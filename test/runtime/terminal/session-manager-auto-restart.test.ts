@@ -16,6 +16,7 @@ vi.mock("../../../src/terminal/pty-session.js", () => ({
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 
 interface MockSpawnRequest {
+	env?: Record<string, string | undefined>;
 	onData?: (chunk: Buffer) => void;
 	onExit?: (event: { exitCode: number | null; signal?: number }) => void;
 }
@@ -115,6 +116,33 @@ describe("TerminalSessionManager auto-restart", () => {
 		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
 		expect(manager.getSummary("task-1")?.state).toBe("awaiting_review");
 		expect(manager.getSummary("task-1")?.pid).toBeNull();
+	});
+
+	it("exposes Kanban task context environment to task agents", async () => {
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			return createMockPtySession(111, request);
+		});
+
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-rvf",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/worktrees/task-rvf",
+			projectPath: "/tmp/project",
+			prompt: "Fix the bug",
+		});
+
+		const spawnRequest = ptySessionSpawnMock.mock.calls[0]?.[0] as MockSpawnRequest | undefined;
+		expect(spawnRequest?.env).toMatchObject({
+			KANBAN_TASK_ID: "task-rvf",
+			KANBAN_ATTEMPT_ID: "task-rvf",
+			CLINE_KANBAN_TASK_ID: "task-rvf",
+			CLINE_KANBAN_ATTEMPT_ID: "task-rvf",
+			KANBAN_PROJECT_PATH: "/tmp/project",
+			CLINE_KANBAN_PROJECT_PATH: "/tmp/project",
+		});
 	});
 
 	it("sends deferred Codex startup input when the prompt marker appears", async () => {

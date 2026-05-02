@@ -62,6 +62,9 @@ export interface ClineTaskMessage {
 		messageKind?: string | null;
 		displayRole?: string | null;
 		reason?: string | null;
+		source?: string | null;
+		idempotencyKey?: string | null;
+		promptSha256?: string | null;
 	} | null;
 }
 
