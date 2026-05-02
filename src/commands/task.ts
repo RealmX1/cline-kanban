@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
 
@@ -23,6 +26,7 @@ import {
 	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
 } from "../core/task-board-mutations";
+import { lockedFileSystem } from "../fs/locked-file-system";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
@@ -1060,6 +1064,254 @@ async function deleteTaskCommand(input: {
 	};
 }
 
+const TASK_MESSAGE_INJECTIONS_FILENAME = "task-message-injections.json";
+const TASK_MESSAGE_PENDING_STATUS = "pending";
+
+interface TaskMessageInjectionRecord {
+	task_id: string;
+	attempt_id?: string;
+	source: string;
+	idempotency_key: string;
+	prompt_sha256: string;
+	message_id: string;
+	turn_id?: string;
+	checkpoint_id?: string;
+	status?: string;
+	created_at: string;
+}
+
+interface TaskMessageCommandResult extends JsonRecord {
+	ok: true;
+	task_id: string;
+	attempt_id?: string;
+	message_id: string;
+	turn_id?: string;
+	checkpoint_id?: string;
+	status?: string;
+}
+
+function isTaskMessageInjectionRecord(value: unknown): value is TaskMessageInjectionRecord {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return false;
+	}
+	const record = value as Record<string, unknown>;
+	return (
+		typeof record.task_id === "string" &&
+		typeof record.source === "string" &&
+		typeof record.idempotency_key === "string" &&
+		typeof record.prompt_sha256 === "string" &&
+		typeof record.message_id === "string" &&
+		typeof record.created_at === "string"
+	);
+}
+
+async function readTaskMessageInjectionRecords(path: string): Promise<TaskMessageInjectionRecord[]> {
+	let raw: string;
+	try {
+		raw = await readFile(path, "utf8");
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+			return [];
+		}
+		throw error;
+	}
+	const parsed = JSON.parse(raw) as unknown;
+	if (!Array.isArray(parsed) || !parsed.every(isTaskMessageInjectionRecord)) {
+		throw new Error(`Invalid ${TASK_MESSAGE_INJECTIONS_FILENAME}. Fix or remove the file before retrying.`);
+	}
+	return parsed;
+}
+
+async function writeTaskMessageInjectionRecords(path: string, records: TaskMessageInjectionRecord[]): Promise<void> {
+	await lockedFileSystem.writeJsonFileAtomic(path, records, { lock: null });
+}
+
+function hashPrompt(prompt: string): string {
+	return createHash("sha256").update(prompt, "utf8").digest("hex");
+}
+
+function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMessageCommandResult {
+	return {
+		ok: true,
+		task_id: record.task_id,
+		...(record.attempt_id ? { attempt_id: record.attempt_id } : {}),
+		message_id: record.message_id,
+		...(record.turn_id ? { turn_id: record.turn_id } : {}),
+		...(record.checkpoint_id ? { checkpoint_id: record.checkpoint_id } : {}),
+		...(record.status ? { status: record.status } : {}),
+	};
+}
+
+function createPendingTaskMessageRecord(input: {
+	taskId: string;
+	attemptId?: string;
+	source: string;
+	idempotencyKey: string;
+	promptSha256: string;
+}): TaskMessageInjectionRecord {
+	return {
+		task_id: input.taskId,
+		...(input.attemptId ? { attempt_id: input.attemptId } : {}),
+		source: input.source,
+		idempotency_key: input.idempotencyKey,
+		prompt_sha256: input.promptSha256,
+		message_id: `${input.taskId}-${input.idempotencyKey}`,
+		status: TASK_MESSAGE_PENDING_STATUS,
+		created_at: new Date().toISOString(),
+	};
+}
+
+function replaceTaskMessageInjectionRecord(
+	records: TaskMessageInjectionRecord[],
+	nextRecord: TaskMessageInjectionRecord,
+): TaskMessageInjectionRecord[] {
+	return records.map((record) =>
+		record.task_id === nextRecord.task_id && record.idempotency_key === nextRecord.idempotency_key
+			? nextRecord
+			: record,
+	);
+}
+
+async function removeTaskMessageInjectionRecord(
+	path: string,
+	records: TaskMessageInjectionRecord[],
+	recordToRemove: TaskMessageInjectionRecord,
+): Promise<void> {
+	await writeTaskMessageInjectionRecords(
+		path,
+		records.filter(
+			(record) =>
+				record.task_id !== recordToRemove.task_id || record.idempotency_key !== recordToRemove.idempotency_key,
+		),
+	);
+}
+
+function resolvePromptInput(input: { prompt?: string; promptFile?: string }): Promise<string> {
+	const prompt = input.prompt?.trim();
+	const promptFile = input.promptFile?.trim();
+	if (prompt && promptFile) {
+		throw new Error("task message accepts exactly one of --prompt-file or --prompt.");
+	}
+	if (promptFile) {
+		return readFile(promptFile, "utf8");
+	}
+	if (prompt) {
+		return Promise.resolve(prompt);
+	}
+	throw new Error("task message requires --prompt-file or --prompt.");
+}
+
+async function sendTaskMessageCommand(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	promptFile?: string;
+	prompt?: string;
+	source: string;
+	idempotencyKey: string;
+	attemptId?: string;
+}): Promise<TaskMessageCommandResult> {
+	const taskId = input.taskId.trim();
+	if (!taskId) {
+		throw new Error("task message requires --task-id.");
+	}
+	const source = input.source.trim();
+	if (!source) {
+		throw new Error("task message requires --source.");
+	}
+	const idempotencyKey = input.idempotencyKey.trim();
+	if (!idempotencyKey) {
+		throw new Error("task message requires --idempotency-key.");
+	}
+	const attemptId = input.attemptId?.trim() || undefined;
+	if (attemptId && attemptId !== taskId) {
+		throw new Error(`Attempt "${attemptId}" does not belong to task "${taskId}".`);
+	}
+	const prompt = await resolvePromptInput({ prompt: input.prompt, promptFile: input.promptFile });
+	if (!prompt.trim()) {
+		throw new Error("task message prompt cannot be empty.");
+	}
+	const promptSha256 = hashPrompt(prompt);
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const state = await runtimeClient.workspace.getState.query();
+	const taskRecord = findTaskRecord(state, taskId);
+	if (!taskRecord) {
+		throw new Error(`Task "${taskId}" was not found in workspace ${workspace.repoPath}.`);
+	}
+
+	const recordPath = join(workspace.statePath, TASK_MESSAGE_INJECTIONS_FILENAME);
+	return await lockedFileSystem.withLock({ path: recordPath, type: "file" }, async () => {
+		const records = await readTaskMessageInjectionRecords(recordPath);
+		const existing = records.find((record) => record.task_id === taskId && record.idempotency_key === idempotencyKey);
+		if (existing) {
+			if (existing.prompt_sha256 !== promptSha256) {
+				throw new Error(
+					`Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash differs.`,
+				);
+			}
+			if (existing.status === TASK_MESSAGE_PENDING_STATUS) {
+				throw new Error(
+					`Previous task message delivery for task "${taskId}" and key "${idempotencyKey}" is incomplete; not retrying automatically.`,
+				);
+			}
+			return toTaskMessageCommandResult(existing);
+		}
+
+		const previousSessionState = state.sessions[taskId]?.state ?? null;
+		const pendingRecord = createPendingTaskMessageRecord({
+			taskId,
+			attemptId,
+			source,
+			idempotencyKey,
+			promptSha256,
+		});
+		const recordsWithPending = [...records, pendingRecord];
+		await writeTaskMessageInjectionRecords(recordPath, recordsWithPending);
+
+		const chatResponse = await runtimeClient.runtime.sendTaskChatMessage
+			.mutate({
+				taskId,
+				text: prompt,
+				mode: "act",
+				source,
+				idempotencyKey,
+				promptSha256,
+			})
+			.catch(async (error: unknown) => {
+				await removeTaskMessageInjectionRecord(recordPath, recordsWithPending, pendingRecord);
+				throw error;
+			});
+		const messageId = chatResponse.message?.id ?? null;
+		const summary = chatResponse.summary ?? null;
+		if (!chatResponse.ok || !messageId) {
+			await removeTaskMessageInjectionRecord(recordPath, recordsWithPending, pendingRecord);
+			throw new Error(chatResponse.error ?? "task has no active Cline chat session");
+		}
+		if (!summary) {
+			await removeTaskMessageInjectionRecord(recordPath, recordsWithPending, pendingRecord);
+			throw new Error("task has no active agent session");
+		}
+
+		const checkpoint = summary.latestTurnCheckpoint ?? null;
+		const record: TaskMessageInjectionRecord = {
+			task_id: taskId,
+			...(attemptId ? { attempt_id: attemptId } : {}),
+			source,
+			idempotency_key: idempotencyKey,
+			prompt_sha256: promptSha256,
+			message_id: messageId,
+			...(checkpoint ? { turn_id: String(checkpoint.turn), checkpoint_id: checkpoint.ref } : {}),
+			status: previousSessionState === "running" ? "queued" : "started",
+			created_at: new Date().toISOString(),
+		};
+		await writeTaskMessageInjectionRecords(recordPath, replaceTaskMessageInjectionRecord(recordsWithPending, record));
+		return toTaskMessageCommandResult(record);
+	});
+}
+
 function parseOptionalBooleanOption(value: unknown, flagName: string): boolean | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -1278,6 +1530,42 @@ export function registerTaskCommand(program: Command): void {
 					}),
 			);
 		});
+
+	task
+		.command("message")
+		.description("Inject a follow-up user message into an active task agent session.")
+		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--prompt-file <path>", "UTF-8 file containing the complete follow-up message.")
+		.option("--prompt <text>", "Follow-up message text.")
+		.requiredOption("--source <source>", "Message source label.")
+		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key.")
+		.option("--attempt-id <id>", "Optional task attempt/session ID.")
+		.action(
+			async (options: {
+				projectPath: string;
+				taskId: string;
+				promptFile?: string;
+				prompt?: string;
+				source: string;
+				idempotencyKey: string;
+				attemptId?: string;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await sendTaskMessageCommand({
+							cwd: process.cwd(),
+							projectPath: options.projectPath,
+							taskId: options.taskId,
+							promptFile: options.promptFile,
+							prompt: options.prompt,
+							source: options.source,
+							idempotencyKey: options.idempotencyKey,
+							attemptId: options.attemptId,
+						}),
+				);
+			},
+		);
 
 	task
 		.command("link")

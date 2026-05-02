@@ -90,6 +90,7 @@ export interface StartTaskSessionRequest {
 	rows?: number;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
+	projectPath?: string;
 }
 
 export interface StartShellSessionRequest {
@@ -151,6 +152,7 @@ function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTa
 		args: [...request.args],
 		images: request.images ? request.images.map((image) => ({ ...image })) : undefined,
 		env: request.env ? { ...request.env } : undefined,
+		projectPath: request.projectPath,
 	};
 }
 
@@ -336,7 +338,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 			workspaceId: request.workspaceId,
 		});
 
-		const env = buildTerminalEnvironment(request.env, launch.env);
+		const taskContextEnv = {
+			KANBAN_TASK_ID: request.taskId,
+			KANBAN_ATTEMPT_ID: request.taskId,
+			CLINE_KANBAN_TASK_ID: request.taskId,
+			CLINE_KANBAN_ATTEMPT_ID: request.taskId,
+			KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
+			CLINE_KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
+		};
+		const env = buildTerminalEnvironment(request.env, launch.env, taskContextEnv);
 
 		// Adapters can wrap the configured agent binary when they need extra runtime wiring
 		// (for example, Codex uses a wrapper script to watch session logs for hook transitions).

@@ -284,6 +284,9 @@ export function parseTaskChatSendRequest(value: unknown): RuntimeTaskChatSendReq
 		...parsed,
 		taskId,
 		text,
+		source: parsed.source?.trim() || undefined,
+		idempotencyKey: parsed.idempotencyKey?.trim() || undefined,
+		promptSha256: parsed.promptSha256?.trim() || undefined,
 	};
 }
 

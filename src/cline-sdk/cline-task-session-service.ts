@@ -36,6 +36,7 @@ import {
 	createAssistantMessage,
 	createDefaultSummary,
 	createMessage,
+	createMessageWithMeta,
 	isCreditLimitError,
 	now,
 	setOrCreateAssistantMessage,
@@ -88,6 +89,7 @@ export interface ClineTaskSessionService {
 		text: string,
 		mode?: RuntimeTaskSessionMode,
 		images?: RuntimeTaskImage[],
+		meta?: ClineTaskMessage["meta"],
 	): Promise<RuntimeTaskSessionSummary | null>;
 	reloadTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null>;
 	clearTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null>;
@@ -542,6 +544,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		text: string,
 		mode?: RuntimeTaskSessionMode,
 		images?: RuntimeTaskImage[],
+		meta?: ClineTaskMessage["meta"],
 	): Promise<RuntimeTaskSessionSummary | null> {
 		const entry = this.messageRepository.getTaskEntry(taskId);
 		if (!entry) {
@@ -568,7 +571,9 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 			}
 		}
 		{
-			const message = createMessage(taskId, "user", normalized, images);
+			const message = meta
+				? createMessageWithMeta(taskId, "user", normalized, meta, images)
+				: createMessage(taskId, "user", normalized, images);
 			entry.messages.push(message);
 			this.emitMessage(taskId, message);
 			clearActiveTurnState(entry);
