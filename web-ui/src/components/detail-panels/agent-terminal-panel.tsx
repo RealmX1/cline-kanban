@@ -1,14 +1,26 @@
 import "@xterm/xterm/css/xterm.css";
 
-import { Command, Maximize2, MessageSquare, Minimize2, X } from "lucide-react";
-import type { MutableRefObject, ReactElement } from "react";
-import { useMemo } from "react";
+import {
+	ArrowDown,
+	ArrowUp,
+	CaseSensitive,
+	Command,
+	Maximize2,
+	MessageSquare,
+	Minimize2,
+	Search,
+	X,
+} from "lucide-react";
+import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
+import type { TerminalSearchResultState } from "@/terminal/persistent-terminal-manager";
 import { usePersistentTerminalSession } from "@/terminal/use-persistent-terminal-session";
 import { isMacPlatform } from "@/utils/platform";
 
@@ -16,8 +28,15 @@ interface AgentTerminalSessionControls {
 	clearTerminal: () => void;
 	containerRef: MutableRefObject<HTMLDivElement | null>;
 	isStopping: boolean;
+	isSearchOpen: boolean;
 	lastError: string | null;
+	searchOpenRequestKey: number;
+	searchResults: TerminalSearchResultState;
 	stopTerminal: () => Promise<void>;
+	closeTerminalSearch: () => void;
+	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
+	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
+	openTerminalSearch: () => void;
 }
 
 export interface AgentTerminalPanelProps {
@@ -96,6 +115,152 @@ const statusTagColors: Record<StatusTagStyle, string> = {
 	danger: "bg-status-red/15 text-status-red",
 };
 
+function formatSearchResultLabel(query: string, results: TerminalSearchResultState): string {
+	if (!query.trim()) {
+		return "";
+	}
+	if (results.resultCount === 0) {
+		return "No results";
+	}
+	if (results.resultIndex < 0) {
+		return `${results.resultCount}+`;
+	}
+	return `${results.resultIndex + 1}/${results.resultCount}`;
+}
+
+function isTerminalFindShortcut(event: KeyboardEvent<HTMLInputElement>): boolean {
+	const isFindModifier = isMacPlatform ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+	return isFindModifier && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f";
+}
+
+function TerminalSearchBar({
+	isOpen,
+	openRequestKey,
+	results,
+	onClose,
+	onNext,
+	onPrevious,
+}: {
+	isOpen: boolean;
+	openRequestKey: number;
+	results: TerminalSearchResultState;
+	onClose: () => void;
+	onNext: (query: string, options?: { caseSensitive?: boolean }) => boolean;
+	onPrevious: (query: string, options?: { caseSensitive?: boolean }) => boolean;
+}): ReactElement | null {
+	const inputRef = useRef<HTMLInputElement | null>(null);
+	const [query, setQuery] = useState("");
+	const [caseSensitive, setCaseSensitive] = useState(false);
+	const trimmedQuery = query.trim();
+	const resultLabel = formatSearchResultLabel(query, results);
+	const hasQuery = trimmedQuery.length > 0;
+
+	useEffect(() => {
+		if (!isOpen) {
+			return;
+		}
+		window.requestAnimationFrame(() => {
+			inputRef.current?.focus();
+			inputRef.current?.select();
+		});
+	}, [isOpen, openRequestKey]);
+
+	useEffect(() => {
+		if (!isOpen) {
+			return;
+		}
+		onNext(query, { caseSensitive });
+	}, [caseSensitive, isOpen, onNext, query]);
+
+	if (!isOpen) {
+		return null;
+	}
+
+	const handleQueryChange = (event: ChangeEvent<HTMLInputElement>) => {
+		const nextQuery = event.target.value;
+		setQuery(nextQuery);
+	};
+
+	const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+		if (isTerminalFindShortcut(event)) {
+			event.preventDefault();
+			event.stopPropagation();
+			inputRef.current?.focus();
+			inputRef.current?.select();
+			return;
+		}
+		if (event.key === "Escape") {
+			event.preventDefault();
+			event.stopPropagation();
+			onClose();
+			return;
+		}
+		if (event.key === "Enter") {
+			event.preventDefault();
+			event.stopPropagation();
+			if (event.shiftKey) {
+				onPrevious(query, { caseSensitive });
+				return;
+			}
+			onNext(query, { caseSensitive });
+		}
+	};
+
+	return (
+		<div className="flex h-9 shrink-0 items-center gap-1 border-b border-border bg-surface-1 px-2">
+			<Search size={14} className="shrink-0 text-text-tertiary" />
+			<input
+				ref={inputRef}
+				value={query}
+				onChange={handleQueryChange}
+				onKeyDown={handleKeyDown}
+				placeholder="Find in terminal"
+				className="h-7 min-w-0 flex-1 rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary outline-none placeholder:text-text-tertiary focus:border-border-focus"
+				aria-label="Find in terminal"
+			/>
+			<span className="w-16 shrink-0 text-right text-[11px] text-text-secondary" aria-live="polite">
+				{resultLabel}
+			</span>
+			<Tooltip content="Match case">
+				<Button
+					icon={<CaseSensitive size={14} />}
+					variant="ghost"
+					size="sm"
+					className={cn(caseSensitive && "bg-surface-3 text-text-primary")}
+					onClick={() => {
+						setCaseSensitive((current) => !current);
+					}}
+					aria-label="Match case"
+					aria-pressed={caseSensitive}
+				/>
+			</Tooltip>
+			<Tooltip content="Previous match">
+				<Button
+					icon={<ArrowUp size={14} />}
+					variant="ghost"
+					size="sm"
+					onClick={() => onPrevious(query, { caseSensitive })}
+					disabled={!hasQuery}
+					aria-label="Previous match"
+				/>
+			</Tooltip>
+			<Tooltip content="Next match">
+				<Button
+					icon={<ArrowDown size={14} />}
+					variant="ghost"
+					size="sm"
+					onClick={() => onNext(query, { caseSensitive })}
+					disabled={!hasQuery}
+					aria-label="Next match"
+				/>
+			</Tooltip>
+			<Tooltip content="Close search">
+				<Button icon={<X size={14} />} variant="ghost" size="sm" onClick={onClose} aria-label="Close search" />
+			</Tooltip>
+		</div>
+	);
+}
+
 function AgentTerminalReviewActions({
 	taskId,
 	taskColumnId,
@@ -172,7 +337,20 @@ function AgentTerminalPanelLayout({
 	onToggleExpand,
 	sessionControls,
 }: AgentTerminalPanelProps & { sessionControls: AgentTerminalSessionControls }): ReactElement {
-	const { containerRef, lastError, isStopping, clearTerminal, stopTerminal } = sessionControls;
+	const {
+		containerRef,
+		lastError,
+		isStopping,
+		isSearchOpen,
+		searchOpenRequestKey,
+		searchResults,
+		clearTerminal,
+		closeTerminalSearch,
+		findNextInTerminal,
+		findPreviousInTerminal,
+		openTerminalSearch,
+		stopTerminal,
+	} = sessionControls;
 	const canStop = summary?.state === "running" || summary?.state === "awaiting_review";
 	const statusLabel = useMemo(() => describeState(summary), [summary]);
 	const statusTagStyle = useMemo(() => getStateTagStyle(summary), [summary]);
@@ -214,6 +392,15 @@ function AgentTerminalPanelLayout({
 							</span>
 						</div>
 						<div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+							<Tooltip side="top" content="Find in terminal">
+								<Button
+									icon={<Search size={14} />}
+									variant="default"
+									size="sm"
+									onClick={openTerminalSearch}
+									aria-label="Find in terminal"
+								/>
+							</Tooltip>
 							<Button variant="default" size="sm" onClick={clearTerminal}>
 								Clear
 							</Button>
@@ -256,6 +443,15 @@ function AgentTerminalPanelLayout({
 						) : null}
 					</div>
 					<div style={{ display: "flex", alignItems: "center", gap: 2, marginRight: "-6px" }}>
+						<Tooltip side="top" content="Find in terminal">
+							<Button
+								icon={<Search size={12} />}
+								variant="ghost"
+								size="sm"
+								onClick={openTerminalSearch}
+								aria-label="Find in terminal"
+							/>
+						</Tooltip>
 						{agentLabel && onSendAgentCommand ? (
 							<Tooltip side="top" content={`Run ${agentLabel}`}>
 								<Button
@@ -302,6 +498,14 @@ function AgentTerminalPanelLayout({
 					</div>
 				</div>
 			) : null}
+			<TerminalSearchBar
+				isOpen={isSearchOpen}
+				openRequestKey={searchOpenRequestKey}
+				results={searchResults}
+				onClose={closeTerminalSearch}
+				onNext={findNextInTerminal}
+				onPrevious={findPreviousInTerminal}
+			/>
 			<div style={{ flex: "1 1 0", minHeight: 0, overflow: "hidden", padding: "3px 1.5px 3px 3px" }}>
 				<div
 					ref={containerRef}

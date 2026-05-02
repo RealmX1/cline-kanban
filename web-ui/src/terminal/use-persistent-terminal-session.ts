@@ -3,7 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getTerminalThemeColors, useTheme } from "@/hooks/use-theme";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
-import { disposePersistentTerminal, ensurePersistentTerminal } from "@/terminal/persistent-terminal-manager";
+import {
+	disposePersistentTerminal,
+	ensurePersistentTerminal,
+	type TerminalSearchResultState,
+} from "@/terminal/persistent-terminal-manager";
 import { registerTerminalController } from "@/terminal/terminal-controller-registry";
 
 interface UsePersistentTerminalSessionInput {
@@ -23,8 +27,19 @@ export interface UsePersistentTerminalSessionResult {
 	containerRef: MutableRefObject<HTMLDivElement | null>;
 	lastError: string | null;
 	isStopping: boolean;
+	isSearchOpen: boolean;
+	searchOpenRequestKey: number;
+	searchResults: TerminalSearchResultState;
 	clearTerminal: () => void;
+	closeTerminalSearch: () => void;
+	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
+	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
+	openTerminalSearch: () => void;
 	stopTerminal: () => Promise<void>;
+}
+
+function getEmptyTerminalSearchResults(): TerminalSearchResultState {
+	return { resultCount: 0, resultIndex: -1 };
 }
 
 export function usePersistentTerminalSession({
@@ -43,6 +58,7 @@ export function usePersistentTerminalSession({
 	const themeColors = useMemo(() => getTerminalThemeColors(themeId), [themeId]);
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const terminalRef = useRef<ReturnType<typeof ensurePersistentTerminal> | null>(null);
+	const recentlyUnmountedTerminalRef = useRef<ReturnType<typeof ensurePersistentTerminal> | null>(null);
 	const callbackRef = useRef<{
 		onSummary?: (summary: RuntimeTaskSessionSummary) => void;
 		onConnectionReady?: (taskId: string) => void;
@@ -57,10 +73,23 @@ export function usePersistentTerminalSession({
 	} | null>(null);
 	const [lastError, setLastError] = useState<string | null>(null);
 	const [isStopping, setIsStopping] = useState(false);
+	const [isSearchOpen, setIsSearchOpen] = useState(false);
+	const [searchOpenRequestKey, setSearchOpenRequestKey] = useState(0);
+	const [searchResults, setSearchResults] = useState<TerminalSearchResultState>(getEmptyTerminalSearchResults);
 	callbackRef.current = {
 		onSummary,
 		onConnectionReady,
 	};
+
+	const resetTerminalSearchState = useCallback(() => {
+		setIsSearchOpen(false);
+		setSearchOpenRequestKey(0);
+		setSearchResults(getEmptyTerminalSearchResults());
+	}, []);
+
+	const getSearchCleanupTerminal = useCallback(() => {
+		return terminalRef.current ?? recentlyUnmountedTerminalRef.current;
+	}, []);
 
 	useEffect(() => {
 		if (!enabled) {
@@ -68,11 +97,14 @@ export function usePersistentTerminalSession({
 			if (previousSession) {
 				disposePersistentTerminal(previousSession.workspaceId, previousSession.taskId);
 			}
+			getSearchCleanupTerminal()?.clearSearch();
 			terminalRef.current?.unmount(containerRef.current);
 			terminalRef.current = null;
+			recentlyUnmountedTerminalRef.current = null;
 			previousSessionRef.current = null;
 			setLastError(null);
 			setIsStopping(false);
+			resetTerminalSearchState();
 			return;
 		}
 
@@ -81,22 +113,35 @@ export function usePersistentTerminalSession({
 			if (previousSession) {
 				disposePersistentTerminal(previousSession.workspaceId, previousSession.taskId);
 			}
+			getSearchCleanupTerminal()?.clearSearch();
 			terminalRef.current?.unmount(containerRef.current);
 			terminalRef.current = null;
+			recentlyUnmountedTerminalRef.current = null;
 			previousSessionRef.current = null;
 			setLastError("No project selected.");
-			return;
-		}
-		const container = containerRef.current;
-		if (!container) {
+			resetTerminalSearchState();
 			return;
 		}
 		const previousSession = previousSessionRef.current;
+		const didSessionIdentityChange =
+			previousSession !== null &&
+			(previousSession.workspaceId !== workspaceId ||
+				previousSession.taskId !== taskId ||
+				previousSession.sessionStartedAt !== sessionStartedAt);
 		const didSessionRestart =
 			previousSession !== null &&
 			previousSession.workspaceId === workspaceId &&
 			previousSession.taskId === taskId &&
 			previousSession.sessionStartedAt !== sessionStartedAt;
+		if (didSessionIdentityChange) {
+			getSearchCleanupTerminal()?.clearSearch();
+			resetTerminalSearchState();
+		}
+
+		const container = containerRef.current;
+		if (!container) {
+			return;
+		}
 
 		const terminal = ensurePersistentTerminal({
 			taskId,
@@ -114,6 +159,7 @@ export function usePersistentTerminalSession({
 			sessionStartedAt,
 		};
 		terminalRef.current = terminal;
+		recentlyUnmountedTerminalRef.current = null;
 		const unsubscribe = terminal.subscribe({
 			onConnectionReady: (connectedTaskId) => {
 				callbackRef.current.onConnectionReady?.(connectedTaskId);
@@ -122,6 +168,11 @@ export function usePersistentTerminalSession({
 			onSummary: (summary) => {
 				callbackRef.current.onSummary?.(summary);
 			},
+			onSearchOpenRequested: () => {
+				setIsSearchOpen(true);
+				setSearchOpenRequestKey((current) => current + 1);
+			},
+			onSearchResults: setSearchResults,
 		});
 		terminal.mount(
 			container,
@@ -142,6 +193,7 @@ export function usePersistentTerminalSession({
 			terminal.unmount(container);
 			if (terminalRef.current === terminal) {
 				terminalRef.current = null;
+				recentlyUnmountedTerminalRef.current = terminal;
 			}
 		};
 	}, [
@@ -153,6 +205,8 @@ export function usePersistentTerminalSession({
 		taskId,
 		terminalBackgroundColor,
 		themeColors,
+		getSearchCleanupTerminal,
+		resetTerminalSearchState,
 		workspaceId,
 	]);
 
@@ -183,11 +237,39 @@ export function usePersistentTerminalSession({
 		terminalRef.current?.clear();
 	}, []);
 
+	const openTerminalSearch = useCallback(() => {
+		setIsSearchOpen(true);
+		setSearchOpenRequestKey((current) => current + 1);
+	}, []);
+
+	const closeTerminalSearch = useCallback(() => {
+		const terminal = terminalRef.current;
+		terminal?.clearSearch();
+		terminal?.focus();
+		setSearchResults(getEmptyTerminalSearchResults());
+		setIsSearchOpen(false);
+	}, []);
+
+	const findNextInTerminal = useCallback((query: string, options?: { caseSensitive?: boolean }) => {
+		return terminalRef.current?.searchNext(query, options) ?? false;
+	}, []);
+
+	const findPreviousInTerminal = useCallback((query: string, options?: { caseSensitive?: boolean }) => {
+		return terminalRef.current?.searchPrevious(query, options) ?? false;
+	}, []);
+
 	return {
 		containerRef,
 		lastError,
 		isStopping,
+		isSearchOpen,
+		searchOpenRequestKey,
+		searchResults,
 		clearTerminal,
+		closeTerminalSearch,
+		findNextInTerminal,
+		findPreviousInTerminal,
+		openTerminalSearch,
 		stopTerminal,
 	};
 }

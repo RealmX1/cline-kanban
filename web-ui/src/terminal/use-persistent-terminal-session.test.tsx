@@ -10,6 +10,11 @@ const ensurePersistentTerminalMock = vi.hoisted(() => vi.fn());
 const disposePersistentTerminalMock = vi.hoisted(() => vi.fn());
 const registerTerminalControllerMock = vi.hoisted(() => vi.fn());
 
+interface TestPersistentTerminalSubscriber {
+	onSearchOpenRequested?: () => void;
+	onSearchResults?: (results: { resultCount: number; resultIndex: number }) => void;
+}
+
 vi.mock("@/terminal/persistent-terminal-manager", () => ({
 	ensurePersistentTerminal: ensurePersistentTerminalMock,
 	disposePersistentTerminal: disposePersistentTerminalMock,
@@ -21,7 +26,7 @@ vi.mock("@/terminal/terminal-controller-registry", () => ({
 
 function createPersistentTerminalMock() {
 	return {
-		subscribe: vi.fn(() => vi.fn()),
+		subscribe: vi.fn((_subscriber: TestPersistentTerminalSubscriber) => vi.fn()),
 		mount: vi.fn(),
 		unmount: vi.fn(),
 		reset: vi.fn(),
@@ -29,6 +34,10 @@ function createPersistentTerminalMock() {
 		paste: vi.fn(() => true),
 		waitForLikelyPrompt: vi.fn(async () => true),
 		clear: vi.fn(),
+		clearSearch: vi.fn(),
+		focus: vi.fn(),
+		searchNext: vi.fn(() => true),
+		searchPrevious: vi.fn(() => true),
 		stop: vi.fn(async () => {}),
 	};
 }
@@ -48,7 +57,14 @@ function HookHarness({
 	onSummary?: (summary: RuntimeTaskSessionSummary) => void;
 	onConnectionReady?: (taskId: string) => void;
 }) {
-	const { containerRef } = usePersistentTerminalSession({
+	const {
+		containerRef,
+		closeTerminalSearch,
+		findNextInTerminal,
+		findPreviousInTerminal,
+		isSearchOpen,
+		searchResults,
+	} = usePersistentTerminalSession({
 		taskId,
 		workspaceId,
 		enabled,
@@ -59,7 +75,24 @@ function HookHarness({
 		cursorColor: "cursor-color",
 	});
 
-	return <div ref={containerRef} />;
+	return (
+		<div
+			ref={containerRef}
+			data-search-open={String(isSearchOpen)}
+			data-search-result-count={String(searchResults.resultCount)}
+			data-search-result-index={String(searchResults.resultIndex)}
+		>
+			<button type="button" onClick={() => closeTerminalSearch()}>
+				close
+			</button>
+			<button type="button" onClick={() => findNextInTerminal("needle", { caseSensitive: true })}>
+				next
+			</button>
+			<button type="button" onClick={() => findPreviousInTerminal("needle")}>
+				previous
+			</button>
+		</div>
+	);
 }
 
 describe("usePersistentTerminalSession", () => {
@@ -121,6 +154,35 @@ describe("usePersistentTerminalSession", () => {
 		expect(ensurePersistentTerminalMock).toHaveBeenCalledTimes(2);
 	});
 
+	it("clears terminal search when a new session starts for the same task", async () => {
+		const terminal = createPersistentTerminalMock();
+		ensurePersistentTerminalMock.mockReturnValue(terminal);
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={100} />);
+		});
+
+		const harness = container.querySelector("[data-search-open]");
+		const subscriber = terminal.subscribe.mock.calls[0]?.[0];
+		await act(async () => {
+			subscriber?.onSearchOpenRequested?.();
+			subscriber?.onSearchResults?.({ resultCount: 3, resultIndex: 1 });
+		});
+
+		expect(harness?.getAttribute("data-search-open")).toBe("true");
+		expect(harness?.getAttribute("data-search-result-count")).toBe("3");
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={200} />);
+		});
+
+		expect(terminal.clearSearch).toHaveBeenCalledTimes(1);
+		expect(terminal.reset).toHaveBeenCalledTimes(1);
+		expect(harness?.getAttribute("data-search-open")).toBe("false");
+		expect(harness?.getAttribute("data-search-result-count")).toBe("0");
+		expect(harness?.getAttribute("data-search-result-index")).toBe("-1");
+	});
+
 	it("does not dispose when the selected task changes", async () => {
 		await act(async () => {
 			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={100} />);
@@ -132,6 +194,36 @@ describe("usePersistentTerminalSession", () => {
 
 		expect(disposePersistentTerminalMock).not.toHaveBeenCalled();
 		expect(ensurePersistentTerminalMock).toHaveBeenCalledTimes(2);
+	});
+
+	it("clears parked terminal search when the selected task changes", async () => {
+		const firstTerminal = createPersistentTerminalMock();
+		const secondTerminal = createPersistentTerminalMock();
+		ensurePersistentTerminalMock.mockReturnValueOnce(firstTerminal).mockReturnValueOnce(secondTerminal);
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={100} />);
+		});
+
+		const harness = container.querySelector("[data-search-open]");
+		const subscriber = firstTerminal.subscribe.mock.calls[0]?.[0];
+		await act(async () => {
+			subscriber?.onSearchOpenRequested?.();
+			subscriber?.onSearchResults?.({ resultCount: 7, resultIndex: 4 });
+		});
+
+		expect(harness?.getAttribute("data-search-open")).toBe("true");
+		expect(harness?.getAttribute("data-search-result-count")).toBe("7");
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-b" workspaceId="project-1" sessionStartedAt={200} />);
+		});
+
+		expect(firstTerminal.clearSearch).toHaveBeenCalledTimes(1);
+		expect(secondTerminal.clearSearch).not.toHaveBeenCalled();
+		expect(harness?.getAttribute("data-search-open")).toBe("false");
+		expect(harness?.getAttribute("data-search-result-count")).toBe("0");
+		expect(harness?.getAttribute("data-search-result-index")).toBe("-1");
 	});
 
 	it("disposes terminal when disabled", async () => {
@@ -207,5 +299,57 @@ describe("usePersistentTerminalSession", () => {
 				themeColors: getTerminalThemeColors("graphite"),
 			}),
 		);
+	});
+
+	it("opens terminal search and tracks result updates from the persistent terminal", async () => {
+		const terminal = createPersistentTerminalMock();
+		ensurePersistentTerminalMock.mockReturnValue(terminal);
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={100} />);
+		});
+
+		const harness = container.querySelector("[data-search-open]");
+		expect(harness?.getAttribute("data-search-open")).toBe("false");
+
+		const subscriber = terminal.subscribe.mock.calls[0]?.[0];
+		await act(async () => {
+			subscriber?.onSearchOpenRequested?.();
+			subscriber?.onSearchResults?.({ resultCount: 5, resultIndex: 2 });
+		});
+
+		expect(harness?.getAttribute("data-search-open")).toBe("true");
+		expect(harness?.getAttribute("data-search-result-count")).toBe("5");
+		expect(harness?.getAttribute("data-search-result-index")).toBe("2");
+	});
+
+	it("forwards search actions to the persistent terminal and clears search on close", async () => {
+		const terminal = createPersistentTerminalMock();
+		ensurePersistentTerminalMock.mockReturnValue(terminal);
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" workspaceId="project-1" sessionStartedAt={100} />);
+		});
+
+		const nextButton = Array.from(container.querySelectorAll("button")).find(
+			(button) => button.textContent === "next",
+		);
+		const previousButton = Array.from(container.querySelectorAll("button")).find(
+			(button) => button.textContent === "previous",
+		);
+		const closeButton = Array.from(container.querySelectorAll("button")).find(
+			(button) => button.textContent === "close",
+		);
+
+		await act(async () => {
+			nextButton?.click();
+			previousButton?.click();
+			closeButton?.click();
+		});
+
+		expect(terminal.searchNext).toHaveBeenCalledWith("needle", { caseSensitive: true });
+		expect(terminal.searchPrevious).toHaveBeenCalledWith("needle", undefined);
+		expect(terminal.clearSearch).toHaveBeenCalledTimes(1);
+		expect(terminal.focus).toHaveBeenCalledTimes(1);
 	});
 });
