@@ -292,6 +292,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					cols: body.cols,
 					rows: body.rows,
 					workspaceId: workspaceScope.workspaceId,
+					projectPath: workspaceScope.workspacePath,
 				});
 
 				let nextSummary = summary;
@@ -600,22 +601,35 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					};
 				}
 				const requestedMode = body.mode;
-				let summary = await clineTaskSessionService.sendTaskSessionInput(
-					body.taskId,
-					body.text,
-					requestedMode,
-					body.images,
-				);
+				const messageMeta = {
+					source: body.source ?? null,
+					idempotencyKey: body.idempotencyKey ?? null,
+					promptSha256: body.promptSha256 ?? null,
+				};
+				const hasMessageMeta = Object.values(messageMeta).some((value) => value !== null);
+				const sendClineTaskSessionInput = async () => {
+					if (hasMessageMeta) {
+						return await clineTaskSessionService.sendTaskSessionInput(
+							body.taskId,
+							body.text,
+							requestedMode,
+							body.images,
+							messageMeta,
+						);
+					}
+					return await clineTaskSessionService.sendTaskSessionInput(
+						body.taskId,
+						body.text,
+						requestedMode,
+						body.images,
+					);
+				};
+				let summary = await sendClineTaskSessionInput();
 				if (!summary) {
 					if (!isHomeAgentSessionId(body.taskId)) {
 						const reboundSummary = await clineTaskSessionService.rebindPersistedTaskSession(body.taskId);
 						if (reboundSummary) {
-							summary = await clineTaskSessionService.sendTaskSessionInput(
-								body.taskId,
-								body.text,
-								requestedMode,
-								body.images,
-							);
+							summary = await sendClineTaskSessionInput();
 						}
 						if (!summary) {
 							return {

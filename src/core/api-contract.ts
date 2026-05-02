@@ -1026,6 +1026,9 @@ export const runtimeTaskChatMessageSchema = z.object({
 			messageKind: z.string().nullable().optional(),
 			displayRole: z.string().nullable().optional(),
 			reason: z.string().nullable().optional(),
+			source: z.string().nullable().optional(),
+			idempotencyKey: z.string().nullable().optional(),
+			promptSha256: z.string().nullable().optional(),
 		})
 		.nullable()
 		.optional(),
@@ -1049,6 +1052,9 @@ export const runtimeTaskChatSendRequestSchema = z.object({
 	text: z.string(),
 	images: z.array(runtimeTaskImageSchema).optional(),
 	mode: runtimeTaskSessionModeSchema.optional(),
+	source: z.string().optional(),
+	idempotencyKey: z.string().optional(),
+	promptSha256: z.string().optional(),
 });
 export type RuntimeTaskChatSendRequest = z.infer<typeof runtimeTaskChatSendRequestSchema>;
 

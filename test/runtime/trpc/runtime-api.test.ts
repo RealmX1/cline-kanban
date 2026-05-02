@@ -1648,6 +1648,59 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(response.message).toEqual(latestMessage);
 	});
 
+	it("forwards task chat source metadata to the Cline message", async () => {
+		const summary = createSummary({ agentId: "cline", pid: null });
+		const latestMessage = {
+			id: "message-rvf-1",
+			role: "user" as const,
+			content: "$review-validate-fix",
+			createdAt: Date.now(),
+			meta: {
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-run-1",
+				promptSha256: "abc123",
+			},
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(summary);
+		clineTaskSessionService.listMessages.mockReturnValue([latestMessage]);
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-1",
+				text: "$review-validate-fix",
+				source: " review-validate-fix ",
+				idempotencyKey: " rvf-run-1 ",
+				promptSha256: " abc123 ",
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
+			"task-1",
+			"$review-validate-fix",
+			undefined,
+			undefined,
+			{
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-run-1",
+				promptSha256: "abc123",
+			},
+		);
+		expect(response.message).toEqual(latestMessage);
+	});
+
 	it("auto-starts home chat sessions when the first message is sent", async () => {
 		const summary = createSummary({ agentId: "cline", pid: null });
 		const latestMessage = {
