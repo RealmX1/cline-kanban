@@ -164,6 +164,34 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(getCodexConfigOverrideValues(launch.args, "check_for_update_on_startup")).toEqual(["false"]);
 	});
 
+	it("launches Codex without alternate screen so terminal scrollback keeps session history", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-inline-history",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+		});
+
+		expect(launch.args).toContain("--no-alt-screen");
+	});
+
+	it("does not duplicate an explicit Codex no-alt-screen flag", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-explicit-inline-history",
+			agentId: "codex",
+			binary: "codex",
+			args: ["--no-alt-screen"],
+			cwd: "/tmp",
+			prompt: "",
+		});
+
+		expect(launch.args.filter((arg) => arg === "--no-alt-screen")).toHaveLength(1);
+	});
+
 	it("preserves an explicit Codex update-check override", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({

@@ -4,7 +4,7 @@ import headlessTerminalModule from "@xterm/headless";
 const { SerializeAddon } = serializeAddonModule as typeof import("@xterm/addon-serialize");
 const { Terminal } = headlessTerminalModule as typeof import("@xterm/headless");
 
-const TERMINAL_SCROLLBACK = 10_000;
+const TERMINAL_SCROLLBACK = 100_000;
 
 export interface TerminalRestoreSnapshot {
 	snapshot: string;
