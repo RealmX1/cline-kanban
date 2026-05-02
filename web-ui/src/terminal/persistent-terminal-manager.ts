@@ -1,5 +1,6 @@
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
+import { type ISearchOptions, SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -25,6 +26,19 @@ const SHIFT_ENTER_SEQUENCE = "\n";
 const RESIZE_DEBOUNCE_MS = 50;
 const INTERRUPT_IDLE_SETTLE_MS = 250;
 const PARKING_ROOT_ID = "kb-persistent-terminal-parking-root";
+const SEARCH_DECORATIONS: NonNullable<ISearchOptions["decorations"]> = {
+	activeMatchBackground: "#0084FF",
+	activeMatchBorder: "#66B7FF",
+	activeMatchColorOverviewRuler: "#0084FF",
+	matchBackground: "#D29922",
+	matchBorder: "#D4A72C",
+	matchOverviewRuler: "#D29922",
+};
+
+export interface TerminalSearchResultState {
+	resultCount: number;
+	resultIndex: number;
+}
 
 interface PersistentTerminalAppearance {
 	cursorColor: string;
@@ -37,6 +51,8 @@ interface PersistentTerminalSubscriber {
 	onLastError?: (message: string | null) => void;
 	onSummary?: (summary: RuntimeTaskSessionSummary) => void;
 	onOutputText?: (text: string) => void;
+	onSearchOpenRequested?: () => void;
+	onSearchResults?: (results: TerminalSearchResultState) => void;
 }
 
 interface MountPersistentTerminalOptions {
@@ -112,6 +128,16 @@ function isCopyShortcut(event: KeyboardEvent): boolean {
 	);
 }
 
+function isFindShortcut(event: KeyboardEvent): boolean {
+	return (
+		event.type === "keydown" &&
+		((isMacPlatform && event.metaKey && !event.ctrlKey) || (!isMacPlatform && event.ctrlKey && !event.metaKey)) &&
+		!event.altKey &&
+		!event.shiftKey &&
+		event.key.toLowerCase() === "f"
+	);
+}
+
 function getParkingRoot(): HTMLDivElement {
 	const existingRoot = document.getElementById(PARKING_ROOT_ID);
 	if (existingRoot instanceof HTMLDivElement) {
@@ -141,6 +167,7 @@ function buildKey(workspaceId: string, taskId: string): string {
 class PersistentTerminal {
 	private readonly terminal: Terminal;
 	private readonly fitAddon = new FitAddon();
+	private readonly searchAddon = new SearchAddon({ highlightLimit: 3000 });
 	private readonly hostElement: HTMLDivElement;
 	private readonly subscribers = new Set<PersistentTerminalSubscriber>();
 	private readonly parkingRoot: HTMLDivElement;
@@ -190,6 +217,7 @@ class PersistentTerminal {
 		});
 		this.terminal.loadAddon(this.fitAddon);
 		this.terminal.loadAddon(new ClipboardAddon());
+		this.terminal.loadAddon(this.searchAddon);
 		this.terminal.loadAddon(new WebLinksAddon());
 		this.terminal.loadAddon(this.unicode11Addon);
 		this.terminal.unicode.activeVersion = "11";
@@ -217,7 +245,15 @@ class PersistentTerminal {
 				});
 				return false;
 			}
+			if (isFindShortcut(event)) {
+				event.preventDefault();
+				this.notifySearchOpenRequested();
+				return false;
+			}
 			return true;
+		});
+		this.searchAddon.onDidChangeResults((results) => {
+			this.notifySearchResults(results);
 		});
 
 		try {
@@ -256,6 +292,18 @@ class PersistentTerminal {
 		this.connectionReady = true;
 		for (const subscriber of this.subscribers) {
 			subscriber.onConnectionReady?.(this.taskId);
+		}
+	}
+
+	private notifySearchOpenRequested(): void {
+		for (const subscriber of this.subscribers) {
+			subscriber.onSearchOpenRequested?.();
+		}
+	}
+
+	private notifySearchResults(results: TerminalSearchResultState): void {
+		for (const subscriber of this.subscribers) {
+			subscriber.onSearchResults?.(results);
 		}
 	}
 
@@ -605,6 +653,38 @@ class PersistentTerminal {
 				}
 				this.terminal.clear();
 			});
+	}
+
+	searchNext(query: string, options: Pick<ISearchOptions, "caseSensitive"> = {}): boolean {
+		const normalizedQuery = query.trim();
+		if (!normalizedQuery) {
+			this.clearSearch();
+			this.notifySearchResults({ resultCount: 0, resultIndex: -1 });
+			return false;
+		}
+		return this.searchAddon.findNext(normalizedQuery, {
+			...options,
+			decorations: SEARCH_DECORATIONS,
+			incremental: true,
+		});
+	}
+
+	searchPrevious(query: string, options: Pick<ISearchOptions, "caseSensitive"> = {}): boolean {
+		const normalizedQuery = query.trim();
+		if (!normalizedQuery) {
+			this.clearSearch();
+			this.notifySearchResults({ resultCount: 0, resultIndex: -1 });
+			return false;
+		}
+		return this.searchAddon.findPrevious(normalizedQuery, {
+			...options,
+			decorations: SEARCH_DECORATIONS,
+		});
+	}
+
+	clearSearch(): void {
+		this.searchAddon.clearDecorations();
+		this.terminal.clearSelection();
 	}
 
 	reset(): void {
