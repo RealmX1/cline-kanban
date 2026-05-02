@@ -30,6 +30,18 @@ describe("TerminalStateMirror", () => {
 		expect(snapshot.snapshot).toContain("world");
 	});
 
+	it("preserves more than the previous 10k-line scrollback limit", async () => {
+		const mirror = createMirror(100, 30);
+		const lines = Array.from({ length: 10_050 }, (_, index) => `line-${String(index + 1).padStart(5, "0")}`);
+
+		mirror.applyOutput(Buffer.from(lines.join("\r\n"), "utf8"));
+
+		const snapshot = await mirror.getSnapshot();
+
+		expect(snapshot.snapshot).toContain("line-00001");
+		expect(snapshot.snapshot).toContain("line-10050");
+	});
+
 	it("preserves alternate-screen state when the active buffer is alternate", async () => {
 		const mirror = createMirror();
 

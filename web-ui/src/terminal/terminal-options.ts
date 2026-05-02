@@ -10,6 +10,7 @@ interface CreateKanbanTerminalOptionsInput {
 }
 
 const TERMINAL_WORD_SEPARATOR = " ()[]{}',\"`";
+const TERMINAL_SCROLLBACK_LINES = 100_000;
 const TERMINAL_FONT_FAMILY =
 	"'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'SF Mono', Menlo, Monaco, 'Courier New', monospace";
 
@@ -38,7 +39,7 @@ export function createKanbanTerminalOptions({
 		rightClickSelectsWord: false,
 		scrollOnEraseInDisplay: true,
 		scrollOnUserInput: true,
-		scrollback: 10_000,
+		scrollback: TERMINAL_SCROLLBACK_LINES,
 		smoothScrollDuration: 0,
 		theme: {
 			background: terminalBackgroundColor,

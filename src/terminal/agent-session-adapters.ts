@@ -743,6 +743,10 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("-c", "check_for_update_on_startup=false");
 		}
 
+		if (!hasCliOption(codexArgs, "--no-alt-screen")) {
+			codexArgs.push("--no-alt-screen");
+		}
+
 		if (input.autonomousModeEnabled && !hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")) {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		}
