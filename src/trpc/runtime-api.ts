@@ -17,6 +17,7 @@ import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtim
 import type {
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeTaskChatMessage,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
 import {
@@ -89,6 +90,34 @@ async function resolveExistingTaskCwdOrEnsure(options: {
 			ensure: true,
 		});
 	}
+}
+
+function buildTerminalChatInput(text: string): Buffer {
+	return Buffer.from(`\u001b[200~${text}\u001b[201~\r`, "utf8");
+}
+
+function buildTerminalTaskChatDeliveryMessage(input: {
+	taskId: string;
+	text: string;
+	source?: string;
+	idempotencyKey?: string;
+	promptSha256?: string;
+}): RuntimeTaskChatMessage {
+	const messageId = input.idempotencyKey
+		? `terminal:${input.taskId}:${input.idempotencyKey}`
+		: `terminal:${input.taskId}:${Date.now()}`;
+	return {
+		id: messageId,
+		role: "user",
+		content: input.text,
+		createdAt: Date.now(),
+		meta: {
+			messageKind: "terminal-input",
+			source: input.source ?? null,
+			idempotencyKey: input.idempotencyKey ?? null,
+			promptSha256: input.promptSha256 ?? null,
+		},
+	};
 }
 
 export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrpcContext["runtimeApi"] {
@@ -632,6 +661,28 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							summary = await sendClineTaskSessionInput();
 						}
 						if (!summary) {
+							if (body.images && body.images.length > 0) {
+								return {
+									ok: false,
+									summary: null,
+									error: "Task chat images require an active Cline chat session.",
+								};
+							}
+							const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+							const terminalSummary = terminalManager.writeInput(body.taskId, buildTerminalChatInput(body.text));
+							if (terminalSummary) {
+								return {
+									ok: true,
+									summary: terminalSummary,
+									message: buildTerminalTaskChatDeliveryMessage({
+										taskId: body.taskId,
+										text: body.text,
+										source: body.source,
+										idempotencyKey: body.idempotencyKey,
+										promptSha256: body.promptSha256,
+									}),
+								};
+							}
 							return {
 								ok: false,
 								summary: null,

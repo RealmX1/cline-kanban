@@ -8,7 +8,7 @@ Owner context: Review-Validate-Fix (RVF) Stop hook automation
 Target implementer: Cline/Kanban app agent
 
 Implementation note, 2026-05-02:
-This plan was implemented in the Kanban repo with a narrow host-side API, plus an RVF review/fix pass. The final implementation intentionally does not use terminal PTY fallback for `task message`; it only accepts the Cline chat/user-message path as a successful delivery.
+This plan was implemented in the Kanban repo with a narrow host-side API, plus an RVF review/fix pass. A later RVF run proved that current Kanban tasks can also be active Codex terminal sessions with the correct `KANBAN_TASK_ID`/`KANBAN_ATTEMPT_ID` environment. `task message` now keeps the Cline chat/user-message path as the preferred delivery path, then falls back to terminal input for running non-Cline tasks. The terminal fallback submits the prompt with bracketed paste and returns a synthetic delivery receipt message so CLI idempotency records still have a stable `message_id`.
 
 ## Summary
 
@@ -29,7 +29,7 @@ kanban task message \
 This command must use the same internal path as a real user follow-up message sent to the active task agent. It must not be implemented as card activity, task metadata, task prompt update, hook context, system prompt/context injection, or `contextModification`.
 
 Implementation note:
-Implemented as `kanban task message` in [src/commands/task.ts](/Users/bominzhang/Documents/GitHub/cline-kanban/src/commands/task.ts). The command resolves the runtime workspace, validates the task exists, reads the prompt, records idempotency state, and sends through `runtime.sendTaskChatMessage`. The RVF review pass removed the earlier terminal `sendTaskSessionInput` fallback because PTY input is not equivalent to a real follow-up user turn.
+Implemented as `kanban task message` in [src/commands/task.ts](/Users/bominzhang/Documents/GitHub/cline-kanban/src/commands/task.ts). The command resolves the runtime workspace, validates the task exists, reads the prompt, records idempotency state, and sends through `runtime.sendTaskChatMessage`. `runtime.sendTaskChatMessage` first tries the Cline SDK chat/session path. If no Cline chat session is live or rebound and the task has a running terminal session, it falls back to terminal input for non-image text prompts.
 
 ## Required CLI Contract
 
