@@ -92,6 +92,17 @@ node dist/cli.js --port auto
 
 You can still use `KANBAN_RUNTIME_PORT` if needed, but `--port` is preferred for local multi-instance runs.
 
+## Long-lived tmux launch
+
+When launching a reusable local Kanban server for automation or RVF, run it in tmux session `cline-kanban` or `cline-kanban-<port>`. For the default port:
+
+```bash
+tmux new-session -d -s cline-kanban-3484 -c "$PWD" \
+  'exec kanban --no-open --skip-shutdown-cleanup --port 3484'
+```
+
+RVF uses the tmux session name, not the server process cwd, to decide whether an existing listener is a Cline Kanban runtime it may reuse. A listener in an unrelated tmux session, a legacy `vibe-kanban` session, or no tmux session should be treated as foreign even if the command line contains `kanban`.
+
 ## Dogfooding with two Kanban instances
 
 Run your stable orchestrator first (main checkout):
