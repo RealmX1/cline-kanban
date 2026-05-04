@@ -1701,6 +1701,109 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(response.message).toEqual(latestMessage);
 	});
 
+	it("falls back to terminal input for running non-Cline task chat messages", async () => {
+		const summary = createSummary({ agentId: "codex", state: "awaiting_review" });
+		const terminalManager = {
+			writeInput: vi.fn(() => summary),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
+		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-1",
+				text: "please continue",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-run-1",
+				promptSha256: "abc123",
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
+			"task-1",
+			"please continue",
+			undefined,
+			undefined,
+			{
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-run-1",
+				promptSha256: "abc123",
+			},
+		);
+		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
+		expect(terminalManager.writeInput).toHaveBeenCalledWith(
+			"task-1",
+			Buffer.from("\u001b[200~please continue\u001b[201~\r", "utf8"),
+		);
+		expect(response.summary).toEqual(summary);
+		expect(response.message).toEqual({
+			id: "terminal:task-1:rvf-run-1",
+			role: "user",
+			content: "please continue",
+			createdAt: expect.any(Number),
+			meta: {
+				messageKind: "terminal-input",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-run-1",
+				promptSha256: "abc123",
+			},
+		});
+	});
+
+	it("does not fall back to terminal input for chat messages with images", async () => {
+		const terminalManager = {
+			writeInput: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
+		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-1",
+				text: "look at this",
+				images: [
+					{
+						id: "img-1",
+						data: "abc123",
+						mimeType: "image/png",
+					},
+				],
+			},
+		);
+
+		expect(response).toEqual({
+			ok: false,
+			summary: null,
+			error: "Task chat images require an active Cline chat session.",
+		});
+		expect(terminalManager.writeInput).not.toHaveBeenCalled();
+	});
+
 	it("auto-starts home chat sessions when the first message is sent", async () => {
 		const summary = createSummary({ agentId: "cline", pid: null });
 		const latestMessage = {
