@@ -6,11 +6,12 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { getTerminalThemeColors, type ThemeTerminalColors } from "@/hooks/use-theme";
-import { estimateTaskSessionGeometry } from "@/runtime/task-session-geometry";
+import { estimateTaskSessionGeometry, SHELL_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTerminalWsClientMessage,
+	RuntimeTerminalWsResizeMessage,
 	RuntimeTerminalWsServerMessage,
 } from "@/runtime/types";
 import { clearTerminalGeometry, reportTerminalGeometry } from "@/terminal/terminal-geometry-registry";
@@ -26,6 +27,8 @@ const SHIFT_ENTER_SEQUENCE = "\n";
 const RESIZE_DEBOUNCE_MS = 50;
 const INTERRUPT_IDLE_SETTLE_MS = 250;
 const PARKING_ROOT_ID = "kb-persistent-terminal-parking-root";
+const HOME_TERMINAL_TASK_ID = "__home_terminal__";
+const DETAIL_TERMINAL_TASK_PREFIX = "__detail_terminal__:";
 const SEARCH_DECORATIONS: NonNullable<ISearchOptions["decorations"]> = {
 	activeMatchBackground: "#0084FF",
 	activeMatchBorder: "#66B7FF",
@@ -164,6 +167,30 @@ function buildKey(workspaceId: string, taskId: string): string {
 	return `${workspaceId}:${taskId}`;
 }
 
+function isShellTerminalTaskId(taskId: string): boolean {
+	return taskId === HOME_TERMINAL_TASK_ID || taskId.startsWith(DETAIL_TERMINAL_TASK_PREFIX);
+}
+
+function estimateInitialTerminalGeometry(taskId: string): { cols: number; rows: number } {
+	const geometry = estimateTaskSessionGeometry(window.innerWidth, window.innerHeight);
+	if (!isShellTerminalTaskId(taskId)) {
+		return geometry;
+	}
+	return {
+		...geometry,
+		cols: SHELL_SESSION_TERMINAL_COLS,
+	};
+}
+
+function resizeMessagesEqual(left: RuntimeTerminalWsResizeMessage, right: RuntimeTerminalWsResizeMessage): boolean {
+	return (
+		left.cols === right.cols &&
+		left.rows === right.rows &&
+		left.pixelWidth === right.pixelWidth &&
+		left.pixelHeight === right.pixelHeight
+	);
+}
+
 class PersistentTerminal {
 	private readonly terminal: Terminal;
 	private readonly fitAddon = new FitAddon();
@@ -188,6 +215,7 @@ class PersistentTerminal {
 	private restoreCompleted = false;
 	private outputTextDecoder = new TextDecoder();
 	private terminalWriteQueue: Promise<void> = Promise.resolve();
+	private lastSentResizeMessage: RuntimeTerminalWsResizeMessage | null = null;
 	private disposed = false;
 
 	constructor(
@@ -203,7 +231,7 @@ class PersistentTerminal {
 			height: "100%",
 		});
 		this.parkingRoot.appendChild(this.hostElement);
-		const initialGeometry = estimateTaskSessionGeometry(window.innerWidth, window.innerHeight);
+		const initialGeometry = estimateInitialTerminalGeometry(this.taskId);
 
 		this.terminal = new Terminal({
 			...createKanbanTerminalOptions({
@@ -307,11 +335,12 @@ class PersistentTerminal {
 		}
 	}
 
-	private sendControlMessage(message: RuntimeTerminalWsClientMessage): void {
+	private sendControlMessage(message: RuntimeTerminalWsClientMessage): boolean {
 		if (!this.controlSocket || this.controlSocket.readyState !== WebSocket.OPEN) {
-			return;
+			return false;
 		}
 		this.controlSocket.send(JSON.stringify(message));
+		return true;
 	}
 
 	private sendIoData(data: string | Uint8Array): boolean {
@@ -404,13 +433,19 @@ class PersistentTerminal {
 			cols: this.terminal.cols,
 			rows: this.terminal.rows,
 		});
-		this.sendControlMessage({
+		const resizeMessage: RuntimeTerminalWsResizeMessage = {
 			type: "resize",
 			cols: this.terminal.cols,
 			rows: this.terminal.rows,
 			pixelWidth: renderedPixelSize.pixelWidth,
 			pixelHeight: renderedPixelSize.pixelHeight,
-		});
+		};
+		if (this.lastSentResizeMessage && resizeMessagesEqual(this.lastSentResizeMessage, resizeMessage)) {
+			return;
+		}
+		if (this.sendControlMessage(resizeMessage)) {
+			this.lastSentResizeMessage = resizeMessage;
+		}
 	}
 
 	private connectIo(): void {
@@ -470,6 +505,7 @@ class PersistentTerminal {
 	private connectControl(): void {
 		const controlSocket = new WebSocket(getTerminalControlWebSocketUrl(this.taskId, this.workspaceId, this.clientId));
 		this.controlSocket = controlSocket;
+		this.lastSentResizeMessage = null;
 		controlSocket.onopen = () => {
 			if (this.disposed || this.controlSocket !== controlSocket) {
 				return;
