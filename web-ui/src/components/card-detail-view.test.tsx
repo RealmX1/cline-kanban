@@ -628,6 +628,7 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
+					selectedAgentId="cline"
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -651,6 +652,7 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
+					selectedAgentId="cline"
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -695,6 +697,7 @@ describe("CardDetailView", () => {
 					<CardDetailView
 						selection={createSelection()}
 						currentProjectId="workspace-1"
+						selectedAgentId="cline"
 						sessionSummary={null}
 						taskSessions={{}}
 						onSessionSummary={() => {}}

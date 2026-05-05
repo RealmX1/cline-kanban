@@ -6,6 +6,7 @@ import {
 	readOptionalPersistedResizeNumber,
 	writePersistedResizeNumber,
 } from "@/resize/resize-persistence";
+import { SHELL_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeGitRepositoryInfo, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey, removeLocalStorageItem } from "@/storage/local-storage-store";
@@ -16,17 +17,8 @@ import type { BoardCard, CardSelection } from "@/types";
 const HOME_TERMINAL_TASK_ID = "__home_terminal__";
 const HOME_TERMINAL_ROWS = 16;
 const DETAIL_TERMINAL_TASK_PREFIX = "__detail_terminal__:";
-const APPROX_TERMINAL_CELL_WIDTH_PX = 8;
-const MIN_TERMINAL_COLS = 40;
 const MIN_BOTTOM_TERMINAL_PANE_HEIGHT = 200;
 const EXPANDED_TERMINAL_PANE_HEIGHT = 99999;
-
-function estimateShellTerminalCols(): number {
-	if (typeof window === "undefined") {
-		return 120;
-	}
-	return Math.max(MIN_TERMINAL_COLS, Math.floor(Math.max(0, window.innerWidth - 96) / APPROX_TERMINAL_CELL_WIDTH_PX));
-}
 
 function loadBottomTerminalPaneHeight(): number | undefined {
 	return readOptionalPersistedResizeNumber({
@@ -47,7 +39,7 @@ async function resolveShellTerminalGeometry(taskId: string): Promise<{ cols: num
 	await prepareWaitForTerminalGeometry(taskId)();
 	return (
 		getTerminalGeometry(taskId) ?? {
-			cols: estimateShellTerminalCols(),
+			cols: SHELL_SESSION_TERMINAL_COLS,
 			rows: HOME_TERMINAL_ROWS,
 		}
 	);

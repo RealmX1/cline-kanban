@@ -373,14 +373,33 @@ class PersistentTerminal {
 		await this.enqueueTerminalWrite(snapshot);
 	}
 
+	private getRenderedPixelSize(): { pixelWidth?: number; pixelHeight?: number } {
+		const screenElement = this.terminal.element?.querySelector<HTMLElement>(".xterm-screen");
+		if (!screenElement) {
+			return {};
+		}
+		const bounds = screenElement.getBoundingClientRect();
+		const pixelWidth = Math.round(bounds.width);
+		const pixelHeight = Math.round(bounds.height);
+		return {
+			pixelWidth: pixelWidth > 0 ? pixelWidth : undefined,
+			pixelHeight: pixelHeight > 0 ? pixelHeight : undefined,
+		};
+	}
+
 	private requestResize(): void {
 		if (!this.visibleContainer) {
 			return;
 		}
-		this.fitAddon.fit();
-		const bounds = this.visibleContainer.getBoundingClientRect();
-		const pixelWidth = Math.round(bounds.width);
-		const pixelHeight = Math.round(bounds.height);
+		const proposedDimensions = this.fitAddon.proposeDimensions();
+		const nextRows =
+			proposedDimensions && Number.isFinite(proposedDimensions.rows)
+				? Math.max(1, Math.floor(proposedDimensions.rows))
+				: this.terminal.rows;
+		if (nextRows !== this.terminal.rows) {
+			this.terminal.resize(this.terminal.cols, nextRows);
+		}
+		const renderedPixelSize = this.getRenderedPixelSize();
 		reportTerminalGeometry(this.taskId, {
 			cols: this.terminal.cols,
 			rows: this.terminal.rows,
@@ -389,8 +408,8 @@ class PersistentTerminal {
 			type: "resize",
 			cols: this.terminal.cols,
 			rows: this.terminal.rows,
-			pixelWidth: pixelWidth > 0 ? pixelWidth : undefined,
-			pixelHeight: pixelHeight > 0 ? pixelHeight : undefined,
+			pixelWidth: renderedPixelSize.pixelWidth,
+			pixelHeight: renderedPixelSize.pixelHeight,
 		});
 	}
 
