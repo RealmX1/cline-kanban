@@ -52,11 +52,14 @@ describe("TerminalSessionManager", () => {
 	});
 
 	it("advertises truecolor support to terminal agents", () => {
-		const env = buildTerminalEnvironment({
-			NO_COLOR: "1",
-			NODE_DISABLE_COLORS: "1",
-			FORCE_COLOR: "0",
-		});
+		const env = buildTerminalEnvironment(
+			{ forceColor: true },
+			{
+				NO_COLOR: "1",
+				NODE_DISABLE_COLORS: "1",
+				FORCE_COLOR: "0",
+			},
+		);
 
 		expect(env.TERM).toBe("xterm-256color");
 		expect(env.COLORTERM).toBe("truecolor");
@@ -65,6 +68,27 @@ describe("TerminalSessionManager", () => {
 		expect(env.CLICOLOR_FORCE).toBe("1");
 		expect(env.NO_COLOR).toBeUndefined();
 		expect(env.NODE_DISABLE_COLORS).toBeUndefined();
+	});
+
+	it("preserves explicit color opt-outs for shell sessions", () => {
+		const env = buildTerminalEnvironment(
+			{ forceColor: false },
+			{
+				NO_COLOR: "1",
+				NODE_DISABLE_COLORS: "1",
+				FORCE_COLOR: "0",
+				CLICOLOR: "0",
+				CLICOLOR_FORCE: undefined,
+			},
+		);
+
+		expect(env.TERM).toBe("xterm-256color");
+		expect(env.COLORTERM).toBe("truecolor");
+		expect(env.CLICOLOR).toBe("0");
+		expect(env.CLICOLOR_FORCE).toBeUndefined();
+		expect(env.FORCE_COLOR).toBe("0");
+		expect(env.NO_COLOR).toBe("1");
+		expect(env.NODE_DISABLE_COLORS).toBe("1");
 	});
 
 	it("stores hook activity metadata on sessions", () => {
