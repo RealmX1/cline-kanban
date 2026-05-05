@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { buildShellCommandLine } from "../../../src/core/shell";
-import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import { buildTerminalEnvironment, TerminalSessionManager } from "../../../src/terminal/session-manager";
 
 function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
 	return {
@@ -49,6 +49,22 @@ describe("TerminalSessionManager", () => {
 		expect(commandLine).toContain("cline");
 		expect(commandLine).toContain("--auto-approve-all");
 		expect(commandLine).toContain("hello world");
+	});
+
+	it("advertises truecolor support to terminal agents", () => {
+		const env = buildTerminalEnvironment({
+			NO_COLOR: "1",
+			NODE_DISABLE_COLORS: "1",
+			FORCE_COLOR: "0",
+		});
+
+		expect(env.TERM).toBe("xterm-256color");
+		expect(env.COLORTERM).toBe("truecolor");
+		expect(env.FORCE_COLOR).toBe("3");
+		expect(env.CLICOLOR).toBe("1");
+		expect(env.CLICOLOR_FORCE).toBe("1");
+		expect(env.NO_COLOR).toBeUndefined();
+		expect(env.NODE_DISABLE_COLORS).toBeUndefined();
 	});
 
 	it("stores hook activity metadata on sessions", () => {

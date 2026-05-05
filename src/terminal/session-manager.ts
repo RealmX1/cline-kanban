@@ -182,16 +182,22 @@ function formatShellSpawnFailure(binary: string, error: unknown): string {
 	return `Failed to launch "${binary}": ${message}`;
 }
 
-function buildTerminalEnvironment(
+export function buildTerminalEnvironment(
 	...sources: Array<Record<string, string | undefined> | undefined>
 ): Record<string, string | undefined> {
-	return {
+	const env = {
 		...process.env,
 		...Object.assign({}, ...sources),
+		CLICOLOR: "1",
+		CLICOLOR_FORCE: "1",
 		COLORTERM: "truecolor",
+		FORCE_COLOR: "3",
 		TERM: "xterm-256color",
 		TERM_PROGRAM: "kanban",
 	};
+	delete env.NO_COLOR;
+	delete env.NODE_DISABLE_COLORS;
+	return env;
 }
 
 function hasCodexInteractivePrompt(text: string): boolean {
