@@ -26,4 +26,20 @@ describe("createKanbanTerminalOptions", () => {
 		expect(options.theme?.background).toBe("#101112");
 		expect(options.theme?.cursor).toBe("#abcdef");
 	});
+
+	it("defines ANSI colors instead of relying on browser defaults", () => {
+		const options = createKanbanTerminalOptions({
+			cursorColor: "#abcdef",
+			isMacPlatform: false,
+			terminalBackgroundColor: "#101112",
+			themeColors: getTerminalThemeColors("default"),
+		});
+
+		expect(options.theme?.red).toBe("#CD3131");
+		expect(options.theme?.green).toBe("#0DBC79");
+		expect(options.theme?.blue).toBe("#2472C8");
+		expect(options.theme?.brightRed).toBe("#F14C4C");
+		expect(options.theme?.brightGreen).toBe("#23D18B");
+		expect(options.theme?.brightBlue).toBe("#3B8EEA");
+	});
 });
