@@ -18,6 +18,7 @@ import { ResizeHandle } from "@/resize/resize-handle";
 import { useCardDetailLayout } from "@/resize/use-card-detail-layout";
 import { useResizeDrag } from "@/resize/use-resize-drag";
 import { isNativeClineAgentSelected } from "@/runtime/native-agent";
+import { APPROX_TERMINAL_CELL_WIDTH_PX, TASK_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
 import type {
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
@@ -36,6 +37,7 @@ import { useWindowEvent } from "@/utils/react-use";
 // the overall file or line counts that drive the shared workspace metadata stream.
 const DETAIL_DIFF_POLL_INTERVAL_MS = 1_000;
 const DIFF_MODE_ACTIVE_BACKGROUND = "color-mix(in srgb, var(--color-surface-3) 80%, var(--color-text-primary))";
+const DETAIL_TERMINAL_PANEL_WIDTH_PX = TASK_SESSION_TERMINAL_COLS * APPROX_TERMINAL_CELL_WIDTH_PX + 40;
 
 function isTypingTarget(target: EventTarget | null): boolean {
 	if (!(target instanceof HTMLElement)) {
@@ -514,6 +516,16 @@ export function CardDetailView({
 	const isTaskTerminalEnabled = selection.column.id === "in_progress" || selection.column.id === "review";
 	const effectiveTaskAgentId = sessionSummary?.agentId ?? selection.card.agentId ?? selectedAgentId;
 	const showClineAgentChatPanel = isNativeClineAgentSelected(effectiveTaskAgentId);
+	const agentPanelStyle = showClineAgentChatPanel
+		? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
+		: {
+				display: isDiffExpanded ? "none" : "flex",
+				flex: `0 0 ${DETAIL_TERMINAL_PANEL_WIDTH_PX}px`,
+				width: DETAIL_TERMINAL_PANEL_WIDTH_PX,
+			};
+	const diffPanelStyle = showClineAgentChatPanel
+		? { width: isDiffExpanded ? "100%" : diffPanelPercent }
+		: { flex: "1 1 0" };
 	const availablePaths = useMemo(() => {
 		if (!runtimeFiles || runtimeFiles.length === 0) {
 			return [];
@@ -841,13 +853,10 @@ export function CardDetailView({
 				) : (
 					<>
 						<div ref={mainRowRef} className="flex min-h-0 flex-1 overflow-hidden">
-							<div
-								className="min-h-0 min-w-0"
-								style={{ display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }}
-							>
+							<div className="min-h-0 min-w-0" style={agentPanelStyle}>
 								{agentChatPanel}
 							</div>
-							{!isDiffExpanded ? (
+							{!isDiffExpanded && showClineAgentChatPanel ? (
 								<ResizeHandle
 									orientation="vertical"
 									ariaLabel="Resize agent and diff panels"
@@ -855,10 +864,7 @@ export function CardDetailView({
 									className="z-10"
 								/>
 							) : null}
-							<div
-								className="flex min-h-0 min-w-0 flex-col"
-								style={{ width: isDiffExpanded ? "100%" : diffPanelPercent }}
-							>
+							<div className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
 								{isRuntimeAvailable ? (
 									<DiffToolbar
 										mode={diffMode}
