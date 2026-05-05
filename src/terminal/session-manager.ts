@@ -182,21 +182,28 @@ function formatShellSpawnFailure(binary: string, error: unknown): string {
 	return `Failed to launch "${binary}": ${message}`;
 }
 
+interface TerminalEnvironmentOptions {
+	forceColor: boolean;
+}
+
 export function buildTerminalEnvironment(
+	options: TerminalEnvironmentOptions,
 	...sources: Array<Record<string, string | undefined> | undefined>
 ): Record<string, string | undefined> {
 	const env = {
 		...process.env,
 		...Object.assign({}, ...sources),
-		CLICOLOR: "1",
-		CLICOLOR_FORCE: "1",
 		COLORTERM: "truecolor",
-		FORCE_COLOR: "3",
 		TERM: "xterm-256color",
 		TERM_PROGRAM: "kanban",
 	};
-	delete env.NO_COLOR;
-	delete env.NODE_DISABLE_COLORS;
+	if (options.forceColor) {
+		env.CLICOLOR = "1";
+		env.CLICOLOR_FORCE = "1";
+		env.FORCE_COLOR = "3";
+		delete env.NO_COLOR;
+		delete env.NODE_DISABLE_COLORS;
+	}
 	return env;
 }
 
@@ -352,7 +359,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
 			CLINE_KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
 		};
-		const env = buildTerminalEnvironment(request.env, launch.env, taskContextEnv);
+		const env = buildTerminalEnvironment({ forceColor: true }, request.env, launch.env, taskContextEnv);
 
 		// Adapters can wrap the configured agent binary when they need extra runtime wiring
 		// (for example, Codex uses a wrapper script to watch session logs for hook transitions).
@@ -594,7 +601,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				entry.active.session.write(data);
 			},
 		});
-		const env = buildTerminalEnvironment(request.env);
+		const env = buildTerminalEnvironment({ forceColor: false }, request.env);
 
 		let session: PtySession;
 		try {
