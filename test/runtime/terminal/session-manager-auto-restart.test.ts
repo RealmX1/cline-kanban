@@ -223,4 +223,41 @@ describe("TerminalSessionManager auto-restart", () => {
 		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
 		expect(session.write).toHaveBeenCalledTimes(1);
 	});
+
+	it("sends deferred Claude startup input after terminal output begins", async () => {
+		const deferredStartupInput = "\u001b[200~Implement the task\u001b[201~\r\r";
+		prepareAgentLaunchMock.mockResolvedValue({
+			binary: "claude",
+			args: [],
+			env: {},
+			deferredStartupInput,
+		});
+
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(111, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-claude",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-claude",
+			prompt: "Implement the task",
+		});
+
+		const session = spawnedSessions[0];
+		expect(session).toBeDefined();
+		if (!session) {
+			return;
+		}
+
+		session.triggerData("Claude Code\n");
+		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
+		expect(session.write).toHaveBeenCalledTimes(1);
+	});
 });

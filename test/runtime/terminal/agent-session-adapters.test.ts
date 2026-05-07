@@ -178,6 +178,38 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.args).toContain("--no-alt-screen");
 	});
 
+	it("launches Claude without alternate screen so terminal scrollback keeps session history", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-inline-history",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+		});
+
+		expect(launch.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBe("1");
+		expect(launch.env.FORCE_HYPERLINK).toBe("1");
+	});
+
+	it("defers Claude task prompts until the interactive terminal is ready", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-deferred-prompt",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Implement the task",
+		});
+
+		expect(launch.args).not.toContain("Implement the task");
+		expect(launch.deferredStartupInput).toContain("\u001b[200~");
+		expect(launch.deferredStartupInput).toContain("Implement the task");
+		expect(launch.deferredStartupInput?.endsWith("\r\r")).toBe(true);
+	});
+
 	it("does not duplicate an explicit Codex no-alt-screen flag", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({

@@ -603,10 +603,15 @@ function toBracketedPasteSubmission(command: string): string {
 	return `\u001b[200~${command}\u001b[201~\r`;
 }
 
+function toClaudeBracketedPasteSubmission(command: string): string {
+	return `\u001b[200~${command}\u001b[201~\r\r`;
+}
+
 const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const args = [...input.args];
 		const env: Record<string, string | undefined> = {
+			CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1",
 			FORCE_HYPERLINK: "1",
 		};
 		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
@@ -699,13 +704,14 @@ const claudeAdapter: AgentSessionAdapter = {
 			args.push("--append-system-prompt", appendedSystemPrompt);
 		}
 
-		const withPromptLaunch = withPrompt(args, input.prompt, "append");
+		const trimmed = input.prompt.trim();
+		const deferredStartupInput = trimmed ? toClaudeBracketedPasteSubmission(trimmed) : undefined;
 		return {
-			...withPromptLaunch,
+			args,
 			env: {
-				...withPromptLaunch.env,
 				...env,
 			},
+			deferredStartupInput,
 		};
 	},
 };
