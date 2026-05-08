@@ -4,6 +4,7 @@ import type {
 	RuntimeBoardData,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
+	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import {
@@ -122,17 +123,27 @@ function countTasksByColumn(board: RuntimeBoardData): RuntimeProjectTaskCounts {
 	return counts;
 }
 
-export function collectProjectWorktreeTaskIdsForRemoval(board: RuntimeBoardData): Set<string> {
-	const taskIds = new Set<string>();
+export interface ProjectWorktreeTaskCleanupTarget {
+	taskId: string;
+	worktreeMode: RuntimeTaskWorktreeMode | undefined;
+}
+
+export function collectProjectWorktreeTaskIdsForRemoval(board: RuntimeBoardData): ProjectWorktreeTaskCleanupTarget[] {
+	const targets: ProjectWorktreeTaskCleanupTarget[] = [];
+	const seen = new Set<string>();
 	for (const column of board.columns) {
 		if (column.id === "backlog" || column.id === "trash") {
 			continue;
 		}
 		for (const card of column.cards) {
-			taskIds.add(card.id);
+			if (seen.has(card.id)) {
+				continue;
+			}
+			seen.add(card.id);
+			targets.push({ taskId: card.id, worktreeMode: card.worktreeMode });
 		}
 	}
-	return taskIds;
+	return targets;
 }
 
 function applyLiveSessionStateToProjectTaskCounts(

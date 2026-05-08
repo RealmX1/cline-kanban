@@ -47,7 +47,7 @@ import { createWorkspaceApi } from "../trpc/workspace-api";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import type { RuntimeStateHub } from "./runtime-state-hub";
-import type { WorkspaceRegistry } from "./workspace-registry";
+import type { ProjectWorktreeTaskCleanupTarget, WorkspaceRegistry } from "./workspace-registry";
 
 interface DisposeTrackedWorkspaceResult {
 	terminalManager: TerminalSessionManager | null;
@@ -70,7 +70,9 @@ export interface CreateRuntimeServerDependencies {
 			stopTerminalSessions?: boolean;
 		},
 	) => DisposeTrackedWorkspaceResult;
-	collectProjectWorktreeTaskIdsForRemoval: (board: RuntimeWorkspaceStateResponse["board"]) => Set<string>;
+	collectProjectWorktreeTaskIdsForRemoval: (
+		board: RuntimeWorkspaceStateResponse["board"],
+	) => ProjectWorktreeTaskCleanupTarget[];
 	pickDirectoryPathFromSystemDialog: () => string | null;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;

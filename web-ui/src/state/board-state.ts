@@ -162,6 +162,9 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		clineProviderId?: unknown;
 		clineModelId?: unknown;
 		clineReasoningEffort?: unknown;
+		parentSessionId?: unknown;
+		worktreeMode?: unknown;
+		prepFilePath?: unknown;
 		createdAt?: unknown;
 		updatedAt?: unknown;
 	};
@@ -186,6 +189,11 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 
 	const now = Date.now();
 
+	const parentSessionId = typeof card.parentSessionId === "string" ? card.parentSessionId.trim() : "";
+	const prepFilePath = typeof card.prepFilePath === "string" ? card.prepFilePath.trim() : "";
+	const worktreeMode =
+		card.worktreeMode === "branch" || card.worktreeMode === "inplace" ? card.worktreeMode : undefined;
+
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
 		title,
@@ -199,6 +207,9 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
+		...(parentSessionId ? { parentSessionId } : {}),
+		...(worktreeMode ? { worktreeMode } : {}),
+		...(prepFilePath ? { prepFilePath } : {}),
 		createdAt: typeof card.createdAt === "number" ? card.createdAt : now,
 		updatedAt: typeof card.updatedAt === "number" ? card.updatedAt : now,
 	};

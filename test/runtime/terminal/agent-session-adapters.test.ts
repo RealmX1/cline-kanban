@@ -238,6 +238,65 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(getCodexConfigOverrideValues(launch.args, "check_for_update_on_startup")).toEqual(["true"]);
 	});
 
+	it("forks Codex when parentSessionId is provided", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-fork",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "do the thing",
+			parentSessionId: "11111111-2222-3333-4444-555555555555",
+		});
+
+		const forkIndex = launch.args.indexOf("fork");
+		expect(forkIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[forkIndex + 1]).toBe("11111111-2222-3333-4444-555555555555");
+		const promptIndex = launch.args.indexOf("do the thing");
+		expect(promptIndex).toBeGreaterThan(forkIndex);
+		expect(launch.args).not.toContain("resume");
+		expect(launch.args).not.toContain("--last");
+		// Config flags must precede the subcommand.
+		const noAltIndex = launch.args.indexOf("--no-alt-screen");
+		expect(noAltIndex).toBeGreaterThanOrEqual(0);
+		expect(noAltIndex).toBeLessThan(forkIndex);
+	});
+
+	it("prefers fork over resume when both parentSessionId and resumeFromTrash are set", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-fork-vs-resume",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			parentSessionId: "11111111-2222-3333-4444-555555555555",
+			resumeFromTrash: true,
+		});
+
+		expect(launch.args).toContain("fork");
+		expect(launch.args).not.toContain("resume");
+		expect(launch.args).not.toContain("--last");
+	});
+
+	it("ignores a non-UUID parentSessionId on Codex", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-bad-parent",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			parentSessionId: "not-a-uuid",
+		});
+
+		expect(launch.args).not.toContain("fork");
+		expect(launch.args).not.toContain("not-a-uuid");
+	});
+
 	it("writes Claude settings with explicit permission hook", async () => {
 		setupTempHome();
 		await prepareAgentLaunch({

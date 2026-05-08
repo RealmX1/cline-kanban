@@ -91,6 +91,7 @@ export interface StartTaskSessionRequest {
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	projectPath?: string;
+	parentSessionId?: string;
 }
 
 export interface StartShellSessionRequest {
@@ -351,6 +352,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			resumeFromTrash: request.resumeFromTrash,
 			env: request.env,
 			workspaceId: request.workspaceId,
+			parentSessionId: request.parentSessionId,
 		});
 
 		const taskContextEnv = {

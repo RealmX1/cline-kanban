@@ -38,6 +38,7 @@ export interface AgentAdapterLaunchInput {
 	resumeFromTrash?: boolean;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
+	parentSessionId?: string;
 }
 
 export type AgentOutputTransitionDetector = (
@@ -125,6 +126,34 @@ function hasCliOption(args: string[], optionName: string): boolean {
 		}
 	}
 	return false;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function normalizeParentSessionId(value: string | undefined): string | null {
+	if (!value) {
+		return null;
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return null;
+	}
+	if (!UUID_PATTERN.test(trimmed)) {
+		process.stderr.write(
+			`kanban: parent_session_id "${trimmed}" is not a UUID; codex fork expects a session UUID. Ignoring.\n`,
+		);
+		return null;
+	}
+	return trimmed;
+}
+
+function warnUnsupportedParentSessionId(agentId: RuntimeAgentId, parentSessionId: string | undefined): void {
+	if (!parentSessionId || !parentSessionId.trim()) {
+		return;
+	}
+	process.stderr.write(
+		`kanban: agent "${agentId}" does not support parent_session_id; ignoring "${parentSessionId.trim()}".\n`,
+	);
 }
 
 function getClineHookScriptPath(
@@ -757,7 +786,14 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		}
 
-		if (input.resumeFromTrash) {
+		// Fork wins over resume: a parent_session_id always implies a fresh fork session,
+		// even on a trash-restore launch.
+		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
+		if (parentSessionId) {
+			if (!codexArgs.includes("fork")) {
+				codexArgs.push("fork", parentSessionId);
+			}
+		} else if (input.resumeFromTrash) {
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");
 			}
@@ -1452,6 +1488,9 @@ export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promis
 		prompt: input.prompt,
 		images: input.images,
 	});
+	if (input.agentId !== "codex") {
+		warnUnsupportedParentSessionId(input.agentId, input.parentSessionId);
+	}
 	return await ADAPTERS[input.agentId].prepare({
 		...input,
 		prompt: preparedPrompt,

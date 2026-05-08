@@ -43,7 +43,7 @@ function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 			terminalManager: null as TerminalSessionManager | null,
 			workspacePath: null as string | null,
 		})),
-		collectProjectWorktreeTaskIdsForRemoval: vi.fn(() => new Set<string>()),
+		collectProjectWorktreeTaskIdsForRemoval: vi.fn(() => []),
 		warn: vi.fn(),
 		buildProjectsPayload: vi.fn(async () => ({ currentProjectId: null, projects: [] })),
 		pickDirectoryPathFromSystemDialog: vi.fn(() => null),

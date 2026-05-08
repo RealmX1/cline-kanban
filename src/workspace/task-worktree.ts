@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join } from "node:path";
 
 import type {
 	RuntimeTaskWorkspaceInfoResponse,
+	RuntimeTaskWorktreeMode,
 	RuntimeWorktreeDeleteResponse,
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
@@ -438,9 +439,20 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 	cwd: string;
 	taskId: string;
 	baseRef: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<RuntimeWorktreeEnsureResponse> {
 	try {
 		const context = await loadWorkspaceContext(options.cwd);
+		if (options.worktreeMode === "inplace") {
+			const inplaceBaseRef = options.baseRef.trim();
+			const inplaceCommit = await tryRunGit(context.repoPath, ["rev-parse", "HEAD"]);
+			return {
+				ok: true,
+				path: context.repoPath,
+				baseRef: inplaceBaseRef,
+				baseCommit: inplaceCommit ?? "",
+			};
+		}
 		const taskId = normalizeTaskIdForWorktreePath(options.taskId);
 		const worktreePath = getTaskWorktreePath(context.repoPath, taskId);
 		// Investigation note: ensure is called on every task start. The previous implementation
@@ -565,8 +577,16 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 export async function deleteTaskWorktree(options: {
 	repoPath: string;
 	taskId: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<RuntimeWorktreeDeleteResponse> {
 	try {
+		// Inplace tasks share an existing worktree owned by another session; never delete it.
+		if (options.worktreeMode === "inplace") {
+			return {
+				ok: true,
+				removed: false,
+			};
+		}
 		const taskId = normalizeTaskIdForWorktreePath(options.taskId);
 		const rootPath = getWorktreesBaseRootPath();
 		const worktreePath = getTaskWorktreePath(options.repoPath, taskId);
@@ -611,8 +631,13 @@ export async function resolveTaskCwd(options: {
 	taskId: string;
 	baseRef: string;
 	ensure?: boolean;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<string> {
 	const context = await loadWorkspaceContext(options.cwd);
+
+	if (options.worktreeMode === "inplace") {
+		return context.repoPath;
+	}
 
 	const normalizedBaseRef = options.baseRef.trim();
 	if (!normalizedBaseRef) {
@@ -624,6 +649,7 @@ export async function resolveTaskCwd(options: {
 			cwd: options.cwd,
 			taskId: options.taskId,
 			baseRef: normalizedBaseRef,
+			worktreeMode: options.worktreeMode,
 		});
 		if (!ensured.ok) {
 			throw new Error(ensured.error ?? "Worktree setup failed.");
@@ -642,6 +668,7 @@ export async function getTaskWorkspacePathInfo(options: {
 	cwd: string;
 	taskId: string;
 	baseRef: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<Pick<RuntimeTaskWorkspaceInfoResponse, "taskId" | "path" | "exists" | "baseRef">> {
 	const taskId = normalizeTaskIdForWorktreePath(options.taskId);
 	const normalizedBaseRef = options.baseRef.trim();
@@ -653,6 +680,15 @@ export async function getTaskWorkspacePathInfo(options: {
 
 	if (!normalizedBaseRef) {
 		throw new Error("Task base branch is required for task workspace info.");
+	}
+
+	if (options.worktreeMode === "inplace") {
+		return {
+			taskId,
+			path: repoPath,
+			exists: await pathExists(repoPath),
+			baseRef: normalizedBaseRef,
+		};
 	}
 
 	const worktreePath = getTaskWorktreePath(repoPath, taskId);
@@ -668,6 +704,7 @@ export async function getTaskWorkspaceInfo(options: {
 	cwd: string;
 	taskId: string;
 	baseRef: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<RuntimeTaskWorkspaceInfoResponse> {
 	const workspacePathInfo = await getTaskWorkspacePathInfo(options);
 	if (!workspacePathInfo.exists) {

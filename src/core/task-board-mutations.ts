@@ -7,6 +7,7 @@ import type {
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskImage,
+	RuntimeTaskWorktreeMode,
 } from "./api-contract";
 import { createUniqueTaskId } from "./task-id";
 import { resolveTaskTitle } from "./task-title";
@@ -22,6 +23,9 @@ export interface RuntimeCreateTaskInput {
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	baseRef: string;
+	parentSessionId?: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
+	prepFilePath?: string;
 }
 
 export interface RuntimeUpdateTaskInput {
@@ -34,6 +38,9 @@ export interface RuntimeUpdateTaskInput {
 	agentId?: RuntimeAgentId | null;
 	clineSettings?: RuntimeTaskClineSettings | null;
 	baseRef: string;
+	parentSessionId?: string | null;
+	worktreeMode?: RuntimeTaskWorktreeMode | null;
+	prepFilePath?: string | null;
 }
 
 function normalizeTaskAutoReviewMode(value: RuntimeTaskAutoReviewMode | null | undefined): RuntimeTaskAutoReviewMode {
@@ -299,6 +306,8 @@ export function addTaskToColumn(
 	if (explicitTaskId && existingIds.has(explicitTaskId)) {
 		throw new Error(`Task "${explicitTaskId}" already exists.`);
 	}
+	const parentSessionId = input.parentSessionId?.trim();
+	const prepFilePath = input.prepFilePath?.trim();
 	const task: RuntimeBoardCard = {
 		id: explicitTaskId || createUniqueTaskId(existingIds, randomUuid),
 		title: resolveTaskTitle(input.title, prompt),
@@ -310,6 +319,9 @@ export function addTaskToColumn(
 		...(input.agentId ? { agentId: input.agentId } : {}),
 		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
 		baseRef,
+		worktreeMode: input.worktreeMode ?? "branch",
+		...(parentSessionId ? { parentSessionId } : {}),
+		...(prepFilePath ? { prepFilePath } : {}),
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -615,6 +627,24 @@ export function updateTask(
 				return card;
 			}
 			columnUpdated = true;
+			const nextParentSessionId =
+				input.parentSessionId === undefined
+					? card.parentSessionId
+					: input.parentSessionId === null
+						? undefined
+						: input.parentSessionId.trim() || undefined;
+			const nextWorktreeMode =
+				input.worktreeMode === undefined
+					? card.worktreeMode
+					: input.worktreeMode === null
+						? "branch"
+						: input.worktreeMode;
+			const nextPrepFilePath =
+				input.prepFilePath === undefined
+					? card.prepFilePath
+					: input.prepFilePath === null
+						? undefined
+						: input.prepFilePath.trim() || undefined;
 			updatedTask = {
 				...card,
 				title: resolveTaskTitle(input.title, prompt),
@@ -631,6 +661,9 @@ export function updateTask(
 							? undefined
 							: cloneTaskClineSettings(input.clineSettings),
 				baseRef,
+				parentSessionId: nextParentSessionId,
+				worktreeMode: nextWorktreeMode,
+				prepFilePath: nextPrepFilePath,
 				updatedAt: now,
 			};
 			return updatedTask;

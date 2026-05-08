@@ -7,6 +7,7 @@ import type {
 	RuntimeGitSyncAction,
 	RuntimeGitSyncResponse,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceChangesMode,
 	RuntimeWorkspaceFileSearchResponse,
 	RuntimeWorkspaceStateResponse,
@@ -47,8 +48,8 @@ export interface CreateWorkspaceApiDependencies {
 }
 
 function normalizeOptionalTaskWorkspaceScopeInput(
-	input: { taskId: string; baseRef: string } | null,
-): { taskId: string; baseRef: string } | null {
+	input: { taskId: string; baseRef: string; worktreeMode?: RuntimeTaskWorktreeMode } | null,
+): { taskId: string; baseRef: string; worktreeMode: RuntimeTaskWorktreeMode | undefined } | null {
 	if (!input) {
 		return null;
 	}
@@ -60,6 +61,7 @@ function normalizeOptionalTaskWorkspaceScopeInput(
 	return {
 		taskId,
 		baseRef,
+		worktreeMode: input.worktreeMode,
 	};
 }
 
@@ -67,10 +69,12 @@ function normalizeRequiredTaskWorkspaceScopeInput(input: {
 	taskId: string;
 	baseRef: string;
 	mode?: RuntimeWorkspaceChangesMode;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }): {
 	taskId: string;
 	baseRef: string;
 	mode: RuntimeWorkspaceChangesMode;
+	worktreeMode: RuntimeTaskWorktreeMode | undefined;
 } {
 	const taskId = input.taskId.trim();
 	const baseRef = input.baseRef.trim();
@@ -85,6 +89,7 @@ function normalizeRequiredTaskWorkspaceScopeInput(input: {
 		taskId,
 		baseRef,
 		mode,
+		worktreeMode: input.worktreeMode,
 	};
 }
 
@@ -208,6 +213,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						taskId: taskScope.taskId,
 						baseRef: taskScope.baseRef,
 						ensure: false,
+						...(taskScope.worktreeMode ? { worktreeMode: taskScope.worktreeMode } : {}),
 					});
 				}
 				const summary = await getGitSyncSummary(summaryCwd);
@@ -257,6 +263,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						taskId: taskScope.taskId,
 						baseRef: taskScope.baseRef,
 						ensure: false,
+						...(taskScope.worktreeMode ? { worktreeMode: taskScope.worktreeMode } : {}),
 					});
 				}
 				const response = await discardGitChanges({
@@ -282,6 +289,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					taskId: normalizedInput.taskId,
 					baseRef: normalizedInput.baseRef,
 					ensure: false,
+					...(normalizedInput.worktreeMode ? { worktreeMode: normalizedInput.worktreeMode } : {}),
 				});
 			} catch (error) {
 				if (!isMissingTaskWorktreeError(error)) {
@@ -324,6 +332,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				cwd: workspaceScope.workspacePath,
 				taskId: body.taskId,
 				baseRef: body.baseRef,
+				worktreeMode: body.worktreeMode,
 			});
 		},
 		deleteWorktree: async (workspaceScope, input) => {
@@ -331,6 +340,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			return await deleteTaskWorktree({
 				repoPath: workspaceScope.workspacePath,
 				taskId: body.taskId,
+				worktreeMode: body.worktreeMode,
 			});
 		},
 		loadTaskContext: async (workspaceScope, input) => {
@@ -339,6 +349,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				cwd: workspaceScope.workspacePath,
 				taskId: normalizedInput.taskId,
 				baseRef: normalizedInput.baseRef,
+				worktreeMode: normalizedInput.worktreeMode,
 			});
 		},
 		searchFiles: async (workspaceScope, input) => {
@@ -398,6 +409,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					taskId: taskScope.taskId,
 					baseRef: taskScope.baseRef,
 					ensure: false,
+					...(taskScope.worktreeMode ? { worktreeMode: taskScope.worktreeMode } : {}),
 				});
 			}
 			return await getGitLog({
@@ -417,6 +429,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					taskId: taskScope.taskId,
 					baseRef: taskScope.baseRef,
 					ensure: false,
+					...(taskScope.worktreeMode ? { worktreeMode: taskScope.worktreeMode } : {}),
 				});
 			}
 			return await getGitRefs(refsCwd);
@@ -430,6 +443,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					taskId: taskScope.taskId,
 					baseRef: taskScope.baseRef,
 					ensure: false,
+					...(taskScope.worktreeMode ? { worktreeMode: taskScope.worktreeMode } : {}),
 				});
 			}
 			return await getCommitDiff({

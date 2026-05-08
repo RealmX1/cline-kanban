@@ -14,6 +14,7 @@ import type {
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskWorkspaceInfoResponse,
+	RuntimeTaskWorktreeMode,
 	RuntimeWorktreeDeleteResponse,
 	RuntimeWorktreeEnsureResponse,
 } from "@/runtime/types";
@@ -66,7 +67,10 @@ export interface UseTaskSessionsResult {
 	abortTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;
 	cancelTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;
 	fetchTaskChatMessages: (taskId: string) => Promise<RuntimeTaskChatMessage[] | null>;
-	cleanupTaskWorkspace: (taskId: string) => Promise<RuntimeWorktreeDeleteResponse | null>;
+	cleanupTaskWorkspace: (
+		taskId: string,
+		worktreeMode?: RuntimeTaskWorktreeMode,
+	) => Promise<RuntimeWorktreeDeleteResponse | null>;
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
 }
 
@@ -128,6 +132,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				const payload = await trpcClient.workspace.ensureWorktree.mutate({
 					taskId: task.id,
 					baseRef: task.baseRef,
+					...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
 				});
 				if (!payload.ok) {
 					return {
@@ -166,6 +171,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					rows: geometry.rows,
 					agentId: task.agentId,
 					clineSettings: task.clineSettings,
+					...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
+					...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
+					...(task.prepFilePath ? { prepFilePath: task.prepFilePath } : {}),
 				});
 				if (!payload.ok || !payload.summary) {
 					return {
@@ -241,13 +249,16 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 	);
 
 	const cleanupTaskWorkspace = useCallback(
-		async (taskId: string): Promise<RuntimeWorktreeDeleteResponse | null> => {
+		async (taskId: string, worktreeMode?: RuntimeTaskWorktreeMode): Promise<RuntimeWorktreeDeleteResponse | null> => {
 			if (!currentProjectId) {
 				return null;
 			}
 			try {
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
-				const payload = await trpcClient.workspace.deleteWorktree.mutate({ taskId });
+				const payload = await trpcClient.workspace.deleteWorktree.mutate({
+					taskId,
+					...(worktreeMode ? { worktreeMode } : {}),
+				});
 				if (!payload.ok) {
 					const message = payload.error ?? "Could not clean up task workspace.";
 					console.error(`[cleanupTaskWorkspace] ${message}`);
@@ -273,6 +284,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				return await trpcClient.workspace.getTaskContext.query({
 					taskId: task.id,
 					baseRef: task.baseRef,
+					...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
 				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

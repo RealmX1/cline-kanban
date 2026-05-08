@@ -4,6 +4,7 @@ import type {
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskImage,
+	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
 
 export type BoardColumnId = RuntimeBoardColumnId;
@@ -47,6 +48,9 @@ export interface BoardCard {
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	baseRef: string;
+	parentSessionId?: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
+	prepFilePath?: string;
 	createdAt: number;
 	updatedAt: number;
 }

@@ -272,3 +272,84 @@ describe("per-task agent/model/provider overrides", () => {
 		});
 	});
 });
+
+describe("dispatch / fork-flow fields", () => {
+	it("defaults worktreeMode to 'branch' when omitted on create", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Plain task", baseRef: "main" },
+			() => "aaaaa111",
+		);
+		expect(created.task.worktreeMode).toBe("branch");
+		expect(created.task.parentSessionId).toBeUndefined();
+		expect(created.task.prepFilePath).toBeUndefined();
+	});
+
+	it("persists parentSessionId / worktreeMode / prepFilePath on create", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Forked task",
+				baseRef: "main",
+				parentSessionId: "11111111-2222-3333-4444-555555555555",
+				worktreeMode: "inplace",
+				prepFilePath: "/tmp/rvf-prep/abc.json",
+			},
+			() => "aaaaa111",
+		);
+		expect(created.task.parentSessionId).toBe("11111111-2222-3333-4444-555555555555");
+		expect(created.task.worktreeMode).toBe("inplace");
+		expect(created.task.prepFilePath).toBe("/tmp/rvf-prep/abc.json");
+	});
+
+	it("preserves dispatch fields on update when not specified", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Forked task",
+				baseRef: "main",
+				parentSessionId: "11111111-2222-3333-4444-555555555555",
+				worktreeMode: "inplace",
+				prepFilePath: "/tmp/rvf-prep/abc.json",
+			},
+			() => "aaaaa111",
+		);
+		const updated = updateTask(created.board, created.task.id, {
+			prompt: "Forked task v2",
+			baseRef: "main",
+		});
+		expect(updated.task?.parentSessionId).toBe("11111111-2222-3333-4444-555555555555");
+		expect(updated.task?.worktreeMode).toBe("inplace");
+		expect(updated.task?.prepFilePath).toBe("/tmp/rvf-prep/abc.json");
+	});
+
+	it("clears dispatch fields when update sets them to null", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Forked task",
+				baseRef: "main",
+				parentSessionId: "11111111-2222-3333-4444-555555555555",
+				worktreeMode: "inplace",
+				prepFilePath: "/tmp/rvf-prep/abc.json",
+			},
+			() => "aaaaa111",
+		);
+		const updated = updateTask(created.board, created.task.id, {
+			prompt: "Forked task v2",
+			baseRef: "main",
+			parentSessionId: null,
+			worktreeMode: null,
+			prepFilePath: null,
+		});
+		expect(updated.task?.parentSessionId).toBeUndefined();
+		// worktreeMode falls back to the create-path default ("branch") so that
+		// every persisted card carries a concrete mode regardless of update path.
+		expect(updated.task?.worktreeMode).toBe("branch");
+		expect(updated.task?.prepFilePath).toBeUndefined();
+	});
+});

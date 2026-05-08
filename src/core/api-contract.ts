@@ -23,10 +23,14 @@ export const runtimeWorkspaceFileChangeSchema = z.object({
 });
 export type RuntimeWorkspaceFileChange = z.infer<typeof runtimeWorkspaceFileChangeSchema>;
 
+export const runtimeTaskWorktreeModeSchema = z.enum(["branch", "inplace"]);
+export type RuntimeTaskWorktreeMode = z.infer<typeof runtimeTaskWorktreeModeSchema>;
+
 export const runtimeWorkspaceChangesRequestSchema = z.object({
 	taskId: z.string(),
 	baseRef: z.string(),
 	mode: z.enum(["working_copy", "last_turn"]).optional(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
 });
 export type RuntimeWorkspaceChangesRequest = z.infer<typeof runtimeWorkspaceChangesRequestSchema>;
 
@@ -144,6 +148,9 @@ export const runtimeBoardCardSchema = z
 		clineModelId: z.string().optional(),
 		clineReasoningEffort: runtimeLegacyTaskClineReasoningEffortSchema.optional(),
 		baseRef: z.string(),
+		parentSessionId: z.string().optional(),
+		worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
+		prepFilePath: z.string().optional(),
 		createdAt: z.number(),
 		updatedAt: z.number(),
 	})
@@ -540,6 +547,7 @@ export type RuntimeProjectRemoveResponse = z.infer<typeof runtimeProjectRemoveRe
 export const runtimeWorktreeEnsureRequestSchema = z.object({
 	taskId: z.string(),
 	baseRef: z.string(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
 });
 export type RuntimeWorktreeEnsureRequest = z.infer<typeof runtimeWorktreeEnsureRequestSchema>;
 
@@ -564,6 +572,7 @@ export type RuntimeWorktreeEnsureResponse = z.infer<typeof runtimeWorktreeEnsure
 
 export const runtimeWorktreeDeleteRequestSchema = z.object({
 	taskId: z.string(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
 });
 export type RuntimeWorktreeDeleteRequest = z.infer<typeof runtimeWorktreeDeleteRequestSchema>;
 
@@ -577,6 +586,7 @@ export type RuntimeWorktreeDeleteResponse = z.infer<typeof runtimeWorktreeDelete
 export const runtimeTaskWorkspaceInfoRequestSchema = z.object({
 	taskId: z.string(),
 	baseRef: z.string(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
 });
 export type RuntimeTaskWorkspaceInfoRequest = z.infer<typeof runtimeTaskWorkspaceInfoRequestSchema>;
 
@@ -983,6 +993,9 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	rows: z.number().int().positive().optional(),
 	agentId: runtimeAgentIdSchema.optional(),
 	clineSettings: runtimeTaskClineSettingsSchema.optional(),
+	parentSessionId: z.string().optional(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
+	prepFilePath: z.string().optional(),
 });
 export type RuntimeTaskSessionStartRequest = z.infer<typeof runtimeTaskSessionStartRequestSchema>;
 
@@ -1116,6 +1129,7 @@ export const runtimeShellSessionStartRequestSchema = z.object({
 	rows: z.number().int().positive().optional(),
 	workspaceTaskId: z.string().optional(),
 	baseRef: z.string(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
 });
 export type RuntimeShellSessionStartRequest = z.infer<typeof runtimeShellSessionStartRequestSchema>;
 

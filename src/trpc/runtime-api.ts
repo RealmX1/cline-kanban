@@ -18,6 +18,7 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
 	RuntimeTaskChatMessage,
+	RuntimeTaskWorktreeMode,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
 import {
@@ -74,6 +75,7 @@ async function resolveExistingTaskCwdOrEnsure(options: {
 	cwd: string;
 	taskId: string;
 	baseRef: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<string> {
 	try {
 		return await resolveTaskCwd({
@@ -81,6 +83,7 @@ async function resolveExistingTaskCwdOrEnsure(options: {
 			taskId: options.taskId,
 			baseRef: options.baseRef,
 			ensure: false,
+			worktreeMode: options.worktreeMode,
 		});
 	} catch {
 		return await resolveTaskCwd({
@@ -88,6 +91,7 @@ async function resolveExistingTaskCwdOrEnsure(options: {
 			taskId: options.taskId,
 			baseRef: options.baseRef,
 			ensure: true,
+			worktreeMode: options.worktreeMode,
 		});
 	}
 }
@@ -208,6 +212,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							cwd: workspaceScope.workspacePath,
 							taskId: body.taskId,
 							baseRef: body.baseRef,
+							worktreeMode: body.worktreeMode,
 						});
 				const shouldCaptureTurnCheckpoint = !body.resumeFromTrash && !isHomeAgentSessionId(body.taskId);
 
@@ -322,6 +327,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					rows: body.rows,
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
+					parentSessionId: body.parentSessionId,
 				});
 
 				let nextSummary = summary;
@@ -732,6 +738,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							taskId: body.workspaceTaskId,
 							baseRef: body.baseRef,
 							ensure: true,
+							...(body.worktreeMode ? { worktreeMode: body.worktreeMode } : {}),
 						})
 					: workspaceScope.workspacePath;
 				const summary = await terminalManager.startShellSession({

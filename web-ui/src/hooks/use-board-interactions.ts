@@ -57,7 +57,7 @@ interface UseBoardInteractionsInput {
 	setIsClearTrashDialogOpen: Dispatch<SetStateAction<boolean>>;
 	setIsGitHistoryOpen: Dispatch<SetStateAction<boolean>>;
 	stopTaskSession: (taskId: string) => Promise<void>;
-	cleanupTaskWorkspace: (taskId: string) => Promise<unknown>;
+	cleanupTaskWorkspace: UseTaskSessionsResult["cleanupTaskWorkspace"];
 	ensureTaskWorkspace: UseTaskSessionsResult["ensureTaskWorkspace"];
 	startTaskSession: UseTaskSessionsResult["startTaskSession"];
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
@@ -828,7 +828,9 @@ export function useBoardInteractions({
 	}, [setIsClearTrashDialogOpen, trashTaskCount]);
 
 	const handleConfirmClearTrash = useCallback(() => {
-		const taskIds = [...trashTaskIds];
+		const trashColumn = board.columns.find((column) => column.id === "trash");
+		const trashCards = trashColumn ? [...trashColumn.cards] : [];
+		const taskIds = trashCards.map((card) => card.id);
 		setIsClearTrashDialogOpen(false);
 		if (taskIds.length === 0) {
 			return;
@@ -849,13 +851,14 @@ export function useBoardInteractions({
 
 		void (async () => {
 			await Promise.all(
-				taskIds.map(async (taskId) => {
-					await stopTaskSession(taskId);
-					await cleanupTaskWorkspace(taskId);
+				trashCards.map(async (card) => {
+					await stopTaskSession(card.id);
+					await cleanupTaskWorkspace(card.id, card.worktreeMode);
 				}),
 			);
 		})();
 	}, [
+		board.columns,
 		cleanupTaskWorkspace,
 		selectedTaskId,
 		setBoard,
@@ -863,7 +866,6 @@ export function useBoardInteractions({
 		setSelectedTaskId,
 		setSessions,
 		stopTaskSession,
-		trashTaskIds,
 	]);
 
 	const resetBoardInteractionsState = useCallback(() => {

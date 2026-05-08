@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
-
 import type {
 	RuntimeAgentId,
 	RuntimeBoardCard,
@@ -11,9 +10,14 @@ import type {
 	RuntimeBoardDependency,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskClineSettings,
+	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
-import { runtimeAgentIdSchema, runtimeClineReasoningEffortSchema } from "../core/api-contract";
+import {
+	runtimeAgentIdSchema,
+	runtimeClineReasoningEffortSchema,
+	runtimeTaskWorktreeModeSchema,
+} from "../core/api-contract";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import {
 	addTaskDependency,
@@ -84,6 +88,40 @@ function parseAutoReviewMode(value: string | undefined): "commit" | "pr" | undef
 		return value;
 	}
 	throw new Error(`Invalid auto review mode "${value}". Expected: commit, pr.`);
+}
+
+const VALID_WORKTREE_MODES = runtimeTaskWorktreeModeSchema.options;
+
+function parseWorktreeMode(value: string | undefined): RuntimeTaskWorktreeMode | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	const result = runtimeTaskWorktreeModeSchema.safeParse(value);
+	if (result.success) {
+		return result.data;
+	}
+	throw new Error(`Invalid worktree mode "${value}". Expected one of: ${VALID_WORKTREE_MODES.join(", ")}.`);
+}
+
+function parseOptionalWorktreeModeOrInherit(value: string | undefined): RuntimeTaskWorktreeMode | null | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (value === "inherit") {
+		return null;
+	}
+	return parseWorktreeMode(value);
+}
+
+function parseOptionalStringOrInherit(value: string | undefined): string | null | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (value === "inherit") {
+		return null;
+	}
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : null;
 }
 
 const VALID_AGENT_IDS = runtimeAgentIdSchema.options;
@@ -487,6 +525,9 @@ async function createTask(input: {
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	parentSessionId?: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
+	prepFilePath?: string;
 }): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
@@ -508,6 +549,9 @@ async function createTask(input: {
 				agentId: input.agentId,
 				clineSettings: input.clineSettings,
 				baseRef: resolvedBaseRef,
+				parentSessionId: input.parentSessionId,
+				worktreeMode: input.worktreeMode,
+				prepFilePath: input.prepFilePath,
 			},
 			() => globalThis.crypto.randomUUID(),
 		);
@@ -531,6 +575,9 @@ async function createTask(input: {
 			autoReviewMode: created.autoReviewMode ?? "commit",
 			...(created.agentId ? { agentId: created.agentId } : {}),
 			...formatTaskClineSettings(created.clineSettings),
+			...(created.parentSessionId ? { parentSessionId: created.parentSessionId } : {}),
+			worktreeMode: created.worktreeMode ?? "branch",
+			...(created.prepFilePath ? { prepFilePath: created.prepFilePath } : {}),
 		},
 	};
 }
@@ -549,6 +596,9 @@ async function updateTaskCommand(input: {
 	clineProviderId?: string | null;
 	clineModelId?: string | null;
 	clineReasoningEffort?: ParsedTaskClineReasoningEffort;
+	parentSessionId?: string | null;
+	worktreeMode?: RuntimeTaskWorktreeMode | null;
+	prepFilePath?: string | null;
 }): Promise<JsonRecord> {
 	if (
 		input.title === undefined &&
@@ -560,7 +610,10 @@ async function updateTaskCommand(input: {
 		input.agentId === undefined &&
 		input.clineProviderId === undefined &&
 		input.clineModelId === undefined &&
-		input.clineReasoningEffort === undefined
+		input.clineReasoningEffort === undefined &&
+		input.parentSessionId === undefined &&
+		input.worktreeMode === undefined &&
+		input.prepFilePath === undefined
 	) {
 		throw new Error("task update requires at least one field to change.");
 	}
@@ -588,6 +641,9 @@ async function updateTaskCommand(input: {
 			autoReviewMode: input.autoReviewMode ?? taskRecord.task.autoReviewMode ?? "commit",
 			agentId: input.agentId,
 			clineSettings: nextTaskClineSettings,
+			parentSessionId: input.parentSessionId,
+			worktreeMode: input.worktreeMode,
+			prepFilePath: input.prepFilePath,
 		});
 		if (!updatedTask.updated || !updatedTask.task) {
 			throw new Error(`Task "${input.taskId}" could not be updated.`);
@@ -703,6 +759,7 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 		const ensured = await runtimeClient.workspace.ensureWorktree.mutate({
 			taskId: task.id,
 			baseRef: task.baseRef,
+			worktreeMode: task.worktreeMode,
 		});
 		if (!ensured.ok) {
 			throw new Error(ensured.error ?? "Could not ensure task worktree.");
@@ -716,6 +773,9 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 			baseRef: task.baseRef,
 			agentId: task.agentId,
 			clineSettings: task.clineSettings,
+			parentSessionId: task.parentSessionId,
+			worktreeMode: task.worktreeMode,
+			prepFilePath: task.prepFilePath,
 		});
 		if (!started.ok || !started.summary) {
 			throw new Error(started.error ?? "Could not start task session.");
@@ -1390,6 +1450,9 @@ export function registerTaskCommand(program: Command): void {
 			"--cline-reasoning-effort <level>",
 			"Cline reasoning effort override: default | low | medium | high | xhigh.",
 		)
+		.option("--parent-session-id <uuid>", "Codex parent session id; agent launcher will run `codex fork <uuid>`.")
+		.option("--worktree-mode <mode>", `Worktree mode: ${VALID_WORKTREE_MODES.join(" | ")}. Defaults to branch.`)
+		.option("--prep-file-path <path>", "Absolute path to a dispatch prep file persisted on the task.")
 		.action(
 			async (options: {
 				title?: string;
@@ -1403,6 +1466,9 @@ export function registerTaskCommand(program: Command): void {
 				clineProvider?: string;
 				clineModel?: string;
 				clineReasoningEffort?: string;
+				parentSessionId?: string;
+				worktreeMode?: string;
+				prepFilePath?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -1421,6 +1487,9 @@ export function registerTaskCommand(program: Command): void {
 								modelId: parseOptionalStringOrDefault(options.clineModel) ?? undefined,
 								reasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
 							}),
+							parentSessionId: options.parentSessionId?.trim() || undefined,
+							worktreeMode: parseWorktreeMode(options.worktreeMode),
+							prepFilePath: options.prepFilePath?.trim() || undefined,
 						}),
 				);
 			},
@@ -1450,6 +1519,15 @@ export function registerTaskCommand(program: Command): void {
 			"--cline-reasoning-effort <level>",
 			'Cline reasoning effort override: default | low | medium | high | xhigh. Use "inherit" to clear.',
 		)
+		.option(
+			"--parent-session-id <uuid>",
+			'Codex parent session id; agent launcher will run `codex fork <uuid>`. Use "inherit" to clear.',
+		)
+		.option("--worktree-mode <mode>", `Worktree mode: ${VALID_WORKTREE_MODES.join(" | ")}. Use "inherit" to clear.`)
+		.option(
+			"--prep-file-path <path>",
+			'Absolute path to a dispatch prep file persisted on the task. Use "inherit" to clear.',
+		)
 		.action(
 			async (options: {
 				taskId: string;
@@ -1464,6 +1542,9 @@ export function registerTaskCommand(program: Command): void {
 				clineProvider?: string;
 				clineModel?: string;
 				clineReasoningEffort?: string;
+				parentSessionId?: string;
+				worktreeMode?: string;
+				prepFilePath?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -1481,6 +1562,9 @@ export function registerTaskCommand(program: Command): void {
 							clineProviderId: parseOptionalStringOrDefault(options.clineProvider),
 							clineModelId: parseOptionalStringOrDefault(options.clineModel),
 							clineReasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
+							parentSessionId: parseOptionalStringOrInherit(options.parentSessionId),
+							worktreeMode: parseOptionalWorktreeModeOrInherit(options.worktreeMode),
+							prepFilePath: parseOptionalStringOrInherit(options.prepFilePath),
 						}),
 				);
 			},

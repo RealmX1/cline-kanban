@@ -8,6 +8,7 @@ import type {
 	RuntimeProjectTaskCounts,
 } from "../core/api-contract";
 import { parseDirectoryListRequest, parseProjectAddRequest, parseProjectRemoveRequest } from "../core/api-validation";
+import type { ProjectWorktreeTaskCleanupTarget } from "../server/workspace-registry";
 import {
 	listWorkspaceIndexEntries,
 	loadWorkspaceContext,
@@ -48,7 +49,7 @@ export interface CreateProjectsApiDependencies {
 		workspaceId: string,
 		options?: DisposeWorkspaceOptions,
 	) => { terminalManager: TerminalSessionManager | null; workspacePath: string | null };
-	collectProjectWorktreeTaskIdsForRemoval: (board: RuntimeBoardData) => Set<string>;
+	collectProjectWorktreeTaskIdsForRemoval: (board: RuntimeBoardData) => ProjectWorktreeTaskCleanupTarget[];
 	warn: (message: string) => void;
 	buildProjectsPayload: (preferredCurrentProjectId: string | null) => Promise<{
 		currentProjectId: string | null;
@@ -167,11 +168,11 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 					};
 				}
 
-				const taskIdsToCleanup = new Set<string>();
+				const targetsToCleanup: ProjectWorktreeTaskCleanupTarget[] = [];
 				try {
 					const workspaceState = await loadWorkspaceState(projectToRemove.repoPath);
-					for (const taskId of deps.collectProjectWorktreeTaskIdsForRemoval(workspaceState.board)) {
-						taskIdsToCleanup.add(taskId);
+					for (const target of deps.collectProjectWorktreeTaskIdsForRemoval(workspaceState.board)) {
+						targetsToCleanup.push(target);
 					}
 				} catch {
 					// Best effort: if board state cannot be read, skip worktree cleanup IDs.
@@ -201,15 +202,16 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 					}
 				}
 				void deps.broadcastRuntimeProjectsUpdated(deps.getActiveWorkspaceId());
-				if (taskIdsToCleanup.size > 0) {
-					const cleanupTaskIds = Array.from(taskIdsToCleanup);
+				if (targetsToCleanup.length > 0) {
+					const cleanupTargets = targetsToCleanup;
 					void (async () => {
 						const deletions = await Promise.all(
-							cleanupTaskIds.map(async (taskId) => ({
-								taskId,
+							cleanupTargets.map(async (target) => ({
+								taskId: target.taskId,
 								deleted: await deleteTaskWorktree({
 									repoPath: projectToRemove.repoPath,
-									taskId,
+									taskId: target.taskId,
+									...(target.worktreeMode ? { worktreeMode: target.worktreeMode } : {}),
 								}),
 							})),
 						);

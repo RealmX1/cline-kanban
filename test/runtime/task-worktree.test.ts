@@ -52,7 +52,11 @@ vi.mock("../../src/workspace/task-worktree-path.js", () => ({
 	normalizeTaskIdForWorktreePath: taskWorktreePathMocks.normalizeTaskIdForWorktreePath,
 }));
 
-import { ensureTaskWorktreeIfDoesntExist, removeTaskWorktreeSetupLock } from "../../src/workspace/task-worktree";
+import {
+	deleteTaskWorktree,
+	ensureTaskWorktreeIfDoesntExist,
+	removeTaskWorktreeSetupLock,
+} from "../../src/workspace/task-worktree";
 
 type ExecFileOptions = {
 	cwd?: string;
@@ -286,6 +290,78 @@ describe.sequential("task-worktree serialization", () => {
 			await expect(removeTaskWorktreeSetupLock(repoPath)).resolves.toBe(true);
 			expect(existsSync(lockPath)).toBe(false);
 			await expect(removeTaskWorktreeSetupLock(repoPath)).resolves.toBe(false);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("returns the workspace repo path for inplace ensure without calling git worktree add", async () => {
+		const { path: sandboxRoot, cleanup } = createTempDir("kanban-task-worktree-inplace-");
+		try {
+			const repoPath = join(sandboxRoot, "repo");
+			mkdirSync(join(repoPath, ".git"), { recursive: true });
+
+			workspaceStateMocks.loadWorkspaceContext.mockResolvedValue({ repoPath });
+			workspaceStateMocks.getRuntimeHomePath.mockReturnValue(join(sandboxRoot, "runtime-home"));
+			workspaceStateMocks.getTaskWorktreesHomePath.mockReturnValue(join(sandboxRoot, "worktrees-home"));
+			taskWorktreePathMocks.getWorkspaceFolderLabelForWorktreePath.mockReturnValue("repo");
+			taskWorktreePathMocks.normalizeTaskIdForWorktreePath.mockImplementation((taskId: string) => taskId);
+
+			childProcessMocks.execFilePromise.mockImplementation(
+				async (_file: string, args: readonly string[], options?: ExecFileOptions) => {
+					const { command } = getCommandArgs(args, options);
+					if (command[0] === "rev-parse" && command[1] === "HEAD") {
+						return { stdout: "deadbeefdeadbeef\n", stderr: "" };
+					}
+					throw createGitError(`inplace ensure must not run: ${command.join(" ")}`);
+				},
+			);
+
+			const ensured = await ensureTaskWorktreeIfDoesntExist({
+				cwd: repoPath,
+				taskId: "inplace-task",
+				baseRef: "HEAD",
+				worktreeMode: "inplace",
+			});
+
+			expect(ensured.ok).toBe(true);
+			if (ensured.ok) {
+				expect(ensured.path).toBe(repoPath);
+				expect(ensured.baseCommit).toBe("deadbeefdeadbeef");
+			}
+			const calls = childProcessMocks.execFilePromise.mock.calls;
+			for (const [, args] of calls) {
+				const command = stripConfigFlags(args as readonly string[]);
+				expect(command).not.toContain("worktree");
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("does not delete anything when worktreeMode is inplace", async () => {
+		const { path: sandboxRoot, cleanup } = createTempDir("kanban-task-worktree-inplace-delete-");
+		try {
+			const repoPath = join(sandboxRoot, "repo");
+			mkdirSync(join(repoPath, ".git"), { recursive: true });
+
+			workspaceStateMocks.getRuntimeHomePath.mockReturnValue(join(sandboxRoot, "runtime-home"));
+			workspaceStateMocks.getTaskWorktreesHomePath.mockReturnValue(join(sandboxRoot, "worktrees-home"));
+			taskWorktreePathMocks.normalizeTaskIdForWorktreePath.mockImplementation((taskId: string) => taskId);
+
+			childProcessMocks.execFilePromise.mockImplementation(async (_file: string, args: readonly string[]) => {
+				const command = stripConfigFlags(args as readonly string[]);
+				throw createGitError(`inplace delete must not run: ${command.join(" ")}`);
+			});
+
+			const result = await deleteTaskWorktree({
+				repoPath,
+				taskId: "inplace-task",
+				worktreeMode: "inplace",
+			});
+
+			expect(result).toEqual({ ok: true, removed: false });
+			expect(childProcessMocks.execFilePromise).not.toHaveBeenCalled();
 		} finally {
 			cleanup();
 		}

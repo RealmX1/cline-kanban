@@ -160,6 +160,7 @@ export function parseWorktreeEnsureRequest(value: unknown): RuntimeWorktreeEnsur
 	return {
 		taskId,
 		baseRef,
+		...(parsed.worktreeMode ? { worktreeMode: parsed.worktreeMode } : {}),
 	};
 }
 
@@ -171,6 +172,7 @@ export function parseWorktreeDeleteRequest(value: unknown): RuntimeWorktreeDelet
 	}
 	return {
 		taskId,
+		...(parsed.worktreeMode ? { worktreeMode: parsed.worktreeMode } : {}),
 	};
 }
 
