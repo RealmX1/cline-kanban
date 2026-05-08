@@ -9,10 +9,13 @@ import {
 const fitAddonProposeDimensionsMock = vi.hoisted(() => vi.fn<() => { cols: number; rows: number } | undefined>());
 const screenPixelSize = vi.hoisted(() => ({ width: 480, height: 320 }));
 const createdTerminalOptions = vi.hoisted(() => [] as Array<{ cols?: number; rows?: number }>);
+const terminalBuffer = vi.hoisted(() => ({ baseY: 0, viewportY: 0 }));
+const terminalScrollToBottomMock = vi.hoisted(() => vi.fn());
 const webSocketInstances = vi.hoisted(
 	() =>
 		[] as Array<{
 			close: () => void;
+			onmessage: ((event: MessageEvent) => void) | null;
 			readyState: number;
 			sentMessages: string[];
 			url: string;
@@ -70,6 +73,7 @@ vi.mock("@xterm/xterm", () => ({
 		options: { theme?: unknown };
 		rows: number;
 		unicode = { activeVersion: "" };
+		buffer = { active: terminalBuffer };
 
 		constructor(options: { cols?: number; rows?: number; theme?: unknown }) {
 			this.cols = options.cols ?? 80;
@@ -133,6 +137,10 @@ vi.mock("@xterm/xterm", () => ({
 		resize(cols: number, rows: number): void {
 			this.cols = cols;
 			this.rows = rows;
+		}
+
+		scrollToBottom(): void {
+			terminalScrollToBottomMock();
 		}
 
 		write(_data: string | Uint8Array, callback?: () => void): void {
@@ -212,6 +220,9 @@ describe("persistent-terminal-manager", () => {
 	beforeEach(() => {
 		fitAddonProposeDimensionsMock.mockReset();
 		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 80, rows: 30 });
+		terminalBuffer.baseY = 0;
+		terminalBuffer.viewportY = 0;
+		terminalScrollToBottomMock.mockReset();
 		createdTerminalOptions.length = 0;
 		webSocketInstances.length = 0;
 		screenPixelSize.width = 480;
@@ -332,5 +343,93 @@ describe("persistent-terminal-manager", () => {
 		const ioSockets = webSocketInstances.filter((socket) => socket.url.includes("/api/terminal/io"));
 		expect(ioSockets).toHaveLength(2);
 		expect(lastErrors.at(-1)).toBe("Terminal stream closed. Reconnecting...");
+	});
+
+	it("keeps the terminal at the bottom after restore when it was following output", async () => {
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const container = createContainer();
+		terminal.mount(container, appearance, { isVisible: true });
+		terminalScrollToBottomMock.mockClear();
+		terminalBuffer.baseY = 20;
+		terminalBuffer.viewportY = 20;
+
+		const controlSocket = webSocketInstances.find((socket) => socket.url.includes("/api/terminal/control"));
+		controlSocket?.onmessage?.(
+			new MessageEvent("message", {
+				data: JSON.stringify({ type: "restore", snapshot: "restored", cols: 80, rows: 30 }),
+			}),
+		);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		await vi.waitFor(() => {
+			expect(terminalScrollToBottomMock).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	it("keeps the terminal at the bottom after remount when it was following output", () => {
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const firstContainer = createContainer();
+		const secondContainer = createContainer();
+		terminal.mount(firstContainer, appearance, { isVisible: true });
+		terminalScrollToBottomMock.mockClear();
+		terminalBuffer.baseY = 20;
+		terminalBuffer.viewportY = 20;
+
+		terminal.unmount(firstContainer);
+		terminal.mount(secondContainer, appearance, { isVisible: true });
+
+		expect(terminalScrollToBottomMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not force the terminal to the bottom after restore when the user scrolled up", async () => {
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const container = createContainer();
+		terminal.mount(container, appearance, { isVisible: true });
+		terminalScrollToBottomMock.mockClear();
+		terminalBuffer.baseY = 20;
+		terminalBuffer.viewportY = 10;
+
+		const controlSocket = webSocketInstances.find((socket) => socket.url.includes("/api/terminal/control"));
+		controlSocket?.onmessage?.(
+			new MessageEvent("message", {
+				data: JSON.stringify({ type: "restore", snapshot: "restored", cols: 80, rows: 30 }),
+			}),
+		);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
+	});
+
+	it("does not force the terminal to the bottom after remount when the user scrolled up", () => {
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const firstContainer = createContainer();
+		const secondContainer = createContainer();
+		terminal.mount(firstContainer, appearance, { isVisible: true });
+		terminalScrollToBottomMock.mockClear();
+		terminalBuffer.baseY = 20;
+		terminalBuffer.viewportY = 10;
+
+		terminal.unmount(firstContainer);
+		terminal.mount(secondContainer, appearance, { isVisible: true });
+
+		expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
 	});
 });

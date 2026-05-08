@@ -427,15 +427,18 @@ class PersistentTerminal {
 		cols: number | null | undefined,
 		rows: number | null | undefined,
 	): Promise<void> {
+		const shouldKeepScrolledToBottom = this.shouldKeepScrolledToBottom();
 		await this.terminalWriteQueue.catch(() => undefined);
 		this.terminal.reset();
 		if (cols && rows && (this.terminal.cols !== cols || this.terminal.rows !== rows)) {
 			this.terminal.resize(cols, rows);
 		}
 		if (!snapshot) {
+			this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 			return;
 		}
 		await this.enqueueTerminalWrite(snapshot);
+		this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 	}
 
 	private getRenderedPixelSize(): { pixelWidth?: number; pixelHeight?: number } {
@@ -486,6 +489,23 @@ class PersistentTerminal {
 		if (this.sendControlMessage(resizeMessage)) {
 			this.lastSentResizeMessage = resizeMessage;
 		}
+	}
+
+	private shouldKeepScrolledToBottom(): boolean {
+		const buffer = this.terminal.buffer.active;
+		return buffer.baseY - buffer.viewportY <= 1;
+	}
+
+	private keepScrolledToBottom(shouldKeepScrolledToBottom: boolean): void {
+		if (!shouldKeepScrolledToBottom) {
+			return;
+		}
+		window.requestAnimationFrame(() => {
+			if (this.disposed) {
+				return;
+			}
+			this.terminal.scrollToBottom();
+		});
 	}
 
 	private connectIo(): void {
@@ -676,6 +696,7 @@ class PersistentTerminal {
 		}
 		this.ensureConnected();
 		this.updateAppearance(appearance);
+		const shouldKeepScrolledToBottom = this.shouldKeepScrolledToBottom();
 		if (this.visibleContainer !== container) {
 			this.visibleContainer = container;
 			container.appendChild(this.hostElement);
@@ -696,6 +717,7 @@ class PersistentTerminal {
 		if (options.isVisible !== false) {
 			window.requestAnimationFrame(() => {
 				this.requestResize();
+				this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 				if (options.autoFocus) {
 					this.terminal.focus();
 				}
