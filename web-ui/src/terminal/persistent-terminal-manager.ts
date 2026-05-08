@@ -26,6 +26,8 @@ import { isMacPlatform } from "@/utils/platform";
 const SHIFT_ENTER_SEQUENCE = "\n";
 const RESIZE_DEBOUNCE_MS = 50;
 const INTERRUPT_IDLE_SETTLE_MS = 250;
+const TERMINAL_RECONNECT_INITIAL_DELAY_MS = 250;
+const TERMINAL_RECONNECT_MAX_DELAY_MS = 5_000;
 const PARKING_ROOT_ID = "kb-persistent-terminal-parking-root";
 const HOME_TERMINAL_TASK_ID = "__home_terminal__";
 const DETAIL_TERMINAL_TASK_PREFIX = "__detail_terminal__:";
@@ -216,6 +218,8 @@ class PersistentTerminal {
 	private outputTextDecoder = new TextDecoder();
 	private terminalWriteQueue: Promise<void> = Promise.resolve();
 	private lastSentResizeMessage: RuntimeTerminalWsResizeMessage | null = null;
+	private reconnectTimer: number | null = null;
+	private reconnectAttempt = 0;
 	private disposed = false;
 
 	constructor(
@@ -335,6 +339,38 @@ class PersistentTerminal {
 		}
 	}
 
+	private clearReconnectTimer(): void {
+		if (this.reconnectTimer !== null) {
+			window.clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+	}
+
+	private scheduleReconnect(): void {
+		if (this.disposed || this.reconnectTimer !== null) {
+			return;
+		}
+		const delay = Math.min(
+			TERMINAL_RECONNECT_INITIAL_DELAY_MS * 2 ** this.reconnectAttempt,
+			TERMINAL_RECONNECT_MAX_DELAY_MS,
+		);
+		this.reconnectAttempt += 1;
+		this.reconnectTimer = window.setTimeout(() => {
+			this.reconnectTimer = null;
+			this.ensureConnected();
+			if (!this.disposed && (!this.ioSocket || !this.controlSocket)) {
+				this.scheduleReconnect();
+			}
+		}, delay);
+	}
+
+	private markSocketOpen(): void {
+		this.reconnectAttempt = 0;
+		this.clearReconnectTimer();
+		this.lastError = null;
+		this.notifyLastError();
+	}
+
 	private sendControlMessage(message: RuntimeTerminalWsClientMessage): boolean {
 		if (!this.controlSocket || this.controlSocket.readyState !== WebSocket.OPEN) {
 			return false;
@@ -421,12 +457,16 @@ class PersistentTerminal {
 			return;
 		}
 		const proposedDimensions = this.fitAddon.proposeDimensions();
+		const nextCols =
+			proposedDimensions && Number.isFinite(proposedDimensions.cols)
+				? Math.max(1, Math.floor(proposedDimensions.cols))
+				: this.terminal.cols;
 		const nextRows =
 			proposedDimensions && Number.isFinite(proposedDimensions.rows)
 				? Math.max(1, Math.floor(proposedDimensions.rows))
 				: this.terminal.rows;
-		if (nextRows !== this.terminal.rows) {
-			this.terminal.resize(this.terminal.cols, nextRows);
+		if (nextCols !== this.terminal.cols || nextRows !== this.terminal.rows) {
+			this.terminal.resize(nextCols, nextRows);
 		}
 		const renderedPixelSize = this.getRenderedPixelSize();
 		reportTerminalGeometry(this.taskId, {
@@ -473,8 +513,7 @@ class PersistentTerminal {
 			if (this.disposed || this.ioSocket !== ioSocket) {
 				return;
 			}
-			this.lastError = null;
-			this.notifyLastError();
+			this.markSocketOpen();
 			if (this.restoreCompleted && this.visibleContainer) {
 				this.requestResize();
 			}
@@ -496,13 +535,16 @@ class PersistentTerminal {
 			this.ioSocket = null;
 			this.outputTextDecoder = new TextDecoder();
 			this.connectionReady = false;
-			this.restoreCompleted = false;
-			this.lastError = "Terminal stream closed. Close and reopen to reconnect.";
+			this.lastError = "Terminal stream closed. Reconnecting...";
 			this.notifyLastError();
+			this.scheduleReconnect();
 		};
 	}
 
 	private connectControl(): void {
+		if (this.controlSocket) {
+			return;
+		}
 		const controlSocket = new WebSocket(getTerminalControlWebSocketUrl(this.taskId, this.workspaceId, this.clientId));
 		this.controlSocket = controlSocket;
 		this.lastSentResizeMessage = null;
@@ -510,8 +552,7 @@ class PersistentTerminal {
 			if (this.disposed || this.controlSocket !== controlSocket) {
 				return;
 			}
-			this.lastError = null;
-			this.notifyLastError();
+			this.markSocketOpen();
 		};
 		controlSocket.onmessage = (event) => {
 			let payload: RuntimeTerminalWsServerMessage;
@@ -574,8 +615,11 @@ class PersistentTerminal {
 				return;
 			}
 			this.controlSocket = null;
-			this.lastError = "Terminal control connection closed. Close and reopen to reconnect.";
+			this.connectionReady = false;
+			this.restoreCompleted = false;
+			this.lastError = "Terminal control connection closed. Reconnecting...";
 			this.notifyLastError();
+			this.scheduleReconnect();
 		};
 	}
 
@@ -820,6 +864,7 @@ class PersistentTerminal {
 			return;
 		}
 		this.disposed = true;
+		this.clearReconnectTimer();
 		this.unmount(this.visibleContainer);
 		this.ioSocket?.close();
 		this.controlSocket?.close();

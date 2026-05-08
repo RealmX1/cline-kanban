@@ -12,6 +12,7 @@ const createdTerminalOptions = vi.hoisted(() => [] as Array<{ cols?: number; row
 const webSocketInstances = vi.hoisted(
 	() =>
 		[] as Array<{
+			close: () => void;
 			readyState: number;
 			sentMessages: string[];
 			url: string;
@@ -210,7 +211,7 @@ function getResizeMessages(): RuntimeTerminalWsResizeMessage[] {
 describe("persistent-terminal-manager", () => {
 	beforeEach(() => {
 		fitAddonProposeDimensionsMock.mockReset();
-		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 999, rows: 30 });
+		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 80, rows: 30 });
 		createdTerminalOptions.length = 0;
 		webSocketInstances.length = 0;
 		screenPixelSize.width = 480;
@@ -237,6 +238,7 @@ describe("persistent-terminal-manager", () => {
 
 	afterEach(() => {
 		disposeAllPersistentTerminalsForWorkspace("workspace-1");
+		vi.useRealTimers();
 		document.body.replaceChildren();
 	});
 
@@ -253,7 +255,7 @@ describe("persistent-terminal-manager", () => {
 
 		expect(getResizeMessages()).toEqual([
 			{
-				cols: TASK_SESSION_TERMINAL_COLS,
+				cols: 80,
 				pixelHeight: 320,
 				pixelWidth: 480,
 				rows: 30,
@@ -262,9 +264,9 @@ describe("persistent-terminal-manager", () => {
 		]);
 	});
 
-	it("sends a resize control frame when rows change", () => {
-		fitAddonProposeDimensionsMock.mockReturnValueOnce({ cols: 999, rows: 30 }).mockReturnValueOnce({
-			cols: 999,
+	it("sends a resize control frame when fitted dimensions change", () => {
+		fitAddonProposeDimensionsMock.mockReturnValueOnce({ cols: 80, rows: 30 }).mockReturnValueOnce({
+			cols: 100,
 			rows: 31,
 		});
 		const terminal = ensurePersistentTerminal({
@@ -277,7 +279,10 @@ describe("persistent-terminal-manager", () => {
 		terminal.mount(container, appearance, { isVisible: true });
 		terminal.mount(container, appearance, { isVisible: true });
 
-		expect(getResizeMessages().map((message) => message.rows)).toEqual([30, 31]);
+		expect(getResizeMessages().map((message) => [message.cols, message.rows])).toEqual([
+			[80, 30],
+			[100, 31],
+		]);
 	});
 
 	it("initializes shell persistent terminals with shell columns", () => {
@@ -302,5 +307,30 @@ describe("persistent-terminal-manager", () => {
 			SHELL_SESSION_TERMINAL_COLS,
 			TASK_SESSION_TERMINAL_COLS,
 		]);
+	});
+
+	it("reconnects the terminal stream after a websocket close", () => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const container = createContainer();
+		const lastErrors: Array<string | null> = [];
+		terminal.subscribe({
+			onLastError: (message) => {
+				lastErrors.push(message);
+			},
+		});
+		terminal.mount(container, appearance, { isVisible: true });
+		const originalIoSocket = webSocketInstances.find((socket) => socket.url.includes("/api/terminal/io"));
+
+		originalIoSocket?.close();
+		vi.advanceTimersByTime(250);
+
+		const ioSockets = webSocketInstances.filter((socket) => socket.url.includes("/api/terminal/io"));
+		expect(ioSockets).toHaveLength(2);
+		expect(lastErrors.at(-1)).toBe("Terminal stream closed. Reconnecting...");
 	});
 });

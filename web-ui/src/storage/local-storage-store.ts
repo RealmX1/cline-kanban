@@ -6,6 +6,7 @@ export enum LocalStorageKey {
 	TaskCreatePrimaryStartAction = "kanban.task-create-primary-start-action",
 	BottomTerminalPaneHeight = "kanban.bottom-terminal-pane-height",
 	DetailAgentPanelRatio = "kanban.detail-agent-panel-ratio",
+	DetailTerminalPanelWidth = "kanban.detail-terminal-panel-width",
 	DetailTaskCardsPanelRatio = "kanban.detail-task-cards-panel-ratio",
 	DetailDiffFileTreePanelRatio = "kanban.detail-diff-file-tree-panel-ratio",
 	DetailExpandedDiffFileTreePanelRatio = "kanban.detail-expanded-diff-file-tree-panel-ratio",
@@ -25,6 +26,7 @@ export enum LocalStorageKey {
 export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
 	LocalStorageKey.BottomTerminalPaneHeight,
 	LocalStorageKey.DetailAgentPanelRatio,
+	LocalStorageKey.DetailTerminalPanelWidth,
 	LocalStorageKey.DetailTaskCardsPanelRatio,
 	LocalStorageKey.DetailDiffFileTreePanelRatio,
 	LocalStorageKey.DetailExpandedDiffFileTreePanelRatio,

@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CardDetailView } from "@/components/card-detail-view";
+import { DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import { TERMINAL_THEME_COLORS } from "@/terminal/theme-colors";
 import type { BoardCard, BoardColumn, CardSelection } from "@/types";
@@ -147,6 +148,17 @@ function requireAgentPanel(container: HTMLElement): HTMLElement {
 		throw new Error("Expected an agent panel element.");
 	}
 	return panel;
+}
+
+function setMainRowWidthForAgentResize(container: HTMLElement, width: number): void {
+	const separator = requireResizeSeparator(container);
+	if (!(separator.parentElement instanceof HTMLElement)) {
+		throw new Error("Expected a main row element.");
+	}
+	Object.defineProperty(separator.parentElement, "offsetWidth", {
+		configurable: true,
+		value: width,
+	});
 }
 
 function requireDetailDiffSeparator(container: HTMLElement): HTMLElement {
@@ -547,6 +559,82 @@ describe("CardDetailView", () => {
 			panelBackgroundColor: "var(--color-surface-0)",
 			terminalBackgroundColor: TERMINAL_THEME_COLORS.surfacePrimary,
 		});
+	});
+
+	it("shows a resize handle and default fixed width for the non-cline terminal panel", async () => {
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					selectedAgentId="claude"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(requireResizeSeparator(container)).toBeInstanceOf(HTMLElement);
+		expect(requireAgentPanel(container).style.width).toBe(`${DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX}px`);
+	});
+
+	it("persists the resized non-cline terminal panel width as pixels", async () => {
+		const renderDetail = async (): Promise<void> => {
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={createSelection()}
+						currentProjectId="workspace-1"
+						selectedAgentId="claude"
+						sessionSummary={null}
+						taskSessions={{}}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+		};
+
+		await renderDetail();
+		setMainRowWidthForAgentResize(container, 1400);
+		const separator = requireResizeSeparator(container);
+		const dragHandle = separator.firstElementChild;
+		expect(dragHandle).toBeInstanceOf(HTMLDivElement);
+		if (!(dragHandle instanceof HTMLDivElement)) {
+			throw new Error("Expected a draggable resize handle.");
+		}
+
+		await act(async () => {
+			dragHandle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 200 }));
+			window.dispatchEvent(new MouseEvent("mousemove", { clientX: 480 }));
+			window.dispatchEvent(new MouseEvent("mouseup", { clientX: 480 }));
+		});
+
+		const savedWidth = window.localStorage.getItem(LocalStorageKey.DetailTerminalPanelWidth);
+		expect(savedWidth).toBe("800");
+		expect(requireAgentPanel(container).style.width).toBe("800px");
+
+		await act(async () => {
+			root.unmount();
+			root = createRoot(container);
+		});
+
+		await renderDetail();
+		expect(requireAgentPanel(container).style.width).toBe("800px");
 	});
 
 	it("queues Add diff comments into the cline composer without sending them", async () => {

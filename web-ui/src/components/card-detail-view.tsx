@@ -1,6 +1,6 @@
 import type { DropResult } from "@hello-pangea/dnd";
 import { Files, GitCompareArrows, Maximize2, MessageSquare, Minimize2, X } from "lucide-react";
-import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
@@ -15,10 +15,15 @@ import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
 import { ResizeHandle } from "@/resize/resize-handle";
-import { useCardDetailLayout } from "@/resize/use-card-detail-layout";
+import { clampBetween } from "@/resize/resize-persistence";
+import {
+	MAX_DETAIL_TERMINAL_PANEL_WIDTH_PX,
+	MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
+	MIN_DETAIL_TERMINAL_PANEL_WIDTH_PX,
+	useCardDetailLayout,
+} from "@/resize/use-card-detail-layout";
 import { useResizeDrag } from "@/resize/use-resize-drag";
 import { isNativeClineAgentSelected } from "@/runtime/native-agent";
-import { APPROX_TERMINAL_CELL_WIDTH_PX, TASK_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
 import type {
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
@@ -37,7 +42,6 @@ import { useWindowEvent } from "@/utils/react-use";
 // the overall file or line counts that drive the shared workspace metadata stream.
 const DETAIL_DIFF_POLL_INTERVAL_MS = 1_000;
 const DIFF_MODE_ACTIVE_BACKGROUND = "color-mix(in srgb, var(--color-surface-3) 80%, var(--color-text-primary))";
-const DETAIL_TERMINAL_PANEL_WIDTH_PX = TASK_SESSION_TERMINAL_COLS * APPROX_TERMINAL_CELL_WIDTH_PX + 40;
 
 function isTypingTarget(target: EventTarget | null): boolean {
 	if (!(target instanceof HTMLElement)) {
@@ -73,6 +77,38 @@ function useResizeHandler(
 			startDrag(event, { axis: "x", cursor: "ew-resize", onMove: applyDelta, onEnd: applyDelta });
 		},
 		[containerRef, ratio, setRatio, startDrag, invert],
+	);
+}
+
+function clampTerminalPanelWidthToContainer(width: number, containerWidth: number): number {
+	const maxWidth = Math.max(
+		MIN_DETAIL_TERMINAL_PANEL_WIDTH_PX,
+		Math.min(MAX_DETAIL_TERMINAL_PANEL_WIDTH_PX, containerWidth - MIN_DETAIL_DIFF_PANEL_WIDTH_PX),
+	);
+	return clampBetween(width, MIN_DETAIL_TERMINAL_PANEL_WIDTH_PX, maxWidth, true);
+}
+
+function usePixelResizeHandler(
+	containerRef: React.RefObject<HTMLDivElement | null>,
+	width: number,
+	setWidth: (width: number) => void,
+	startDrag: ReturnType<typeof useResizeDrag>["startDrag"],
+): (event: ReactMouseEvent<HTMLDivElement>) => void {
+	return useCallback(
+		(event: ReactMouseEvent<HTMLDivElement>) => {
+			const container = containerRef.current;
+			if (!container) {
+				return;
+			}
+			const containerWidth = Math.max(container.offsetWidth, 1);
+			const startWidth = clampTerminalPanelWidthToContainer(width, containerWidth);
+			const startX = event.clientX;
+			const applyDelta = (pointerX: number) => {
+				setWidth(clampTerminalPanelWidthToContainer(startWidth + pointerX - startX, containerWidth));
+			};
+			startDrag(event, { axis: "x", cursor: "ew-resize", onMove: applyDelta, onEnd: applyDelta });
+		},
+		[containerRef, width, setWidth, startDrag],
 	);
 }
 
@@ -447,6 +483,8 @@ export function CardDetailView({
 		setTaskCardsPanelRatio,
 		agentPanelRatio,
 		setAgentPanelRatio,
+		detailTerminalPanelWidth,
+		setDetailTerminalPanelWidth,
 		detailDiffFileTreeRatio,
 		setDetailDiffFileTreeRatio,
 	} = useCardDetailLayout({
@@ -472,6 +510,12 @@ export function CardDetailView({
 		mainRowRef,
 		agentPanelRatio,
 		setAgentPanelRatio,
+		startAgentPanelResize,
+	);
+	const handleTerminalDiffSeparatorMouseDown = usePixelResizeHandler(
+		mainRowRef,
+		detailTerminalPanelWidth,
+		setDetailTerminalPanelWidth,
 		startAgentPanelResize,
 	);
 	const handleDetailDiffSeparatorMouseDown = useResizeHandler(
@@ -516,16 +560,17 @@ export function CardDetailView({
 	const isTaskTerminalEnabled = selection.column.id === "in_progress" || selection.column.id === "review";
 	const effectiveTaskAgentId = sessionSummary?.agentId ?? selection.card.agentId ?? selectedAgentId;
 	const showClineAgentChatPanel = isNativeClineAgentSelected(effectiveTaskAgentId);
-	const agentPanelStyle = showClineAgentChatPanel
+	const agentPanelStyle: CSSProperties = showClineAgentChatPanel
 		? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
 		: {
 				display: isDiffExpanded ? "none" : "flex",
-				flex: `0 0 ${DETAIL_TERMINAL_PANEL_WIDTH_PX}px`,
-				width: DETAIL_TERMINAL_PANEL_WIDTH_PX,
+				flex: "0 0 auto",
+				maxWidth: `calc(100% - ${MIN_DETAIL_DIFF_PANEL_WIDTH_PX}px)`,
+				width: detailTerminalPanelWidth,
 			};
-	const diffPanelStyle = showClineAgentChatPanel
+	const diffPanelStyle: CSSProperties = showClineAgentChatPanel
 		? { width: isDiffExpanded ? "100%" : diffPanelPercent }
-		: { flex: "1 1 0" };
+		: { flex: "1 1 0", minWidth: MIN_DETAIL_DIFF_PANEL_WIDTH_PX };
 	const availablePaths = useMemo(() => {
 		if (!runtimeFiles || runtimeFiles.length === 0) {
 			return [];
@@ -856,11 +901,15 @@ export function CardDetailView({
 							<div className="min-h-0 min-w-0" style={agentPanelStyle}>
 								{agentChatPanel}
 							</div>
-							{!isDiffExpanded && showClineAgentChatPanel ? (
+							{!isDiffExpanded ? (
 								<ResizeHandle
 									orientation="vertical"
 									ariaLabel="Resize agent and diff panels"
-									onMouseDown={handleAgentDiffSeparatorMouseDown}
+									onMouseDown={
+										showClineAgentChatPanel
+											? handleAgentDiffSeparatorMouseDown
+											: handleTerminalDiffSeparatorMouseDown
+									}
 									className="z-10"
 								/>
 							) : null}
