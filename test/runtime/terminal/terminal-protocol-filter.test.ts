@@ -28,6 +28,32 @@ describe("terminal protocol filter", () => {
 		expect(filtered.toString("utf8")).toBe("\u001b[c");
 	});
 
+	it("suppresses scrollback erasure while preserving normal screen erasure", () => {
+		const state = createTerminalProtocolFilterState({
+			suppressScrollbackErasure: true,
+		});
+
+		const filtered = filterTerminalProtocolOutput(
+			state,
+			Buffer.from("before\u001b[2J middle \u001b[3J after \u001b[?3J end", "utf8"),
+		);
+
+		expect(filtered.toString("utf8")).toBe("before\u001b[2J middle  after  end");
+	});
+
+	it("handles split scrollback erasure sequences across chunks", () => {
+		const state = createTerminalProtocolFilterState({
+			suppressScrollbackErasure: true,
+		});
+
+		const firstChunk = filterTerminalProtocolOutput(state, Buffer.from("before\u001b[", "utf8"));
+		const secondChunk = filterTerminalProtocolOutput(state, Buffer.from("3Jafter", "utf8"));
+
+		expect(firstChunk.toString("utf8")).toBe("before");
+		expect(secondChunk.toString("utf8")).toBe("after");
+		expect(state.pendingChunk).toBeNull();
+	});
+
 	it("handles split device attribute queries across chunks", () => {
 		const state = createTerminalProtocolFilterState({
 			suppressDeviceAttributeQueries: true,

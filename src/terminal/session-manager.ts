@@ -550,6 +550,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			rows,
 			terminalProtocolFilter: createTerminalProtocolFilterState({
 				interceptOscColorQueries: true,
+				suppressScrollbackErasure: true,
 				suppressDeviceAttributeQueries: request.agentId === "droid",
 			}),
 			onSessionCleanup: launch.cleanup ?? null,

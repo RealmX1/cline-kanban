@@ -4,15 +4,18 @@ const OSC_INTRODUCER = 0x5d;
 const CSI_INTRODUCER = 0x5b;
 const STRING_TERMINATOR = 0x5c;
 const DEVICE_ATTRIBUTES_FINAL = 0x63;
+const ERASE_IN_DISPLAY_FINAL = 0x4a;
 
 export interface TerminalProtocolFilterState {
 	pendingChunk: Buffer | null;
 	interceptOscColorQueries: boolean;
+	suppressScrollbackErasure: boolean;
 	suppressDeviceAttributeQueries: boolean;
 }
 
 export interface CreateTerminalProtocolFilterStateOptions {
 	interceptOscColorQueries?: boolean;
+	suppressScrollbackErasure?: boolean;
 	suppressDeviceAttributeQueries?: boolean;
 }
 
@@ -27,6 +30,7 @@ export function createTerminalProtocolFilterState(
 	return {
 		pendingChunk: null,
 		interceptOscColorQueries: options.interceptOscColorQueries ?? false,
+		suppressScrollbackErasure: options.suppressScrollbackErasure ?? false,
 		suppressDeviceAttributeQueries: options.suppressDeviceAttributeQueries ?? false,
 	};
 }
@@ -49,6 +53,18 @@ function shouldSuppressDeviceAttributeQuery(
 	}
 	const body = sequenceBody.toString("utf8");
 	return body === "" || body === "0" || body === ">" || body === ">0";
+}
+
+function shouldSuppressScrollbackErasure(
+	state: TerminalProtocolFilterState,
+	sequenceBody: Buffer,
+	finalByte: number,
+): boolean {
+	if (!state.suppressScrollbackErasure || finalByte !== ERASE_IN_DISPLAY_FINAL) {
+		return false;
+	}
+	const body = sequenceBody.toString("utf8");
+	return body === "3" || body === "?3";
 }
 
 export function filterTerminalProtocolOutput(
@@ -148,7 +164,11 @@ export function filterTerminalProtocolOutput(
 			}
 
 			const finalByte = source[finalIndex] as number;
-			if (!shouldSuppressDeviceAttributeQuery(state, source.subarray(sequenceStart + 2, finalIndex), finalByte)) {
+			const sequenceBody = source.subarray(sequenceStart + 2, finalIndex);
+			if (
+				!shouldSuppressDeviceAttributeQuery(state, sequenceBody, finalByte) &&
+				!shouldSuppressScrollbackErasure(state, sequenceBody, finalByte)
+			) {
 				segments.push(source.subarray(sequenceStart, finalIndex + 1));
 			}
 
