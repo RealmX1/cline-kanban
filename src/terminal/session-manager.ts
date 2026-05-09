@@ -372,6 +372,98 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const hasCodexLaunchSignature = [commandBinary, ...commandArgs].some((part) =>
 			part.toLowerCase().includes("codex"),
 		);
+		const preActiveOutputChunks: Buffer[] = [];
+		const handleTaskOutput = (chunk: Buffer): void => {
+			if (!entry.active) {
+				preActiveOutputChunks.push(chunk);
+				return;
+			}
+
+			const filteredChunk = filterTerminalProtocolOutput(entry.active.terminalProtocolFilter, chunk, {
+				onOsc10ForegroundQuery: () => entry.active?.session.write(OSC_FOREGROUND_QUERY_REPLY),
+				onOsc11BackgroundQuery: () => entry.active?.session.write(OSC_BACKGROUND_QUERY_REPLY),
+			});
+			if (filteredChunk.byteLength === 0) {
+				return;
+			}
+			entry.terminalStateMirror?.applyOutput(filteredChunk);
+
+			const needsDecodedOutput =
+				entry.active.workspaceTrustBuffer !== null ||
+				entry.active.deferredStartupInput !== null ||
+				(entry.active.detectOutputTransition !== null &&
+					(entry.active.shouldInspectOutputForTransition?.(entry.summary) ?? true));
+			const data = needsDecodedOutput ? filteredChunk.toString("utf8") : "";
+
+			if (entry.active.workspaceTrustBuffer !== null) {
+				entry.active.workspaceTrustBuffer += data;
+				if (entry.active.workspaceTrustBuffer.length > MAX_WORKSPACE_TRUST_BUFFER_CHARS) {
+					entry.active.workspaceTrustBuffer = entry.active.workspaceTrustBuffer.slice(
+						-MAX_WORKSPACE_TRUST_BUFFER_CHARS,
+					);
+				}
+				if (!entry.active.autoConfirmedWorkspaceTrust && entry.active.workspaceTrustConfirmTimer === null) {
+					const hasClaudePrompt = hasClaudeWorkspaceTrustPrompt(entry.active.workspaceTrustBuffer);
+					const hasCodexPrompt = hasCodexWorkspaceTrustPrompt(entry.active.workspaceTrustBuffer);
+					if (hasClaudePrompt || hasCodexPrompt) {
+						entry.active.autoConfirmedWorkspaceTrust = true;
+						const trustConfirmDelayMs = WORKSPACE_TRUST_CONFIRM_DELAY_MS;
+						entry.active.workspaceTrustConfirmTimer = setTimeout(() => {
+							const activeEntry = this.entries.get(request.taskId)?.active;
+							if (!activeEntry || !activeEntry.autoConfirmedWorkspaceTrust) {
+								return;
+							}
+							activeEntry.session.write("\r");
+							// Trust text can remain in the rolling buffer after we auto-confirm.
+							// Clear it so later startup/prompt checks do not match stale trust output.
+							if (activeEntry.workspaceTrustBuffer !== null) {
+								activeEntry.workspaceTrustBuffer = "";
+							}
+							activeEntry.workspaceTrustConfirmTimer = null;
+						}, trustConfirmDelayMs);
+					}
+				}
+			}
+			updateSummary(entry, { lastOutputAt: now() });
+
+			// Startup input is deferred until the TUI is alive so the task prompt creates a
+			// persisted interactive session instead of a short-lived argv prompt run.
+			if (
+				entry.active.deferredStartupInput !== null &&
+				data.length > 0 &&
+				((entry.summary.agentId === "codex" &&
+					(hasCodexInteractivePrompt(data) ||
+						hasCodexStartupUiRendered(data) ||
+						(entry.active.workspaceTrustBuffer !== null &&
+							(hasCodexInteractivePrompt(entry.active.workspaceTrustBuffer) ||
+								hasCodexStartupUiRendered(entry.active.workspaceTrustBuffer))))) ||
+					entry.summary.agentId === "claude")
+			) {
+				this.trySendDeferredStartupInput(request.taskId);
+			}
+
+			const adapterEvent = entry.active.detectOutputTransition?.(data, entry.summary) ?? null;
+			if (adapterEvent) {
+				const requiresEnterForCodex =
+					adapterEvent.type === "agent.prompt-ready" &&
+					entry.summary.agentId === "codex" &&
+					!entry.active.awaitingCodexPromptAfterEnter;
+				if (!requiresEnterForCodex) {
+					const summary = this.applySessionEvent(entry, adapterEvent);
+					if (adapterEvent.type === "agent.prompt-ready" && entry.summary.agentId === "codex") {
+						entry.active.awaitingCodexPromptAfterEnter = false;
+					}
+					for (const taskListener of entry.listeners.values()) {
+						taskListener.onState?.(cloneSummary(summary));
+					}
+					this.emitSummary(summary);
+				}
+			}
+
+			for (const taskListener of entry.listeners.values()) {
+				taskListener.onOutput?.(filteredChunk);
+			}
+		};
 		let session: PtySession;
 		try {
 			session = PtySession.spawn({
@@ -382,94 +474,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				cols,
 				rows,
 				onData: (chunk) => {
-					if (!entry.active) {
-						return;
-					}
-
-					const filteredChunk = filterTerminalProtocolOutput(entry.active.terminalProtocolFilter, chunk, {
-						onOsc10ForegroundQuery: () => entry.active?.session.write(OSC_FOREGROUND_QUERY_REPLY),
-						onOsc11BackgroundQuery: () => entry.active?.session.write(OSC_BACKGROUND_QUERY_REPLY),
-					});
-					if (filteredChunk.byteLength === 0) {
-						return;
-					}
-					entry.terminalStateMirror?.applyOutput(filteredChunk);
-
-					const needsDecodedOutput =
-						entry.active.workspaceTrustBuffer !== null ||
-						entry.active.deferredStartupInput !== null ||
-						(entry.active.detectOutputTransition !== null &&
-							(entry.active.shouldInspectOutputForTransition?.(entry.summary) ?? true));
-					const data = needsDecodedOutput ? filteredChunk.toString("utf8") : "";
-
-					if (entry.active.workspaceTrustBuffer !== null) {
-						entry.active.workspaceTrustBuffer += data;
-						if (entry.active.workspaceTrustBuffer.length > MAX_WORKSPACE_TRUST_BUFFER_CHARS) {
-							entry.active.workspaceTrustBuffer = entry.active.workspaceTrustBuffer.slice(
-								-MAX_WORKSPACE_TRUST_BUFFER_CHARS,
-							);
-						}
-						if (!entry.active.autoConfirmedWorkspaceTrust && entry.active.workspaceTrustConfirmTimer === null) {
-							const hasClaudePrompt = hasClaudeWorkspaceTrustPrompt(entry.active.workspaceTrustBuffer);
-							const hasCodexPrompt = hasCodexWorkspaceTrustPrompt(entry.active.workspaceTrustBuffer);
-							if (hasClaudePrompt || hasCodexPrompt) {
-								entry.active.autoConfirmedWorkspaceTrust = true;
-								const trustConfirmDelayMs = WORKSPACE_TRUST_CONFIRM_DELAY_MS;
-								entry.active.workspaceTrustConfirmTimer = setTimeout(() => {
-									const activeEntry = this.entries.get(request.taskId)?.active;
-									if (!activeEntry || !activeEntry.autoConfirmedWorkspaceTrust) {
-										return;
-									}
-									activeEntry.session.write("\r");
-									// Trust text can remain in the rolling buffer after we auto-confirm.
-									// Clear it so later startup/prompt checks do not match stale trust output.
-									if (activeEntry.workspaceTrustBuffer !== null) {
-										activeEntry.workspaceTrustBuffer = "";
-									}
-									activeEntry.workspaceTrustConfirmTimer = null;
-								}, trustConfirmDelayMs);
-							}
-						}
-					}
-					updateSummary(entry, { lastOutputAt: now() });
-
-					// Startup input is deferred until the TUI is alive so the task prompt creates a
-					// persisted interactive session instead of a short-lived argv prompt run.
-					if (
-						entry.active.deferredStartupInput !== null &&
-						data.length > 0 &&
-						((entry.summary.agentId === "codex" &&
-							(hasCodexInteractivePrompt(data) ||
-								hasCodexStartupUiRendered(data) ||
-								(entry.active.workspaceTrustBuffer !== null &&
-									(hasCodexInteractivePrompt(entry.active.workspaceTrustBuffer) ||
-										hasCodexStartupUiRendered(entry.active.workspaceTrustBuffer))))) ||
-							entry.summary.agentId === "claude")
-					) {
-						this.trySendDeferredStartupInput(request.taskId);
-					}
-
-					const adapterEvent = entry.active.detectOutputTransition?.(data, entry.summary) ?? null;
-					if (adapterEvent) {
-						const requiresEnterForCodex =
-							adapterEvent.type === "agent.prompt-ready" &&
-							entry.summary.agentId === "codex" &&
-							!entry.active.awaitingCodexPromptAfterEnter;
-						if (!requiresEnterForCodex) {
-							const summary = this.applySessionEvent(entry, adapterEvent);
-							if (adapterEvent.type === "agent.prompt-ready" && entry.summary.agentId === "codex") {
-								entry.active.awaitingCodexPromptAfterEnter = false;
-							}
-							for (const taskListener of entry.listeners.values()) {
-								taskListener.onState?.(cloneSummary(summary));
-							}
-							this.emitSummary(summary);
-						}
-					}
-
-					for (const taskListener of entry.listeners.values()) {
-						taskListener.onOutput?.(filteredChunk);
-					}
+					handleTaskOutput(chunk);
 				},
 				onExit: (event) => {
 					const currentEntry = this.entries.get(request.taskId);
@@ -575,6 +580,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			previousTurnCheckpoint: null,
 		});
 		this.emitSummary(entry.summary);
+		for (const chunk of preActiveOutputChunks) {
+			handleTaskOutput(chunk);
+		}
 
 		return cloneSummary(entry.summary);
 	}

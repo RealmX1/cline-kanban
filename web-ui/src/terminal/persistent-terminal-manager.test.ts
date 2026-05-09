@@ -11,10 +11,13 @@ const screenPixelSize = vi.hoisted(() => ({ width: 480, height: 320 }));
 const createdTerminalOptions = vi.hoisted(() => [] as Array<{ cols?: number; rows?: number }>);
 const terminalBuffer = vi.hoisted(() => ({ baseY: 0, viewportY: 0 }));
 const terminalScrollToBottomMock = vi.hoisted(() => vi.fn());
+const terminalWriteSideEffect = vi.hoisted(() => ({ current: null as null | ((data: string | Uint8Array) => void) }));
 const webSocketInstances = vi.hoisted(
 	() =>
 		[] as Array<{
+			addEventListener: (type: string, handler: (event: MessageEvent) => void) => void;
 			close: () => void;
+			messageListeners: Array<(event: MessageEvent) => void>;
 			onmessage: ((event: MessageEvent) => void) | null;
 			readyState: number;
 			sentMessages: string[];
@@ -143,7 +146,8 @@ vi.mock("@xterm/xterm", () => ({
 			terminalScrollToBottomMock();
 		}
 
-		write(_data: string | Uint8Array, callback?: () => void): void {
+		write(data: string | Uint8Array, callback?: () => void): void {
+			terminalWriteSideEffect.current?.(data);
 			callback?.();
 		}
 	},
@@ -175,6 +179,7 @@ class MockWebSocket {
 	onmessage: ((event: MessageEvent) => void) | null = null;
 	onopen: ((event: Event) => void) | null = null;
 	readyState = MockWebSocket.OPEN;
+	readonly messageListeners: Array<(event: MessageEvent) => void> = [];
 	readonly sentMessages: string[] = [];
 	readonly url: string;
 
@@ -183,7 +188,11 @@ class MockWebSocket {
 		webSocketInstances.push(this);
 	}
 
-	addEventListener(_type: string, _handler: (event: MessageEvent) => void): void {}
+	addEventListener(type: string, handler: (event: MessageEvent) => void): void {
+		if (type === "message") {
+			this.messageListeners.push(handler);
+		}
+	}
 
 	close(): void {
 		this.readyState = MockWebSocket.CLOSED;
@@ -216,6 +225,20 @@ function getResizeMessages(): RuntimeTerminalWsResizeMessage[] {
 		.filter((message) => message.type === "resize");
 }
 
+function dispatchSocketMessage(
+	socket: {
+		messageListeners: Array<(event: MessageEvent) => void>;
+		onmessage: ((event: MessageEvent) => void) | null;
+	},
+	data: string | ArrayBuffer,
+): void {
+	const event = new MessageEvent("message", { data });
+	for (const listener of socket.messageListeners) {
+		listener(event);
+	}
+	socket.onmessage?.(event);
+}
+
 describe("persistent-terminal-manager", () => {
 	beforeEach(() => {
 		fitAddonProposeDimensionsMock.mockReset();
@@ -223,6 +246,7 @@ describe("persistent-terminal-manager", () => {
 		terminalBuffer.baseY = 0;
 		terminalBuffer.viewportY = 0;
 		terminalScrollToBottomMock.mockReset();
+		terminalWriteSideEffect.current = null;
 		createdTerminalOptions.length = 0;
 		webSocketInstances.length = 0;
 		screenPixelSize.width = 480;
@@ -408,6 +432,58 @@ describe("persistent-terminal-manager", () => {
 				data: JSON.stringify({ type: "restore", snapshot: "restored", cols: 80, rows: 30 }),
 			}),
 		);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
+	});
+
+	it("keeps the terminal at the bottom after live output when it was following output", async () => {
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const container = createContainer();
+		terminal.mount(container, appearance, { isVisible: true });
+		terminalScrollToBottomMock.mockClear();
+		terminalBuffer.baseY = 20;
+		terminalBuffer.viewportY = 20;
+		terminalWriteSideEffect.current = () => {
+			terminalBuffer.viewportY = 0;
+		};
+
+		const ioSocket = webSocketInstances.find((socket) => socket.url.includes("/api/terminal/io"));
+		if (!ioSocket) {
+			throw new Error("Expected terminal IO socket.");
+		}
+		dispatchSocketMessage(ioSocket, "hook output");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(terminalScrollToBottomMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not force the terminal to the bottom after live output when the user scrolled up", async () => {
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const container = createContainer();
+		terminal.mount(container, appearance, { isVisible: true });
+		terminalScrollToBottomMock.mockClear();
+		terminalBuffer.baseY = 20;
+		terminalBuffer.viewportY = 10;
+		terminalWriteSideEffect.current = () => {
+			terminalBuffer.viewportY = 0;
+		};
+
+		const ioSocket = webSocketInstances.find((socket) => socket.url.includes("/api/terminal/io"));
+		if (!ioSocket) {
+			throw new Error("Expected terminal IO socket.");
+		}
+		dispatchSocketMessage(ioSocket, "hook output");
 		await Promise.resolve();
 		await Promise.resolve();
 

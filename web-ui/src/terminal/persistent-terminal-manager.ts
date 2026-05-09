@@ -392,6 +392,7 @@ class PersistentTerminal {
 		options: {
 			ackBytes?: number;
 			notifyText?: string | null;
+			keepScrolledToBottom?: boolean;
 		} = {},
 	): Promise<void> {
 		const ackBytes = options.ackBytes ?? 0;
@@ -405,6 +406,8 @@ class PersistentTerminal {
 							resolve();
 							return;
 						}
+						const shouldKeepScrolledToBottom =
+							options.keepScrolledToBottom === false ? false : this.shouldKeepScrolledToBottom();
 						this.terminal.write(data, () => {
 							if (notifyText) {
 								this.notifyOutputText(notifyText);
@@ -415,6 +418,7 @@ class PersistentTerminal {
 									bytes: ackBytes,
 								});
 							}
+							this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 							resolve();
 						});
 					}),
@@ -437,7 +441,7 @@ class PersistentTerminal {
 			this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 			return;
 		}
-		await this.enqueueTerminalWrite(snapshot);
+		await this.enqueueTerminalWrite(snapshot, { keepScrolledToBottom: false });
 		this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 	}
 
