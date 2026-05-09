@@ -335,7 +335,6 @@ export default function App(): ReactElement {
 	} = useTaskEditor({
 		board,
 		setBoard,
-		currentProjectId,
 		createTaskBranchOptions,
 		defaultTaskBranchRef,
 		selectedAgentId: runtimeProjectConfig?.selectedAgentId ?? null,

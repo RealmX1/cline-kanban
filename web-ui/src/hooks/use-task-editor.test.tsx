@@ -50,6 +50,7 @@ interface HookSnapshot {
 	handleCreateTasks: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
 	setNewTaskPrompt: (value: string) => void;
 	setNewTaskImages: (value: TaskImage[]) => void;
+	setNewTaskBranchRef: (value: string) => void;
 	handleOpenEditTask: (task: BoardCard) => void;
 	handleSaveEditedTask: () => string | null;
 	handleSaveAndStartEditedTask: () => void;
@@ -71,19 +72,22 @@ function HookHarness({
 	initialBoard,
 	onSnapshot,
 	queueTaskStartAfterEdit,
+	createTaskBranchOptions = [{ value: "main", label: "main" }],
+	defaultTaskBranchRef = "main",
 }: {
 	initialBoard: BoardData;
 	onSnapshot: (snapshot: HookSnapshot) => void;
 	queueTaskStartAfterEdit?: (taskId: string) => void;
+	createTaskBranchOptions?: Array<{ value: string; label: string }>;
+	defaultTaskBranchRef?: string;
 }): null {
 	const [board, setBoard] = useState<BoardData>(initialBoard);
 	const [, setSelectedTaskId] = useState<string | null>(null);
 	const editor = useTaskEditor({
 		board,
 		setBoard,
-		currentProjectId: "project-1",
-		createTaskBranchOptions: [{ value: "main", label: "main" }],
-		defaultTaskBranchRef: "main",
+		createTaskBranchOptions,
+		defaultTaskBranchRef,
 		selectedAgentId: null,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
@@ -107,6 +111,7 @@ function HookHarness({
 			handleCreateTasks: editor.handleCreateTasks,
 			setNewTaskPrompt: editor.setNewTaskPrompt,
 			setNewTaskImages: editor.setNewTaskImages,
+			setNewTaskBranchRef: editor.setNewTaskBranchRef,
 			handleOpenEditTask: editor.handleOpenEditTask,
 			handleSaveEditedTask: editor.handleSaveEditedTask,
 			handleSaveAndStartEditedTask: editor.handleSaveAndStartEditedTask,
@@ -138,6 +143,7 @@ function HookHarness({
 		editor.setEditTaskAutoReviewMode,
 		editor.setEditTaskPrompt,
 		editor.setNewTaskImages,
+		editor.setNewTaskBranchRef,
 		editor.setNewTaskPrompt,
 		onSnapshot,
 	]);
@@ -341,6 +347,53 @@ describe("useTaskEditor", () => {
 		expect(snapshot.newTaskClineSettings).toBeUndefined();
 		expect(snapshot.board.columns[0]?.cards.some((card) => card.prompt === "Create another task")).toBe(true);
 	});
+
+	it("resets closed create dialogs to the default task branch instead of the last selected branch", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					createTaskBranchOptions={[
+						{ value: "feature/recent", label: "feature/recent" },
+						{ value: "main", label: "main (default)" },
+					]}
+					defaultTaskBranchRef="feature/recent"
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+		});
+
+		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe("feature/recent");
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskBranchRef("main");
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Use main once");
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+
+		const afterCreateSnapshot = requireSnapshot(latestSnapshot);
+		expect(afterCreateSnapshot.isInlineTaskCreateOpen).toBe(false);
+		expect(afterCreateSnapshot.newTaskBranchRef).toBe("feature/recent");
+		expect(afterCreateSnapshot.board.columns[0]?.cards[0]?.baseRef).toBe("main");
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+		});
+
+		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe("feature/recent");
+	});
+
 	it("copies attached images to each split task and clears the draft images", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 

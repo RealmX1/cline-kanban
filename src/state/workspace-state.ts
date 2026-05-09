@@ -449,7 +449,12 @@ function detectGitCurrentBranch(repoPath: string): string | null {
 function detectGitBranches(repoPath: string): string[] {
 	// TODO: support showing remote branches again once worktree creation can safely fetch/pull
 	// and resolve missing local tracking branches automatically.
-	const output = runGitCapture(repoPath, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+	const output = runGitCapture(repoPath, [
+		"for-each-ref",
+		"--sort=-committerdate",
+		"--format=%(refname:short)",
+		"refs/heads",
+	]);
 	if (!output) {
 		return [];
 	}
@@ -462,7 +467,7 @@ function detectGitBranches(repoPath: string): string[] {
 		}
 		unique.add(trimmed);
 	}
-	return Array.from(unique).sort((left, right) => left.localeCompare(right));
+	return Array.from(unique);
 }
 
 function detectGitDefaultBranch(repoPath: string, branches: string[]): string | null {

@@ -1,6 +1,6 @@
 import { deriveTaskTitleFromPrompt } from "@runtime-task-title";
 import type { Dispatch, SetStateAction } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
 	normalizeStoredTaskAutoReviewMode,
@@ -18,7 +18,6 @@ import { useBooleanLocalStorageValue, useRawLocalStorageValue } from "@/utils/re
 interface UseTaskEditorInput {
 	board: BoardData;
 	setBoard: Dispatch<SetStateAction<BoardData>>;
-	currentProjectId: string | null;
 	createTaskBranchOptions: Array<{ value: string; label: string }>;
 	defaultTaskBranchRef: string;
 	selectedAgentId: RuntimeAgentId | null;
@@ -86,7 +85,6 @@ export interface UseTaskEditorResult {
 export function useTaskEditor({
 	board,
 	setBoard,
-	currentProjectId,
 	createTaskBranchOptions,
 	defaultTaskBranchRef,
 	selectedAgentId,
@@ -111,7 +109,6 @@ export function useTaskEditor({
 	);
 	const isNewTaskStartInPlanModeDisabled = false;
 	const [newTaskBranchRef, setNewTaskBranchRef] = useState("");
-	const [lastCreatedTaskBranchByProjectId, setLastCreatedTaskBranchByProjectId] = useState<Record<string, string>>({});
 	const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
 	const [editTaskPrompt, setEditTaskPrompt] = useState("");
 	const [editTaskImages, setEditTaskImages] = useState<TaskImage[]>([]);
@@ -126,22 +123,7 @@ export function useTaskEditor({
 	const [editTaskAgentId, setEditTaskAgentId] = useState<RuntimeAgentId | undefined>(undefined);
 	const [editTaskClineSettings, setEditTaskClineSettings] = useState<RuntimeTaskClineSettings | undefined>(undefined);
 
-	const lastCreatedTaskBranchRef = useMemo(() => {
-		if (!currentProjectId) {
-			return null;
-		}
-		return lastCreatedTaskBranchByProjectId[currentProjectId] ?? null;
-	}, [currentProjectId, lastCreatedTaskBranchByProjectId]);
-
-	const resolvedDefaultTaskBranchRef = useMemo(() => {
-		if (
-			lastCreatedTaskBranchRef &&
-			createTaskBranchOptions.some((option) => option.value === lastCreatedTaskBranchRef)
-		) {
-			return lastCreatedTaskBranchRef;
-		}
-		return defaultTaskBranchRef;
-	}, [createTaskBranchOptions, defaultTaskBranchRef, lastCreatedTaskBranchRef]);
+	const resolvedDefaultTaskBranchRef = defaultTaskBranchRef;
 
 	useEffect(() => {
 		const isCurrentValid = createTaskBranchOptions.some((option) => option.value === newTaskBranchRef);
@@ -209,8 +191,9 @@ export function useTaskEditor({
 
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
+		setNewTaskBranchRef(resolvedDefaultTaskBranchRef);
 		setIsInlineTaskCreateOpen(true);
-	}, []);
+	}, [resolvedDefaultTaskBranchRef]);
 
 	const handleCancelCreateTask = useCallback(() => {
 		setIsInlineTaskCreateOpen(false);
@@ -361,16 +344,9 @@ export function useTaskEditor({
 				...(newTaskAutoReviewEnabled ? { auto_review_mode: newTaskAutoReviewMode } : {}),
 				prompt_character_count: prompt.length,
 			});
-			if (currentProjectId) {
-				setLastCreatedTaskBranchByProjectId((current) => ({
-					...current,
-					[currentProjectId]: baseRef,
-				}));
-			}
-
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
-			setNewTaskBranchRef(baseRef);
+			setNewTaskBranchRef(options?.keepDialogOpen ? baseRef : resolvedDefaultTaskBranchRef);
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
 			if (!options?.keepDialogOpen) {
@@ -380,7 +356,6 @@ export function useTaskEditor({
 		},
 		[
 			board,
-			currentProjectId,
 			newTaskAgentId,
 			newTaskAutoReviewEnabled,
 			newTaskAutoReviewMode,
@@ -432,16 +407,9 @@ export function useTaskEditor({
 					prompt_character_count: prompt.length,
 				});
 			}
-			if (currentProjectId) {
-				setLastCreatedTaskBranchByProjectId((current) => ({
-					...current,
-					[currentProjectId]: baseRef,
-				}));
-			}
-
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
-			setNewTaskBranchRef(baseRef);
+			setNewTaskBranchRef(options?.keepDialogOpen ? baseRef : resolvedDefaultTaskBranchRef);
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
 			if (!options?.keepDialogOpen) {
@@ -451,7 +419,6 @@ export function useTaskEditor({
 		},
 		[
 			board,
-			currentProjectId,
 			newTaskAgentId,
 			newTaskAutoReviewEnabled,
 			newTaskAutoReviewMode,
