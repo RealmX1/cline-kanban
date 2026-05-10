@@ -280,7 +280,8 @@ export default function App(): ReactElement {
 		workspacePath,
 	});
 
-	const { createTaskBranchOptions, defaultTaskBranchRef } = useTaskBranchOptions({ workspaceGit });
+	const { createTaskBranchOptions, editTaskBranchOptions, defaultTaskBranchRef, defaultCreateTaskBranchRef } =
+		useTaskBranchOptions({ workspaceGit });
 	const queueTaskStartAfterEdit = useCallback((taskId: string) => {
 		setPendingTaskStartAfterEditId(taskId);
 	}, []);
@@ -336,7 +337,9 @@ export default function App(): ReactElement {
 		board,
 		setBoard,
 		createTaskBranchOptions,
+		editTaskBranchOptions,
 		defaultTaskBranchRef,
+		defaultCreateTaskBranchRef,
 		selectedAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
@@ -778,7 +781,7 @@ export default function App(): ReactElement {
 			onAutoReviewModeChange={setEditTaskAutoReviewMode}
 			workspaceId={currentProjectId}
 			branchRef={editTaskBranchRef}
-			branchOptions={createTaskBranchOptions}
+			branchOptions={editTaskBranchOptions}
 			onBranchRefChange={setEditTaskBranchRef}
 			agentId={editTaskAgentId}
 			onAgentIdChange={setEditTaskAgentId}
