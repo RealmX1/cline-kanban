@@ -2,9 +2,8 @@ import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { NEW_TASK_WORKTREE_OPTION_VALUE } from "@/hooks/use-task-branch-options";
 import { useTaskEditor } from "@/hooks/use-task-editor";
-import type { RuntimeAgentId, RuntimeTaskClineSettings } from "@/runtime/types";
+import type { RuntimeAgentId, RuntimeTaskClineSettings, RuntimeTaskWorktreeMode } from "@/runtime/types";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
 function createTask(taskId: string, prompt: string, createdAt: number, overrides: Partial<BoardCard> = {}): BoardCard {
@@ -40,6 +39,7 @@ interface HookSnapshot {
 	newTaskPrompt: string;
 	newTaskImages: TaskImage[];
 	newTaskBranchRef: string;
+	newTaskWorktreeMode: RuntimeTaskWorktreeMode;
 	newTaskAgentId: RuntimeAgentId | undefined;
 	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
 	editingTaskId: string | null;
@@ -52,6 +52,7 @@ interface HookSnapshot {
 	setNewTaskPrompt: (value: string) => void;
 	setNewTaskImages: (value: TaskImage[]) => void;
 	setNewTaskBranchRef: (value: string) => void;
+	setNewTaskWorktreeMode: (value: RuntimeTaskWorktreeMode) => void;
 	handleOpenEditTask: (task: BoardCard) => void;
 	handleSaveEditedTask: () => string | null;
 	handleSaveAndStartEditedTask: () => void;
@@ -73,13 +74,10 @@ function HookHarness({
 	initialBoard,
 	onSnapshot,
 	queueTaskStartAfterEdit,
-	createTaskBranchOptions = [
-		{ value: NEW_TASK_WORKTREE_OPTION_VALUE, label: "New worktree" },
-		{ value: "main", label: "main" },
-	],
+	createTaskBranchOptions = [{ value: "main", label: "main" }],
 	editTaskBranchOptions = [{ value: "main", label: "main" }],
 	defaultTaskBranchRef = "main",
-	defaultCreateTaskBranchRef = NEW_TASK_WORKTREE_OPTION_VALUE,
+	defaultCreateTaskBranchRef = "main",
 }: {
 	initialBoard: BoardData;
 	onSnapshot: (snapshot: HookSnapshot) => void;
@@ -110,6 +108,7 @@ function HookHarness({
 			newTaskPrompt: editor.newTaskPrompt,
 			newTaskImages: editor.newTaskImages,
 			newTaskBranchRef: editor.newTaskBranchRef,
+			newTaskWorktreeMode: editor.newTaskWorktreeMode,
 			newTaskAgentId: editor.newTaskAgentId,
 			newTaskClineSettings: editor.newTaskClineSettings,
 			editingTaskId: editor.editingTaskId,
@@ -122,6 +121,7 @@ function HookHarness({
 			setNewTaskPrompt: editor.setNewTaskPrompt,
 			setNewTaskImages: editor.setNewTaskImages,
 			setNewTaskBranchRef: editor.setNewTaskBranchRef,
+			setNewTaskWorktreeMode: editor.setNewTaskWorktreeMode,
 			handleOpenEditTask: editor.handleOpenEditTask,
 			handleSaveEditedTask: editor.handleSaveEditedTask,
 			handleSaveAndStartEditedTask: editor.handleSaveAndStartEditedTask,
@@ -341,7 +341,8 @@ describe("useTaskEditor", () => {
 
 		await act(async () => {});
 		expect(requireSnapshot(latestSnapshot).newTaskPrompt).toBe("Create another task");
-		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe(NEW_TASK_WORKTREE_OPTION_VALUE);
+		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe("main");
+		expect(requireSnapshot(latestSnapshot).newTaskWorktreeMode).toBe("branch");
 
 		let createdTaskId: string | null = null;
 		await act(async () => {
@@ -352,14 +353,15 @@ describe("useTaskEditor", () => {
 		expect(createdTaskId).toBeTruthy();
 		expect(snapshot.isInlineTaskCreateOpen).toBe(true);
 		expect(snapshot.newTaskPrompt).toBe("");
-		expect(snapshot.newTaskBranchRef).toBe(NEW_TASK_WORKTREE_OPTION_VALUE);
+		expect(snapshot.newTaskBranchRef).toBe("main");
+		expect(snapshot.newTaskWorktreeMode).toBe("branch");
 		expect(snapshot.newTaskAgentId).toBeUndefined();
 		expect(snapshot.newTaskClineSettings).toBeUndefined();
 		expect(snapshot.board.columns[0]?.cards[0]?.baseRef).toBe("main");
 		expect(snapshot.board.columns[0]?.cards.some((card) => card.prompt === "Create another task")).toBe(true);
 	});
 
-	it("defaults closed create dialogs to a new worktree instead of the last selected base ref", async () => {
+	it("defaults closed create dialogs to the current base ref instead of the last selected base ref", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
 		await act(async () => {
@@ -367,11 +369,11 @@ describe("useTaskEditor", () => {
 				<HookHarness
 					initialBoard={createBoard()}
 					createTaskBranchOptions={[
-						{ value: NEW_TASK_WORKTREE_OPTION_VALUE, label: "New worktree" },
 						{ value: "feature/recent", label: "feature/recent" },
 						{ value: "main", label: "main (default)" },
 					]}
 					defaultTaskBranchRef="feature/recent"
+					defaultCreateTaskBranchRef="feature/recent"
 					onSnapshot={(snapshot) => {
 						latestSnapshot = snapshot;
 					}}
@@ -383,7 +385,7 @@ describe("useTaskEditor", () => {
 			requireSnapshot(latestSnapshot).handleOpenCreateTask();
 		});
 
-		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe(NEW_TASK_WORKTREE_OPTION_VALUE);
+		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe("feature/recent");
 
 		await act(async () => {
 			requireSnapshot(latestSnapshot).setNewTaskBranchRef("main");
@@ -396,17 +398,17 @@ describe("useTaskEditor", () => {
 
 		const afterCreateSnapshot = requireSnapshot(latestSnapshot);
 		expect(afterCreateSnapshot.isInlineTaskCreateOpen).toBe(false);
-		expect(afterCreateSnapshot.newTaskBranchRef).toBe(NEW_TASK_WORKTREE_OPTION_VALUE);
+		expect(afterCreateSnapshot.newTaskBranchRef).toBe("feature/recent");
 		expect(afterCreateSnapshot.board.columns[0]?.cards[0]?.baseRef).toBe("main");
 
 		await act(async () => {
 			requireSnapshot(latestSnapshot).handleOpenCreateTask();
 		});
 
-		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe(NEW_TASK_WORKTREE_OPTION_VALUE);
+		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe("feature/recent");
 	});
 
-	it("creates from the default base ref when the new worktree option is selected", async () => {
+	it("creates a new worktree task from the default base ref", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
 		await act(async () => {
@@ -414,11 +416,11 @@ describe("useTaskEditor", () => {
 				<HookHarness
 					initialBoard={createBoard()}
 					createTaskBranchOptions={[
-						{ value: NEW_TASK_WORKTREE_OPTION_VALUE, label: "New worktree" },
 						{ value: "feature/recent", label: "feature/recent" },
 						{ value: "main", label: "main (default)" },
 					]}
 					defaultTaskBranchRef="feature/recent"
+					defaultCreateTaskBranchRef="feature/recent"
 					onSnapshot={(snapshot) => {
 						latestSnapshot = snapshot;
 					}}
@@ -438,6 +440,42 @@ describe("useTaskEditor", () => {
 		const snapshot = requireSnapshot(latestSnapshot);
 		expect(snapshot.board.columns[0]?.cards[0]?.baseRef).toBe("feature/recent");
 		expect(snapshot.board.columns[0]?.cards[0]?.worktreeMode).toBe("branch");
+	});
+
+	it("can create a task for the current checkout without changing the base ref", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					createTaskBranchOptions={[
+						{ value: "feature/recent", label: "feature/recent" },
+						{ value: "main", label: "main (default)" },
+					]}
+					defaultTaskBranchRef="feature/recent"
+					defaultCreateTaskBranchRef="feature/recent"
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+			requireSnapshot(latestSnapshot).setNewTaskWorktreeMode("inplace");
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Use current checkout");
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+
+		const snapshot = requireSnapshot(latestSnapshot);
+		expect(snapshot.board.columns[0]?.cards[0]?.baseRef).toBe("feature/recent");
+		expect(snapshot.board.columns[0]?.cards[0]?.worktreeMode).toBe("inplace");
+		expect(snapshot.newTaskWorktreeMode).toBe("branch");
 	});
 
 	it("copies attached images to each split task and clears the draft images", async () => {

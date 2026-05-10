@@ -301,6 +301,8 @@ export default function App(): ReactElement {
 		isNewTaskStartInPlanModeDisabled,
 		newTaskBranchRef,
 		setNewTaskBranchRef,
+		newTaskWorktreeMode,
+		setNewTaskWorktreeMode,
 		newTaskAgentId,
 		setNewTaskAgentId,
 		newTaskClineSettings,
@@ -1132,6 +1134,8 @@ export default function App(): ReactElement {
 					branchRef={newTaskBranchRef}
 					branchOptions={createTaskBranchOptions}
 					onBranchRefChange={setNewTaskBranchRef}
+					worktreeMode={newTaskWorktreeMode}
+					onWorktreeModeChange={setNewTaskWorktreeMode}
 					agentId={newTaskAgentId}
 					onAgentIdChange={setNewTaskAgentId}
 					clineSettings={newTaskClineSettings}

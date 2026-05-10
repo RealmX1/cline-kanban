@@ -23,10 +23,16 @@ import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
 import { TaskAgentModelPicker, useTaskAgentModelPicker } from "@/components/task-agent-model-picker";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
+import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeClineReasoningEffort,
+	RuntimeTaskClineSettings,
+	RuntimeTaskWorktreeMode,
+} from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { TaskAutoReviewMode, TaskImage } from "@/types";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
@@ -118,6 +124,8 @@ export function TaskCreateDialog({
 	branchRef,
 	branchOptions,
 	onBranchRefChange,
+	worktreeMode,
+	onWorktreeModeChange,
 	agentId,
 	onAgentIdChange,
 	clineSettings,
@@ -149,6 +157,8 @@ export function TaskCreateDialog({
 	branchRef: string;
 	branchOptions: BranchSelectOption[];
 	onBranchRefChange: (value: string) => void;
+	worktreeMode: RuntimeTaskWorktreeMode;
+	onWorktreeModeChange: (value: RuntimeTaskWorktreeMode) => void;
 	agentId?: RuntimeAgentId | undefined;
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
@@ -534,7 +544,18 @@ export function TaskCreateDialog({
 					</label>
 
 					<div>
-						<span className="text-[11px] text-text-secondary block mb-1">Worktree base ref</span>
+						<span className="text-[11px] text-text-secondary block mb-1">Task workspace</span>
+						<TaskWorktreeModeControl
+							value={worktreeMode}
+							onChange={onWorktreeModeChange}
+							idPrefix="task-create-worktree-mode"
+						/>
+					</div>
+
+					<div>
+						<span className="text-[11px] text-text-secondary block mb-1">
+							{worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
+						</span>
 						<BranchSelectDropdown
 							options={branchOptions}
 							selectedValue={branchRef}

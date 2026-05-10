@@ -3,7 +3,12 @@ import { createShortTaskId } from "@runtime-task-id";
 import * as runtimeTaskState from "@runtime-task-state";
 
 import { createInitialBoardData } from "@/data/board-data";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeClineReasoningEffort,
+	RuntimeTaskClineSettings,
+	RuntimeTaskWorktreeMode,
+} from "@/runtime/types";
 import { isAllowedCrossColumnCardMove, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import {
 	type BoardCard,
@@ -28,6 +33,7 @@ export interface TaskDraft {
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	baseRef: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }
 
 export interface TaskMoveEvent {
@@ -358,6 +364,7 @@ export function addTaskToColumnWithResult(
 			agentId: draft.agentId,
 			clineSettings: draft.clineSettings,
 			baseRef: draft.baseRef,
+			worktreeMode: draft.worktreeMode,
 		},
 		createBrowserUuid,
 	);

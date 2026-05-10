@@ -8,8 +8,7 @@ import {
 	TASK_AUTO_REVIEW_MODE_STORAGE_KEY,
 	TASK_START_IN_PLAN_MODE_STORAGE_KEY,
 } from "@/hooks/app-utils";
-import { NEW_TASK_WORKTREE_OPTION_VALUE } from "@/hooks/use-task-branch-options";
-import type { RuntimeAgentId, RuntimeTaskClineSettings } from "@/runtime/types";
+import type { RuntimeAgentId, RuntimeTaskClineSettings, RuntimeTaskWorktreeMode } from "@/runtime/types";
 import { addTaskToColumnWithResult, findCardSelection, updateTask, updateTaskTitle } from "@/state/board-state";
 import { toTelemetrySelectedAgentId, trackTaskCreated } from "@/telemetry/events";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
@@ -51,6 +50,8 @@ export interface UseTaskEditorResult {
 	isNewTaskStartInPlanModeDisabled: boolean;
 	newTaskBranchRef: string;
 	setNewTaskBranchRef: Dispatch<SetStateAction<string>>;
+	newTaskWorktreeMode: RuntimeTaskWorktreeMode;
+	setNewTaskWorktreeMode: Dispatch<SetStateAction<RuntimeTaskWorktreeMode>>;
 	newTaskAgentId: RuntimeAgentId | undefined;
 	setNewTaskAgentId: Dispatch<SetStateAction<RuntimeAgentId | undefined>>;
 	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
@@ -114,6 +115,7 @@ export function useTaskEditor({
 	);
 	const isNewTaskStartInPlanModeDisabled = false;
 	const [newTaskBranchRef, setNewTaskBranchRef] = useState("");
+	const [newTaskWorktreeMode, setNewTaskWorktreeMode] = useState<RuntimeTaskWorktreeMode>("branch");
 	const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
 	const [editTaskPrompt, setEditTaskPrompt] = useState("");
 	const [editTaskImages, setEditTaskImages] = useState<TaskImage[]>([]);
@@ -130,16 +132,6 @@ export function useTaskEditor({
 
 	const resolvedDefaultTaskBranchRef = defaultTaskBranchRef;
 	const resolvedDefaultCreateTaskBranchRef = defaultCreateTaskBranchRef;
-
-	const resolveCreateTaskBaseRef = useCallback(
-		(selection: string): string => {
-			if (selection === NEW_TASK_WORKTREE_OPTION_VALUE) {
-				return resolvedDefaultTaskBranchRef;
-			}
-			return selection || resolvedDefaultTaskBranchRef;
-		},
-		[resolvedDefaultTaskBranchRef],
-	);
 
 	useEffect(() => {
 		const isCurrentValid = createTaskBranchOptions.some((option) => option.value === newTaskBranchRef);
@@ -217,6 +209,7 @@ export function useTaskEditor({
 		setNewTaskPrompt("");
 		setNewTaskImages([]);
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
+		setNewTaskWorktreeMode("branch");
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
 	}, [resolvedDefaultCreateTaskBranchRef]);
@@ -337,7 +330,7 @@ export function useTaskEditor({
 			if (!prompt) {
 				return null;
 			}
-			const baseRef = resolveCreateTaskBaseRef(newTaskBranchRef);
+			const baseRef = newTaskBranchRef || resolvedDefaultTaskBranchRef;
 			if (!baseRef) {
 				return null;
 			}
@@ -352,6 +345,7 @@ export function useTaskEditor({
 				agentId: newTaskAgentId,
 				clineSettings: newTaskClineSettings,
 				baseRef,
+				worktreeMode: newTaskWorktreeMode,
 			});
 			setBoard(created.board);
 			trackTaskCreated({
@@ -363,6 +357,7 @@ export function useTaskEditor({
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
+			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
 			if (!options?.keepDialogOpen) {
@@ -380,9 +375,9 @@ export function useTaskEditor({
 			newTaskImages,
 			newTaskPrompt,
 			newTaskStartInPlanMode,
-			resolveCreateTaskBaseRef,
 			resolvedDefaultCreateTaskBranchRef,
 			resolvedDefaultTaskBranchRef,
+			newTaskWorktreeMode,
 			selectedAgentId,
 			setBoard,
 			setNewTaskAgentId,
@@ -396,7 +391,7 @@ export function useTaskEditor({
 			if (validPrompts.length === 0) {
 				return [];
 			}
-			const baseRef = resolveCreateTaskBaseRef(newTaskBranchRef);
+			const baseRef = newTaskBranchRef || resolvedDefaultTaskBranchRef;
 			if (!baseRef) {
 				return [];
 			}
@@ -412,6 +407,7 @@ export function useTaskEditor({
 					agentId: newTaskAgentId,
 					clineSettings: newTaskClineSettings,
 					baseRef,
+					worktreeMode: newTaskWorktreeMode,
 				});
 				updatedBoard = created.board;
 				createdTaskIds.push(created.task.id);
@@ -428,6 +424,7 @@ export function useTaskEditor({
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
+			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
 			if (!options?.keepDialogOpen) {
@@ -444,9 +441,9 @@ export function useTaskEditor({
 			newTaskClineSettings,
 			newTaskImages,
 			newTaskStartInPlanMode,
-			resolveCreateTaskBaseRef,
 			resolvedDefaultCreateTaskBranchRef,
 			resolvedDefaultTaskBranchRef,
+			newTaskWorktreeMode,
 			selectedAgentId,
 			setBoard,
 			setNewTaskAgentId,
@@ -469,6 +466,7 @@ export function useTaskEditor({
 		setEditTaskAgentId(undefined);
 		setEditTaskClineSettings(undefined);
 		setNewTaskImages([]);
+		setNewTaskWorktreeMode("branch");
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
 	}, []);
@@ -488,6 +486,8 @@ export function useTaskEditor({
 		isNewTaskStartInPlanModeDisabled,
 		newTaskBranchRef,
 		setNewTaskBranchRef,
+		newTaskWorktreeMode,
+		setNewTaskWorktreeMode,
 		newTaskAgentId,
 		setNewTaskAgentId,
 		newTaskClineSettings,

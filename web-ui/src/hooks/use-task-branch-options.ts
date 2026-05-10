@@ -59,21 +59,27 @@ export function buildTaskBranchOptions(workspaceGit: RuntimeGitRepositoryInfo | 
 }
 
 export function buildCreateTaskBranchOptions(workspaceGit: RuntimeGitRepositoryInfo | null): TaskBranchOption[] {
-	const branchOptions = buildTaskBranchOptions(workspaceGit);
-	if (branchOptions.length === 0) {
-		return [];
-	}
-	return [{ value: NEW_TASK_WORKTREE_OPTION_VALUE, label: "New worktree (default)" }, ...branchOptions];
+	return buildTaskBranchOptions(workspaceGit);
 }
 
 export function resolveDefaultTaskBranchRef(
 	workspaceGit: RuntimeGitRepositoryInfo | null,
 	createTaskBranchOptions: readonly TaskBranchOption[],
 ): string {
+	const mainBranch = createTaskBranchOptions.find((option) => option.value === "main");
+	if (mainBranch) {
+		return mainBranch.value;
+	}
+	if (workspaceGit?.defaultBranch) {
+		return workspaceGit.defaultBranch;
+	}
+	if (workspaceGit?.currentBranch) {
+		return workspaceGit.currentBranch;
+	}
 	if (createTaskBranchOptions.length > 0) {
 		return createTaskBranchOptions[0]?.value ?? "";
 	}
-	return workspaceGit?.currentBranch ?? workspaceGit?.defaultBranch ?? "";
+	return "";
 }
 
 export function useTaskBranchOptions({ workspaceGit }: UseTaskBranchOptionsInput): UseTaskBranchOptionsResult {
@@ -93,6 +99,6 @@ export function useTaskBranchOptions({ workspaceGit }: UseTaskBranchOptionsInput
 		createTaskBranchOptions,
 		editTaskBranchOptions,
 		defaultTaskBranchRef,
-		defaultCreateTaskBranchRef: createTaskBranchOptions[0]?.value ?? "",
+		defaultCreateTaskBranchRef: defaultTaskBranchRef,
 	};
 }

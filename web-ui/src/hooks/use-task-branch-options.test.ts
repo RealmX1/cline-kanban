@@ -18,7 +18,7 @@ function createWorkspaceGit(overrides: Partial<RuntimeGitRepositoryInfo> = {}): 
 }
 
 describe("use-task-branch-options", () => {
-	it("keeps branch options in repository-provided recency order", () => {
+	it("keeps branch options in repository-provided recency order while defaulting to main", () => {
 		const workspaceGit = createWorkspaceGit();
 
 		const options = buildTaskBranchOptions(workspaceGit);
@@ -29,21 +29,21 @@ describe("use-task-branch-options", () => {
 			{ value: "main", label: "main" },
 			{ value: "release/old", label: "release/old" },
 		]);
-		expect(resolveDefaultTaskBranchRef(workspaceGit, options)).toBe("feature/newest");
+		expect(resolveDefaultTaskBranchRef(workspaceGit, options)).toBe("main");
 	});
 
-	it("prepends the new worktree option for task creation", () => {
+	it("uses real refs for task creation options", () => {
 		const workspaceGit = createWorkspaceGit();
 
 		const options = buildCreateTaskBranchOptions(workspaceGit);
 
 		expect(options).toEqual([
-			{ value: NEW_TASK_WORKTREE_OPTION_VALUE, label: "New worktree (default)" },
 			{ value: "feature/newest", label: "feature/newest (current)" },
 			{ value: "bugfix/recent", label: "bugfix/recent" },
 			{ value: "main", label: "main" },
 			{ value: "release/old", label: "release/old" },
 		]);
+		expect(options.some((option) => option.value === NEW_TASK_WORKTREE_OPTION_VALUE)).toBe(false);
 	});
 
 	it("appends current and default refs without duplicating branch options", () => {
@@ -60,7 +60,20 @@ describe("use-task-branch-options", () => {
 			{ value: "main", label: "main" },
 			{ value: "detached-worktree-branch", label: "detached-worktree-branch (current)" },
 		]);
-		expect(resolveDefaultTaskBranchRef(workspaceGit, options)).toBe("topic/recent");
+		expect(resolveDefaultTaskBranchRef(workspaceGit, options)).toBe("main");
+	});
+
+	it("uses main as the default even when another branch is listed first", () => {
+		const workspaceGit = createWorkspaceGit({
+			currentBranch: "main",
+			defaultBranch: "main",
+			branches: ["feature/recent", "main"],
+		});
+
+		const options = buildCreateTaskBranchOptions(workspaceGit);
+
+		expect(options[0]?.value).toBe("feature/recent");
+		expect(resolveDefaultTaskBranchRef(workspaceGit, options)).toBe("main");
 	});
 
 	it("marks only the active branch as current when it is also the repository default branch", () => {
@@ -73,7 +86,6 @@ describe("use-task-branch-options", () => {
 		const options = buildCreateTaskBranchOptions(workspaceGit);
 
 		expect(options).toEqual([
-			{ value: NEW_TASK_WORKTREE_OPTION_VALUE, label: "New worktree (default)" },
 			{ value: "main", label: "main (current)" },
 			{ value: "feature/recent", label: "feature/recent" },
 		]);

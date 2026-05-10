@@ -7,9 +7,15 @@ import { useHotkeys } from "react-hotkeys-hook";
 import { BranchSelectDropdown, type BranchSelectOption } from "@/components/branch-select-dropdown";
 import { TaskAgentModelPicker, useTaskAgentModelPicker } from "@/components/task-agent-model-picker";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
+import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeClineReasoningEffort,
+	RuntimeTaskClineSettings,
+	RuntimeTaskWorktreeMode,
+} from "@/runtime/types";
 import type { TaskAutoReviewMode, TaskImage } from "@/types";
 import { pasteShortcutLabel } from "@/utils/platform";
 import { useDocumentEvent, useMeasure } from "@/utils/react-use";
@@ -65,6 +71,8 @@ export function TaskInlineCreateCard({
 	branchRef,
 	branchOptions,
 	onBranchRefChange,
+	worktreeMode = "branch",
+	onWorktreeModeChange,
 	enabled = true,
 	mode = "create",
 	idPrefix = "inline-task",
@@ -97,6 +105,8 @@ export function TaskInlineCreateCard({
 	branchRef: string;
 	branchOptions: TaskBranchOption[];
 	onBranchRefChange: (value: string) => void;
+	worktreeMode?: RuntimeTaskWorktreeMode;
+	onWorktreeModeChange?: (value: RuntimeTaskWorktreeMode) => void;
 	enabled?: boolean;
 	mode?: TaskInlineCardMode;
 	idPrefix?: string;
@@ -266,8 +276,22 @@ export function TaskInlineCreateCard({
 					<span>Start in plan mode</span>
 				</label>
 
+				{mode === "create" && onWorktreeModeChange ? (
+					<div>
+						<span className="text-[11px] text-text-secondary block mb-1">Task workspace</span>
+						<TaskWorktreeModeControl
+							value={worktreeMode}
+							onChange={onWorktreeModeChange}
+							disabled={!enabled}
+							idPrefix={`${idPrefix}-worktree-mode`}
+						/>
+					</div>
+				) : null}
+
 				<div>
-					<span className="text-[11px] text-text-secondary block mb-1">Worktree base ref</span>
+					<span className="text-[11px] text-text-secondary block mb-1">
+						{mode === "create" && worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
+					</span>
 					<BranchSelectDropdown
 						id={branchSelectId}
 						options={branchOptions}
