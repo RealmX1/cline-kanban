@@ -95,7 +95,64 @@ function initGitRepository(path: string): void {
 	}
 }
 
+function runGit(cwd: string, args: string[], envOverrides: NodeJS.ProcessEnv = {}): string {
+	const result = spawnSync("git", args, {
+		cwd,
+		encoding: "utf8",
+		env: createGitTestEnv(envOverrides),
+	});
+	if (result.status !== 0) {
+		throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
+	}
+	return result.stdout.trim();
+}
+
+function commitAllAt(cwd: string, message: string, isoDate: string): string {
+	runGit(cwd, ["add", "."], {
+		GIT_AUTHOR_DATE: isoDate,
+		GIT_COMMITTER_DATE: isoDate,
+	});
+	runGit(cwd, ["commit", "-qm", message], {
+		GIT_AUTHOR_DATE: isoDate,
+		GIT_COMMITTER_DATE: isoDate,
+	});
+	return runGit(cwd, ["rev-parse", "HEAD"]);
+}
+
 describe.sequential("workspace-state integration", () => {
+	it("returns local branch metadata with last commit dates in recency order", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-git-info-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-a");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+				runGit(workspacePath, ["config", "user.name", "Test User"]);
+				runGit(workspacePath, ["config", "user.email", "test@example.com"]);
+
+				writeFileSync(join(workspacePath, "main.txt"), "main\n", "utf8");
+				commitAllAt(workspacePath, "main commit", "2026-05-08T10:00:00+08:00");
+				const mainBranch = runGit(workspacePath, ["symbolic-ref", "--short", "HEAD"]);
+
+				runGit(workspacePath, ["checkout", "-qb", "feature/recent"]);
+				writeFileSync(join(workspacePath, "feature.txt"), "feature\n", "utf8");
+				commitAllAt(workspacePath, "feature commit", "2026-05-10T12:34:56+08:00");
+
+				runGit(workspacePath, ["checkout", "-q", mainBranch]);
+
+				const state = await loadWorkspaceState(workspacePath);
+
+				expect(state.git.currentBranch).toBe(mainBranch);
+				expect(state.git.branches).toEqual([
+					{ name: "feature/recent", lastCommitDate: "2026-05-10T12:34:56+08:00" },
+					{ name: mainBranch, lastCommitDate: "2026-05-08T10:00:00+08:00" },
+				]);
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
 	it("persists revision numbers and rejects stale writes", async () => {
 		await withTemporaryHome(async () => {
 			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-");

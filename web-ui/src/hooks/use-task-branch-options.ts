@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 
-import type { RuntimeGitRepositoryInfo } from "@/runtime/types";
+import type { RuntimeGitBranch, RuntimeGitRepositoryInfo } from "@/runtime/types";
 
 interface TaskBranchOption {
 	value: string;
@@ -20,15 +20,33 @@ interface UseTaskBranchOptionsResult {
 
 export const NEW_TASK_WORKTREE_OPTION_VALUE = "__kanban_new_task_worktree__";
 
-function buildTaskBranchLabel(branch: string, workspaceGit: RuntimeGitRepositoryInfo): string {
+function formatBranchLastCommitDate(lastCommitDate: string): string {
+	const trimmed = lastCommitDate.trim();
+	if (!trimmed) {
+		return "";
+	}
+	const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/u.exec(trimmed);
+	if (match) {
+		return `${match[1]} ${match[2]}`;
+	}
+	return trimmed;
+}
+
+function buildTaskBranchLabel(branch: RuntimeGitBranch, workspaceGit: RuntimeGitRepositoryInfo): string {
 	const labels: string[] = [];
-	if (branch === workspaceGit.currentBranch) {
+	if (branch.name === workspaceGit.currentBranch) {
 		labels.push("current");
 	}
-	if (labels.length === 0) {
-		return branch;
+	if (branch.lastCommitDate) {
+		const formattedLastCommitDate = formatBranchLastCommitDate(branch.lastCommitDate);
+		if (formattedLastCommitDate) {
+			labels.push(`last commit ${formattedLastCommitDate}`);
+		}
 	}
-	return `${branch} (${labels.join(", ")})`;
+	if (labels.length === 0) {
+		return branch.name;
+	}
+	return `${branch.name} (${labels.join(", ")})`;
 }
 
 export function buildTaskBranchOptions(workspaceGit: RuntimeGitRepositoryInfo | null): TaskBranchOption[] {
@@ -38,14 +56,19 @@ export function buildTaskBranchOptions(workspaceGit: RuntimeGitRepositoryInfo | 
 
 	const options: TaskBranchOption[] = [];
 	const seen = new Set<string>();
-	const append = (value: string | null) => {
+	const append = (branch: RuntimeGitBranch | string | null) => {
+		if (!branch) {
+			return;
+		}
+		const branchInfo = typeof branch === "string" ? { name: branch } : branch;
+		const value = branchInfo.name.trim();
 		if (!value || seen.has(value)) {
 			return;
 		}
 		seen.add(value);
 		options.push({
 			value,
-			label: buildTaskBranchLabel(value, workspaceGit),
+			label: buildTaskBranchLabel(branchInfo, workspaceGit),
 		});
 	};
 

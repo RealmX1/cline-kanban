@@ -8,6 +8,7 @@ import { z } from "zod";
 import {
 	type RuntimeBoardColumnId,
 	type RuntimeBoardData,
+	type RuntimeGitBranch,
 	type RuntimeGitRepositoryInfo,
 	type RuntimeTaskSessionSummary,
 	type RuntimeWorkspaceStateResponse,
@@ -446,13 +447,13 @@ function detectGitCurrentBranch(repoPath: string): string | null {
 	return runGitCapture(repoPath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
 }
 
-function detectGitBranches(repoPath: string): string[] {
+function detectGitBranches(repoPath: string): RuntimeGitBranch[] {
 	// TODO: support showing remote branches again once worktree creation can safely fetch/pull
 	// and resolve missing local tracking branches automatically.
 	const output = runGitCapture(repoPath, [
 		"for-each-ref",
 		"--sort=-committerdate",
-		"--format=%(refname:short)",
+		"--format=%(refname:short)%09%(committerdate:iso-strict)",
 		"refs/heads",
 	]);
 	if (!output) {
@@ -460,17 +461,21 @@ function detectGitBranches(repoPath: string): string[] {
 	}
 
 	const unique = new Set<string>();
+	const branches: RuntimeGitBranch[] = [];
 	for (const line of output.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed || trimmed === "HEAD") {
+		const [rawName, rawLastCommitDate] = line.split("\t");
+		const name = rawName?.trim() ?? "";
+		if (!name || name === "HEAD" || unique.has(name)) {
 			continue;
 		}
-		unique.add(trimmed);
+		unique.add(name);
+		const lastCommitDate = rawLastCommitDate?.trim();
+		branches.push(lastCommitDate ? { name, lastCommitDate } : { name });
 	}
-	return Array.from(unique);
+	return branches;
 }
 
-function detectGitDefaultBranch(repoPath: string, branches: string[]): string | null {
+function detectGitDefaultBranch(repoPath: string, branchNames: string[]): string | null {
 	const remoteHead = runGitCapture(repoPath, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
 	if (remoteHead) {
 		const normalized = remoteHead.startsWith("origin/") ? remoteHead.slice("origin/".length) : remoteHead;
@@ -478,13 +483,13 @@ function detectGitDefaultBranch(repoPath: string, branches: string[]): string | 
 			return normalized;
 		}
 	}
-	if (branches.includes("main")) {
+	if (branchNames.includes("main")) {
 		return "main";
 	}
-	if (branches.includes("master")) {
+	if (branchNames.includes("master")) {
 		return "master";
 	}
-	return branches[0] ?? null;
+	return branchNames[0] ?? null;
 }
 
 function detectGitRepositoryInfo(repoPath: string): RuntimeGitRepositoryInfo {
@@ -495,8 +500,13 @@ function detectGitRepositoryInfo(repoPath: string): RuntimeGitRepositoryInfo {
 
 	const currentBranch = detectGitCurrentBranch(repoPath);
 	const branches = detectGitBranches(repoPath);
-	const orderedBranches = currentBranch && !branches.includes(currentBranch) ? [currentBranch, ...branches] : branches;
-	const defaultBranch = detectGitDefaultBranch(repoPath, orderedBranches);
+	const branchNames = branches.map((branch) => branch.name);
+	const orderedBranches =
+		currentBranch && !branchNames.includes(currentBranch) ? [{ name: currentBranch }, ...branches] : branches;
+	const defaultBranch = detectGitDefaultBranch(
+		repoPath,
+		orderedBranches.map((branch) => branch.name),
+	);
 
 	return {
 		currentBranch,
