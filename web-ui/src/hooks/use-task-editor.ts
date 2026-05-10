@@ -8,6 +8,7 @@ import {
 	TASK_AUTO_REVIEW_MODE_STORAGE_KEY,
 	TASK_START_IN_PLAN_MODE_STORAGE_KEY,
 } from "@/hooks/app-utils";
+import { NEW_TASK_WORKTREE_OPTION_VALUE } from "@/hooks/use-task-branch-options";
 import type { RuntimeAgentId, RuntimeTaskClineSettings } from "@/runtime/types";
 import { addTaskToColumnWithResult, findCardSelection, updateTask, updateTaskTitle } from "@/state/board-state";
 import { toTelemetrySelectedAgentId, trackTaskCreated } from "@/telemetry/events";
@@ -19,7 +20,9 @@ interface UseTaskEditorInput {
 	board: BoardData;
 	setBoard: Dispatch<SetStateAction<BoardData>>;
 	createTaskBranchOptions: Array<{ value: string; label: string }>;
+	editTaskBranchOptions: Array<{ value: string; label: string }>;
 	defaultTaskBranchRef: string;
+	defaultCreateTaskBranchRef: string;
 	selectedAgentId: RuntimeAgentId | null;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	queueTaskStartAfterEdit?: (taskId: string) => void;
@@ -86,7 +89,9 @@ export function useTaskEditor({
 	board,
 	setBoard,
 	createTaskBranchOptions,
+	editTaskBranchOptions,
 	defaultTaskBranchRef,
+	defaultCreateTaskBranchRef,
 	selectedAgentId,
 	setSelectedTaskId,
 	queueTaskStartAfterEdit,
@@ -124,23 +129,34 @@ export function useTaskEditor({
 	const [editTaskClineSettings, setEditTaskClineSettings] = useState<RuntimeTaskClineSettings | undefined>(undefined);
 
 	const resolvedDefaultTaskBranchRef = defaultTaskBranchRef;
+	const resolvedDefaultCreateTaskBranchRef = defaultCreateTaskBranchRef;
+
+	const resolveCreateTaskBaseRef = useCallback(
+		(selection: string): string => {
+			if (selection === NEW_TASK_WORKTREE_OPTION_VALUE) {
+				return resolvedDefaultTaskBranchRef;
+			}
+			return selection || resolvedDefaultTaskBranchRef;
+		},
+		[resolvedDefaultTaskBranchRef],
+	);
 
 	useEffect(() => {
 		const isCurrentValid = createTaskBranchOptions.some((option) => option.value === newTaskBranchRef);
 		if (isCurrentValid) {
 			return;
 		}
-		setNewTaskBranchRef(resolvedDefaultTaskBranchRef);
-	}, [createTaskBranchOptions, newTaskBranchRef, resolvedDefaultTaskBranchRef]);
+		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
+	}, [createTaskBranchOptions, newTaskBranchRef, resolvedDefaultCreateTaskBranchRef]);
 
 	useEffect(() => {
 		if (!isInlineTaskCreateOpen) {
 			return;
 		}
 		if (!newTaskBranchRef) {
-			setNewTaskBranchRef(resolvedDefaultTaskBranchRef);
+			setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		}
-	}, [isInlineTaskCreateOpen, newTaskBranchRef, resolvedDefaultTaskBranchRef]);
+	}, [isInlineTaskCreateOpen, newTaskBranchRef, resolvedDefaultCreateTaskBranchRef]);
 
 	useEffect(() => {
 		if (!isNewTaskStartInPlanModeDisabled || !newTaskStartInPlanMode) {
@@ -160,12 +176,12 @@ export function useTaskEditor({
 		if (!editingTaskId) {
 			return;
 		}
-		const isCurrentValid = createTaskBranchOptions.some((option) => option.value === editTaskBranchRef);
+		const isCurrentValid = editTaskBranchOptions.some((option) => option.value === editTaskBranchRef);
 		if (isCurrentValid) {
 			return;
 		}
 		setEditTaskBranchRef(resolvedDefaultTaskBranchRef);
-	}, [createTaskBranchOptions, editTaskBranchRef, editingTaskId, resolvedDefaultTaskBranchRef]);
+	}, [editTaskBranchOptions, editTaskBranchRef, editingTaskId, resolvedDefaultTaskBranchRef]);
 
 	useEffect(() => {
 		if (!editingTaskId) {
@@ -191,19 +207,19 @@ export function useTaskEditor({
 
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
-		setNewTaskBranchRef(resolvedDefaultTaskBranchRef);
+		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setIsInlineTaskCreateOpen(true);
-	}, [resolvedDefaultTaskBranchRef]);
+	}, [resolvedDefaultCreateTaskBranchRef]);
 
 	const handleCancelCreateTask = useCallback(() => {
 		setIsInlineTaskCreateOpen(false);
 
 		setNewTaskPrompt("");
 		setNewTaskImages([]);
-		setNewTaskBranchRef(resolvedDefaultTaskBranchRef);
+		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
-	}, [resolvedDefaultTaskBranchRef]);
+	}, [resolvedDefaultCreateTaskBranchRef]);
 
 	const handleOpenEditTask = useCallback(
 		(task: BoardCard, options?: OpenEditTaskOptions) => {
@@ -321,10 +337,10 @@ export function useTaskEditor({
 			if (!prompt) {
 				return null;
 			}
-			if (!(newTaskBranchRef || resolvedDefaultTaskBranchRef)) {
+			const baseRef = resolveCreateTaskBaseRef(newTaskBranchRef);
+			if (!baseRef) {
 				return null;
 			}
-			const baseRef = newTaskBranchRef || resolvedDefaultTaskBranchRef;
 			const title = deriveTaskTitleFromPrompt(prompt);
 			const created = addTaskToColumnWithResult(board, "backlog", {
 				title,
@@ -346,7 +362,7 @@ export function useTaskEditor({
 			});
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
-			setNewTaskBranchRef(options?.keepDialogOpen ? baseRef : resolvedDefaultTaskBranchRef);
+			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
 			if (!options?.keepDialogOpen) {
@@ -364,6 +380,8 @@ export function useTaskEditor({
 			newTaskImages,
 			newTaskPrompt,
 			newTaskStartInPlanMode,
+			resolveCreateTaskBaseRef,
+			resolvedDefaultCreateTaskBranchRef,
 			resolvedDefaultTaskBranchRef,
 			selectedAgentId,
 			setBoard,
@@ -378,10 +396,10 @@ export function useTaskEditor({
 			if (validPrompts.length === 0) {
 				return [];
 			}
-			if (!(newTaskBranchRef || resolvedDefaultTaskBranchRef)) {
+			const baseRef = resolveCreateTaskBaseRef(newTaskBranchRef);
+			if (!baseRef) {
 				return [];
 			}
-			const baseRef = newTaskBranchRef || resolvedDefaultTaskBranchRef;
 			const createdTaskIds: string[] = [];
 			let updatedBoard = board;
 			for (const prompt of validPrompts) {
@@ -409,7 +427,7 @@ export function useTaskEditor({
 			}
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
-			setNewTaskBranchRef(options?.keepDialogOpen ? baseRef : resolvedDefaultTaskBranchRef);
+			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
 			if (!options?.keepDialogOpen) {
@@ -426,6 +444,8 @@ export function useTaskEditor({
 			newTaskClineSettings,
 			newTaskImages,
 			newTaskStartInPlanMode,
+			resolveCreateTaskBaseRef,
+			resolvedDefaultCreateTaskBranchRef,
 			resolvedDefaultTaskBranchRef,
 			selectedAgentId,
 			setBoard,
