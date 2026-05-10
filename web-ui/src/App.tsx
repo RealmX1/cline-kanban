@@ -648,6 +648,7 @@ export default function App(): ReactElement {
 	const detailSession = selectedCard
 		? (sessions[selectedCard.card.id] ?? createIdleTaskSession(selectedCard.card.id))
 		: null;
+	const isDetailViewMounted = Boolean(selectedCard && detailSession);
 	const detailTerminalSummary = detailTerminalTaskId ? (sessions[detailTerminalTaskId] ?? null) : null;
 	const detailTerminalSubtitle = useMemo(() => {
 		if (!selectedCard) {
@@ -942,8 +943,8 @@ export default function App(): ReactElement {
 												onStartTask={handleStartTaskFromBoard}
 												onStartAllTasks={handleStartAllBacklogTasksFromBoard}
 												onClearTrash={handleOpenClearTrash}
-												editingTaskId={editingTaskId}
-												inlineTaskEditor={inlineTaskEditor}
+												editingTaskId={isDetailViewMounted ? null : editingTaskId}
+												inlineTaskEditor={isDetailViewMounted ? undefined : inlineTaskEditor}
 												onEditTask={handleOpenEditTask}
 												onSaveTaskTitle={handleSaveTaskTitle}
 												onCommitTask={handleCommitTask}

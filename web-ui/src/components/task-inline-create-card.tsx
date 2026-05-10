@@ -24,6 +24,7 @@ const AUTO_REVIEW_MODE_OPTIONS: Array<{ value: TaskAutoReviewMode; label: string
 ];
 const AUTO_REVIEW_MODE_SELECT_WIDTH_CH = 16;
 const COMPACT_ACTIONS_WIDTH_THRESHOLD_PX = 280;
+const TASK_INLINE_EDITOR_SELECTOR = "[data-task-inline-editor='true']";
 
 function ButtonShortcut({ includeShift = false }: { includeShift?: boolean }): ReactElement {
 	return (
@@ -187,7 +188,12 @@ export function TaskInlineCreateCard({
 			if (!container) {
 				return;
 			}
-			if (event.target instanceof Node && container.contains(event.target)) {
+			const target = event.target instanceof Node ? event.target : null;
+			if (target && container.contains(target)) {
+				return;
+			}
+			const targetElement = target instanceof Element ? target : target?.parentElement;
+			if (targetElement?.closest(TASK_INLINE_EDITOR_SELECTOR)) {
 				return;
 			}
 			onCreate();
@@ -198,6 +204,7 @@ export function TaskInlineCreateCard({
 	return (
 		<div
 			ref={setCardRef}
+			data-task-inline-editor="true"
 			className="rounded-md border border-border-bright bg-surface-2 p-3"
 			style={{ flexShrink: 0, marginBottom: cardMarginBottom, fontSize: 12 }}
 		>
