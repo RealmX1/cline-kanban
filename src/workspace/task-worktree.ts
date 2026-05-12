@@ -18,6 +18,7 @@ const KANBAN_MANAGED_EXCLUDE_BLOCK_END = "# kanban-managed-symlinked-ignored-pat
 const KANBAN_TRASHED_TASK_PATCHES_DIR_NAME = "trashed-task-patches";
 const KANBAN_TASK_WORKTREE_SETUP_LOCKFILE_NAME = "kanban-task-worktree-setup.lock";
 const TASK_PATCH_FILE_SUFFIX = ".patch";
+const PROJECT_LOCAL_CODEX_SKILLS_PATH = ".codex/skills";
 
 const SYMLINK_PATH_SEGMENT_BLACKLIST = new Set([
 	".git",
@@ -327,12 +328,12 @@ function stripManagedExcludeBlock(content: string): string {
 	return nextLines.join("\n").replace(/\n+$/g, "");
 }
 
-async function syncManagedIgnoredPathExcludes(repoPath: string, relativePaths: string[]): Promise<void> {
-	const excludePathOutput = await getGitStdout(["rev-parse", "--git-path", "info/exclude"], repoPath);
+async function syncManagedPathExcludes(cwd: string, relativePaths: string[], comment: string): Promise<void> {
+	const excludePathOutput = await getGitStdout(["rev-parse", "--git-path", "info/exclude"], cwd);
 	if (!excludePathOutput) {
 		return;
 	}
-	const excludePath = isAbsolute(excludePathOutput) ? excludePathOutput : join(repoPath, excludePathOutput);
+	const excludePath = isAbsolute(excludePathOutput) ? excludePathOutput : join(cwd, excludePathOutput);
 
 	const existingContent = await readFile(excludePath, "utf8").catch(() => "");
 	const preservedContent = stripManagedExcludeBlock(existingContent);
@@ -342,7 +343,7 @@ async function syncManagedIgnoredPathExcludes(repoPath: string, relativePaths: s
 			? ""
 			: [
 					KANBAN_MANAGED_EXCLUDE_BLOCK_START,
-					"# Keep symlinked ignored paths ignored inside Kanban task worktrees.",
+					comment,
 					...managedPaths.map((relativePath) => `/${escapeGitIgnoreLiteral(relativePath)}`),
 					KANBAN_MANAGED_EXCLUDE_BLOCK_END,
 				].join("\n");
@@ -356,6 +357,45 @@ async function syncManagedIgnoredPathExcludes(repoPath: string, relativePaths: s
 	await lockedFileSystem.writeTextFileAtomic(excludePath, normalizedNextContent);
 }
 
+async function syncManagedIgnoredPathExcludes(repoPath: string, relativePaths: string[]): Promise<void> {
+	await syncManagedPathExcludes(
+		repoPath,
+		relativePaths,
+		"# Keep symlinked ignored paths ignored inside Kanban task worktrees.",
+	);
+}
+
+async function mirrorExistingPath(options: {
+	repoPath: string;
+	worktreePath: string;
+	relativePath: string;
+}): Promise<boolean> {
+	const relativePath = toPlatformRelativePath(options.relativePath);
+	if (!relativePath || shouldSkipSymlink(relativePath)) {
+		return false;
+	}
+
+	const sourcePath = join(options.repoPath, relativePath);
+	if (!(await pathExists(sourcePath))) {
+		return false;
+	}
+
+	const targetPath = join(options.worktreePath, relativePath);
+	if (await pathExists(targetPath)) {
+		return false;
+	}
+
+	const sourceStat = await lstat(sourcePath);
+	await mkdir(dirname(targetPath), { recursive: true });
+	return (
+		(await mirrorIgnoredPath({
+			sourcePath,
+			targetPath,
+			isDirectory: sourceStat.isDirectory(),
+		})) === "mirrored"
+	);
+}
+
 async function syncIgnoredPathsIntoWorktree(repoPath: string, worktreePath: string): Promise<void> {
 	const ignoredPaths = getUniquePaths(await listIgnoredPaths(repoPath)).filter(
 		(relativePath) => !shouldSkipSymlink(relativePath),
@@ -365,28 +405,12 @@ async function syncIgnoredPathsIntoWorktree(repoPath: string, worktreePath: stri
 
 	await syncManagedIgnoredPathExcludes(repoPath, mirroredIgnoredPaths);
 	for (const relativePath of mirroredIgnoredPaths) {
-		if (shouldSkipSymlink(relativePath)) {
-			continue;
-		}
-
-		const sourcePath = join(repoPath, relativePath);
-		if (!(await pathExists(sourcePath))) {
-			continue;
-		}
-
-		const targetPath = join(worktreePath, relativePath);
-		if (await pathExists(targetPath)) {
-			continue;
-		}
-
-		const sourceStat = await lstat(sourcePath);
-		await mkdir(dirname(targetPath), { recursive: true });
-		await mirrorIgnoredPath({
-			sourcePath,
-			targetPath,
-			isDirectory: sourceStat.isDirectory(),
-		});
+		await mirrorExistingPath({ repoPath, worktreePath, relativePath });
 	}
+}
+
+async function syncProjectLocalAgentConfigIntoWorktree(repoPath: string, worktreePath: string): Promise<void> {
+	await mirrorExistingPath({ repoPath, worktreePath, relativePath: PROJECT_LOCAL_CODEX_SKILLS_PATH });
 }
 
 async function initializeSubmodulesIfNeeded(worktreePath: string): Promise<void> {
@@ -401,6 +425,7 @@ async function prepareNewTaskWorktree(repoPath: string, worktreePath: string): P
 	try {
 		await initializeSubmodulesIfNeeded(worktreePath);
 		await syncIgnoredPathsIntoWorktree(repoPath, worktreePath);
+		await syncProjectLocalAgentConfigIntoWorktree(repoPath, worktreePath);
 	} catch (error) {
 		await removeTaskWorktreeInternal(repoPath, worktreePath).catch(() => {});
 		throw error;
@@ -462,6 +487,7 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 		const existingResult = await runGit(worktreePath, ["rev-parse", "HEAD"]);
 		if (existingResult.ok && existingResult.stdout) {
 			await syncIgnoredPathsIntoWorktree(context.repoPath, worktreePath);
+			await syncProjectLocalAgentConfigIntoWorktree(context.repoPath, worktreePath);
 			return {
 				ok: true,
 				path: worktreePath,
@@ -474,6 +500,7 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 			const lockedExistingCommit = await tryRunGit(worktreePath, ["rev-parse", "HEAD"]);
 			if (lockedExistingCommit) {
 				await syncIgnoredPathsIntoWorktree(context.repoPath, worktreePath);
+				await syncProjectLocalAgentConfigIntoWorktree(context.repoPath, worktreePath);
 				return {
 					ok: true,
 					path: worktreePath,

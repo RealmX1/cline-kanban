@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cline Kanban Runtime Update"
+  short_description: "Rebuild and restart this Kanban safely"
+  default_prompt: "Use $safe-version-update to rebuild, relink, or restart this Cline Kanban runtime while preserving task worktrees, runtime data, PATH, and agent detection."

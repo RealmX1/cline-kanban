@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -334,6 +334,54 @@ describe.sequential("task-worktree serialization", () => {
 				const command = stripConfigFlags(args as readonly string[]);
 				expect(command).not.toContain("worktree");
 			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("mirrors project-local Codex skills into an existing task worktree", async () => {
+		const { path: sandboxRoot, cleanup } = createTempDir("kanban-task-worktree-codex-skills-");
+		try {
+			const repoPath = join(sandboxRoot, "repo");
+			const worktreesHomePath = join(sandboxRoot, "worktrees-home");
+			const worktreePath = join(worktreesHomePath, "task-codex-skills", "repo");
+			const skillsPath = join(repoPath, ".codex", "skills");
+			mkdirSync(join(repoPath, ".git"), { recursive: true });
+			mkdirSync(join(skillsPath, "safe-version-update"), { recursive: true });
+			writeFileSync(join(skillsPath, "safe-version-update", "SKILL.md"), "name: safe-version-update\n", "utf8");
+			mkdirSync(worktreePath, { recursive: true });
+
+			workspaceStateMocks.loadWorkspaceContext.mockResolvedValue({ repoPath });
+			workspaceStateMocks.getRuntimeHomePath.mockReturnValue(join(sandboxRoot, "runtime-home"));
+			workspaceStateMocks.getTaskWorktreesHomePath.mockReturnValue(worktreesHomePath);
+			taskWorktreePathMocks.getWorkspaceFolderLabelForWorktreePath.mockReturnValue("repo");
+			taskWorktreePathMocks.normalizeTaskIdForWorktreePath.mockImplementation((taskId: string) => taskId);
+
+			childProcessMocks.execFilePromise.mockImplementation(
+				async (_file: string, args: readonly string[], options?: ExecFileOptions) => {
+					const { cwd, command } = getCommandArgs(args, options);
+					if (cwd === worktreePath && command[0] === "rev-parse" && command[1] === "HEAD") {
+						return { stdout: "existing-task-commit\n", stderr: "" };
+					}
+					if (command[0] === "ls-files") {
+						return { stdout: "", stderr: "" };
+					}
+					if (command[0] === "rev-parse" && command[1] === "--git-path") {
+						return { stdout: ".git/info/exclude\n", stderr: "" };
+					}
+					throw createGitError(`Unhandled git command: ${command.join(" ")}`);
+				},
+			);
+
+			const ensured = await ensureTaskWorktreeIfDoesntExist({
+				cwd: repoPath,
+				taskId: "task-codex-skills",
+				baseRef: "HEAD",
+			});
+
+			expect(ensured.ok).toBe(true);
+			expect(readlinkSync(join(worktreePath, ".codex", "skills"))).toBe(skillsPath);
+			expect(childProcessMocks.execFilePromise.mock.calls.some(([, args]) => args.includes("worktree"))).toBe(false);
 		} finally {
 			cleanup();
 		}
