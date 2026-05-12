@@ -197,10 +197,16 @@ export const runtimeBoardDataSchema = z.object({
 });
 export type RuntimeBoardData = z.infer<typeof runtimeBoardDataSchema>;
 
+export const runtimeGitBranchSchema = z.object({
+	name: z.string(),
+	lastCommitDate: z.string().optional(),
+});
+export type RuntimeGitBranch = z.infer<typeof runtimeGitBranchSchema>;
+
 export const runtimeGitRepositoryInfoSchema = z.object({
 	currentBranch: z.string().nullable(),
 	defaultBranch: z.string().nullable(),
-	branches: z.array(z.string()),
+	branches: z.array(runtimeGitBranchSchema),
 });
 export type RuntimeGitRepositoryInfo = z.infer<typeof runtimeGitRepositoryInfoSchema>;
 

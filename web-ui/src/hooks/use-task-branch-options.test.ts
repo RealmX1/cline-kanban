@@ -12,7 +12,12 @@ function createWorkspaceGit(overrides: Partial<RuntimeGitRepositoryInfo> = {}): 
 	return {
 		currentBranch: "feature/newest",
 		defaultBranch: "main",
-		branches: ["feature/newest", "bugfix/recent", "main", "release/old"],
+		branches: [
+			{ name: "feature/newest", lastCommitDate: "2026-05-10T10:00:00+08:00" },
+			{ name: "bugfix/recent", lastCommitDate: "2026-05-09T09:30:00+08:00" },
+			{ name: "main", lastCommitDate: "2026-05-08T18:45:00+08:00" },
+			{ name: "release/old" },
+		],
 		...overrides,
 	};
 }
@@ -24,9 +29,9 @@ describe("use-task-branch-options", () => {
 		const options = buildTaskBranchOptions(workspaceGit);
 
 		expect(options).toEqual([
-			{ value: "feature/newest", label: "feature/newest (current)" },
-			{ value: "bugfix/recent", label: "bugfix/recent" },
-			{ value: "main", label: "main" },
+			{ value: "feature/newest", label: "feature/newest (current, last commit 2026-05-10 10:00)" },
+			{ value: "bugfix/recent", label: "bugfix/recent (last commit 2026-05-09 09:30)" },
+			{ value: "main", label: "main (last commit 2026-05-08 18:45)" },
 			{ value: "release/old", label: "release/old" },
 		]);
 		expect(resolveDefaultTaskBranchRef(workspaceGit, options)).toBe("main");
@@ -38,9 +43,9 @@ describe("use-task-branch-options", () => {
 		const options = buildCreateTaskBranchOptions(workspaceGit);
 
 		expect(options).toEqual([
-			{ value: "feature/newest", label: "feature/newest (current)" },
-			{ value: "bugfix/recent", label: "bugfix/recent" },
-			{ value: "main", label: "main" },
+			{ value: "feature/newest", label: "feature/newest (current, last commit 2026-05-10 10:00)" },
+			{ value: "bugfix/recent", label: "bugfix/recent (last commit 2026-05-09 09:30)" },
+			{ value: "main", label: "main (last commit 2026-05-08 18:45)" },
 			{ value: "release/old", label: "release/old" },
 		]);
 		expect(options.some((option) => option.value === NEW_TASK_WORKTREE_OPTION_VALUE)).toBe(false);
@@ -50,14 +55,17 @@ describe("use-task-branch-options", () => {
 		const workspaceGit = createWorkspaceGit({
 			currentBranch: "detached-worktree-branch",
 			defaultBranch: "main",
-			branches: ["topic/recent", "main"],
+			branches: [
+				{ name: "topic/recent", lastCommitDate: "2026-05-10T08:00:00+08:00" },
+				{ name: "main", lastCommitDate: "2026-05-08T18:45:00+08:00" },
+			],
 		});
 
 		const options = buildTaskBranchOptions(workspaceGit);
 
 		expect(options).toEqual([
-			{ value: "topic/recent", label: "topic/recent" },
-			{ value: "main", label: "main" },
+			{ value: "topic/recent", label: "topic/recent (last commit 2026-05-10 08:00)" },
+			{ value: "main", label: "main (last commit 2026-05-08 18:45)" },
 			{ value: "detached-worktree-branch", label: "detached-worktree-branch (current)" },
 		]);
 		expect(resolveDefaultTaskBranchRef(workspaceGit, options)).toBe("main");
@@ -67,7 +75,10 @@ describe("use-task-branch-options", () => {
 		const workspaceGit = createWorkspaceGit({
 			currentBranch: "main",
 			defaultBranch: "main",
-			branches: ["feature/recent", "main"],
+			branches: [
+				{ name: "feature/recent", lastCommitDate: "2026-05-07T14:15:00+08:00" },
+				{ name: "main", lastCommitDate: "2026-05-08T18:45:00+08:00" },
+			],
 		});
 
 		const options = buildCreateTaskBranchOptions(workspaceGit);
@@ -80,14 +91,17 @@ describe("use-task-branch-options", () => {
 		const workspaceGit = createWorkspaceGit({
 			currentBranch: "main",
 			defaultBranch: "main",
-			branches: ["main", "feature/recent"],
+			branches: [
+				{ name: "main", lastCommitDate: "2026-05-08T18:45:00+08:00" },
+				{ name: "feature/recent", lastCommitDate: "2026-05-07T14:15:00+08:00" },
+			],
 		});
 
 		const options = buildCreateTaskBranchOptions(workspaceGit);
 
 		expect(options).toEqual([
-			{ value: "main", label: "main (current)" },
-			{ value: "feature/recent", label: "feature/recent" },
+			{ value: "main", label: "main (current, last commit 2026-05-08 18:45)" },
+			{ value: "feature/recent", label: "feature/recent (last commit 2026-05-07 14:15)" },
 		]);
 	});
 });

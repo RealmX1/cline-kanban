@@ -126,7 +126,7 @@ function createLegacyRuntimeConfig(overrides: Partial<RuntimeConfigResponse> = {
 const DEFAULT_WORKSPACE_GIT: RuntimeGitRepositoryInfo = {
 	currentBranch: "main",
 	defaultBranch: "main",
-	branches: ["main"],
+	branches: [{ name: "main" }],
 };
 
 function createFlushPromises(): Promise<void> {

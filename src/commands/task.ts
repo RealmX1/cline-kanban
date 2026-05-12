@@ -360,7 +360,7 @@ async function updateRuntimeWorkspaceState<T>(
 }
 
 function resolveTaskBaseRef(state: RuntimeWorkspaceStateResponse): string {
-	return state.git.currentBranch ?? state.git.defaultBranch ?? state.git.branches[0] ?? "";
+	return state.git.currentBranch ?? state.git.defaultBranch ?? state.git.branches[0]?.name ?? "";
 }
 
 function findTaskRecord(

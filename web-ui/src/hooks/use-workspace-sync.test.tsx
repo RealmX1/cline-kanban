@@ -47,7 +47,7 @@ function createWorkspaceState(taskId: string, revision: number): RuntimeWorkspac
 		git: {
 			currentBranch: "main",
 			defaultBranch: "main",
-			branches: ["main"],
+			branches: [{ name: "main" }],
 		},
 		board: createBoard(taskId),
 		sessions: {},
