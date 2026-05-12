@@ -8,6 +8,12 @@ import {
 	TASK_AUTO_REVIEW_MODE_STORAGE_KEY,
 	TASK_START_IN_PLAN_MODE_STORAGE_KEY,
 } from "@/hooks/app-utils";
+import {
+	clearTaskEditDraft,
+	isTaskEditDraftEqualToTask,
+	readSavedTaskEditDraft,
+	saveTaskEditDraft,
+} from "@/hooks/task-edit-drafts";
 import type { RuntimeAgentId, RuntimeTaskClineSettings, RuntimeTaskWorktreeMode } from "@/runtime/types";
 import { addTaskToColumnWithResult, findCardSelection, updateTask, updateTaskTitle } from "@/state/board-state";
 import { toTelemetrySelectedAgentId, trackTaskCreated } from "@/telemetry/events";
@@ -22,6 +28,7 @@ interface UseTaskEditorInput {
 	editTaskBranchOptions: Array<{ value: string; label: string }>;
 	defaultTaskBranchRef: string;
 	defaultCreateTaskBranchRef: string;
+	currentProjectId: string | null;
 	selectedAgentId: RuntimeAgentId | null;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	queueTaskStartAfterEdit?: (taskId: string) => void;
@@ -93,6 +100,7 @@ export function useTaskEditor({
 	editTaskBranchOptions,
 	defaultTaskBranchRef,
 	defaultCreateTaskBranchRef,
+	currentProjectId,
 	selectedAgentId,
 	setSelectedTaskId,
 	queueTaskStartAfterEdit,
@@ -189,8 +197,53 @@ export function useTaskEditor({
 			setEditTaskAutoReviewMode("commit");
 			setEditTaskImages([]);
 			setEditTaskBranchRef("");
+			setEditTaskAgentId(undefined);
+			setEditTaskClineSettings(undefined);
+			clearTaskEditDraft(currentProjectId, editingTaskId);
 		}
-	}, [board, editingTaskId]);
+	}, [board, currentProjectId, editingTaskId]);
+
+	useEffect(() => {
+		if (!editingTaskId) {
+			return;
+		}
+		const selection = findCardSelection(board, editingTaskId);
+		if (!selection || selection.column.id !== "backlog") {
+			return;
+		}
+		const draft = {
+			taskId: editingTaskId,
+			prompt: editTaskPrompt,
+			images: editTaskImages.map((image) => ({ ...image })),
+			startInPlanMode: editTaskStartInPlanMode,
+			autoReviewEnabled: editTaskAutoReviewEnabled,
+			autoReviewMode: editTaskAutoReviewMode,
+			branchRef: editTaskBranchRef || resolvedDefaultTaskBranchRef,
+			agentId: editTaskAgentId,
+			clineSettings: editTaskClineSettings,
+		};
+		if (isTaskEditDraftEqualToTask(draft, selection.card)) {
+			clearTaskEditDraft(currentProjectId, editingTaskId);
+			return;
+		}
+		saveTaskEditDraft(currentProjectId, {
+			...draft,
+			savedAt: Date.now(),
+		});
+	}, [
+		board,
+		currentProjectId,
+		editTaskAgentId,
+		editTaskAutoReviewEnabled,
+		editTaskAutoReviewMode,
+		editTaskBranchRef,
+		editTaskClineSettings,
+		editTaskImages,
+		editTaskPrompt,
+		editTaskStartInPlanMode,
+		editingTaskId,
+		resolvedDefaultTaskBranchRef,
+	]);
 
 	const handleOpenCreateTask = useCallback(() => {
 		setEditingTaskId(null);
@@ -224,22 +277,32 @@ export function useTaskEditor({
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			const taskPrompt = task.prompt.trim();
+			const savedDraft = readSavedTaskEditDraft(currentProjectId, task.id);
 			setEditingTaskId(task.id);
 
-			setEditTaskPrompt(taskPrompt);
-			setEditTaskImages(task.images ? task.images.map((image) => ({ ...image })) : []);
-			setEditTaskStartInPlanMode(task.startInPlanMode);
-			setEditTaskAutoReviewEnabled(task.autoReviewEnabled === true);
-			setEditTaskAutoReviewMode(resolveTaskAutoReviewMode(task.autoReviewMode));
+			setEditTaskPrompt(savedDraft?.prompt ?? taskPrompt);
+			setEditTaskImages(
+				savedDraft
+					? savedDraft.images.map((image) => ({ ...image }))
+					: task.images
+						? task.images.map((image) => ({ ...image }))
+						: [],
+			);
+			setEditTaskStartInPlanMode(savedDraft?.startInPlanMode ?? task.startInPlanMode);
+			setEditTaskAutoReviewEnabled(savedDraft?.autoReviewEnabled ?? task.autoReviewEnabled === true);
+			setEditTaskAutoReviewMode(savedDraft?.autoReviewMode ?? resolveTaskAutoReviewMode(task.autoReviewMode));
 			const fallbackBranch = task.baseRef || resolvedDefaultTaskBranchRef;
-			setEditTaskBranchRef(fallbackBranch);
-			setEditTaskAgentId(task.agentId);
-			setEditTaskClineSettings(task.clineSettings);
+			setEditTaskBranchRef(savedDraft?.branchRef ?? fallbackBranch);
+			setEditTaskAgentId(savedDraft?.agentId ?? task.agentId);
+			setEditTaskClineSettings(savedDraft?.clineSettings ?? task.clineSettings);
 		},
-		[resolvedDefaultTaskBranchRef, setSelectedTaskId],
+		[currentProjectId, resolvedDefaultTaskBranchRef, setSelectedTaskId],
 	);
 
 	const handleCancelEditTask = useCallback(() => {
+		if (editingTaskId) {
+			clearTaskEditDraft(currentProjectId, editingTaskId);
+		}
 		setEditingTaskId(null);
 
 		setEditTaskPrompt("");
@@ -248,7 +311,9 @@ export function useTaskEditor({
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
 		setEditTaskBranchRef("");
-	}, []);
+		setEditTaskAgentId(undefined);
+		setEditTaskClineSettings(undefined);
+	}, [currentProjectId, editingTaskId]);
 
 	const handleSaveEditedTask = useCallback((): string | null => {
 		if (!editingTaskId) {
@@ -264,6 +329,7 @@ export function useTaskEditor({
 
 		const baseRef = editTaskBranchRef || resolvedDefaultTaskBranchRef;
 		const savedTaskId = editingTaskId;
+		clearTaskEditDraft(currentProjectId, savedTaskId);
 
 		setBoard((currentBoard) => {
 			const currentCard = currentBoard.columns.flatMap((c) => c.cards).find((c) => c.id === savedTaskId);
@@ -302,6 +368,7 @@ export function useTaskEditor({
 		editTaskImages,
 		editTaskStartInPlanMode,
 		editingTaskId,
+		currentProjectId,
 		resolvedDefaultTaskBranchRef,
 		setBoard,
 	]);

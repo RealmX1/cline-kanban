@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useTaskEditor } from "@/hooks/use-task-editor";
 import type { RuntimeAgentId, RuntimeTaskClineSettings, RuntimeTaskWorktreeMode } from "@/runtime/types";
+import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
 function createTask(taskId: string, prompt: string, createdAt: number, overrides: Partial<BoardCard> = {}): BoardCard {
@@ -54,6 +55,7 @@ interface HookSnapshot {
 	setNewTaskBranchRef: (value: string) => void;
 	setNewTaskWorktreeMode: (value: RuntimeTaskWorktreeMode) => void;
 	handleOpenEditTask: (task: BoardCard) => void;
+	handleCancelEditTask: () => void;
 	handleSaveEditedTask: () => string | null;
 	handleSaveAndStartEditedTask: () => void;
 	setEditTaskPrompt: (value: string) => void;
@@ -78,6 +80,7 @@ function HookHarness({
 	editTaskBranchOptions = [{ value: "main", label: "main" }],
 	defaultTaskBranchRef = "main",
 	defaultCreateTaskBranchRef = "main",
+	currentProjectId = "project-1",
 }: {
 	initialBoard: BoardData;
 	onSnapshot: (snapshot: HookSnapshot) => void;
@@ -86,6 +89,7 @@ function HookHarness({
 	editTaskBranchOptions?: Array<{ value: string; label: string }>;
 	defaultTaskBranchRef?: string;
 	defaultCreateTaskBranchRef?: string;
+	currentProjectId?: string | null;
 }): null {
 	const [board, setBoard] = useState<BoardData>(initialBoard);
 	const [, setSelectedTaskId] = useState<string | null>(null);
@@ -96,6 +100,7 @@ function HookHarness({
 		editTaskBranchOptions,
 		defaultTaskBranchRef,
 		defaultCreateTaskBranchRef,
+		currentProjectId,
 		selectedAgentId: null,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
@@ -123,6 +128,7 @@ function HookHarness({
 			setNewTaskBranchRef: editor.setNewTaskBranchRef,
 			setNewTaskWorktreeMode: editor.setNewTaskWorktreeMode,
 			handleOpenEditTask: editor.handleOpenEditTask,
+			handleCancelEditTask: editor.handleCancelEditTask,
 			handleSaveEditedTask: editor.handleSaveEditedTask,
 			handleSaveAndStartEditedTask: editor.handleSaveAndStartEditedTask,
 			setEditTaskPrompt: editor.setEditTaskPrompt,
@@ -139,6 +145,7 @@ function HookHarness({
 		editor.editTaskPrompt,
 		editor.editTaskStartInPlanMode,
 		editor.editingTaskId,
+		editor.handleCancelEditTask,
 		editor.handleOpenEditTask,
 		editor.handleSaveEditedTask,
 		editor.handleSaveAndStartEditedTask,
@@ -229,6 +236,140 @@ describe("useTaskEditor", () => {
 		expect(savedTaskId).toBe("task-1");
 		expect(requireSnapshot(latestSnapshot).editingTaskId).toBeNull();
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Updated prompt");
+	});
+
+	it("restores an autosaved edit draft when reopening the same task", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([createTask("task-1", "Initial prompt", 1)]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskPrompt("Autosaved draft prompt");
+		});
+		await act(async () => {});
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toContain("Autosaved draft prompt");
+
+		act(() => {
+			root.unmount();
+		});
+		root = createRoot(container);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const reopenedTask = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!reopenedTask) {
+			throw new Error("Expected a backlog task.");
+		}
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(reopenedTask);
+		});
+
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Autosaved draft prompt");
+	});
+
+	it("clears the autosaved edit draft after saving", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([createTask("task-1", "Initial prompt", 1)]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskPrompt("Saved draft prompt");
+		});
+		await act(async () => {});
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toContain("Saved draft prompt");
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveEditedTask();
+		});
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Saved draft prompt");
+	});
+
+	it("clears the autosaved edit draft after canceling", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([createTask("task-1", "Initial prompt", 1)]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskPrompt("Canceled draft prompt");
+		});
+		await act(async () => {});
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toContain("Canceled draft prompt");
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCancelEditTask();
+		});
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Initial prompt");
 	});
 
 	it("does not disable start in plan mode when auto review is enabled while editing", async () => {

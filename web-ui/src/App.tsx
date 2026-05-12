@@ -342,6 +342,7 @@ export default function App(): ReactElement {
 		editTaskBranchOptions,
 		defaultTaskBranchRef,
 		defaultCreateTaskBranchRef,
+		currentProjectId,
 		selectedAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
