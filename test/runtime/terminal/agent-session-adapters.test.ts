@@ -253,6 +253,10 @@ describe("prepareAgentLaunch hook strategies", () => {
 		const forkIndex = launch.args.indexOf("fork");
 		expect(forkIndex).toBeGreaterThanOrEqual(0);
 		expect(launch.args[forkIndex + 1]).toBe("11111111-2222-3333-4444-555555555555");
+		const cwdIndex = launch.args.indexOf("-C");
+		expect(cwdIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[cwdIndex + 1]).toBe("/tmp");
+		expect(cwdIndex).toBeLessThan(forkIndex);
 		const promptIndex = launch.args.indexOf("do the thing");
 		expect(promptIndex).toBeGreaterThan(forkIndex);
 		expect(launch.args).not.toContain("resume");
@@ -263,7 +267,25 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(noAltIndex).toBeLessThan(forkIndex);
 	});
 
-	it("prefers fork over resume when both parentSessionId and resumeFromTrash are set", async () => {
+	it("preserves explicit Codex working directory when parentSessionId is provided", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-fork-explicit-cwd",
+			agentId: "codex",
+			binary: "codex",
+			args: ["--cd", "/explicit"],
+			cwd: "/tmp",
+			prompt: "",
+			parentSessionId: "11111111-2222-3333-4444-555555555555",
+		});
+
+		expect(launch.args.filter((arg) => arg === "-C")).toHaveLength(0);
+		expect(launch.args).toContain("--cd");
+		expect(launch.args[launch.args.indexOf("--cd") + 1]).toBe("/explicit");
+		expect(launch.args).toContain("fork");
+	});
+
+	it("prefers resume over parent fork when both parentSessionId and resumeFromTrash are set", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
 			taskId: "task-codex-fork-vs-resume",
@@ -276,9 +298,10 @@ describe("prepareAgentLaunch hook strategies", () => {
 			resumeFromTrash: true,
 		});
 
-		expect(launch.args).toContain("fork");
-		expect(launch.args).not.toContain("resume");
-		expect(launch.args).not.toContain("--last");
+		expect(launch.args).not.toContain("fork");
+		expect(launch.args).not.toContain("11111111-2222-3333-4444-555555555555");
+		expect(launch.args).toContain("resume");
+		expect(launch.args).toContain("--last");
 	});
 
 	it("ignores a non-UUID parentSessionId on Codex", async () => {

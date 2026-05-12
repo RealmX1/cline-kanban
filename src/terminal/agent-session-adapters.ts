@@ -128,6 +128,10 @@ function hasCliOption(args: string[], optionName: string): boolean {
 	return false;
 }
 
+function hasCodexWorkingDirectoryOverride(args: string[]): boolean {
+	return args.includes("-C") || hasCliOption(args, "--cd");
+}
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function normalizeParentSessionId(value: string | undefined): string | null {
@@ -786,19 +790,20 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		}
 
-		// Fork wins over resume: a parent_session_id always implies a fresh fork session,
-		// even on a trash-restore launch.
 		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
-		if (parentSessionId) {
-			if (!codexArgs.includes("fork")) {
-				codexArgs.push("fork", parentSessionId);
-			}
-		} else if (input.resumeFromTrash) {
+		if (input.resumeFromTrash) {
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");
 			}
 			if (!hasCliOption(codexArgs, "--last")) {
 				codexArgs.push("--last");
+			}
+		} else if (parentSessionId) {
+			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
+				codexArgs.push("-C", input.cwd);
+			}
+			if (!codexArgs.includes("fork")) {
+				codexArgs.push("fork", parentSessionId);
 			}
 		}
 
