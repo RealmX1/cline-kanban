@@ -142,4 +142,81 @@ describe("ColumnContextPanel", () => {
 			inline: "nearest",
 		});
 	});
+
+	it("restores the most recently updated done task from the collapsed done header", async () => {
+		const olderDoneTask = {
+			...createCard("task-done-older", "Older done task"),
+			updatedAt: 3,
+		};
+		const latestDoneTask = {
+			...createCard("task-done-latest", "Latest done task"),
+			updatedAt: 10,
+		};
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: [] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [createCard("task-review", "Review task")] },
+			{ id: "trash", title: "Done", cards: [olderDoneTask, latestDoneTask] },
+		];
+		const onRestoreFromTrashTask = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-review")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+					onRestoreFromTrashTask={onRestoreFromTrashTask}
+				/>,
+			);
+		});
+
+		const restoreButton = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="Restore most recent done task"]',
+		);
+		expect(restoreButton).toBeInstanceOf(HTMLButtonElement);
+		expect(restoreButton?.disabled).toBe(false);
+
+		await act(async () => {
+			restoreButton?.click();
+		});
+
+		expect(onRestoreFromTrashTask).toHaveBeenCalledTimes(1);
+		expect(onRestoreFromTrashTask).toHaveBeenCalledWith("task-done-latest");
+	});
+
+	it("disables the collapsed done restore button when done is empty", async () => {
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: [] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [createCard("task-review", "Review task")] },
+			{ id: "trash", title: "Done", cards: [] },
+		];
+		const onRestoreFromTrashTask = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-review")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+					onRestoreFromTrashTask={onRestoreFromTrashTask}
+				/>,
+			);
+		});
+
+		const restoreButton = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="Restore most recent done task"]',
+		);
+		expect(restoreButton).toBeInstanceOf(HTMLButtonElement);
+		expect(restoreButton?.disabled).toBe(true);
+
+		await act(async () => {
+			restoreButton?.click();
+		});
+
+		expect(onRestoreFromTrashTask).not.toHaveBeenCalled();
+	});
 });

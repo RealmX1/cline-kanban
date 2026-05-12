@@ -1,5 +1,5 @@
 import { type BeforeCapture, DragDropContext, Droppable, type DropResult } from "@hello-pangea/dnd";
-import { ChevronDown, ChevronRight, Play, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Play, RotateCcw, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -63,6 +63,15 @@ function ColumnSection({
 	const canCreate = column.id === "backlog" && onCreateTask;
 	const canStartAllTasks = column.id === "backlog" && onStartAllTasks;
 	const canClearTrash = column.id === "trash" && onClearTrash;
+	const latestTrashCard =
+		column.id === "trash"
+			? column.cards.reduce<BoardCardModel | null>((latestCard, card) => {
+					if (!latestCard || card.updatedAt > latestCard.updatedAt) {
+						return card;
+					}
+					return latestCard;
+				}, null)
+			: null;
 	const cardDropType = "CARD";
 	const isDropDisabled = isCardDropDisabled(column.id, activeDragSourceColumnId ?? null);
 
@@ -124,6 +133,22 @@ function ColumnSection({
 						disabled={column.cards.length === 0}
 						aria-label="Start all backlog tasks"
 						title={column.cards.length > 0 ? "Start all backlog tasks" : "Backlog is empty"}
+						style={{ marginRight: 4 }}
+					/>
+				) : null}
+				{column.id === "trash" && onRestoreFromTrashTask ? (
+					<Button
+						icon={<RotateCcw size={14} />}
+						variant="ghost"
+						size="sm"
+						onClick={() => {
+							if (latestTrashCard) {
+								onRestoreFromTrashTask(latestTrashCard.id);
+							}
+						}}
+						disabled={!latestTrashCard}
+						aria-label="Restore most recent done task"
+						title={latestTrashCard ? "Restore most recent done task" : "Done is empty"}
 						style={{ marginRight: 4 }}
 					/>
 				) : null}
