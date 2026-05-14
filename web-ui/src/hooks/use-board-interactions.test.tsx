@@ -1,4 +1,4 @@
-import { act, type Dispatch, type SetStateAction, useEffect, useState } from "react";
+import { act, type Dispatch, type ReactElement, type SetStateAction, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -67,6 +67,9 @@ const NOOP_RUN_AUTO_REVIEW = async (): Promise<boolean> => false;
 
 interface HookSnapshot {
 	handleRestoreTaskFromTrash: (taskId: string) => void;
+	handleOpenDeleteTask: (taskId: string) => void;
+	handleConfirmDeleteTask: () => void;
+	deleteTaskTarget: BoardCard | null;
 	handleStartTask: (taskId: string) => void;
 	handleCardSelect: (taskId: string) => void;
 }
@@ -91,7 +94,10 @@ function HookHarness({
 	ensureTaskWorkspace,
 	startTaskSession,
 	selectedCard = null,
+	selectedTaskId = null,
 	setSelectedTaskIdOverride,
+	stopTaskSession = NOOP_STOP_SESSION,
+	cleanupTaskWorkspace = NOOP_CLEANUP_WORKSPACE,
 	onSnapshot,
 }: {
 	board: BoardData;
@@ -99,11 +105,14 @@ function HookHarness({
 	ensureTaskWorkspace: UseTaskSessionsResult["ensureTaskWorkspace"];
 	startTaskSession: UseTaskSessionsResult["startTaskSession"];
 	selectedCard?: { card: BoardCard; column: { id: "backlog" | "in_progress" | "review" | "trash" } } | null;
+	selectedTaskId?: string | null;
 	setSelectedTaskIdOverride?: Dispatch<SetStateAction<string | null>>;
+	stopTaskSession?: (taskId: string) => Promise<void>;
+	cleanupTaskWorkspace?: UseTaskSessionsResult["cleanupTaskWorkspace"];
 	onSnapshot?: (snapshot: HookSnapshot) => void;
 }): null {
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
-	const [, setSelectedTaskId] = useState<string | null>(null);
+	const [, setSelectedTaskId] = useState<string | null>(selectedTaskId);
 	const [, setIsClearTrashDialogOpen] = useState(false);
 	const [, setIsGitHistoryOpen] = useState(false);
 
@@ -113,13 +122,13 @@ function HookHarness({
 		sessions,
 		setSessions,
 		selectedCard,
-		selectedTaskId: null,
+		selectedTaskId,
 		currentProjectId: "project-1",
 		setSelectedTaskId: setSelectedTaskIdOverride ?? setSelectedTaskId,
 		setIsClearTrashDialogOpen,
 		setIsGitHistoryOpen,
-		stopTaskSession: NOOP_STOP_SESSION,
-		cleanupTaskWorkspace: NOOP_CLEANUP_WORKSPACE,
+		stopTaskSession,
+		cleanupTaskWorkspace,
 		ensureTaskWorkspace,
 		startTaskSession,
 		fetchTaskWorkspaceInfo: NOOP_FETCH_WORKSPACE_INFO,
@@ -132,10 +141,21 @@ function HookHarness({
 	useEffect(() => {
 		onSnapshot?.({
 			handleRestoreTaskFromTrash: actions.handleRestoreTaskFromTrash,
+			handleOpenDeleteTask: actions.handleOpenDeleteTask,
+			handleConfirmDeleteTask: actions.handleConfirmDeleteTask,
+			deleteTaskTarget: actions.deleteTaskTarget,
 			handleStartTask: actions.handleStartTask,
 			handleCardSelect: actions.handleCardSelect,
 		});
-	}, [actions.handleCardSelect, actions.handleRestoreTaskFromTrash, actions.handleStartTask, onSnapshot]);
+	}, [
+		actions.deleteTaskTarget,
+		actions.handleCardSelect,
+		actions.handleConfirmDeleteTask,
+		actions.handleOpenDeleteTask,
+		actions.handleRestoreTaskFromTrash,
+		actions.handleStartTask,
+		onSnapshot,
+	]);
 
 	return null;
 }
@@ -253,6 +273,111 @@ describe("useBoardInteractions", () => {
 		expect(started).toBe(true);
 		expect(ensureTaskWorkspace).toHaveBeenCalledWith(backlogTask);
 		expect(startTaskSession).toHaveBeenCalledWith(backlogTask);
+	});
+
+	it("permanently deletes one task from any column without clearing the rest of the board", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		let latestBoard: BoardData | null = null;
+
+		useProgrammaticCardMovesMock.mockReturnValue({
+			handleProgrammaticCardMoveReady: () => {},
+			setRequestMoveTaskToTrashHandler: () => {},
+			tryProgrammaticCardMove: () => "unavailable",
+			consumeProgrammaticCardMove: () => ({}),
+			resolvePendingProgrammaticTrashMove: () => {},
+			waitForProgrammaticCardMoveAvailability: async () => {},
+			resetProgrammaticCardMoves: () => {},
+			requestMoveTaskToTrashWithAnimation: async () => {},
+			programmaticCardMoveCycle: 0,
+		});
+
+		useLinkedBacklogTaskActionsMock.mockReturnValue({
+			handleCreateDependency: () => {},
+			handleDeleteDependency: () => {},
+			confirmMoveTaskToTrash: async () => {},
+			requestMoveTaskToTrash: async () => {},
+		});
+
+		const initialBoard = createBoard();
+		initialBoard.columns[3] = {
+			...initialBoard.columns[3]!,
+			cards: [createTask("done-1", "Keep done", 10), createTask("done-2", "Keep me", 11)],
+		};
+		initialBoard.dependencies = [
+			{
+				id: "dep-1",
+				fromTaskId: "task-1",
+				toTaskId: "done-1",
+				createdAt: 12,
+			},
+		];
+		const stopTaskSession = vi.fn(async () => {});
+		const cleanupTaskWorkspace = vi.fn(async () => null);
+		const ensureTaskWorkspace = vi.fn(async () => ({
+			ok: true as const,
+			response: {
+				ok: true as const,
+				path: "/tmp/done-1",
+				baseRef: "main",
+				baseCommit: "abc123",
+			},
+		}));
+		const startTaskSession = vi.fn(async () => ({ ok: true as const }));
+
+		function StatefulHarness(): ReactElement {
+			const [board, setBoard] = useState(initialBoard);
+			useEffect(() => {
+				latestBoard = board;
+			}, [board]);
+			return (
+				<HookHarness
+					board={board}
+					setBoard={setBoard}
+					ensureTaskWorkspace={ensureTaskWorkspace}
+					startTaskSession={startTaskSession}
+					stopTaskSession={stopTaskSession}
+					cleanupTaskWorkspace={cleanupTaskWorkspace}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>
+			);
+		}
+
+		await act(async () => {
+			root.render(<StatefulHarness />);
+		});
+
+		const requireSnapshot = (): HookSnapshot => {
+			if (!latestSnapshot) {
+				throw new Error("Expected a hook snapshot.");
+			}
+			return latestSnapshot;
+		};
+		const requireBoard = (): BoardData => {
+			if (!latestBoard) {
+				throw new Error("Expected latest board.");
+			}
+			return latestBoard;
+		};
+
+		await act(async () => {
+			requireSnapshot().handleOpenDeleteTask("task-1");
+		});
+
+		expect(requireSnapshot().deleteTaskTarget?.id).toBe("task-1");
+
+		await act(async () => {
+			requireSnapshot().handleConfirmDeleteTask();
+		});
+
+		const doneCards = requireBoard().columns.find((column) => column.id === "trash")?.cards ?? [];
+		expect(doneCards.map((card) => card.id)).toEqual(["done-1", "done-2"]);
+		const backlogCards = requireBoard().columns.find((column) => column.id === "backlog")?.cards ?? [];
+		expect(backlogCards).toEqual([]);
+		expect(requireBoard().dependencies).toEqual([]);
+		expect(stopTaskSession).toHaveBeenCalledWith("task-1");
+		expect(cleanupTaskWorkspace).toHaveBeenCalledWith("task-1", undefined);
 	});
 
 	it("waits for a new backlog card height to settle before starting animation", async () => {

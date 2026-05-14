@@ -15,6 +15,7 @@ import {
 	findCardSelection,
 	getTaskColumnId,
 	moveTaskToColumn,
+	removeTask,
 	updateTask,
 } from "@/state/board-state";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
@@ -84,6 +85,10 @@ export interface UseBoardInteractionsResult {
 	handleMoveToTrash: () => void;
 	handleMoveReviewCardToTrash: (taskId: string) => void;
 	handleRestoreTaskFromTrash: (taskId: string) => void;
+	handleOpenDeleteTask: (taskId: string) => void;
+	handleCancelDeleteTask: () => void;
+	handleConfirmDeleteTask: () => void;
+	deleteTaskTarget: BoardCard | null;
 	handleCancelAutomaticTaskAction: (taskId: string) => void;
 	handleOpenClearTrash: () => void;
 	handleConfirmClearTrash: () => void;
@@ -121,6 +126,7 @@ export function useBoardInteractions({
 		Record<string, PendingProgrammaticStartMoveCompletion>
 	>({});
 	const [moveToTrashLoadingById, setMoveToTrashLoadingById] = useState<Record<string, boolean>>({});
+	const [deleteTaskTarget, setDeleteTaskTarget] = useState<BoardCard | null>(null);
 	const {
 		handleProgrammaticCardMoveReady,
 		setRequestMoveTaskToTrashHandler,
@@ -797,6 +803,69 @@ export function useBoardInteractions({
 		[board, resumeTaskFromTrash, setBoard, tryProgrammaticCardMove],
 	);
 
+	const handleOpenDeleteTask = useCallback(
+		(taskId: string) => {
+			const selection = findCardSelection(board, taskId);
+			if (!selection) {
+				return;
+			}
+			setDeleteTaskTarget(selection.card);
+		},
+		[board],
+	);
+
+	const handleCancelDeleteTask = useCallback(() => {
+		setDeleteTaskTarget(null);
+	}, []);
+
+	const handleConfirmDeleteTask = useCallback(() => {
+		if (!deleteTaskTarget) {
+			return;
+		}
+
+		const task = deleteTaskTarget;
+		const selection = findCardSelection(board, task.id);
+		setDeleteTaskTarget(null);
+		if (!selection) {
+			return;
+		}
+
+		setBoard((currentBoard) => {
+			const currentSelection = findCardSelection(currentBoard, task.id);
+			if (!currentSelection) {
+				return currentBoard;
+			}
+			const deleted = removeTask(currentBoard, task.id);
+			return deleted.removed ? deleted.board : currentBoard;
+		});
+		setSessions((currentSessions) => {
+			if (!currentSessions[task.id]) {
+				return currentSessions;
+			}
+			const nextSessions = { ...currentSessions };
+			delete nextSessions[task.id];
+			return nextSessions;
+		});
+		if (selectedTaskId === task.id) {
+			setSelectedTaskId(null);
+			clearTaskWorkspaceInfo(task.id);
+		}
+
+		void (async () => {
+			await stopTaskSession(task.id);
+			await cleanupTaskWorkspace(task.id, task.worktreeMode);
+		})();
+	}, [
+		board,
+		cleanupTaskWorkspace,
+		deleteTaskTarget,
+		selectedTaskId,
+		setBoard,
+		setSelectedTaskId,
+		setSessions,
+		stopTaskSession,
+	]);
+
 	const handleCancelAutomaticTaskAction = useCallback(
 		(taskId: string) => {
 			setBoard((currentBoard) => {
@@ -877,6 +946,7 @@ export function useBoardInteractions({
 		}
 		resetProgrammaticCardMoves();
 		setIsClearTrashDialogOpen(false);
+		setDeleteTaskTarget(null);
 	}, [resetProgrammaticCardMoves, resolvePendingProgrammaticStartMove, setIsClearTrashDialogOpen]);
 
 	useEffect(() => {
@@ -896,6 +966,10 @@ export function useBoardInteractions({
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
 		handleRestoreTaskFromTrash,
+		handleOpenDeleteTask,
+		handleCancelDeleteTask,
+		handleConfirmDeleteTask,
+		deleteTaskTarget,
 		handleCancelAutomaticTaskAction,
 		handleOpenClearTrash,
 		handleConfirmClearTrash,

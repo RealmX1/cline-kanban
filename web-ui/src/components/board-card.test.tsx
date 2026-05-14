@@ -212,6 +212,28 @@ describe("BoardCard", () => {
 		expect(trashButton?.querySelector("svg.animate-spin")).toBeTruthy();
 	});
 
+	it("shows the permanent delete action on backlog cards", async () => {
+		const onDeleteTask = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="backlog" onDeleteTask={onDeleteTask} />
+				</TooltipProvider>,
+			);
+		});
+
+		const deleteButton = container.querySelector<HTMLButtonElement>('button[aria-label="Delete task permanently"]');
+		expect(deleteButton).toBeInstanceOf(HTMLButtonElement);
+
+		await act(async () => {
+			deleteButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			deleteButton?.click();
+		});
+
+		expect(onDeleteTask).toHaveBeenCalledWith("task-1");
+	});
+
 	it("shows inline see more and less controls for long descriptions", async () => {
 		const description =
 			"Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau final hidden segment";
