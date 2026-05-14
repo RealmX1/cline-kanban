@@ -10,7 +10,11 @@ import type {
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
-import { resolveHomeAgentAppendSystemPrompt } from "../prompts/append-system-prompt";
+import {
+	combineAppendSystemPrompts,
+	resolveHomeAgentAppendSystemPrompt,
+	resolveTaskSessionAppendSystemPrompt,
+} from "../prompts/append-system-prompt";
 import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
 import {
 	compactPersistedMessagesForContextOverflow,
@@ -412,7 +416,10 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 						providerId,
 						rules: runtimeSetup.loadRules(),
 					}));
-				const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(request.taskId);
+				const appendedSystemPrompt = combineAppendSystemPrompts(
+					resolveHomeAgentAppendSystemPrompt(request.taskId),
+					resolveTaskSessionAppendSystemPrompt(request.taskId, request.cwd),
+				);
 				if (appendedSystemPrompt) {
 					systemPrompt = `${systemPrompt}\n\n${appendedSystemPrompt}`;
 				}

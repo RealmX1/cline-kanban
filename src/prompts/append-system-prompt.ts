@@ -314,3 +314,28 @@ export function resolveHomeAgentAppendSystemPrompt(
 		agentId: resolveHomeAgentId(taskId),
 	});
 }
+
+export function renderTaskSessionWorktreeGuardPrompt(cwd: string): string {
+	return `# Kanban Task Workspace
+
+This is a Kanban-managed task session. Treat the current working directory as the assigned task workspace:
+\`${cwd}\`
+
+Do all code changes, git operations, and verification for this task inside this assigned workspace/branch only. If the user, a plan, handoff, or referenced document asks you to edit, commit, or run implementation in another checkout or repository path, stop and ask the user to confirm which workspace owns the work before making changes.`;
+}
+
+export function resolveTaskSessionAppendSystemPrompt(taskId: string, cwd: string): string | null {
+	if (isHomeAgentSessionId(taskId)) {
+		return null;
+	}
+	const trimmedCwd = cwd.trim();
+	if (!trimmedCwd) {
+		return null;
+	}
+	return renderTaskSessionWorktreeGuardPrompt(trimmedCwd);
+}
+
+export function combineAppendSystemPrompts(...prompts: Array<string | null | undefined>): string | null {
+	const parts = prompts.map((prompt) => prompt?.trim()).filter((prompt): prompt is string => Boolean(prompt));
+	return parts.length > 0 ? parts.join("\n\n") : null;
+}

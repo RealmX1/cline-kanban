@@ -12,7 +12,11 @@ import type {
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { quoteShellArg } from "../core/shell";
 import { lockedFileSystem } from "../fs/locked-file-system";
-import { resolveHomeAgentAppendSystemPrompt } from "../prompts/append-system-prompt";
+import {
+	combineAppendSystemPrompts,
+	resolveHomeAgentAppendSystemPrompt,
+	resolveTaskSessionAppendSystemPrompt,
+} from "../prompts/append-system-prompt";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { configureCodexHooks, hasCodexConfigOverride } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
@@ -640,6 +644,22 @@ function toClaudeBracketedPasteSubmission(command: string): string {
 	return `\u001b[200~${command}\u001b[201~\r\r`;
 }
 
+function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string | null {
+	return combineAppendSystemPrompts(
+		resolveHomeAgentAppendSystemPrompt(input.taskId),
+		resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd),
+	);
+}
+
+function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): string {
+	const prompt = input.prompt.trim();
+	const taskSessionPrompt = resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd);
+	if (!prompt || !taskSessionPrompt) {
+		return input.prompt;
+	}
+	return `${taskSessionPrompt}\n\n# Task\n${input.prompt}`;
+}
+
 const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const args = [...input.args];
@@ -647,7 +667,7 @@ const claudeAdapter: AgentSessionAdapter = {
 			CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1",
 			FORCE_HYPERLINK: "1",
 		};
-		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
+		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 		if (
 			input.autonomousModeEnabled &&
 			!input.startInPlanMode &&
@@ -776,7 +796,7 @@ const codexAdapter: AgentSessionAdapter = {
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
 		let deferredStartupInput: string | undefined;
-		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
+		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 
 		if (!hasCodexConfigOverride(codexArgs, "check_for_update_on_startup")) {
 			codexArgs.push("-c", "check_for_update_on_startup=false");
@@ -915,7 +935,8 @@ const geminiAdapter: AgentSessionAdapter = {
 			env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = configPath;
 		}
 
-		const trimmed = input.prompt.trim();
+		const prompt = prependTaskSessionGuidanceToPrompt(input);
+		const trimmed = prompt.trim();
 		if (trimmed) {
 			args.push("-i", trimmed);
 			return {
@@ -1209,7 +1230,8 @@ const opencodeAdapter: AgentSessionAdapter = {
 			}
 		}
 
-		const trimmed = input.prompt.trim();
+		const prompt = prependTaskSessionGuidanceToPrompt(input);
+		const trimmed = prompt.trim();
 		if (trimmed) {
 			args.push("--prompt", trimmed);
 			return {
@@ -1287,7 +1309,7 @@ const droidAdapter: AgentSessionAdapter = {
 			}
 		}
 
-		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
+		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 		if (
 			appendedSystemPrompt &&
 			!hasCliOption(args, "--append-system-prompt") &&
@@ -1296,7 +1318,7 @@ const droidAdapter: AgentSessionAdapter = {
 			args.push("--append-system-prompt", appendedSystemPrompt);
 		}
 
-		const withPromptLaunch = withPrompt(args, input.prompt, "append");
+		const withPromptLaunch = withPrompt(args, prependTaskSessionGuidanceToPrompt(input), "append");
 		return {
 			...withPromptLaunch,
 			env: {
@@ -1321,7 +1343,7 @@ const kiroAdapter: AgentSessionAdapter = {
 		}
 
 		const hooks = resolveHookContext(input);
-		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
+		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 		if (hooks || appendedSystemPrompt) {
 			const configPath = getKiroAgentConfigPath();
 			const config: Record<string, unknown> = {
@@ -1467,7 +1489,7 @@ const clineAdapter: AgentSessionAdapter = {
 			);
 		}
 
-		const withPromptLaunch = withPrompt(args, input.prompt, "append");
+		const withPromptLaunch = withPrompt(args, prependTaskSessionGuidanceToPrompt(input), "append");
 		return {
 			...withPromptLaunch,
 			env: {

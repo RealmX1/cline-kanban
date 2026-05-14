@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	combineAppendSystemPrompts,
 	renderAppendSystemPrompt,
 	resolveAppendSystemPromptCommandPrefix,
 	resolveHomeAgentAppendSystemPrompt,
+	resolveTaskSessionAppendSystemPrompt,
 } from "../../src/prompts/append-system-prompt";
 
 describe("resolveAppendSystemPromptCommandPrefix", () => {
@@ -132,5 +134,25 @@ describe("resolveHomeAgentAppendSystemPrompt", () => {
 		expect(prompt).toContain("Current home agent: `kiro`");
 		expect(prompt).toContain("kiro-cli mcp add --name linear --url https://mcp.linear.app/mcp --scope global");
 		expect(prompt).not.toContain("--scope user");
+	});
+});
+
+describe("resolveTaskSessionAppendSystemPrompt", () => {
+	it("injects a task workspace guard for non-home task sessions", () => {
+		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo");
+		expect(prompt).toContain("Kanban-managed task session");
+		expect(prompt).toContain("`/tmp/worktrees/task-1/repo`");
+		expect(prompt).toContain("assigned workspace/branch only");
+		expect(prompt).toContain("ask the user to confirm which workspace owns the work");
+	});
+
+	it("does not inject a task workspace guard for home sidebar sessions", () => {
+		expect(resolveTaskSessionAppendSystemPrompt("__home_agent__:workspace-1:codex", "/tmp/repo")).toBeNull();
+	});
+});
+
+describe("combineAppendSystemPrompts", () => {
+	it("joins only non-empty prompts", () => {
+		expect(combineAppendSystemPrompts("first", null, "  ", "second")).toBe("first\n\nsecond");
 	});
 });

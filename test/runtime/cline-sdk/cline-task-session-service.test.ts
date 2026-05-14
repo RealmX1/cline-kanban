@@ -964,6 +964,35 @@ describe("InMemoryClineTaskSessionService", () => {
 		expect(summary.warningMessage).toBeNull();
 	});
 
+	it("appends task workspace guard instructions for native task sessions", async () => {
+		const { service, runtime } = createTrackedService();
+
+		await service.startTaskSession({
+			taskId: "task-1",
+			cwd: "/tmp/worktrees/task-1/repo",
+			prompt: "Implement the task",
+		});
+		await vi.waitFor(() => {
+			expect(runtime.startTaskSessionMock).toHaveBeenCalledTimes(1);
+		});
+
+		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				systemPrompt: expect.stringContaining("Kanban-managed task session"),
+			}),
+		);
+		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				systemPrompt: expect.stringContaining("`/tmp/worktrees/task-1/repo`"),
+			}),
+		);
+		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				systemPrompt: expect.stringContaining("ask the user to confirm which workspace owns the work"),
+			}),
+		);
+	});
+
 	it("appends Kanban sidebar instructions for home sessions", async () => {
 		const { service, runtime } = createTrackedService();
 		setKanbanProcessContext();

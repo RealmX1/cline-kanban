@@ -164,6 +164,24 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(getCodexConfigOverrideValues(launch.args, "check_for_update_on_startup")).toEqual(["false"]);
 	});
 
+	it("adds task workspace guard instructions to Codex developer instructions", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-worktree-guard",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/worktrees/task-1/repo",
+			prompt: "",
+		});
+
+		const developerInstructions = getCodexConfigOverrideValues(launch.args, "developer_instructions");
+		expect(developerInstructions).toHaveLength(1);
+		expect(developerInstructions[0]).toContain("Kanban-managed task session");
+		expect(developerInstructions[0]).toContain("`/tmp/worktrees/task-1/repo`");
+		expect(developerInstructions[0]).toContain("ask the user to confirm which workspace owns the work");
+	});
+
 	it("launches Codex without alternate screen so terminal scrollback keeps session history", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
@@ -208,6 +226,25 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.deferredStartupInput).toContain("\u001b[200~");
 		expect(launch.deferredStartupInput).toContain("Implement the task");
 		expect(launch.deferredStartupInput?.endsWith("\r\r")).toBe(true);
+	});
+
+	it("appends task workspace guard instructions for Claude task sessions", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-worktree-guard",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/worktrees/task-1/repo",
+			prompt: "Implement the task",
+		});
+
+		const appendPromptIndex = launch.args.indexOf("--append-system-prompt");
+		expect(appendPromptIndex).toBeGreaterThanOrEqual(0);
+		const appendedPrompt = launch.args[appendPromptIndex + 1];
+		expect(appendedPrompt).toContain("Kanban-managed task session");
+		expect(appendedPrompt).toContain("`/tmp/worktrees/task-1/repo`");
+		expect(appendedPrompt).toContain("ask the user to confirm which workspace owns the work");
 	});
 
 	it("does not duplicate an explicit Codex no-alt-screen flag", async () => {
@@ -656,6 +693,24 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(postToolUseScript).toContain("to_in_progress");
 		expect(postToolUseScript).toContain("ask_followup_question");
 		expect(postToolUseScript).toContain("plan_mode_respond");
+	});
+
+	it("prepends task workspace guard instructions for Cline CLI task prompts", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cline-worktree-guard",
+			agentId: "cline",
+			binary: "cline",
+			args: [],
+			cwd: "/tmp/worktrees/task-1/repo",
+			prompt: "Implement the task",
+		});
+
+		const prompt = launch.args.at(-1) ?? "";
+		expect(prompt).toContain("Kanban-managed task session");
+		expect(prompt).toContain("`/tmp/worktrees/task-1/repo`");
+		expect(prompt).toContain("ask the user to confirm which workspace owns the work");
+		expect(prompt).toContain("# Task\nImplement the task");
 	});
 
 	it("adds resume flags for each agent", async () => {
