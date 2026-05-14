@@ -2,6 +2,7 @@
 // It combines live in-memory updates with hydration from persisted SDK
 // session artifacts so the rest of the backend can read one repository shape.
 import type { RuntimeTaskImage, RuntimeTaskSessionSummary, RuntimeTaskTurnCheckpoint } from "../core/api-contract";
+import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import type { ClinePersistedTaskSessionSnapshot } from "./cline-session-runtime";
 import {
 	type ClineTaskMessage,
@@ -100,11 +101,27 @@ export class InMemoryClineMessageRepository implements ClineMessageRepository {
 		if (cachedMessages) {
 			return cachedMessages.map((message) => cloneMessage(message));
 		}
-		const persistedSession = await loadPersistedSession();
+		// Surface persisted-session read failures and empty hydrations. The previous
+		// behavior silently returned [], which masked the "trash-resume comes back blank"
+		// class of bugs because the caller could not distinguish "no session on disk"
+		// from "read crashed" or "session present but empty".
+		let persistedSession: ClinePersistedTaskSessionSnapshot | null = null;
+		try {
+			persistedSession = await loadPersistedSession();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			logTuiFreezeError(`[tui-freeze] hydration-error taskId=${taskId} error=${JSON.stringify(message)}`, error);
+			return [];
+		}
 		if (!persistedSession) {
 			return [];
 		}
 		const hydratedMessages = hydratePersistedSessionMessages(taskId, persistedSession.messages);
+		if (hydratedMessages.length === 0) {
+			logTuiFreezeWarning(
+				`[tui-freeze] hydration-empty taskId=${taskId} persistedMessageCount=${persistedSession.messages.length}`,
+			);
+		}
 		this.hydratedMessagesByTaskId.set(taskId, hydratedMessages);
 		return hydratedMessages.map((message) => cloneMessage(message));
 	}

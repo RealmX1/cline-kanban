@@ -39,6 +39,8 @@ function createPersistentTerminalMock() {
 		searchNext: vi.fn(() => true),
 		searchPrevious: vi.fn(() => true),
 		stop: vi.fn(async () => {}),
+		refresh: vi.fn(async () => ({ ok: true })),
+		consumeRestartResetSuppression: vi.fn(() => false),
 	};
 }
 

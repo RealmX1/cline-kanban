@@ -27,6 +27,7 @@ export interface UsePersistentTerminalSessionResult {
 	containerRef: MutableRefObject<HTMLDivElement | null>;
 	lastError: string | null;
 	isStopping: boolean;
+	isRefreshing: boolean;
 	isSearchOpen: boolean;
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
@@ -35,6 +36,7 @@ export interface UsePersistentTerminalSessionResult {
 	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	openTerminalSearch: () => void;
+	refreshTerminal: () => Promise<void>;
 	stopTerminal: () => Promise<void>;
 }
 
@@ -73,6 +75,7 @@ export function usePersistentTerminalSession({
 	} | null>(null);
 	const [lastError, setLastError] = useState<string | null>(null);
 	const [isStopping, setIsStopping] = useState(false);
+	const [isRefreshing, setIsRefreshing] = useState(false);
 	const [isSearchOpen, setIsSearchOpen] = useState(false);
 	const [searchOpenRequestKey, setSearchOpenRequestKey] = useState(0);
 	const [searchResults, setSearchResults] = useState<TerminalSearchResultState>(getEmptyTerminalSearchResults);
@@ -151,7 +154,12 @@ export function usePersistentTerminalSession({
 			themeColors,
 		});
 		if (didSessionRestart) {
-			terminal.reset();
+			// User-initiated refresh sets a suppression flag so the existing scrollback
+			// (including the "[kanban] Refreshing terminal session..." banner) survives
+			// the PTY swap. Normal restarts (e.g., trash-resume drag) still reset.
+			if (!terminal.consumeRestartResetSuppression()) {
+				terminal.reset();
+			}
 		}
 		previousSessionRef.current = {
 			workspaceId,
@@ -233,6 +241,25 @@ export function usePersistentTerminalSession({
 		}
 	}, []);
 
+	const refreshTerminal = useCallback(async () => {
+		const terminal = terminalRef.current;
+		if (!terminal) {
+			return;
+		}
+		setIsRefreshing(true);
+		try {
+			const result = await terminal.refresh();
+			if (!result.ok && result.error) {
+				setLastError(result.error);
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			setLastError(message);
+		} finally {
+			setIsRefreshing(false);
+		}
+	}, []);
+
 	const clearTerminal = useCallback(() => {
 		terminalRef.current?.clear();
 	}, []);
@@ -262,6 +289,7 @@ export function usePersistentTerminalSession({
 		containerRef,
 		lastError,
 		isStopping,
+		isRefreshing,
 		isSearchOpen,
 		searchOpenRequestKey,
 		searchResults,
@@ -270,6 +298,7 @@ export function usePersistentTerminalSession({
 		findNextInTerminal,
 		findPreviousInTerminal,
 		openTerminalSearch,
+		refreshTerminal,
 		stopTerminal,
 	};
 }

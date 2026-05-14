@@ -42,10 +42,12 @@ import {
 	parseTaskSessionInputRequest,
 	parseTaskSessionStartRequest,
 	parseTaskSessionStopRequest,
+	parseTaskTerminalRefreshRequest,
 } from "../core/api-validation";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { openInBrowser } from "../server/browser";
+import { loadWorkspaceBoardById } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { resolveTaskCwd } from "../workspace/task-worktree";
@@ -347,6 +349,99 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				return {
 					ok: true,
 					summary: nextSummary,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					ok: false,
+					summary: null,
+					error: message,
+				};
+			}
+		},
+		refreshTaskTerminal: async (workspaceScope, input) => {
+			try {
+				const body = parseTaskTerminalRefreshRequest(input);
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const currentSummary = terminalManager.getSummary(body.taskId);
+				if (!currentSummary) {
+					return {
+						ok: false,
+						summary: null,
+						error: "No terminal session to refresh.",
+					};
+				}
+				if (currentSummary.agentId === null || currentSummary.agentId === "cline") {
+					return {
+						ok: false,
+						summary: null,
+						error: "Refresh is only available for active TUI terminal agents.",
+					};
+				}
+				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+				let card: (typeof board.columns)[number]["cards"][number] | null = null;
+				for (const column of board.columns) {
+					const found = column.cards.find((entry) => entry.id === body.taskId);
+					if (found) {
+						card = found;
+						break;
+					}
+				}
+				if (!card) {
+					return {
+						ok: false,
+						summary: null,
+						error: "Card not found in the workspace board.",
+					};
+				}
+				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+				const effectiveAgentId = currentSummary.agentId ?? card.agentId ?? scopedRuntimeConfig.selectedAgentId;
+				const resolvedConfig =
+					effectiveAgentId !== scopedRuntimeConfig.selectedAgentId
+						? { ...scopedRuntimeConfig, selectedAgentId: effectiveAgentId }
+						: scopedRuntimeConfig;
+				const resolved = resolveAgentCommand(resolvedConfig);
+				if (!resolved) {
+					return {
+						ok: false,
+						summary: null,
+						error: "No runnable agent command is configured.",
+					};
+				}
+				const taskCwd = isHomeAgentSessionId(body.taskId)
+					? workspaceScope.workspacePath
+					: await resolveExistingTaskCwdOrEnsure({
+							cwd: workspaceScope.workspacePath,
+							taskId: body.taskId,
+							baseRef: card.baseRef,
+							worktreeMode: card.worktreeMode,
+						});
+				// Heuristic: if the previous session produced any output, a rollout likely
+				// exists on disk, so try to resume (Codex resume --last). If we never saw
+				// output, replay the starting prompt fresh — this is the path that recovers
+				// long auto-fork prompts the user may have never observed.
+				const tryResume = currentSummary.lastOutputAt !== null;
+				const summary = await terminalManager.refreshTaskTerminal({
+					taskId: body.taskId,
+					agentId: resolved.agentId,
+					binary: resolved.binary,
+					args: resolved.args,
+					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
+					cwd: taskCwd,
+					prompt: tryResume ? "" : card.prompt,
+					images: tryResume ? undefined : card.images,
+					startInPlanMode: tryResume ? undefined : card.startInPlanMode,
+					resumeFromTrash: tryResume,
+					cols: body.cols,
+					rows: body.rows,
+					workspaceId: workspaceScope.workspaceId,
+					projectPath: workspaceScope.workspacePath,
+					parentSessionId: tryResume ? undefined : card.parentSessionId,
+				});
+				return {
+					ok: true,
+					summary,
+					mode: tryResume ? "resume" : "fresh",
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

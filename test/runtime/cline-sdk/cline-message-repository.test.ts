@@ -153,4 +153,34 @@ describe("InMemoryClineMessageRepository", () => {
 		expect(await repository.hydrateTaskMessages("task-1", loadPersistedSession)).toEqual([]);
 		expect(loadPersistedSession).toHaveBeenCalledTimes(2);
 	});
+
+	it("logs and recovers when the persisted-session loader throws instead of silently returning []", async () => {
+		const repository = createInMemoryClineMessageRepository();
+		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const loadPersistedSession = vi.fn(async () => {
+			throw new Error("disk read failed");
+		});
+
+		const messages = await repository.hydrateTaskMessages("task-broken", loadPersistedSession);
+
+		expect(messages).toEqual([]);
+		const combined = stderrSpy.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
+		expect(combined).toContain("[tui-freeze] hydration-error");
+		expect(combined).toContain("task-broken");
+		stderrSpy.mockRestore();
+	});
+
+	it("warns when persisted session exists but yields zero hydrated messages", async () => {
+		const repository = createInMemoryClineMessageRepository();
+		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const loadPersistedSession = vi.fn(async () => createPersistedSnapshot([]));
+
+		const messages = await repository.hydrateTaskMessages("task-empty", loadPersistedSession);
+
+		expect(messages).toEqual([]);
+		const combined = stderrSpy.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
+		expect(combined).toContain("[tui-freeze] hydration-empty");
+		expect(combined).toContain("task-empty");
+		stderrSpy.mockRestore();
+	});
 });

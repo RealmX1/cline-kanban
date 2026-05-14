@@ -1024,6 +1024,21 @@ export const runtimeTaskSessionStopResponseSchema = z.object({
 });
 export type RuntimeTaskSessionStopResponse = z.infer<typeof runtimeTaskSessionStopResponseSchema>;
 
+export const runtimeTaskTerminalRefreshRequestSchema = z.object({
+	taskId: z.string(),
+	cols: z.number().int().positive().optional(),
+	rows: z.number().int().positive().optional(),
+});
+export type RuntimeTaskTerminalRefreshRequest = z.infer<typeof runtimeTaskTerminalRefreshRequestSchema>;
+
+export const runtimeTaskTerminalRefreshResponseSchema = z.object({
+	ok: z.boolean(),
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	mode: z.enum(["resume", "fresh"]).optional(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskTerminalRefreshResponse = z.infer<typeof runtimeTaskTerminalRefreshResponseSchema>;
+
 export const runtimeTaskSessionInputRequestSchema = z.object({
 	taskId: z.string(),
 	text: z.string(),

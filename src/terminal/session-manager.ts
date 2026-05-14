@@ -9,6 +9,7 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
+import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
 	type AgentAdapterLaunchInput,
 	type AgentOutputTransitionDetector,
@@ -42,6 +43,20 @@ import { TerminalStateMirror } from "./terminal-state-mirror";
 const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
+const DEFAULT_STALL_THRESHOLD_MS = 45_000;
+const STALL_SCAN_INTERVAL_MS = 15_000;
+
+function readStallThresholdMs(): number {
+	const raw = process.env.CLINE_TUI_STALL_MS;
+	if (!raw) {
+		return DEFAULT_STALL_THRESHOLD_MS;
+	}
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return DEFAULT_STALL_THRESHOLD_MS;
+	}
+	return Math.floor(parsed);
+}
 // TUI apps (Codex, OpenCode) can query OSC 10/11 before the browser terminal is attached
 // and ready to answer. We intercept those startup probes during early PTY output, synthesize
 // foreground/background color replies, then disable the filter once a live terminal listener
@@ -89,6 +104,9 @@ interface SessionEntry {
 	suppressAutoRestartOnExit: boolean;
 	autoRestartTimestamps: number[];
 	pendingAutoRestart: Promise<void> | null;
+	// Reference timestamp for the most recent stall window we have already logged.
+	// Reset to null when output advances, so each new silent window gets exactly one log line.
+	lastStallLoggedAt: number | null;
 }
 
 export interface StartTaskSessionRequest {
@@ -244,6 +262,8 @@ function clearClaudeStartupReadinessTimer(state: { claudeStartupReadinessTimer: 
 export class TerminalSessionManager implements TerminalSessionService {
 	private readonly entries = new Map<string, SessionEntry>();
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
+	private readonly stallThresholdMs = readStallThresholdMs();
+	private stallScanInterval: NodeJS.Timeout | null = null;
 
 	private trySendDeferredStartupInput(taskId: string): boolean {
 		const entry = this.entries.get(taskId);
@@ -267,6 +287,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 在已经 idle 的 session 上空跑回调。
 		clearClaudeStartupReadinessTimer(active);
 		active.session.write(deferredInput);
+		logTuiFreezeWarning(
+			`[tui-freeze] codex-startup-prompt-flushed taskId=${taskId} agentId=${entry.summary.agentId} chars=${deferredInput.length}`,
+		);
 		return true;
 	}
 
@@ -298,6 +321,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				suppressAutoRestartOnExit: false,
 				autoRestartTimestamps: [],
 				pendingAutoRestart: null,
+				lastStallLoggedAt: null,
 			});
 		}
 	}
@@ -610,6 +634,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
+		entry.lastStallLoggedAt = null;
+		this.ensureStallScanRunning();
 
 		// 独立的 wall-clock 兜底：Claude 可能在一个 chunk 里渲染完启动 UI，而 readiness
 		// predicate 漏识别（例如 TUI 文案改写、边框被切分到两块 chunk 里），此后不会
@@ -1037,6 +1063,72 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(entry.summary);
 	}
 
+	// Stop the PTY and wait until the process group has actually exited.
+	// Tries SIGTERM first; escalates to SIGKILL after the graceful window so
+	// a wedged TUI cannot block a user-initiated refresh.
+	async forceStopTaskSession(taskId: string, gracefulTimeoutMs = 2_000): Promise<void> {
+		const entry = this.entries.get(taskId);
+		if (!entry?.active) {
+			return;
+		}
+		const active = entry.active;
+		entry.suppressAutoRestartOnExit = true;
+		const cleanupFn = active.onSessionCleanup;
+		active.onSessionCleanup = null;
+		stopWorkspaceTrustTimers(active);
+		active.session.stop();
+		const gracefulDeadline = now() + gracefulTimeoutMs;
+		while (now() < gracefulDeadline) {
+			if (active.session.hasExited()) {
+				if (cleanupFn) {
+					cleanupFn().catch(() => undefined);
+				}
+				return;
+			}
+			await new Promise<void>((resolve) => setTimeout(resolve, 50));
+		}
+		if (!active.session.hasExited()) {
+			active.session.stop({ force: true });
+			const forceDeadline = now() + 500;
+			while (now() < forceDeadline && !active.session.hasExited()) {
+				await new Promise<void>((resolve) => setTimeout(resolve, 25));
+			}
+		}
+		if (!active.session.hasExited()) {
+			// PTY 在 SIGKILL + 500ms 轮询后仍未退出（zombie / 容器 PID 1 等罕见场景）。
+			// 记录 tui-freeze 错误，并显式释放 entry.active，让后续 startTaskSession
+			// 进入 fresh-spawn 分支恢复任务，旧 PTY 进程交由 OS 回收。
+			logTuiFreezeError(
+				`[tui-freeze] force-kill-timeout taskId=${taskId} agentId=${entry.summary.agentId ?? "(none)"} pid=${entry.summary.pid ?? "(none)"}`,
+			);
+			entry.active = null;
+		}
+		if (cleanupFn) {
+			cleanupFn().catch(() => undefined);
+		}
+	}
+
+	// User-initiated terminal refresh. Caller resolves the agent command, cwd, and
+	// the card-derived prompt; we handle the stop/wait/respawn dance and emit a
+	// visible scrollback banner so the user can see the refresh moment.
+	async refreshTaskTerminal(request: StartTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
+		await this.forceStopTaskSession(request.taskId, 2_000);
+		const summary = await this.startTaskSession(request);
+		// startTaskSession disposes the old terminal state mirror and creates a fresh one,
+		// so the banner must be written AFTER the new mirror exists. Otherwise late-attach
+		// viewers reattaching via the control socket would receive a restore snapshot from
+		// the new mirror that never saw the banner.
+		const entry = this.entries.get(request.taskId);
+		if (entry) {
+			const banner = Buffer.from("\r\n[kanban] Refreshing terminal session...\r\n", "utf8");
+			entry.terminalStateMirror?.applyOutput(banner);
+			for (const listener of entry.listeners.values()) {
+				listener.onOutput?.(banner);
+			}
+		}
+		return summary;
+	}
+
 	markInterruptedAndStopAll(): RuntimeTaskSessionSummary[] {
 		const activeEntries = Array.from(this.entries.values()).filter((entry) => entry.active != null);
 		for (const entry of activeEntries) {
@@ -1066,6 +1158,55 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return updateSummary(entry, transition.patch);
 	}
 
+	private ensureStallScanRunning(): void {
+		if (this.stallScanInterval !== null) {
+			return;
+		}
+		const interval = setInterval(() => {
+			this.scanForStalls();
+		}, STALL_SCAN_INTERVAL_MS);
+		// Don't keep Node alive just for this probe; production has other refs.
+		interval.unref?.();
+		this.stallScanInterval = interval;
+	}
+
+	private scanForStalls(): void {
+		const currentTime = now();
+		for (const [taskId, entry] of this.entries.entries()) {
+			if (!entry.active || !isActiveState(entry.summary.state)) {
+				entry.lastStallLoggedAt = null;
+				continue;
+			}
+			if (entry.summary.agentId === null) {
+				// Skip raw shell sessions; the stall probe is scoped to agent TUIs.
+				continue;
+			}
+			const baseline = entry.summary.lastOutputAt ?? entry.summary.startedAt;
+			if (!baseline) {
+				continue;
+			}
+			const elapsed = currentTime - baseline;
+			if (elapsed < this.stallThresholdMs) {
+				entry.lastStallLoggedAt = null;
+				continue;
+			}
+			if (entry.lastStallLoggedAt !== null && entry.lastStallLoggedAt >= baseline) {
+				continue;
+			}
+			logTuiFreezeWarning(
+				`[tui-freeze] stall-detected taskId=${taskId} agentId=${entry.summary.agentId} pid=${entry.summary.pid ?? "(none)"} state=${entry.summary.state} elapsedMs=${elapsed} thresholdMs=${this.stallThresholdMs}`,
+			);
+			entry.lastStallLoggedAt = baseline;
+		}
+	}
+
+	dispose(): void {
+		if (this.stallScanInterval !== null) {
+			clearInterval(this.stallScanInterval);
+			this.stallScanInterval = null;
+		}
+	}
+
 	private ensureEntry(taskId: string): SessionEntry {
 		const existing = this.entries.get(taskId);
 		if (existing) {
@@ -1081,6 +1222,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			suppressAutoRestartOnExit: false,
 			autoRestartTimestamps: [],
 			pendingAutoRestart: null,
+			lastStallLoggedAt: null,
 		};
 		this.entries.set(taskId, created);
 		return created;

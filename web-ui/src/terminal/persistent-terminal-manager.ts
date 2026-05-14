@@ -28,6 +28,7 @@ const RESIZE_DEBOUNCE_MS = 50;
 const INTERRUPT_IDLE_SETTLE_MS = 250;
 const TERMINAL_RECONNECT_INITIAL_DELAY_MS = 250;
 const TERMINAL_RECONNECT_MAX_DELAY_MS = 5_000;
+const VIEWER_QUEUE_STALL_MS = 5_000;
 const PARKING_ROOT_ID = "kb-persistent-terminal-parking-root";
 const HOME_TERMINAL_TASK_ID = "__home_terminal__";
 const DETAIL_TERMINAL_TASK_PREFIX = "__detail_terminal__:";
@@ -217,10 +218,15 @@ class PersistentTerminal {
 	private restoreCompleted = false;
 	private outputTextDecoder = new TextDecoder();
 	private terminalWriteQueue: Promise<void> = Promise.resolve();
+	private slowFlushLogged = false;
 	private lastSentResizeMessage: RuntimeTerminalWsResizeMessage | null = null;
 	private reconnectTimer: number | null = null;
 	private reconnectAttempt = 0;
 	private disposed = false;
+	// User-initiated refresh swaps the backing PTY but should NOT wipe the visible
+	// scrollback. The hook reads and clears this flag before deciding whether the
+	// new sessionStartedAt warrants resetting the xterm instance.
+	private suppressNextRestartReset = false;
 
 	constructor(
 		private readonly taskId: string,
@@ -397,6 +403,7 @@ class PersistentTerminal {
 	): Promise<void> {
 		const ackBytes = options.ackBytes ?? 0;
 		const notifyText = options.notifyText ?? null;
+		const enqueuedAt = performance.now();
 		this.terminalWriteQueue = this.terminalWriteQueue
 			.catch(() => undefined)
 			.then(
@@ -409,6 +416,17 @@ class PersistentTerminal {
 						const shouldKeepScrolledToBottom =
 							options.keepScrolledToBottom === false ? false : this.shouldKeepScrolledToBottom();
 						this.terminal.write(data, () => {
+							const elapsed = performance.now() - enqueuedAt;
+							if (elapsed > VIEWER_QUEUE_STALL_MS) {
+								if (!this.slowFlushLogged) {
+									console.warn(
+										`[tui-freeze] viewer-queue taskId=${this.taskId} elapsedMs=${Math.round(elapsed)}`,
+									);
+									this.slowFlushLogged = true;
+								}
+							} else if (this.slowFlushLogged) {
+								this.slowFlushLogged = false;
+							}
 							if (notifyText) {
 								this.notifyOutputText(notifyText);
 							}
@@ -883,6 +901,31 @@ class PersistentTerminal {
 		this.sendControlMessage({ type: "stop" });
 		const trpcClient = getRuntimeTrpcClient(this.workspaceId);
 		await trpcClient.runtime.stopTaskSession.mutate({ taskId: this.taskId });
+	}
+
+	async refresh(): Promise<{ ok: boolean; error?: string; mode?: "resume" | "fresh" }> {
+		this.suppressNextRestartReset = true;
+		const trpcClient = getRuntimeTrpcClient(this.workspaceId);
+		try {
+			const result = await trpcClient.runtime.refreshTaskTerminal.mutate({
+				taskId: this.taskId,
+				cols: this.terminal.cols,
+				rows: this.terminal.rows,
+			});
+			if (!result.ok) {
+				this.suppressNextRestartReset = false;
+			}
+			return { ok: result.ok, error: result.error, mode: result.mode };
+		} catch (error) {
+			this.suppressNextRestartReset = false;
+			throw error;
+		}
+	}
+
+	consumeRestartResetSuppression(): boolean {
+		const value = this.suppressNextRestartReset;
+		this.suppressNextRestartReset = false;
+		return value;
 	}
 
 	dispose(): void {

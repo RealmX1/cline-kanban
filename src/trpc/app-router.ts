@@ -81,6 +81,8 @@ import type {
 	RuntimeTaskSessionStartResponse,
 	RuntimeTaskSessionStopRequest,
 	RuntimeTaskSessionStopResponse,
+	RuntimeTaskTerminalRefreshRequest,
+	RuntimeTaskTerminalRefreshResponse,
 	RuntimeTaskWorkspaceInfoRequest,
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeUpdateStatusResponse,
@@ -172,6 +174,8 @@ import {
 	runtimeTaskSessionStartResponseSchema,
 	runtimeTaskSessionStopRequestSchema,
 	runtimeTaskSessionStopResponseSchema,
+	runtimeTaskTerminalRefreshRequestSchema,
+	runtimeTaskTerminalRefreshResponseSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
 	runtimeTaskWorkspaceInfoResponseSchema,
 	runtimeUpdateStatusResponseSchema,
@@ -222,6 +226,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStopRequest,
 		) => Promise<RuntimeTaskSessionStopResponse>;
+		refreshTaskTerminal: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskTerminalRefreshRequest,
+		) => Promise<RuntimeTaskTerminalRefreshResponse>;
 		sendTaskSessionInput: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionInputRequest,
@@ -466,6 +474,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskSessionStopResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.stopTaskSession(ctx.workspaceScope, input);
+			}),
+		refreshTaskTerminal: workspaceProcedure
+			.input(runtimeTaskTerminalRefreshRequestSchema)
+			.output(runtimeTaskTerminalRefreshResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.refreshTaskTerminal(ctx.workspaceScope, input);
 			}),
 		sendTaskSessionInput: workspaceProcedure
 			.input(runtimeTaskSessionInputRequestSchema)

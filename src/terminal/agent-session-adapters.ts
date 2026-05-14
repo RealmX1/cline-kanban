@@ -11,6 +11,7 @@ import type {
 } from "../core/api-contract";
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { quoteShellArg } from "../core/shell";
+import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import {
 	combineAppendSystemPrompts,
@@ -878,6 +879,10 @@ const codexAdapter: AgentSessionAdapter = {
 		} else if (trimmed) {
 			codexArgs.push(trimmed);
 		}
+
+		logTuiFreezeWarning(
+			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${parentSessionId !== null} hasResume=${Boolean(input.resumeFromTrash)} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
+		);
 
 		if (hooks) {
 			return {

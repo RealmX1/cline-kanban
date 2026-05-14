@@ -50,12 +50,21 @@ function isIgnorablePtyResizeError(error: unknown): boolean {
 	return error.message.toLowerCase().includes("already exited");
 }
 
-function terminatePtyProcess(ptyProcess: pty.IPty): void {
+function terminatePtyProcess(ptyProcess: pty.IPty, options: { force?: boolean } = {}): void {
 	const pid = ptyProcess.pid;
-	ptyProcess.kill();
+	const groupSignal: NodeJS.Signals = options.force ? "SIGKILL" : "SIGTERM";
+	try {
+		if (options.force) {
+			ptyProcess.kill("SIGKILL");
+		} else {
+			ptyProcess.kill();
+		}
+	} catch {
+		// Process already exited or PTY already torn down; nothing to do.
+	}
 	if (process.platform !== "win32" && Number.isFinite(pid) && pid > 0) {
 		try {
-			process.kill(-pid, "SIGTERM");
+			process.kill(-pid, groupSignal);
 		} catch {
 			// Best effort: process group may already be gone or inaccessible.
 		}
@@ -148,11 +157,15 @@ export class PtySession {
 		this.ptyProcess.resume();
 	}
 
-	stop(options?: { interrupted?: boolean }): void {
+	stop(options?: { interrupted?: boolean; force?: boolean }): void {
 		if (options?.interrupted) {
 			this.interrupted = true;
 		}
-		terminatePtyProcess(this.ptyProcess);
+		terminatePtyProcess(this.ptyProcess, { force: options?.force });
+	}
+
+	hasExited(): boolean {
+		return this.exited;
 	}
 
 	wasInterrupted(): boolean {

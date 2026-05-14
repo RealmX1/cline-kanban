@@ -8,6 +8,7 @@ import {
 	Maximize2,
 	MessageSquare,
 	Minimize2,
+	RotateCcw,
 	Search,
 	X,
 } from "lucide-react";
@@ -28,11 +29,13 @@ interface AgentTerminalSessionControls {
 	clearTerminal: () => void;
 	containerRef: MutableRefObject<HTMLDivElement | null>;
 	isStopping: boolean;
+	isRefreshing: boolean;
 	isSearchOpen: boolean;
 	lastError: string | null;
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
 	stopTerminal: () => Promise<void>;
+	refreshTerminal: () => Promise<void>;
 	closeTerminalSearch: () => void;
 	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
@@ -114,6 +117,36 @@ const statusTagColors: Record<StatusTagStyle, string> = {
 	warning: "bg-status-orange/15 text-status-orange",
 	danger: "bg-status-red/15 text-status-red",
 };
+
+// Mirror the backend stall probe threshold (src/terminal/session-manager.ts).
+// We don't take an action — just surface the dwell time so users can decide.
+const STALL_HINT_THRESHOLD_MS = 45_000;
+const STALL_HINT_TICK_MS = 5_000;
+
+function useStallElapsedMs(summary: RuntimeTaskSessionSummary | null): number | null {
+	const [now, setNow] = useState<number>(() => Date.now());
+	const isRunning = summary?.state === "running";
+	useEffect(() => {
+		if (!isRunning) {
+			return;
+		}
+		const timer = window.setInterval(() => {
+			setNow(Date.now());
+		}, STALL_HINT_TICK_MS);
+		return () => {
+			window.clearInterval(timer);
+		};
+	}, [isRunning]);
+	if (!isRunning || !summary) {
+		return null;
+	}
+	const baseline = summary.lastOutputAt ?? summary.startedAt;
+	if (!baseline) {
+		return null;
+	}
+	const elapsed = now - baseline;
+	return elapsed >= STALL_HINT_THRESHOLD_MS ? elapsed : null;
+}
 
 function formatSearchResultLabel(query: string, results: TerminalSearchResultState): string {
 	if (!query.trim()) {
@@ -341,6 +374,7 @@ function AgentTerminalPanelLayout({
 		containerRef,
 		lastError,
 		isStopping,
+		isRefreshing,
 		isSearchOpen,
 		searchOpenRequestKey,
 		searchResults,
@@ -349,11 +383,14 @@ function AgentTerminalPanelLayout({
 		findNextInTerminal,
 		findPreviousInTerminal,
 		openTerminalSearch,
+		refreshTerminal,
 		stopTerminal,
 	} = sessionControls;
 	const canStop = summary?.state === "running" || summary?.state === "awaiting_review";
+	const canRefresh = summary !== null && summary.agentId !== null && summary.agentId !== "cline";
 	const statusLabel = useMemo(() => describeState(summary), [summary]);
 	const statusTagStyle = useMemo(() => getStateTagStyle(summary), [summary]);
+	const stallElapsedMs = useStallElapsedMs(summary);
 	const agentLabel = useMemo(() => {
 		const normalizedCommand = agentCommand?.trim();
 		if (!normalizedCommand) {
@@ -390,6 +427,11 @@ function AgentTerminalPanelLayout({
 							>
 								{statusLabel}
 							</span>
+							{stallElapsedMs !== null ? (
+								<span className="text-xs text-text-tertiary">
+									No output for {Math.round(stallElapsedMs / 1000)}s
+								</span>
+							) : null}
 						</div>
 						<div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
 							<Tooltip side="top" content="Find in terminal">
@@ -399,6 +441,18 @@ function AgentTerminalPanelLayout({
 									size="sm"
 									onClick={openTerminalSearch}
 									aria-label="Find in terminal"
+								/>
+							</Tooltip>
+							<Tooltip side="top" content="Restart this terminal session (recovers from a frozen TUI)">
+								<Button
+									icon={isRefreshing ? <Spinner size={14} /> : <RotateCcw size={14} />}
+									variant="default"
+									size="sm"
+									onClick={() => {
+										void refreshTerminal();
+									}}
+									disabled={!canRefresh || isRefreshing}
+									aria-label="Refresh terminal session"
 								/>
 							</Tooltip>
 							<Button variant="default" size="sm" onClick={clearTerminal}>
