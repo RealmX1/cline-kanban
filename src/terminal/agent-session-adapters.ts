@@ -18,6 +18,7 @@ import {
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
 import { getRuntimeHomePath } from "../state/workspace-state";
+import { hasClaudeInteractivePrompt, hasClaudeStartupUiRendered } from "./claude-readiness";
 import { configureCodexHooks, hasCodexConfigOverride } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
 import {
@@ -765,9 +766,36 @@ const claudeAdapter: AgentSessionAdapter = {
 				...env,
 			},
 			deferredStartupInput,
+			detectOutputTransition: claudePromptDetector,
+			shouldInspectOutputForTransition: shouldInspectClaudeOutputForTransition,
 		};
 	},
 };
+
+function claudePromptDetector(data: string, summary: RuntimeTaskSessionSummary): SessionTransitionEvent | null {
+	if (summary.state !== "awaiting_review") {
+		return null;
+	}
+	// 仅在 reviewReason === "attention" 时根据 TUI 输出回到 running。
+	// reviewReason === "hook" 表示 Claude 在 Stop / Notification hook 后等待用户审查，
+	// 而 Claude 的 TUI 输入框 / 启动横幅会随着每一次重绘出现 — 如果在 "hook" 下也接受
+	// prompt-ready，那么 hook 触发后下一帧 TUI 重绘就会立刻把状态翻回 running，
+	// "等待审查" 的语义就丢失了。"hook" -> running 应由 UserPromptSubmit hook 走
+	// `hook.to_in_progress` 路径触发，而不是靠终端输出探测。
+	if (summary.reviewReason !== "attention") {
+		return null;
+	}
+	if (hasClaudeInteractivePrompt(data) || hasClaudeStartupUiRendered(data)) {
+		return { type: "agent.prompt-ready" };
+	}
+	return null;
+}
+
+function shouldInspectClaudeOutputForTransition(summary: RuntimeTaskSessionSummary): boolean {
+	// 与 claudePromptDetector 保持一致：仅在 reviewReason === "attention" 时才需要解码
+	// 输出来探测 prompt-ready 转移。
+	return summary.state === "awaiting_review" && summary.reviewReason === "attention";
+}
 
 function codexPromptDetector(data: string, summary: RuntimeTaskSessionSummary): SessionTransitionEvent | null {
 	if (summary.state !== "awaiting_review") {

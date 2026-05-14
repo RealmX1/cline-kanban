@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
 
 const originalHome = process.env.HOME;
@@ -245,6 +246,98 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(appendedPrompt).toContain("Kanban-managed task session");
 		expect(appendedPrompt).toContain("`/tmp/worktrees/task-1/repo`");
 		expect(appendedPrompt).toContain("ask the user to confirm which workspace owns the work");
+	});
+
+	it("exposes a Claude prompt-ready detector and inspection predicate", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-prompt-detector",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Implement the task",
+		});
+
+		expect(typeof launch.detectOutputTransition).toBe("function");
+		expect(typeof launch.shouldInspectOutputForTransition).toBe("function");
+
+		const attentionSummary: RuntimeTaskSessionSummary = {
+			taskId: "task-claude-prompt-detector",
+			state: "awaiting_review",
+			agentId: "claude",
+			workspacePath: "/tmp",
+			pid: 1,
+			startedAt: Date.now(),
+			updatedAt: Date.now(),
+			lastOutputAt: Date.now(),
+			reviewReason: "attention",
+			exitCode: null,
+			lastHookAt: null,
+			latestHookActivity: null,
+		};
+
+		const promptReady = launch.detectOutputTransition?.("╭──────────────────────╮", attentionSummary) ?? null;
+		expect(promptReady).toEqual({ type: "agent.prompt-ready" });
+
+		const noEvent = launch.detectOutputTransition?.("Loading hooks…", attentionSummary) ?? null;
+		expect(noEvent).toBeNull();
+
+		const runningSummary: RuntimeTaskSessionSummary = {
+			...attentionSummary,
+			state: "running",
+			reviewReason: null,
+		};
+		const ignoredWhileRunning = launch.detectOutputTransition?.("╭──────────────────────╮", runningSummary) ?? null;
+		expect(ignoredWhileRunning).toBeNull();
+
+		expect(launch.shouldInspectOutputForTransition?.(attentionSummary)).toBe(true);
+		expect(launch.shouldInspectOutputForTransition?.(runningSummary)).toBe(false);
+	});
+
+	it("does not flip Claude back to running when reviewReason is 'hook' and the input box re-renders", async () => {
+		// 回归测试 RVF G1-002：Stop / Notification hook 把 session 推到
+		// awaiting_review(reviewReason='hook')，Claude TUI 后续随便一次重绘都
+		// 会渲染输入框边框 / 启动横幅。如果 claudePromptDetector 在 'hook' 下
+		// 也接受 prompt-ready，那么状态会被立刻翻回 running，"等待审查" 的语义
+		// 就丢失了。修复后 detector 应只在 reviewReason === "attention" 下放行。
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-hook-redraw",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Implement the task",
+		});
+
+		const hookSummary: RuntimeTaskSessionSummary = {
+			taskId: "task-claude-hook-redraw",
+			state: "awaiting_review",
+			agentId: "claude",
+			workspacePath: "/tmp",
+			pid: 1,
+			startedAt: Date.now(),
+			updatedAt: Date.now(),
+			lastOutputAt: Date.now(),
+			reviewReason: "hook",
+			exitCode: null,
+			lastHookAt: Date.now(),
+			latestHookActivity: null,
+		};
+
+		// 输入框边框出现在每次 TUI 重绘里 — 不应该在 hook 状态触发 prompt-ready。
+		const borderEvent = launch.detectOutputTransition?.("╭──────────────────────╮", hookSummary) ?? null;
+		expect(borderEvent).toBeNull();
+		const bottomBorderEvent = launch.detectOutputTransition?.("╰──────────────────────╯", hookSummary) ?? null;
+		expect(bottomBorderEvent).toBeNull();
+		// 启动横幅同理 — Claude TUI 重启 / 重绘时仍可能出现 "Claude Code"。
+		const bannerEvent = launch.detectOutputTransition?.("Claude Code v1.2.3", hookSummary) ?? null;
+		expect(bannerEvent).toBeNull();
+
+		// shouldInspectClaudeOutputForTransition 必须与 detector 保持一致，
+		// 在 hook 下不需要解码输出去探测转移。
+		expect(launch.shouldInspectOutputForTransition?.(hookSummary)).toBe(false);
 	});
 
 	it("does not duplicate an explicit Codex no-alt-screen flag", async () => {
