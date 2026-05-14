@@ -1288,6 +1288,34 @@ export type RuntimeGitRefsResponse = z.infer<typeof runtimeGitRefsResponseSchema
 export const runtimeHookEventSchema = z.enum(["to_review", "to_in_progress", "activity"]);
 export type RuntimeHookEvent = z.infer<typeof runtimeHookEventSchema>;
 
+// Canonical schema source:
+//   workflow-plugin-design-system/schemas/report-validation-contract.schema.json
+// Mirror enum strings verbatim; do not invent synonyms or import the upstream
+// package (it is not a cline-kanban dependency). RuntimeReportEvent is the
+// report lifecycle (report_filed / report_validated / ...) and is semantically
+// orthogonal to RuntimeHookEvent above (agent runtime activity).
+export const runtimeReportEventSchema = z.enum([
+	"report_filed",
+	"report_validated",
+	"report_rejected",
+	"report_evidence_attached",
+]);
+export type RuntimeReportEvent = z.infer<typeof runtimeReportEventSchema>;
+
+export const runtimeReportEventMetadataSchema = z.object({
+	reportId: z.string(),
+	reportSource: z.enum(["in_app_kanban", "agent_self_report", "rvf_review_agent"]),
+	subClaimTarget: z
+		.enum(["issue_exists", "behavior_matches_report", "cause_attribution", "reporter_supplied", "synthesis_pending"])
+		.nullable()
+		.default(null),
+	severity: z.enum(["critical", "high", "medium", "low", "unknown"]).nullable().default(null),
+	userImpactLevel: z.enum(["blocking", "degraded", "annoyance", "cosmetic", "unknown"]).nullable().default(null),
+	evidenceArtifactPath: z.string().nullable().default(null),
+	reasonCode: z.string().nullable().default(null),
+});
+export type RuntimeReportEventMetadata = z.infer<typeof runtimeReportEventMetadataSchema>;
+
 export const runtimeHookIngestRequestSchema = z.object({
 	taskId: z.string(),
 	workspaceId: z.string(),
