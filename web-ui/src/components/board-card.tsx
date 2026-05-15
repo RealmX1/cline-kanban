@@ -2,7 +2,7 @@ import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
-import { AlertCircle, AlertTriangle, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, Archive, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -619,18 +619,20 @@ export function BoardCard({
 										/>
 									) : null}
 									{columnId === "review" ? (
-										<Button
-											icon={isMoveToTrashLoading ? <Spinner size={13} /> : <Trash2 size={13} />}
-											variant="ghost"
-											size="sm"
-											disabled={isMoveToTrashLoading}
-											aria-label="Move task to done"
-											onMouseDown={stopEvent}
-											onClick={(event) => {
-												stopEvent(event);
-												onMoveToTrash?.(card.id);
-											}}
-										/>
+										<Tooltip side="bottom" content="Move to done">
+											<Button
+												icon={isMoveToTrashLoading ? <Spinner size={13} /> : <Archive size={13} />}
+												variant="ghost"
+												size="sm"
+												disabled={isMoveToTrashLoading}
+												aria-label="Move task to done"
+												onMouseDown={stopEvent}
+												onClick={(event) => {
+													stopEvent(event);
+													onMoveToTrash?.(card.id);
+												}}
+											/>
+										</Tooltip>
 									) : null}
 									{columnId === "trash" ? (
 										<Tooltip
@@ -660,9 +662,8 @@ export function BoardCard({
 										<Tooltip side="bottom" content="Delete permanently">
 											<Button
 												icon={<Trash2 size={12} />}
-												variant="ghost"
+												variant="danger"
 												size="sm"
-												className="text-status-red hover:text-status-red"
 												aria-label="Delete task permanently"
 												onMouseDown={stopEvent}
 												onClick={(event) => {

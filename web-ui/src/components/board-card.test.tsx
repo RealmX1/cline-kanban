@@ -203,13 +203,31 @@ describe("BoardCard", () => {
 
 	it("shows a loading state on the review done button while moving to done", async () => {
 		await act(async () => {
-			root.render(<BoardCard card={createCard()} index={0} columnId="review" isMoveToTrashLoading />);
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="review" isMoveToTrashLoading />
+				</TooltipProvider>,
+			);
 		});
 
 		const trashButton = container.querySelector('button[aria-label="Move task to done"]');
 		expect(trashButton).toBeInstanceOf(HTMLButtonElement);
 		expect((trashButton as HTMLButtonElement | null)?.disabled).toBe(true);
 		expect(trashButton?.querySelector("svg.animate-spin")).toBeTruthy();
+	});
+
+	it("uses an archive icon for moving review cards to done", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="review" />
+				</TooltipProvider>,
+			);
+		});
+
+		const doneButton = container.querySelector('button[aria-label="Move task to done"]');
+		expect(doneButton?.querySelector("svg.lucide-archive")).toBeTruthy();
+		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
 	});
 
 	it("shows the permanent delete action on backlog cards", async () => {
@@ -225,6 +243,8 @@ describe("BoardCard", () => {
 
 		const deleteButton = container.querySelector<HTMLButtonElement>('button[aria-label="Delete task permanently"]');
 		expect(deleteButton).toBeInstanceOf(HTMLButtonElement);
+		expect(deleteButton?.className).toContain("text-status-red");
+		expect(deleteButton?.className).toContain("bg-status-red/10");
 
 		await act(async () => {
 			deleteButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
@@ -301,17 +321,19 @@ describe("BoardCard", () => {
 
 		await act(async () => {
 			root.render(
-				<BoardCard
-					card={createCard({
-						agentId: "cline",
-						clineSettings: {
-							modelId: "openai/gpt-5.5",
-							reasoningEffort: "low",
-						},
-					})}
-					index={0}
-					columnId="review"
-				/>,
+				<TooltipProvider>
+					<BoardCard
+						card={createCard({
+							agentId: "cline",
+							clineSettings: {
+								modelId: "openai/gpt-5.5",
+								reasoningEffort: "low",
+							},
+						})}
+						index={0}
+						columnId="review"
+					/>
+				</TooltipProvider>,
 			);
 		});
 
@@ -538,23 +560,25 @@ describe("BoardCard", () => {
 	it("does not show a stale bare tool name for non-tool review updates", async () => {
 		await act(async () => {
 			root.render(
-				<BoardCard
-					card={createCard()}
-					index={0}
-					columnId="review"
-					sessionSummary={createSummary("awaiting_review", {
-						agentId: "kiro",
-						latestHookActivity: {
-							activityText: "Waiting for review",
-							toolName: "fs_write",
-							toolInputSummary: null,
-							finalMessage: null,
-							hookEventName: "stop",
-							notificationType: null,
-							source: "kiro",
-						},
-					})}
-				/>,
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", {
+							agentId: "kiro",
+							latestHookActivity: {
+								activityText: "Waiting for review",
+								toolName: "fs_write",
+								toolInputSummary: null,
+								finalMessage: null,
+								hookEventName: "stop",
+								notificationType: null,
+								source: "kiro",
+							},
+						})}
+					/>
+				</TooltipProvider>,
 			);
 		});
 
