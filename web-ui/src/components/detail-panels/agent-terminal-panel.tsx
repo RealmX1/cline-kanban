@@ -387,7 +387,10 @@ function AgentTerminalPanelLayout({
 		stopTerminal,
 	} = sessionControls;
 	const canStop = summary?.state === "running" || summary?.state === "awaiting_review";
-	const canRefresh = summary !== null && summary.agentId !== null && summary.agentId !== "cline";
+	const isSyntheticHomeSession = taskId.startsWith("__home_");
+	const showRefreshButton = !isSyntheticHomeSession;
+	const canRefresh = showRefreshButton && summary !== null && summary.agentId !== null && summary.agentId !== "cline";
+	const showCompactHeader = !showSessionToolbar;
 	const statusLabel = useMemo(() => describeState(summary), [summary]);
 	const statusTagStyle = useMemo(() => getStateTagStyle(summary), [summary]);
 	const stallElapsedMs = useStallElapsedMs(summary);
@@ -443,18 +446,20 @@ function AgentTerminalPanelLayout({
 									aria-label="Find in terminal"
 								/>
 							</Tooltip>
-							<Tooltip side="top" content="Restart this terminal session (recovers from a frozen TUI)">
-								<Button
-									icon={isRefreshing ? <Spinner size={14} /> : <RotateCcw size={14} />}
-									variant="default"
-									size="sm"
-									onClick={() => {
-										void refreshTerminal();
-									}}
-									disabled={!canRefresh || isRefreshing}
-									aria-label="Refresh terminal session"
-								/>
-							</Tooltip>
+							{showRefreshButton ? (
+								<Tooltip side="top" content="Restart this terminal session (recovers from a frozen TUI)">
+									<Button
+										icon={isRefreshing ? <Spinner size={14} /> : <RotateCcw size={14} />}
+										variant="default"
+										size="sm"
+										onClick={() => {
+											void refreshTerminal();
+										}}
+										disabled={!canRefresh || isRefreshing}
+										aria-label="Refresh terminal session"
+									/>
+								</Tooltip>
+							) : null}
 							<Button variant="default" size="sm" onClick={clearTerminal}>
 								Clear
 							</Button>
@@ -472,7 +477,7 @@ function AgentTerminalPanelLayout({
 					</div>
 					<div className="h-px bg-border" />
 				</>
-			) : onClose ? (
+			) : showCompactHeader ? (
 				<div
 					style={{
 						display: "flex",
@@ -511,18 +516,20 @@ function AgentTerminalPanelLayout({
 								aria-label="Find in terminal"
 							/>
 						</Tooltip>
-						<Tooltip side="top" content="Restart this terminal session (recovers from a frozen TUI)">
-							<Button
-								icon={isRefreshing ? <Spinner size={12} /> : <RotateCcw size={12} />}
-								variant="ghost"
-								size="sm"
-								onClick={() => {
-									void refreshTerminal();
-								}}
-								disabled={!canRefresh || isRefreshing}
-								aria-label="Refresh terminal session"
-							/>
-						</Tooltip>
+						{showRefreshButton ? (
+							<Tooltip side="top" content="Restart this terminal session (recovers from a frozen TUI)">
+								<Button
+									icon={isRefreshing ? <Spinner size={12} /> : <RotateCcw size={12} />}
+									variant="ghost"
+									size="sm"
+									onClick={() => {
+										void refreshTerminal();
+									}}
+									disabled={!canRefresh || isRefreshing}
+									aria-label="Refresh terminal session"
+								/>
+							</Tooltip>
+						) : null}
 						{agentLabel && onSendAgentCommand ? (
 							<Tooltip side="top" content={`Run ${agentLabel}`}>
 								<Button
@@ -559,13 +566,15 @@ function AgentTerminalPanelLayout({
 								/>
 							</Tooltip>
 						) : null}
-						<Button
-							icon={<X size={14} />}
-							variant="ghost"
-							size="sm"
-							onClick={onClose}
-							aria-label="Close terminal"
-						/>
+						{onClose ? (
+							<Button
+								icon={<X size={14} />}
+								variant="ghost"
+								size="sm"
+								onClick={onClose}
+								aria-label="Close terminal"
+							/>
+						) : null}
 					</div>
 				</div>
 			) : null}

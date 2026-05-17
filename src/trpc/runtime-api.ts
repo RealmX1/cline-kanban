@@ -416,11 +416,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							baseRef: card.baseRef,
 							worktreeMode: card.worktreeMode,
 						});
-				// Heuristic: if the previous session produced any output, a rollout likely
-				// exists on disk, so try to resume (Codex resume --last). If we never saw
-				// output, replay the starting prompt fresh — this is the path that recovers
-				// long auto-fork prompts the user may have never observed.
-				const tryResume = currentSummary.lastOutputAt !== null;
 				const summary = await terminalManager.refreshTaskTerminal({
 					taskId: body.taskId,
 					agentId: resolved.agentId,
@@ -428,20 +423,20 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					args: resolved.args,
 					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
 					cwd: taskCwd,
-					prompt: tryResume ? "" : card.prompt,
-					images: tryResume ? undefined : card.images,
-					startInPlanMode: tryResume ? undefined : card.startInPlanMode,
-					resumeFromTrash: tryResume,
+					prompt: "",
+					images: undefined,
+					startInPlanMode: undefined,
+					resumeFromTrash: true,
 					cols: body.cols,
 					rows: body.rows,
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
-					parentSessionId: tryResume ? undefined : card.parentSessionId,
+					parentSessionId: undefined,
 				});
 				return {
 					ok: true,
 					summary,
-					mode: tryResume ? "resume" : "fresh",
+					mode: "resume",
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

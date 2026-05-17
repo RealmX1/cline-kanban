@@ -58,6 +58,10 @@ const browserMocks = vi.hoisted(() => ({
 	openInBrowser: vi.fn(),
 }));
 
+const workspaceStateMocks = vi.hoisted(() => ({
+	loadWorkspaceBoardById: vi.fn(),
+}));
+
 vi.mock("../../../src/terminal/agent-registry.js", () => ({
 	resolveAgentCommand: agentRegistryMocks.resolveAgentCommand,
 	buildRuntimeConfigResponse: agentRegistryMocks.buildRuntimeConfigResponse,
@@ -125,6 +129,10 @@ vi.mock("@clinebot/core", () => ({
 
 vi.mock("../../../src/server/browser.js", () => ({
 	openInBrowser: browserMocks.openInBrowser,
+}));
+
+vi.mock("../../../src/state/workspace-state.js", () => ({
+	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
 }));
 
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
@@ -286,6 +294,32 @@ describe("createRuntimeApi startTaskSession", () => {
 		llmsModelMocks.resolveProviderConfig.mockReset();
 		llmsModelMocks.resolveProviderModelCatalogKeys.mockReset();
 		browserMocks.openInBrowser.mockReset();
+		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [] },
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{
+					id: "review",
+					title: "Review",
+					cards: [
+						{
+							id: "task-1",
+							title: "Task 1",
+							prompt: "Implement task",
+							startInPlanMode: false,
+							autoReviewEnabled: false,
+							autoReviewMode: "commit",
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+					],
+				},
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		});
 
 		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
 			agentId: "claude",
@@ -1122,6 +1156,60 @@ describe("createRuntimeApi startTaskSession", () => {
 			}),
 		);
 		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("refreshes Codex terminals with the same resume shape as restoring a done card", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+			agentId: "codex",
+			label: "OpenAI Codex",
+			command: "codex",
+			binary: "codex",
+			args: [],
+		});
+
+		const terminalManager = {
+			getSummary: vi.fn(() =>
+				createSummary({
+					agentId: "codex",
+					workspacePath: "/tmp/existing-worktree",
+					startedAt: 1_700_000_000_000,
+					lastOutputAt: null,
+				}),
+			),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "codex" })),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => {
+				const runtimeConfigState = createRuntimeConfigState();
+				runtimeConfigState.selectedAgentId = "codex";
+				return runtimeConfigState;
+			}),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				agentId: "codex",
+				prompt: "",
+				images: undefined,
+				startInPlanMode: undefined,
+				resumeFromTrash: true,
+			}),
+		);
+		expect(response.mode).toBe("resume");
 	});
 
 	it("does not resolve cline OAuth when starting a non-cline task session", async () => {
