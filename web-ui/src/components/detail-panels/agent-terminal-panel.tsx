@@ -495,6 +495,11 @@ function AgentTerminalPanelLayout({
 								{minimalHeaderSubtitle}
 							</span>
 						) : null}
+						{stallElapsedMs !== null ? (
+							<span className="whitespace-nowrap text-text-tertiary" style={{ fontSize: 10 }}>
+								No output for {Math.round(stallElapsedMs / 1000)}s
+							</span>
+						) : null}
 					</div>
 					<div style={{ display: "flex", alignItems: "center", gap: 2, marginRight: "-6px" }}>
 						<Tooltip side="top" content="Find in terminal">
@@ -504,6 +509,18 @@ function AgentTerminalPanelLayout({
 								size="sm"
 								onClick={openTerminalSearch}
 								aria-label="Find in terminal"
+							/>
+						</Tooltip>
+						<Tooltip side="top" content="Restart this terminal session (recovers from a frozen TUI)">
+							<Button
+								icon={isRefreshing ? <Spinner size={12} /> : <RotateCcw size={12} />}
+								variant="ghost"
+								size="sm"
+								onClick={() => {
+									void refreshTerminal();
+								}}
+								disabled={!canRefresh || isRefreshing}
+								aria-label="Refresh terminal session"
 							/>
 						</Tooltip>
 						{agentLabel && onSendAgentCommand ? (
