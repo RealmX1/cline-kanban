@@ -212,7 +212,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.env.FORCE_HYPERLINK).toBe("1");
 	});
 
-	it("defers Claude task prompts until the interactive terminal is ready", async () => {
+	it("passes Claude task prompts as startup argv", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
 			taskId: "task-claude-deferred-prompt",
@@ -223,10 +223,25 @@ describe("prepareAgentLaunch hook strategies", () => {
 			prompt: "Implement the task",
 		});
 
-		expect(launch.args).not.toContain("Implement the task");
-		expect(launch.deferredStartupInput).toContain("\u001b[200~");
-		expect(launch.deferredStartupInput).toContain("Implement the task");
-		expect(launch.deferredStartupInput?.endsWith("\r\r")).toBe(true);
+		expect(launch.args).toContain("Implement the task");
+		expect(launch.deferredStartupInput).toBeUndefined();
+	});
+
+	it("does not replay the saved Claude task prompt when resuming a task", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-resume",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Original task prompt",
+			resumeFromTrash: true,
+		});
+
+		expect(launch.args).toContain("--continue");
+		expect(launch.args).not.toContain("Original task prompt");
+		expect(launch.deferredStartupInput).toBeUndefined();
 	});
 
 	it("appends task workspace guard instructions for Claude task sessions", async () => {

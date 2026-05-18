@@ -642,10 +642,6 @@ function toBracketedPasteSubmission(command: string): string {
 	return `\u001b[200~${command}\u001b[201~\r`;
 }
 
-function toClaudeBracketedPasteSubmission(command: string): string {
-	return `\u001b[200~${command}\u001b[201~\r\r`;
-}
-
 function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string | null {
 	return combineAppendSystemPrompts(
 		resolveHomeAgentAppendSystemPrompt(input.taskId),
@@ -760,13 +756,14 @@ const claudeAdapter: AgentSessionAdapter = {
 		}
 
 		const trimmed = input.prompt.trim();
-		const deferredStartupInput = trimmed ? toClaudeBracketedPasteSubmission(trimmed) : undefined;
+		if (!input.resumeFromTrash && trimmed) {
+			args.push(trimmed);
+		}
 		return {
 			args,
 			env: {
 				...env,
 			},
-			deferredStartupInput,
 			detectOutputTransition: claudePromptDetector,
 			shouldInspectOutputForTransition: shouldInspectClaudeOutputForTransition,
 		};

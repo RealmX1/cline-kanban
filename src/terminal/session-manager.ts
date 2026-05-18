@@ -288,7 +288,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearClaudeStartupReadinessTimer(active);
 		active.session.write(deferredInput);
 		logTuiFreezeWarning(
-			`[tui-freeze] codex-startup-prompt-flushed taskId=${taskId} agentId=${entry.summary.agentId} chars=${deferredInput.length}`,
+			`[tui-freeze] startup-prompt-flushed taskId=${taskId} agentId=${entry.summary.agentId} chars=${deferredInput.length}`,
 		);
 		return true;
 	}
