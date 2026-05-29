@@ -543,7 +543,7 @@ export function BoardCard({
 					>
 						<div
 							className={cn(
-								"rounded-md border border-border-bright bg-surface-2 p-2.5",
+								"relative rounded-md border border-border-bright bg-surface-2 p-2.5",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3 hover:border-border-bright",
 								isDragging && "shadow-lg",
 								isHovered && isCardInteractive && "bg-surface-3 border-border-bright",
@@ -551,7 +551,7 @@ export function BoardCard({
 								isDependencyTarget && "kb-board-card-dependency-target",
 							)}
 						>
-							<div className="flex items-center gap-2" style={{ minHeight: 24 }}>
+							<div className="flex items-center gap-2 pr-12" style={{ minHeight: 24 }}>
 								{statusMarker ? <div className="inline-flex items-center">{statusMarker}</div> : null}
 								<div className="flex-1 min-w-0">
 									{isEditingTitle ? (
@@ -604,12 +604,20 @@ export function BoardCard({
 										</p>
 									)}
 								</div>
-								<div className="flex shrink-0 items-center gap-1">
-									{columnId === "backlog" ? (
+							</div>
+							<div
+								className={cn(
+									"absolute right-1.5 top-1.5 z-10 flex items-center gap-0.5 transition-opacity",
+									"focus-within:opacity-100 focus-within:pointer-events-auto",
+									isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
+								)}
+							>
+								{columnId === "backlog" ? (
+									<Tooltip side="bottom" content="Start task">
 										<Button
-											icon={<Play size={14} />}
+											icon={<Play size={12} />}
 											variant="ghost"
-											size="sm"
+											size="xs"
 											aria-label="Start task"
 											onMouseDown={stopEvent}
 											onClick={(event) => {
@@ -617,63 +625,63 @@ export function BoardCard({
 												onStart?.(card.id);
 											}}
 										/>
-									) : null}
-									{columnId === "review" ? (
-										<Tooltip side="bottom" content="Move to done">
-											<Button
-												icon={isMoveToTrashLoading ? <Spinner size={13} /> : <Archive size={13} />}
-												variant="ghost"
-												size="sm"
-												disabled={isMoveToTrashLoading}
-												aria-label="Move task to done"
-												onMouseDown={stopEvent}
-												onClick={(event) => {
-													stopEvent(event);
-													onMoveToTrash?.(card.id);
-												}}
-											/>
-										</Tooltip>
-									) : null}
-									{columnId === "trash" ? (
-										<Tooltip
-											side="bottom"
-											content={
-												<>
-													Restore session
-													<br />
-													in new worktree
-												</>
-											}
-										>
-											<Button
-												icon={<RotateCcw size={12} />}
-												variant="ghost"
-												size="sm"
-												aria-label="Restore task from done"
-												onMouseDown={stopEvent}
-												onClick={(event) => {
-													stopEvent(event);
-													onRestoreFromTrash?.(card.id);
-												}}
-											/>
-										</Tooltip>
-									) : null}
-									{onDeleteTask ? (
-										<Tooltip side="bottom" content="Delete permanently">
-											<Button
-												icon={<Trash2 size={12} />}
-												variant="danger"
-												size="sm"
-												aria-label="Delete task permanently"
-												onMouseDown={stopEvent}
-												onClick={(event) => {
-													stopEvent(event);
-													onDeleteTask(card.id);
-												}}
-											/>
-										</Tooltip>
-									) : null}
-								</div>
+									</Tooltip>
+								) : null}
+								{columnId === "review" || columnId === "in_progress" ? (
+									<Tooltip side="bottom" content="Move to done">
+										<Button
+											icon={isMoveToTrashLoading ? <Spinner size={12} /> : <Archive size={12} />}
+											variant="ghost"
+											size="xs"
+											disabled={isMoveToTrashLoading}
+											aria-label="Move task to done"
+											onMouseDown={stopEvent}
+											onClick={(event) => {
+												stopEvent(event);
+												onMoveToTrash?.(card.id);
+											}}
+										/>
+									</Tooltip>
+								) : null}
+								{columnId === "trash" ? (
+									<Tooltip
+										side="bottom"
+										content={
+											<>
+												Restore session
+												<br />
+												in new worktree
+											</>
+										}
+									>
+										<Button
+											icon={<RotateCcw size={12} />}
+											variant="ghost"
+											size="xs"
+											aria-label="Restore task from done"
+											onMouseDown={stopEvent}
+											onClick={(event) => {
+												stopEvent(event);
+												onRestoreFromTrash?.(card.id);
+											}}
+										/>
+									</Tooltip>
+								) : null}
+								{onDeleteTask ? (
+									<Tooltip side="bottom" content="Delete permanently">
+										<Button
+											icon={<Trash2 size={12} />}
+											variant="danger"
+											size="xs"
+											aria-label="Delete task permanently"
+											onMouseDown={stopEvent}
+											onClick={(event) => {
+												stopEvent(event);
+												onDeleteTask(card.id);
+											}}
+										/>
+									</Tooltip>
+								) : null}
 							</div>
 							{displayDescription ? (
 								<div ref={descriptionContainerRef}>

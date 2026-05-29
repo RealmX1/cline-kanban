@@ -3,7 +3,7 @@ import { type ButtonHTMLAttributes, forwardRef, type ReactNode } from "react";
 import { cn } from "@/components/ui/cn";
 
 export type ButtonVariant = "default" | "primary" | "danger" | "ghost";
-export type ButtonSize = "sm" | "md";
+export type ButtonSize = "xs" | "sm" | "md";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 	variant?: ButtonVariant;
@@ -23,6 +23,7 @@ const variantStyles: Record<ButtonVariant, string> = {
 };
 
 const sizeStyles: Record<ButtonSize, string> = {
+	xs: "h-5 px-1 text-[11px] gap-1",
 	sm: "h-7 px-2 text-xs gap-1.5",
 	md: "h-8 px-3 text-[13px] gap-2",
 };

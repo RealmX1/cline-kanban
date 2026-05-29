@@ -152,7 +152,13 @@ describe("BoardCard", () => {
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 		container = document.createElement("div");
 		document.body.appendChild(container);
-		root = createRoot(container);
+		// Mirror the real app, which mounts every BoardCard under a TooltipProvider
+		// (see main.tsx), so action-button tooltips render without per-call wrapping.
+		const baseRoot = createRoot(container);
+		root = {
+			render: (children: ReactNode) => baseRoot.render(<TooltipProvider>{children}</TooltipProvider>),
+			unmount: () => baseRoot.unmount(),
+		};
 		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({
 			x: 0,
 			y: 0,
@@ -228,6 +234,24 @@ describe("BoardCard", () => {
 		const doneButton = container.querySelector('button[aria-label="Move task to done"]');
 		expect(doneButton?.querySelector("svg.lucide-archive")).toBeTruthy();
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
+	});
+
+	it("shows the archive action on in-progress cards", async () => {
+		const onMoveToTrash = vi.fn();
+
+		await act(async () => {
+			root.render(<BoardCard card={createCard()} index={0} columnId="in_progress" onMoveToTrash={onMoveToTrash} />);
+		});
+
+		const doneButton = container.querySelector<HTMLButtonElement>('button[aria-label="Move task to done"]');
+		expect(doneButton).toBeInstanceOf(HTMLButtonElement);
+
+		await act(async () => {
+			doneButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			doneButton?.click();
+		});
+
+		expect(onMoveToTrash).toHaveBeenCalledWith("task-1");
 	});
 
 	it("shows the permanent delete action on backlog cards", async () => {
