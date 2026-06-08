@@ -18,7 +18,7 @@ const KANBAN_MANAGED_EXCLUDE_BLOCK_END = "# kanban-managed-symlinked-ignored-pat
 const KANBAN_TRASHED_TASK_PATCHES_DIR_NAME = "trashed-task-patches";
 const KANBAN_TASK_WORKTREE_SETUP_LOCKFILE_NAME = "kanban-task-worktree-setup.lock";
 const TASK_PATCH_FILE_SUFFIX = ".patch";
-const PROJECT_LOCAL_CODEX_SKILLS_PATH = ".codex/skills";
+const PROJECT_LOCAL_AGENT_SKILLS_PATHS = [".codex/skills", ".claude/skills"];
 
 const SYMLINK_PATH_SEGMENT_BLACKLIST = new Set([
 	".git",
@@ -410,7 +410,9 @@ async function syncIgnoredPathsIntoWorktree(repoPath: string, worktreePath: stri
 }
 
 async function syncProjectLocalAgentConfigIntoWorktree(repoPath: string, worktreePath: string): Promise<void> {
-	await mirrorExistingPath({ repoPath, worktreePath, relativePath: PROJECT_LOCAL_CODEX_SKILLS_PATH });
+	for (const relativePath of PROJECT_LOCAL_AGENT_SKILLS_PATHS) {
+		await mirrorExistingPath({ repoPath, worktreePath, relativePath });
+	}
 }
 
 async function initializeSubmodulesIfNeeded(worktreePath: string): Promise<void> {

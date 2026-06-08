@@ -339,17 +339,24 @@ describe.sequential("task-worktree serialization", () => {
 		}
 	});
 
-	it("mirrors project-local Codex skills into an existing task worktree", async () => {
-		const { path: sandboxRoot, cleanup } = createTempDir("kanban-task-worktree-codex-skills-");
+	it("mirrors project-local agent skills (Codex and Claude) into an existing task worktree", async () => {
+		const { path: sandboxRoot, cleanup } = createTempDir("kanban-task-worktree-agent-skills-");
 		try {
 			const repoPath = join(sandboxRoot, "repo");
 			const worktreesHomePath = join(sandboxRoot, "worktrees-home");
-			const worktreePath = join(worktreesHomePath, "task-codex-skills", "repo");
+			const worktreePath = join(worktreesHomePath, "task-agent-skills", "repo");
 			const skillsPath = join(repoPath, ".codex", "skills");
+			const claudeSkillsPath = join(repoPath, ".claude", "skills");
 			mkdirSync(join(repoPath, ".git"), { recursive: true });
 			mkdirSync(join(skillsPath, "cline-kanban-local-deploy"), { recursive: true });
 			writeFileSync(
 				join(skillsPath, "cline-kanban-local-deploy", "SKILL.md"),
+				"name: cline-kanban-local-deploy\n",
+				"utf8",
+			);
+			mkdirSync(join(claudeSkillsPath, "cline-kanban-local-deploy"), { recursive: true });
+			writeFileSync(
+				join(claudeSkillsPath, "cline-kanban-local-deploy", "SKILL.md"),
 				"name: cline-kanban-local-deploy\n",
 				"utf8",
 			);
@@ -379,12 +386,13 @@ describe.sequential("task-worktree serialization", () => {
 
 			const ensured = await ensureTaskWorktreeIfDoesntExist({
 				cwd: repoPath,
-				taskId: "task-codex-skills",
+				taskId: "task-agent-skills",
 				baseRef: "HEAD",
 			});
 
 			expect(ensured.ok).toBe(true);
 			expect(readlinkSync(join(worktreePath, ".codex", "skills"))).toBe(skillsPath);
+			expect(readlinkSync(join(worktreePath, ".claude", "skills"))).toBe(claudeSkillsPath);
 			expect(childProcessMocks.execFilePromise.mock.calls.some(([, args]) => args.includes("worktree"))).toBe(false);
 		} finally {
 			cleanup();
