@@ -227,6 +227,14 @@ class PersistentTerminal {
 	// scrollback. The hook reads and clears this flag before deciding whether the
 	// new sessionStartedAt warrants resetting the xterm instance.
 	private suppressNextRestartReset = false;
+	// While the browser tab is hidden the renderer (xterm's requestAnimationFrame loop)
+	// is paused by the browser, so writing live output would pile up a backlog that
+	// replays as a multi-minute "time-lapse" when the tab is shown again. Instead we
+	// suspend rendering while hidden (still acking so the agent keeps running) and snap
+	// straight to a fresh server snapshot on return.
+	private documentVisible: boolean;
+	private renderingSuspended: boolean;
+	private needsSnapshotResync = false;
 
 	constructor(
 		private readonly taskId: string,
@@ -304,7 +312,38 @@ class PersistentTerminal {
 			// Fall back to the default renderer when WebGL is unavailable.
 		}
 
+		this.documentVisible = typeof document === "undefined" || document.visibilityState === "visible";
+		this.renderingSuspended = !this.documentVisible;
+		if (typeof document !== "undefined") {
+			document.addEventListener("visibilitychange", this.handleVisibilityChange);
+		}
+
 		this.ensureConnected();
+	}
+
+	private readonly handleVisibilityChange = (): void => {
+		this.setDocumentVisible(document.visibilityState === "visible");
+	};
+
+	private setDocumentVisible(visible: boolean): void {
+		if (this.documentVisible === visible) {
+			return;
+		}
+		this.documentVisible = visible;
+		this.renderingSuspended = !visible;
+		if (visible && this.needsSnapshotResync) {
+			this.needsSnapshotResync = false;
+			this.requestSnapshotResync();
+		}
+	}
+
+	private requestSnapshotResync(): void {
+		// We discarded live output while hidden, so the visible terminal is stale. Ask the
+		// server for a fresh snapshot (the server-side mirror stays current in real time) to
+		// jump straight to the latest screen — no frame-by-frame catch-up. If the control
+		// socket is currently closed, the pending reconnect already sends a restore snapshot,
+		// so this is a no-op in that case.
+		this.sendControlMessage({ type: "request_restore" });
 	}
 
 	private notifyLastError(): void {
@@ -544,9 +583,23 @@ class PersistentTerminal {
 			if (!writeData) {
 				return;
 			}
+			const ackBytes = getTerminalSocketChunkByteLength(event.data);
+			// Decode every chunk regardless of visibility so the streaming TextDecoder and
+			// activity notifications stay consistent across the hidden window.
 			const decoded = decodeTerminalSocketChunk(this.outputTextDecoder, event.data);
+			if (this.renderingSuspended) {
+				// Tab is hidden: skip the xterm write (the renderer is paused, so it would
+				// only build a backlog). Ack immediately to keep the agent's PTY flowing,
+				// keep activity notifications alive, and remember to resync on return.
+				this.sendControlMessage({ type: "output_ack", bytes: ackBytes });
+				if (decoded) {
+					this.notifyOutputText(decoded);
+				}
+				this.needsSnapshotResync = true;
+				return;
+			}
 			void this.enqueueTerminalWrite(writeData, {
-				ackBytes: getTerminalSocketChunkByteLength(event.data),
+				ackBytes,
 				notifyText: decoded || null,
 			});
 		});
@@ -933,6 +986,9 @@ class PersistentTerminal {
 			return;
 		}
 		this.disposed = true;
+		if (typeof document !== "undefined") {
+			document.removeEventListener("visibilitychange", this.handleVisibilityChange);
+		}
 		this.clearReconnectTimer();
 		this.unmount(this.visibleContainer);
 		this.ioSocket?.close();

@@ -464,4 +464,39 @@ describe("createTerminalWebSocketBridge", () => {
 		await closeSocket(ioSocketB.socket);
 		await closeSocket(controlSocketB.socket);
 	});
+
+	it("re-sends a fresh snapshot and re-gates live output on request_restore", async () => {
+		const ioUrl = `${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
+		const controlUrl = `${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
+
+		const ioSocket = await openQueuedWebSocket(ioUrl);
+		const controlSocket = await openQueuedWebSocket(controlUrl);
+
+		await waitForControlMessage(controlSocket, (message) => message.type === "restore");
+		controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
+
+		// A returning hidden tab asks for the latest screen. The server should serialize a
+		// fresh snapshot and resend it (the second getRestoreSnapshot call).
+		terminalManager.getRestoreSnapshot.mockResolvedValueOnce({ snapshot: "fresh-snap", cols: 80, rows: 24 });
+		controlSocket.socket.send(JSON.stringify({ type: "request_restore" }));
+
+		const resnapshot = await waitForControlMessage(
+			controlSocket,
+			(message) => message.type === "restore" && message.snapshot === "fresh-snap",
+		);
+		expect(resnapshot.type).toBe("restore");
+		expect(terminalManager.getRestoreSnapshot).toHaveBeenCalledTimes(2);
+
+		// Live output is gated again until the client acknowledges the new snapshot, so it
+		// cannot interleave ahead of the snapshot the viewer is about to render.
+		terminalManager.emitOutput(TASK_ID, "after-resync");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(ioSocket.queue).toHaveLength(0);
+
+		controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
+		await expect(waitForIoMessage(ioSocket)).resolves.toEqual(Buffer.from("after-resync", "utf8"));
+
+		await closeSocket(ioSocket.socket);
+		await closeSocket(controlSocket.socket);
+	});
 });

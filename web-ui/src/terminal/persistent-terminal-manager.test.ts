@@ -239,6 +239,19 @@ function dispatchSocketMessage(
 	socket.onmessage?.(event);
 }
 
+function setDocumentHidden(hidden: boolean): void {
+	Object.defineProperty(document, "visibilityState", {
+		configurable: true,
+		value: hidden ? "hidden" : "visible",
+		writable: true,
+	});
+	document.dispatchEvent(new Event("visibilitychange"));
+}
+
+function parseControlMessages(socket: { sentMessages: string[] }): Array<{ type: string; bytes?: number }> {
+	return socket.sentMessages.map((message) => JSON.parse(message) as { type: string; bytes?: number });
+}
+
 describe("persistent-terminal-manager", () => {
 	beforeEach(() => {
 		fitAddonProposeDimensionsMock.mockReset();
@@ -269,6 +282,7 @@ describe("persistent-terminal-manager", () => {
 			},
 			writable: true,
 		});
+		setDocumentHidden(false);
 	});
 
 	afterEach(() => {
@@ -367,6 +381,47 @@ describe("persistent-terminal-manager", () => {
 		const ioSockets = webSocketInstances.filter((socket) => socket.url.includes("/api/terminal/io"));
 		expect(ioSockets).toHaveLength(2);
 		expect(lastErrors.at(-1)).toBe("Terminal stream closed. Reconnecting...");
+	});
+
+	it("suspends rendering while hidden and snaps to a fresh snapshot on return", () => {
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const container = createContainer();
+		const writes: Array<string | Uint8Array> = [];
+		terminalWriteSideEffect.current = (data) => writes.push(data);
+		terminal.mount(container, appearance, { isVisible: true });
+
+		const controlSocket = webSocketInstances.find((socket) => socket.url.includes("/api/terminal/control"));
+		const ioSocket = webSocketInstances.find((socket) => socket.url.includes("/api/terminal/io"));
+		if (!controlSocket || !ioSocket) {
+			throw new Error("Expected both control and io sockets.");
+		}
+
+		// Finish the initial restore handshake so live output would normally render.
+		dispatchSocketMessage(controlSocket, JSON.stringify({ type: "restore", snapshot: "", cols: 80, rows: 30 }));
+		const writesAfterRestore = writes.length;
+
+		// Tab goes to the background: output keeps arriving but must not pile up in xterm.
+		setDocumentHidden(true);
+		dispatchSocketMessage(ioSocket, "output-while-hidden");
+
+		// Nothing was written to the terminal while hidden...
+		expect(writes.length).toBe(writesAfterRestore);
+		// ...but the bytes were acked so the server keeps the agent's PTY running.
+		const acks = parseControlMessages(controlSocket).filter((message) => message.type === "output_ack");
+		expect(acks.length).toBeGreaterThan(0);
+		// No snapshot was requested yet — only on return.
+		expect(parseControlMessages(controlSocket).some((message) => message.type === "request_restore")).toBe(false);
+
+		// Returning to the tab requests one fresh snapshot instead of replaying the backlog.
+		setDocumentHidden(false);
+		const restoreRequests = parseControlMessages(controlSocket).filter(
+			(message) => message.type === "request_restore",
+		);
+		expect(restoreRequests).toHaveLength(1);
 	});
 
 	it("keeps the terminal at the bottom after restore when it was following output", async () => {

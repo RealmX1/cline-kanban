@@ -495,24 +495,33 @@ export function createTerminalWebSocketBridge({
 			previousControlSocket.close(1000, "Replaced by newer terminal control connection.");
 		}
 
-		void terminalManager
-			.getRestoreSnapshot(taskId)
-			.then((snapshot) => {
-				sendControlMessage(ws, {
-					type: "restore",
-					snapshot: snapshot?.snapshot ?? "",
-					cols: snapshot?.cols ?? null,
-					rows: snapshot?.rows ?? null,
+		// Re-enter the restore handshake for this viewer: stop forwarding live output
+		// (it buffers into pendingOutputChunks until restore_complete) and send a fresh
+		// snapshot. Used both on initial connect and when a hidden tab returns and asks
+		// to jump straight to the latest screen via request_restore.
+		const sendRestoreSnapshot = (): void => {
+			viewerState.restoreComplete = false;
+			viewerState.pendingOutputChunks = [];
+			void terminalManager
+				.getRestoreSnapshot(taskId)
+				.then((snapshot) => {
+					sendControlMessage(ws, {
+						type: "restore",
+						snapshot: snapshot?.snapshot ?? "",
+						cols: snapshot?.cols ?? null,
+						rows: snapshot?.rows ?? null,
+					});
+				})
+				.catch(() => {
+					sendControlMessage(ws, {
+						type: "restore",
+						snapshot: "",
+						cols: null,
+						rows: null,
+					});
 				});
-			})
-			.catch(() => {
-				sendControlMessage(ws, {
-					type: "restore",
-					snapshot: "",
-					cols: null,
-					rows: null,
-				});
-			});
+		};
+		sendRestoreSnapshot();
 
 		ws.on("message", (rawMessage: RawData) => {
 			const message = parseWebSocketPayload(rawMessage);
@@ -542,6 +551,11 @@ export function createTerminalWebSocketBridge({
 			if (message.type === "restore_complete") {
 				viewerState.restoreComplete = true;
 				viewerState.flushPendingOutput();
+				return;
+			}
+
+			if (message.type === "request_restore") {
+				sendRestoreSnapshot();
 			}
 		});
 

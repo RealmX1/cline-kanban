@@ -1187,11 +1187,20 @@ export const runtimeTerminalWsRestoreCompleteMessageSchema = z.object({
 });
 export type RuntimeTerminalWsRestoreCompleteMessage = z.infer<typeof runtimeTerminalWsRestoreCompleteMessageSchema>;
 
+// Sent when a viewer returns from a hidden browser tab. While hidden it discarded
+// live output instead of rendering it (to avoid a "time-lapse" backlog replay), so it
+// asks the server to re-send a fresh snapshot to jump straight to the latest screen.
+export const runtimeTerminalWsRequestRestoreMessageSchema = z.object({
+	type: z.literal("request_restore"),
+});
+export type RuntimeTerminalWsRequestRestoreMessage = z.infer<typeof runtimeTerminalWsRequestRestoreMessageSchema>;
+
 export const runtimeTerminalWsClientMessageSchema = z.discriminatedUnion("type", [
 	runtimeTerminalWsResizeMessageSchema,
 	runtimeTerminalWsStopMessageSchema,
 	runtimeTerminalWsOutputAckMessageSchema,
 	runtimeTerminalWsRestoreCompleteMessageSchema,
+	runtimeTerminalWsRequestRestoreMessageSchema,
 ]);
 export type RuntimeTerminalWsClientMessage = z.infer<typeof runtimeTerminalWsClientMessageSchema>;
 
