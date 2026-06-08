@@ -31,7 +31,39 @@ When the global `kanban` CLI is symlinked to a local custom branch, source edits
 - The running Node process has already loaded its current `dist/cli.js` and web bundle.
 - The browser may keep the old web bundle until the server restarts and the page refreshes.
 
-Safe rebuild/restart shape:
+### Preferred restart: supervised kill-by-PID
+
+If the long-lived server is run by a `while true` supervisor script (e.g. `run-cline-kanban-<port>-service.sh`), do NOT recreate the tmux session and do NOT kill by process name. Rebuild, then restart by signalling the single listener PID and letting the supervisor respawn it:
+
+```sh
+cd /Users/bominzhang/Documents/GitHub/cline-kanban
+npm run typecheck && npm run build
+
+# resolve the PID from the PORT, never from the name
+PID=$(lsof -nP -iTCP:3484 -sTCP:LISTEN -t | head -1)
+# re-confirm it still owns the port right before killing (guards against PID reuse)
+kill -9 "$PID"
+```
+
+Read the supervisor's exit-code contract first — a typical `run-cline-kanban-<port>-service.sh` loops like this:
+
+- kanban exit `130` (SIGINT) or `143` (SIGTERM) → the loop exits → the server stays DOWN.
+- any other exit, including SIGKILL→`137` or a crash → `sleep 5` then respawn.
+
+So `kill -9 <listener-pid>` is the intended "restart to pick up a new build" lever: the still-alive supervisor relaunches kanban with its own inherited PATH and cwd, which removes the PATH-drift risk of `tmux new-session` (a fresh tmux session inherits the tmux server's environment, not your rich interactive PATH).
+
+Never kill by name on a box that runs several listeners side by side (`kanban` on 3484/3485, `mkanban` on 3492/3501, other `node` servers): `pkill -f kanban` / `killall node` would match and kill unrelated servers. `kill` takes a numeric PID and signals exactly that one process.
+
+What `kill -9 <pid>` does and does NOT do:
+
+- Sends SIGKILL to that ONE process (uncatchable, immediate). A positive PID signals only that process — NOT its children and NOT its process group (the group form is `kill -9 -<pgid>`).
+- A child task agent (a `claude`/`codex` session the server spawned) is not signalled directly. It usually dies as a secondary effect: the server holds the agent's PTY master, so when the server dies the PTY hangs up (SIGHUP / read EOF) and the agent exits. This is not guaranteed for detached children — verify separately with `pgrep -P <old-pid>` before assuming it stopped.
+
+After respawn (the supervisor waits ~5s), validate: new PID ≠ old, listens on the port, HTTP 200, loaded the fresh `dist/` build, tmux ownership intact, PATH parity, and agent detection through the runtime API (not just the shell).
+
+### Fallback restart shape (no supervisor script)
+
+When no supervisor loop owns the server, rebuild first, then recreate the tmux session with an explicit PATH so agent detection still works:
 
 ```sh
 cd /Users/bominzhang/Documents/GitHub/cline-kanban
