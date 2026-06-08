@@ -9,7 +9,7 @@ description: Safely integrate official Cline/Kanban upstream source changes into
 
 Treat an official upstream update as source-history integration only. Protect local custom work and produce a checkout that can be handed to the local runtime update workflow later.
 
-Do not stop, restart, relink, or clean up a running Kanban runtime in this skill. If a running instance must use the updated checkout, finish this skill first and then use the safe local runtime update workflow.
+Do not stop, restart, relink, or clean up a running Kanban runtime in this skill. If a running instance must use the updated checkout, finish this skill first and then use this project's `cline-kanban-local-deploy` skill (the safe local runtime deploy workflow).
 
 默认用用户偏好的主要语言回复；如果当前项目要求中文，就用中文描述计划、风险、验证结果和后续操作。
 
@@ -70,7 +70,7 @@ This skill does not own:
    - Confirm the custom commits still exist on top of the official target, or explicitly report any commits intentionally dropped.
 
 7. Hand off runtime refresh separately.
-   - If the user wants the local server or CLI to run the integrated code, use the safe local runtime update workflow after this source integration is complete.
+   - If the user wants the local server or CLI to run the integrated code, use this project's `cline-kanban-local-deploy` skill after this source integration is complete.
    - Pass along the old commit, new commit, backup branch, validation results, and any runtime risks discovered during the snapshot.
 
 ## Output Expectations

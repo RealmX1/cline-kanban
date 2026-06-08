@@ -347,8 +347,12 @@ describe.sequential("task-worktree serialization", () => {
 			const worktreePath = join(worktreesHomePath, "task-codex-skills", "repo");
 			const skillsPath = join(repoPath, ".codex", "skills");
 			mkdirSync(join(repoPath, ".git"), { recursive: true });
-			mkdirSync(join(skillsPath, "safe-version-update"), { recursive: true });
-			writeFileSync(join(skillsPath, "safe-version-update", "SKILL.md"), "name: safe-version-update\n", "utf8");
+			mkdirSync(join(skillsPath, "cline-kanban-local-deploy"), { recursive: true });
+			writeFileSync(
+				join(skillsPath, "cline-kanban-local-deploy", "SKILL.md"),
+				"name: cline-kanban-local-deploy\n",
+				"utf8",
+			);
 			mkdirSync(worktreePath, { recursive: true });
 
 			workspaceStateMocks.loadWorkspaceContext.mockResolvedValue({ repoPath });

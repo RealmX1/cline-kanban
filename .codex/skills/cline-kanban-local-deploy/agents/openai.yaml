@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cline Kanban Local Deploy"
+  short_description: "Deploy this Kanban from local source safely"
+  default_prompt: "Use $cline-kanban-local-deploy to deploy this Cline Kanban runtime from the local source checkout (rebuild, relink, or restart) while preserving task worktrees, runtime data, PATH, and agent detection."

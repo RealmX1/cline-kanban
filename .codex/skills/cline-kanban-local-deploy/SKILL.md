@@ -1,9 +1,9 @@
 ---
-name: safe-version-update
-description: Project-local workflow for safely refreshing this Cline Kanban running instance from an already-present local source checkout while preserving runtime state, task metadata, worktrees, dirty diffs, CLI links, PATH, and agent detection. Use in this project when asked to rebuild, relink, reinstall, restart, or switch the running local instance to code that is already in this checkout. Do not use for fetching, rebasing, cherry-picking, or taking new code from official upstream; use this project's cline-kanban-upstream-update skill for official source integration first.
+name: cline-kanban-local-deploy
+description: Project-local workflow for safely deploying this Cline Kanban running instance from an already-present local source checkout while preserving runtime state, task metadata, worktrees, dirty diffs, CLI links, PATH, and agent detection. Use in this project when asked to deploy locally, rebuild, relink, reinstall, restart, or switch the running local instance to code that is already in this checkout (the "local deploy"). Do not use for fetching, rebasing, cherry-picking, or taking new code from official upstream; use this project's cline-kanban-upstream-update skill for official source integration first.
 ---
 
-# Safe Local Runtime Update
+# Cline Kanban Local Deploy
 
 ## Core Rule
 
