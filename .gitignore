@@ -25,3 +25,7 @@ packages/desktop/runtime-child.js
 packages/desktop/runtime-child-env.js
 packages/desktop/desktop-preflight.js
 packages/desktop/cli
+
+# 本地暂存物：local-deploy 备份补丁、临时诊断探针脚本（不纳入版本控制）
+.plan/local-deploy-backups/
+.plan/probes/
