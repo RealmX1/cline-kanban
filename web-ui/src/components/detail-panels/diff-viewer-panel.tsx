@@ -505,6 +505,7 @@ function SplitDiff({
 export function DiffViewerPanel({
 	workspaceFiles,
 	selectedPath,
+	selectedPathExpandToken = 0,
 	onSelectedPathChange,
 	onAddToTerminal,
 	onSendToTerminal,
@@ -514,6 +515,12 @@ export function DiffViewerPanel({
 }: {
 	workspaceFiles: RuntimeWorkspaceFileChange[] | null;
 	selectedPath: string | null;
+	/**
+	 * 由父组件在「显式选中」（文件树点击 / 父级主动设置）时递增的令牌。
+	 * 滚动联动只更新 selectedPath、绝不改动此令牌，因此令牌变化是「显式选中」的可靠信号——
+	 * 即使 selectedPath 未变化（点击已高亮但折叠的文件），也能借此重新触发展开+滚动。
+	 */
+	selectedPathExpandToken?: number;
 	onSelectedPathChange: (path: string) => void;
 	onAddToTerminal?: (formatted: string) => void;
 	onSendToTerminal?: (formatted: string) => void;
@@ -528,6 +535,7 @@ export function DiffViewerPanel({
 	const suppressScrollSyncUntilRef = useRef(0);
 	const programmaticScrollUntilRef = useRef(0);
 	const programmaticScrollClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const lastHandledExpandTokenRef = useRef(selectedPathExpandToken);
 
 	const diffEntries = useMemo(() => {
 		return (workspaceFiles ?? []).map((file, index) => ({
@@ -651,18 +659,28 @@ export function DiffViewerPanel({
 	}, []);
 
 	useEffect(() => {
+		// 令牌递增 = 父组件标记的「显式选中」（文件树点击 / 父级主动设置）。
+		// 即使 selectedPath 未变化，令牌变化也会重新触发本 effect，从而能展开「已高亮但折叠」的文件。
+		const isExplicitSelection = selectedPathExpandToken !== lastHandledExpandTokenRef.current;
+		lastHandledExpandTokenRef.current = selectedPathExpandToken;
+
 		if (!selectedPath) {
 			return;
 		}
 
-		const syncSelection = scrollSyncSelectionRef.current;
-		if (syncSelection && syncSelection.path === selectedPath && Date.now() - syncSelection.at < 150) {
-			scrollSyncSelectionRef.current = null;
-			return;
+		if (!isExplicitSelection) {
+			const syncSelection = scrollSyncSelectionRef.current;
+			if (syncSelection && syncSelection.path === selectedPath && Date.now() - syncSelection.at < 150) {
+				// 来自滚动联动的选中：只更新文件树高亮，绝不展开，避免滚动浏览折叠列表时级联展开重新卡顿
+				scrollSyncSelectionRef.current = null;
+				return;
+			}
 		}
 		scrollSyncSelectionRef.current = null;
+		// 显式选中（文件树点击 / 父级主动设置）：展开该文件并滚动到位
+		setExpandedPaths((prev) => (prev[selectedPath] ? prev : { ...prev, [selectedPath]: true }));
 		scrollToPath(selectedPath);
-	}, [scrollToPath, selectedPath]);
+	}, [scrollToPath, selectedPath, selectedPathExpandToken]);
 
 	const handleAddComment = useCallback(
 		(filePath: string, lineNumber: number, lineText: string, variant: "added" | "removed" | "context") => {
@@ -836,7 +854,7 @@ export function DiffViewerPanel({
 						}}
 					>
 						{groupedByPath.map((group) => {
-							const isExpanded = expandedPaths[group.path] ?? true;
+							const isExpanded = expandedPaths[group.path] ?? false;
 							const hasBinaryEntry = group.entries.some((entry) => entry.isBinary);
 							return (
 								<section
@@ -855,7 +873,7 @@ export function DiffViewerPanel({
 											const container = scrollContainerRef.current;
 											const sectionEl = sectionElementsRef.current[group.path];
 											const previousTop = sectionEl?.getBoundingClientRect().top ?? null;
-											const nextExpanded = !(expandedPaths[group.path] ?? true);
+											const nextExpanded = !(expandedPaths[group.path] ?? false);
 											suppressScrollSyncUntilRef.current = Date.now() + 250;
 											setExpandedPaths((prev) => ({
 												...prev,

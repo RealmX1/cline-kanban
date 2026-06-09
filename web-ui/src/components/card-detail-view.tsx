@@ -477,6 +477,13 @@ export function CardDetailView({
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 	const terminalThemeColors = useTerminalThemeColors();
 	const [selectedPath, setSelectedPath] = useState<string | null>(null);
+	// 每次「显式选中」（文件树点击 / 父级主动设置）递增，作为告知 DiffViewerPanel 应展开+滚动的信号。
+	// 滚动联动只走 setSelectedPath、不动此令牌，因此重复点击已高亮但折叠的文件也能可靠展开。
+	const [selectedPathExpandToken, setSelectedPathExpandToken] = useState(0);
+	const handleExplicitSelectPath = useCallback((path: string) => {
+		setSelectedPath(path);
+		setSelectedPathExpandToken((token) => token + 1);
+	}, []);
 	const [diffComments, setDiffComments] = useState<Map<string, DiffLineComment>>(new Map());
 	const [diffMode, setDiffMode] = useState<RuntimeWorkspaceChangesMode>("working_copy");
 	const [isDiffExpanded, setIsDiffExpanded] = useState(false);
@@ -645,10 +652,11 @@ export function CardDetailView({
 	);
 
 	useEffect(() => {
-		if (selectedPath && availablePaths.includes(selectedPath)) {
-			return;
+		// 默认不自动选中任何文件（即默认不展开、不渲染任何 diff）；
+		// 仅当此前选中的文件已不在当前改动列表中时，清空选中。
+		if (selectedPath && !availablePaths.includes(selectedPath)) {
+			setSelectedPath(null);
 		}
-		setSelectedPath(availablePaths[0] ?? null);
 	}, [availablePaths, selectedPath]);
 
 	useEffect(() => {
@@ -796,6 +804,7 @@ export function CardDetailView({
 									<DiffViewerPanel
 										workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
 										selectedPath={selectedPath}
+										selectedPathExpandToken={selectedPathExpandToken}
 										onSelectedPathChange={setSelectedPath}
 										viewMode="unified"
 										onAddToTerminal={
@@ -819,7 +828,7 @@ export function CardDetailView({
 								workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
 								selectedPath={selectedPath}
 								onSelectPath={(path: string) => {
-									setSelectedPath(path);
+									handleExplicitSelectPath(path);
 									setMobileTab("diff");
 								}}
 								panelFlex="1 1 0"
@@ -939,6 +948,7 @@ export function CardDetailView({
 												<DiffViewerPanel
 													workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
 													selectedPath={selectedPath}
+													selectedPathExpandToken={selectedPathExpandToken}
 													onSelectedPathChange={setSelectedPath}
 													viewMode={isDiffExpanded ? "split" : "unified"}
 													onAddToTerminal={
@@ -968,7 +978,7 @@ export function CardDetailView({
 												<FileTreePanel
 													workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
 													selectedPath={selectedPath}
-													onSelectPath={setSelectedPath}
+													onSelectPath={handleExplicitSelectPath}
 													panelFlex="1 1 0"
 												/>
 											</div>

@@ -142,6 +142,149 @@ describe("DiffViewerPanel", () => {
 		expect(scrollContainer.scrollTop).toBe(547);
 	});
 
+	it("re-expands a collapsed file when the same selectedPath is explicitly selected again via an incremented expand token", async () => {
+		const workspaceFiles: RuntimeWorkspaceFileChange[] = [
+			{
+				path: "src/a.ts",
+				status: "modified",
+				additions: 1,
+				deletions: 0,
+				oldText: "const a = 1;\n",
+				newText: "const a = 2;\n",
+			},
+			{
+				path: "src/b.ts",
+				status: "modified",
+				additions: 1,
+				deletions: 0,
+				oldText: "const b = 1;\n",
+				newText: "const b = 2;\n",
+			},
+		];
+		const comments = new Map<string, DiffLineComment>();
+
+		// 默认全部折叠：无 selectedPath、token 为 0。
+		await act(async () => {
+			root.render(
+				<DiffViewerPanel
+					workspaceFiles={workspaceFiles}
+					selectedPath={null}
+					selectedPathExpandToken={0}
+					onSelectedPathChange={() => {}}
+					comments={comments}
+					onCommentsChange={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.querySelector(".kb-diff-row")).toBeNull();
+
+		// 显式选中 src/b.ts（令牌递增）：应展开并渲染其 diff 行。
+		await act(async () => {
+			root.render(
+				<DiffViewerPanel
+					workspaceFiles={workspaceFiles}
+					selectedPath="src/b.ts"
+					selectedPathExpandToken={1}
+					onSelectedPathChange={() => {}}
+					comments={comments}
+					onCommentsChange={() => {}}
+				/>,
+			);
+		});
+
+		const sectionsAfterExpand = Array.from(container.querySelectorAll("section"));
+		expect(sectionsAfterExpand).toHaveLength(2);
+		const bSectionExpanded = sectionsAfterExpand[1];
+		expect(bSectionExpanded?.querySelector(".kb-diff-row")).toBeInstanceOf(HTMLDivElement);
+
+		// 用文件头 chevron 折叠 src/b.ts，但 selectedPath 仍为 src/b.ts（复现「已高亮但折叠」状态）。
+		const collapseButton = bSectionExpanded?.querySelector("button.kb-diff-file-header");
+		expect(collapseButton).toBeInstanceOf(HTMLButtonElement);
+		await act(async () => {
+			(collapseButton as HTMLButtonElement).click();
+		});
+		expect(bSectionExpanded?.querySelector(".kb-diff-row")).toBeNull();
+
+		// 再次显式选中同一 selectedPath（仅令牌递增）：必须重新展开折叠的文件。
+		await act(async () => {
+			root.render(
+				<DiffViewerPanel
+					workspaceFiles={workspaceFiles}
+					selectedPath="src/b.ts"
+					selectedPathExpandToken={2}
+					onSelectedPathChange={() => {}}
+					comments={comments}
+					onCommentsChange={() => {}}
+				/>,
+			);
+		});
+
+		const sectionsAfterReexpand = Array.from(container.querySelectorAll("section"));
+		expect(sectionsAfterReexpand[1]?.querySelector(".kb-diff-row")).toBeInstanceOf(HTMLDivElement);
+	});
+
+	it("does not expand a scroll-synced selectedPath that arrives without an expand token change", async () => {
+		const workspaceFiles: RuntimeWorkspaceFileChange[] = [
+			{
+				path: "src/a.ts",
+				status: "modified",
+				additions: 1,
+				deletions: 0,
+				oldText: "const a = 1;\n",
+				newText: "const a = 2;\n",
+			},
+			{
+				path: "src/b.ts",
+				status: "modified",
+				additions: 1,
+				deletions: 0,
+				oldText: "const b = 1;\n",
+				newText: "const b = 2;\n",
+			},
+		];
+		const comments = new Map<string, DiffLineComment>();
+
+		await act(async () => {
+			root.render(
+				<DiffViewerPanel
+					workspaceFiles={workspaceFiles}
+					selectedPath={null}
+					selectedPathExpandToken={0}
+					onSelectedPathChange={() => {}}
+					comments={comments}
+					onCommentsChange={() => {}}
+				/>,
+			);
+		});
+
+		const scrollContainer = container.querySelector("section")?.parentElement;
+		if (!(scrollContainer instanceof HTMLDivElement)) {
+			throw new Error("Expected a diff scroll container.");
+		}
+
+		// 模拟滚动联动：用户滚动折叠列表，顶部活动项被设为 selectedPath，但令牌不变（仍为 0）。
+		await act(async () => {
+			scrollContainer.dispatchEvent(new Event("scroll"));
+		});
+		await act(async () => {
+			root.render(
+				<DiffViewerPanel
+					workspaceFiles={workspaceFiles}
+					selectedPath="src/b.ts"
+					selectedPathExpandToken={0}
+					onSelectedPathChange={() => {}}
+					comments={comments}
+					onCommentsChange={() => {}}
+				/>,
+			);
+		});
+
+		// 令牌未变化 + 处于滚动联动窗口：只高亮、不展开，避免滚动浏览时级联展开。
+		const bSection = Array.from(container.querySelectorAll("section"))[1];
+		expect(bSection?.querySelector(".kb-diff-row")).toBeNull();
+	});
+
 	it("renders replaced lines side by side in split view", async () => {
 		const workspaceFiles: RuntimeWorkspaceFileChange[] = [
 			{
@@ -158,7 +301,7 @@ describe("DiffViewerPanel", () => {
 			root.render(
 				<DiffViewerPanel
 					workspaceFiles={workspaceFiles}
-					selectedPath={null}
+					selectedPath="src/example.ts"
 					onSelectedPathChange={() => {}}
 					comments={new Map<string, DiffLineComment>()}
 					onCommentsChange={() => {}}
@@ -190,7 +333,7 @@ describe("DiffViewerPanel", () => {
 			root.render(
 				<DiffViewerPanel
 					workspaceFiles={workspaceFiles}
-					selectedPath={null}
+					selectedPath="src/example.ts"
 					onSelectedPathChange={() => {}}
 					comments={new Map<string, DiffLineComment>()}
 					onCommentsChange={() => {}}
@@ -227,7 +370,7 @@ describe("DiffViewerPanel", () => {
 			root.render(
 				<DiffViewerPanel
 					workspaceFiles={workspaceFiles}
-					selectedPath={null}
+					selectedPath="src/example.ts"
 					onSelectedPathChange={() => {}}
 					comments={new Map<string, DiffLineComment>()}
 					onCommentsChange={() => {}}
@@ -255,7 +398,7 @@ describe("DiffViewerPanel", () => {
 			root.render(
 				<DiffViewerPanel
 					workspaceFiles={workspaceFiles}
-					selectedPath={null}
+					selectedPath="assets/logo.png"
 					onSelectedPathChange={() => {}}
 					comments={new Map<string, DiffLineComment>()}
 					onCommentsChange={() => {}}
