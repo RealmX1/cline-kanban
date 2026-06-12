@@ -312,8 +312,8 @@ describe("CardDetailView", () => {
 		});
 
 		const lastCall = mockUseRuntimeWorkspaceChanges.mock.calls.at(-1);
-		expect(lastCall?.[3]).toBe("last_turn");
-		expect(lastCall?.[7]).toBe(true);
+		expect(lastCall?.[4]).toBe("last_turn");
+		expect(lastCall?.[8]).toBe(true);
 	});
 
 	it("keeps the active diff mode visually highlighted", async () => {

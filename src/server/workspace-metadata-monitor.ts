@@ -2,6 +2,7 @@ import type {
 	RuntimeBoardData,
 	RuntimeGitSyncSummary,
 	RuntimeTaskWorkspaceMetadata,
+	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceMetadata,
 } from "../core/api-contract";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
@@ -12,6 +13,7 @@ const WORKSPACE_METADATA_POLL_INTERVAL_MS = 1_000;
 interface TrackedTaskWorkspace {
 	taskId: string;
 	baseRef: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }
 
 interface CachedHomeGitMetadata {
@@ -68,6 +70,7 @@ function collectTrackedTasks(board: RuntimeBoardData): TrackedTaskWorkspace[] {
 			tracked.push({
 				taskId: card.id,
 				baseRef: card.baseRef,
+				...(card.worktreeMode ? { worktreeMode: card.worktreeMode } : {}),
 			});
 		}
 	}
@@ -188,6 +191,7 @@ async function loadTaskWorkspaceMetadata(
 		cwd: workspacePath,
 		taskId: task.taskId,
 		baseRef: task.baseRef,
+		...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
 	});
 
 	if (!pathInfo.exists) {

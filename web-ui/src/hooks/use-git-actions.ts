@@ -118,8 +118,9 @@ export function useGitActions({
 		return {
 			taskId: selectedCard.card.id,
 			baseRef: selectedCard.card.baseRef,
+			...(selectedCard.card.worktreeMode ? { worktreeMode: selectedCard.card.worktreeMode } : {}),
 		};
-	}, [selectedCard?.card.baseRef, selectedCard?.card.id]);
+	}, [selectedCard?.card.baseRef, selectedCard?.card.id, selectedCard?.card.worktreeMode]);
 
 	const gitHistorySummary = useMemo(() => {
 		if (!selectedCard) {

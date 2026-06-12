@@ -547,6 +547,7 @@ export function CardDetailView({
 		selection.card.id,
 		currentProjectId,
 		selection.card.baseRef,
+		selection.card.worktreeMode ?? null,
 		diffMode,
 		taskWorkspaceStateVersion,
 		isDocumentVisible && !gitHistoryPanel && selection.column.id !== "trash" ? DETAIL_DIFF_POLL_INTERVAL_MS : null,

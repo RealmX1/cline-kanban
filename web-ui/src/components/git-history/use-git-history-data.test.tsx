@@ -8,6 +8,7 @@ import type {
 	RuntimeGitLogResponse,
 	RuntimeGitRefsResponse,
 	RuntimeGitSyncSummary,
+	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceChangesResponse,
 } from "@/runtime/types";
 
@@ -149,7 +150,7 @@ function HookHarness({
 	enabled = true,
 	onRender,
 }: {
-	taskScope: { taskId: string; baseRef: string } | null;
+	taskScope: { taskId: string; baseRef: string; worktreeMode?: RuntimeTaskWorktreeMode } | null;
 	enabled?: boolean;
 	onRender: (snapshot: HookSnapshot) => void;
 }): null {
@@ -217,6 +218,26 @@ describe("useGitHistoryData", () => {
 			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 				previousActEnvironment;
 		}
+	});
+
+	it("forwards worktreeMode through every git history query for inplace tasks", async () => {
+		const inplaceScope = { taskId: "task-1", baseRef: "main", worktreeMode: "inplace" as const };
+
+		await act(async () => {
+			root.render(<HookHarness taskScope={inplaceScope} onRender={() => {}} />);
+			await flushPromises();
+		});
+		await act(async () => {
+			await flushPromises();
+		});
+
+		expect(getGitRefsQueryMock).toHaveBeenCalledWith(inplaceScope);
+		expect(getGitLogQueryMock).toHaveBeenCalledWith(
+			expect.objectContaining({ taskScope: inplaceScope }),
+			expect.anything(),
+		);
+		expect(getChangesQueryMock).toHaveBeenCalledWith(inplaceScope);
+		expect(getCommitDiffQueryMock).toHaveBeenCalledWith(expect.objectContaining({ taskScope: inplaceScope }));
 	});
 
 	it("does not expose home git history data during a task scope transition", async () => {

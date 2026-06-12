@@ -2,7 +2,7 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeWorkspaceChangesResponse } from "@/runtime/types";
+import type { RuntimeTaskWorktreeMode, RuntimeWorkspaceChangesResponse } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
 
 const getChangesQueryMock = vi.hoisted(() => vi.fn());
@@ -52,11 +52,13 @@ interface HookSnapshot {
 
 function HookHarness({
 	taskId,
+	worktreeMode = null,
 	viewKey = null,
 	clearOnViewTransition = true,
 	onSnapshot,
 }: {
 	taskId: string;
+	worktreeMode?: RuntimeTaskWorktreeMode | null;
 	viewKey?: string | null;
 	clearOnViewTransition?: boolean;
 	onSnapshot: (snapshot: HookSnapshot) => void;
@@ -65,6 +67,7 @@ function HookHarness({
 		taskId,
 		"project-1",
 		"main",
+		worktreeMode,
 		"working_copy",
 		0,
 		null,
@@ -109,6 +112,49 @@ describe("useRuntimeWorkspaceChanges", () => {
 			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 				previousActEnvironment;
 		}
+	});
+
+	it("forwards worktreeMode to the getChanges request for inplace tasks", async () => {
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("inplace.ts"));
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskId="task-inplace"
+					worktreeMode="inplace"
+					onSnapshot={() => {
+						/* noop */
+					}}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		expect(getChangesQueryMock).toHaveBeenCalledWith({
+			taskId: "task-inplace",
+			baseRef: "main",
+			worktreeMode: "inplace",
+			mode: "working_copy",
+		});
+	});
+
+	it("omits worktreeMode from the getChanges request by default", async () => {
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("default.ts"));
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskId="task-default"
+					onSnapshot={() => {
+						/* noop */
+					}}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(1);
+		expect(getChangesQueryMock.mock.calls[0]?.[0]).not.toHaveProperty("worktreeMode");
 	});
 
 	it("clears the previous task diff immediately when switching tasks", async () => {

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type UseGitActionsResult, useGitActions } from "@/hooks/use-git-actions";
 import type { RuntimeConfigResponse, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
 import { clearTaskWorkspaceInfo, clearTaskWorkspaceSnapshot } from "@/stores/workspace-metadata-store";
-import type { BoardData } from "@/types";
+import type { BoardCard, BoardData, CardSelection } from "@/types";
 
 const showAppToastMock = vi.hoisted(() => vi.fn());
 const useGitHistoryDataMock = vi.hoisted(() => vi.fn());
@@ -51,7 +51,7 @@ function createGitHistoryResult(): UseGitActionsResult["gitHistory"] {
 	};
 }
 
-function createBoard(): BoardData {
+function createBoard(cardOverrides?: Partial<BoardCard>): BoardData {
 	return {
 		columns: [
 			{
@@ -68,12 +68,22 @@ function createBoard(): BoardData {
 						baseRef: "main",
 						createdAt: 1,
 						updatedAt: 1,
+						...cardOverrides,
 					},
 				],
 			},
 		],
 		dependencies: [],
 	};
+}
+
+function createCardSelection(board: BoardData): CardSelection {
+	const column = board.columns[0];
+	const card = column?.cards[0];
+	if (!column || !card) {
+		throw new Error("Expected a board with at least one card.");
+	}
+	return { card, column, allColumns: board.columns };
 }
 
 function createRuntimeConfig(selectedAgentId: RuntimeConfigResponse["selectedAgentId"]): RuntimeConfigResponse {
@@ -129,18 +139,22 @@ function createWorkspaceInfo(): RuntimeTaskWorkspaceInfoResponse {
 }
 
 function HookHarness({
+	board,
+	selectedCard = null,
 	onSnapshot,
 	sendTaskSessionInput,
 	sendTaskChatMessage,
 }: {
+	board?: BoardData;
+	selectedCard?: CardSelection | null;
 	onSnapshot: (snapshot: HookSnapshot) => void;
 	sendTaskSessionInput: Parameters<typeof useGitActions>[0]["sendTaskSessionInput"];
 	sendTaskChatMessage: Parameters<typeof useGitActions>[0]["sendTaskChatMessage"];
 }): null {
 	const gitActions = useGitActions({
 		currentProjectId: "project-1",
-		board: createBoard(),
-		selectedCard: null,
+		board: board ?? createBoard(),
+		selectedCard,
 		runtimeProjectConfig: createRuntimeConfig("cline"),
 		sendTaskSessionInput,
 		sendTaskChatMessage,
@@ -190,6 +204,60 @@ describe("useGitActions", () => {
 			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 				previousActEnvironment;
 		}
+	});
+
+	it("passes the selected card's worktreeMode to the git history task scope", async () => {
+		const board = createBoard({ worktreeMode: "inplace" });
+		const selection = createCardSelection(board);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					selectedCard={selection}
+					onSnapshot={() => {
+						/* noop */
+					}}
+					sendTaskSessionInput={async () => ({ ok: true })}
+					sendTaskChatMessage={async () => ({ ok: true })}
+				/>,
+			);
+		});
+
+		expect(useGitHistoryDataMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				taskScope: {
+					taskId: "task-1",
+					baseRef: "main",
+					worktreeMode: "inplace",
+				},
+			}),
+		);
+	});
+
+	it("omits worktreeMode from the git history task scope when the card has none", async () => {
+		const board = createBoard();
+		const selection = createCardSelection(board);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					selectedCard={selection}
+					onSnapshot={() => {
+						/* noop */
+					}}
+					sendTaskSessionInput={async () => ({ ok: true })}
+					sendTaskChatMessage={async () => ({ ok: true })}
+				/>,
+			);
+		});
+
+		const lastOptions = useGitHistoryDataMock.mock.calls.at(-1)?.[0] as
+			| { taskScope?: { taskId: string; baseRef: string } | null }
+			| undefined;
+		expect(lastOptions?.taskScope).toEqual({ taskId: "task-1", baseRef: "main" });
+		expect(lastOptions?.taskScope).not.toHaveProperty("worktreeMode");
 	});
 
 	it("sends commit prompts through the native cline chat API", async () => {

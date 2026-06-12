@@ -8,6 +8,7 @@ import type {
 	RuntimeGitRef,
 	RuntimeGitRefsResponse,
 	RuntimeGitSyncSummary,
+	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceChangesResponse,
 } from "@/runtime/types";
 import { useTrpcQuery } from "@/runtime/use-trpc-query";
@@ -22,6 +23,7 @@ const EMPTY_LOG_REFS: string[] = [];
 interface GitHistoryTaskScope {
 	taskId: string;
 	baseRef: string;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 }
 
 interface UseGitHistoryDataOptions {
