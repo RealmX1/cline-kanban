@@ -2,7 +2,18 @@ import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
-import { AlertCircle, AlertTriangle, Archive, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
+import {
+	AlertCircle,
+	AlertTriangle,
+	Archive,
+	Bot,
+	FileText,
+	GitBranch,
+	Pencil,
+	Play,
+	RotateCcw,
+	Trash2,
+} from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -11,6 +22,7 @@ import {
 	formatClineSelectedModelButtonText,
 	resolveClineModelDisplayName,
 } from "@/components/detail-panels/cline-model-picker-options";
+import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
@@ -262,6 +274,7 @@ export function BoardCard({
 	defaultClineModelId?: string | null;
 }): React.ReactElement {
 	const [isHovered, setIsHovered] = useState(false);
+	const [isPromptViewerOpen, setIsPromptViewerOpen] = useState(false);
 	const [isEditingTitle, setIsEditingTitle] = useState(false);
 	const [draftTitle, setDraftTitle] = useState(card.title);
 	const titleInputRef = useRef<HTMLInputElement | null>(null);
@@ -489,6 +502,12 @@ export function BoardCard({
 						data-column-id={columnId}
 						data-selected={selected}
 						onMouseDownCapture={(event) => {
+							// Radix Portal（如 TaskOriginalPromptDialog）挂载到 document.body，
+							// 但 React 合成事件仍沿组件树冒泡回卡片 shell；下方基于 DOM 祖先链的
+							// closest() 守卫对 portal 内容不生效，所以先做 DOM containment 检查。
+							if (!event.currentTarget.contains(event.target as Node)) {
+								return;
+							}
 							if (!isCardInteractive) {
 								return;
 							}
@@ -509,6 +528,10 @@ export function BoardCard({
 							onDependencyPointerDown?.(card.id, event);
 						}}
 						onClick={(event) => {
+							// 同上：portal 内容的合成 click 也会冒泡到这里，先做 DOM containment 检查。
+							if (!event.currentTarget.contains(event.target as Node)) {
+								return;
+							}
 							if (!isCardInteractive) {
 								return;
 							}
@@ -555,7 +578,7 @@ export function BoardCard({
 								isDependencyTarget && "kb-board-card-dependency-target",
 							)}
 						>
-							<div className="flex items-center gap-2 pr-12" style={{ minHeight: 24 }}>
+							<div className="flex items-center gap-2 pr-16" style={{ minHeight: 24 }}>
 								{statusMarker ? <div className="inline-flex items-center">{statusMarker}</div> : null}
 								<div className="flex-1 min-w-0">
 									{isEditingTitle ? (
@@ -616,6 +639,19 @@ export function BoardCard({
 									isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
 								)}
 							>
+								<Tooltip side="bottom" content="View original prompt">
+									<Button
+										icon={<FileText size={12} />}
+										variant="ghost"
+										size="xs"
+										aria-label="View original prompt"
+										onMouseDown={stopEvent}
+										onClick={(event) => {
+											stopEvent(event);
+											setIsPromptViewerOpen(true);
+										}}
+									/>
+								</Tooltip>
 								{columnId === "backlog" ? (
 									<Tooltip side="bottom" content="Start task">
 										<Button
@@ -687,6 +723,9 @@ export function BoardCard({
 									</Tooltip>
 								) : null}
 							</div>
+							{isPromptViewerOpen ? (
+								<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
+							) : null}
 							{displayDescription ? (
 								<div ref={descriptionContainerRef}>
 									<p

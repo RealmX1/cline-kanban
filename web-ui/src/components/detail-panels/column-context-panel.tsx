@@ -4,11 +4,17 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BoardCard } from "@/components/board-card";
+import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
+import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { findCardColumnId, isCardDropDisabled } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumn, BoardColumnId, CardSelection } from "@/types";
+
+// 详情页左侧所有 section 共用一个滚动容器；模块级常量保持引用稳定。
+const getDetailTaskListScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
+	sentinel.closest<HTMLElement>(".kb-detail-task-list-scroll");
 
 function ColumnSection({
 	column,
@@ -76,6 +82,13 @@ function ColumnSection({
 			: null;
 	const cardDropType = "CARD";
 	const isDropDisabled = isCardDropDisabled(column.id, activeDragSourceColumnId ?? null);
+	const selectedIndex = column.cards.findIndex((card) => card.id === selectedCardId);
+	const { visibleCount, hasMore, remainingCount, loadMoreSentinelRef, revealMore } = useProgressiveRenderCount({
+		totalCount: column.cards.length,
+		getScrollRoot: getDetailTaskListScrollRoot,
+		enabled: activeDragSourceColumnId == null,
+		ensureVisibleIndex: selectedIndex >= 0 ? selectedIndex : undefined,
+	});
 
 	useEffect(() => {
 		if (!column.cards.some((card) => card.id === selectedCardId)) {
@@ -200,7 +213,7 @@ function ColumnSection({
 								{(() => {
 									const items: ReactNode[] = [];
 									let draggableIndex = 0;
-									for (const card of column.cards) {
+									for (const card of column.cards.slice(0, visibleCount)) {
 										if (column.id === "backlog" && editingTaskId === card.id) {
 											items.push(
 												<div key={card.id} style={{ marginBottom: 8 }}>
@@ -242,6 +255,13 @@ function ColumnSection({
 									}
 									return items;
 								})()}
+								{hasMore ? (
+									<LoadMoreTasksSentinel
+										ref={loadMoreSentinelRef}
+										remainingCount={remainingCount}
+										onReveal={revealMore}
+									/>
+								) : null}
 								{provided.placeholder}
 								{column.cards.length === 0 ? (
 									<div className="flex items-center justify-center py-4 text-text-tertiary text-xs">Empty</div>
@@ -328,17 +348,27 @@ export function ColumnContextPanel({
 			return;
 		}
 		const escapedTaskId = selection.card.id.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-		const selectedCardElement = scrollContainer.querySelector<HTMLElement>(`[data-task-id="${escapedTaskId}"]`);
-		if (!selectedCardElement) {
-			return;
-		}
-
-		const frameId = window.requestAnimationFrame(() => {
-			selectedCardElement.scrollIntoView({
-				block: "center",
-				inline: "nearest",
-			});
-		});
+		// 在 rAF 内查询而非同步查询：被选中的卡片可能因渐进渲染（ensureVisibleIndex）
+		// 需要再渲染一帧才挂载到 DOM。若首帧未找到，则在随后的若干帧重试，
+		// 直到它出现再居中（命中后立即停止）。
+		const MAX_SCROLL_INTO_VIEW_FRAMES = 30;
+		let frameId = 0;
+		let attempts = 0;
+		const centerSelectedCard = () => {
+			const selectedCardElement = scrollContainer.querySelector<HTMLElement>(`[data-task-id="${escapedTaskId}"]`);
+			if (selectedCardElement) {
+				selectedCardElement.scrollIntoView({
+					block: "center",
+					inline: "nearest",
+				});
+				return;
+			}
+			if (attempts < MAX_SCROLL_INTO_VIEW_FRAMES) {
+				attempts += 1;
+				frameId = window.requestAnimationFrame(centerSelectedCard);
+			}
+		};
+		frameId = window.requestAnimationFrame(centerSelectedCard);
 		return () => {
 			window.cancelAnimationFrame(frameId);
 		};
@@ -358,7 +388,7 @@ export function ColumnContextPanel({
 			<DragDropContext onBeforeCapture={handleBeforeCapture} onDragEnd={handleDragEnd}>
 				<div
 					ref={scrollContainerRef}
-					className="flex flex-col gap-2 p-2"
+					className="kb-detail-task-list-scroll flex flex-col gap-2 p-2"
 					style={{
 						flex: "1 1 0",
 						minHeight: 0,

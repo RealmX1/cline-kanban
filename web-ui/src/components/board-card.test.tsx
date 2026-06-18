@@ -278,6 +278,91 @@ describe("BoardCard", () => {
 		expect(onDeleteTask).toHaveBeenCalledWith("task-1");
 	});
 
+	it("opens the original prompt dialog from a card with a failed session", async () => {
+		const rawPrompt = "Task title||full raw prompt body that the dialog must show verbatim";
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard({ prompt: rawPrompt })}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("failed")}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const viewPromptButton = container.querySelector<HTMLButtonElement>('button[aria-label="View original prompt"]');
+		expect(viewPromptButton).toBeInstanceOf(HTMLButtonElement);
+
+		await act(async () => {
+			viewPromptButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			viewPromptButton?.click();
+		});
+
+		const promptBlock = document.body.querySelector("[role='dialog'] pre");
+		expect(promptBlock?.textContent).toBe(rawPrompt);
+	});
+
+	it("does not select the card when clicking non-interactive content inside the prompt dialog", async () => {
+		const onCardSelect = vi.fn();
+
+		await act(async () => {
+			root.render(<BoardCard card={createCard()} index={0} columnId="backlog" onClick={onCardSelect} />);
+		});
+
+		const viewPromptButton = container.querySelector<HTMLButtonElement>('button[aria-label="View original prompt"]');
+		await act(async () => {
+			viewPromptButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			viewPromptButton?.click();
+		});
+
+		// 弹窗内容由 Radix Portal 挂到 document.body，但 React 合成事件仍会沿
+		// React 组件树冒泡回卡片 shell；点击弹窗内非按钮区域不得触发选卡。
+		const promptBlock = document.body.querySelector<HTMLElement>("[role='dialog'] pre");
+		expect(promptBlock).not.toBeNull();
+
+		await act(async () => {
+			promptBlock?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			promptBlock?.click();
+		});
+
+		expect(onCardSelect).not.toHaveBeenCalled();
+		expect(document.body.querySelector("[role='dialog'] pre")).not.toBeNull();
+	});
+
+	it("does not start dependency linking from cmd+mousedown inside the prompt dialog", async () => {
+		const onDependencyPointerDown = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard()}
+					index={0}
+					columnId="backlog"
+					onDependencyPointerDown={onDependencyPointerDown}
+				/>,
+			);
+		});
+
+		const viewPromptButton = container.querySelector<HTMLButtonElement>('button[aria-label="View original prompt"]');
+		await act(async () => {
+			viewPromptButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			viewPromptButton?.click();
+		});
+
+		const promptBlock = document.body.querySelector<HTMLElement>("[role='dialog'] pre");
+		expect(promptBlock).not.toBeNull();
+
+		await act(async () => {
+			promptBlock?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, metaKey: true }));
+		});
+
+		expect(onDependencyPointerDown).not.toHaveBeenCalled();
+	});
+
 	it("shows inline see more and less controls for long descriptions", async () => {
 		const description =
 			"Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau final hidden segment";

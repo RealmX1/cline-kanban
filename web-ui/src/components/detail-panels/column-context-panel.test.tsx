@@ -143,6 +143,78 @@ describe("ColumnContextPanel", () => {
 		});
 	});
 
+	it("initially renders only the first 10 cards in a column and reveals more on demand", async () => {
+		const backlogCards = Array.from({ length: 15 }, (_, index) =>
+			createCard(`task-${index + 1}`, `Backlog task ${index + 1}`),
+		);
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: backlogCards },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [] },
+			{ id: "trash", title: "Done", cards: [] },
+		];
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-1")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.querySelectorAll("[data-task-id]").length).toBe(10);
+
+		const sentinelButton = [...container.querySelectorAll("button")].find((button) =>
+			button.textContent?.includes("滚动或点击加载"),
+		);
+		expect(sentinelButton?.textContent).toContain("还有 5 个");
+
+		await act(async () => {
+			sentinelButton?.click();
+		});
+
+		expect(container.querySelectorAll("[data-task-id]").length).toBe(15);
+		expect(
+			[...container.querySelectorAll("button")].some((button) => button.textContent?.includes("滚动或点击加载")),
+		).toBe(false);
+	});
+
+	it("renders and centers a selected card that sits beyond the initial render window", async () => {
+		const backlogCards = Array.from({ length: 15 }, (_, index) =>
+			createCard(`task-${index + 1}`, `Backlog task ${index + 1}`),
+		);
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: backlogCards },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [] },
+			{ id: "trash", title: "Done", cards: [] },
+		];
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-13")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+				/>,
+			);
+		});
+
+		// 被选中的是第 13 张（index 12），需扩展到至少 13 张才能让它挂载并居中。
+		const renderedCount = container.querySelectorAll("[data-task-id]").length;
+		expect(renderedCount).toBeGreaterThanOrEqual(13);
+		expect(container.querySelector('[data-task-id="task-13"]')).not.toBeNull();
+		expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
+		expect(scrollIntoViewMock).toHaveBeenLastCalledWith({
+			block: "center",
+			inline: "nearest",
+		});
+	});
+
 	it("restores the most recently updated done task from the collapsed done header", async () => {
 		const olderDoneTask = {
 			...createCard("task-done-older", "Older done task"),

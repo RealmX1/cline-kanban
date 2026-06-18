@@ -3,11 +3,17 @@ import { Play, Plus, Trash2 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 
 import { BoardCard } from "@/components/board-card";
+import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
+import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumnId, BoardColumn as BoardColumnModel } from "@/types";
+
+// 模块级常量，保持引用稳定（避免每次渲染都给 hook 传新函数触发 observer 重建）。
+const getColumnCardsScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
+	sentinel.closest<HTMLElement>(".kb-column-cards");
 
 export function BoardColumn({
 	column,
@@ -75,6 +81,11 @@ export function BoardColumn({
 	const canCreate = column.id === "backlog" && onCreateTask;
 	const canStartAllTasks = column.id === "backlog" && onStartAllTasks;
 	const canClearTrash = column.id === "trash" && onClearTrash;
+	const { visibleCount, hasMore, remainingCount, loadMoreSentinelRef, revealMore } = useProgressiveRenderCount({
+		totalCount: column.cards.length,
+		getScrollRoot: getColumnCardsScrollRoot,
+		enabled: activeDragTaskId == null,
+	});
 	const cardDropType = "CARD";
 	const isDropDisabled = isCardDropDisabled(column.id, activeDragSourceColumnId ?? null, {
 		activeDragTaskId,
@@ -153,7 +164,7 @@ export function BoardColumn({
 							{(() => {
 								const items: ReactNode[] = [];
 								let draggableIndex = 0;
-								for (const card of column.cards) {
+								for (const card of column.cards.slice(0, visibleCount)) {
 									if (column.id === "backlog" && editingTaskId === card.id) {
 										items.push(
 											<div
@@ -205,6 +216,13 @@ export function BoardColumn({
 								}
 								return items;
 							})()}
+							{hasMore ? (
+								<LoadMoreTasksSentinel
+									ref={loadMoreSentinelRef}
+									remainingCount={remainingCount}
+									onReveal={revealMore}
+								/>
+							) : null}
 							{cardProvided.placeholder}
 						</div>
 					)}
