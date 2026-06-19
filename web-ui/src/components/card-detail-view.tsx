@@ -892,6 +892,7 @@ export function CardDetailView({
 							moveToTrashLoadingById={moveToTrashLoadingById}
 							panelWidth="100%"
 							defaultClineModelId={runtimeConfig?.clineProviderSettings?.modelId ?? null}
+							defaultAgentId={selectedAgentId}
 						/>
 					</div>
 					<ResizeHandle

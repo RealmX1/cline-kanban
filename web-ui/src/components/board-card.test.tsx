@@ -547,6 +547,50 @@ describe("BoardCard", () => {
 		expect(container.textContent).not.toContain("GPT-5.5 (High)");
 	});
 
+	it("always shows the global default agent when the task has no agent override", async () => {
+		await act(async () => {
+			root.render(<BoardCard card={createCard()} index={0} columnId="backlog" defaultAgentId="claude" />);
+		});
+
+		expect(container.textContent).toContain("Claude Code");
+	});
+
+	it("shows the agent locked from the previous run over the current default", async () => {
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard()}
+					index={0}
+					columnId="review"
+					sessionSummary={createSummary("awaiting_review", { agentId: "cline" })}
+					defaultAgentId="claude"
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("Cline");
+		expect(container.textContent).not.toContain("Claude Code");
+	});
+
+	it("shows the task-level agent override over the global default", async () => {
+		await act(async () => {
+			root.render(
+				<BoardCard card={createCard({ agentId: "codex" })} index={0} columnId="backlog" defaultAgentId="claude" />,
+			);
+		});
+
+		expect(container.textContent).toContain("OpenAI Codex");
+		expect(container.textContent).not.toContain("Claude Code");
+	});
+
+	it("shows no agent badge when there is no override, session, or default agent", async () => {
+		await act(async () => {
+			root.render(<BoardCard card={createCard()} index={0} columnId="backlog" />);
+		});
+
+		expect(container.querySelector("svg.lucide-bot")).toBeNull();
+	});
+
 	it("shows tool input details in the session preview text", async () => {
 		await act(async () => {
 			root.render(
