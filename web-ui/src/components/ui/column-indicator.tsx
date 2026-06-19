@@ -34,6 +34,27 @@ export function ColumnIndicator({ columnId, size = 14 }: { columnId: string; siz
 			</svg>
 		);
 	}
+	if (columnId === "validation") {
+		const checkStartX = cx - r * 0.5;
+		const checkStartY = cy;
+		const checkMidX = cx - r * 0.1;
+		const checkMidY = cy + r * 0.45;
+		const checkEndX = cx + r * 0.55;
+		const checkEndY = cy - r * 0.45;
+		return (
+			<svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+				<circle cx={cx} cy={cy} r={r} fill="none" stroke={color} strokeWidth={strokeWidth} />
+				<path
+					d={`M${checkStartX} ${checkStartY} L${checkMidX} ${checkMidY} L${checkEndX} ${checkEndY}`}
+					fill="none"
+					stroke={color}
+					strokeWidth={strokeWidth}
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				/>
+			</svg>
+		);
+	}
 	return (
 		<svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
 			<circle cx={cx} cy={cy} r={r + strokeWidth / 2} fill={color} />

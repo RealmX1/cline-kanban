@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
+import {
+	isAllowedCrossColumnCardMove,
+	isCardDropDisabled,
+	type ProgrammaticCardMoveInFlight,
+} from "@/state/drag-rules";
 
 describe("drag rules", () => {
 	it("keeps manual in-progress to review drops disabled", () => {
@@ -56,5 +60,57 @@ describe("drag rules", () => {
 
 	it("allows manual trash to review drops", () => {
 		expect(isCardDropDisabled("review", "trash")).toBe(false);
+	});
+
+	it("allows free in-progress and review drops into validation", () => {
+		expect(isAllowedCrossColumnCardMove("in_progress", "validation")).toBe(true);
+		expect(isAllowedCrossColumnCardMove("review", "validation")).toBe(true);
+		expect(isCardDropDisabled("validation", "in_progress")).toBe(false);
+		expect(isCardDropDisabled("validation", "review")).toBe(false);
+	});
+
+	it("blocks manual drops into validation from non in-progress/review columns", () => {
+		expect(isAllowedCrossColumnCardMove("backlog", "validation")).toBe(false);
+		expect(isAllowedCrossColumnCardMove("trash", "validation")).toBe(false);
+		expect(isCardDropDisabled("validation", "backlog")).toBe(true);
+		expect(isCardDropDisabled("validation", "trash")).toBe(true);
+	});
+
+	it("allows manual validation to done drops", () => {
+		expect(isAllowedCrossColumnCardMove("validation", "trash")).toBe(true);
+		expect(isCardDropDisabled("trash", "validation")).toBe(false);
+	});
+
+	it("only allows validation to in-progress as a matching programmatic move", () => {
+		const move: ProgrammaticCardMoveInFlight = {
+			taskId: "task-1",
+			fromColumnId: "validation",
+			toColumnId: "in_progress",
+			insertAtTop: true,
+		};
+
+		// Manual drag (no programmatic move in flight) stays disabled.
+		expect(isAllowedCrossColumnCardMove("validation", "in_progress")).toBe(false);
+		expect(isCardDropDisabled("in_progress", "validation")).toBe(true);
+
+		// The matching programmatic auto-move (session running) is allowed.
+		expect(
+			isCardDropDisabled("in_progress", "validation", {
+				activeDragTaskId: "task-1",
+				programmaticCardMoveInFlight: move,
+			}),
+		).toBe(false);
+		// A non-matching task id is still blocked.
+		expect(
+			isCardDropDisabled("in_progress", "validation", {
+				activeDragTaskId: "task-2",
+				programmaticCardMoveInFlight: move,
+			}),
+		).toBe(true);
+	});
+
+	it("never allows manual validation to review drops", () => {
+		expect(isAllowedCrossColumnCardMove("validation", "review")).toBe(false);
+		expect(isCardDropDisabled("review", "validation")).toBe(true);
 	});
 });

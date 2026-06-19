@@ -217,7 +217,7 @@ function getLinkedBacklogTaskIdsReadyAfterTaskTrashed(
 	taskId: string,
 	fromColumnId: RuntimeBoardColumnId | null,
 ): string[] {
-	if (!taskId || board.dependencies.length === 0 || fromColumnId !== "review") {
+	if (!taskId || board.dependencies.length === 0 || (fromColumnId !== "review" && fromColumnId !== "validation")) {
 		return [];
 	}
 	const readyTaskIds = new Set<string>();

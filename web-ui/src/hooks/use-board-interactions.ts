@@ -84,6 +84,8 @@ export interface UseBoardInteractionsResult {
 	handleCardSelect: (taskId: string) => void;
 	handleMoveToTrash: () => void;
 	handleMoveReviewCardToTrash: (taskId: string) => void;
+	handleMoveCardToValidation: (taskId: string) => void;
+	handleMoveSelectedCardToValidation: () => void;
 	handleRestoreTaskFromTrash: (taskId: string) => void;
 	handleOpenDeleteTask: (taskId: string) => void;
 	handleCancelDeleteTask: () => void;
@@ -457,7 +459,7 @@ export function useBoardInteractions({
 					}
 					continue;
 				}
-				if (summary.state === "running" && columnId === "review") {
+				if (summary.state === "running" && (columnId === "review" || columnId === "validation")) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
 						skipKickoff: true,
 					});
@@ -474,7 +476,8 @@ export function useBoardInteractions({
 					summary.state === "interrupted" &&
 					previous?.state !== "interrupted" &&
 					columnId &&
-					columnId !== "trash"
+					columnId !== "trash" &&
+					columnId !== "validation"
 				) {
 					const nextTaskId = getNextDetailTaskIdAfterTrashMove(nextBoard, summary.taskId);
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "trash", {
@@ -769,13 +772,52 @@ export function useBoardInteractions({
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
 				return;
 			}
+			// Compact "Move to done" fires from Review, In Progress, and Validation cards. Pass the
+			// card's actual column so the Review→Done slide animation only runs for Review cards and
+			// the other columns fall back to a direct trash move.
+			const fromColumnId = getTaskColumnId(board, taskId) ?? "review";
 			setTaskMoveToTrashLoading(taskId, true);
-			void requestMoveTaskToTrashWithAnimation(taskId, "review").finally(() => {
+			void requestMoveTaskToTrashWithAnimation(taskId, fromColumnId).finally(() => {
 				setTaskMoveToTrashLoading(taskId, false);
 			});
 		},
-		[requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
+		[board, requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
 	);
+
+	// Pure board move into the manual-validation buffer. No session stop, no worktree teardown —
+	// the developer keeps the running agent/diff while validating. Persisted automatically via
+	// useWorkspacePersistence. Mirrors the manual in_progress/review → validation drag end-state.
+	const handleMoveCardToValidation = useCallback(
+		(taskId: string) => {
+			const fromColumnId = getTaskColumnId(board, taskId);
+			if (fromColumnId !== "in_progress" && fromColumnId !== "review") {
+				return;
+			}
+			const moved = moveTaskToColumn(board, taskId, "validation", { insertAtTop: true });
+			if (moved.moved) {
+				setBoard(moved.board);
+				// A still-running session in Validation gets auto-migrated back to In Progress by the
+				// level-triggered effect above, so warn the developer instead of leaving the card looking
+				// like it never moved. Non-blocking, auto-dismisses after 3s.
+				if (sessions[taskId]?.state === "running") {
+					showAppToast({
+						intent: "warning",
+						icon: "info-sign",
+						message: "Task is still running — it will return to In Progress while the agent keeps working.",
+						timeout: 3000,
+					});
+				}
+			}
+		},
+		[board, sessions, setBoard],
+	);
+
+	const handleMoveSelectedCardToValidation = useCallback(() => {
+		if (!selectedCard) {
+			return;
+		}
+		handleMoveCardToValidation(selectedCard.card.id);
+	}, [handleMoveCardToValidation, selectedCard]);
 
 	const handleRestoreTaskFromTrash = useCallback(
 		(taskId: string) => {
@@ -965,6 +1007,8 @@ export function useBoardInteractions({
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		handleMoveCardToValidation,
+		handleMoveSelectedCardToValidation,
 		handleRestoreTaskFromTrash,
 		handleOpenDeleteTask,
 		handleCancelDeleteTask,

@@ -568,6 +568,57 @@ describe("board dependency state", () => {
 		]);
 	});
 
+	it("keeps cards in the validation column when normalizing", () => {
+		const rawBoard = {
+			columns: [
+				{ id: "backlog", cards: [] },
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{
+					id: "validation",
+					cards: [{ id: "v", prompt: "Task V", startInPlanMode: false, baseRef: "main" }],
+				},
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalized = normalizeBoardData(rawBoard);
+		const validationColumn = normalized?.columns.find((column) => column.id === "validation");
+		expect(validationColumn?.cards.map((card) => card.id)).toEqual(["v"]);
+	});
+
+	it("backfills an empty validation column for legacy four-column boards", () => {
+		const rawBoard = {
+			columns: [
+				{ id: "backlog", cards: [] },
+				{
+					id: "in_progress",
+					cards: [{ id: "a", prompt: "Task A", startInPlanMode: false, baseRef: "main" }],
+				},
+				{ id: "review", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalized = normalizeBoardData(rawBoard);
+		expect(normalized).not.toBeNull();
+		if (!normalized) {
+			throw new Error("expected normalized board");
+		}
+		expect(normalized.columns.map((column) => column.id)).toEqual([
+			"backlog",
+			"in_progress",
+			"review",
+			"validation",
+			"trash",
+		]);
+		const validationColumn = normalized.columns.find((column) => column.id === "validation");
+		expect(validationColumn?.cards).toEqual([]);
+		expect(getTaskColumnId(normalized, "a")).toBe("in_progress");
+	});
+
 	it("disables auto-review settings for a task", () => {
 		let board = createInitialBoardData();
 		board = addTaskToColumn(board, "review", {

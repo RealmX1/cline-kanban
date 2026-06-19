@@ -575,6 +575,8 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		handleMoveCardToValidation,
+		handleMoveSelectedCardToValidation,
 		handleRestoreTaskFromTrash,
 		handleOpenDeleteTask,
 		handleCancelDeleteTask,
@@ -962,6 +964,7 @@ export default function App(): ReactElement {
 												openPrTaskLoadingById={openPrTaskLoadingById}
 												moveToTrashLoadingById={moveToTrashLoadingById}
 												onMoveToTrashTask={handleMoveReviewCardToTrash}
+												onMoveToValidationTask={handleMoveCardToValidation}
 												onRestoreFromTrashTask={handleRestoreTaskFromTrash}
 												onDeleteTask={handleOpenDeleteTask}
 												dependencies={board.dependencies}
@@ -1068,6 +1071,7 @@ export default function App(): ReactElement {
 									streamedClineChatMessages={selectedTaskChatMessages}
 									onMoveToTrash={handleMoveToTrash}
 									isMoveToTrashLoading={moveToTrashLoadingById[selectedCard.card.id] ?? false}
+									onMoveToValidation={handleMoveSelectedCardToValidation}
 									gitHistoryPanel={
 										isGitHistoryOpen ? (
 											<GitHistoryView workspaceId={currentProjectId} gitHistory={gitHistory} />

@@ -22,6 +22,7 @@ test("renders kanban top bar and columns", async ({ page }) => {
 	await expect(page.getByText("Backlog", { exact: true })).toBeVisible();
 	await expect(page.getByText("In Progress", { exact: true })).toBeVisible();
 	await expect(page.getByText("Review", { exact: true })).toBeVisible();
+	await expect(page.getByText("Validation", { exact: true })).toBeVisible();
 	await expect(page.getByText("Trash", { exact: true })).toBeVisible();
 	await expect(page.getByRole("button", { name: "Create task" })).toBeVisible();
 });

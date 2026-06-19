@@ -7,6 +7,7 @@ import {
 	AlertTriangle,
 	Archive,
 	Bot,
+	ClipboardCheck,
 	FileText,
 	GitBranch,
 	Pencil,
@@ -231,6 +232,7 @@ export function BoardCard({
 	onClick,
 	onStart,
 	onMoveToTrash,
+	onMoveToValidation,
 	onRestoreFromTrash,
 	onDeleteTask,
 	onSaveTitle,
@@ -240,6 +242,7 @@ export function BoardCard({
 	isCommitLoading = false,
 	isOpenPrLoading = false,
 	isMoveToTrashLoading = false,
+	isMoveToValidationLoading = false,
 	onDependencyPointerDown,
 	onDependencyPointerEnter,
 	isDependencySource = false,
@@ -257,6 +260,7 @@ export function BoardCard({
 	onClick?: () => void;
 	onStart?: (taskId: string) => void;
 	onMoveToTrash?: (taskId: string) => void;
+	onMoveToValidation?: (taskId: string) => void;
 	onRestoreFromTrash?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
@@ -266,6 +270,7 @@ export function BoardCard({
 	isCommitLoading?: boolean;
 	isOpenPrLoading?: boolean;
 	isMoveToTrashLoading?: boolean;
+	isMoveToValidationLoading?: boolean;
 	onDependencyPointerDown?: (taskId: string, event: MouseEvent<HTMLElement>) => void;
 	onDependencyPointerEnter?: (taskId: string) => void;
 	isDependencySource?: boolean;
@@ -427,7 +432,8 @@ export function BoardCard({
 		return null;
 	};
 	const statusMarker = renderStatusMarker();
-	const showWorkspaceStatus = columnId === "in_progress" || columnId === "review" || isTrashCard;
+	const showWorkspaceStatus =
+		columnId === "in_progress" || columnId === "review" || columnId === "validation" || isTrashCard;
 	const reviewWorkspacePath = reviewWorkspaceSnapshot
 		? formatPathForDisplay(reviewWorkspaceSnapshot.path)
 		: isTrashCard
@@ -676,6 +682,22 @@ export function BoardCard({
 									</Tooltip>
 								) : null}
 								{columnId === "review" || columnId === "in_progress" ? (
+									<Tooltip side="bottom" content="Move to validation">
+										<Button
+											icon={isMoveToValidationLoading ? <Spinner size={12} /> : <ClipboardCheck size={12} />}
+											variant="ghost"
+											size="xs"
+											disabled={isMoveToValidationLoading}
+											aria-label="Move task to validation"
+											onMouseDown={stopEvent}
+											onClick={(event) => {
+												stopEvent(event);
+												onMoveToValidation?.(card.id);
+											}}
+										/>
+									</Tooltip>
+								) : null}
+								{columnId === "review" || columnId === "in_progress" || columnId === "validation" ? (
 									<Tooltip side="bottom" content="Move to done">
 										<Button
 											icon={isMoveToTrashLoading ? <Spinner size={12} /> : <Archive size={12} />}
