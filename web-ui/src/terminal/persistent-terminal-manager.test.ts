@@ -5,6 +5,7 @@ import {
 	disposeAllPersistentTerminalsForWorkspace,
 	ensurePersistentTerminal,
 } from "@/terminal/persistent-terminal-manager";
+import type * as PlatformModule from "@/utils/platform";
 
 const fitAddonProposeDimensionsMock = vi.hoisted(() => vi.fn<() => { cols: number; rows: number } | undefined>());
 const screenPixelSize = vi.hoisted(() => ({ width: 480, height: 320 }));
@@ -12,6 +13,8 @@ const createdTerminalOptions = vi.hoisted(() => [] as Array<{ cols?: number; row
 const terminalBuffer = vi.hoisted(() => ({ baseY: 0, viewportY: 0 }));
 const terminalScrollToBottomMock = vi.hoisted(() => vi.fn());
 const terminalWriteSideEffect = vi.hoisted(() => ({ current: null as null | ((data: string | Uint8Array) => void) }));
+const webglAddonConstructions = vi.hoisted(() => ({ count: 0 }));
+const platformOverrides = vi.hoisted(() => ({ isSafari: false }));
 const webSocketInstances = vi.hoisted(
 	() =>
 		[] as Array<{
@@ -63,11 +66,25 @@ vi.mock("@xterm/addon-web-links", () => ({
 
 vi.mock("@xterm/addon-webgl", () => ({
 	WebglAddon: class {
+		constructor() {
+			webglAddonConstructions.count += 1;
+		}
+
 		dispose(): void {}
 
 		onContextLoss(_handler: () => void): void {}
 	},
 }));
+
+vi.mock("@/utils/platform", async (importOriginal) => {
+	const actual = (await importOriginal()) as typeof PlatformModule;
+	return {
+		...actual,
+		get isSafari() {
+			return platformOverrides.isSafari;
+		},
+	};
+});
 
 vi.mock("@xterm/xterm", () => ({
 	Terminal: class {
@@ -260,6 +277,8 @@ describe("persistent-terminal-manager", () => {
 		terminalBuffer.viewportY = 0;
 		terminalScrollToBottomMock.mockReset();
 		terminalWriteSideEffect.current = null;
+		webglAddonConstructions.count = 0;
+		platformOverrides.isSafari = false;
 		createdTerminalOptions.length = 0;
 		webSocketInstances.length = 0;
 		screenPixelSize.width = 480;
@@ -562,5 +581,31 @@ describe("persistent-terminal-manager", () => {
 		terminal.mount(secondContainer, appearance, { isVisible: true });
 
 		expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
+	});
+
+	it("loads the WebGL renderer on non-Safari browsers", () => {
+		platformOverrides.isSafari = false;
+
+		ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+
+		expect(webglAddonConstructions.count).toBe(1);
+	});
+
+	it("skips the WebGL renderer on Safari so the crisp DOM renderer is used", () => {
+		// Safari 不改变 window.devicePixelRatio，WebGL canvas 在 Cmd +/- 缩放时会发虚；
+		// 跳过 WebGL 后 xterm 回退到 DOM 渲染器，任意缩放都清晰。
+		platformOverrides.isSafari = true;
+
+		ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+
+		expect(webglAddonConstructions.count).toBe(0);
 	});
 });
