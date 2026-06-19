@@ -21,7 +21,7 @@ import {
 	hasInterruptAcknowledgement,
 	hasLikelyShellPrompt,
 } from "@/terminal/terminal-prompt-heuristics";
-import { isMacPlatform } from "@/utils/platform";
+import { isMacPlatform, isSafari } from "@/utils/platform";
 
 const SHIFT_ENTER_SEQUENCE = "\n";
 const RESIZE_DEBOUNCE_MS = 50;
@@ -302,14 +302,19 @@ class PersistentTerminal {
 			this.notifySearchResults(results);
 		});
 
-		try {
-			const webglAddon = new WebglAddon();
-			webglAddon.onContextLoss(() => {
-				webglAddon.dispose();
-			});
-			this.terminal.loadAddon(webglAddon);
-		} catch {
-			// Fall back to the default renderer when WebGL is unavailable.
+		if (!isSafari) {
+			// Safari 走 xterm 的 DOM 渲染器：它在 Cmd +/- 缩放时始终清晰（Safari 不改变
+			// window.devicePixelRatio，WebGL canvas 缓冲区不会按新 DPR 重新光栅化、文字发虚），
+			// 同时也规避了较新 Safari 的 WebGL 渲染破损（xterm.js #5816）。
+			try {
+				const webglAddon = new WebglAddon();
+				webglAddon.onContextLoss(() => {
+					webglAddon.dispose();
+				});
+				this.terminal.loadAddon(webglAddon);
+			} catch {
+				// Fall back to the default DOM renderer when WebGL is unavailable.
+			}
 		}
 
 		this.documentVisible = typeof document === "undefined" || document.visibilityState === "visible";
