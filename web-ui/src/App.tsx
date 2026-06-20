@@ -9,6 +9,7 @@ import { AddProjectDialog } from "@/components/add-project-dialog";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
+import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
 import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
@@ -196,6 +197,7 @@ export default function App(): ReactElement {
 		ensureTaskWorkspace,
 		startTaskSession,
 		stopTaskSession,
+		continueConnectionRetrySessions,
 		sendTaskSessionInput,
 		sendTaskChatMessage,
 		cancelTaskChatTurn,
@@ -206,6 +208,38 @@ export default function App(): ReactElement {
 		currentProjectId,
 		setSessions,
 	});
+
+	// 当前 workspace 内正处于连接重试的会话视图（驱动顶栏「重连中」指示器）。
+	// sessions 已按 workspace 范围维护，因此这里天然是 per-tab 范围。
+	const connectionRetrySessions = useMemo<ConnectionRetrySessionView[]>(() => {
+		const titleByTaskId = new Map<string, string>();
+		for (const column of board.columns) {
+			for (const card of column.cards) {
+				titleByTaskId.set(card.id, card.title);
+			}
+		}
+		const views: ConnectionRetrySessionView[] = [];
+		for (const summary of Object.values(sessions)) {
+			const retry = summary.connectionRetry;
+			if (!retry || retry.status !== "retrying") {
+				continue;
+			}
+			views.push({
+				taskId: summary.taskId,
+				taskTitle: titleByTaskId.get(summary.taskId) ?? summary.taskId,
+				retryCount: retry.retryCount,
+				nextAttemptAt: retry.nextAttemptAt,
+			});
+		}
+		return views;
+	}, [board, sessions]);
+
+	const handleContinueConnectionRetrySessions = useCallback(
+		(taskIds: string[]) => {
+			void continueConnectionRetrySessions(taskIds);
+		},
+		[continueConnectionRetrySessions],
+	);
 
 	const {
 		workspacePath,
@@ -897,6 +931,8 @@ export default function App(): ReactElement {
 						onToggleGitHistory={hasNoProjects ? undefined : handleToggleGitHistory}
 						isGitHistoryOpen={isGitHistoryOpen}
 						hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
+						connectionRetrySessions={connectionRetrySessions}
+						onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 						<div

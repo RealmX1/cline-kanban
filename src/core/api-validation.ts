@@ -12,6 +12,7 @@ import {
 	type RuntimeClineUpdateProviderRequest,
 	type RuntimeCommandRunRequest,
 	type RuntimeConfigSaveRequest,
+	type RuntimeContinueConnectionRetrySessionsRequest,
 	type RuntimeDirectoryListRequest,
 	type RuntimeGitCheckoutRequest,
 	type RuntimeHookIngestRequest,
@@ -45,6 +46,7 @@ import {
 	runtimeClineUpdateProviderRequestSchema,
 	runtimeCommandRunRequestSchema,
 	runtimeConfigSaveRequestSchema,
+	runtimeContinueConnectionRetrySessionsRequestSchema,
 	runtimeDirectoryListRequestSchema,
 	runtimeGitCheckoutRequestSchema,
 	runtimeHookIngestRequestSchema,
@@ -247,6 +249,19 @@ export function parseTaskSessionStopRequest(value: unknown): RuntimeTaskSessionS
 	}
 	return {
 		taskId,
+	};
+}
+
+export function parseContinueConnectionRetrySessionsRequest(
+	value: unknown,
+): RuntimeContinueConnectionRetrySessionsRequest {
+	const parsed = parseWithSchema(runtimeContinueConnectionRetrySessionsRequestSchema, value);
+	const taskIds = parsed.taskIds.map((taskId) => taskId.trim()).filter((taskId) => taskId.length > 0);
+	if (taskIds.length === 0) {
+		throw new Error("Invalid connection-retry continuation payload: no task ids.");
+	}
+	return {
+		taskIds,
 	};
 }
 

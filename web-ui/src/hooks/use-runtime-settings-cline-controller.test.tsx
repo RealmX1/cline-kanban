@@ -75,6 +75,7 @@ function createRuntimeConfigResponse(
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project/.cline/kanban/config.json",
 		readyForReviewNotificationsEnabled: true,
+		autoContinueOnConnectionDropEnabled: true,
 		detectedCommands: ["cline"],
 		agents: [
 			{

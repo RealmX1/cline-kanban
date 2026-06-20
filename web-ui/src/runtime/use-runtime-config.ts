@@ -15,6 +15,7 @@ export interface UseRuntimeConfigResult {
 		agentAutonomousModeEnabled?: boolean;
 		shortcuts?: RuntimeProjectShortcut[];
 		readyForReviewNotificationsEnabled?: boolean;
+		autoContinueOnConnectionDropEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
 	}) => Promise<RuntimeConfigResponse | null>;
@@ -82,6 +83,7 @@ export function useRuntimeConfig(
 			agentAutonomousModeEnabled?: boolean;
 			shortcuts?: RuntimeProjectShortcut[];
 			readyForReviewNotificationsEnabled?: boolean;
+			autoContinueOnConnectionDropEnabled?: boolean;
 			commitPromptTemplate?: string;
 			openPrPromptTemplate?: string;
 		}): Promise<RuntimeConfigResponse | null> => {

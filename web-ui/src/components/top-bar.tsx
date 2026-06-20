@@ -16,6 +16,7 @@ import {
 	Terminal,
 } from "lucide-react";
 import { useState } from "react";
+import { ConnectionRetryIndicator, type ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
 import { OpenWorkspaceButton } from "@/components/open-workspace-button";
 import {
 	getRuntimeShortcutIconComponent,
@@ -313,6 +314,8 @@ export function TopBar({
 	canOpenWorkspace,
 	isOpeningWorkspace,
 	hideProjectDependentActions = false,
+	connectionRetrySessions = [],
+	onContinueConnectionRetrySessions,
 }: {
 	onToggleSidebar?: () => void;
 	onBack?: () => void;
@@ -348,6 +351,8 @@ export function TopBar({
 	canOpenWorkspace: boolean;
 	isOpeningWorkspace: boolean;
 	hideProjectDependentActions?: boolean;
+	connectionRetrySessions?: ConnectionRetrySessionView[];
+	onContinueConnectionRetrySessions?: (taskIds: string[]) => void;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
 	const displayWorkspacePath = workspacePath ? formatPathForDisplay(workspacePath) : null;
@@ -671,6 +676,14 @@ export function TopBar({
 								/>
 							) : null}
 						</>
+					) : null}
+
+					{/* 连接重试指示器：有任务在自动续跑时显示；否则渲染 null。 */}
+					{onContinueConnectionRetrySessions ? (
+						<ConnectionRetryIndicator
+							sessions={connectionRetrySessions}
+							onContinue={onContinueConnectionRetrySessions}
+						/>
 					) : null}
 
 					{/* Settings: always visible */}

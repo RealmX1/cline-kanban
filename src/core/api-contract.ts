@@ -292,6 +292,19 @@ export const runtimeTaskTurnCheckpointSchema = z.object({
 });
 export type RuntimeTaskTurnCheckpoint = z.infer<typeof runtimeTaskTurnCheckpointSchema>;
 
+// 终端 agent 因瞬时连接错误（VPN 抖动等）停在空闲提示符时，
+// 自动续跑框架（src/terminal/output-reactions）进入「连接重试」状态：
+// 记录已尝试的续跑次数、首次出错时刻、最近一次注入时刻，以及下一次计划注入的时刻。
+// 该状态在 agent 真正向前推进后被清除（字段回到 null）。
+export const runtimeTaskConnectionRetrySchema = z.object({
+	status: z.literal("retrying"),
+	retryCount: z.number().int().nonnegative(),
+	firstErrorAt: z.number(),
+	lastAttemptAt: z.number().nullable(),
+	nextAttemptAt: z.number().nullable(),
+});
+export type RuntimeTaskConnectionRetry = z.infer<typeof runtimeTaskConnectionRetrySchema>;
+
 export const runtimeTaskSessionSummarySchema = z.object({
 	taskId: z.string(),
 	state: runtimeTaskSessionStateSchema,
@@ -309,6 +322,7 @@ export const runtimeTaskSessionSummarySchema = z.object({
 	warningMessage: z.string().nullable().optional(),
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
+	connectionRetry: runtimeTaskConnectionRetrySchema.nullable().optional(),
 });
 export type RuntimeTaskSessionSummary = z.infer<typeof runtimeTaskSessionSummarySchema>;
 
@@ -963,6 +977,7 @@ export const runtimeConfigResponseSchema = z.object({
 	globalConfigPath: z.string(),
 	projectConfigPath: z.string().nullable(),
 	readyForReviewNotificationsEnabled: z.boolean(),
+	autoContinueOnConnectionDropEnabled: z.boolean(),
 	detectedCommands: z.array(z.string()),
 	agents: z.array(runtimeAgentDefinitionSchema),
 	shortcuts: z.array(runtimeProjectShortcutSchema),
@@ -980,6 +995,7 @@ export const runtimeConfigSaveRequestSchema = z.object({
 	agentAutonomousModeEnabled: z.boolean().optional(),
 	shortcuts: z.array(runtimeProjectShortcutSchema).optional(),
 	readyForReviewNotificationsEnabled: z.boolean().optional(),
+	autoContinueOnConnectionDropEnabled: z.boolean().optional(),
 	commitPromptTemplate: z.string().optional(),
 	openPrPromptTemplate: z.string().optional(),
 });
@@ -1023,6 +1039,26 @@ export const runtimeTaskSessionStopResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeTaskSessionStopResponse = z.infer<typeof runtimeTaskSessionStopResponseSchema>;
+
+// 手动触发：对一组正处于「连接重试」状态的终端 agent 立即注入一次续跑指令
+// （不等待退避计时器）。单任务「立即续跑」传单元素数组；「全部立即续跑」传当前
+// workspace 的整张重试列表（web-ui 已按 workspace 派生）。
+export const runtimeContinueConnectionRetrySessionsRequestSchema = z.object({
+	taskIds: z.array(z.string()).min(1),
+});
+export type RuntimeContinueConnectionRetrySessionsRequest = z.infer<
+	typeof runtimeContinueConnectionRetrySessionsRequestSchema
+>;
+
+export const runtimeContinueConnectionRetrySessionsResponseSchema = z.object({
+	ok: z.boolean(),
+	// 实际被触发续跑的任务 id 列表（命中且仍在重试列表里的）。
+	triggeredTaskIds: z.array(z.string()),
+	error: z.string().optional(),
+});
+export type RuntimeContinueConnectionRetrySessionsResponse = z.infer<
+	typeof runtimeContinueConnectionRetrySessionsResponseSchema
+>;
 
 export const runtimeTaskTerminalRefreshRequestSchema = z.object({
 	taskId: z.string(),

@@ -116,6 +116,7 @@ export function buildRuntimeConfigResponse(
 		globalConfigPath: runtimeConfig.globalConfigPath,
 		projectConfigPath: runtimeConfig.projectConfigPath,
 		readyForReviewNotificationsEnabled: runtimeConfig.readyForReviewNotificationsEnabled,
+		autoContinueOnConnectionDropEnabled: runtimeConfig.autoContinueOnConnectionDropEnabled,
 		detectedCommands,
 		agents,
 		shortcuts: runtimeConfig.shortcuts,

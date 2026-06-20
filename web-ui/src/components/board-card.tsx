@@ -160,6 +160,14 @@ function getCardSessionActivity(summary: RuntimeTaskSessionSummary | undefined):
 	if (isCardCreditLimitError(summary)) {
 		return { dotColor: SESSION_ACTIVITY_COLOR.warning, text: "Out of credits" };
 	}
+	// 连接重试是最显著的「卡住」状态：优先于普通活动文案展示。
+	if (summary.connectionRetry?.status === "retrying") {
+		const attempts = summary.connectionRetry.retryCount;
+		return {
+			dotColor: SESSION_ACTIVITY_COLOR.warning,
+			text: attempts > 0 ? `重连中…（已续跑 ${attempts} 次）` : "重连中…",
+		};
+	}
 	const hookActivity = summary.latestHookActivity;
 	const activityText = hookActivity?.activityText?.trim();
 	const toolName = hookActivity?.toolName?.trim() ?? null;

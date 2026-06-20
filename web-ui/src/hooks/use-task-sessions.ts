@@ -54,6 +54,8 @@ export interface UseTaskSessionsResult {
 	ensureTaskWorkspace: (task: BoardCard) => Promise<EnsureTaskWorkspaceResult>;
 	startTaskSession: (task: BoardCard, options?: StartTaskSessionOptions) => Promise<StartTaskSessionResult>;
 	stopTaskSession: (taskId: string) => Promise<void>;
+	// 手动「立即续跑」：对一组正在连接重试的任务各注入一次续跑。返回实际触发的任务 id。
+	continueConnectionRetrySessions: (taskIds: string[]) => Promise<string[]>;
 	sendTaskSessionInput: (
 		taskId: string,
 		text: string,
@@ -209,6 +211,23 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		[currentProjectId],
 	);
 
+	const continueConnectionRetrySessions = useCallback(
+		async (taskIds: string[]): Promise<string[]> => {
+			if (!currentProjectId || taskIds.length === 0) {
+				return [];
+			}
+			try {
+				const trpcClient = getRuntimeTrpcClient(currentProjectId);
+				const payload = await trpcClient.runtime.continueConnectionRetrySessions.mutate({ taskIds });
+				return payload.ok ? payload.triggeredTaskIds : [];
+			} catch {
+				// 续跑是尽力而为：失败不阻断 UI。
+				return [];
+			}
+		},
+		[currentProjectId],
+	);
+
 	const sendTaskSessionInput = useCallback(
 		async (taskId: string, text: string, options?: SendTerminalInputOptions): Promise<SendTaskSessionInputResult> => {
 			const appendNewline = options?.appendNewline ?? true;
@@ -300,6 +319,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		ensureTaskWorkspace,
 		startTaskSession,
 		stopTaskSession,
+		continueConnectionRetrySessions,
 		sendTaskSessionInput,
 		sendTaskChatMessage,
 		abortTaskChatTurn,

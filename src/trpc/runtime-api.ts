@@ -32,6 +32,7 @@ import {
 	parseClineProviderSettingsSaveRequest,
 	parseClineUpdateProviderRequest,
 	parseCommandRunRequest,
+	parseContinueConnectionRetrySessionsRequest,
 	parseRuntimeConfigSaveRequest,
 	parseShellSessionStartRequest,
 	parseTaskChatAbortRequest,
@@ -320,6 +321,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					binary: resolved.binary,
 					args: resolved.args,
 					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
+					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
 					cwd: taskCwd,
 					prompt: body.prompt,
 					images: body.images,
@@ -422,6 +424,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					binary: resolved.binary,
 					args: resolved.args,
 					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
+					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
 					cwd: taskCwd,
 					prompt: "",
 					images: undefined,
@@ -469,6 +472,24 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				return {
 					ok: false,
 					summary: null,
+					error: message,
+				};
+			}
+		},
+		continueConnectionRetrySessions: async (workspaceScope, input) => {
+			try {
+				const body = parseContinueConnectionRetrySessionsRequest(input);
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const triggeredTaskIds = terminalManager.continueConnectionRetrySessions(body.taskIds);
+				return {
+					ok: true,
+					triggeredTaskIds,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					ok: false,
+					triggeredTaskIds: [],
 					error: message,
 				};
 			}

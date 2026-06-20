@@ -36,6 +36,8 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeConfigResponse,
 	RuntimeConfigSaveRequest,
+	RuntimeContinueConnectionRetrySessionsRequest,
+	RuntimeContinueConnectionRetrySessionsResponse,
 	RuntimeDebugResetAllStateResponse,
 	RuntimeDirectoryListRequest,
 	RuntimeDirectoryListResponse,
@@ -129,6 +131,8 @@ import {
 	runtimeCommandRunResponseSchema,
 	runtimeConfigResponseSchema,
 	runtimeConfigSaveRequestSchema,
+	runtimeContinueConnectionRetrySessionsRequestSchema,
+	runtimeContinueConnectionRetrySessionsResponseSchema,
 	runtimeDebugResetAllStateResponseSchema,
 	runtimeDirectoryListRequestSchema,
 	runtimeDirectoryListResponseSchema,
@@ -226,6 +230,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStopRequest,
 		) => Promise<RuntimeTaskSessionStopResponse>;
+		continueConnectionRetrySessions: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeContinueConnectionRetrySessionsRequest,
+		) => Promise<RuntimeContinueConnectionRetrySessionsResponse>;
 		refreshTaskTerminal: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskTerminalRefreshRequest,
@@ -474,6 +482,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskSessionStopResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.stopTaskSession(ctx.workspaceScope, input);
+			}),
+		continueConnectionRetrySessions: workspaceProcedure
+			.input(runtimeContinueConnectionRetrySessionsRequestSchema)
+			.output(runtimeContinueConnectionRetrySessionsResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.continueConnectionRetrySessions(ctx.workspaceScope, input);
 			}),
 		refreshTaskTerminal: workspaceProcedure
 			.input(runtimeTaskTerminalRefreshRequestSchema)

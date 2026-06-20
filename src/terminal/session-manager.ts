@@ -2,6 +2,7 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import type {
+	RuntimeTaskConnectionRetry,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
@@ -15,6 +16,7 @@ import {
 	type AgentOutputTransitionDetector,
 	type AgentOutputTransitionInspectionPredicate,
 	prepareAgentLaunch,
+	toBracketedPasteSubmission,
 } from "./agent-session-adapters";
 import {
 	CLAUDE_STARTUP_READINESS_TIMEOUT_MS,
@@ -27,10 +29,24 @@ import {
 	stopWorkspaceTrustTimers,
 	WORKSPACE_TRUST_CONFIRM_DELAY_MS,
 } from "./claude-workspace-trust";
+import { hasCodexInteractivePrompt, hasCodexStartupUiRendered } from "./codex-readiness";
 import { hasCodexWorkspaceTrustPrompt, shouldAutoConfirmCodexWorkspaceTrust } from "./codex-workspace-trust";
-import { stripAnsi } from "./output-utils";
+import {
+	getDefaultOutputReactionEngine,
+	type OutputReactionActions,
+	type OutputReactionContext,
+	type OutputReactionEngine,
+	type OutputReactionSessionState,
+} from "./output-reactions";
+import { OUTPUT_QUIET_THRESHOLD_MS } from "./output-reactions/connection-drop-auto-continue";
+import {
+	buildNetworkInterruptionContinuationLine,
+	ensureNetworkInterruptionResumeInstructionsFile,
+	getNetworkInterruptionResumeInstructionsPath,
+} from "./output-reactions/network-interruption-continuation-instructions";
 import { PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
+import { stripAnsiAndControl } from "./terminal-output-normalization";
 import {
 	createTerminalProtocolFilterState,
 	disableOscColorQueryIntercept,
@@ -41,6 +57,10 @@ import type { TerminalSessionListener, TerminalSessionService } from "./terminal
 import { TerminalStateMirror } from "./terminal-state-mirror";
 
 const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
+// 输出反应（output-reactions）扫描缓冲上限：镜像 workspace-trust 缓冲，约 16KB。
+const MAX_OUTPUT_REACTION_SCAN_BUFFER_CHARS = 16_384;
+// 用户近期手动输入抑制窗口：这段时间内不自动注入续跑，避免打断正在打字的用户。
+const OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS = 8_000;
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
 const DEFAULT_STALL_THRESHOLD_MS = 45_000;
@@ -92,6 +112,15 @@ interface ActiveProcessState {
 	// 导致 deferred prompt 永远注不进去。这个一次性 setTimeout 在到点后强制调用
 	// trySendDeferredStartupInput；命中 predicate 或 session 退出时由调用方清掉。
 	claudeStartupReadinessTimer: NodeJS.Timeout | null;
+	// 输出反应框架（连接中断自动续跑等）。仅在开关开启且 agent 适用时非 null。
+	outputReactionEngine: OutputReactionEngine | null;
+	outputReactionSession: OutputReactionSessionState | null;
+	// 滚动的 stripAnsiAndControl 扫描缓冲（保留换行；用于错误检测与提示符就绪判断）。
+	outputReactionScanBuffer: string | null;
+	// 输出反应的兜底 / 退避 attempt 定时器（同一时刻至多一个待触发）。
+	outputReactionAttemptTimer: NodeJS.Timeout | null;
+	// 最近一次用户手动输入时刻，用于抑制自动注入打断用户。
+	lastUserInputAt: number | null;
 }
 
 interface SessionEntry {
@@ -115,6 +144,7 @@ export interface StartTaskSessionRequest {
 	binary: string;
 	args: string[];
 	autonomousModeEnabled?: boolean;
+	autoContinueOnConnectionDropEnabled?: boolean;
 	cwd: string;
 	prompt: string;
 	images?: RuntimeTaskImage[];
@@ -159,6 +189,7 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		warningMessage: null,
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
+		connectionRetry: null,
 	};
 }
 
@@ -242,20 +273,17 @@ export function buildTerminalEnvironment(
 	return env;
 }
 
-function hasCodexInteractivePrompt(text: string): boolean {
-	const stripped = stripAnsi(text);
-	return /(?:^|[\n\r])\s*›\s*/u.test(stripped);
-}
-
-function hasCodexStartupUiRendered(text: string): boolean {
-	const stripped = stripAnsi(text).toLowerCase();
-	return stripped.includes("openai codex (v");
-}
-
 function clearClaudeStartupReadinessTimer(state: { claudeStartupReadinessTimer: NodeJS.Timeout | null }): void {
 	if (state.claudeStartupReadinessTimer) {
 		clearTimeout(state.claudeStartupReadinessTimer);
 		state.claudeStartupReadinessTimer = null;
+	}
+}
+
+function clearOutputReactionTimer(state: { outputReactionAttemptTimer: NodeJS.Timeout | null }): void {
+	if (state.outputReactionAttemptTimer) {
+		clearTimeout(state.outputReactionAttemptTimer);
+		state.outputReactionAttemptTimer = null;
 	}
 }
 
@@ -291,6 +319,229 @@ export class TerminalSessionManager implements TerminalSessionService {
 			`[tui-freeze] startup-prompt-flushed taskId=${taskId} agentId=${entry.summary.agentId} chars=${deferredInput.length}`,
 		);
 		return true;
+	}
+
+	// 是否为该任务挂载输出反应引擎：开关开启（默认开）且有 reaction 适用于该 agent。
+	private resolveOutputReactionEngine(request: StartTaskSessionRequest): OutputReactionEngine | null {
+		if (request.autoContinueOnConnectionDropEnabled === false) {
+			return null;
+		}
+		const engine = getDefaultOutputReactionEngine();
+		return engine.isActiveFor(request.agentId) ? engine : null;
+	}
+
+	private buildOutputReactionContext(entry: SessionEntry, chunkText: string): OutputReactionContext | null {
+		const active = entry.active;
+		if (!active) {
+			return null;
+		}
+		const agentId = entry.summary.agentId;
+		if (agentId === null) {
+			return null;
+		}
+		return {
+			agentId,
+			now: now(),
+			chunkText,
+			scanText: active.outputReactionScanBuffer ?? "",
+		};
+	}
+
+	// 每个新 chunk：维护滚动扫描缓冲（stripAnsiAndControl，保留换行），并驱动引擎。
+	private processOutputReactionChunk(taskId: string, entry: SessionEntry, decodedChunk: string): void {
+		const active = entry.active;
+		if (!active || active.outputReactionEngine === null || active.outputReactionSession === null) {
+			return;
+		}
+		const chunkText = stripAnsiAndControl(decodedChunk);
+		const previousBuffer = active.outputReactionScanBuffer ?? "";
+		let nextBuffer = previousBuffer + chunkText;
+		if (nextBuffer.length > MAX_OUTPUT_REACTION_SCAN_BUFFER_CHARS) {
+			nextBuffer = nextBuffer.slice(-MAX_OUTPUT_REACTION_SCAN_BUFFER_CHARS);
+		}
+		active.outputReactionScanBuffer = nextBuffer;
+
+		const ctx = this.buildOutputReactionContext(entry, chunkText);
+		if (ctx === null) {
+			return;
+		}
+		active.outputReactionEngine.onOutput(ctx, active.outputReactionSession, this.buildOutputReactionActions(taskId));
+	}
+
+	// 退避 / 兜底定时器触发：让引擎尝试注入续跑（或判定已恢复）。
+	private runOutputReactionAttempt(taskId: string): void {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active || active.outputReactionEngine === null || active.outputReactionSession === null) {
+			return;
+		}
+		active.outputReactionAttemptTimer = null;
+		const ctx = this.buildOutputReactionContext(entry, "");
+		if (ctx === null) {
+			return;
+		}
+		active.outputReactionEngine.onAttempt(ctx, active.outputReactionSession, this.buildOutputReactionActions(taskId));
+	}
+
+	// 判断当前输出是否停在可注入的交互提示符（按 agent 选预测函数）。
+	private isAtInteractivePromptForReaction(entry: SessionEntry): boolean {
+		const active = entry.active;
+		if (!active || active.outputReactionScanBuffer === null) {
+			return false;
+		}
+		const scan = active.outputReactionScanBuffer;
+		if (entry.summary.agentId === "codex") {
+			return hasCodexInteractivePrompt(scan);
+		}
+		if (entry.summary.agentId === "claude") {
+			return hasClaudeInteractivePrompt(scan);
+		}
+		return false;
+	}
+
+	// 构造注入 / 调度 / 状态更新等副作用入口，交给 reaction 调用。
+	private buildOutputReactionActions(taskId: string): OutputReactionActions {
+		return {
+			submitContinuationReference: () => {
+				this.submitConnectionDropContinuation(taskId);
+			},
+			schedule: (delayMs: number) => {
+				const active = this.entries.get(taskId)?.active;
+				if (!active) {
+					return;
+				}
+				clearOutputReactionTimer(active);
+				const timer = setTimeout(
+					() => {
+						this.runOutputReactionAttempt(taskId);
+					},
+					Math.max(0, Math.floor(delayMs)),
+				);
+				timer.unref?.();
+				active.outputReactionAttemptTimer = timer;
+			},
+			clearScheduledAttempts: () => {
+				const active = this.entries.get(taskId)?.active;
+				if (active) {
+					clearOutputReactionTimer(active);
+				}
+			},
+			setConnectionRetryState: (patch: RuntimeTaskConnectionRetry) => {
+				this.applyConnectionRetryState(taskId, patch);
+			},
+			clearConnectionRetryState: () => {
+				this.applyConnectionRetryState(taskId, null);
+			},
+			isAtInteractivePrompt: () => {
+				const entry = this.entries.get(taskId);
+				return entry ? this.isAtInteractivePromptForReaction(entry) : false;
+			},
+			canInjectNow: () => {
+				const active = this.entries.get(taskId)?.active;
+				if (!active) {
+					return false;
+				}
+				if (active.deferredStartupInput !== null) {
+					return false;
+				}
+				if (
+					active.lastUserInputAt !== null &&
+					now() - active.lastUserInputAt < OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS
+				) {
+					return false;
+				}
+				return true;
+			},
+			isAgentOutputQuiet: () => {
+				const entry = this.entries.get(taskId);
+				const lastOutputAt = entry?.summary.lastOutputAt ?? null;
+				// 从未产出过任何输出：视为静默（不会因「无 lastOutputAt」永久卡住注入）。
+				if (lastOutputAt === null) {
+					return true;
+				}
+				return now() - lastOutputAt >= OUTPUT_QUIET_THRESHOLD_MS;
+			},
+			log: (message: string) => {
+				logTuiFreezeWarning(`${message} taskId=${taskId}`);
+			},
+		};
+	}
+
+	// 实际把续跑指令注入 PTY：bracketed paste 引用续跑指令文件；Codex 追加回车。
+	private submitConnectionDropContinuation(taskId: string): void {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			return;
+		}
+		void ensureNetworkInterruptionResumeInstructionsFile().catch(() => {
+			// 落盘失败不阻断注入：路径确定，文件稍后可补写。
+		});
+		const instructionsPath = getNetworkInterruptionResumeInstructionsPath();
+		const line = buildNetworkInterruptionContinuationLine(instructionsPath);
+		// toBracketedPasteSubmission 结尾已含单个 `\r`（回车），与 Codex deferred-startup
+		// （/plan）路径一致；不再额外补写 `\r`，避免双回车 / 空提交。
+		// 仍标记 awaitingCodexPromptAfterEnter：bracketed paste 末尾的 CR 已构成回车，
+		// 与 writeInput「输入含 CR 即视为回车」的语义一致。
+		active.session.write(toBracketedPasteSubmission(line));
+		if (entry.summary.agentId === "codex") {
+			active.awaitingCodexPromptAfterEnter = true;
+		}
+	}
+
+	// 更新 summary.connectionRetry 并广播（驱动看板徽标 / 顶栏重试列表）。
+	private applyConnectionRetryState(taskId: string, patch: RuntimeTaskConnectionRetry | null): void {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return;
+		}
+		const current = entry.summary.connectionRetry ?? null;
+		if (current === null && patch === null) {
+			return;
+		}
+		const summary = updateSummary(entry, { connectionRetry: patch });
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+	}
+
+	// 手动「立即续跑」：对指定任务（若仍在连接重试）强制注入一次续跑。
+	// 返回实际触发的任务 id（命中且正在重试的）。
+	continueConnectionRetrySessions(taskIds: readonly string[]): string[] {
+		const triggered: string[] = [];
+		for (const taskId of taskIds) {
+			const entry = this.entries.get(taskId);
+			const active = entry?.active;
+			if (!entry || !active || active.outputReactionEngine === null || active.outputReactionSession === null) {
+				continue;
+			}
+			if ((entry.summary.connectionRetry ?? null) === null) {
+				continue;
+			}
+			const ctx = this.buildOutputReactionContext(entry, "");
+			if (ctx === null) {
+				continue;
+			}
+			active.outputReactionEngine.triggerContinueNow(
+				ctx,
+				active.outputReactionSession,
+				this.buildOutputReactionActions(taskId),
+			);
+			triggered.push(taskId);
+		}
+		return triggered;
+	}
+
+	// 当前正处于连接重试的任务 id 列表（summary.connectionRetry 非空）。
+	listConnectionRetryTaskIds(): string[] {
+		const ids: string[] = [];
+		for (const [taskId, entry] of this.entries.entries()) {
+			if ((entry.summary.connectionRetry ?? null) !== null) {
+				ids.push(taskId);
+			}
+		}
+		return ids;
 	}
 
 	private hasLiveOutputListener(entry: SessionEntry): boolean {
@@ -373,6 +624,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (entry.active) {
 			stopWorkspaceTrustTimers(entry.active);
 			clearClaudeStartupReadinessTimer(entry.active);
+			clearOutputReactionTimer(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -442,6 +694,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const needsDecodedOutput =
 				entry.active.workspaceTrustBuffer !== null ||
 				entry.active.deferredStartupInput !== null ||
+				entry.active.outputReactionEngine !== null ||
 				(entry.active.detectOutputTransition !== null &&
 					(entry.active.shouldInspectOutputForTransition?.(entry.summary) ?? true));
 			const data = needsDecodedOutput ? filteredChunk.toString("utf8") : "";
@@ -525,6 +778,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 				}
 			}
 
+			if (entry.active.outputReactionEngine !== null && data.length > 0) {
+				this.processOutputReactionChunk(request.taskId, entry, data);
+			}
+
 			for (const taskListener of entry.listeners.values()) {
 				taskListener.onOutput?.(filteredChunk);
 			}
@@ -552,6 +809,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					stopWorkspaceTrustTimers(currentActive);
 					clearClaudeStartupReadinessTimer(currentActive);
+					clearOutputReactionTimer(currentActive);
 
 					const summary = this.applySessionEvent(currentEntry, {
 						type: "process.exit",
@@ -566,6 +824,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					currentEntry.active = null;
 					this.emitSummary(summary);
+					// 进程退出即结束任何「连接重试」状态，避免顶栏 / 看板把已死的 session 仍标为重连中。
+					this.applyConnectionRetryState(request.taskId, null);
 					if (shouldAutoRestart) {
 						this.scheduleAutoRestart(currentEntry);
 					}
@@ -604,6 +864,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			throw new Error(formatSpawnFailure(commandBinary, error));
 		}
 
+		// 输出反应框架：仅当「连接中断自动续跑」开关开启、且有 reaction 适用于该 agent
+		// （第一版为 Claude / Codex）时才挂载。挂载即异步幂等落盘续跑指令文件，确保
+		// 注入时文件已存在可被 agent 读取。
+		const outputReactionEngine = this.resolveOutputReactionEngine(request);
+		const outputReactionSession = outputReactionEngine?.createSessionState(request.agentId) ?? null;
+		if (outputReactionEngine !== null) {
+			void ensureNetworkInterruptionResumeInstructionsFile().catch(() => {
+				// 落盘失败不阻断续跑：注入体仍引用确定性路径，文件稍后可补写。
+			});
+		}
+
 		const active: ActiveProcessState = {
 			session,
 			workspaceTrustBuffer:
@@ -631,6 +902,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 					? now() + CLAUDE_STARTUP_READINESS_TIMEOUT_MS
 					: null,
 			claudeStartupReadinessTimer: null,
+			outputReactionEngine,
+			outputReactionSession,
+			outputReactionScanBuffer: outputReactionEngine !== null ? "" : null,
+			outputReactionAttemptTimer: null,
+			lastUserInputAt: null,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -690,6 +966,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (entry.active) {
 			stopWorkspaceTrustTimers(entry.active);
 			clearClaudeStartupReadinessTimer(entry.active);
+			clearOutputReactionTimer(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -756,6 +1033,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					stopWorkspaceTrustTimers(currentActive);
 					clearClaudeStartupReadinessTimer(currentActive);
+					clearOutputReactionTimer(currentActive);
 
 					const summary = updateSummary(currentEntry, {
 						state: currentActive.session.wasInterrupted() ? "interrupted" : "idle",
@@ -809,6 +1087,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			workspaceTrustConfirmTimer: null,
 			claudeStartupReadinessDeadlineAt: null,
 			claudeStartupReadinessTimer: null,
+			outputReactionEngine: null,
+			outputReactionSession: null,
+			outputReactionScanBuffer: null,
+			outputReactionAttemptTimer: null,
+			lastUserInputAt: null,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -870,6 +1153,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry?.active) {
 			return null;
 		}
+		// 记录用户手动输入时刻，用于抑制自动续跑注入打断正在打字的用户。
+		entry.active.lastUserInputAt = now();
 		if (
 			entry.summary.agentId === "codex" &&
 			entry.summary.state === "awaiting_review" &&
@@ -1054,6 +1339,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry.active.onSessionCleanup = null;
 		stopWorkspaceTrustTimers(entry.active);
 		clearClaudeStartupReadinessTimer(entry.active);
+		clearOutputReactionTimer(entry.active);
 		entry.active.session.stop();
 		if (cleanupFn) {
 			cleanupFn().catch(() => {
@@ -1076,6 +1362,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const cleanupFn = active.onSessionCleanup;
 		active.onSessionCleanup = null;
 		stopWorkspaceTrustTimers(active);
+		clearClaudeStartupReadinessTimer(active);
+		clearOutputReactionTimer(active);
 		active.session.stop();
 		const gracefulDeadline = now() + gracefulTimeoutMs;
 		while (now() < gracefulDeadline) {
@@ -1102,6 +1390,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				`[tui-freeze] force-kill-timeout taskId=${taskId} agentId=${entry.summary.agentId ?? "(none)"} pid=${entry.summary.pid ?? "(none)"}`,
 			);
 			entry.active = null;
+			this.applyConnectionRetryState(taskId, null);
 		}
 		if (cleanupFn) {
 			cleanupFn().catch(() => undefined);
@@ -1137,6 +1426,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			stopWorkspaceTrustTimers(entry.active);
 			clearClaudeStartupReadinessTimer(entry.active);
+			clearOutputReactionTimer(entry.active);
 			entry.active.session.stop({ interrupted: true });
 		}
 		return activeEntries.map((entry) => cloneSummary(entry.summary));

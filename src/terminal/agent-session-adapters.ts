@@ -638,7 +638,11 @@ function withPrompt(args: string[], prompt: string, mode: "append" | "flag", fla
 	};
 }
 
-function toBracketedPasteSubmission(command: string): string {
+// Wraps a command in bracketed-paste framing so a TUI agent (Claude Code, Codex)
+// treats it as a single pasted submission terminated by Enter. Exported so the
+// output-reactions framework can inject continuation prompts through the same
+// mechanism used for deferred startup input.
+export function toBracketedPasteSubmission(command: string): string {
 	return `\u001b[200~${command}\u001b[201~\r`;
 }
 
