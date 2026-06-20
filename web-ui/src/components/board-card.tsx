@@ -16,7 +16,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
 	formatClineReasoningEffortLabel,
@@ -33,14 +33,7 @@ import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatPathForDisplay } from "@/utils/path-display";
-import { useMeasure } from "@/utils/react-use";
-import {
-	clampTextWithInlineSuffix,
-	getTaskPromptDescription,
-	normalizePromptForDisplay,
-	truncateTaskPromptLabel,
-} from "@/utils/task-prompt";
-import { DEFAULT_TEXT_MEASURE_FONT, measureTextWidth, readElementFontShorthand } from "@/utils/text-measure";
+import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
 
 interface CardSessionActivity {
 	dotColor: string;
@@ -57,12 +50,8 @@ const SESSION_ACTIVITY_COLOR = {
 	secondary: "var(--color-text-secondary)",
 } as const;
 
-const DESCRIPTION_COLLAPSE_LINES = 3;
-const DESCRIPTION_EXPANDED_MAX_LINES = 10;
-const DESCRIPTION_EXPAND_LABEL = "See more";
-const DESCRIPTION_COLLAPSE_LABEL = "Less";
-const DESCRIPTION_COLLAPSE_SUFFIX = `… ${DESCRIPTION_EXPAND_LABEL}`;
-const DESCRIPTION_EXPANDED_SUFFIX = `… ${DESCRIPTION_COLLAPSE_LABEL}`;
+// 会跳转的列（单击打开详情、替换看板）上，单击先延迟这么久，留出双击改标题的拦截窗口。
+const CLICK_ACTIVATION_DELAY_MS = 220;
 
 function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: string | null | undefined): string | null {
 	if (!workspacePath) {
@@ -294,15 +283,14 @@ export function BoardCard({
 	const [draftTitle, setDraftTitle] = useState(card.title);
 	const titleInputRef = useRef<HTMLInputElement | null>(null);
 	const titleEditCancelledRef = useRef(false);
-	const [descriptionContainerRef, descriptionRect] = useMeasure<HTMLDivElement>();
-	const descriptionRef = useRef<HTMLParagraphElement | null>(null);
-	const [descriptionWidthFallback, setDescriptionWidthFallback] = useState(0);
-	const [descriptionFont, setDescriptionFont] = useState(DEFAULT_TEXT_MEASURE_FONT);
-	const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
 	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(card.id);
 	const isTrashCard = columnId === "trash";
 	const isCardInteractive = !isTrashCard;
-	const descriptionWidth = descriptionRect.width > 0 ? descriptionRect.width : descriptionWidthFallback;
+	// 会跳转的列上双击改标题需先拦截单击；这些列单击会打开详情、替换看板。
+	const isNavigatingColumn = columnId === "in_progress" || columnId === "review" || columnId === "validation";
+	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog。
+	const isInlineTitleEditEnabled = onSaveTitle != null && (isNavigatingColumn || isTrashCard);
+	const clickActivationTimerRef = useRef<number | null>(null);
 	const rawSessionActivity = useMemo(() => getCardSessionActivity(sessionSummary), [sessionSummary]);
 	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
 	const lastSessionActivityCardIdRef = useRef<string | null>(null);
@@ -318,28 +306,17 @@ export function BoardCard({
 		() => normalizePromptForDisplay(card.title) || truncateTaskPromptLabel(card.prompt),
 		[card.prompt, card.title],
 	);
-	const displayDescription = useMemo(
-		() => getTaskPromptDescription(card.prompt, displayTitle),
-		[card.prompt, displayTitle],
+
+	// 卸载时清掉尚未触发的延迟单击计时器，避免对已销毁卡片调用 onClick。
+	useEffect(
+		() => () => {
+			if (clickActivationTimerRef.current != null) {
+				clearTimeout(clickActivationTimerRef.current);
+				clickActivationTimerRef.current = null;
+			}
+		},
+		[],
 	);
-
-	useLayoutEffect(() => {
-		if (descriptionRect.width > 0 || !displayDescription) {
-			return;
-		}
-		const nextWidth = descriptionRef.current?.parentElement?.getBoundingClientRect().width ?? 0;
-		if (nextWidth > 0 && nextWidth !== descriptionWidthFallback) {
-			setDescriptionWidthFallback(nextWidth);
-		}
-	}, [descriptionRect.width, descriptionWidthFallback, displayDescription]);
-
-	useLayoutEffect(() => {
-		setDescriptionFont(readElementFontShorthand(descriptionRef.current, DEFAULT_TEXT_MEASURE_FONT));
-	}, [descriptionWidth, displayDescription]);
-
-	useEffect(() => {
-		setIsDescriptionExpanded(false);
-	}, [card.id, displayDescription]);
 
 	useEffect(() => {
 		setDraftTitle(card.title);
@@ -393,38 +370,6 @@ export function BoardCard({
 			titleInputRef.current?.blur();
 		}
 	};
-
-	const isDescriptionMeasured = descriptionRect.width > 0;
-
-	const descriptionDisplay = useMemo(() => {
-		if (!displayDescription) {
-			return {
-				collapsed: { text: "", isTruncated: false },
-				expanded: { text: "", isTruncated: false },
-			};
-		}
-		if (descriptionWidth <= 0) {
-			return {
-				collapsed: { text: displayDescription, isTruncated: false },
-				expanded: { text: displayDescription, isTruncated: false },
-			};
-		}
-		const measure = (value: string) => measureTextWidth(value, descriptionFont);
-		return {
-			collapsed: clampTextWithInlineSuffix(displayDescription, {
-				maxWidthPx: descriptionWidth,
-				maxLines: DESCRIPTION_COLLAPSE_LINES,
-				suffix: DESCRIPTION_COLLAPSE_SUFFIX,
-				measureText: measure,
-			}),
-			expanded: clampTextWithInlineSuffix(displayDescription, {
-				maxWidthPx: descriptionWidth,
-				maxLines: DESCRIPTION_EXPANDED_MAX_LINES,
-				suffix: DESCRIPTION_EXPANDED_SUFFIX,
-				measureText: measure,
-			}),
-		};
-	}, [descriptionFont, descriptionWidth, displayDescription]);
 
 	const isCreditLimit = isCardCreditLimitError(sessionSummary);
 	const renderStatusMarker = () => {
@@ -508,8 +453,6 @@ export function BoardCard({
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentLabel, modelOverrideLabel]);
 
-	const activeDescriptionDisplay = isDescriptionExpanded ? descriptionDisplay.expanded : descriptionDisplay.collapsed;
-
 	return (
 		<Draggable draggableId={card.id} index={index} isDragDisabled={false}>
 			{(provided, snapshot) => {
@@ -569,9 +512,47 @@ export function BoardCard({
 							if (target?.closest("button, a, input, textarea, [contenteditable='true']")) {
 								return;
 							}
-							if (!snapshot.isDragging && onClick) {
-								onClick();
+							if (snapshot.isDragging || !onClick) {
+								return;
 							}
+							// 双击的第二击：交给 onDoubleClick 处理，单击逻辑直接放行。
+							if (event.detail > 1) {
+								return;
+							}
+							// 会跳转的列：延迟单击，留出双击拦截窗口（双击会清掉这个计时器）。
+							if (isNavigatingColumn) {
+								if (clickActivationTimerRef.current != null) {
+									clearTimeout(clickActivationTimerRef.current);
+								}
+								clickActivationTimerRef.current = window.setTimeout(() => {
+									clickActivationTimerRef.current = null;
+									onClick();
+								}, CLICK_ACTIVATION_DELAY_MS);
+								return;
+							}
+							// backlog 立即开编辑弹窗；trash 在上方 !isCardInteractive 已 return，到不了这里。
+							onClick();
+						}}
+						onDoubleClick={(event) => {
+							if (!event.currentTarget.contains(event.target as Node)) {
+								return;
+							}
+							if (!isInlineTitleEditEnabled || isDependencyLinking) {
+								return;
+							}
+							const target = event.target as HTMLElement | null;
+							if (target?.closest("button, a, input, textarea, [contenteditable='true']")) {
+								return;
+							}
+							event.preventDefault();
+							event.stopPropagation();
+							// 取消尚未触发的单击跳转，改为进入标题编辑。
+							if (clickActivationTimerRef.current != null) {
+								clearTimeout(clickActivationTimerRef.current);
+								clickActivationTimerRef.current = null;
+							}
+							setDraftTitle(card.title);
+							setIsEditingTitle(true);
 						}}
 						style={{
 							...provided.draggableProps.style,
@@ -600,7 +581,7 @@ export function BoardCard({
 								isDependencyTarget && "kb-board-card-dependency-target",
 							)}
 						>
-							<div className="flex items-center gap-2 pr-16" style={{ minHeight: 24 }}>
+							<div className="flex items-start gap-2" style={{ minHeight: 24 }}>
 								{statusMarker ? <div className="inline-flex items-center">{statusMarker}</div> : null}
 								<div className="flex-1 min-w-0">
 									{isEditingTitle ? (
@@ -616,10 +597,10 @@ export function BoardCard({
 											className="h-7 w-full rounded-md border border-border-focus bg-surface-2 px-2 text-sm font-medium text-text-primary focus:outline-none"
 										/>
 									) : onSaveTitle ? (
-										<div className="flex items-center gap-1 min-w-0">
+										<div className="flex items-start gap-1 min-w-0">
 											<p
 												className={cn(
-													"kb-line-clamp-1 m-0 min-w-0 font-medium text-sm",
+													"line-clamp-3 m-0 min-w-0 flex-1 font-medium text-sm",
 													isTrashCard && "line-through text-text-tertiary",
 												)}
 											>
@@ -635,7 +616,7 @@ export function BoardCard({
 													setIsEditingTitle(true);
 												}}
 												className={cn(
-													"shrink-0 cursor-pointer rounded-sm p-0.5 text-text-tertiary hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+													"shrink-0 self-start mt-0.5 cursor-pointer rounded-sm p-0.5 text-text-tertiary hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
 													isHovered ? "opacity-100" : "opacity-0",
 												)}
 											>
@@ -645,7 +626,7 @@ export function BoardCard({
 									) : (
 										<p
 											className={cn(
-												"kb-line-clamp-1 m-0 font-medium text-sm",
+												"line-clamp-3 m-0 font-medium text-sm",
 												isTrashCard && "line-through text-text-tertiary",
 											)}
 										>
@@ -656,7 +637,7 @@ export function BoardCard({
 							</div>
 							<div
 								className={cn(
-									"absolute right-1.5 top-1.5 z-10 flex items-center gap-0.5 transition-opacity",
+									"absolute right-1 top-1 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
 									"focus-within:opacity-100 focus-within:pointer-events-auto",
 									isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
 								)}
@@ -763,64 +744,6 @@ export function BoardCard({
 							</div>
 							{isPromptViewerOpen ? (
 								<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
-							) : null}
-							{displayDescription ? (
-								<div ref={descriptionContainerRef}>
-									<p
-										ref={descriptionRef}
-										className={cn(
-											"text-sm leading-[1.4]",
-											isTrashCard ? "text-text-tertiary" : "text-text-secondary",
-											!isDescriptionMeasured && !isDescriptionExpanded && "line-clamp-3",
-										)}
-										style={{
-											margin: "2px 0 0",
-										}}
-									>
-										{activeDescriptionDisplay.isTruncated
-											? activeDescriptionDisplay.text
-											: displayDescription}
-										{activeDescriptionDisplay.isTruncated ? (
-											<>
-												{"… "}
-												<button
-													type="button"
-													className="inline cursor-pointer rounded-sm text-text-tertiary hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent [font:inherit]"
-													aria-expanded={isDescriptionExpanded}
-													aria-label={
-														isDescriptionExpanded
-															? "Collapse task description"
-															: "Expand task description"
-													}
-													onMouseDown={stopEvent}
-													onClick={(event) => {
-														stopEvent(event);
-														setIsDescriptionExpanded(!isDescriptionExpanded);
-													}}
-												>
-													{isDescriptionExpanded ? DESCRIPTION_COLLAPSE_LABEL : DESCRIPTION_EXPAND_LABEL}
-												</button>
-											</>
-										) : isDescriptionExpanded && descriptionDisplay.collapsed.isTruncated ? (
-											<>
-												{" "}
-												<button
-													type="button"
-													className="inline cursor-pointer rounded-sm text-text-tertiary hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent [font:inherit]"
-													aria-expanded={isDescriptionExpanded}
-													aria-label="Collapse task description"
-													onMouseDown={stopEvent}
-													onClick={(event) => {
-														stopEvent(event);
-														setIsDescriptionExpanded(false);
-													}}
-												>
-													{DESCRIPTION_COLLAPSE_LABEL}
-												</button>
-											</>
-										) : null}
-									</p>
-								</div>
 							) : null}
 							{taskAgentSettingsLabel ? (
 								<div className="mt-1">

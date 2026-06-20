@@ -12,6 +12,11 @@ const dndMock = vi.hoisted(() => ({
 	} | null,
 }));
 
+// 记录每个 BoardColumn 实际收到的 onSaveTitle，用于断言父级 wiring 是否对每一列（含 done/trash）传入保存回调。
+const boardColumnMock = vi.hoisted(() => ({
+	onSaveTitleByColumnId: new Map<string, ((taskId: string, title: string) => void) | undefined>(),
+}));
+
 vi.mock("@hello-pangea/dnd", async () => {
 	const React = await vi.importActual<typeof import("react")>("react");
 
@@ -38,15 +43,24 @@ vi.mock("@hello-pangea/dnd", async () => {
 });
 
 vi.mock("@/components/board-column", () => ({
-	BoardColumn: ({ column }: { column: BoardData["columns"][number] }): React.ReactElement => (
-		<section data-column-id={column.id}>
-			<div className="kb-column-cards">
-				{column.cards.map((card) => (
-					<div key={card.id} data-task-id={card.id} />
-				))}
-			</div>
-		</section>
-	),
+	BoardColumn: ({
+		column,
+		onSaveTitle,
+	}: {
+		column: BoardData["columns"][number];
+		onSaveTitle?: (taskId: string, title: string) => void;
+	}): React.ReactElement => {
+		boardColumnMock.onSaveTitleByColumnId.set(column.id, onSaveTitle);
+		return (
+			<section data-column-id={column.id}>
+				<div className="kb-column-cards">
+					{column.cards.map((card) => (
+						<div key={card.id} data-task-id={card.id} />
+					))}
+				</div>
+			</section>
+		);
+	},
 }));
 
 vi.mock("@/components/dependencies/dependency-overlay", () => ({
@@ -81,6 +95,7 @@ describe("KanbanBoard", () => {
 	let previousActEnvironment: boolean | undefined;
 
 	beforeEach(() => {
+		boardColumnMock.onSaveTitleByColumnId.clear();
 		vi.useFakeTimers();
 		vi.spyOn(performance, "now").mockImplementation(() => Date.now());
 		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback: FrameRequestCallback) => {
@@ -224,5 +239,39 @@ describe("KanbanBoard", () => {
 		});
 
 		expect(boardElement?.dataset.programmaticCardMove).toBe("true");
+	});
+
+	it("wires onSaveTitle to every column including done/trash so inline title editing stays reachable", async () => {
+		const onSaveTaskTitle = vi.fn();
+		const board: BoardData = {
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [] },
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "validation", title: "Validation", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		await act(async () => {
+			root.render(
+				<KanbanBoard
+					data={board}
+					taskSessions={{}}
+					onCardSelect={() => {}}
+					onCreateTask={() => {}}
+					onSaveTaskTitle={onSaveTaskTitle}
+					dependencies={[]}
+					onDragEnd={() => {}}
+				/>,
+			);
+		});
+
+		// done/trash 列必须收到非空 onSaveTitle，否则 board-card 的双击/铅笔改标题在生产里恒不可达。
+		expect(boardColumnMock.onSaveTitleByColumnId.get("trash")).toBe(onSaveTaskTitle);
+		expect(boardColumnMock.onSaveTitleByColumnId.get("in_progress")).toBe(onSaveTaskTitle);
+		expect(boardColumnMock.onSaveTitleByColumnId.get("review")).toBe(onSaveTaskTitle);
+		expect(boardColumnMock.onSaveTitleByColumnId.get("validation")).toBe(onSaveTaskTitle);
 	});
 });
