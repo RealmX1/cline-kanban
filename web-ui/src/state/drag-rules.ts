@@ -39,9 +39,15 @@ export function isAllowedCrossColumnCardMove(
 	if (fromColumnId === "trash" && toColumnId === "review") {
 		return true;
 	}
+	// Free forward drag into the manual-validation buffer (mirrors how In Progress/Review feed
+	// the validation step). The reverse — validation → in_progress — is programmatic-only below.
+	if ((fromColumnId === "in_progress" || fromColumnId === "review") && toColumnId === "validation") {
+		return true;
+	}
 	if (
 		(fromColumnId === "in_progress" && toColumnId === "review") ||
-		(fromColumnId === "review" && toColumnId === "in_progress")
+		(fromColumnId === "review" && toColumnId === "in_progress") ||
+		(fromColumnId === "validation" && toColumnId === "in_progress")
 	) {
 		return isMatchingProgrammaticCardMove(
 			options?.taskId,
@@ -86,6 +92,12 @@ export function isCardDropDisabled(
 		if (activeDragSourceColumnId === "backlog" || activeDragSourceColumnId === "in_progress") {
 			return false;
 		}
+		return !isAllowedCrossColumnCardMove(activeDragSourceColumnId, columnId, {
+			taskId: options?.activeDragTaskId,
+			programmaticCardMoveInFlight: options?.programmaticCardMoveInFlight,
+		});
+	}
+	if (columnId === "validation") {
 		return !isAllowedCrossColumnCardMove(activeDragSourceColumnId, columnId, {
 			taskId: options?.activeDragTaskId,
 			programmaticCardMoveInFlight: options?.programmaticCardMoveInFlight,

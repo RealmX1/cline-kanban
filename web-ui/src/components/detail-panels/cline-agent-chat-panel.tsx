@@ -93,9 +93,12 @@ export interface ClineAgentChatPanelProps {
 	isOpenPrLoading?: boolean;
 	onMoveToTrash?: () => void;
 	isMoveToTrashLoading?: boolean;
+	onMoveToValidation?: () => void;
+	isMoveToValidationLoading?: boolean;
 	onCancelAutomaticAction?: () => void;
 	cancelAutomaticActionLabel?: string | null;
 	showMoveToTrash?: boolean;
+	showMoveToValidation?: boolean;
 }
 
 export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, ClineAgentChatPanelProps>(
@@ -124,9 +127,12 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			isOpenPrLoading = false,
 			onMoveToTrash,
 			isMoveToTrashLoading = false,
+			onMoveToValidation,
+			isMoveToValidationLoading = false,
 			onCancelAutomaticAction,
 			cancelAutomaticActionLabel,
 			showMoveToTrash = false,
+			showMoveToValidation = false,
 		},
 		ref,
 	): ReactElement {
@@ -157,9 +163,11 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			onCommit,
 			onOpenPr,
 			onMoveToTrash,
+			onMoveToValidation,
 			onCancelAutomaticAction,
 			cancelAutomaticActionLabel,
 			showMoveToTrash,
+			showMoveToValidation,
 		});
 		const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 		// TODO: Persist per-task mode immediately when toggled so page refresh restores unsent mode changes.
@@ -490,9 +498,16 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 								{cancelAutomaticActionLabel}
 							</Button>
 						) : null}
-						<Button variant="danger" fill disabled={isMoveToTrashLoading} onClick={onMoveToTrash}>
-							{isMoveToTrashLoading ? <Spinner size={14} /> : "Move Card To Done"}
-						</Button>
+						{showMoveToValidation && onMoveToValidation ? (
+							<Button variant="primary" fill disabled={isMoveToValidationLoading} onClick={onMoveToValidation}>
+								{isMoveToValidationLoading ? <Spinner size={14} /> : "Move Card To Validation"}
+							</Button>
+						) : null}
+						{showMoveToTrash && onMoveToTrash ? (
+							<Button variant="danger" fill disabled={isMoveToTrashLoading} onClick={onMoveToTrash}>
+								{isMoveToTrashLoading ? <Spinner size={14} /> : "Move Card To Done"}
+							</Button>
+						) : null}
 					</div>
 				) : null}
 			</div>

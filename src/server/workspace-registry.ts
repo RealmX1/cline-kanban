@@ -97,6 +97,7 @@ function createEmptyProjectTaskCounts(): RuntimeProjectTaskCounts {
 		backlog: 0,
 		in_progress: 0,
 		review: 0,
+		validation: 0,
 		trash: 0,
 	};
 }
@@ -114,6 +115,9 @@ function countTasksByColumn(board: RuntimeBoardData): RuntimeProjectTaskCounts {
 				break;
 			case "review":
 				counts.review += count;
+				break;
+			case "validation":
+				counts.validation += count;
 				break;
 			case "trash":
 				counts.trash += count;
@@ -170,7 +174,7 @@ function applyLiveSessionStateToProjectTaskCounts(
 			next.review += 1;
 			continue;
 		}
-		if (summary.state === "interrupted" && columnId !== "trash") {
+		if (summary.state === "interrupted" && columnId !== "trash" && columnId !== "validation") {
 			next[columnId] = Math.max(0, next[columnId] - 1);
 			next.trash += 1;
 		}

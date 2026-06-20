@@ -19,7 +19,7 @@ import { canCreateTaskDependency } from "@/state/board-state";
 import { findCardColumnId, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import type { BoardCard, BoardColumnId, BoardData, BoardDependency } from "@/types";
 
-const BOARD_COLUMN_ORDER: BoardColumnId[] = ["backlog", "in_progress", "review", "trash"];
+const BOARD_COLUMN_ORDER: BoardColumnId[] = ["backlog", "in_progress", "review", "validation", "trash"];
 
 export type RequestProgrammaticCardMove = (move: ProgrammaticCardMoveInFlight) => boolean;
 
@@ -43,11 +43,13 @@ export function KanbanBoard({
 	onOpenPrTask,
 	onCancelAutomaticTaskAction,
 	onMoveToTrashTask,
+	onMoveToValidationTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
 	commitTaskLoadingById,
 	openPrTaskLoadingById,
 	moveToTrashLoadingById,
+	moveToValidationLoadingById,
 	dependencies,
 	onCreateDependency,
 	onDeleteDependency,
@@ -72,11 +74,13 @@ export function KanbanBoard({
 	onOpenPrTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
+	onMoveToValidationTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
 	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
+	moveToValidationLoadingById?: Record<string, boolean>;
 	dependencies: BoardDependency[];
 	onCreateDependency?: (fromTaskId: string, toTaskId: string) => void;
 	onDeleteDependency?: (dependencyId: string) => void;
@@ -400,12 +404,26 @@ export function KanbanBoard({
 						onCommitTask={column.id === "review" ? onCommitTask : undefined}
 						onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
 						onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
-						onMoveToTrashTask={column.id === "review" ? onMoveToTrashTask : undefined}
+						onMoveToTrashTask={
+							column.id === "review" || column.id === "in_progress" || column.id === "validation"
+								? onMoveToTrashTask
+								: undefined
+						}
+						onMoveToValidationTask={
+							column.id === "review" || column.id === "in_progress" ? onMoveToValidationTask : undefined
+						}
 						onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
 						onDeleteTask={onDeleteTask}
 						commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
 						openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
-						moveToTrashLoadingById={column.id === "review" ? moveToTrashLoadingById : undefined}
+						moveToTrashLoadingById={
+							column.id === "review" || column.id === "in_progress" || column.id === "validation"
+								? moveToTrashLoadingById
+								: undefined
+						}
+						moveToValidationLoadingById={
+							column.id === "review" || column.id === "in_progress" ? moveToValidationLoadingById : undefined
+						}
 						activeDragTaskId={activeDragTaskId}
 						activeDragSourceColumnId={activeDragSourceColumnId}
 						programmaticCardMoveInFlight={programmaticCardMoveInFlight}

@@ -36,6 +36,7 @@ const BOARD_COLUMNS: Array<{ id: RuntimeBoardColumnId; title: string }> = [
 	{ id: "backlog", title: "Backlog" },
 	{ id: "in_progress", title: "In Progress" },
 	{ id: "review", title: "Review" },
+	{ id: "validation", title: "Validation" },
 	{ id: "trash", title: "Done" },
 ];
 
@@ -149,6 +150,31 @@ function createEmptyBoard(): RuntimeBoardData {
 		})),
 		dependencies: [],
 	};
+}
+
+// Backfills/reorders board columns to match the canonical BOARD_COLUMNS list so that
+// legacy persisted boards (e.g. the pre-Validation 4-column layout) gain any newly
+// introduced column as an empty column without losing existing cards. The board schema
+// only admits known column ids, so mapping over BOARD_COLUMNS captures every existing
+// column; missing ones are inserted empty and column order is normalized.
+function reconcileBoardColumns(board: RuntimeBoardData): RuntimeBoardData {
+	const existingColumnsById = new Map(board.columns.map((column) => [column.id, column]));
+	let columnsChanged = board.columns.length !== BOARD_COLUMNS.length;
+	const reconciledColumns = BOARD_COLUMNS.map((expectedColumn, expectedIndex) => {
+		const existingColumn = existingColumnsById.get(expectedColumn.id);
+		if (!existingColumn) {
+			columnsChanged = true;
+			return { id: expectedColumn.id, title: expectedColumn.title, cards: [] };
+		}
+		if (board.columns[expectedIndex]?.id !== expectedColumn.id) {
+			columnsChanged = true;
+		}
+		return existingColumn;
+	});
+	if (!columnsChanged) {
+		return board;
+	}
+	return { ...board, columns: reconciledColumns };
 }
 
 function createEmptyWorkspaceIndex(): WorkspaceIndexFile {
@@ -297,7 +323,9 @@ async function readWorkspaceBoard(workspaceId: string): Promise<RuntimeBoardData
 	const boardPath = getWorkspaceBoardPath(workspaceId);
 	const rawBoard = await readJsonFile(boardPath);
 	return updateTaskDependencies(
-		parsePersistedStateFile(boardPath, BOARD_FILENAME, rawBoard, runtimeBoardDataSchema, createEmptyBoard()),
+		reconcileBoardColumns(
+			parsePersistedStateFile(boardPath, BOARD_FILENAME, rawBoard, runtimeBoardDataSchema, createEmptyBoard()),
+		),
 	);
 }
 

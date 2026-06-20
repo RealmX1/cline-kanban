@@ -6,7 +6,7 @@ import { CardDetailView } from "@/components/card-detail-view";
 import { DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import { TERMINAL_THEME_COLORS } from "@/terminal/theme-colors";
-import type { BoardCard, BoardColumn, CardSelection } from "@/types";
+import type { BoardCard, BoardColumn, BoardColumnId, CardSelection } from "@/types";
 
 const mockUseRuntimeWorkspaceChanges = vi.fn();
 const {
@@ -118,6 +118,27 @@ function createSelection(): CardSelection {
 	return {
 		card,
 		column: columns[0]!,
+		allColumns: columns,
+	};
+}
+
+function createSelectionInColumn(columnId: BoardColumnId): CardSelection {
+	const card = createCard("task-1");
+	const columns: BoardColumn[] = [
+		{ id: "backlog", title: "Backlog", cards: [] },
+		{ id: "in_progress", title: "In Progress", cards: [] },
+		{ id: "review", title: "Review", cards: [] },
+		{ id: "validation", title: "Validation", cards: [] },
+		{ id: "trash", title: "Done", cards: [] },
+	];
+	const targetColumn = columns.find((column) => column.id === columnId);
+	if (!targetColumn) {
+		throw new Error(`Unknown column ${columnId}`);
+	}
+	targetColumn.cards.push(card);
+	return {
+		card,
+		column: targetColumn,
 		allColumns: columns,
 	};
 }
@@ -866,5 +887,97 @@ describe("CardDetailView", () => {
 		});
 
 		expect(requireDetailDiffFileTreePanel(container).style.flex).toBe("0 0 18%");
+	});
+
+	it("confirms before moving an in-progress card straight to Done from the focus view", async () => {
+		const onMoveToTrash = vi.fn();
+		const onMoveToValidation = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelectionInColumn("in_progress")}
+					currentProjectId="workspace-1"
+					selectedAgentId="cline"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={onMoveToTrash}
+					onMoveToValidation={onMoveToValidation}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		const panelProps = getLastMockFirstArg<{
+			onMoveToTrash?: () => void;
+			showMoveToTrash?: boolean;
+			showMoveToValidation?: boolean;
+		}>(mockClineAgentChatPanel);
+		expect(panelProps.showMoveToTrash).toBe(true);
+		expect(panelProps.showMoveToValidation).toBe(true);
+
+		// Simulate the footer "Move Card To Done" click — should open the confirm dialog, not move yet.
+		await act(async () => {
+			panelProps.onMoveToTrash?.();
+		});
+		expect(document.body.textContent).toContain("Move directly to Done?");
+		expect(onMoveToTrash).not.toHaveBeenCalled();
+
+		const confirmButton = Array.from(document.body.querySelectorAll("button")).find(
+			(button) => button.textContent?.trim() === "Move to Done",
+		);
+		expect(confirmButton).toBeInstanceOf(HTMLButtonElement);
+		if (!(confirmButton instanceof HTMLButtonElement)) {
+			throw new Error("Expected confirm button");
+		}
+
+		await act(async () => {
+			confirmButton.click();
+		});
+		expect(onMoveToTrash).toHaveBeenCalledTimes(1);
+	});
+
+	it("moves a validation card to Done without confirmation", async () => {
+		const onMoveToTrash = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelectionInColumn("validation")}
+					currentProjectId="workspace-1"
+					selectedAgentId="cline"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={onMoveToTrash}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		const panelProps = getLastMockFirstArg<{
+			onMoveToTrash?: () => void;
+			showMoveToTrash?: boolean;
+			showMoveToValidation?: boolean;
+		}>(mockClineAgentChatPanel);
+		expect(panelProps.showMoveToTrash).toBe(true);
+		expect(panelProps.showMoveToValidation).toBe(false);
+
+		await act(async () => {
+			panelProps.onMoveToTrash?.();
+		});
+		expect(document.body.textContent).not.toContain("Move directly to Done?");
+		expect(onMoveToTrash).toHaveBeenCalledTimes(1);
 	});
 });

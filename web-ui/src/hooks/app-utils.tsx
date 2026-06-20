@@ -1,4 +1,4 @@
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeProjectTaskCounts, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardData, TaskAutoReviewMode } from "@/types";
 
@@ -20,16 +20,12 @@ export interface SearchableTask {
 	columnTitle: string;
 }
 
-export function countTasksByColumn(board: BoardData): {
-	backlog: number;
-	in_progress: number;
-	review: number;
-	trash: number;
-} {
-	const counts = {
+export function countTasksByColumn(board: BoardData): RuntimeProjectTaskCounts {
+	const counts: RuntimeProjectTaskCounts = {
 		backlog: 0,
 		in_progress: 0,
 		review: 0,
+		validation: 0,
 		trash: 0,
 	};
 	for (const column of board.columns) {
@@ -43,6 +39,10 @@ export function countTasksByColumn(board: BoardData): {
 		}
 		if (column.id === "review") {
 			counts.review += column.cards.length;
+			continue;
+		}
+		if (column.id === "validation") {
+			counts.validation += column.cards.length;
 			continue;
 		}
 		if (column.id === "trash") {

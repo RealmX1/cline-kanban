@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useLinkedBacklogTaskActions } from "@/hooks/use-linked-backlog-task-actions";
 import { getDetailTerminalTaskId } from "@/hooks/use-terminal-panels";
-import type { BoardCard, BoardData, BoardDependency } from "@/types";
+import type { BoardCard, BoardColumnId, BoardData, BoardDependency } from "@/types";
 
 const trackTaskDependencyCreatedMock = vi.hoisted(() => vi.fn());
 const trackTasksAutoStartedFromDependencyMock = vi.hoisted(() => vi.fn());
@@ -52,10 +52,7 @@ interface HookSnapshot {
 	board: BoardData;
 	handleCreateDependency: (fromTaskId: string, toTaskId: string) => void;
 	confirmMoveTaskToTrash: (task: BoardCard, currentBoard?: BoardData) => Promise<void>;
-	requestMoveTaskToTrash: (
-		taskId: string,
-		fromColumnId: "backlog" | "in_progress" | "review" | "trash",
-	) => Promise<void>;
+	requestMoveTaskToTrash: (taskId: string, fromColumnId: BoardColumnId) => Promise<void>;
 }
 
 interface Deferred<T> {
@@ -85,7 +82,7 @@ function HookHarness({
 	kickoffTaskInProgress?: (
 		task: BoardCard,
 		taskId: string,
-		fromColumnId: "backlog" | "in_progress" | "review" | "trash",
+		fromColumnId: BoardColumnId,
 		options?: { optimisticMove?: boolean },
 	) => Promise<boolean>;
 	startBacklogTaskWithAnimation?: (task: BoardCard) => Promise<boolean>;

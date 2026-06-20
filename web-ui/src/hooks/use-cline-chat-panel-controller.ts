@@ -24,9 +24,11 @@ interface UseClineChatPanelControllerInput {
 	onCommit?: () => void;
 	onOpenPr?: () => void;
 	onMoveToTrash?: () => void;
+	onMoveToValidation?: () => void;
 	onCancelAutomaticAction?: () => void;
 	cancelAutomaticActionLabel?: string | null;
 	showMoveToTrash?: boolean;
+	showMoveToValidation?: boolean;
 }
 
 interface UseClineChatPanelControllerResult {
@@ -59,9 +61,11 @@ export function useClineChatPanelController({
 	onCommit,
 	onOpenPr,
 	onMoveToTrash,
+	onMoveToValidation,
 	onCancelAutomaticAction,
 	cancelAutomaticActionLabel,
 	showMoveToTrash = false,
+	showMoveToValidation = false,
 }: UseClineChatPanelControllerInput): UseClineChatPanelControllerResult {
 	const [draft, setDraft] = useState("");
 	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(taskId);
@@ -81,7 +85,8 @@ export function useClineChatPanelController({
 		Boolean(onCommit) &&
 		Boolean(onOpenPr);
 	const showAgentProgressIndicator = summary?.state === "running";
-	const showActionFooter = showMoveToTrash && Boolean(onMoveToTrash);
+	const showActionFooter =
+		(showMoveToTrash && Boolean(onMoveToTrash)) || (showMoveToValidation && Boolean(onMoveToValidation));
 	const showCancelAutomaticAction = Boolean(cancelAutomaticActionLabel && onCancelAutomaticAction);
 
 	const handleSendText = useCallback(

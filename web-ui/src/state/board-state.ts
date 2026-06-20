@@ -66,7 +66,7 @@ function withUpdatedColumns(board: BoardData, columns: BoardColumn[]): BoardData
 }
 
 function normalizeColumnId(id: string): BoardColumnId | null {
-	if (id === "backlog" || id === "in_progress" || id === "review" || id === "trash") {
+	if (id === "backlog" || id === "in_progress" || id === "review" || id === "validation" || id === "trash") {
 		return id;
 	}
 	return null;

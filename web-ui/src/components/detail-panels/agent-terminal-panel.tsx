@@ -55,9 +55,12 @@ export interface AgentTerminalPanelProps {
 	taskColumnId?: string;
 	onMoveToTrash?: () => void;
 	isMoveToTrashLoading?: boolean;
+	onMoveToValidation?: () => void;
+	isMoveToValidationLoading?: boolean;
 	onCancelAutomaticAction?: () => void;
 	cancelAutomaticActionLabel?: string | null;
 	showMoveToTrash?: boolean;
+	showMoveToValidation?: boolean;
 	showSessionToolbar?: boolean;
 	onClose?: () => void;
 	autoFocus?: boolean;
@@ -351,9 +354,12 @@ function AgentTerminalPanelLayout({
 	taskColumnId = "in_progress",
 	onMoveToTrash,
 	isMoveToTrashLoading = false,
+	onMoveToValidation,
+	isMoveToValidationLoading = false,
 	onCancelAutomaticAction,
 	cancelAutomaticActionLabel,
 	showMoveToTrash,
+	showMoveToValidation,
 	showSessionToolbar = true,
 	onClose,
 	autoFocus: _autoFocus = false,
@@ -598,7 +604,7 @@ function AgentTerminalPanelLayout({
 					{lastError}
 				</div>
 			) : null}
-			{showMoveToTrash && onMoveToTrash ? (
+			{(showMoveToTrash && onMoveToTrash) || (showMoveToValidation && onMoveToValidation) ? (
 				<div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "8px 12px" }}>
 					<AgentTerminalReviewActions
 						taskId={taskId}
@@ -613,9 +619,16 @@ function AgentTerminalPanelLayout({
 							{cancelAutomaticActionLabel}
 						</Button>
 					) : null}
-					<Button variant="danger" fill disabled={isMoveToTrashLoading} onClick={onMoveToTrash}>
-						{isMoveToTrashLoading ? <Spinner size={14} /> : "Move Card To Done"}
-					</Button>
+					{showMoveToValidation && onMoveToValidation ? (
+						<Button variant="primary" fill disabled={isMoveToValidationLoading} onClick={onMoveToValidation}>
+							{isMoveToValidationLoading ? <Spinner size={14} /> : "Move Card To Validation"}
+						</Button>
+					) : null}
+					{showMoveToTrash && onMoveToTrash ? (
+						<Button variant="danger" fill disabled={isMoveToTrashLoading} onClick={onMoveToTrash}>
+							{isMoveToTrashLoading ? <Spinner size={14} /> : "Move Card To Done"}
+						</Button>
+					) : null}
 				</div>
 			) : null}
 		</div>

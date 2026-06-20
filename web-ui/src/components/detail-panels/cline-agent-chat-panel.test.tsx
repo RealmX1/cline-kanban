@@ -1163,4 +1163,65 @@ describe("ClineAgentChatPanel", () => {
 		expect(container.textContent).not.toContain("Open PR");
 		expect(container.textContent).toContain("Move Card To Done");
 	});
+
+	it("renders Move Card To Validation above Move Card To Done for review/in-progress", async () => {
+		const onMoveToValidation = vi.fn();
+		const onMoveToTrash = vi.fn();
+
+		await act(async () => {
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					taskId="task-1"
+					summary={createSummary("awaiting_review")}
+					onLoadMessages={async () => []}
+					taskColumnId="review"
+					onMoveToTrash={onMoveToTrash}
+					showMoveToTrash
+					onMoveToValidation={onMoveToValidation}
+					showMoveToValidation
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		const buttons = Array.from(container.querySelectorAll("button"));
+		const validationButton = buttons.find((button) => button.textContent?.includes("Move Card To Validation"));
+		const doneButton = buttons.find((button) => button.textContent?.includes("Move Card To Done"));
+		expect(validationButton).toBeInstanceOf(HTMLButtonElement);
+		expect(doneButton).toBeInstanceOf(HTMLButtonElement);
+		if (!(validationButton instanceof HTMLButtonElement) || !(doneButton instanceof HTMLButtonElement)) {
+			throw new Error("Expected both footer buttons");
+		}
+		// Validation button is rendered before (above) the Done button in document order.
+		expect(validationButton.compareDocumentPosition(doneButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+		await act(async () => {
+			validationButton.click();
+		});
+		expect(onMoveToValidation).toHaveBeenCalledTimes(1);
+		expect(onMoveToTrash).not.toHaveBeenCalled();
+	});
+
+	it("shows only Move Card To Done (no Validation) for validation-column cards", async () => {
+		await act(async () => {
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					taskId="task-1"
+					summary={createSummary("awaiting_review")}
+					onLoadMessages={async () => []}
+					taskColumnId="validation"
+					onMoveToTrash={() => {}}
+					showMoveToTrash
+					onMoveToValidation={() => {}}
+					showMoveToValidation={false}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		expect(container.textContent).toContain("Move Card To Done");
+		expect(container.textContent).not.toContain("Move Card To Validation");
+	});
 });
