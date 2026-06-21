@@ -69,7 +69,14 @@ This skill does not own:
    - Treat a production build here as validation of the checkout, not as proof that a running runtime has been updated.
    - Confirm the custom commits still exist on top of the official target, or explicitly report any commits intentionally dropped.
 
-7. Hand off runtime refresh separately.
+7. 收尾:汇总本次集成纳入的 upstream commit 与保留/丢弃的本地 custom commit(source 级,不涉及 runtime)。
+   - 门控:仅在 rebase/merge/cherry-pick 确实落地后执行;若在任一边界中止、源历史并未改变,跳过本汇总。
+   - 新纳入的 upstream commit(commit 级,逐条):优先复用步骤 4 `git log --left-right --cherry-pick` 的 upstream-only 侧结果(已排除与本地等价的 commit),避免把已 cherry-pick 的算重;裸两点区间 `git log --oneline --no-decorate <old_merge_base>..<new_upstream_target>` 仅作粗略对照。
+   - 本地 custom commit 的保留/丢弃:取自步骤 4/6 的 `git range-diff`,逐条列出仍在 upstream 之上的 custom commit,以及被丢弃 / 被 upstream 等价取代的 custom commit——丢弃的必须列出,别只报保留的。
+   - 边界:若 merge-base 已等于 upstream target(已是最新),报「无新 upstream commit」;若没有 custom commit,如实说明。
+   - 措辞全程锚在 source 级:「本次集成新纳入了这些 upstream commit / 这些 custom commit 被保留或丢弃」;显式重申「本 skill 未重启、未 relink、未触碰任何运行中的 runtime」。
+
+8. Hand off runtime refresh separately.
    - If the user wants the local server or CLI to run the integrated code, use this project's `cline-kanban-local-deploy` skill after this source integration is complete.
    - Pass along the old commit, new commit, backup branch, validation results, and any runtime risks discovered during the snapshot.
 
@@ -83,5 +90,6 @@ Report:
 - Integration method used: rebase, merge, or cherry-pick onto a new branch.
 - Whether version files were intentionally changed.
 - Whether custom commits remain on top of upstream.
+- 本次集成 delta 摘要(source 级、commit 级):逐条列出本次新纳入的 upstream commit,以及被保留 / 被丢弃的本地 custom commit;若已是最新则报「无新 upstream commit」。
 - Validation commands and results.
 - Explicit note that no running runtime was restarted or relinked by this skill.
