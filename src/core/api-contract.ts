@@ -1061,6 +1061,26 @@ export type RuntimeContinueConnectionRetrySessionsResponse = z.infer<
 	typeof runtimeContinueConnectionRetrySessionsResponseSchema
 >;
 
+// 手动「移出列表 / 停止重试」：把指定任务从自动续跑重试列表里移出，结束其当前重连 episode、
+// 不再注入续跑（软移除——之后若再检测到新的瞬时连接错误仍会重新进入）。单任务传单元素数组；
+// 「全部移出」传当前 workspace 的整张重试列表（web-ui 已按 workspace 派生）。
+export const runtimeDismissConnectionRetrySessionsRequestSchema = z.object({
+	taskIds: z.array(z.string()).min(1),
+});
+export type RuntimeDismissConnectionRetrySessionsRequest = z.infer<
+	typeof runtimeDismissConnectionRetrySessionsRequestSchema
+>;
+
+export const runtimeDismissConnectionRetrySessionsResponseSchema = z.object({
+	ok: z.boolean(),
+	// 实际被移出的任务 id 列表（命中且仍在重试列表里的）。
+	dismissedTaskIds: z.array(z.string()),
+	error: z.string().optional(),
+});
+export type RuntimeDismissConnectionRetrySessionsResponse = z.infer<
+	typeof runtimeDismissConnectionRetrySessionsResponseSchema
+>;
+
 export const runtimeTaskTerminalRefreshRequestSchema = z.object({
 	taskId: z.string(),
 	cols: z.number().int().positive().optional(),

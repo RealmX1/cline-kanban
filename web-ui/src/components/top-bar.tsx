@@ -316,6 +316,7 @@ export function TopBar({
 	hideProjectDependentActions = false,
 	connectionRetrySessions = [],
 	onContinueConnectionRetrySessions,
+	onDismissConnectionRetrySessions,
 }: {
 	onToggleSidebar?: () => void;
 	onBack?: () => void;
@@ -353,6 +354,7 @@ export function TopBar({
 	hideProjectDependentActions?: boolean;
 	connectionRetrySessions?: ConnectionRetrySessionView[];
 	onContinueConnectionRetrySessions?: (taskIds: string[]) => void;
+	onDismissConnectionRetrySessions?: (taskIds: string[]) => void;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
 	const displayWorkspacePath = workspacePath ? formatPathForDisplay(workspacePath) : null;
@@ -683,6 +685,7 @@ export function TopBar({
 						<ConnectionRetryIndicator
 							sessions={connectionRetrySessions}
 							onContinue={onContinueConnectionRetrySessions}
+							onDismiss={onDismissConnectionRetrySessions}
 						/>
 					) : null}
 

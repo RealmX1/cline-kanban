@@ -198,6 +198,7 @@ export default function App(): ReactElement {
 		startTaskSession,
 		stopTaskSession,
 		continueConnectionRetrySessions,
+		dismissConnectionRetrySessions,
 		sendTaskSessionInput,
 		sendTaskChatMessage,
 		cancelTaskChatTurn,
@@ -239,6 +240,13 @@ export default function App(): ReactElement {
 			void continueConnectionRetrySessions(taskIds);
 		},
 		[continueConnectionRetrySessions],
+	);
+
+	const handleDismissConnectionRetrySessions = useCallback(
+		(taskIds: string[]) => {
+			void dismissConnectionRetrySessions(taskIds);
+		},
+		[dismissConnectionRetrySessions],
 	);
 
 	const {
@@ -935,6 +943,7 @@ export default function App(): ReactElement {
 						hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
 						connectionRetrySessions={connectionRetrySessions}
 						onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
+						onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 						<div

@@ -212,5 +212,14 @@ export function createConnectionDropAutoContinueReaction(): OutputReaction {
 			state.nextAttemptAt = ctx.now;
 			performAttempt(state, ctx, actions, { manual: true });
 		},
+		dismiss(_ctx, rawState, actions) {
+			// 手动「移出列表 / 停止重试」：结束当前 episode（清定时器 + 清 UI 重连状态、不注入）。
+			// 软移除——之后若再检测到新的瞬时连接错误，onOutput 仍会重新进入一次新 episode。
+			const state = rawState as ConnectionDropReactionState;
+			if (!state.episodeActive) {
+				return;
+			}
+			endEpisode(state, actions, "manual-dismiss");
+		},
 	};
 }

@@ -5,9 +5,10 @@
 // 自身无数据获取：重试会话视图与续跑回调由 App.tsx 从 workspace 范围的 sessions 派生后下传。
 
 import * as RadixPopover from "@radix-ui/react-popover";
-import { PlugZap } from "lucide-react";
+import { PlugZap, X } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 import { useInterval } from "@/utils/react-use";
 
 export interface ConnectionRetrySessionView {
@@ -37,9 +38,12 @@ function formatNextAttempt(nextAttemptAt: number | null, nowMs: number): string 
 export function ConnectionRetryIndicator({
 	sessions,
 	onContinue,
+	onDismiss,
 }: {
 	sessions: ConnectionRetrySessionView[];
 	onContinue: (taskIds: string[]) => void;
+	// 手动「移出列表 / 停止重试」：把任务从自动续跑重试列表里移出（软移除，新错误仍会再入）。
+	onDismiss?: (taskIds: string[]) => void;
 }): React.ReactElement | null {
 	const [open, setOpen] = useState(false);
 	// 每秒重渲染一次，让倒计时随时间走动；无重试会话时停掉计时器。
@@ -100,13 +104,29 @@ export function ConnectionRetryIndicator({
 								<Button size="sm" variant="default" onClick={() => onContinue([session.taskId])}>
 									立即续跑
 								</Button>
+								{onDismiss ? (
+									<Tooltip content="停止重试并移出列表">
+										<Button
+											size="sm"
+											variant="ghost"
+											icon={<X size={14} />}
+											aria-label="停止重试并移出列表"
+											onClick={() => onDismiss([session.taskId])}
+										/>
+									</Tooltip>
+								) : null}
 							</div>
 						))}
 					</div>
-					<div className="mt-1 border-t border-border pt-1.5">
+					<div className="mt-1 space-y-1 border-t border-border pt-1.5">
 						<Button size="sm" variant="primary" fill onClick={() => onContinue(allTaskIds)}>
 							全部立即续跑（{sessions.length}）
 						</Button>
+						{onDismiss ? (
+							<Button size="sm" variant="ghost" fill onClick={() => onDismiss(allTaskIds)}>
+								全部移出（{sessions.length}）
+							</Button>
+						) : null}
 					</div>
 				</RadixPopover.Content>
 			</RadixPopover.Portal>
