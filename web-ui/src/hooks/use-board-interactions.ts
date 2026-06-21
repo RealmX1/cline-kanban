@@ -18,6 +18,7 @@ import {
 	removeTask,
 	updateTask,
 } from "@/state/board-state";
+import { isAgentActivelyProducingOutput } from "@/state/task-session-activity";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
@@ -442,6 +443,7 @@ export function useBoardInteractions({
 			let nextBoard = currentBoard;
 			const previousSessions = previousSessionsRef.current;
 			const blockedInterruptedTaskIds = new Set<string>();
+			const nowMs = Date.now();
 			for (const summary of Object.values(sessions)) {
 				const previous = previousSessions[summary.taskId];
 				if (previous && previous.updatedAt > summary.updatedAt) {
@@ -459,7 +461,15 @@ export function useBoardInteractions({
 					}
 					continue;
 				}
-				if (summary.state === "running" && (columnId === "review" || columnId === "validation")) {
+				// Review 列：维持原行为——running 会话不应停在 review（review 是
+				// awaiting_review 的自动落位区），一律打回 In Progress。
+				// Validation 列：收窄判据——仅当 agent 此刻仍在持续产出输出时才打回；
+				// 空闲 / 已退出却仍标 running 的会话允许停留在 Validation（见
+				// isAgentActivelyProducingOutput 注释）。
+				const shouldBounceRunningToInProgress =
+					(summary.state === "running" && columnId === "review") ||
+					(columnId === "validation" && isAgentActivelyProducingOutput(summary, nowMs));
+				if (shouldBounceRunningToInProgress) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
 						skipKickoff: true,
 					});
@@ -796,10 +806,13 @@ export function useBoardInteractions({
 			const moved = moveTaskToColumn(board, taskId, "validation", { insertAtTop: true });
 			if (moved.moved) {
 				setBoard(moved.board);
-				// A still-running session in Validation gets auto-migrated back to In Progress by the
-				// level-triggered effect above, so warn the developer instead of leaving the card looking
-				// like it never moved. Non-blocking, auto-dismisses after 3s.
-				if (sessions[taskId]?.state === "running") {
+				// A session that is *actively producing output* in Validation gets auto-migrated back to
+				// In Progress by the level-triggered effect above, so warn the developer instead of leaving
+				// the card looking like it never moved. Idle / already-exited sessions (still flagged
+				// "running") now stay in Validation, so the warning must use the same predicate as the
+				// bounce — keying off bare state === "running" would false-warn on those. Non-blocking,
+				// auto-dismisses after 3s.
+				if (isAgentActivelyProducingOutput(sessions[taskId], Date.now())) {
 					showAppToast({
 						intent: "warning",
 						icon: "info-sign",

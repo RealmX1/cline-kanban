@@ -59,6 +59,43 @@ function createBoard(): BoardData {
 	};
 }
 
+function createRunningSession(
+	taskId: string,
+	overrides: Partial<RuntimeTaskSessionSummary> = {},
+): RuntimeTaskSessionSummary {
+	return {
+		taskId,
+		state: "running",
+		agentId: "claude",
+		workspacePath: null,
+		pid: 1234,
+		startedAt: Date.now(),
+		updatedAt: Date.now(),
+		lastOutputAt: null,
+		reviewReason: null,
+		exitCode: null,
+		lastHookAt: null,
+		latestHookActivity: null,
+		...overrides,
+	};
+}
+
+// Board with a populated Validation column (createBoard omits it) so the
+// level-triggered effect can be observed deciding whether a running session
+// stays in Validation or bounces back to In Progress.
+function createBoardWithValidationTask(taskId: string): BoardData {
+	return {
+		columns: [
+			{ id: "backlog", title: "Backlog", cards: [] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [] },
+			{ id: "validation", title: "Validation", cards: [createTask(taskId, "Validating task", 1)] },
+			{ id: "trash", title: "Done", cards: [] },
+		],
+		dependencies: [],
+	};
+}
+
 const NOOP_STOP_SESSION = async (): Promise<void> => {};
 const NOOP_CLEANUP_WORKSPACE = async (): Promise<null> => null;
 const NOOP_FETCH_WORKSPACE_INFO = async (): Promise<null> => null;
@@ -98,6 +135,7 @@ function HookHarness({
 	setSelectedTaskIdOverride,
 	stopTaskSession = NOOP_STOP_SESSION,
 	cleanupTaskWorkspace = NOOP_CLEANUP_WORKSPACE,
+	initialSessions,
 	onSnapshot,
 }: {
 	board: BoardData;
@@ -109,9 +147,10 @@ function HookHarness({
 	setSelectedTaskIdOverride?: Dispatch<SetStateAction<string | null>>;
 	stopTaskSession?: (taskId: string) => Promise<void>;
 	cleanupTaskWorkspace?: UseTaskSessionsResult["cleanupTaskWorkspace"];
+	initialSessions?: Record<string, RuntimeTaskSessionSummary>;
 	onSnapshot?: (snapshot: HookSnapshot) => void;
 }): null {
-	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
+	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>(initialSessions ?? {});
 	const [, setSelectedTaskId] = useState<string | null>(selectedTaskId);
 	const [, setIsClearTrashDialogOpen] = useState(false);
 	const [, setIsGitHistoryOpen] = useState(false);
@@ -801,5 +840,99 @@ describe("useBoardInteractions", () => {
 		});
 
 		expect(setSelectedTaskId).not.toHaveBeenCalled();
+	});
+
+	it("keeps an idle (output-quiet) running task in Validation instead of bouncing it", async () => {
+		let currentBoard = createBoardWithValidationTask("task-idle");
+
+		useProgrammaticCardMovesMock.mockReturnValue({
+			handleProgrammaticCardMoveReady: () => {},
+			setRequestMoveTaskToTrashHandler: () => {},
+			tryProgrammaticCardMove: () => "unavailable",
+			consumeProgrammaticCardMove: () => ({}),
+			resolvePendingProgrammaticTrashMove: () => {},
+			waitForProgrammaticCardMoveAvailability: async () => {},
+			resetProgrammaticCardMoves: () => {},
+			requestMoveTaskToTrashWithAnimation: async () => {},
+			programmaticCardMoveCycle: 0,
+		});
+		useLinkedBacklogTaskActionsMock.mockReturnValue({
+			handleCreateDependency: () => {},
+			handleDeleteDependency: () => {},
+			confirmMoveTaskToTrash: async () => {},
+			requestMoveTaskToTrash: async () => {},
+		});
+
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+		});
+		// lastOutputAt well beyond the 5s quiet threshold → idle running.
+		const idleSessions = {
+			"task-idle": createRunningSession("task-idle", { lastOutputAt: Date.now() - 60_000 }),
+		};
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={currentBoard}
+					setBoard={setBoard}
+					ensureTaskWorkspace={async () => ({ ok: true as const })}
+					startTaskSession={async () => ({ ok: true as const })}
+					initialSessions={idleSessions}
+				/>,
+			);
+		});
+
+		const validationCards = currentBoard.columns.find((column) => column.id === "validation")?.cards ?? [];
+		const inProgressCards = currentBoard.columns.find((column) => column.id === "in_progress")?.cards ?? [];
+		expect(validationCards.map((card) => card.id)).toEqual(["task-idle"]);
+		expect(inProgressCards).toEqual([]);
+	});
+
+	it("bounces an actively-producing running task out of Validation back to In Progress", async () => {
+		let currentBoard = createBoardWithValidationTask("task-active");
+
+		useProgrammaticCardMovesMock.mockReturnValue({
+			handleProgrammaticCardMoveReady: () => {},
+			setRequestMoveTaskToTrashHandler: () => {},
+			tryProgrammaticCardMove: () => "unavailable",
+			consumeProgrammaticCardMove: () => ({}),
+			resolvePendingProgrammaticTrashMove: () => {},
+			waitForProgrammaticCardMoveAvailability: async () => {},
+			resetProgrammaticCardMoves: () => {},
+			requestMoveTaskToTrashWithAnimation: async () => {},
+			programmaticCardMoveCycle: 0,
+		});
+		useLinkedBacklogTaskActionsMock.mockReturnValue({
+			handleCreateDependency: () => {},
+			handleDeleteDependency: () => {},
+			confirmMoveTaskToTrash: async () => {},
+			requestMoveTaskToTrash: async () => {},
+		});
+
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+		});
+		// lastOutputAt within the 5s quiet threshold → actively producing output.
+		const activeSessions = {
+			"task-active": createRunningSession("task-active", { lastOutputAt: Date.now() - 500 }),
+		};
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={currentBoard}
+					setBoard={setBoard}
+					ensureTaskWorkspace={async () => ({ ok: true as const })}
+					startTaskSession={async () => ({ ok: true as const })}
+					initialSessions={activeSessions}
+				/>,
+			);
+		});
+
+		const validationCards = currentBoard.columns.find((column) => column.id === "validation")?.cards ?? [];
+		const inProgressCards = currentBoard.columns.find((column) => column.id === "in_progress")?.cards ?? [];
+		expect(validationCards).toEqual([]);
+		expect(inProgressCards.map((card) => card.id)).toEqual(["task-active"]);
 	});
 });
