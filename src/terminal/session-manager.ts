@@ -10,6 +10,7 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
+import { isAgentOutputQuiet as evaluateAgentOutputQuiet } from "../core/session-activity";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
 	type AgentAdapterLaunchInput,
@@ -38,7 +39,6 @@ import {
 	type OutputReactionEngine,
 	type OutputReactionSessionState,
 } from "./output-reactions";
-import { OUTPUT_QUIET_THRESHOLD_MS } from "./output-reactions/connection-drop-auto-continue";
 import {
 	buildNetworkInterruptionContinuationLine,
 	ensureNetworkInterruptionResumeInstructionsFile,
@@ -454,12 +454,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 			isAgentOutputQuiet: () => {
 				const entry = this.entries.get(taskId);
-				const lastOutputAt = entry?.summary.lastOutputAt ?? null;
-				// 从未产出过任何输出：视为静默（不会因「无 lastOutputAt」永久卡住注入）。
-				if (lastOutputAt === null) {
-					return true;
-				}
-				return now() - lastOutputAt >= OUTPUT_QUIET_THRESHOLD_MS;
+				// 静默判定（含「从未产出 → 视为静默」）统一走 src/core/session-activity.ts 的共享原语，
+				// 默认阈值 AGENT_OUTPUT_QUIET_THRESHOLD_MS（2s）。
+				return evaluateAgentOutputQuiet(entry?.summary.lastOutputAt ?? null, now());
 			},
 			log: (message: string) => {
 				logTuiFreezeWarning(`${message} taskId=${taskId}`);

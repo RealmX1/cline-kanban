@@ -18,16 +18,15 @@ export const CONNECTION_DROP_AUTO_CONTINUE_REACTION_ID = "connection-drop-auto-c
 // 指数增长的退避间隔（毫秒），到顶（最后一项）后按顶值无限重试，绝不彻底停止。
 // 第 0 次（首个 attempt）用一个较短的「沉降」延时，等 TUI 把提示符框重绘完整。
 //
-// 首档（4s）特意留足够余量大于 OUTPUT_QUIET_THRESHOLD_MS（2s）的「输出静默」门控：
+// 首档（4s）特意留足够余量大于 AGENT_OUTPUT_QUIET_THRESHOLD_MS（2s，见 src/core/session-activity.ts）的「输出静默」门控：
 // 真实连接中断时 agent 确实停产，到首个 attempt 时一定已静默、不会被误判为「仍在工作」
 // 而清掉 episode；而误命中（正常输出含 timeout 等词）若 agent 仍在持续产出，则到首个
 // attempt 时输出未静默，触发 endEpisode 清除伪「重连中」状态、绝不注入打断。
 const BACKOFF_SCHEDULE_MS: readonly number[] = [4_000, 15_000, 60_000, 240_000, 480_000];
 
-// 自动注入前的「输出静默」阈值（毫秒）：仅当距 agent 最近一次输出已超过此阈值，才认为
-// agent 确实停在原地、可安全注入续跑；否则判定 agent 仍在工作 / 已自行恢复。
-// session-manager 用 summary.lastOutputAt 实现 isAgentOutputQuiet() 时复用此阈值。
-export const OUTPUT_QUIET_THRESHOLD_MS = 2_000;
+// 「输出静默」阈值（AGENT_OUTPUT_QUIET_THRESHOLD_MS，2s）现由 src/core/session-activity.ts 统一持有：
+// session-manager 注入的 isAgentOutputQuiet 动作复用该阈值，仅当距 agent 最近一次输出已超过它、
+// 判定 agent 确实停在原地时，本反应才注入续跑。
 
 // attempt 触发时若尚未就绪（agent 仍在忙 / deferred input 未注入完 / 用户刚输入），
 // 隔这么久再探一次，而不是消耗一次退避档位。

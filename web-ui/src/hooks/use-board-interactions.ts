@@ -1,4 +1,5 @@
 import type { DropResult } from "@hello-pangea/dnd";
+import { isAgentActivelyProducingOutput } from "@runtime-session-activity";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
@@ -18,7 +19,6 @@ import {
 	removeTask,
 	updateTask,
 } from "@/state/board-state";
-import { isAgentActivelyProducingOutput } from "@/state/task-session-activity";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
