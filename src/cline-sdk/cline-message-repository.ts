@@ -2,6 +2,7 @@
 // It combines live in-memory updates with hydration from persisted SDK
 // session artifacts so the rest of the backend can read one repository shape.
 import type { RuntimeTaskImage, RuntimeTaskSessionSummary, RuntimeTaskTurnCheckpoint } from "../core/api-contract";
+import { applySessionFacets } from "../core/session-activity";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import type { ClinePersistedTaskSessionSnapshot } from "./cline-session-runtime";
 import {
@@ -172,12 +173,15 @@ export function createTaskEntryFromPersistedSession(
 	for (const message of messages) {
 		hydratePersistedMessage(entry, taskId, message);
 	}
-	entry.summary = {
+	// 经单一构造 applySessionFacets 重 stamp 双轴 facet：summaryPatch 常覆写 state/reviewReason
+	// （resume/rebind 写 awaiting_review|failed），若仅 spread createDefaultSummary 的 idle facet 而不
+	// 重派生，会得到「非 idle state + idle facet」的不一致 summary（projectLegacyState 投影回 idle）。
+	entry.summary = applySessionFacets({
 		...entry.summary,
 		...summaryPatch,
 		taskId,
 		updatedAt: Date.now(),
-	};
+	});
 	return entry;
 }
 

@@ -10,7 +10,14 @@
 // 本模块把前两者收敛为「单一新鲜度原语 + 参数化阈值」，保留 5s/2s 双阈值（语义相反、有意
 // 不跨边界，见下），消除「同一判定多份实现、阈值漂移」的隐患。
 
-import type { RuntimeTaskSessionSummary } from "./api-contract.js";
+import type {
+	RuntimeTaskSessionLiveness,
+	RuntimeTaskSessionReviewReason,
+	RuntimeTaskSessionState,
+	RuntimeTaskSessionSummary,
+	RuntimeTaskSessionTurnOwner,
+	RuntimeTaskSessionUserTurnKind,
+} from "./api-contract.js";
 
 // 「agent 仍在持续产出」的活跃窗口阈值（毫秒）。前后端有意取不同值、语义相反，故分别命名、
 // 不强行统一为一个常量：
@@ -64,4 +71,115 @@ export function isAgentActivelyProducingOutput(
 		summary?.state === "running" &&
 		isAgentOutputWithinActiveWindow(summary.lastOutputAt, nowMs, VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS)
 	);
+}
+
+// ── 双轴会话状态 facet 的派生真相源 ─────────────────────────────────────────────
+// 枚举/类型定义在 src/core/api-contract.ts（含 superRefine 组合护栏）；此处是其求值逻辑：
+//   - deriveUserTurnKind / deriveSessionFacetsFromLegacyState：old→new（dual-write 与读时回填共用）
+//   - projectLegacyState：new→old 的唯一 reducer（live/exited 在此被有损压扁）
+//   - applySessionFacets：单一构造，所有写点经 updateSummary 漏斗统一 stamp facet
+// 三者满足 projectLegacyState(deriveSessionFacetsFromLegacyState(state, …)) === state（投影可逆），
+// 这正是 Stage 1「零行为漂移」承诺的命门，由黄金转移单测逐路径断言。
+
+// per-session facet schema 版本（随 dual-write 落盘的可选字段；Stage 2 据此判定是否需读时回填）。
+// 故意定义在本纯函数模块而非 api-contract：若从 api-contract 取值 import，会把整套 Zod schema 拖进
+// 浏览器 bundle（api-contract 当前仅被 web-ui 以 type-only 引用、不在运行时 bundle）。
+export const SESSION_SUMMARY_SCHEMA_VERSION = 1;
+
+// 三 facet 组合（合法组合由 api-contract 的 superRefine 护栏在校验边界硬化）。
+export interface SessionFacets {
+	turnOwner: RuntimeTaskSessionTurnOwner;
+	liveness: RuntimeTaskSessionLiveness;
+	userTurnKind: RuntimeTaskSessionUserTurnKind | null;
+}
+
+// reviewReason → 人轴种类。仅 turnOwner==="user" 时取用，恒返回非 null（满足「user 回合 userTurnKind
+// 不可为 null」不变量）。三分：error=运行错；interrupted=被中断；exit/completion/hook=完成待审(review)；
+// attention/兜底=needs_input。注：question / plan_review / permission 需 harness 级采集，归后续 Stage。
+export function deriveUserTurnKind(reviewReason: RuntimeTaskSessionReviewReason): RuntimeTaskSessionUserTurnKind {
+	switch (reviewReason) {
+		case "error":
+			return "error";
+		case "interrupted":
+			return "interrupted";
+		case "exit":
+		case "completion":
+		case "hook":
+			return "review";
+		default:
+			// "attention" 及 null/未知：兜底待输入
+			return "needs_input";
+	}
+}
+
+// old→new：把 legacy 一维 state（+ 同刻上下文）映射为三 facet。dual-write（Stage 1）与读时回填
+// （Stage 2 migrateLegacyState）共用此唯一映射。关键增益：awaiting_review 借 pid 区分 live↔exited
+// （legacy state 表达不了，故此方向无损），running 借 connectionRetry 区分 live↔retrying。
+export function deriveSessionFacetsFromLegacyState(
+	state: RuntimeTaskSessionState,
+	context: {
+		reviewReason: RuntimeTaskSessionReviewReason;
+		pid: number | null;
+		connectionRetryActive: boolean;
+	},
+): SessionFacets {
+	switch (state) {
+		case "idle":
+			return { turnOwner: null, liveness: "none", userTurnKind: null };
+		case "running":
+			return {
+				turnOwner: "agent",
+				liveness: context.connectionRetryActive ? "retrying" : "live",
+				userTurnKind: null,
+			};
+		case "failed":
+			// spawn 失败（终端启动失败）：等人处理、进程未起。
+			return { turnOwner: "user", liveness: "failed", userTurnKind: "error" };
+		case "interrupted":
+			return { turnOwner: "user", liveness: "interrupted", userTurnKind: "interrupted" };
+		case "awaiting_review":
+			return {
+				turnOwner: "user",
+				liveness: context.pid === null ? "exited" : "live",
+				userTurnKind: deriveUserTurnKind(context.reviewReason),
+			};
+	}
+}
+
+// new→old 的唯一 legacy reducer（禁止消费者各自手写投影）。live/exited 在此被压扁回
+// awaiting_review——这是有损方向，故依赖「进程已退」的决策型消费者自 Stage 2 起须直接读 liveness。
+export function projectLegacyState(facets: SessionFacets): RuntimeTaskSessionState {
+	if (facets.turnOwner === null) {
+		return "idle";
+	}
+	if (facets.turnOwner === "agent") {
+		return "running";
+	}
+	// turnOwner === "user"
+	if (facets.liveness === "failed") {
+		return "failed";
+	}
+	if (facets.liveness === "interrupted") {
+		return "interrupted";
+	}
+	return "awaiting_review";
+}
+
+// 单一构造：给「已合并好的 summary」打上与其 legacy state 自洽的三 facet + schemaVersion。
+// 所有 dual-write 经两处 updateSummary 漏斗（src/cline-sdk/cline-session-state.ts、
+// src/terminal/session-manager.ts）统一走此函数，故 facet 恒由当刻 state/reviewReason/pid/
+// connectionRetry 派生、与 state 投影可逆——无需在每个写点手填 facet，也杜绝漂移。
+export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSummary {
+	const facets = deriveSessionFacetsFromLegacyState(summary.state, {
+		reviewReason: summary.reviewReason,
+		pid: summary.pid,
+		connectionRetryActive: summary.connectionRetry != null,
+	});
+	return {
+		...summary,
+		turnOwner: facets.turnOwner,
+		liveness: facets.liveness,
+		userTurnKind: facets.userTurnKind,
+		schemaVersion: SESSION_SUMMARY_SCHEMA_VERSION,
+	};
 }

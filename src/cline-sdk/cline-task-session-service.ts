@@ -10,6 +10,7 @@ import type {
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
+import { applySessionFacets } from "../core/session-activity";
 import {
 	combineAppendSystemPrompts,
 	resolveHomeAgentAppendSystemPrompt,
@@ -361,7 +362,9 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 					reviewReason: initialReviewReason,
 				})
 			: ({
-					summary: {
+					// 经单一构造 applySessionFacets 重 stamp 双轴 facet：本内联分支覆写 state/reviewReason
+					// 后若仅 spread createDefaultSummary 的 idle facet，会得到与 state 不一致的 facet。
+					summary: applySessionFacets({
 						...createDefaultSummary(request.taskId),
 						state: initialState,
 						mode: resolvedMode,
@@ -369,7 +372,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 						startedAt: now(),
 						lastOutputAt: now(),
 						reviewReason: initialReviewReason,
-					},
+					}),
 					messages: [],
 					activeAssistantMessageId: null,
 					activeReasoningMessageId: null,

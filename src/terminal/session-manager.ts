@@ -10,7 +10,7 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
-import { isAgentOutputQuiet as evaluateAgentOutputQuiet } from "../core/session-activity";
+import { applySessionFacets, isAgentOutputQuiet as evaluateAgentOutputQuiet } from "../core/session-activity";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
 	type AgentAdapterLaunchInput,
@@ -173,7 +173,8 @@ function now(): number {
 }
 
 function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
-	return {
+	// 初始 idle summary 即带上 idle facet，使「直接发出未经 updateSummary 的默认 summary」也自洽。
+	return applySessionFacets({
 		taskId,
 		state: "idle",
 		agentId: null,
@@ -190,7 +191,7 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
 		connectionRetry: null,
-	};
+	});
 }
 
 function cloneSummary(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSummary {
@@ -200,11 +201,12 @@ function cloneSummary(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSum
 }
 
 function updateSummary(entry: SessionEntry, patch: Partial<RuntimeTaskSessionSummary>): RuntimeTaskSessionSummary {
-	entry.summary = {
+	// 单一 dual-write 漏斗：合并 patch 后统一 stamp 双轴 facet（与 legacy state 投影可逆）。
+	entry.summary = applySessionFacets({
 		...entry.summary,
 		...patch,
 		updatedAt: now(),
-	};
+	});
 	return entry.summary;
 }
 

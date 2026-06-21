@@ -2,6 +2,7 @@
 // This module owns the in-memory summary and message shape plus the low-level
 // mutations shared by the event adapter and the message repository.
 import type { RuntimeTaskImage, RuntimeTaskSessionSummary } from "../core/api-contract";
+import { applySessionFacets } from "../core/session-activity";
 
 const CLINE_USER_ATTENTION_TOOL_NAMES = new Set(["ask_followup_question", "plan_mode_respond"]);
 
@@ -90,7 +91,9 @@ export function cloneMessage(message: ClineTaskMessage): ClineTaskMessage {
 }
 
 export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
-	return {
+	// 初始 idle summary 即带上 idle facet（turnOwner=null / liveness=none / userTurnKind=null），
+	// 使「直接发出未经 updateSummary 的默认 summary」也自洽。
+	return applySessionFacets({
 		taskId,
 		state: "idle",
 		mode: null,
@@ -107,18 +110,19 @@ export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary 
 		warningMessage: null,
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
-	};
+	});
 }
 
 export function updateSummary(
 	entry: ClineTaskSessionEntry,
 	patch: Partial<RuntimeTaskSessionSummary>,
 ): RuntimeTaskSessionSummary {
-	entry.summary = {
+	// 单一 dual-write 漏斗：合并 patch 后统一 stamp 双轴 facet（与 legacy state 投影可逆）。
+	entry.summary = applySessionFacets({
 		...entry.summary,
 		...patch,
 		updatedAt: now(),
-	};
+	});
 	return cloneSummary(entry.summary);
 }
 

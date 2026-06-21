@@ -269,9 +269,42 @@ export const runtimeTaskSessionModeSchema = z.enum(["act", "plan"]);
 export type RuntimeTaskSessionMode = z.infer<typeof runtimeTaskSessionModeSchema>;
 
 export const runtimeTaskSessionReviewReasonSchema = z
-	.enum(["attention", "exit", "error", "interrupted", "hook"])
+	.enum(["attention", "exit", "error", "interrupted", "hook", "completion"])
 	.nullable();
 export type RuntimeTaskSessionReviewReason = z.infer<typeof runtimeTaskSessionReviewReasonSchema>;
+
+// ── 双轴会话状态 facet（加性、可选）──────────────────────────────────────────────
+// 把一维 `state` 过载的 `running` / `awaiting_review` 拆成三条正交 facet。Stage 1 起与 legacy
+// `state` 并写（dual-write）、保持投影可逆；Stage 2 起翻转为权威、`state` 降为 `projectLegacyState`
+// 派生投影。派生求值/护栏在纯函数真相源 `src/core/session-activity.ts`。
+//
+// 「谁的回合」turnOwner：agent=该 agent 推进；user=等人；null=无会话/无回合。
+export const runtimeTaskSessionTurnOwnerSchema = z.enum(["agent", "user"]).nullable();
+export type RuntimeTaskSessionTurnOwner = z.infer<typeof runtimeTaskSessionTurnOwnerSchema>;
+
+// 「执行活性」liveness（存储基值，事件驱动）：不含派生的 computing/quiet——那是随时间漂移的
+// 派生叠加，绝不落盘/推送（summary 无周期 tick，一写即 stale）。
+//   none=无会话/无回合；starting=spawn 后首条 PTY 输出前；live=活跃存活；
+//   retrying=连接重试（仅由 connectionRetry 投影，不另存）；exited=进程已退仍等人；
+//   failed=spawn 失败；interrupted=被中断。
+export const runtimeTaskSessionLivenessSchema = z.enum([
+	"none",
+	"starting",
+	"live",
+	"retrying",
+	"exited",
+	"failed",
+	"interrupted",
+]);
+export type RuntimeTaskSessionLiveness = z.infer<typeof runtimeTaskSessionLivenessSchema>;
+
+// 「人轴」userTurnKind：仅 turnOwner==="user" 有意义（agent/null 回合恒为 null）；事件置位、
+// 可存储/广播。review=完成待审；question=澄清提问；plan_review=计划待批；permission=权限请求；
+// error=运行错；interrupted=被中断；needs_input=兜底待输入。
+export const runtimeTaskSessionUserTurnKindSchema = z
+	.enum(["review", "question", "plan_review", "permission", "error", "interrupted", "needs_input"])
+	.nullable();
+export type RuntimeTaskSessionUserTurnKind = z.infer<typeof runtimeTaskSessionUserTurnKindSchema>;
 
 export const runtimeTaskHookActivitySchema = z.object({
 	activityText: z.string().nullable().default(null),
@@ -305,7 +338,7 @@ export const runtimeTaskConnectionRetrySchema = z.object({
 });
 export type RuntimeTaskConnectionRetry = z.infer<typeof runtimeTaskConnectionRetrySchema>;
 
-export const runtimeTaskSessionSummarySchema = z.object({
+const runtimeTaskSessionSummaryObjectSchema = z.object({
 	taskId: z.string(),
 	state: runtimeTaskSessionStateSchema,
 	mode: runtimeTaskSessionModeSchema.nullable().optional(),
@@ -323,6 +356,68 @@ export const runtimeTaskSessionSummarySchema = z.object({
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	connectionRetry: runtimeTaskConnectionRetrySchema.nullable().optional(),
+	// 双轴 facet（加性、可选）+ per-session schema 版本。三 facet 共生（要么全置、要么全缺）：
+	// 全缺=未迁移的旧盘数据（Stage 2 读时回填）；全置=经 applySessionFacets 漏斗写入、组合受
+	// 下方 superRefine 护栏约束。schemaVersion 为 per-session 可选字段（不引入文件级包裹、无 flag day）。
+	turnOwner: runtimeTaskSessionTurnOwnerSchema.optional(),
+	liveness: runtimeTaskSessionLivenessSchema.optional(),
+	userTurnKind: runtimeTaskSessionUserTurnKindSchema.optional(),
+	schemaVersion: z.number().int().nonnegative().optional(),
+});
+
+// 不变量护栏：facet 一旦出现即必须三者共生且组合合法（projectLegacyState 才能全函数、可逆）。
+// 旧盘数据（三 facet 全 undefined）直接放行，留给 Stage 2 读时回填。这是双轴「合法组合不由类型
+// 强制」的运行时补偿——与 applySessionFacets 单一构造、projectLegacyState 唯一 reducer 共同收敛。
+// 护栏直接挂在 canonical schema 上，故持久化加载 / 保存请求 / 广播 / tRPC 响应所有校验边界自动硬化。
+const LIVENESS_FOR_AGENT_TURN: readonly RuntimeTaskSessionLiveness[] = ["starting", "live", "retrying"];
+const LIVENESS_FOR_USER_TURN: readonly RuntimeTaskSessionLiveness[] = ["live", "exited", "failed", "interrupted"];
+export const runtimeTaskSessionSummarySchema = runtimeTaskSessionSummaryObjectSchema.superRefine((summary, ctx) => {
+	const anyFacetPresent =
+		summary.turnOwner !== undefined || summary.liveness !== undefined || summary.userTurnKind !== undefined;
+	if (!anyFacetPresent) {
+		return; // 未迁移旧盘数据：无 facet，跳过组合校验
+	}
+	if (summary.turnOwner === undefined || summary.liveness === undefined || summary.userTurnKind === undefined) {
+		ctx.addIssue({
+			code: z.ZodIssueCode.custom,
+			message: "会话 facet 必须三者共生（turnOwner + liveness + userTurnKind 要么全置、要么全缺）",
+		});
+		return;
+	}
+	if (summary.turnOwner === null) {
+		if (summary.liveness !== "none") {
+			ctx.addIssue({ code: z.ZodIssueCode.custom, message: "turnOwner=null（无回合）时 liveness 必须为 none" });
+		}
+		if (summary.userTurnKind !== null) {
+			ctx.addIssue({ code: z.ZodIssueCode.custom, message: "turnOwner=null（无回合）时 userTurnKind 必须为 null" });
+		}
+		return;
+	}
+	if (summary.turnOwner === "agent") {
+		if (summary.userTurnKind !== null) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: "turnOwner=agent（agent 回合）时 userTurnKind 必须为 null",
+			});
+		}
+		if (!LIVENESS_FOR_AGENT_TURN.includes(summary.liveness)) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: `turnOwner=agent 的 liveness 必须 ∈ {${LIVENESS_FOR_AGENT_TURN.join(", ")}}`,
+			});
+		}
+		return;
+	}
+	// turnOwner === "user"
+	if (summary.userTurnKind === null) {
+		ctx.addIssue({ code: z.ZodIssueCode.custom, message: "turnOwner=user（等人）时 userTurnKind 不可为 null" });
+	}
+	if (!LIVENESS_FOR_USER_TURN.includes(summary.liveness)) {
+		ctx.addIssue({
+			code: z.ZodIssueCode.custom,
+			message: `turnOwner=user 的 liveness 必须 ∈ {${LIVENESS_FOR_USER_TURN.join(", ")}}`,
+		});
+	}
 });
 export type RuntimeTaskSessionSummary = z.infer<typeof runtimeTaskSessionSummarySchema>;
 
