@@ -9,8 +9,6 @@ import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { ReviewTaskWorkspaceSnapshot } from "@/types";
 
 let mockWorkspaceSnapshot: ReviewTaskWorkspaceSnapshot | undefined;
-let mockMeasureWidths = [240, 240, 240];
-let mockMeasureCallCount = 0;
 
 vi.mock("@hello-pangea/dnd", () => ({
 	Draggable: ({
@@ -33,47 +31,12 @@ vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => mockWorkspaceSnapshot,
 }));
 
-vi.mock("@/utils/react-use", () => ({
-	useMedia: () => false,
-	useMeasure: () => {
-		mockMeasureCallCount += 1;
-		const width = mockMeasureWidths[(mockMeasureCallCount - 1) % mockMeasureWidths.length] ?? 240;
-		return [
-			() => {},
-			{
-				width,
-				height: 0,
-				top: 0,
-				left: 0,
-				bottom: 0,
-				right: 0,
-				x: 0,
-				y: 0,
-				toJSON: () => ({}),
-			},
-		];
-	},
-}));
-
-vi.mock("@/utils/text-measure", () => ({
-	DEFAULT_TEXT_MEASURE_FONT: "400 14px sans-serif",
-	measureTextWidth: (value: string) => value.length * 8,
-	readElementFontShorthand: () => "400 14px sans-serif",
-}));
-
 vi.mock("@/utils/task-prompt", async () => {
 	const actual = await vi.importActual<typeof import("@/utils/task-prompt")>("@/utils/task-prompt");
 	return {
 		...actual,
 		truncateTaskPromptLabel: (prompt: string) => prompt.split("||")[0]?.trim() ?? "",
 		normalizePromptForDisplay: (value: string) => value.split("||")[0]?.trim() ?? value.trim(),
-		getTaskPromptDescription: (prompt: string, title: string) => {
-			const normalized = prompt.trim();
-			if (!normalized.startsWith(title)) {
-				return normalized;
-			}
-			return normalized.slice(title.length).replace(/^\|\|/, "").trim();
-		},
 	};
 });
 
@@ -115,6 +78,13 @@ function createSummary(
 	};
 }
 
+// React 受控 input：直接赋值不会触发 onChange，需走原生 setter + input 事件。
+function setControlledInputValue(input: HTMLInputElement, value: string): void {
+	const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+	setter?.call(input, value);
+	input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 function Harness(): React.ReactElement {
 	const [card, setCard] = useState(
 		createCard({
@@ -145,8 +115,6 @@ describe("BoardCard", () => {
 
 	beforeEach(() => {
 		mockWorkspaceSnapshot = undefined;
-		mockMeasureWidths = [240, 240, 240];
-		mockMeasureCallCount = 0;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -236,15 +204,63 @@ describe("BoardCard", () => {
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
 	});
 
-	it("shows the archive action on in-progress cards", async () => {
+	it("hides the move-to-validation and move-to-done actions on in-progress cards", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						onMoveToTrash={vi.fn()}
+						onMoveToValidation={vi.fn()}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector('button[aria-label="Move task to done"]')).toBeNull();
+		expect(container.querySelector('button[aria-label="Move task to validation"]')).toBeNull();
+	});
+
+	it("moves review cards to validation from the compact card action", async () => {
+		const onMoveToValidation = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="review" onMoveToValidation={onMoveToValidation} />
+				</TooltipProvider>,
+			);
+		});
+
+		const validationButton = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="Move task to validation"]',
+		);
+		expect(validationButton).toBeInstanceOf(HTMLButtonElement);
+
+		await act(async () => {
+			validationButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			validationButton?.click();
+		});
+
+		expect(onMoveToValidation).toHaveBeenCalledWith("task-1");
+	});
+
+	it("shows only the move-to-done action on validation cards", async () => {
 		const onMoveToTrash = vi.fn();
 
 		await act(async () => {
-			root.render(<BoardCard card={createCard()} index={0} columnId="in_progress" onMoveToTrash={onMoveToTrash} />);
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="validation" onMoveToTrash={onMoveToTrash} />
+				</TooltipProvider>,
+			);
 		});
 
 		const doneButton = container.querySelector<HTMLButtonElement>('button[aria-label="Move task to done"]');
 		expect(doneButton).toBeInstanceOf(HTMLButtonElement);
+		expect(container.querySelector('button[aria-label="Move task to validation"]')).toBeNull();
 
 		await act(async () => {
 			doneButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
@@ -361,42 +377,6 @@ describe("BoardCard", () => {
 		});
 
 		expect(onDependencyPointerDown).not.toHaveBeenCalled();
-	});
-
-	it("shows inline see more and less controls for long descriptions", async () => {
-		const description =
-			"Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau final hidden segment";
-
-		await act(async () => {
-			root.render(
-				<BoardCard card={createCard({ prompt: `Task title||${description}` })} index={0} columnId="backlog" />,
-			);
-		});
-
-		const findButton = (label: string) =>
-			Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.trim() === label);
-
-		const seeMoreButton = findButton("See more");
-		expect(seeMoreButton).toBeDefined();
-		expect(container.textContent).not.toContain("final hidden segment");
-
-		await act(async () => {
-			seeMoreButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-			seeMoreButton?.click();
-		});
-
-		expect(findButton("See more")).toBeUndefined();
-		expect(findButton("Less")).toBeDefined();
-		expect(container.textContent).toContain(description);
-
-		const lessButton = findButton("Less");
-		await act(async () => {
-			lessButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-			lessButton?.click();
-		});
-
-		expect(findButton("See more")).toBeDefined();
-		expect(container.textContent).not.toContain("final hidden segment");
 	});
 
 	it("reconstructs and shows trashed worktree path when workspace metadata is not tracked", async () => {
@@ -644,7 +624,7 @@ describe("BoardCard", () => {
 							toolName: "Read",
 							toolInputSummary: null,
 							finalMessage: null,
-							hookEventName: "PostToolUse",
+							hookEventName: "tool_result",
 							notificationType: null,
 							source: "claude",
 						},
@@ -778,22 +758,6 @@ describe("BoardCard", () => {
 		expect(container.textContent).not.toContain("Thinking...");
 	});
 
-	it("renders a new card description before the async measure observer reports width", async () => {
-		mockMeasureWidths = [0, 0, 0];
-
-		await act(async () => {
-			root.render(
-				<BoardCard
-					card={createCard({ prompt: "Task title||Freshly created task description" })}
-					index={0}
-					columnId="backlog"
-				/>,
-			);
-		});
-
-		expect(container.textContent).toContain("Freshly created task description");
-	});
-
 	it("renders session activity as single-line truncated text on trash cards", async () => {
 		const preview =
 			"Reviewing the archived implementation details and collecting the final notes for the handoff before cleanup hidden tail";
@@ -919,5 +883,116 @@ describe("BoardCard", () => {
 
 		expect(container.textContent).toContain("checking the next file");
 		expect(container.textContent).not.toContain("Agent:");
+	});
+
+	const getTitleParagraph = (container: HTMLElement) =>
+		Array.from(container.querySelectorAll("p")).find(
+			(paragraph) => paragraph.textContent?.trim() === "Review API changes",
+		);
+
+	it("enters title edit mode on double-click for in-progress cards", async () => {
+		await act(async () => {
+			root.render(<BoardCard card={createCard()} index={0} columnId="in_progress" onSaveTitle={() => {}} />);
+		});
+
+		expect(container.querySelector("input")).toBeNull();
+
+		await act(async () => {
+			getTitleParagraph(container)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+		});
+
+		const input = container.querySelector<HTMLInputElement>("input");
+		expect(input).toBeInstanceOf(HTMLInputElement);
+		expect(input?.value).toBe("Review API changes");
+	});
+
+	it("enters title edit mode on double-click for done (trash) cards", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="trash" onSaveTitle={() => {}} />
+				</TooltipProvider>,
+			);
+		});
+
+		await act(async () => {
+			getTitleParagraph(container)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+		});
+
+		expect(container.querySelector("input")).toBeInstanceOf(HTMLInputElement);
+	});
+
+	it("saves the renamed title on Enter after double-click edit", async () => {
+		const onSaveTitle = vi.fn();
+
+		await act(async () => {
+			root.render(<BoardCard card={createCard()} index={0} columnId="review" onSaveTitle={onSaveTitle} />);
+		});
+
+		await act(async () => {
+			getTitleParagraph(container)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+		});
+
+		const input = container.querySelector<HTMLInputElement>("input");
+		expect(input).toBeInstanceOf(HTMLInputElement);
+
+		await act(async () => {
+			input?.focus();
+			if (input) {
+				setControlledInputValue(input, "Renamed via enter");
+			}
+			input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		});
+
+		expect(onSaveTitle).toHaveBeenCalledWith("task-1", "Renamed via enter");
+	});
+
+	it("delays single-click navigation and cancels it on double-click for navigating columns", async () => {
+		vi.useFakeTimers();
+		try {
+			const onClick = vi.fn();
+
+			await act(async () => {
+				root.render(
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						onClick={onClick}
+						onSaveTitle={() => {}}
+					/>,
+				);
+			});
+
+			const shell = container.querySelector<HTMLElement>(".kb-board-card-shell");
+			expect(shell).toBeInstanceOf(HTMLElement);
+
+			// 单击不应立即导航——延迟窗口内挂起。
+			await act(async () => {
+				shell?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+			});
+			expect(onClick).not.toHaveBeenCalled();
+
+			// 推进延迟窗口后才真正导航。
+			await act(async () => {
+				vi.advanceTimersByTime(220);
+			});
+			expect(onClick).toHaveBeenCalledTimes(1);
+
+			onClick.mockClear();
+
+			// 双击：第一击排程后 dblclick 取消之，导航不触发、进入标题编辑。
+			await act(async () => {
+				shell?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+				shell?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+			});
+			await act(async () => {
+				vi.advanceTimersByTime(500);
+			});
+			expect(onClick).not.toHaveBeenCalled();
+			expect(container.querySelector("input")).toBeInstanceOf(HTMLInputElement);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

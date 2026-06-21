@@ -72,6 +72,10 @@ interface HookSnapshot {
 	deleteTaskTarget: BoardCard | null;
 	handleStartTask: (taskId: string) => void;
 	handleCardSelect: (taskId: string) => void;
+	handleMoveReviewCardToTrash: (taskId: string) => void;
+	isMoveToDoneConfirmOpen: boolean;
+	confirmMoveToDone: () => void;
+	cancelMoveToDone: () => void;
 }
 
 function createRect(width: number, height: number): DOMRect {
@@ -146,6 +150,10 @@ function HookHarness({
 			deleteTaskTarget: actions.deleteTaskTarget,
 			handleStartTask: actions.handleStartTask,
 			handleCardSelect: actions.handleCardSelect,
+			handleMoveReviewCardToTrash: actions.handleMoveReviewCardToTrash,
+			isMoveToDoneConfirmOpen: actions.isMoveToDoneConfirmOpen,
+			confirmMoveToDone: actions.confirmMoveToDone,
+			cancelMoveToDone: actions.cancelMoveToDone,
 		});
 	}, [
 		actions.deleteTaskTarget,
@@ -154,6 +162,10 @@ function HookHarness({
 		actions.handleOpenDeleteTask,
 		actions.handleRestoreTaskFromTrash,
 		actions.handleStartTask,
+		actions.handleMoveReviewCardToTrash,
+		actions.isMoveToDoneConfirmOpen,
+		actions.confirmMoveToDone,
+		actions.cancelMoveToDone,
 		onSnapshot,
 	]);
 
@@ -801,5 +813,87 @@ describe("useBoardInteractions", () => {
 		});
 
 		expect(setSelectedTaskId).not.toHaveBeenCalled();
+	});
+
+	it("confirms before moving a review card to Done but moves a validation card directly", async () => {
+		const requestMoveTaskToTrashWithAnimation = vi.fn(async () => {});
+
+		useProgrammaticCardMovesMock.mockReturnValue({
+			handleProgrammaticCardMoveReady: () => {},
+			setRequestMoveTaskToTrashHandler: () => {},
+			tryProgrammaticCardMove: () => "unavailable",
+			consumeProgrammaticCardMove: () => ({}),
+			resolvePendingProgrammaticTrashMove: () => {},
+			waitForProgrammaticCardMoveAvailability: async () => {},
+			resetProgrammaticCardMoves: () => {},
+			requestMoveTaskToTrashWithAnimation,
+			programmaticCardMoveCycle: 0,
+		});
+
+		useLinkedBacklogTaskActionsMock.mockReturnValue({
+			handleCreateDependency: () => {},
+			handleDeleteDependency: () => {},
+			confirmMoveTaskToTrash: async () => {},
+			requestMoveTaskToTrash: async () => {},
+		});
+
+		const board: BoardData = {
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [] },
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [createTask("task-review", "Review task", 1)] },
+				{ id: "validation", title: "Validation", cards: [createTask("task-val", "Validation task", 2)] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					setBoard={vi.fn()}
+					ensureTaskWorkspace={vi.fn(async () => ({
+						ok: true as const,
+						response: { ok: true as const, path: "/tmp/x", baseRef: "main", baseCommit: "abc" },
+					}))}
+					startTaskSession={vi.fn(async () => ({ ok: true as const }))}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const requireSnapshot = (): HookSnapshot => {
+			if (!latestSnapshot) {
+				throw new Error("Expected a hook snapshot.");
+			}
+			return latestSnapshot;
+		};
+
+		// Review → Done opens the confirmation instead of moving immediately.
+		await act(async () => {
+			requireSnapshot().handleMoveReviewCardToTrash("task-review");
+		});
+		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(true);
+		expect(requestMoveTaskToTrashWithAnimation).not.toHaveBeenCalled();
+
+		// Confirming runs the actual move with the review source column.
+		await act(async () => {
+			requireSnapshot().confirmMoveToDone();
+		});
+		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
+		expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-review", "review");
+
+		requestMoveTaskToTrashWithAnimation.mockClear();
+
+		// Validation → Done is the normal completion path: no confirmation, moves directly.
+		await act(async () => {
+			requireSnapshot().handleMoveReviewCardToTrash("task-val");
+		});
+		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
+		expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-val", "validation");
 	});
 });

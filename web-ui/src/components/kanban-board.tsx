@@ -400,30 +400,22 @@ export function KanbanBoard({
 						editingTaskId={column.id === "backlog" ? editingTaskId : null}
 						inlineTaskEditor={column.id === "backlog" ? inlineTaskEditor : undefined}
 						onEditTask={column.id === "backlog" ? onEditTask : undefined}
-						onSaveTitle={column.id !== "trash" ? onSaveTaskTitle : undefined}
+						onSaveTitle={onSaveTaskTitle}
 						onCommitTask={column.id === "review" ? onCommitTask : undefined}
 						onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
 						onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 						onMoveToTrashTask={
-							column.id === "review" || column.id === "in_progress" || column.id === "validation"
-								? onMoveToTrashTask
-								: undefined
+							column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
 						}
-						onMoveToValidationTask={
-							column.id === "review" || column.id === "in_progress" ? onMoveToValidationTask : undefined
-						}
+						onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
 						onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
 						onDeleteTask={onDeleteTask}
 						commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
 						openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
 						moveToTrashLoadingById={
-							column.id === "review" || column.id === "in_progress" || column.id === "validation"
-								? moveToTrashLoadingById
-								: undefined
+							column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
 						}
-						moveToValidationLoadingById={
-							column.id === "review" || column.id === "in_progress" ? moveToValidationLoadingById : undefined
-						}
+						moveToValidationLoadingById={column.id === "review" ? moveToValidationLoadingById : undefined}
 						activeDragTaskId={activeDragTaskId}
 						activeDragSourceColumnId={activeDragSourceColumnId}
 						programmaticCardMoveInFlight={programmaticCardMoveInFlight}

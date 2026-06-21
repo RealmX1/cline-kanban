@@ -10,13 +10,27 @@ vi.mock("@/components/board-card", () => ({
 	BoardCard: ({
 		card,
 		selected,
+		onMoveToTrash,
+		onMoveToValidation,
 	}: {
 		card: { id: string; prompt: string };
 		selected?: boolean;
+		onMoveToTrash?: (taskId: string) => void;
+		onMoveToValidation?: (taskId: string) => void;
 	}): React.ReactElement => {
 		return (
 			<div data-task-id={card.id} data-selected={selected ? "true" : "false"}>
 				{card.prompt}
+				{onMoveToTrash ? (
+					<button type="button" aria-label={`move-to-done-${card.id}`} onClick={() => onMoveToTrash(card.id)} />
+				) : null}
+				{onMoveToValidation ? (
+					<button
+						type="button"
+						aria-label={`move-to-validation-${card.id}`}
+						onClick={() => onMoveToValidation(card.id)}
+					/>
+				) : null}
 			</div>
 		);
 	},
@@ -290,5 +304,56 @@ describe("ColumnContextPanel", () => {
 		});
 
 		expect(onRestoreFromTrashTask).not.toHaveBeenCalled();
+	});
+
+	it("wires the compact move actions per column (review gets both, in_progress none, validation done only)", async () => {
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: [] },
+			{ id: "in_progress", title: "In Progress", cards: [createCard("task-ip", "In progress task")] },
+			{ id: "review", title: "Review", cards: [createCard("task-review", "Review task")] },
+			{ id: "validation", title: "Validation", cards: [createCard("task-val", "Validation task")] },
+			{ id: "trash", title: "Done", cards: [] },
+		];
+		const onMoveToValidationTask = vi.fn();
+		const onMoveToTrashTask = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-review")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+					onMoveToValidationTask={onMoveToValidationTask}
+					onMoveToTrashTask={onMoveToTrashTask}
+				/>,
+			);
+		});
+
+		// Review card: both actions wired.
+		const reviewValidation = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="move-to-validation-task-review"]',
+		);
+		expect(reviewValidation).toBeInstanceOf(HTMLButtonElement);
+		expect(container.querySelector('button[aria-label="move-to-done-task-review"]')).toBeInstanceOf(
+			HTMLButtonElement,
+		);
+		await act(async () => {
+			reviewValidation?.click();
+		});
+		expect(onMoveToValidationTask).toHaveBeenCalledWith("task-review");
+
+		// In Progress card: neither action wired.
+		expect(container.querySelector('button[aria-label="move-to-validation-task-ip"]')).toBeNull();
+		expect(container.querySelector('button[aria-label="move-to-done-task-ip"]')).toBeNull();
+
+		// Validation card: move-to-done wired, move-to-validation not.
+		const validationDone = container.querySelector<HTMLButtonElement>('button[aria-label="move-to-done-task-val"]');
+		expect(validationDone).toBeInstanceOf(HTMLButtonElement);
+		expect(container.querySelector('button[aria-label="move-to-validation-task-val"]')).toBeNull();
+		await act(async () => {
+			validationDone?.click();
+		});
+		expect(onMoveToTrashTask).toHaveBeenCalledWith("task-val");
 	});
 });

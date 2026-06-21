@@ -438,7 +438,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 					baseUrl: request.baseUrl,
 					reasoningEffort: request.reasoningEffort,
 					systemPrompt,
-					userInstructionWatcher: runtimeSetup.watcher,
+					userInstructionService: runtimeSetup.userInstructionService,
 					requestToolApproval: runtimeSetup.requestToolApproval,
 				});
 				const warningMessage = formatStartWarnings(startResult.warnings);
@@ -785,8 +785,11 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 
 	async listSlashCommands(workspacePath: string): Promise<ClineSdkSlashCommand[]> {
 		const runtimeSetup = await this.ensureRuntimeSetup(workspacePath);
-		await runtimeSetup.watcher.refreshAll();
-		return listClineSdkWorkflowSlashCommands(runtimeSetup.watcher);
+		await Promise.all([
+			runtimeSetup.userInstructionService.refreshType("skill"),
+			runtimeSetup.userInstructionService.refreshType("workflow"),
+		]);
+		return listClineSdkWorkflowSlashCommands(runtimeSetup.userInstructionService);
 	}
 
 	async loadTaskSessionMessages(taskId: string): Promise<ClineTaskMessage[]> {
