@@ -204,15 +204,63 @@ describe("BoardCard", () => {
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
 	});
 
-	it("shows the archive action on in-progress cards", async () => {
+	it("hides the move-to-validation and move-to-done actions on in-progress cards", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						onMoveToTrash={vi.fn()}
+						onMoveToValidation={vi.fn()}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector('button[aria-label="Move task to done"]')).toBeNull();
+		expect(container.querySelector('button[aria-label="Move task to validation"]')).toBeNull();
+	});
+
+	it("moves review cards to validation from the compact card action", async () => {
+		const onMoveToValidation = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="review" onMoveToValidation={onMoveToValidation} />
+				</TooltipProvider>,
+			);
+		});
+
+		const validationButton = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="Move task to validation"]',
+		);
+		expect(validationButton).toBeInstanceOf(HTMLButtonElement);
+
+		await act(async () => {
+			validationButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			validationButton?.click();
+		});
+
+		expect(onMoveToValidation).toHaveBeenCalledWith("task-1");
+	});
+
+	it("shows only the move-to-done action on validation cards", async () => {
 		const onMoveToTrash = vi.fn();
 
 		await act(async () => {
-			root.render(<BoardCard card={createCard()} index={0} columnId="in_progress" onMoveToTrash={onMoveToTrash} />);
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="validation" onMoveToTrash={onMoveToTrash} />
+				</TooltipProvider>,
+			);
 		});
 
 		const doneButton = container.querySelector<HTMLButtonElement>('button[aria-label="Move task to done"]');
 		expect(doneButton).toBeInstanceOf(HTMLButtonElement);
+		expect(container.querySelector('button[aria-label="Move task to validation"]')).toBeNull();
 
 		await act(async () => {
 			doneButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));

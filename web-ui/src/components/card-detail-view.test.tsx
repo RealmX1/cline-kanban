@@ -889,14 +889,44 @@ describe("CardDetailView", () => {
 		expect(requireDetailDiffFileTreePanel(container).style.flex).toBe("0 0 18%");
 	});
 
-	it("confirms before moving an in-progress card straight to Done from the focus view", async () => {
+	it("hides the agent-panel Move to Validation / Move to Done actions for in-progress cards", async () => {
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelectionInColumn("in_progress")}
+					currentProjectId="workspace-1"
+					selectedAgentId="cline"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					onMoveToValidation={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		const panelProps = getLastMockFirstArg<{
+			showMoveToTrash?: boolean;
+			showMoveToValidation?: boolean;
+		}>(mockClineAgentChatPanel);
+		expect(panelProps.showMoveToTrash).toBe(false);
+		expect(panelProps.showMoveToValidation).toBe(false);
+	});
+
+	it("forwards the review agent-panel Move to Done to the parent handler (confirmation is centralized)", async () => {
 		const onMoveToTrash = vi.fn();
 		const onMoveToValidation = vi.fn();
 
 		await act(async () => {
 			root.render(
 				<CardDetailView
-					selection={createSelectionInColumn("in_progress")}
+					selection={createSelectionInColumn("review")}
 					currentProjectId="workspace-1"
 					selectedAgentId="cline"
 					sessionSummary={null}
@@ -922,24 +952,12 @@ describe("CardDetailView", () => {
 		expect(panelProps.showMoveToTrash).toBe(true);
 		expect(panelProps.showMoveToValidation).toBe(true);
 
-		// Simulate the footer "Move Card To Done" click — should open the confirm dialog, not move yet.
+		// The confirmation now lives at the App level (driven by useBoardInteractions), so CardDetailView
+		// just forwards the click to the parent handler — no local dialog.
 		await act(async () => {
 			panelProps.onMoveToTrash?.();
 		});
-		expect(document.body.textContent).toContain("Move directly to Done?");
-		expect(onMoveToTrash).not.toHaveBeenCalled();
-
-		const confirmButton = Array.from(document.body.querySelectorAll("button")).find(
-			(button) => button.textContent?.trim() === "Move to Done",
-		);
-		expect(confirmButton).toBeInstanceOf(HTMLButtonElement);
-		if (!(confirmButton instanceof HTMLButtonElement)) {
-			throw new Error("Expected confirm button");
-		}
-
-		await act(async () => {
-			confirmButton.click();
-		});
+		expect(document.body.textContent).not.toContain("Move directly to Done?");
 		expect(onMoveToTrash).toHaveBeenCalledTimes(1);
 	});
 
