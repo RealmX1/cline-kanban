@@ -56,6 +56,8 @@ export interface UseTaskSessionsResult {
 	stopTaskSession: (taskId: string) => Promise<void>;
 	// 手动「立即续跑」：对一组正在连接重试的任务各注入一次续跑。返回实际触发的任务 id。
 	continueConnectionRetrySessions: (taskIds: string[]) => Promise<string[]>;
+	// 手动「移出列表 / 停止重试」：把一组任务从自动续跑重试列表里移出。返回实际移出的任务 id。
+	dismissConnectionRetrySessions: (taskIds: string[]) => Promise<string[]>;
 	sendTaskSessionInput: (
 		taskId: string,
 		text: string,
@@ -228,6 +230,23 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		[currentProjectId],
 	);
 
+	const dismissConnectionRetrySessions = useCallback(
+		async (taskIds: string[]): Promise<string[]> => {
+			if (!currentProjectId || taskIds.length === 0) {
+				return [];
+			}
+			try {
+				const trpcClient = getRuntimeTrpcClient(currentProjectId);
+				const payload = await trpcClient.runtime.dismissConnectionRetrySessions.mutate({ taskIds });
+				return payload.ok ? payload.dismissedTaskIds : [];
+			} catch {
+				// 移出是尽力而为：失败不阻断 UI（后端广播才是 UI 的真相来源）。
+				return [];
+			}
+		},
+		[currentProjectId],
+	);
+
 	const sendTaskSessionInput = useCallback(
 		async (taskId: string, text: string, options?: SendTerminalInputOptions): Promise<SendTaskSessionInputResult> => {
 			const appendNewline = options?.appendNewline ?? true;
@@ -320,6 +339,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		startTaskSession,
 		stopTaskSession,
 		continueConnectionRetrySessions,
+		dismissConnectionRetrySessions,
 		sendTaskSessionInput,
 		sendTaskChatMessage,
 		abortTaskChatTurn,

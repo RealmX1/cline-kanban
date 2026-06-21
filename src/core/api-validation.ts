@@ -14,6 +14,7 @@ import {
 	type RuntimeConfigSaveRequest,
 	type RuntimeContinueConnectionRetrySessionsRequest,
 	type RuntimeDirectoryListRequest,
+	type RuntimeDismissConnectionRetrySessionsRequest,
 	type RuntimeGitCheckoutRequest,
 	type RuntimeHookIngestRequest,
 	type RuntimeProjectAddRequest,
@@ -48,6 +49,7 @@ import {
 	runtimeConfigSaveRequestSchema,
 	runtimeContinueConnectionRetrySessionsRequestSchema,
 	runtimeDirectoryListRequestSchema,
+	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeGitCheckoutRequestSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeProjectAddRequestSchema,
@@ -259,6 +261,19 @@ export function parseContinueConnectionRetrySessionsRequest(
 	const taskIds = parsed.taskIds.map((taskId) => taskId.trim()).filter((taskId) => taskId.length > 0);
 	if (taskIds.length === 0) {
 		throw new Error("Invalid connection-retry continuation payload: no task ids.");
+	}
+	return {
+		taskIds,
+	};
+}
+
+export function parseDismissConnectionRetrySessionsRequest(
+	value: unknown,
+): RuntimeDismissConnectionRetrySessionsRequest {
+	const parsed = parseWithSchema(runtimeDismissConnectionRetrySessionsRequestSchema, value);
+	const taskIds = parsed.taskIds.map((taskId) => taskId.trim()).filter((taskId) => taskId.length > 0);
+	if (taskIds.length === 0) {
+		throw new Error("Invalid connection-retry dismissal payload: no task ids.");
 	}
 	return {
 		taskIds,

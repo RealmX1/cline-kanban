@@ -33,6 +33,7 @@ import {
 	parseClineUpdateProviderRequest,
 	parseCommandRunRequest,
 	parseContinueConnectionRetrySessionsRequest,
+	parseDismissConnectionRetrySessionsRequest,
 	parseRuntimeConfigSaveRequest,
 	parseShellSessionStartRequest,
 	parseTaskChatAbortRequest,
@@ -490,6 +491,24 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				return {
 					ok: false,
 					triggeredTaskIds: [],
+					error: message,
+				};
+			}
+		},
+		dismissConnectionRetrySessions: async (workspaceScope, input) => {
+			try {
+				const body = parseDismissConnectionRetrySessionsRequest(input);
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const dismissedTaskIds = terminalManager.dismissConnectionRetrySessions(body.taskIds);
+				return {
+					ok: true,
+					dismissedTaskIds,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					ok: false,
+					dismissedTaskIds: [],
 					error: message,
 				};
 			}

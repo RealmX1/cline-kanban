@@ -17,6 +17,7 @@ import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
+import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
 import { TaskCreateDialog } from "@/components/task-create-dialog";
 import { TaskInlineCreateCard } from "@/components/task-inline-create-card";
@@ -198,6 +199,7 @@ export default function App(): ReactElement {
 		startTaskSession,
 		stopTaskSession,
 		continueConnectionRetrySessions,
+		dismissConnectionRetrySessions,
 		sendTaskSessionInput,
 		sendTaskChatMessage,
 		cancelTaskChatTurn,
@@ -239,6 +241,13 @@ export default function App(): ReactElement {
 			void continueConnectionRetrySessions(taskIds);
 		},
 		[continueConnectionRetrySessions],
+	);
+
+	const handleDismissConnectionRetrySessions = useCallback(
+		(taskIds: string[]) => {
+			void dismissConnectionRetrySessions(taskIds);
+		},
+		[dismissConnectionRetrySessions],
 	);
 
 	const {
@@ -609,6 +618,9 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		isMoveToDoneConfirmOpen,
+		confirmMoveToDone,
+		cancelMoveToDone,
 		handleMoveCardToValidation,
 		handleMoveSelectedCardToValidation,
 		handleRestoreTaskFromTrash,
@@ -935,6 +947,7 @@ export default function App(): ReactElement {
 						hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
 						connectionRetrySessions={connectionRetrySessions}
 						onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
+						onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 						<div
@@ -1091,6 +1104,7 @@ export default function App(): ReactElement {
 									agentOpenPrTaskLoadingById={agentOpenPrTaskLoadingById}
 									moveToTrashLoadingById={moveToTrashLoadingById}
 									onMoveReviewCardToTrash={handleMoveReviewCardToTrash}
+									onMoveReviewCardToValidation={handleMoveCardToValidation}
 									onRestoreTaskFromTrash={handleRestoreTaskFromTrash}
 									onDeleteTask={handleOpenDeleteTask}
 									onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
@@ -1226,6 +1240,12 @@ export default function App(): ReactElement {
 				/>
 
 				<UpdateNotificationController />
+
+				<SkipValidationConfirmDialog
+					open={isMoveToDoneConfirmOpen}
+					onCancel={cancelMoveToDone}
+					onConfirm={confirmMoveToDone}
+				/>
 
 				<AlertDialog
 					open={gitActionError !== null}

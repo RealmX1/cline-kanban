@@ -33,6 +33,7 @@ function ColumnSection({
 	onCommitTask,
 	onOpenPrTask,
 	onMoveToTrashTask,
+	onMoveToValidationTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
 	commitTaskLoadingById,
@@ -59,6 +60,7 @@ function ColumnSection({
 	onCommitTask?: (taskId: string) => void;
 	onOpenPrTask?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
+	onMoveToValidationTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
@@ -234,6 +236,7 @@ function ColumnSection({
 												selected={card.id === selectedCardId}
 												onStart={onStartTask}
 												onMoveToTrash={onMoveToTrashTask}
+												onMoveToValidation={onMoveToValidationTask}
 												onRestoreFromTrash={onRestoreFromTrashTask}
 												onDeleteTask={onDeleteTask}
 												onCommit={onCommitTask}
@@ -297,6 +300,7 @@ export function ColumnContextPanel({
 	onCommitTask,
 	onOpenPrTask,
 	onMoveToTrashTask,
+	onMoveToValidationTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
 	commitTaskLoadingById,
@@ -320,6 +324,7 @@ export function ColumnContextPanel({
 	onCommitTask?: (taskId: string) => void;
 	onOpenPrTask?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
+	onMoveToValidationTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
@@ -420,12 +425,17 @@ export function ColumnContextPanel({
 							onSaveTitle={onSaveTaskTitle}
 							onCommitTask={column.id === "review" ? onCommitTask : undefined}
 							onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
-							onMoveToTrashTask={column.id === "review" ? onMoveToTrashTask : undefined}
+							onMoveToTrashTask={
+								column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
+							}
+							onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
 							onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
 							onDeleteTask={onDeleteTask}
 							commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
 							openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
-							moveToTrashLoadingById={column.id === "review" ? moveToTrashLoadingById : undefined}
+							moveToTrashLoadingById={
+								column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
+							}
 							activeDragSourceColumnId={activeDragSourceColumnId}
 							workspacePath={workspacePath}
 							defaultClineModelId={defaultClineModelId}

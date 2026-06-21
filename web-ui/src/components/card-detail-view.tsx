@@ -8,7 +8,6 @@ import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/component
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
-import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
@@ -371,6 +370,7 @@ export function CardDetailView({
 	onAgentCommitTask,
 	onAgentOpenPrTask,
 	onMoveReviewCardToTrash,
+	onMoveReviewCardToValidation,
 	onRestoreTaskFromTrash,
 	onDeleteTask,
 	onCancelAutomaticTaskAction,
@@ -432,6 +432,7 @@ export function CardDetailView({
 	onAgentCommitTask?: (taskId: string) => void;
 	onAgentOpenPrTask?: (taskId: string) => void;
 	onMoveReviewCardToTrash?: (taskId: string) => void;
+	onMoveReviewCardToValidation?: (taskId: string) => void;
 	onRestoreTaskFromTrash?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
@@ -492,7 +493,6 @@ export function CardDetailView({
 	const [diffComments, setDiffComments] = useState<Map<string, DiffLineComment>>(new Map());
 	const [diffMode, setDiffMode] = useState<RuntimeWorkspaceChangesMode>("working_copy");
 	const [isDiffExpanded, setIsDiffExpanded] = useState(false);
-	const [isSkipValidationConfirmOpen, setIsSkipValidationConfirmOpen] = useState(false);
 	const {
 		taskCardsPanelRatio,
 		setTaskCardsPanelRatio,
@@ -572,12 +572,10 @@ export function CardDetailView({
 	const detailDiffFileTreePanelPercent = `${(detailDiffFileTreeRatio * 100).toFixed(1)}%`;
 	const detailDiffContentPanelPercent = `${((1 - detailDiffFileTreeRatio) * 100).toFixed(1)}%`;
 	const detailDiffFileTreePanelFlex = `0 0 ${detailDiffFileTreePanelPercent}`;
-	const showMoveToTrashActions =
-		selection.column.id === "review" || selection.column.id === "in_progress" || selection.column.id === "validation";
-	const showMoveToValidationActions = selection.column.id === "review" || selection.column.id === "in_progress";
-	// Moving straight to Done from Review/In Progress skips the manual Validation step, so it
-	// requires confirmation. From Validation, Move to Done is the normal completion path (no confirm).
-	const requiresMoveToDoneConfirm = selection.column.id === "review" || selection.column.id === "in_progress";
+	// In Progress no longer offers Move to Validation / Move to Done from the agent TUI — those
+	// shortcuts only make sense once a task is in Review (or, for Done, already in Validation).
+	const showMoveToTrashActions = selection.column.id === "review" || selection.column.id === "validation";
+	const showMoveToValidationActions = selection.column.id === "review";
 	const isTaskTerminalEnabled =
 		selection.column.id === "in_progress" || selection.column.id === "review" || selection.column.id === "validation";
 	const effectiveTaskAgentId = sessionSummary?.agentId ?? selection.card.agentId ?? selectedAgentId;
@@ -711,19 +709,6 @@ export function CardDetailView({
 
 	const showBottomTerminal = bottomTerminalOpen && !!bottomTerminalTaskId;
 
-	const handleRequestMoveToTrash = useCallback(() => {
-		if (requiresMoveToDoneConfirm) {
-			setIsSkipValidationConfirmOpen(true);
-			return;
-		}
-		onMoveToTrash();
-	}, [requiresMoveToDoneConfirm, onMoveToTrash]);
-
-	const handleConfirmMoveToTrash = useCallback(() => {
-		setIsSkipValidationConfirmOpen(false);
-		onMoveToTrash();
-	}, [onMoveToTrash]);
-
 	const agentChatPanel = showClineAgentChatPanel ? (
 		<ClineAgentChatPanel
 			ref={clineAgentChatPanelRef}
@@ -748,7 +733,7 @@ export function CardDetailView({
 			isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
 			isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
 			showMoveToTrash={showMoveToTrashActions}
-			onMoveToTrash={handleRequestMoveToTrash}
+			onMoveToTrash={onMoveToTrash}
 			isMoveToTrashLoading={isMoveToTrashLoading}
 			showMoveToValidation={showMoveToValidationActions}
 			onMoveToValidation={onMoveToValidation}
@@ -778,7 +763,7 @@ export function CardDetailView({
 			showSessionToolbar={false}
 			autoFocus
 			showMoveToTrash={showMoveToTrashActions}
-			onMoveToTrash={handleRequestMoveToTrash}
+			onMoveToTrash={onMoveToTrash}
 			isMoveToTrashLoading={isMoveToTrashLoading}
 			showMoveToValidation={showMoveToValidationActions}
 			onMoveToValidation={onMoveToValidation}
@@ -797,14 +782,6 @@ export function CardDetailView({
 			terminalBackgroundColor={terminalThemeColors.surfacePrimary}
 			cursorColor={terminalThemeColors.textPrimary}
 			taskColumnId={selection.column.id}
-		/>
-	);
-
-	const skipValidationConfirmDialog = (
-		<SkipValidationConfirmDialog
-			open={isSkipValidationConfirmOpen}
-			onCancel={() => setIsSkipValidationConfirmOpen(false)}
-			onConfirm={handleConfirmMoveToTrash}
 		/>
 	);
 
@@ -898,7 +875,6 @@ export function CardDetailView({
 						</div>
 					) : null}
 				</div>
-				{skipValidationConfirmDialog}
 			</div>
 		);
 	}
@@ -925,6 +901,7 @@ export function CardDetailView({
 							onCommitTask={onCommitTask}
 							onOpenPrTask={onOpenPrTask}
 							onMoveToTrashTask={onMoveReviewCardToTrash}
+							onMoveToValidationTask={onMoveReviewCardToValidation}
 							onRestoreFromTrashTask={onRestoreTaskFromTrash}
 							onDeleteTask={onDeleteTask}
 							commitTaskLoadingById={commitTaskLoadingById}
@@ -1051,7 +1028,6 @@ export function CardDetailView({
 					</>
 				)}
 			</div>
-			{skipValidationConfirmDialog}
 		</div>
 	);
 }

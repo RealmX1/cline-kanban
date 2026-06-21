@@ -168,4 +168,34 @@ describe("connection-drop-auto-continue reaction", () => {
 		reaction.triggerNow(ctx(1_000), state, actions);
 		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
 	});
+
+	it("dismiss ends the episode (clears retry state, stops timers, no injection)", () => {
+		const { actions } = createMockActions();
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		expect(actions.setConnectionRetryState).toHaveBeenCalledTimes(1);
+		reaction.dismiss(ctx(2_000), state, actions);
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+		expect(actions.clearConnectionRetryState).toHaveBeenCalledTimes(1);
+		expect(actions.clearScheduledAttempts).toHaveBeenCalled();
+		// 移出后退避定时器再触发也不应注入（episode 已结束）。
+		reaction.onAttempt(ctx(10_000), state, actions);
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+	});
+
+	it("dismiss is a no-op when not in a retry episode", () => {
+		const { actions } = createMockActions();
+		reaction.dismiss(ctx(1_000), state, actions);
+		expect(actions.clearConnectionRetryState).not.toHaveBeenCalled();
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+	});
+
+	it("soft dismiss: a new transient error after dismiss re-arms a fresh episode", () => {
+		const { actions, retryPatches } = createMockActions();
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		reaction.dismiss(ctx(2_000), state, actions);
+		// 新的瞬时连接错误（移出之后）应重新进入一次新 episode。
+		reaction.onOutput(ctx(60_000, CLAUDE_ERROR_LINE), state, actions);
+		expect(actions.setConnectionRetryState).toHaveBeenCalledTimes(2);
+		expect(retryPatches.at(-1)).toMatchObject({ status: "retrying", retryCount: 0 });
+	});
 });

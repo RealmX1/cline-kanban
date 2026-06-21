@@ -85,6 +85,9 @@ export interface UseBoardInteractionsResult {
 	handleCardSelect: (taskId: string) => void;
 	handleMoveToTrash: () => void;
 	handleMoveReviewCardToTrash: (taskId: string) => void;
+	isMoveToDoneConfirmOpen: boolean;
+	confirmMoveToDone: () => void;
+	cancelMoveToDone: () => void;
 	handleMoveCardToValidation: (taskId: string) => void;
 	handleMoveSelectedCardToValidation: () => void;
 	handleRestoreTaskFromTrash: (taskId: string) => void;
@@ -129,6 +132,12 @@ export function useBoardInteractions({
 		Record<string, PendingProgrammaticStartMoveCompletion>
 	>({});
 	const [moveToTrashLoadingById, setMoveToTrashLoadingById] = useState<Record<string, boolean>>({});
+	// Pending "Move to Done" awaiting confirmation. Set whenever a move would skip the manual
+	// Validation step (from Review / In Progress); the App-level SkipValidationConfirmDialog reads
+	// this to open, and confirm/cancel resolve it. null = no confirmation in flight.
+	const [pendingMoveToDone, setPendingMoveToDone] = useState<{ taskId: string; fromColumnId: BoardColumnId } | null>(
+		null,
+	);
 	const [deleteTaskTarget, setDeleteTaskTarget] = useState<BoardCard | null>(null);
 	const {
 		handleProgrammaticCardMoveReady,
@@ -764,35 +773,62 @@ export function useBoardInteractions({
 		[board, setIsGitHistoryOpen, setSelectedTaskId],
 	);
 
-	const handleMoveToTrash = useCallback(() => {
-		if (!selectedCard) {
-			return;
-		}
-		if (moveToTrashLoadingByIdRef.current[selectedCard.card.id]) {
-			return;
-		}
-		setTaskMoveToTrashLoading(selectedCard.card.id, true);
-		void requestMoveTaskToTrashWithAnimation(selectedCard.card.id, selectedCard.column.id).finally(() => {
-			setTaskMoveToTrashLoading(selectedCard.card.id, false);
-		});
-	}, [requestMoveTaskToTrashWithAnimation, selectedCard, setTaskMoveToTrashLoading]);
-
-	const handleMoveReviewCardToTrash = useCallback(
-		(taskId: string) => {
+	// Actually perform the move to Done. Pass the card's source column so the Review→Done slide
+	// animation only runs for Review cards and other columns fall back to a direct trash move.
+	const performMoveToTrash = useCallback(
+		(taskId: string, fromColumnId: BoardColumnId) => {
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
 				return;
 			}
-			// Compact "Move to done" fires from Review, In Progress, and Validation cards. Pass the
-			// card's actual column so the Review→Done slide animation only runs for Review cards and
-			// the other columns fall back to a direct trash move.
-			const fromColumnId = getTaskColumnId(board, taskId) ?? "review";
 			setTaskMoveToTrashLoading(taskId, true);
 			void requestMoveTaskToTrashWithAnimation(taskId, fromColumnId).finally(() => {
 				setTaskMoveToTrashLoading(taskId, false);
 			});
 		},
-		[board, requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
+		[requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
 	);
+
+	// Single entry point for every "Move to Done" trigger (board card, detail sidebar card, agent
+	// TUI bottom button). Moving straight to Done from Review / In Progress skips the manual
+	// Validation step, so it requires confirmation; from Validation it is the normal completion path.
+	const requestMoveToTrash = useCallback(
+		(taskId: string, fromColumnId: BoardColumnId) => {
+			if (moveToTrashLoadingByIdRef.current[taskId]) {
+				return;
+			}
+			if (fromColumnId === "review" || fromColumnId === "in_progress") {
+				setPendingMoveToDone({ taskId, fromColumnId });
+				return;
+			}
+			performMoveToTrash(taskId, fromColumnId);
+		},
+		[performMoveToTrash],
+	);
+
+	const handleMoveToTrash = useCallback(() => {
+		if (!selectedCard) {
+			return;
+		}
+		requestMoveToTrash(selectedCard.card.id, selectedCard.column.id);
+	}, [requestMoveToTrash, selectedCard]);
+
+	const handleMoveReviewCardToTrash = useCallback(
+		(taskId: string) => {
+			requestMoveToTrash(taskId, getTaskColumnId(board, taskId) ?? "review");
+		},
+		[board, requestMoveToTrash],
+	);
+
+	const confirmMoveToDone = useCallback(() => {
+		if (pendingMoveToDone) {
+			performMoveToTrash(pendingMoveToDone.taskId, pendingMoveToDone.fromColumnId);
+		}
+		setPendingMoveToDone(null);
+	}, [pendingMoveToDone, performMoveToTrash]);
+
+	const cancelMoveToDone = useCallback(() => {
+		setPendingMoveToDone(null);
+	}, []);
 
 	// Pure board move into the manual-validation buffer. No session stop, no worktree teardown —
 	// the developer keeps the running agent/diff while validating. Persisted automatically via
@@ -1020,6 +1056,9 @@ export function useBoardInteractions({
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		isMoveToDoneConfirmOpen: pendingMoveToDone !== null,
+		confirmMoveToDone,
+		cancelMoveToDone,
 		handleMoveCardToValidation,
 		handleMoveSelectedCardToValidation,
 		handleRestoreTaskFromTrash,

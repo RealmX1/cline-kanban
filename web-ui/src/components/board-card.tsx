@@ -670,7 +670,7 @@ export function BoardCard({
 										/>
 									</Tooltip>
 								) : null}
-								{columnId === "review" || columnId === "in_progress" ? (
+								{columnId === "review" ? (
 									<Tooltip side="bottom" content="Move to validation">
 										<Button
 											icon={isMoveToValidationLoading ? <Spinner size={12} /> : <ClipboardCheck size={12} />}
@@ -686,7 +686,7 @@ export function BoardCard({
 										/>
 									</Tooltip>
 								) : null}
-								{columnId === "review" || columnId === "in_progress" || columnId === "validation" ? (
+								{columnId === "review" || columnId === "validation" ? (
 									<Tooltip side="bottom" content="Move to done">
 										<Button
 											icon={isMoveToTrashLoading ? <Spinner size={12} /> : <Archive size={12} />}

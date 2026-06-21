@@ -67,6 +67,9 @@ export interface OutputReaction {
 	onAttempt(ctx: OutputReactionContext, state: unknown, actions: OutputReactionActions): void;
 	// 手动「立即续跑」：忽略退避、强制注入一次（仍尊重提示符就绪 / 抑制条件）。
 	triggerNow(ctx: OutputReactionContext, state: unknown, actions: OutputReactionActions): void;
+	// 手动「移出列表 / 停止重试」：立即结束当前 episode（清定时器 + 清 UI 重连状态，不注入）。
+	// 软移除——若之后再检测到新的瞬时连接错误，仍会重新进入一次新 episode。
+	dismiss(ctx: OutputReactionContext, state: unknown, actions: OutputReactionActions): void;
 }
 
 interface ActiveReaction {
@@ -85,6 +88,11 @@ export interface OutputReactionEngine {
 	onOutput(ctx: OutputReactionContext, session: OutputReactionSessionState, actions: OutputReactionActions): void;
 	onAttempt(ctx: OutputReactionContext, session: OutputReactionSessionState, actions: OutputReactionActions): void;
 	triggerContinueNow(
+		ctx: OutputReactionContext,
+		session: OutputReactionSessionState,
+		actions: OutputReactionActions,
+	): void;
+	triggerDismiss(
 		ctx: OutputReactionContext,
 		session: OutputReactionSessionState,
 		actions: OutputReactionActions,
@@ -115,6 +123,11 @@ export function createOutputReactionEngine(reactions: readonly OutputReaction[])
 		triggerContinueNow(ctx, session, actions) {
 			for (const active of session.reactions) {
 				active.reaction.triggerNow(ctx, active.state, actions);
+			}
+		},
+		triggerDismiss(ctx, session, actions) {
+			for (const active of session.reactions) {
+				active.reaction.dismiss(ctx, active.state, actions);
 			}
 		},
 	};

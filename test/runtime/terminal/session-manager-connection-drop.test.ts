@@ -209,4 +209,37 @@ describe("session-manager · connection-drop auto-continue", () => {
 
 		manager.stopTaskSession("task-conn-drop-manual");
 	});
+
+	it("manual dismiss removes a retrying session from the list without injecting", async () => {
+		const getSession = spawnManagerWithSession(1006);
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-conn-drop-dismiss",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-conn-drop-dismiss",
+			prompt: "Do the task",
+		});
+		const session = getSession();
+		const write = (session as NonNullable<typeof session>).write;
+
+		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		expect(manager.getSummary("task-conn-drop-dismiss")?.connectionRetry?.status).toBe("retrying");
+
+		// 手动移出列表：结束 episode、清重连状态、不注入。
+		const dismissed = manager.dismissConnectionRetrySessions(["task-conn-drop-dismiss"]);
+		expect(dismissed).toEqual(["task-conn-drop-dismiss"]);
+		expect(manager.getSummary("task-conn-drop-dismiss")?.connectionRetry ?? null).toBeNull();
+
+		// 移出后退避定时器再触发也不应注入（episode 已结束、定时器已清）。
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(write).not.toHaveBeenCalled();
+
+		// 不在重试列表里的任务 id 不应被移出。
+		const none = manager.dismissConnectionRetrySessions(["nonexistent-task"]);
+		expect(none).toEqual([]);
+
+		manager.stopTaskSession("task-conn-drop-dismiss");
+	});
 });

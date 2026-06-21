@@ -533,6 +533,34 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return triggered;
 	}
 
+	// 手动「移出列表 / 停止重试」：对指定任务（若仍在连接重试）结束 episode、清除重连状态。
+	// 软移除——之后若再检测到新的瞬时连接错误，仍会重新进入一次新 episode。
+	// 返回实际被移出的任务 id（命中且正在重试的）。
+	dismissConnectionRetrySessions(taskIds: readonly string[]): string[] {
+		const dismissed: string[] = [];
+		for (const taskId of taskIds) {
+			const entry = this.entries.get(taskId);
+			const active = entry?.active;
+			if (!entry || !active || active.outputReactionEngine === null || active.outputReactionSession === null) {
+				continue;
+			}
+			if ((entry.summary.connectionRetry ?? null) === null) {
+				continue;
+			}
+			const ctx = this.buildOutputReactionContext(entry, "");
+			if (ctx === null) {
+				continue;
+			}
+			active.outputReactionEngine.triggerDismiss(
+				ctx,
+				active.outputReactionSession,
+				this.buildOutputReactionActions(taskId),
+			);
+			dismissed.push(taskId);
+		}
+		return dismissed;
+	}
+
 	// 当前正处于连接重试的任务 id 列表（summary.connectionRetry 非空）。
 	listConnectionRetryTaskIds(): string[] {
 		const ids: string[] = [];
