@@ -364,6 +364,45 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.shouldInspectOutputForTransition?.(hookSummary)).toBe(false);
 	});
 
+	it("采信显式 facet：exited（进程已退仍等人审）的 attention 会话仍探测 prompt-ready", async () => {
+		// Stage 3：detector 门控从 legacy `state==="awaiting_review"` 翻为 facet 真相源
+		// isAwaitingUserReviewTurn。本例显式带 facet（turnOwner=user/liveness=exited），验证：
+		//   ① 被直接采信（不回退 legacy 派生）；
+		//   ② exited 与 live 折叠为同一「等人审」分支（live↔exited 不敏感，无 distinction ② 偷渡）——
+		//      进程已退但仍 reviewReason==="attention" 的会话照旧探测 prompt-ready。
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-exited-attention",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Implement the task",
+		});
+
+		const exitedAttentionSummary: RuntimeTaskSessionSummary = {
+			taskId: "task-claude-exited-attention",
+			state: "awaiting_review",
+			agentId: "claude",
+			workspacePath: "/tmp",
+			pid: null,
+			startedAt: Date.now(),
+			updatedAt: Date.now(),
+			lastOutputAt: Date.now(),
+			reviewReason: "attention",
+			exitCode: 0,
+			lastHookAt: null,
+			latestHookActivity: null,
+			turnOwner: "user",
+			liveness: "exited",
+			userTurnKind: "needs_input",
+		};
+
+		const promptReady = launch.detectOutputTransition?.("╭──────────────────────╮", exitedAttentionSummary) ?? null;
+		expect(promptReady).toEqual({ type: "agent.prompt-ready" });
+		expect(launch.shouldInspectOutputForTransition?.(exitedAttentionSummary)).toBe(true);
+	});
+
 	it("does not duplicate an explicit Codex no-alt-screen flag", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({

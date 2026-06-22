@@ -220,6 +220,17 @@ export function isSessionInActiveTurn(facets: SessionFacets): boolean {
 	return facets.turnOwner !== null && facets.liveness !== "failed" && facets.liveness !== "interrupted";
 }
 
+// 决策型「会话处于等人审查回合」判据（facet 权威）。严格等价于 legacy `state==="awaiting_review"`：
+// user 回合（turnOwner==="user"）且未落终止态（failed/interrupted）——即 user 回合的活跃态。
+//   - 等价于 projectLegacyState(facets)==="awaiting_review"；全表证明见 session-facets.test.ts。
+//   - 涵盖 user+live 与 user+exited（旧 projectLegacyState 把两者压扁为 awaiting_review），故对
+//     live↔exited 不敏感，凡读它的消费者迁移皆为零行为漂移、且不会偷渡 distinction ②。
+//   - 单一真相源：项目计数叠加、claude/codex prompt-ready 检测器等共用本判据，避免各自手写
+//     `turnOwner==="user" && liveness∉{failed,interrupted}` 子集（计划反对的「每消费者维护子集」反模式）。
+export function isAwaitingUserReviewTurn(facets: SessionFacets): boolean {
+	return facets.turnOwner === "user" && isSessionInActiveTurn(facets);
+}
+
 // ── 展示叠加：把存储基值 liveness 的 "live" 按新鲜度细分为 computing / quiet ──────────────
 // 双轴模型里 computing（仍在产出）/ quiet（活着但静默）是「随时间漂移的派生叠加」，故意不进存储/
 // 不进 superRefine 枚举（summary 只在事件时广播、无周期 tick，存它一写即 stale）。本函数即计划所称

@@ -11,6 +11,7 @@ import {
 	applySessionFacets,
 	deriveSessionFacetsFromLegacyState,
 	deriveUserTurnKind,
+	isAwaitingUserReviewTurn,
 	isSessionInActiveTurn,
 	projectLegacyState,
 	resolveSessionFacets,
@@ -444,5 +445,40 @@ describe("isSessionInActiveTurn（facet 版活跃判据，零行为漂移）", (
 		expect(isSessionInActiveTurn({ turnOwner: "user", liveness: "interrupted", userTurnKind: "interrupted" })).toBe(
 			false,
 		);
+	});
+});
+
+describe("isAwaitingUserReviewTurn（facet 版等人审判据，零行为漂移）", () => {
+	it("全 state×pid×retry×reviewReason：与旧 state==='awaiting_review' 逐项等价", () => {
+		for (const state of ALL_STATES) {
+			for (const pid of [null, 123] as const) {
+				for (const connectionRetryActive of [false, true] as const) {
+					for (const reviewReason of ALL_REVIEW_REASONS) {
+						const facets = deriveSessionFacetsFromLegacyState(state, {
+							reviewReason,
+							pid,
+							connectionRetryActive,
+						});
+						expect(isAwaitingUserReviewTurn(facets)).toBe(state === "awaiting_review");
+						// 等价于 projectLegacyState 反投影（单一 reducer 自洽）。
+						expect(isAwaitingUserReviewTurn(facets)).toBe(projectLegacyState(facets) === "awaiting_review");
+					}
+				}
+			}
+		}
+	});
+
+	it("user+live 与 user+exited 同判 true（live↔exited 折叠，无 distinction ② 偷渡）", () => {
+		expect(isAwaitingUserReviewTurn({ turnOwner: "user", liveness: "live", userTurnKind: "review" })).toBe(true);
+		expect(isAwaitingUserReviewTurn({ turnOwner: "user", liveness: "exited", userTurnKind: "review" })).toBe(true);
+	});
+
+	it("agent 回合 / idle / failed / interrupted → 非等人审", () => {
+		expect(isAwaitingUserReviewTurn({ turnOwner: "agent", liveness: "live", userTurnKind: null })).toBe(false);
+		expect(isAwaitingUserReviewTurn({ turnOwner: null, liveness: "none", userTurnKind: null })).toBe(false);
+		expect(isAwaitingUserReviewTurn({ turnOwner: "user", liveness: "failed", userTurnKind: "error" })).toBe(false);
+		expect(
+			isAwaitingUserReviewTurn({ turnOwner: "user", liveness: "interrupted", userTurnKind: "interrupted" }),
+		).toBe(false);
 	});
 });

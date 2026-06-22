@@ -10,6 +10,7 @@ import type {
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
 import { buildKanbanCommandParts } from "../core/kanban-command";
+import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
 import { quoteShellArg } from "../core/shell";
 import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { lockedFileSystem } from "../fs/locked-file-system";
@@ -775,7 +776,8 @@ const claudeAdapter: AgentSessionAdapter = {
 };
 
 function claudePromptDetector(data: string, summary: RuntimeTaskSessionSummary): SessionTransitionEvent | null {
-	if (summary.state !== "awaiting_review") {
+	// 旧门控 `state==="awaiting_review"` → facet 真相源（行为保持，见 isAwaitingUserReviewTurn 注释）。
+	if (!isAwaitingUserReviewTurn(resolveSessionFacets(summary))) {
 		return null;
 	}
 	// 仅在 reviewReason === "attention" 时根据 TUI 输出回到 running。
@@ -796,11 +798,12 @@ function claudePromptDetector(data: string, summary: RuntimeTaskSessionSummary):
 function shouldInspectClaudeOutputForTransition(summary: RuntimeTaskSessionSummary): boolean {
 	// 与 claudePromptDetector 保持一致：仅在 reviewReason === "attention" 时才需要解码
 	// 输出来探测 prompt-ready 转移。
-	return summary.state === "awaiting_review" && summary.reviewReason === "attention";
+	return isAwaitingUserReviewTurn(resolveSessionFacets(summary)) && summary.reviewReason === "attention";
 }
 
 function codexPromptDetector(data: string, summary: RuntimeTaskSessionSummary): SessionTransitionEvent | null {
-	if (summary.state !== "awaiting_review") {
+	// 旧门控 `state==="awaiting_review"` → facet 真相源（行为保持，见 isAwaitingUserReviewTurn 注释）。
+	if (!isAwaitingUserReviewTurn(resolveSessionFacets(summary))) {
 		return null;
 	}
 	if (summary.reviewReason !== "attention" && summary.reviewReason !== "hook") {
@@ -815,7 +818,7 @@ function codexPromptDetector(data: string, summary: RuntimeTaskSessionSummary): 
 
 function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummary): boolean {
 	return (
-		summary.state === "awaiting_review" &&
+		isAwaitingUserReviewTurn(resolveSessionFacets(summary)) &&
 		(summary.reviewReason === "attention" || summary.reviewReason === "hook" || summary.reviewReason === "error")
 	);
 }
