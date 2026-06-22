@@ -1,4 +1,8 @@
 import { z } from "zod";
+// Stage 4 全写侧反转：facet 为写时主真相源，`state` 降为 projectLegacyState(facets) 派生投影。
+// bundle-safe：session-activity 是零 Node 依赖的纯函数模块，其对 api-contract 仅 type-only import
+// （编译期擦除），故二者无运行时循环；本处取值 import 不会把任何 Node 依赖拖进浏览器 bundle。
+import { projectLegacyState } from "./session-activity.js";
 import { resolveTaskTitle } from "./task-title.js";
 
 export const runtimeWorkspaceFileStatusSchema = z.enum([
@@ -340,7 +344,9 @@ export type RuntimeTaskConnectionRetry = z.infer<typeof runtimeTaskConnectionRet
 
 const runtimeTaskSessionSummaryObjectSchema = z.object({
 	taskId: z.string(),
-	state: runtimeTaskSessionStateSchema,
+	// Stage 4 全写侧反转：`state` 降为派生投影 → 输入可选（facet-only 写不带 state）；末位 .transform
+	// 从 facet 投影回 state，使输出型 state 仍为 required（消费者类型不破，见下方 transform）。
+	state: runtimeTaskSessionStateSchema.optional(),
 	mode: runtimeTaskSessionModeSchema.nullable().optional(),
 	agentId: runtimeAgentIdSchema.nullable(),
 	workspacePath: z.string().nullable(),
@@ -371,54 +377,83 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 // 护栏直接挂在 canonical schema 上，故持久化加载 / 保存请求 / 广播 / tRPC 响应所有校验边界自动硬化。
 const LIVENESS_FOR_AGENT_TURN: readonly RuntimeTaskSessionLiveness[] = ["starting", "live", "retrying"];
 const LIVENESS_FOR_USER_TURN: readonly RuntimeTaskSessionLiveness[] = ["live", "exited", "failed", "interrupted"];
-export const runtimeTaskSessionSummarySchema = runtimeTaskSessionSummaryObjectSchema.superRefine((summary, ctx) => {
-	const anyFacetPresent =
-		summary.turnOwner !== undefined || summary.liveness !== undefined || summary.userTurnKind !== undefined;
-	if (!anyFacetPresent) {
-		return; // 未迁移旧盘数据：无 facet，跳过组合校验
-	}
-	if (summary.turnOwner === undefined || summary.liveness === undefined || summary.userTurnKind === undefined) {
-		ctx.addIssue({
-			code: z.ZodIssueCode.custom,
-			message: "会话 facet 必须三者共生（turnOwner + liveness + userTurnKind 要么全置、要么全缺）",
-		});
-		return;
-	}
-	if (summary.turnOwner === null) {
-		if (summary.liveness !== "none") {
-			ctx.addIssue({ code: z.ZodIssueCode.custom, message: "turnOwner=null（无回合）时 liveness 必须为 none" });
-		}
-		if (summary.userTurnKind !== null) {
-			ctx.addIssue({ code: z.ZodIssueCode.custom, message: "turnOwner=null（无回合）时 userTurnKind 必须为 null" });
-		}
-		return;
-	}
-	if (summary.turnOwner === "agent") {
-		if (summary.userTurnKind !== null) {
+export const runtimeTaskSessionSummarySchema = runtimeTaskSessionSummaryObjectSchema
+	.superRefine((summary, ctx) => {
+		const allFacetsPresent =
+			summary.turnOwner !== undefined && summary.liveness !== undefined && summary.userTurnKind !== undefined;
+		// Stage 4 反转护栏：`state` 缺失（facet-only 写）时三 facet 必须全置——否则末位 transform 无从
+		// 投影出 legacy state。旧盘数据恒带 state、新写恒带完整 facet，故二者皆放行；唯「既无 state、
+		// facet 又不全」的畸形 summary 被拒。
+		if (summary.state === undefined && !allFacetsPresent) {
 			ctx.addIssue({
 				code: z.ZodIssueCode.custom,
-				message: "turnOwner=agent（agent 回合）时 userTurnKind 必须为 null",
+				message: "state 缺失（facet 写时主真相源）时 turnOwner + liveness + userTurnKind 必须三者全置",
 			});
+			return;
 		}
-		if (!LIVENESS_FOR_AGENT_TURN.includes(summary.liveness)) {
+		const anyFacetPresent =
+			summary.turnOwner !== undefined || summary.liveness !== undefined || summary.userTurnKind !== undefined;
+		if (!anyFacetPresent) {
+			return; // 未迁移旧盘数据：无 facet，跳过组合校验
+		}
+		if (summary.turnOwner === undefined || summary.liveness === undefined || summary.userTurnKind === undefined) {
 			ctx.addIssue({
 				code: z.ZodIssueCode.custom,
-				message: `turnOwner=agent 的 liveness 必须 ∈ {${LIVENESS_FOR_AGENT_TURN.join(", ")}}`,
+				message: "会话 facet 必须三者共生（turnOwner + liveness + userTurnKind 要么全置、要么全缺）",
+			});
+			return;
+		}
+		if (summary.turnOwner === null) {
+			if (summary.liveness !== "none") {
+				ctx.addIssue({ code: z.ZodIssueCode.custom, message: "turnOwner=null（无回合）时 liveness 必须为 none" });
+			}
+			if (summary.userTurnKind !== null) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: "turnOwner=null（无回合）时 userTurnKind 必须为 null",
+				});
+			}
+			return;
+		}
+		if (summary.turnOwner === "agent") {
+			if (summary.userTurnKind !== null) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: "turnOwner=agent（agent 回合）时 userTurnKind 必须为 null",
+				});
+			}
+			if (!LIVENESS_FOR_AGENT_TURN.includes(summary.liveness)) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: `turnOwner=agent 的 liveness 必须 ∈ {${LIVENESS_FOR_AGENT_TURN.join(", ")}}`,
+				});
+			}
+			return;
+		}
+		// turnOwner === "user"
+		if (summary.userTurnKind === null) {
+			ctx.addIssue({ code: z.ZodIssueCode.custom, message: "turnOwner=user（等人）时 userTurnKind 不可为 null" });
+		}
+		if (!LIVENESS_FOR_USER_TURN.includes(summary.liveness)) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: `turnOwner=user 的 liveness 必须 ∈ {${LIVENESS_FOR_USER_TURN.join(", ")}}`,
 			});
 		}
-		return;
-	}
-	// turnOwner === "user"
-	if (summary.userTurnKind === null) {
-		ctx.addIssue({ code: z.ZodIssueCode.custom, message: "turnOwner=user（等人）时 userTurnKind 不可为 null" });
-	}
-	if (!LIVENESS_FOR_USER_TURN.includes(summary.liveness)) {
-		ctx.addIssue({
-			code: z.ZodIssueCode.custom,
-			message: `turnOwner=user 的 liveness 必须 ∈ {${LIVENESS_FOR_USER_TURN.join(", ")}}`,
-		});
-	}
-});
+	})
+	.transform((summary) => {
+		// state 缺（facet 写时主真相源、facet-only 写）→ 从三 facet 投影回 legacy state；已带 state
+		// （旧盘数据 / state 权威写）→ 原样保留。恒返回 state 恒赋值的单一对象字面量（勿条件 spread），
+		// 故 z.infer 输出型 `state` 仍为 required——消费者类型不破。
+		const state =
+			summary.state ??
+			projectLegacyState({
+				turnOwner: summary.turnOwner ?? null,
+				liveness: summary.liveness ?? "none",
+				userTurnKind: summary.userTurnKind ?? null,
+			});
+		return { ...summary, state };
+	});
 export type RuntimeTaskSessionSummary = z.infer<typeof runtimeTaskSessionSummarySchema>;
 
 export const runtimeWorkspaceStateResponseSchema = z.object({

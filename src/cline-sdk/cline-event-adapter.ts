@@ -2,18 +2,21 @@
 // Keep protocol-specific parsing here so the runtime and repository can stay
 // focused on lifecycle, storage, and task-facing orchestration.
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
+import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
+import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
 import {
 	appendAssistantChunk,
 	appendReasoningChunk,
 	type ClineTaskMessage,
 	type ClineTaskSessionEntry,
 	canReturnToRunning,
+	classifyClineUserAttentionTool,
 	clearActiveTurnState,
 	createAssistantMessage,
 	createMessage,
 	createReasoningMessage,
+	deriveClineFacetPatch,
 	finishToolCallMessage,
-	isClineUserAttentionTool,
 	isCreditLimitError,
 	latestAssistantMessageMatches,
 	now,
@@ -167,7 +170,7 @@ function emitAssistantTextSummary(input: ApplyClineSessionEventInput, text: stri
 	const previewText = toPreviewText(fullPreviewText);
 	const retainedToolActivity = getRetainedClineToolActivity(input.entry);
 	emitSummary(input, {
-		state: "running",
+		...deriveClineFacetPatch("running", null),
 		lastOutputAt: now(),
 		lastHookAt: now(),
 		latestHookActivity: {
@@ -257,9 +260,9 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			...(recoverable
 				? {}
 				: {
-						state: "awaiting_review",
 						reviewReason: "error",
 						warningMessage: creditLimitError ? null : (errorMessage ?? "Unknown agent error"),
+						...deriveClineFacetPatch("awaiting_review", "error"),
 					}),
 			lastOutputAt: now(),
 			lastHookAt: now(),
@@ -287,8 +290,8 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const retainedToolActivity = getRetainedClineToolActivity(entry);
 		clearActiveTurnState(entry);
 		emitSummary(input, {
-			state: "awaiting_review",
 			reviewReason: "error",
+			...deriveClineFacetPatch("awaiting_review", "error"),
 			warningMessage: errorMessage ?? "Unknown agent error",
 			lastOutputAt: now(),
 			lastHookAt: now(),
@@ -398,14 +401,15 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			},
 		};
 		if (status === "aborted") {
-			summaryPatch.state = "interrupted";
 			summaryPatch.reviewReason = "interrupted";
+			Object.assign(summaryPatch, deriveClineFacetPatch("interrupted", "interrupted"));
 		} else if (status === "failed") {
-			summaryPatch.state = "awaiting_review";
 			summaryPatch.reviewReason = "error";
+			Object.assign(summaryPatch, deriveClineFacetPatch("awaiting_review", "error"));
 		} else {
-			summaryPatch.state = "awaiting_review";
-			summaryPatch.reviewReason = "hook";
+			// B1 completion split：自然完成置 reviewReason:"completion"（区别于 hook 待关注；人轴同 → review）。
+			summaryPatch.reviewReason = "completion";
+			Object.assign(summaryPatch, deriveClineFacetPatch("awaiting_review", "completion"));
 		}
 
 		clearActiveTurnState(entry);
@@ -447,14 +451,15 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			},
 		};
 		if (doneReason === "aborted") {
-			summaryPatch.state = "interrupted";
 			summaryPatch.reviewReason = "interrupted";
+			Object.assign(summaryPatch, deriveClineFacetPatch("interrupted", "interrupted"));
 		} else if (doneReason === "error") {
-			summaryPatch.state = "awaiting_review";
 			summaryPatch.reviewReason = "error";
+			Object.assign(summaryPatch, deriveClineFacetPatch("awaiting_review", "error"));
 		} else {
-			summaryPatch.state = "awaiting_review";
-			summaryPatch.reviewReason = "hook";
+			// B1 completion split：自然完成置 reviewReason:"completion"（区别于 hook 待关注；人轴同 → review）。
+			summaryPatch.reviewReason = "completion";
+			Object.assign(summaryPatch, deriveClineFacetPatch("awaiting_review", "completion"));
 		}
 
 		clearActiveTurnState(entry);
@@ -467,7 +472,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		if (reasoning && reasoning.length > 0) {
 			input.emitMessage(taskId, appendReasoningChunk(entry, taskId, reasoning));
 			emitSummary(input, {
-				state: "running",
+				...deriveClineFacetPatch("running", null),
 				lastOutputAt: now(),
 			});
 		}
@@ -504,7 +509,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		if (reasoning && reasoning.length > 0) {
 			input.emitMessage(taskId, appendReasoningChunk(entry, taskId, reasoning));
 			emitSummary(input, {
-				state: "running",
+				...deriveClineFacetPatch("running", null),
 				lastOutputAt: now(),
 			});
 		}
@@ -532,7 +537,8 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const toolCallId = typeof toolCall?.toolCallId === "string" ? toolCall.toolCallId : null;
 		const toolInput = toolCall?.input;
 		const toolDisplay = getClineToolCallDisplay(toolName, toolInput);
-		const isUserAttentionTool = isClineUserAttentionTool(toolName);
+		const userAttentionKind = classifyClineUserAttentionTool(toolName);
+		const isUserAttentionTool = userAttentionKind !== null;
 		input.emitMessage(
 			taskId,
 			startToolCallMessage(entry, taskId, {
@@ -554,12 +560,23 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 				source: "cline-sdk",
 			},
 		};
-		if (isUserAttentionTool && (entry.summary.state === "running" || entry.summary.state === "idle")) {
-			summaryPatch.state = "awaiting_review";
+		// A3 读迁移：旧 `state==="running"||"idle"` → facet `turnOwner==="agent"||null`（running⟺agent、idle⟺null）。
+		const turnOwner = resolveSessionFacets(entry.summary).turnOwner;
+		if (isUserAttentionTool && (turnOwner === "agent" || turnOwner === null)) {
+			// B2 采集增强：ask_followup_question→question / plan_mode_respond→plan_review。经 deriveClineFacetPatch
+			// 产完整 facet 三元组后由 override 写人轴——绝不裸写单 userTurnKind（否则撞 superRefine 共生护栏）。
 			summaryPatch.reviewReason = "hook";
+			Object.assign(summaryPatch, deriveClineFacetPatch("awaiting_review", "hook", userAttentionKind ?? undefined));
+			logUserTurnKindCapture({
+				taskId,
+				agentId: entry.summary.agentId,
+				source: "cline-sdk",
+				rawSignal: toolName,
+				resolvedKind: userAttentionKind ?? "unclassified",
+			});
 		} else if (!isUserAttentionTool && canReturnToRunning(entry.summary.reviewReason)) {
-			summaryPatch.state = "running";
 			summaryPatch.reviewReason = null;
+			Object.assign(summaryPatch, deriveClineFacetPatch("running", null));
 		}
 		emitSummary(input, summaryPatch);
 		return;
@@ -572,7 +589,8 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const { output: toolOutput, error: toolError } = readToolResult(agentEvent.message);
 		const toolInput = toolCallId ? entry.toolInputByToolCallId.get(toolCallId) : undefined;
 		const toolDisplay = getClineToolCallDisplay(toolName, toolInput);
-		const isUserAttentionTool = isClineUserAttentionTool(toolName);
+		const userAttentionKind = classifyClineUserAttentionTool(toolName);
+		const isUserAttentionTool = userAttentionKind !== null;
 		input.emitMessage(
 			taskId,
 			finishToolCallMessage(entry, taskId, {
@@ -597,8 +615,8 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			},
 		};
 		if (isUserAttentionTool && canReturnToRunning(entry.summary.reviewReason)) {
-			summaryPatch.state = "running";
 			summaryPatch.reviewReason = null;
+			Object.assign(summaryPatch, deriveClineFacetPatch("running", null));
 		}
 		emitSummary(input, summaryPatch);
 		return;
@@ -609,7 +627,8 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const toolCallId = typeof agentEvent.toolCallId === "string" ? agentEvent.toolCallId : null;
 		const toolInput = agentEvent.input;
 		const toolDisplay = getClineToolCallDisplay(toolName, toolInput);
-		const isUserAttentionTool = isClineUserAttentionTool(toolName);
+		const userAttentionKind = classifyClineUserAttentionTool(toolName);
+		const isUserAttentionTool = userAttentionKind !== null;
 		input.emitMessage(
 			taskId,
 			startToolCallMessage(entry, taskId, {
@@ -631,12 +650,23 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 				source: "cline-sdk",
 			},
 		};
-		if (isUserAttentionTool && (entry.summary.state === "running" || entry.summary.state === "idle")) {
-			summaryPatch.state = "awaiting_review";
+		// A3 读迁移：旧 `state==="running"||"idle"` → facet `turnOwner==="agent"||null`（running⟺agent、idle⟺null）。
+		const turnOwner = resolveSessionFacets(entry.summary).turnOwner;
+		if (isUserAttentionTool && (turnOwner === "agent" || turnOwner === null)) {
+			// B2 采集增强：ask_followup_question→question / plan_mode_respond→plan_review。经 deriveClineFacetPatch
+			// 产完整 facet 三元组后由 override 写人轴——绝不裸写单 userTurnKind（否则撞 superRefine 共生护栏）。
 			summaryPatch.reviewReason = "hook";
+			Object.assign(summaryPatch, deriveClineFacetPatch("awaiting_review", "hook", userAttentionKind ?? undefined));
+			logUserTurnKindCapture({
+				taskId,
+				agentId: entry.summary.agentId,
+				source: "cline-sdk",
+				rawSignal: toolName,
+				resolvedKind: userAttentionKind ?? "unclassified",
+			});
 		} else if (!isUserAttentionTool && canReturnToRunning(entry.summary.reviewReason)) {
-			summaryPatch.state = "running";
 			summaryPatch.reviewReason = null;
+			Object.assign(summaryPatch, deriveClineFacetPatch("running", null));
 		}
 		emitSummary(input, summaryPatch);
 		return;
@@ -650,7 +680,8 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const durationMs = typeof agentEvent.durationMs === "number" ? agentEvent.durationMs : null;
 		const toolInput = toolCallId ? entry.toolInputByToolCallId.get(toolCallId) : undefined;
 		const toolDisplay = getClineToolCallDisplay(toolName, toolInput);
-		const isUserAttentionTool = isClineUserAttentionTool(toolName);
+		const userAttentionKind = classifyClineUserAttentionTool(toolName);
+		const isUserAttentionTool = userAttentionKind !== null;
 		input.emitMessage(
 			taskId,
 			finishToolCallMessage(entry, taskId, {
@@ -675,8 +706,8 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			},
 		};
 		if (isUserAttentionTool && canReturnToRunning(entry.summary.reviewReason)) {
-			summaryPatch.state = "running";
 			summaryPatch.reviewReason = null;
+			Object.assign(summaryPatch, deriveClineFacetPatch("running", null));
 		}
 		emitSummary(input, summaryPatch);
 		return;
@@ -708,7 +739,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const previewText = toPreviewText(fullPreviewText);
 		const retainedToolActivity = getRetainedClineToolActivity(entry);
 		emitSummary(input, {
-			state: "running",
+			...deriveClineFacetPatch("running", null),
 			lastOutputAt: now(),
 			lastHookAt: now(),
 			latestHookActivity: {
@@ -752,9 +783,10 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			return;
 		}
 		clearActiveTurnState(entry);
+		const endedReviewReason = interrupted ? "interrupted" : "exit";
 		emitSummary(input, {
-			state: interrupted ? "interrupted" : "awaiting_review",
-			reviewReason: interrupted ? "interrupted" : "exit",
+			reviewReason: endedReviewReason,
+			...deriveClineFacetPatch(interrupted ? "interrupted" : "awaiting_review", endedReviewReason),
 			lastOutputAt: now(),
 		});
 		return;
@@ -764,13 +796,15 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		if (statusEvent.payload.status !== "running") {
 			clearActiveTurnState(entry);
 		}
+		// A3 读迁移：旧 `state==="awaiting_review"` → facet isAwaitingUserReviewTurn；「保持当前 state」=
+		// 发 metadata-only patch（仅 lastOutputAt），由 mergeSummaryWithFacets preserve 现有 facet。
+		const statusFacets = resolveSessionFacets(entry.summary);
+		const shouldReturnToRunning =
+			statusEvent.payload.status === "running" &&
+			!(isAwaitingUserReviewTurn(statusFacets) && canReturnToRunning(entry.summary.reviewReason));
 		emitSummary(input, {
-			state:
-				statusEvent.payload.status === "running" &&
-				!(entry.summary.state === "awaiting_review" && canReturnToRunning(entry.summary.reviewReason))
-					? "running"
-					: entry.summary.state,
 			lastOutputAt: now(),
+			...(shouldReturnToRunning ? deriveClineFacetPatch("running", null) : {}),
 		});
 	}
 }
@@ -783,7 +817,7 @@ function emitTurnCanceled(input: ApplyClineSessionEventInput): void {
 	input.pendingTurnCancelTaskIds.delete(input.taskId);
 	clearActiveTurnState(input.entry);
 	emitSummary(input, {
-		state: "idle",
+		...deriveClineFacetPatch("idle", null),
 		reviewReason: null,
 		lastOutputAt: now(),
 		lastHookAt: now(),

@@ -6,6 +6,14 @@ import {
 	createDefaultSummary,
 } from "../../../src/cline-sdk/cline-session-state";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { applySessionFacets } from "../../../src/core/session-activity";
+
+// Stage 4 反转后 handler 经 facet 真相源判定（resolveSessionFacets）；fixture 直接覆写 summary.state 而
+// 不重 stamp facet 会得到「state 与 facet 不一致」的非真实 summary（真实运行恒经漏斗自洽）。故 fixture
+// 改经 applySessionFacets 让 facet 与 state 一致，复刻真实运行态。
+function seedSummaryState(entry: ClineTaskSessionEntry, overrides: Partial<RuntimeTaskSessionSummary>): void {
+	entry.summary = applySessionFacets({ ...entry.summary, ...overrides });
+}
 
 function createEntry(taskId: string): ClineTaskSessionEntry {
 	return {
@@ -112,7 +120,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("handles runtime-native assistant, tool, and finished agent events", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		applyEvent({
 			entry,
@@ -249,7 +257,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("shows full assistant text received only at content_end", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -276,7 +284,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("transitions into and back out of awaiting review around user-attention tools", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const toolStart = applyEvent({
 			entry,
@@ -297,6 +305,9 @@ describe("applyClineSessionEvent", () => {
 
 		expect(toolStart.entry.summary.state).toBe("awaiting_review");
 		expect(toolStart.entry.summary.reviewReason).toBe("hook");
+		// B2 采集增强：ask_followup_question → 人轴 question（完整 facet 三元组，user 回合）。
+		expect(toolStart.entry.summary.turnOwner).toBe("user");
+		expect(toolStart.entry.summary.userTurnKind).toBe("question");
 		expect(toolStart.messages[0]?.role).toBe("tool");
 		expect(toolStart.summaries.at(-1)?.latestHookActivity?.activityText).toBe(
 			"Using ask_followup_question(Need approval?)",
@@ -322,6 +333,9 @@ describe("applyClineSessionEvent", () => {
 
 		expect(toolEnd.entry.summary.state).toBe("running");
 		expect(toolEnd.entry.summary.reviewReason).toBeNull();
+		// 回 running：完整 facet 三元组自然清人轴（agent 回合 userTurnKind 必 null）。
+		expect(toolEnd.entry.summary.turnOwner).toBe("agent");
+		expect(toolEnd.entry.summary.userTurnKind).toBeNull();
 		expect(toolEnd.messages[0]?.meta?.hookEventName).toBe("tool_call_end");
 		expect(toolEnd.summaries.at(-1)?.latestHookActivity?.activityText).toBe(
 			"Completed ask_followup_question(Need approval?)",
@@ -330,7 +344,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("retains the last tool label while assistant text streams after a tool call", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		applyEvent({
 			entry,
@@ -372,7 +386,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("summarizes read_files tool calls from the SDK files payload", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -401,7 +415,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("converts aborted done events with pending cancel state back to idle", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 		const pendingTurnCancelTaskIds = new Set<string>(["task-1"]);
 
 		const result = applyEvent({
@@ -427,7 +441,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("converts run-failed events with pending cancel state back to idle", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 		const pendingTurnCancelTaskIds = new Set<string>(["task-1"]);
 
 		const result = applyEvent({
@@ -454,7 +468,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("moves completed done events into awaiting review with the final message attached", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -472,7 +486,9 @@ describe("applyClineSessionEvent", () => {
 		});
 
 		expect(result.entry.summary.state).toBe("awaiting_review");
-		expect(result.entry.summary.reviewReason).toBe("hook");
+		// B1 completion split：自然完成（done/completed）置 reviewReason:"completion"（人轴仍 → review）。
+		expect(result.entry.summary.reviewReason).toBe("completion");
+		expect(result.entry.summary.userTurnKind).toBe("review");
 		expect(result.entry.summary.latestHookActivity?.finalMessage).toBe("Done. Added the comment.");
 		expect(result.messages[0]?.role).toBe("assistant");
 		expect(result.messages[0]?.content).toBe("Done. Added the comment.");
@@ -480,7 +496,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("keeps the previous preview when done events have no final text", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 		entry.summary.latestHookActivity = {
 			activityText: "Reviewing the final diff",
 			toolName: "Read",
@@ -506,7 +522,8 @@ describe("applyClineSessionEvent", () => {
 		});
 
 		expect(result.entry.summary.state).toBe("awaiting_review");
-		expect(result.entry.summary.reviewReason).toBe("hook");
+		// B1 completion split：自然完成（done/completed，无 final text）同置 reviewReason:"completion"。
+		expect(result.entry.summary.reviewReason).toBe("completion");
 		expect(result.entry.summary.latestHookActivity?.activityText).toBe("Reviewing the final diff");
 		expect(result.entry.summary.latestHookActivity?.toolName).toBe("Read");
 		expect(result.entry.summary.latestHookActivity?.toolInputSummary).toBe("src/index.ts");
@@ -515,8 +532,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("keeps awaiting-review sessions in review when a stale running status event arrives", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "awaiting_review";
-		entry.summary.reviewReason = "attention";
+		seedSummaryState(entry, { state: "awaiting_review", reviewReason: "attention" });
 
 		const result = applyEvent({
 			entry,
@@ -536,7 +552,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("surfaces recoverable agent errors in the summary without failing the task", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -566,7 +582,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("sets credit_limit notificationType and suppresses warningMessage for insufficient-balance errors from SDK", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -593,8 +609,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("preserves credit-limit metadata when a later done event closes the turn", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "awaiting_review";
-		entry.summary.reviewReason = "error";
+		seedSummaryState(entry, { state: "awaiting_review", reviewReason: "error" });
 		entry.summary.latestHookActivity = {
 			activityText: "Agent error: 402 Insufficient balance",
 			toolName: null,
@@ -625,7 +640,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("forces credit-limit errors to non-recoverable even when SDK marks them recoverable", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -652,7 +667,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("suppresses recovery notices containing credit-limit text", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -677,7 +692,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("passes through credit-limit notices when reason is absent", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -700,7 +715,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("passes through non-recovery notices even when they contain credit-limit text", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -724,7 +739,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("detects credit-limit from agentEvent.message when error is absent", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -750,7 +765,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("does not detect credit-limit errors for non-Cline providers", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 
 		const result = applyEvent({
 			entry,
@@ -776,7 +791,7 @@ describe("applyClineSessionEvent", () => {
 
 	it("keeps unrecoverable agent errors resumable", () => {
 		const entry = createEntry("task-1");
-		entry.summary.state = "running";
+		seedSummaryState(entry, { state: "running" });
 		entry.activeAssistantMessageId = "assistant-1";
 
 		const result = applyEvent({

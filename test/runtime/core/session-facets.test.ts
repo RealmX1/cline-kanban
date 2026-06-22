@@ -15,6 +15,7 @@ import {
 	isAwaitingUserReviewTurn,
 	isNotifiableUserTurn,
 	isSessionInActiveTurn,
+	mergeSummaryWithFacets,
 	projectLegacyState,
 	resolveSessionFacets,
 	SESSION_SUMMARY_SCHEMA_VERSION,
@@ -310,6 +311,91 @@ describe("applySessionFacets（单一构造漏斗）", () => {
 	});
 });
 
+describe("mergeSummaryWithFacets（Stage 4 写侧主真相源派发器）", () => {
+	function runningBase(agentId: RuntimeAgentId | null = "cline"): RuntimeTaskSessionSummary {
+		return applySessionFacets(
+			makeSummary({ state: "running", agentId, pid: agentId === "cline" ? null : 7, lastOutputAt: 1_000 }),
+		);
+	}
+
+	it("facet-only patch（无 state）→ facet 权威，state 由 projectLegacyState 投影回填", () => {
+		const next = mergeSummaryWithFacets(runningBase(), {
+			reviewReason: "hook",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "question",
+		});
+		expect(next.turnOwner).toBe("user");
+		expect(next.liveness).toBe("live");
+		expect(next.userTurnKind).toBe("question");
+		expect(next.state).toBe("awaiting_review");
+		expect(projectLegacyState(facetsOf(next))).toBe(next.state);
+	});
+
+	it("state-only patch（无 facet）→ legacy 向，与今日 applySessionFacets 逐字一致", () => {
+		const base = runningBase("claude");
+		const next = mergeSummaryWithFacets(base, { state: "awaiting_review", reviewReason: "error", pid: null });
+		expect(next).toEqual(applySessionFacets({ ...base, state: "awaiting_review", reviewReason: "error", pid: null }));
+	});
+
+	// 评审修正 #1（两腿同判最致命缺陷）回归：采集到的 question 不被高频 metadata-only bump 经 reviewReason
+	// 重派生冲回 review。**A1 阻塞门控**。
+	it("metadata-only patch preserve 已采集 userTurnKind（question 经 lastOutputAt bump 后仍是 question）", () => {
+		const question = mergeSummaryWithFacets(runningBase(), {
+			reviewReason: "hook",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "question",
+		});
+		expect(question.userTurnKind).toBe("question");
+		const afterBump = mergeSummaryWithFacets(question, { lastOutputAt: 2_000 });
+		expect(afterBump.userTurnKind).toBe("question");
+		expect(afterBump.turnOwner).toBe("user");
+		expect(afterBump.state).toBe("awaiting_review");
+	});
+
+	// metadata-only 仍重派生 agent 轴：connectionRetry 驱动 live↔retrying，不被 preserve 冻住（A1 零漂移要件）。
+	it("metadata-only connectionRetry patch 驱动 running 的 live→retrying", () => {
+		const running = applySessionFacets(makeSummary({ state: "running", agentId: "claude", pid: 1 }));
+		expect(running.liveness).toBe("live");
+		const retrying = mergeSummaryWithFacets(running, { connectionRetry: ACTIVE_RETRY });
+		expect(retrying.liveness).toBe("retrying");
+		const backLive = mergeSummaryWithFacets(retrying, { connectionRetry: null });
+		expect(backLive.liveness).toBe("live");
+	});
+
+	// A1 parity（迁移前零行为漂移命门）：全格上「facet-only 写 ≡ legacy state-only 写」，
+	// 在非平凡 prior（running）上验证（评审要求 merge 到非空白 summary）。
+	it("parity：facet-only 写与 legacy state-only 写在全 state×reviewReason×agentId 上四 facet+state 一致", () => {
+		for (const state of ALL_STATES) {
+			for (const reviewReason of ALL_REVIEW_REASONS) {
+				for (const agentId of ALL_AGENT_IDS) {
+					const pid = agentId === "cline" ? null : 7;
+					const prior = runningBase(agentId);
+					const facets = deriveSessionFacetsFromLegacyState(state, {
+						reviewReason,
+						pid,
+						connectionRetryActive: false,
+						agentId,
+					});
+					const viaFacet = mergeSummaryWithFacets(prior, {
+						reviewReason,
+						pid,
+						turnOwner: facets.turnOwner,
+						liveness: facets.liveness,
+						userTurnKind: facets.userTurnKind,
+					});
+					const viaState = mergeSummaryWithFacets(prior, { reviewReason, pid, state });
+					expect(viaFacet.state).toBe(viaState.state);
+					expect(viaFacet.turnOwner).toBe(viaState.turnOwner);
+					expect(viaFacet.liveness).toBe(viaState.liveness);
+					expect(viaFacet.userTurnKind).toBe(viaState.userTurnKind);
+				}
+			}
+		}
+	});
+});
+
 describe("黄金转移（经真实终端 reducer reduceSessionTransition）", () => {
 	// process.exit 是终端/PTY agent 专属事件（Cline SDK 无进程退出概念），故 base 显式为终端 agent：
 	// 其 pid 123 退出后 → pid null → exited（harness-aware 规则在 agentId="claude" 下仍走 pid 判定）。
@@ -322,8 +408,11 @@ describe("黄金转移（经真实终端 reducer reduceSessionTransition）", ()
 		event: Parameters<typeof reduceSessionTransition>[1],
 		updatedAt: number,
 	): RuntimeTaskSessionSummary {
+		// Stage 4 反转后 reducer 产 facet-only patch（无 state）；须经 mergeSummaryWithFacets 派发（与真实
+		// session-manager.applySessionEvent → updateSummary 漏斗一致），而非 applySessionFacets（后者会从
+		// base 的 stale state 反推、忽略 patch 携带的 facet）。
 		const result = reduceSessionTransition(base, event);
-		return applySessionFacets({ ...base, ...result.patch, updatedAt });
+		return mergeSummaryWithFacets(base, { ...result.patch, updatedAt });
 	}
 
 	it("hook.to_review：running → awaiting_review，进程仍在 → live/review", () => {
@@ -365,6 +454,28 @@ describe("黄金转移（经真实终端 reducer reduceSessionTransition）", ()
 		expect(back.turnOwner).toBe("agent");
 		expect(back.liveness).toBe("live");
 		expect(back.userTurnKind).toBe(null);
+	});
+
+	// 评审修正 #5 / 风险 #1：A2 反转后 reducer 的 process.exit 必须传 pid:null（后退出）+ agentId 进派生。
+	// 锁 patch.liveness（非只锁 state）—— exited↔live 区分是本重构存在意义，误用 summary.pid 会让
+	// state/test 全过却悄毁该区分。交叉 agentId∈{claude,cline,null}：
+	it("process.exit × agentId=cline：harness-aware → awaiting/live（无 pid 概念，绝不误标 exited）", () => {
+		const clineRunning = applySessionFacets(
+			makeSummary({ state: "running", agentId: "cline", pid: null, lastOutputAt: 1_000 }),
+		);
+		const next = applyPatch(clineRunning, { type: "process.exit", exitCode: 0, interrupted: false }, 7_000);
+		expect(next.state).toBe("awaiting_review");
+		expect(next.liveness).toBe("live");
+		expect(next.userTurnKind).toBe("review");
+	});
+
+	it("process.exit × agentId=null：保守回退 pid 规则 → exited（pid 退出后为 null）", () => {
+		const nullRunning = applySessionFacets(
+			makeSummary({ state: "running", agentId: null, pid: 7, lastOutputAt: 1_000 }),
+		);
+		const next = applyPatch(nullRunning, { type: "process.exit", exitCode: 0, interrupted: false }, 8_000);
+		expect(next.state).toBe("awaiting_review");
+		expect(next.liveness).toBe("exited");
 	});
 });
 
@@ -451,6 +562,61 @@ describe("superRefine 不变量护栏", () => {
 
 	it("拒绝 null 回合 + 非 null userTurnKind", () => {
 		expect(parses({ state: "idle", turnOwner: null, liveness: "none", userTurnKind: "review" })).toBe(false);
+	});
+});
+
+// Stage 4 schema 反转：`state` 输入可选 + 末位 transform 从 facet 投影回填，使输出型 state 仍 required。
+describe("schema state.optional() + transform（Stage 4 全写侧反转）", () => {
+	const baseRawFields = {
+		taskId: "t",
+		agentId: "cline",
+		workspacePath: null,
+		pid: null,
+		startedAt: null,
+		updatedAt: 1,
+		lastOutputAt: null,
+		reviewReason: null,
+		exitCode: null,
+	};
+
+	it("旧形（state 有、facet 无）→ 保留 state、放行（未迁移旧盘）", () => {
+		const result = runtimeTaskSessionSummarySchema.safeParse({ ...baseRawFields, state: "running" });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.state).toBe("running");
+		}
+	});
+
+	it("新形（facet 有、state 无）→ transform 从三 facet 投影出 state", () => {
+		const result = runtimeTaskSessionSummarySchema.safeParse({
+			...baseRawFields,
+			turnOwner: "user",
+			liveness: "exited",
+			userTurnKind: "review",
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.state).toBe("awaiting_review");
+		}
+	});
+
+	it("既无 state 又 facet 不全 → 拒绝（transform 无从投影）", () => {
+		expect(runtimeTaskSessionSummarySchema.safeParse({ ...baseRawFields, turnOwner: "user" }).success).toBe(false);
+		expect(runtimeTaskSessionSummarySchema.safeParse({ ...baseRawFields }).success).toBe(false);
+	});
+
+	it("既有 state 又有完整合法 facet → 保留 state（不被 transform 覆盖）", () => {
+		const result = runtimeTaskSessionSummarySchema.safeParse({
+			...baseRawFields,
+			state: "running",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.state).toBe("running");
+		}
 	});
 });
 

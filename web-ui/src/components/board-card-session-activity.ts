@@ -3,9 +3,9 @@
 //
 // 真相源：Stage 3 余区已把本派生的全部 legacy 一维 `summary.state` 读迁到双轴 facet
 // （resolveSessionFacets + isAwaitingUserReviewTurn，叠加 connectionRetry / latestHookActivity）。
-// Channel C（人轴文案，普适四种）已在此落地：等人审回合按 userTurnKind 细分状态点颜色 + 无内容占位
-// CTA——review=完成待审(绿) / needs_input=待你输入(金) / error=运行出错(红)。question/plan_review/
-// permission 在当前采集下不产出（普适四种折叠进 review/needs_input），待 Stage 4 可选采集增强再细分。
+// Channel C（人轴文案）：等人审回合按 userTurnKind 细分状态点颜色 + 无内容占位 CTA——review=完成待审(绿)
+// / needs_input=待你输入(金) / error=运行出错(红)。Stage 4 采集增强后另产出 question / plan_review
+// （Cline SDK）/ permission（Claude）三类「阻塞等你」（均金 CTA），见 resolveAwaitingUserTurnPresentation。
 
 import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "@runtime-session-activity";
@@ -95,10 +95,12 @@ function resolveToolCallLabel(
 	return formatClineToolCallLabel(parsed.toolName, parsed.toolInputSummary);
 }
 
-// Channel C（人轴文案，普适四种）：把「等人审查回合」的 userTurnKind 映射为状态点颜色 + 无内容时的
-// 占位 CTA。review（完成/exit/hook）=完成待审(绿)；needs_input（attention/兜底）=待你输入(金 CTA)；
-// error（运行错，区别于 spawn failed liveness）=运行出错(红)。interrupted 不经此（liveness=interrupted
-// 非等人审回合）。占位文案沿用同族英文风格（"Waiting for review" / "Task failed to start"）。
+// Channel C（人轴文案）：把「等人审查回合」的 userTurnKind 映射为状态点颜色 + 无内容时的占位 CTA。
+// review（完成/exit/hook/completion）=完成待审(绿)；needs_input（attention/兜底）=待你输入(金 CTA)；
+// error（运行错，区别于 spawn failed liveness）=运行出错(红)。Stage 4 采集增强后新增三类「阻塞等你」
+// （均金 CTA，区别于被动 review 绿）：question（ask_followup_question）=待你回答；plan_review
+// （plan_mode_respond）=计划待批；permission（Claude PermissionRequest）=权限请求。interrupted 不经此
+// （liveness=interrupted 非等人审回合）。占位文案沿用同族英文风格。
 function resolveAwaitingUserTurnPresentation(userTurnKind: RuntimeTaskSessionUserTurnKind | null): {
 	dotColor: string;
 	placeholder: string;
@@ -108,6 +110,12 @@ function resolveAwaitingUserTurnPresentation(userTurnKind: RuntimeTaskSessionUse
 			return { dotColor: SESSION_ACTIVITY_COLOR.error, placeholder: "Encountered an error" };
 		case "needs_input":
 			return { dotColor: SESSION_ACTIVITY_COLOR.waiting, placeholder: "Needs your input" };
+		case "question":
+			return { dotColor: SESSION_ACTIVITY_COLOR.waiting, placeholder: "Needs your answer" };
+		case "plan_review":
+			return { dotColor: SESSION_ACTIVITY_COLOR.waiting, placeholder: "Plan awaiting approval" };
+		case "permission":
+			return { dotColor: SESSION_ACTIVITY_COLOR.waiting, placeholder: "Permission requested" };
 		default:
 			return { dotColor: SESSION_ACTIVITY_COLOR.success, placeholder: "Waiting for review" };
 	}

@@ -18,6 +18,19 @@ describe("resolveReviewReadyNotificationTitle", () => {
 		it("error → encountered an error", () => {
 			expect(resolveReviewReadyNotificationTitle("my-repo", "error")).toBe("my-repo encountered an error");
 		});
+
+		// Stage 4 采集增强：question / plan_review / permission 三类「阻塞等你」各有专属措辞。
+		it("question → needs your answer", () => {
+			expect(resolveReviewReadyNotificationTitle("my-repo", "question")).toBe("my-repo needs your answer");
+		});
+
+		it("plan_review → has a plan to review", () => {
+			expect(resolveReviewReadyNotificationTitle("my-repo", "plan_review")).toBe("my-repo has a plan to review");
+		});
+
+		it("permission → needs permission", () => {
+			expect(resolveReviewReadyNotificationTitle("my-repo", "permission")).toBe("my-repo needs permission");
+		});
 	});
 
 	describe("无 workspaceTitle 时首字母大写、退化为通用标题", () => {
@@ -34,7 +47,7 @@ describe("resolveReviewReadyNotificationTitle", () => {
 		});
 	});
 
-	describe("缺省/折叠种类一律落到 review 措辞兜底（决策 A：普适四种、其余折叠）", () => {
+	describe("缺省/无专属措辞种类落到 review 措辞兜底", () => {
 		it("undefined（旧服务端/缓存旧构建不带 payload 字段）→ ready for review", () => {
 			expect(resolveReviewReadyNotificationTitle("my-repo", undefined)).toBe("my-repo ready for review");
 			expect(resolveReviewReadyNotificationTitle(null, undefined)).toBe("Ready for review");
@@ -44,8 +57,9 @@ describe("resolveReviewReadyNotificationTitle", () => {
 			expect(resolveReviewReadyNotificationTitle("my-repo", null)).toBe("my-repo ready for review");
 		});
 
-		it.each<RuntimeTaskSessionUserTurnKind>(["question", "plan_review", "permission", "interrupted"])(
-			"折叠种类 %s → ready for review",
+		// review（主路径）与 interrupted（被中断，不在通知白名单但防御性映射）均无专属措辞 → 兜底。
+		it.each<RuntimeTaskSessionUserTurnKind>(["review", "interrupted"])(
+			"无专属措辞种类 %s → ready for review",
 			(kind) => {
 				expect(resolveReviewReadyNotificationTitle("my-repo", kind)).toBe("my-repo ready for review");
 			},

@@ -4,7 +4,9 @@ import type {
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import { parseHookIngestRequest } from "../core/api-validation";
+import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { resolveSessionFacets } from "../core/session-activity";
+import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
@@ -67,8 +69,42 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					} satisfies RuntimeHookIngestResponse;
 				}
 
+				// B3 Claude permission 采集：to_review 时从 hook metadata 分类更细人轴（仅 source==="claude" 的
+				// PermissionRequest / permission_prompt → permission），随 hook.to_review 覆写 facet 人轴。
+				let userTurnKindOverride: "permission" | null = null;
+				if (event === "to_review") {
+					userTurnKindOverride = classifyHookUserTurnKind(body.metadata);
+					if (userTurnKindOverride !== null) {
+						logUserTurnKindCapture({
+							taskId,
+							agentId: summary.agentId,
+							source: body.metadata?.source ?? null,
+							rawSignal: body.metadata?.hookEventName ?? body.metadata?.notificationType ?? null,
+							resolvedKind: userTurnKindOverride,
+						});
+					} else {
+						// expected-but-absent：识别到 claude 的 permission-ish 信号却未精确匹配已知模式 → 记
+						// unclassified，让线上数据暴露 harness 信号漂移（Claude 改名/新增）。不刷普适四种（Stop 等
+						// 无 permission 字样的常规 to_review 不触发）。
+						const sourceLc = body.metadata?.source?.trim().toLowerCase() ?? null;
+						const rawHook = body.metadata?.hookEventName?.trim().toLowerCase() ?? null;
+						const rawNotif = body.metadata?.notificationType?.trim().toLowerCase() ?? null;
+						if (sourceLc === "claude" && (rawHook?.includes("permission") || rawNotif?.includes("permission"))) {
+							logUserTurnKindCapture({
+								taskId,
+								agentId: summary.agentId,
+								source: body.metadata?.source ?? null,
+								rawSignal: body.metadata?.hookEventName ?? body.metadata?.notificationType ?? null,
+								resolvedKind: "unclassified",
+							});
+						}
+					}
+				}
+
 				const transitionedSummary =
-					event === "to_review" ? manager.transitionToReview(taskId, "hook") : manager.transitionToRunning(taskId);
+					event === "to_review"
+						? manager.transitionToReview(taskId, "hook", userTurnKindOverride ?? undefined)
+						: manager.transitionToRunning(taskId);
 				if (!transitionedSummary) {
 					return {
 						ok: false,

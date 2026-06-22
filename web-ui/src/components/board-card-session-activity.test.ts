@@ -368,6 +368,28 @@ describe("deriveCardSessionActivity", () => {
 			);
 			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "Encountered an error" });
 		});
+
+		// Stage 4 采集增强：question / plan_review / permission 三类「阻塞等你」各有专属金 CTA 占位。
+		it("question（Cline ask_followup_question）无内容 → 金点「Needs your answer」", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", { turnOwner: "user", liveness: "live", userTurnKind: "question" }),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.waiting, text: "Needs your answer" });
+		});
+
+		it("plan_review（Cline plan_mode_respond）无内容 → 金点「Plan awaiting approval」", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", { turnOwner: "user", liveness: "live", userTurnKind: "plan_review" }),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.waiting, text: "Plan awaiting approval" });
+		});
+
+		it("permission（Claude PermissionRequest）无内容 → 金点「Permission requested」", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", { turnOwner: "user", liveness: "exited", userTurnKind: "permission" }),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.waiting, text: "Permission requested" });
+		});
 	});
 });
 

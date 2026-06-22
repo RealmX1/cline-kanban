@@ -198,6 +198,59 @@ export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeT
 	};
 }
 
+// ── 写侧主真相源派发器（Stage 4 全写侧反转）────────────────────────────────────
+// 单一 per-patch 派发器：按 patch 形状决定 facet 与 legacy state 谁是权威，产出「三 facet 与 state
+// 自洽」的 summary。两个 updateSummary 漏斗（cline-session-state.ts / session-manager.ts）统一经此写。
+//
+// 反转后 facet 是**写时主真相源**：
+//   - patch 带 facet 且无 state → **facet 权威**：state = projectLegacyState(facets)（写侧主路径；
+//     facet 写恒经 statePatch/facetPatch 发完整三元组，故 merged 必带完整三 facet）。
+//   - patch 带 state（含同时带 facet 的 constructor seed）→ **legacy 向**：applySessionFacets 从
+//     state 反推 facet（旧路兼容 / shutdown 持久化 / seed 数据，state 权威）。
+//   - patch 两者皆无（metadata-only：lastOutputAt / latestHookActivity / connectionRetry-only）→
+//     从 state+ctx 重派生 turnOwner/liveness（保 connectionRetry→retrying、exited 等元数据驱动的
+//     活性变化），但 **preserve 已采集的 userTurnKind**——它可能是采集增强写入的 question /
+//     plan_review / permission，无法从 reviewReason 反推，绝不能被 applySessionFacets 冲回
+//     review / needs_input（两腿评审同判最致命缺陷）。facet 全缺的旧盘数据走 applySessionFacets。
+//
+// A1 零行为漂移保证：迁移前全库仍只发 state-only / metadata-only patch。state-only → applySessionFacets
+// （同今日）；metadata-only 分支「重派 turnOwner/liveness + preserve userTurnKind」在「facet 恒由 state
+// 反推」的迁移前世界里与 applySessionFacets 逐字等价（preserved userTurnKind === 重派 userTurnKind）。
+export function mergeSummaryWithFacets(
+	prev: RuntimeTaskSessionSummary,
+	patch: Partial<RuntimeTaskSessionSummary>,
+): RuntimeTaskSessionSummary {
+	const merged = { ...prev, ...patch };
+	const patchHasFacet =
+		patch.turnOwner !== undefined || patch.liveness !== undefined || patch.userTurnKind !== undefined;
+	const patchHasState = patch.state !== undefined;
+
+	if (patchHasFacet && !patchHasState) {
+		// facet 权威：state 由唯一 reducer 投影；三 facet 直接采信（merged 必完整）。
+		const facets = resolveSessionFacets(merged);
+		return {
+			...merged,
+			turnOwner: facets.turnOwner,
+			liveness: facets.liveness,
+			userTurnKind: facets.userTurnKind,
+			state: projectLegacyState(facets),
+			schemaVersion: SESSION_SUMMARY_SCHEMA_VERSION,
+		};
+	}
+
+	if (patchHasState) {
+		// legacy 向（state 权威）：旧路兼容 / shutdown 持久化 / constructor seed（state+facet 同在）。
+		return applySessionFacets(merged);
+	}
+
+	// metadata-only：重派 agent 轴（turnOwner/liveness），preserve 已采集的 userTurnKind。
+	const refreshed = applySessionFacets(merged);
+	if (merged.userTurnKind !== undefined) {
+		return { ...refreshed, userTurnKind: merged.userTurnKind };
+	}
+	return refreshed;
+}
+
 // ── 读侧 facet 权威解析（Stage 2 翻转真相源）─────────────────────────────────────
 // 决策型消费者一律经此读 facet、不再读 legacy `state`，从而绕开 projectLegacyState 对
 // live↔exited 的有损压扁（投影只在 new→old 方向有损；facet 本身保真）。

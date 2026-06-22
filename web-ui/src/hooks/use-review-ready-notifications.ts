@@ -54,16 +54,18 @@ function resolveReviewReadyNotificationBody(
 	return finalMessage || taskTitle;
 }
 
-// 通知标题随「人轴」userTurnKind 措辞，与卡片 channel C 文案对齐（error=报错 / needs_input=待输入 /
-// 其余含 review 与折叠种类与缺省=待审）。userTurnKind 取自一次性 ready 事件 payload（见
-// runtimeStateStreamTaskReadyForReviewMessageSchema），不回读延迟 150ms 批处理的 summary 流——这正是
-// 上次 ③(b) 命中竞态后的重做要点。决策 A「普适四种」下实际只会出现 review/error/needs_input；
-// question/plan_review/permission/interrupted/null/undefined 一律落到 review 措辞兜底。
+// 通知标题随「人轴」userTurnKind 措辞，与卡片 channel C 文案对齐。userTurnKind 取自一次性 ready 事件
+// payload（见 runtimeStateStreamTaskReadyForReviewMessageSchema），不回读延迟 150ms 批处理的 summary 流
+// ——这正是上次 ③(b) 命中竞态后的重做要点。Stage 4 采集增强后可出现 error / needs_input / question /
+// plan_review / permission；review / interrupted / null / undefined 一律落到 "ready for review" 兜底。
 const REVIEW_READY_TITLE_PHRASE_BY_USER_TURN_KIND: Partial<
 	Record<NonNullable<RuntimeTaskSessionUserTurnKind>, string>
 > = {
 	error: "encountered an error",
 	needs_input: "needs your input",
+	question: "needs your answer",
+	plan_review: "has a plan to review",
+	permission: "needs permission",
 };
 const DEFAULT_REVIEW_READY_TITLE_PHRASE = "ready for review";
 

@@ -2,18 +2,23 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import type {
+	RuntimeAgentId,
 	RuntimeTaskConnectionRetry,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
+	RuntimeTaskSessionState,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskSessionUserTurnKind,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import {
 	applySessionFacets,
+	deriveSessionFacetsFromLegacyState,
 	isAgentOutputQuiet as evaluateAgentOutputQuiet,
 	isAwaitingUserReviewTurn,
 	isSessionInActiveTurn,
+	mergeSummaryWithFacets,
 	resolveSessionFacets,
 } from "../core/session-activity";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
@@ -206,13 +211,27 @@ function cloneSummary(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSum
 }
 
 function updateSummary(entry: SessionEntry, patch: Partial<RuntimeTaskSessionSummary>): RuntimeTaskSessionSummary {
-	// 单一 dual-write 漏斗：合并 patch 后统一 stamp 双轴 facet（与 legacy state 投影可逆）。
-	entry.summary = applySessionFacets({
-		...entry.summary,
-		...patch,
-		updatedAt: now(),
-	});
+	// 单一写侧漏斗：经 mergeSummaryWithFacets 派发（facet 写时主真相源，详见该函数）。
+	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: now() });
 	return entry.summary;
+}
+
+// Stage 4 全写侧反转：终端/PTY agent 写点经此从「目标 legacy state + 当刻覆写上下文」产出完整三 facet
+// 写侧补丁（facet 写时主真相源；state 由 mergeSummaryWithFacets 投影回填）。connectionRetryActive 取自
+// prev（写点不改 connectionRetry，故与 mergeSummaryWithFacets 合并后取值一致），agentId/pid 取本次覆写值
+// （launch 设新 pid/agentId、exit/fail 设 pid:null）——使终端 agent awaiting 的 live↔exited 区分正确。
+function buildTerminalFacetPatch(
+	prev: RuntimeTaskSessionSummary,
+	state: RuntimeTaskSessionState,
+	overrides: { reviewReason: RuntimeTaskSessionReviewReason; pid: number | null; agentId: RuntimeAgentId | null },
+): Partial<RuntimeTaskSessionSummary> {
+	const facets = deriveSessionFacetsFromLegacyState(state, {
+		reviewReason: overrides.reviewReason,
+		pid: overrides.pid,
+		connectionRetryActive: prev.connectionRetry != null,
+		agentId: overrides.agentId,
+	});
+	return { turnOwner: facets.turnOwner, liveness: facets.liveness, userTurnKind: facets.userTurnKind };
 }
 
 // 「会话处于活跃回合」判据（Stage 3 余区：legacy `state` 读 → 双轴 facet 真相源）。
@@ -883,7 +902,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			terminalStateMirror.dispose();
 			const summary = updateSummary(entry, {
-				state: "failed",
+				...buildTerminalFacetPatch(entry.summary, "failed", {
+					reviewReason: "error",
+					pid: null,
+					agentId: request.agentId,
+				}),
 				agentId: request.agentId,
 				workspacePath: request.cwd,
 				pid: null,
@@ -967,7 +990,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 		const startedAt = now();
 		updateSummary(entry, {
-			state: request.resumeFromTrash ? "awaiting_review" : "running",
+			...buildTerminalFacetPatch(entry.summary, request.resumeFromTrash ? "awaiting_review" : "running", {
+				reviewReason: request.resumeFromTrash ? "attention" : null,
+				pid: session.pid,
+				agentId: request.agentId,
+			}),
 			agentId: request.agentId,
 			workspacePath: request.cwd,
 			pid: session.pid,
@@ -1071,9 +1098,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 					clearClaudeStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
 
+					const shellExitInterrupted = currentActive.session.wasInterrupted();
 					const summary = updateSummary(currentEntry, {
-						state: currentActive.session.wasInterrupted() ? "interrupted" : "idle",
-						reviewReason: currentActive.session.wasInterrupted() ? "interrupted" : null,
+						...buildTerminalFacetPatch(currentEntry.summary, shellExitInterrupted ? "interrupted" : "idle", {
+							reviewReason: shellExitInterrupted ? "interrupted" : null,
+							pid: null,
+							agentId: currentEntry.summary.agentId,
+						}),
+						reviewReason: shellExitInterrupted ? "interrupted" : null,
 						exitCode: event.exitCode,
 						pid: null,
 					});
@@ -1089,7 +1121,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		} catch (error) {
 			terminalStateMirror.dispose();
 			const summary = updateSummary(entry, {
-				state: "failed",
+				...buildTerminalFacetPatch(entry.summary, "failed", {
+					reviewReason: "error",
+					pid: null,
+					agentId: null,
+				}),
 				agentId: null,
 				workspacePath: request.cwd,
 				pid: null,
@@ -1133,7 +1169,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry.terminalStateMirror = terminalStateMirror;
 
 		updateSummary(entry, {
-			state: "running",
+			...buildTerminalFacetPatch(entry.summary, "running", {
+				reviewReason: null,
+				pid: session.pid,
+				agentId: null,
+			}),
 			agentId: null,
 			workspacePath: request.cwd,
 			pid: session.pid,
@@ -1164,7 +1204,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// Preserve agentId so the server can route to the correct agent type
 		// (Cline SDK vs terminal PTY) when a task is restored from trash.
 		const summary = updateSummary(entry, {
-			state: "idle",
+			...buildTerminalFacetPatch(entry.summary, "idle", {
+				reviewReason: null,
+				pid: null,
+				agentId: entry.summary.agentId,
+			}),
 			workspacePath: null,
 			pid: null,
 			startedAt: null,
@@ -1246,7 +1290,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return true;
 	}
 
-	transitionToReview(taskId: string, reason: RuntimeTaskSessionReviewReason): RuntimeTaskSessionSummary | null {
+	transitionToReview(
+		taskId: string,
+		reason: RuntimeTaskSessionReviewReason,
+		userTurnKindOverride?: RuntimeTaskSessionUserTurnKind,
+	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return null;
@@ -1255,7 +1303,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return cloneSummary(entry.summary);
 		}
 		const before = entry.summary;
-		const summary = this.applySessionEvent(entry, { type: "hook.to_review" });
+		// userTurnKindOverride（B3 Claude permission 采集）随 hook.to_review 事件下发，由 reducer 在 user 回合
+		// 覆写人轴（经完整 facet 三元组，不裸写单字段）。
+		const summary = this.applySessionEvent(entry, { type: "hook.to_review", userTurnKindOverride });
 		if (summary !== before && entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));
@@ -1481,9 +1531,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 				entry.active.workspaceTrustBuffer = "";
 			}
 		}
-		// 此处读的是 reducer 刚产出的「转换补丁」legacy state（patch 尚未经 applySessionFacets 打 facet，
-		// 故无 facet 可读）——属写侧 reducer 输出检视、非存储 summary 的消费者读，有意保留 legacy 形态。
-		if (entry.active && transition.changed && transition.patch.state === "awaiting_review") {
+		// Stage 4 反转后 reducer patch 直接携带 facet（不再写 legacy state）→ 解阻塞此处旧的瞬态 patch.state
+		// 读。改读 patch 的 facet：`isAwaitingUserReviewTurn(patchFacets)` 与旧 `patch.state==="awaiting_review"`
+		// 逐项等价（hook.to_review + 非中断 exit → true；prompt-ready/to_in_progress 回 running 与中断 exit → false）。
+		if (
+			entry.active &&
+			transition.changed &&
+			isAwaitingUserReviewTurn({
+				turnOwner: transition.patch.turnOwner ?? null,
+				liveness: transition.patch.liveness ?? "none",
+				userTurnKind: transition.patch.userTurnKind ?? null,
+			})
+		) {
 			entry.active.awaitingCodexPromptAfterEnter = false;
 		}
 		return updateSummary(entry, transition.patch);
