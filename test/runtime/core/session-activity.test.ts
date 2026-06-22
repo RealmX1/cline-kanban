@@ -125,6 +125,42 @@ describe("isAgentActivelyProducingOutput（前端 Validation 停留判据）", (
 	it("undefined summary → false（任务无会话）", () => {
 		expect(isAgentActivelyProducingOutput(undefined, NOW)).toBe(false);
 	});
+
+	// 双轴迁移（Stage 3 ④）：门控由 state==="running" 翻为 resolveSessionFacets().turnOwner==="agent"。
+	// 下面钉住「facet 权威」语义——既证明带 facet 时采信 facet（而非 legacy state），也证明 no-facet
+	// 时即时派生与旧 state 判据全表等价（上方各例已覆盖 no-facet 路径）。
+	it("显式 facet turnOwner==='agent' 被采信（即使 legacy state 背离为 awaiting_review）→ 仍按 agent 回合判活跃", () => {
+		const summary = makeSummary({
+			state: "awaiting_review",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1),
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(true);
+	});
+
+	it("显式 facet turnOwner==='user' 被采信（即使 legacy state 背离为 running）→ 非 agent 回合，false", () => {
+		const summary = makeSummary({
+			state: "running",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "review",
+			lastOutputAt: NOW,
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("显式 facet turnOwner==='agent' 但已超活跃窗口 → false（facet 决定回合、窗口决定新鲜度，正交）", () => {
+		const summary = makeSummary({
+			state: "running",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
 });
 
 describe("deriveDisplayLiveness（展示叠加：live → computing / quiet）", () => {

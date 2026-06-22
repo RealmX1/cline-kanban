@@ -57,18 +57,24 @@ export function isAgentOutputQuiet(
 	return !isAgentOutputWithinActiveWindow(lastOutputAt, nowMs, quietThresholdMs);
 }
 
-// 前端 Validation 列自动打回判据：仅当会话处于 running 且仍在活跃产出窗口内 → true（打回
-// In Progress）；空闲 / 从未输出 / 已死残留 / 非 running 一律 false（允许停留 Validation）。
+// 前端 Validation 列自动打回判据：仅当会话处于 agent 回合（turnOwner==="agent"）且仍在活跃产出
+// 窗口内 → true（打回 In Progress）；空闲 / 从未输出 / 已死残留 / 非 agent 回合一律 false（允许停留
+// Validation）。
 //
-// 注：此处对 running 的门控是「当前一维 state」的过渡实现；双轴重构落地后将改为
-// `turnOwner==="agent" && liveness ∈ {live, retrying}` 的派生叠加（见 session-state 重构计划
-// Stage 1/3）——届时只需改这一处门控，新鲜度原语不动。
+// 双轴迁移（Stage 3 ④，行为保持）：门控已从一维 `state==="running"` 翻为 facet 权威
+// `resolveSessionFacets(summary).turnOwner==="agent"`——二者全表等价（no-facet summary 即时派生、
+// facet-present summary 采信权威，见 resolveSessionFacets）。活跃窗口仍直接读 lastOutputAt：这是
+// 「真·时间型」新鲜度，按 freshness 分层规则**不读** computing/quiet 派生叠加，而由唯一调用点
+// （use-board-interactions 的 level-triggered effect）在 summary 流到达时重算（详见该处注释）。
 export function isAgentActivelyProducingOutput(
 	summary: RuntimeTaskSessionSummary | null | undefined,
 	nowMs: number,
 ): boolean {
+	if (summary == null) {
+		return false;
+	}
 	return (
-		summary?.state === "running" &&
+		resolveSessionFacets(summary).turnOwner === "agent" &&
 		isAgentOutputWithinActiveWindow(summary.lastOutputAt, nowMs, VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS)
 	);
 }

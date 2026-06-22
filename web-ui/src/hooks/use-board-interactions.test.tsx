@@ -96,11 +96,56 @@ function createBoardWithValidationTask(taskId: string): BoardData {
 	};
 }
 
+// Full column set with a single task placed in `columnId`, so the level-triggered effect's
+// facet-driven column mapping (awaiting-review → review, agent-turn → bounce, interrupted → trash)
+// can be observed end-to-end.
+function createBoardWithTaskInColumn(taskId: string, columnId: BoardData["columns"][number]["id"]): BoardData {
+	const columns: BoardData["columns"] = [
+		{ id: "backlog", title: "Backlog", cards: [] },
+		{ id: "in_progress", title: "In Progress", cards: [] },
+		{ id: "review", title: "Review", cards: [] },
+		{ id: "validation", title: "Validation", cards: [] },
+		{ id: "trash", title: "Done", cards: [] },
+	];
+	for (const column of columns) {
+		if (column.id === columnId) {
+			column.cards = [createTask(taskId, "Mapped task", 1)];
+		}
+	}
+	return { columns, dependencies: [] };
+}
+
 const NOOP_STOP_SESSION = async (): Promise<void> => {};
 const NOOP_CLEANUP_WORKSPACE = async (): Promise<null> => null;
 const NOOP_FETCH_WORKSPACE_INFO = async (): Promise<null> => null;
 const NOOP_SEND_TASK_INPUT = async (): Promise<{ ok: boolean }> => ({ ok: true });
 const NOOP_RUN_AUTO_REVIEW = async (): Promise<boolean> => false;
+
+// The level-triggered column-mapping effect only needs "unavailable" programmatic moves (so it falls
+// through to the direct moveTaskToColumn path) plus no-op linked-backlog actions. Shared by the
+// facet-driven mapping tests below to avoid repeating the full mock objects.
+function mockUnavailableProgrammaticCardMoves(): void {
+	useProgrammaticCardMovesMock.mockReturnValue({
+		handleProgrammaticCardMoveReady: () => {},
+		setRequestMoveTaskToTrashHandler: () => {},
+		tryProgrammaticCardMove: () => "unavailable",
+		consumeProgrammaticCardMove: () => ({}),
+		resolvePendingProgrammaticTrashMove: () => {},
+		waitForProgrammaticCardMoveAvailability: async () => {},
+		resetProgrammaticCardMoves: () => {},
+		requestMoveTaskToTrashWithAnimation: async () => {},
+		programmaticCardMoveCycle: 0,
+	});
+}
+
+function mockNoopLinkedBacklogTaskActions(): void {
+	useLinkedBacklogTaskActionsMock.mockReturnValue({
+		handleCreateDependency: () => {},
+		handleDeleteDependency: () => {},
+		confirmMoveTaskToTrash: async () => {},
+		requestMoveTaskToTrash: async () => {},
+	});
+}
 
 interface HookSnapshot {
 	handleRestoreTaskFromTrash: (taskId: string) => void;
@@ -1028,5 +1073,96 @@ describe("useBoardInteractions", () => {
 		});
 		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
 		expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-val", "validation");
+	});
+
+	// Stage 3 ④：列自动流转的 state 读已翻为 facet 权威（resolveSessionFacets + isAwaitingUserReviewTurn /
+	// turnOwner==="agent" / liveness==="interrupted"）。下面钉住「行为保持 + facet 采信 + exited 折叠不偷渡
+	// distinction ②」。
+	describe("facet 驱动的列自动流转（Stage 3 ④）", () => {
+		const renderWithSessions = async (
+			board: BoardData,
+			setBoard: Dispatch<SetStateAction<BoardData>>,
+			sessions: Record<string, RuntimeTaskSessionSummary>,
+		): Promise<void> => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopLinkedBacklogTaskActions();
+			await act(async () => {
+				root.render(
+					<HookHarness
+						board={board}
+						setBoard={setBoard}
+						ensureTaskWorkspace={async () => ({ ok: true as const })}
+						startTaskSession={async () => ({ ok: true as const })}
+						initialSessions={sessions}
+					/>,
+				);
+			});
+		};
+		const cardIdsIn = (board: BoardData, columnId: BoardData["columns"][number]["id"]): string[] =>
+			(board.columns.find((column) => column.id === columnId)?.cards ?? []).map((card) => card.id);
+
+		it("awaiting_review 会话从 In Progress 自动落位 Review（等价旧 state==='awaiting_review'）", async () => {
+			let currentBoard = createBoardWithTaskInColumn("task-ar", "in_progress");
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			await renderWithSessions(currentBoard, setBoard, {
+				"task-ar": createRunningSession("task-ar", { state: "awaiting_review", reviewReason: "exit" }),
+			});
+			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-ar"]);
+			expect(cardIdsIn(currentBoard, "in_progress")).toEqual([]);
+		});
+
+		it("user+exited 会话照旧自动落位 Review（exited 折叠进等人审回合，不偷渡 distinction ②）", async () => {
+			let currentBoard = createBoardWithTaskInColumn("task-exited", "in_progress");
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			await renderWithSessions(currentBoard, setBoard, {
+				"task-exited": createRunningSession("task-exited", {
+					state: "awaiting_review",
+					turnOwner: "user",
+					liveness: "exited",
+					userTurnKind: "review",
+					pid: null,
+				}),
+			});
+			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-exited"]);
+			expect(cardIdsIn(currentBoard, "in_progress")).toEqual([]);
+		});
+
+		it("显式 facet 被采信优先于背离的 legacy state：state='running' 但 facet=user/exited → 落位 Review", async () => {
+			let currentBoard = createBoardWithTaskInColumn("task-div", "in_progress");
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			// 旧代码读 legacy state==='running' 不会把它移出 In Progress；新代码读 facet（user 回合）→ 移入 Review。
+			await renderWithSessions(currentBoard, setBoard, {
+				"task-div": createRunningSession("task-div", {
+					state: "running",
+					turnOwner: "user",
+					liveness: "exited",
+					userTurnKind: "review",
+				}),
+			});
+			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-div"]);
+			expect(cardIdsIn(currentBoard, "in_progress")).toEqual([]);
+		});
+
+		it("interrupted 会话从 In Progress 自动移入 Done（trash）（等价旧 state==='interrupted'）", async () => {
+			let currentBoard = createBoardWithTaskInColumn("task-int", "in_progress");
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			await renderWithSessions(currentBoard, setBoard, {
+				"task-int": createRunningSession("task-int", {
+					state: "interrupted",
+					reviewReason: "interrupted",
+					pid: null,
+				}),
+			});
+			expect(cardIdsIn(currentBoard, "trash")).toEqual(["task-int"]);
+			expect(cardIdsIn(currentBoard, "in_progress")).toEqual([]);
+		});
 	});
 });
