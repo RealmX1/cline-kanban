@@ -1,0 +1,319 @@
+import { describe, expect, it } from "vitest";
+
+import type { RuntimeTaskConnectionRetry, RuntimeTaskHookActivity, RuntimeTaskSessionSummary } from "@/runtime/types";
+import {
+	deriveCardSessionActivity,
+	isCardCreditLimitError,
+	SESSION_ACTIVITY_COLOR,
+} from "./board-card-session-activity";
+
+// 本套件锁定 deriveCardSessionActivity / isCardCreditLimitError 从 board-card.tsx 抽出时的「迁移前
+// 可见行为基线」（双轴会话状态重构 Stage 3 首步，零行为变更）。Stage 3 后续闸把派生改读 turnOwner /
+// liveness（computing/quiet/exited）/ userTurnKind 三轴后，这些断言即作为「不得回归既有卡片文案 /
+// 状态点颜色」的护栏。
+
+function makeHookActivity(overrides: Partial<RuntimeTaskHookActivity> = {}): RuntimeTaskHookActivity {
+	return {
+		activityText: null,
+		toolName: null,
+		toolInputSummary: null,
+		finalMessage: null,
+		hookEventName: null,
+		notificationType: null,
+		source: "cline-sdk",
+		...overrides,
+	};
+}
+
+function makeConnectionRetry(retryCount: number): RuntimeTaskConnectionRetry {
+	return {
+		status: "retrying",
+		retryCount,
+		firstErrorAt: 1,
+		lastAttemptAt: null,
+		nextAttemptAt: null,
+	};
+}
+
+function makeSummary(
+	state: RuntimeTaskSessionSummary["state"],
+	overrides: Partial<RuntimeTaskSessionSummary> = {},
+): RuntimeTaskSessionSummary {
+	return {
+		taskId: "task-1",
+		state,
+		agentId: "cline",
+		workspacePath: "/tmp/worktree",
+		pid: null,
+		startedAt: 1,
+		updatedAt: 1,
+		lastOutputAt: 1,
+		reviewReason: null,
+		exitCode: null,
+		lastHookAt: 1,
+		latestHookActivity: null,
+		latestTurnCheckpoint: null,
+		previousTurnCheckpoint: null,
+		...overrides,
+	};
+}
+
+describe("isCardCreditLimitError", () => {
+	it("returns false for an undefined summary", () => {
+		expect(isCardCreditLimitError(undefined)).toBe(false);
+	});
+
+	it("only treats settled states (awaiting_review / failed / interrupted) as credit-limit candidates", () => {
+		const creditLimitHook = makeHookActivity({ notificationType: "credit_limit" });
+		// running 仍在 agent 回合，不视为「额度耗尽待处理」。
+		expect(isCardCreditLimitError(makeSummary("running", { latestHookActivity: creditLimitHook }))).toBe(false);
+		expect(isCardCreditLimitError(makeSummary("awaiting_review", { latestHookActivity: creditLimitHook }))).toBe(
+			true,
+		);
+		expect(isCardCreditLimitError(makeSummary("failed", { latestHookActivity: creditLimitHook }))).toBe(true);
+		expect(isCardCreditLimitError(makeSummary("interrupted", { latestHookActivity: creditLimitHook }))).toBe(true);
+	});
+
+	it("requires the credit_limit notification type", () => {
+		expect(isCardCreditLimitError(makeSummary("awaiting_review"))).toBe(false);
+		expect(
+			isCardCreditLimitError(
+				makeSummary("awaiting_review", { latestHookActivity: makeHookActivity({ notificationType: "attention" }) }),
+			),
+		).toBe(false);
+	});
+});
+
+describe("deriveCardSessionActivity", () => {
+	it("returns null when there is no summary", () => {
+		expect(deriveCardSessionActivity(undefined)).toBeNull();
+	});
+
+	it("returns null for an idle session with no activity", () => {
+		expect(deriveCardSessionActivity(makeSummary("idle"))).toBeNull();
+	});
+
+	it("returns null for an interrupted session with no activity to preview", () => {
+		expect(deriveCardSessionActivity(makeSummary("interrupted"))).toBeNull();
+	});
+
+	describe("credit limit (highest priority)", () => {
+		it("shows the out-of-credits warning", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", {
+					latestHookActivity: makeHookActivity({ notificationType: "credit_limit" }),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.warning, text: "Out of credits" });
+		});
+
+		it("takes precedence over an active connection retry", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", {
+					latestHookActivity: makeHookActivity({ notificationType: "credit_limit" }),
+					connectionRetry: makeConnectionRetry(3),
+				}),
+			);
+			expect(result?.text).toBe("Out of credits");
+		});
+	});
+
+	describe("connection retry (above hook activity)", () => {
+		it("shows a plain reconnecting label before any auto-continue", () => {
+			const result = deriveCardSessionActivity(makeSummary("running", { connectionRetry: makeConnectionRetry(0) }));
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.warning, text: "重连中…" });
+		});
+
+		it("includes the auto-continue attempt count once it is non-zero", () => {
+			const result = deriveCardSessionActivity(makeSummary("running", { connectionRetry: makeConnectionRetry(2) }));
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.warning, text: "重连中…（已续跑 2 次）" });
+		});
+
+		it("takes precedence over a concurrent tool-call activity", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					connectionRetry: makeConnectionRetry(1),
+					latestHookActivity: makeHookActivity({
+						activityText: "Using Read",
+						toolName: "Read",
+						toolInputSummary: "src/index.ts",
+					}),
+				}),
+			);
+			expect(result?.text).toBe("重连中…（已续跑 1 次）");
+		});
+	});
+
+	describe("awaiting-review final message", () => {
+		it("shows the final message verbatim regardless of hook event name", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", {
+					latestHookActivity: makeHookActivity({ finalMessage: "Done reviewing", hookEventName: "stop" }),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "Done reviewing" });
+		});
+	});
+
+	describe("streaming final message (no tool, assistant_delta / agent_end / turn_start)", () => {
+		it("renders running streams as thinking-colored previews", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					latestHookActivity: makeHookActivity({
+						activityText: "Reviewing the final diff",
+						finalMessage: "Reviewing the final diff",
+						hookEventName: "assistant_delta",
+					}),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Reviewing the final diff" });
+		});
+
+		it("renders non-running streams as success-colored previews", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("interrupted", {
+					latestHookActivity: makeHookActivity({ finalMessage: "Wrapped up", hookEventName: "agent_end" }),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "Wrapped up" });
+		});
+	});
+
+	describe("tool-call labels (compact format)", () => {
+		it("formats an explicit cline tool name plus input summary", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					latestHookActivity: makeHookActivity({
+						activityText: "Using Read",
+						toolName: "Read",
+						toolInputSummary: "src/index.ts",
+					}),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Read(src/index.ts)" });
+		});
+
+		it("recovers the input summary from the activity text when not provided separately", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					latestHookActivity: makeHookActivity({ activityText: "Completed Read: src/index.ts", toolName: "Read" }),
+				}),
+			);
+			expect(result?.text).toBe("Read(src/index.ts)");
+		});
+
+		it("parses a bare codex-style activity line with no explicit tool name", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					latestHookActivity: makeHookActivity({ activityText: "Calling Read: src/index.ts" }),
+				}),
+			);
+			expect(result?.text).toBe("Read(src/index.ts)");
+		});
+
+		it("marks a failed tool call red and strips trailing failure detail from the summary", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					latestHookActivity: makeHookActivity({
+						activityText: "Failed Read: boom: extra detail",
+						toolName: "Read",
+					}),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "Read(boom)" });
+		});
+
+		it("prefers a tool label over a thinking fallback when a non-matching activity text carries a tool", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					latestHookActivity: makeHookActivity({
+						activityText: "Agent active",
+						toolName: "Read",
+						toolInputSummary: "src/index.ts",
+						finalMessage: "Looking at the file now",
+						hookEventName: "assistant_delta",
+					}),
+				}),
+			);
+			expect(result?.text).toBe("Read(src/index.ts)");
+		});
+	});
+
+	describe("activity-text prefixes (no tool label)", () => {
+		it("treats a Final: prefix as a success message", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", { latestHookActivity: makeHookActivity({ activityText: "Final: All done" }) }),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "All done" });
+		});
+
+		it("strips an Agent: prefix while keeping the thinking color for running sessions", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("running", {
+					latestHookActivity: makeHookActivity({ activityText: "Agent: checking the next file" }),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "checking the next file" });
+		});
+
+		it("colors waiting-for-approval gold", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", {
+					latestHookActivity: makeHookActivity({ activityText: "Waiting for approval to proceed" }),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.waiting, text: "Waiting for approval to proceed" });
+		});
+
+		it("colors waiting-for-review green", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", {
+					latestHookActivity: makeHookActivity({ activityText: "Waiting for review of the diff" }),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review of the diff" });
+		});
+
+		it("collapses generic activity sentinels into a Thinking… placeholder", () => {
+			for (const activityText of ["Agent active", "Working on task", "Resumed prior session"]) {
+				const result = deriveCardSessionActivity(
+					makeSummary("running", { latestHookActivity: makeHookActivity({ activityText }) }),
+				);
+				expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." });
+			}
+		});
+
+		it("colors arbitrary activity text red when the session itself failed", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("failed", { latestHookActivity: makeHookActivity({ activityText: "Something broke" }) }),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "Something broke" });
+		});
+	});
+
+	describe("state fallbacks when there is no activity text", () => {
+		it("uses the failure final message for a failed session", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("failed", {
+					latestHookActivity: makeHookActivity({ finalMessage: "spawn boom", hookEventName: "stop" }),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "spawn boom" });
+		});
+
+		it("falls back to a generic failed-to-start message when nothing else is available", () => {
+			const result = deriveCardSessionActivity(makeSummary("failed"));
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "Task failed to start" });
+		});
+
+		it("shows a waiting-for-review placeholder for a bare awaiting_review session", () => {
+			const result = deriveCardSessionActivity(makeSummary("awaiting_review"));
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" });
+		});
+
+		it("shows a Thinking… placeholder for a bare running session", () => {
+			const result = deriveCardSessionActivity(makeSummary("running"));
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." });
+		});
+	});
+});

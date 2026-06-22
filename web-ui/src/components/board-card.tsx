@@ -1,6 +1,5 @@
 import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
-import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
 import {
 	AlertCircle,
@@ -34,21 +33,12 @@ import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatPathForDisplay } from "@/utils/path-display";
 import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
-
-interface CardSessionActivity {
-	dotColor: string;
-	text: string;
-}
-
-const SESSION_ACTIVITY_COLOR = {
-	thinking: "var(--color-status-blue)",
-	success: "var(--color-status-green)",
-	waiting: "var(--color-status-gold)",
-	error: "var(--color-status-red)",
-	warning: "var(--color-status-orange)",
-	muted: "var(--color-text-tertiary)",
-	secondary: "var(--color-text-secondary)",
-} as const;
+import {
+	type CardSessionActivity,
+	deriveCardSessionActivity,
+	isCardCreditLimitError,
+	SESSION_ACTIVITY_COLOR,
+} from "./board-card-session-activity";
 
 // 会跳转的列（单击打开详情、替换看板）上，单击先延迟这么久，留出双击改标题的拦截窗口。
 const CLICK_ACTIVATION_DELAY_MS = 220;
@@ -62,162 +52,6 @@ function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: strin
 	} catch {
 		return null;
 	}
-}
-
-function extractToolInputSummaryFromActivityText(activityText: string, toolName: string): string | null {
-	const escapedToolName = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const match = activityText.match(
-		new RegExp(`^(?:Using|Completed|Failed|Calling)\\s+${escapedToolName}(?::\\s*(.+))?$`),
-	);
-	if (!match) {
-		return null;
-	}
-	const rawSummary = match[1]?.trim() ?? "";
-	if (!rawSummary) {
-		return null;
-	}
-	if (activityText.startsWith("Failed ")) {
-		const [operationSummary] = rawSummary.split(": ");
-		return operationSummary?.trim() || null;
-	}
-	return rawSummary;
-}
-
-function parseToolCallFromActivityText(
-	activityText: string,
-): { toolName: string; toolInputSummary: string | null } | null {
-	const match = activityText.match(/^(?:Using|Completed|Failed|Calling)\s+([^:()]+?)(?::\s*(.+))?$/);
-	if (!match?.[1]) {
-		return null;
-	}
-	const toolName = match[1].trim();
-	if (!toolName) {
-		return null;
-	}
-	const rawSummary = match[2]?.trim() ?? "";
-	if (!rawSummary) {
-		return { toolName, toolInputSummary: null };
-	}
-	if (activityText.startsWith("Failed ")) {
-		const [operationSummary] = rawSummary.split(": ");
-		return {
-			toolName,
-			toolInputSummary: operationSummary?.trim() || null,
-		};
-	}
-	return {
-		toolName,
-		toolInputSummary: rawSummary,
-	};
-}
-
-function resolveToolCallLabel(
-	activityText: string | undefined,
-	toolName: string | null,
-	toolInputSummary: string | null,
-): string | null {
-	if (toolName) {
-		const parsedSummary = extractToolInputSummaryFromActivityText(activityText ?? "", toolName);
-		if (!toolInputSummary && !parsedSummary) {
-			return null;
-		}
-		return formatClineToolCallLabel(toolName, toolInputSummary ?? parsedSummary);
-	}
-	if (!activityText) {
-		return null;
-	}
-	const parsed = parseToolCallFromActivityText(activityText);
-	if (!parsed) {
-		return null;
-	}
-	return formatClineToolCallLabel(parsed.toolName, parsed.toolInputSummary);
-}
-
-function isCardCreditLimitError(summary: RuntimeTaskSessionSummary | undefined): boolean {
-	if (!summary) {
-		return false;
-	}
-	if (summary.state !== "awaiting_review" && summary.state !== "failed" && summary.state !== "interrupted") {
-		return false;
-	}
-	return summary.latestHookActivity?.notificationType === "credit_limit";
-}
-
-function getCardSessionActivity(summary: RuntimeTaskSessionSummary | undefined): CardSessionActivity | null {
-	if (!summary) {
-		return null;
-	}
-	if (isCardCreditLimitError(summary)) {
-		return { dotColor: SESSION_ACTIVITY_COLOR.warning, text: "Out of credits" };
-	}
-	// 连接重试是最显著的「卡住」状态：优先于普通活动文案展示。
-	if (summary.connectionRetry?.status === "retrying") {
-		const attempts = summary.connectionRetry.retryCount;
-		return {
-			dotColor: SESSION_ACTIVITY_COLOR.warning,
-			text: attempts > 0 ? `重连中…（已续跑 ${attempts} 次）` : "重连中…",
-		};
-	}
-	const hookActivity = summary.latestHookActivity;
-	const activityText = hookActivity?.activityText?.trim();
-	const toolName = hookActivity?.toolName?.trim() ?? null;
-	const toolInputSummary = hookActivity?.toolInputSummary?.trim() ?? null;
-	const finalMessage = hookActivity?.finalMessage?.trim();
-	const hookEventName = hookActivity?.hookEventName?.trim() ?? null;
-	if (summary.state === "awaiting_review" && finalMessage) {
-		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: finalMessage };
-	}
-	if (
-		finalMessage &&
-		!toolName &&
-		(hookEventName === "assistant_delta" || hookEventName === "agent_end" || hookEventName === "turn_start")
-	) {
-		return {
-			dotColor: summary.state === "running" ? SESSION_ACTIVITY_COLOR.thinking : SESSION_ACTIVITY_COLOR.success,
-			text: finalMessage,
-		};
-	}
-	if (activityText) {
-		let dotColor: string =
-			summary.state === "failed" ? SESSION_ACTIVITY_COLOR.error : SESSION_ACTIVITY_COLOR.thinking;
-		let text = activityText;
-		const toolCallLabel = resolveToolCallLabel(activityText, toolName, toolInputSummary);
-		if (toolCallLabel) {
-			if (text.startsWith("Failed ")) {
-				dotColor = SESSION_ACTIVITY_COLOR.error;
-			}
-			return {
-				dotColor,
-				text: toolCallLabel,
-			};
-		}
-		if (text.startsWith("Final: ")) {
-			dotColor = SESSION_ACTIVITY_COLOR.success;
-			text = text.slice(7);
-		} else if (text.startsWith("Agent: ")) {
-			text = text.slice(7);
-		} else if (text.startsWith("Waiting for approval")) {
-			dotColor = SESSION_ACTIVITY_COLOR.waiting;
-		} else if (text.startsWith("Waiting for review")) {
-			dotColor = SESSION_ACTIVITY_COLOR.success;
-		} else if (text.startsWith("Failed ")) {
-			dotColor = SESSION_ACTIVITY_COLOR.error;
-		} else if (text === "Agent active" || text === "Working on task" || text.startsWith("Resumed")) {
-			return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };
-		}
-		return { dotColor, text };
-	}
-	if (summary.state === "failed") {
-		const failedText = finalMessage ?? activityText ?? "Task failed to start";
-		return { dotColor: SESSION_ACTIVITY_COLOR.error, text: failedText };
-	}
-	if (summary.state === "awaiting_review") {
-		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" };
-	}
-	if (summary.state === "running") {
-		return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };
-	}
-	return null;
 }
 
 export function BoardCard({
@@ -291,7 +125,7 @@ export function BoardCard({
 	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog。
 	const isInlineTitleEditEnabled = onSaveTitle != null && (isNavigatingColumn || isTrashCard);
 	const clickActivationTimerRef = useRef<number | null>(null);
-	const rawSessionActivity = useMemo(() => getCardSessionActivity(sessionSummary), [sessionSummary]);
+	const rawSessionActivity = useMemo(() => deriveCardSessionActivity(sessionSummary), [sessionSummary]);
 	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
 	const lastSessionActivityCardIdRef = useRef<string | null>(null);
 	if (lastSessionActivityCardIdRef.current !== card.id) {
