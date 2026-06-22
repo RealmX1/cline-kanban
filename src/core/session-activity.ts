@@ -225,8 +225,9 @@ export function isSessionInActiveTurn(facets: SessionFacets): boolean {
 //   - 等价于 projectLegacyState(facets)==="awaiting_review"；全表证明见 session-facets.test.ts。
 //   - 涵盖 user+live 与 user+exited（旧 projectLegacyState 把两者压扁为 awaiting_review），故对
 //     live↔exited 不敏感，凡读它的消费者迁移皆为零行为漂移、且不会偷渡 distinction ②。
-//   - 单一真相源：项目计数叠加、claude/codex prompt-ready 检测器等共用本判据，避免各自手写
-//     `turnOwner==="user" && liveness∉{failed,interrupted}` 子集（计划反对的「每消费者维护子集」反模式）。
+//   - 单一真相源：项目计数叠加、claude/codex prompt-ready 检测器、hook 事件转换闸（hooks-api）等
+//     共用本判据，避免各自手写 `turnOwner==="user" && liveness∉{failed,interrupted}` 子集
+//     （计划反对的「每消费者维护子集」反模式）。
 export function isAwaitingUserReviewTurn(facets: SessionFacets): boolean {
 	return facets.turnOwner === "user" && isSessionInActiveTurn(facets);
 }

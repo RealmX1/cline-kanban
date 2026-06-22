@@ -1,14 +1,10 @@
-import type {
-	RuntimeHookEvent,
-	RuntimeHookIngestResponse,
-	RuntimeTaskSessionSummary,
-	RuntimeTaskTurnCheckpoint,
-} from "../core/api-contract";
+import type { RuntimeHookIngestResponse, RuntimeTaskTurnCheckpoint } from "../core/api-contract";
 import { parseHookIngestRequest } from "../core/api-validation";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
+import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
 export interface CreateHooksApiDependencies {
 	getWorkspacePathById: (workspaceId: string) => string | null;
@@ -21,19 +17,6 @@ export interface CreateHooksApiDependencies {
 		turn: number;
 	}) => Promise<RuntimeTaskTurnCheckpoint>;
 	deleteTaskTurnCheckpointRef?: (input: { cwd: string; ref: string }) => Promise<void>;
-}
-
-function canTransitionTaskForHookEvent(summary: RuntimeTaskSessionSummary, event: RuntimeHookEvent): boolean {
-	if (event === "activity") {
-		return false;
-	}
-	if (event === "to_review") {
-		return summary.state === "running";
-	}
-	return (
-		summary.state === "awaiting_review" &&
-		(summary.reviewReason === "attention" || summary.reviewReason === "hook" || summary.reviewReason === "error")
-	);
 }
 
 export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcContext["hooksApi"] {
