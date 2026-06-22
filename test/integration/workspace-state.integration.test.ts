@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
+import { applySessionFacets, SESSION_SUMMARY_SCHEMA_VERSION } from "../../src/core/session-activity";
 import type { WorkspaceStateConflictError } from "../../src/state/workspace-state";
 import {
 	getWorkspacesRootPath,
@@ -397,6 +398,82 @@ describe.sequential("workspace-state integration", () => {
 
 				await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("sessions.json");
 				await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("state");
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	// Stage 2 读时回填回归：旧盘 sessions.json（facet 全缺）在 loadWorkspaceState 时被即时回填出
+	// 与 legacy state 自洽的三 facet + schemaVersion；已带 facet 的 session 不被 clobber；且纯读
+	// 无副作用——on-disk 文件不被改写（回填只在内存、随下次 save 落盘）。
+	it("backfills consistent session facets on read without rewriting the file", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-session-facet-backfill-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-legacy-sessions");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+
+				const context = await loadWorkspaceContext(workspacePath);
+				mkdirSync(context.statePath, { recursive: true });
+				writeFileSync(
+					join(context.statePath, "board.json"),
+					JSON.stringify(createBoard("Valid board"), null, 2),
+					"utf8",
+				);
+
+				// 旧盘：两个无-facet legacy session（running / awaiting_review 进程已退）+ 一个已带 facet 的。
+				const legacyRunning: RuntimeTaskSessionSummary = {
+					...createSessionSummary("legacy-running"),
+					state: "running",
+					pid: 4321,
+					lastOutputAt: Date.now(),
+				};
+				const legacyExited: RuntimeTaskSessionSummary = {
+					...createSessionSummary("legacy-exited"),
+					state: "awaiting_review",
+					pid: null,
+					reviewReason: "exit",
+				};
+				const alreadyFaceted = applySessionFacets({
+					...createSessionSummary("already-faceted"),
+					state: "awaiting_review",
+					pid: 99,
+					reviewReason: "hook",
+				});
+				const sessionsPath = join(context.statePath, "sessions.json");
+				const rawSessionsOnDisk = JSON.stringify(
+					{
+						"legacy-running": legacyRunning,
+						"legacy-exited": legacyExited,
+						"already-faceted": alreadyFaceted,
+					},
+					null,
+					2,
+				);
+				writeFileSync(sessionsPath, rawSessionsOnDisk, "utf8");
+
+				const loaded = await loadWorkspaceState(workspacePath);
+
+				// running 旧盘 → agent/live；盖 schemaVersion。
+				const running = loaded.sessions["legacy-running"];
+				expect(running?.turnOwner).toBe("agent");
+				expect(running?.liveness).toBe("live");
+				expect(running?.userTurnKind).toBe(null);
+				expect(running?.schemaVersion).toBe(SESSION_SUMMARY_SCHEMA_VERSION);
+
+				// awaiting_review + pid:null 旧盘 → exited（legacy state 表达不了、读时回填保真）。
+				const exited = loaded.sessions["legacy-exited"];
+				expect(exited?.turnOwner).toBe("user");
+				expect(exited?.liveness).toBe("exited");
+				expect(exited?.userTurnKind).toBe("review");
+
+				// 已带 facet 的 session 原样保留、不被 clobber。
+				expect(loaded.sessions["already-faceted"]).toEqual(alreadyFaceted);
+
+				// 纯读无副作用：on-disk sessions.json 未被改写（回填只在内存，随下次 save 落盘）。
+				expect(readFileSync(sessionsPath, "utf8")).toBe(rawSessionsOnDisk);
 			} finally {
 				cleanup();
 			}

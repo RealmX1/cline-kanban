@@ -183,3 +183,39 @@ export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeT
 		schemaVersion: SESSION_SUMMARY_SCHEMA_VERSION,
 	};
 }
+
+// ── 读侧 facet 权威解析（Stage 2 翻转真相源）─────────────────────────────────────
+// 决策型消费者一律经此读 facet、不再读 legacy `state`，从而绕开 projectLegacyState 对
+// live↔exited 的有损压扁（投影只在 new→old 方向有损；facet 本身保真）。
+//
+// 解析优先级：
+//   - summary 已带三 facet（经 applySessionFacets 漏斗 / 读时回填 backfillSessionFacets）→ 直接采信；
+//   - facet 全缺（未迁移旧盘残留、或 web-ui 无-facet 构造点）→ 即时从 legacy state 派生（与读时
+//     回填同一映射 deriveSessionFacetsFromLegacyState，故「在线派生」与「落盘回填」结果恒一致）。
+// 三 facet 由 superRefine 护栏保证共生（要么全置、要么全缺），故仅以 turnOwner 是否 undefined 判定
+// 「已带 facet」即可；为容错对另两者也作显式 defined 收窄。
+export function resolveSessionFacets(summary: RuntimeTaskSessionSummary): SessionFacets {
+	if (summary.turnOwner !== undefined && summary.liveness !== undefined && summary.userTurnKind !== undefined) {
+		return {
+			turnOwner: summary.turnOwner,
+			liveness: summary.liveness,
+			userTurnKind: summary.userTurnKind,
+		};
+	}
+	return deriveSessionFacetsFromLegacyState(summary.state, {
+		reviewReason: summary.reviewReason,
+		pid: summary.pid,
+		connectionRetryActive: summary.connectionRetry != null,
+	});
+}
+
+// 决策型「会话是否处于活跃回合」判据（facet 权威，绕开有损 legacy 投影）。
+// 严格等价于 legacy `state ∈ {running, awaiting_review}`：有回合主（turnOwner 非 null）且未落入
+// 终止态（failed=spawn 失败 / interrupted=被中断）。
+//   - 全表等价证明见 session-facets.test.ts（全 state×pid×retry×reviewReason 与旧判据逐项对照）。
+//   - 关键：exited（进程已退但仍等人审）仍判活跃——这正是 legacy 投影压扁、而 facet 保真的区分点。
+//     未来「进程已退」类 UX（Terminal stream closed / 标记被打断会话）据 liveness="exited" 细分，
+//     而本活跃判据对 live/exited 不敏感，故此处迁移为纯重构、零行为漂移。
+export function isSessionInActiveTurn(facets: SessionFacets): boolean {
+	return facets.turnOwner !== null && facets.liveness !== "failed" && facets.liveness !== "interrupted";
+}

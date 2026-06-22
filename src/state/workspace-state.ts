@@ -18,6 +18,7 @@ import {
 	runtimeWorkspaceStateSaveRequestSchema,
 } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
+import { applySessionFacets } from "../core/session-activity";
 import { updateTaskDependencies } from "../core/task-board-mutations";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
@@ -333,10 +334,34 @@ export async function loadWorkspaceBoardById(workspaceId: string): Promise<Runti
 	return await readWorkspaceBoard(workspaceId);
 }
 
+// Stage 2 读时回填：对「三 facet 全缺」的旧盘 per-session 即时经 applySessionFacets 从 legacy
+// state 派生自洽 facet + 盖 schemaVersion；已带 facet 的 session 原样保留（绝不 clobber——未来源头
+// 权威信号如 starting/userTurnKind 细分须保真）。纯内存变换、读路径无副作用：回填结果随下一次正常
+// save 落盘（比照 reconcileBoardColumns 的 backfill-on-read / persist-on-next-save 模式，不在读时触发
+// 写盘 / 抬 revision）。superRefine 在加载边界已保证：facet 若存在必三者共生，故仅判 turnOwner 即可。
+function backfillSessionFacets(
+	sessions: Record<string, RuntimeTaskSessionSummary>,
+): Record<string, RuntimeTaskSessionSummary> {
+	let changed = false;
+	const next: Record<string, RuntimeTaskSessionSummary> = {};
+	for (const [taskId, summary] of Object.entries(sessions)) {
+		const hasFacets =
+			summary.turnOwner !== undefined && summary.liveness !== undefined && summary.userTurnKind !== undefined;
+		if (hasFacets) {
+			next[taskId] = summary;
+			continue;
+		}
+		next[taskId] = applySessionFacets(summary);
+		changed = true;
+	}
+	return changed ? next : sessions;
+}
+
 async function readWorkspaceSessions(workspaceId: string): Promise<Record<string, RuntimeTaskSessionSummary>> {
 	const sessionsPath = getWorkspaceSessionsPath(workspaceId);
 	const rawSessions = await readJsonFile(sessionsPath);
-	return parsePersistedStateFile(sessionsPath, SESSIONS_FILENAME, rawSessions, workspaceSessionsSchema, {});
+	const parsed = parsePersistedStateFile(sessionsPath, SESSIONS_FILENAME, rawSessions, workspaceSessionsSchema, {});
+	return backfillSessionFacets(parsed);
 }
 
 async function readWorkspaceMeta(workspaceId: string): Promise<WorkspaceStateMeta> {

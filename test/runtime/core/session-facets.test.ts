@@ -11,7 +11,9 @@ import {
 	applySessionFacets,
 	deriveSessionFacetsFromLegacyState,
 	deriveUserTurnKind,
+	isSessionInActiveTurn,
 	projectLegacyState,
+	resolveSessionFacets,
 	SESSION_SUMMARY_SCHEMA_VERSION,
 	type SessionFacets,
 } from "../../../src/core/session-activity";
@@ -371,5 +373,76 @@ describe("superRefine 不变量护栏", () => {
 
 	it("拒绝 null 回合 + 非 null userTurnKind", () => {
 		expect(parses({ state: "idle", turnOwner: null, liveness: "none", userTurnKind: "review" })).toBe(false);
+	});
+});
+
+// Stage 2 读侧 facet 权威：决策型消费者经 resolveSessionFacets 读 facet（不再读 legacy state），
+// isSessionInActiveTurn 是 facet 版「活跃回合」判据，须与旧 state∈{running,awaiting_review} 全表等价。
+describe("resolveSessionFacets（在则采信、缺则即时派生）", () => {
+	it("已带三 facet → 原样采信（即使与 legacy state 在线派生结果不同，也信 present 值）", () => {
+		// awaiting_review + pid 非 null：在线派生本会得 live；present 显式 exited 必须被采信、不被覆盖。
+		const summary = makeSummary({
+			state: "awaiting_review",
+			pid: 123,
+			reviewReason: "exit",
+			turnOwner: "user",
+			liveness: "exited",
+			userTurnKind: "review",
+		});
+		expect(resolveSessionFacets(summary)).toEqual({
+			turnOwner: "user",
+			liveness: "exited",
+			userTurnKind: "review",
+		});
+	});
+
+	it("facet 全缺（旧盘残留）→ 即时派生，与 deriveSessionFacetsFromLegacyState 恒一致", () => {
+		const summary = makeSummary({ state: "running", pid: 123, connectionRetry: ACTIVE_RETRY });
+		expect(resolveSessionFacets(summary)).toEqual(
+			deriveSessionFacetsFromLegacyState("running", {
+				reviewReason: null,
+				pid: 123,
+				connectionRetryActive: true,
+			}),
+		);
+		expect(resolveSessionFacets(summary)).toEqual({ turnOwner: "agent", liveness: "retrying", userTurnKind: null });
+	});
+});
+
+describe("isSessionInActiveTurn（facet 版活跃判据，零行为漂移）", () => {
+	it("全 state×pid×retry×reviewReason：与旧 state∈{running,awaiting_review} 逐项等价", () => {
+		for (const state of ALL_STATES) {
+			for (const pid of [null, 123] as const) {
+				for (const connectionRetryActive of [false, true] as const) {
+					for (const reviewReason of ALL_REVIEW_REASONS) {
+						const facets = deriveSessionFacetsFromLegacyState(state, {
+							reviewReason,
+							pid,
+							connectionRetryActive,
+						});
+						const legacyActive = state === "running" || state === "awaiting_review";
+						expect(isSessionInActiveTurn(facets)).toBe(legacyActive);
+					}
+				}
+			}
+		}
+	});
+
+	it("exited（进程已退仍等人审）仍判活跃——legacy 投影压扁、facet 保真的区分点", () => {
+		const exited = deriveSessionFacetsFromLegacyState("awaiting_review", {
+			reviewReason: "exit",
+			pid: null,
+			connectionRetryActive: false,
+		});
+		expect(exited.liveness).toBe("exited");
+		expect(isSessionInActiveTurn(exited)).toBe(true);
+	});
+
+	it("idle / failed / interrupted → 非活跃", () => {
+		expect(isSessionInActiveTurn({ turnOwner: null, liveness: "none", userTurnKind: null })).toBe(false);
+		expect(isSessionInActiveTurn({ turnOwner: "user", liveness: "failed", userTurnKind: "error" })).toBe(false);
+		expect(isSessionInActiveTurn({ turnOwner: "user", liveness: "interrupted", userTurnKind: "interrupted" })).toBe(
+			false,
+		);
 	});
 });

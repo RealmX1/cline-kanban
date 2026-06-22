@@ -1,5 +1,5 @@
 import type { RuntimeTaskSessionSummary, RuntimeWorkspaceStateResponse } from "../core/api-contract";
-import { applySessionFacets } from "../core/session-activity";
+import { applySessionFacets, isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { updateTaskDependencies } from "../core/task-board-mutations";
 import { listWorkspaceIndexEntries, loadWorkspaceState, saveWorkspaceState } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -142,11 +142,10 @@ async function cleanupTaskWorktreeSetupLocks(
 	);
 }
 
+// Stage 2：关停时「需打断」判据改读 facet（与 workspace-api 的 isActiveTaskSessionState 共用同一
+// facet 真相源）。等价于旧 `state ∈ {running, awaiting_review}`，绕开有损 legacy 投影。
 function shouldInterruptSessionOnShutdown(summary: RuntimeTaskSessionSummary): boolean {
-	if (summary.state === "running") {
-		return true;
-	}
-	return summary.state === "awaiting_review";
+	return isSessionInActiveTurn(resolveSessionFacets(summary));
 }
 
 function collectShutdownInterruptedTaskIds(
