@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createTaskEntryFromPersistedSession } from "../../../src/cline-sdk/cline-message-repository";
 import {
+	type RuntimeAgentId,
 	type RuntimeTaskConnectionRetry,
 	type RuntimeTaskSessionReviewReason,
 	type RuntimeTaskSessionState,
@@ -60,6 +61,9 @@ const ALL_REVIEW_REASONS: readonly RuntimeTaskSessionReviewReason[] = [
 	"hook",
 	"completion",
 ];
+// harness 维度（distinction ② 解阻塞）：Cline SDK（in-process、无 pid 概念）vs 终端/PTY agent（有真实
+// pid）vs 未知(null) 回退。awaiting_review 的 live↔exited 派生现依赖它，故黄金表把它纳入全表覆盖。
+const ALL_AGENT_IDS: readonly (RuntimeAgentId | null)[] = [null, "cline", "claude"];
 
 function facetsOf(summary: RuntimeTaskSessionSummary): SessionFacets {
 	// 仅在 facet 三者皆已 stamp 时调用（applySessionFacets 之后必然成立）。
@@ -87,48 +91,99 @@ describe("deriveUserTurnKind（reviewReason → 人轴种类）", () => {
 describe("deriveSessionFacetsFromLegacyState（old → new）", () => {
 	it("idle → 无回合", () => {
 		expect(
-			deriveSessionFacetsFromLegacyState("idle", { reviewReason: null, pid: null, connectionRetryActive: false }),
+			deriveSessionFacetsFromLegacyState("idle", {
+				reviewReason: null,
+				pid: null,
+				connectionRetryActive: false,
+				agentId: null,
+			}),
 		).toEqual({ turnOwner: null, liveness: "none", userTurnKind: null });
 	});
 
 	it("running 无重试 → agent/live", () => {
 		expect(
-			deriveSessionFacetsFromLegacyState("running", { reviewReason: null, pid: 123, connectionRetryActive: false }),
+			deriveSessionFacetsFromLegacyState("running", {
+				reviewReason: null,
+				pid: 123,
+				connectionRetryActive: false,
+				agentId: "claude",
+			}),
 		).toEqual({ turnOwner: "agent", liveness: "live", userTurnKind: null });
 	});
 
 	it("running + 连接重试 → agent/retrying（仅由 connectionRetry 投影）", () => {
 		expect(
-			deriveSessionFacetsFromLegacyState("running", { reviewReason: null, pid: 123, connectionRetryActive: true }),
+			deriveSessionFacetsFromLegacyState("running", {
+				reviewReason: null,
+				pid: 123,
+				connectionRetryActive: true,
+				agentId: "claude",
+			}),
 		).toEqual({ turnOwner: "agent", liveness: "retrying", userTurnKind: null });
 	});
 
-	it("awaiting_review 进程仍在(pid 非 null) → user/live", () => {
+	it("awaiting_review 终端 agent 进程仍在(pid 非 null) → user/live", () => {
 		expect(
 			deriveSessionFacetsFromLegacyState("awaiting_review", {
 				reviewReason: "hook",
 				pid: 123,
 				connectionRetryActive: false,
+				agentId: "claude",
 			}),
 		).toEqual({ turnOwner: "user", liveness: "live", userTurnKind: "review" });
 	});
 
-	it("awaiting_review 进程已退(pid null) → user/exited（legacy state 表达不了，本方向无损）", () => {
+	it("awaiting_review 终端 agent 进程已退(pid null) → user/exited（legacy state 表达不了，本方向无损）", () => {
 		expect(
 			deriveSessionFacetsFromLegacyState("awaiting_review", {
 				reviewReason: "exit",
 				pid: null,
 				connectionRetryActive: false,
+				agentId: "claude",
 			}),
 		).toEqual({ turnOwner: "user", liveness: "exited", userTurnKind: "review" });
 	});
 
-	it("awaiting_review + reviewReason error → user/error（运行错，区别于 spawn failed）", () => {
+	it("awaiting_review Cline SDK(pid null 但 in-process) → user/live（harness-aware：不误标 exited）", () => {
+		expect(
+			deriveSessionFacetsFromLegacyState("awaiting_review", {
+				reviewReason: "completion",
+				pid: null,
+				connectionRetryActive: false,
+				agentId: "cline",
+			}),
+		).toEqual({ turnOwner: "user", liveness: "live", userTurnKind: "review" });
+	});
+
+	it("awaiting_review Cline SDK + reviewReason error(pid null) → user/error 但 liveness=live（SDK 仍存活）", () => {
 		expect(
 			deriveSessionFacetsFromLegacyState("awaiting_review", {
 				reviewReason: "error",
 				pid: null,
 				connectionRetryActive: false,
+				agentId: "cline",
+			}),
+		).toEqual({ turnOwner: "user", liveness: "live", userTurnKind: "error" });
+	});
+
+	it("awaiting_review agentId 未知(null) + pid null → user/exited（保守回退旧 pid 规则）", () => {
+		expect(
+			deriveSessionFacetsFromLegacyState("awaiting_review", {
+				reviewReason: "exit",
+				pid: null,
+				connectionRetryActive: false,
+				agentId: null,
+			}),
+		).toEqual({ turnOwner: "user", liveness: "exited", userTurnKind: "review" });
+	});
+
+	it("awaiting_review + reviewReason error（终端进程已退）→ user/error（运行错，区别于 spawn failed）", () => {
+		expect(
+			deriveSessionFacetsFromLegacyState("awaiting_review", {
+				reviewReason: "error",
+				pid: null,
+				connectionRetryActive: false,
+				agentId: "claude",
 			}),
 		).toEqual({ turnOwner: "user", liveness: "exited", userTurnKind: "error" });
 	});
@@ -139,6 +194,7 @@ describe("deriveSessionFacetsFromLegacyState（old → new）", () => {
 				reviewReason: "error",
 				pid: null,
 				connectionRetryActive: false,
+				agentId: null,
 			}),
 		).toEqual({ turnOwner: "user", liveness: "failed", userTurnKind: "error" });
 	});
@@ -149,6 +205,7 @@ describe("deriveSessionFacetsFromLegacyState（old → new）", () => {
 				reviewReason: "interrupted",
 				pid: null,
 				connectionRetryActive: false,
+				agentId: null,
 			}),
 		).toEqual({ turnOwner: "user", liveness: "interrupted", userTurnKind: "interrupted" });
 	});
@@ -174,32 +231,37 @@ describe("projectLegacyState（new → old 唯一 reducer）", () => {
 });
 
 describe("投影可逆性（零行为漂移命门）", () => {
-	it("全 legacy state × 全上下文：projectLegacyState(derive(state, ctx)) === state，且 facet 过护栏", () => {
+	it("全 legacy state × 全上下文（含 agentId）：projectLegacyState(derive(state, ctx)) === state，且 facet 过护栏", () => {
 		for (const state of ALL_STATES) {
 			for (const pid of [null, 123] as const) {
 				for (const connectionRetryActive of [false, true] as const) {
 					for (const reviewReason of ALL_REVIEW_REASONS) {
-						const facets = deriveSessionFacetsFromLegacyState(state, {
-							reviewReason,
-							pid,
-							connectionRetryActive,
-						});
-						// 1) 投影回得到原 legacy state（迁移期 state 仍可由 facet 无损投影）
-						expect(projectLegacyState(facets)).toBe(state);
-						// 2) 派生出的 facet 组合必然通过 superRefine 护栏
-						const parsed = runtimeTaskSessionSummarySchema.safeParse(
-							makeSummary({
-								state,
-								pid,
+						for (const agentId of ALL_AGENT_IDS) {
+							const facets = deriveSessionFacetsFromLegacyState(state, {
 								reviewReason,
-								connectionRetry: connectionRetryActive ? ACTIVE_RETRY : null,
-								turnOwner: facets.turnOwner,
-								liveness: facets.liveness,
-								userTurnKind: facets.userTurnKind,
-								schemaVersion: SESSION_SUMMARY_SCHEMA_VERSION,
-							}),
-						);
-						expect(parsed.success).toBe(true);
+								pid,
+								connectionRetryActive,
+								agentId,
+							});
+							// 1) 投影回得到原 legacy state（迁移期 state 仍可由 facet 无损投影）。
+							// 关键：harness-aware 后 awaiting 的 live↔exited 仍同投影回 awaiting_review，可逆不变。
+							expect(projectLegacyState(facets)).toBe(state);
+							// 2) 派生出的 facet 组合必然通过 superRefine 护栏
+							const parsed = runtimeTaskSessionSummarySchema.safeParse(
+								makeSummary({
+									state,
+									pid,
+									reviewReason,
+									agentId,
+									connectionRetry: connectionRetryActive ? ACTIVE_RETRY : null,
+									turnOwner: facets.turnOwner,
+									liveness: facets.liveness,
+									userTurnKind: facets.userTurnKind,
+									schemaVersion: SESSION_SUMMARY_SCHEMA_VERSION,
+								}),
+							);
+							expect(parsed.success).toBe(true);
+						}
 					}
 				}
 			}
@@ -222,9 +284,19 @@ describe("applySessionFacets（单一构造漏斗）", () => {
 		expect(stamped.liveness).toBe("retrying");
 	});
 
-	it("awaiting_review 且 pid=null → exited", () => {
-		const stamped = applySessionFacets(makeSummary({ state: "awaiting_review", pid: null, reviewReason: "exit" }));
+	it("终端 agent awaiting_review 且 pid=null → exited", () => {
+		const stamped = applySessionFacets(
+			makeSummary({ state: "awaiting_review", agentId: "claude", pid: null, reviewReason: "exit" }),
+		);
 		expect(stamped.liveness).toBe("exited");
+		expect(stamped.userTurnKind).toBe("review");
+	});
+
+	it("Cline SDK awaiting_review 且 pid=null → live（harness-aware 经漏斗 stamp，不误标 exited）", () => {
+		const stamped = applySessionFacets(
+			makeSummary({ state: "awaiting_review", agentId: "cline", pid: null, reviewReason: "completion" }),
+		);
+		expect(stamped.liveness).toBe("live");
 		expect(stamped.userTurnKind).toBe("review");
 	});
 
@@ -239,7 +311,11 @@ describe("applySessionFacets（单一构造漏斗）", () => {
 });
 
 describe("黄金转移（经真实终端 reducer reduceSessionTransition）", () => {
-	const running = applySessionFacets(makeSummary({ state: "running", pid: 123, lastOutputAt: 1_000 }));
+	// process.exit 是终端/PTY agent 专属事件（Cline SDK 无进程退出概念），故 base 显式为终端 agent：
+	// 其 pid 123 退出后 → pid null → exited（harness-aware 规则在 agentId="claude" 下仍走 pid 判定）。
+	const running = applySessionFacets(
+		makeSummary({ state: "running", agentId: "claude", pid: 123, lastOutputAt: 1_000 }),
+	);
 
 	function applyPatch(
 		base: RuntimeTaskSessionSummary,
@@ -405,36 +481,52 @@ describe("resolveSessionFacets（在则采信、缺则即时派生）", () => {
 				reviewReason: null,
 				pid: 123,
 				connectionRetryActive: true,
+				agentId: null,
 			}),
 		);
 		expect(resolveSessionFacets(summary)).toEqual({ turnOwner: "agent", liveness: "retrying", userTurnKind: null });
 	});
+
+	it("facet 全缺的 Cline awaiting(pid null) → 即时派生 harness-aware live（读路径也透传 summary.agentId）", () => {
+		const summary = makeSummary({
+			state: "awaiting_review",
+			agentId: "cline",
+			pid: null,
+			reviewReason: "completion",
+		});
+		expect(resolveSessionFacets(summary)).toEqual({ turnOwner: "user", liveness: "live", userTurnKind: "review" });
+	});
 });
 
 describe("isSessionInActiveTurn（facet 版活跃判据，零行为漂移）", () => {
-	it("全 state×pid×retry×reviewReason：与旧 state∈{running,awaiting_review} 逐项等价", () => {
+	it("全 state×pid×retry×reviewReason×agentId：与旧 state∈{running,awaiting_review} 逐项等价", () => {
 		for (const state of ALL_STATES) {
 			for (const pid of [null, 123] as const) {
 				for (const connectionRetryActive of [false, true] as const) {
 					for (const reviewReason of ALL_REVIEW_REASONS) {
-						const facets = deriveSessionFacetsFromLegacyState(state, {
-							reviewReason,
-							pid,
-							connectionRetryActive,
-						});
-						const legacyActive = state === "running" || state === "awaiting_review";
-						expect(isSessionInActiveTurn(facets)).toBe(legacyActive);
+						for (const agentId of ALL_AGENT_IDS) {
+							const facets = deriveSessionFacetsFromLegacyState(state, {
+								reviewReason,
+								pid,
+								connectionRetryActive,
+								agentId,
+							});
+							const legacyActive = state === "running" || state === "awaiting_review";
+							// harness-aware 后 awaiting 的 live↔exited 仍同判活跃，故活跃判据对 agentId 不变。
+							expect(isSessionInActiveTurn(facets)).toBe(legacyActive);
+						}
 					}
 				}
 			}
 		}
 	});
 
-	it("exited（进程已退仍等人审）仍判活跃——legacy 投影压扁、facet 保真的区分点", () => {
+	it("exited（终端进程已退仍等人审）仍判活跃——legacy 投影压扁、facet 保真的区分点", () => {
 		const exited = deriveSessionFacetsFromLegacyState("awaiting_review", {
 			reviewReason: "exit",
 			pid: null,
 			connectionRetryActive: false,
+			agentId: "claude",
 		});
 		expect(exited.liveness).toBe("exited");
 		expect(isSessionInActiveTurn(exited)).toBe(true);
@@ -450,19 +542,22 @@ describe("isSessionInActiveTurn（facet 版活跃判据，零行为漂移）", (
 });
 
 describe("isAwaitingUserReviewTurn（facet 版等人审判据，零行为漂移）", () => {
-	it("全 state×pid×retry×reviewReason：与旧 state==='awaiting_review' 逐项等价", () => {
+	it("全 state×pid×retry×reviewReason×agentId：与旧 state==='awaiting_review' 逐项等价", () => {
 		for (const state of ALL_STATES) {
 			for (const pid of [null, 123] as const) {
 				for (const connectionRetryActive of [false, true] as const) {
 					for (const reviewReason of ALL_REVIEW_REASONS) {
-						const facets = deriveSessionFacetsFromLegacyState(state, {
-							reviewReason,
-							pid,
-							connectionRetryActive,
-						});
-						expect(isAwaitingUserReviewTurn(facets)).toBe(state === "awaiting_review");
-						// 等价于 projectLegacyState 反投影（单一 reducer 自洽）。
-						expect(isAwaitingUserReviewTurn(facets)).toBe(projectLegacyState(facets) === "awaiting_review");
+						for (const agentId of ALL_AGENT_IDS) {
+							const facets = deriveSessionFacetsFromLegacyState(state, {
+								reviewReason,
+								pid,
+								connectionRetryActive,
+								agentId,
+							});
+							expect(isAwaitingUserReviewTurn(facets)).toBe(state === "awaiting_review");
+							// 等价于 projectLegacyState 反投影（单一 reducer 自洽）。
+							expect(isAwaitingUserReviewTurn(facets)).toBe(projectLegacyState(facets) === "awaiting_review");
+						}
 					}
 				}
 			}
@@ -492,22 +587,25 @@ const LEGACY_NOTIFY_REVIEW_REASONS: ReadonlySet<RuntimeTaskSessionReviewReason> 
 	"error",
 ]);
 describe("isNotifiableUserTurn（通知触发判据，决策 B 广·阻塞即提醒）", () => {
-	it("全 state×pid×retry×reviewReason：等价『等人审回合 ∧ userTurnKind≠interrupted』且自洽于 legacy 投影", () => {
+	it("全 state×pid×retry×reviewReason×agentId：等价『等人审回合 ∧ userTurnKind≠interrupted』且自洽于 legacy 投影", () => {
 		for (const state of ALL_STATES) {
 			for (const pid of [null, 123] as const) {
 				for (const connectionRetryActive of [false, true] as const) {
 					for (const reviewReason of ALL_REVIEW_REASONS) {
-						const facets = deriveSessionFacetsFromLegacyState(state, {
-							reviewReason,
-							pid,
-							connectionRetryActive,
-						});
-						const expected = isAwaitingUserReviewTurn(facets) && facets.userTurnKind !== "interrupted";
-						expect(isNotifiableUserTurn(facets)).toBe(expected);
-						// 自洽于唯一 reducer：仅 awaiting_review 投影且人轴非 interrupted。
-						expect(isNotifiableUserTurn(facets)).toBe(
-							projectLegacyState(facets) === "awaiting_review" && facets.userTurnKind !== "interrupted",
-						);
+						for (const agentId of ALL_AGENT_IDS) {
+							const facets = deriveSessionFacetsFromLegacyState(state, {
+								reviewReason,
+								pid,
+								connectionRetryActive,
+								agentId,
+							});
+							const expected = isAwaitingUserReviewTurn(facets) && facets.userTurnKind !== "interrupted";
+							expect(isNotifiableUserTurn(facets)).toBe(expected);
+							// 自洽于唯一 reducer：仅 awaiting_review 投影且人轴非 interrupted（对 agentId 不变）。
+							expect(isNotifiableUserTurn(facets)).toBe(
+								projectLegacyState(facets) === "awaiting_review" && facets.userTurnKind !== "interrupted",
+							);
+						}
 					}
 				}
 			}
@@ -518,10 +616,12 @@ describe("isNotifiableUserTurn（通知触发判据，决策 B 广·阻塞即提
 		const newlyNotifying: RuntimeTaskSessionReviewReason[] = [];
 		for (const pid of [null, 123] as const) {
 			for (const reviewReason of ALL_REVIEW_REASONS) {
+				// 终端 agent：pid null→exited、pid 123→live；通知判据对 live↔exited 不变，故超集逻辑只随 pid/reason 走。
 				const facets = deriveSessionFacetsFromLegacyState("awaiting_review", {
 					reviewReason,
 					pid,
 					connectionRetryActive: false,
+					agentId: "claude",
 				});
 				const wasNotifying = LEGACY_NOTIFY_REVIEW_REASONS.has(reviewReason);
 				// 超集：旧会通知的，现仍通知（保活，绝不回归）。
@@ -542,11 +642,13 @@ describe("isNotifiableUserTurn（通知触发判据，决策 B 广·阻塞即提
 			reviewReason: "hook",
 			pid: 123,
 			connectionRetryActive: false,
+			agentId: "claude",
 		});
 		const exited = deriveSessionFacetsFromLegacyState("awaiting_review", {
 			reviewReason: "hook",
 			pid: null,
 			connectionRetryActive: false,
+			agentId: "claude",
 		});
 		expect(live.liveness).toBe("live");
 		expect(exited.liveness).toBe("exited");

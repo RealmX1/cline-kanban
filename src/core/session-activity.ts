@@ -11,6 +11,7 @@
 // 不跨边界，见下），消除「同一判定多份实现、阈值漂移」的隐患。
 
 import type {
+	RuntimeAgentId,
 	RuntimeTaskSessionLiveness,
 	RuntimeTaskSessionReviewReason,
 	RuntimeTaskSessionState,
@@ -119,14 +120,16 @@ export function deriveUserTurnKind(reviewReason: RuntimeTaskSessionReviewReason)
 }
 
 // old→new：把 legacy 一维 state（+ 同刻上下文）映射为三 facet。dual-write（Stage 1）与读时回填
-// （Stage 2 migrateLegacyState）共用此唯一映射。关键增益：awaiting_review 借 pid 区分 live↔exited
-// （legacy state 表达不了，故此方向无损），running 借 connectionRetry 区分 live↔retrying。
+// （Stage 2 migrateLegacyState）共用此唯一映射。关键增益：awaiting_review 借 agentId+pid 区分
+// live↔exited（legacy state 表达不了，故此方向无损；Cline SDK 恒 live，见下），running 借
+// connectionRetry 区分 live↔retrying。
 export function deriveSessionFacetsFromLegacyState(
 	state: RuntimeTaskSessionState,
 	context: {
 		reviewReason: RuntimeTaskSessionReviewReason;
 		pid: number | null;
 		connectionRetryActive: boolean;
+		agentId: RuntimeAgentId | null;
 	},
 ): SessionFacets {
 	switch (state) {
@@ -146,7 +149,11 @@ export function deriveSessionFacetsFromLegacyState(
 		case "awaiting_review":
 			return {
 				turnOwner: "user",
-				liveness: context.pid === null ? "exited" : "live",
+				// harness-aware「进程已退」判定（解阻塞 distinction ②）：Cline SDK 在进程内运行、无 OS pid
+				// 概念（pid 恒 null），awaiting 仅表示 SDK 会话仍存活 → 一律 live；终端/PTY agent 才有真实
+				// pid，pid===null 才表示其进程已退 → exited。旧实现只看 pid===null，会把所有 Cline awaiting
+				// 误标 exited（即此区阻塞根因）。agentId 未知(null) 时保守回退旧 pid 规则（按 pid 判）。
+				liveness: context.agentId === "cline" || context.pid !== null ? "live" : "exited",
 				userTurnKind: deriveUserTurnKind(context.reviewReason),
 			};
 	}
@@ -180,6 +187,7 @@ export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeT
 		reviewReason: summary.reviewReason,
 		pid: summary.pid,
 		connectionRetryActive: summary.connectionRetry != null,
+		agentId: summary.agentId,
 	});
 	return {
 		...summary,
@@ -212,6 +220,7 @@ export function resolveSessionFacets(summary: RuntimeTaskSessionSummary): Sessio
 		reviewReason: summary.reviewReason,
 		pid: summary.pid,
 		connectionRetryActive: summary.connectionRetry != null,
+		agentId: summary.agentId,
 	});
 }
 
