@@ -274,4 +274,143 @@ describe("TerminalSessionManager", () => {
 		});
 		expect(getSnapshotSpy).toHaveBeenCalledTimes(1);
 	});
+
+	// Stage 3 余区：session-manager 的活跃回合 / Codex 回车门控从 legacy `state` 读 → 双轴 facet 真相源。
+	// 锁定「迁移前可见行为基线」：isActiveState(running|awaiting_review) ⟺ isSummaryInActiveTurn(facets)；
+	// Codex 回车旧 `state==="awaiting_review"` ⟺ isAwaitingUserReviewTurn(facets) + reviewReason 门控保留。
+	// 含 live↔exited 折叠反证（exited 待审仍判活跃 / 仍触发 Codex 回车，不偷渡 distinction ②）。
+	describe("facet 真相源迁移（行为保持）", () => {
+		it("recoverStaleSession 重置 awaiting_review（活跃回合）的无进程会话", () => {
+			const manager = new TerminalSessionManager();
+			manager.hydrateFromRecord({
+				"task-1": createSummary({ state: "awaiting_review", reviewReason: "hook" }),
+			});
+
+			const recovered = manager.recoverStaleSession("task-1");
+
+			expect(recovered?.state).toBe("idle");
+			expect(recovered?.pid).toBeNull();
+			expect(recovered?.workspacePath).toBeNull();
+		});
+
+		it("recoverStaleSession 不动非活跃回合（interrupted）的会话", () => {
+			const manager = new TerminalSessionManager();
+			manager.hydrateFromRecord({
+				"task-1": createSummary({
+					state: "interrupted",
+					reviewReason: "interrupted",
+					workspacePath: "/tmp/keep",
+					pid: 999,
+				}),
+			});
+
+			const recovered = manager.recoverStaleSession("task-1");
+
+			// interrupted 不属 {running, awaiting_review} → 旧 isActiveState 为 false → 不重置；facet 下同。
+			expect(recovered?.state).toBe("interrupted");
+			expect(recovered?.workspacePath).toBe("/tmp/keep");
+			expect(recovered?.pid).toBe(999);
+		});
+
+		it("recoverStaleSession 反证：exited（进程已退仍等人审）仍判活跃 → 仍重置", () => {
+			const manager = new TerminalSessionManager();
+			manager.hydrateFromRecord({
+				"task-1": createSummary({
+					state: "awaiting_review",
+					reviewReason: "hook",
+					pid: null,
+					exitCode: 0,
+					turnOwner: "user",
+					liveness: "exited",
+					userTurnKind: "review",
+				}),
+			});
+
+			const recovered = manager.recoverStaleSession("task-1");
+
+			expect(recovered?.state).toBe("idle");
+		});
+
+		function injectCodexEntry(
+			manager: TerminalSessionManager,
+			summaryOverrides: Partial<RuntimeTaskSessionSummary>,
+		): { awaitingFlag: () => boolean; writeSpy: ReturnType<typeof vi.fn> } {
+			const writeSpy = vi.fn();
+			const entry = {
+				summary: createSummary({ agentId: "codex", ...summaryOverrides }),
+				active: {
+					session: { write: writeSpy },
+					awaitingCodexPromptAfterEnter: false,
+				},
+				listenerIdCounter: 1,
+				listeners: new Map(),
+			};
+			(manager as unknown as { entries: Map<string, typeof entry> }).entries.set("task-1", entry);
+			return { awaitingFlag: () => entry.active.awaitingCodexPromptAfterEnter, writeSpy };
+		}
+
+		it("writeInput：Codex 在 awaiting_review + reviewReason∈{hook,attention,error} 回车 → 置位等待标记", () => {
+			for (const reviewReason of ["hook", "attention", "error"] as const) {
+				const manager = new TerminalSessionManager();
+				const { awaitingFlag, writeSpy } = injectCodexEntry(manager, { state: "awaiting_review", reviewReason });
+				manager.writeInput("task-1", Buffer.from([13]));
+				expect(awaitingFlag()).toBe(true);
+				expect(writeSpy).toHaveBeenCalledTimes(1);
+			}
+		});
+
+		it("writeInput：换行(LF)同样触发 Codex 等待标记", () => {
+			const manager = new TerminalSessionManager();
+			const { awaitingFlag } = injectCodexEntry(manager, { state: "awaiting_review", reviewReason: "attention" });
+			manager.writeInput("task-1", Buffer.from([10]));
+			expect(awaitingFlag()).toBe(true);
+		});
+
+		it("writeInput：reviewReason 不在白名单（exit）即便回车也不置位（保留 reviewReason 门控）", () => {
+			const manager = new TerminalSessionManager();
+			const { awaitingFlag } = injectCodexEntry(manager, { state: "awaiting_review", reviewReason: "exit" });
+			manager.writeInput("task-1", Buffer.from([13]));
+			expect(awaitingFlag()).toBe(false);
+		});
+
+		it("writeInput：非 awaiting_review（running）回车不置位", () => {
+			const manager = new TerminalSessionManager();
+			const { awaitingFlag } = injectCodexEntry(manager, { state: "running", reviewReason: null });
+			manager.writeInput("task-1", Buffer.from([13]));
+			expect(awaitingFlag()).toBe(false);
+		});
+
+		it("writeInput：非 Codex（claude）即便 awaiting_review+hook+回车也不置位（保留 agentId 门控）", () => {
+			const manager = new TerminalSessionManager();
+			const { awaitingFlag } = injectCodexEntry(manager, {
+				agentId: "claude",
+				state: "awaiting_review",
+				reviewReason: "hook",
+			});
+			manager.writeInput("task-1", Buffer.from([13]));
+			expect(awaitingFlag()).toBe(false);
+		});
+
+		it("writeInput：无回车字节不置位", () => {
+			const manager = new TerminalSessionManager();
+			const { awaitingFlag } = injectCodexEntry(manager, { state: "awaiting_review", reviewReason: "hook" });
+			manager.writeInput("task-1", Buffer.from("hello"));
+			expect(awaitingFlag()).toBe(false);
+		});
+
+		it("writeInput 反证：Codex exited（进程已退仍等人审）+hook+回车仍置位（exited 折叠为活跃）", () => {
+			const manager = new TerminalSessionManager();
+			const { awaitingFlag } = injectCodexEntry(manager, {
+				state: "awaiting_review",
+				reviewReason: "hook",
+				pid: null,
+				exitCode: 0,
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "review",
+			});
+			manager.writeInput("task-1", Buffer.from([13]));
+			expect(awaitingFlag()).toBe(true);
+		});
+	});
 });

@@ -6,11 +6,16 @@ import type {
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
-	RuntimeTaskSessionState,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
-import { applySessionFacets, isAgentOutputQuiet as evaluateAgentOutputQuiet } from "../core/session-activity";
+import {
+	applySessionFacets,
+	isAgentOutputQuiet as evaluateAgentOutputQuiet,
+	isAwaitingUserReviewTurn,
+	isSessionInActiveTurn,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
 	type AgentAdapterLaunchInput,
@@ -210,8 +215,12 @@ function updateSummary(entry: SessionEntry, patch: Partial<RuntimeTaskSessionSum
 	return entry.summary;
 }
 
-function isActiveState(state: RuntimeTaskSessionState): boolean {
-	return state === "running" || state === "awaiting_review";
+// 「会话处于活跃回合」判据（Stage 3 余区：legacy `state` 读 → 双轴 facet 真相源）。
+// 经 resolveSessionFacets 读 facet、复用共享 isSessionInActiveTurn，严格等价旧
+// `state ∈ {running, awaiting_review}`（全表等价见 session-facets.test.ts），且对 live↔exited
+// 折叠不敏感（exited 仍判活跃）——故迁移为纯重构、零行为漂移，不偷渡 distinction ②。
+function isSummaryInActiveTurn(summary: RuntimeTaskSessionSummary): boolean {
+	return isSessionInActiveTurn(resolveSessionFacets(summary));
 }
 
 function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTaskSessionRequest {
@@ -644,7 +653,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			kind: "task",
 			request: cloneStartTaskSessionRequest(request),
 		};
-		if (entry.active && isActiveState(entry.summary.state)) {
+		if (entry.active && isSummaryInActiveTurn(entry.summary)) {
 			return cloneSummary(entry.summary);
 		}
 
@@ -986,7 +995,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			kind: "shell",
 			request: cloneStartShellSessionRequest(request),
 		};
-		if (entry.active && entry.summary.state === "running") {
+		if (entry.active && resolveSessionFacets(entry.summary).turnOwner === "agent") {
 			return cloneSummary(entry.summary);
 		}
 
@@ -1148,7 +1157,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
-		if (entry.active || !isActiveState(entry.summary.state)) {
+		if (entry.active || !isSummaryInActiveTurn(entry.summary)) {
 			return cloneSummary(entry.summary);
 		}
 
@@ -1182,9 +1191,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		// 记录用户手动输入时刻，用于抑制自动续跑注入打断正在打字的用户。
 		entry.active.lastUserInputAt = now();
+		// 旧门控 `state==="awaiting_review"` → facet 真相源 isAwaitingUserReviewTurn（涵盖 live↔exited
+		// 折叠、零行为漂移）。reviewReason∈{hook,attention,error} 读保留——deriveUserTurnKind 非 1:1
+		// （attention→needs_input 而 needs_input 亦覆盖 null），换 userTurnKind 会改行为，留 channel-C 批次。
 		if (
 			entry.summary.agentId === "codex" &&
-			entry.summary.state === "awaiting_review" &&
+			isAwaitingUserReviewTurn(resolveSessionFacets(entry.summary)) &&
 			(entry.summary.reviewReason === "hook" ||
 				entry.summary.reviewReason === "attention" ||
 				entry.summary.reviewReason === "error") &&
@@ -1469,6 +1481,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				entry.active.workspaceTrustBuffer = "";
 			}
 		}
+		// 此处读的是 reducer 刚产出的「转换补丁」legacy state（patch 尚未经 applySessionFacets 打 facet，
+		// 故无 facet 可读）——属写侧 reducer 输出检视、非存储 summary 的消费者读，有意保留 legacy 形态。
 		if (entry.active && transition.changed && transition.patch.state === "awaiting_review") {
 			entry.active.awaitingCodexPromptAfterEnter = false;
 		}
@@ -1490,7 +1504,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private scanForStalls(): void {
 		const currentTime = now();
 		for (const [taskId, entry] of this.entries.entries()) {
-			if (!entry.active || !isActiveState(entry.summary.state)) {
+			if (!entry.active || !isSummaryInActiveTurn(entry.summary)) {
 				entry.lastStallLoggedAt = null;
 				continue;
 			}
