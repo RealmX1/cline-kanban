@@ -2,14 +2,14 @@
 // 独立、零 React 依赖、可直接单测的模块（双轴会话状态重构 Stage 3 首步抽取，零行为变更）。
 //
 // 真相源：Stage 3 余区已把本派生的全部 legacy 一维 `summary.state` 读迁到双轴 facet
-// （resolveSessionFacets + isAwaitingUserReviewTurn，叠加 connectionRetry / latestHookActivity），
-// 逐项等价、零可见行为变更，由本模块单测作「迁移前可见行为基线」回归护栏钉住。
-// 仍属「行为保持」：channel C 的人轴文案增强（按 userTurnKind 细分 question / permission / error…）
-// 是后续与列映射 / 通知白名单同批的改动，本模块此刻不引入新文案、不改可见行为。
+// （resolveSessionFacets + isAwaitingUserReviewTurn，叠加 connectionRetry / latestHookActivity）。
+// Channel C（人轴文案，普适四种）已在此落地：等人审回合按 userTurnKind 细分状态点颜色 + 无内容占位
+// CTA——review=完成待审(绿) / needs_input=待你输入(金) / error=运行出错(红)。question/plan_review/
+// permission 在当前采集下不产出（普适四种折叠进 review/needs_input），待 Stage 4 可选采集增强再细分。
 
 import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "@runtime-session-activity";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskSessionSummary, RuntimeTaskSessionUserTurnKind } from "@/runtime/types";
 
 export interface CardSessionActivity {
 	dotColor: string;
@@ -95,6 +95,24 @@ function resolveToolCallLabel(
 	return formatClineToolCallLabel(parsed.toolName, parsed.toolInputSummary);
 }
 
+// Channel C（人轴文案，普适四种）：把「等人审查回合」的 userTurnKind 映射为状态点颜色 + 无内容时的
+// 占位 CTA。review（完成/exit/hook）=完成待审(绿)；needs_input（attention/兜底）=待你输入(金 CTA)；
+// error（运行错，区别于 spawn failed liveness）=运行出错(红)。interrupted 不经此（liveness=interrupted
+// 非等人审回合）。占位文案沿用同族英文风格（"Waiting for review" / "Task failed to start"）。
+function resolveAwaitingUserTurnPresentation(userTurnKind: RuntimeTaskSessionUserTurnKind | null): {
+	dotColor: string;
+	placeholder: string;
+} {
+	switch (userTurnKind) {
+		case "error":
+			return { dotColor: SESSION_ACTIVITY_COLOR.error, placeholder: "Encountered an error" };
+		case "needs_input":
+			return { dotColor: SESSION_ACTIVITY_COLOR.waiting, placeholder: "Needs your input" };
+		default:
+			return { dotColor: SESSION_ACTIVITY_COLOR.success, placeholder: "Waiting for review" };
+	}
+}
+
 export function isCardCreditLimitError(summary: RuntimeTaskSessionSummary | undefined): boolean {
 	if (!summary) {
 		return false;
@@ -132,7 +150,8 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 	const finalMessage = hookActivity?.finalMessage?.trim();
 	const hookEventName = hookActivity?.hookEventName?.trim() ?? null;
 	if (isAwaitingUserReviewTurn(facets) && finalMessage) {
-		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: finalMessage };
+		// 仍逐字显示 finalMessage，状态点颜色随人轴 userTurnKind（review 绿 / needs_input 金 / error 红）。
+		return { dotColor: resolveAwaitingUserTurnPresentation(facets.userTurnKind).dotColor, text: finalMessage };
 	}
 	if (
 		finalMessage &&
@@ -181,7 +200,9 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 		return { dotColor: SESSION_ACTIVITY_COLOR.error, text: failedText };
 	}
 	if (isAwaitingUserReviewTurn(facets)) {
-		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" };
+		// Channel C 终端占位：按 userTurnKind 给出 完成待审 / 待你输入 / 运行出错 的颜色 + CTA。
+		const { dotColor, placeholder } = resolveAwaitingUserTurnPresentation(facets.userTurnKind);
+		return { dotColor, text: placeholder };
 	}
 	if (facets.turnOwner === "agent") {
 		return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };

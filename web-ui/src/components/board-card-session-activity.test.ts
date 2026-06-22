@@ -7,10 +7,11 @@ import {
 	SESSION_ACTIVITY_COLOR,
 } from "./board-card-session-activity";
 
-// 本套件锁定 deriveCardSessionActivity / isCardCreditLimitError 从 board-card.tsx 抽出时的「迁移前
-// 可见行为基线」（双轴会话状态重构 Stage 3 首步，零行为变更）。Stage 3 后续闸把派生改读 turnOwner /
-// liveness（computing/quiet/exited）/ userTurnKind 三轴后，这些断言即作为「不得回归既有卡片文案 /
-// 状态点颜色」的护栏。
+// 本套件锁定 deriveCardSessionActivity / isCardCreditLimitError 的可见行为。Stage 3 首步抽出时为
+// 「迁移前基线」，余区把真相源迁到 facet（零行为变更）。Channel C（人轴文案，普适四种）已落地：等人审
+// 回合按 userTurnKind 细分 review（绿「Waiting for review」）/ needs_input（金「Needs your input」）/
+// error（红「Encountered an error」），finalMessage 仍逐字显示、仅状态点颜色随人轴。其余断言（富活动
+// 文案 / spawn-failed / Thinking 兜底 / exited 折叠）作为「不得回归」的护栏。
 
 function makeHookActivity(overrides: Partial<RuntimeTaskHookActivity> = {}): RuntimeTaskHookActivity {
 	return {
@@ -145,9 +146,11 @@ describe("deriveCardSessionActivity", () => {
 	});
 
 	describe("awaiting-review final message", () => {
-		it("shows the final message verbatim regardless of hook event name", () => {
+		it("shows the final message verbatim regardless of hook event name (review turn → success)", () => {
 			const result = deriveCardSessionActivity(
 				makeSummary("awaiting_review", {
+					// reviewReason="hook" → userTurnKind=review（完成待审）：finalMessage 逐字 + 绿点。
+					reviewReason: "hook",
 					latestHookActivity: makeHookActivity({ finalMessage: "Done reviewing", hookEventName: "stop" }),
 				}),
 			);
@@ -306,14 +309,64 @@ describe("deriveCardSessionActivity", () => {
 			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "Task failed to start" });
 		});
 
-		it("shows a waiting-for-review placeholder for a bare awaiting_review session", () => {
-			const result = deriveCardSessionActivity(makeSummary("awaiting_review"));
+		it("shows a waiting-for-review placeholder for a review-kind awaiting_review session", () => {
+			// reviewReason="hook" → userTurnKind=review（完成待审）。
+			const result = deriveCardSessionActivity(makeSummary("awaiting_review", { reviewReason: "hook" }));
 			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" });
 		});
 
 		it("shows a Thinking… placeholder for a bare running session", () => {
 			const result = deriveCardSessionActivity(makeSummary("running"));
 			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." });
+		});
+	});
+
+	// Channel C（人轴文案，普适四种）：等人审回合按 userTurnKind 细分颜色 + 占位 CTA。
+	describe("channel C — 等人审回合按 userTurnKind 细分（普适四种）", () => {
+		it("needs_input（reviewReason=null 兜底）无内容 → 金点「Needs your input」", () => {
+			const result = deriveCardSessionActivity(makeSummary("awaiting_review"));
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.waiting, text: "Needs your input" });
+		});
+
+		it("needs_input 有 finalMessage → 逐字显示 + 金点（颜色随人轴，非 success）", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", {
+					latestHookActivity: makeHookActivity({
+						finalMessage: "Which file should I edit?",
+						hookEventName: "stop",
+					}),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.waiting, text: "Which file should I edit?" });
+		});
+
+		it("error（运行错，reviewReason=error）无内容 → 红点「Encountered an error」", () => {
+			const result = deriveCardSessionActivity(makeSummary("awaiting_review", { reviewReason: "error" }));
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "Encountered an error" });
+		});
+
+		it("error 有 finalMessage → 逐字显示 + 红点（区别于 spawn-failed 占位）", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("awaiting_review", {
+					reviewReason: "error",
+					latestHookActivity: makeHookActivity({ finalMessage: "Tool call failed", hookEventName: "stop" }),
+				}),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "Tool call failed" });
+		});
+
+		it("采信显式 facet：userTurnKind=needs_input（即便 legacy state=idle）→ 金点「Needs your input」", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("idle", { turnOwner: "user", liveness: "live", userTurnKind: "needs_input" }),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.waiting, text: "Needs your input" });
+		});
+
+		it("采信显式 facet：userTurnKind=error（user/exited，非 failed）→ 红点「Encountered an error」", () => {
+			const result = deriveCardSessionActivity(
+				makeSummary("idle", { turnOwner: "user", liveness: "exited", userTurnKind: "error" }),
+			);
+			expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "Encountered an error" });
 		});
 	});
 });
