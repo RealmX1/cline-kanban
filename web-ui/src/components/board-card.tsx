@@ -144,6 +144,10 @@ export function BoardCard({
 	// 静默边界后停止脉动；tick 仅在「agent 回合 + liveness=live」时开启，空闲 / 待审 / 已结束卡不计时。
 	const sessionFacets = sessionSummary ? resolveSessionFacets(sessionSummary) : null;
 	const isLiveAgentTurn = sessionFacets?.turnOwner === "agent" && sessionFacets.liveness === "live";
+	// channel B（distinction ②）：终端 agent 进程已退、任务仍等你审 → liveness==="exited"（Cline SDK 在
+	// 进程内运行、恒 live，永不进此分支）。卡片状态点改「空心环」表达「进程已退但仍待你处理」，与实心 live
+	// 点区分；点的颜色仍随 channel C（review绿/needs_input金/error红）。pulse 仅 agent 回合开启、与本互斥。
+	const isExitedAwaiting = sessionFacets?.liveness === "exited";
 	const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
 	useInterval(() => setActivityNowMs(Date.now()), isLiveAgentTurn ? 1000 : null);
 	const isAgentComputing =
@@ -622,10 +626,26 @@ export function BoardCard({
 											"inline-block shrink-0 rounded-full",
 											!isTrashCard && isAgentComputing && "animate-pulse",
 										)}
+										title={
+											!isTrashCard && isExitedAwaiting
+												? "Agent process exited — still awaiting your review"
+												: undefined
+										}
 										style={{
 											width: 6,
 											height: 6,
-											backgroundColor: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : sessionActivity.dotColor,
+											// exited（进程已退）：空心环（transparent 底 + 同色描边，box-sizing:border-box 下留中空）；
+											// 否则实心点。trash 卡一律 muted 实心、不参与 exited 区分。
+											backgroundColor:
+												isTrashCard || isExitedAwaiting
+													? isTrashCard
+														? SESSION_ACTIVITY_COLOR.muted
+														: "transparent"
+													: sessionActivity.dotColor,
+											border:
+												!isTrashCard && isExitedAwaiting
+													? `1.5px solid ${sessionActivity.dotColor}`
+													: undefined,
 											marginTop: 4,
 										}}
 									/>

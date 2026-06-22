@@ -11,6 +11,7 @@ import {
 	Minimize2,
 	RotateCcw,
 	Search,
+	Unplug,
 	X,
 } from "lucide-react";
 import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement } from "react";
@@ -398,7 +399,11 @@ function AgentTerminalPanelLayout({
 		stopTerminal,
 	} = sessionControls;
 	// canStop 由 legacy `state∈{running,awaiting_review}` 翻为 facet 活跃回合判据（isSessionInActiveTurn 与之等价）。
-	const canStop = summary ? isSessionInActiveTurn(resolveSessionFacets(summary)) : false;
+	const sessionFacets = summary ? resolveSessionFacets(summary) : null;
+	const canStop = sessionFacets ? isSessionInActiveTurn(sessionFacets) : false;
+	// channel B（distinction ②）：终端 agent 进程已退、任务仍等你审 → liveness==="exited"。面板顶端给一条
+	// muted 提示，解释「终端为何不再更新/冻结」。Cline SDK 在进程内运行、恒 live，永不进此分支。
+	const isStreamClosed = sessionFacets?.liveness === "exited";
 	const isSyntheticHomeSession = taskId.startsWith("__home_");
 	const showRefreshButton = !isSyntheticHomeSession;
 	const canRefresh = showRefreshButton && summary !== null && summary.agentId !== null && summary.agentId !== "cline";
@@ -598,6 +603,12 @@ function AgentTerminalPanelLayout({
 				onNext={findNextInTerminal}
 				onPrevious={findPreviousInTerminal}
 			/>
+			{isStreamClosed ? (
+				<div className="flex items-center gap-1.5 border-t border-border bg-surface-2 px-3 py-1.5 text-xs text-text-tertiary">
+					<Unplug size={12} className="shrink-0" />
+					<span>Terminal stream closed — the agent process has exited. The output above is final.</span>
+				</div>
+			) : null}
 			<div style={{ flex: "1 1 0", minHeight: 0, overflow: "hidden", padding: "3px 1.5px 3px 3px" }}>
 				<div
 					ref={containerRef}

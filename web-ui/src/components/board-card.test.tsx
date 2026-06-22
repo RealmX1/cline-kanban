@@ -264,6 +264,95 @@ describe("BoardCard", () => {
 		expect(dot?.className).not.toContain("animate-pulse");
 	});
 
+	// channel B（distinction ②）：exited（进程已退）的 awaiting 卡片状态点渲染为「空心环」
+	// （transparent 底 + 同色描边），与实心 live 点区分；点色仍随 channel C。下面四例钉住这条接线，
+	// 含「显式 facet」与「经 ②-prep 派生」两路径，及 Cline 恒 live 不误标的反证。
+	it("renders the session-activity dot as a hollow ring for an exited (process-gone) awaiting card", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", {
+							pid: null,
+							turnOwner: "user",
+							liveness: "exited",
+							userTurnKind: "review",
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.style.backgroundColor).toBe("transparent");
+		expect(dot?.getAttribute("style") ?? "").toContain("1.5px solid");
+		expect(dot?.getAttribute("title")).toContain("process exited");
+	});
+
+	it("renders the session-activity dot as a filled dot (no ring) for a live awaiting card", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", {
+							pid: 123,
+							turnOwner: "user",
+							liveness: "live",
+							userTurnKind: "review",
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.style.backgroundColor).not.toBe("transparent");
+		expect(dot?.getAttribute("style") ?? "").not.toContain("solid");
+		expect(dot?.getAttribute("title")).toBeNull();
+	});
+
+	it("②-prep×②-visible：终端 agent awaiting（pid null、无显式 facet）派生 exited → 空心环", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", { agentId: "claude", pid: null })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
+		expect(dot?.style.backgroundColor).toBe("transparent");
+		expect(dot?.getAttribute("style") ?? "").toContain("1.5px solid");
+	});
+
+	it("②-prep×②-visible 反证：Cline awaiting（pid null、无显式 facet）派生 live → 实心点（不误标空心）", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", { agentId: "cline", pid: null })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
+		expect(dot?.style.backgroundColor).not.toBe("transparent");
+		expect(dot?.getAttribute("style") ?? "").not.toContain("solid");
+	});
+
 	// Stage 3 余区：in_progress 状态标记的 `state==="failed"` 读 → facet 真相源
 	// （严格等价 turnOwner==="user" && liveness==="failed"；复用卡片已解析的 sessionFacets）。
 	// 经渲染查询失败标记 AlertCircle 的 `text-status-red` svg 钉住，含 exited≠failed 反证 + 显式 facet 采信。

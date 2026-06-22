@@ -113,6 +113,76 @@ describe("AgentTerminalPanel", () => {
 		expect(container.querySelector('[aria-label="Refresh terminal session"]')).toBeNull();
 		expect(container.querySelector('[aria-label="Find in terminal"]')).not.toBeNull();
 	});
+
+	// channel B（distinction ②）：终端 agent 进程已退（liveness="exited"）时面板顶部提示「stream closed」。
+	it("exited（终端进程已退 = awaiting_review + pid null）→ 顶部显示 Terminal stream closed 提示", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={{ ...createSummary("codex"), state: "awaiting_review", pid: null }}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.textContent).toContain("Terminal stream closed");
+	});
+
+	it("live awaiting（进程仍在，pid 非 null）→ 不显示 stream closed 提示", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={{ ...createSummary("codex"), state: "awaiting_review", pid: 123 }}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.textContent).not.toContain("Terminal stream closed");
+	});
+
+	// ②-prep × ②-visible 合成反证：Cline SDK 在进程内运行、awaiting 恒 live，即便 pid null 也绝不误报 stream closed。
+	it("Cline awaiting（pid null 但 in-process）→ 不显示 stream closed（harness-aware 恒 live）", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={{ ...createSummary("cline"), state: "awaiting_review", pid: null }}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.textContent).not.toContain("Terminal stream closed");
+	});
+
+	it("running（agent 回合）→ 不显示 stream closed 提示", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createSummary("codex")}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.textContent).not.toContain("Terminal stream closed");
+	});
 });
 
 describe("describeState / getStateTagStyle（facet 真相源驱动，行为与 legacy state 逐项等价）", () => {
