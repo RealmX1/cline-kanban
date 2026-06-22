@@ -19,6 +19,7 @@ import type {
 	RuntimeStateStreamWorkspaceMetadataMessage,
 	RuntimeStateStreamWorkspaceStateMessage,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskSessionUserTurnKind,
 } from "../core/api-contract";
 import { isNotifiableUserTurn, resolveSessionFacets } from "../core/session-activity";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -57,7 +58,11 @@ export interface RuntimeStateHub {
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void>;
 	broadcastClineMcpAuthStatusesUpdated: (statuses: RuntimeClineMcpServerAuthStatus[]) => void;
 	bumpClineSessionContextVersion: () => void;
-	broadcastTaskReadyForReview: (workspaceId: string, taskId: string) => void;
+	broadcastTaskReadyForReview: (
+		workspaceId: string,
+		taskId: string,
+		userTurnKind: RuntimeTaskSessionUserTurnKind,
+	) => void;
 	close: () => Promise<void>;
 }
 
@@ -323,7 +328,11 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
-	const broadcastTaskReadyForReview = (workspaceId: string, taskId: string) => {
+	const broadcastTaskReadyForReview = (
+		workspaceId: string,
+		taskId: string,
+		userTurnKind: RuntimeTaskSessionUserTurnKind,
+	) => {
 		const runtimeClients = runtimeStateClientsByWorkspaceId.get(workspaceId);
 		if (!runtimeClients || runtimeClients.size === 0) {
 			return;
@@ -333,6 +342,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			workspaceId,
 			taskId,
 			triggeredAt: Date.now(),
+			userTurnKind,
 		};
 		for (const client of runtimeClients) {
 			sendRuntimeStateMessage(client, payload);
@@ -526,12 +536,15 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				// 通知触发：从 legacy reviewReason 白名单切到 userTurnKind 轴的「广·阻塞即提醒」判据
 				// （决策 B，单一真相源 isNotifiableUserTurn）。边沿 = 上一帧非「可通知等人回合」→ 本帧是，
 				// 故停在等人回合期间不重复 ping；exit/completion/null-reason 的等人回合现也纳入（broad）。
+				// 触发瞬间把当前 facet 的 userTurnKind 内联进 ready 事件 payload（③(b)）：前端通知标题据此
+				// 措辞，不回读延迟批处理的 summary 流，杜绝上次「标题读 stale userTurnKind」竞态。
+				const currentFacets = resolveSessionFacets(summary);
 				if (
 					previousSummary &&
 					!isNotifiableUserTurn(resolveSessionFacets(previousSummary)) &&
-					isNotifiableUserTurn(resolveSessionFacets(summary))
+					isNotifiableUserTurn(currentFacets)
 				) {
-					broadcastTaskReadyForReview(workspaceId, summary.taskId);
+					broadcastTaskReadyForReview(workspaceId, summary.taskId, currentFacets.userTurnKind);
 				}
 			});
 			clineSummaryUnsubscribeByWorkspaceId.set(workspaceId, unsubscribe);

@@ -1,5 +1,10 @@
-import type { RuntimeHookIngestResponse, RuntimeTaskTurnCheckpoint } from "../core/api-contract";
+import type {
+	RuntimeHookIngestResponse,
+	RuntimeTaskSessionUserTurnKind,
+	RuntimeTaskTurnCheckpoint,
+} from "../core/api-contract";
 import { parseHookIngestRequest } from "../core/api-validation";
+import { resolveSessionFacets } from "../core/session-activity";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
@@ -10,7 +15,11 @@ export interface CreateHooksApiDependencies {
 	getWorkspacePathById: (workspaceId: string) => string | null;
 	ensureTerminalManagerForWorkspace: (workspaceId: string, repoPath: string) => Promise<TerminalSessionManager>;
 	broadcastRuntimeWorkspaceStateUpdated: (workspaceId: string, workspacePath: string) => Promise<void> | void;
-	broadcastTaskReadyForReview: (workspaceId: string, taskId: string) => void;
+	broadcastTaskReadyForReview: (
+		workspaceId: string,
+		taskId: string,
+		userTurnKind: RuntimeTaskSessionUserTurnKind,
+	) => void;
 	captureTaskTurnCheckpoint?: (input: {
 		cwd: string;
 		taskId: string;
@@ -97,7 +106,13 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
 				if (event === "to_review") {
-					deps.broadcastTaskReadyForReview(workspaceId, taskId);
+					// hook 终端路径恒广播。userTurnKind 取自刚落定的 transitionedSummary facet（经漏斗自洽，
+					// hook 转审 reviewReason="hook" → review），随事件 payload 内联下发给前端通知标题（③(b)）。
+					deps.broadcastTaskReadyForReview(
+						workspaceId,
+						taskId,
+						resolveSessionFacets(transitionedSummary).userTurnKind,
+					);
 				}
 
 				return { ok: true } satisfies RuntimeHookIngestResponse;

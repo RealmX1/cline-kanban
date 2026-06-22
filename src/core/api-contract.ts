@@ -542,6 +542,11 @@ export const runtimeStateStreamTaskReadyForReviewMessageSchema = z.object({
 	workspaceId: z.string(),
 	taskId: z.string(),
 	triggeredAt: z.number(),
+	// 「人轴」种类随一次性 ready 事件 payload 内联下发（广播时由服务端从 summary facet 解析）。
+	// 前端通知标题据此措辞，不再回读延迟 150ms 批处理的 task_sessions_updated summary 流——
+	// 杜绝上次 ③(b) 命中的「事件先到、summary 后到 → 标题读 stale userTurnKind」竞态。
+	// 可选：旧服务端/缓存旧构建可能不带该字段，缺省时前端按 review 措辞兜底（加性 schema 纪律）。
+	userTurnKind: runtimeTaskSessionUserTurnKindSchema.optional(),
 });
 export type RuntimeStateStreamTaskReadyForReviewMessage = z.infer<
 	typeof runtimeStateStreamTaskReadyForReviewMessageSchema

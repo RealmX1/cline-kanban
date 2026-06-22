@@ -874,6 +874,9 @@ describe.sequential("runtime state stream integration", () => {
 			)) as RuntimeStateStreamTaskReadyForReviewMessage;
 			expect(readyMessage.type).toBe("task_ready_for_review");
 			expect(readyMessage.triggeredAt).toBeGreaterThan(0);
+			// ③(b)：人轴 userTurnKind 经事件 payload 内联端到端到达前端（hook 转审 reviewReason="hook"→review）。
+			// 这正是「标题不回读延迟 summary 流」竞态修复的端到端铁证：ready 事件本身已自带正确的人轴种类。
+			expect(readyMessage.userTurnKind).toBe("review");
 
 			await requestJson({
 				baseUrl: `http://127.0.0.1:${port}`,
