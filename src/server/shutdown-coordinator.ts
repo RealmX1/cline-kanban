@@ -1,4 +1,5 @@
 import type { RuntimeTaskSessionSummary, RuntimeWorkspaceStateResponse } from "../core/api-contract";
+import { applySessionFacets } from "../core/session-activity";
 import { updateTaskDependencies } from "../core/task-board-mutations";
 import { listWorkspaceIndexEntries, loadWorkspaceState, saveWorkspaceState } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -78,13 +79,17 @@ async function persistInterruptedSessions(
 	for (const taskId of interruptedTaskIds) {
 		const summary = options?.resolveSummary?.(taskId) ?? workspaceState.sessions[taskId] ?? null;
 		if (summary) {
-			nextSessions[taskId] = {
+			// 漏斗外的唯一持久化写点：spread 一个「已带 facet」的 summary 并覆写 state/reviewReason/pid
+			// 后，必须重经 applySessionFacets 从新 state 反推 facet，否则会落盘 facet↔state 不一致
+			// （如 running 任务的 agent/live facet 配 state="interrupted"，projectLegacyState 投影回
+			// running）。superRefine 只校验 facet 组合合法、不校验与 state 自洽，故此处不补会静默落盘脏数据。
+			nextSessions[taskId] = applySessionFacets({
 				...summary,
 				state: "interrupted",
 				reviewReason: "interrupted",
 				pid: null,
 				updatedAt: Date.now(),
-			};
+			});
 		}
 	}
 	await saveWorkspaceState(workspacePath, {
