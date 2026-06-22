@@ -204,6 +204,66 @@ describe("BoardCard", () => {
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
 	});
 
+	// 双轴重构 Stage 3「computing 脉动」（distinction ①）：agent 回合且最近 5s 内仍在产出 → 状态点
+	// animate-pulse；静默 / 非 agent 回合 → 静止点。下面三例钉住这条接线（派生逻辑本身见
+	// session-activity.test.ts 的 deriveDisplayLiveness 单测）。
+	it("pulses the session-activity dot while a running agent is actively producing output (computing)", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("running", { lastOutputAt: Date.now() })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const dot = container.querySelector("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.className).toContain("animate-pulse");
+	});
+
+	it("does not pulse the dot once a running agent has gone quiet (no recent output)", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("running", { lastOutputAt: Date.now() - 60_000 })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const dot = container.querySelector("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.className).not.toContain("animate-pulse");
+	});
+
+	it("never pulses on a user-turn card even when its agent process is still live (awaiting review)", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", { lastOutputAt: Date.now(), pid: 123 })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const dot = container.querySelector("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.className).not.toContain("animate-pulse");
+	});
+
 	it("hides the move-to-validation and move-to-done actions on in-progress cards", async () => {
 		await act(async () => {
 			root.render(

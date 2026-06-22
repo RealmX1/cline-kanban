@@ -219,3 +219,27 @@ export function resolveSessionFacets(summary: RuntimeTaskSessionSummary): Sessio
 export function isSessionInActiveTurn(facets: SessionFacets): boolean {
 	return facets.turnOwner !== null && facets.liveness !== "failed" && facets.liveness !== "interrupted";
 }
+
+// ── 展示叠加：把存储基值 liveness 的 "live" 按新鲜度细分为 computing / quiet ──────────────
+// 双轴模型里 computing（仍在产出）/ quiet（活着但静默）是「随时间漂移的派生叠加」，故意不进存储/
+// 不进 superRefine 枚举（summary 只在事件时广播、无周期 tick，存它一写即 stale）。本函数即计划所称
+// 的 deriveLiveness：对 liveness==="live" 用共享新鲜度原语叠加出 computing|quiet，其余基值原样透传。
+//
+// **只供「有重渲染 tick」的展示型消费者**（board-card / agent-terminal-panel）。决策型消费者
+// （通知、Validation 打回、active 判定、shutdown）**绝不读 computing/quiet**——它们只读事件置位的
+// liveness 基值（见计划 freshness 分层）。本函数对任意 turnOwner 的 live 都会拆分；「computing 仅对
+// agent 回合有意义」由消费者自行收窄（user 回合的 live=终端 agent 在 prompt 待命，不应被当作在算）。
+export type SessionDisplayLiveness = Exclude<RuntimeTaskSessionLiveness, "live"> | "computing" | "quiet";
+
+export function deriveDisplayLiveness(
+	facets: SessionFacets,
+	lastOutputAt: number | null | undefined,
+	nowMs: number,
+	options: { activeWindowMs?: number } = {},
+): SessionDisplayLiveness {
+	if (facets.liveness !== "live") {
+		return facets.liveness;
+	}
+	const activeWindowMs = options.activeWindowMs ?? VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS;
+	return isAgentOutputWithinActiveWindow(lastOutputAt, nowMs, activeWindowMs) ? "computing" : "quiet";
+}

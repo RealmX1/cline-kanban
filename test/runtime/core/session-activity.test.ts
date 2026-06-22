@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import {
 	AGENT_OUTPUT_QUIET_THRESHOLD_MS,
+	deriveDisplayLiveness,
 	isAgentActivelyProducingOutput,
 	isAgentOutputQuiet,
 	isAgentOutputWithinActiveWindow,
+	type SessionFacets,
 	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 } from "../../../src/core/session-activity";
 
@@ -122,5 +124,58 @@ describe("isAgentActivelyProducingOutput（前端 Validation 停留判据）", (
 
 	it("undefined summary → false（任务无会话）", () => {
 		expect(isAgentActivelyProducingOutput(undefined, NOW)).toBe(false);
+	});
+});
+
+describe("deriveDisplayLiveness（展示叠加：live → computing / quiet）", () => {
+	const agentLive: SessionFacets = { turnOwner: "agent", liveness: "live", userTurnKind: null };
+
+	it("live 且最近一次输出在 5s 默认窗口内 → computing", () => {
+		expect(deriveDisplayLiveness(agentLive, NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1), NOW)).toBe(
+			"computing",
+		);
+	});
+
+	it("live 但最近一次输出超出默认窗口 → quiet（活着但静默）", () => {
+		expect(deriveDisplayLiveness(agentLive, NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1), NOW)).toBe(
+			"quiet",
+		);
+	});
+
+	it("live 恰好等于窗口边界 → quiet（新鲜度原语是严格小于）", () => {
+		expect(deriveDisplayLiveness(agentLive, NOW - VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS, NOW)).toBe("quiet");
+	});
+
+	it("live 但 lastOutputAt 为 null（从未产出 / 已死残留）→ quiet", () => {
+		expect(deriveDisplayLiveness(agentLive, null, NOW)).toBe("quiet");
+	});
+
+	it("自定义 activeWindowMs 生效", () => {
+		expect(deriveDisplayLiveness(agentLive, NOW - 3_000, NOW, { activeWindowMs: 5_000 })).toBe("computing");
+		expect(deriveDisplayLiveness(agentLive, NOW - 6_000, NOW, { activeWindowMs: 5_000 })).toBe("quiet");
+	});
+
+	it("user 回合的 live 也按新鲜度拆分（helper 通用；agent 收窄交由消费者）", () => {
+		const userLive: SessionFacets = { turnOwner: "user", liveness: "live", userTurnKind: "review" };
+		expect(deriveDisplayLiveness(userLive, NOW, NOW)).toBe("computing");
+		expect(deriveDisplayLiveness(userLive, NOW - 10_000, NOW)).toBe("quiet");
+	});
+
+	it("非 live 基值一律原样透传（与 lastOutputAt / nowMs 无关）", () => {
+		const cases: { liveness: SessionFacets["liveness"]; facets: SessionFacets }[] = [
+			{ liveness: "none", facets: { turnOwner: null, liveness: "none", userTurnKind: null } },
+			{ liveness: "starting", facets: { turnOwner: "agent", liveness: "starting", userTurnKind: null } },
+			{ liveness: "retrying", facets: { turnOwner: "agent", liveness: "retrying", userTurnKind: null } },
+			{ liveness: "exited", facets: { turnOwner: "user", liveness: "exited", userTurnKind: "review" } },
+			{ liveness: "failed", facets: { turnOwner: "user", liveness: "failed", userTurnKind: "error" } },
+			{
+				liveness: "interrupted",
+				facets: { turnOwner: "user", liveness: "interrupted", userTurnKind: "interrupted" },
+			},
+		];
+		for (const { liveness, facets } of cases) {
+			// 即便 lastOutputAt 很新鲜，非 live 也不会被叠加成 computing。
+			expect(deriveDisplayLiveness(facets, NOW, NOW)).toBe(liveness);
+		}
 	});
 });

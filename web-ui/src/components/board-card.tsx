@@ -1,5 +1,6 @@
 import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
+import { deriveDisplayLiveness, resolveSessionFacets } from "@runtime-session-activity";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
 import {
 	AlertCircle,
@@ -32,6 +33,7 @@ import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatPathForDisplay } from "@/utils/path-display";
+import { useInterval } from "@/utils/react-use";
 import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
 import {
 	type CardSessionActivity,
@@ -136,6 +138,18 @@ export function BoardCard({
 		lastSessionActivityRef.current = rawSessionActivity;
 	}
 	const sessionActivity = rawSessionActivity ?? lastSessionActivityRef.current;
+	// 「computing 脉动」（双轴重构 Stage 3，distinction ①）：agent 回合且最近 5s 内仍在产出 PTY 输出时，
+	// 状态点脉动表示「在算」；静默(quiet)/其它态保持现状静止点。computing/quiet 是随时间漂移的派生叠加
+	// （deriveDisplayLiveness，见 session-activity.ts），summary 静默期不再广播，故需本地 tick 让卡片在跨过
+	// 静默边界后停止脉动；tick 仅在「agent 回合 + liveness=live」时开启，空闲 / 待审 / 已结束卡不计时。
+	const sessionFacets = sessionSummary ? resolveSessionFacets(sessionSummary) : null;
+	const isLiveAgentTurn = sessionFacets?.turnOwner === "agent" && sessionFacets.liveness === "live";
+	const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
+	useInterval(() => setActivityNowMs(Date.now()), isLiveAgentTurn ? 1000 : null);
+	const isAgentComputing =
+		isLiveAgentTurn && sessionSummary != null && sessionFacets != null
+			? deriveDisplayLiveness(sessionFacets, sessionSummary.lastOutputAt, activityNowMs) === "computing"
+			: false;
 	const displayTitle = useMemo(
 		() => normalizePromptForDisplay(card.title) || truncateTaskPromptLabel(card.prompt),
 		[card.prompt, card.title],
@@ -602,7 +616,10 @@ export function BoardCard({
 									}}
 								>
 									<span
-										className="inline-block shrink-0 rounded-full"
+										className={cn(
+											"inline-block shrink-0 rounded-full",
+											!isTrashCard && isAgentComputing && "animate-pulse",
+										)}
 										style={{
 											width: 6,
 											height: 6,
