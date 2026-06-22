@@ -19,6 +19,7 @@ import {
 	runtimeTaskWorktreeModeSchema,
 } from "../core/api-contract";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
+import { resolveSessionFacets } from "../core/session-activity";
 import {
 	addTaskDependency,
 	addTaskToColumn,
@@ -759,7 +760,8 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 	}
 
 	const existingSession = runtimeState.sessions[task.id] ?? null;
-	const shouldStartSession = !existingSession || existingSession.state !== "running";
+	// 旧 `state==="running"` → facet 真相源 turnOwner==="agent"（running 是 agent 回合唯一来源，严格等价）。
+	const shouldStartSession = !existingSession || resolveSessionFacets(existingSession).turnOwner !== "agent";
 
 	if (shouldStartSession) {
 		const ensured = await runtimeClient.workspace.ensureWorktree.mutate({

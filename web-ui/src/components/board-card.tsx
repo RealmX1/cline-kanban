@@ -225,7 +225,9 @@ export function BoardCard({
 			return <AlertTriangle size={12} className="text-status-orange" />;
 		}
 		if (columnId === "in_progress") {
-			if (sessionSummary?.state === "failed") {
+			// 旧 `state==="failed"`（spawn 失败）→ facet 真相源：严格等价 turnOwner==="user" && liveness==="failed"
+			// （projectLegacyState 仅此组合投影回 failed；agent 回合先投影为 running）。复用上方已解析的 sessionFacets。
+			if (sessionFacets?.turnOwner === "user" && sessionFacets.liveness === "failed") {
 				return <AlertCircle size={12} className="text-status-red" />;
 			}
 			return <Spinner size={12} />;

@@ -264,6 +264,67 @@ describe("BoardCard", () => {
 		expect(dot?.className).not.toContain("animate-pulse");
 	});
 
+	// Stage 3 余区：in_progress 状态标记的 `state==="failed"` 读 → facet 真相源
+	// （严格等价 turnOwner==="user" && liveness==="failed"；复用卡片已解析的 sessionFacets）。
+	// 经渲染查询失败标记 AlertCircle 的 `text-status-red` svg 钉住，含 exited≠failed 反证 + 显式 facet 采信。
+	it("renders the failed status marker (AlertCircle/red) on an in-progress card with a failed session", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("failed")}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.querySelector("svg.text-status-red")).toBeTruthy();
+	});
+
+	it("反证：exited（进程已退）的 awaiting_review 不渲染失败标记（exited ≠ failed，退化为 Spinner）", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("awaiting_review", {
+							pid: null,
+							exitCode: 0,
+							turnOwner: "user",
+							liveness: "exited",
+							userTurnKind: "review",
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.querySelector("svg.text-status-red")).toBeFalsy();
+	});
+
+	it("采信显式 facet：turnOwner=user/liveness=failed（即便 legacy state=idle）仍渲染失败标记", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("idle", {
+							turnOwner: "user",
+							liveness: "failed",
+							userTurnKind: "error",
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.querySelector("svg.text-status-red")).toBeTruthy();
+	});
+
 	it("hides the move-to-validation and move-to-done actions on in-progress cards", async () => {
 		await act(async () => {
 			root.render(

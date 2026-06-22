@@ -317,3 +317,61 @@ describe("deriveCardSessionActivity", () => {
 		});
 	});
 });
+
+// Stage 3 余区：派生真相源从 legacy `state` → 双轴 facet。锁定「采信显式 facet」与「live↔exited 折叠」
+// 两条不变量——后者证明 exited（进程已退仍等人审）不被偷渡为不同于 live 的呈现（不偷渡 distinction ②）。
+describe("facet 真相源（行为保持 + exited 折叠反证）", () => {
+	it("反证：exited 的 awaiting_review 与 live 同样回落「Waiting for review」（不区分 live↔exited）", () => {
+		const result = deriveCardSessionActivity(
+			makeSummary("awaiting_review", {
+				pid: null,
+				exitCode: 0,
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "review",
+			}),
+		);
+		expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" });
+	});
+
+	it("采信显式 facet：turnOwner=agent（即便 legacy state=idle）→ Thinking… 占位", () => {
+		const result = deriveCardSessionActivity(
+			makeSummary("idle", { turnOwner: "agent", liveness: "live", userTurnKind: null }),
+		);
+		expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." });
+	});
+
+	it("采信显式 facet：turnOwner=user/liveness=failed（即便 legacy state=idle）→ 失败占位", () => {
+		const result = deriveCardSessionActivity(
+			makeSummary("idle", { turnOwner: "user", liveness: "failed", userTurnKind: "error" }),
+		);
+		expect(result).toEqual({ dotColor: SESSION_ACTIVITY_COLOR.error, text: "Task failed to start" });
+	});
+
+	it("isCardCreditLimitError：exited 的 awaiting_review（user 回合）+ credit_limit 仍判 true", () => {
+		expect(
+			isCardCreditLimitError(
+				makeSummary("awaiting_review", {
+					pid: null,
+					turnOwner: "user",
+					liveness: "exited",
+					userTurnKind: "review",
+					latestHookActivity: makeHookActivity({ notificationType: "credit_limit" }),
+				}),
+			),
+		).toBe(true);
+	});
+
+	it("isCardCreditLimitError：agent 回合（非 user）+ credit_limit 判 false（保留 user 回合门控）", () => {
+		expect(
+			isCardCreditLimitError(
+				makeSummary("running", {
+					turnOwner: "agent",
+					liveness: "live",
+					userTurnKind: null,
+					latestHookActivity: makeHookActivity({ notificationType: "credit_limit" }),
+				}),
+			),
+		).toBe(false);
+	});
+});

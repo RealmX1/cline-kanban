@@ -1,12 +1,14 @@
 // 看板卡片「会话活性预览」（状态点颜色 + 单行预览文案）的纯派生逻辑——从 board-card.tsx 抽出为
-// 独立、零 React 依赖、可直接单测的模块（双轴会话状态重构 Stage 3 首步，零行为变更）。
+// 独立、零 React 依赖、可直接单测的模块（双轴会话状态重构 Stage 3 首步抽取，零行为变更）。
 //
-// 现状：派生只读 legacy 一维 `summary.state`（叠加 connectionRetry / latestHookActivity）。Stage 3
-// 后续闸会把 deriveCardSessionActivity 的签名扩展为消费 turnOwner / 派生 liveness（computing /
-// quiet / exited）/ userTurnKind 三轴（见 session-state 重构计划「可视化」一节），届时本模块的
-// 单测即作为「迁移前可见行为基线」的回归护栏。本步只做「提取 + 锁测」，不引入新轴、不改可见行为。
+// 真相源：Stage 3 余区已把本派生的全部 legacy 一维 `summary.state` 读迁到双轴 facet
+// （resolveSessionFacets + isAwaitingUserReviewTurn，叠加 connectionRetry / latestHookActivity），
+// 逐项等价、零可见行为变更，由本模块单测作「迁移前可见行为基线」回归护栏钉住。
+// 仍属「行为保持」：channel C 的人轴文案增强（按 userTurnKind 细分 question / permission / error…）
+// 是后续与列映射 / 通知白名单同批的改动，本模块此刻不引入新文案、不改可见行为。
 
 import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
+import { isAwaitingUserReviewTurn, resolveSessionFacets } from "@runtime-session-activity";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 
 export interface CardSessionActivity {
@@ -97,7 +99,8 @@ export function isCardCreditLimitError(summary: RuntimeTaskSessionSummary | unde
 	if (!summary) {
 		return false;
 	}
-	if (summary.state !== "awaiting_review" && summary.state !== "failed" && summary.state !== "interrupted") {
+	// 旧 `state ∈ {awaiting_review, failed, interrupted}` ⟺ turnOwner==="user"（这三态是 user 回合的全部 legacy 投影）。
+	if (resolveSessionFacets(summary).turnOwner !== "user") {
 		return false;
 	}
 	return summary.latestHookActivity?.notificationType === "credit_limit";
@@ -107,6 +110,10 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 	if (!summary) {
 		return null;
 	}
+	// Stage 3 余区：本派生从 legacy 一维 `summary.state` 读 → 双轴 facet 真相源（零可见行为变更）。
+	// 各 state 读逐项等价：running⟺turnOwner==="agent"；awaiting_review⟺isAwaitingUserReviewTurn；
+	// failed⟺turnOwner==="user" && liveness==="failed"（全表等价见 session-facets.test.ts）。
+	const facets = resolveSessionFacets(summary);
 	if (isCardCreditLimitError(summary)) {
 		return { dotColor: SESSION_ACTIVITY_COLOR.warning, text: "Out of credits" };
 	}
@@ -124,7 +131,7 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 	const toolInputSummary = hookActivity?.toolInputSummary?.trim() ?? null;
 	const finalMessage = hookActivity?.finalMessage?.trim();
 	const hookEventName = hookActivity?.hookEventName?.trim() ?? null;
-	if (summary.state === "awaiting_review" && finalMessage) {
+	if (isAwaitingUserReviewTurn(facets) && finalMessage) {
 		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: finalMessage };
 	}
 	if (
@@ -133,13 +140,15 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 		(hookEventName === "assistant_delta" || hookEventName === "agent_end" || hookEventName === "turn_start")
 	) {
 		return {
-			dotColor: summary.state === "running" ? SESSION_ACTIVITY_COLOR.thinking : SESSION_ACTIVITY_COLOR.success,
+			dotColor: facets.turnOwner === "agent" ? SESSION_ACTIVITY_COLOR.thinking : SESSION_ACTIVITY_COLOR.success,
 			text: finalMessage,
 		};
 	}
 	if (activityText) {
 		let dotColor: string =
-			summary.state === "failed" ? SESSION_ACTIVITY_COLOR.error : SESSION_ACTIVITY_COLOR.thinking;
+			facets.turnOwner === "user" && facets.liveness === "failed"
+				? SESSION_ACTIVITY_COLOR.error
+				: SESSION_ACTIVITY_COLOR.thinking;
 		let text = activityText;
 		const toolCallLabel = resolveToolCallLabel(activityText, toolName, toolInputSummary);
 		if (toolCallLabel) {
@@ -167,14 +176,14 @@ export function deriveCardSessionActivity(summary: RuntimeTaskSessionSummary | u
 		}
 		return { dotColor, text };
 	}
-	if (summary.state === "failed") {
+	if (facets.turnOwner === "user" && facets.liveness === "failed") {
 		const failedText = finalMessage ?? activityText ?? "Task failed to start";
 		return { dotColor: SESSION_ACTIVITY_COLOR.error, text: failedText };
 	}
-	if (summary.state === "awaiting_review") {
+	if (isAwaitingUserReviewTurn(facets)) {
 		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" };
 	}
-	if (summary.state === "running") {
+	if (facets.turnOwner === "agent") {
 		return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };
 	}
 	return null;

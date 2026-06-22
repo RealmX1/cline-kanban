@@ -1,6 +1,8 @@
 // Builds the view model for the native Cline chat panel.
 // Keep panel-specific UI state here so the panel component can stay mostly
 // declarative and shared across detail and sidebar surfaces.
+
+import { resolveSessionFacets } from "@runtime-session-activity";
 import { useCallback, useState } from "react";
 
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
@@ -78,13 +80,15 @@ export function useClineChatPanelController({
 		incomingMessage,
 	});
 	const canSend = Boolean(onSendMessage) && !isSending && !isCanceling;
-	const canCancel = Boolean(onCancelTurn) && summary?.state === "running" && !isCanceling;
+	// 旧 `state==="running"` → facet 真相源 turnOwner==="agent"（running 是 agent 回合唯一来源，严格等价）。
+	const isAgentTurn = summary ? resolveSessionFacets(summary).turnOwner === "agent" : false;
+	const canCancel = Boolean(onCancelTurn) && isAgentTurn && !isCanceling;
 	const showReviewActions =
 		taskColumnId === "review" &&
 		(reviewWorkspaceSnapshot?.changedFiles ?? 0) > 0 &&
 		Boolean(onCommit) &&
 		Boolean(onOpenPr);
-	const showAgentProgressIndicator = summary?.state === "running";
+	const showAgentProgressIndicator = isAgentTurn;
 	const showActionFooter =
 		(showMoveToTrash && Boolean(onMoveToTrash)) || (showMoveToValidation && Boolean(onMoveToValidation));
 	const showCancelAutomaticAction = Boolean(cancelAutomaticActionLabel && onCancelAutomaticAction);
