@@ -12,6 +12,7 @@ import {
 	deriveSessionFacetsFromLegacyState,
 	deriveUserTurnKind,
 	isAwaitingUserReviewTurn,
+	isNotifiableUserTurn,
 	isSessionInActiveTurn,
 	projectLegacyState,
 	resolveSessionFacets,
@@ -480,5 +481,97 @@ describe("isAwaitingUserReviewTurn（facet 版等人审判据，零行为漂移�
 		expect(
 			isAwaitingUserReviewTurn({ turnOwner: "user", liveness: "interrupted", userTurnKind: "interrupted" }),
 		).toBe(false);
+	});
+});
+
+// 通知触发轴从 reviewReason 白名单切到 userTurnKind「广·阻塞即提醒」（决策 B，runtime-state-hub 用）。
+// 旧 Cline 路径白名单：reviewReason∈{hook,attention,error} 才 broadcastTaskReadyForReview。
+const LEGACY_NOTIFY_REVIEW_REASONS: ReadonlySet<RuntimeTaskSessionReviewReason> = new Set([
+	"hook",
+	"attention",
+	"error",
+]);
+describe("isNotifiableUserTurn（通知触发判据，决策 B 广·阻塞即提醒）", () => {
+	it("全 state×pid×retry×reviewReason：等价『等人审回合 ∧ userTurnKind≠interrupted』且自洽于 legacy 投影", () => {
+		for (const state of ALL_STATES) {
+			for (const pid of [null, 123] as const) {
+				for (const connectionRetryActive of [false, true] as const) {
+					for (const reviewReason of ALL_REVIEW_REASONS) {
+						const facets = deriveSessionFacetsFromLegacyState(state, {
+							reviewReason,
+							pid,
+							connectionRetryActive,
+						});
+						const expected = isAwaitingUserReviewTurn(facets) && facets.userTurnKind !== "interrupted";
+						expect(isNotifiableUserTurn(facets)).toBe(expected);
+						// 自洽于唯一 reducer：仅 awaiting_review 投影且人轴非 interrupted。
+						expect(isNotifiableUserTurn(facets)).toBe(
+							projectLegacyState(facets) === "awaiting_review" && facets.userTurnKind !== "interrupted",
+						);
+					}
+				}
+			}
+		}
+	});
+
+	it("相对旧 reviewReason 白名单是严格超集（零通知回归）+ 标出新增触发", () => {
+		const newlyNotifying: RuntimeTaskSessionReviewReason[] = [];
+		for (const pid of [null, 123] as const) {
+			for (const reviewReason of ALL_REVIEW_REASONS) {
+				const facets = deriveSessionFacetsFromLegacyState("awaiting_review", {
+					reviewReason,
+					pid,
+					connectionRetryActive: false,
+				});
+				const wasNotifying = LEGACY_NOTIFY_REVIEW_REASONS.has(reviewReason);
+				// 超集：旧会通知的，现仍通知（保活，绝不回归）。
+				if (wasNotifying) {
+					expect(isNotifiableUserTurn(facets)).toBe(true);
+				}
+				if (!wasNotifying && isNotifiableUserTurn(facets) && pid === null) {
+					newlyNotifying.push(reviewReason);
+				}
+			}
+		}
+		// 新增触发（属决策 B 的有意修正、非回归）：exit/completion(→review) 与 null(→needs_input) 的等人回合。
+		expect(new Set(newlyNotifying)).toEqual(new Set<RuntimeTaskSessionReviewReason>([null, "exit", "completion"]));
+	});
+
+	it("awaiting_review 的 live↔exited 同判 true（pid 有无不改通知，不偷渡 distinction ②）", () => {
+		const live = deriveSessionFacetsFromLegacyState("awaiting_review", {
+			reviewReason: "hook",
+			pid: 123,
+			connectionRetryActive: false,
+		});
+		const exited = deriveSessionFacetsFromLegacyState("awaiting_review", {
+			reviewReason: "hook",
+			pid: null,
+			connectionRetryActive: false,
+		});
+		expect(live.liveness).toBe("live");
+		expect(exited.liveness).toBe("exited");
+		expect(isNotifiableUserTurn(live)).toBe(true);
+		expect(isNotifiableUserTurn(exited)).toBe(true);
+	});
+
+	it("review/error/needs_input → 通知；interrupted（被中断/终止）→ 不通知", () => {
+		expect(isNotifiableUserTurn({ turnOwner: "user", liveness: "live", userTurnKind: "review" })).toBe(true);
+		expect(isNotifiableUserTurn({ turnOwner: "user", liveness: "exited", userTurnKind: "error" })).toBe(true);
+		expect(isNotifiableUserTurn({ turnOwner: "user", liveness: "live", userTurnKind: "needs_input" })).toBe(true);
+		// 病态组合（awaiting_review 但人轴 interrupted）显式排除。
+		expect(isNotifiableUserTurn({ turnOwner: "user", liveness: "live", userTurnKind: "interrupted" })).toBe(false);
+		// 真·interrupted 态（liveness=interrupted）本就非等人审 → 不通知。
+		expect(isNotifiableUserTurn({ turnOwner: "user", liveness: "interrupted", userTurnKind: "interrupted" })).toBe(
+			false,
+		);
+		expect(isNotifiableUserTurn({ turnOwner: "user", liveness: "failed", userTurnKind: "error" })).toBe(false);
+		expect(isNotifiableUserTurn({ turnOwner: "agent", liveness: "live", userTurnKind: null })).toBe(false);
+		expect(isNotifiableUserTurn({ turnOwner: null, liveness: "none", userTurnKind: null })).toBe(false);
+	});
+
+	it("前向兼容：未来采集增强产出的 question/plan_review/permission 均触发通知（broad 含全部阻塞类）", () => {
+		expect(isNotifiableUserTurn({ turnOwner: "user", liveness: "live", userTurnKind: "question" })).toBe(true);
+		expect(isNotifiableUserTurn({ turnOwner: "user", liveness: "live", userTurnKind: "plan_review" })).toBe(true);
+		expect(isNotifiableUserTurn({ turnOwner: "user", liveness: "exited", userTurnKind: "permission" })).toBe(true);
 	});
 });

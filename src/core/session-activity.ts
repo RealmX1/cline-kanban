@@ -232,6 +232,19 @@ export function isAwaitingUserReviewTurn(facets: SessionFacets): boolean {
 	return facets.turnOwner === "user" && isSessionInActiveTurn(facets);
 }
 
+// 决策型「该回合是否触发 ready-for-review 系统通知」判据（facet 权威，单一真相源）。
+// 用户拍板「广·阻塞即提醒」（2026-06-22）：凡进入「等人审查回合」（isAwaitingUserReviewTurn）且
+// userTurnKind 非 interrupted（被中断/终止不打扰）即触发——涵盖 review（含完成/exit/hook）、error
+// （运行错）、needs_input（含 attention/兜底），以及未来采集增强后才会产出的 question/plan_review/
+// permission（均属「agent 阻塞等你」，broad 策略一律提醒）。故判据写成「awaiting 回合 ∧ 非
+// interrupted」而非枚举白名单，既精确编码决策、又对后续采集增强前向兼容。
+//   - 相对旧 reviewReason∈{hook,attention,error} 白名单的有意差异（属修正、非回归）：reviewReason
+//     "exit"/"completion"/null 的等人回合（→review/needs_input）此前不通知，现纳入广播。
+//   - 决策型判据：只读事件置位 facet，不读 computing/quiet 派生叠加（见 freshness 分层）。
+export function isNotifiableUserTurn(facets: SessionFacets): boolean {
+	return isAwaitingUserReviewTurn(facets) && facets.userTurnKind !== "interrupted";
+}
+
 // ── 展示叠加：把存储基值 liveness 的 "live" 按新鲜度细分为 computing / quiet ──────────────
 // 双轴模型里 computing（仍在产出）/ quiet（活着但静默）是「随时间漂移的派生叠加」，故意不进存储/
 // 不进 superRefine 枚举（summary 只在事件时广播、无周期 tick，存它一写即 stale）。本函数即计划所称
