@@ -106,6 +106,12 @@ function classifyHookEvent(
 		case "sessionstart":
 			return "to_in_progress";
 		case "pretooluse":
+		// Stage 5 备注：生产环境的 Claude question/plan_review 采集**不走本 log-watcher**——它经
+		// command-hook 路径（settings.json 的 PreToolUse matcher `ExitPlanMode|AskUserQuestion`→to_review
+		// → `kanban hooks ingest` → classifyHookUserTurnKind 读 toolName，见 agent-session-adapters.ts /
+		// hooks-api.ts）。本 watcher 当前**仅测试引用**（startClaudeSessionWatcher 无生产调用点），故此处
+		// pretooluse→activity 保持不变；若将来把 watcher 接入生产，需在此把 toolName∈{ExitPlanMode,
+		// AskUserQuestion} 的 pretooluse 同样路由到 to_review（classifyHookEvent 需把 toolName 纳入入参）。
 		case "subagentstop":
 			return "activity";
 		case "notification": {

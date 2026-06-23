@@ -121,6 +121,35 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(existsSync(wrapperPath)).toBe(false);
 	});
 
+	it("registers a dedicated Claude PreToolUse matcher routing ExitPlanMode/AskUserQuestion to review (Stage 5)", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-stage5-hooks",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			workspaceId: "workspace-1",
+		});
+
+		const settingsIndex = launch.args.indexOf("--settings");
+		expect(settingsIndex).toBeGreaterThanOrEqual(0);
+		const settingsPath = launch.args[settingsIndex + 1];
+		const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+			hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
+		};
+
+		const preToolUse = settings.hooks.PreToolUse;
+		expect(preToolUse).toHaveLength(2);
+		// 专用 matcher 必须排在兜底 *（activity）之前，且路由到 to_review。
+		expect(preToolUse[0].matcher).toBe("ExitPlanMode|AskUserQuestion");
+		expect(preToolUse[0].hooks[0].command).toContain("--event");
+		expect(preToolUse[0].hooks[0].command).toContain("to_review");
+		expect(preToolUse[1].matcher).toBe("*");
+		expect(preToolUse[1].hooks[0].command).toContain("activity");
+	});
+
 	it("appends Kanban sidebar instructions for home Claude sessions", async () => {
 		setupTempHome();
 		setKanbanProcessContext();

@@ -69,9 +69,10 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					} satisfies RuntimeHookIngestResponse;
 				}
 
-				// B3 Claude permission 采集：to_review 时从 hook metadata 分类更细人轴（仅 source==="claude" 的
-				// PermissionRequest / permission_prompt → permission），随 hook.to_review 覆写 facet 人轴。
-				let userTurnKindOverride: "permission" | null = null;
+				// Claude（终端 agent）采集增强：to_review 时从 hook metadata 分类更细人轴（仅 source==="claude"）
+				// ——permission（PermissionRequest / permission_prompt，B3）+ plan_review / question（ExitPlanMode /
+				// AskUserQuestion 工具名，Stage 5），随 hook.to_review 经 reducer 完整 facet 三元组覆写人轴。
+				let userTurnKindOverride: RuntimeTaskSessionUserTurnKind | null = null;
 				if (event === "to_review") {
 					userTurnKindOverride = classifyHookUserTurnKind(body.metadata);
 					if (userTurnKindOverride !== null) {
@@ -79,22 +80,37 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 							taskId,
 							agentId: summary.agentId,
 							source: body.metadata?.source ?? null,
-							rawSignal: body.metadata?.hookEventName ?? body.metadata?.notificationType ?? null,
+							// 工具驱动的人轴（question/plan_review）以 toolName 为触发信号，permission 以
+							// hookEventName/notificationType——优先 toolName 便于线上回溯触发因。
+							rawSignal:
+								body.metadata?.toolName ??
+								body.metadata?.hookEventName ??
+								body.metadata?.notificationType ??
+								null,
 							resolvedKind: userTurnKindOverride,
 						});
 					} else {
-						// expected-but-absent：识别到 claude 的 permission-ish 信号却未精确匹配已知模式 → 记
-						// unclassified，让线上数据暴露 harness 信号漂移（Claude 改名/新增）。不刷普适四种（Stop 等
-						// 无 permission 字样的常规 to_review 不触发）。
+						// expected-but-absent：识别到 claude 的更细人轴信号（permission 字样，或带 toolName 的工具驱动
+						// to_review——如 Claude 改名后的 plan/question 工具仍被未锚定的 matcher 部分命中）却未精确匹配
+						// 已知模式 → 记 unclassified，让线上数据暴露 harness 信号漂移。不刷普适四种（Stop 等无
+						// toolName、无 permission 字样的常规 to_review 不触发）。
 						const sourceLc = body.metadata?.source?.trim().toLowerCase() ?? null;
 						const rawHook = body.metadata?.hookEventName?.trim().toLowerCase() ?? null;
 						const rawNotif = body.metadata?.notificationType?.trim().toLowerCase() ?? null;
-						if (sourceLc === "claude" && (rawHook?.includes("permission") || rawNotif?.includes("permission"))) {
+						const rawTool = body.metadata?.toolName?.trim() ?? "";
+						if (
+							sourceLc === "claude" &&
+							(rawHook?.includes("permission") || rawNotif?.includes("permission") || rawTool.length > 0)
+						) {
 							logUserTurnKindCapture({
 								taskId,
 								agentId: summary.agentId,
 								source: body.metadata?.source ?? null,
-								rawSignal: body.metadata?.hookEventName ?? body.metadata?.notificationType ?? null,
+								rawSignal:
+									body.metadata?.toolName ??
+									body.metadata?.hookEventName ??
+									body.metadata?.notificationType ??
+									null,
 								resolvedKind: "unclassified",
 							});
 						}

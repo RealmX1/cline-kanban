@@ -702,6 +702,17 @@ const claudeAdapter: AgentSessionAdapter = {
 					],
 					PreToolUse: [
 						{
+							// Stage 5：Claude 原生「计划待批 / 澄清提问」经它自己的工具触发（ExitPlanMode /
+							// AskUserQuestion）。PreToolUse 在工具执行前触发——此刻用户需先批/答 → 映射为
+							// to_review；具体人轴（plan_review / question）由 ingest 端 classifyHookUserTurnKind
+							// 读 metadata.toolName 区分。须排在下方 *→activity 之前（专用 matcher 优先）。镜像
+							// Notification 的 permission_prompt+* 双 matcher：保留 *→activity 继续喂活动 feed，
+							// 两者对同一工具双触发幂等（activity 不转换、仅 applyHookActivity，metadata-only 漏斗
+							// 分支 preserve userTurnKind，不冲掉已采集的人轴）。
+							matcher: "ExitPlanMode|AskUserQuestion",
+							hooks: [{ type: "command", command: buildHookCommand("to_review", { source: "claude" }) }],
+						},
+						{
 							matcher: "*",
 							hooks: [{ type: "command", command: buildHookCommand("activity", { source: "claude" }) }],
 						},

@@ -169,6 +169,173 @@ describe("createHooksApi", () => {
 		expect(manager.transitionToReview).toHaveBeenCalledWith("task-1", "hook", undefined);
 	});
 
+	it("S5: classifies Claude ExitPlanMode PreToolUse into userTurnKind=plan_review and broadcasts it", async () => {
+		const transitionedSummary = createSummary({
+			state: "awaiting_review",
+			reviewReason: "hook",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "plan_review",
+		});
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(() => transitionedSummary),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const broadcastTaskReadyForReview = vi.fn();
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview,
+			captureTaskTurnCheckpoint: vi.fn(async () => ({
+				turn: 1,
+				ref: "refs/kanban/checkpoints/task-1/turn/1",
+				commit: "1111111",
+				createdAt: 1,
+			})),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { source: "claude", hookEventName: "PreToolUse", toolName: "ExitPlanMode" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.transitionToReview).toHaveBeenCalledWith("task-1", "hook", "plan_review");
+		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith("workspace-1", "task-1", "plan_review");
+	});
+
+	it("S5: classifies Claude AskUserQuestion PreToolUse into userTurnKind=question and broadcasts it", async () => {
+		const transitionedSummary = createSummary({
+			state: "awaiting_review",
+			reviewReason: "hook",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "question",
+		});
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(() => transitionedSummary),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const broadcastTaskReadyForReview = vi.fn();
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview,
+			captureTaskTurnCheckpoint: vi.fn(async () => ({
+				turn: 1,
+				ref: "refs/kanban/checkpoints/task-1/turn/1",
+				commit: "1111111",
+				createdAt: 1,
+			})),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { source: "claude", hookEventName: "PreToolUse", toolName: "AskUserQuestion" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.transitionToReview).toHaveBeenCalledWith("task-1", "hook", "question");
+		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith("workspace-1", "task-1", "question");
+	});
+
+	it("S5: ExitPlanMode arriving via PermissionRequest is labeled plan_review (race-proof, not permission)", async () => {
+		// ExitPlanMode 同时 fire PreToolUse 与 PermissionRequest；本仓库 adapter 的 PermissionRequest "*"→to_review
+		// 可能先到。classifier 按 toolName 优先于通用 permission，故无论哪条 hook 先赢 to_review 闸，都落 plan_review。
+		const transitionedSummary = createSummary({
+			state: "awaiting_review",
+			reviewReason: "hook",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "plan_review",
+		});
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(() => transitionedSummary),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const broadcastTaskReadyForReview = vi.fn();
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview,
+			captureTaskTurnCheckpoint: vi.fn(async () => ({
+				turn: 1,
+				ref: "refs/kanban/checkpoints/task-1/turn/1",
+				commit: "1111111",
+				createdAt: 1,
+			})),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { source: "claude", hookEventName: "PermissionRequest", toolName: "ExitPlanMode" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.transitionToReview).toHaveBeenCalledWith("task-1", "hook", "plan_review");
+		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith("workspace-1", "task-1", "plan_review");
+	});
+
+	it("S5: double-fire — the matcher `*`→activity for the same tool is a benign no-op (no transition)", async () => {
+		// 同一个 ExitPlanMode/AskUserQuestion 工具同时命中专用 matcher（to_review）与 *（activity）。后者
+		// 经 activity 路径：canTransitionTaskForHookEvent → false → 仅 applyHookActivity（metadata-only 漏斗
+		// 分支 preserve 已采集的 userTurnKind），不触发任何 state 转换。此处在 hooks-api 层钉住「activity 不
+		// 转换」的不变量（已采集人轴的 preserve 由 mergeSummaryWithFacets 单测覆盖）。
+		const manager = {
+			getSummary: vi.fn(() =>
+				createSummary({ state: "awaiting_review", turnOwner: "user", userTurnKind: "plan_review" }),
+			),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "activity",
+			metadata: { source: "claude", hookEventName: "PreToolUse", toolName: "ExitPlanMode" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.transitionToReview).not.toHaveBeenCalled();
+		expect(manager.transitionToRunning).not.toHaveBeenCalled();
+		expect(manager.applyHookActivity).toHaveBeenCalledWith("task-1", {
+			source: "claude",
+			hookEventName: "PreToolUse",
+			toolName: "ExitPlanMode",
+		});
+	});
+
 	it("captures a turn checkpoint when transitioning to review", async () => {
 		const transitionedSummary = createSummary({
 			state: "awaiting_review",

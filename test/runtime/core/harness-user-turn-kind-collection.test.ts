@@ -22,7 +22,7 @@ describe("classifyClineUserAttentionTool（Cline SDK 工具 → 人轴）", () =
 	});
 });
 
-describe("classifyHookUserTurnKind（Claude hook metadata → permission）", () => {
+describe("classifyHookUserTurnKind（Claude hook metadata → permission / question / plan_review）", () => {
 	it("claude + PermissionRequest → permission", () => {
 		expect(classifyHookUserTurnKind({ source: "claude", hookEventName: "PermissionRequest" })).toBe("permission");
 	});
@@ -44,5 +44,53 @@ describe("classifyHookUserTurnKind（Claude hook metadata → permission）", ()
 		expect(classifyHookUserTurnKind(null)).toBe(null);
 		expect(classifyHookUserTurnKind(undefined)).toBe(null);
 		expect(classifyHookUserTurnKind({})).toBe(null);
+	});
+
+	// Stage 5：Claude Code 原生工具名 → question / plan_review（与 Cline SDK 同语义、不同工具名）。
+	it("claude + ExitPlanMode toolName → plan_review", () => {
+		expect(
+			classifyHookUserTurnKind({ source: "claude", hookEventName: "PreToolUse", toolName: "ExitPlanMode" }),
+		).toBe("plan_review");
+	});
+	it("claude + AskUserQuestion toolName → question", () => {
+		expect(
+			classifyHookUserTurnKind({ source: "claude", hookEventName: "PreToolUse", toolName: "AskUserQuestion" }),
+		).toBe("question");
+	});
+	it("toolName 大小写 / 空白 / snake_case alias 不敏感", () => {
+		expect(classifyHookUserTurnKind({ source: "claude", toolName: "  exitplanmode  " })).toBe("plan_review");
+		expect(classifyHookUserTurnKind({ source: "claude", toolName: "exit_plan_mode" })).toBe("plan_review");
+		expect(classifyHookUserTurnKind({ source: "claude", toolName: "ASKUSERQUESTION" })).toBe("question");
+		expect(classifyHookUserTurnKind({ source: "claude", toolName: "ask_user_question" })).toBe("question");
+	});
+	it("非 claude 来源带工具名 → null", () => {
+		expect(classifyHookUserTurnKind({ source: "cline", toolName: "ExitPlanMode" })).toBe(null);
+		expect(classifyHookUserTurnKind({ source: "codex", toolName: "AskUserQuestion" })).toBe(null);
+	});
+	it("claude 未知工具名 → null（回落单源派生，不强加人轴）", () => {
+		expect(classifyHookUserTurnKind({ source: "claude", hookEventName: "PreToolUse", toolName: "Bash" })).toBe(null);
+		expect(classifyHookUserTurnKind({ source: "claude", toolName: "Read" })).toBe(null);
+	});
+	it("通用工具的 PermissionRequest（如 Bash）→ permission（无特定 plan/question 工具名）", () => {
+		expect(classifyHookUserTurnKind({ source: "claude", hookEventName: "PermissionRequest", toolName: "Bash" })).toBe(
+			"permission",
+		);
+	});
+	// 竞态鲁棒（评审确认）：ExitPlanMode/AskUserQuestion 也经 PermissionRequest 抵达，且该 hook 在本仓库
+	// adapter 走 "*"→to_review；toolName 必须先于通用 permission 判定，否则「批准计划」的权限请求会被误标
+	// permission 而非 plan_review。语义上 ExitPlanMode 的权限请求本就是 plan_review。
+	it("ExitPlanMode 经 PermissionRequest 抵达 → plan_review（非 permission，竞态鲁棒）", () => {
+		expect(
+			classifyHookUserTurnKind({ source: "claude", hookEventName: "PermissionRequest", toolName: "ExitPlanMode" }),
+		).toBe("plan_review");
+	});
+	it("AskUserQuestion 经 PermissionRequest 抵达 → question（非 permission，竞态鲁棒）", () => {
+		expect(
+			classifyHookUserTurnKind({
+				source: "claude",
+				hookEventName: "PermissionRequest",
+				toolName: "AskUserQuestion",
+			}),
+		).toBe("question");
 	});
 });
