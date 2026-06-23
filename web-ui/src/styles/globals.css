@@ -365,6 +365,14 @@ body,
 	border-radius: var(--radius-md);
 }
 
+/* Focus View 左侧列表：选中卡列内双向 sticky，被滚过时钉在顶/底沿仍可见 */
+.kb-detail-task-list-scroll .kb-board-card-shell[data-selected="true"] {
+	position: sticky; /* 覆盖基础的 position: relative */
+	top: 0; /* 向下滚动时钉在顶沿（scrollport 自带 p-2 已留出间距） */
+	bottom: 0; /* 向上滚动时钉在底沿；top+bottom 同设 = 双向「不论上下」 */
+	z-index: 3; /* 高于同级卡片 z-index:1 / hover z-index:2，滚动时盖住下方卡片 */
+}
+
 .kb-board-card-dependency-source {
 	box-shadow: inset 0 0 0 1px var(--color-accent);
 }
