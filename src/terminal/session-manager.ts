@@ -488,6 +488,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 				// 默认阈值 AGENT_OUTPUT_QUIET_THRESHOLD_MS（2s）。
 				return evaluateAgentOutputQuiet(entry?.summary.lastOutputAt ?? null, now());
 			},
+			isAgentTurnActive: () => {
+				const entry = this.entries.get(taskId);
+				// dual-axis facet 真相源：仅 turnOwner==="agent" 才算活跃 agent 回合（与 connection-drop
+				// 检测器的主门控对齐）。会话不存在 / 已翻入 user 回合（agent 提问 / 计划评审 / 权限确认）
+				// 时返回 false，让检测器让位、绝不把续跑注入到等待用户的对话框里。
+				return entry ? resolveSessionFacets(entry.summary).turnOwner === "agent" : false;
+			},
 			log: (message: string) => {
 				logTuiFreezeWarning(`${message} taskId=${taskId}`);
 			},
@@ -1311,6 +1318,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 				listener.onState?.(cloneSummary(summary));
 			}
 			this.emitSummary(summary);
+			// 翻入 user 回合（agent 向用户提问 / 计划评审 / 权限确认）：让 connection-drop 检测器即时
+			// 让位（结束残留 episode、清「重连中」徽标、停退避定时器）。这是「facet→检测器」的事件
+			// 驱动输入边，兜住「PTY 输出先于 hook 落地、误起 episode」的竞态；并顺带清掉 to_review 后
+			// 残留的 connectionRetry（episode 仍 active 时 endEpisode 会一并 clearConnectionRetryState），
+			// 否则会话再回到 running 会让陈旧值复活成 retrying。
+			const active = entry.active;
+			if (active.outputReactionEngine !== null && active.outputReactionSession !== null) {
+				const ctx = this.buildOutputReactionContext(entry, "");
+				if (ctx !== null) {
+					active.outputReactionEngine.onUserTurnStart(
+						ctx,
+						active.outputReactionSession,
+						this.buildOutputReactionActions(taskId),
+					);
+				}
+			}
 		}
 		return cloneSummary(summary);
 	}

@@ -210,6 +210,63 @@ describe("session-manager · connection-drop auto-continue", () => {
 		manager.stopTaskSession("task-conn-drop-manual");
 	});
 
+	it("stands down (clears retry state, no injection) when the turn flips to the user mid-episode", async () => {
+		// 竞态：PTY 输出先于 hook 落地 → episode 已起（retrying）；随后 agent 向用户提问，
+		// hook 经 transitionToReview 把回合翻成 user → 检测器即时让位、清「重连中」、绝不注入。
+		const getSession = spawnManagerWithSession(1007);
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-conn-drop-standdown",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-conn-drop-standdown",
+			prompt: "Do the task",
+		});
+		const session = getSession();
+		const write = (session as NonNullable<typeof session>).write;
+
+		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		expect(manager.getSummary("task-conn-drop-standdown")?.connectionRetry?.status).toBe("retrying");
+
+		// agent 向用户提问 → hook 翻入 user 回合（question）。
+		manager.transitionToReview("task-conn-drop-standdown", "hook", "question");
+		expect(manager.getSummary("task-conn-drop-standdown")?.connectionRetry ?? null).toBeNull();
+
+		// 退避定时器到点也不会注入（episode 已让位结束、定时器已清）。
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(write).not.toHaveBeenCalled();
+
+		manager.stopTaskSession("task-conn-drop-standdown");
+	});
+
+	it("does not enter retry when a transient pattern arrives after the turn already flipped to the user", async () => {
+		// 常见路径：hook 先于问题 UI 文本落地 → turnOwner 已是 user。问题 / 选项文本里命中瞬时
+		// 正则（如 agent 在讨论 econnreset）也不起 episode、不置「重连中」、不注入。
+		const getSession = spawnManagerWithSession(1008);
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-conn-drop-user-first",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-conn-drop-user-first",
+			prompt: "Do the task",
+		});
+		const session = getSession();
+		const write = (session as NonNullable<typeof session>).write;
+
+		// 先翻入 user 回合（提问），再让带连接错误措辞的「问题文本」流过检测器。
+		manager.transitionToReview("task-conn-drop-user-first", "hook", "question");
+		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+
+		expect(manager.getSummary("task-conn-drop-user-first")?.connectionRetry ?? null).toBeNull();
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(write).not.toHaveBeenCalled();
+
+		manager.stopTaskSession("task-conn-drop-user-first");
+	});
+
 	it("manual dismiss removes a retrying session from the list without injecting", async () => {
 		const getSession = spawnManagerWithSession(1006);
 		const manager = new TerminalSessionManager();
