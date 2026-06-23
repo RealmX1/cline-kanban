@@ -681,6 +681,17 @@ const claudeAdapter: AgentSessionAdapter = {
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
 			args.push("--continue");
 		}
+		// Claude Code 的 `--continue`（「Refresh terminal session」/恢复任务时用）会用会话最后一条
+		// 已记录回合的「裸」model id `claude-opus-4-8` 重建模型——这丢掉了 1M context 选择，静默回退到
+		// 200k 变体（实测：即便会话本来跑在 1M，`--continue` 也会掉到 200k；而尚未产出回合的会话因为
+		// 「无可重建」反而留在默认 1M，于是表现为「时好时坏」）。显式传 `--model default`（一个随版本
+		// 自动跟进的别名，当前解析为 1M 的 `claude-opus-4-8[1m]`，换代后自动指向新默认）可让每次启动
+		// （全新与恢复）都落到看板预期的默认模型，并覆盖上述重建。仅在未显式指定 model 时注入，故按任务
+		// 指定的具体模型仍然优先。注意：只有 `--model` 这个「旗标」能解析 `default` 别名并压过 `--continue`
+		// 的重建；`ANTHROPIC_MODEL=default` 环境变量会被当成名为 "default" 的自定义模型（实测失效）。
+		if (!hasCliOption(args, "--model")) {
+			args.push("--model", "default");
+		}
 		if (input.startInPlanMode) {
 			const withoutImmediateBypass = args.filter((arg) => arg !== "--dangerously-skip-permissions");
 			args.length = 0;
