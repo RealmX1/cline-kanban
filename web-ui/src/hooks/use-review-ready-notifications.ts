@@ -12,6 +12,7 @@ import {
 	subscribeToNotificationBadgeClear,
 } from "@/utils/notification-badge-sync";
 import { getBrowserNotificationPermission } from "@/utils/notification-permission";
+import { playReviewReadyNotificationSound } from "@/utils/notification-sound";
 import { useDocumentTitle, useInterval, useUnmount, useWindowEvent } from "@/utils/react-use";
 import {
 	createTabPresenceId,
@@ -28,6 +29,7 @@ interface UseReviewReadyNotificationsOptions {
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	readyForReviewNotificationsEnabled: boolean;
+	notificationSoundEnabled: boolean;
 	workspacePath: string | null;
 }
 
@@ -45,13 +47,17 @@ function isDocumentCurrentlyVisible(fallbackValue: boolean): boolean {
 	return document.visibilityState === "visible";
 }
 
-function resolveReviewReadyNotificationBody(
-	taskId: string,
+// 正文多行：第 1 行 repo / 工作区目录名、第 2 行任务标题、第 3 行 agent 最终消息（若有）。
+// 缺省行（无 workspace、空白 finalMessage）被过滤掉，OS 通知会优雅截断过长行。taskTitle 由调用点保证非空。
+export function resolveReviewReadyNotificationBody(
+	workspaceTitle: string | null,
 	taskTitle: string,
-	taskSessions: Record<string, RuntimeTaskSessionSummary>,
+	finalMessage: string | null | undefined,
 ): string {
-	const finalMessage = taskSessions[taskId]?.latestHookActivity?.finalMessage?.trim();
-	return finalMessage || taskTitle;
+	const lines = [workspaceTitle?.trim() || null, taskTitle, finalMessage?.trim() || null].filter(
+		(line): line is string => Boolean(line && line.length > 0),
+	);
+	return lines.join("\n");
 }
 
 // 通知标题随「人轴」userTurnKind 措辞，与卡片 channel C 文案对齐。userTurnKind 取自一次性 ready 事件
@@ -69,22 +75,21 @@ const REVIEW_READY_TITLE_PHRASE_BY_USER_TURN_KIND: Partial<
 };
 const DEFAULT_REVIEW_READY_TITLE_PHRASE = "ready for review";
 
-export function resolveReviewReadyNotificationTitle(
-	workspaceTitle: string | null,
-	userTurnKind: RuntimeTaskSessionUserTurnKind | undefined,
-): string {
+// 标题 = userTurnKind 措辞本身（首字母大写、独立成句），不再前缀项目名——项目名改放正文第一行，
+// 任务标题放第二行（见 resolveReviewReadyNotificationBody），让标题第一眼就回答「是什么种类的事」。
+export function resolveReviewReadyNotificationTitle(userTurnKind: RuntimeTaskSessionUserTurnKind | undefined): string {
 	const phrase =
 		(userTurnKind ? REVIEW_READY_TITLE_PHRASE_BY_USER_TURN_KIND[userTurnKind] : undefined) ??
 		DEFAULT_REVIEW_READY_TITLE_PHRASE;
-	if (!workspaceTitle) {
-		return `${phrase.charAt(0).toUpperCase()}${phrase.slice(1)}`;
-	}
-	return `${workspaceTitle} ${phrase}`;
+	return `${phrase.charAt(0).toUpperCase()}${phrase.slice(1)}`;
 }
 
-function showReadyForReviewNotification(taskId: string, notificationTitle: string, notificationBody: string): void {
+// 返回值 = 本次是否真的展示了 OS 通知横幅：权限非 granted（default/denied/unsupported）早返回 false，
+// 构造 Notification 抛错时 catch 后也返回 false，仅在成功构造时返回 true。调用点据此让提示音与「通知确实
+// 弹出」严格绑定（无横幅则不发声），落实 use 端注释声明的「声音与通知共享门控」不变量。
+function showReadyForReviewNotification(taskId: string, notificationTitle: string, notificationBody: string): boolean {
 	if (!canShowBrowserNotifications()) {
-		return;
+		return false;
 	}
 	try {
 		const notification = new Notification(notificationTitle, {
@@ -98,8 +103,10 @@ function showReadyForReviewNotification(taskId: string, notificationTitle: strin
 			}
 			notification.close();
 		};
+		return true;
 	} catch {
 		// Ignore browser notification failures.
+		return false;
 	}
 }
 
@@ -110,6 +117,7 @@ export function useReviewReadyNotifications({
 	latestTaskReadyForReview,
 	taskSessions,
 	readyForReviewNotificationsEnabled,
+	notificationSoundEnabled,
 	workspacePath,
 }: UseReviewReadyNotificationsOptions): void {
 	const notificationPresenceTabIdRef = useRef<string>(createTabPresenceId());
@@ -214,17 +222,22 @@ export function useReviewReadyNotifications({
 		const taskTitle = selection
 			? truncateTaskPromptLabel(selection.card.prompt) || `Task ${latestTaskReadyForReview.taskId}`
 			: `Task ${latestTaskReadyForReview.taskId}`;
-		const notificationBody = resolveReviewReadyNotificationBody(
-			latestTaskReadyForReview.taskId,
-			taskTitle,
-			taskSessions,
-		);
+		const finalMessage = taskSessions[latestTaskReadyForReview.taskId]?.latestHookActivity?.finalMessage;
+		const notificationBody = resolveReviewReadyNotificationBody(workspaceTitle, taskTitle, finalMessage);
 		setPendingReviewReadyNotificationCount((current) => current + 1);
-		const notificationTitle = resolveReviewReadyNotificationTitle(
-			workspaceTitle,
-			latestTaskReadyForReview.userTurnKind,
+		const notificationTitle = resolveReviewReadyNotificationTitle(latestTaskReadyForReview.userTurnKind);
+		const didShowNotification = showReadyForReviewNotification(
+			latestTaskReadyForReview.taskId,
+			notificationTitle,
+			notificationBody,
 		);
-		showReadyForReviewNotification(latestTaskReadyForReview.taskId, notificationTitle, notificationBody);
+		// 提示音与通知共享同一套门控（开关 / 可见性 / peer tab），并额外绑定「OS 通知确实弹出」：
+		// 仅当 didShowNotification 为真（浏览器权限 granted 且 Notification 构造未抛错）时才发声，
+		// 杜绝「权限未授予 → 无通知横幅却照样响声」的不一致路径（角标计数已在上方无条件更新，作为降级视觉提示）。
+		// 设置里关「Play a sound」时同样被跳过——出通知不出声。
+		if (didShowNotification && notificationSoundEnabled) {
+			playReviewReadyNotificationSound(latestTaskReadyForReview.userTurnKind);
+		}
 	}, [
 		activeWorkspaceId,
 		board,
@@ -232,6 +245,7 @@ export function useReviewReadyNotifications({
 		isWindowFocused,
 		latestTaskReadyForReview,
 		readyForReviewNotificationsEnabled,
+		notificationSoundEnabled,
 		taskSessions,
 		workspaceTitle,
 	]);

@@ -109,8 +109,8 @@ describe("drag rules", () => {
 		).toBe(true);
 	});
 
-	it("never allows manual validation to review drops", () => {
-		expect(isAllowedCrossColumnCardMove("validation", "review")).toBe(false);
-		expect(isCardDropDisabled("review", "validation")).toBe(true);
+	it("allows manual validation to review drops (mirror of review to validation)", () => {
+		expect(isAllowedCrossColumnCardMove("validation", "review")).toBe(true);
+		expect(isCardDropDisabled("review", "validation")).toBe(false);
 	});
 });

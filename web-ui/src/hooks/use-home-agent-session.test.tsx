@@ -68,6 +68,7 @@ function createRuntimeConfig(overrides: Partial<RuntimeConfigResponse> = {}): Ru
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project-config.json",
 		readyForReviewNotificationsEnabled: true,
+		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
 		detectedCommands: ["codex", "claude", "cline"],
 		agents: [

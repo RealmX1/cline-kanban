@@ -44,6 +44,12 @@ export function isAllowedCrossColumnCardMove(
 	if ((fromColumnId === "in_progress" || fromColumnId === "review") && toColumnId === "validation") {
 		return true;
 	}
+	// Free reverse drag: pull a card from the manual-validation buffer back into Review (undo the
+	// "moved into validation" step). Mirrors review → validation above; pure board re-classification
+	// with no session side effects.
+	if (fromColumnId === "validation" && toColumnId === "review") {
+		return true;
+	}
 	if (
 		(fromColumnId === "in_progress" && toColumnId === "review") ||
 		(fromColumnId === "review" && toColumnId === "in_progress") ||
