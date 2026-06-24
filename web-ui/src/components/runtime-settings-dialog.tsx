@@ -378,6 +378,7 @@ export function RuntimeSettingsDialog({
 	const [selectedAgentId, setSelectedAgentId] = useState<RuntimeAgentId>("claude");
 	const [agentAutonomousModeEnabled, setAgentAutonomousModeEnabled] = useState(true);
 	const [readyForReviewNotificationsEnabled, setReadyForReviewNotificationsEnabled] = useState(true);
+	const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(true);
 	const [autoContinueOnConnectionDropEnabled, setAutoContinueOnConnectionDropEnabled] = useState(true);
 	const [initialThemeId, setInitialThemeId] = useState<ThemeId>(readStoredThemeId);
 	const [draftThemeId, setDraftThemeId] = useState<ThemeId>(readStoredThemeId);
@@ -452,6 +453,7 @@ export function RuntimeSettingsDialog({
 	const initialSelectedAgentId = configuredAgentId ?? fallbackAgentId;
 	const initialAgentAutonomousModeEnabled = config?.agentAutonomousModeEnabled ?? true;
 	const initialReadyForReviewNotificationsEnabled = config?.readyForReviewNotificationsEnabled ?? true;
+	const initialNotificationSoundEnabled = config?.notificationSoundEnabled ?? true;
 	const initialAutoContinueOnConnectionDropEnabled = config?.autoContinueOnConnectionDropEnabled ?? true;
 	const initialShortcuts = config?.shortcuts ?? [];
 	const initialCommitPromptTemplate = config?.commitPromptTemplate ?? "";
@@ -479,6 +481,9 @@ export function RuntimeSettingsDialog({
 			return true;
 		}
 		if (readyForReviewNotificationsEnabled !== initialReadyForReviewNotificationsEnabled) {
+			return true;
+		}
+		if (notificationSoundEnabled !== initialNotificationSoundEnabled) {
 			return true;
 		}
 		if (autoContinueOnConnectionDropEnabled !== initialAutoContinueOnConnectionDropEnabled) {
@@ -519,11 +524,13 @@ export function RuntimeSettingsDialog({
 		initialCommitPromptTemplate,
 		initialOpenPrPromptTemplate,
 		initialReadyForReviewNotificationsEnabled,
+		initialNotificationSoundEnabled,
 		initialSelectedAgentId,
 		initialShortcuts,
 		initialThemeId,
 		openPrPromptTemplate,
 		readyForReviewNotificationsEnabled,
+		notificationSoundEnabled,
 		selectedAgentId,
 		shortcuts,
 	]);
@@ -535,6 +542,7 @@ export function RuntimeSettingsDialog({
 		setSelectedAgentId(configuredAgentId ?? fallbackAgentId);
 		setAgentAutonomousModeEnabled(config?.agentAutonomousModeEnabled ?? true);
 		setReadyForReviewNotificationsEnabled(config?.readyForReviewNotificationsEnabled ?? true);
+		setNotificationSoundEnabled(config?.notificationSoundEnabled ?? true);
 		setAutoContinueOnConnectionDropEnabled(config?.autoContinueOnConnectionDropEnabled ?? true);
 		setShortcuts(config?.shortcuts ?? []);
 		setCommitPromptTemplate(config?.commitPromptTemplate ?? "");
@@ -546,6 +554,7 @@ export function RuntimeSettingsDialog({
 		config?.commitPromptTemplate,
 		config?.openPrPromptTemplate,
 		config?.readyForReviewNotificationsEnabled,
+		config?.notificationSoundEnabled,
 		config?.selectedAgentId,
 		config?.shortcuts,
 		fallbackAgentId,
@@ -719,6 +728,7 @@ export function RuntimeSettingsDialog({
 			selectedAgentId,
 			agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled,
+			notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled,
 			shortcuts,
 			commitPromptTemplate,
@@ -945,6 +955,17 @@ export function RuntimeSettingsDialog({
 								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
 							</RadixSwitch.Root>
 							<span className="text-[13px] text-text-primary">Notify when a task is ready for review</span>
+						</div>
+						<div className="flex items-center gap-2 mt-2">
+							<RadixSwitch.Root
+								checked={notificationSoundEnabled}
+								disabled={controlsDisabled || !readyForReviewNotificationsEnabled}
+								onCheckedChange={setNotificationSoundEnabled}
+								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer disabled:opacity-40"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+							</RadixSwitch.Root>
+							<span className="text-[13px] text-text-primary">Play a sound</span>
 						</div>
 						<div className="flex items-center gap-2 mt-2">
 							<p className="text-text-secondary text-[13px] m-0">

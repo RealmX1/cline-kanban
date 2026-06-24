@@ -71,6 +71,17 @@ const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
 const MAX_OUTPUT_REACTION_SCAN_BUFFER_CHARS = 16_384;
 // 用户近期手动输入抑制窗口：这段时间内不自动注入续跑，避免打断正在打字的用户。
 const OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS = 8_000;
+// RVF followup 等「程序化已提交用户轮」投递（submitTaskChatInputWhenReady）：终端 agent（Claude/Codex）
+// 刚在 Stop 后、TUI 仍处于重绘/过渡态时，立即写 bracketed paste 会出现「粘贴进输入框但末尾 CR 被吞、
+// 不发送」的竞态（实测 RVF followup 间歇性卡住）。故投递必须门控到提示符就绪，与
+// submitConnectionDropContinuation / deferred-startup 同范式：先沉降、就绪轮询、deadline 兜底。
+// 首次就绪探测前的沉降延时（给 Stop 后的 TUI 把提示符框重绘完整）。
+const TASK_CHAT_INPUT_DELIVERY_SETTLE_MS = 1_000;
+// 未就绪时的就绪轮询间隔。
+const TASK_CHAT_INPUT_DELIVERY_RECHECK_MS = 1_500;
+// 就绪轮询总时长上限：到点仍未就绪则尽力强制写一次（best-effort，行为不劣于今日的立即写）。
+// 远小于 RVF prep 文件 300s TTL（rvf_prep_file.py DEFAULT_TTL_SECONDS），故即便兜底强制写，prep 仍有效。
+const TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS = 60_000;
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
 const DEFAULT_STALL_THRESHOLD_MS = 45_000;
@@ -131,6 +142,14 @@ interface ActiveProcessState {
 	outputReactionAttemptTimer: NodeJS.Timeout | null;
 	// 最近一次用户手动输入时刻，用于抑制自动注入打断用户。
 	lastUserInputAt: number | null;
+	// 程序化「已提交用户轮」投递（RVF followup 等）的待决就绪轮询定时器：同一时刻至多一个，
+	// last-write-wins；命中就绪/deadline 写入后或 session 退出时清除。null 表示当前无待决投递。
+	taskChatInputDeliveryTimer: NodeJS.Timeout | null;
+	// 投递「代际」单调计数：每次 submitTaskChatInputWhenReady 自增并被本次 attempt 捕获。
+	// 清掉定时器无法取消「已过定时器、正 await resolveInteractivePromptReadiness」的在途 attempt，
+	// 它 await 返回后仍会写旧文本——故 attempt 在写/重排前复查代际，被新投递取代者直接放弃，
+	// 保证 last-write-wins 跨越 await 仍成立（最新消息覆盖最旧、不重复/不乱序提交）。
+	taskChatInputDeliveryGeneration: number;
 }
 
 interface SessionEntry {
@@ -315,6 +334,37 @@ function clearOutputReactionTimer(state: { outputReactionAttemptTimer: NodeJS.Ti
 		clearTimeout(state.outputReactionAttemptTimer);
 		state.outputReactionAttemptTimer = null;
 	}
+}
+
+function clearTaskChatInputDeliveryTimer(state: { taskChatInputDeliveryTimer: NodeJS.Timeout | null }): void {
+	if (state.taskChatInputDeliveryTimer) {
+		clearTimeout(state.taskChatInputDeliveryTimer);
+		state.taskChatInputDeliveryTimer = null;
+	}
+}
+
+// 取某 agent 的 TUI 提示符就绪预测（仅 claude / codex 有交互式输入框可探测）。返回 null 表示
+// 该终端 agent 没有可门控的就绪信号——调用方据此选择「立即投递」而非拖到 deadline 兜底。
+function resolveTuiInteractivePromptPredicate(agentId: RuntimeAgentId | null): ((scan: string) => boolean) | null {
+	if (agentId === "claude") {
+		return hasClaudeInteractivePrompt;
+	}
+	if (agentId === "codex") {
+		return hasCodexInteractivePrompt;
+	}
+	return null;
+}
+
+// 取文本最后 lineCount 行（用于把就绪判定限定在终端当前视口，排除 scrollback 历史）。
+function takeLastLines(text: string, lineCount: number): string {
+	if (lineCount <= 0) {
+		return text;
+	}
+	const lines = text.split("\n");
+	if (lines.length <= lineCount) {
+		return text;
+	}
+	return lines.slice(lines.length - lineCount).join("\n");
 }
 
 export class TerminalSessionManager implements TerminalSessionService {
@@ -523,6 +573,113 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 	}
 
+	// 把 text 作为一条「已提交的用户轮」投递进活跃 terminal agent 的输入框，在 TUI 提示符就绪时
+	// （带沉降 + 有界轮询 + deadline 兜底）再真正写入 PTY 并提交。同步返回当前 summary（= 已受理投递，
+	// 保持调用方的 synthetic 回执契约）；无活跃 session 时返回 null。实际 PTY 写入异步发生。
+	// 专用于 RVF followup 等程序化注入：Stop 刚结束、TUI 仍在重绘时立即写会出现「粘贴了但 CR 被吞、
+	// 不发送」的间歇竞态，故必须门控到提示符就绪——与 submitConnectionDropContinuation / deferred-startup 同范式。
+	// 注意：与 writeInput（人类手敲终端）不同，这里不记 lastUserInputAt，避免把程序化投递当成「用户正在打字」而自我抑制。
+	submitTaskChatInputWhenReady(taskId: string, text: string): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			return null;
+		}
+		// last-write-wins：清掉该 task 上一个未决投递的定时器，并自增代际令本次成为唯一有效投递——
+		// 把已过定时器、正 await 就绪判定的在途 attempt 也一并作废（见 taskChatInputDeliveryGeneration）。
+		clearTaskChatInputDeliveryTimer(active);
+		const generation = ++active.taskChatInputDeliveryGeneration;
+		const deadlineAt = now() + TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS;
+		const timer = setTimeout(() => {
+			void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation);
+		}, TASK_CHAT_INPUT_DELIVERY_SETTLE_MS);
+		timer.unref?.();
+		active.taskChatInputDeliveryTimer = timer;
+		return cloneSummary(entry.summary);
+	}
+
+	// 一次投递 attempt：就绪命中或 deadline 兜底则写 PTY，否则隔 RECHECK_MS 再探（不消耗额外语义，只是轮询）。
+	// generation 为调度时捕获的代际；写入/重排前复查，被后续投递取代（代际不再相等）者直接放弃。
+	private async runTaskChatInputDeliveryAttempt(
+		taskId: string,
+		text: string,
+		deadlineAt: number,
+		generation: number,
+	): Promise<void> {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			// session 已结束：放弃投递（timer 已随 teardown 清除）。
+			return;
+		}
+		// 进入 await 前先校验代际：已被更晚的投递取代则不再触发就绪判定（避免无谓 await 后写旧文本）。
+		if (active.taskChatInputDeliveryGeneration !== generation) {
+			return;
+		}
+		active.taskChatInputDeliveryTimer = null;
+		const ready = await this.resolveInteractivePromptReadiness(entry);
+		// await 期间 session 可能已被替换/结束：复查同一 active 仍在。
+		const currentEntry = this.entries.get(taskId);
+		const currentActive = currentEntry?.active;
+		if (!currentEntry || !currentActive || currentActive !== active) {
+			return;
+		}
+		// await 期间可能有更晚的投递（submitTaskChatInputWhenReady）已自增代际：本 attempt 已过时，
+		// 直接放弃——既不写旧文本也不重排，保证 last-write-wins 跨越 await 仍成立。
+		if (currentActive.taskChatInputDeliveryGeneration !== generation) {
+			return;
+		}
+		const pastDeadline = now() >= deadlineAt;
+		if (!ready && !pastDeadline) {
+			const timer = setTimeout(() => {
+				void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation);
+			}, TASK_CHAT_INPUT_DELIVERY_RECHECK_MS);
+			timer.unref?.();
+			currentActive.taskChatInputDeliveryTimer = timer;
+			return;
+		}
+		// 就绪命中 或 deadline 兜底：直接写 PTY（不走 writeInput，避免把程序化投递记成 lastUserInputAt
+		// 而自我抑制——与 submitConnectionDropContinuation 一致）。toBracketedPasteSubmission 结尾已含单个 CR，
+		// 不额外补写回车，避免双回车 / 空提交。Codex 时标记 awaitingCodexPromptAfterEnter（末尾 CR 已构成回车）。
+		currentActive.session.write(toBracketedPasteSubmission(text));
+		if (currentEntry.summary.agentId === "codex") {
+			currentActive.awaitingCodexPromptAfterEnter = true;
+		}
+		logTuiFreezeWarning(
+			`[tui-freeze] task-chat-input-delivered taskId=${taskId} agentId=${currentEntry.summary.agentId} ` +
+				`via=${ready ? "prompt-ready" : "deadline-fallback"} chars=${text.length}`,
+		);
+	}
+
+	// 提示符就绪判定（双通道）：① 快路径——默认配置下输出反应扫描缓冲在线，复用同步的
+	// isAtInteractivePromptForReaction（便宜、可测）；② 兜底——永远在线的全屏镜像快照（即便反应引擎关闭，
+	// 也已捕获 Stop 后的最终提示符渲染），去 ANSI 后跑同一组提示符就绪预测。任一命中即就绪。
+	private async resolveInteractivePromptReadiness(entry: SessionEntry): Promise<boolean> {
+		const active = entry.active;
+		if (!active) {
+			return false;
+		}
+		const predicate = resolveTuiInteractivePromptPredicate(entry.summary.agentId);
+		// 无 TUI 就绪预测的终端 agent（droid / kiro 等）：没有可门控的提示符信号，
+		// 维持「立即投递」语义——否则会一律拖到 deadline 兜底才写，相对就绪门控前的即时写是回归。
+		if (predicate === null) {
+			return true;
+		}
+		if (active.outputReactionScanBuffer !== null && this.isAtInteractivePromptForReaction(entry)) {
+			return true;
+		}
+		const mirror = entry.terminalStateMirror;
+		if (!mirror) {
+			return false;
+		}
+		const snapshot = await mirror.getSnapshot();
+		// 仅按当前视口（最后 rows 行）判定就绪：getSnapshot() 含完整 scrollback（TERMINAL_SCROLLBACK=100_000，
+		// 服务于终端 restore，须保持原样），而历史里早先出现过的提示符框会误判「当前屏」就绪——把投递写进
+		// 正处于重绘/出输出的非就绪窗口，正是本特性要消除的「粘贴了但 CR 被吞、不发送」竞态。
+		const scan = stripAnsiAndControl(takeLastLines(snapshot.snapshot, snapshot.rows));
+		return predicate(scan);
+	}
+
 	// 更新 summary.connectionRetry 并广播（驱动看板徽标 / 顶栏重试列表）。
 	private applyConnectionRetryState(taskId: string, patch: RuntimeTaskConnectionRetry | null): void {
 		const entry = this.entries.get(taskId);
@@ -687,6 +844,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			stopWorkspaceTrustTimers(entry.active);
 			clearClaudeStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
+			clearTaskChatInputDeliveryTimer(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -872,6 +1030,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					stopWorkspaceTrustTimers(currentActive);
 					clearClaudeStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
+					clearTaskChatInputDeliveryTimer(currentActive);
 
 					const summary = this.applySessionEvent(currentEntry, {
 						type: "process.exit",
@@ -973,6 +1132,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionScanBuffer: outputReactionEngine !== null ? "" : null,
 			outputReactionAttemptTimer: null,
 			lastUserInputAt: null,
+			taskChatInputDeliveryTimer: null,
+			taskChatInputDeliveryGeneration: 0,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -1037,6 +1198,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			stopWorkspaceTrustTimers(entry.active);
 			clearClaudeStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
+			clearTaskChatInputDeliveryTimer(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -1104,6 +1266,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					stopWorkspaceTrustTimers(currentActive);
 					clearClaudeStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
+					clearTaskChatInputDeliveryTimer(currentActive);
 
 					const shellExitInterrupted = currentActive.session.wasInterrupted();
 					const summary = updateSummary(currentEntry, {
@@ -1171,6 +1334,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionScanBuffer: null,
 			outputReactionAttemptTimer: null,
 			lastUserInputAt: null,
+			taskChatInputDeliveryTimer: null,
+			taskChatInputDeliveryGeneration: 0,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -1452,6 +1617,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		stopWorkspaceTrustTimers(entry.active);
 		clearClaudeStartupReadinessTimer(entry.active);
 		clearOutputReactionTimer(entry.active);
+		clearTaskChatInputDeliveryTimer(entry.active);
 		entry.active.session.stop();
 		if (cleanupFn) {
 			cleanupFn().catch(() => {
@@ -1476,6 +1642,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		stopWorkspaceTrustTimers(active);
 		clearClaudeStartupReadinessTimer(active);
 		clearOutputReactionTimer(active);
+		clearTaskChatInputDeliveryTimer(active);
 		active.session.stop();
 		const gracefulDeadline = now() + gracefulTimeoutMs;
 		while (now() < gracefulDeadline) {
@@ -1539,6 +1706,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			stopWorkspaceTrustTimers(entry.active);
 			clearClaudeStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
+			clearTaskChatInputDeliveryTimer(entry.active);
 			entry.active.session.stop({ interrupted: true });
 		}
 		return activeEntries.map((entry) => cloneSummary(entry.summary));
