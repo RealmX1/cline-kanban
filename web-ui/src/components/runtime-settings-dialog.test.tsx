@@ -171,6 +171,7 @@ const savedClineOauthConfig = {
 	selectedShortcutLabel: null,
 	agentAutonomousModeEnabled: true,
 	readyForReviewNotificationsEnabled: false,
+	notificationSoundEnabled: false,
 	autoContinueOnConnectionDropEnabled: false,
 	effectiveCommand: "cline",
 	detectedCommands: [],
@@ -281,6 +282,56 @@ describe("RuntimeSettingsDialog", () => {
 		});
 
 		expect(resetLayoutCustomizationsMock).toHaveBeenCalledTimes(1);
+	});
+
+	// 行内开关定位：先按文案找到该行的 <span> label，再取同一行里的 Radix Switch（role="switch"）。
+	function findSwitchByRowLabel(rootEl: ParentNode, labelText: string): HTMLButtonElement | null {
+		const label = Array.from(rootEl.querySelectorAll("span")).find((el) => el.textContent?.trim() === labelText);
+		const row = label?.closest("div");
+		return (row?.querySelector('button[role="switch"]') as HTMLButtonElement | null) ?? null;
+	}
+
+	it("disables the notification sound switch when ready-for-review notifications are off", async () => {
+		// savedClineOauthConfig 关着 readyForReviewNotificationsEnabled → 「Play a sound」应随父开关置灰。
+		await act(async () => {
+			root.render(
+				<RuntimeSettingsDialog
+					open={true}
+					workspaceId={"workspace-1"}
+					initialConfig={savedClineOauthConfig}
+					onOpenChange={() => {}}
+				/>,
+			);
+		});
+
+		const reviewSwitch = findSwitchByRowLabel(document.body, "Notify when a task is ready for review");
+		const soundSwitch = findSwitchByRowLabel(document.body, "Play a sound");
+		expect(reviewSwitch).toBeInstanceOf(HTMLButtonElement);
+		expect(soundSwitch).toBeInstanceOf(HTMLButtonElement);
+		expect(soundSwitch?.disabled).toBe(true);
+	});
+
+	it("enables the notification sound switch when ready-for-review notifications are on", async () => {
+		await act(async () => {
+			root.render(
+				<RuntimeSettingsDialog
+					open={true}
+					workspaceId={"workspace-1"}
+					initialConfig={
+						{
+							...savedClineOauthConfig,
+							readyForReviewNotificationsEnabled: true,
+							notificationSoundEnabled: true,
+						} as unknown as RuntimeConfigResponse
+					}
+					onOpenChange={() => {}}
+				/>,
+			);
+		});
+
+		const soundSwitch = findSwitchByRowLabel(document.body, "Play a sound");
+		expect(soundSwitch).toBeInstanceOf(HTMLButtonElement);
+		expect(soundSwitch?.disabled).toBe(false);
 	});
 
 	it("enables save on theme change and reverts preview on cancel", async () => {
