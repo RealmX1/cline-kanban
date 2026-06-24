@@ -148,6 +148,7 @@ export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary 
 		startedAt: null,
 		updatedAt: now(),
 		lastOutputAt: null,
+		lastSubstantiveOutputAt: null,
 		reviewReason: null,
 		exitCode: null,
 		lastHookAt: null,
@@ -162,8 +163,17 @@ export function updateSummary(
 	entry: ClineTaskSessionEntry,
 	patch: Partial<RuntimeTaskSessionSummary>,
 ): RuntimeTaskSessionSummary {
+	// Cline（in-process SDK）的 output 事件都是真内容（assistant 增量 / 工具活动），非 TUI 重绘，故在
+	// 此单一漏斗镜像 lastSubstantiveOutputAt = lastOutputAt（一处覆盖全部 Cline 写点）——使 Cline 任务的
+	// Validation 停留判据行为与迁移前一致。仅当 patch 显式给了 lastOutputAt 而未给实质戳时镜像；显式给
+	// 实质戳（理论上）或未动 lastOutputAt 的 patch 不干预。终端 agent 侧绝不在此镜像——那侧必须由
+	// agent-output-substance.ts 分类器把关（见 session-manager.ts handleTaskOutput）。
+	const mirroredPatch =
+		patch.lastOutputAt !== undefined && patch.lastSubstantiveOutputAt === undefined
+			? { ...patch, lastSubstantiveOutputAt: patch.lastOutputAt }
+			: patch;
 	// 单一写侧漏斗：经 mergeSummaryWithFacets 派发（facet 写时主真相源，详见该函数）。
-	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: now() });
+	entry.summary = mergeSummaryWithFacets(entry.summary, { ...mirroredPatch, updatedAt: now() });
 	return cloneSummary(entry.summary);
 }
 

@@ -923,9 +923,12 @@ describe("useBoardInteractions", () => {
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
 			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
 		});
-		// lastOutputAt well beyond the 5s quiet threshold → idle running.
+		// lastSubstantiveOutputAt well beyond the 5s quiet threshold → idle running (no fresh substance).
 		const idleSessions = {
-			"task-idle": createRunningSession("task-idle", { lastOutputAt: Date.now() - 60_000 }),
+			"task-idle": createRunningSession("task-idle", {
+				lastOutputAt: Date.now() - 60_000,
+				lastSubstantiveOutputAt: Date.now() - 60_000,
+			}),
 		};
 
 		await act(async () => {
@@ -970,9 +973,12 @@ describe("useBoardInteractions", () => {
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
 			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
 		});
-		// lastOutputAt within the 5s quiet threshold → actively producing output.
+		// lastSubstantiveOutputAt within the 5s quiet threshold → actively producing substantive output.
 		const activeSessions = {
-			"task-active": createRunningSession("task-active", { lastOutputAt: Date.now() - 500 }),
+			"task-active": createRunningSession("task-active", {
+				lastOutputAt: Date.now() - 500,
+				lastSubstantiveOutputAt: Date.now() - 500,
+			}),
 		};
 
 		await act(async () => {
@@ -991,6 +997,58 @@ describe("useBoardInteractions", () => {
 		const inProgressCards = currentBoard.columns.find((column) => column.id === "in_progress")?.cards ?? [];
 		expect(validationCards).toEqual([]);
 		expect(inProgressCards.map((card) => card.id)).toEqual(["task-active"]);
+	});
+
+	// 核心 bug 回归：Claude TUI spinner 每秒重绘把 lastOutputAt 刷得恒新鲜，但无新实质内容时
+	// lastSubstantiveOutputAt 保持陈旧——卡片必须留在 Validation，不被打回 In Progress。
+	it("keeps a spinner-only running task (fresh lastOutputAt, stale lastSubstantiveOutputAt) in Validation", async () => {
+		let currentBoard = createBoardWithValidationTask("task-spinner");
+
+		useProgrammaticCardMovesMock.mockReturnValue({
+			handleProgrammaticCardMoveReady: () => {},
+			setRequestMoveTaskToTrashHandler: () => {},
+			tryProgrammaticCardMove: () => "unavailable",
+			consumeProgrammaticCardMove: () => ({}),
+			resolvePendingProgrammaticTrashMove: () => {},
+			waitForProgrammaticCardMoveAvailability: async () => {},
+			resetProgrammaticCardMoves: () => {},
+			requestMoveTaskToTrashWithAnimation: async () => {},
+			programmaticCardMoveCycle: 0,
+		});
+		useLinkedBacklogTaskActionsMock.mockReturnValue({
+			handleCreateDependency: () => {},
+			handleDeleteDependency: () => {},
+			confirmMoveTaskToTrash: async () => {},
+			requestMoveTaskToTrash: async () => {},
+		});
+
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+		});
+		// spinner 重绘：lastOutputAt 极新鲜，但实质戳早已陈旧（>5s）→ 视为「不在产出」。
+		const spinnerSessions = {
+			"task-spinner": createRunningSession("task-spinner", {
+				lastOutputAt: Date.now(),
+				lastSubstantiveOutputAt: Date.now() - 60_000,
+			}),
+		};
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={currentBoard}
+					setBoard={setBoard}
+					ensureTaskWorkspace={async () => ({ ok: true as const })}
+					startTaskSession={async () => ({ ok: true as const })}
+					initialSessions={spinnerSessions}
+				/>,
+			);
+		});
+
+		const validationCards = currentBoard.columns.find((column) => column.id === "validation")?.cards ?? [];
+		const inProgressCards = currentBoard.columns.find((column) => column.id === "in_progress")?.cards ?? [];
+		expect(validationCards.map((card) => card.id)).toEqual(["task-spinner"]);
+		expect(inProgressCards).toEqual([]);
 	});
 
 	it("confirms before moving a review card to Done but moves a validation card directly", async () => {

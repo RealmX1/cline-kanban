@@ -82,19 +82,19 @@ describe("isAgentOutputQuiet（后端自动续跑静默门控）", () => {
 	});
 });
 
-describe("isAgentActivelyProducingOutput（前端 Validation 停留判据）", () => {
-	it("running 且最近一次输出在 5s 阈值内 → true（仍在持续产出）", () => {
+describe("isAgentActivelyProducingOutput（前端 Validation 停留判据，读 lastSubstantiveOutputAt）", () => {
+	it("running 且最近一次实质输出在 5s 阈值内 → true（仍在持续产出）", () => {
 		const summary = makeSummary({
 			state: "running",
-			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1),
+			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1),
 		});
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(true);
 	});
 
-	it("running 但最近一次输出超过阈值（空闲）→ false（允许停留 Validation）", () => {
+	it("running 但最近一次实质输出超过阈值（空闲）→ false（允许停留 Validation）", () => {
 		const summary = makeSummary({
 			state: "running",
-			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
+			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
 		});
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
 	});
@@ -102,23 +102,43 @@ describe("isAgentActivelyProducingOutput（前端 Validation 停留判据）", (
 	it("恰好等于阈值边界 → false（阈值是严格小于）", () => {
 		const summary = makeSummary({
 			state: "running",
-			lastOutputAt: NOW - VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
+			lastSubstantiveOutputAt: NOW - VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 		});
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
 	});
 
-	it("running 但 lastOutputAt 为 null（从未输出 / 已死残留）→ false", () => {
-		const summary = makeSummary({ state: "running", lastOutputAt: null });
+	it("running 但 lastSubstantiveOutputAt 为 null（从未实质产出 / 已死残留）→ false", () => {
+		const summary = makeSummary({ state: "running", lastSubstantiveOutputAt: null });
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
 	});
 
-	it("awaiting_review 即使最近有输出也 → false（只对 running 生效）", () => {
-		const summary = makeSummary({ state: "awaiting_review", lastOutputAt: NOW });
+	// ── 本 bug 的核心回归：spinner 空转把 lastOutputAt 刷得恒新鲜，但实质戳未盖 / 已陈旧 → 不打回 ──
+	it("【回归】running + lastOutputAt 极新鲜 但 lastSubstantiveOutputAt 为 undefined（旧盘 / 未盖实质戳）→ false", () => {
+		const summary = makeSummary({ state: "running", lastOutputAt: NOW, lastSubstantiveOutputAt: undefined });
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("【回归】running + lastOutputAt 极新鲜（spinner 重绘）但 lastSubstantiveOutputAt 已陈旧 → false（允许停留 Validation）", () => {
+		const summary = makeSummary({
+			state: "running",
+			lastOutputAt: NOW,
+			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("不回退 lastOutputAt：lastOutputAt 新鲜 + lastSubstantiveOutputAt 为 null → false（绝不复用 lastOutputAt）", () => {
+		const summary = makeSummary({ state: "running", lastOutputAt: NOW, lastSubstantiveOutputAt: null });
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("awaiting_review 即使最近有实质输出也 → false（只对 agent 回合生效）", () => {
+		const summary = makeSummary({ state: "awaiting_review", lastSubstantiveOutputAt: NOW });
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
 	});
 
 	it("idle → false", () => {
-		const summary = makeSummary({ state: "idle", lastOutputAt: NOW });
+		const summary = makeSummary({ state: "idle", lastSubstantiveOutputAt: NOW });
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
 	});
 
@@ -135,7 +155,7 @@ describe("isAgentActivelyProducingOutput（前端 Validation 停留判据）", (
 			turnOwner: "agent",
 			liveness: "live",
 			userTurnKind: null,
-			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1),
+			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1),
 		});
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(true);
 	});
@@ -146,7 +166,7 @@ describe("isAgentActivelyProducingOutput（前端 Validation 停留判据）", (
 			turnOwner: "user",
 			liveness: "live",
 			userTurnKind: "review",
-			lastOutputAt: NOW,
+			lastSubstantiveOutputAt: NOW,
 		});
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
 	});
@@ -157,7 +177,7 @@ describe("isAgentActivelyProducingOutput（前端 Validation 停留判据）", (
 			turnOwner: "agent",
 			liveness: "live",
 			userTurnKind: null,
-			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
+			lastSubstantiveOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
 		});
 		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
 	});

@@ -354,6 +354,12 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	startedAt: z.number().nullable(),
 	updatedAt: z.number(),
 	lastOutputAt: z.number().nullable(),
+	// 「最近一次**实质**输出」时刻：仅当 agent 产出新的正文 / 工具内容时推进，过滤 TUI 装饰性重绘
+	// （spinner / footer / 计时器），与每段 PTY 字节都刷新的 lastOutputAt 区分。Validation 列自动打回
+	// 判据（isAgentActivelyProducingOutput）读它；其余 4 个 lastOutputAt 读点（自动续跑静默门控、卡顿
+	// 探针、卡片 computing 展示、终端面板基线）仍读 lastOutputAt（spinner 期应计为活动）。加性可选：
+	// 旧盘数据 / web-ui 手构造 summary 缺它 → undefined ⇒ 判据回退「不在产出」（见判据注释）。
+	lastSubstantiveOutputAt: z.number().nullable().optional(),
 	reviewReason: runtimeTaskSessionReviewReasonSchema,
 	exitCode: z.number().nullable(),
 	lastHookAt: z.number().nullable().default(null),
