@@ -1,0 +1,942 @@
+import type {
+	DraggableProvidedDraggableProps,
+	DraggableProvidedDragHandleProps,
+	DraggableStyle,
+} from "@hello-pangea/dnd";
+import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
+import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
+import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
+import {
+	AlertCircle,
+	AlertTriangle,
+	Archive,
+	Bot,
+	ClipboardCheck,
+	FileText,
+	GitBranch,
+	Pencil,
+	Play,
+	RotateCcw,
+	Trash2,
+} from "lucide-react";
+import type { KeyboardEvent, MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import {
+	formatClineReasoningEffortLabel,
+	formatClineSelectedModelButtonText,
+	resolveClineModelDisplayName,
+} from "@/components/detail-panels/cline-model-picker-options";
+import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/components/ui/cn";
+import { Spinner } from "@/components/ui/spinner";
+import { Tooltip } from "@/components/ui/tooltip";
+import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
+import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
+import { getTaskAutoReviewCancelButtonLabel } from "@/types";
+import { formatPathForDisplay } from "@/utils/path-display";
+import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
+
+interface CardSessionActivity {
+	dotColor: string;
+	text: string;
+}
+
+const SESSION_ACTIVITY_COLOR = {
+	thinking: "var(--color-status-blue)",
+	success: "var(--color-status-green)",
+	waiting: "var(--color-status-gold)",
+	error: "var(--color-status-red)",
+	warning: "var(--color-status-orange)",
+	muted: "var(--color-text-tertiary)",
+	secondary: "var(--color-text-secondary)",
+} as const;
+
+// 会跳转的列（单击打开详情、替换看板）上，单击先延迟这么久，留出双击改标题的拦截窗口。
+const CLICK_ACTIVATION_DELAY_MS = 220;
+
+function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: string | null | undefined): string | null {
+	if (!workspacePath) {
+		return null;
+	}
+	try {
+		return buildTaskWorktreeDisplayPath(taskId, workspacePath);
+	} catch {
+		return null;
+	}
+}
+
+function extractToolInputSummaryFromActivityText(activityText: string, toolName: string): string | null {
+	const escapedToolName = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const match = activityText.match(
+		new RegExp(`^(?:Using|Completed|Failed|Calling)\\s+${escapedToolName}(?::\\s*(.+))?$`),
+	);
+	if (!match) {
+		return null;
+	}
+	const rawSummary = match[1]?.trim() ?? "";
+	if (!rawSummary) {
+		return null;
+	}
+	if (activityText.startsWith("Failed ")) {
+		const [operationSummary] = rawSummary.split(": ");
+		return operationSummary?.trim() || null;
+	}
+	return rawSummary;
+}
+
+function parseToolCallFromActivityText(
+	activityText: string,
+): { toolName: string; toolInputSummary: string | null } | null {
+	const match = activityText.match(/^(?:Using|Completed|Failed|Calling)\s+([^:()]+?)(?::\s*(.+))?$/);
+	if (!match?.[1]) {
+		return null;
+	}
+	const toolName = match[1].trim();
+	if (!toolName) {
+		return null;
+	}
+	const rawSummary = match[2]?.trim() ?? "";
+	if (!rawSummary) {
+		return { toolName, toolInputSummary: null };
+	}
+	if (activityText.startsWith("Failed ")) {
+		const [operationSummary] = rawSummary.split(": ");
+		return {
+			toolName,
+			toolInputSummary: operationSummary?.trim() || null,
+		};
+	}
+	return {
+		toolName,
+		toolInputSummary: rawSummary,
+	};
+}
+
+function resolveToolCallLabel(
+	activityText: string | undefined,
+	toolName: string | null,
+	toolInputSummary: string | null,
+): string | null {
+	if (toolName) {
+		const parsedSummary = extractToolInputSummaryFromActivityText(activityText ?? "", toolName);
+		if (!toolInputSummary && !parsedSummary) {
+			return null;
+		}
+		return formatClineToolCallLabel(toolName, toolInputSummary ?? parsedSummary);
+	}
+	if (!activityText) {
+		return null;
+	}
+	const parsed = parseToolCallFromActivityText(activityText);
+	if (!parsed) {
+		return null;
+	}
+	return formatClineToolCallLabel(parsed.toolName, parsed.toolInputSummary);
+}
+
+function isCardCreditLimitError(summary: RuntimeTaskSessionSummary | undefined): boolean {
+	if (!summary) {
+		return false;
+	}
+	if (summary.state !== "awaiting_review" && summary.state !== "failed" && summary.state !== "interrupted") {
+		return false;
+	}
+	return summary.latestHookActivity?.notificationType === "credit_limit";
+}
+
+function getCardSessionActivity(summary: RuntimeTaskSessionSummary | undefined): CardSessionActivity | null {
+	if (!summary) {
+		return null;
+	}
+	if (isCardCreditLimitError(summary)) {
+		return { dotColor: SESSION_ACTIVITY_COLOR.warning, text: "Out of credits" };
+	}
+	// 连接重试是最显著的「卡住」状态：优先于普通活动文案展示。
+	if (summary.connectionRetry?.status === "retrying") {
+		const attempts = summary.connectionRetry.retryCount;
+		return {
+			dotColor: SESSION_ACTIVITY_COLOR.warning,
+			text: attempts > 0 ? `重连中…（已续跑 ${attempts} 次）` : "重连中…",
+		};
+	}
+	const hookActivity = summary.latestHookActivity;
+	const activityText = hookActivity?.activityText?.trim();
+	const toolName = hookActivity?.toolName?.trim() ?? null;
+	const toolInputSummary = hookActivity?.toolInputSummary?.trim() ?? null;
+	const finalMessage = hookActivity?.finalMessage?.trim();
+	const hookEventName = hookActivity?.hookEventName?.trim() ?? null;
+	if (summary.state === "awaiting_review" && finalMessage) {
+		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: finalMessage };
+	}
+	if (
+		finalMessage &&
+		!toolName &&
+		(hookEventName === "assistant_delta" || hookEventName === "agent_end" || hookEventName === "turn_start")
+	) {
+		return {
+			dotColor: summary.state === "running" ? SESSION_ACTIVITY_COLOR.thinking : SESSION_ACTIVITY_COLOR.success,
+			text: finalMessage,
+		};
+	}
+	if (activityText) {
+		let dotColor: string =
+			summary.state === "failed" ? SESSION_ACTIVITY_COLOR.error : SESSION_ACTIVITY_COLOR.thinking;
+		let text = activityText;
+		const toolCallLabel = resolveToolCallLabel(activityText, toolName, toolInputSummary);
+		if (toolCallLabel) {
+			if (text.startsWith("Failed ")) {
+				dotColor = SESSION_ACTIVITY_COLOR.error;
+			}
+			return {
+				dotColor,
+				text: toolCallLabel,
+			};
+		}
+		if (text.startsWith("Final: ")) {
+			dotColor = SESSION_ACTIVITY_COLOR.success;
+			text = text.slice(7);
+		} else if (text.startsWith("Agent: ")) {
+			text = text.slice(7);
+		} else if (text.startsWith("Waiting for approval")) {
+			dotColor = SESSION_ACTIVITY_COLOR.waiting;
+		} else if (text.startsWith("Waiting for review")) {
+			dotColor = SESSION_ACTIVITY_COLOR.success;
+		} else if (text.startsWith("Failed ")) {
+			dotColor = SESSION_ACTIVITY_COLOR.error;
+		} else if (text === "Agent active" || text === "Working on task" || text.startsWith("Resumed")) {
+			return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };
+		}
+		return { dotColor, text };
+	}
+	if (summary.state === "failed") {
+		const failedText = finalMessage ?? activityText ?? "Task failed to start";
+		return { dotColor: SESSION_ACTIVITY_COLOR.error, text: failedText };
+	}
+	if (summary.state === "awaiting_review") {
+		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" };
+	}
+	if (summary.state === "running") {
+		return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };
+	}
+	return null;
+}
+
+/**
+ * 卡片的业务 props：与 DnD/钉住克隆等渲染容器无关的领域回调与数据。
+ * `BoardCard`（看板内的可拖卡）、`TaskCardBody`（纯卡体）、`SelectedTaskPinBar`
+ * （Focus View 跨 stage 浮动钉住条里的克隆卡）共用同一套，确保三处行为一致。
+ */
+export interface TaskCardBusinessProps {
+	card: BoardCardModel;
+	columnId: BoardColumnId;
+	sessionSummary?: RuntimeTaskSessionSummary;
+	selected?: boolean;
+	onClick?: () => void;
+	onStart?: (taskId: string) => void;
+	onMoveToTrash?: (taskId: string) => void;
+	onMoveToValidation?: (taskId: string) => void;
+	onRestoreFromTrash?: (taskId: string) => void;
+	onDeleteTask?: (taskId: string) => void;
+	onSaveTitle?: (taskId: string, title: string) => void;
+	onCommit?: (taskId: string) => void;
+	onOpenPr?: (taskId: string) => void;
+	onCancelAutomaticAction?: (taskId: string) => void;
+	isCommitLoading?: boolean;
+	isOpenPrLoading?: boolean;
+	isMoveToTrashLoading?: boolean;
+	isMoveToValidationLoading?: boolean;
+	onDependencyPointerDown?: (taskId: string, event: MouseEvent<HTMLElement>) => void;
+	onDependencyPointerEnter?: (taskId: string) => void;
+	isDependencySource?: boolean;
+	isDependencyTarget?: boolean;
+	isDependencyLinking?: boolean;
+	workspacePath?: string | null;
+	defaultClineModelId?: string | null;
+	defaultAgentId?: RuntimeAgentId | null;
+}
+
+/**
+ * 注入式 DnD 绑定。由 `BoardCard` 从 `@hello-pangea/dnd` 的 `provided`/`snapshot`
+ * 装配后下传；`TaskCardBody` 自身不引用 `<Draggable>`，因此可被钉住克隆（无 DnD）复用。
+ */
+export interface TaskCardBodyDragBindings {
+	innerRef: (element?: HTMLElement | null) => void;
+	draggableProps: DraggableProvidedDraggableProps;
+	dragHandleProps: DraggableProvidedDragHandleProps | null;
+	isDragging: boolean;
+	draggableStyle?: DraggableStyle;
+}
+
+/**
+ * 任务卡的纯展示卡体（卡壳 + 内层可视卡 + 全部展示态/交互）。
+ *
+ * - 列表内可拖卡：由 `BoardCard` 提供 `drag` 绑定，外壳挂上 DnD ref/props 与 `data-task-id`。
+ * - 钉住克隆（`pinnedClone`）：不挂 DnD、不输出 `data-task-id`（保证全局唯一）、`cursor:default`、
+ *   关闭单击导航/双击改标题/依赖连线，但保留 hover 揭示动作组与各动作按钮，视觉与列表卡完全一致。
+ */
+export function TaskCardBody({
+	card,
+	columnId,
+	sessionSummary,
+	selected = false,
+	onClick,
+	onStart,
+	onMoveToTrash,
+	onMoveToValidation,
+	onRestoreFromTrash,
+	onDeleteTask,
+	onSaveTitle,
+	onCommit,
+	onOpenPr,
+	onCancelAutomaticAction,
+	isCommitLoading = false,
+	isOpenPrLoading = false,
+	isMoveToTrashLoading = false,
+	isMoveToValidationLoading = false,
+	onDependencyPointerDown,
+	onDependencyPointerEnter,
+	isDependencySource = false,
+	isDependencyTarget = false,
+	isDependencyLinking = false,
+	workspacePath,
+	defaultClineModelId = null,
+	defaultAgentId = null,
+	drag = null,
+	pinnedClone = false,
+}: TaskCardBusinessProps & {
+	drag?: TaskCardBodyDragBindings | null;
+	pinnedClone?: boolean;
+}): React.ReactElement {
+	const [isHovered, setIsHovered] = useState(false);
+	const [isPromptViewerOpen, setIsPromptViewerOpen] = useState(false);
+	const [isEditingTitle, setIsEditingTitle] = useState(false);
+	const [draftTitle, setDraftTitle] = useState(card.title);
+	const titleInputRef = useRef<HTMLInputElement | null>(null);
+	const titleEditCancelledRef = useRef(false);
+	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(card.id);
+	const isTrashCard = columnId === "trash";
+	// 钉住克隆是非交互镜像：单击/双击/依赖一律关闭，只保留 hover 揭示动作组。
+	const isCardInteractive = !isTrashCard && !pinnedClone;
+	// 会跳转的列上双击改标题需先拦截单击；这些列单击会打开详情、替换看板。
+	const isNavigatingColumn = columnId === "in_progress" || columnId === "review" || columnId === "validation";
+	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog；钉住克隆不参与编辑。
+	const isInlineTitleEditEnabled = !pinnedClone && onSaveTitle != null && (isNavigatingColumn || isTrashCard);
+	const clickActivationTimerRef = useRef<number | null>(null);
+	const isDragging = drag?.isDragging ?? false;
+	const rawSessionActivity = useMemo(() => getCardSessionActivity(sessionSummary), [sessionSummary]);
+	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
+	const lastSessionActivityCardIdRef = useRef<string | null>(null);
+	if (lastSessionActivityCardIdRef.current !== card.id) {
+		lastSessionActivityCardIdRef.current = card.id;
+		lastSessionActivityRef.current = null;
+	}
+	if (rawSessionActivity) {
+		lastSessionActivityRef.current = rawSessionActivity;
+	}
+	const sessionActivity = rawSessionActivity ?? lastSessionActivityRef.current;
+	const displayTitle = useMemo(
+		() => normalizePromptForDisplay(card.title) || truncateTaskPromptLabel(card.prompt),
+		[card.prompt, card.title],
+	);
+
+	// 卸载时清掉尚未触发的延迟单击计时器，避免对已销毁卡片调用 onClick。
+	useEffect(
+		() => () => {
+			if (clickActivationTimerRef.current != null) {
+				clearTimeout(clickActivationTimerRef.current);
+				clickActivationTimerRef.current = null;
+			}
+		},
+		[],
+	);
+
+	useEffect(() => {
+		setDraftTitle(card.title);
+		setIsEditingTitle(false);
+	}, [card.id, card.title]);
+
+	useEffect(() => {
+		if (!isEditingTitle) {
+			return;
+		}
+		window.requestAnimationFrame(() => {
+			titleInputRef.current?.focus();
+			titleInputRef.current?.select();
+		});
+	}, [isEditingTitle]);
+
+	const stopEvent = (event: MouseEvent<HTMLElement>) => {
+		event.preventDefault();
+		event.stopPropagation();
+	};
+
+	const submitTitle = () => {
+		if (titleEditCancelledRef.current) {
+			titleEditCancelledRef.current = false;
+			return;
+		}
+		setIsEditingTitle(false);
+		if (!onSaveTitle) {
+			return;
+		}
+		const trimmed = draftTitle.trim();
+		if (trimmed === card.title) {
+			return;
+		}
+		onSaveTitle(card.id, trimmed);
+	};
+
+	const handleTitleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+		if (event.key === "Enter") {
+			event.preventDefault();
+			event.stopPropagation();
+			titleInputRef.current?.blur();
+			return;
+		}
+		if (event.key === "Escape") {
+			event.preventDefault();
+			event.stopPropagation();
+			titleEditCancelledRef.current = true;
+			setDraftTitle(card.title);
+			setIsEditingTitle(false);
+			titleInputRef.current?.blur();
+		}
+	};
+
+	const isCreditLimit = isCardCreditLimitError(sessionSummary);
+	const renderStatusMarker = () => {
+		if (isCreditLimit) {
+			return <AlertTriangle size={12} className="text-status-orange" />;
+		}
+		if (columnId === "in_progress") {
+			if (sessionSummary?.state === "failed") {
+				return <AlertCircle size={12} className="text-status-red" />;
+			}
+			return <Spinner size={12} />;
+		}
+		return null;
+	};
+	const statusMarker = renderStatusMarker();
+	const showWorkspaceStatus =
+		columnId === "in_progress" || columnId === "review" || columnId === "validation" || isTrashCard;
+	const reviewWorkspacePath = reviewWorkspaceSnapshot
+		? formatPathForDisplay(reviewWorkspaceSnapshot.path)
+		: isTrashCard
+			? card.worktreeMode === "inplace"
+				? workspacePath
+					? formatPathForDisplay(workspacePath)
+					: null
+				: reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
+			: null;
+	const reviewRefLabel = reviewWorkspaceSnapshot?.branch ?? reviewWorkspaceSnapshot?.headCommit?.slice(0, 8) ?? "HEAD";
+	const reviewChangeSummary = reviewWorkspaceSnapshot
+		? reviewWorkspaceSnapshot.changedFiles == null
+			? null
+			: {
+					filesLabel: `${reviewWorkspaceSnapshot.changedFiles} ${reviewWorkspaceSnapshot.changedFiles === 1 ? "file" : "files"}`,
+					additions: reviewWorkspaceSnapshot.additions ?? 0,
+					deletions: reviewWorkspaceSnapshot.deletions ?? 0,
+				}
+		: null;
+	const showReviewGitActions = columnId === "review" && (reviewWorkspaceSnapshot?.changedFiles ?? 0) > 0;
+	const isAnyGitActionLoading = isCommitLoading || isOpenPrLoading;
+	const cancelAutomaticActionLabel =
+		!isTrashCard && card.autoReviewEnabled ? getTaskAutoReviewCancelButtonLabel(card.autoReviewMode) : null;
+	// 始终显示任务的 effective agent，按运行期同一套优先级解析：
+	// 上次运行已锁定（sessionSummary.agentId）?? 任务级覆盖（card.agentId）?? 全局默认（defaultAgentId）
+	// 与 src/trpc/runtime-api.ts 的解析顺序一致。
+	const agentLabel = useMemo(() => {
+		const effectiveAgentId = sessionSummary?.agentId ?? card.agentId ?? defaultAgentId;
+		if (!effectiveAgentId) {
+			return null;
+		}
+		return getRuntimeAgentCatalogEntry(effectiveAgentId)?.label ?? effectiveAgentId;
+	}, [sessionSummary?.agentId, card.agentId, defaultAgentId]);
+	const modelOverrideLabel = useMemo(() => {
+		if (card.clineSettings === undefined) {
+			return null;
+		}
+		const explicitReasoningLabel = card.clineSettings.reasoningEffort
+			? formatClineReasoningEffortLabel(card.clineSettings.reasoningEffort)
+			: !card.clineSettings.providerId && !card.clineSettings.modelId
+				? "Default"
+				: null;
+		if (card.clineSettings.providerId && !card.clineSettings.modelId) {
+			const providerLabel = `Provider: ${card.clineSettings.providerId}`;
+			return explicitReasoningLabel ? `${providerLabel} (${explicitReasoningLabel})` : providerLabel;
+		}
+		const effectiveModelId = card.clineSettings.modelId ?? defaultClineModelId;
+		if (!effectiveModelId) {
+			return explicitReasoningLabel ? `Default model (${explicitReasoningLabel})` : null;
+		}
+		const modelName = resolveClineModelDisplayName(effectiveModelId);
+		if (explicitReasoningLabel) {
+			return `${modelName} (${explicitReasoningLabel})`;
+		}
+		const inheritedReasoningEffort = "";
+		return formatClineSelectedModelButtonText({
+			modelName,
+			reasoningEffort: inheritedReasoningEffort,
+			showReasoningEffort: Boolean(inheritedReasoningEffort),
+		});
+	}, [card.clineSettings, defaultClineModelId]);
+	const taskAgentSettingsLabel = useMemo(() => {
+		const parts = [agentLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
+		return parts.length > 0 ? parts.join(" · ") : null;
+	}, [agentLabel, modelOverrideLabel]);
+
+	const cardShell = (
+		<div
+			ref={drag?.innerRef}
+			{...(drag?.draggableProps ?? {})}
+			{...(drag?.dragHandleProps ?? {})}
+			className="kb-board-card-shell"
+			// 钉住克隆不输出 data-task-id：保证全局 data-task-id 唯一（CSS sticky/scrollIntoView/测试计数依赖此唯一性）。
+			data-task-id={pinnedClone ? undefined : card.id}
+			data-column-id={columnId}
+			data-selected={selected}
+			onMouseDownCapture={
+				pinnedClone
+					? undefined
+					: (event) => {
+							// Radix Portal（如 TaskOriginalPromptDialog）挂载到 document.body，
+							// 但 React 合成事件仍沿组件树冒泡回卡片 shell；下方基于 DOM 祖先链的
+							// closest() 守卫对 portal 内容不生效，所以先做 DOM containment 检查。
+							if (!event.currentTarget.contains(event.target as Node)) {
+								return;
+							}
+							if (!isCardInteractive) {
+								return;
+							}
+							if (isDependencyLinking) {
+								event.preventDefault();
+								event.stopPropagation();
+								return;
+							}
+							if (!event.metaKey && !event.ctrlKey) {
+								return;
+							}
+							const target = event.target as HTMLElement | null;
+							if (target?.closest("button, a, input, textarea, [contenteditable='true']")) {
+								return;
+							}
+							event.preventDefault();
+							event.stopPropagation();
+							onDependencyPointerDown?.(card.id, event);
+						}
+			}
+			onClick={
+				pinnedClone
+					? undefined
+					: (event) => {
+							// 同上：portal 内容的合成 click 也会冒泡到这里，先做 DOM containment 检查。
+							if (!event.currentTarget.contains(event.target as Node)) {
+								return;
+							}
+							if (!isCardInteractive) {
+								return;
+							}
+							if (isDependencyLinking) {
+								event.preventDefault();
+								event.stopPropagation();
+								return;
+							}
+							if (event.metaKey || event.ctrlKey) {
+								return;
+							}
+							const target = event.target as HTMLElement | null;
+							if (target?.closest("button, a, input, textarea, [contenteditable='true']")) {
+								return;
+							}
+							if (isDragging || !onClick) {
+								return;
+							}
+							// 双击的第二击：交给 onDoubleClick 处理，单击逻辑直接放行。
+							if (event.detail > 1) {
+								return;
+							}
+							// 会跳转的列：延迟单击，留出双击拦截窗口（双击会清掉这个计时器）。
+							if (isNavigatingColumn) {
+								if (clickActivationTimerRef.current != null) {
+									clearTimeout(clickActivationTimerRef.current);
+								}
+								clickActivationTimerRef.current = window.setTimeout(() => {
+									clickActivationTimerRef.current = null;
+									onClick();
+								}, CLICK_ACTIVATION_DELAY_MS);
+								return;
+							}
+							// backlog 立即开编辑弹窗；trash 在上方 !isCardInteractive 已 return，到不了这里。
+							onClick();
+						}
+			}
+			onDoubleClick={
+				pinnedClone
+					? undefined
+					: (event) => {
+							if (!event.currentTarget.contains(event.target as Node)) {
+								return;
+							}
+							if (!isInlineTitleEditEnabled || isDependencyLinking) {
+								return;
+							}
+							const target = event.target as HTMLElement | null;
+							if (target?.closest("button, a, input, textarea, [contenteditable='true']")) {
+								return;
+							}
+							event.preventDefault();
+							event.stopPropagation();
+							// 取消尚未触发的单击跳转，改为进入标题编辑。
+							if (clickActivationTimerRef.current != null) {
+								clearTimeout(clickActivationTimerRef.current);
+								clickActivationTimerRef.current = null;
+							}
+							setDraftTitle(card.title);
+							setIsEditingTitle(true);
+						}
+			}
+			style={{
+				...(drag?.draggableStyle ?? {}),
+				marginBottom: pinnedClone ? 0 : 6,
+				cursor: pinnedClone ? "default" : "grab",
+			}}
+			onMouseEnter={() => {
+				setIsHovered(true);
+				if (!pinnedClone) {
+					onDependencyPointerEnter?.(card.id);
+				}
+			}}
+			onMouseMove={
+				pinnedClone
+					? undefined
+					: () => {
+							if (!isDependencyLinking) {
+								return;
+							}
+							onDependencyPointerEnter?.(card.id);
+						}
+			}
+			onMouseLeave={() => setIsHovered(false)}
+		>
+			<div
+				className={cn(
+					"relative rounded-md border border-border-bright bg-surface-2 p-2.5",
+					isCardInteractive && "cursor-pointer hover:bg-surface-3 hover:border-border-bright",
+					isDragging && "shadow-lg",
+					isHovered && isCardInteractive && "bg-surface-3 border-border-bright",
+					isDependencySource && "kb-board-card-dependency-source",
+					isDependencyTarget && "kb-board-card-dependency-target",
+				)}
+			>
+				<div className="flex items-start gap-2" style={{ minHeight: 24 }}>
+					{statusMarker ? <div className="inline-flex items-center">{statusMarker}</div> : null}
+					<div className="flex-1 min-w-0">
+						{isEditingTitle ? (
+							<input
+								ref={titleInputRef}
+								value={draftTitle}
+								onChange={(event) => setDraftTitle(event.currentTarget.value)}
+								onBlur={submitTitle}
+								onKeyDown={handleTitleKeyDown}
+								onMouseDown={(event) => {
+									event.stopPropagation();
+								}}
+								className="h-7 w-full rounded-md border border-border-focus bg-surface-2 px-2 text-sm font-medium text-text-primary focus:outline-none"
+							/>
+						) : onSaveTitle && !pinnedClone ? (
+							<div className="flex items-start gap-1 min-w-0">
+								<p
+									className={cn(
+										"line-clamp-3 m-0 min-w-0 flex-1 font-medium text-sm",
+										isTrashCard && "line-through text-text-tertiary",
+									)}
+								>
+									{displayTitle}
+								</p>
+								<button
+									type="button"
+									aria-label="Edit task title"
+									onMouseDown={stopEvent}
+									onClick={(event) => {
+										stopEvent(event);
+										setDraftTitle(card.title);
+										setIsEditingTitle(true);
+									}}
+									className={cn(
+										"shrink-0 self-start mt-0.5 cursor-pointer rounded-sm p-0.5 text-text-tertiary hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+										isHovered ? "opacity-100" : "opacity-0",
+									)}
+								>
+									<Pencil size={12} />
+								</button>
+							</div>
+						) : (
+							<p
+								className={cn(
+									"line-clamp-3 m-0 font-medium text-sm",
+									isTrashCard && "line-through text-text-tertiary",
+								)}
+							>
+								{displayTitle}
+							</p>
+						)}
+					</div>
+				</div>
+				<div
+					className={cn(
+						"absolute right-1 top-1 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+						"focus-within:opacity-100 focus-within:pointer-events-auto",
+						isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
+					)}
+				>
+					<Tooltip side="bottom" content="View original prompt">
+						<Button
+							icon={<FileText size={12} />}
+							variant="ghost"
+							size="xs"
+							aria-label="View original prompt"
+							onMouseDown={stopEvent}
+							onClick={(event) => {
+								stopEvent(event);
+								setIsPromptViewerOpen(true);
+							}}
+						/>
+					</Tooltip>
+					{columnId === "backlog" ? (
+						<Tooltip side="bottom" content="Start task">
+							<Button
+								icon={<Play size={12} />}
+								variant="ghost"
+								size="xs"
+								aria-label="Start task"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onStart?.(card.id);
+								}}
+							/>
+						</Tooltip>
+					) : null}
+					{columnId === "review" ? (
+						<Tooltip side="bottom" content="Move to validation">
+							<Button
+								icon={isMoveToValidationLoading ? <Spinner size={12} /> : <ClipboardCheck size={12} />}
+								variant="ghost"
+								size="xs"
+								disabled={isMoveToValidationLoading}
+								aria-label="Move task to validation"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onMoveToValidation?.(card.id);
+								}}
+							/>
+						</Tooltip>
+					) : null}
+					{columnId === "review" || columnId === "validation" ? (
+						<Tooltip side="bottom" content="Move to done">
+							<Button
+								icon={isMoveToTrashLoading ? <Spinner size={12} /> : <Archive size={12} />}
+								variant="ghost"
+								size="xs"
+								disabled={isMoveToTrashLoading}
+								aria-label="Move task to done"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onMoveToTrash?.(card.id);
+								}}
+							/>
+						</Tooltip>
+					) : null}
+					{columnId === "trash" ? (
+						<Tooltip
+							side="bottom"
+							content={
+								<>
+									Restore session
+									<br />
+									in new worktree
+								</>
+							}
+						>
+							<Button
+								icon={<RotateCcw size={12} />}
+								variant="ghost"
+								size="xs"
+								aria-label="Restore task from done"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onRestoreFromTrash?.(card.id);
+								}}
+							/>
+						</Tooltip>
+					) : null}
+					{onDeleteTask ? (
+						<Tooltip side="bottom" content="Delete permanently">
+							<Button
+								icon={<Trash2 size={12} />}
+								variant="danger"
+								size="xs"
+								aria-label="Delete task permanently"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onDeleteTask(card.id);
+								}}
+							/>
+						</Tooltip>
+					) : null}
+				</div>
+				{isPromptViewerOpen ? (
+					<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
+				) : null}
+				{taskAgentSettingsLabel ? (
+					<div className="mt-1">
+						<span
+							className={cn(
+								"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
+								isTrashCard
+									? "border-border text-text-tertiary bg-surface-1"
+									: "border-status-blue/30 bg-status-blue/10 text-status-blue",
+							)}
+						>
+							<Bot size={12} className="shrink-0" />
+							<span className="truncate">{taskAgentSettingsLabel}</span>
+						</span>
+					</div>
+				) : null}
+				{sessionActivity ? (
+					<div
+						className="flex gap-1.5 items-start mt-[6px]"
+						style={{
+							color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : undefined,
+						}}
+					>
+						<span
+							className="inline-block shrink-0 rounded-full"
+							style={{
+								width: 6,
+								height: 6,
+								backgroundColor: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : sessionActivity.dotColor,
+								marginTop: 4,
+							}}
+						/>
+						<div className="min-w-0 flex-1">
+							<p className="m-0 font-mono truncate" style={{ fontSize: 12 }}>
+								{sessionActivity.text}
+							</p>
+						</div>
+					</div>
+				) : null}
+				{showWorkspaceStatus && reviewWorkspacePath ? (
+					<p
+						className="font-mono"
+						style={{
+							margin: "4px 0 0",
+							fontSize: 12,
+							lineHeight: 1.4,
+							whiteSpace: "normal",
+							overflowWrap: "anywhere",
+							color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : undefined,
+						}}
+					>
+						{isTrashCard ? (
+							<span
+								style={{
+									color: SESSION_ACTIVITY_COLOR.muted,
+									textDecoration: "line-through",
+								}}
+							>
+								{reviewWorkspacePath}
+							</span>
+						) : reviewWorkspaceSnapshot ? (
+							<>
+								<span style={{ color: SESSION_ACTIVITY_COLOR.secondary }}>{reviewWorkspacePath}</span>
+								<GitBranch
+									size={10}
+									style={{
+										display: "inline",
+										color: SESSION_ACTIVITY_COLOR.secondary,
+										margin: "0px 4px 2px",
+										verticalAlign: "middle",
+									}}
+								/>
+								<span style={{ color: SESSION_ACTIVITY_COLOR.secondary }}>{reviewRefLabel}</span>
+								{reviewChangeSummary ? (
+									<>
+										<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> (</span>
+										<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>
+											{reviewChangeSummary.filesLabel}
+										</span>
+										<span className="text-status-green"> +{reviewChangeSummary.additions}</span>
+										<span className="text-status-red"> -{reviewChangeSummary.deletions}</span>
+										<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>)</span>
+									</>
+								) : null}
+							</>
+						) : null}
+					</p>
+				) : null}
+				{showReviewGitActions ? (
+					<div className="flex gap-1.5 mt-1.5">
+						<Button
+							variant="primary"
+							size="sm"
+							icon={isCommitLoading ? <Spinner size={12} /> : undefined}
+							disabled={isAnyGitActionLoading}
+							style={{ flex: "1 1 0" }}
+							onMouseDown={stopEvent}
+							onClick={(event) => {
+								stopEvent(event);
+								onCommit?.(card.id);
+							}}
+						>
+							Commit
+						</Button>
+						<Button
+							variant="primary"
+							size="sm"
+							icon={isOpenPrLoading ? <Spinner size={12} /> : undefined}
+							disabled={isAnyGitActionLoading}
+							style={{ flex: "1 1 0" }}
+							onMouseDown={stopEvent}
+							onClick={(event) => {
+								stopEvent(event);
+								onOpenPr?.(card.id);
+							}}
+						>
+							Open PR
+						</Button>
+					</div>
+				) : null}
+				{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
+					<Button
+						size="sm"
+						fill
+						style={{ marginTop: 12 }}
+						onMouseDown={stopEvent}
+						onClick={(event) => {
+							stopEvent(event);
+							onCancelAutomaticAction(card.id);
+						}}
+					>
+						{cancelAutomaticActionLabel}
+					</Button>
+				) : null}
+			</div>
+		</div>
+	);
+
+	// 拖拽中把卡壳 portal 到 document.body，避免被祖先 overflow 裁切（@hello-pangea/dnd 惯用法）。
+	// 关键：portal 只切换无状态的卡壳 DOM，TaskCardBody 组件本身始终挂载在原位，
+	// 故 isHovered/isEditingTitle/最近活动记忆等 hooks 状态在拖拽前后不被重置（与拆分前一致）。
+	if (drag?.isDragging && typeof document !== "undefined") {
+		return createPortal(cardShell, document.body);
+	}
+	return cardShell;
+}
