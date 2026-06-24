@@ -1794,7 +1794,7 @@ describe("createRuntimeApi startTaskSession", () => {
 	it("falls back to terminal input for running non-Cline task chat messages", async () => {
 		const summary = createSummary({ agentId: "codex", state: "awaiting_review" });
 		const terminalManager = {
-			writeInput: vi.fn(() => summary),
+			submitTaskChatInputWhenReady: vi.fn(() => summary),
 		};
 		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
@@ -1834,10 +1834,9 @@ describe("createRuntimeApi startTaskSession", () => {
 			},
 		);
 		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
-		expect(terminalManager.writeInput).toHaveBeenCalledWith(
-			"task-1",
-			Buffer.from("\u001b[200~please continue\u001b[201~\r", "utf8"),
-		);
+		// RVF followup 终端回退：经就绪门控投递，以原始文本调用（bracketed-paste 编码与就绪判定下沉到
+		// TerminalSessionManager.submitTaskChatInputWhenReady，由 session-manager 单测覆盖）。
+		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue");
 		expect(response.summary).toEqual(summary);
 		expect(response.message).toEqual({
 			id: "terminal:task-1:rvf-run-1",
@@ -1855,7 +1854,7 @@ describe("createRuntimeApi startTaskSession", () => {
 
 	it("does not fall back to terminal input for chat messages with images", async () => {
 		const terminalManager = {
-			writeInput: vi.fn(),
+			submitTaskChatInputWhenReady: vi.fn(),
 		};
 		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
@@ -1891,7 +1890,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			summary: null,
 			error: "Task chat images require an active Cline chat session.",
 		});
-		expect(terminalManager.writeInput).not.toHaveBeenCalled();
+		expect(terminalManager.submitTaskChatInputWhenReady).not.toHaveBeenCalled();
 	});
 
 	it("auto-starts home chat sessions when the first message is sent", async () => {
