@@ -365,19 +365,23 @@ body,
 	border-radius: var(--radius-md);
 }
 
-/* Focus View 左侧列表：选中卡列内双向 sticky，被滚过时钉在顶/底沿仍可见 */
-.kb-detail-task-list-scroll .kb-board-card-shell[data-selected="true"] {
-	position: sticky; /* 覆盖基础的 position: relative */
-	top: 0; /* 向下滚动时钉在顶沿（scrollport 自带 p-2 已留出间距） */
-	bottom: 0; /* 向上滚动时钉在底沿；top+bottom 同设 = 双向「不论上下」 */
-	z-index: 3; /* 高于同级卡片 z-index:1 / hover z-index:2，滚动时盖住下方卡片 */
+/*
+ * Focus View 左侧列表：钉住期间隐藏「真实选中卡」，只留浮动钉住条里的克隆可见。
+ * 真实卡仍带 accent outline、且 margin-bottom:6 / 可能展开内联标题编辑而比克隆更高，
+ * 若不隐藏会从克隆下沿探出形成重影。用 visibility:hidden（而非 display:none）——保留布局盒子，
+ * useSelectedCardPinState 的 getBoundingClientRect 仍可测得真实几何、pin 判定不变；display:none
+ * 会让卡变 0×0 → hook 误判 hidden → 显回 → 再测 → 抖动循环。data-selected-pinned 由
+ * ColumnContextPanel 在 pinState!=="hidden" 时写到 scrollport 上。
+ */
+.kb-detail-task-list-scroll[data-selected-pinned="true"] .kb-board-card-shell[data-selected="true"] {
+	visibility: hidden;
 }
 
 /*
- * Focus View 跨 stage 浮动钉住条：当选中卡连同其所在 stage 被滚出视口、上方列内 sticky
- * 失效后，在滚动视口的顶/底沿浮现「stage 卡头 + 选中卡」。脱离文档流的 overlay，不挤动布局；
- * `right` 让出滚动条宽度由内联样式动态给出。横向 padding 复刻 scrollport 的 p-2(8px)，使钉住卡
- * 与列表卡左右对齐。z-index 高于列内 sticky 卡（z-index:3）。
+ * Focus View 跨 stage 浮动钉住条：选中卡任一前沿一触滚动视口边沿，即在该边（顶沿 pinTop /
+ * 底沿 pinBottom）浮现「stage 卡头 + 完整选中卡」，作为选中卡的唯一钉住机制（stage 内 + 跨 stage）。
+ * 脱离文档流的 overlay，不挤动布局；`right` 让出滚动条宽度由内联样式动态给出。横向 padding 复刻
+ * scrollport 的 p-2(8px)，使钉住卡与列表卡左右对齐。z-index:5 高于原生 sticky 区段卡头（z-index:4）。
  */
 .kb-detail-pin-bar {
 	position: absolute;
