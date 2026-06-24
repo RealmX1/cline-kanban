@@ -291,6 +291,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
 					readyForReviewNotificationsEnabled: true,
+					notificationSoundEnabled: true,
 					autoContinueOnConnectionDropEnabled: true,
 					shortcuts: [],
 					commitPromptTemplate: current.commitPromptTemplateDefault,
@@ -303,12 +304,14 @@ describe.sequential("runtime-config auto agent selection", () => {
 					selectedAgentId?: string;
 					agentAutonomousModeEnabled?: boolean;
 					readyForReviewNotificationsEnabled?: boolean;
+					notificationSoundEnabled?: boolean;
 					commitPromptTemplate?: string;
 					openPrPromptTemplate?: string;
 				};
 				expect(globalPayload.selectedAgentId).toBeUndefined();
 				expect(globalPayload.agentAutonomousModeEnabled).toBeUndefined();
 				expect(globalPayload.readyForReviewNotificationsEnabled).toBeUndefined();
+				expect(globalPayload.notificationSoundEnabled).toBeUndefined();
 				expect(globalPayload.commitPromptTemplate).toBeUndefined();
 				expect(globalPayload.openPrPromptTemplate).toBeUndefined();
 				expect(existsSync(join(tempProject, ".cline", "kanban", "config.json"))).toBe(false);
@@ -337,6 +340,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
 					readyForReviewNotificationsEnabled: true,
+					notificationSoundEnabled: true,
 					autoContinueOnConnectionDropEnabled: true,
 					shortcuts: [],
 					commitPromptTemplate: current.commitPromptTemplateDefault,
@@ -365,6 +369,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
 					readyForReviewNotificationsEnabled: true,
+					notificationSoundEnabled: true,
 					autoContinueOnConnectionDropEnabled: true,
 					shortcuts: [{ label: "Ship", command: "npm run ship", icon: "rocket" }],
 					commitPromptTemplate: current.commitPromptTemplateDefault,

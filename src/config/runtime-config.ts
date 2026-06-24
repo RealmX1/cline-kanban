@@ -15,6 +15,7 @@ interface RuntimeGlobalConfigFileShape {
 	selectedShortcutLabel?: string;
 	agentAutonomousModeEnabled?: boolean;
 	readyForReviewNotificationsEnabled?: boolean;
+	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
@@ -31,6 +32,7 @@ export interface RuntimeConfigState {
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
 	readyForReviewNotificationsEnabled: boolean;
+	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
@@ -44,6 +46,7 @@ export interface RuntimeConfigUpdateInput {
 	selectedShortcutLabel?: string | null;
 	agentAutonomousModeEnabled?: boolean;
 	readyForReviewNotificationsEnabled?: boolean;
+	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
 	shortcuts?: RuntimeProjectShortcut[];
 	commitPromptTemplate?: string;
@@ -60,6 +63,7 @@ const DEFAULT_AGENT_ID: RuntimeAgentId = "cline";
 const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = ["claude", "codex", "droid", "kiro"];
 const DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED = true;
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
+const DEFAULT_NOTIFICATION_SOUND_ENABLED = true;
 const DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED = true;
 const DEFAULT_COMMIT_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD. When you are finished with the task, commit the working changes onto {{base_ref}}.
 
@@ -287,6 +291,10 @@ function toRuntimeConfigState({
 			globalConfig?.readyForReviewNotificationsEnabled,
 			DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED,
 		),
+		notificationSoundEnabled: normalizeBoolean(
+			globalConfig?.notificationSoundEnabled,
+			DEFAULT_NOTIFICATION_SOUND_ENABLED,
+		),
 		autoContinueOnConnectionDropEnabled: normalizeBoolean(
 			globalConfig?.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
@@ -318,6 +326,7 @@ async function writeRuntimeGlobalConfigFile(
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
 		readyForReviewNotificationsEnabled?: boolean;
+		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
@@ -341,6 +350,10 @@ async function writeRuntimeGlobalConfigFile(
 		config.readyForReviewNotificationsEnabled === undefined
 			? DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED
 			: normalizeBoolean(config.readyForReviewNotificationsEnabled, DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED);
+	const notificationSoundEnabled =
+		config.notificationSoundEnabled === undefined
+			? DEFAULT_NOTIFICATION_SOUND_ENABLED
+			: normalizeBoolean(config.notificationSoundEnabled, DEFAULT_NOTIFICATION_SOUND_ENABLED);
 	const autoContinueOnConnectionDropEnabled =
 		config.autoContinueOnConnectionDropEnabled === undefined
 			? DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED
@@ -383,6 +396,12 @@ async function writeRuntimeGlobalConfigFile(
 		readyForReviewNotificationsEnabled !== DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED
 	) {
 		payload.readyForReviewNotificationsEnabled = readyForReviewNotificationsEnabled;
+	}
+	if (
+		hasOwnKey(existing, "notificationSoundEnabled") ||
+		notificationSoundEnabled !== DEFAULT_NOTIFICATION_SOUND_ENABLED
+	) {
+		payload.notificationSoundEnabled = notificationSoundEnabled;
 	}
 	if (
 		hasOwnKey(existing, "autoContinueOnConnectionDropEnabled") ||
@@ -475,6 +494,7 @@ function createRuntimeConfigStateFromValues(input: {
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
 	readyForReviewNotificationsEnabled: boolean;
+	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
@@ -493,6 +513,7 @@ function createRuntimeConfigStateFromValues(input: {
 			input.readyForReviewNotificationsEnabled,
 			DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED,
 		),
+		notificationSoundEnabled: normalizeBoolean(input.notificationSoundEnabled, DEFAULT_NOTIFICATION_SOUND_ENABLED),
 		autoContinueOnConnectionDropEnabled: normalizeBoolean(
 			input.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
@@ -513,6 +534,7 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		selectedShortcutLabel: current.selectedShortcutLabel,
 		agentAutonomousModeEnabled: current.agentAutonomousModeEnabled,
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
+		notificationSoundEnabled: current.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: current.autoContinueOnConnectionDropEnabled,
 		shortcuts: [],
 		commitPromptTemplate: current.commitPromptTemplate,
@@ -549,6 +571,7 @@ export async function saveRuntimeConfig(
 		selectedShortcutLabel: string | null;
 		agentAutonomousModeEnabled: boolean;
 		readyForReviewNotificationsEnabled: boolean;
+		notificationSoundEnabled: boolean;
 		autoContinueOnConnectionDropEnabled: boolean;
 		shortcuts: RuntimeProjectShortcut[];
 		commitPromptTemplate: string;
@@ -562,6 +585,7 @@ export async function saveRuntimeConfig(
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
+			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
@@ -574,6 +598,7 @@ export async function saveRuntimeConfig(
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
+			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
 			shortcuts: config.shortcuts,
 			commitPromptTemplate: config.commitPromptTemplate,
@@ -596,6 +621,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled:
 				updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
+			notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled:
 				updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
@@ -608,6 +634,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 			nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
+			nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 			nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
 			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
@@ -622,6 +649,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
+			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
@@ -636,6 +664,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
+			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
 			shortcuts: nextConfig.shortcuts,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
@@ -666,6 +695,7 @@ export async function updateGlobalRuntimeConfig(
 				agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
 				readyForReviewNotificationsEnabled:
 					updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
+				notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled:
 					updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
 				shortcuts: current.shortcuts,
@@ -678,6 +708,7 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 				nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
+				nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 				nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
 				nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 				nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate;
@@ -691,6 +722,7 @@ export async function updateGlobalRuntimeConfig(
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
+				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
@@ -703,6 +735,7 @@ export async function updateGlobalRuntimeConfig(
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
+				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
 				shortcuts: nextConfig.shortcuts,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,

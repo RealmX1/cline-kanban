@@ -46,6 +46,7 @@ export async function saveRuntimeConfig(
 		agentAutonomousModeEnabled?: boolean;
 		shortcuts?: RuntimeProjectShortcut[];
 		readyForReviewNotificationsEnabled?: boolean;
+		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;

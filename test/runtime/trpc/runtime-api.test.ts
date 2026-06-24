@@ -190,6 +190,7 @@ function createRuntimeConfigState(): RuntimeConfigState {
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
 		readyForReviewNotificationsEnabled: true,
+		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
 		shortcuts: [],
 		commitPromptTemplate: "commit",

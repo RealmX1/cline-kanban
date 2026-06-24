@@ -33,6 +33,7 @@ function createRuntimeConfigResponse(
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project/.cline/kanban/config.json",
 		readyForReviewNotificationsEnabled: true,
+		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
 		detectedCommands: [selectedAgentId],
 		agents: [
