@@ -89,3 +89,48 @@ self.addEventListener("fetch", (event) => {
     )
   );
 });
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(handleNotificationClick(event.notification.data || {}));
+});
+
+async function handleNotificationClick(data) {
+  const taskId = typeof data.taskId === "string" ? data.taskId : null;
+  const workspaceId = typeof data.workspaceId === "string" ? data.workspaceId : null;
+  const workspacePathname = typeof data.workspacePathname === "string" ? data.workspacePathname : null;
+
+  if (!taskId) {
+    return;
+  }
+
+  const windowClients = await self.clients.matchAll({
+    type: "window",
+    includeUncontrolled: true,
+  });
+  const target = windowClients.find((client) => {
+    if (!workspacePathname) {
+      return false;
+    }
+    try {
+      return new URL(client.url).pathname === workspacePathname;
+    } catch {
+      return false;
+    }
+  });
+
+  if (target) {
+    await target.focus();
+    target.postMessage({
+      source: "cline-kanban",
+      type: "focus-task-from-notification",
+      taskId,
+      workspaceId,
+    });
+    return;
+  }
+
+  if (self.clients.openWindow && workspacePathname) {
+    await self.clients.openWindow(`${workspacePathname}?task=${encodeURIComponent(taskId)}`);
+  }
+}

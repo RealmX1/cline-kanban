@@ -23,6 +23,11 @@ import {
 } from "../core/session-activity";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
+	type AgentOutputSubstanceMemory,
+	createAgentOutputSubstanceMemory,
+	detectFreshSubstantiveAgentOutput,
+} from "./agent-output-substance";
+import {
 	type AgentAdapterLaunchInput,
 	type AgentOutputTransitionDetector,
 	type AgentOutputTransitionInspectionPredicate,
@@ -142,6 +147,10 @@ interface ActiveProcessState {
 	outputReactionAttemptTimer: NodeJS.Timeout | null;
 	// 最近一次用户手动输入时刻，用于抑制自动注入打断用户。
 	lastUserInputAt: number | null;
+	// 实质输出新鲜度记忆：把 TUI 周期性重绘（spinner / footer / 帮助提示）从「实质产出」剔除，
+	// 只有带来「最近未见过的新词内容」的 chunk 才推进 summary.lastSubstantiveOutputAt
+	// （Validation 列自动打回判据 isAgentActivelyProducingOutput 读它）。见 agent-output-substance.ts。
+	agentOutputSubstanceMemory: AgentOutputSubstanceMemory;
 	// 程序化「已提交用户轮」投递（RVF followup 等）的待决就绪轮询定时器：同一时刻至多一个，
 	// last-write-wins；命中就绪/deadline 写入后或 session 退出时清除。null 表示当前无待决投递。
 	taskChatInputDeliveryTimer: NodeJS.Timeout | null;
@@ -212,6 +221,7 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		startedAt: null,
 		updatedAt: now(),
 		lastOutputAt: null,
+		lastSubstantiveOutputAt: null,
 		reviewReason: null,
 		exitCode: null,
 		lastHookAt: null,
@@ -948,7 +958,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 				}
 			}
-			updateSummary(entry, { lastOutputAt: now() });
+			// lastOutputAt 每段非空 chunk 都刷新（spinner 重绘亦然）——供自动续跑静默门控 / 卡顿探针 /
+			// 卡片 computing 展示读取。lastSubstantiveOutputAt 仅在「agent 回合且本 chunk 带来新实质内容」
+			// 时同刻推进——Validation 列自动打回判据读它，从而 spinner 空转不再误判为「仍在产出」。
+			// 分类与解码仅在 agent 回合做（限定成本、语义对齐）；needsDecodedOutput 已算出 data 时复用，
+			// 否则按需解码。合并进同一个 metadata-only patch，保持每 chunk 仅一次 updateSummary / 广播。
+			const inAgentTurn =
+				entry.summary.agentId !== null && resolveSessionFacets(entry.summary).turnOwner === "agent";
+			const hasFreshSubstantiveOutput =
+				inAgentTurn &&
+				detectFreshSubstantiveAgentOutput(
+					entry.active.agentOutputSubstanceMemory,
+					data.length > 0 ? data : filteredChunk.toString("utf8"),
+				);
+			const outputAt = now();
+			updateSummary(
+				entry,
+				hasFreshSubstantiveOutput
+					? { lastOutputAt: outputAt, lastSubstantiveOutputAt: outputAt }
+					: { lastOutputAt: outputAt },
+			);
 
 			// Startup input is deferred until the TUI is alive so the task prompt creates a
 			// persisted interactive session instead of a short-lived argv prompt run.
@@ -1132,6 +1161,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionScanBuffer: outputReactionEngine !== null ? "" : null,
 			outputReactionAttemptTimer: null,
 			lastUserInputAt: null,
+			agentOutputSubstanceMemory: createAgentOutputSubstanceMemory(),
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,
 		};
@@ -1334,6 +1364,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionScanBuffer: null,
 			outputReactionAttemptTimer: null,
 			lastUserInputAt: null,
+			agentOutputSubstanceMemory: createAgentOutputSubstanceMemory(),
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,
 		};

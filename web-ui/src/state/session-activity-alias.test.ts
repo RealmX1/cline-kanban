@@ -12,7 +12,7 @@ describe("@runtime-session-activity alias resolves in web-ui vitest", () => {
 		expect(VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS).toBe(5_000);
 	});
 
-	it("running + 窗口内输出 → true；空闲 → false", () => {
+	it("running + 窗口内实质输出 → true；空闲 → false", () => {
 		expect(
 			isAgentActivelyProducingOutput(
 				{
@@ -24,6 +24,7 @@ describe("@runtime-session-activity alias resolves in web-ui vitest", () => {
 					startedAt: null,
 					updatedAt: NOW,
 					lastOutputAt: NOW - 1_000,
+					lastSubstantiveOutputAt: NOW - 1_000,
 					reviewReason: null,
 					exitCode: null,
 					lastHookAt: null,
