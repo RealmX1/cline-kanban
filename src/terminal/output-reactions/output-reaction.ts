@@ -51,6 +51,16 @@ export interface OutputReactionActions {
 	// 没有在持续产出。仅用于自动注入路径的二次空闲门控——若输出仍在流动（非静默），
 	// 说明 agent 仍在工作 / 已自行恢复，不应注入打断它。手动「立即续跑」豁免此门控。
 	isAgentOutputQuiet(): boolean;
+	// 当前是否处于「活跃的 agent 回合」（dual-axis facet 的 turnOwner==="agent"）。
+	//
+	// 这是 connection-drop 检测器的**主门控信号**，用来根治「agent 正在向用户提问
+	// （AskUserQuestion / ExitPlanMode / 权限确认）被误判为瞬时网络中断」：真实掉线时
+	// agent 仍在自己的回合（turnOwner 保持 agent，只是卡住 / 死了），而向用户提问会经 hook
+	// 把 turnOwner 翻成 user。`classifyConnectionError` 的正则在 agent 自产文本（问题/选项
+	// 文本、分析、测试日志）上无法区分真实错误行与内容，唯一兜底 isAgentOutputQuiet 又恰好
+	// 对「提问态」失效（提问 = 静默 + 停在提示符，与掉线在输出文本上完全同形），故需用 facet
+	// 这个**带外信号**门控：仅在 agent 回合运作，一旦进入 user 回合立即 stand down。
+	isAgentTurnActive(): boolean;
 	// 结构化日志。
 	log(message: string): void;
 }
@@ -70,6 +80,12 @@ export interface OutputReaction {
 	// 手动「移出列表 / 停止重试」：立即结束当前 episode（清定时器 + 清 UI 重连状态，不注入）。
 	// 软移除——若之后再检测到新的瞬时连接错误，仍会重新进入一次新 episode。
 	dismiss(ctx: OutputReactionContext, state: unknown, actions: OutputReactionActions): void;
+	// 事件驱动的「让位（stand down）」：会话刚翻入 user 回合（agent 向用户提问 / 计划评审 /
+	// 权限确认）时调用，立即结束当前 episode（清定时器 + 清 UI 重连状态，不注入）。与 dismiss
+	// 同为软结束，但语义不同：dismiss 是用户在重试列表上手动移除，standDown 是 facet→检测器的
+	// 显式输入边（turnOwner 翻成 user 即让位），用来兜住「PTY 输出先于 hook 落地、episode 已起」
+	// 的竞态、并消除「retrying 徽标闪现」。
+	standDown(ctx: OutputReactionContext, state: unknown, actions: OutputReactionActions): void;
 }
 
 interface ActiveReaction {
@@ -93,6 +109,12 @@ export interface OutputReactionEngine {
 		actions: OutputReactionActions,
 	): void;
 	triggerDismiss(
+		ctx: OutputReactionContext,
+		session: OutputReactionSessionState,
+		actions: OutputReactionActions,
+	): void;
+	// 会话刚翻入 user 回合时由 session-manager 调用，转发给每个 reaction 的 standDown。
+	onUserTurnStart(
 		ctx: OutputReactionContext,
 		session: OutputReactionSessionState,
 		actions: OutputReactionActions,
@@ -128,6 +150,11 @@ export function createOutputReactionEngine(reactions: readonly OutputReaction[])
 		triggerDismiss(ctx, session, actions) {
 			for (const active of session.reactions) {
 				active.reaction.dismiss(ctx, active.state, actions);
+			}
+		},
+		onUserTurnStart(ctx, session, actions) {
+			for (const active of session.reactions) {
+				active.reaction.standDown(ctx, active.state, actions);
 			}
 		},
 	};

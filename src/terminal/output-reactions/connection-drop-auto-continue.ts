@@ -85,6 +85,10 @@ function endEpisode(state: ConnectionDropReactionState, actions: OutputReactionA
 	state.nextAttemptAt = null;
 	state.errorSeenSinceLastInjection = false;
 	state.lastErrorSignature = null;
+	// 清空跨 chunk 桥接缓存：结束 episode 时（user 回合让位 / recovered / permanent / dismiss）
+	// 残留的 carryover 可能仍含命中正则的文本，若不清掉会被下一段无害输出拼成 detectionText
+	// 再次误命中，把这一回合的误判桥接泄漏到下一个 agent 回合，复活一次伪 retry episode。
+	state.splitCarryover = "";
 	actions.clearScheduledAttempts();
 	actions.clearConnectionRetryState();
 	actions.log(`[output-reaction] ${CONNECTION_DROP_AUTO_CONTINUE_REACTION_ID} episode ended: ${reason}`);
@@ -108,6 +112,17 @@ function performAttempt(
 	options: { manual: boolean },
 ): void {
 	if (!state.episodeActive) {
+		return;
+	}
+	// facet 主门控：会话已翻入 user 回合（agent 正在向用户提问 / 计划评审 / 权限确认）。
+	// 真实掉线永远不会产生 user 回合（agent 没提问，是卡住 / 死了，没有 hook 翻面）；走到这里
+	// 说明当初那个 episode 多半是正则误命中 agent 自产文本起的伪 episode，或是「PTY 输出先于
+	// hook 落地、episode 已起、standDown 还没到」的竞态尾巴。无论哪种，都立即结束 episode、清掉
+	// 「重连中」徽标，**绝不**把续跑指令注入到正在等待用户的对话框里（那等于替用户答题 / 打断
+	// 人轴交互）。手动「立即续跑」同样不豁免：user 回合下注入本质就是错的，且重试列表本不该含
+	// user 回合的会话。
+	if (!actions.isAgentTurnActive()) {
+		endEpisode(state, actions, "user-turn-active");
 		return;
 	}
 	// 还没到下一次注入时刻（自动路径下的早醒）：补齐剩余等待。手动路径忽略时刻限制。
@@ -183,6 +198,18 @@ export function createConnectionDropAutoContinueReaction(): OutputReaction {
 
 			if (classification === "transient") {
 				if (!state.episodeActive) {
+					// facet 主门控（常见路径：PreToolUse hook 通常先于问题 UI 渲染落地，故问题文本
+					// 到达检测器时 turnOwner 多已是 user）：仅在活跃的 agent 回合才起 episode。若此刻
+					// 已翻入 user 回合，瞬时正则命中的几乎必是 agent 自产的问题 / 选项 / 内容文本，
+					// 而非真实掉线——直接不起 episode，从源头消除「提问被误判为网络中断」的徽标与注入。
+					if (!actions.isAgentTurnActive()) {
+						// 清空跨 chunk 桥接缓存：这一段命中正则的文本几乎必是 agent 自产的问题 /
+						// 选项内容，决不能让它残留在 carryover 里。否则用户答完、回合切回 agent 后，
+						// 下一段无害输出会被拼成 `stale carryover + ' ' + 新 chunk` 再次命中正则，
+						// 把当回合的误判桥接泄漏到下一个 agent 回合、复活一次伪 retry。
+						state.splitCarryover = "";
+						return;
+					}
 					startEpisode(state, ctx, signature);
 					publishRetryState(state, actions);
 					actions.log(
@@ -219,6 +246,17 @@ export function createConnectionDropAutoContinueReaction(): OutputReaction {
 				return;
 			}
 			endEpisode(state, actions, "manual-dismiss");
+		},
+		standDown(_ctx, rawState, actions) {
+			// facet→检测器的显式输入边：会话刚翻入 user 回合（agent 向用户提问 / 计划评审 /
+			// 权限确认）时由引擎转发到此。立即让位——结束当前 episode（清定时器 + 清「重连中」
+			// 状态、不注入）。这条边专治「PTY 输出先于 hook 落地、episode 已起」的竞态：让 facet
+			// 翻面能即时清掉残留 episode 与 retrying 徽标，不必等下一个退避定时器到点。
+			const state = rawState as ConnectionDropReactionState;
+			if (!state.episodeActive) {
+				return;
+			}
+			endEpisode(state, actions, "user-turn-started");
 		},
 	};
 }

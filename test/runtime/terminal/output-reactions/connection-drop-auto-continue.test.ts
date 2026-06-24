@@ -25,6 +25,8 @@ function createMockActions(overrides?: Partial<OutputReactionActions>) {
 		canInjectNow: vi.fn(() => true),
 		// 默认「已静默」：保持既有用例（agent 停产后注入续跑）的语义不变。
 		isAgentOutputQuiet: vi.fn(() => true),
+		// 默认「活跃 agent 回合」：真实掉线发生在 agent 回合内，保持既有用例语义不变。
+		isAgentTurnActive: vi.fn(() => true),
 		log: vi.fn(),
 		...overrides,
 	};
@@ -197,5 +199,92 @@ describe("connection-drop-auto-continue reaction", () => {
 		reaction.onOutput(ctx(60_000, CLAUDE_ERROR_LINE), state, actions);
 		expect(actions.setConnectionRetryState).toHaveBeenCalledTimes(2);
 		expect(retryPatches.at(-1)).toMatchObject({ status: "retrying", retryCount: 0 });
+	});
+
+	// ── facet 主门控：agent 正在向用户提问（turnOwner=user）不得被误判为网络中断 ──
+
+	it("does not start an episode when a transient pattern hits during a user turn (facet gate)", () => {
+		// 模拟「agent 正在向用户提问」：turnOwner 已翻成 user（hook 先于问题文本落地）。
+		// 此刻命中瞬时正则的几乎必是 agent 自产的问题 / 选项文本，绝非真实掉线。
+		const isAgentTurnActive = vi.fn(() => false);
+		const { actions } = createMockActions({ isAgentTurnActive });
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		// 不起 episode：不置「重连中」、不排退避定时器。
+		expect(actions.setConnectionRetryState).not.toHaveBeenCalled();
+		expect(actions.schedule).not.toHaveBeenCalled();
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+	});
+
+	it("does not leak the user-turn error text via splitCarryover into the next agent turn (no resurrected false episode)", () => {
+		// 跨回合泄漏回归：user 回合让位（onOutput 早退）不得把命中正则的问题文本残留在
+		// splitCarryover 里桥接到下一个 agent 回合。
+		const isAgentTurnActive = vi.fn(() => false);
+		const { actions } = createMockActions({ isAgentTurnActive });
+		// 1) user 回合：问题文本命中瞬时正则 → 不起 episode。
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		expect(actions.setConnectionRetryState).not.toHaveBeenCalled();
+		expect(actions.schedule).not.toHaveBeenCalled();
+		// 2) 用户答完、回合切回 agent；下一段无害输出到达。
+		//    修复前：detectionText = stale carryover + ' ' + 新 chunk 会再次命中正则 → 伪 startEpisode。
+		//    修复后：carryover 已被清空 → 仍不起 episode。
+		isAgentTurnActive.mockReturnValue(true);
+		reaction.onOutput(ctx(2_000, "ok, proceeding with the build now"), state, actions);
+		expect(actions.setConnectionRetryState).not.toHaveBeenCalled();
+		expect(actions.schedule).not.toHaveBeenCalled();
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+	});
+
+	it("ends an in-flight episode without injecting if the turn flips to the user before the attempt fires (race tail)", () => {
+		// 竞态：PTY 输出先于 hook 落地 → episode 已起；随后 hook 把回合翻成 user。
+		const isAgentTurnActive = vi.fn(() => true);
+		const { actions } = createMockActions({ isAgentTurnActive });
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		expect(actions.setConnectionRetryState).toHaveBeenCalledTimes(1);
+		// 退避定时器到点时回合已是 user → performAttempt 立即结束 episode、绝不注入。
+		isAgentTurnActive.mockReturnValue(false);
+		reaction.onAttempt(ctx(5_000), state, actions);
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+		expect(actions.clearConnectionRetryState).toHaveBeenCalledTimes(1);
+		expect(actions.clearScheduledAttempts).toHaveBeenCalled();
+	});
+
+	it("does not inject on a manual trigger during a user turn either (manual is not exempt from the facet gate)", () => {
+		const isAgentTurnActive = vi.fn(() => true);
+		const { actions } = createMockActions({ isAgentTurnActive });
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		isAgentTurnActive.mockReturnValue(false);
+		reaction.triggerNow(ctx(2_000), state, actions);
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+		expect(actions.clearConnectionRetryState).toHaveBeenCalledTimes(1);
+	});
+
+	it("standDown ends an active episode (clears retry state, stops timers, no injection)", () => {
+		const { actions } = createMockActions();
+		reaction.onOutput(ctx(1_000, CLAUDE_ERROR_LINE), state, actions);
+		expect(actions.setConnectionRetryState).toHaveBeenCalledTimes(1);
+		reaction.standDown(ctx(2_000), state, actions);
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+		expect(actions.clearConnectionRetryState).toHaveBeenCalledTimes(1);
+		expect(actions.clearScheduledAttempts).toHaveBeenCalled();
+		// 让位后退避定时器再触发也不应注入（episode 已结束）。
+		reaction.onAttempt(ctx(10_000), state, actions);
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+	});
+
+	it("standDown is a no-op when not in a retry episode", () => {
+		const { actions } = createMockActions();
+		reaction.standDown(ctx(1_000), state, actions);
+		expect(actions.clearConnectionRetryState).not.toHaveBeenCalled();
+		expect(actions.submitContinuationReference).not.toHaveBeenCalled();
+	});
+
+	it("regression: a genuine drop during an active agent turn still starts an episode and injects on backoff", () => {
+		// 确认 facet 门控没把真实掉线一起 gate 掉：agent 回合 + 输出静默 + 停在提示符的真实瞬时错误，
+		// 仍正常起 episode 并在首个退避档位注入续跑。
+		const { actions, retryPatches } = createMockActions(); // isAgentTurnActive 默认 true
+		reaction.onOutput(ctx(0, CLAUDE_ERROR_LINE), state, actions);
+		expect(retryPatches[0]).toMatchObject({ status: "retrying", retryCount: 0 });
+		reaction.onAttempt(ctx(5_000), state, actions);
+		expect(actions.submitContinuationReference).toHaveBeenCalledTimes(1);
 	});
 });
