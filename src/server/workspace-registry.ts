@@ -1,6 +1,5 @@
 import { type RuntimeConfigState, toGlobalRuntimeConfigState } from "../config/runtime-config";
 import type {
-	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
@@ -17,6 +16,7 @@ import {
 	removeWorkspaceStateFiles,
 } from "../state/workspace-state";
 import { TerminalSessionManager } from "../terminal/session-manager";
+import { applyLiveSessionStateToProjectTaskCounts } from "./project-task-counts-live-session-overlay";
 
 export interface WorkspaceRegistryScope {
 	workspaceId: string;
@@ -148,38 +148,6 @@ export function collectProjectWorktreeTaskIdsForRemoval(board: RuntimeBoardData)
 		}
 	}
 	return targets;
-}
-
-function applyLiveSessionStateToProjectTaskCounts(
-	counts: RuntimeProjectTaskCounts,
-	board: RuntimeBoardData,
-	sessionSummaries: RuntimeWorkspaceStateResponse["sessions"],
-): RuntimeProjectTaskCounts {
-	const taskColumnById = new Map<string, RuntimeBoardColumnId>();
-	for (const column of board.columns) {
-		for (const card of column.cards) {
-			taskColumnById.set(card.id, column.id);
-		}
-	}
-	const next = {
-		...counts,
-	};
-	for (const summary of Object.values(sessionSummaries)) {
-		const columnId = taskColumnById.get(summary.taskId);
-		if (!columnId) {
-			continue;
-		}
-		if (summary.state === "awaiting_review" && columnId === "in_progress") {
-			next.in_progress = Math.max(0, next.in_progress - 1);
-			next.review += 1;
-			continue;
-		}
-		if (summary.state === "interrupted" && columnId !== "trash" && columnId !== "validation") {
-			next[columnId] = Math.max(0, next[columnId] - 1);
-			next.trash += 1;
-		}
-	}
-	return next;
 }
 
 function toProjectSummary(project: {

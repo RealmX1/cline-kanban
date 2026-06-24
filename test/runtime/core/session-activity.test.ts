@@ -1,0 +1,217 @@
+import { describe, expect, it } from "vitest";
+
+import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import {
+	AGENT_OUTPUT_QUIET_THRESHOLD_MS,
+	deriveDisplayLiveness,
+	isAgentActivelyProducingOutput,
+	isAgentOutputQuiet,
+	isAgentOutputWithinActiveWindow,
+	type SessionFacets,
+	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
+} from "../../../src/core/session-activity";
+
+const NOW = 1_700_000_000_000;
+
+// 只构造活性判定关心的字段（state / lastOutputAt），其余按 schema 必填项给安全默认值。
+function makeSummary(overrides: Partial<RuntimeTaskSessionSummary>): RuntimeTaskSessionSummary {
+	return {
+		taskId: "task-1",
+		state: "running",
+		agentId: "claude",
+		workspacePath: null,
+		pid: null,
+		startedAt: null,
+		updatedAt: NOW,
+		lastOutputAt: null,
+		reviewReason: null,
+		exitCode: null,
+		lastHookAt: null,
+		latestHookActivity: null,
+		...overrides,
+	};
+}
+
+describe("isAgentOutputWithinActiveWindow（共享新鲜度原语）", () => {
+	it("窗口内 → true", () => {
+		expect(isAgentOutputWithinActiveWindow(NOW - 1_000, NOW, 2_000)).toBe(true);
+	});
+
+	it("恰好等于窗口边界 → false（严格小于）", () => {
+		expect(isAgentOutputWithinActiveWindow(NOW - 2_000, NOW, 2_000)).toBe(false);
+	});
+
+	it("超过窗口 → false", () => {
+		expect(isAgentOutputWithinActiveWindow(NOW - 2_001, NOW, 2_000)).toBe(false);
+	});
+
+	it("lastOutputAt 为 null → false（从未产出 / 已死残留）", () => {
+		expect(isAgentOutputWithinActiveWindow(null, NOW, 2_000)).toBe(false);
+	});
+
+	it("lastOutputAt 为 undefined → false", () => {
+		expect(isAgentOutputWithinActiveWindow(undefined, NOW, 2_000)).toBe(false);
+	});
+});
+
+describe("isAgentOutputQuiet（后端自动续跑静默门控）", () => {
+	it("从未产出（null）→ true（视为静默，避免永久卡住注入）", () => {
+		expect(isAgentOutputQuiet(null, NOW)).toBe(true);
+	});
+
+	it("默认阈值 2s 内有输出 → false（仍在工作）", () => {
+		expect(isAgentOutputQuiet(NOW - (AGENT_OUTPUT_QUIET_THRESHOLD_MS - 1), NOW)).toBe(false);
+	});
+
+	it("距最近输出恰好 >= 默认 2s → true（已静默）", () => {
+		expect(isAgentOutputQuiet(NOW - AGENT_OUTPUT_QUIET_THRESHOLD_MS, NOW)).toBe(true);
+	});
+
+	it("与旧实现逐点一致：quiet === (lastOutputAt===null || now-lastOutputAt>=2000)", () => {
+		for (const delta of [0, 1, 1_999, 2_000, 2_001, 10_000]) {
+			const lastOutputAt = NOW - delta;
+			const legacy = lastOutputAt === null ? true : NOW - lastOutputAt >= AGENT_OUTPUT_QUIET_THRESHOLD_MS;
+			expect(isAgentOutputQuiet(lastOutputAt, NOW)).toBe(legacy);
+		}
+		expect(isAgentOutputQuiet(null, NOW)).toBe(true);
+	});
+
+	it("自定义阈值参数生效", () => {
+		expect(isAgentOutputQuiet(NOW - 3_000, NOW, 5_000)).toBe(false);
+		expect(isAgentOutputQuiet(NOW - 6_000, NOW, 5_000)).toBe(true);
+	});
+});
+
+describe("isAgentActivelyProducingOutput（前端 Validation 停留判据）", () => {
+	it("running 且最近一次输出在 5s 阈值内 → true（仍在持续产出）", () => {
+		const summary = makeSummary({
+			state: "running",
+			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1),
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(true);
+	});
+
+	it("running 但最近一次输出超过阈值（空闲）→ false（允许停留 Validation）", () => {
+		const summary = makeSummary({
+			state: "running",
+			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("恰好等于阈值边界 → false（阈值是严格小于）", () => {
+		const summary = makeSummary({
+			state: "running",
+			lastOutputAt: NOW - VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("running 但 lastOutputAt 为 null（从未输出 / 已死残留）→ false", () => {
+		const summary = makeSummary({ state: "running", lastOutputAt: null });
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("awaiting_review 即使最近有输出也 → false（只对 running 生效）", () => {
+		const summary = makeSummary({ state: "awaiting_review", lastOutputAt: NOW });
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("idle → false", () => {
+		const summary = makeSummary({ state: "idle", lastOutputAt: NOW });
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("undefined summary → false（任务无会话）", () => {
+		expect(isAgentActivelyProducingOutput(undefined, NOW)).toBe(false);
+	});
+
+	// 双轴迁移（Stage 3 ④）：门控由 state==="running" 翻为 resolveSessionFacets().turnOwner==="agent"。
+	// 下面钉住「facet 权威」语义——既证明带 facet 时采信 facet（而非 legacy state），也证明 no-facet
+	// 时即时派生与旧 state 判据全表等价（上方各例已覆盖 no-facet 路径）。
+	it("显式 facet turnOwner==='agent' 被采信（即使 legacy state 背离为 awaiting_review）→ 仍按 agent 回合判活跃", () => {
+		const summary = makeSummary({
+			state: "awaiting_review",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1),
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(true);
+	});
+
+	it("显式 facet turnOwner==='user' 被采信（即使 legacy state 背离为 running）→ 非 agent 回合，false", () => {
+		const summary = makeSummary({
+			state: "running",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "review",
+			lastOutputAt: NOW,
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+
+	it("显式 facet turnOwner==='agent' 但已超活跃窗口 → false（facet 决定回合、窗口决定新鲜度，正交）", () => {
+		const summary = makeSummary({
+			state: "running",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+			lastOutputAt: NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1),
+		});
+		expect(isAgentActivelyProducingOutput(summary, NOW)).toBe(false);
+	});
+});
+
+describe("deriveDisplayLiveness（展示叠加：live → computing / quiet）", () => {
+	const agentLive: SessionFacets = { turnOwner: "agent", liveness: "live", userTurnKind: null };
+
+	it("live 且最近一次输出在 5s 默认窗口内 → computing", () => {
+		expect(deriveDisplayLiveness(agentLive, NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1), NOW)).toBe(
+			"computing",
+		);
+	});
+
+	it("live 但最近一次输出超出默认窗口 → quiet（活着但静默）", () => {
+		expect(deriveDisplayLiveness(agentLive, NOW - (VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS + 1), NOW)).toBe(
+			"quiet",
+		);
+	});
+
+	it("live 恰好等于窗口边界 → quiet（新鲜度原语是严格小于）", () => {
+		expect(deriveDisplayLiveness(agentLive, NOW - VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS, NOW)).toBe("quiet");
+	});
+
+	it("live 但 lastOutputAt 为 null（从未产出 / 已死残留）→ quiet", () => {
+		expect(deriveDisplayLiveness(agentLive, null, NOW)).toBe("quiet");
+	});
+
+	it("自定义 activeWindowMs 生效", () => {
+		expect(deriveDisplayLiveness(agentLive, NOW - 3_000, NOW, { activeWindowMs: 5_000 })).toBe("computing");
+		expect(deriveDisplayLiveness(agentLive, NOW - 6_000, NOW, { activeWindowMs: 5_000 })).toBe("quiet");
+	});
+
+	it("user 回合的 live 也按新鲜度拆分（helper 通用；agent 收窄交由消费者）", () => {
+		const userLive: SessionFacets = { turnOwner: "user", liveness: "live", userTurnKind: "review" };
+		expect(deriveDisplayLiveness(userLive, NOW, NOW)).toBe("computing");
+		expect(deriveDisplayLiveness(userLive, NOW - 10_000, NOW)).toBe("quiet");
+	});
+
+	it("非 live 基值一律原样透传（与 lastOutputAt / nowMs 无关）", () => {
+		const cases: { liveness: SessionFacets["liveness"]; facets: SessionFacets }[] = [
+			{ liveness: "none", facets: { turnOwner: null, liveness: "none", userTurnKind: null } },
+			{ liveness: "starting", facets: { turnOwner: "agent", liveness: "starting", userTurnKind: null } },
+			{ liveness: "retrying", facets: { turnOwner: "agent", liveness: "retrying", userTurnKind: null } },
+			{ liveness: "exited", facets: { turnOwner: "user", liveness: "exited", userTurnKind: "review" } },
+			{ liveness: "failed", facets: { turnOwner: "user", liveness: "failed", userTurnKind: "error" } },
+			{
+				liveness: "interrupted",
+				facets: { turnOwner: "user", liveness: "interrupted", userTurnKind: "interrupted" },
+			},
+		];
+		for (const { liveness, facets } of cases) {
+			// 即便 lastOutputAt 很新鲜，非 live 也不会被叠加成 computing。
+			expect(deriveDisplayLiveness(facets, NOW, NOW)).toBe(liveness);
+		}
+	});
+});

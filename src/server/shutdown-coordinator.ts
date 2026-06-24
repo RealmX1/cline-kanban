@@ -1,4 +1,10 @@
 import type { RuntimeTaskSessionSummary, RuntimeWorkspaceStateResponse } from "../core/api-contract";
+import {
+	deriveSessionFacetsFromLegacyState,
+	isSessionInActiveTurn,
+	mergeSummaryWithFacets,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { updateTaskDependencies } from "../core/task-board-mutations";
 import { listWorkspaceIndexEntries, loadWorkspaceState, saveWorkspaceState } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -78,13 +84,23 @@ async function persistInterruptedSessions(
 	for (const taskId of interruptedTaskIds) {
 		const summary = options?.resolveSummary?.(taskId) ?? workspaceState.sessions[taskId] ?? null;
 		if (summary) {
-			nextSessions[taskId] = {
-				...summary,
-				state: "interrupted",
+			// Stage 4 全写侧反转：facet 写时主真相源，禁止手写 `state:`。本持久化写点经 mergeSummaryWithFacets
+			// 的 facet 分支落定「被中断」三 facet（由单源派生规则 deriveSessionFacetsFromLegacyState 产出），
+			// state 由 projectLegacyState 投影回 interrupted——facet↔state 恒自洽，不会静默落盘脏数据。
+			const interruptedFacets = deriveSessionFacetsFromLegacyState("interrupted", {
+				reviewReason: "interrupted",
+				pid: null,
+				connectionRetryActive: summary.connectionRetry != null,
+				agentId: summary.agentId,
+			});
+			nextSessions[taskId] = mergeSummaryWithFacets(summary, {
 				reviewReason: "interrupted",
 				pid: null,
 				updatedAt: Date.now(),
-			};
+				turnOwner: interruptedFacets.turnOwner,
+				liveness: interruptedFacets.liveness,
+				userTurnKind: interruptedFacets.userTurnKind,
+			});
 		}
 	}
 	await saveWorkspaceState(workspacePath, {
@@ -137,11 +153,10 @@ async function cleanupTaskWorktreeSetupLocks(
 	);
 }
 
+// Stage 2：关停时「需打断」判据改读 facet（与 workspace-api 的 isActiveTaskSessionState 共用同一
+// facet 真相源）。等价于旧 `state ∈ {running, awaiting_review}`，绕开有损 legacy 投影。
 function shouldInterruptSessionOnShutdown(summary: RuntimeTaskSessionSummary): boolean {
-	if (summary.state === "running") {
-		return true;
-	}
-	return summary.state === "awaiting_review";
+	return isSessionInActiveTurn(resolveSessionFacets(summary));
 }
 
 function collectShutdownInterruptedTaskIds(

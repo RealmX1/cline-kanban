@@ -204,6 +204,216 @@ describe("BoardCard", () => {
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
 	});
 
+	// 双轴重构 Stage 3「computing 脉动」（distinction ①）：agent 回合且最近 5s 内仍在产出 → 状态点
+	// animate-pulse；静默 / 非 agent 回合 → 静止点。下面三例钉住这条接线（派生逻辑本身见
+	// session-activity.test.ts 的 deriveDisplayLiveness 单测）。
+	it("pulses the session-activity dot while a running agent is actively producing output (computing)", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("running", { lastOutputAt: Date.now() })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const dot = container.querySelector("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.className).toContain("animate-pulse");
+	});
+
+	it("does not pulse the dot once a running agent has gone quiet (no recent output)", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("running", { lastOutputAt: Date.now() - 60_000 })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const dot = container.querySelector("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.className).not.toContain("animate-pulse");
+	});
+
+	it("never pulses on a user-turn card even when its agent process is still live (awaiting review)", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", { lastOutputAt: Date.now(), pid: 123 })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const dot = container.querySelector("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.className).not.toContain("animate-pulse");
+	});
+
+	// channel B（distinction ②）：exited（进程已退）的 awaiting 卡片状态点渲染为「空心环」
+	// （transparent 底 + 同色描边），与实心 live 点区分；点色仍随 channel C。下面四例钉住这条接线，
+	// 含「显式 facet」与「经 ②-prep 派生」两路径，及 Cline 恒 live 不误标的反证。
+	it("renders the session-activity dot as a hollow ring for an exited (process-gone) awaiting card", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", {
+							pid: null,
+							turnOwner: "user",
+							liveness: "exited",
+							userTurnKind: "review",
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.style.backgroundColor).toBe("transparent");
+		expect(dot?.getAttribute("style") ?? "").toContain("1.5px solid");
+		expect(dot?.getAttribute("title")).toContain("process exited");
+	});
+
+	it("renders the session-activity dot as a filled dot (no ring) for a live awaiting card", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", {
+							pid: 123,
+							turnOwner: "user",
+							liveness: "live",
+							userTurnKind: "review",
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
+		expect(dot).toBeInstanceOf(HTMLSpanElement);
+		expect(dot?.style.backgroundColor).not.toBe("transparent");
+		expect(dot?.getAttribute("style") ?? "").not.toContain("solid");
+		expect(dot?.getAttribute("title")).toBeNull();
+	});
+
+	it("②-prep×②-visible：终端 agent awaiting（pid null、无显式 facet）派生 exited → 空心环", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", { agentId: "claude", pid: null })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
+		expect(dot?.style.backgroundColor).toBe("transparent");
+		expect(dot?.getAttribute("style") ?? "").toContain("1.5px solid");
+	});
+
+	it("②-prep×②-visible 反证：Cline awaiting（pid null、无显式 facet）派生 live → 实心点（不误标空心）", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", { agentId: "cline", pid: null })}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		const dot = container.querySelector<HTMLSpanElement>("span.inline-block.shrink-0.rounded-full");
+		expect(dot?.style.backgroundColor).not.toBe("transparent");
+		expect(dot?.getAttribute("style") ?? "").not.toContain("solid");
+	});
+
+	// Stage 3 余区：in_progress 状态标记的 `state==="failed"` 读 → facet 真相源
+	// （严格等价 turnOwner==="user" && liveness==="failed"；复用卡片已解析的 sessionFacets）。
+	// 经渲染查询失败标记 AlertCircle 的 `text-status-red` svg 钉住，含 exited≠failed 反证 + 显式 facet 采信。
+	it("renders the failed status marker (AlertCircle/red) on an in-progress card with a failed session", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("failed")}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.querySelector("svg.text-status-red")).toBeTruthy();
+	});
+
+	it("反证：exited（进程已退）的 awaiting_review 不渲染失败标记（exited ≠ failed，退化为 Spinner）", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("awaiting_review", {
+							pid: null,
+							exitCode: 0,
+							turnOwner: "user",
+							liveness: "exited",
+							userTurnKind: "review",
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.querySelector("svg.text-status-red")).toBeFalsy();
+	});
+
+	it("采信显式 facet：turnOwner=user/liveness=failed（即便 legacy state=idle）仍渲染失败标记", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("idle", {
+							turnOwner: "user",
+							liveness: "failed",
+							userTurnKind: "error",
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.querySelector("svg.text-status-red")).toBeTruthy();
+	});
+
 	it("hides the move-to-validation and move-to-done actions on in-progress cards", async () => {
 		await act(async () => {
 			root.render(

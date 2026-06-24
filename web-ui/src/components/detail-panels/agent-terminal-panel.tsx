@@ -1,5 +1,6 @@
 import "@xterm/xterm/css/xterm.css";
 
+import { isSessionInActiveTurn, resolveSessionFacets } from "@runtime-session-activity";
 import {
 	ArrowDown,
 	ArrowUp,
@@ -10,15 +11,16 @@ import {
 	Minimize2,
 	RotateCcw,
 	Search,
+	Unplug,
 	X,
 } from "lucide-react";
 import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { TerminalSearchResultState } from "@/terminal/persistent-terminal-manager";
@@ -77,39 +79,42 @@ export interface AgentTerminalPanelProps {
 	onToggleExpand?: () => void;
 }
 
-function describeState(summary: RuntimeTaskSessionSummary | null): string {
+// 读 facet 真相源（turnOwner/liveness），不再读 legacy `state`；标签文案与旧 state 映射逐项等价
+// （agent⟺running、user+interrupted⟺interrupted、user+failed⟺failed、user 其余⟺awaiting_review、null⟺idle）。
+// awaiting_review 的 live/exited 都落入 user 其余分支，故进程是否已退不改变此处展示（保持旧行为）。
+export function describeState(summary: RuntimeTaskSessionSummary | null): string {
 	if (!summary) {
 		return "No session yet";
 	}
-	if (summary.state === "running") {
+	const facets = resolveSessionFacets(summary);
+	if (facets.turnOwner === "agent") {
 		return "Running";
 	}
-	if (summary.state === "awaiting_review") {
+	if (facets.turnOwner === "user") {
+		if (facets.liveness === "interrupted") {
+			return "Interrupted";
+		}
+		if (facets.liveness === "failed") {
+			return "Failed";
+		}
 		return "Ready for review";
-	}
-	if (summary.state === "interrupted") {
-		return "Interrupted";
-	}
-	if (summary.state === "failed") {
-		return "Failed";
 	}
 	return "Idle";
 }
 
 type StatusTagStyle = "neutral" | "success" | "warning" | "danger";
 
-function getStateTagStyle(summary: RuntimeTaskSessionSummary | null): StatusTagStyle {
+// 同 describeState：读 facet 真相源，样式与旧 state 映射逐项等价（agent→success、user+{interrupted,failed}→danger、user 其余→warning、null→neutral）。
+export function getStateTagStyle(summary: RuntimeTaskSessionSummary | null): StatusTagStyle {
 	if (!summary) {
 		return "neutral";
 	}
-	if (summary.state === "running") {
+	const facets = resolveSessionFacets(summary);
+	if (facets.turnOwner === "agent") {
 		return "success";
 	}
-	if (summary.state === "awaiting_review") {
-		return "warning";
-	}
-	if (summary.state === "interrupted" || summary.state === "failed") {
-		return "danger";
+	if (facets.turnOwner === "user") {
+		return facets.liveness === "interrupted" || facets.liveness === "failed" ? "danger" : "warning";
 	}
 	return "neutral";
 }
@@ -128,9 +133,10 @@ const STALL_HINT_TICK_MS = 5_000;
 
 function useStallElapsedMs(summary: RuntimeTaskSessionSummary | null): number | null {
 	const [now, setNow] = useState<number>(() => Date.now());
-	const isRunning = summary?.state === "running";
+	// 门控由 legacy `state==="running"` 翻为 facet `turnOwner==="agent"`（二者等价）；stall 仅在 agent 回合计时。
+	const isAgentTurn = summary ? resolveSessionFacets(summary).turnOwner === "agent" : false;
 	useEffect(() => {
-		if (!isRunning) {
+		if (!isAgentTurn) {
 			return;
 		}
 		const timer = window.setInterval(() => {
@@ -139,8 +145,8 @@ function useStallElapsedMs(summary: RuntimeTaskSessionSummary | null): number | 
 		return () => {
 			window.clearInterval(timer);
 		};
-	}, [isRunning]);
-	if (!isRunning || !summary) {
+	}, [isAgentTurn]);
+	if (!isAgentTurn || !summary) {
 		return null;
 	}
 	const baseline = summary.lastOutputAt ?? summary.startedAt;
@@ -392,7 +398,12 @@ function AgentTerminalPanelLayout({
 		refreshTerminal,
 		stopTerminal,
 	} = sessionControls;
-	const canStop = summary?.state === "running" || summary?.state === "awaiting_review";
+	// canStop 由 legacy `state∈{running,awaiting_review}` 翻为 facet 活跃回合判据（isSessionInActiveTurn 与之等价）。
+	const sessionFacets = summary ? resolveSessionFacets(summary) : null;
+	const canStop = sessionFacets ? isSessionInActiveTurn(sessionFacets) : false;
+	// channel B（distinction ②）：终端 agent 进程已退、任务仍等你审 → liveness==="exited"。面板顶端给一条
+	// muted 提示，解释「终端为何不再更新/冻结」。Cline SDK 在进程内运行、恒 live，永不进此分支。
+	const isStreamClosed = sessionFacets?.liveness === "exited";
 	const isSyntheticHomeSession = taskId.startsWith("__home_");
 	const showRefreshButton = !isSyntheticHomeSession;
 	const canRefresh = showRefreshButton && summary !== null && summary.agentId !== null && summary.agentId !== "cline";
@@ -592,6 +603,12 @@ function AgentTerminalPanelLayout({
 				onNext={findNextInTerminal}
 				onPrevious={findPreviousInTerminal}
 			/>
+			{isStreamClosed ? (
+				<div className="flex items-center gap-1.5 border-t border-border bg-surface-2 px-3 py-1.5 text-xs text-text-tertiary">
+					<Unplug size={12} className="shrink-0" />
+					<span>Terminal stream closed — the agent process has exited. The output above is final.</span>
+				</div>
+			) : null}
 			<div style={{ flex: "1 1 0", minHeight: 0, overflow: "hidden", padding: "3px 1.5px 3px 3px" }}>
 				<div
 					ref={containerRef}

@@ -1,4 +1,9 @@
 import type { DropResult } from "@hello-pangea/dnd";
+import {
+	isAgentActivelyProducingOutput,
+	isAwaitingUserReviewTurn,
+	resolveSessionFacets,
+} from "@runtime-session-activity";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
@@ -18,7 +23,6 @@ import {
 	removeTask,
 	updateTask,
 } from "@/state/board-state";
-import { isAgentActivelyProducingOutput } from "@/state/task-session-activity";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
@@ -459,7 +463,14 @@ export function useBoardInteractions({
 					continue;
 				}
 				const columnId = getTaskColumnId(nextBoard, summary.taskId);
-				if (summary.state === "awaiting_review" && columnId === "in_progress") {
+				// 双轴迁移（Stage 3 ④，行为保持）：列自动流转的 state 读全部翻为 facet 权威
+				// （resolveSessionFacets），绕开 projectLegacyState 对 live↔exited 的有损压扁。各判据
+				// 严格等价旧 legacy state：isAwaitingUserReviewTurn ⟺ awaiting_review（含 user+exited
+				// 折叠，故进程已退却仍等人审的会话照旧自动落位 review，不偷渡 distinction ②）、
+				// turnOwner==="agent" ⟺ running、liveness==="interrupted" ⟺ interrupted。
+				const facets = resolveSessionFacets(summary);
+				const previousFacets = previous ? resolveSessionFacets(previous) : undefined;
+				if (isAwaitingUserReviewTurn(facets) && columnId === "in_progress") {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review");
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						continue;
@@ -470,13 +481,12 @@ export function useBoardInteractions({
 					}
 					continue;
 				}
-				// Review 列：维持原行为——running 会话不应停在 review（review 是
-				// awaiting_review 的自动落位区），一律打回 In Progress。
-				// Validation 列：收窄判据——仅当 agent 此刻仍在持续产出输出时才打回；
-				// 空闲 / 已退出却仍标 running 的会话允许停留在 Validation（见
-				// isAgentActivelyProducingOutput 注释）。
+				// Review 列：维持原行为——agent 回合会话不应停在 review（review 是等人审查回合的
+				// 自动落位区），一律打回 In Progress。
+				// Validation 列：收窄判据——仅当 agent 此刻仍在持续产出输出时才打回；空闲 / 已退出
+				// 却仍处 agent 回合的会话允许停留在 Validation（见 isAgentActivelyProducingOutput 注释）。
 				const shouldBounceRunningToInProgress =
-					(summary.state === "running" && columnId === "review") ||
+					(facets.turnOwner === "agent" && columnId === "review") ||
 					(columnId === "validation" && isAgentActivelyProducingOutput(summary, nowMs));
 				if (shouldBounceRunningToInProgress) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
@@ -492,8 +502,8 @@ export function useBoardInteractions({
 					continue;
 				}
 				if (
-					summary.state === "interrupted" &&
-					previous?.state !== "interrupted" &&
+					facets.liveness === "interrupted" &&
+					previousFacets?.liveness !== "interrupted" &&
 					columnId &&
 					columnId !== "trash" &&
 					columnId !== "validation"

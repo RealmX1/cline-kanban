@@ -121,6 +121,35 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(existsSync(wrapperPath)).toBe(false);
 	});
 
+	it("registers a dedicated Claude PreToolUse matcher routing ExitPlanMode/AskUserQuestion to review (Stage 5)", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-stage5-hooks",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			workspaceId: "workspace-1",
+		});
+
+		const settingsIndex = launch.args.indexOf("--settings");
+		expect(settingsIndex).toBeGreaterThanOrEqual(0);
+		const settingsPath = launch.args[settingsIndex + 1];
+		const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+			hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
+		};
+
+		const preToolUse = settings.hooks.PreToolUse;
+		expect(preToolUse).toHaveLength(2);
+		// 专用 matcher 必须排在兜底 *（activity）之前，且路由到 to_review。
+		expect(preToolUse[0].matcher).toBe("ExitPlanMode|AskUserQuestion");
+		expect(preToolUse[0].hooks[0].command).toContain("--event");
+		expect(preToolUse[0].hooks[0].command).toContain("to_review");
+		expect(preToolUse[1].matcher).toBe("*");
+		expect(preToolUse[1].hooks[0].command).toContain("activity");
+	});
+
 	it("appends Kanban sidebar instructions for home Claude sessions", async () => {
 		setupTempHome();
 		setKanbanProcessContext();
@@ -362,6 +391,45 @@ describe("prepareAgentLaunch hook strategies", () => {
 		// shouldInspectClaudeOutputForTransition 必须与 detector 保持一致，
 		// 在 hook 下不需要解码输出去探测转移。
 		expect(launch.shouldInspectOutputForTransition?.(hookSummary)).toBe(false);
+	});
+
+	it("采信显式 facet：exited（进程已退仍等人审）的 attention 会话仍探测 prompt-ready", async () => {
+		// Stage 3：detector 门控从 legacy `state==="awaiting_review"` 翻为 facet 真相源
+		// isAwaitingUserReviewTurn。本例显式带 facet（turnOwner=user/liveness=exited），验证：
+		//   ① 被直接采信（不回退 legacy 派生）；
+		//   ② exited 与 live 折叠为同一「等人审」分支（live↔exited 不敏感，无 distinction ② 偷渡）——
+		//      进程已退但仍 reviewReason==="attention" 的会话照旧探测 prompt-ready。
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-exited-attention",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Implement the task",
+		});
+
+		const exitedAttentionSummary: RuntimeTaskSessionSummary = {
+			taskId: "task-claude-exited-attention",
+			state: "awaiting_review",
+			agentId: "claude",
+			workspacePath: "/tmp",
+			pid: null,
+			startedAt: Date.now(),
+			updatedAt: Date.now(),
+			lastOutputAt: Date.now(),
+			reviewReason: "attention",
+			exitCode: 0,
+			lastHookAt: null,
+			latestHookActivity: null,
+			turnOwner: "user",
+			liveness: "exited",
+			userTurnKind: "needs_input",
+		};
+
+		const promptReady = launch.detectOutputTransition?.("╭──────────────────────╮", exitedAttentionSummary) ?? null;
+		expect(promptReady).toEqual({ type: "agent.prompt-ready" });
+		expect(launch.shouldInspectOutputForTransition?.(exitedAttentionSummary)).toBe(true);
 	});
 
 	it("does not duplicate an explicit Codex no-alt-screen flag", async () => {

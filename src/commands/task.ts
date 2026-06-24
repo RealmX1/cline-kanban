@@ -19,6 +19,7 @@ import {
 	runtimeTaskWorktreeModeSchema,
 } from "../core/api-contract";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
+import { resolveSessionFacets } from "../core/session-activity";
 import {
 	addTaskDependency,
 	addTaskToColumn,
@@ -391,6 +392,7 @@ function formatTaskRecord(
 	columnId: RuntimeBoardColumnId,
 ): JsonRecord {
 	const session = state.sessions[task.id] ?? null;
+	const sessionFacets = session ? resolveSessionFacets(session) : null;
 	return {
 		id: task.id,
 		prompt: task.prompt,
@@ -403,18 +405,24 @@ function formatTaskRecord(
 		...formatTaskClineSettings(task.clineSettings),
 		createdAt: task.createdAt,
 		updatedAt: task.updatedAt,
-		session: session
-			? {
-					state: session.state,
-					agentId: session.agentId,
-					pid: session.pid,
-					startedAt: session.startedAt,
-					updatedAt: session.updatedAt,
-					lastOutputAt: session.lastOutputAt,
-					reviewReason: session.reviewReason,
-					exitCode: session.exitCode,
-				}
-			: null,
+		session:
+			session && sessionFacets
+				? {
+						// Stage 4：`state` 是 projectLegacyState(facets) 派生投影（向后兼容保留）；additively 补三 facet
+						// （双轴真相源，经 resolveSessionFacets 解析，旧盘无 facet 时即时派生，恒自洽）。
+						state: session.state,
+						turnOwner: sessionFacets.turnOwner,
+						liveness: sessionFacets.liveness,
+						userTurnKind: sessionFacets.userTurnKind,
+						agentId: session.agentId,
+						pid: session.pid,
+						startedAt: session.startedAt,
+						updatedAt: session.updatedAt,
+						lastOutputAt: session.lastOutputAt,
+						reviewReason: session.reviewReason,
+						exitCode: session.exitCode,
+					}
+				: null,
 	};
 }
 
@@ -759,7 +767,8 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 	}
 
 	const existingSession = runtimeState.sessions[task.id] ?? null;
-	const shouldStartSession = !existingSession || existingSession.state !== "running";
+	// 旧 `state==="running"` → facet 真相源 turnOwner==="agent"（running 是 agent 回合唯一来源，严格等价）。
+	const shouldStartSession = !existingSession || resolveSessionFacets(existingSession).turnOwner !== "agent";
 
 	if (shouldStartSession) {
 		const ensured = await runtimeClient.workspace.ensureWorktree.mutate({
@@ -1326,7 +1335,9 @@ async function sendTaskMessageCommand(input: {
 			return toTaskMessageCommandResult(existing);
 		}
 
-		const previousSessionState = state.sessions[taskId]?.state ?? null;
+		// A3 读迁移：旧 `state==="running"`（消息注入排队判据）→ facet `turnOwner==="agent"`。
+		const previousSession = state.sessions[taskId] ?? null;
+		const previousIsAgentTurn = previousSession ? resolveSessionFacets(previousSession).turnOwner === "agent" : false;
 		const pendingRecord = createPendingTaskMessageRecord({
 			taskId,
 			attemptId,
@@ -1370,7 +1381,7 @@ async function sendTaskMessageCommand(input: {
 			prompt_sha256: promptSha256,
 			message_id: messageId,
 			...(checkpoint ? { turn_id: String(checkpoint.turn), checkpoint_id: checkpoint.ref } : {}),
-			status: previousSessionState === "running" ? "queued" : "started",
+			status: previousIsAgentTurn ? "queued" : "started",
 			created_at: new Date().toISOString(),
 		};
 		await writeTaskMessageInjectionRecords(recordPath, replaceTaskMessageInjectionRecord(recordsWithPending, record));

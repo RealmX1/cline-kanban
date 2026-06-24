@@ -4,7 +4,7 @@ import type {
 	DraggableStyle,
 } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
-import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
+import { deriveDisplayLiveness, resolveSessionFacets } from "@runtime-session-activity";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
 import {
 	AlertCircle,
@@ -37,22 +37,14 @@ import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatPathForDisplay } from "@/utils/path-display";
+import { useInterval } from "@/utils/react-use";
 import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
-
-interface CardSessionActivity {
-	dotColor: string;
-	text: string;
-}
-
-const SESSION_ACTIVITY_COLOR = {
-	thinking: "var(--color-status-blue)",
-	success: "var(--color-status-green)",
-	waiting: "var(--color-status-gold)",
-	error: "var(--color-status-red)",
-	warning: "var(--color-status-orange)",
-	muted: "var(--color-text-tertiary)",
-	secondary: "var(--color-text-secondary)",
-} as const;
+import {
+	type CardSessionActivity,
+	deriveCardSessionActivity,
+	isCardCreditLimitError,
+	SESSION_ACTIVITY_COLOR,
+} from "./board-card-session-activity";
 
 // 会跳转的列（单击打开详情、替换看板）上，单击先延迟这么久，留出双击改标题的拦截窗口。
 const CLICK_ACTIVATION_DELAY_MS = 220;
@@ -66,162 +58,6 @@ function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: strin
 	} catch {
 		return null;
 	}
-}
-
-function extractToolInputSummaryFromActivityText(activityText: string, toolName: string): string | null {
-	const escapedToolName = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const match = activityText.match(
-		new RegExp(`^(?:Using|Completed|Failed|Calling)\\s+${escapedToolName}(?::\\s*(.+))?$`),
-	);
-	if (!match) {
-		return null;
-	}
-	const rawSummary = match[1]?.trim() ?? "";
-	if (!rawSummary) {
-		return null;
-	}
-	if (activityText.startsWith("Failed ")) {
-		const [operationSummary] = rawSummary.split(": ");
-		return operationSummary?.trim() || null;
-	}
-	return rawSummary;
-}
-
-function parseToolCallFromActivityText(
-	activityText: string,
-): { toolName: string; toolInputSummary: string | null } | null {
-	const match = activityText.match(/^(?:Using|Completed|Failed|Calling)\s+([^:()]+?)(?::\s*(.+))?$/);
-	if (!match?.[1]) {
-		return null;
-	}
-	const toolName = match[1].trim();
-	if (!toolName) {
-		return null;
-	}
-	const rawSummary = match[2]?.trim() ?? "";
-	if (!rawSummary) {
-		return { toolName, toolInputSummary: null };
-	}
-	if (activityText.startsWith("Failed ")) {
-		const [operationSummary] = rawSummary.split(": ");
-		return {
-			toolName,
-			toolInputSummary: operationSummary?.trim() || null,
-		};
-	}
-	return {
-		toolName,
-		toolInputSummary: rawSummary,
-	};
-}
-
-function resolveToolCallLabel(
-	activityText: string | undefined,
-	toolName: string | null,
-	toolInputSummary: string | null,
-): string | null {
-	if (toolName) {
-		const parsedSummary = extractToolInputSummaryFromActivityText(activityText ?? "", toolName);
-		if (!toolInputSummary && !parsedSummary) {
-			return null;
-		}
-		return formatClineToolCallLabel(toolName, toolInputSummary ?? parsedSummary);
-	}
-	if (!activityText) {
-		return null;
-	}
-	const parsed = parseToolCallFromActivityText(activityText);
-	if (!parsed) {
-		return null;
-	}
-	return formatClineToolCallLabel(parsed.toolName, parsed.toolInputSummary);
-}
-
-function isCardCreditLimitError(summary: RuntimeTaskSessionSummary | undefined): boolean {
-	if (!summary) {
-		return false;
-	}
-	if (summary.state !== "awaiting_review" && summary.state !== "failed" && summary.state !== "interrupted") {
-		return false;
-	}
-	return summary.latestHookActivity?.notificationType === "credit_limit";
-}
-
-function getCardSessionActivity(summary: RuntimeTaskSessionSummary | undefined): CardSessionActivity | null {
-	if (!summary) {
-		return null;
-	}
-	if (isCardCreditLimitError(summary)) {
-		return { dotColor: SESSION_ACTIVITY_COLOR.warning, text: "Out of credits" };
-	}
-	// 连接重试是最显著的「卡住」状态：优先于普通活动文案展示。
-	if (summary.connectionRetry?.status === "retrying") {
-		const attempts = summary.connectionRetry.retryCount;
-		return {
-			dotColor: SESSION_ACTIVITY_COLOR.warning,
-			text: attempts > 0 ? `重连中…（已续跑 ${attempts} 次）` : "重连中…",
-		};
-	}
-	const hookActivity = summary.latestHookActivity;
-	const activityText = hookActivity?.activityText?.trim();
-	const toolName = hookActivity?.toolName?.trim() ?? null;
-	const toolInputSummary = hookActivity?.toolInputSummary?.trim() ?? null;
-	const finalMessage = hookActivity?.finalMessage?.trim();
-	const hookEventName = hookActivity?.hookEventName?.trim() ?? null;
-	if (summary.state === "awaiting_review" && finalMessage) {
-		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: finalMessage };
-	}
-	if (
-		finalMessage &&
-		!toolName &&
-		(hookEventName === "assistant_delta" || hookEventName === "agent_end" || hookEventName === "turn_start")
-	) {
-		return {
-			dotColor: summary.state === "running" ? SESSION_ACTIVITY_COLOR.thinking : SESSION_ACTIVITY_COLOR.success,
-			text: finalMessage,
-		};
-	}
-	if (activityText) {
-		let dotColor: string =
-			summary.state === "failed" ? SESSION_ACTIVITY_COLOR.error : SESSION_ACTIVITY_COLOR.thinking;
-		let text = activityText;
-		const toolCallLabel = resolveToolCallLabel(activityText, toolName, toolInputSummary);
-		if (toolCallLabel) {
-			if (text.startsWith("Failed ")) {
-				dotColor = SESSION_ACTIVITY_COLOR.error;
-			}
-			return {
-				dotColor,
-				text: toolCallLabel,
-			};
-		}
-		if (text.startsWith("Final: ")) {
-			dotColor = SESSION_ACTIVITY_COLOR.success;
-			text = text.slice(7);
-		} else if (text.startsWith("Agent: ")) {
-			text = text.slice(7);
-		} else if (text.startsWith("Waiting for approval")) {
-			dotColor = SESSION_ACTIVITY_COLOR.waiting;
-		} else if (text.startsWith("Waiting for review")) {
-			dotColor = SESSION_ACTIVITY_COLOR.success;
-		} else if (text.startsWith("Failed ")) {
-			dotColor = SESSION_ACTIVITY_COLOR.error;
-		} else if (text === "Agent active" || text === "Working on task" || text.startsWith("Resumed")) {
-			return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };
-		}
-		return { dotColor, text };
-	}
-	if (summary.state === "failed") {
-		const failedText = finalMessage ?? activityText ?? "Task failed to start";
-		return { dotColor: SESSION_ACTIVITY_COLOR.error, text: failedText };
-	}
-	if (summary.state === "awaiting_review") {
-		return { dotColor: SESSION_ACTIVITY_COLOR.success, text: "Waiting for review" };
-	}
-	if (summary.state === "running") {
-		return { dotColor: SESSION_ACTIVITY_COLOR.thinking, text: "Thinking..." };
-	}
-	return null;
 }
 
 /**
@@ -326,7 +162,7 @@ export function TaskCardBody({
 	const isInlineTitleEditEnabled = !pinnedClone && onSaveTitle != null && (isNavigatingColumn || isTrashCard);
 	const clickActivationTimerRef = useRef<number | null>(null);
 	const isDragging = drag?.isDragging ?? false;
-	const rawSessionActivity = useMemo(() => getCardSessionActivity(sessionSummary), [sessionSummary]);
+	const rawSessionActivity = useMemo(() => deriveCardSessionActivity(sessionSummary), [sessionSummary]);
 	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
 	const lastSessionActivityCardIdRef = useRef<string | null>(null);
 	if (lastSessionActivityCardIdRef.current !== card.id) {
@@ -337,6 +173,22 @@ export function TaskCardBody({
 		lastSessionActivityRef.current = rawSessionActivity;
 	}
 	const sessionActivity = rawSessionActivity ?? lastSessionActivityRef.current;
+	// 「computing 脉动」（双轴重构 Stage 3，distinction ①）：agent 回合且最近 5s 内仍在产出 PTY 输出时，
+	// 状态点脉动表示「在算」；静默(quiet)/其它态保持现状静止点。computing/quiet 是随时间漂移的派生叠加
+	// （deriveDisplayLiveness，见 session-activity.ts），summary 静默期不再广播，故需本地 tick 让卡片在跨过
+	// 静默边界后停止脉动；tick 仅在「agent 回合 + liveness=live」时开启，空闲 / 待审 / 已结束卡不计时。
+	const sessionFacets = sessionSummary ? resolveSessionFacets(sessionSummary) : null;
+	const isLiveAgentTurn = sessionFacets?.turnOwner === "agent" && sessionFacets.liveness === "live";
+	// channel B（distinction ②）：终端 agent 进程已退、任务仍等你审 → liveness==="exited"（Cline SDK 在
+	// 进程内运行、恒 live，永不进此分支）。卡片状态点改「空心环」表达「进程已退但仍待你处理」，与实心 live
+	// 点区分；点的颜色仍随 channel C（review绿/needs_input金/error红）。pulse 仅 agent 回合开启、与本互斥。
+	const isExitedAwaiting = sessionFacets?.liveness === "exited";
+	const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
+	useInterval(() => setActivityNowMs(Date.now()), isLiveAgentTurn ? 1000 : null);
+	const isAgentComputing =
+		isLiveAgentTurn && sessionSummary != null && sessionFacets != null
+			? deriveDisplayLiveness(sessionFacets, sessionSummary.lastOutputAt, activityNowMs) === "computing"
+			: false;
 	const displayTitle = useMemo(
 		() => normalizePromptForDisplay(card.title) || truncateTaskPromptLabel(card.prompt),
 		[card.prompt, card.title],
@@ -412,7 +264,9 @@ export function TaskCardBody({
 			return <AlertTriangle size={12} className="text-status-orange" />;
 		}
 		if (columnId === "in_progress") {
-			if (sessionSummary?.state === "failed") {
+			// 旧 `state==="failed"`（spawn 失败）→ facet 真相源：严格等价 turnOwner==="user" && liveness==="failed"
+			// （projectLegacyState 仅此组合投影回 failed；agent 回合先投影为 running）。复用上方已解析的 sessionFacets。
+			if (sessionFacets?.turnOwner === "user" && sessionFacets.liveness === "failed") {
 				return <AlertCircle size={12} className="text-status-red" />;
 			}
 			return <Spinner size={12} />;
@@ -818,11 +672,28 @@ export function TaskCardBody({
 						}}
 					>
 						<span
-							className="inline-block shrink-0 rounded-full"
+							className={cn(
+								"inline-block shrink-0 rounded-full",
+								!isTrashCard && isAgentComputing && "animate-pulse",
+							)}
+							title={
+								!isTrashCard && isExitedAwaiting
+									? "Agent process exited — still awaiting your review"
+									: undefined
+							}
 							style={{
 								width: 6,
 								height: 6,
-								backgroundColor: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : sessionActivity.dotColor,
+								// exited（进程已退）：空心环（transparent 底 + 同色描边，box-sizing:border-box 下留中空）；
+								// 否则实心点。trash 卡一律 muted 实心、不参与 exited 区分。
+								backgroundColor:
+									isTrashCard || isExitedAwaiting
+										? isTrashCard
+											? SESSION_ACTIVITY_COLOR.muted
+											: "transparent"
+										: sessionActivity.dotColor,
+								border:
+									!isTrashCard && isExitedAwaiting ? `1.5px solid ${sessionActivity.dotColor}` : undefined,
 								marginTop: 4,
 							}}
 						/>

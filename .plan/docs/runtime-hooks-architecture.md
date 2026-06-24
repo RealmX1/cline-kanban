@@ -28,9 +28,11 @@ It does not cover adding new agents in detail.
 1. Board columns:
    1. `in_progress`
    2. `review`
-2. Runtime session states:
-   1. `running`
-   2. `awaiting_review`
+2. Runtime session state (dual-axis facets — write-time source of truth):
+   1. `turnOwner` (`agent` / `user` / `null`) — whose turn it is. Legacy `running` ⟺ `turnOwner==="agent"`.
+   2. `liveness` (`none`/`starting`/`live`/`retrying`/`exited`/`failed`/`interrupted`) — execution liveness.
+   3. `userTurnKind` (`review`/`question`/`plan_review`/`permission`/`error`/`interrupted`/`needs_input`) — only meaningful in a user turn.
+   4. Legacy one-dimensional `state` (`running`/`awaiting_review`/…) is now a **derived projection** `projectLegacyState(facets)`; decisions read facets via `resolveSessionFacets` (legacy `awaiting_review` ⟺ `isAwaitingUserReviewTurn(facets)`). Truth source: `src/core/session-activity.ts`.
 3. Hook transition intents:
    1. `to_in_progress`
    2. `to_review`
@@ -283,11 +285,12 @@ The runtime reducer accepts:
 3. `agent.prompt-ready`
 4. `process.exit`
 
-Reducer rules:
+Reducer rules (read via facets; the reducer emits facet patches, `state` is the projected output):
 
-1. `hook.to_review` only transitions when current state is `running`.
-2. `hook.to_in_progress` only transitions when current state is `awaiting_review` and reason is `hook` or `attention`.
-3. Non-eligible transitions are ignored.
+1. `hook.to_review` only transitions when `turnOwner==="agent"` (legacy `running`); it can carry a `userTurnKindOverride` (e.g. Claude `permission`).
+2. `hook.to_in_progress` / `agent.prompt-ready` only transition when `isAwaitingUserReviewTurn(facets)` (legacy `awaiting_review`) and reason is `hook`, `attention`, or `error`.
+3. `process.exit` derives facets from the post-exit `pid:null` + `agentId` (terminal agent → `exited`, in-process Cline → `live`).
+4. Non-eligible transitions are ignored.
 
 Hooks API rules:
 

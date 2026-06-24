@@ -1411,7 +1411,9 @@ describe("InMemoryClineTaskSessionService", () => {
 
 		const summary = service.getSummary("task-1");
 		expect(summary?.state).toBe("awaiting_review");
-		expect(summary?.reviewReason).toBe("hook");
+		// B1 completion split：SDK done/completed 置 reviewReason:"completion"（人轴仍 → review）。
+		expect(summary?.reviewReason).toBe("completion");
+		expect(summary?.userTurnKind).toBe("review");
 		expect(summary?.latestHookActivity?.hookEventName).toBe("agent_end");
 		expect(summary?.latestHookActivity?.finalMessage).toBe("Done. Added the comment.");
 		await vi.waitFor(() => {

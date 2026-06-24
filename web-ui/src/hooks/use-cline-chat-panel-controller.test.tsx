@@ -266,6 +266,63 @@ describe("useClineChatPanelController", () => {
 		expect(requireSnapshot(latestSnapshot).showCancelAutomaticAction).toBe(true);
 	});
 
+	// Stage 3 余区：canCancel / showAgentProgressIndicator 的 `state==="running"` 读 → facet 真相源
+	// 共享 isAgentTurn(turnOwner==="agent")。两者共用同一 isAgentTurn，故经可观测的 showAgentProgressIndicator
+	// 钉住即覆盖 canCancel 的同一读。含显式 facet 采信 + exited 折叠反证（exited 是 user 回合、非 agent 回合）。
+	it("非 agent 回合（awaiting_review）→ showAgentProgressIndicator 关（边界，旧 running 等价）", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					summary={createSummary("awaiting_review")}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await Promise.resolve();
+		});
+		expect(requireSnapshot(latestSnapshot).showAgentProgressIndicator).toBe(false);
+	});
+
+	it("采信显式 facet：turnOwner=agent（即便 legacy state=idle）→ showAgentProgressIndicator 开", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					summary={createSummary("idle", { turnOwner: "agent", liveness: "live", userTurnKind: null })}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await Promise.resolve();
+		});
+		expect(requireSnapshot(latestSnapshot).showAgentProgressIndicator).toBe(true);
+	});
+
+	it("反证：exited（user 回合、进程已退）→ showAgentProgressIndicator 关（exited 非 agent 回合）", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					summary={createSummary("awaiting_review", {
+						pid: null,
+						exitCode: 0,
+						turnOwner: "user",
+						liveness: "exited",
+						userTurnKind: "review",
+					})}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await Promise.resolve();
+		});
+		expect(requireSnapshot(latestSnapshot).showAgentProgressIndicator).toBe(false);
+	});
+
 	it("hides review actions after the workspace becomes clean", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 		setTaskWorkspaceSnapshot({

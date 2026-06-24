@@ -100,10 +100,6 @@ async function resolveExistingTaskCwdOrEnsure(options: {
 	}
 }
 
-function buildTerminalChatInput(text: string): Buffer {
-	return Buffer.from(`\u001b[200~${text}\u001b[201~\r`, "utf8");
-}
-
 function buildTerminalTaskChatDeliveryMessage(input: {
 	taskId: string;
 	text: string;
@@ -805,7 +801,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								};
 							}
 							const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-							const terminalSummary = terminalManager.writeInput(body.taskId, buildTerminalChatInput(body.text));
+							// RVF followup 等程序化 chat 注入：经就绪门控投递（沉降 + 提示符就绪轮询 + deadline 兜底），
+							// 避免 Stop 后 TUI 重绘态下「粘贴进输入框但 CR 被吞、不发送」的间歇竞态。详见 submitTaskChatInputWhenReady。
+							const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text);
 							if (terminalSummary) {
 								return {
 									ok: true,

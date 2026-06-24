@@ -1,0 +1,151 @@
+import { describe, expect, it } from "vitest";
+import type {
+	RuntimeHookEvent,
+	RuntimeTaskSessionReviewReason,
+	RuntimeTaskSessionState,
+	RuntimeTaskSessionSummary,
+} from "../../../src/core/api-contract";
+import type { SessionFacets } from "../../../src/core/session-activity";
+import { canTransitionTaskForHookEvent } from "../../../src/trpc/hook-event-task-transition-gate";
+
+// Stage 3 余区：hooks-api 的 hook 事件转换闸从 legacy `state` 读 → 双轴 facet 真相源。
+// 本套件锁定「迁移前可见行为基线」：
+//   - to_review 旧 `state==="running"` ⟺ `turnOwner==="agent"`；
+//   - to_in_progress 旧 `state==="awaiting_review"` ⟺ `isAwaitingUserReviewTurn(facets)`，
+//     且下游 reviewReason∈{attention,hook,error} 门控原样保留；
+//   - activity 永不转换。
+// 含 live↔exited 折叠的反向证明（exited 待审仍可转 in_progress，不被偷渡区分）+ 显式 facet 采信。
+// 纯函数测试，不启动 SDK host（见 AGENTS.md Node22 CI 挂起告警）。
+
+const ALL_EVENTS: readonly RuntimeHookEvent[] = ["to_review", "to_in_progress", "activity"];
+const ALL_STATES: readonly RuntimeTaskSessionState[] = ["idle", "running", "awaiting_review", "failed", "interrupted"];
+const ALL_REVIEW_REASONS: readonly RuntimeTaskSessionReviewReason[] = [
+	null,
+	"attention",
+	"exit",
+	"error",
+	"interrupted",
+	"hook",
+	"completion",
+];
+
+function makeSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
+	return {
+		taskId: "task-1",
+		state: "idle",
+		agentId: null,
+		workspacePath: null,
+		pid: null,
+		startedAt: null,
+		updatedAt: 1_000,
+		lastOutputAt: null,
+		reviewReason: null,
+		exitCode: null,
+		lastHookAt: null,
+		latestHookActivity: null,
+		...overrides,
+	};
+}
+
+// 迁移前的 legacy 判据（逐字保留作黄金基线对照源）。
+function legacyCanTransition(summary: RuntimeTaskSessionSummary, event: RuntimeHookEvent): boolean {
+	if (event === "activity") {
+		return false;
+	}
+	if (event === "to_review") {
+		return summary.state === "running";
+	}
+	return (
+		summary.state === "awaiting_review" &&
+		(summary.reviewReason === "attention" || summary.reviewReason === "hook" || summary.reviewReason === "error")
+	);
+}
+
+describe("canTransitionTaskForHookEvent (legacy state → facet 行为保持)", () => {
+	it("activity 事件永不转换", () => {
+		for (const state of ALL_STATES) {
+			for (const reviewReason of ALL_REVIEW_REASONS) {
+				expect(canTransitionTaskForHookEvent(makeSummary({ state, reviewReason }), "activity")).toBe(false);
+			}
+		}
+	});
+
+	it("to_review 仅在 running（=turnOwner agent）时放行", () => {
+		expect(canTransitionTaskForHookEvent(makeSummary({ state: "running", pid: 1234 }), "to_review")).toBe(true);
+		for (const state of ["idle", "awaiting_review", "failed", "interrupted"] as const) {
+			expect(canTransitionTaskForHookEvent(makeSummary({ state }), "to_review")).toBe(false);
+		}
+	});
+
+	it("to_in_progress 仅在 awaiting_review + reviewReason∈{attention,hook,error} 时放行", () => {
+		for (const reviewReason of ["attention", "hook", "error"] as const) {
+			expect(
+				canTransitionTaskForHookEvent(makeSummary({ state: "awaiting_review", reviewReason }), "to_in_progress"),
+			).toBe(true);
+		}
+		for (const reviewReason of [null, "exit", "interrupted", "completion"] as const) {
+			expect(
+				canTransitionTaskForHookEvent(makeSummary({ state: "awaiting_review", reviewReason }), "to_in_progress"),
+			).toBe(false);
+		}
+		// 非 awaiting_review 即便 reviewReason=attention 也不放行。
+		expect(
+			canTransitionTaskForHookEvent(makeSummary({ state: "running", reviewReason: "attention" }), "to_in_progress"),
+		).toBe(false);
+	});
+
+	it("全表逐项等价旧 legacy 判据（全 event×state×reviewReason×pid×connectionRetry，零行为漂移）", () => {
+		for (const event of ALL_EVENTS) {
+			for (const state of ALL_STATES) {
+				for (const reviewReason of ALL_REVIEW_REASONS) {
+					for (const pid of [null, 1234]) {
+						for (const connectionRetryActive of [false, true]) {
+							const summary = makeSummary({
+								state,
+								reviewReason,
+								pid,
+								connectionRetry: connectionRetryActive
+									? {
+											status: "retrying",
+											retryCount: 1,
+											firstErrorAt: 1_000,
+											lastAttemptAt: 1_500,
+											nextAttemptAt: 2_000,
+										}
+									: null,
+							});
+							expect(canTransitionTaskForHookEvent(summary, event)).toBe(legacyCanTransition(summary, event));
+						}
+					}
+				}
+			}
+		}
+	});
+
+	it("采信显式 facet：agent 回合（即便 legacy state 不一致）to_review 放行", () => {
+		const explicitAgent: Partial<RuntimeTaskSessionSummary> & SessionFacets = {
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+		};
+		expect(canTransitionTaskForHookEvent(makeSummary({ state: "idle", ...explicitAgent }), "to_review")).toBe(true);
+	});
+
+	it("live↔exited 折叠反证：exited（进程已退仍等人审）+ reviewReason=hook 仍可转 in_progress", () => {
+		const exitedAwaiting: Partial<RuntimeTaskSessionSummary> & SessionFacets = {
+			turnOwner: "user",
+			liveness: "exited",
+			userTurnKind: "review",
+		};
+		const summary = makeSummary({
+			state: "awaiting_review",
+			pid: null,
+			reviewReason: "hook",
+			exitCode: 0,
+			...exitedAwaiting,
+		});
+		expect(canTransitionTaskForHookEvent(summary, "to_in_progress")).toBe(true);
+		// 同一 exited 会话不应被当成 agent 回合而误放 to_review。
+		expect(canTransitionTaskForHookEvent(summary, "to_review")).toBe(false);
+	});
+});

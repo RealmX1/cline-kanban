@@ -11,6 +11,12 @@ import type {
 } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import {
+	applySessionFacets,
+	isAwaitingUserReviewTurn,
+	isSessionInActiveTurn,
+	resolveSessionFacets,
+} from "../core/session-activity";
+import {
 	combineAppendSystemPrompts,
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
@@ -41,6 +47,7 @@ import {
 	createDefaultSummary,
 	createMessage,
 	createMessageWithMeta,
+	deriveClineFacetPatch,
 	isCreditLimitError,
 	now,
 	setOrCreateAssistantMessage,
@@ -234,8 +241,8 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		}
 		clearActiveTurnState(entry);
 		const errorSummary = updateSummary(entry, {
-			state: "awaiting_review",
 			reviewReason: "error",
+			...deriveClineFacetPatch("awaiting_review", "error"),
 			lastOutputAt: now(),
 			lastHookAt: now(),
 			warningMessage: creditLimitError ? null : errorMessage,
@@ -329,7 +336,8 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 			!request.resumeFromTrash &&
 			!request.resumeFromPersistence &&
 			existing &&
-			(existing.summary.state === "running" || existing.summary.state === "awaiting_review")
+			// A3 读迁移：旧 `state∈{running,awaiting_review}` → facet isSessionInActiveTurn（全表等价、绕开有损投影）。
+			isSessionInActiveTurn(resolveSessionFacets(existing.summary))
 		) {
 			return cloneSummary(existing.summary);
 		}
@@ -361,7 +369,9 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 					reviewReason: initialReviewReason,
 				})
 			: ({
-					summary: {
+					// 经单一构造 applySessionFacets 重 stamp 双轴 facet：本内联分支覆写 state/reviewReason
+					// 后若仅 spread createDefaultSummary 的 idle facet，会得到与 state 不一致的 facet。
+					summary: applySessionFacets({
 						...createDefaultSummary(request.taskId),
 						state: initialState,
 						mode: resolvedMode,
@@ -369,7 +379,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 						startedAt: now(),
 						lastOutputAt: now(),
 						reviewReason: initialReviewReason,
-					},
+					}),
 					messages: [],
 					activeAssistantMessageId: null,
 					activeReasoningMessageId: null,
@@ -384,7 +394,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 			entry.messages.push(message);
 			this.emitMessage(request.taskId, message);
 			const runningSummary = updateSummary(entry, {
-				state: "running",
+				...deriveClineFacetPatch("running", null),
 				reviewReason: null,
 				lastOutputAt: now(),
 				lastHookAt: now(),
@@ -485,12 +495,13 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		}
 		this.pendingTurnCancelTaskIds.delete(taskId);
 		await this.sessionRuntime.stopTaskSession(taskId).catch(() => null);
-		if (entry.summary.state === "idle") {
+		// A3 读迁移：旧 `state==="idle"` → facet `turnOwner===null`（idle ⟺ 无回合）。
+		if (resolveSessionFacets(entry.summary).turnOwner === null) {
 			return cloneSummary(entry.summary);
 		}
 		const summary = updateSummary(entry, {
-			state: "interrupted",
 			reviewReason: "interrupted",
+			...deriveClineFacetPatch("interrupted", "interrupted"),
 			exitCode: null,
 			lastOutputAt: now(),
 		});
@@ -506,8 +517,8 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		this.pendingTurnCancelTaskIds.delete(taskId);
 		await this.sessionRuntime.abortTaskSession(taskId).catch(() => null);
 		const summary = updateSummary(entry, {
-			state: "interrupted",
 			reviewReason: "interrupted",
+			...deriveClineFacetPatch("interrupted", "interrupted"),
 			exitCode: null,
 			lastOutputAt: now(),
 		});
@@ -520,14 +531,15 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		if (!entry) {
 			return null;
 		}
-		if (entry.summary.state !== "running") {
+		// A3 读迁移：旧 `state==="running"` → facet `turnOwner==="agent"`。
+		if (resolveSessionFacets(entry.summary).turnOwner !== "agent") {
 			return null;
 		}
 		this.pendingTurnCancelTaskIds.add(taskId);
 		await this.sessionRuntime.abortTaskSession(taskId).catch(() => null);
 		clearActiveTurnState(entry);
 		const summary = updateSummary(entry, {
-			state: "idle",
+			...deriveClineFacetPatch("idle", null),
 			reviewReason: null,
 			exitCode: null,
 			lastOutputAt: now(),
@@ -557,12 +569,10 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		if (!entry) {
 			return null;
 		}
-		if (
-			entry.summary.state !== "running" &&
-			entry.summary.state !== "awaiting_review" &&
-			entry.summary.state !== "idle" &&
-			entry.summary.state !== "failed"
-		) {
+		// A3 读迁移（最易误改的读）：旧「state ∉ {running,awaiting_review,idle,failed}」恒等于
+		// 「state===interrupted」⟺ facet `liveness==="interrupted"`。**勿用 isSessionInActiveTurn**——
+		// 那会把应受理输入的 idle/failed 也拒掉（语义不同）。仅被中断会话拒绝继续输入。
+		if (resolveSessionFacets(entry.summary).liveness === "interrupted") {
 			return null;
 		}
 		this.pendingTurnCancelTaskIds.delete(taskId);
@@ -584,9 +594,10 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 			entry.messages.push(message);
 			this.emitMessage(taskId, message);
 			clearActiveTurnState(entry);
-			const queueDelivery = entry.summary.state === "running";
+			// A3 读迁移：旧 `state==="running"` → facet `turnOwner==="agent"`。
+			const queueDelivery = resolveSessionFacets(entry.summary).turnOwner === "agent";
 			const waitingSummary = updateSummary(entry, {
-				state: "running",
+				...deriveClineFacetPatch("running", null),
 				mode: effectiveMode,
 				reviewReason: null,
 				warningMessage: null,
@@ -657,7 +668,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 				});
 		}
 		const summary = updateSummary(entry, {
-			state: "running",
+			...deriveClineFacetPatch("running", null),
 			mode: effectiveMode,
 			reviewReason: null,
 			lastOutputAt: now(),
@@ -697,7 +708,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 			});
 			const warningMessage = formatStartWarnings(warnings);
 			const summary = updateSummary(entry, {
-				state: "idle",
+				...deriveClineFacetPatch("idle", null),
 				mode: effectiveMode,
 				reviewReason: null,
 				warningMessage: warningMessage ?? null,
@@ -740,7 +751,8 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 
 	async rebindPersistedTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
 		const existingEntry = this.messageRepository.getTaskEntry(taskId);
-		if (existingEntry && existingEntry.summary.state !== "failed") {
+		// A3 读迁移：旧 `state==="failed"` ⟺ facet `liveness==="failed"`（spawn 失败的唯一 legacy 投影）。
+		if (existingEntry && resolveSessionFacets(existingEntry.summary).liveness !== "failed") {
 			return cloneSummary(existingEntry.summary);
 		}
 		const snapshot = await this.sessionRuntime.readPersistedTaskSession(taskId);
@@ -752,8 +764,9 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		const persistedCwd = typeof snapshot.record.cwd === "string" ? snapshot.record.cwd.trim() : "";
 		const persistedWorkspaceRoot =
 			typeof snapshot.record.workspaceRoot === "string" ? snapshot.record.workspaceRoot.trim() : "";
-		const reboundState = existingEntry?.summary.state === "failed" ? "failed" : "awaiting_review";
-		const reboundReviewReason = existingEntry?.summary.state === "failed" ? "error" : "attention";
+		const existingFailed = existingEntry ? resolveSessionFacets(existingEntry.summary).liveness === "failed" : false;
+		const reboundState = existingFailed ? "failed" : "awaiting_review";
+		const reboundReviewReason = existingFailed ? "error" : "attention";
 		const entry = createTaskEntryFromPersistedSession(taskId, snapshot.messages, {
 			agentId: "cline",
 			state: reboundState,
@@ -840,7 +853,11 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		if (isHomeAgentSessionId(nextSummary.taskId) || !nextSummary.workspacePath) {
 			return false;
 		}
-		return previousSummary.state !== "awaiting_review" && nextSummary.state === "awaiting_review";
+		// A3 读迁移：旧 `state==="awaiting_review"` 边沿 → facet isAwaitingUserReviewTurn（live↔exited 折叠等价）。
+		return (
+			!isAwaitingUserReviewTurn(resolveSessionFacets(previousSummary)) &&
+			isAwaitingUserReviewTurn(resolveSessionFacets(nextSummary))
+		);
 	}
 
 	private captureReviewCheckpoint(taskId: string, summary: RuntimeTaskSessionSummary): void {

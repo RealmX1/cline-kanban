@@ -2,14 +2,25 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import type {
+	RuntimeAgentId,
 	RuntimeTaskConnectionRetry,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
 	RuntimeTaskSessionState,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskSessionUserTurnKind,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
+import {
+	applySessionFacets,
+	deriveSessionFacetsFromLegacyState,
+	isAgentOutputQuiet as evaluateAgentOutputQuiet,
+	isAwaitingUserReviewTurn,
+	isSessionInActiveTurn,
+	mergeSummaryWithFacets,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
 	type AgentAdapterLaunchInput,
@@ -38,7 +49,6 @@ import {
 	type OutputReactionEngine,
 	type OutputReactionSessionState,
 } from "./output-reactions";
-import { OUTPUT_QUIET_THRESHOLD_MS } from "./output-reactions/connection-drop-auto-continue";
 import {
 	buildNetworkInterruptionContinuationLine,
 	ensureNetworkInterruptionResumeInstructionsFile,
@@ -61,6 +71,17 @@ const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
 const MAX_OUTPUT_REACTION_SCAN_BUFFER_CHARS = 16_384;
 // 用户近期手动输入抑制窗口：这段时间内不自动注入续跑，避免打断正在打字的用户。
 const OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS = 8_000;
+// RVF followup 等「程序化已提交用户轮」投递（submitTaskChatInputWhenReady）：终端 agent（Claude/Codex）
+// 刚在 Stop 后、TUI 仍处于重绘/过渡态时，立即写 bracketed paste 会出现「粘贴进输入框但末尾 CR 被吞、
+// 不发送」的竞态（实测 RVF followup 间歇性卡住）。故投递必须门控到提示符就绪，与
+// submitConnectionDropContinuation / deferred-startup 同范式：先沉降、就绪轮询、deadline 兜底。
+// 首次就绪探测前的沉降延时（给 Stop 后的 TUI 把提示符框重绘完整）。
+const TASK_CHAT_INPUT_DELIVERY_SETTLE_MS = 1_000;
+// 未就绪时的就绪轮询间隔。
+const TASK_CHAT_INPUT_DELIVERY_RECHECK_MS = 1_500;
+// 就绪轮询总时长上限：到点仍未就绪则尽力强制写一次（best-effort，行为不劣于今日的立即写）。
+// 远小于 RVF prep 文件 300s TTL（rvf_prep_file.py DEFAULT_TTL_SECONDS），故即便兜底强制写，prep 仍有效。
+const TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS = 60_000;
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
 const DEFAULT_STALL_THRESHOLD_MS = 45_000;
@@ -121,6 +142,14 @@ interface ActiveProcessState {
 	outputReactionAttemptTimer: NodeJS.Timeout | null;
 	// 最近一次用户手动输入时刻，用于抑制自动注入打断用户。
 	lastUserInputAt: number | null;
+	// 程序化「已提交用户轮」投递（RVF followup 等）的待决就绪轮询定时器：同一时刻至多一个，
+	// last-write-wins；命中就绪/deadline 写入后或 session 退出时清除。null 表示当前无待决投递。
+	taskChatInputDeliveryTimer: NodeJS.Timeout | null;
+	// 投递「代际」单调计数：每次 submitTaskChatInputWhenReady 自增并被本次 attempt 捕获。
+	// 清掉定时器无法取消「已过定时器、正 await resolveInteractivePromptReadiness」的在途 attempt，
+	// 它 await 返回后仍会写旧文本——故 attempt 在写/重排前复查代际，被新投递取代者直接放弃，
+	// 保证 last-write-wins 跨越 await 仍成立（最新消息覆盖最旧、不重复/不乱序提交）。
+	taskChatInputDeliveryGeneration: number;
 }
 
 interface SessionEntry {
@@ -173,7 +202,8 @@ function now(): number {
 }
 
 function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
-	return {
+	// 初始 idle summary 即带上 idle facet，使「直接发出未经 updateSummary 的默认 summary」也自洽。
+	return applySessionFacets({
 		taskId,
 		state: "idle",
 		agentId: null,
@@ -190,7 +220,7 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
 		connectionRetry: null,
-	};
+	});
 }
 
 function cloneSummary(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSummary {
@@ -200,16 +230,35 @@ function cloneSummary(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSum
 }
 
 function updateSummary(entry: SessionEntry, patch: Partial<RuntimeTaskSessionSummary>): RuntimeTaskSessionSummary {
-	entry.summary = {
-		...entry.summary,
-		...patch,
-		updatedAt: now(),
-	};
+	// 单一写侧漏斗：经 mergeSummaryWithFacets 派发（facet 写时主真相源，详见该函数）。
+	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: now() });
 	return entry.summary;
 }
 
-function isActiveState(state: RuntimeTaskSessionState): boolean {
-	return state === "running" || state === "awaiting_review";
+// Stage 4 全写侧反转：终端/PTY agent 写点经此从「目标 legacy state + 当刻覆写上下文」产出完整三 facet
+// 写侧补丁（facet 写时主真相源；state 由 mergeSummaryWithFacets 投影回填）。connectionRetryActive 取自
+// prev（写点不改 connectionRetry，故与 mergeSummaryWithFacets 合并后取值一致），agentId/pid 取本次覆写值
+// （launch 设新 pid/agentId、exit/fail 设 pid:null）——使终端 agent awaiting 的 live↔exited 区分正确。
+function buildTerminalFacetPatch(
+	prev: RuntimeTaskSessionSummary,
+	state: RuntimeTaskSessionState,
+	overrides: { reviewReason: RuntimeTaskSessionReviewReason; pid: number | null; agentId: RuntimeAgentId | null },
+): Partial<RuntimeTaskSessionSummary> {
+	const facets = deriveSessionFacetsFromLegacyState(state, {
+		reviewReason: overrides.reviewReason,
+		pid: overrides.pid,
+		connectionRetryActive: prev.connectionRetry != null,
+		agentId: overrides.agentId,
+	});
+	return { turnOwner: facets.turnOwner, liveness: facets.liveness, userTurnKind: facets.userTurnKind };
+}
+
+// 「会话处于活跃回合」判据（Stage 3 余区：legacy `state` 读 → 双轴 facet 真相源）。
+// 经 resolveSessionFacets 读 facet、复用共享 isSessionInActiveTurn，严格等价旧
+// `state ∈ {running, awaiting_review}`（全表等价见 session-facets.test.ts），且对 live↔exited
+// 折叠不敏感（exited 仍判活跃）——故迁移为纯重构、零行为漂移，不偷渡 distinction ②。
+function isSummaryInActiveTurn(summary: RuntimeTaskSessionSummary): boolean {
+	return isSessionInActiveTurn(resolveSessionFacets(summary));
 }
 
 function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTaskSessionRequest {
@@ -285,6 +334,37 @@ function clearOutputReactionTimer(state: { outputReactionAttemptTimer: NodeJS.Ti
 		clearTimeout(state.outputReactionAttemptTimer);
 		state.outputReactionAttemptTimer = null;
 	}
+}
+
+function clearTaskChatInputDeliveryTimer(state: { taskChatInputDeliveryTimer: NodeJS.Timeout | null }): void {
+	if (state.taskChatInputDeliveryTimer) {
+		clearTimeout(state.taskChatInputDeliveryTimer);
+		state.taskChatInputDeliveryTimer = null;
+	}
+}
+
+// 取某 agent 的 TUI 提示符就绪预测（仅 claude / codex 有交互式输入框可探测）。返回 null 表示
+// 该终端 agent 没有可门控的就绪信号——调用方据此选择「立即投递」而非拖到 deadline 兜底。
+function resolveTuiInteractivePromptPredicate(agentId: RuntimeAgentId | null): ((scan: string) => boolean) | null {
+	if (agentId === "claude") {
+		return hasClaudeInteractivePrompt;
+	}
+	if (agentId === "codex") {
+		return hasCodexInteractivePrompt;
+	}
+	return null;
+}
+
+// 取文本最后 lineCount 行（用于把就绪判定限定在终端当前视口，排除 scrollback 历史）。
+function takeLastLines(text: string, lineCount: number): string {
+	if (lineCount <= 0) {
+		return text;
+	}
+	const lines = text.split("\n");
+	if (lines.length <= lineCount) {
+		return text;
+	}
+	return lines.slice(lines.length - lineCount).join("\n");
 }
 
 export class TerminalSessionManager implements TerminalSessionService {
@@ -454,12 +534,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 			isAgentOutputQuiet: () => {
 				const entry = this.entries.get(taskId);
-				const lastOutputAt = entry?.summary.lastOutputAt ?? null;
-				// 从未产出过任何输出：视为静默（不会因「无 lastOutputAt」永久卡住注入）。
-				if (lastOutputAt === null) {
-					return true;
-				}
-				return now() - lastOutputAt >= OUTPUT_QUIET_THRESHOLD_MS;
+				// 静默判定（含「从未产出 → 视为静默」）统一走 src/core/session-activity.ts 的共享原语，
+				// 默认阈值 AGENT_OUTPUT_QUIET_THRESHOLD_MS（2s）。
+				return evaluateAgentOutputQuiet(entry?.summary.lastOutputAt ?? null, now());
+			},
+			isAgentTurnActive: () => {
+				const entry = this.entries.get(taskId);
+				// dual-axis facet 真相源：仅 turnOwner==="agent" 才算活跃 agent 回合（与 connection-drop
+				// 检测器的主门控对齐）。会话不存在 / 已翻入 user 回合（agent 提问 / 计划评审 / 权限确认）
+				// 时返回 false，让检测器让位、绝不把续跑注入到等待用户的对话框里。
+				return entry ? resolveSessionFacets(entry.summary).turnOwner === "agent" : false;
 			},
 			log: (message: string) => {
 				logTuiFreezeWarning(`${message} taskId=${taskId}`);
@@ -487,6 +571,113 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (entry.summary.agentId === "codex") {
 			active.awaitingCodexPromptAfterEnter = true;
 		}
+	}
+
+	// 把 text 作为一条「已提交的用户轮」投递进活跃 terminal agent 的输入框，在 TUI 提示符就绪时
+	// （带沉降 + 有界轮询 + deadline 兜底）再真正写入 PTY 并提交。同步返回当前 summary（= 已受理投递，
+	// 保持调用方的 synthetic 回执契约）；无活跃 session 时返回 null。实际 PTY 写入异步发生。
+	// 专用于 RVF followup 等程序化注入：Stop 刚结束、TUI 仍在重绘时立即写会出现「粘贴了但 CR 被吞、
+	// 不发送」的间歇竞态，故必须门控到提示符就绪——与 submitConnectionDropContinuation / deferred-startup 同范式。
+	// 注意：与 writeInput（人类手敲终端）不同，这里不记 lastUserInputAt，避免把程序化投递当成「用户正在打字」而自我抑制。
+	submitTaskChatInputWhenReady(taskId: string, text: string): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			return null;
+		}
+		// last-write-wins：清掉该 task 上一个未决投递的定时器，并自增代际令本次成为唯一有效投递——
+		// 把已过定时器、正 await 就绪判定的在途 attempt 也一并作废（见 taskChatInputDeliveryGeneration）。
+		clearTaskChatInputDeliveryTimer(active);
+		const generation = ++active.taskChatInputDeliveryGeneration;
+		const deadlineAt = now() + TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS;
+		const timer = setTimeout(() => {
+			void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation);
+		}, TASK_CHAT_INPUT_DELIVERY_SETTLE_MS);
+		timer.unref?.();
+		active.taskChatInputDeliveryTimer = timer;
+		return cloneSummary(entry.summary);
+	}
+
+	// 一次投递 attempt：就绪命中或 deadline 兜底则写 PTY，否则隔 RECHECK_MS 再探（不消耗额外语义，只是轮询）。
+	// generation 为调度时捕获的代际；写入/重排前复查，被后续投递取代（代际不再相等）者直接放弃。
+	private async runTaskChatInputDeliveryAttempt(
+		taskId: string,
+		text: string,
+		deadlineAt: number,
+		generation: number,
+	): Promise<void> {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			// session 已结束：放弃投递（timer 已随 teardown 清除）。
+			return;
+		}
+		// 进入 await 前先校验代际：已被更晚的投递取代则不再触发就绪判定（避免无谓 await 后写旧文本）。
+		if (active.taskChatInputDeliveryGeneration !== generation) {
+			return;
+		}
+		active.taskChatInputDeliveryTimer = null;
+		const ready = await this.resolveInteractivePromptReadiness(entry);
+		// await 期间 session 可能已被替换/结束：复查同一 active 仍在。
+		const currentEntry = this.entries.get(taskId);
+		const currentActive = currentEntry?.active;
+		if (!currentEntry || !currentActive || currentActive !== active) {
+			return;
+		}
+		// await 期间可能有更晚的投递（submitTaskChatInputWhenReady）已自增代际：本 attempt 已过时，
+		// 直接放弃——既不写旧文本也不重排，保证 last-write-wins 跨越 await 仍成立。
+		if (currentActive.taskChatInputDeliveryGeneration !== generation) {
+			return;
+		}
+		const pastDeadline = now() >= deadlineAt;
+		if (!ready && !pastDeadline) {
+			const timer = setTimeout(() => {
+				void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation);
+			}, TASK_CHAT_INPUT_DELIVERY_RECHECK_MS);
+			timer.unref?.();
+			currentActive.taskChatInputDeliveryTimer = timer;
+			return;
+		}
+		// 就绪命中 或 deadline 兜底：直接写 PTY（不走 writeInput，避免把程序化投递记成 lastUserInputAt
+		// 而自我抑制——与 submitConnectionDropContinuation 一致）。toBracketedPasteSubmission 结尾已含单个 CR，
+		// 不额外补写回车，避免双回车 / 空提交。Codex 时标记 awaitingCodexPromptAfterEnter（末尾 CR 已构成回车）。
+		currentActive.session.write(toBracketedPasteSubmission(text));
+		if (currentEntry.summary.agentId === "codex") {
+			currentActive.awaitingCodexPromptAfterEnter = true;
+		}
+		logTuiFreezeWarning(
+			`[tui-freeze] task-chat-input-delivered taskId=${taskId} agentId=${currentEntry.summary.agentId} ` +
+				`via=${ready ? "prompt-ready" : "deadline-fallback"} chars=${text.length}`,
+		);
+	}
+
+	// 提示符就绪判定（双通道）：① 快路径——默认配置下输出反应扫描缓冲在线，复用同步的
+	// isAtInteractivePromptForReaction（便宜、可测）；② 兜底——永远在线的全屏镜像快照（即便反应引擎关闭，
+	// 也已捕获 Stop 后的最终提示符渲染），去 ANSI 后跑同一组提示符就绪预测。任一命中即就绪。
+	private async resolveInteractivePromptReadiness(entry: SessionEntry): Promise<boolean> {
+		const active = entry.active;
+		if (!active) {
+			return false;
+		}
+		const predicate = resolveTuiInteractivePromptPredicate(entry.summary.agentId);
+		// 无 TUI 就绪预测的终端 agent（droid / kiro 等）：没有可门控的提示符信号，
+		// 维持「立即投递」语义——否则会一律拖到 deadline 兜底才写，相对就绪门控前的即时写是回归。
+		if (predicate === null) {
+			return true;
+		}
+		if (active.outputReactionScanBuffer !== null && this.isAtInteractivePromptForReaction(entry)) {
+			return true;
+		}
+		const mirror = entry.terminalStateMirror;
+		if (!mirror) {
+			return false;
+		}
+		const snapshot = await mirror.getSnapshot();
+		// 仅按当前视口（最后 rows 行）判定就绪：getSnapshot() 含完整 scrollback（TERMINAL_SCROLLBACK=100_000，
+		// 服务于终端 restore，须保持原样），而历史里早先出现过的提示符框会误判「当前屏」就绪——把投递写进
+		// 正处于重绘/出输出的非就绪窗口，正是本特性要消除的「粘贴了但 CR 被吞、不发送」竞态。
+		const scan = stripAnsiAndControl(takeLastLines(snapshot.snapshot, snapshot.rows));
+		return predicate(scan);
 	}
 
 	// 更新 summary.connectionRetry 并广播（驱动看板徽标 / 顶栏重试列表）。
@@ -645,7 +836,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			kind: "task",
 			request: cloneStartTaskSessionRequest(request),
 		};
-		if (entry.active && isActiveState(entry.summary.state)) {
+		if (entry.active && isSummaryInActiveTurn(entry.summary)) {
 			return cloneSummary(entry.summary);
 		}
 
@@ -653,6 +844,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			stopWorkspaceTrustTimers(entry.active);
 			clearClaudeStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
+			clearTaskChatInputDeliveryTimer(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -838,6 +1030,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					stopWorkspaceTrustTimers(currentActive);
 					clearClaudeStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
+					clearTaskChatInputDeliveryTimer(currentActive);
 
 					const summary = this.applySessionEvent(currentEntry, {
 						type: "process.exit",
@@ -875,7 +1068,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			terminalStateMirror.dispose();
 			const summary = updateSummary(entry, {
-				state: "failed",
+				...buildTerminalFacetPatch(entry.summary, "failed", {
+					reviewReason: "error",
+					pid: null,
+					agentId: request.agentId,
+				}),
 				agentId: request.agentId,
 				workspacePath: request.cwd,
 				pid: null,
@@ -935,6 +1132,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionScanBuffer: outputReactionEngine !== null ? "" : null,
 			outputReactionAttemptTimer: null,
 			lastUserInputAt: null,
+			taskChatInputDeliveryTimer: null,
+			taskChatInputDeliveryGeneration: 0,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -959,7 +1158,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 		const startedAt = now();
 		updateSummary(entry, {
-			state: request.resumeFromTrash ? "awaiting_review" : "running",
+			...buildTerminalFacetPatch(entry.summary, request.resumeFromTrash ? "awaiting_review" : "running", {
+				reviewReason: request.resumeFromTrash ? "attention" : null,
+				pid: session.pid,
+				agentId: request.agentId,
+			}),
 			agentId: request.agentId,
 			workspacePath: request.cwd,
 			pid: session.pid,
@@ -987,7 +1190,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			kind: "shell",
 			request: cloneStartShellSessionRequest(request),
 		};
-		if (entry.active && entry.summary.state === "running") {
+		if (entry.active && resolveSessionFacets(entry.summary).turnOwner === "agent") {
 			return cloneSummary(entry.summary);
 		}
 
@@ -995,6 +1198,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			stopWorkspaceTrustTimers(entry.active);
 			clearClaudeStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
+			clearTaskChatInputDeliveryTimer(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -1062,10 +1266,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 					stopWorkspaceTrustTimers(currentActive);
 					clearClaudeStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
+					clearTaskChatInputDeliveryTimer(currentActive);
 
+					const shellExitInterrupted = currentActive.session.wasInterrupted();
 					const summary = updateSummary(currentEntry, {
-						state: currentActive.session.wasInterrupted() ? "interrupted" : "idle",
-						reviewReason: currentActive.session.wasInterrupted() ? "interrupted" : null,
+						...buildTerminalFacetPatch(currentEntry.summary, shellExitInterrupted ? "interrupted" : "idle", {
+							reviewReason: shellExitInterrupted ? "interrupted" : null,
+							pid: null,
+							agentId: currentEntry.summary.agentId,
+						}),
+						reviewReason: shellExitInterrupted ? "interrupted" : null,
 						exitCode: event.exitCode,
 						pid: null,
 					});
@@ -1081,7 +1291,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		} catch (error) {
 			terminalStateMirror.dispose();
 			const summary = updateSummary(entry, {
-				state: "failed",
+				...buildTerminalFacetPatch(entry.summary, "failed", {
+					reviewReason: "error",
+					pid: null,
+					agentId: null,
+				}),
 				agentId: null,
 				workspacePath: request.cwd,
 				pid: null,
@@ -1120,12 +1334,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionScanBuffer: null,
 			outputReactionAttemptTimer: null,
 			lastUserInputAt: null,
+			taskChatInputDeliveryTimer: null,
+			taskChatInputDeliveryGeneration: 0,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
 
 		updateSummary(entry, {
-			state: "running",
+			...buildTerminalFacetPatch(entry.summary, "running", {
+				reviewReason: null,
+				pid: session.pid,
+				agentId: null,
+			}),
 			agentId: null,
 			workspacePath: request.cwd,
 			pid: session.pid,
@@ -1149,14 +1369,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
-		if (entry.active || !isActiveState(entry.summary.state)) {
+		if (entry.active || !isSummaryInActiveTurn(entry.summary)) {
 			return cloneSummary(entry.summary);
 		}
 
 		// Preserve agentId so the server can route to the correct agent type
 		// (Cline SDK vs terminal PTY) when a task is restored from trash.
 		const summary = updateSummary(entry, {
-			state: "idle",
+			...buildTerminalFacetPatch(entry.summary, "idle", {
+				reviewReason: null,
+				pid: null,
+				agentId: entry.summary.agentId,
+			}),
 			workspacePath: null,
 			pid: null,
 			startedAt: null,
@@ -1183,9 +1407,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		// 记录用户手动输入时刻，用于抑制自动续跑注入打断正在打字的用户。
 		entry.active.lastUserInputAt = now();
+		// 旧门控 `state==="awaiting_review"` → facet 真相源 isAwaitingUserReviewTurn（涵盖 live↔exited
+		// 折叠、零行为漂移）。reviewReason∈{hook,attention,error} 读保留——deriveUserTurnKind 非 1:1
+		// （attention→needs_input 而 needs_input 亦覆盖 null），换 userTurnKind 会改行为，留 channel-C 批次。
 		if (
 			entry.summary.agentId === "codex" &&
-			entry.summary.state === "awaiting_review" &&
+			isAwaitingUserReviewTurn(resolveSessionFacets(entry.summary)) &&
 			(entry.summary.reviewReason === "hook" ||
 				entry.summary.reviewReason === "attention" ||
 				entry.summary.reviewReason === "error") &&
@@ -1235,7 +1462,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return true;
 	}
 
-	transitionToReview(taskId: string, reason: RuntimeTaskSessionReviewReason): RuntimeTaskSessionSummary | null {
+	transitionToReview(
+		taskId: string,
+		reason: RuntimeTaskSessionReviewReason,
+		userTurnKindOverride?: RuntimeTaskSessionUserTurnKind,
+	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return null;
@@ -1244,12 +1475,30 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return cloneSummary(entry.summary);
 		}
 		const before = entry.summary;
-		const summary = this.applySessionEvent(entry, { type: "hook.to_review" });
+		// userTurnKindOverride（B3 Claude permission 采集）随 hook.to_review 事件下发，由 reducer 在 user 回合
+		// 覆写人轴（经完整 facet 三元组，不裸写单字段）。
+		const summary = this.applySessionEvent(entry, { type: "hook.to_review", userTurnKindOverride });
 		if (summary !== before && entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));
 			}
 			this.emitSummary(summary);
+			// 翻入 user 回合（agent 向用户提问 / 计划评审 / 权限确认）：让 connection-drop 检测器即时
+			// 让位（结束残留 episode、清「重连中」徽标、停退避定时器）。这是「facet→检测器」的事件
+			// 驱动输入边，兜住「PTY 输出先于 hook 落地、误起 episode」的竞态；并顺带清掉 to_review 后
+			// 残留的 connectionRetry（episode 仍 active 时 endEpisode 会一并 clearConnectionRetryState），
+			// 否则会话再回到 running 会让陈旧值复活成 retrying。
+			const active = entry.active;
+			if (active.outputReactionEngine !== null && active.outputReactionSession !== null) {
+				const ctx = this.buildOutputReactionContext(entry, "");
+				if (ctx !== null) {
+					active.outputReactionEngine.onUserTurnStart(
+						ctx,
+						active.outputReactionSession,
+						this.buildOutputReactionActions(taskId),
+					);
+				}
+			}
 		}
 		return cloneSummary(summary);
 	}
@@ -1368,6 +1617,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		stopWorkspaceTrustTimers(entry.active);
 		clearClaudeStartupReadinessTimer(entry.active);
 		clearOutputReactionTimer(entry.active);
+		clearTaskChatInputDeliveryTimer(entry.active);
 		entry.active.session.stop();
 		if (cleanupFn) {
 			cleanupFn().catch(() => {
@@ -1392,6 +1642,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		stopWorkspaceTrustTimers(active);
 		clearClaudeStartupReadinessTimer(active);
 		clearOutputReactionTimer(active);
+		clearTaskChatInputDeliveryTimer(active);
 		active.session.stop();
 		const gracefulDeadline = now() + gracefulTimeoutMs;
 		while (now() < gracefulDeadline) {
@@ -1455,6 +1706,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			stopWorkspaceTrustTimers(entry.active);
 			clearClaudeStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
+			clearTaskChatInputDeliveryTimer(entry.active);
 			entry.active.session.stop({ interrupted: true });
 		}
 		return activeEntries.map((entry) => cloneSummary(entry.summary));
@@ -1470,7 +1722,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 				entry.active.workspaceTrustBuffer = "";
 			}
 		}
-		if (entry.active && transition.changed && transition.patch.state === "awaiting_review") {
+		// Stage 4 反转后 reducer patch 直接携带 facet（不再写 legacy state）→ 解阻塞此处旧的瞬态 patch.state
+		// 读。改读 patch 的 facet：`isAwaitingUserReviewTurn(patchFacets)` 与旧 `patch.state==="awaiting_review"`
+		// 逐项等价（hook.to_review + 非中断 exit → true；prompt-ready/to_in_progress 回 running 与中断 exit → false）。
+		if (
+			entry.active &&
+			transition.changed &&
+			isAwaitingUserReviewTurn({
+				turnOwner: transition.patch.turnOwner ?? null,
+				liveness: transition.patch.liveness ?? "none",
+				userTurnKind: transition.patch.userTurnKind ?? null,
+			})
+		) {
 			entry.active.awaitingCodexPromptAfterEnter = false;
 		}
 		return updateSummary(entry, transition.patch);
@@ -1491,7 +1754,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private scanForStalls(): void {
 		const currentTime = now();
 		for (const [taskId, entry] of this.entries.entries()) {
-			if (!entry.active || !isActiveState(entry.summary.state)) {
+			if (!entry.active || !isSummaryInActiveTurn(entry.summary)) {
 				entry.lastStallLoggedAt = null;
 				continue;
 			}

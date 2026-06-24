@@ -17,6 +17,7 @@ import {
 	parseWorktreeDeleteRequest,
 	parseWorktreeEnsureRequest,
 } from "../core/api-validation";
+import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { saveWorkspaceState, WorkspaceStateConflictError } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import {
@@ -93,8 +94,10 @@ function normalizeRequiredTaskWorkspaceScopeInput(input: {
 	};
 }
 
+// Stage 2：决策型「活跃回合」判据改读 facet（不再读 legacy state）。等价于旧
+// `state ∈ {running, awaiting_review}`，但绕开 projectLegacyState 对 live↔exited 的有损投影。
 function isActiveTaskSessionState(summary: RuntimeTaskSessionSummary | null): boolean {
-	return summary?.state === "running" || summary?.state === "awaiting_review";
+	return summary != null && isSessionInActiveTurn(resolveSessionFacets(summary));
 }
 
 function selectLastTurnSummary(
@@ -312,7 +315,10 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				if (!toCheckpoint) {
 					return await createEmptyWorkspaceChangesResponse(taskCwd);
 				}
-				if (summary?.state === "running" || !fromCheckpoint) {
+				// agent 仍在本回合推进（旧 state==="running" ⟺ facet turnOwner==="agent"）→ 用最新
+				// checkpoint 单边 diff；否则取上一/最新 checkpoint 之间的 diff。
+				const agentTurnInProgress = summary != null && resolveSessionFacets(summary).turnOwner === "agent";
+				if (agentTurnInProgress || !fromCheckpoint) {
 					return await getWorkspaceChangesFromRef({
 						cwd: taskCwd,
 						fromRef: toCheckpoint.commit,

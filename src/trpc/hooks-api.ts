@@ -1,39 +1,33 @@
 import type {
-	RuntimeHookEvent,
 	RuntimeHookIngestResponse,
-	RuntimeTaskSessionSummary,
+	RuntimeTaskSessionUserTurnKind,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import { parseHookIngestRequest } from "../core/api-validation";
+import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
+import { resolveSessionFacets } from "../core/session-activity";
+import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
+import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
 export interface CreateHooksApiDependencies {
 	getWorkspacePathById: (workspaceId: string) => string | null;
 	ensureTerminalManagerForWorkspace: (workspaceId: string, repoPath: string) => Promise<TerminalSessionManager>;
 	broadcastRuntimeWorkspaceStateUpdated: (workspaceId: string, workspacePath: string) => Promise<void> | void;
-	broadcastTaskReadyForReview: (workspaceId: string, taskId: string) => void;
+	broadcastTaskReadyForReview: (
+		workspaceId: string,
+		taskId: string,
+		userTurnKind: RuntimeTaskSessionUserTurnKind,
+	) => void;
 	captureTaskTurnCheckpoint?: (input: {
 		cwd: string;
 		taskId: string;
 		turn: number;
 	}) => Promise<RuntimeTaskTurnCheckpoint>;
 	deleteTaskTurnCheckpointRef?: (input: { cwd: string; ref: string }) => Promise<void>;
-}
-
-function canTransitionTaskForHookEvent(summary: RuntimeTaskSessionSummary, event: RuntimeHookEvent): boolean {
-	if (event === "activity") {
-		return false;
-	}
-	if (event === "to_review") {
-		return summary.state === "running";
-	}
-	return (
-		summary.state === "awaiting_review" &&
-		(summary.reviewReason === "attention" || summary.reviewReason === "hook" || summary.reviewReason === "error")
-	);
 }
 
 export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcContext["hooksApi"] {
@@ -75,8 +69,58 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					} satisfies RuntimeHookIngestResponse;
 				}
 
+				// Claude（终端 agent）采集增强：to_review 时从 hook metadata 分类更细人轴（仅 source==="claude"）
+				// ——permission（PermissionRequest / permission_prompt，B3）+ plan_review / question（ExitPlanMode /
+				// AskUserQuestion 工具名，Stage 5），随 hook.to_review 经 reducer 完整 facet 三元组覆写人轴。
+				let userTurnKindOverride: RuntimeTaskSessionUserTurnKind | null = null;
+				if (event === "to_review") {
+					userTurnKindOverride = classifyHookUserTurnKind(body.metadata);
+					if (userTurnKindOverride !== null) {
+						logUserTurnKindCapture({
+							taskId,
+							agentId: summary.agentId,
+							source: body.metadata?.source ?? null,
+							// 工具驱动的人轴（question/plan_review）以 toolName 为触发信号，permission 以
+							// hookEventName/notificationType——优先 toolName 便于线上回溯触发因。
+							rawSignal:
+								body.metadata?.toolName ??
+								body.metadata?.hookEventName ??
+								body.metadata?.notificationType ??
+								null,
+							resolvedKind: userTurnKindOverride,
+						});
+					} else {
+						// expected-but-absent：识别到 claude 的更细人轴信号（permission 字样，或带 toolName 的工具驱动
+						// to_review——如 Claude 改名后的 plan/question 工具仍被未锚定的 matcher 部分命中）却未精确匹配
+						// 已知模式 → 记 unclassified，让线上数据暴露 harness 信号漂移。不刷普适四种（Stop 等无
+						// toolName、无 permission 字样的常规 to_review 不触发）。
+						const sourceLc = body.metadata?.source?.trim().toLowerCase() ?? null;
+						const rawHook = body.metadata?.hookEventName?.trim().toLowerCase() ?? null;
+						const rawNotif = body.metadata?.notificationType?.trim().toLowerCase() ?? null;
+						const rawTool = body.metadata?.toolName?.trim() ?? "";
+						if (
+							sourceLc === "claude" &&
+							(rawHook?.includes("permission") || rawNotif?.includes("permission") || rawTool.length > 0)
+						) {
+							logUserTurnKindCapture({
+								taskId,
+								agentId: summary.agentId,
+								source: body.metadata?.source ?? null,
+								rawSignal:
+									body.metadata?.toolName ??
+									body.metadata?.hookEventName ??
+									body.metadata?.notificationType ??
+									null,
+								resolvedKind: "unclassified",
+							});
+						}
+					}
+				}
+
 				const transitionedSummary =
-					event === "to_review" ? manager.transitionToReview(taskId, "hook") : manager.transitionToRunning(taskId);
+					event === "to_review"
+						? manager.transitionToReview(taskId, "hook", userTurnKindOverride ?? undefined)
+						: manager.transitionToRunning(taskId);
 				if (!transitionedSummary) {
 					return {
 						ok: false,
@@ -114,7 +158,13 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
 				if (event === "to_review") {
-					deps.broadcastTaskReadyForReview(workspaceId, taskId);
+					// hook 终端路径恒广播。userTurnKind 取自刚落定的 transitionedSummary facet（经漏斗自洽，
+					// hook 转审 reviewReason="hook" → review），随事件 payload 内联下发给前端通知标题（③(b)）。
+					deps.broadcastTaskReadyForReview(
+						workspaceId,
+						taskId,
+						resolveSessionFacets(transitionedSummary).userTurnKind,
+					);
 				}
 
 				return { ok: true } satisfies RuntimeHookIngestResponse;

@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
+import { AgentTerminalPanel, describeState, getStateTagStyle } from "@/components/detail-panels/agent-terminal-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 
@@ -112,5 +112,148 @@ describe("AgentTerminalPanel", () => {
 
 		expect(container.querySelector('[aria-label="Refresh terminal session"]')).toBeNull();
 		expect(container.querySelector('[aria-label="Find in terminal"]')).not.toBeNull();
+	});
+
+	// channel B（distinction ②）：终端 agent 进程已退（liveness="exited"）时面板顶部提示「stream closed」。
+	it("exited（终端进程已退 = awaiting_review + pid null）→ 顶部显示 Terminal stream closed 提示", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={{ ...createSummary("codex"), state: "awaiting_review", pid: null }}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.textContent).toContain("Terminal stream closed");
+	});
+
+	it("live awaiting（进程仍在，pid 非 null）→ 不显示 stream closed 提示", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={{ ...createSummary("codex"), state: "awaiting_review", pid: 123 }}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.textContent).not.toContain("Terminal stream closed");
+	});
+
+	// ②-prep × ②-visible 合成反证：Cline SDK 在进程内运行、awaiting 恒 live，即便 pid null 也绝不误报 stream closed。
+	it("Cline awaiting（pid null 但 in-process）→ 不显示 stream closed（harness-aware 恒 live）", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={{ ...createSummary("cline"), state: "awaiting_review", pid: null }}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.textContent).not.toContain("Terminal stream closed");
+	});
+
+	it("running（agent 回合）→ 不显示 stream closed 提示", () => {
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createSummary("codex")}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.textContent).not.toContain("Terminal stream closed");
+	});
+});
+
+describe("describeState / getStateTagStyle（facet 真相源驱动，行为与 legacy state 逐项等价）", () => {
+	function makeStatusSummary(overrides: Partial<RuntimeTaskSessionSummary>): RuntimeTaskSessionSummary {
+		return {
+			taskId: "task-1",
+			state: "idle",
+			agentId: "claude",
+			workspacePath: null,
+			pid: null,
+			startedAt: null,
+			updatedAt: 1,
+			lastOutputAt: null,
+			reviewReason: null,
+			exitCode: null,
+			lastHookAt: null,
+			latestHookActivity: null,
+			...overrides,
+		};
+	}
+
+	it("null summary → No session yet / neutral", () => {
+		expect(describeState(null)).toBe("No session yet");
+		expect(getStateTagStyle(null)).toBe("neutral");
+	});
+
+	it("running（agent 回合）→ Running / success", () => {
+		const summary = makeStatusSummary({ state: "running", pid: 123, lastOutputAt: 1 });
+		expect(describeState(summary)).toBe("Running");
+		expect(getStateTagStyle(summary)).toBe("success");
+	});
+
+	it("awaiting_review（live，有 pid）→ Ready for review / warning", () => {
+		const summary = makeStatusSummary({ state: "awaiting_review", pid: 123 });
+		expect(describeState(summary)).toBe("Ready for review");
+		expect(getStateTagStyle(summary)).toBe("warning");
+	});
+
+	it("awaiting_review（exited，无 pid）→ 仍 Ready for review / warning（不因进程已退而改变展示）", () => {
+		const summary = makeStatusSummary({ state: "awaiting_review", pid: null });
+		expect(describeState(summary)).toBe("Ready for review");
+		expect(getStateTagStyle(summary)).toBe("warning");
+	});
+
+	it("interrupted → Interrupted / danger", () => {
+		const summary = makeStatusSummary({ state: "interrupted" });
+		expect(describeState(summary)).toBe("Interrupted");
+		expect(getStateTagStyle(summary)).toBe("danger");
+	});
+
+	it("failed → Failed / danger", () => {
+		const summary = makeStatusSummary({ state: "failed" });
+		expect(describeState(summary)).toBe("Failed");
+		expect(getStateTagStyle(summary)).toBe("danger");
+	});
+
+	it("idle → Idle / neutral", () => {
+		const summary = makeStatusSummary({ state: "idle" });
+		expect(describeState(summary)).toBe("Idle");
+		expect(getStateTagStyle(summary)).toBe("neutral");
+	});
+
+	it("采信已存在的显式 facet：exited 的 awaiting_review 仍走 user 分支", () => {
+		const summary = makeStatusSummary({
+			state: "awaiting_review",
+			pid: null,
+			turnOwner: "user",
+			liveness: "exited",
+			userTurnKind: "review",
+		});
+		expect(describeState(summary)).toBe("Ready for review");
+		expect(getStateTagStyle(summary)).toBe("warning");
 	});
 });

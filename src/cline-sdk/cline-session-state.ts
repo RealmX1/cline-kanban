@@ -1,9 +1,55 @@
 // Pure state helpers for native Cline sessions.
 // This module owns the in-memory summary and message shape plus the low-level
 // mutations shared by the event adapter and the message repository.
-import type { RuntimeTaskImage, RuntimeTaskSessionSummary } from "../core/api-contract";
+import type {
+	RuntimeTaskImage,
+	RuntimeTaskSessionReviewReason,
+	RuntimeTaskSessionState,
+	RuntimeTaskSessionSummary,
+	RuntimeTaskSessionUserTurnKind,
+} from "../core/api-contract";
+import {
+	applySessionFacets,
+	deriveSessionFacetsFromLegacyState,
+	mergeSummaryWithFacets,
+} from "../core/session-activity";
 
-const CLINE_USER_ATTENTION_TOOL_NAMES = new Set(["ask_followup_question", "plan_mode_respond"]);
+// Stage 4 全写侧反转：Cline SDK 写点经此从「目标 legacy state + 当刻 reviewReason」产出完整三 facet 的
+// 写侧补丁（facet 是写时主真相源；state 由 mergeSummaryWithFacets 的 projectLegacyState 投影回填）。
+// Cline 在进程内运行（pid 恒 null、无 connectionRetry），故 awaiting 恒 live、永不 exited（harness-aware）。
+// 只返回三 facet——reviewReason 由各写点按原样自行设置（不强制改未触 reviewReason 的写点，如 running 续帧）。
+// userTurnKindOverride（仅 user 回合生效）用于 harness 采集增强：ask_followup_question→question、
+// plan_mode_respond→plan_review（B2）。
+export function deriveClineFacetPatch(
+	state: RuntimeTaskSessionState,
+	reviewReason: RuntimeTaskSessionReviewReason,
+	userTurnKindOverride?: RuntimeTaskSessionUserTurnKind | null,
+): Partial<RuntimeTaskSessionSummary> {
+	const facets = deriveSessionFacetsFromLegacyState(state, {
+		reviewReason,
+		pid: null,
+		connectionRetryActive: false,
+		agentId: "cline",
+	});
+	const userTurnKind =
+		userTurnKindOverride !== undefined && facets.turnOwner === "user" ? userTurnKindOverride : facets.userTurnKind;
+	return { turnOwner: facets.turnOwner, liveness: facets.liveness, userTurnKind };
+}
+
+// ask_followup_question → question / plan_mode_respond → plan_review / 其它 → null（B2 采集增强）。
+export function classifyClineUserAttentionTool(toolName: string | null): "question" | "plan_review" | null {
+	if (!toolName) {
+		return null;
+	}
+	const normalized = toolName.trim().toLowerCase();
+	if (normalized === "ask_followup_question") {
+		return "question";
+	}
+	if (normalized === "plan_mode_respond") {
+		return "plan_review";
+	}
+	return null;
+}
 
 /**
  * Detect credit-limit / insufficient-balance errors from an error message string.
@@ -90,7 +136,9 @@ export function cloneMessage(message: ClineTaskMessage): ClineTaskMessage {
 }
 
 export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
-	return {
+	// 初始 idle summary 即带上 idle facet（turnOwner=null / liveness=none / userTurnKind=null），
+	// 使「直接发出未经 updateSummary 的默认 summary」也自洽。
+	return applySessionFacets({
 		taskId,
 		state: "idle",
 		mode: null,
@@ -107,18 +155,15 @@ export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary 
 		warningMessage: null,
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
-	};
+	});
 }
 
 export function updateSummary(
 	entry: ClineTaskSessionEntry,
 	patch: Partial<RuntimeTaskSessionSummary>,
 ): RuntimeTaskSessionSummary {
-	entry.summary = {
-		...entry.summary,
-		...patch,
-		updatedAt: now(),
-	};
+	// 单一写侧漏斗：经 mergeSummaryWithFacets 派发（facet 写时主真相源，详见该函数）。
+	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: now() });
 	return cloneSummary(entry.summary);
 }
 
@@ -161,13 +206,6 @@ export function buildSessionIdPrefix(taskId: string): string {
 function toSessionIdTaskPrefix(taskId: string): string {
 	const normalized = taskId.replace(WINDOWS_INVALID_SESSION_ID_CHARS, "_").trim();
 	return normalized.length > 0 ? normalized : "session";
-}
-
-export function isClineUserAttentionTool(toolName: string | null): boolean {
-	if (!toolName) {
-		return false;
-	}
-	return CLINE_USER_ATTENTION_TOOL_NAMES.has(toolName.trim().toLowerCase());
 }
 
 export function canReturnToRunning(reviewReason: RuntimeTaskSessionSummary["reviewReason"]): boolean {

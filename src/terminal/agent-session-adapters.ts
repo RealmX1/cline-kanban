@@ -10,6 +10,7 @@ import type {
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
 import { buildKanbanCommandParts } from "../core/kanban-command";
+import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
 import { quoteShellArg } from "../core/shell";
 import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { lockedFileSystem } from "../fs/locked-file-system";
@@ -680,6 +681,17 @@ const claudeAdapter: AgentSessionAdapter = {
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
 			args.push("--continue");
 		}
+		// Claude Code 的 `--continue`（「Refresh terminal session」/恢复任务时用）会用会话最后一条
+		// 已记录回合的「裸」model id `claude-opus-4-8` 重建模型——这丢掉了 1M context 选择，静默回退到
+		// 200k 变体（实测：即便会话本来跑在 1M，`--continue` 也会掉到 200k；而尚未产出回合的会话因为
+		// 「无可重建」反而留在默认 1M，于是表现为「时好时坏」）。显式传 `--model default`（一个随版本
+		// 自动跟进的别名，当前解析为 1M 的 `claude-opus-4-8[1m]`，换代后自动指向新默认）可让每次启动
+		// （全新与恢复）都落到看板预期的默认模型，并覆盖上述重建。仅在未显式指定 model 时注入，故按任务
+		// 指定的具体模型仍然优先。注意：只有 `--model` 这个「旗标」能解析 `default` 别名并压过 `--continue`
+		// 的重建；`ANTHROPIC_MODEL=default` 环境变量会被当成名为 "default" 的自定义模型（实测失效）。
+		if (!hasCliOption(args, "--model")) {
+			args.push("--model", "default");
+		}
 		if (input.startInPlanMode) {
 			const withoutImmediateBypass = args.filter((arg) => arg !== "--dangerously-skip-permissions");
 			args.length = 0;
@@ -700,6 +712,17 @@ const claudeAdapter: AgentSessionAdapter = {
 						{ hooks: [{ type: "command", command: buildHookCommand("activity", { source: "claude" }) }] },
 					],
 					PreToolUse: [
+						{
+							// Stage 5：Claude 原生「计划待批 / 澄清提问」经它自己的工具触发（ExitPlanMode /
+							// AskUserQuestion）。PreToolUse 在工具执行前触发——此刻用户需先批/答 → 映射为
+							// to_review；具体人轴（plan_review / question）由 ingest 端 classifyHookUserTurnKind
+							// 读 metadata.toolName 区分。须排在下方 *→activity 之前（专用 matcher 优先）。镜像
+							// Notification 的 permission_prompt+* 双 matcher：保留 *→activity 继续喂活动 feed，
+							// 两者对同一工具双触发幂等（activity 不转换、仅 applyHookActivity，metadata-only 漏斗
+							// 分支 preserve userTurnKind，不冲掉已采集的人轴）。
+							matcher: "ExitPlanMode|AskUserQuestion",
+							hooks: [{ type: "command", command: buildHookCommand("to_review", { source: "claude" }) }],
+						},
 						{
 							matcher: "*",
 							hooks: [{ type: "command", command: buildHookCommand("activity", { source: "claude" }) }],
@@ -775,7 +798,8 @@ const claudeAdapter: AgentSessionAdapter = {
 };
 
 function claudePromptDetector(data: string, summary: RuntimeTaskSessionSummary): SessionTransitionEvent | null {
-	if (summary.state !== "awaiting_review") {
+	// 旧门控 `state==="awaiting_review"` → facet 真相源（行为保持，见 isAwaitingUserReviewTurn 注释）。
+	if (!isAwaitingUserReviewTurn(resolveSessionFacets(summary))) {
 		return null;
 	}
 	// 仅在 reviewReason === "attention" 时根据 TUI 输出回到 running。
@@ -796,11 +820,12 @@ function claudePromptDetector(data: string, summary: RuntimeTaskSessionSummary):
 function shouldInspectClaudeOutputForTransition(summary: RuntimeTaskSessionSummary): boolean {
 	// 与 claudePromptDetector 保持一致：仅在 reviewReason === "attention" 时才需要解码
 	// 输出来探测 prompt-ready 转移。
-	return summary.state === "awaiting_review" && summary.reviewReason === "attention";
+	return isAwaitingUserReviewTurn(resolveSessionFacets(summary)) && summary.reviewReason === "attention";
 }
 
 function codexPromptDetector(data: string, summary: RuntimeTaskSessionSummary): SessionTransitionEvent | null {
-	if (summary.state !== "awaiting_review") {
+	// 旧门控 `state==="awaiting_review"` → facet 真相源（行为保持，见 isAwaitingUserReviewTurn 注释）。
+	if (!isAwaitingUserReviewTurn(resolveSessionFacets(summary))) {
 		return null;
 	}
 	if (summary.reviewReason !== "attention" && summary.reviewReason !== "hook") {
@@ -815,7 +840,7 @@ function codexPromptDetector(data: string, summary: RuntimeTaskSessionSummary): 
 
 function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummary): boolean {
 	return (
-		summary.state === "awaiting_review" &&
+		isAwaitingUserReviewTurn(resolveSessionFacets(summary)) &&
 		(summary.reviewReason === "attention" || summary.reviewReason === "hook" || summary.reviewReason === "error")
 	);
 }
