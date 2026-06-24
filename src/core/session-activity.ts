@@ -64,8 +64,18 @@ export function isAgentOutputQuiet(
 //
 // 双轴迁移（Stage 3 ④，行为保持）：门控已从一维 `state==="running"` 翻为 facet 权威
 // `resolveSessionFacets(summary).turnOwner==="agent"`——二者全表等价（no-facet summary 即时派生、
-// facet-present summary 采信权威，见 resolveSessionFacets）。活跃窗口仍直接读 lastOutputAt：这是
-// 「真·时间型」新鲜度，按 freshness 分层规则**不读** computing/quiet 派生叠加，而由唯一调用点
+// facet-present summary 采信权威，见 resolveSessionFacets）。
+//
+// 活跃窗口读 **lastSubstantiveOutputAt** 而非 lastOutputAt（本判据是唯一改读实质戳的读点）：
+// Claude/Codex TUI 的 spinner 状态行每秒重绘，会让 lastOutputAt 几乎恒新鲜——只要 turnOwner==="agent"，
+// 移入 Validation 的卡片就被持续打回。实质戳只在 agent 产出新正文 / 工具内容时推进（装饰性重绘被
+// agent-output-substance.ts 分类器滤除），故「spinner 在转但无新正文」≥5s 即可停留 Validation，而真在
+// 流式产出时仍按原语义打回。其余 4 个 lastOutputAt 读点（自动续跑静默门控、卡顿探针、卡片 computing
+// 展示、终端面板基线）有意继续读 lastOutputAt——spinner=在思考，对它们应计为活动，绝不能迁移。
+//   - null/undefined 回退 ⇒ false（不在产出）：isAgentOutputWithinActiveWindow 对 null/undefined 即返
+//     false。**不**回退到 lastOutputAt——那会原样重现本 bug（spinner 期正是实质戳未盖、lastOutputAt 恒
+//     新鲜的稳态）。代价仅为：流式 agent 在下一段实质 chunk 盖戳前（≈1s）暂判为非产出，可接受、自愈。
+// 活跃窗口是「真·时间型」新鲜度，按 freshness 分层规则**不读** computing/quiet 派生叠加，而由唯一调用点
 // （use-board-interactions 的 level-triggered effect）在 summary 流到达时重算（详见该处注释）。
 export function isAgentActivelyProducingOutput(
 	summary: RuntimeTaskSessionSummary | null | undefined,
@@ -76,7 +86,11 @@ export function isAgentActivelyProducingOutput(
 	}
 	return (
 		resolveSessionFacets(summary).turnOwner === "agent" &&
-		isAgentOutputWithinActiveWindow(summary.lastOutputAt, nowMs, VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS)
+		isAgentOutputWithinActiveWindow(
+			summary.lastSubstantiveOutputAt,
+			nowMs,
+			VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
+		)
 	);
 }
 

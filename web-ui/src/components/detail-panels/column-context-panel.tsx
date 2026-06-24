@@ -4,10 +4,12 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BoardCard } from "@/components/board-card";
+import { SelectedTaskPinBar } from "@/components/detail-panels/selected-task-pin-bar";
+import { StageHeaderLabel } from "@/components/detail-panels/stage-header-label";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { Button } from "@/components/ui/button";
-import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
+import { useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { findCardColumnId, isCardDropDisabled } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumn, BoardColumnId, CardSelection } from "@/types";
@@ -135,13 +137,7 @@ function ColumnSection({
 					) : (
 						<ChevronRight size={16} className="text-text-secondary" style={{ flexShrink: 0 }} />
 					)}
-					<span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-						<ColumnIndicator columnId={column.id} />
-						<span style={{ fontWeight: 600, fontSize: 13 }}>{column.title}</span>
-						<span className="text-text-secondary" style={{ fontSize: 11 }}>
-							{column.cards.length}
-						</span>
-					</span>
+					<StageHeaderLabel columnId={column.id} title={column.title} count={column.cards.length} />
 				</button>
 				{canStartAllTasks ? (
 					<Button
@@ -352,6 +348,14 @@ export function ColumnContextPanel({
 		[onTaskDragEnd],
 	);
 
+	// 选中卡滚过其所在 stage、进入下一个 stage 后，列内 CSS sticky 失效；用 IO 侦测「整卡完全越界」，
+	// 由浮动钉住条接管跨 stage 持续可见。拖拽进行中真实卡会被 portal 到 body，故拖拽期暂停侦测。
+	const selectedCardPinState = useSelectedCardPinState({
+		selectedTaskId: selection.card.id,
+		scrollRootRef: scrollContainerRef,
+		enabled: activeDragSourceColumnId == null,
+	});
+
 	useEffect(() => {
 		const scrollContainer = scrollContainerRef.current;
 		if (!scrollContainer) {
@@ -387,6 +391,7 @@ export function ColumnContextPanel({
 	return (
 		<div
 			style={{
+				position: "relative",
 				display: "flex",
 				flexDirection: "column",
 				width: panelWidth ?? "20%",
@@ -444,6 +449,27 @@ export function ColumnContextPanel({
 					))}
 				</div>
 			</DragDropContext>
+			{selectedCardPinState !== "hidden" ? (
+				<SelectedTaskPinBar
+					selection={selection}
+					pinState={selectedCardPinState}
+					scrollRootRef={scrollContainerRef}
+					taskSessions={taskSessions}
+					onStartTask={onStartTask}
+					onMoveToTrashTask={onMoveToTrashTask}
+					onMoveToValidationTask={onMoveToValidationTask}
+					onRestoreFromTrashTask={onRestoreFromTrashTask}
+					onDeleteTask={onDeleteTask}
+					onCommitTask={onCommitTask}
+					onOpenPrTask={onOpenPrTask}
+					commitTaskLoadingById={commitTaskLoadingById}
+					openPrTaskLoadingById={openPrTaskLoadingById}
+					moveToTrashLoadingById={moveToTrashLoadingById}
+					workspacePath={workspacePath}
+					defaultClineModelId={defaultClineModelId}
+					defaultAgentId={defaultAgentId}
+				/>
+			) : null}
 		</div>
 	);
 }
