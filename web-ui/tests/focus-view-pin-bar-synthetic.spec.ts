@@ -175,7 +175,9 @@ function buildSyntheticPage(): string {
       if (state === "hidden") scroll.removeAttribute("data-selected-pinned");
       else scroll.setAttribute("data-selected-pinned", "true");
       if (state === "pinTop" && pinBar) {
-        scroll.style.setProperty("--kb-selected-pin-top", pinBar.offsetHeight + "px");
+        // 镜像 column-context-panel：扣掉 scrollport 顶 padding，使原生 sticky 卡头底贴浮动条无缝。
+        var paddingTop = parseFloat(getComputedStyle(scroll).paddingTop) || 0;
+        scroll.style.setProperty("--kb-selected-pin-top", Math.max(0, pinBar.offsetHeight - paddingTop) + "px");
       } else {
         scroll.style.setProperty("--kb-selected-pin-top", "0px");
       }
@@ -332,9 +334,10 @@ test.describe("Focus View pin bar (synthetic, real browser)", () => {
 		}, IN_VIEW_STAGE_TITLE);
 
 		expect(geometry).not.toBeNull();
-		// 在视 stage（Review）的原生 sticky 卡头停在浮动条「下方」——若 offset 未生效会卡在 top:0（高于浮动条底沿）。
+		// 在视 stage（Review）的原生 sticky 卡头底贴浮动条「严丝合缝」——既不被压到下方留缝（旧 bug：露出
+		// scrollport 顶 padding 宽的可透视缝），也不卡在 top:0（offset 未生效）高于浮动条底沿。容差 1px。
 		expect(geometry?.headerPosition).toBe("sticky");
-		expect(geometry?.headerTop ?? -999).toBeGreaterThanOrEqual((geometry?.barBottom ?? 999) - 1);
+		expect(Math.abs((geometry?.headerTop ?? -999) - (geometry?.barBottom ?? 999))).toBeLessThanOrEqual(1);
 	});
 
 	test("scrolling above the selected stage pins the card to the BOTTOM edge, in-view header at the top", async ({

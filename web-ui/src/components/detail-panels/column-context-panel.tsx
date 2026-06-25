@@ -370,7 +370,12 @@ export function ColumnContextPanel({
 			return;
 		}
 		const applyOffset = (): void => {
-			scrollContainer.style.setProperty("--kb-selected-pin-top", `${pinBarRoot.offsetHeight}px`);
+			// 原生 sticky 卡头的 top 从 scrollport「内容盒」上沿（即 p-2 顶 padding 之下）起算，而浮动条
+			// overlay 贴在 scrollport 边框盒上沿（top:0）。若直接用浮动条全高，卡头会比浮动条底沿再低 paddingTop，
+			// 露出 paddingTop 宽的「可透视缝」。故扣掉 scrollport 顶 padding，使卡头上沿与浮动条底沿严丝合缝。
+			const paddingTop = Number.parseFloat(getComputedStyle(scrollContainer).paddingTop) || 0;
+			const offset = Math.max(0, pinBarRoot.offsetHeight - paddingTop);
+			scrollContainer.style.setProperty("--kb-selected-pin-top", `${offset}px`);
 		};
 		applyOffset();
 		if (typeof ResizeObserver === "undefined") {
