@@ -25,10 +25,13 @@ import {
 	type RuntimeTaskChatMessagesRequest,
 	type RuntimeTaskChatReloadRequest,
 	type RuntimeTaskChatSendRequest,
+	type RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
+	type RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
 	type RuntimeTaskSessionInputRequest,
 	type RuntimeTaskSessionStartRequest,
 	type RuntimeTaskSessionStopRequest,
 	type RuntimeTaskTerminalRefreshRequest,
+	type RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
 	type RuntimeTaskWorkspaceInfoRequest,
 	type RuntimeTerminalWsClientMessage,
 	type RuntimeWorkspaceChangesRequest,
@@ -60,10 +63,13 @@ import {
 	runtimeTaskChatMessagesRequestSchema,
 	runtimeTaskChatReloadRequestSchema,
 	runtimeTaskChatSendRequestSchema,
+	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema,
+	runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskSessionInputRequestSchema,
 	runtimeTaskSessionStartRequestSchema,
 	runtimeTaskSessionStopRequestSchema,
 	runtimeTaskTerminalRefreshRequestSchema,
+	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
 	runtimeTerminalWsClientMessageSchema,
 	runtimeWorkspaceChangesRequestSchema,
@@ -277,6 +283,47 @@ export function parseDismissConnectionRetrySessionsRequest(
 	}
 	return {
 		taskIds,
+	};
+}
+
+export function parseTaskParkAwaitingDispatchedBackgroundWorkRequest(
+	value: unknown,
+): RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest {
+	const parsed = parseWithSchema(runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	if (!taskId) {
+		throw new Error("Invalid task park payload: missing task id.");
+	}
+	const label = parsed.label?.trim();
+	return {
+		taskId,
+		...(label ? { label } : {}),
+	};
+}
+
+export function parseTaskUnparkAwaitingDispatchedBackgroundWorkRequest(
+	value: unknown,
+): RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest {
+	const parsed = parseWithSchema(runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	if (!taskId) {
+		throw new Error("Invalid task unpark payload: missing task id.");
+	}
+	return {
+		taskId,
+	};
+}
+
+export function parseTaskIsParkedAwaitingDispatchedBackgroundWorkRequest(
+	value: unknown,
+): RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest {
+	const parsed = parseWithSchema(runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	if (!taskId) {
+		throw new Error("Invalid task is-parked payload: missing task id.");
+	}
+	return {
+		taskId,
 	};
 }
 

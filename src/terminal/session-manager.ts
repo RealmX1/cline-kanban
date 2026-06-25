@@ -17,6 +17,7 @@ import {
 	deriveSessionFacetsFromLegacyState,
 	isAgentOutputQuiet as evaluateAgentOutputQuiet,
 	isAwaitingUserReviewTurn,
+	isParkedAwaitingDispatchedBackgroundWork,
 	isSessionInActiveTurn,
 	mergeSummaryWithFacets,
 	resolveSessionFacets,
@@ -550,10 +551,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 			isAgentTurnActive: () => {
 				const entry = this.entries.get(taskId);
+				if (!entry) {
+					return false;
+				}
+				// parked（已派发后台工作、等自行恢复）时返回 false：parked 主 agent 是 {agent,live,null} 且空闲在
+				// prompt，若仍判活跃，connection-drop 检测器会把「续跑」注入到一个正在等后台的会话里。这是
+				// 自动续跑的 master gate（connection-drop-auto-continue 消费），故在此短路即足够拦住 parked 误注入；
+				// canInjectNow 等下游守卫只在本判据放行后才可达，无需重复加 parked 检查（park 入口另会结束已开 episode）。
+				if (isParkedAwaitingDispatchedBackgroundWork(entry.summary)) {
+					return false;
+				}
 				// dual-axis facet 真相源：仅 turnOwner==="agent" 才算活跃 agent 回合（与 connection-drop
 				// 检测器的主门控对齐）。会话不存在 / 已翻入 user 回合（agent 提问 / 计划评审 / 权限确认）
 				// 时返回 false，让检测器让位、绝不把续跑注入到等待用户的对话框里。
-				return entry ? resolveSessionFacets(entry.summary).turnOwner === "agent" : false;
+				return resolveSessionFacets(entry.summary).turnOwner === "agent";
 			},
 			log: (message: string) => {
 				logTuiFreezeWarning(`${message} taskId=${taskId}`);
@@ -595,6 +606,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry || !active) {
 			return null;
 		}
+		// 程序化「已提交用户轮」投递即外部编排的 resume 动作（RVF followup）——一个 parked 会话收到投递就是被恢复，
+		// 故在此清 park（单一幂等 sink unparkTaskSession，未 parked 时 no-op）。这是最可靠的清标点：纯内存、同步、
+		// 不依赖任何 hook 往返，且只在 parked 期间真正有后台等待时投递才会出现（park→Stop 后无投递，故 park 稳定保持）。
+		this.unparkTaskSession(taskId);
 		// last-write-wins：清掉该 task 上一个未决投递的定时器，并自增代际令本次成为唯一有效投递——
 		// 把已过定时器、正 await 就绪判定的在途 attempt 也一并作废（见 taskChatInputDeliveryGeneration）。
 		clearTaskChatInputDeliveryTimer(active);
@@ -707,6 +722,94 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.emitSummary(summary);
 	}
 
+	// 结束当前已开的 connection-drop reaction episode（清「重连中」徽标、停退避定时器、顺带清残留 connectionRetry）。
+	// 翻入 user 回合（transitionToReview）与 park（parkTaskSessionAwaitingDispatchedBackgroundWork）共用：转换闸 /
+	// isAgentTurnActive 只挡「新 episode 起不起」，对一个已 active 的 episode 必须显式 teardown 才会让位——否则
+	// parked / 等审会话里仍跑着的 episode 会继续把续跑注入进去。engine 的 onUserTurnStart 即其 episode teardown 入口。
+	private endActiveOutputReactionEpisode(entry: SessionEntry, taskId: string): void {
+		const active = entry.active;
+		if (!active || active.outputReactionEngine === null || active.outputReactionSession === null) {
+			return;
+		}
+		const ctx = this.buildOutputReactionContext(entry, "");
+		if (ctx === null) {
+			return;
+		}
+		active.outputReactionEngine.onUserTurnStart(
+			ctx,
+			active.outputReactionSession,
+			this.buildOutputReactionActions(taskId),
+		);
+	}
+
+	// 外部编排（RVF / 自研 Kanban）置 park：标记主 agent 正在等待自己以非 native 方式派发的后台工作完成、会被外部
+	// 恢复，从而在它结束本轮发出裸 Stop 时结构性抑制误发的 ready-for-review 通知。同步顺序：①校验任务存在、有活跃
+	// 会话且处于 agent 回合；②经 updateSummary metadata-only 写 sidecar（不携带 facet / state → {agent,live,null}
+	// 三元组与 superRefine 护栏从不被触碰）；③设 suppressAutoRestartOnExit（park 中途真退出不自动重启、免丢上下文）；
+	// ④结束已开的 reaction episode（闸只挡新 episode）；⑤emit 广播（sidecar 经现有 mergeTaskSessionSummaries 到 UI）。
+	// 时序保证：编排层须 await 本调用 OK 再让 agent 结束这一轮——sidecar 同步写内存 entry.summary，hooks-api 在转换
+	// 前读内存 getSummary，故随后的裸 Stop 必见 parked、被单一 to_review 闸抑制。幂等：已 parked 时刷新 label 但保留
+	// 原 sinceMs（重复 park 不报错，便于编排重试）。
+	parkTaskSessionAwaitingDispatchedBackgroundWork(
+		taskId: string,
+		options: { label?: string } = {},
+	): { ok: true; summary: RuntimeTaskSessionSummary } | { ok: false; error: string } {
+		const entry = this.entries.get(taskId);
+		if (!entry || !entry.active) {
+			return { ok: false, error: `Task "${taskId}" has no active agent session to park.` };
+		}
+		if (resolveSessionFacets(entry.summary).turnOwner !== "agent") {
+			return { ok: false, error: `Task "${taskId}" is not in an agent turn and cannot be parked.` };
+		}
+		const label = options.label?.trim() || undefined;
+		const sinceMs = entry.summary.awaitingDispatchedBackgroundWork?.sinceMs ?? now();
+		const summary = updateSummary(entry, {
+			awaitingDispatchedBackgroundWork: { sinceMs, ...(label ? { label } : {}) },
+		});
+		entry.suppressAutoRestartOnExit = true;
+		this.endActiveOutputReactionEpisode(entry, taskId);
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+		return { ok: true, summary: cloneSummary(summary) };
+	}
+
+	// 清 park（resume / 显式兜底 / onExit 对称清理共用，单一幂等 sink）。未 parked 即 no-op、返回当前 summary。
+	// 清标经 updateSummary metadata-only 写 null（同 connectionRetry 清标，facet 三元组不变），并复位
+	// suppressAutoRestartOnExit=false 恢复正常重启语义（park 期的真退出已在 onExit 的 shouldAutoRestart 处被
+	// parked / wasSuppressed 守卫拦下，此处复位只影响 resume 后的后续退出）。
+	unparkTaskSession(taskId: string): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return null;
+		}
+		if (!isParkedAwaitingDispatchedBackgroundWork(entry.summary)) {
+			return cloneSummary(entry.summary);
+		}
+		const summary = updateSummary(entry, { awaitingDispatchedBackgroundWork: null });
+		entry.suppressAutoRestartOnExit = false;
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
+	// 某任务当前是否 parked + park 元数据（源自内存 entry.summary 的 sidecar）。RVF is-parked 查询用。
+	getAwaitingDispatchedBackgroundWork(taskId: string): {
+		parked: boolean;
+		label: string | null;
+		sinceMs: number | null;
+	} {
+		const entry = this.entries.get(taskId);
+		const sidecar = entry?.summary.awaitingDispatchedBackgroundWork ?? null;
+		if (sidecar == null) {
+			return { parked: false, label: null, sinceMs: null };
+		}
+		return { parked: true, label: sidecar.label ?? null, sinceMs: sidecar.sinceMs };
+	}
+
 	// 手动「立即续跑」：对指定任务（若仍在连接重试）强制注入一次续跑。
 	// 返回实际触发的任务 id（命中且正在重试的）。
 	continueConnectionRetrySessions(taskIds: readonly string[]): string[] {
@@ -791,8 +894,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	hydrateFromRecord(record: Record<string, RuntimeTaskSessionSummary>): void {
 		for (const [taskId, summary] of Object.entries(record)) {
+			// park 是「活进程作用域」的运行时状态：从磁盘重建出来、active 为 null 的会话按定义不是「当前正在 park」。
+			// graceful shutdown 经 listSummaries() 落盘的 summary 可能仍带 park sidecar（onExit 的对称清理未必在 persist
+			// 前 flush），而后续重建（recoverStaleSession / startTaskSession）都走 facet-only 的 buildTerminalFacetPatch，
+			// 其 mergeSummaryWithFacets 的 {...prev,...patch} 合并会保留这个 stale sidecar，使全新 agent run 恒被
+			// isParkedAwaitingDispatchedBackgroundWork 误判为 parked → 真实 Stop 在 to_review 闸被误抑制、漏发一次通知。
+			// 在磁盘重载这一单一 chokepoint 清掉该 optional sidecar，任何内存条目都不再带 stale marker 诞生。
 			this.entries.set(taskId, {
-				summary: cloneSummary(summary),
+				summary: cloneSummary({ ...summary, awaitingDispatchedBackgroundWork: null }),
 				active: null,
 				terminalStateMirror: null,
 				listenerIdCounter: 1,
@@ -1076,6 +1185,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 					this.emitSummary(summary);
 					// 进程退出即结束任何「连接重试」状态，避免顶栏 / 看板把已死的 session 仍标为重连中。
 					this.applyConnectionRetryState(request.taskId, null);
+					// 对称清 park：parked 主 agent 的 PTY 若真的退出（崩溃 / 用户 kill），清掉残留 sidecar，避免一个已死
+					// 会话仍被标为 parked。auto-restart 已在上方 shouldAutoRestart 处被 parked / wasSuppressed 守卫拦下。
+					this.unparkTaskSession(request.taskId);
 					if (shouldAutoRestart) {
 						this.scheduleAutoRestart(currentEntry);
 					}
@@ -1519,17 +1631,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 驱动输入边，兜住「PTY 输出先于 hook 落地、误起 episode」的竞态；并顺带清掉 to_review 后
 			// 残留的 connectionRetry（episode 仍 active 时 endEpisode 会一并 clearConnectionRetryState），
 			// 否则会话再回到 running 会让陈旧值复活成 retrying。
-			const active = entry.active;
-			if (active.outputReactionEngine !== null && active.outputReactionSession !== null) {
-				const ctx = this.buildOutputReactionContext(entry, "");
-				if (ctx !== null) {
-					active.outputReactionEngine.onUserTurnStart(
-						ctx,
-						active.outputReactionSession,
-						this.buildOutputReactionActions(taskId),
-					);
-				}
-			}
+			this.endActiveOutputReactionEpisode(entry, taskId);
 		}
 		return cloneSummary(summary);
 	}
@@ -1785,7 +1887,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private scanForStalls(): void {
 		const currentTime = now();
 		for (const [taskId, entry] of this.entries.entries()) {
-			if (!entry.active || !isSummaryInActiveTurn(entry.summary)) {
+			// parked（已派发后台工作、等自行恢复）跳过卡顿扫描：parked 主 agent 是 {agent,live,null}（active turn）
+			// 且空闲在 prompt，输出基线很快过 stall 阈值，不跳过会误报 [tui-freeze] stall-detected。
+			if (
+				!entry.active ||
+				!isSummaryInActiveTurn(entry.summary) ||
+				isParkedAwaitingDispatchedBackgroundWork(entry.summary)
+			) {
 				entry.lastStallLoggedAt = null;
 				continue;
 			}
@@ -1844,6 +1952,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const wasSuppressed = entry.suppressAutoRestartOnExit;
 		entry.suppressAutoRestartOnExit = false;
 		if (wasSuppressed) {
+			return false;
+		}
+		// parked 会话的 PTY 退出不自动重启：重启会拿原始 prompt 起一个全新 agent，丢掉「我派发了后台、正在等」的
+		// 上下文。park 入口已设 suppressAutoRestartOnExit=true（上面的 wasSuppressed 通常已拦下），此处再读 parked
+		// 作 belt-and-suspenders，覆盖 suppress 因故被提前消费却仍 parked 的情形。
+		if (isParkedAwaitingDispatchedBackgroundWork(entry.summary)) {
 			return false;
 		}
 		if (entry.listeners.size === 0 || entry.restartRequest?.kind !== "task") {

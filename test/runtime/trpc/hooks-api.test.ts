@@ -336,6 +336,102 @@ describe("createHooksApi", () => {
 		});
 	});
 
+	it("parked（已派发后台工作）的裸 Stop：to_review 被闸抑制，绝不广播 ready-for-review", async () => {
+		// 主 agent 非 native dispatch 后 park、结束本轮发裸 Stop。真实 gate 读 getSummary 返回的 parked summary →
+		// to_review 返回 false → 走 no-transition 路径（仅 applyHookActivity）→ broadcastTaskReadyForReview 不可达。
+		const broadcastTaskReadyForReview = vi.fn();
+		const manager = {
+			getSummary: vi.fn(() =>
+				createSummary({ state: "running", awaitingDispatchedBackgroundWork: { sinceMs: 1_000, label: "child-x" } }),
+			),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(),
+			unparkTaskSession: vi.fn(),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview,
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { source: "claude", hookEventName: "Stop" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.transitionToReview).not.toHaveBeenCalled();
+		expect(broadcastTaskReadyForReview).not.toHaveBeenCalled();
+		// 活动元数据仍被记录（no-transition 路径）。
+		expect(manager.applyHookActivity).toHaveBeenCalledWith("task-1", { source: "claude", hookEventName: "Stop" });
+	});
+
+	it("parked + UserPromptSubmit（to_in_progress）：清 park（unparkTaskSession 被调用）", async () => {
+		const manager = {
+			getSummary: vi.fn(() =>
+				createSummary({ state: "running", awaitingDispatchedBackgroundWork: { sinceMs: 1_000 } }),
+			),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(),
+			unparkTaskSession: vi.fn(),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.unparkTaskSession).toHaveBeenCalledWith("task-1");
+	});
+
+	it("parked + PostToolUse（to_in_progress 的中途活动）：**不**清 park（避免结束本轮前误清）", async () => {
+		const manager = {
+			getSummary: vi.fn(() =>
+				createSummary({ state: "running", awaitingDispatchedBackgroundWork: { sinceMs: 1_000 } }),
+			),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(),
+			unparkTaskSession: vi.fn(),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "Read" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.unparkTaskSession).not.toHaveBeenCalled();
+	});
+
 	it("captures a turn checkpoint when transitioning to review", async () => {
 		const transitionedSummary = createSummary({
 			state: "awaiting_review",

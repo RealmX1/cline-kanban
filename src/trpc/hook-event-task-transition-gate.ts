@@ -1,5 +1,9 @@
 import type { RuntimeHookEvent, RuntimeTaskSessionSummary } from "../core/api-contract";
-import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
+import {
+	isAwaitingUserReviewTurn,
+	isParkedAwaitingDispatchedBackgroundWork,
+	resolveSessionFacets,
+} from "../core/session-activity";
 
 // Hook 事件能否触发任务回合转换的判据（Stage 3 余区：legacy `state` 读 → 双轴 facet 真相源）。
 // 从 hooks-api.ts 抽出为纯模块，使单测只 import 纯代码、规避 AGENTS.md 的 Node22 SDK-host 启动隐患，
@@ -21,7 +25,11 @@ export function canTransitionTaskForHookEvent(summary: RuntimeTaskSessionSummary
 		return false;
 	}
 	if (event === "to_review") {
-		return resolveSessionFacets(summary).turnOwner === "agent";
+		// parked（已派发后台工作、等自行恢复）时结构性抑制 to_review：主 agent 此刻是普通 agent 回合
+		// {agent,live,null}，但它发出的裸 Stop 不是「收尾等用户审查」而是「park 等后台」，放行会经
+		// transitionToReview → broadcastTaskReadyForReview 误发 OS 通知。闸在此返回 false → hooks-api 走
+		// no-transition 路径（仅 applyHookActivity）→ 通知分支不可达。判据读 sidecar（非 facet），不绕开 facet 真相源。
+		return resolveSessionFacets(summary).turnOwner === "agent" && !isParkedAwaitingDispatchedBackgroundWork(summary);
 	}
 	return (
 		isAwaitingUserReviewTurn(resolveSessionFacets(summary)) &&

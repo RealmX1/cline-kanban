@@ -41,10 +41,13 @@ import {
 	parseTaskChatMessagesRequest,
 	parseTaskChatReloadRequest,
 	parseTaskChatSendRequest,
+	parseTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
+	parseTaskParkAwaitingDispatchedBackgroundWorkRequest,
 	parseTaskSessionInputRequest,
 	parseTaskSessionStartRequest,
 	parseTaskSessionStopRequest,
 	parseTaskTerminalRefreshRequest,
+	parseTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
 } from "../core/api-validation";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveTaskTitle } from "../core/task-title.js";
@@ -507,6 +510,44 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					dismissedTaskIds: [],
 					error: message,
 				};
+			}
+		},
+		parkTaskAwaitingDispatchedBackgroundWork: async (workspaceScope, input) => {
+			try {
+				const body = parseTaskParkAwaitingDispatchedBackgroundWorkRequest(input);
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const result = terminalManager.parkTaskSessionAwaitingDispatchedBackgroundWork(body.taskId, {
+					label: body.label,
+				});
+				if (!result.ok) {
+					return { ok: false, summary: null, error: result.error };
+				}
+				return { ok: true, summary: result.summary };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return { ok: false, summary: null, error: message };
+			}
+		},
+		unparkTaskAwaitingDispatchedBackgroundWork: async (workspaceScope, input) => {
+			try {
+				const body = parseTaskUnparkAwaitingDispatchedBackgroundWorkRequest(input);
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const summary = terminalManager.unparkTaskSession(body.taskId);
+				return { ok: Boolean(summary), summary };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return { ok: false, summary: null, error: message };
+			}
+		},
+		isTaskParkedAwaitingDispatchedBackgroundWork: async (workspaceScope, input) => {
+			try {
+				const body = parseTaskIsParkedAwaitingDispatchedBackgroundWorkRequest(input);
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const state = terminalManager.getAwaitingDispatchedBackgroundWork(body.taskId);
+				return { ok: true, parked: state.parked, label: state.label, sinceMs: state.sinceMs };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return { ok: false, parked: false, label: null, sinceMs: null, error: message };
 			}
 		},
 		sendTaskSessionInput: async (workspaceScope, input) => {
