@@ -327,6 +327,23 @@ export function isNotifiableUserTurn(facets: SessionFacets): boolean {
 	return isAwaitingUserReviewTurn(facets) && facets.userTurnKind !== "interrupted";
 }
 
+// ── park：「已 park、正在等待已派发后台工作」的唯一被认可判据 ────────────────────────────────
+// 主 agent 以非 native 方式 dispatch 一个后台任务（例：把 reviewer 计划作为独立 Kanban 任务发出）后，结束自己
+// 这一轮去等它完成。Claude 此刻只发一个裸 Stop（它不知道刚才那是子 agent，不发 SubagentStop），裸 Stop 经
+// to_review 会被当成「等人审查」误发 ready-for-review 通知。parked 的主 agent 真相就是普通 running 三元组
+// {turnOwner:"agent", liveness:"live", userTurnKind:null}——它**不是** user 回合，故无法用 facet 表达「在等后台、
+// 别提醒」；改用一个 connectionRetry 式 sidecar `awaitingDispatchedBackgroundWork`（present = parked）表达。
+//
+// 本谓词是 gate（hook-event-task-transition-gate.ts 的 to_review 前置抑制）/ UI（task-card-body 抑制 computing 脉冲、
+// 渲染 parked 徽标）/ RVF（is-parked 查询）/ session-manager（isAgentTurnActive、scanForStalls、shouldAutoRestart
+// 四处空闲守卫）共用的**唯一** park 判据——读 sidecar 而非 facet（facet 仍是普通 agent 回合），故不绕开任何 facet
+// 真相源。纯函数、读单字段，Node-dep-free（可被 web-ui 经 @runtime-session-activity 直接 import）。
+export function isParkedAwaitingDispatchedBackgroundWork(
+	summary: RuntimeTaskSessionSummary | null | undefined,
+): boolean {
+	return summary != null && summary.awaitingDispatchedBackgroundWork != null;
+}
+
 // ── 展示叠加：把存储基值 liveness 的 "live" 按新鲜度细分为 computing / quiet ──────────────
 // 双轴模型里 computing（仍在产出）/ quiet（活着但静默）是「随时间漂移的派生叠加」，故意不进存储/
 // 不进 superRefine 枚举（summary 只在事件时广播、无周期 tick，存它一写即 stale）。本函数即计划所称

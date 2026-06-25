@@ -79,6 +79,10 @@ import type {
 	RuntimeTaskChatReloadResponse,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
+	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
+	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponse,
+	RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
+	RuntimeTaskParkAwaitingDispatchedBackgroundWorkResponse,
 	RuntimeTaskSessionInputRequest,
 	RuntimeTaskSessionInputResponse,
 	RuntimeTaskSessionStartRequest,
@@ -87,6 +91,8 @@ import type {
 	RuntimeTaskSessionStopResponse,
 	RuntimeTaskTerminalRefreshRequest,
 	RuntimeTaskTerminalRefreshResponse,
+	RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
+	RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkResponse,
 	RuntimeTaskWorkspaceInfoRequest,
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeUpdateStatusResponse,
@@ -176,6 +182,10 @@ import {
 	runtimeTaskChatReloadResponseSchema,
 	runtimeTaskChatSendRequestSchema,
 	runtimeTaskChatSendResponseSchema,
+	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema,
+	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema,
+	runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema,
+	runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema,
 	runtimeTaskSessionInputRequestSchema,
 	runtimeTaskSessionInputResponseSchema,
 	runtimeTaskSessionStartRequestSchema,
@@ -184,6 +194,8 @@ import {
 	runtimeTaskSessionStopResponseSchema,
 	runtimeTaskTerminalRefreshRequestSchema,
 	runtimeTaskTerminalRefreshResponseSchema,
+	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema,
+	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkResponseSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
 	runtimeTaskWorkspaceInfoResponseSchema,
 	runtimeUpdateStatusResponseSchema,
@@ -242,6 +254,18 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeDismissConnectionRetrySessionsRequest,
 		) => Promise<RuntimeDismissConnectionRetrySessionsResponse>;
+		parkTaskAwaitingDispatchedBackgroundWork: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
+		) => Promise<RuntimeTaskParkAwaitingDispatchedBackgroundWorkResponse>;
+		unparkTaskAwaitingDispatchedBackgroundWork: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
+		) => Promise<RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkResponse>;
+		isTaskParkedAwaitingDispatchedBackgroundWork: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
+		) => Promise<RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponse>;
 		refreshTaskTerminal: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskTerminalRefreshRequest,
@@ -502,6 +526,24 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeDismissConnectionRetrySessionsResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.dismissConnectionRetrySessions(ctx.workspaceScope, input);
+			}),
+		parkTaskAwaitingDispatchedBackgroundWork: workspaceProcedure
+			.input(runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema)
+			.output(runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.parkTaskAwaitingDispatchedBackgroundWork(ctx.workspaceScope, input);
+			}),
+		unparkTaskAwaitingDispatchedBackgroundWork: workspaceProcedure
+			.input(runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema)
+			.output(runtimeTaskUnparkAwaitingDispatchedBackgroundWorkResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.unparkTaskAwaitingDispatchedBackgroundWork(ctx.workspaceScope, input);
+			}),
+		isTaskParkedAwaitingDispatchedBackgroundWork: workspaceProcedure
+			.input(runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema)
+			.output(runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.isTaskParkedAwaitingDispatchedBackgroundWork(ctx.workspaceScope, input);
 			}),
 		refreshTaskTerminal: workspaceProcedure
 			.input(runtimeTaskTerminalRefreshRequestSchema)

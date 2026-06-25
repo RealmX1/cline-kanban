@@ -149,3 +149,28 @@ describe("canTransitionTaskForHookEvent (legacy state → facet 行为保持)", 
 		expect(canTransitionTaskForHookEvent(summary, "to_review")).toBe(false);
 	});
 });
+
+// 非 native dispatch park：主 agent 以非 native 方式派发后台任务、结束本轮等其完成时发出的裸 Stop 不应被当成
+// 「收尾等用户审查」。park 的唯一作用就是让这个单一 to_review 闸结构性抑制误发的 ready-for-review 通知。
+describe("canTransitionTaskForHookEvent — parked（已派发后台工作）抑制 to_review", () => {
+	const agentTurnSummary = (overrides: Partial<RuntimeTaskSessionSummary> = {}) =>
+		makeSummary({ state: "running", pid: 1234, ...overrides });
+
+	it("parked 的 agent 回合：to_review 被抑制（返回 false）", () => {
+		const parked = agentTurnSummary({ awaitingDispatchedBackgroundWork: { sinceMs: 1_000 } });
+		expect(canTransitionTaskForHookEvent(parked, "to_review")).toBe(false);
+	});
+
+	it("未 parked 的 agent 回合：to_review 照旧放行（回归保护）", () => {
+		expect(canTransitionTaskForHookEvent(agentTurnSummary(), "to_review")).toBe(true);
+		expect(
+			canTransitionTaskForHookEvent(agentTurnSummary({ awaitingDispatchedBackgroundWork: null }), "to_review"),
+		).toBe(true);
+	});
+
+	it("parked 带 label 同样抑制 to_review，且不改 activity（恒 false）", () => {
+		const parked = agentTurnSummary({ awaitingDispatchedBackgroundWork: { sinceMs: 1_000, label: "child-x" } });
+		expect(canTransitionTaskForHookEvent(parked, "to_review")).toBe(false);
+		expect(canTransitionTaskForHookEvent(parked, "activity")).toBe(false);
+	});
+});

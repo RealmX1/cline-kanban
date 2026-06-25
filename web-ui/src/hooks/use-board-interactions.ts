@@ -2,6 +2,7 @@ import type { DropResult } from "@hello-pangea/dnd";
 import {
 	isAgentActivelyProducingOutput,
 	isAwaitingUserReviewTurn,
+	isParkedAwaitingDispatchedBackgroundWork,
 	resolveSessionFacets,
 } from "@runtime-session-activity";
 import type { Dispatch, SetStateAction } from "react";
@@ -482,11 +483,14 @@ export function useBoardInteractions({
 					continue;
 				}
 				// Review 列：维持原行为——agent 回合会话不应停在 review（review 是等人审查回合的
-				// 自动落位区），一律打回 In Progress。
+				// 自动落位区），一律打回 In Progress。**例外（强制）**：parked（已派发后台工作、等自行恢复）
+				// 的会话虽是 agent 回合，但被外部编排有意放在 review 等结果——不可打回，否则会被反复 bounce / 抖动。
 				// Validation 列：收窄判据——仅当 agent 此刻仍在持续产出输出时才打回；空闲 / 已退出
 				// 却仍处 agent 回合的会话允许停留在 Validation（见 isAgentActivelyProducingOutput 注释）。
 				const shouldBounceRunningToInProgress =
-					(facets.turnOwner === "agent" && columnId === "review") ||
+					(facets.turnOwner === "agent" &&
+						columnId === "review" &&
+						!isParkedAwaitingDispatchedBackgroundWork(summary)) ||
 					(columnId === "validation" && isAgentActivelyProducingOutput(summary, nowMs));
 				if (shouldBounceRunningToInProgress) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {

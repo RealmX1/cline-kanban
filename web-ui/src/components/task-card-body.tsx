@@ -4,7 +4,11 @@ import type {
 	DraggableStyle,
 } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
-import { deriveDisplayLiveness, resolveSessionFacets } from "@runtime-session-activity";
+import {
+	deriveDisplayLiveness,
+	isParkedAwaitingDispatchedBackgroundWork,
+	resolveSessionFacets,
+} from "@runtime-session-activity";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
 import {
 	AlertCircle,
@@ -14,6 +18,7 @@ import {
 	ClipboardCheck,
 	FileText,
 	GitBranch,
+	Hourglass,
 	Pencil,
 	Play,
 	RotateCcw,
@@ -178,15 +183,19 @@ export function TaskCardBody({
 	// （deriveDisplayLiveness，见 session-activity.ts），summary 静默期不再广播，故需本地 tick 让卡片在跨过
 	// 静默边界后停止脉动；tick 仅在「agent 回合 + liveness=live」时开启，空闲 / 待审 / 已结束卡不计时。
 	const sessionFacets = sessionSummary ? resolveSessionFacets(sessionSummary) : null;
+	// parked（已派发后台工作、等自行恢复）：纯展示信号——它是普通 agent 回合 {agent,live,null}，但**不在算**，
+	// 是在等自己派发的后台工作。读 sidecar（非 facet，deriveDisplayLiveness 不动），抑制 computing 脉冲并渲染
+	// parked 徽标，让卡片不再误显示「转圈在算」。
+	const isParkedAwaitingBackgroundWork = isParkedAwaitingDispatchedBackgroundWork(sessionSummary);
 	const isLiveAgentTurn = sessionFacets?.turnOwner === "agent" && sessionFacets.liveness === "live";
 	// channel B（distinction ②）：终端 agent 进程已退、任务仍等你审 → liveness==="exited"（Cline SDK 在
 	// 进程内运行、恒 live，永不进此分支）。卡片状态点改「空心环」表达「进程已退但仍待你处理」，与实心 live
 	// 点区分；点的颜色仍随 channel C（review绿/needs_input金/error红）。pulse 仅 agent 回合开启、与本互斥。
 	const isExitedAwaiting = sessionFacets?.liveness === "exited";
 	const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
-	useInterval(() => setActivityNowMs(Date.now()), isLiveAgentTurn ? 1000 : null);
+	useInterval(() => setActivityNowMs(Date.now()), isLiveAgentTurn && !isParkedAwaitingBackgroundWork ? 1000 : null);
 	const isAgentComputing =
-		isLiveAgentTurn && sessionSummary != null && sessionFacets != null
+		isLiveAgentTurn && !isParkedAwaitingBackgroundWork && sessionSummary != null && sessionFacets != null
 			? deriveDisplayLiveness(sessionFacets, sessionSummary.lastOutputAt, activityNowMs) === "computing"
 			: false;
 	const displayTitle = useMemo(
@@ -661,6 +670,18 @@ export function TaskCardBody({
 						>
 							<Bot size={12} className="shrink-0" />
 							<span className="truncate">{taskAgentSettingsLabel}</span>
+						</span>
+					</div>
+				) : null}
+				{!isTrashCard && isParkedAwaitingBackgroundWork ? (
+					<div className="mt-1">
+						<span className="inline-flex max-w-full items-center gap-1 rounded-md border border-status-purple/30 bg-status-purple/10 px-1.5 py-0.5 text-xs text-status-purple">
+							<Hourglass size={12} className="shrink-0" />
+							<span className="truncate">
+								{sessionSummary?.awaitingDispatchedBackgroundWork?.label
+									? `Parked — awaiting ${sessionSummary.awaitingDispatchedBackgroundWork.label}`
+									: "Parked — awaiting dispatched background work"}
+							</span>
 						</span>
 					</div>
 				) : null}

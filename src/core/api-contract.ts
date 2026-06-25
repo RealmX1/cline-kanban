@@ -342,6 +342,27 @@ export const runtimeTaskConnectionRetrySchema = z.object({
 });
 export type RuntimeTaskConnectionRetry = z.infer<typeof runtimeTaskConnectionRetrySchema>;
 
+// 主 agent 以「非 native」方式 dispatch 了一个后台任务（例：把 reviewer 计划作为独立 Kanban 任务发出），
+// 并结束自己这一轮去等它完成时，由外部编排（RVF / 自研 Kanban）置上的「已 park、正在等待已派发后台工作」
+// sidecar。present = parked：此刻主 agent 停在空闲提示符，但它**不是**在等用户审查，而是在等自己派发的后台
+// 工作回灌结果、会被外部编排自行恢复（submitTaskChatInputWhenReady followup → UserPromptSubmit）。
+//   - 仅内存态（与 connectionRetry 同，sessions.json 仅在 shutdown 落盘）：A 无 watcher、resume 在外部，
+//     park 的唯一作用是让「主 agent 结束本轮那一刻同步读到的内存 summary」带上此标记，从而在单一 to_review
+//     转换闸前置抑制误发的 ready-for-review 通知。崩溃前无进程即无 Stop，故无需崩溃持久化。
+//   - 真相判据见 src/core/session-activity.ts 的 isParkedAwaitingDispatchedBackgroundWork（gate / UI / RVF /
+//     session-manager 共用的唯一谓词）；置 / 清标经 TerminalSessionManager 的 park / unpark 走 updateSummary
+//     metadata-only 漏斗，不携带 facet / state，故 {turnOwner:"agent", liveness:"live", userTurnKind:null} 三元组
+//     与下方 superRefine 护栏从不被触碰（parked 主 agent 的真相就是普通 running 三元组）。
+export const runtimeTaskAwaitingDispatchedBackgroundWorkSchema = z.object({
+	// park 起始时刻（epoch ms）。用于 UI 展示与（自研 Kanban 继承时）潜在的 park 超时兜底。
+	sinceMs: z.number(),
+	// 可选的人类可读标签（例：被派发的子任务 id / 简述），仅用于 UI 与诊断。
+	label: z.string().optional(),
+});
+export type RuntimeTaskAwaitingDispatchedBackgroundWork = z.infer<
+	typeof runtimeTaskAwaitingDispatchedBackgroundWorkSchema
+>;
+
 const runtimeTaskSessionSummaryObjectSchema = z.object({
 	taskId: z.string(),
 	// Stage 4 全写侧反转：`state` 降为派生投影 → 输入可选（facet-only 写不带 state）；末位 .transform
@@ -368,6 +389,10 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	connectionRetry: runtimeTaskConnectionRetrySchema.nullable().optional(),
+	// 「已 park、正在等待已派发后台工作」sidecar（加性、nullable + optional，仅内存态、随 connectionRetry 同侧）。
+	// present = parked；判据 / 时序见 runtimeTaskAwaitingDispatchedBackgroundWorkSchema 与 session-activity.ts
+	// 的 isParkedAwaitingDispatchedBackgroundWork。不参与 facet / superRefine（与 connectionRetry-only 写同形）。
+	awaitingDispatchedBackgroundWork: runtimeTaskAwaitingDispatchedBackgroundWorkSchema.nullable().optional(),
 	// 双轴 facet（加性、可选）+ per-session schema 版本。三 facet 共生（要么全置、要么全缺）：
 	// 全缺=未迁移的旧盘数据（Stage 2 读时回填）；全置=经 applySessionFacets 漏斗写入、组合受
 	// 下方 superRefine 护栏约束。schemaVersion 为 per-session 可选字段（不引入文件级包裹、无 flag day）。
@@ -1183,6 +1208,63 @@ export const runtimeTaskSessionStopResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeTaskSessionStopResponse = z.infer<typeof runtimeTaskSessionStopResponseSchema>;
+
+// 外部编排（RVF / 自研 Kanban）对一个终端 agent 任务「置 park」：标记它正在等待自己以非 native 方式派发的
+// 后台工作完成、会被外部恢复，从而在主 agent 结束本轮发出裸 Stop 时结构性抑制误发的 ready-for-review 通知。
+// label 可选，仅用于 UI 与诊断（例：被派发的子任务 id）。编排层须 await 本调用 OK 再让 agent 结束这一轮。
+export const runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema = z.object({
+	taskId: z.string(),
+	label: z.string().optional(),
+});
+export type RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest = z.infer<
+	typeof runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema
+>;
+
+export const runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema = z.object({
+	ok: z.boolean(),
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskParkAwaitingDispatchedBackgroundWorkResponse = z.infer<
+	typeof runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema
+>;
+
+// 显式清 park（兜底）：用于编排层不走 followup 的恢复路径手动 unpark。幂等：未 parked 即 no-op success。
+export const runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema = z.object({
+	taskId: z.string(),
+});
+export type RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest = z.infer<
+	typeof runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema
+>;
+
+export const runtimeTaskUnparkAwaitingDispatchedBackgroundWorkResponseSchema = z.object({
+	ok: z.boolean(),
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkResponse = z.infer<
+	typeof runtimeTaskUnparkAwaitingDispatchedBackgroundWorkResponseSchema
+>;
+
+// 查询某任务当前是否 parked（源自内存 getSummary 的 sidecar）。RVF stop-hook 先查 Kanban、查询出错才回落
+// 旧文件启发式，Kanban 在分歧时权威。parked=false 时 label / sinceMs 为 null。
+export const runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema = z.object({
+	taskId: z.string(),
+});
+export type RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest = z.infer<
+	typeof runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema
+>;
+
+export const runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema = z.object({
+	ok: z.boolean(),
+	parked: z.boolean(),
+	label: z.string().nullable(),
+	sinceMs: z.number().nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponse = z.infer<
+	typeof runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema
+>;
 
 // 手动触发：对一组正处于「连接重试」状态的终端 agent 立即注入一次续跑指令
 // （不等待退避计时器）。单任务「立即续跑」传单元素数组；「全部立即续跑」传当前

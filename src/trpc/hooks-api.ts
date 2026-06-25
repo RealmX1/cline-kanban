@@ -5,7 +5,7 @@ import type {
 } from "../core/api-contract";
 import { parseHookIngestRequest } from "../core/api-validation";
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
-import { resolveSessionFacets } from "../core/session-activity";
+import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
 import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -58,6 +58,19 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						ok: false,
 						error: `Task "${taskId}" not found in workspace "${workspaceId}"`,
 					} satisfies RuntimeHookIngestResponse;
+				}
+
+				// parked 会话收到「用户重新提交了一个 prompt」（UserPromptSubmit → to_in_progress）即视为恢复：清 park。
+				// 仅认 UserPromptSubmit（真·新一轮提交），不认 PostToolUse / PostToolUseFailure 等同样映射到 to_in_progress
+				// 的中途活动——否则 parked 父在结束本轮前的任意工具调用会把 park 误清、随后的裸 Stop 又误报。
+				// submitTaskChatInputWhenReady 已覆盖 RVF 程序化 resume；本路径额外覆盖人工在终端手敲 followup 的恢复
+				// （hookEventName 由 `kanban hooks` CLI 从 hook stdin 的 hook_event_name 抽出，见 normalizeHookMetadata）。
+				if (
+					event === "to_in_progress" &&
+					isParkedAwaitingDispatchedBackgroundWork(summary) &&
+					body.metadata?.hookEventName?.trim().toLowerCase() === "userpromptsubmit"
+				) {
+					manager.unparkTaskSession(taskId);
 				}
 
 				if (!canTransitionTaskForHookEvent(summary, event)) {

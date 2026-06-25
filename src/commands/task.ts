@@ -838,6 +838,78 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 	};
 }
 
+// 「park」：标记一个已 dispatch 后台工作、正等其完成的 in-progress 终端 agent 任务，使它结束本轮发出的裸 Stop
+// 不再被误判为「等用户审查」而误发通知。供外部编排（RVF / 自研 Kanban）在让 agent 结束这一轮**之前** await。
+async function parkTask(input: {
+	cwd: string;
+	taskId: string;
+	label?: string;
+	projectPath?: string;
+}): Promise<JsonRecord> {
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const label = input.label?.trim() || undefined;
+	const response = await runtimeClient.runtime.parkTaskAwaitingDispatchedBackgroundWork.mutate({
+		taskId: input.taskId,
+		...(label ? { label } : {}),
+	});
+	if (!response.ok) {
+		throw new Error(response.error ?? `Could not park task "${input.taskId}".`);
+	}
+	return {
+		ok: true,
+		workspacePath: workspace.repoPath,
+		taskId: input.taskId,
+		parked: true,
+		...(label ? { label } : {}),
+	};
+}
+
+// 「unpark」：显式清 park（兜底，供不走 followup 的恢复路径）。幂等——未 parked 也成功返回。
+async function unparkTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const response = await runtimeClient.runtime.unparkTaskAwaitingDispatchedBackgroundWork.mutate({
+		taskId: input.taskId,
+	});
+	if (!response.ok) {
+		throw new Error(response.error ?? `Could not unpark task "${input.taskId}".`);
+	}
+	return {
+		ok: true,
+		workspacePath: workspace.repoPath,
+		taskId: input.taskId,
+		parked: false,
+	};
+}
+
+// 「is-parked」：查询某任务当前是否 parked（源自运行时内存 getSummary 的 sidecar）。RVF stop-hook 先查 Kanban、
+// 查询出错才回落旧文件启发式，Kanban 在分歧时权威。
+async function isTaskParkedCommand(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const response = await runtimeClient.runtime.isTaskParkedAwaitingDispatchedBackgroundWork.query({
+		taskId: input.taskId,
+	});
+	if (!response.ok) {
+		throw new Error(response.error ?? `Could not query park state for task "${input.taskId}".`);
+	}
+	return {
+		ok: true,
+		workspacePath: workspace.repoPath,
+		taskId: input.taskId,
+		parked: response.parked,
+		label: response.label,
+		sinceMs: response.sinceMs,
+	};
+}
+
 interface TrashTaskExecutionResult {
 	task: JsonRecord;
 	taskId: string;
@@ -1727,6 +1799,58 @@ export function registerTaskCommand(program: Command): void {
 			await runTaskCommand(
 				async () =>
 					await startTask({
+						cwd: process.cwd(),
+						taskId: options.taskId,
+						projectPath: options.projectPath,
+					}),
+			);
+		});
+
+	task
+		.command("park")
+		.description(
+			"Mark a task as awaiting dispatched background work so its next bare Stop does not fire a ready-for-review notification. Await this OK before letting the agent end its turn.",
+		)
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--label <text>", "Optional human-readable label (e.g. the dispatched child task id).")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { taskId: string; label?: string; projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await parkTask({
+						cwd: process.cwd(),
+						taskId: options.taskId,
+						label: options.label,
+						projectPath: options.projectPath,
+					}),
+			);
+		});
+
+	task
+		.command("unpark")
+		.description("Explicitly clear a task's awaiting-dispatched-background-work park marker (idempotent).")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { taskId: string; projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await unparkTask({
+						cwd: process.cwd(),
+						taskId: options.taskId,
+						projectPath: options.projectPath,
+					}),
+			);
+		});
+
+	task
+		.command("is-parked")
+		.description("Report whether a task is currently parked awaiting dispatched background work.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { taskId: string; projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await isTaskParkedCommand({
 						cwd: process.cwd(),
 						taskId: options.taskId,
 						projectPath: options.projectPath,
