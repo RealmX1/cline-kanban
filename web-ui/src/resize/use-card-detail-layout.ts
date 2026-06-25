@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 
+import { DETAIL_TERMINAL_WIDTH_PREFERENCE } from "@/resize/detail-terminal-panel-width";
 import { useLayoutResetEffect } from "@/resize/layout-customizations";
 import { clampBetween } from "@/resize/resize-persistence";
 import {
@@ -8,12 +9,16 @@ import {
 	persistResizePreference,
 	type ResizeNumberPreference,
 } from "@/resize/resize-preferences";
-import { APPROX_TERMINAL_CELL_WIDTH_PX, TASK_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
-export const DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX = TASK_SESSION_TERMINAL_COLS * APPROX_TERMINAL_CELL_WIDTH_PX + 40;
-export const MIN_DETAIL_TERMINAL_PANEL_WIDTH_PX = 320;
-export const MAX_DETAIL_TERMINAL_PANEL_WIDTH_PX = 1400;
+// The detail terminal panel width descriptor / bounds now live in their own
+// leaf module so non-React call sites can read them; re-exported here to keep
+// existing `@/resize/use-card-detail-layout` importers unbroken.
+export {
+	DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX,
+	MAX_DETAIL_TERMINAL_PANEL_WIDTH_PX,
+	MIN_DETAIL_TERMINAL_PANEL_WIDTH_PX,
+} from "@/resize/detail-terminal-panel-width";
 export const MIN_DETAIL_DIFF_PANEL_WIDTH_PX = 360;
 
 const TASK_CARDS_RATIO_PREFERENCE: ResizeNumberPreference = {
@@ -26,13 +31,6 @@ const AGENT_RATIO_PREFERENCE: ResizeNumberPreference = {
 	key: LocalStorageKey.DetailAgentPanelRatio,
 	defaultValue: 0.4,
 	normalize: (value) => clampBetween(value, 0.15, 0.75),
-};
-
-const DETAIL_TERMINAL_WIDTH_PREFERENCE: ResizeNumberPreference = {
-	key: LocalStorageKey.DetailTerminalPanelWidth,
-	defaultValue: DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX,
-	normalize: (value) =>
-		clampBetween(value, MIN_DETAIL_TERMINAL_PANEL_WIDTH_PX, MAX_DETAIL_TERMINAL_PANEL_WIDTH_PX, true),
 };
 
 const COLLAPSED_DIFF_FILE_TREE_RATIO_PREFERENCE: ResizeNumberPreference = {

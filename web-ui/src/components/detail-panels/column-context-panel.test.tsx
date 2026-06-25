@@ -157,6 +157,45 @@ describe("ColumnContextPanel", () => {
 		});
 	});
 
+	it("renders the create-task button at the top of the scroll list, above every stage section", async () => {
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: [createCard("task-1", "Backlog task")] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [] },
+			{ id: "trash", title: "Done", cards: [] },
+		];
+		const onCreateTask = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-1")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+					onCreateTask={onCreateTask}
+				/>,
+			);
+		});
+
+		const createButton = container.querySelector<HTMLButtonElement>('button[aria-label="Create task"]');
+		expect(createButton).toBeInstanceOf(HTMLButtonElement);
+		// 直接挂在 scrollport 上（不再嵌在 backlog 的 stage section / Droppable 里）。
+		const scrollport = container.querySelector(".kb-detail-task-list-scroll");
+		expect(createButton?.parentElement).toBe(scrollport);
+		// 文档顺序上位于所有任务卡之前 = 列表最顶端。
+		const firstCard = container.querySelector("[data-task-id]");
+		expect(firstCard).not.toBeNull();
+		if (createButton && firstCard) {
+			expect(createButton.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		}
+
+		await act(async () => {
+			createButton?.click();
+		});
+		expect(onCreateTask).toHaveBeenCalledTimes(1);
+	});
+
 	it("initially renders only the first 10 cards in a column and reveals more on demand", async () => {
 		const backlogCards = Array.from({ length: 15 }, (_, index) =>
 			createCard(`task-${index + 1}`, `Backlog task ${index + 1}`),

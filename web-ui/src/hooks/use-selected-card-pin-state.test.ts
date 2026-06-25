@@ -95,7 +95,7 @@ describe("useSelectedCardPinState", () => {
 		});
 	};
 
-	it("is hidden while the selected card overlaps the viewport", async () => {
+	it("is hidden while the selected card sits fully inside the viewport", async () => {
 		cardRect = { top: 10, bottom: 90, width: 200, height: 80 };
 		await renderHarness();
 		expect(readPinState()).toBe("hidden");
@@ -109,6 +109,19 @@ describe("useSelectedCardPinState", () => {
 
 	it("pins to the bottom when the card is fully below the viewport", async () => {
 		cardRect = { top: 560, bottom: 640, width: 200, height: 80 };
+		await renderHarness();
+		expect(readPinState()).toBe("pinBottom");
+	});
+
+	// sticky 语义关键：前沿一触视口边即钉（旧「完全越界才钉」语义下这两例都会是 hidden）。
+	it("pins to the top as soon as the card's top edge crosses the viewport top (straddling)", async () => {
+		cardRect = { top: -10, bottom: 70, width: 200, height: 80 };
+		await renderHarness();
+		expect(readPinState()).toBe("pinTop");
+	});
+
+	it("pins to the bottom as soon as the card's bottom edge crosses the viewport bottom (straddling)", async () => {
+		cardRect = { top: 460, bottom: 540, width: 200, height: 80 };
 		await renderHarness();
 		expect(readPinState()).toBe("pinBottom");
 	});

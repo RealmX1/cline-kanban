@@ -3,14 +3,14 @@ import { useEffect, useState } from "react";
 
 /**
  * Focus View 左侧列表中「被选中卡」相对滚动视口的钉住位置：
- * - `hidden`：选中卡（含其 CSS sticky 吸附位）还有任一像素在视口内 → 无需浮动钉住条，
- *   交给列内 CSS sticky 处理。
- * - `pinTop`：选中卡整体已滚出视口「上」沿（连同其所在 stage 一起被滚过）。
- * - `pinBottom`：选中卡整体在视口「下」沿之外。
+ * - `hidden`：选中卡整体仍完整落在视口内（上下两沿都不触边）→ 无需浮动钉住条。
+ * - `pinTop`：选中卡上沿已触/越过视口「上」沿（向下滚动时）→ 浮动条钉在顶沿。
+ * - `pinBottom`：选中卡下沿已触/越过视口「下」沿（向上滚动时）→ 浮动条钉在底沿。
  *
- * CSS sticky 只能在卡所属 stage 的 containing block 内吸附；一旦滚过该 stage 进入下一个 stage，
- * 选中卡就脱离 sticky 范围而消失。本 hook 侦测「整卡完全越界」并判定顶/底沿，交由浮动钉住条
- * 接管跨 stage 的持续可见，与列内 CSS sticky 无缝衔接（任一像素可见即 `hidden`）。
+ * 采 **sticky 语义**（前沿一碰视口边即钉，而非整卡完全越界才钉）：浮动钉住条是选中卡的
+ * 唯一钉住机制，既接管「选中卡自己 stage 内」的滚动，也接管「滚进别的 stage」的跨 stage 持续可见。
+ * 前沿一触边浮动条立即在该边浮现（含 stage 卡头 + 完整卡），故无「列内 sticky 切浮动条」的
+ * 「先消失再重现」接管缝，且 stage 卡头始终随行。
  *
  * 实现要点：状态以**实时几何**（`getBoundingClientRect`）为唯一真相，而非
  * `IntersectionObserver` 的 `isIntersecting`。原因是 IO 仅在「相交比例跨越阈值」时回调——当滚动
@@ -76,15 +76,17 @@ export function useSelectedCardPinState({
 				return;
 			}
 			const rootRect = root.getBoundingClientRect();
-			if (cardRect.bottom <= rootRect.top) {
+			// sticky 语义：选中卡任一前沿触/越视口对应边沿即钉到该边（与浮动条 overlay 边沿一致）。
+			// 卡比视口更高时上沿先判定（top<=top 先命中）→ 默认 pinTop，符合向下滚动直觉。
+			if (cardRect.top <= rootRect.top) {
 				setPinState("pinTop");
 				return;
 			}
-			if (cardRect.top >= rootRect.bottom) {
+			if (cardRect.bottom >= rootRect.bottom) {
 				setPinState("pinBottom");
 				return;
 			}
-			// 与视口仍有交叠（含 sticky 吸附位）→ 列内 CSS sticky 保证可见，浮动条让位。
+			// 整卡仍完整落在视口内（两沿都不触）→ 无需浮动条。
 			setPinState("hidden");
 		};
 

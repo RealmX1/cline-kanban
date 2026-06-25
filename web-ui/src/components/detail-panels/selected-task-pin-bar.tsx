@@ -25,6 +25,7 @@ export function SelectedTaskPinBar({
 	selection,
 	pinState,
 	scrollRootRef,
+	pinBarRootRef,
 	taskSessions,
 	onStartTask,
 	onMoveToTrashTask,
@@ -43,6 +44,8 @@ export function SelectedTaskPinBar({
 	selection: CardSelection;
 	pinState: Exclude<SelectedCardPinState, "hidden">;
 	scrollRootRef: RefObject<HTMLElement | null>;
+	/** 浮动条根元素（`.kb-detail-pin-bar`）的 ref，供面板 ResizeObserver 测高以让位原生 sticky 卡头。 */
+	pinBarRootRef?: RefObject<HTMLDivElement>;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	onStartTask?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
@@ -98,6 +101,7 @@ export function SelectedTaskPinBar({
 
 	return (
 		<div
+			ref={pinBarRootRef}
 			className="kb-detail-pin-bar"
 			data-testid="selected-task-pin-bar"
 			data-pin={pinState === "pinTop" ? "top" : "bottom"}

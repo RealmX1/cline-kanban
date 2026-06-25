@@ -9,7 +9,7 @@ import { StageHeaderLabel } from "@/components/detail-panels/stage-header-label"
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { Button } from "@/components/ui/button";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
-import { useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
+import { type SelectedCardPinState, useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { findCardColumnId, isCardDropDisabled } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumn, BoardColumnId, CardSelection } from "@/types";
@@ -22,9 +22,9 @@ function ColumnSection({
 	column,
 	selectedCardId,
 	defaultOpen,
+	pinState,
 	onCardClick,
 	taskSessions,
-	onCreateTask,
 	onStartTask,
 	onStartAllTasks,
 	onClearTrash,
@@ -49,9 +49,10 @@ function ColumnSection({
 	column: BoardColumn;
 	selectedCardId: string;
 	defaultOpen: boolean;
+	/** 选中卡当前的钉住状态：用于「含选中卡 section」在 pinTop 时去重原生卡头（见下方 headerSticky）。 */
+	pinState: SelectedCardPinState;
 	onCardClick: (card: BoardCardModel) => void;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
-	onCreateTask?: () => void;
 	onStartTask?: (taskId: string) => void;
 	onStartAllTasks?: () => void;
 	onClearTrash?: () => void;
@@ -74,7 +75,6 @@ function ColumnSection({
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
 	const [open, setOpen] = useState(defaultOpen);
-	const canCreate = column.id === "backlog" && onCreateTask;
 	const canStartAllTasks = column.id === "backlog" && onStartAllTasks;
 	const canClearTrash = column.id === "trash" && onClearTrash;
 	const latestTrashCard =
@@ -103,6 +103,13 @@ function ColumnSection({
 		setOpen(true);
 	}, [column.cards, selectedCardId]);
 
+	// 原生 sticky 区段卡头（解决「滚过在视 stage 卡头后分不清当前所属 stage」）：浏览器自动 swap、零 JS 抖动。
+	// 去重：含选中卡的 section 在 pinTop 时，其原生卡头与浮动条里的卡头重复 → 该 section 卡头改非 sticky；
+	// 其余情形（pinBottom / hidden，或不含选中卡的 section）照常 sticky，充当「当前在视 stage 卡头」。
+	// top 引用 scrollport 上由面板写的 --kb-selected-pin-top：pinTop 时 = 浮动条高度，使卡头停在浮动条下方。
+	const containsSelectedCard = selectedIndex >= 0;
+	const headerSticky = !(containsSelectedCard && pinState === "pinTop");
+
 	return (
 		<div className="bg-surface-1 rounded-lg shrink-0 border border-border">
 			<div
@@ -110,6 +117,10 @@ function ColumnSection({
 					display: "flex",
 					alignItems: "center",
 					height: 40,
+					position: headerSticky ? "sticky" : "static",
+					top: "var(--kb-selected-pin-top, 0px)",
+					zIndex: 4,
+					background: "var(--color-surface-1)",
 				}}
 			>
 				<button
@@ -194,22 +205,6 @@ function ColumnSection({
 									padding: 8,
 								}}
 							>
-								{canCreate ? (
-									<Button
-										icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
-										aria-label="Create task"
-										fill
-										onClick={onCreateTask}
-										style={{ marginBottom: 8 }}
-									>
-										<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-											<span>Create task</span>
-											<span aria-hidden className="text-text-secondary">
-												(c)
-											</span>
-										</span>
-									</Button>
-								) : null}
 								{(() => {
 									const items: ReactNode[] = [];
 									let draggableIndex = 0;
@@ -332,6 +327,7 @@ export function ColumnContextPanel({
 }): React.ReactElement {
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+	const pinBarRootRef = useRef<HTMLDivElement | null>(null);
 
 	const handleBeforeCapture = useCallback(
 		(start: BeforeCapture) => {
@@ -348,13 +344,44 @@ export function ColumnContextPanel({
 		[onTaskDragEnd],
 	);
 
-	// 选中卡滚过其所在 stage、进入下一个 stage 后，列内 CSS sticky 失效；用 IO 侦测「整卡完全越界」，
-	// 由浮动钉住条接管跨 stage 持续可见。拖拽进行中真实卡会被 portal 到 body，故拖拽期暂停侦测。
+	// 选中卡是左列唯一钉住机制：前沿一触视口边即由浮动钉住条接管（stage 内 + 跨 stage 持续可见）。
+	// 拖拽进行中真实卡会被 portal 到 body 致目标丢失，故拖拽期暂停侦测、归 hidden。
 	const selectedCardPinState = useSelectedCardPinState({
 		selectedTaskId: selection.card.id,
 		scrollRootRef: scrollContainerRef,
 		enabled: activeDragSourceColumnId == null,
 	});
+
+	// 浮动条钉顶（pinTop）时，原生 sticky 区段卡头须停在浮动条「下方」，否则被不透明浮动条（z-5）盖住。
+	// 实测浮动条高度写入 scrollport 的 --kb-selected-pin-top（区段卡头 top 引用它）；pinBottom/hidden
+	// 时浮动条不在顶沿、offset 归 0，卡头照常停在 top:0。用 ResizeObserver 跟随浮动条高度变化（卡体展开等）。
+	useEffect(() => {
+		const scrollContainer = scrollContainerRef.current;
+		if (!scrollContainer) {
+			return;
+		}
+		if (selectedCardPinState !== "pinTop") {
+			scrollContainer.style.setProperty("--kb-selected-pin-top", "0px");
+			return;
+		}
+		const pinBarRoot = pinBarRootRef.current;
+		if (!pinBarRoot) {
+			scrollContainer.style.setProperty("--kb-selected-pin-top", "0px");
+			return;
+		}
+		const applyOffset = (): void => {
+			scrollContainer.style.setProperty("--kb-selected-pin-top", `${pinBarRoot.offsetHeight}px`);
+		};
+		applyOffset();
+		if (typeof ResizeObserver === "undefined") {
+			return;
+		}
+		const resizeObserver = new ResizeObserver(applyOffset);
+		resizeObserver.observe(pinBarRoot);
+		return () => {
+			resizeObserver.disconnect();
+		};
+	}, [selectedCardPinState]);
 
 	useEffect(() => {
 		const scrollContainer = scrollContainerRef.current;
@@ -404,6 +431,7 @@ export function ColumnContextPanel({
 				<div
 					ref={scrollContainerRef}
 					className="kb-detail-task-list-scroll flex flex-col gap-2 p-2"
+					data-selected-pinned={selectedCardPinState !== "hidden" ? "true" : undefined}
 					style={{
 						flex: "1 1 0",
 						minHeight: 0,
@@ -412,15 +440,30 @@ export function ColumnContextPanel({
 						overflowAnchor: "none",
 					}}
 				>
+					{onCreateTask ? (
+						<Button
+							icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
+							aria-label="Create task"
+							fill
+							onClick={onCreateTask}
+						>
+							<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+								<span>Create task</span>
+								<span aria-hidden className="text-text-secondary">
+									(c)
+								</span>
+							</span>
+						</Button>
+					) : null}
 					{selection.allColumns.map((column) => (
 						<ColumnSection
 							key={column.id}
 							column={column}
 							selectedCardId={selection.card.id}
 							defaultOpen={column.id !== "trash"}
+							pinState={selectedCardPinState}
 							onCardClick={(card) => onCardSelect(card.id)}
 							taskSessions={taskSessions}
-							onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
 							onStartTask={column.id === "backlog" ? onStartTask : undefined}
 							onStartAllTasks={column.id === "backlog" ? onStartAllTasks : undefined}
 							onClearTrash={column.id === "trash" ? onClearTrash : undefined}
@@ -454,6 +497,7 @@ export function ColumnContextPanel({
 					selection={selection}
 					pinState={selectedCardPinState}
 					scrollRootRef={scrollContainerRef}
+					pinBarRootRef={pinBarRootRef}
 					taskSessions={taskSessions}
 					onStartTask={onStartTask}
 					onMoveToTrashTask={onMoveToTrashTask}

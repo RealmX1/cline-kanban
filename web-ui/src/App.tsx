@@ -46,6 +46,7 @@ import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-w
 import { useGitActions } from "@/hooks/use-git-actions";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
+import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { parseRemovedProjectPathFromStreamError, useProjectNavigation } from "@/hooks/use-project-navigation";
 import { useProjectUiState } from "@/hooks/use-project-ui-state";
@@ -282,6 +283,7 @@ export default function App(): ReactElement {
 			setIsGitHistoryOpen(false);
 		},
 	});
+	useNotificationTaskFocus({ currentProjectId: navigationCurrentProjectId, setSelectedTaskId });
 
 	useEffect(() => {
 		replaceWorkspaceMetadata(workspaceMetadata);
