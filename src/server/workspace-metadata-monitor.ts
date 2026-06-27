@@ -6,6 +6,7 @@ import type {
 	RuntimeWorkspaceMetadata,
 } from "../core/api-contract";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
+import { runGit } from "../workspace/git-utils";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const WORKSPACE_METADATA_POLL_INTERVAL_MS = 1_000;
@@ -101,6 +102,7 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.path === b.path &&
 		a.exists === b.exists &&
 		a.baseRef === b.baseRef &&
+		a.baseCommit === b.baseCommit &&
 		a.branch === b.branch &&
 		a.isDetached === b.isDetached &&
 		a.headCommit === b.headCommit &&
@@ -182,6 +184,16 @@ async function loadHomeGitMetadata(entry: WorkspaceMetadataEntry): Promise<Cache
 	}
 }
 
+/**
+ * 任务从 base 分叉时的提交（fork-point）。`git merge-base HEAD <baseRef>` 在任务 worktree 内现算：
+ * 该提交稳定不随 base 分支推进而变（base 前进时公共祖先不变）。inplace 任务 HEAD 即在 base 上，
+ * merge-base 退化为当前 HEAD，符合预期。任何失败（baseRef 不可解析、git 出错）→ null，优雅降级。
+ */
+async function loadTaskForkPointCommit(workspacePath: string, baseRef: string): Promise<string | null> {
+	const result = await runGit(workspacePath, ["merge-base", "HEAD", baseRef]);
+	return result.ok && result.stdout ? result.stdout : null;
+}
+
 async function loadTaskWorkspaceMetadata(
 	workspacePath: string,
 	task: TrackedTaskWorkspace,
@@ -209,6 +221,7 @@ async function loadTaskWorkspaceMetadata(
 				path: pathInfo.path,
 				exists: false,
 				baseRef: pathInfo.baseRef,
+				baseCommit: null,
 				branch: null,
 				isDetached: false,
 				headCommit: null,
@@ -232,12 +245,14 @@ async function loadTaskWorkspaceMetadata(
 			return current;
 		}
 		const summary = await getGitSyncSummary(pathInfo.path, { probe });
+		const baseCommit = await loadTaskForkPointCommit(pathInfo.path, pathInfo.baseRef);
 		return {
 			data: {
 				taskId: task.taskId,
 				path: pathInfo.path,
 				exists: true,
 				baseRef: pathInfo.baseRef,
+				baseCommit,
 				branch: probe.currentBranch,
 				isDetached: probe.headCommit !== null && probe.currentBranch === null,
 				headCommit: probe.headCommit,
@@ -258,6 +273,7 @@ async function loadTaskWorkspaceMetadata(
 				path: pathInfo.path,
 				exists: true,
 				baseRef: pathInfo.baseRef,
+				baseCommit: null,
 				branch: null,
 				isDetached: false,
 				headCommit: null,

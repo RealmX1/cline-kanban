@@ -108,6 +108,12 @@ function Harness(): React.ReactElement {
 	);
 }
 
+// agent 角标改为纯图标 + accessible name（aria-label）+ hover tooltip：完整「agent · 模型」
+// 信息不再作为可见正文渲染，故从角标的可访问名读取断言。
+function getAgentBadgeLabel(container: HTMLElement): string {
+	return container.querySelector("[data-agent-badge]")?.getAttribute("aria-label") ?? "";
+}
+
 describe("BoardCard", () => {
 	let container: HTMLDivElement;
 	let root: Root;
@@ -603,7 +609,9 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("~/.cline/worktrees/trash-task-1/kanban");
+		// 完整 worktree 路径不再作为可见正文渲染，改由简写目录行的 title（hover 揭示）+ 复制按钮承载。
+		const directoryRow = container.querySelector("[data-task-directory]");
+		expect(directoryRow?.getAttribute("title")).toContain("~/.cline/worktrees/trash-task-1/kanban");
 	});
 
 	it("shows formatted agent override details with model name and reasoning effort", async () => {
@@ -613,6 +621,7 @@ describe("BoardCard", () => {
 			branch: "feature/override",
 			isDetached: false,
 			headCommit: "1234567890abcdef",
+			baseCommit: null,
 			changedFiles: 2,
 			additions: 5,
 			deletions: 1,
@@ -636,8 +645,8 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("Cline");
-		expect(container.textContent).toContain("GPT-5.5 (Low)");
+		expect(getAgentBadgeLabel(container)).toContain("Cline");
+		expect(getAgentBadgeLabel(container)).toContain("GPT-5.5 (Low)");
 		expect(container.textContent).not.toContain("openai/gpt-5.5");
 	});
 
@@ -657,7 +666,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("GPT-5.5 (Low)");
+		expect(getAgentBadgeLabel(container)).toContain("GPT-5.5 (Low)");
 	});
 
 	it("shows a fallback indicator for reasoning-only overrides without a resolved default model", async () => {
@@ -675,7 +684,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("Default model (Low)");
+		expect(getAgentBadgeLabel(container)).toContain("Default model (Low)");
 	});
 
 	it("shows explicit default reasoning metadata for reasoning-only task overrides", async () => {
@@ -693,7 +702,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("GPT-5.5 (Default)");
+		expect(getAgentBadgeLabel(container)).toContain("GPT-5.5 (Default)");
 		expect(container.textContent).not.toContain("GPT-5.5 (High)");
 	});
 
@@ -713,7 +722,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("Provider: groq");
+		expect(getAgentBadgeLabel(container)).toContain("Provider: groq");
 		expect(container.textContent).not.toContain("GPT-5.5");
 	});
 
@@ -733,7 +742,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("GPT-5.5");
+		expect(getAgentBadgeLabel(container)).toContain("GPT-5.5");
 		expect(container.textContent).not.toContain("GPT-5.5 (High)");
 	});
 
@@ -742,7 +751,7 @@ describe("BoardCard", () => {
 			root.render(<BoardCard card={createCard()} index={0} columnId="backlog" defaultAgentId="claude" />);
 		});
 
-		expect(container.textContent).toContain("Claude Code");
+		expect(getAgentBadgeLabel(container)).toContain("Claude Code");
 	});
 
 	it("shows the agent locked from the previous run over the current default", async () => {
@@ -758,7 +767,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("Cline");
+		expect(getAgentBadgeLabel(container)).toContain("Cline");
 		expect(container.textContent).not.toContain("Claude Code");
 	});
 
@@ -769,7 +778,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("OpenAI Codex");
+		expect(getAgentBadgeLabel(container)).toContain("OpenAI Codex");
 		expect(container.textContent).not.toContain("Claude Code");
 	});
 

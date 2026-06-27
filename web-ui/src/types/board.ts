@@ -79,6 +79,8 @@ export interface ReviewTaskWorkspaceSnapshot {
 	branch: string | null;
 	isDetached: boolean;
 	headCommit: string | null;
+	// 任务从 base 分叉时的提交（fork-point）；未探测 / 计算失败 / inplace 无分叉为 null。
+	baseCommit: string | null;
 	changedFiles: number | null;
 	additions: number | null;
 	deletions: number | null;

@@ -537,6 +537,9 @@ export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	path: z.string(),
 	exists: z.boolean(),
 	baseRef: z.string(),
+	// 任务从 base 分叉时的提交（fork-point，git merge-base HEAD <baseRef>）。
+	// 稳定不随 base 分支推进而变；未探测 / 计算失败 / inplace 无分叉等情形为 null。
+	baseCommit: z.string().nullable(),
 	branch: z.string().nullable(),
 	isDetached: z.boolean(),
 	headCommit: z.string().nullable(),

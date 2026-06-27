@@ -9,6 +9,10 @@ const taskWorktreeMocks = vi.hoisted(() => ({
 	getTaskWorkspacePathInfo: vi.fn(),
 }));
 
+const gitUtilsMocks = vi.hoisted(() => ({
+	runGit: vi.fn(),
+}));
+
 vi.mock("../../src/workspace/git-sync.js", () => ({
 	getGitSyncSummary: gitSyncMocks.getGitSyncSummary,
 	probeGitWorkspaceState: gitSyncMocks.probeGitWorkspaceState,
@@ -17,6 +21,13 @@ vi.mock("../../src/workspace/git-sync.js", () => ({
 vi.mock("../../src/workspace/task-worktree.js", () => ({
 	getTaskWorkspacePathInfo: taskWorktreeMocks.getTaskWorkspacePathInfo,
 }));
+
+vi.mock("../../src/workspace/git-utils.js", () => ({
+	runGit: gitUtilsMocks.runGit,
+}));
+
+// fork-point（git merge-base HEAD <baseRef>）的确定性返回；非 merge-base 调用退化为失败。
+const FORK_POINT_COMMIT = "f00ba4c0ffee1234";
 
 import type { RuntimeBoardCard, RuntimeBoardData, RuntimeTaskWorktreeMode } from "../../src/core/api-contract";
 import {
@@ -72,6 +83,12 @@ describe("createWorkspaceMetadataMonitor", () => {
 		gitSyncMocks.getGitSyncSummary.mockReset();
 		gitSyncMocks.probeGitWorkspaceState.mockReset();
 		taskWorktreeMocks.getTaskWorkspacePathInfo.mockReset();
+		gitUtilsMocks.runGit.mockReset();
+		gitUtilsMocks.runGit.mockImplementation(async (_cwd: string, args: string[]) =>
+			args[0] === "merge-base"
+				? { ok: true, stdout: FORK_POINT_COMMIT, stderr: "", output: FORK_POINT_COMMIT, error: null, exitCode: 0 }
+				: { ok: false, stdout: "", stderr: "", output: "", error: "unexpected git call", exitCode: 1 },
+		);
 
 		taskWorktreeMocks.getTaskWorkspacePathInfo.mockImplementation(async (options: TaskWorkspacePathInfoOptions) =>
 			options.worktreeMode === "inplace"
@@ -154,16 +171,21 @@ describe("createWorkspaceMetadataMonitor", () => {
 			path: WORKSPACE_PATH,
 			exists: true,
 			branch: "main",
+			// fork-point（git merge-base HEAD <baseRef>）现算并随 metadata 暴露。
+			baseCommit: FORK_POINT_COMMIT,
 			changedFiles: 2,
 			additions: 5,
 			deletions: 1,
 		});
+		expect(gitUtilsMocks.runGit).toHaveBeenCalledWith(WORKSPACE_PATH, ["merge-base", "HEAD", "main"]);
 
 		const branchTask = metadata.taskWorkspaces.find((task) => task.taskId === "task-branch");
 		expect(branchTask).toMatchObject({
 			path: BRANCH_TASK_WORKTREE_PATH,
 			exists: false,
 			branch: null,
+			// 未落地的 worktree（exists:false）不探测分叉点 → baseCommit 为 null。
+			baseCommit: null,
 			changedFiles: null,
 		});
 	});

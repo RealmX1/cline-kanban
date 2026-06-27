@@ -14,10 +14,12 @@ import {
 	AlertCircle,
 	AlertTriangle,
 	Archive,
-	Bot,
+	Check,
 	ClipboardCheck,
+	Copy,
 	FileText,
 	GitBranch,
+	Home,
 	Hourglass,
 	Pencil,
 	Play,
@@ -42,8 +44,9 @@ import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatPathForDisplay } from "@/utils/path-display";
-import { useInterval } from "@/utils/react-use";
+import { useCopyToClipboard, useInterval } from "@/utils/react-use";
 import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
+import { getAgentVisual } from "./agent-visual";
 import {
 	type CardSessionActivity,
 	deriveCardSessionActivity,
@@ -210,6 +213,10 @@ export function TaskCardBody({
 				clearTimeout(clickActivationTimerRef.current);
 				clickActivationTimerRef.current = null;
 			}
+			if (directoryCopyResetTimerRef.current != null) {
+				clearTimeout(directoryCopyResetTimerRef.current);
+				directoryCopyResetTimerRef.current = null;
+			}
 		},
 		[],
 	);
@@ -311,13 +318,14 @@ export function TaskCardBody({
 	// 始终显示任务的 effective agent，按运行期同一套优先级解析：
 	// 上次运行已锁定（sessionSummary.agentId）?? 任务级覆盖（card.agentId）?? 全局默认（defaultAgentId）
 	// 与 src/trpc/runtime-api.ts 的解析顺序一致。
+	const effectiveAgentId = sessionSummary?.agentId ?? card.agentId ?? defaultAgentId;
+	const agentVisual = getAgentVisual(effectiveAgentId);
 	const agentLabel = useMemo(() => {
-		const effectiveAgentId = sessionSummary?.agentId ?? card.agentId ?? defaultAgentId;
 		if (!effectiveAgentId) {
 			return null;
 		}
 		return getRuntimeAgentCatalogEntry(effectiveAgentId)?.label ?? effectiveAgentId;
-	}, [sessionSummary?.agentId, card.agentId, defaultAgentId]);
+	}, [effectiveAgentId]);
 	const modelOverrideLabel = useMemo(() => {
 		if (card.clineSettings === undefined) {
 			return null;
@@ -350,6 +358,31 @@ export function TaskCardBody({
 		const parts = [agentLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentLabel, modelOverrideLabel]);
+
+	// 简写目录行：{worktree/in-place} · {current head} · {base branch}@{base commit(fork-point)}。
+	// base commit 取 fork-point（reviewWorkspaceSnapshot.baseCommit）；缺失时优雅降级为只显示 base 分支名。
+	const worktreeModeLabel = card.worktreeMode === "inplace" ? "in-place" : "worktree";
+	const baseForkPointShort = reviewWorkspaceSnapshot?.baseCommit?.slice(0, 8) ?? null;
+	const baseRefLabel = baseForkPointShort ? `${card.baseRef}@${baseForkPointShort}` : card.baseRef;
+	// 复制源优先绝对路径（snapshot.path），trash 无快照时退回重建的展示路径，再退回 base 仓库路径。
+	const copyableDirectoryPath = reviewWorkspaceSnapshot?.path ?? reviewWorkspacePath ?? workspacePath ?? null;
+	const [, copyToClipboard] = useCopyToClipboard();
+	const [isDirectoryPathCopied, setIsDirectoryPathCopied] = useState(false);
+	const directoryCopyResetTimerRef = useRef<number | null>(null);
+	const handleCopyDirectoryPath = () => {
+		if (!copyableDirectoryPath) {
+			return;
+		}
+		copyToClipboard(copyableDirectoryPath);
+		setIsDirectoryPathCopied(true);
+		if (directoryCopyResetTimerRef.current != null) {
+			clearTimeout(directoryCopyResetTimerRef.current);
+		}
+		directoryCopyResetTimerRef.current = window.setTimeout(() => {
+			setIsDirectoryPathCopied(false);
+			directoryCopyResetTimerRef.current = null;
+		}, 1500);
+	};
 
 	const cardShell = (
 		<div
@@ -494,6 +527,23 @@ export function TaskCardBody({
 					isDependencyTarget && "kb-board-card-dependency-target",
 				)}
 			>
+				{/* agent 纯图标角标：钉在卡片左上角、略微超出边框（absolute，不占标题横向空间）。
+				    完整「agent · 模型」信息进 hover tooltip；无 effective agent 时不渲染。 */}
+				{taskAgentSettingsLabel ? (
+					<Tooltip content={taskAgentSettingsLabel}>
+						<span
+							data-agent-badge=""
+							role="img"
+							aria-label={taskAgentSettingsLabel}
+							className="absolute -left-2 -top-2 z-20 inline-flex h-[18px] w-[18px] items-center justify-center rounded-full border border-border-bright bg-surface-1 shadow-sm"
+						>
+							<agentVisual.Icon
+								size={11}
+								className={cn("shrink-0", isTrashCard ? "text-text-tertiary" : agentVisual.className)}
+							/>
+						</span>
+					</Tooltip>
+				) : null}
 				<div className="flex items-start gap-2" style={{ minHeight: 24 }}>
 					{statusMarker ? <div className="inline-flex items-center">{statusMarker}</div> : null}
 					<div className="flex-1 min-w-0">
@@ -658,21 +708,6 @@ export function TaskCardBody({
 				{isPromptViewerOpen ? (
 					<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
 				) : null}
-				{taskAgentSettingsLabel ? (
-					<div className="mt-1">
-						<span
-							className={cn(
-								"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
-								isTrashCard
-									? "border-border text-text-tertiary bg-surface-1"
-									: "border-status-blue/30 bg-status-blue/10 text-status-blue",
-							)}
-						>
-							<Bot size={12} className="shrink-0" />
-							<span className="truncate">{taskAgentSettingsLabel}</span>
-						</span>
-					</div>
-				) : null}
 				{!isTrashCard && isParkedAwaitingBackgroundWork ? (
 					<div className="mt-1">
 						<span className="inline-flex max-w-full items-center gap-1 rounded-md border border-status-purple/30 bg-status-purple/10 px-1.5 py-0.5 text-xs text-status-purple">
@@ -726,53 +761,61 @@ export function TaskCardBody({
 					</div>
 				) : null}
 				{showWorkspaceStatus && reviewWorkspacePath ? (
-					<p
-						className="font-mono"
+					<div
+						data-task-directory=""
+						title={copyableDirectoryPath ?? undefined}
+						className="mt-1 flex items-center gap-1 font-mono"
 						style={{
-							margin: "4px 0 0",
 							fontSize: 12,
 							lineHeight: 1.4,
-							whiteSpace: "normal",
-							overflowWrap: "anywhere",
-							color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : undefined,
+							color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : SESSION_ACTIVITY_COLOR.secondary,
 						}}
 					>
-						{isTrashCard ? (
-							<span
-								style={{
-									color: SESSION_ACTIVITY_COLOR.muted,
-									textDecoration: "line-through",
-								}}
-							>
-								{reviewWorkspacePath}
-							</span>
-						) : reviewWorkspaceSnapshot ? (
-							<>
-								<span style={{ color: SESSION_ACTIVITY_COLOR.secondary }}>{reviewWorkspacePath}</span>
-								<GitBranch
-									size={10}
-									style={{
-										display: "inline",
-										color: SESSION_ACTIVITY_COLOR.secondary,
-										margin: "0px 4px 2px",
-										verticalAlign: "middle",
+						{card.worktreeMode === "inplace" ? (
+							<Home size={10} className="shrink-0" />
+						) : (
+							<GitBranch size={10} className="shrink-0" />
+						)}
+						<span className={cn("min-w-0 flex-1 truncate", isTrashCard && "line-through")}>
+							<span>{worktreeModeLabel}</span>
+							<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> · </span>
+							<span>{reviewRefLabel}</span>
+							<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> · </span>
+							<span>{baseRefLabel}</span>
+							{reviewChangeSummary ? (
+								<>
+									<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> (</span>
+									<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>{reviewChangeSummary.filesLabel}</span>
+									<span className="text-status-green"> +{reviewChangeSummary.additions}</span>
+									<span className="text-status-red"> -{reviewChangeSummary.deletions}</span>
+									<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>)</span>
+								</>
+							) : null}
+						</span>
+						{copyableDirectoryPath ? (
+							<Tooltip content="Copy directory path">
+								<button
+									type="button"
+									aria-label="Copy directory path"
+									onMouseDown={stopEvent}
+									onClick={(event) => {
+										stopEvent(event);
+										handleCopyDirectoryPath();
 									}}
-								/>
-								<span style={{ color: SESSION_ACTIVITY_COLOR.secondary }}>{reviewRefLabel}</span>
-								{reviewChangeSummary ? (
-									<>
-										<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> (</span>
-										<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>
-											{reviewChangeSummary.filesLabel}
-										</span>
-										<span className="text-status-green"> +{reviewChangeSummary.additions}</span>
-										<span className="text-status-red"> -{reviewChangeSummary.deletions}</span>
-										<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>)</span>
-									</>
-								) : null}
-							</>
+									className={cn(
+										"shrink-0 cursor-pointer rounded-sm p-0.5 text-text-tertiary hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+										isHovered ? "opacity-100" : "opacity-0",
+									)}
+								>
+									{isDirectoryPathCopied ? (
+										<Check size={11} className="text-status-green" />
+									) : (
+										<Copy size={11} />
+									)}
+								</button>
+							</Tooltip>
 						) : null}
-					</p>
+					</div>
 				) : null}
 				{showReviewGitActions ? (
 					<div className="flex gap-1.5 mt-1.5">
