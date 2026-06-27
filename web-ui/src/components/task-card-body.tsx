@@ -17,6 +17,7 @@ import {
 	Check,
 	ClipboardCheck,
 	Copy,
+	Eye,
 	FileText,
 	GitBranch,
 	Home,
@@ -82,6 +83,8 @@ export interface TaskCardBusinessProps {
 	onStart?: (taskId: string) => void;
 	onMoveToTrash?: (taskId: string) => void;
 	onMoveToValidation?: (taskId: string) => void;
+	// 手动把 In Progress 卡翻入 Review（仅终端 agent；卡死/空闲会话拖不进 Review 的兜底入口）。
+	onMoveToReview?: (taskId: string) => void;
 	onRestoreFromTrash?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
@@ -92,6 +95,7 @@ export interface TaskCardBusinessProps {
 	isOpenPrLoading?: boolean;
 	isMoveToTrashLoading?: boolean;
 	isMoveToValidationLoading?: boolean;
+	isMoveToReviewLoading?: boolean;
 	onDependencyPointerDown?: (taskId: string, event: MouseEvent<HTMLElement>) => void;
 	onDependencyPointerEnter?: (taskId: string) => void;
 	isDependencySource?: boolean;
@@ -130,6 +134,7 @@ export function TaskCardBody({
 	onStart,
 	onMoveToTrash,
 	onMoveToValidation,
+	onMoveToReview,
 	onRestoreFromTrash,
 	onDeleteTask,
 	onSaveTitle,
@@ -140,6 +145,7 @@ export function TaskCardBody({
 	isOpenPrLoading = false,
 	isMoveToTrashLoading = false,
 	isMoveToValidationLoading = false,
+	isMoveToReviewLoading = false,
 	onDependencyPointerDown,
 	onDependencyPointerEnter,
 	isDependencySource = false,
@@ -645,6 +651,24 @@ export function TaskCardBody({
 								onClick={(event) => {
 									stopEvent(event);
 									onMoveToValidation?.(card.id);
+								}}
+							/>
+						</Tooltip>
+					) : null}
+					{/* 仅终端 agent（claude/codex…，排除进程内 Cline SDK 与无会话）的 In Progress 卡：手动翻入 Review。
+					    用于会话卡死/空闲（Stop hook 未触发、进程未退）拖不进 Review 列、被反复打回的兜底。 */}
+					{columnId === "in_progress" && sessionSummary?.agentId != null && sessionSummary.agentId !== "cline" ? (
+						<Tooltip side="bottom" content="Move to review">
+							<Button
+								icon={isMoveToReviewLoading ? <Spinner size={12} /> : <Eye size={12} />}
+								variant="ghost"
+								size="xs"
+								disabled={isMoveToReviewLoading}
+								aria-label="Move task to review"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onMoveToReview?.(card.id);
 								}}
 							/>
 						</Tooltip>

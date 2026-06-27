@@ -36,6 +36,7 @@ function ColumnSection({
 	onOpenPrTask,
 	onMoveToTrashTask,
 	onMoveToValidationTask,
+	onMoveToReviewTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
 	commitTaskLoadingById,
@@ -64,6 +65,7 @@ function ColumnSection({
 	onOpenPrTask?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
 	onMoveToValidationTask?: (taskId: string) => void;
+	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
@@ -228,6 +230,7 @@ function ColumnSection({
 												onStart={onStartTask}
 												onMoveToTrash={onMoveToTrashTask}
 												onMoveToValidation={onMoveToValidationTask}
+												onMoveToReview={onMoveToReviewTask}
 												onRestoreFromTrash={onRestoreFromTrashTask}
 												onDeleteTask={onDeleteTask}
 												onCommit={onCommitTask}
@@ -292,6 +295,7 @@ export function ColumnContextPanel({
 	onOpenPrTask,
 	onMoveToTrashTask,
 	onMoveToValidationTask,
+	onMoveToReviewTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
 	commitTaskLoadingById,
@@ -316,6 +320,7 @@ export function ColumnContextPanel({
 	onOpenPrTask?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
 	onMoveToValidationTask?: (taskId: string) => void;
+	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
@@ -482,6 +487,7 @@ export function ColumnContextPanel({
 								column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
 							}
 							onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
+							onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
 							onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
 							onDeleteTask={onDeleteTask}
 							commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}

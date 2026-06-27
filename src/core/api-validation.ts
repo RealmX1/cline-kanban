@@ -30,6 +30,7 @@ import {
 	type RuntimeTaskSessionInputRequest,
 	type RuntimeTaskSessionStartRequest,
 	type RuntimeTaskSessionStopRequest,
+	type RuntimeTaskSessionTransitionToReviewRequest,
 	type RuntimeTaskTerminalRefreshRequest,
 	type RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
 	type RuntimeTaskWorkspaceInfoRequest,
@@ -68,6 +69,7 @@ import {
 	runtimeTaskSessionInputRequestSchema,
 	runtimeTaskSessionStartRequestSchema,
 	runtimeTaskSessionStopRequestSchema,
+	runtimeTaskSessionTransitionToReviewRequestSchema,
 	runtimeTaskTerminalRefreshRequestSchema,
 	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
@@ -254,6 +256,17 @@ export function parseTaskSessionStopRequest(value: unknown): RuntimeTaskSessionS
 	const taskId = parsed.taskId.trim();
 	if (!taskId) {
 		throw new Error("Invalid task session stop payload.");
+	}
+	return {
+		taskId,
+	};
+}
+
+export function parseTaskSessionTransitionToReviewRequest(value: unknown): RuntimeTaskSessionTransitionToReviewRequest {
+	const parsed = parseWithSchema(runtimeTaskSessionTransitionToReviewRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	if (!taskId) {
+		throw new Error("Invalid task session transition-to-review payload.");
 	}
 	return {
 		taskId,

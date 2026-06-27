@@ -115,7 +115,7 @@ export interface SessionFacets {
 }
 
 // reviewReason → 人轴种类。仅 turnOwner==="user" 时取用，恒返回非 null（满足「user 回合 userTurnKind
-// 不可为 null」不变量）。三分：error=运行错；interrupted=被中断；exit/completion/hook=完成待审(review)；
+// 不可为 null」不变量）。三分：error=运行错；interrupted=被中断；exit/completion/hook/manual_review=待审(review)；
 // attention/兜底=needs_input。注：question / plan_review / permission 需 harness 级采集，归后续 Stage。
 export function deriveUserTurnKind(reviewReason: RuntimeTaskSessionReviewReason): RuntimeTaskSessionUserTurnKind {
 	switch (reviewReason) {
@@ -126,6 +126,8 @@ export function deriveUserTurnKind(reviewReason: RuntimeTaskSessionReviewReason)
 		case "exit":
 		case "completion":
 		case "hook":
+		case "manual_review":
+			// manual_review：用户手动翻入审查回合，与 agent 自然完成同归「待审」人轴。
 			return "review";
 		default:
 			// "attention" 及 null/未知：兜底待输入

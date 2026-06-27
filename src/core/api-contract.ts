@@ -273,7 +273,9 @@ export const runtimeTaskSessionModeSchema = z.enum(["act", "plan"]);
 export type RuntimeTaskSessionMode = z.infer<typeof runtimeTaskSessionModeSchema>;
 
 export const runtimeTaskSessionReviewReasonSchema = z
-	.enum(["attention", "exit", "error", "interrupted", "hook", "completion"])
+	// manual_review：用户经卡片悬浮按钮把一个停在 agent 回合（多为卡死/空闲）的会话手动翻入「等人审查」
+	// 回合（区别于 agent 自然完成的 hook/exit/completion），自解释、利于排查与 UI 区分。
+	.enum(["attention", "exit", "error", "interrupted", "hook", "completion", "manual_review"])
 	.nullable();
 export type RuntimeTaskSessionReviewReason = z.infer<typeof runtimeTaskSessionReviewReasonSchema>;
 
@@ -1211,6 +1213,25 @@ export const runtimeTaskSessionStopResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeTaskSessionStopResponse = z.infer<typeof runtimeTaskSessionStopResponseSchema>;
+
+// 用户经卡片右上角「移至 Review」悬浮按钮把一个停在 agent 回合的终端 agent 任务手动翻入「等人审查」回合
+// （reviewReason=manual_review）。区别于 stopTaskSession（中断/收尾），此处只翻回合、不杀进程：用于卡死/空闲
+// 会话（Stop hook 未触发、进程未退、无兜底转移）无法被拖入 Review 列、被反复打回 In Progress 的场景。
+export const runtimeTaskSessionTransitionToReviewRequestSchema = z.object({
+	taskId: z.string(),
+});
+export type RuntimeTaskSessionTransitionToReviewRequest = z.infer<
+	typeof runtimeTaskSessionTransitionToReviewRequestSchema
+>;
+
+export const runtimeTaskSessionTransitionToReviewResponseSchema = z.object({
+	ok: z.boolean(),
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskSessionTransitionToReviewResponse = z.infer<
+	typeof runtimeTaskSessionTransitionToReviewResponseSchema
+>;
 
 // 外部编排（RVF / 自研 Kanban）对一个终端 agent 任务「置 park」：标记它正在等待自己以非 native 方式派发的
 // 后台工作完成、会被外部恢复，从而在主 agent 结束本轮发出裸 Stop 时结构性抑制误发的 ready-for-review 通知。

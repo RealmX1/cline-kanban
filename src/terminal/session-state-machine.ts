@@ -12,7 +12,13 @@ import {
 
 export type SessionTransitionEvent =
 	// userTurnKindOverride：harness 采集增强（如 Claude permission）覆写更细人轴；仅 user 回合生效。
-	| { type: "hook.to_review"; userTurnKindOverride?: RuntimeTaskSessionUserTurnKind }
+	// reviewReason：翻入审查回合的成因，默认 "hook"（agent 自然完成）；用户手动触发时传 "manual_review"。
+	// 它既被 stamp 进 summary.reviewReason，又作为 buildFacetPatch 的派生上下文，使 userTurnKind 与成因自洽。
+	| {
+			type: "hook.to_review";
+			reviewReason?: RuntimeTaskSessionReviewReason;
+			userTurnKindOverride?: RuntimeTaskSessionUserTurnKind;
+	  }
 	| { type: "hook.to_in_progress" }
 	| { type: "agent.prompt-ready" }
 	| { type: "process.exit"; exitCode: number | null; interrupted: boolean };
@@ -63,14 +69,17 @@ export function reduceSessionTransition(
 			if (resolveSessionFacets(summary).turnOwner !== "agent") {
 				return { changed: false, patch: {}, clearAttentionBuffer: false };
 			}
+			// 默认 "hook"（agent 自然完成）；手动「移至 Review」按钮传 "manual_review"。reviewReason 同时
+			// stamp 进 summary 并喂给 buildFacetPatch，使 userTurnKind 经 deriveUserTurnKind 与成因自洽。
+			const reviewReason: RuntimeTaskSessionReviewReason = event.reviewReason ?? "hook";
 			return {
 				changed: true,
 				patch: {
-					reviewReason: "hook",
+					reviewReason,
 					...buildFacetPatch(
 						summary,
 						"awaiting_review",
-						{ reviewReason: "hook", pid: summary.pid },
+						{ reviewReason, pid: summary.pid },
 						event.userTurnKindOverride,
 					),
 				},

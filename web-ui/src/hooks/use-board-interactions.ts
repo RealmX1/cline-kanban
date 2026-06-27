@@ -64,6 +64,7 @@ interface UseBoardInteractionsInput {
 	setIsClearTrashDialogOpen: Dispatch<SetStateAction<boolean>>;
 	setIsGitHistoryOpen: Dispatch<SetStateAction<boolean>>;
 	stopTaskSession: (taskId: string) => Promise<void>;
+	transitionTaskToReview: (taskId: string) => Promise<boolean>;
 	cleanupTaskWorkspace: UseTaskSessionsResult["cleanupTaskWorkspace"];
 	ensureTaskWorkspace: UseTaskSessionsResult["ensureTaskWorkspace"];
 	startTaskSession: UseTaskSessionsResult["startTaskSession"];
@@ -95,6 +96,9 @@ export interface UseBoardInteractionsResult {
 	cancelMoveToDone: () => void;
 	handleMoveCardToValidation: (taskId: string) => void;
 	handleMoveSelectedCardToValidation: () => void;
+	// 手动「移至 Review」：仅 In Progress 卡可用，翻会话回合 + 由 Rule A 自动落位 Review。
+	handleMoveCardToReview: (taskId: string) => void;
+	moveToReviewLoadingById: Record<string, boolean>;
 	handleRestoreTaskFromTrash: (taskId: string) => void;
 	handleOpenDeleteTask: (taskId: string) => void;
 	handleCancelDeleteTask: () => void;
@@ -121,6 +125,7 @@ export function useBoardInteractions({
 	setIsClearTrashDialogOpen,
 	setIsGitHistoryOpen,
 	stopTaskSession,
+	transitionTaskToReview,
 	cleanupTaskWorkspace,
 	ensureTaskWorkspace,
 	startTaskSession,
@@ -137,6 +142,8 @@ export function useBoardInteractions({
 		Record<string, PendingProgrammaticStartMoveCompletion>
 	>({});
 	const [moveToTrashLoadingById, setMoveToTrashLoadingById] = useState<Record<string, boolean>>({});
+	// 「移至 Review」按钮的 per-task in-flight 态（端点 await 期间显 Spinner）。
+	const [moveToReviewLoadingById, setMoveToReviewLoadingById] = useState<Record<string, boolean>>({});
 	// Pending "Move to Done" awaiting confirmation. Set whenever a move would skip the manual
 	// Validation step (from Review / In Progress); the App-level SkipValidationConfirmDialog reads
 	// this to open, and confirm/cancel resolve it. null = no confirmation in flight.
@@ -882,6 +889,42 @@ export function useBoardInteractions({
 		handleMoveCardToValidation(selectedCard.card.id);
 	}, [handleMoveCardToValidation, selectedCard]);
 
+	// 手动「移至 Review」：把一个停在 agent 回合（多为卡死/空闲——Stop hook 未触发、进程未退）的终端 agent
+	// 任务翻入「等人审查」回合。不手动挪列：transitionTaskToReview 成功后即时 upsert 的 summary（turnOwner=user）
+	// 触发上方 level-triggered effect 的 Rule A 自动落位 Review，且 review-bounce（要求 turnOwner=agent）不再触发，
+	// 卡片稳定停在 Review。仅 In Progress 卡生效（与按钮渲染门控一致，双重保险）。
+	const handleMoveCardToReview = useCallback(
+		(taskId: string) => {
+			if (getTaskColumnId(board, taskId) !== "in_progress") {
+				return;
+			}
+			setMoveToReviewLoadingById((current) => ({ ...current, [taskId]: true }));
+			void (async () => {
+				try {
+					const ok = await transitionTaskToReview(taskId);
+					if (!ok) {
+						showAppToast({
+							intent: "warning",
+							icon: "info-sign",
+							message: "Couldn't move task to Review — try again.",
+							timeout: 3000,
+						});
+					}
+				} finally {
+					setMoveToReviewLoadingById((current) => {
+						if (!(taskId in current)) {
+							return current;
+						}
+						const next = { ...current };
+						delete next[taskId];
+						return next;
+					});
+				}
+			})();
+		},
+		[board, transitionTaskToReview],
+	);
+
 	const handleRestoreTaskFromTrash = useCallback(
 		(taskId: string) => {
 			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review");
@@ -1075,6 +1118,8 @@ export function useBoardInteractions({
 		cancelMoveToDone,
 		handleMoveCardToValidation,
 		handleMoveSelectedCardToValidation,
+		handleMoveCardToReview,
+		moveToReviewLoadingById,
 		handleRestoreTaskFromTrash,
 		handleOpenDeleteTask,
 		handleCancelDeleteTask,

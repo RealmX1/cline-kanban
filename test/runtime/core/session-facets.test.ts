@@ -82,6 +82,7 @@ describe("deriveUserTurnKind（reviewReason → 人轴种类）", () => {
 		["exit", "review"],
 		["completion", "review"],
 		["hook", "review"],
+		["manual_review", "review"],
 		["attention", "needs_input"],
 		[null, "needs_input"],
 	] as const)("%s → %s", (reason, expected) => {
@@ -421,7 +422,26 @@ describe("黄金转移（经真实终端 reducer reduceSessionTransition）", ()
 		expect(next.turnOwner).toBe("user");
 		expect(next.liveness).toBe("live");
 		expect(next.userTurnKind).toBe("review");
+		expect(next.reviewReason).toBe("hook");
 		expect(projectLegacyState(facetsOf(next))).toBe(next.state);
+	});
+
+	it("hook.to_review × reviewReason:manual_review（手动「移至 Review」）→ awaiting_review/user/live/review，reason 透传", () => {
+		const next = applyPatch(running, { type: "hook.to_review", reviewReason: "manual_review" }, 2_000);
+		expect(next.state).toBe("awaiting_review");
+		expect(next.turnOwner).toBe("user");
+		expect(next.liveness).toBe("live");
+		expect(next.userTurnKind).toBe("review");
+		// reviewReason 自解释 stamp（区别于 agent 自然完成的 hook），且 userTurnKind 经 deriveUserTurnKind 自洽。
+		expect(next.reviewReason).toBe("manual_review");
+		expect(projectLegacyState(facetsOf(next))).toBe(next.state);
+	});
+
+	it("hook.to_review guard：非 agent 回合（已 awaiting）再发 manual_review → 无变化（幂等）", () => {
+		const review = applyPatch(running, { type: "hook.to_review", reviewReason: "manual_review" }, 2_000);
+		const result = reduceSessionTransition(review, { type: "hook.to_review", reviewReason: "manual_review" });
+		expect(result.changed).toBe(false);
+		expect(result.patch).toEqual({});
 	});
 
 	it("process.exit code 0：awaiting_review + pid:null → exited/review", () => {
