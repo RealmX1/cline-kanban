@@ -3,6 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 const ensureInstructionsFileMock = vi.hoisted(() => vi.fn(async () => "/tmp/network-interruption-resume.md"));
+// 捕获 [tui-freeze] 日志以断言投递的 via= 通道（prompt-ready / output-quiet / deadline-fallback）。
+const tuiFreezeWarnings = vi.hoisted(() => [] as string[]);
+
+vi.mock("../../../src/diagnostics/tui-freeze-logger.js", () => ({
+	logTuiFreezeWarning: (message: string) => {
+		tuiFreezeWarnings.push(message);
+	},
+	logTuiFreezeError: () => {},
+}));
 
 // toBracketedPasteSubmission 用哨兵替身：本套件验证 submitTaskChatInputWhenReady 的「就绪门控 +
 // 以原始文本委托编码 + 写一次 + Codex 置位」契约；bracketed-paste + 末尾单 CR 的真实编码由
@@ -61,6 +70,51 @@ const CLAUDE_READY_PROMPT = "╭────────────────
 const SETTLE_MS = 1_000;
 const RECHECK_MS = 1_500;
 const PAST_DEADLINE_MS = 65_000;
+// 须与 session-manager.ts 同步：用户手敲抑制窗 8s、deadline(60s) 后让路防饿死硬上限 15s。
+const USER_INPUT_SUPPRESS_MS = 8_000;
+const DEADLINE_PLUS_MAX_YIELD_MS = 60_000 + 15_000;
+
+// 构造一个用 fake mirror 的最小 claude 会话 entry（fake-timer 下确定性，避免 await 真实 headless xterm）。
+// 返回 write spy 与 entry，便于测试在推进过程中改写 active.lastUserInputAt 模拟用户打字。
+function installFakeClaudeEntry(
+	manager: TerminalSessionManager,
+	taskId: string,
+	options: {
+		mirrorSnapshot: string;
+		state: string;
+		reviewReason?: string | null;
+		lastOutputAt?: number | null;
+		lastUserInputAt?: number | null;
+	},
+) {
+	const write = vi.fn();
+	const summary = {
+		taskId,
+		agentId: "claude",
+		state: options.state,
+		reviewReason: options.reviewReason ?? null,
+		lastOutputAt: options.lastOutputAt ?? null,
+	} as unknown as RuntimeTaskSessionSummary;
+	const entry = {
+		summary,
+		active: {
+			session: { write },
+			outputReactionScanBuffer: null,
+			deferredStartupInput: null,
+			lastUserInputAt: options.lastUserInputAt ?? null,
+			taskChatInputDeliveryTimer: null,
+			taskChatInputDeliveryGeneration: 0,
+			awaitingCodexPromptAfterEnter: false,
+		},
+		terminalStateMirror: {
+			getSnapshot: async () => ({ snapshot: options.mirrorSnapshot, cols: 80, rows: 24 }),
+		},
+		listenerIdCounter: 1,
+		listeners: new Map(),
+	};
+	(manager as unknown as { entries: Map<string, typeof entry> }).entries.set(taskId, entry);
+	return { write, entry };
+}
 
 function spawnManagerWithSession(pid: number) {
 	let spawnedSession: ReturnType<typeof createMockPtySession> | null = null;
@@ -97,6 +151,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		prepareAgentLaunchMock.mockReset();
 		ptySessionSpawnMock.mockReset();
 		ensureInstructionsFileMock.mockClear();
+		tuiFreezeWarnings.length = 0;
 		vi.useFakeTimers();
 	});
 
@@ -210,12 +265,20 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		// 用受控的 fake mirror 保证 fake-timer 下确定性（避免 await 真实 headless xterm 写回调）。
 		const manager = new TerminalSessionManager();
 		const write = vi.fn();
-		const summary = { taskId: "task-deliver-mirror", agentId: "claude" } as unknown as RuntimeTaskSessionSummary;
+		// state:"running" → resolveSessionFacets 解析出 turnOwner:"agent"，使 A2 idle 兜底门控关闭，
+		// 本例就绪走镜像快照命中（"prompt"），不被 quiet 兜底抢跑。
+		const summary = {
+			taskId: "task-deliver-mirror",
+			agentId: "claude",
+			state: "running",
+		} as unknown as RuntimeTaskSessionSummary;
 		const entry = {
 			summary,
 			active: {
 				session: { write },
 				outputReactionScanBuffer: null,
+				deferredStartupInput: null,
+				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
 				awaitingCodexPromptAfterEnter: false,
@@ -241,7 +304,13 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		// 正在出输出、无提示符。若就绪判定看完整快照会误判 true（旧 bug）；只看最后 rows 行则判 false。
 		const manager = new TerminalSessionManager();
 		const write = vi.fn();
-		const summary = { taskId: "task-deliver-viewport", agentId: "claude" } as unknown as RuntimeTaskSessionSummary;
+		// state:"running" → turnOwner:"agent" 关闭 A2 idle 兜底，使本例保持「视口无提示符 → 仅 deadline 兜底」
+		// 的原始意图（否则 quiet 兜底会在 SETTLE 即判就绪、抢在 deadline 之前写入）。
+		const summary = {
+			taskId: "task-deliver-viewport",
+			agentId: "claude",
+			state: "running",
+		} as unknown as RuntimeTaskSessionSummary;
 		const midOutputViewport = [
 			"正在执行第 1 步…",
 			"正在执行第 2 步…",
@@ -255,6 +324,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			active: {
 				session: { write },
 				outputReactionScanBuffer: null,
+				deferredStartupInput: null,
+				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
 				awaitingCodexPromptAfterEnter: false,
@@ -304,7 +375,12 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		// 新的 submitTaskChatInputWhenReady 自增代际令旧 attempt 在 await 返回后放弃；最终只投递最新文本一次。
 		const manager = new TerminalSessionManager();
 		const write = vi.fn();
-		const summary = { taskId: "task-deliver-lww", agentId: "claude" } as unknown as RuntimeTaskSessionSummary;
+		// state:"running" → turnOwner:"agent"（本例就绪走镜像快照命中，与 A2 兜底无关，仅保真）。
+		const summary = {
+			taskId: "task-deliver-lww",
+			agentId: "claude",
+			state: "running",
+		} as unknown as RuntimeTaskSessionSummary;
 		// 受控 mirror：getSnapshot 返回一个直到我们放行才 resolve 的 promise，模拟「旧 attempt 卡在 await 中」。
 		let releaseFirstSnapshot: (() => void) | null = null;
 		let snapshotCalls = 0;
@@ -313,6 +389,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			active: {
 				session: { write },
 				outputReactionScanBuffer: null,
+				deferredStartupInput: null,
+				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
 				awaitingCodexPromptAfterEnter: false,
@@ -354,5 +432,73 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(write).toHaveBeenCalledWith("SUBMIT[新消息]");
+	});
+
+	it("A2 idle 兜底：提示符正则整窗不命中但 agent 已让出回合且终端静默 → 沉降后即投递（via=output-quiet），不拖到 deadline", async () => {
+		// 真实 RVF 现场的稳健兜底：镜像视口未呈现可匹配的 idle 框（scanBuffer 也为 null）→ predicate 整窗不命中。
+		// state:"awaiting_review" → turnOwner:"user"（agent 已让出回合）；lastOutputAt:null → 视为已字节静默。
+		// 二者同时成立时 A2 判就绪，避免拖满 60s deadline。
+		const manager = new TerminalSessionManager();
+		const { write } = installFakeClaudeEntry(manager, "task-deliver-quiet", {
+			mirrorSnapshot: "正在收尾，本视口没有可匹配的输入框…",
+			state: "awaiting_review",
+			reviewReason: "exit",
+			lastOutputAt: null,
+		});
+
+		manager.submitTaskChatInputWhenReady("task-deliver-quiet", "继续 RVF");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+		expect(
+			tuiFreezeWarnings.some((m) => m.includes("task-chat-input-delivered") && m.includes("via=output-quiet")),
+		).toBe(true);
+	});
+
+	it("A1 让路：就绪（框在）但用户近 8s 内手敲 → 沉降后不插队；越过抑制窗后的下一轮才投递", async () => {
+		const manager = new TerminalSessionManager();
+		const typedAt = Date.now();
+		const { write } = installFakeClaudeEntry(manager, "task-deliver-yield", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: typedAt,
+		});
+
+		manager.submitTaskChatInputWhenReady("task-deliver-yield", "继续 RVF");
+		// 就绪命中（框在镜像视口），但用户近 OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS 内手敲过 → 让路、不写。
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write).not.toHaveBeenCalled();
+		// 推进越过抑制窗（其间不再刷新 lastUserInputAt = 用户停手）→ 下一轮 recheck 放行投递。
+		await vi.advanceTimersByTimeAsync(USER_INPUT_SUPPRESS_MS + RECHECK_MS);
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+		expect(tuiFreezeWarnings.some((m) => m.includes("via=prompt-ready"))).toBe(true);
+	});
+
+	it("A1 防饿死：用户持续手敲不停 → 在 deadline + MAX_DEADLINE_INPUT_YIELD_MS 硬上限保底强写一次", async () => {
+		const manager = new TerminalSessionManager();
+		const base = Date.now();
+		const { write, entry } = installFakeClaudeEntry(manager, "task-deliver-starve", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: base,
+		});
+
+		manager.submitTaskChatInputWhenReady("task-deliver-starve", "继续 RVF");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write).not.toHaveBeenCalled();
+
+		// 模拟连续打字：每个 recheck 间隔前把 lastUserInputAt 刷新到当前时刻，使 A1 让路条件恒成立——
+		// 直到越过 deadline(60s) + MAX(15s) 硬上限，投递无条件保底强写（守住「投递绝不丢」）。
+		for (
+			let elapsed = SETTLE_MS;
+			elapsed < DEADLINE_PLUS_MAX_YIELD_MS + RECHECK_MS && write.mock.calls.length === 0;
+			elapsed += RECHECK_MS
+		) {
+			entry.active.lastUserInputAt = Date.now();
+			await vi.advanceTimersByTimeAsync(RECHECK_MS);
+		}
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
 	});
 });

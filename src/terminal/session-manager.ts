@@ -88,6 +88,9 @@ const TASK_CHAT_INPUT_DELIVERY_RECHECK_MS = 1_500;
 // 就绪轮询总时长上限：到点仍未就绪则尽力强制写一次（best-effort，行为不劣于今日的立即写）。
 // 远小于 RVF prep 文件 300s TTL（rvf_prep_file.py DEFAULT_TTL_SECONDS），故即便兜底强制写，prep 仍有效。
 const TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS = 60_000;
+// 投递让路防饿死硬上限：deadline 之后即便用户仍在手敲，也至多再为其让路这么久，到点无条件保底强写。
+// 守住「投递绝不丢」与 :88 的 best-effort 承诺——用户持续打字也不会把 RVF followup 永久饿死。
+const TASK_CHAT_INPUT_DELIVERY_MAX_DEADLINE_INPUT_YIELD_MS = 15_000;
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
 const DEFAULT_STALL_THRESHOLD_MS = 45_000;
@@ -354,6 +357,29 @@ function clearTaskChatInputDeliveryTimer(state: { taskChatInputDeliveryTimer: No
 	}
 }
 
+// 程序化「已提交用户轮」投递的就绪判别式（替代裸 boolean，使兜底写的 via= 日志能区分命中哪条通道，
+// 等于免费内建复现打点）：
+// - "prompt"    交互提示符框 / `>` 标记已渲染（快路径扫描缓冲或镜像快照命中）。
+// - "quiet"     提示符正则整窗不命中，但 agent 已让出回合且终端字节静默 → idle 稳健兜底放行。
+// - "immediate" 该终端 agent 无可门控就绪信号（droid / kiro），维持立即投递语义。
+// - null        尚未就绪（继续轮询或最终走 deadline 兜底）。
+type TaskChatInputDeliveryReadiness = "prompt" | "quiet" | "immediate" | null;
+
+// 把就绪判别式翻成 [tui-freeze] task-chat-input-delivered 的 via= 标签。readiness===null 只可能
+// 因 deadline 兜底走到写入，故记 deadline-fallback；其余直接映射命中的通道（免费内建复现打点）。
+function resolveTaskChatInputDeliveryVia(readiness: TaskChatInputDeliveryReadiness): string {
+	switch (readiness) {
+		case "prompt":
+			return "prompt-ready";
+		case "quiet":
+			return "output-quiet";
+		case "immediate":
+			return "immediate";
+		default:
+			return "deadline-fallback";
+	}
+}
+
 // 取某 agent 的 TUI 提示符就绪预测（仅 claude / codex 有交互式输入框可探测）。返回 null 表示
 // 该终端 agent 没有可门控的就绪信号——调用方据此选择「立即投递」而非拖到 deadline 兜底。
 function resolveTuiInteractivePromptPredicate(agentId: RuntimeAgentId | null): ((scan: string) => boolean) | null {
@@ -532,16 +558,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				if (!active) {
 					return false;
 				}
-				if (active.deferredStartupInput !== null) {
-					return false;
-				}
-				if (
-					active.lastUserInputAt !== null &&
-					now() - active.lastUserInputAt < OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS
-				) {
-					return false;
-				}
-				return true;
+				return this.canInjectIntoTerminalNow(active);
 			},
 			isAgentOutputQuiet: () => {
 				const entry = this.entries.get(taskId);
@@ -594,6 +611,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 	}
 
+	// 当前是否可向终端注入程序化输入：deferred-startup 仍待发、或用户近 OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS（8s）
+	// 内手敲过，都视为不可注入（避免抢在启动 prompt 之前 / 打断正在打字的用户）。被 output-reaction 的 canInjectNow
+	// 动作（连接中断自动续跑）与 task-chat-input 投递的让路守卫共享，保证两条程序化注入路径同源判断。
+	private canInjectIntoTerminalNow(active: ActiveProcessState): boolean {
+		if (active.deferredStartupInput !== null) {
+			return false;
+		}
+		if (active.lastUserInputAt !== null && now() - active.lastUserInputAt < OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS) {
+			return false;
+		}
+		return true;
+	}
+
 	// 把 text 作为一条「已提交的用户轮」投递进活跃 terminal agent 的输入框，在 TUI 提示符就绪时
 	// （带沉降 + 有界轮询 + deadline 兜底）再真正写入 PTY 并提交。同步返回当前 summary（= 已受理投递，
 	// 保持调用方的 synthetic 回执契约）；无活跃 session 时返回 null。实际 PTY 写入异步发生。
@@ -642,7 +672,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		active.taskChatInputDeliveryTimer = null;
-		const ready = await this.resolveInteractivePromptReadiness(entry);
+		const readiness = await this.resolveInteractivePromptReadiness(entry);
 		// await 期间 session 可能已被替换/结束：复查同一 active 仍在。
 		const currentEntry = this.entries.get(taskId);
 		const currentActive = currentEntry?.active;
@@ -655,12 +685,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		const pastDeadline = now() >= deadlineAt;
-		if (!ready && !pastDeadline) {
-			const timer = setTimeout(() => {
-				void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation);
-			}, TASK_CHAT_INPUT_DELIVERY_RECHECK_MS);
-			timer.unref?.();
-			currentActive.taskChatInputDeliveryTimer = timer;
+		if (readiness === null && !pastDeadline) {
+			// 尚未就绪且未过 deadline：隔 RECHECK_MS 再探（纯轮询，不消耗额外语义）。
+			this.scheduleTaskChatInputDeliveryRecheck(taskId, text, deadlineAt, generation, currentActive);
+			return;
+		}
+		// A1 让路：用户近窗口在手敲（或 deferred-startup 仍待发）→ 不插进用户正在打字的那一行中间，
+		// 改排一次重试；ready 与 deadline 两支都覆盖（用户正往 Claude 输入框里打字时框线仍在，ready 也会插队）。
+		// 防饿死硬上限：deadline 之后再让路至多 MAX_DEADLINE_INPUT_YIELD_MS，到点无条件保底强写（投递绝不丢）。
+		// 仍不写自身 lastUserInputAt（程序化投递只读人类的、不写自己的），故让路判断只受真人手敲影响。
+		if (
+			!this.canInjectIntoTerminalNow(currentActive) &&
+			now() < deadlineAt + TASK_CHAT_INPUT_DELIVERY_MAX_DEADLINE_INPUT_YIELD_MS
+		) {
+			this.scheduleTaskChatInputDeliveryRecheck(taskId, text, deadlineAt, generation, currentActive);
 			return;
 		}
 		// 就绪命中 或 deadline 兜底：直接写 PTY（不走 writeInput，避免把程序化投递记成 lastUserInputAt
@@ -672,37 +710,66 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		logTuiFreezeWarning(
 			`[tui-freeze] task-chat-input-delivered taskId=${taskId} agentId=${currentEntry.summary.agentId} ` +
-				`via=${ready ? "prompt-ready" : "deadline-fallback"} chars=${text.length}`,
+				`via=${resolveTaskChatInputDeliveryVia(readiness)} chars=${text.length}`,
 		);
+	}
+
+	// 排一次 RECHECK_MS 后的投递重试（未就绪轮询 / A1 让路重排共用），沿用捕获的 deadlineAt + generation。
+	private scheduleTaskChatInputDeliveryRecheck(
+		taskId: string,
+		text: string,
+		deadlineAt: number,
+		generation: number,
+		active: ActiveProcessState,
+	): void {
+		const timer = setTimeout(() => {
+			void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation);
+		}, TASK_CHAT_INPUT_DELIVERY_RECHECK_MS);
+		timer.unref?.();
+		active.taskChatInputDeliveryTimer = timer;
 	}
 
 	// 提示符就绪判定（双通道）：① 快路径——默认配置下输出反应扫描缓冲在线，复用同步的
 	// isAtInteractivePromptForReaction（便宜、可测）；② 兜底——永远在线的全屏镜像快照（即便反应引擎关闭，
 	// 也已捕获 Stop 后的最终提示符渲染），去 ANSI 后跑同一组提示符就绪预测。任一命中即就绪。
-	private async resolveInteractivePromptReadiness(entry: SessionEntry): Promise<boolean> {
+	private async resolveInteractivePromptReadiness(entry: SessionEntry): Promise<TaskChatInputDeliveryReadiness> {
 		const active = entry.active;
 		if (!active) {
-			return false;
+			return null;
 		}
 		const predicate = resolveTuiInteractivePromptPredicate(entry.summary.agentId);
 		// 无 TUI 就绪预测的终端 agent（droid / kiro 等）：没有可门控的提示符信号，
 		// 维持「立即投递」语义——否则会一律拖到 deadline 兜底才写，相对就绪门控前的即时写是回归。
 		if (predicate === null) {
-			return true;
+			return "immediate";
 		}
 		if (active.outputReactionScanBuffer !== null && this.isAtInteractivePromptForReaction(entry)) {
-			return true;
+			return "prompt";
 		}
 		const mirror = entry.terminalStateMirror;
-		if (!mirror) {
-			return false;
+		if (mirror) {
+			const snapshot = await mirror.getSnapshot();
+			// 仅按当前视口（最后 rows 行）判定就绪：getSnapshot() 含完整 scrollback（TERMINAL_SCROLLBACK=100_000，
+			// 服务于终端 restore，须保持原样），而历史里早先出现过的提示符框会误判「当前屏」就绪——把投递写进
+			// 正处于重绘/出输出的非就绪窗口，正是本特性要消除的「粘贴了但 CR 被吞、不发送」竞态。
+			const scan = stripAnsiAndControl(takeLastLines(snapshot.snapshot, snapshot.rows));
+			if (predicate(scan)) {
+				return "prompt";
+			}
 		}
-		const snapshot = await mirror.getSnapshot();
-		// 仅按当前视口（最后 rows 行）判定就绪：getSnapshot() 含完整 scrollback（TERMINAL_SCROLLBACK=100_000，
-		// 服务于终端 restore，须保持原样），而历史里早先出现过的提示符框会误判「当前屏」就绪——把投递写进
-		// 正处于重绘/出输出的非就绪窗口，正是本特性要消除的「粘贴了但 CR 被吞、不发送」竞态。
-		const scan = stripAnsiAndControl(takeLastLines(snapshot.snapshot, snapshot.rows));
-		return predicate(scan);
+		// A2 稳健 idle 兜底：提示符正则在该环境整窗不命中（真实 viewport 未呈现可匹配 idle 框 / mirror rows 截断）
+		// 时，复用既有 idle 原语避免拖满 60s deadline。仅当 agent 已让出回合（turnOwner !== "agent"，RVF 投递时
+		// 的稳定态）且终端字节已静默（isAgentOutputQuiet，≥AGENT_OUTPUT_QUIET_THRESHOLD_MS=2s，TUI 重绘已落定）
+		// 才放行：turnOwner 门控保证不在 agent 回合中途的短暂静默里误投，字节静默门控规避「粘贴但 CR 被吞」竞态。
+		// 这是额外的 OR 兜底，不放宽上面的视口判定（Issue 1 回归守卫保持）。降级安全：若 idle Claude 仍周期吐字节
+		// （lastOutputAt 恒新鲜），此条不触发 → 行为退回今日，predicate / deadline 仍在。
+		if (
+			resolveSessionFacets(entry.summary).turnOwner !== "agent" &&
+			evaluateAgentOutputQuiet(entry.summary.lastOutputAt ?? null, now())
+		) {
+			return "quiet";
+		}
+		return null;
 	}
 
 	// 更新 summary.connectionRetry 并广播（驱动看板徽标 / 顶栏重试列表）。
