@@ -141,30 +141,6 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					} satisfies RuntimeHookIngestResponse;
 				}
 
-				if (event === "to_review") {
-					const nextTurn = (transitionedSummary.latestTurnCheckpoint?.turn ?? 0) + 1;
-					const checkpointCwd = transitionedSummary.workspacePath ?? workspacePath;
-					const staleRef = transitionedSummary.previousTurnCheckpoint?.ref ?? null;
-					try {
-						const checkpoint = await checkpointCapture({
-							cwd: checkpointCwd,
-							taskId,
-							turn: nextTurn,
-						});
-						manager.applyTurnCheckpoint(taskId, checkpoint);
-						if (staleRef) {
-							void checkpointRefDelete({
-								cwd: checkpointCwd,
-								ref: staleRef,
-							}).catch(() => {
-								// Best effort cleanup only.
-							});
-						}
-					} catch {
-						// Best effort checkpointing only.
-					}
-				}
-
 				if (body.metadata) {
 					manager.applyHookActivity(taskId, body.metadata);
 				}
@@ -178,6 +154,38 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						taskId,
 						resolveSessionFacets(transitionedSummary).userTurnKind,
 					);
+
+					// F1：把 turn-checkpoint 的 git 工作移出 hook 客户端的响应关键路径。
+					// 看板列状态在 transitionToReview 时即已落定、并随上面两条广播即时下发；checkpoint 仅为
+					// UI 的 base-commit（fork-point）服务，对列状态毫无必要。旧版同步 await 它，会把 7 个 git
+					// 子进程的耗时（大仓 / 慢盘 / 与 agent 抢 .git/index.lock 时轻松破 3s）整段压进 hook 客户端
+					// 的硬超时窗口，触发误判超时 → fail-open 静默丢投。改为不 await 的后台任务：完成后
+					// applyTurnCheckpoint 再补发一次 workspace-state 广播把 base-commit 推给 UI，staleRef 清理
+					// 挂在其后。沿用既有 best-effort try/catch——checkpoint 失败绝不回滚已落定的转审。
+					const nextTurn = (transitionedSummary.latestTurnCheckpoint?.turn ?? 0) + 1;
+					const checkpointCwd = transitionedSummary.workspacePath ?? workspacePath;
+					const staleRef = transitionedSummary.previousTurnCheckpoint?.ref ?? null;
+					void (async () => {
+						try {
+							const checkpoint = await checkpointCapture({
+								cwd: checkpointCwd,
+								taskId,
+								turn: nextTurn,
+							});
+							manager.applyTurnCheckpoint(taskId, checkpoint);
+							await deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
+							if (staleRef) {
+								await checkpointRefDelete({
+									cwd: checkpointCwd,
+									ref: staleRef,
+								}).catch(() => {
+									// Best effort cleanup only.
+								});
+							}
+						} catch {
+							// Best effort checkpointing only.
+						}
+					})();
 				}
 
 				return { ok: true } satisfies RuntimeHookIngestResponse;

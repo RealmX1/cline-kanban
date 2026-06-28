@@ -482,15 +482,19 @@ describe("createHooksApi", () => {
 		});
 
 		expect(response).toEqual({ ok: true });
+		// F1：checkpoint 已移出响应关键路径，作为不 await 的后台任务在 ingest 返回后才落定。
+		// 故 capture/applyTurnCheckpoint/deleteRef 这些副作用要 waitFor，而非在 ingest 返回那刻断言。
+		await vi.waitFor(() => {
+			expect(deleteTaskTurnCheckpointRef).toHaveBeenCalledWith({
+				cwd: "/tmp/worktree",
+				ref: "refs/kanban/checkpoints/task-1/turn/1",
+			});
+		});
 		expect(captureTaskTurnCheckpoint).toHaveBeenCalledWith({
 			cwd: "/tmp/worktree",
 			taskId: "task-1",
 			turn: 3,
 		});
 		expect(manager.applyTurnCheckpoint).toHaveBeenCalledTimes(1);
-		expect(deleteTaskTurnCheckpointRef).toHaveBeenCalledWith({
-			cwd: "/tmp/worktree",
-			ref: "refs/kanban/checkpoints/task-1/turn/1",
-		});
 	});
 });
