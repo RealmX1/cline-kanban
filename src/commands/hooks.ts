@@ -1,12 +1,17 @@
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { createTRPCProxyClient, httpBatchLink, TRPCClientError } from "@trpc/client";
 import type { Command } from "commander";
-import type { RuntimeHookEvent, RuntimeTaskHookActivity } from "../core/api-contract";
+import type { RuntimeHookEvent, RuntimeHookIngestResponse, RuntimeTaskHookActivity } from "../core/api-contract";
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { buildKanbanRuntimeUrl, getRuntimeFetch } from "../core/runtime-endpoint";
 import { buildWindowsCmdArgsArray, resolveWindowsComSpec, shouldUseWindowsCmdLaunch } from "../core/windows-cmd-launch";
+import {
+	type HookDeliveryFailureKind,
+	recordHookDeliveryFailure,
+} from "../diagnostics/hook-ingest-delivery-failure-logger";
 import { parseHookRuntimeContextFromEnv } from "../terminal/hook-runtime-context";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import {
@@ -375,6 +380,95 @@ function parseHooksIngestArgs(
 	};
 }
 
+// F2：单次投递的客户端超时（ms）。env 可调（过度指定命名），默认略宽于旧硬编码 3000——F1 落地后
+// 服务端响应已降到亚秒级，这层超时只作上限兜底，留出余量给冷启动 manager 加载等慢路径。
+const DEFAULT_HOOK_INGEST_TIMEOUT_MS = 3500;
+// F2：投递最多尝试次数（含首次）。有界，使 codex 路径最坏总耗时（MAX_ATTEMPTS × timeoutMs + backoff）
+// 仍落在 CODEX_HOOK_TIMEOUT_SECONDS（已随本批抬到 8s）窗口内、不被 codex 先回收 hook 进程。
+// 2 次 = 首投 + 1 次重试；F1 落地后首投几乎必中，这次重试是给瞬时尖刺（daemon 忙 / .git/index.lock
+// 争用 / 短暂不可达）的兜底。
+const HOOK_INGEST_MAX_ATTEMPTS = 2;
+const HOOK_INGEST_RETRY_BACKOFF_MS = 250;
+
+function resolveHookIngestTimeoutMs(): number {
+	const raw = process.env.KANBAN_HOOK_INGEST_TIMEOUT_MS;
+	if (raw === undefined) {
+		return DEFAULT_HOOK_INGEST_TIMEOUT_MS;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return DEFAULT_HOOK_INGEST_TIMEOUT_MS;
+	}
+	return parsed;
+}
+
+// F2 核心：把「有界重试 + 传输/业务失败分流」抽成纯函数（注入 mutate + 回调），使单测能在不起真实
+// tRPC/网络的前提下锁住行为。分流判据天然干净：
+//   - mutate 成功 resolve（HTTP 200，body 带逻辑结果）→ 看 .ok。{ok:false} 是 daemon **可达**但逻辑拒绝
+//     （workspace/task not found 等），重试不会变 → 立即按 "rejected" 记录并抛，**不重试**。
+//   - mutate / withTimeout **抛出** → 传输层故障（超时 / daemon 不可达 / 锁争用）→ 可重试；耗尽后按
+//     "transport" 记录并抛。
+// onFinalFailure 仅在「最终放弃」时触发一次（中途重试不触发），由调用方接 F3 的丢投记录。
+export async function deliverHookIngestWithRetry(
+	mutate: () => Promise<RuntimeHookIngestResponse>,
+	options: {
+		timeoutMs: number;
+		maxAttempts: number;
+		backoffMs: number;
+		onFinalFailure?: (info: {
+			attempts: number;
+			failureKind: HookDeliveryFailureKind;
+			error: unknown;
+		}) => Promise<void> | void;
+	},
+): Promise<void> {
+	let lastTransportError: unknown = null;
+	for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
+		let ingestResponse: RuntimeHookIngestResponse;
+		try {
+			ingestResponse = await withTimeout(mutate(), options.timeoutMs, "kanban hooks ingest");
+		} catch (transportError) {
+			lastTransportError = transportError;
+			if (attempt < options.maxAttempts) {
+				await delay(options.backoffMs);
+				continue;
+			}
+			await options.onFinalFailure?.({ attempts: attempt, failureKind: "transport", error: transportError });
+			throw transportError;
+		}
+		if (ingestResponse.ok === false) {
+			const businessError = new Error(ingestResponse.error ?? "Hook ingest failed");
+			await options.onFinalFailure?.({ attempts: attempt, failureKind: "rejected", error: businessError });
+			throw businessError;
+		}
+		return;
+	}
+	// 不可达（循环每轮非 return 即 throw）；满足 TS 控制流分析的兜底。
+	throw lastTransportError instanceof Error ? lastTransportError : new Error("kanban hooks ingest failed");
+}
+
+// F3：仅生命周期事件（非 activity）的最终失败才落丢投记录——activity 纯元数据、不改看板列，
+// daemon 不可达时高频活动事件不该刷爆记录文件。
+function recordIngestDropForLifecycleEvent(
+	args: HooksIngestArgs,
+	attempts: number,
+	failureKind: HookDeliveryFailureKind,
+	error: unknown,
+): Promise<void> {
+	if (args.event === "activity") {
+		return Promise.resolve();
+	}
+	return recordHookDeliveryFailure({
+		event: args.event,
+		taskId: args.taskId,
+		workspaceId: args.workspaceId,
+		source: args.metadata?.source ?? null,
+		attempts,
+		failureKind,
+		error: formatError(error),
+	});
+}
+
 async function ingestHookEvent(args: HooksIngestArgs): Promise<void> {
 	const trpcClient = createTRPCProxyClient<RuntimeAppRouter>({
 		links: [
@@ -388,19 +482,22 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<void> {
 			}),
 		],
 	});
-	const ingestResponse = await withTimeout(
-		trpcClient.hooks.ingest.mutate({
-			taskId: args.taskId,
-			workspaceId: args.workspaceId,
-			event: args.event,
-			metadata: args.metadata,
-		}),
-		3000,
-		"kanban hooks ingest",
+	await deliverHookIngestWithRetry(
+		() =>
+			trpcClient.hooks.ingest.mutate({
+				taskId: args.taskId,
+				workspaceId: args.workspaceId,
+				event: args.event,
+				metadata: args.metadata,
+			}),
+		{
+			timeoutMs: resolveHookIngestTimeoutMs(),
+			maxAttempts: HOOK_INGEST_MAX_ATTEMPTS,
+			backoffMs: HOOK_INGEST_RETRY_BACKOFF_MS,
+			onFinalFailure: ({ attempts, failureKind, error }) =>
+				recordIngestDropForLifecycleEvent(args, attempts, failureKind, error),
+		},
 	);
-	if (ingestResponse.ok === false) {
-		throw new Error(ingestResponse.error ?? "Hook ingest failed");
-	}
 }
 
 function spawnBackgroundKanban(args: string[]): void {
