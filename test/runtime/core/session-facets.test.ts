@@ -476,6 +476,28 @@ describe("黄金转移（经真实终端 reducer reduceSessionTransition）", ()
 		expect(back.userTurnKind).toBe(null);
 	});
 
+	// manual_review 现可翻回 running（原 cd472d0 的永久锁已拆）：活跃 agent 的下一笔 to_in_progress
+	// （PostToolUse / UserPromptSubmit）或 prompt-ready 即解锁，卡片回 In Progress。to_in_progress 与
+	// agent.prompt-ready 共用 reducer 同一分支，两路都断言以防未来重锁其一。
+	it("hook.to_in_progress：awaiting_review(manual_review) → running，回 agent/live，reviewReason 清空", () => {
+		const review = applyPatch(running, { type: "hook.to_review", reviewReason: "manual_review" }, 2_000);
+		expect(review.reviewReason).toBe("manual_review");
+		const back = applyPatch(review, { type: "hook.to_in_progress" }, 6_000);
+		expect(back.state).toBe("running");
+		expect(back.turnOwner).toBe("agent");
+		expect(back.liveness).toBe("live");
+		expect(back.userTurnKind).toBe(null);
+		expect(back.reviewReason).toBe(null);
+	});
+
+	it("agent.prompt-ready：awaiting_review(manual_review) → running（同分支，亦解锁）", () => {
+		const review = applyPatch(running, { type: "hook.to_review", reviewReason: "manual_review" }, 2_000);
+		const back = applyPatch(review, { type: "agent.prompt-ready" }, 6_000);
+		expect(back.state).toBe("running");
+		expect(back.turnOwner).toBe("agent");
+		expect(back.reviewReason).toBe(null);
+	});
+
 	// 评审修正 #5 / 风险 #1：A2 反转后 reducer 的 process.exit 必须传 pid:null（后退出）+ agentId 进派生。
 	// 锁 patch.liveness（非只锁 state）—— exited↔live 区分是本重构存在意义，误用 summary.pid 会让
 	// state/test 全过却悄毁该区分。交叉 agentId∈{claude,cline,null}：

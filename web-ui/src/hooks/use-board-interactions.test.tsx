@@ -1085,6 +1085,77 @@ describe("useBoardInteractions", () => {
 		expect(inProgressCards).toEqual([]);
 	});
 
+	// Change 1 回归：Review 列补装与 Validation 同款活跃度 offset。空闲 / 卡死的 agent 回合卡（陈旧
+	// lastSubstantiveOutputAt）此前被裸 turnOwner==="agent" 反复打回 In Progress——这正是当年加 manual_review
+	// 永久锁的动因；补 offset 后它们留在 Review，仅真在产出时才打回。镜像上方两个 Validation 用例。
+	it("keeps an idle (output-quiet) agent-turn task in Review instead of bouncing it", async () => {
+		let currentBoard = createBoardWithTaskInColumn("task-idle-review", "review");
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopLinkedBacklogTaskActions();
+
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+		});
+		// lastSubstantiveOutputAt well beyond the 5s quiet threshold → idle agent turn (no fresh substance).
+		const idleSessions = {
+			"task-idle-review": createRunningSession("task-idle-review", {
+				lastOutputAt: Date.now() - 60_000,
+				lastSubstantiveOutputAt: Date.now() - 60_000,
+			}),
+		};
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={currentBoard}
+					setBoard={setBoard}
+					ensureTaskWorkspace={async () => ({ ok: true as const })}
+					startTaskSession={async () => ({ ok: true as const })}
+					initialSessions={idleSessions}
+				/>,
+			);
+		});
+
+		const reviewCards = currentBoard.columns.find((column) => column.id === "review")?.cards ?? [];
+		const inProgressCards = currentBoard.columns.find((column) => column.id === "in_progress")?.cards ?? [];
+		expect(reviewCards.map((card) => card.id)).toEqual(["task-idle-review"]);
+		expect(inProgressCards).toEqual([]);
+	});
+
+	it("bounces an actively-producing agent-turn task out of Review back to In Progress", async () => {
+		let currentBoard = createBoardWithTaskInColumn("task-active-review", "review");
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopLinkedBacklogTaskActions();
+
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+		});
+		// lastSubstantiveOutputAt within the 5s quiet threshold → actively producing substantive output.
+		const activeSessions = {
+			"task-active-review": createRunningSession("task-active-review", {
+				lastOutputAt: Date.now() - 500,
+				lastSubstantiveOutputAt: Date.now() - 500,
+			}),
+		};
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={currentBoard}
+					setBoard={setBoard}
+					ensureTaskWorkspace={async () => ({ ok: true as const })}
+					startTaskSession={async () => ({ ok: true as const })}
+					initialSessions={activeSessions}
+				/>,
+			);
+		});
+
+		const reviewCards = currentBoard.columns.find((column) => column.id === "review")?.cards ?? [];
+		const inProgressCards = currentBoard.columns.find((column) => column.id === "in_progress")?.cards ?? [];
+		expect(reviewCards).toEqual([]);
+		expect(inProgressCards.map((card) => card.id)).toEqual(["task-active-review"]);
+	});
+
 	it("confirms before moving a review card to Done but moves a validation card directly", async () => {
 		const requestMoveTaskToTrashWithAnimation = vi.fn(async () => {});
 
