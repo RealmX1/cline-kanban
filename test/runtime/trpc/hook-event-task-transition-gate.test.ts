@@ -19,6 +19,10 @@ import { canTransitionTaskForHookEvent } from "../../../src/trpc/hook-event-task
 
 const ALL_EVENTS: readonly RuntimeHookEvent[] = ["to_review", "to_in_progress", "activity"];
 const ALL_STATES: readonly RuntimeTaskSessionState[] = ["idle", "running", "awaiting_review", "failed", "interrupted"];
+// 故意不含 "manual_review"：它是 legacy `state` 时代之后才引入的 reviewReason（cd472d0），无对应
+// 的 legacy state 行为可等价，且解锁后其 to_in_progress 放行是**有意的 post-legacy 漂移**
+// （production=true vs legacyCanTransition=false）。把它加进本表会让下方「全表逐项等价旧 legacy 判据」
+// 的扫描在 manual_review 行误判失败。manual_review 的放行由下方专门用例单独锁定。
 const ALL_REVIEW_REASONS: readonly RuntimeTaskSessionReviewReason[] = [
 	null,
 	"attention",
@@ -77,8 +81,9 @@ describe("canTransitionTaskForHookEvent (legacy state → facet 行为保持)", 
 		}
 	});
 
-	it("to_in_progress 仅在 awaiting_review + reviewReason∈{attention,hook,error} 时放行", () => {
-		for (const reviewReason of ["attention", "hook", "error"] as const) {
+	it("to_in_progress 仅在 awaiting_review + reviewReason∈{attention,hook,error,manual_review} 时放行", () => {
+		// manual_review（「移至 Review」手动钉住）现也放行——活跃 agent 的下一笔 to_in_progress 即可解锁回 In Progress。
+		for (const reviewReason of ["attention", "hook", "error", "manual_review"] as const) {
 			expect(
 				canTransitionTaskForHookEvent(makeSummary({ state: "awaiting_review", reviewReason }), "to_in_progress"),
 			).toBe(true);
