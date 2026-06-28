@@ -78,11 +78,11 @@ function createSummary(
 	};
 }
 
-// React 受控 input：直接赋值不会触发 onChange，需走原生 setter + input 事件。
-function setControlledInputValue(input: HTMLInputElement, value: string): void {
-	const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-	setter?.call(input, value);
-	input.dispatchEvent(new Event("input", { bubbles: true }));
+// React 受控 textarea：直接赋值不会触发 onChange，需走原生 setter + input 事件。
+function setControlledTextareaValue(textarea: HTMLTextAreaElement, value: string): void {
+	const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+	setter?.call(textarea, value);
+	textarea.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function Harness(): React.ReactElement {
@@ -1178,15 +1178,15 @@ describe("BoardCard", () => {
 			root.render(<BoardCard card={createCard()} index={0} columnId="in_progress" onSaveTitle={() => {}} />);
 		});
 
-		expect(container.querySelector("input")).toBeNull();
+		expect(container.querySelector("textarea")).toBeNull();
 
 		await act(async () => {
 			getTitleParagraph(container)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 		});
 
-		const input = container.querySelector<HTMLInputElement>("input");
-		expect(input).toBeInstanceOf(HTMLInputElement);
-		expect(input?.value).toBe("Review API changes");
+		const titleEditField = container.querySelector<HTMLTextAreaElement>("textarea");
+		expect(titleEditField).toBeInstanceOf(HTMLTextAreaElement);
+		expect(titleEditField?.value).toBe("Review API changes");
 	});
 
 	it("enters title edit mode on double-click for done (trash) cards", async () => {
@@ -1202,7 +1202,7 @@ describe("BoardCard", () => {
 			getTitleParagraph(container)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 		});
 
-		expect(container.querySelector("input")).toBeInstanceOf(HTMLInputElement);
+		expect(container.querySelector("textarea")).toBeInstanceOf(HTMLTextAreaElement);
 	});
 
 	it("saves the renamed title on Enter after double-click edit", async () => {
@@ -1216,15 +1216,15 @@ describe("BoardCard", () => {
 			getTitleParagraph(container)?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 		});
 
-		const input = container.querySelector<HTMLInputElement>("input");
-		expect(input).toBeInstanceOf(HTMLInputElement);
+		const titleEditField = container.querySelector<HTMLTextAreaElement>("textarea");
+		expect(titleEditField).toBeInstanceOf(HTMLTextAreaElement);
 
 		await act(async () => {
-			input?.focus();
-			if (input) {
-				setControlledInputValue(input, "Renamed via enter");
+			titleEditField?.focus();
+			if (titleEditField) {
+				setControlledTextareaValue(titleEditField, "Renamed via enter");
 			}
-			input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+			titleEditField?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 		});
 
 		expect(onSaveTitle).toHaveBeenCalledWith("task-1", "Renamed via enter");
@@ -1273,7 +1273,7 @@ describe("BoardCard", () => {
 				vi.advanceTimersByTime(500);
 			});
 			expect(onClick).not.toHaveBeenCalled();
-			expect(container.querySelector("input")).toBeInstanceOf(HTMLInputElement);
+			expect(container.querySelector("textarea")).toBeInstanceOf(HTMLTextAreaElement);
 		} finally {
 			vi.useRealTimers();
 		}
