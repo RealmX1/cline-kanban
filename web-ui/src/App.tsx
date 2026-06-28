@@ -200,6 +200,7 @@ export default function App(): ReactElement {
 		ensureTaskWorkspace,
 		startTaskSession,
 		stopTaskSession,
+		transitionTaskToReview,
 		continueConnectionRetrySessions,
 		dismissConnectionRetrySessions,
 		sendTaskSessionInput,
@@ -627,6 +628,8 @@ export default function App(): ReactElement {
 		cancelMoveToDone,
 		handleMoveCardToValidation,
 		handleMoveSelectedCardToValidation,
+		handleMoveCardToReview,
+		moveToReviewLoadingById,
 		handleRestoreTaskFromTrash,
 		handleOpenDeleteTask,
 		handleCancelDeleteTask,
@@ -651,6 +654,7 @@ export default function App(): ReactElement {
 		setIsClearTrashDialogOpen,
 		setIsGitHistoryOpen,
 		stopTaskSession,
+		transitionTaskToReview,
 		cleanupTaskWorkspace,
 		ensureTaskWorkspace,
 		startTaskSession,
@@ -1016,8 +1020,10 @@ export default function App(): ReactElement {
 												commitTaskLoadingById={commitTaskLoadingById}
 												openPrTaskLoadingById={openPrTaskLoadingById}
 												moveToTrashLoadingById={moveToTrashLoadingById}
+												moveToReviewLoadingById={moveToReviewLoadingById}
 												onMoveToTrashTask={handleMoveReviewCardToTrash}
 												onMoveToValidationTask={handleMoveCardToValidation}
+												onMoveToReviewTask={handleMoveCardToReview}
 												onRestoreFromTrashTask={handleRestoreTaskFromTrash}
 												onDeleteTask={handleOpenDeleteTask}
 												dependencies={board.dependencies}
@@ -1109,6 +1115,7 @@ export default function App(): ReactElement {
 									moveToTrashLoadingById={moveToTrashLoadingById}
 									onMoveReviewCardToTrash={handleMoveReviewCardToTrash}
 									onMoveReviewCardToValidation={handleMoveCardToValidation}
+									onMoveCardToReview={handleMoveCardToReview}
 									onRestoreTaskFromTrash={handleRestoreTaskFromTrash}
 									onDeleteTask={handleOpenDeleteTask}
 									onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}

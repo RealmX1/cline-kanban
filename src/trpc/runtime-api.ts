@@ -46,6 +46,7 @@ import {
 	parseTaskSessionInputRequest,
 	parseTaskSessionStartRequest,
 	parseTaskSessionStopRequest,
+	parseTaskSessionTransitionToReviewRequest,
 	parseTaskTerminalRefreshRequest,
 	parseTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
 } from "../core/api-validation";
@@ -463,6 +464,26 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const summary = terminalManager.stopTaskSession(body.taskId);
+				return {
+					ok: Boolean(summary),
+					summary,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					ok: false,
+					summary: null,
+					error: message,
+				};
+			}
+		},
+		transitionTaskToReview: async (workspaceScope, input) => {
+			try {
+				const body = parseTaskSessionTransitionToReviewRequest(input);
+				// 仅终端 agent（claude/codex）会卡在 agent 回合 / 拖 Review 被打回；Cline SDK 在进程内自报完成、
+				// 不经此入口。故只路由到 scoped terminal manager；非终端任务 → null summary → ok:false。
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const summary = terminalManager.transitionToReview(body.taskId, "manual_review");
 				return {
 					ok: Boolean(summary),
 					summary,

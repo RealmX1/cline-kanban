@@ -1681,13 +1681,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
-		if (reason !== "hook") {
+		// "hook"=agent 自然完成（Stop hook）；"manual_review"=用户经卡片悬浮按钮手动翻入审查回合。其余成因
+		// （exit/error/interrupted/attention/null）不经此入口转 review，原样返回当前 summary（no-op）。
+		if (reason !== "hook" && reason !== "manual_review") {
 			return cloneSummary(entry.summary);
 		}
 		const before = entry.summary;
-		// userTurnKindOverride（B3 Claude permission 采集）随 hook.to_review 事件下发，由 reducer 在 user 回合
-		// 覆写人轴（经完整 facet 三元组，不裸写单字段）。
-		const summary = this.applySessionEvent(entry, { type: "hook.to_review", userTurnKindOverride });
+		// reviewReason 透传进 hook.to_review 事件 → 既 stamp 进 summary、又驱动 userTurnKind 派生。
+		// userTurnKindOverride（B3 Claude permission 采集）随同事件下发，由 reducer 在 user 回合覆写人轴
+		// （经完整 facet 三元组，不裸写单字段）。
+		const summary = this.applySessionEvent(entry, {
+			type: "hook.to_review",
+			reviewReason: reason,
+			userTurnKindOverride,
+		});
 		if (summary !== before && entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));

@@ -64,6 +64,7 @@ interface UseBoardInteractionsInput {
 	setIsClearTrashDialogOpen: Dispatch<SetStateAction<boolean>>;
 	setIsGitHistoryOpen: Dispatch<SetStateAction<boolean>>;
 	stopTaskSession: (taskId: string) => Promise<void>;
+	transitionTaskToReview: (taskId: string) => Promise<boolean>;
 	cleanupTaskWorkspace: UseTaskSessionsResult["cleanupTaskWorkspace"];
 	ensureTaskWorkspace: UseTaskSessionsResult["ensureTaskWorkspace"];
 	startTaskSession: UseTaskSessionsResult["startTaskSession"];
@@ -95,6 +96,9 @@ export interface UseBoardInteractionsResult {
 	cancelMoveToDone: () => void;
 	handleMoveCardToValidation: (taskId: string) => void;
 	handleMoveSelectedCardToValidation: () => void;
+	// 手动「移至 Review」：仅 In Progress 卡可用，翻会话回合 + 由 Rule A 自动落位 Review。
+	handleMoveCardToReview: (taskId: string) => void;
+	moveToReviewLoadingById: Record<string, boolean>;
 	handleRestoreTaskFromTrash: (taskId: string) => void;
 	handleOpenDeleteTask: (taskId: string) => void;
 	handleCancelDeleteTask: () => void;
@@ -121,6 +125,7 @@ export function useBoardInteractions({
 	setIsClearTrashDialogOpen,
 	setIsGitHistoryOpen,
 	stopTaskSession,
+	transitionTaskToReview,
 	cleanupTaskWorkspace,
 	ensureTaskWorkspace,
 	startTaskSession,
@@ -137,6 +142,8 @@ export function useBoardInteractions({
 		Record<string, PendingProgrammaticStartMoveCompletion>
 	>({});
 	const [moveToTrashLoadingById, setMoveToTrashLoadingById] = useState<Record<string, boolean>>({});
+	// 「移至 Review」按钮的 per-task in-flight 态（端点 await 期间显 Spinner）。
+	const [moveToReviewLoadingById, setMoveToReviewLoadingById] = useState<Record<string, boolean>>({});
 	// Pending "Move to Done" awaiting confirmation. Set whenever a move would skip the manual
 	// Validation step (from Review / In Progress); the App-level SkipValidationConfirmDialog reads
 	// this to open, and confirm/cancel resolve it. null = no confirmation in flight.
@@ -482,15 +489,18 @@ export function useBoardInteractions({
 					}
 					continue;
 				}
-				// Review 列：维持原行为——agent 回合会话不应停在 review（review 是等人审查回合的
-				// 自动落位区），一律打回 In Progress。**例外（强制）**：parked（已派发后台工作、等自行恢复）
-				// 的会话虽是 agent 回合，但被外部编排有意放在 review 等结果——不可打回，否则会被反复 bounce / 抖动。
-				// Validation 列：收窄判据——仅当 agent 此刻仍在持续产出输出时才打回；空闲 / 已退出
-				// 却仍处 agent 回合的会话允许停留在 Validation（见 isAgentActivelyProducingOutput 注释）。
+				// Review 列与 Validation 列对齐——同用活跃度 offset：仅当 agent 此刻仍在持续产出输出
+				// （isAgentActivelyProducingOutput，内含 turnOwner==="agent"）时才打回 In Progress；空闲 /
+				// 卡死 / 已退出却仍处 agent 回合的会话允许停留在 review（review 是等人审查回合的自动落位区，
+				// 也是「移至 Review」手动钉住空闲会话的落位区）。原 Review 分支只读裸 turnOwner==="agent"，
+				// 把空闲 / 卡死的 agent 回合会话也反复打回——这正是当年为绕开它而加 manual_review 永久锁的动因；
+				// 补上 offset 后该锁不再必要（见 session-state-machine.ts canReturnToRunning）。
+				// **例外（强制）**：parked（已派发后台工作、等自行恢复）的会话被外部编排有意放在 review 等结果，
+				// 即便仍在产出也不可打回，否则会被反复 bounce / 抖动。
 				const shouldBounceRunningToInProgress =
-					(facets.turnOwner === "agent" &&
-						columnId === "review" &&
-						!isParkedAwaitingDispatchedBackgroundWork(summary)) ||
+					(columnId === "review" &&
+						!isParkedAwaitingDispatchedBackgroundWork(summary) &&
+						isAgentActivelyProducingOutput(summary, nowMs)) ||
 					(columnId === "validation" && isAgentActivelyProducingOutput(summary, nowMs));
 				if (shouldBounceRunningToInProgress) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
@@ -882,6 +892,42 @@ export function useBoardInteractions({
 		handleMoveCardToValidation(selectedCard.card.id);
 	}, [handleMoveCardToValidation, selectedCard]);
 
+	// 手动「移至 Review」：把一个停在 agent 回合（多为卡死/空闲——Stop hook 未触发、进程未退）的终端 agent
+	// 任务翻入「等人审查」回合。不手动挪列：transitionTaskToReview 成功后即时 upsert 的 summary（turnOwner=user）
+	// 触发上方 level-triggered effect 的 Rule A 自动落位 Review，且 review-bounce（要求 turnOwner=agent）不再触发，
+	// 卡片稳定停在 Review。仅 In Progress 卡生效（与按钮渲染门控一致，双重保险）。
+	const handleMoveCardToReview = useCallback(
+		(taskId: string) => {
+			if (getTaskColumnId(board, taskId) !== "in_progress") {
+				return;
+			}
+			setMoveToReviewLoadingById((current) => ({ ...current, [taskId]: true }));
+			void (async () => {
+				try {
+					const ok = await transitionTaskToReview(taskId);
+					if (!ok) {
+						showAppToast({
+							intent: "warning",
+							icon: "info-sign",
+							message: "Couldn't move task to Review — try again.",
+							timeout: 3000,
+						});
+					}
+				} finally {
+					setMoveToReviewLoadingById((current) => {
+						if (!(taskId in current)) {
+							return current;
+						}
+						const next = { ...current };
+						delete next[taskId];
+						return next;
+					});
+				}
+			})();
+		},
+		[board, transitionTaskToReview],
+	);
+
 	const handleRestoreTaskFromTrash = useCallback(
 		(taskId: string) => {
 			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review");
@@ -1075,6 +1121,8 @@ export function useBoardInteractions({
 		cancelMoveToDone,
 		handleMoveCardToValidation,
 		handleMoveSelectedCardToValidation,
+		handleMoveCardToReview,
+		moveToReviewLoadingById,
 		handleRestoreTaskFromTrash,
 		handleOpenDeleteTask,
 		handleCancelDeleteTask,

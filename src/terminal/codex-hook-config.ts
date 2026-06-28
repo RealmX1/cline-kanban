@@ -4,7 +4,11 @@ import type { RuntimeHookEvent } from "../core/api-contract";
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { quoteShellArg } from "../core/shell";
 
-const CODEX_HOOK_TIMEOUT_SECONDS = 5;
+// codex 在该秒数后回收 hook 进程，即 codex 路径单条 hook 的总时间预算。F2 给 `kanban hooks ingest`
+// 加了有界重试（最坏 HOOK_INGEST_MAX_ATTEMPTS × KANBAN_HOOK_INGEST_TIMEOUT_MS + backoff ≈ 7.25s），
+// 故从 5s 抬到 8s，让重试窗口完整落在 codex 回收之前、不被 codex 先杀进程而把丢投截断成静默。
+// 正常路径 F1 后亚秒返回，这个上限极少触达。
+const CODEX_HOOK_TIMEOUT_SECONDS = 8;
 
 type CodexHookConfigEvent = "PermissionRequest" | "PostToolUse" | "PreToolUse" | "Stop" | "UserPromptSubmit";
 

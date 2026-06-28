@@ -45,12 +45,21 @@ const EXPANDED_DIFF_FILE_TREE_RATIO_PREFERENCE: ResizeNumberPreference = {
 	normalize: (value) => clampBetween(value, 0.12, 0.6),
 };
 
+// Vertical split of the right column: top = prompt library, bottom = diff. Default 50/50.
+const RIGHT_PROMPT_RATIO_PREFERENCE: ResizeNumberPreference = {
+	key: LocalStorageKey.DetailRightPromptPanelRatio,
+	defaultValue: 0.5,
+	normalize: (value) => clampBetween(value, 0.15, 0.85),
+};
+
 export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolean }): {
 	agentPanelRatio: number;
 	detailDiffFileTreeRatio: number;
+	detailRightPromptRatio: number;
 	detailTerminalPanelWidth: number;
 	setAgentPanelRatio: (ratio: number) => void;
 	setDetailDiffFileTreeRatio: (ratio: number) => void;
+	setDetailRightPromptRatio: (ratio: number) => void;
 	setDetailTerminalPanelWidth: (width: number) => void;
 	setTaskCardsPanelRatio: (ratio: number) => void;
 	taskCardsPanelRatio: number;
@@ -68,6 +77,9 @@ export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolea
 	const [expandedDetailDiffFileTreeRatio, setExpandedDetailDiffFileTreeRatioState] = useState(() =>
 		loadResizePreference(EXPANDED_DIFF_FILE_TREE_RATIO_PREFERENCE),
 	);
+	const [detailRightPromptRatio, setDetailRightPromptRatioState] = useState(() =>
+		loadResizePreference(RIGHT_PROMPT_RATIO_PREFERENCE),
+	);
 
 	const setTaskCardsPanelRatio = useCallback((ratio: number) => {
 		setTaskCardsPanelRatioState(persistResizePreference(TASK_CARDS_RATIO_PREFERENCE, ratio));
@@ -79,6 +91,10 @@ export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolea
 
 	const setDetailTerminalPanelWidth = useCallback((width: number) => {
 		setDetailTerminalPanelWidthState(persistResizePreference(DETAIL_TERMINAL_WIDTH_PREFERENCE, width));
+	}, []);
+
+	const setDetailRightPromptRatio = useCallback((ratio: number) => {
+		setDetailRightPromptRatioState(persistResizePreference(RIGHT_PROMPT_RATIO_PREFERENCE, ratio));
 	}, []);
 
 	const setDetailDiffFileTreeRatio = useCallback(
@@ -106,6 +122,7 @@ export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolea
 		setExpandedDetailDiffFileTreeRatioState(
 			getResizePreferenceDefaultValue(EXPANDED_DIFF_FILE_TREE_RATIO_PREFERENCE),
 		);
+		setDetailRightPromptRatioState(getResizePreferenceDefaultValue(RIGHT_PROMPT_RATIO_PREFERENCE));
 	});
 
 	return {
@@ -117,5 +134,7 @@ export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolea
 		setDetailTerminalPanelWidth,
 		detailDiffFileTreeRatio: isDiffExpanded ? expandedDetailDiffFileTreeRatio : collapsedDetailDiffFileTreeRatio,
 		setDetailDiffFileTreeRatio,
+		detailRightPromptRatio,
+		setDetailRightPromptRatio,
 	};
 }

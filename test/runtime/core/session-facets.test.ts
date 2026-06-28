@@ -82,6 +82,7 @@ describe("deriveUserTurnKind（reviewReason → 人轴种类）", () => {
 		["exit", "review"],
 		["completion", "review"],
 		["hook", "review"],
+		["manual_review", "review"],
 		["attention", "needs_input"],
 		[null, "needs_input"],
 	] as const)("%s → %s", (reason, expected) => {
@@ -421,7 +422,26 @@ describe("黄金转移（经真实终端 reducer reduceSessionTransition）", ()
 		expect(next.turnOwner).toBe("user");
 		expect(next.liveness).toBe("live");
 		expect(next.userTurnKind).toBe("review");
+		expect(next.reviewReason).toBe("hook");
 		expect(projectLegacyState(facetsOf(next))).toBe(next.state);
+	});
+
+	it("hook.to_review × reviewReason:manual_review（手动「移至 Review」）→ awaiting_review/user/live/review，reason 透传", () => {
+		const next = applyPatch(running, { type: "hook.to_review", reviewReason: "manual_review" }, 2_000);
+		expect(next.state).toBe("awaiting_review");
+		expect(next.turnOwner).toBe("user");
+		expect(next.liveness).toBe("live");
+		expect(next.userTurnKind).toBe("review");
+		// reviewReason 自解释 stamp（区别于 agent 自然完成的 hook），且 userTurnKind 经 deriveUserTurnKind 自洽。
+		expect(next.reviewReason).toBe("manual_review");
+		expect(projectLegacyState(facetsOf(next))).toBe(next.state);
+	});
+
+	it("hook.to_review guard：非 agent 回合（已 awaiting）再发 manual_review → 无变化（幂等）", () => {
+		const review = applyPatch(running, { type: "hook.to_review", reviewReason: "manual_review" }, 2_000);
+		const result = reduceSessionTransition(review, { type: "hook.to_review", reviewReason: "manual_review" });
+		expect(result.changed).toBe(false);
+		expect(result.patch).toEqual({});
 	});
 
 	it("process.exit code 0：awaiting_review + pid:null → exited/review", () => {
@@ -454,6 +474,28 @@ describe("黄金转移（经真实终端 reducer reduceSessionTransition）", ()
 		expect(back.turnOwner).toBe("agent");
 		expect(back.liveness).toBe("live");
 		expect(back.userTurnKind).toBe(null);
+	});
+
+	// manual_review 现可翻回 running（原 cd472d0 的永久锁已拆）：活跃 agent 的下一笔 to_in_progress
+	// （PostToolUse / UserPromptSubmit）或 prompt-ready 即解锁，卡片回 In Progress。to_in_progress 与
+	// agent.prompt-ready 共用 reducer 同一分支，两路都断言以防未来重锁其一。
+	it("hook.to_in_progress：awaiting_review(manual_review) → running，回 agent/live，reviewReason 清空", () => {
+		const review = applyPatch(running, { type: "hook.to_review", reviewReason: "manual_review" }, 2_000);
+		expect(review.reviewReason).toBe("manual_review");
+		const back = applyPatch(review, { type: "hook.to_in_progress" }, 6_000);
+		expect(back.state).toBe("running");
+		expect(back.turnOwner).toBe("agent");
+		expect(back.liveness).toBe("live");
+		expect(back.userTurnKind).toBe(null);
+		expect(back.reviewReason).toBe(null);
+	});
+
+	it("agent.prompt-ready：awaiting_review(manual_review) → running（同分支，亦解锁）", () => {
+		const review = applyPatch(running, { type: "hook.to_review", reviewReason: "manual_review" }, 2_000);
+		const back = applyPatch(review, { type: "agent.prompt-ready" }, 6_000);
+		expect(back.state).toBe("running");
+		expect(back.turnOwner).toBe("agent");
+		expect(back.reviewReason).toBe(null);
 	});
 
 	// 评审修正 #5 / 风险 #1：A2 反转后 reducer 的 process.exit 必须传 pid:null（后退出）+ agentId 进派生。

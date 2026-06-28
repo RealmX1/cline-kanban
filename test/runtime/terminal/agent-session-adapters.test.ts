@@ -113,7 +113,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:pre_tool_use:0:0"');
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:post_tool_use:0:0"');
 		expect(hookTrustState[0]).toContain('trusted_hash="sha256:');
-		expect(launchCommand).toContain("timeout=5");
+		expect(launchCommand).toContain("timeout=8");
 		expect(launchCommand).not.toContain("codex-wrapper");
 		expect(launchCommand).not.toContain("notify=");
 

@@ -439,6 +439,70 @@ describe("BoardCard", () => {
 		expect(container.querySelector('button[aria-label="Move task to validation"]')).toBeNull();
 	});
 
+	it("shows the move-to-review action on an in-progress terminal-agent card and fires onMoveToReview", async () => {
+		const onMoveToReview = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("running", { agentId: "claude" })}
+						onMoveToReview={onMoveToReview}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const reviewButton = container.querySelector<HTMLButtonElement>('button[aria-label="Move task to review"]');
+		expect(reviewButton).toBeInstanceOf(HTMLButtonElement);
+
+		await act(async () => {
+			reviewButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			reviewButton?.click();
+		});
+
+		expect(onMoveToReview).toHaveBeenCalledWith("task-1");
+	});
+
+	it("hides the move-to-review action on an in-progress Cline (in-process SDK) card", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="in_progress"
+						sessionSummary={createSummary("running", { agentId: "cline" })}
+						onMoveToReview={vi.fn()}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector('button[aria-label="Move task to review"]')).toBeNull();
+	});
+
+	it("hides the move-to-review action on a terminal-agent card outside In Progress (review column)", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="review"
+						sessionSummary={createSummary("awaiting_review", { agentId: "claude" })}
+						onMoveToReview={vi.fn()}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector('button[aria-label="Move task to review"]')).toBeNull();
+	});
+
 	it("moves review cards to validation from the compact card action", async () => {
 		const onMoveToValidation = vi.fn();
 

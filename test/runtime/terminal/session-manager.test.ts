@@ -44,6 +44,35 @@ describe("TerminalSessionManager", () => {
 		expect(entry.active.workspaceTrustBuffer).toBe("");
 	});
 
+	it("transitionToReview(manual_review)：running 终端 agent 手动翻入 awaiting_review/user/review，reason=manual_review", () => {
+		const manager = new TerminalSessionManager();
+		const entry = {
+			summary: createSummary({ state: "running", reviewReason: null }),
+			listenerIdCounter: 1,
+			listeners: new Map(),
+		};
+		(manager as unknown as { entries: Map<string, unknown> }).entries.set("task-1", entry);
+		const result = manager.transitionToReview("task-1", "manual_review");
+		expect(result?.state).toBe("awaiting_review");
+		expect(result?.reviewReason).toBe("manual_review");
+		expect(result?.turnOwner).toBe("user");
+		expect(result?.liveness).toBe("live");
+		expect(result?.userTurnKind).toBe("review");
+	});
+
+	it("transitionToReview：非 hook/manual_review reason（如 exit）→ no-op，summary 原样不变", () => {
+		const manager = new TerminalSessionManager();
+		const entry = {
+			summary: createSummary({ state: "running", reviewReason: null }),
+			listenerIdCounter: 1,
+			listeners: new Map(),
+		};
+		(manager as unknown as { entries: Map<string, unknown> }).entries.set("task-1", entry);
+		const result = manager.transitionToReview("task-1", "exit");
+		expect(result?.state).toBe("running");
+		expect(result?.reviewReason).toBe(null);
+	});
+
 	it("builds shell kickoff command lines with quoted arguments", () => {
 		const commandLine = buildShellCommandLine("cline", ["--auto-approve-all", "hello world"]);
 		expect(commandLine).toContain("cline");

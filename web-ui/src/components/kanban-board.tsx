@@ -44,12 +44,14 @@ export function KanbanBoard({
 	onCancelAutomaticTaskAction,
 	onMoveToTrashTask,
 	onMoveToValidationTask,
+	onMoveToReviewTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
 	commitTaskLoadingById,
 	openPrTaskLoadingById,
 	moveToTrashLoadingById,
 	moveToValidationLoadingById,
+	moveToReviewLoadingById,
 	dependencies,
 	onCreateDependency,
 	onDeleteDependency,
@@ -75,12 +77,14 @@ export function KanbanBoard({
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
 	onMoveToValidationTask?: (taskId: string) => void;
+	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
 	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	moveToValidationLoadingById?: Record<string, boolean>;
+	moveToReviewLoadingById?: Record<string, boolean>;
 	dependencies: BoardDependency[];
 	onCreateDependency?: (fromTaskId: string, toTaskId: string) => void;
 	onDeleteDependency?: (dependencyId: string) => void;
@@ -408,6 +412,7 @@ export function KanbanBoard({
 							column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
 						}
 						onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
+						onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
 						onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
 						onDeleteTask={onDeleteTask}
 						commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
@@ -416,6 +421,7 @@ export function KanbanBoard({
 							column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
 						}
 						moveToValidationLoadingById={column.id === "review" ? moveToValidationLoadingById : undefined}
+						moveToReviewLoadingById={column.id === "in_progress" ? moveToReviewLoadingById : undefined}
 						activeDragTaskId={activeDragTaskId}
 						activeDragSourceColumnId={activeDragSourceColumnId}
 						programmaticCardMoveInFlight={programmaticCardMoveInFlight}

@@ -56,6 +56,10 @@ export interface UseTaskSessionsResult {
 	ensureTaskWorkspace: (task: BoardCard) => Promise<EnsureTaskWorkspaceResult>;
 	startTaskSession: (task: BoardCard, options?: StartTaskSessionOptions) => Promise<StartTaskSessionResult>;
 	stopTaskSession: (taskId: string) => Promise<void>;
+	// 手动「移至 Review」：把一个停在 agent 回合的终端 agent 任务翻入「等人审查」回合（不杀进程）。
+	// 成功时即时 upsert 返回的 summary（携 turnOwner=user）→ 由 use-board-interactions 的 Rule A 自动落位
+	// Review 列、且 review-bounce 不再触发。返回是否成功（供调用方失败时提示）。
+	transitionTaskToReview: (taskId: string) => Promise<boolean>;
 	// 手动「立即续跑」：对一组正在连接重试的任务各注入一次续跑。返回实际触发的任务 id。
 	continueConnectionRetrySessions: (taskIds: string[]) => Promise<string[]>;
 	// 手动「移出列表 / 停止重试」：把一组任务从自动续跑重试列表里移出。返回实际移出的任务 id。
@@ -239,6 +243,26 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		[currentProjectId],
 	);
 
+	const transitionTaskToReview = useCallback(
+		async (taskId: string): Promise<boolean> => {
+			if (!currentProjectId) {
+				return false;
+			}
+			try {
+				const trpcClient = getRuntimeTrpcClient(currentProjectId);
+				const payload = await trpcClient.runtime.transitionTaskToReview.mutate({ taskId });
+				if (payload.ok && payload.summary) {
+					// 即时 upsert：不等 WS 广播，直接喂新 summary（turnOwner=user）给 Rule A → 立刻落位 Review。
+					upsertSession(payload.summary);
+				}
+				return payload.ok;
+			} catch {
+				return false;
+			}
+		},
+		[currentProjectId, upsertSession],
+	);
+
 	const continueConnectionRetrySessions = useCallback(
 		async (taskIds: string[]): Promise<string[]> => {
 			if (!currentProjectId || taskIds.length === 0) {
@@ -364,6 +388,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		ensureTaskWorkspace,
 		startTaskSession,
 		stopTaskSession,
+		transitionTaskToReview,
 		continueConnectionRetrySessions,
 		dismissConnectionRetrySessions,
 		sendTaskSessionInput,
