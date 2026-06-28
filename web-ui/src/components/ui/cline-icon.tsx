@@ -1,4 +1,10 @@
-export function ClineIcon({ size = 20, className }: { size?: number; className?: string }): React.ReactElement {
+export function ClineIcon({
+	size = 20,
+	className,
+}: {
+	size?: number | string;
+	className?: string;
+}): React.ReactElement {
 	return (
 		<svg width={size} height={size} viewBox="0 0 92 95" fill="currentColor" className={className}>
 			<path

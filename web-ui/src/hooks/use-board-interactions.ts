@@ -489,15 +489,18 @@ export function useBoardInteractions({
 					}
 					continue;
 				}
-				// Review 列：维持原行为——agent 回合会话不应停在 review（review 是等人审查回合的
-				// 自动落位区），一律打回 In Progress。**例外（强制）**：parked（已派发后台工作、等自行恢复）
-				// 的会话虽是 agent 回合，但被外部编排有意放在 review 等结果——不可打回，否则会被反复 bounce / 抖动。
-				// Validation 列：收窄判据——仅当 agent 此刻仍在持续产出输出时才打回；空闲 / 已退出
-				// 却仍处 agent 回合的会话允许停留在 Validation（见 isAgentActivelyProducingOutput 注释）。
+				// Review 列与 Validation 列对齐——同用活跃度 offset：仅当 agent 此刻仍在持续产出输出
+				// （isAgentActivelyProducingOutput，内含 turnOwner==="agent"）时才打回 In Progress；空闲 /
+				// 卡死 / 已退出却仍处 agent 回合的会话允许停留在 review（review 是等人审查回合的自动落位区，
+				// 也是「移至 Review」手动钉住空闲会话的落位区）。原 Review 分支只读裸 turnOwner==="agent"，
+				// 把空闲 / 卡死的 agent 回合会话也反复打回——这正是当年为绕开它而加 manual_review 永久锁的动因；
+				// 补上 offset 后该锁不再必要（见 session-state-machine.ts canReturnToRunning）。
+				// **例外（强制）**：parked（已派发后台工作、等自行恢复）的会话被外部编排有意放在 review 等结果，
+				// 即便仍在产出也不可打回，否则会被反复 bounce / 抖动。
 				const shouldBounceRunningToInProgress =
-					(facets.turnOwner === "agent" &&
-						columnId === "review" &&
-						!isParkedAwaitingDispatchedBackgroundWork(summary)) ||
+					(columnId === "review" &&
+						!isParkedAwaitingDispatchedBackgroundWork(summary) &&
+						isAgentActivelyProducingOutput(summary, nowMs)) ||
 					(columnId === "validation" && isAgentActivelyProducingOutput(summary, nowMs));
 				if (shouldBounceRunningToInProgress) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {

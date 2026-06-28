@@ -31,8 +31,13 @@ export function canTransitionTaskForHookEvent(summary: RuntimeTaskSessionSummary
 		// no-transition 路径（仅 applyHookActivity）→ 通知分支不可达。判据读 sidecar（非 facet），不绕开 facet 真相源。
 		return resolveSessionFacets(summary).turnOwner === "agent" && !isParkedAwaitingDispatchedBackgroundWork(summary);
 	}
+	// manual_review 加入放行集，与 reducer 的 canReturnToRunning 保持一致（缺一则闸/reducer 不一致、
+	// manual_review 卡仍翻不回）。本闸先于 reducer，故两处必须同步。
 	return (
 		isAwaitingUserReviewTurn(resolveSessionFacets(summary)) &&
-		(summary.reviewReason === "attention" || summary.reviewReason === "hook" || summary.reviewReason === "error")
+		(summary.reviewReason === "attention" ||
+			summary.reviewReason === "hook" ||
+			summary.reviewReason === "error" ||
+			summary.reviewReason === "manual_review")
 	);
 }
