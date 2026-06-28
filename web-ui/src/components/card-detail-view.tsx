@@ -371,6 +371,7 @@ export function CardDetailView({
 	onAgentOpenPrTask,
 	onMoveReviewCardToTrash,
 	onMoveReviewCardToValidation,
+	onMoveCardToReview,
 	onRestoreTaskFromTrash,
 	onDeleteTask,
 	onCancelAutomaticTaskAction,
@@ -433,6 +434,8 @@ export function CardDetailView({
 	onAgentOpenPrTask?: (taskId: string) => void;
 	onMoveReviewCardToTrash?: (taskId: string) => void;
 	onMoveReviewCardToValidation?: (taskId: string) => void;
+	// 手动把 In Progress 卡翻入 Review（仅终端 agent；by-id，路由到 column-context-panel 的 in_progress section）。
+	onMoveCardToReview?: (taskId: string) => void;
 	onRestoreTaskFromTrash?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
@@ -902,6 +905,7 @@ export function CardDetailView({
 							onOpenPrTask={onOpenPrTask}
 							onMoveToTrashTask={onMoveReviewCardToTrash}
 							onMoveToValidationTask={onMoveReviewCardToValidation}
+							onMoveToReviewTask={onMoveCardToReview}
 							onRestoreFromTrashTask={onRestoreTaskFromTrash}
 							onDeleteTask={onDeleteTask}
 							commitTaskLoadingById={commitTaskLoadingById}

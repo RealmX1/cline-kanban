@@ -158,6 +158,8 @@ interface HookSnapshot {
 	isMoveToDoneConfirmOpen: boolean;
 	confirmMoveToDone: () => void;
 	cancelMoveToDone: () => void;
+	handleMoveCardToReview: (taskId: string) => void;
+	moveToReviewLoadingById: Record<string, boolean>;
 }
 
 function createRect(width: number, height: number): DOMRect {
@@ -183,6 +185,7 @@ function HookHarness({
 	selectedTaskId = null,
 	setSelectedTaskIdOverride,
 	stopTaskSession = NOOP_STOP_SESSION,
+	transitionTaskToReview: transitionTaskToReviewProp,
 	cleanupTaskWorkspace = NOOP_CLEANUP_WORKSPACE,
 	initialSessions,
 	onSnapshot,
@@ -195,11 +198,37 @@ function HookHarness({
 	selectedTaskId?: string | null;
 	setSelectedTaskIdOverride?: Dispatch<SetStateAction<string | null>>;
 	stopTaskSession?: (taskId: string) => Promise<void>;
+	transitionTaskToReview?: (taskId: string) => Promise<boolean>;
 	cleanupTaskWorkspace?: UseTaskSessionsResult["cleanupTaskWorkspace"];
 	initialSessions?: Record<string, RuntimeTaskSessionSummary>;
 	onSnapshot?: (snapshot: HookSnapshot) => void;
 }): null {
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>(initialSessions ?? {});
+	// 默认实现模拟真实链路：transitionTaskToReview 成功后 use-task-sessions 会 upsert 携 turnOwner=user 的
+	// summary（见生产实现），这里直接把 in-memory session 翻成 awaiting_review/user，驱动 Rule A 落位 Review。
+	const transitionTaskToReview =
+		transitionTaskToReviewProp ??
+		(async (taskId: string): Promise<boolean> => {
+			setSessions((current) => {
+				const existing = current[taskId];
+				if (!existing) {
+					return current;
+				}
+				return {
+					...current,
+					[taskId]: {
+						...existing,
+						state: "awaiting_review",
+						turnOwner: "user",
+						liveness: "live",
+						userTurnKind: "review",
+						reviewReason: "manual_review",
+						updatedAt: existing.updatedAt + 1,
+					},
+				};
+			});
+			return true;
+		});
 	const [, setSelectedTaskId] = useState<string | null>(selectedTaskId);
 	const [, setIsClearTrashDialogOpen] = useState(false);
 	const [, setIsGitHistoryOpen] = useState(false);
@@ -216,6 +245,7 @@ function HookHarness({
 		setIsClearTrashDialogOpen,
 		setIsGitHistoryOpen,
 		stopTaskSession,
+		transitionTaskToReview,
 		cleanupTaskWorkspace,
 		ensureTaskWorkspace,
 		startTaskSession,
@@ -238,6 +268,8 @@ function HookHarness({
 			isMoveToDoneConfirmOpen: actions.isMoveToDoneConfirmOpen,
 			confirmMoveToDone: actions.confirmMoveToDone,
 			cancelMoveToDone: actions.cancelMoveToDone,
+			handleMoveCardToReview: actions.handleMoveCardToReview,
+			moveToReviewLoadingById: actions.moveToReviewLoadingById,
 		});
 	}, [
 		actions.deleteTaskTarget,
@@ -250,6 +282,8 @@ function HookHarness({
 		actions.isMoveToDoneConfirmOpen,
 		actions.confirmMoveToDone,
 		actions.cancelMoveToDone,
+		actions.handleMoveCardToReview,
+		actions.moveToReviewLoadingById,
 		onSnapshot,
 	]);
 
@@ -1221,6 +1255,146 @@ describe("useBoardInteractions", () => {
 			});
 			expect(cardIdsIn(currentBoard, "trash")).toEqual(["task-int"]);
 			expect(cardIdsIn(currentBoard, "in_progress")).toEqual([]);
+		});
+	});
+
+	// 手动「移至 Review」按钮：把停在 agent 回合（卡死/空闲）的终端 agent 任务翻入「等人审查」回合，
+	// 由 Rule A 自动落位 Review（复用任务自然完成的同一落位流程），不手动挪列。
+	describe("handleMoveCardToReview（手动「移至 Review」按钮）", () => {
+		const cardIdsIn = (board: BoardData | null, columnId: BoardData["columns"][number]["id"]): string[] =>
+			(board?.columns.find((column) => column.id === columnId)?.cards ?? []).map((card) => card.id);
+
+		it("in_progress 终端 agent 卡点击 → 翻会话 awaiting_review/user → Rule A 自动落位 Review", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopLinkedBacklogTaskActions();
+			let latestSnapshot: HookSnapshot | null = null;
+			let latestBoard: BoardData | null = null;
+
+			function StatefulHarness(): ReactElement {
+				const [board, setBoard] = useState(() => createBoardWithTaskInColumn("task-mr", "in_progress"));
+				useEffect(() => {
+					latestBoard = board;
+				}, [board]);
+				return (
+					<HookHarness
+						board={board}
+						setBoard={setBoard}
+						ensureTaskWorkspace={async () => ({ ok: true as const })}
+						startTaskSession={async () => ({ ok: true as const })}
+						initialSessions={{ "task-mr": createRunningSession("task-mr") }}
+						onSnapshot={(snapshot) => {
+							latestSnapshot = snapshot;
+						}}
+					/>
+				);
+			}
+
+			await act(async () => {
+				root.render(<StatefulHarness />);
+			});
+
+			// 初始：running/agent 卡停在 In Progress（agent 回合，In Progress 不打回）。
+			expect(cardIdsIn(latestBoard, "in_progress")).toEqual(["task-mr"]);
+			expect(cardIdsIn(latestBoard, "review")).toEqual([]);
+
+			await act(async () => {
+				latestSnapshot?.handleMoveCardToReview("task-mr");
+				// 冲洗 detached 异步（await 端点 → 默认实现翻 awaiting_review/user）+ 随后由 sessions 变更
+				// 触发的 level-triggered effect（Rule A 落位 review）。
+				await Promise.resolve();
+				await Promise.resolve();
+				await Promise.resolve();
+			});
+
+			expect(cardIdsIn(latestBoard, "review")).toEqual(["task-mr"]);
+			expect(cardIdsIn(latestBoard, "in_progress")).toEqual([]);
+		});
+
+		it("transitionTaskToReview 失败 → 弹 warning toast 且卡片留在 In Progress", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopLinkedBacklogTaskActions();
+			let latestSnapshot: HookSnapshot | null = null;
+			let latestBoard: BoardData | null = null;
+			const failingTransition = vi.fn(async () => false);
+
+			function StatefulHarness(): ReactElement {
+				const [board, setBoard] = useState(() => createBoardWithTaskInColumn("task-fail", "in_progress"));
+				useEffect(() => {
+					latestBoard = board;
+				}, [board]);
+				return (
+					<HookHarness
+						board={board}
+						setBoard={setBoard}
+						ensureTaskWorkspace={async () => ({ ok: true as const })}
+						startTaskSession={async () => ({ ok: true as const })}
+						transitionTaskToReview={failingTransition}
+						initialSessions={{ "task-fail": createRunningSession("task-fail") }}
+						onSnapshot={(snapshot) => {
+							latestSnapshot = snapshot;
+						}}
+					/>
+				);
+			}
+
+			await act(async () => {
+				root.render(<StatefulHarness />);
+			});
+
+			await act(async () => {
+				latestSnapshot?.handleMoveCardToReview("task-fail");
+				await Promise.resolve();
+				await Promise.resolve();
+				await Promise.resolve();
+			});
+
+			expect(failingTransition).toHaveBeenCalledWith("task-fail");
+			expect(showAppToastMock).toHaveBeenCalledWith(expect.objectContaining({ intent: "warning" }));
+			expect(cardIdsIn(latestBoard, "in_progress")).toEqual(["task-fail"]);
+			expect(cardIdsIn(latestBoard, "review")).toEqual([]);
+		});
+
+		it("非 in_progress 卡 → 守卫拦截，不调用端点", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopLinkedBacklogTaskActions();
+			let latestSnapshot: HookSnapshot | null = null;
+			const transition = vi.fn(async () => true);
+
+			function StatefulHarness(): ReactElement {
+				const [board, setBoard] = useState(() => createBoardWithTaskInColumn("task-rv", "review"));
+				return (
+					<HookHarness
+						board={board}
+						setBoard={setBoard}
+						ensureTaskWorkspace={async () => ({ ok: true as const })}
+						startTaskSession={async () => ({ ok: true as const })}
+						transitionTaskToReview={transition}
+						initialSessions={{
+							"task-rv": createRunningSession("task-rv", {
+								state: "awaiting_review",
+								turnOwner: "user",
+								liveness: "live",
+								userTurnKind: "review",
+								reviewReason: "hook",
+							}),
+						}}
+						onSnapshot={(snapshot) => {
+							latestSnapshot = snapshot;
+						}}
+					/>
+				);
+			}
+
+			await act(async () => {
+				root.render(<StatefulHarness />);
+			});
+
+			await act(async () => {
+				latestSnapshot?.handleMoveCardToReview("task-rv");
+				await Promise.resolve();
+			});
+
+			expect(transition).not.toHaveBeenCalled();
 		});
 	});
 });

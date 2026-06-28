@@ -89,6 +89,8 @@ import type {
 	RuntimeTaskSessionStartResponse,
 	RuntimeTaskSessionStopRequest,
 	RuntimeTaskSessionStopResponse,
+	RuntimeTaskSessionTransitionToReviewRequest,
+	RuntimeTaskSessionTransitionToReviewResponse,
 	RuntimeTaskTerminalRefreshRequest,
 	RuntimeTaskTerminalRefreshResponse,
 	RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
@@ -192,6 +194,8 @@ import {
 	runtimeTaskSessionStartResponseSchema,
 	runtimeTaskSessionStopRequestSchema,
 	runtimeTaskSessionStopResponseSchema,
+	runtimeTaskSessionTransitionToReviewRequestSchema,
+	runtimeTaskSessionTransitionToReviewResponseSchema,
 	runtimeTaskTerminalRefreshRequestSchema,
 	runtimeTaskTerminalRefreshResponseSchema,
 	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema,
@@ -246,6 +250,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStopRequest,
 		) => Promise<RuntimeTaskSessionStopResponse>;
+		transitionTaskToReview: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskSessionTransitionToReviewRequest,
+		) => Promise<RuntimeTaskSessionTransitionToReviewResponse>;
 		continueConnectionRetrySessions: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeContinueConnectionRetrySessionsRequest,
@@ -514,6 +522,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskSessionStopResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.stopTaskSession(ctx.workspaceScope, input);
+			}),
+		transitionTaskToReview: workspaceProcedure
+			.input(runtimeTaskSessionTransitionToReviewRequestSchema)
+			.output(runtimeTaskSessionTransitionToReviewResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.transitionTaskToReview(ctx.workspaceScope, input);
 			}),
 		continueConnectionRetrySessions: workspaceProcedure
 			.input(runtimeContinueConnectionRetrySessionsRequestSchema)

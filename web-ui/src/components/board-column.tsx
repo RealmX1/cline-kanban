@@ -31,12 +31,14 @@ export function BoardColumn({
 	onCancelAutomaticTaskAction,
 	onMoveToTrashTask,
 	onMoveToValidationTask,
+	onMoveToReviewTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
 	commitTaskLoadingById,
 	openPrTaskLoadingById,
 	moveToTrashLoadingById,
 	moveToValidationLoadingById,
+	moveToReviewLoadingById,
 	onCardClick,
 	activeDragTaskId,
 	activeDragSourceColumnId,
@@ -65,12 +67,14 @@ export function BoardColumn({
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
 	onMoveToValidationTask?: (taskId: string) => void;
+	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
 	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	moveToValidationLoadingById?: Record<string, boolean>;
+	moveToReviewLoadingById?: Record<string, boolean>;
 	onCardClick?: (card: BoardCardModel) => void;
 	activeDragTaskId?: string | null;
 	activeDragSourceColumnId?: BoardColumnId | null;
@@ -194,6 +198,7 @@ export function BoardColumn({
 											onStart={onStartTask}
 											onMoveToTrash={onMoveToTrashTask}
 											onMoveToValidation={onMoveToValidationTask}
+											onMoveToReview={onMoveToReviewTask}
 											onRestoreFromTrash={onRestoreFromTrashTask}
 											onDeleteTask={onDeleteTask}
 											onCommit={onCommitTask}
@@ -203,6 +208,7 @@ export function BoardColumn({
 											isOpenPrLoading={openPrTaskLoadingById?.[card.id] ?? false}
 											isMoveToTrashLoading={moveToTrashLoadingById?.[card.id] ?? false}
 											isMoveToValidationLoading={moveToValidationLoadingById?.[card.id] ?? false}
+											isMoveToReviewLoading={moveToReviewLoadingById?.[card.id] ?? false}
 											onDependencyPointerDown={onDependencyPointerDown}
 											onDependencyPointerEnter={onDependencyPointerEnter}
 											isDependencySource={dependencySourceTaskId === card.id}
