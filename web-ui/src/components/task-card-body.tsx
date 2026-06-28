@@ -311,6 +311,7 @@ export function TaskCardBody({
 					deletions: reviewWorkspaceSnapshot.deletions ?? 0,
 				}
 		: null;
+	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath);
 	const showReviewGitActions = columnId === "review" && (reviewWorkspaceSnapshot?.changedFiles ?? 0) > 0;
 	const isAnyGitActionLoading = isCommitLoading || isOpenPrLoading;
 	const cancelAutomaticActionLabel =
@@ -559,33 +560,6 @@ export function TaskCardBody({
 								}}
 								className="h-7 w-full rounded-md border border-border-focus bg-surface-2 px-2 text-sm font-medium text-text-primary focus:outline-none"
 							/>
-						) : onSaveTitle && !pinnedClone ? (
-							<div className="flex items-start gap-1 min-w-0">
-								<p
-									className={cn(
-										"line-clamp-3 m-0 min-w-0 flex-1 font-medium text-sm",
-										isTrashCard && "line-through text-text-tertiary",
-									)}
-								>
-									{displayTitle}
-								</p>
-								<button
-									type="button"
-									aria-label="Edit task title"
-									onMouseDown={stopEvent}
-									onClick={(event) => {
-										stopEvent(event);
-										setDraftTitle(card.title);
-										setIsEditingTitle(true);
-									}}
-									className={cn(
-										"shrink-0 self-start mt-0.5 cursor-pointer rounded-sm p-0.5 text-text-tertiary hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
-										isHovered ? "opacity-100" : "opacity-0",
-									)}
-								>
-									<Pencil size={12} />
-								</button>
-							</div>
 						) : (
 							<p
 								className={cn(
@@ -605,6 +579,22 @@ export function TaskCardBody({
 						isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
 					)}
 				>
+					{onSaveTitle && !pinnedClone && !isEditingTitle ? (
+						<Tooltip side="bottom" content="Edit title">
+							<Button
+								icon={<Pencil size={12} />}
+								variant="ghost"
+								size="xs"
+								aria-label="Edit task title"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									setDraftTitle(card.title);
+									setIsEditingTitle(true);
+								}}
+							/>
+						</Tooltip>
+					) : null}
 					<Tooltip side="bottom" content="View original prompt">
 						<Button
 							icon={<FileText size={12} />}
@@ -618,6 +608,27 @@ export function TaskCardBody({
 							}}
 						/>
 					</Tooltip>
+					{showDirectoryRow && copyableDirectoryPath ? (
+						<Tooltip side="bottom" content="Copy directory path">
+							<Button
+								icon={
+									isDirectoryPathCopied ? (
+										<Check size={12} className="text-status-green" />
+									) : (
+										<Copy size={12} />
+									)
+								}
+								variant="ghost"
+								size="xs"
+								aria-label="Copy directory path"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									handleCopyDirectoryPath();
+								}}
+							/>
+						</Tooltip>
+					) : null}
 					{columnId === "backlog" ? (
 						<Tooltip side="bottom" content="Start task">
 							<Button
@@ -760,7 +771,7 @@ export function TaskCardBody({
 						</div>
 					</div>
 				) : null}
-				{showWorkspaceStatus && reviewWorkspacePath ? (
+				{showDirectoryRow ? (
 					<div
 						data-task-directory=""
 						title={copyableDirectoryPath ?? undefined}
@@ -778,9 +789,13 @@ export function TaskCardBody({
 						)}
 						<span className={cn("min-w-0 flex-1 truncate", isTrashCard && "line-through")}>
 							<span>{worktreeModeLabel}</span>
-							<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> · </span>
+							<span className="mx-1" style={{ color: SESSION_ACTIVITY_COLOR.muted }}>
+								·
+							</span>
 							<span>{reviewRefLabel}</span>
-							<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> · </span>
+							<span className="mx-1" style={{ color: SESSION_ACTIVITY_COLOR.muted }}>
+								·
+							</span>
 							<span>{baseRefLabel}</span>
 							{reviewChangeSummary ? (
 								<>
@@ -792,29 +807,6 @@ export function TaskCardBody({
 								</>
 							) : null}
 						</span>
-						{copyableDirectoryPath ? (
-							<Tooltip content="Copy directory path">
-								<button
-									type="button"
-									aria-label="Copy directory path"
-									onMouseDown={stopEvent}
-									onClick={(event) => {
-										stopEvent(event);
-										handleCopyDirectoryPath();
-									}}
-									className={cn(
-										"shrink-0 cursor-pointer rounded-sm p-0.5 text-text-tertiary hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
-										isHovered ? "opacity-100" : "opacity-0",
-									)}
-								>
-									{isDirectoryPathCopied ? (
-										<Check size={11} className="text-status-green" />
-									) : (
-										<Copy size={11} />
-									)}
-								</button>
-							</Tooltip>
-						) : null}
 					</div>
 				) : null}
 				{showReviewGitActions ? (
