@@ -8,6 +8,7 @@ import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/component
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
+import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
@@ -77,6 +78,30 @@ function useResizeHandler(
 			startDrag(event, { axis: "x", cursor: "ew-resize", onMove: applyDelta, onEnd: applyDelta });
 		},
 		[containerRef, ratio, setRatio, startDrag, invert],
+	);
+}
+
+/** Vertical sibling of `useResizeHandler` for top/bottom splits (offsetHeight + clientY). */
+function useVerticalResizeHandler(
+	containerRef: React.RefObject<HTMLDivElement | null>,
+	ratio: number,
+	setRatio: (r: number) => void,
+	startDrag: ReturnType<typeof useResizeDrag>["startDrag"],
+): (event: ReactMouseEvent<HTMLDivElement>) => void {
+	return useCallback(
+		(event: ReactMouseEvent<HTMLDivElement>) => {
+			const container = containerRef.current;
+			if (!container) {
+				return;
+			}
+			const containerHeight = Math.max(container.offsetHeight, 1);
+			const startY = event.clientY;
+			const applyDelta = (pointerY: number) => {
+				setRatio(ratio + (pointerY - startY) / containerHeight);
+			};
+			startDrag(event, { axis: "y", cursor: "ns-resize", onMove: applyDelta, onEnd: applyDelta });
+		},
+		[containerRef, ratio, setRatio, startDrag],
 	);
 }
 
@@ -505,13 +530,17 @@ export function CardDetailView({
 		setDetailTerminalPanelWidth,
 		detailDiffFileTreeRatio,
 		setDetailDiffFileTreeRatio,
+		detailRightPromptRatio,
+		setDetailRightPromptRatio,
 	} = useCardDetailLayout({
 		isDiffExpanded,
 	});
 	const { startDrag: startTaskCardsPanelResize } = useResizeDrag();
 	const { startDrag: startAgentPanelResize } = useResizeDrag();
 	const { startDrag: startDetailDiffResize } = useResizeDrag();
+	const { startDrag: startRightPromptResize } = useResizeDrag();
 	const detailLayoutRef = useRef<HTMLDivElement | null>(null);
+	const rightColumnRef = useRef<HTMLDivElement | null>(null);
 	const hasExplicitTaskClineSettings =
 		selection.card.agentId === "cline" || selection.card.clineSettings !== undefined;
 	const mainRowRef = useRef<HTMLDivElement | null>(null);
@@ -542,6 +571,12 @@ export function CardDetailView({
 		setDetailDiffFileTreeRatio,
 		startDetailDiffResize,
 		true,
+	);
+	const handleRightPromptSeparatorMouseDown = useVerticalResizeHandler(
+		rightColumnRef,
+		detailRightPromptRatio,
+		setDetailRightPromptRatio,
+		startRightPromptResize,
 	);
 	const taskWorkspaceStateVersion = useTaskWorkspaceStateVersionValue(selection.card.id);
 	const lastTurnViewKey =
@@ -575,6 +610,7 @@ export function CardDetailView({
 	const detailDiffFileTreePanelPercent = `${(detailDiffFileTreeRatio * 100).toFixed(1)}%`;
 	const detailDiffContentPanelPercent = `${((1 - detailDiffFileTreeRatio) * 100).toFixed(1)}%`;
 	const detailDiffFileTreePanelFlex = `0 0 ${detailDiffFileTreePanelPercent}`;
+	const rightPromptPanelPercent = `${(detailRightPromptRatio * 100).toFixed(1)}%`;
 	// In Progress no longer offers Move to Validation / Move to Done from the agent TUI — those
 	// shortcuts only make sense once a task is in Review (or, for Done, already in Validation).
 	const showMoveToTrashActions = selection.column.id === "review" || selection.column.id === "validation";
@@ -685,7 +721,10 @@ export function CardDetailView({
 		setIsDiffExpanded((previous) => !previous);
 	}, [bottomTerminalOpen, isDiffExpanded, onBottomTerminalClose]);
 
-	const handleAddDiffComments = useCallback(
+	// Fill text into whichever agent input is active: Cline SDK composer draft (in-process) or the
+	// terminal agent's PTY (paste, no newline). Shared by the diff "add comment" action and the
+	// prompt library "fill into input" button.
+	const injectTextIntoActiveInput = useCallback(
 		(formatted: string) => {
 			if (showClineAgentChatPanel) {
 				clineAgentChatPanelRef.current?.appendToDraft(formatted);
@@ -828,7 +867,7 @@ export function CardDetailView({
 										onSelectedPathChange={setSelectedPath}
 										viewMode="unified"
 										onAddToTerminal={
-											onAddReviewComments || showClineAgentChatPanel ? handleAddDiffComments : undefined
+											onAddReviewComments || showClineAgentChatPanel ? injectTextIntoActiveInput : undefined
 										}
 										onSendToTerminal={
 											onSendReviewComments || showClineAgentChatPanel ? handleSendDiffComments : undefined
@@ -948,65 +987,86 @@ export function CardDetailView({
 									className="z-10"
 								/>
 							) : null}
-							<div className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
-								{isRuntimeAvailable ? (
-									<DiffToolbar
-										mode={diffMode}
-										onModeChange={setDiffMode}
-										isExpanded={isDiffExpanded}
-										onToggleExpand={handleToggleDiffExpand}
-									/>
-								) : null}
-								<div className="flex min-h-0 flex-1">
-									{isWorkspaceChangesPending ? (
-										<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
-									) : hasNoWorkspaceFileChanges ? (
-										<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
-									) : (
-										<div ref={detailDiffRowRef} className="flex min-w-0 flex-1">
-											<div
-												className="flex min-h-0 min-w-0"
-												style={{ flex: `0 0 ${detailDiffContentPanelPercent}` }}
-											>
-												<DiffViewerPanel
-													workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
-													selectedPath={selectedPath}
-													selectedPathExpandToken={selectedPathExpandToken}
-													onSelectedPathChange={setSelectedPath}
-													viewMode={isDiffExpanded ? "split" : "unified"}
-													onAddToTerminal={
-														onAddReviewComments || showClineAgentChatPanel
-															? handleAddDiffComments
-															: undefined
-													}
-													onSendToTerminal={
-														onSendReviewComments || showClineAgentChatPanel
-															? handleSendDiffComments
-															: undefined
-													}
-													comments={diffComments}
-													onCommentsChange={setDiffComments}
-												/>
-											</div>
-											<ResizeHandle
-												orientation="vertical"
-												ariaLabel="Resize detail diff panels"
-												onMouseDown={handleDetailDiffSeparatorMouseDown}
-												className="z-10"
+							<div ref={rightColumnRef} className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
+								{!isDiffExpanded ? (
+									<>
+										<div
+											className="min-h-0 overflow-hidden"
+											style={{ flex: `0 0 ${rightPromptPanelPercent}` }}
+										>
+											<PromptLibraryPanel
+												taskId={selection.card.id}
+												onFillInput={injectTextIntoActiveInput}
 											/>
-											<div
-												className="flex min-h-0 min-w-0"
-												style={{ flex: `0 0 ${detailDiffFileTreePanelPercent}` }}
-											>
-												<FileTreePanel
-													workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
-													selectedPath={selectedPath}
-													onSelectPath={handleExplicitSelectPath}
-													panelFlex="1 1 0"
-												/>
-											</div>
 										</div>
-									)}
+										<ResizeHandle
+											orientation="horizontal"
+											ariaLabel="Resize prompts and diff panels"
+											onMouseDown={handleRightPromptSeparatorMouseDown}
+											className="z-10"
+										/>
+									</>
+								) : null}
+								<div className="flex min-h-0 flex-1 flex-col">
+									{isRuntimeAvailable ? (
+										<DiffToolbar
+											mode={diffMode}
+											onModeChange={setDiffMode}
+											isExpanded={isDiffExpanded}
+											onToggleExpand={handleToggleDiffExpand}
+										/>
+									) : null}
+									<div className="flex min-h-0 flex-1">
+										{isWorkspaceChangesPending ? (
+											<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
+										) : hasNoWorkspaceFileChanges ? (
+											<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
+										) : (
+											<div ref={detailDiffRowRef} className="flex min-w-0 flex-1">
+												<div
+													className="flex min-h-0 min-w-0"
+													style={{ flex: `0 0 ${detailDiffContentPanelPercent}` }}
+												>
+													<DiffViewerPanel
+														workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
+														selectedPath={selectedPath}
+														selectedPathExpandToken={selectedPathExpandToken}
+														onSelectedPathChange={setSelectedPath}
+														viewMode={isDiffExpanded ? "split" : "unified"}
+														onAddToTerminal={
+															onAddReviewComments || showClineAgentChatPanel
+																? injectTextIntoActiveInput
+																: undefined
+														}
+														onSendToTerminal={
+															onSendReviewComments || showClineAgentChatPanel
+																? handleSendDiffComments
+																: undefined
+														}
+														comments={diffComments}
+														onCommentsChange={setDiffComments}
+													/>
+												</div>
+												<ResizeHandle
+													orientation="vertical"
+													ariaLabel="Resize detail diff panels"
+													onMouseDown={handleDetailDiffSeparatorMouseDown}
+													className="z-10"
+												/>
+												<div
+													className="flex min-h-0 min-w-0"
+													style={{ flex: `0 0 ${detailDiffFileTreePanelPercent}` }}
+												>
+													<FileTreePanel
+														workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
+														selectedPath={selectedPath}
+														onSelectPath={handleExplicitSelectPath}
+														panelFlex="1 1 0"
+													/>
+												</div>
+											</div>
+										)}
+									</div>
 								</div>
 							</div>
 						</div>
