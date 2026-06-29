@@ -161,6 +161,10 @@ interface ActiveProcessState {
 	// 只有带来「最近未见过的新词内容」的 chunk 才推进 summary.lastSubstantiveOutputAt
 	// （Validation 列自动打回判据 isAgentActivelyProducingOutput 读它）。见 agent-output-substance.ts。
 	agentOutputSubstanceMemory: AgentOutputSubstanceMemory;
+	// resumeFromTrash / refresh 后 Claude --continue 恢复 UI（cache past due 三选一、启动横幅）
+	// 不是「agent 上次响应」——此 guard 为 true 时 handleTaskOutput 不推进 lastSubstantiveOutputAt。
+	// 仅 Claude + resumeFromTrash；清除条件：hook.to_in_progress 或真 assistant 产出（⏺/●）。仅内存态。
+	suppressSubstantiveOutputUntilContinues: boolean;
 	// 程序化「已提交用户轮」投递（RVF followup 等）的待决就绪轮询定时器：同一时刻至多一个，
 	// last-write-wins；命中就绪/deadline 写入后或 session 退出时清除。null 表示当前无待决投递。
 	taskChatInputDeliveryTimer: NodeJS.Timeout | null;
@@ -373,6 +377,17 @@ function clearSubmitConfirmTimer(state: { submitConfirmTimer: NodeJS.Timeout | n
 		clearTimeout(state.submitConfirmTimer);
 		state.submitConfirmTimer = null;
 	}
+}
+
+// Claude assistant / 工具行前缀；resume guard 见到即视为用户已继续、agent 开始真产出。
+const RESUME_GUARD_AGENT_CONTINUATION_MARKERS = ["⏺", "●"] as const;
+
+function chunkIndicatesAgentContinuationAfterResume(chunk: string): boolean {
+	return RESUME_GUARD_AGENT_CONTINUATION_MARKERS.some((marker) => chunk.includes(marker));
+}
+
+function clearResumeSubstantiveGuard(active: ActiveProcessState): void {
+	active.suppressSubstantiveOutputUntilContinues = false;
 }
 
 // 程序化「已提交用户轮」投递的就绪判别式（替代裸 boolean，使兜底写的 via= 日志能区分命中哪条通道，
@@ -1236,12 +1251,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 否则按需解码。合并进同一个 metadata-only patch，保持每 chunk 仅一次 updateSummary / 广播。
 			const inAgentTurn =
 				entry.summary.agentId !== null && resolveSessionFacets(entry.summary).turnOwner === "agent";
-			const hasFreshSubstantiveOutput =
-				inAgentTurn &&
-				detectFreshSubstantiveAgentOutput(
-					entry.active.agentOutputSubstanceMemory,
-					data.length > 0 ? data : filteredChunk.toString("utf8"),
-				);
+			const decodedChunk = data.length > 0 ? data : filteredChunk.toString("utf8");
+			if (
+				entry.active.suppressSubstantiveOutputUntilContinues &&
+				chunkIndicatesAgentContinuationAfterResume(decodedChunk)
+			) {
+				clearResumeSubstantiveGuard(entry.active);
+			}
+			let hasFreshSubstantiveOutput =
+				inAgentTurn && detectFreshSubstantiveAgentOutput(entry.active.agentOutputSubstanceMemory, decodedChunk);
+			if (entry.active.suppressSubstantiveOutputUntilContinues) {
+				hasFreshSubstantiveOutput = false;
+			}
 			const outputAt = now();
 			updateSummary(
 				entry,
@@ -1437,6 +1458,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionAttemptTimer: null,
 			lastUserInputAt: null,
 			agentOutputSubstanceMemory: createAgentOutputSubstanceMemory(),
+			suppressSubstantiveOutputUntilContinues: request.resumeFromTrash === true && request.agentId === "claude",
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
@@ -1644,6 +1666,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionAttemptTimer: null,
 			lastUserInputAt: null,
 			agentOutputSubstanceMemory: createAgentOutputSubstanceMemory(),
+			suppressSubstantiveOutputUntilContinues: false,
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
@@ -1882,6 +1905,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const before = entry.summary;
 		const summary = this.applySessionEvent(entry, { type: "hook.to_in_progress" });
+		if (entry.active) {
+			clearResumeSubstantiveGuard(entry.active);
+		}
 		if (summary !== before && entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));

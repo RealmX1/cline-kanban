@@ -232,11 +232,11 @@ export function TaskCardBody({
 	useInterval(() => setActivityNowMs(Date.now()), isLiveAgentTurn && !isParkedAwaitingBackgroundWork ? 1000 : null);
 	// 头部「创建至今 / agent 上次响应至今」双时长读数的常开粗 tick（30s）：读数粒度是分/时/天，30s 足够，
 	// 且常开不分 live/idle（与上面仅 live 卡的 1s computing tick 解耦）。lastSubstantiveOutputAt 只在 agent 产出
-	// 新正文/工具内容时推进——过滤 TUI 装饰性重绘、与 board.json 分离，故列间拖动与终端重启刷新都不会扰动它，
-	// 恰好锚定「真实最后一次响应」；为空（早期 session）回退 lastOutputAt，再空则隐藏响应段。
+	// 新正文/工具内容时推进——过滤 TUI 装饰性重绘、与 board.json 分离，故列间拖动与终端 restart refresh
+	// （resume guard）都不会扰动它；无实质戳时隐藏响应段（不回退 lastOutputAt，避免 PTY 噪声带偏展示）。
 	const [elapsedNowMs, setElapsedNowMs] = useState(() => Date.now());
 	useInterval(() => setElapsedNowMs(Date.now()), 30_000);
-	const lastAgentResponseAt = sessionSummary?.lastSubstantiveOutputAt ?? sessionSummary?.lastOutputAt ?? null;
+	const lastAgentResponseAt = sessionSummary?.lastSubstantiveOutputAt ?? null;
 	const isAgentComputing =
 		isLiveAgentTurn && !isParkedAwaitingBackgroundWork && sessionSummary != null && sessionFacets != null
 			? deriveDisplayLiveness(sessionFacets, sessionSummary.lastOutputAt, activityNowMs) === "computing"
