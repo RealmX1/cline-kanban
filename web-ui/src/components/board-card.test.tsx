@@ -673,7 +673,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		// 完整 worktree 路径不再作为可见正文渲染，改由简写目录行的 title（hover 揭示）+ 复制按钮承载。
+		// 完整 worktree 路径由目录行 title（hover）揭示；复制按钮钉在该行右下角，仅行 hover 时显现。
 		const directoryRow = container.querySelector("[data-task-directory]");
 		expect(directoryRow?.getAttribute("title")).toContain("~/.cline/worktrees/trash-task-1/kanban");
 	});

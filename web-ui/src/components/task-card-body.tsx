@@ -29,7 +29,7 @@ import {
 	RotateCcw,
 	Trash2,
 } from "lucide-react";
-import type { KeyboardEvent, MouseEvent } from "react";
+import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -70,6 +70,28 @@ function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: strin
 	} catch {
 		return null;
 	}
+}
+
+/** 钉在宿主行右下角；仅在该行 hover / focus-within 时显现（换行后仍贴末行右侧）。 */
+function TaskCardRowHoverActions({
+	groupName,
+	children,
+}: {
+	groupName: "title" | "directory";
+	children: ReactNode;
+}): React.ReactElement {
+	return (
+		<div
+			className={cn(
+				"absolute bottom-0 right-0 z-10 flex rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+				groupName === "title"
+					? "opacity-0 pointer-events-none group-hover/title:opacity-100 group-hover/title:pointer-events-auto group-focus-within/title:opacity-100 group-focus-within/title:pointer-events-auto"
+					: "opacity-0 pointer-events-none group-hover/directory:opacity-100 group-hover/directory:pointer-events-auto group-focus-within/directory:opacity-100 group-focus-within/directory:pointer-events-auto",
+			)}
+		>
+			{children}
+		</div>
+	);
 }
 
 /**
@@ -328,6 +350,7 @@ export function TaskCardBody({
 				}
 		: null;
 	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath);
+	const showTitleEditButton = onSaveTitle != null && !pinnedClone && !isEditingTitle;
 	const showReviewGitActions = columnId === "review" && (reviewWorkspaceSnapshot?.changedFiles ?? 0) > 0;
 	const isAnyGitActionLoading = isCommitLoading || isOpenPrLoading;
 	const cancelAutomaticActionLabel =
@@ -375,7 +398,6 @@ export function TaskCardBody({
 		const parts = [agentLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentLabel, modelOverrideLabel]);
-
 	// 简写目录行：{worktree/in-place} · {current head} · {base branch}@{base commit(fork-point)}。
 	// base commit 取 fork-point（reviewWorkspaceSnapshot.baseCommit）；缺失时优雅降级为只显示 base 分支名。
 	const worktreeModeLabel = card.worktreeMode === "inplace" ? "in-place" : "worktree";
@@ -383,6 +405,7 @@ export function TaskCardBody({
 	const baseRefLabel = baseForkPointShort ? `${card.baseRef}@${baseForkPointShort}` : card.baseRef;
 	// 复制源优先绝对路径（snapshot.path），trash 无快照时退回重建的展示路径，再退回 base 仓库路径。
 	const copyableDirectoryPath = reviewWorkspaceSnapshot?.path ?? reviewWorkspacePath ?? workspacePath ?? null;
+	const showDirectoryCopyButton = showDirectoryRow && Boolean(copyableDirectoryPath);
 	const [, copyToClipboard] = useCopyToClipboard();
 	const [isDirectoryPathCopied, setIsDirectoryPathCopied] = useState(false);
 	const directoryCopyResetTimerRef = useRef<number | null>(null);
@@ -544,35 +567,34 @@ export function TaskCardBody({
 					isDependencyTarget && "kb-board-card-dependency-target",
 				)}
 			>
-				{/* agent 纯图标角标：钉在卡片左上角、略微超出边框（absolute，不占标题横向空间）。
-				    完整「agent · 模型」信息进 hover tooltip；无 effective agent 时不渲染。 */}
-				{taskAgentSettingsLabel ? (
-					<Tooltip content={taskAgentSettingsLabel}>
-						<span
-							data-agent-badge=""
-							role="img"
-							aria-label={taskAgentSettingsLabel}
-							className="absolute -left-2 -top-2 z-20 inline-flex h-[18px] w-[18px] items-center justify-center rounded-full border border-border-bright bg-surface-1 shadow-sm"
-						>
-							<agentVisual.Icon
-								size={11}
-								className={cn("shrink-0", isTrashCard ? "text-text-tertiary" : agentVisual.className)}
-							/>
-						</span>
-					</Tooltip>
-				) : null}
-				{/* 标题上方、agent 角标右侧的微型时长药丸：同一上边带、错开在角标右侧（-top-2 left-4，
-				    略微出框、与角标同族）。Clock=自创建至今（恒显，backlog 也有用）；Activity=agent 上次响应至今
-				    （仅有时间戳时显，优雅降级）。各段 hover 显绝对本地时间。 */}
-				<div className="absolute -top-2 left-4 z-20 inline-flex items-center gap-1 rounded-full border border-border-bright bg-surface-1 px-1.5 py-px shadow-sm">
+				{/* agent 图标 + 微型时长药丸合一：钉在卡片左上角、略微超出边框（不占标题横向空间）。
+				    最左为 agent 图标（略放大）；完整「agent · 模型」进 hover tooltip。
+				    Clock=自创建至今（恒显）；Activity=agent 上次响应至今（仅有时间戳时显）。各段 hover 显绝对本地时间。 */}
+				<div className="absolute -left-2 -top-2 z-20 inline-flex h-4 items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
+					{taskAgentSettingsLabel ? (
+						<Tooltip content={taskAgentSettingsLabel}>
+							<span
+								data-agent-badge=""
+								role="img"
+								aria-label={taskAgentSettingsLabel}
+								className="inline-flex shrink-0 items-center"
+							>
+								<agentVisual.Icon
+									size={12}
+									className={cn("shrink-0", isTrashCard ? "text-text-tertiary" : agentVisual.className)}
+								/>
+							</span>
+						</Tooltip>
+					) : null}
+					{taskAgentSettingsLabel ? <span aria-hidden className="h-2.5 w-px shrink-0 bg-border-bright" /> : null}
 					<Tooltip content={`Created · ${new Date(card.createdAt).toLocaleString()}`}>
 						<span
 							className={cn(
-								"inline-flex items-center gap-0.5 text-[10px]",
+								"inline-flex items-center gap-0.5 text-[10px] leading-none",
 								isTrashCard ? "text-text-tertiary" : "text-text-secondary",
 							)}
 						>
-							<Clock size={9} className="shrink-0" />
+							<Clock size={8} className="shrink-0" />
 							{formatCompactElapsedSince(card.createdAt, elapsedNowMs)}
 						</span>
 					</Tooltip>
@@ -582,20 +604,20 @@ export function TaskCardBody({
 							<Tooltip content={`Agent last responded · ${new Date(lastAgentResponseAt).toLocaleString()}`}>
 								<span
 									className={cn(
-										"inline-flex items-center gap-0.5 text-[10px]",
+										"inline-flex items-center gap-0.5 text-[10px] leading-none",
 										isTrashCard ? "text-text-tertiary" : "text-text-secondary",
 									)}
 								>
-									<Activity size={9} className="shrink-0" />
+									<Activity size={8} className="shrink-0" />
 									{formatCompactElapsedSince(lastAgentResponseAt, elapsedNowMs)}
 								</span>
 							</Tooltip>
 						</>
 					) : null}
 				</div>
-				<div className="flex items-start gap-2" style={{ minHeight: 24 }}>
+				<div className="flex items-start gap-2 pt-0.5" style={{ minHeight: 24 }}>
 					{statusMarker ? <div className="inline-flex items-center">{statusMarker}</div> : null}
-					<div className="flex-1 min-w-0">
+					<div className={cn("relative min-w-0 flex-1", showTitleEditButton && "group/title")}>
 						{isEditingTitle ? (
 							// 标题语义上仍是单串；改 textarea 只为长标题视觉 wraparound + 随内容自增高
 							// （原生 field-sizing:content，目标运行环境是现代 Chrome）。Enter 仍保存、Esc 仍取消。
@@ -616,36 +638,39 @@ export function TaskCardBody({
 								className={cn(
 									"line-clamp-3 m-0 font-medium text-sm",
 									isTrashCard && "line-through text-text-tertiary",
+									showTitleEditButton && "pr-6",
 								)}
 							>
 								{displayTitle}
 							</p>
 						)}
+						{showTitleEditButton ? (
+							<TaskCardRowHoverActions groupName="title">
+								<Tooltip side="bottom" content="Edit title">
+									<Button
+										icon={<Pencil size={12} />}
+										variant="ghost"
+										size="xs"
+										aria-label="Edit task title"
+										onMouseDown={stopEvent}
+										onClick={(event) => {
+											stopEvent(event);
+											setDraftTitle(card.title);
+											setIsEditingTitle(true);
+										}}
+									/>
+								</Tooltip>
+							</TaskCardRowHoverActions>
+						) : null}
 					</div>
 				</div>
 				<div
 					className={cn(
-						"absolute right-1 top-1 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+						"absolute right-1 -top-2 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
 						"focus-within:opacity-100 focus-within:pointer-events-auto",
 						isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
 					)}
 				>
-					{onSaveTitle && !pinnedClone && !isEditingTitle ? (
-						<Tooltip side="bottom" content="Edit title">
-							<Button
-								icon={<Pencil size={12} />}
-								variant="ghost"
-								size="xs"
-								aria-label="Edit task title"
-								onMouseDown={stopEvent}
-								onClick={(event) => {
-									stopEvent(event);
-									setDraftTitle(card.title);
-									setIsEditingTitle(true);
-								}}
-							/>
-						</Tooltip>
-					) : null}
 					<Tooltip side="bottom" content="View original prompt">
 						<Button
 							icon={<FileText size={12} />}
@@ -659,27 +684,6 @@ export function TaskCardBody({
 							}}
 						/>
 					</Tooltip>
-					{showDirectoryRow && copyableDirectoryPath ? (
-						<Tooltip side="bottom" content="Copy directory path">
-							<Button
-								icon={
-									isDirectoryPathCopied ? (
-										<Check size={12} className="text-status-green" />
-									) : (
-										<Copy size={12} />
-									)
-								}
-								variant="ghost"
-								size="xs"
-								aria-label="Copy directory path"
-								onMouseDown={stopEvent}
-								onClick={(event) => {
-									stopEvent(event);
-									handleCopyDirectoryPath();
-								}}
-							/>
-						</Tooltip>
-					) : null}
 					{columnId === "backlog" ? (
 						<Tooltip side="bottom" content="Start task">
 							<Button
@@ -844,7 +848,10 @@ export function TaskCardBody({
 					<div
 						data-task-directory=""
 						title={copyableDirectoryPath ?? undefined}
-						className="mt-1 flex items-start gap-1 font-mono"
+						className={cn(
+							"group/directory relative mt-1 flex items-start gap-1 font-mono",
+							showDirectoryCopyButton && "pr-6",
+						)}
 						style={{
 							fontSize: 12,
 							lineHeight: 1.4,
@@ -876,6 +883,29 @@ export function TaskCardBody({
 								</>
 							) : null}
 						</span>
+						{showDirectoryCopyButton ? (
+							<TaskCardRowHoverActions groupName="directory">
+								<Tooltip side="bottom" content="Copy directory path">
+									<Button
+										icon={
+											isDirectoryPathCopied ? (
+												<Check size={12} className="text-status-green" />
+											) : (
+												<Copy size={12} />
+											)
+										}
+										variant="ghost"
+										size="xs"
+										aria-label="Copy directory path"
+										onMouseDown={stopEvent}
+										onClick={(event) => {
+											stopEvent(event);
+											handleCopyDirectoryPath();
+										}}
+									/>
+								</Tooltip>
+							</TaskCardRowHoverActions>
+						) : null}
 					</div>
 				) : null}
 				{showReviewGitActions ? (
