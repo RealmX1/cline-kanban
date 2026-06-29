@@ -45,5 +45,9 @@ export async function disposeCliTelemetryService(): Promise<void> {
 	}
 	const current = telemetrySingleton;
 	telemetrySingleton = undefined;
-	await current.telemetry.dispose();
+	try {
+		await current.telemetry.dispose();
+	} catch {
+		// Telemetry must never block CLI shutdown or exit.
+	}
 }

@@ -12,6 +12,7 @@ If you are new to the codebase, read these in order:
 
 1. [`../README.md`](../README.md) for the product overview and local setup.
 2. [`architecture.md`](./architecture.md) for the system map, runtime model, and key file guide.
+3. [`cli-environment.md`](./cli-environment.md) for CLI/hook environment variables (timeouts, runtime host/port, hook context).
 
 This `docs/` folder should stand on its own for normal onboarding. Active plans and handoffs may still exist in `.plan/docs`, but a new engineer should not need those to understand the current architecture.
 

@@ -18,6 +18,7 @@ import {
 	runtimeClineReasoningEffortSchema,
 	runtimeTaskWorktreeModeSchema,
 } from "../core/api-contract";
+import { mergeAbortSignals, resolveCliTrpcTimeoutMs, safeStringify } from "../core/cli-process-guards";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
 import {
@@ -65,7 +66,7 @@ function toErrorMessage(error: unknown): string {
 }
 
 function printJson(payload: unknown): void {
-	process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+	process.stdout.write(`${safeStringify(payload, 2)}\n`);
 }
 
 function parseListColumn(value: string | undefined): ListTaskColumn | undefined {
@@ -294,6 +295,7 @@ function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string)
 }
 
 function createRuntimeTrpcClient(workspaceId: string | null) {
+	const trpcTimeoutMs = resolveCliTrpcTimeoutMs();
 	return createTRPCProxyClient<RuntimeAppRouter>({
 		links: [
 			httpBatchLink({
@@ -301,7 +303,8 @@ function createRuntimeTrpcClient(workspaceId: string | null) {
 				headers: () => (workspaceId ? { "x-kanban-workspace-id": workspaceId } : {}),
 				fetch: async (url, options) => {
 					const runtimeFetch = await getRuntimeFetch();
-					return runtimeFetch(url, options);
+					const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
+					return runtimeFetch(url, { ...options, signal });
 				},
 			}),
 		],
