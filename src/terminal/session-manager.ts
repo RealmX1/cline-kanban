@@ -843,7 +843,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const mirror = entry.terminalStateMirror;
 		if (mirror) {
 			const snapshot = await mirror.getSnapshot();
-			// 仅按当前视口（最后 rows 行）判定就绪：getSnapshot() 含完整 scrollback（TERMINAL_SCROLLBACK=100_000，
+			// 仅按当前视口（最后 rows 行）判定就绪：getSnapshot() 含完整 scrollback（TERMINAL_SCROLLBACK=20_000，
 			// 服务于终端 restore，须保持原样），而历史里早先出现过的提示符框会误判「当前屏」就绪——把投递写进
 			// 正处于重绘/出输出的非就绪窗口，正是本特性要消除的「粘贴了但 CR 被吞、不发送」竞态。
 			const scan = stripAnsiAndControl(takeLastLines(snapshot.snapshot, snapshot.rows));

@@ -310,6 +310,25 @@ describe("persistent-terminal-manager", () => {
 		document.body.replaceChildren();
 	});
 
+	it("reclaims the oldest parked terminal beyond the cap, keeping mounted and newer parked ones", () => {
+		// mounted 终端（mount 后 visibleContainer 非 null → 非 parked）：永不参与 LRU 回收。
+		const mounted = ensurePersistentTerminal({ ...appearance, taskId: "task-keep", workspaceId: "workspace-1" });
+		mounted.mount(createContainer(), appearance, { isVisible: true });
+		const mountedDisposeSpy = vi.spyOn(mounted, "dispose");
+
+		// 三个 parked 终端（创建后不 mount → isParked()===true）；上限 MAX_PARKED_TERMINALS=2。
+		const oldestParked = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		const oldestDisposeSpy = vi.spyOn(oldestParked, "dispose");
+		const newerParked = ensurePersistentTerminal({ ...appearance, taskId: "task-b", workspaceId: "workspace-1" });
+		const newerDisposeSpy = vi.spyOn(newerParked, "dispose");
+		// 创建第 3 个 parked 触发 sweep：parked=[task-a, task-b, task-c]，只回收最旧的 task-a。
+		ensurePersistentTerminal({ ...appearance, taskId: "task-c", workspaceId: "workspace-1" });
+
+		expect(oldestDisposeSpy).toHaveBeenCalledTimes(1); // 最旧 parked 被回收
+		expect(newerDisposeSpy).not.toHaveBeenCalled(); // 较新 parked 在最近 2 个内，保留
+		expect(mountedDisposeSpy).not.toHaveBeenCalled(); // mounted 永不被回收
+	});
+
 	it("does not resend unchanged resize control frames", () => {
 		const terminal = ensurePersistentTerminal({
 			...appearance,
