@@ -825,6 +825,13 @@ class PersistentTerminal {
 		this.parkingRoot.appendChild(this.hostElement);
 	}
 
+	// 「泊车」= 已 unmount 到隐藏 parkingRoot、当前没有任何可见容器挂载它（visibleContainer===null）。
+	// 泊车终端仍持有 WebGL 上下文 + 两条 socket + scrollback，是 LRU 回收的唯一合法对象；
+	// mounted（visibleContainer 非 null）的终端仍被 hook 的 terminalRef 引用，回收会调用已 dispose 实例。
+	isParked(): boolean {
+		return this.visibleContainer === null;
+	}
+
 	focus(): void {
 		this.terminal.focus();
 	}
@@ -1008,23 +1015,53 @@ class PersistentTerminal {
 
 const terminals = new Map<string, PersistentTerminal>();
 
+// 同时存活的客户端 xterm 上限：保留全部 mounted（可见挂载中）的 + 最近 MAX_PARKED_TERMINALS 个 parked 的，
+// 其余 dispose 回收（释放 WebGL 上下文 + 两条 socket + scrollback）。曾经的实现只「泊车」不回收，导致一个
+// 标签页里每看过一个任务就泄漏一个活终端、无上限（还会撞浏览器约 16 个 WebGL 上下文的硬上限）。
+// 服务端 mirror 持完整 scrollback，被回收任务 revisit 时重连并从快照完整恢复，故回收对用户几乎无感。
+// N=2 让最近来回切的两三个任务仍即时；更久以前看过的回收掉，回到时走一次与「切回隐藏标签页/刷新页面」相同的重连。
+// ponytail: Map 迭代严格按插入序 = LRU；cache hit 时 delete 再 set 重排为 MRU（Map.set 对已存在 key 不改顺序），无需额外时间戳。
+const MAX_PARKED_TERMINALS = 2;
+
+function reclaimParkedTerminalsBeyondLimit(): void {
+	const parkedKeys: string[] = [];
+	for (const [key, terminal] of terminals) {
+		if (terminal.isParked()) {
+			parkedKeys.push(key);
+		}
+	}
+	// parkedKeys 头部最旧、尾部最新（Map 插入序）；只回收超出上限的最旧若干个。
+	// 必须 Math.max(0, …) clamp：slice(0, 负数) 会从尾部反向取值，反而错误驱逐最近的终端。
+	const evictCount = Math.max(0, parkedKeys.length - MAX_PARKED_TERMINALS);
+	for (const key of parkedKeys.slice(0, evictCount)) {
+		terminals.get(key)?.dispose();
+		terminals.delete(key);
+	}
+}
+
 export function ensurePersistentTerminal(input: EnsurePersistentTerminalInput): PersistentTerminal {
 	const key = buildKey(input.workspaceId, input.taskId);
-	let terminal = terminals.get(key);
-	if (!terminal) {
-		terminal = new PersistentTerminal(input.taskId, input.workspaceId, {
+	const existing = terminals.get(key);
+	if (existing) {
+		existing.setAppearance({
 			cursorColor: input.cursorColor,
 			terminalBackgroundColor: input.terminalBackgroundColor,
 			themeColors: input.themeColors,
 		});
-		terminals.set(key, terminal);
-		return terminal;
+		// 重排为 MRU：Map.set 对已存在 key 不改插入顺序，必须先 delete 再 set 才能移到末尾。
+		terminals.delete(key);
+		terminals.set(key, existing);
+		reclaimParkedTerminalsBeyondLimit();
+		return existing;
 	}
-	terminal.setAppearance({
+	const terminal = new PersistentTerminal(input.taskId, input.workspaceId, {
 		cursorColor: input.cursorColor,
 		terminalBackgroundColor: input.terminalBackgroundColor,
 		themeColors: input.themeColors,
 	});
+	terminals.set(key, terminal);
+	// 刚创建的终端尚未 mount（isParked()===true）但处于 parkedKeys 末尾（最新），不会被本次 sweep 回收。
+	reclaimParkedTerminalsBeyondLimit();
 	return terminal;
 }
 
