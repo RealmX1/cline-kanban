@@ -15,6 +15,7 @@ import {
 	DEFAULT_CLI_TELEMETRY_FLUSH_MS,
 	installCliFatalErrorHandlers,
 	installCliHardTimeoutIfNeeded,
+	registerCliFatalErrorReporter,
 	registerCliProcessExit,
 	safeErrorMessage,
 } from "./core/cli-process-guards";
@@ -45,6 +46,9 @@ import type { TerminalSessionManager } from "./terminal/session-manager";
 import { runOnDemandUpdate } from "./update/update";
 
 registerCliProcessExit((code) => process.exit(code));
+registerCliFatalErrorReporter((error) => {
+	captureNodeException(error, { area: "fatal" });
+});
 installCliFatalErrorHandlers();
 
 interface CliOptions {

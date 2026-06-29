@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
 	installCliHardTimeoutIfNeeded,
+	registerCliFatalErrorReporter,
 	resolveCliHardTimeoutMs,
 	safeErrorMessage,
 	safeStringify,
@@ -36,6 +37,14 @@ describe("cli-process-guards", () => {
 			const cancel = installCliHardTimeoutIfNeeded([], true);
 			expect(() => {
 				cancel();
+			}).not.toThrow();
+		});
+	});
+
+	describe("registerCliFatalErrorReporter", () => {
+		it("accepts a reporter without throwing", () => {
+			expect(() => {
+				registerCliFatalErrorReporter(() => {});
 			}).not.toThrow();
 		});
 	});

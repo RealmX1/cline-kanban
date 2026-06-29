@@ -6,10 +6,24 @@ export const DEFAULT_CLI_TELEMETRY_FLUSH_MS = 500;
 let fatalHandlersInstalled = false;
 let handlingFatalError = false;
 type CliProcessExit = (code: number) => never;
+type CliFatalErrorReporter = (error: unknown) => void;
 let cliProcessExit: CliProcessExit | null = null;
+let fatalErrorReporter: CliFatalErrorReporter | null = null;
 
 export function registerCliProcessExit(exit: CliProcessExit): void {
 	cliProcessExit = exit;
+}
+
+export function registerCliFatalErrorReporter(reporter: CliFatalErrorReporter): void {
+	fatalErrorReporter = reporter;
+}
+
+function reportFatalError(error: unknown): void {
+	try {
+		fatalErrorReporter?.(error);
+	} catch {
+		// Telemetry must never block fatal CLI exit.
+	}
 }
 
 function exitCliProcess(code: number): never {
@@ -105,10 +119,12 @@ export function installCliFatalErrorHandlers(): void {
 	fatalHandlersInstalled = true;
 
 	process.on("uncaughtException", (error) => {
+		reportFatalError(error);
 		writeFatalAndExit(`kanban: fatal: ${safeErrorMessage(error)}`, 1);
 	});
 
 	process.on("unhandledRejection", (reason) => {
+		reportFatalError(reason);
 		writeFatalAndExit(`kanban: fatal: ${safeErrorMessage(reason)}`, 1);
 	});
 }
