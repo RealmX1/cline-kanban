@@ -84,11 +84,22 @@ describe("createWorkspaceMetadataMonitor", () => {
 		gitSyncMocks.probeGitWorkspaceState.mockReset();
 		taskWorktreeMocks.getTaskWorkspacePathInfo.mockReset();
 		gitUtilsMocks.runGit.mockReset();
-		gitUtilsMocks.runGit.mockImplementation(async (_cwd: string, args: string[]) =>
-			args[0] === "merge-base"
-				? { ok: true, stdout: FORK_POINT_COMMIT, stderr: "", output: FORK_POINT_COMMIT, error: null, exitCode: 0 }
-				: { ok: false, stdout: "", stderr: "", output: "", error: "unexpected git call", exitCode: 1 },
-		);
+		gitUtilsMocks.runGit.mockImplementation(async (_cwd: string, args: string[]) => {
+			if (args[0] === "merge-base") {
+				return {
+					ok: true,
+					stdout: FORK_POINT_COMMIT,
+					stderr: "",
+					output: FORK_POINT_COMMIT,
+					error: null,
+					exitCode: 0,
+				};
+			}
+			if (args[0] === "rev-list" && args[1] === "--count") {
+				return { ok: true, stdout: "3", stderr: "", output: "3", error: null, exitCode: 0 };
+			}
+			return { ok: false, stdout: "", stderr: "", output: "", error: "unexpected git call", exitCode: 1 };
+		});
 
 		taskWorktreeMocks.getTaskWorkspacePathInfo.mockImplementation(async (options: TaskWorkspacePathInfoOptions) =>
 			options.worktreeMode === "inplace"
@@ -173,11 +184,17 @@ describe("createWorkspaceMetadataMonitor", () => {
 			branch: "main",
 			// fork-point（git merge-base HEAD <baseRef>）现算并随 metadata 暴露。
 			baseCommit: FORK_POINT_COMMIT,
+			commitsSinceFork: 3,
 			changedFiles: 2,
 			additions: 5,
 			deletions: 1,
 		});
 		expect(gitUtilsMocks.runGit).toHaveBeenCalledWith(WORKSPACE_PATH, ["merge-base", "HEAD", "main"]);
+		expect(gitUtilsMocks.runGit).toHaveBeenCalledWith(WORKSPACE_PATH, [
+			"rev-list",
+			"--count",
+			`${FORK_POINT_COMMIT}..HEAD`,
+		]);
 
 		const branchTask = metadata.taskWorkspaces.find((task) => task.taskId === "task-branch");
 		expect(branchTask).toMatchObject({
@@ -186,6 +203,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 			branch: null,
 			// 未落地的 worktree（exists:false）不探测分叉点 → baseCommit 为 null。
 			baseCommit: null,
+			commitsSinceFork: null,
 			changedFiles: null,
 		});
 	});

@@ -42,6 +42,7 @@ const workspaceSnapshots: Record<string, ReviewTaskWorkspaceSnapshot> = {
 		isDetached: false,
 		headCommit: "abc123",
 		baseCommit: null,
+		commitsSinceFork: null,
 		changedFiles: 3,
 		additions: 10,
 		deletions: 2,

@@ -103,6 +103,7 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.exists === b.exists &&
 		a.baseRef === b.baseRef &&
 		a.baseCommit === b.baseCommit &&
+		a.commitsSinceFork === b.commitsSinceFork &&
 		a.branch === b.branch &&
 		a.isDetached === b.isDetached &&
 		a.headCommit === b.headCommit &&
@@ -194,6 +195,19 @@ async function loadTaskForkPointCommit(workspacePath: string, baseRef: string): 
 	return result.ok && result.stdout ? result.stdout : null;
 }
 
+/** fork-point..HEAD 的 commit 数；无 fork/HEAD 或 git 失败 → null。 */
+async function loadCommitsSinceFork(workspacePath: string, baseCommit: string | null): Promise<number | null> {
+	if (!baseCommit) {
+		return null;
+	}
+	const result = await runGit(workspacePath, ["rev-list", "--count", `${baseCommit}..HEAD`]);
+	if (!result.ok || !result.stdout) {
+		return null;
+	}
+	const parsed = Number.parseInt(result.stdout, 10);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
 async function loadTaskWorkspaceMetadata(
 	workspacePath: string,
 	task: TrackedTaskWorkspace,
@@ -222,6 +236,7 @@ async function loadTaskWorkspaceMetadata(
 				exists: false,
 				baseRef: pathInfo.baseRef,
 				baseCommit: null,
+				commitsSinceFork: null,
 				branch: null,
 				isDetached: false,
 				headCommit: null,
@@ -246,6 +261,7 @@ async function loadTaskWorkspaceMetadata(
 		}
 		const summary = await getGitSyncSummary(pathInfo.path, { probe });
 		const baseCommit = await loadTaskForkPointCommit(pathInfo.path, pathInfo.baseRef);
+		const commitsSinceFork = await loadCommitsSinceFork(pathInfo.path, baseCommit);
 		return {
 			data: {
 				taskId: task.taskId,
@@ -253,6 +269,7 @@ async function loadTaskWorkspaceMetadata(
 				exists: true,
 				baseRef: pathInfo.baseRef,
 				baseCommit,
+				commitsSinceFork,
 				branch: probe.currentBranch,
 				isDetached: probe.headCommit !== null && probe.currentBranch === null,
 				headCommit: probe.headCommit,
@@ -274,6 +291,7 @@ async function loadTaskWorkspaceMetadata(
 				exists: true,
 				baseRef: pathInfo.baseRef,
 				baseCommit: null,
+				commitsSinceFork: null,
 				branch: null,
 				isDetached: false,
 				headCommit: null,

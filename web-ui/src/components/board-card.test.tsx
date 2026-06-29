@@ -686,6 +686,7 @@ describe("BoardCard", () => {
 			isDetached: false,
 			headCommit: "1234567890abcdef",
 			baseCommit: null,
+			commitsSinceFork: null,
 			changedFiles: 2,
 			additions: 5,
 			deletions: 1,
