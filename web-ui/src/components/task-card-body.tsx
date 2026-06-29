@@ -72,7 +72,7 @@ function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: strin
 	}
 }
 
-/** 钉在宿主行右下角；仅在该行 hover / focus-within 时显现（换行后仍贴末行右侧）。 */
+/** 钉在宿主行右下角；纯 overlay，不占文本流宽度；hover 时左侧渐变遮住末行被挡字符。 */
 function TaskCardRowHoverActions({
 	groupName,
 	children,
@@ -83,13 +83,15 @@ function TaskCardRowHoverActions({
 	return (
 		<div
 			className={cn(
-				"absolute bottom-0 right-0 z-10 flex rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+				"pointer-events-none absolute bottom-0 right-0 z-10 flex items-end opacity-0 transition-opacity",
+				// 与卡面同底色的左向渐变：hover 时才显现，避免为按钮预留 pr-* 挤占换行宽度。
+				"bg-gradient-to-l from-surface-2 from-45% to-transparent pl-4 group-hover/card:from-surface-3",
 				groupName === "title"
-					? "opacity-0 pointer-events-none group-hover/title:opacity-100 group-hover/title:pointer-events-auto group-focus-within/title:opacity-100 group-focus-within/title:pointer-events-auto"
-					: "opacity-0 pointer-events-none group-hover/directory:opacity-100 group-hover/directory:pointer-events-auto group-focus-within/directory:opacity-100 group-focus-within/directory:pointer-events-auto",
+					? "group-hover/title:opacity-100 group-hover/title:pointer-events-auto group-focus-within/title:opacity-100 group-focus-within/title:pointer-events-auto"
+					: "group-hover/directory:opacity-100 group-hover/directory:pointer-events-auto group-focus-within/directory:opacity-100 group-focus-within/directory:pointer-events-auto",
 			)}
 		>
-			{children}
+			<div className="pointer-events-auto mb-px flex rounded-md bg-surface-3 px-0.5 shadow-sm">{children}</div>
 		</div>
 	);
 }
@@ -559,7 +561,7 @@ export function TaskCardBody({
 		>
 			<div
 				className={cn(
-					"relative rounded-md border border-border-bright bg-surface-2 p-2.5",
+					"group/card relative rounded-md border border-border-bright bg-surface-2 p-2.5",
 					isCardInteractive && "cursor-pointer hover:bg-surface-3 hover:border-border-bright",
 					isDragging && "shadow-lg",
 					isHovered && isCardInteractive && "bg-surface-3 border-border-bright",
@@ -570,7 +572,7 @@ export function TaskCardBody({
 				{/* agent 图标 + 微型时长药丸合一：钉在卡片左上角、略微超出边框（不占标题横向空间）。
 				    最左为 agent 图标（略放大）；完整「agent · 模型」进 hover tooltip。
 				    Clock=自创建至今（恒显）；Activity=agent 上次响应至今（仅有时间戳时显）。各段 hover 显绝对本地时间。 */}
-				<div className="absolute -left-2 -top-2 z-20 inline-flex h-4 items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
+				<div className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
 					{taskAgentSettingsLabel ? (
 						<Tooltip content={taskAgentSettingsLabel}>
 							<span
@@ -638,7 +640,6 @@ export function TaskCardBody({
 								className={cn(
 									"line-clamp-3 m-0 font-medium text-sm",
 									isTrashCard && "line-through text-text-tertiary",
-									showTitleEditButton && "pr-6",
 								)}
 							>
 								{displayTitle}
@@ -666,7 +667,7 @@ export function TaskCardBody({
 				</div>
 				<div
 					className={cn(
-						"absolute right-1 -top-2 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+						"absolute right-1 -top-[6px] z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
 						"focus-within:opacity-100 focus-within:pointer-events-auto",
 						isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
 					)}
@@ -848,10 +849,7 @@ export function TaskCardBody({
 					<div
 						data-task-directory=""
 						title={copyableDirectoryPath ?? undefined}
-						className={cn(
-							"group/directory relative mt-1 flex items-start gap-1 font-mono",
-							showDirectoryCopyButton && "pr-6",
-						)}
+						className={cn("group/directory relative mt-1 flex items-start gap-1 font-mono")}
 						style={{
 							fontSize: 12,
 							lineHeight: 1.4,
