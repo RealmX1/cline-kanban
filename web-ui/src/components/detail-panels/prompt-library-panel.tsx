@@ -36,7 +36,7 @@ function PromptRow({
 	const canFill = prompt.text.trim().length > 0;
 
 	return (
-		<div className="group flex items-start gap-1.5 rounded-md border border-border bg-surface-2 p-1.5 focus-within:border-border-focus">
+		<div className="group relative rounded-md border border-border bg-surface-2 focus-within:border-border-focus">
 			<textarea
 				ref={textareaRef}
 				value={prompt.text}
@@ -44,9 +44,11 @@ function PromptRow({
 				placeholder="Prompt text…"
 				rows={1}
 				spellCheck={false}
-				className="min-h-[1.5rem] flex-1 resize-none bg-transparent text-xs leading-5 text-text-primary placeholder:text-text-tertiary focus:outline-none"
+				className="block min-h-[1.5rem] w-full resize-none overflow-x-hidden bg-transparent p-1.5 text-xs leading-5 text-text-primary placeholder:text-text-tertiary focus:outline-none"
 			/>
-			<div className="flex shrink-0 items-center gap-0.5">
+			{/* Action cluster floats at the bottom-right and reveals on hover/focus so it never
+			    competes with the textarea for horizontal width nor pins itself to the top. */}
+			<div className="pointer-events-none absolute right-1 bottom-1 flex items-center gap-0.5 rounded-md border border-border-bright bg-surface-2 opacity-0 shadow-sm transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
 				<Tooltip content={isGlobal ? "Global · all tasks & repos" : "This task only"}>
 					<Button
 						variant="ghost"
