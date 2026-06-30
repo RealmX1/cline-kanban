@@ -206,9 +206,10 @@ How it works end to end:
 3. `kanban hooks ingest --event <to_review|to_in_progress>` reads hook context from env:
    - `KANBAN_HOOK_TASK_ID`
    - `KANBAN_HOOK_WORKSPACE_ID`
-   - `KANBAN_HOOK_PORT`
 4. The ingest command calls runtime TRPC `hooks.ingest`.
 5. The runtime applies guarded transitions and ignores duplicates or invalid transitions as no-ops.
+
+CLI timeout and runtime connection env vars (`KANBAN_CLI_HARD_TIMEOUT_MS`, `KANBAN_CLI_TRPC_TIMEOUT_MS`, `KANBAN_HOOK_INGEST_TIMEOUT_MS`, `KANBAN_RUNTIME_HOST`, `KANBAN_RUNTIME_PORT`) are documented in [`docs/cli-environment.md`](docs/cli-environment.md).
 
 Current agent mappings:
 

@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/node";
 import packageJson from "../../package.json" with { type: "json" };
+import { safeErrorMessage } from "../core/cli-process-guards.js";
 
 const nodeSentryDsn = "https://b597cbea54f43704439be10d843699b0@o4511098366263296.ingest.us.sentry.io/4511098558087168";
 
@@ -29,24 +30,37 @@ interface CaptureNodeExceptionOptions {
 	area?: string;
 }
 
+function toCaptureError(error: unknown): Error {
+	return new Error(safeErrorMessage(error));
+}
+
 export function captureNodeException(error: unknown, options?: CaptureNodeExceptionOptions): void {
 	if (!initialized) {
 		return;
 	}
 
-	Sentry.withScope((scope) => {
-		if (options?.area) {
-			scope.setTag("error_area", options.area);
-		}
-		Sentry.captureException(error);
-	});
+	try {
+		Sentry.withScope((scope) => {
+			if (options?.area) {
+				scope.setTag("error_area", options.area);
+			}
+			Sentry.captureException(toCaptureError(error));
+		});
+	} catch {
+		// Telemetry must never block CLI shutdown or exit.
+	}
 }
 
 export async function flushNodeTelemetry(timeoutMs = 2_000): Promise<void> {
 	if (!initialized) {
 		return;
 	}
-	await Sentry.flush(timeoutMs);
+
+	try {
+		await Sentry.flush(timeoutMs);
+	} catch {
+		// Telemetry must never block CLI shutdown or exit.
+	}
 }
 
 export function isNodeSentryEnabled(): boolean {

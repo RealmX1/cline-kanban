@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -245,6 +245,147 @@ async function runCliCommandAndCollectOutput(options: {
 		exitCode: process.exitCode,
 		didExit,
 	};
+}
+
+const CLI_GUARD_TRPC_TIMEOUT_MS = 800;
+const CLI_GUARD_HARD_TIMEOUT_MS = 5_000;
+const CLI_GUARD_HOOK_INGEST_TIMEOUT_MS = 500;
+const CLI_GUARD_MAX_RSS_KB = 512 * 1024;
+const CLI_GUARD_MAX_RSS_GROWTH_KB = 256 * 1024;
+
+function withCliGuardTimeouts(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+	return {
+		...env,
+		KANBAN_CLI_TRPC_TIMEOUT_MS: String(CLI_GUARD_TRPC_TIMEOUT_MS),
+		KANBAN_CLI_HARD_TIMEOUT_MS: String(CLI_GUARD_HARD_TIMEOUT_MS),
+		KANBAN_HOOK_INGEST_TIMEOUT_MS: String(CLI_GUARD_HOOK_INGEST_TIMEOUT_MS),
+	};
+}
+
+async function startHangingHttpServer(): Promise<{ port: number; server: Server }> {
+	const server = createServer(() => {
+		// Accept connections but never complete a tRPC response.
+	});
+	await new Promise<void>((resolveListen, rejectListen) => {
+		server.once("error", rejectListen);
+		server.listen(0, "127.0.0.1", () => {
+			resolveListen();
+		});
+	});
+	const address = server.address();
+	const port = typeof address === "object" && address ? address.port : null;
+	if (!port) {
+		server.close();
+		throw new Error("Could not start hanging HTTP server.");
+	}
+	return { port, server };
+}
+
+async function closeHttpServer(server: Server): Promise<void> {
+	await new Promise<void>((resolveClose, rejectClose) => {
+		server.close((error) => {
+			if (error) {
+				rejectClose(error);
+				return;
+			}
+			resolveClose();
+		});
+	});
+}
+
+function readProcessRssKb(pid: number): number | null {
+	const result = spawnSync("ps", ["-o", "rss=", "-p", String(pid)], {
+		encoding: "utf8",
+	});
+	if (result.status !== 0) {
+		return null;
+	}
+	const parsed = Number.parseInt(result.stdout.trim(), 10);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function bootstrapWorkspaceOnDisk(options: { projectPath: string; homeDir: string }): Promise<string> {
+	const port = String(await getAvailablePort());
+	const serverProcess = await startRuntimeServerForProject({
+		projectPath: options.projectPath,
+		homeDir: options.homeDir,
+		port,
+	});
+	await stopRuntimeServer(serverProcess);
+	return port;
+}
+
+async function waitForExitWhileTrackingRss(options: {
+	process: ChildProcess;
+	timeoutMs: number;
+	warmupMs?: number;
+	pollIntervalMs?: number;
+}): Promise<{ didExit: boolean; baselineRssKb: number; maxRssKb: number }> {
+	const pollIntervalMs = options.pollIntervalMs ?? 100;
+	const warmupMs = options.warmupMs ?? 500;
+	const startedAt = Date.now();
+	let baselineRssKb: number | null = null;
+	let maxRssKb = 0;
+
+	while (Date.now() - startedAt < options.timeoutMs) {
+		if (typeof options.process.pid === "number") {
+			const rssKb = readProcessRssKb(options.process.pid);
+			if (rssKb !== null) {
+				maxRssKb = Math.max(maxRssKb, rssKb);
+				if (baselineRssKb === null && Date.now() - startedAt >= warmupMs) {
+					baselineRssKb = rssKb;
+				}
+			}
+		}
+		if (options.process.exitCode !== null) {
+			return { didExit: true, baselineRssKb: baselineRssKb ?? maxRssKb, maxRssKb };
+		}
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, pollIntervalMs);
+		});
+	}
+
+	options.process.kill("SIGKILL");
+	return { didExit: false, baselineRssKb: baselineRssKb ?? maxRssKb, maxRssKb };
+}
+
+async function startRuntimeServerForProject(options: {
+	projectPath: string;
+	homeDir: string;
+	port: string;
+}): Promise<ChildProcess> {
+	const env = createGitTestEnv({
+		HOME: options.homeDir,
+		USERPROFILE: options.homeDir,
+		KANBAN_RUNTIME_PORT: options.port,
+	});
+	const serverProcess = spawn(
+		process.execPath,
+		[
+			"--require",
+			resolveShutdownIpcHookPath(),
+			"--import",
+			resolveTsxLoaderImportSpecifier(),
+			resolve(process.cwd(), "src/cli.ts"),
+			"--no-open",
+		],
+		{
+			cwd: options.projectPath,
+			env,
+			stdio: ["ignore", "pipe", "pipe", "ipc"],
+		},
+	);
+	await waitForServerStart(serverProcess);
+	return serverProcess;
+}
+
+async function stopRuntimeServer(serverProcess: ChildProcess): Promise<void> {
+	await requestGracefulShutdown(serverProcess);
+	const stopped = await waitForExit(serverProcess, 5_000);
+	if (!stopped) {
+		serverProcess.kill("SIGKILL");
+		await waitForExit(serverProcess, 5_000);
+	}
 }
 
 describe("source task commands", () => {
@@ -649,6 +790,326 @@ describe("source task commands", () => {
 					await waitForExit(serverProcess, 5_000);
 				}
 			}
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+});
+
+describe("CLI subprocess exit guarantees", () => {
+	it("exits after task list without --column on a multi-task workspace", { timeout: 120_000 }, async () => {
+		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-list-all-");
+		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-list-all-");
+
+		try {
+			initGitRepository(projectPath);
+			writeFileSync(join(projectPath, "README.md"), "# CLI List All Tasks Test\n", "utf8");
+			commitAll(projectPath, "init");
+
+			const port = String(await getAvailablePort());
+			const env = createGitTestEnv({
+				HOME: homeDir,
+				USERPROFILE: homeDir,
+				KANBAN_RUNTIME_PORT: port,
+			});
+			const serverProcess = await startRuntimeServerForProject({
+				projectPath,
+				homeDir,
+				port,
+			});
+
+			try {
+				for (let index = 0; index < 12; index += 1) {
+					const created = await runCliCommandAndCollectOutput({
+						args: [
+							"task",
+							"create",
+							"--prompt",
+							`Create CLI list-all fixture task ${index + 1}`,
+							"--project-path",
+							projectPath,
+						],
+						cwd: projectPath,
+						env,
+					});
+					expect(created.didExit, `task create ${index + 1} did not exit in time`).toBe(true);
+					expect(created.exitCode).toBe(0);
+				}
+
+				const listed = await runCliCommandAndCollectOutput({
+					args: ["task", "list", "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+					timeoutMs: 15_000,
+				});
+				expect(
+					listed.didExit,
+					`task list without --column did not exit in time.\nstdout:\n${listed.stdout}\nstderr:\n${listed.stderr}`,
+				).toBe(true);
+				expect(listed.exitCode).toBe(0);
+
+				const payload = JSON.parse(listed.stdout) as { ok?: boolean; count?: number; column?: string | null };
+				expect(payload.ok).toBe(true);
+				expect(payload.column).toBeNull();
+				expect(payload.count).toBe(12);
+			} finally {
+				await stopRuntimeServer(serverProcess);
+			}
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("exits when the runtime server is unreachable", { timeout: 30_000 }, async () => {
+		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-unreachable-");
+		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-unreachable-");
+
+		try {
+			initGitRepository(projectPath);
+			writeFileSync(join(projectPath, "README.md"), "# CLI Unreachable Runtime Test\n", "utf8");
+			commitAll(projectPath, "init");
+
+			const deadPort = String(await getAvailablePort());
+			const env = withCliGuardTimeouts(
+				createGitTestEnv({
+					HOME: homeDir,
+					USERPROFILE: homeDir,
+					KANBAN_RUNTIME_PORT: deadPort,
+				}),
+			);
+
+			const result = await runCliCommandAndCollectOutput({
+				args: ["task", "list", "--project-path", projectPath],
+				cwd: projectPath,
+				env,
+				timeoutMs: CLI_GUARD_HARD_TIMEOUT_MS + 2_000,
+			});
+
+			expect(
+				result.didExit,
+				`task list against unreachable runtime did not exit.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+			).toBe(true);
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout).toContain('"ok": false');
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("exits when the runtime hangs instead of responding to tRPC", { timeout: 30_000 }, async () => {
+		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-hanging-");
+		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-hanging-");
+
+		let hangingServer: Server | null = null;
+		try {
+			initGitRepository(projectPath);
+			writeFileSync(join(projectPath, "README.md"), "# CLI Hanging Runtime Test\n", "utf8");
+			commitAll(projectPath, "init");
+
+			const started = await startHangingHttpServer();
+			hangingServer = started.server;
+			const env = withCliGuardTimeouts(
+				createGitTestEnv({
+					HOME: homeDir,
+					USERPROFILE: homeDir,
+					KANBAN_RUNTIME_PORT: String(started.port),
+				}),
+			);
+
+			const result = await runCliCommandAndCollectOutput({
+				args: ["task", "list", "--project-path", projectPath],
+				cwd: projectPath,
+				env,
+				timeoutMs: CLI_GUARD_HARD_TIMEOUT_MS + 2_000,
+			});
+
+			expect(
+				result.didExit,
+				`task list against hanging runtime did not exit.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+			).toBe(true);
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout).toContain('"ok": false');
+		} finally {
+			if (hangingServer) {
+				await closeHttpServer(hangingServer);
+			}
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it(
+		"exits with code 1 (not 124) when tRPC times out under production-like timeout margin",
+		{ timeout: 30_000 },
+		async () => {
+			const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-trpc-margin-");
+			const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-trpc-margin-");
+
+			let hangingServer: Server | null = null;
+			try {
+				initGitRepository(projectPath);
+				writeFileSync(join(projectPath, "README.md"), "# CLI TRPC Margin Test\n", "utf8");
+				commitAll(projectPath, "init");
+				await bootstrapWorkspaceOnDisk({ projectPath, homeDir });
+
+				const started = await startHangingHttpServer();
+				hangingServer = started.server;
+				const env = createGitTestEnv({
+					HOME: homeDir,
+					USERPROFILE: homeDir,
+					KANBAN_RUNTIME_PORT: String(started.port),
+					KANBAN_CLI_TRPC_TIMEOUT_MS: "2000",
+					KANBAN_CLI_HARD_TIMEOUT_MS: "7000",
+				});
+
+				const result = await runCliCommandAndCollectOutput({
+					args: ["task", "list", "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+					timeoutMs: 10_000,
+				});
+
+				expect(
+					result.didExit,
+					`task list did not exit after tRPC timeout.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+				).toBe(true);
+				expect(result.exitCode).toBe(1);
+				expect(result.stdout).toContain('"ok": false');
+			} finally {
+				if (hangingServer) {
+					await closeHttpServer(hangingServer);
+				}
+				cleanupProject();
+				cleanupHome();
+			}
+		},
+	);
+
+	it("enforces the CLI hard timeout with exit code 124", { timeout: 30_000 }, async () => {
+		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-hard-timeout-");
+		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-hard-timeout-");
+
+		let hangingServer: Server | null = null;
+		try {
+			initGitRepository(projectPath);
+			writeFileSync(join(projectPath, "README.md"), "# CLI Hard Timeout Test\n", "utf8");
+			commitAll(projectPath, "init");
+			await bootstrapWorkspaceOnDisk({ projectPath, homeDir });
+
+			const started = await startHangingHttpServer();
+			hangingServer = started.server;
+			const env = createGitTestEnv({
+				HOME: homeDir,
+				USERPROFILE: homeDir,
+				KANBAN_RUNTIME_PORT: String(started.port),
+				KANBAN_CLI_HARD_TIMEOUT_MS: "1500",
+				KANBAN_CLI_TRPC_TIMEOUT_MS: "60000",
+			});
+
+			const result = await runCliCommandAndCollectOutput({
+				args: ["task", "list", "--project-path", projectPath],
+				cwd: projectPath,
+				env,
+				timeoutMs: 5_000,
+			});
+
+			expect(
+				result.didExit,
+				`task list did not hit hard timeout.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+			).toBe(true);
+			expect(result.exitCode).toBe(124);
+			expect(result.stderr).toContain("command timed out after 1500ms");
+		} finally {
+			if (hangingServer) {
+				await closeHttpServer(hangingServer);
+			}
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("does not grow RSS while waiting for a hanging runtime response", { timeout: 30_000 }, async () => {
+		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-rss-");
+		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-rss-");
+
+		let hangingServer: Server | null = null;
+		try {
+			initGitRepository(projectPath);
+			writeFileSync(join(projectPath, "README.md"), "# CLI RSS Guard Test\n", "utf8");
+			commitAll(projectPath, "init");
+			await bootstrapWorkspaceOnDisk({ projectPath, homeDir });
+
+			const started = await startHangingHttpServer();
+			hangingServer = started.server;
+			const env = withCliGuardTimeouts(
+				createGitTestEnv({
+					HOME: homeDir,
+					USERPROFILE: homeDir,
+					KANBAN_RUNTIME_PORT: String(started.port),
+				}),
+			);
+
+			const commandProcess = spawnSourceCli(["task", "list", "--project-path", projectPath], {
+				cwd: projectPath,
+				env,
+			});
+			const rssResult = await waitForExitWhileTrackingRss({
+				process: commandProcess,
+				timeoutMs: CLI_GUARD_HARD_TIMEOUT_MS + 2_000,
+			});
+
+			expect(
+				rssResult.didExit,
+				`task list against hanging runtime did not exit (baseline=${rssResult.baselineRssKb}kb max=${rssResult.maxRssKb}kb).`,
+			).toBe(true);
+			expect(rssResult.maxRssKb).toBeLessThan(CLI_GUARD_MAX_RSS_KB);
+			expect(rssResult.maxRssKb).toBeLessThanOrEqual(rssResult.baselineRssKb + CLI_GUARD_MAX_RSS_GROWTH_KB);
+			expect(commandProcess.exitCode).toBe(1);
+		} finally {
+			if (hangingServer) {
+				await closeHttpServer(hangingServer);
+			}
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("exits hooks ingest when the runtime is unreachable", { timeout: 30_000 }, async () => {
+		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-hooks-exit-");
+		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-hooks-exit-");
+
+		try {
+			initGitRepository(projectPath);
+			writeFileSync(join(projectPath, "README.md"), "# CLI Hooks Exit Test\n", "utf8");
+			commitAll(projectPath, "init");
+
+			const deadPort = String(await getAvailablePort());
+			const env = withCliGuardTimeouts(
+				createGitTestEnv({
+					HOME: homeDir,
+					USERPROFILE: homeDir,
+					KANBAN_RUNTIME_PORT: deadPort,
+					KANBAN_HOOK_TASK_ID: "task-hooks-exit",
+					KANBAN_HOOK_WORKSPACE_ID: "workspace-hooks-exit",
+				}),
+			);
+
+			const result = await runCliCommandAndCollectOutput({
+				args: ["hooks", "ingest", "--event", "activity", "--source", "claude"],
+				cwd: projectPath,
+				env,
+				timeoutMs: CLI_GUARD_HARD_TIMEOUT_MS + 2_000,
+			});
+
+			expect(
+				result.didExit,
+				`hooks ingest against unreachable runtime did not exit.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+			).toBe(true);
+			expect(result.exitCode).toBe(1);
+			expect(result.stderr).toContain("kanban hooks ingest:");
 		} finally {
 			cleanupProject();
 			cleanupHome();

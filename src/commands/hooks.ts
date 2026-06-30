@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createTRPCProxyClient, httpBatchLink, TRPCClientError } from "@trpc/client";
 import type { Command } from "commander";
 import type { RuntimeHookEvent, RuntimeHookIngestResponse, RuntimeTaskHookActivity } from "../core/api-contract";
+import { mergeAbortSignals } from "../core/cli-process-guards";
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { buildKanbanRuntimeUrl, getRuntimeFetch } from "../core/runtime-endpoint";
 import { buildWindowsCmdArgsArray, resolveWindowsComSpec, shouldUseWindowsCmdLaunch } from "../core/windows-cmd-launch";
@@ -65,15 +66,17 @@ function formatError(error: unknown): string {
 	return String(error);
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, timeoutMs: number, label: string): Promise<T> {
+	const controller = new AbortController();
 	let timeoutHandle: NodeJS.Timeout | null = null;
 	const timeoutPromise = new Promise<never>((_, reject) => {
 		timeoutHandle = setTimeout(() => {
+			controller.abort();
 			reject(new Error(`${label} timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
 	});
 	try {
-		return await Promise.race([promise, timeoutPromise]);
+		return await Promise.race([run(controller.signal), timeoutPromise]);
 	} finally {
 		if (timeoutHandle) {
 			clearTimeout(timeoutHandle);
@@ -410,7 +413,7 @@ function resolveHookIngestTimeoutMs(): number {
 //     "transport" 记录并抛。
 // onFinalFailure 仅在「最终放弃」时触发一次（中途重试不触发），由调用方接 F3 的丢投记录。
 export async function deliverHookIngestWithRetry(
-	mutate: () => Promise<RuntimeHookIngestResponse>,
+	mutate: (signal: AbortSignal) => Promise<RuntimeHookIngestResponse>,
 	options: {
 		timeoutMs: number;
 		maxAttempts: number;
@@ -426,7 +429,7 @@ export async function deliverHookIngestWithRetry(
 	for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
 		let ingestResponse: RuntimeHookIngestResponse;
 		try {
-			ingestResponse = await withTimeout(mutate(), options.timeoutMs, "kanban hooks ingest");
+			ingestResponse = await withTimeout((signal) => mutate(signal), options.timeoutMs, "kanban hooks ingest");
 		} catch (transportError) {
 			lastTransportError = transportError;
 			if (attempt < options.maxAttempts) {
@@ -470,26 +473,28 @@ function recordIngestDropForLifecycleEvent(
 }
 
 async function ingestHookEvent(args: HooksIngestArgs): Promise<void> {
-	const trpcClient = createTRPCProxyClient<RuntimeAppRouter>({
-		links: [
-			httpBatchLink({
-				url: buildKanbanRuntimeUrl("/api/trpc"),
-				maxItems: 1,
-				fetch: async (url, options) => {
-					const runtimeFetch = await getRuntimeFetch();
-					return runtimeFetch(url, options);
-				},
-			}),
-		],
-	});
 	await deliverHookIngestWithRetry(
-		() =>
-			trpcClient.hooks.ingest.mutate({
+		async (signal) => {
+			const trpcClient = createTRPCProxyClient<RuntimeAppRouter>({
+				links: [
+					httpBatchLink({
+						url: buildKanbanRuntimeUrl("/api/trpc"),
+						maxItems: 1,
+						fetch: async (url, options) => {
+							const runtimeFetch = await getRuntimeFetch();
+							const mergedSignal = mergeAbortSignals(signal, options?.signal);
+							return runtimeFetch(url, { ...options, signal: mergedSignal });
+						},
+					}),
+				],
+			});
+			return await trpcClient.hooks.ingest.mutate({
 				taskId: args.taskId,
 				workspaceId: args.workspaceId,
 				event: args.event,
 				metadata: args.metadata,
-			}),
+			});
+		},
 		{
 			timeoutMs: resolveHookIngestTimeoutMs(),
 			maxAttempts: HOOK_INGEST_MAX_ATTEMPTS,

@@ -11,6 +11,14 @@ import { registerHooksCommand } from "./commands/hooks";
 import { registerTaskCommand } from "./commands/task";
 import { loadGlobalRuntimeConfig, loadRuntimeConfig } from "./config/runtime-config";
 import type { RuntimeCommandRunResponse } from "./core/api-contract";
+import {
+	DEFAULT_CLI_TELEMETRY_FLUSH_MS,
+	installCliFatalErrorHandlers,
+	installCliHardTimeoutIfNeeded,
+	registerCliFatalErrorReporter,
+	registerCliProcessExit,
+	safeErrorMessage,
+} from "./core/cli-process-guards";
 import { createGitProcessEnv } from "./core/git-process-env";
 import {
 	installGracefulShutdownHandlers,
@@ -36,6 +44,12 @@ import type { RuntimeStateHub } from "./server/runtime-state-hub";
 import { captureNodeException, flushNodeTelemetry } from "./telemetry/sentry-node.js";
 import type { TerminalSessionManager } from "./terminal/session-manager";
 import { runOnDemandUpdate } from "./update/update";
+
+registerCliProcessExit((code) => process.exit(code));
+registerCliFatalErrorReporter((error) => {
+	captureNodeException(error, { area: "fatal" });
+});
+installCliFatalErrorHandlers();
 
 interface CliOptions {
 	noOpen: boolean;
@@ -738,18 +752,23 @@ function createProgram(invocationArgs: string[]): Command {
 
 async function run(): Promise<void> {
 	const argv = process.argv.slice(2);
+	const isServerStyleInvocation = shouldAutoOpenBrowserTabForInvocation(argv);
+	const cancelCliHardTimeout = installCliHardTimeoutIfNeeded(argv, isServerStyleInvocation);
 	const program = createProgram(argv);
-	await program.parseAsync(argv, { from: "user" });
-	if (!shouldAutoOpenBrowserTabForInvocation(argv)) {
-		await Promise.allSettled([disposeCliTelemetryService(), flushNodeTelemetry()]);
-		process.exit(process.exitCode ?? 0);
+	try {
+		await program.parseAsync(argv, { from: "user" });
+	} finally {
+		if (!isServerStyleInvocation) {
+			cancelCliHardTimeout();
+			await Promise.allSettled([disposeCliTelemetryService(), flushNodeTelemetry(DEFAULT_CLI_TELEMETRY_FLUSH_MS)]);
+			process.exit(process.exitCode ?? 0);
+		}
 	}
 }
 
 void run().catch(async (error) => {
 	captureNodeException(error, { area: "startup" });
 	await Promise.allSettled([disposeCliTelemetryService(), flushNodeTelemetry()]);
-	const message = error instanceof Error ? error.message : String(error);
-	console.error(`Failed to start Kanban: ${message}`);
+	console.error(`Failed to start Kanban: ${safeErrorMessage(error)}`);
 	process.exit(1);
 });

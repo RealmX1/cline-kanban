@@ -112,6 +112,40 @@ describe("session-manager · connection-drop auto-continue", () => {
 		manager.stopTaskSession("task-conn-drop");
 	});
 
+	it("续跑注入末尾 CR 被吞（输出仍静默）→ 写后确认补发裸 `\\r`，绝不重发整段 paste（防文本翻倍回归）", async () => {
+		// 连接中断路径旧病：CR 被吞 → 退避重试重新整段 paste → 输入框文本叠两份。写后确认闭环改为补发裸回车：
+		// 注入续跑 paste 后保持输出静默（模拟 CR 被吞、框卡 idle），过 SUBMIT_CONFIRM_DELAY_MS 应只补发一个 `"\r"`，
+		// 而非又一段 `[200~…[201~`。
+		const SUBMIT_CONFIRM_DELAY_MS = 2_500;
+		const getSession = spawnManagerWithSession(1009);
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-conn-drop-resend-cr",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-conn-drop-resend-cr",
+			prompt: "Do the task",
+			autoContinueOnConnectionDropEnabled: true,
+		});
+		const session = getSession();
+		const write = (session as NonNullable<typeof session>).write;
+
+		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await vi.advanceTimersByTimeAsync(4_000); // 首档退避 → 注入续跑 paste。
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(write.mock.calls[0]?.[0]).toContain("[200~");
+
+		// 不再喂任何输出（CR 被吞、框静止）→ 过确认延时应补发裸回车。
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
+		expect(write).toHaveBeenCalledTimes(2);
+		expect(write.mock.calls[1]?.[0]).toBe("\r");
+		// 关键回归断言：补发的不是又一段 bracketed paste（绝不重发整段续跑文本 → 不翻倍）。
+		expect(write.mock.calls[1]?.[0]).not.toContain("[200~");
+
+		manager.stopTaskSession("task-conn-drop-resend-cr");
+	});
+
 	it("does not inject when the auto-continue flag is disabled", async () => {
 		const getSession = spawnManagerWithSession(1002);
 		const manager = new TerminalSessionManager();
@@ -154,9 +188,12 @@ describe("session-manager · connection-drop auto-continue", () => {
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(manager.getSummary("task-conn-drop-recover")?.connectionRetry?.status).toBe("retrying");
 
-		// 没有再出现连接错误 → 下一次退避触发时判定已恢复，清除重试状态、不再注入。
+		// 没有再出现连接错误 → 下一次退避触发时判定已恢复，清除重试状态、不再注入续跑。
 		await vi.advanceTimersByTimeAsync(20_000);
-		expect(write).toHaveBeenCalledTimes(1);
+		// 只数「续跑 paste 注入」（含 bracketed-paste 框 `[200~`）：写后确认闭环在 mock 始终静默（无后续输出回流）下
+		// 会补发裸 `\r`，那是另一条安全层、非续跑注入；恢复后续跑注入数应恒为 1。
+		const continuationInjections = write.mock.calls.filter((call) => String(call[0]).includes("[200~"));
+		expect(continuationInjections).toHaveLength(1);
 		expect(manager.getSummary("task-conn-drop-recover")?.connectionRetry ?? null).toBeNull();
 
 		manager.stopTaskSession("task-conn-drop-recover");
