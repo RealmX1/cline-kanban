@@ -111,6 +111,13 @@ export const runtimeTaskImageSchema = z.object({
 	name: z.string().optional(),
 });
 export type RuntimeTaskImage = z.infer<typeof runtimeTaskImageSchema>;
+export const runtimeTaskCommentEntrySchema = z.object({
+	taskCommentEntryId: z.string(),
+	commentText: z.string(),
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+export type RuntimeTaskCommentEntry = z.infer<typeof runtimeTaskCommentEntrySchema>;
 
 const runtimeLegacyTaskClineReasoningEffortSchema = z.enum(["default", "low", "medium", "high", "xhigh"]);
 
@@ -137,6 +144,30 @@ function normalizeRuntimeTaskClineSettings(input: {
 	};
 }
 
+function normalizeRuntimeTaskCommentEntries(
+	entries?: RuntimeTaskCommentEntry[],
+): RuntimeTaskCommentEntry[] | undefined {
+	if (!entries || entries.length === 0) {
+		return undefined;
+	}
+	const normalizedEntries = entries
+		.map((entry) => {
+			const taskCommentEntryId = entry.taskCommentEntryId.trim();
+			const commentText = entry.commentText.trim();
+			if (!taskCommentEntryId || !commentText) {
+				return null;
+			}
+			return {
+				taskCommentEntryId,
+				commentText,
+				createdAt: entry.createdAt,
+				updatedAt: entry.updatedAt,
+			};
+		})
+		.filter((entry): entry is RuntimeTaskCommentEntry => entry !== null);
+	return normalizedEntries.length > 0 ? normalizedEntries : undefined;
+}
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
@@ -146,6 +177,7 @@ export const runtimeBoardCardSchema = z
 		autoReviewEnabled: z.boolean().optional(),
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
+		taskCommentEntries: z.array(runtimeTaskCommentEntrySchema).optional(),
 		agentId: runtimeAgentIdSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		clineProviderId: z.string().optional(),
@@ -163,6 +195,7 @@ export const runtimeBoardCardSchema = z
 			clineProviderId: _legacyProviderId,
 			clineModelId: _legacyModelId,
 			clineReasoningEffort: _legacyReasoningEffort,
+			taskCommentEntries: rawTaskCommentEntries,
 			...card
 		}) => {
 			const clineSettings = normalizeRuntimeTaskClineSettings({
@@ -171,9 +204,11 @@ export const runtimeBoardCardSchema = z
 				clineModelId: _legacyModelId,
 				clineReasoningEffort: _legacyReasoningEffort,
 			});
+			const taskCommentEntries = normalizeRuntimeTaskCommentEntries(rawTaskCommentEntries);
 			return {
 				...card,
 				...(clineSettings !== undefined ? { clineSettings } : {}),
+				...(taskCommentEntries !== undefined ? { taskCommentEntries } : {}),
 				title: resolveTaskTitle(card.title, card.prompt),
 			};
 		},

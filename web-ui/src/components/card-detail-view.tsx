@@ -1,5 +1,5 @@
 import type { DropResult } from "@hello-pangea/dnd";
-import { Files, GitCompareArrows, Maximize2, MessageSquare, Minimize2, X } from "lucide-react";
+import { Files, FileText, GitCompareArrows, Maximize2, MessageSquare, Minimize2, X } from "lucide-react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
@@ -9,6 +9,7 @@ import { ColumnContextPanel } from "@/components/detail-panels/column-context-pa
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
 import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
+import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
@@ -36,7 +37,7 @@ import type {
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
 import { useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel } from "@/types";
+import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel, type TaskCommentEntry } from "@/types";
 import { useWindowEvent } from "@/utils/react-use";
 
 // We still poll the open detail diff because line content can change without changing
@@ -257,12 +258,20 @@ function WorkspaceChangesEmptyPanel({ title }: { title: string }): React.ReactEl
 	);
 }
 
-type MobileTab = "chat" | "diff" | "files";
+type MobileTab = "chat" | "diff" | "files" | "comments";
 
 const MOBILE_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "chat", label: "Chat", icon: <MessageSquare size={14} /> },
 	{ id: "diff", label: "Diff", icon: <GitCompareArrows size={14} /> },
 	{ id: "files", label: "Files", icon: <Files size={14} /> },
+	{ id: "comments", label: "Comments", icon: <FileText size={14} /> },
+];
+
+type DetailUtilityTab = "prompts" | "comments";
+
+const DETAIL_UTILITY_TABS: { id: DetailUtilityTab; label: string; icon: React.ReactElement }[] = [
+	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
+	{ id: "comments", label: "Comments", icon: <MessageSquare size={14} /> },
 ];
 
 function MobileDetailTabBar({
@@ -288,6 +297,37 @@ function MobileDetailTabBar({
 					{tab.icon}
 					{tab.label}
 					{activeTab === tab.id ? <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" /> : null}
+				</button>
+			))}
+		</div>
+	);
+}
+
+function DetailUtilityTabList({
+	activeTab,
+	onTabChange,
+}: {
+	activeTab: DetailUtilityTab;
+	onTabChange: (tab: DetailUtilityTab) => void;
+}): React.ReactElement {
+	return (
+		<div role="tablist" aria-label="Task detail utility panel" className="flex min-w-0 items-center gap-0.5">
+			{DETAIL_UTILITY_TABS.map((tab) => (
+				<button
+					key={tab.id}
+					type="button"
+					role="tab"
+					aria-selected={activeTab === tab.id}
+					className={cn(
+						"inline-flex h-6 min-w-0 items-center gap-1.5 rounded-sm px-2 text-xs font-medium transition-colors",
+						activeTab === tab.id
+							? "bg-surface-3 text-text-primary"
+							: "text-text-secondary hover:bg-surface-3 hover:text-text-primary",
+					)}
+					onClick={() => onTabChange(tab.id)}
+				>
+					{tab.icon}
+					<span className="truncate">{tab.label}</span>
 				</button>
 			))}
 		</div>
@@ -434,6 +474,7 @@ export function CardDetailView({
 	isDocumentVisible = true,
 	onClineSettingsSaved,
 	onTaskClineSettingsChanged,
+	onTaskCommentEntriesChange,
 }: {
 	selection: CardSelection;
 	currentProjectId: string | null;
@@ -506,9 +547,11 @@ export function CardDetailView({
 		modelId: string;
 		reasoningEffort: RuntimeClineReasoningEffort | "";
 	}) => void;
+	onTaskCommentEntriesChange?: (taskId: string, entries: TaskCommentEntry[]) => void;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
+	const [detailUtilityTab, setDetailUtilityTab] = useState<DetailUtilityTab>("prompts");
 	const terminalThemeColors = useTerminalThemeColors();
 	const [selectedPath, setSelectedPath] = useState<string | null>(null);
 	// 每次「显式选中」（文件树点击 / 父级主动设置）递增，作为告知 DiffViewerPanel 应展开+滚动的信号。
@@ -546,6 +589,7 @@ export function CardDetailView({
 	const mainRowRef = useRef<HTMLDivElement | null>(null);
 	const detailDiffRowRef = useRef<HTMLDivElement | null>(null);
 	const clineAgentChatPanelRef = useRef<ClineAgentChatPanelHandle | null>(null);
+	const taskCommentEntries = selection.card.taskCommentEntries ?? [];
 
 	const handleSeparatorMouseDown = useResizeHandler(
 		detailLayoutRef,
@@ -749,6 +793,15 @@ export function CardDetailView({
 		[onSendReviewComments, selection.card.id, showClineAgentChatPanel],
 	);
 
+	const handleTaskCommentEntriesChange = useCallback(
+		(entries: TaskCommentEntry[]) => {
+			onTaskCommentEntriesChange?.(selection.card.id, entries);
+		},
+		[onTaskCommentEntriesChange, selection.card.id],
+	);
+
+	const detailUtilityTabs = <DetailUtilityTabList activeTab={detailUtilityTab} onTabChange={setDetailUtilityTab} />;
+
 	const showBottomTerminal = bottomTerminalOpen && !!bottomTerminalTaskId;
 
 	const agentChatPanel = showClineAgentChatPanel ? (
@@ -893,6 +946,16 @@ export function CardDetailView({
 								panelFlex="1 1 0"
 							/>
 						</div>
+						{/* Comments panel */}
+						<div
+							className="min-h-0 min-w-0 flex-1 flex-col"
+							style={{ display: mobileTab === "comments" ? "flex" : "none" }}
+						>
+							<TaskCommentsPanel
+								taskCommentEntries={taskCommentEntries}
+								onTaskCommentEntriesChange={handleTaskCommentEntriesChange}
+							/>
+						</div>
 					</div>
 					{/* Terminal panel — bottom overlay */}
 					{showBottomTerminal ? (
@@ -994,10 +1057,19 @@ export function CardDetailView({
 											className="min-h-0 overflow-hidden"
 											style={{ flex: `0 0 ${rightPromptPanelPercent}` }}
 										>
-											<PromptLibraryPanel
-												taskId={selection.card.id}
-												onFillInput={injectTextIntoActiveInput}
-											/>
+											{detailUtilityTab === "prompts" ? (
+												<PromptLibraryPanel
+													taskId={selection.card.id}
+													onFillInput={injectTextIntoActiveInput}
+													headerContent={detailUtilityTabs}
+												/>
+											) : (
+												<TaskCommentsPanel
+													taskCommentEntries={taskCommentEntries}
+													onTaskCommentEntriesChange={handleTaskCommentEntriesChange}
+													headerContent={detailUtilityTabs}
+												/>
+											)}
 										</div>
 										<ResizeHandle
 											orientation="horizontal"

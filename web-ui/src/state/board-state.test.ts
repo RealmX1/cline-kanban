@@ -588,6 +588,55 @@ describe("board dependency state", () => {
 		expect(validationColumn?.cards.map((card) => card.id)).toEqual(["v"]);
 	});
 
+	it("normalizes task comment entries on persisted cards", () => {
+		const rawBoard = {
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "commented-task",
+							prompt: "Task with notes",
+							startInPlanMode: false,
+							baseRef: "main",
+							taskCommentEntries: [
+								{
+									taskCommentEntryId: "comment-1",
+									commentText: "Keep this note.",
+									createdAt: 100,
+									updatedAt: 110,
+								},
+								{
+									taskCommentEntryId: "empty-comment",
+									commentText: "   ",
+									createdAt: 120,
+									updatedAt: 120,
+								},
+							],
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "validation", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalized = normalizeBoardData(rawBoard);
+		const task = normalized?.columns.find((column) => column.id === "backlog")?.cards[0];
+
+		expect(task?.taskCommentEntries).toEqual([
+			{
+				taskCommentEntryId: "comment-1",
+				commentText: "Keep this note.",
+				createdAt: 100,
+				updatedAt: 110,
+			},
+		]);
+	});
+
 	it("backfills an empty validation column for legacy four-column boards", () => {
 		const rawBoard = {
 			columns: [

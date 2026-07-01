@@ -105,6 +105,68 @@ describe("task images", () => {
 	});
 });
 
+describe("task comment entries", () => {
+	it("persists task comments when creating, updating, and moving tasks", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Task with comment",
+				baseRef: "main",
+				taskCommentEntries: [
+					{
+						taskCommentEntryId: "comment-1",
+						commentText: "Remember to validate the migration path.",
+						createdAt: 100,
+						updatedAt: 100,
+					},
+				],
+			},
+			() => "aaaaa111",
+		);
+
+		expect(created.task.taskCommentEntries).toEqual([
+			{
+				taskCommentEntryId: "comment-1",
+				commentText: "Remember to validate the migration path.",
+				createdAt: 100,
+				updatedAt: 100,
+			},
+		]);
+
+		const updated = updateTask(created.board, created.task.id, {
+			prompt: "Task with comment",
+			baseRef: "main",
+			taskCommentEntries: [
+				{
+					taskCommentEntryId: "comment-1",
+					commentText: "Updated task-level note.",
+					createdAt: 100,
+					updatedAt: 140,
+				},
+				{
+					taskCommentEntryId: "comment-2",
+					commentText: "Second note.",
+					createdAt: 150,
+					updatedAt: 150,
+				},
+			],
+		});
+
+		expect(updated.task?.taskCommentEntries?.map((entry) => entry.commentText)).toEqual([
+			"Updated task-level note.",
+			"Second note.",
+		]);
+
+		const moved = moveTaskToColumn(updated.board, created.task.id, "review");
+
+		expect(moved.task?.taskCommentEntries?.map((entry) => entry.taskCommentEntryId)).toEqual([
+			"comment-1",
+			"comment-2",
+		]);
+	});
+});
+
 describe("per-task agent/model/provider overrides", () => {
 	it("persists agentId on the card when creating a task", () => {
 		const created = addTaskToColumn(

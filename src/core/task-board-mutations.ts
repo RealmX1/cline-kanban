@@ -6,6 +6,7 @@ import type {
 	RuntimeBoardDependency,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
+	RuntimeTaskCommentEntry,
 	RuntimeTaskImage,
 	RuntimeTaskWorktreeMode,
 } from "./api-contract";
@@ -20,6 +21,7 @@ export interface RuntimeCreateTaskInput {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
+	taskCommentEntries?: RuntimeTaskCommentEntry[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	baseRef: string;
@@ -35,6 +37,7 @@ export interface RuntimeUpdateTaskInput {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
+	taskCommentEntries?: RuntimeTaskCommentEntry[] | null;
 	agentId?: RuntimeAgentId | null;
 	clineSettings?: RuntimeTaskClineSettings | null;
 	baseRef: string;
@@ -53,6 +56,28 @@ function normalizeTaskAutoReviewMode(value: RuntimeTaskAutoReviewMode | null | u
 // Copy image metadata so board tasks do not retain caller-owned array or object references.
 function cloneTaskImages(images?: RuntimeTaskImage[]): RuntimeTaskImage[] | undefined {
 	return images && images.length > 0 ? images.map((image) => ({ ...image })) : undefined;
+}
+
+function cloneTaskCommentEntries(entries?: RuntimeTaskCommentEntry[] | null): RuntimeTaskCommentEntry[] | undefined {
+	if (!entries || entries.length === 0) {
+		return undefined;
+	}
+	const clonedEntries = entries
+		.map((entry) => {
+			const taskCommentEntryId = entry.taskCommentEntryId.trim();
+			const commentText = entry.commentText.trim();
+			if (!taskCommentEntryId || !commentText) {
+				return null;
+			}
+			return {
+				taskCommentEntryId,
+				commentText,
+				createdAt: entry.createdAt,
+				updatedAt: entry.updatedAt,
+			};
+		})
+		.filter((entry): entry is RuntimeTaskCommentEntry => entry !== null);
+	return clonedEntries.length > 0 ? clonedEntries : undefined;
 }
 
 function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings | null): RuntimeTaskClineSettings | undefined {
@@ -316,6 +341,7 @@ export function addTaskToColumn(
 		autoReviewEnabled: Boolean(input.autoReviewEnabled),
 		autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 		images: cloneTaskImages(input.images),
+		taskCommentEntries: cloneTaskCommentEntries(input.taskCommentEntries),
 		...(input.agentId ? { agentId: input.agentId } : {}),
 		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
 		baseRef,
@@ -645,7 +671,7 @@ export function updateTask(
 					: input.prepFilePath === null
 						? undefined
 						: input.prepFilePath.trim() || undefined;
-			updatedTask = {
+			const nextTask: RuntimeBoardCard = {
 				...card,
 				title: resolveTaskTitle(input.title, prompt),
 				prompt,
@@ -653,6 +679,12 @@ export function updateTask(
 				autoReviewEnabled: Boolean(input.autoReviewEnabled),
 				autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 				images: input.images === undefined ? card.images : cloneTaskImages(input.images),
+				taskCommentEntries:
+					input.taskCommentEntries === undefined
+						? cloneTaskCommentEntries(card.taskCommentEntries)
+						: input.taskCommentEntries === null
+							? undefined
+							: cloneTaskCommentEntries(input.taskCommentEntries),
 				agentId: input.agentId === undefined ? card.agentId : (input.agentId ?? undefined),
 				clineSettings:
 					input.clineSettings === undefined
@@ -666,7 +698,8 @@ export function updateTask(
 				prepFilePath: nextPrepFilePath,
 				updatedAt: now,
 			};
-			return updatedTask;
+			updatedTask = nextTask;
+			return nextTask;
 		});
 		return columnUpdated ? { ...column, cards } : column;
 	});

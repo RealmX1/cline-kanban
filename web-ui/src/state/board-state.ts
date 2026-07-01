@@ -20,6 +20,7 @@ import {
 	DEFAULT_TASK_AUTO_REVIEW_MODE,
 	resolveTaskAutoReviewMode,
 	type TaskAutoReviewMode,
+	type TaskCommentEntry,
 	type TaskImage,
 } from "@/types";
 
@@ -30,6 +31,7 @@ export interface TaskDraft {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
+	taskCommentEntries?: TaskCommentEntry[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	baseRef: string;
@@ -102,6 +104,48 @@ function normalizeTaskImages(rawImages: unknown): TaskImage[] | undefined {
 	return images.length > 0 ? images : undefined;
 }
 
+function normalizeTaskCommentEntries(rawEntries: unknown): TaskCommentEntry[] | undefined {
+	if (!Array.isArray(rawEntries)) {
+		return undefined;
+	}
+	const entries: TaskCommentEntry[] = [];
+	for (const rawEntry of rawEntries) {
+		if (!rawEntry || typeof rawEntry !== "object") {
+			continue;
+		}
+		const entry = rawEntry as {
+			taskCommentEntryId?: unknown;
+			commentText?: unknown;
+			createdAt?: unknown;
+			updatedAt?: unknown;
+		};
+		if (
+			typeof entry.taskCommentEntryId !== "string" ||
+			typeof entry.commentText !== "string" ||
+			typeof entry.createdAt !== "number" ||
+			typeof entry.updatedAt !== "number"
+		) {
+			continue;
+		}
+		const taskCommentEntryId = entry.taskCommentEntryId.trim();
+		const commentText = entry.commentText.trim();
+		if (!taskCommentEntryId || !commentText) {
+			continue;
+		}
+		entries.push({
+			taskCommentEntryId,
+			commentText,
+			createdAt: entry.createdAt,
+			updatedAt: entry.updatedAt,
+		});
+	}
+	return entries.length > 0 ? entries : undefined;
+}
+
+function cloneTaskCommentEntries(entries?: TaskCommentEntry[] | null): TaskCommentEntry[] | undefined {
+	return normalizeTaskCommentEntries(entries);
+}
+
 function normalizeTaskClineReasoningEffort(rawReasoningEffort: unknown): RuntimeClineReasoningEffort | undefined {
 	if (
 		rawReasoningEffort === "low" ||
@@ -162,6 +206,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		autoReviewEnabled?: unknown;
 		autoReviewMode?: unknown;
 		images?: unknown;
+		taskCommentEntries?: unknown;
 		baseRef?: unknown;
 		agentId?: unknown;
 		clineSettings?: unknown;
@@ -210,6 +255,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 			typeof card.autoReviewMode === "string" ? (card.autoReviewMode as TaskAutoReviewMode) : undefined,
 		),
 		images: normalizeTaskImages(card.images),
+		taskCommentEntries: normalizeTaskCommentEntries(card.taskCommentEntries),
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
@@ -361,6 +407,7 @@ export function addTaskToColumnWithResult(
 			autoReviewEnabled: draft.autoReviewEnabled,
 			autoReviewMode: draft.autoReviewMode,
 			images: draft.images,
+			taskCommentEntries: draft.taskCommentEntries,
 			agentId: draft.agentId,
 			clineSettings: draft.clineSettings,
 			baseRef: draft.baseRef,
@@ -560,11 +607,44 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 						: draft.images.length > 0
 							? draft.images.map((image) => ({ ...image }))
 							: undefined,
+				taskCommentEntries:
+					draft.taskCommentEntries === undefined
+						? cloneTaskCommentEntries(card.taskCommentEntries)
+						: cloneTaskCommentEntries(draft.taskCommentEntries),
 				agentId: draft.agentId,
 				clineSettings: draft.clineSettings,
 				baseRef,
 				updatedAt: Date.now(),
 			};
+		});
+		return columnUpdated ? { ...column, cards } : column;
+	});
+
+	if (!updated) {
+		return { board, updated: false };
+	}
+	return { board: withUpdatedColumns(board, columns), updated: true };
+}
+
+export function updateTaskCommentEntries(
+	board: BoardData,
+	taskId: string,
+	taskCommentEntries: TaskCommentEntry[],
+): { board: BoardData; updated: boolean } {
+	const normalizedEntries = cloneTaskCommentEntries(taskCommentEntries);
+	let updated = false;
+	const columns = board.columns.map((column) => {
+		let columnUpdated = false;
+		const cards = column.cards.map((card) => {
+			if (card.id !== taskId) {
+				return card;
+			}
+			columnUpdated = true;
+			updated = true;
+			return updateTaskTimestamp({
+				...card,
+				taskCommentEntries: normalizedEntries,
+			});
 		});
 		return columnUpdated ? { ...column, cards } : column;
 	});
