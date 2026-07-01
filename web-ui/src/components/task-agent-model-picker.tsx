@@ -1,9 +1,8 @@
-import * as Collapsible from "@radix-ui/react-collapsible";
 import { getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
-import { ChevronDown } from "lucide-react";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { getAgentVisual } from "@/components/agent-visual";
 import { ClineChatModelSelector } from "@/components/detail-panels/cline-chat-model-selector";
 import {
 	buildClineAgentModelPickerOptions,
@@ -12,7 +11,7 @@ import {
 } from "@/components/detail-panels/cline-model-picker-options";
 import { SearchSelectDropdown } from "@/components/search-select-dropdown";
 import { cn } from "@/components/ui/cn";
-import { NativeSelect } from "@/components/ui/native-select";
+import { Tooltip } from "@/components/ui/tooltip";
 import { fetchClineProviderCatalog, fetchClineProviderModels } from "@/runtime/runtime-config-query";
 import type {
 	RuntimeAgentId,
@@ -285,7 +284,6 @@ export function TaskAgentModelPicker({
 	const showClineModelPicker = showClineProviderPicker && Boolean(effectiveProviderId);
 	const hasTaskClineSettingsOverride = clineSettings !== undefined;
 	const selectedTaskReasoningEffort = clineReasoningEffort ?? "";
-	const [isSettingsExpanded, setIsSettingsExpanded] = useState(false);
 	const [isProviderPopoverOpen, setIsProviderPopoverOpen] = useState(false);
 	const [isModelPopoverOpen, setIsModelPopoverOpen] = useState(false);
 	const [reasoningEffort, setReasoningEffort] = useState<RuntimeClineReasoningEffort | "">(
@@ -372,15 +370,33 @@ export function TaskAgentModelPicker({
 	}, [defaultReasoningEffort, hasTaskClineSettingsOverride, reasoningEffort]);
 
 	useEffect(() => {
-		if (!isSettingsExpanded) {
-			setIsProviderPopoverOpen(false);
-			setIsModelPopoverOpen(false);
-		}
-	}, [isSettingsExpanded]);
-
-	useEffect(() => {
 		onPopoverOpenChange?.(isProviderPopoverOpen || isModelPopoverOpen);
 	}, [isModelPopoverOpen, isProviderPopoverOpen, onPopoverOpenChange]);
+
+	useEffect(() => {
+		if (!showClineProviderPicker) {
+			setIsProviderPopoverOpen(false);
+			setIsModelPopoverOpen(false);
+			return;
+		}
+		if (!showClineModelPicker) {
+			setIsModelPopoverOpen(false);
+		}
+	}, [showClineModelPicker, showClineProviderPicker]);
+
+	const handleAgentIconSelection = useCallback(
+		(optionValue: string, isSelectedAgentOption: boolean) => {
+			if (isSelectedAgentOption) {
+				return;
+			}
+			onAgentIdChange(optionValue ? (optionValue as RuntimeAgentId) : undefined);
+			if (optionValue !== "cline") {
+				onClineSettingsChange?.(undefined);
+				setReasoningEffort("");
+			}
+		},
+		[onAgentIdChange, onClineSettingsChange],
+	);
 
 	useEffect(() => {
 		if (!selectedModelCapabilityKnown) {
@@ -449,159 +465,148 @@ export function TaskAgentModelPicker({
 
 	return (
 		<div className="flex flex-col gap-2">
-			<Collapsible.Root open={isSettingsExpanded} onOpenChange={setIsSettingsExpanded}>
-				<Collapsible.Trigger asChild>
-					<button
-						type="button"
-						className="inline-flex w-fit items-center gap-1 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer bg-transparent border-none p-0"
-					>
-						<ChevronDown
-							size={12}
-							className={cn("transition-transform", isSettingsExpanded ? "rotate-0" : "-rotate-90")}
+			<div className="flex flex-col gap-1">
+				<span className="text-[11px] text-text-secondary">Agent</span>
+				<div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Agent">
+					{agentOptions.map((option) => {
+						const iconAgentId = (option.value || defaultAgentId || undefined) as RuntimeAgentId | undefined;
+						const agentVisual = getAgentVisual(iconAgentId);
+						const AgentIcon = agentVisual.Icon;
+						const isSelectedAgentOption =
+							option.value === ""
+								? agentId === undefined || agentId === defaultAgentId
+								: agentId === option.value;
+						const agentButtonAccessibleName = option.value ? option.label : `${option.label} (default agent)`;
+
+						return (
+							<Tooltip key={option.value || "default-agent"} content={option.label}>
+								<button
+									type="button"
+									aria-label={agentButtonAccessibleName}
+									aria-pressed={isSelectedAgentOption}
+									className={cn(
+										"inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-border-focus focus:ring-offset-1 focus:ring-offset-surface-0",
+										isSelectedAgentOption
+											? "border-accent bg-accent/10 text-text-primary"
+											: "border-border-bright bg-surface-2 text-text-secondary hover:border-border-focus hover:bg-surface-3 hover:text-text-primary",
+									)}
+									onClick={() => handleAgentIconSelection(option.value, isSelectedAgentOption)}
+								>
+									<AgentIcon size={16} className={agentVisual.className} />
+								</button>
+							</Tooltip>
+						);
+					})}
+				</div>
+			</div>
+			{showClineProviderPicker ? (
+				<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+					<div className="min-w-0">
+						<span className="text-[11px] text-text-secondary block mb-1">
+							Provider{isLoadingProviders ? " (loading\u2026)" : ""}
+						</span>
+						<SearchSelectDropdown
+							options={clineProviderOptions}
+							selectedValue={clineProviderId ?? ""}
+							onSelect={(value) => {
+								const newProviderId = value || undefined;
+								const newDefaultModel =
+									newProviderId && providerDefaultModels ? providerDefaultModels[newProviderId] : undefined;
+								updateTaskClineSettings((currentSettings) => {
+									const nextSettings = cloneTaskClineSettings(currentSettings) ?? {};
+									if (newProviderId) {
+										nextSettings.providerId = newProviderId;
+									} else {
+										delete nextSettings.providerId;
+									}
+									if (newDefaultModel) {
+										nextSettings.modelId = newDefaultModel;
+									} else {
+										delete nextSettings.modelId;
+									}
+									delete nextSettings.reasoningEffort;
+									const preserveEmptyOverride =
+										newProviderId !== undefined ||
+										(currentSettings !== undefined && Object.keys(currentSettings).length === 0);
+									return nextSettings.providerId || nextSettings.modelId || preserveEmptyOverride
+										? nextSettings
+										: undefined;
+								});
+								setReasoningEffort(
+									newProviderId || (clineSettings !== undefined && Object.keys(clineSettings).length === 0)
+										? ""
+										: (defaultReasoningEffort ?? ""),
+								);
+							}}
+							disabled={isLoadingProviders}
+							fill
+							size="sm"
+							placeholder="Search providers..."
+							emptyText="No providers available"
+							noResultsText="No matching providers"
+							showSelectedIndicator
+							onPopoverOpenChange={setIsProviderPopoverOpen}
 						/>
-						Override Agent Settings
-					</button>
-				</Collapsible.Trigger>
-				<Collapsible.Content className="pt-2">
-					<div className="flex flex-col gap-2">
-						<div className="w-full sm:w-1/2 min-w-0">
-							<span className="text-[11px] text-text-secondary block mb-1">Agent</span>
-							<NativeSelect
-								size="sm"
-								fill
-								value={agentId ?? ""}
-								onChange={(e) => {
-									const value = e.currentTarget.value;
-									onAgentIdChange(value ? (value as RuntimeAgentId) : undefined);
-									if (value !== "cline") {
-										onClineSettingsChange?.(undefined);
-										setReasoningEffort("");
+					</div>
+					{showClineModelPicker ? (
+						<div className="min-w-0">
+							<span className="text-[11px] text-text-secondary block mb-1">
+								Model{isLoadingModels ? " (loading\u2026)" : ""}
+							</span>
+							<ClineChatModelSelector
+								modelOptions={modelPickerOptions.options}
+								recommendedModelIds={modelPickerOptions.recommendedModelIds}
+								pinSelectedModelToTop={modelPickerOptions.shouldPinSelectedModelToTop}
+								selectedModelId={clineModelId ?? ""}
+								selectedModelButtonText={selectedModelButtonText}
+								onSelectModel={(value) => {
+									updateTaskClineSettings((currentSettings) => {
+										const nextSettings = cloneTaskClineSettings(currentSettings) ?? {};
+										if (value) {
+											nextSettings.modelId = value;
+										} else {
+											delete nextSettings.modelId;
+										}
+										if (!value || !reasoningEnabledModelIdSet.has(value)) {
+											delete nextSettings.reasoningEffort;
+										}
+										const preserveEmptyOverride =
+											currentSettings !== undefined && Object.keys(currentSettings).length === 0;
+										return nextSettings.providerId ||
+											nextSettings.modelId ||
+											nextSettings.reasoningEffort ||
+											preserveEmptyOverride
+											? nextSettings
+											: undefined;
+									});
+									if (!value && !clineProviderId) {
+										setReasoningEffort(
+											clineSettings !== undefined && Object.keys(clineSettings).length === 0
+												? ""
+												: (defaultReasoningEffort ?? ""),
+										);
+										return;
+									}
+									if (!value || !reasoningEnabledModelIdSet.has(value)) {
+										setReasoningEffortWithOverride("");
 									}
 								}}
-							>
-								{agentOptions.map((option) => (
-									<option key={option.value} value={option.value}>
-										{option.label}
-									</option>
-								))}
-							</NativeSelect>
+								reasoningEnabledModelIds={reasoningEnabledModelIds}
+								defaultOptionSupportsReasoningEffort={!clineModelId && selectedModelSupportsReasoningEffort}
+								selectedReasoningEffort={reasoningEffort}
+								onSelectReasoningEffort={(nextReasoningEffort) =>
+									setReasoningEffortWithOverride(nextReasoningEffort)
+								}
+								disabled={isLoadingModels}
+								isModelLoading={isLoadingModels}
+								fill
+								triggerVariant="default"
+								onPopoverOpenChange={setIsModelPopoverOpen}
+							/>
 						</div>
-						{showClineProviderPicker ? (
-							<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-								<div className="min-w-0">
-									<span className="text-[11px] text-text-secondary block mb-1">
-										Provider{isLoadingProviders ? " (loading\u2026)" : ""}
-									</span>
-									<SearchSelectDropdown
-										options={clineProviderOptions}
-										selectedValue={clineProviderId ?? ""}
-										onSelect={(value) => {
-											const newProviderId = value || undefined;
-											const newDefaultModel =
-												newProviderId && providerDefaultModels
-													? providerDefaultModels[newProviderId]
-													: undefined;
-											updateTaskClineSettings((currentSettings) => {
-												const nextSettings = cloneTaskClineSettings(currentSettings) ?? {};
-												if (newProviderId) {
-													nextSettings.providerId = newProviderId;
-												} else {
-													delete nextSettings.providerId;
-												}
-												if (newDefaultModel) {
-													nextSettings.modelId = newDefaultModel;
-												} else {
-													delete nextSettings.modelId;
-												}
-												delete nextSettings.reasoningEffort;
-												const preserveEmptyOverride =
-													newProviderId !== undefined ||
-													(currentSettings !== undefined && Object.keys(currentSettings).length === 0);
-												return nextSettings.providerId || nextSettings.modelId || preserveEmptyOverride
-													? nextSettings
-													: undefined;
-											});
-											setReasoningEffort(
-												newProviderId ||
-													(clineSettings !== undefined && Object.keys(clineSettings).length === 0)
-													? ""
-													: (defaultReasoningEffort ?? ""),
-											);
-										}}
-										disabled={isLoadingProviders}
-										fill
-										size="sm"
-										placeholder="Search providers..."
-										emptyText="No providers available"
-										noResultsText="No matching providers"
-										showSelectedIndicator
-										onPopoverOpenChange={setIsProviderPopoverOpen}
-									/>
-								</div>
-								{showClineModelPicker ? (
-									<div className="min-w-0">
-										<span className="text-[11px] text-text-secondary block mb-1">
-											Model{isLoadingModels ? " (loading\u2026)" : ""}
-										</span>
-										<ClineChatModelSelector
-											modelOptions={modelPickerOptions.options}
-											recommendedModelIds={modelPickerOptions.recommendedModelIds}
-											pinSelectedModelToTop={modelPickerOptions.shouldPinSelectedModelToTop}
-											selectedModelId={clineModelId ?? ""}
-											selectedModelButtonText={selectedModelButtonText}
-											onSelectModel={(value) => {
-												updateTaskClineSettings((currentSettings) => {
-													const nextSettings = cloneTaskClineSettings(currentSettings) ?? {};
-													if (value) {
-														nextSettings.modelId = value;
-													} else {
-														delete nextSettings.modelId;
-													}
-													if (!value || !reasoningEnabledModelIdSet.has(value)) {
-														delete nextSettings.reasoningEffort;
-													}
-													const preserveEmptyOverride =
-														currentSettings !== undefined && Object.keys(currentSettings).length === 0;
-													return nextSettings.providerId ||
-														nextSettings.modelId ||
-														nextSettings.reasoningEffort ||
-														preserveEmptyOverride
-														? nextSettings
-														: undefined;
-												});
-												if (!value && !clineProviderId) {
-													setReasoningEffort(
-														clineSettings !== undefined && Object.keys(clineSettings).length === 0
-															? ""
-															: (defaultReasoningEffort ?? ""),
-													);
-													return;
-												}
-												if (!value || !reasoningEnabledModelIdSet.has(value)) {
-													setReasoningEffortWithOverride("");
-												}
-											}}
-											reasoningEnabledModelIds={reasoningEnabledModelIds}
-											defaultOptionSupportsReasoningEffort={
-												!clineModelId && selectedModelSupportsReasoningEffort
-											}
-											selectedReasoningEffort={reasoningEffort}
-											onSelectReasoningEffort={(nextReasoningEffort) =>
-												setReasoningEffortWithOverride(nextReasoningEffort)
-											}
-											disabled={isLoadingModels}
-											isModelLoading={isLoadingModels}
-											fill
-											triggerVariant="default"
-											onPopoverOpenChange={setIsModelPopoverOpen}
-										/>
-									</div>
-								) : null}
-							</div>
-						) : null}
-					</div>
-				</Collapsible.Content>
-			</Collapsible.Root>
+					) : null}
+				</div>
+			) : null}
 		</div>
 	);
 }
