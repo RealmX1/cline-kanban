@@ -1618,6 +1618,15 @@ export const runtimeGitCommitDiffFileSchema = z.object({
 });
 export type RuntimeGitCommitDiffFile = z.infer<typeof runtimeGitCommitDiffFileSchema>;
 
+export const runtimeGitCommitChangedFileMetadataSchema = z.object({
+	path: z.string(),
+	previousPath: z.string().optional(),
+	status: z.enum(["modified", "added", "deleted", "renamed"]),
+	additions: z.number(),
+	deletions: z.number(),
+});
+export type RuntimeGitCommitChangedFileMetadata = z.infer<typeof runtimeGitCommitChangedFileMetadataSchema>;
+
 export const runtimeGitCommitDiffRequestSchema = z.object({
 	commitHash: z.string(),
 	taskScope: runtimeTaskWorkspaceInfoRequestSchema.nullable().optional(),
@@ -1631,6 +1640,42 @@ export const runtimeGitCommitDiffResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeGitCommitDiffResponse = z.infer<typeof runtimeGitCommitDiffResponseSchema>;
+
+export const runtimeGitCommitChangedFileMetadataRequestSchema = z.object({
+	commitHash: z.string(),
+	taskScope: runtimeTaskWorkspaceInfoRequestSchema.nullable().optional(),
+});
+export type RuntimeGitCommitChangedFileMetadataRequest = z.infer<
+	typeof runtimeGitCommitChangedFileMetadataRequestSchema
+>;
+
+export const runtimeGitCommitChangedFileMetadataResponseSchema = z.object({
+	ok: z.boolean(),
+	commitHash: z.string(),
+	files: z.array(runtimeGitCommitChangedFileMetadataSchema),
+	error: z.string().optional(),
+});
+export type RuntimeGitCommitChangedFileMetadataResponse = z.infer<
+	typeof runtimeGitCommitChangedFileMetadataResponseSchema
+>;
+
+export const runtimeGitCommitFileDiffPatchRequestSchema = z.object({
+	commitHash: z.string(),
+	path: z.string(),
+	previousPath: z.string().optional(),
+	taskScope: runtimeTaskWorkspaceInfoRequestSchema.nullable().optional(),
+});
+export type RuntimeGitCommitFileDiffPatchRequest = z.infer<typeof runtimeGitCommitFileDiffPatchRequestSchema>;
+
+export const runtimeGitCommitFileDiffPatchResponseSchema = z.object({
+	ok: z.boolean(),
+	commitHash: z.string(),
+	path: z.string(),
+	previousPath: z.string().optional(),
+	patch: z.string(),
+	error: z.string().optional(),
+});
+export type RuntimeGitCommitFileDiffPatchResponse = z.infer<typeof runtimeGitCommitFileDiffPatchResponseSchema>;
 
 export const runtimeGitRefsResponseSchema = z.object({
 	ok: z.boolean(),

@@ -4,7 +4,13 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { getCommitDiff, getGitLog, getGitRefs } from "../../src/workspace/git-history";
+import {
+	getCommitChangedFileMetadata,
+	getCommitDiff,
+	getCommitFileDiffPatch,
+	getGitLog,
+	getGitRefs,
+} from "../../src/workspace/git-history";
 import { discardGitChanges, getGitSyncSummary } from "../../src/workspace/git-sync";
 import { createGitTestEnv } from "../utilities/git-env";
 import { createTempDir } from "../utilities/temp-dir";
@@ -34,6 +40,90 @@ function commitAll(cwd: string, message: string): string {
 }
 
 describe.sequential("git history runtime", () => {
+	it("returns commit changed file metadata without patches", async () => {
+		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-metadata-");
+		try {
+			initRepository(repoPath);
+			writeFileSync(join(repoPath, "first.txt"), "hello\n", "utf8");
+			writeFileSync(join(repoPath, "second.txt"), "world\nagain\n", "utf8");
+			const commitHash = commitAll(repoPath, "add files");
+
+			const response = await getCommitChangedFileMetadata({
+				cwd: repoPath,
+				commitHash,
+			});
+
+			expect(response.ok).toBe(true);
+			expect(response.files).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						path: "first.txt",
+						status: "added",
+						additions: 1,
+						deletions: 0,
+					}),
+					expect.objectContaining({
+						path: "second.txt",
+						status: "added",
+						additions: 2,
+						deletions: 0,
+					}),
+				]),
+			);
+			expect(response.files[0]).not.toHaveProperty("patch");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("reports an error when commit changed file metadata cannot be read", async () => {
+		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-invalid-metadata-");
+		try {
+			initRepository(repoPath);
+			writeFileSync(join(repoPath, "first.txt"), "hello\n", "utf8");
+			commitAll(repoPath, "init");
+
+			const response = await getCommitChangedFileMetadata({
+				cwd: repoPath,
+				commitHash: "not-a-real-commit",
+			});
+
+			expect(response.ok).toBe(false);
+			expect(response.files).toEqual([]);
+			expect(response.error).toBeTruthy();
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("returns only the requested file patch for a commit", async () => {
+		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-file-patch-");
+		try {
+			initRepository(repoPath);
+			writeFileSync(join(repoPath, "first.txt"), "old first\n", "utf8");
+			writeFileSync(join(repoPath, "second.txt"), "old second\n", "utf8");
+			commitAll(repoPath, "init");
+
+			writeFileSync(join(repoPath, "first.txt"), "new first\n", "utf8");
+			writeFileSync(join(repoPath, "second.txt"), "new second\n", "utf8");
+			const commitHash = commitAll(repoPath, "edit files");
+
+			const response = await getCommitFileDiffPatch({
+				cwd: repoPath,
+				commitHash,
+				path: "first.txt",
+			});
+
+			expect(response.ok).toBe(true);
+			expect(response.patch).toContain("diff --git a/first.txt b/first.txt");
+			expect(response.patch).toContain("+new first");
+			expect(response.patch).not.toContain("second.txt");
+			expect(response.patch).not.toContain("+new second");
+		} finally {
+			cleanup();
+		}
+	});
+
 	it("returns correct metadata for root commit diffs", async () => {
 		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-root-");
 		try {

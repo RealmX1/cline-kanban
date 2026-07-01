@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronDown, ChevronRight, GitCommit, GitCompare } from "lucide-react";
+import { AlertCircle, ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, GitCommit, GitCompare } from "lucide-react";
 import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
 import {
@@ -8,14 +8,22 @@ import {
 	truncatePathMiddle,
 	type UnifiedDiffRow,
 } from "@/components/shared/diff-renderer";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { ResizeHandle } from "@/resize/resize-handle";
 import { useGitCommitDiffLayout } from "@/resize/use-git-commit-diff-layout";
 import { useResizeDrag } from "@/resize/use-resize-drag";
-import type { RuntimeGitCommitDiffFile, RuntimeWorkspaceFileChange } from "@/runtime/types";
+import type { RuntimeGitCommitChangedFileMetadata, RuntimeWorkspaceFileChange } from "@/runtime/types";
 import { isBinaryFilePath } from "@/utils/is-binary-file-path";
 
+export interface GitCommitDiffCommitFile extends RuntimeGitCommitChangedFileMetadata {
+	patch: string | null;
+	isPatchLoading: boolean;
+	patchErrorMessage: string | null;
+}
+
 export type GitCommitDiffSource =
-	| { type: "commit"; files: RuntimeGitCommitDiffFile[] }
+	| { type: "commit"; files: GitCommitDiffCommitFile[] }
 	| { type: "working-copy"; files: RuntimeWorkspaceFileChange[] };
 
 function getSectionTopWithinScrollContainer(container: HTMLElement, section: HTMLElement): number {
@@ -30,7 +38,7 @@ function getFileRows(source: GitCommitDiffSource, path: string): UnifiedDiffRow[
 	}
 	if (source.type === "commit") {
 		const file = source.files.find((f) => f.path === path);
-		if (!file) {
+		if (!file?.patch) {
 			return [];
 		}
 		return parsePatchToRows(file.patch);
@@ -66,7 +74,7 @@ function toWorkspaceFileChangeFormat(source: GitCommitDiffSource): RuntimeWorksp
 	}));
 }
 
-function getCommitFile(source: GitCommitDiffSource | null, path: string): RuntimeGitCommitDiffFile | null {
+function getCommitFile(source: GitCommitDiffSource | null, path: string): GitCommitDiffCommitFile | null {
 	if (!source || source.type !== "commit") {
 		return null;
 	}
@@ -79,6 +87,9 @@ export function GitCommitDiffPanel({
 	errorMessage,
 	selectedPath,
 	onSelectPath,
+	onLoadCommitFileDiffPatch,
+	onLoadAllCommitFileDiffPatches,
+	isLoadingAllCommitFilePatches = false,
 	headerContent,
 }: {
 	diffSource: GitCommitDiffSource | null;
@@ -86,6 +97,9 @@ export function GitCommitDiffPanel({
 	errorMessage?: string | null;
 	selectedPath: string | null;
 	onSelectPath: (path: string | null) => void;
+	onLoadCommitFileDiffPatch?: (file: RuntimeGitCommitChangedFileMetadata) => void;
+	onLoadAllCommitFileDiffPatches?: () => void;
+	isLoadingAllCommitFilePatches?: boolean;
 	headerContent?: React.ReactNode;
 }): React.ReactElement {
 	const [expandedPaths, setExpandedPaths] = useState<Record<string, boolean>>({});
@@ -137,6 +151,51 @@ export function GitCommitDiffPanel({
 		},
 		[fileTreePanelRatio, setFileTreePanelRatio, startDiffSplitResize],
 	);
+
+	const loadCommitFilePatchByPath = useCallback(
+		(path: string) => {
+			const commitFile = getCommitFile(diffSource, path);
+			if (!commitFile || commitFile.patch !== null || commitFile.isPatchLoading) {
+				return;
+			}
+			onLoadCommitFileDiffPatch?.(commitFile);
+		},
+		[diffSource, onLoadCommitFileDiffPatch],
+	);
+
+	const expandFilePath = useCallback(
+		(path: string) => {
+			setExpandedPaths((current) => {
+				if (current[path]) {
+					return current;
+				}
+				return { ...current, [path]: true };
+			});
+			loadCommitFilePatchByPath(path);
+		},
+		[loadCommitFilePatchByPath],
+	);
+
+	const handleSelectPath = useCallback(
+		(path: string | null) => {
+			if (path) {
+				expandFilePath(path);
+			}
+			onSelectPath(path);
+		},
+		[expandFilePath, onSelectPath],
+	);
+
+	const handleExpandAll = useCallback(() => {
+		setExpandedPaths(Object.fromEntries(filePaths.map((path) => [path, true])));
+		if (diffSource?.type === "commit") {
+			onLoadAllCommitFileDiffPatches?.();
+		}
+	}, [diffSource?.type, filePaths, onLoadAllCommitFileDiffPatches]);
+
+	const handleCollapseAll = useCallback(() => {
+		setExpandedPaths({});
+	}, []);
 
 	useEffect(() => {
 		setExpandedPaths({});
@@ -329,6 +388,29 @@ export function GitCommitDiffPanel({
 				}}
 			>
 				{headerContent ? headerContent : null}
+				<div className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-surface-0 px-3 text-xs text-text-tertiary">
+					<span className="min-w-0 flex-1 truncate">
+						{files.length} changed {files.length === 1 ? "file" : "files"}
+					</span>
+					<Button
+						variant="ghost"
+						size="sm"
+						icon={isLoadingAllCommitFilePatches ? <Spinner size={14} /> : <ChevronsDown size={14} />}
+						onClick={handleExpandAll}
+						disabled={files.length === 0 || isLoadingAllCommitFilePatches}
+					>
+						Expand all
+					</Button>
+					<Button
+						variant="ghost"
+						size="sm"
+						icon={<ChevronsUp size={14} />}
+						onClick={handleCollapseAll}
+						disabled={files.length === 0}
+					>
+						Collapse all
+					</Button>
+				</div>
 				<div
 					ref={scrollContainerRef}
 					onScroll={handleDiffScroll}
@@ -341,11 +423,15 @@ export function GitCommitDiffPanel({
 					}}
 				>
 					{filePaths.map((path) => {
-						const isExpanded = expandedPaths[path] ?? true;
+						const isExpanded = expandedPaths[path] ?? false;
 						const stats = diffSource ? getFileStats(diffSource, path) : { additions: 0, deletions: 0 };
-						const rows = diffSource ? getFileRows(diffSource, path) : [];
 						const commitFile = getCommitFile(diffSource, path);
 						const isBinaryFile = isBinaryFilePath(path);
+						const rows = isExpanded && diffSource ? getFileRows(diffSource, path) : [];
+						const isCommitPatchLoading =
+							diffSource?.type === "commit" ? (commitFile?.isPatchLoading ?? false) : false;
+						const commitPatchErrorMessage =
+							diffSource?.type === "commit" ? (commitFile?.patchErrorMessage ?? null) : null;
 
 						return (
 							<section
@@ -364,9 +450,12 @@ export function GitCommitDiffPanel({
 										const container = scrollContainerRef.current;
 										const sectionEl = sectionElementsRef.current[path];
 										const previousTop = sectionEl?.getBoundingClientRect().top ?? null;
-										const nextExpanded = !(expandedPaths[path] ?? true);
+										const nextExpanded = !(expandedPaths[path] ?? false);
 										suppressScrollSyncUntilRef.current = Date.now() + 250;
 										setExpandedPaths((prev) => ({ ...prev, [path]: nextExpanded }));
+										if (nextExpanded) {
+											loadCommitFilePatchByPath(path);
+										}
 										requestAnimationFrame(() => {
 											if (previousTop == null || !container || !sectionEl) {
 												return;
@@ -412,7 +501,22 @@ export function GitCommitDiffPanel({
 													Renamed from <code className="font-mono">{commitFile.previousPath}</code>
 												</div>
 											) : null}
-											{!isBinaryFile && rows.length > 0 ? (
+											{isCommitPatchLoading ? (
+												<div className="flex items-center gap-2 px-3 py-3 text-xs text-text-tertiary">
+													<Spinner size={14} />
+													<span>Loading diff</span>
+												</div>
+											) : commitPatchErrorMessage ? (
+												<div
+													style={{
+														padding: "12px",
+														fontSize: 12,
+														color: "var(--color-status-red)",
+													}}
+												>
+													{commitPatchErrorMessage}
+												</div>
+											) : !isBinaryFile && rows.length > 0 ? (
 												<ReadOnlyUnifiedDiff rows={rows} path={path} />
 											) : !isBinaryFile ? (
 												<div
@@ -450,7 +554,7 @@ export function GitCommitDiffPanel({
 				<FileTreePanel
 					workspaceFiles={workspaceFilesForTree}
 					selectedPath={selectedPath}
-					onSelectPath={onSelectPath}
+					onSelectPath={handleSelectPath}
 					panelFlex="1 1 0"
 				/>
 			</div>

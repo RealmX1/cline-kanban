@@ -46,8 +46,11 @@ function createGitHistoryResult(): UseGitActionsResult["gitHistory"] {
 		selectRef: () => {},
 		selectCommit: () => {},
 		selectDiffPath: () => {},
+		loadCommitFileDiffPatch: async () => {},
+		loadAllCommitFileDiffPatches: async () => {},
 		loadMoreCommits: () => {},
 		refresh: () => {},
+		isLoadingAllCommitFilePatches: false,
 	};
 }
 

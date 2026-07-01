@@ -2,9 +2,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useGitHistoryData } from "@/components/git-history/use-git-history-data";
+import { type UseGitHistoryDataResult, useGitHistoryData } from "@/components/git-history/use-git-history-data";
 import type {
+	RuntimeGitCommitChangedFileMetadataResponse,
 	RuntimeGitCommitDiffResponse,
+	RuntimeGitCommitFileDiffPatchResponse,
 	RuntimeGitLogResponse,
 	RuntimeGitRefsResponse,
 	RuntimeGitSyncSummary,
@@ -15,6 +17,8 @@ import type {
 const getGitRefsQueryMock = vi.hoisted(() => vi.fn());
 const getGitLogQueryMock = vi.hoisted(() => vi.fn());
 const getCommitDiffQueryMock = vi.hoisted(() => vi.fn());
+const getCommitChangedFileMetadataQueryMock = vi.hoisted(() => vi.fn());
+const getCommitFileDiffPatchQueryMock = vi.hoisted(() => vi.fn());
 const getChangesQueryMock = vi.hoisted(() => vi.fn());
 const getWorkspaceChangesQueryMock = vi.hoisted(() => vi.fn());
 
@@ -29,6 +33,12 @@ vi.mock("@/runtime/trpc-client", () => ({
 			},
 			getCommitDiff: {
 				query: getCommitDiffQueryMock,
+			},
+			getCommitChangedFileMetadata: {
+				query: getCommitChangedFileMetadataQueryMock,
+			},
+			getCommitFileDiffPatch: {
+				query: getCommitFileDiffPatchQueryMock,
 			},
 			getChanges: {
 				query: getChangesQueryMock,
@@ -48,6 +58,11 @@ interface HookSnapshot {
 	isRefsLoading: boolean;
 	isLogLoading: boolean;
 	isDiffLoading: boolean;
+	diffFiles: Array<{
+		path: string;
+		patch: string | null;
+		isPatchLoading: boolean;
+	}>;
 }
 
 function createGitSummary(branch: string): RuntimeGitSyncSummary {
@@ -127,7 +142,39 @@ function createDiffResponse(hash: string): RuntimeGitCommitDiffResponse {
 	return {
 		ok: true,
 		commitHash: hash,
-		files: [],
+		files: [
+			{
+				path: "src/example.ts",
+				status: "modified",
+				additions: 1,
+				deletions: 1,
+				patch: "@@ -1 +1 @@\n-old\n+new\n",
+			},
+		],
+	};
+}
+
+function createChangedFileMetadataResponse(hash: string): RuntimeGitCommitChangedFileMetadataResponse {
+	return {
+		ok: true,
+		commitHash: hash,
+		files: [
+			{
+				path: "src/example.ts",
+				status: "modified",
+				additions: 1,
+				deletions: 1,
+			},
+		],
+	};
+}
+
+function createFileDiffPatchResponse(hash: string, path = "src/example.ts"): RuntimeGitCommitFileDiffPatchResponse {
+	return {
+		ok: true,
+		commitHash: hash,
+		path,
+		patch: "@@ -1 +1 @@\n-old\n+new\n",
 	};
 }
 
@@ -152,7 +199,7 @@ function HookHarness({
 }: {
 	taskScope: { taskId: string; baseRef: string; worktreeMode?: RuntimeTaskWorktreeMode } | null;
 	enabled?: boolean;
-	onRender: (snapshot: HookSnapshot) => void;
+	onRender: (snapshot: HookSnapshot, gitHistory: UseGitHistoryDataResult) => void;
 }): null {
 	const gitHistory = useGitHistoryData({
 		workspaceId: "project-1",
@@ -161,17 +208,35 @@ function HookHarness({
 		enabled,
 	});
 
-	onRender({
-		refs: gitHistory.refs.map((ref) => ref.name),
-		activeRefName: gitHistory.activeRef?.name ?? null,
-		commits: gitHistory.commits.map((commit) => commit.hash),
-		selectedCommitHash: gitHistory.selectedCommitHash,
-		isRefsLoading: gitHistory.isRefsLoading,
-		isLogLoading: gitHistory.isLogLoading,
-		isDiffLoading: gitHistory.isDiffLoading,
-	});
+	onRender(
+		{
+			refs: gitHistory.refs.map((ref) => ref.name),
+			activeRefName: gitHistory.activeRef?.name ?? null,
+			commits: gitHistory.commits.map((commit) => commit.hash),
+			selectedCommitHash: gitHistory.selectedCommitHash,
+			isRefsLoading: gitHistory.isRefsLoading,
+			isLogLoading: gitHistory.isLogLoading,
+			isDiffLoading: gitHistory.isDiffLoading,
+			diffFiles:
+				gitHistory.diffSource?.type === "commit"
+					? gitHistory.diffSource.files.map((file) => ({
+							path: file.path,
+							patch: file.patch,
+							isPatchLoading: file.isPatchLoading,
+						}))
+					: [],
+		},
+		gitHistory,
+	);
 
 	return null;
+}
+
+function requireLatestGitHistory(gitHistory: UseGitHistoryDataResult | null): UseGitHistoryDataResult {
+	if (!gitHistory) {
+		throw new Error("Expected git history hook result.");
+	}
+	return gitHistory;
 }
 
 describe("useGitHistoryData", () => {
@@ -183,6 +248,8 @@ describe("useGitHistoryData", () => {
 		getGitRefsQueryMock.mockReset();
 		getGitLogQueryMock.mockReset();
 		getCommitDiffQueryMock.mockReset();
+		getCommitChangedFileMetadataQueryMock.mockReset();
+		getCommitFileDiffPatchQueryMock.mockReset();
 		getChangesQueryMock.mockReset();
 		getWorkspaceChangesQueryMock.mockReset();
 
@@ -195,6 +262,13 @@ describe("useGitHistoryData", () => {
 		);
 		getCommitDiffQueryMock.mockImplementation(async ({ commitHash }: { commitHash: string }) =>
 			createDiffResponse(commitHash),
+		);
+		getCommitChangedFileMetadataQueryMock.mockImplementation(async ({ commitHash }: { commitHash: string }) =>
+			createChangedFileMetadataResponse(commitHash),
+		);
+		getCommitFileDiffPatchQueryMock.mockImplementation(
+			async ({ commitHash, path }: { commitHash: string; path: string }) =>
+				createFileDiffPatchResponse(commitHash, path),
 		);
 		getChangesQueryMock.mockImplementation(async () => createWorkspaceChangesResponse());
 		getWorkspaceChangesQueryMock.mockImplementation(async () => createWorkspaceChangesResponse());
@@ -237,7 +311,10 @@ describe("useGitHistoryData", () => {
 			expect.anything(),
 		);
 		expect(getChangesQueryMock).toHaveBeenCalledWith(inplaceScope);
-		expect(getCommitDiffQueryMock).toHaveBeenCalledWith(expect.objectContaining({ taskScope: inplaceScope }));
+		expect(getCommitChangedFileMetadataQueryMock).toHaveBeenCalledWith(
+			expect.objectContaining({ taskScope: inplaceScope }),
+		);
+		expect(getCommitDiffQueryMock).not.toHaveBeenCalled();
 	});
 
 	it("does not expose home git history data during a task scope transition", async () => {
@@ -339,6 +416,13 @@ describe("useGitHistoryData", () => {
 			isRefsLoading: false,
 			isLogLoading: false,
 			isDiffLoading: false,
+			diffFiles: [
+				{
+					path: "src/example.ts",
+					patch: null,
+					isPatchLoading: false,
+				},
+			],
 		});
 
 		await act(async () => {
@@ -430,5 +514,87 @@ describe("useGitHistoryData", () => {
 			commits: ["remotehash1", "homehash1", "basehash1"],
 			selectedCommitHash: "homehash1",
 		});
+	});
+
+	it("loads one commit file patch on demand", async () => {
+		let latestGitHistory: UseGitHistoryDataResult | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskScope={null}
+					onRender={(_snapshot, gitHistory) => {
+						latestGitHistory = gitHistory;
+					}}
+				/>,
+			);
+			await flushPromises();
+		});
+		await act(async () => {
+			await flushPromises();
+		});
+
+		expect(getCommitDiffQueryMock).not.toHaveBeenCalled();
+		const gitHistoryBeforeFilePatch = requireLatestGitHistory(latestGitHistory);
+		const diffSource = gitHistoryBeforeFilePatch.diffSource;
+		expect(diffSource?.type).toBe("commit");
+		if (!diffSource || diffSource.type !== "commit") {
+			throw new Error("Expected commit diff source.");
+		}
+		const file = diffSource.files[0];
+		expect(file?.patch).toBeNull();
+
+		await act(async () => {
+			await gitHistoryBeforeFilePatch.loadCommitFileDiffPatch(file!);
+			await flushPromises();
+		});
+
+		expect(getCommitFileDiffPatchQueryMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				commitHash: "homehash1",
+				path: "src/example.ts",
+			}),
+		);
+		const gitHistoryAfterFilePatch = requireLatestGitHistory(latestGitHistory);
+		expect(
+			gitHistoryAfterFilePatch.diffSource?.type === "commit"
+				? gitHistoryAfterFilePatch.diffSource.files[0]?.patch
+				: null,
+		).toContain("+new");
+	});
+
+	it("loads all commit file patches through the full diff query on demand", async () => {
+		let latestGitHistory: UseGitHistoryDataResult | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskScope={null}
+					onRender={(_snapshot, gitHistory) => {
+						latestGitHistory = gitHistory;
+					}}
+				/>,
+			);
+			await flushPromises();
+		});
+
+		expect(getCommitDiffQueryMock).not.toHaveBeenCalled();
+
+		await act(async () => {
+			await requireLatestGitHistory(latestGitHistory).loadAllCommitFileDiffPatches();
+			await flushPromises();
+		});
+
+		expect(getCommitDiffQueryMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				commitHash: "homehash1",
+			}),
+		);
+		const gitHistoryAfterFullDiff = requireLatestGitHistory(latestGitHistory);
+		expect(
+			gitHistoryAfterFullDiff.diffSource?.type === "commit"
+				? gitHistoryAfterFullDiff.diffSource.files[0]?.patch
+				: null,
+		).toContain("+new");
 	});
 });

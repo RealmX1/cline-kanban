@@ -27,7 +27,13 @@ import {
 	getWorkspaceChangesBetweenRefs,
 	getWorkspaceChangesFromRef,
 } from "../workspace/get-workspace-changes";
-import { getCommitDiff, getGitLog, getGitRefs } from "../workspace/git-history";
+import {
+	getCommitChangedFileMetadata,
+	getCommitDiff,
+	getCommitFileDiffPatch,
+	getGitLog,
+	getGitRefs,
+} from "../workspace/git-history";
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
 import {
@@ -495,6 +501,42 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			return await getCommitDiff({
 				cwd: diffCwd,
 				commitHash: input.commitHash,
+			});
+		},
+		loadCommitChangedFileMetadata: async (workspaceScope, input) => {
+			const taskScope = normalizeOptionalTaskWorkspaceScopeInput(input.taskScope ?? null);
+			let metadataCwd = workspaceScope.workspacePath;
+			if (taskScope) {
+				metadataCwd = await resolveTaskCwd({
+					cwd: workspaceScope.workspacePath,
+					taskId: taskScope.taskId,
+					baseRef: taskScope.baseRef,
+					ensure: false,
+					...(taskScope.worktreeMode ? { worktreeMode: taskScope.worktreeMode } : {}),
+				});
+			}
+			return await getCommitChangedFileMetadata({
+				cwd: metadataCwd,
+				commitHash: input.commitHash,
+			});
+		},
+		loadCommitFileDiffPatch: async (workspaceScope, input) => {
+			const taskScope = normalizeOptionalTaskWorkspaceScopeInput(input.taskScope ?? null);
+			let diffCwd = workspaceScope.workspacePath;
+			if (taskScope) {
+				diffCwd = await resolveTaskCwd({
+					cwd: workspaceScope.workspacePath,
+					taskId: taskScope.taskId,
+					baseRef: taskScope.baseRef,
+					ensure: false,
+					...(taskScope.worktreeMode ? { worktreeMode: taskScope.worktreeMode } : {}),
+				});
+			}
+			return await getCommitFileDiffPatch({
+				cwd: diffCwd,
+				commitHash: input.commitHash,
+				path: input.path,
+				previousPath: input.previousPath,
 			});
 		},
 	};
