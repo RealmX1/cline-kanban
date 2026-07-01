@@ -41,6 +41,19 @@ describe("terminal protocol filter", () => {
 		expect(filtered.toString("utf8")).toBe("before\u001b[2J middle  after  end");
 	});
 
+	it("preserves scrollback erasure when suppression is disabled (inline agents rely on CSI 3 J to replace, not stack)", () => {
+		const state = createTerminalProtocolFilterState();
+
+		// erase-screen (2 J) and erase-scrollback (3 J / ? 3 J) must ALL pass through when
+		// suppression is off — this is what lets an inline agent (Codex) clear + reprint in place
+		// instead of stacking a duplicate transcript under the old history.
+		const esc = String.fromCharCode(0x1b);
+		const input = `before${esc}[2J middle ${esc}[3J after ${esc}[?3J end`;
+		const filtered = filterTerminalProtocolOutput(state, Buffer.from(input, "utf8"));
+
+		expect(filtered.toString("utf8")).toBe(input);
+	});
+
 	it("handles split scrollback erasure sequences across chunks", () => {
 		const state = createTerminalProtocolFilterState({
 			suppressScrollbackErasure: true,

@@ -1,6 +1,7 @@
 // PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
+import { agentRendersTranscriptInline } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeTaskConnectionRetry,
@@ -1437,7 +1438,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			rows,
 			terminalProtocolFilter: createTerminalProtocolFilterState({
 				interceptOscColorQueries: true,
-				suppressScrollbackErasure: true,
+				// inline transcript agent（Codex）靠「CSI 3 J 清 scrollback + 重印整段」做原地刷新，
+				// 吞掉 CSI 3 J 会让重印叠加在旧历史下面（可见翻倍），并让 mirror scrollback 只增不清、
+				// 每次 restore 全量重放。故仅对 alt-screen agent 抑制 CSI 3 J（见 agentRendersTranscriptInline）。
+				suppressScrollbackErasure: !agentRendersTranscriptInline(request.agentId),
 				suppressDeviceAttributeQueries: request.agentId === "droid",
 			}),
 			onSessionCleanup: launch.cleanup ?? null,
