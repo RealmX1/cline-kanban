@@ -42,6 +42,27 @@ describe("TerminalStateMirror", () => {
 		expect(snapshot.snapshot).toContain("line-10050");
 	});
 
+	it("honors CSI 3 J (erase scrollback) so an inline clear+reprint replaces history instead of stacking it", async () => {
+		// Codex (inline / --no-alt-screen) re-renders by erasing scrollback + screen and reprinting the
+		// whole transcript. The mirror must honor CSI 3 J; otherwise its scrollback only grows and every
+		// restore replays a stale, duplicated history. (session-manager stops suppressing 3 J for Codex.)
+		const mirror = createMirror(80, 5);
+		const esc = String.fromCharCode(0x1b);
+
+		// Tall transcript: most of it scrolls off the 5-row viewport into scrollback.
+		const oldLines = Array.from({ length: 30 }, (_, index) => `old-line-${String(index + 1).padStart(3, "0")}`);
+		mirror.applyOutput(Buffer.from(oldLines.join("\r\n"), "utf8"));
+
+		// Erase scrollback (3 J) + erase screen (2 J) + home, then reprint.
+		mirror.applyOutput(Buffer.from(`${esc}[3J${esc}[2J${esc}[Hreprinted-transcript`, "utf8"));
+
+		const snapshot = await mirror.getSnapshot();
+
+		expect(snapshot.snapshot).toContain("reprinted-transcript");
+		expect(snapshot.snapshot).not.toContain("old-line-001");
+		expect(snapshot.snapshot).not.toContain("old-line-030");
+	});
+
 	it("preserves alternate-screen state when the active buffer is alternate", async () => {
 		const mirror = createMirror();
 

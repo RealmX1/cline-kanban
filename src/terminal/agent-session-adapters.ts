@@ -857,6 +857,9 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("-c", "check_for_update_on_startup=false");
 		}
 
+		// Codex = inline transcript agent（见 agent-catalog.ts 的 agentRendersTranscriptInline）：强制
+		// --no-alt-screen 把完整历史渲染进 scrollback。与 session-manager 的 suppressScrollbackErasure
+		// 门控同源，二者必须一致，否则「让历史进 scrollback」与「保护 scrollback 不被 CSI 3 J 清掉」会打架。
 		if (!hasCliOption(codexArgs, "--no-alt-screen")) {
 			codexArgs.push("--no-alt-screen");
 		}
