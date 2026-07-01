@@ -59,6 +59,8 @@ describe("GitCommitDiffPanel", () => {
 					additions: 1,
 					deletions: 0,
 					patch: "@@ -1 +1 @@\n-const a = 1;\n+const a = 2;\n",
+					isPatchLoading: false,
+					patchErrorMessage: null,
 				},
 				{
 					path: "src/b.ts",
@@ -66,6 +68,8 @@ describe("GitCommitDiffPanel", () => {
 					additions: 1,
 					deletions: 0,
 					patch: "@@ -1 +1 @@\n-const b = 1;\n+const b = 2;\n",
+					isPatchLoading: false,
+					patchErrorMessage: null,
 				},
 			],
 		};
@@ -134,6 +138,54 @@ describe("GitCommitDiffPanel", () => {
 		expect(scrollContainer.scrollTop).toBe(547);
 	});
 
+	it("renders commit files collapsed until a file or all files are expanded", async () => {
+		const onLoadCommitFileDiffPatch = vi.fn();
+		const onLoadAllCommitFileDiffPatches = vi.fn();
+		const diffSource: GitCommitDiffSource = {
+			type: "commit",
+			files: [
+				{
+					path: "src/a.ts",
+					status: "modified",
+					additions: 1,
+					deletions: 1,
+					patch: null,
+					isPatchLoading: false,
+					patchErrorMessage: null,
+				},
+			],
+		};
+
+		await act(async () => {
+			root.render(
+				<GitCommitDiffPanel
+					diffSource={diffSource}
+					isLoading={false}
+					errorMessage={null}
+					selectedPath={null}
+					onSelectPath={() => {}}
+					onLoadCommitFileDiffPatch={onLoadCommitFileDiffPatch}
+					onLoadAllCommitFileDiffPatches={onLoadAllCommitFileDiffPatches}
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("src/a.ts");
+		expect(container.querySelector(".kb-diff-row")).toBeNull();
+
+		const expandAllButton = Array.from(container.querySelectorAll("button")).find(
+			(button) => button.textContent === "Expand all",
+		);
+		expect(expandAllButton).toBeInstanceOf(HTMLButtonElement);
+
+		await act(async () => {
+			expandAllButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		});
+
+		expect(onLoadAllCommitFileDiffPatches).toHaveBeenCalledTimes(1);
+		expect(onLoadCommitFileDiffPatch).not.toHaveBeenCalled();
+	});
+
 	it("shows only the file header for binary paths", async () => {
 		const diffSource: GitCommitDiffSource = {
 			type: "commit",
@@ -144,6 +196,8 @@ describe("GitCommitDiffPanel", () => {
 					additions: 0,
 					deletions: 0,
 					patch: "Binary files a/assets/logo.png and b/assets/logo.png differ\n",
+					isPatchLoading: false,
+					patchErrorMessage: null,
 				},
 			],
 		};
