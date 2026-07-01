@@ -4,7 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { agentRendersTranscriptInline } from "../../../src/core/agent-catalog";
+import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
 
 const originalHome = process.env.HOME;
@@ -78,6 +79,22 @@ afterEach(() => {
 	Object.defineProperty(process, "execPath", {
 		configurable: true,
 		value: originalExecPath,
+	});
+});
+
+describe("agentRendersTranscriptInline", () => {
+	// This predicate is the single source of truth coupling two behaviors: codexAdapter forces
+	// --no-alt-screen (transcript rendered into scrollback) and session-manager therefore must NOT
+	// suppress CSI 3 J for it. If a second agent ever becomes inline, add it here AND wire both sites.
+	it("marks only Codex as an inline-transcript agent", () => {
+		expect(agentRendersTranscriptInline("codex")).toBe(true);
+	});
+
+	it("treats every non-Codex agent as alt-screen (not inline)", () => {
+		const nonInlineAgents: RuntimeAgentId[] = ["claude", "gemini", "opencode", "droid", "kiro", "cline"];
+		for (const agentId of nonInlineAgents) {
+			expect(agentRendersTranscriptInline(agentId)).toBe(false);
+		}
 	});
 });
 

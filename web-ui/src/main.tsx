@@ -36,6 +36,9 @@ ReactDOM.createRoot(root).render(
 					<Toaster
 						theme="dark"
 						position="bottom-right"
+						// Lift toasts above the always-visible bug-report FAB (bottom-right pill)
+						// so they stack over it instead of overlapping.
+						offset={{ bottom: 76 }}
 						toastOptions={{
 							style: {
 								background: "var(--color-surface-1)",

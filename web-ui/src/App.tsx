@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AddProjectDialog } from "@/components/add-project-dialog";
 import { notifyError, showAppToast } from "@/components/app-toaster";
+import { BugReportFab } from "@/components/bug-report/bug-report-fab";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
@@ -1285,6 +1286,12 @@ export default function App(): ReactElement {
 						</AlertDialogAction>
 					</AlertDialogFooter>
 				</AlertDialog>
+
+				<BugReportFab
+					projects={projects}
+					currentProjectId={currentProjectId}
+					activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
+				/>
 			</div>
 		</LayoutCustomizationsProvider>
 	);

@@ -517,6 +517,24 @@ export const runtimeWorkspaceStateNotifyResponseSchema = z.object({
 });
 export type RuntimeWorkspaceStateNotifyResponse = z.infer<typeof runtimeWorkspaceStateNotifyResponseSchema>;
 
+// Targeted "append one backlog task to this workspace" request. The client is already
+// scoped to the destination workspace (via the x-kanban-workspace-id header), so the
+// server resolves baseRef itself and only needs the task's user-facing fields. Reuses
+// the same core mutation pipeline as `kanban task create` (mutateWorkspaceState +
+// addTaskToColumn). Used by the bug-report FAB to file a bug straight onto the
+// cline-kanban developer board.
+export const runtimeAddBacklogTaskRequestSchema = z.object({
+	prompt: z.string(),
+	title: z.string().optional(),
+	images: z.array(runtimeTaskImageSchema).optional(),
+});
+export type RuntimeAddBacklogTaskRequest = z.infer<typeof runtimeAddBacklogTaskRequestSchema>;
+
+export const runtimeAddBacklogTaskResponseSchema = z.object({
+	taskId: z.string(),
+});
+export type RuntimeAddBacklogTaskResponse = z.infer<typeof runtimeAddBacklogTaskResponseSchema>;
+
 export const runtimeProjectTaskCountsSchema = z.object({
 	backlog: z.number(),
 	in_progress: z.number(),
@@ -531,6 +549,10 @@ export const runtimeProjectSummarySchema = z.object({
 	path: z.string(),
 	name: z.string(),
 	taskCounts: runtimeProjectTaskCountsSchema,
+	// The project's git `remote.origin.url` (raw, unnormalized), or null when the repo
+	// has no origin remote / the read failed. Consumed by the bug-report FAB to detect
+	// the cline-kanban developer project by matching its GitHub owner/repo slug.
+	gitRemoteOriginUrl: z.string().nullable().optional(),
 });
 export type RuntimeProjectSummary = z.infer<typeof runtimeProjectSummarySchema>;
 
