@@ -16,6 +16,7 @@ import {
 	removeWorkspaceStateFiles,
 } from "../state/workspace-state";
 import { TerminalSessionManager } from "../terminal/session-manager";
+import { runGit } from "../workspace/git-utils";
 import { applyLiveSessionStateToProjectTaskCounts } from "./project-task-counts-live-session-overlay";
 
 export interface WorkspaceRegistryScope {
@@ -154,6 +155,9 @@ function toProjectSummary(project: {
 	workspaceId: string;
 	repoPath: string;
 	taskCounts: RuntimeProjectTaskCounts;
+	// Optional so the `projects.add` fast path can omit it — origin is populated for real
+	// on the next projects_updated/snapshot broadcast via buildProjectsPayload.
+	gitRemoteOriginUrl?: string | null;
 }): RuntimeProjectSummary {
 	const normalized = project.repoPath.replaceAll("\\", "/").replace(/\/+$/g, "");
 	const segments = normalized.split("/").filter((segment) => segment.length > 0);
@@ -163,6 +167,7 @@ function toProjectSummary(project: {
 		path: project.repoPath,
 		name,
 		taskCounts: project.taskCounts,
+		gitRemoteOriginUrl: project.gitRemoteOriginUrl ?? null,
 	};
 }
 
@@ -185,6 +190,11 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		activeWorkspaceId && activeWorkspacePath ? [[activeWorkspaceId, activeWorkspacePath]] : [],
 	);
 	const projectTaskCountsByWorkspaceId = new Map<string, RuntimeProjectTaskCounts>();
+	// ponytail: cache git origin per workspace — origin rarely changes and this runs on
+	// every projects_updated broadcast, so we avoid spawning a git process each time.
+	// Ceiling: a user re-pointing origin won't reflect until restart; add invalidation if
+	// that ever matters.
+	const gitRemoteOriginUrlByWorkspaceId = new Map<string, string | null>();
 	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
 	const terminalManagerLoadPromises = new Map<string, Promise<TerminalSessionManager>>();
 
@@ -307,6 +317,17 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		return response;
 	};
 
+	const resolveGitRemoteOriginUrl = async (workspaceId: string, repoPath: string): Promise<string | null> => {
+		const cached = gitRemoteOriginUrlByWorkspaceId.get(workspaceId);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const result = await runGit(repoPath, ["config", "--get", "remote.origin.url"]);
+		const originUrl = result.ok && result.stdout ? result.stdout : null;
+		gitRemoteOriginUrlByWorkspaceId.set(workspaceId, originUrl);
+		return originUrl;
+	};
+
 	const buildProjectsPayload = async (preferredCurrentProjectId: string | null) => {
 		const projects = await listWorkspaceIndexEntries();
 		const fallbackProjectId =
@@ -321,10 +342,12 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		const projectSummaries = await Promise.all(
 			projects.map(async (project) => {
 				const taskCounts = await summarizeProjectTaskCounts(project.workspaceId, project.repoPath);
+				const gitRemoteOriginUrl = await resolveGitRemoteOriginUrl(project.workspaceId, project.repoPath);
 				return toProjectSummary({
 					workspaceId: project.workspaceId,
 					repoPath: project.repoPath,
 					taskCounts,
+					gitRemoteOriginUrl,
 				});
 			}),
 		);

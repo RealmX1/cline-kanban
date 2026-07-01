@@ -6,6 +6,8 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import { z } from "zod";
 
 import type {
+	RuntimeAddBacklogTaskRequest,
+	RuntimeAddBacklogTaskResponse,
 	RuntimeClineAccountBalanceResponse,
 	RuntimeClineAccountOrganizationsResponse,
 	RuntimeClineAccountProfileResponse,
@@ -111,6 +113,8 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
+	runtimeAddBacklogTaskRequestSchema,
+	runtimeAddBacklogTaskResponseSchema,
 	runtimeClineAccountBalanceResponseSchema,
 	runtimeClineAccountOrganizationsResponseSchema,
 	runtimeClineAccountProfileResponseSchema,
@@ -396,6 +400,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeWorkspaceStateSaveRequest,
 		) => Promise<RuntimeWorkspaceStateResponse>;
+		addBacklogTask: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeAddBacklogTaskRequest,
+		) => Promise<RuntimeAddBacklogTaskResponse>;
 		loadWorkspaceChanges: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeWorkspaceChangesResponse>;
 		loadGitLog: (scope: RuntimeTrpcWorkspaceScope, input: RuntimeGitLogRequest) => Promise<RuntimeGitLogResponse>;
 		loadGitRefs: (
@@ -765,6 +773,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeWorkspaceStateResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.saveState(ctx.workspaceScope, input);
+			}),
+		addBacklogTask: workspaceProcedure
+			.input(runtimeAddBacklogTaskRequestSchema)
+			.output(runtimeAddBacklogTaskResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.addBacklogTask(ctx.workspaceScope, input);
 			}),
 		getWorkspaceChanges: workspaceProcedure.output(runtimeWorkspaceChangesResponseSchema).query(async ({ ctx }) => {
 			return await ctx.workspaceApi.loadWorkspaceChanges(ctx.workspaceScope);

@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/kbd";
 import { Spinner } from "@/components/ui/spinner";
+import { KANBAN_FORK_GITHUB_ISSUES_URL } from "@/config/issue-reporting-urls";
 import type { FeaturebaseFeedbackState } from "@/hooks/use-featurebase-feedback-widget";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { RuntimeAgentId, RuntimeClineProviderSettings, RuntimeProjectSummary } from "@/runtime/types";
@@ -35,7 +36,6 @@ const COLLAPSED_WIDTH = 48;
 const SIDEBAR_COLLAPSE_THRESHOLD = 120;
 const SIDEBAR_MIN_EXPANDED_WIDTH = 200;
 const SIDEBAR_MAX_EXPANDED_WIDTH = 600;
-const GITHUB_ISSUES_URL = "https://github.com/cline/kanban/issues";
 
 interface TaskCountBadge {
 	id: string;
@@ -558,7 +558,7 @@ function ProjectSupportFooter({
 		if (shouldShowFeaturebaseFeedback) {
 			void featurebaseFeedbackState?.openFeedbackWidget();
 		} else {
-			window.open(GITHUB_ISSUES_URL, "_blank");
+			window.open(KANBAN_FORK_GITHUB_ISSUES_URL, "_blank");
 		}
 	};
 
