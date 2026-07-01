@@ -18,7 +18,8 @@ import {
 	parseWorktreeEnsureRequest,
 } from "../core/api-validation";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
-import { saveWorkspaceState, WorkspaceStateConflictError } from "../state/workspace-state";
+import { addTaskToColumn } from "../core/task-board-mutations";
+import { mutateWorkspaceState, saveWorkspaceState, WorkspaceStateConflictError } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import {
 	createEmptyWorkspaceChangesResponse,
@@ -402,6 +403,45 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				}
 				throw error;
 			}
+		},
+		addBacklogTask: async (workspaceScope, input) => {
+			const prompt = input.prompt.trim();
+			if (!prompt) {
+				throw new TRPCError({ code: "BAD_REQUEST", message: "Task prompt is required." });
+			}
+			// Reuses the exact `kanban task create` core pipeline: atomic locked
+			// load→mutate→save via mutateWorkspaceState + the pure addTaskToColumn. baseRef is
+			// resolved server-side from the workspace's git state (same rule as the CLI).
+			const mutationResponse = await mutateWorkspaceState(workspaceScope.workspacePath, (state) => {
+				const resolvedBaseRef =
+					state.git.currentBranch ?? state.git.defaultBranch ?? state.git.branches[0]?.name ?? "";
+				if (!resolvedBaseRef) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "Could not determine task base branch for this workspace.",
+					});
+				}
+				const result = addTaskToColumn(
+					state.board,
+					"backlog",
+					{
+						title: input.title,
+						prompt,
+						baseRef: resolvedBaseRef,
+						images: input.images,
+					},
+					() => globalThis.crypto.randomUUID(),
+				);
+				return {
+					board: result.board,
+					value: { taskId: result.task.id },
+				};
+			});
+			if (mutationResponse.saved) {
+				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceScope.workspaceId, workspaceScope.workspacePath);
+				void deps.broadcastRuntimeProjectsUpdated(workspaceScope.workspaceId);
+			}
+			return { taskId: mutationResponse.value.taskId };
 		},
 		loadWorkspaceChanges: async (workspaceScope) => {
 			return await getWorkspaceChanges(workspaceScope.workspacePath);
