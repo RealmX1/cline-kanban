@@ -1,8 +1,9 @@
-import { act, useEffect } from "react";
+import { act, type ReactElement, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { UseTaskAgentModelPickerResult } from "@/components/task-agent-model-picker";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import type {
 	RuntimeAgentId,
 	RuntimeClineProviderCatalogItem,
@@ -36,6 +37,14 @@ function createProvider(
 
 function createTaskClineSettings(settings?: RuntimeTaskClineSettings): RuntimeTaskClineSettings | undefined {
 	return settings;
+}
+
+function findButtonByAriaLabel(label: string): HTMLButtonElement | null {
+	return container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+}
+
+function renderWithTooltipProvider(element: ReactElement): void {
+	root.render(<TooltipProvider>{element}</TooltipProvider>);
 }
 
 let container: HTMLDivElement;
@@ -82,7 +91,7 @@ describe("useTaskAgentModelPicker – clineProviderOptions", () => {
 			return null;
 		}
 
-		await act(async () => root.render(<Harness />));
+		await act(async () => renderWithTooltipProvider(<Harness />));
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 0));
 		});
@@ -123,7 +132,7 @@ describe("useTaskAgentModelPicker – clineProviderOptions", () => {
 			return null;
 		}
 
-		await act(async () => root.render(<Harness />));
+		await act(async () => renderWithTooltipProvider(<Harness />));
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 0));
 		});
@@ -159,7 +168,7 @@ describe("useTaskAgentModelPicker – clineProviderOptions", () => {
 			return null;
 		}
 
-		await act(async () => root.render(<Harness />));
+		await act(async () => renderWithTooltipProvider(<Harness />));
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 0));
 		});
@@ -198,7 +207,7 @@ describe("useTaskAgentModelPicker – providerDefaultModels", () => {
 			return null;
 		}
 
-		await act(async () => root.render(<Harness />));
+		await act(async () => renderWithTooltipProvider(<Harness />));
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 0));
 		});
@@ -243,7 +252,7 @@ describe("useTaskAgentModelPicker – provider-aware model default label", () =>
 			return null;
 		}
 
-		await act(async () => root.render(<Harness />));
+		await act(async () => renderWithTooltipProvider(<Harness />));
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 0));
 		});
@@ -282,7 +291,7 @@ describe("useTaskAgentModelPicker – provider-aware model default label", () =>
 			return null;
 		}
 
-		await act(async () => root.render(<Harness />));
+		await act(async () => renderWithTooltipProvider(<Harness />));
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 0));
 		});
@@ -323,7 +332,7 @@ describe("useTaskAgentModelPicker – provider-aware model default label", () =>
 			return null;
 		}
 
-		await act(async () => root.render(<Harness />));
+		await act(async () => renderWithTooltipProvider(<Harness />));
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 0));
 		});
@@ -366,7 +375,7 @@ describe("useTaskAgentModelPicker – provider-aware model default label", () =>
 			return null;
 		}
 
-		await act(async () => root.render(<Harness />));
+		await act(async () => renderWithTooltipProvider(<Harness />));
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 0));
 		});
@@ -390,7 +399,7 @@ describe("TaskAgentModelPicker – auto-reset invalid model selection", () => {
 		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
 
 		await act(async () =>
-			root.render(
+			renderWithTooltipProvider(
 				<TaskAgentModelPicker
 					agentId={"cline" as RuntimeAgentId}
 					onAgentIdChange={() => {}}
@@ -428,7 +437,7 @@ describe("TaskAgentModelPicker – auto-reset invalid model selection", () => {
 		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
 
 		await act(async () =>
-			root.render(
+			renderWithTooltipProvider(
 				<TaskAgentModelPicker
 					agentId={"cline" as RuntimeAgentId}
 					onAgentIdChange={() => {}}
@@ -458,7 +467,7 @@ describe("TaskAgentModelPicker – auto-reset invalid model selection", () => {
 		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
 
 		await act(async () =>
-			root.render(
+			renderWithTooltipProvider(
 				<TaskAgentModelPicker
 					agentId={"cline" as RuntimeAgentId}
 					onAgentIdChange={() => {}}
@@ -489,7 +498,7 @@ describe("TaskAgentModelPicker – auto-reset invalid model selection", () => {
 		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
 
 		await act(async () =>
-			root.render(
+			renderWithTooltipProvider(
 				<TaskAgentModelPicker
 					agentId={"cline" as RuntimeAgentId}
 					onAgentIdChange={() => {}}
@@ -514,12 +523,157 @@ describe("TaskAgentModelPicker – auto-reset invalid model selection", () => {
 	});
 });
 
+describe("TaskAgentModelPicker – agent icon selector", () => {
+	it("renders agent icon buttons immediately without the old override foldout", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={undefined}
+					onAgentIdChange={() => {}}
+					clineSettings={undefined}
+					onClineSettingsChange={() => {}}
+					agentOptions={[
+						{ value: "", label: "Cline" },
+						{ value: "claude", label: "Claude Code" },
+					]}
+					clineProviderOptions={[{ value: "", label: "Cline" }]}
+					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+					defaultProviderId="cline"
+				/>,
+			),
+		);
+
+		expect(container.textContent).not.toContain("Override Agent Settings");
+		const inheritedDefaultAgentButton = findButtonByAriaLabel("Cline (default agent)");
+		const claudeAgentButton = findButtonByAriaLabel("Claude Code");
+		expect(inheritedDefaultAgentButton).not.toBeNull();
+		expect(claudeAgentButton).not.toBeNull();
+		expect(inheritedDefaultAgentButton?.getAttribute("aria-pressed")).toBe("true");
+		expect(claudeAgentButton?.getAttribute("aria-pressed")).toBe("false");
+	});
+
+	it("selects an explicit non-Cline agent and clears Cline settings", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		const onAgentIdChange = vi.fn();
+		const onClineSettingsChange = vi.fn();
+
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={undefined}
+					onAgentIdChange={onAgentIdChange}
+					clineSettings={createTaskClineSettings({ providerId: "cline", modelId: "openai/gpt-5.4" })}
+					onClineSettingsChange={onClineSettingsChange}
+					agentOptions={[
+						{ value: "", label: "Cline" },
+						{ value: "claude", label: "Claude Code" },
+					]}
+					clineProviderOptions={[{ value: "", label: "Cline" }]}
+					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+					defaultProviderId="cline"
+				/>,
+			),
+		);
+
+		const claudeAgentButton = findButtonByAriaLabel("Claude Code");
+		expect(claudeAgentButton).not.toBeNull();
+		await act(async () => {
+			claudeAgentButton?.click();
+		});
+
+		expect(onAgentIdChange).toHaveBeenCalledWith("claude");
+		expect(onClineSettingsChange).toHaveBeenCalledWith(undefined);
+	});
+
+	it("does not clear Cline settings when the selected inherited default agent is clicked again", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		const onAgentIdChange = vi.fn();
+		const onClineSettingsChange = vi.fn();
+
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={undefined}
+					onAgentIdChange={onAgentIdChange}
+					clineSettings={createTaskClineSettings({ providerId: "cline", modelId: "openai/gpt-5.4" })}
+					onClineSettingsChange={onClineSettingsChange}
+					agentOptions={[
+						{ value: "", label: "Cline" },
+						{ value: "claude", label: "Claude Code" },
+					]}
+					clineProviderOptions={[{ value: "", label: "Cline" }]}
+					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+					defaultProviderId="cline"
+				/>,
+			),
+		);
+
+		const inheritedDefaultAgentButton = findButtonByAriaLabel("Cline (default agent)");
+		expect(inheritedDefaultAgentButton).not.toBeNull();
+		expect(inheritedDefaultAgentButton?.getAttribute("aria-pressed")).toBe("true");
+		await act(async () => {
+			inheritedDefaultAgentButton?.click();
+		});
+
+		expect(onAgentIdChange).not.toHaveBeenCalled();
+		expect(onClineSettingsChange).not.toHaveBeenCalled();
+	});
+
+	it("selects the inherited default agent as an undefined task override", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		const onAgentIdChange = vi.fn();
+		const onClineSettingsChange = vi.fn();
+
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={"claude" as RuntimeAgentId}
+					onAgentIdChange={onAgentIdChange}
+					clineSettings={createTaskClineSettings({ providerId: "cline" })}
+					onClineSettingsChange={onClineSettingsChange}
+					agentOptions={[
+						{ value: "", label: "Cline" },
+						{ value: "claude", label: "Claude Code" },
+					]}
+					clineProviderOptions={[{ value: "", label: "Cline" }]}
+					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+					defaultProviderId="cline"
+				/>,
+			),
+		);
+
+		expect(container.textContent).not.toContain("Provider");
+		const inheritedDefaultAgentButton = findButtonByAriaLabel("Cline (default agent)");
+		expect(inheritedDefaultAgentButton).not.toBeNull();
+		await act(async () => {
+			inheritedDefaultAgentButton?.click();
+		});
+
+		expect(onAgentIdChange).toHaveBeenCalledWith(undefined);
+		expect(onClineSettingsChange).toHaveBeenCalledWith(undefined);
+	});
+});
+
 describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 	it("shows reasoning metadata for an inherited default model and opens reasoning choices immediately", async () => {
 		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
 
 		await act(async () =>
-			root.render(
+			renderWithTooltipProvider(
 				<TaskAgentModelPicker
 					agentId={"cline" as RuntimeAgentId}
 					onAgentIdChange={() => {}}
@@ -545,14 +699,6 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 			),
 		);
 
-		const settingsTrigger = Array.from(container.querySelectorAll("button")).find((button) =>
-			button.textContent?.includes("Override Agent Settings"),
-		);
-		expect(settingsTrigger).not.toBeUndefined();
-		await act(async () => {
-			(settingsTrigger as HTMLButtonElement).click();
-		});
-
 		expect(container.textContent).toContain("GPT-5.4 (High)");
 
 		const trigger = document.getElementById("cline-chat-model-picker");
@@ -569,7 +715,7 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 
 		const renderPicker = async (providerModels: RuntimeClineProviderModel[]) => {
 			await act(async () =>
-				root.render(
+				renderWithTooltipProvider(
 					<TaskAgentModelPicker
 						agentId={"cline" as RuntimeAgentId}
 						onAgentIdChange={() => {}}
@@ -595,14 +741,6 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 
 		await renderPicker([]);
 
-		const settingsTrigger = Array.from(container.querySelectorAll("button")).find((button) =>
-			button.textContent?.includes("Override Agent Settings"),
-		);
-		expect(settingsTrigger).not.toBeUndefined();
-		await act(async () => {
-			(settingsTrigger as HTMLButtonElement).click();
-		});
-
 		await renderPicker([
 			{ id: "openai/gpt-5.4", name: "GPT-5.4", supportsReasoningEffort: true },
 			{ id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex", supportsReasoningEffort: true },
@@ -616,7 +754,7 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 		const onClineSettingsChange = vi.fn();
 
 		await act(async () =>
-			root.render(
+			renderWithTooltipProvider(
 				<TaskAgentModelPicker
 					agentId={"cline" as RuntimeAgentId}
 					onAgentIdChange={() => {}}
@@ -642,14 +780,6 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 			),
 		);
 
-		const settingsTrigger = Array.from(container.querySelectorAll("button")).find((button) =>
-			button.textContent?.includes("Override Agent Settings"),
-		);
-		expect(settingsTrigger).not.toBeUndefined();
-		await act(async () => {
-			(settingsTrigger as HTMLButtonElement).click();
-		});
-
 		const modelTrigger = document.getElementById("cline-chat-model-picker");
 		expect(modelTrigger).not.toBeNull();
 		await act(async () => {
@@ -674,7 +804,7 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 		const onClineSettingsChange = vi.fn();
 
 		await act(async () =>
-			root.render(
+			renderWithTooltipProvider(
 				<TaskAgentModelPicker
 					agentId={"cline" as RuntimeAgentId}
 					onAgentIdChange={() => {}}
@@ -693,14 +823,6 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 				/>,
 			),
 		);
-
-		const settingsTrigger = Array.from(container.querySelectorAll("button")).find((button) =>
-			button.textContent?.includes("Override Agent Settings"),
-		);
-		expect(settingsTrigger).not.toBeUndefined();
-		await act(async () => {
-			(settingsTrigger as HTMLButtonElement).click();
-		});
 
 		const modelTrigger = document.getElementById("cline-chat-model-picker");
 		expect(modelTrigger).not.toBeNull();
@@ -723,7 +845,7 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
 
 		await act(async () =>
-			root.render(
+			renderWithTooltipProvider(
 				<TaskAgentModelPicker
 					agentId={"cline" as RuntimeAgentId}
 					onAgentIdChange={() => {}}
@@ -750,14 +872,6 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 				/>,
 			),
 		);
-
-		const settingsTrigger = Array.from(container.querySelectorAll("button")).find((button) =>
-			button.textContent?.includes("Override Agent Settings"),
-		);
-		expect(settingsTrigger).not.toBeUndefined();
-		await act(async () => {
-			(settingsTrigger as HTMLButtonElement).click();
-		});
 
 		expect(container.textContent).toContain("GPT-5.3 Codex");
 		expect(container.textContent).not.toContain("GPT-5.3 Codex (High)");

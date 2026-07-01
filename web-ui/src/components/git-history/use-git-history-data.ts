@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { GitCommitDiffSource } from "@/components/git-history/git-commit-diff-panel";
+import type { GitCommitDiffCommitFile, GitCommitDiffSource } from "@/components/git-history/git-commit-diff-panel";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeGitCommit,
+	RuntimeGitCommitChangedFileMetadata,
+	RuntimeGitCommitChangedFileMetadataResponse,
 	RuntimeGitCommitDiffResponse,
+	RuntimeGitCommitFileDiffPatchResponse,
 	RuntimeGitRef,
 	RuntimeGitRefsResponse,
 	RuntimeGitSyncSummary,
@@ -61,8 +64,21 @@ export interface UseGitHistoryDataResult {
 	selectRef: (ref: RuntimeGitRef) => void;
 	selectCommit: (commit: RuntimeGitCommit) => void;
 	selectDiffPath: (path: string | null) => void;
+	loadCommitFileDiffPatch: (file: RuntimeGitCommitChangedFileMetadata) => Promise<void>;
+	loadAllCommitFileDiffPatches: () => Promise<void>;
 	loadMoreCommits: () => void;
 	refresh: (options?: GitHistoryRefreshOptions) => void;
+	isLoadingAllCommitFilePatches: boolean;
+}
+
+interface CommitFileDiffPatchState {
+	patch: string | null;
+	isLoading: boolean;
+	errorMessage: string | null;
+}
+
+function buildCommitFileDiffPatchKey(file: { path: string; previousPath?: string }): string {
+	return file.previousPath ? `${file.previousPath}\0${file.path}` : file.path;
 }
 
 export function useGitHistoryData({
@@ -76,6 +92,11 @@ export function useGitHistoryData({
 	const [selectedRefName, setSelectedRefName] = useState<string | null>(null);
 	const [selectedCommitHash, setSelectedCommitHash] = useState<string | null>(null);
 	const [selectedDiffPath, setSelectedDiffPath] = useState<string | null>(null);
+	const [commitFileDiffPatchStateByKey, setCommitFileDiffPatchStateByKey] = useState<
+		Record<string, CommitFileDiffPatchState>
+	>({});
+	const [isLoadingAllCommitFilePatches, setIsLoadingAllCommitFilePatches] = useState(false);
+	const [allCommitFilePatchesErrorMessage, setAllCommitFilePatchesErrorMessage] = useState<string | null>(null);
 	const [commits, setCommits] = useState<RuntimeGitCommit[]>([]);
 	const [totalCommitCount, setTotalCommitCount] = useState(0);
 	const [isLogLoading, setIsLogLoading] = useState(false);
@@ -118,7 +139,7 @@ export function useGitHistoryData({
 		retainDataOnError: true,
 	});
 
-	const scopeKey = `${workspaceId ?? "__none__"}:${taskScope?.taskId ?? "__home__"}:${taskScope?.baseRef ?? "__home__"}`;
+	const scopeKey = `${workspaceId ?? "__none__"}:${taskScope?.taskId ?? "__home__"}:${taskScope?.baseRef ?? "__home__"}:${taskScope?.worktreeMode ?? "__home__"}`;
 	const prevScopeKeyRef = useRef(scopeKey);
 	const isScopeTransitioning = prevScopeKeyRef.current !== scopeKey;
 
@@ -170,6 +191,15 @@ export function useGitHistoryData({
 		return [activeRef.name];
 	}, [activeRef, refs]);
 	const logKey = `${scopeKey}:${logRefs.length > 0 ? logRefs.join("|") : "__no_ref__"}`;
+	const commitDiffScopeKey = `${scopeKey}:${selectedCommitHash ?? "__no_commit__"}`;
+	const commitDiffScopeKeyRef = useRef(commitDiffScopeKey);
+
+	useEffect(() => {
+		commitDiffScopeKeyRef.current = commitDiffScopeKey;
+		setCommitFileDiffPatchStateByKey({});
+		setIsLoadingAllCommitFilePatches(false);
+		setAllCommitFilePatchesErrorMessage(null);
+	}, [commitDiffScopeKey]);
 
 	const loadCommits = useCallback(
 		async (options: { skip: number; maxCount: number; append: boolean; silent?: boolean }) => {
@@ -348,26 +378,208 @@ export function useGitHistoryData({
 		setSelectedDiffPath(null);
 	}, [activeRef, commits, selectedCommitHash, viewMode]);
 
-	const diffQueryFn = useCallback(async () => {
+	const commitChangedFileMetadataQueryFn = useCallback(async () => {
 		if (!workspaceId || !selectedCommitHash) {
 			throw new Error("Missing scope.");
 		}
 		const trpc = getRuntimeTrpcClient(workspaceId);
-		return await trpc.workspace.getCommitDiff.query({
+		return await trpc.workspace.getCommitChangedFileMetadata.query({
 			commitHash: selectedCommitHash,
 			taskScope: taskScope ?? null,
 		});
 	}, [selectedCommitHash, taskScope, workspaceId]);
 
-	const diffQuery = useTrpcQuery<RuntimeGitCommitDiffResponse>({
+	const commitChangedFileMetadataQuery = useTrpcQuery<RuntimeGitCommitChangedFileMetadataResponse>({
 		enabled:
 			!isScopeTransitioning &&
 			enabled &&
 			workspaceId !== null &&
 			selectedCommitHash !== null &&
 			viewMode === "commit",
-		queryFn: diffQueryFn,
+		queryFn: commitChangedFileMetadataQueryFn,
 	});
+
+	const loadCommitFileDiffPatch = useCallback(
+		async (file: RuntimeGitCommitChangedFileMetadata) => {
+			if (!enabled || !workspaceId || !selectedCommitHash || viewMode !== "commit") {
+				return;
+			}
+			const requestCommitDiffScopeKey = commitDiffScopeKey;
+			const patchKey = buildCommitFileDiffPatchKey(file);
+			const existingPatchState = commitFileDiffPatchStateByKey[patchKey];
+			if (existingPatchState?.isLoading || existingPatchState?.patch != null) {
+				return;
+			}
+			setCommitFileDiffPatchStateByKey((current) => {
+				const currentPatchState = current[patchKey];
+				if (currentPatchState?.isLoading || currentPatchState?.patch != null) {
+					return current;
+				}
+				return {
+					...current,
+					[patchKey]: {
+						patch: currentPatchState?.patch ?? null,
+						isLoading: true,
+						errorMessage: null,
+					},
+				};
+			});
+
+			try {
+				const trpc = getRuntimeTrpcClient(workspaceId);
+				const payload = (await trpc.workspace.getCommitFileDiffPatch.query({
+					commitHash: selectedCommitHash,
+					path: file.path,
+					previousPath: file.previousPath,
+					taskScope: taskScope ?? null,
+				})) as RuntimeGitCommitFileDiffPatchResponse;
+				if (commitDiffScopeKeyRef.current !== requestCommitDiffScopeKey) {
+					return;
+				}
+				setCommitFileDiffPatchStateByKey((current) => ({
+					...current,
+					[patchKey]: {
+						patch: payload.ok ? payload.patch : null,
+						isLoading: false,
+						errorMessage: payload.ok ? null : (payload.error ?? "Could not load file diff."),
+					},
+				}));
+			} catch (error) {
+				if (commitDiffScopeKeyRef.current !== requestCommitDiffScopeKey) {
+					return;
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				setCommitFileDiffPatchStateByKey((current) => ({
+					...current,
+					[patchKey]: {
+						patch: null,
+						isLoading: false,
+						errorMessage: message || "Could not load file diff.",
+					},
+				}));
+			}
+		},
+		[
+			commitDiffScopeKey,
+			commitFileDiffPatchStateByKey,
+			enabled,
+			selectedCommitHash,
+			taskScope,
+			viewMode,
+			workspaceId,
+		],
+	);
+
+	const loadAllCommitFileDiffPatches = useCallback(async () => {
+		if (!enabled || !workspaceId || !selectedCommitHash || viewMode !== "commit" || isLoadingAllCommitFilePatches) {
+			return;
+		}
+		const metadataFiles = commitChangedFileMetadataQuery.data?.files ?? [];
+		const requestCommitDiffScopeKey = commitDiffScopeKey;
+		setIsLoadingAllCommitFilePatches(true);
+		setAllCommitFilePatchesErrorMessage(null);
+		setCommitFileDiffPatchStateByKey((current) => {
+			const next = { ...current };
+			for (const file of metadataFiles) {
+				const patchKey = buildCommitFileDiffPatchKey(file);
+				const existing = next[patchKey];
+				if (existing?.patch !== null && existing?.patch !== undefined) {
+					continue;
+				}
+				next[patchKey] = {
+					patch: null,
+					isLoading: true,
+					errorMessage: null,
+				};
+			}
+			return next;
+		});
+
+		try {
+			const trpc = getRuntimeTrpcClient(workspaceId);
+			const payload = (await trpc.workspace.getCommitDiff.query({
+				commitHash: selectedCommitHash,
+				taskScope: taskScope ?? null,
+			})) as RuntimeGitCommitDiffResponse;
+			if (commitDiffScopeKeyRef.current !== requestCommitDiffScopeKey) {
+				return;
+			}
+			if (!payload.ok) {
+				const errorMessage = payload.error ?? "Could not load all file diffs.";
+				setAllCommitFilePatchesErrorMessage(errorMessage);
+				setCommitFileDiffPatchStateByKey((current) => {
+					const next = { ...current };
+					for (const file of metadataFiles) {
+						const patchKey = buildCommitFileDiffPatchKey(file);
+						if (next[patchKey]?.isLoading) {
+							next[patchKey] = { patch: null, isLoading: false, errorMessage };
+						}
+					}
+					return next;
+				});
+				return;
+			}
+			setCommitFileDiffPatchStateByKey((current) => {
+				const next = { ...current };
+				const payloadPatchByKey = new Map(
+					payload.files.map((file) => [
+						buildCommitFileDiffPatchKey(file),
+						{
+							patch: file.patch,
+							isLoading: false,
+							errorMessage: null,
+						},
+					]),
+				);
+				for (const file of metadataFiles) {
+					const patchKey = buildCommitFileDiffPatchKey(file);
+					next[patchKey] = payloadPatchByKey.get(patchKey) ?? {
+						patch: next[patchKey]?.patch ?? null,
+						isLoading: false,
+						errorMessage: null,
+					};
+				}
+				for (const file of payload.files) {
+					next[buildCommitFileDiffPatchKey(file)] = {
+						patch: file.patch,
+						isLoading: false,
+						errorMessage: null,
+					};
+				}
+				return next;
+			});
+		} catch (error) {
+			if (commitDiffScopeKeyRef.current !== requestCommitDiffScopeKey) {
+				return;
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			const errorMessage = message || "Could not load all file diffs.";
+			setAllCommitFilePatchesErrorMessage(errorMessage);
+			setCommitFileDiffPatchStateByKey((current) => {
+				const next = { ...current };
+				for (const file of metadataFiles) {
+					const patchKey = buildCommitFileDiffPatchKey(file);
+					if (next[patchKey]?.isLoading) {
+						next[patchKey] = { patch: null, isLoading: false, errorMessage };
+					}
+				}
+				return next;
+			});
+		} finally {
+			if (commitDiffScopeKeyRef.current === requestCommitDiffScopeKey) {
+				setIsLoadingAllCommitFilePatches(false);
+			}
+		}
+	}, [
+		commitChangedFileMetadataQuery.data?.files,
+		commitDiffScopeKey,
+		enabled,
+		isLoadingAllCommitFilePatches,
+		selectedCommitHash,
+		taskScope,
+		viewMode,
+		workspaceId,
+	]);
 
 	const summaryWorkingCopyFileCount = gitSummary?.changedFiles ?? null;
 
@@ -405,9 +617,18 @@ export function useGitHistoryData({
 		setLogErrorMessage(null);
 		setResolvedLogKey(null);
 		refsQuery.setData(null);
-		diffQuery.setData(null);
+		commitChangedFileMetadataQuery.setData(null);
+		setCommitFileDiffPatchStateByKey({});
+		setIsLoadingAllCommitFilePatches(false);
+		setAllCommitFilePatchesErrorMessage(null);
 		workingCopyQuery.setData(null);
-	}, [abortInFlightLogRequest, diffQuery.setData, enabled, refsQuery.setData, workingCopyQuery.setData]);
+	}, [
+		abortInFlightLogRequest,
+		commitChangedFileMetadataQuery.setData,
+		enabled,
+		refsQuery.setData,
+		workingCopyQuery.setData,
+	]);
 
 	useEffect(() => {
 		if (!isScopeTransitioning) {
@@ -426,11 +647,14 @@ export function useGitHistoryData({
 		setLogErrorMessage(null);
 		setResolvedLogKey(null);
 		refsQuery.setData(null);
-		diffQuery.setData(null);
+		commitChangedFileMetadataQuery.setData(null);
+		setCommitFileDiffPatchStateByKey({});
+		setIsLoadingAllCommitFilePatches(false);
+		setAllCommitFilePatchesErrorMessage(null);
 		workingCopyQuery.setData(null);
 	}, [
 		abortInFlightLogRequest,
-		diffQuery.setData,
+		commitChangedFileMetadataQuery.setData,
 		isScopeTransitioning,
 		refsQuery.setData,
 		scopeKey,
@@ -456,16 +680,23 @@ export function useGitHistoryData({
 		}
 		void refsQuery.refetch();
 		refreshCommits({ silent: true });
+		if (viewMode === "commit" && selectedCommitHash && commitChangedFileMetadataQuery.data) {
+			void commitChangedFileMetadataQuery.refetch();
+		}
 		if (shouldLoadWorkingCopyChanges || workingCopyQuery.data) {
 			void workingCopyQuery.refetch();
 		}
 	}, [
+		commitChangedFileMetadataQuery.data,
+		commitChangedFileMetadataQuery.refetch,
 		enabled,
 		refsQuery.refetch,
 		refreshCommits,
+		selectedCommitHash,
 		shouldLoadWorkingCopyChanges,
 		stateVersion,
 		isScopeTransitioning,
+		viewMode,
 		workingCopyQuery.data,
 		workingCopyQuery.refetch,
 		workspaceId,
@@ -499,26 +730,47 @@ export function useGitHistoryData({
 			}
 			return { type: "working-copy", files };
 		}
-		const commitFiles = diffQuery.data?.files;
+		const commitFiles = commitChangedFileMetadataQuery.data?.files;
 		if (!commitFiles) {
 			return null;
 		}
-		return { type: "commit", files: commitFiles };
-	}, [diffQuery.data?.files, viewMode, workingCopyQuery.data?.files]);
+		return {
+			type: "commit",
+			files: commitFiles.map((file): GitCommitDiffCommitFile => {
+				const patchState = commitFileDiffPatchStateByKey[buildCommitFileDiffPatchKey(file)];
+				return {
+					...file,
+					patch: patchState?.patch ?? null,
+					isPatchLoading: patchState?.isLoading ?? false,
+					patchErrorMessage: patchState?.errorMessage ?? null,
+				};
+			}),
+		};
+	}, [
+		commitChangedFileMetadataQuery.data?.files,
+		commitFileDiffPatchStateByKey,
+		viewMode,
+		workingCopyQuery.data?.files,
+	]);
 
 	const selectedCommit = commits.find((commit) => commit.hash === selectedCommitHash) ?? null;
+	const isCommitChangedFileMetadataLoading =
+		viewMode === "commit" &&
+		selectedCommitHash !== null &&
+		commitChangedFileMetadataQuery.isLoading &&
+		commitChangedFileMetadataQuery.data === null;
 	const isDiffLoading =
 		viewMode === "commit"
-			? isLogLoading || diffQuery.isLoading
+			? isLogLoading || isCommitChangedFileMetadataLoading
 			: workingCopyQuery.isLoading && !workingCopyQuery.data;
 	const diffErrorMessage =
 		viewMode === "commit"
 			? (resolvedLogErrorMessage ??
-				(diffQuery.isError
-					? (diffQuery.error?.message ?? "Could not load diff.")
-					: diffQuery.data && !diffQuery.data.ok
-						? (diffQuery.data.error ?? "Could not load diff.")
-						: null))
+				(commitChangedFileMetadataQuery.isError
+					? (commitChangedFileMetadataQuery.error?.message ?? "Could not load changed files.")
+					: commitChangedFileMetadataQuery.data && !commitChangedFileMetadataQuery.data.ok
+						? (commitChangedFileMetadataQuery.data.error ?? "Could not load changed files.")
+						: allCommitFilePatchesErrorMessage))
 			: workingCopyQuery.isError && !workingCopyQuery.data
 				? (workingCopyQuery.error?.message ?? "Could not load working copy changes.")
 				: null;
@@ -545,6 +797,9 @@ export function useGitHistoryData({
 						silent: true,
 					});
 				}
+				if (viewMode === "commit" && selectedCommitHash && !commitChangedFileMetadataQuery.isLoading) {
+					void commitChangedFileMetadataQuery.refetch();
+				}
 				if (shouldLoadWorkingCopyChanges && !workingCopyQuery.isLoading) {
 					void workingCopyQuery.refetch();
 				}
@@ -555,19 +810,25 @@ export function useGitHistoryData({
 			refreshCommits({
 				silent: false,
 			});
+			if (viewMode === "commit" && selectedCommitHash) {
+				void commitChangedFileMetadataQuery.refetch();
+			}
 			if (shouldLoadWorkingCopyChanges) {
 				void workingCopyQuery.refetch();
 			}
 		},
 		[
 			enabled,
+			commitChangedFileMetadataQuery,
 			isScopeTransitioning,
 			isLoadingMoreCommits,
 			isLogLoading,
 			refsQuery,
 			refsQueryFn,
 			refreshCommits,
+			selectedCommitHash,
 			shouldLoadWorkingCopyChanges,
+			viewMode,
 			workingCopyQuery,
 			workingCopyQueryFn,
 		],
@@ -583,6 +844,7 @@ export function useGitHistoryData({
 	const visibleRefsErrorMessage = isScopeTransitioning ? null : refsErrorMessage;
 	const visibleLogErrorMessage = isScopeTransitioning ? null : resolvedLogErrorMessage;
 	const visibleDiffErrorMessage = isScopeTransitioning ? null : diffErrorMessage;
+	const visibleIsLoadingAllCommitFilePatches = isScopeTransitioning ? false : isLoadingAllCommitFilePatches;
 
 	return {
 		viewMode,
@@ -607,7 +869,10 @@ export function useGitHistoryData({
 		selectRef,
 		selectCommit,
 		selectDiffPath: setSelectedDiffPath,
+		loadCommitFileDiffPatch,
+		loadAllCommitFileDiffPatches,
 		loadMoreCommits,
 		refresh,
+		isLoadingAllCommitFilePatches: visibleIsLoadingAllCommitFilePatches,
 	};
 }
