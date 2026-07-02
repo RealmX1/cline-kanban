@@ -800,6 +800,7 @@ export function CardDetailView({
 		[onTaskCommentEntriesChange, selection.card.id],
 	);
 
+	const promptLibraryProjectId = currentProjectId ?? "__unknown_project__";
 	const detailUtilityTabs = <DetailUtilityTabList activeTab={detailUtilityTab} onTabChange={setDetailUtilityTab} />;
 
 	const showBottomTerminal = bottomTerminalOpen && !!bottomTerminalTaskId;
@@ -1060,6 +1061,7 @@ export function CardDetailView({
 											{detailUtilityTab === "prompts" ? (
 												<PromptLibraryPanel
 													taskId={selection.card.id}
+													projectId={promptLibraryProjectId}
 													onFillInput={injectTextIntoActiveInput}
 													headerContent={detailUtilityTabs}
 												/>

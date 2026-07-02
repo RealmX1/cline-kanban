@@ -14,6 +14,7 @@ export enum LocalStorageKey {
 	DetailRightPromptPanelRatio = "kanban.detail-right-prompt-panel-ratio",
 	PromptLibraryGlobal = "kanban.prompt-library.global.v1",
 	PromptLibraryByTask = "kanban.prompt-library.by-task.v1",
+	PromptLibraryByProject = "kanban.prompt-library.by-project.v1",
 	ProjectNavigationPanelWidth = "kb-sidebar-width",
 	ProjectNavigationPanelCollapsed = "kanban.project-navigation-panel-collapsed",
 	GitHistoryRefsPanelWidth = "kanban.git-history-refs-panel-width",
