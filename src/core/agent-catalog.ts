@@ -1,5 +1,7 @@
 import type { RuntimeAgentId } from "./api-contract";
 
+export { isKanbanCursorAgentModelId, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "./cursor-agent-models";
+
 export interface RuntimeAgentCatalogEntry {
 	id: RuntimeAgentId;
 	label: string;
@@ -33,6 +35,14 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: [],
 		autonomousArgs: ["--auto-approve-all"],
 		installUrl: "https://github.com/cline/cline",
+	},
+	{
+		id: "cursor",
+		label: "Cursor",
+		binary: "cursor-agent",
+		baseArgs: [],
+		autonomousArgs: ["--force"],
+		installUrl: "https://cursor.com/cli",
 	},
 	{
 		id: "opencode",
@@ -74,6 +84,7 @@ export const RUNTIME_LAUNCH_SUPPORTED_AGENT_IDS: readonly RuntimeAgentId[] = [
 	"cline",
 	"claude",
 	"codex",
+	"cursor",
 	"droid",
 	"kiro",
 	// "opencode",

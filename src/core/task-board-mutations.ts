@@ -7,6 +7,7 @@ import type {
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskImage,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "./api-contract";
 import { createUniqueTaskId } from "./task-id";
@@ -22,6 +23,7 @@ export interface RuntimeCreateTaskInput {
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	baseRef: string;
 	parentSessionId?: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
@@ -37,6 +39,7 @@ export interface RuntimeUpdateTaskInput {
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId | null;
 	clineSettings?: RuntimeTaskClineSettings | null;
+	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings | null;
 	baseRef: string;
 	parentSessionId?: string | null;
 	worktreeMode?: RuntimeTaskWorktreeMode | null;
@@ -65,6 +68,22 @@ function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings | null): Run
 		...(providerId ? { providerId } : {}),
 		...(modelId ? { modelId } : {}),
 		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+	};
+}
+
+function cloneTaskTerminalAgentModelOverrideSettings(
+	settings?: RuntimeTaskTerminalAgentModelOverrideSettings | null,
+): RuntimeTaskTerminalAgentModelOverrideSettings | undefined {
+	if (settings === undefined || settings === null) {
+		return undefined;
+	}
+	const modelId = settings.modelId.trim();
+	if (!modelId) {
+		return undefined;
+	}
+	return {
+		agentId: settings.agentId,
+		modelId,
 	};
 }
 
@@ -318,6 +337,13 @@ export function addTaskToColumn(
 		images: cloneTaskImages(input.images),
 		...(input.agentId ? { agentId: input.agentId } : {}),
 		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
+		...(input.terminalAgentModelOverrideSettings !== undefined
+			? {
+					terminalAgentModelOverrideSettings: cloneTaskTerminalAgentModelOverrideSettings(
+						input.terminalAgentModelOverrideSettings,
+					),
+				}
+			: {}),
 		baseRef,
 		worktreeMode: input.worktreeMode ?? "branch",
 		...(parentSessionId ? { parentSessionId } : {}),
@@ -660,6 +686,12 @@ export function updateTask(
 						: input.clineSettings === null
 							? undefined
 							: cloneTaskClineSettings(input.clineSettings),
+				terminalAgentModelOverrideSettings:
+					input.terminalAgentModelOverrideSettings === undefined
+						? cloneTaskTerminalAgentModelOverrideSettings(card.terminalAgentModelOverrideSettings)
+						: input.terminalAgentModelOverrideSettings === null
+							? undefined
+							: cloneTaskTerminalAgentModelOverrideSettings(input.terminalAgentModelOverrideSettings),
 				baseRef,
 				parentSessionId: nextParentSessionId,
 				worktreeMode: nextWorktreeMode,

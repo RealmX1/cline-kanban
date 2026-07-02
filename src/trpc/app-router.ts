@@ -99,6 +99,8 @@ import type {
 	RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkResponse,
 	RuntimeTaskWorkspaceInfoRequest,
 	RuntimeTaskWorkspaceInfoResponse,
+	RuntimeTerminalAgentModelSelectionOptionsRequest,
+	RuntimeTerminalAgentModelSelectionOptionsResponse,
 	RuntimeUpdateStatusResponse,
 	RuntimeWorkspaceChangesRequest,
 	RuntimeWorkspaceChangesResponse,
@@ -206,6 +208,8 @@ import {
 	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkResponseSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
 	runtimeTaskWorkspaceInfoResponseSchema,
+	runtimeTerminalAgentModelSelectionOptionsRequestSchema,
+	runtimeTerminalAgentModelSelectionOptionsResponseSchema,
 	runtimeUpdateStatusResponseSchema,
 	runtimeWorkspaceChangesRequestSchema,
 	runtimeWorkspaceChangesResponseSchema,
@@ -325,6 +329,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeClineProviderModelsRequest,
 		) => Promise<RuntimeClineProviderModelsResponse>;
+		getTerminalAgentModelSelectionOptions: (
+			scope: RuntimeTrpcWorkspaceScope | null,
+			input: RuntimeTerminalAgentModelSelectionOptionsRequest,
+		) => Promise<RuntimeTerminalAgentModelSelectionOptionsResponse>;
 		runClineProviderOAuthLogin: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeClineOauthLoginRequest,
@@ -643,6 +651,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeClineProviderModelsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getClineProviderModels(ctx.workspaceScope, input);
+			}),
+		getTerminalAgentModelSelectionOptions: t.procedure
+			.input(runtimeTerminalAgentModelSelectionOptionsRequestSchema)
+			.output(runtimeTerminalAgentModelSelectionOptionsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getTerminalAgentModelSelectionOptions(ctx.workspaceScope, input);
 			}),
 		getClineMcpAuthStatuses: t.procedure.output(runtimeClineMcpAuthStatusResponseSchema).query(async ({ ctx }) => {
 			return await ctx.runtimeApi.getClineMcpAuthStatuses(ctx.workspaceScope);

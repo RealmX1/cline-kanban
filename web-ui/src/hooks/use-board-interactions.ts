@@ -1032,6 +1032,7 @@ export function useBoardInteractions({
 					images: selection.card.images,
 					agentId: selection.card.agentId,
 					clineSettings: selection.card.clineSettings,
+					terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
 					baseRef: selection.card.baseRef,
 				});
 				return updated.updated ? updated.board : currentBoard;

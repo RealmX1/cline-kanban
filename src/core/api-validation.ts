@@ -34,6 +34,7 @@ import {
 	type RuntimeTaskTerminalRefreshRequest,
 	type RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
 	type RuntimeTaskWorkspaceInfoRequest,
+	type RuntimeTerminalAgentModelSelectionOptionsRequest,
 	type RuntimeTerminalWsClientMessage,
 	type RuntimeWorkspaceChangesRequest,
 	type RuntimeWorkspaceFileSearchRequest,
@@ -73,6 +74,7 @@ import {
 	runtimeTaskTerminalRefreshRequestSchema,
 	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
+	runtimeTerminalAgentModelSelectionOptionsRequestSchema,
 	runtimeTerminalWsClientMessageSchema,
 	runtimeWorkspaceChangesRequestSchema,
 	runtimeWorkspaceFileSearchRequestSchema,
@@ -249,6 +251,12 @@ export function parseTaskSessionStartRequest(value: unknown): RuntimeTaskSession
 		taskId,
 		baseRef,
 	};
+}
+
+export function parseTerminalAgentModelSelectionOptionsRequest(
+	value: unknown,
+): RuntimeTerminalAgentModelSelectionOptionsRequest {
+	return parseWithSchema(runtimeTerminalAgentModelSelectionOptionsRequestSchema, value);
 }
 
 export function parseTaskSessionStopRequest(value: unknown): RuntimeTaskSessionStopRequest {

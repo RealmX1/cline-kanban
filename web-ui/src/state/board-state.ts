@@ -1,12 +1,13 @@
 import type { DropResult } from "@hello-pangea/dnd";
+import { isKanbanCursorAgentModelId } from "@runtime-agent-catalog";
 import { createShortTaskId } from "@runtime-task-id";
 import * as runtimeTaskState from "@runtime-task-state";
-
 import { createInitialBoardData } from "@/data/board-data";
 import type {
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskClineSettings,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
 import { isAllowedCrossColumnCardMove, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
@@ -32,6 +33,7 @@ export interface TaskDraft {
 	images?: TaskImage[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	baseRef: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
 }
@@ -149,6 +151,33 @@ function normalizeTaskClineSettings(input: {
 	};
 }
 
+function normalizeTaskTerminalAgentModelOverrideSettings(
+	rawSettings: unknown,
+): RuntimeTaskTerminalAgentModelOverrideSettings | undefined {
+	if (!rawSettings || typeof rawSettings !== "object") {
+		return undefined;
+	}
+	const settings = rawSettings as {
+		agentId?: unknown;
+		modelId?: unknown;
+	};
+	const agentId =
+		settings.agentId === "claude" || settings.agentId === "codex" || settings.agentId === "cursor"
+			? settings.agentId
+			: null;
+	const modelId = typeof settings.modelId === "string" ? settings.modelId.trim() : "";
+	if (!agentId || !modelId) {
+		return undefined;
+	}
+	if (agentId === "cursor" && !isKanbanCursorAgentModelId(modelId)) {
+		return undefined;
+	}
+	return {
+		agentId,
+		modelId,
+	};
+}
+
 function normalizeCard(rawCard: unknown): BoardCard | null {
 	if (!rawCard || typeof rawCard !== "object") {
 		return null;
@@ -165,6 +194,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef?: unknown;
 		agentId?: unknown;
 		clineSettings?: unknown;
+		terminalAgentModelOverrideSettings?: unknown;
 		clineProviderId?: unknown;
 		clineModelId?: unknown;
 		clineReasoningEffort?: unknown;
@@ -192,6 +222,9 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		legacyModelId: card.clineModelId,
 		legacyReasoningEffort: card.clineReasoningEffort,
 	});
+	const terminalAgentModelOverrideSettings = normalizeTaskTerminalAgentModelOverrideSettings(
+		card.terminalAgentModelOverrideSettings,
+	);
 
 	const now = Date.now();
 
@@ -213,6 +246,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
+		...(terminalAgentModelOverrideSettings !== undefined ? { terminalAgentModelOverrideSettings } : {}),
 		...(parentSessionId ? { parentSessionId } : {}),
 		...(worktreeMode ? { worktreeMode } : {}),
 		...(prepFilePath ? { prepFilePath } : {}),
@@ -363,6 +397,7 @@ export function addTaskToColumnWithResult(
 			images: draft.images,
 			agentId: draft.agentId,
 			clineSettings: draft.clineSettings,
+			terminalAgentModelOverrideSettings: draft.terminalAgentModelOverrideSettings,
 			baseRef: draft.baseRef,
 			worktreeMode: draft.worktreeMode,
 		},
@@ -562,6 +597,7 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 							: undefined,
 				agentId: draft.agentId,
 				clineSettings: draft.clineSettings,
+				terminalAgentModelOverrideSettings: draft.terminalAgentModelOverrideSettings,
 				baseRef,
 				updatedAt: Date.now(),
 			};
@@ -593,6 +629,7 @@ export function updateTaskTitle(
 		images: selection.card.images,
 		agentId: selection.card.agentId,
 		clineSettings: selection.card.clineSettings,
+		terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
 		baseRef: selection.card.baseRef,
 	});
 }
@@ -624,6 +661,7 @@ export function applyTaskDetailClineSettingsSelection(
 		images: selection.card.images,
 		agentId: settings.agentId,
 		clineSettings: settings.clineSettings ?? undefined,
+		terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
 		baseRef: selection.card.baseRef,
 	});
 }
@@ -682,6 +720,7 @@ export function disableTaskAutoReview(board: BoardData, taskId: string): { board
 		images: selection.card.images,
 		agentId: selection.card.agentId,
 		clineSettings: selection.card.clineSettings,
+		terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
 		baseRef: selection.card.baseRef,
 	});
 }
