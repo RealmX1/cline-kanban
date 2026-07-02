@@ -214,6 +214,7 @@ export interface StartTaskSessionRequest {
 	workspaceId?: string;
 	projectPath?: string;
 	parentSessionId?: string;
+	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
 
 export interface StartShellSessionRequest {
@@ -1173,6 +1174,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			env: request.env,
 			workspaceId: request.workspaceId,
 			parentSessionId: request.parentSessionId,
+			terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 		});
 
 		const taskContextEnv = {

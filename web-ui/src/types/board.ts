@@ -5,6 +5,7 @@ import type {
 	RuntimeTaskClineSettings,
 	RuntimeTaskCommentEntry,
 	RuntimeTaskImage,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
 
@@ -50,6 +51,7 @@ export interface BoardCard {
 	taskCommentEntries?: TaskCommentEntry[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	baseRef: string;
 	parentSessionId?: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;

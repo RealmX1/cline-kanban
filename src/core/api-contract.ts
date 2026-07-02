@@ -2,6 +2,7 @@ import { z } from "zod";
 // Stage 4 全写侧反转：facet 为写时主真相源，`state` 降为 projectLegacyState(facets) 派生投影。
 // bundle-safe：session-activity 是零 Node 依赖的纯函数模块，其对 api-contract 仅 type-only import
 // （编译期擦除），故二者无运行时循环；本处取值 import 不会把任何 Node 依赖拖进浏览器 bundle。
+import { isKanbanCursorAgentModelId } from "./cursor-agent-models.js";
 import { projectLegacyState } from "./session-activity.js";
 import { resolveTaskTitle } from "./task-title.js";
 
@@ -79,8 +80,41 @@ export const runtimeSlashCommandsResponseSchema = z.object({
 });
 export type RuntimeSlashCommandsResponse = z.infer<typeof runtimeSlashCommandsResponseSchema>;
 
-export const runtimeAgentIdSchema = z.enum(["claude", "codex", "gemini", "opencode", "droid", "kiro", "cline"]);
+const runtimeTrimmedNonEmptyStringSchema = z
+	.string()
+	.transform((value) => value.trim())
+	.pipe(z.string().min(1));
+
+export const runtimeAgentIdSchema = z.enum([
+	"claude",
+	"codex",
+	"gemini",
+	"opencode",
+	"droid",
+	"kiro",
+	"cline",
+	"cursor",
+]);
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
+export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
+export type RuntimeTerminalAgentModelSelectionAgentId = z.infer<typeof runtimeTerminalAgentModelSelectionAgentIdSchema>;
+export const runtimeTaskTerminalAgentModelOverrideSettingsSchema = z
+	.object({
+		agentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+		modelId: runtimeTrimmedNonEmptyStringSchema,
+	})
+	.superRefine((settings, ctx) => {
+		if (settings.agentId === "cursor" && !isKanbanCursorAgentModelId(settings.modelId)) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["modelId"],
+				message: "Cursor agent model overrides must use auto, composer, or composer-* models.",
+			});
+		}
+	});
+export type RuntimeTaskTerminalAgentModelOverrideSettings = z.infer<
+	typeof runtimeTaskTerminalAgentModelOverrideSettingsSchema
+>;
 
 const runtimeBoardColumnIdEnum = z.enum(["backlog", "in_progress", "review", "validation", "trash"]);
 export const runtimeBoardColumnIdSchema = z.preprocess(
@@ -180,6 +214,7 @@ export const runtimeBoardCardSchema = z
 		taskCommentEntries: z.array(runtimeTaskCommentEntrySchema).optional(),
 		agentId: runtimeAgentIdSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
+		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		clineProviderId: z.string().optional(),
 		clineModelId: z.string().optional(),
 		clineReasoningEffort: runtimeLegacyTaskClineReasoningEffortSchema.optional(),
@@ -1248,11 +1283,38 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	rows: z.number().int().positive().optional(),
 	agentId: runtimeAgentIdSchema.optional(),
 	clineSettings: runtimeTaskClineSettingsSchema.optional(),
+	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 	parentSessionId: z.string().optional(),
 	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
 	prepFilePath: z.string().optional(),
 });
 export type RuntimeTaskSessionStartRequest = z.infer<typeof runtimeTaskSessionStartRequestSchema>;
+
+export const runtimeTerminalAgentModelSelectionOptionsRequestSchema = z.object({
+	agentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+});
+export type RuntimeTerminalAgentModelSelectionOptionsRequest = z.infer<
+	typeof runtimeTerminalAgentModelSelectionOptionsRequestSchema
+>;
+
+export const runtimeTerminalAgentModelSelectionOptionSchema = z.object({
+	modelId: z.string(),
+	label: z.string(),
+	description: z.string().optional(),
+	isCurrent: z.boolean().optional(),
+});
+export type RuntimeTerminalAgentModelSelectionOption = z.infer<typeof runtimeTerminalAgentModelSelectionOptionSchema>;
+
+export const runtimeTerminalAgentModelSelectionOptionsResponseSchema = z.object({
+	agentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+	defaultModelId: z.string().nullable(),
+	defaultLabel: z.string(),
+	options: z.array(runtimeTerminalAgentModelSelectionOptionSchema),
+	warning: z.string().optional(),
+});
+export type RuntimeTerminalAgentModelSelectionOptionsResponse = z.infer<
+	typeof runtimeTerminalAgentModelSelectionOptionsResponseSchema
+>;
 
 export const runtimeTaskSessionStartResponseSchema = z.object({
 	ok: z.boolean(),

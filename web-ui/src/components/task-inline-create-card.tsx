@@ -5,7 +5,11 @@ import { type Dispatch, type ReactElement, type SetStateAction, useCallback, use
 import { useHotkeys } from "react-hotkeys-hook";
 
 import { BranchSelectDropdown, type BranchSelectOption } from "@/components/branch-select-dropdown";
-import { TaskAgentModelPicker, useTaskAgentModelPicker } from "@/components/task-agent-model-picker";
+import {
+	TaskAgentModelPicker,
+	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
+	useTaskAgentModelPicker,
+} from "@/components/task-agent-model-picker";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control";
 import { Button } from "@/components/ui/button";
@@ -14,6 +18,7 @@ import type {
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskClineSettings,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
 import type { TaskAutoReviewMode, TaskImage } from "@/types";
@@ -80,6 +85,8 @@ export function TaskInlineCreateCard({
 	onAgentIdChange,
 	clineSettings,
 	onClineSettingsChange,
+	terminalAgentModelOverrideSettings,
+	onTerminalAgentModelOverrideSettingsChange,
 	defaultAgentId,
 	defaultProviderId,
 	defaultModelId,
@@ -114,6 +121,11 @@ export function TaskInlineCreateCard({
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
 	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
+	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
+	onTerminalAgentModelOverrideSettingsChange?: (
+		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
+		options?: TaskTerminalAgentModelOverrideSettingsChangeOptions,
+	) => void;
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
 	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
@@ -156,6 +168,9 @@ export function TaskInlineCreateCard({
 		providerModels,
 		isLoadingProviders,
 		isLoadingModels,
+		terminalAgentModelOptions,
+		terminalAgentDefaultModelId,
+		isLoadingTerminalAgentModels,
 		providerDefaultModels,
 	} = useTaskAgentModelPicker({
 		active: true,
@@ -345,13 +360,18 @@ export function TaskInlineCreateCard({
 						onAgentIdChange={onAgentIdChange}
 						clineSettings={clineSettings}
 						onClineSettingsChange={onClineSettingsChange}
+						terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
+						onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
 						agentOptions={agentOptions}
 						clineProviderOptions={clineProviderOptions}
 						clineModelOptions={clineModelOptions}
+						terminalAgentModelOptions={terminalAgentModelOptions}
+						terminalAgentDefaultModelId={terminalAgentDefaultModelId}
 						effectiveDefaultModelId={effectiveDefaultModelId}
 						providerModels={providerModels}
 						isLoadingProviders={isLoadingProviders}
 						isLoadingModels={isLoadingModels}
+						isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
 						defaultAgentId={defaultAgentId}
 						defaultProviderId={defaultProviderId}
 						defaultReasoningEffort={defaultReasoningEffort}

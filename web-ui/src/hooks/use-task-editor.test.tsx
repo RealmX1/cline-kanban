@@ -3,7 +3,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useTaskEditor } from "@/hooks/use-task-editor";
-import type { RuntimeAgentId, RuntimeTaskClineSettings, RuntimeTaskWorktreeMode } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeTaskClineSettings,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
+	RuntimeTaskWorktreeMode,
+} from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
@@ -43,6 +48,7 @@ interface HookSnapshot {
 	newTaskWorktreeMode: RuntimeTaskWorktreeMode;
 	newTaskAgentId: RuntimeAgentId | undefined;
 	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
+	newTaskTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
 	editTaskStartInPlanMode: boolean;
@@ -63,6 +69,10 @@ interface HookSnapshot {
 	setEditTaskAutoReviewMode: (value: TaskAutoReviewMode) => void;
 	setNewTaskAgentId: (value: RuntimeAgentId | undefined) => void;
 	setNewTaskClineSettings: (value: RuntimeTaskClineSettings | undefined) => void;
+	setNewTaskTerminalAgentModelOverrideSettings: (
+		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
+		options?: { rememberSelectionForFutureCreateTasks?: boolean },
+	) => void;
 }
 
 function requireSnapshot(snapshot: HookSnapshot | null): HookSnapshot {
@@ -81,6 +91,7 @@ function HookHarness({
 	defaultTaskBranchRef = "main",
 	defaultCreateTaskBranchRef = "main",
 	currentProjectId = "project-1",
+	selectedAgentId = null,
 }: {
 	initialBoard: BoardData;
 	onSnapshot: (snapshot: HookSnapshot) => void;
@@ -90,6 +101,7 @@ function HookHarness({
 	defaultTaskBranchRef?: string;
 	defaultCreateTaskBranchRef?: string;
 	currentProjectId?: string | null;
+	selectedAgentId?: RuntimeAgentId | null;
 }): null {
 	const [board, setBoard] = useState<BoardData>(initialBoard);
 	const [, setSelectedTaskId] = useState<string | null>(null);
@@ -101,7 +113,7 @@ function HookHarness({
 		defaultTaskBranchRef,
 		defaultCreateTaskBranchRef,
 		currentProjectId,
-		selectedAgentId: null,
+		selectedAgentId,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 	});
@@ -116,6 +128,7 @@ function HookHarness({
 			newTaskWorktreeMode: editor.newTaskWorktreeMode,
 			newTaskAgentId: editor.newTaskAgentId,
 			newTaskClineSettings: editor.newTaskClineSettings,
+			newTaskTerminalAgentModelOverrideSettings: editor.newTaskTerminalAgentModelOverrideSettings,
 			editingTaskId: editor.editingTaskId,
 			editTaskPrompt: editor.editTaskPrompt,
 			editTaskStartInPlanMode: editor.editTaskStartInPlanMode,
@@ -136,6 +149,7 @@ function HookHarness({
 			setEditTaskAutoReviewMode: editor.setEditTaskAutoReviewMode,
 			setNewTaskAgentId: editor.setNewTaskAgentId,
 			setNewTaskClineSettings: editor.setNewTaskClineSettings,
+			setNewTaskTerminalAgentModelOverrideSettings: editor.setNewTaskTerminalAgentModelOverrideSettings,
 		});
 	}, [
 		board,
@@ -156,12 +170,14 @@ function HookHarness({
 		editor.newTaskBranchRef,
 		editor.newTaskAgentId,
 		editor.newTaskClineSettings,
+		editor.newTaskTerminalAgentModelOverrideSettings,
 		editor.setEditTaskAutoReviewEnabled,
 		editor.setEditTaskAutoReviewMode,
 		editor.setEditTaskPrompt,
 		editor.setNewTaskImages,
 		editor.setNewTaskBranchRef,
 		editor.setNewTaskPrompt,
+		editor.setNewTaskTerminalAgentModelOverrideSettings,
 		onSnapshot,
 	]);
 
@@ -500,6 +516,115 @@ describe("useTaskEditor", () => {
 		expect(snapshot.newTaskClineSettings).toBeUndefined();
 		expect(snapshot.board.columns[0]?.cards[0]?.baseRef).toBe("main");
 		expect(snapshot.board.columns[0]?.cards.some((card) => card.prompt === "Create another task")).toBe(true);
+	});
+
+	it("remembers the create-task terminal agent model selection for the next task", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					selectedAgentId="cursor"
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskTerminalAgentModelOverrideSettings({
+				agentId: "cursor",
+				modelId: "auto",
+			});
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("First Cursor task");
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+
+		let snapshot = requireSnapshot(latestSnapshot);
+		expect(snapshot.board.columns[0]?.cards[0]?.terminalAgentModelOverrideSettings).toEqual({
+			agentId: "cursor",
+			modelId: "auto",
+		});
+		expect(snapshot.newTaskTerminalAgentModelOverrideSettings).toEqual({
+			agentId: "cursor",
+			modelId: "auto",
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+		});
+		expect(requireSnapshot(latestSnapshot).newTaskTerminalAgentModelOverrideSettings).toEqual({
+			agentId: "cursor",
+			modelId: "auto",
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Second Cursor task");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+
+		snapshot = requireSnapshot(latestSnapshot);
+		expect(snapshot.board.columns[0]?.cards.map((card) => card.terminalAgentModelOverrideSettings)).toEqual([
+			{ agentId: "cursor", modelId: "auto" },
+			{ agentId: "cursor", modelId: "auto" },
+		]);
+	});
+
+	it("does not clear a remembered terminal model selection when an agent switch clears stale task state", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					selectedAgentId="cursor"
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskTerminalAgentModelOverrideSettings({
+				agentId: "cursor",
+				modelId: "auto",
+			});
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskAgentId("claude");
+			requireSnapshot(latestSnapshot).setNewTaskTerminalAgentModelOverrideSettings(undefined, {
+				rememberSelectionForFutureCreateTasks: false,
+			});
+		});
+		await act(async () => {});
+
+		expect(requireSnapshot(latestSnapshot).newTaskTerminalAgentModelOverrideSettings).toBeUndefined();
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskAgentId("cursor");
+		});
+		await act(async () => {});
+
+		expect(requireSnapshot(latestSnapshot).newTaskTerminalAgentModelOverrideSettings).toEqual({
+			agentId: "cursor",
+			modelId: "auto",
+		});
 	});
 
 	it("defaults closed create dialogs to the current base ref instead of the last selected base ref", async () => {

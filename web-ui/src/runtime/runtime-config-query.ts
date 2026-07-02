@@ -30,6 +30,8 @@ import type {
 	RuntimeFeaturebaseTokenResponse,
 	RuntimeProjectShortcut,
 	RuntimeRunUpdateResponse,
+	RuntimeTerminalAgentModelSelectionAgentId,
+	RuntimeTerminalAgentModelSelectionOptionsResponse,
 	RuntimeUpdateStatusResponse,
 } from "@/runtime/types";
 
@@ -154,6 +156,14 @@ export async function fetchClineProviderModels(
 	const trpcClient = getRuntimeTrpcClient(workspaceId);
 	const response = await trpcClient.runtime.getClineProviderModels.query({ providerId });
 	return response.models;
+}
+
+export async function fetchTerminalAgentModelSelectionOptions(
+	workspaceId: string | null,
+	agentId: RuntimeTerminalAgentModelSelectionAgentId,
+): Promise<RuntimeTerminalAgentModelSelectionOptionsResponse> {
+	const trpcClient = getRuntimeTrpcClient(workspaceId);
+	return await trpcClient.runtime.getTerminalAgentModelSelectionOptions.query({ agentId });
 }
 
 export async function runClineProviderOauthLogin(

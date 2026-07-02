@@ -357,6 +357,8 @@ export default function App(): ReactElement {
 		setNewTaskAgentId,
 		newTaskClineSettings,
 		setNewTaskClineSettings,
+		newTaskTerminalAgentModelOverrideSettings,
+		setNewTaskTerminalAgentModelOverrideSettings,
 		editingTaskId,
 		editTaskPrompt,
 		setEditTaskPrompt,
@@ -375,6 +377,8 @@ export default function App(): ReactElement {
 		setEditTaskAgentId,
 		editTaskClineSettings,
 		setEditTaskClineSettings,
+		editTaskTerminalAgentModelOverrideSettings,
+		setEditTaskTerminalAgentModelOverrideSettings,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
@@ -863,6 +867,8 @@ export default function App(): ReactElement {
 			onAgentIdChange={setEditTaskAgentId}
 			clineSettings={editTaskClineSettings}
 			onClineSettingsChange={setEditTaskClineSettings}
+			terminalAgentModelOverrideSettings={editTaskTerminalAgentModelOverrideSettings}
+			onTerminalAgentModelOverrideSettingsChange={setEditTaskTerminalAgentModelOverrideSettings}
 			defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 			defaultProviderId={defaultTaskClineProviderId}
 			defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
@@ -1226,6 +1232,8 @@ export default function App(): ReactElement {
 					onAgentIdChange={setNewTaskAgentId}
 					clineSettings={newTaskClineSettings}
 					onClineSettingsChange={setNewTaskClineSettings}
+					terminalAgentModelOverrideSettings={newTaskTerminalAgentModelOverrideSettings}
+					onTerminalAgentModelOverrideSettingsChange={setNewTaskTerminalAgentModelOverrideSettings}
 					defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 					defaultProviderId={defaultTaskClineProviderId}
 					defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}

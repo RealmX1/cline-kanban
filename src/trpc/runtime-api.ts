@@ -49,6 +49,7 @@ import {
 	parseTaskSessionTransitionToReviewRequest,
 	parseTaskTerminalRefreshRequest,
 	parseTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
+	parseTerminalAgentModelSelectionOptionsRequest,
 } from "../core/api-validation";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveTaskTitle } from "../core/task-title.js";
@@ -56,6 +57,7 @@ import { openInBrowser } from "../server/browser";
 import { loadWorkspaceBoardById } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
+import { getTerminalAgentModelSelectionOptions } from "../terminal/terminal-agent-model-selection";
 import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
@@ -333,6 +335,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
 					parentSessionId: body.parentSessionId,
+					terminalAgentModelOverrideSettings:
+						body.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
+							? body.terminalAgentModelOverrideSettings
+							: undefined,
 				});
 
 				let nextSummary = summary;
@@ -436,6 +442,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
 					parentSessionId: undefined,
+					terminalAgentModelOverrideSettings:
+						card.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
+							? card.terminalAgentModelOverrideSettings
+							: undefined,
 				});
 				return {
 					ok: true,
@@ -756,6 +766,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		getClineProviderModels: async (_workspaceScope, input) => {
 			const body = parseClineProviderModelsRequest(input);
 			return await clineProviderService.getProviderModels(body.providerId);
+		},
+		getTerminalAgentModelSelectionOptions: async (_workspaceScope, input) => {
+			const body = parseTerminalAgentModelSelectionOptionsRequest(input);
+			return await getTerminalAgentModelSelectionOptions(body.agentId);
 		},
 		getClineMcpAuthStatuses: async (_workspaceScope) => {
 			const statuses = await clineMcpRuntimeService.getAuthStatuses();

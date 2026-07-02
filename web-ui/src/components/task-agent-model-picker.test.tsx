@@ -13,17 +13,21 @@ import type {
 
 const fetchClineProviderCatalogMock = vi.hoisted(() => vi.fn());
 const fetchClineProviderModelsMock = vi.hoisted(() => vi.fn());
+const fetchTerminalAgentModelSelectionOptionsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@runtime-agent-catalog", () => ({
+	KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID: "composer-2.5",
 	getRuntimeLaunchSupportedAgentCatalog: vi.fn(() => [
 		{ id: "cline", label: "Cline", binary: "cline" },
 		{ id: "claude", label: "Claude Code", binary: "claude" },
+		{ id: "cursor", label: "Cursor", binary: "cursor-agent" },
 	]),
 }));
 
 vi.mock("@/runtime/runtime-config-query", () => ({
 	fetchClineProviderCatalog: fetchClineProviderCatalogMock,
 	fetchClineProviderModels: fetchClineProviderModelsMock,
+	fetchTerminalAgentModelSelectionOptions: fetchTerminalAgentModelSelectionOptionsMock,
 }));
 
 function createProvider(
@@ -665,6 +669,88 @@ describe("TaskAgentModelPicker – agent icon selector", () => {
 
 		expect(onAgentIdChange).toHaveBeenCalledWith(undefined);
 		expect(onClineSettingsChange).toHaveBeenCalledWith(undefined);
+	});
+});
+
+describe("TaskAgentModelPicker – terminal agent model selector", () => {
+	it("shows Cursor's Kanban default as Composer 2.5 instead of the raw fast default", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={"cursor" as RuntimeAgentId}
+					onAgentIdChange={() => {}}
+					clineSettings={undefined}
+					onClineSettingsChange={() => {}}
+					terminalAgentModelOverrideSettings={undefined}
+					onTerminalAgentModelOverrideSettingsChange={() => {}}
+					agentOptions={[
+						{ value: "", label: "Cline" },
+						{ value: "cursor", label: "Cursor" },
+					]}
+					clineProviderOptions={[{ value: "", label: "Cline" }]}
+					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
+					terminalAgentModelOptions={[
+						{ value: "", label: "Default · Composer 2.5" },
+						{ value: "auto", label: "Auto" },
+						{ value: "composer-2.5-fast", label: "Composer 2.5 Fast" },
+					]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					isLoadingTerminalAgentModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+					defaultProviderId="cline"
+				/>,
+			),
+		);
+
+		expect(findButtonByAriaLabel("Default · Composer 2.5")).not.toBeNull();
+		expect(container.textContent).not.toContain("Default · Composer 2.5 Fast");
+	});
+
+	it("writes an explicit terminal agent model override when a non-default model is selected", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		const onTerminalAgentModelOverrideSettingsChange = vi.fn();
+
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={"cursor" as RuntimeAgentId}
+					onAgentIdChange={() => {}}
+					clineSettings={undefined}
+					onClineSettingsChange={() => {}}
+					terminalAgentModelOverrideSettings={undefined}
+					onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
+					agentOptions={[
+						{ value: "", label: "Cline" },
+						{ value: "cursor", label: "Cursor" },
+					]}
+					clineProviderOptions={[{ value: "", label: "Cline" }]}
+					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
+					terminalAgentModelOptions={[
+						{ value: "", label: "Default · Composer 2.5" },
+						{ value: "auto", label: "Auto" },
+					]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					isLoadingTerminalAgentModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+					defaultProviderId="cline"
+				/>,
+			),
+		);
+
+		const autoButton = findButtonByAriaLabel("Auto");
+		expect(autoButton).not.toBeNull();
+		await act(async () => {
+			autoButton?.click();
+		});
+
+		expect(onTerminalAgentModelOverrideSettingsChange).toHaveBeenCalledWith({
+			agentId: "cursor",
+			modelId: "auto",
+		});
 	});
 });
 

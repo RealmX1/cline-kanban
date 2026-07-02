@@ -1,4 +1,8 @@
-import type { RuntimeAgentId, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeTaskClineSettings,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
+} from "@/runtime/types";
 import {
 	LocalStorageKey,
 	readLocalStorageItem,
@@ -11,6 +15,7 @@ import {
 	runtimeAgentIdSchema,
 	runtimeTaskClineSettingsSchema,
 	runtimeTaskImageSchema,
+	runtimeTaskTerminalAgentModelOverrideSettingsSchema,
 } from "../../../src/core/api-contract";
 
 export interface TaskEditDraft {
@@ -23,6 +28,7 @@ export interface TaskEditDraft {
 	branchRef: string;
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	savedAt: number;
 }
 
@@ -72,6 +78,16 @@ function readClineSettings(value: unknown): RuntimeTaskClineSettings | undefined
 	return settings;
 }
 
+function readTerminalAgentModelOverrideSettings(
+	value: unknown,
+): RuntimeTaskTerminalAgentModelOverrideSettings | undefined {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const parsed = runtimeTaskTerminalAgentModelOverrideSettingsSchema.safeParse(value);
+	return parsed.success ? parsed.data : undefined;
+}
+
 function readTaskEditDraft(value: unknown): TaskEditDraft | null {
 	if (!isRecord(value)) {
 		return null;
@@ -94,6 +110,9 @@ function readTaskEditDraft(value: unknown): TaskEditDraft | null {
 		branchRef,
 		agentId: readOptionalAgentId(value.agentId),
 		clineSettings: readClineSettings(value.clineSettings),
+		terminalAgentModelOverrideSettings: readTerminalAgentModelOverrideSettings(
+			value.terminalAgentModelOverrideSettings,
+		),
 		savedAt: typeof value.savedAt === "number" ? value.savedAt : 0,
 	};
 }
@@ -163,6 +182,8 @@ export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">
 		draft.autoReviewMode === resolveTaskAutoReviewMode(task.autoReviewMode) &&
 		draft.branchRef === task.baseRef &&
 		draft.agentId === task.agentId &&
-		JSON.stringify(draft.clineSettings ?? null) === JSON.stringify(task.clineSettings ?? null)
+		JSON.stringify(draft.clineSettings ?? null) === JSON.stringify(task.clineSettings ?? null) &&
+		JSON.stringify(draft.terminalAgentModelOverrideSettings ?? null) ===
+			JSON.stringify(task.terminalAgentModelOverrideSettings ?? null)
 	);
 }
