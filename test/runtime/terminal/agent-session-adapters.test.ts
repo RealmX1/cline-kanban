@@ -3,8 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
-
-import { agentRendersTranscriptInline } from "../../../src/core/agent-catalog";
+import { agentRendersTranscriptInline, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "../../../src/core/agent-catalog";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
 
@@ -91,10 +90,45 @@ describe("agentRendersTranscriptInline", () => {
 	});
 
 	it("treats every non-Codex agent as alt-screen (not inline)", () => {
-		const nonInlineAgents: RuntimeAgentId[] = ["claude", "gemini", "opencode", "droid", "kiro", "cline"];
+		const nonInlineAgents: RuntimeAgentId[] = ["claude", "gemini", "opencode", "droid", "kiro", "cline", "cursor"];
 		for (const agentId of nonInlineAgents) {
 			expect(agentRendersTranscriptInline(agentId)).toBe(false);
 		}
+	});
+});
+
+describe("cursorAdapter", () => {
+	it("uses the Kanban Cursor default model instead of Cursor Agent's raw fast default", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-default-model",
+			agentId: "cursor" as RuntimeAgentId,
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			terminalAgentModelOverrideSettings: undefined,
+		});
+
+		const modelIndex = launch.args.indexOf("--model");
+		expect(modelIndex).toBeGreaterThan(-1);
+		expect(launch.args[modelIndex + 1]).toBe(KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID);
+		expect(launch.args).not.toContain("composer-2.5-fast");
+	});
+
+	it("uses an explicit Cursor model override when present", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-explicit-model",
+			agentId: "cursor" as RuntimeAgentId,
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			terminalAgentModelOverrideSettings: { agentId: "cursor", modelId: "auto" },
+		});
+
+		const modelIndex = launch.args.indexOf("--model");
+		expect(modelIndex).toBeGreaterThan(-1);
+		expect(launch.args[modelIndex + 1]).toBe("auto");
 	});
 });
 

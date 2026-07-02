@@ -1,4 +1,4 @@
-import { getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
+import { getRuntimeLaunchSupportedAgentCatalog, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "@runtime-agent-catalog";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -12,13 +12,19 @@ import {
 import { SearchSelectDropdown } from "@/components/search-select-dropdown";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
-import { fetchClineProviderCatalog, fetchClineProviderModels } from "@/runtime/runtime-config-query";
+import {
+	fetchClineProviderCatalog,
+	fetchClineProviderModels,
+	fetchTerminalAgentModelSelectionOptions,
+} from "@/runtime/runtime-config-query";
 import type {
 	RuntimeAgentId,
 	RuntimeClineProviderCatalogItem,
 	RuntimeClineProviderModel,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskClineSettings,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
+	RuntimeTerminalAgentModelSelectionAgentId,
 } from "@/runtime/types";
 
 // ---------------------------------------------------------------------------
@@ -42,12 +48,44 @@ export interface UseTaskAgentModelPickerResult {
 	agentOptions: Array<{ value: string; label: string }>;
 	clineProviderOptions: Array<{ value: string; label: string }>;
 	clineModelOptions: Array<{ value: string; label: string }>;
+	terminalAgentModelOptions: Array<{ value: string; label: string }>;
+	terminalAgentDefaultModelId: string | null;
 	effectiveDefaultModelId: string | null;
 	providerModels: RuntimeClineProviderModel[];
 	isLoadingProviders: boolean;
 	isLoadingModels: boolean;
+	isLoadingTerminalAgentModels: boolean;
 	/** Map of provider ID → its default model ID (from the provider catalog). */
 	providerDefaultModels: Record<string, string>;
+}
+
+export interface TaskTerminalAgentModelOverrideSettingsChangeOptions {
+	rememberSelectionForFutureCreateTasks?: boolean;
+}
+
+function isTerminalAgentModelSelectionAgentId(
+	agentId: RuntimeAgentId | null | undefined,
+): agentId is RuntimeTerminalAgentModelSelectionAgentId {
+	return agentId === "claude" || agentId === "codex" || agentId === "cursor";
+}
+
+function getFallbackTerminalAgentDefaultModelOption(agentId: RuntimeTerminalAgentModelSelectionAgentId): {
+	value: string;
+	label: string;
+	defaultModelId: string | null;
+} {
+	if (agentId === "cursor") {
+		return {
+			value: "",
+			label: "Default · Composer 2.5",
+			defaultModelId: KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
+		};
+	}
+	return {
+		value: "",
+		label: "Default",
+		defaultModelId: null,
+	};
 }
 
 export function useTaskAgentModelPicker({
@@ -61,8 +99,13 @@ export function useTaskAgentModelPicker({
 }: UseTaskAgentModelPickerInput): UseTaskAgentModelPickerResult {
 	const [providerCatalog, setProviderCatalog] = useState<RuntimeClineProviderCatalogItem[]>([]);
 	const [providerModels, setProviderModels] = useState<RuntimeClineProviderModel[]>([]);
+	const [terminalAgentModelOptions, setTerminalAgentModelOptions] = useState<Array<{ value: string; label: string }>>(
+		[],
+	);
+	const [terminalAgentDefaultModelId, setTerminalAgentDefaultModelId] = useState<string | null>(null);
 	const [isLoadingProviders, setIsLoadingProviders] = useState(false);
 	const [isLoadingModels, setIsLoadingModels] = useState(false);
+	const [isLoadingTerminalAgentModels, setIsLoadingTerminalAgentModels] = useState(false);
 
 	// Derive the effective agent: explicit override takes precedence, then the global default
 	const effectiveAgentId = agentId ?? defaultAgentId ?? null;
@@ -87,6 +130,53 @@ export function useTaskAgentModelPicker({
 			.finally(() => {
 				if (!cancelled) {
 					setIsLoadingProviders(false);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [active, effectiveAgentId, workspaceId]);
+
+	useEffect(() => {
+		if (!active || !isTerminalAgentModelSelectionAgentId(effectiveAgentId)) {
+			setTerminalAgentModelOptions([]);
+			setTerminalAgentDefaultModelId(null);
+			setIsLoadingTerminalAgentModels(false);
+			return;
+		}
+		let cancelled = false;
+		const fallbackDefaultOption = getFallbackTerminalAgentDefaultModelOption(effectiveAgentId);
+		setTerminalAgentModelOptions([fallbackDefaultOption]);
+		setTerminalAgentDefaultModelId(fallbackDefaultOption.defaultModelId);
+		setIsLoadingTerminalAgentModels(true);
+		void fetchTerminalAgentModelSelectionOptions(workspaceId, effectiveAgentId)
+			.then((response) => {
+				if (cancelled) {
+					return;
+				}
+				const defaultOption = {
+					value: "",
+					label: response.defaultLabel || fallbackDefaultOption.label,
+				};
+				const explicitOptions = response.options
+					.filter((option) => option.modelId.trim().length > 0)
+					.filter((option) => option.modelId !== response.defaultModelId)
+					.map((option) => ({
+						value: option.modelId,
+						label: option.label || option.modelId,
+					}));
+				setTerminalAgentDefaultModelId(response.defaultModelId);
+				setTerminalAgentModelOptions([defaultOption, ...explicitOptions]);
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setTerminalAgentModelOptions([fallbackDefaultOption]);
+					setTerminalAgentDefaultModelId(fallbackDefaultOption.defaultModelId);
+				}
+			})
+			.finally(() => {
+				if (!cancelled) {
+					setIsLoadingTerminalAgentModels(false);
 				}
 			});
 		return () => {
@@ -198,10 +288,13 @@ export function useTaskAgentModelPicker({
 		agentOptions,
 		clineProviderOptions,
 		clineModelOptions,
+		terminalAgentModelOptions,
+		terminalAgentDefaultModelId,
 		effectiveDefaultModelId,
 		providerModels,
 		isLoadingProviders,
 		isLoadingModels,
+		isLoadingTerminalAgentModels,
 		providerDefaultModels,
 	};
 }
@@ -228,13 +321,18 @@ export function TaskAgentModelPicker({
 	onAgentIdChange,
 	clineSettings,
 	onClineSettingsChange,
+	terminalAgentModelOverrideSettings,
+	onTerminalAgentModelOverrideSettingsChange,
 	agentOptions,
 	clineProviderOptions,
 	clineModelOptions,
+	terminalAgentModelOptions = [],
+	terminalAgentDefaultModelId = null,
 	effectiveDefaultModelId = null,
 	providerModels = [],
 	isLoadingProviders,
 	isLoadingModels,
+	isLoadingTerminalAgentModels = false,
 	onPopoverOpenChange,
 	defaultAgentId,
 	defaultProviderId,
@@ -245,13 +343,21 @@ export function TaskAgentModelPicker({
 	onAgentIdChange: (value: RuntimeAgentId | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
 	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
+	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
+	onTerminalAgentModelOverrideSettingsChange?: (
+		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
+		options?: TaskTerminalAgentModelOverrideSettingsChangeOptions,
+	) => void;
 	agentOptions: Array<{ value: string; label: string }>;
 	clineProviderOptions: Array<{ value: string; label: string }>;
 	clineModelOptions: Array<{ value: string; label: string }>;
+	terminalAgentModelOptions?: Array<{ value: string; label: string }>;
+	terminalAgentDefaultModelId?: string | null;
 	effectiveDefaultModelId?: string | null;
 	providerModels?: RuntimeClineProviderModel[];
 	isLoadingProviders: boolean;
 	isLoadingModels: boolean;
+	isLoadingTerminalAgentModels?: boolean;
 	onPopoverOpenChange?: (open: boolean) => void;
 	/** The default agent ID from runtimeConfig — used to decide if Cline pickers should show by default */
 	defaultAgentId?: RuntimeAgentId | null;
@@ -277,6 +383,7 @@ export function TaskAgentModelPicker({
 	// (either explicitly overridden to cline, or defaulting to cline)
 	const effectiveAgentId = agentId ?? defaultAgentId ?? null;
 	const showClineProviderPicker = effectiveAgentId === "cline";
+	const showTerminalAgentModelPicker = isTerminalAgentModelSelectionAgentId(effectiveAgentId);
 
 	// Show the Cline model picker when a provider is effectively selected
 	// (either explicitly overridden, or the global default provider is set)
@@ -394,8 +501,23 @@ export function TaskAgentModelPicker({
 				onClineSettingsChange?.(undefined);
 				setReasoningEffort("");
 			}
+			const nextEffectiveAgentId = (optionValue || defaultAgentId || null) as RuntimeAgentId | null;
+			if (
+				terminalAgentModelOverrideSettings !== undefined &&
+				terminalAgentModelOverrideSettings.agentId !== nextEffectiveAgentId
+			) {
+				onTerminalAgentModelOverrideSettingsChange?.(undefined, {
+					rememberSelectionForFutureCreateTasks: false,
+				});
+			}
 		},
-		[onAgentIdChange, onClineSettingsChange],
+		[
+			defaultAgentId,
+			onAgentIdChange,
+			onClineSettingsChange,
+			onTerminalAgentModelOverrideSettingsChange,
+			terminalAgentModelOverrideSettings,
+		],
 	);
 
 	useEffect(() => {
@@ -429,6 +551,12 @@ export function TaskAgentModelPicker({
 			selectedModelSupportsReasoningEffort,
 		],
 	);
+	const selectedTerminalAgentModelId =
+		isTerminalAgentModelSelectionAgentId(effectiveAgentId) &&
+		terminalAgentModelOverrideSettings?.agentId === effectiveAgentId &&
+		terminalAgentModelOverrideSettings.modelId !== terminalAgentDefaultModelId
+			? terminalAgentModelOverrideSettings.modelId
+			: "";
 
 	// When models finish loading and the currently selected model isn't in the
 	// options list, auto-select the first real model so the button never shows
@@ -605,6 +733,49 @@ export function TaskAgentModelPicker({
 							/>
 						</div>
 					) : null}
+				</div>
+			) : null}
+			{showTerminalAgentModelPicker ? (
+				<div className="flex flex-col gap-1">
+					<span className="text-[11px] text-text-secondary">
+						Model{isLoadingTerminalAgentModels ? " (loading\u2026)" : ""}
+					</span>
+					<div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Agent model">
+						{terminalAgentModelOptions.map((option) => {
+							const isSelectedModelOption = selectedTerminalAgentModelId === option.value;
+							return (
+								<Tooltip key={option.value || "default-terminal-agent-model"} content={option.label}>
+									<button
+										type="button"
+										aria-label={option.label}
+										aria-pressed={isSelectedModelOption}
+										className={cn(
+											"inline-flex h-8 items-center justify-center rounded-md border px-2 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-border-focus focus:ring-offset-1 focus:ring-offset-surface-0",
+											isSelectedModelOption
+												? "border-accent bg-accent/10 text-text-primary"
+												: "border-border-bright bg-surface-2 text-text-secondary hover:border-border-focus hover:bg-surface-3 hover:text-text-primary",
+										)}
+										disabled={isLoadingTerminalAgentModels && terminalAgentModelOptions.length <= 1}
+										onClick={() => {
+											if (!isTerminalAgentModelSelectionAgentId(effectiveAgentId)) {
+												return;
+											}
+											if (!option.value) {
+												onTerminalAgentModelOverrideSettingsChange?.(undefined);
+												return;
+											}
+											onTerminalAgentModelOverrideSettingsChange?.({
+												agentId: effectiveAgentId,
+												modelId: option.value,
+											});
+										}}
+									>
+										{option.label}
+									</button>
+								</Tooltip>
+							);
+						})}
+					</div>
 				</div>
 			) : null}
 		</div>

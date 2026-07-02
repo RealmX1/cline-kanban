@@ -2,12 +2,13 @@ import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-
+import { isKanbanCursorAgentModelId, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeHookEvent,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
 } from "../core/api-contract";
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
@@ -46,6 +47,7 @@ export interface AgentAdapterLaunchInput {
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	parentSessionId?: string;
+	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 }
 
 export type AgentOutputTransitionDetector = (
@@ -133,6 +135,45 @@ function hasCliOption(args: string[], optionName: string): boolean {
 		}
 	}
 	return false;
+}
+
+function removeCliOptionsWithValues(args: string[], optionNames: readonly string[]): string[] {
+	const optionNameSet = new Set(optionNames);
+	const nextArgs: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (optionNameSet.has(arg)) {
+			index += 1;
+			continue;
+		}
+		if (optionNames.some((optionName) => arg.startsWith(`${optionName}=`))) {
+			continue;
+		}
+		nextArgs.push(arg);
+	}
+	return nextArgs;
+}
+
+function setModelCliOption(args: string[], modelId: string): string[] {
+	const trimmedModelId = modelId.trim();
+	if (!trimmedModelId) {
+		return [...args];
+	}
+	return [...removeCliOptionsWithValues(args, ["--model", "-m"]), "--model", trimmedModelId];
+}
+
+function resolveTerminalAgentModelOverride(
+	input: AgentAdapterLaunchInput,
+	agentId: RuntimeTaskTerminalAgentModelOverrideSettings["agentId"],
+): string | null {
+	if (input.terminalAgentModelOverrideSettings?.agentId !== agentId) {
+		return null;
+	}
+	const modelId = input.terminalAgentModelOverrideSettings.modelId.trim();
+	if (agentId === "cursor" && !isKanbanCursorAgentModelId(modelId)) {
+		return null;
+	}
+	return modelId || null;
 }
 
 function hasCodexWorkingDirectoryOverride(args: string[]): boolean {
@@ -665,7 +706,8 @@ function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): str
 
 const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
-		const args = [...input.args];
+		const explicitModelId = resolveTerminalAgentModelOverride(input, "claude");
+		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {
 			CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1",
 			FORCE_HYPERLINK: "1",
@@ -689,7 +731,7 @@ const claudeAdapter: AgentSessionAdapter = {
 		// （全新与恢复）都落到看板预期的默认模型，并覆盖上述重建。仅在未显式指定 model 时注入，故按任务
 		// 指定的具体模型仍然优先。注意：只有 `--model` 这个「旗标」能解析 `default` 别名并压过 `--continue`
 		// 的重建；`ANTHROPIC_MODEL=default` 环境变量会被当成名为 "default" 的自定义模型（实测失效）。
-		if (!hasCliOption(args, "--model")) {
+		if (!explicitModelId && !hasCliOption(args, "--model")) {
 			args.push("--model", "default");
 		}
 		if (input.startInPlanMode) {
@@ -847,7 +889,8 @@ function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummar
 
 const codexAdapter: AgentSessionAdapter = {
 	async prepare(input) {
-		const codexArgs = [...input.args];
+		const explicitModelId = resolveTerminalAgentModelOverride(input, "codex");
+		const codexArgs = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
 		let deferredStartupInput: string | undefined;
@@ -931,6 +974,45 @@ const codexAdapter: AgentSessionAdapter = {
 			deferredStartupInput,
 			detectOutputTransition: codexPromptDetector,
 			shouldInspectOutputForTransition: shouldInspectCodexOutputForTransition,
+		};
+	},
+};
+
+const cursorAdapter: AgentSessionAdapter = {
+	async prepare(input) {
+		const explicitModelId = resolveTerminalAgentModelOverride(input, "cursor");
+		const args = setModelCliOption(input.args, explicitModelId ?? KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID);
+		const env: Record<string, string | undefined> = {};
+
+		if (!hasCliOption(args, "--workspace")) {
+			args.push("--workspace", input.cwd);
+		}
+
+		if (
+			input.autonomousModeEnabled &&
+			!input.startInPlanMode &&
+			!hasCliOption(args, "--force") &&
+			!hasCliOption(args, "--yolo")
+		) {
+			args.push("--force");
+		}
+
+		if (input.resumeFromTrash && !hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
+			args.push("--continue");
+		}
+
+		if (input.startInPlanMode && !hasCliOption(args, "--plan") && !hasCliOption(args, "--mode")) {
+			args.push("--plan");
+		}
+
+		const trimmed = prependTaskSessionGuidanceToPrompt(input).trim();
+		if (!input.resumeFromTrash && trimmed) {
+			args.push(trimmed);
+		}
+
+		return {
+			args,
+			env,
 		};
 	},
 };
@@ -1565,6 +1647,7 @@ const clineAdapter: AgentSessionAdapter = {
 const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	claude: claudeAdapter,
 	codex: codexAdapter,
+	cursor: cursorAdapter,
 	gemini: geminiAdapter,
 	opencode: opencodeAdapter,
 	droid: droidAdapter,

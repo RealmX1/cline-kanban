@@ -165,12 +165,9 @@ function performAttempt(
 	actions.schedule(delay);
 }
 
-// appliesTo：第一版覆盖 Claude Code + Codex。
+// appliesTo：当前覆盖 Claude Code + Codex。Cursor 已是可选 agent，但 connection-drop 续跑还
+// 需要补 Cursor 专属连接错误文案 / 提示符确认后再放行，避免误注入。
 //
-// TODO（第一序列 · Cursor Agent）：Cursor 当前不是 Kanban 可选 agent（agent-catalog.ts /
-//   runtimeAgentIdSchema 里没有 cursor）。一旦把 Cursor 注册为可选 agent，请在此放行
-//   `agentId === "cursor"`，并在 connection-error-patterns.ts 补 Cursor 的连接错误文案
-//   与（如需要）独立的提示符就绪正则。
 // TODO（第二序列 · droid / kiro 等）：用户主动使用这些终端 agent 时，在此追加对应
 //   agentId 即可——接入成本基本就是「appliesTo 放行 + 一组正则」。
 function appliesToAgent(agentId: RuntimeAgentId): boolean {

@@ -1,4 +1,4 @@
-import { Bot, Cpu, Wind } from "lucide-react";
+import { Bot, Cpu, MousePointer2, Wind } from "lucide-react";
 import type { ComponentType } from "react";
 
 import { ClaudeIcon, CodexIcon, GeminiIcon } from "@/components/ui/agent-brand-icons";
@@ -14,7 +14,7 @@ export type AgentIconComponent = ComponentType<{ size?: number | string; classNa
 /**
  * 每-agent 的角标视觉：一个可辨识的图标 + 一个着色 className（status-* / text-* 设计 token）。
  * 纯数据映射（无包装层），供任务卡左上角的 agent 纯图标角标使用。
- * claude/codex/cline/gemini 用真实品牌标（内联 SVG）；droid/kiro 暂用可辨识的 lucide 图标 + status 配色。
+ * claude/codex/cline/gemini 用真实品牌标（内联 SVG）；cursor/droid/kiro 暂用可辨识的 lucide 图标 + status 配色。
  */
 export interface AgentVisual {
 	Icon: AgentIconComponent;
@@ -26,6 +26,7 @@ const AGENT_VISUAL_BY_ID: Partial<Record<RuntimeAgentId, AgentVisual>> = {
 	codex: { Icon: CodexIcon, className: "text-text-primary" },
 	cline: { Icon: ClineIcon, className: "text-status-blue" },
 	gemini: { Icon: GeminiIcon, className: "text-status-purple" },
+	cursor: { Icon: MousePointer2, className: "text-status-green" },
 	droid: { Icon: Cpu, className: "text-status-red" },
 	kiro: { Icon: Wind, className: "text-status-gold" },
 };
