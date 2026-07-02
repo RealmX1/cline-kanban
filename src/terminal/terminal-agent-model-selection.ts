@@ -32,15 +32,16 @@ function deduplicateModelOptions(
 	return deduplicated;
 }
 
-function parseCodexModelCatalog(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
+export function parseCodexModelCatalog(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
 	const parsed = JSON.parse(stdout) as {
-		models?: Array<{ slug?: unknown; display_name?: unknown }>;
+		models?: Array<{ slug?: unknown; display_name?: unknown; visibility?: unknown }>;
 	};
 	const models = Array.isArray(parsed.models) ? parsed.models : [];
 	return deduplicateModelOptions(
 		models.flatMap((model): RuntimeTerminalAgentModelSelectionOption[] => {
 			const modelId = typeof model.slug === "string" ? model.slug.trim() : "";
-			if (!modelId) {
+			const visibility = typeof model.visibility === "string" ? model.visibility.trim() : "";
+			if (!modelId || visibility === "hide") {
 				return [];
 			}
 			const displayName = typeof model.display_name === "string" ? model.display_name.trim() : "";
