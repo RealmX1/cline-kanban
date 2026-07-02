@@ -145,6 +145,13 @@ export const runtimeTaskImageSchema = z.object({
 	name: z.string().optional(),
 });
 export type RuntimeTaskImage = z.infer<typeof runtimeTaskImageSchema>;
+export const runtimeTaskCommentEntrySchema = z.object({
+	taskCommentEntryId: z.string(),
+	commentText: z.string(),
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+export type RuntimeTaskCommentEntry = z.infer<typeof runtimeTaskCommentEntrySchema>;
 
 const runtimeLegacyTaskClineReasoningEffortSchema = z.enum(["default", "low", "medium", "high", "xhigh"]);
 
@@ -171,6 +178,30 @@ function normalizeRuntimeTaskClineSettings(input: {
 	};
 }
 
+function normalizeRuntimeTaskCommentEntries(
+	entries?: RuntimeTaskCommentEntry[],
+): RuntimeTaskCommentEntry[] | undefined {
+	if (!entries || entries.length === 0) {
+		return undefined;
+	}
+	const normalizedEntries = entries
+		.map((entry) => {
+			const taskCommentEntryId = entry.taskCommentEntryId.trim();
+			const commentText = entry.commentText.trim();
+			if (!taskCommentEntryId || !commentText) {
+				return null;
+			}
+			return {
+				taskCommentEntryId,
+				commentText,
+				createdAt: entry.createdAt,
+				updatedAt: entry.updatedAt,
+			};
+		})
+		.filter((entry): entry is RuntimeTaskCommentEntry => entry !== null);
+	return normalizedEntries.length > 0 ? normalizedEntries : undefined;
+}
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
@@ -180,6 +211,7 @@ export const runtimeBoardCardSchema = z
 		autoReviewEnabled: z.boolean().optional(),
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
+		taskCommentEntries: z.array(runtimeTaskCommentEntrySchema).optional(),
 		agentId: runtimeAgentIdSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
@@ -198,6 +230,7 @@ export const runtimeBoardCardSchema = z
 			clineProviderId: _legacyProviderId,
 			clineModelId: _legacyModelId,
 			clineReasoningEffort: _legacyReasoningEffort,
+			taskCommentEntries: rawTaskCommentEntries,
 			...card
 		}) => {
 			const clineSettings = normalizeRuntimeTaskClineSettings({
@@ -206,9 +239,11 @@ export const runtimeBoardCardSchema = z
 				clineModelId: _legacyModelId,
 				clineReasoningEffort: _legacyReasoningEffort,
 			});
+			const taskCommentEntries = normalizeRuntimeTaskCommentEntries(rawTaskCommentEntries);
 			return {
 				...card,
 				...(clineSettings !== undefined ? { clineSettings } : {}),
+				...(taskCommentEntries !== undefined ? { taskCommentEntries } : {}),
 				title: resolveTaskTitle(card.title, card.prompt),
 			};
 		},
@@ -1680,6 +1715,15 @@ export const runtimeGitCommitDiffFileSchema = z.object({
 });
 export type RuntimeGitCommitDiffFile = z.infer<typeof runtimeGitCommitDiffFileSchema>;
 
+export const runtimeGitCommitChangedFileMetadataSchema = z.object({
+	path: z.string(),
+	previousPath: z.string().optional(),
+	status: z.enum(["modified", "added", "deleted", "renamed"]),
+	additions: z.number(),
+	deletions: z.number(),
+});
+export type RuntimeGitCommitChangedFileMetadata = z.infer<typeof runtimeGitCommitChangedFileMetadataSchema>;
+
 export const runtimeGitCommitDiffRequestSchema = z.object({
 	commitHash: z.string(),
 	taskScope: runtimeTaskWorkspaceInfoRequestSchema.nullable().optional(),
@@ -1693,6 +1737,42 @@ export const runtimeGitCommitDiffResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeGitCommitDiffResponse = z.infer<typeof runtimeGitCommitDiffResponseSchema>;
+
+export const runtimeGitCommitChangedFileMetadataRequestSchema = z.object({
+	commitHash: z.string(),
+	taskScope: runtimeTaskWorkspaceInfoRequestSchema.nullable().optional(),
+});
+export type RuntimeGitCommitChangedFileMetadataRequest = z.infer<
+	typeof runtimeGitCommitChangedFileMetadataRequestSchema
+>;
+
+export const runtimeGitCommitChangedFileMetadataResponseSchema = z.object({
+	ok: z.boolean(),
+	commitHash: z.string(),
+	files: z.array(runtimeGitCommitChangedFileMetadataSchema),
+	error: z.string().optional(),
+});
+export type RuntimeGitCommitChangedFileMetadataResponse = z.infer<
+	typeof runtimeGitCommitChangedFileMetadataResponseSchema
+>;
+
+export const runtimeGitCommitFileDiffPatchRequestSchema = z.object({
+	commitHash: z.string(),
+	path: z.string(),
+	previousPath: z.string().optional(),
+	taskScope: runtimeTaskWorkspaceInfoRequestSchema.nullable().optional(),
+});
+export type RuntimeGitCommitFileDiffPatchRequest = z.infer<typeof runtimeGitCommitFileDiffPatchRequestSchema>;
+
+export const runtimeGitCommitFileDiffPatchResponseSchema = z.object({
+	ok: z.boolean(),
+	commitHash: z.string(),
+	path: z.string(),
+	previousPath: z.string().optional(),
+	patch: z.string(),
+	error: z.string().optional(),
+});
+export type RuntimeGitCommitFileDiffPatchResponse = z.infer<typeof runtimeGitCommitFileDiffPatchResponseSchema>;
 
 export const runtimeGitRefsResponseSchema = z.object({
 	ok: z.boolean(),

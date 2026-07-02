@@ -3,6 +3,7 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
+	RuntimeTaskCommentEntry,
 	RuntimeTaskImage,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -12,6 +13,7 @@ export type BoardColumnId = RuntimeBoardColumnId;
 
 export type TaskAutoReviewMode = RuntimeTaskAutoReviewMode;
 export type TaskImage = RuntimeTaskImage;
+export type TaskCommentEntry = RuntimeTaskCommentEntry;
 
 export const DEFAULT_TASK_AUTO_REVIEW_MODE: TaskAutoReviewMode = "commit";
 
@@ -46,6 +48,7 @@ export interface BoardCard {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
+	taskCommentEntries?: TaskCommentEntry[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;

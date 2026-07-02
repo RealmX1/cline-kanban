@@ -74,7 +74,7 @@ import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { saveWorkspaceState } from "@/runtime/workspace-state-query";
-import { applyTaskDetailClineSettingsChange, findCardSelection } from "@/state/board-state";
+import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
 import {
 	getTaskWorkspaceInfo,
 	getTaskWorkspaceSnapshot,
@@ -82,7 +82,7 @@ import {
 	resetWorkspaceMetadataStore,
 } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import type { BoardData } from "@/types";
+import type { BoardData, TaskCommentEntry } from "@/types";
 
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
@@ -824,6 +824,16 @@ export default function App(): ReactElement {
 		[defaultTaskClineProviderId, runtimeProjectConfig, selectedCard, setBoard],
 	);
 
+	const handleTaskCommentEntriesChange = useCallback(
+		(taskId: string, taskCommentEntries: TaskCommentEntry[]) => {
+			setBoard((currentBoard) => {
+				const result = updateTaskCommentEntries(currentBoard, taskId, taskCommentEntries);
+				return result.updated ? result.board : currentBoard;
+			});
+		},
+		[setBoard],
+	);
+
 	const handleCreateDialogOpenChange = useCallback(
 		(open: boolean) => {
 			if (!open) {
@@ -1162,6 +1172,7 @@ export default function App(): ReactElement {
 									isDocumentVisible={isDocumentVisible}
 									onClineSettingsSaved={refreshRuntimeProjectConfig}
 									onTaskClineSettingsChanged={handleClineTaskSettingsChangedForTask}
+									onTaskCommentEntriesChange={handleTaskCommentEntriesChange}
 								/>
 							</div>
 						) : null}

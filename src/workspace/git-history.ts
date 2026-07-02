@@ -1,6 +1,9 @@
 import type {
 	RuntimeGitCommit,
+	RuntimeGitCommitChangedFileMetadata,
+	RuntimeGitCommitChangedFileMetadataResponse,
 	RuntimeGitCommitDiffResponse,
+	RuntimeGitCommitFileDiffPatchResponse,
 	RuntimeGitLogResponse,
 	RuntimeGitRef,
 	RuntimeGitRefsResponse,
@@ -13,6 +16,16 @@ const LOG_RECORD_SEPARATOR = "\x1e";
 const LOG_FORMAT = ["%H", "%h", "%an", "%ae", "%aI", "%s", "%P"].join(LOG_FIELD_SEPARATOR);
 
 type CommitRelation = NonNullable<RuntimeGitCommit["relation"]>;
+
+async function resolveGitRepositoryRoot(
+	cwd: string,
+): Promise<{ ok: true; repoRoot: string } | { ok: false; error: string }> {
+	const repoRootResult = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+	if (!repoRootResult.ok || !repoRootResult.stdout) {
+		return { ok: false, error: "No git repository detected." };
+	}
+	return { ok: true, repoRoot: repoRootResult.stdout };
+}
 
 function parseCommitRecord(record: string): RuntimeGitCommit | null {
 	const fields = record.split(LOG_FIELD_SEPARATOR);
@@ -43,11 +56,11 @@ export async function getGitLog(options: {
 }): Promise<RuntimeGitLogResponse> {
 	const { cwd, ref, refs, maxCount = 200, skip = 0 } = options;
 
-	const repoRootResult = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
-	if (!repoRootResult.ok || !repoRootResult.stdout) {
-		return { ok: false, commits: [], totalCount: 0, error: "No git repository detected." };
+	const repoRootResult = await resolveGitRepositoryRoot(cwd);
+	if (!repoRootResult.ok) {
+		return { ok: false, commits: [], totalCount: 0, error: repoRootResult.error };
 	}
-	const repoRoot = repoRootResult.stdout;
+	const repoRoot = repoRootResult.repoRoot;
 	const requestedRefs = normalizeRequestedRefs(refs, ref);
 
 	const logArgs = [
@@ -116,11 +129,11 @@ function parseTrackCounts(trackDescriptor: string | null): { ahead?: number; beh
 }
 
 export async function getGitRefs(cwd: string): Promise<RuntimeGitRefsResponse> {
-	const repoRootResult = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
-	if (!repoRootResult.ok || !repoRootResult.stdout) {
-		return { ok: false, refs: [], error: "No git repository detected." };
+	const repoRootResult = await resolveGitRepositoryRoot(cwd);
+	if (!repoRootResult.ok) {
+		return { ok: false, refs: [], error: repoRootResult.error };
 	}
-	const repoRoot = repoRootResult.stdout;
+	const repoRoot = repoRootResult.repoRoot;
 
 	const [headResult, branchResult, headRefResult] = await Promise.all([
 		runGit(repoRoot, ["rev-parse", "HEAD"]),
@@ -361,6 +374,83 @@ function parseCommitNumstatEntries(output: string): CommitDiffStatEntry[] {
 	return entries;
 }
 
+function getCommitDiffEntryKey(path: string, previousPath?: string): string {
+	return previousPath ? `${previousPath}\0${path}` : path;
+}
+
+function mergeCommitChangedFileMetadata(
+	nameStatusEntries: Array<{
+		path: string;
+		previousPath?: string;
+		status: "modified" | "added" | "deleted" | "renamed";
+	}>,
+	numstatEntries: CommitDiffStatEntry[],
+): RuntimeGitCommitChangedFileMetadata[] {
+	const filesByKey = new Map<string, RuntimeGitCommitChangedFileMetadata>();
+
+	for (const entry of nameStatusEntries) {
+		filesByKey.set(getCommitDiffEntryKey(entry.path, entry.previousPath), {
+			path: entry.path,
+			previousPath: entry.previousPath,
+			status: entry.status,
+			additions: 0,
+			deletions: 0,
+		});
+	}
+
+	for (const entry of numstatEntries) {
+		const key = getCommitDiffEntryKey(entry.path, entry.previousPath);
+		const existing = filesByKey.get(key);
+		if (existing) {
+			existing.additions = entry.additions;
+			existing.deletions = entry.deletions;
+			continue;
+		}
+		filesByKey.set(key, {
+			path: entry.path,
+			previousPath: entry.previousPath,
+			status: entry.previousPath ? "renamed" : "modified",
+			additions: entry.additions,
+			deletions: entry.deletions,
+		});
+	}
+
+	const files = Array.from(filesByKey.values());
+	files.sort((a, b) => a.path.localeCompare(b.path));
+	return files;
+}
+
+async function getCommitChangedFileMetadataFromRepository(
+	repoRoot: string,
+	commitHash: string,
+): Promise<
+	| { ok: true; files: RuntimeGitCommitChangedFileMetadata[] }
+	| { ok: false; files: RuntimeGitCommitChangedFileMetadata[]; error: string }
+> {
+	const [nameStatusResult, numstatResult] = await Promise.all([
+		runGit(repoRoot, ["diff-tree", "--root", "--no-commit-id", "-r", "-M", "--name-status", "-z", commitHash]),
+		runGit(repoRoot, ["diff-tree", "--root", "--no-commit-id", "-r", "-M", "--numstat", "-z", commitHash]),
+	]);
+
+	if (!nameStatusResult.ok || !numstatResult.ok) {
+		return {
+			ok: false,
+			files: [],
+			error:
+				nameStatusResult.error ??
+				numstatResult.error ??
+				`Failed to read changed file metadata for commit ${commitHash}.`,
+		};
+	}
+
+	const nameStatusEntries = parseCommitNameStatusEntries(nameStatusResult.stdout);
+	const numstatEntries = parseCommitNumstatEntries(numstatResult.stdout);
+	return {
+		ok: true,
+		files: mergeCommitChangedFileMetadata(nameStatusEntries, numstatEntries),
+	};
+}
+
 function parseCommitPatchEntries(output: string): Array<{
 	path: string;
 	previousPath?: string;
@@ -394,64 +484,101 @@ function parseCommitPatchEntries(output: string): Array<{
 	return entries;
 }
 
+export async function getCommitChangedFileMetadata(options: {
+	cwd: string;
+	commitHash: string;
+}): Promise<RuntimeGitCommitChangedFileMetadataResponse> {
+	const { cwd, commitHash } = options;
+
+	const repoRootResult = await resolveGitRepositoryRoot(cwd);
+	if (!repoRootResult.ok) {
+		return { ok: false, commitHash, files: [], error: repoRootResult.error };
+	}
+
+	const metadataResult = await getCommitChangedFileMetadataFromRepository(repoRootResult.repoRoot, commitHash);
+	if (!metadataResult.ok) {
+		return { ok: false, commitHash, files: [], error: metadataResult.error };
+	}
+	return { ok: true, commitHash, files: metadataResult.files };
+}
+
+export async function getCommitFileDiffPatch(options: {
+	cwd: string;
+	commitHash: string;
+	path: string;
+	previousPath?: string;
+}): Promise<RuntimeGitCommitFileDiffPatchResponse> {
+	const { cwd, commitHash, path, previousPath } = options;
+
+	const repoRootResult = await resolveGitRepositoryRoot(cwd);
+	if (!repoRootResult.ok) {
+		return { ok: false, commitHash, path, previousPath, patch: "", error: repoRootResult.error };
+	}
+
+	const pathspecs = previousPath && previousPath !== path ? [previousPath, path] : [path];
+	const diffResult = await runGit(
+		repoRootResult.repoRoot,
+		["show", "--format=", "--find-renames", "--patch", "--diff-algorithm=histogram", commitHash, "--", ...pathspecs],
+		{ trimStdout: false },
+	);
+
+	if (!diffResult.ok) {
+		return {
+			ok: false,
+			commitHash,
+			path,
+			previousPath,
+			patch: "",
+			error: diffResult.error ?? "Failed to read file diff.",
+		};
+	}
+
+	return {
+		ok: true,
+		commitHash,
+		path,
+		previousPath,
+		patch: diffResult.stdout,
+	};
+}
+
 export async function getCommitDiff(options: {
 	cwd: string;
 	commitHash: string;
 }): Promise<RuntimeGitCommitDiffResponse> {
 	const { cwd, commitHash } = options;
 
-	const repoRootResult = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
-	if (!repoRootResult.ok || !repoRootResult.stdout) {
-		return { ok: false, commitHash, files: [], error: "No git repository detected." };
+	const repoRootResult = await resolveGitRepositoryRoot(cwd);
+	if (!repoRootResult.ok) {
+		return { ok: false, commitHash, files: [], error: repoRootResult.error };
 	}
-	const repoRoot = repoRootResult.stdout;
+	const repoRoot = repoRootResult.repoRoot;
 
-	const [nameStatusResult, numstatResult, diffResult] = await Promise.all([
-		runGit(repoRoot, ["diff-tree", "--root", "--no-commit-id", "-r", "-M", "--name-status", "-z", commitHash]),
-		runGit(repoRoot, ["diff-tree", "--root", "--no-commit-id", "-r", "-M", "--numstat", "-z", commitHash]),
+	const [changedFileMetadata, diffResult] = await Promise.all([
+		getCommitChangedFileMetadataFromRepository(repoRoot, commitHash),
 		runGit(repoRoot, ["show", "--format=", "--find-renames", "--patch", "--diff-algorithm=histogram", commitHash], {
 			trimStdout: false,
 		}),
 	]);
 
+	if (!changedFileMetadata.ok) {
+		return { ok: false, commitHash, files: [], error: changedFileMetadata.error };
+	}
+	if (!diffResult.ok) {
+		return { ok: false, commitHash, files: [], error: diffResult.error ?? "Failed to read commit diff." };
+	}
+
 	const filesByKey = new Map<string, RuntimeGitCommitDiffResponse["files"][number]>();
-	const getEntryKey = (path: string, previousPath?: string): string =>
-		previousPath ? `${previousPath}\0${path}` : path;
-
-	const nameStatusEntries = nameStatusResult.ok ? parseCommitNameStatusEntries(nameStatusResult.stdout) : [];
-	for (const entry of nameStatusEntries) {
-		filesByKey.set(getEntryKey(entry.path, entry.previousPath), {
-			path: entry.path,
-			previousPath: entry.previousPath,
-			status: entry.status,
-			additions: 0,
-			deletions: 0,
+	for (const file of changedFileMetadata.files) {
+		filesByKey.set(getCommitDiffEntryKey(file.path, file.previousPath), {
+			...file,
 			patch: "",
 		});
 	}
 
-	const numstatEntries = numstatResult.ok ? parseCommitNumstatEntries(numstatResult.stdout) : [];
-	for (const entry of numstatEntries) {
-		const key = getEntryKey(entry.path, entry.previousPath);
-		const existing = filesByKey.get(key);
-		if (existing) {
-			existing.additions = entry.additions;
-			existing.deletions = entry.deletions;
-			continue;
-		}
-		filesByKey.set(key, {
-			path: entry.path,
-			previousPath: entry.previousPath,
-			status: entry.previousPath ? "renamed" : "modified",
-			additions: entry.additions,
-			deletions: entry.deletions,
-			patch: "",
-		});
-	}
-
-	const patchEntries = diffResult.ok ? parseCommitPatchEntries(diffResult.stdout) : [];
+	const patchEntries = parseCommitPatchEntries(diffResult.stdout);
 	for (const entry of patchEntries) {
-		const key = getEntryKey(entry.path, entry.previousPath);
+		const key = getCommitDiffEntryKey(entry.path, entry.previousPath);
 		const existing = filesByKey.get(key);
 		if (existing) {
 			existing.patch = entry.patch;

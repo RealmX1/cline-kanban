@@ -48,8 +48,12 @@ import type {
 	RuntimeFeaturebaseTokenResponse,
 	RuntimeGitCheckoutRequest,
 	RuntimeGitCheckoutResponse,
+	RuntimeGitCommitChangedFileMetadataRequest,
+	RuntimeGitCommitChangedFileMetadataResponse,
 	RuntimeGitCommitDiffRequest,
 	RuntimeGitCommitDiffResponse,
+	RuntimeGitCommitFileDiffPatchRequest,
+	RuntimeGitCommitFileDiffPatchResponse,
 	RuntimeGitDiscardResponse,
 	RuntimeGitLogRequest,
 	RuntimeGitLogResponse,
@@ -157,8 +161,12 @@ import {
 	runtimeFeaturebaseTokenResponseSchema,
 	runtimeGitCheckoutRequestSchema,
 	runtimeGitCheckoutResponseSchema,
+	runtimeGitCommitChangedFileMetadataRequestSchema,
+	runtimeGitCommitChangedFileMetadataResponseSchema,
 	runtimeGitCommitDiffRequestSchema,
 	runtimeGitCommitDiffResponseSchema,
+	runtimeGitCommitFileDiffPatchRequestSchema,
+	runtimeGitCommitFileDiffPatchResponseSchema,
 	runtimeGitDiscardResponseSchema,
 	runtimeGitLogRequestSchema,
 	runtimeGitLogResponseSchema,
@@ -422,6 +430,14 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeGitCommitDiffRequest,
 		) => Promise<RuntimeGitCommitDiffResponse>;
+		loadCommitChangedFileMetadata: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGitCommitChangedFileMetadataRequest,
+		) => Promise<RuntimeGitCommitChangedFileMetadataResponse>;
+		loadCommitFileDiffPatch: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGitCommitFileDiffPatchRequest,
+		) => Promise<RuntimeGitCommitFileDiffPatchResponse>;
 	};
 	projectsApi: {
 		listProjects: (preferredWorkspaceId: string | null) => Promise<RuntimeProjectsResponse>;
@@ -814,6 +830,18 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeGitCommitDiffResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadCommitDiff(ctx.workspaceScope, input);
+			}),
+		getCommitChangedFileMetadata: workspaceProcedure
+			.input(runtimeGitCommitChangedFileMetadataRequestSchema)
+			.output(runtimeGitCommitChangedFileMetadataResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.loadCommitChangedFileMetadata(ctx.workspaceScope, input);
+			}),
+		getCommitFileDiffPatch: workspaceProcedure
+			.input(runtimeGitCommitFileDiffPatchRequestSchema)
+			.output(runtimeGitCommitFileDiffPatchResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.loadCommitFileDiffPatch(ctx.workspaceScope, input);
 			}),
 	}),
 	projects: t.router({

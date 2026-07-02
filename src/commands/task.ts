@@ -404,6 +404,7 @@ function formatTaskRecord(
 		startInPlanMode: task.startInPlanMode,
 		autoReviewEnabled: task.autoReviewEnabled === true,
 		autoReviewMode: task.autoReviewMode ?? "commit",
+		taskCommentEntries: task.taskCommentEntries ?? [],
 		...(task.agentId ? { agentId: task.agentId } : {}),
 		...formatTaskClineSettings(task.clineSettings),
 		createdAt: task.createdAt,

@@ -15,12 +15,14 @@ const {
 	mockDiffViewerPanel,
 	mockClineAppendToDraft,
 	mockClineSendText,
+	mockPromptLibraryPanel,
 } = vi.hoisted(() => ({
 	mockAgentTerminalPanel: vi.fn((_props: { panelBackgroundColor?: string; terminalBackgroundColor?: string }) => null),
 	mockClineAgentChatPanel: vi.fn((..._args: unknown[]) => null),
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
 	mockClineAppendToDraft: vi.fn(),
 	mockClineSendText: vi.fn(async () => {}),
+	mockPromptLibraryPanel: vi.fn((_props: unknown) => null),
 }));
 
 vi.mock("react-hotkeys-hook", () => ({
@@ -59,6 +61,13 @@ vi.mock("@/components/detail-panels/diff-viewer-panel", () => ({
 
 vi.mock("@/components/detail-panels/file-tree-panel", () => ({
 	FileTreePanel: () => <div data-testid="file-tree-panel" />,
+}));
+
+vi.mock("@/components/detail-panels/prompt-library-panel", () => ({
+	PromptLibraryPanel: (props: { headerContent?: ReactNode }) => {
+		mockPromptLibraryPanel(props);
+		return <div data-testid="prompt-library-panel">{props.headerContent}</div>;
+	},
 }));
 
 vi.mock("@/resize/resizable-bottom-pane", () => ({
@@ -217,6 +226,7 @@ describe("CardDetailView", () => {
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();
 		mockClineSendText.mockClear();
+		mockPromptLibraryPanel.mockClear();
 		mockUseRuntimeWorkspaceChanges.mockReturnValue({
 			changes: {
 				files: [
@@ -244,6 +254,7 @@ describe("CardDetailView", () => {
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();
 		mockClineSendText.mockClear();
+		mockPromptLibraryPanel.mockClear();
 		vi.restoreAllMocks();
 		container.remove();
 		if (previousActEnvironment === undefined) {
@@ -388,6 +399,75 @@ describe("CardDetailView", () => {
 		expect(getDiffModeButton("Last Turn").getAttribute("style")).toContain(
 			"background-color: color-mix(in srgb, var(--color-surface-3) 80%, var(--color-text-primary))",
 		);
+	});
+
+	it("switches the top-right detail utility panel from prompts to task comments and saves a new comment", async () => {
+		const onTaskCommentEntriesChange = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onTaskCommentEntriesChange={onTaskCommentEntriesChange}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.querySelector('[data-testid="prompt-library-panel"]')).toBeInstanceOf(HTMLDivElement);
+		const commentsTab = Array.from(container.querySelectorAll("button")).find(
+			(button) => button.getAttribute("role") === "tab" && button.textContent?.trim() === "Comments",
+		);
+		expect(commentsTab).toBeInstanceOf(HTMLButtonElement);
+		if (!(commentsTab instanceof HTMLButtonElement)) {
+			throw new Error("Expected a Comments tab.");
+		}
+
+		await act(async () => {
+			commentsTab.click();
+		});
+
+		const textarea = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Write a task comment..."]');
+		expect(textarea).toBeInstanceOf(HTMLTextAreaElement);
+		if (!(textarea instanceof HTMLTextAreaElement)) {
+			throw new Error("Expected a task comment textarea.");
+		}
+
+		await act(async () => {
+			const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+			valueSetter?.call(textarea, "Investigate this before final validation.");
+			textarea.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+
+		const addButton = Array.from(container.querySelectorAll("button")).find(
+			(button) => button.textContent?.trim() === "Add comment",
+		);
+		expect(addButton).toBeInstanceOf(HTMLButtonElement);
+		if (!(addButton instanceof HTMLButtonElement)) {
+			throw new Error("Expected an Add comment button.");
+		}
+
+		await act(async () => {
+			addButton.click();
+		});
+
+		expect(onTaskCommentEntriesChange).toHaveBeenCalledTimes(1);
+		expect(onTaskCommentEntriesChange.mock.calls[0]?.[0]).toBe("task-1");
+		expect(onTaskCommentEntriesChange.mock.calls[0]?.[1]).toEqual([
+			expect.objectContaining({
+				commentText: "Investigate this before final validation.",
+			}),
+		]);
 	});
 
 	it("closes git history before handling other Escape behavior", async () => {

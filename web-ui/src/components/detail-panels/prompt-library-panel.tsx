@@ -1,5 +1,5 @@
 import { CornerDownLeft, Globe, Plus, Trash2 } from "lucide-react";
-import { useLayoutEffect, useRef } from "react";
+import { type ReactNode, useLayoutEffect, useRef } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -87,16 +87,20 @@ function PromptRow({
 export function PromptLibraryPanel({
 	taskId,
 	onFillInput,
+	headerContent,
 }: {
 	taskId: string;
 	onFillInput: (text: string) => void;
+	headerContent?: ReactNode;
 }): React.ReactElement {
 	const { prompts, addPrompt, updatePromptText, removePrompt, setPromptScope } = usePromptLibrary(taskId);
 
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
 			<div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
-				<span className="text-xs font-medium uppercase tracking-wide text-text-secondary">Prompts</span>
+				{headerContent ?? (
+					<span className="text-xs font-medium uppercase tracking-wide text-text-secondary">Prompts</span>
+				)}
 				<Button variant="ghost" size="xs" icon={<Plus size={14} />} onClick={addPrompt}>
 					Add
 				</Button>

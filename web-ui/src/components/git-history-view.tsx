@@ -228,6 +228,9 @@ export function GitHistoryView({
 				errorMessage={gitHistory.diffErrorMessage}
 				selectedPath={gitHistory.selectedDiffPath}
 				onSelectPath={gitHistory.selectDiffPath}
+				onLoadCommitFileDiffPatch={gitHistory.loadCommitFileDiffPatch}
+				onLoadAllCommitFileDiffPatches={gitHistory.loadAllCommitFileDiffPatches}
+				isLoadingAllCommitFilePatches={gitHistory.isLoadingAllCommitFilePatches}
 				headerContent={
 					gitHistory.viewMode === "commit" && gitHistory.selectedCommit ? (
 						<CommitDiffHeader commit={gitHistory.selectedCommit} />
