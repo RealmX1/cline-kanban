@@ -1,8 +1,11 @@
 import { Check, Plus, Trash2 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 import type { TaskCommentEntry } from "@/types";
+
+const COMMENT_TEXTAREA_MAX_HEIGHT = 180;
 
 function createTaskCommentEntryId(): string {
 	if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -11,9 +14,9 @@ function createTaskCommentEntryId(): string {
 	return `task-comment-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function formatTaskCommentTimestamp(timestamp: number): string {
+function formatTaskCommentMetadataTimestamp(timestamp: number): string {
 	if (!Number.isFinite(timestamp)) {
-		return "";
+		return "unknown";
 	}
 	return new Date(timestamp).toLocaleString(undefined, {
 		month: "short",
@@ -21,6 +24,28 @@ function formatTaskCommentTimestamp(timestamp: number): string {
 		hour: "2-digit",
 		minute: "2-digit",
 	});
+}
+
+function useAutosizedCommentTextarea(ref: React.RefObject<HTMLTextAreaElement | null>, value: string): void {
+	useLayoutEffect(() => {
+		const textarea = ref.current;
+		if (!textarea) {
+			return;
+		}
+		textarea.style.height = "auto";
+		textarea.style.height = `${Math.min(textarea.scrollHeight, COMMENT_TEXTAREA_MAX_HEIGHT)}px`;
+		textarea.style.overflowY = textarea.scrollHeight > COMMENT_TEXTAREA_MAX_HEIGHT ? "auto" : "hidden";
+	}, [ref, value]);
+}
+
+function TaskCommentMetadataPill({ entry }: { entry: TaskCommentEntry }): React.ReactElement {
+	return (
+		<div className="pointer-events-none absolute top-0 left-2 z-10 flex max-w-[calc(100%-1rem)] -translate-y-1/2 items-center gap-1 overflow-hidden rounded-full border border-border-bright bg-surface-3 px-2 py-0.5 text-[10px] leading-4 text-text-secondary shadow-sm">
+			<span className="truncate">Created {formatTaskCommentMetadataTimestamp(entry.createdAt)}</span>
+			<span className="shrink-0 text-text-tertiary">·</span>
+			<span className="truncate">Edited {formatTaskCommentMetadataTimestamp(entry.updatedAt)}</span>
+		</div>
+	);
 }
 
 function sortTaskCommentEntriesNewestFirst(entries: TaskCommentEntry[]): TaskCommentEntry[] {
@@ -42,6 +67,8 @@ function TaskCommentEntryRow({
 	onDelete: (taskCommentEntryId: string) => void;
 }): React.ReactElement {
 	const [draftText, setDraftText] = useState(entry.commentText);
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	useAutosizedCommentTextarea(textareaRef, draftText);
 
 	useEffect(() => {
 		setDraftText(entry.commentText);
@@ -49,22 +76,31 @@ function TaskCommentEntryRow({
 
 	const trimmedDraftText = draftText.trim();
 	const canSave = trimmedDraftText.length > 0 && trimmedDraftText !== entry.commentText;
-	const timestampLabel = formatTaskCommentTimestamp(entry.updatedAt || entry.createdAt);
 
 	return (
-		<div className="rounded-md border border-border bg-surface-2 p-2 focus-within:border-border-focus">
-			<div className="mb-1.5 flex items-center justify-between gap-2">
-				<span className="truncate text-[11px] text-text-tertiary">{timestampLabel}</span>
-				<div className="flex items-center gap-1">
+		<div className="group relative mt-2 rounded-md border border-border bg-surface-2 pt-3 focus-within:border-border-focus">
+			<TaskCommentMetadataPill entry={entry} />
+			<textarea
+				ref={textareaRef}
+				value={draftText}
+				onChange={(event) => setDraftText(event.target.value)}
+				placeholder="Edit task comment..."
+				rows={1}
+				spellCheck={false}
+				className="block min-h-[1.5rem] w-full resize-none overflow-x-hidden bg-transparent p-1.5 text-xs leading-5 text-text-primary placeholder:text-text-tertiary focus:outline-none"
+			/>
+			<div className="pointer-events-none absolute right-1 bottom-1 flex items-center gap-0.5 rounded-md border border-border-bright bg-surface-2 opacity-0 shadow-sm transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+				<Tooltip content="Save comment">
 					<Button
 						variant="ghost"
 						size="xs"
 						icon={<Check size={14} />}
+						aria-label="Save task comment"
 						disabled={!canSave}
 						onClick={() => onUpdate(entry.taskCommentEntryId, trimmedDraftText)}
-					>
-						Save
-					</Button>
+					/>
+				</Tooltip>
+				<Tooltip content="Delete">
 					<Button
 						variant="ghost"
 						size="xs"
@@ -73,15 +109,8 @@ function TaskCommentEntryRow({
 						aria-label="Delete task comment"
 						onClick={() => onDelete(entry.taskCommentEntryId)}
 					/>
-				</div>
+				</Tooltip>
 			</div>
-			<textarea
-				value={draftText}
-				onChange={(event) => setDraftText(event.target.value)}
-				placeholder="Edit task comment..."
-				rows={3}
-				className="block min-h-16 w-full resize-y rounded-md border border-border bg-surface-1 p-2 text-xs leading-5 text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
-			/>
 		</div>
 	);
 }
@@ -96,6 +125,8 @@ export function TaskCommentsPanel({
 	headerContent?: ReactNode;
 }): React.ReactElement {
 	const [newCommentText, setNewCommentText] = useState("");
+	const newCommentTextareaRef = useRef<HTMLTextAreaElement>(null);
+	useAutosizedCommentTextarea(newCommentTextareaRef, newCommentText);
 	const sortedTaskCommentEntries = useMemo(
 		() => sortTaskCommentEntriesNewestFirst(taskCommentEntries),
 		[taskCommentEntries],
@@ -142,11 +173,13 @@ export function TaskCommentsPanel({
 			<div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-3">
 				<div className="rounded-md border border-border bg-surface-2 p-2 focus-within:border-border-focus">
 					<textarea
+						ref={newCommentTextareaRef}
 						value={newCommentText}
 						onChange={(event) => setNewCommentText(event.target.value)}
 						placeholder="Write a task comment..."
-						rows={3}
-						className="block min-h-16 w-full resize-y rounded-md border border-border bg-surface-1 p-2 text-xs leading-5 text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
+						rows={1}
+						spellCheck={false}
+						className="block min-h-[1.5rem] w-full resize-none overflow-x-hidden rounded-md border border-border bg-surface-1 p-2 text-xs leading-5 text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
 					/>
 					<div className="mt-2 flex justify-end">
 						<Button
