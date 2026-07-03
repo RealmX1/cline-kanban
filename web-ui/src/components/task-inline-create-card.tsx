@@ -1,7 +1,16 @@
 import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import { deriveTaskTitleFromPrompt } from "@runtime-task-title";
 import { ArrowBigUp, Check, Command, CornerDownLeft } from "lucide-react";
-import { type Dispatch, type ReactElement, type SetStateAction, useCallback, useRef, useState } from "react";
+import {
+	type Dispatch,
+	type FocusEvent,
+	type ReactElement,
+	type SetStateAction,
+	useCallback,
+	useEffect,
+	useRef,
+	useState,
+} from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 
 import { BranchSelectDropdown, type BranchSelectOption } from "@/components/branch-select-dropdown";
@@ -143,6 +152,7 @@ export function TaskInlineCreateCard({
 	const actionLabel = mode === "edit" ? "Save" : "Create";
 	const [measureRef, cardRect] = useMeasure<HTMLDivElement>();
 	const containerRef = useRef<HTMLDivElement | null>(null);
+	const editSaveRequestedRef = useRef(false);
 	const [isBranchPopoverOpen, setIsBranchPopoverOpen] = useState(false);
 	const [isModelPickerPopoverOpen, setIsModelPickerPopoverOpen] = useState(false);
 	const setCardRef = useCallback(
@@ -159,6 +169,37 @@ export function TaskInlineCreateCard({
 	const hideCreateShortcut = mode === "create" && isCompactActions;
 	const cancelLabel = hideCancelShortcut ? "Cancel" : "Cancel (esc)";
 	const cardMarginBottom = mode === "create" ? 6 : 0;
+
+	useEffect(() => {
+		editSaveRequestedRef.current = false;
+	}, [prompt, branchRef, startInPlanMode, autoReviewEnabled, autoReviewMode, mode]);
+
+	const requestEditSave = useCallback(() => {
+		if (mode !== "edit" || editSaveRequestedRef.current) {
+			return;
+		}
+		editSaveRequestedRef.current = true;
+		onCreate();
+	}, [mode, onCreate]);
+
+	const handleEditorBlurCapture = useCallback(
+		(event: FocusEvent<HTMLDivElement>) => {
+			if (!enabled || mode !== "edit" || isBranchPopoverOpen || isModelPickerPopoverOpen) {
+				return;
+			}
+			const nextFocusedNode = event.relatedTarget;
+			if (nextFocusedNode instanceof Node) {
+				if (event.currentTarget.contains(nextFocusedNode)) {
+					return;
+				}
+				if (nextFocusedNode instanceof Element && nextFocusedNode.closest(TASK_INLINE_EDITOR_SELECTOR)) {
+					return;
+				}
+			}
+			requestEditSave();
+		},
+		[enabled, isBranchPopoverOpen, isModelPickerPopoverOpen, mode, requestEditSave],
+	);
 
 	const {
 		agentOptions,
@@ -221,7 +262,7 @@ export function TaskInlineCreateCard({
 			if (targetElement?.closest(TASK_INLINE_EDITOR_SELECTOR)) {
 				return;
 			}
-			onCreate();
+			requestEditSave();
 		},
 		true,
 	);
@@ -230,6 +271,7 @@ export function TaskInlineCreateCard({
 		<div
 			ref={setCardRef}
 			data-task-inline-editor="true"
+			onBlurCapture={handleEditorBlurCapture}
 			className="rounded-md border border-border-bright bg-surface-2 p-3"
 			style={{ flexShrink: 0, marginBottom: cardMarginBottom, fontSize: 12 }}
 		>
