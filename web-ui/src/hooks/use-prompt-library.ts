@@ -181,10 +181,17 @@ export function setPromptScopeInLibrary(
 
 export interface PromptLibraryController {
 	prompts: StoredPrompt[];
-	addPrompt: () => void;
+	addPrompt: () => string;
 	updatePromptText: (id: string, text: string) => void;
 	removePrompt: (id: string) => void;
 	setPromptScope: (id: string, scope: PromptScope) => void;
+}
+
+function createPromptId(): string {
+	if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+		return crypto.randomUUID();
+	}
+	return `prompt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function usePromptLibrary(taskId: string, projectId: string): PromptLibraryController {
@@ -224,7 +231,9 @@ export function usePromptLibrary(taskId: string, projectId: string): PromptLibra
 	);
 
 	const addPrompt = useCallback(() => {
-		applyReducer((state) => addTaskPrompt(state, taskId, crypto.randomUUID(), Date.now()));
+		const promptId = createPromptId();
+		applyReducer((state) => addTaskPrompt(state, taskId, promptId, Date.now()));
+		return promptId;
 	}, [applyReducer, taskId]);
 
 	const updatePromptText = useCallback(

@@ -1,12 +1,12 @@
-import { CornerDownLeft, FileText, GitBranch, Globe, Plus, Trash2 } from "lucide-react";
-import { type ReactNode, useLayoutEffect, useRef } from "react";
+import { ChevronDown, ChevronUp, CornerDownLeft, FileText, GitBranch, Globe, Plus, Trash2 } from "lucide-react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
 import { type PromptScope, type StoredPrompt, usePromptLibrary } from "@/hooks/use-prompt-library";
 
-const PROMPT_TEXTAREA_MAX_HEIGHT = 160;
+const COLLAPSED_PROMPT_TEXTAREA_VISIBLE_LINE_COUNT = 4;
 
 const PROMPT_SCOPE_META: Record<
 	PromptScope,
@@ -47,7 +47,7 @@ function formatPromptMetadataTimestamp(timestamp: number): string {
 function PromptMetadataPill({ prompt }: { prompt: StoredPrompt }): React.ReactElement {
 	const scopeMeta = PROMPT_SCOPE_META[prompt.scope];
 	return (
-		<div className="pointer-events-none absolute top-0 left-2 z-10 flex max-w-[calc(100%-1rem)] -translate-y-1/2 items-center gap-1 overflow-hidden rounded-full border border-border-bright bg-surface-3 px-2 py-0.5 text-[10px] leading-4 text-text-secondary shadow-sm">
+		<div className="pointer-events-none absolute -top-[7px] -left-2 z-10 flex max-w-[calc(100%+0.5rem)] items-center gap-1 overflow-hidden rounded-full border border-border-bright bg-surface-3 px-2 py-0.5 text-[10px] leading-4 text-text-secondary shadow-sm">
 			<span className="shrink-0 font-medium text-text-primary">{scopeMeta.label}</span>
 			<span className="truncate">Created {formatPromptMetadataTimestamp(prompt.createdAt)}</span>
 			<span className="shrink-0 text-text-tertiary">·</span>
@@ -56,36 +56,107 @@ function PromptMetadataPill({ prompt }: { prompt: StoredPrompt }): React.ReactEl
 	);
 }
 
+function getCollapsedTextareaHeight(textarea: HTMLTextAreaElement): number {
+	const styles = getComputedStyle(textarea);
+	const lineHeight = Number.parseFloat(styles.lineHeight);
+	const paddingTop = Number.parseFloat(styles.paddingTop) || 0;
+	const paddingBottom = Number.parseFloat(styles.paddingBottom) || 0;
+	const fallbackLineHeight = 20;
+	return (
+		(Number.isFinite(lineHeight) ? lineHeight : fallbackLineHeight) * COLLAPSED_PROMPT_TEXTAREA_VISIBLE_LINE_COUNT +
+		paddingTop +
+		paddingBottom
+	);
+}
+
+function useAutosizedPromptTextarea({
+	ref,
+	value,
+	isFocusedWithin,
+	isExpanded,
+	onOverflowChange,
+}: {
+	ref: React.RefObject<HTMLTextAreaElement | null>;
+	value: string;
+	isFocusedWithin: boolean;
+	isExpanded: boolean;
+	onOverflowChange: (hasOverflow: boolean) => void;
+}): void {
+	useLayoutEffect(() => {
+		const textarea = ref.current;
+		if (!textarea) {
+			return;
+		}
+		textarea.style.height = "auto";
+		const fullHeight = textarea.scrollHeight;
+		const collapsedHeight = getCollapsedTextareaHeight(textarea);
+		const hasOverflow = fullHeight > collapsedHeight + 1;
+		const shouldCollapse = hasOverflow && !isFocusedWithin && !isExpanded;
+		textarea.style.height = `${shouldCollapse ? collapsedHeight : fullHeight}px`;
+		textarea.style.overflowY = "hidden";
+		onOverflowChange(hasOverflow);
+	}, [ref, value, isFocusedWithin, isExpanded, onOverflowChange]);
+}
+
 function PromptRow({
 	prompt,
 	onChangeText,
 	onToggleScope,
 	onFill,
 	onRemove,
+	shouldAutoFocus,
+	onAutoFocusHandled,
 }: {
 	prompt: StoredPrompt;
 	onChangeText: (id: string, text: string) => void;
 	onToggleScope: (id: string, scope: PromptScope) => void;
 	onFill: (text: string) => void;
 	onRemove: (id: string) => void;
+	shouldAutoFocus: boolean;
+	onAutoFocusHandled: () => void;
 }): React.ReactElement {
+	const [hasCollapsibleContent, setHasCollapsibleContent] = useState(false);
+	const [isExpanded, setIsExpanded] = useState(false);
+	const [isFocusedWithin, setIsFocusedWithin] = useState(false);
+	const rowRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
-	useLayoutEffect(() => {
+	useAutosizedPromptTextarea({
+		ref: textareaRef,
+		value: prompt.text,
+		isFocusedWithin,
+		isExpanded,
+		onOverflowChange: setHasCollapsibleContent,
+	});
+
+	useEffect(() => {
+		if (!shouldAutoFocus) {
+			return;
+		}
 		const textarea = textareaRef.current;
 		if (!textarea) {
 			return;
 		}
-		textarea.style.height = "auto";
-		textarea.style.height = `${Math.min(textarea.scrollHeight, PROMPT_TEXTAREA_MAX_HEIGHT)}px`;
-		textarea.style.overflowY = textarea.scrollHeight > PROMPT_TEXTAREA_MAX_HEIGHT ? "auto" : "hidden";
-	}, [prompt.text]);
+		textarea.focus();
+		textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+		onAutoFocusHandled();
+	}, [shouldAutoFocus, onAutoFocusHandled]);
 
 	const isGlobal = prompt.scope === "global";
 	const canFill = prompt.text.trim().length > 0;
 	const scopeMeta = PROMPT_SCOPE_META[prompt.scope];
 
 	return (
-		<div className="group relative mt-2 rounded-md border border-border bg-surface-2 pt-3 focus-within:border-border-focus">
+		<div
+			ref={rowRef}
+			className="group relative mt-3 mb-4 rounded-md border border-border bg-surface-2 py-1 focus-within:border-border-focus"
+			onFocus={() => setIsFocusedWithin(true)}
+			onBlur={(event) => {
+				const nextFocusedElement = event.relatedTarget instanceof Node ? event.relatedTarget : null;
+				if (!rowRef.current?.contains(nextFocusedElement)) {
+					setIsFocusedWithin(false);
+				}
+			}}
+		>
 			<PromptMetadataPill prompt={prompt} />
 			<textarea
 				ref={textareaRef}
@@ -96,9 +167,19 @@ function PromptRow({
 				spellCheck={false}
 				className="block min-h-[1.5rem] w-full resize-none overflow-x-hidden bg-transparent p-1.5 text-xs leading-5 text-text-primary placeholder:text-text-tertiary focus:outline-none"
 			/>
-			{/* Action cluster floats at the bottom-right and reveals on hover/focus so it never
-			    competes with the textarea for horizontal width nor pins itself to the top. */}
-			<div className="pointer-events-none absolute right-1 bottom-1 flex items-center gap-0.5 rounded-md border border-border-bright bg-surface-2 opacity-0 shadow-sm transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+			{hasCollapsibleContent ? (
+				<Tooltip content={isExpanded ? "Collapse prompt" : "Show full prompt"}>
+					<Button
+						variant="ghost"
+						size="xs"
+						icon={isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+						aria-label={isExpanded ? "Collapse prompt" : "Show full prompt"}
+						className="absolute bottom-0 left-2 z-20 -mb-3 border border-border-bright bg-surface-2 shadow-sm"
+						onClick={() => setIsExpanded((current) => !current)}
+					/>
+				</Tooltip>
+			) : null}
+			<div className="pointer-events-none absolute right-2 bottom-0 z-20 -mb-3 flex items-center gap-0.5 rounded-md border border-border-bright bg-surface-2 opacity-0 shadow-sm transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
 				<Tooltip content={`${scopeMeta.tooltip} · click for next scope`}>
 					<Button
 						variant="ghost"
@@ -146,6 +227,10 @@ export function PromptLibraryPanel({
 	headerContent?: ReactNode;
 }): React.ReactElement {
 	const { prompts, addPrompt, updatePromptText, removePrompt, setPromptScope } = usePromptLibrary(taskId, projectId);
+	const [pendingFocusPromptId, setPendingFocusPromptId] = useState<string | null>(null);
+	const handleAddPrompt = (): void => {
+		setPendingFocusPromptId(addPrompt());
+	};
 
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
@@ -153,7 +238,7 @@ export function PromptLibraryPanel({
 				{headerContent ?? (
 					<span className="text-xs font-medium uppercase tracking-wide text-text-secondary">Prompts</span>
 				)}
-				<Button variant="ghost" size="xs" icon={<Plus size={14} />} onClick={addPrompt}>
+				<Button variant="ghost" size="xs" icon={<Plus size={14} />} onClick={handleAddPrompt}>
 					Add
 				</Button>
 			</div>
@@ -171,6 +256,8 @@ export function PromptLibraryPanel({
 							onToggleScope={setPromptScope}
 							onFill={onFillInput}
 							onRemove={removePrompt}
+							shouldAutoFocus={pendingFocusPromptId === prompt.id}
+							onAutoFocusHandled={() => setPendingFocusPromptId(null)}
 						/>
 					))
 				)}
