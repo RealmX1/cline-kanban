@@ -20,6 +20,7 @@ import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
+import { TaskBoardSearchToolbar } from "@/components/task-board-search-toolbar";
 import { TaskCreateDialog } from "@/components/task-create-dialog";
 import { TaskInlineCreateCard } from "@/components/task-inline-create-card";
 import { TopBar } from "@/components/top-bar";
@@ -74,6 +75,8 @@ import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { saveWorkspaceState } from "@/runtime/workspace-state-query";
+import type { TaskBoardSearchMode } from "@/search/task-board-search";
+import { useTaskBoardSearch } from "@/search/use-task-board-search";
 import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
 import {
 	getTaskWorkspaceInfo,
@@ -87,6 +90,8 @@ import type { BoardData, TaskCommentEntry } from "@/types";
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
 	const [board, setBoard] = useState<BoardData>(() => createInitialBoardData());
+	const [taskSearchQuery, setTaskSearchQuery] = useState("");
+	const [taskSearchMode, setTaskSearchMode] = useState<TaskBoardSearchMode>("hybrid");
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
 	const [canPersistWorkspaceState, setCanPersistWorkspaceState] = useState(false);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -100,6 +105,7 @@ export default function App(): ReactElement {
 	const handleProjectSwitchStart = useCallback(() => {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
+		setTaskSearchQuery("");
 		setPendingTaskStartAfterEditId(null);
 		taskEditorResetRef.current();
 	}, []);
@@ -239,6 +245,11 @@ export default function App(): ReactElement {
 		}
 		return views;
 	}, [board, sessions]);
+	const taskBoardSearch = useTaskBoardSearch({
+		board,
+		query: taskSearchQuery,
+		mode: taskSearchMode,
+	});
 
 	const handleContinueConnectionRetrySessions = useCallback(
 		(taskIds: string[]) => {
@@ -1018,41 +1029,58 @@ export default function App(): ReactElement {
 												isDiscardWorkingChangesPending={isDiscardingHomeWorkingChanges}
 											/>
 										) : (
-											<KanbanBoard
-												data={board}
-												taskSessions={sessions}
-												workspacePath={workspacePath}
-												onCardSelect={handleCardSelect}
-												onCreateTask={handleOpenCreateTask}
-												onStartTask={handleStartTaskFromBoard}
-												onStartAllTasks={handleStartAllBacklogTasksFromBoard}
-												onClearTrash={handleOpenClearTrash}
-												editingTaskId={isDetailViewMounted ? null : editingTaskId}
-												inlineTaskEditor={isDetailViewMounted ? undefined : inlineTaskEditor}
-												onEditTask={handleOpenEditTask}
-												onSaveTaskTitle={handleSaveTaskTitle}
-												onCommitTask={handleCommitTask}
-												onOpenPrTask={handleOpenPrTask}
-												onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
-												commitTaskLoadingById={commitTaskLoadingById}
-												openPrTaskLoadingById={openPrTaskLoadingById}
-												moveToTrashLoadingById={moveToTrashLoadingById}
-												moveToReviewLoadingById={moveToReviewLoadingById}
-												onMoveToTrashTask={handleMoveReviewCardToTrash}
-												onMoveToValidationTask={handleMoveCardToValidation}
-												onMoveToReviewTask={handleMoveCardToReview}
-												onRestoreFromTrashTask={handleRestoreTaskFromTrash}
-												onDeleteTask={handleOpenDeleteTask}
-												dependencies={board.dependencies}
-												onCreateDependency={handleCreateDependency}
-												onDeleteDependency={handleDeleteDependency}
-												onRequestProgrammaticCardMoveReady={
-													selectedCard ? undefined : handleProgrammaticCardMoveReady
-												}
-												onDragEnd={handleDragEnd}
-												defaultClineModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
-												defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-											/>
+											<div className="flex flex-1 flex-col min-h-0 min-w-0 bg-surface-0">
+												<TaskBoardSearchToolbar
+													query={taskSearchQuery}
+													mode={taskSearchMode}
+													visibleTaskCount={taskBoardSearch.visibleTaskCount}
+													totalTaskCount={taskBoardSearch.totalTaskCount}
+													semanticSearchStatus={taskBoardSearch.semanticSearchStatus}
+													onQueryChange={setTaskSearchQuery}
+													onModeChange={setTaskSearchMode}
+												/>
+												<KanbanBoard
+													data={taskBoardSearch.filteredBoard}
+													taskSessions={sessions}
+													workspacePath={workspacePath}
+													onCardSelect={handleCardSelect}
+													onCreateTask={handleOpenCreateTask}
+													onStartTask={handleStartTaskFromBoard}
+													onStartAllTasks={handleStartAllBacklogTasksFromBoard}
+													onClearTrash={handleOpenClearTrash}
+													editingTaskId={isDetailViewMounted ? null : editingTaskId}
+													inlineTaskEditor={isDetailViewMounted ? undefined : inlineTaskEditor}
+													onEditTask={handleOpenEditTask}
+													onSaveTaskTitle={handleSaveTaskTitle}
+													onCommitTask={handleCommitTask}
+													onOpenPrTask={handleOpenPrTask}
+													onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
+													commitTaskLoadingById={commitTaskLoadingById}
+													openPrTaskLoadingById={openPrTaskLoadingById}
+													moveToTrashLoadingById={moveToTrashLoadingById}
+													moveToReviewLoadingById={moveToReviewLoadingById}
+													onMoveToTrashTask={handleMoveReviewCardToTrash}
+													onMoveToValidationTask={handleMoveCardToValidation}
+													onMoveToReviewTask={handleMoveCardToReview}
+													onRestoreFromTrashTask={handleRestoreTaskFromTrash}
+													onDeleteTask={handleOpenDeleteTask}
+													dependencies={taskBoardSearch.filteredDependencies}
+													onCreateDependency={handleCreateDependency}
+													onDeleteDependency={handleDeleteDependency}
+													onRequestProgrammaticCardMoveReady={
+														selectedCard || taskBoardSearch.isSearchActive
+															? undefined
+															: handleProgrammaticCardMoveReady
+													}
+													onDragEnd={handleDragEnd}
+													defaultClineModelId={
+														runtimeProjectConfig?.clineProviderSettings?.modelId ?? null
+													}
+													defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
+													taskSearchResultById={taskBoardSearch.resultByTaskId}
+													isCardDragDisabled={taskBoardSearch.isSearchActive}
+												/>
+											</div>
 										)}
 									</div>
 									{showHomeBottomTerminal ? (
