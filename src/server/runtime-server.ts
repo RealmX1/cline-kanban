@@ -215,6 +215,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			workspaceApi: createWorkspaceApi({
 				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 				getScopedClineTaskSessionService,
+				loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
 				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
 				buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,

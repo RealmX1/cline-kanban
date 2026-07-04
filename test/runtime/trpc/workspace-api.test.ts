@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeTaskSessionSummary, RuntimeWorkspaceChangesResponse } from "../../../src/core/api-contract";
+import type { RuntimeConfigState } from "../../../src/config/runtime-config";
+import type {
+	RuntimeBoardData,
+	RuntimeTaskSessionSummary,
+	RuntimeWorkspaceChangesResponse,
+	RuntimeWorkspaceStateResponse,
+} from "../../../src/core/api-contract";
 
 const workspaceTaskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
@@ -11,6 +17,11 @@ const workspaceChangesMocks = vi.hoisted(() => ({
 	getWorkspaceChanges: vi.fn(),
 	getWorkspaceChangesBetweenRefs: vi.fn(),
 	getWorkspaceChangesFromRef: vi.fn(),
+}));
+
+const workspaceStateMocks = vi.hoisted(() => ({
+	mutateWorkspaceState: vi.fn(),
+	saveWorkspaceState: vi.fn(),
 }));
 
 vi.mock("../../../src/workspace/task-worktree.js", () => ({
@@ -27,7 +38,20 @@ vi.mock("../../../src/workspace/get-workspace-changes.js", () => ({
 	getWorkspaceChangesFromRef: workspaceChangesMocks.getWorkspaceChangesFromRef,
 }));
 
-import { createWorkspaceApi } from "../../../src/trpc/workspace-api";
+vi.mock("../../../src/state/workspace-state.js", () => ({
+	mutateWorkspaceState: workspaceStateMocks.mutateWorkspaceState,
+	saveWorkspaceState: workspaceStateMocks.saveWorkspaceState,
+	WorkspaceStateConflictError: class WorkspaceStateConflictError extends Error {
+		currentRevision: number;
+
+		constructor(message: string, currentRevision: number) {
+			super(message);
+			this.currentRevision = currentRevision;
+		}
+	},
+}));
+
+import { type CreateWorkspaceApiDependencies, createWorkspaceApi } from "../../../src/trpc/workspace-api";
 
 function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
 	return {
@@ -57,6 +81,68 @@ function createChangesResponse(): RuntimeWorkspaceChangesResponse {
 	};
 }
 
+function createBoard(): RuntimeBoardData {
+	return {
+		columns: [
+			{ id: "backlog", title: "Backlog", cards: [] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [] },
+			{ id: "validation", title: "Validation", cards: [] },
+			{ id: "trash", title: "Done", cards: [] },
+		],
+		dependencies: [],
+	};
+}
+
+function createWorkspaceState(board: RuntimeBoardData = createBoard()): RuntimeWorkspaceStateResponse {
+	return {
+		repoPath: "/tmp/repo",
+		statePath: "/tmp/state",
+		git: {
+			currentBranch: "main",
+			defaultBranch: "main",
+			branches: [{ name: "main" }],
+		},
+		board,
+		sessions: {},
+		revision: 1,
+	};
+}
+
+function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): RuntimeConfigState {
+	return {
+		globalConfigPath: "/tmp/global-config.json",
+		projectConfigPath: "/tmp/project-config.json",
+		selectedAgentId: "claude",
+		selectedShortcutLabel: null,
+		agentAutonomousModeEnabled: true,
+		newTaskStartInPlanModeByDefault: true,
+		readyForReviewNotificationsEnabled: true,
+		notificationSoundEnabled: true,
+		autoContinueOnConnectionDropEnabled: true,
+		shortcuts: [],
+		commitPromptTemplate: "commit",
+		openPrPromptTemplate: "pr",
+		commitPromptTemplateDefault: "commit",
+		openPrPromptTemplateDefault: "pr",
+		...overrides,
+	};
+}
+
+function createWorkspaceApiForTest(
+	deps: Partial<CreateWorkspaceApiDependencies> = {},
+): ReturnType<typeof createWorkspaceApi> {
+	return createWorkspaceApi({
+		ensureTerminalManagerForWorkspace: vi.fn(),
+		getScopedClineTaskSessionService: vi.fn(),
+		broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+		broadcastRuntimeProjectsUpdated: vi.fn(),
+		buildWorkspaceStateSnapshot: vi.fn(),
+		loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+		...deps,
+	});
+}
+
 describe("createWorkspaceApi loadChanges", () => {
 	beforeEach(() => {
 		workspaceTaskWorktreeMocks.resolveTaskCwd.mockReset();
@@ -64,6 +150,8 @@ describe("createWorkspaceApi loadChanges", () => {
 		workspaceChangesMocks.getWorkspaceChanges.mockReset();
 		workspaceChangesMocks.getWorkspaceChangesBetweenRefs.mockReset();
 		workspaceChangesMocks.getWorkspaceChangesFromRef.mockReset();
+		workspaceStateMocks.mutateWorkspaceState.mockReset();
+		workspaceStateMocks.saveWorkspaceState.mockReset();
 
 		workspaceTaskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");
 		workspaceChangesMocks.createEmptyWorkspaceChangesResponse.mockResolvedValue(createChangesResponse());
@@ -93,7 +181,7 @@ describe("createWorkspaceApi loadChanges", () => {
 			),
 		};
 
-		const api = createWorkspaceApi({
+		const api = createWorkspaceApiForTest({
 			ensureTerminalManagerForWorkspace: vi.fn(async () => terminalManager as never),
 			getScopedClineTaskSessionService: vi.fn(async () => ({ getSummary: vi.fn(() => null) }) as never),
 			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
@@ -142,7 +230,7 @@ describe("createWorkspaceApi loadChanges", () => {
 			),
 		};
 
-		const api = createWorkspaceApi({
+		const api = createWorkspaceApiForTest({
 			ensureTerminalManagerForWorkspace: vi.fn(async () => terminalManager as never),
 			getScopedClineTaskSessionService: vi.fn(async () => ({ getSummary: vi.fn(() => null) }) as never),
 			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
@@ -193,7 +281,7 @@ describe("createWorkspaceApi loadChanges", () => {
 			),
 		};
 
-		const api = createWorkspaceApi({
+		const api = createWorkspaceApiForTest({
 			ensureTerminalManagerForWorkspace: vi.fn(async () => terminalManager as never),
 			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
@@ -265,7 +353,7 @@ describe("createWorkspaceApi loadChanges", () => {
 			),
 		};
 
-		const api = createWorkspaceApi({
+		const api = createWorkspaceApiForTest({
 			ensureTerminalManagerForWorkspace: vi.fn(async () => terminalManager as never),
 			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
@@ -300,7 +388,7 @@ describe("createWorkspaceApi loadChanges", () => {
 		const emptyResponse = createChangesResponse();
 		workspaceChangesMocks.createEmptyWorkspaceChangesResponse.mockResolvedValue(emptyResponse);
 
-		const api = createWorkspaceApi({
+		const api = createWorkspaceApiForTest({
 			ensureTerminalManagerForWorkspace: vi.fn(),
 			getScopedClineTaskSessionService: vi.fn(),
 			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
@@ -323,5 +411,58 @@ describe("createWorkspaceApi loadChanges", () => {
 		expect(response).toBe(emptyResponse);
 		expect(workspaceChangesMocks.createEmptyWorkspaceChangesResponse).toHaveBeenCalledWith("/tmp/repo");
 		expect(workspaceChangesMocks.getWorkspaceChanges).not.toHaveBeenCalled();
+	});
+});
+
+describe("createWorkspaceApi addBacklogTask", () => {
+	beforeEach(() => {
+		workspaceStateMocks.mutateWorkspaceState.mockReset();
+		workspaceStateMocks.saveWorkspaceState.mockReset();
+	});
+
+	it("uses the runtime default when creating backlog tasks through the scoped API", async () => {
+		const savedBoardRef: { current: RuntimeBoardData | null } = { current: null };
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_cwd, mutate) => {
+			const currentState = createWorkspaceState();
+			const mutation = mutate(currentState);
+			savedBoardRef.current = mutation.board;
+			return {
+				value: mutation.value,
+				state: {
+					...currentState,
+					board: mutation.board,
+				},
+				saved: true,
+			};
+		});
+		const broadcastRuntimeWorkspaceStateUpdated = vi.fn();
+		const broadcastRuntimeProjectsUpdated = vi.fn();
+		const api = createWorkspaceApiForTest({
+			loadScopedRuntimeConfig: vi.fn(async () =>
+				createRuntimeConfigState({
+					newTaskStartInPlanModeByDefault: false,
+				}),
+			),
+			broadcastRuntimeWorkspaceStateUpdated,
+			broadcastRuntimeProjectsUpdated,
+		});
+
+		await api.addBacklogTask(
+			{
+				workspaceId: "workspace-1",
+				workspacePath: "/tmp/repo",
+			},
+			{
+				prompt: "Create from API",
+			},
+		);
+
+		if (!savedBoardRef.current) {
+			throw new Error("Expected addBacklogTask to save a board.");
+		}
+		const backlogColumn = savedBoardRef.current.columns.find((column) => column.id === "backlog");
+		expect(backlogColumn?.cards[0]?.startInPlanMode).toBe(false);
+		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledWith("workspace-1", "/tmp/repo");
+		expect(broadcastRuntimeProjectsUpdated).toHaveBeenCalledWith("workspace-1");
 	});
 });

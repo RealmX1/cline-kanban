@@ -46,6 +46,7 @@ export async function saveRuntimeConfig(
 		selectedAgentId?: RuntimeAgentId;
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
+		newTaskStartInPlanModeByDefault?: boolean;
 		shortcuts?: RuntimeProjectShortcut[];
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;

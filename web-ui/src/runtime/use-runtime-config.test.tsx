@@ -19,6 +19,7 @@ function createRuntimeConfigResponse(selectedAgentId: RuntimeConfigResponse["sel
 		selectedAgentId,
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
+		newTaskStartInPlanModeByDefault: true,
 		effectiveCommand: selectedAgentId,
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project/.cline/kanban/config.json",

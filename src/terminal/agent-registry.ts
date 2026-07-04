@@ -111,6 +111,7 @@ export function buildRuntimeConfigResponse(
 		selectedAgentId: runtimeConfig.selectedAgentId,
 		selectedShortcutLabel: runtimeConfig.selectedShortcutLabel,
 		agentAutonomousModeEnabled: runtimeConfig.agentAutonomousModeEnabled,
+		newTaskStartInPlanModeByDefault: runtimeConfig.newTaskStartInPlanModeByDefault,
 		debugModeEnabled: isRuntimeDebugModeEnabled(),
 		effectiveCommand,
 		globalConfigPath: runtimeConfig.globalConfigPath,

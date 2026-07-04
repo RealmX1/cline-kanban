@@ -377,6 +377,7 @@ export function RuntimeSettingsDialog({
 	const { resetLayoutCustomizations } = useLayoutCustomizations();
 	const [selectedAgentId, setSelectedAgentId] = useState<RuntimeAgentId>("claude");
 	const [agentAutonomousModeEnabled, setAgentAutonomousModeEnabled] = useState(true);
+	const [newTaskStartInPlanModeByDefault, setNewTaskStartInPlanModeByDefault] = useState(true);
 	const [readyForReviewNotificationsEnabled, setReadyForReviewNotificationsEnabled] = useState(true);
 	const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(true);
 	const [autoContinueOnConnectionDropEnabled, setAutoContinueOnConnectionDropEnabled] = useState(true);
@@ -452,6 +453,7 @@ export function RuntimeSettingsDialog({
 	const fallbackAgentId = firstInstalledAgentId ?? displayedAgents[0]?.id ?? "claude";
 	const initialSelectedAgentId = configuredAgentId ?? fallbackAgentId;
 	const initialAgentAutonomousModeEnabled = config?.agentAutonomousModeEnabled ?? true;
+	const initialNewTaskStartInPlanModeByDefault = config?.newTaskStartInPlanModeByDefault ?? true;
 	const initialReadyForReviewNotificationsEnabled = config?.readyForReviewNotificationsEnabled ?? true;
 	const initialNotificationSoundEnabled = config?.notificationSoundEnabled ?? true;
 	const initialAutoContinueOnConnectionDropEnabled = config?.autoContinueOnConnectionDropEnabled ?? true;
@@ -478,6 +480,9 @@ export function RuntimeSettingsDialog({
 			return true;
 		}
 		if (agentAutonomousModeEnabled !== initialAgentAutonomousModeEnabled) {
+			return true;
+		}
+		if (newTaskStartInPlanModeByDefault !== initialNewTaskStartInPlanModeByDefault) {
 			return true;
 		}
 		if (readyForReviewNotificationsEnabled !== initialReadyForReviewNotificationsEnabled) {
@@ -522,6 +527,7 @@ export function RuntimeSettingsDialog({
 		initialAgentAutonomousModeEnabled,
 		initialAutoContinueOnConnectionDropEnabled,
 		initialCommitPromptTemplate,
+		initialNewTaskStartInPlanModeByDefault,
 		initialOpenPrPromptTemplate,
 		initialReadyForReviewNotificationsEnabled,
 		initialNotificationSoundEnabled,
@@ -530,6 +536,7 @@ export function RuntimeSettingsDialog({
 		initialThemeId,
 		openPrPromptTemplate,
 		readyForReviewNotificationsEnabled,
+		newTaskStartInPlanModeByDefault,
 		notificationSoundEnabled,
 		selectedAgentId,
 		shortcuts,
@@ -541,6 +548,7 @@ export function RuntimeSettingsDialog({
 		}
 		setSelectedAgentId(configuredAgentId ?? fallbackAgentId);
 		setAgentAutonomousModeEnabled(config?.agentAutonomousModeEnabled ?? true);
+		setNewTaskStartInPlanModeByDefault(config?.newTaskStartInPlanModeByDefault ?? true);
 		setReadyForReviewNotificationsEnabled(config?.readyForReviewNotificationsEnabled ?? true);
 		setNotificationSoundEnabled(config?.notificationSoundEnabled ?? true);
 		setAutoContinueOnConnectionDropEnabled(config?.autoContinueOnConnectionDropEnabled ?? true);
@@ -552,6 +560,7 @@ export function RuntimeSettingsDialog({
 		config?.agentAutonomousModeEnabled,
 		config?.autoContinueOnConnectionDropEnabled,
 		config?.commitPromptTemplate,
+		config?.newTaskStartInPlanModeByDefault,
 		config?.openPrPromptTemplate,
 		config?.readyForReviewNotificationsEnabled,
 		config?.notificationSoundEnabled,
@@ -727,6 +736,7 @@ export function RuntimeSettingsDialog({
 		const saved = await save({
 			selectedAgentId,
 			agentAutonomousModeEnabled,
+			newTaskStartInPlanModeByDefault,
 			readyForReviewNotificationsEnabled,
 			notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled,
@@ -841,6 +851,17 @@ export function RuntimeSettingsDialog({
 						<p className="text-text-secondary text-[13px] ml-6 mt-0 mb-0">
 							Allows agents to use tools without stopping for permission. Use at your own risk.
 						</p>
+						<div className="flex items-center gap-2 mt-3">
+							<RadixSwitch.Root
+								checked={newTaskStartInPlanModeByDefault}
+								disabled={controlsDisabled}
+								onCheckedChange={setNewTaskStartInPlanModeByDefault}
+								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer disabled:opacity-40"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+							</RadixSwitch.Root>
+							<span className="text-[13px] text-text-primary">Start new tasks in plan mode by default</span>
+						</div>
 					</div>
 
 					{/* ---- Cline ---- */}

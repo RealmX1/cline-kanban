@@ -104,18 +104,21 @@ describe.sequential("runtime-config auto agent selection", () => {
 					) as {
 						selectedAgentId?: string;
 						agentAutonomousModeEnabled?: boolean;
+						newTaskStartInPlanModeByDefault?: boolean;
 						readyForReviewNotificationsEnabled?: boolean;
 						commitPromptTemplate?: string;
 						openPrPromptTemplate?: string;
 					};
 					expect(persisted.selectedAgentId).toBe("codex");
 					expect(persisted.agentAutonomousModeEnabled).toBeUndefined();
+					expect(persisted.newTaskStartInPlanModeByDefault).toBeUndefined();
 					expect(persisted.readyForReviewNotificationsEnabled).toBeUndefined();
 					expect(persisted.commitPromptTemplate).toBeUndefined();
 					expect(persisted.openPrPromptTemplate).toBeUndefined();
 
 					const reloadedState = await loadRuntimeConfig(tempProject);
 					expect(reloadedState.selectedAgentId).toBe("codex");
+					expect(reloadedState.newTaskStartInPlanModeByDefault).toBe(true);
 				});
 			} finally {
 				if (previousShell === undefined) {
@@ -291,6 +294,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 					selectedAgentId: "cline",
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
+					newTaskStartInPlanModeByDefault: true,
 					readyForReviewNotificationsEnabled: true,
 					notificationSoundEnabled: true,
 					autoContinueOnConnectionDropEnabled: true,
@@ -304,6 +308,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 				) as {
 					selectedAgentId?: string;
 					agentAutonomousModeEnabled?: boolean;
+					newTaskStartInPlanModeByDefault?: boolean;
 					readyForReviewNotificationsEnabled?: boolean;
 					notificationSoundEnabled?: boolean;
 					commitPromptTemplate?: string;
@@ -311,6 +316,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 				};
 				expect(globalPayload.selectedAgentId).toBeUndefined();
 				expect(globalPayload.agentAutonomousModeEnabled).toBeUndefined();
+				expect(globalPayload.newTaskStartInPlanModeByDefault).toBeUndefined();
 				expect(globalPayload.readyForReviewNotificationsEnabled).toBeUndefined();
 				expect(globalPayload.notificationSoundEnabled).toBeUndefined();
 				expect(globalPayload.commitPromptTemplate).toBeUndefined();
@@ -340,6 +346,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 					selectedAgentId: "cline",
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
+					newTaskStartInPlanModeByDefault: true,
 					readyForReviewNotificationsEnabled: true,
 					notificationSoundEnabled: true,
 					autoContinueOnConnectionDropEnabled: true,
@@ -369,6 +376,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 					selectedAgentId: "cline",
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
+					newTaskStartInPlanModeByDefault: true,
 					readyForReviewNotificationsEnabled: true,
 					notificationSoundEnabled: true,
 					autoContinueOnConnectionDropEnabled: true,
@@ -444,6 +452,37 @@ describe.sequential("runtime-config auto agent selection", () => {
 
 				const reloaded = await loadRuntimeConfig(tempProject);
 				expect(reloaded.agentAutonomousModeEnabled).toBe(false);
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("persists disabled new-task plan mode default explicitly", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir(
+			"kanban-home-runtime-config-new-task-plan-disabled-",
+		);
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir(
+			"kanban-project-runtime-config-new-task-plan-disabled-",
+		);
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				const updated = await updateRuntimeConfig(tempProject, {
+					newTaskStartInPlanModeByDefault: false,
+				});
+				expect(updated.newTaskStartInPlanModeByDefault).toBe(false);
+
+				const globalPayload = JSON.parse(
+					readFileSync(join(tempHome, ".cline", "kanban", "config.json"), "utf8"),
+				) as {
+					newTaskStartInPlanModeByDefault?: boolean;
+				};
+				expect(globalPayload.newTaskStartInPlanModeByDefault).toBe(false);
+
+				const reloaded = await loadRuntimeConfig(tempProject);
+				expect(reloaded.newTaskStartInPlanModeByDefault).toBe(false);
 			});
 		} finally {
 			cleanupProject();
