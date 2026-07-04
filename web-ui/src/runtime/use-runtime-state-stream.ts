@@ -1,5 +1,5 @@
 import { useEffect, useReducer } from "react";
-
+import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import type {
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeProjectSummary,
@@ -310,6 +310,8 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 		let reconnectAttempt = 0;
 		let activeWorkspaceId = requestedWorkspaceId;
 		let requestedWorkspaceForConnection = requestedWorkspaceId;
+		let hasOpenedRuntimeStream = false;
+		let shouldCheckServedBuildAssetsOnOpen = false;
 
 		dispatch({ type: "requested_workspace_changed" });
 
@@ -358,6 +360,11 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 				return;
 			}
 			socket.onopen = () => {
+				if (hasOpenedRuntimeStream && shouldCheckServedBuildAssetsOnOpen) {
+					void reloadBrowserIfServedBuildAssetsChanged();
+				}
+				hasOpenedRuntimeStream = true;
+				shouldCheckServedBuildAssetsOnOpen = false;
 				reconnectAttempt = 0;
 				dispatch({ type: "stream_connected" });
 			};
@@ -477,6 +484,9 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 					type: "stream_disconnected",
 					message: "Runtime stream disconnected.",
 				});
+				if (hasOpenedRuntimeStream) {
+					shouldCheckServedBuildAssetsOnOpen = true;
+				}
 				scheduleReconnect();
 			};
 			socket.onerror = () => {
