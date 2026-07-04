@@ -409,6 +409,8 @@ export default function App(): ReactElement {
 		defaultCreateTaskBranchRef,
 		currentProjectId,
 		selectedAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
+		newTaskStartInPlanModeByDefault: runtimeProjectConfig?.newTaskStartInPlanModeByDefault ?? true,
+		isNewTaskStartInPlanModeDefaultLoaded: runtimeProjectConfig !== null,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 	});

@@ -200,7 +200,7 @@ Parameters:
 - \`--prompt "<text>"\` required task prompt text.
 - \`--project-path <path>\` optional workspace path. If not already registered in Kanban, it is auto-added for git repos.
 - \`--base-ref <branch>\` optional base branch/worktree ref. Defaults to current branch, then default branch, then first known branch.
-- \`--start-in-plan-mode <true|false>\` optional. Default false. Set true only when explicitly requested.
+- \`--start-in-plan-mode <true|false>\` optional. Default follows the runtime Settings default. Set this only when you need to override that default for this task.
 - \`--auto-review-enabled <true|false>\` optional. Default false. Enables automatic action once task reaches review.
 - \`--auto-review-mode commit|pr\` optional auto-review action. Default \`commit\`.
 

@@ -64,6 +64,8 @@ describe("renderAppendSystemPrompt", () => {
 		expect(rendered).toContain("kanban task done");
 		expect(rendered).toContain("kanban task delete");
 		expect(rendered).toContain("--column backlog|in_progress|review|done");
+		expect(rendered).toContain("Default follows the runtime Settings default");
+		expect(rendered).not.toContain("`--start-in-plan-mode <true|false>` optional. Default false.");
 		expect(rendered).toContain("Provide exactly one of");
 		expect(rendered).toContain("task delete --column done");
 		expect(rendered).toContain("kanban task link");

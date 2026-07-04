@@ -13,6 +13,7 @@ export interface UseRuntimeConfigResult {
 		selectedAgentId?: RuntimeAgentId;
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
+		newTaskStartInPlanModeByDefault?: boolean;
 		shortcuts?: RuntimeProjectShortcut[];
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
@@ -82,8 +83,10 @@ export function useRuntimeConfig(
 			selectedAgentId?: RuntimeAgentId;
 			selectedShortcutLabel?: string | null;
 			agentAutonomousModeEnabled?: boolean;
+			newTaskStartInPlanModeByDefault?: boolean;
 			shortcuts?: RuntimeProjectShortcut[];
 			readyForReviewNotificationsEnabled?: boolean;
+			notificationSoundEnabled?: boolean;
 			autoContinueOnConnectionDropEnabled?: boolean;
 			commitPromptTemplate?: string;
 			openPrPromptTemplate?: string;

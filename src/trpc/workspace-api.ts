@@ -1,5 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
+import type { RuntimeConfigState } from "../config/runtime-config";
 import type {
 	RuntimeGitCheckoutResponse,
 	RuntimeGitDiscardResponse,
@@ -50,6 +51,7 @@ export interface CreateWorkspaceApiDependencies {
 		workspaceId: string;
 		workspacePath: string;
 	}) => Promise<ClineTaskSessionService>;
+	loadScopedRuntimeConfig: (scope: { workspaceId: string; workspacePath: string }) => Promise<RuntimeConfigState>;
 	broadcastRuntimeWorkspaceStateUpdated: (workspaceId: string, workspacePath: string) => Promise<void> | void;
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void> | void;
 	buildWorkspaceStateSnapshot: (workspaceId: string, workspacePath: string) => Promise<RuntimeWorkspaceStateResponse>;
@@ -415,6 +417,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			if (!prompt) {
 				throw new TRPCError({ code: "BAD_REQUEST", message: "Task prompt is required." });
 			}
+			const runtimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
 			// Reuses the exact `kanban task create` core pipeline: atomic locked
 			// load→mutate→save via mutateWorkspaceState + the pure addTaskToColumn. baseRef is
 			// resolved server-side from the workspace's git state (same rule as the CLI).
@@ -433,6 +436,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					{
 						title: input.title,
 						prompt,
+						startInPlanMode: runtimeConfig.newTaskStartInPlanModeByDefault,
 						baseRef: resolvedBaseRef,
 						images: input.images,
 					},

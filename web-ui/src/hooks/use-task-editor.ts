@@ -7,7 +7,6 @@ import {
 	normalizeStoredTaskAutoReviewMode,
 	TASK_AUTO_REVIEW_ENABLED_STORAGE_KEY,
 	TASK_AUTO_REVIEW_MODE_STORAGE_KEY,
-	TASK_START_IN_PLAN_MODE_STORAGE_KEY,
 } from "@/hooks/app-utils";
 import {
 	clearTaskEditDraft,
@@ -134,6 +133,8 @@ interface UseTaskEditorInput {
 	defaultCreateTaskBranchRef: string;
 	currentProjectId: string | null;
 	selectedAgentId: RuntimeAgentId | null;
+	newTaskStartInPlanModeByDefault: boolean;
+	isNewTaskStartInPlanModeDefaultLoaded: boolean;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	queueTaskStartAfterEdit?: (taskId: string) => void;
 }
@@ -212,16 +213,15 @@ export function useTaskEditor({
 	defaultCreateTaskBranchRef,
 	currentProjectId,
 	selectedAgentId,
+	newTaskStartInPlanModeByDefault,
+	isNewTaskStartInPlanModeDefaultLoaded,
 	setSelectedTaskId,
 	queueTaskStartAfterEdit,
 }: UseTaskEditorInput): UseTaskEditorResult {
 	const [isInlineTaskCreateOpen, setIsInlineTaskCreateOpen] = useState(false);
 	const [newTaskPrompt, setNewTaskPrompt] = useState("");
 	const [newTaskImages, setNewTaskImages] = useState<TaskImage[]>([]);
-	const [newTaskStartInPlanMode, setNewTaskStartInPlanMode] = useBooleanLocalStorageValue(
-		TASK_START_IN_PLAN_MODE_STORAGE_KEY,
-		false,
-	);
+	const [newTaskStartInPlanMode, setNewTaskStartInPlanMode] = useState(newTaskStartInPlanModeByDefault);
 	const [newTaskAutoReviewEnabled, setNewTaskAutoReviewEnabled] = useBooleanLocalStorageValue(
 		TASK_AUTO_REVIEW_ENABLED_STORAGE_KEY,
 		false,
@@ -285,6 +285,13 @@ export function useTaskEditor({
 
 	const resolvedDefaultTaskBranchRef = defaultTaskBranchRef;
 	const resolvedDefaultCreateTaskBranchRef = defaultCreateTaskBranchRef;
+
+	useEffect(() => {
+		if (isInlineTaskCreateOpen) {
+			return;
+		}
+		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
+	}, [isInlineTaskCreateOpen, newTaskStartInPlanModeByDefault]);
 
 	useEffect(() => {
 		const isCurrentValid = createTaskBranchOptions.some((option) => option.value === newTaskBranchRef);
@@ -404,6 +411,9 @@ export function useTaskEditor({
 	]);
 
 	const handleOpenCreateTask = useCallback(() => {
+		if (!isNewTaskStartInPlanModeDefaultLoaded) {
+			return;
+		}
 		setEditingTaskId(null);
 		setEditTaskPrompt("");
 		setEditTaskImages([]);
@@ -413,21 +423,29 @@ export function useTaskEditor({
 		setNewTaskTerminalAgentModelOverrideSettings(
 			resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, selectedAgentId),
 		);
+		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setIsInlineTaskCreateOpen(true);
-	}, [currentProjectId, resolvedDefaultCreateTaskBranchRef, selectedAgentId]);
+	}, [
+		currentProjectId,
+		isNewTaskStartInPlanModeDefaultLoaded,
+		newTaskStartInPlanModeByDefault,
+		resolvedDefaultCreateTaskBranchRef,
+		selectedAgentId,
+	]);
 
 	const handleCancelCreateTask = useCallback(() => {
 		setIsInlineTaskCreateOpen(false);
 
 		setNewTaskPrompt("");
 		setNewTaskImages([]);
+		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setNewTaskWorktreeMode("branch");
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(undefined);
-	}, [resolvedDefaultCreateTaskBranchRef]);
+	}, [newTaskStartInPlanModeByDefault, resolvedDefaultCreateTaskBranchRef]);
 
 	const handleOpenEditTask = useCallback(
 		(task: BoardCard, options?: OpenEditTaskOptions) => {
@@ -562,6 +580,9 @@ export function useTaskEditor({
 
 	const handleCreateTask = useCallback(
 		(options?: CreateTaskOptions): string | null => {
+			if (!isNewTaskStartInPlanModeDefaultLoaded) {
+				return null;
+			}
 			const prompt = newTaskPrompt.trim();
 			if (!prompt) {
 				return null;
@@ -593,6 +614,7 @@ export function useTaskEditor({
 			});
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
+			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
 			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
@@ -607,6 +629,7 @@ export function useTaskEditor({
 		},
 		[
 			board,
+			isNewTaskStartInPlanModeDefaultLoaded,
 			newTaskAgentId,
 			newTaskAutoReviewEnabled,
 			newTaskAutoReviewMode,
@@ -616,6 +639,7 @@ export function useTaskEditor({
 			newTaskImages,
 			newTaskPrompt,
 			newTaskStartInPlanMode,
+			newTaskStartInPlanModeByDefault,
 			resolvedDefaultCreateTaskBranchRef,
 			resolvedDefaultTaskBranchRef,
 			newTaskWorktreeMode,
@@ -629,6 +653,9 @@ export function useTaskEditor({
 
 	const handleCreateTasks = useCallback(
 		(prompts: string[], options?: CreateTaskOptions): string[] => {
+			if (!isNewTaskStartInPlanModeDefaultLoaded) {
+				return [];
+			}
 			const validPrompts = prompts.map((p) => p.trim()).filter(Boolean);
 			if (validPrompts.length === 0) {
 				return [];
@@ -666,6 +693,7 @@ export function useTaskEditor({
 			}
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
+			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
 			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
@@ -680,6 +708,7 @@ export function useTaskEditor({
 		},
 		[
 			board,
+			isNewTaskStartInPlanModeDefaultLoaded,
 			newTaskAgentId,
 			newTaskAutoReviewEnabled,
 			newTaskAutoReviewMode,
@@ -688,6 +717,7 @@ export function useTaskEditor({
 			newTaskTerminalAgentModelOverrideSettings,
 			newTaskImages,
 			newTaskStartInPlanMode,
+			newTaskStartInPlanModeByDefault,
 			resolvedDefaultCreateTaskBranchRef,
 			resolvedDefaultTaskBranchRef,
 			newTaskWorktreeMode,
@@ -704,6 +734,7 @@ export function useTaskEditor({
 		setEditingTaskId(null);
 
 		setNewTaskPrompt("");
+		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
@@ -719,7 +750,7 @@ export function useTaskEditor({
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(undefined);
-	}, []);
+	}, [newTaskStartInPlanModeByDefault]);
 
 	return {
 		isInlineTaskCreateOpen,

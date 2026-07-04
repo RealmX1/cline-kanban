@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
+import { loadRuntimeConfig } from "../config/runtime-config";
 import type {
 	RuntimeAgentId,
 	RuntimeBoardCard,
@@ -550,6 +551,7 @@ async function createTask(input: {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const runtimeConfig = await loadRuntimeConfig(workspaceRepoPath);
 	const created = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (state) => {
 		const resolvedBaseRef = (input.baseRef ?? "").trim() || resolveTaskBaseRef(state);
 		if (!resolvedBaseRef) {
@@ -561,7 +563,7 @@ async function createTask(input: {
 			{
 				title: input.title,
 				prompt: input.prompt,
-				startInPlanMode: input.startInPlanMode,
+				startInPlanMode: input.startInPlanMode ?? runtimeConfig.newTaskStartInPlanModeByDefault,
 				autoReviewEnabled: input.autoReviewEnabled,
 				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,

@@ -2,7 +2,6 @@ import type { RuntimeProjectTaskCounts, RuntimeTaskSessionSummary } from "@/runt
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardData, TaskAutoReviewMode } from "@/types";
 
-export const TASK_START_IN_PLAN_MODE_STORAGE_KEY = LocalStorageKey.TaskStartInPlanMode;
 export const TASK_AUTO_REVIEW_ENABLED_STORAGE_KEY = LocalStorageKey.TaskAutoReviewEnabled;
 export const TASK_AUTO_REVIEW_MODE_STORAGE_KEY = LocalStorageKey.TaskAutoReviewMode;
 const DETAIL_TASK_QUERY_PARAM = "task";

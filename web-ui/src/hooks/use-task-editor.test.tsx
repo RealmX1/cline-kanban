@@ -44,6 +44,7 @@ interface HookSnapshot {
 	isInlineTaskCreateOpen: boolean;
 	newTaskPrompt: string;
 	newTaskImages: TaskImage[];
+	newTaskStartInPlanMode: boolean;
 	newTaskBranchRef: string;
 	newTaskWorktreeMode: RuntimeTaskWorktreeMode;
 	newTaskAgentId: RuntimeAgentId | undefined;
@@ -92,6 +93,8 @@ function HookHarness({
 	defaultCreateTaskBranchRef = "main",
 	currentProjectId = "project-1",
 	selectedAgentId = null,
+	newTaskStartInPlanModeByDefault = true,
+	isNewTaskStartInPlanModeDefaultLoaded = true,
 }: {
 	initialBoard: BoardData;
 	onSnapshot: (snapshot: HookSnapshot) => void;
@@ -102,6 +105,8 @@ function HookHarness({
 	defaultCreateTaskBranchRef?: string;
 	currentProjectId?: string | null;
 	selectedAgentId?: RuntimeAgentId | null;
+	newTaskStartInPlanModeByDefault?: boolean;
+	isNewTaskStartInPlanModeDefaultLoaded?: boolean;
 }): null {
 	const [board, setBoard] = useState<BoardData>(initialBoard);
 	const [, setSelectedTaskId] = useState<string | null>(null);
@@ -114,6 +119,8 @@ function HookHarness({
 		defaultCreateTaskBranchRef,
 		currentProjectId,
 		selectedAgentId,
+		newTaskStartInPlanModeByDefault,
+		isNewTaskStartInPlanModeDefaultLoaded,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 	});
@@ -124,6 +131,7 @@ function HookHarness({
 			isInlineTaskCreateOpen: editor.isInlineTaskCreateOpen,
 			newTaskPrompt: editor.newTaskPrompt,
 			newTaskImages: editor.newTaskImages,
+			newTaskStartInPlanMode: editor.newTaskStartInPlanMode,
 			newTaskBranchRef: editor.newTaskBranchRef,
 			newTaskWorktreeMode: editor.newTaskWorktreeMode,
 			newTaskAgentId: editor.newTaskAgentId,
@@ -167,6 +175,7 @@ function HookHarness({
 		editor.isInlineTaskCreateOpen,
 		editor.newTaskPrompt,
 		editor.newTaskImages,
+		editor.newTaskStartInPlanMode,
 		editor.newTaskBranchRef,
 		editor.newTaskAgentId,
 		editor.newTaskClineSettings,
@@ -211,6 +220,105 @@ describe("useTaskEditor", () => {
 				previousActEnvironment;
 		}
 		localStorage.clear();
+	});
+
+	it("defaults new tasks to plan mode from the runtime setting", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					newTaskStartInPlanModeByDefault={true}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		expect(requireSnapshot(latestSnapshot).newTaskStartInPlanMode).toBe(true);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Create default plan task");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.startInPlanMode).toBe(true);
+	});
+
+	it("ignores the legacy browser-local plan mode default when runtime setting is false", async () => {
+		localStorage.setItem(LocalStorageKey.TaskStartInPlanMode, "true");
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					newTaskStartInPlanModeByDefault={false}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		expect(requireSnapshot(latestSnapshot).newTaskStartInPlanMode).toBe(false);
+	});
+
+	it("does not create tasks before the runtime plan mode default has loaded", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					newTaskStartInPlanModeByDefault={true}
+					isNewTaskStartInPlanModeDefaultLoaded={false}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Create after config loads");
+		});
+		await act(async () => {
+			const createdTaskId = requireSnapshot(latestSnapshot).handleCreateTask();
+			expect(createdTaskId).toBeNull();
+		});
+
+		expect(requireSnapshot(latestSnapshot).isInlineTaskCreateOpen).toBe(false);
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards).toHaveLength(0);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={requireSnapshot(latestSnapshot).board}
+					newTaskStartInPlanModeByDefault={false}
+					isNewTaskStartInPlanModeDefaultLoaded={true}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Create after config loads");
+		});
+		await act(async () => {
+			const createdTaskId = requireSnapshot(latestSnapshot).handleCreateTask();
+			expect(createdTaskId).not.toBeNull();
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.startInPlanMode).toBe(false);
 	});
 
 	it("returns the edited task id when saving a task", async () => {

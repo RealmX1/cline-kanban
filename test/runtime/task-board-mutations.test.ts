@@ -56,6 +56,30 @@ describe("deleteTasksFromBoard", () => {
 	});
 });
 
+describe("task plan mode defaults", () => {
+	it("starts newly-created tasks in plan mode when no explicit value is provided", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task A", baseRef: "main" },
+			() => "aaaaa111",
+		);
+
+		expect(created.task.startInPlanMode).toBe(true);
+	});
+
+	it("allows callers to explicitly create a task outside plan mode", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task A", baseRef: "main", startInPlanMode: false },
+			() => "aaaaa111",
+		);
+
+		expect(created.task.startInPlanMode).toBe(false);
+	});
+});
+
 describe("task images", () => {
 	it("preserves images when creating and updating tasks", () => {
 		const created = addTaskToColumn(

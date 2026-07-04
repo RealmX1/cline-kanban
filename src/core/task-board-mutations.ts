@@ -356,7 +356,7 @@ export function addTaskToColumn(
 		id: explicitTaskId || createUniqueTaskId(existingIds, randomUuid),
 		title: resolveTaskTitle(input.title, prompt),
 		prompt,
-		startInPlanMode: Boolean(input.startInPlanMode),
+		startInPlanMode: input.startInPlanMode ?? true,
 		autoReviewEnabled: Boolean(input.autoReviewEnabled),
 		autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 		images: cloneTaskImages(input.images),
