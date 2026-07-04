@@ -22,3 +22,17 @@ export function getNextDetailTaskIdAfterTrashMove(board: BoardData, taskId: stri
 
 	return detailTaskIds[currentIndex + 1] ?? detailTaskIds[currentIndex - 1] ?? null;
 }
+
+export function getNextReviewTaskIdAfterReviewTaskMovesToValidation(board: BoardData, taskId: string): string | null {
+	const reviewColumn = board.columns.find((column) => column.id === "review");
+	if (!reviewColumn) {
+		return null;
+	}
+
+	const currentIndex = reviewColumn.cards.findIndex((card) => card.id === taskId);
+	if (currentIndex === -1) {
+		return null;
+	}
+
+	return reviewColumn.cards[currentIndex + 1]?.id ?? reviewColumn.cards[currentIndex - 1]?.id ?? null;
+}

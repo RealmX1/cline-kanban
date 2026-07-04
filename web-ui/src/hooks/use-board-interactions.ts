@@ -28,7 +28,10 @@ import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
-import { getNextDetailTaskIdAfterTrashMove } from "@/utils/detail-view-task-order";
+import {
+	getNextDetailTaskIdAfterTrashMove,
+	getNextReviewTaskIdAfterReviewTaskMovesToValidation,
+} from "@/utils/detail-view-task-order";
 import {
 	getBrowserNotificationPermission,
 	hasPromptedForBrowserNotificationPermission,
@@ -172,6 +175,19 @@ export function useBoardInteractions({
 		delete pendingProgrammaticStartMoveCompletionByTaskIdRef.current[taskId];
 		pending.resolve(started);
 	}, []);
+
+	const moveFocusedReviewTaskToNextReviewTaskAfterValidationMove = useCallback(
+		(boardBeforeReviewToValidationMove: BoardData, movedTaskId: string) => {
+			const nextReviewTaskId = getNextReviewTaskIdAfterReviewTaskMovesToValidation(
+				boardBeforeReviewToValidationMove,
+				movedTaskId,
+			);
+			setSelectedTaskId((currentSelectedTaskId) =>
+				currentSelectedTaskId === movedTaskId ? (nextReviewTaskId ?? currentSelectedTaskId) : currentSelectedTaskId,
+			);
+		},
+		[setSelectedTaskId],
+	);
 
 	const getPrimaryBoardTaskElement = useCallback((taskId: string): HTMLElement | null => {
 		const boardElement = document.querySelector<HTMLElement>(".kb-board");
@@ -682,6 +698,9 @@ export function useBoardInteractions({
 				return;
 			}
 
+			if (moveEvent.fromColumnId === "review" && moveEvent.toColumnId === "validation") {
+				moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, moveEvent.taskId);
+			}
 			setBoard(applied.board);
 
 			if (
@@ -715,6 +734,7 @@ export function useBoardInteractions({
 			resumeTaskFromTrash,
 			resolvePendingProgrammaticStartMove,
 			resolvePendingProgrammaticTrashMove,
+			moveFocusedReviewTaskToNextReviewTaskAfterValidationMove,
 			setBoard,
 			setSelectedTaskId,
 		],
@@ -866,6 +886,9 @@ export function useBoardInteractions({
 			const moved = moveTaskToColumn(board, taskId, "validation", { insertAtTop: true });
 			if (moved.moved) {
 				setBoard(moved.board);
+				if (fromColumnId === "review") {
+					moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, taskId);
+				}
 				// A session that is *actively producing output* in Validation gets auto-migrated back to
 				// In Progress by the level-triggered effect above, so warn the developer instead of leaving
 				// the card looking like it never moved. Idle / already-exited sessions (still flagged
@@ -882,7 +905,7 @@ export function useBoardInteractions({
 				}
 			}
 		},
-		[board, sessions, setBoard],
+		[board, moveFocusedReviewTaskToNextReviewTaskAfterValidationMove, sessions, setBoard],
 	);
 
 	const handleMoveSelectedCardToValidation = useCallback(() => {

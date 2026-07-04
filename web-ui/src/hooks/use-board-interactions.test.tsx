@@ -1,3 +1,4 @@
+import type { DropResult } from "@hello-pangea/dnd";
 import { act, type Dispatch, type ReactElement, type SetStateAction, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -115,6 +116,26 @@ function createBoardWithTaskInColumn(taskId: string, columnId: BoardData["column
 	return { columns, dependencies: [] };
 }
 
+function createBoardWithReviewTaskIds(
+	reviewTaskIds: string[],
+	otherColumnCardsByColumnId?: Partial<Record<BoardData["columns"][number]["id"], BoardCard[]>>,
+): BoardData {
+	return {
+		columns: [
+			{ id: "backlog", title: "Backlog", cards: otherColumnCardsByColumnId?.backlog ?? [] },
+			{ id: "in_progress", title: "In Progress", cards: otherColumnCardsByColumnId?.in_progress ?? [] },
+			{
+				id: "review",
+				title: "Review",
+				cards: reviewTaskIds.map((taskId, index) => createTask(taskId, `Review task ${taskId}`, index + 1)),
+			},
+			{ id: "validation", title: "Validation", cards: otherColumnCardsByColumnId?.validation ?? [] },
+			{ id: "trash", title: "Done", cards: otherColumnCardsByColumnId?.trash ?? [] },
+		],
+		dependencies: [],
+	};
+}
+
 const NOOP_STOP_SESSION = async (): Promise<void> => {};
 const NOOP_CLEANUP_WORKSPACE = async (): Promise<null> => null;
 const NOOP_FETCH_WORKSPACE_INFO = async (): Promise<null> => null;
@@ -155,6 +176,8 @@ interface HookSnapshot {
 	handleStartTask: (taskId: string) => void;
 	handleCardSelect: (taskId: string) => void;
 	handleMoveReviewCardToTrash: (taskId: string) => void;
+	handleMoveCardToValidation: (taskId: string) => void;
+	handleDragEnd: (result: DropResult) => void;
 	isMoveToDoneConfirmOpen: boolean;
 	confirmMoveToDone: () => void;
 	cancelMoveToDone: () => void;
@@ -265,6 +288,8 @@ function HookHarness({
 			handleStartTask: actions.handleStartTask,
 			handleCardSelect: actions.handleCardSelect,
 			handleMoveReviewCardToTrash: actions.handleMoveReviewCardToTrash,
+			handleMoveCardToValidation: actions.handleMoveCardToValidation,
+			handleDragEnd: actions.handleDragEnd,
 			isMoveToDoneConfirmOpen: actions.isMoveToDoneConfirmOpen,
 			confirmMoveToDone: actions.confirmMoveToDone,
 			cancelMoveToDone: actions.cancelMoveToDone,
@@ -279,6 +304,8 @@ function HookHarness({
 		actions.handleRestoreTaskFromTrash,
 		actions.handleStartTask,
 		actions.handleMoveReviewCardToTrash,
+		actions.handleMoveCardToValidation,
+		actions.handleDragEnd,
 		actions.isMoveToDoneConfirmOpen,
 		actions.confirmMoveToDone,
 		actions.cancelMoveToDone,
@@ -332,6 +359,53 @@ describe("useBoardInteractions", () => {
 				previousActEnvironment;
 		}
 	});
+
+	async function renderMoveToValidationHarness(board: BoardData, initialSelectedTaskId: string | null) {
+		let currentBoard = board;
+		let selectedTaskId = initialSelectedTaskId;
+		let latestSnapshot: HookSnapshot | null = null;
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+		});
+		const setSelectedTaskId = vi.fn<Dispatch<SetStateAction<string | null>>>((nextSelectedTaskId) => {
+			selectedTaskId =
+				typeof nextSelectedTaskId === "function" ? nextSelectedTaskId(selectedTaskId) : nextSelectedTaskId;
+		});
+
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopLinkedBacklogTaskActions();
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={currentBoard}
+					setBoard={setBoard}
+					ensureTaskWorkspace={async () => ({ ok: true as const })}
+					startTaskSession={async () => ({ ok: true as const })}
+					selectedTaskId={initialSelectedTaskId}
+					setSelectedTaskIdOverride={setSelectedTaskId}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const requireSnapshot = (): HookSnapshot => {
+			if (!latestSnapshot) {
+				throw new Error("Expected a hook snapshot.");
+			}
+			return latestSnapshot;
+		};
+
+		return {
+			getCurrentBoard: () => currentBoard,
+			getSelectedTaskId: () => selectedTaskId,
+			requireSnapshot,
+			setBoard,
+			setSelectedTaskId,
+		};
+	}
 
 	it("starts dependency-unblocked tasks even when setBoard updater is deferred", async () => {
 		let startBacklogTaskWithAnimation: ((task: BoardCard) => Promise<boolean>) | null = null;
@@ -931,6 +1005,106 @@ describe("useBoardInteractions", () => {
 		});
 
 		expect(setSelectedTaskId).not.toHaveBeenCalled();
+	});
+
+	it("moves focus to the following review task when the selected review task moves to validation", async () => {
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["review-1", "review-2", "review-3"]),
+			"review-2",
+		);
+
+		await act(async () => {
+			harness.requireSnapshot().handleMoveCardToValidation("review-2");
+		});
+
+		const reviewTaskIds = harness
+			.getCurrentBoard()
+			.columns.find((column) => column.id === "review")
+			?.cards.map((card) => card.id);
+		const validationTaskIds = harness
+			.getCurrentBoard()
+			.columns.find((column) => column.id === "validation")
+			?.cards.map((card) => card.id);
+		expect(reviewTaskIds).toEqual(["review-1", "review-3"]);
+		expect(validationTaskIds).toEqual(["review-2"]);
+		expect(harness.getSelectedTaskId()).toBe("review-3");
+	});
+
+	it("moves focus to the previous review task when the selected last review task moves to validation", async () => {
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["review-1", "review-2"]),
+			"review-2",
+		);
+
+		await act(async () => {
+			harness.requireSnapshot().handleMoveCardToValidation("review-2");
+		});
+
+		expect(harness.getSelectedTaskId()).toBe("review-1");
+	});
+
+	it("keeps focus on the moved validation task when review has no remaining tasks", async () => {
+		const harness = await renderMoveToValidationHarness(createBoardWithReviewTaskIds(["review-1"]), "review-1");
+
+		await act(async () => {
+			harness.requireSnapshot().handleMoveCardToValidation("review-1");
+		});
+
+		expect(harness.getSelectedTaskId()).toBe("review-1");
+	});
+
+	it("does not steal focus when a non-selected review task moves to validation", async () => {
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["review-1", "review-2", "review-3"]),
+			"review-1",
+		);
+
+		await act(async () => {
+			harness.requireSnapshot().handleMoveCardToValidation("review-2");
+		});
+
+		expect(harness.getSelectedTaskId()).toBe("review-1");
+	});
+
+	it("moves focus to the following review task when the selected review task is dragged to validation", async () => {
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["review-1", "review-2"]),
+			"review-1",
+		);
+		const reviewToValidationDropResult: DropResult = {
+			draggableId: "review-1",
+			type: "CARD",
+			source: { droppableId: "review", index: 0 },
+			destination: { droppableId: "validation", index: 0 },
+			mode: "SNAP",
+			reason: "DROP",
+			combine: null,
+		};
+
+		await act(async () => {
+			harness.requireSnapshot().handleDragEnd(reviewToValidationDropResult);
+		});
+
+		const validationTaskIds = harness
+			.getCurrentBoard()
+			.columns.find((column) => column.id === "validation")
+			?.cards.map((card) => card.id);
+		expect(validationTaskIds).toEqual(["review-1"]);
+		expect(harness.getSelectedTaskId()).toBe("review-2");
+	});
+
+	it("keeps focus on an in-progress task when that task moves to validation", async () => {
+		const inProgressTask = createTask("in-progress-1", "In-progress task", 1);
+		const harness = await renderMoveToValidationHarness(
+			createBoardWithReviewTaskIds(["review-1", "review-2"], { in_progress: [inProgressTask] }),
+			"in-progress-1",
+		);
+
+		await act(async () => {
+			harness.requireSnapshot().handleMoveCardToValidation("in-progress-1");
+		});
+
+		expect(harness.getSelectedTaskId()).toBe("in-progress-1");
 	});
 
 	it("keeps an idle (output-quiet) running task in Validation instead of bouncing it", async () => {
