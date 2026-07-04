@@ -12,7 +12,10 @@ function renderPanel(root: Root, panel: ReactElement): void {
 
 function setControlledTextareaValue(textarea: HTMLTextAreaElement, value: string): void {
 	const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-	setter?.call(textarea, value);
+	if (!setter) {
+		throw new Error("Expected textarea value setter");
+	}
+	setter.call(textarea, value);
 	textarea.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
@@ -50,6 +53,74 @@ describe("TaskCommentsPanel", () => {
 			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 				previousActEnvironment;
 		}
+	});
+
+	it("adds a new task comment when the new comment textarea loses focus", async () => {
+		const onChange = vi.fn();
+
+		await act(async () => {
+			renderPanel(root, <TaskCommentsPanel taskCommentEntries={[]} onTaskCommentEntriesChange={onChange} />);
+		});
+
+		const textarea = container.querySelector("textarea");
+		expect(textarea).toBeInstanceOf(HTMLTextAreaElement);
+		if (!(textarea instanceof HTMLTextAreaElement)) {
+			throw new Error("Expected new comment textarea.");
+		}
+
+		await act(async () => {
+			setControlledTextareaValue(textarea, "Remember this");
+		});
+
+		await act(async () => {
+			textarea.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+		});
+
+		expect(onChange).toHaveBeenCalledTimes(1);
+		expect(onChange.mock.calls[0]?.[0]).toMatchObject([{ commentText: "Remember this" }]);
+	});
+
+	it("updates an existing task comment when the edit textarea loses focus", async () => {
+		const onChange = vi.fn();
+		const existingCommentEntries: TaskCommentEntry[] = [
+			{
+				taskCommentEntryId: "comment-1",
+				commentText: "Before",
+				createdAt: 100,
+				updatedAt: 100,
+			},
+		];
+
+		await act(async () => {
+			renderPanel(
+				root,
+				<TaskCommentsPanel taskCommentEntries={existingCommentEntries} onTaskCommentEntriesChange={onChange} />,
+			);
+		});
+
+		const textareas = container.querySelectorAll("textarea");
+		const editTextarea = textareas[1];
+		expect(editTextarea).toBeInstanceOf(HTMLTextAreaElement);
+		if (!(editTextarea instanceof HTMLTextAreaElement)) {
+			throw new Error("Expected edit comment textarea.");
+		}
+
+		await act(async () => {
+			setControlledTextareaValue(editTextarea, "After");
+		});
+
+		await act(async () => {
+			editTextarea.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+		});
+
+		expect(onChange).toHaveBeenCalledTimes(1);
+		expect(onChange.mock.calls[0]?.[0]).toMatchObject([
+			{
+				taskCommentEntryId: "comment-1",
+				commentText: "After",
+				createdAt: 100,
+			},
+		]);
 	});
 
 	it("focuses the saved comment entry after adding it", async () => {

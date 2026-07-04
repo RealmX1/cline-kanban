@@ -1,5 +1,14 @@
 import { Check, ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react";
-import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+	type MouseEvent,
+	type ReactNode,
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -133,6 +142,15 @@ function TaskCommentEntryRow({
 
 	const trimmedDraftText = draftText.trim();
 	const canSave = trimmedDraftText.length > 0 && trimmedDraftText !== entry.commentText;
+	const saveDraftTextIfChanged = useCallback(() => {
+		if (!canSave) {
+			return;
+		}
+		onUpdate(entry.taskCommentEntryId, trimmedDraftText);
+	}, [canSave, entry.taskCommentEntryId, onUpdate, trimmedDraftText]);
+	const keepTextareaFocusedForAction = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+		event.preventDefault();
+	}, []);
 
 	return (
 		<div
@@ -151,6 +169,7 @@ function TaskCommentEntryRow({
 				ref={textareaRef}
 				value={draftText}
 				onChange={(event) => setDraftText(event.target.value)}
+				onBlur={saveDraftTextIfChanged}
 				placeholder="Edit task comment..."
 				rows={1}
 				spellCheck={false}
@@ -176,7 +195,8 @@ function TaskCommentEntryRow({
 						icon={<Check size={14} />}
 						aria-label="Save task comment"
 						disabled={!canSave}
-						onClick={() => onUpdate(entry.taskCommentEntryId, trimmedDraftText)}
+						onMouseDown={keepTextareaFocusedForAction}
+						onClick={saveDraftTextIfChanged}
 					/>
 				</Tooltip>
 				<Tooltip content="Delete">
@@ -186,6 +206,7 @@ function TaskCommentEntryRow({
 						icon={<Trash2 size={14} />}
 						className="hover:text-status-red"
 						aria-label="Delete task comment"
+						onMouseDown={keepTextareaFocusedForAction}
 						onClick={() => onDelete(entry.taskCommentEntryId)}
 					/>
 				</Tooltip>
@@ -219,7 +240,7 @@ export function TaskCommentsPanel({
 		[taskCommentEntries],
 	);
 
-	const handleAddTaskCommentEntry = (): void => {
+	const handleAddTaskCommentEntry = useCallback((): void => {
 		const commentText = newCommentText.trim();
 		if (!commentText) {
 			return;
@@ -237,7 +258,10 @@ export function TaskCommentsPanel({
 		]);
 		setPendingFocusTaskCommentEntryId(taskCommentEntryId);
 		setNewCommentText("");
-	};
+	}, [newCommentText, onTaskCommentEntriesChange, taskCommentEntries]);
+	const keepNewCommentTextareaFocusedForAction = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+		event.preventDefault();
+	}, []);
 
 	const handleUpdateTaskCommentEntry = (taskCommentEntryId: string, commentText: string): void => {
 		const now = Date.now();
@@ -265,6 +289,7 @@ export function TaskCommentsPanel({
 						ref={newCommentTextareaRef}
 						value={newCommentText}
 						onChange={(event) => setNewCommentText(event.target.value)}
+						onBlur={handleAddTaskCommentEntry}
 						placeholder="Write a task comment..."
 						rows={1}
 						spellCheck={false}
@@ -277,6 +302,7 @@ export function TaskCommentsPanel({
 							size="sm"
 							icon={<Plus size={14} />}
 							disabled={newCommentText.trim().length === 0}
+							onMouseDown={keepNewCommentTextareaFocusedForAction}
 							onClick={handleAddTaskCommentEntry}
 						>
 							Add comment

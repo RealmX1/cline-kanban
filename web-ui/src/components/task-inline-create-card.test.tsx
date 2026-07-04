@@ -132,4 +132,27 @@ describe("TaskInlineCreateCard", () => {
 			outside.remove();
 		}
 	});
+
+	it("saves an edit card when focus leaves the inline task editor", async () => {
+		const save = vi.fn();
+		const outside = document.createElement("button");
+		document.body.appendChild(outside);
+
+		try {
+			await act(async () => {
+				root.render(<InlineEditor idPrefix="single-editor" onCreate={save} />);
+			});
+
+			const textarea = container.querySelector("textarea");
+			expect(textarea).toBeInstanceOf(HTMLTextAreaElement);
+
+			await act(async () => {
+				textarea?.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: outside }));
+			});
+
+			expect(save).toHaveBeenCalledTimes(1);
+		} finally {
+			outside.remove();
+		}
+	});
 });
