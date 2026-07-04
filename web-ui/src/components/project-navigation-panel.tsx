@@ -28,6 +28,7 @@ import {
 	removeLocalStorageItem,
 	writeLocalStorageItem,
 } from "@/storage/local-storage-store";
+import { CREATE_TASK_KEYBOARD_SHORTCUT_KEYS } from "@/utils/create-task-keyboard-shortcut";
 import { formatPathForDisplay } from "@/utils/path-display";
 import { isMacPlatform, modifierKeyLabel } from "@/utils/platform";
 import { useUnmount, useWindowEvent } from "@/utils/react-use";
@@ -590,7 +591,7 @@ const MOD = isMacPlatform ? "⌘" : modifierKeyLabel;
 const ALT = isMacPlatform ? "⌥" : "Alt";
 
 const ESSENTIAL_SHORTCUTS = [
-	{ keys: ["C"], label: "New task" },
+	{ keys: CREATE_TASK_KEYBOARD_SHORTCUT_KEYS, label: "New task" },
 	{ keys: [MOD, "B"], label: "Start backlog tasks" },
 	{ keys: [MOD, "Shift", "S"], label: "Settings" },
 	{ keys: ["Click", MOD], label: "Hold to link tasks" },
