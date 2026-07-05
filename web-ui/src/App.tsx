@@ -882,6 +882,7 @@ export default function App(): ReactElement {
 			onClineSettingsChange={setEditTaskClineSettings}
 			terminalAgentModelOverrideSettings={editTaskTerminalAgentModelOverrideSettings}
 			onTerminalAgentModelOverrideSettingsChange={setEditTaskTerminalAgentModelOverrideSettings}
+			agents={runtimeProjectConfig?.agents ?? []}
 			defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 			defaultProviderId={defaultTaskClineProviderId}
 			defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
@@ -1264,6 +1265,7 @@ export default function App(): ReactElement {
 					onClineSettingsChange={setNewTaskClineSettings}
 					terminalAgentModelOverrideSettings={newTaskTerminalAgentModelOverrideSettings}
 					onTerminalAgentModelOverrideSettingsChange={setNewTaskTerminalAgentModelOverrideSettings}
+					agents={runtimeProjectConfig?.agents ?? []}
 					defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 					defaultProviderId={defaultTaskClineProviderId}
 					defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
