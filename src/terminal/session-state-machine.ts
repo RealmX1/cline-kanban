@@ -29,12 +29,20 @@ export interface SessionTransitionResult {
 	clearAttentionBuffer: boolean;
 }
 
-// manual_review（「移至 Review」手动钉住）现也可翻回 running：agent 在活跃产出时下一笔
-// to_in_progress / prompt-ready 即解锁，卡片回 In Progress。空闲 / 卡死的 manual_review 卡不会被误翻回——
-// 它根本不发 hook、且 prompt-ready 探测仅对 reviewReason==="attention" 触发（见 agent-session-adapters.ts），
-// 加之看板 Review 列已补活跃度 offset（use-board-interactions.ts），无实质产出者天然留在 review。
+// manual_review（「移至 Review」手动钉住）与 idle_stall（scanForStalls 对「完工不退出」终端会话的自愈翻入）
+// 现也可翻回 running：agent 在活跃产出时下一笔 to_in_progress / prompt-ready 即解锁，卡片回 In Progress。
+// 空闲 / 卡死的 manual_review / idle_stall 卡不会被误翻回——它根本不发 hook、且 prompt-ready 探测仅对
+// reviewReason==="attention" 触发（见 agent-session-adapters.ts），加之看板 Review 列已补活跃度 offset
+// （use-board-interactions.ts），无实质产出者天然留在 review。idle_stall 必与本 allowlist 及 hook 闸
+// （hook-event-task-transition-gate.ts）的 to_in_progress 放行集同步，缺一则自愈进 review 的终端会话永卡 review。
 function canReturnToRunning(reason: RuntimeTaskSessionReviewReason): boolean {
-	return reason === "attention" || reason === "hook" || reason === "error" || reason === "manual_review";
+	return (
+		reason === "attention" ||
+		reason === "hook" ||
+		reason === "error" ||
+		reason === "manual_review" ||
+		reason === "idle_stall"
+	);
 }
 
 // Stage 4 全写侧反转：reducer 的转换补丁不再写 legacy `state`，而是从「目标 state + 当刻上下文」经

@@ -348,7 +348,11 @@ export type RuntimeTaskSessionMode = z.infer<typeof runtimeTaskSessionModeSchema
 export const runtimeTaskSessionReviewReasonSchema = z
 	// manual_review：用户经卡片悬浮按钮把一个停在 agent 回合（多为卡死/空闲）的会话手动翻入「等人审查」
 	// 回合（区别于 agent 自然完成的 hook/exit/completion），自解释、利于排查与 UI 区分。
-	.enum(["attention", "exit", "error", "interrupted", "hook", "completion", "manual_review"])
+	// idle_stall：终端 agent 完工却不退出、turnOwner 卡在 agent、liveness=live（光标重绘让 lastOutputAt
+	// 一直刷新到「现在」），既无进程退出、也无 turnOwner=user 持稳可触发客户端搬列，于是永久滞留 In Progress。
+	// scanForStalls 观测到「agent 回合 + 停在交互提示符 + lastSubstantiveOutputAt 超保守阈值」时主动翻入审查
+	// 回合自愈（区别于 manual_review 的人工触发、区别于 hook 的 agent 自然 Stop——保留诊断可分性）。
+	.enum(["attention", "exit", "error", "interrupted", "hook", "completion", "manual_review", "idle_stall"])
 	.nullable();
 export type RuntimeTaskSessionReviewReason = z.infer<typeof runtimeTaskSessionReviewReasonSchema>;
 
