@@ -13,9 +13,11 @@ import {
 	type RuntimeCommandRunRequest,
 	type RuntimeConfigSaveRequest,
 	type RuntimeContinueConnectionRetrySessionsRequest,
+	type RuntimeDeploymentMarker,
 	type RuntimeDirectoryListRequest,
 	type RuntimeDismissConnectionRetrySessionsRequest,
 	type RuntimeGitCheckoutRequest,
+	type RuntimeGuidedVerificationState,
 	type RuntimeHookIngestRequest,
 	type RuntimeProjectAddRequest,
 	type RuntimeProjectRemoveRequest,
@@ -53,9 +55,11 @@ import {
 	runtimeCommandRunRequestSchema,
 	runtimeConfigSaveRequestSchema,
 	runtimeContinueConnectionRetrySessionsRequestSchema,
+	runtimeDeploymentMarkerSchema,
 	runtimeDirectoryListRequestSchema,
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeGitCheckoutRequestSchema,
+	runtimeGuidedVerificationStateSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeProjectAddRequestSchema,
 	runtimeProjectRemoveRequestSchema,
@@ -719,4 +723,16 @@ export function parseDirectoryListRequest(value: unknown): RuntimeDirectoryListR
 
 export function parseClineAccountSwitchRequest(value: unknown): RuntimeClineAccountSwitchRequest {
 	return parseWithSchema(runtimeClineAccountSwitchRequestSchema, value);
+}
+
+// 读盘校验 last-deployed-source-commit.json（plan 1a）。校验失败即 throw；
+// 「文件缺失 / JSON 损坏隔离降级」由 deployment modules 阶段 try/catch 包裹调用。
+export function parseDeploymentMarker(value: unknown): RuntimeDeploymentMarker {
+	return parseWithSchema(runtimeDeploymentMarkerSchema, value);
+}
+
+// 读盘校验 guided-verification-state.json（plan 1c）。校验失败即 throw；
+// 损坏文件改名隔离并降级为空 deploymentGroups 由 modules 阶段处理，不在此静默吞错。
+export function parseGuidedVerificationState(value: unknown): RuntimeGuidedVerificationState {
+	return parseWithSchema(runtimeGuidedVerificationStateSchema, value);
 }

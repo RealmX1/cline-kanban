@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { createGitProcessEnv } from "../core/git-process-env";
 
@@ -84,6 +84,58 @@ export async function getGitStdout(args: string[], cwd: string, options: RunGitO
 	}
 
 	return result.stdout;
+}
+
+// `runGit` 走 execFile，无法向 git 的 stdin 灌数据；`git patch-id` 只从 stdin 读 patch，故需一个 spawn 版本。
+// 保持不导出：目前唯一用途是 computeStablePatchId 的两步管道。
+async function runGitReadingStdin(
+	cwd: string,
+	args: string[],
+	stdin: string,
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+	return await new Promise((resolve) => {
+		const child = spawn("git", ["-c", "core.quotepath=false", ...args], {
+			cwd,
+			env: createGitProcessEnv(),
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk.toString();
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk.toString();
+		});
+		child.on("error", (error) => {
+			resolve({ ok: false, stdout: "", stderr: error instanceof Error ? error.message : String(error) });
+		});
+		child.on("close", (code) => {
+			resolve({ ok: code === 0, stdout, stderr: stderr.trim() });
+		});
+		// git 可能在读完前关闭 stdin（如空 diff）——吞掉 EPIPE，让 close 事件裁决成败。
+		child.stdin.on("error", () => {});
+		child.stdin.write(stdin);
+		child.stdin.end();
+	});
+}
+
+/**
+ * 计算某个 commit 的 stable patch-id，语义等价 `git show <sha> | git patch-id --stable`。
+ * 用于 cherry-pick 后 hash 变更但 patch 相同的等价匹配（部署关联引擎）。
+ * 无 diff 的提交（如 merge commit 的 combined diff、空提交）patch-id 无输出，返回 null。
+ */
+export async function computeStablePatchId(cwd: string, sha: string): Promise<string | null> {
+	const show = await runGit(cwd, ["show", sha], { trimStdout: false });
+	if (!show.ok || show.stdout.trim() === "") {
+		return null;
+	}
+	const patchId = await runGitReadingStdin(cwd, ["patch-id", "--stable"], show.stdout);
+	if (!patchId.ok) {
+		return null;
+	}
+	// 输出形如 `<patch-id> <commit-id>`，取首列。
+	const firstToken = patchId.stdout.trim().split(/\s+/)[0];
+	return firstToken !== undefined && firstToken !== "" ? firstToken : null;
 }
 
 export interface GitHeadInfo {

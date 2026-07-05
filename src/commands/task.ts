@@ -66,7 +66,7 @@ function toErrorMessage(error: unknown): string {
 	return String(error);
 }
 
-function printJson(payload: unknown): void {
+export function printJson(payload: unknown): void {
 	process.stdout.write(`${safeStringify(payload, 2)}\n`);
 }
 
@@ -295,7 +295,7 @@ function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string)
 	throw new Error(`${commandName} requires either --task-id or --column.`);
 }
 
-function createRuntimeTrpcClient(workspaceId: string | null) {
+export function createRuntimeTrpcClient(workspaceId: string | null) {
 	const trpcTimeoutMs = resolveCliTrpcTimeoutMs();
 	return createTRPCProxyClient<RuntimeAppRouter>({
 		links: [
@@ -916,7 +916,7 @@ async function isTaskParkedCommand(input: { cwd: string; taskId: string; project
 	};
 }
 
-interface TrashTaskExecutionResult {
+export interface TrashTaskExecutionResult {
 	task: JsonRecord;
 	taskId: string;
 	previousColumnId: ListTaskColumn;
@@ -938,7 +938,9 @@ function columnCanHaveLiveTaskSession(columnId: ListTaskColumn): boolean {
 	return columnId === "in_progress" || columnId === "review" || columnId === "validation";
 }
 
-async function trashTaskById(input: {
+// deployment CLI（verification-complete / -confirm 移列）复用其完整副作用链：
+// notifyStateUpdated（server reload）→ 按列门控 stopTaskSession → 自动启动就绪 linked 任务 → deleteWorktree。
+export async function trashTaskById(input: {
 	cwd: string;
 	taskId: string;
 	projectPath?: string;

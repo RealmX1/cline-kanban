@@ -26,6 +26,7 @@ function createRuntimeConfigResponse(selectedAgentId: RuntimeConfigResponse["sel
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		guidedVerificationForceCompleteEnabled: false,
 		detectedCommands: ["codex"],
 		agents: [
 			{

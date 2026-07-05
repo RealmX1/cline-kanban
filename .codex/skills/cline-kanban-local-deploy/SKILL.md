@@ -74,7 +74,7 @@ Present this as the default because source edits are not live until the build/li
      - 正向新增:`git log --oneline --no-decorate <OLD>..<NEW>` —— 列为「本次新投入使用的 N 个源 commit」。
      - 反向兜底:`git log --oneline --no-decorate <NEW>..<OLD>` —— 若非空说明发生回滚/分叉,标为「⚠️ M 个 commit 被回退」并如实给出方向,别只报单向。
    - 诚实覆盖三类边界:① OLD 为「无基线」→ 报「无基线(首次/不可知),仅列出本次 NEW 所在的源 commit」;② 正向与反向区间皆空 → 报「与上次部署为同一 commit,无新增」;③ 区间命令失败(OLD 已不在本 repo,git 报 `unknown revision`)→ 退化为直接给出 OLD/NEW 两个 SHA、不做区间。
-   - 汇报后写/覆盖部署标记:把本次 NEW 写进 `~/.cline/kanban/last-deployed-source-commit.json`,字段 `deployedSourceCommit`(NEW SHA)、`deployedAtIso`(当前时间)、`sourceCheckoutPath`(源 checkout 绝对路径)、`packageVersion`(`package.json` 版本)。NEW 即成为下一次部署的 OLD 基线。
+   - 汇报后**唯一经 CLI 记录部署**:跑 `kanban deployment record`(在源 checkout 目录内运行,或传 `--source-checkout-path <源 checkout 绝对路径>` 与 `--new-commit <NEW SHA>`;`--project-path` 可选,缺省按 source checkout 路径匹配已注册 workspace)。该命令写/覆盖部署标记 `~/.cline/kanban/last-deployed-source-commit.json`(含 `deploymentId`(新 uuid)、`deployedSourceCommit`(NEW)、`deployedAtIso`、`sourceCheckoutPath`、`packageVersion`),**并**创建本次部署的 Guided Verification 组、关联本次 delta 命中的任务提交。NEW 即成为下一次部署的 OLD 基线。**绝不手写标记文件**——绕过 `record` 不会生成 `deploymentId`、不会创建 verification 组,同 commit 重部署时前端检测键会失效。命令返回 JSON(含本次 `deploymentId`、deploy SHA、关联任务数),并入本步汇报。
    - 措辞锚在 runtime 语义:「现在运行的 build 反映了这些源 commit」,不要写成「源码集成了这些 commit」(那是 upstream-update skill 的语义)。
 
 7. If something looks wiped, stop and recover from artifacts.
@@ -91,7 +91,7 @@ Report:
 - Whether any source files or version files were intentionally changed; normally this skill should not change version files.
 - Where runtime backups were saved.
 - Which service/process is now running and how it was launched.
-- 现在运行的 build 对应的源 commit(NEW),以及部署标记文件 `~/.cline/kanban/last-deployed-source-commit.json` 的更新情况(供下次部署作 OLD 基线)。
+- 现在运行的 build 对应的源 commit(NEW),以及 `kanban deployment record` 的记录结果:部署标记文件 `~/.cline/kanban/last-deployed-source-commit.json` 的更新情况(供下次部署作 OLD 基线)、本次 `deploymentId`、以及本次 Guided Verification 组关联的任务数。
 - Validation commands and results.
 - Any residual risk, especially tasks that lost live processes and need manual resume.
 

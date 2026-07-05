@@ -381,6 +381,8 @@ export function RuntimeSettingsDialog({
 	const [readyForReviewNotificationsEnabled, setReadyForReviewNotificationsEnabled] = useState(true);
 	const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(true);
 	const [autoContinueOnConnectionDropEnabled, setAutoContinueOnConnectionDropEnabled] = useState(true);
+	// Guided Verification break-glass 总闸：默认关闭，开启后 CLI `--force` 才能跳过 token 两步确认直接入 Done。
+	const [guidedVerificationForceCompleteEnabled, setGuidedVerificationForceCompleteEnabled] = useState(false);
 	const [initialThemeId, setInitialThemeId] = useState<ThemeId>(readStoredThemeId);
 	const [draftThemeId, setDraftThemeId] = useState<ThemeId>(readStoredThemeId);
 	const [notificationPermission, setNotificationPermission] = useState<BrowserNotificationPermission>("unsupported");
@@ -457,6 +459,7 @@ export function RuntimeSettingsDialog({
 	const initialReadyForReviewNotificationsEnabled = config?.readyForReviewNotificationsEnabled ?? true;
 	const initialNotificationSoundEnabled = config?.notificationSoundEnabled ?? true;
 	const initialAutoContinueOnConnectionDropEnabled = config?.autoContinueOnConnectionDropEnabled ?? true;
+	const initialGuidedVerificationForceCompleteEnabled = config?.guidedVerificationForceCompleteEnabled ?? false;
 	const initialShortcuts = config?.shortcuts ?? [];
 	const initialCommitPromptTemplate = config?.commitPromptTemplate ?? "";
 	const initialOpenPrPromptTemplate = config?.openPrPromptTemplate ?? "";
@@ -494,6 +497,9 @@ export function RuntimeSettingsDialog({
 		if (autoContinueOnConnectionDropEnabled !== initialAutoContinueOnConnectionDropEnabled) {
 			return true;
 		}
+		if (guidedVerificationForceCompleteEnabled !== initialGuidedVerificationForceCompleteEnabled) {
+			return true;
+		}
 		if (clineSettings.hasUnsavedChanges) {
 			return true;
 		}
@@ -519,6 +525,7 @@ export function RuntimeSettingsDialog({
 	}, [
 		agentAutonomousModeEnabled,
 		autoContinueOnConnectionDropEnabled,
+		guidedVerificationForceCompleteEnabled,
 		clineMcpSettings.hasUnsavedChanges,
 		clineSettings.hasUnsavedChanges,
 		commitPromptTemplate,
@@ -526,6 +533,7 @@ export function RuntimeSettingsDialog({
 		draftThemeId,
 		initialAgentAutonomousModeEnabled,
 		initialAutoContinueOnConnectionDropEnabled,
+		initialGuidedVerificationForceCompleteEnabled,
 		initialCommitPromptTemplate,
 		initialNewTaskStartInPlanModeByDefault,
 		initialOpenPrPromptTemplate,
@@ -552,6 +560,7 @@ export function RuntimeSettingsDialog({
 		setReadyForReviewNotificationsEnabled(config?.readyForReviewNotificationsEnabled ?? true);
 		setNotificationSoundEnabled(config?.notificationSoundEnabled ?? true);
 		setAutoContinueOnConnectionDropEnabled(config?.autoContinueOnConnectionDropEnabled ?? true);
+		setGuidedVerificationForceCompleteEnabled(config?.guidedVerificationForceCompleteEnabled ?? false);
 		setShortcuts(config?.shortcuts ?? []);
 		setCommitPromptTemplate(config?.commitPromptTemplate ?? "");
 		setOpenPrPromptTemplate(config?.openPrPromptTemplate ?? "");
@@ -559,6 +568,7 @@ export function RuntimeSettingsDialog({
 	}, [
 		config?.agentAutonomousModeEnabled,
 		config?.autoContinueOnConnectionDropEnabled,
+		config?.guidedVerificationForceCompleteEnabled,
 		config?.commitPromptTemplate,
 		config?.newTaskStartInPlanModeByDefault,
 		config?.openPrPromptTemplate,
@@ -740,6 +750,7 @@ export function RuntimeSettingsDialog({
 			readyForReviewNotificationsEnabled,
 			notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled,
 			shortcuts,
 			commitPromptTemplate,
 			openPrPromptTemplate,
@@ -862,6 +873,30 @@ export function RuntimeSettingsDialog({
 							</RadixSwitch.Root>
 							<span className="text-[13px] text-text-primary">Start new tasks in plan mode by default</span>
 						</div>
+					</div>
+
+					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
+						<h6 className="text-[12px] font-semibold uppercase tracking-wider text-text-secondary m-0 mb-2">
+							Guided Verification
+						</h6>
+						<div className="flex items-center gap-2">
+							<RadixSwitch.Root
+								checked={guidedVerificationForceCompleteEnabled}
+								disabled={controlsDisabled}
+								onCheckedChange={setGuidedVerificationForceCompleteEnabled}
+								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer disabled:opacity-40"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+							</RadixSwitch.Root>
+							<span className="text-[13px] text-text-primary">
+								允许 CLI <code className="font-mono text-xs">--force</code> 强制完成 Guided Verification
+							</span>
+						</div>
+						<p className="text-text-secondary text-[13px] mt-2 mb-0">
+							仅作为 break-glass 逃生舱：开启此总闸后，CLI 传 <code className="font-mono text-xs">--force</code>{" "}
+							才能跳过 token 两步确认，直接把任务移入 Done（供脚本化 dogfood / CI
+							使用，操作者自担风险）。默认关闭。
+						</p>
 					</div>
 
 					{/* ---- Cline ---- */}

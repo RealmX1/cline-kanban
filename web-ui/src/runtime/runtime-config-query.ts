@@ -51,6 +51,7 @@ export async function saveRuntimeConfig(
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		guidedVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
 	},
