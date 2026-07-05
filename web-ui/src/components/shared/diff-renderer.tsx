@@ -144,21 +144,42 @@ export function getHighlightedLineHtml(
 	return Prism.highlight(line.length > 0 ? line : " ", grammar, language);
 }
 
-export function buildHighlightedLineMap(
-	text: string | null | undefined,
+/**
+ * 只对「实际会渲染的行」做 Prism 高亮，按 row.key 建 map。
+ * 折叠掉的 context 块（未展开）与走逐段高亮的 modified 行（有 segments）都跳过。
+ * 相比对整份新旧全文逐行高亮，本函数把高亮成本从 O(文件行数) 降到 O(可见行数)——
+ * 展开大文件时不再同步冻结主线程。调用方应对 displayItems 做 memo。
+ */
+export function buildHighlightedRowMap(
+	displayItems: DiffDisplayItem[],
 	grammar: Prism.Grammar | null,
 	language: string | null,
-): Map<number, string> {
-	const lines = toLines(text ?? "");
-	const highlightedByLine = new Map<number, string>();
-	for (let index = 0; index < lines.length; index += 1) {
-		const line = lines[index] ?? "";
-		const highlighted = getHighlightedLineHtml(line, grammar, language);
+): Map<string, string> {
+	const highlightedByRowKey = new Map<string, string>();
+	if (!grammar || !language) {
+		return highlightedByRowKey;
+	}
+	const addRow = (row: UnifiedDiffRow): void => {
+		if (row.segments) {
+			return;
+		}
+		const highlighted = getHighlightedLineHtml(row.text, grammar, language);
 		if (highlighted != null) {
-			highlightedByLine.set(index + 1, highlighted);
+			highlightedByRowKey.set(row.key, highlighted);
+		}
+	};
+	for (const item of displayItems) {
+		if (item.type === "row") {
+			addRow(item.row);
+			continue;
+		}
+		if (item.block.expanded) {
+			for (const row of item.block.rows) {
+				addRow(row);
+			}
 		}
 	}
-	return highlightedByLine;
+	return highlightedByRowKey;
 }
 
 function buildModifiedSegments(

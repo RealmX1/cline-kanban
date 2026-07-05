@@ -1837,8 +1837,11 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
 		// RVF followup 终端回退：经就绪门控投递，以原始文本调用（bracketed-paste 编码与就绪判定下沉到
-		// TerminalSessionManager.submitTaskChatInputWhenReady，由 session-manager 单测覆盖）。
-		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue");
+		// TerminalSessionManager.submitTaskChatInputWhenReady，由 session-manager 单测覆盖）。带 source（后台自动
+		// 注入）→ deferWhileUserTurn=true：遇非 agent 回合时让位挂起、不打断正等用户的会话（Fix B）。
+		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue", {
+			deferWhileUserTurn: true,
+		});
 		expect(response.summary).toEqual(summary);
 		expect(response.message).toEqual({
 			id: "terminal:task-1:rvf-run-1",
