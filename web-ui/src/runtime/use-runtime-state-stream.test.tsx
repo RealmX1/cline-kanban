@@ -31,6 +31,10 @@ class MockRuntimeStateWebSocket {
 		this.readyState = MockRuntimeStateWebSocket.CLOSED;
 	}
 
+	triggerMessage(message: unknown): void {
+		this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent<string>);
+	}
+
 	triggerOpen(): void {
 		this.readyState = MockRuntimeStateWebSocket.OPEN;
 		this.onopen?.();
@@ -132,5 +136,62 @@ describe("useRuntimeStateStream", () => {
 		});
 
 		expect(reloadBrowserIfServedBuildAssetsChangedMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("快照按 workspaceId 分桶通知 feed，notification_log_updated 按桶替换且不碰其它 repo", async () => {
+		const captured: { current: UseRuntimeStateStreamResult | null } = { current: null };
+		await act(async () => {
+			root.render(
+				<RuntimeStateStreamHarness
+					onSnapshot={(snapshot) => {
+						captured.current = snapshot;
+					}}
+				/>,
+			);
+		});
+		const socket = MockRuntimeStateWebSocket.instances[0];
+		if (!socket) {
+			throw new Error("Expected the initial runtime stream socket.");
+		}
+		act(() => {
+			socket.triggerOpen();
+		});
+
+		const feedEntry = (workspaceId: string, taskId: string, triggeredAt: number) => ({
+			id: `${taskId}:${triggeredAt}`,
+			workspaceId,
+			taskId,
+			repoName: workspaceId,
+			taskTitle: `Task ${taskId}`,
+			userTurnKind: "review" as const,
+			triggeredAt,
+			visitedAt: null,
+			isDone: false,
+		});
+
+		await act(async () => {
+			socket.triggerMessage({
+				type: "snapshot",
+				currentProjectId: "ws-a",
+				projects: [],
+				workspaceState: null,
+				workspaceMetadata: null,
+				clineSessionContextVersion: 0,
+				notificationLog: [feedEntry("ws-a", "t1", 1), feedEntry("ws-b", "t2", 2)],
+			});
+		});
+		expect(captured.current?.notificationLogByWorkspaceId["ws-a"]).toHaveLength(1);
+		expect(captured.current?.notificationLogByWorkspaceId["ws-b"]).toHaveLength(1);
+
+		// 增量：仅替换 ws-a 桶（跨 repo 全局广播，不按 activeWorkspaceId 过滤），ws-b 保持不变。
+		await act(async () => {
+			socket.triggerMessage({
+				type: "notification_log_updated",
+				workspaceId: "ws-a",
+				entries: [feedEntry("ws-a", "t1", 1), feedEntry("ws-a", "t3", 3)],
+			});
+		});
+		expect(captured.current?.notificationLogByWorkspaceId["ws-a"]).toHaveLength(2);
+		expect(captured.current?.notificationLogByWorkspaceId["ws-b"]).toHaveLength(1);
 	});
 });

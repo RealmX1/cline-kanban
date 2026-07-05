@@ -317,6 +317,7 @@ export function TopBar({
 	connectionRetrySessions = [],
 	onContinueConnectionRetrySessions,
 	onDismissConnectionRetrySessions,
+	notificationCenter,
 }: {
 	onToggleSidebar?: () => void;
 	onBack?: () => void;
@@ -355,6 +356,8 @@ export function TopBar({
 	connectionRetrySessions?: ConnectionRetrySessionView[];
 	onContinueConnectionRetrySessions?: (taskIds: string[]) => void;
 	onDismissConnectionRetrySessions?: (taskIds: string[]) => void;
+	// 全局通知铃铛（跨 repo）：由 App.tsx 渲染 <NotificationCenter/> 后作为 slot 传入，始终可见。
+	notificationCenter?: React.ReactNode;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
 	const displayWorkspacePath = workspacePath ? formatPathForDisplay(workspacePath) : null;
@@ -688,6 +691,9 @@ export function TopBar({
 							onDismiss={onDismissConnectionRetrySessions}
 						/>
 					) : null}
+
+					{/* 全局通知铃铛：跨 repo，始终可见。 */}
+					{notificationCenter}
 
 					{/* Settings: always visible */}
 					<Button

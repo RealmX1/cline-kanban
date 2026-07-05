@@ -63,6 +63,9 @@ import type {
 	RuntimeGitSyncResponse,
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
+	RuntimeNotificationClearRequest,
+	RuntimeNotificationMarkVisitedRequest,
+	RuntimeNotificationMutationResponse,
 	RuntimeOpenFileRequest,
 	RuntimeOpenFileResponse,
 	RuntimeProjectAddRequest,
@@ -176,6 +179,9 @@ import {
 	runtimeGitSyncResponseSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeHookIngestResponseSchema,
+	runtimeNotificationClearRequestSchema,
+	runtimeNotificationMarkVisitedRequestSchema,
+	runtimeNotificationMutationResponseSchema,
 	runtimeOpenFileRequestSchema,
 	runtimeOpenFileResponseSchema,
 	runtimeProjectAddRequestSchema,
@@ -372,6 +378,14 @@ export interface RuntimeTrpcContext {
 		openFile: (input: RuntimeOpenFileRequest) => Promise<RuntimeOpenFileResponse>;
 		getUpdateStatus: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeUpdateStatusResponse>;
 		runUpdateNow: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeRunUpdateResponse>;
+		markTaskNotificationsVisited: (
+			scope: RuntimeTrpcWorkspaceScope | null,
+			input: RuntimeNotificationMarkVisitedRequest,
+		) => Promise<RuntimeNotificationMutationResponse>;
+		clearNotificationLog: (
+			scope: RuntimeTrpcWorkspaceScope | null,
+			input: RuntimeNotificationClearRequest,
+		) => Promise<RuntimeNotificationMutationResponse>;
 	};
 	workspaceApi: {
 		loadGitSummary: (
@@ -734,6 +748,19 @@ export const runtimeAppRouter = t.router({
 		runUpdateNow: t.procedure.output(runtimeRunUpdateResponseSchema).mutation(async ({ ctx }) => {
 			return await ctx.runtimeApi.runUpdateNow(ctx.workspaceScope);
 		}),
+		// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。t.procedure 不强制 workspace scope。
+		markTaskNotificationsVisited: t.procedure
+			.input(runtimeNotificationMarkVisitedRequestSchema)
+			.output(runtimeNotificationMutationResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.markTaskNotificationsVisited(ctx.workspaceScope, input);
+			}),
+		clearNotificationLog: t.procedure
+			.input(runtimeNotificationClearRequestSchema)
+			.output(runtimeNotificationMutationResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.clearNotificationLog(ctx.workspaceScope, input);
+			}),
 	}),
 	workspace: t.router({
 		getGitSummary: workspaceProcedure

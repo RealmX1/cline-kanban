@@ -16,6 +16,7 @@ import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
+import { NotificationCenter } from "@/components/notification-center";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
@@ -48,6 +49,7 @@ import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-w
 import { useGitActions } from "@/hooks/use-git-actions";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
+import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { parseRemovedProjectPathFromStreamError, useProjectNavigation } from "@/hooks/use-project-navigation";
@@ -70,6 +72,7 @@ import {
 	selectLatestTaskChatMessageForTask,
 	selectTaskChatMessagesForTask,
 } from "@/runtime/native-agent";
+import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
@@ -118,6 +121,7 @@ export default function App(): ReactElement {
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,
 		isRuntimeDisconnected,
@@ -297,6 +301,54 @@ export default function App(): ReactElement {
 		},
 	});
 	useNotificationTaskFocus({ currentProjectId: navigationCurrentProjectId, setSelectedTaskId });
+
+	// 应用内通知中心（跨 repo 铃铛）。mark/clear 是跨 repo mutation：用 notification 的 workspaceId 起 tRPC 客户端，
+	// input 显式携带同一 workspaceId（服务端 t.procedure 忽略连接 scope，按 input.workspaceId 操作）。
+	const handleMarkTaskNotificationsVisited = useCallback((workspaceId: string, taskId: string) => {
+		void getRuntimeTrpcClient(workspaceId)
+			.runtime.markTaskNotificationsVisited.mutate({ workspaceId, taskId })
+			.catch(() => {
+				// 标记已读失败可忽略：下次快照/广播会纠正。
+			});
+	}, []);
+	const handleClearWorkspaceNotifications = useCallback((workspaceId: string) => {
+		void getRuntimeTrpcClient(workspaceId)
+			.runtime.clearNotificationLog.mutate({ workspaceId })
+			.catch(() => {
+				// 清空失败可忽略：下次快照/广播会纠正。
+			});
+	}, []);
+	const notificationCenter = useNotificationCenter({
+		notificationLogByWorkspaceId,
+		selectedTaskId,
+		onMarkTaskVisited: handleMarkTaskNotificationsVisited,
+		onClearWorkspace: handleClearWorkspaceNotifications,
+	});
+
+	// 跨 repo 点击通知定位 task：同项目直接选中；跨项目先切项目，待目标项目数据落地（currentProjectId 到位、
+	// 非切换中）后再选中——否则会被 useDetailTaskNavigation 切项目时的 closeDetail 清掉。
+	const pendingNotificationFocusRef = useRef<{ workspaceId: string; taskId: string } | null>(null);
+	const focusNotificationTask = useCallback(
+		(workspaceId: string, taskId: string) => {
+			if (workspaceId === navigationCurrentProjectId) {
+				setSelectedTaskId(taskId);
+				return;
+			}
+			pendingNotificationFocusRef.current = { workspaceId, taskId };
+			void handleSelectProject(workspaceId);
+		},
+		[navigationCurrentProjectId, setSelectedTaskId, handleSelectProject],
+	);
+	useEffect(() => {
+		const pending = pendingNotificationFocusRef.current;
+		if (!pending) {
+			return;
+		}
+		if (currentProjectId === pending.workspaceId && !isProjectSwitching) {
+			pendingNotificationFocusRef.current = null;
+			setSelectedTaskId(pending.taskId);
+		}
+	}, [currentProjectId, isProjectSwitching, setSelectedTaskId]);
 
 	useEffect(() => {
 		replaceWorkspaceMetadata(workspaceMetadata);
@@ -986,6 +1038,17 @@ export default function App(): ReactElement {
 						connectionRetrySessions={connectionRetrySessions}
 						onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
 						onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
+						notificationCenter={
+							<NotificationCenter
+								panelGroups={notificationCenter.panelGroups}
+								allGroups={notificationCenter.allGroups}
+								unreadCount={notificationCenter.unreadCount}
+								onFocusTask={focusNotificationTask}
+								onMarkGroupVisited={handleMarkTaskNotificationsVisited}
+								onMarkAllVisited={notificationCenter.markAllVisited}
+								onClearAll={notificationCenter.clearAll}
+							/>
+						}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 						<div
