@@ -71,6 +71,7 @@ function createRuntimeConfig(overrides: Partial<RuntimeConfigResponse> = {}): Ru
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		guidedVerificationForceCompleteEnabled: false,
 		detectedCommands: ["codex", "claude", "cline"],
 		agents: [
 			{

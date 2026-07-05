@@ -15,6 +15,7 @@ import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { GitHistoryView } from "@/components/git-history-view";
+import { GuidedVerificationController } from "@/components/guided-verification/guided-verification-controller";
 import { KanbanBoard } from "@/components/kanban-board";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
@@ -46,6 +47,7 @@ import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
 import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
+import { useGuidedVerification } from "@/hooks/use-guided-verification";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
@@ -641,6 +643,7 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		completeGuidedVerificationMoveToDone,
 		isMoveToDoneConfirmOpen,
 		confirmMoveToDone,
 		cancelMoveToDone,
@@ -697,6 +700,24 @@ export default function App(): ReactElement {
 		handleStartAllBacklogTasks,
 		setSelectedTaskId,
 	});
+
+	// Guided Verification：App.tsx 持有唯一一份 useGuidedVerification 实例，同时供顶栏 badge 派生待核对数、
+	// 并作为 prop 下传给 GuidedVerificationController（controller 消费该结果，不再自持第二份实例）。
+	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
+	const guidedVerification = useGuidedVerification(currentProjectId);
+	const { setCollapsed: setGuidedVerificationCollapsed } = guidedVerification;
+	const guidedVerificationActiveGroup = guidedVerification.activeGroup;
+	// 待核对数 = active 组内未核对且未被 reconcile 移除的任务数；与面板 countPending 语义一致。
+	// 未加载或无 active 组时为 null → 顶栏不渲染 badge（项目切换时 hook 会重置 hasLoadedOnce，badge 自动隐藏）。
+	const guidedVerificationPendingCount =
+		guidedVerification.hasLoadedOnce && guidedVerificationActiveGroup
+			? guidedVerificationActiveGroup.tasks.filter((task) => task.verifiedAt === null && task.droppedReason === null)
+					.length
+			: null;
+	// 顶栏 badge 与 controller 面板共用同一实例，setCollapsed(false) 直接展开面板，无需强制 remount。
+	const handleOpenGuidedVerification = useCallback(() => {
+		setGuidedVerificationCollapsed(false);
+	}, [setGuidedVerificationCollapsed]);
 
 	useAppHotkeys({
 		selectedCard,
@@ -987,6 +1008,8 @@ export default function App(): ReactElement {
 						connectionRetrySessions={connectionRetrySessions}
 						onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
 						onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
+						guidedVerificationPendingCount={guidedVerificationPendingCount}
+						onOpenGuidedVerification={handleOpenGuidedVerification}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 						<div
@@ -1342,6 +1365,13 @@ export default function App(): ReactElement {
 					projects={projects}
 					currentProjectId={currentProjectId}
 					activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
+				/>
+
+				<GuidedVerificationController
+					verification={guidedVerification}
+					board={board}
+					completeGuidedVerificationMoveToDone={completeGuidedVerificationMoveToDone}
+					onSelectTask={setSelectedTaskId}
 				/>
 			</div>
 		</LayoutCustomizationsProvider>
