@@ -614,11 +614,32 @@ export const runtimeProjectTaskCountsSchema = z.object({
 });
 export type RuntimeProjectTaskCounts = z.infer<typeof runtimeProjectTaskCountsSchema>;
 
+// Cross-Repository Stage-First Overview（跨-repo 概览，见 CONTEXT.md）用：in_progress 列单个 task
+// 的精简明细投影。前端据 turnOwner + lastOutputAt 把它二分为 Active / Stale
+// （见 session-activity.ts 的 RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS）。
+export const runtimeInProgressTaskDetailSchema = z.object({
+	taskId: z.string(),
+	title: z.string(),
+	agentId: runtimeAgentIdSchema.nullable(),
+	// 距最近一次 PTY 输出（含 spinner 重绘）；null=从未产出/无会话。前端据此判「近期活跃」。
+	lastOutputAt: z.number().nullable(),
+	turnOwner: runtimeTaskSessionTurnOwnerSchema,
+	liveness: runtimeTaskSessionLivenessSchema,
+});
+export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDetailSchema>;
+
 export const runtimeProjectSummarySchema = z.object({
 	id: z.string(),
 	path: z.string(),
 	name: z.string(),
 	taskCounts: runtimeProjectTaskCountsSchema,
+	// board 列归属的原始计数（未套主看板的 live-session overlay）。Stage-First Overview 用它做
+	// Review/Validation/Done 的 stage 计数，与 overlay 后的 taskCounts 并存不冲突（见 ADR-0001）。
+	// optional：projects.add 快路径可省略，下一次 projects_updated/snapshot 广播补齐。
+	rawColumnTaskCounts: runtimeProjectTaskCountsSchema.optional(),
+	// 该 project in_progress 列全部 task 的明细，供 Stage-First Overview 展开 In-Progress 阶段
+	// （前端据活跃度二分 Active/Stale）。default([])：旧广播/快照无此字段时安全回退。
+	inProgressTaskDetails: z.array(runtimeInProgressTaskDetailSchema).default([]),
 	// The project's git `remote.origin.url` (raw, unnormalized), or null when the repo
 	// has no origin remote / the read failed. Consumed by the bug-report FAB to detect
 	// the cline-kanban developer project by matching its GitHub owner/repo slug.

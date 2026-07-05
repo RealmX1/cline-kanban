@@ -30,6 +30,12 @@ import type {
 export const VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS = 5_000;
 export const AGENT_OUTPUT_QUIET_THRESHOLD_MS = 2_000;
 
+// 「近期活跃」窗口（毫秒）：Cross-Repository Stage-First Overview（见 CONTEXT.md）据此把 In-Progress
+// 阶段的 task 二分为 Active（agent 回合且距最近 PTY 输出 lastOutputAt 在本窗口内）/ Stale（其余）。
+// 有意比前后端现有的 5s / 2s 窗口宽得多——此处要的是「最近几分钟这个 agent 还在动」的人类尺度判断，
+// 宽窗口下 spinner 噪声无影响，故读 lastOutputAt（而非实质戳）即可。复用 isAgentOutputWithinActiveWindow。
+export const RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS = 5 * 60_000;
+
 // 距 agent 最近一次 PTY 输出是否仍落在 activeWindowMs 活跃窗口内（true = 仍在产出 / computing）。
 //
 // 语义细节（迁移前后必须逐字保持，两侧旧实现都依赖它）：
