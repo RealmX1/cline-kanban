@@ -1,7 +1,7 @@
 // 应用内通知中心后端：store（append 幂等 / 300 上限丢最旧 / mark 整组 / 并发串行 / readAll 聚合）、
 // feed-builder（isDone 随 board 派生 / taskTitle / repoName / 缺失回退）、以及「无客户端也落库」的核心卖点。
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -11,11 +11,17 @@ import { createRuntimeStateHub } from "../../src/server/runtime-state-hub";
 import { buildNotificationFeedEntries } from "../../src/state/notification-feed-builder";
 import {
 	appendNotificationLogEntry,
+	clearNotificationLog,
 	markTaskNotificationsVisited,
 	readAllNotificationLogs,
 	readNotificationLog,
 } from "../../src/state/notification-log-store";
-import { loadWorkspaceContext, loadWorkspaceState, saveWorkspaceState } from "../../src/state/workspace-state";
+import {
+	getWorkspacesRootPath,
+	loadWorkspaceContext,
+	loadWorkspaceState,
+	saveWorkspaceState,
+} from "../../src/state/workspace-state";
 import { createGitTestEnv } from "../utilities/git-env";
 import { createTempDir } from "../utilities/temp-dir";
 
@@ -285,6 +291,30 @@ describe.sequential("notification-log-store integration", () => {
 				} finally {
 					await hub.close();
 				}
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	it("拒绝逃逸 workspaces 根的 workspaceId（防路径遍历）", async () => {
+		await withTemporaryHome(async () => {
+			const { cleanup } = createTempDir("kanban-notif-");
+			try {
+				// clearNotificationLog 会创建目录并写 []；"../" 逃逸的 workspaceId 必须被拒绝，且不在根外留下文件。
+				const escapeTarget = join(getWorkspacesRootPath(), "..", "notif-escape-probe", "notifications.json");
+				await expect(clearNotificationLog("../notif-escape-probe")).rejects.toThrow(/outside workspaces root/);
+				await expect(markTaskNotificationsVisited("../notif-escape-probe", "t", 1)).rejects.toThrow(
+					/outside workspaces root/,
+				);
+				await expect(
+					appendNotificationLogEntry("../notif-escape-probe", {
+						taskId: "t",
+						userTurnKind: "review",
+						triggeredAt: 1,
+					}),
+				).rejects.toThrow(/outside workspaces root/);
+				expect(existsSync(escapeTarget)).toBe(false);
 			} finally {
 				cleanup();
 			}

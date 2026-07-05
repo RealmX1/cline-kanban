@@ -2,11 +2,11 @@
 // 存「最小字段」——taskTitle/repoName/isDone 不落库，由 notification-feed-builder 在发送时派生。
 // 关键卖点：落库发生在 runtime-state-hub 的「0 客户端提前返回」之前，故浏览器全关时段的后台事件也记录。
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { type RuntimeTaskSessionUserTurnKind, runtimeTaskSessionUserTurnKindSchema } from "../core/api-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
-import { getWorkspaceDirectoryPath, listWorkspaceIndexEntries } from "./workspace-state";
+import { getWorkspaceDirectoryPath, getWorkspacesRootPath, listWorkspaceIndexEntries } from "./workspace-state";
 
 const NOTIFICATION_LOG_FILENAME = "notifications.json";
 
@@ -31,7 +31,16 @@ export interface AppendNotificationLogEntryInput {
 }
 
 function getNotificationLogPath(workspaceId: string): string {
-	return join(getWorkspaceDirectoryPath(workspaceId), NOTIFICATION_LOG_FILENAME);
+	// 防路径遍历（root-cause 单一 choke point，覆盖 append/read/mark/clear 全部入口）：workspaceId 经
+	// markTaskNotificationsVisited / clearNotificationLog 两个 tRPC mutation 从客户端 input 进来，且这两个
+	// mutation 用 t.procedure 不校验连接 scope；未校验的 "../" 会让 join 逃逸出 workspaces 根（clearNotificationLog
+	// 会创建目录并写入 []）。要求 workspace 目录必须是 workspaces 根的直接子目录，否则拒绝。
+	const workspaceDirectory = resolve(getWorkspaceDirectoryPath(workspaceId));
+	const workspacesRoot = resolve(getWorkspacesRootPath());
+	if (dirname(workspaceDirectory) !== workspacesRoot) {
+		throw new Error(`Refusing notification log access outside workspaces root for workspaceId: ${workspaceId}`);
+	}
+	return join(workspaceDirectory, NOTIFICATION_LOG_FILENAME);
 }
 
 async function readRawNotificationLog(workspaceId: string): Promise<PersistedNotificationEntry[]> {

@@ -330,14 +330,21 @@ export default function App(): ReactElement {
 	const pendingNotificationFocusRef = useRef<{ workspaceId: string; taskId: string } | null>(null);
 	const focusNotificationTask = useCallback(
 		(workspaceId: string, taskId: string) => {
-			if (workspaceId === navigationCurrentProjectId) {
+			// 目标项目已完全落地（loaded 且非切换中）才直接选中——与下方 pending-effect 同轴（currentProjectId）。
+			// 若只看 navigationCurrentProjectId（导航意图），切换在途时会过早 setSelectedTaskId，随后被
+			// useDetailTaskNavigation 切项目的 closeDetail 清掉且无 pending 恢复，通知点击打不开详情。
+			if (workspaceId === currentProjectId && !isProjectSwitching) {
 				setSelectedTaskId(taskId);
 				return;
 			}
+			// 否则挂 pending，待目标项目落地后由 effect 选中；仅当导航意图尚未指向目标时才触发切项目
+			// （已在切往目标时重复 handleSelectProject 无意义）。
 			pendingNotificationFocusRef.current = { workspaceId, taskId };
-			void handleSelectProject(workspaceId);
+			if (workspaceId !== navigationCurrentProjectId) {
+				void handleSelectProject(workspaceId);
+			}
 		},
-		[navigationCurrentProjectId, setSelectedTaskId, handleSelectProject],
+		[currentProjectId, isProjectSwitching, navigationCurrentProjectId, setSelectedTaskId, handleSelectProject],
 	);
 	useEffect(() => {
 		const pending = pendingNotificationFocusRef.current;
