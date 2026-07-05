@@ -1,5 +1,6 @@
 import { type RuntimeConfigState, toGlobalRuntimeConfigState } from "../config/runtime-config";
 import type {
+	RuntimeBoardCard,
 	RuntimeBoardData,
 	RuntimeInProgressTaskDetail,
 	RuntimeProjectSummary,
@@ -37,6 +38,50 @@ export interface CreateWorkspaceRegistryDependencies {
 
 export interface DisposeWorkspaceRegistryOptions {
 	stopTerminalSessions?: boolean;
+}
+
+/**
+ * `sessions.json` 只在 graceful shutdown 落盘。非优雅退出（进程被杀 / --skip-shutdown-cleanup）会
+ * 留下 agent 完全启动之前的默认快照——`startTaskSession` 的 `agentId: request.agentId` 尚未写入，
+ * 于是 summary.agentId 恒为 null。board card 才是「该 task 用哪个 agent」的 durable 真相源，故在
+ * hydrate 之前用它回填丢失的 agentId。否则 summary.agentId===null 会同时击穿三条恢复路径：
+ * canRefresh（Refresh 按钮禁用）、refreshTaskTerminal 的 agentId gate、以及聚焦时的自动续跑判据，
+ * 令「进程随运行时重启而死」的任务彻底无法恢复。只回填、不覆盖已有 agentId；无 card 的 shell /
+ * home / synthetic 会话正确保留 null。
+ */
+export function applyBoardCardAgentIdsToSessions(
+	board: RuntimeBoardData,
+	sessions: RuntimeWorkspaceStateResponse["sessions"],
+): void {
+	const cardAgentIdByTaskId = new Map<string, NonNullable<RuntimeBoardCard["agentId"]>>();
+	for (const column of board.columns) {
+		for (const card of column.cards) {
+			if (card.agentId) {
+				cardAgentIdByTaskId.set(card.id, card.agentId);
+			}
+		}
+	}
+	for (const summary of Object.values(sessions)) {
+		if (summary.agentId === null) {
+			const cardAgentId = cardAgentIdByTaskId.get(summary.taskId);
+			if (cardAgentId) {
+				summary.agentId = cardAgentId;
+			}
+		}
+	}
+}
+
+async function backfillSessionAgentIdsFromBoard(
+	workspaceId: string,
+	sessions: RuntimeWorkspaceStateResponse["sessions"],
+): Promise<void> {
+	let board: RuntimeBoardData;
+	try {
+		board = await loadWorkspaceBoardById(workspaceId);
+	} catch {
+		return;
+	}
+	applyBoardCardAgentIdsToSessions(board, sessions);
 }
 
 export interface ResolvedWorkspaceStreamTarget {
@@ -239,6 +284,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			const manager = new TerminalSessionManager();
 			try {
 				const existingWorkspace = await loadWorkspaceState(repoPath);
+				await backfillSessionAgentIdsFromBoard(workspaceId, existingWorkspace.sessions);
 				manager.hydrateFromRecord(existingWorkspace.sessions);
 			} catch {
 				// Workspace state will be created on demand.

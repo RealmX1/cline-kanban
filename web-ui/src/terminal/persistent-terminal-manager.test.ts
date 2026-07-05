@@ -488,6 +488,94 @@ describe("persistent-terminal-manager", () => {
 		});
 	});
 
+	describe("auto-resume on focusing a runtime-restarted stale session", () => {
+		function findControlSocket() {
+			const socket = webSocketInstances.find((entry) => entry.url.includes("/api/terminal/control"));
+			if (!socket) {
+				throw new Error("control socket not found");
+			}
+			return socket;
+		}
+
+		function dispatchState(summary: Record<string, unknown>): void {
+			dispatchSocketMessage(findControlSocket(), JSON.stringify({ type: "state", summary }));
+		}
+
+		function dispatchRestore(snapshot: string): void {
+			dispatchSocketMessage(findControlSocket(), JSON.stringify({ type: "restore", snapshot, cols: 80, rows: 30 }));
+		}
+
+		function mountedTerminal() {
+			const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+			terminal.mount(createContainer(), appearance, { isVisible: true });
+			return terminal;
+		}
+
+		// 死会话（服务器重启后 hydrate 出的 idle、agentId 已由服务端从 board card 回填、pid=null）+ 空 restore
+		// 快照 → 聚焦即自动一次性续跑；再次空 restore（切走再切回）不重复触发。
+		it("auto-refreshes once for an empty snapshot terminal-agent session, then debounces", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState({ taskId: "task-a", agentId: "claude", pid: null, state: "idle", liveness: "none" });
+			dispatchRestore("");
+
+			await vi.waitFor(() => {
+				expect(refreshSpy).toHaveBeenCalledTimes(1);
+			});
+
+			dispatchRestore("");
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not auto-refresh when the restore snapshot is non-empty (live/exited session, mirror intact)", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
+			dispatchState({
+				taskId: "task-a",
+				agentId: "claude",
+				pid: null,
+				state: "awaiting_review",
+				liveness: "exited",
+			});
+			dispatchRestore("restored screen");
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it("does not auto-refresh when agentId is null (fresh/never-started or shell session)", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
+			dispatchState({ taskId: "task-a", agentId: null, pid: null, state: "idle", liveness: "none" });
+			dispatchRestore("");
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it("does not auto-refresh the in-process Cline SDK agent", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
+			dispatchState({ taskId: "task-a", agentId: "cline", pid: null, state: "idle", liveness: "none" });
+			dispatchRestore("");
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it("does not auto-refresh when a live PTY is present (pid non-null)", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
+			dispatchState({ taskId: "task-a", agentId: "claude", pid: 4321, state: "running", liveness: "live" });
+			dispatchRestore("");
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+	});
+
 	it("keeps the terminal at the bottom after remount when it was following output", () => {
 		const terminal = ensurePersistentTerminal({
 			...appearance,
