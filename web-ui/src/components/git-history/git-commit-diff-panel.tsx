@@ -432,6 +432,13 @@ export function GitCommitDiffPanel({
 							diffSource?.type === "commit" ? (commitFile?.isPatchLoading ?? false) : false;
 						const commitPatchErrorMessage =
 							diffSource?.type === "commit" ? (commitFile?.patchErrorMessage ?? null) : null;
+						// working-copy 数据来自被 per-file 体积上限 cap 的 getChanges：超限文件 oldText/newText 被置 null、
+						// contentOmittedForSize=true → buildUnifiedDiffRows 得 0 行。此时必须显示「文件过大」占位，
+						// 而非误导性的「No textual diff available.」（暗示无改动）。与 DiffViewerPanel 占位保持一致。
+						const contentOmittedForSize =
+							diffSource?.type === "working-copy"
+								? (diffSource.files.find((file) => file.path === path)?.contentOmittedForSize ?? false)
+								: false;
 
 						return (
 							<section
@@ -518,6 +525,12 @@ export function GitCommitDiffPanel({
 												</div>
 											) : !isBinaryFile && rows.length > 0 ? (
 												<ReadOnlyUnifiedDiff rows={rows} path={path} />
+											) : !isBinaryFile && contentOmittedForSize ? (
+												<div className="px-3 py-4 text-[12px] text-text-tertiary">
+													文件过大，未内联显示 diff（
+													<span className="text-status-green">+{stats.additions}</span>{" "}
+													<span className="text-status-red">-{stats.deletions}</span>）。
+												</div>
 											) : !isBinaryFile ? (
 												<div
 													style={{

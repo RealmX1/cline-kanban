@@ -4,11 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import {
 	buildDisplayItems,
-	buildHighlightedLineMap,
+	buildHighlightedRowMap,
 	buildUnifiedDiffRows,
 	CollapsedBlockControls,
 	DiffRowText,
-	getHighlightedLineHtml,
 	resolvePrismGrammar,
 	resolvePrismLanguage,
 	truncatePathMiddle,
@@ -26,6 +25,7 @@ interface FileDiffGroup {
 	entries: Array<{
 		id: string;
 		isBinary: boolean;
+		contentOmittedForSize: boolean;
 		oldText: string | null;
 		newText: string;
 	}>;
@@ -140,16 +140,12 @@ function UnifiedDiff({
 	const { expandedBlocks, expandTop, expandBottom, expandAll } = useIncrementalExpand();
 	const prismLanguage = useMemo(() => resolvePrismLanguage(path), [path]);
 	const prismGrammar = useMemo(() => resolvePrismGrammar(prismLanguage), [prismLanguage]);
-	const highlightedOldByLine = useMemo(
-		() => buildHighlightedLineMap(oldText, prismGrammar, prismLanguage),
-		[oldText, prismGrammar, prismLanguage],
-	);
-	const highlightedNewByLine = useMemo(
-		() => buildHighlightedLineMap(newText, prismGrammar, prismLanguage),
-		[newText, prismGrammar, prismLanguage],
-	);
 	const rows = useMemo(() => buildUnifiedDiffRows(oldText, newText), [oldText, newText]);
 	const displayItems = useMemo(() => buildDisplayItems(rows, expandedBlocks), [expandedBlocks, rows]);
+	const highlightedRowMap = useMemo(
+		() => buildHighlightedRowMap(displayItems, prismGrammar, prismLanguage),
+		[displayItems, prismGrammar, prismLanguage],
+	);
 
 	const renderRow = (row: UnifiedDiffRow): React.ReactElement => {
 		const rowKey = row.lineNumber != null ? commentKey(path, row.lineNumber, row.variant) : null;
@@ -163,12 +159,7 @@ function UnifiedDiff({
 					: "kb-diff-row kb-diff-row-context";
 		const rowClass = hasComment ? `${baseClass} kb-diff-row-commented` : baseClass;
 		const canClickRow = row.lineNumber != null && !hasComment;
-		const highlightedLineHtml =
-			row.lineNumber == null
-				? null
-				: row.variant === "removed"
-					? (highlightedOldByLine.get(row.lineNumber) ?? null)
-					: (highlightedNewByLine.get(row.lineNumber) ?? null);
+		const highlightedLineHtml = highlightedRowMap.get(row.key) ?? null;
 
 		const handleRowClick =
 			row.lineNumber != null && !hasComment
@@ -345,6 +336,10 @@ function SplitDiff({
 	const prismGrammar = useMemo(() => resolvePrismGrammar(prismLanguage), [prismLanguage]);
 	const rows = useMemo(() => buildUnifiedDiffRows(oldText, newText), [oldText, newText]);
 	const displayItems = useMemo(() => buildDisplayItems(rows, expandedBlocks), [expandedBlocks, rows]);
+	const highlightedRowMap = useMemo(
+		() => buildHighlightedRowMap(displayItems, prismGrammar, prismLanguage),
+		[displayItems, prismGrammar, prismLanguage],
+	);
 
 	const renderSide = (row: UnifiedDiffRow, side: "left" | "right"): React.ReactElement => {
 		const rowLineNumber = row.lineNumber;
@@ -368,7 +363,7 @@ function SplitDiff({
 				? baseClass
 				: `${baseClass} kb-diff-row-noncommentable`;
 		const canClickRow = canCommentOnSide && !hasComment;
-		const highlightedLineHtml = getHighlightedLineHtml(row.text, prismGrammar, prismLanguage);
+		const highlightedLineHtml = highlightedRowMap.get(row.key) ?? null;
 
 		return (
 			<div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
@@ -542,6 +537,7 @@ export function DiffViewerPanel({
 			id: `workspace-${file.path}-${index}`,
 			path: file.path,
 			isBinary: isBinaryFilePath(file.path),
+			contentOmittedForSize: file.contentOmittedForSize ?? false,
 			oldText: file.oldText,
 			newText: file.newText ?? "",
 			additions: file.additions,
@@ -570,6 +566,7 @@ export function DiffViewerPanel({
 			group.entries.push({
 				id: entry.id,
 				isBinary: entry.isBinary,
+				contentOmittedForSize: entry.contentOmittedForSize,
 				oldText: entry.oldText,
 				newText: entry.newText,
 			});
@@ -907,7 +904,13 @@ export function DiffViewerPanel({
 										>
 											{group.entries.map((entry) => (
 												<div key={entry.id} className="kb-diff-entry">
-													{entry.isBinary ? null : viewMode === "split" ? (
+													{entry.isBinary ? null : entry.contentOmittedForSize ? (
+														<div className="px-3 py-4 text-[12px] text-text-tertiary">
+															文件过大，未内联显示 diff（
+															<span className="text-status-green">+{group.added}</span>{" "}
+															<span className="text-status-red">-{group.removed}</span>）。
+														</div>
+													) : viewMode === "split" ? (
 														<SplitDiff
 															path={group.path}
 															oldText={entry.oldText}
