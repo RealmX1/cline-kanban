@@ -11,6 +11,7 @@ import { BugReportFab } from "@/components/bug-report/bug-report-fab";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
+import { CrossRepositoryStageFirstOverview } from "@/components/cross-repository-stage-first-overview";
 import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
@@ -303,6 +304,53 @@ export default function App(): ReactElement {
 		},
 	});
 	useNotificationTaskFocus({ currentProjectId: navigationCurrentProjectId, setSelectedTaskId });
+
+	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 CONTEXT.md）开关 + 跨-workspace 打开某 task 的待定跳转。
+	const [isBoardOverviewOpen, setIsBoardOverviewOpen] = useState(false);
+	const [pendingOverviewTaskOpen, setPendingOverviewTaskOpen] = useState<{ repoId: string; taskId: string } | null>(
+		null,
+	);
+	const handleToggleBoardOverview = useCallback(() => {
+		setIsBoardOverviewOpen((open) => {
+			const next = !open;
+			if (next) {
+				setIsGitHistoryOpen(false);
+			}
+			return next;
+		});
+	}, []);
+	const handleOpenOverviewTask = useCallback(
+		(repoId: string, taskId: string) => {
+			setIsBoardOverviewOpen(false);
+			if (repoId === currentProjectId) {
+				setSelectedTaskId(taskId);
+				return;
+			}
+			// 跨 repo：先切 workspace，待目标 board 加载出该 task 再打开 detail（见下方 effect）。
+			setPendingOverviewTaskOpen({ repoId, taskId });
+			handleSelectProject(repoId);
+		},
+		[currentProjectId, handleSelectProject, setSelectedTaskId],
+	);
+	const handleOpenOverviewStage = useCallback(
+		(repoId: string) => {
+			setIsBoardOverviewOpen(false);
+			handleSelectProject(repoId);
+		},
+		[handleSelectProject],
+	);
+	// 跨-workspace 打开 task 的收尾：目标 repo 已激活、且其 board 加载出该 task 后，再 setSelectedTaskId
+	// ——绕开 project-switch 时 use-detail-task-navigation 的 closeDetail 竞态（见该 hook）。
+	useEffect(() => {
+		if (!pendingOverviewTaskOpen || currentProjectId !== pendingOverviewTaskOpen.repoId) {
+			return;
+		}
+		if (!findCardSelection(board, pendingOverviewTaskOpen.taskId)) {
+			return;
+		}
+		setSelectedTaskId(pendingOverviewTaskOpen.taskId);
+		setPendingOverviewTaskOpen(null);
+	}, [board, currentProjectId, pendingOverviewTaskOpen, setSelectedTaskId]);
 
 	// 应用内通知中心（跨 repo 铃铛）。mark/clear 是跨 repo mutation：用 notification 的 workspaceId 起 tRPC 客户端，
 	// input 显式携带同一 workspaceId（服务端 t.procedure 忽略连接 scope，按 input.workspaceId 操作）。
@@ -685,7 +733,13 @@ export default function App(): ReactElement {
 		if (hasNoProjects) {
 			return;
 		}
-		setIsGitHistoryOpen((current) => !current);
+		setIsGitHistoryOpen((current) => {
+			const next = !current;
+			if (next) {
+				setIsBoardOverviewOpen(false);
+			}
+			return next;
+		});
 	}, [hasNoProjects]);
 	const handleCloseGitHistory = useCallback(() => {
 		setIsGitHistoryOpen(false);
@@ -1011,6 +1065,8 @@ export default function App(): ReactElement {
 				<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
 					<TopBar
 						onToggleSidebar={!selectedCard ? handleToggleSidebar : undefined}
+						onToggleBoardOverview={!selectedCard && !hasNoProjects ? handleToggleBoardOverview : undefined}
+						isBoardOverviewOpen={isBoardOverviewOpen}
 						onBack={selectedCard ? handleBack : undefined}
 						workspacePath={navbarWorkspacePath}
 						isWorkspacePathLoading={shouldShowProjectLoadingState}
@@ -1112,7 +1168,13 @@ export default function App(): ReactElement {
 							) : (
 								<div className="flex flex-1 flex-col min-h-0 min-w-0">
 									<div className="flex flex-1 min-h-0 min-w-0">
-										{isGitHistoryOpen ? (
+										{isBoardOverviewOpen ? (
+											<CrossRepositoryStageFirstOverview
+												projects={projects}
+												onOpenTask={handleOpenOverviewTask}
+												onOpenStage={handleOpenOverviewStage}
+											/>
+										) : isGitHistoryOpen ? (
 											<GitHistoryView
 												workspaceId={currentProjectId}
 												gitHistory={gitHistory}

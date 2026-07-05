@@ -10,6 +10,7 @@ import {
 	ClipboardCheck,
 	Command,
 	GitBranch,
+	LayoutGrid,
 	Menu,
 	Play,
 	Plus,
@@ -299,6 +300,8 @@ export function TopBar({
 	isTerminalLoading,
 	onToggleGitHistory,
 	isGitHistoryOpen,
+	onToggleBoardOverview,
+	isBoardOverviewOpen,
 	onOpenSettings,
 	showDebugButton,
 	onOpenDebugDialog,
@@ -340,6 +343,8 @@ export function TopBar({
 	isTerminalLoading?: boolean;
 	onToggleGitHistory?: () => void;
 	isGitHistoryOpen?: boolean;
+	onToggleBoardOverview?: () => void;
+	isBoardOverviewOpen?: boolean;
 	onOpenSettings?: (section?: SettingsSection) => void;
 	showDebugButton?: boolean;
 	onOpenDebugDialog?: () => void;
@@ -724,6 +729,22 @@ export function TopBar({
 							sessions={connectionRetrySessions}
 							onContinue={onContinueConnectionRetrySessions}
 							onDismiss={onDismissConnectionRetrySessions}
+						/>
+					) : null}
+
+					{/* Board Overview: 跨-repo 的 Stage-First 概览切换（仅主看板视图，非任务详情） */}
+					{onToggleBoardOverview ? (
+						<Button
+							variant="ghost"
+							size="sm"
+							icon={<LayoutGrid size={16} />}
+							onClick={onToggleBoardOverview}
+							aria-label={isBoardOverviewOpen ? "Close board overview" : "Open board overview"}
+							className={cn(
+								"ml-0.5",
+								isBoardOverviewOpen && "ring-1 ring-accent",
+								isMobile && MOBILE_TOUCH_TARGET,
+							)}
 						/>
 					) : null}
 

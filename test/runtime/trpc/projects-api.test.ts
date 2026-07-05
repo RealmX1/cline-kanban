@@ -37,6 +37,7 @@ function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 			path: "/test",
 			name: "test",
 			taskCounts: { backlog: 0, in_progress: 0, review: 0, validation: 0, trash: 0 },
+			inProgressTaskDetails: [],
 		})),
 		broadcastRuntimeProjectsUpdated: vi.fn(),
 		getTerminalManagerForWorkspace: vi.fn(() => null),
