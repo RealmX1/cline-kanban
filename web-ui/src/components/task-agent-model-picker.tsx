@@ -1,4 +1,8 @@
-import { getRuntimeLaunchSupportedAgentCatalog, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "@runtime-agent-catalog";
+import {
+	getRuntimeAgentCatalogEntry,
+	getRuntimeLaunchSupportedAgentCatalog,
+	KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
+} from "@runtime-agent-catalog";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -17,7 +21,9 @@ import {
 	fetchClineProviderModels,
 	fetchTerminalAgentModelSelectionOptions,
 } from "@/runtime/runtime-config-query";
+import { readTaskAgentModelListCache, writeTaskAgentModelListCache } from "@/runtime/task-agent-model-list-cache";
 import type {
+	RuntimeAgentDefinition,
 	RuntimeAgentId,
 	RuntimeClineProviderCatalogItem,
 	RuntimeClineProviderModel,
@@ -25,7 +31,26 @@ import type {
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTerminalAgentModelSelectionAgentId,
+	RuntimeTerminalAgentModelSelectionOptionsResponse,
 } from "@/runtime/types";
+
+/** One agent icon-button option. `installed` gates grey-out: only `false` greys out (click opens install guide). */
+export interface TaskAgentPickerAgentOption {
+	value: string;
+	label: string;
+	/** From RuntimeAgentDefinition.installed. null/undefined (config not loaded / unknown agent) render normally. */
+	installed?: boolean | null;
+}
+
+/** One terminal-agent model button option. `description` is the concrete model-id shown in the hover tooltip. */
+export interface TaskAgentPickerTerminalModelOption {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+/** Stable empty default so the agentOptions memo doesn't rebuild when no agents prop is passed. */
+const EMPTY_AGENT_DEFINITIONS: RuntimeAgentDefinition[] = [];
 
 // ---------------------------------------------------------------------------
 // Hook: manages fetch state for Cline provider catalog + model lists
@@ -36,6 +61,8 @@ export interface UseTaskAgentModelPickerInput {
 	workspaceId: string | null;
 	agentId: RuntimeAgentId | undefined;
 	clineSettings?: RuntimeTaskClineSettings;
+	/** Agent definitions from runtimeConfig.agents — carries `installed` for grey-out of not-installed agents. */
+	agents?: RuntimeAgentDefinition[];
 	/** The default agent ID from runtimeConfig.selectedAgentId — used to build the first option label */
 	defaultAgentId?: RuntimeAgentId | null;
 	/** The default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
@@ -45,10 +72,10 @@ export interface UseTaskAgentModelPickerInput {
 }
 
 export interface UseTaskAgentModelPickerResult {
-	agentOptions: Array<{ value: string; label: string }>;
+	agentOptions: TaskAgentPickerAgentOption[];
 	clineProviderOptions: Array<{ value: string; label: string }>;
 	clineModelOptions: Array<{ value: string; label: string }>;
-	terminalAgentModelOptions: Array<{ value: string; label: string }>;
+	terminalAgentModelOptions: TaskAgentPickerTerminalModelOption[];
 	terminalAgentDefaultModelId: string | null;
 	effectiveDefaultModelId: string | null;
 	providerModels: RuntimeClineProviderModel[];
@@ -93,15 +120,14 @@ export function useTaskAgentModelPicker({
 	workspaceId,
 	agentId,
 	clineSettings,
+	agents,
 	defaultAgentId,
 	defaultProviderId,
 	defaultModelId,
 }: UseTaskAgentModelPickerInput): UseTaskAgentModelPickerResult {
 	const [providerCatalog, setProviderCatalog] = useState<RuntimeClineProviderCatalogItem[]>([]);
 	const [providerModels, setProviderModels] = useState<RuntimeClineProviderModel[]>([]);
-	const [terminalAgentModelOptions, setTerminalAgentModelOptions] = useState<Array<{ value: string; label: string }>>(
-		[],
-	);
+	const [terminalAgentModelOptions, setTerminalAgentModelOptions] = useState<TaskAgentPickerTerminalModelOption[]>([]);
 	const [terminalAgentDefaultModelId, setTerminalAgentDefaultModelId] = useState<string | null>(null);
 	const [isLoadingProviders, setIsLoadingProviders] = useState(false);
 	const [isLoadingModels, setIsLoadingModels] = useState(false);
@@ -115,15 +141,21 @@ export function useTaskAgentModelPicker({
 			return;
 		}
 		let cancelled = false;
+		const cacheKey = `cline-catalog:${workspaceId}`;
+		const cached = readTaskAgentModelListCache<RuntimeClineProviderCatalogItem[]>(cacheKey);
+		if (cached) {
+			setProviderCatalog(cached);
+		}
 		setIsLoadingProviders(true);
 		void fetchClineProviderCatalog(workspaceId)
 			.then((catalog) => {
 				if (!cancelled) {
 					setProviderCatalog(catalog);
+					writeTaskAgentModelListCache(cacheKey, catalog);
 				}
 			})
 			.catch(() => {
-				if (!cancelled) {
+				if (!cancelled && !cached) {
 					setProviderCatalog([]);
 				}
 			})
@@ -146,33 +178,48 @@ export function useTaskAgentModelPicker({
 		}
 		let cancelled = false;
 		const fallbackDefaultOption = getFallbackTerminalAgentDefaultModelOption(effectiveAgentId);
-		setTerminalAgentModelOptions([fallbackDefaultOption]);
-		setTerminalAgentDefaultModelId(fallbackDefaultOption.defaultModelId);
+		const cacheKey = `terminal:${effectiveAgentId}`;
+
+		// Response → {default option + explicit options} transform, shared by cache-seed and fetch-success.
+		const applyResponse = (response: RuntimeTerminalAgentModelSelectionOptionsResponse) => {
+			const defaultOption: TaskAgentPickerTerminalModelOption = {
+				value: "",
+				label: response.defaultLabel || fallbackDefaultOption.label,
+			};
+			const explicitOptions = response.options
+				.filter((option) => option.modelId.trim().length > 0)
+				.filter((option) => option.modelId !== response.defaultModelId)
+				.map<TaskAgentPickerTerminalModelOption>((option) => ({
+					value: option.modelId,
+					label: option.label || option.modelId,
+					...(option.description ? { description: option.description } : {}),
+				}));
+			setTerminalAgentDefaultModelId(response.defaultModelId);
+			setTerminalAgentModelOptions([defaultOption, ...explicitOptions]);
+		};
+
+		const cached = readTaskAgentModelListCache<RuntimeTerminalAgentModelSelectionOptionsResponse>(cacheKey);
+		if (cached) {
+			applyResponse(cached);
+		} else {
+			setTerminalAgentModelOptions([fallbackDefaultOption]);
+			setTerminalAgentDefaultModelId(fallbackDefaultOption.defaultModelId);
+		}
 		setIsLoadingTerminalAgentModels(true);
 		void fetchTerminalAgentModelSelectionOptions(workspaceId, effectiveAgentId)
 			.then((response) => {
 				if (cancelled) {
 					return;
 				}
-				const defaultOption = {
-					value: "",
-					label: response.defaultLabel || fallbackDefaultOption.label,
-				};
-				const explicitOptions = response.options
-					.filter((option) => option.modelId.trim().length > 0)
-					.filter((option) => option.modelId !== response.defaultModelId)
-					.map((option) => ({
-						value: option.modelId,
-						label: option.label || option.modelId,
-					}));
-				setTerminalAgentDefaultModelId(response.defaultModelId);
-				setTerminalAgentModelOptions([defaultOption, ...explicitOptions]);
+				applyResponse(response);
+				writeTaskAgentModelListCache(cacheKey, response);
 			})
 			.catch(() => {
-				if (!cancelled) {
-					setTerminalAgentModelOptions([fallbackDefaultOption]);
-					setTerminalAgentDefaultModelId(fallbackDefaultOption.defaultModelId);
+				if (cancelled || cached) {
+					return; // Keep the cached list on failure rather than clearing it.
 				}
+				setTerminalAgentModelOptions([fallbackDefaultOption]);
+				setTerminalAgentDefaultModelId(fallbackDefaultOption.defaultModelId);
 			})
 			.finally(() => {
 				if (!cancelled) {
@@ -194,15 +241,21 @@ export function useTaskAgentModelPicker({
 			return;
 		}
 		let cancelled = false;
+		const cacheKey = `cline-models:${workspaceId}:${effectiveProviderId}`;
+		const cached = readTaskAgentModelListCache<RuntimeClineProviderModel[]>(cacheKey);
+		if (cached) {
+			setProviderModels(cached);
+		}
 		setIsLoadingModels(true);
 		void fetchClineProviderModels(workspaceId, effectiveProviderId)
 			.then((models) => {
 				if (!cancelled) {
 					setProviderModels(models);
+					writeTaskAgentModelListCache(cacheKey, models);
 				}
 			})
 			.catch(() => {
-				if (!cancelled) {
+				if (!cancelled && !cached) {
 					setProviderModels([]);
 				}
 			})
@@ -216,8 +269,15 @@ export function useTaskAgentModelPicker({
 		};
 	}, [active, effectiveAgentId, effectiveProviderId, workspaceId]);
 
-	const agentOptions = useMemo(() => {
+	const agentOptions = useMemo<TaskAgentPickerAgentOption[]>(() => {
 		const catalog = getRuntimeLaunchSupportedAgentCatalog();
+		const installedByAgentId = new Map(
+			(agents ?? EMPTY_AGENT_DEFINITIONS).map((agent) => [agent.id, agent.installed]),
+		);
+		// Cline is the in-process SDK agent → always available. Otherwise read backend detection;
+		// null (config not yet loaded / unknown agent) renders normally rather than greyed.
+		const resolveInstalled = (id: RuntimeAgentId): boolean | null =>
+			id === "cline" ? true : (installedByAgentId.get(id) ?? null);
 		let firstLabel = "Default";
 		if (defaultAgentId) {
 			const defaultAgent = catalog.find((a) => a.id === defaultAgentId);
@@ -226,13 +286,13 @@ export function useTaskAgentModelPicker({
 			}
 		}
 		return [
-			{ value: "", label: firstLabel },
+			{ value: "", label: firstLabel, installed: defaultAgentId ? resolveInstalled(defaultAgentId) : null },
 			// Exclude the default agent from the explicit list — it's already represented by the first option
 			...catalog
 				.filter((agent) => agent.id !== defaultAgentId)
-				.map((agent) => ({ value: agent.id, label: agent.label })),
+				.map((agent) => ({ value: agent.id, label: agent.label, installed: resolveInstalled(agent.id) })),
 		];
-	}, [defaultAgentId]);
+	}, [agents, defaultAgentId]);
 
 	const clineProviderOptions = useMemo(() => {
 		let firstLabel = "Default";
@@ -348,10 +408,10 @@ export function TaskAgentModelPicker({
 		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
 		options?: TaskTerminalAgentModelOverrideSettingsChangeOptions,
 	) => void;
-	agentOptions: Array<{ value: string; label: string }>;
+	agentOptions: TaskAgentPickerAgentOption[];
 	clineProviderOptions: Array<{ value: string; label: string }>;
 	clineModelOptions: Array<{ value: string; label: string }>;
-	terminalAgentModelOptions?: Array<{ value: string; label: string }>;
+	terminalAgentModelOptions?: TaskAgentPickerTerminalModelOption[];
 	terminalAgentDefaultModelId?: string | null;
 	effectiveDefaultModelId?: string | null;
 	providerModels?: RuntimeClineProviderModel[];
@@ -604,21 +664,44 @@ export function TaskAgentModelPicker({
 							option.value === ""
 								? agentId === undefined || agentId === defaultAgentId
 								: agentId === option.value;
+						// installed === false → not installed: grey base, light up on hover, click opens the
+						// install guide instead of selecting. null/true (unknown or installed) render normally.
+						const isNotInstalled = option.installed === false;
 						const agentButtonAccessibleName = option.value ? option.label : `${option.label} (default agent)`;
+						const agentButtonTooltip = isNotInstalled
+							? `${option.label} · not installed — click to open the install guide`
+							: option.label;
 
 						return (
-							<Tooltip key={option.value || "default-agent"} content={option.label}>
+							<Tooltip key={option.value || "default-agent"} content={agentButtonTooltip}>
 								<button
 									type="button"
 									aria-label={agentButtonAccessibleName}
 									aria-pressed={isSelectedAgentOption}
 									className={cn(
 										"inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-border-focus focus:ring-offset-1 focus:ring-offset-surface-0",
-										isSelectedAgentOption
-											? "border-accent bg-accent/10 text-text-primary"
-											: "border-border-bright bg-surface-2 text-text-secondary hover:border-border-focus hover:bg-surface-3 hover:text-text-primary",
+										// isNotInstalled takes precedence over isSelectedAgentOption: a not-installed
+										// agent can still be the selected option (default agent, or a saved agentId
+										// whose binary isn't present) but must never show the accent selected state —
+										// it isn't a usable choice, clicking only opens the install guide.
+										isNotInstalled
+											? "cursor-default border-border bg-surface-2 text-text-tertiary opacity-50 hover:border-border-focus hover:bg-surface-3 hover:text-text-primary hover:opacity-100"
+											: isSelectedAgentOption
+												? "border-accent bg-accent/10 text-text-primary"
+												: "border-border-bright bg-surface-2 text-text-secondary hover:border-border-focus hover:bg-surface-3 hover:text-text-primary",
 									)}
-									onClick={() => handleAgentIconSelection(option.value, isSelectedAgentOption)}
+									onClick={() => {
+										if (isNotInstalled) {
+											const installUrl = iconAgentId
+												? getRuntimeAgentCatalogEntry(iconAgentId)?.installUrl
+												: null;
+											if (installUrl) {
+												window.open(installUrl, "_blank", "noopener,noreferrer");
+											}
+											return;
+										}
+										handleAgentIconSelection(option.value, isSelectedAgentOption);
+									}}
 								>
 									<AgentIcon size={16} className={agentVisual.className} />
 								</button>
@@ -744,7 +827,10 @@ export function TaskAgentModelPicker({
 						{terminalAgentModelOptions.map((option) => {
 							const isSelectedModelOption = selectedTerminalAgentModelId === option.value;
 							return (
-								<Tooltip key={option.value || "default-terminal-agent-model"} content={option.label}>
+								<Tooltip
+									key={option.value || "default-terminal-agent-model"}
+									content={option.description ?? option.label}
+								>
 									<button
 										type="button"
 										aria-label={option.label}

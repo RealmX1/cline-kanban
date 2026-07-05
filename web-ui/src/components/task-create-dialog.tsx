@@ -32,6 +32,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import type {
+	RuntimeAgentDefinition,
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskClineSettings,
@@ -137,6 +138,7 @@ export function TaskCreateDialog({
 	onClineSettingsChange,
 	terminalAgentModelOverrideSettings,
 	onTerminalAgentModelOverrideSettingsChange,
+	agents,
 	defaultAgentId,
 	defaultProviderId,
 	defaultModelId,
@@ -175,6 +177,8 @@ export function TaskCreateDialog({
 		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
 		options?: TaskTerminalAgentModelOverrideSettingsChangeOptions,
 	) => void;
+	/** Agent definitions from runtimeConfig.agents — carries `installed` so the picker can grey out not-installed agents */
+	agents?: RuntimeAgentDefinition[];
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
 	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
@@ -216,6 +220,7 @@ export function TaskCreateDialog({
 		workspaceId,
 		agentId,
 		clineSettings,
+		agents,
 		defaultAgentId,
 		defaultProviderId,
 		defaultModelId,
