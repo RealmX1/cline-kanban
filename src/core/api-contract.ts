@@ -662,6 +662,40 @@ export const runtimeClineMcpServerAuthStatusSchema = z.object({
 });
 export type RuntimeClineMcpServerAuthStatus = z.infer<typeof runtimeClineMcpServerAuthStatusSchema>;
 
+// 应用内通知中心的「已派生」feed 条目：后端在发送时把最小持久化条目补齐成前端可直接渲染的形态。
+// taskTitle/repoName/isDone 一律后端派生——跨 repo 聚合下客户端只加载活跃 repo 的 board，拿不到
+// 其它 repo 的 board 自行解析。id = `${taskId}:${triggeredAt}`（append 幂等键）。
+export const runtimeNotificationFeedEntrySchema = z.object({
+	id: z.string(),
+	workspaceId: z.string(),
+	taskId: z.string(),
+	repoName: z.string(),
+	taskTitle: z.string(),
+	userTurnKind: runtimeTaskSessionUserTurnKindSchema,
+	triggeredAt: z.number(),
+	visitedAt: z.number().nullable(),
+	isDone: z.boolean(),
+});
+export type RuntimeNotificationFeedEntry = z.infer<typeof runtimeNotificationFeedEntrySchema>;
+
+// 通知中心的两个跨 repo mutation：workspaceId 显式入参（点 repo B 的通知时正看 repo A，
+// 不能用连接绑定的 scope）。mark = 把该 taskId 组所有未读置为已访问；clear = 清空该 workspace 日志。
+export const runtimeNotificationMarkVisitedRequestSchema = z.object({
+	workspaceId: z.string(),
+	taskId: z.string(),
+});
+export type RuntimeNotificationMarkVisitedRequest = z.infer<typeof runtimeNotificationMarkVisitedRequestSchema>;
+
+export const runtimeNotificationClearRequestSchema = z.object({
+	workspaceId: z.string(),
+});
+export type RuntimeNotificationClearRequest = z.infer<typeof runtimeNotificationClearRequestSchema>;
+
+export const runtimeNotificationMutationResponseSchema = z.object({
+	ok: z.boolean(),
+});
+export type RuntimeNotificationMutationResponse = z.infer<typeof runtimeNotificationMutationResponseSchema>;
+
 export const runtimeStateStreamSnapshotMessageSchema = z.object({
 	type: z.literal("snapshot"),
 	currentProjectId: z.string().nullable(),
@@ -669,6 +703,8 @@ export const runtimeStateStreamSnapshotMessageSchema = z.object({
 	workspaceState: runtimeWorkspaceStateResponseSchema.nullable(),
 	workspaceMetadata: runtimeWorkspaceMetadataSchema.nullable(),
 	clineSessionContextVersion: z.number().int().nonnegative(),
+	// 跨全部 workspace 聚合的通知 feed（铃铛/日志用），随首帧快照下发；空时为 []。
+	notificationLog: z.array(runtimeNotificationFeedEntrySchema),
 });
 export type RuntimeStateStreamSnapshotMessage = z.infer<typeof runtimeStateStreamSnapshotMessageSchema>;
 
@@ -752,6 +788,17 @@ export const runtimeStateStreamErrorMessageSchema = z.object({
 });
 export type RuntimeStateStreamErrorMessage = z.infer<typeof runtimeStateStreamErrorMessageSchema>;
 
+// 单个 workspace 的通知 feed 增量：新事件落库、mark-visited、clear、board 变更（isDone 刷新）后，
+// 后端把该 workspace 的整段派生 feed 全局广播给所有连接客户端（铃铛是跨 repo 聚合的）。
+export const runtimeStateStreamNotificationLogUpdatedMessageSchema = z.object({
+	type: z.literal("notification_log_updated"),
+	workspaceId: z.string(),
+	entries: z.array(runtimeNotificationFeedEntrySchema),
+});
+export type RuntimeStateStreamNotificationLogUpdatedMessage = z.infer<
+	typeof runtimeStateStreamNotificationLogUpdatedMessageSchema
+>;
+
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamSnapshotMessageSchema,
 	runtimeStateStreamWorkspaceStateMessageSchema,
@@ -763,6 +810,7 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamTaskChatClearedMessageSchema,
 	runtimeStateStreamMcpAuthUpdatedMessageSchema,
 	runtimeStateStreamClineSessionContextUpdatedMessageSchema,
+	runtimeStateStreamNotificationLogUpdatedMessageSchema,
 	runtimeStateStreamErrorMessageSchema,
 ]);
 export type RuntimeStateStreamMessage = z.infer<typeof runtimeStateStreamMessageSchema>;

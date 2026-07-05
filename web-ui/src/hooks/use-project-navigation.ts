@@ -53,6 +53,7 @@ export interface UseProjectNavigationResult {
 	taskChatMessagesByTaskId: ReturnType<typeof useRuntimeStateStream>["taskChatMessagesByTaskId"];
 	latestTaskReadyForReview: ReturnType<typeof useRuntimeStateStream>["latestTaskReadyForReview"];
 	latestMcpAuthStatuses: ReturnType<typeof useRuntimeStateStream>["latestMcpAuthStatuses"];
+	notificationLogByWorkspaceId: ReturnType<typeof useRuntimeStateStream>["notificationLogByWorkspaceId"];
 	clineSessionContextVersion: ReturnType<typeof useRuntimeStateStream>["clineSessionContextVersion"];
 	streamError: string | null;
 	isRuntimeDisconnected: boolean;
@@ -87,6 +88,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,
 		isRuntimeDisconnected,
@@ -276,6 +278,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,
 		isRuntimeDisconnected,

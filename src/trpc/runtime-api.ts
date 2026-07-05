@@ -54,6 +54,7 @@ import {
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { openInBrowser } from "../server/browser";
+import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { loadWorkspaceBoardById } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -75,6 +76,7 @@ export interface CreateRuntimeApiDependencies {
 		statuses: Awaited<ReturnType<ReturnType<typeof createClineMcpRuntimeService>["getAuthStatuses"]>>,
 	) => void;
 	broadcastTaskChatCleared?: (workspaceId: string, taskId: string) => void;
+	broadcastNotificationLogUpdated?: (workspaceId: string) => Promise<void> | void;
 	bumpClineSessionContextVersion?: () => void;
 	prepareForStateReset?: () => Promise<void>;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
@@ -1008,6 +1010,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 		runUpdateNow: async () => {
 			return await deps.runUpdateNow();
+		},
+		// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。落库后重建 feed 全局广播。
+		markTaskNotificationsVisited: async (_workspaceScope, input) => {
+			await markTaskNotificationsVisited(input.workspaceId, input.taskId, Date.now());
+			await deps.broadcastNotificationLogUpdated?.(input.workspaceId);
+			return { ok: true };
+		},
+		clearNotificationLog: async (_workspaceScope, input) => {
+			await clearNotificationLog(input.workspaceId);
+			await deps.broadcastNotificationLogUpdated?.(input.workspaceId);
+			return { ok: true };
 		},
 	};
 }

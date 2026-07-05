@@ -318,6 +318,7 @@ export function TopBar({
 	connectionRetrySessions = [],
 	onContinueConnectionRetrySessions,
 	onDismissConnectionRetrySessions,
+	notificationCenter,
 	guidedVerificationPendingCount,
 	onOpenGuidedVerification,
 }: {
@@ -358,6 +359,8 @@ export function TopBar({
 	connectionRetrySessions?: ConnectionRetrySessionView[];
 	onContinueConnectionRetrySessions?: (taskIds: string[]) => void;
 	onDismissConnectionRetrySessions?: (taskIds: string[]) => void;
+	// 全局通知铃铛（跨 repo）：由 App.tsx 渲染 <NotificationCenter/> 后作为 slot 传入，始终可见。
+	notificationCenter?: React.ReactNode;
 	// Guided Verification 顶栏入口：null/undefined 表示当前 workspace 无 active 部署组 → 不渲染 badge；
 	// number（含 0）表示 active 组待核对任务数。点击展开面板（见 App 的 handleOpenGuidedVerification）。
 	guidedVerificationPendingCount?: number | null;
@@ -723,6 +726,9 @@ export function TopBar({
 							onDismiss={onDismissConnectionRetrySessions}
 						/>
 					) : null}
+
+					{/* 全局通知铃铛：跨 repo，始终可见。 */}
+					{notificationCenter}
 
 					{/* Settings: always visible */}
 					<Button
