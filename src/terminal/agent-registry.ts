@@ -119,6 +119,7 @@ export function buildRuntimeConfigResponse(
 		readyForReviewNotificationsEnabled: runtimeConfig.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: runtimeConfig.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: runtimeConfig.autoContinueOnConnectionDropEnabled,
+		guidedVerificationForceCompleteEnabled: runtimeConfig.guidedVerificationForceCompleteEnabled,
 		detectedCommands,
 		agents,
 		shortcuts: runtimeConfig.shortcuts,

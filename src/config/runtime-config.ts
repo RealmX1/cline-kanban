@@ -18,6 +18,7 @@ interface RuntimeGlobalConfigFileShape {
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	guidedVerificationForceCompleteEnabled?: boolean;
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
 }
@@ -36,6 +37,7 @@ export interface RuntimeConfigState {
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	guidedVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
 	openPrPromptTemplate: string;
@@ -51,6 +53,7 @@ export interface RuntimeConfigUpdateInput {
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	guidedVerificationForceCompleteEnabled?: boolean;
 	shortcuts?: RuntimeProjectShortcut[];
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
@@ -69,6 +72,8 @@ const DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT = true;
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
 const DEFAULT_NOTIFICATION_SOUND_ENABLED = true;
 const DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED = true;
+// 引导式验证的「强制完成」是绕过安全确认的逃生阀，默认关闭；CLI 传 --force 且此开关开启才生效。
+const DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED = false;
 const DEFAULT_COMMIT_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD. When you are finished with the task, commit the working changes onto {{base_ref}}.
 
 - Do not run destructive commands: git reset --hard, git clean -fdx, git worktree remove, rm/mv on repository paths.
@@ -308,6 +313,10 @@ function toRuntimeConfigState({
 			globalConfig?.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
 		),
+		guidedVerificationForceCompleteEnabled: normalizeBoolean(
+			globalConfig?.guidedVerificationForceCompleteEnabled,
+			DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED,
+		),
 		shortcuts: normalizeShortcuts(projectConfig?.shortcuts),
 		commitPromptTemplate: normalizePromptTemplate(globalConfig?.commitPromptTemplate, DEFAULT_COMMIT_PROMPT_TEMPLATE),
 		openPrPromptTemplate: normalizePromptTemplate(
@@ -338,6 +347,7 @@ async function writeRuntimeGlobalConfigFile(
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		guidedVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
 	},
@@ -374,6 +384,13 @@ async function writeRuntimeGlobalConfigFile(
 			: normalizeBoolean(
 					config.autoContinueOnConnectionDropEnabled,
 					DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
+				);
+	const guidedVerificationForceCompleteEnabled =
+		config.guidedVerificationForceCompleteEnabled === undefined
+			? DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED
+			: normalizeBoolean(
+					config.guidedVerificationForceCompleteEnabled,
+					DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED,
 				);
 	const commitPromptTemplate =
 		config.commitPromptTemplate === undefined
@@ -428,6 +445,12 @@ async function writeRuntimeGlobalConfigFile(
 		autoContinueOnConnectionDropEnabled !== DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED
 	) {
 		payload.autoContinueOnConnectionDropEnabled = autoContinueOnConnectionDropEnabled;
+	}
+	if (
+		hasOwnKey(existing, "guidedVerificationForceCompleteEnabled") ||
+		guidedVerificationForceCompleteEnabled !== DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED
+	) {
+		payload.guidedVerificationForceCompleteEnabled = guidedVerificationForceCompleteEnabled;
 	}
 	if (hasOwnKey(existing, "commitPromptTemplate") || commitPromptTemplate !== DEFAULT_COMMIT_PROMPT_TEMPLATE) {
 		payload.commitPromptTemplate = commitPromptTemplate;
@@ -517,6 +540,7 @@ function createRuntimeConfigStateFromValues(input: {
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	guidedVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
 	openPrPromptTemplate: string;
@@ -543,6 +567,10 @@ function createRuntimeConfigStateFromValues(input: {
 			input.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
 		),
+		guidedVerificationForceCompleteEnabled: normalizeBoolean(
+			input.guidedVerificationForceCompleteEnabled,
+			DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED,
+		),
 		shortcuts: normalizeShortcuts(input.shortcuts),
 		commitPromptTemplate: normalizePromptTemplate(input.commitPromptTemplate, DEFAULT_COMMIT_PROMPT_TEMPLATE),
 		openPrPromptTemplate: normalizePromptTemplate(input.openPrPromptTemplate, DEFAULT_OPEN_PR_PROMPT_TEMPLATE),
@@ -562,6 +590,7 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: current.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: current.autoContinueOnConnectionDropEnabled,
+		guidedVerificationForceCompleteEnabled: current.guidedVerificationForceCompleteEnabled,
 		shortcuts: [],
 		commitPromptTemplate: current.commitPromptTemplate,
 		openPrPromptTemplate: current.openPrPromptTemplate,
@@ -600,6 +629,7 @@ export async function saveRuntimeConfig(
 		readyForReviewNotificationsEnabled: boolean;
 		notificationSoundEnabled: boolean;
 		autoContinueOnConnectionDropEnabled: boolean;
+		guidedVerificationForceCompleteEnabled: boolean;
 		shortcuts: RuntimeProjectShortcut[];
 		commitPromptTemplate: string;
 		openPrPromptTemplate: string;
@@ -615,6 +645,7 @@ export async function saveRuntimeConfig(
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled: config.guidedVerificationForceCompleteEnabled,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
 		});
@@ -629,6 +660,7 @@ export async function saveRuntimeConfig(
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled: config.guidedVerificationForceCompleteEnabled,
 			shortcuts: config.shortcuts,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
@@ -655,6 +687,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled:
 				updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled:
+				updates.guidedVerificationForceCompleteEnabled ?? current.guidedVerificationForceCompleteEnabled,
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
 			commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 			openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
@@ -668,6 +702,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 			nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 			nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+			nextConfig.guidedVerificationForceCompleteEnabled !== current.guidedVerificationForceCompleteEnabled ||
 			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
 			!areRuntimeProjectShortcutsEqual(nextConfig.shortcuts, current.shortcuts);
@@ -684,6 +719,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 		});
@@ -700,6 +736,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
 			shortcuts: nextConfig.shortcuts,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
@@ -734,6 +771,8 @@ export async function updateGlobalRuntimeConfig(
 				notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled:
 					updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+				guidedVerificationForceCompleteEnabled:
+					updates.guidedVerificationForceCompleteEnabled ?? current.guidedVerificationForceCompleteEnabled,
 				shortcuts: current.shortcuts,
 				commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 				openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
@@ -747,6 +786,7 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 				nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 				nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+				nextConfig.guidedVerificationForceCompleteEnabled !== current.guidedVerificationForceCompleteEnabled ||
 				nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 				nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate;
 
@@ -762,6 +802,7 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 			});
@@ -776,6 +817,7 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
 				shortcuts: nextConfig.shortcuts,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
