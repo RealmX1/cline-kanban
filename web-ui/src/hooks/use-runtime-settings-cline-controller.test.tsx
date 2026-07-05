@@ -78,6 +78,7 @@ function createRuntimeConfigResponse(
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		guidedVerificationForceCompleteEnabled: false,
 		detectedCommands: ["cline"],
 		agents: [
 			{

@@ -7,6 +7,7 @@ import {
 	Check,
 	ChevronDown,
 	CircleArrowDown,
+	ClipboardCheck,
 	Command,
 	GitBranch,
 	LayoutGrid,
@@ -320,6 +321,9 @@ export function TopBar({
 	connectionRetrySessions = [],
 	onContinueConnectionRetrySessions,
 	onDismissConnectionRetrySessions,
+	notificationCenter,
+	guidedVerificationPendingCount,
+	onOpenGuidedVerification,
 }: {
 	onToggleSidebar?: () => void;
 	onBack?: () => void;
@@ -360,6 +364,12 @@ export function TopBar({
 	connectionRetrySessions?: ConnectionRetrySessionView[];
 	onContinueConnectionRetrySessions?: (taskIds: string[]) => void;
 	onDismissConnectionRetrySessions?: (taskIds: string[]) => void;
+	// 全局通知铃铛（跨 repo）：由 App.tsx 渲染 <NotificationCenter/> 后作为 slot 传入，始终可见。
+	notificationCenter?: React.ReactNode;
+	// Guided Verification 顶栏入口：null/undefined 表示当前 workspace 无 active 部署组 → 不渲染 badge；
+	// number（含 0）表示 active 组待核对任务数。点击展开面板（见 App 的 handleOpenGuidedVerification）。
+	guidedVerificationPendingCount?: number | null;
+	onOpenGuidedVerification?: () => void;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
 	const displayWorkspacePath = workspacePath ? formatPathForDisplay(workspacePath) : null;
@@ -685,6 +695,34 @@ export function TopBar({
 						</>
 					) : null}
 
+					{/* Guided Verification badge：当前 workspace 有 active 部署组时显示待核对数，点击展开面板。 */}
+					{onOpenGuidedVerification && guidedVerificationPendingCount != null ? (
+						<Tooltip
+							side="bottom"
+							content={
+								guidedVerificationPendingCount > 0
+									? `Guided Verification · ${guidedVerificationPendingCount} 项待核对`
+									: "Guided Verification · 已全部核对"
+							}
+						>
+							<Button
+								variant="ghost"
+								size="sm"
+								icon={<ClipboardCheck size={16} />}
+								onClick={onOpenGuidedVerification}
+								aria-label="Open Guided Verification"
+								data-testid="open-guided-verification-button"
+								className={cn("ml-0.5", isMobile && MOBILE_TOUCH_TARGET)}
+							>
+								{guidedVerificationPendingCount > 0 ? (
+									<span className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-status-orange px-1 text-[11px] font-semibold text-black">
+										{guidedVerificationPendingCount}
+									</span>
+								) : null}
+							</Button>
+						</Tooltip>
+					) : null}
+
 					{/* 连接重试指示器：有任务在自动续跑时显示；否则渲染 null。 */}
 					{onContinueConnectionRetrySessions ? (
 						<ConnectionRetryIndicator
@@ -709,6 +747,10 @@ export function TopBar({
 							)}
 						/>
 					) : null}
+
+					{/* 全局通知铃铛：跨 repo，始终可见。 */}
+					{notificationCenter}
+
 					{/* Settings: always visible */}
 					<Button
 						variant="ghost"

@@ -24,6 +24,7 @@ import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import type {
+	RuntimeAgentDefinition,
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskClineSettings,
@@ -96,6 +97,7 @@ export function TaskInlineCreateCard({
 	onClineSettingsChange,
 	terminalAgentModelOverrideSettings,
 	onTerminalAgentModelOverrideSettingsChange,
+	agents,
 	defaultAgentId,
 	defaultProviderId,
 	defaultModelId,
@@ -135,6 +137,8 @@ export function TaskInlineCreateCard({
 		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
 		options?: TaskTerminalAgentModelOverrideSettingsChangeOptions,
 	) => void;
+	/** Agent definitions from runtimeConfig.agents — carries `installed` so the picker can grey out not-installed agents */
+	agents?: RuntimeAgentDefinition[];
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
 	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
@@ -218,6 +222,7 @@ export function TaskInlineCreateCard({
 		workspaceId,
 		agentId,
 		clineSettings,
+		agents,
 		defaultAgentId,
 		defaultProviderId,
 		defaultModelId,

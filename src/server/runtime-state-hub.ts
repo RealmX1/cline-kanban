@@ -6,10 +6,12 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { ClineTaskMessage, ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type {
 	RuntimeClineMcpServerAuthStatus,
+	RuntimeNotificationFeedEntry,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamErrorMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
+	RuntimeStateStreamNotificationLogUpdatedMessage,
 	RuntimeStateStreamProjectsMessage,
 	RuntimeStateStreamSnapshotMessage,
 	RuntimeStateStreamTaskChatClearedMessage,
@@ -22,6 +24,12 @@ import type {
 	RuntimeTaskSessionUserTurnKind,
 } from "../core/api-contract";
 import { isNotifiableUserTurn, resolveSessionFacets } from "../core/session-activity";
+import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
+import {
+	appendNotificationLogEntry,
+	readAllNotificationLogs,
+	readNotificationLog,
+} from "../state/notification-log-store";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
@@ -63,6 +71,9 @@ export interface RuntimeStateHub {
 		taskId: string,
 		userTurnKind: RuntimeTaskSessionUserTurnKind,
 	) => void;
+	// 通知中心：某 workspace 的日志变更（mark-visited / clear / board 变更导致 isDone 刷新）后，
+	// 重建该 workspace 的派生 feed 并全局广播给所有客户端（铃铛跨 repo 聚合）。
+	broadcastNotificationLogUpdated: (workspaceId: string) => Promise<void>;
 	close: () => Promise<void>;
 }
 
@@ -304,6 +315,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const broadcastRuntimeWorkspaceStateUpdated = async (workspaceId: string, workspacePath: string): Promise<void> => {
+		// isDone 刷新：board 变更（含 move-to-done）后重建该 workspace 的通知 feed 并全局广播，使铃铛面板
+		// 即时隐藏已完成卡片。放在下方 per-workspace 0-客户端 guard 之前——即便没人正看该 workspace，
+		// 跨 repo 铃铛仍需拿到它的 isDone 变化（内部按全局客户端数自守卫）。
+		void broadcastNotificationLogUpdated(workspaceId);
 		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
 		if (!clients || clients.size === 0) {
 			return;
@@ -328,11 +343,66 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
+	// 重建某 workspace 的派生通知 feed 并全局广播（铃铛跨 repo 聚合，故发给所有连接客户端而非仅本 workspace）。
+	// 0 客户端时直接跳过广播——但注意持久化早已在 appendNotificationLogEntry 完成，这里只管在场客户端的推送。
+	const broadcastNotificationLogUpdated = async (workspaceId: string): Promise<void> => {
+		if (runtimeStateClients.size === 0) {
+			return;
+		}
+		try {
+			const entries = await readNotificationLog(workspaceId);
+			const feed = await buildNotificationFeedEntries(workspaceId, entries);
+			const payload: RuntimeStateStreamNotificationLogUpdatedMessage = {
+				type: "notification_log_updated",
+				workspaceId,
+				entries: feed,
+			};
+			for (const client of runtimeStateClients) {
+				sendRuntimeStateMessage(client, payload);
+			}
+		} catch {
+			// 通知 feed 重建失败不影响主流程；下次变更会重发。
+		}
+	};
+
+	// 先无条件落库（可通知边沿的持久化），再全局广播 feed。落库独立于客户端在场与否。
+	const persistNotification = async (
+		workspaceId: string,
+		input: { taskId: string; userTurnKind: RuntimeTaskSessionUserTurnKind; triggeredAt: number },
+	): Promise<void> => {
+		try {
+			await appendNotificationLogEntry(workspaceId, input);
+		} catch {
+			// 落库失败（磁盘错误等）不应打断 OS 通知路径；容忍并继续。
+		}
+		await broadcastNotificationLogUpdated(workspaceId);
+	};
+
+	const buildAggregatedNotificationFeed = async (): Promise<RuntimeNotificationFeedEntry[]> => {
+		try {
+			const logsByWorkspaceId = await readAllNotificationLogs();
+			const feeds = await Promise.all(
+				Object.entries(logsByWorkspaceId).map(([logWorkspaceId, entries]) =>
+					buildNotificationFeedEntries(logWorkspaceId, entries),
+				),
+			);
+			return feeds.flat();
+		} catch {
+			return [];
+		}
+	};
+
 	const broadcastTaskReadyForReview = (
 		workspaceId: string,
 		taskId: string,
 		userTurnKind: RuntimeTaskSessionUserTurnKind,
 	) => {
+		const triggeredAt = Date.now();
+		// ① 先无条件落库 + 全局广播通知 feed——在下方 per-workspace「0 客户端」guard 之前，
+		// 故浏览器全关时段的后台事件也进持久化日志（跨 repo 聚合方案的核心卖点）。同一 triggeredAt
+		// 复用给下方一次性 OS 通知事件，保证两条路径的 id/时间一致。
+		void persistNotification(workspaceId, { taskId, userTurnKind, triggeredAt });
+		// ② 照旧广播一次性 task_ready_for_review（OS 通知用），仅发给本 workspace 的在场客户端，行为不变。
 		const runtimeClients = runtimeStateClientsByWorkspaceId.get(workspaceId);
 		if (!runtimeClients || runtimeClients.size === 0) {
 			return;
@@ -341,7 +411,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			type: "task_ready_for_review",
 			workspaceId,
 			taskId,
-			triggeredAt: Date.now(),
+			triggeredAt,
 			userTurnKind,
 		};
 		for (const client of runtimeClients) {
@@ -435,6 +505,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					workspaceState = null;
 					workspaceMetadata = null;
 				}
+				// 聚合全部 workspace 的通知 feed，随首帧快照下发（铃铛跨 repo）。独立于当前连接的 workspace scope。
+				const notificationLog = await buildAggregatedNotificationFeed();
 				if (client.readyState !== WebSocket.OPEN) {
 					if (monitorWorkspaceId) {
 						workspaceMetadataMonitor.disconnectWorkspace(monitorWorkspaceId);
@@ -449,6 +521,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					workspaceState,
 					workspaceMetadata,
 					clineSessionContextVersion,
+					notificationLog,
 				} satisfies RuntimeStateStreamSnapshotMessage);
 				if (client.readyState !== WebSocket.OPEN) {
 					if (monitorWorkspaceId) {
@@ -566,6 +639,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		broadcastClineMcpAuthStatusesUpdated,
 		bumpClineSessionContextVersion,
 		broadcastTaskReadyForReview,
+		broadcastNotificationLogUpdated,
 		close: async () => {
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {
 				clearTimeout(timer);

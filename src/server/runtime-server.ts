@@ -36,10 +36,11 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
-import { loadWorkspaceContextById } from "../state/workspace-state";
+import { loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
+import { createDeploymentApi } from "../trpc/deployment-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
@@ -207,6 +208,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				runCommand: deps.runCommand,
 				broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
 				broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
+				broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
 				bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
 				prepareForStateReset,
 				getUpdateStatus: deps.getUpdateStatus,
@@ -248,6 +250,40 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 				broadcastTaskReadyForReview: deps.runtimeStateHub.broadcastTaskReadyForReview,
+			}),
+			deploymentApi: createDeploymentApi({
+				// 看板当前列快照：直读该 workspace 的 board.json，摊平 columns×cards → (taskId, columnId)。
+				loadBoardTasksForWorkspace: async (scope) => {
+					const board = await loadWorkspaceBoardById(scope.workspaceId);
+					return board.columns.flatMap((column) =>
+						column.cards.map((card) => ({ taskId: card.id, columnId: column.id })),
+					);
+				},
+				// 确认框 agent response 按 agent 类型分源（plan Grilling #5）。
+				loadTaskAgentResponsePreview: async (scope, taskId) => {
+					// agent 类型判定必须廉价：绝不为终端任务触发 loadTaskSessionMessages —— 后者会 boot Cline SDK
+					// session host（AGENTS.md 记载的 CI 卡死诱因）。先用「in-memory Cline summary agentId」+「看板卡
+					// 配置的 agentId」双廉价信号判定是否 Cline 任务，二者皆非 cline 才走终端 agent 路径。
+					const clineTaskSessionService = await getScopedClineTaskSessionService(scope);
+					const board = await loadWorkspaceBoardById(scope.workspaceId);
+					const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+					const isClineTask =
+						clineTaskSessionService.getSummary(taskId)?.agentId === "cline" || card?.agentId === "cline";
+					if (isClineTask) {
+						// Cline（in-process SDK）：取任务聊天记录最后一条 assistant message；拿不到时优雅降级为 null。
+						const messages = await clineTaskSessionService.loadTaskSessionMessages(taskId);
+						let lastAssistantMessageContent: string | null = null;
+						for (const message of messages) {
+							if (message.role === "assistant") {
+								lastAssistantMessageContent = message.content;
+							}
+						}
+						return lastAssistantMessageContent;
+					}
+					// 终端 agent（Claude 等）：取 hook 采集的最近 finalMessage；无则优雅降级为 null。
+					const manager = await getScopedTerminalManager(scope);
+					return manager.getSummary(taskId)?.latestHookActivity?.finalMessage ?? null;
+				},
 			}),
 		};
 	};

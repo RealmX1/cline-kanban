@@ -16,7 +16,9 @@ import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { GitHistoryView } from "@/components/git-history-view";
+import { GuidedVerificationController } from "@/components/guided-verification/guided-verification-controller";
 import { KanbanBoard } from "@/components/kanban-board";
+import { NotificationCenter } from "@/components/notification-center";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
@@ -47,8 +49,10 @@ import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
 import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
+import { useGuidedVerification } from "@/hooks/use-guided-verification";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
+import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { parseRemovedProjectPathFromStreamError, useProjectNavigation } from "@/hooks/use-project-navigation";
@@ -71,6 +75,7 @@ import {
 	selectLatestTaskChatMessageForTask,
 	selectTaskChatMessagesForTask,
 } from "@/runtime/native-agent";
+import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
@@ -119,6 +124,7 @@ export default function App(): ReactElement {
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,
 		isRuntimeDisconnected,
@@ -345,6 +351,61 @@ export default function App(): ReactElement {
 		setSelectedTaskId(pendingOverviewTaskOpen.taskId);
 		setPendingOverviewTaskOpen(null);
 	}, [board, currentProjectId, pendingOverviewTaskOpen, setSelectedTaskId]);
+
+	// 应用内通知中心（跨 repo 铃铛）。mark/clear 是跨 repo mutation：用 notification 的 workspaceId 起 tRPC 客户端，
+	// input 显式携带同一 workspaceId（服务端 t.procedure 忽略连接 scope，按 input.workspaceId 操作）。
+	const handleMarkTaskNotificationsVisited = useCallback((workspaceId: string, taskId: string) => {
+		void getRuntimeTrpcClient(workspaceId)
+			.runtime.markTaskNotificationsVisited.mutate({ workspaceId, taskId })
+			.catch(() => {
+				// 标记已读失败可忽略：下次快照/广播会纠正。
+			});
+	}, []);
+	const handleClearWorkspaceNotifications = useCallback((workspaceId: string) => {
+		void getRuntimeTrpcClient(workspaceId)
+			.runtime.clearNotificationLog.mutate({ workspaceId })
+			.catch(() => {
+				// 清空失败可忽略：下次快照/广播会纠正。
+			});
+	}, []);
+	const notificationCenter = useNotificationCenter({
+		notificationLogByWorkspaceId,
+		selectedTaskId,
+		onMarkTaskVisited: handleMarkTaskNotificationsVisited,
+		onClearWorkspace: handleClearWorkspaceNotifications,
+	});
+
+	// 跨 repo 点击通知定位 task：同项目直接选中；跨项目先切项目，待目标项目数据落地（currentProjectId 到位、
+	// 非切换中）后再选中——否则会被 useDetailTaskNavigation 切项目时的 closeDetail 清掉。
+	const pendingNotificationFocusRef = useRef<{ workspaceId: string; taskId: string } | null>(null);
+	const focusNotificationTask = useCallback(
+		(workspaceId: string, taskId: string) => {
+			// 目标项目已完全落地（loaded 且非切换中）才直接选中——与下方 pending-effect 同轴（currentProjectId）。
+			// 若只看 navigationCurrentProjectId（导航意图），切换在途时会过早 setSelectedTaskId，随后被
+			// useDetailTaskNavigation 切项目的 closeDetail 清掉且无 pending 恢复，通知点击打不开详情。
+			if (workspaceId === currentProjectId && !isProjectSwitching) {
+				setSelectedTaskId(taskId);
+				return;
+			}
+			// 否则挂 pending，待目标项目落地后由 effect 选中；仅当导航意图尚未指向目标时才触发切项目
+			// （已在切往目标时重复 handleSelectProject 无意义）。
+			pendingNotificationFocusRef.current = { workspaceId, taskId };
+			if (workspaceId !== navigationCurrentProjectId) {
+				void handleSelectProject(workspaceId);
+			}
+		},
+		[currentProjectId, isProjectSwitching, navigationCurrentProjectId, setSelectedTaskId, handleSelectProject],
+	);
+	useEffect(() => {
+		const pending = pendingNotificationFocusRef.current;
+		if (!pending) {
+			return;
+		}
+		if (currentProjectId === pending.workspaceId && !isProjectSwitching) {
+			pendingNotificationFocusRef.current = null;
+			setSelectedTaskId(pending.taskId);
+		}
+	}, [currentProjectId, isProjectSwitching, setSelectedTaskId]);
 
 	useEffect(() => {
 		replaceWorkspaceMetadata(workspaceMetadata);
@@ -695,6 +756,7 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		completeGuidedVerificationMoveToDone,
 		isMoveToDoneConfirmOpen,
 		confirmMoveToDone,
 		cancelMoveToDone,
@@ -751,6 +813,24 @@ export default function App(): ReactElement {
 		handleStartAllBacklogTasks,
 		setSelectedTaskId,
 	});
+
+	// Guided Verification：App.tsx 持有唯一一份 useGuidedVerification 实例，同时供顶栏 badge 派生待核对数、
+	// 并作为 prop 下传给 GuidedVerificationController（controller 消费该结果，不再自持第二份实例）。
+	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
+	const guidedVerification = useGuidedVerification(currentProjectId);
+	const { setCollapsed: setGuidedVerificationCollapsed } = guidedVerification;
+	const guidedVerificationActiveGroup = guidedVerification.activeGroup;
+	// 待核对数 = active 组内未核对且未被 reconcile 移除的任务数；与面板 countPending 语义一致。
+	// 未加载或无 active 组时为 null → 顶栏不渲染 badge（项目切换时 hook 会重置 hasLoadedOnce，badge 自动隐藏）。
+	const guidedVerificationPendingCount =
+		guidedVerification.hasLoadedOnce && guidedVerificationActiveGroup
+			? guidedVerificationActiveGroup.tasks.filter((task) => task.verifiedAt === null && task.droppedReason === null)
+					.length
+			: null;
+	// 顶栏 badge 与 controller 面板共用同一实例，setCollapsed(false) 直接展开面板，无需强制 remount。
+	const handleOpenGuidedVerification = useCallback(() => {
+		setGuidedVerificationCollapsed(false);
+	}, [setGuidedVerificationCollapsed]);
 
 	useAppHotkeys({
 		selectedCard,
@@ -936,6 +1016,7 @@ export default function App(): ReactElement {
 			onClineSettingsChange={setEditTaskClineSettings}
 			terminalAgentModelOverrideSettings={editTaskTerminalAgentModelOverrideSettings}
 			onTerminalAgentModelOverrideSettingsChange={setEditTaskTerminalAgentModelOverrideSettings}
+			agents={runtimeProjectConfig?.agents ?? []}
 			defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 			defaultProviderId={defaultTaskClineProviderId}
 			defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
@@ -1042,6 +1123,19 @@ export default function App(): ReactElement {
 						connectionRetrySessions={connectionRetrySessions}
 						onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
 						onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
+						notificationCenter={
+							<NotificationCenter
+								panelGroups={notificationCenter.panelGroups}
+								allGroups={notificationCenter.allGroups}
+								unreadCount={notificationCenter.unreadCount}
+								onFocusTask={focusNotificationTask}
+								onMarkGroupVisited={handleMarkTaskNotificationsVisited}
+								onMarkAllVisited={notificationCenter.markAllVisited}
+								onClearAll={notificationCenter.clearAll}
+							/>
+						}
+						guidedVerificationPendingCount={guidedVerificationPendingCount}
+						onOpenGuidedVerification={handleOpenGuidedVerification}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 						<div
@@ -1326,6 +1420,7 @@ export default function App(): ReactElement {
 					onClineSettingsChange={setNewTaskClineSettings}
 					terminalAgentModelOverrideSettings={newTaskTerminalAgentModelOverrideSettings}
 					onTerminalAgentModelOverrideSettingsChange={setNewTaskTerminalAgentModelOverrideSettings}
+					agents={runtimeProjectConfig?.agents ?? []}
 					defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 					defaultProviderId={defaultTaskClineProviderId}
 					defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
@@ -1402,6 +1497,13 @@ export default function App(): ReactElement {
 					projects={projects}
 					currentProjectId={currentProjectId}
 					activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
+				/>
+
+				<GuidedVerificationController
+					verification={guidedVerification}
+					board={board}
+					completeGuidedVerificationMoveToDone={completeGuidedVerificationMoveToDone}
+					onSelectTask={setSelectedTaskId}
 				/>
 			</div>
 		</LayoutCustomizationsProvider>
