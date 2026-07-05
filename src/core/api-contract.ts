@@ -25,6 +25,9 @@ export const runtimeWorkspaceFileChangeSchema = z.object({
 	deletions: z.number(),
 	oldText: z.string().nullable(),
 	newText: z.string().nullable(),
+	// 服务端因文件过大而未回传全文时置 true：oldText/newText 被省略为 null，additions/deletions 仍有效。
+	// 前端据此渲染"文件过大，未内联显示"占位，避免大 payload/主线程 Prism+DOM 把整个 app 拖垮。
+	contentOmittedForSize: z.boolean().optional(),
 });
 export type RuntimeWorkspaceFileChange = z.infer<typeof runtimeWorkspaceFileChangeSchema>;
 

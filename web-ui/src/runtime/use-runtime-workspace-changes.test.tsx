@@ -48,17 +48,20 @@ interface HookSnapshot {
 	paths: string[];
 	isLoading: boolean;
 	isRuntimeAvailable: boolean;
+	changes: RuntimeWorkspaceChangesResponse | null;
 }
 
 function HookHarness({
 	taskId,
 	worktreeMode = null,
+	stateVersion = 0,
 	viewKey = null,
 	clearOnViewTransition = true,
 	onSnapshot,
 }: {
 	taskId: string;
 	worktreeMode?: RuntimeTaskWorktreeMode | null;
+	stateVersion?: number;
 	viewKey?: string | null;
 	clearOnViewTransition?: boolean;
 	onSnapshot: (snapshot: HookSnapshot) => void;
@@ -69,7 +72,7 @@ function HookHarness({
 		"main",
 		worktreeMode,
 		"working_copy",
-		0,
+		stateVersion,
 		null,
 		viewKey,
 		clearOnViewTransition,
@@ -80,6 +83,7 @@ function HookHarness({
 			paths: workspaceChanges.changes?.files.map((file) => file.path) ?? [],
 			isLoading: workspaceChanges.isLoading,
 			isRuntimeAvailable: workspaceChanges.isRuntimeAvailable,
+			changes: workspaceChanges.changes,
 		});
 	}, [onSnapshot, workspaceChanges.changes, workspaceChanges.isLoading, workspaceChanges.isRuntimeAvailable]);
 
@@ -155,6 +159,59 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(getChangesQueryMock).toHaveBeenCalledTimes(1);
 		expect(getChangesQueryMock.mock.calls[0]?.[0]).not.toHaveProperty("worktreeMode");
+	});
+
+	it("keeps the same changes reference when a poll returns content-identical files (dedup)", async () => {
+		// 两次响应文件内容完全相同，仅对象引用 / generatedAt 不同——模拟 1s 轮询在工作树未变时的空转。
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("stable.ts"));
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("stable.ts"));
+
+		const snapshots: HookSnapshot[] = [];
+		const onSnapshot = (snapshot: HookSnapshot) => {
+			snapshots.push(snapshot);
+		};
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" stateVersion={0} onSnapshot={onSnapshot} />);
+			await Promise.resolve();
+		});
+
+		const firstChangesRef = snapshots.at(-1)?.changes ?? null;
+		expect(firstChangesRef).not.toBeNull();
+
+		// stateVersion 递增触发 refetch；内容相同 → 应保留旧引用，绝不下发新对象。
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" stateVersion={1} onSnapshot={onSnapshot} />);
+			await Promise.resolve();
+		});
+
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(2);
+		expect(snapshots.at(-1)?.changes).toBe(firstChangesRef);
+	});
+
+	it("replaces the changes reference when a poll returns different file content", async () => {
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("before.ts"));
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("after.ts"));
+
+		const snapshots: HookSnapshot[] = [];
+		const onSnapshot = (snapshot: HookSnapshot) => {
+			snapshots.push(snapshot);
+		};
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" stateVersion={0} onSnapshot={onSnapshot} />);
+			await Promise.resolve();
+		});
+
+		const firstChangesRef = snapshots.at(-1)?.changes ?? null;
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" stateVersion={1} onSnapshot={onSnapshot} />);
+			await Promise.resolve();
+		});
+
+		expect(snapshots.at(-1)?.changes).not.toBe(firstChangesRef);
+		expect(snapshots.at(-1)?.paths).toEqual(["after.ts"]);
 	});
 
 	it("clears the previous task diff immediately when switching tasks", async () => {
