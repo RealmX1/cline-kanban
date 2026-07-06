@@ -10,6 +10,25 @@ import { getGitStdout } from "./git-utils";
 
 const WORKSPACE_CHANGES_CACHE_MAX_ENTRIES = 128;
 
+// ponytail: 单文件 diff 内联渲染上限（old+new 合计字符数）。超过则不回传全文——payload 传输、
+// JSON.parse、以及前端 Prism 高亮 + DOM 行渲染都随文件大小线性膨胀，一个 lockfile / 生成文件即可
+// 拖垮整个 app。仅保留 additions/deletions 供表头显示。阈值取"内联审查已无意义"的量级（~万行级）;
+// 需要查看超大文件时应走按需加载（未实现）。上调：改此常量即可。
+const MAX_INLINE_DIFF_TEXT_LENGTH = 1024 * 1024;
+
+function applyInlineDiffContentSizeLimit(change: RuntimeWorkspaceFileChange): RuntimeWorkspaceFileChange {
+	const combinedLength = (change.oldText?.length ?? 0) + (change.newText?.length ?? 0);
+	if (combinedLength <= MAX_INLINE_DIFF_TEXT_LENGTH) {
+		return change;
+	}
+	return {
+		...change,
+		oldText: null,
+		newText: null,
+		contentOmittedForSize: true,
+	};
+}
+
 interface WorkspaceChangesCacheEntry {
 	stateKey: string;
 	response: RuntimeWorkspaceChangesResponse;
@@ -290,7 +309,7 @@ async function buildFileChange(repoRoot: string, entry: NameStatusEntry): Promis
 			? { additions: toLineCount(newText ?? ""), deletions: 0 }
 			: ((await readDiffStat(repoRoot, entry.path)) ?? fallbackStats(oldText, newText));
 
-	return {
+	return applyInlineDiffContentSizeLimit({
 		path: entry.path,
 		previousPath: entry.previousPath,
 		status: entry.status,
@@ -298,7 +317,7 @@ async function buildFileChange(repoRoot: string, entry: NameStatusEntry): Promis
 		deletions: stats.deletions,
 		oldText,
 		newText,
-	};
+	});
 }
 
 async function buildFileChangeBetweenRefs(
@@ -313,7 +332,7 @@ async function buildFileChangeBetweenRefs(
 	const stats =
 		(await readDiffStatBetweenRefs(repoRoot, fromRef, toRef, entry.path)) ?? fallbackStats(oldText, newText);
 
-	return {
+	return applyInlineDiffContentSizeLimit({
 		path: entry.path,
 		previousPath: entry.previousPath,
 		status: entry.status,
@@ -321,7 +340,7 @@ async function buildFileChangeBetweenRefs(
 		deletions: stats.deletions,
 		oldText,
 		newText,
-	};
+	});
 }
 
 async function buildFileChangeFromRef(
@@ -340,7 +359,7 @@ async function buildFileChangeFromRef(
 			? { additions: toLineCount(newText ?? ""), deletions: 0 }
 			: ((await readDiffStatFromRef(repoRoot, fromRef, entry.path)) ?? fallbackStats(oldText, newText));
 
-	return {
+	return applyInlineDiffContentSizeLimit({
 		path: entry.path,
 		previousPath: entry.previousPath,
 		status: entry.status,
@@ -348,7 +367,7 @@ async function buildFileChangeFromRef(
 		deletions: stats.deletions,
 		oldText,
 		newText,
-	};
+	});
 }
 
 export async function createEmptyWorkspaceChangesResponse(cwd: string): Promise<RuntimeWorkspaceChangesResponse> {

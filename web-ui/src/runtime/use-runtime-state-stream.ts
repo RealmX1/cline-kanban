@@ -52,6 +52,24 @@ function bucketNotificationFeedByWorkspaceId(
 	return byWorkspaceId;
 }
 
+// project 被移除后裁剪通知桶：只保留仍存在的 workspace。removeProject 只广播 projects_updated、不发通知增量，
+// 若不裁剪，被删 repo 的桶会原样留在客户端内存——铃铛残留其通知且点击跳转失败（切到已删 project 是 no-op）。
+// 无 stale 桶时返回原对象，保持引用稳定、不触发无谓重渲染。
+function pruneNotificationLogToWorkspaces(
+	byWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>,
+	liveWorkspaceIds: ReadonlySet<string>,
+): Record<string, RuntimeNotificationFeedEntry[]> {
+	const staleWorkspaceIds = Object.keys(byWorkspaceId).filter((workspaceId) => !liveWorkspaceIds.has(workspaceId));
+	if (staleWorkspaceIds.length === 0) {
+		return byWorkspaceId;
+	}
+	const pruned = { ...byWorkspaceId };
+	for (const workspaceId of staleWorkspaceIds) {
+		delete pruned[workspaceId];
+	}
+	return pruned;
+}
+
 function getRuntimeStreamUrl(workspaceId: string | null): string {
 	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	const url = new URL(`${protocol}//${window.location.host}/api/runtime/ws`);
@@ -221,6 +239,8 @@ function runtimeStateStreamReducer(
 	}
 	if (action.type === "projects_updated") {
 		const didProjectChange = action.nextProjectId !== state.currentProjectId;
+		// project.id 即 workspaceId（通知桶键）；裁剪已移除 workspace 的桶（见 pruneNotificationLogToWorkspaces）。
+		const liveWorkspaceIds = new Set(action.payload.projects.map((project) => project.id));
 		return {
 			...state,
 			currentProjectId: action.nextProjectId,
@@ -230,6 +250,10 @@ function runtimeStateStreamReducer(
 			latestTaskChatMessage: didProjectChange ? null : state.latestTaskChatMessage,
 			taskChatMessagesByTaskId: didProjectChange ? {} : state.taskChatMessagesByTaskId,
 			latestTaskReadyForReview: didProjectChange ? null : state.latestTaskReadyForReview,
+			notificationLogByWorkspaceId: pruneNotificationLogToWorkspaces(
+				state.notificationLogByWorkspaceId,
+				liveWorkspaceIds,
+			),
 			hasReceivedSnapshot: true,
 		};
 	}

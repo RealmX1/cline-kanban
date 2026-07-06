@@ -5,6 +5,7 @@ import {
 	createTaskBoardSearchState,
 	findFuzzyTaskBoardSearchResults,
 	mergeTaskBoardSearchResults,
+	normalizeSearchQuery,
 	type TaskBoardSearchDocument,
 	type TaskBoardSearchMode,
 	type TaskBoardSearchResult,
@@ -35,10 +36,6 @@ interface TaskBoardSemanticSearchResultSnapshot {
 	results: TaskBoardSearchResult[];
 }
 
-function normalizeSearchQuery(query: string): string {
-	return query.trim().replace(/\s+/gu, " ");
-}
-
 export function useTaskBoardSearch({
 	board,
 	query,
@@ -50,7 +47,20 @@ export function useTaskBoardSearch({
 }): UseTaskBoardSearchResult {
 	const normalizedQuery = normalizeSearchQuery(query);
 	const isSearchActive = normalizedQuery.length > 0;
-	const documents = useMemo(() => buildTaskBoardSearchDocuments(board), [board]);
+	// 语义索引以 documents 引用为缓存键；board 实时流每 tick 换引用会让 TF/Orama 索引反复从零重建（agent 边跑边搜
+	// 时尤甚）。故按可搜索内容（taskId+title+prompt）算签名，内容未变则保持旧引用，索引不再无谓重建、也不重触发搜索。
+	const documentsSignatureRef = useRef<string>("");
+	const documentsRef = useRef<TaskBoardSearchDocument[]>([]);
+	const documents = useMemo(() => {
+		const next = buildTaskBoardSearchDocuments(board);
+		const nextSignature = next.map((doc) => `${doc.taskId}\t${doc.title}\t${doc.prompt}`).join("\n");
+		if (nextSignature === documentsSignatureRef.current) {
+			return documentsRef.current;
+		}
+		documentsSignatureRef.current = nextSignature;
+		documentsRef.current = next;
+		return next;
+	}, [board]);
 	const fuzzyResults = useMemo(() => {
 		if (!isSearchActive || mode === "semantic") {
 			return [] satisfies TaskBoardSearchResult[];

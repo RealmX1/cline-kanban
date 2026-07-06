@@ -97,7 +97,9 @@ export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
 	const [board, setBoard] = useState<BoardData>(() => createInitialBoardData());
 	const [taskSearchQuery, setTaskSearchQuery] = useState("");
-	const [taskSearchMode, setTaskSearchMode] = useState<TaskBoardSearchMode>("hybrid");
+	// 默认 fuzzy（fzf）：语义（hybrid/semantic）栈重，且其相似度分并不用于看板排序（列内不重排卡片），
+	// 默认走 fuzzy 省去每次搜索的 embedding 开销；需要语义召回时用户可在工具栏切到 Hybrid/Semantic。
+	const [taskSearchMode, setTaskSearchMode] = useState<TaskBoardSearchMode>("fuzzy");
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
 	const [canPersistWorkspaceState, setCanPersistWorkspaceState] = useState(false);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);

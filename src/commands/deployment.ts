@@ -476,7 +476,10 @@ async function verificationState(input: {
 		});
 		groups = groups.filter((group) => group.workspaceId === workspace.workspaceId);
 	}
-	const activeDeploymentId = latestActiveDeploymentId(groups);
+	// 无 --project-path 时 groups 是跨全部 workspace 的全集，单一标量 activeDeploymentId 在该模式下无良定义
+	// （latestActiveDeploymentId 只会挑「谁最后部署」，可能属于调用方没在看的另一个 workspace）；仅在限定了
+	// project 时才返回标量。deploymentGroups 各自带 workspaceId，全 dump 模式下由调用方自行按 workspace 消歧。
+	const activeDeploymentId = input.projectPath !== undefined ? latestActiveDeploymentId(groups) : null;
 	if (input.activeOnly) {
 		groups = groups.filter((group) => group.foldedAtIso === null);
 	}

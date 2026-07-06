@@ -199,7 +199,9 @@ export function useTaskAgentModelPicker({
 		};
 
 		const cached = readTaskAgentModelListCache<RuntimeTerminalAgentModelSelectionOptionsResponse>(cacheKey);
-		if (cached) {
+		// 带 warning 的历史缓存是修复前被降级 fallback 污染的结果（列表退化为单条 Default）——不拿它 seed，
+		// 改显示 fallbackDefaultOption 等首次成功探测覆盖，让修复前的旧污染不必等下次成功即自愈。
+		if (cached && !cached.warning) {
 			applyResponse(cached);
 		} else {
 			setTerminalAgentModelOptions([fallbackDefaultOption]);
@@ -209,6 +211,16 @@ export function useTaskAgentModelPicker({
 		void fetchTerminalAgentModelSelectionOptions(workspaceId, effectiveAgentId)
 			.then((response) => {
 				if (cancelled) {
+					return;
+				}
+				// 后端 CLI 探测失败会 resolve 成带 warning 的 fallback 响应（列表退化为单条 Default），而非 reject——
+				// 因此下面的 .catch 对这类最常见失败永不触发。这种降级结果绝不能写回 localStorage，否则一次
+				// `claude --help` 抖动就把好端端的 opus/sonnet/haiku/fable 列表污染成单条 Default 并跨会话持久化。
+				// 已有可用缓存时保留旧列表、不覆盖显示；仅真实成功响应才 apply + 落盘。
+				if (response.warning) {
+					if (!cached) {
+						applyResponse(response);
+					}
 					return;
 				}
 				applyResponse(response);

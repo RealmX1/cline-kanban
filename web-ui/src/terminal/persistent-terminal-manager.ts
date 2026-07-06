@@ -1,3 +1,4 @@
+import { resolveSessionFacets } from "@runtime-session-activity";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { type ISearchOptions, SearchAddon } from "@xterm/addon-search";
@@ -216,6 +217,9 @@ class PersistentTerminal {
 	private controlSocket: WebSocket | null = null;
 	private connectionReady = false;
 	private restoreCompleted = false;
+	// 一次性防抖：运行时重启后首次聚焦该任务、检测到「空终端 + 无活会话」时自动续跑一次。manager 实例
+	// 跨 mount/unmount parked 存活，故一生只放一次电；dispose 重建（关面板/刷页）才允许再试。
+	private autoResumeAttempted = false;
 	private outputTextDecoder = new TextDecoder();
 	private terminalWriteQueue: Promise<void> = Promise.resolve();
 	private slowFlushLogged = false;
@@ -375,6 +379,34 @@ class PersistentTerminal {
 		for (const subscriber of this.subscribers) {
 			subscriber.onConnectionReady?.(this.taskId);
 		}
+	}
+
+	// 运行时（node 服务器）重启会杀掉终端 agent 的非-detached PTY 子进程，并丢失只存在内存里的
+	// scrollback mirror；新服务器 hydrate 出的会话 active=null、summary 降级为 idle（agentId 由服务端
+	// hydrate 从 board card 回填）。此时聚焦该任务 → 终端一片空白且无活会话。按约定「聚焦 + 空终端 +
+	// 未连到活 agent 会话」应自动续跑：经 refresh() 走 refreshTaskTerminal 的 resumeFromTrash 路径
+	// （--continue）在原 worktree 接回 agent 自己落盘的会话。空 restore 快照是「服务器死过一次、mirror
+	// 已丢」的权威信号——活会话 / 自然退出但服务器存活时 mirror 仍有内容、快照非空，故不会误触发。
+	private maybeAutoResumeStaleSession(hadSnapshot: boolean): void {
+		if (this.autoResumeAttempted || hadSnapshot) {
+			return;
+		}
+		const summary = this.latestSummary;
+		// agentId===null → 无 agent 会话可续（全新 backlog / shell）；"cline" 是进程内 SDK、不走 PTY；
+		// pid!==null → 已有活 PTY，无需续跑。
+		if (!summary || summary.agentId === null || summary.agentId === "cline" || summary.pid !== null) {
+			return;
+		}
+		// 让位守卫（铁律：consumer 一律经 resolveSessionFacets 读 facet 做决策，不臆测 pid/state）：会话若停在
+		// 「用户回合」（awaiting review / 提问 / 待授权，turnOwner==="user"）则绝不自动续跑——那会用 --continue
+		// 抢跑 agent、把等待用户处理的 Review 会话强行推进。仅 agent 回合 / 无归属（真 idle）才续。
+		if (resolveSessionFacets(summary).turnOwner === "user") {
+			return;
+		}
+		this.autoResumeAttempted = true;
+		void this.refresh().catch(() => {
+			// 续跑失败不打断终端；Refresh 按钮仍可手动重试。
+		});
 	}
 
 	private notifySearchOpenRequested(): void {
@@ -678,6 +710,7 @@ class PersistentTerminal {
 						if (this.ioSocket) {
 							this.notifyConnectionReady();
 						}
+						this.maybeAutoResumeStaleSession(Boolean(payload.snapshot));
 					})
 					.catch(() => {
 						if (this.disposed || this.controlSocket !== controlSocket) {

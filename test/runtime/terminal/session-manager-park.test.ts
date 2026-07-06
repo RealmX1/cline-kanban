@@ -1,8 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 
+// 捕获 [tui-freeze] 日志：Fix A 自愈套件断言「翻入 review 后自限、不重复触发 stall-auto-review」。
+const tuiFreezeWarnings = vi.hoisted(() => [] as string[]);
+vi.mock("../../../src/diagnostics/tui-freeze-logger.js", () => ({
+	logTuiFreezeWarning: (message: string) => {
+		tuiFreezeWarnings.push(message);
+	},
+	logTuiFreezeError: () => {},
+}));
+
 import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import { resolveSessionFacets } from "../../../src/core/session-activity";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import { canTransitionTaskForHookEvent } from "../../../src/trpc/hook-event-task-transition-gate";
 
 // 非 native dispatch park 的会话层行为（park / unpark / 空闲守卫 / facet 不变量 / resume 自动清标）。
 // 直接构造 manager 并经私有 entries 注入一个最小会话条目（不 spawn 真 PTY，规避 AGENTS.md Node22 SDK-host 隐患）。
@@ -31,13 +41,16 @@ function makeEntry(summaryOverrides: Partial<RuntimeTaskSessionSummary> = {}) {
 		active: {
 			outputReactionEngine: null,
 			outputReactionSession: null,
+			outputReactionScanBuffer: null as string | null,
 			taskChatInputDeliveryTimer: null as NodeJS.Timeout | null,
 			taskChatInputDeliveryGeneration: 0,
 			deferredStartupInput: null,
 			lastUserInputAt: null,
 			session: { write: vi.fn() },
 		},
-		terminalStateMirror: null,
+		terminalStateMirror: null as {
+			getSnapshot: () => Promise<{ snapshot: string; cols: number; rows: number }>;
+		} | null,
 		listenerIdCounter: 1,
 		listeners: new Map(),
 		restartRequest: null,
@@ -241,5 +254,133 @@ describe("TerminalSessionManager park（已派发后台工作）", () => {
 		expect(manager.getSummary("task-1")?.awaitingDispatchedBackgroundWork ?? null).toBeNull();
 		// 入参不应被原地改动（clone 边界）。
 		expect(persisted.awaitingDispatchedBackgroundWork).not.toBeNull();
+	});
+});
+
+// Fix A：终端 agent 完工却不退出、turnOwner 卡在 agent 的 idle-live 会话，scanForStalls 自愈翻入 Review。
+describe("TerminalSessionManager idle-live 自愈（scanForStalls → transitionToReview idle_stall）", () => {
+	// 纯净 Claude 输入框就绪信号（与 delivery 套件同源）——喂进 fake mirror 快照，走「引擎关闭仍在线的全屏镜像」判据。
+	const CLAUDE_READY_PROMPT = "╭──────────────────────╮\n│ > │\n╰──────────────────────╯";
+
+	function fakeMirror(snapshot: string) {
+		return { getSnapshot: async () => ({ snapshot, cols: 80, rows: 24 }) };
+	}
+
+	function scanForStalls(manager: TerminalSessionManager): Promise<void> {
+		return (manager as unknown as { scanForStalls: () => Promise<void> }).scanForStalls.call(manager);
+	}
+
+	it("agent 回合 + 停在交互提示符 + lastSubstantiveOutputAt 超阈值 → 翻入 review（reviewReason=idle_stall），即便 lastOutputAt 仍新鲜", async () => {
+		tuiFreezeWarnings.length = 0;
+		const manager = new TerminalSessionManager();
+		// 病灶复现：lastOutputAt 恒新鲜（光标重绘），但 lastSubstantiveOutputAt 停在很久以前 → 自愈须读实质戳。
+		const entry = makeEntry({
+			state: "running",
+			lastOutputAt: Date.now(),
+			lastSubstantiveOutputAt: 1,
+			startedAt: 1,
+		});
+		entry.terminalStateMirror = fakeMirror(CLAUDE_READY_PROMPT);
+		injectEntry(manager, entry);
+
+		await scanForStalls(manager);
+
+		expect(resolveSessionFacets(entry.summary)).toEqual({
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "review",
+		});
+		expect(entry.summary.reviewReason).toBe("idle_stall");
+		// 翻转后的 summary 仍过 schema 校验（idle_stall 组合合法）。
+		expect(() => runtimeTaskSessionSummarySchema.parse(entry.summary)).not.toThrow();
+		// 自限（回归护栏）：turnOwner 已是 user，再扫一轮不得再触发——isSummaryInActiveTurn 对 awaiting_review 仍为 true，
+		// 故自愈判定必须另按 turnOwner==="agent" 门控，否则每轮都会重复打 stall-auto-review 日志。断言总触发恰为一次。
+		await scanForStalls(manager);
+		expect(resolveSessionFacets(entry.summary).turnOwner).toBe("user");
+		expect(tuiFreezeWarnings.filter((m) => m.includes("stall-auto-review"))).toHaveLength(1);
+	});
+
+	it("lastSubstantiveOutputAt 仍新鲜（未超阈值）→ 不翻转", async () => {
+		const manager = new TerminalSessionManager();
+		const entry = makeEntry({
+			state: "running",
+			lastOutputAt: Date.now(),
+			lastSubstantiveOutputAt: Date.now(),
+			startedAt: Date.now(),
+		});
+		entry.terminalStateMirror = fakeMirror(CLAUDE_READY_PROMPT);
+		injectEntry(manager, entry);
+
+		await scanForStalls(manager);
+
+		expect(resolveSessionFacets(entry.summary).turnOwner).toBe("agent");
+		expect(entry.summary.reviewReason ?? null).toBeNull();
+	});
+
+	it("超阈值但当前不在交互提示符（mid-tool，镜像非提示符文本）→ 不翻转（防「安静但在干活」误报）", async () => {
+		const manager = new TerminalSessionManager();
+		const entry = makeEntry({
+			state: "running",
+			lastOutputAt: Date.now(),
+			lastSubstantiveOutputAt: 1,
+			startedAt: 1,
+		});
+		// 镜像里是构建输出而非输入框 → predicate 不命中 → readiness≠"prompt" → 不自愈。
+		entry.terminalStateMirror = fakeMirror("Compiling module 42/128 ...\nrunning tests ...");
+		injectEntry(manager, entry);
+
+		await scanForStalls(manager);
+
+		expect(resolveSessionFacets(entry.summary).turnOwner).toBe("agent");
+		expect(entry.summary.reviewReason ?? null).toBeNull();
+	});
+
+	// 反向放行回归护栏：经 idle_stall 自愈翻入 review 的终端会话，必须能经 to_in_progress（hook 闸 + reducer 双门）回到
+	// running（turnOwner==="agent"）。缺任一门放行即卡片永卡 awaiting_review、且破坏 deferWhileUserTurn 让位（注入永久挂起）。
+	it("round-trip：idle_stall 自愈进 review → transitionToRunning 回到 running（reducer canReturnToRunning 放行）", async () => {
+		const manager = new TerminalSessionManager();
+		const entry = makeEntry({
+			state: "running",
+			lastOutputAt: Date.now(),
+			lastSubstantiveOutputAt: 1,
+			startedAt: 1,
+		});
+		entry.terminalStateMirror = fakeMirror(CLAUDE_READY_PROMPT);
+		injectEntry(manager, entry);
+
+		// 正向：自愈翻入 review（reviewReason=idle_stall、turnOwner=user）。
+		await scanForStalls(manager);
+		expect(entry.summary.reviewReason).toBe("idle_stall");
+		expect(resolveSessionFacets(entry.summary).turnOwner).toBe("user");
+
+		// 反向：真实 to_in_progress（UserPromptSubmit / PostToolUse hook）→ 回 running。
+		const returned = manager.transitionToRunning("task-1");
+		expect(returned).not.toBeNull();
+		expect(resolveSessionFacets(entry.summary)).toEqual({
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+		});
+		expect(entry.summary.reviewReason ?? null).toBeNull();
+		expect(() => runtimeTaskSessionSummarySchema.parse(entry.summary)).not.toThrow();
+	});
+
+	// hook 闸（canTransitionTaskForHookEvent，先于 reducer）也必须放行 idle_stall 的 to_in_progress，否则 hooks-api 提前挡下、
+	// reducer 永不被调用。与 reducer 修复同源、两处必须同步。
+	it("round-trip：idle_stall review 会话在 hook 闸 canTransitionTaskForHookEvent(to_in_progress) 被放行", async () => {
+		const manager = new TerminalSessionManager();
+		const entry = makeEntry({
+			state: "running",
+			lastOutputAt: Date.now(),
+			lastSubstantiveOutputAt: 1,
+			startedAt: 1,
+		});
+		entry.terminalStateMirror = fakeMirror(CLAUDE_READY_PROMPT);
+		injectEntry(manager, entry);
+
+		await scanForStalls(manager);
+		expect(entry.summary.reviewReason).toBe("idle_stall");
+
+		expect(canTransitionTaskForHookEvent(entry.summary, "to_in_progress")).toBe(true);
 	});
 });

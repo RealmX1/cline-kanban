@@ -881,7 +881,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 							// RVF followup 等程序化 chat 注入：经就绪门控投递（沉降 + 提示符就绪轮询 + deadline 兜底），
 							// 避免 Stop 后 TUI 重绘态下「粘贴进输入框但 CR 被吞、不发送」的间歇竞态。详见 submitTaskChatInputWhenReady。
-							const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text);
+							// deferWhileUserTurn=（带 source 即后台自动注入）：后台注入遇会话处于非 agent 回合（agent 正等用户
+							// 回答 AskUserQuestion / 计划评审 / 权限确认）时让位挂起、待 agent 回合恢复再投递，绝不把正等用户的
+							// 会话经 UserPromptSubmit 翻回 agent 回合。用户发起的发送（人类聊天 / commit·openPR，无 source）不受影响。
+							const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
+								deferWhileUserTurn: body.source != null,
+							});
 							if (terminalSummary) {
 								return {
 									ok: true,

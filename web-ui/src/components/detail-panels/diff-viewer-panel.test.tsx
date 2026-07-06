@@ -411,6 +411,39 @@ describe("DiffViewerPanel", () => {
 		expect(container.querySelector(".kb-diff-row")).toBeNull();
 	});
 
+	it("renders a size-omitted placeholder instead of diff rows when content was omitted for size", async () => {
+		const workspaceFiles: RuntimeWorkspaceFileChange[] = [
+			{
+				path: "package-lock.json",
+				status: "modified",
+				additions: 4200,
+				deletions: 1800,
+				oldText: null,
+				newText: null,
+				contentOmittedForSize: true,
+			},
+		];
+
+		await act(async () => {
+			root.render(
+				<DiffViewerPanel
+					workspaceFiles={workspaceFiles}
+					selectedPath="package-lock.json"
+					selectedPathExpandToken={1}
+					onSelectedPathChange={() => {}}
+					comments={new Map<string, DiffLineComment>()}
+					onCommentsChange={() => {}}
+				/>,
+			);
+		});
+
+		// 展开后也绝不渲染 diff 行——正是它把大文件的 Prism + DOM 成本挡在外面。
+		expect(container.querySelector(".kb-diff-row")).toBeNull();
+		expect(container.textContent).toContain("文件过大");
+		expect(container.textContent).toContain("+4200");
+		expect(container.textContent).toContain("-1800");
+	});
+
 	it("shows shortcut indicators on Add and Send", async () => {
 		const workspaceFiles: RuntimeWorkspaceFileChange[] = [
 			{
