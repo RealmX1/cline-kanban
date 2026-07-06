@@ -1,3 +1,4 @@
+import { resolveSessionFacets } from "@runtime-session-activity";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { type ISearchOptions, SearchAddon } from "@xterm/addon-search";
@@ -394,6 +395,12 @@ class PersistentTerminal {
 		// agentId===null → 无 agent 会话可续（全新 backlog / shell）；"cline" 是进程内 SDK、不走 PTY；
 		// pid!==null → 已有活 PTY，无需续跑。
 		if (!summary || summary.agentId === null || summary.agentId === "cline" || summary.pid !== null) {
+			return;
+		}
+		// 让位守卫（铁律：consumer 一律经 resolveSessionFacets 读 facet 做决策，不臆测 pid/state）：会话若停在
+		// 「用户回合」（awaiting review / 提问 / 待授权，turnOwner==="user"）则绝不自动续跑——那会用 --continue
+		// 抢跑 agent、把等待用户处理的 Review 会话强行推进。仅 agent 回合 / 无归属（真 idle）才续。
+		if (resolveSessionFacets(summary).turnOwner === "user") {
 			return;
 		}
 		this.autoResumeAttempted = true;

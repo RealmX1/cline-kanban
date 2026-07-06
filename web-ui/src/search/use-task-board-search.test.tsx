@@ -161,4 +161,46 @@ describe("useTaskBoardSearch", () => {
 		expect(semanticSearchMocks.createTaskBoardSemanticSearchIndex).toHaveBeenCalledTimes(1);
 		expect(semanticIndex.findResults).toHaveBeenCalledTimes(2);
 	});
+
+	it("keeps the semantic index across board-reference changes with identical content, and rebuilds on content change", async () => {
+		vi.useFakeTimers();
+		const semanticIndex = {
+			findResults: vi.fn(async () => [createSemanticResult("task-alpha")]),
+		};
+		semanticSearchMocks.createTaskBoardSemanticSearchIndex.mockResolvedValue(semanticIndex);
+
+		const { rerender } = await renderHook({ board: createBoard(), query: "alpha", mode: "semantic" });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+			await Promise.resolve();
+		});
+		expect(semanticSearchMocks.createTaskBoardSemanticSearchIndex).toHaveBeenCalledTimes(1);
+
+		// 新 board 引用、内容相同（实时流每 tick 换引用的场景）→ documents 按内容签名保持稳定引用 → 索引不重建。
+		await rerender({ board: createBoard(), query: "alpha", mode: "semantic" });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+			await Promise.resolve();
+		});
+		expect(semanticSearchMocks.createTaskBoardSemanticSearchIndex).toHaveBeenCalledTimes(1);
+
+		// 内容变更（新增卡片）→ 签名变化 → 索引重建。
+		const changedBoard = createBoard();
+		const backlogColumn = changedBoard.columns.find((column) => column.id === "backlog");
+		backlogColumn?.cards.push({
+			id: "task-gamma",
+			title: "Gamma task",
+			prompt: "New work",
+			startInPlanMode: false,
+			baseRef: "main",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		await rerender({ board: changedBoard, query: "alpha", mode: "semantic" });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+			await Promise.resolve();
+		});
+		expect(semanticSearchMocks.createTaskBoardSemanticSearchIndex).toHaveBeenCalledTimes(2);
+	});
 });

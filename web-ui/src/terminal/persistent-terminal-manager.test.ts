@@ -511,6 +511,18 @@ describe("persistent-terminal-manager", () => {
 			return terminal;
 		}
 
+		// 自动续跑决策发生在 applyRestore().then() 回调里：restore_complete 控制消息在 maybeAutoResumeStaleSession
+		// 之前的同一同步块内经 sendControlMessage 发出。故等到 restore_complete 出现即代表续跑决策已跑完，可确定性断言
+		// refresh 是否被调用——取代「2 个 microtask」浅时序（那会在决策点之前就断言、无论有无 gate 都通过，形成假绿）。
+		async function waitForRestoreCompleted(expectedCount = 1): Promise<void> {
+			await vi.waitFor(() => {
+				const completions = parseControlMessages(findControlSocket()).filter(
+					(message) => message.type === "restore_complete",
+				);
+				expect(completions.length).toBeGreaterThanOrEqual(expectedCount);
+			});
+		}
+
 		// 死会话（服务器重启后 hydrate 出的 idle、agentId 已由服务端从 board card 回填、pid=null）+ 空 restore
 		// 快照 → 聚焦即自动一次性续跑；再次空 restore（切走再切回）不重复触发。
 		it("auto-refreshes once for an empty snapshot terminal-agent session, then debounces", async () => {
@@ -524,8 +536,7 @@ describe("persistent-terminal-manager", () => {
 			});
 
 			dispatchRestore("");
-			await Promise.resolve();
-			await Promise.resolve();
+			await waitForRestoreCompleted(2);
 			expect(refreshSpy).toHaveBeenCalledTimes(1);
 		});
 
@@ -540,8 +551,18 @@ describe("persistent-terminal-manager", () => {
 				liveness: "exited",
 			});
 			dispatchRestore("restored screen");
-			await Promise.resolve();
-			await Promise.resolve();
+			await waitForRestoreCompleted();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it("does not auto-refresh an empty-snapshot session that is awaiting a user turn (review)", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			// 重启后 hydrate 出的会话即便空快照，只要仍是用户回合（awaiting_review → turnOwner==="user"）就绝不自动续跑，
+			// 否则会抢跑正等待用户核对的 agent。resolveSessionFacets 从 legacy state 派生 turnOwner。
+			dispatchState({ taskId: "task-a", agentId: "claude", pid: null, state: "awaiting_review" });
+			dispatchRestore("");
+			await waitForRestoreCompleted();
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
@@ -550,8 +571,7 @@ describe("persistent-terminal-manager", () => {
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
 			dispatchState({ taskId: "task-a", agentId: null, pid: null, state: "idle", liveness: "none" });
 			dispatchRestore("");
-			await Promise.resolve();
-			await Promise.resolve();
+			await waitForRestoreCompleted();
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
@@ -560,8 +580,7 @@ describe("persistent-terminal-manager", () => {
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
 			dispatchState({ taskId: "task-a", agentId: "cline", pid: null, state: "idle", liveness: "none" });
 			dispatchRestore("");
-			await Promise.resolve();
-			await Promise.resolve();
+			await waitForRestoreCompleted();
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
@@ -570,8 +589,7 @@ describe("persistent-terminal-manager", () => {
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
 			dispatchState({ taskId: "task-a", agentId: "claude", pid: 4321, state: "running", liveness: "live" });
 			dispatchRestore("");
-			await Promise.resolve();
-			await Promise.resolve();
+			await waitForRestoreCompleted();
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 	});

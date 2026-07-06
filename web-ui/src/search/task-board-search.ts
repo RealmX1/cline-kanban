@@ -33,7 +33,7 @@ export interface TaskBoardSearchState {
 	visibleTaskCount: number;
 }
 
-function normalizeSearchQuery(query: string): string {
+export function normalizeSearchQuery(query: string): string {
 	return query.trim().replace(/\s+/gu, " ");
 }
 
