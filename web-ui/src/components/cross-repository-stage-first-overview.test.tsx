@@ -16,7 +16,9 @@ function detail(overrides: Partial<RuntimeInProgressTaskDetail> & { taskId: stri
 	return {
 		title: overrides.taskId,
 		agentId: null,
+		createdAt: 0,
 		lastOutputAt: null,
+		lastSubstantiveOutputAt: null,
 		turnOwner: null,
 		liveness: "none",
 		...overrides,
@@ -61,6 +63,11 @@ function buttonWithText(host: HTMLElement, text: string): HTMLButtonElement | un
 		| undefined;
 }
 
+// task 行按钮的文本已含时间元药丸（Clock/Activity），不再等于纯标题，故按稳定 testid 定位。
+function taskRow(host: HTMLElement, taskId: string): HTMLButtonElement | null {
+	return host.querySelector<HTMLButtonElement>(`[data-testid="overview-task-${taskId}"]`);
+}
+
 describe("CrossRepositoryStageFirstOverview", () => {
 	const now = Date.now();
 	const PROJECTS: RuntimeProjectSummary[] = [
@@ -85,10 +92,10 @@ describe("CrossRepositoryStageFirstOverview", () => {
 	it("Active 只收 agent 回合 + 近期输出；其余归 Stale", () => {
 		const host = render(<CrossRepositoryStageFirstOverview projects={PROJECTS} onOpenTask={vi.fn()} />);
 		// Active 组渲染活跃 task（恒展开）
-		expect(buttonWithText(host, "alpha-active")).toBeTruthy();
+		expect(taskRow(host, "alpha-active")).toBeTruthy();
 		// >5min 的 agent task 与 awaiting_review 的 user task 归 Stale（默认折叠 → 不在 DOM）
-		expect(buttonWithText(host, "alpha-stale-old")).toBeFalsy();
-		expect(buttonWithText(host, "beta-awaiting")).toBeFalsy();
+		expect(taskRow(host, "alpha-stale-old")).toBeFalsy();
+		expect(taskRow(host, "beta-awaiting")).toBeFalsy();
 		// Active/Stale 计数徽标
 		expect(host.textContent).toContain("Active");
 		expect(host.textContent).toContain("Stale");
@@ -104,10 +111,82 @@ describe("CrossRepositoryStageFirstOverview", () => {
 		expect(buttonWithText(host, "Done8")).toBeTruthy();
 	});
 
+	it("Review/Validation/Done 的 per-repo 分计数默认可见（无需展开）", () => {
+		const host = render(<CrossRepositoryStageFirstOverview projects={PROJECTS} onOpenTask={vi.fn()} />);
+		// 不点击展开，per-repo 行即在 DOM：Review 的 alpha=2 / beta=1（行按钮文本 = repo 名 + 分计数）。
+		expect(buttonWithText(host, "alpha2")).toBeTruthy();
+		expect(buttonWithText(host, "beta1")).toBeTruthy();
+		// Validation 只有 alpha=1（beta=0 被过滤，不出行）。
+		expect(buttonWithText(host, "alpha1")).toBeTruthy();
+	});
+
+	it("stage 从 0→N（概览挂载后计数实时到达）时 per-repo 行自动展开（受控 open，非仅 mount 生效）", () => {
+		// 初始 Review 为空 → 该 stage 折叠，per-repo 行不在 DOM（Radix Collapsible 关闭时不挂载 Content）。
+		const emptyReview = [project({ id: "solo", rawColumnTaskCounts: counts({ review: 0 }) })];
+		const host = render(<CrossRepositoryStageFirstOverview projects={emptyReview} onOpenTask={vi.fn()} />);
+		expect(buttonWithText(host, "solo3")).toBeFalsy();
+		// 概览已挂载，projects 更新为 Review=3（同一 root 重渲染 → CountStageSection 组件实例保留）。
+		const populatedReview = [project({ id: "solo", rawColumnTaskCounts: counts({ review: 3 }) })];
+		act(() => root?.render(<CrossRepositoryStageFirstOverview projects={populatedReview} onOpenTask={vi.fn()} />));
+		// hasTasks 由 false→true → useEffect setOpen(true) → per-repo 行（solo=3）自动可见，无需手动展开。
+		expect(buttonWithText(host, "solo3")).toBeTruthy();
+	});
+
+	it("task 行显示时间元数据：自创建至今 + agent 上次实质响应至今", () => {
+		const projects = [
+			project({
+				id: "solo",
+				rawColumnTaskCounts: counts({ in_progress: 1 }),
+				inProgressTaskDetails: [
+					// createdAt 3min 前 → Clock "3m"；lastSubstantiveOutputAt 1s 前 → Activity "now"。
+					detail({
+						taskId: "t1",
+						turnOwner: "agent",
+						liveness: "live",
+						createdAt: now - 3 * 60_000,
+						lastOutputAt: now - FRESH,
+						lastSubstantiveOutputAt: now - FRESH,
+					}),
+				],
+			}),
+		];
+		const host = render(<CrossRepositoryStageFirstOverview projects={projects} onOpenTask={vi.fn()} />);
+		const row = taskRow(host, "t1");
+		expect(row).toBeTruthy();
+		expect(row?.textContent).toContain("3m");
+		expect(row?.textContent).toContain("now");
+	});
+
+	it("Activity 药丸读 lastSubstantiveOutputAt 而非 lastOutputAt（spinner 噪声不显示虚假『刚响应』）", () => {
+		const projects = [
+			project({
+				id: "solo",
+				rawColumnTaskCounts: counts({ in_progress: 1 }),
+				inProgressTaskDetails: [
+					// lastOutputAt 刚刷新（spinner 重绘）但无实质产出 → Active（分类读 lastOutputAt）、但 Activity 段隐藏。
+					detail({
+						taskId: "t-spinner",
+						turnOwner: "agent",
+						liveness: "live",
+						createdAt: now - 3 * 60_000,
+						lastOutputAt: now - FRESH,
+						lastSubstantiveOutputAt: null,
+					}),
+				],
+			}),
+		];
+		const host = render(<CrossRepositoryStageFirstOverview projects={projects} onOpenTask={vi.fn()} />);
+		const row = taskRow(host, "t-spinner");
+		expect(row).toBeTruthy();
+		// Clock 恒显（createdAt 3min → "3m"）；lastSubstantiveOutputAt=null → 无 Activity 段 → 不出现 "now"。
+		expect(row?.textContent).toContain("3m");
+		expect(row?.textContent).not.toContain("now");
+	});
+
 	it("点击 in-progress task 冒泡 (repoId, taskId)", () => {
 		const onOpenTask = vi.fn();
 		const host = render(<CrossRepositoryStageFirstOverview projects={PROJECTS} onOpenTask={onOpenTask} />);
-		const row = buttonWithText(host, "alpha-active");
+		const row = taskRow(host, "alpha-active");
 		act(() => {
 			row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 		});

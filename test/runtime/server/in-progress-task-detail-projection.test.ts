@@ -72,17 +72,44 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 	it("无 session 的卡 → turnOwner=null / liveness=none / lastOutputAt=null", () => {
 		const result = collectInProgressTaskDetailsFromBoard(makeBoard({ in_progress: ["a"] }), {});
 		expect(result).toEqual([
-			{ taskId: "a", title: "a", agentId: null, lastOutputAt: null, turnOwner: null, liveness: "none" },
+			{
+				taskId: "a",
+				title: "a",
+				agentId: null,
+				createdAt: 0,
+				lastOutputAt: null,
+				lastSubstantiveOutputAt: null,
+				turnOwner: null,
+				liveness: "none",
+			},
 		]);
 	});
 
-	it("running 会话 → turnOwner=agent / liveness=live，透传 lastOutputAt 与 agentId", () => {
+	it("running 会话 → turnOwner=agent / liveness=live，透传 lastOutputAt / lastSubstantiveOutputAt / agentId", () => {
 		const result = collectInProgressTaskDetailsFromBoard(
 			makeBoard({ in_progress: ["a"] }),
-			sessionsOf(makeSummary({ taskId: "a", state: "running", pid: 1, agentId: "claude", lastOutputAt: 5_000 })),
+			sessionsOf(
+				makeSummary({
+					taskId: "a",
+					state: "running",
+					pid: 1,
+					agentId: "claude",
+					lastOutputAt: 5_000,
+					lastSubstantiveOutputAt: 4_000,
+				}),
+			),
 		);
 		expect(result).toEqual([
-			{ taskId: "a", title: "a", agentId: "claude", lastOutputAt: 5_000, turnOwner: "agent", liveness: "live" },
+			{
+				taskId: "a",
+				title: "a",
+				agentId: "claude",
+				createdAt: 0,
+				lastOutputAt: 5_000,
+				lastSubstantiveOutputAt: 4_000,
+				turnOwner: "agent",
+				liveness: "live",
+			},
 		]);
 	});
 

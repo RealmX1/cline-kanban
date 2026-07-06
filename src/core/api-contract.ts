@@ -628,8 +628,14 @@ export const runtimeInProgressTaskDetailSchema = z.object({
 	taskId: z.string(),
 	title: z.string(),
 	agentId: runtimeAgentIdSchema.nullable(),
-	// 距最近一次 PTY 输出（含 spinner 重绘）；null=从未产出/无会话。前端据此判「近期活跃」。
+	// 任务卡创建时刻（epoch ms）；概览行据此显示「自创建至今」时长药丸（同主看板卡片头部）。
+	createdAt: z.number(),
+	// 距最近一次 PTY 输出（含 spinner 重绘）；null=从未产出/无会话。前端据此判「近期活跃」（Active/Stale 二分）。
 	lastOutputAt: z.number().nullable(),
+	// 距最近一次「实质」产出（不含 spinner/footer/计时器等装饰性重绘）；null=无实质戳/无会话。概览行的
+	// 「agent 上次响应至今」药丸读它——与主看板卡片头部同源（task-card-body 的 lastAgentResponseAt），
+	// 避免终端 agent 仅 spinner 重绘时显示虚假「刚响应」。
+	lastSubstantiveOutputAt: z.number().nullable(),
 	turnOwner: runtimeTaskSessionTurnOwnerSchema,
 	liveness: runtimeTaskSessionLivenessSchema,
 });
