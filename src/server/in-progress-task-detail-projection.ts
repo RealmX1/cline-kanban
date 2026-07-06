@@ -27,7 +27,9 @@ export function collectInProgressTaskDetailsFromBoard(
 			taskId: card.id,
 			title: card.title,
 			agentId: summary?.agentId ?? card.agentId ?? null,
+			createdAt: card.createdAt,
 			lastOutputAt: summary?.lastOutputAt ?? null,
+			lastSubstantiveOutputAt: summary?.lastSubstantiveOutputAt ?? null,
 			turnOwner: facets?.turnOwner ?? null,
 			liveness: facets?.liveness ?? "none",
 		};

@@ -321,7 +321,9 @@ export default function App(): ReactElement {
 	}, []);
 	const handleOpenOverviewTask = useCallback(
 		(repoId: string, taskId: string) => {
-			setIsBoardOverviewOpen(false);
+			// 刻意不关概览：detail 打开时 home layout 只是 visibility:hidden（非卸载），概览仍在其下；
+			// 从 detail 返回（handleBack 清 selectedTaskId）即重现概览——与 Guided Verification 面板点 task
+			// 后返回回到面板的行为一致（避免「从概览点进去、返回却落到普通 board」的困惑）。
 			if (repoId === currentProjectId) {
 				setSelectedTaskId(taskId);
 				return;

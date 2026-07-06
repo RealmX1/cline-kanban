@@ -1,11 +1,12 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { isAgentOutputWithinActiveWindow, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS } from "@runtime-session-activity";
-import { Activity, ChevronRight } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Activity, ChevronRight, Clock } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { getAgentVisual } from "@/components/agent-visual";
 import { SESSION_ACTIVITY_COLOR } from "@/components/board-card-session-activity";
 import { cn } from "@/components/ui/cn";
 import type { RuntimeInProgressTaskDetail, RuntimeProjectSummary, RuntimeProjectTaskCounts } from "@/runtime/types";
+import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 import { useInterval } from "@/utils/react-use";
 
 // Cross-Repository Stage-First Overview（见 CONTEXT.md / ADR-0001）：把整个看板（Board Scope）所有
@@ -100,7 +101,7 @@ export function CrossRepositoryStageFirstOverview({
 					</div>
 					<div className="flex flex-col gap-3 p-3">
 						<ActiveSection groups={activeByRepo} total={activeTotal} nowMs={nowMs} onOpenTask={onOpenTask} />
-						<StaleSection groups={staleByRepo} total={staleTotal} onOpenTask={onOpenTask} />
+						<StaleSection groups={staleByRepo} total={staleTotal} nowMs={nowMs} onOpenTask={onOpenTask} />
 					</div>
 				</section>
 
@@ -154,10 +155,12 @@ function ActiveSection({
 function StaleSection({
 	groups,
 	total,
+	nowMs,
 	onOpenTask,
 }: {
 	groups: RepoTaskGroup[];
 	total: number;
+	nowMs: number;
 	onOpenTask: (repoId: string, taskId: string) => void;
 }): React.ReactElement | null {
 	if (total === 0) {
@@ -181,7 +184,7 @@ function StaleSection({
 			<Collapsible.Content>
 				<div className="flex flex-col gap-2 px-2 pb-1 pt-1">
 					{groups.map((group) => (
-						<RepoTaskGroupBlock key={group.repo.id} group={group} onOpenTask={onOpenTask} />
+						<RepoTaskGroupBlock key={group.repo.id} group={group} nowMs={nowMs} onOpenTask={onOpenTask} />
 					))}
 				</div>
 			</Collapsible.Content>
@@ -195,7 +198,7 @@ function RepoTaskGroupBlock({
 	onOpenTask,
 }: {
 	group: RepoTaskGroup;
-	nowMs?: number;
+	nowMs: number;
 	onOpenTask: (repoId: string, taskId: string) => void;
 }): React.ReactElement {
 	return (
@@ -207,7 +210,8 @@ function RepoTaskGroupBlock({
 						key={task.taskId}
 						task={task}
 						repoId={group.repo.id}
-						active={nowMs !== undefined && isActiveInProgressTask(task, nowMs)}
+						active={isActiveInProgressTask(task, nowMs)}
+						nowMs={nowMs}
 						onOpenTask={onOpenTask}
 					/>
 				))}
@@ -220,17 +224,20 @@ function OverviewTaskRow({
 	task,
 	repoId,
 	active,
+	nowMs,
 	onOpenTask,
 }: {
 	task: RuntimeInProgressTaskDetail;
 	repoId: string;
 	active: boolean;
+	nowMs: number;
 	onOpenTask: (repoId: string, taskId: string) => void;
 }): React.ReactElement {
 	const visual = getAgentVisual(task.agentId);
 	return (
 		<button
 			type="button"
+			data-testid={`overview-task-${task.taskId}`}
 			onClick={() => onOpenTask(repoId, task.taskId)}
 			className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-surface-3"
 		>
@@ -244,6 +251,28 @@ function OverviewTaskRow({
 			/>
 			<visual.Icon size={14} className={cn("shrink-0", visual.className)} />
 			<span className="min-w-0 flex-1 truncate text-sm text-text-primary">{task.title}</span>
+			{/* 时间元数据（同主看板卡片头部）：Clock=自创建至今（恒显）；Activity=agent 上次「实质」响应至今
+			    （有戳才显）。Activity 读 lastSubstantiveOutputAt（非 lastOutputAt）——与主看板 lastAgentResponseAt
+			    同源，滤掉 spinner/footer 装饰性重绘，避免虚假「刚响应」。绝对本地时间走原生 title——避免把
+			    Radix Tooltip 嵌进行按钮产生嵌套交互元素。 */}
+			<span className="ml-1 flex shrink-0 items-center gap-1.5 text-[10px] leading-none text-text-tertiary">
+				<span
+					className="inline-flex items-center gap-0.5"
+					title={`Created · ${new Date(task.createdAt).toLocaleString()}`}
+				>
+					<Clock size={10} className="shrink-0" />
+					{formatCompactElapsedSince(task.createdAt, nowMs)}
+				</span>
+				{task.lastSubstantiveOutputAt != null ? (
+					<span
+						className="inline-flex items-center gap-0.5"
+						title={`Agent last responded · ${new Date(task.lastSubstantiveOutputAt).toLocaleString()}`}
+					>
+						<Activity size={10} className="shrink-0" />
+						{formatCompactElapsedSince(task.lastSubstantiveOutputAt, nowMs)}
+					</span>
+				) : null}
+			</span>
 		</button>
 	);
 }
@@ -266,20 +295,29 @@ function CountStageSection({
 		.filter((entry) => entry.count > 0);
 	const total = perRepo.reduce((sum, entry) => sum + entry.count, 0);
 
+	// per-repo 分计数默认可见（header 仍留跨-repo 总计 + 可折叠收起）；空 stage 折叠禁用。
+	// 受控 open（非 Radix defaultOpen）：概览挂载后 projects 实时更新、stage 从 0→N（如某 task 移入 Review）
+	// 时也自动展开——hasTasks 布尔翻转即 setOpen 同步；hasTasks 保持 true 期间用户手动折叠得以保留（effect 不触发）。
+	const hasTasks = total > 0;
+	const [open, setOpen] = useState(hasTasks);
+	useEffect(() => {
+		setOpen(hasTasks);
+	}, [hasTasks]);
+
 	return (
-		<Collapsible.Root>
+		<Collapsible.Root open={open} onOpenChange={setOpen}>
 			<section className="rounded-lg border border-border bg-surface-1">
 				<Collapsible.Trigger asChild>
 					<button
 						type="button"
-						disabled={total === 0}
+						disabled={!hasTasks}
 						className="group flex w-full items-center gap-2 px-4 py-2.5 text-left disabled:cursor-default"
 					>
 						<ChevronRight
 							size={14}
 							className={cn(
 								"text-text-tertiary transition-transform group-data-[state=open]:rotate-90",
-								total === 0 && "opacity-30",
+								!hasTasks && "opacity-30",
 							)}
 						/>
 						<span className={cn("text-sm font-semibold", tone)}>{label}</span>
