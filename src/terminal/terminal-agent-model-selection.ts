@@ -120,10 +120,10 @@ function buildFallbackResponse(
 		return {
 			agentId,
 			defaultModelId: KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
-			defaultLabel: "Default · Composer 2.5",
+			defaultLabel: "Default · Cursor Grok 4.5 High",
 			options: [
 				{ modelId: "auto", label: "Auto" },
-				{ modelId: "composer-2.5-fast", label: "Composer 2.5 Fast" },
+				{ modelId: "grok-4.5-fast-high", label: "Cursor Grok 4.5 High Fast" },
 			],
 			...(warning ? { warning } : {}),
 		};
@@ -176,7 +176,7 @@ export async function getTerminalAgentModelSelectionOptions(
 		return {
 			agentId,
 			defaultModelId: KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
-			defaultLabel: "Default · Composer 2.5",
+			defaultLabel: "Default · Cursor Grok 4.5 High",
 			options,
 		};
 	} catch (error) {

@@ -112,7 +112,9 @@ describe("cursorAdapter", () => {
 		const modelIndex = launch.args.indexOf("--model");
 		expect(modelIndex).toBeGreaterThan(-1);
 		expect(launch.args[modelIndex + 1]).toBe(KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID);
+		expect(launch.args[modelIndex + 1]).toBe("grok-4.5-high");
 		expect(launch.args).not.toContain("composer-2.5-fast");
+		expect(launch.args).not.toContain("grok-4.5-fast-high");
 	});
 
 	it("uses an explicit Cursor model override when present", async () => {

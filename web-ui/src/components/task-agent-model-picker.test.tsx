@@ -16,7 +16,7 @@ const fetchClineProviderModelsMock = vi.hoisted(() => vi.fn());
 const fetchTerminalAgentModelSelectionOptionsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@runtime-agent-catalog", () => ({
-	KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID: "composer-2.5",
+	KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID: "grok-4.5-high",
 	getRuntimeLaunchSupportedAgentCatalog: vi.fn(() => [
 		{ id: "cline", label: "Cline", binary: "cline" },
 		{ id: "claude", label: "Claude Code", binary: "claude" },
@@ -678,7 +678,7 @@ describe("TaskAgentModelPicker – agent icon selector", () => {
 });
 
 describe("TaskAgentModelPicker – terminal agent model selector", () => {
-	it("shows Cursor's Kanban default as Composer 2.5 instead of the raw fast default", async () => {
+	it("shows Cursor's Kanban default as Grok 4.5 High instead of a fast default", async () => {
 		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
 
 		await act(async () =>
@@ -697,9 +697,9 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 					clineProviderOptions={[{ value: "", label: "Cline" }]}
 					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
 					terminalAgentModelOptions={[
-						{ value: "", label: "Default · Composer 2.5" },
+						{ value: "", label: "Default · Cursor Grok 4.5 High" },
 						{ value: "auto", label: "Auto" },
-						{ value: "composer-2.5-fast", label: "Composer 2.5 Fast" },
+						{ value: "grok-4.5-fast-high", label: "Cursor Grok 4.5 High Fast" },
 					]}
 					isLoadingProviders={false}
 					isLoadingModels={false}
@@ -710,8 +710,8 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 			),
 		);
 
-		expect(findButtonByAriaLabel("Default · Composer 2.5")).not.toBeNull();
-		expect(container.textContent).not.toContain("Default · Composer 2.5 Fast");
+		expect(findButtonByAriaLabel("Default · Cursor Grok 4.5 High")).not.toBeNull();
+		expect(container.textContent).not.toContain("Default · Cursor Grok 4.5 High Fast");
 	});
 
 	it("writes an explicit terminal agent model override when a non-default model is selected", async () => {
@@ -734,7 +734,7 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 					clineProviderOptions={[{ value: "", label: "Cline" }]}
 					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
 					terminalAgentModelOptions={[
-						{ value: "", label: "Default · Composer 2.5" },
+						{ value: "", label: "Default · Cursor Grok 4.5 High" },
 						{ value: "auto", label: "Auto" },
 					]}
 					isLoadingProviders={false}

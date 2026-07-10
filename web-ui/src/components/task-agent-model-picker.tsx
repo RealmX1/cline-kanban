@@ -104,7 +104,7 @@ function getFallbackTerminalAgentDefaultModelOption(agentId: RuntimeTerminalAgen
 	if (agentId === "cursor") {
 		return {
 			value: "",
-			label: "Default · Composer 2.5",
+			label: "Default · Cursor Grok 4.5 High",
 			defaultModelId: KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
 		};
 	}
