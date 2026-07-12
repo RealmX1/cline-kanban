@@ -6,7 +6,13 @@ import type {
 	RuntimeWorkspaceFileChange,
 	RuntimeWorkspaceFileStatus,
 } from "../core/api-contract";
-import { getGitStdout } from "./git-utils";
+import { getGitStdout as getGitStdoutWithoutTimeout } from "./git-utils";
+
+const WORKSPACE_CHANGES_GIT_TIMEOUT_MS = 30_000;
+
+async function getGitStdout(args: string[], cwd: string): Promise<string> {
+	return await getGitStdoutWithoutTimeout(args, cwd, { timeoutMs: WORKSPACE_CHANGES_GIT_TIMEOUT_MS });
+}
 
 const WORKSPACE_CHANGES_CACHE_MAX_ENTRIES = 128;
 

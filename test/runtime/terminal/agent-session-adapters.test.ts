@@ -542,6 +542,27 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(noAltIndex).toBeLessThan(forkIndex);
 	});
 
+	it("forks the latest Codex session in read-only mode for a By the way session", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-codex",
+			agentId: "codex",
+			binary: "codex",
+			args: ["--dangerously-bypass-approvals-and-sandbox"],
+			cwd: "/tmp/task-worktree",
+			prompt: "Explain this module",
+			readOnlyQuestionSession: true,
+			forkLatestWorkingDirectorySession: true,
+		});
+
+		expect(launch.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+		expect(launch.args).toContain("read-only");
+		expect(launch.args).toContain("never");
+		expect(launch.args).toContain("fork");
+		expect(launch.args).toContain("--last");
+		expect(launch.args).toContain("Explain this module");
+	});
+
 	it("preserves explicit Codex working directory when parentSessionId is provided", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
@@ -615,6 +636,46 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(settings.hooks?.PreToolUse).toBeDefined();
 		expect(settings.hooks?.PostToolUse).toBeDefined();
 		expect(settings.hooks?.PostToolUseFailure).toBeDefined();
+	});
+
+	it("forks Claude with a read-only tool set for a By the way session", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-claude",
+			agentId: "claude",
+			binary: "claude",
+			args: ["--dangerously-skip-permissions"],
+			cwd: "/tmp/task-worktree",
+			prompt: "Explain this module",
+			readOnlyQuestionSession: true,
+			forkLatestWorkingDirectorySession: true,
+		});
+
+		expect(launch.args).not.toContain("--dangerously-skip-permissions");
+		expect(launch.args).toContain("--permission-mode");
+		expect(launch.args).toContain("plan");
+		expect(launch.args).toContain("Read,Glob,Grep,WebSearch,WebFetch");
+		expect(launch.args).toContain("--continue");
+		expect(launch.args).toContain("--fork-session");
+	});
+
+	it("keeps Claude By the way sessions read-only when autonomous mode is enabled", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-claude-autonomous",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			autonomousModeEnabled: true,
+			cwd: "/tmp/task-worktree",
+			prompt: "Explain this module",
+			readOnlyQuestionSession: true,
+		});
+
+		expect(launch.args).not.toContain("--dangerously-skip-permissions");
+		expect(launch.args).toContain("--permission-mode");
+		expect(launch.args).toContain("plan");
+		expect(launch.args).toContain("Read,Glob,Grep,WebSearch,WebFetch");
 	});
 
 	it("writes Gemini settings with AfterTool mapped to to_in_progress", async () => {

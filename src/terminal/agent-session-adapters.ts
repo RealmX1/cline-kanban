@@ -47,6 +47,8 @@ export interface AgentAdapterLaunchInput {
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	parentSessionId?: string;
+	readOnlyQuestionSession?: boolean;
+	forkLatestWorkingDirectorySession?: boolean;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 }
 
@@ -713,8 +715,14 @@ const claudeAdapter: AgentSessionAdapter = {
 			FORCE_HYPERLINK: "1",
 		};
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
+		if (input.readOnlyQuestionSession) {
+			const withoutBypass = args.filter((arg) => arg !== "--dangerously-skip-permissions");
+			args.length = 0;
+			args.push(...withoutBypass, "--permission-mode", "plan", "--tools", "Read,Glob,Grep,WebSearch,WebFetch");
+		}
 		if (
 			input.autonomousModeEnabled &&
+			!input.readOnlyQuestionSession &&
 			!input.startInPlanMode &&
 			!hasCliOption(args, "--dangerously-skip-permissions")
 		) {
@@ -722,6 +730,14 @@ const claudeAdapter: AgentSessionAdapter = {
 		}
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
 			args.push("--continue");
+		}
+		if (input.forkLatestWorkingDirectorySession) {
+			if (!hasCliOption(args, "--continue")) {
+				args.push("--continue");
+			}
+			if (!hasCliOption(args, "--fork-session")) {
+				args.push("--fork-session");
+			}
 		}
 		// Claude Code 的 `--continue`（「Refresh terminal session」/恢复任务时用）会用会话最后一条
 		// 已记录回合的「裸」model id `claude-opus-4-8` 重建模型——这丢掉了 1M context 选择，静默回退到
@@ -912,6 +928,12 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 
 		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
+		if (input.readOnlyQuestionSession) {
+			const withoutBypass = codexArgs.filter((arg) => arg !== "--dangerously-bypass-approvals-and-sandbox");
+			codexArgs.length = 0;
+			codexArgs.push(...removeCliOptionsWithValues(withoutBypass, ["--sandbox", "-s", "--ask-for-approval", "-a"]));
+			codexArgs.push("--sandbox", "read-only", "--ask-for-approval", "never");
+		}
 		if (input.resumeFromTrash) {
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");
@@ -919,12 +941,17 @@ const codexAdapter: AgentSessionAdapter = {
 			if (!hasCliOption(codexArgs, "--last")) {
 				codexArgs.push("--last");
 			}
-		} else if (parentSessionId) {
+		} else if (parentSessionId || input.forkLatestWorkingDirectorySession) {
 			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
 				codexArgs.push("-C", input.cwd);
 			}
 			if (!codexArgs.includes("fork")) {
-				codexArgs.push("fork", parentSessionId);
+				codexArgs.push("fork");
+				if (parentSessionId) {
+					codexArgs.push(parentSessionId);
+				} else {
+					codexArgs.push("--last");
+				}
 			}
 		}
 

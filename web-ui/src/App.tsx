@@ -107,6 +107,7 @@ export default function App(): ReactElement {
 	const [homeSidebarSection, setHomeSidebarSection] = useState<"projects" | "agent">("projects");
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
+	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
 	const taskEditorResetRef = useRef<() => void>(() => {});
 	const lastStreamErrorRef = useRef<string | null>(null);
@@ -215,6 +216,7 @@ export default function App(): ReactElement {
 		upsertSession,
 		ensureTaskWorkspace,
 		startTaskSession,
+		createByTheWayTaskConversationSession,
 		stopTaskSession,
 		transitionTaskToReview,
 		continueConnectionRetrySessions,
@@ -305,6 +307,10 @@ export default function App(): ReactElement {
 			setIsGitHistoryOpen(false);
 		},
 	});
+
+	useEffect(() => {
+		setIsTaskChangesSidebarOpen(false);
+	}, [selectedCard?.card.id]);
 	useNotificationTaskFocus({ currentProjectId: navigationCurrentProjectId, setSelectedTaskId });
 
 	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 CONTEXT.md）开关 + 跨-workspace 打开某 task 的待定跳转。
@@ -1123,6 +1129,10 @@ export default function App(): ReactElement {
 						isOpeningWorkspace={isOpeningWorkspace}
 						onToggleGitHistory={hasNoProjects ? undefined : handleToggleGitHistory}
 						isGitHistoryOpen={isGitHistoryOpen}
+						onToggleTaskChangesSidebar={
+							selectedCard ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
+						}
+						isTaskChangesSidebarOpen={selectedCard ? isTaskChangesSidebarOpen : false}
 						hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
 						connectionRetrySessions={connectionRetrySessions}
 						onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
@@ -1298,6 +1308,32 @@ export default function App(): ReactElement {
 									runtimeConfig={runtimeProjectConfig ?? null}
 									sessionSummary={detailSession}
 									taskSessions={sessions}
+									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
+									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
+									onCreateByTheWayTaskConversationSession={async (input) => {
+										const effectiveAgentId =
+											detailSession.agentId ??
+											selectedCard.card.agentId ??
+											runtimeProjectConfig?.selectedAgentId;
+										if (
+											!effectiveAgentId ||
+											!(["cline", "claude", "codex"] as const).includes(
+												effectiveAgentId as "cline" | "claude" | "codex",
+											)
+										) {
+											return {
+												ok: false,
+												message: effectiveAgentId
+													? `${effectiveAgentId} By the way sessions are not available.`
+													: "No supported agent is selected.",
+											};
+										}
+										return await createByTheWayTaskConversationSession({
+											task: selectedCard.card,
+											agentId: effectiveAgentId,
+											...input,
+										});
+									}}
 									onSessionSummary={upsertSession}
 									onCardSelect={handleCardSelect}
 									onTaskDragEnd={handleDetailTaskDragEnd}

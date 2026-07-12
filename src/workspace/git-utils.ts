@@ -17,6 +17,7 @@ interface GitCommandResult {
 export interface RunGitOptions {
 	trimStdout?: boolean;
 	env?: NodeJS.ProcessEnv;
+	timeoutMs?: number;
 }
 
 function normalizeProcessExitCode(code: unknown): number {
@@ -40,6 +41,7 @@ export async function runGit(cwd: string, args: string[], options: RunGitOptions
 			encoding: "utf8",
 			maxBuffer: GIT_MAX_BUFFER_BYTES,
 			env: options.env || createGitProcessEnv(),
+			...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 		});
 		const normalizedStdout = String(stdout ?? "").trim();
 		const normalizedStderr = String(stderr ?? "").trim();

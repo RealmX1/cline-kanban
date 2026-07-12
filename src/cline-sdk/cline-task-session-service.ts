@@ -4,6 +4,7 @@
 // host, repository, or event-adapter details.
 import type {
 	RuntimeClineReasoningEffort,
+	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskImage,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
@@ -70,6 +71,7 @@ export type { ClineTaskMessage } from "./cline-session-state";
 
 export interface StartClineTaskSessionRequest {
 	taskId: string;
+	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	cwd: string;
 	prompt: string;
 	startInPlanMode?: boolean;
@@ -110,6 +112,7 @@ export interface ClineTaskSessionService {
 	listMessages(taskId: string): ClineTaskMessage[];
 	listSlashCommands(workspacePath: string): Promise<ClineSdkSlashCommand[]>;
 	loadTaskSessionMessages(taskId: string): Promise<ClineTaskMessage[]>;
+	loadPersistedTaskSessionMessages(taskId: string): Promise<ClineSdkPersistedMessage[]>;
 	applyTurnCheckpoint(taskId: string, checkpoint: RuntimeTaskTurnCheckpoint): RuntimeTaskSessionSummary | null;
 	dispose(): Promise<void>;
 }
@@ -367,12 +370,18 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 					startedAt: now(),
 					lastOutputAt: now(),
 					reviewReason: initialReviewReason,
+					...(request.taskConversationSessionMetadata
+						? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+						: {}),
 				})
 			: ({
 					// 经单一构造 applySessionFacets 重 stamp 双轴 facet：本内联分支覆写 state/reviewReason
 					// 后若仅 spread createDefaultSummary 的 idle facet，会得到与 state 不一致的 facet。
 					summary: applySessionFacets({
 						...createDefaultSummary(request.taskId),
+						...(request.taskConversationSessionMetadata
+							? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+							: {}),
 						state: initialState,
 						mode: resolvedMode,
 						workspacePath: request.cwd,
@@ -432,6 +441,9 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 				);
 				if (appendedSystemPrompt) {
 					systemPrompt = `${systemPrompt}\n\n${appendedSystemPrompt}`;
+				}
+				if (request.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way") {
+					systemPrompt = `${systemPrompt}\n\n# By the way session\nAnswer the user's side question using read-only inspection only. Do not modify files, run mutating commands, or change Kanban task state.`;
 				}
 
 				const startResult = await this.sessionRuntime.startTaskSession({
@@ -578,7 +590,10 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		this.pendingTurnCancelTaskIds.delete(taskId);
 		const normalized = text.trim();
 		const hasImages = Boolean(images && images.length > 0);
-		const effectiveMode: RuntimeTaskSessionMode = mode ?? entry.summary.mode ?? "act";
+		const effectiveMode: RuntimeTaskSessionMode =
+			entry.summary.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way"
+				? "plan"
+				: (mode ?? entry.summary.mode ?? "act");
 		if (normalized.length === 0 && !hasImages) {
 			return null;
 		}
@@ -598,6 +613,14 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 			const queueDelivery = resolveSessionFacets(entry.summary).turnOwner === "agent";
 			const waitingSummary = updateSummary(entry, {
 				...deriveClineFacetPatch("running", null),
+				...(entry.summary.taskConversationSessionMetadata
+					? {
+							taskConversationSessionMetadata: {
+								...entry.summary.taskConversationSessionMetadata,
+								latestUserMessagePreview: normalized,
+							},
+						}
+					: {}),
 				mode: effectiveMode,
 				reviewReason: null,
 				warningMessage: null,
@@ -803,6 +826,11 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 			runtimeSetup.userInstructionService.refreshType("workflow"),
 		]);
 		return listClineSdkWorkflowSlashCommands(runtimeSetup.userInstructionService);
+	}
+
+	async loadPersistedTaskSessionMessages(taskId: string): Promise<ClineSdkPersistedMessage[]> {
+		const persistedSnapshot = await this.sessionRuntime.readPersistedTaskSession(taskId).catch(() => null);
+		return persistedSnapshot?.messages ?? [];
 	}
 
 	async loadTaskSessionMessages(taskId: string): Promise<ClineTaskMessage[]> {

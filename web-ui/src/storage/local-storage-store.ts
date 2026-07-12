@@ -6,6 +6,7 @@ export enum LocalStorageKey {
 	TaskCreateTerminalAgentModelSelections = "kanban.task-create-terminal-agent-model-selections.v1",
 	AgentTipsDismissed = "kanban.agent-tips-dismissed",
 	TaskCreatePrimaryStartAction = "kanban.task-create-primary-start-action",
+	TaskConversationSessionReadReceipts = "kanban.task-conversation-session-read-receipts.v1",
 	BottomTerminalPaneHeight = "kanban.bottom-terminal-pane-height",
 	DetailAgentPanelRatio = "kanban.detail-agent-panel-ratio",
 	DetailTerminalPanelWidth = "kanban.detail-terminal-panel-width",

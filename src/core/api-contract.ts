@@ -408,6 +408,17 @@ export const runtimeTaskTurnCheckpointSchema = z.object({
 });
 export type RuntimeTaskTurnCheckpoint = z.infer<typeof runtimeTaskTurnCheckpointSchema>;
 
+export const runtimeTaskConversationSessionMetadataSchema = z.object({
+	workspaceTaskId: z.string(),
+	taskConversationSessionRole: z.enum(["main", "by_the_way"]),
+	taskConversationSessionContextSource: z.enum(["main", "started_from_scratch", "forked_from_main_current_turn"]),
+	parentTaskConversationSessionId: z.string().nullable(),
+	mainSessionOriginTurnNumber: z.number().int().nonnegative().nullable(),
+	mainSessionOriginUserMessagePreview: z.string().nullable(),
+	latestUserMessagePreview: z.string().nullable(),
+});
+export type RuntimeTaskConversationSessionMetadata = z.infer<typeof runtimeTaskConversationSessionMetadataSchema>;
+
 // 终端 agent 因瞬时连接错误（VPN 抖动等）停在空闲提示符时，
 // 自动续跑框架（src/terminal/output-reactions）进入「连接重试」状态：
 // 记录已尝试的续跑次数、首次出错时刻、最近一次注入时刻，以及下一次计划注入的时刻。
@@ -472,6 +483,7 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// present = parked；判据 / 时序见 runtimeTaskAwaitingDispatchedBackgroundWorkSchema 与 session-activity.ts
 	// 的 isParkedAwaitingDispatchedBackgroundWork。不参与 facet / superRefine（与 connectionRetry-only 写同形）。
 	awaitingDispatchedBackgroundWork: runtimeTaskAwaitingDispatchedBackgroundWorkSchema.nullable().optional(),
+	taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
 	// 双轴 facet（加性、可选）+ per-session schema 版本。三 facet 共生（要么全置、要么全缺）：
 	// 全缺=未迁移的旧盘数据（Stage 2 读时回填）；全置=经 applySessionFacets 漏斗写入、组合受
 	// 下方 superRefine 护栏约束。schemaVersion 为 per-session 可选字段（不引入文件级包裹、无 flag day）。
@@ -1358,6 +1370,8 @@ export type RuntimeConfigSaveRequest = z.infer<typeof runtimeConfigSaveRequestSc
 
 export const runtimeTaskSessionStartRequestSchema = z.object({
 	taskId: z.string(),
+	workspaceTaskId: z.string().optional(),
+	taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
 	prompt: z.string(),
 	/** Display title from the Kanban task card. Propagated to SDK session metadata as a convenience copy. */
 	taskTitle: z.string().optional(),
