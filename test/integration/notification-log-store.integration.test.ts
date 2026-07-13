@@ -270,7 +270,10 @@ describe.sequential("notification-log-store integration", () => {
 						resolveWorkspaceForStream: async () => {
 							throw new Error("not used in this test");
 						},
-						buildProjectsPayload: async () => ({ currentProjectId: null, projects: [] }),
+						buildProjectsPayloadUsingCachedRuntimeProjectAvailability: async () => ({
+							currentProjectId: null,
+							projects: [],
+						}),
 						buildWorkspaceStateSnapshot: async () => {
 							throw new Error("not used in this test");
 						},

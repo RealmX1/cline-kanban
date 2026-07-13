@@ -672,6 +672,23 @@ export const runtimeProjectTaskCountsSchema = z.object({
 });
 export type RuntimeProjectTaskCounts = z.infer<typeof runtimeProjectTaskCountsSchema>;
 
+export const runtimeProjectUnavailableReasonSchema = z.enum([
+	"project_path_missing",
+	"project_path_not_directory",
+	"project_path_access_could_not_be_verified",
+	"git_work_tree_unavailable",
+]);
+export type RuntimeProjectUnavailableReason = z.infer<typeof runtimeProjectUnavailableReasonSchema>;
+
+export const runtimeProjectAvailabilitySchema = z.discriminatedUnion("status", [
+	z.object({ status: z.literal("available") }),
+	z.object({
+		status: z.literal("unavailable"),
+		reason: runtimeProjectUnavailableReasonSchema,
+	}),
+]);
+export type RuntimeProjectAvailability = z.infer<typeof runtimeProjectAvailabilitySchema>;
+
 // Cross-Repository Stage-First Overview（跨-repo 概览，见 CONTEXT.md）用：in_progress 列单个 task
 // 的精简明细投影。前端据 turnOwner + lastOutputAt 把它二分为 Active / Stale
 // （见 session-activity.ts 的 RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS）。
@@ -697,6 +714,8 @@ export const runtimeProjectSummarySchema = z.object({
 	path: z.string(),
 	name: z.string(),
 	taskCounts: runtimeProjectTaskCountsSchema,
+	// 旧 runtime payload 未携带 availability；缺省仅用于网络兼容。新服务端始终显式检查并发送结果。
+	availability: runtimeProjectAvailabilitySchema.default({ status: "available" }),
 	// board 列归属的原始计数（未套主看板的 live-session overlay）。Stage-First Overview 用它做
 	// Review/Validation/Done 的 stage 计数，与 overlay 后的 taskCounts 并存不冲突（见 ADR-0001）。
 	// optional：projects.add 快路径可省略，下一次 projects_updated/snapshot 广播补齐。
@@ -952,16 +971,123 @@ export const runtimeDirectoryListResponseSchema = z.object({
 });
 export type RuntimeDirectoryListResponse = z.infer<typeof runtimeDirectoryListResponseSchema>;
 
-export const runtimeProjectRemoveRequestSchema = z.object({
+export const runtimeProjectPermanentDeletionPreviewRequestSchema = z.object({
 	projectId: z.string(),
 });
-export type RuntimeProjectRemoveRequest = z.infer<typeof runtimeProjectRemoveRequestSchema>;
+export type RuntimeProjectPermanentDeletionPreviewRequest = z.infer<
+	typeof runtimeProjectPermanentDeletionPreviewRequestSchema
+>;
 
-export const runtimeProjectRemoveResponseSchema = z.object({
+export const runtimeProjectPermanentDeletionBlockingReasonSchema = z.enum([
+	"confirmation_project_name_could_not_be_derived",
+	"workspace_state_directory_path_is_unsafe",
+	"workspace_state_could_not_be_verified",
+	"runtime_sessions_could_not_be_verified",
+	"managed_worktrees_could_not_be_verified",
+]);
+export type RuntimeProjectPermanentDeletionBlockingReason = z.infer<
+	typeof runtimeProjectPermanentDeletionBlockingReasonSchema
+>;
+
+export const runtimeProjectPermanentDeletionPreviewSchema = z.object({
+	projectId: z.string(),
+	projectName: z.string(),
+	projectPath: z.string(),
+	workspaceStateRevision: z.number().int().nonnegative().nullable(),
+	totalTaskCount: z.number().int().nonnegative(),
+	activeSessionCount: z.number().int().nonnegative(),
+	managedWorktreeCount: z.number().int().nonnegative(),
+	workspaceStateDirectoryPath: z.string(),
+	deletionAllowed: z.boolean(),
+	blockingReasons: z.array(runtimeProjectPermanentDeletionBlockingReasonSchema),
+	requiredConfirmationProjectName: z.string(),
+});
+export type RuntimeProjectPermanentDeletionPreview = z.infer<typeof runtimeProjectPermanentDeletionPreviewSchema>;
+
+export const runtimeProjectPermanentDeletionPreviewResponseSchema = z.union([
+	z.object({
+		ok: z.literal(true),
+		preview: runtimeProjectPermanentDeletionPreviewSchema,
+	}),
+	z.object({
+		ok: z.literal(false),
+		preview: z.null(),
+		error: z.string(),
+	}),
+]);
+export type RuntimeProjectPermanentDeletionPreviewResponse = z.infer<
+	typeof runtimeProjectPermanentDeletionPreviewResponseSchema
+>;
+
+export const runtimeProjectPermanentDeletionRequestSchema = z.object({
+	projectId: z.string(),
+	expectedWorkspaceStateRevision: z.number().int().nonnegative(),
+	confirmationProjectName: z.string(),
+});
+export type RuntimeProjectPermanentDeletionRequest = z.infer<typeof runtimeProjectPermanentDeletionRequestSchema>;
+
+export const runtimeProjectPermanentDeletionResultStatusSchema = z.enum([
+	"completed",
+	"aborted_before_project_data_deletion",
+	"completed_with_retained_staging_directory",
+]);
+export type RuntimeProjectPermanentDeletionResultStatus = z.infer<
+	typeof runtimeProjectPermanentDeletionResultStatusSchema
+>;
+
+export const runtimeProjectPermanentDeletionFailureCodeSchema = z.enum([
+	"project_not_registered",
+	"deletion_not_allowed",
+	"confirmation_project_name_mismatch",
+	"preview_stale",
+	"workspace_state_changed_after_managed_worktree_deletion",
+	"workspace_state_directory_path_is_unsafe",
+	"runtime_session_stop_or_persistence_failed",
+	"managed_worktree_deletion_failed",
+	"workspace_state_staging_failed",
+	"workspace_index_deletion_failed",
+	"workspace_state_staging_rollback_failed",
+	"workspace_runtime_disposal_failed",
+	"fallback_project_selection_failed",
+	"projects_broadcast_failed",
+	"staging_directory_removal_failed",
+]);
+export type RuntimeProjectPermanentDeletionFailureCode = z.infer<
+	typeof runtimeProjectPermanentDeletionFailureCodeSchema
+>;
+
+export const runtimeProjectPermanentDeletionFailureSchema = z.object({
+	code: runtimeProjectPermanentDeletionFailureCodeSchema,
+	message: z.string(),
+	path: z.string().optional(),
+	taskId: z.string().optional(),
+});
+export type RuntimeProjectPermanentDeletionFailure = z.infer<typeof runtimeProjectPermanentDeletionFailureSchema>;
+
+export const runtimeProjectManagedWorktreeDeletionResultSchema = z.object({
+	taskId: z.string(),
+	path: z.string(),
 	ok: z.boolean(),
+	removed: z.boolean(),
 	error: z.string().optional(),
 });
-export type RuntimeProjectRemoveResponse = z.infer<typeof runtimeProjectRemoveResponseSchema>;
+export type RuntimeProjectManagedWorktreeDeletionResult = z.infer<
+	typeof runtimeProjectManagedWorktreeDeletionResultSchema
+>;
+
+export const runtimeProjectPermanentDeletionResultSchema = z.object({
+	status: runtimeProjectPermanentDeletionResultStatusSchema,
+	failureCode: runtimeProjectPermanentDeletionFailureCodeSchema.optional(),
+	projectId: z.string(),
+	stoppedSessionCount: z.number().int().nonnegative(),
+	worktreeDeletionResults: z.array(runtimeProjectManagedWorktreeDeletionResultSchema),
+	projectIndexDeleted: z.boolean(),
+	workspaceStateDirectoryDeleted: z.boolean(),
+	failures: z.array(runtimeProjectPermanentDeletionFailureSchema),
+	retainedPaths: z.array(z.string()),
+	newCurrentProjectId: z.string().nullable(),
+});
+export type RuntimeProjectPermanentDeletionResult = z.infer<typeof runtimeProjectPermanentDeletionResultSchema>;
 
 export const runtimeWorktreeEnsureRequestSchema = z.object({
 	taskId: z.string(),

@@ -4,6 +4,8 @@ interface UseTrpcQueryOptions<TData> {
 	enabled: boolean;
 	queryFn: () => Promise<TData>;
 	retainDataOnError?: boolean;
+	/** 重试进行中仍保留最近一次错误；仅在请求成功后清除。 */
+	retainErrorDuringRefetch?: boolean;
 	/**
 	 * 当新结果与当前 data 语义相等时返回 true：此时保留旧引用、跳过 setData，
 	 * 避免轮询在内容未变时空转触发下游 memo 重算与整棵 re-render（大 diff 每秒轮询的主要开销）。
@@ -18,6 +20,7 @@ export interface UseTrpcQueryResult<TData> {
 	error: Error | null;
 	refetch: () => Promise<TData | null>;
 	setData: (nextData: TData | null) => void;
+	clearQueryError: () => void;
 }
 
 function toError(value: unknown): Error {
@@ -33,7 +36,7 @@ function toError(value: unknown): Error {
 // request race protection when inputs change, and unmount safety so stale responses
 // do not overwrite newer state. This hook provides that minimal behavior with no cache layer.
 export function useTrpcQuery<TData>(options: UseTrpcQueryOptions<TData>): UseTrpcQueryResult<TData> {
-	const { enabled, queryFn, retainDataOnError = false, isDataEqual } = options;
+	const { enabled, queryFn, retainDataOnError = false, retainErrorDuringRefetch = false, isDataEqual } = options;
 	const [data, setDataState] = useState<TData | null>(null);
 	const [isLoading, setIsLoading] = useState(false);
 	const [isError, setIsError] = useState(false);
@@ -45,6 +48,10 @@ export function useTrpcQuery<TData>(options: UseTrpcQueryOptions<TData>): UseTrp
 	const setData = useCallback((nextData: TData | null) => {
 		dataRef.current = nextData;
 		setDataState(nextData);
+	}, []);
+	const clearQueryError = useCallback(() => {
+		setIsError(false);
+		setError(null);
 	}, []);
 
 	useEffect(() => {
@@ -64,8 +71,9 @@ export function useTrpcQuery<TData>(options: UseTrpcQueryOptions<TData>): UseTrp
 		const requestId = requestIdRef.current + 1;
 		requestIdRef.current = requestId;
 		setIsLoading(true);
-		setIsError(false);
-		setError(null);
+		if (!retainErrorDuringRefetch) {
+			clearQueryError();
+		}
 		try {
 			const nextData = await queryFn();
 			if (!isMountedRef.current || requestIdRef.current !== requestId) {
@@ -75,10 +83,12 @@ export function useTrpcQuery<TData>(options: UseTrpcQueryOptions<TData>): UseTrp
 			if (previousData != null && isDataEqual?.(previousData, nextData)) {
 				// 内容语义未变：保留旧引用，不触发下游 re-render。
 				setIsLoading(false);
+				clearQueryError();
 				return previousData;
 			}
 			setData(nextData);
 			setIsLoading(false);
+			clearQueryError();
 			return nextData;
 		} catch (queryError) {
 			if (!isMountedRef.current || requestIdRef.current !== requestId) {
@@ -92,7 +102,7 @@ export function useTrpcQuery<TData>(options: UseTrpcQueryOptions<TData>): UseTrp
 			setError(toError(queryError));
 			return null;
 		}
-	}, [enabled, isDataEqual, queryFn, retainDataOnError, setData]);
+	}, [clearQueryError, enabled, isDataEqual, queryFn, retainDataOnError, retainErrorDuringRefetch, setData]);
 
 	useEffect(() => {
 		if (!enabled) {
@@ -112,5 +122,6 @@ export function useTrpcQuery<TData>(options: UseTrpcQueryOptions<TData>): UseTrp
 		error,
 		refetch,
 		setData,
+		clearQueryError,
 	};
 }

@@ -13,8 +13,8 @@ import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry"
 import type {
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
-	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import {
 	buildKanbanRuntimeUrl,
@@ -45,10 +45,14 @@ import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
 import { createWorkspaceApi } from "../trpc/workspace-api";
+import {
+	type ActiveRuntimeSessionShutdownResult,
+	stopActiveTerminalAndClineRuntimeSessionsForWorkspace,
+} from "./active-runtime-session-shutdown";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import type { RuntimeStateHub } from "./runtime-state-hub";
-import type { ProjectWorktreeTaskCleanupTarget, WorkspaceRegistry } from "./workspace-registry";
+import type { WorkspaceRegistry } from "./workspace-registry";
 
 interface DisposeTrackedWorkspaceResult {
 	terminalManager: TerminalSessionManager | null;
@@ -71,9 +75,6 @@ export interface CreateRuntimeServerDependencies {
 			stopTerminalSessions?: boolean;
 		},
 	) => DisposeTrackedWorkspaceResult;
-	collectProjectWorktreeTaskIdsForRemoval: (
-		board: RuntimeWorkspaceStateResponse["board"],
-	) => ProjectWorktreeTaskCleanupTarget[];
 	pickDirectoryPathFromSystemDialog: () => string | null;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
@@ -81,6 +82,14 @@ export interface CreateRuntimeServerDependencies {
 
 export interface RuntimeServer {
 	url: string;
+	stopAllActiveRuntimeSessionsForShutdown: () => Promise<
+		Array<
+			ActiveRuntimeSessionShutdownResult & {
+				workspaceId: string;
+				workspacePath: string | null;
+			}
+		>
+	>;
 	close: () => Promise<void>;
 }
 
@@ -145,6 +154,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
 	const clineTaskSessionServiceByWorkspaceId = new Map<string, ClineTaskSessionService>();
+	const clineWorkspacePathByWorkspaceId = new Map<string, string>();
 	const clineWatcherRegistry = createClineWatcherRegistry();
 	const getScopedClineTaskSessionService = async (
 		scope: RuntimeTrpcWorkspaceScope,
@@ -155,6 +165,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				watcherRegistry: clineWatcherRegistry,
 			});
 			clineTaskSessionServiceByWorkspaceId.set(scope.workspaceId, service);
+			clineWorkspacePathByWorkspaceId.set(scope.workspaceId, scope.workspacePath);
 			deps.runtimeStateHub.trackClineTaskSessionService(scope.workspaceId, scope.workspacePath, service);
 		}
 		return service;
@@ -165,10 +176,55 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			return;
 		}
 		clineTaskSessionServiceByWorkspaceId.delete(workspaceId);
+		clineWorkspacePathByWorkspaceId.delete(workspaceId);
 		await service.dispose();
 	};
-	const disposeClineTaskSessionService = (workspaceId: string): void => {
-		void disposeClineTaskSessionServiceAsync(workspaceId);
+	const listProjectRuntimeSessionSummaries = (workspaceId: string): RuntimeTaskSessionSummary[] => {
+		const summariesByTaskId = new Map<string, RuntimeTaskSessionSummary>();
+		const terminalManager = deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId);
+		for (const summary of terminalManager?.listSummaries() ?? []) {
+			summariesByTaskId.set(summary.taskId, summary);
+		}
+		const clineTaskSessionService = clineTaskSessionServiceByWorkspaceId.get(workspaceId);
+		for (const summary of clineTaskSessionService?.listSummaries() ?? []) {
+			summariesByTaskId.set(summary.taskId, summary);
+		}
+		return Array.from(summariesByTaskId.values());
+	};
+	const stopAndCollectProjectRuntimeSessionsForSafePersistence = async (
+		workspaceId: string,
+	): Promise<ActiveRuntimeSessionShutdownResult> => {
+		const terminalManager = deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId);
+		const clineTaskSessionService = clineTaskSessionServiceByWorkspaceId.get(workspaceId);
+		return await stopActiveTerminalAndClineRuntimeSessionsForWorkspace({
+			terminalManager,
+			clineTaskSessionService: clineTaskSessionService ?? null,
+		});
+	};
+	const stopAllActiveRuntimeSessionsForShutdown = async () => {
+		const workspacePathByWorkspaceId = new Map<string, string | null>();
+		for (const { workspaceId, workspacePath } of deps.workspaceRegistry.listManagedWorkspaces()) {
+			workspacePathByWorkspaceId.set(workspaceId, workspacePath);
+		}
+		for (const [workspaceId, workspacePath] of clineWorkspacePathByWorkspaceId) {
+			workspacePathByWorkspaceId.set(workspaceId, workspacePath);
+		}
+
+		const results: Array<ActiveRuntimeSessionShutdownResult & { workspaceId: string; workspacePath: string | null }> =
+			[];
+		for (const [workspaceId, workspacePath] of workspacePathByWorkspaceId) {
+			try {
+				results.push({
+					workspaceId,
+					workspacePath,
+					...(await stopAndCollectProjectRuntimeSessionsForSafePersistence(workspaceId)),
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				deps.warn(`Could not safely stop runtime sessions for ${workspacePath ?? workspaceId}. ${message}`);
+			}
+		}
+		return results;
 	};
 	const prepareForStateReset = async (): Promise<void> => {
 		const workspaceIds = new Set<string>();
@@ -234,12 +290,24 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				summarizeProjectTaskCounts: deps.workspaceRegistry.summarizeProjectTaskCounts,
 				createProjectSummary: deps.workspaceRegistry.createProjectSummary,
 				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
-				getTerminalManagerForWorkspace: deps.workspaceRegistry.getTerminalManagerForWorkspace,
-				disposeWorkspace: (workspaceId, options) => {
-					disposeClineTaskSessionService(workspaceId);
-					return deps.disposeWorkspace(workspaceId, options);
+				listProjectRuntimeSessionSummaries,
+				stopAndCollectProjectRuntimeSessionsForSafePersistence,
+				disposeProjectRuntime: async (workspaceId) => {
+					const disposalFailureMessages: string[] = [];
+					try {
+						await disposeClineTaskSessionServiceAsync(workspaceId);
+					} catch (error) {
+						disposalFailureMessages.push(error instanceof Error ? error.message : String(error));
+					}
+					try {
+						deps.disposeWorkspace(workspaceId, { stopTerminalSessions: false });
+					} catch (error) {
+						disposalFailureMessages.push(error instanceof Error ? error.message : String(error));
+					}
+					if (disposalFailureMessages.length > 0) {
+						throw new Error(disposalFailureMessages.join(" "));
+					}
 				},
-				collectProjectWorktreeTaskIdsForRemoval: deps.collectProjectWorktreeTaskIdsForRemoval,
 				warn: deps.warn,
 				buildProjectsPayload: deps.workspaceRegistry.buildProjectsPayload,
 				pickDirectoryPathFromSystemDialog: deps.pickDirectoryPathFromSystemDialog,
@@ -534,6 +602,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	return {
 		url,
+		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
 			await Promise.all(
 				Array.from(clineTaskSessionServiceByWorkspaceId.values()).map(async (service) => {
@@ -541,6 +610,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				}),
 			);
 			clineTaskSessionServiceByWorkspaceId.clear();
+			clineWorkspacePathByWorkspaceId.clear();
 			await clineWatcherRegistry.close();
 			await deps.runtimeStateHub.close();
 			await terminalWebSocketBridge.close();
