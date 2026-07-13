@@ -3,7 +3,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskWorktreeMode, RuntimeWorkspaceChangesResponse } from "@/runtime/types";
-import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
+import {
+	type RuntimeWorkspaceChangesQueryPhase,
+	useRuntimeWorkspaceChanges,
+} from "@/runtime/use-runtime-workspace-changes";
 
 const getChangesQueryMock = vi.hoisted(() => vi.fn());
 
@@ -46,13 +49,16 @@ function createWorkspaceChangesResponse(path: string): RuntimeWorkspaceChangesRe
 
 interface HookSnapshot {
 	paths: string[];
-	isLoading: boolean;
-	isRuntimeAvailable: boolean;
+	queryPhase: RuntimeWorkspaceChangesQueryPhase;
+	isRequestInFlight: boolean;
+	errorMessage: string | null;
 	changes: RuntimeWorkspaceChangesResponse | null;
 }
 
 function HookHarness({
 	taskId,
+	workspaceId = "project-1",
+	baseRef = "main",
 	worktreeMode = null,
 	stateVersion = 0,
 	viewKey = null,
@@ -60,7 +66,9 @@ function HookHarness({
 	pollIntervalMs = null,
 	onSnapshot,
 }: {
-	taskId: string;
+	taskId: string | null;
+	workspaceId?: string | null;
+	baseRef?: string | null;
 	worktreeMode?: RuntimeTaskWorktreeMode | null;
 	stateVersion?: number;
 	viewKey?: string | null;
@@ -70,8 +78,8 @@ function HookHarness({
 }): null {
 	const workspaceChanges = useRuntimeWorkspaceChanges(
 		taskId,
-		"project-1",
-		"main",
+		workspaceId,
+		baseRef,
 		worktreeMode,
 		"working_copy",
 		stateVersion,
@@ -83,11 +91,18 @@ function HookHarness({
 	useEffect(() => {
 		onSnapshot({
 			paths: workspaceChanges.changes?.files.map((file) => file.path) ?? [],
-			isLoading: workspaceChanges.isLoading,
-			isRuntimeAvailable: workspaceChanges.isRuntimeAvailable,
+			queryPhase: workspaceChanges.queryPhase,
+			isRequestInFlight: workspaceChanges.isRequestInFlight,
+			errorMessage: workspaceChanges.error?.message ?? null,
 			changes: workspaceChanges.changes,
 		});
-	}, [onSnapshot, workspaceChanges.changes, workspaceChanges.isLoading, workspaceChanges.isRuntimeAvailable]);
+	}, [
+		onSnapshot,
+		workspaceChanges.changes,
+		workspaceChanges.error,
+		workspaceChanges.isRequestInFlight,
+		workspaceChanges.queryPhase,
+	]);
 
 	return null;
 }
@@ -237,8 +252,8 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(snapshots.at(-1)).toMatchObject({
 			paths: ["task-a.ts"],
-			isLoading: false,
-			isRuntimeAvailable: true,
+			queryPhase: "ready",
+			isRequestInFlight: false,
 		});
 
 		await act(async () => {
@@ -254,8 +269,8 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(snapshots.at(-1)).toMatchObject({
 			paths: [],
-			isLoading: true,
-			isRuntimeAvailable: true,
+			queryPhase: "initial_loading",
+			isRequestInFlight: true,
 		});
 
 		await act(async () => {
@@ -265,8 +280,8 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(snapshots.at(-1)).toMatchObject({
 			paths: ["task-b.ts"],
-			isLoading: false,
-			isRuntimeAvailable: true,
+			queryPhase: "ready",
+			isRequestInFlight: false,
 		});
 	});
 
@@ -292,8 +307,8 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(snapshots.at(-1)).toMatchObject({
 			paths: ["turn-1.ts"],
-			isLoading: false,
-			isRuntimeAvailable: true,
+			queryPhase: "ready",
+			isRequestInFlight: false,
 		});
 
 		await act(async () => {
@@ -310,8 +325,8 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(snapshots.at(-1)).toMatchObject({
 			paths: [],
-			isLoading: true,
-			isRuntimeAvailable: true,
+			queryPhase: "initial_loading",
+			isRequestInFlight: true,
 		});
 
 		await act(async () => {
@@ -321,8 +336,8 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(snapshots.at(-1)).toMatchObject({
 			paths: ["turn-2.ts"],
-			isLoading: false,
-			isRuntimeAvailable: true,
+			queryPhase: "ready",
+			isRequestInFlight: false,
 		});
 	});
 
@@ -349,8 +364,8 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(snapshots.at(-1)).toMatchObject({
 			paths: ["turn-1.ts"],
-			isLoading: false,
-			isRuntimeAvailable: true,
+			queryPhase: "ready",
+			isRequestInFlight: false,
 		});
 
 		await act(async () => {
@@ -368,8 +383,8 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(snapshots.at(-1)).toMatchObject({
 			paths: ["turn-1.ts"],
-			isLoading: true,
-			isRuntimeAvailable: true,
+			queryPhase: "refreshing",
+			isRequestInFlight: true,
 		});
 
 		await act(async () => {
@@ -379,9 +394,165 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(snapshots.at(-1)).toMatchObject({
 			paths: ["turn-2.ts"],
-			isLoading: false,
-			isRuntimeAvailable: true,
+			queryPhase: "ready",
+			isRequestInFlight: false,
 		});
+	});
+
+	it("keeps an initial error stable while the automatic retry is in flight", async () => {
+		vi.useFakeTimers();
+		const retryResponse = createDeferred<RuntimeWorkspaceChangesResponse>();
+		getChangesQueryMock.mockRejectedValueOnce(new Error("temporary changes failure"));
+		getChangesQueryMock.mockImplementationOnce(() => retryResponse.promise);
+
+		const snapshots: HookSnapshot[] = [];
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskId="task-initial-error"
+					pollIntervalMs={1_000}
+					onSnapshot={(snapshot) => snapshots.push(snapshot)}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		expect(snapshots.at(-1)).toMatchObject({
+			paths: [],
+			queryPhase: "initial_error",
+			isRequestInFlight: false,
+			errorMessage: "temporary changes failure",
+		});
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1_000);
+		});
+		expect(snapshots.at(-1)).toMatchObject({
+			paths: [],
+			queryPhase: "initial_error",
+			isRequestInFlight: true,
+			errorMessage: "temporary changes failure",
+		});
+
+		await act(async () => {
+			retryResponse.resolve(createWorkspaceChangesResponse("recovered.ts"));
+			await retryResponse.promise;
+		});
+		expect(snapshots.at(-1)).toMatchObject({
+			paths: ["recovered.ts"],
+			queryPhase: "ready",
+			isRequestInFlight: false,
+			errorMessage: null,
+		});
+		vi.useRealTimers();
+	});
+
+	it("clears an earlier task error when transitioning to a different task", async () => {
+		const nextTaskResponse = createDeferred<RuntimeWorkspaceChangesResponse>();
+		getChangesQueryMock.mockRejectedValueOnce(new Error("task-a failed"));
+		getChangesQueryMock.mockImplementationOnce(() => nextTaskResponse.promise);
+
+		const snapshots: HookSnapshot[] = [];
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" onSnapshot={(snapshot) => snapshots.push(snapshot)} />);
+			await Promise.resolve();
+		});
+		expect(snapshots.at(-1)).toMatchObject({
+			queryPhase: "initial_error",
+			errorMessage: "task-a failed",
+		});
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-b" onSnapshot={(snapshot) => snapshots.push(snapshot)} />);
+		});
+		expect(snapshots.at(-1)).toMatchObject({
+			paths: [],
+			queryPhase: "initial_loading",
+			isRequestInFlight: true,
+			errorMessage: null,
+		});
+
+		await act(async () => {
+			nextTaskResponse.resolve(createWorkspaceChangesResponse("task-b.ts"));
+			await nextTaskResponse.promise;
+		});
+		expect(snapshots.at(-1)).toMatchObject({
+			paths: ["task-b.ts"],
+			queryPhase: "ready",
+			errorMessage: null,
+		});
+	});
+
+	it("retains the last successful changes through a failed poll and its retry", async () => {
+		vi.useFakeTimers();
+		const recoveryResponse = createDeferred<RuntimeWorkspaceChangesResponse>();
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("last-good.ts"));
+		getChangesQueryMock.mockRejectedValueOnce(new Error("poll failed"));
+		getChangesQueryMock.mockImplementationOnce(() => recoveryResponse.promise);
+
+		const snapshots: HookSnapshot[] = [];
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskId="task-stale-after-error"
+					pollIntervalMs={1_000}
+					onSnapshot={(snapshot) => snapshots.push(snapshot)}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1_000);
+		});
+		expect(snapshots.at(-1)).toMatchObject({
+			paths: ["last-good.ts"],
+			queryPhase: "stale_after_refresh_error",
+			isRequestInFlight: false,
+			errorMessage: "poll failed",
+		});
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1_000);
+		});
+		expect(snapshots.at(-1)).toMatchObject({
+			paths: ["last-good.ts"],
+			queryPhase: "stale_after_refresh_error",
+			isRequestInFlight: true,
+			errorMessage: "poll failed",
+		});
+
+		await act(async () => {
+			recoveryResponse.resolve(createWorkspaceChangesResponse("recovered.ts"));
+			await recoveryResponse.promise;
+		});
+		expect(snapshots.at(-1)).toMatchObject({
+			paths: ["recovered.ts"],
+			queryPhase: "ready",
+			isRequestInFlight: false,
+			errorMessage: null,
+		});
+		vi.useRealTimers();
+	});
+
+	it("distinguishes disabled collection from missing workspace query scope", async () => {
+		const snapshots: HookSnapshot[] = [];
+		await act(async () => {
+			root.render(<HookHarness taskId={null} onSnapshot={(snapshot) => snapshots.push(snapshot)} />);
+		});
+		expect(snapshots.at(-1)?.queryPhase).toBe("disabled");
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskId="task-missing-workspace"
+					workspaceId={null}
+					onSnapshot={(snapshot) => snapshots.push(snapshot)}
+				/>,
+			);
+		});
+		expect(snapshots.at(-1)?.queryPhase).toBe("missing_workspace_scope");
+		expect(getChangesQueryMock).not.toHaveBeenCalled();
 	});
 
 	it("waits for a slow poll to settle before scheduling the next poll", async () => {
