@@ -5,6 +5,7 @@ import { agentRendersTranscriptInline } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeTaskConnectionRetry,
+	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
@@ -204,6 +205,8 @@ interface SessionEntry {
 
 export interface StartTaskSessionRequest {
 	taskId: string;
+	workspaceTaskId?: string;
+	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: AgentAdapterLaunchInput["agentId"];
 	binary: string;
 	args: string[];
@@ -1231,14 +1234,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 			workspaceId: request.workspaceId,
 			parentSessionId: request.parentSessionId,
 			taskAgentSessionInitialization: request.taskAgentSessionInitialization,
+			readOnlyQuestionSession: request.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way",
+			forkLatestWorkingDirectorySession:
+				request.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+				"forked_from_main_current_turn",
 			terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 		});
 
 		const taskContextEnv = {
-			KANBAN_TASK_ID: request.taskId,
+			KANBAN_TASK_ID: request.workspaceTaskId ?? request.taskId,
 			KANBAN_ATTEMPT_ID: request.taskId,
-			CLINE_KANBAN_TASK_ID: request.taskId,
+			CLINE_KANBAN_TASK_ID: request.workspaceTaskId ?? request.taskId,
 			CLINE_KANBAN_ATTEMPT_ID: request.taskId,
+			KANBAN_TASK_CONVERSATION_SESSION_ID: request.taskId,
 			KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
 			CLINE_KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
 		};
@@ -1469,6 +1477,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 				latestHookActivity: null,
 				latestTurnCheckpoint: null,
 				previousTurnCheckpoint: null,
+				...(request.taskConversationSessionMetadata
+					? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+					: {}),
 			});
 			this.emitSummary(summary);
 			throw new Error(formatSpawnFailure(commandBinary, error));
@@ -1567,6 +1578,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			warningMessage: null,
 			latestTurnCheckpoint: null,
 			previousTurnCheckpoint: null,
+			...(request.taskConversationSessionMetadata
+				? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+				: {}),
 		});
 		this.emitSummary(entry.summary);
 		for (const chunk of preActiveOutputChunks) {
@@ -1819,6 +1833,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 			entry.active.awaitingCodexPromptAfterEnter = true;
 		}
 		entry.active.session.write(data);
+		const submittedUserMessagePreview = data.includes(10) || data.includes(13) ? data.toString("utf8").trim() : "";
+		if (submittedUserMessagePreview && entry.summary.taskConversationSessionMetadata) {
+			const summary = updateSummary(entry, {
+				taskConversationSessionMetadata: {
+					...entry.summary.taskConversationSessionMetadata,
+					latestUserMessagePreview: submittedUserMessagePreview,
+				},
+			});
+			this.emitSummary(summary);
+		}
 		return cloneSummary(entry.summary);
 	}
 

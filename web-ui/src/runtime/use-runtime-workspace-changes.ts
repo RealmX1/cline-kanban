@@ -10,6 +10,7 @@ import { useTrpcQuery } from "@/runtime/use-trpc-query";
 
 export interface UseRuntimeWorkspaceChangesResult {
 	changes: RuntimeWorkspaceChangesResponse | null;
+	error: Error | null;
 	isLoading: boolean;
 	isRuntimeAvailable: boolean;
 	refresh: () => Promise<void>;
@@ -117,17 +118,30 @@ export function useRuntimeWorkspaceChanges(
 		if (!hasWorkspaceScope || pollIntervalMs == null) {
 			return;
 		}
-		const interval = window.setInterval(() => {
-			void changesQuery.refetch();
-		}, pollIntervalMs);
+		let cancelled = false;
+		let nextPollTimer: number | null = null;
+		const scheduleNextPoll = () => {
+			nextPollTimer = window.setTimeout(() => {
+				void changesQuery.refetch().finally(() => {
+					if (!cancelled) {
+						scheduleNextPoll();
+					}
+				});
+			}, pollIntervalMs);
+		};
+		scheduleNextPoll();
 		return () => {
-			window.clearInterval(interval);
+			cancelled = true;
+			if (nextPollTimer !== null) {
+				window.clearTimeout(nextPollTimer);
+			}
 		};
 	}, [changesQuery.refetch, hasWorkspaceScope, pollIntervalMs]);
 
 	if (!taskId) {
 		return {
 			changes: null,
+			error: null,
 			isLoading: false,
 			isRuntimeAvailable: true,
 			refresh,
@@ -137,6 +151,7 @@ export function useRuntimeWorkspaceChanges(
 	if (!workspaceId) {
 		return {
 			changes: null,
+			error: null,
 			isLoading: false,
 			isRuntimeAvailable: false,
 			refresh,
@@ -150,6 +165,7 @@ export function useRuntimeWorkspaceChanges(
 
 	return {
 		changes: visibleChanges,
+		error: shouldHideDuringTransition ? null : changesQuery.error,
 		isLoading: visibleIsLoading,
 		isRuntimeAvailable: visibleIsRuntimeAvailable,
 		refresh,

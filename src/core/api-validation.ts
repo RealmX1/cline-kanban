@@ -250,9 +250,18 @@ export function parseTaskSessionStartRequest(value: unknown): RuntimeTaskSession
 	if (!baseRef) {
 		throw new Error("Task session baseRef cannot be empty.");
 	}
+	const workspaceTaskId = parsed.workspaceTaskId?.trim() || undefined;
+	if (
+		parsed.taskConversationSessionMetadata &&
+		workspaceTaskId &&
+		parsed.taskConversationSessionMetadata.workspaceTaskId !== workspaceTaskId
+	) {
+		throw new Error("Task conversation session workspaceTaskId values must match.");
+	}
 	return {
 		...parsed,
 		taskId,
+		workspaceTaskId,
 		baseRef,
 	};
 }

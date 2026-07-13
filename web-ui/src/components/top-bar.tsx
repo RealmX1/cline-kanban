@@ -10,6 +10,7 @@ import {
 	ClipboardCheck,
 	Command,
 	GitBranch,
+	GitCompareArrows,
 	LayoutGrid,
 	Menu,
 	Play,
@@ -300,6 +301,8 @@ export function TopBar({
 	isTerminalLoading,
 	onToggleGitHistory,
 	isGitHistoryOpen,
+	onToggleTaskChangesSidebar,
+	isTaskChangesSidebarOpen,
 	onToggleBoardOverview,
 	isBoardOverviewOpen,
 	onOpenSettings,
@@ -343,6 +346,8 @@ export function TopBar({
 	isTerminalLoading?: boolean;
 	onToggleGitHistory?: () => void;
 	isGitHistoryOpen?: boolean;
+	onToggleTaskChangesSidebar?: () => void;
+	isTaskChangesSidebarOpen?: boolean;
 	onToggleBoardOverview?: () => void;
 	isBoardOverviewOpen?: boolean;
 	onOpenSettings?: (section?: SettingsSection) => void;
@@ -693,6 +698,24 @@ export function TopBar({
 								/>
 							) : null}
 						</>
+					) : null}
+
+					{onToggleTaskChangesSidebar ? (
+						<Tooltip side="bottom" content={isTaskChangesSidebarOpen ? "Show sessions" : "Show changes"}>
+							<Button
+								variant="ghost"
+								size="sm"
+								icon={<GitCompareArrows size={16} />}
+								onClick={onToggleTaskChangesSidebar}
+								aria-label={isTaskChangesSidebarOpen ? "Hide task changes" : "Show task changes"}
+								aria-pressed={isTaskChangesSidebarOpen}
+								className={cn(
+									"ml-0.5",
+									isMobile && MOBILE_TOUCH_TARGET,
+									isTaskChangesSidebarOpen && "ring-1 ring-accent",
+								)}
+							/>
+						</Tooltip>
 					) : null}
 
 					{/* Guided Verification badge：当前 workspace 有 active 部署组时显示待核对数，点击展开面板。 */}

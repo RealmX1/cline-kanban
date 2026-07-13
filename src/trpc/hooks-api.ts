@@ -146,7 +146,10 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				}
 
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
-				if (event === "to_review") {
+				if (
+					event === "to_review" &&
+					transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way"
+				) {
 					// hook 终端路径恒广播。userTurnKind 取自刚落定的 transitionedSummary facet（经漏斗自洽，
 					// hook 转审 reviewReason="hook" → review），随事件 payload 内联下发给前端通知标题（③(b)）。
 					deps.broadcastTaskReadyForReview(

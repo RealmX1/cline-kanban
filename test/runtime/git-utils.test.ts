@@ -71,4 +71,16 @@ describe("runGit", () => {
 		expect(result.exitCode).toBe(-1);
 		expect(result.stdout).toBe("partial-output");
 	});
+
+	it("forwards an explicit timeout to the git child process", async () => {
+		childProcessMocks.execFilePromise.mockResolvedValueOnce({ stdout: "ok\n", stderr: "" });
+
+		await runGit("/repo", ["status", "--short"], { timeoutMs: 30_000 });
+
+		expect(childProcessMocks.execFilePromise).toHaveBeenCalledWith(
+			"git",
+			["-c", "core.quotepath=false", "status", "--short"],
+			expect.objectContaining({ timeout: 30_000 }),
+		);
+	});
 });

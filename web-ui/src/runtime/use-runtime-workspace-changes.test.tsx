@@ -57,6 +57,7 @@ function HookHarness({
 	stateVersion = 0,
 	viewKey = null,
 	clearOnViewTransition = true,
+	pollIntervalMs = null,
 	onSnapshot,
 }: {
 	taskId: string;
@@ -64,6 +65,7 @@ function HookHarness({
 	stateVersion?: number;
 	viewKey?: string | null;
 	clearOnViewTransition?: boolean;
+	pollIntervalMs?: number | null;
 	onSnapshot: (snapshot: HookSnapshot) => void;
 }): null {
 	const workspaceChanges = useRuntimeWorkspaceChanges(
@@ -73,7 +75,7 @@ function HookHarness({
 		worktreeMode,
 		"working_copy",
 		stateVersion,
-		null,
+		pollIntervalMs,
 		viewKey,
 		clearOnViewTransition,
 	);
@@ -380,5 +382,49 @@ describe("useRuntimeWorkspaceChanges", () => {
 			isLoading: false,
 			isRuntimeAvailable: true,
 		});
+	});
+
+	it("waits for a slow poll to settle before scheduling the next poll", async () => {
+		vi.useFakeTimers();
+		const initialResponse = createDeferred<RuntimeWorkspaceChangesResponse>();
+		const firstPollResponse = createDeferred<RuntimeWorkspaceChangesResponse>();
+		getChangesQueryMock.mockImplementationOnce(() => initialResponse.promise);
+		getChangesQueryMock.mockImplementationOnce(() => firstPollResponse.promise);
+		getChangesQueryMock.mockResolvedValue(createWorkspaceChangesResponse("after-slow-poll.ts"));
+
+		const snapshots: HookSnapshot[] = [];
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskId="task-slow-poll"
+					pollIntervalMs={1_000}
+					onSnapshot={(snapshot) => snapshots.push(snapshot)}
+				/>,
+			);
+			initialResponse.resolve(createWorkspaceChangesResponse("initial.ts"));
+			await initialResponse.promise;
+		});
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1_000);
+		});
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(2);
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(5_000);
+		});
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(2);
+
+		await act(async () => {
+			firstPollResponse.resolve(createWorkspaceChangesResponse("slow-poll-finished.ts"));
+			await firstPollResponse.promise;
+		});
+		expect(snapshots.at(-1)?.paths).toEqual(["slow-poll-finished.ts"]);
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1_000);
+		});
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(3);
+		vi.useRealTimers();
 	});
 });

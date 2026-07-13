@@ -49,6 +49,7 @@ vi.mock("@/telemetry/events", () => ({
 
 interface HookSnapshot {
 	startTaskSession: ReturnType<typeof useTaskSessions>["startTaskSession"];
+	createByTheWayTaskConversationSession: ReturnType<typeof useTaskSessions>["createByTheWayTaskConversationSession"];
 }
 
 function createTask(): BoardCard {
@@ -74,8 +75,9 @@ function HookHarness({ onSnapshot }: { onSnapshot: (snapshot: HookSnapshot) => v
 	useEffect(() => {
 		onSnapshot({
 			startTaskSession: sessions.startTaskSession,
+			createByTheWayTaskConversationSession: sessions.createByTheWayTaskConversationSession,
 		});
-	}, [onSnapshot, sessions.startTaskSession]);
+	}, [onSnapshot, sessions.createByTheWayTaskConversationSession, sessions.startTaskSession]);
 
 	return null;
 }
@@ -174,6 +176,58 @@ describe("useTaskSessions", () => {
 		});
 
 		expect(trackTaskResumedFromTrashMock).not.toHaveBeenCalled();
+	});
+
+	it("creates a read-only By the way session related to the current main turn", async () => {
+		vi.spyOn(crypto, "randomUUID").mockReturnValue("11111111-1111-4111-8111-111111111111");
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected a hook snapshot.");
+		}
+
+		let result: Awaited<ReturnType<HookSnapshot["createByTheWayTaskConversationSession"]>> | null = null;
+		await act(async () => {
+			result =
+				(await latestSnapshot?.createByTheWayTaskConversationSession({
+					task: createTask(),
+					agentId: "codex",
+					initialUserQuestion: "  Why does this type exist?  ",
+					contextSource: "forked_from_main_current_turn",
+					mainSessionOriginTurnNumber: 4,
+					mainSessionOriginUserMessagePreview: "Implement the feature",
+				})) ?? null;
+		});
+
+		const taskConversationSessionId = "task-conversation-session-11111111-1111-4111-8111-111111111111";
+		expect(result).toEqual({ ok: true, taskConversationSessionId });
+		expect(startTaskSessionMutateMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				taskId: taskConversationSessionId,
+				workspaceTaskId: "task-1",
+				prompt: "Why does this type exist?",
+				agentId: "codex",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "forked_from_main_current_turn",
+					parentTaskConversationSessionId: "task-1",
+					mainSessionOriginTurnNumber: 4,
+					mainSessionOriginUserMessagePreview: "Implement the feature",
+					latestUserMessagePreview: "Why does this type exist?",
+				},
+			}),
+		);
 	});
 
 	it("forwards start-in-plan-mode from the task card when starting a task", async () => {

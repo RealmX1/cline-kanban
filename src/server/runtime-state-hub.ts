@@ -614,6 +614,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				const currentFacets = resolveSessionFacets(summary);
 				if (
 					previousSummary &&
+					summary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way" &&
 					!isNotifiableUserTurn(resolveSessionFacets(previousSummary)) &&
 					isNotifiableUserTurn(currentFacets)
 				) {

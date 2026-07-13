@@ -496,6 +496,200 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
+	it("starts a By the way runtime session in the main task workspace without creating a turn checkpoint", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-1" })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const taskConversationSessionMetadata = {
+			workspaceTaskId: "task-1",
+			taskConversationSessionRole: "by_the_way" as const,
+			taskConversationSessionContextSource: "forked_from_main_current_turn" as const,
+			parentTaskConversationSessionId: "task-1",
+			mainSessionOriginTurnNumber: 4,
+			mainSessionOriginUserMessagePreview: "Implement sessions",
+			latestUserMessagePreview: "Why is this read-only?",
+		};
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "side-session-1",
+				workspaceTaskId: "task-1",
+				baseRef: "main",
+				prompt: "Why is this read-only?",
+				agentId: "codex",
+				taskConversationSessionMetadata,
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(taskWorktreeMocks.resolveTaskCwd).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-1" }));
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				taskId: "side-session-1",
+				workspaceTaskId: "task-1",
+				cwd: "/tmp/main-task-worktree",
+				taskConversationSessionMetadata,
+			}),
+		);
+		expect(terminalManager.applyTurnCheckpoint).not.toHaveBeenCalled();
+		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
+	});
+
+	it("rejects By the way runtime sessions for unsupported agents", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			listSummaries: vi.fn(() => []),
+			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-unsupported" })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "side-session-unsupported",
+				workspaceTaskId: "task-1",
+				baseRef: "main",
+				prompt: "Explain this module",
+				agentId: "gemini",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: 1,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "Explain this module",
+				},
+			},
+		);
+
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("does not support") });
+		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("rejects a later cwd-latest fork after a By the way session already exists", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
+		const existingByTheWaySummary = createSummary({
+			taskId: "side-session-existing",
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "task-1",
+				taskConversationSessionRole: "by_the_way",
+				taskConversationSessionContextSource: "forked_from_main_current_turn",
+				parentTaskConversationSessionId: "task-1",
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: "Earlier question",
+			},
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			listSummaries: vi.fn(() => [existingByTheWaySummary]),
+			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-later" })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "side-session-later",
+				workspaceTaskId: "task-1",
+				baseRef: "main",
+				prompt: "Later question",
+				agentId: "codex",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "forked_from_main_current_turn",
+					parentTaskConversationSessionId: "task-1",
+					mainSessionOriginTurnNumber: 2,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "Later question",
+				},
+			},
+		);
+
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("Start from scratch") });
+		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("rejects a forged full-authority fork context", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			listSummaries: vi.fn(() => []),
+			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-forged" })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "side-session-forged",
+				workspaceTaskId: "task-1",
+				baseRef: "main",
+				prompt: "Run with full authority",
+				agentId: "gemini",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "main",
+					taskConversationSessionContextSource: "forked_from_main_current_turn",
+					parentTaskConversationSessionId: "task-1",
+					mainSessionOriginTurnNumber: 2,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "Run with full authority",
+				},
+			},
+		);
+
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("inconsistent") });
+		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+	});
+
 	it("ensures the worktree when no existing task cwd is available", async () => {
 		taskWorktreeMocks.resolveTaskCwd
 			.mockRejectedValueOnce(new Error("missing"))

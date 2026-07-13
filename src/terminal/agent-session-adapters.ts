@@ -49,6 +49,8 @@ export interface AgentAdapterLaunchInput {
 	workspaceId?: string;
 	parentSessionId?: string;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
+	readOnlyQuestionSession?: boolean;
+	forkLatestWorkingDirectorySession?: boolean;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 }
 
@@ -744,8 +746,14 @@ const claudeAdapter: AgentSessionAdapter = {
 			FORCE_HYPERLINK: "1",
 		};
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
+		if (input.readOnlyQuestionSession) {
+			const withoutBypass = args.filter((arg) => arg !== "--dangerously-skip-permissions");
+			args.length = 0;
+			args.push(...withoutBypass, "--permission-mode", "plan", "--tools", "Read,Glob,Grep,WebSearch,WebFetch");
+		}
 		if (
 			input.autonomousModeEnabled &&
+			!input.readOnlyQuestionSession &&
 			!input.startInPlanMode &&
 			!hasCliOption(args, "--dangerously-skip-permissions")
 		) {
@@ -759,6 +767,13 @@ const claudeAdapter: AgentSessionAdapter = {
 				taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" &&
 				!hasCliOption(args, "--fork-session")
 			) {
+				args.push("--fork-session");
+			}
+		} else if (input.forkLatestWorkingDirectorySession) {
+			if (!hasCliOption(args, "--continue")) {
+				args.push("--continue");
+			}
+			if (!hasCliOption(args, "--fork-session")) {
 				args.push("--fork-session");
 			}
 		}
@@ -950,7 +965,13 @@ const codexAdapter: AgentSessionAdapter = {
 		if (input.autonomousModeEnabled && !hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")) {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		}
-
+		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
+		if (input.readOnlyQuestionSession) {
+			const withoutBypass = codexArgs.filter((arg) => arg !== "--dangerously-bypass-approvals-and-sandbox");
+			codexArgs.length = 0;
+			codexArgs.push(...removeCliOptionsWithValues(withoutBypass, ["--sandbox", "-s", "--ask-for-approval", "-a"]));
+			codexArgs.push("--sandbox", "read-only", "--ask-for-approval", "never");
+		}
 		if (input.resumeFromTrash) {
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");
@@ -966,6 +987,18 @@ const codexAdapter: AgentSessionAdapter = {
 				taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" ? "fork" : "resume";
 			if (!codexArgs.includes(sessionSubcommand)) {
 				codexArgs.push(sessionSubcommand, taskAgentSessionInitialization.sourceSessionId);
+			}
+		} else if (parentSessionId || input.forkLatestWorkingDirectorySession) {
+			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
+				codexArgs.push("-C", input.cwd);
+			}
+			if (!codexArgs.includes("fork")) {
+				codexArgs.push("fork");
+				if (parentSessionId) {
+					codexArgs.push(parentSessionId);
+				} else {
+					codexArgs.push("--last");
+				}
 			}
 		}
 
@@ -992,9 +1025,18 @@ const codexAdapter: AgentSessionAdapter = {
 		} else if (trimmed) {
 			codexArgs.push(trimmed);
 		}
+		const resumesSession =
+			Boolean(input.resumeFromTrash) ||
+			(!input.resumeFromTrash &&
+				taskAgentSessionInitialization?.sourceSessionReuseMode === "resume_existing_session");
+		const forksSession =
+			!input.resumeFromTrash &&
+			(taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session" ||
+				(!taskAgentSessionInitialization &&
+					(parentSessionId !== null || Boolean(input.forkLatestWorkingDirectorySession))));
 
 		logTuiFreezeWarning(
-			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session"} hasResume=${Boolean(input.resumeFromTrash) || taskAgentSessionInitialization?.sourceSessionReuseMode === "resume_existing_session"} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
+			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${forksSession} hasResume=${resumesSession} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
 		);
 
 		if (hooks) {

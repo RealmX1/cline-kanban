@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CardDetailView } from "@/components/card-detail-view";
 import { DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
+import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import { TERMINAL_THEME_COLORS } from "@/terminal/theme-colors";
 import type { BoardCard, BoardColumn, BoardColumnId, CardSelection } from "@/types";
@@ -15,6 +16,7 @@ const {
 	mockDiffViewerPanel,
 	mockClineAppendToDraft,
 	mockClineSendText,
+	mockUseIsMobile,
 	mockPromptLibraryPanel,
 } = vi.hoisted(() => ({
 	mockAgentTerminalPanel: vi.fn((_props: { panelBackgroundColor?: string; terminalBackgroundColor?: string }) => null),
@@ -22,6 +24,7 @@ const {
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
 	mockClineAppendToDraft: vi.fn(),
 	mockClineSendText: vi.fn(async () => {}),
+	mockUseIsMobile: vi.fn(() => false),
 	mockPromptLibraryPanel: vi.fn((_props: unknown) => null),
 }));
 
@@ -30,7 +33,7 @@ vi.mock("react-hotkeys-hook", () => ({
 }));
 
 vi.mock("@/hooks/use-is-mobile", () => ({
-	useIsMobile: () => false,
+	useIsMobile: () => mockUseIsMobile(),
 }));
 
 vi.mock("@/components/detail-panels/agent-terminal-panel", () => ({
@@ -131,6 +134,28 @@ function createSelection(): CardSelection {
 	};
 }
 
+function createSessionSummary(taskId = "task-1"): RuntimeTaskSessionSummary {
+	return {
+		taskId,
+		state: "running",
+		agentId: "codex",
+		workspacePath: "/tmp/worktree",
+		pid: 123,
+		startedAt: 1,
+		updatedAt: 1,
+		lastOutputAt: 1,
+		reviewReason: null,
+		exitCode: null,
+		lastHookAt: null,
+		latestHookActivity: null,
+		latestTurnCheckpoint: null,
+		previousTurnCheckpoint: null,
+		turnOwner: "agent",
+		liveness: "live",
+		userTurnKind: null,
+	};
+}
+
 function createSelectionInColumn(columnId: BoardColumnId): CardSelection {
 	const card = createCard("task-1");
 	const columns: BoardColumn[] = [
@@ -208,6 +233,16 @@ function requireDetailDiffFileTreePanel(container: HTMLElement): HTMLElement {
 	return panel;
 }
 
+function requireButtonWithExactText(container: HTMLElement, buttonText: string): HTMLButtonElement {
+	const button = Array.from(container.querySelectorAll("button")).find(
+		(candidateButton) => candidateButton.textContent?.trim() === buttonText,
+	);
+	if (!(button instanceof HTMLButtonElement)) {
+		throw new Error(`Expected a button with text "${buttonText}".`);
+	}
+	return button;
+}
+
 describe("CardDetailView", () => {
 	let container: HTMLDivElement;
 	let root: Root;
@@ -226,6 +261,7 @@ describe("CardDetailView", () => {
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();
 		mockClineSendText.mockClear();
+		mockUseIsMobile.mockReturnValue(false);
 		mockPromptLibraryPanel.mockClear();
 		mockUseRuntimeWorkspaceChanges.mockReturnValue({
 			changes: {
@@ -254,6 +290,7 @@ describe("CardDetailView", () => {
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();
 		mockClineSendText.mockClear();
+		mockUseIsMobile.mockReset();
 		mockPromptLibraryPanel.mockClear();
 		vi.restoreAllMocks();
 		container.remove();
@@ -265,12 +302,121 @@ describe("CardDetailView", () => {
 		}
 	});
 
+	it("defaults to Sessions and Prompts without collecting workspace changes", async () => {
+		const sessionSummary = createSessionSummary();
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					selectedAgentId="codex"
+					sessionSummary={sessionSummary}
+					taskSessions={{ "task-1": sessionSummary }}
+					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(mockUseRuntimeWorkspaceChanges.mock.calls.at(-1)?.[0]).toBeNull();
+		expect(container.textContent).toContain("Sessions");
+		expect(container.textContent).toContain("Main session");
+		expect(container.querySelector('[data-testid="prompt-library-panel"]')).not.toBeNull();
+		expect(container.querySelector('[data-testid="diff-viewer-panel"]')).toBeNull();
+	});
+
+	it("keeps mobile Sessions and Prompts reachable without rendering disabled workspace changes", async () => {
+		mockUseIsMobile.mockReturnValue(true);
+		mockUseRuntimeWorkspaceChanges.mockReturnValue({
+			changes: null,
+			isRuntimeAvailable: true,
+		});
+		const sessionSummary = createSessionSummary();
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					selectedAgentId="codex"
+					sessionSummary={sessionSummary}
+					taskSessions={{ "task-1": sessionSummary }}
+					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(mockUseRuntimeWorkspaceChanges.mock.calls.at(-1)?.[0]).toBeNull();
+		expect(container.querySelector(".kb-skeleton")).toBeNull();
+		expect(() => requireButtonWithExactText(container, "Diff")).toThrow();
+		expect(() => requireButtonWithExactText(container, "Files")).toThrow();
+
+		const sessionsButton = requireButtonWithExactText(container, "Sessions");
+		await act(async () => sessionsButton.click());
+		expect(sessionsButton.className).toContain("text-accent");
+		expect(container.textContent).toContain("Main session");
+
+		const promptsButton = requireButtonWithExactText(container, "Prompts");
+		await act(async () => promptsButton.click());
+		expect(promptsButton.className).toContain("text-accent");
+		expect(container.querySelector('[data-testid="prompt-library-panel"]')).not.toBeNull();
+	});
+
+	it("enables mobile workspace changes tabs and queries the main task when Changes is open", async () => {
+		mockUseIsMobile.mockReturnValue(true);
+		const sessionSummary = createSessionSummary();
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					selectedAgentId="codex"
+					isTaskChangesSidebarOpen
+					sessionSummary={sessionSummary}
+					taskSessions={{ "task-1": sessionSummary }}
+					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(mockUseRuntimeWorkspaceChanges.mock.calls.at(-1)?.[0]).toBe("task-1");
+		expect(requireButtonWithExactText(container, "Diff")).toBeInstanceOf(HTMLButtonElement);
+		expect(requireButtonWithExactText(container, "Files")).toBeInstanceOf(HTMLButtonElement);
+		expect(requireButtonWithExactText(container, "Sessions")).toBeInstanceOf(HTMLButtonElement);
+		expect(requireButtonWithExactText(container, "Prompts")).toBeInstanceOf(HTMLButtonElement);
+	});
+
 	it("collapses the expanded diff on Escape without closing the detail view", async () => {
 		await act(async () => {
 			root.render(
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
+					isTaskChangesSidebarOpen
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -316,6 +462,7 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
+					isTaskChangesSidebarOpen
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -354,6 +501,7 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
+					isTaskChangesSidebarOpen
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -746,6 +894,7 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
+					isTaskChangesSidebarOpen
 					selectedAgentId="cline"
 					sessionSummary={null}
 					taskSessions={{}}
@@ -781,6 +930,7 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
+					isTaskChangesSidebarOpen
 					selectedAgentId="cline"
 					sessionSummary={null}
 					taskSessions={{}}
@@ -940,6 +1090,7 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
+					isTaskChangesSidebarOpen
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
