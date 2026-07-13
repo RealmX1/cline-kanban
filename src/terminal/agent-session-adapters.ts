@@ -6,6 +6,7 @@ import { isKanbanCursorAgentModelId, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from
 import type {
 	RuntimeAgentId,
 	RuntimeHookEvent,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -47,6 +48,7 @@ export interface AgentAdapterLaunchInput {
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	parentSessionId?: string;
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	readOnlyQuestionSession?: boolean;
 	forkLatestWorkingDirectorySession?: boolean;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
@@ -647,6 +649,34 @@ function buildOpenCodePluginContent(
 `;
 }
 
+function resolveTaskAgentSessionInitialization(
+	input: AgentAdapterLaunchInput,
+): RuntimeTaskAgentSessionInitialization | null {
+	const explicitInitialization = input.taskAgentSessionInitialization;
+	if (explicitInitialization) {
+		if (explicitInitialization.sourceAgentId !== input.agentId) {
+			throw new Error(
+				`Task session initialization agent "${explicitInitialization.sourceAgentId}" does not match selected agent "${input.agentId}".`,
+			);
+		}
+		if (
+			explicitInitialization.sourceAgentId === "cursor" &&
+			explicitInitialization.sourceSessionReuseMode === "fork_existing_session"
+		) {
+			throw new Error("Cursor Agent does not support forking existing sessions.");
+		}
+		return explicitInitialization;
+	}
+	const legacyParentSessionId = normalizeParentSessionId(input.parentSessionId);
+	return input.agentId === "codex" && legacyParentSessionId
+		? {
+				sourceAgentId: "codex",
+				sourceSessionId: legacyParentSessionId,
+				sourceSessionReuseMode: "fork_existing_session",
+			}
+		: null;
+}
+
 function getHookAgentDirectory(agentId: RuntimeAgentId): string {
 	return join(getRuntimeHomePath(), "hooks", agentId);
 }
@@ -708,6 +738,7 @@ function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): str
 
 const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
+		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "claude");
 		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {
@@ -730,8 +761,15 @@ const claudeAdapter: AgentSessionAdapter = {
 		}
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
 			args.push("--continue");
-		}
-		if (input.forkLatestWorkingDirectorySession) {
+		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
+			args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
+			if (
+				taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" &&
+				!hasCliOption(args, "--fork-session")
+			) {
+				args.push("--fork-session");
+			}
+		} else if (input.forkLatestWorkingDirectorySession) {
 			if (!hasCliOption(args, "--continue")) {
 				args.push("--continue");
 			}
@@ -905,6 +943,7 @@ function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummar
 
 const codexAdapter: AgentSessionAdapter = {
 	async prepare(input) {
+		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "codex");
 		const codexArgs = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {};
@@ -916,17 +955,9 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("-c", "check_for_update_on_startup=false");
 		}
 
-		// Codex = inline transcript agent（见 agent-catalog.ts 的 agentRendersTranscriptInline）：强制
-		// --no-alt-screen 把完整历史渲染进 scrollback。与 session-manager 的 suppressScrollbackErasure
-		// 门控同源，二者必须一致，否则「让历史进 scrollback」与「保护 scrollback 不被 CSI 3 J 清掉」会打架。
-		if (!hasCliOption(codexArgs, "--no-alt-screen")) {
-			codexArgs.push("--no-alt-screen");
-		}
-
 		if (input.autonomousModeEnabled && !hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")) {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		}
-
 		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
 		if (input.readOnlyQuestionSession) {
 			const withoutBypass = codexArgs.filter((arg) => arg !== "--dangerously-bypass-approvals-and-sandbox");
@@ -940,6 +971,15 @@ const codexAdapter: AgentSessionAdapter = {
 			}
 			if (!hasCliOption(codexArgs, "--last")) {
 				codexArgs.push("--last");
+			}
+		} else if (taskAgentSessionInitialization) {
+			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
+				codexArgs.push("-C", input.cwd);
+			}
+			const sessionSubcommand =
+				taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" ? "fork" : "resume";
+			if (!codexArgs.includes(sessionSubcommand)) {
+				codexArgs.push(sessionSubcommand, taskAgentSessionInitialization.sourceSessionId);
 			}
 		} else if (parentSessionId || input.forkLatestWorkingDirectorySession) {
 			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
@@ -978,9 +1018,18 @@ const codexAdapter: AgentSessionAdapter = {
 		} else if (trimmed) {
 			codexArgs.push(trimmed);
 		}
+		const resumesSession =
+			Boolean(input.resumeFromTrash) ||
+			(!input.resumeFromTrash &&
+				taskAgentSessionInitialization?.sourceSessionReuseMode === "resume_existing_session");
+		const forksSession =
+			!input.resumeFromTrash &&
+			(taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session" ||
+				(!taskAgentSessionInitialization &&
+					(parentSessionId !== null || Boolean(input.forkLatestWorkingDirectorySession))));
 
 		logTuiFreezeWarning(
-			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${parentSessionId !== null} hasResume=${Boolean(input.resumeFromTrash)} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
+			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${forksSession} hasResume=${resumesSession} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
 		);
 
 		if (hooks) {
@@ -1007,6 +1056,7 @@ const codexAdapter: AgentSessionAdapter = {
 
 const cursorAdapter: AgentSessionAdapter = {
 	async prepare(input) {
+		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "cursor");
 		const args = setModelCliOption(input.args, explicitModelId ?? KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID);
 		const env: Record<string, string | undefined> = {};
@@ -1026,6 +1076,8 @@ const cursorAdapter: AgentSessionAdapter = {
 
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
 			args.push("--continue");
+		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
+			args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
 		}
 
 		if (input.startInPlanMode && !hasCliOption(args, "--plan") && !hasCliOption(args, "--mode")) {

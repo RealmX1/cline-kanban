@@ -1,7 +1,6 @@
 // PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
-import { agentRendersTranscriptInline } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeTaskConnectionRetry,
@@ -37,6 +36,7 @@ import {
 	prepareAgentLaunch,
 	toBracketedPasteSubmission,
 } from "./agent-session-adapters";
+import { materializeTaskAgentSessionForExecutionWorkingDirectory } from "./agent-session-materialization";
 import {
 	CLAUDE_STARTUP_READINESS_TIMEOUT_MS,
 	hasClaudeInteractivePrompt,
@@ -222,6 +222,7 @@ export interface StartTaskSessionRequest {
 	workspaceId?: string;
 	projectPath?: string;
 	parentSessionId?: string;
+	taskAgentSessionInitialization?: AgentAdapterLaunchInput["taskAgentSessionInitialization"];
 	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
 
@@ -359,6 +360,21 @@ export function buildTerminalEnvironment(
 		delete env.NODE_DISABLE_COLORS;
 	}
 	return env;
+}
+
+// Agent TUI 默认是 screen-oriented（alt-screen）app：终端主动清 scrollback 会抹掉 Kanban 想保留的
+// 历史，故默认抑制 CSI 3 J。唯一例外是「显式 --no-alt-screen 的 Codex」这一 inline transcript opt-in
+// 模式——它靠「CSI 3 J 清 scrollback + 整段重印」做原地刷新，此时必须放行 CSI 3 J，否则重印会叠加在
+// 旧历史下面（可见翻倍）。判据基于最终启动 args，而非 agentId，因为同一个 codex 既可跑默认 alt-screen、
+// 也可显式 opt-in inline。
+export function shouldSuppressTerminalScrollbackErasureForAgentLaunch(
+	agentId: RuntimeAgentId,
+	commandArgs: readonly string[],
+): boolean {
+	if (agentId === "codex" && commandArgs.includes("--no-alt-screen")) {
+		return false;
+	}
+	return true;
 }
 
 function clearClaudeStartupReadinessTimer(state: { claudeStartupReadinessTimer: NodeJS.Timeout | null }): void {
@@ -1213,6 +1229,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 		});
 
+		await materializeTaskAgentSessionForExecutionWorkingDirectory({
+			initialization: request.taskAgentSessionInitialization,
+			executionWorkingDirectoryPath: request.cwd,
+		});
 		const launch = await prepareAgentLaunch({
 			taskId: request.taskId,
 			agentId: request.agentId,
@@ -1227,6 +1247,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			env: request.env,
 			workspaceId: request.workspaceId,
 			parentSessionId: request.parentSessionId,
+			taskAgentSessionInitialization: request.taskAgentSessionInitialization,
 			readOnlyQuestionSession: request.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way",
 			forkLatestWorkingDirectorySession:
 				request.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
@@ -1501,10 +1522,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			rows,
 			terminalProtocolFilter: createTerminalProtocolFilterState({
 				interceptOscColorQueries: true,
-				// inline transcript agent（Codex）靠「CSI 3 J 清 scrollback + 重印整段」做原地刷新，
-				// 吞掉 CSI 3 J 会让重印叠加在旧历史下面（可见翻倍），并让 mirror scrollback 只增不清、
-				// 每次 restore 全量重放。故仅对 alt-screen agent 抑制 CSI 3 J（见 agentRendersTranscriptInline）。
-				suppressScrollbackErasure: !agentRendersTranscriptInline(request.agentId),
+				// 默认抑制终端主动清 scrollback（保护 Kanban 历史）；仅当 Codex 显式 --no-alt-screen 走
+				// inline transcript opt-in 时放行 CSI 3 J（该模式靠整屏重印替换旧内容，见 helper 注释）。
+				suppressScrollbackErasure: shouldSuppressTerminalScrollbackErasureForAgentLaunch(
+					request.agentId,
+					commandArgs,
+				),
 				suppressDeviceAttributeQueries: request.agentId === "droid",
 			}),
 			onSessionCleanup: launch.cleanup ?? null,

@@ -27,6 +27,7 @@ import {
 	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
 	useTaskAgentModelPicker,
 } from "@/components/task-agent-model-picker";
+import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control";
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,7 @@ import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -65,6 +67,7 @@ function normalizeStoredTaskCreateStartAction(value: string): TaskCreateStartAct
  * 关闭 New task 对话框前，用来判断「本次会话内是否改动过表单」的快照。
  * 基线在对话框打开那一刻捕获，关闭时与当前值逐字段比较，只认本次打开后的改动
  * （sticky 偏好如 auto-review 若本次没动，则基线==当前，不算脏）。
+ * 仅在 create 模式下用于二次确认；edit 模式关闭是存草稿而非丢弃，不走此守卫。
  */
 export interface TaskCreateFormSnapshot {
 	prompt: string;
@@ -161,7 +164,7 @@ function parseListItems(text: string): string[] {
 	return [];
 }
 
-export function TaskCreateDialog({
+export function TaskEditorDialog({
 	open,
 	onOpenChange,
 	prompt,
@@ -197,6 +200,9 @@ export function TaskCreateDialog({
 	defaultProviderId,
 	defaultModelId,
 	defaultReasoningEffort,
+	taskEditorMode = "create",
+	taskAgentSessionInitialization,
+	onTaskAgentSessionInitializationChange,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -241,6 +247,9 @@ export function TaskCreateDialog({
 	defaultModelId?: string | null;
 	/** Default Cline reasoning effort from runtimeConfig.clineProviderSettings.reasoningEffort */
 	defaultReasoningEffort?: RuntimeClineReasoningEffort | null;
+	taskEditorMode?: "create" | "edit";
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
+	onTaskAgentSessionInitializationChange?: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
 }): ReactElement {
 	const [mode, setMode] = useState<"single" | "multi">("single");
 	const [createMore, setCreateMore] = useState(false);
@@ -257,7 +266,6 @@ export function TaskCreateDialog({
 		normalizeStoredTaskCreateStartAction,
 	);
 	const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
-
 	const {
 		agentOptions,
 		clineProviderOptions,
@@ -312,10 +320,11 @@ export function TaskCreateDialog({
 	});
 
 	const handleSplitIntoTasks = useCallback(() => {
+		onTaskAgentSessionInitializationChange?.(undefined);
 		setTaskPrompts(detectedItems);
 		setMode("multi");
 		nextFocusIndexRef.current = 0;
-	}, [detectedItems]);
+	}, [detectedItems, onTaskAgentSessionInitializationChange]);
 
 	const handleBackToSingle = useCallback(() => {
 		const joined = taskPrompts
@@ -504,6 +513,10 @@ export function TaskCreateDialog({
 		[open, mode, handleRunSingleStartAction, onCreateStartAndOpen],
 	);
 
+	// 关闭守卫仅在 create 模式启用：edit 模式关闭是存草稿（handleCancelEditTask），
+	// 不应弹「放弃」二次确认。
+	const isCreateMode = taskEditorMode === "create";
+
 	// 每次渲染刷新「当前表单」快照，供关闭时与打开时的基线比较。
 	const currentFormSnapshot: TaskCreateFormSnapshot = {
 		prompt,
@@ -541,16 +554,20 @@ export function TaskCreateDialog({
 	}, [onOpenChange]);
 
 	// X 关闭按钮走 Radix Close → onOpenChange(false)；Esc / 点击外部各自 preventDefault
-	// 后也汇到这里，三个关闭入口统一经 handleCloseRequest 守卫。
+	// 后也汇到这里。create 模式统一经 handleCloseRequest 守卫；edit 模式直通 base 语义。
 	const handleDialogOpenChange = useCallback(
 		(nextOpen: boolean) => {
 			if (nextOpen) {
 				onOpenChange(true);
 				return;
 			}
-			handleCloseRequest();
+			if (isCreateMode) {
+				handleCloseRequest();
+				return;
+			}
+			onOpenChange(false);
 		},
-		[handleCloseRequest, onOpenChange],
+		[handleCloseRequest, isCreateMode, onOpenChange],
 	);
 
 	const handleConfirmDiscard = useCallback(() => {
@@ -562,10 +579,22 @@ export function TaskCreateDialog({
 		setIsDiscardConfirmOpen(false);
 	}, []);
 
-	const dialogTitle = mode === "multi" ? `New tasks${validTaskCount > 0 ? ` (${validTaskCount})` : ""}` : "New task";
+	const dialogTitle =
+		taskEditorMode === "edit"
+			? "Edit backlog task"
+			: mode === "multi"
+				? `New tasks${validTaskCount > 0 ? ` (${validTaskCount})` : ""}`
+				: "New task";
 
 	const taskCountLabel = validTaskCount === 1 ? "task" : "tasks";
-	const primaryStartLabel = effectivePrimaryStartAction === "start" ? "Start task" : "Start and open";
+	const primaryStartLabel =
+		taskEditorMode === "edit"
+			? effectivePrimaryStartAction === "start"
+				? "Save and start"
+				: "Save, start and open"
+			: effectivePrimaryStartAction === "start"
+				? "Start task"
+				: "Start and open";
 	const primaryStartShortcutModifier = effectivePrimaryStartAction === "start" ? "mod" : "alt";
 	const secondaryStartLabel = secondaryStartAction === "start" ? "Start task" : "Start and open";
 	const secondaryStartShortcutModifier = secondaryStartAction === "start" ? "mod" : "alt";
@@ -576,14 +605,22 @@ export function TaskCreateDialog({
 				open={open}
 				onOpenChange={handleDialogOpenChange}
 				contentClassName="max-w-2xl"
-				onEscapeKeyDown={(event) => {
-					event.preventDefault();
-					if (!isDiscardConfirmOpen) handleCloseRequest();
-				}}
-				onPointerDownOutside={(event) => {
-					event.preventDefault();
-					if (!isDiscardConfirmOpen) handleCloseRequest();
-				}}
+				onEscapeKeyDown={
+					isCreateMode
+						? (event) => {
+								event.preventDefault();
+								if (!isDiscardConfirmOpen) handleCloseRequest();
+							}
+						: undefined
+				}
+				onPointerDownOutside={
+					isCreateMode
+						? (event) => {
+								event.preventDefault();
+								if (!isDiscardConfirmOpen) handleCloseRequest();
+							}
+						: undefined
+				}
 			>
 				<DialogHeader title={dialogTitle} icon={<PencilLine size={16} />} />
 				<DialogBody>
@@ -611,7 +648,7 @@ export function TaskCreateDialog({
 									</code>{" "}
 									to add images.
 								</p>
-								{detectedItems.length >= 2 ? (
+								{taskEditorMode === "create" && detectedItems.length >= 2 ? (
 									<button
 										type="button"
 										onClick={handleSplitIntoTasks}
@@ -745,51 +782,67 @@ export function TaskCreateDialog({
 						</div>
 
 						{onAgentIdChange && onClineSettingsChange ? (
-							<TaskAgentModelPicker
-								agentId={agentId}
-								onAgentIdChange={onAgentIdChange}
-								clineSettings={clineSettings}
-								onClineSettingsChange={onClineSettingsChange}
-								terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
-								onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
-								agentOptions={agentOptions}
-								clineProviderOptions={clineProviderOptions}
-								clineModelOptions={clineModelOptions}
-								terminalAgentModelOptions={terminalAgentModelOptions}
-								terminalAgentDefaultModelId={terminalAgentDefaultModelId}
-								effectiveDefaultModelId={effectiveDefaultModelId}
-								providerModels={providerModels}
-								isLoadingProviders={isLoadingProviders}
-								isLoadingModels={isLoadingModels}
-								isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
-								defaultAgentId={defaultAgentId}
-								defaultProviderId={defaultProviderId}
-								defaultReasoningEffort={defaultReasoningEffort}
-								providerDefaultModels={providerDefaultModels}
-							/>
+							<>
+								<TaskAgentModelPicker
+									agentId={agentId}
+									onAgentIdChange={onAgentIdChange}
+									clineSettings={clineSettings}
+									onClineSettingsChange={onClineSettingsChange}
+									terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
+									onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
+									agentOptions={agentOptions}
+									clineProviderOptions={clineProviderOptions}
+									clineModelOptions={clineModelOptions}
+									terminalAgentModelOptions={terminalAgentModelOptions}
+									terminalAgentDefaultModelId={terminalAgentDefaultModelId}
+									effectiveDefaultModelId={effectiveDefaultModelId}
+									providerModels={providerModels}
+									isLoadingProviders={isLoadingProviders}
+									isLoadingModels={isLoadingModels}
+									isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
+									defaultAgentId={defaultAgentId}
+									defaultProviderId={defaultProviderId}
+									defaultReasoningEffort={defaultReasoningEffort}
+									providerDefaultModels={providerDefaultModels}
+								/>
+								{mode === "single" && onTaskAgentSessionInitializationChange ? (
+									<TaskAgentSessionInitializationControl
+										agentId={agentId}
+										defaultAgentId={defaultAgentId}
+										workspaceId={workspaceId}
+										value={taskAgentSessionInitialization}
+										onChange={onTaskAgentSessionInitializationChange}
+										onAgentIdChange={onAgentIdChange}
+									/>
+								) : null}
+							</>
 						) : null}
 					</div>
 				</DialogBody>
 				<DialogFooter>
-					<label
-						htmlFor={createMoreId}
-						className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-					>
-						<RadixSwitch.Root
-							id={createMoreId}
-							checked={createMore}
-							onCheckedChange={setCreateMore}
-							className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
+					{taskEditorMode === "create" ? (
+						<label
+							htmlFor={createMoreId}
+							className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
 						>
-							<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
-						</RadixSwitch.Root>
-						<span>Create more</span>
-					</label>
+							<RadixSwitch.Root
+								id={createMoreId}
+								checked={createMore}
+								onCheckedChange={setCreateMore}
+								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+							</RadixSwitch.Root>
+							<span>Create more</span>
+						</label>
+					) : (
+						<span className="mr-auto" />
+					)}
 					{mode === "single" ? (
 						<>
 							<Button size="sm" onClick={handleCreateSingle} disabled={!prompt.trim() || !branchRef}>
 								<span className="inline-flex items-center">
-									Create
+									{taskEditorMode === "edit" ? "Save changes" : "Create"}
 									<ButtonShortcut />
 								</span>
 							</Button>

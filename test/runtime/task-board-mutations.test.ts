@@ -390,6 +390,36 @@ describe("dispatch / fork-flow fields", () => {
 		expect(created.task.prepFilePath).toBe("/tmp/rvf-prep/abc.json");
 	});
 
+	it("persists and clears generalized task agent session initialization", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Resume Claude task",
+				baseRef: "main",
+				agentId: "claude",
+				taskAgentSessionInitialization: {
+					sourceAgentId: "claude",
+					sourceSessionId: "11111111-2222-3333-8444-555555555555",
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			},
+			() => "aaaaa111",
+		);
+		expect(created.task.taskAgentSessionInitialization).toEqual({
+			sourceAgentId: "claude",
+			sourceSessionId: "11111111-2222-3333-8444-555555555555",
+			sourceSessionReuseMode: "resume_existing_session",
+		});
+
+		const cleared = updateTask(created.board, created.task.id, {
+			prompt: created.task.prompt,
+			baseRef: created.task.baseRef,
+			taskAgentSessionInitialization: null,
+		});
+		expect(cleared.task?.taskAgentSessionInitialization).toBeUndefined();
+	});
+
 	it("preserves dispatch fields on update when not specified", () => {
 		const created = addTaskToColumn(
 			createBoard(),

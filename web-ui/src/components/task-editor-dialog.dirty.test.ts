@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hasTaskCreateFormEdits, type TaskCreateFormSnapshot } from "@/components/task-create-dialog";
+import { hasTaskCreateFormEdits, type TaskCreateFormSnapshot } from "@/components/task-editor-dialog";
 
 function baseline(overrides: Partial<TaskCreateFormSnapshot> = {}): TaskCreateFormSnapshot {
 	return {

@@ -10,13 +10,18 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardDependency,
 	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentSessionInitialization,
+	RuntimeTaskAgentSessionInitializationReuseMode,
 	RuntimeTaskClineSettings,
+	RuntimeTaskSessionStartRequest,
 	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import {
 	runtimeAgentIdSchema,
 	runtimeClineReasoningEffortSchema,
+	runtimeTaskAgentSessionInitializationReuseModeSchema,
+	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskWorktreeModeSchema,
 } from "../core/api-contract";
 import { mergeAbortSignals, resolveCliTrpcTimeoutMs, safeStringify } from "../core/cli-process-guards";
@@ -160,6 +165,50 @@ function parseOptionalStringOrDefault(value: string | undefined): string | null 
 }
 
 type ParsedTaskClineReasoningEffort = RuntimeClineReasoningEffort | "default" | null | undefined;
+
+export function buildTaskAgentSessionInitialization(input: {
+	agentId: RuntimeAgentId | null | undefined;
+	sourceSessionId: string | null | undefined;
+	sourceSessionReuseMode: RuntimeTaskAgentSessionInitializationReuseMode | undefined;
+	existingTaskAgentId?: RuntimeAgentId;
+	existing?: RuntimeTaskAgentSessionInitialization;
+}): RuntimeTaskAgentSessionInitialization | null | undefined {
+	if (input.sourceSessionId === undefined && input.sourceSessionReuseMode === undefined) {
+		if (
+			input.agentId !== undefined &&
+			input.existing !== undefined &&
+			input.agentId !== input.existing.sourceAgentId
+		) {
+			return null;
+		}
+		return undefined;
+	}
+	if (input.sourceSessionId === null) {
+		return null;
+	}
+	if (
+		input.sourceSessionId === undefined &&
+		input.agentId !== undefined &&
+		input.existing !== undefined &&
+		input.agentId !== input.existing.sourceAgentId
+	) {
+		throw new Error(
+			"Changing the session reuse mode while switching agents also requires --agent-session-initialization-id.",
+		);
+	}
+	const sourceSessionId = input.sourceSessionId ?? input.existing?.sourceSessionId;
+	const sourceAgentId = input.agentId ?? input.existingTaskAgentId ?? input.existing?.sourceAgentId;
+	if (!sourceSessionId || (sourceAgentId !== "claude" && sourceAgentId !== "codex" && sourceAgentId !== "cursor")) {
+		throw new Error("Agent session initialization requires --agent-id claude, codex, or cursor and a session UUID.");
+	}
+	return runtimeTaskAgentSessionInitializationSchema.parse({
+		sourceAgentId,
+		sourceSessionId,
+		sourceSessionReuseMode:
+			input.sourceSessionReuseMode ?? input.existing?.sourceSessionReuseMode ?? "resume_existing_session",
+		sourceSessionWorkingDirectoryPath: input.existing?.sourceSessionWorkingDirectoryPath,
+	});
+}
 
 function parseTaskClineReasoningEffort(value: string | undefined): ParsedTaskClineReasoningEffort {
 	if (value === undefined) {
@@ -544,6 +593,7 @@ async function createTask(input: {
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	parentSessionId?: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
 	prepFilePath?: string;
@@ -568,6 +618,7 @@ async function createTask(input: {
 				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,
 				clineSettings: input.clineSettings,
+				taskAgentSessionInitialization: input.taskAgentSessionInitialization,
 				baseRef: resolvedBaseRef,
 				parentSessionId: input.parentSessionId,
 				worktreeMode: input.worktreeMode,
@@ -595,6 +646,9 @@ async function createTask(input: {
 			autoReviewMode: created.autoReviewMode ?? "commit",
 			...(created.agentId ? { agentId: created.agentId } : {}),
 			...formatTaskClineSettings(created.clineSettings),
+			...(created.taskAgentSessionInitialization
+				? { taskAgentSessionInitialization: created.taskAgentSessionInitialization }
+				: {}),
 			...(created.parentSessionId ? { parentSessionId: created.parentSessionId } : {}),
 			worktreeMode: created.worktreeMode ?? "branch",
 			...(created.prepFilePath ? { prepFilePath: created.prepFilePath } : {}),
@@ -616,6 +670,8 @@ async function updateTaskCommand(input: {
 	clineProviderId?: string | null;
 	clineModelId?: string | null;
 	clineReasoningEffort?: ParsedTaskClineReasoningEffort;
+	taskAgentSessionInitializationId?: string | null;
+	taskAgentSessionInitializationMode?: RuntimeTaskAgentSessionInitializationReuseMode;
 	parentSessionId?: string | null;
 	worktreeMode?: RuntimeTaskWorktreeMode | null;
 	prepFilePath?: string | null;
@@ -631,6 +687,8 @@ async function updateTaskCommand(input: {
 		input.clineProviderId === undefined &&
 		input.clineModelId === undefined &&
 		input.clineReasoningEffort === undefined &&
+		input.taskAgentSessionInitializationId === undefined &&
+		input.taskAgentSessionInitializationMode === undefined &&
 		input.parentSessionId === undefined &&
 		input.worktreeMode === undefined &&
 		input.prepFilePath === undefined
@@ -651,6 +709,15 @@ async function updateTaskCommand(input: {
 			modelId: input.clineModelId,
 			reasoningEffort: input.clineReasoningEffort,
 		});
+		const builtTaskAgentSessionInitialization = buildTaskAgentSessionInitialization({
+			agentId: input.agentId,
+			sourceSessionId: input.taskAgentSessionInitializationId,
+			sourceSessionReuseMode: input.taskAgentSessionInitializationMode,
+			existingTaskAgentId: taskRecord.task.agentId,
+			existing: taskRecord.task.taskAgentSessionInitialization,
+		});
+		const nextTaskAgentSessionInitialization =
+			builtTaskAgentSessionInitialization === null ? null : builtTaskAgentSessionInitialization;
 
 		const updatedTask = updateTask(runtimeState.board, input.taskId, {
 			title: input.title ?? taskRecord.task.title,
@@ -661,6 +728,7 @@ async function updateTaskCommand(input: {
 			autoReviewMode: input.autoReviewMode ?? taskRecord.task.autoReviewMode ?? "commit",
 			agentId: input.agentId,
 			clineSettings: nextTaskClineSettings,
+			taskAgentSessionInitialization: nextTaskAgentSessionInitialization,
 			parentSessionId: input.parentSessionId,
 			worktreeMode: input.worktreeMode,
 			prepFilePath: input.prepFilePath,
@@ -786,18 +854,7 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 			throw new Error(ensured.error ?? "Could not ensure task worktree.");
 		}
 
-		const started = await runtimeClient.runtime.startTaskSession.mutate({
-			taskId: task.id,
-			prompt: task.prompt,
-			taskTitle: task.title,
-			startInPlanMode: task.startInPlanMode,
-			baseRef: task.baseRef,
-			agentId: task.agentId,
-			clineSettings: task.clineSettings,
-			parentSessionId: task.parentSessionId,
-			worktreeMode: task.worktreeMode,
-			prepFilePath: task.prepFilePath,
-		});
+		const started = await runtimeClient.runtime.startTaskSession.mutate(buildCliTaskSessionStartRequest(task));
 		if (!started.ok || !started.summary) {
 			throw new Error(started.error ?? "Could not start task session.");
 		}
@@ -841,6 +898,22 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 			column: "in_progress",
 			workspacePath: workspaceRepoPath,
 		},
+	};
+}
+
+export function buildCliTaskSessionStartRequest(task: RuntimeBoardCard): RuntimeTaskSessionStartRequest {
+	return {
+		taskId: task.id,
+		prompt: task.prompt,
+		taskTitle: task.title,
+		startInPlanMode: task.startInPlanMode,
+		baseRef: task.baseRef,
+		agentId: task.agentId,
+		clineSettings: task.clineSettings,
+		taskAgentSessionInitialization: task.taskAgentSessionInitialization,
+		parentSessionId: task.parentSessionId,
+		worktreeMode: task.worktreeMode,
+		prepFilePath: task.prepFilePath,
 	};
 }
 
@@ -1547,6 +1620,11 @@ export function registerTaskCommand(program: Command): void {
 			"--cline-reasoning-effort <level>",
 			"Cline reasoning effort override: default | low | medium | high | xhigh.",
 		)
+		.option("--agent-session-initialization-id <uuid>", "Existing Claude, Codex, or Cursor session UUID.")
+		.option(
+			"--agent-session-initialization-mode <mode>",
+			"Session reuse mode: resume_existing_session | fork_existing_session.",
+		)
 		.option("--parent-session-id <uuid>", "Codex parent session id; agent launcher will run `codex fork <uuid>`.")
 		.option("--worktree-mode <mode>", `Worktree mode: ${VALID_WORKTREE_MODES.join(" | ")}. Defaults to branch.`)
 		.option("--prep-file-path <path>", "Absolute path to a dispatch prep file persisted on the task.")
@@ -1563,6 +1641,8 @@ export function registerTaskCommand(program: Command): void {
 				clineProvider?: string;
 				clineModel?: string;
 				clineReasoningEffort?: string;
+				agentSessionInitializationId?: string;
+				agentSessionInitializationMode?: string;
 				parentSessionId?: string;
 				worktreeMode?: string;
 				prepFilePath?: string;
@@ -1584,6 +1664,16 @@ export function registerTaskCommand(program: Command): void {
 								modelId: parseOptionalStringOrDefault(options.clineModel) ?? undefined,
 								reasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
 							}),
+							taskAgentSessionInitialization:
+								buildTaskAgentSessionInitialization({
+									agentId: parseAgentId(options.agentId),
+									sourceSessionId: options.agentSessionInitializationId?.trim() || undefined,
+									sourceSessionReuseMode: options.agentSessionInitializationMode
+										? runtimeTaskAgentSessionInitializationReuseModeSchema.parse(
+												options.agentSessionInitializationMode,
+											)
+										: undefined,
+								}) ?? undefined,
 							parentSessionId: options.parentSessionId?.trim() || undefined,
 							worktreeMode: parseWorktreeMode(options.worktreeMode),
 							prepFilePath: options.prepFilePath?.trim() || undefined,
@@ -1617,6 +1707,14 @@ export function registerTaskCommand(program: Command): void {
 			'Cline reasoning effort override: default | low | medium | high | xhigh. Use "inherit" to clear.',
 		)
 		.option(
+			"--agent-session-initialization-id <uuid>",
+			'Existing Claude, Codex, or Cursor session UUID. Use "inherit" to clear.',
+		)
+		.option(
+			"--agent-session-initialization-mode <mode>",
+			"Session reuse mode: resume_existing_session | fork_existing_session.",
+		)
+		.option(
 			"--parent-session-id <uuid>",
 			'Codex parent session id; agent launcher will run `codex fork <uuid>`. Use "inherit" to clear.',
 		)
@@ -1639,6 +1737,8 @@ export function registerTaskCommand(program: Command): void {
 				clineProvider?: string;
 				clineModel?: string;
 				clineReasoningEffort?: string;
+				agentSessionInitializationId?: string;
+				agentSessionInitializationMode?: string;
 				parentSessionId?: string;
 				worktreeMode?: string;
 				prepFilePath?: string;
@@ -1659,6 +1759,14 @@ export function registerTaskCommand(program: Command): void {
 							clineProviderId: parseOptionalStringOrDefault(options.clineProvider),
 							clineModelId: parseOptionalStringOrDefault(options.clineModel),
 							clineReasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
+							taskAgentSessionInitializationId: parseOptionalStringOrInherit(
+								options.agentSessionInitializationId,
+							),
+							taskAgentSessionInitializationMode: options.agentSessionInitializationMode
+								? runtimeTaskAgentSessionInitializationReuseModeSchema.parse(
+										options.agentSessionInitializationMode,
+									)
+								: undefined,
 							parentSessionId: parseOptionalStringOrInherit(options.parentSessionId),
 							worktreeMode: parseOptionalWorktreeModeOrInherit(options.worktreeMode),
 							prepFilePath: parseOptionalStringOrInherit(options.prepFilePath),

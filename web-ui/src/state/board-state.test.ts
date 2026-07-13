@@ -13,6 +13,7 @@ import {
 	moveTaskToColumn,
 	normalizeBoardData,
 	trashTaskAndGetReadyLinkedTaskIds,
+	updateTask,
 	updateTaskTitle,
 } from "@/state/board-state";
 import type { ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
@@ -52,6 +53,115 @@ afterEach(() => {
 });
 
 describe("board dependency state", () => {
+	it("applies worktree and agent session initialization changes when updating a task", () => {
+		const fixture = createBacklogBoard(["Task A"]);
+		const taskId = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
+		const boardWithStaleLegacyParentSessionId = {
+			...fixture.board,
+			columns: fixture.board.columns.map((column) => ({
+				...column,
+				cards: column.cards.map((card) =>
+					card.id === taskId ? { ...card, parentSessionId: "223e4567-e89b-42d3-a456-426614174000" } : card,
+				),
+			})),
+		};
+		const taskAgentSessionInitialization = {
+			sourceAgentId: "codex" as const,
+			sourceSessionId: "123e4567-e89b-42d3-a456-426614174000",
+			sourceSessionReuseMode: "fork_existing_session" as const,
+		};
+
+		const result = updateTask(boardWithStaleLegacyParentSessionId, taskId, {
+			prompt: "Task A updated",
+			baseRef: "main",
+			worktreeMode: "inplace",
+			taskAgentSessionInitialization,
+		});
+
+		expect(result.updated).toBe(true);
+		expect(result.board.columns[0]?.cards[0]).toMatchObject({
+			prompt: "Task A updated",
+			worktreeMode: "inplace",
+			taskAgentSessionInitialization,
+		});
+		expect(result.board.columns[0]?.cards[0]?.parentSessionId).toBeUndefined();
+	});
+
+	it("preserves worktree and agent session initialization when an update omits those fields", () => {
+		const taskAgentSessionInitialization = {
+			sourceAgentId: "codex" as const,
+			sourceSessionId: "123e4567-e89b-42d3-a456-426614174000",
+			sourceSessionReuseMode: "resume_existing_session" as const,
+		};
+		let board = addTaskToColumn(createInitialBoardData(), "review", {
+			title: "Initial title",
+			prompt: "Task A",
+			autoReviewEnabled: true,
+			baseRef: "main",
+			worktreeMode: "inplace",
+			taskAgentSessionInitialization,
+		});
+		const task = board.columns.find((column) => column.id === "review")?.cards[0];
+		if (!task) {
+			throw new Error("Expected review task to exist");
+		}
+
+		board = updateTaskTitle(board, task.id, "Updated title").board;
+		board = disableTaskAutoReview(board, task.id).board;
+
+		expect(board.columns.find((column) => column.id === "review")?.cards[0]).toMatchObject({
+			title: "Updated title",
+			autoReviewEnabled: false,
+			worktreeMode: "inplace",
+			taskAgentSessionInitialization,
+		});
+	});
+
+	it("clears worktree and agent session initialization when an update explicitly provides undefined", () => {
+		const taskAgentSessionInitialization = {
+			sourceAgentId: "codex" as const,
+			sourceSessionId: "123e4567-e89b-42d3-a456-426614174000",
+			sourceSessionReuseMode: "resume_existing_session" as const,
+		};
+		const board = addTaskToColumn(createInitialBoardData(), "backlog", {
+			prompt: "Task A",
+			baseRef: "main",
+			worktreeMode: "inplace",
+			taskAgentSessionInitialization,
+		});
+		const task = board.columns.find((column) => column.id === "backlog")?.cards[0];
+		if (!task) {
+			throw new Error("Expected backlog task to exist");
+		}
+		const boardWithLegacyParentSessionId = {
+			...board,
+			columns: board.columns.map((column) => ({
+				...column,
+				cards: column.cards.map((card) =>
+					card.id === task.id
+						? { ...card, parentSessionId: taskAgentSessionInitialization.sourceSessionId }
+						: card,
+				),
+			})),
+		};
+
+		const updated = updateTask(boardWithLegacyParentSessionId, task.id, {
+			prompt: task.prompt,
+			baseRef: task.baseRef,
+			worktreeMode: undefined,
+			taskAgentSessionInitialization: undefined,
+		});
+		const updatedTask = updated.board.columns.find((column) => column.id === "backlog")?.cards[0];
+
+		expect(updatedTask?.worktreeMode).toBeUndefined();
+		expect(updatedTask?.taskAgentSessionInitialization).toBeUndefined();
+		expect(updatedTask?.parentSessionId).toBeUndefined();
+		expect(
+			normalizeBoardData(updated.board)?.columns.find((column) => column.id === "backlog")?.cards[0]
+				?.taskAgentSessionInitialization,
+		).toBeUndefined();
+	});
+
 	it("creates tasks when randomUUID is unavailable", () => {
 		vi.stubGlobal("crypto", { randomUUID: undefined });
 
@@ -566,6 +676,35 @@ describe("board dependency state", () => {
 			"c->a",
 			"b->c",
 		]);
+	});
+
+	it("does not upgrade a non-UUID legacy parent session id", () => {
+		const rawBoard = {
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "legacy-session-task",
+							prompt: "Task with an invalid legacy session",
+							startInPlanMode: false,
+							baseRef: "main",
+							parentSessionId: "not-a-uuid",
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "validation", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalizedTask = normalizeBoardData(rawBoard)?.columns[0]?.cards[0];
+
+		expect(normalizedTask?.parentSessionId).toBe("not-a-uuid");
+		expect(normalizedTask?.taskAgentSessionInitialization).toBeUndefined();
 	});
 
 	it("keeps cards in the validation column when normalizing", () => {

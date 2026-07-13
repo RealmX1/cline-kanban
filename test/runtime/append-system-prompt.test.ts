@@ -144,8 +144,23 @@ describe("resolveTaskSessionAppendSystemPrompt", () => {
 		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo");
 		expect(prompt).toContain("Kanban-managed task session");
 		expect(prompt).toContain("`/tmp/worktrees/task-1/repo`");
-		expect(prompt).toContain("assigned workspace/branch only");
 		expect(prompt).toContain("ask the user to confirm which workspace owns the work");
+	});
+
+	it("allows derived same-repository worktrees created by task tooling without asking", () => {
+		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo");
+		expect(prompt).toContain("derived from this workspace");
+		expect(prompt).toContain("git worktree add");
+		expect(prompt).toContain("git rev-parse --git-common-dir");
+		expect(prompt).toContain("without stopping to ask");
+		expect(prompt).not.toContain("assigned workspace/branch only");
+	});
+
+	it("treats a user-invoked workflow as pre-authorized for the checkouts its procedure operates on", () => {
+		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo");
+		expect(prompt).toContain("Workflows the user explicitly invoked");
+		expect(prompt).toContain("base-branch-sync");
+		expect(prompt).toContain("the invocation itself authorizes");
 	});
 
 	it("does not inject a task workspace guard for home sidebar sessions", () => {

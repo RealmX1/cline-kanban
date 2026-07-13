@@ -3,7 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
-import { agentRendersTranscriptInline, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "../../../src/core/agent-catalog";
+import { KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "../../../src/core/agent-catalog";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
 
@@ -81,22 +81,6 @@ afterEach(() => {
 	});
 });
 
-describe("agentRendersTranscriptInline", () => {
-	// This predicate is the single source of truth coupling two behaviors: codexAdapter forces
-	// --no-alt-screen (transcript rendered into scrollback) and session-manager therefore must NOT
-	// suppress CSI 3 J for it. If a second agent ever becomes inline, add it here AND wire both sites.
-	it("marks only Codex as an inline-transcript agent", () => {
-		expect(agentRendersTranscriptInline("codex")).toBe(true);
-	});
-
-	it("treats every non-Codex agent as alt-screen (not inline)", () => {
-		const nonInlineAgents: RuntimeAgentId[] = ["claude", "gemini", "opencode", "droid", "kiro", "cline", "cursor"];
-		for (const agentId of nonInlineAgents) {
-			expect(agentRendersTranscriptInline(agentId)).toBe(false);
-		}
-	});
-});
-
 describe("cursorAdapter", () => {
 	it("uses the Kanban Cursor default model instead of Cursor Agent's raw fast default", async () => {
 		const launch = await prepareAgentLaunch({
@@ -131,6 +115,65 @@ describe("cursorAdapter", () => {
 		const modelIndex = launch.args.indexOf("--model");
 		expect(modelIndex).toBeGreaterThan(-1);
 		expect(launch.args[modelIndex + 1]).toBe("auto");
+	});
+
+	it("resumes the selected Cursor chat in the task workspace", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-resume-existing-session",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Continue this work",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "cursor",
+				sourceSessionId: "11111111-2222-3333-4444-555555555555",
+				sourceSessionReuseMode: "resume_existing_session",
+				sourceSessionWorkingDirectoryPath: "/tmp/repo",
+			},
+		});
+
+		const resumeIndex = launch.args.indexOf("--resume");
+		expect(resumeIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[resumeIndex + 1]).toBe("11111111-2222-3333-4444-555555555555");
+		expect(launch.args.some((argument) => argument.includes("Continue this work"))).toBe(true);
+	});
+
+	it("prepares a Cursor session from a different checkout after runtime materialization", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-cross-checkout-session",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "Continue this work",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "cursor",
+				sourceSessionId: "11111111-2222-3333-4444-555555555555",
+				sourceSessionReuseMode: "resume_existing_session",
+				sourceSessionWorkingDirectoryPath: "/tmp/source-checkout",
+			},
+		});
+		expect(launch.args).toContain("--resume");
+		expect(launch.args).toContain("11111111-2222-3333-4444-555555555555");
+	});
+
+	it("rejects Cursor fork initialization because the CLI cannot fork chats", async () => {
+		await expect(
+			prepareAgentLaunch({
+				taskId: "task-cursor-fork-existing-session",
+				agentId: "cursor",
+				binary: "cursor-agent",
+				args: [],
+				cwd: "/tmp/repo",
+				prompt: "Continue this work",
+				taskAgentSessionInitialization: {
+					sourceAgentId: "cursor",
+					sourceSessionId: "11111111-2222-3333-4444-555555555555",
+					sourceSessionReuseMode: "fork_existing_session",
+				},
+			}),
+		).rejects.toThrow("Cursor");
 	});
 });
 
@@ -274,10 +317,14 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(developerInstructions[0]).toContain("ask the user to confirm which workspace owns the work");
 	});
 
-	it("launches Codex without alternate screen so terminal scrollback keeps session history", async () => {
+	// 防回灌守卫：codex 默认必须跑原生 alt-screen（原地重绘），绝不能强制注入 --no-alt-screen。
+	// 强制 inline 会让 codex 每次 resize 整屏 ESC[2J ESC[3J + 全量重印，叠加 20k 行 mirror 全量重放，
+	// 复现「从顶滚到底」的历史顽疾（见 6b5c42dd 引入、b296352 修复、后被 main merge 反复回灌）。
+	// 若未来某次 merge 又把强制注入带回来，这条会当场失败。
+	it("launches Codex on its native alt-screen by NOT injecting --no-alt-screen by default", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
-			taskId: "task-codex-inline-history",
+			taskId: "task-codex-default-alt-screen",
 			agentId: "codex",
 			binary: "codex",
 			args: [],
@@ -285,7 +332,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			prompt: "",
 		});
 
-		expect(launch.args).toContain("--no-alt-screen");
+		expect(launch.args).not.toContain("--no-alt-screen");
 	});
 
 	it("launches Claude without alternate screen so terminal scrollback keeps session history", async () => {
@@ -536,10 +583,102 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(promptIndex).toBeGreaterThan(forkIndex);
 		expect(launch.args).not.toContain("resume");
 		expect(launch.args).not.toContain("--last");
-		// Config flags must precede the subcommand.
-		const noAltIndex = launch.args.indexOf("--no-alt-screen");
-		expect(noAltIndex).toBeGreaterThanOrEqual(0);
-		expect(noAltIndex).toBeLessThan(forkIndex);
+		// Config flags (-c ...) must precede the subcommand.
+		const configFlagIndex = launch.args.indexOf("-c");
+		expect(configFlagIndex).toBeGreaterThanOrEqual(0);
+		expect(configFlagIndex).toBeLessThan(forkIndex);
+	});
+
+	it("resumes the selected Codex session without forking it", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-resume-existing-session",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Continue this work",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "codex",
+				sourceSessionId: "11111111-2222-3333-4444-555555555555",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		const resumeIndex = launch.args.indexOf("resume");
+		expect(resumeIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[resumeIndex + 1]).toBe("11111111-2222-3333-4444-555555555555");
+		expect(launch.args).not.toContain("fork");
+		expect(launch.args.indexOf("-C")).toBeLessThan(resumeIndex);
+		expect(launch.args.indexOf("Continue this work")).toBeGreaterThan(resumeIndex);
+	});
+
+	it("prefers an explicitly selected Codex session over forking the latest working-directory session", async () => {
+		setupTempHome();
+		const sourceSessionId = "11111111-2222-3333-4444-555555555555";
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-explicit-session-precedence",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Continue this work",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "codex",
+				sourceSessionId,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+			forkLatestWorkingDirectorySession: true,
+		});
+
+		const resumeIndex = launch.args.indexOf("resume");
+		expect(resumeIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[resumeIndex + 1]).toBe(sourceSessionId);
+		expect(launch.args).not.toContain("fork");
+		expect(launch.args).not.toContain("--last");
+	});
+
+	it("forks the selected Claude session with a new session id", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-fork-existing-session",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Continue this work",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "claude",
+				sourceSessionId: "11111111-2222-3333-4444-555555555555",
+				sourceSessionReuseMode: "fork_existing_session",
+				sourceSessionWorkingDirectoryPath: "/tmp",
+			},
+		});
+
+		const resumeIndex = launch.args.indexOf("--resume");
+		expect(resumeIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[resumeIndex + 1]).toBe("11111111-2222-3333-4444-555555555555");
+		expect(launch.args).toContain("--fork-session");
+		expect(launch.args).toContain("Continue this work");
+	});
+
+	it("prepares manually entered Claude session initialization without a source checkout", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-unverified-session",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Continue this work",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "claude",
+				sourceSessionId: "11111111-2222-3333-4444-555555555555",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(launch.args).toContain("--resume");
+		expect(launch.args).toContain("11111111-2222-3333-4444-555555555555");
 	});
 
 	it("forks the latest Codex session in read-only mode for a By the way session", async () => {

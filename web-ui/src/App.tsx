@@ -24,8 +24,7 @@ import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
 import { TaskBoardSearchToolbar } from "@/components/task-board-search-toolbar";
-import { TaskCreateDialog } from "@/components/task-create-dialog";
-import { TaskInlineCreateCard } from "@/components/task-inline-create-card";
+import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TopBar } from "@/components/top-bar";
 import { Button } from "@/components/ui/button";
 import {
@@ -489,6 +488,8 @@ export default function App(): ReactElement {
 		setNewTaskClineSettings,
 		newTaskTerminalAgentModelOverrideSettings,
 		setNewTaskTerminalAgentModelOverrideSettings,
+		newTaskAgentSessionInitialization,
+		setNewTaskAgentSessionInitialization,
 		editingTaskId,
 		editTaskPrompt,
 		setEditTaskPrompt,
@@ -503,12 +504,16 @@ export default function App(): ReactElement {
 		isEditTaskStartInPlanModeDisabled,
 		editTaskBranchRef,
 		setEditTaskBranchRef,
+		editTaskWorktreeMode,
+		setEditTaskWorktreeMode,
 		editTaskAgentId,
 		setEditTaskAgentId,
 		editTaskClineSettings,
 		setEditTaskClineSettings,
 		editTaskTerminalAgentModelOverrideSettings,
 		setEditTaskTerminalAgentModelOverrideSettings,
+		editTaskAgentSessionInitialization,
+		setEditTaskAgentSessionInitialization,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
@@ -874,7 +879,6 @@ export default function App(): ReactElement {
 	const detailSession = selectedCard
 		? (sessions[selectedCard.card.id] ?? createIdleTaskSession(selectedCard.card.id))
 		: null;
-	const isDetailViewMounted = Boolean(selectedCard && detailSession);
 	const detailTerminalSummary = detailTerminalTaskId ? (sessions[detailTerminalTaskId] ?? null) : null;
 	const detailTerminalSubtitle = useMemo(() => {
 		if (!selectedCard) {
@@ -994,47 +998,15 @@ export default function App(): ReactElement {
 	const handleCreateDialogOpenChange = useCallback(
 		(open: boolean) => {
 			if (!open) {
-				handleCancelCreateTask();
+				if (editingTaskId) {
+					handleCancelEditTask();
+				} else {
+					handleCancelCreateTask();
+				}
 			}
 		},
-		[handleCancelCreateTask],
+		[editingTaskId, handleCancelCreateTask, handleCancelEditTask],
 	);
-
-	const inlineTaskEditor = editingTaskId ? (
-		<TaskInlineCreateCard
-			prompt={editTaskPrompt}
-			onPromptChange={setEditTaskPrompt}
-			images={editTaskImages}
-			onImagesChange={setEditTaskImages}
-			onCreate={handleSaveEditedTask}
-			onCreateAndStart={handleSaveAndStartEditedTask}
-			onCancel={handleCancelEditTask}
-			startInPlanMode={editTaskStartInPlanMode}
-			onStartInPlanModeChange={setEditTaskStartInPlanMode}
-			startInPlanModeDisabled={isEditTaskStartInPlanModeDisabled}
-			autoReviewEnabled={editTaskAutoReviewEnabled}
-			onAutoReviewEnabledChange={setEditTaskAutoReviewEnabled}
-			autoReviewMode={editTaskAutoReviewMode}
-			onAutoReviewModeChange={setEditTaskAutoReviewMode}
-			workspaceId={currentProjectId}
-			branchRef={editTaskBranchRef}
-			branchOptions={editTaskBranchOptions}
-			onBranchRefChange={setEditTaskBranchRef}
-			agentId={editTaskAgentId}
-			onAgentIdChange={setEditTaskAgentId}
-			clineSettings={editTaskClineSettings}
-			onClineSettingsChange={setEditTaskClineSettings}
-			terminalAgentModelOverrideSettings={editTaskTerminalAgentModelOverrideSettings}
-			onTerminalAgentModelOverrideSettingsChange={setEditTaskTerminalAgentModelOverrideSettings}
-			agents={runtimeProjectConfig?.agents ?? []}
-			defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-			defaultProviderId={defaultTaskClineProviderId}
-			defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
-			defaultReasoningEffort={runtimeProjectConfig?.clineProviderSettings?.reasoningEffort ?? null}
-			mode="edit"
-			idPrefix={`inline-edit-task-${editingTaskId}`}
-		/>
-	) : undefined;
 
 	if (isRuntimeDisconnected) {
 		return <RuntimeDisconnectedFallback />;
@@ -1220,8 +1192,6 @@ export default function App(): ReactElement {
 													onStartTask={handleStartTaskFromBoard}
 													onStartAllTasks={handleStartAllBacklogTasksFromBoard}
 													onClearTrash={handleOpenClearTrash}
-													editingTaskId={isDetailViewMounted ? null : editingTaskId}
-													inlineTaskEditor={isDetailViewMounted ? undefined : inlineTaskEditor}
 													onEditTask={handleOpenEditTask}
 													onSaveTaskTitle={handleSaveTaskTitle}
 													onCommitTask={handleCommitTask}
@@ -1341,8 +1311,6 @@ export default function App(): ReactElement {
 									onStartTask={handleStartTaskFromBoard}
 									onStartAllTasks={handleStartAllBacklogTasksFromBoard}
 									onClearTrash={handleOpenClearTrash}
-									editingTaskId={editingTaskId}
-									inlineTaskEditor={inlineTaskEditor}
 									onEditTask={(task) => {
 										handleOpenEditTask(task, { preserveDetailSelection: true });
 									}}
@@ -1429,37 +1397,59 @@ export default function App(): ReactElement {
 					onShowStartupOnboardingDialog={handleShowStartupOnboardingDialog}
 					onResetAllState={handleResetAllState}
 				/>
-				<TaskCreateDialog
-					open={isInlineTaskCreateOpen}
+				<TaskEditorDialog
+					open={isInlineTaskCreateOpen || editingTaskId !== null}
 					onOpenChange={handleCreateDialogOpenChange}
-					prompt={newTaskPrompt}
-					onPromptChange={setNewTaskPrompt}
-					images={newTaskImages}
-					onImagesChange={setNewTaskImages}
-					onCreate={handleCreateTask}
-					onCreateAndStart={handleCreateAndStartTask}
-					onCreateStartAndOpen={handleCreateStartAndOpenTask}
+					taskEditorMode={editingTaskId ? "edit" : "create"}
+					prompt={editingTaskId ? editTaskPrompt : newTaskPrompt}
+					onPromptChange={editingTaskId ? setEditTaskPrompt : setNewTaskPrompt}
+					images={editingTaskId ? editTaskImages : newTaskImages}
+					onImagesChange={editingTaskId ? setEditTaskImages : setNewTaskImages}
+					onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
+					onCreateAndStart={
+						editingTaskId
+							? () => {
+									handleSaveAndStartEditedTask();
+									return editingTaskId;
+								}
+							: handleCreateAndStartTask
+					}
+					onCreateStartAndOpen={editingTaskId ? undefined : handleCreateStartAndOpenTask}
 					onCreateMultiple={handleCreateTasks}
 					onCreateAndStartMultiple={handleCreateAndStartTasks}
-					startInPlanMode={newTaskStartInPlanMode}
-					onStartInPlanModeChange={setNewTaskStartInPlanMode}
-					startInPlanModeDisabled={isNewTaskStartInPlanModeDisabled}
-					autoReviewEnabled={newTaskAutoReviewEnabled}
-					onAutoReviewEnabledChange={setNewTaskAutoReviewEnabled}
-					autoReviewMode={newTaskAutoReviewMode}
-					onAutoReviewModeChange={setNewTaskAutoReviewMode}
+					startInPlanMode={editingTaskId ? editTaskStartInPlanMode : newTaskStartInPlanMode}
+					onStartInPlanModeChange={editingTaskId ? setEditTaskStartInPlanMode : setNewTaskStartInPlanMode}
+					startInPlanModeDisabled={
+						editingTaskId ? isEditTaskStartInPlanModeDisabled : isNewTaskStartInPlanModeDisabled
+					}
+					autoReviewEnabled={editingTaskId ? editTaskAutoReviewEnabled : newTaskAutoReviewEnabled}
+					onAutoReviewEnabledChange={editingTaskId ? setEditTaskAutoReviewEnabled : setNewTaskAutoReviewEnabled}
+					autoReviewMode={editingTaskId ? editTaskAutoReviewMode : newTaskAutoReviewMode}
+					onAutoReviewModeChange={editingTaskId ? setEditTaskAutoReviewMode : setNewTaskAutoReviewMode}
 					workspaceId={currentProjectId}
-					branchRef={newTaskBranchRef}
-					branchOptions={createTaskBranchOptions}
-					onBranchRefChange={setNewTaskBranchRef}
-					worktreeMode={newTaskWorktreeMode}
-					onWorktreeModeChange={setNewTaskWorktreeMode}
-					agentId={newTaskAgentId}
-					onAgentIdChange={setNewTaskAgentId}
-					clineSettings={newTaskClineSettings}
-					onClineSettingsChange={setNewTaskClineSettings}
-					terminalAgentModelOverrideSettings={newTaskTerminalAgentModelOverrideSettings}
-					onTerminalAgentModelOverrideSettingsChange={setNewTaskTerminalAgentModelOverrideSettings}
+					branchRef={editingTaskId ? editTaskBranchRef : newTaskBranchRef}
+					branchOptions={editingTaskId ? editTaskBranchOptions : createTaskBranchOptions}
+					onBranchRefChange={editingTaskId ? setEditTaskBranchRef : setNewTaskBranchRef}
+					worktreeMode={editingTaskId ? editTaskWorktreeMode : newTaskWorktreeMode}
+					onWorktreeModeChange={editingTaskId ? setEditTaskWorktreeMode : setNewTaskWorktreeMode}
+					agentId={editingTaskId ? editTaskAgentId : newTaskAgentId}
+					onAgentIdChange={editingTaskId ? setEditTaskAgentId : setNewTaskAgentId}
+					clineSettings={editingTaskId ? editTaskClineSettings : newTaskClineSettings}
+					onClineSettingsChange={editingTaskId ? setEditTaskClineSettings : setNewTaskClineSettings}
+					terminalAgentModelOverrideSettings={
+						editingTaskId ? editTaskTerminalAgentModelOverrideSettings : newTaskTerminalAgentModelOverrideSettings
+					}
+					onTerminalAgentModelOverrideSettingsChange={
+						editingTaskId
+							? setEditTaskTerminalAgentModelOverrideSettings
+							: setNewTaskTerminalAgentModelOverrideSettings
+					}
+					taskAgentSessionInitialization={
+						editingTaskId ? editTaskAgentSessionInitialization : newTaskAgentSessionInitialization
+					}
+					onTaskAgentSessionInitializationChange={
+						editingTaskId ? setEditTaskAgentSessionInitialization : setNewTaskAgentSessionInitialization
+					}
 					agents={runtimeProjectConfig?.agents ?? []}
 					defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 					defaultProviderId={defaultTaskClineProviderId}

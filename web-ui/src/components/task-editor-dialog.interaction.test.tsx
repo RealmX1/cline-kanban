@@ -3,14 +3,15 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { TaskCreateDialog } from "@/components/task-create-dialog";
+import { TaskEditorDialog } from "@/components/task-editor-dialog";
 
-type Props = ComponentProps<typeof TaskCreateDialog>;
+type Props = ComponentProps<typeof TaskEditorDialog>;
 
 function makeProps(overrides: Partial<Props> = {}): Props {
 	return {
 		open: true,
 		onOpenChange: vi.fn(),
+		taskEditorMode: "create",
 		prompt: "",
 		onPromptChange: vi.fn(),
 		images: [],
@@ -45,7 +46,7 @@ function findCloseButton(): HTMLButtonElement | null {
 	return document.body.querySelector<HTMLButtonElement>('[aria-label="Close"]');
 }
 
-describe("TaskCreateDialog close guard", () => {
+describe("TaskEditorDialog close guard", () => {
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
@@ -98,7 +99,7 @@ describe("TaskCreateDialog close guard", () => {
 
 	async function render(props: Props): Promise<void> {
 		await act(async () => {
-			root.render(<TaskCreateDialog {...props} />);
+			root.render(<TaskEditorDialog {...props} />);
 		});
 	}
 
@@ -151,6 +152,20 @@ describe("TaskCreateDialog close guard", () => {
 		});
 
 		expect(onOpenChange).not.toHaveBeenCalled();
+		expect(findButtonByText("Discard")).toBeUndefined();
+	});
+
+	it("does NOT guard in edit mode: closes directly even with edits (edit close saves a draft)", async () => {
+		const onOpenChange = vi.fn();
+		// edit 模式：即便表单有改动，关闭也不弹「放弃」确认——直通 base 的关闭语义。
+		await render(makeProps({ onOpenChange, taskEditorMode: "edit", prompt: "" }));
+		await render(makeProps({ onOpenChange, taskEditorMode: "edit", prompt: "Edited body" }));
+
+		await act(async () => {
+			findCloseButton()?.click();
+		});
+
+		expect(onOpenChange).toHaveBeenCalledWith(false);
 		expect(findButtonByText("Discard")).toBeUndefined();
 	});
 });
