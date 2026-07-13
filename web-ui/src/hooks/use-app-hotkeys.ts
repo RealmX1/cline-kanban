@@ -1,7 +1,6 @@
 import { useHotkeys } from "react-hotkeys-hook";
 
 import type { CardSelection } from "@/types";
-import { CREATE_TASK_KEYBOARD_SHORTCUT_HOTKEY } from "@/utils/create-task-keyboard-shortcut";
 
 function isEventInsideDialog(target: EventTarget | null): boolean {
 	return target instanceof Element && target.closest("[role='dialog']") !== null;
@@ -96,7 +95,7 @@ export function useAppHotkeys({
 	);
 
 	useHotkeys(
-		CREATE_TASK_KEYBOARD_SHORTCUT_HOTKEY,
+		"c",
 		() => {
 			if (!canUseCreateTaskShortcut) {
 				return;

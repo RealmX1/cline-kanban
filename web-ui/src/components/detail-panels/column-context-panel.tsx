@@ -13,7 +13,6 @@ import { type SelectedCardPinState, useSelectedCardPinState } from "@/hooks/use-
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { findCardColumnId, isCardDropDisabled } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumn, BoardColumnId, CardSelection } from "@/types";
-import { CREATE_TASK_KEYBOARD_SHORTCUT_INLINE_LABEL } from "@/utils/create-task-keyboard-shortcut";
 
 // 详情页左侧所有 section 共用一个滚动容器；模块级常量保持引用稳定。
 const getDetailTaskListScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
@@ -461,7 +460,7 @@ export function ColumnContextPanel({
 							<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
 								<span>Create task</span>
 								<span aria-hidden className="text-text-secondary">
-									({CREATE_TASK_KEYBOARD_SHORTCUT_INLINE_LABEL})
+									(c)
 								</span>
 							</span>
 						</Button>

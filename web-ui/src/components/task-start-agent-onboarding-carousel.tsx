@@ -13,7 +13,6 @@ import type {
 	RuntimeClineProviderSettings,
 	RuntimeConfigResponse,
 } from "@/runtime/types";
-import { CREATE_TASK_KEYBOARD_SHORTCUT_INLINE_LABEL } from "@/utils/create-task-keyboard-shortcut";
 
 interface BaseOnboardingSlide {
 	kind: "media" | "agent-selection";
@@ -50,7 +49,8 @@ export const TASK_START_ONBOARDING_SLIDES: OnboardingSlide[] = [
 	{
 		kind: "media",
 		title: "Create tasks with Kanban",
-		description: `Press ${CREATE_TASK_KEYBOARD_SHORTCUT_INLINE_LABEL} to create a task yourself, or talk to the sidebar Kanban agent to plan work for you. It can pull projects and issues from Linear and GitHub, then turn them into tasks your coding agent can pick up.`,
+		description:
+			"Press c to create a task yourself, or talk to the sidebar Kanban agent to plan work for you. It can pull projects and issues from Linear and GitHub, then turn them into tasks your coding agent can pick up.",
 		assetVideoUrl: "https://github.com/user-attachments/assets/4408930c-33cd-4af9-a343-e82b099eab8c",
 		assetAlt: "Talking to the sidebar Kanban agent to create tasks from Linear and GitHub",
 		assetWidthPx: 1908,
