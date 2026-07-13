@@ -318,10 +318,15 @@ export function resolveHomeAgentAppendSystemPrompt(
 export function renderTaskSessionWorktreeGuardPrompt(cwd: string): string {
 	return `# Kanban Task Workspace
 
-This is a Kanban-managed task session. Treat the current working directory as the assigned task workspace:
+This is a Kanban-managed task session. Your assigned task workspace is the current working directory:
 \`${cwd}\`
 
-Do all code changes, git operations, and verification for this task inside this assigned workspace/branch only. If the user, a plan, handoff, or referenced document asks you to edit, commit, or run implementation in another checkout or repository path, stop and ask the user to confirm which workspace owns the work before making changes.`;
+Anchor the task's source changes and commits here by default. No confirmation is needed for:
+
+- Worktrees derived from this workspace by this task's tooling (for example an RVF fix-attempt worktree created via \`git worktree add\`; they share this repository's \`git rev-parse --git-common-dir\`). Read, edit, run, and commit in them without stopping to ask.
+- Workflows the user explicitly invoked (for example base-branch-sync): the invocation itself authorizes every checkout or worktree that workflow's own procedure operates on.
+
+Only when a plan, handoff, or referenced document — not the user — directs edits into an unrelated repository or checkout should you stop and ask the user to confirm which workspace owns the work before making changes.`;
 }
 
 export function resolveTaskSessionAppendSystemPrompt(taskId: string, cwd: string): string | null {
