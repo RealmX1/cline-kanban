@@ -1,27 +1,25 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { ChevronDown, ChevronUp, Ellipsis, ExternalLink, Info, Lightbulb, Plus, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, Ellipsis, ExternalLink, Info, Lightbulb, Plus, X } from "lucide-react";
 import { type MouseEvent as ReactMouseEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { canShowFeaturebaseFeedbackButton } from "@/components/featurebase-feedback-button";
+import { PermanentProjectDataDeletionDialog } from "@/components/permanent-project-data-deletion-dialog";
 import { Button } from "@/components/ui/button";
 import { ClineIcon } from "@/components/ui/cline-icon";
 import { cn } from "@/components/ui/cn";
-import {
-	AlertDialog,
-	AlertDialogAction,
-	AlertDialogBody,
-	AlertDialogCancel,
-	AlertDialogDescription,
-	AlertDialogFooter,
-	AlertDialogHeader,
-	AlertDialogTitle,
-} from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/kbd";
 import { Spinner } from "@/components/ui/spinner";
 import { KANBAN_FORK_GITHUB_ISSUES_URL } from "@/config/issue-reporting-urls";
 import type { FeaturebaseFeedbackState } from "@/hooks/use-featurebase-feedback-widget";
 import { useIsMobile } from "@/hooks/use-is-mobile";
-import type { RuntimeAgentId, RuntimeClineProviderSettings, RuntimeProjectSummary } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeClineProviderSettings,
+	RuntimeProjectPermanentDeletionPreview,
+	RuntimeProjectPermanentDeletionRequest,
+	RuntimeProjectPermanentDeletionResult,
+	RuntimeProjectSummary,
+} from "@/runtime/types";
 import {
 	LocalStorageKey,
 	readLocalStorageItem,
@@ -50,7 +48,7 @@ export function ProjectNavigationPanel({
 	projects,
 	isLoadingProjects = false,
 	currentProjectId,
-	removingProjectId,
+	permanentlyDeletingProjectId,
 	activeSection,
 	onActiveSectionChange,
 	canShowAgentSection,
@@ -59,7 +57,8 @@ export function ProjectNavigationPanel({
 	clineProviderSettings,
 	featurebaseFeedbackState,
 	onSelectProject,
-	onRemoveProject,
+	onGetPermanentDeletionPreview,
+	onPermanentlyDeleteProjectData,
 	onAddProject,
 	sidebarWidth,
 	setExpandedSidebarWidth,
@@ -69,7 +68,7 @@ export function ProjectNavigationPanel({
 	projects: RuntimeProjectSummary[];
 	isLoadingProjects?: boolean;
 	currentProjectId: string | null;
-	removingProjectId: string | null;
+	permanentlyDeletingProjectId: string | null;
 	activeSection: "projects" | "agent";
 	onActiveSectionChange: (section: "projects" | "agent") => void;
 	canShowAgentSection: boolean;
@@ -78,7 +77,10 @@ export function ProjectNavigationPanel({
 	clineProviderSettings?: RuntimeClineProviderSettings | null;
 	featurebaseFeedbackState?: FeaturebaseFeedbackState;
 	onSelectProject: (projectId: string) => void;
-	onRemoveProject: (projectId: string) => Promise<boolean>;
+	onGetPermanentDeletionPreview: (projectId: string) => Promise<RuntimeProjectPermanentDeletionPreview | null>;
+	onPermanentlyDeleteProjectData: (
+		input: RuntimeProjectPermanentDeletionRequest,
+	) => Promise<RuntimeProjectPermanentDeletionResult | null>;
 	onAddProject: () => void;
 	sidebarWidth: number;
 	setExpandedSidebarWidth: (width: number) => void;
@@ -92,15 +94,11 @@ export function ProjectNavigationPanel({
 		featurebaseFeedbackState,
 	});
 
-	const [pendingProjectRemoval, setPendingProjectRemoval] = useState<RuntimeProjectSummary | null>(null);
-	const isProjectRemovalPending = pendingProjectRemoval !== null && removingProjectId === pendingProjectRemoval.id;
-	const pendingProjectTaskCount = pendingProjectRemoval
-		? pendingProjectRemoval.taskCounts.backlog +
-			pendingProjectRemoval.taskCounts.in_progress +
-			pendingProjectRemoval.taskCounts.review +
-			pendingProjectRemoval.taskCounts.validation +
-			pendingProjectRemoval.taskCounts.trash
-		: 0;
+	const [pendingPermanentProjectDataDeletion, setPendingPermanentProjectDataDeletion] =
+		useState<RuntimeProjectSummary | null>(null);
+	const isPermanentProjectDataDeletionPending =
+		pendingPermanentProjectDataDeletion !== null &&
+		permanentlyDeletingProjectId === pendingPermanentProjectDataDeletion.id;
 
 	const isMobile = useIsMobile();
 	const [isMobileClosing, setIsMobileClosing] = useState(false);
@@ -231,7 +229,9 @@ export function ProjectNavigationPanel({
 						<button
 							key={project.id}
 							type="button"
-							title={project.name}
+							title={
+								project.availability.status === "unavailable" ? `${project.name} — unavailable` : project.name
+							}
 							onClick={() => {
 								if (isMobile) {
 									setCollapsed(false);
@@ -239,7 +239,7 @@ export function ProjectNavigationPanel({
 								onSelectProject(project.id);
 							}}
 							className={cn(
-								"rounded-md text-xs font-semibold shrink-0 border-0 cursor-pointer flex items-center justify-center",
+								"relative rounded-md text-xs font-semibold shrink-0 border-0 cursor-pointer flex items-center justify-center",
 								isMobile ? "w-11 h-11" : "w-8 h-8",
 								isCurrent
 									? "bg-accent text-accent-fg"
@@ -247,6 +247,13 @@ export function ProjectNavigationPanel({
 							)}
 						>
 							{letter}
+							{project.availability.status === "unavailable" ? (
+								<AlertTriangle
+									size={10}
+									aria-label="Project unavailable"
+									className="absolute right-0 top-0 text-status-orange"
+								/>
+							) : null}
 						</button>
 					);
 				})}
@@ -254,7 +261,7 @@ export function ProjectNavigationPanel({
 					type="button"
 					title="Add project"
 					onClick={onAddProject}
-					disabled={removingProjectId !== null}
+					disabled={permanentlyDeletingProjectId !== null}
 					className={cn(
 						"rounded-md text-xs shrink-0 border-0 cursor-pointer flex items-center justify-center bg-transparent text-text-tertiary hover:text-text-secondary hover:bg-surface-2 mt-auto",
 						isMobile ? "w-11 h-11" : "w-8 h-8",
@@ -366,19 +373,19 @@ export function ProjectNavigationPanel({
 								key={project.id}
 								project={project}
 								isCurrent={currentProjectId === project.id}
-								removingProjectId={removingProjectId}
+								permanentlyDeletingProjectId={permanentlyDeletingProjectId}
 								onSelect={(projectId) => {
 									onSelectProject(projectId);
 									if (isMobile) {
 										setCollapsed(true);
 									}
 								}}
-								onRemove={(projectId) => {
+								onRequestPermanentDataDeletion={(projectId) => {
 									const found = sortedProjects.find((item) => item.id === projectId);
 									if (!found) {
 										return;
 									}
-									setPendingProjectRemoval(found);
+									setPendingPermanentProjectDataDeletion(found);
 								}}
 							/>
 						))}
@@ -389,7 +396,7 @@ export function ProjectNavigationPanel({
 								className="kb-project-row flex cursor-pointer items-center gap-1.5 rounded-md text-text-secondary hover:text-text-primary"
 								style={{ padding: "6px 8px" }}
 								onClick={onAddProject}
-								disabled={removingProjectId !== null}
+								disabled={permanentlyDeletingProjectId !== null}
 							>
 								<Plus size={14} className="shrink-0" />
 								<span className="text-sm">Add Project</span>
@@ -414,69 +421,17 @@ export function ProjectNavigationPanel({
 					</div>
 				</div>
 			)}
-			<AlertDialog
-				open={pendingProjectRemoval !== null}
-				onOpenChange={(open) => {
-					if (!open && !isProjectRemovalPending) {
-						setPendingProjectRemoval(null);
+			<PermanentProjectDataDeletionDialog
+				project={pendingPermanentProjectDataDeletion}
+				isPermanentDeletionPending={isPermanentProjectDataDeletionPending}
+				onGetPermanentDeletionPreview={onGetPermanentDeletionPreview}
+				onPermanentlyDeleteProjectData={onPermanentlyDeleteProjectData}
+				onClose={() => {
+					if (!isPermanentProjectDataDeletionPending) {
+						setPendingPermanentProjectDataDeletion(null);
 					}
 				}}
-			>
-				<AlertDialogHeader>
-					<AlertDialogTitle>Remove Project</AlertDialogTitle>
-				</AlertDialogHeader>
-				<AlertDialogBody>
-					<AlertDialogDescription asChild>
-						<div className="flex flex-col gap-3">
-							<p>{pendingProjectRemoval ? pendingProjectRemoval.name : "This project"}</p>
-							<p className="text-text-primary">
-								This will delete all project tasks ({pendingProjectTaskCount}), remove task
-								workspaces/worktrees, and stop any running processes for this project.
-							</p>
-							<p className="text-text-primary">This action cannot be undone.</p>
-						</div>
-					</AlertDialogDescription>
-				</AlertDialogBody>
-				<AlertDialogFooter>
-					<AlertDialogCancel asChild>
-						<Button
-							variant="default"
-							disabled={isProjectRemovalPending}
-							onClick={() => {
-								if (!isProjectRemovalPending) {
-									setPendingProjectRemoval(null);
-								}
-							}}
-						>
-							Cancel
-						</Button>
-					</AlertDialogCancel>
-					<AlertDialogAction asChild>
-						<Button
-							variant="danger"
-							disabled={isProjectRemovalPending}
-							onClick={async () => {
-								if (!pendingProjectRemoval) {
-									return;
-								}
-								const removed = await onRemoveProject(pendingProjectRemoval.id);
-								if (removed) {
-									setPendingProjectRemoval(null);
-								}
-							}}
-						>
-							{isProjectRemovalPending ? (
-								<>
-									<Spinner size={14} />
-									Removing...
-								</>
-							) : (
-								"Remove Project"
-							)}
-						</Button>
-					</AlertDialogAction>
-				</AlertDialogFooter>
-			</AlertDialog>
+			/>
 		</aside>
 	);
 }
@@ -693,19 +648,20 @@ function ProjectRowSkeleton(): React.ReactElement {
 function ProjectRow({
 	project,
 	isCurrent,
-	removingProjectId,
+	permanentlyDeletingProjectId,
 	onSelect,
-	onRemove,
+	onRequestPermanentDataDeletion,
 }: {
 	project: RuntimeProjectSummary;
 	isCurrent: boolean;
-	removingProjectId: string | null;
+	permanentlyDeletingProjectId: string | null;
 	onSelect: (id: string) => void;
-	onRemove: (id: string) => void;
+	onRequestPermanentDataDeletion: (id: string) => void;
 }): React.ReactElement {
 	const displayPath = formatPathForDisplay(project.path);
-	const isRemovingProject = removingProjectId === project.id;
-	const hasAnyProjectRemoval = removingProjectId !== null;
+	const isPermanentlyDeletingProjectData = permanentlyDeletingProjectId === project.id;
+	const hasAnyPermanentProjectDataDeletion = permanentlyDeletingProjectId !== null;
+	const isProjectUnavailable = project.availability.status === "unavailable";
 	const [isMenuOpen, setIsMenuOpen] = useState(false);
 	const taskCountBadges: TaskCountBadge[] = [
 		{
@@ -765,13 +721,28 @@ function ProjectRow({
 			}}
 		>
 			<div className="flex-1 min-w-0">
-				<div
-					className={cn(
-						"font-medium whitespace-nowrap overflow-hidden text-ellipsis text-sm",
-						isCurrent ? "text-accent-fg" : "text-text-primary",
-					)}
-				>
-					{project.name}
+				<div className="flex min-w-0 items-center gap-1.5">
+					<div
+						className={cn(
+							"font-medium whitespace-nowrap overflow-hidden text-ellipsis text-sm",
+							isCurrent ? "text-accent-fg" : "text-text-primary",
+						)}
+					>
+						{project.name}
+					</div>
+					{isProjectUnavailable ? (
+						<span
+							role="status"
+							aria-label="Project unavailable"
+							className={cn(
+								"inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-[10px] font-medium",
+								isCurrent ? "bg-accent-fg/20 text-accent-fg" : "bg-status-orange/20 text-status-orange",
+							)}
+						>
+							<AlertTriangle size={10} />
+							Unavailable
+						</span>
+					) : null}
 				</div>
 				<div
 					className={cn(
@@ -806,8 +777,8 @@ function ProjectRow({
 						<Button
 							variant="ghost"
 							size="sm"
-							icon={isRemovingProject ? <Spinner size={12} /> : <Ellipsis size={14} />}
-							disabled={hasAnyProjectRemoval && !isRemovingProject}
+							icon={isPermanentlyDeletingProjectData ? <Spinner size={12} /> : <Ellipsis size={14} />}
+							disabled={hasAnyPermanentProjectDataDeletion && !isPermanentlyDeletingProjectData}
 							className={
 								isCurrent
 									? "text-accent-fg hover:bg-accent-fg/20 hover:text-accent-fg active:bg-accent-fg/30"
@@ -829,9 +800,9 @@ function ProjectRow({
 						>
 							<DropdownMenu.Item
 								className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] text-status-red cursor-pointer outline-none data-[highlighted]:bg-surface-3"
-								onSelect={() => onRemove(project.id)}
+								onSelect={() => onRequestPermanentDataDeletion(project.id)}
 							>
-								Delete
+								Permanently Delete Project Data
 							</DropdownMenu.Item>
 						</DropdownMenu.Content>
 					</DropdownMenu.Portal>

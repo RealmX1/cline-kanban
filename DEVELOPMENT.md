@@ -48,13 +48,7 @@ Use `http://127.0.0.1:4173` while developing UI so changes hot reload.
 
 Use `npm run dev:full` when you are actively developing Kanban and want fast iteration. It runs the source checkout with `tsx watch` plus the Vite web UI dev server, so runtime changes reload and web UI changes get HMR.
 
-By default, `dev:full` now starts Kanban with `--skip-shutdown-cleanup` so stopping a debug/dev instance does not move cards to Trash or delete task worktrees from your active boards.
-
-To opt back into shutdown cleanup while using `dev:full`, run:
-
-```bash
-npm run dev:full -- --with-shutdown-cleanup
-```
+Shutdown is non-destructive by default: stopping a debug/dev instance does not move cards or delete task worktrees.
 
 If `node_modules` has not been installed in this worktree, `dev:full` auto-runs `npm ci` before launch.
 
@@ -66,10 +60,6 @@ The repo includes `.vscode/launch.json` with two configurations:
 
 - `Dev (Full Stack)`: Launches the same workflow as `npm run dev:full`, starting both the runtime and Vite in one terminal.
 - `Run Tests`: Runs `vitest run` with the debugger so you can set breakpoints in tests.
-
-Shutdown cleanup flags:
-
-- `--skip-shutdown-cleanup`: do not move sessions to trash or delete task worktrees on shutdown
 
 ## Build and run packaged CLI
 
@@ -98,7 +88,7 @@ When launching a reusable local Kanban server for automation or RVF, run it in t
 
 ```bash
 tmux new-session -d -s cline-kanban-3484 -c "$PWD" \
-  'exec kanban --no-open --skip-shutdown-cleanup --port 3484'
+  'exec kanban --no-open --port 3484'
 ```
 
 RVF uses the tmux session name, not the server process cwd, to decide whether an existing listener is a Cline Kanban runtime it may reuse. A listener in an unrelated tmux session, a legacy `vibe-kanban` session, or no tmux session should be treated as foreign even if the command line contains `kanban`.

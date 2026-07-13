@@ -38,6 +38,7 @@ const PROJECTS: RuntimeProjectSummary[] = [
 			validation: 0,
 			trash: 0,
 		},
+		availability: { status: "available" },
 		inProgressTaskDetails: [],
 	},
 ];
@@ -134,7 +135,7 @@ describe("ProjectNavigationPanel width persistence", () => {
 				<PanelWithLayout
 					projects={PROJECTS}
 					currentProjectId="project-1"
-					removingProjectId={null}
+					permanentlyDeletingProjectId={null}
 					activeSection="projects"
 					onActiveSectionChange={() => {}}
 					canShowAgentSection
@@ -142,7 +143,12 @@ describe("ProjectNavigationPanel width persistence", () => {
 					clineProviderSettings={null}
 					featurebaseFeedbackState={undefined}
 					onSelectProject={() => {}}
-					onRemoveProject={async () => true}
+					onGetPermanentDeletionPreview={async () => {
+						throw new Error("Permanent deletion preview was not expected in this test.");
+					}}
+					onPermanentlyDeleteProjectData={async () => {
+						throw new Error("Permanent project data deletion was not expected in this test.");
+					}}
 					onAddProject={() => {}}
 					{...overrides}
 				/>,
@@ -196,6 +202,19 @@ describe("ProjectNavigationPanel width persistence", () => {
 		renderPanel();
 		expect(container.textContent).toContain("Kanban is in beta. Help us improve by sharing your experience.");
 		expect(container.textContent).toContain("Report issue");
+	});
+
+	it("shows a persistent warning on an unavailable project row", () => {
+		renderPanel({
+			projects: [
+				{
+					...PROJECTS[0]!,
+					availability: { status: "unavailable", reason: "project_path_missing" },
+				},
+			],
+		});
+		expect(container.textContent).toContain("Unavailable");
+		expect(container.querySelector('[aria-label="Project unavailable"]')).not.toBeNull();
 	});
 
 	it("shows send feedback instead of report issue when Cline OAuth is available", () => {

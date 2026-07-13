@@ -1180,6 +1180,48 @@ describe("InMemoryClineTaskSessionService", () => {
 		expect(stopped?.reviewReason).toBe("interrupted");
 	});
 
+	it("propagates safe-shutdown stop failures without projecting a false stopped state", async () => {
+		const { service, runtime } = createTrackedService();
+		await service.startTaskSession({
+			taskId: "task-1",
+			cwd: "/tmp/worktree",
+			prompt: "Initial prompt",
+		});
+		runtime.stopTaskSessionMock.mockRejectedValueOnce(new Error("SDK stop failed"));
+
+		await expect(service.stopTaskSessionForSafeShutdown("task-1")).rejects.toThrow("SDK stop failed");
+		expect(service.getSummary("task-1")?.state).toBe("running");
+	});
+
+	it("preserves a live user-turn kind while safely projecting it to exited", async () => {
+		const { service, runtime } = createTrackedService();
+		await service.startTaskSession({
+			taskId: "task-1",
+			cwd: "/tmp/worktree",
+			prompt: "Initial prompt",
+		});
+		const sessionId = await waitForTaskSessionId(runtime, "task-1");
+		runtime.emitAgentEvent(sessionId, {
+			type: "content_start",
+			contentType: "tool",
+			toolCallId: "tool-1",
+			toolName: "ask_followup_question",
+			input: { question: "Need approval" },
+		});
+		expect(service.getSummary("task-1")?.userTurnKind).toBe("question");
+
+		const stopped = await service.stopTaskSessionForSafeShutdown("task-1");
+
+		expect(stopped).toEqual(
+			expect.objectContaining({
+				state: "awaiting_review",
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "question",
+			}),
+		);
+	});
+
 	it("rebinds persisted sessions before stopping when no in-memory entry exists", async () => {
 		const { service, runtime } = createTrackedService();
 		runtime.readPersistedTaskSessionMock.mockResolvedValue({

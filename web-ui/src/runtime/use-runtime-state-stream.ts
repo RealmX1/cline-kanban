@@ -1,4 +1,4 @@
-import { useEffect, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import type {
 	RuntimeClineMcpServerAuthStatus,
@@ -94,6 +94,7 @@ export interface UseRuntimeStateStreamResult {
 	streamError: string | null;
 	isRuntimeDisconnected: boolean;
 	hasReceivedSnapshot: boolean;
+	recheckProjectAvailability: () => void;
 }
 
 interface RuntimeStateStreamStore {
@@ -360,6 +361,10 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 		requestedWorkspaceId,
 		createInitialRuntimeStateStreamStore,
 	);
+	const [runtimeStreamConnectionGeneration, setRuntimeStreamConnectionGeneration] = useState(0);
+	const recheckProjectAvailability = useCallback(() => {
+		setRuntimeStreamConnectionGeneration((currentGeneration) => currentGeneration + 1);
+	}, []);
 	useEffect(() => {
 		let cancelled = false;
 		let socket: WebSocket | null = null;
@@ -574,7 +579,7 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 			}
 			cleanupSocket();
 		};
-	}, [requestedWorkspaceId]);
+	}, [requestedWorkspaceId, runtimeStreamConnectionGeneration]);
 
 	return {
 		currentProjectId: state.currentProjectId,
@@ -590,5 +595,6 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 		streamError: state.streamError,
 		isRuntimeDisconnected: state.isRuntimeDisconnected,
 		hasReceivedSnapshot: state.hasReceivedSnapshot,
+		recheckProjectAvailability,
 	};
 }

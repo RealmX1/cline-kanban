@@ -20,7 +20,8 @@ import {
 	type RuntimeGuidedVerificationState,
 	type RuntimeHookIngestRequest,
 	type RuntimeProjectAddRequest,
-	type RuntimeProjectRemoveRequest,
+	type RuntimeProjectPermanentDeletionPreviewRequest,
+	type RuntimeProjectPermanentDeletionRequest,
 	type RuntimeShellSessionStartRequest,
 	type RuntimeTaskChatAbortRequest,
 	type RuntimeTaskChatCancelRequest,
@@ -62,7 +63,8 @@ import {
 	runtimeGuidedVerificationStateSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeProjectAddRequestSchema,
-	runtimeProjectRemoveRequestSchema,
+	runtimeProjectPermanentDeletionPreviewRequestSchema,
+	runtimeProjectPermanentDeletionRequestSchema,
 	runtimeShellSessionStartRequestSchema,
 	runtimeTaskChatAbortRequestSchema,
 	runtimeTaskChatCancelRequestSchema,
@@ -214,14 +216,29 @@ export function parseProjectAddRequest(value: unknown): RuntimeProjectAddRequest
 	};
 }
 
-export function parseProjectRemoveRequest(value: unknown): RuntimeProjectRemoveRequest {
-	const parsed = parseWithSchema(runtimeProjectRemoveRequestSchema, value);
+export function parseProjectPermanentDeletionPreviewRequest(
+	value: unknown,
+): RuntimeProjectPermanentDeletionPreviewRequest {
+	const parsed = parseWithSchema(runtimeProjectPermanentDeletionPreviewRequestSchema, value);
 	const projectId = parsed.projectId.trim();
 	if (!projectId) {
 		throw new Error("Project ID cannot be empty.");
 	}
 	return {
 		projectId,
+	};
+}
+
+export function parseProjectPermanentDeletionRequest(value: unknown): RuntimeProjectPermanentDeletionRequest {
+	const parsed = parseWithSchema(runtimeProjectPermanentDeletionRequestSchema, value);
+	const projectId = parsed.projectId.trim();
+	if (!projectId) {
+		throw new Error("Project ID cannot be empty.");
+	}
+	return {
+		projectId,
+		expectedWorkspaceStateRevision: parsed.expectedWorkspaceStateRevision,
+		confirmationProjectName: parsed.confirmationProjectName,
 	};
 }
 

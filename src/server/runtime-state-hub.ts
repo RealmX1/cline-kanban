@@ -36,15 +36,12 @@ import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspa
 
 const TASK_SESSION_STREAM_BATCH_MS = 150;
 
-export interface DisposeRuntimeStateWorkspaceOptions {
-	disconnectClients?: boolean;
-	closeClientErrorMessage?: string;
-}
-
 export interface CreateRuntimeStateHubDependencies {
 	workspaceRegistry: Pick<
 		WorkspaceRegistry,
-		"resolveWorkspaceForStream" | "buildProjectsPayload" | "buildWorkspaceStateSnapshot"
+		| "resolveWorkspaceForStream"
+		| "buildProjectsPayloadUsingCachedRuntimeProjectAvailability"
+		| "buildWorkspaceStateSnapshot"
 	>;
 }
 
@@ -61,7 +58,7 @@ export interface RuntimeStateHub {
 			requestedWorkspaceId: string | null;
 		},
 	) => void;
-	disposeWorkspace: (workspaceId: string, options?: DisposeRuntimeStateWorkspaceOptions) => void;
+	disposeWorkspace: (workspaceId: string) => void;
 	broadcastRuntimeWorkspaceStateUpdated: (workspaceId: string, workspacePath: string) => Promise<void>;
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void>;
 	broadcastClineMcpAuthStatusesUpdated: (statuses: RuntimeClineMcpServerAuthStatus[]) => void;
@@ -122,7 +119,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			return;
 		}
 		try {
-			const payload = await deps.workspaceRegistry.buildProjectsPayload(preferredCurrentProjectId);
+			const payload =
+				await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
+					preferredCurrentProjectId,
+				);
 			for (const client of runtimeStateClients) {
 				sendRuntimeStateMessage(client, {
 					type: "projects_updated",
@@ -255,7 +255,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		runtimeStateClients.delete(client);
 	};
 
-	const disposeWorkspace = (workspaceId: string, options?: DisposeRuntimeStateWorkspaceOptions) => {
+	const disposeWorkspace = (workspaceId: string) => {
 		const unsubscribeSummary = terminalSummaryUnsubscribeByWorkspaceId.get(workspaceId);
 		if (unsubscribeSummary) {
 			try {
@@ -286,32 +286,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		clineMessageUnsubscribeByWorkspaceId.delete(workspaceId);
 		disposeTaskSessionSummaryBroadcast(workspaceId);
 		workspaceMetadataMonitor.disposeWorkspace(workspaceId);
-
-		if (!options?.disconnectClients) {
-			return;
-		}
-
-		const runtimeClients = runtimeStateClientsByWorkspaceId.get(workspaceId);
-		if (!runtimeClients || runtimeClients.size === 0) {
-			runtimeStateClientsByWorkspaceId.delete(workspaceId);
-			return;
-		}
-
-		for (const runtimeClient of runtimeClients) {
-			if (options.closeClientErrorMessage) {
-				sendRuntimeStateMessage(runtimeClient, {
-					type: "error",
-					message: options.closeClientErrorMessage,
-				} satisfies RuntimeStateStreamErrorMessage);
-			}
-			try {
-				runtimeClient.close();
-			} catch {
-				// Ignore close failures while disposing removed workspace clients.
-			}
-			cleanupRuntimeStateClient(runtimeClient);
-		}
-		runtimeStateClientsByWorkspaceId.delete(workspaceId);
 	};
 
 	const broadcastRuntimeWorkspaceStateUpdated = async (workspaceId: string, workspacePath: string): Promise<void> => {
@@ -431,17 +405,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				typeof (context as { requestedWorkspaceId?: unknown }).requestedWorkspaceId === "string"
 					? (context as { requestedWorkspaceId: string }).requestedWorkspaceId || null
 					: null;
-			const workspace: ResolvedWorkspaceStreamTarget = await deps.workspaceRegistry.resolveWorkspaceForStream(
-				requestedWorkspaceId,
-				{
-					onRemovedWorkspace: ({ workspaceId, message }) => {
-						disposeWorkspace(workspaceId, {
-							disconnectClients: true,
-							closeClientErrorMessage: message,
-						});
-					},
-				},
-			);
+			const workspace: ResolvedWorkspaceStreamTarget =
+				await deps.workspaceRegistry.resolveWorkspaceForStream(requestedWorkspaceId);
 			if (client.readyState !== WebSocket.OPEN) {
 				cleanupRuntimeStateClient(client);
 				return;
@@ -488,20 +453,22 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				};
 				let workspaceState: RuntimeStateStreamSnapshotMessage["workspaceState"];
 				let workspaceMetadata: RuntimeStateStreamSnapshotMessage["workspaceMetadata"];
-				if (workspace.workspaceId && workspace.workspacePath) {
-					monitorWorkspaceId = workspace.workspaceId;
+				if (workspace.status === "available") {
+					monitorWorkspaceId = workspace.projectId;
 					[projectsPayload, workspaceState] = await Promise.all([
-						deps.workspaceRegistry.buildProjectsPayload(workspace.workspaceId),
-						deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspace.workspaceId, workspace.workspacePath),
+						deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(workspace.projectId),
+						deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspace.projectId, workspace.workspacePath),
 					]);
 					workspaceMetadata = await workspaceMetadataMonitor.connectWorkspace({
-						workspaceId: workspace.workspaceId,
+						workspaceId: workspace.projectId,
 						workspacePath: workspace.workspacePath,
 						board: workspaceState.board,
 					});
 					didConnectWorkspaceMonitor = true;
 				} else {
-					projectsPayload = await deps.workspaceRegistry.buildProjectsPayload(null);
+					projectsPayload = await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
+						workspace.projectId,
+					);
 					workspaceState = null;
 					workspaceMetadata = null;
 				}
@@ -546,15 +513,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 							summaries: clineSummaries,
 						} satisfies RuntimeStateStreamTaskSessionsMessage);
 					}
-				}
-				if (workspace.removedRequestedWorkspacePath) {
-					sendRuntimeStateMessage(client, {
-						type: "error",
-						message: `Project no longer exists on disk and was removed: ${workspace.removedRequestedWorkspacePath}`,
-					} satisfies RuntimeStateStreamErrorMessage);
-				}
-				if (workspace.didPruneProjects) {
-					void broadcastRuntimeProjectsUpdated(workspace.workspaceId);
 				}
 			} catch (error) {
 				if (didConnectWorkspaceMonitor && monitorWorkspaceId) {

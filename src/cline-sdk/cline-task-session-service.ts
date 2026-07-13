@@ -13,6 +13,7 @@ import type {
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import {
 	applySessionFacets,
+	deriveSessionFacetsFromLegacyState,
 	isAwaitingUserReviewTurn,
 	isSessionInActiveTurn,
 	resolveSessionFacets,
@@ -95,6 +96,7 @@ export interface ClineTaskSessionService {
 	onMessage(listener: (taskId: string, message: ClineTaskMessage) => void): () => void;
 	startTaskSession(request: StartClineTaskSessionRequest): Promise<RuntimeTaskSessionSummary>;
 	stopTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null>;
+	stopTaskSessionForSafeShutdown(taskId: string): Promise<RuntimeTaskSessionSummary | null>;
 	abortTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null>;
 	cancelTaskTurn(taskId: string): Promise<RuntimeTaskSessionSummary | null>;
 	sendTaskSessionInput(
@@ -517,6 +519,41 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 			exitCode: null,
 			lastOutputAt: now(),
 		});
+		this.emitSummary(summary);
+		return summary;
+	}
+
+	async stopTaskSessionForSafeShutdown(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
+		const entry = this.messageRepository.getTaskEntry(taskId);
+		if (!entry) {
+			return null;
+		}
+		const facetsBeforeStop = resolveSessionFacets(entry.summary);
+		this.pendingTurnCancelTaskIds.delete(taskId);
+		await this.sessionRuntime.stopTaskSession(taskId);
+
+		let summary: RuntimeTaskSessionSummary;
+		if (facetsBeforeStop.turnOwner === "user") {
+			const exitedUserTurnFacets = deriveSessionFacetsFromLegacyState("awaiting_review", {
+				reviewReason: entry.summary.reviewReason,
+				pid: null,
+				connectionRetryActive: false,
+				agentId: null,
+			});
+			summary = updateSummary(entry, {
+				pid: null,
+				turnOwner: exitedUserTurnFacets.turnOwner,
+				liveness: exitedUserTurnFacets.liveness,
+				userTurnKind: facetsBeforeStop.userTurnKind,
+			});
+		} else {
+			summary = updateSummary(entry, {
+				reviewReason: "interrupted",
+				...deriveClineFacetPatch("interrupted", "interrupted"),
+				exitCode: null,
+				lastOutputAt: now(),
+			});
+		}
 		this.emitSummary(summary);
 		return summary;
 	}

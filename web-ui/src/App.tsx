@@ -36,6 +36,7 @@ import {
 	AlertDialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { UnavailableProjectRuntimeState } from "@/components/unavailable-project-runtime-state";
 import { UpdateNotificationController } from "@/components/update-notification-controller";
 import { createInitialBoardData } from "@/data/board-data";
 import { createIdleTaskSession } from "@/hooks/app-utils";
@@ -54,7 +55,7 @@ import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
 import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
-import { parseRemovedProjectPathFromStreamError, useProjectNavigation } from "@/hooks/use-project-navigation";
+import { useProjectNavigation } from "@/hooks/use-project-navigation";
 import { useProjectUiState } from "@/hooks/use-project-ui-state";
 import { useReviewReadyNotifications } from "@/hooks/use-review-ready-notifications";
 import { useShortcutActions } from "@/hooks/use-shortcut-actions";
@@ -131,14 +132,16 @@ export default function App(): ReactElement {
 		streamError,
 		isRuntimeDisconnected,
 		hasReceivedSnapshot,
+		recheckProjectAvailability,
 		navigationCurrentProjectId,
-		removingProjectId,
+		permanentlyDeletingProjectId,
 		hasNoProjects,
 		isProjectSwitching,
 		handleSelectProject,
 		handleAddProject,
 		handleAddProjectSuccess,
-		handleRemoveProject,
+		handleGetPermanentDeletionPreview,
+		handlePermanentlyDeleteProjectData,
 		isAddProjectDialogOpen,
 		setIsAddProjectDialogOpen,
 		pendingNativeGitInitPath,
@@ -146,21 +149,33 @@ export default function App(): ReactElement {
 	} = useProjectNavigation({
 		onProjectSwitchStart: handleProjectSwitchStart,
 	});
-	const activeNotificationWorkspaceId = navigationCurrentProjectId;
+	const currentProjectSummary = projects.find((project) => project.id === currentProjectId) ?? null;
+	const currentUnavailableProject =
+		currentProjectSummary?.availability.status === "unavailable"
+			? {
+					...currentProjectSummary,
+					availability: currentProjectSummary.availability,
+				}
+			: null;
+	const isCurrentProjectRuntimeUnavailable = currentUnavailableProject !== null;
+	const projectRuntimeWorkspaceId = isCurrentProjectRuntimeUnavailable ? null : currentProjectId;
+	const activeNotificationWorkspaceId = isCurrentProjectRuntimeUnavailable ? null : navigationCurrentProjectId;
 	const isDocumentVisible = useDocumentVisibility();
 	const isInitialRuntimeLoad =
 		!hasReceivedSnapshot && currentProjectId === null && projects.length === 0 && !streamError;
-	const isAwaitingWorkspaceSnapshot = currentProjectId !== null && streamedWorkspaceState === null;
+	const isAwaitingWorkspaceSnapshot = projectRuntimeWorkspaceId !== null && streamedWorkspaceState === null;
 	const {
 		config: runtimeProjectConfig,
 		isLoading: isRuntimeProjectConfigLoading,
 		refresh: refreshRuntimeProjectConfig,
-	} = useRuntimeProjectConfig(currentProjectId);
+	} = useRuntimeProjectConfig(projectRuntimeWorkspaceId);
 	const { isBlocked: isKanbanAccessBlocked, refresh: refreshKanbanAccess } = useKanbanAccessGate({
-		workspaceId: currentProjectId,
+		workspaceId: projectRuntimeWorkspaceId,
 	});
 	const isTaskAgentReady = isTaskAgentSetupSatisfied(runtimeProjectConfig);
-	const settingsWorkspaceId = navigationCurrentProjectId ?? currentProjectId;
+	const settingsWorkspaceId = isCurrentProjectRuntimeUnavailable
+		? null
+		: (navigationCurrentProjectId ?? currentProjectId);
 	const { config: settingsRuntimeProjectConfig, refresh: refreshSettingsRuntimeProjectConfig } =
 		useRuntimeProjectConfig(settingsWorkspaceId);
 	const featurebaseFeedbackState = useFeaturebaseFeedbackWidget({
@@ -174,7 +189,7 @@ export default function App(): ReactElement {
 		handleSelectOnboardingAgent,
 		handleOnboardingClineSetupSaved,
 	} = useStartupOnboarding({
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		runtimeProjectConfig,
 		isRuntimeProjectConfigLoading,
 		isTaskAgentReady,
@@ -227,7 +242,7 @@ export default function App(): ReactElement {
 		cleanupTaskWorkspace,
 		fetchTaskWorkspaceInfo,
 	} = useTaskSessions({
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		setSessions,
 	});
 
@@ -286,7 +301,7 @@ export default function App(): ReactElement {
 		refreshWorkspaceState,
 		resetWorkspaceSyncState,
 	} = useWorkspaceSync({
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		streamedWorkspaceState,
 		hasNoProjects,
 		hasReceivedSnapshot,
@@ -297,7 +312,7 @@ export default function App(): ReactElement {
 	});
 	const { selectedTaskId, selectedCard, setSelectedTaskId, handleBack } = useDetailTaskNavigation({
 		board,
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		isAwaitingWorkspaceSnapshot,
 		isInitialRuntimeLoad,
 		isProjectSwitching,
@@ -531,7 +546,7 @@ export default function App(): ReactElement {
 		editTaskBranchOptions,
 		defaultTaskBranchRef,
 		defaultCreateTaskBranchRef,
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		selectedAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
 		newTaskStartInPlanModeByDefault: runtimeProjectConfig?.newTaskStartInPlanModeByDefault ?? true,
 		isNewTaskStartInPlanModeDefaultLoaded: runtimeProjectConfig !== null,
@@ -579,7 +594,7 @@ export default function App(): ReactElement {
 		runAutoReviewGitAction,
 		resetGitActionState,
 	} = useGitActions({
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		board,
 		selectedCard,
 		runtimeProjectConfig,
@@ -617,7 +632,7 @@ export default function App(): ReactElement {
 		closeDetailTerminal,
 		resetTerminalPanelsState,
 	} = useTerminalPanels({
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		selectedCard,
 		workspaceGit,
 		agentCommand,
@@ -626,7 +641,7 @@ export default function App(): ReactElement {
 	});
 	const homeTerminalSummary = sessions[homeTerminalTaskId] ?? null;
 	const homeSidebarAgentPanel = useHomeSidebarAgentPanel({
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		hasNoProjects,
 		runtimeProjectConfig,
 		clineSessionContextVersion,
@@ -637,7 +652,7 @@ export default function App(): ReactElement {
 	});
 	const { runningShortcutLabel, handleSelectShortcutLabel, handleRunShortcut, handleCreateShortcut } =
 		useShortcutActions({
-			currentProjectId,
+			currentProjectId: projectRuntimeWorkspaceId,
 			selectedShortcutLabel: runtimeProjectConfig?.selectedShortcutLabel,
 			shortcuts,
 			refreshRuntimeProjectConfig,
@@ -666,10 +681,10 @@ export default function App(): ReactElement {
 	useWorkspacePersistence({
 		board,
 		sessions,
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		workspaceRevision,
 		hydrationNonce: workspaceHydrationNonce,
-		canPersistWorkspaceState,
+		canPersistWorkspaceState: canPersistWorkspaceState && !isCurrentProjectRuntimeUnavailable,
 		isDocumentVisible,
 		isWorkspaceStateRefreshing,
 		persistWorkspaceState: persistWorkspaceStateAsync,
@@ -683,22 +698,6 @@ export default function App(): ReactElement {
 			lastStreamErrorRef.current = null;
 			return;
 		}
-		const removedPath = parseRemovedProjectPathFromStreamError(streamError);
-		if (removedPath !== null) {
-			showAppToast(
-				{
-					intent: "danger",
-					icon: "warning-sign",
-					message: removedPath
-						? `Project no longer exists and was removed: ${removedPath}`
-						: "Project no longer exists and was removed.",
-					timeout: 6000,
-				},
-				`project-removed-${removedPath || "unknown"}`,
-			);
-			lastStreamErrorRef.current = null;
-			return;
-		}
 		if (isRuntimeDisconnected) {
 			lastStreamErrorRef.current = streamError;
 			return;
@@ -708,6 +707,17 @@ export default function App(): ReactElement {
 		}
 		lastStreamErrorRef.current = streamError;
 	}, [isRuntimeDisconnected, streamError]);
+
+	useEffect(() => {
+		if (!isCurrentProjectRuntimeUnavailable) {
+			return;
+		}
+		setCanPersistWorkspaceState(false);
+		setIsGitHistoryOpen(false);
+		setSelectedTaskId(null);
+		resetTaskEditorState();
+		resetTerminalPanelsState();
+	}, [isCurrentProjectRuntimeUnavailable, resetTaskEditorState, resetTerminalPanelsState, setSelectedTaskId]);
 
 	useEffect(() => {
 		resetTaskEditorState();
@@ -832,7 +842,7 @@ export default function App(): ReactElement {
 	// Guided Verification：App.tsx 持有唯一一份 useGuidedVerification 实例，同时供顶栏 badge 派生待核对数、
 	// 并作为 prop 下传给 GuidedVerificationController（controller 消费该结果，不再自持第二份实例）。
 	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
-	const guidedVerification = useGuidedVerification(currentProjectId);
+	const guidedVerification = useGuidedVerification(projectRuntimeWorkspaceId);
 	const { setCollapsed: setGuidedVerificationCollapsed } = guidedVerification;
 	const guidedVerificationActiveGroup = guidedVerification.activeGroup;
 	// 待核对数 = active 组内未核对且未被 reconcile 移除的任务数；与面板 countPending 语义一致。
@@ -852,7 +862,7 @@ export default function App(): ReactElement {
 		isDetailTerminalOpen,
 		isHomeTerminalOpen: showHomeBottomTerminal,
 		isHomeGitHistoryOpen: !selectedCard && isGitHistoryOpen,
-		canUseCreateTaskShortcut: !hasNoProjects && currentProjectId !== null,
+		canUseCreateTaskShortcut: !hasNoProjects && projectRuntimeWorkspaceId !== null,
 		handleToggleDetailTerminal,
 		handleToggleHomeTerminal,
 		handleToggleExpandDetailTerminal,
@@ -929,7 +939,8 @@ export default function App(): ReactElement {
 	const navbarWorkspaceHint = hasNoProjects ? undefined : activeWorkspaceHint;
 	const navbarRuntimeHint = hasNoProjects ? undefined : runtimeHint;
 	const shouldHideProjectDependentTopBarActions =
-		!selectedCard && (isProjectSwitching || isAwaitingWorkspaceSnapshot || isWorkspaceMetadataPending);
+		isCurrentProjectRuntimeUnavailable ||
+		(!selectedCard && (isProjectSwitching || isAwaitingWorkspaceSnapshot || isWorkspaceMetadataPending));
 
 	const {
 		openTargetOptions,
@@ -939,7 +950,7 @@ export default function App(): ReactElement {
 		canOpenWorkspace,
 		isOpeningWorkspace,
 	} = useOpenWorkspace({
-		currentProjectId,
+		currentProjectId: projectRuntimeWorkspaceId,
 		workspacePath: activeWorkspacePath,
 	});
 	const selectedTaskChatMessages = selectTaskChatMessagesForTask(selectedCard?.card.id, taskChatMessagesByTaskId);
@@ -1023,10 +1034,10 @@ export default function App(): ReactElement {
 						projects={displayedProjects}
 						isLoadingProjects={isProjectListLoading}
 						currentProjectId={navigationCurrentProjectId}
-						removingProjectId={removingProjectId}
+						permanentlyDeletingProjectId={permanentlyDeletingProjectId}
 						activeSection={homeSidebarSection}
 						onActiveSectionChange={setHomeSidebarSection}
-						canShowAgentSection={!hasNoProjects && Boolean(currentProjectId)}
+						canShowAgentSection={!hasNoProjects && projectRuntimeWorkspaceId !== null}
 						agentSectionContent={homeSidebarAgentPanel}
 						selectedAgentId={settingsRuntimeProjectConfig?.selectedAgentId ?? null}
 						clineProviderSettings={settingsRuntimeProjectConfig?.clineProviderSettings ?? null}
@@ -1034,7 +1045,8 @@ export default function App(): ReactElement {
 						onSelectProject={(projectId) => {
 							void handleSelectProject(projectId);
 						}}
-						onRemoveProject={handleRemoveProject}
+						onGetPermanentDeletionPreview={handleGetPermanentDeletionPreview}
+						onPermanentlyDeleteProjectData={handlePermanentlyDeleteProjectData}
 						onAddProject={() => {
 							void handleAddProject();
 						}}
@@ -1047,7 +1059,11 @@ export default function App(): ReactElement {
 				<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
 					<TopBar
 						onToggleSidebar={!selectedCard ? handleToggleSidebar : undefined}
-						onToggleBoardOverview={!selectedCard && !hasNoProjects ? handleToggleBoardOverview : undefined}
+						onToggleBoardOverview={
+							!selectedCard && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+								? handleToggleBoardOverview
+								: undefined
+						}
 						isBoardOverviewOpen={isBoardOverviewOpen}
 						onBack={selectedCard ? handleBack : undefined}
 						workspacePath={navbarWorkspacePath}
@@ -1056,31 +1072,37 @@ export default function App(): ReactElement {
 						runtimeHint={navbarRuntimeHint}
 						selectedTaskId={selectedCard?.card.id ?? null}
 						selectedTaskBaseRef={selectedCard?.card.baseRef ?? null}
-						showHomeGitSummary={!hasNoProjects && !selectedCard}
-						runningGitAction={selectedCard || hasNoProjects ? null : runningGitAction}
+						showHomeGitSummary={!hasNoProjects && !selectedCard && !isCurrentProjectRuntimeUnavailable}
+						runningGitAction={
+							selectedCard || hasNoProjects || isCurrentProjectRuntimeUnavailable ? null : runningGitAction
+						}
 						onGitFetch={
-							selectedCard
+							selectedCard || isCurrentProjectRuntimeUnavailable
 								? undefined
 								: () => {
 										void runGitAction("fetch");
 									}
 						}
 						onGitPull={
-							selectedCard
+							selectedCard || isCurrentProjectRuntimeUnavailable
 								? undefined
 								: () => {
 										void runGitAction("pull");
 									}
 						}
 						onGitPush={
-							selectedCard
+							selectedCard || isCurrentProjectRuntimeUnavailable
 								? undefined
 								: () => {
 										void runGitAction("push");
 									}
 						}
 						onToggleTerminal={
-							hasNoProjects ? undefined : selectedCard ? handleToggleDetailTerminal : handleToggleHomeTerminal
+							hasNoProjects || isCurrentProjectRuntimeUnavailable
+								? undefined
+								: selectedCard
+									? handleToggleDetailTerminal
+									: handleToggleHomeTerminal
 						}
 						isTerminalOpen={selectedCard ? isDetailTerminalOpen : showHomeBottomTerminal}
 						isTerminalLoading={selectedCard ? isDetailTerminalStarting : isHomeTerminalStarting}
@@ -1092,14 +1114,16 @@ export default function App(): ReactElement {
 						onSelectShortcutLabel={handleSelectShortcutLabel}
 						runningShortcutLabel={runningShortcutLabel}
 						onRunShortcut={handleRunShortcut}
-						onCreateFirstShortcut={currentProjectId ? handleCreateShortcut : undefined}
+						onCreateFirstShortcut={projectRuntimeWorkspaceId ? handleCreateShortcut : undefined}
 						openTargetOptions={openTargetOptions}
 						selectedOpenTargetId={selectedOpenTargetId}
 						onSelectOpenTarget={onSelectOpenTarget}
 						onOpenWorkspace={onOpenWorkspace}
 						canOpenWorkspace={canOpenWorkspace}
 						isOpeningWorkspace={isOpeningWorkspace}
-						onToggleGitHistory={hasNoProjects ? undefined : handleToggleGitHistory}
+						onToggleGitHistory={
+							hasNoProjects || isCurrentProjectRuntimeUnavailable ? undefined : handleToggleGitHistory
+						}
 						isGitHistoryOpen={isGitHistoryOpen}
 						onToggleTaskChangesSidebar={
 							selectedCard ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
@@ -1151,6 +1175,11 @@ export default function App(): ReactElement {
 										</Button>
 									</div>
 								</div>
+							) : currentUnavailableProject ? (
+								<UnavailableProjectRuntimeState
+									project={currentUnavailableProject}
+									onRecheck={recheckProjectAvailability}
+								/>
 							) : (
 								<div className="flex flex-1 flex-col min-h-0 min-w-0">
 									<div className="flex flex-1 min-h-0 min-w-0">
@@ -1398,7 +1427,7 @@ export default function App(): ReactElement {
 					onResetAllState={handleResetAllState}
 				/>
 				<TaskEditorDialog
-					open={isInlineTaskCreateOpen || editingTaskId !== null}
+					open={!isCurrentProjectRuntimeUnavailable && (isInlineTaskCreateOpen || editingTaskId !== null)}
 					onOpenChange={handleCreateDialogOpenChange}
 					taskEditorMode={editingTaskId ? "edit" : "create"}
 					prompt={editingTaskId ? editTaskPrompt : newTaskPrompt}
@@ -1426,7 +1455,7 @@ export default function App(): ReactElement {
 					onAutoReviewEnabledChange={editingTaskId ? setEditTaskAutoReviewEnabled : setNewTaskAutoReviewEnabled}
 					autoReviewMode={editingTaskId ? editTaskAutoReviewMode : newTaskAutoReviewMode}
 					onAutoReviewModeChange={editingTaskId ? setEditTaskAutoReviewMode : setNewTaskAutoReviewMode}
-					workspaceId={currentProjectId}
+					workspaceId={projectRuntimeWorkspaceId}
 					branchRef={editingTaskId ? editTaskBranchRef : newTaskBranchRef}
 					branchOptions={editingTaskId ? editTaskBranchOptions : createTaskBranchOptions}
 					onBranchRefChange={editingTaskId ? setEditTaskBranchRef : setNewTaskBranchRef}
