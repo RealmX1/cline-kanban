@@ -11,7 +11,6 @@ import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types"
 import type { TaskBoardSearchResult } from "@/search/task-board-search";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumnId, BoardColumn as BoardColumnModel } from "@/types";
-import { CREATE_TASK_KEYBOARD_SHORTCUT_INLINE_LABEL } from "@/utils/create-task-keyboard-shortcut";
 
 // 模块级常量，保持引用稳定（避免每次渲染都给 hook 传新函数触发 observer 重建）。
 const getColumnCardsScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
@@ -107,7 +106,7 @@ export function BoardColumn({
 		<span className="inline-flex items-center gap-1.5">
 			<span>Create task</span>
 			<span aria-hidden className="text-text-secondary">
-				({CREATE_TASK_KEYBOARD_SHORTCUT_INLINE_LABEL})
+				(c)
 			</span>
 		</span>
 	);
