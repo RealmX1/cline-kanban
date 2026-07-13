@@ -26,6 +26,7 @@ import {
 	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
 	useTaskAgentModelPicker,
 } from "@/components/task-agent-model-picker";
+import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,7 @@ import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -107,7 +109,7 @@ function parseListItems(text: string): string[] {
 	return [];
 }
 
-export function TaskCreateDialog({
+export function TaskEditorDialog({
 	open,
 	onOpenChange,
 	prompt,
@@ -143,6 +145,9 @@ export function TaskCreateDialog({
 	defaultProviderId,
 	defaultModelId,
 	defaultReasoningEffort,
+	taskEditorMode = "create",
+	taskAgentSessionInitialization,
+	onTaskAgentSessionInitializationChange,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -187,6 +192,9 @@ export function TaskCreateDialog({
 	defaultModelId?: string | null;
 	/** Default Cline reasoning effort from runtimeConfig.clineProviderSettings.reasoningEffort */
 	defaultReasoningEffort?: RuntimeClineReasoningEffort | null;
+	taskEditorMode?: "create" | "edit";
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
+	onTaskAgentSessionInitializationChange?: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
 }): ReactElement {
 	const [mode, setMode] = useState<"single" | "multi">("single");
 	const [createMore, setCreateMore] = useState(false);
@@ -202,7 +210,6 @@ export function TaskCreateDialog({
 		DEFAULT_PRIMARY_START_ACTION,
 		normalizeStoredTaskCreateStartAction,
 	);
-
 	const {
 		agentOptions,
 		clineProviderOptions,
@@ -256,10 +263,11 @@ export function TaskCreateDialog({
 	});
 
 	const handleSplitIntoTasks = useCallback(() => {
+		onTaskAgentSessionInitializationChange?.(undefined);
 		setTaskPrompts(detectedItems);
 		setMode("multi");
 		nextFocusIndexRef.current = 0;
-	}, [detectedItems]);
+	}, [detectedItems, onTaskAgentSessionInitializationChange]);
 
 	const handleBackToSingle = useCallback(() => {
 		const joined = taskPrompts
@@ -448,10 +456,22 @@ export function TaskCreateDialog({
 		[open, mode, handleRunSingleStartAction, onCreateStartAndOpen],
 	);
 
-	const dialogTitle = mode === "multi" ? `New tasks${validTaskCount > 0 ? ` (${validTaskCount})` : ""}` : "New task";
+	const dialogTitle =
+		taskEditorMode === "edit"
+			? "Edit backlog task"
+			: mode === "multi"
+				? `New tasks${validTaskCount > 0 ? ` (${validTaskCount})` : ""}`
+				: "New task";
 
 	const taskCountLabel = validTaskCount === 1 ? "task" : "tasks";
-	const primaryStartLabel = effectivePrimaryStartAction === "start" ? "Start task" : "Start and open";
+	const primaryStartLabel =
+		taskEditorMode === "edit"
+			? effectivePrimaryStartAction === "start"
+				? "Save and start"
+				: "Save, start and open"
+			: effectivePrimaryStartAction === "start"
+				? "Start task"
+				: "Start and open";
 	const primaryStartShortcutModifier = effectivePrimaryStartAction === "start" ? "mod" : "alt";
 	const secondaryStartLabel = secondaryStartAction === "start" ? "Start task" : "Start and open";
 	const secondaryStartShortcutModifier = secondaryStartAction === "start" ? "mod" : "alt";
@@ -484,7 +504,7 @@ export function TaskCreateDialog({
 								</code>{" "}
 								to add images.
 							</p>
-							{detectedItems.length >= 2 ? (
+							{taskEditorMode === "create" && detectedItems.length >= 2 ? (
 								<button
 									type="button"
 									onClick={handleSplitIntoTasks}
@@ -618,51 +638,67 @@ export function TaskCreateDialog({
 					</div>
 
 					{onAgentIdChange && onClineSettingsChange ? (
-						<TaskAgentModelPicker
-							agentId={agentId}
-							onAgentIdChange={onAgentIdChange}
-							clineSettings={clineSettings}
-							onClineSettingsChange={onClineSettingsChange}
-							terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
-							onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
-							agentOptions={agentOptions}
-							clineProviderOptions={clineProviderOptions}
-							clineModelOptions={clineModelOptions}
-							terminalAgentModelOptions={terminalAgentModelOptions}
-							terminalAgentDefaultModelId={terminalAgentDefaultModelId}
-							effectiveDefaultModelId={effectiveDefaultModelId}
-							providerModels={providerModels}
-							isLoadingProviders={isLoadingProviders}
-							isLoadingModels={isLoadingModels}
-							isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
-							defaultAgentId={defaultAgentId}
-							defaultProviderId={defaultProviderId}
-							defaultReasoningEffort={defaultReasoningEffort}
-							providerDefaultModels={providerDefaultModels}
-						/>
+						<>
+							<TaskAgentModelPicker
+								agentId={agentId}
+								onAgentIdChange={onAgentIdChange}
+								clineSettings={clineSettings}
+								onClineSettingsChange={onClineSettingsChange}
+								terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
+								onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
+								agentOptions={agentOptions}
+								clineProviderOptions={clineProviderOptions}
+								clineModelOptions={clineModelOptions}
+								terminalAgentModelOptions={terminalAgentModelOptions}
+								terminalAgentDefaultModelId={terminalAgentDefaultModelId}
+								effectiveDefaultModelId={effectiveDefaultModelId}
+								providerModels={providerModels}
+								isLoadingProviders={isLoadingProviders}
+								isLoadingModels={isLoadingModels}
+								isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
+								defaultAgentId={defaultAgentId}
+								defaultProviderId={defaultProviderId}
+								defaultReasoningEffort={defaultReasoningEffort}
+								providerDefaultModels={providerDefaultModels}
+							/>
+							{mode === "single" && onTaskAgentSessionInitializationChange ? (
+								<TaskAgentSessionInitializationControl
+									agentId={agentId}
+									defaultAgentId={defaultAgentId}
+									workspaceId={workspaceId}
+									value={taskAgentSessionInitialization}
+									onChange={onTaskAgentSessionInitializationChange}
+									onAgentIdChange={onAgentIdChange}
+								/>
+							) : null}
+						</>
 					) : null}
 				</div>
 			</DialogBody>
 			<DialogFooter>
-				<label
-					htmlFor={createMoreId}
-					className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-				>
-					<RadixSwitch.Root
-						id={createMoreId}
-						checked={createMore}
-						onCheckedChange={setCreateMore}
-						className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
+				{taskEditorMode === "create" ? (
+					<label
+						htmlFor={createMoreId}
+						className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
 					>
-						<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
-					</RadixSwitch.Root>
-					<span>Create more</span>
-				</label>
+						<RadixSwitch.Root
+							id={createMoreId}
+							checked={createMore}
+							onCheckedChange={setCreateMore}
+							className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
+						>
+							<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+						</RadixSwitch.Root>
+						<span>Create more</span>
+					</label>
+				) : (
+					<span className="mr-auto" />
+				)}
 				{mode === "single" ? (
 					<>
 						<Button size="sm" onClick={handleCreateSingle} disabled={!prompt.trim() || !branchRef}>
 							<span className="inline-flex items-center">
-								Create
+								{taskEditorMode === "edit" ? "Save changes" : "Create"}
 								<ButtonShortcut />
 							</span>
 						</Button>

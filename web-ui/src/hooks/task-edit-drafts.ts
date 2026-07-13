@@ -1,7 +1,9 @@
 import type {
 	RuntimeAgentId,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
+	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
 import {
 	LocalStorageKey,
@@ -13,6 +15,7 @@ import type { BoardCard, TaskAutoReviewMode, TaskImage } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
 import {
 	runtimeAgentIdSchema,
+	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskClineSettingsSchema,
 	runtimeTaskImageSchema,
 	runtimeTaskTerminalAgentModelOverrideSettingsSchema,
@@ -29,6 +32,8 @@ export interface TaskEditDraft {
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
+	worktreeMode?: RuntimeTaskWorktreeMode;
 	savedAt: number;
 }
 
@@ -88,6 +93,11 @@ function readTerminalAgentModelOverrideSettings(
 	return parsed.success ? parsed.data : undefined;
 }
 
+function readTaskAgentSessionInitialization(value: unknown): RuntimeTaskAgentSessionInitialization | undefined {
+	const parsed = runtimeTaskAgentSessionInitializationSchema.safeParse(value);
+	return parsed.success ? parsed.data : undefined;
+}
+
 function readTaskEditDraft(value: unknown): TaskEditDraft | null {
 	if (!isRecord(value)) {
 		return null;
@@ -108,11 +118,14 @@ function readTaskEditDraft(value: unknown): TaskEditDraft | null {
 			readOptionalString(value.autoReviewMode) as TaskAutoReviewMode | undefined,
 		),
 		branchRef,
+		worktreeMode:
+			value.worktreeMode === "inplace" || value.worktreeMode === "branch" ? value.worktreeMode : undefined,
 		agentId: readOptionalAgentId(value.agentId),
 		clineSettings: readClineSettings(value.clineSettings),
 		terminalAgentModelOverrideSettings: readTerminalAgentModelOverrideSettings(
 			value.terminalAgentModelOverrideSettings,
 		),
+		taskAgentSessionInitialization: readTaskAgentSessionInitialization(value.taskAgentSessionInitialization),
 		savedAt: typeof value.savedAt === "number" ? value.savedAt : 0,
 	};
 }
@@ -181,9 +194,12 @@ export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">
 		draft.autoReviewEnabled === (task.autoReviewEnabled === true) &&
 		draft.autoReviewMode === resolveTaskAutoReviewMode(task.autoReviewMode) &&
 		draft.branchRef === task.baseRef &&
+		draft.worktreeMode === (task.worktreeMode ?? "branch") &&
 		draft.agentId === task.agentId &&
 		JSON.stringify(draft.clineSettings ?? null) === JSON.stringify(task.clineSettings ?? null) &&
 		JSON.stringify(draft.terminalAgentModelOverrideSettings ?? null) ===
-			JSON.stringify(task.terminalAgentModelOverrideSettings ?? null)
+			JSON.stringify(task.terminalAgentModelOverrideSettings ?? null) &&
+		JSON.stringify(draft.taskAgentSessionInitialization ?? null) ===
+			JSON.stringify(task.taskAgentSessionInitialization ?? null)
 	);
 }

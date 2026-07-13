@@ -146,6 +146,7 @@ export interface TaskCardBusinessProps {
 	onRestoreFromTrash?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
+	onOpenTaskEditor?: () => void;
 	onCommit?: (taskId: string) => void;
 	onOpenPr?: (taskId: string) => void;
 	onCancelAutomaticAction?: (taskId: string) => void;
@@ -197,6 +198,7 @@ export function TaskCardBody({
 	onRestoreFromTrash,
 	onDeleteTask,
 	onSaveTitle,
+	onOpenTaskEditor,
 	onCommit,
 	onOpenPr,
 	onCancelAutomaticAction,
@@ -386,7 +388,7 @@ export function TaskCardBody({
 				}
 		: null;
 	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath);
-	const showTitleEditButton = onSaveTitle != null && !pinnedClone && !isEditingTitle;
+	const showTitleEditButton = (onSaveTitle != null || onOpenTaskEditor != null) && !pinnedClone && !isEditingTitle;
 	const showReviewGitActions = columnId === "review" && (reviewWorkspaceSnapshot?.changedFiles ?? 0) > 0;
 	const isAnyGitActionLoading = isCommitLoading || isOpenPrLoading;
 	const cancelAutomaticActionLabel =
@@ -686,7 +688,7 @@ export function TaskCardBody({
 						)}
 						{showTitleEditButton ? (
 							<TaskCardRowHoverActions groupName="title">
-								<Tooltip side="bottom" content="Edit title">
+								<Tooltip side="bottom" content={onOpenTaskEditor ? "Edit task" : "Edit title"}>
 									<Button
 										icon={<Pencil size={12} />}
 										variant="ghost"
@@ -695,6 +697,10 @@ export function TaskCardBody({
 										onMouseDown={stopEvent}
 										onClick={(event) => {
 											stopEvent(event);
+											if (onOpenTaskEditor) {
+												onOpenTaskEditor();
+												return;
+											}
 											setDraftTitle(card.title);
 											setIsEditingTitle(true);
 										}}

@@ -6,6 +6,7 @@ import { createInitialBoardData } from "@/data/board-data";
 import type {
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -24,6 +25,7 @@ import {
 	type TaskCommentEntry,
 	type TaskImage,
 } from "@/types";
+import { runtimeTaskAgentSessionInitializationSchema } from "../../../src/core/api-contract";
 
 export interface TaskDraft {
 	title?: string;
@@ -36,6 +38,7 @@ export interface TaskDraft {
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	baseRef: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
 }
@@ -240,6 +243,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		agentId?: unknown;
 		clineSettings?: unknown;
 		terminalAgentModelOverrideSettings?: unknown;
+		taskAgentSessionInitialization?: unknown;
 		clineProviderId?: unknown;
 		clineModelId?: unknown;
 		clineReasoningEffort?: unknown;
@@ -270,10 +274,25 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 	const terminalAgentModelOverrideSettings = normalizeTaskTerminalAgentModelOverrideSettings(
 		card.terminalAgentModelOverrideSettings,
 	);
+	const parentSessionId = typeof card.parentSessionId === "string" ? card.parentSessionId.trim() : "";
+	const parsedTaskAgentSessionInitialization = runtimeTaskAgentSessionInitializationSchema.safeParse(
+		card.taskAgentSessionInitialization,
+	);
+	const parsedLegacyTaskAgentSessionInitialization = parentSessionId
+		? runtimeTaskAgentSessionInitializationSchema.safeParse({
+				sourceAgentId: "codex",
+				sourceSessionId: parentSessionId,
+				sourceSessionReuseMode: "fork_existing_session",
+			})
+		: null;
+	const taskAgentSessionInitialization = parsedTaskAgentSessionInitialization.success
+		? parsedTaskAgentSessionInitialization.data
+		: parsedLegacyTaskAgentSessionInitialization?.success
+			? parsedLegacyTaskAgentSessionInitialization.data
+			: undefined;
 
 	const now = Date.now();
 
-	const parentSessionId = typeof card.parentSessionId === "string" ? card.parentSessionId.trim() : "";
 	const prepFilePath = typeof card.prepFilePath === "string" ? card.prepFilePath.trim() : "";
 	const worktreeMode =
 		card.worktreeMode === "branch" || card.worktreeMode === "inplace" ? card.worktreeMode : undefined;
@@ -293,6 +312,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
 		...(terminalAgentModelOverrideSettings !== undefined ? { terminalAgentModelOverrideSettings } : {}),
+		...(taskAgentSessionInitialization !== undefined ? { taskAgentSessionInitialization } : {}),
 		...(parentSessionId ? { parentSessionId } : {}),
 		...(worktreeMode ? { worktreeMode } : {}),
 		...(prepFilePath ? { prepFilePath } : {}),
@@ -445,6 +465,7 @@ export function addTaskToColumnWithResult(
 			agentId: draft.agentId,
 			clineSettings: draft.clineSettings,
 			terminalAgentModelOverrideSettings: draft.terminalAgentModelOverrideSettings,
+			taskAgentSessionInitialization: draft.taskAgentSessionInitialization,
 			baseRef: draft.baseRef,
 			worktreeMode: draft.worktreeMode,
 		},
@@ -619,6 +640,8 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 	if (!baseRef) {
 		return { board, updated: false };
 	}
+	const shouldUpdateTaskAgentSessionInitialization = Object.hasOwn(draft, "taskAgentSessionInitialization");
+	const shouldUpdateWorktreeMode = Object.hasOwn(draft, "worktreeMode");
 
 	let updated = false;
 	const columns = board.columns.map((column) => {
@@ -649,7 +672,12 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				agentId: draft.agentId,
 				clineSettings: draft.clineSettings,
 				terminalAgentModelOverrideSettings: draft.terminalAgentModelOverrideSettings,
+				taskAgentSessionInitialization: shouldUpdateTaskAgentSessionInitialization
+					? draft.taskAgentSessionInitialization
+					: card.taskAgentSessionInitialization,
+				parentSessionId: shouldUpdateTaskAgentSessionInitialization ? undefined : card.parentSessionId,
 				baseRef,
+				worktreeMode: shouldUpdateWorktreeMode ? draft.worktreeMode : card.worktreeMode,
 				updatedAt: Date.now(),
 			};
 		});

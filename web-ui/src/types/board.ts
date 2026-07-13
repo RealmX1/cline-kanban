@@ -1,6 +1,7 @@
 import type {
 	RuntimeAgentId,
 	RuntimeBoardColumnId,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskCommentEntry,
@@ -52,6 +53,7 @@ export interface BoardCard {
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	baseRef: string;
 	parentSessionId?: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
