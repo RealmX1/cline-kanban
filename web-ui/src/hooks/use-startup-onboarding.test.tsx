@@ -19,12 +19,14 @@ function createRuntimeConfigResponse(selectedAgentId: RuntimeConfigResponse["sel
 		selectedAgentId,
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
+		newTaskStartInPlanModeByDefault: true,
 		effectiveCommand: selectedAgentId,
 		globalConfigPath: "/tmp/.cline/kanban/config.json",
 		projectConfigPath: "/tmp/project/.cline/kanban/config.json",
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		guidedVerificationForceCompleteEnabled: false,
 		detectedCommands: ["codex"],
 		agents: [
 			{

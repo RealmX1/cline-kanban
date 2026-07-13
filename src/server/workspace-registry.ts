@@ -1,6 +1,8 @@
 import { type RuntimeConfigState, toGlobalRuntimeConfigState } from "../config/runtime-config";
 import type {
+	RuntimeBoardCard,
 	RuntimeBoardData,
+	RuntimeInProgressTaskDetail,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
 	RuntimeTaskWorktreeMode,
@@ -17,6 +19,7 @@ import {
 } from "../state/workspace-state";
 import { TerminalSessionManager } from "../terminal/session-manager";
 import { runGit } from "../workspace/git-utils";
+import { collectInProgressTaskDetailsFromBoard } from "./in-progress-task-detail-projection";
 import { applyLiveSessionStateToProjectTaskCounts } from "./project-task-counts-live-session-overlay";
 
 export interface WorkspaceRegistryScope {
@@ -35,6 +38,50 @@ export interface CreateWorkspaceRegistryDependencies {
 
 export interface DisposeWorkspaceRegistryOptions {
 	stopTerminalSessions?: boolean;
+}
+
+/**
+ * `sessions.json` 只在 graceful shutdown 落盘。非优雅退出（进程被杀 / --skip-shutdown-cleanup）会
+ * 留下 agent 完全启动之前的默认快照——`startTaskSession` 的 `agentId: request.agentId` 尚未写入，
+ * 于是 summary.agentId 恒为 null。board card 才是「该 task 用哪个 agent」的 durable 真相源，故在
+ * hydrate 之前用它回填丢失的 agentId。否则 summary.agentId===null 会同时击穿三条恢复路径：
+ * canRefresh（Refresh 按钮禁用）、refreshTaskTerminal 的 agentId gate、以及聚焦时的自动续跑判据，
+ * 令「进程随运行时重启而死」的任务彻底无法恢复。只回填、不覆盖已有 agentId；无 card 的 shell /
+ * home / synthetic 会话正确保留 null。
+ */
+export function applyBoardCardAgentIdsToSessions(
+	board: RuntimeBoardData,
+	sessions: RuntimeWorkspaceStateResponse["sessions"],
+): void {
+	const cardAgentIdByTaskId = new Map<string, NonNullable<RuntimeBoardCard["agentId"]>>();
+	for (const column of board.columns) {
+		for (const card of column.cards) {
+			if (card.agentId) {
+				cardAgentIdByTaskId.set(card.id, card.agentId);
+			}
+		}
+	}
+	for (const summary of Object.values(sessions)) {
+		if (summary.agentId === null) {
+			const cardAgentId = cardAgentIdByTaskId.get(summary.taskId);
+			if (cardAgentId) {
+				summary.agentId = cardAgentId;
+			}
+		}
+	}
+}
+
+async function backfillSessionAgentIdsFromBoard(
+	workspaceId: string,
+	sessions: RuntimeWorkspaceStateResponse["sessions"],
+): Promise<void> {
+	let board: RuntimeBoardData;
+	try {
+		board = await loadWorkspaceBoardById(workspaceId);
+	} catch {
+		return;
+	}
+	applyBoardCardAgentIdsToSessions(board, sessions);
 }
 
 export interface ResolvedWorkspaceStreamTarget {
@@ -155,6 +202,11 @@ function toProjectSummary(project: {
 	workspaceId: string;
 	repoPath: string;
 	taskCounts: RuntimeProjectTaskCounts;
+	// board 列归属的原始计数（未套 live-session overlay），供 Stage-First Overview 用。快路径可省略，
+	// 下一次 projects_updated/snapshot 广播补齐（见 ADR-0001）。
+	rawColumnTaskCounts?: RuntimeProjectTaskCounts;
+	// in_progress 列 task 明细，供 Stage-First Overview 展开 In-Progress 阶段。快路径省略时默认空数组。
+	inProgressTaskDetails?: RuntimeInProgressTaskDetail[];
 	// Optional so the `projects.add` fast path can omit it — origin is populated for real
 	// on the next projects_updated/snapshot broadcast via buildProjectsPayload.
 	gitRemoteOriginUrl?: string | null;
@@ -167,6 +219,8 @@ function toProjectSummary(project: {
 		path: project.repoPath,
 		name,
 		taskCounts: project.taskCounts,
+		...(project.rawColumnTaskCounts ? { rawColumnTaskCounts: project.rawColumnTaskCounts } : {}),
+		inProgressTaskDetails: project.inProgressTaskDetails ?? [],
 		gitRemoteOriginUrl: project.gitRemoteOriginUrl ?? null,
 	};
 }
@@ -230,6 +284,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			const manager = new TerminalSessionManager();
 			try {
 				const existingWorkspace = await loadWorkspaceState(repoPath);
+				await backfillSessionAgentIdsFromBoard(workspaceId, existingWorkspace.sessions);
 				manager.hydrateFromRecord(existingWorkspace.sessions);
 			} catch {
 				// Workspace state will be created on demand.
@@ -281,17 +336,28 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		};
 	};
 
-	const summarizeProjectTaskCounts = async (
+	// 一次性汇总单个 project 的三样数据（共用一次 board 加载 + listSummaries，零重复 I/O）：
+	//   - taskCounts：套 live-session overlay 的计数（主看板/项目列表用）。
+	//   - rawColumnTaskCounts：board 列归属的原始计数（Stage-First Overview 的 stage 计数用，见 ADR-0001）。
+	//   - inProgressTaskDetails：in_progress 列 task 明细（Stage-First Overview 展开 In-Progress 用）。
+	const summarizeProject = async (
 		workspaceId: string,
-		_repoPath: string,
-	): Promise<RuntimeProjectTaskCounts> => {
+	): Promise<{
+		taskCounts: RuntimeProjectTaskCounts;
+		rawColumnTaskCounts: RuntimeProjectTaskCounts;
+		inProgressTaskDetails: RuntimeInProgressTaskDetail[];
+	}> => {
 		try {
 			const board = await loadWorkspaceBoardById(workspaceId);
 			const persistedCounts = countTasksByColumn(board);
 			const terminalManager = getTerminalManagerForWorkspace(workspaceId);
 			if (!terminalManager) {
 				projectTaskCountsByWorkspaceId.set(workspaceId, persistedCounts);
-				return persistedCounts;
+				return {
+					taskCounts: persistedCounts,
+					rawColumnTaskCounts: persistedCounts,
+					inProgressTaskDetails: collectInProgressTaskDetailsFromBoard(board, {}),
+				};
 			}
 			const liveSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] = {};
 			for (const summary of terminalManager.listSummaries()) {
@@ -299,10 +365,23 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			}
 			const nextCounts = applyLiveSessionStateToProjectTaskCounts(persistedCounts, board, liveSessionsByTaskId);
 			projectTaskCountsByWorkspaceId.set(workspaceId, nextCounts);
-			return nextCounts;
+			return {
+				taskCounts: nextCounts,
+				rawColumnTaskCounts: persistedCounts,
+				inProgressTaskDetails: collectInProgressTaskDetailsFromBoard(board, liveSessionsByTaskId),
+			};
 		} catch {
-			return projectTaskCountsByWorkspaceId.get(workspaceId) ?? createEmptyProjectTaskCounts();
+			const cached = projectTaskCountsByWorkspaceId.get(workspaceId) ?? createEmptyProjectTaskCounts();
+			return { taskCounts: cached, rawColumnTaskCounts: cached, inProgressTaskDetails: [] };
 		}
+	};
+
+	// 接口保留的薄封装（projects.add 快路径经此只取 overlay 计数；repoPath 参数留作签名兼容）。
+	const summarizeProjectTaskCounts = async (
+		workspaceId: string,
+		_repoPath: string,
+	): Promise<RuntimeProjectTaskCounts> => {
+		return (await summarizeProject(workspaceId)).taskCounts;
 	};
 
 	const buildWorkspaceStateSnapshot = async (
@@ -341,12 +420,16 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			fallbackProjectId;
 		const projectSummaries = await Promise.all(
 			projects.map(async (project) => {
-				const taskCounts = await summarizeProjectTaskCounts(project.workspaceId, project.repoPath);
+				const { taskCounts, rawColumnTaskCounts, inProgressTaskDetails } = await summarizeProject(
+					project.workspaceId,
+				);
 				const gitRemoteOriginUrl = await resolveGitRemoteOriginUrl(project.workspaceId, project.repoPath);
 				return toProjectSummary({
 					workspaceId: project.workspaceId,
 					repoPath: project.repoPath,
 					taskCounts,
+					rawColumnTaskCounts,
+					inProgressTaskDetails,
 					gitRemoteOriginUrl,
 				});
 			}),

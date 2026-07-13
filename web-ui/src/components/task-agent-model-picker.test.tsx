@@ -16,12 +16,17 @@ const fetchClineProviderModelsMock = vi.hoisted(() => vi.fn());
 const fetchTerminalAgentModelSelectionOptionsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@runtime-agent-catalog", () => ({
-	KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID: "composer-2.5",
+	KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID: "grok-4.5-high",
 	getRuntimeLaunchSupportedAgentCatalog: vi.fn(() => [
 		{ id: "cline", label: "Cline", binary: "cline" },
 		{ id: "claude", label: "Claude Code", binary: "claude" },
 		{ id: "cursor", label: "Cursor", binary: "cursor-agent" },
 	]),
+	getRuntimeAgentCatalogEntry: vi.fn((agentId: string) =>
+		agentId === "claude"
+			? { id: "claude", label: "Claude Code", installUrl: "https://install.example/claude" }
+			: null,
+	),
 }));
 
 vi.mock("@/runtime/runtime-config-query", () => ({
@@ -673,7 +678,7 @@ describe("TaskAgentModelPicker – agent icon selector", () => {
 });
 
 describe("TaskAgentModelPicker – terminal agent model selector", () => {
-	it("shows Cursor's Kanban default as Composer 2.5 instead of the raw fast default", async () => {
+	it("shows Cursor's Kanban default as Grok 4.5 High instead of a fast default", async () => {
 		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
 
 		await act(async () =>
@@ -692,9 +697,9 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 					clineProviderOptions={[{ value: "", label: "Cline" }]}
 					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
 					terminalAgentModelOptions={[
-						{ value: "", label: "Default · Composer 2.5" },
+						{ value: "", label: "Default · Cursor Grok 4.5 High" },
 						{ value: "auto", label: "Auto" },
-						{ value: "composer-2.5-fast", label: "Composer 2.5 Fast" },
+						{ value: "grok-4.5-fast-high", label: "Cursor Grok 4.5 High Fast" },
 					]}
 					isLoadingProviders={false}
 					isLoadingModels={false}
@@ -705,8 +710,8 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 			),
 		);
 
-		expect(findButtonByAriaLabel("Default · Composer 2.5")).not.toBeNull();
-		expect(container.textContent).not.toContain("Default · Composer 2.5 Fast");
+		expect(findButtonByAriaLabel("Default · Cursor Grok 4.5 High")).not.toBeNull();
+		expect(container.textContent).not.toContain("Default · Cursor Grok 4.5 High Fast");
 	});
 
 	it("writes an explicit terminal agent model override when a non-default model is selected", async () => {
@@ -729,7 +734,7 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 					clineProviderOptions={[{ value: "", label: "Cline" }]}
 					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
 					terminalAgentModelOptions={[
-						{ value: "", label: "Default · Composer 2.5" },
+						{ value: "", label: "Default · Cursor Grok 4.5 High" },
 						{ value: "auto", label: "Auto" },
 					]}
 					isLoadingProviders={false}
@@ -750,6 +755,220 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 		expect(onTerminalAgentModelOverrideSettingsChange).toHaveBeenCalledWith({
 			agentId: "cursor",
 			modelId: "auto",
+		});
+	});
+});
+
+describe("TaskAgentModelPicker – not-installed agent grey-out", () => {
+	it("greys out a not-installed agent and opens the install guide on click instead of selecting it", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		const onAgentIdChange = vi.fn();
+		const openMock = vi.spyOn(window, "open").mockReturnValue(null);
+
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={undefined}
+					onAgentIdChange={onAgentIdChange}
+					clineSettings={undefined}
+					onClineSettingsChange={() => {}}
+					agentOptions={[
+						{ value: "", label: "Cline", installed: true },
+						{ value: "claude", label: "Claude Code", installed: false },
+					]}
+					clineProviderOptions={[{ value: "", label: "Cline" }]}
+					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+					defaultProviderId="cline"
+				/>,
+			),
+		);
+
+		const claudeAgentButton = findButtonByAriaLabel("Claude Code");
+		expect(claudeAgentButton).not.toBeNull();
+		// Grey base treatment for not-installed agents.
+		expect(claudeAgentButton?.className).toContain("opacity-50");
+		expect(claudeAgentButton?.className).toContain("cursor-default");
+
+		await act(async () => {
+			claudeAgentButton?.click();
+		});
+
+		// Click opens the install guide and does NOT select the agent.
+		expect(openMock).toHaveBeenCalledWith("https://install.example/claude", "_blank", "noopener,noreferrer");
+		expect(onAgentIdChange).not.toHaveBeenCalled();
+	});
+
+	it("does not grey out an installed agent and selects it on click", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		const onAgentIdChange = vi.fn();
+		const openMock = vi.spyOn(window, "open").mockReturnValue(null);
+
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={undefined}
+					onAgentIdChange={onAgentIdChange}
+					clineSettings={undefined}
+					onClineSettingsChange={() => {}}
+					agentOptions={[
+						{ value: "", label: "Cline", installed: true },
+						{ value: "claude", label: "Claude Code", installed: true },
+					]}
+					clineProviderOptions={[{ value: "", label: "Cline" }]}
+					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+					defaultProviderId="cline"
+				/>,
+			),
+		);
+
+		const claudeAgentButton = findButtonByAriaLabel("Claude Code");
+		expect(claudeAgentButton?.className).not.toContain("opacity-50");
+
+		await act(async () => {
+			claudeAgentButton?.click();
+		});
+
+		expect(onAgentIdChange).toHaveBeenCalledWith("claude");
+		expect(openMock).not.toHaveBeenCalled();
+	});
+
+	it("keeps a selected-but-not-installed agent greyed out instead of showing the accent selected state", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		const onAgentIdChange = vi.fn();
+
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					// Editing a task whose saved agentId points at an agent whose binary isn't installed:
+					// the option is both selected AND installed: false.
+					agentId={"claude" as RuntimeAgentId}
+					onAgentIdChange={onAgentIdChange}
+					clineSettings={undefined}
+					onClineSettingsChange={() => {}}
+					agentOptions={[
+						{ value: "", label: "Cline", installed: true },
+						{ value: "claude", label: "Claude Code", installed: false },
+					]}
+					clineProviderOptions={[{ value: "", label: "Cline" }]}
+					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+					defaultProviderId="cline"
+				/>,
+			),
+		);
+
+		const claudeAgentButton = findButtonByAriaLabel("Claude Code");
+		expect(claudeAgentButton).not.toBeNull();
+		// aria-pressed still reflects the real selection state.
+		expect(claudeAgentButton?.getAttribute("aria-pressed")).toBe("true");
+		// The not-installed grey-out must win over the accent selected style, since a
+		// not-installed agent can't be used — clicking only opens the install guide.
+		expect(claudeAgentButton?.className).toContain("opacity-50");
+		expect(claudeAgentButton?.className).toContain("cursor-default");
+		expect(claudeAgentButton?.className).not.toContain("border-accent");
+	});
+});
+
+describe("useTaskAgentModelPicker – installed + terminal model description passthrough", () => {
+	it("derives agentOptions.installed from the agents input (cline forced true, unknown null)", async () => {
+		fetchClineProviderCatalogMock.mockResolvedValue([]);
+		fetchClineProviderModelsMock.mockResolvedValue([]);
+
+		let snapshot: UseTaskAgentModelPickerResult | null = null;
+		const { useTaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+
+		function Harness() {
+			const result = useTaskAgentModelPicker({
+				active: true,
+				workspaceId: null,
+				agentId: "cline",
+				clineSettings: undefined,
+				agents: [
+					{
+						id: "claude",
+						label: "Claude Code",
+						binary: "claude",
+						command: "claude",
+						defaultArgs: [],
+						installed: false,
+						configured: false,
+					},
+				],
+				defaultAgentId: "cline",
+				defaultProviderId: "cline",
+				defaultModelId: null,
+			});
+			useEffect(() => {
+				snapshot = result;
+			});
+			return null;
+		}
+
+		await act(async () => renderWithTooltipProvider(<Harness />));
+		await act(async () => {
+			await new Promise((r) => setTimeout(r, 0));
+		});
+
+		const installedByValue = new Map(snapshot!.agentOptions.map((o) => [o.value, o.installed]));
+		// Default option resolves to cline → always installed.
+		expect(installedByValue.get("")).toBe(true);
+		// Backend-detected not-installed agent.
+		expect(installedByValue.get("claude")).toBe(false);
+		// An agent absent from the agents input → unknown (null), renders normally.
+		expect(installedByValue.get("cursor")).toBeNull();
+	});
+
+	it("carries the concrete model-id description through terminalAgentModelOptions", async () => {
+		fetchClineProviderCatalogMock.mockResolvedValue([]);
+		fetchClineProviderModelsMock.mockResolvedValue([]);
+		fetchTerminalAgentModelSelectionOptionsMock.mockResolvedValue({
+			agentId: "claude",
+			defaultModelId: null,
+			defaultLabel: "Default",
+			options: [
+				{ modelId: "opus", label: "Opus 4.8", description: "claude-opus-4-8" },
+				{ modelId: "haiku", label: "Haiku 4.5", description: "claude-haiku-4-5-20251001" },
+			],
+		});
+
+		let snapshot: UseTaskAgentModelPickerResult | null = null;
+		const { useTaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+
+		function Harness() {
+			const result = useTaskAgentModelPicker({
+				active: true,
+				workspaceId: null,
+				agentId: "claude",
+				clineSettings: undefined,
+				defaultAgentId: "cline",
+				defaultProviderId: "cline",
+				defaultModelId: null,
+			});
+			useEffect(() => {
+				snapshot = result;
+			});
+			return null;
+		}
+
+		await act(async () => renderWithTooltipProvider(<Harness />));
+		await act(async () => {
+			await new Promise((r) => setTimeout(r, 0));
+		});
+
+		const byValue = new Map(snapshot!.terminalAgentModelOptions.map((o) => [o.value, o]));
+		expect(byValue.get("opus")).toEqual({ value: "opus", label: "Opus 4.8", description: "claude-opus-4-8" });
+		expect(byValue.get("haiku")).toEqual({
+			value: "haiku",
+			label: "Haiku 4.5",
+			description: "claude-haiku-4-5-20251001",
 		});
 	});
 });

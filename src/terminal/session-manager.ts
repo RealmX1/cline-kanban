@@ -1,10 +1,10 @@
 // PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
-import { agentRendersTranscriptInline } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeTaskConnectionRetry,
+	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
@@ -36,6 +36,7 @@ import {
 	prepareAgentLaunch,
 	toBracketedPasteSubmission,
 } from "./agent-session-adapters";
+import { materializeTaskAgentSessionForExecutionWorkingDirectory } from "./agent-session-materialization";
 import {
 	CLAUDE_STARTUP_READINESS_TIMEOUT_MS,
 	hasClaudeInteractivePrompt,
@@ -102,6 +103,11 @@ const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
 const DEFAULT_STALL_THRESHOLD_MS = 45_000;
 const STALL_SCAN_INTERVAL_MS = 15_000;
+// idle-live 自愈进 Review 的阈值：终端 agent 完工却不退出、turnOwner 卡在 agent 时，scanForStalls 观测到
+// 「停在交互提示符 + 距最近实质产出（lastSubstantiveOutputAt，非 lastOutputAt——光标重绘会一直刷新它）超过
+// 本阈值」即主动 transitionToReview 自愈。远大于 45s 日志阈值，取保守 5 分钟：主护栏是「停在交互提示符」这一
+// 强信号（agent 确已空闲、非 mid-tool / 长构建），阈值只作次要防抖，宁可晚翻也不误翻正在干活的会话。
+const IDLE_STALL_AUTO_REVIEW_THRESHOLD_MS = 5 * 60_000;
 
 function readStallThresholdMs(): number {
 	const raw = process.env.CLINE_TUI_STALL_MS;
@@ -198,6 +204,8 @@ interface SessionEntry {
 
 export interface StartTaskSessionRequest {
 	taskId: string;
+	workspaceTaskId?: string;
+	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: AgentAdapterLaunchInput["agentId"];
 	binary: string;
 	args: string[];
@@ -214,6 +222,7 @@ export interface StartTaskSessionRequest {
 	workspaceId?: string;
 	projectPath?: string;
 	parentSessionId?: string;
+	taskAgentSessionInitialization?: AgentAdapterLaunchInput["taskAgentSessionInitialization"];
 	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
 
@@ -351,6 +360,21 @@ export function buildTerminalEnvironment(
 		delete env.NODE_DISABLE_COLORS;
 	}
 	return env;
+}
+
+// Agent TUI 默认是 screen-oriented（alt-screen）app：终端主动清 scrollback 会抹掉 Kanban 想保留的
+// 历史，故默认抑制 CSI 3 J。唯一例外是「显式 --no-alt-screen 的 Codex」这一 inline transcript opt-in
+// 模式——它靠「CSI 3 J 清 scrollback + 整段重印」做原地刷新，此时必须放行 CSI 3 J，否则重印会叠加在
+// 旧历史下面（可见翻倍）。判据基于最终启动 args，而非 agentId，因为同一个 codex 既可跑默认 alt-screen、
+// 也可显式 opt-in inline。
+export function shouldSuppressTerminalScrollbackErasureForAgentLaunch(
+	agentId: RuntimeAgentId,
+	commandArgs: readonly string[],
+): boolean {
+	if (agentId === "codex" && commandArgs.includes("--no-alt-screen")) {
+		return false;
+	}
+	return true;
 }
 
 function clearClaudeStartupReadinessTimer(state: { claudeStartupReadinessTimer: NodeJS.Timeout | null }): void {
@@ -661,12 +685,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 专用于 RVF followup 等程序化注入：Stop 刚结束、TUI 仍在重绘时立即写会出现「粘贴了但 CR 被吞、
 	// 不发送」的间歇竞态，故必须门控到提示符就绪——与 submitConnectionDropContinuation / deferred-startup 同范式。
 	// 注意：与 writeInput（人类手敲终端）不同，这里不记 lastUserInputAt，避免把程序化投递当成「用户正在打字」而自我抑制。
-	submitTaskChatInputWhenReady(taskId: string, text: string): RuntimeTaskSessionSummary | null {
+	// options.deferWhileUserTurn（默认 false）：后台自动注入（RVF followup 等，请求体带 source）置 true——遇会话处于
+	// 非 agent 回合（agent 正用 AskUserQuestion / 计划评审 / 权限确认等待用户）时让位、挂起延迟，直到 turnOwner 回到
+	// agent 才投递（见 runTaskChatInputDeliveryAttempt）。用户发起的发送（人类聊天 / commit·openPR 按钮，无 source）
+	// 保持 false，任何回合都照常送达（含 deadline 强写）——这两个本就是故意向 review 态会话发指令。
+	submitTaskChatInputWhenReady(
+		taskId: string,
+		text: string,
+		options?: { deferWhileUserTurn?: boolean },
+	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
 		if (!entry || !active) {
 			return null;
 		}
+		const deferWhileUserTurn = options?.deferWhileUserTurn ?? false;
 		// 程序化「已提交用户轮」投递即外部编排的 resume 动作（RVF followup）——一个 parked 会话收到投递就是被恢复，
 		// 故在此清 park（单一幂等 sink unparkTaskSession，未 parked 时 no-op）。这是最可靠的清标点：纯内存、同步、
 		// 不依赖任何 hook 往返，且只在 parked 期间真正有后台等待时投递才会出现（park→Stop 后无投递，故 park 稳定保持）。
@@ -679,7 +712,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const generation = ++active.taskChatInputDeliveryGeneration;
 		const deadlineAt = now() + TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS;
 		const timer = setTimeout(() => {
-			void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation);
+			void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation, deferWhileUserTurn);
 		}, TASK_CHAT_INPUT_DELIVERY_SETTLE_MS);
 		timer.unref?.();
 		active.taskChatInputDeliveryTimer = timer;
@@ -693,6 +726,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		text: string,
 		deadlineAt: number,
 		generation: number,
+		deferWhileUserTurn: boolean,
 	): Promise<void> {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
@@ -717,10 +751,36 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (currentActive.taskChatInputDeliveryGeneration !== generation) {
 			return;
 		}
+		// Fix B 让位守卫：后台自动注入（deferWhileUserTurn=true）遇「非 agent 回合」（agent 正 AskUserQuestion /
+		// 计划评审 / 权限确认等待用户）时，不写 PTY、不走下面的 deadline 强写，改排一次重探，直到 turnOwner 回到 agent
+		// 才真正投递。等价把 connection-drop 注入路径的 isAgentTurnActive 让位不变量（turnOwner≠agent 就绝不打进正等
+		// 用户的对话框、以免 UserPromptSubmit 把会话翻回 agent 回合）补到本路径——但仅对后台注入生效。语义为「延迟」
+		// 而非「丢弃」：保住这一轮 followup（RVF CLI 不自动重试，丢弃=永久跳过一轮）。须置于 pastDeadline 判定之前，
+		// 才能盖过 deadline 兜底强写。用户发起的发送（deferWhileUserTurn=false）不经此分支，任何回合照常送达。
+		// ponytail: 若 agent 长期停在用户回合，此注入将每 RECHECK_MS 空探一次、无限挂起——unref 定时器、代际管理已有、
+		// 会话 teardown 随 clearTaskChatInputDeliveryTimer 清除，无泄漏；且卡片此时本应在 Review，与线 A 只扫 agent 回合不冲突。
+		if (deferWhileUserTurn && resolveSessionFacets(currentEntry.summary).turnOwner !== "agent") {
+			this.scheduleTaskChatInputDeliveryRecheck(
+				taskId,
+				text,
+				deadlineAt,
+				generation,
+				currentActive,
+				deferWhileUserTurn,
+			);
+			return;
+		}
 		const pastDeadline = now() >= deadlineAt;
 		if (readiness === null && !pastDeadline) {
 			// 尚未就绪且未过 deadline：隔 RECHECK_MS 再探（纯轮询，不消耗额外语义）。
-			this.scheduleTaskChatInputDeliveryRecheck(taskId, text, deadlineAt, generation, currentActive);
+			this.scheduleTaskChatInputDeliveryRecheck(
+				taskId,
+				text,
+				deadlineAt,
+				generation,
+				currentActive,
+				deferWhileUserTurn,
+			);
 			return;
 		}
 		// A1 让路：用户近窗口在手敲（或 deferred-startup 仍待发）→ 不插进用户正在打字的那一行中间，
@@ -731,7 +791,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			!this.canInjectIntoTerminalNow(currentActive) &&
 			now() < deadlineAt + TASK_CHAT_INPUT_DELIVERY_MAX_DEADLINE_INPUT_YIELD_MS
 		) {
-			this.scheduleTaskChatInputDeliveryRecheck(taskId, text, deadlineAt, generation, currentActive);
+			this.scheduleTaskChatInputDeliveryRecheck(
+				taskId,
+				text,
+				deadlineAt,
+				generation,
+				currentActive,
+				deferWhileUserTurn,
+			);
 			return;
 		}
 		// 就绪命中 或 deadline 兜底：经写后确认闭环写 PTY（不走 writeInput，避免把程序化投递记成 lastUserInputAt
@@ -745,16 +812,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 		);
 	}
 
-	// 排一次 RECHECK_MS 后的投递重试（未就绪轮询 / A1 让路重排共用），沿用捕获的 deadlineAt + generation。
+	// 排一次 RECHECK_MS 后的投递重试（未就绪轮询 / A1 让路重排 / Fix B 让位重探共用），沿用捕获的 deadlineAt + generation
+	// + deferWhileUserTurn（后台注入让位标记须跨重试保持，否则重探时会丢失让位语义、退回无条件强写）。
 	private scheduleTaskChatInputDeliveryRecheck(
 		taskId: string,
 		text: string,
 		deadlineAt: number,
 		generation: number,
 		active: ActiveProcessState,
+		deferWhileUserTurn: boolean,
 	): void {
 		const timer = setTimeout(() => {
-			void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation);
+			void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation, deferWhileUserTurn);
 		}, TASK_CHAT_INPUT_DELIVERY_RECHECK_MS);
 		timer.unref?.();
 		active.taskChatInputDeliveryTimer = timer;
@@ -1160,6 +1229,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 		});
 
+		await materializeTaskAgentSessionForExecutionWorkingDirectory({
+			initialization: request.taskAgentSessionInitialization,
+			executionWorkingDirectoryPath: request.cwd,
+		});
 		const launch = await prepareAgentLaunch({
 			taskId: request.taskId,
 			agentId: request.agentId,
@@ -1174,14 +1247,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 			env: request.env,
 			workspaceId: request.workspaceId,
 			parentSessionId: request.parentSessionId,
+			taskAgentSessionInitialization: request.taskAgentSessionInitialization,
+			readOnlyQuestionSession: request.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way",
+			forkLatestWorkingDirectorySession:
+				request.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+				"forked_from_main_current_turn",
 			terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 		});
 
 		const taskContextEnv = {
-			KANBAN_TASK_ID: request.taskId,
+			KANBAN_TASK_ID: request.workspaceTaskId ?? request.taskId,
 			KANBAN_ATTEMPT_ID: request.taskId,
-			CLINE_KANBAN_TASK_ID: request.taskId,
+			CLINE_KANBAN_TASK_ID: request.workspaceTaskId ?? request.taskId,
 			CLINE_KANBAN_ATTEMPT_ID: request.taskId,
+			KANBAN_TASK_CONVERSATION_SESSION_ID: request.taskId,
 			KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
 			CLINE_KANBAN_PROJECT_PATH: request.projectPath ?? request.cwd,
 		};
@@ -1412,6 +1491,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 				latestHookActivity: null,
 				latestTurnCheckpoint: null,
 				previousTurnCheckpoint: null,
+				...(request.taskConversationSessionMetadata
+					? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+					: {}),
 			});
 			this.emitSummary(summary);
 			throw new Error(formatSpawnFailure(commandBinary, error));
@@ -1440,10 +1522,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			rows,
 			terminalProtocolFilter: createTerminalProtocolFilterState({
 				interceptOscColorQueries: true,
-				// inline transcript agent（Codex）靠「CSI 3 J 清 scrollback + 重印整段」做原地刷新，
-				// 吞掉 CSI 3 J 会让重印叠加在旧历史下面（可见翻倍），并让 mirror scrollback 只增不清、
-				// 每次 restore 全量重放。故仅对 alt-screen agent 抑制 CSI 3 J（见 agentRendersTranscriptInline）。
-				suppressScrollbackErasure: !agentRendersTranscriptInline(request.agentId),
+				// 默认抑制终端主动清 scrollback（保护 Kanban 历史）；仅当 Codex 显式 --no-alt-screen 走
+				// inline transcript opt-in 时放行 CSI 3 J（该模式靠整屏重印替换旧内容，见 helper 注释）。
+				suppressScrollbackErasure: shouldSuppressTerminalScrollbackErasureForAgentLaunch(
+					request.agentId,
+					commandArgs,
+				),
 				suppressDeviceAttributeQueries: request.agentId === "droid",
 			}),
 			onSessionCleanup: launch.cleanup ?? null,
@@ -1510,6 +1594,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			warningMessage: null,
 			latestTurnCheckpoint: null,
 			previousTurnCheckpoint: null,
+			...(request.taskConversationSessionMetadata
+				? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+				: {}),
 		});
 		this.emitSummary(entry.summary);
 		for (const chunk of preActiveOutputChunks) {
@@ -1762,6 +1849,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 			entry.active.awaitingCodexPromptAfterEnter = true;
 		}
 		entry.active.session.write(data);
+		const submittedUserMessagePreview = data.includes(10) || data.includes(13) ? data.toString("utf8").trim() : "";
+		if (submittedUserMessagePreview && entry.summary.taskConversationSessionMetadata) {
+			const summary = updateSummary(entry, {
+				taskConversationSessionMetadata: {
+					...entry.summary.taskConversationSessionMetadata,
+					latestUserMessagePreview: submittedUserMessagePreview,
+				},
+			});
+			this.emitSummary(summary);
+		}
 		return cloneSummary(entry.summary);
 	}
 
@@ -1812,9 +1909,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
-		// "hook"=agent 自然完成（Stop hook）；"manual_review"=用户经卡片悬浮按钮手动翻入审查回合。其余成因
+		// "hook"=agent 自然完成（Stop hook）；"manual_review"=用户经卡片悬浮按钮手动翻入审查回合；
+		// "idle_stall"=scanForStalls 观测到「完工不退出的空闲 agent 回合会话」主动自愈翻入。其余成因
 		// （exit/error/interrupted/attention/null）不经此入口转 review，原样返回当前 summary（no-op）。
-		if (reason !== "hook" && reason !== "manual_review") {
+		if (reason !== "hook" && reason !== "manual_review" && reason !== "idle_stall") {
 			return cloneSummary(entry.summary);
 		}
 		const before = entry.summary;
@@ -2088,14 +2186,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		const interval = setInterval(() => {
-			this.scanForStalls();
+			// scanForStalls 现为 async（idle-live 自愈需读全屏镜像快照）；吞掉 rejection，绝不让一次扫描异常掀翻 interval。
+			void this.scanForStalls().catch(() => {});
 		}, STALL_SCAN_INTERVAL_MS);
 		// Don't keep Node alive just for this probe; production has other refs.
 		interval.unref?.();
 		this.stallScanInterval = interval;
 	}
 
-	private scanForStalls(): void {
+	private async scanForStalls(): Promise<void> {
 		const currentTime = now();
 		for (const [taskId, entry] of this.entries.entries()) {
 			// parked（已派发后台工作、等自行恢复）跳过卡顿扫描：parked 主 agent 是 {agent,live,null}（active turn）
@@ -2110,6 +2209,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			if (entry.summary.agentId === null) {
 				// Skip raw shell sessions; the stall probe is scoped to agent TUIs.
+				continue;
+			}
+			// idle-live 自愈：完工却不退出、turnOwner 卡在 agent 的会话，距最近实质产出超阈值 + 确停在交互提示符 →
+			// 主动 transitionToReview 翻入 user 回合（现有客户端 effect 随即把卡物理搬进 Review）。必须先于下方
+			// lastOutputAt 基线的 log 逻辑——光标重绘让 lastOutputAt 恒新鲜，log 分支会在 elapsed<阈值处提前 continue，
+			// 永远够不到这条自愈（正是本 bug 的病灶）。
+			if (await this.attemptIdleStallAutoReview(taskId, entry, currentTime)) {
+				entry.lastStallLoggedAt = null;
 				continue;
 			}
 			const baseline = entry.summary.lastOutputAt ?? entry.summary.startedAt;
@@ -2129,6 +2236,56 @@ export class TerminalSessionManager implements TerminalSessionService {
 			);
 			entry.lastStallLoggedAt = baseline;
 		}
+	}
+
+	// idle-live 自愈判定 + 动作。前置条件（agent 回合 / 非 parked / 有 agentId / active）已由 scanForStalls 保证。
+	// 命中两条独立门控才翻转：
+	//  ① 距最近「实质产出」超阈值——用 lastSubstantiveOutputAt 而非 lastOutputAt（光标重绘一直刷新后者、会永久压住
+	//     计时器，正是本 bug 的病灶）；lastSubstantiveOutputAt 缺失时回退 startedAt。这是次要防抖。
+	//  ② 当前确实停在交互提示符——走 resolveInteractivePromptReadiness 的 "prompt" 分支，它经「永远在线的全屏镜像
+	//     快照」判定，与 connection-drop 反应引擎是否挂载解耦（isAtInteractivePromptForReaction 依赖的扫描缓冲仅在
+	//     autoContinueOnConnectionDropEnabled 开启时在线，用它作主护栏会把自愈错误耦合到那个无关开关）。只接受
+	//     "prompt"——"immediate"（无提示符预测的 droid/kiro）/"quiet"（其门控要求 turnOwner≠agent，本路径永不触发）
+	//     太宽，保守跳过。这是防「安静但在干活（mid-tool / 长构建，此时渲染的是 spinner 而非输入框）」误报的主信号。
+	// 翻转后 turnOwner=user，下轮 scanForStalls 的 isSummaryInActiveTurn 转 false 不再命中——自限、不重复搬列。
+	// 返回是否已翻转（true → 调用方跳过本 entry 后续 log 逻辑）。
+	private async attemptIdleStallAutoReview(
+		taskId: string,
+		entry: SessionEntry,
+		currentTime: number,
+	): Promise<boolean> {
+		// agent 回合专属：scanForStalls 顶部 gate 用的 isSummaryInActiveTurn 等价旧 state∈{running,awaiting_review}，
+		// 对 user 回合（awaiting_review）也为 true——若不在此另加 turnOwner==="agent" 强门控，翻入 review 后每轮扫描
+		// 都会再次进来、重复打 stall-auto-review 日志并空跑镜像读（transitionToReview 的 reducer 虽会空转、状态不变，
+		// 但日志刷屏 + 无谓 IO）。此守卫即自限的真正闸门：翻转后 turnOwner=user，下轮在此直接返回。
+		if (resolveSessionFacets(entry.summary).turnOwner !== "agent") {
+			return false;
+		}
+		const substantiveBaseline = entry.summary.lastSubstantiveOutputAt ?? entry.summary.startedAt;
+		if (!substantiveBaseline || currentTime - substantiveBaseline <= IDLE_STALL_AUTO_REVIEW_THRESHOLD_MS) {
+			return false;
+		}
+		let readiness: TaskChatInputDeliveryReadiness;
+		try {
+			readiness = await this.resolveInteractivePromptReadiness(entry);
+		} catch {
+			// 镜像快照读取抖动不应打断整轮 stall 扫描：本轮跳过自愈，下轮再判。
+			return false;
+		}
+		if (readiness !== "prompt") {
+			return false;
+		}
+		// await 期间会话可能已结束 / 已被别的路径翻出 agent 回合：翻转前复查仍是活跃 agent 回合，避免误翻。
+		const current = this.entries.get(taskId);
+		if (!current || !current.active || resolveSessionFacets(current.summary).turnOwner !== "agent") {
+			return false;
+		}
+		const idleMs = currentTime - substantiveBaseline;
+		logTuiFreezeWarning(
+			`[tui-freeze] stall-auto-review taskId=${taskId} agentId=${current.summary.agentId} pid=${current.summary.pid ?? "(none)"} idleMs=${idleMs} reason=idle_stall`,
+		);
+		this.transitionToReview(taskId, "idle_stall");
+		return true;
 	}
 
 	dispose(): void {

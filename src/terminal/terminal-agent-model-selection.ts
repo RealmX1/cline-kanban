@@ -51,24 +51,42 @@ export function parseCodexModelCatalog(stdout: string): RuntimeTerminalAgentMode
 	);
 }
 
-function parseClaudeHelpModelAliases(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
-	const aliases = new Set<string>();
+// ponytail: 策展的版本号硬编码在此。`claude --help` 的 `--model` 行只举几个示例别名
+// （不含 haiku、无版本号），别名→具体版本的解析发生在 `claude` 二进制内部、没有廉价可编程来源。
+// Anthropic 发布新默认版本时手动 bump 这张表（label 版本号 + description 具体 model-id）。
+const CLAUDE_CODE_MODEL_ALIAS_SUPPLEMENT: RuntimeTerminalAgentModelSelectionOption[] = [
+	{ modelId: "opus", label: "Opus 4.8", description: "claude-opus-4-8" },
+	{ modelId: "sonnet", label: "Sonnet 5", description: "claude-sonnet-5" },
+	{ modelId: "haiku", label: "Haiku 4.5", description: "claude-haiku-4-5-20251001" },
+	{ modelId: "fable", label: "Fable 5", description: "claude-fable-5" },
+];
+
+export function parseClaudeHelpModelAliases(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
+	const helpAliases: string[] = [];
 	const aliasMatch = stdout.match(/e\.g\.\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*or\s*'([^']+)'/);
 	if (aliasMatch) {
 		for (const alias of aliasMatch.slice(1)) {
-			if (alias) {
-				aliases.add(alias.trim());
+			const trimmed = alias?.trim();
+			if (trimmed) {
+				helpAliases.push(trimmed);
 			}
 		}
 	}
-	for (const alias of ["sonnet", "opus", "fable"]) {
-		aliases.add(alias);
-	}
+	const supplementByModelId = new Map(CLAUDE_CODE_MODEL_ALIAS_SUPPLEMENT.map((option) => [option.modelId, option]));
+	// 静态补充表在前（策展 label + 版本 + 具体 id，保证 haiku 必现），help 自动发现的其余别名在后。
+	// dedup 保留首次出现，因此已知类别用静态条目、未知别名退回「首字母大写」占位。
+	const orderedModelIds = [...CLAUDE_CODE_MODEL_ALIAS_SUPPLEMENT.map((option) => option.modelId), ...helpAliases];
 	return deduplicateModelOptions(
-		[...aliases].map((alias) => ({
-			modelId: alias,
-			label: alias.charAt(0).toUpperCase() + alias.slice(1),
-		})),
+		orderedModelIds.map((modelId) => {
+			const supplement = supplementByModelId.get(modelId);
+			if (supplement) {
+				return supplement;
+			}
+			return {
+				modelId,
+				label: modelId.charAt(0).toUpperCase() + modelId.slice(1),
+			};
+		}),
 	);
 }
 
@@ -102,10 +120,10 @@ function buildFallbackResponse(
 		return {
 			agentId,
 			defaultModelId: KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
-			defaultLabel: "Default · Composer 2.5",
+			defaultLabel: "Default · Cursor Grok 4.5 High",
 			options: [
 				{ modelId: "auto", label: "Auto" },
-				{ modelId: "composer-2.5-fast", label: "Composer 2.5 Fast" },
+				{ modelId: "grok-4.5-fast-high", label: "Cursor Grok 4.5 High Fast" },
 			],
 			...(warning ? { warning } : {}),
 		};
@@ -158,7 +176,7 @@ export async function getTerminalAgentModelSelectionOptions(
 		return {
 			agentId,
 			defaultModelId: KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
-			defaultLabel: "Default · Composer 2.5",
+			defaultLabel: "Default · Cursor Grok 4.5 High",
 			options,
 		};
 	} catch (error) {

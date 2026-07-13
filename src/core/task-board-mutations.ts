@@ -4,6 +4,7 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeBoardDependency,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskCommentEntry,
@@ -26,6 +27,7 @@ export interface RuntimeCreateTaskInput {
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	baseRef: string;
 	parentSessionId?: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
@@ -43,6 +45,7 @@ export interface RuntimeUpdateTaskInput {
 	agentId?: RuntimeAgentId | null;
 	clineSettings?: RuntimeTaskClineSettings | null;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings | null;
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization | null;
 	baseRef: string;
 	parentSessionId?: string | null;
 	worktreeMode?: RuntimeTaskWorktreeMode | null;
@@ -110,6 +113,12 @@ function cloneTaskTerminalAgentModelOverrideSettings(
 		agentId: settings.agentId,
 		modelId,
 	};
+}
+
+function cloneTaskAgentSessionInitialization(
+	initialization?: RuntimeTaskAgentSessionInitialization | null,
+): RuntimeTaskAgentSessionInitialization | undefined {
+	return initialization ? { ...initialization } : undefined;
 }
 
 export interface RuntimeCreateTaskResult {
@@ -356,7 +365,7 @@ export function addTaskToColumn(
 		id: explicitTaskId || createUniqueTaskId(existingIds, randomUuid),
 		title: resolveTaskTitle(input.title, prompt),
 		prompt,
-		startInPlanMode: Boolean(input.startInPlanMode),
+		startInPlanMode: input.startInPlanMode ?? true,
 		autoReviewEnabled: Boolean(input.autoReviewEnabled),
 		autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 		images: cloneTaskImages(input.images),
@@ -369,6 +378,9 @@ export function addTaskToColumn(
 						input.terminalAgentModelOverrideSettings,
 					),
 				}
+			: {}),
+		...(input.taskAgentSessionInitialization
+			? { taskAgentSessionInitialization: cloneTaskAgentSessionInitialization(input.taskAgentSessionInitialization) }
 			: {}),
 		baseRef,
 		worktreeMode: input.worktreeMode ?? "branch",
@@ -691,6 +703,10 @@ export function updateTask(
 					: input.worktreeMode === null
 						? "branch"
 						: input.worktreeMode;
+			const nextTaskAgentSessionInitialization =
+				input.taskAgentSessionInitialization === undefined
+					? cloneTaskAgentSessionInitialization(card.taskAgentSessionInitialization)
+					: cloneTaskAgentSessionInitialization(input.taskAgentSessionInitialization);
 			const nextPrepFilePath =
 				input.prepFilePath === undefined
 					? card.prepFilePath
@@ -724,6 +740,7 @@ export function updateTask(
 						: input.terminalAgentModelOverrideSettings === null
 							? undefined
 							: cloneTaskTerminalAgentModelOverrideSettings(input.terminalAgentModelOverrideSettings),
+				taskAgentSessionInitialization: nextTaskAgentSessionInitialization,
 				baseRef,
 				parentSessionId: nextParentSessionId,
 				worktreeMode: nextWorktreeMode,

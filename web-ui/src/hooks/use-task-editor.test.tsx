@@ -2,15 +2,42 @@ import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { useTaskEditor } from "@/hooks/use-task-editor";
 import type {
 	RuntimeAgentId,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
+
+vi.mock("@/components/task-agent-model-picker", () => ({
+	TaskAgentModelPicker: () => null,
+	useTaskAgentModelPicker: () => ({
+		agentOptions: [],
+		clineProviderOptions: [],
+		clineModelOptions: [],
+		terminalAgentModelOptions: [],
+		terminalAgentDefaultModelId: null,
+		effectiveDefaultModelId: null,
+		providerModels: [],
+		isLoadingProviders: false,
+		isLoadingModels: false,
+		isLoadingTerminalAgentModels: false,
+		providerDefaultModels: {},
+	}),
+}));
+
+vi.mock("@/components/task-agent-session-initialization-control", () => ({
+	TaskAgentSessionInitializationControl: () => null,
+}));
+
+vi.mock("@/components/task-prompt-composer", () => ({
+	TaskPromptComposer: () => null,
+}));
 
 function createTask(taskId: string, prompt: string, createdAt: number, overrides: Partial<BoardCard> = {}): BoardCard {
 	return {
@@ -44,14 +71,18 @@ interface HookSnapshot {
 	isInlineTaskCreateOpen: boolean;
 	newTaskPrompt: string;
 	newTaskImages: TaskImage[];
+	newTaskStartInPlanMode: boolean;
 	newTaskBranchRef: string;
 	newTaskWorktreeMode: RuntimeTaskWorktreeMode;
 	newTaskAgentId: RuntimeAgentId | undefined;
 	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
 	newTaskTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
+	newTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
 	editTaskStartInPlanMode: boolean;
+	editTaskWorktreeMode: RuntimeTaskWorktreeMode;
+	editTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
 	isEditTaskStartInPlanModeDisabled: boolean;
 	handleOpenCreateTask: () => void;
 	handleCreateTask: (options?: { keepDialogOpen?: boolean }) => string | null;
@@ -67,12 +98,15 @@ interface HookSnapshot {
 	setEditTaskPrompt: (value: string) => void;
 	setEditTaskAutoReviewEnabled: (value: boolean) => void;
 	setEditTaskAutoReviewMode: (value: TaskAutoReviewMode) => void;
+	setEditTaskWorktreeMode: (value: RuntimeTaskWorktreeMode) => void;
+	setEditTaskAgentSessionInitialization: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
 	setNewTaskAgentId: (value: RuntimeAgentId | undefined) => void;
 	setNewTaskClineSettings: (value: RuntimeTaskClineSettings | undefined) => void;
 	setNewTaskTerminalAgentModelOverrideSettings: (
 		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
 		options?: { rememberSelectionForFutureCreateTasks?: boolean },
 	) => void;
+	setNewTaskAgentSessionInitialization: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
 }
 
 function requireSnapshot(snapshot: HookSnapshot | null): HookSnapshot {
@@ -92,6 +126,8 @@ function HookHarness({
 	defaultCreateTaskBranchRef = "main",
 	currentProjectId = "project-1",
 	selectedAgentId = null,
+	newTaskStartInPlanModeByDefault = true,
+	isNewTaskStartInPlanModeDefaultLoaded = true,
 }: {
 	initialBoard: BoardData;
 	onSnapshot: (snapshot: HookSnapshot) => void;
@@ -102,6 +138,8 @@ function HookHarness({
 	defaultCreateTaskBranchRef?: string;
 	currentProjectId?: string | null;
 	selectedAgentId?: RuntimeAgentId | null;
+	newTaskStartInPlanModeByDefault?: boolean;
+	isNewTaskStartInPlanModeDefaultLoaded?: boolean;
 }): null {
 	const [board, setBoard] = useState<BoardData>(initialBoard);
 	const [, setSelectedTaskId] = useState<string | null>(null);
@@ -114,6 +152,8 @@ function HookHarness({
 		defaultCreateTaskBranchRef,
 		currentProjectId,
 		selectedAgentId,
+		newTaskStartInPlanModeByDefault,
+		isNewTaskStartInPlanModeDefaultLoaded,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 	});
@@ -124,14 +164,18 @@ function HookHarness({
 			isInlineTaskCreateOpen: editor.isInlineTaskCreateOpen,
 			newTaskPrompt: editor.newTaskPrompt,
 			newTaskImages: editor.newTaskImages,
+			newTaskStartInPlanMode: editor.newTaskStartInPlanMode,
 			newTaskBranchRef: editor.newTaskBranchRef,
 			newTaskWorktreeMode: editor.newTaskWorktreeMode,
 			newTaskAgentId: editor.newTaskAgentId,
 			newTaskClineSettings: editor.newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings: editor.newTaskTerminalAgentModelOverrideSettings,
+			newTaskAgentSessionInitialization: editor.newTaskAgentSessionInitialization,
 			editingTaskId: editor.editingTaskId,
 			editTaskPrompt: editor.editTaskPrompt,
 			editTaskStartInPlanMode: editor.editTaskStartInPlanMode,
+			editTaskWorktreeMode: editor.editTaskWorktreeMode,
+			editTaskAgentSessionInitialization: editor.editTaskAgentSessionInitialization,
 			isEditTaskStartInPlanModeDisabled: editor.isEditTaskStartInPlanModeDisabled,
 			handleOpenCreateTask: editor.handleOpenCreateTask,
 			handleCreateTask: editor.handleCreateTask,
@@ -147,9 +191,12 @@ function HookHarness({
 			setEditTaskPrompt: editor.setEditTaskPrompt,
 			setEditTaskAutoReviewEnabled: editor.setEditTaskAutoReviewEnabled,
 			setEditTaskAutoReviewMode: editor.setEditTaskAutoReviewMode,
+			setEditTaskWorktreeMode: editor.setEditTaskWorktreeMode,
+			setEditTaskAgentSessionInitialization: editor.setEditTaskAgentSessionInitialization,
 			setNewTaskAgentId: editor.setNewTaskAgentId,
 			setNewTaskClineSettings: editor.setNewTaskClineSettings,
 			setNewTaskTerminalAgentModelOverrideSettings: editor.setNewTaskTerminalAgentModelOverrideSettings,
+			setNewTaskAgentSessionInitialization: editor.setNewTaskAgentSessionInitialization,
 		});
 	}, [
 		board,
@@ -157,7 +204,9 @@ function HookHarness({
 		editor.handleCreateTasks,
 		editor.handleOpenCreateTask,
 		editor.editTaskPrompt,
+		editor.editTaskAgentSessionInitialization,
 		editor.editTaskStartInPlanMode,
+		editor.editTaskWorktreeMode,
 		editor.editingTaskId,
 		editor.handleCancelEditTask,
 		editor.handleOpenEditTask,
@@ -167,17 +216,22 @@ function HookHarness({
 		editor.isInlineTaskCreateOpen,
 		editor.newTaskPrompt,
 		editor.newTaskImages,
+		editor.newTaskStartInPlanMode,
 		editor.newTaskBranchRef,
 		editor.newTaskAgentId,
 		editor.newTaskClineSettings,
 		editor.newTaskTerminalAgentModelOverrideSettings,
+		editor.newTaskAgentSessionInitialization,
 		editor.setEditTaskAutoReviewEnabled,
 		editor.setEditTaskAutoReviewMode,
+		editor.setEditTaskWorktreeMode,
+		editor.setEditTaskAgentSessionInitialization,
 		editor.setEditTaskPrompt,
 		editor.setNewTaskImages,
 		editor.setNewTaskBranchRef,
 		editor.setNewTaskPrompt,
 		editor.setNewTaskTerminalAgentModelOverrideSettings,
+		editor.setNewTaskAgentSessionInitialization,
 		onSnapshot,
 	]);
 
@@ -211,6 +265,105 @@ describe("useTaskEditor", () => {
 				previousActEnvironment;
 		}
 		localStorage.clear();
+	});
+
+	it("defaults new tasks to plan mode from the runtime setting", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					newTaskStartInPlanModeByDefault={true}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		expect(requireSnapshot(latestSnapshot).newTaskStartInPlanMode).toBe(true);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Create default plan task");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.startInPlanMode).toBe(true);
+	});
+
+	it("ignores the legacy browser-local plan mode default when runtime setting is false", async () => {
+		localStorage.setItem(LocalStorageKey.TaskStartInPlanMode, "true");
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					newTaskStartInPlanModeByDefault={false}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		expect(requireSnapshot(latestSnapshot).newTaskStartInPlanMode).toBe(false);
+	});
+
+	it("does not create tasks before the runtime plan mode default has loaded", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					newTaskStartInPlanModeByDefault={true}
+					isNewTaskStartInPlanModeDefaultLoaded={false}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Create after config loads");
+		});
+		await act(async () => {
+			const createdTaskId = requireSnapshot(latestSnapshot).handleCreateTask();
+			expect(createdTaskId).toBeNull();
+		});
+
+		expect(requireSnapshot(latestSnapshot).isInlineTaskCreateOpen).toBe(false);
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards).toHaveLength(0);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={requireSnapshot(latestSnapshot).board}
+					newTaskStartInPlanModeByDefault={false}
+					isNewTaskStartInPlanModeDefaultLoaded={true}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Create after config loads");
+		});
+		await act(async () => {
+			const createdTaskId = requireSnapshot(latestSnapshot).handleCreateTask();
+			expect(createdTaskId).not.toBeNull();
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.startInPlanMode).toBe(false);
 	});
 
 	it("returns the edited task id when saving a task", async () => {
@@ -252,6 +405,112 @@ describe("useTaskEditor", () => {
 		expect(savedTaskId).toBe("task-1");
 		expect(requireSnapshot(latestSnapshot).editingTaskId).toBeNull();
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Updated prompt");
+	});
+
+	it("saves edited worktree mode and agent session initialization", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const originalInitialization: RuntimeTaskAgentSessionInitialization = {
+			sourceAgentId: "codex",
+			sourceSessionId: "123e4567-e89b-42d3-a456-426614174000",
+			sourceSessionReuseMode: "resume_existing_session",
+		};
+		const updatedInitialization: RuntimeTaskAgentSessionInitialization = {
+			...originalInitialization,
+			sourceSessionReuseMode: "fork_existing_session",
+		};
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				agentId: "codex",
+				worktreeMode: "branch",
+				taskAgentSessionInitialization: originalInitialization,
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+			requireSnapshot(latestSnapshot).setEditTaskWorktreeMode("inplace");
+			requireSnapshot(latestSnapshot).setEditTaskAgentSessionInitialization(updatedInitialization);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveEditedTask();
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]).toMatchObject({
+			worktreeMode: "inplace",
+			taskAgentSessionInitialization: updatedInitialization,
+		});
+
+		const updatedTask = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!updatedTask) {
+			throw new Error("Expected the updated backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(updatedTask);
+			requireSnapshot(latestSnapshot).setEditTaskAgentSessionInitialization(undefined);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveEditedTask();
+		});
+
+		expect(
+			requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.taskAgentSessionInitialization,
+		).toBeUndefined();
+	});
+
+	it("falls back to an inplace task when a legacy edit draft has no worktree mode", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const task = createTask("task-1", "Initial prompt", 1, { worktreeMode: "inplace" });
+		const legacyDraftKey = JSON.stringify(["project-1", task.id]);
+		window.localStorage.setItem(
+			LocalStorageKey.TaskEditDrafts,
+			JSON.stringify({
+				drafts: {
+					[legacyDraftKey]: {
+						taskId: task.id,
+						prompt: "Legacy draft prompt",
+						images: [],
+						startInPlanMode: false,
+						autoReviewEnabled: false,
+						autoReviewMode: "commit",
+						branchRef: "main",
+						savedAt: 1,
+					},
+				},
+			}),
+		);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([task])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Legacy draft prompt");
+		expect(requireSnapshot(latestSnapshot).editTaskWorktreeMode).toBe("inplace");
 	});
 
 	it("restores an autosaved edit draft when reopening the same task", async () => {
@@ -877,5 +1136,92 @@ describe("useTaskEditor", () => {
 				reasoningEffort: "medium",
 			});
 		}
+	});
+
+	it("persists session initialization on create and loads it with worktree mode in the shared backlog editor", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const initialization: RuntimeTaskAgentSessionInitialization = {
+			sourceAgentId: "claude",
+			sourceSessionId: "11111111-2222-3333-8444-555555555555",
+			sourceSessionReuseMode: "resume_existing_session",
+		};
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Continue existing Claude work");
+			requireSnapshot(latestSnapshot).setNewTaskAgentId("claude");
+			requireSnapshot(latestSnapshot).setNewTaskWorktreeMode("inplace");
+			requireSnapshot(latestSnapshot).setNewTaskAgentSessionInitialization(initialization);
+		});
+		let taskId: string | null = null;
+		await act(async () => {
+			taskId = requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+		const createdTask = requireSnapshot(latestSnapshot).board.columns[0]?.cards.find((card) => card.id === taskId);
+		expect(createdTask?.taskAgentSessionInitialization).toEqual(initialization);
+
+		await act(async () => {
+			if (createdTask) requireSnapshot(latestSnapshot).handleOpenEditTask(createdTask);
+		});
+		expect(requireSnapshot(latestSnapshot).editTaskWorktreeMode).toBe("inplace");
+		expect(requireSnapshot(latestSnapshot).editTaskAgentSessionInitialization).toEqual(initialization);
+	});
+
+	it("allows selecting a new worktree when continuing a Claude session", async () => {
+		const onWorktreeModeChange = vi.fn();
+		await act(async () => {
+			root.render(
+				<TaskEditorDialog
+					open
+					onOpenChange={vi.fn()}
+					prompt="Continue existing Claude work"
+					onPromptChange={vi.fn()}
+					images={[]}
+					onImagesChange={vi.fn()}
+					onCreate={() => null}
+					onCreateMultiple={() => []}
+					startInPlanMode={false}
+					onStartInPlanModeChange={vi.fn()}
+					autoReviewEnabled={false}
+					onAutoReviewEnabledChange={vi.fn()}
+					autoReviewMode="commit"
+					onAutoReviewModeChange={vi.fn()}
+					workspaceId="workspace-1"
+					branchRef="main"
+					branchOptions={[{ value: "main", label: "main" }]}
+					onBranchRefChange={vi.fn()}
+					worktreeMode="inplace"
+					onWorktreeModeChange={onWorktreeModeChange}
+					agentId="claude"
+					onAgentIdChange={vi.fn()}
+					onClineSettingsChange={vi.fn()}
+					taskAgentSessionInitialization={{
+						sourceAgentId: "claude",
+						sourceSessionId: "11111111-2222-4333-8444-555555555555",
+						sourceSessionReuseMode: "resume_existing_session",
+					}}
+					onTaskAgentSessionInitializationChange={vi.fn()}
+				/>,
+			);
+		});
+
+		const newWorktreeButton = document.body.querySelector<HTMLButtonElement>("#task-create-worktree-mode-branch");
+		expect(newWorktreeButton?.disabled).toBe(false);
+
+		await act(async () => {
+			newWorktreeButton?.click();
+		});
+
+		expect(onWorktreeModeChange).toHaveBeenCalledWith("branch");
 	});
 });

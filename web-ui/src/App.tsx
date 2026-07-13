@@ -11,17 +11,20 @@ import { BugReportFab } from "@/components/bug-report/bug-report-fab";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
+import { CrossRepositoryStageFirstOverview } from "@/components/cross-repository-stage-first-overview";
 import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { GitHistoryView } from "@/components/git-history-view";
+import { GuidedVerificationController } from "@/components/guided-verification/guided-verification-controller";
 import { KanbanBoard } from "@/components/kanban-board";
+import { NotificationCenter } from "@/components/notification-center";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
-import { TaskCreateDialog } from "@/components/task-create-dialog";
-import { TaskInlineCreateCard } from "@/components/task-inline-create-card";
+import { TaskBoardSearchToolbar } from "@/components/task-board-search-toolbar";
+import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TopBar } from "@/components/top-bar";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,8 +48,10 @@ import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
 import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
+import { useGuidedVerification } from "@/hooks/use-guided-verification";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
+import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { parseRemovedProjectPathFromStreamError, useProjectNavigation } from "@/hooks/use-project-navigation";
@@ -69,11 +74,14 @@ import {
 	selectLatestTaskChatMessageForTask,
 	selectTaskChatMessagesForTask,
 } from "@/runtime/native-agent";
+import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { saveWorkspaceState } from "@/runtime/workspace-state-query";
+import type { TaskBoardSearchMode } from "@/search/task-board-search";
+import { useTaskBoardSearch } from "@/search/use-task-board-search";
 import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
 import {
 	getTaskWorkspaceInfo,
@@ -87,6 +95,10 @@ import type { BoardData, TaskCommentEntry } from "@/types";
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
 	const [board, setBoard] = useState<BoardData>(() => createInitialBoardData());
+	const [taskSearchQuery, setTaskSearchQuery] = useState("");
+	// 默认 fuzzy（fzf）：语义（hybrid/semantic）栈重，且其相似度分并不用于看板排序（列内不重排卡片），
+	// 默认走 fuzzy 省去每次搜索的 embedding 开销；需要语义召回时用户可在工具栏切到 Hybrid/Semantic。
+	const [taskSearchMode, setTaskSearchMode] = useState<TaskBoardSearchMode>("fuzzy");
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
 	const [canPersistWorkspaceState, setCanPersistWorkspaceState] = useState(false);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -94,12 +106,14 @@ export default function App(): ReactElement {
 	const [homeSidebarSection, setHomeSidebarSection] = useState<"projects" | "agent">("projects");
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
+	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
 	const taskEditorResetRef = useRef<() => void>(() => {});
 	const lastStreamErrorRef = useRef<string | null>(null);
 	const handleProjectSwitchStart = useCallback(() => {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
+		setTaskSearchQuery("");
 		setPendingTaskStartAfterEditId(null);
 		taskEditorResetRef.current();
 	}, []);
@@ -112,6 +126,7 @@ export default function App(): ReactElement {
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,
 		isRuntimeDisconnected,
@@ -200,6 +215,7 @@ export default function App(): ReactElement {
 		upsertSession,
 		ensureTaskWorkspace,
 		startTaskSession,
+		createByTheWayTaskConversationSession,
 		stopTaskSession,
 		transitionTaskToReview,
 		continueConnectionRetrySessions,
@@ -239,6 +255,11 @@ export default function App(): ReactElement {
 		}
 		return views;
 	}, [board, sessions]);
+	const taskBoardSearch = useTaskBoardSearch({
+		board,
+		query: taskSearchQuery,
+		mode: taskSearchMode,
+	});
 
 	const handleContinueConnectionRetrySessions = useCallback(
 		(taskIds: string[]) => {
@@ -285,7 +306,115 @@ export default function App(): ReactElement {
 			setIsGitHistoryOpen(false);
 		},
 	});
+
+	useEffect(() => {
+		setIsTaskChangesSidebarOpen(false);
+	}, [selectedCard?.card.id]);
 	useNotificationTaskFocus({ currentProjectId: navigationCurrentProjectId, setSelectedTaskId });
+
+	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 CONTEXT.md）开关 + 跨-workspace 打开某 task 的待定跳转。
+	const [isBoardOverviewOpen, setIsBoardOverviewOpen] = useState(false);
+	const [pendingOverviewTaskOpen, setPendingOverviewTaskOpen] = useState<{ repoId: string; taskId: string } | null>(
+		null,
+	);
+	const handleToggleBoardOverview = useCallback(() => {
+		setIsBoardOverviewOpen((open) => {
+			const next = !open;
+			if (next) {
+				setIsGitHistoryOpen(false);
+			}
+			return next;
+		});
+	}, []);
+	const handleOpenOverviewTask = useCallback(
+		(repoId: string, taskId: string) => {
+			// 刻意不关概览：detail 打开时 home layout 只是 visibility:hidden（非卸载），概览仍在其下；
+			// 从 detail 返回（handleBack 清 selectedTaskId）即重现概览——与 Guided Verification 面板点 task
+			// 后返回回到面板的行为一致（避免「从概览点进去、返回却落到普通 board」的困惑）。
+			if (repoId === currentProjectId) {
+				setSelectedTaskId(taskId);
+				return;
+			}
+			// 跨 repo：先切 workspace，待目标 board 加载出该 task 再打开 detail（见下方 effect）。
+			setPendingOverviewTaskOpen({ repoId, taskId });
+			handleSelectProject(repoId);
+		},
+		[currentProjectId, handleSelectProject, setSelectedTaskId],
+	);
+	const handleOpenOverviewStage = useCallback(
+		(repoId: string) => {
+			setIsBoardOverviewOpen(false);
+			handleSelectProject(repoId);
+		},
+		[handleSelectProject],
+	);
+	// 跨-workspace 打开 task 的收尾：目标 repo 已激活、且其 board 加载出该 task 后，再 setSelectedTaskId
+	// ——绕开 project-switch 时 use-detail-task-navigation 的 closeDetail 竞态（见该 hook）。
+	useEffect(() => {
+		if (!pendingOverviewTaskOpen || currentProjectId !== pendingOverviewTaskOpen.repoId) {
+			return;
+		}
+		if (!findCardSelection(board, pendingOverviewTaskOpen.taskId)) {
+			return;
+		}
+		setSelectedTaskId(pendingOverviewTaskOpen.taskId);
+		setPendingOverviewTaskOpen(null);
+	}, [board, currentProjectId, pendingOverviewTaskOpen, setSelectedTaskId]);
+
+	// 应用内通知中心（跨 repo 铃铛）。mark/clear 是跨 repo mutation：用 notification 的 workspaceId 起 tRPC 客户端，
+	// input 显式携带同一 workspaceId（服务端 t.procedure 忽略连接 scope，按 input.workspaceId 操作）。
+	const handleMarkTaskNotificationsVisited = useCallback((workspaceId: string, taskId: string) => {
+		void getRuntimeTrpcClient(workspaceId)
+			.runtime.markTaskNotificationsVisited.mutate({ workspaceId, taskId })
+			.catch(() => {
+				// 标记已读失败可忽略：下次快照/广播会纠正。
+			});
+	}, []);
+	const handleClearWorkspaceNotifications = useCallback((workspaceId: string) => {
+		void getRuntimeTrpcClient(workspaceId)
+			.runtime.clearNotificationLog.mutate({ workspaceId })
+			.catch(() => {
+				// 清空失败可忽略：下次快照/广播会纠正。
+			});
+	}, []);
+	const notificationCenter = useNotificationCenter({
+		notificationLogByWorkspaceId,
+		selectedTaskId,
+		onMarkTaskVisited: handleMarkTaskNotificationsVisited,
+		onClearWorkspace: handleClearWorkspaceNotifications,
+	});
+
+	// 跨 repo 点击通知定位 task：同项目直接选中；跨项目先切项目，待目标项目数据落地（currentProjectId 到位、
+	// 非切换中）后再选中——否则会被 useDetailTaskNavigation 切项目时的 closeDetail 清掉。
+	const pendingNotificationFocusRef = useRef<{ workspaceId: string; taskId: string } | null>(null);
+	const focusNotificationTask = useCallback(
+		(workspaceId: string, taskId: string) => {
+			// 目标项目已完全落地（loaded 且非切换中）才直接选中——与下方 pending-effect 同轴（currentProjectId）。
+			// 若只看 navigationCurrentProjectId（导航意图），切换在途时会过早 setSelectedTaskId，随后被
+			// useDetailTaskNavigation 切项目的 closeDetail 清掉且无 pending 恢复，通知点击打不开详情。
+			if (workspaceId === currentProjectId && !isProjectSwitching) {
+				setSelectedTaskId(taskId);
+				return;
+			}
+			// 否则挂 pending，待目标项目落地后由 effect 选中；仅当导航意图尚未指向目标时才触发切项目
+			// （已在切往目标时重复 handleSelectProject 无意义）。
+			pendingNotificationFocusRef.current = { workspaceId, taskId };
+			if (workspaceId !== navigationCurrentProjectId) {
+				void handleSelectProject(workspaceId);
+			}
+		},
+		[currentProjectId, isProjectSwitching, navigationCurrentProjectId, setSelectedTaskId, handleSelectProject],
+	);
+	useEffect(() => {
+		const pending = pendingNotificationFocusRef.current;
+		if (!pending) {
+			return;
+		}
+		if (currentProjectId === pending.workspaceId && !isProjectSwitching) {
+			pendingNotificationFocusRef.current = null;
+			setSelectedTaskId(pending.taskId);
+		}
+	}, [currentProjectId, isProjectSwitching, setSelectedTaskId]);
 
 	useEffect(() => {
 		replaceWorkspaceMetadata(workspaceMetadata);
@@ -359,6 +488,8 @@ export default function App(): ReactElement {
 		setNewTaskClineSettings,
 		newTaskTerminalAgentModelOverrideSettings,
 		setNewTaskTerminalAgentModelOverrideSettings,
+		newTaskAgentSessionInitialization,
+		setNewTaskAgentSessionInitialization,
 		editingTaskId,
 		editTaskPrompt,
 		setEditTaskPrompt,
@@ -373,12 +504,16 @@ export default function App(): ReactElement {
 		isEditTaskStartInPlanModeDisabled,
 		editTaskBranchRef,
 		setEditTaskBranchRef,
+		editTaskWorktreeMode,
+		setEditTaskWorktreeMode,
 		editTaskAgentId,
 		setEditTaskAgentId,
 		editTaskClineSettings,
 		setEditTaskClineSettings,
 		editTaskTerminalAgentModelOverrideSettings,
 		setEditTaskTerminalAgentModelOverrideSettings,
+		editTaskAgentSessionInitialization,
+		setEditTaskAgentSessionInitialization,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
@@ -398,6 +533,8 @@ export default function App(): ReactElement {
 		defaultCreateTaskBranchRef,
 		currentProjectId,
 		selectedAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
+		newTaskStartInPlanModeByDefault: runtimeProjectConfig?.newTaskStartInPlanModeByDefault ?? true,
+		isNewTaskStartInPlanModeDefaultLoaded: runtimeProjectConfig !== null,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 	});
@@ -611,7 +748,13 @@ export default function App(): ReactElement {
 		if (hasNoProjects) {
 			return;
 		}
-		setIsGitHistoryOpen((current) => !current);
+		setIsGitHistoryOpen((current) => {
+			const next = !current;
+			if (next) {
+				setIsBoardOverviewOpen(false);
+			}
+			return next;
+		});
 	}, [hasNoProjects]);
 	const handleCloseGitHistory = useCallback(() => {
 		setIsGitHistoryOpen(false);
@@ -628,6 +771,7 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		completeGuidedVerificationMoveToDone,
 		isMoveToDoneConfirmOpen,
 		confirmMoveToDone,
 		cancelMoveToDone,
@@ -685,6 +829,24 @@ export default function App(): ReactElement {
 		setSelectedTaskId,
 	});
 
+	// Guided Verification：App.tsx 持有唯一一份 useGuidedVerification 实例，同时供顶栏 badge 派生待核对数、
+	// 并作为 prop 下传给 GuidedVerificationController（controller 消费该结果，不再自持第二份实例）。
+	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
+	const guidedVerification = useGuidedVerification(currentProjectId);
+	const { setCollapsed: setGuidedVerificationCollapsed } = guidedVerification;
+	const guidedVerificationActiveGroup = guidedVerification.activeGroup;
+	// 待核对数 = active 组内未核对且未被 reconcile 移除的任务数；与面板 countPending 语义一致。
+	// 未加载或无 active 组时为 null → 顶栏不渲染 badge（项目切换时 hook 会重置 hasLoadedOnce，badge 自动隐藏）。
+	const guidedVerificationPendingCount =
+		guidedVerification.hasLoadedOnce && guidedVerificationActiveGroup
+			? guidedVerificationActiveGroup.tasks.filter((task) => task.verifiedAt === null && task.droppedReason === null)
+					.length
+			: null;
+	// 顶栏 badge 与 controller 面板共用同一实例，setCollapsed(false) 直接展开面板，无需强制 remount。
+	const handleOpenGuidedVerification = useCallback(() => {
+		setGuidedVerificationCollapsed(false);
+	}, [setGuidedVerificationCollapsed]);
+
 	useAppHotkeys({
 		selectedCard,
 		isDetailTerminalOpen,
@@ -717,7 +879,6 @@ export default function App(): ReactElement {
 	const detailSession = selectedCard
 		? (sessions[selectedCard.card.id] ?? createIdleTaskSession(selectedCard.card.id))
 		: null;
-	const isDetailViewMounted = Boolean(selectedCard && detailSession);
 	const detailTerminalSummary = detailTerminalTaskId ? (sessions[detailTerminalTaskId] ?? null) : null;
 	const detailTerminalSubtitle = useMemo(() => {
 		if (!selectedCard) {
@@ -837,46 +998,15 @@ export default function App(): ReactElement {
 	const handleCreateDialogOpenChange = useCallback(
 		(open: boolean) => {
 			if (!open) {
-				handleCancelCreateTask();
+				if (editingTaskId) {
+					handleCancelEditTask();
+				} else {
+					handleCancelCreateTask();
+				}
 			}
 		},
-		[handleCancelCreateTask],
+		[editingTaskId, handleCancelCreateTask, handleCancelEditTask],
 	);
-
-	const inlineTaskEditor = editingTaskId ? (
-		<TaskInlineCreateCard
-			prompt={editTaskPrompt}
-			onPromptChange={setEditTaskPrompt}
-			images={editTaskImages}
-			onImagesChange={setEditTaskImages}
-			onCreate={handleSaveEditedTask}
-			onCreateAndStart={handleSaveAndStartEditedTask}
-			onCancel={handleCancelEditTask}
-			startInPlanMode={editTaskStartInPlanMode}
-			onStartInPlanModeChange={setEditTaskStartInPlanMode}
-			startInPlanModeDisabled={isEditTaskStartInPlanModeDisabled}
-			autoReviewEnabled={editTaskAutoReviewEnabled}
-			onAutoReviewEnabledChange={setEditTaskAutoReviewEnabled}
-			autoReviewMode={editTaskAutoReviewMode}
-			onAutoReviewModeChange={setEditTaskAutoReviewMode}
-			workspaceId={currentProjectId}
-			branchRef={editTaskBranchRef}
-			branchOptions={editTaskBranchOptions}
-			onBranchRefChange={setEditTaskBranchRef}
-			agentId={editTaskAgentId}
-			onAgentIdChange={setEditTaskAgentId}
-			clineSettings={editTaskClineSettings}
-			onClineSettingsChange={setEditTaskClineSettings}
-			terminalAgentModelOverrideSettings={editTaskTerminalAgentModelOverrideSettings}
-			onTerminalAgentModelOverrideSettingsChange={setEditTaskTerminalAgentModelOverrideSettings}
-			defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-			defaultProviderId={defaultTaskClineProviderId}
-			defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
-			defaultReasoningEffort={runtimeProjectConfig?.clineProviderSettings?.reasoningEffort ?? null}
-			mode="edit"
-			idPrefix={`inline-edit-task-${editingTaskId}`}
-		/>
-	) : undefined;
 
 	if (isRuntimeDisconnected) {
 		return <RuntimeDisconnectedFallback />;
@@ -917,6 +1047,8 @@ export default function App(): ReactElement {
 				<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
 					<TopBar
 						onToggleSidebar={!selectedCard ? handleToggleSidebar : undefined}
+						onToggleBoardOverview={!selectedCard && !hasNoProjects ? handleToggleBoardOverview : undefined}
+						isBoardOverviewOpen={isBoardOverviewOpen}
 						onBack={selectedCard ? handleBack : undefined}
 						workspacePath={navbarWorkspacePath}
 						isWorkspacePathLoading={shouldShowProjectLoadingState}
@@ -969,10 +1101,27 @@ export default function App(): ReactElement {
 						isOpeningWorkspace={isOpeningWorkspace}
 						onToggleGitHistory={hasNoProjects ? undefined : handleToggleGitHistory}
 						isGitHistoryOpen={isGitHistoryOpen}
+						onToggleTaskChangesSidebar={
+							selectedCard ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
+						}
+						isTaskChangesSidebarOpen={selectedCard ? isTaskChangesSidebarOpen : false}
 						hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
 						connectionRetrySessions={connectionRetrySessions}
 						onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
 						onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
+						notificationCenter={
+							<NotificationCenter
+								panelGroups={notificationCenter.panelGroups}
+								allGroups={notificationCenter.allGroups}
+								unreadCount={notificationCenter.unreadCount}
+								onFocusTask={focusNotificationTask}
+								onMarkGroupVisited={handleMarkTaskNotificationsVisited}
+								onMarkAllVisited={notificationCenter.markAllVisited}
+								onClearAll={notificationCenter.clearAll}
+							/>
+						}
+						guidedVerificationPendingCount={guidedVerificationPendingCount}
+						onOpenGuidedVerification={handleOpenGuidedVerification}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 						<div
@@ -1005,7 +1154,13 @@ export default function App(): ReactElement {
 							) : (
 								<div className="flex flex-1 flex-col min-h-0 min-w-0">
 									<div className="flex flex-1 min-h-0 min-w-0">
-										{isGitHistoryOpen ? (
+										{isBoardOverviewOpen ? (
+											<CrossRepositoryStageFirstOverview
+												projects={projects}
+												onOpenTask={handleOpenOverviewTask}
+												onOpenStage={handleOpenOverviewStage}
+											/>
+										) : isGitHistoryOpen ? (
 											<GitHistoryView
 												workspaceId={currentProjectId}
 												gitHistory={gitHistory}
@@ -1018,41 +1173,56 @@ export default function App(): ReactElement {
 												isDiscardWorkingChangesPending={isDiscardingHomeWorkingChanges}
 											/>
 										) : (
-											<KanbanBoard
-												data={board}
-												taskSessions={sessions}
-												workspacePath={workspacePath}
-												onCardSelect={handleCardSelect}
-												onCreateTask={handleOpenCreateTask}
-												onStartTask={handleStartTaskFromBoard}
-												onStartAllTasks={handleStartAllBacklogTasksFromBoard}
-												onClearTrash={handleOpenClearTrash}
-												editingTaskId={isDetailViewMounted ? null : editingTaskId}
-												inlineTaskEditor={isDetailViewMounted ? undefined : inlineTaskEditor}
-												onEditTask={handleOpenEditTask}
-												onSaveTaskTitle={handleSaveTaskTitle}
-												onCommitTask={handleCommitTask}
-												onOpenPrTask={handleOpenPrTask}
-												onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
-												commitTaskLoadingById={commitTaskLoadingById}
-												openPrTaskLoadingById={openPrTaskLoadingById}
-												moveToTrashLoadingById={moveToTrashLoadingById}
-												moveToReviewLoadingById={moveToReviewLoadingById}
-												onMoveToTrashTask={handleMoveReviewCardToTrash}
-												onMoveToValidationTask={handleMoveCardToValidation}
-												onMoveToReviewTask={handleMoveCardToReview}
-												onRestoreFromTrashTask={handleRestoreTaskFromTrash}
-												onDeleteTask={handleOpenDeleteTask}
-												dependencies={board.dependencies}
-												onCreateDependency={handleCreateDependency}
-												onDeleteDependency={handleDeleteDependency}
-												onRequestProgrammaticCardMoveReady={
-													selectedCard ? undefined : handleProgrammaticCardMoveReady
-												}
-												onDragEnd={handleDragEnd}
-												defaultClineModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
-												defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-											/>
+											<div className="flex flex-1 flex-col min-h-0 min-w-0 bg-surface-0">
+												<TaskBoardSearchToolbar
+													query={taskSearchQuery}
+													mode={taskSearchMode}
+													visibleTaskCount={taskBoardSearch.visibleTaskCount}
+													totalTaskCount={taskBoardSearch.totalTaskCount}
+													semanticSearchStatus={taskBoardSearch.semanticSearchStatus}
+													onQueryChange={setTaskSearchQuery}
+													onModeChange={setTaskSearchMode}
+												/>
+												<KanbanBoard
+													data={taskBoardSearch.filteredBoard}
+													taskSessions={sessions}
+													workspacePath={workspacePath}
+													onCardSelect={handleCardSelect}
+													onCreateTask={handleOpenCreateTask}
+													onStartTask={handleStartTaskFromBoard}
+													onStartAllTasks={handleStartAllBacklogTasksFromBoard}
+													onClearTrash={handleOpenClearTrash}
+													onEditTask={handleOpenEditTask}
+													onSaveTaskTitle={handleSaveTaskTitle}
+													onCommitTask={handleCommitTask}
+													onOpenPrTask={handleOpenPrTask}
+													onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
+													commitTaskLoadingById={commitTaskLoadingById}
+													openPrTaskLoadingById={openPrTaskLoadingById}
+													moveToTrashLoadingById={moveToTrashLoadingById}
+													moveToReviewLoadingById={moveToReviewLoadingById}
+													onMoveToTrashTask={handleMoveReviewCardToTrash}
+													onMoveToValidationTask={handleMoveCardToValidation}
+													onMoveToReviewTask={handleMoveCardToReview}
+													onRestoreFromTrashTask={handleRestoreTaskFromTrash}
+													onDeleteTask={handleOpenDeleteTask}
+													dependencies={taskBoardSearch.filteredDependencies}
+													onCreateDependency={handleCreateDependency}
+													onDeleteDependency={handleDeleteDependency}
+													onRequestProgrammaticCardMoveReady={
+														selectedCard || taskBoardSearch.isSearchActive
+															? undefined
+															: handleProgrammaticCardMoveReady
+													}
+													onDragEnd={handleDragEnd}
+													defaultClineModelId={
+														runtimeProjectConfig?.clineProviderSettings?.modelId ?? null
+													}
+													defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
+													taskSearchResultById={taskBoardSearch.resultByTaskId}
+													isCardDragDisabled={taskBoardSearch.isSearchActive}
+												/>
+											</div>
 										)}
 									</div>
 									{showHomeBottomTerminal ? (
@@ -1108,6 +1278,32 @@ export default function App(): ReactElement {
 									runtimeConfig={runtimeProjectConfig ?? null}
 									sessionSummary={detailSession}
 									taskSessions={sessions}
+									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
+									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
+									onCreateByTheWayTaskConversationSession={async (input) => {
+										const effectiveAgentId =
+											detailSession.agentId ??
+											selectedCard.card.agentId ??
+											runtimeProjectConfig?.selectedAgentId;
+										if (
+											!effectiveAgentId ||
+											!(["cline", "claude", "codex"] as const).includes(
+												effectiveAgentId as "cline" | "claude" | "codex",
+											)
+										) {
+											return {
+												ok: false,
+												message: effectiveAgentId
+													? `${effectiveAgentId} By the way sessions are not available.`
+													: "No supported agent is selected.",
+											};
+										}
+										return await createByTheWayTaskConversationSession({
+											task: selectedCard.card,
+											agentId: effectiveAgentId,
+											...input,
+										});
+									}}
 									onSessionSummary={upsertSession}
 									onCardSelect={handleCardSelect}
 									onTaskDragEnd={handleDetailTaskDragEnd}
@@ -1115,8 +1311,6 @@ export default function App(): ReactElement {
 									onStartTask={handleStartTaskFromBoard}
 									onStartAllTasks={handleStartAllBacklogTasksFromBoard}
 									onClearTrash={handleOpenClearTrash}
-									editingTaskId={editingTaskId}
-									inlineTaskEditor={inlineTaskEditor}
 									onEditTask={(task) => {
 										handleOpenEditTask(task, { preserveDetailSelection: true });
 									}}
@@ -1203,37 +1397,60 @@ export default function App(): ReactElement {
 					onShowStartupOnboardingDialog={handleShowStartupOnboardingDialog}
 					onResetAllState={handleResetAllState}
 				/>
-				<TaskCreateDialog
-					open={isInlineTaskCreateOpen}
+				<TaskEditorDialog
+					open={isInlineTaskCreateOpen || editingTaskId !== null}
 					onOpenChange={handleCreateDialogOpenChange}
-					prompt={newTaskPrompt}
-					onPromptChange={setNewTaskPrompt}
-					images={newTaskImages}
-					onImagesChange={setNewTaskImages}
-					onCreate={handleCreateTask}
-					onCreateAndStart={handleCreateAndStartTask}
-					onCreateStartAndOpen={handleCreateStartAndOpenTask}
+					taskEditorMode={editingTaskId ? "edit" : "create"}
+					prompt={editingTaskId ? editTaskPrompt : newTaskPrompt}
+					onPromptChange={editingTaskId ? setEditTaskPrompt : setNewTaskPrompt}
+					images={editingTaskId ? editTaskImages : newTaskImages}
+					onImagesChange={editingTaskId ? setEditTaskImages : setNewTaskImages}
+					onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
+					onCreateAndStart={
+						editingTaskId
+							? () => {
+									handleSaveAndStartEditedTask();
+									return editingTaskId;
+								}
+							: handleCreateAndStartTask
+					}
+					onCreateStartAndOpen={editingTaskId ? undefined : handleCreateStartAndOpenTask}
 					onCreateMultiple={handleCreateTasks}
 					onCreateAndStartMultiple={handleCreateAndStartTasks}
-					startInPlanMode={newTaskStartInPlanMode}
-					onStartInPlanModeChange={setNewTaskStartInPlanMode}
-					startInPlanModeDisabled={isNewTaskStartInPlanModeDisabled}
-					autoReviewEnabled={newTaskAutoReviewEnabled}
-					onAutoReviewEnabledChange={setNewTaskAutoReviewEnabled}
-					autoReviewMode={newTaskAutoReviewMode}
-					onAutoReviewModeChange={setNewTaskAutoReviewMode}
+					startInPlanMode={editingTaskId ? editTaskStartInPlanMode : newTaskStartInPlanMode}
+					onStartInPlanModeChange={editingTaskId ? setEditTaskStartInPlanMode : setNewTaskStartInPlanMode}
+					startInPlanModeDisabled={
+						editingTaskId ? isEditTaskStartInPlanModeDisabled : isNewTaskStartInPlanModeDisabled
+					}
+					autoReviewEnabled={editingTaskId ? editTaskAutoReviewEnabled : newTaskAutoReviewEnabled}
+					onAutoReviewEnabledChange={editingTaskId ? setEditTaskAutoReviewEnabled : setNewTaskAutoReviewEnabled}
+					autoReviewMode={editingTaskId ? editTaskAutoReviewMode : newTaskAutoReviewMode}
+					onAutoReviewModeChange={editingTaskId ? setEditTaskAutoReviewMode : setNewTaskAutoReviewMode}
 					workspaceId={currentProjectId}
-					branchRef={newTaskBranchRef}
-					branchOptions={createTaskBranchOptions}
-					onBranchRefChange={setNewTaskBranchRef}
-					worktreeMode={newTaskWorktreeMode}
-					onWorktreeModeChange={setNewTaskWorktreeMode}
-					agentId={newTaskAgentId}
-					onAgentIdChange={setNewTaskAgentId}
-					clineSettings={newTaskClineSettings}
-					onClineSettingsChange={setNewTaskClineSettings}
-					terminalAgentModelOverrideSettings={newTaskTerminalAgentModelOverrideSettings}
-					onTerminalAgentModelOverrideSettingsChange={setNewTaskTerminalAgentModelOverrideSettings}
+					branchRef={editingTaskId ? editTaskBranchRef : newTaskBranchRef}
+					branchOptions={editingTaskId ? editTaskBranchOptions : createTaskBranchOptions}
+					onBranchRefChange={editingTaskId ? setEditTaskBranchRef : setNewTaskBranchRef}
+					worktreeMode={editingTaskId ? editTaskWorktreeMode : newTaskWorktreeMode}
+					onWorktreeModeChange={editingTaskId ? setEditTaskWorktreeMode : setNewTaskWorktreeMode}
+					agentId={editingTaskId ? editTaskAgentId : newTaskAgentId}
+					onAgentIdChange={editingTaskId ? setEditTaskAgentId : setNewTaskAgentId}
+					clineSettings={editingTaskId ? editTaskClineSettings : newTaskClineSettings}
+					onClineSettingsChange={editingTaskId ? setEditTaskClineSettings : setNewTaskClineSettings}
+					terminalAgentModelOverrideSettings={
+						editingTaskId ? editTaskTerminalAgentModelOverrideSettings : newTaskTerminalAgentModelOverrideSettings
+					}
+					onTerminalAgentModelOverrideSettingsChange={
+						editingTaskId
+							? setEditTaskTerminalAgentModelOverrideSettings
+							: setNewTaskTerminalAgentModelOverrideSettings
+					}
+					taskAgentSessionInitialization={
+						editingTaskId ? editTaskAgentSessionInitialization : newTaskAgentSessionInitialization
+					}
+					onTaskAgentSessionInitializationChange={
+						editingTaskId ? setEditTaskAgentSessionInitialization : setNewTaskAgentSessionInitialization
+					}
+					agents={runtimeProjectConfig?.agents ?? []}
 					defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 					defaultProviderId={defaultTaskClineProviderId}
 					defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
@@ -1310,6 +1527,13 @@ export default function App(): ReactElement {
 					projects={projects}
 					currentProjectId={currentProjectId}
 					activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
+				/>
+
+				<GuidedVerificationController
+					verification={guidedVerification}
+					board={board}
+					completeGuidedVerificationMoveToDone={completeGuidedVerificationMoveToDone}
+					onSelectTask={setSelectedTaskId}
 				/>
 			</div>
 		</LayoutCustomizationsProvider>

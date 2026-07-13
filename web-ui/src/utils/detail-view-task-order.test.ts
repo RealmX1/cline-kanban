@@ -1,6 +1,22 @@
 import { describe, expect, it } from "vitest";
 
-import { getNextDetailTaskIdAfterTrashMove, isDetailViewColumnId } from "@/utils/detail-view-task-order";
+import {
+	getNextDetailTaskIdAfterTrashMove,
+	getNextReviewTaskIdAfterReviewTaskMovesToValidation,
+	isDetailViewColumnId,
+} from "@/utils/detail-view-task-order";
+
+function createTask(taskId: string) {
+	return {
+		id: taskId,
+		title: taskId,
+		prompt: "",
+		startInPlanMode: false,
+		baseRef: "main",
+		createdAt: 1,
+		updatedAt: 1,
+	};
+}
 
 describe("isDetailViewColumnId", () => {
 	it("returns true only for in-progress and review columns", () => {
@@ -205,6 +221,80 @@ describe("getNextDetailTaskIdAfterTrashMove", () => {
 					},
 					{ id: "in_progress", title: "In Progress", cards: [] },
 					{ id: "review", title: "Review", cards: [] },
+					{ id: "trash", title: "Done", cards: [] },
+				],
+				dependencies: [],
+			},
+			"b1",
+		);
+
+		expect(nextTaskId).toBeNull();
+	});
+});
+
+describe("getNextReviewTaskIdAfterReviewTaskMovesToValidation", () => {
+	it("prefers the following review task", () => {
+		const nextTaskId = getNextReviewTaskIdAfterReviewTaskMovesToValidation(
+			{
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [] },
+					{ id: "in_progress", title: "In Progress", cards: [] },
+					{ id: "review", title: "Review", cards: [createTask("r1"), createTask("r2"), createTask("r3")] },
+					{ id: "validation", title: "Validation", cards: [] },
+					{ id: "trash", title: "Done", cards: [] },
+				],
+				dependencies: [],
+			},
+			"r2",
+		);
+
+		expect(nextTaskId).toBe("r3");
+	});
+
+	it("falls back to the previous review task when moving the last review task", () => {
+		const nextTaskId = getNextReviewTaskIdAfterReviewTaskMovesToValidation(
+			{
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [] },
+					{ id: "in_progress", title: "In Progress", cards: [] },
+					{ id: "review", title: "Review", cards: [createTask("r1"), createTask("r2")] },
+					{ id: "validation", title: "Validation", cards: [] },
+					{ id: "trash", title: "Done", cards: [] },
+				],
+				dependencies: [],
+			},
+			"r2",
+		);
+
+		expect(nextTaskId).toBe("r1");
+	});
+
+	it("returns null when the moved task is the only review task", () => {
+		const nextTaskId = getNextReviewTaskIdAfterReviewTaskMovesToValidation(
+			{
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [] },
+					{ id: "in_progress", title: "In Progress", cards: [] },
+					{ id: "review", title: "Review", cards: [createTask("r1")] },
+					{ id: "validation", title: "Validation", cards: [] },
+					{ id: "trash", title: "Done", cards: [] },
+				],
+				dependencies: [],
+			},
+			"r1",
+		);
+
+		expect(nextTaskId).toBeNull();
+	});
+
+	it("returns null when the task is not in review", () => {
+		const nextTaskId = getNextReviewTaskIdAfterReviewTaskMovesToValidation(
+			{
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [createTask("b1")] },
+					{ id: "in_progress", title: "In Progress", cards: [] },
+					{ id: "review", title: "Review", cards: [createTask("r1")] },
+					{ id: "validation", title: "Validation", cards: [] },
 					{ id: "trash", title: "Done", cards: [] },
 				],
 				dependencies: [],

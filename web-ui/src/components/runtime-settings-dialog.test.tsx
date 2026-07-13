@@ -75,6 +75,7 @@ vi.mock("@radix-ui/react-select", () => ({
 }));
 
 const resetLayoutCustomizationsMock = vi.hoisted(() => vi.fn());
+const useRuntimeConfigSaveMock = vi.hoisted(() => vi.fn(async () => true));
 const clineSetupSectionOnSavedRef = vi.hoisted(() => ({
 	onSaved: null as null | (() => void),
 }));
@@ -142,7 +143,7 @@ vi.mock("@/runtime/use-runtime-config", () => ({
 		isLoading: false,
 		isSaving: false,
 		refresh: vi.fn(),
-		save: vi.fn(async () => true),
+		save: useRuntimeConfigSaveMock,
 	}),
 }));
 
@@ -170,6 +171,7 @@ const savedClineOauthConfig = {
 	selectedAgentId: "cline",
 	selectedShortcutLabel: null,
 	agentAutonomousModeEnabled: true,
+	newTaskStartInPlanModeByDefault: true,
 	readyForReviewNotificationsEnabled: false,
 	notificationSoundEnabled: false,
 	autoContinueOnConnectionDropEnabled: false,
@@ -219,6 +221,8 @@ describe("RuntimeSettingsDialog", () => {
 
 	beforeEach(() => {
 		resetLayoutCustomizationsMock.mockReset();
+		useRuntimeConfigSaveMock.mockClear();
+		useRuntimeConfigSaveMock.mockResolvedValue(true);
 		clineSetupSectionOnSavedRef.onSaved = null;
 		window.localStorage.clear();
 		document.documentElement.removeAttribute("data-theme");
@@ -290,6 +294,39 @@ describe("RuntimeSettingsDialog", () => {
 		const row = label?.closest("div");
 		return (row?.querySelector('button[role="switch"]') as HTMLButtonElement | null) ?? null;
 	}
+
+	it("saves the new-task plan mode default switch", async () => {
+		const handleOpenChange = vi.fn();
+		await act(async () => {
+			root.render(
+				<RuntimeSettingsDialog
+					open={true}
+					workspaceId={"workspace-1"}
+					initialConfig={savedClineOauthConfig}
+					onOpenChange={handleOpenChange}
+				/>,
+			);
+		});
+
+		const defaultPlanModeSwitch = findSwitchByRowLabel(document.body, "Start new tasks in plan mode by default");
+		const saveButton = findButtonByText(document.body, "Save");
+		expect(defaultPlanModeSwitch).toBeInstanceOf(HTMLButtonElement);
+		expect(saveButton).toBeInstanceOf(HTMLButtonElement);
+
+		await act(async () => {
+			defaultPlanModeSwitch?.click();
+		});
+		await act(async () => {
+			saveButton?.click();
+		});
+
+		expect(useRuntimeConfigSaveMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				newTaskStartInPlanModeByDefault: false,
+			}),
+		);
+		expect(handleOpenChange).toHaveBeenCalledWith(false);
+	});
 
 	it("disables the notification sound switch when ready-for-review notifications are off", async () => {
 		// savedClineOauthConfig 关着 readyForReviewNotificationsEnabled → 「Play a sound」应随父开关置灰。

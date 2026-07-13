@@ -30,6 +30,12 @@ import type {
 export const VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS = 5_000;
 export const AGENT_OUTPUT_QUIET_THRESHOLD_MS = 2_000;
 
+// 「近期活跃」窗口（毫秒）：Cross-Repository Stage-First Overview（见 CONTEXT.md）据此把 In-Progress
+// 阶段的 task 二分为 Active（agent 回合且距最近 PTY 输出 lastOutputAt 在本窗口内）/ Stale（其余）。
+// 有意比前后端现有的 5s / 2s 窗口宽得多——此处要的是「最近几分钟这个 agent 还在动」的人类尺度判断，
+// 宽窗口下 spinner 噪声无影响，故读 lastOutputAt（而非实质戳）即可。复用 isAgentOutputWithinActiveWindow。
+export const RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS = 5 * 60_000;
+
 // 距 agent 最近一次 PTY 输出是否仍落在 activeWindowMs 活跃窗口内（true = 仍在产出 / computing）。
 //
 // 语义细节（迁移前后必须逐字保持，两侧旧实现都依赖它）：
@@ -115,7 +121,7 @@ export interface SessionFacets {
 }
 
 // reviewReason → 人轴种类。仅 turnOwner==="user" 时取用，恒返回非 null（满足「user 回合 userTurnKind
-// 不可为 null」不变量）。三分：error=运行错；interrupted=被中断；exit/completion/hook/manual_review=待审(review)；
+// 不可为 null」不变量）。三分：error=运行错；interrupted=被中断；exit/completion/hook/manual_review/idle_stall=待审(review)；
 // attention/兜底=needs_input。注：question / plan_review / permission 需 harness 级采集，归后续 Stage。
 export function deriveUserTurnKind(reviewReason: RuntimeTaskSessionReviewReason): RuntimeTaskSessionUserTurnKind {
 	switch (reviewReason) {
@@ -127,7 +133,9 @@ export function deriveUserTurnKind(reviewReason: RuntimeTaskSessionReviewReason)
 		case "completion":
 		case "hook":
 		case "manual_review":
-			// manual_review：用户手动翻入审查回合，与 agent 自然完成同归「待审」人轴。
+		case "idle_stall":
+			// manual_review：用户手动翻入审查回合；idle_stall：完工不退出的空闲会话被 scanForStalls 自愈翻入。
+			// 二者与 agent 自然完成同归「待审」人轴。
 			return "review";
 		default:
 			// "attention" 及 null/未知：兜底待输入

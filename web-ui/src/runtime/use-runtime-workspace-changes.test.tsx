@@ -48,19 +48,24 @@ interface HookSnapshot {
 	paths: string[];
 	isLoading: boolean;
 	isRuntimeAvailable: boolean;
+	changes: RuntimeWorkspaceChangesResponse | null;
 }
 
 function HookHarness({
 	taskId,
 	worktreeMode = null,
+	stateVersion = 0,
 	viewKey = null,
 	clearOnViewTransition = true,
+	pollIntervalMs = null,
 	onSnapshot,
 }: {
 	taskId: string;
 	worktreeMode?: RuntimeTaskWorktreeMode | null;
+	stateVersion?: number;
 	viewKey?: string | null;
 	clearOnViewTransition?: boolean;
+	pollIntervalMs?: number | null;
 	onSnapshot: (snapshot: HookSnapshot) => void;
 }): null {
 	const workspaceChanges = useRuntimeWorkspaceChanges(
@@ -69,8 +74,8 @@ function HookHarness({
 		"main",
 		worktreeMode,
 		"working_copy",
-		0,
-		null,
+		stateVersion,
+		pollIntervalMs,
 		viewKey,
 		clearOnViewTransition,
 	);
@@ -80,6 +85,7 @@ function HookHarness({
 			paths: workspaceChanges.changes?.files.map((file) => file.path) ?? [],
 			isLoading: workspaceChanges.isLoading,
 			isRuntimeAvailable: workspaceChanges.isRuntimeAvailable,
+			changes: workspaceChanges.changes,
 		});
 	}, [onSnapshot, workspaceChanges.changes, workspaceChanges.isLoading, workspaceChanges.isRuntimeAvailable]);
 
@@ -155,6 +161,59 @@ describe("useRuntimeWorkspaceChanges", () => {
 
 		expect(getChangesQueryMock).toHaveBeenCalledTimes(1);
 		expect(getChangesQueryMock.mock.calls[0]?.[0]).not.toHaveProperty("worktreeMode");
+	});
+
+	it("keeps the same changes reference when a poll returns content-identical files (dedup)", async () => {
+		// 两次响应文件内容完全相同，仅对象引用 / generatedAt 不同——模拟 1s 轮询在工作树未变时的空转。
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("stable.ts"));
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("stable.ts"));
+
+		const snapshots: HookSnapshot[] = [];
+		const onSnapshot = (snapshot: HookSnapshot) => {
+			snapshots.push(snapshot);
+		};
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" stateVersion={0} onSnapshot={onSnapshot} />);
+			await Promise.resolve();
+		});
+
+		const firstChangesRef = snapshots.at(-1)?.changes ?? null;
+		expect(firstChangesRef).not.toBeNull();
+
+		// stateVersion 递增触发 refetch；内容相同 → 应保留旧引用，绝不下发新对象。
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" stateVersion={1} onSnapshot={onSnapshot} />);
+			await Promise.resolve();
+		});
+
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(2);
+		expect(snapshots.at(-1)?.changes).toBe(firstChangesRef);
+	});
+
+	it("replaces the changes reference when a poll returns different file content", async () => {
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("before.ts"));
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("after.ts"));
+
+		const snapshots: HookSnapshot[] = [];
+		const onSnapshot = (snapshot: HookSnapshot) => {
+			snapshots.push(snapshot);
+		};
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" stateVersion={0} onSnapshot={onSnapshot} />);
+			await Promise.resolve();
+		});
+
+		const firstChangesRef = snapshots.at(-1)?.changes ?? null;
+
+		await act(async () => {
+			root.render(<HookHarness taskId="task-a" stateVersion={1} onSnapshot={onSnapshot} />);
+			await Promise.resolve();
+		});
+
+		expect(snapshots.at(-1)?.changes).not.toBe(firstChangesRef);
+		expect(snapshots.at(-1)?.paths).toEqual(["after.ts"]);
 	});
 
 	it("clears the previous task diff immediately when switching tasks", async () => {
@@ -323,5 +382,49 @@ describe("useRuntimeWorkspaceChanges", () => {
 			isLoading: false,
 			isRuntimeAvailable: true,
 		});
+	});
+
+	it("waits for a slow poll to settle before scheduling the next poll", async () => {
+		vi.useFakeTimers();
+		const initialResponse = createDeferred<RuntimeWorkspaceChangesResponse>();
+		const firstPollResponse = createDeferred<RuntimeWorkspaceChangesResponse>();
+		getChangesQueryMock.mockImplementationOnce(() => initialResponse.promise);
+		getChangesQueryMock.mockImplementationOnce(() => firstPollResponse.promise);
+		getChangesQueryMock.mockResolvedValue(createWorkspaceChangesResponse("after-slow-poll.ts"));
+
+		const snapshots: HookSnapshot[] = [];
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskId="task-slow-poll"
+					pollIntervalMs={1_000}
+					onSnapshot={(snapshot) => snapshots.push(snapshot)}
+				/>,
+			);
+			initialResponse.resolve(createWorkspaceChangesResponse("initial.ts"));
+			await initialResponse.promise;
+		});
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1_000);
+		});
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(2);
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(5_000);
+		});
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(2);
+
+		await act(async () => {
+			firstPollResponse.resolve(createWorkspaceChangesResponse("slow-poll-finished.ts"));
+			await firstPollResponse.promise;
+		});
+		expect(snapshots.at(-1)?.paths).toEqual(["slow-poll-finished.ts"]);
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1_000);
+		});
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(3);
+		vi.useRealTimers();
 	});
 });

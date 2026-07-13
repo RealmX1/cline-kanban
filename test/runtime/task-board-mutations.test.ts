@@ -56,6 +56,30 @@ describe("deleteTasksFromBoard", () => {
 	});
 });
 
+describe("task plan mode defaults", () => {
+	it("starts newly-created tasks in plan mode when no explicit value is provided", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task A", baseRef: "main" },
+			() => "aaaaa111",
+		);
+
+		expect(created.task.startInPlanMode).toBe(true);
+	});
+
+	it("allows callers to explicitly create a task outside plan mode", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task A", baseRef: "main", startInPlanMode: false },
+			() => "aaaaa111",
+		);
+
+		expect(created.task.startInPlanMode).toBe(false);
+	});
+});
+
 describe("task images", () => {
 	it("preserves images when creating and updating tasks", () => {
 		const created = addTaskToColumn(
@@ -364,6 +388,36 @@ describe("dispatch / fork-flow fields", () => {
 		expect(created.task.parentSessionId).toBe("11111111-2222-3333-4444-555555555555");
 		expect(created.task.worktreeMode).toBe("inplace");
 		expect(created.task.prepFilePath).toBe("/tmp/rvf-prep/abc.json");
+	});
+
+	it("persists and clears generalized task agent session initialization", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Resume Claude task",
+				baseRef: "main",
+				agentId: "claude",
+				taskAgentSessionInitialization: {
+					sourceAgentId: "claude",
+					sourceSessionId: "11111111-2222-3333-8444-555555555555",
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			},
+			() => "aaaaa111",
+		);
+		expect(created.task.taskAgentSessionInitialization).toEqual({
+			sourceAgentId: "claude",
+			sourceSessionId: "11111111-2222-3333-8444-555555555555",
+			sourceSessionReuseMode: "resume_existing_session",
+		});
+
+		const cleared = updateTask(created.board, created.task.id, {
+			prompt: created.task.prompt,
+			baseRef: created.task.baseRef,
+			taskAgentSessionInitialization: null,
+		});
+		expect(cleared.task?.taskAgentSessionInitialization).toBeUndefined();
 	});
 
 	it("preserves dispatch fields on update when not specified", () => {

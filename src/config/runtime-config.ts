@@ -14,9 +14,11 @@ interface RuntimeGlobalConfigFileShape {
 	selectedAgentId?: RuntimeAgentId;
 	selectedShortcutLabel?: string;
 	agentAutonomousModeEnabled?: boolean;
+	newTaskStartInPlanModeByDefault?: boolean;
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	guidedVerificationForceCompleteEnabled?: boolean;
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
 }
@@ -31,9 +33,11 @@ export interface RuntimeConfigState {
 	selectedAgentId: RuntimeAgentId;
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
+	newTaskStartInPlanModeByDefault: boolean;
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	guidedVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
 	openPrPromptTemplate: string;
@@ -45,9 +49,11 @@ export interface RuntimeConfigUpdateInput {
 	selectedAgentId?: RuntimeAgentId;
 	selectedShortcutLabel?: string | null;
 	agentAutonomousModeEnabled?: boolean;
+	newTaskStartInPlanModeByDefault?: boolean;
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	guidedVerificationForceCompleteEnabled?: boolean;
 	shortcuts?: RuntimeProjectShortcut[];
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
@@ -62,9 +68,12 @@ const PROJECT_CONFIG_FILENAME = "config.json";
 const DEFAULT_AGENT_ID: RuntimeAgentId = "cline";
 const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = ["claude", "codex", "cursor", "droid", "kiro"];
 const DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED = true;
+const DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT = true;
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
 const DEFAULT_NOTIFICATION_SOUND_ENABLED = true;
 const DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED = true;
+// 引导式验证的「强制完成」是绕过安全确认的逃生阀，默认关闭；CLI 传 --force 且此开关开启才生效。
+const DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED = false;
 const DEFAULT_COMMIT_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD. When you are finished with the task, commit the working changes onto {{base_ref}}.
 
 - Do not run destructive commands: git reset --hard, git clean -fdx, git worktree remove, rm/mv on repository paths.
@@ -288,6 +297,10 @@ function toRuntimeConfigState({
 			globalConfig?.agentAutonomousModeEnabled,
 			DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED,
 		),
+		newTaskStartInPlanModeByDefault: normalizeBoolean(
+			globalConfig?.newTaskStartInPlanModeByDefault,
+			DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT,
+		),
 		readyForReviewNotificationsEnabled: normalizeBoolean(
 			globalConfig?.readyForReviewNotificationsEnabled,
 			DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED,
@@ -299,6 +312,10 @@ function toRuntimeConfigState({
 		autoContinueOnConnectionDropEnabled: normalizeBoolean(
 			globalConfig?.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
+		),
+		guidedVerificationForceCompleteEnabled: normalizeBoolean(
+			globalConfig?.guidedVerificationForceCompleteEnabled,
+			DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED,
 		),
 		shortcuts: normalizeShortcuts(projectConfig?.shortcuts),
 		commitPromptTemplate: normalizePromptTemplate(globalConfig?.commitPromptTemplate, DEFAULT_COMMIT_PROMPT_TEMPLATE),
@@ -326,9 +343,11 @@ async function writeRuntimeGlobalConfigFile(
 		selectedAgentId?: RuntimeAgentId;
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
+		newTaskStartInPlanModeByDefault?: boolean;
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		guidedVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
 	},
@@ -347,6 +366,10 @@ async function writeRuntimeGlobalConfigFile(
 		config.agentAutonomousModeEnabled === undefined
 			? DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED
 			: normalizeBoolean(config.agentAutonomousModeEnabled, DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED);
+	const newTaskStartInPlanModeByDefault =
+		config.newTaskStartInPlanModeByDefault === undefined
+			? DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT
+			: normalizeBoolean(config.newTaskStartInPlanModeByDefault, DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT);
 	const readyForReviewNotificationsEnabled =
 		config.readyForReviewNotificationsEnabled === undefined
 			? DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED
@@ -361,6 +384,13 @@ async function writeRuntimeGlobalConfigFile(
 			: normalizeBoolean(
 					config.autoContinueOnConnectionDropEnabled,
 					DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
+				);
+	const guidedVerificationForceCompleteEnabled =
+		config.guidedVerificationForceCompleteEnabled === undefined
+			? DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED
+			: normalizeBoolean(
+					config.guidedVerificationForceCompleteEnabled,
+					DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED,
 				);
 	const commitPromptTemplate =
 		config.commitPromptTemplate === undefined
@@ -393,6 +423,12 @@ async function writeRuntimeGlobalConfigFile(
 		payload.agentAutonomousModeEnabled = agentAutonomousModeEnabled;
 	}
 	if (
+		hasOwnKey(existing, "newTaskStartInPlanModeByDefault") ||
+		newTaskStartInPlanModeByDefault !== DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT
+	) {
+		payload.newTaskStartInPlanModeByDefault = newTaskStartInPlanModeByDefault;
+	}
+	if (
 		hasOwnKey(existing, "readyForReviewNotificationsEnabled") ||
 		readyForReviewNotificationsEnabled !== DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED
 	) {
@@ -409,6 +445,12 @@ async function writeRuntimeGlobalConfigFile(
 		autoContinueOnConnectionDropEnabled !== DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED
 	) {
 		payload.autoContinueOnConnectionDropEnabled = autoContinueOnConnectionDropEnabled;
+	}
+	if (
+		hasOwnKey(existing, "guidedVerificationForceCompleteEnabled") ||
+		guidedVerificationForceCompleteEnabled !== DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED
+	) {
+		payload.guidedVerificationForceCompleteEnabled = guidedVerificationForceCompleteEnabled;
 	}
 	if (hasOwnKey(existing, "commitPromptTemplate") || commitPromptTemplate !== DEFAULT_COMMIT_PROMPT_TEMPLATE) {
 		payload.commitPromptTemplate = commitPromptTemplate;
@@ -494,9 +536,11 @@ function createRuntimeConfigStateFromValues(input: {
 	selectedAgentId: RuntimeAgentId;
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
+	newTaskStartInPlanModeByDefault: boolean;
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	guidedVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
 	openPrPromptTemplate: string;
@@ -510,6 +554,10 @@ function createRuntimeConfigStateFromValues(input: {
 			input.agentAutonomousModeEnabled,
 			DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED,
 		),
+		newTaskStartInPlanModeByDefault: normalizeBoolean(
+			input.newTaskStartInPlanModeByDefault,
+			DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT,
+		),
 		readyForReviewNotificationsEnabled: normalizeBoolean(
 			input.readyForReviewNotificationsEnabled,
 			DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED,
@@ -518,6 +566,10 @@ function createRuntimeConfigStateFromValues(input: {
 		autoContinueOnConnectionDropEnabled: normalizeBoolean(
 			input.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
+		),
+		guidedVerificationForceCompleteEnabled: normalizeBoolean(
+			input.guidedVerificationForceCompleteEnabled,
+			DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED,
 		),
 		shortcuts: normalizeShortcuts(input.shortcuts),
 		commitPromptTemplate: normalizePromptTemplate(input.commitPromptTemplate, DEFAULT_COMMIT_PROMPT_TEMPLATE),
@@ -534,9 +586,11 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		selectedAgentId: current.selectedAgentId,
 		selectedShortcutLabel: current.selectedShortcutLabel,
 		agentAutonomousModeEnabled: current.agentAutonomousModeEnabled,
+		newTaskStartInPlanModeByDefault: current.newTaskStartInPlanModeByDefault,
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: current.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: current.autoContinueOnConnectionDropEnabled,
+		guidedVerificationForceCompleteEnabled: current.guidedVerificationForceCompleteEnabled,
 		shortcuts: [],
 		commitPromptTemplate: current.commitPromptTemplate,
 		openPrPromptTemplate: current.openPrPromptTemplate,
@@ -571,9 +625,11 @@ export async function saveRuntimeConfig(
 		selectedAgentId: RuntimeAgentId;
 		selectedShortcutLabel: string | null;
 		agentAutonomousModeEnabled: boolean;
+		newTaskStartInPlanModeByDefault: boolean;
 		readyForReviewNotificationsEnabled: boolean;
 		notificationSoundEnabled: boolean;
 		autoContinueOnConnectionDropEnabled: boolean;
+		guidedVerificationForceCompleteEnabled: boolean;
 		shortcuts: RuntimeProjectShortcut[];
 		commitPromptTemplate: string;
 		openPrPromptTemplate: string;
@@ -585,9 +641,11 @@ export async function saveRuntimeConfig(
 			selectedAgentId: config.selectedAgentId,
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
+			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled: config.guidedVerificationForceCompleteEnabled,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
 		});
@@ -598,9 +656,11 @@ export async function saveRuntimeConfig(
 			selectedAgentId: config.selectedAgentId,
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
+			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled: config.guidedVerificationForceCompleteEnabled,
 			shortcuts: config.shortcuts,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
@@ -620,11 +680,15 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel:
 				updates.selectedShortcutLabel === undefined ? current.selectedShortcutLabel : updates.selectedShortcutLabel,
 			agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
+			newTaskStartInPlanModeByDefault:
+				updates.newTaskStartInPlanModeByDefault ?? current.newTaskStartInPlanModeByDefault,
 			readyForReviewNotificationsEnabled:
 				updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled:
 				updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled:
+				updates.guidedVerificationForceCompleteEnabled ?? current.guidedVerificationForceCompleteEnabled,
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
 			commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 			openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
@@ -634,9 +698,11 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.selectedAgentId !== current.selectedAgentId ||
 			nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 			nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
+			nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 			nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 			nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+			nextConfig.guidedVerificationForceCompleteEnabled !== current.guidedVerificationForceCompleteEnabled ||
 			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
 			!areRuntimeProjectShortcutsEqual(nextConfig.shortcuts, current.shortcuts);
@@ -649,9 +715,11 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedAgentId: nextConfig.selectedAgentId,
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 		});
@@ -664,9 +732,11 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedAgentId: nextConfig.selectedAgentId,
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
 			shortcuts: nextConfig.shortcuts,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
@@ -694,11 +764,15 @@ export async function updateGlobalRuntimeConfig(
 						? current.selectedShortcutLabel
 						: updates.selectedShortcutLabel,
 				agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
+				newTaskStartInPlanModeByDefault:
+					updates.newTaskStartInPlanModeByDefault ?? current.newTaskStartInPlanModeByDefault,
 				readyForReviewNotificationsEnabled:
 					updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled:
 					updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+				guidedVerificationForceCompleteEnabled:
+					updates.guidedVerificationForceCompleteEnabled ?? current.guidedVerificationForceCompleteEnabled,
 				shortcuts: current.shortcuts,
 				commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 				openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
@@ -708,9 +782,11 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.selectedAgentId !== current.selectedAgentId ||
 				nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 				nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
+				nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 				nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 				nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+				nextConfig.guidedVerificationForceCompleteEnabled !== current.guidedVerificationForceCompleteEnabled ||
 				nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 				nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate;
 
@@ -722,9 +798,11 @@ export async function updateGlobalRuntimeConfig(
 				selectedAgentId: nextConfig.selectedAgentId,
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 			});
@@ -735,9 +813,11 @@ export async function updateGlobalRuntimeConfig(
 				selectedAgentId: nextConfig.selectedAgentId,
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
 				shortcuts: nextConfig.shortcuts,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,

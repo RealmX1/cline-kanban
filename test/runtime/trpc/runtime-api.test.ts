@@ -189,9 +189,11 @@ function createRuntimeConfigState(): RuntimeConfigState {
 		selectedAgentId: "claude",
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
+		newTaskStartInPlanModeByDefault: true,
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		guidedVerificationForceCompleteEnabled: false,
 		shortcuts: [],
 		commitPromptTemplate: "commit",
 		openPrPromptTemplate: "pr",
@@ -492,6 +494,200 @@ describe("createRuntimeApi startTaskSession", () => {
 				cwd: "/tmp/existing-worktree",
 			}),
 		);
+	});
+
+	it("starts a By the way runtime session in the main task workspace without creating a turn checkpoint", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-1" })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const taskConversationSessionMetadata = {
+			workspaceTaskId: "task-1",
+			taskConversationSessionRole: "by_the_way" as const,
+			taskConversationSessionContextSource: "forked_from_main_current_turn" as const,
+			parentTaskConversationSessionId: "task-1",
+			mainSessionOriginTurnNumber: 4,
+			mainSessionOriginUserMessagePreview: "Implement sessions",
+			latestUserMessagePreview: "Why is this read-only?",
+		};
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "side-session-1",
+				workspaceTaskId: "task-1",
+				baseRef: "main",
+				prompt: "Why is this read-only?",
+				agentId: "codex",
+				taskConversationSessionMetadata,
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(taskWorktreeMocks.resolveTaskCwd).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-1" }));
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				taskId: "side-session-1",
+				workspaceTaskId: "task-1",
+				cwd: "/tmp/main-task-worktree",
+				taskConversationSessionMetadata,
+			}),
+		);
+		expect(terminalManager.applyTurnCheckpoint).not.toHaveBeenCalled();
+		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
+	});
+
+	it("rejects By the way runtime sessions for unsupported agents", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			listSummaries: vi.fn(() => []),
+			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-unsupported" })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "side-session-unsupported",
+				workspaceTaskId: "task-1",
+				baseRef: "main",
+				prompt: "Explain this module",
+				agentId: "gemini",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: 1,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "Explain this module",
+				},
+			},
+		);
+
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("does not support") });
+		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("rejects a later cwd-latest fork after a By the way session already exists", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
+		const existingByTheWaySummary = createSummary({
+			taskId: "side-session-existing",
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "task-1",
+				taskConversationSessionRole: "by_the_way",
+				taskConversationSessionContextSource: "forked_from_main_current_turn",
+				parentTaskConversationSessionId: "task-1",
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: "Earlier question",
+			},
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			listSummaries: vi.fn(() => [existingByTheWaySummary]),
+			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-later" })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "side-session-later",
+				workspaceTaskId: "task-1",
+				baseRef: "main",
+				prompt: "Later question",
+				agentId: "codex",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "forked_from_main_current_turn",
+					parentTaskConversationSessionId: "task-1",
+					mainSessionOriginTurnNumber: 2,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "Later question",
+				},
+			},
+		);
+
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("Start from scratch") });
+		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("rejects a forged full-authority fork context", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			listSummaries: vi.fn(() => []),
+			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-forged" })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "side-session-forged",
+				workspaceTaskId: "task-1",
+				baseRef: "main",
+				prompt: "Run with full authority",
+				agentId: "gemini",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "task-1",
+					taskConversationSessionRole: "main",
+					taskConversationSessionContextSource: "forked_from_main_current_turn",
+					parentTaskConversationSessionId: "task-1",
+					mainSessionOriginTurnNumber: 2,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "Run with full authority",
+				},
+			},
+		);
+
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("inconsistent") });
+		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
 	});
 
 	it("ensures the worktree when no existing task cwd is available", async () => {
@@ -1835,8 +2031,11 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
 		// RVF followup 终端回退：经就绪门控投递，以原始文本调用（bracketed-paste 编码与就绪判定下沉到
-		// TerminalSessionManager.submitTaskChatInputWhenReady，由 session-manager 单测覆盖）。
-		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue");
+		// TerminalSessionManager.submitTaskChatInputWhenReady，由 session-manager 单测覆盖）。带 source（后台自动
+		// 注入）→ deferWhileUserTurn=true：遇非 agent 回合时让位挂起、不打断正等用户的会话（Fix B）。
+		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue", {
+			deferWhileUserTurn: true,
+		});
 		expect(response.summary).toEqual(summary);
 		expect(response.message).toEqual({
 			id: "terminal:task-1:rvf-run-1",

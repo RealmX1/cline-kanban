@@ -6,6 +6,7 @@ export enum LocalStorageKey {
 	TaskCreateTerminalAgentModelSelections = "kanban.task-create-terminal-agent-model-selections.v1",
 	AgentTipsDismissed = "kanban.agent-tips-dismissed",
 	TaskCreatePrimaryStartAction = "kanban.task-create-primary-start-action",
+	TaskConversationSessionReadReceipts = "kanban.task-conversation-session-read-receipts.v1",
 	BottomTerminalPaneHeight = "kanban.bottom-terminal-pane-height",
 	DetailAgentPanelRatio = "kanban.detail-agent-panel-ratio",
 	DetailTerminalPanelWidth = "kanban.detail-terminal-panel-width",
@@ -27,6 +28,10 @@ export enum LocalStorageKey {
 	NotificationBadgeClearEvent = "kanban.notification-badge-clear.v1",
 	TabVisibilityPresence = "kanban.tab-visibility-presence.v1",
 	Theme = "kanban.theme",
+	// Guided Verification 浮动面板的「保持最前」偏好（默认 true，由消费方 use-guided-verification 兜底）。
+	GuidedVerificationStayInFront = "kanban.guided-verification-stay-in-front",
+	// Guided Verification 面板折叠为右下角 badge 的偏好。
+	GuidedVerificationCollapsed = "kanban.guided-verification-collapsed",
 }
 
 export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [

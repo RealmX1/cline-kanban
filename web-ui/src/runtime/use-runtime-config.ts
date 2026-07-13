@@ -13,10 +13,12 @@ export interface UseRuntimeConfigResult {
 		selectedAgentId?: RuntimeAgentId;
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
+		newTaskStartInPlanModeByDefault?: boolean;
 		shortcuts?: RuntimeProjectShortcut[];
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		guidedVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
 	}) => Promise<RuntimeConfigResponse | null>;
@@ -82,9 +84,12 @@ export function useRuntimeConfig(
 			selectedAgentId?: RuntimeAgentId;
 			selectedShortcutLabel?: string | null;
 			agentAutonomousModeEnabled?: boolean;
+			newTaskStartInPlanModeByDefault?: boolean;
 			shortcuts?: RuntimeProjectShortcut[];
 			readyForReviewNotificationsEnabled?: boolean;
+			notificationSoundEnabled?: boolean;
 			autoContinueOnConnectionDropEnabled?: boolean;
+			guidedVerificationForceCompleteEnabled?: boolean;
 			commitPromptTemplate?: string;
 			openPrPromptTemplate?: string;
 		}): Promise<RuntimeConfigResponse | null> => {

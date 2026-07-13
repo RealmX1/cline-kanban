@@ -2,10 +2,12 @@ import { useEffect, useReducer } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import type {
 	RuntimeClineMcpServerAuthStatus,
+	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
+	RuntimeStateStreamNotificationLogUpdatedMessage,
 	RuntimeStateStreamProjectsMessage,
 	RuntimeStateStreamSnapshotMessage,
 	RuntimeStateStreamTaskChatClearedMessage,
@@ -37,6 +39,37 @@ function mergeTaskSessionSummaries(
 	return nextSessions;
 }
 
+// 快照下发的是「跨全部 workspace 的扁平 feed」，按 workspaceId 分桶存，便于 notification_log_updated 增量按桶替换。
+function bucketNotificationFeedByWorkspaceId(
+	entries: RuntimeNotificationFeedEntry[],
+): Record<string, RuntimeNotificationFeedEntry[]> {
+	const byWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]> = {};
+	for (const entry of entries) {
+		const bucket = byWorkspaceId[entry.workspaceId] ?? [];
+		bucket.push(entry);
+		byWorkspaceId[entry.workspaceId] = bucket;
+	}
+	return byWorkspaceId;
+}
+
+// project 被移除后裁剪通知桶：只保留仍存在的 workspace。removeProject 只广播 projects_updated、不发通知增量，
+// 若不裁剪，被删 repo 的桶会原样留在客户端内存——铃铛残留其通知且点击跳转失败（切到已删 project 是 no-op）。
+// 无 stale 桶时返回原对象，保持引用稳定、不触发无谓重渲染。
+function pruneNotificationLogToWorkspaces(
+	byWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>,
+	liveWorkspaceIds: ReadonlySet<string>,
+): Record<string, RuntimeNotificationFeedEntry[]> {
+	const staleWorkspaceIds = Object.keys(byWorkspaceId).filter((workspaceId) => !liveWorkspaceIds.has(workspaceId));
+	if (staleWorkspaceIds.length === 0) {
+		return byWorkspaceId;
+	}
+	const pruned = { ...byWorkspaceId };
+	for (const workspaceId of staleWorkspaceIds) {
+		delete pruned[workspaceId];
+	}
+	return pruned;
+}
+
 function getRuntimeStreamUrl(workspaceId: string | null): string {
 	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	const url = new URL(`${protocol}//${window.location.host}/api/runtime/ws`);
@@ -55,6 +88,8 @@ export interface UseRuntimeStateStreamResult {
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
+	// 跨 repo 聚合的通知 feed，按 workspaceId 分桶（切项目不清空——铃铛看整台服务器）。
+	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
 	streamError: string | null;
 	isRuntimeDisconnected: boolean;
@@ -70,6 +105,7 @@ interface RuntimeStateStreamStore {
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
+	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
 	streamError: string | null;
 	isRuntimeDisconnected: boolean;
@@ -89,6 +125,7 @@ type RuntimeStateStreamAction =
 	| { type: "task_chat_cleared"; payload: RuntimeStateStreamTaskChatClearedMessage }
 	| { type: "workspace_metadata_updated"; workspaceMetadata: RuntimeWorkspaceMetadata }
 	| { type: "task_ready_for_review"; payload: RuntimeStateStreamTaskReadyForReviewMessage }
+	| { type: "notification_log_updated"; payload: RuntimeStateStreamNotificationLogUpdatedMessage }
 	| { type: "mcp_auth_updated"; payload: RuntimeStateStreamMcpAuthUpdatedMessage }
 	| { type: "cline_session_context_updated"; payload: RuntimeStateStreamClineSessionContextUpdatedMessage }
 	| { type: "workspace_state_updated"; workspaceState: RuntimeWorkspaceStateResponse }
@@ -106,6 +143,7 @@ function createInitialRuntimeStateStreamStore(requestedWorkspaceId: string | nul
 		taskChatMessagesByTaskId: {},
 		latestTaskReadyForReview: null,
 		latestMcpAuthStatuses: null,
+		notificationLogByWorkspaceId: {},
 		clineSessionContextVersion: 0,
 		streamError: null,
 		isRuntimeDisconnected: false,
@@ -190,6 +228,9 @@ function runtimeStateStreamReducer(
 			taskChatMessagesByTaskId: {},
 			latestTaskReadyForReview: state.latestTaskReadyForReview,
 			latestMcpAuthStatuses: state.latestMcpAuthStatuses,
+			// 快照是聚合日志的权威源：整体替换分桶（含重连后从后端恢复已访问态）。
+			// ?? [] 兜底旧服务端/异常 payload——缺字段时不因 for-of undefined 抛错而丢掉整个 snapshot。
+			notificationLogByWorkspaceId: bucketNotificationFeedByWorkspaceId(action.payload.notificationLog ?? []),
 			clineSessionContextVersion: action.payload.clineSessionContextVersion,
 			streamError: null,
 			isRuntimeDisconnected: false,
@@ -198,6 +239,8 @@ function runtimeStateStreamReducer(
 	}
 	if (action.type === "projects_updated") {
 		const didProjectChange = action.nextProjectId !== state.currentProjectId;
+		// project.id 即 workspaceId（通知桶键）；裁剪已移除 workspace 的桶（见 pruneNotificationLogToWorkspaces）。
+		const liveWorkspaceIds = new Set(action.payload.projects.map((project) => project.id));
 		return {
 			...state,
 			currentProjectId: action.nextProjectId,
@@ -207,6 +250,10 @@ function runtimeStateStreamReducer(
 			latestTaskChatMessage: didProjectChange ? null : state.latestTaskChatMessage,
 			taskChatMessagesByTaskId: didProjectChange ? {} : state.taskChatMessagesByTaskId,
 			latestTaskReadyForReview: didProjectChange ? null : state.latestTaskReadyForReview,
+			notificationLogByWorkspaceId: pruneNotificationLogToWorkspaces(
+				state.notificationLogByWorkspaceId,
+				liveWorkspaceIds,
+			),
 			hasReceivedSnapshot: true,
 		};
 	}
@@ -241,6 +288,16 @@ function runtimeStateStreamReducer(
 		return {
 			...state,
 			latestTaskReadyForReview: action.payload,
+		};
+	}
+	if (action.type === "notification_log_updated") {
+		// 按桶替换该 workspace 的整段 feed（后端每次发的是完整 feed，非增量条目）。跨 repo：其它桶不动。
+		return {
+			...state,
+			notificationLogByWorkspaceId: {
+				...state.notificationLogByWorkspaceId,
+				[action.payload.workspaceId]: action.payload.entries,
+			},
 		};
 	}
 	if (action.type === "mcp_auth_updated") {
@@ -452,6 +509,14 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 						});
 						return;
 					}
+					if (payload.type === "notification_log_updated") {
+						// 全局广播：不按 activeWorkspaceId 过滤（铃铛跨 repo，需接收其它 workspace 的更新）。
+						dispatch({
+							type: "notification_log_updated",
+							payload,
+						});
+						return;
+					}
 					if (payload.type === "mcp_auth_updated") {
 						dispatch({
 							type: "mcp_auth_updated",
@@ -520,6 +585,7 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 		taskChatMessagesByTaskId: state.taskChatMessagesByTaskId,
 		latestTaskReadyForReview: state.latestTaskReadyForReview,
 		latestMcpAuthStatuses: state.latestMcpAuthStatuses,
+		notificationLogByWorkspaceId: state.notificationLogByWorkspaceId,
 		clineSessionContextVersion: state.clineSessionContextVersion,
 		streamError: state.streamError,
 		isRuntimeDisconnected: state.isRuntimeDisconnected,

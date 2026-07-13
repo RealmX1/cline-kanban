@@ -12,6 +12,7 @@ import { MIN_DETAIL_DIFF_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout"
 import { clampPanelWidthToWindow, estimateTaskAgentTerminalGeometry } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
+	RuntimeAgentId,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
@@ -45,6 +46,16 @@ interface SendTaskSessionInputResult {
 interface StartTaskSessionResult {
 	ok: boolean;
 	message?: string;
+	taskConversationSessionId?: string;
+}
+
+export interface CreateByTheWayTaskConversationSessionInput {
+	task: BoardCard;
+	agentId: RuntimeAgentId;
+	initialUserQuestion: string;
+	contextSource: "started_from_scratch" | "forked_from_main_current_turn";
+	mainSessionOriginTurnNumber: number;
+	mainSessionOriginUserMessagePreview: string | null;
 }
 
 interface StartTaskSessionOptions {
@@ -55,6 +66,9 @@ export interface UseTaskSessionsResult {
 	upsertSession: (summary: RuntimeTaskSessionSummary) => void;
 	ensureTaskWorkspace: (task: BoardCard) => Promise<EnsureTaskWorkspaceResult>;
 	startTaskSession: (task: BoardCard, options?: StartTaskSessionOptions) => Promise<StartTaskSessionResult>;
+	createByTheWayTaskConversationSession: (
+		input: CreateByTheWayTaskConversationSessionInput,
+	) => Promise<StartTaskSessionResult>;
 	stopTaskSession: (taskId: string) => Promise<void>;
 	// 手动「移至 Review」：把一个停在 agent 回合的终端 agent 任务翻入「等人审查」回合（不杀进程）。
 	// 成功时即时 upsert 返回的 summary（携 turnOwner=user）→ 由 use-board-interactions 的 Rule A 自动落位
@@ -207,6 +221,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					clineSettings: task.clineSettings,
 					terminalAgentModelOverrideSettings: task.terminalAgentModelOverrideSettings,
 					...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
+					...(task.taskAgentSessionInitialization
+						? { taskAgentSessionInitialization: task.taskAgentSessionInitialization }
+						: {}),
 					...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
 					...(task.prepFilePath ? { prepFilePath: task.prepFilePath } : {}),
 				});
@@ -242,6 +259,63 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			}
 		},
 		[currentProjectId],
+	);
+
+	const createByTheWayTaskConversationSession = useCallback(
+		async (input: CreateByTheWayTaskConversationSessionInput): Promise<StartTaskSessionResult> => {
+			if (!currentProjectId) {
+				return { ok: false, message: "No project selected." };
+			}
+			const initialUserQuestion = input.initialUserQuestion.trim();
+			if (!initialUserQuestion) {
+				return { ok: false, message: "Enter a question for the new session." };
+			}
+			const taskConversationSessionId = `task-conversation-session-${crypto.randomUUID()}`;
+			try {
+				const geometry =
+					getTerminalGeometry(taskConversationSessionId) ??
+					estimateTaskAgentTerminalGeometry(
+						clampPanelWidthToWindow(
+							loadDetailTerminalPanelWidth(),
+							MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
+							window.innerWidth,
+						),
+						window.innerHeight,
+					);
+				const trpcClient = getRuntimeTrpcClient(currentProjectId);
+				const payload = await trpcClient.runtime.startTaskSession.mutate({
+					taskId: taskConversationSessionId,
+					workspaceTaskId: input.task.id,
+					prompt: initialUserQuestion,
+					taskTitle: `By the way: ${initialUserQuestion.slice(0, 80)}`,
+					baseRef: input.task.baseRef,
+					cols: geometry.cols,
+					rows: geometry.rows,
+					agentId: input.agentId,
+					clineSettings: input.task.clineSettings,
+					terminalAgentModelOverrideSettings: input.task.terminalAgentModelOverrideSettings,
+					...(input.task.worktreeMode ? { worktreeMode: input.task.worktreeMode } : {}),
+					taskConversationSessionMetadata: {
+						workspaceTaskId: input.task.id,
+						taskConversationSessionRole: "by_the_way",
+						taskConversationSessionContextSource: input.contextSource,
+						parentTaskConversationSessionId:
+							input.contextSource === "forked_from_main_current_turn" ? input.task.id : null,
+						mainSessionOriginTurnNumber: input.mainSessionOriginTurnNumber,
+						mainSessionOriginUserMessagePreview: input.mainSessionOriginUserMessagePreview,
+						latestUserMessagePreview: initialUserQuestion,
+					},
+				});
+				if (!payload.ok || !payload.summary) {
+					return { ok: false, message: payload.error ?? "Could not create the By the way session." };
+				}
+				upsertSession(payload.summary);
+				return { ok: true, taskConversationSessionId };
+			} catch (error) {
+				return { ok: false, message: error instanceof Error ? error.message : String(error) };
+			}
+		},
+		[currentProjectId, upsertSession],
 	);
 
 	const transitionTaskToReview = useCallback(
@@ -388,6 +462,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		upsertSession,
 		ensureTaskWorkspace,
 		startTaskSession,
+		createByTheWayTaskConversationSession,
 		stopTaskSession,
 		transitionTaskToReview,
 		continueConnectionRetrySessions,

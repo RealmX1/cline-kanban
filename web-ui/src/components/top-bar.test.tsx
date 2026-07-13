@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TopBar } from "@/components/top-bar";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 function findButtonByText(container: HTMLElement, text: string): HTMLButtonElement | null {
 	return (Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.trim() === text) ??
@@ -48,17 +49,19 @@ describe("TopBar script shortcut onboarding", () => {
 
 		await act(async () => {
 			root.render(
-				<TopBar
-					openTargetOptions={[]}
-					selectedOpenTargetId="vscode"
-					onSelectOpenTarget={() => {}}
-					onOpenWorkspace={() => {}}
-					canOpenWorkspace={false}
-					isOpeningWorkspace={false}
-					shortcuts={[]}
-					onRunShortcut={onRunShortcut}
-					onCreateFirstShortcut={onCreateFirstShortcut}
-				/>,
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						shortcuts={[]}
+						onRunShortcut={onRunShortcut}
+						onCreateFirstShortcut={onCreateFirstShortcut}
+					/>
+				</TooltipProvider>,
 			);
 		});
 
@@ -108,16 +111,18 @@ describe("TopBar script shortcut onboarding", () => {
 
 		await act(async () => {
 			root.render(
-				<TopBar
-					openTargetOptions={[]}
-					selectedOpenTargetId="vscode"
-					onSelectOpenTarget={() => {}}
-					onOpenWorkspace={() => {}}
-					canOpenWorkspace={false}
-					isOpeningWorkspace={false}
-					runtimeHint="No agent configured"
-					onOpenSettings={onOpenSettings}
-				/>,
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						runtimeHint="No agent configured"
+						onOpenSettings={onOpenSettings}
+					/>
+				</TooltipProvider>,
 			);
 		});
 
@@ -130,5 +135,30 @@ describe("TopBar script shortcut onboarding", () => {
 		});
 
 		expect(onOpenSettings).toHaveBeenCalledTimes(1);
+	});
+
+	it("toggles the focused task Changes sidebar from the top navigation", async () => {
+		const onToggleTaskChangesSidebar = vi.fn();
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						isTaskChangesSidebarOpen={false}
+						onToggleTaskChangesSidebar={onToggleTaskChangesSidebar}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const changesButton = container.querySelector('button[aria-label="Show task changes"]');
+		expect(changesButton).toBeInstanceOf(HTMLButtonElement);
+		await act(async () => (changesButton as HTMLButtonElement).click());
+		expect(onToggleTaskChangesSidebar).toHaveBeenCalledTimes(1);
 	});
 });

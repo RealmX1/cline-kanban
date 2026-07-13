@@ -9,11 +9,16 @@ import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { ReviewTaskWorkspaceSnapshot } from "@/types";
 
 let mockWorkspaceSnapshot: ReviewTaskWorkspaceSnapshot | undefined;
+const draggableMock = vi.hoisted(() => ({
+	lastIsDragDisabled: null as boolean | null,
+}));
 
 vi.mock("@hello-pangea/dnd", () => ({
 	Draggable: ({
 		children,
+		isDragDisabled,
 	}: {
+		isDragDisabled?: boolean;
 		children: (
 			provided: {
 				innerRef: (element: HTMLDivElement | null) => void;
@@ -22,9 +27,10 @@ vi.mock("@hello-pangea/dnd", () => ({
 			},
 			snapshot: { isDragging: boolean },
 		) => ReactNode;
-	}): React.ReactElement => (
-		<>{children({ innerRef: () => {}, draggableProps: {}, dragHandleProps: {} }, { isDragging: false })}</>
-	),
+	}): React.ReactElement => {
+		draggableMock.lastIsDragDisabled = isDragDisabled ?? false;
+		return <>{children({ innerRef: () => {}, draggableProps: {}, dragHandleProps: {} }, { isDragging: false })}</>;
+	},
 }));
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
@@ -121,6 +127,7 @@ describe("BoardCard", () => {
 
 	beforeEach(() => {
 		mockWorkspaceSnapshot = undefined;
+		draggableMock.lastIsDragDisabled = null;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -208,6 +215,25 @@ describe("BoardCard", () => {
 		const doneButton = container.querySelector('button[aria-label="Move task to done"]');
 		expect(doneButton?.querySelector("svg.lucide-archive")).toBeTruthy();
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
+	});
+
+	it("passes search drag disabled state to the draggable wrapper", async () => {
+		await act(async () => {
+			root.render(<BoardCard card={createCard()} index={0} columnId="backlog" isDragDisabled />);
+		});
+
+		expect(draggableMock.lastIsDragDisabled).toBe(true);
+	});
+
+	it("shows source badges for task search matches", async () => {
+		await act(async () => {
+			root.render(
+				<BoardCard card={createCard()} index={0} columnId="backlog" searchMatchSources={["title", "prompt"]} />,
+			);
+		});
+
+		expect(container.textContent).toContain("Name");
+		expect(container.textContent).toContain("Prompt");
 	});
 
 	// 双轴重构 Stage 3「computing 脉动」（distinction ①）：agent 回合且最近 5s 内仍在产出 → 状态点
@@ -1173,6 +1199,33 @@ describe("BoardCard", () => {
 		Array.from(container.querySelectorAll("p")).find(
 			(paragraph) => paragraph.textContent?.trim() === "Review API changes",
 		);
+
+	it("opens the shared task editor instead of inline title editing when requested", async () => {
+		const onOpenTaskEditor = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="backlog"
+						onOpenTaskEditor={onOpenTaskEditor}
+						onSaveTitle={() => {}}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		await act(async () => {
+			container
+				.querySelector<HTMLButtonElement>('[aria-label="Edit task title"]')
+				?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		});
+
+		expect(onOpenTaskEditor).toHaveBeenCalledTimes(1);
+		expect(container.querySelector("textarea")).toBeNull();
+	});
 
 	it("enters title edit mode on double-click for in-progress cards", async () => {
 		await act(async () => {

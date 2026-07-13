@@ -64,12 +64,14 @@ function createRuntimeConfig(overrides: Partial<RuntimeConfigResponse> = {}): Ru
 		selectedAgentId: "codex",
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
+		newTaskStartInPlanModeByDefault: true,
 		effectiveCommand: "codex --dangerously-bypass-approvals-and-sandbox",
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project-config.json",
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		guidedVerificationForceCompleteEnabled: false,
 		detectedCommands: ["codex", "claude", "cline"],
 		agents: [
 			{

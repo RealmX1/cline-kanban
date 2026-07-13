@@ -38,6 +38,7 @@ const PROJECTS: RuntimeProjectSummary[] = [
 			validation: 0,
 			trash: 0,
 		},
+		inProgressTaskDetails: [],
 	},
 ];
 

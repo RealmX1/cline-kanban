@@ -28,7 +28,10 @@ import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
-import { getNextDetailTaskIdAfterTrashMove } from "@/utils/detail-view-task-order";
+import {
+	getNextDetailTaskIdAfterTrashMove,
+	getNextReviewTaskIdAfterReviewTaskMovesToValidation,
+} from "@/utils/detail-view-task-order";
 import {
 	getBrowserNotificationPermission,
 	hasPromptedForBrowserNotificationPermission,
@@ -94,6 +97,10 @@ export interface UseBoardInteractionsResult {
 	isMoveToDoneConfirmOpen: boolean;
 	confirmMoveToDone: () => void;
 	cancelMoveToDone: () => void;
+	// Guided Verification 全勾入 Done 的移列入口：语义等价 performMoveToTrash（直接移入 trash/Done，
+	// 绕过 requestMoveToTrash 对 review/in_progress 的 SkipValidationConfirmDialog），但**可 await 且返回成败**，
+	// 供调用方在移列确实成功后才写 boardMovedToDoneAt。fromColumnId 取任务的当前实际列（getTaskColumnId），非快照。
+	completeGuidedVerificationMoveToDone: (taskId: string, fromColumnId: BoardColumnId) => Promise<{ ok: boolean }>;
 	handleMoveCardToValidation: (taskId: string) => void;
 	handleMoveSelectedCardToValidation: () => void;
 	// 手动「移至 Review」：仅 In Progress 卡可用，翻会话回合 + 由 Rule A 自动落位 Review。
@@ -172,6 +179,19 @@ export function useBoardInteractions({
 		delete pendingProgrammaticStartMoveCompletionByTaskIdRef.current[taskId];
 		pending.resolve(started);
 	}, []);
+
+	const moveFocusedReviewTaskToNextReviewTaskAfterValidationMove = useCallback(
+		(boardBeforeReviewToValidationMove: BoardData, movedTaskId: string) => {
+			const nextReviewTaskId = getNextReviewTaskIdAfterReviewTaskMovesToValidation(
+				boardBeforeReviewToValidationMove,
+				movedTaskId,
+			);
+			setSelectedTaskId((currentSelectedTaskId) =>
+				currentSelectedTaskId === movedTaskId ? (nextReviewTaskId ?? currentSelectedTaskId) : currentSelectedTaskId,
+			);
+		},
+		[setSelectedTaskId],
+	);
 
 	const getPrimaryBoardTaskElement = useCallback((taskId: string): HTMLElement | null => {
 		const boardElement = document.querySelector<HTMLElement>(".kb-board");
@@ -682,6 +702,9 @@ export function useBoardInteractions({
 				return;
 			}
 
+			if (moveEvent.fromColumnId === "review" && moveEvent.toColumnId === "validation") {
+				moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, moveEvent.taskId);
+			}
 			setBoard(applied.board);
 
 			if (
@@ -715,6 +738,7 @@ export function useBoardInteractions({
 			resumeTaskFromTrash,
 			resolvePendingProgrammaticStartMove,
 			resolvePendingProgrammaticTrashMove,
+			moveFocusedReviewTaskToNextReviewTaskAfterValidationMove,
 			setBoard,
 			setSelectedTaskId,
 		],
@@ -812,6 +836,30 @@ export function useBoardInteractions({
 		[requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
 	);
 
+	// Guided Verification 全勾入 Done 的移列入口。与 performMoveToTrash 等价——直接走 requestMoveTaskToTrash
+	// WithAnimation（保留 stopTaskSession + worktree 清理副作用），绕过 requestMoveToTrash 对 review/in_progress
+	// 的 SkipValidationConfirmDialog（Guided Verification 自有确认框）。关键区别：**awaitable 且返回成败**——
+	// performMoveToTrash 吞掉 Promise（fire-and-forget），本导出 await 之，成功 resolve { ok:true }、抛错 { ok:false }，
+	// 让调用方在移列确实成功后才回写 boardMovedToDoneAt / 调 confirmVerificationComplete。
+	const completeGuidedVerificationMoveToDone = useCallback(
+		async (taskId: string, fromColumnId: BoardColumnId): Promise<{ ok: boolean }> => {
+			// 同任务移列已在途：不重复触发，报失败让调用方不写完成标记。
+			if (moveToTrashLoadingByIdRef.current[taskId]) {
+				return { ok: false };
+			}
+			setTaskMoveToTrashLoading(taskId, true);
+			try {
+				await requestMoveTaskToTrashWithAnimation(taskId, fromColumnId);
+				return { ok: true };
+			} catch {
+				return { ok: false };
+			} finally {
+				setTaskMoveToTrashLoading(taskId, false);
+			}
+		},
+		[requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
+	);
+
 	// Single entry point for every "Move to Done" trigger (board card, detail sidebar card, agent
 	// TUI bottom button). Moving straight to Done from Review / In Progress skips the manual
 	// Validation step, so it requires confirmation; from Validation it is the normal completion path.
@@ -866,6 +914,9 @@ export function useBoardInteractions({
 			const moved = moveTaskToColumn(board, taskId, "validation", { insertAtTop: true });
 			if (moved.moved) {
 				setBoard(moved.board);
+				if (fromColumnId === "review") {
+					moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, taskId);
+				}
 				// A session that is *actively producing output* in Validation gets auto-migrated back to
 				// In Progress by the level-triggered effect above, so warn the developer instead of leaving
 				// the card looking like it never moved. Idle / already-exited sessions (still flagged
@@ -882,7 +933,7 @@ export function useBoardInteractions({
 				}
 			}
 		},
-		[board, sessions, setBoard],
+		[board, moveFocusedReviewTaskToNextReviewTaskAfterValidationMove, sessions, setBoard],
 	);
 
 	const handleMoveSelectedCardToValidation = useCallback(() => {
@@ -1120,6 +1171,7 @@ export function useBoardInteractions({
 		isMoveToDoneConfirmOpen: pendingMoveToDone !== null,
 		confirmMoveToDone,
 		cancelMoveToDone,
+		completeGuidedVerificationMoveToDone,
 		handleMoveCardToValidation,
 		handleMoveSelectedCardToValidation,
 		handleMoveCardToReview,

@@ -608,3 +608,61 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		expect(crResendsAfter).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS);
 	});
 });
+
+// Fix B：后台自动注入（deferWhileUserTurn=true）遇非 agent 回合让位挂起、待 agent 回合恢复再投递；
+// 用户发起的发送（deferWhileUserTurn=false）任何回合照常送达。
+describe("session-manager · submitTaskChatInputWhenReady 后台注入让位（Fix B deferWhileUserTurn）", () => {
+	beforeEach(() => {
+		prepareAgentLaunchMock.mockReset();
+		ptySessionSpawnMock.mockReset();
+		ensureInstructionsFileMock.mockClear();
+		tuiFreezeWarnings.length = 0;
+		tuiFreezeErrors.length = 0;
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("deferWhileUserTurn=true + user 回合：越过 deadline 仍不写；turnOwner 回 agent 后的下一轮 recheck 才投递一次", async () => {
+		const manager = new TerminalSessionManager();
+		// awaiting_review = user 回合（agent 正 AskUserQuestion 等用户）。就绪信号在镜像里（框在），故一旦让位解除即可投递。
+		const { write, entry } = installFakeClaudeEntry(manager, "task-defer-user-turn", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+
+		manager.submitTaskChatInputWhenReady("task-defer-user-turn", "再跑一轮 RVF", { deferWhileUserTurn: true });
+		// 后台注入遇 user 回合 → 让位：即便越过 deadline 兜底也绝不强写（这正是 connection-drop 让位不变量补到本路径）。
+		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
+		const submitsWhileDeferred = write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["));
+		expect(submitsWhileDeferred).toHaveLength(0);
+
+		// agent 回合恢复（用户答完、agent 续跑）→ 挂起的注入在下一轮 recheck 放行、恰投递一次。
+		entry.summary.state = "running";
+		await vi.advanceTimersByTimeAsync(RECHECK_MS);
+		const submitsAfterResume = write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["));
+		expect(submitsAfterResume).toHaveLength(1);
+		expect(submitsAfterResume[0]?.[0]).toBe("SUBMIT[再跑一轮 RVF]");
+	});
+
+	it("deferWhileUserTurn=false（用户发起）+ user 回合：不让位，就绪即照常投递", async () => {
+		const manager = new TerminalSessionManager();
+		// 同为 user 回合，但人类聊天 / commit·openPR 按钮发送不带 source → 不让位：故意向 review 态会话发指令，应送达。
+		const { write } = installFakeClaudeEntry(manager, "task-nodefer-user-turn", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+
+		manager.submitTaskChatInputWhenReady("task-nodefer-user-turn", "用户手输的消息");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		const submits = write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["));
+		expect(submits).toHaveLength(1);
+		expect(submits[0]?.[0]).toBe("SUBMIT[用户手输的消息]");
+	});
+});

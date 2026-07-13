@@ -7,6 +7,7 @@ import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TRPCError } from "@trpc/server";
+import { listAvailableAgentSessions } from "../agent-session-history/available-agent-session-index";
 import { createClineMcpRuntimeService } from "../cline-sdk/cline-mcp-runtime-service";
 import { createClineMcpSettingsService } from "../cline-sdk/cline-mcp-settings-service";
 import { createClineProviderService } from "../cline-sdk/cline-provider-service";
@@ -15,9 +16,11 @@ import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-se
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtime-config";
 import type {
+	RuntimeAgentId,
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
 	RuntimeTaskChatMessage,
+	RuntimeTaskSessionSummary,
 	RuntimeTaskWorktreeMode,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
@@ -54,6 +57,7 @@ import {
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { openInBrowser } from "../server/browser";
+import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { loadWorkspaceBoardById } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -75,6 +79,7 @@ export interface CreateRuntimeApiDependencies {
 		statuses: Awaited<ReturnType<ReturnType<typeof createClineMcpRuntimeService>["getAuthStatuses"]>>,
 	) => void;
 	broadcastTaskChatCleared?: (workspaceId: string, taskId: string) => void;
+	broadcastNotificationLogUpdated?: (workspaceId: string) => Promise<void> | void;
 	bumpClineSessionContextVersion?: () => void;
 	prepareForStateReset?: () => Promise<void>;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
@@ -128,6 +133,13 @@ function buildTerminalTaskChatDeliveryMessage(input: {
 			promptSha256: input.promptSha256 ?? null,
 		},
 	};
+}
+
+const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["cline", "claude", "codex"]);
+
+function isByTheWaySessionForWorkspaceTask(summary: RuntimeTaskSessionSummary, workspaceTaskId: string): boolean {
+	const metadata = summary.taskConversationSessionMetadata;
+	return metadata?.workspaceTaskId === workspaceTaskId && metadata.taskConversationSessionRole === "by_the_way";
 }
 
 export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrpcContext["runtimeApi"] {
@@ -212,15 +224,19 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				const requestedClineTaskMode = body.mode ?? "act";
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+				const workspaceTaskId = body.workspaceTaskId ?? body.taskId;
 				const taskCwd = isHomeAgentSessionId(body.taskId)
 					? workspaceScope.workspacePath
 					: await resolveExistingTaskCwdOrEnsure({
 							cwd: workspaceScope.workspacePath,
-							taskId: body.taskId,
+							taskId: workspaceTaskId,
 							baseRef: body.baseRef,
 							worktreeMode: body.worktreeMode,
 						});
-				const shouldCaptureTurnCheckpoint = !body.resumeFromTrash && !isHomeAgentSessionId(body.taskId);
+				const shouldCaptureTurnCheckpoint =
+					!body.resumeFromTrash &&
+					!isHomeAgentSessionId(body.taskId) &&
+					body.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way";
 
 				// Per-task config source-of-truth precedence:
 				//
@@ -240,6 +256,47 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					? (terminalManager.getSummary(body.taskId)?.agentId ?? null)
 					: null;
 				const effectiveAgentId = previousTerminalAgentId ?? body.agentId ?? scopedRuntimeConfig.selectedAgentId;
+				const taskConversationSessionMetadata = body.taskConversationSessionMetadata;
+				const isByTheWaySession = taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way";
+				if (
+					taskConversationSessionMetadata &&
+					(taskConversationSessionMetadata.taskConversationSessionRole === "main") !==
+						(taskConversationSessionMetadata.taskConversationSessionContextSource === "main")
+				) {
+					throw new Error("Task conversation session role and context source are inconsistent.");
+				}
+				if (
+					isByTheWaySession &&
+					(!body.workspaceTaskId ||
+						taskConversationSessionMetadata.workspaceTaskId !== workspaceTaskId ||
+						body.taskId === workspaceTaskId)
+				) {
+					throw new Error("By the way sessions require a distinct taskId and a matching workspaceTaskId.");
+				}
+				if (isByTheWaySession && !byTheWaySessionSupportedAgentIds.has(effectiveAgentId)) {
+					throw new Error(`Agent "${effectiveAgentId}" does not support By the way sessions.`);
+				}
+				if (
+					isByTheWaySession &&
+					taskConversationSessionMetadata.taskConversationSessionContextSource === "forked_from_main_current_turn"
+				) {
+					const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
+					const existingTaskConversationSessionSummaries = [
+						...(typeof terminalManager.listSummaries === "function" ? terminalManager.listSummaries() : []),
+						...(typeof clineTaskSessionService.listSummaries === "function"
+							? clineTaskSessionService.listSummaries()
+							: []),
+					];
+					if (
+						existingTaskConversationSessionSummaries.some((summary) =>
+							isByTheWaySessionForWorkspaceTask(summary, workspaceTaskId),
+						)
+					) {
+						throw new Error(
+							"Forking the current main session is unavailable after a By the way session already exists. Start from scratch instead.",
+						);
+					}
+				}
 				let useClinePath = effectiveAgentId === "cline";
 				const shouldProbePersistedClineSession =
 					body.resumeFromTrash && !useClinePath && previousTerminalAgentId === null;
@@ -269,16 +326,26 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					});
 					const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 					const resolvedClineTitle = resolveTaskTitle(body.taskTitle?.trim(), body.prompt);
+					const clineForkInitialMessages =
+						body.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+						"forked_from_main_current_turn"
+							? await clineTaskSessionService.loadPersistedTaskSessionMessages(workspaceTaskId)
+							: undefined;
 					const summary = await clineTaskSessionService.startTaskSession({
 						taskId: body.taskId,
+						taskConversationSessionMetadata: body.taskConversationSessionMetadata,
 						cwd: taskCwd,
 						prompt: body.prompt,
 						taskTitle: resolvedClineTitle.length > 0 ? resolvedClineTitle : undefined,
+						initialMessages: clineForkInitialMessages,
 						images: body.images,
 						resumeFromTrash: body.resumeFromTrash,
 						providerId: clineLaunchConfig.providerId,
 						modelId: clineLaunchConfig.modelId,
-						mode: requestedClineTaskMode,
+						mode:
+							body.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way"
+								? "plan"
+								: requestedClineTaskMode,
 						startInPlanMode: body.startInPlanMode,
 						apiKey: clineLaunchConfig.apiKey,
 						baseUrl: clineLaunchConfig.baseUrl,
@@ -320,6 +387,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				const summary = await terminalManager.startTaskSession({
 					taskId: body.taskId,
+					workspaceTaskId,
+					taskConversationSessionMetadata: body.taskConversationSessionMetadata,
 					agentId: resolved.agentId,
 					binary: resolved.binary,
 					args: resolved.args,
@@ -335,6 +404,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
 					parentSessionId: body.parentSessionId,
+					taskAgentSessionInitialization: body.taskAgentSessionInitialization,
 					terminalAgentModelOverrideSettings:
 						body.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
 							? body.terminalAgentModelOverrideSettings
@@ -442,6 +512,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
 					parentSessionId: undefined,
+					taskAgentSessionInitialization: undefined,
 					terminalAgentModelOverrideSettings:
 						card.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
 							? card.terminalAgentModelOverrideSettings
@@ -465,17 +536,29 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			try {
 				const body = parseTaskSessionStopRequest(input);
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-				const clineSummary = await clineTaskSessionService.stopTaskSession(body.taskId);
-				if (clineSummary) {
-					return {
-						ok: true,
-						summary: clineSummary,
-					};
-				}
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const summary = terminalManager.stopTaskSession(body.taskId);
+				const relatedTaskConversationSessionIds = new Set<string>([body.taskId]);
+				const clineTaskSessionSummaries =
+					typeof clineTaskSessionService.listSummaries === "function"
+						? clineTaskSessionService.listSummaries()
+						: [];
+				const terminalTaskSessionSummaries =
+					typeof terminalManager.listSummaries === "function" ? terminalManager.listSummaries() : [];
+				for (const summary of [...clineTaskSessionSummaries, ...terminalTaskSessionSummaries]) {
+					if (summary.taskConversationSessionMetadata?.workspaceTaskId === body.taskId) {
+						relatedTaskConversationSessionIds.add(summary.taskId);
+					}
+				}
+				let summary: RuntimeTaskSessionSummary | null = null;
+				for (const taskConversationSessionId of relatedTaskConversationSessionIds) {
+					const clineSummary = await clineTaskSessionService.stopTaskSession(taskConversationSessionId);
+					const terminalSummary = clineSummary ? null : terminalManager.stopTaskSession(taskConversationSessionId);
+					if (taskConversationSessionId === body.taskId) {
+						summary = clineSummary ?? terminalSummary ?? summary;
+					}
+				}
 				return {
-					ok: Boolean(summary),
+					ok: relatedTaskConversationSessionIds.size > 1 || Boolean(summary),
 					summary,
 				};
 			} catch (error) {
@@ -771,6 +854,15 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			const body = parseTerminalAgentModelSelectionOptionsRequest(input);
 			return await getTerminalAgentModelSelectionOptions(body.agentId);
 		},
+		getAvailableAgentSessions: async (workspaceScope, input) => {
+			if (!workspaceScope) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Select a workspace before searching agent sessions.",
+				});
+			}
+			return await listAvailableAgentSessions(workspaceScope.workspacePath, input);
+		},
 		getClineMcpAuthStatuses: async (_workspaceScope) => {
 			const statuses = await clineMcpRuntimeService.getAuthStatuses();
 			return {
@@ -879,7 +971,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 							// RVF followup 等程序化 chat 注入：经就绪门控投递（沉降 + 提示符就绪轮询 + deadline 兜底），
 							// 避免 Stop 后 TUI 重绘态下「粘贴进输入框但 CR 被吞、不发送」的间歇竞态。详见 submitTaskChatInputWhenReady。
-							const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text);
+							// deferWhileUserTurn=（带 source 即后台自动注入）：后台注入遇会话处于非 agent 回合（agent 正等用户
+							// 回答 AskUserQuestion / 计划评审 / 权限确认）时让位挂起、待 agent 回合恢复再投递，绝不把正等用户的
+							// 会话经 UserPromptSubmit 翻回 agent 回合。用户发起的发送（人类聊天 / commit·openPR，无 source）不受影响。
+							const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
+								deferWhileUserTurn: body.source != null,
+							});
 							if (terminalSummary) {
 								return {
 									ok: true,
@@ -1008,6 +1105,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 		runUpdateNow: async () => {
 			return await deps.runUpdateNow();
+		},
+		// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。落库后重建 feed 全局广播。
+		markTaskNotificationsVisited: async (_workspaceScope, input) => {
+			await markTaskNotificationsVisited(input.workspaceId, input.taskId, Date.now());
+			await deps.broadcastNotificationLogUpdated?.(input.workspaceId);
+			return { ok: true };
+		},
+		clearNotificationLog: async (_workspaceScope, input) => {
+			await clearNotificationLog(input.workspaceId);
+			await deps.broadcastNotificationLogUpdated?.(input.workspaceId);
+			return { ok: true };
 		},
 	};
 }
