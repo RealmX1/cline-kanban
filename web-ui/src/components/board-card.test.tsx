@@ -1200,6 +1200,33 @@ describe("BoardCard", () => {
 			(paragraph) => paragraph.textContent?.trim() === "Review API changes",
 		);
 
+	it("opens the shared task editor instead of inline title editing when requested", async () => {
+		const onOpenTaskEditor = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="backlog"
+						onOpenTaskEditor={onOpenTaskEditor}
+						onSaveTitle={() => {}}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		await act(async () => {
+			container
+				.querySelector<HTMLButtonElement>('[aria-label="Edit task title"]')
+				?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		});
+
+		expect(onOpenTaskEditor).toHaveBeenCalledTimes(1);
+		expect(container.querySelector("textarea")).toBeNull();
+	});
+
 	it("enters title edit mode on double-click for in-progress cards", async () => {
 		await act(async () => {
 			root.render(<BoardCard card={createCard()} index={0} columnId="in_progress" onSaveTitle={() => {}} />);

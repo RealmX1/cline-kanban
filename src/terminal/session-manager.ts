@@ -37,6 +37,7 @@ import {
 	prepareAgentLaunch,
 	toBracketedPasteSubmission,
 } from "./agent-session-adapters";
+import { materializeTaskAgentSessionForExecutionWorkingDirectory } from "./agent-session-materialization";
 import {
 	CLAUDE_STARTUP_READINESS_TIMEOUT_MS,
 	hasClaudeInteractivePrompt,
@@ -222,6 +223,7 @@ export interface StartTaskSessionRequest {
 	workspaceId?: string;
 	projectPath?: string;
 	parentSessionId?: string;
+	taskAgentSessionInitialization?: AgentAdapterLaunchInput["taskAgentSessionInitialization"];
 	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
 
@@ -1213,6 +1215,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 		});
 
+		await materializeTaskAgentSessionForExecutionWorkingDirectory({
+			initialization: request.taskAgentSessionInitialization,
+			executionWorkingDirectoryPath: request.cwd,
+		});
 		const launch = await prepareAgentLaunch({
 			taskId: request.taskId,
 			agentId: request.agentId,
@@ -1227,6 +1233,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			env: request.env,
 			workspaceId: request.workspaceId,
 			parentSessionId: request.parentSessionId,
+			taskAgentSessionInitialization: request.taskAgentSessionInitialization,
 			readOnlyQuestionSession: request.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way",
 			forkLatestWorkingDirectorySession:
 				request.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
