@@ -3,11 +3,14 @@ import { useCallback, useEffect, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { buildProjectPathname, parseProjectIdFromPathname } from "@/hooks/app-utils";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
+import type {
+	RuntimeProjectPermanentDeletionPreview,
+	RuntimeProjectPermanentDeletionRequest,
+	RuntimeProjectPermanentDeletionResult,
+} from "@/runtime/types";
 import { useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
 import { isLocalhostAccess } from "@/utils/localhost-detection";
 import { useWindowEvent } from "@/utils/react-use";
-
-const REMOVED_PROJECT_ERROR_PREFIX = "Project no longer exists on disk and was removed:";
 
 const DIRECTORY_PICKER_UNAVAILABLE_MARKERS = [
 	"could not open directory picker",
@@ -27,13 +30,6 @@ function isDirectoryPickerUnavailableError(message: string | null | undefined): 
 	return DIRECTORY_PICKER_UNAVAILABLE_MARKERS.some((marker) => normalized.includes(marker));
 }
 
-export function parseRemovedProjectPathFromStreamError(streamError: string | null): string | null {
-	if (!streamError || !streamError.startsWith(REMOVED_PROJECT_ERROR_PREFIX)) {
-		return null;
-	}
-	return streamError.slice(REMOVED_PROJECT_ERROR_PREFIX.length).trim();
-}
-
 interface UseProjectNavigationInput {
 	onProjectSwitchStart: () => void;
 }
@@ -41,7 +37,7 @@ interface UseProjectNavigationInput {
 export interface UseProjectNavigationResult {
 	requestedProjectId: string | null;
 	navigationCurrentProjectId: string | null;
-	removingProjectId: string | null;
+	permanentlyDeletingProjectId: string | null;
 	isAddProjectDialogOpen: boolean;
 	setIsAddProjectDialogOpen: (open: boolean) => void;
 	pendingNativeGitInitPath: string | null;
@@ -58,12 +54,16 @@ export interface UseProjectNavigationResult {
 	streamError: string | null;
 	isRuntimeDisconnected: boolean;
 	hasReceivedSnapshot: boolean;
+	recheckProjectAvailability: () => void;
 	hasNoProjects: boolean;
 	isProjectSwitching: boolean;
 	handleSelectProject: (projectId: string) => void;
 	handleAddProject: () => void;
 	handleAddProjectSuccess: (projectId: string) => void;
-	handleRemoveProject: (projectId: string) => Promise<boolean>;
+	handleGetPermanentDeletionPreview: (projectId: string) => Promise<RuntimeProjectPermanentDeletionPreview | null>;
+	handlePermanentlyDeleteProjectData: (
+		input: RuntimeProjectPermanentDeletionRequest,
+	) => Promise<RuntimeProjectPermanentDeletionResult | null>;
 	resetProjectNavigationState: () => void;
 }
 
@@ -75,7 +75,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		return parseProjectIdFromPathname(window.location.pathname);
 	});
 	const [pendingAddedProjectId, setPendingAddedProjectId] = useState<string | null>(null);
-	const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
+	const [permanentlyDeletingProjectId, setPermanentlyDeletingProjectId] = useState<string | null>(null);
 	const [isAddProjectDialogOpen, setIsAddProjectDialogOpen] = useState(false);
 	const [pendingGitInitPath, setPendingGitInitPath] = useState<string | null>(null);
 
@@ -93,6 +93,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		streamError,
 		isRuntimeDisconnected,
 		hasReceivedSnapshot,
+		recheckProjectAvailability,
 	} = useRuntimeStateStream(requestedProjectId);
 
 	const hasNoProjects = hasReceivedSnapshot && projects.length === 0 && currentProjectId === null;
@@ -166,32 +167,50 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		}
 	}, [currentProjectId, handleAddProjectSuccess]);
 
-	const handleRemoveProject = useCallback(
-		async (projectId: string): Promise<boolean> => {
-			if (removingProjectId) {
-				return false;
-			}
-			setRemovingProjectId(projectId);
+	const handleGetPermanentDeletionPreview = useCallback(
+		async (projectId: string): Promise<RuntimeProjectPermanentDeletionPreview | null> => {
 			try {
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
-				const payload = await trpcClient.projects.remove.mutate({ projectId });
+				const payload = await trpcClient.projects.getPermanentDeletionPreview.query({ projectId });
 				if (!payload.ok) {
-					throw new Error(payload.error ?? "Could not remove project.");
+					throw new Error(payload.error);
 				}
-				if (currentProjectId === projectId) {
-					onProjectSwitchStart();
-					setRequestedProjectId(null);
-				}
-				return true;
+				return payload.preview;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				notifyError(message);
-				return false;
-			} finally {
-				setRemovingProjectId((current) => (current === projectId ? null : current));
+				return null;
 			}
 		},
-		[currentProjectId, onProjectSwitchStart, removingProjectId],
+		[currentProjectId],
+	);
+
+	const handlePermanentlyDeleteProjectData = useCallback(
+		async (input: RuntimeProjectPermanentDeletionRequest): Promise<RuntimeProjectPermanentDeletionResult | null> => {
+			if (permanentlyDeletingProjectId) {
+				return null;
+			}
+			setPermanentlyDeletingProjectId(input.projectId);
+			try {
+				const trpcClient = getRuntimeTrpcClient(currentProjectId);
+				const result = await trpcClient.projects.permanentlyDeleteProjectData.mutate(input);
+				if (
+					currentProjectId === input.projectId &&
+					(result.status === "completed" || result.status === "completed_with_retained_staging_directory")
+				) {
+					onProjectSwitchStart();
+					setRequestedProjectId(null);
+				}
+				return result;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				notifyError(message);
+				return null;
+			} finally {
+				setPermanentlyDeletingProjectId((current) => (current === input.projectId ? null : current));
+			}
+		},
+		[currentProjectId, onProjectSwitchStart, permanentlyDeletingProjectId],
 	);
 
 	const handlePopState = useCallback(() => {
@@ -258,7 +277,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 	}, [currentProjectId, pendingAddedProjectId, projects, requestedProjectId]);
 
 	const resetProjectNavigationState = useCallback(() => {
-		setRemovingProjectId(null);
+		setPermanentlyDeletingProjectId(null);
 		setIsAddProjectDialogOpen(false);
 		setPendingGitInitPath(null);
 	}, []);
@@ -266,7 +285,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 	return {
 		requestedProjectId,
 		navigationCurrentProjectId,
-		removingProjectId,
+		permanentlyDeletingProjectId,
 		isAddProjectDialogOpen,
 		setIsAddProjectDialogOpen,
 		pendingNativeGitInitPath: pendingGitInitPath,
@@ -283,12 +302,14 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		streamError,
 		isRuntimeDisconnected,
 		hasReceivedSnapshot,
+		recheckProjectAvailability,
 		hasNoProjects,
 		isProjectSwitching,
 		handleSelectProject,
 		handleAddProject,
 		handleAddProjectSuccess,
-		handleRemoveProject,
+		handleGetPermanentDeletionPreview,
+		handlePermanentlyDeleteProjectData,
 		resetProjectNavigationState,
 	};
 }

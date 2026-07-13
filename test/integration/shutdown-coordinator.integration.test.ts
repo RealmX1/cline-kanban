@@ -2,13 +2,12 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { applySessionFacets, projectLegacyState } from "../../src/core/session-activity";
 import { shutdownRuntimeServer } from "../../src/server/shutdown-coordinator";
 import { loadWorkspaceState, saveWorkspaceState } from "../../src/state/workspace-state";
-import type { TerminalSessionManager } from "../../src/terminal/session-manager";
 import { createGitTestEnv } from "../utilities/git-env";
 import { createTempDir } from "../utilities/temp-dir";
 
@@ -96,7 +95,7 @@ function createSession(taskId: string, state: "running" | "awaiting_review" | "i
 }
 
 describe.sequential("shutdown coordinator integration", () => {
-	it("moves all in-progress and review cards to trash for every indexed project on shutdown", async () => {
+	it("preserves every board and leaves unloaded indexed workspaces untouched on shutdown", async () => {
 		await withTemporaryHome(async () => {
 			const { path: sandboxRoot, cleanup } = createTempDir("kanban-shutdown-scope-");
 			try {
@@ -131,31 +130,21 @@ describe.sequential("shutdown coordinator integration", () => {
 					},
 					expectedRevision: indexedInitial.revision,
 				});
+				const managedStateBeforeShutdown = await loadWorkspaceState(managedProjectPath);
+				const indexedStateBeforeShutdown = await loadWorkspaceState(indexedProjectPath);
 
 				let didCloseRuntimeServer = false;
-				const managedTerminalManager = {
-					markInterruptedAndStopAll: () => [createSession("managed-running", "running")],
-					listSummaries: () => [createSession("managed-running", "running")],
-					getSummary: (taskId: string) => {
-						if (taskId === "managed-running") {
-							return createSession("managed-running", "running");
-						}
-						if (taskId === "managed-idle") {
-							return createSession("managed-idle", "idle");
-						}
-						return null;
+				const managedRunningSummary = createSession("managed-running", "running");
+				const stopAllActiveRuntimeSessionsForShutdown = vi.fn(async () => [
+					{
+						workspaceId: "managed-project",
+						workspacePath: managedProjectPath,
+						stoppedRuntimeSessionSummaries: [managedRunningSummary],
+						runtimeSessionSummariesForSafePersistence: [managedRunningSummary],
 					},
-				} as unknown as TerminalSessionManager;
+				]);
 				await shutdownRuntimeServer({
-					workspaceRegistry: {
-						listManagedWorkspaces: () => [
-							{
-								workspaceId: "managed-project",
-								workspacePath: managedProjectPath,
-								terminalManager: managedTerminalManager,
-							},
-						],
-					},
+					stopAllActiveRuntimeSessionsForShutdown,
 					warn: () => {},
 					closeRuntimeServer: async () => {
 						didCloseRuntimeServer = true;
@@ -163,22 +152,18 @@ describe.sequential("shutdown coordinator integration", () => {
 				});
 
 				expect(didCloseRuntimeServer).toBe(true);
+				expect(stopAllActiveRuntimeSessionsForShutdown).toHaveBeenCalledTimes(1);
 
 				const managedAfter = await loadWorkspaceState(managedProjectPath);
-				const managedTrash = managedAfter.board.columns.find((column) => column.id === "trash")?.cards ?? [];
-				expect(managedTrash.map((card) => card.id).sort()).toEqual(
-					["managed-idle", "managed-missing-session", "managed-running"].sort(),
-				);
+				expect(managedAfter.board).toEqual(managedStateBeforeShutdown.board);
 				expect(managedAfter.sessions["managed-running"]?.state).toBe("interrupted");
-				expect(managedAfter.sessions["managed-idle"]?.state).toBe("interrupted");
+				expect(managedAfter.sessions["managed-idle"]?.state).toBe("idle");
 				expect(managedAfter.sessions["managed-missing-session"]).toBeUndefined();
 
 				const indexedAfter = await loadWorkspaceState(indexedProjectPath);
-				const indexedTrash = indexedAfter.board.columns.find((column) => column.id === "trash")?.cards ?? [];
-				expect(indexedTrash.map((card) => card.id).sort()).toEqual(
-					["indexed-awaiting-review", "indexed-missing-session"].sort(),
-				);
-				expect(indexedAfter.sessions["indexed-awaiting-review"]?.state).toBe("interrupted");
+				expect(indexedAfter.board).toEqual(indexedStateBeforeShutdown.board);
+				expect(indexedAfter.sessions).toEqual(indexedStateBeforeShutdown.sessions);
+				expect(indexedAfter.revision).toBe(indexedStateBeforeShutdown.revision);
 				expect(indexedAfter.sessions["indexed-missing-session"]).toBeUndefined();
 			} finally {
 				cleanup();
@@ -186,12 +171,7 @@ describe.sequential("shutdown coordinator integration", () => {
 		});
 	}, 30_000);
 
-	// SC-001 回归：shutdown 是全仓唯一「漏斗外、spread+覆写 state」的持久化写点。Stage 1 让
-	// terminalManager.getSummary 返回的 summary 都带 facet 后，若不重经 applySessionFacets，落盘
-	// 的会是「facet 仍停留旧 state（running→agent/live、idle→null/none）+ state=interrupted」的
-	// 不一致数据（projectLegacyState 投影回 running/idle，Stage 2 翻转真相源时被误判）。superRefine
-	// 不拦此类不一致，故必须在写点根治。本例断言落盘 facet 与 state 自洽。
-	it("re-stamps consistent interrupted facets on persisted sessions (SC-001 regression)", async () => {
+	it("projects stopped live PTYs without changing card columns or user-owned turn meaning", async () => {
 		await withTemporaryHome(async () => {
 			const { path: sandboxRoot, cleanup } = createTempDir("kanban-shutdown-facets-");
 			try {
@@ -200,61 +180,70 @@ describe.sequential("shutdown coordinator integration", () => {
 				initGitRepository(projectPath);
 
 				const initial = await loadWorkspaceState(projectPath);
+				const runningSummary = applySessionFacets(createSession("running-task", "running"));
+				const awaitingUserSummary = applySessionFacets(createSession("awaiting-user-task", "awaiting_review"));
+				const idleSummary = applySessionFacets(createSession("idle-task", "idle"));
 				await saveWorkspaceState(projectPath, {
-					board: createBoard({ inProgress: ["running-task"], review: ["idle-task"] }),
+					board: createBoard({
+						inProgress: ["running-task"],
+						review: ["awaiting-user-task", "idle-task"],
+					}),
 					sessions: {
-						"running-task": createSession("running-task", "running"),
-						"idle-task": createSession("idle-task", "idle"),
+						"running-task": runningSummary,
+						"awaiting-user-task": awaitingUserSummary,
+						"idle-task": idleSummary,
 					},
 					expectedRevision: initial.revision,
 				});
-
-				// 模拟生产：getSummary 返回已带 facet 的 summary（running→agent/live、idle→null/none）。
-				// 修复前 shutdown 会把这些与最终 state=interrupted 矛盾的 facet 原样落盘。
-				const terminalManager = {
-					markInterruptedAndStopAll: () => [],
-					listSummaries: () => [],
-					getSummary: (taskId: string) => {
-						if (taskId === "running-task") {
-							return applySessionFacets(createSession("running-task", "running"));
-						}
-						if (taskId === "idle-task") {
-							return applySessionFacets(createSession("idle-task", "idle"));
-						}
-						return null;
-					},
-				} as unknown as TerminalSessionManager;
+				const stateBeforeShutdown = await loadWorkspaceState(projectPath);
 
 				await shutdownRuntimeServer({
-					workspaceRegistry: {
-						listManagedWorkspaces: () => [
-							{ workspaceId: "facet-project", workspacePath: projectPath, terminalManager },
-						],
-					},
+					stopAllActiveRuntimeSessionsForShutdown: async () => [
+						{
+							workspaceId: "facet-project",
+							workspacePath: projectPath,
+							stoppedRuntimeSessionSummaries: [runningSummary],
+							runtimeSessionSummariesForSafePersistence: [runningSummary, awaitingUserSummary, idleSummary],
+						},
+					],
 					warn: () => {},
 					closeRuntimeServer: async () => {},
 				});
 
 				const after = await loadWorkspaceState(projectPath);
-				for (const taskId of ["running-task", "idle-task"]) {
+				expect(after.board).toEqual(stateBeforeShutdown.board);
+				expect(after.sessions["running-task"]).toEqual(
+					expect.objectContaining({
+						state: "interrupted",
+						turnOwner: "user",
+						liveness: "interrupted",
+						userTurnKind: "interrupted",
+						pid: null,
+					}),
+				);
+				expect(after.sessions["awaiting-user-task"]).toEqual(
+					expect.objectContaining({
+						state: "awaiting_review",
+						turnOwner: "user",
+						liveness: "exited",
+						userTurnKind: awaitingUserSummary.userTurnKind,
+						reviewReason: awaitingUserSummary.reviewReason,
+						pid: null,
+					}),
+				);
+				expect(after.sessions["idle-task"]).toEqual(idleSummary);
+				for (const taskId of ["running-task", "awaiting-user-task", "idle-task"]) {
 					const persisted = after.sessions[taskId];
-					expect(persisted, `session ${taskId} should be persisted`).toBeDefined();
-					if (!persisted) {
-						continue;
+					expect(persisted).toBeDefined();
+					if (persisted) {
+						expect(
+							projectLegacyState({
+								turnOwner: persisted.turnOwner ?? null,
+								liveness: persisted.liveness ?? "none",
+								userTurnKind: persisted.userTurnKind ?? null,
+							}),
+						).toBe(persisted.state);
 					}
-					expect(persisted.state).toBe("interrupted");
-					expect(persisted.turnOwner).toBe("user");
-					expect(persisted.liveness).toBe("interrupted");
-					expect(persisted.userTurnKind).toBe("interrupted");
-					// 核心不变量：落盘 facet 投影回 legacy state 必须等于 state（投影可逆/自洽）。
-					// 修复前 running-task 会是 agent/live → 投影 "running" ≠ "interrupted"，此断言失败。
-					expect(
-						projectLegacyState({
-							turnOwner: persisted.turnOwner ?? null,
-							liveness: persisted.liveness ?? "none",
-							userTurnKind: persisted.userTurnKind ?? null,
-						}),
-					).toBe(persisted.state);
 				}
 			} finally {
 				cleanup();

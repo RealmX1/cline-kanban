@@ -30,6 +30,7 @@ function HookHarness({ onResult }: { onResult: (result: ReturnType<typeof usePro
 				name: "project-a",
 				path: "/tmp/project-a",
 				taskCounts: { backlog: 1, in_progress: 0, review: 1, validation: 0, trash: 0 },
+				availability: { status: "available" },
 				inProgressTaskDetails: [],
 			},
 			{
@@ -37,6 +38,7 @@ function HookHarness({ onResult }: { onResult: (result: ReturnType<typeof usePro
 				name: "project-b",
 				path: "/tmp/project-b",
 				taskCounts: { backlog: 0, in_progress: 0, review: 0, validation: 0, trash: 0 },
+				availability: { status: "available" },
 				inProgressTaskDetails: [],
 			},
 		],

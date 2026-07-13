@@ -1,50 +1,26 @@
-# Dogfood shutdown cleanup handoff plan
+# Dogfood shutdown cleanup handoff plan（已被安全默认行为取代）
 
-## Goal
+## 状态
 
-Prevent `Ctrl+C` on dogfood runs from trashing tasks or deleting task worktrees.
+本计划已退役。安全 shutdown 已成为唯一行为，不再存在 cleanup owner 或反向开启破坏性清理的选项。
 
-## Confirmed root cause
+## 当前不变量
 
-- `npm run dogfood` often launches a second Kanban runtime.
-- Shutdown cleanup marks running and review sessions interrupted, moves cards to trash, and can delete task worktrees.
-- For dogfooding, this shutdown behavior is too destructive.
+- 正常 shutdown 不移动任何卡片，不删除任何 task worktree。
+- 只停止 managed workspace 中实际存活的 PTY。
+- Agent-owned 活跃回合安全投影为 interrupted，PID 清空。
+- User-owned review/question/permission 等回合保留 `userTurnKind`，投影为 exited，PID 清空。
+- Idle/exited session 不修改。
+- 未加载的 indexed workspace 不读取或写入 board/session state。
+- 可重建的 task worktree setup lock 仍可在 shutdown 时清理。
 
-## Final approach
+## 兼容边界
 
-Use an explicit runtime flag instead of sibling process detection.
+仓库内的 dogfood、开发和文档示例均不再传 `--skip-shutdown-cleanup`。CLI 仅把该参数保留为隐藏 no-op，使已经安装但尚未迁移的外部 supervisor 能继续启动；参数不会进入 runtime 或 shutdown coordinator，也不会输出提示。
 
-- Add CLI option: `--skip-shutdown-cleanup`
-- When set, runtime shutdown skips session interruption persistence and worktree deletion
-- `scripts/dogfood.mjs` always passes this flag when launching `dist/cli.js`
+## 回归覆盖
 
-This keeps normal Kanban behavior unchanged, while making dogfood deterministic and safe.
-
-## Supporting behavior
-
-- Keep terminal stale session recovery:
-  - if a summary is active but PTY is gone, reset to `idle`
-  - terminal can reopen as a fresh shell session
-
-## Tests
-
-- Integration coverage verifies cleanup is skipped when `--skip-shutdown-cleanup` is enabled
-- Existing shutdown tests still verify normal cleanup behavior when flag is not set
-- Runtime terminal unit test verifies stale session recovery
-
-## Files changed
-
-- `src/cli.ts`
-- `scripts/dogfood.mjs`
-- `src/server/shutdown-coordinator.ts`
-- `src/terminal/session-manager.ts`
-- `src/terminal/terminal-session-service.ts`
-- `src/terminal/ws-server.ts`
+- `test/integration/shutdown-coordinator.integration.test.ts`
 - `test/integration/runtime-state-stream.integration.test.ts`
-- `test/runtime/terminal/session-manager.test.ts`
 
-## Validation checklist
-
-- `npm run lint`
-- `npm run typecheck`
-- `npm run test`
+两处测试共同验证默认 shutdown 保留 card column、session 等待语义和 task worktree；runtime 启动测试额外验证隐藏兼容参数仍可被旧 supervisor 接受。

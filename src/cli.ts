@@ -54,7 +54,6 @@ installCliFatalErrorHandlers();
 
 interface CliOptions {
 	noOpen: boolean;
-	skipShutdownCleanup: boolean;
 	host: string | null;
 	port: { mode: "fixed"; value: number } | { mode: "auto" } | null;
 	https: boolean;
@@ -84,7 +83,6 @@ interface RootCommandOptions {
 	host?: string;
 	port?: { mode: "fixed"; value: number } | { mode: "auto" };
 	open?: boolean;
-	skipShutdownCleanup?: boolean;
 	update?: boolean;
 	https?: boolean;
 	cert?: string;
@@ -242,15 +240,6 @@ async function assertPathIsDirectory(path: string): Promise<void> {
 	}
 }
 
-async function pathIsDirectory(path: string): Promise<boolean> {
-	try {
-		const info = await stat(path);
-		return info.isDirectory();
-	} catch {
-		return false;
-	}
-}
-
 function hasGitRepository(path: string): boolean {
 	const result = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
 		cwd: path,
@@ -389,7 +378,7 @@ async function runScopedCommand(command: string, cwd: string): Promise<RuntimeCo
 async function startServer(): Promise<{
 	url: string;
 	close: () => Promise<void>;
-	shutdown: (options?: { skipSessionCleanup?: boolean }) => Promise<void>;
+	shutdown: () => Promise<void>;
 }> {
 	/*
 		Server-only modules are loaded lazily because task-oriented subcommands like
@@ -409,7 +398,7 @@ async function startServer(): Promise<{
 		{ createRuntimeStateHub },
 		{ resolveInteractiveShellCommand },
 		{ shutdownRuntimeServer },
-		{ collectProjectWorktreeTaskIdsForRemoval, createWorkspaceRegistry },
+		{ createWorkspaceRegistry },
 		{ clearPendingUpdateNotification, getPendingUpdateNotification },
 	] = await Promise.all([
 		import("./projects/project-path.js"),
@@ -427,7 +416,6 @@ async function startServer(): Promise<{
 		loadGlobalRuntimeConfig,
 		loadRuntimeConfig,
 		hasGitRepository,
-		pathIsDirectory,
 		onTerminalManagerReady: (workspaceId, manager) => {
 			runtimeStateHub?.trackTerminalManager(workspaceId, manager);
 		},
@@ -466,7 +454,6 @@ async function startServer(): Promise<{
 		assertPathIsDirectory,
 		hasGitRepository,
 		disposeWorkspace: disposeTrackedWorkspace,
-		collectProjectWorktreeTaskIdsForRemoval,
 		pickDirectoryPathFromSystemDialog,
 		getUpdateStatus: () => {
 			const notification = getPendingUpdateNotification();
@@ -514,14 +501,13 @@ async function startServer(): Promise<{
 		await runtimeServer.close();
 	};
 
-	const shutdown = async (options?: { skipSessionCleanup?: boolean }) => {
+	const shutdown = async () => {
 		await shutdownRuntimeServer({
-			workspaceRegistry,
+			stopAllActiveRuntimeSessionsForShutdown: runtimeServer.stopAllActiveRuntimeSessionsForShutdown,
 			warn: (message) => {
 				console.warn(`[kanban] ${message}`);
 			},
 			closeRuntimeServer: close,
-			skipSessionCleanup: options?.skipSessionCleanup ?? false,
 		});
 	};
 
@@ -628,12 +614,7 @@ async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolea
 		}
 		isShuttingDown = true;
 		runPendingAutoUpdateOnShutdown();
-		if (options.skipShutdownCleanup) {
-			console.warn("Skipping shutdown task cleanup for this instance.");
-		}
-		await runtime.shutdown({
-			skipSessionCleanup: options.skipShutdownCleanup,
-		});
+		await runtime.shutdown();
 		await disposeCliTelemetryService().catch(() => {});
 	};
 
@@ -697,7 +678,6 @@ function createProgram(invocationArgs: string[]): Command {
 		.option("--host <ip>", "Host IP to bind the server to (default: 127.0.0.1).")
 		.option("--port <number|auto>", "Runtime port (1-65535) or auto.", parseCliPortValue)
 		.option("--no-open", "Do not open browser automatically.")
-		.option("--skip-shutdown-cleanup", "Do not move sessions to done or delete task worktrees on shutdown.")
 		.option("--https", "Enable HTTPS. Requires both --cert and --key.")
 		.option("--cert <path>", "Path to a TLS certificate PEM file (implies HTTPS).")
 		.option("--key <path>", "Path to a TLS private key PEM file (implies HTTPS).")
@@ -710,6 +690,12 @@ function createProgram(invocationArgs: string[]): Command {
 		.addHelpText("after", `\nRuntime URL: ${getKanbanRuntimeOrigin()}`);
 
 	program.addOption(new Option("--agent <id>", "Deprecated compatibility flag. Ignored.").hideHelp());
+	program.addOption(
+		new Option(
+			"--skip-shutdown-cleanup",
+			"Deprecated compatibility flag. Ignored because shutdown is non-destructive by default.",
+		).hideHelp(),
+	);
 
 	registerTaskCommand(program);
 	registerHooksCommand(program);
@@ -739,7 +725,6 @@ function createProgram(invocationArgs: string[]): Command {
 				host: options.host ?? null,
 				port: options.port ?? null,
 				noOpen: options.open === false,
-				skipShutdownCleanup: options.skipShutdownCleanup === true,
 				https: options.https === true,
 				cert: options.cert ?? null,
 				key: options.key ?? null,
