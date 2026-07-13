@@ -207,6 +207,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					clineSettings: task.clineSettings,
 					terminalAgentModelOverrideSettings: task.terminalAgentModelOverrideSettings,
 					...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
+					...(task.taskAgentSessionInitialization
+						? { taskAgentSessionInitialization: task.taskAgentSessionInitialization }
+						: {}),
 					...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
 					...(task.prepFilePath ? { prepFilePath: task.prepFilePath } : {}),
 				});

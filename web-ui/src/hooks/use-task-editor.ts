@@ -16,6 +16,7 @@ import {
 } from "@/hooks/task-edit-drafts";
 import type {
 	RuntimeAgentId,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -170,6 +171,8 @@ export interface UseTaskEditorResult {
 	setNewTaskClineSettings: Dispatch<SetStateAction<RuntimeTaskClineSettings | undefined>>;
 	newTaskTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	setNewTaskTerminalAgentModelOverrideSettings: SetTaskCreateTerminalAgentModelOverrideSettings;
+	newTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
+	setNewTaskAgentSessionInitialization: Dispatch<SetStateAction<RuntimeTaskAgentSessionInitialization | undefined>>;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
 	setEditTaskPrompt: Dispatch<SetStateAction<string>>;
@@ -184,6 +187,8 @@ export interface UseTaskEditorResult {
 	isEditTaskStartInPlanModeDisabled: boolean;
 	editTaskBranchRef: string;
 	setEditTaskBranchRef: Dispatch<SetStateAction<string>>;
+	editTaskWorktreeMode: RuntimeTaskWorktreeMode;
+	setEditTaskWorktreeMode: Dispatch<SetStateAction<RuntimeTaskWorktreeMode>>;
 	editTaskAgentId: RuntimeAgentId | undefined;
 	setEditTaskAgentId: Dispatch<SetStateAction<RuntimeAgentId | undefined>>;
 	editTaskClineSettings: RuntimeTaskClineSettings | undefined;
@@ -192,6 +197,8 @@ export interface UseTaskEditorResult {
 	setEditTaskTerminalAgentModelOverrideSettings: Dispatch<
 		SetStateAction<RuntimeTaskTerminalAgentModelOverrideSettings | undefined>
 	>;
+	editTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
+	setEditTaskAgentSessionInitialization: Dispatch<SetStateAction<RuntimeTaskAgentSessionInitialization | undefined>>;
 	handleOpenCreateTask: () => void;
 	handleCancelCreateTask: () => void;
 	handleOpenEditTask: (task: BoardCard, options?: OpenEditTaskOptions) => void;
@@ -242,16 +249,23 @@ export function useTaskEditor({
 	const [editTaskAutoReviewMode, setEditTaskAutoReviewMode] = useState<TaskAutoReviewMode>("commit");
 	const isEditTaskStartInPlanModeDisabled = false;
 	const [editTaskBranchRef, setEditTaskBranchRef] = useState("");
+	const [editTaskWorktreeMode, setEditTaskWorktreeMode] = useState<RuntimeTaskWorktreeMode>("branch");
 
 	const [newTaskAgentId, setNewTaskAgentId] = useState<RuntimeAgentId | undefined>(undefined);
 	const [newTaskClineSettings, setNewTaskClineSettings] = useState<RuntimeTaskClineSettings | undefined>(undefined);
 	const [newTaskTerminalAgentModelOverrideSettings, setNewTaskTerminalAgentModelOverrideSettings] = useState<
 		RuntimeTaskTerminalAgentModelOverrideSettings | undefined
 	>(undefined);
+	const [newTaskAgentSessionInitialization, setNewTaskAgentSessionInitialization] = useState<
+		RuntimeTaskAgentSessionInitialization | undefined
+	>(undefined);
 	const [editTaskAgentId, setEditTaskAgentId] = useState<RuntimeAgentId | undefined>(undefined);
 	const [editTaskClineSettings, setEditTaskClineSettings] = useState<RuntimeTaskClineSettings | undefined>(undefined);
 	const [editTaskTerminalAgentModelOverrideSettings, setEditTaskTerminalAgentModelOverrideSettings] = useState<
 		RuntimeTaskTerminalAgentModelOverrideSettings | undefined
+	>(undefined);
+	const [editTaskAgentSessionInitialization, setEditTaskAgentSessionInitialization] = useState<
+		RuntimeTaskAgentSessionInitialization | undefined
 	>(undefined);
 
 	const rememberNewTaskTerminalAgentModelOverrideSettings = useCallback(
@@ -360,8 +374,10 @@ export function useTaskEditor({
 			setEditTaskAutoReviewMode("commit");
 			setEditTaskImages([]);
 			setEditTaskBranchRef("");
+			setEditTaskWorktreeMode("branch");
 			setEditTaskAgentId(undefined);
 			setEditTaskClineSettings(undefined);
+			setEditTaskAgentSessionInitialization(undefined);
 			clearTaskEditDraft(currentProjectId, editingTaskId);
 		}
 	}, [board, currentProjectId, editingTaskId]);
@@ -382,9 +398,11 @@ export function useTaskEditor({
 			autoReviewEnabled: editTaskAutoReviewEnabled,
 			autoReviewMode: editTaskAutoReviewMode,
 			branchRef: editTaskBranchRef || resolvedDefaultTaskBranchRef,
+			worktreeMode: editTaskWorktreeMode,
 			agentId: editTaskAgentId,
 			clineSettings: editTaskClineSettings,
 			terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
+			taskAgentSessionInitialization: editTaskAgentSessionInitialization,
 		};
 		if (isTaskEditDraftEqualToTask(draft, selection.card)) {
 			clearTaskEditDraft(currentProjectId, editingTaskId);
@@ -403,9 +421,11 @@ export function useTaskEditor({
 		editTaskBranchRef,
 		editTaskClineSettings,
 		editTaskTerminalAgentModelOverrideSettings,
+		editTaskAgentSessionInitialization,
 		editTaskImages,
 		editTaskPrompt,
 		editTaskStartInPlanMode,
+		editTaskWorktreeMode,
 		editingTaskId,
 		resolvedDefaultTaskBranchRef,
 	]);
@@ -423,6 +443,7 @@ export function useTaskEditor({
 		setNewTaskTerminalAgentModelOverrideSettings(
 			resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, selectedAgentId),
 		);
+		setNewTaskAgentSessionInitialization(undefined);
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setIsInlineTaskCreateOpen(true);
@@ -445,6 +466,7 @@ export function useTaskEditor({
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(undefined);
+		setNewTaskAgentSessionInitialization(undefined);
 	}, [newTaskStartInPlanModeByDefault, resolvedDefaultCreateTaskBranchRef]);
 
 	const handleOpenEditTask = useCallback(
@@ -473,10 +495,14 @@ export function useTaskEditor({
 			setEditTaskAutoReviewMode(savedDraft?.autoReviewMode ?? resolveTaskAutoReviewMode(task.autoReviewMode));
 			const fallbackBranch = task.baseRef || resolvedDefaultTaskBranchRef;
 			setEditTaskBranchRef(savedDraft?.branchRef ?? fallbackBranch);
+			setEditTaskWorktreeMode(savedDraft?.worktreeMode ?? task.worktreeMode ?? "branch");
 			setEditTaskAgentId(savedDraft?.agentId ?? task.agentId);
 			setEditTaskClineSettings(savedDraft?.clineSettings ?? task.clineSettings);
 			setEditTaskTerminalAgentModelOverrideSettings(
 				savedDraft?.terminalAgentModelOverrideSettings ?? task.terminalAgentModelOverrideSettings,
+			);
+			setEditTaskAgentSessionInitialization(
+				savedDraft?.taskAgentSessionInitialization ?? task.taskAgentSessionInitialization,
 			);
 		},
 		[currentProjectId, resolvedDefaultTaskBranchRef, setSelectedTaskId],
@@ -494,9 +520,11 @@ export function useTaskEditor({
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
 		setEditTaskBranchRef("");
+		setEditTaskWorktreeMode("branch");
 		setEditTaskAgentId(undefined);
 		setEditTaskClineSettings(undefined);
 		setEditTaskTerminalAgentModelOverrideSettings(undefined);
+		setEditTaskAgentSessionInitialization(undefined);
 	}, [currentProjectId, editingTaskId]);
 
 	const handleSaveEditedTask = useCallback((): string | null => {
@@ -528,7 +556,9 @@ export function useTaskEditor({
 				agentId: editTaskAgentId,
 				clineSettings: editTaskClineSettings,
 				terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
+				taskAgentSessionInitialization: editTaskAgentSessionInitialization,
 				baseRef,
+				worktreeMode: editTaskWorktreeMode,
 			});
 			return updated.updated ? updated.board : currentBoard;
 		});
@@ -540,9 +570,11 @@ export function useTaskEditor({
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
 		setEditTaskBranchRef("");
+		setEditTaskWorktreeMode("branch");
 		setEditTaskAgentId(undefined);
 		setEditTaskClineSettings(undefined);
 		setEditTaskTerminalAgentModelOverrideSettings(undefined);
+		setEditTaskAgentSessionInitialization(undefined);
 		return savedTaskId;
 	}, [
 		editTaskAgentId,
@@ -551,9 +583,11 @@ export function useTaskEditor({
 		editTaskBranchRef,
 		editTaskClineSettings,
 		editTaskTerminalAgentModelOverrideSettings,
+		editTaskAgentSessionInitialization,
 		editTaskPrompt,
 		editTaskImages,
 		editTaskStartInPlanMode,
+		editTaskWorktreeMode,
 		editingTaskId,
 		currentProjectId,
 		resolvedDefaultTaskBranchRef,
@@ -602,6 +636,7 @@ export function useTaskEditor({
 				agentId: newTaskAgentId,
 				clineSettings: newTaskClineSettings,
 				terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
+				taskAgentSessionInitialization: newTaskAgentSessionInitialization,
 				baseRef,
 				worktreeMode: newTaskWorktreeMode,
 			});
@@ -622,6 +657,7 @@ export function useTaskEditor({
 			setNewTaskTerminalAgentModelOverrideSettings(
 				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, selectedAgentId),
 			);
+			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
 				setIsInlineTaskCreateOpen(false);
 			}
@@ -636,6 +672,7 @@ export function useTaskEditor({
 			newTaskBranchRef,
 			newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings,
+			newTaskAgentSessionInitialization,
 			newTaskImages,
 			newTaskPrompt,
 			newTaskStartInPlanMode,
@@ -701,6 +738,7 @@ export function useTaskEditor({
 			setNewTaskTerminalAgentModelOverrideSettings(
 				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, selectedAgentId),
 			);
+			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
 				setIsInlineTaskCreateOpen(false);
 			}
@@ -750,6 +788,7 @@ export function useTaskEditor({
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(undefined);
+		setNewTaskAgentSessionInitialization(undefined);
 	}, [newTaskStartInPlanModeByDefault]);
 
 	return {
@@ -775,6 +814,8 @@ export function useTaskEditor({
 		setNewTaskClineSettings,
 		newTaskTerminalAgentModelOverrideSettings,
 		setNewTaskTerminalAgentModelOverrideSettings: rememberNewTaskTerminalAgentModelOverrideSettings,
+		newTaskAgentSessionInitialization,
+		setNewTaskAgentSessionInitialization,
 		editingTaskId,
 		editTaskPrompt,
 		setEditTaskPrompt,
@@ -789,12 +830,16 @@ export function useTaskEditor({
 		isEditTaskStartInPlanModeDisabled,
 		editTaskBranchRef,
 		setEditTaskBranchRef,
+		editTaskWorktreeMode,
+		setEditTaskWorktreeMode,
 		editTaskAgentId,
 		setEditTaskAgentId,
 		editTaskClineSettings,
 		setEditTaskClineSettings,
 		editTaskTerminalAgentModelOverrideSettings,
 		setEditTaskTerminalAgentModelOverrideSettings,
+		editTaskAgentSessionInitialization,
+		setEditTaskAgentSessionInitialization,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,

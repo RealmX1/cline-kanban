@@ -8,6 +8,8 @@ import { z } from "zod";
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
+	RuntimeAvailableAgentSessionsRequest,
+	RuntimeAvailableAgentSessionsResponse,
 	RuntimeClineAccountBalanceResponse,
 	RuntimeClineAccountOrganizationsResponse,
 	RuntimeClineAccountProfileResponse,
@@ -133,6 +135,8 @@ import type {
 import {
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
+	runtimeAvailableAgentSessionsRequestSchema,
+	runtimeAvailableAgentSessionsResponseSchema,
 	runtimeClineAccountBalanceResponseSchema,
 	runtimeClineAccountOrganizationsResponseSchema,
 	runtimeClineAccountProfileResponseSchema,
@@ -365,6 +369,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeTerminalAgentModelSelectionOptionsRequest,
 		) => Promise<RuntimeTerminalAgentModelSelectionOptionsResponse>;
+		getAvailableAgentSessions: (
+			scope: RuntimeTrpcWorkspaceScope | null,
+			input: RuntimeAvailableAgentSessionsRequest,
+		) => Promise<RuntimeAvailableAgentSessionsResponse>;
 		runClineProviderOAuthLogin: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeClineOauthLoginRequest,
@@ -723,6 +731,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTerminalAgentModelSelectionOptionsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getTerminalAgentModelSelectionOptions(ctx.workspaceScope, input);
+			}),
+		getAvailableAgentSessions: t.procedure
+			.input(runtimeAvailableAgentSessionsRequestSchema)
+			.output(runtimeAvailableAgentSessionsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getAvailableAgentSessions(ctx.workspaceScope, input);
 			}),
 		getClineMcpAuthStatuses: t.procedure.output(runtimeClineMcpAuthStatusResponseSchema).query(async ({ ctx }) => {
 			return await ctx.runtimeApi.getClineMcpAuthStatuses(ctx.workspaceScope);

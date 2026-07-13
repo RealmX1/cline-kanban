@@ -6,6 +6,7 @@ import { isKanbanCursorAgentModelId, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from
 import type {
 	RuntimeAgentId,
 	RuntimeHookEvent,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -47,6 +48,7 @@ export interface AgentAdapterLaunchInput {
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	parentSessionId?: string;
+	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 }
 
@@ -645,6 +647,34 @@ function buildOpenCodePluginContent(
 `;
 }
 
+function resolveTaskAgentSessionInitialization(
+	input: AgentAdapterLaunchInput,
+): RuntimeTaskAgentSessionInitialization | null {
+	const explicitInitialization = input.taskAgentSessionInitialization;
+	if (explicitInitialization) {
+		if (explicitInitialization.sourceAgentId !== input.agentId) {
+			throw new Error(
+				`Task session initialization agent "${explicitInitialization.sourceAgentId}" does not match selected agent "${input.agentId}".`,
+			);
+		}
+		if (
+			explicitInitialization.sourceAgentId === "cursor" &&
+			explicitInitialization.sourceSessionReuseMode === "fork_existing_session"
+		) {
+			throw new Error("Cursor Agent does not support forking existing sessions.");
+		}
+		return explicitInitialization;
+	}
+	const legacyParentSessionId = normalizeParentSessionId(input.parentSessionId);
+	return input.agentId === "codex" && legacyParentSessionId
+		? {
+				sourceAgentId: "codex",
+				sourceSessionId: legacyParentSessionId,
+				sourceSessionReuseMode: "fork_existing_session",
+			}
+		: null;
+}
+
 function getHookAgentDirectory(agentId: RuntimeAgentId): string {
 	return join(getRuntimeHomePath(), "hooks", agentId);
 }
@@ -706,6 +736,7 @@ function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): str
 
 const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
+		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "claude");
 		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {
@@ -722,6 +753,14 @@ const claudeAdapter: AgentSessionAdapter = {
 		}
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
 			args.push("--continue");
+		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
+			args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
+			if (
+				taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" &&
+				!hasCliOption(args, "--fork-session")
+			) {
+				args.push("--fork-session");
+			}
 		}
 		// Claude Code 的 `--continue`（「Refresh terminal session」/恢复任务时用）会用会话最后一条
 		// 已记录回合的「裸」model id `claude-opus-4-8` 重建模型——这丢掉了 1M context 选择，静默回退到
@@ -889,6 +928,7 @@ function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummar
 
 const codexAdapter: AgentSessionAdapter = {
 	async prepare(input) {
+		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "codex");
 		const codexArgs = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {};
@@ -911,7 +951,6 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		}
 
-		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
 		if (input.resumeFromTrash) {
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");
@@ -919,12 +958,14 @@ const codexAdapter: AgentSessionAdapter = {
 			if (!hasCliOption(codexArgs, "--last")) {
 				codexArgs.push("--last");
 			}
-		} else if (parentSessionId) {
+		} else if (taskAgentSessionInitialization) {
 			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
 				codexArgs.push("-C", input.cwd);
 			}
-			if (!codexArgs.includes("fork")) {
-				codexArgs.push("fork", parentSessionId);
+			const sessionSubcommand =
+				taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" ? "fork" : "resume";
+			if (!codexArgs.includes(sessionSubcommand)) {
+				codexArgs.push(sessionSubcommand, taskAgentSessionInitialization.sourceSessionId);
 			}
 		}
 
@@ -953,7 +994,7 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 
 		logTuiFreezeWarning(
-			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${parentSessionId !== null} hasResume=${Boolean(input.resumeFromTrash)} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
+			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session"} hasResume=${Boolean(input.resumeFromTrash) || taskAgentSessionInitialization?.sourceSessionReuseMode === "resume_existing_session"} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
 		);
 
 		if (hooks) {
@@ -980,6 +1021,7 @@ const codexAdapter: AgentSessionAdapter = {
 
 const cursorAdapter: AgentSessionAdapter = {
 	async prepare(input) {
+		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "cursor");
 		const args = setModelCliOption(input.args, explicitModelId ?? KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID);
 		const env: Record<string, string | undefined> = {};
@@ -999,6 +1041,8 @@ const cursorAdapter: AgentSessionAdapter = {
 
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
 			args.push("--continue");
+		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
+			args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
 		}
 
 		if (input.startInPlanMode && !hasCliOption(args, "--plan") && !hasCliOption(args, "--mode")) {

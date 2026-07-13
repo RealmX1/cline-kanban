@@ -24,8 +24,6 @@ export function BoardColumn({
 	onStartTask,
 	onStartAllTasks,
 	onClearTrash,
-	editingTaskId,
-	inlineTaskEditor,
 	onEditTask,
 	onSaveTitle,
 	onCommitTask,
@@ -62,8 +60,6 @@ export function BoardColumn({
 	onStartTask?: (taskId: string) => void;
 	onStartAllTasks?: () => void;
 	onClearTrash?: () => void;
-	editingTaskId?: string | null;
-	inlineTaskEditor?: ReactNode;
 	onEditTask?: (card: BoardCardModel) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
 	onCommitTask?: (taskId: string) => void;
@@ -181,19 +177,6 @@ export function BoardColumn({
 								const items: ReactNode[] = [];
 								let draggableIndex = 0;
 								for (const card of column.cards.slice(0, visibleCount)) {
-									if (column.id === "backlog" && editingTaskId === card.id) {
-										items.push(
-											<div
-												key={card.id}
-												data-task-id={card.id}
-												data-column-id={column.id}
-												style={{ marginBottom: 6 }}
-											>
-												{inlineTaskEditor}
-											</div>,
-										);
-										continue;
-									}
 									items.push(
 										<BoardCard
 											key={card.id}
@@ -226,6 +209,9 @@ export function BoardColumn({
 											defaultClineModelId={defaultClineModelId}
 											defaultAgentId={defaultAgentId}
 											onSaveTitle={onSaveTitle}
+											onOpenTaskEditor={
+												column.id === "backlog" && onEditTask ? () => onEditTask(card) : undefined
+											}
 											onClick={() => {
 												if (column.id === "backlog") {
 													onEditTask?.(card);

@@ -7,6 +7,7 @@ import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TRPCError } from "@trpc/server";
+import { listAvailableAgentSessions } from "../agent-session-history/available-agent-session-index";
 import { createClineMcpRuntimeService } from "../cline-sdk/cline-mcp-runtime-service";
 import { createClineMcpSettingsService } from "../cline-sdk/cline-mcp-settings-service";
 import { createClineProviderService } from "../cline-sdk/cline-provider-service";
@@ -337,6 +338,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
 					parentSessionId: body.parentSessionId,
+					taskAgentSessionInitialization: body.taskAgentSessionInitialization,
 					terminalAgentModelOverrideSettings:
 						body.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
 							? body.terminalAgentModelOverrideSettings
@@ -444,6 +446,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
 					parentSessionId: undefined,
+					taskAgentSessionInitialization: undefined,
 					terminalAgentModelOverrideSettings:
 						card.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
 							? card.terminalAgentModelOverrideSettings
@@ -772,6 +775,15 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		getTerminalAgentModelSelectionOptions: async (_workspaceScope, input) => {
 			const body = parseTerminalAgentModelSelectionOptionsRequest(input);
 			return await getTerminalAgentModelSelectionOptions(body.agentId);
+		},
+		getAvailableAgentSessions: async (workspaceScope, input) => {
+			if (!workspaceScope) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Select a workspace before searching agent sessions.",
+				});
+			}
+			return await listAvailableAgentSessions(workspaceScope.workspacePath, input);
 		},
 		getClineMcpAuthStatuses: async (_workspaceScope) => {
 			const statuses = await clineMcpRuntimeService.getAuthStatuses();

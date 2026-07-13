@@ -101,6 +101,33 @@ export const runtimeAgentIdSchema = z.enum([
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
 export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
 export type RuntimeTerminalAgentModelSelectionAgentId = z.infer<typeof runtimeTerminalAgentModelSelectionAgentIdSchema>;
+export const runtimeTaskAgentSessionInitializationReuseModeSchema = z.enum([
+	"resume_existing_session",
+	"fork_existing_session",
+]);
+export type RuntimeTaskAgentSessionInitializationReuseMode = z.infer<
+	typeof runtimeTaskAgentSessionInitializationReuseModeSchema
+>;
+export const runtimeTaskAgentSessionInitializationSchema = z
+	.object({
+		sourceAgentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+		sourceSessionId: z.string().trim().uuid(),
+		sourceSessionReuseMode: runtimeTaskAgentSessionInitializationReuseModeSchema,
+		sourceSessionWorkingDirectoryPath: z.string().trim().min(1).optional(),
+	})
+	.superRefine((initialization, ctx) => {
+		if (
+			initialization.sourceAgentId === "cursor" &&
+			initialization.sourceSessionReuseMode === "fork_existing_session"
+		) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["sourceSessionReuseMode"],
+				message: "Cursor Agent does not support forking existing sessions.",
+			});
+		}
+	});
+export type RuntimeTaskAgentSessionInitialization = z.infer<typeof runtimeTaskAgentSessionInitializationSchema>;
 export const runtimeTaskTerminalAgentModelOverrideSettingsSchema = z
 	.object({
 		agentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
@@ -218,6 +245,7 @@ export const runtimeBoardCardSchema = z
 		agentId: runtimeAgentIdSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
+		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
 		clineProviderId: z.string().optional(),
 		clineModelId: z.string().optional(),
 		clineReasoningEffort: runtimeLegacyTaskClineReasoningEffortSchema.optional(),
@@ -243,10 +271,21 @@ export const runtimeBoardCardSchema = z
 				clineReasoningEffort: _legacyReasoningEffort,
 			});
 			const taskCommentEntries = normalizeRuntimeTaskCommentEntries(rawTaskCommentEntries);
+			const legacyTaskAgentSessionInitialization = card.parentSessionId
+				? runtimeTaskAgentSessionInitializationSchema.safeParse({
+						sourceAgentId: "codex",
+						sourceSessionId: card.parentSessionId,
+						sourceSessionReuseMode: "fork_existing_session",
+					})
+				: null;
+			const taskAgentSessionInitialization =
+				card.taskAgentSessionInitialization ??
+				(legacyTaskAgentSessionInitialization?.success ? legacyTaskAgentSessionInitialization.data : undefined);
 			return {
 				...card,
 				...(clineSettings !== undefined ? { clineSettings } : {}),
 				...(taskCommentEntries !== undefined ? { taskCommentEntries } : {}),
+				...(taskAgentSessionInitialization !== undefined ? { taskAgentSessionInitialization } : {}),
 				title: resolveTaskTitle(card.title, card.prompt),
 			};
 		},
@@ -1356,25 +1395,40 @@ export const runtimeConfigSaveRequestSchema = z.object({
 });
 export type RuntimeConfigSaveRequest = z.infer<typeof runtimeConfigSaveRequestSchema>;
 
-export const runtimeTaskSessionStartRequestSchema = z.object({
-	taskId: z.string(),
-	prompt: z.string(),
-	/** Display title from the Kanban task card. Propagated to SDK session metadata as a convenience copy. */
-	taskTitle: z.string().optional(),
-	images: z.array(runtimeTaskImageSchema).optional(),
-	startInPlanMode: z.boolean().optional(),
-	mode: runtimeTaskSessionModeSchema.optional(),
-	resumeFromTrash: z.boolean().optional(),
-	baseRef: z.string(),
-	cols: z.number().int().positive().optional(),
-	rows: z.number().int().positive().optional(),
-	agentId: runtimeAgentIdSchema.optional(),
-	clineSettings: runtimeTaskClineSettingsSchema.optional(),
-	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
-	parentSessionId: z.string().optional(),
-	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
-	prepFilePath: z.string().optional(),
-});
+export const runtimeTaskSessionStartRequestSchema = z
+	.object({
+		taskId: z.string(),
+		prompt: z.string(),
+		/** Display title from the Kanban task card. Propagated to SDK session metadata as a convenience copy. */
+		taskTitle: z.string().optional(),
+		images: z.array(runtimeTaskImageSchema).optional(),
+		startInPlanMode: z.boolean().optional(),
+		mode: runtimeTaskSessionModeSchema.optional(),
+		resumeFromTrash: z.boolean().optional(),
+		baseRef: z.string(),
+		cols: z.number().int().positive().optional(),
+		rows: z.number().int().positive().optional(),
+		agentId: runtimeAgentIdSchema.optional(),
+		clineSettings: runtimeTaskClineSettingsSchema.optional(),
+		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
+		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
+		parentSessionId: z.string().optional(),
+		worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
+		prepFilePath: z.string().optional(),
+	})
+	.superRefine((request, ctx) => {
+		if (
+			request.taskAgentSessionInitialization &&
+			request.agentId &&
+			request.taskAgentSessionInitialization.sourceAgentId !== request.agentId
+		) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["taskAgentSessionInitialization", "sourceAgentId"],
+				message: "Task session initialization agent must match the selected task agent.",
+			});
+		}
+	});
 export type RuntimeTaskSessionStartRequest = z.infer<typeof runtimeTaskSessionStartRequestSchema>;
 
 export const runtimeTerminalAgentModelSelectionOptionsRequestSchema = z.object({
@@ -1402,6 +1456,46 @@ export const runtimeTerminalAgentModelSelectionOptionsResponseSchema = z.object(
 export type RuntimeTerminalAgentModelSelectionOptionsResponse = z.infer<
 	typeof runtimeTerminalAgentModelSelectionOptionsResponseSchema
 >;
+
+export const runtimeAvailableAgentSessionSearchScopeSchema = z.enum(["current_repository", "all_local_sessions"]);
+export type RuntimeAvailableAgentSessionSearchScope = z.infer<typeof runtimeAvailableAgentSessionSearchScopeSchema>;
+
+export const runtimeAvailableAgentSessionPreviewTurnSchema = z.object({
+	role: z.enum(["user", "assistant"]),
+	text: z.string(),
+	timestamp: z.string().nullable(),
+});
+export type RuntimeAvailableAgentSessionPreviewTurn = z.infer<typeof runtimeAvailableAgentSessionPreviewTurnSchema>;
+
+export const runtimeAvailableAgentSessionSummarySchema = z.object({
+	sourceAgentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+	sourceSessionId: z.string().uuid(),
+	sessionTitle: z.string(),
+	sessionWorkingDirectoryPath: z.string().nullable(),
+	gitBranchName: z.string().nullable(),
+	modelId: z.string().nullable(),
+	lastUpdatedAt: z.string(),
+	previewConversationTurns: z.array(runtimeAvailableAgentSessionPreviewTurnSchema).max(3),
+});
+export type RuntimeAvailableAgentSessionSummary = z.infer<typeof runtimeAvailableAgentSessionSummarySchema>;
+
+export const runtimeAvailableAgentSessionsRequestSchema = z.object({
+	agentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+	searchScope: runtimeAvailableAgentSessionSearchScopeSchema.default("current_repository"),
+	query: z.string().trim().max(2048).default(""),
+	pageCursor: z.number().int().nonnegative().default(0),
+	pageSize: z.number().int().min(1).max(100).default(50),
+	forceRefresh: z.boolean().default(false),
+});
+export type RuntimeAvailableAgentSessionsRequest = z.infer<typeof runtimeAvailableAgentSessionsRequestSchema>;
+
+export const runtimeAvailableAgentSessionsResponseSchema = z.object({
+	sessions: z.array(runtimeAvailableAgentSessionSummarySchema),
+	nextPageCursor: z.number().int().nonnegative().nullable(),
+	totalMatchingSessions: z.number().int().nonnegative(),
+	scanWarnings: z.array(z.string()),
+});
+export type RuntimeAvailableAgentSessionsResponse = z.infer<typeof runtimeAvailableAgentSessionsResponseSchema>;
 
 export const runtimeTaskSessionStartResponseSchema = z.object({
 	ok: z.boolean(),
