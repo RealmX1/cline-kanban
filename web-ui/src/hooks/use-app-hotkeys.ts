@@ -20,7 +20,7 @@ interface UseAppHotkeysInput {
 	handleOpenSettings: () => void;
 	handleToggleGitHistory: () => void;
 	handleCloseGitHistory: () => void;
-	onStartAllTasks: () => void;
+	onRequestStartAllReadyBacklogTasks: () => void;
 }
 
 export function useAppHotkeys({
@@ -37,7 +37,7 @@ export function useAppHotkeys({
 	handleOpenSettings,
 	handleToggleGitHistory,
 	handleCloseGitHistory,
-	onStartAllTasks,
+	onRequestStartAllReadyBacklogTasks,
 }: UseAppHotkeysInput): void {
 	useHotkeys(
 		"mod+j",
@@ -58,13 +58,13 @@ export function useAppHotkeys({
 
 	useHotkeys(
 		"mod+b",
-		onStartAllTasks,
+		onRequestStartAllReadyBacklogTasks,
 		{
 			enableOnContentEditable: false,
 			enableOnFormTags: false,
 			preventDefault: true,
 		},
-		[onStartAllTasks],
+		[onRequestStartAllReadyBacklogTasks],
 	);
 
 	useHotkeys(

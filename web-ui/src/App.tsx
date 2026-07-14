@@ -22,6 +22,7 @@ import { NotificationCenter } from "@/components/notification-center";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
+import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
 import { TaskBoardSearchToolbar } from "@/components/task-board-search-toolbar";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
@@ -829,9 +830,13 @@ export default function App(): ReactElement {
 		handleCreateAndStartTasks,
 		handleCreateStartAndOpenTask,
 		handleStartTaskFromBoard,
-		handleStartAllBacklogTasksFromBoard,
+		pendingStartAllReadyBacklogTaskCards,
+		requestStartAllReadyBacklogTasksConfirmation,
+		confirmStartAllReadyBacklogTasks,
+		cancelStartAllReadyBacklogTasksConfirmation,
 	} = useTaskStartActions({
 		board,
+		currentProjectId,
 		handleCreateTask,
 		handleCreateTasks,
 		handleStartTask,
@@ -871,7 +876,7 @@ export default function App(): ReactElement {
 		handleOpenSettings,
 		handleToggleGitHistory,
 		handleCloseGitHistory,
-		onStartAllTasks: handleStartAllBacklogTasksFromBoard,
+		onRequestStartAllReadyBacklogTasks: requestStartAllReadyBacklogTasksConfirmation,
 	});
 
 	useEffect(() => {
@@ -1219,7 +1224,7 @@ export default function App(): ReactElement {
 													onCardSelect={handleCardSelect}
 													onCreateTask={handleOpenCreateTask}
 													onStartTask={handleStartTaskFromBoard}
-													onStartAllTasks={handleStartAllBacklogTasksFromBoard}
+													onRequestStartAllReadyBacklogTasks={requestStartAllReadyBacklogTasksConfirmation}
 													onClearTrash={handleOpenClearTrash}
 													onEditTask={handleOpenEditTask}
 													onSaveTaskTitle={handleSaveTaskTitle}
@@ -1338,7 +1343,7 @@ export default function App(): ReactElement {
 									onTaskDragEnd={handleDetailTaskDragEnd}
 									onCreateTask={handleOpenCreateTask}
 									onStartTask={handleStartTaskFromBoard}
-									onStartAllTasks={handleStartAllBacklogTasksFromBoard}
+									onRequestStartAllReadyBacklogTasks={requestStartAllReadyBacklogTasksConfirmation}
 									onClearTrash={handleOpenClearTrash}
 									onEditTask={(task) => {
 										handleOpenEditTask(task, { preserveDetailSelection: true });
@@ -1522,6 +1527,12 @@ export default function App(): ReactElement {
 					open={isMoveToDoneConfirmOpen}
 					onCancel={cancelMoveToDone}
 					onConfirm={confirmMoveToDone}
+				/>
+
+				<StartAllReadyBacklogTasksConfirmDialog
+					tasks={pendingStartAllReadyBacklogTaskCards}
+					onCancel={cancelStartAllReadyBacklogTasksConfirmation}
+					onConfirm={confirmStartAllReadyBacklogTasks}
 				/>
 
 				<AlertDialog
