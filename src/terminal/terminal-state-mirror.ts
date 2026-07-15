@@ -69,6 +69,19 @@ export class TerminalStateMirror {
 		};
 	}
 
+	// 只序列化当前活动屏（scrollback: 0，成本 rows×cols 级），供「提示符就绪判定」这类
+	// 只看最后一屏的消费者使用。serialize 是同步的、执行期间阻塞整个事件循环——全量
+	// getSnapshot() 最坏序列化 2 万行 scrollback，周期性调用（如 15s stall 扫描）会造成
+	// 事件循环尖峰、冻结所有任务的键盘回显；就绪判定语义上本就只按当前视口判定，用本方法。
+	async getViewportSnapshot(): Promise<TerminalRestoreSnapshot> {
+		await this.operationQueue;
+		return {
+			snapshot: this.serializeAddon.serialize({ scrollback: 0 }),
+			cols: this.terminal.cols,
+			rows: this.terminal.rows,
+		};
+	}
+
 	dispose(): void {
 		this.terminal.dispose();
 	}

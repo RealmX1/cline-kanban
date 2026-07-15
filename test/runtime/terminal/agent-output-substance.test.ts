@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
 	createAgentOutputSubstanceMemory,
 	detectFreshSubstantiveAgentOutput,
+	detectFreshSubstantiveAgentOutputFromStripped,
 	extractAgentOutputContentSignatures,
+	extractAgentOutputContentSignaturesFromStripped,
 	isSubstantiveAgentOutput,
 } from "../../../src/terminal/agent-output-substance";
+import { stripAnsiAndControl } from "../../../src/terminal/terminal-output-normalization";
 
 // 真实 Claude/Codex TUI 帧的代表性样本（含 \r 重绘前缀与 ANSI SGR，验证 stripAnsiAndControl 前置生效）。
 // spinner / footer / 框线属装饰性重绘 → 非实质；assistant / 工具 / 报错文本属实质产出。
@@ -151,5 +154,39 @@ describe("detectFreshSubstantiveAgentOutput（带记忆：内容行新鲜度）"
 		}
 		// oldest 已被淘汰 → 再现重新判为 fresh。
 		expect(detectFreshSubstantiveAgentOutput(memory, oldest)).toBe(true);
+	});
+});
+
+describe("FromStripped 变体：与 decoded-chunk API 在 ANSI corpus 上逐例等价（strip 一次共享的语义保证）", () => {
+	// 覆盖 ANSI SGR、\r 重绘、CSI 光标控制、OSC、框线 chrome、真实正文、混合多行等形态。
+	const ESC = "\u001b";
+	const ANSI_CORPUS = [
+		`\r${ESC}[38;5;213m✻${ESC}[0m Cogitating… (12s · esc to interrupt)`,
+		`${ESC}[2K\r⏺ Real assistant output line with substance.`,
+		`${ESC}]0;window title${ESC}⏺ Content after an OSC title sequence.`,
+		"╭──────────────╮\n│ > │\n╰──────────────╯",
+		`${ESC}[1A${ESC}[2K✶ Sparkle spinner frame (3s · esc to interrupt)`,
+		`⏺ First real line.\r\n${ESC}[31m⏺ Second colored real line.${ESC}[0m\r\n? for shortcuts`,
+		"plain text without any escapes at all",
+		"",
+	];
+
+	it("extractAgentOutputContentSignaturesFromStripped(strip(x)) === extractAgentOutputContentSignatures(x)", () => {
+		for (const sample of ANSI_CORPUS) {
+			expect(extractAgentOutputContentSignaturesFromStripped(stripAnsiAndControl(sample))).toEqual(
+				extractAgentOutputContentSignatures(sample),
+			);
+		}
+	});
+
+	it("detectFreshSubstantiveAgentOutputFromStripped 与 decoded API 在同序列输入下逐步等价（独立记忆）", () => {
+		const memoryForDecodedApi = createAgentOutputSubstanceMemory();
+		const memoryForStrippedApi = createAgentOutputSubstanceMemory();
+		// 同一 corpus 连续喂两遍：第二遍验证「已见过」抑制在两个 API 下一致。
+		for (const sample of [...ANSI_CORPUS, ...ANSI_CORPUS]) {
+			expect(detectFreshSubstantiveAgentOutputFromStripped(memoryForStrippedApi, stripAnsiAndControl(sample))).toBe(
+				detectFreshSubstantiveAgentOutput(memoryForDecodedApi, sample),
+			);
+		}
 	});
 });

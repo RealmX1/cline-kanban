@@ -55,6 +55,13 @@ const CLAUDE_ERROR_WITH_PROMPT =
 	"[31m\r⏺ API Error: Connection closed mid-response. The response above may be incomplete.[0m\r\n" +
 	"╭──────────────────────╮\n│ > │\n╰──────────────────────╯";
 
+// 输出重分析(连接错误检测等)按 session-manager 的 OUTPUT_ANALYSIS_BATCH_WINDOW_MS(50ms)攒批;
+// 喂完输出后先推进该窗口,让检测结果落地,再做断言/推进退避档位。
+const OUTPUT_ANALYSIS_BATCH_WINDOW_MS = 50;
+async function settleOutputAnalysisBatch(): Promise<void> {
+	await vi.advanceTimersByTimeAsync(OUTPUT_ANALYSIS_BATCH_WINDOW_MS);
+}
+
 function spawnManagerWithSession(pid: number) {
 	let spawnedSession: ReturnType<typeof createMockPtySession> | null = null;
 	prepareAgentLaunchMock.mockImplementation(async (input: { args: string[]; binary?: string }) => ({
@@ -99,6 +106,7 @@ describe("session-manager · connection-drop auto-continue", () => {
 		const write = (session as NonNullable<typeof session>).write;
 
 		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await settleOutputAnalysisBatch();
 		// 检测到错误即进入重试状态，但不立即注入。
 		expect(write).not.toHaveBeenCalled();
 		expect(manager.getSummary("task-conn-drop")?.connectionRetry?.status).toBe("retrying");
@@ -132,6 +140,7 @@ describe("session-manager · connection-drop auto-continue", () => {
 		const write = (session as NonNullable<typeof session>).write;
 
 		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await settleOutputAnalysisBatch();
 		await vi.advanceTimersByTimeAsync(4_000); // 首档退避 → 注入续跑 paste。
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(write.mock.calls[0]?.[0]).toContain("[200~");
@@ -144,6 +153,38 @@ describe("session-manager · connection-drop auto-continue", () => {
 		expect(write.mock.calls[1]?.[0]).not.toContain("[200~");
 
 		manager.stopTaskSession("task-conn-drop-resend-cr");
+	});
+
+	it("bridges an error line split across two flush windows via the carryover tail", async () => {
+		// 错误行跨 flush 边界被切断:前半批 flush 后留 slice(-256) carryover,后半批与之拼接
+		// 后正则仍命中 → episode 照常开启(与旧 per-chunk 语义下的跨 chunk 桥接同构)。
+		const getSession = spawnManagerWithSession(1011);
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-conn-drop-split-flush",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-conn-drop-split-flush",
+			prompt: "Do the task",
+			autoContinueOnConnectionDropEnabled: true,
+		});
+		const session = getSession();
+		expect(session).not.toBeNull();
+
+		// 前半段(错误短语「connection closed」被拦腰切断)→ 独立 flush 为第一批。
+		(session as NonNullable<typeof session>).triggerData("\r⏺ API Error: Conn");
+		await settleOutputAnalysisBatch();
+		expect(manager.getSummary("task-conn-drop-split-flush")?.connectionRetry ?? null).toBeNull();
+
+		// 后半段 + 提示符框 → 第二批;与 carryover 拼接后命中 transient 正则。
+		(session as NonNullable<typeof session>).triggerData(
+			"ection closed mid-response. The response above may be incomplete.\r\n╭──────────────────────╮\n│ > │\n╰──────────────────────╯",
+		);
+		await settleOutputAnalysisBatch();
+		expect(manager.getSummary("task-conn-drop-split-flush")?.connectionRetry?.status).toBe("retrying");
+
+		manager.stopTaskSession("task-conn-drop-split-flush");
 	});
 
 	it("does not inject when the auto-continue flag is disabled", async () => {
@@ -162,6 +203,7 @@ describe("session-manager · connection-drop auto-continue", () => {
 		const write = (session as NonNullable<typeof session>).write;
 
 		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await settleOutputAnalysisBatch();
 		await vi.advanceTimersByTimeAsync(10_000);
 		expect(write).not.toHaveBeenCalled();
 		expect(manager.getSummary("task-conn-drop-off")?.connectionRetry ?? null).toBeNull();
@@ -184,6 +226,7 @@ describe("session-manager · connection-drop auto-continue", () => {
 		const write = (session as NonNullable<typeof session>).write;
 
 		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await settleOutputAnalysisBatch();
 		await vi.advanceTimersByTimeAsync(4_000); // first injection
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(manager.getSummary("task-conn-drop-recover")?.connectionRetry?.status).toBe("retrying");
@@ -214,6 +257,7 @@ describe("session-manager · connection-drop auto-continue", () => {
 		const write = (session as NonNullable<typeof session>).write;
 
 		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await settleOutputAnalysisBatch();
 		manager.stopTaskSession("task-conn-drop-stop");
 		await vi.advanceTimersByTimeAsync(30_000);
 		// 计时器已清理：永远不会注入。
@@ -235,6 +279,7 @@ describe("session-manager · connection-drop auto-continue", () => {
 		const write = (session as NonNullable<typeof session>).write;
 
 		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await settleOutputAnalysisBatch();
 		const triggered = manager.continueConnectionRetrySessions(["task-conn-drop-manual"]);
 		expect(triggered).toEqual(["task-conn-drop-manual"]);
 		expect(write).toHaveBeenCalledTimes(1);
@@ -264,6 +309,7 @@ describe("session-manager · connection-drop auto-continue", () => {
 		const write = (session as NonNullable<typeof session>).write;
 
 		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await settleOutputAnalysisBatch();
 		expect(manager.getSummary("task-conn-drop-standdown")?.connectionRetry?.status).toBe("retrying");
 
 		// agent 向用户提问 → hook 翻入 user 回合（question）。
@@ -296,6 +342,7 @@ describe("session-manager · connection-drop auto-continue", () => {
 		// 先翻入 user 回合（提问），再让带连接错误措辞的「问题文本」流过检测器。
 		manager.transitionToReview("task-conn-drop-user-first", "hook", "question");
 		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await settleOutputAnalysisBatch();
 
 		expect(manager.getSummary("task-conn-drop-user-first")?.connectionRetry ?? null).toBeNull();
 		await vi.advanceTimersByTimeAsync(30_000);
@@ -319,6 +366,7 @@ describe("session-manager · connection-drop auto-continue", () => {
 		const write = (session as NonNullable<typeof session>).write;
 
 		(session as NonNullable<typeof session>).triggerData(CLAUDE_ERROR_WITH_PROMPT);
+		await settleOutputAnalysisBatch();
 		expect(manager.getSummary("task-conn-drop-dismiss")?.connectionRetry?.status).toBe("retrying");
 
 		// 手动移出列表：结束 episode、清重连状态、不注入。

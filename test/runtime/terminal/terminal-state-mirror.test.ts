@@ -100,4 +100,54 @@ describe("TerminalStateMirror", () => {
 
 		expect(onInputResponse).toHaveBeenCalledWith("\u001b[1;1R");
 	});
+
+	describe("getViewportSnapshot（活动屏快照：就绪判定用，不付 2 万行 scrollback 序列化成本）", () => {
+		it("only contains the active screen and excludes scrolled-off history", async () => {
+			const mirror = createMirror(80, 5);
+			// 30 行灌进 5 行视口：前 25 行进 scrollback，末尾若干行留在活动屏。
+			const lines = Array.from({ length: 30 }, (_, index) => `history-line-${String(index + 1).padStart(3, "0")}`);
+			mirror.applyOutput(Buffer.from(lines.join("\r\n"), "utf8"));
+
+			const viewportSnapshot = await mirror.getViewportSnapshot();
+			const fullSnapshot = await mirror.getSnapshot();
+
+			// 活动屏尾行两者都有；滚出视口的历史只在全量快照里。
+			expect(viewportSnapshot.snapshot).toContain("history-line-030");
+			expect(viewportSnapshot.snapshot).not.toContain("history-line-001");
+			expect(fullSnapshot.snapshot).toContain("history-line-001");
+			expect(viewportSnapshot.cols).toBe(80);
+			expect(viewportSnapshot.rows).toBe(5);
+		});
+
+		it("applies queued writes and resizes before generating a viewport snapshot", async () => {
+			const mirror = createMirror(80, 24);
+
+			mirror.applyOutput(Buffer.from("before resize", "utf8"));
+			mirror.resize(120, 40);
+			mirror.applyOutput(Buffer.from("\r\nviewport content after resize", "utf8"));
+
+			const snapshot = await mirror.getViewportSnapshot();
+
+			expect(snapshot.cols).toBe(120);
+			expect(snapshot.rows).toBe(40);
+			expect(snapshot.snapshot).toContain("viewport content after resize");
+		});
+
+		it("matches the tail of the full snapshot for prompt-readiness style consumers", async () => {
+			// 就绪判定语义等价性：现状管线是「全量 serialize 后取最后 rows 行」，viewport 快照
+			// 就是活动屏——两者对「最后一屏内容」的呈现应一致（此处用包含关系断言核心内容行，
+			// 避免依赖 serialize 对空行/光标位置的边缘格式差）。
+			const mirror = createMirror(80, 6);
+			const promptFrame = "╭──────────────╮\r\n│ > │\r\n╰──────────────╯";
+			mirror.applyOutput(Buffer.from(`some earlier output\r\n${promptFrame}`, "utf8"));
+
+			const viewportSnapshot = await mirror.getViewportSnapshot();
+			const fullSnapshot = await mirror.getSnapshot();
+
+			for (const promptLine of ["│ > │", "╭──────────────╮", "╰──────────────╯"]) {
+				expect(viewportSnapshot.snapshot).toContain(promptLine);
+				expect(fullSnapshot.snapshot).toContain(promptLine);
+			}
+		});
+	});
 });

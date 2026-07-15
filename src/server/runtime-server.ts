@@ -24,6 +24,7 @@ import {
 	getKanbanRuntimeTls,
 	isKanbanRemoteHost,
 } from "../core/runtime-endpoint";
+import { startEventLoopDelayMonitor } from "../diagnostics/event-loop-delay-monitor";
 import {
 	checkRateLimit,
 	clearRateLimit,
@@ -562,6 +563,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		const requestedWorkspaceId = requestUrl.searchParams.get("workspaceId")?.trim() || null;
 		deps.runtimeStateHub.handleUpgrade(request, socket, head, { requestedWorkspaceId });
 	});
+	// [tui-freeze] 诊断:终端回显链路与所有任务的输入处理共享这个 Node 事件循环,
+	// 循环被同步重活占据时键盘输入会整体延迟——在 bridge 生命周期内持续采样延迟直方图。
+	const stopEventLoopDelayMonitor = startEventLoopDelayMonitor();
 	const terminalWebSocketBridge = createTerminalWebSocketBridge({
 		server,
 		resolveTerminalManager: (workspaceId) => deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId),
@@ -613,6 +617,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			clineWorkspacePathByWorkspaceId.clear();
 			await clineWatcherRegistry.close();
 			await deps.runtimeStateHub.close();
+			stopEventLoopDelayMonitor();
 			await terminalWebSocketBridge.close();
 			await new Promise<void>((resolveClose, rejectClose) => {
 				server.close((error) => {

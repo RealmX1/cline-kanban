@@ -50,6 +50,7 @@ function makeEntry(summaryOverrides: Partial<RuntimeTaskSessionSummary> = {}) {
 		},
 		terminalStateMirror: null as {
 			getSnapshot: () => Promise<{ snapshot: string; cols: number; rows: number }>;
+			getViewportSnapshot: () => Promise<{ snapshot: string; cols: number; rows: number }>;
 		} | null,
 		listenerIdCounter: 1,
 		listeners: new Map(),
@@ -263,7 +264,11 @@ describe("TerminalSessionManager idle-live 自愈（scanForStalls → transition
 	const CLAUDE_READY_PROMPT = "╭──────────────────────╮\n│ > │\n╰──────────────────────╯";
 
 	function fakeMirror(snapshot: string) {
-		return { getSnapshot: async () => ({ snapshot, cols: 80, rows: 24 }) };
+		// 就绪判定读 getViewportSnapshot(活动屏);park 测试的 fake 快照本身就是一屏内容,两者同值。
+		return {
+			getSnapshot: async () => ({ snapshot, cols: 80, rows: 24 }),
+			getViewportSnapshot: async () => ({ snapshot, cols: 80, rows: 24 }),
+		};
 	}
 
 	function scanForStalls(manager: TerminalSessionManager): Promise<void> {
