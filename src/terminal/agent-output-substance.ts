@@ -68,9 +68,15 @@ function isChromeLine(trimmedLine: string): boolean {
 // 仅保留含 >=3 连续词字符的行 → 归一化为签名（trim + 小写 + 折叠空白）。
 // 返回空数组即「本 chunk 无任何实质内容行」。
 export function extractAgentOutputContentSignatures(decodedChunk: string): string[] {
-	const stripped = stripAnsiAndControl(decodedChunk);
+	return extractAgentOutputContentSignaturesFromStripped(stripAnsiAndControl(decodedChunk));
+}
+
+// 同上,但接收**已经过 stripAnsiAndControl** 的文本。热路径(session-manager handleTaskOutput)
+// 对同一 chunk 既做实质输出检测又做 output-reaction 扫描,strip 是两者中最贵的单项——由调用方
+// strip 一次后分发给两个消费者,避免同一 chunk 被重复 strip 两遍。
+export function extractAgentOutputContentSignaturesFromStripped(strippedChunk: string): string[] {
 	const signatures: string[] = [];
-	for (const rawSegment of stripped.split(/[\r\n]+/u)) {
+	for (const rawSegment of strippedChunk.split(/[\r\n]+/u)) {
 		const trimmed = rawSegment.trim();
 		if (isChromeLine(trimmed)) {
 			continue;
@@ -105,7 +111,16 @@ export function createAgentOutputSubstanceMemory(): AgentOutputSubstanceMemory {
 //   - 复现签名会被「移到最新」（LRU 刷新），使周期性 footer 永不被淘汰、长期保持「非新鲜」。
 //   - spinner 状态行每帧不同，本就被 chrome 规则拦在内容行之外，永不进入记忆。
 export function detectFreshSubstantiveAgentOutput(memory: AgentOutputSubstanceMemory, decodedChunk: string): boolean {
-	const signatures = extractAgentOutputContentSignatures(decodedChunk);
+	return detectFreshSubstantiveAgentOutputFromStripped(memory, stripAnsiAndControl(decodedChunk));
+}
+
+// 同上,但接收**已经过 stripAnsiAndControl** 的文本(strip 一次、多消费者共享,见
+// extractAgentOutputContentSignaturesFromStripped 注释)。
+export function detectFreshSubstantiveAgentOutputFromStripped(
+	memory: AgentOutputSubstanceMemory,
+	strippedChunk: string,
+): boolean {
+	const signatures = extractAgentOutputContentSignaturesFromStripped(strippedChunk);
 	let hasFreshContent = false;
 	const recent = memory.recentContentSignatures;
 	for (const signature of signatures) {
