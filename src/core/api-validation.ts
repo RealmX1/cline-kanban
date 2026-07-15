@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import {
+	type RuntimeAuthoredVerificationDefinitionInputFile,
+	type RuntimeAuthoredVerificationDefinitionsFile,
 	type RuntimeClineAccountSwitchRequest,
 	type RuntimeClineAddProviderRequest,
 	type RuntimeClineDeviceAuthCompleteRequest,
@@ -17,8 +19,8 @@ import {
 	type RuntimeDirectoryListRequest,
 	type RuntimeDismissConnectionRetrySessionsRequest,
 	type RuntimeGitCheckoutRequest,
-	type RuntimeGuidedVerificationState,
 	type RuntimeHookIngestRequest,
+	type RuntimePostDeployVerificationState,
 	type RuntimeProjectAddRequest,
 	type RuntimeProjectRemoveRequest,
 	type RuntimeShellSessionStartRequest,
@@ -43,6 +45,8 @@ import {
 	type RuntimeWorkspaceStateSaveRequest,
 	type RuntimeWorktreeDeleteRequest,
 	type RuntimeWorktreeEnsureRequest,
+	runtimeAuthoredVerificationDefinitionInputFileSchema,
+	runtimeAuthoredVerificationDefinitionsFileSchema,
 	runtimeClineAccountSwitchRequestSchema,
 	runtimeClineAddProviderRequestSchema,
 	runtimeClineDeviceAuthCompleteRequestSchema,
@@ -59,8 +63,8 @@ import {
 	runtimeDirectoryListRequestSchema,
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeGitCheckoutRequestSchema,
-	runtimeGuidedVerificationStateSchema,
 	runtimeHookIngestRequestSchema,
+	runtimePostDeployVerificationStateSchema,
 	runtimeProjectAddRequestSchema,
 	runtimeProjectRemoveRequestSchema,
 	runtimeShellSessionStartRequestSchema,
@@ -740,8 +744,21 @@ export function parseDeploymentMarker(value: unknown): RuntimeDeploymentMarker {
 	return parseWithSchema(runtimeDeploymentMarkerSchema, value);
 }
 
-// 读盘校验 guided-verification-state.json（plan 1c）。校验失败即 throw；
+// 读盘校验 post-deploy-verification-state.json（plan 1c）。校验失败即 throw；
 // 损坏文件改名隔离并降级为空 deploymentGroups 由 modules 阶段处理，不在此静默吞错。
-export function parseGuidedVerificationState(value: unknown): RuntimeGuidedVerificationState {
-	return parseWithSchema(runtimeGuidedVerificationStateSchema, value);
+export function parsePostDeployVerificationState(value: unknown): RuntimePostDeployVerificationState {
+	return parseWithSchema(runtimePostDeployVerificationStateSchema, value);
+}
+
+// 读盘校验 authored-verification-definitions.json（plan Stage 2）。校验失败即 throw；
+// 损坏降级为空 definitions 由 modules 阶段处理。
+export function parseAuthoredVerificationDefinitionsFile(value: unknown): RuntimeAuthoredVerificationDefinitionsFile {
+	return parseWithSchema(runtimeAuthoredVerificationDefinitionsFileSchema, value);
+}
+
+// 校验 agent 提供的 definition JSON（单个或数组）。校验失败即 throw，供 register CLI 报错。
+export function parseAuthoredVerificationDefinitionInputFile(
+	value: unknown,
+): RuntimeAuthoredVerificationDefinitionInputFile {
+	return parseWithSchema(runtimeAuthoredVerificationDefinitionInputFileSchema, value);
 }

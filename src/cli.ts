@@ -10,6 +10,7 @@ import { disposeCliTelemetryService } from "./cline-sdk/cline-telemetry-service.
 import { registerDeploymentCommand } from "./commands/deployment";
 import { registerHooksCommand } from "./commands/hooks";
 import { registerTaskCommand } from "./commands/task";
+import { registerVerificationCommand } from "./commands/verification";
 import { loadGlobalRuntimeConfig, loadRuntimeConfig } from "./config/runtime-config";
 import type { RuntimeCommandRunResponse } from "./core/api-contract";
 import {
@@ -714,6 +715,7 @@ function createProgram(invocationArgs: string[]): Command {
 	registerTaskCommand(program);
 	registerHooksCommand(program);
 	registerDeploymentCommand(program);
+	registerVerificationCommand(program);
 
 	program
 		.command("mcp")

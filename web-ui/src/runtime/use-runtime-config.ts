@@ -18,7 +18,7 @@ export interface UseRuntimeConfigResult {
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
-		guidedVerificationForceCompleteEnabled?: boolean;
+		postDeployVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
 	}) => Promise<RuntimeConfigResponse | null>;
@@ -89,7 +89,7 @@ export function useRuntimeConfig(
 			readyForReviewNotificationsEnabled?: boolean;
 			notificationSoundEnabled?: boolean;
 			autoContinueOnConnectionDropEnabled?: boolean;
-			guidedVerificationForceCompleteEnabled?: boolean;
+			postDeployVerificationForceCompleteEnabled?: boolean;
 			commitPromptTemplate?: string;
 			openPrPromptTemplate?: string;
 		}): Promise<RuntimeConfigResponse | null> => {

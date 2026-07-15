@@ -1,25 +1,27 @@
 import { type ReactElement, useCallback, useState } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
-import { resolveGuidedVerificationStuckDoneRecovery } from "@/components/guided-verification/guided-verification-completion-recovery";
-import { GuidedVerificationDoneConfirmDialog } from "@/components/guided-verification/guided-verification-done-confirm-dialog";
-import { GuidedVerificationPanel } from "@/components/guided-verification/guided-verification-panel";
-import { InProgressDoneWarningDialog } from "@/components/guided-verification/in-progress-done-warning-dialog";
-import type { UseGuidedVerificationResult } from "@/hooks/use-guided-verification";
-import type { RuntimeGuidedVerificationAcknowledgement } from "@/runtime/types";
+import { InProgressDoneWarningDialog } from "@/components/post-deploy-verification/in-progress-done-warning-dialog";
+import { resolvePostDeployVerificationStuckDoneRecovery } from "@/components/post-deploy-verification/post-deploy-verification-completion-recovery";
+import { PostDeployVerificationDoneConfirmDialog } from "@/components/post-deploy-verification/post-deploy-verification-done-confirm-dialog";
+import { PostDeployVerificationPanel } from "@/components/post-deploy-verification/post-deploy-verification-panel";
+import type { UsePostDeployVerificationResult } from "@/hooks/use-post-deploy-verification";
+import type { RuntimePostDeployVerificationAcknowledgement } from "@/runtime/types";
 import { findCardSelection, getTaskColumnId } from "@/state/board-state";
 import type { BoardColumnId, BoardData } from "@/types";
 import { truncateTaskPromptLabel } from "@/utils/task-prompt";
 
-export interface GuidedVerificationControllerProps {
+export interface PostDeployVerificationControllerProps {
 	// hook 单实例由 App.tsx 持有并下传：controller 与顶栏 badge 共用同一份轮询/状态，
 	// 避免双实例重复轮询与「检测到新部署」重复 toast（原 remount-nonce hack 的根因已消除）。
-	verification: UseGuidedVerificationResult;
+	verification: UsePostDeployVerificationResult;
 	board: BoardData;
 	// 移列由 useBoardInteractions 提供（awaitable、返回成败）；controller 只在移列成功后才 confirm 标记 state。
-	completeGuidedVerificationMoveToDone: (taskId: string, fromColumnId: BoardColumnId) => Promise<{ ok: boolean }>;
+	completePostDeployVerificationMoveToDone: (taskId: string, fromColumnId: BoardColumnId) => Promise<{ ok: boolean }>;
 	// 点击任务卡片跳转 focus view。
 	onSelectTask: (taskId: string) => void;
+	// 引导定位 anchor.view==="board" 时导航回看板（App 提供 setSelectedTaskId(null)）。
+	onNavigateToBoard: () => void;
 }
 
 // 入 Done 确认流的进行态：token / 需确认项 / agent 回复 / 发起时的当前列快照。
@@ -31,7 +33,7 @@ interface PendingCompletion {
 	fromColumnId: BoardColumnId;
 	token: string;
 	agentResponsePreview: string | undefined;
-	requiredAcknowledgements: RuntimeGuidedVerificationAcknowledgement[];
+	requiredAcknowledgements: RuntimePostDeployVerificationAcknowledgement[];
 }
 
 function resolveTaskTitle(board: BoardData, taskId: string): string {
@@ -39,12 +41,13 @@ function resolveTaskTitle(board: BoardData, taskId: string): string {
 	return selection?.card.title || truncateTaskPromptLabel(selection?.card.prompt ?? "") || `任务 ${taskId}`;
 }
 
-export function GuidedVerificationController({
+export function PostDeployVerificationController({
 	verification,
 	board,
-	completeGuidedVerificationMoveToDone,
+	completePostDeployVerificationMoveToDone,
 	onSelectTask,
-}: GuidedVerificationControllerProps): ReactElement {
+	onNavigateToBoard,
+}: PostDeployVerificationControllerProps): ReactElement {
 	const { refresh, requestComplete, confirmComplete } = verification;
 
 	// 正在跑完成流的 taskId（发放 token / 弹窗 / 移列 / confirm 全程），用于卡片 spinner 与禁用重入。
@@ -65,7 +68,7 @@ export function GuidedVerificationController({
 		async (pending: PendingCompletion): Promise<void> => {
 			// A1：移列前复检当前列。token 发放后任务若已漂移到别的列（如 review→in_progress 经 idle_stall 反向放行集，
 			// 或用户晾着确认框期间被自动流转），pending 里冻结的 requiredAcknowledgements 已过时；直接 finalize 会用
-			// 更弱的 ack 集把它推入 Done、跳过本应弹的更强确认（如 in_progress_active）。且 completeGuidedVerificationMoveToDone
+			// 更弱的 ack 集把它推入 Done、跳过本应弹的更强确认（如 in_progress_active）。且 completePostDeployVerificationMoveToDone
 			// 有意绕过看板级 SkipValidationConfirmDialog（无补偿守卫），故此处是唯一防线。列变即中止，让用户按当前列重走——
 			// 对齐 CLI confirm 的「列变即失效、按当前列重发 token」语义（deployment.ts:722）。
 			const liveColumnId = getTaskColumnId(board, pending.taskId);
@@ -79,7 +82,7 @@ export function GuidedVerificationController({
 				return;
 			}
 			setIsFinalizing(true);
-			const moved = await completeGuidedVerificationMoveToDone(pending.taskId, pending.fromColumnId);
+			const moved = await completePostDeployVerificationMoveToDone(pending.taskId, pending.fromColumnId);
 			if (!moved.ok) {
 				showAppToast({ intent: "danger", message: "移入 Done 失败，核对未标记完成" });
 				closeCompletionFlow();
@@ -104,7 +107,7 @@ export function GuidedVerificationController({
 			closeCompletionFlow();
 			refresh();
 		},
-		[board, completeGuidedVerificationMoveToDone, confirmComplete, closeCompletionFlow, refresh],
+		[board, completePostDeployVerificationMoveToDone, confirmComplete, closeCompletionFlow, refresh],
 	);
 
 	const handleRequestComplete = useCallback(
@@ -122,14 +125,14 @@ export function GuidedVerificationController({
 			// 直接用该 token 重试 confirm（后端已放行 trash + 有效 token），绕过对 trash 拒发新 token 的 requestComplete
 			// （那是原本让该滞留态在产品内无法恢复的死角）。仅对空-acks（validation-origin）token 自动恢复：带非空 acks 的
 			// review/in_progress token 若在此直接 confirm，会把冻结的 requiredAcknowledgements 原样当作「用户已确认」回传，
-			// 伪造本应弹出的 skip_validation / in_progress_active 安全二次确认（见 resolveGuidedVerificationStuckDoneRecovery
+			// 伪造本应弹出的 skip_validation / in_progress_active 安全二次确认（见 resolvePostDeployVerificationStuckDoneRecovery
 			// 的安全边界注释），故 helper 对非空 acks 返回 null。token 已过期回收 / 已 dropped / 非空 acks 的子态均返回 null，走常规流程。
 			const recoveryGroup =
 				verification.activeGroup?.deploymentId === deploymentId
 					? verification.activeGroup
 					: (verification.historyGroups.find((entry) => entry.deploymentId === deploymentId) ?? null);
 			const recoveryTask = recoveryGroup?.tasks.find((entry) => entry.taskId === taskId) ?? null;
-			const stuckPending = resolveGuidedVerificationStuckDoneRecovery(recoveryTask, currentColumnId, Date.now());
+			const stuckPending = resolvePostDeployVerificationStuckDoneRecovery(recoveryTask, currentColumnId, Date.now());
 			if (stuckPending) {
 				setCompletingTaskId(taskId);
 				const confirmed = await confirmComplete({
@@ -240,7 +243,7 @@ export function GuidedVerificationController({
 
 	return (
 		<>
-			<GuidedVerificationPanel
+			<PostDeployVerificationPanel
 				activeGroup={verification.activeGroup}
 				historyGroups={verification.historyGroups}
 				hasLoadedOnce={verification.hasLoadedOnce}
@@ -255,11 +258,13 @@ export function GuidedVerificationController({
 				onToggleChecklistItem={verification.toggleChecklistItem}
 				onAddCustomChecklistItem={verification.addCustomChecklistItem}
 				onRemoveCustomChecklistItem={verification.removeCustomChecklistItem}
+				onRunVerificationItem={verification.runVerificationItem}
 				onRequestComplete={handleRequestComplete}
 				onSelectTask={onSelectTask}
+				onNavigateToBoard={onNavigateToBoard}
 			/>
 			{doneConfirm ? (
-				<GuidedVerificationDoneConfirmDialog
+				<PostDeployVerificationDoneConfirmDialog
 					open
 					onOpenChange={handleDoneConfirmOpenChange}
 					taskTitle={doneConfirm.taskTitle}

@@ -1379,8 +1379,8 @@ export const runtimeConfigResponseSchema = z.object({
 	readyForReviewNotificationsEnabled: z.boolean(),
 	notificationSoundEnabled: z.boolean(),
 	autoContinueOnConnectionDropEnabled: z.boolean(),
-	// Guided Verification 「一键强制完成（跳过 token 两步确认）」的全局总闸；配合 CLI `--force` 才生效（plan Grilling #9）。
-	guidedVerificationForceCompleteEnabled: z.boolean(),
+	// Post-Deploy Verification 「一键强制完成（跳过 token 两步确认）」的全局总闸；配合 CLI `--force` 才生效（plan Grilling #9）。
+	postDeployVerificationForceCompleteEnabled: z.boolean(),
 	detectedCommands: z.array(z.string()),
 	agents: z.array(runtimeAgentDefinitionSchema),
 	shortcuts: z.array(runtimeProjectShortcutSchema),
@@ -1401,7 +1401,7 @@ export const runtimeConfigSaveRequestSchema = z.object({
 	readyForReviewNotificationsEnabled: z.boolean().optional(),
 	notificationSoundEnabled: z.boolean().optional(),
 	autoContinueOnConnectionDropEnabled: z.boolean().optional(),
-	guidedVerificationForceCompleteEnabled: z.boolean().optional(),
+	postDeployVerificationForceCompleteEnabled: z.boolean().optional(),
 	commitPromptTemplate: z.string().optional(),
 	openPrPromptTemplate: z.string().optional(),
 });
@@ -2022,18 +2022,18 @@ export const runtimeHookIngestResponseSchema = z.object({
 export type RuntimeHookIngestResponse = z.infer<typeof runtimeHookIngestResponseSchema>;
 
 // ==========================================================================
-// Deployment / Guided Verification（plan「Guided Verification Spike」1a / 1c /
+// Deployment / Post-Deploy Verification（plan「Post-Deploy Verification Spike」1a / 1c /
 // tRPC 契约 / Grilling #8–#9）
 //
 // 领域术语（plan「领域术语」）：
 //   Deployment          = 一次成功 local deploy（运行中的 build 从 OLD → NEW 源 commit）
-//   Guided Verification = 部署后针对「本次 deploy 新纳入的任务提交」的核对流程（面板 + checklist）
+//   Post-Deploy Verification = 部署后针对「本次 deploy 新纳入的任务提交」的核对流程（面板 + checklist）
 //   Verified            = 某任务针对某次 Deployment 的 checklist 全部勾选（verifiedAt，非 fullyValidatedAt）
 // 定位键统一 (deploymentId, taskId)：同一 taskId 可同时存在于多个 Deployment 组。
 // ==========================================================================
 
 // ~/.cline/kanban/last-deployed-source-commit.json（plan 1a）。
-// deploymentId 由 `kanban deployment record` 生成的 uuid，是 guided-verification-state
+// deploymentId 由 `kanban deployment record` 生成的 uuid，是 post-deploy-verification-state
 // 组键的同源冗余互存——同 commit 重部署（OLD === NEW）时 SHA 不变、deploymentId 变，
 // 前端「新 deploy」检测必须以 deploymentId 为准。
 export const runtimeDeploymentMarkerSchema = z.object({
@@ -2050,97 +2050,238 @@ export type RuntimeDeploymentMarker = z.infer<typeof runtimeDeploymentMarkerSche
 // 任务纳入某 Deployment 组的原因（plan「任务纳入规则」）：
 //   validation_column   = validation 列任务始终纳入当前组，无需 commit 关联
 //   commit_correlation  = review / in_progress 列任务，其 work 提交与 deploy delta（hash / patch-id）关联
-export const runtimeGuidedVerificationInclusionReasonSchema = z.enum(["validation_column", "commit_correlation"]);
-export type RuntimeGuidedVerificationInclusionReason = z.infer<typeof runtimeGuidedVerificationInclusionReasonSchema>;
+export const runtimePostDeployVerificationInclusionReasonSchema = z.enum(["validation_column", "commit_correlation"]);
+export type RuntimePostDeployVerificationInclusionReason = z.infer<
+	typeof runtimePostDeployVerificationInclusionReasonSchema
+>;
 
-// checklist 项来源：commit = 由关联到的 deploy commit 生成；custom = 用户在面板手动增补。
-export const runtimeGuidedVerificationChecklistItemSourceSchema = z.enum(["commit", "custom"]);
-export type RuntimeGuidedVerificationChecklistItemSource = z.infer<
-	typeof runtimeGuidedVerificationChecklistItemSourceSchema
+// checklist 项来源：commit = 由关联到的 deploy commit 生成；custom = 用户在面板手动增补；
+// authored = agent 在 RVF 阶段通过 `kanban verification register` 注册的部署后验证定义 materialize 而来。
+export const runtimePostDeployVerificationChecklistItemSourceSchema = z.enum(["commit", "custom", "authored"]);
+export type RuntimePostDeployVerificationChecklistItemSource = z.infer<
+	typeof runtimePostDeployVerificationChecklistItemSourceSchema
 >;
 
 // 悬挂任务 reconcile 标记（plan「任务纳入规则」双向 reconcile）：
 //   task_deleted        = 任务已从看板删除
-//   moved_out_manually  = 未经 Guided Verification 被手动移出（拖入 trash / 移回 backlog）
-export const runtimeGuidedVerificationDroppedReasonSchema = z.enum(["task_deleted", "moved_out_manually"]);
-export type RuntimeGuidedVerificationDroppedReason = z.infer<typeof runtimeGuidedVerificationDroppedReasonSchema>;
+//   moved_out_manually  = 未经 Post-Deploy Verification 被手动移出（拖入 trash / 移回 backlog）
+export const runtimePostDeployVerificationDroppedReasonSchema = z.enum(["task_deleted", "moved_out_manually"]);
+export type RuntimePostDeployVerificationDroppedReason = z.infer<
+	typeof runtimePostDeployVerificationDroppedReasonSchema
+>;
 
 // 入 Done 前需显式确认的项（plan Grilling #6 / #8）：
 //   skip_validation     = review/in_progress 跳过 validation 列直接入 Done
 //   in_progress_active  = 任务仍处于 in_progress（session 可能仍在跑）
 // CLI 单次 `verification-confirm --ack a,b`；UI in_progress 拆成两次顺序对话框。
-export const runtimeGuidedVerificationAcknowledgementSchema = z.enum(["skip_validation", "in_progress_active"]);
-export type RuntimeGuidedVerificationAcknowledgement = z.infer<typeof runtimeGuidedVerificationAcknowledgementSchema>;
+export const runtimePostDeployVerificationAcknowledgementSchema = z.enum(["skip_validation", "in_progress_active"]);
+export type RuntimePostDeployVerificationAcknowledgement = z.infer<
+	typeof runtimePostDeployVerificationAcknowledgementSchema
+>;
 
-export const runtimeGuidedVerificationChecklistItemSchema = z.object({
+// 验证项的两种 kind（plan Stage 1）：
+//   guided_manual    = 引导人工型：只能人眼/人手观察的断言，触发时把用户带到操作位置并分步指引（见 guidance）。
+//   automated_script = 自动脚本型：可程序化外部观察的断言，server 端 spawn 脚本执行，通过即自动勾选（见 script/run）。
+// 旧数据（无 kind 字段）解析为 guided_manual + guidance=null ⇒ 面板仍渲染成纯 checkbox（零行为变化）。
+export const runtimePostDeployVerificationItemKindSchema = z.enum(["guided_manual", "automated_script"]);
+export type RuntimePostDeployVerificationItemKind = z.infer<typeof runtimePostDeployVerificationItemKindSchema>;
+
+// 自动脚本型的脚本描述：entrypoint 为资产目录内的相对入口文件（runner 执行前有 realpath 越界护栏，绝对路径/越界拒绝执行）；interpreter 决定 spawn 方式；timeoutMs 到时 kill。
+export const runtimePostDeployVerificationScriptInterpreterSchema = z.enum(["bash", "node"]);
+export type RuntimePostDeployVerificationScriptInterpreter = z.infer<
+	typeof runtimePostDeployVerificationScriptInterpreterSchema
+>;
+export const runtimePostDeployVerificationScriptSchema = z.object({
+	entrypoint: z.string(),
+	interpreter: runtimePostDeployVerificationScriptInterpreterSchema.default("bash"),
+	timeoutMs: z.number().int().positive().default(60000),
+});
+export type RuntimePostDeployVerificationScript = z.infer<typeof runtimePostDeployVerificationScriptSchema>;
+
+// 自动脚本一次运行的结果快照（仅承载展示信息；勾选真源仍是 item.checked，由 pass/fail 驱动）。
+export const runtimePostDeployVerificationRunStatusSchema = z.enum([
+	"not_run",
+	"running",
+	"passed",
+	"failed",
+	"errored",
+	"timed_out",
+]);
+export type RuntimePostDeployVerificationRunStatus = z.infer<typeof runtimePostDeployVerificationRunStatusSchema>;
+export const runtimePostDeployVerificationRunSchema = z.object({
+	status: runtimePostDeployVerificationRunStatusSchema,
+	exitCode: z.number().nullable(),
+	startedAtIso: z.string().nullable(),
+	finishedAtIso: z.string().nullable(),
+	outputExcerpt: z.string(),
+});
+export type RuntimePostDeployVerificationRun = z.infer<typeof runtimePostDeployVerificationRunSchema>;
+
+// 引导人工型的定位锚点：view 指目标视图；anchorKey 指该视图内某个 data-verification-anchor 元素（缺省则仅导航+聚焦面板）。
+export const runtimePostDeployVerificationGuidanceAnchorViewSchema = z.enum(["board", "task_detail"]);
+export type RuntimePostDeployVerificationGuidanceAnchorView = z.infer<
+	typeof runtimePostDeployVerificationGuidanceAnchorViewSchema
+>;
+export const runtimePostDeployVerificationGuidanceAnchorSchema = z.object({
+	view: runtimePostDeployVerificationGuidanceAnchorViewSchema,
+	anchorKey: z.string().optional(),
+});
+export type RuntimePostDeployVerificationGuidanceAnchor = z.infer<
+	typeof runtimePostDeployVerificationGuidanceAnchorSchema
+>;
+// 引导人工型的分步指引：steps 现场指导（打开 X→点 Y→应看到 Z），expectedObservation 判定通过的观察，failureSignature 失败特征。
+export const runtimePostDeployVerificationGuidanceSchema = z.object({
+	steps: z.array(z.string()),
+	expectedObservation: z.string(),
+	failureSignature: z.string().optional(),
+	anchor: runtimePostDeployVerificationGuidanceAnchorSchema.nullable().default(null),
+});
+export type RuntimePostDeployVerificationGuidance = z.infer<typeof runtimePostDeployVerificationGuidanceSchema>;
+
+// per-verification 清理规格（plan Stage 5）：
+//   automatic = 整任务核对完成时自动删 assetsDir + 注销 authored 定义；
+//   manual    = 保留资产，面板展示 manualSteps（含 repo instrumentation 的验证强制此模式）；
+//   retain    = 刻意保留，不删不提示。
+export const runtimePostDeployVerificationCleanupModeSchema = z.enum(["automatic", "manual", "retain"]);
+export type RuntimePostDeployVerificationCleanupMode = z.infer<typeof runtimePostDeployVerificationCleanupModeSchema>;
+export const runtimePostDeployVerificationCleanupSchema = z.object({
+	mode: runtimePostDeployVerificationCleanupModeSchema,
+	assetsDir: z.string().nullable(),
+	manualSteps: z.array(z.string()),
+});
+export type RuntimePostDeployVerificationCleanup = z.infer<typeof runtimePostDeployVerificationCleanupSchema>;
+
+// 验证项：kind 是判别信息，其余 kind 专属字段可空默认。旧 item（仅 id/label/checked/source）解析后：
+// kind=guided_manual、guidance/script/run/cleanup 全 null ⇒ 面板渲染成纯 checkbox，与全量重命名前零行为差异。
+export const runtimePostDeployVerificationChecklistItemSchema = z.object({
 	id: z.string(),
 	label: z.string(),
 	checked: z.boolean(),
-	source: runtimeGuidedVerificationChecklistItemSourceSchema,
+	source: runtimePostDeployVerificationChecklistItemSourceSchema,
+	kind: runtimePostDeployVerificationItemKindSchema.default("guided_manual"),
+	guidance: runtimePostDeployVerificationGuidanceSchema.nullable().default(null),
+	script: runtimePostDeployVerificationScriptSchema.nullable().default(null),
+	run: runtimePostDeployVerificationRunSchema.nullable().default(null),
+	cleanup: runtimePostDeployVerificationCleanupSchema.nullable().default(null),
 });
-export type RuntimeGuidedVerificationChecklistItem = z.infer<typeof runtimeGuidedVerificationChecklistItemSchema>;
+export type RuntimePostDeployVerificationChecklistItem = z.infer<
+	typeof runtimePostDeployVerificationChecklistItemSchema
+>;
 
 // CLI 两步确认跨进程，token 必须持久化于 task 条目而非内存（plan 1c / Grilling #8）。
 // columnIdAtIssuance 绑定发放时所在列——confirm 时任务列已变（如自动流转）则 token 失效重发。
-export const runtimeGuidedVerificationPendingConfirmationSchema = z.object({
+export const runtimePostDeployVerificationPendingConfirmationSchema = z.object({
 	token: z.string(),
 	expiresAtIso: z.string(),
-	requiredAcknowledgements: z.array(runtimeGuidedVerificationAcknowledgementSchema),
+	requiredAcknowledgements: z.array(runtimePostDeployVerificationAcknowledgementSchema),
 	columnIdAtIssuance: runtimeBoardColumnIdSchema,
 });
-export type RuntimeGuidedVerificationPendingConfirmation = z.infer<
-	typeof runtimeGuidedVerificationPendingConfirmationSchema
+export type RuntimePostDeployVerificationPendingConfirmation = z.infer<
+	typeof runtimePostDeployVerificationPendingConfirmationSchema
 >;
 
-export const runtimeGuidedVerificationTaskSchema = z.object({
+export const runtimePostDeployVerificationTaskSchema = z.object({
 	taskId: z.string(),
 	// 纳入本组时的列快照，仅作展示；入 Done 确认流按任务「当前列」分支，不看此快照（plan 1d）。
 	columnIdAtMatch: runtimeBoardColumnIdSchema,
 	matchedCommits: z.array(z.string()),
-	inclusionReason: runtimeGuidedVerificationInclusionReasonSchema,
-	checklist: z.array(runtimeGuidedVerificationChecklistItemSchema),
+	inclusionReason: runtimePostDeployVerificationInclusionReasonSchema,
+	checklist: z.array(runtimePostDeployVerificationChecklistItemSchema),
 	verifiedAt: z.string().nullable(),
 	boardMovedToDoneAt: z.string().nullable(),
-	pendingConfirmation: runtimeGuidedVerificationPendingConfirmationSchema.nullable(),
-	droppedReason: runtimeGuidedVerificationDroppedReasonSchema.nullable(),
+	pendingConfirmation: runtimePostDeployVerificationPendingConfirmationSchema.nullable(),
+	droppedReason: runtimePostDeployVerificationDroppedReasonSchema.nullable(),
 });
-export type RuntimeGuidedVerificationTask = z.infer<typeof runtimeGuidedVerificationTaskSchema>;
+export type RuntimePostDeployVerificationTask = z.infer<typeof runtimePostDeployVerificationTaskSchema>;
 
 // 组键 = deploymentId（record 生成的 uuid，与 marker 同源）；勿用 deployedSourceCommit（同 commit 重部署冲突）。
 // workspaceId 必需：taskId 仅在 workspace 内唯一。foldedAtIso 非 null 即该组已折叠进历史。
-export const runtimeGuidedVerificationDeploymentGroupSchema = z.object({
+export const runtimePostDeployVerificationDeploymentGroupSchema = z.object({
 	deploymentId: z.string().uuid(),
 	workspaceId: z.string(),
 	deployedSourceCommit: z.string(),
 	previousDeployedSourceCommit: z.string().nullable(),
 	deployedAtIso: z.string(),
 	foldedAtIso: z.string().nullable(),
-	tasks: z.array(runtimeGuidedVerificationTaskSchema),
+	tasks: z.array(runtimePostDeployVerificationTaskSchema),
 });
-export type RuntimeGuidedVerificationDeploymentGroup = z.infer<typeof runtimeGuidedVerificationDeploymentGroupSchema>;
+export type RuntimePostDeployVerificationDeploymentGroup = z.infer<
+	typeof runtimePostDeployVerificationDeploymentGroupSchema
+>;
 
-// ~/.cline/kanban/guided-verification-state.json 全量（plan 1c）：跨 workspace 的单一全局文件。
-export const runtimeGuidedVerificationStateSchema = z.object({
-	deploymentGroups: z.array(runtimeGuidedVerificationDeploymentGroupSchema),
+// ~/.cline/kanban/post-deploy-verification-state.json 全量（plan 1c）：跨 workspace 的单一全局文件。
+export const runtimePostDeployVerificationStateSchema = z.object({
+	deploymentGroups: z.array(runtimePostDeployVerificationDeploymentGroupSchema),
 });
-export type RuntimeGuidedVerificationState = z.infer<typeof runtimeGuidedVerificationStateSchema>;
+export type RuntimePostDeployVerificationState = z.infer<typeof runtimePostDeployVerificationStateSchema>;
+
+// ---- Authored 验证定义（plan Stage 2）----
+// Agent 在 RVF 阶段用 `kanban verification register` 注册的部署后验证定义，落在独立的 pending 存储
+// ~/.cline/kanban/authored-verification-definitions.json；record 建组 / reconcile 新增任务时按 (workspaceId, taskId)
+// materialize 成 checklist item（id=`authored:<verificationId>`，source="authored"）并入部署组。
+// 与部署组分离存储的原因：定义在「部署前」注册（此时尚无部署组），且需跨多次部署 seed 到各新组的新副本。
+export const runtimeAuthoredVerificationDefinitionSchema = z.object({
+	verificationId: z.string().uuid(),
+	workspaceId: z.string(),
+	taskId: z.string(),
+	kind: runtimePostDeployVerificationItemKindSchema,
+	label: z.string(),
+	guidance: runtimePostDeployVerificationGuidanceSchema.nullable().default(null),
+	script: runtimePostDeployVerificationScriptSchema.nullable().default(null),
+	cleanup: runtimePostDeployVerificationCleanupSchema,
+	createdAtIso: z.string(),
+});
+export type RuntimeAuthoredVerificationDefinition = z.infer<typeof runtimeAuthoredVerificationDefinitionSchema>;
+
+// ~/.cline/kanban/authored-verification-definitions.json 全量：跨 workspace 的单一 pending 存储。
+export const runtimeAuthoredVerificationDefinitionsFileSchema = z.object({
+	definitions: z.array(runtimeAuthoredVerificationDefinitionSchema),
+});
+export type RuntimeAuthoredVerificationDefinitionsFile = z.infer<
+	typeof runtimeAuthoredVerificationDefinitionsFileSchema
+>;
+
+// Agent 写给 `kanban verification register` 的 definition JSON 形态：workspaceId/taskId/createdAtIso 由 register 赋值，
+// verificationId 缺省则分配（提供则用于 rvf-reopen 幂等重注册）。文件可为单个对象或对象数组。
+export const runtimeAuthoredVerificationDefinitionInputSchema = z.object({
+	verificationId: z.string().uuid().optional(),
+	kind: runtimePostDeployVerificationItemKindSchema,
+	label: z.string().min(1),
+	guidance: runtimePostDeployVerificationGuidanceSchema.nullable().default(null),
+	script: runtimePostDeployVerificationScriptSchema.nullable().default(null),
+	cleanup: runtimePostDeployVerificationCleanupSchema,
+});
+export type RuntimeAuthoredVerificationDefinitionInput = z.infer<
+	typeof runtimeAuthoredVerificationDefinitionInputSchema
+>;
+export const runtimeAuthoredVerificationDefinitionInputFileSchema = z.union([
+	runtimeAuthoredVerificationDefinitionInputSchema,
+	z.array(runtimeAuthoredVerificationDefinitionInputSchema),
+]);
+export type RuntimeAuthoredVerificationDefinitionInputFile = z.infer<
+	typeof runtimeAuthoredVerificationDefinitionInputFileSchema
+>;
 
 // ---- tRPC procedure I/O（plan「tRPC / API 契约」，全部 workspace-scoped）----
 
-// deployment.getGuidedVerificationState（query）：workspaceId 来自 workspaceProcedure 中间件。
-export const runtimeGetGuidedVerificationStateRequestSchema = z.object({
+// deployment.getPostDeployVerificationState（query）：workspaceId 来自 workspaceProcedure 中间件。
+export const runtimeGetPostDeployVerificationStateRequestSchema = z.object({
 	// 仅取当前 active 组（foldedAtIso === null 的最新组），省略/为 false 则含折叠历史。
 	activeOnly: z.boolean().optional(),
 });
-export type RuntimeGetGuidedVerificationStateRequest = z.infer<typeof runtimeGetGuidedVerificationStateRequestSchema>;
+export type RuntimeGetPostDeployVerificationStateRequest = z.infer<
+	typeof runtimeGetPostDeployVerificationStateRequestSchema
+>;
 
-export const runtimeGetGuidedVerificationStateResponseSchema = z.object({
+export const runtimeGetPostDeployVerificationStateResponseSchema = z.object({
 	// 已按当前 workspaceId 过滤；activeOnly 时仅含 active 组。
-	deploymentGroups: z.array(runtimeGuidedVerificationDeploymentGroupSchema),
+	deploymentGroups: z.array(runtimePostDeployVerificationDeploymentGroupSchema),
 	// active 组 = 该 workspace 中 foldedAtIso === null 的最新组；无则 null。
 	activeDeploymentId: z.string().nullable(),
 });
-export type RuntimeGetGuidedVerificationStateResponse = z.infer<typeof runtimeGetGuidedVerificationStateResponseSchema>;
+export type RuntimeGetPostDeployVerificationStateResponse = z.infer<
+	typeof runtimeGetPostDeployVerificationStateResponseSchema
+>;
 
 // deployment.updateVerificationChecklist（mutation）：勾选 / 增删自定义项，operation 判别联合。
 export const runtimeUpdateVerificationChecklistRequestSchema = z.discriminatedUnion("operation", [
@@ -2168,11 +2309,30 @@ export type RuntimeUpdateVerificationChecklistRequest = z.infer<typeof runtimeUp
 
 export const runtimeUpdateVerificationChecklistResponseSchema = z.object({
 	ok: z.boolean(),
-	task: runtimeGuidedVerificationTaskSchema.nullable(),
+	task: runtimePostDeployVerificationTaskSchema.nullable(),
 	error: z.string().optional(),
 });
 export type RuntimeUpdateVerificationChecklistResponse = z.infer<
 	typeof runtimeUpdateVerificationChecklistResponseSchema
+>;
+
+// deployment.runPostDeployVerificationItem（mutation，plan Stage 3）：运行一个自动脚本型验证项。
+// server 端置 running → spawn 脚本 → await 完成（≤timeout）→ 写 run 结果 + pass 置 checked=true → 返回更新后的 task。
+export const runtimeRunPostDeployVerificationItemRequestSchema = z.object({
+	deploymentId: z.string(),
+	taskId: z.string(),
+	itemId: z.string(),
+});
+export type RuntimeRunPostDeployVerificationItemRequest = z.infer<
+	typeof runtimeRunPostDeployVerificationItemRequestSchema
+>;
+export const runtimeRunPostDeployVerificationItemResponseSchema = z.object({
+	ok: z.boolean(),
+	task: runtimePostDeployVerificationTaskSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeRunPostDeployVerificationItemResponse = z.infer<
+	typeof runtimeRunPostDeployVerificationItemResponseSchema
 >;
 
 // deployment.requestVerificationComplete（mutation）：checklist 全勾后提议入 Done。
@@ -2190,7 +2350,7 @@ export const runtimeRequestVerificationCompleteResponseSchema = z.object({
 	// 确认框展示的 agent 最近回复（按 agent 类型分源，统一截断；plan Grilling #5）。
 	agentResponsePreview: z.string().optional(),
 	// 按任务「当前列」重算；含 "in_progress_active" 即前端需追加第二次确认（plan Grilling #6）。
-	requiredAcknowledgements: z.array(runtimeGuidedVerificationAcknowledgementSchema).optional(),
+	requiredAcknowledgements: z.array(runtimePostDeployVerificationAcknowledgementSchema).optional(),
 	error: z.string().optional(),
 });
 export type RuntimeRequestVerificationCompleteResponse = z.infer<
@@ -2199,23 +2359,23 @@ export type RuntimeRequestVerificationCompleteResponse = z.infer<
 
 // deployment.confirmVerificationComplete（mutation）：
 // **此过程只更新 verification state**（校验并消费 token、置 verifiedAt/boardMovedToDoneAt、清 pendingConfirmation），
-// **绝不移列**。移列职责：Web = completeGuidedVerificationMoveToDone、CLI = trashTaskById 链（plan 1d）。
+// **绝不移列**。移列职责：Web = completePostDeployVerificationMoveToDone、CLI = trashTaskById 链（plan 1d）。
 // Web 时序为「先移列后 confirm」，故 confirm 校验任务已在 trash、checklist 仍全勾、token 有效。
 export const runtimeConfirmVerificationCompleteRequestSchema = z.object({
 	deploymentId: z.string(),
 	taskId: z.string(),
 	token: z.string(),
-	acks: z.array(runtimeGuidedVerificationAcknowledgementSchema),
+	acks: z.array(runtimePostDeployVerificationAcknowledgementSchema),
 });
 export type RuntimeConfirmVerificationCompleteRequest = z.infer<typeof runtimeConfirmVerificationCompleteRequestSchema>;
 
 export const runtimeConfirmVerificationCompleteResponseSchema = z.object({
 	ok: z.boolean(),
 	// 标记后的 task（含已置的 verifiedAt/boardMovedToDoneAt、已清的 pendingConfirmation）；失败为 null。
-	task: runtimeGuidedVerificationTaskSchema.nullable(),
+	task: runtimePostDeployVerificationTaskSchema.nullable(),
 	// 任务当前列 ≠ columnIdAtIssuance 时 token 失效——返回新 token + 新需确认项，要求重走 requestVerificationComplete（plan Grilling #8）。
 	reissuedConfirmationToken: z.string().optional(),
-	requiredAcknowledgements: z.array(runtimeGuidedVerificationAcknowledgementSchema).optional(),
+	requiredAcknowledgements: z.array(runtimePostDeployVerificationAcknowledgementSchema).optional(),
 	error: z.string().optional(),
 });
 export type RuntimeConfirmVerificationCompleteResponse = z.infer<

@@ -8,7 +8,7 @@ import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/workspace-state";
 
 // 运行中 build 当前部署到的源 commit 标记（plan 1a）。
-// 唯一由 `kanban deployment record` 写入，与 guided-verification-state 组键（deploymentId）同源冗余互存。
+// 唯一由 `kanban deployment record` 写入，与 post-deploy-verification-state 组键（deploymentId）同源冗余互存。
 const DEPLOY_MARKER_FILENAME = "last-deployed-source-commit.json";
 
 export function getDeployMarkerPath(): string {

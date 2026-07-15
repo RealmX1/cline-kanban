@@ -1,6 +1,6 @@
 import { AlertTriangle } from "lucide-react";
 import type { ReactElement } from "react";
-import { formatBoardColumnLabel } from "@/components/guided-verification/guided-verification-format";
+import { formatBoardColumnLabel } from "@/components/post-deploy-verification/post-deploy-verification-format";
 import { Button } from "@/components/ui/button";
 import {
 	AlertDialog,
@@ -17,7 +17,7 @@ import type { BoardColumnId } from "@/types";
 // Grilling #3–5：全勾后从 review / in_progress 直接入 Done 会跳过 Validation 列，需一次确认，
 // 额外展示该任务最近一条 agent response（按 agent 类型分源，由后端 requestVerificationComplete 预置）。
 // in_progress 场景本对话框是「第一次确认」，通过后 controller 追加 InProgressDoneWarningDialog（第二次）。
-export interface GuidedVerificationDoneConfirmDialogProps {
+export interface PostDeployVerificationDoneConfirmDialogProps {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	taskTitle: string;
@@ -29,7 +29,7 @@ export interface GuidedVerificationDoneConfirmDialogProps {
 	onConfirm: () => void;
 }
 
-export function GuidedVerificationDoneConfirmDialog({
+export function PostDeployVerificationDoneConfirmDialog({
 	open,
 	onOpenChange,
 	taskTitle,
@@ -38,7 +38,7 @@ export function GuidedVerificationDoneConfirmDialog({
 	requiresSecondConfirmation,
 	isBusy,
 	onConfirm,
-}: GuidedVerificationDoneConfirmDialogProps): ReactElement {
+}: PostDeployVerificationDoneConfirmDialogProps): ReactElement {
 	const columnLabel = formatBoardColumnLabel(fromColumnId);
 	return (
 		<AlertDialog open={open} onOpenChange={onOpenChange}>

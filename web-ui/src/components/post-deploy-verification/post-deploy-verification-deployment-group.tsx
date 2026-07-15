@@ -1,13 +1,13 @@
 import type { ReactElement } from "react";
 
-import { GuidedVerificationTaskCard } from "@/components/guided-verification/guided-verification-task-card";
-import type { RuntimeGuidedVerificationDeploymentGroup, RuntimeGuidedVerificationTask } from "@/runtime/types";
+import { PostDeployVerificationTaskCard } from "@/components/post-deploy-verification/post-deploy-verification-task-card";
+import type { RuntimePostDeployVerificationDeploymentGroup, RuntimePostDeployVerificationTask } from "@/runtime/types";
 import { findCardSelection } from "@/state/board-state";
 import type { BoardColumnId, BoardData } from "@/types";
 import { truncateTaskPromptLabel } from "@/utils/task-prompt";
 
-export interface GuidedVerificationDeploymentGroupProps {
-	group: RuntimeGuidedVerificationDeploymentGroup;
+export interface PostDeployVerificationDeploymentGroupProps {
+	group: RuntimePostDeployVerificationDeploymentGroup;
 	board: BoardData;
 	// active 组可交互；history 组为只读快照。
 	interactive: boolean;
@@ -15,19 +15,21 @@ export interface GuidedVerificationDeploymentGroupProps {
 	onToggleChecklistItem: (deploymentId: string, taskId: string, itemId: string, checked: boolean) => void;
 	onAddCustomChecklistItem: (deploymentId: string, taskId: string, label: string) => void;
 	onRemoveCustomChecklistItem: (deploymentId: string, taskId: string, itemId: string) => void;
+	onRunVerificationItem: (deploymentId: string, taskId: string, itemId: string) => void;
 	onRequestComplete: (deploymentId: string, taskId: string) => void;
 	onSelectTask: (taskId: string) => void;
+	onNavigateToBoard: () => void;
 }
 
 // 任务归入待核对 / 已核对 / 已移除三桶（plan 面板三区）。
-function partitionTasks(tasks: RuntimeGuidedVerificationTask[]): {
-	pending: RuntimeGuidedVerificationTask[];
-	done: RuntimeGuidedVerificationTask[];
-	dropped: RuntimeGuidedVerificationTask[];
+function partitionTasks(tasks: RuntimePostDeployVerificationTask[]): {
+	pending: RuntimePostDeployVerificationTask[];
+	done: RuntimePostDeployVerificationTask[];
+	dropped: RuntimePostDeployVerificationTask[];
 } {
-	const pending: RuntimeGuidedVerificationTask[] = [];
-	const done: RuntimeGuidedVerificationTask[] = [];
-	const dropped: RuntimeGuidedVerificationTask[] = [];
+	const pending: RuntimePostDeployVerificationTask[] = [];
+	const done: RuntimePostDeployVerificationTask[] = [];
+	const dropped: RuntimePostDeployVerificationTask[] = [];
 	for (const task of tasks) {
 		if (task.droppedReason !== null) {
 			dropped.push(task);
@@ -40,7 +42,7 @@ function partitionTasks(tasks: RuntimeGuidedVerificationTask[]): {
 	return { pending, done, dropped };
 }
 
-export function GuidedVerificationDeploymentGroup({
+export function PostDeployVerificationDeploymentGroup({
 	group,
 	board,
 	interactive,
@@ -48,20 +50,22 @@ export function GuidedVerificationDeploymentGroup({
 	onToggleChecklistItem,
 	onAddCustomChecklistItem,
 	onRemoveCustomChecklistItem,
+	onRunVerificationItem,
 	onRequestComplete,
 	onSelectTask,
-}: GuidedVerificationDeploymentGroupProps): ReactElement {
+	onNavigateToBoard,
+}: PostDeployVerificationDeploymentGroupProps): ReactElement {
 	const { pending, done, dropped } = partitionTasks(group.tasks);
 	// 「没有 commit 关联任务」：本组零 commit_correlation 任务时明示（validation 列任务不受影响仍列出）。
 	const hasCommitCorrelatedTask = group.tasks.some((task) => task.inclusionReason === "commit_correlation");
 
-	const renderTaskCard = (task: RuntimeGuidedVerificationTask): ReactElement => {
+	const renderTaskCard = (task: RuntimePostDeployVerificationTask): ReactElement => {
 		const selection = findCardSelection(board, task.taskId);
 		const taskTitle =
 			selection?.card.title || truncateTaskPromptLabel(selection?.card.prompt ?? "") || `任务 ${task.taskId}`;
 		const currentColumnId: BoardColumnId | null = selection?.column.id ?? null;
 		return (
-			<GuidedVerificationTaskCard
+			<PostDeployVerificationTaskCard
 				key={task.taskId}
 				task={task}
 				taskTitle={taskTitle}
@@ -75,8 +79,10 @@ export function GuidedVerificationDeploymentGroup({
 				onRemoveCustomChecklistItem={(itemId) =>
 					onRemoveCustomChecklistItem(group.deploymentId, task.taskId, itemId)
 				}
+				onRunVerificationItem={(itemId) => onRunVerificationItem(group.deploymentId, task.taskId, itemId)}
 				onRequestComplete={() => onRequestComplete(group.deploymentId, task.taskId)}
 				onSelectTask={() => onSelectTask(task.taskId)}
+				onNavigateToBoard={onNavigateToBoard}
 			/>
 		);
 	};

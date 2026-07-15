@@ -1,4 +1,4 @@
-// 部署 / Guided Verification 各模块（deploy-marker / guided-verification-state /
+// 部署 / Post-Deploy Verification 各模块（deploy-marker / post-deploy-verification-state /
 // task-deploy-correlation / deployment-api / deployment CLI）容错降级时的告警统一出口。
 // 沿用 diagnostics/*-logger.ts 的 process.stderr.write 约定：绕过 no-console lint
 // （grit/no-console.grit），无需 opt-in 即在服务端日志可见。各调用点自带 [模块名] 前缀，

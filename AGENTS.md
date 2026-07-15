@@ -11,6 +11,16 @@ What NOT to add: Stuff you can figure out from reading a few files, obvious patt
 
 ---
 
+RVF entry: Post-Deploy Verification authoring
+
+RVF-ENTRY-SKILL: cline-kanban-post-deploy-verification-authoring
+
+- 当一个 kanban 任务的实现收尾、宣告完成、或进入 review 前（即进入 RVF review/validate/fix 阶段时），**必须先调用 skill `cline-kanban-post-deploy-verification-authoring`**：分析哪些断言只有部署后的真实运行实例才验得到（超出部署前现场测试），并把它们注册成自动脚本型 / 引导人工型验证，使其在部署后出现在验证面板里。
+- RVF fix 若改变了可观察行为，land 前以 **reconcile 模式**重入该 skill（对已注册定义按 verificationId 幂等重注册、只 diff 变化，不堆叠重复）。
+- 上面的 `RVF-ENTRY-SKILL:` 行是 **repo-通用的机器可发现约定**：其它仓库将来可在自己的 AGENTS.md 声明同样的标记来 opt-in 这一 RVF 入口机制。（RVF 主插件侧「读取目标 repo 的 RVF-ENTRY-SKILL 并调用之」的通用钩子属另一仓库、需 rvf-local-deploy，暂未实现、仅在此记录。）
+
+---
+
 TypeScript principles
 - No any types unless absolutely necessary.
 - Check node_modules for external API type definitions instead of guessing.
