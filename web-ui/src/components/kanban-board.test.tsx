@@ -15,6 +15,7 @@ const dndMock = vi.hoisted(() => ({
 // 记录每个 BoardColumn 实际收到的 onSaveTitle，用于断言父级 wiring 是否对每一列（含 done/trash）传入保存回调。
 const boardColumnMock = vi.hoisted(() => ({
 	onSaveTitleByColumnId: new Map<string, ((taskId: string, title: string) => void) | undefined>(),
+	onRequestStartAllReadyBacklogTasksByColumnId: new Map<string, (() => void) | undefined>(),
 }));
 
 vi.mock("@hello-pangea/dnd", async () => {
@@ -46,11 +47,14 @@ vi.mock("@/components/board-column", () => ({
 	BoardColumn: ({
 		column,
 		onSaveTitle,
+		onRequestStartAllReadyBacklogTasks,
 	}: {
 		column: BoardData["columns"][number];
 		onSaveTitle?: (taskId: string, title: string) => void;
+		onRequestStartAllReadyBacklogTasks?: () => void;
 	}): React.ReactElement => {
 		boardColumnMock.onSaveTitleByColumnId.set(column.id, onSaveTitle);
+		boardColumnMock.onRequestStartAllReadyBacklogTasksByColumnId.set(column.id, onRequestStartAllReadyBacklogTasks);
 		return (
 			<section data-column-id={column.id}>
 				<div className="kb-column-cards">
@@ -96,6 +100,7 @@ describe("KanbanBoard", () => {
 
 	beforeEach(() => {
 		boardColumnMock.onSaveTitleByColumnId.clear();
+		boardColumnMock.onRequestStartAllReadyBacklogTasksByColumnId.clear();
 		vi.useFakeTimers();
 		vi.spyOn(performance, "now").mockImplementation(() => Date.now());
 		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback: FrameRequestCallback) => {
@@ -273,5 +278,38 @@ describe("KanbanBoard", () => {
 		expect(boardColumnMock.onSaveTitleByColumnId.get("in_progress")).toBe(onSaveTaskTitle);
 		expect(boardColumnMock.onSaveTitleByColumnId.get("review")).toBe(onSaveTaskTitle);
 		expect(boardColumnMock.onSaveTitleByColumnId.get("validation")).toBe(onSaveTaskTitle);
+	});
+
+	it("wires the main backlog header action to the centralized start-all confirmation request", async () => {
+		const onRequestStartAllReadyBacklogTasks = vi.fn();
+		const board: BoardData = {
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [] },
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "validation", title: "Validation", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		await act(async () => {
+			root.render(
+				<KanbanBoard
+					data={board}
+					taskSessions={{}}
+					onCardSelect={() => {}}
+					onCreateTask={() => {}}
+					onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
+					dependencies={[]}
+					onDragEnd={() => {}}
+				/>,
+			);
+		});
+
+		expect(boardColumnMock.onRequestStartAllReadyBacklogTasksByColumnId.get("backlog")).toBe(
+			onRequestStartAllReadyBacklogTasks,
+		);
+		expect(boardColumnMock.onRequestStartAllReadyBacklogTasksByColumnId.get("in_progress")).toBeUndefined();
 	});
 });

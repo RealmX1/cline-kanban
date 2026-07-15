@@ -40,7 +40,7 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeConfigResponse,
 	RuntimeConfigSaveRequest,
-	// Guided Verification / deployment tRPC I/O 类型（本阶段新增，供 RuntimeTrpcContext.deploymentApi 使用）
+	// Post-Deploy Verification / deployment tRPC I/O 类型（本阶段新增，供 RuntimeTrpcContext.deploymentApi 使用）
 	RuntimeConfirmVerificationCompleteRequest,
 	RuntimeConfirmVerificationCompleteResponse,
 	RuntimeContinueConnectionRetrySessionsRequest,
@@ -51,8 +51,8 @@ import type {
 	RuntimeDismissConnectionRetrySessionsRequest,
 	RuntimeDismissConnectionRetrySessionsResponse,
 	RuntimeFeaturebaseTokenResponse,
-	RuntimeGetGuidedVerificationStateRequest,
-	RuntimeGetGuidedVerificationStateResponse,
+	RuntimeGetPostDeployVerificationStateRequest,
+	RuntimeGetPostDeployVerificationStateResponse,
 	RuntimeGitCheckoutRequest,
 	RuntimeGitCheckoutResponse,
 	RuntimeGitCommitChangedFileMetadataRequest,
@@ -85,6 +85,8 @@ import type {
 	RuntimeProjectsResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
+	RuntimeRunPostDeployVerificationItemRequest,
+	RuntimeRunPostDeployVerificationItemResponse,
 	RuntimeRunUpdateResponse,
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
@@ -169,7 +171,7 @@ import {
 	runtimeCommandRunResponseSchema,
 	runtimeConfigResponseSchema,
 	runtimeConfigSaveRequestSchema,
-	// Guided Verification / deployment tRPC I/O schemas（本阶段新增，供 deployment router 校验）
+	// Post-Deploy Verification / deployment tRPC I/O schemas（本阶段新增，供 deployment router 校验）
 	runtimeConfirmVerificationCompleteRequestSchema,
 	runtimeConfirmVerificationCompleteResponseSchema,
 	runtimeContinueConnectionRetrySessionsRequestSchema,
@@ -180,8 +182,8 @@ import {
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeDismissConnectionRetrySessionsResponseSchema,
 	runtimeFeaturebaseTokenResponseSchema,
-	runtimeGetGuidedVerificationStateRequestSchema,
-	runtimeGetGuidedVerificationStateResponseSchema,
+	runtimeGetPostDeployVerificationStateRequestSchema,
+	runtimeGetPostDeployVerificationStateResponseSchema,
 	runtimeGitCheckoutRequestSchema,
 	runtimeGitCheckoutResponseSchema,
 	runtimeGitCommitChangedFileMetadataRequestSchema,
@@ -214,6 +216,8 @@ import {
 	runtimeProjectsResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
+	runtimeRunPostDeployVerificationItemRequestSchema,
+	runtimeRunPostDeployVerificationItemResponseSchema,
 	runtimeRunUpdateResponseSchema,
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
@@ -507,14 +511,18 @@ export interface RuntimeTrpcContext {
 		ingest: (input: RuntimeHookIngestRequest) => Promise<RuntimeHookIngestResponse>;
 	};
 	deploymentApi: {
-		getGuidedVerificationState: (
+		getPostDeployVerificationState: (
 			scope: RuntimeTrpcWorkspaceScope,
-			input: RuntimeGetGuidedVerificationStateRequest,
-		) => Promise<RuntimeGetGuidedVerificationStateResponse>;
+			input: RuntimeGetPostDeployVerificationStateRequest,
+		) => Promise<RuntimeGetPostDeployVerificationStateResponse>;
 		updateVerificationChecklist: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeUpdateVerificationChecklistRequest,
 		) => Promise<RuntimeUpdateVerificationChecklistResponse>;
+		runPostDeployVerificationItem: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRunPostDeployVerificationItemRequest,
+		) => Promise<RuntimeRunPostDeployVerificationItemResponse>;
 		requestVerificationComplete: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeRequestVerificationCompleteRequest,
@@ -970,17 +978,23 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	deployment: t.router({
-		getGuidedVerificationState: workspaceProcedure
-			.input(runtimeGetGuidedVerificationStateRequestSchema)
-			.output(runtimeGetGuidedVerificationStateResponseSchema)
+		getPostDeployVerificationState: workspaceProcedure
+			.input(runtimeGetPostDeployVerificationStateRequestSchema)
+			.output(runtimeGetPostDeployVerificationStateResponseSchema)
 			.query(async ({ ctx, input }) => {
-				return await ctx.deploymentApi.getGuidedVerificationState(ctx.workspaceScope, input);
+				return await ctx.deploymentApi.getPostDeployVerificationState(ctx.workspaceScope, input);
 			}),
 		updateVerificationChecklist: workspaceProcedure
 			.input(runtimeUpdateVerificationChecklistRequestSchema)
 			.output(runtimeUpdateVerificationChecklistResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.deploymentApi.updateVerificationChecklist(ctx.workspaceScope, input);
+			}),
+		runPostDeployVerificationItem: workspaceProcedure
+			.input(runtimeRunPostDeployVerificationItemRequestSchema)
+			.output(runtimeRunPostDeployVerificationItemResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.deploymentApi.runPostDeployVerificationItem(ctx.workspaceScope, input);
 			}),
 		requestVerificationComplete: workspaceProcedure
 			.input(runtimeRequestVerificationCompleteRequestSchema)

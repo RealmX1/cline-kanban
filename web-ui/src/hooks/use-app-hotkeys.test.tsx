@@ -64,7 +64,7 @@ describe("useAppHotkeys", () => {
 					handleOpenSettings={handleOpenSettings}
 					handleToggleGitHistory={handleToggleGitHistory}
 					handleCloseGitHistory={() => {}}
-					onStartAllTasks={() => {}}
+					onRequestStartAllReadyBacklogTasks={() => {}}
 				/>,
 			);
 		});
@@ -108,7 +108,7 @@ describe("useAppHotkeys", () => {
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={handleCloseGitHistory}
-					onStartAllTasks={() => {}}
+					onRequestStartAllReadyBacklogTasks={() => {}}
 				/>,
 			);
 		});
@@ -126,8 +126,8 @@ describe("useAppHotkeys", () => {
 		expect(handleCloseGitHistory).toHaveBeenCalledTimes(1);
 	});
 
-	it("starts all tasks on Mod+B", async () => {
-		const onStartAllTasks = vi.fn();
+	it("requests start-all confirmation on Mod+B", async () => {
+		const onRequestStartAllReadyBacklogTasks = vi.fn();
 
 		await act(async () => {
 			root.render(
@@ -145,7 +145,7 @@ describe("useAppHotkeys", () => {
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
-					onStartAllTasks={onStartAllTasks}
+					onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
 				/>,
 			);
 		});
@@ -160,7 +160,7 @@ describe("useAppHotkeys", () => {
 			startAllTasksHandler();
 		});
 
-		expect(onStartAllTasks).toHaveBeenCalledTimes(1);
+		expect(onRequestStartAllReadyBacklogTasks).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not open create task on C when create-task shortcut is disabled", async () => {
@@ -182,7 +182,7 @@ describe("useAppHotkeys", () => {
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
-					onStartAllTasks={() => {}}
+					onRequestStartAllReadyBacklogTasks={() => {}}
 				/>,
 			);
 		});

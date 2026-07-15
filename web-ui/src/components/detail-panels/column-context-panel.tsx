@@ -26,7 +26,7 @@ function ColumnSection({
 	onCardClick,
 	taskSessions,
 	onStartTask,
-	onStartAllTasks,
+	onRequestStartAllReadyBacklogTasks,
 	onClearTrash,
 	onEditTask,
 	onSaveTitle,
@@ -53,7 +53,7 @@ function ColumnSection({
 	onCardClick: (card: BoardCardModel) => void;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	onStartTask?: (taskId: string) => void;
-	onStartAllTasks?: () => void;
+	onRequestStartAllReadyBacklogTasks?: () => void;
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCardModel) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
@@ -73,7 +73,7 @@ function ColumnSection({
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
 	const [open, setOpen] = useState(defaultOpen);
-	const canStartAllTasks = column.id === "backlog" && onStartAllTasks;
+	const canRequestStartAllReadyBacklogTasks = column.id === "backlog" && onRequestStartAllReadyBacklogTasks;
 	const canClearTrash = column.id === "trash" && onClearTrash;
 	const latestTrashCard =
 		column.id === "trash"
@@ -148,15 +148,15 @@ function ColumnSection({
 					)}
 					<StageHeaderLabel columnId={column.id} title={column.title} count={column.cards.length} />
 				</button>
-				{canStartAllTasks ? (
+				{canRequestStartAllReadyBacklogTasks ? (
 					<Button
 						icon={<Play size={14} />}
 						variant="ghost"
 						size="sm"
-						onClick={onStartAllTasks}
+						onClick={onRequestStartAllReadyBacklogTasks}
 						disabled={column.cards.length === 0}
-						aria-label="Start all backlog tasks"
-						title={column.cards.length > 0 ? "Start all backlog tasks" : "Backlog is empty"}
+						aria-label="Start all ready backlog tasks"
+						title={column.cards.length > 0 ? "Start all ready backlog tasks" : "Backlog is empty"}
 						style={{ marginRight: 4 }}
 					/>
 				) : null}
@@ -276,7 +276,7 @@ export function ColumnContextPanel({
 	onTaskDragEnd,
 	onCreateTask,
 	onStartTask,
-	onStartAllTasks,
+	onRequestStartAllReadyBacklogTasks,
 	onClearTrash,
 	onEditTask,
 	onSaveTaskTitle,
@@ -299,7 +299,7 @@ export function ColumnContextPanel({
 	onTaskDragEnd: (result: DropResult) => void;
 	onCreateTask?: () => void;
 	onStartTask?: (taskId: string) => void;
-	onStartAllTasks?: () => void;
+	onRequestStartAllReadyBacklogTasks?: () => void;
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCardModel) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
@@ -462,7 +462,9 @@ export function ColumnContextPanel({
 							onCardClick={(card) => onCardSelect(card.id)}
 							taskSessions={taskSessions}
 							onStartTask={column.id === "backlog" ? onStartTask : undefined}
-							onStartAllTasks={column.id === "backlog" ? onStartAllTasks : undefined}
+							onRequestStartAllReadyBacklogTasks={
+								column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
+							}
 							onClearTrash={column.id === "trash" ? onClearTrash : undefined}
 							onEditTask={column.id === "backlog" ? onEditTask : undefined}
 							onSaveTitle={onSaveTaskTitle}

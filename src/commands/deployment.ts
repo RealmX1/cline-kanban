@@ -5,29 +5,31 @@ import packageJson from "../../package.json" with { type: "json" };
 import { loadRuntimeConfig } from "../config/runtime-config";
 import type {
 	RuntimeBoardColumnId,
-	RuntimeGuidedVerificationAcknowledgement,
-	RuntimeGuidedVerificationDeploymentGroup,
-	RuntimeGuidedVerificationPendingConfirmation,
-	RuntimeGuidedVerificationState,
-	RuntimeGuidedVerificationTask,
+	RuntimePostDeployVerificationAcknowledgement,
+	RuntimePostDeployVerificationDeploymentGroup,
+	RuntimePostDeployVerificationPendingConfirmation,
+	RuntimePostDeployVerificationState,
+	RuntimePostDeployVerificationTask,
 	RuntimeUpdateVerificationChecklistRequest,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
-import { runtimeGuidedVerificationAcknowledgementSchema } from "../core/api-contract";
-import { parseGuidedVerificationState } from "../core/api-validation";
+import { runtimePostDeployVerificationAcknowledgementSchema } from "../core/api-contract";
+import { parsePostDeployVerificationState } from "../core/api-validation";
 import { getKanbanRuntimeOrigin } from "../core/runtime-endpoint";
 import { getTaskColumnId } from "../core/task-board-mutations";
+import { materializeAuthoredVerificationItemsForTask } from "../deployment/authored-verification-definitions";
 import { readDeployMarker } from "../deployment/deploy-marker";
 import {
 	computeRequiredAcknowledgementsForColumn,
 	createDeploymentGroup,
-	createGuidedVerificationTaskWithSeededChecklist,
+	createPostDeployVerificationTaskWithSeededChecklist,
 	getActiveGroup,
-	getGuidedVerificationStatePath,
+	getPostDeployVerificationStatePath,
 	markTaskVerified,
+	migrateLegacyPostDeployVerificationStateFileIfNeeded,
 	setPendingConfirmation,
 	updateTaskChecklist,
-} from "../deployment/guided-verification-state";
+} from "../deployment/post-deploy-verification-state";
 import type { DeploymentCorrelationTaskInput } from "../deployment/task-deploy-correlation";
 import { correlateTasksWithDeployDelta } from "../deployment/task-deploy-correlation";
 import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagnostics-logger";
@@ -69,13 +71,15 @@ async function runDeploymentCommand(handler: () => Promise<JsonRecord>): Promise
 }
 
 /**
- * 只读加载 guided-verification-state（供 verification-state 输出与 complete/confirm 定位组用）。
- * ENOENT → 空组；解析失败 → 降级为空组并 warn。损坏隔离/重建是写路径（guided-verification-state 模块）的职责，
- * 只读路径不改盘。
- * ponytail: 直接读文件而非新增模块导出——本阶段只允许改 3 个文件，且这是纯容错读，无业务逻辑重造。
+ * 只读加载 post-deploy-verification-state（供 verification-state 输出与 complete/confirm 定位组用）。
+ * 读前复用状态模块的一次性 legacy 文件名迁移（issue CI4a）：升级后用户首个动作若是这些只读 CLI，
+ * 也能立即看到 legacy guided-verification-state.json 数据，而非误报空组 / not found。迁移是幂等原子 rename，
+ * 是设计内的读时迁移路径，不属于损坏隔离/重建——后者仍是写路径（post-deploy-verification-state 模块）的职责，
+ * 本 helper 除该迁移外不改盘。ENOENT → 空组；解析失败 → 降级为空组并 warn。
  */
-async function readGuidedVerificationStateReadOnly(): Promise<RuntimeGuidedVerificationState> {
-	const path = getGuidedVerificationStatePath();
+async function readPostDeployVerificationStateReadOnly(): Promise<RuntimePostDeployVerificationState> {
+	await migrateLegacyPostDeployVerificationStateFileIfNeeded();
+	const path = getPostDeployVerificationStatePath();
 	let raw: string;
 	try {
 		raw = await readFile(path, "utf8");
@@ -86,36 +90,36 @@ async function readGuidedVerificationStateReadOnly(): Promise<RuntimeGuidedVerif
 		throw error;
 	}
 	try {
-		return parseGuidedVerificationState(JSON.parse(raw));
+		return parsePostDeployVerificationState(JSON.parse(raw));
 	} catch (error) {
 		logDeploymentDiagnosticWarning(
-			`[deployment] guided-verification-state 读取失败，按空状态处理（隔离/重建由写路径负责）：${toErrorMessage(error)}`,
+			`[deployment] post-deploy-verification-state 读取失败，按空状态处理（隔离/重建由写路径负责）：${toErrorMessage(error)}`,
 		);
 		return { deploymentGroups: [] };
 	}
 }
 
 function findGroupInState(
-	state: RuntimeGuidedVerificationState,
+	state: RuntimePostDeployVerificationState,
 	deploymentId: string,
-): RuntimeGuidedVerificationDeploymentGroup | null {
+): RuntimePostDeployVerificationDeploymentGroup | null {
 	return state.deploymentGroups.find((group) => group.deploymentId === deploymentId) ?? null;
 }
 
 function findTaskInGroup(
-	group: RuntimeGuidedVerificationDeploymentGroup,
+	group: RuntimePostDeployVerificationDeploymentGroup,
 	taskId: string,
-): RuntimeGuidedVerificationTask | null {
+): RuntimePostDeployVerificationTask | null {
 	return group.tasks.find((task) => task.taskId === taskId) ?? null;
 }
 
-function checklistFullyChecked(task: RuntimeGuidedVerificationTask): boolean {
+function checklistFullyChecked(task: RuntimePostDeployVerificationTask): boolean {
 	return task.checklist.length > 0 && task.checklist.every((item) => item.checked);
 }
 
 function acknowledgementSetsEqual(
-	left: RuntimeGuidedVerificationAcknowledgement[],
-	right: RuntimeGuidedVerificationAcknowledgement[],
+	left: RuntimePostDeployVerificationAcknowledgement[],
+	right: RuntimePostDeployVerificationAcknowledgement[],
 ): boolean {
 	const leftSet = new Set(left);
 	const rightSet = new Set(right);
@@ -130,13 +134,13 @@ function acknowledgementSetsEqual(
 	return true;
 }
 
-function acknowledgementMismatchMessage(required: RuntimeGuidedVerificationAcknowledgement[]): string {
+function acknowledgementMismatchMessage(required: RuntimePostDeployVerificationAcknowledgement[]): string {
 	return required.length === 0
 		? "This task requires no acknowledgements; pass --ack with an empty list."
 		: `--ack must exactly match the required acknowledgements for the current column: ${required.join(", ")}.`;
 }
 
-function parseAcknowledgementList(value: string | undefined): RuntimeGuidedVerificationAcknowledgement[] {
+function parseAcknowledgementList(value: string | undefined): RuntimePostDeployVerificationAcknowledgement[] {
 	if (value === undefined) {
 		return [];
 	}
@@ -145,7 +149,7 @@ function parseAcknowledgementList(value: string | undefined): RuntimeGuidedVerif
 		.map((part) => part.trim())
 		.filter((part) => part.length > 0);
 	return parts.map((part) => {
-		const result = runtimeGuidedVerificationAcknowledgementSchema.safeParse(part);
+		const result = runtimePostDeployVerificationAcknowledgementSchema.safeParse(part);
 		if (!result.success) {
 			throw new Error(`Invalid --ack value "${part}". Expected one of: skip_validation, in_progress_active.`);
 		}
@@ -218,7 +222,7 @@ async function requireLiveWorkspaceRuntime(workspaceId: string): Promise<LiveWor
 		return { client, repoPath: context.repoPath, board: state.board };
 	} catch (error) {
 		throw new Error(
-			`Guided Verification requires a running Kanban server at ${getKanbanRuntimeOrigin()} to move a task to done: ${toErrorMessage(error)}`,
+			`Post-Deploy Verification requires a running Kanban server at ${getKanbanRuntimeOrigin()} to move a task to done: ${toErrorMessage(error)}`,
 		);
 	}
 }
@@ -272,7 +276,7 @@ async function proposeVerificationConfirmation(input: {
 	}
 	const token = randomUUID();
 	const expiresAtIso = new Date(Date.parse(input.nowIso) + CONFIRMATION_TOKEN_TTL_MS).toISOString();
-	const pendingConfirmation: RuntimeGuidedVerificationPendingConfirmation = {
+	const pendingConfirmation: RuntimePostDeployVerificationPendingConfirmation = {
 		token,
 		expiresAtIso,
 		requiredAcknowledgements,
@@ -354,10 +358,10 @@ async function recordDeployment(input: {
 		tasks: correlationTasks,
 	});
 
-	const groupTasks: RuntimeGuidedVerificationTask[] = [];
+	const groupTasks: RuntimePostDeployVerificationTask[] = [];
 	for (const candidate of candidates) {
 		groupTasks.push(
-			createGuidedVerificationTaskWithSeededChecklist({
+			createPostDeployVerificationTaskWithSeededChecklist({
 				taskId: candidate.taskId,
 				columnIdAtMatch: candidate.columnId,
 				matchedCommits: candidate.matchedCommits,
@@ -367,7 +371,7 @@ async function recordDeployment(input: {
 	}
 	for (const card of validationCards) {
 		groupTasks.push(
-			createGuidedVerificationTaskWithSeededChecklist({
+			createPostDeployVerificationTaskWithSeededChecklist({
 				taskId: card.id,
 				columnIdAtMatch: "validation",
 				matchedCommits: [],
@@ -378,6 +382,24 @@ async function recordDeployment(input: {
 
 	const deploymentId = randomUUID();
 	const nowIso = new Date().toISOString();
+
+	// 合并 agent 注册的 authored 验证定义（plan Stage 2）：对每个组内任务，按 (workspaceId, taskId) materialize
+	// 并按 item id 去重追加（authored id 前缀独立，实际不会与 commit:/custom 冲突）。跨多次部署：每个新组 seed 一份新副本。
+	let authoredItemCount = 0;
+	for (const task of groupTasks) {
+		const authoredItems = await materializeAuthoredVerificationItemsForTask(
+			workspace.workspaceId,
+			task.taskId,
+			nowIso,
+		);
+		for (const item of authoredItems) {
+			if (!task.checklist.some((existing) => existing.id === item.id)) {
+				task.checklist.push(item);
+				authoredItemCount += 1;
+			}
+		}
+	}
+
 	const { group, marker } = await createDeploymentGroup(
 		{
 			deploymentId,
@@ -404,6 +426,7 @@ async function recordDeployment(input: {
 		correlatedTaskCount: candidates.length,
 		validationTaskCount: validationCards.length,
 		totalVerificationTaskCount: groupTasks.length,
+		authoredVerificationItemCount: authoredItemCount,
 		noCorrelatedTasks: candidates.length === 0,
 		tasks: groupTasks.map((task) => ({
 			taskId: task.taskId,
@@ -456,7 +479,7 @@ async function verificationSummary(input: { cwd: string; projectPath?: string })
 
 // ---- verification-state ----
 
-function latestActiveDeploymentId(groups: RuntimeGuidedVerificationDeploymentGroup[]): string | null {
+function latestActiveDeploymentId(groups: RuntimePostDeployVerificationDeploymentGroup[]): string | null {
 	const active = groups
 		.filter((group) => group.foldedAtIso === null)
 		.sort((left, right) => Date.parse(right.deployedAtIso) - Date.parse(left.deployedAtIso));
@@ -468,7 +491,7 @@ async function verificationState(input: {
 	projectPath?: string;
 	activeOnly?: boolean;
 }): Promise<JsonRecord> {
-	const state = await readGuidedVerificationStateReadOnly();
+	const state = await readPostDeployVerificationStateReadOnly();
 	let groups = state.deploymentGroups;
 	if (input.projectPath !== undefined) {
 		const workspace = await loadWorkspaceContext(resolveProjectInputPath(input.projectPath, input.cwd), {
@@ -546,11 +569,37 @@ async function verificationUpdate(input: {
 	return { ok: result.ok, task: result.task, ...(result.error ? { error: result.error } : {}) };
 }
 
+// ---- verification-run ----
+
+// 运行一个自动脚本型验证项（plan Stage 3）。经 tRPC 委托 server（单一执行路径，running 并发状态集中在 server），
+// 需 live runtime：spawn 脚本 + 观察运行实例都发生在 server 进程内。workspaceId 由 deploymentId 定位组得到。
+async function verificationRun(input: { deploymentId: string; taskId: string; itemId: string }): Promise<JsonRecord> {
+	const state = await readPostDeployVerificationStateReadOnly();
+	const group = findGroupInState(state, input.deploymentId);
+	if (!group) {
+		return { ok: false, error: `Deployment group not found: ${input.deploymentId}` };
+	}
+	const client = createRuntimeTrpcClient(group.workspaceId);
+	try {
+		const result = await client.deployment.runPostDeployVerificationItem.mutate({
+			deploymentId: input.deploymentId,
+			taskId: input.taskId,
+			itemId: input.itemId,
+		});
+		return { ok: result.ok, task: result.task, ...(result.error ? { error: result.error } : {}) };
+	} catch (error) {
+		return {
+			ok: false,
+			error: `Running an automated verification requires a live Kanban server at ${getKanbanRuntimeOrigin()}: ${toErrorMessage(error)}`,
+		};
+	}
+}
+
 // ---- verification-complete ----
 
 async function verificationComplete(input: { deploymentId: string; taskId: string }): Promise<JsonRecord> {
 	const nowIso = new Date().toISOString();
-	const state = await readGuidedVerificationStateReadOnly();
+	const state = await readPostDeployVerificationStateReadOnly();
 	const group = findGroupInState(state, input.deploymentId);
 	if (!group) {
 		return { ok: false, needsConfirmation: false, error: `Deployment group not found: ${input.deploymentId}` };
@@ -630,14 +679,14 @@ async function verificationComplete(input: { deploymentId: string; taskId: strin
 
 async function isForceCompleteEnabled(repoPath: string): Promise<boolean> {
 	const config = await loadRuntimeConfig(repoPath);
-	return config.guidedVerificationForceCompleteEnabled === true;
+	return config.postDeployVerificationForceCompleteEnabled === true;
 }
 
 async function verificationConfirm(input: {
 	deploymentId: string;
 	taskId: string;
 	token?: string;
-	acks: RuntimeGuidedVerificationAcknowledgement[];
+	acks: RuntimePostDeployVerificationAcknowledgement[];
 	force: boolean;
 }): Promise<JsonRecord> {
 	const nowIso = new Date().toISOString();
@@ -651,7 +700,7 @@ async function verificationConfirm(input: {
 		};
 	}
 
-	const state = await readGuidedVerificationStateReadOnly();
+	const state = await readPostDeployVerificationStateReadOnly();
 	const group = findGroupInState(state, input.deploymentId);
 	if (!group) {
 		return { ok: false, error: `Deployment group not found: ${input.deploymentId}` };
@@ -690,7 +739,7 @@ async function verificationConfirm(input: {
 		if (!(await isForceCompleteEnabled(live.repoPath))) {
 			return {
 				ok: false,
-				error: "--force requires guidedVerificationForceCompleteEnabled to be enabled in the runtime config.",
+				error: "--force requires postDeployVerificationForceCompleteEnabled to be enabled in the runtime config.",
 			};
 		}
 		if (!acknowledgementSetsEqual(input.acks, requiredAcknowledgements)) {
@@ -756,11 +805,11 @@ async function verificationConfirm(input: {
 export function registerDeploymentCommand(program: Command): void {
 	const deployment = program
 		.command("deployment")
-		.description("Record deployments and drive Guided Verification from the CLI.");
+		.description("Record deployments and drive Post-Deploy Verification from the CLI.");
 
 	deployment
 		.command("record")
-		.description("Record a deployment: write the deploy marker and create a new Guided Verification group.")
+		.description("Record a deployment: write the deploy marker and create a new Post-Deploy Verification group.")
 		.option(
 			"--source-checkout-path <path>",
 			"Kanban source checkout where the deploy delta is computed. Defaults to cwd.",
@@ -784,7 +833,7 @@ export function registerDeploymentCommand(program: Command): void {
 
 	deployment
 		.command("verification-summary")
-		.description("Summarize the active Guided Verification group for a workspace.")
+		.description("Summarize the active Post-Deploy Verification group for a workspace.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.action(async (options: { projectPath?: string }) => {
 			await runDeploymentCommand(
@@ -794,7 +843,7 @@ export function registerDeploymentCommand(program: Command): void {
 
 	deployment
 		.command("verification-state")
-		.description("Print the full Guided Verification state (all deployment groups, including folded history).")
+		.description("Print the full Post-Deploy Verification state (all deployment groups, including folded history).")
 		.option("--project-path <path>", "Filter to a single workspace. Defaults to all workspaces.")
 		.option("--active-only", "Only include active (not-yet-folded) deployment groups.")
 		.action(async (options: { projectPath?: string; activeOnly?: boolean }) => {
@@ -842,6 +891,25 @@ export function registerDeploymentCommand(program: Command): void {
 		);
 
 	deployment
+		.command("verification-run")
+		.description(
+			"Run an automated-script verification item (delegates to the live server; passes auto-check the item).",
+		)
+		.requiredOption("--deployment-id <id>", "Deployment group id.")
+		.requiredOption("--task-id <id>", "Task id within the deployment group.")
+		.requiredOption("--item-id <id>", "Checklist item id (must be an automated_script verification).")
+		.action(async (options: { deploymentId: string; taskId: string; itemId: string }) => {
+			await runDeploymentCommand(
+				async () =>
+					await verificationRun({
+						deploymentId: options.deploymentId,
+						taskId: options.taskId,
+						itemId: options.itemId,
+					}),
+			);
+		});
+
+	deployment
 		.command("verification-complete")
 		.description("Propose moving a fully-checked verification task to done (validation column completes directly).")
 		.requiredOption("--deployment-id <id>", "Deployment group id.")
@@ -862,7 +930,7 @@ export function registerDeploymentCommand(program: Command): void {
 			"--ack <list>",
 			"Comma-separated acknowledgements (skip_validation,in_progress_active) required by the current column.",
 		)
-		.option("--force", "Break-glass: skip the token handshake. Requires guidedVerificationForceCompleteEnabled.")
+		.option("--force", "Break-glass: skip the token handshake. Requires postDeployVerificationForceCompleteEnabled.")
 		.action(
 			async (options: { deploymentId: string; taskId: string; token?: string; ack?: string; force?: boolean }) => {
 				await runDeploymentCommand(
