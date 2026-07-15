@@ -1,4 +1,7 @@
-import type { RuntimeGuidedVerificationPendingConfirmation, RuntimeGuidedVerificationTask } from "@/runtime/types";
+import type {
+	RuntimePostDeployVerificationPendingConfirmation,
+	RuntimePostDeployVerificationTask,
+} from "@/runtime/types";
 import type { BoardColumnId } from "@/types";
 
 // M4 恢复判定：「移列成功但 confirm 失败」的滞留态——任务已被移入 Done（trash 列）却未标记 verified，但盘上
@@ -20,11 +23,11 @@ import type { BoardColumnId } from "@/types";
 // 不覆盖的子态（返回 null）：token 已过期被回收（pendingConfirmation===null）、任务已被 reconcile 标记 dropped、
 // 或 pending 带非空 requiredAcknowledgements（review/in_progress-origin）。这些需后端 --force 恢复（见 follow-up），
 // 不在本前端最小恢复范围内。
-export function resolveGuidedVerificationStuckDoneRecovery(
-	task: RuntimeGuidedVerificationTask | null,
+export function resolvePostDeployVerificationStuckDoneRecovery(
+	task: RuntimePostDeployVerificationTask | null,
 	currentColumnId: BoardColumnId | null,
 	nowMs: number,
-): RuntimeGuidedVerificationPendingConfirmation | null {
+): RuntimePostDeployVerificationPendingConfirmation | null {
 	if (currentColumnId !== "trash" || task === null || task.verifiedAt !== null || task.droppedReason !== null) {
 		return null;
 	}

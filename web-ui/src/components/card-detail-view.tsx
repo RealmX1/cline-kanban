@@ -21,6 +21,7 @@ import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
 import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
+import { taskDetailAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
@@ -1230,7 +1231,12 @@ export function CardDetailView({
 	}
 
 	return (
-		<div ref={detailLayoutRef} className="flex min-h-0 flex-1 overflow-hidden bg-surface-0">
+		<div
+			ref={detailLayoutRef}
+			className="flex min-h-0 flex-1 overflow-hidden bg-surface-0"
+			// Post-Deploy Verification 引导定位锚点：guidance.anchor.view==="task_detail" 可指向此任务详情容器。
+			data-verification-anchor={taskDetailAnchorKey(selection.card.id)}
+		>
 			{!isDiffExpanded ? (
 				<>
 					<div className="flex min-h-0 min-w-0" style={{ width: taskCardsPanelPercent }}>

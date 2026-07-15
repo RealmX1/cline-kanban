@@ -1,37 +1,41 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type {
-	RuntimeGuidedVerificationDeploymentGroup,
-	RuntimeGuidedVerificationState,
-	RuntimeGuidedVerificationTask,
+	RuntimePostDeployVerificationChecklistItem,
+	RuntimePostDeployVerificationDeploymentGroup,
+	RuntimePostDeployVerificationState,
+	RuntimePostDeployVerificationTask,
 } from "../../../src/core/api-contract";
 import {
+	applyVerificationRunResult,
 	computeRequiredAcknowledgementsForColumn,
 	consumePendingConfirmation,
 	consumePendingConfirmationAndMarkVerified,
 	getActiveGroup,
-	getGuidedVerificationStatePath,
+	getPostDeployVerificationStatePath,
 	markTaskVerified,
+	migrateLegacyPostDeployVerificationStateFileIfNeeded,
 	reconcileGroup,
 	setPendingConfirmation,
+	setVerificationRunState,
 	updateTaskChecklist,
-} from "../../../src/deployment/guided-verification-state";
+} from "../../../src/deployment/post-deploy-verification-state";
 import { createTempDir } from "../../utilities/temp-dir";
 
-// guided-verification-state 的 state 文件路径 = join(getRuntimeHomePath(), ...) = join(homedir(), ".cline", "kanban", ...)，
+// post-deploy-verification-state 的 state 文件路径 = join(getRuntimeHomePath(), ...) = join(homedir(), ".cline", "kanban", ...)，
 // homedir() 在 POSIX 下读 $HOME。故用「临时 HOME」把 state 文件重定向到隔离沙箱（沿用 runtime-config.test.ts 的 HOME 覆盖手法）。
 // 所有「当前时间」用测试传入的固定 iso 字符串——模块本身不取时钟。
-describe.sequential("guided-verification-state", () => {
+describe.sequential("post-deploy-verification-state", () => {
 	let sandbox: ReturnType<typeof createTempDir>;
 	let previousHome: string | undefined;
 	let previousUserProfile: string | undefined;
 
 	beforeEach(() => {
-		sandbox = createTempDir("kanban-guided-verification-state-");
+		sandbox = createTempDir("kanban-post-deploy-verification-state-");
 		previousHome = process.env.HOME;
 		previousUserProfile = process.env.USERPROFILE;
 		process.env.HOME = sandbox.path;
@@ -58,20 +62,25 @@ describe.sequential("guided-verification-state", () => {
 	const FAR_FUTURE_ISO = "2999-01-01T00:00:00.000Z";
 
 	function stateFilePath(): string {
-		return getGuidedVerificationStatePath();
+		return getPostDeployVerificationStatePath();
 	}
 
-	function writeStateToDisk(state: RuntimeGuidedVerificationState): void {
+	// 全量重命名前的 legacy state 文件路径（同目录、旧文件名）。
+	function legacyStateFilePath(): string {
+		return join(dirname(stateFilePath()), "guided-verification-state.json");
+	}
+
+	function writeStateToDisk(state: RuntimePostDeployVerificationState): void {
 		const path = stateFilePath();
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, JSON.stringify(state, null, 2), "utf8");
 	}
 
-	function readStateFromDisk(): RuntimeGuidedVerificationState {
-		return JSON.parse(readFileSync(stateFilePath(), "utf8")) as RuntimeGuidedVerificationState;
+	function readStateFromDisk(): RuntimePostDeployVerificationState {
+		return JSON.parse(readFileSync(stateFilePath(), "utf8")) as RuntimePostDeployVerificationState;
 	}
 
-	function findTaskOnDisk(deploymentId: string, taskId: string): RuntimeGuidedVerificationTask | undefined {
+	function findTaskOnDisk(deploymentId: string, taskId: string): RuntimePostDeployVerificationTask | undefined {
 		return readStateFromDisk()
 			.deploymentGroups.find((group) => group.deploymentId === deploymentId)
 			?.tasks.find((task) => task.taskId === taskId);
@@ -82,15 +91,39 @@ describe.sequential("guided-verification-state", () => {
 		return randomUUID();
 	}
 
+	// 补全验证项默认字段（kind/guidance/script/run/cleanup），使内联 fixture 只需写 id/label/checked/source。
+	function buildChecklistItem(
+		fields: Partial<RuntimePostDeployVerificationChecklistItem> & {
+			id: string;
+			label: string;
+			checked: boolean;
+			source: RuntimePostDeployVerificationChecklistItem["source"];
+		},
+	): RuntimePostDeployVerificationChecklistItem {
+		return {
+			id: fields.id,
+			label: fields.label,
+			checked: fields.checked,
+			source: fields.source,
+			kind: fields.kind ?? "guided_manual",
+			guidance: fields.guidance ?? null,
+			script: fields.script ?? null,
+			run: fields.run ?? null,
+			cleanup: fields.cleanup ?? null,
+		};
+	}
+
 	function buildTask(
-		overrides: Partial<RuntimeGuidedVerificationTask> & { taskId: string },
-	): RuntimeGuidedVerificationTask {
+		overrides: Partial<RuntimePostDeployVerificationTask> & { taskId: string },
+	): RuntimePostDeployVerificationTask {
 		return {
 			taskId: overrides.taskId,
 			columnIdAtMatch: overrides.columnIdAtMatch ?? "review",
 			matchedCommits: overrides.matchedCommits ?? [],
 			inclusionReason: overrides.inclusionReason ?? "commit_correlation",
-			checklist: overrides.checklist ?? [{ id: "item-1", label: "验证项", checked: false, source: "commit" }],
+			checklist: overrides.checklist ?? [
+				buildChecklistItem({ id: "item-1", label: "验证项", checked: false, source: "commit" }),
+			],
 			verifiedAt: overrides.verifiedAt ?? null,
 			boardMovedToDoneAt: overrides.boardMovedToDoneAt ?? null,
 			pendingConfirmation: overrides.pendingConfirmation ?? null,
@@ -99,8 +132,8 @@ describe.sequential("guided-verification-state", () => {
 	}
 
 	function buildGroup(
-		overrides: Partial<RuntimeGuidedVerificationDeploymentGroup> & { deploymentId: string },
-	): RuntimeGuidedVerificationDeploymentGroup {
+		overrides: Partial<RuntimePostDeployVerificationDeploymentGroup> & { deploymentId: string },
+	): RuntimePostDeployVerificationDeploymentGroup {
 		return {
 			deploymentId: overrides.deploymentId,
 			workspaceId: overrides.workspaceId ?? "ws-1",
@@ -111,6 +144,322 @@ describe.sequential("guided-verification-state", () => {
 			tasks: overrides.tasks ?? [],
 		};
 	}
+
+	it("读时把 legacy guided-verification-state.json 一次性迁移为新文件名且数据零丢失", async () => {
+		const deploymentId = newDeploymentId();
+		const state: RuntimePostDeployVerificationState = {
+			deploymentGroups: [
+				buildGroup({
+					deploymentId,
+					workspaceId: "ws-1",
+					tasks: [
+						buildTask({
+							taskId: "task-legacy",
+							checklist: [
+								buildChecklistItem({
+									id: "commit:abc1234",
+									label: "验证提交 abc1234",
+									checked: true,
+									source: "commit",
+								}),
+							],
+						}),
+					],
+				}),
+			],
+		};
+		// 用 legacy 文件名写盘，新文件名不存在。
+		const legacyPath = legacyStateFilePath();
+		mkdirSync(dirname(legacyPath), { recursive: true });
+		writeFileSync(legacyPath, JSON.stringify(state, null, 2), "utf8");
+		expect(existsSync(stateFilePath())).toBe(false);
+
+		// 任意读路径触发迁移（getActiveGroup 经 mutate 骨架读盘）。
+		const group = await getActiveGroup("ws-1", NOW_ISO);
+
+		// 迁移后：legacy 文件消失、新文件出现、组与勾选状态完整保留。
+		expect(existsSync(legacyPath)).toBe(false);
+		expect(existsSync(stateFilePath())).toBe(true);
+		expect(group?.deploymentId).toBe(deploymentId);
+		expect(group?.tasks[0]?.checklist[0]?.label).toBe("验证提交 abc1234");
+		expect(group?.tasks[0]?.checklist[0]?.checked).toBe(true);
+	});
+
+	it("导出的 migrateLegacyPostDeployVerificationStateFileIfNeeded 可被独立调用完成迁移（CLI 只读 helper 依赖此导出，issue CI4a）", async () => {
+		const deploymentId = newDeploymentId();
+		const state: RuntimePostDeployVerificationState = {
+			deploymentGroups: [buildGroup({ deploymentId, workspaceId: "ws-1" })],
+		};
+		const legacyPath = legacyStateFilePath();
+		mkdirSync(dirname(legacyPath), { recursive: true });
+		writeFileSync(legacyPath, JSON.stringify(state, null, 2), "utf8");
+		expect(existsSync(stateFilePath())).toBe(false);
+
+		// 直接调用（commands/deployment.ts readPostDeployVerificationStateReadOnly 的调用形态）：
+		// 不经 mutate 骨架 / state 锁，也应完成 rename 迁移，让随后的裸 readFile 立即读到 legacy 数据。
+		await migrateLegacyPostDeployVerificationStateFileIfNeeded();
+
+		expect(existsSync(legacyPath)).toBe(false);
+		expect(existsSync(stateFilePath())).toBe(true);
+		expect(readStateFromDisk().deploymentGroups[0]?.deploymentId).toBe(deploymentId);
+
+		// 幂等：再次调用 no-op，不报错、不改盘。
+		await migrateLegacyPostDeployVerificationStateFileIfNeeded();
+		expect(readStateFromDisk().deploymentGroups[0]?.deploymentId).toBe(deploymentId);
+	});
+
+	it("新文件已存在时不触碰 legacy 文件（迁移仅在新文件缺失时发生）", async () => {
+		const newDepId = newDeploymentId();
+		writeStateToDisk({
+			deploymentGroups: [buildGroup({ deploymentId: newDepId, workspaceId: "ws-1" })],
+		});
+		// 同时放一个 legacy 文件（内容不同），应被完全忽略、保持原样。
+		const legacyPath = legacyStateFilePath();
+		writeFileSync(legacyPath, JSON.stringify({ deploymentGroups: [] }, null, 2), "utf8");
+
+		const group = await getActiveGroup("ws-1", NOW_ISO);
+
+		expect(existsSync(legacyPath)).toBe(true); // legacy 未被消费
+		expect(group?.deploymentId).toBe(newDepId); // 读的是新文件
+	});
+
+	it("旧 checklist item（无 kind/guidance/script/run/cleanup）解析为纯 checkbox 默认值", async () => {
+		const deploymentId = newDeploymentId();
+		// 手写一份仅含旧四字段的 state（模拟全量重命名前落盘的数据），绕过 buildChecklistItem 的补全。
+		const legacyShapedState = {
+			deploymentGroups: [
+				{
+					deploymentId,
+					workspaceId: "ws-1",
+					deployedSourceCommit: "a".repeat(40),
+					previousDeployedSourceCommit: null,
+					deployedAtIso: PAST_ISO,
+					foldedAtIso: null,
+					tasks: [
+						{
+							taskId: "task-old-shape",
+							columnIdAtMatch: "review",
+							matchedCommits: ["abc1234"],
+							inclusionReason: "commit_correlation",
+							checklist: [{ id: "commit:abc1234", label: "验证提交 abc1234", checked: false, source: "commit" }],
+							verifiedAt: null,
+							boardMovedToDoneAt: null,
+							pendingConfirmation: null,
+							droppedReason: null,
+						},
+					],
+				},
+			],
+		};
+		mkdirSync(dirname(stateFilePath()), { recursive: true });
+		writeFileSync(stateFilePath(), JSON.stringify(legacyShapedState, null, 2), "utf8");
+
+		const group = await getActiveGroup("ws-1", NOW_ISO);
+		const item = group?.tasks[0]?.checklist[0];
+
+		expect(item?.kind).toBe("guided_manual");
+		expect(item?.guidance).toBeNull();
+		expect(item?.script).toBeNull();
+		expect(item?.run).toBeNull();
+		expect(item?.cleanup).toBeNull();
+		// 旧字段原样保留。
+		expect(item?.source).toBe("commit");
+		expect(item?.checked).toBe(false);
+	});
+
+	function buildAutomatedScriptItem(id: string): RuntimePostDeployVerificationChecklistItem {
+		return buildChecklistItem({
+			id,
+			label: "自动脚本验证",
+			checked: false,
+			source: "authored",
+			kind: "automated_script",
+			script: { entrypoint: "run.sh", interpreter: "bash", timeoutMs: 30000 },
+		});
+	}
+
+	it("setVerificationRunState 置 running；非自动脚本项拒绝；已 running 拒绝", async () => {
+		const deploymentId = newDeploymentId();
+		writeStateToDisk({
+			deploymentGroups: [
+				buildGroup({
+					deploymentId,
+					tasks: [
+						buildTask({
+							taskId: "task-run",
+							checklist: [
+								buildAutomatedScriptItem("authored:auto-1"),
+								buildChecklistItem({ id: "commit:x", label: "手工", checked: false, source: "commit" }),
+							],
+						}),
+					],
+				}),
+			],
+		});
+
+		const started = await setVerificationRunState(
+			{ deploymentId, taskId: "task-run", itemId: "authored:auto-1", startedAtIso: NOW_ISO },
+			NOW_ISO,
+		);
+		expect(started.ok).toBe(true);
+		expect(findTaskOnDisk(deploymentId, "task-run")?.checklist[0]?.run?.status).toBe("running");
+
+		// 非自动脚本项拒绝。
+		const rejectedManual = await setVerificationRunState(
+			{ deploymentId, taskId: "task-run", itemId: "commit:x", startedAtIso: NOW_ISO },
+			NOW_ISO,
+		);
+		expect(rejectedManual.ok).toBe(false);
+
+		// 已 running 再次运行拒绝（并发护栏）。
+		const rejectedConcurrent = await setVerificationRunState(
+			{ deploymentId, taskId: "task-run", itemId: "authored:auto-1", startedAtIso: NOW_ISO },
+			NOW_ISO,
+		);
+		expect(rejectedConcurrent.ok).toBe(false);
+	});
+
+	it("applyVerificationRunResult：passed 置 checked=true，failed 置 checked=false", async () => {
+		const deploymentId = newDeploymentId();
+		writeStateToDisk({
+			deploymentGroups: [
+				buildGroup({
+					deploymentId,
+					tasks: [buildTask({ taskId: "task-apply", checklist: [buildAutomatedScriptItem("authored:auto-2")] })],
+				}),
+			],
+		});
+
+		await applyVerificationRunResult(
+			{
+				deploymentId,
+				taskId: "task-apply",
+				itemId: "authored:auto-2",
+				run: {
+					status: "passed",
+					exitCode: 0,
+					startedAtIso: NOW_ISO,
+					finishedAtIso: NOW_ISO,
+					outputExcerpt: "ok",
+				},
+			},
+			NOW_ISO,
+		);
+		expect(findTaskOnDisk(deploymentId, "task-apply")?.checklist[0]?.checked).toBe(true);
+
+		await applyVerificationRunResult(
+			{
+				deploymentId,
+				taskId: "task-apply",
+				itemId: "authored:auto-2",
+				run: {
+					status: "failed",
+					exitCode: 1,
+					startedAtIso: NOW_ISO,
+					finishedAtIso: NOW_ISO,
+					outputExcerpt: "boom",
+				},
+			},
+			NOW_ISO,
+		);
+		const item = findTaskOnDisk(deploymentId, "task-apply")?.checklist[0];
+		expect(item?.checked).toBe(false);
+		expect(item?.run?.status).toBe("failed");
+	});
+
+	it("toggle_checklist_item 拒绝 automated_script 项（checked 仅由 run 结果驱动，CI1(a) 回归）", async () => {
+		const deploymentId = newDeploymentId();
+		writeStateToDisk({
+			deploymentGroups: [
+				buildGroup({
+					deploymentId,
+					tasks: [
+						buildTask({ taskId: "task-toggle-auto", checklist: [buildAutomatedScriptItem("authored:auto-3")] }),
+					],
+				}),
+			],
+		});
+
+		// 从未运行（run===null）的自动项手动标 checked=true 必须被拒绝，否则可绕过 every(checked) 完成门控。
+		const rejected = await updateTaskChecklist(
+			{
+				operation: "toggle_checklist_item",
+				deploymentId,
+				taskId: "task-toggle-auto",
+				itemId: "authored:auto-3",
+				checked: true,
+			},
+			NOW_ISO,
+		);
+		expect(rejected.ok).toBe(false);
+		expect(findTaskOnDisk(deploymentId, "task-toggle-auto")?.checklist[0]?.checked).toBe(false);
+
+		// guided_manual 项仍可正常手动切换（拒绝面仅限自动脚本项）。
+		const manualDeploymentId = newDeploymentId();
+		writeStateToDisk({
+			deploymentGroups: [
+				buildGroup({
+					deploymentId: manualDeploymentId,
+					tasks: [buildTask({ taskId: "task-toggle-manual" })],
+				}),
+			],
+		});
+		const accepted = await updateTaskChecklist(
+			{
+				operation: "toggle_checklist_item",
+				deploymentId: manualDeploymentId,
+				taskId: "task-toggle-manual",
+				itemId: "item-1",
+				checked: true,
+			},
+			NOW_ISO,
+		);
+		expect(accepted.ok).toBe(true);
+		expect(findTaskOnDisk(manualDeploymentId, "task-toggle-manual")?.checklist[0]?.checked).toBe(true);
+	});
+
+	it("重跑：setVerificationRunState 置 running 时把上一轮 passed 的 checked 重置为 false（CI1(b) 回归）", async () => {
+		const deploymentId = newDeploymentId();
+		writeStateToDisk({
+			deploymentGroups: [
+				buildGroup({
+					deploymentId,
+					tasks: [
+						buildTask({
+							taskId: "task-rerun",
+							checklist: [
+								buildChecklistItem({
+									id: "authored:auto-rerun",
+									label: "自动脚本验证",
+									checked: true, // 上一轮 passed 留下的勾选
+									source: "authored",
+									kind: "automated_script",
+									script: { entrypoint: "run.sh", interpreter: "bash", timeoutMs: 30000 },
+									run: {
+										status: "passed",
+										exitCode: 0,
+										startedAtIso: PAST_ISO,
+										finishedAtIso: PAST_ISO,
+										outputExcerpt: "ok",
+									},
+								}),
+							],
+						}),
+					],
+				}),
+			],
+		});
+
+		const restarted = await setVerificationRunState(
+			{ deploymentId, taskId: "task-rerun", itemId: "authored:auto-rerun", startedAtIso: NOW_ISO },
+			NOW_ISO,
+		);
+		expect(restarted.ok).toBe(true);
+		const item = findTaskOnDisk(deploymentId, "task-rerun")?.checklist[0];
+		expect(item?.run?.status).toBe("running");
+		// running 期间不得残留「已通过」勾选；结果回来由 applyVerificationRunResult 重新决定。
+		expect(item?.checked).toBe(false);
+	});
 
 	it("token 过期后下次写盘 GC 清除 pendingConfirmation", async () => {
 		const deploymentId = newDeploymentId();
@@ -287,6 +636,7 @@ describe.sequential("guided-verification-state", () => {
 
 		await reconcileGroup({
 			deploymentId,
+			workspaceId: "ws-1",
 			currentBoardTasks: [
 				{ taskId: "review-kept", columnId: "review" },
 				{ taskId: "moved-trash", columnId: "trash" },
@@ -318,7 +668,9 @@ describe.sequential("guided-verification-state", () => {
 					tasks: [
 						buildTask({
 							taskId: "task-race-aftermath",
-							checklist: [{ id: "item-1", label: "验证项", checked: true, source: "commit" }],
+							checklist: [
+								buildChecklistItem({ id: "item-1", label: "验证项", checked: true, source: "commit" }),
+							],
 							// 竞态后遗症：reconcile 误标 + confirm 仍在途。
 							droppedReason: "moved_out_manually",
 							pendingConfirmation: {
@@ -353,7 +705,9 @@ describe.sequential("guided-verification-state", () => {
 					tasks: [
 						buildTask({
 							taskId: "task-atomic",
-							checklist: [{ id: "item-1", label: "验证项", checked: true, source: "commit" }],
+							checklist: [
+								buildChecklistItem({ id: "item-1", label: "验证项", checked: true, source: "commit" }),
+							],
 							// 竞态后遗症：reconcile 误标，confirm 仍在途。
 							droppedReason: "moved_out_manually",
 							pendingConfirmation: {
@@ -421,7 +775,9 @@ describe.sequential("guided-verification-state", () => {
 					tasks: [
 						buildTask({
 							taskId: "task-wrong-token",
-							checklist: [{ id: "item-1", label: "验证项", checked: true, source: "commit" }],
+							checklist: [
+								buildChecklistItem({ id: "item-1", label: "验证项", checked: true, source: "commit" }),
+							],
 							pendingConfirmation: {
 								token: "tok-real",
 								expiresAtIso: FAR_FUTURE_ISO,
@@ -507,7 +863,9 @@ describe.sequential("guided-verification-state", () => {
 						? [
 								buildTask({
 									taskId: "t-old",
-									checklist: [{ id: "item-1", label: "验证项", checked: false, source: "commit" }],
+									checklist: [
+										buildChecklistItem({ id: "item-1", label: "验证项", checked: false, source: "commit" }),
+									],
 								}),
 							]
 						: [],
