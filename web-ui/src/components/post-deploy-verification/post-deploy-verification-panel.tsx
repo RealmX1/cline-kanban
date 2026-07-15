@@ -3,19 +3,19 @@ import { ChevronDown, ClipboardCheck, Minus, Pin, PinOff } from "lucide-react";
 import type { ReactElement } from "react";
 import { createPortal } from "react-dom";
 
-import { GuidedVerificationDeploymentGroup } from "@/components/guided-verification/guided-verification-deployment-group";
+import { PostDeployVerificationDeploymentGroup } from "@/components/post-deploy-verification/post-deploy-verification-deployment-group";
 import {
 	formatDeployShaRange,
 	formatDeployTimestamp,
-} from "@/components/guided-verification/guided-verification-format";
+} from "@/components/post-deploy-verification/post-deploy-verification-format";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
-import type { RuntimeGuidedVerificationDeploymentGroup, RuntimeGuidedVerificationTask } from "@/runtime/types";
+import type { RuntimePostDeployVerificationDeploymentGroup, RuntimePostDeployVerificationTask } from "@/runtime/types";
 import type { BoardData } from "@/types";
 
-export interface GuidedVerificationPanelProps {
-	activeGroup: RuntimeGuidedVerificationDeploymentGroup | null;
-	historyGroups: RuntimeGuidedVerificationDeploymentGroup[];
+export interface PostDeployVerificationPanelProps {
+	activeGroup: RuntimePostDeployVerificationDeploymentGroup | null;
+	historyGroups: RuntimePostDeployVerificationDeploymentGroup[];
 	hasLoadedOnce: boolean;
 	loadError: string | null;
 	board: BoardData;
@@ -29,24 +29,26 @@ export interface GuidedVerificationPanelProps {
 	onToggleChecklistItem: (deploymentId: string, taskId: string, itemId: string, checked: boolean) => void;
 	onAddCustomChecklistItem: (deploymentId: string, taskId: string, label: string) => void;
 	onRemoveCustomChecklistItem: (deploymentId: string, taskId: string, itemId: string) => void;
+	onRunVerificationItem: (deploymentId: string, taskId: string, itemId: string) => void;
 	onRequestComplete: (deploymentId: string, taskId: string) => void;
 	onSelectTask: (taskId: string) => void;
+	onNavigateToBoard: () => void;
 }
 
-function countPending(group: RuntimeGuidedVerificationDeploymentGroup | null): number {
+function countPending(group: RuntimePostDeployVerificationDeploymentGroup | null): number {
 	if (!group) {
 		return 0;
 	}
 	return group.tasks.filter((task) => task.verifiedAt === null && task.droppedReason === null).length;
 }
 
-function summarizeGroupProgress(tasks: RuntimeGuidedVerificationTask[]): { done: number; total: number } {
+function summarizeGroupProgress(tasks: RuntimePostDeployVerificationTask[]): { done: number; total: number } {
 	const total = tasks.filter((task) => task.droppedReason === null).length;
 	const done = tasks.filter((task) => task.droppedReason === null && task.verifiedAt !== null).length;
 	return { done, total };
 }
 
-export function GuidedVerificationPanel(props: GuidedVerificationPanelProps): ReactElement | null {
+export function PostDeployVerificationPanel(props: PostDeployVerificationPanelProps): ReactElement | null {
 	const {
 		activeGroup,
 		historyGroups,
@@ -62,8 +64,10 @@ export function GuidedVerificationPanel(props: GuidedVerificationPanelProps): Re
 		onToggleChecklistItem,
 		onAddCustomChecklistItem,
 		onRemoveCustomChecklistItem,
+		onRunVerificationItem,
 		onRequestComplete,
 		onSelectTask,
+		onNavigateToBoard,
 	} = props;
 
 	// 门控：数据未到达前不闪现；本 workspace 无任何 deployment 组时不挂载（即工作区维度门控，见 plan）。
@@ -80,14 +84,14 @@ export function GuidedVerificationPanel(props: GuidedVerificationPanelProps): Re
 			<button
 				type="button"
 				onClick={onToggleCollapsed}
-				aria-label="展开 Guided Verification 面板"
+				aria-label="展开 Post-Deploy Verification 面板"
 				className={cn(
 					"fixed bottom-20 right-4 inline-flex cursor-pointer items-center gap-2 rounded-full border border-border-bright bg-surface-2 px-3 py-2 text-sm text-text-primary shadow-lg transition-colors hover:bg-surface-3",
 					zIndexClassName,
 				)}
 			>
 				<ClipboardCheck size={16} className="text-accent" />
-				<span className="font-medium">Guided Verification</span>
+				<span className="font-medium">Post-Deploy Verification</span>
 				{pendingCount > 0 ? (
 					<span className="inline-flex min-w-5 items-center justify-center rounded-full bg-status-orange px-1.5 text-[11px] font-semibold text-black">
 						{pendingCount}
@@ -111,7 +115,7 @@ export function GuidedVerificationPanel(props: GuidedVerificationPanelProps): Re
 			<div className="flex shrink-0 items-center justify-between gap-2 rounded-t-lg border-b border-border bg-surface-1 px-3 py-2">
 				<div className="flex min-w-0 items-center gap-2">
 					<ClipboardCheck size={16} className="shrink-0 text-accent" />
-					<span className="truncate text-sm font-semibold text-text-primary">Guided Verification</span>
+					<span className="truncate text-sm font-semibold text-text-primary">Post-Deploy Verification</span>
 					{pendingCount > 0 ? (
 						<span className="inline-flex min-w-5 items-center justify-center rounded-full bg-status-orange px-1.5 text-[11px] font-semibold text-black">
 							{pendingCount}
@@ -137,7 +141,7 @@ export function GuidedVerificationPanel(props: GuidedVerificationPanelProps): Re
 						<button
 							type="button"
 							onClick={onToggleCollapsed}
-							aria-label="折叠 Guided Verification 面板"
+							aria-label="折叠 Post-Deploy Verification 面板"
 							className="cursor-pointer rounded-md p-1 text-text-tertiary transition-colors hover:bg-surface-3 hover:text-text-primary"
 						>
 							<Minus size={14} />
@@ -171,7 +175,7 @@ export function GuidedVerificationPanel(props: GuidedVerificationPanelProps): Re
 							</div>
 							<p className="m-0 mt-0.5 text-[11px] text-text-secondary">当前部署 · 待核对 {pendingCount}</p>
 						</div>
-						<GuidedVerificationDeploymentGroup
+						<PostDeployVerificationDeploymentGroup
 							group={activeGroup}
 							board={board}
 							interactive
@@ -179,8 +183,10 @@ export function GuidedVerificationPanel(props: GuidedVerificationPanelProps): Re
 							onToggleChecklistItem={onToggleChecklistItem}
 							onAddCustomChecklistItem={onAddCustomChecklistItem}
 							onRemoveCustomChecklistItem={onRemoveCustomChecklistItem}
+							onRunVerificationItem={onRunVerificationItem}
 							onRequestComplete={onRequestComplete}
 							onSelectTask={onSelectTask}
+							onNavigateToBoard={onNavigateToBoard}
 						/>
 					</section>
 				) : null}
@@ -220,7 +226,7 @@ export function GuidedVerificationPanel(props: GuidedVerificationPanelProps): Re
 										</button>
 									</RadixCollapsible.Trigger>
 									<RadixCollapsible.Content className="border-t border-border px-2 py-2">
-										<GuidedVerificationDeploymentGroup
+										<PostDeployVerificationDeploymentGroup
 											group={group}
 											board={board}
 											interactive={false}
@@ -228,8 +234,10 @@ export function GuidedVerificationPanel(props: GuidedVerificationPanelProps): Re
 											onToggleChecklistItem={onToggleChecklistItem}
 											onAddCustomChecklistItem={onAddCustomChecklistItem}
 											onRemoveCustomChecklistItem={onRemoveCustomChecklistItem}
+											onRunVerificationItem={onRunVerificationItem}
 											onRequestComplete={onRequestComplete}
 											onSelectTask={onSelectTask}
+											onNavigateToBoard={onNavigateToBoard}
 										/>
 									</RadixCollapsible.Content>
 								</RadixCollapsible.Root>

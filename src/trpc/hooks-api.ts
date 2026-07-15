@@ -130,10 +130,19 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					}
 				}
 
+				// resume substantive guard 只认「一轮用户提交」驱动的 to_in_progress 作为解除信号：
+				// Claude/Codex/Droid 的 UserPromptSubmit + Gemini 的 BeforeAgent（二者在 hooks.ts inferActivityText
+				// 与 mapGeminiHookEvent 里等价视为「用户提交、agent 开始新一轮」）。不认 PostToolUse / PostToolUseFailure
+				// 等自动续跑中途活动（与上方 park 解除同一区分）。Gemini 经 task-chat 恢复走 paste 路径不过 writeInput，
+				// 故必须靠本 hook 信号解除 guard，否则全 TUI 武装后 Gemini 的 lastSubstantiveOutputAt 会永久冻结。
+				const resumeContinueHookEventName = body.metadata?.hookEventName?.trim().toLowerCase() ?? "";
+				const userInitiatedResume =
+					event === "to_in_progress" &&
+					(resumeContinueHookEventName === "userpromptsubmit" || resumeContinueHookEventName === "beforeagent");
 				const transitionedSummary =
 					event === "to_review"
 						? manager.transitionToReview(taskId, "hook", userTurnKindOverride ?? undefined)
-						: manager.transitionToRunning(taskId);
+						: manager.transitionToRunning(taskId, { userInitiatedResume });
 				if (!transitionedSummary) {
 					return {
 						ok: false,

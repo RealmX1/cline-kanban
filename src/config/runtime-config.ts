@@ -18,6 +18,9 @@ interface RuntimeGlobalConfigFileShape {
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	postDeployVerificationForceCompleteEnabled?: boolean;
+	// Legacy 键（Post-Deploy Verification 全量重命名前叫 guidedVerificationForceCompleteEnabled）。
+	// 仅用于读时兼容:旧 config.json 里若只有这个键,回退读它;下一次写入只落新键,旧键随原子覆盖自然消失。
 	guidedVerificationForceCompleteEnabled?: boolean;
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
@@ -37,7 +40,7 @@ export interface RuntimeConfigState {
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
-	guidedVerificationForceCompleteEnabled: boolean;
+	postDeployVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
 	openPrPromptTemplate: string;
@@ -53,7 +56,7 @@ export interface RuntimeConfigUpdateInput {
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
-	guidedVerificationForceCompleteEnabled?: boolean;
+	postDeployVerificationForceCompleteEnabled?: boolean;
 	shortcuts?: RuntimeProjectShortcut[];
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
@@ -72,8 +75,8 @@ const DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT = true;
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
 const DEFAULT_NOTIFICATION_SOUND_ENABLED = true;
 const DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED = true;
-// 引导式验证的「强制完成」是绕过安全确认的逃生阀，默认关闭；CLI 传 --force 且此开关开启才生效。
-const DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED = false;
+// 部署后验证的「强制完成」是绕过安全确认的逃生阀，默认关闭；CLI 传 --force 且此开关开启才生效。
+const DEFAULT_POST_DEPLOY_VERIFICATION_FORCE_COMPLETE_ENABLED = false;
 const DEFAULT_COMMIT_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD. When you are finished with the task, commit the working changes onto {{base_ref}}.
 
 - Do not run destructive commands: git reset --hard, git clean -fdx, git worktree remove, rm/mv on repository paths.
@@ -313,9 +316,10 @@ function toRuntimeConfigState({
 			globalConfig?.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
 		),
-		guidedVerificationForceCompleteEnabled: normalizeBoolean(
-			globalConfig?.guidedVerificationForceCompleteEnabled,
-			DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED,
+		postDeployVerificationForceCompleteEnabled: normalizeBoolean(
+			globalConfig?.postDeployVerificationForceCompleteEnabled ??
+				globalConfig?.guidedVerificationForceCompleteEnabled,
+			DEFAULT_POST_DEPLOY_VERIFICATION_FORCE_COMPLETE_ENABLED,
 		),
 		shortcuts: normalizeShortcuts(projectConfig?.shortcuts),
 		commitPromptTemplate: normalizePromptTemplate(globalConfig?.commitPromptTemplate, DEFAULT_COMMIT_PROMPT_TEMPLATE),
@@ -347,7 +351,7 @@ async function writeRuntimeGlobalConfigFile(
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
-		guidedVerificationForceCompleteEnabled?: boolean;
+		postDeployVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
 	},
@@ -385,12 +389,12 @@ async function writeRuntimeGlobalConfigFile(
 					config.autoContinueOnConnectionDropEnabled,
 					DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
 				);
-	const guidedVerificationForceCompleteEnabled =
-		config.guidedVerificationForceCompleteEnabled === undefined
-			? DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED
+	const postDeployVerificationForceCompleteEnabled =
+		config.postDeployVerificationForceCompleteEnabled === undefined
+			? DEFAULT_POST_DEPLOY_VERIFICATION_FORCE_COMPLETE_ENABLED
 			: normalizeBoolean(
-					config.guidedVerificationForceCompleteEnabled,
-					DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED,
+					config.postDeployVerificationForceCompleteEnabled,
+					DEFAULT_POST_DEPLOY_VERIFICATION_FORCE_COMPLETE_ENABLED,
 				);
 	const commitPromptTemplate =
 		config.commitPromptTemplate === undefined
@@ -447,10 +451,10 @@ async function writeRuntimeGlobalConfigFile(
 		payload.autoContinueOnConnectionDropEnabled = autoContinueOnConnectionDropEnabled;
 	}
 	if (
-		hasOwnKey(existing, "guidedVerificationForceCompleteEnabled") ||
-		guidedVerificationForceCompleteEnabled !== DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED
+		hasOwnKey(existing, "postDeployVerificationForceCompleteEnabled") ||
+		postDeployVerificationForceCompleteEnabled !== DEFAULT_POST_DEPLOY_VERIFICATION_FORCE_COMPLETE_ENABLED
 	) {
-		payload.guidedVerificationForceCompleteEnabled = guidedVerificationForceCompleteEnabled;
+		payload.postDeployVerificationForceCompleteEnabled = postDeployVerificationForceCompleteEnabled;
 	}
 	if (hasOwnKey(existing, "commitPromptTemplate") || commitPromptTemplate !== DEFAULT_COMMIT_PROMPT_TEMPLATE) {
 		payload.commitPromptTemplate = commitPromptTemplate;
@@ -540,7 +544,7 @@ function createRuntimeConfigStateFromValues(input: {
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
-	guidedVerificationForceCompleteEnabled: boolean;
+	postDeployVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
 	openPrPromptTemplate: string;
@@ -567,9 +571,9 @@ function createRuntimeConfigStateFromValues(input: {
 			input.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
 		),
-		guidedVerificationForceCompleteEnabled: normalizeBoolean(
-			input.guidedVerificationForceCompleteEnabled,
-			DEFAULT_GUIDED_VERIFICATION_FORCE_COMPLETE_ENABLED,
+		postDeployVerificationForceCompleteEnabled: normalizeBoolean(
+			input.postDeployVerificationForceCompleteEnabled,
+			DEFAULT_POST_DEPLOY_VERIFICATION_FORCE_COMPLETE_ENABLED,
 		),
 		shortcuts: normalizeShortcuts(input.shortcuts),
 		commitPromptTemplate: normalizePromptTemplate(input.commitPromptTemplate, DEFAULT_COMMIT_PROMPT_TEMPLATE),
@@ -590,7 +594,7 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: current.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: current.autoContinueOnConnectionDropEnabled,
-		guidedVerificationForceCompleteEnabled: current.guidedVerificationForceCompleteEnabled,
+		postDeployVerificationForceCompleteEnabled: current.postDeployVerificationForceCompleteEnabled,
 		shortcuts: [],
 		commitPromptTemplate: current.commitPromptTemplate,
 		openPrPromptTemplate: current.openPrPromptTemplate,
@@ -629,7 +633,7 @@ export async function saveRuntimeConfig(
 		readyForReviewNotificationsEnabled: boolean;
 		notificationSoundEnabled: boolean;
 		autoContinueOnConnectionDropEnabled: boolean;
-		guidedVerificationForceCompleteEnabled: boolean;
+		postDeployVerificationForceCompleteEnabled: boolean;
 		shortcuts: RuntimeProjectShortcut[];
 		commitPromptTemplate: string;
 		openPrPromptTemplate: string;
@@ -645,7 +649,7 @@ export async function saveRuntimeConfig(
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
-			guidedVerificationForceCompleteEnabled: config.guidedVerificationForceCompleteEnabled,
+			postDeployVerificationForceCompleteEnabled: config.postDeployVerificationForceCompleteEnabled,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
 		});
@@ -660,7 +664,7 @@ export async function saveRuntimeConfig(
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
-			guidedVerificationForceCompleteEnabled: config.guidedVerificationForceCompleteEnabled,
+			postDeployVerificationForceCompleteEnabled: config.postDeployVerificationForceCompleteEnabled,
 			shortcuts: config.shortcuts,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
@@ -687,8 +691,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled:
 				updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
-			guidedVerificationForceCompleteEnabled:
-				updates.guidedVerificationForceCompleteEnabled ?? current.guidedVerificationForceCompleteEnabled,
+			postDeployVerificationForceCompleteEnabled:
+				updates.postDeployVerificationForceCompleteEnabled ?? current.postDeployVerificationForceCompleteEnabled,
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
 			commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 			openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
@@ -702,7 +706,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 			nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 			nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
-			nextConfig.guidedVerificationForceCompleteEnabled !== current.guidedVerificationForceCompleteEnabled ||
+			nextConfig.postDeployVerificationForceCompleteEnabled !== current.postDeployVerificationForceCompleteEnabled ||
 			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
 			!areRuntimeProjectShortcutsEqual(nextConfig.shortcuts, current.shortcuts);
@@ -719,7 +723,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
-			guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
+			postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 		});
@@ -736,7 +740,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
-			guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
+			postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 			shortcuts: nextConfig.shortcuts,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
@@ -771,8 +775,8 @@ export async function updateGlobalRuntimeConfig(
 				notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled:
 					updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
-				guidedVerificationForceCompleteEnabled:
-					updates.guidedVerificationForceCompleteEnabled ?? current.guidedVerificationForceCompleteEnabled,
+				postDeployVerificationForceCompleteEnabled:
+					updates.postDeployVerificationForceCompleteEnabled ?? current.postDeployVerificationForceCompleteEnabled,
 				shortcuts: current.shortcuts,
 				commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 				openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
@@ -786,7 +790,8 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 				nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 				nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
-				nextConfig.guidedVerificationForceCompleteEnabled !== current.guidedVerificationForceCompleteEnabled ||
+				nextConfig.postDeployVerificationForceCompleteEnabled !==
+					current.postDeployVerificationForceCompleteEnabled ||
 				nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 				nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate;
 
@@ -802,7 +807,7 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
-				guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
+				postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 			});
@@ -817,7 +822,7 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
-				guidedVerificationForceCompleteEnabled: nextConfig.guidedVerificationForceCompleteEnabled,
+				postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 				shortcuts: nextConfig.shortcuts,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,

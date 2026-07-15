@@ -1,37 +1,42 @@
-// Guided Verification 的 tRPC handler 层（plan「tRPC / API 契约」+ 1d 移列分工）。
-// 纯委托：读写 verification state 交给 src/deployment/guided-verification-state.ts，
+// Post-Deploy Verification 的 tRPC handler 层（plan「tRPC / API 契约」+ 1d 移列分工）。
+// 纯委托：读写 verification state 交给 src/deployment/post-deploy-verification-state.ts，
 // 看板当前列 / agent 回复预览由 runtime-server 经 DI 注入。
 // 硬约束（plan 1d）：confirmVerificationComplete **只更新 verification state，绝不移列** —— Web 侧移列由
-// completeGuidedVerificationMoveToDone 负责、CLI 走 trashTaskById 链；本层不触碰 board.json。
+// completePostDeployVerificationMoveToDone 负责、CLI 走 trashTaskById 链；本层不触碰 board.json。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import type {
 	RuntimeConfirmVerificationCompleteRequest,
 	RuntimeConfirmVerificationCompleteResponse,
-	RuntimeGetGuidedVerificationStateRequest,
-	RuntimeGetGuidedVerificationStateResponse,
-	RuntimeGuidedVerificationState,
-	RuntimeGuidedVerificationTask,
+	RuntimeGetPostDeployVerificationStateRequest,
+	RuntimeGetPostDeployVerificationStateResponse,
+	RuntimePostDeployVerificationState,
+	RuntimePostDeployVerificationTask,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
+	RuntimeRunPostDeployVerificationItemRequest,
+	RuntimeRunPostDeployVerificationItemResponse,
 	RuntimeUpdateVerificationChecklistRequest,
 	RuntimeUpdateVerificationChecklistResponse,
 } from "../core/api-contract";
-import { parseGuidedVerificationState } from "../core/api-validation";
+import { parsePostDeployVerificationState } from "../core/api-validation";
 import type {
 	ConsumePendingConfirmationFailureReason,
 	ReconcileGroupBoardTask,
-} from "../deployment/guided-verification-state";
+} from "../deployment/post-deploy-verification-state";
 import {
+	applyVerificationRunResult,
 	computeRequiredAcknowledgementsForColumn,
 	consumePendingConfirmationAndMarkVerified,
 	getActiveGroup,
-	getGuidedVerificationStatePath,
+	getPostDeployVerificationStatePath,
 	reconcileGroup,
 	setPendingConfirmation,
+	setVerificationRunState,
 	updateTaskChecklist,
-} from "../deployment/guided-verification-state";
+} from "../deployment/post-deploy-verification-state";
+import { runVerificationScript, toRunSnapshot } from "../deployment/verification-script-runner";
 import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagnostics-logger";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
 
@@ -59,14 +64,14 @@ function isEnoentError(error: unknown): boolean {
 
 // 只读快照：直接读盘 + schema 校验。ENOENT（尚无 state）与损坏都降级为空组 —— 损坏文件的隔离 + 重建由
 // state 模块的写路径（mutate 骨架 / getActiveGroup）负责，查询侧不重复实现隔离逻辑。
-async function readGuidedVerificationStateSnapshot(): Promise<RuntimeGuidedVerificationState> {
+async function readPostDeployVerificationStateSnapshot(): Promise<RuntimePostDeployVerificationState> {
 	try {
-		const raw = await readFile(getGuidedVerificationStatePath(), "utf8");
-		return parseGuidedVerificationState(JSON.parse(raw));
+		const raw = await readFile(getPostDeployVerificationStatePath(), "utf8");
+		return parsePostDeployVerificationState(JSON.parse(raw));
 	} catch (error) {
 		if (!isEnoentError(error)) {
 			logDeploymentDiagnosticWarning(
-				`[deployment-api] 读取 guided-verification-state 失败，降级为空组：${errorMessage(error)}`,
+				`[deployment-api] 读取 post-deploy-verification-state 失败，降级为空组：${errorMessage(error)}`,
 			);
 		}
 		return { deploymentGroups: [] };
@@ -74,7 +79,7 @@ async function readGuidedVerificationStateSnapshot(): Promise<RuntimeGuidedVerif
 }
 
 // checklist 非空且全部勾选才算可完成核对（seed 保证至少一项，空数组防御性判为未完成）。
-function isChecklistFullyChecked(task: RuntimeGuidedVerificationTask): boolean {
+function isChecklistFullyChecked(task: RuntimePostDeployVerificationTask): boolean {
 	return task.checklist.length > 0 && task.checklist.every((item) => item.checked);
 }
 
@@ -103,20 +108,25 @@ function describeConsumeFailure(reason: ConsumePendingConfirmationFailureReason 
 
 export function createDeploymentApi(deps: CreateDeploymentApiDependencies): RuntimeTrpcContext["deploymentApi"] {
 	return {
-		getGuidedVerificationState: async (
+		getPostDeployVerificationState: async (
 			scope: RuntimeTrpcWorkspaceScope,
-			input: RuntimeGetGuidedVerificationStateRequest,
-		): Promise<RuntimeGetGuidedVerificationStateResponse> => {
+			input: RuntimeGetPostDeployVerificationStateRequest,
+		): Promise<RuntimeGetPostDeployVerificationStateResponse> => {
 			const nowIso = new Date().toISOString();
 			// active 组选取顺带触发 state 模块的损坏隔离 + 过期 token GC（读时经 mutate 骨架）。
 			const activeGroup = await getActiveGroup(scope.workspaceId, nowIso);
 			if (activeGroup) {
 				// 每次轮询对当前组做双向 reconcile：新进 validation 任务动态加入 + 悬挂任务标 droppedReason（plan 数据流）。
 				const boardTasks = await deps.loadBoardTasksForWorkspace(scope);
-				await reconcileGroup({ deploymentId: activeGroup.deploymentId, currentBoardTasks: boardTasks, nowIso });
+				await reconcileGroup({
+					deploymentId: activeGroup.deploymentId,
+					workspaceId: scope.workspaceId,
+					currentBoardTasks: boardTasks,
+					nowIso,
+				});
 			}
 			// getActiveGroup 已确保盘上为合法 JSON，可安全直读全量并按当前 workspaceId 过滤。
-			const snapshot = await readGuidedVerificationStateSnapshot();
+			const snapshot = await readPostDeployVerificationStateSnapshot();
 			const workspaceGroups = snapshot.deploymentGroups.filter((group) => group.workspaceId === scope.workspaceId);
 			const activeDeploymentId = activeGroup?.deploymentId ?? null;
 			const deploymentGroups = input.activeOnly
@@ -126,13 +136,58 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 		},
 
 		// ponytail: 不做逐 mutation 的 workspace 归属校验 —— deploymentId 是 uuid，客户端只能从 workspace 过滤后的
-		// getGuidedVerificationState 得知自己组的 id，本地单用户 dogfood 下跨 workspace 越权无实际意义。
+		// getPostDeployVerificationState 得知自己组的 id，本地单用户 dogfood 下跨 workspace 越权无实际意义。
 		updateVerificationChecklist: async (
 			_scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeUpdateVerificationChecklistRequest,
 		): Promise<RuntimeUpdateVerificationChecklistResponse> => {
-			// GuidedVerificationTaskMutationResult 与响应契约同形，直接返回（router output schema 兜底校验）。
+			// PostDeployVerificationTaskMutationResult 与响应契约同形，直接返回（router output schema 兜底校验）。
 			return await updateTaskChecklist(input, new Date().toISOString());
+		},
+
+		// 运行一个自动脚本型验证项（plan Stage 3）：置 running（并发护栏）→ spawn 脚本 await 完成 → 写结果。
+		// 选择「await 到完成」而非 WS 推送：本地 dogfood ≤timeout 可接受，断线由面板 30s 轮询兜底对账。
+		runPostDeployVerificationItem: async (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRunPostDeployVerificationItemRequest,
+		): Promise<RuntimeRunPostDeployVerificationItemResponse> => {
+			// workspace 归属校验（与 requestVerificationComplete/confirmVerificationComplete 同形）：run 会 spawn 执行
+			// agent 编写的脚本，风险远高于勾选 checkbox，跨 workspace 的 deploymentId 一律在置 running 前拒绝、不触发脚本。
+			const snapshot = await readPostDeployVerificationStateSnapshot();
+			const group = snapshot.deploymentGroups.find((entry) => entry.deploymentId === input.deploymentId);
+			if (!group || group.workspaceId !== scope.workspaceId) {
+				return { ok: false, task: null, error: `部署组未找到：deploymentId=${input.deploymentId}` };
+			}
+			const startedAtIso = new Date().toISOString();
+			// 置 running 并取回目标项的 script（并发护栏在此判定：已 running 则拒绝）。
+			const started = await setVerificationRunState(
+				{ deploymentId: input.deploymentId, taskId: input.taskId, itemId: input.itemId, startedAtIso },
+				startedAtIso,
+			);
+			if (!started.ok || started.task === null) {
+				return { ok: false, task: started.task, error: started.error ?? "无法开始运行验证脚本" };
+			}
+			const item = started.task.checklist.find((entry) => entry.id === input.itemId);
+			if (!item || item.script === null) {
+				return { ok: false, task: started.task, error: `验证项缺少脚本：${input.itemId}` };
+			}
+
+			const outcome = await runVerificationScript({
+				verificationId: item.id.startsWith("authored:") ? item.id.slice("authored:".length) : item.id,
+				script: item.script,
+				startedAtIso,
+				finishedAtIsoProvider: () => new Date().toISOString(),
+			});
+			const applied = await applyVerificationRunResult(
+				{
+					deploymentId: input.deploymentId,
+					taskId: input.taskId,
+					itemId: input.itemId,
+					run: toRunSnapshot(outcome),
+				},
+				new Date().toISOString(),
+			);
+			return { ok: applied.ok, task: applied.task, error: applied.error };
 		},
 
 		requestVerificationComplete: async (
@@ -146,7 +201,7 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 				return { needsConfirmation: false, error: `任务未在看板上：taskId=${input.taskId}（可能已删除）` };
 			}
 
-			const snapshot = await readGuidedVerificationStateSnapshot();
+			const snapshot = await readPostDeployVerificationStateSnapshot();
 			const group = snapshot.deploymentGroups.find((entry) => entry.deploymentId === input.deploymentId);
 			if (!group || group.workspaceId !== scope.workspaceId) {
 				return { needsConfirmation: false, error: `部署组未找到：deploymentId=${input.deploymentId}` };
@@ -202,7 +257,7 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 			const boardTasks = await deps.loadBoardTasksForWorkspace(scope);
 			const currentColumn = boardTasks.find((task) => task.taskId === input.taskId)?.columnId ?? null;
 
-			const snapshot = await readGuidedVerificationStateSnapshot();
+			const snapshot = await readPostDeployVerificationStateSnapshot();
 			const group = snapshot.deploymentGroups.find((entry) => entry.deploymentId === input.deploymentId);
 			if (!group || group.workspaceId !== scope.workspaceId) {
 				return { ok: false, task: null, error: `部署组未找到：deploymentId=${input.deploymentId}` };

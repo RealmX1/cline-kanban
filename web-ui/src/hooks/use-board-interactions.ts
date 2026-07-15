@@ -97,10 +97,10 @@ export interface UseBoardInteractionsResult {
 	isMoveToDoneConfirmOpen: boolean;
 	confirmMoveToDone: () => void;
 	cancelMoveToDone: () => void;
-	// Guided Verification 全勾入 Done 的移列入口：语义等价 performMoveToTrash（直接移入 trash/Done，
+	// Post-Deploy Verification 全勾入 Done 的移列入口：语义等价 performMoveToTrash（直接移入 trash/Done，
 	// 绕过 requestMoveToTrash 对 review/in_progress 的 SkipValidationConfirmDialog），但**可 await 且返回成败**，
 	// 供调用方在移列确实成功后才写 boardMovedToDoneAt。fromColumnId 取任务的当前实际列（getTaskColumnId），非快照。
-	completeGuidedVerificationMoveToDone: (taskId: string, fromColumnId: BoardColumnId) => Promise<{ ok: boolean }>;
+	completePostDeployVerificationMoveToDone: (taskId: string, fromColumnId: BoardColumnId) => Promise<{ ok: boolean }>;
 	handleMoveCardToValidation: (taskId: string) => void;
 	handleMoveSelectedCardToValidation: () => void;
 	// 手动「移至 Review」：仅 In Progress 卡可用，翻会话回合 + 由 Rule A 自动落位 Review。
@@ -836,12 +836,12 @@ export function useBoardInteractions({
 		[requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
 	);
 
-	// Guided Verification 全勾入 Done 的移列入口。与 performMoveToTrash 等价——直接走 requestMoveTaskToTrash
+	// Post-Deploy Verification 全勾入 Done 的移列入口。与 performMoveToTrash 等价——直接走 requestMoveTaskToTrash
 	// WithAnimation（保留 stopTaskSession + worktree 清理副作用），绕过 requestMoveToTrash 对 review/in_progress
-	// 的 SkipValidationConfirmDialog（Guided Verification 自有确认框）。关键区别：**awaitable 且返回成败**——
+	// 的 SkipValidationConfirmDialog（Post-Deploy Verification 自有确认框）。关键区别：**awaitable 且返回成败**——
 	// performMoveToTrash 吞掉 Promise（fire-and-forget），本导出 await 之，成功 resolve { ok:true }、抛错 { ok:false }，
 	// 让调用方在移列确实成功后才回写 boardMovedToDoneAt / 调 confirmVerificationComplete。
-	const completeGuidedVerificationMoveToDone = useCallback(
+	const completePostDeployVerificationMoveToDone = useCallback(
 		async (taskId: string, fromColumnId: BoardColumnId): Promise<{ ok: boolean }> => {
 			// 同任务移列已在途：不重复触发，报失败让调用方不写完成标记。
 			if (moveToTrashLoadingByIdRef.current[taskId]) {
@@ -1171,7 +1171,7 @@ export function useBoardInteractions({
 		isMoveToDoneConfirmOpen: pendingMoveToDone !== null,
 		confirmMoveToDone,
 		cancelMoveToDone,
-		completeGuidedVerificationMoveToDone,
+		completePostDeployVerificationMoveToDone,
 		handleMoveCardToValidation,
 		handleMoveSelectedCardToValidation,
 		handleMoveCardToReview,

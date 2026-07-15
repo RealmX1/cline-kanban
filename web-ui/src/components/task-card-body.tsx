@@ -37,6 +37,7 @@ import {
 	formatClineSelectedModelButtonText,
 	resolveClineModelDisplayName,
 } from "@/components/detail-panels/cline-model-picker-options";
+import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -472,6 +473,8 @@ export function TaskCardBody({
 			className="kb-board-card-shell"
 			// 钉住克隆不输出 data-task-id：保证全局 data-task-id 唯一（CSS sticky/scrollIntoView/测试计数依赖此唯一性）。
 			data-task-id={pinnedClone ? undefined : card.id}
+			// Post-Deploy Verification 引导定位锚点：guidance.anchor 可指向此看板任务卡（钉住克隆不输出，保唯一）。
+			data-verification-anchor={pinnedClone ? undefined : boardTaskCardAnchorKey(card.id)}
 			data-column-id={columnId}
 			data-selected={selected}
 			onMouseDownCapture={

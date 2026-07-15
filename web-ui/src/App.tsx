@@ -16,9 +16,9 @@ import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { GitHistoryView } from "@/components/git-history-view";
-import { GuidedVerificationController } from "@/components/guided-verification/guided-verification-controller";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
+import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
@@ -50,12 +50,12 @@ import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
 import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
-import { useGuidedVerification } from "@/hooks/use-guided-verification";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
 import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
+import { usePostDeployVerification } from "@/hooks/use-post-deploy-verification";
 import { useProjectNavigation } from "@/hooks/use-project-navigation";
 import { useProjectUiState } from "@/hooks/use-project-ui-state";
 import { useReviewReadyNotifications } from "@/hooks/use-review-ready-notifications";
@@ -345,7 +345,7 @@ export default function App(): ReactElement {
 	const handleOpenOverviewTask = useCallback(
 		(repoId: string, taskId: string) => {
 			// 刻意不关概览：detail 打开时 home layout 只是 visibility:hidden（非卸载），概览仍在其下；
-			// 从 detail 返回（handleBack 清 selectedTaskId）即重现概览——与 Guided Verification 面板点 task
+			// 从 detail 返回（handleBack 清 selectedTaskId）即重现概览——与 Post-Deploy Verification 面板点 task
 			// 后返回回到面板的行为一致（避免「从概览点进去、返回却落到普通 board」的困惑）。
 			if (repoId === currentProjectId) {
 				setSelectedTaskId(taskId);
@@ -782,7 +782,7 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
-		completeGuidedVerificationMoveToDone,
+		completePostDeployVerificationMoveToDone,
 		isMoveToDoneConfirmOpen,
 		confirmMoveToDone,
 		cancelMoveToDone,
@@ -844,23 +844,24 @@ export default function App(): ReactElement {
 		setSelectedTaskId,
 	});
 
-	// Guided Verification：App.tsx 持有唯一一份 useGuidedVerification 实例，同时供顶栏 badge 派生待核对数、
-	// 并作为 prop 下传给 GuidedVerificationController（controller 消费该结果，不再自持第二份实例）。
+	// Post-Deploy Verification：App.tsx 持有唯一一份 usePostDeployVerification 实例，同时供顶栏 badge 派生待核对数、
+	// 并作为 prop 下传给 PostDeployVerificationController（controller 消费该结果，不再自持第二份实例）。
 	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
-	const guidedVerification = useGuidedVerification(projectRuntimeWorkspaceId);
-	const { setCollapsed: setGuidedVerificationCollapsed } = guidedVerification;
-	const guidedVerificationActiveGroup = guidedVerification.activeGroup;
+	const postDeployVerification = usePostDeployVerification(projectRuntimeWorkspaceId);
+	const { setCollapsed: setPostDeployVerificationCollapsed } = postDeployVerification;
+	const postDeployVerificationActiveGroup = postDeployVerification.activeGroup;
 	// 待核对数 = active 组内未核对且未被 reconcile 移除的任务数；与面板 countPending 语义一致。
 	// 未加载或无 active 组时为 null → 顶栏不渲染 badge（项目切换时 hook 会重置 hasLoadedOnce，badge 自动隐藏）。
-	const guidedVerificationPendingCount =
-		guidedVerification.hasLoadedOnce && guidedVerificationActiveGroup
-			? guidedVerificationActiveGroup.tasks.filter((task) => task.verifiedAt === null && task.droppedReason === null)
-					.length
+	const postDeployVerificationPendingCount =
+		postDeployVerification.hasLoadedOnce && postDeployVerificationActiveGroup
+			? postDeployVerificationActiveGroup.tasks.filter(
+					(task) => task.verifiedAt === null && task.droppedReason === null,
+				).length
 			: null;
 	// 顶栏 badge 与 controller 面板共用同一实例，setCollapsed(false) 直接展开面板，无需强制 remount。
-	const handleOpenGuidedVerification = useCallback(() => {
-		setGuidedVerificationCollapsed(false);
-	}, [setGuidedVerificationCollapsed]);
+	const handleOpenPostDeployVerification = useCallback(() => {
+		setPostDeployVerificationCollapsed(false);
+	}, [setPostDeployVerificationCollapsed]);
 
 	useAppHotkeys({
 		selectedCard,
@@ -1149,8 +1150,8 @@ export default function App(): ReactElement {
 								onClearAll={notificationCenter.clearAll}
 							/>
 						}
-						guidedVerificationPendingCount={guidedVerificationPendingCount}
-						onOpenGuidedVerification={handleOpenGuidedVerification}
+						postDeployVerificationPendingCount={postDeployVerificationPendingCount}
+						onOpenPostDeployVerification={handleOpenPostDeployVerification}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 						<div
@@ -1569,11 +1570,12 @@ export default function App(): ReactElement {
 					activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
 				/>
 
-				<GuidedVerificationController
-					verification={guidedVerification}
+				<PostDeployVerificationController
+					verification={postDeployVerification}
 					board={board}
-					completeGuidedVerificationMoveToDone={completeGuidedVerificationMoveToDone}
+					completePostDeployVerificationMoveToDone={completePostDeployVerificationMoveToDone}
 					onSelectTask={setSelectedTaskId}
+					onNavigateToBoard={() => setSelectedTaskId(null)}
 				/>
 			</div>
 		</LayoutCustomizationsProvider>

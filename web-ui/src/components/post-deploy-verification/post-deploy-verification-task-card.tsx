@@ -1,21 +1,25 @@
-import * as RadixCheckbox from "@radix-ui/react-checkbox";
-import { Check, CheckCircle2, GitCommit, Plus, X } from "lucide-react";
+import { CheckCircle2, GitCommit, Plus } from "lucide-react";
 import { type ReactElement, useState } from "react";
 
+import { PostDeployVerificationChecklistItem } from "@/components/post-deploy-verification/post-deploy-verification-checklist-item";
 import {
 	boardColumnBadgeClassName,
 	formatBoardColumnLabel,
 	formatDeployTimestamp,
 	shortenCommitSha,
-} from "@/components/guided-verification/guided-verification-format";
+} from "@/components/post-deploy-verification/post-deploy-verification-format";
+import {
+	spotlightAnchor,
+	VERIFICATION_ANCHOR_ATTR,
+	verificationPanelTaskAnchorKey,
+} from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { Tooltip } from "@/components/ui/tooltip";
-import type { RuntimeGuidedVerificationTask } from "@/runtime/types";
+import type { RuntimePostDeployVerificationChecklistItem, RuntimePostDeployVerificationTask } from "@/runtime/types";
 import type { BoardColumnId } from "@/types";
 
-export interface GuidedVerificationTaskCardProps {
-	task: RuntimeGuidedVerificationTask;
+export interface PostDeployVerificationTaskCardProps {
+	task: RuntimePostDeployVerificationTask;
 	taskTitle: string;
 	// 当前实际所在列（getTaskColumnId）；null = 任务已不在看板（可能已删除）。
 	currentColumnId: BoardColumnId | null;
@@ -25,11 +29,17 @@ export interface GuidedVerificationTaskCardProps {
 	onToggleChecklistItem: (itemId: string, checked: boolean) => void;
 	onAddCustomChecklistItem: (label: string) => void;
 	onRemoveCustomChecklistItem: (itemId: string) => void;
+	onRunVerificationItem: (itemId: string) => void;
 	onRequestComplete: () => void;
 	onSelectTask: () => void;
+	// 「定位并核对」中 anchor.view==="board" 时导航回看板（App 提供 setSelectedTaskId(null)）。
+	onNavigateToBoard: () => void;
 }
 
-export function GuidedVerificationTaskCard({
+// spotlight 需在导航切换视图后目标元素挂载完成才生效；视图切换是异步渲染，故延后一帧再定位。
+const SPOTLIGHT_AFTER_NAVIGATION_DELAY_MS = 80;
+
+export function PostDeployVerificationTaskCard({
 	task,
 	taskTitle,
 	currentColumnId,
@@ -38,10 +48,25 @@ export function GuidedVerificationTaskCard({
 	onToggleChecklistItem,
 	onAddCustomChecklistItem,
 	onRemoveCustomChecklistItem,
+	onRunVerificationItem,
 	onRequestComplete,
 	onSelectTask,
-}: GuidedVerificationTaskCardProps): ReactElement {
+	onNavigateToBoard,
+}: PostDeployVerificationTaskCardProps): ReactElement {
 	const [customDraft, setCustomDraft] = useState("");
+
+	// 「定位并核对」：按 anchor.view 导航（task_detail=本任务详情 / board=看板），随后 spotlight 目标元素。
+	// 降级：无 anchor 时把面板内本任务卡滚入视野并高亮（至少让用户知道核对哪个任务）。
+	const handleLocate = (item: RuntimePostDeployVerificationChecklistItem): void => {
+		const anchor = item.guidance?.anchor ?? null;
+		if (anchor?.view === "task_detail") {
+			onSelectTask();
+		} else if (anchor?.view === "board") {
+			onNavigateToBoard();
+		}
+		const anchorKey = anchor?.anchorKey ?? verificationPanelTaskAnchorKey(task.taskId);
+		window.setTimeout(() => spotlightAnchor(anchorKey), SPOTLIGHT_AFTER_NAVIGATION_DELAY_MS);
+	};
 	const isVerified = task.verifiedAt !== null;
 	const isDropped = task.droppedReason !== null;
 	const allChecked = task.checklist.length > 0 && task.checklist.every((item) => item.checked);
@@ -60,7 +85,10 @@ export function GuidedVerificationTaskCard({
 	};
 
 	return (
-		<div className="rounded-md border border-border bg-surface-1 p-2">
+		<div
+			className="rounded-md border border-border bg-surface-1 p-2"
+			{...{ [VERIFICATION_ANCHOR_ATTR]: verificationPanelTaskAnchorKey(task.taskId) }}
+		>
 			<div className="flex items-start justify-between gap-2">
 				<button
 					type="button"
@@ -109,38 +137,20 @@ export function GuidedVerificationTaskCard({
 				</p>
 			) : null}
 
-			{/* checklist */}
+			{/* checklist：automated_script 项渲染运行按钮 + 状态徽标，其余渲染 checkbox（组件内分发） */}
 			<div className="mt-2 space-y-1">
 				{task.checklist.map((item) => (
-					<div key={item.id} className="group/item flex items-center gap-2">
-						<RadixCheckbox.Root
-							checked={item.checked}
-							disabled={!checklistInteractive || isCompleting}
-							onCheckedChange={(next) => onToggleChecklistItem(item.id, next === true)}
-							className="flex h-3.5 w-3.5 shrink-0 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:border-accent data-[state=checked]:bg-accent disabled:cursor-default disabled:opacity-50"
-						>
-							<RadixCheckbox.Indicator>
-								<Check size={11} className="text-white" />
-							</RadixCheckbox.Indicator>
-						</RadixCheckbox.Root>
-						<span
-							className={`flex-1 text-[12px] ${item.checked ? "text-text-tertiary line-through" : "text-text-secondary"}`}
-						>
-							{item.label}
-						</span>
-						{checklistInteractive && item.source === "custom" ? (
-							<Tooltip content="移除自定义核对项">
-								<button
-									type="button"
-									aria-label="移除自定义核对项"
-									onClick={() => onRemoveCustomChecklistItem(item.id)}
-									className="shrink-0 cursor-pointer text-text-tertiary opacity-0 transition-opacity hover:text-status-red group-hover/item:opacity-100"
-								>
-									<X size={12} />
-								</button>
-							</Tooltip>
-						) : null}
-					</div>
+					<PostDeployVerificationChecklistItem
+						key={item.id}
+						item={item}
+						interactive={checklistInteractive}
+						isCompleting={isCompleting}
+						taskVerified={isVerified}
+						onToggle={(checked) => onToggleChecklistItem(item.id, checked)}
+						onRun={() => onRunVerificationItem(item.id)}
+						onRemoveCustom={() => onRemoveCustomChecklistItem(item.id)}
+						onLocate={() => handleLocate(item)}
+					/>
 				))}
 				{task.checklist.length === 0 ? <p className="m-0 text-[12px] italic text-text-tertiary">无核对项</p> : null}
 			</div>

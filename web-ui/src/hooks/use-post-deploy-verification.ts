@@ -6,8 +6,8 @@ import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeConfirmVerificationCompleteRequest,
 	RuntimeConfirmVerificationCompleteResponse,
-	RuntimeGuidedVerificationDeploymentGroup,
-	RuntimeGuidedVerificationTask,
+	RuntimePostDeployVerificationDeploymentGroup,
+	RuntimePostDeployVerificationTask,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 } from "@/runtime/types";
@@ -15,13 +15,13 @@ import { LocalStorageKey } from "@/storage/local-storage-store";
 import { useBooleanLocalStorageValue, useInterval } from "@/utils/react-use";
 
 // MVP 无 WebSocket：30s 心跳轮询 + tab focus 时 immediate refresh（plan 数据流）。
-const GUIDED_VERIFICATION_POLL_INTERVAL_MS = 30_000;
+const POST_DEPLOY_VERIFICATION_POLL_INTERVAL_MS = 30_000;
 
-export interface UseGuidedVerificationResult {
+export interface UsePostDeployVerificationResult {
 	// active 组 = 该 workspace 中 activeDeploymentId 指向的组（foldedAtIso === null 的最新组）；无则 null。
-	activeGroup: RuntimeGuidedVerificationDeploymentGroup | null;
+	activeGroup: RuntimePostDeployVerificationDeploymentGroup | null;
 	// 折叠历史组，按 deploy 时间倒序（plan 面板三区之二）。
-	historyGroups: RuntimeGuidedVerificationDeploymentGroup[];
+	historyGroups: RuntimePostDeployVerificationDeploymentGroup[];
 	activeDeploymentId: string | null;
 	loadError: string | null;
 	// 首次成功加载前为 false——用于避免面板在数据到达前闪现空态。
@@ -36,6 +36,8 @@ export interface UseGuidedVerificationResult {
 	toggleChecklistItem: (deploymentId: string, taskId: string, itemId: string, checked: boolean) => Promise<void>;
 	addCustomChecklistItem: (deploymentId: string, taskId: string, label: string) => Promise<void>;
 	removeCustomChecklistItem: (deploymentId: string, taskId: string, itemId: string) => Promise<void>;
+	// 运行一个自动脚本型验证项：乐观置 running，mutation 阻塞到脚本完成后以返回的 task 替换（含 run 结果 + 自动勾选）。
+	runVerificationItem: (deploymentId: string, taskId: string, itemId: string) => Promise<void>;
 	// 完成流的两个 tRPC 步骤：orchestration（弹窗 + 移列时序）在 controller，本 hook 只暴露原子调用。
 	requestComplete: (
 		input: RuntimeRequestVerificationCompleteRequest,
@@ -48,10 +50,10 @@ export interface UseGuidedVerificationResult {
 // ---- 纯函数：本地乐观更新 deploymentGroups（不改后端，供勾选/替换任务用） ----
 
 function replaceTaskInGroups(
-	groups: RuntimeGuidedVerificationDeploymentGroup[],
+	groups: RuntimePostDeployVerificationDeploymentGroup[],
 	deploymentId: string,
-	nextTask: RuntimeGuidedVerificationTask,
-): RuntimeGuidedVerificationDeploymentGroup[] {
+	nextTask: RuntimePostDeployVerificationTask,
+): RuntimePostDeployVerificationDeploymentGroup[] {
 	return groups.map((group) => {
 		if (group.deploymentId !== deploymentId) {
 			return group;
@@ -64,12 +66,12 @@ function replaceTaskInGroups(
 }
 
 function patchChecklistCheckedInGroups(
-	groups: RuntimeGuidedVerificationDeploymentGroup[],
+	groups: RuntimePostDeployVerificationDeploymentGroup[],
 	deploymentId: string,
 	taskId: string,
 	itemId: string,
 	checked: boolean,
-): RuntimeGuidedVerificationDeploymentGroup[] {
+): RuntimePostDeployVerificationDeploymentGroup[] {
 	return groups.map((group) => {
 		if (group.deploymentId !== deploymentId) {
 			return group;
@@ -89,21 +91,63 @@ function patchChecklistCheckedInGroups(
 	});
 }
 
+// 乐观把某自动脚本项置 running（脚本运行期间按钮转圈）；mutation 返回后由 replaceTaskInGroups 覆盖真实结果。
+function patchItemRunningInGroups(
+	groups: RuntimePostDeployVerificationDeploymentGroup[],
+	deploymentId: string,
+	taskId: string,
+	itemId: string,
+): RuntimePostDeployVerificationDeploymentGroup[] {
+	return groups.map((group) => {
+		if (group.deploymentId !== deploymentId) {
+			return group;
+		}
+		return {
+			...group,
+			tasks: group.tasks.map((task) => {
+				if (task.taskId !== taskId) {
+					return task;
+				}
+				return {
+					...task,
+					checklist: task.checklist.map((item) =>
+						item.id === itemId
+							? {
+									...item,
+									run: {
+										status: "running" as const,
+										exitCode: null,
+										startedAtIso: item.run?.startedAtIso ?? null,
+										finishedAtIso: null,
+										outputExcerpt: item.run?.outputExcerpt ?? "",
+									},
+								}
+							: item,
+					),
+				};
+			}),
+		};
+	});
+}
+
 function resolveErrorMessage(error: unknown, fallback: string): string {
 	return error instanceof Error && error.message ? error.message : fallback;
 }
 
-export function useGuidedVerification(workspaceId: string | null): UseGuidedVerificationResult {
+export function usePostDeployVerification(workspaceId: string | null): UsePostDeployVerificationResult {
 	const isDocumentVisible = useDocumentVisibility();
-	const [deploymentGroups, setDeploymentGroups] = useState<RuntimeGuidedVerificationDeploymentGroup[]>([]);
+	const [deploymentGroups, setDeploymentGroups] = useState<RuntimePostDeployVerificationDeploymentGroup[]>([]);
 	const [activeDeploymentId, setActiveDeploymentId] = useState<string | null>(null);
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 	const [stayInFront, setStayInFront] = useBooleanLocalStorageValue(
-		LocalStorageKey.GuidedVerificationStayInFront,
+		LocalStorageKey.PostDeployVerificationStayInFront,
 		true,
 	);
-	const [collapsed, setCollapsed] = useBooleanLocalStorageValue(LocalStorageKey.GuidedVerificationCollapsed, false);
+	const [collapsed, setCollapsed] = useBooleanLocalStorageValue(
+		LocalStorageKey.PostDeployVerificationCollapsed,
+		false,
+	);
 
 	const isMountedRef = useRef(true);
 	// 守护过期响应：workspace 切换后旧请求返回不得覆盖新 workspace 数据。
@@ -130,7 +174,7 @@ export function useGuidedVerification(workspaceId: string | null): UseGuidedVeri
 		void (async () => {
 			try {
 				const client = getRuntimeTrpcClient(requestWorkspaceId);
-				const response = await client.deployment.getGuidedVerificationState.query({});
+				const response = await client.deployment.getPostDeployVerificationState.query({});
 				if (!isMountedRef.current || requestWorkspaceIdRef.current !== requestWorkspaceId) {
 					return;
 				}
@@ -146,14 +190,14 @@ export function useGuidedVerification(workspaceId: string | null): UseGuidedVeri
 					response.activeDeploymentId !== null &&
 					response.activeDeploymentId !== previousActiveDeploymentId
 				) {
-					showAppToast({ intent: "primary", message: "检测到新部署 · 请核对 Guided Verification" });
+					showAppToast({ intent: "primary", message: "检测到新部署 · 请核对 Post-Deploy Verification" });
 					setCollapsed(false);
 				}
 			} catch (error) {
 				if (!isMountedRef.current || requestWorkspaceIdRef.current !== requestWorkspaceId) {
 					return;
 				}
-				setLoadError(resolveErrorMessage(error, "加载 Guided Verification 状态失败"));
+				setLoadError(resolveErrorMessage(error, "加载 Post-Deploy Verification 状态失败"));
 			}
 		})();
 	}, [workspaceId, setCollapsed]);
@@ -177,7 +221,7 @@ export function useGuidedVerification(workspaceId: string | null): UseGuidedVeri
 			}
 			refresh();
 		},
-		workspaceId && isDocumentVisible ? GUIDED_VERIFICATION_POLL_INTERVAL_MS : null,
+		workspaceId && isDocumentVisible ? POST_DEPLOY_VERIFICATION_POLL_INTERVAL_MS : null,
 	);
 
 	// tab 由隐藏转可见的边沿：立即刷新一次（focus immediate，见 plan 数据流）。
@@ -311,6 +355,44 @@ export function useGuidedVerification(workspaceId: string | null): UseGuidedVeri
 		[workspaceId],
 	);
 
+	const runVerificationItem = useCallback(
+		async (deploymentId: string, taskId: string, itemId: string): Promise<void> => {
+			if (!workspaceId) {
+				return;
+			}
+			// 乐观置 running（按钮转圈）；mutation 阻塞到脚本完成。
+			setDeploymentGroups((groups) => patchItemRunningInGroups(groups, deploymentId, taskId, itemId));
+			try {
+				const response = await getRuntimeTrpcClient(workspaceId).deployment.runPostDeployVerificationItem.mutate({
+					deploymentId,
+					taskId,
+					itemId,
+				});
+				if (!isMountedRef.current) {
+					return;
+				}
+				if (!response.ok) {
+					showAppToast({ intent: "danger", message: response.error ?? "运行验证脚本失败" });
+				}
+				const nextTask = response.task;
+				if (nextTask) {
+					setDeploymentGroups((groups) => replaceTaskInGroups(groups, deploymentId, nextTask));
+				} else {
+					// server 未返回 task（异常）：重新拉取真实状态对账。
+					refresh();
+				}
+			} catch (error) {
+				if (!isMountedRef.current) {
+					return;
+				}
+				showAppToast({ intent: "danger", message: resolveErrorMessage(error, "运行验证脚本失败") });
+				// 断线/超时：脚本可能已在 server 端写结果，刷新对账真实 run 状态。
+				refresh();
+			}
+		},
+		[workspaceId, refresh],
+	);
+
 	const requestComplete = useCallback(
 		async (
 			input: RuntimeRequestVerificationCompleteRequest,
@@ -359,6 +441,7 @@ export function useGuidedVerification(workspaceId: string | null): UseGuidedVeri
 		toggleChecklistItem,
 		addCustomChecklistItem,
 		removeCustomChecklistItem,
+		runVerificationItem,
 		requestComplete,
 		confirmComplete,
 	};
