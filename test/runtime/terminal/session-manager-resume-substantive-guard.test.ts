@@ -92,7 +92,7 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		}
 	}
 
-	it("keeps lastSubstantiveOutputAt across refresh when Claude resume UI appears", async () => {
+	it("keeps lastSubstantiveOutputAt across refresh when Claude reprints ⏺/● transcript and auto-continues", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
@@ -138,8 +138,13 @@ describe("TerminalSessionManager resume substantive guard", () => {
 
 		const secondSession = spawnedSessions[1];
 		expect(secondSession).toBeDefined();
+		// Claude --continue 重播整段旧 transcript（本身带 ⏺/● 前缀）+ 渲染 cache-past-due 三选一菜单。
 		secondSession?.triggerData("Claude Code\nHow can I help you today?\n");
+		secondSession?.triggerData("⏺ Earlier real agent response before refresh.\n");
 		secondSession?.triggerData(CLAUDE_RESUME_MENU);
+		// 自动续跑旧回合触发 PostToolUse → to_in_progress（非 UserPromptSubmit）：翻 running 但不应解除 guard。
+		manager.transitionToRunning("task-guard");
+		secondSession?.triggerData("⏺ More reprinted transcript output.\n");
 
 		const afterResumeUi = manager.getSummary("task-guard");
 		expect(afterResumeUi?.lastSubstantiveOutputAt).toBe(substantiveBefore);
@@ -178,7 +183,8 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		});
 
 		spawnedSessions[1]?.triggerData(CLAUDE_RESUME_MENU);
-		manager.transitionToRunning("task-guard-2");
+		// 用户选了菜单项 → UserPromptSubmit → to_in_progress（userInitiatedResume）→ 解除 guard。
+		manager.transitionToRunning("task-guard-2", { userInitiatedResume: true });
 		spawnedSessions[1]?.triggerData("⏺ Resuming from summary.\n");
 
 		const afterContinue = manager.getSummary("task-guard-2");
@@ -208,14 +214,14 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		spawnedSessions[0]?.triggerData(CLAUDE_RESUME_MENU);
 		const beforeHook = manager.getSummary("task-guard-3")?.lastSubstantiveOutputAt;
 
-		manager.transitionToRunning("task-guard-3");
+		manager.transitionToRunning("task-guard-3", { userInitiatedResume: true });
 		spawnedSessions[0]?.triggerData("⏺ Continued after hook.\n");
 
 		const afterHook = manager.getSummary("task-guard-3");
 		expect(afterHook?.lastSubstantiveOutputAt).not.toBe(beforeHook);
 	});
 
-	it("does not enable resume guard for non-Claude agents on resumeFromTrash", async () => {
+	it("arms resume guard for non-Claude agents too and clears it on user terminal input", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(111, request);
@@ -240,8 +246,43 @@ describe("TerminalSessionManager resume substantive guard", () => {
 			resumeFromTrash: true,
 		});
 
+		// 翻 running 但非 UserPromptSubmit → guard 保持武装；codex 重播旧输出不应推进时间戳。
 		manager.transitionToRunning("task-codex-resume");
 		spawnedSessions[0]?.triggerData("Applying the requested change to foo.ts\n");
+		expect(manager.getSummary("task-codex-resume")?.lastSubstantiveOutputAt).toBeNull();
+
+		// 用户手敲输入（writeInput）= agent 无关的真·继续信号 → 解除 guard；此后新输出才推进。
+		manager.writeInput("task-codex-resume", Buffer.from("continue\r", "utf8"));
+		spawnedSessions[0]?.triggerData("Edited foo.ts and reran the tests.\n");
 		expect(manager.getSummary("task-codex-resume")?.lastSubstantiveOutputAt).not.toBeNull();
+	});
+
+	it("does not clear resume guard on PostToolUse-driven to_in_progress (no UserPromptSubmit)", async () => {
+		const spawnedSessions: MockPtySession[] = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(111, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-guard-posttool",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-guard-posttool",
+			prompt: "",
+			resumeFromTrash: true,
+		});
+
+		spawnedSessions[0]?.triggerData("⏺ Old transcript reprinted on resume.\n");
+		const beforeAutoContinue = manager.getSummary("task-guard-posttool")?.lastSubstantiveOutputAt ?? null;
+
+		// PostToolUse → to_in_progress：翻 running，但 userInitiatedResume 缺省(false) → 不解除 guard。
+		manager.transitionToRunning("task-guard-posttool");
+		spawnedSessions[0]?.triggerData("⏺ Auto-continued tool output from the old turn.\n");
+
+		expect(manager.getSummary("task-guard-posttool")?.lastSubstantiveOutputAt).toBe(beforeAutoContinue);
 	});
 });

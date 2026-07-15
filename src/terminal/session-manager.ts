@@ -168,9 +168,12 @@ interface ActiveProcessState {
 	// 只有带来「最近未见过的新词内容」的 chunk 才推进 summary.lastSubstantiveOutputAt
 	// （Validation 列自动打回判据 isAgentActivelyProducingOutput 读它）。见 agent-output-substance.ts。
 	agentOutputSubstanceMemory: AgentOutputSubstanceMemory;
-	// resumeFromTrash / refresh 后 Claude --continue 恢复 UI（cache past due 三选一、启动横幅）
-	// 不是「agent 上次响应」——此 guard 为 true 时 handleTaskOutput 不推进 lastSubstantiveOutputAt。
-	// 仅 Claude + resumeFromTrash；清除条件：hook.to_in_progress 或真 assistant 产出（⏺/●）。仅内存态。
+	// resumeFromTrash / refresh 后 agent 恢复 UI（Claude --continue 的 cache past due 三选一、
+	// 启动横幅、整段旧 transcript 重播）不是「agent 上次响应」——此 guard 为 true 时 handleTaskOutput
+	// 不推进 lastSubstantiveOutputAt。全部 TUI agent + resumeFromTrash 武装。
+	// 清除条件仅认「用户真·继续」：writeInput（人工手敲 / task-chat 提交，全 agent）或源自
+	// UserPromptSubmit 的 hook.to_in_progress（Claude）。刻意不认重播里的 ⏺/● 前缀、也不认
+	// PostToolUse 映射的 to_in_progress（自动续跑旧回合的中途活动），二者都会被旧 transcript 误触发。仅内存态。
 	suppressSubstantiveOutputUntilContinues: boolean;
 	// 程序化「已提交用户轮」投递（RVF followup 等）的待决就绪轮询定时器：同一时刻至多一个，
 	// last-write-wins；命中就绪/deadline 写入后或 session 退出时清除。null 表示当前无待决投递。
@@ -403,13 +406,6 @@ function clearSubmitConfirmTimer(state: { submitConfirmTimer: NodeJS.Timeout | n
 		clearTimeout(state.submitConfirmTimer);
 		state.submitConfirmTimer = null;
 	}
-}
-
-// Claude assistant / 工具行前缀；resume guard 见到即视为用户已继续、agent 开始真产出。
-const RESUME_GUARD_AGENT_CONTINUATION_MARKERS = ["⏺", "●"] as const;
-
-function chunkIndicatesAgentContinuationAfterResume(chunk: string): boolean {
-	return RESUME_GUARD_AGENT_CONTINUATION_MARKERS.some((marker) => chunk.includes(marker));
 }
 
 function clearResumeSubstantiveGuard(active: ActiveProcessState): void {
@@ -1334,12 +1330,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const inAgentTurn =
 				entry.summary.agentId !== null && resolveSessionFacets(entry.summary).turnOwner === "agent";
 			const decodedChunk = data.length > 0 ? data : filteredChunk.toString("utf8");
-			if (
-				entry.active.suppressSubstantiveOutputUntilContinues &&
-				chunkIndicatesAgentContinuationAfterResume(decodedChunk)
-			) {
-				clearResumeSubstantiveGuard(entry.active);
-			}
 			let hasFreshSubstantiveOutput =
 				inAgentTurn && detectFreshSubstantiveAgentOutput(entry.active.agentOutputSubstanceMemory, decodedChunk);
 			if (entry.active.suppressSubstantiveOutputUntilContinues) {
@@ -1548,7 +1538,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionAttemptTimer: null,
 			lastUserInputAt: null,
 			agentOutputSubstanceMemory: createAgentOutputSubstanceMemory(),
-			suppressSubstantiveOutputUntilContinues: request.resumeFromTrash === true && request.agentId === "claude",
+			// 全部 TUI agent 恢复时都武装：startTaskSession 是终端 agent 专用路径，resumeFromTrash===true
+			// 已隐含 TUI agent。非 Claude 的解除依赖 writeInput（人工手敲）；见字段注释的取舍说明。
+			suppressSubstantiveOutputUntilContinues: request.resumeFromTrash === true,
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
@@ -1835,6 +1827,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		// 记录用户手动输入时刻，用于抑制自动续跑注入打断正在打字的用户。
 		entry.active.lastUserInputAt = now();
+		// 人工手敲（含在 Claude resume 三选一菜单里选 1/2/3、或提交新消息）是「用户真·继续」的
+		// agent 无关信号：解除 resume substantive guard，此后 agent 的新产出才推进 lastSubstantiveOutputAt。
+		clearResumeSubstantiveGuard(entry.active);
 		// 旧门控 `state==="awaiting_review"` → facet 真相源 isAwaitingUserReviewTurn（涵盖 live↔exited
 		// 折叠、零行为漂移）。reviewReason∈{hook,attention,error} 读保留——deriveUserTurnKind 非 1:1
 		// （attention→needs_input 而 needs_input 亦覆盖 null），换 userTurnKind 会改行为，留 channel-C 批次。
@@ -2002,14 +1997,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
-	transitionToRunning(taskId: string): RuntimeTaskSessionSummary | null {
+	transitionToRunning(taskId: string, options?: { userInitiatedResume?: boolean }): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return null;
 		}
 		const before = entry.summary;
 		const summary = this.applySessionEvent(entry, { type: "hook.to_in_progress" });
-		if (entry.active) {
+		// 状态机翻 running 无条件；但 resume substantive guard 只在「用户真·继续」时解除——
+		// 仅源自 UserPromptSubmit 的 to_in_progress 才算，PostToolUse 等自动续跑旧回合的中途活动不算，
+		// 否则 Claude --continue 自动续跑一次工具调用就会误解除 guard、让重播刷 lastSubstantiveOutputAt。
+		if (entry.active && options?.userInitiatedResume === true) {
 			clearResumeSubstantiveGuard(entry.active);
 		}
 		if (summary !== before && entry.active) {

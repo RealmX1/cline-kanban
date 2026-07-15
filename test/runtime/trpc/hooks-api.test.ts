@@ -432,6 +432,89 @@ describe("createHooksApi", () => {
 		expect(manager.unparkTaskSession).not.toHaveBeenCalled();
 	});
 
+	it("to_in_progress + Gemini BeforeAgent：userInitiatedResume=true（Gemini 的用户提交等价信号，解除 resume guard）", async () => {
+		const manager = {
+			getSummary: vi.fn(() =>
+				createSummary({ agentId: "gemini", state: "awaiting_review", reviewReason: "attention" }),
+			),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(() => createSummary({ agentId: "gemini", state: "running" })),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "gemini", hookEventName: "BeforeAgent" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: true });
+	});
+
+	it("to_in_progress + UserPromptSubmit：userInitiatedResume=true（Claude/Codex/Droid 用户提交）", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "awaiting_review", reviewReason: "attention" })),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: true });
+	});
+
+	it("to_in_progress + PostToolUse：userInitiatedResume=false（自动续跑中途活动，不解除 guard）", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "awaiting_review", reviewReason: "attention" })),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
+			applyHookActivity: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "Read" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: false });
+	});
+
 	it("captures a turn checkpoint when transitioning to review", async () => {
 		const transitionedSummary = createSummary({
 			state: "awaiting_review",
