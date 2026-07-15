@@ -4,7 +4,6 @@ import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeProjectTaskCounts } from "../../../src/core/api-contract";
-import type { TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { type CreateProjectsApiDependencies, createProjectsApi } from "../../../src/trpc/projects-api";
 
 function createTestCwd(): string {
@@ -37,15 +36,16 @@ function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 			path: "/test",
 			name: "test",
 			taskCounts: { backlog: 0, in_progress: 0, review: 0, validation: 0, trash: 0 },
+			availability: { status: "available" as const },
 			inProgressTaskDetails: [],
 		})),
 		broadcastRuntimeProjectsUpdated: vi.fn(),
-		getTerminalManagerForWorkspace: vi.fn(() => null),
-		disposeWorkspace: vi.fn(() => ({
-			terminalManager: null as TerminalSessionManager | null,
-			workspacePath: null as string | null,
+		listProjectRuntimeSessionSummaries: vi.fn(() => []),
+		stopAndCollectProjectRuntimeSessionsForSafePersistence: vi.fn(async () => ({
+			stoppedRuntimeSessionSummaries: [],
+			runtimeSessionSummariesForSafePersistence: [],
 		})),
-		collectProjectWorktreeTaskIdsForRemoval: vi.fn(() => []),
+		disposeProjectRuntime: vi.fn(async () => {}),
 		warn: vi.fn(),
 		buildProjectsPayload: vi.fn(async () => ({ currentProjectId: null, projects: [] })),
 		pickDirectoryPathFromSystemDialog: vi.fn(() => null),

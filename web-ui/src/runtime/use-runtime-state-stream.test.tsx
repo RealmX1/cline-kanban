@@ -138,6 +138,29 @@ describe("useRuntimeStateStream", () => {
 		expect(reloadBrowserIfServedBuildAssetsChangedMock).toHaveBeenCalledTimes(1);
 	});
 
+	it("rechecks project availability by replacing the current runtime stream connection", async () => {
+		const captured: { current: UseRuntimeStateStreamResult | null } = { current: null };
+		await act(async () => {
+			root.render(
+				<RuntimeStateStreamHarness
+					onSnapshot={(snapshot) => {
+						captured.current = snapshot;
+					}}
+				/>,
+			);
+		});
+		const initialSocket = MockRuntimeStateWebSocket.instances[0];
+		if (!initialSocket || !captured.current) {
+			throw new Error("Expected the initial runtime stream state.");
+		}
+		act(() => initialSocket.triggerOpen());
+
+		act(() => captured.current?.recheckProjectAvailability());
+
+		expect(initialSocket.readyState).toBe(MockRuntimeStateWebSocket.CLOSED);
+		expect(MockRuntimeStateWebSocket.instances).toHaveLength(2);
+	});
+
 	it("快照按 workspaceId 分桶通知 feed，notification_log_updated 按桶替换且不碰其它 repo", async () => {
 		const captured: { current: UseRuntimeStateStreamResult | null } = { current: null };
 		await act(async () => {

@@ -1,5 +1,15 @@
 import type { DropResult } from "@hello-pangea/dnd";
-import { Files, FileText, GitCompareArrows, List, Maximize2, MessageSquare, Minimize2, X } from "lucide-react";
+import {
+	AlertTriangle,
+	Files,
+	FileText,
+	GitCompareArrows,
+	List,
+	Maximize2,
+	MessageSquare,
+	Minimize2,
+	X,
+} from "lucide-react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
@@ -261,16 +271,64 @@ function WorkspaceChangesEmptyPanel({ title }: { title: string }): React.ReactEl
 	);
 }
 
-function WorkspaceChangesErrorPanel({ error, onRetry }: { error: Error; onRetry: () => void }): React.ReactElement {
+function WorkspaceChangesErrorPanel({
+	error,
+	onRetry,
+	isRequestInFlight,
+}: {
+	error: Error;
+	onRetry: () => void;
+	isRequestInFlight: boolean;
+}): React.ReactElement {
 	return (
 		<div className="flex min-h-0 min-w-0 flex-1 items-center justify-center bg-surface-0 p-6">
 			<div className="max-w-md text-center">
 				<h3 className="font-semibold text-status-red">Could not load changes</h3>
 				<p className="mt-2 text-xs text-text-secondary">{error.message}</p>
-				<Button variant="default" size="sm" className="mt-3" onClick={onRetry}>
-					Retry
+				<Button variant="default" size="sm" className="mt-3" disabled={isRequestInFlight} onClick={onRetry}>
+					{isRequestInFlight ? "Retrying..." : "Retry"}
 				</Button>
 			</div>
+		</div>
+	);
+}
+
+function WorkspaceChangesUnavailablePanel(): React.ReactElement {
+	return (
+		<div className="flex min-h-0 min-w-0 flex-1 items-center justify-center bg-surface-0 p-6">
+			<div className="max-w-md text-center text-text-tertiary">
+				<GitCompareArrows size={40} className="mx-auto" />
+				<h3 className="mt-3 font-semibold text-text-secondary">Workspace changes unavailable</h3>
+				<p className="mt-2 text-xs text-text-tertiary">
+					Select an available workspace before loading its change history.
+				</p>
+			</div>
+		</div>
+	);
+}
+
+function WorkspaceChangesStaleDataWarning({
+	error,
+	onRetry,
+	isRequestInFlight,
+}: {
+	error: Error;
+	onRetry: () => void;
+	isRequestInFlight: boolean;
+}): React.ReactElement {
+	return (
+		<div
+			role="status"
+			className="flex shrink-0 items-center gap-2 border-b border-status-orange/40 bg-status-orange/10 px-2.5 py-1.5 text-xs"
+		>
+			<AlertTriangle size={14} className="shrink-0 text-status-orange" />
+			<div className="min-w-0 flex-1">
+				<span className="font-medium text-status-orange">Changes may be out of date.</span>{" "}
+				<span className="text-text-secondary">{error.message}</span>
+			</div>
+			<Button variant="ghost" size="sm" className="h-6 shrink-0" disabled={isRequestInFlight} onClick={onRetry}>
+				{isRequestInFlight ? "Retrying..." : "Retry"}
+			</Button>
 		</div>
 	);
 }
@@ -450,7 +508,7 @@ export function CardDetailView({
 	onTaskDragEnd,
 	onCreateTask,
 	onStartTask,
-	onStartAllTasks,
+	onRequestStartAllReadyBacklogTasks,
 	onClearTrash,
 	onEditTask,
 	onSaveTaskTitle,
@@ -515,7 +573,7 @@ export function CardDetailView({
 	onTaskDragEnd: (result: DropResult) => void;
 	onCreateTask?: () => void;
 	onStartTask?: (taskId: string) => void;
-	onStartAllTasks?: () => void;
+	onRequestStartAllReadyBacklogTasks?: () => void;
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCard) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
@@ -668,7 +726,8 @@ export function CardDetailView({
 	const {
 		changes: workspaceChanges,
 		error: workspaceChangesError,
-		isRuntimeAvailable,
+		queryPhase: workspaceChangesQueryPhase,
+		isRequestInFlight: isWorkspaceChangesRequestInFlight,
 		refresh: refreshWorkspaceChanges,
 	} = useRuntimeWorkspaceChanges(
 		isTaskChangesSidebarOpen ? selection.card.id : null,
@@ -684,9 +743,11 @@ export function CardDetailView({
 		true,
 	);
 	const runtimeFiles = workspaceChanges?.files ?? null;
-	const isWorkspaceChangesPending = isRuntimeAvailable && workspaceChanges === null;
-	const hasNoWorkspaceFileChanges =
-		isRuntimeAvailable && workspaceChanges !== null && runtimeFiles !== null && runtimeFiles.length === 0;
+	const isWorkspaceChangesMissingScope = workspaceChangesQueryPhase === "missing_workspace_scope";
+	const isWorkspaceChangesInitialLoading = workspaceChangesQueryPhase === "initial_loading";
+	const isWorkspaceChangesInitialError = workspaceChangesQueryPhase === "initial_error";
+	const isWorkspaceChangesStaleAfterRefreshError = workspaceChangesQueryPhase === "stale_after_refresh_error";
+	const hasNoWorkspaceFileChanges = workspaceChanges !== null && runtimeFiles !== null && runtimeFiles.length === 0;
 	const emptyDiffTitle = diffMode === "last_turn" ? "No changes since last turn" : "No working changes";
 	const taskCardsPanelPercent = `${(taskCardsPanelRatio * 100).toFixed(1)}%`;
 	const detailContentPanelPercent = `${((1 - taskCardsPanelRatio) * 100).toFixed(1)}%`;
@@ -1050,28 +1111,36 @@ export function CardDetailView({
 								className="min-h-0 min-w-0 flex-1 flex-col"
 								style={{ display: mobileTab === "diff" ? "flex" : "none" }}
 							>
-								{isRuntimeAvailable ? (
-									<DiffToolbar
-										mode={diffMode}
-										onModeChange={setDiffMode}
-										isExpanded={false}
-										onToggleExpand={handleToggleDiffExpand}
-										hideExpand
+								<DiffToolbar
+									mode={diffMode}
+									onModeChange={setDiffMode}
+									isExpanded={false}
+									onToggleExpand={handleToggleDiffExpand}
+									hideExpand
+								/>
+								{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
+									<WorkspaceChangesStaleDataWarning
+										error={workspaceChangesError}
+										onRetry={() => void refreshWorkspaceChanges()}
+										isRequestInFlight={isWorkspaceChangesRequestInFlight}
 									/>
 								) : null}
 								<div className="flex min-h-0 flex-1">
-									{workspaceChangesError ? (
+									{isWorkspaceChangesMissingScope ? (
+										<WorkspaceChangesUnavailablePanel />
+									) : isWorkspaceChangesInitialError && workspaceChangesError ? (
 										<WorkspaceChangesErrorPanel
 											error={workspaceChangesError}
 											onRetry={() => void refreshWorkspaceChanges()}
+											isRequestInFlight={isWorkspaceChangesRequestInFlight}
 										/>
-									) : isWorkspaceChangesPending ? (
+									) : isWorkspaceChangesInitialLoading ? (
 										<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
 									) : hasNoWorkspaceFileChanges ? (
 										<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
-									) : (
+									) : workspaceChanges !== null ? (
 										<DiffViewerPanel
-											workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
+											workspaceFiles={runtimeFiles}
 											selectedPath={selectedPath}
 											selectedPathExpandToken={selectedPathExpandToken}
 											onSelectedPathChange={setSelectedPath}
@@ -1087,6 +1156,8 @@ export function CardDetailView({
 											comments={diffComments}
 											onCommentsChange={setDiffComments}
 										/>
+									) : (
+										<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
 									)}
 								</div>
 							</div>
@@ -1097,15 +1168,38 @@ export function CardDetailView({
 								className="min-h-0 min-w-0 flex-1 flex-col"
 								style={{ display: mobileTab === "files" ? "flex" : "none" }}
 							>
-								<FileTreePanel
-									workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
-									selectedPath={selectedPath}
-									onSelectPath={(path: string) => {
-										handleExplicitSelectPath(path);
-										setMobileTab("diff");
-									}}
-									panelFlex="1 1 0"
-								/>
+								{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
+									<WorkspaceChangesStaleDataWarning
+										error={workspaceChangesError}
+										onRetry={() => void refreshWorkspaceChanges()}
+										isRequestInFlight={isWorkspaceChangesRequestInFlight}
+									/>
+								) : null}
+								<div className="flex min-h-0 flex-1">
+									{isWorkspaceChangesMissingScope ? (
+										<WorkspaceChangesUnavailablePanel />
+									) : isWorkspaceChangesInitialError && workspaceChangesError ? (
+										<WorkspaceChangesErrorPanel
+											error={workspaceChangesError}
+											onRetry={() => void refreshWorkspaceChanges()}
+											isRequestInFlight={isWorkspaceChangesRequestInFlight}
+										/>
+									) : isWorkspaceChangesInitialLoading ? (
+										<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
+									) : workspaceChanges !== null ? (
+										<FileTreePanel
+											workspaceFiles={runtimeFiles}
+											selectedPath={selectedPath}
+											onSelectPath={(path: string) => {
+												handleExplicitSelectPath(path);
+												setMobileTab("diff");
+											}}
+											panelFlex="1 1 0"
+										/>
+									) : (
+										<WorkspaceChangesLoadingPanel panelFlex="1 1 0" />
+									)}
+								</div>
 							</div>
 						) : null}
 					</div>
@@ -1154,7 +1248,7 @@ export function CardDetailView({
 							onTaskDragEnd={onTaskDragEnd}
 							onCreateTask={onCreateTask}
 							onStartTask={onStartTask}
-							onStartAllTasks={onStartAllTasks}
+							onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
 							onClearTrash={onClearTrash}
 							onEditTask={onEditTask}
 							onSaveTaskTitle={onSaveTaskTitle}
@@ -1208,32 +1302,40 @@ export function CardDetailView({
 							<div ref={rightColumnRef} className="flex min-h-0 min-w-0 flex-col" style={diffPanelStyle}>
 								{isTaskChangesSidebarOpen ? (
 									<div className="flex min-h-0 flex-1 flex-col">
-										{isRuntimeAvailable ? (
-											<DiffToolbar
-												mode={diffMode}
-												onModeChange={setDiffMode}
-												isExpanded={isDiffExpanded}
-												onToggleExpand={handleToggleDiffExpand}
+										<DiffToolbar
+											mode={diffMode}
+											onModeChange={setDiffMode}
+											isExpanded={isDiffExpanded}
+											onToggleExpand={handleToggleDiffExpand}
+										/>
+										{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
+											<WorkspaceChangesStaleDataWarning
+												error={workspaceChangesError}
+												onRetry={() => void refreshWorkspaceChanges()}
+												isRequestInFlight={isWorkspaceChangesRequestInFlight}
 											/>
 										) : null}
 										<div className="flex min-h-0 flex-1">
-											{workspaceChangesError ? (
+											{isWorkspaceChangesMissingScope ? (
+												<WorkspaceChangesUnavailablePanel />
+											) : isWorkspaceChangesInitialError && workspaceChangesError ? (
 												<WorkspaceChangesErrorPanel
 													error={workspaceChangesError}
 													onRetry={() => void refreshWorkspaceChanges()}
+													isRequestInFlight={isWorkspaceChangesRequestInFlight}
 												/>
-											) : isWorkspaceChangesPending ? (
+											) : isWorkspaceChangesInitialLoading ? (
 												<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
 											) : hasNoWorkspaceFileChanges ? (
 												<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />
-											) : (
+											) : workspaceChanges !== null ? (
 												<div ref={detailDiffRowRef} className="flex min-w-0 flex-1">
 													<div
 														className="flex min-h-0 min-w-0"
 														style={{ flex: `0 0 ${detailDiffContentPanelPercent}` }}
 													>
 														<DiffViewerPanel
-															workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
+															workspaceFiles={runtimeFiles}
 															selectedPath={selectedPath}
 															selectedPathExpandToken={selectedPathExpandToken}
 															onSelectedPathChange={setSelectedPath}
@@ -1263,13 +1365,15 @@ export function CardDetailView({
 														style={{ flex: `0 0 ${detailDiffFileTreePanelPercent}` }}
 													>
 														<FileTreePanel
-															workspaceFiles={isRuntimeAvailable ? runtimeFiles : null}
+															workspaceFiles={runtimeFiles}
 															selectedPath={selectedPath}
 															onSelectPath={handleExplicitSelectPath}
 															panelFlex="1 1 0"
 														/>
 													</div>
 												</div>
+											) : (
+												<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
 											)}
 										</div>
 									</div>

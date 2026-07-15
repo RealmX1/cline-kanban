@@ -1,7 +1,6 @@
 import { useHotkeys } from "react-hotkeys-hook";
 
 import type { CardSelection } from "@/types";
-import { CREATE_TASK_KEYBOARD_SHORTCUT_HOTKEY } from "@/utils/create-task-keyboard-shortcut";
 
 function isEventInsideDialog(target: EventTarget | null): boolean {
 	return target instanceof Element && target.closest("[role='dialog']") !== null;
@@ -21,7 +20,7 @@ interface UseAppHotkeysInput {
 	handleOpenSettings: () => void;
 	handleToggleGitHistory: () => void;
 	handleCloseGitHistory: () => void;
-	onStartAllTasks: () => void;
+	onRequestStartAllReadyBacklogTasks: () => void;
 }
 
 export function useAppHotkeys({
@@ -38,7 +37,7 @@ export function useAppHotkeys({
 	handleOpenSettings,
 	handleToggleGitHistory,
 	handleCloseGitHistory,
-	onStartAllTasks,
+	onRequestStartAllReadyBacklogTasks,
 }: UseAppHotkeysInput): void {
 	useHotkeys(
 		"mod+j",
@@ -59,13 +58,13 @@ export function useAppHotkeys({
 
 	useHotkeys(
 		"mod+b",
-		onStartAllTasks,
+		onRequestStartAllReadyBacklogTasks,
 		{
 			enableOnContentEditable: false,
 			enableOnFormTags: false,
 			preventDefault: true,
 		},
-		[onStartAllTasks],
+		[onRequestStartAllReadyBacklogTasks],
 	);
 
 	useHotkeys(
@@ -96,7 +95,7 @@ export function useAppHotkeys({
 	);
 
 	useHotkeys(
-		CREATE_TASK_KEYBOARD_SHORTCUT_HOTKEY,
+		"c",
 		() => {
 			if (!canUseCreateTaskShortcut) {
 				return;

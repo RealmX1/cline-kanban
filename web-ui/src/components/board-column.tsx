@@ -11,7 +11,6 @@ import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types"
 import type { TaskBoardSearchResult } from "@/search/task-board-search";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumnId, BoardColumn as BoardColumnModel } from "@/types";
-import { CREATE_TASK_KEYBOARD_SHORTCUT_INLINE_LABEL } from "@/utils/create-task-keyboard-shortcut";
 
 // 模块级常量，保持引用稳定（避免每次渲染都给 hook 传新函数触发 observer 重建）。
 const getColumnCardsScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
@@ -22,7 +21,7 @@ export function BoardColumn({
 	taskSessions,
 	onCreateTask,
 	onStartTask,
-	onStartAllTasks,
+	onRequestStartAllReadyBacklogTasks,
 	onClearTrash,
 	onEditTask,
 	onSaveTitle,
@@ -58,7 +57,7 @@ export function BoardColumn({
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	onCreateTask?: () => void;
 	onStartTask?: (taskId: string) => void;
-	onStartAllTasks?: () => void;
+	onRequestStartAllReadyBacklogTasks?: () => void;
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCardModel) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
@@ -91,7 +90,7 @@ export function BoardColumn({
 	isCardDragDisabled?: boolean;
 }): React.ReactElement {
 	const canCreate = column.id === "backlog" && onCreateTask;
-	const canStartAllTasks = column.id === "backlog" && onStartAllTasks;
+	const canRequestStartAllReadyBacklogTasks = column.id === "backlog" && onRequestStartAllReadyBacklogTasks;
 	const canClearTrash = column.id === "trash" && onClearTrash;
 	const { visibleCount, hasMore, remainingCount, loadMoreSentinelRef, revealMore } = useProgressiveRenderCount({
 		totalCount: column.cards.length,
@@ -107,7 +106,7 @@ export function BoardColumn({
 		<span className="inline-flex items-center gap-1.5">
 			<span>Create task</span>
 			<span aria-hidden className="text-text-secondary">
-				({CREATE_TASK_KEYBOARD_SHORTCUT_INLINE_LABEL})
+				(c)
 			</span>
 		</span>
 	);
@@ -133,15 +132,15 @@ export function BoardColumn({
 						<span className="font-semibold text-sm">{column.title}</span>
 						<span className="text-text-secondary text-xs">{column.cards.length}</span>
 					</div>
-					{canStartAllTasks ? (
+					{canRequestStartAllReadyBacklogTasks ? (
 						<Button
 							icon={<Play size={14} />}
 							variant="ghost"
 							size="sm"
-							onClick={onStartAllTasks}
+							onClick={onRequestStartAllReadyBacklogTasks}
 							disabled={column.cards.length === 0}
-							aria-label="Start all backlog tasks"
-							title={column.cards.length > 0 ? "Start all backlog tasks" : "Backlog is empty"}
+							aria-label="Start all ready backlog tasks"
+							title={column.cards.length > 0 ? "Start all ready backlog tasks" : "Backlog is empty"}
 						/>
 					) : null}
 					{canClearTrash ? (

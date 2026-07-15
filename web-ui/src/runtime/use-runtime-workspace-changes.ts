@@ -8,11 +8,20 @@ import type {
 } from "@/runtime/types";
 import { useTrpcQuery } from "@/runtime/use-trpc-query";
 
+export type RuntimeWorkspaceChangesQueryPhase =
+	| "disabled"
+	| "missing_workspace_scope"
+	| "initial_loading"
+	| "initial_error"
+	| "ready"
+	| "refreshing"
+	| "stale_after_refresh_error";
+
 export interface UseRuntimeWorkspaceChangesResult {
 	changes: RuntimeWorkspaceChangesResponse | null;
 	error: Error | null;
-	isLoading: boolean;
-	isRuntimeAvailable: boolean;
+	queryPhase: RuntimeWorkspaceChangesQueryPhase;
+	isRequestInFlight: boolean;
 	refresh: () => Promise<void>;
 }
 
@@ -80,6 +89,8 @@ export function useRuntimeWorkspaceChanges(
 	const changesQuery = useTrpcQuery<RuntimeWorkspaceChangesResponse>({
 		enabled: hasWorkspaceScope,
 		queryFn,
+		retainDataOnError: true,
+		retainErrorDuringRefetch: true,
 		isDataEqual: areWorkspaceChangesEqual,
 	});
 
@@ -98,8 +109,9 @@ export function useRuntimeWorkspaceChanges(
 		previousRequestKeyRef.current = requestKey;
 		if (clearOnViewTransition) {
 			changesQuery.setData(null);
+			changesQuery.clearQueryError();
 		}
-	}, [changesQuery.setData, clearOnViewTransition, isRequestTransitioning, requestKey]);
+	}, [changesQuery.clearQueryError, changesQuery.setData, clearOnViewTransition, isRequestTransitioning, requestKey]);
 
 	useEffect(() => {
 		if (!hasWorkspaceScope) {
@@ -142,32 +154,42 @@ export function useRuntimeWorkspaceChanges(
 		return {
 			changes: null,
 			error: null,
-			isLoading: false,
-			isRuntimeAvailable: true,
+			queryPhase: "disabled",
+			isRequestInFlight: false,
 			refresh,
 		};
 	}
 
-	if (!workspaceId) {
+	if (!workspaceId || !baseRef) {
 		return {
 			changes: null,
 			error: null,
-			isLoading: false,
-			isRuntimeAvailable: false,
+			queryPhase: "missing_workspace_scope",
+			isRequestInFlight: false,
 			refresh,
 		};
 	}
 
 	const shouldHideDuringTransition = clearOnViewTransition && isRequestTransitioning;
 	const visibleChanges = shouldHideDuringTransition ? null : changesQuery.data;
-	const visibleIsLoading = shouldHideDuringTransition || changesQuery.isLoading;
-	const visibleIsRuntimeAvailable = shouldHideDuringTransition ? true : !changesQuery.isError;
+	const visibleError = shouldHideDuringTransition ? null : changesQuery.error;
+	const isRequestInFlight = shouldHideDuringTransition || changesQuery.isLoading;
+	const queryPhase: RuntimeWorkspaceChangesQueryPhase =
+		visibleChanges !== null
+			? visibleError
+				? "stale_after_refresh_error"
+				: isRequestInFlight
+					? "refreshing"
+					: "ready"
+			: visibleError
+				? "initial_error"
+				: "initial_loading";
 
 	return {
 		changes: visibleChanges,
-		error: shouldHideDuringTransition ? null : changesQuery.error,
-		isLoading: visibleIsLoading,
-		isRuntimeAvailable: visibleIsRuntimeAvailable,
+		error: visibleError,
+		queryPhase,
+		isRequestInFlight,
 		refresh,
 	};
 }

@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -14,7 +14,8 @@ import type {
 	RuntimeBoardData,
 	RuntimeHookIngestResponse,
 	RuntimeProjectAddResponse,
-	RuntimeProjectRemoveResponse,
+	RuntimeProjectPermanentDeletionPreviewResponse,
+	RuntimeProjectPermanentDeletionResult,
 	RuntimeProjectsResponse,
 	RuntimeShellSessionStartResponse,
 	RuntimeStateStreamMessage,
@@ -456,6 +457,194 @@ async function requestJson<T>(input: {
 }
 
 describe.sequential("runtime state stream integration", () => {
+	it("retains indexed project data and selection when the project path becomes unavailable", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-unavailable-project-");
+		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-unavailable-project-");
+		const projectPath = join(tempRoot, "project");
+		const temporarilyMovedProjectPath = join(tempRoot, "project-temporarily-moved");
+		mkdirSync(projectPath, { recursive: true });
+		initGitRepository(projectPath);
+
+		const port = await getAvailablePort();
+		const server = await startKanbanServer({ cwd: projectPath, homeDir: tempHome, port });
+		let initialStream: RuntimeStreamClient | null = null;
+		let unavailableProjectStream: RuntimeStreamClient | null = null;
+		let recoveredProjectStream: RuntimeStreamClient | null = null;
+
+		try {
+			const runtimeUrl = new URL(server.runtimeUrl);
+			const workspaceId = decodeURIComponent(runtimeUrl.pathname.slice(1));
+			initialStream = await connectRuntimeStream(
+				`ws://127.0.0.1:${port}/api/runtime/ws?workspaceId=${encodeURIComponent(workspaceId)}`,
+			);
+			const initialSnapshot = (await initialStream.waitForMessage(
+				(message): message is RuntimeStateStreamSnapshotMessage => message.type === "snapshot",
+			)) as RuntimeStateStreamSnapshotMessage;
+			if (!initialSnapshot.workspaceState) {
+				throw new Error("Expected an initial workspace state.");
+			}
+
+			const savedStateResponse = await requestJson<RuntimeWorkspaceStateResponse>({
+				baseUrl: `http://127.0.0.1:${port}`,
+				procedure: "workspace.saveState",
+				type: "mutation",
+				workspaceId,
+				payload: {
+					board: createBoard("Retained while unavailable"),
+					sessions: initialSnapshot.workspaceState.sessions,
+					expectedRevision: initialSnapshot.workspaceState.revision,
+				},
+			});
+			expect(savedStateResponse.status).toBe(200);
+
+			const workspacesRootPath = join(tempHome, ".cline", "kanban", "workspaces");
+			const indexPath = join(workspacesRootPath, "index.json");
+			const workspaceStateDirectoryPath = join(workspacesRootPath, workspaceId);
+			const retainedFilePaths = [
+				indexPath,
+				join(workspaceStateDirectoryPath, "board.json"),
+				join(workspaceStateDirectoryPath, "sessions.json"),
+				join(workspaceStateDirectoryPath, "meta.json"),
+			];
+			const retainedFileContentsBefore = new Map(
+				retainedFilePaths.map((filePath) => [filePath, readFileSync(filePath)]),
+			);
+
+			renameSync(projectPath, temporarilyMovedProjectPath);
+			expect(readFileSync(indexPath)).toEqual(retainedFileContentsBefore.get(indexPath));
+			unavailableProjectStream = await connectRuntimeStream(
+				`ws://127.0.0.1:${port}/api/runtime/ws?workspaceId=${encodeURIComponent(workspaceId)}`,
+			);
+			const unavailableSnapshot = (await unavailableProjectStream.waitForMessage(
+				(message): message is RuntimeStateStreamSnapshotMessage => message.type === "snapshot",
+			)) as RuntimeStateStreamSnapshotMessage;
+
+			expect(unavailableSnapshot.currentProjectId).toBe(workspaceId);
+			expect(unavailableSnapshot.workspaceState).toBeNull();
+			expect(unavailableSnapshot.workspaceMetadata).toBeNull();
+			expect(unavailableSnapshot.projects).toEqual([
+				expect.objectContaining({
+					id: workspaceId,
+					availability: { status: "unavailable", reason: "project_path_missing" },
+					taskCounts: expect.objectContaining({ backlog: 1 }),
+				}),
+			]);
+			for (const filePath of retainedFilePaths) {
+				expect(readFileSync(filePath)).toEqual(retainedFileContentsBefore.get(filePath));
+			}
+			const unexpectedErrors = (await unavailableProjectStream.collectFor(150)).filter(
+				(message) => message.type === "error",
+			);
+			expect(unexpectedErrors).toEqual([]);
+
+			renameSync(temporarilyMovedProjectPath, projectPath);
+			recoveredProjectStream = await connectRuntimeStream(
+				`ws://127.0.0.1:${port}/api/runtime/ws?workspaceId=${encodeURIComponent(workspaceId)}`,
+			);
+			const recoveredSnapshot = (await recoveredProjectStream.waitForMessage(
+				(message): message is RuntimeStateStreamSnapshotMessage => message.type === "snapshot",
+			)) as RuntimeStateStreamSnapshotMessage;
+			expect(recoveredSnapshot.currentProjectId).toBe(workspaceId);
+			expect(recoveredSnapshot.workspaceState?.board.columns[0]?.cards[0]?.title).toBe("Retained while unavailable");
+			expect(recoveredSnapshot.projects).toEqual([
+				expect.objectContaining({ id: workspaceId, availability: { status: "available" } }),
+			]);
+		} finally {
+			if (initialStream) {
+				await initialStream.close();
+			}
+			if (unavailableProjectStream) {
+				await unavailableProjectStream.close();
+			}
+			if (recoveredProjectStream) {
+				await recoveredProjectStream.close();
+			}
+			if (existsSync(temporarilyMovedProjectPath) && !existsSync(projectPath)) {
+				renameSync(temporarilyMovedProjectPath, projectPath);
+			}
+			await server.stop();
+			cleanupRoot();
+			cleanupHome();
+		}
+	}, 30_000);
+
+	it("treats core.bare=true as a retained unavailable project without deleting persisted state", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-bare-project-");
+		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-bare-project-");
+		initGitRepository(projectPath);
+		const port = await getAvailablePort();
+		const server = await startKanbanServer({ cwd: projectPath, homeDir: tempHome, port });
+		let initialStream: RuntimeStreamClient | null = null;
+		let unavailableProjectStream: RuntimeStreamClient | null = null;
+
+		try {
+			const workspaceId = decodeURIComponent(new URL(server.runtimeUrl).pathname.slice(1));
+			initialStream = await connectRuntimeStream(
+				`ws://127.0.0.1:${port}/api/runtime/ws?workspaceId=${encodeURIComponent(workspaceId)}`,
+			);
+			const initialSnapshot = (await initialStream.waitForMessage(
+				(message): message is RuntimeStateStreamSnapshotMessage => message.type === "snapshot",
+			)) as RuntimeStateStreamSnapshotMessage;
+			if (!initialSnapshot.workspaceState) {
+				throw new Error("Expected an initial workspace state.");
+			}
+			await requestJson<RuntimeWorkspaceStateResponse>({
+				baseUrl: `http://127.0.0.1:${port}`,
+				procedure: "workspace.saveState",
+				type: "mutation",
+				workspaceId,
+				payload: {
+					board: createBoard("Retained while Git is bare"),
+					sessions: {},
+					expectedRevision: initialSnapshot.workspaceState.revision,
+				},
+			});
+
+			const workspacesRootPath = join(tempHome, ".cline", "kanban", "workspaces");
+			const retainedFilePaths = [
+				join(workspacesRootPath, "index.json"),
+				join(workspacesRootPath, workspaceId, "board.json"),
+				join(workspacesRootPath, workspaceId, "sessions.json"),
+				join(workspacesRootPath, workspaceId, "meta.json"),
+			];
+			const retainedFileContentsBefore = new Map(
+				retainedFilePaths.map((filePath) => [filePath, readFileSync(filePath)]),
+			);
+
+			runGit(projectPath, ["config", "core.bare", "true"]);
+			unavailableProjectStream = await connectRuntimeStream(
+				`ws://127.0.0.1:${port}/api/runtime/ws?workspaceId=${encodeURIComponent(workspaceId)}`,
+			);
+			const unavailableSnapshot = (await unavailableProjectStream.waitForMessage(
+				(message): message is RuntimeStateStreamSnapshotMessage => message.type === "snapshot",
+			)) as RuntimeStateStreamSnapshotMessage;
+
+			expect(unavailableSnapshot.currentProjectId).toBe(workspaceId);
+			expect(unavailableSnapshot.workspaceState).toBeNull();
+			expect(unavailableSnapshot.projects).toEqual([
+				expect.objectContaining({
+					id: workspaceId,
+					availability: { status: "unavailable", reason: "git_work_tree_unavailable" },
+					taskCounts: expect.objectContaining({ backlog: 1 }),
+				}),
+			]);
+			for (const filePath of retainedFilePaths) {
+				expect(readFileSync(filePath)).toEqual(retainedFileContentsBefore.get(filePath));
+			}
+		} finally {
+			if (initialStream) {
+				await initialStream.close();
+			}
+			if (unavailableProjectStream) {
+				await unavailableProjectStream.close();
+			}
+			runGit(projectPath, ["config", "core.bare", "false"]);
+			await server.stop();
+			cleanupProject();
+			cleanupHome();
+		}
+	}, 30_000);
+
 	it("starts outside a git repository with no active workspace", async () => {
 		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-no-git-");
 		const { path: nonGitPath, cleanup: cleanupNonGitPath } = createTempDir("kanban-no-git-");
@@ -1136,248 +1325,142 @@ describe.sequential("runtime state stream integration", () => {
 		}
 	}, 45_000);
 
-	it("moves stale completed review cards to trash on shutdown", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-stale-exit-review-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-stale-exit-review-");
-
-		mkdirSync(projectPath, { recursive: true });
-		initGitRepository(projectPath);
-
-		const taskId = "stale-exit-review-task";
-		const taskTitle = "Stale Exit Review Task";
-		const now = Date.now();
-
-		const firstPort = await getAvailablePort();
-		const firstServer = await startKanbanServer({
-			cwd: projectPath,
-			homeDir: tempHome,
-			port: firstPort,
-		});
-
-		try {
-			const firstRuntimeUrl = new URL(firstServer.runtimeUrl);
-			const workspaceId = decodeURIComponent(firstRuntimeUrl.pathname.slice(1));
-			expect(workspaceId).not.toBe("");
-
-			const currentState = await requestJson<RuntimeWorkspaceStateResponse>({
-				baseUrl: `http://127.0.0.1:${firstPort}`,
-				procedure: "workspace.getState",
-				type: "query",
-				workspaceId,
-			});
-			expect(currentState.status).toBe(200);
-
-			const seedResponse = await requestJson<RuntimeWorkspaceStateResponse>({
-				baseUrl: `http://127.0.0.1:${firstPort}`,
-				procedure: "workspace.saveState",
-				type: "mutation",
-				workspaceId,
-				payload: {
-					board: createReviewBoard(taskId, taskTitle),
-					sessions: {
-						[taskId]: {
-							taskId,
-							state: "awaiting_review",
-							agentId: "codex",
-							workspacePath: projectPath,
-							pid: null,
-							startedAt: now - 2_000,
-							updatedAt: now,
-							lastOutputAt: now,
-							reviewReason: "exit",
-							exitCode: 0,
-							lastHookAt: null,
-							latestHookActivity: null,
-						},
-					},
-					expectedRevision: currentState.payload.revision,
-				},
-			});
-			expect(seedResponse.status).toBe(200);
-			const taskWorkspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
-				baseUrl: `http://127.0.0.1:${firstPort}`,
-				procedure: "workspace.getTaskContext",
-				type: "query",
-				workspaceId,
-				payload: {
-					taskId,
-					baseRef: "HEAD",
-				},
-			});
-			expect(taskWorkspaceInfo.status).toBe(200);
-			mkdirSync(taskWorkspaceInfo.payload.path, { recursive: true });
-		} finally {
-			await firstServer.stop();
-		}
-
-		const secondPort = await getAvailablePort();
-		const secondServer = await startKanbanServer({
-			cwd: projectPath,
-			homeDir: tempHome,
-			port: secondPort,
-		});
-
-		try {
-			const secondRuntimeUrl = new URL(secondServer.runtimeUrl);
-			const workspaceId = decodeURIComponent(secondRuntimeUrl.pathname.slice(1));
-			expect(workspaceId).not.toBe("");
-
-			const finalState = await requestJson<RuntimeWorkspaceStateResponse>({
-				baseUrl: `http://127.0.0.1:${secondPort}`,
-				procedure: "workspace.getState",
-				type: "query",
-				workspaceId,
-			});
-			expect(finalState.status).toBe(200);
-
-			const reviewCards = finalState.payload.board.columns.find((column) => column.id === "review")?.cards ?? [];
-			const trashCards = finalState.payload.board.columns.find((column) => column.id === "trash")?.cards ?? [];
-			expect(reviewCards.some((card) => card.id === taskId)).toBe(false);
-			expect(trashCards.some((card) => card.id === taskId)).toBe(true);
-			expect(finalState.payload.sessions[taskId]?.state).toBe("interrupted");
-			expect(finalState.payload.sessions[taskId]?.reviewReason).toBe("interrupted");
-			const workspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
-				baseUrl: `http://127.0.0.1:${secondPort}`,
-				procedure: "workspace.getTaskContext",
-				type: "query",
-				workspaceId,
-				payload: {
-					taskId,
-					baseRef: "HEAD",
-				},
-			});
-			expect(workspaceInfo.status).toBe(200);
-			expect(workspaceInfo.payload.exists).toBe(false);
-		} finally {
-			await secondServer.stop();
-			cleanupProject();
-			cleanupHome();
-		}
-	}, 45_000);
-
-	it("skips stale session shutdown cleanup when --skip-shutdown-cleanup is enabled", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-skip-cleanup-flag-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-skip-cleanup-flag-");
-
-		mkdirSync(projectPath, { recursive: true });
-		initGitRepository(projectPath);
-
-		const taskId = "skip-cleanup-flag-review-task";
-		const taskTitle = "Keep review task when cleanup flag is enabled";
-		const now = Date.now();
-
-		const firstPort = await getAvailablePort();
-		const firstServer = await startKanbanServer({
-			cwd: projectPath,
-			homeDir: tempHome,
-			port: firstPort,
+	it.each([
+		{
+			label: "default shutdown",
+			extraArgs: [] as string[],
+		},
+		{
+			label: "the hidden --skip-shutdown-cleanup compatibility flag",
 			extraArgs: ["--skip-shutdown-cleanup"],
-		});
+		},
+	])(
+		"preserves completed review cards and task worktrees with $label",
+		async ({ extraArgs }) => {
+			const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-safe-shutdown-");
+			const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-safe-shutdown-");
 
-		try {
-			const firstRuntimeUrl = new URL(firstServer.runtimeUrl);
-			const workspaceId = decodeURIComponent(firstRuntimeUrl.pathname.slice(1));
-			expect(workspaceId).not.toBe("");
+			mkdirSync(projectPath, { recursive: true });
+			initGitRepository(projectPath);
 
-			const currentState = await requestJson<RuntimeWorkspaceStateResponse>({
-				baseUrl: `http://127.0.0.1:${firstPort}`,
-				procedure: "workspace.getState",
-				type: "query",
-				workspaceId,
+			const taskId = "safe-shutdown-review-task";
+			const now = Date.now();
+			const firstPort = await getAvailablePort();
+			const firstServer = await startKanbanServer({
+				cwd: projectPath,
+				homeDir: tempHome,
+				port: firstPort,
+				extraArgs,
 			});
-			expect(currentState.status).toBe(200);
 
-			const seedResponse = await requestJson<RuntimeWorkspaceStateResponse>({
-				baseUrl: `http://127.0.0.1:${firstPort}`,
-				procedure: "workspace.saveState",
-				type: "mutation",
-				workspaceId,
-				payload: {
-					board: createReviewBoard(taskId, taskTitle),
-					sessions: {
-						[taskId]: {
-							taskId,
-							state: "awaiting_review",
-							agentId: "codex",
-							workspacePath: projectPath,
-							pid: null,
-							startedAt: now - 2_000,
-							updatedAt: now,
-							lastOutputAt: now,
-							reviewReason: "hook",
-							exitCode: null,
-							lastHookAt: null,
-							latestHookActivity: null,
+			try {
+				const firstRuntimeUrl = new URL(firstServer.runtimeUrl);
+				const workspaceId = decodeURIComponent(firstRuntimeUrl.pathname.slice(1));
+				expect(workspaceId).not.toBe("");
+
+				const currentState = await requestJson<RuntimeWorkspaceStateResponse>({
+					baseUrl: `http://127.0.0.1:${firstPort}`,
+					procedure: "workspace.getState",
+					type: "query",
+					workspaceId,
+				});
+				expect(currentState.status).toBe(200);
+
+				const seedResponse = await requestJson<RuntimeWorkspaceStateResponse>({
+					baseUrl: `http://127.0.0.1:${firstPort}`,
+					procedure: "workspace.saveState",
+					type: "mutation",
+					workspaceId,
+					payload: {
+						board: createReviewBoard(taskId, "Safe Shutdown Review Task"),
+						sessions: {
+							[taskId]: {
+								taskId,
+								state: "awaiting_review",
+								agentId: "codex",
+								workspacePath: projectPath,
+								pid: null,
+								startedAt: now - 2_000,
+								updatedAt: now,
+								lastOutputAt: now,
+								reviewReason: "hook",
+								exitCode: null,
+								lastHookAt: null,
+								latestHookActivity: null,
+							},
 						},
+						expectedRevision: currentState.payload.revision,
 					},
-					expectedRevision: currentState.payload.revision,
-				},
+				});
+				expect(seedResponse.status).toBe(200);
+
+				const taskWorkspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
+					baseUrl: `http://127.0.0.1:${firstPort}`,
+					procedure: "workspace.getTaskContext",
+					type: "query",
+					workspaceId,
+					payload: { taskId, baseRef: "HEAD" },
+				});
+				expect(taskWorkspaceInfo.status).toBe(200);
+				mkdirSync(taskWorkspaceInfo.payload.path, { recursive: true });
+			} finally {
+				await firstServer.stop();
+			}
+
+			const secondPort = await getAvailablePort();
+			const secondServer = await startKanbanServer({
+				cwd: projectPath,
+				homeDir: tempHome,
+				port: secondPort,
 			});
-			expect(seedResponse.status).toBe(200);
 
-			const taskWorkspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
-				baseUrl: `http://127.0.0.1:${firstPort}`,
-				procedure: "workspace.getTaskContext",
-				type: "query",
-				workspaceId,
-				payload: {
-					taskId,
-					baseRef: "HEAD",
-				},
-			});
-			expect(taskWorkspaceInfo.status).toBe(200);
-			mkdirSync(taskWorkspaceInfo.payload.path, { recursive: true });
-		} finally {
-			await firstServer.stop();
-		}
+			try {
+				const secondRuntimeUrl = new URL(secondServer.runtimeUrl);
+				const workspaceId = decodeURIComponent(secondRuntimeUrl.pathname.slice(1));
+				expect(workspaceId).not.toBe("");
 
-		const secondPort = await getAvailablePort();
-		const secondServer = await startKanbanServer({
-			cwd: projectPath,
-			homeDir: tempHome,
-			port: secondPort,
-		});
+				const finalState = await requestJson<RuntimeWorkspaceStateResponse>({
+					baseUrl: `http://127.0.0.1:${secondPort}`,
+					procedure: "workspace.getState",
+					type: "query",
+					workspaceId,
+				});
+				expect(finalState.status).toBe(200);
 
-		try {
-			const secondRuntimeUrl = new URL(secondServer.runtimeUrl);
-			const workspaceId = decodeURIComponent(secondRuntimeUrl.pathname.slice(1));
-			expect(workspaceId).not.toBe("");
+				const reviewCards = finalState.payload.board.columns.find((column) => column.id === "review")?.cards ?? [];
+				const trashCards = finalState.payload.board.columns.find((column) => column.id === "trash")?.cards ?? [];
+				expect(reviewCards.some((card) => card.id === taskId)).toBe(true);
+				expect(trashCards.some((card) => card.id === taskId)).toBe(false);
+				expect(finalState.payload.sessions[taskId]).toEqual(
+					expect.objectContaining({
+						state: "awaiting_review",
+						turnOwner: "user",
+						liveness: "exited",
+						userTurnKind: "review",
+						reviewReason: "hook",
+						pid: null,
+					}),
+				);
 
-			const finalState = await requestJson<RuntimeWorkspaceStateResponse>({
-				baseUrl: `http://127.0.0.1:${secondPort}`,
-				procedure: "workspace.getState",
-				type: "query",
-				workspaceId,
-			});
-			expect(finalState.status).toBe(200);
+				const workspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
+					baseUrl: `http://127.0.0.1:${secondPort}`,
+					procedure: "workspace.getTaskContext",
+					type: "query",
+					workspaceId,
+					payload: { taskId, baseRef: "HEAD" },
+				});
+				expect(workspaceInfo.status).toBe(200);
+				expect(workspaceInfo.payload.exists).toBe(true);
+			} finally {
+				await secondServer.stop();
+				cleanupProject();
+				cleanupHome();
+			}
+		},
+		45_000,
+	);
 
-			const reviewCards = finalState.payload.board.columns.find((column) => column.id === "review")?.cards ?? [];
-			const trashCards = finalState.payload.board.columns.find((column) => column.id === "trash")?.cards ?? [];
-			expect(reviewCards.some((card) => card.id === taskId)).toBe(true);
-			expect(trashCards.some((card) => card.id === taskId)).toBe(false);
-			expect(finalState.payload.sessions[taskId]?.state).toBe("awaiting_review");
-			expect(finalState.payload.sessions[taskId]?.reviewReason).toBe("hook");
-
-			const workspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
-				baseUrl: `http://127.0.0.1:${secondPort}`,
-				procedure: "workspace.getTaskContext",
-				type: "query",
-				workspaceId,
-				payload: {
-					taskId,
-					baseRef: "HEAD",
-				},
-			});
-			expect(workspaceInfo.status).toBe(200);
-			expect(workspaceInfo.payload.exists).toBe(true);
-		} finally {
-			await secondServer.stop();
-			cleanupProject();
-			cleanupHome();
-		}
-	}, 45_000);
-
-	it("falls back to remaining project when removing the active project", async () => {
+	it("falls back to the remaining project after confirmed permanent deletion of the active project", async () => {
 		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-remove-");
 		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-projects-remove-");
 
@@ -1429,17 +1512,47 @@ describe.sequential("runtime state stream integration", () => {
 			)) as RuntimeStateStreamSnapshotMessage;
 			expect(initialSnapshot.currentProjectId).toBe(workspaceAId);
 
-			const removeResponse = await requestJson<RuntimeProjectRemoveResponse>({
+			const deletionPreviewResponse = await requestJson<RuntimeProjectPermanentDeletionPreviewResponse>({
 				baseUrl: `http://127.0.0.1:${port}`,
-				procedure: "projects.remove",
-				type: "mutation",
+				procedure: "projects.getPermanentDeletionPreview",
+				type: "query",
 				workspaceId: workspaceAId,
 				payload: {
 					projectId: workspaceAId,
 				},
 			});
-			expect(removeResponse.status).toBe(200);
-			expect(removeResponse.payload.ok).toBe(true);
+			expect(deletionPreviewResponse.status).toBe(200);
+			expect(deletionPreviewResponse.payload.ok).toBe(true);
+			if (!deletionPreviewResponse.payload.ok) {
+				throw new Error(deletionPreviewResponse.payload.error);
+			}
+			const preview = deletionPreviewResponse.payload.preview;
+			expect(preview.deletionAllowed).toBe(true);
+			expect(preview.requiredConfirmationProjectName).toBe("project-a");
+			expect(preview.workspaceStateRevision).not.toBeNull();
+			if (preview.workspaceStateRevision === null) {
+				throw new Error("Permanent deletion preview did not contain a workspace revision.");
+			}
+
+			const permanentDeletionResponse = await requestJson<RuntimeProjectPermanentDeletionResult>({
+				baseUrl: `http://127.0.0.1:${port}`,
+				procedure: "projects.permanentlyDeleteProjectData",
+				type: "mutation",
+				workspaceId: workspaceAId,
+				payload: {
+					projectId: workspaceAId,
+					expectedWorkspaceStateRevision: preview.workspaceStateRevision,
+					confirmationProjectName: preview.requiredConfirmationProjectName,
+				},
+			});
+			expect(permanentDeletionResponse.status).toBe(200);
+			expect(permanentDeletionResponse.payload).toMatchObject({
+				status: "completed",
+				projectId: workspaceAId,
+				projectIndexDeleted: true,
+				workspaceStateDirectoryDeleted: true,
+				newCurrentProjectId: workspaceBId,
+			});
 
 			const projectsUpdated = (await streamA.waitForMessage(
 				(message): message is RuntimeStateStreamProjectsMessage =>

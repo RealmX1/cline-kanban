@@ -36,6 +36,7 @@ function project(overrides: Partial<RuntimeProjectSummary> & { id: string }): Ru
 		taskCounts: counts(),
 		inProgressTaskDetails: [],
 		...overrides,
+		availability: overrides.availability ?? { status: "available" },
 	};
 }
 

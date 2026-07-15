@@ -21,6 +21,7 @@ import { useHotkeys } from "react-hotkeys-hook";
 
 import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
+import { DiscardTaskCreateConfirmDialog } from "@/components/discard-task-create-confirm-dialog";
 import {
 	TaskAgentModelPicker,
 	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
@@ -60,6 +61,60 @@ function normalizeStoredTaskCreateStartAction(value: string): TaskCreateStartAct
 		return value;
 	}
 	return null;
+}
+
+/**
+ * 关闭 New task 对话框前，用来判断「本次会话内是否改动过表单」的快照。
+ * 基线在对话框打开那一刻捕获，关闭时与当前值逐字段比较，只认本次打开后的改动
+ * （sticky 偏好如 auto-review 若本次没动，则基线==当前，不算脏）。
+ * 仅在 create 模式下用于二次确认；edit 模式关闭是存草稿而非丢弃，不走此守卫。
+ */
+export interface TaskCreateFormSnapshot {
+	prompt: string;
+	/** 多任务模式下所有非空行 trim 后拼接；单任务模式为空串 */
+	multiPromptContent: string;
+	imageCount: number;
+	startInPlanMode: boolean;
+	autoReviewEnabled: boolean;
+	autoReviewMode: TaskAutoReviewMode;
+	branchRef: string;
+	worktreeMode: RuntimeTaskWorktreeMode;
+	agentId: RuntimeAgentId | undefined;
+	clineSettings: RuntimeTaskClineSettings | undefined;
+	terminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
+}
+
+function isSameClineSettings(
+	left: RuntimeTaskClineSettings | undefined,
+	right: RuntimeTaskClineSettings | undefined,
+): boolean {
+	return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function isSameTerminalAgentModelOverrideSettings(
+	left: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
+	right: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
+): boolean {
+	return (left?.agentId ?? null) === (right?.agentId ?? null) && (left?.modelId ?? null) === (right?.modelId ?? null);
+}
+
+export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline: TaskCreateFormSnapshot): boolean {
+	return (
+		current.prompt.trim() !== baseline.prompt.trim() ||
+		current.multiPromptContent !== baseline.multiPromptContent ||
+		current.imageCount !== baseline.imageCount ||
+		current.startInPlanMode !== baseline.startInPlanMode ||
+		current.autoReviewEnabled !== baseline.autoReviewEnabled ||
+		current.autoReviewMode !== baseline.autoReviewMode ||
+		current.branchRef !== baseline.branchRef ||
+		current.worktreeMode !== baseline.worktreeMode ||
+		current.agentId !== baseline.agentId ||
+		!isSameClineSettings(current.clineSettings, baseline.clineSettings) ||
+		!isSameTerminalAgentModelOverrideSettings(
+			current.terminalAgentModelOverrideSettings,
+			baseline.terminalAgentModelOverrideSettings,
+		)
+	);
 }
 
 function ButtonShortcut({
@@ -210,6 +265,7 @@ export function TaskEditorDialog({
 		DEFAULT_PRIMARY_START_ACTION,
 		normalizeStoredTaskCreateStartAction,
 	);
+	const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
 	const {
 		agentOptions,
 		clineProviderOptions,
@@ -246,6 +302,7 @@ export function TaskEditorDialog({
 			setCreateMore(false);
 			setComposerResetKey(0);
 			setTaskPrompts([]);
+			setIsDiscardConfirmOpen(false);
 			inputRefs.current = [];
 			nextFocusIndexRef.current = null;
 		}
@@ -456,6 +513,72 @@ export function TaskEditorDialog({
 		[open, mode, handleRunSingleStartAction, onCreateStartAndOpen],
 	);
 
+	// 关闭守卫仅在 create 模式启用：edit 模式关闭是存草稿（handleCancelEditTask），
+	// 不应弹「放弃」二次确认。
+	const isCreateMode = taskEditorMode === "create";
+
+	// 每次渲染刷新「当前表单」快照，供关闭时与打开时的基线比较。
+	const currentFormSnapshot: TaskCreateFormSnapshot = {
+		prompt,
+		multiPromptContent: taskPrompts
+			.map((value) => value.trim())
+			.filter(Boolean)
+			.join("\n"),
+		imageCount: images.length,
+		startInPlanMode,
+		autoReviewEnabled,
+		autoReviewMode,
+		branchRef,
+		worktreeMode,
+		agentId,
+		clineSettings,
+		terminalAgentModelOverrideSettings,
+	};
+	const latestFormSnapshotRef = useRef(currentFormSnapshot);
+	latestFormSnapshotRef.current = currentFormSnapshot;
+	const baselineFormSnapshotRef = useRef<TaskCreateFormSnapshot | null>(null);
+
+	// 打开那一刻捕获基线；关闭时清空。基线来自当次打开后 settle 的默认值。
+	useEffect(() => {
+		baselineFormSnapshotRef.current = open ? latestFormSnapshotRef.current : null;
+	}, [open]);
+
+	const handleCloseRequest = useCallback(() => {
+		const baseline = baselineFormSnapshotRef.current;
+		const hasEdits = baseline ? hasTaskCreateFormEdits(latestFormSnapshotRef.current, baseline) : false;
+		if (hasEdits) {
+			setIsDiscardConfirmOpen(true);
+			return;
+		}
+		onOpenChange(false);
+	}, [onOpenChange]);
+
+	// X 关闭按钮走 Radix Close → onOpenChange(false)；Esc / 点击外部各自 preventDefault
+	// 后也汇到这里。create 模式统一经 handleCloseRequest 守卫；edit 模式直通 base 语义。
+	const handleDialogOpenChange = useCallback(
+		(nextOpen: boolean) => {
+			if (nextOpen) {
+				onOpenChange(true);
+				return;
+			}
+			if (isCreateMode) {
+				handleCloseRequest();
+				return;
+			}
+			onOpenChange(false);
+		},
+		[handleCloseRequest, isCreateMode, onOpenChange],
+	);
+
+	const handleConfirmDiscard = useCallback(() => {
+		setIsDiscardConfirmOpen(false);
+		onOpenChange(false);
+	}, [onOpenChange]);
+
+	const handleCancelDiscard = useCallback(() => {
+		setIsDiscardConfirmOpen(false);
+	}, []);
+
 	const dialogTitle =
 		taskEditorMode === "edit"
 			? "Edit backlog task"
@@ -477,316 +600,343 @@ export function TaskEditorDialog({
 	const secondaryStartShortcutModifier = secondaryStartAction === "start" ? "mod" : "alt";
 
 	return (
-		<Dialog open={open} onOpenChange={onOpenChange} contentClassName="max-w-2xl">
-			<DialogHeader title={dialogTitle} icon={<PencilLine size={16} />} />
-			<DialogBody>
-				{mode === "single" ? (
-					<div>
-						<TaskPromptComposer
-							key={composerResetKey}
-							value={prompt}
-							onValueChange={onPromptChange}
-							images={images}
-							onImagesChange={onImagesChange}
-							onSubmit={handleCreateSingle}
-							onSubmitAndStart={() => handleRunSingleStartAction("start")}
-							placeholder="Describe the task..."
-							autoFocus
-							workspaceId={workspaceId}
-							showAttachImageButton={false}
-						/>
-						<div className="flex items-center justify-between mt-1.5">
-							<p className="text-[11px] text-text-tertiary">
-								Use <code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">@file</code> to
-								reference files. Drag and drop or{" "}
-								<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
-									{pasteShortcutLabel}
-								</code>{" "}
-								to add images.
-							</p>
-							{taskEditorMode === "create" && detectedItems.length >= 2 ? (
+		<>
+			<Dialog
+				open={open}
+				onOpenChange={handleDialogOpenChange}
+				contentClassName="max-w-2xl"
+				onEscapeKeyDown={
+					isCreateMode
+						? (event) => {
+								event.preventDefault();
+								if (!isDiscardConfirmOpen) handleCloseRequest();
+							}
+						: undefined
+				}
+				onPointerDownOutside={
+					isCreateMode
+						? (event) => {
+								event.preventDefault();
+								if (!isDiscardConfirmOpen) handleCloseRequest();
+							}
+						: undefined
+				}
+			>
+				<DialogHeader title={dialogTitle} icon={<PencilLine size={16} />} />
+				<DialogBody>
+					{mode === "single" ? (
+						<div>
+							<TaskPromptComposer
+								key={composerResetKey}
+								value={prompt}
+								onValueChange={onPromptChange}
+								images={images}
+								onImagesChange={onImagesChange}
+								onSubmit={handleCreateSingle}
+								onSubmitAndStart={() => handleRunSingleStartAction("start")}
+								placeholder="Describe the task..."
+								autoFocus
+								workspaceId={workspaceId}
+								showAttachImageButton={false}
+							/>
+							<div className="flex items-center justify-between mt-1.5">
+								<p className="text-[11px] text-text-tertiary">
+									Use <code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">@file</code> to
+									reference files. Drag and drop or{" "}
+									<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
+										{pasteShortcutLabel}
+									</code>{" "}
+									to add images.
+								</p>
+								{taskEditorMode === "create" && detectedItems.length >= 2 ? (
+									<button
+										type="button"
+										onClick={handleSplitIntoTasks}
+										className="inline-flex items-center gap-1.5 text-[12px] text-status-blue hover:text-[#86BEFF] cursor-pointer shrink-0"
+									>
+										<List size={12} />
+										Split into {detectedItems.length} tasks
+									</button>
+								) : null}
+							</div>
+						</div>
+					) : (
+						<div>
+							<div className="flex flex-col gap-1.5">
+								{taskPrompts.map((taskPrompt, index) => (
+									<div key={index} className="flex items-center gap-1.5">
+										<span className="text-[12px] text-text-tertiary text-right shrink-0 tabular-nums">
+											{index + 1}.
+										</span>
+										<input
+											ref={(el) => setInputRef(index, el)}
+											type="text"
+											value={taskPrompt}
+											onChange={(e) => handleUpdateTaskPrompt(index, e.target.value)}
+											onKeyDown={(e) => handleInputKeyDown(index, e)}
+											placeholder="Describe the task..."
+											className="flex-1 min-w-0 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
+										/>
+										<Button
+											variant="ghost"
+											size="sm"
+											icon={<X size={14} />}
+											onClick={() => handleRemoveTask(index)}
+											aria-label={`Remove task ${index + 1}`}
+										/>
+									</div>
+								))}
+							</div>
+							<div className="flex items-center justify-between mt-3">
 								<button
 									type="button"
-									onClick={handleSplitIntoTasks}
-									className="inline-flex items-center gap-1.5 text-[12px] text-status-blue hover:text-[#86BEFF] cursor-pointer shrink-0"
+									onClick={() => handleAddTask()}
+									className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
 								>
-									<List size={12} />
-									Split into {detectedItems.length} tasks
+									<Plus size={12} />
+									Add task
 								</button>
-							) : null}
+								<button
+									type="button"
+									onClick={handleBackToSingle}
+									className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
+								>
+									<ArrowLeft size={12} />
+									Back to single prompt
+								</button>
+							</div>
 						</div>
-					</div>
-				) : (
-					<div>
-						<div className="flex flex-col gap-1.5">
-							{taskPrompts.map((taskPrompt, index) => (
-								<div key={index} className="flex items-center gap-1.5">
-									<span className="text-[12px] text-text-tertiary text-right shrink-0 tabular-nums">
-										{index + 1}.
-									</span>
-									<input
-										ref={(el) => setInputRef(index, el)}
-										type="text"
-										value={taskPrompt}
-										onChange={(e) => handleUpdateTaskPrompt(index, e.target.value)}
-										onKeyDown={(e) => handleInputKeyDown(index, e)}
-										placeholder="Describe the task..."
-										className="flex-1 min-w-0 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
-									/>
-									<Button
-										variant="ghost"
-										size="sm"
-										icon={<X size={14} />}
-										onClick={() => handleRemoveTask(index)}
-										aria-label={`Remove task ${index + 1}`}
-									/>
-								</div>
-							))}
-						</div>
-						<div className="flex items-center justify-between mt-3">
-							<button
-								type="button"
-								onClick={() => handleAddTask()}
-								className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
-							>
-								<Plus size={12} />
-								Add task
-							</button>
-							<button
-								type="button"
-								onClick={handleBackToSingle}
-								className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
-							>
-								<ArrowLeft size={12} />
-								Back to single prompt
-							</button>
-						</div>
-					</div>
-				)}
+					)}
 
-				<div className="flex flex-col gap-2.5 mt-4 pt-4 border-t border-border">
-					<label
-						htmlFor={startInPlanModeId}
-						className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-					>
-						<RadixCheckbox.Root
-							id={startInPlanModeId}
-							checked={startInPlanMode}
-							onCheckedChange={(checked) => onStartInPlanModeChange(checked === true)}
-							disabled={startInPlanModeDisabled}
-							className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent disabled:cursor-default disabled:opacity-40"
-						>
-							<RadixCheckbox.Indicator>
-								<Check size={10} className="text-white" />
-							</RadixCheckbox.Indicator>
-						</RadixCheckbox.Root>
-						Start in plan mode
-					</label>
-
-					<div>
-						<span className="text-[11px] text-text-secondary block mb-1">Task workspace</span>
-						<TaskWorktreeModeControl
-							value={worktreeMode}
-							onChange={onWorktreeModeChange}
-							idPrefix="task-create-worktree-mode"
-						/>
-					</div>
-
-					<div>
-						<span className="text-[11px] text-text-secondary block mb-1">
-							{worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
-						</span>
-						<BranchSelectDropdown
-							options={branchOptions}
-							selectedValue={branchRef}
-							onSelect={onBranchRefChange}
-							fill
-							size="sm"
-							emptyText="No branches detected"
-						/>
-					</div>
-
-					<div className="flex items-center gap-2 flex-wrap">
+					<div className="flex flex-col gap-2.5 mt-4 pt-4 border-t border-border">
 						<label
-							htmlFor={autoReviewEnabledId}
+							htmlFor={startInPlanModeId}
 							className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
 						>
 							<RadixCheckbox.Root
-								id={autoReviewEnabledId}
-								checked={autoReviewEnabled}
-								onCheckedChange={(checked) => onAutoReviewEnabledChange(checked === true)}
-								className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent"
+								id={startInPlanModeId}
+								checked={startInPlanMode}
+								onCheckedChange={(checked) => onStartInPlanModeChange(checked === true)}
+								disabled={startInPlanModeDisabled}
+								className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent disabled:cursor-default disabled:opacity-40"
 							>
 								<RadixCheckbox.Indicator>
 									<Check size={10} className="text-white" />
 								</RadixCheckbox.Indicator>
 							</RadixCheckbox.Root>
-							Automatically
+							Start in plan mode
 						</label>
-						<NativeSelect
-							size="sm"
-							value={autoReviewMode}
-							onChange={(e) => onAutoReviewModeChange(e.currentTarget.value as TaskAutoReviewMode)}
-							style={{ width: "16ch", maxWidth: "100%" }}
-						>
-							{AUTO_REVIEW_MODE_OPTIONS.map((option) => (
-								<option key={option.value} value={option.value}>
-									{option.label}
-								</option>
-							))}
-						</NativeSelect>
-					</div>
 
-					{onAgentIdChange && onClineSettingsChange ? (
-						<>
-							<TaskAgentModelPicker
-								agentId={agentId}
-								onAgentIdChange={onAgentIdChange}
-								clineSettings={clineSettings}
-								onClineSettingsChange={onClineSettingsChange}
-								terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
-								onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
-								agentOptions={agentOptions}
-								clineProviderOptions={clineProviderOptions}
-								clineModelOptions={clineModelOptions}
-								terminalAgentModelOptions={terminalAgentModelOptions}
-								terminalAgentDefaultModelId={terminalAgentDefaultModelId}
-								effectiveDefaultModelId={effectiveDefaultModelId}
-								providerModels={providerModels}
-								isLoadingProviders={isLoadingProviders}
-								isLoadingModels={isLoadingModels}
-								isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
-								defaultAgentId={defaultAgentId}
-								defaultProviderId={defaultProviderId}
-								defaultReasoningEffort={defaultReasoningEffort}
-								providerDefaultModels={providerDefaultModels}
+						<div>
+							<span className="text-[11px] text-text-secondary block mb-1">Task workspace</span>
+							<TaskWorktreeModeControl
+								value={worktreeMode}
+								onChange={onWorktreeModeChange}
+								idPrefix="task-create-worktree-mode"
 							/>
-							{mode === "single" && onTaskAgentSessionInitializationChange ? (
-								<TaskAgentSessionInitializationControl
-									agentId={agentId}
-									defaultAgentId={defaultAgentId}
-									workspaceId={workspaceId}
-									value={taskAgentSessionInitialization}
-									onChange={onTaskAgentSessionInitializationChange}
-									onAgentIdChange={onAgentIdChange}
-								/>
-							) : null}
-						</>
-					) : null}
-				</div>
-			</DialogBody>
-			<DialogFooter>
-				{taskEditorMode === "create" ? (
-					<label
-						htmlFor={createMoreId}
-						className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-					>
-						<RadixSwitch.Root
-							id={createMoreId}
-							checked={createMore}
-							onCheckedChange={setCreateMore}
-							className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
-						>
-							<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
-						</RadixSwitch.Root>
-						<span>Create more</span>
-					</label>
-				) : (
-					<span className="mr-auto" />
-				)}
-				{mode === "single" ? (
-					<>
-						<Button size="sm" onClick={handleCreateSingle} disabled={!prompt.trim() || !branchRef}>
-							<span className="inline-flex items-center">
-								{taskEditorMode === "edit" ? "Save changes" : "Create"}
-								<ButtonShortcut />
+						</div>
+
+						<div>
+							<span className="text-[11px] text-text-secondary block mb-1">
+								{worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
 							</span>
-						</Button>
-						{onCreateAndStart ? (
-							<DropdownMenu.Root>
-								<div className="inline-flex items-center">
-									<Button
-										variant="primary"
-										size="sm"
-										onClick={() => handleRunSingleStartAction(primaryStartAction)}
-										disabled={!prompt.trim() || !branchRef}
-										className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
-									>
-										<span className="inline-flex items-center">
-											{primaryStartLabel}
-											<ButtonShortcut includeShift modifier={primaryStartShortcutModifier} />
-										</span>
-									</Button>
-									{onCreateStartAndOpen ? (
-										<DropdownMenu.Trigger asChild>
-											<Button
-												variant="primary"
-												size="sm"
-												disabled={!prompt.trim() || !branchRef}
-												className="rounded-l-none border-l border-white/20 px-1"
-												aria-label="More start options"
-											>
-												<ChevronDown size={12} />
-											</Button>
-										</DropdownMenu.Trigger>
-									) : null}
-								</div>
-								<DropdownMenu.Portal>
-									<DropdownMenu.Content
-										side="bottom"
-										align="end"
-										sideOffset={4}
-										className="z-50 rounded-md border border-border-bright bg-surface-1 p-1 shadow-lg"
-										onCloseAutoFocus={(event) => event.preventDefault()}
-									>
-										<DropdownMenu.Item
-											className="flex items-center justify-between gap-2 rounded-sm px-2 py-1 text-[12px] text-text-primary cursor-pointer outline-none data-[highlighted]:bg-surface-3 whitespace-nowrap"
-											onSelect={() => handleRunSingleStartAction(secondaryStartAction)}
-										>
-											{secondaryStartLabel}
-											<span className="inline-flex items-center gap-0.5 text-text-tertiary" aria-hidden>
-												{secondaryStartShortcutModifier === "alt" ? (
-													isMacPlatform ? (
-														<Option size={10} />
-													) : (
-														<span className="text-[10px] font-medium leading-none">Alt</span>
-													)
-												) : (
-													<Command size={10} />
-												)}
-												<ArrowBigUp size={10} />
-												<CornerDownLeft size={10} />
-											</span>
-										</DropdownMenu.Item>
-									</DropdownMenu.Content>
-								</DropdownMenu.Portal>
-							</DropdownMenu.Root>
-						) : null}
-					</>
-				) : (
-					<>
-						<Button size="sm" onClick={handleCreateAll} disabled={validTaskCount === 0 || !branchRef}>
-							<span className="inline-flex items-center">
-								Create {validTaskCount} {taskCountLabel}
-								<ButtonShortcut />
-							</span>
-						</Button>
-						{onCreateAndStartMultiple ? (
-							<Button
-								variant="primary"
+							<BranchSelectDropdown
+								options={branchOptions}
+								selectedValue={branchRef}
+								onSelect={onBranchRefChange}
+								fill
 								size="sm"
-								onClick={handleCreateAndStartAll}
-								disabled={validTaskCount === 0 || !branchRef}
+								emptyText="No branches detected"
+							/>
+						</div>
+
+						<div className="flex items-center gap-2 flex-wrap">
+							<label
+								htmlFor={autoReviewEnabledId}
+								className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
 							>
+								<RadixCheckbox.Root
+									id={autoReviewEnabledId}
+									checked={autoReviewEnabled}
+									onCheckedChange={(checked) => onAutoReviewEnabledChange(checked === true)}
+									className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent"
+								>
+									<RadixCheckbox.Indicator>
+										<Check size={10} className="text-white" />
+									</RadixCheckbox.Indicator>
+								</RadixCheckbox.Root>
+								Automatically
+							</label>
+							<NativeSelect
+								size="sm"
+								value={autoReviewMode}
+								onChange={(e) => onAutoReviewModeChange(e.currentTarget.value as TaskAutoReviewMode)}
+								style={{ width: "16ch", maxWidth: "100%" }}
+							>
+								{AUTO_REVIEW_MODE_OPTIONS.map((option) => (
+									<option key={option.value} value={option.value}>
+										{option.label}
+									</option>
+								))}
+							</NativeSelect>
+						</div>
+
+						{onAgentIdChange && onClineSettingsChange ? (
+							<>
+								<TaskAgentModelPicker
+									agentId={agentId}
+									onAgentIdChange={onAgentIdChange}
+									clineSettings={clineSettings}
+									onClineSettingsChange={onClineSettingsChange}
+									terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
+									onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
+									agentOptions={agentOptions}
+									clineProviderOptions={clineProviderOptions}
+									clineModelOptions={clineModelOptions}
+									terminalAgentModelOptions={terminalAgentModelOptions}
+									terminalAgentDefaultModelId={terminalAgentDefaultModelId}
+									effectiveDefaultModelId={effectiveDefaultModelId}
+									providerModels={providerModels}
+									isLoadingProviders={isLoadingProviders}
+									isLoadingModels={isLoadingModels}
+									isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
+									defaultAgentId={defaultAgentId}
+									defaultProviderId={defaultProviderId}
+									defaultReasoningEffort={defaultReasoningEffort}
+									providerDefaultModels={providerDefaultModels}
+								/>
+								{mode === "single" && onTaskAgentSessionInitializationChange ? (
+									<TaskAgentSessionInitializationControl
+										agentId={agentId}
+										defaultAgentId={defaultAgentId}
+										workspaceId={workspaceId}
+										value={taskAgentSessionInitialization}
+										onChange={onTaskAgentSessionInitializationChange}
+										onAgentIdChange={onAgentIdChange}
+									/>
+								) : null}
+							</>
+						) : null}
+					</div>
+				</DialogBody>
+				<DialogFooter>
+					{taskEditorMode === "create" ? (
+						<label
+							htmlFor={createMoreId}
+							className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
+						>
+							<RadixSwitch.Root
+								id={createMoreId}
+								checked={createMore}
+								onCheckedChange={setCreateMore}
+								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+							</RadixSwitch.Root>
+							<span>Create more</span>
+						</label>
+					) : (
+						<span className="mr-auto" />
+					)}
+					{mode === "single" ? (
+						<>
+							<Button size="sm" onClick={handleCreateSingle} disabled={!prompt.trim() || !branchRef}>
 								<span className="inline-flex items-center">
-									Start {validTaskCount} {taskCountLabel}
-									<ButtonShortcut includeShift />
+									{taskEditorMode === "edit" ? "Save changes" : "Create"}
+									<ButtonShortcut />
 								</span>
 							</Button>
-						) : null}
-					</>
-				)}
-			</DialogFooter>
-		</Dialog>
+							{onCreateAndStart ? (
+								<DropdownMenu.Root>
+									<div className="inline-flex items-center">
+										<Button
+											variant="primary"
+											size="sm"
+											onClick={() => handleRunSingleStartAction(primaryStartAction)}
+											disabled={!prompt.trim() || !branchRef}
+											className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
+										>
+											<span className="inline-flex items-center">
+												{primaryStartLabel}
+												<ButtonShortcut includeShift modifier={primaryStartShortcutModifier} />
+											</span>
+										</Button>
+										{onCreateStartAndOpen ? (
+											<DropdownMenu.Trigger asChild>
+												<Button
+													variant="primary"
+													size="sm"
+													disabled={!prompt.trim() || !branchRef}
+													className="rounded-l-none border-l border-white/20 px-1"
+													aria-label="More start options"
+												>
+													<ChevronDown size={12} />
+												</Button>
+											</DropdownMenu.Trigger>
+										) : null}
+									</div>
+									<DropdownMenu.Portal>
+										<DropdownMenu.Content
+											side="bottom"
+											align="end"
+											sideOffset={4}
+											className="z-50 rounded-md border border-border-bright bg-surface-1 p-1 shadow-lg"
+											onCloseAutoFocus={(event) => event.preventDefault()}
+										>
+											<DropdownMenu.Item
+												className="flex items-center justify-between gap-2 rounded-sm px-2 py-1 text-[12px] text-text-primary cursor-pointer outline-none data-[highlighted]:bg-surface-3 whitespace-nowrap"
+												onSelect={() => handleRunSingleStartAction(secondaryStartAction)}
+											>
+												{secondaryStartLabel}
+												<span className="inline-flex items-center gap-0.5 text-text-tertiary" aria-hidden>
+													{secondaryStartShortcutModifier === "alt" ? (
+														isMacPlatform ? (
+															<Option size={10} />
+														) : (
+															<span className="text-[10px] font-medium leading-none">Alt</span>
+														)
+													) : (
+														<Command size={10} />
+													)}
+													<ArrowBigUp size={10} />
+													<CornerDownLeft size={10} />
+												</span>
+											</DropdownMenu.Item>
+										</DropdownMenu.Content>
+									</DropdownMenu.Portal>
+								</DropdownMenu.Root>
+							) : null}
+						</>
+					) : (
+						<>
+							<Button size="sm" onClick={handleCreateAll} disabled={validTaskCount === 0 || !branchRef}>
+								<span className="inline-flex items-center">
+									Create {validTaskCount} {taskCountLabel}
+									<ButtonShortcut />
+								</span>
+							</Button>
+							{onCreateAndStartMultiple ? (
+								<Button
+									variant="primary"
+									size="sm"
+									onClick={handleCreateAndStartAll}
+									disabled={validTaskCount === 0 || !branchRef}
+								>
+									<span className="inline-flex items-center">
+										Start {validTaskCount} {taskCountLabel}
+										<ButtonShortcut includeShift />
+									</span>
+								</Button>
+							) : null}
+						</>
+					)}
+				</DialogFooter>
+			</Dialog>
+			<DiscardTaskCreateConfirmDialog
+				open={isDiscardConfirmOpen}
+				onCancel={handleCancelDiscard}
+				onConfirm={handleConfirmDiscard}
+			/>
+		</>
 	);
 }

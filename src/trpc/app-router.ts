@@ -78,8 +78,10 @@ import type {
 	RuntimeProjectAddRequest,
 	RuntimeProjectAddResponse,
 	RuntimeProjectDirectoryPickerResponse,
-	RuntimeProjectRemoveRequest,
-	RuntimeProjectRemoveResponse,
+	RuntimeProjectPermanentDeletionPreviewRequest,
+	RuntimeProjectPermanentDeletionPreviewResponse,
+	RuntimeProjectPermanentDeletionRequest,
+	RuntimeProjectPermanentDeletionResult,
 	RuntimeProjectsResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
@@ -207,8 +209,10 @@ import {
 	runtimeProjectAddRequestSchema,
 	runtimeProjectAddResponseSchema,
 	runtimeProjectDirectoryPickerResponseSchema,
-	runtimeProjectRemoveRequestSchema,
-	runtimeProjectRemoveResponseSchema,
+	runtimeProjectPermanentDeletionPreviewRequestSchema,
+	runtimeProjectPermanentDeletionPreviewResponseSchema,
+	runtimeProjectPermanentDeletionRequestSchema,
+	runtimeProjectPermanentDeletionResultSchema,
 	runtimeProjectsResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
@@ -489,10 +493,14 @@ export interface RuntimeTrpcContext {
 			preferredWorkspaceId: string | null,
 			input: RuntimeProjectAddRequest,
 		) => Promise<RuntimeProjectAddResponse>;
-		removeProject: (
+		getPermanentDeletionPreview: (
 			preferredWorkspaceId: string | null,
-			input: RuntimeProjectRemoveRequest,
-		) => Promise<RuntimeProjectRemoveResponse>;
+			input: RuntimeProjectPermanentDeletionPreviewRequest,
+		) => Promise<RuntimeProjectPermanentDeletionPreviewResponse>;
+		permanentlyDeleteProjectData: (
+			preferredWorkspaceId: string | null,
+			input: RuntimeProjectPermanentDeletionRequest,
+		) => Promise<RuntimeProjectPermanentDeletionResult>;
 		pickProjectDirectory: (preferredWorkspaceId: string | null) => Promise<RuntimeProjectDirectoryPickerResponse>;
 		listDirectoryContents: (
 			preferredWorkspaceId: string | null,
@@ -939,11 +947,17 @@ export const runtimeAppRouter = t.router({
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.projectsApi.addProject(ctx.requestedWorkspaceId, input);
 			}),
-		remove: t.procedure
-			.input(runtimeProjectRemoveRequestSchema)
-			.output(runtimeProjectRemoveResponseSchema)
+		getPermanentDeletionPreview: t.procedure
+			.input(runtimeProjectPermanentDeletionPreviewRequestSchema)
+			.output(runtimeProjectPermanentDeletionPreviewResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.projectsApi.getPermanentDeletionPreview(ctx.requestedWorkspaceId, input);
+			}),
+		permanentlyDeleteProjectData: t.procedure
+			.input(runtimeProjectPermanentDeletionRequestSchema)
+			.output(runtimeProjectPermanentDeletionResultSchema)
 			.mutation(async ({ ctx, input }) => {
-				return await ctx.projectsApi.removeProject(ctx.requestedWorkspaceId, input);
+				return await ctx.projectsApi.permanentlyDeleteProjectData(ctx.requestedWorkspaceId, input);
 			}),
 		pickDirectory: t.procedure.output(runtimeProjectDirectoryPickerResponseSchema).mutation(async ({ ctx }) => {
 			return await ctx.projectsApi.pickProjectDirectory(ctx.requestedWorkspaceId);

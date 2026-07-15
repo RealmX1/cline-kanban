@@ -276,7 +276,10 @@ describe("CardDetailView", () => {
 					},
 				],
 			},
-			isRuntimeAvailable: true,
+			error: null,
+			queryPhase: "ready",
+			isRequestInFlight: false,
+			refresh: vi.fn(),
 		});
 	});
 
@@ -336,7 +339,10 @@ describe("CardDetailView", () => {
 		mockUseIsMobile.mockReturnValue(true);
 		mockUseRuntimeWorkspaceChanges.mockReturnValue({
 			changes: null,
-			isRuntimeAvailable: true,
+			error: null,
+			queryPhase: "disabled",
+			isRequestInFlight: false,
+			refresh: vi.fn(),
 		});
 		const sessionSummary = createSessionSummary();
 
@@ -408,6 +414,162 @@ describe("CardDetailView", () => {
 		expect(requireButtonWithExactText(container, "Files")).toBeInstanceOf(HTMLButtonElement);
 		expect(requireButtonWithExactText(container, "Sessions")).toBeInstanceOf(HTMLButtonElement);
 		expect(requireButtonWithExactText(container, "Prompts")).toBeInstanceOf(HTMLButtonElement);
+	});
+
+	it("keeps the Changes toolbar mounted during an initial request error and retries on demand", async () => {
+		const refresh = vi.fn(async () => {});
+		mockUseRuntimeWorkspaceChanges.mockReturnValue({
+			changes: null,
+			error: new Error("temporary changes failure"),
+			queryPhase: "initial_error",
+			isRequestInFlight: false,
+			refresh,
+		});
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					isTaskChangesSidebarOpen
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(requireButtonWithExactText(container, "All Changes")).toBeInstanceOf(HTMLButtonElement);
+		expect(requireButtonWithExactText(container, "Last Turn")).toBeInstanceOf(HTMLButtonElement);
+		expect(container.textContent).toContain("Could not load changes");
+		expect(container.textContent).toContain("temporary changes failure");
+
+		await act(async () => requireButtonWithExactText(container, "Retry").click());
+		expect(refresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the last successful diff visible with a stale-data warning after a refresh error", async () => {
+		mockUseRuntimeWorkspaceChanges.mockReturnValue({
+			changes: {
+				files: [
+					{
+						path: "src/last-good.ts",
+						status: "modified",
+						additions: 1,
+						deletions: 0,
+						oldText: "before\n",
+						newText: "after\n",
+					},
+				],
+			},
+			error: new Error("poll failed"),
+			queryPhase: "stale_after_refresh_error",
+			isRequestInFlight: false,
+			refresh: vi.fn(),
+		});
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					isTaskChangesSidebarOpen
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(requireButtonWithExactText(container, "All Changes")).toBeInstanceOf(HTMLButtonElement);
+		expect(container.textContent).toContain("Changes may be out of date");
+		expect(container.textContent).toContain("poll failed");
+		expect(container.querySelector('[data-testid="diff-viewer-panel"]')).toBeInstanceOf(HTMLDivElement);
+		expect(container.querySelector('[data-testid="file-tree-panel"]')).toBeInstanceOf(HTMLDivElement);
+	});
+
+	it("shows a stable unavailable state instead of empty diff and file icons when workspace scope is missing", async () => {
+		mockUseRuntimeWorkspaceChanges.mockReturnValue({
+			changes: null,
+			error: null,
+			queryPhase: "missing_workspace_scope",
+			isRequestInFlight: false,
+			refresh: vi.fn(),
+		});
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId={null}
+					isTaskChangesSidebarOpen
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(requireButtonWithExactText(container, "All Changes")).toBeInstanceOf(HTMLButtonElement);
+		expect(container.textContent).toContain("Workspace changes unavailable");
+		expect(container.querySelector('[data-testid="diff-viewer-panel"]')).toBeNull();
+		expect(container.querySelector('[data-testid="file-tree-panel"]')).toBeNull();
+	});
+
+	it("keeps the mobile Changes toolbar mounted during an initial request error", async () => {
+		mockUseIsMobile.mockReturnValue(true);
+		mockUseRuntimeWorkspaceChanges.mockReturnValue({
+			changes: null,
+			error: new Error("mobile changes failure"),
+			queryPhase: "initial_error",
+			isRequestInFlight: true,
+			refresh: vi.fn(),
+		});
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					isTaskChangesSidebarOpen
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		await act(async () => requireButtonWithExactText(container, "Diff").click());
+		expect(requireButtonWithExactText(container, "All Changes")).toBeInstanceOf(HTMLButtonElement);
+		expect(container.textContent).toContain("Could not load changes");
 	});
 
 	it("collapses the expanded diff on Escape without closing the detail view", async () => {

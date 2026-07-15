@@ -1,32 +1,25 @@
 import { readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type {
-	RuntimeBoardData,
 	RuntimeDirectoryListResponse,
 	RuntimeProjectAddResponse,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
+	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
-import { parseDirectoryListRequest, parseProjectAddRequest, parseProjectRemoveRequest } from "../core/api-validation";
-import type { ProjectWorktreeTaskCleanupTarget } from "../server/workspace-registry";
 import {
-	listWorkspaceIndexEntries,
-	loadWorkspaceContext,
-	loadWorkspaceContextById,
-	loadWorkspaceState,
-	removeWorkspaceIndexEntry,
-	removeWorkspaceStateFiles,
-} from "../state/workspace-state";
-import type { TerminalSessionManager } from "../terminal/session-manager";
+	parseDirectoryListRequest,
+	parseProjectAddRequest,
+	parseProjectPermanentDeletionPreviewRequest,
+	parseProjectPermanentDeletionRequest,
+} from "../core/api-validation";
+import type { ActiveRuntimeSessionShutdownResult } from "../server/active-runtime-session-shutdown";
+import { createConfirmedProjectPermanentDeletionService } from "../server/confirmed-project-permanent-deletion";
+import { listWorkspaceIndexEntries, loadWorkspaceContext, loadWorkspaceContextById } from "../state/workspace-state";
 import { cloneGitRepository } from "../workspace/git-clone";
 import { ensureInitialCommit, initializeGitRepository } from "../workspace/initialize-repo";
 import { isPathWithinRoot } from "../workspace/path-sandbox";
-import { deleteTaskWorktree } from "../workspace/task-worktree";
 import type { RuntimeTrpcContext } from "./app-router";
-
-interface DisposeWorkspaceOptions {
-	stopTerminalSessions?: boolean;
-}
 
 export interface CreateProjectsApiDependencies {
 	getActiveWorkspacePath: () => string | null;
@@ -44,12 +37,11 @@ export interface CreateProjectsApiDependencies {
 		taskCounts: RuntimeProjectTaskCounts;
 	}) => RuntimeProjectSummary;
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void> | void;
-	getTerminalManagerForWorkspace: (workspaceId: string) => TerminalSessionManager | null;
-	disposeWorkspace: (
+	listProjectRuntimeSessionSummaries: (workspaceId: string) => RuntimeTaskSessionSummary[];
+	stopAndCollectProjectRuntimeSessionsForSafePersistence: (
 		workspaceId: string,
-		options?: DisposeWorkspaceOptions,
-	) => { terminalManager: TerminalSessionManager | null; workspacePath: string | null };
-	collectProjectWorktreeTaskIdsForRemoval: (board: RuntimeBoardData) => ProjectWorktreeTaskCleanupTarget[];
+	) => Promise<ActiveRuntimeSessionShutdownResult>;
+	disposeProjectRuntime: (workspaceId: string) => Promise<void>;
 	warn: (message: string) => void;
 	buildProjectsPayload: (preferredCurrentProjectId: string | null) => Promise<{
 		currentProjectId: string | null;
@@ -61,6 +53,17 @@ export interface CreateProjectsApiDependencies {
 
 export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeTrpcContext["projectsApi"] {
 	const filesystemRoot = resolve(deps.serverCwd, "/");
+	const confirmedProjectPermanentDeletionService = createConfirmedProjectPermanentDeletionService({
+		getActiveWorkspaceId: deps.getActiveWorkspaceId,
+		setActiveWorkspace: deps.setActiveWorkspace,
+		clearActiveWorkspace: deps.clearActiveWorkspace,
+		listProjectRuntimeSessionSummaries: deps.listProjectRuntimeSessionSummaries,
+		stopAndCollectProjectRuntimeSessionsForSafePersistence:
+			deps.stopAndCollectProjectRuntimeSessionsForSafePersistence,
+		disposeProjectRuntime: deps.disposeProjectRuntime,
+		broadcastRuntimeProjectsUpdated: deps.broadcastRuntimeProjectsUpdated,
+		warn: deps.warn,
+	});
 
 	return {
 		listProjects: async (preferredWorkspaceId) => {
@@ -156,84 +159,13 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 				} satisfies RuntimeProjectAddResponse;
 			}
 		},
-		removeProject: async (_preferredWorkspaceId, input) => {
-			try {
-				const body = parseProjectRemoveRequest(input);
-				const projectsBeforeRemoval = await listWorkspaceIndexEntries();
-				const projectToRemove = projectsBeforeRemoval.find((project) => project.workspaceId === body.projectId);
-				if (!projectToRemove) {
-					return {
-						ok: false,
-						error: `Unknown project ID: ${body.projectId}`,
-					};
-				}
-
-				const targetsToCleanup: ProjectWorktreeTaskCleanupTarget[] = [];
-				try {
-					const workspaceState = await loadWorkspaceState(projectToRemove.repoPath);
-					for (const target of deps.collectProjectWorktreeTaskIdsForRemoval(workspaceState.board)) {
-						targetsToCleanup.push(target);
-					}
-				} catch {
-					// Best effort: if board state cannot be read, skip worktree cleanup IDs.
-				}
-
-				const removedTerminalManager = deps.getTerminalManagerForWorkspace(body.projectId);
-				if (removedTerminalManager) {
-					removedTerminalManager.markInterruptedAndStopAll();
-				}
-
-				const removed = await removeWorkspaceIndexEntry(body.projectId);
-				if (!removed) {
-					throw new Error(`Could not remove project index entry for "${body.projectId}".`);
-				}
-				await removeWorkspaceStateFiles(body.projectId);
-				deps.disposeWorkspace(body.projectId, {
-					stopTerminalSessions: false,
-				});
-
-				if (deps.getActiveWorkspaceId() === body.projectId) {
-					const remaining = await listWorkspaceIndexEntries();
-					const fallbackWorkspace = remaining[0];
-					if (fallbackWorkspace) {
-						await deps.setActiveWorkspace(fallbackWorkspace.workspaceId, fallbackWorkspace.repoPath);
-					} else {
-						deps.clearActiveWorkspace();
-					}
-				}
-				void deps.broadcastRuntimeProjectsUpdated(deps.getActiveWorkspaceId());
-				if (targetsToCleanup.length > 0) {
-					const cleanupTargets = targetsToCleanup;
-					void (async () => {
-						const deletions = await Promise.all(
-							cleanupTargets.map(async (target) => ({
-								taskId: target.taskId,
-								deleted: await deleteTaskWorktree({
-									repoPath: projectToRemove.repoPath,
-									taskId: target.taskId,
-									...(target.worktreeMode ? { worktreeMode: target.worktreeMode } : {}),
-								}),
-							})),
-						);
-						for (const { taskId, deleted } of deletions) {
-							if (deleted.ok) {
-								continue;
-							}
-							const message = deleted.error ?? `Could not delete task workspace for task "${taskId}".`;
-							deps.warn(message);
-						}
-					})();
-				}
-				return {
-					ok: true,
-				};
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				return {
-					ok: false,
-					error: message,
-				};
-			}
+		getPermanentDeletionPreview: async (_preferredWorkspaceId, input) => {
+			const body = parseProjectPermanentDeletionPreviewRequest(input);
+			return await confirmedProjectPermanentDeletionService.getPermanentDeletionPreview(body);
+		},
+		permanentlyDeleteProjectData: async (_preferredWorkspaceId, input) => {
+			const body = parseProjectPermanentDeletionRequest(input);
+			return await confirmedProjectPermanentDeletionService.permanentlyDeleteProjectData(body);
 		},
 		pickProjectDirectory: async () => {
 			try {

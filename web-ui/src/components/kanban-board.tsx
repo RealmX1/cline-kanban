@@ -33,7 +33,7 @@ export function KanbanBoard({
 	onCardSelect,
 	onCreateTask,
 	onStartTask,
-	onStartAllTasks,
+	onRequestStartAllReadyBacklogTasks,
 	onClearTrash,
 	onEditTask,
 	onSaveTaskTitle,
@@ -66,7 +66,7 @@ export function KanbanBoard({
 	onCardSelect: (taskId: string) => void;
 	onCreateTask: () => void;
 	onStartTask?: (taskId: string) => void;
-	onStartAllTasks?: () => void;
+	onRequestStartAllReadyBacklogTasks?: () => void;
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCard) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
@@ -399,7 +399,9 @@ export function KanbanBoard({
 						taskSessions={taskSessions}
 						onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
 						onStartTask={column.id === "backlog" ? onStartTask : undefined}
-						onStartAllTasks={column.id === "backlog" ? onStartAllTasks : undefined}
+						onRequestStartAllReadyBacklogTasks={
+							column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
+						}
 						onClearTrash={column.id === "trash" ? onClearTrash : undefined}
 						onEditTask={column.id === "backlog" ? onEditTask : undefined}
 						onSaveTitle={onSaveTaskTitle}

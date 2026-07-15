@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile, realpath, rm } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
@@ -49,6 +49,14 @@ interface WorkspaceIndexEntry {
 export interface RuntimeWorkspaceIndexEntry {
 	workspaceId: string;
 	repoPath: string;
+}
+
+export interface PersistedWorkspaceStateById {
+	workspaceId: string;
+	statePath: string;
+	board: RuntimeBoardData;
+	sessions: Record<string, RuntimeTaskSessionSummary>;
+	revision: number;
 }
 
 interface WorkspaceIndexFile {
@@ -230,14 +238,6 @@ function getWorkspaceDirectoryLockRequest(workspaceId: string): LockRequest {
 		path: getWorkspaceDirectoryPath(workspaceId),
 		type: "directory",
 		lockfilePath: join(getWorkspacesRootPath(), `${workspaceId}.lock`),
-	};
-}
-
-function getWorkspacesRootLockRequest(): LockRequest {
-	return {
-		path: getWorkspacesRootPath(),
-		type: "directory",
-		lockfileName: ".workspaces.lock",
 	};
 }
 
@@ -693,20 +693,55 @@ export async function removeWorkspaceIndexEntry(workspaceId: string): Promise<bo
 	});
 }
 
-export async function removeWorkspaceStateFiles(workspaceId: string): Promise<void> {
-	await lockedFileSystem.withLocks(
-		[getWorkspacesRootLockRequest(), getWorkspaceDirectoryLockRequest(workspaceId)],
-		async () => {
-			await rm(getWorkspaceDirectoryPath(workspaceId), {
-				recursive: true,
-				force: true,
-			});
-		},
-	);
+export async function loadPersistedWorkspaceStateById(workspaceId: string): Promise<PersistedWorkspaceStateById> {
+	const board = await readWorkspaceBoard(workspaceId);
+	const sessions = await readWorkspaceSessions(workspaceId);
+	const meta = await readWorkspaceMeta(workspaceId);
+	return {
+		workspaceId,
+		statePath: getWorkspaceDirectoryPath(workspaceId),
+		board,
+		sessions,
+		revision: meta.revision,
+	};
 }
 
-export async function loadWorkspaceState(cwd: string): Promise<RuntimeWorkspaceStateResponse> {
-	const context = await loadWorkspaceContext(cwd);
+export async function savePersistedWorkspaceSessionsById(
+	workspaceId: string,
+	sessions: Record<string, RuntimeTaskSessionSummary>,
+	expectedRevision: number,
+): Promise<number> {
+	const parsedSessions = workspaceSessionsSchema.safeParse(sessions);
+	if (!parsedSessions.success) {
+		throw new Error(`Invalid workspace sessions payload. ${formatSchemaIssues(parsedSessions.error)}`);
+	}
+
+	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
+		const currentMeta = await readWorkspaceMeta(workspaceId);
+		if (currentMeta.revision !== expectedRevision) {
+			throw new WorkspaceStateConflictError(expectedRevision, currentMeta.revision);
+		}
+		const nextRevision = currentMeta.revision + 1;
+		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(workspaceId), parsedSessions.data, {
+			lock: null,
+		});
+		await lockedFileSystem.writeJsonFileAtomic(
+			getWorkspaceMetaPath(workspaceId),
+			{
+				revision: nextRevision,
+				updatedAt: Date.now(),
+			} satisfies WorkspaceStateMeta,
+			{ lock: null },
+		);
+		return nextRevision;
+	});
+}
+
+export async function loadWorkspaceState(
+	cwd: string,
+	options: LoadWorkspaceContextOptions = {},
+): Promise<RuntimeWorkspaceStateResponse> {
+	const context = await loadWorkspaceContext(cwd, options);
 	const board = await readWorkspaceBoard(context.workspaceId);
 	const sessions = await readWorkspaceSessions(context.workspaceId);
 	const meta = await readWorkspaceMeta(context.workspaceId);

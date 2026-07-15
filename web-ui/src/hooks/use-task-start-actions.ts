@@ -1,11 +1,12 @@
 import type { Dispatch, SetStateAction } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { findCardSelection } from "@/state/board-state";
-import type { BoardData } from "@/types";
+import type { BoardCard, BoardData } from "@/types";
 
 interface UseTaskStartActionsInput {
 	board: BoardData;
+	currentProjectId: string | null;
 	handleCreateTask: (options?: { keepDialogOpen?: boolean }) => string | null;
 	handleCreateTasks: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
 	handleStartTask: (taskId: string) => void;
@@ -18,7 +19,15 @@ export interface UseTaskStartActionsResult {
 	handleCreateAndStartTasks: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
 	handleCreateStartAndOpenTask: (options?: { keepDialogOpen?: boolean }) => string | null;
 	handleStartTaskFromBoard: (taskId: string) => void;
-	handleStartAllBacklogTasksFromBoard: () => void;
+	pendingStartAllReadyBacklogTaskCards: BoardCard[] | null;
+	requestStartAllReadyBacklogTasksConfirmation: () => void;
+	confirmStartAllReadyBacklogTasks: () => void;
+	cancelStartAllReadyBacklogTasksConfirmation: () => void;
+}
+
+interface PendingStartAllReadyBacklogTasksConfirmation {
+	projectId: string | null;
+	requestedTaskIds: string[];
 }
 
 export function getStartableBacklogTaskIds(board: BoardData): string[] {
@@ -51,6 +60,7 @@ export function getStartableBacklogTaskIds(board: BoardData): string[] {
 
 export function useTaskStartActions({
 	board,
+	currentProjectId,
 	handleCreateTask,
 	handleCreateTasks,
 	handleStartTask,
@@ -58,6 +68,8 @@ export function useTaskStartActions({
 	setSelectedTaskId,
 }: UseTaskStartActionsInput): UseTaskStartActionsResult {
 	const [pendingTaskStartAfterCreateIds, setPendingTaskStartAfterCreateIds] = useState<string[] | null>(null);
+	const [pendingStartAllReadyBacklogTasksConfirmation, setPendingStartAllReadyBacklogTasksConfirmation] =
+		useState<PendingStartAllReadyBacklogTasksConfirmation | null>(null);
 
 	const startBacklogTasks = useCallback(
 		(taskIds: string[]) => {
@@ -95,14 +107,57 @@ export function useTaskStartActions({
 		[board, handleStartTask, startBacklogTasks],
 	);
 
-	const handleStartAllBacklogTasksFromBoard = useCallback(() => {
+	const requestStartAllReadyBacklogTasksConfirmation = useCallback(() => {
 		const backlogTaskIds = getStartableBacklogTaskIds(board);
 
 		if (backlogTaskIds.length === 0) {
 			return;
 		}
-		startBacklogTasks(backlogTaskIds);
-	}, [board, startBacklogTasks]);
+		setPendingStartAllReadyBacklogTasksConfirmation({
+			projectId: currentProjectId,
+			requestedTaskIds: backlogTaskIds,
+		});
+	}, [board, currentProjectId]);
+
+	const pendingStartAllReadyBacklogTaskCards = useMemo(() => {
+		if (
+			!pendingStartAllReadyBacklogTasksConfirmation ||
+			pendingStartAllReadyBacklogTasksConfirmation.projectId !== currentProjectId
+		) {
+			return null;
+		}
+
+		const currentlyStartableTaskIds = new Set(getStartableBacklogTaskIds(board));
+		return pendingStartAllReadyBacklogTasksConfirmation.requestedTaskIds
+			.filter((taskId) => currentlyStartableTaskIds.has(taskId))
+			.map((taskId) => findCardSelection(board, taskId)?.card ?? null)
+			.filter((card): card is BoardCard => card !== null);
+	}, [board, currentProjectId, pendingStartAllReadyBacklogTasksConfirmation]);
+
+	const cancelStartAllReadyBacklogTasksConfirmation = useCallback(() => {
+		setPendingStartAllReadyBacklogTasksConfirmation(null);
+	}, []);
+
+	const confirmStartAllReadyBacklogTasks = useCallback(() => {
+		const confirmedTaskIds = pendingStartAllReadyBacklogTaskCards?.map((card) => card.id) ?? [];
+		setPendingStartAllReadyBacklogTasksConfirmation(null);
+		startBacklogTasks(confirmedTaskIds);
+	}, [pendingStartAllReadyBacklogTaskCards, startBacklogTasks]);
+
+	useEffect(() => {
+		setPendingStartAllReadyBacklogTasksConfirmation((currentConfirmation) => {
+			if (!currentConfirmation || currentConfirmation.projectId === currentProjectId) {
+				return currentConfirmation;
+			}
+			return null;
+		});
+	}, [currentProjectId]);
+
+	useEffect(() => {
+		if (pendingStartAllReadyBacklogTasksConfirmation !== null && pendingStartAllReadyBacklogTaskCards?.length === 0) {
+			setPendingStartAllReadyBacklogTasksConfirmation(null);
+		}
+	}, [pendingStartAllReadyBacklogTaskCards, pendingStartAllReadyBacklogTasksConfirmation]);
 
 	const handleCreateAndStartTask = useCallback(
 		(options?: { keepDialogOpen?: boolean }): string | null => {
@@ -163,6 +218,9 @@ export function useTaskStartActions({
 		handleCreateAndStartTasks,
 		handleCreateStartAndOpenTask,
 		handleStartTaskFromBoard,
-		handleStartAllBacklogTasksFromBoard,
+		pendingStartAllReadyBacklogTaskCards,
+		requestStartAllReadyBacklogTasksConfirmation,
+		confirmStartAllReadyBacklogTasks,
+		cancelStartAllReadyBacklogTasksConfirmation,
 	};
 }

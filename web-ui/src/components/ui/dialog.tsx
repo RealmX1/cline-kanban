@@ -16,6 +16,8 @@ export function Dialog({
 	contentClassName,
 	contentAriaDescribedBy,
 	onEscapeKeyDown,
+	onPointerDownOutside,
+	onInteractOutside,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -23,6 +25,8 @@ export function Dialog({
 	contentClassName?: string;
 	contentAriaDescribedBy?: string;
 	onEscapeKeyDown?: (event: KeyboardEvent) => void;
+	onPointerDownOutside?: ComponentPropsWithoutRef<typeof RadixDialog.Content>["onPointerDownOutside"];
+	onInteractOutside?: ComponentPropsWithoutRef<typeof RadixDialog.Content>["onInteractOutside"];
 }): React.ReactElement {
 	return (
 		<RadixDialog.Root open={open} onOpenChange={onOpenChange}>
@@ -34,6 +38,8 @@ export function Dialog({
 				<RadixDialog.Content
 					aria-describedby={contentAriaDescribedBy}
 					onEscapeKeyDown={onEscapeKeyDown}
+					onPointerDownOutside={onPointerDownOutside}
+					onInteractOutside={onInteractOutside}
 					className={cn(
 						"kb-dialog-content fixed left-1/2 top-1/2 z-50 w-[90vw] max-w-lg max-h-[85vh] flex flex-col rounded-lg border border-[#5A6572] bg-surface-1 shadow-2xl focus:outline-none",
 						contentClassName,
@@ -62,7 +68,10 @@ export function DialogHeader({
 				{title}
 			</RadixDialog.Title>
 			{children}
-			<RadixDialog.Close className="p-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-surface-3 cursor-pointer max-md:min-h-11 max-md:min-w-11 max-md:flex max-md:items-center max-md:justify-center">
+			<RadixDialog.Close
+				aria-label="Close"
+				className="p-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-surface-3 cursor-pointer max-md:min-h-11 max-md:min-w-11 max-md:flex max-md:items-center max-md:justify-center"
+			>
 				<X size={16} className="max-md:hidden" />
 				<X size={20} className="hidden max-md:block" />
 			</RadixDialog.Close>
