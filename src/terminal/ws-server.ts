@@ -7,6 +7,7 @@ import { WebSocketServer } from "ws";
 import type { RuntimeTerminalWsServerMessage } from "../core/api-contract";
 import { parseTerminalWsClientMessage } from "../core/api-validation";
 import { getKanbanRuntimeOrigin } from "../core/runtime-endpoint";
+import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { handleSocketUpgrade } from "../server/middleware";
 import type { TerminalSessionService } from "./terminal-session-service";
 
@@ -76,11 +77,20 @@ interface TerminalStreamState {
 const OUTPUT_BATCH_INTERVAL_MS = 4;
 const LOW_LATENCY_CHUNK_BYTES = 256;
 const LOW_LATENCY_IDLE_WINDOW_MS = 5;
+// 单个 IO 帧的大小上限。批处理窗口内攒下的输出可能拼成数百 KB 的巨帧,而客户端 xterm 对单个
+// chunk 是整段同步解析(WriteBuffer 的 12ms 时间预算只在 chunk 之间检查)——巨帧意味着一次
+// 超长解析、write 回调与 output_ack 大幅推迟,进而触发 ack 背压暂停 PTY、冻结键盘回显。
+// 分帧后客户端逐帧解析/逐帧 ack,未确认字节平滑收敛。取值与 OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES
+// 对齐:单帧不会仅凭 ws.bufferedAmount 一项瞬时越过 socket 高水位。
+const OUTPUT_FRAME_MAX_BYTES = 16 * 1024;
 const OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES = 16 * 1024;
 const OUTPUT_BUFFER_LOW_WATER_MARK_BYTES = Math.floor(OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES / 4);
 const OUTPUT_ACK_HIGH_WATER_MARK_BYTES = 100_000;
 const OUTPUT_ACK_LOW_WATER_MARK_BYTES = 5_000;
 const OUTPUT_RESUME_CHECK_INTERVAL_MS = 16;
+// [tui-freeze] 诊断:PTY 被 ack 背压暂停期间,新按键的 shell 回显完全停产——用户体感即
+// 「键盘输入冻结」。暂停超过该阈值才打日志,短暂正常流控不刷屏。
+const OUTPUT_BACKPRESSURE_PAUSE_WARN_THRESHOLD_MS = 200;
 
 function getWebSocketTransportSocket(ws: WebSocket): Socket | null {
 	const transportSocket = (ws as WebSocket & { _socket?: Socket })._socket;
@@ -226,6 +236,22 @@ export function createTerminalWebSocketBridge({
 		// but not yet acknowledged as committed by the terminal renderer. We also look
 		// at the websocket's own bufferedAmount so we catch both xterm lag and socket lag.
 		let unacknowledgedOutputBytes = 0;
+		let outputPausedAt: number | null = null;
+		let outputPauseReason: "ack-high-water" | "socket-buffered" | null = null;
+
+		const logOutputPauseEndedIfSlow = (endTrigger: "resume" | "dispose") => {
+			if (outputPausedAt === null) {
+				return;
+			}
+			const pauseDurationMs = Date.now() - outputPausedAt;
+			if (pauseDurationMs >= OUTPUT_BACKPRESSURE_PAUSE_WARN_THRESHOLD_MS) {
+				logTuiFreezeWarning(
+					`[tui-freeze] output-backpressure taskId=${taskId} clientId=${clientId} durationMs=${pauseDurationMs} reason=${outputPauseReason ?? "unknown"} endTrigger=${endTrigger} unackBytes=${unacknowledgedOutputBytes} socketBufferedBytes=${ws.bufferedAmount}`,
+				);
+			}
+			outputPausedAt = null;
+			outputPauseReason = null;
+		};
 
 		const shouldPauseOutput = () =>
 			ws.bufferedAmount >= OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES ||
@@ -254,10 +280,16 @@ export function createTerminalWebSocketBridge({
 			}
 			if (canResumeOutput()) {
 				outputPaused = false;
+				logOutputPauseEndedIfSlow("resume");
 				clearResumeCheck();
 				streamState.backpressuredViewerIds.delete(clientId);
 				if (streamState.backpressuredViewerIds.size === 0) {
 					terminalManager.resumeOutput(taskId);
+				}
+				// 暂停期间 flushOutputBatch 会把未发送的余帧退回 pendingOutputChunks;这里没有
+				// 定时器在等的话必须主动续发,否则余帧要等到下一次 PTY 输出才会被捎带出去。
+				if (pendingOutputChunks.length > 0 && outputFlushTimer === null) {
+					flushOutputBatch();
 				}
 				return;
 			}
@@ -284,6 +316,9 @@ export function createTerminalWebSocketBridge({
 			unacknowledgedOutputBytes += chunk.byteLength;
 			if (shouldPauseOutput()) {
 				outputPaused = true;
+				outputPausedAt = Date.now();
+				outputPauseReason =
+					unacknowledgedOutputBytes >= OUTPUT_ACK_HIGH_WATER_MARK_BYTES ? "ack-high-water" : "socket-buffered";
 				const previouslyPaused = streamState.backpressuredViewerIds.size > 0;
 				streamState.backpressuredViewerIds.add(clientId);
 				if (!previouslyPaused) {
@@ -308,14 +343,36 @@ export function createTerminalWebSocketBridge({
 				pendingOutputChunks = [];
 				return;
 			}
-			sendOutputChunk(Buffer.concat(pendingOutputChunks));
+			if (outputPaused) {
+				// 已处于背压暂停:保留 pendingOutputChunks 不发送,等 checkResumeAfterBackpressure
+				// 的 resume 分支重新触发 flush。暂停期间发出的帧不会计入 unacknowledgedOutputBytes
+				// (checkBackpressureAfterSend 在 paused 时直接返回),客户端对它们的 ack 会把计数
+				// 提前打到低水位、过早 resume PTY,让大批量输出绕过流控直灌渲染队列。
+				return;
+			}
+			const batchedOutput = Buffer.concat(pendingOutputChunks);
 			pendingOutputChunks = [];
+			// 按帧上限切片发送(subarray 零拷贝)。字节流内容与顺序不变,仅消息边界变化——客户端
+			// 流式 TextDecoder + xterm 增量解析器对任意切点(跨帧 ANSI / UTF-8 断裂)均安全。
+			// 逐帧走 sendOutputChunk 保持逐帧背压记账。
+			for (let frameOffset = 0; frameOffset < batchedOutput.byteLength; frameOffset += OUTPUT_FRAME_MAX_BYTES) {
+				if (outputPaused) {
+					// 上一帧触发了背压暂停:立即停发,把余帧退回队首等 resume 后续传。本函数全程
+					// 同步,循环期间不会有交错 enqueue,unshift 保证余帧排在暂停期间新到 chunk 之前。
+					pendingOutputChunks.unshift(batchedOutput.subarray(frameOffset));
+					return;
+				}
+				sendOutputChunk(batchedOutput.subarray(frameOffset, frameOffset + OUTPUT_FRAME_MAX_BYTES));
+			}
 		};
 
 		return {
 			enqueueOutput: (chunk: Buffer) => {
 				const now = Date.now();
+				// !outputPaused:暂停期间低延迟路径若直发,该帧同样不计入 unacknowledgedOutputBytes
+				// 记账(与 flushOutputBatch 的暂停停发同一漏洞),必须排队等 resume。
 				const shouldSendImmediately =
+					!outputPaused &&
 					pendingOutputChunks.length === 0 &&
 					outputFlushTimer === null &&
 					chunk.byteLength <= LOW_LATENCY_CHUNK_BYTES &&
@@ -341,6 +398,7 @@ export function createTerminalWebSocketBridge({
 				clearResumeCheck();
 				if (outputPaused) {
 					outputPaused = false;
+					logOutputPauseEndedIfSlow("dispose");
 					streamState.backpressuredViewerIds.delete(clientId);
 					if (streamState.backpressuredViewerIds.size === 0) {
 						terminalManager.resumeOutput(taskId);

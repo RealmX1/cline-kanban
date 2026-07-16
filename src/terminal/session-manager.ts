@@ -27,7 +27,7 @@ import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freez
 import {
 	type AgentOutputSubstanceMemory,
 	createAgentOutputSubstanceMemory,
-	detectFreshSubstantiveAgentOutput,
+	detectFreshSubstantiveAgentOutputFromStripped,
 } from "./agent-output-substance";
 import {
 	type AgentAdapterLaunchInput,
@@ -108,6 +108,18 @@ const STALL_SCAN_INTERVAL_MS = 15_000;
 // 本阈值」即主动 transitionToReview 自愈。远大于 45s 日志阈值，取保守 5 分钟：主护栏是「停在交互提示符」这一
 // 强信号（agent 确已空闲、非 mid-tool / 长构建），阈值只作次要防抖，宁可晚翻也不误翻正在干活的会话。
 const IDLE_STALL_AUTO_REVIEW_THRESHOLD_MS = 5 * 60_000;
+// [tui-freeze] 诊断:mirror 快照序列化(@xterm/addon-serialize)是同步的,单次执行期间整个
+// Node 事件循环被阻塞——所有任务的键盘输入与回显全部延迟。取快照耗时越过该阈值即打日志,
+// 用于定位「restore / 就绪判定」哪个触发点在制造事件循环尖峰。
+const MIRROR_SERIALIZE_WARN_THRESHOLD_MS = 50;
+// 重分析攒批窗口：首个待分析字节起 50ms 后统一执行 strip + 实质输出检测 + 输出转移检测 +
+// output-reaction 扫描。检测延迟上限 50ms，对下游时间常数（连接错误退避首档 4s、输出静默阈值 2s、
+// 状态机翻面为人类时间尺度）可忽略；收益是 spinner 高频重绘期分析频率从每 chunk（每秒可达数十次）
+// 降到 ≤20 次/秒且多 chunk 摊薄。攒批还把跨 chunk 断裂的行拼回完整行，行级签名与连接错误检测更准。
+// 置 0 = 紧急逃生阀：退回逐 chunk 同步分析语义。
+const OUTPUT_ANALYSIS_BATCH_WINDOW_MS = 50;
+// 攒批文本上限：达到即立即 flush，封顶单窗口内存与检测延迟（洪水输出时窗口内可积累的量）。
+const MAX_PENDING_OUTPUT_ANALYSIS_CHARS = 64 * 1024;
 
 function readStallThresholdMs(): number {
 	const raw = process.env.CLINE_TUI_STALL_MS;
@@ -162,6 +174,13 @@ interface ActiveProcessState {
 	outputReactionScanBuffer: string | null;
 	// 输出反应的兜底 / 退避 attempt 定时器（同一时刻至多一个待触发）。
 	outputReactionAttemptTimer: NodeJS.Timeout | null;
+	// 攒批待分析的 decoded 输出文本：重分析（实质输出检测 / adapter 输出转移检测 / output-reaction
+	// 扫描）按 OUTPUT_ANALYSIS_BATCH_WINDOW_MS 窗口合并执行，不再逐 chunk——spinner 每秒重绘多次时
+	// 逐 chunk strip + 正则曾占满单事件循环、拖延所有任务的键盘回显（低负载 TUI 卡顿主因之一）。
+	// 超过 MAX_PENDING_OUTPUT_ANALYSIS_CHARS 立即 flush 封顶内存；会话 teardown 时随定时器一并丢弃。
+	pendingOutputAnalysisText: string;
+	// 上述攒批窗口的一次性 flush 定时器（同一时刻至多一个待触发）。
+	outputAnalysisFlushTimer: NodeJS.Timeout | null;
 	// 最近一次用户手动输入时刻，用于抑制自动注入打断用户。
 	lastUserInputAt: number | null;
 	// 实质输出新鲜度记忆：把 TUI 周期性重绘（spinner / footer / 帮助提示）从「实质产出」剔除，
@@ -408,6 +427,25 @@ function clearSubmitConfirmTimer(state: { submitConfirmTimer: NodeJS.Timeout | n
 	}
 }
 
+// 只清攒批 flush 定时器、保留 pending 文本——供「容量触顶 / 逃生阀走同步 flush」路径使用，
+// 避免已排定的定时器对同一批文本二次 flush。
+function discardPendingOutputAnalysisTimerOnly(state: { outputAnalysisFlushTimer: NodeJS.Timeout | null }): void {
+	if (state.outputAnalysisFlushTimer) {
+		clearTimeout(state.outputAnalysisFlushTimer);
+		state.outputAnalysisFlushTimer = null;
+	}
+}
+
+// 会话 teardown（替换 / 停止 / 退出 / 强停 / 全体中断）时丢弃攒批中的输出分析：清 flush 定时器 +
+// 清 pending 文本。死会话的分析尾巴没有消费者，绝不能套在后继会话的状态上。
+function discardPendingOutputAnalysis(state: {
+	outputAnalysisFlushTimer: NodeJS.Timeout | null;
+	pendingOutputAnalysisText: string;
+}): void {
+	discardPendingOutputAnalysisTimerOnly(state);
+	state.pendingOutputAnalysisText = "";
+}
+
 function clearResumeSubstantiveGuard(active: ActiveProcessState): void {
 	active.suppressSubstantiveOutputUntilContinues = false;
 }
@@ -519,21 +557,107 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 	}
 
-	// 每个新 chunk：维护滚动扫描缓冲（stripAnsiAndControl，保留换行），并驱动引擎。
-	private processOutputReactionChunk(taskId: string, entry: SessionEntry, decodedChunk: string): void {
+	// 把一段 decoded 输出文本并入该会话的重分析攒批。窗口首字节起 OUTPUT_ANALYSIS_BATCH_WINDOW_MS
+	// 后由定时器统一 flush；累计达 MAX_PENDING_OUTPUT_ANALYSIS_CHARS 立即 flush（封顶内存与检测延迟）。
+	// 窗口常量 ≤0 时同步 flush＝逐 chunk 旧语义（紧急逃生阀）。
+	private appendPendingOutputAnalysisText(taskId: string, entry: SessionEntry, decodedChunk: string): void {
+		const active = entry.active;
+		if (!active) {
+			return;
+		}
+		active.pendingOutputAnalysisText += decodedChunk;
+		if (
+			OUTPUT_ANALYSIS_BATCH_WINDOW_MS <= 0 ||
+			active.pendingOutputAnalysisText.length >= MAX_PENDING_OUTPUT_ANALYSIS_CHARS
+		) {
+			discardPendingOutputAnalysisTimerOnly(active);
+			this.flushPendingOutputAnalysis(taskId);
+			return;
+		}
+		if (active.outputAnalysisFlushTimer !== null) {
+			return;
+		}
+		active.outputAnalysisFlushTimer = setTimeout(() => {
+			active.outputAnalysisFlushTimer = null;
+			// 会话在窗口内被替换 / 停止：pending 文本属于旧 active，绝不把旧会话的输出分析
+			// 套在新会话状态上（teardown 已 discard，此处按 active 身份再兜底一层）。
+			if (this.entries.get(taskId)?.active !== active) {
+				return;
+			}
+			this.flushPendingOutputAnalysis(taskId);
+		}, OUTPUT_ANALYSIS_BATCH_WINDOW_MS);
+	}
+
+	// 攒批重分析统一执行点：单次 strip 共享给实质输出检测与 output-reaction 扫描，随后跑
+	// adapter 输出转移检测。agent 回合与 suppress guard 都按 flush 时刻评估——窗口 ≤50ms，
+	// 与「PTY 输出先于 hook 落地」的既有竞态同量级，且由 facet 门控 / standDown 边兜底。
+	private flushPendingOutputAnalysis(taskId: string): void {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			return;
+		}
+		const batchText = active.pendingOutputAnalysisText;
+		active.pendingOutputAnalysisText = "";
+		if (batchText.length === 0) {
+			return;
+		}
+
+		// lastSubstantiveOutputAt 仅在「agent 回合且本批带来新实质内容」时推进——Validation 列
+		// 自动打回判据读它，从而 spinner 空转不再误判为「仍在产出」。
+		const inAgentTurn = entry.summary.agentId !== null && resolveSessionFacets(entry.summary).turnOwner === "agent";
+		const needsReactionScan = active.outputReactionEngine !== null;
+		const strippedBatchText = inAgentTurn || needsReactionScan ? stripAnsiAndControl(batchText) : "";
+		let hasFreshSubstantiveOutput =
+			inAgentTurn &&
+			detectFreshSubstantiveAgentOutputFromStripped(active.agentOutputSubstanceMemory, strippedBatchText);
+		if (active.suppressSubstantiveOutputUntilContinues) {
+			hasFreshSubstantiveOutput = false;
+		}
+		if (hasFreshSubstantiveOutput) {
+			// 取 lastOutputAt 而非 now()：实质内容随批内 chunk 到达，保持
+			// lastSubstantiveOutputAt ≤ lastOutputAt 的既有关系。
+			updateSummary(entry, { lastSubstantiveOutputAt: entry.summary.lastOutputAt ?? now() });
+		}
+
+		const adapterEvent = active.detectOutputTransition?.(batchText, entry.summary) ?? null;
+		if (adapterEvent) {
+			const requiresEnterForCodex =
+				adapterEvent.type === "agent.prompt-ready" &&
+				entry.summary.agentId === "codex" &&
+				!active.awaitingCodexPromptAfterEnter;
+			if (!requiresEnterForCodex) {
+				const summary = this.applySessionEvent(entry, adapterEvent);
+				if (adapterEvent.type === "agent.prompt-ready" && entry.summary.agentId === "codex") {
+					active.awaitingCodexPromptAfterEnter = false;
+				}
+				for (const taskListener of entry.listeners.values()) {
+					taskListener.onState?.(cloneSummary(summary));
+				}
+				this.emitSummary(summary);
+			}
+		}
+
+		if (active.outputReactionEngine !== null) {
+			this.processOutputReactionChunk(taskId, entry, strippedBatchText);
+		}
+	}
+
+	// 每个新 chunk：维护滚动扫描缓冲并驱动引擎。入参已由调用方 stripAnsiAndControl
+	// （保留换行）——strip 一次、与实质输出检测共享,不在此重复 strip。
+	private processOutputReactionChunk(taskId: string, entry: SessionEntry, strippedChunkText: string): void {
 		const active = entry.active;
 		if (!active || active.outputReactionEngine === null || active.outputReactionSession === null) {
 			return;
 		}
-		const chunkText = stripAnsiAndControl(decodedChunk);
 		const previousBuffer = active.outputReactionScanBuffer ?? "";
-		let nextBuffer = previousBuffer + chunkText;
+		let nextBuffer = previousBuffer + strippedChunkText;
 		if (nextBuffer.length > MAX_OUTPUT_REACTION_SCAN_BUFFER_CHARS) {
 			nextBuffer = nextBuffer.slice(-MAX_OUTPUT_REACTION_SCAN_BUFFER_CHARS);
 		}
 		active.outputReactionScanBuffer = nextBuffer;
 
-		const ctx = this.buildOutputReactionContext(entry, chunkText);
+		const ctx = this.buildOutputReactionContext(entry, strippedChunkText);
 		if (ctx === null) {
 			return;
 		}
@@ -924,10 +1048,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const mirror = entry.terminalStateMirror;
 		if (mirror) {
-			const snapshot = await mirror.getSnapshot();
-			// 仅按当前视口（最后 rows 行）判定就绪：getSnapshot() 含完整 scrollback（TERMINAL_SCROLLBACK=20_000，
-			// 服务于终端 restore，须保持原样），而历史里早先出现过的提示符框会误判「当前屏」就绪——把投递写进
-			// 正处于重绘/出输出的非就绪窗口，正是本特性要消除的「粘贴了但 CR 被吞、不发送」竞态。
+			const serializeStartedAtMs = now();
+			// 仅按当前视口（最后 rows 行）判定就绪——历史里早先出现过的提示符框会误判「当前屏」就绪，
+			// 把投递写进正处于重绘/出输出的非就绪窗口，正是本特性要消除的「粘贴了但 CR 被吞、不发送」
+			// 竞态。取 viewport 快照（scrollback: 0）而非全量 getSnapshot()：serialize 是同步阻塞整个
+			// 事件循环的，全量最坏 2 万行，而本判定语义上只需要活动屏；stall 扫描每 15s 对每个长思考
+			// 会话走到这里，全量序列化曾是低负载 TUI 卡顿的周期性尖峰来源。
+			const snapshot = await mirror.getViewportSnapshot();
+			this.logMirrorSerializeIfSlow(
+				entry.summary.taskId,
+				"viewport",
+				serializeStartedAtMs,
+				snapshot.snapshot.length,
+			);
+			// takeLastLines + strip 对 viewport 快照是防御性 no-op 级处理，保持既有判定管线不变。
 			const scan = stripAnsiAndControl(takeLastLines(snapshot.snapshot, snapshot.rows));
 			if (predicate(scan)) {
 				return "prompt";
@@ -1189,7 +1323,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry?.terminalStateMirror) {
 			return null;
 		}
-		return await entry.terminalStateMirror.getSnapshot();
+		const serializeStartedAtMs = now();
+		const snapshot = await entry.terminalStateMirror.getSnapshot();
+		this.logMirrorSerializeIfSlow(taskId, "restore", serializeStartedAtMs, snapshot.snapshot.length);
+		return snapshot;
+	}
+
+	// [tui-freeze] 诊断:见 MIRROR_SERIALIZE_WARN_THRESHOLD_MS。耗时含排队等待 mirror
+	// operationQueue 的部分——量的是调用方(也是事件循环)实际感受到的阻塞窗口。
+	private logMirrorSerializeIfSlow(
+		taskId: string,
+		serializeKind: "restore" | "viewport",
+		serializeStartedAtMs: number,
+		snapshotChars: number,
+	): void {
+		const durationMs = now() - serializeStartedAtMs;
+		if (durationMs >= MIRROR_SERIALIZE_WARN_THRESHOLD_MS) {
+			logTuiFreezeWarning(
+				`[tui-freeze] mirror-serialize taskId=${taskId} kind=${serializeKind} durationMs=${durationMs} snapshotChars=${snapshotChars}`,
+			);
+		}
 	}
 
 	async startTaskSession(request: StartTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
@@ -1208,6 +1361,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearOutputReactionTimer(entry.active);
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
+			discardPendingOutputAnalysis(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -1285,12 +1439,29 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			entry.terminalStateMirror?.applyOutput(filteredChunk);
 
-			const needsDecodedOutput =
-				entry.active.workspaceTrustBuffer !== null ||
-				entry.active.deferredStartupInput !== null ||
+			// 回显 fan-out 必须先于下面的输出分析管线:分析(实质输出检测、连接错误分类等)是
+			// 每 chunk 的同步 CPU 开销,排在前面会把键盘回显整体推迟——正是「低负载下 TUI 输入
+			// 卡顿」的主因之一。顺序约束:filterTerminalProtocolOutput 必须最先(跨 chunk 协议
+			// 状态 + OSC 应答);mirror.applyOutput 保持先于 fan-out 且同一同步 tick 内完成,
+			// restore 快照握手依赖「mirror 已见到该 chunk」的不变量。分析代码不修改 filteredChunk。
+			for (const taskListener of entry.listeners.values()) {
+				taskListener.onOutput?.(filteredChunk);
+			}
+
+			const inAgentTurnAtChunkTime =
+				entry.summary.agentId !== null && resolveSessionFacets(entry.summary).turnOwner === "agent";
+			// 攒批重分析的消费者（实质输出检测 / 输出转移检测 / output-reaction 扫描）——命中任一
+			// 即把本 chunk 的 decoded 文本并入攒批；shouldInspectOutputForTransition 与既有语义一致，
+			// 是解码成本门，不是检测语义门。
+			const hasBatchedOutputAnalysisConsumer =
+				inAgentTurnAtChunkTime ||
 				entry.active.outputReactionEngine !== null ||
 				(entry.active.detectOutputTransition !== null &&
 					(entry.active.shouldInspectOutputForTransition?.(entry.summary) ?? true));
+			const needsDecodedOutput =
+				entry.active.workspaceTrustBuffer !== null ||
+				entry.active.deferredStartupInput !== null ||
+				hasBatchedOutputAnalysisConsumer;
 			const data = needsDecodedOutput ? filteredChunk.toString("utf8") : "";
 
 			if (entry.active.workspaceTrustBuffer !== null) {
@@ -1323,25 +1494,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 				}
 			}
 			// lastOutputAt 每段非空 chunk 都刷新（spinner 重绘亦然）——供自动续跑静默门控 / 卡顿探针 /
-			// 卡片 computing 展示读取。lastSubstantiveOutputAt 仅在「agent 回合且本 chunk 带来新实质内容」
-			// 时同刻推进——Validation 列自动打回判据读它，从而 spinner 空转不再误判为「仍在产出」。
-			// 分类与解码仅在 agent 回合做（限定成本、语义对齐）；needsDecodedOutput 已算出 data 时复用，
-			// 否则按需解码。合并进同一个 metadata-only patch，保持每 chunk 仅一次 updateSummary / 广播。
-			const inAgentTurn =
-				entry.summary.agentId !== null && resolveSessionFacets(entry.summary).turnOwner === "agent";
-			const decodedChunk = data.length > 0 ? data : filteredChunk.toString("utf8");
-			let hasFreshSubstantiveOutput =
-				inAgentTurn && detectFreshSubstantiveAgentOutput(entry.active.agentOutputSubstanceMemory, decodedChunk);
-			if (entry.active.suppressSubstantiveOutputUntilContinues) {
-				hasFreshSubstantiveOutput = false;
-			}
-			const outputAt = now();
-			updateSummary(
-				entry,
-				hasFreshSubstantiveOutput
-					? { lastOutputAt: outputAt, lastSubstantiveOutputAt: outputAt }
-					: { lastOutputAt: outputAt },
-			);
+			// 卡片 computing 展示读取，保持每 chunk 一次 metadata-only updateSummary。重分析
+			// （实质输出检测 → lastSubstantiveOutputAt、输出转移检测、output-reaction 扫描）不在
+			// 每 chunk 执行——decoded 文本并入攒批，由 flushPendingOutputAnalysis 统一处理。
+			updateSummary(entry, { lastOutputAt: now() });
 
 			// Startup input is deferred until the TUI is alive so the task prompt creates a
 			// persisted interactive session instead of a short-lived argv prompt run.
@@ -1373,30 +1529,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				}
 			}
 
-			const adapterEvent = entry.active.detectOutputTransition?.(data, entry.summary) ?? null;
-			if (adapterEvent) {
-				const requiresEnterForCodex =
-					adapterEvent.type === "agent.prompt-ready" &&
-					entry.summary.agentId === "codex" &&
-					!entry.active.awaitingCodexPromptAfterEnter;
-				if (!requiresEnterForCodex) {
-					const summary = this.applySessionEvent(entry, adapterEvent);
-					if (adapterEvent.type === "agent.prompt-ready" && entry.summary.agentId === "codex") {
-						entry.active.awaitingCodexPromptAfterEnter = false;
-					}
-					for (const taskListener of entry.listeners.values()) {
-						taskListener.onState?.(cloneSummary(summary));
-					}
-					this.emitSummary(summary);
-				}
-			}
-
-			if (entry.active.outputReactionEngine !== null && data.length > 0) {
-				this.processOutputReactionChunk(request.taskId, entry, data);
-			}
-
-			for (const taskListener of entry.listeners.values()) {
-				taskListener.onOutput?.(filteredChunk);
+			if (hasBatchedOutputAnalysisConsumer && data.length > 0) {
+				this.appendPendingOutputAnalysisText(request.taskId, entry, data);
 			}
 		};
 		let session: PtySession;
@@ -1425,6 +1559,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					clearOutputReactionTimer(currentActive);
 					clearTaskChatInputDeliveryTimer(currentActive);
 					clearSubmitConfirmTimer(currentActive);
+					discardPendingOutputAnalysis(currentActive);
 
 					const summary = this.applySessionEvent(currentEntry, {
 						type: "process.exit",
@@ -1536,6 +1671,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionSession,
 			outputReactionScanBuffer: outputReactionEngine !== null ? "" : null,
 			outputReactionAttemptTimer: null,
+			pendingOutputAnalysisText: "",
+			outputAnalysisFlushTimer: null,
 			lastUserInputAt: null,
 			agentOutputSubstanceMemory: createAgentOutputSubstanceMemory(),
 			// 全部 TUI agent 恢复时都武装：startTaskSession 是终端 agent 专用路径，resumeFromTrash===true
@@ -1614,6 +1751,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearOutputReactionTimer(entry.active);
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
+			discardPendingOutputAnalysis(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -1683,6 +1821,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					clearOutputReactionTimer(currentActive);
 					clearTaskChatInputDeliveryTimer(currentActive);
 					clearSubmitConfirmTimer(currentActive);
+					discardPendingOutputAnalysis(currentActive);
 
 					const shellExitInterrupted = currentActive.session.wasInterrupted();
 					const summary = updateSummary(currentEntry, {
@@ -1749,6 +1888,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputReactionSession: null,
 			outputReactionScanBuffer: null,
 			outputReactionAttemptTimer: null,
+			pendingOutputAnalysisText: "",
+			outputAnalysisFlushTimer: null,
 			lastUserInputAt: null,
 			agentOutputSubstanceMemory: createAgentOutputSubstanceMemory(),
 			suppressSubstantiveOutputUntilContinues: false,
@@ -2056,6 +2197,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearOutputReactionTimer(entry.active);
 		clearTaskChatInputDeliveryTimer(entry.active);
 		clearSubmitConfirmTimer(entry.active);
+		discardPendingOutputAnalysis(entry.active);
 		entry.active.session.stop();
 		if (cleanupFn) {
 			cleanupFn().catch(() => {
@@ -2082,6 +2224,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearOutputReactionTimer(active);
 		clearTaskChatInputDeliveryTimer(active);
 		clearSubmitConfirmTimer(active);
+		discardPendingOutputAnalysis(active);
 		active.session.stop();
 		const gracefulDeadline = now() + gracefulTimeoutMs;
 		while (now() < gracefulDeadline) {
@@ -2147,6 +2290,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearOutputReactionTimer(entry.active);
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
+			discardPendingOutputAnalysis(entry.active);
 			entry.active.session.stop({ interrupted: true });
 		}
 		return activeEntries.map((entry) => cloneSummary(entry.summary));

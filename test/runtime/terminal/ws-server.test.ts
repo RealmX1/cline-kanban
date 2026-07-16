@@ -145,6 +145,13 @@ async function waitForControlMessage(
 
 async function waitForIoMessage(queuedSocket: QueuedWebSocket, timeoutMs = 2_000): Promise<Buffer> {
 	return await new Promise((resolve, reject) => {
+		// 成功/超时路径也要摘掉 error 监听器:渐进 ack 的用例会按帧数反复调用本函数,
+		// 残留的 once("error") 会线性堆积并触发 MaxListenersExceededWarning。
+		const onSocketError = (error: Error) => {
+			clearTimeout(timeoutId);
+			queuedSocket.events.removeListener("message", tryResolve);
+			reject(error);
+		};
 		const tryResolve = () => {
 			const rawData = queuedSocket.queue.shift();
 			if (!rawData) {
@@ -152,20 +159,53 @@ async function waitForIoMessage(queuedSocket: QueuedWebSocket, timeoutMs = 2_000
 			}
 			clearTimeout(timeoutId);
 			queuedSocket.events.removeListener("message", tryResolve);
+			queuedSocket.socket.removeListener("error", onSocketError);
 			resolve(rawDataToBuffer(rawData));
 		};
 		const timeoutId = setTimeout(() => {
 			queuedSocket.events.removeListener("message", tryResolve);
+			queuedSocket.socket.removeListener("error", onSocketError);
 			reject(new Error("Timed out waiting for terminal output."));
 		}, timeoutMs);
 		queuedSocket.events.on("message", tryResolve);
+		// 先挂 error 监听再尝试同步 resolve:若队列里已有数据,tryResolve 会立即 settle,
+		// 之后才注册的监听器将无人摘除。
+		queuedSocket.socket.once("error", onSocketError);
 		tryResolve();
-		queuedSocket.socket.once("error", (error) => {
-			clearTimeout(timeoutId);
-			queuedSocket.events.removeListener("message", tryResolve);
-			reject(error);
-		});
 	});
+}
+
+// 累计收 IO 帧直到达到期望总字节数(服务端对批处理输出按 OUTPUT_FRAME_MAX_BYTES 分帧,
+// 大段输出到达客户端是多个 ≤16KB 帧而非单个巨帧),并模拟真实客户端的渐进 ack:每收到一帧
+// 就通过 control socket ack 该帧的字节数。服务端在跨过背压水位后会停发余帧(退回队列),
+// 必须靠这些渐进 ack 把 unacknowledgedOutputBytes 降回低水位、触发 resume,余帧才会继续发出。
+// 返回按到达顺序拼接的完整字节流与逐帧大小。
+async function collectIoFramesTotalingBytesWithPerFrameAcks(
+	ioSocket: QueuedWebSocket,
+	controlSocket: QueuedWebSocket,
+	expectedTotalBytes: number,
+	timeoutMs = 2_000,
+): Promise<{ combined: Buffer; frameByteLengths: number[] }> {
+	const frames: Buffer[] = [];
+	let receivedBytes = 0;
+	const deadline = Date.now() + timeoutMs;
+	while (receivedBytes < expectedTotalBytes) {
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) {
+			throw new Error(
+				`Timed out collecting per-frame-acked terminal output frames: got ${receivedBytes}/${expectedTotalBytes} bytes.`,
+			);
+		}
+		const frame = await waitForIoMessage(ioSocket, remainingMs);
+		frames.push(frame);
+		receivedBytes += frame.byteLength;
+		controlSocket.socket.send(JSON.stringify({ type: "output_ack", bytes: frame.byteLength }));
+	}
+	return { combined: Buffer.concat(frames), frameByteLengths: frames.map((frame) => frame.byteLength) };
+}
+
+function sumQueuedIoBytes(queuedSocket: QueuedWebSocket): number {
+	return queuedSocket.queue.reduce((totalBytes, rawData) => totalBytes + rawDataToBuffer(rawData).byteLength, 0);
 }
 
 async function closeSocket(socket: WebSocket): Promise<void> {
@@ -442,27 +482,149 @@ describe("createTerminalWebSocketBridge", () => {
 		controlSocketB.socket.send(JSON.stringify({ type: "restore_complete" }));
 
 		const output = "x".repeat(120_000);
+		const outputTotalBytes = Buffer.byteLength(output);
 		terminalManager.emitOutput(TASK_ID, output);
 
-		const outputA = await waitForIoMessage(ioSocketA);
-		const outputB = await waitForIoMessage(ioSocketB);
-		expect(outputA.byteLength).toBe(Buffer.byteLength(output));
-		expect(outputB.byteLength).toBe(Buffer.byteLength(output));
+		// viewer A 逐帧 ack(模拟正常渲染的客户端),按帧上限分片收全 120KB。
+		// viewer B 一个 ack 都不发:发送侧跨过背压水位后必须停发余帧,B 收不全。
+		const outputA = await collectIoFramesTotalingBytesWithPerFrameAcks(ioSocketA, controlSocketA, outputTotalBytes);
+		expect(outputA.combined.byteLength).toBe(outputTotalBytes);
 		expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
 
-		controlSocketA.socket.send(JSON.stringify({ type: "output_ack", bytes: outputA.byteLength }));
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		// B 仍背压中:PTY 不得 resume(A 已追上不算数,resume 要等最后一个慢 viewer)。
+		const bytesReceivedByViewerBWithoutAcks = sumQueuedIoBytes(ioSocketB);
+		expect(bytesReceivedByViewerBWithoutAcks).toBeLessThan(outputTotalBytes);
 		expect(terminalManager.resumeOutput).not.toHaveBeenCalled();
 
-		controlSocketB.socket.send(JSON.stringify({ type: "output_ack", bytes: outputB.byteLength }));
+		// B 开始逐帧 ack 后余帧续传、收全,最后一个慢 viewer 追上,PTY resume 且与 pause 配平。
+		const outputB = await collectIoFramesTotalingBytesWithPerFrameAcks(ioSocketB, controlSocketB, outputTotalBytes);
+		expect(outputB.combined.byteLength).toBe(outputTotalBytes);
 		await waitForAssertion(() => {
-			expect(terminalManager.resumeOutput).toHaveBeenCalledTimes(1);
+			expect(terminalManager.resumeOutput.mock.calls.length).toBeGreaterThan(0);
+			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(terminalManager.resumeOutput.mock.calls.length);
 		});
 
 		await closeSocket(ioSocketA.socket);
 		await closeSocket(controlSocketA.socket);
 		await closeSocket(ioSocketB.socket);
 		await closeSocket(controlSocketB.socket);
+	});
+
+	it("slices batched output into frames no larger than 16KB while preserving the exact byte stream", async () => {
+		const ioUrl = `${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
+		const controlUrl = `${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
+
+		const ioSocket = await openQueuedWebSocket(ioUrl);
+		const controlSocket = await openQueuedWebSocket(controlUrl);
+
+		await waitForControlMessage(controlSocket, (message) => message.type === "restore");
+		controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
+
+		// 非 16KB 整数倍,验证末帧尾量;内容用变化的字节序列,验证跨帧拼接逐字节等于原文。
+		const OUTPUT_FRAME_MAX_BYTES = 16 * 1024;
+		const output = Array.from({ length: 40_000 }, (_, index) => String.fromCharCode(97 + (index % 26))).join("");
+		const outputTotalBytes = Buffer.byteLength(output);
+		terminalManager.emitOutput(TASK_ID, output);
+
+		const collected = await collectIoFramesTotalingBytesWithPerFrameAcks(ioSocket, controlSocket, outputTotalBytes);
+		expect(collected.frameByteLengths.length).toBeGreaterThan(1);
+		for (const frameByteLength of collected.frameByteLengths) {
+			expect(frameByteLength).toBeLessThanOrEqual(OUTPUT_FRAME_MAX_BYTES);
+		}
+		expect(collected.combined.toString("utf8")).toBe(output);
+
+		// 逐帧 ack 后 PTY 恢复(40KB 未过 100KB ack 高水位,但可能触发 socket buffered 暂停——
+		// 全量 ack + 排空后必须回到未暂停状态,pause/resume 配平)。
+		await waitForAssertion(() => {
+			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(terminalManager.resumeOutput.mock.calls.length);
+		});
+
+		await closeSocket(ioSocket.socket);
+		await closeSocket(controlSocket.socket);
+	});
+
+	it("stops mid-batch sending once the ack high water mark is crossed and resumes the remainder only after acks", async () => {
+		const ioUrl = `${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
+		const controlUrl = `${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
+
+		const ioSocket = await openQueuedWebSocket(ioUrl);
+		const controlSocket = await openQueuedWebSocket(controlUrl);
+
+		await waitForControlMessage(controlSocket, (message) => message.type === "restore");
+		controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
+
+		const OUTPUT_FRAME_MAX_BYTES = 16 * 1024;
+		const OUTPUT_ACK_HIGH_WATER_MARK_BYTES = 100_000;
+		// 单批 300KB,远超 100KB ack 高水位:发送必须在跨过高水位的那一帧停住。
+		// (修复前的缺陷:整批 300KB 在一个 flush 循环里全部发出,且仅暂停前的帧计入记账。)
+		const output = Array.from({ length: 300_000 }, (_, index) => String.fromCharCode(97 + (index % 26))).join("");
+		const outputTotalBytes = Buffer.byteLength(output);
+		terminalManager.emitOutput(TASK_ID, output);
+
+		// 不发任何 ack:收到的字节数被钳制在「高水位 + 至多一帧」以内,余帧留在服务端队列。
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		const bytesReceivedBeforeAnyAck = sumQueuedIoBytes(ioSocket);
+		expect(bytesReceivedBeforeAnyAck).toBeGreaterThan(0);
+		expect(bytesReceivedBeforeAnyAck).toBeLessThanOrEqual(OUTPUT_ACK_HIGH_WATER_MARK_BYTES + OUTPUT_FRAME_MAX_BYTES);
+		expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
+		expect(terminalManager.resumeOutput).not.toHaveBeenCalled();
+
+		// 渐进 ack 后余帧续传:拼接后的字节流与原文逐字节一致(内容与顺序完全不变),
+		// 且每帧仍不超过帧上限——退回队列的余帧续传时依旧走分帧与逐帧记账。
+		const collected = await collectIoFramesTotalingBytesWithPerFrameAcks(ioSocket, controlSocket, outputTotalBytes);
+		for (const frameByteLength of collected.frameByteLengths) {
+			expect(frameByteLength).toBeLessThanOrEqual(OUTPUT_FRAME_MAX_BYTES);
+		}
+		expect(collected.combined.toString("utf8")).toBe(output);
+
+		// 全部字节都计入了记账:ack 恰好等于收到的字节数就能让 pause/resume 配平收敛。
+		await waitForAssertion(() => {
+			expect(terminalManager.resumeOutput.mock.calls.length).toBeGreaterThan(0);
+			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(terminalManager.resumeOutput.mock.calls.length);
+		});
+
+		await closeSocket(ioSocket.socket);
+		await closeSocket(controlSocket.socket);
+	});
+
+	it("queues low-latency chunks arriving while output is paused instead of sending them uncounted", async () => {
+		const ioUrl = `${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
+		const controlUrl = `${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
+
+		const ioSocket = await openQueuedWebSocket(ioUrl);
+		const controlSocket = await openQueuedWebSocket(controlUrl);
+
+		await waitForControlMessage(controlSocket, (message) => message.type === "restore");
+		controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
+
+		// 恰好 7 帧 = 114688 字节:第 7 帧跨过 100KB ack 高水位,批在暂停点上正好耗尽
+		// (pendingOutputChunks 为空但 outputPaused 已置位)——这是低延迟直发路径最容易
+		// 漏记账的形态:后续小 chunk 若直发,checkBackpressureAfterSend 在 paused 时直返、不计字节。
+		const OUTPUT_FRAME_MAX_BYTES = 16 * 1024;
+		const pauseExhaustedBatchByteLength = OUTPUT_FRAME_MAX_BYTES * 7;
+		const bigOutput = Array.from({ length: pauseExhaustedBatchByteLength }, (_, index) =>
+			String.fromCharCode(97 + (index % 26)),
+		).join("");
+		terminalManager.emitOutput(TASK_ID, bigOutput);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+
+		// 暂停期间到达的小 chunk 必须排队等 resume,不得走低延迟路径直发。
+		const tailMarker = "tail-marker";
+		terminalManager.emitOutput(TASK_ID, tailMarker);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(sumQueuedIoBytes(ioSocket)).toBeLessThanOrEqual(pauseExhaustedBatchByteLength);
+
+		// 渐进 ack 后小 chunk 按序补发:字节流 = 大批输出 ⧺ marker,顺序与内容完全不变。
+		const expectedTotalBytes = pauseExhaustedBatchByteLength + Buffer.byteLength(tailMarker);
+		const collected = await collectIoFramesTotalingBytesWithPerFrameAcks(ioSocket, controlSocket, expectedTotalBytes);
+		expect(collected.combined.toString("utf8")).toBe(`${bigOutput}${tailMarker}`);
+		await waitForAssertion(() => {
+			expect(terminalManager.resumeOutput.mock.calls.length).toBeGreaterThan(0);
+			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(terminalManager.resumeOutput.mock.calls.length);
+		});
+
+		await closeSocket(ioSocket.socket);
+		await closeSocket(controlSocket.socket);
 	});
 
 	it("re-sends a fresh snapshot and re-gates live output on request_restore", async () => {

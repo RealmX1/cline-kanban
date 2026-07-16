@@ -15,6 +15,7 @@ import type {
 	RuntimeTerminalWsResizeMessage,
 	RuntimeTerminalWsServerMessage,
 } from "@/runtime/types";
+import { sliceRestoreSnapshotForIncrementalWrite } from "@/terminal/restore-snapshot-slicing";
 import { clearTerminalGeometry, reportTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import { createKanbanTerminalOptions } from "@/terminal/terminal-options";
 import {
@@ -30,6 +31,8 @@ const INTERRUPT_IDLE_SETTLE_MS = 250;
 const TERMINAL_RECONNECT_INITIAL_DELAY_MS = 250;
 const TERMINAL_RECONNECT_MAX_DELAY_MS = 5_000;
 const VIEWER_QUEUE_STALL_MS = 5_000;
+// 可见性恢复门控的兜底超时:request_restore 后恢复快照最长等待时间,超时解除门控防白屏。
+const AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS = 5_000;
 const PARKING_ROOT_ID = "kb-persistent-terminal-parking-root";
 const HOME_TERMINAL_TASK_ID = "__home_terminal__";
 const DETAIL_TERMINAL_TASK_PREFIX = "__detail_terminal__:";
@@ -239,6 +242,13 @@ class PersistentTerminal {
 	private documentVisible: boolean;
 	private renderingSuspended: boolean;
 	private needsSnapshotResync = false;
+	// 可见性恢复竞态门控:标签页回归可见、已发出 request_restore、恢复快照尚未到达的窗口内,
+	// 实时 io chunk 只 ack + 丢弃(不写 xterm)——否则这些 chunk 会先写进过期屏幕(time-lapse
+	// 闪帧),随后又被 reset+快照整段覆盖(双重渲染)。丢弃无损:请求前的在途 chunk 已进服务端
+	// mirror(必含于快照),之后的 chunk 被服务端 restoreComplete=false 缓冲、restore_complete
+	// 后重放。5s 兜底超时防控制消息丢失导致白屏。
+	private awaitingRestoreSnapshot = false;
+	private awaitingRestoreSnapshotTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(
 		private readonly taskId: string,
@@ -342,6 +352,9 @@ class PersistentTerminal {
 		this.renderingSuspended = !visible;
 		if (visible && this.needsSnapshotResync) {
 			this.needsSnapshotResync = false;
+			// 先武装 awaiting 门控再发请求:恢复快照到达前的实时 chunk 不再写进过期屏幕
+			// (见 awaitingRestoreSnapshot 字段注释的竞态说明)。
+			this.beginAwaitingRestoreSnapshotGate();
 			this.requestSnapshotResync();
 		}
 	}
@@ -353,6 +366,29 @@ class PersistentTerminal {
 		// socket is currently closed, the pending reconnect already sends a restore snapshot,
 		// so this is a no-op in that case.
 		this.sendControlMessage({ type: "request_restore" });
+	}
+
+	private beginAwaitingRestoreSnapshotGate(): void {
+		this.awaitingRestoreSnapshot = true;
+		this.clearAwaitingRestoreSnapshotTimeoutTimer();
+		this.awaitingRestoreSnapshotTimeoutTimer = setTimeout(() => {
+			this.awaitingRestoreSnapshotTimeoutTimer = null;
+			// 兜底:恢复快照迟迟未到(控制消息丢失 / 服务端异常)。解除门控恢复实时渲染,
+			// 宁可屏幕内容从过期状态续写,也不能白屏卡死。
+			this.awaitingRestoreSnapshot = false;
+		}, AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS);
+	}
+
+	private endAwaitingRestoreSnapshotGate(): void {
+		this.awaitingRestoreSnapshot = false;
+		this.clearAwaitingRestoreSnapshotTimeoutTimer();
+	}
+
+	private clearAwaitingRestoreSnapshotTimeoutTimer(): void {
+		if (this.awaitingRestoreSnapshotTimeoutTimer !== null) {
+			clearTimeout(this.awaitingRestoreSnapshotTimeoutTimer);
+			this.awaitingRestoreSnapshotTimeoutTimer = null;
+		}
 	}
 
 	private notifyLastError(): void {
@@ -535,7 +571,14 @@ class PersistentTerminal {
 			this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 			return;
 		}
-		await this.enqueueTerminalWrite(snapshot, { keepScrolledToBottom: false });
+		// 快照分片写入:整段写会让 xterm 在一次 write 里同步解析数 MB(其 12ms 时间预算只在
+		// chunk 之间生效),页面冻结且 restore_complete 被推迟。切片后写队列逐段解析,主线程
+		// 在片间保持可响应。滚动定位保持在全部写完之后。
+		let lastSnapshotSliceWrite: Promise<void> = Promise.resolve();
+		for (const snapshotSlice of sliceRestoreSnapshotForIncrementalWrite(snapshot)) {
+			lastSnapshotSliceWrite = this.enqueueTerminalWrite(snapshotSlice, { keepScrolledToBottom: false });
+		}
+		await lastSnapshotSliceWrite;
 		this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 	}
 
@@ -635,6 +678,16 @@ class PersistentTerminal {
 				this.needsSnapshotResync = true;
 				return;
 			}
+			if (this.awaitingRestoreSnapshot) {
+				// 标签页已回归可见、恢复快照在途:这段实时 chunk 属于「将被快照整段覆盖」的
+				// 过期窗口——ack + 丢弃,但**不**置 needsSnapshotResync(快照本就在途,置位会
+				// 自触发下一轮 request_restore 死循环)。丢弃无损,见 awaitingRestoreSnapshot 注释。
+				this.sendControlMessage({ type: "output_ack", bytes: ackBytes });
+				if (decoded) {
+					this.notifyOutputText(decoded);
+				}
+				return;
+			}
 			void this.enqueueTerminalWrite(writeData, {
 				ackBytes,
 				notifyText: decoded || null,
@@ -696,6 +749,9 @@ class PersistentTerminal {
 			}
 
 			if (payload.type === "restore") {
+				// 恢复快照已到达:解除可见性恢复门控。此后到 restore_complete 之间服务端不再
+				// 转发实时输出(restoreComplete=false 缓冲),不存在门控漏窗。
+				this.endAwaitingRestoreSnapshotGate();
 				this.restoreCompleted = false;
 				void this.applyRestore(payload.snapshot, payload.cols, payload.rows)
 					.then(() => {
@@ -1035,6 +1091,7 @@ class PersistentTerminal {
 			document.removeEventListener("visibilitychange", this.handleVisibilityChange);
 		}
 		this.clearReconnectTimer();
+		this.clearAwaitingRestoreSnapshotTimeoutTimer();
 		this.unmount(this.visibleContainer);
 		this.ioSocket?.close();
 		this.controlSocket?.close();

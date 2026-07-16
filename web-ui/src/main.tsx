@@ -36,9 +36,10 @@ ReactDOM.createRoot(root).render(
 					<Toaster
 						theme="dark"
 						position="bottom-right"
-						// Lift toasts above the always-visible bug-report FAB (bottom-right pill)
-						// so they stack over it instead of overlapping.
-						offset={{ bottom: 76 }}
+						// 抬高 toast 起始位置：既避开常驻的 bug 反馈 FAB（右下胶囊），也避开
+						// Post-Deploy Verification 折叠 badge（fixed bottom-20，底 80px + 高约 38px），
+						// 让 toast 堆叠在两者上方而不是盖住可点击控件。
+						offset={{ bottom: 130 }}
 						toastOptions={{
 							style: {
 								background: "var(--color-surface-1)",

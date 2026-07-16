@@ -115,8 +115,10 @@ function installFakeClaudeEntry(
 			submitConfirmGeneration: 0,
 			awaitingCodexPromptAfterEnter: false,
 		},
+		// 就绪判定读 getViewportSnapshot（活动屏，scrollback:0）；fake 的 mirrorSnapshot 即视口内容。
 		terminalStateMirror: {
 			getSnapshot: async () => ({ snapshot: options.mirrorSnapshot, cols: 80, rows: 24 }),
+			getViewportSnapshot: async () => ({ snapshot: options.mirrorSnapshot, cols: 80, rows: 24 }),
 		},
 		listenerIdCounter: 1,
 		listeners: new Map(),
@@ -300,6 +302,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			},
 			terminalStateMirror: {
 				getSnapshot: async () => ({ snapshot: CLAUDE_READY_PROMPT, cols: 80, rows: 24 }),
+				getViewportSnapshot: async () => ({ snapshot: CLAUDE_READY_PROMPT, cols: 80, rows: 24 }),
 			},
 			listenerIdCounter: 1,
 			listeners: new Map(),
@@ -345,8 +348,12 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				taskChatInputDeliveryGeneration: 0,
 				awaitingCodexPromptAfterEnter: false,
 			},
+			// 真实 mirror 的 getViewportSnapshot 只序列化活动屏（scrollback:0）——提示符框只存在于
+			// scrollback 时视口里没有它。fake 按同一契约分别给出「全量」与「视口」两份内容；就绪判定
+			// 若（回归地）改回读全量 getSnapshot 会误判就绪、在 deadline 之前写入，本测试即失败。
 			terminalStateMirror: {
 				getSnapshot: async () => ({ snapshot: snapshotWithPromptOnlyInScrollback, cols: 80, rows: 5 }),
+				getViewportSnapshot: async () => ({ snapshot: midOutputViewport, cols: 80, rows: 5 }),
 			},
 			listenerIdCounter: 1,
 			listeners: new Map(),
@@ -396,7 +403,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			agentId: "claude",
 			state: "running",
 		} as unknown as RuntimeTaskSessionSummary;
-		// 受控 mirror：getSnapshot 返回一个直到我们放行才 resolve 的 promise，模拟「旧 attempt 卡在 await 中」。
+		// 受控 mirror：getViewportSnapshot（就绪判定实际 await 的方法）返回一个直到我们放行才 resolve
+		// 的 promise，模拟「旧 attempt 卡在 await 中」。
 		let releaseFirstSnapshot: (() => void) | null = null;
 		let snapshotCalls = 0;
 		const entry = {
@@ -411,7 +419,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				awaitingCodexPromptAfterEnter: false,
 			},
 			terminalStateMirror: {
-				getSnapshot: async () => {
+				getSnapshot: async () => ({ snapshot: CLAUDE_READY_PROMPT, cols: 80, rows: 24 }),
+				getViewportSnapshot: async () => {
 					snapshotCalls += 1;
 					if (snapshotCalls === 1) {
 						// 第一次（旧投递的 attempt）：挂起，直到测试放行——期间安排第二次投递取代它。
