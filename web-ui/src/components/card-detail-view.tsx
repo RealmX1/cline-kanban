@@ -55,7 +55,10 @@ import { useWindowEvent } from "@/utils/react-use";
 
 // We still poll the open detail diff because line content can change without changing
 // the overall file or line counts that drive the shared workspace metadata stream.
-const DETAIL_DIFF_POLL_INTERVAL_MS = 1_000;
+// 2.5s（而非每秒）：服务端 getWorkspaceChanges* 已对三种 diff 变体做了 stateKey 缓存，空闲工作树上的
+// 轮询坍缩为一次廉价的 fingerprint 比对；每秒一次的 tRPC 往返 + payload stringify 仍是纯浪费，2.5s
+// 兼顾新鲜度与开销。轮询本身已受门控（仅当前选中且可见、非 git 历史面板、非 trash 列的卡片）。
+const DETAIL_DIFF_POLL_INTERVAL_MS = 2_500;
 const DIFF_MODE_ACTIVE_BACKGROUND = "color-mix(in srgb, var(--color-surface-3) 80%, var(--color-text-primary))";
 
 function isTypingTarget(target: EventTarget | null): boolean {

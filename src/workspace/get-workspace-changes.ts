@@ -6,12 +6,22 @@ import type {
 	RuntimeWorkspaceFileChange,
 	RuntimeWorkspaceFileStatus,
 } from "../core/api-contract";
+import { gitFileReadConcurrencyLimiter } from "./git-concurrency";
 import { getGitStdout as getGitStdoutWithoutTimeout } from "./git-utils";
 
 const WORKSPACE_CHANGES_GIT_TIMEOUT_MS = 30_000;
 
 async function getGitStdout(args: string[], cwd: string): Promise<string> {
 	return await getGitStdoutWithoutTimeout(args, cwd, { timeoutMs: WORKSPACE_CHANGES_GIT_TIMEOUT_MS });
+}
+
+// `git diff --numstat -z` 是 NUL 分隔的二进制格式，不能走默认的 trim（trim 虽不会动 NUL 字节，但为
+// 精确解析该格式，保留原始 stdout 更稳妥）。
+async function getGitStdoutWithoutTrimming(args: string[], cwd: string): Promise<string> {
+	return await getGitStdoutWithoutTimeout(args, cwd, {
+		timeoutMs: WORKSPACE_CHANGES_GIT_TIMEOUT_MS,
+		trimStdout: false,
+	});
 }
 
 const WORKSPACE_CHANGES_CACHE_MAX_ENTRIES = 128;
@@ -35,13 +45,48 @@ function applyInlineDiffContentSizeLimit(change: RuntimeWorkspaceFileChange): Ru
 	};
 }
 
+// 三种 diff 变体各自独立缓存：working_copy(HEAD↔工作树)、from_ref(某 commit↔工作树)、
+// between_refs(commit↔commit)。cacheKey 含 variant + refs，故它们互不覆盖。
+type WorkspaceChangesVariant = "working_copy" | "from_ref" | "between_refs";
+
 interface WorkspaceChangesCacheEntry {
 	stateKey: string;
 	response: RuntimeWorkspaceChangesResponse;
 	lastAccessedAt: number;
 }
 
-const workspaceChangesCacheByRepoRoot = new Map<string, WorkspaceChangesCacheEntry>();
+const workspaceChangesCacheByCacheKey = new Map<string, WorkspaceChangesCacheEntry>();
+
+function buildWorkspaceChangesCacheKey(input: {
+	repoRoot: string;
+	variant: WorkspaceChangesVariant;
+	fromRef?: string;
+	toRef?: string;
+}): string {
+	return [input.repoRoot, input.variant, input.fromRef ?? "", input.toRef ?? ""].join("::");
+}
+
+function readCachedWorkspaceChanges(cacheKey: string, stateKey: string): RuntimeWorkspaceChangesResponse | null {
+	const existing = workspaceChangesCacheByCacheKey.get(cacheKey);
+	if (existing && existing.stateKey === stateKey) {
+		existing.lastAccessedAt = Date.now();
+		return existing.response;
+	}
+	return null;
+}
+
+function storeCachedWorkspaceChanges(
+	cacheKey: string,
+	stateKey: string,
+	response: RuntimeWorkspaceChangesResponse,
+): void {
+	workspaceChangesCacheByCacheKey.set(cacheKey, {
+		stateKey,
+		response,
+		lastAccessedAt: Date.now(),
+	});
+	pruneWorkspaceChangesCache();
+}
 
 interface NameStatusEntry {
 	path: string;
@@ -126,6 +171,64 @@ function parseTrackedChanges(output: string): NameStatusEntry[] {
 	return entries;
 }
 
+function parseNumstatCount(raw: string): number {
+	// 二进制文件的 numstat 计数为 `-`；Number.parseInt("-") → NaN → 归零，与旧的 per-file 解析一致。
+	const value = Number.parseInt(raw, 10);
+	return Number.isFinite(value) ? value : 0;
+}
+
+// 把一次 `git diff --numstat -z <range>` 的整段输出解析为 <postimage-path, DiffStat> 映射，
+// key 一律用 postimage（当前/新）路径，正好对应 NameStatusEntry.path 的查询方式。
+// 记录格式（NUL 分隔）：
+//   普通       `adds\tdels\tpath\0`
+//   rename/copy `adds\tdels\t\0oldpath\0newpath\0`（counts 后 inline path 为空，紧跟两条 NUL 分隔路径）
+//   二进制     计数字段为 `-`（→ 0）
+// 这是替代「每文件各跑一次 git diff --numstat」的批量化路径：N 次 spawn 收敛为 1 次。
+function parseNumstatByPostimagePath(output: string): Map<string, DiffStat> {
+	const statsByPath = new Map<string, DiffStat>();
+	const tokens = output.split("\0");
+	let index = 0;
+	while (index < tokens.length) {
+		const record = tokens[index];
+		if (record === undefined || record === "") {
+			index += 1;
+			continue;
+		}
+		const firstTab = record.indexOf("\t");
+		const secondTab = firstTab === -1 ? -1 : record.indexOf("\t", firstTab + 1);
+		if (firstTab === -1 || secondTab === -1) {
+			index += 1;
+			continue;
+		}
+		const additions = parseNumstatCount(record.slice(0, firstTab));
+		const deletions = parseNumstatCount(record.slice(firstTab + 1, secondTab));
+		const inlinePath = record.slice(secondTab + 1);
+		if (inlinePath !== "") {
+			statsByPath.set(inlinePath, { additions, deletions });
+			index += 1;
+			continue;
+		}
+		// rename/copy：接下来两个 token 依次是 preimage、postimage 路径，key 取 postimage。
+		const postimagePath = tokens[index + 2];
+		if (postimagePath !== undefined && postimagePath !== "") {
+			statsByPath.set(postimagePath, { additions, deletions });
+		}
+		index += 3;
+	}
+	return statsByPath;
+}
+
+// 批量读取整个 diff range 的 numstat。`diffRangeArgs` 必须与对应 name-status 调用的 refspec/renames
+// 标志保持一致，以保证 rename 检测方式相同、path 集合对齐（否则 rename 在两处的配对不一致）。
+async function readDiffStatsByPostimagePath(repoRoot: string, diffRangeArgs: string[]): Promise<Map<string, DiffStat>> {
+	try {
+		const output = await getGitStdoutWithoutTrimming(["diff", "--numstat", "-z", ...diffRangeArgs], repoRoot);
+		return parseNumstatByPostimagePath(output);
+	} catch {
+		return new Map();
+	}
+}
+
 async function buildFileFingerprints(repoRoot: string, paths: string[]): Promise<FileFingerprint[]> {
 	if (paths.length === 0) {
 		return [];
@@ -175,10 +278,10 @@ function buildWorkspaceChangesStateKey(input: {
 }
 
 function pruneWorkspaceChangesCache(): void {
-	if (workspaceChangesCacheByRepoRoot.size <= WORKSPACE_CHANGES_CACHE_MAX_ENTRIES) {
+	if (workspaceChangesCacheByCacheKey.size <= WORKSPACE_CHANGES_CACHE_MAX_ENTRIES) {
 		return;
 	}
-	const entries = Array.from(workspaceChangesCacheByRepoRoot.entries()).sort(
+	const entries = Array.from(workspaceChangesCacheByCacheKey.entries()).sort(
 		(left, right) => left[1].lastAccessedAt - right[1].lastAccessedAt,
 	);
 	const removeCount = entries.length - WORKSPACE_CHANGES_CACHE_MAX_ENTRIES;
@@ -187,7 +290,7 @@ function pruneWorkspaceChangesCache(): void {
 		if (!candidate) {
 			break;
 		}
-		workspaceChangesCacheByRepoRoot.delete(candidate[0]);
+		workspaceChangesCacheByCacheKey.delete(candidate[0]);
 	}
 }
 
@@ -204,6 +307,20 @@ async function readFileAtRef(repoRoot: string, ref: string, path: string): Promi
 		return await getGitStdout(["show", `${ref}:${path}`], repoRoot);
 	} catch {
 		return null;
+	}
+}
+
+// 把 ref 解析为不可变 commit SHA，纳入 between_refs / from_ref 的缓存 stateKey。
+// 若 ref 是可移动分支名，它移动到另一个提交后——即便两端 diff 的文件集合与 name-status 状态字母不变
+// （仅文件内容变化）——解析出的 SHA 也会改变 → stateKey 改变 → 缓存自然失效，避免返回陈旧的
+// old/new 内容与 additions/deletions 统计。解析失败（如 ref 不存在）时安全降级为原 ref 字符串
+// （不比未解析更差）。`^{commit}` 会剥掉注解标签，稳妥地落到提交对象上。
+async function resolveRefToCommitToken(repoRoot: string, ref: string): Promise<string> {
+	try {
+		const resolved = (await getGitStdout(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], repoRoot)).trim();
+		return resolved || ref;
+	} catch {
+		return ref;
 	}
 }
 
@@ -234,86 +351,28 @@ function fallbackStats(oldText: string | null, newText: string | null): DiffStat
 	};
 }
 
-async function readDiffStat(repoRoot: string, path: string): Promise<DiffStat | null> {
-	try {
-		const output = await getGitStdout(["diff", "--numstat", "HEAD", "--", path], repoRoot);
-		const firstLine = output
-			.split("\n")
-			.map((line) => line.trim())
-			.find(Boolean);
-		if (!firstLine) {
-			return null;
-		}
-		const [addedRaw, deletedRaw] = firstLine.split("\t");
-		const additions = Number.parseInt(addedRaw ?? "", 10);
-		const deletions = Number.parseInt(deletedRaw ?? "", 10);
-		return {
-			additions: Number.isFinite(additions) ? additions : 0,
-			deletions: Number.isFinite(deletions) ? deletions : 0,
-		};
-	} catch {
-		return null;
+function resolveDiffStat(
+	entry: NameStatusEntry,
+	statsByPath: Map<string, DiffStat>,
+	oldText: string | null,
+	newText: string | null,
+): DiffStat {
+	if (entry.status === "untracked") {
+		return { additions: toLineCount(newText ?? ""), deletions: 0 };
 	}
+	return statsByPath.get(entry.path) ?? fallbackStats(oldText, newText);
 }
 
-async function readDiffStatBetweenRefs(
+async function buildFileChange(
 	repoRoot: string,
-	fromRef: string,
-	toRef: string,
-	path: string,
-): Promise<DiffStat | null> {
-	try {
-		const output = await getGitStdout(["diff", "--numstat", fromRef, toRef, "--", path], repoRoot);
-		const firstLine = output
-			.split("\n")
-			.map((line) => line.trim())
-			.find(Boolean);
-		if (!firstLine) {
-			return null;
-		}
-		const [addedRaw, deletedRaw] = firstLine.split("\t");
-		const additions = Number.parseInt(addedRaw ?? "", 10);
-		const deletions = Number.parseInt(deletedRaw ?? "", 10);
-		return {
-			additions: Number.isFinite(additions) ? additions : 0,
-			deletions: Number.isFinite(deletions) ? deletions : 0,
-		};
-	} catch {
-		return null;
-	}
-}
-
-async function readDiffStatFromRef(repoRoot: string, fromRef: string, path: string): Promise<DiffStat | null> {
-	try {
-		const output = await getGitStdout(["diff", "--numstat", fromRef, "--", path], repoRoot);
-		const firstLine = output
-			.split("\n")
-			.map((line) => line.trim())
-			.find(Boolean);
-		if (!firstLine) {
-			return null;
-		}
-		const [addedRaw, deletedRaw] = firstLine.split("\t");
-		const additions = Number.parseInt(addedRaw ?? "", 10);
-		const deletions = Number.parseInt(deletedRaw ?? "", 10);
-		return {
-			additions: Number.isFinite(additions) ? additions : 0,
-			deletions: Number.isFinite(deletions) ? deletions : 0,
-		};
-	} catch {
-		return null;
-	}
-}
-
-async function buildFileChange(repoRoot: string, entry: NameStatusEntry): Promise<RuntimeWorkspaceFileChange> {
+	entry: NameStatusEntry,
+	statsByPath: Map<string, DiffStat>,
+): Promise<RuntimeWorkspaceFileChange> {
 	const basePath = entry.previousPath ?? entry.path;
 	const oldText =
 		entry.status === "added" || entry.status === "untracked" ? null : await readHeadFile(repoRoot, basePath);
 	const newText = entry.status === "deleted" ? null : await readWorkingTreeFile(repoRoot, entry.path);
-	const stats =
-		entry.status === "untracked"
-			? { additions: toLineCount(newText ?? ""), deletions: 0 }
-			: ((await readDiffStat(repoRoot, entry.path)) ?? fallbackStats(oldText, newText));
+	const stats = resolveDiffStat(entry, statsByPath, oldText, newText);
 
 	return applyInlineDiffContentSizeLimit({
 		path: entry.path,
@@ -331,12 +390,12 @@ async function buildFileChangeBetweenRefs(
 	entry: NameStatusEntry,
 	fromRef: string,
 	toRef: string,
+	statsByPath: Map<string, DiffStat>,
 ): Promise<RuntimeWorkspaceFileChange> {
 	const basePath = entry.previousPath ?? entry.path;
 	const oldText = entry.status === "added" ? null : await readFileAtRef(repoRoot, fromRef, basePath);
 	const newText = entry.status === "deleted" ? null : await readFileAtRef(repoRoot, toRef, entry.path);
-	const stats =
-		(await readDiffStatBetweenRefs(repoRoot, fromRef, toRef, entry.path)) ?? fallbackStats(oldText, newText);
+	const stats = statsByPath.get(entry.path) ?? fallbackStats(oldText, newText);
 
 	return applyInlineDiffContentSizeLimit({
 		path: entry.path,
@@ -353,6 +412,7 @@ async function buildFileChangeFromRef(
 	repoRoot: string,
 	entry: NameStatusEntry,
 	fromRef: string,
+	statsByPath: Map<string, DiffStat>,
 ): Promise<RuntimeWorkspaceFileChange> {
 	const basePath = entry.previousPath ?? entry.path;
 	const oldText =
@@ -360,10 +420,7 @@ async function buildFileChangeFromRef(
 			? null
 			: await readFileAtRef(repoRoot, fromRef, basePath);
 	const newText = entry.status === "deleted" ? null : await readWorkingTreeFile(repoRoot, entry.path);
-	const stats =
-		entry.status === "untracked"
-			? { additions: toLineCount(newText ?? ""), deletions: 0 }
-			: ((await readDiffStatFromRef(repoRoot, fromRef, entry.path)) ?? fallbackStats(oldText, newText));
+	const stats = resolveDiffStat(entry, statsByPath, oldText, newText);
 
 	return applyInlineDiffContentSizeLimit({
 		path: entry.path,
@@ -374,6 +431,22 @@ async function buildFileChangeFromRef(
 		oldText,
 		newText,
 	});
+}
+
+// 把已知的一组变更条目落地为完整的 file changes：批量取一次 numstat，再经共享并发限流器读取每个文件的
+// old/new 内容。限流器是跨请求共享的模块级单例，保证任意负载下并发 git/fs 读取被钳制成常数。
+async function materializeFileChanges<Entry extends NameStatusEntry>(
+	entries: readonly Entry[],
+	diffRangeArgs: string[],
+	repoRoot: string,
+	buildOne: (entry: Entry, statsByPath: Map<string, DiffStat>) => Promise<RuntimeWorkspaceFileChange>,
+): Promise<RuntimeWorkspaceFileChange[]> {
+	const statsByPath = await readDiffStatsByPostimagePath(repoRoot, diffRangeArgs);
+	const files = await Promise.all(
+		entries.map((entry) => gitFileReadConcurrencyLimiter(() => buildOne(entry, statsByPath))),
+	);
+	files.sort((left, right) => left.path.localeCompare(right.path));
+	return files;
 }
 
 export async function createEmptyWorkspaceChangesResponse(cwd: string): Promise<RuntimeWorkspaceChangesResponse> {
@@ -424,25 +497,22 @@ export async function getWorkspaceChanges(cwd: string): Promise<RuntimeWorkspace
 		untrackedOutput,
 		fingerprints,
 	});
-	const existing = workspaceChangesCacheByRepoRoot.get(repoRoot);
-	if (existing && existing.stateKey === stateKey) {
-		existing.lastAccessedAt = Date.now();
-		return existing.response;
+	const cacheKey = buildWorkspaceChangesCacheKey({ repoRoot, variant: "working_copy" });
+	const cached = readCachedWorkspaceChanges(cacheKey, stateKey);
+	if (cached) {
+		return cached;
 	}
 
-	const files = await Promise.all(allChanges.map((entry) => buildFileChange(repoRoot, entry)));
-	files.sort((left, right) => left.path.localeCompare(right.path));
+	// numstat 的 refspec/renames 标志须与上面的 name-status 一致（此处均为 `HEAD --`、无 --find-renames）。
+	const files = await materializeFileChanges(allChanges, ["HEAD", "--"], repoRoot, (entry, statsByPath) =>
+		buildFileChange(repoRoot, entry, statsByPath),
+	);
 	const response: RuntimeWorkspaceChangesResponse = {
 		repoRoot,
 		generatedAt: Date.now(),
 		files,
 	};
-	workspaceChangesCacheByRepoRoot.set(repoRoot, {
-		stateKey,
-		response,
-		lastAccessedAt: Date.now(),
-	});
-	pruneWorkspaceChangesCache();
+	storeCachedWorkspaceChanges(cacheKey, stateKey, response);
 	return response;
 }
 
@@ -454,10 +524,12 @@ export async function getWorkspaceChangesBetweenRefs(
 		throw new Error("Could not resolve git repository root.");
 	}
 
-	const trackedChangesOutput = await getGitStdout(
-		["diff", "--name-status", "--find-renames", input.fromRef, input.toRef, "--"],
-		repoRoot,
-	);
+	// 与 name-status 并行解析两端 ref 的 commit SHA（单次常量 spawn，不加 wall-clock 延迟）。
+	const [trackedChangesOutput, resolvedFromRef, resolvedToRef] = await Promise.all([
+		getGitStdout(["diff", "--name-status", "--find-renames", input.fromRef, input.toRef, "--"], repoRoot),
+		resolveRefToCommitToken(repoRoot, input.fromRef),
+		resolveRefToCommitToken(repoRoot, input.toRef),
+	]);
 	const trackedChanges = parseTrackedChanges(trackedChangesOutput);
 	if (trackedChanges.length === 0) {
 		return {
@@ -467,16 +539,40 @@ export async function getWorkspaceChangesBetweenRefs(
 		};
 	}
 
-	const files = await Promise.all(
-		trackedChanges.map((entry) => buildFileChangeBetweenRefs(repoRoot, entry, input.fromRef, input.toRef)),
-	);
-	files.sort((left, right) => left.path.localeCompare(right.path));
+	// 结果由「两端解析后的 commit SHA + name-status 输出」唯一确定。headCommit 必须用解析后的 SHA 对，
+	// 而非原始 ref 字符串：可移动分支移动到新提交、但文件集合与 name-status 状态字母不变（仅内容变化）时，
+	// 单看 name-status 无法察觉，唯有解析后的 SHA 改变才能触发 cache miss → 重算，避免返回陈旧内容。
+	const stateKey = buildWorkspaceChangesStateKey({
+		repoRoot,
+		headCommit: `${resolvedFromRef}..${resolvedToRef}`,
+		trackedChangesOutput,
+		untrackedOutput: "",
+		fingerprints: [],
+	});
+	const cacheKey = buildWorkspaceChangesCacheKey({
+		repoRoot,
+		variant: "between_refs",
+		fromRef: input.fromRef,
+		toRef: input.toRef,
+	});
+	const cached = readCachedWorkspaceChanges(cacheKey, stateKey);
+	if (cached) {
+		return cached;
+	}
 
-	return {
+	const files = await materializeFileChanges(
+		trackedChanges,
+		["--find-renames", input.fromRef, input.toRef, "--"],
+		repoRoot,
+		(entry, statsByPath) => buildFileChangeBetweenRefs(repoRoot, entry, input.fromRef, input.toRef, statsByPath),
+	);
+	const response: RuntimeWorkspaceChangesResponse = {
 		repoRoot,
 		generatedAt: Date.now(),
 		files,
 	};
+	storeCachedWorkspaceChanges(cacheKey, stateKey, response);
+	return response;
 }
 
 export async function getWorkspaceChangesFromRef(input: ChangesFromRefInput): Promise<RuntimeWorkspaceChangesResponse> {
@@ -485,9 +581,10 @@ export async function getWorkspaceChangesFromRef(input: ChangesFromRefInput): Pr
 		throw new Error("Could not resolve git repository root.");
 	}
 
-	const [trackedChangesOutput, untrackedOutput] = await Promise.all([
+	const [trackedChangesOutput, untrackedOutput, resolvedFromRef] = await Promise.all([
 		getGitStdout(["diff", "--name-status", "--find-renames", input.fromRef, "--"], repoRoot),
 		getGitStdout(["ls-files", "--others", "--exclude-standard"], repoRoot),
+		resolveRefToCommitToken(repoRoot, input.fromRef),
 	]);
 	const trackedChanges = parseTrackedChanges(trackedChangesOutput);
 	const untrackedPaths = untrackedOutput
@@ -513,11 +610,36 @@ export async function getWorkspaceChangesFromRef(input: ChangesFromRefInput): Pr
 		};
 	}
 
-	const files = await Promise.all(allChanges.map((entry) => buildFileChangeFromRef(repoRoot, entry, input.fromRef)));
-	files.sort((left, right) => left.path.localeCompare(right.path));
-	return {
+	// from-side 是某 commit ref、to-side 是可变工作树，故 stateKey 须含工作树 fingerprints + untracked
+	// （照搬 working_copy 构造）。这让空闲工作树上的每秒轮询坍缩为一次廉价的 fingerprint 比对 → 命中缓存。
+	// headCommit 用解析后的 fromRef SHA（而非原始 ref 字符串）：可移动分支作基线时，它移动到新提交、
+	// 但工作树侧 name-status 与 fingerprints 不变时，唯有解析后的 SHA 改变才能触发 cache miss。
+	const fingerprintPaths = allChanges.flatMap((entry) => [entry.path, entry.previousPath].filter(Boolean) as string[]);
+	const fingerprints = await buildFileFingerprints(repoRoot, fingerprintPaths);
+	const stateKey = buildWorkspaceChangesStateKey({
+		repoRoot,
+		headCommit: resolvedFromRef,
+		trackedChangesOutput,
+		untrackedOutput,
+		fingerprints,
+	});
+	const cacheKey = buildWorkspaceChangesCacheKey({ repoRoot, variant: "from_ref", fromRef: input.fromRef });
+	const cached = readCachedWorkspaceChanges(cacheKey, stateKey);
+	if (cached) {
+		return cached;
+	}
+
+	const files = await materializeFileChanges(
+		allChanges,
+		["--find-renames", input.fromRef, "--"],
+		repoRoot,
+		(entry, statsByPath) => buildFileChangeFromRef(repoRoot, entry, input.fromRef, statsByPath),
+	);
+	const response: RuntimeWorkspaceChangesResponse = {
 		repoRoot,
 		generatedAt: Date.now(),
 		files,
 	};
+	storeCachedWorkspaceChanges(cacheKey, stateKey, response);
+	return response;
 }

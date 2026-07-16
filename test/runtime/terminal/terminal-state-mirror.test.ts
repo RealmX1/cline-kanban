@@ -88,6 +88,46 @@ describe("TerminalStateMirror", () => {
 		expect(snapshot.snapshot).toContain("after resize");
 	});
 
+	// dirty-flag 缓存：同一份 snapshot 对象被复用即证明未重跑同步序列化（返回同一引用 ⇔ 命中缓存）。
+	it("reuses the cached snapshot object when no output arrived since the last snapshot", async () => {
+		const mirror = createMirror(100, 30);
+
+		mirror.applyOutput(Buffer.from("stable content", "utf8"));
+
+		const first = await mirror.getSnapshot();
+		const second = await mirror.getSnapshot();
+
+		expect(second).toBe(first);
+		expect(second.snapshot).toContain("stable content");
+	});
+
+	it("recomputes the snapshot after new output arrives", async () => {
+		const mirror = createMirror(100, 30);
+
+		mirror.applyOutput(Buffer.from("first line", "utf8"));
+		const first = await mirror.getSnapshot();
+
+		mirror.applyOutput(Buffer.from("\r\nsecond line", "utf8"));
+		const second = await mirror.getSnapshot();
+
+		expect(second).not.toBe(first);
+		expect(second.snapshot).toContain("second line");
+	});
+
+	it("recomputes the snapshot after a resize changes dimensions", async () => {
+		const mirror = createMirror(80, 24);
+
+		mirror.applyOutput(Buffer.from("content", "utf8"));
+		const first = await mirror.getSnapshot();
+
+		mirror.resize(120, 40);
+		const second = await mirror.getSnapshot();
+
+		expect(second).not.toBe(first);
+		expect(second.cols).toBe(120);
+		expect(second.rows).toBe(40);
+	});
+
 	it("emits terminal query responses through the optional callback", async () => {
 		const onInputResponse = vi.fn();
 		const mirror = new TerminalStateMirror(80, 24, {
