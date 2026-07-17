@@ -110,17 +110,22 @@ function parseStatusPath(line: string): string | null {
 	return tokens[tokens.length - 1] ?? null;
 }
 
-export async function probeGitWorkspaceState(cwd: string): Promise<GitWorkspaceProbe> {
-	const repoRoot = await resolveRepoRoot(cwd);
-	const [statusResult, headCommitResult] = await Promise.all([
-		runGit(repoRoot, ["status", "--porcelain=v2", "--branch", "--untracked-files=all"]),
-		runGit(repoRoot, ["rev-parse", "--verify", "HEAD"]),
-	]);
+export async function probeGitWorkspaceState(
+	cwd: string,
+	options?: { knownRepoRoot?: string },
+): Promise<GitWorkspaceProbe> {
+	// 调用方已确知 cwd 就是 git 顶层（worktree 根 / 仓库根）时传 knownRepoRoot，
+	// 省掉一次 `git rev-parse --show-toplevel` 的同步子进程 spawn。热轮询路径靠此显著降 spawn。
+	const repoRoot = options?.knownRepoRoot ?? (await resolveRepoRoot(cwd));
+	// headCommit 从 `git status --porcelain=v2 --branch` 的 `# branch.oid` 头部解析（见下方循环），
+	// 不再并行跑 `git rev-parse --verify HEAD`，每次探针少一个 spawn。
+	const statusResult = await runGit(repoRoot, ["status", "--porcelain=v2", "--branch", "--untracked-files=all"]);
 
 	if (!statusResult.ok) {
 		throw new Error(statusResult.error ?? "Git status command failed.");
 	}
 
+	let headCommit: string | null = null;
 	let currentBranch: string | null = null;
 	let upstreamBranch: string | null = null;
 	let aheadCount = 0;
@@ -132,6 +137,12 @@ export async function probeGitWorkspaceState(cwd: string): Promise<GitWorkspaceP
 	for (const rawLine of statusResult.stdout.split("\n")) {
 		const line = rawLine.trim();
 		if (!line) {
+			continue;
+		}
+		if (line.startsWith("# branch.oid ")) {
+			const oid = line.slice("# branch.oid ".length).trim();
+			// 无提交的仓库为 `# branch.oid (initial)` → headCommit 为 null。
+			headCommit = oid && oid !== "(initial)" ? oid : null;
 			continue;
 		}
 		if (line.startsWith("# branch.head ")) {
@@ -174,7 +185,6 @@ export async function probeGitWorkspaceState(cwd: string): Promise<GitWorkspaceP
 		}
 	}
 
-	const headCommit = headCommitResult.ok && headCommitResult.stdout ? headCommitResult.stdout : null;
 	const fingerprints = await buildPathFingerprints(repoRoot, fingerprintPaths);
 
 	return {
