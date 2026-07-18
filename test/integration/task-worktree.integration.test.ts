@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { deleteTaskWorktree, ensureTaskWorktreeIfDoesntExist } from "../../src/workspace/task-worktree";
+import {
+	deleteTaskWorktree,
+	ensureTaskWorktreeIfDoesntExist,
+	getTaskWorkspacePathInfo,
+	resolveTaskCwd,
+} from "../../src/workspace/task-worktree";
 import { createGitTestEnv } from "../utilities/git-env";
 import { createTempDir } from "../utilities/temp-dir";
 
@@ -438,6 +443,54 @@ describe.sequential("task-worktree integration", () => {
 
 				expect(restored.warning).toContain("Saved task changes could not be reapplied automatically.");
 				expect(runGit(restored.path, ["rev-parse", "HEAD"])).toBe(createdCommit);
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	// 就绪门控回归护栏:setup 完成后的 worktree 必须立即被读侧判为就绪
+	//(防止 setup-in-progress registry 对已完成的 worktree 过度拦截)。
+	it("reports a fully set up worktree as ready for readers", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-task-worktree-readiness-integration-");
+			try {
+				const repoPath = join(sandboxRoot, "repo");
+				mkdirSync(repoPath, { recursive: true });
+
+				runGit(repoPath, ["init"]);
+				runGit(repoPath, ["config", "user.name", "Kanban Test"]);
+				runGit(repoPath, ["config", "user.email", "kanban-test@example.com"]);
+				writeFileSync(join(repoPath, "README.md"), "readiness\n", "utf8");
+				runGit(repoPath, ["add", "README.md"]);
+				runGit(repoPath, ["commit", "-m", "init"]);
+
+				const ensured = await ensureTaskWorktreeIfDoesntExist({
+					cwd: repoPath,
+					taskId: "task-readiness-integration",
+					baseRef: "HEAD",
+				});
+				expect(ensured.ok).toBe(true);
+				if (!ensured.ok || !ensured.path) {
+					throw new Error("Task worktree was not created");
+				}
+
+				const pathInfo = await getTaskWorkspacePathInfo({
+					cwd: repoPath,
+					taskId: "task-readiness-integration",
+					baseRef: "HEAD",
+				});
+				expect(pathInfo.exists).toBe(true);
+				expect(pathInfo.path).toBe(ensured.path);
+
+				await expect(
+					resolveTaskCwd({
+						cwd: repoPath,
+						taskId: "task-readiness-integration",
+						baseRef: "HEAD",
+						ensure: false,
+					}),
+				).resolves.toBe(ensured.path);
 			} finally {
 				cleanup();
 			}
