@@ -1,21 +1,13 @@
-import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { getWorkspaceChanges } from "../../../src/workspace/get-workspace-changes";
-import { createGitTestEnv } from "../../utilities/git-env";
-import { createTempDir } from "../../utilities/temp-dir";
-
-const gitEnv = createGitTestEnv();
-
-function runGit(cwd: string, args: string[]): void {
-	const result = spawnSync("git", args, { cwd, env: gitEnv, encoding: "utf8" });
-	if (result.status !== 0) {
-		throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
-	}
-}
+import {
+	createIsolatedGitTestWorkspaceFixture,
+	type IsolatedGitTestRepository,
+} from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
 
 // 生成一份 old+new 合计远超内联上限（1MB）的大文件内容。
 function makeLargeContent(marker: string): string {
@@ -25,26 +17,19 @@ function makeLargeContent(marker: string): string {
 
 describe("getWorkspaceChanges size limit", () => {
 	let repoPath: string;
-	let cleanup: () => void;
+	let repository: IsolatedGitTestRepository;
 
 	beforeEach(() => {
-		const temp = createTempDir("kanban-workspace-changes-size-");
-		repoPath = temp.path;
-		cleanup = temp.cleanup;
-		runGit(repoPath, ["init", "-q"]);
-		runGit(repoPath, ["config", "user.name", "Test User"]);
-		runGit(repoPath, ["config", "user.email", "test@example.com"]);
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		repository = fixture.createNonBareRepository({ repositoryDirectoryName: "workspace-changes-size-limit" });
+		repoPath = repository.repositoryPath;
 		writeFileSync(join(repoPath, "huge.txt"), makeLargeContent("base"));
 		writeFileSync(join(repoPath, "small.ts"), "const a = 1;\n");
-		runGit(repoPath, ["add", "."]);
-		runGit(repoPath, ["commit", "-qm", "initial"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "initial"]);
 		// 改动两文件：大文件仍然巨大，小文件保持小。
 		writeFileSync(join(repoPath, "huge.txt"), makeLargeContent("changed"));
 		writeFileSync(join(repoPath, "small.ts"), "const a = 2;\n");
-	});
-
-	afterEach(() => {
-		cleanup();
 	});
 
 	it("omits full text for oversized files but keeps line stats, and leaves small files intact", async () => {

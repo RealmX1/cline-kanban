@@ -1,6 +1,3 @@
-import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
-
 import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
@@ -9,8 +6,7 @@ import { stopActiveTerminalAndClineRuntimeSessionsForWorkspace } from "../../../
 import { persistSafelyStoppedRuntimeSessionsByWorkspaceId } from "../../../src/server/safely-stopped-runtime-session-persistence";
 import { loadWorkspaceContext, loadWorkspaceState, saveWorkspaceState } from "../../../src/state/workspace-state";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
-import { createGitTestEnv } from "../../utilities/git-env";
-import { createTempDir } from "../../utilities/temp-dir";
+import { createIsolatedGitTestWorkspaceFixture } from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
 
 function createSummary(
 	taskId: string,
@@ -97,18 +93,14 @@ describe("active runtime session shutdown", () => {
 	});
 
 	it("persists the latest inactive user-owned summary without changing its timestamps or facets", async () => {
-		const { path: temporaryHomePath, cleanup } = createTempDir("kanban-safe-runtime-persistence-home-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-safe-runtime-persistence-project-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const temporaryHomePath = gitFixture.isolatedHomeDirectoryPath;
+		const projectPath = gitFixture.createNonBareRepository({
+			repositoryDirectoryName: "safe-runtime-persistence-project",
+		}).repositoryPath;
 		const previousHome = process.env.HOME;
 		process.env.HOME = temporaryHomePath;
 		try {
-			mkdirSync(projectPath, { recursive: true });
-			const gitInit = spawnSync("git", ["init"], {
-				cwd: projectPath,
-				env: createGitTestEnv(),
-				stdio: "ignore",
-			});
-			expect(gitInit.status).toBe(0);
 			const initial = await loadWorkspaceState(projectPath);
 			const workspaceContext = await loadWorkspaceContext(projectPath);
 			const persistedBeforeShutdown = createSummary("waiting-user", "idle", "codex");
@@ -134,8 +126,6 @@ describe("active runtime session shutdown", () => {
 		} finally {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;
-			cleanupProject();
-			cleanup();
 		}
 	});
 });

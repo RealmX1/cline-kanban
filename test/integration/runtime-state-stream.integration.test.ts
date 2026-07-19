@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
@@ -27,8 +27,15 @@ import type {
 	RuntimeWorkspaceStateResponse,
 	RuntimeWorktreeEnsureResponse,
 } from "../../src/core/api-contract";
-import { createGitTestEnv } from "../utilities/git-env";
-import { createTempDir } from "../utilities/temp-dir";
+import {
+	createIsolatedGitTestWorkspaceFixture,
+	type IsolatedGitTestRepository,
+	type IsolatedGitTestWorkspaceFixture,
+} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+import {
+	createOwnedProcessLifecycleTestFixture,
+	type OwnedProcessLifecycleTestFixture,
+} from "../dangerous-capability-test-infrastructure/owned-process-lifecycle-test-fixture";
 
 const requireFromHere = createRequire(import.meta.url);
 
@@ -132,33 +139,46 @@ async function getAvailablePort(): Promise<number> {
 	return port;
 }
 
-function initGitRepository(path: string): void {
-	const init = spawnSync("git", ["init"], {
-		cwd: path,
-		stdio: "ignore",
-		env: createGitTestEnv(),
-	});
-	if (init.status !== 0) {
-		throw new Error(`Failed to initialize git repository at ${path}`);
-	}
+function commitAllRepositoryFiles(
+	repository: IsolatedGitTestRepository,
+	workingDirectoryPath: string,
+	message: string,
+): string {
+	repository.runGit(["add", "."], { workingDirectoryPath });
+	repository.runGit(["commit", "--quiet", "-m", message], { workingDirectoryPath });
+	return repository.runGit(["rev-parse", "HEAD"], { workingDirectoryPath }).stdout.trim();
 }
 
-function runGit(cwd: string, args: string[]): string {
-	const result = spawnSync("git", args, {
-		cwd,
-		encoding: "utf8",
-		env: createGitTestEnv(),
-	});
-	if (result.status !== 0) {
-		throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
-	}
-	return result.stdout.trim();
+interface RuntimeStateStreamIntegrationFixture {
+	gitFixture: IsolatedGitTestWorkspaceFixture;
+	processFixture: OwnedProcessLifecycleTestFixture;
+	homeDirectoryPath: string;
+	createRepository(repositoryDirectoryName: string): IsolatedGitTestRepository;
+	createNonGitDirectory(directoryName: string): string;
+	cleanup(): Promise<void>;
 }
 
-function commitAll(cwd: string, message: string): string {
-	runGit(cwd, ["add", "."]);
-	runGit(cwd, ["commit", "-qm", message]);
-	return runGit(cwd, ["rev-parse", "HEAD"]);
+function createRuntimeStateStreamIntegrationFixture(): RuntimeStateStreamIntegrationFixture {
+	const gitFixture = createIsolatedGitTestWorkspaceFixture();
+	const processFixture = createOwnedProcessLifecycleTestFixture();
+	processFixture.spawnUnrelatedSentinelProcess();
+	return {
+		gitFixture,
+		processFixture,
+		homeDirectoryPath: gitFixture.isolatedHomeDirectoryPath,
+		createRepository: (repositoryDirectoryName) =>
+			gitFixture.createNonBareRepository({ repositoryDirectoryName, initialBranchName: "main" }),
+		createNonGitDirectory(directoryName) {
+			const directoryPath = join(gitFixture.ownedIntegrationProjectsDirectoryPath, directoryName);
+			mkdirSync(directoryPath);
+			return directoryPath;
+		},
+		async cleanup() {
+			processFixture.assertUnrelatedSentinelProcessesAlive();
+			await processFixture.cleanup();
+			gitFixture.cleanup();
+		},
+	};
 }
 
 function resolveShutdownIpcHookPath(): string {
@@ -263,16 +283,22 @@ async function waitForExit(childProcess: ChildProcess, timeoutMs: number): Promi
 	});
 }
 
-async function startKanbanServer(input: { cwd: string; homeDir: string; port: number; extraArgs?: string[] }): Promise<{
+async function startKanbanServer(input: {
+	cwd: string;
+	gitFixture: IsolatedGitTestWorkspaceFixture;
+	processFixture: OwnedProcessLifecycleTestFixture;
+	port: number;
+	extraArgs?: string[];
+}): Promise<{
 	runtimeUrl: string;
 	stop: () => Promise<void>;
 }> {
 	const cliEntrypoint = resolve(process.cwd(), "src/cli.ts");
 	const shutdownIpcHookPath = resolveShutdownIpcHookPath();
 	const tsxLoaderImportSpecifier = resolveTsxLoaderImportSpecifier();
-	const child = spawn(
-		process.execPath,
-		[
+	const child = input.processFixture.spawnOwnedProcess({
+		command: process.execPath,
+		arguments: [
 			"--require",
 			shutdownIpcHookPath,
 			"--import",
@@ -281,16 +307,12 @@ async function startKanbanServer(input: { cwd: string; homeDir: string; port: nu
 			"--no-open",
 			...(input.extraArgs ?? []),
 		],
-		{
-			cwd: input.cwd,
-			env: createGitTestEnv({
-				HOME: input.homeDir,
-				USERPROFILE: input.homeDir,
-				KANBAN_RUNTIME_PORT: String(input.port),
-			}),
-			stdio: ["ignore", "pipe", "pipe", "ipc"],
-		},
-	);
+		workingDirectoryPath: input.cwd,
+		environmentVariables: input.gitFixture.createIsolatedChildProcessEnvironment({
+			KANBAN_RUNTIME_PORT: String(input.port),
+		}),
+		stdio: ["ignore", "pipe", "pipe", "ipc"],
+	});
 	const { runtimeUrl } = await waitForProcessStart(child);
 	return {
 		runtimeUrl,
@@ -458,15 +480,19 @@ async function requestJson<T>(input: {
 
 describe.sequential("runtime state stream integration", () => {
 	it("retains indexed project data and selection when the project path becomes unavailable", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-unavailable-project-");
-		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-unavailable-project-");
-		const projectPath = join(tempRoot, "project");
-		const temporarilyMovedProjectPath = join(tempRoot, "project-temporarily-moved");
-		mkdirSync(projectPath, { recursive: true });
-		initGitRepository(projectPath);
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const tempHome = integrationFixture.homeDirectoryPath;
+		const repository = integrationFixture.createRepository("unavailable-project");
+		const projectPath = repository.repositoryPath;
+		const temporarilyMovedProjectPath = `${projectPath}-temporarily-moved`;
 
 		const port = await getAvailablePort();
-		const server = await startKanbanServer({ cwd: projectPath, homeDir: tempHome, port });
+		const server = await startKanbanServer({
+			cwd: projectPath,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
+			port,
+		});
 		let initialStream: RuntimeStreamClient | null = null;
 		let unavailableProjectStream: RuntimeStreamClient | null = null;
 		let recoveredProjectStream: RuntimeStreamClient | null = null;
@@ -563,17 +589,22 @@ describe.sequential("runtime state stream integration", () => {
 				renameSync(temporarilyMovedProjectPath, projectPath);
 			}
 			await server.stop();
-			cleanupRoot();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 30_000);
 
 	it("treats core.bare=true as a retained unavailable project without deleting persisted state", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-bare-project-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-bare-project-");
-		initGitRepository(projectPath);
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const tempHome = integrationFixture.homeDirectoryPath;
+		const repository = integrationFixture.createRepository("bare-project");
+		const projectPath = repository.repositoryPath;
 		const port = await getAvailablePort();
-		const server = await startKanbanServer({ cwd: projectPath, homeDir: tempHome, port });
+		const server = await startKanbanServer({
+			cwd: projectPath,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
+			port,
+		});
 		let initialStream: RuntimeStreamClient | null = null;
 		let unavailableProjectStream: RuntimeStreamClient | null = null;
 
@@ -611,7 +642,7 @@ describe.sequential("runtime state stream integration", () => {
 				retainedFilePaths.map((filePath) => [filePath, readFileSync(filePath)]),
 			);
 
-			runGit(projectPath, ["config", "core.bare", "true"]);
+			repository.runGit(["config", "core.bare", "true"]);
 			unavailableProjectStream = await connectRuntimeStream(
 				`ws://127.0.0.1:${port}/api/runtime/ws?workspaceId=${encodeURIComponent(workspaceId)}`,
 			);
@@ -638,21 +669,21 @@ describe.sequential("runtime state stream integration", () => {
 			if (unavailableProjectStream) {
 				await unavailableProjectStream.close();
 			}
-			runGit(projectPath, ["config", "core.bare", "false"]);
+			repository.runGit(["config", "core.bare", "false"]);
 			await server.stop();
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 30_000);
 
 	it("starts outside a git repository with no active workspace", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-no-git-");
-		const { path: nonGitPath, cleanup: cleanupNonGitPath } = createTempDir("kanban-no-git-");
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const nonGitPath = integrationFixture.createNonGitDirectory("no-git-directory");
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
 			cwd: nonGitPath,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -683,18 +714,19 @@ describe.sequential("runtime state stream integration", () => {
 				await stream.close();
 			}
 			await server.stop();
-			cleanupNonGitPath();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 30_000);
 
 	it("starts from the home directory with no active workspace", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-home-dir-launch-");
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const tempHome = integrationFixture.homeDirectoryPath;
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
 			cwd: tempHome,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -725,27 +757,21 @@ describe.sequential("runtime state stream integration", () => {
 				await stream.close();
 			}
 			await server.stop();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 30_000);
 
 	it("launches outside git using the first indexed project", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-first-project-");
-		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-first-project-");
-
-		const projectAPath = join(tempRoot, "project-a");
-		const projectBPath = join(tempRoot, "project-b");
-		const nonGitPath = join(tempRoot, "non-git");
-		mkdirSync(projectAPath, { recursive: true });
-		mkdirSync(projectBPath, { recursive: true });
-		mkdirSync(nonGitPath, { recursive: true });
-		initGitRepository(projectAPath);
-		initGitRepository(projectBPath);
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const projectAPath = integrationFixture.createRepository("project-a").repositoryPath;
+		const projectBPath = integrationFixture.createRepository("project-b").repositoryPath;
+		const nonGitPath = integrationFixture.createNonGitDirectory("non-git");
 
 		const firstPort = await getAvailablePort();
 		const firstServer = await startKanbanServer({
 			cwd: projectAPath,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port: firstPort,
 		});
 
@@ -773,7 +799,8 @@ describe.sequential("runtime state stream integration", () => {
 		const secondPort = await getAvailablePort();
 		const secondServer = await startKanbanServer({
 			cwd: nonGitPath,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port: secondPort,
 		});
 
@@ -807,25 +834,20 @@ describe.sequential("runtime state stream integration", () => {
 				await secondStream.close();
 			}
 			await secondServer.stop();
-			cleanupRoot();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 45_000);
 
 	it("requires explicit confirmation before initializing git for a non-git added project", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-project-add-git-confirm-");
-		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-project-add-git-confirm-");
-
-		const projectAPath = join(tempRoot, "project-a");
-		const nonGitPath = join(tempRoot, "non-git-project");
-		mkdirSync(projectAPath, { recursive: true });
-		mkdirSync(nonGitPath, { recursive: true });
-		initGitRepository(projectAPath);
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const projectAPath = integrationFixture.createRepository("project-a").repositoryPath;
+		const nonGitPath = integrationFixture.createNonGitDirectory("non-git-project");
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
 			cwd: projectAPath,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -874,26 +896,20 @@ describe.sequential("runtime state stream integration", () => {
 			expect(existsSync(join(nonGitPath, ".git"))).toBe(true);
 		} finally {
 			await server.stop();
-			cleanupRoot();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 45_000);
 
 	it("streams per-project snapshots and isolates workspace updates", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-stream-");
-		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-projects-stream-");
-
-		const projectAPath = join(tempRoot, "project-a");
-		const projectBPath = join(tempRoot, "project-b");
-		mkdirSync(projectAPath, { recursive: true });
-		mkdirSync(projectBPath, { recursive: true });
-		initGitRepository(projectAPath);
-		initGitRepository(projectBPath);
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const projectAPath = integrationFixture.createRepository("project-a").repositoryPath;
+		const projectBPath = integrationFixture.createRepository("project-b").repositoryPath;
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
 			cwd: projectAPath,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -995,22 +1011,19 @@ describe.sequential("runtime state stream integration", () => {
 				await streamB.close();
 			}
 			await server.stop();
-			cleanupRoot();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 30_000);
 
 	it("emits task_ready_for_review when hook review event is ingested", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-hook-stream-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-hook-stream-");
-
-		mkdirSync(projectPath, { recursive: true });
-		initGitRepository(projectPath);
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const projectPath = integrationFixture.createRepository("project-hook-stream").repositoryPath;
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
 			cwd: projectPath,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -1079,26 +1092,22 @@ describe.sequential("runtime state stream integration", () => {
 				await stream.close();
 			}
 			await server.stop();
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 30_000);
 
 	it("streams centralized workspace metadata updates for task worktrees", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-metadata-stream-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-metadata-stream-");
-
-		mkdirSync(projectPath, { recursive: true });
-		initGitRepository(projectPath);
-		runGit(projectPath, ["config", "user.name", "Test User"]);
-		runGit(projectPath, ["config", "user.email", "test@example.com"]);
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-metadata-stream");
+		const projectPath = repository.repositoryPath;
 		writeFileSync(join(projectPath, "README.md"), "seed\n", "utf8");
-		commitAll(projectPath, "seed project");
+		commitAllRepositoryFiles(repository, projectPath, "seed project");
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
 			cwd: projectPath,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -1119,7 +1128,7 @@ describe.sequential("runtime state stream integration", () => {
 
 			const taskId = "metadata-stream-task";
 			const trashTaskId = "metadata-trash-task";
-			const baseRef = runGit(projectPath, ["rev-parse", "--abbrev-ref", "HEAD"]);
+			const baseRef = repository.runGit(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.trim();
 			const board = createReviewBoard(taskId, "Metadata stream task", trashTaskId);
 			const reviewColumn = board.columns.find((column) => column.id === "review");
 			const trashColumn = board.columns.find((column) => column.id === "trash");
@@ -1203,27 +1212,23 @@ describe.sequential("runtime state stream integration", () => {
 				await stream.close();
 			}
 			await server.stop();
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 45_000);
 
 	it("preserves existing task worktree when base ref advances", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-preserve-worktree-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-preserve-worktree-");
-
-		mkdirSync(projectPath, { recursive: true });
-		initGitRepository(projectPath);
-		runGit(projectPath, ["config", "user.name", "Test User"]);
-		runGit(projectPath, ["config", "user.email", "test@example.com"]);
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-preserve-worktree");
+		const projectPath = repository.repositoryPath;
 		writeFileSync(join(projectPath, "initial.txt"), "one\n", "utf8");
-		const firstBaseCommit = commitAll(projectPath, "initial commit");
-		const baseRef = runGit(projectPath, ["symbolic-ref", "--short", "HEAD"]);
+		const firstBaseCommit = commitAllRepositoryFiles(repository, projectPath, "initial commit");
+		const baseRef = repository.runGit(["symbolic-ref", "--short", "HEAD"]).stdout.trim();
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
 			cwd: projectPath,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -1279,13 +1284,11 @@ describe.sequential("runtime state stream integration", () => {
 			}
 			expect(firstEnsure.payload.baseCommit).toBe(firstBaseCommit);
 
-			runGit(firstEnsure.payload.path, ["config", "user.name", "Task User"]);
-			runGit(firstEnsure.payload.path, ["config", "user.email", "task@example.com"]);
 			writeFileSync(join(firstEnsure.payload.path, "task-local.txt"), "task commit\n", "utf8");
-			const taskWorktreeCommit = commitAll(firstEnsure.payload.path, "task-local commit");
+			const taskWorktreeCommit = commitAllRepositoryFiles(repository, firstEnsure.payload.path, "task-local commit");
 
 			writeFileSync(join(projectPath, "advance-base.txt"), "two\n", "utf8");
-			const advancedBaseCommit = commitAll(projectPath, "advance base");
+			const advancedBaseCommit = commitAllRepositoryFiles(repository, projectPath, "advance base");
 			expect(advancedBaseCommit).not.toBe(firstBaseCommit);
 
 			const secondEnsure = await requestJson<RuntimeWorktreeEnsureResponse>({
@@ -1320,8 +1323,7 @@ describe.sequential("runtime state stream integration", () => {
 			expect(taskContext.payload.headCommit).toBe(taskWorktreeCommit);
 		} finally {
 			await server.stop();
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 45_000);
 
@@ -1337,18 +1339,16 @@ describe.sequential("runtime state stream integration", () => {
 	])(
 		"preserves completed review cards and task worktrees with $label",
 		async ({ extraArgs }) => {
-			const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-safe-shutdown-");
-			const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-safe-shutdown-");
-
-			mkdirSync(projectPath, { recursive: true });
-			initGitRepository(projectPath);
+			const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+			const projectPath = integrationFixture.createRepository("project-safe-shutdown").repositoryPath;
 
 			const taskId = "safe-shutdown-review-task";
 			const now = Date.now();
 			const firstPort = await getAvailablePort();
 			const firstServer = await startKanbanServer({
 				cwd: projectPath,
-				homeDir: tempHome,
+				gitFixture: integrationFixture.gitFixture,
+				processFixture: integrationFixture.processFixture,
 				port: firstPort,
 				extraArgs,
 			});
@@ -1410,7 +1410,8 @@ describe.sequential("runtime state stream integration", () => {
 			const secondPort = await getAvailablePort();
 			const secondServer = await startKanbanServer({
 				cwd: projectPath,
-				homeDir: tempHome,
+				gitFixture: integrationFixture.gitFixture,
+				processFixture: integrationFixture.processFixture,
 				port: secondPort,
 			});
 
@@ -1453,28 +1454,22 @@ describe.sequential("runtime state stream integration", () => {
 				expect(workspaceInfo.payload.exists).toBe(true);
 			} finally {
 				await secondServer.stop();
-				cleanupProject();
-				cleanupHome();
+				await integrationFixture.cleanup();
 			}
 		},
 		45_000,
 	);
 
 	it("falls back to the remaining project after confirmed permanent deletion of the active project", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-remove-");
-		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-projects-remove-");
-
-		const projectAPath = join(tempRoot, "project-a");
-		const projectBPath = join(tempRoot, "project-b");
-		mkdirSync(projectAPath, { recursive: true });
-		mkdirSync(projectBPath, { recursive: true });
-		initGitRepository(projectAPath);
-		initGitRepository(projectBPath);
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const projectAPath = integrationFixture.createRepository("project-a").repositoryPath;
+		const projectBPath = integrationFixture.createRepository("project-b").repositoryPath;
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
 			cwd: projectAPath,
-			homeDir: tempHome,
+			gitFixture: integrationFixture.gitFixture,
+			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -1587,8 +1582,7 @@ describe.sequential("runtime state stream integration", () => {
 				await streamB.close();
 			}
 			await server.stop();
-			cleanupRoot();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	}, 30_000);
 });
