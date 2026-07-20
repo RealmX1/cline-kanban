@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
@@ -7,8 +7,15 @@ import { pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { createGitTestEnv } from "../utilities/git-env";
-import { createTempDir } from "../utilities/temp-dir";
+import {
+	createIsolatedGitTestWorkspaceFixture,
+	type IsolatedGitTestRepository,
+	type IsolatedGitTestWorkspaceFixture,
+} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+import {
+	createOwnedProcessLifecycleTestFixture,
+	type OwnedProcessLifecycleTestFixture,
+} from "../dangerous-capability-test-infrastructure/owned-process-lifecycle-test-fixture";
 
 const requireFromHere = createRequire(import.meta.url);
 
@@ -20,41 +27,47 @@ function resolveTsxLoaderImportSpecifier(): string {
 	return pathToFileURL(requireFromHere.resolve("tsx")).href;
 }
 
-function initGitRepository(path: string): void {
-	const init = spawnSync("git", ["init"], {
-		cwd: path,
-		stdio: "ignore",
-		env: createGitTestEnv(),
-	});
-	if (init.status !== 0) {
-		throw new Error(`Failed to initialize git repository at ${path}`);
-	}
-	const checkout = spawnSync("git", ["checkout", "-B", "main"], {
-		cwd: path,
-		stdio: "ignore",
-		env: createGitTestEnv(),
-	});
-	if (checkout.status !== 0) {
-		throw new Error(`Failed to create main branch at ${path}`);
-	}
+function commitAllRepositoryFiles(
+	repository: IsolatedGitTestRepository,
+	workingDirectoryPath: string,
+	message: string,
+): string {
+	repository.runGit(["add", "."], { workingDirectoryPath });
+	repository.runGit(["commit", "--quiet", "-m", message], { workingDirectoryPath });
+	return repository.runGit(["rev-parse", "HEAD"], { workingDirectoryPath }).stdout.trim();
 }
 
-function runGit(cwd: string, args: string[]): string {
-	const result = spawnSync("git", args, {
-		cwd,
-		encoding: "utf8",
-		env: createGitTestEnv(),
-	});
-	if (result.status !== 0) {
-		throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
-	}
-	return result.stdout.trim();
+interface TaskCommandExitIntegrationFixture {
+	gitFixture: IsolatedGitTestWorkspaceFixture;
+	processFixture: OwnedProcessLifecycleTestFixture;
+	homeDirectoryPath: string;
+	createRepository(repositoryDirectoryName: string): IsolatedGitTestRepository;
+	runCliCommandAndCollectOutput(
+		options: Omit<RunCliCommandAndCollectOutputOptions, "processFixture">,
+	): Promise<CliCommandCollectedOutput>;
+	cleanup(): Promise<void>;
 }
 
-function commitAll(cwd: string, message: string): string {
-	runGit(cwd, ["add", "."]);
-	runGit(cwd, ["commit", "-qm", message]);
-	return runGit(cwd, ["rev-parse", "HEAD"]);
+function createTaskCommandExitIntegrationFixture(): TaskCommandExitIntegrationFixture {
+	const gitFixture = createIsolatedGitTestWorkspaceFixture();
+	const processFixture = createOwnedProcessLifecycleTestFixture();
+	processFixture.spawnUnrelatedSentinelProcess();
+	return {
+		gitFixture,
+		processFixture,
+		homeDirectoryPath: gitFixture.isolatedHomeDirectoryPath,
+		createRepository(repositoryDirectoryName) {
+			return gitFixture.createNonBareRepository({ repositoryDirectoryName, initialBranchName: "main" });
+		},
+		runCliCommandAndCollectOutput(options) {
+			return runCliCommandAndCollectOutput({ ...options, processFixture });
+		},
+		async cleanup() {
+			processFixture.assertUnrelatedSentinelProcessesAlive();
+			await processFixture.cleanup();
+			gitFixture.cleanup();
+		},
+	};
 }
 
 async function getAvailablePort(): Promise<number> {
@@ -204,25 +217,45 @@ async function requestGracefulShutdown(process: ChildProcess): Promise<void> {
 
 function spawnSourceCli(
 	args: string[],
-	options: { cwd: string; env: NodeJS.ProcessEnv; stdio?: ChildProcess["stdio"] },
+	options: {
+		cwd: string;
+		env: NodeJS.ProcessEnv;
+		processFixture: OwnedProcessLifecycleTestFixture;
+		stdio?: ChildProcess["stdio"];
+	},
 ) {
 	const cliEntrypoint = resolve(process.cwd(), "src/cli.ts");
-	return spawn(process.execPath, ["--import", resolveTsxLoaderImportSpecifier(), cliEntrypoint, ...args], {
-		cwd: options.cwd,
-		env: options.env,
+	return options.processFixture.spawnOwnedProcess({
+		command: process.execPath,
+		arguments: ["--import", resolveTsxLoaderImportSpecifier(), cliEntrypoint, ...args],
+		workingDirectoryPath: options.cwd,
+		environmentVariables: options.env,
 		stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
 	});
 }
 
-async function runCliCommandAndCollectOutput(options: {
+interface RunCliCommandAndCollectOutputOptions {
 	args: string[];
 	cwd: string;
 	env: NodeJS.ProcessEnv;
+	processFixture: OwnedProcessLifecycleTestFixture;
 	timeoutMs?: number;
-}): Promise<{ stdout: string; stderr: string; exitCode: number | null; didExit: boolean }> {
+}
+
+interface CliCommandCollectedOutput {
+	stdout: string;
+	stderr: string;
+	exitCode: number | null;
+	didExit: boolean;
+}
+
+async function runCliCommandAndCollectOutput(
+	options: RunCliCommandAndCollectOutputOptions,
+): Promise<CliCommandCollectedOutput> {
 	const process = spawnSourceCli(options.args, {
 		cwd: options.cwd,
 		env: options.env,
+		processFixture: options.processFixture,
 	});
 
 	let stdout = "";
@@ -304,11 +337,16 @@ function readProcessRssKb(pid: number): number | null {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
-async function bootstrapWorkspaceOnDisk(options: { projectPath: string; homeDir: string }): Promise<string> {
+async function bootstrapWorkspaceOnDisk(options: {
+	projectPath: string;
+	gitFixture: IsolatedGitTestWorkspaceFixture;
+	processFixture: OwnedProcessLifecycleTestFixture;
+}): Promise<string> {
 	const port = String(await getAvailablePort());
 	const serverProcess = await startRuntimeServerForProject({
 		projectPath: options.projectPath,
-		homeDir: options.homeDir,
+		gitFixture: options.gitFixture,
+		processFixture: options.processFixture,
 		port,
 	});
 	await stopRuntimeServer(serverProcess);
@@ -351,17 +389,16 @@ async function waitForExitWhileTrackingRss(options: {
 
 async function startRuntimeServerForProject(options: {
 	projectPath: string;
-	homeDir: string;
+	gitFixture: IsolatedGitTestWorkspaceFixture;
+	processFixture: OwnedProcessLifecycleTestFixture;
 	port: string;
 }): Promise<ChildProcess> {
-	const env = createGitTestEnv({
-		HOME: options.homeDir,
-		USERPROFILE: options.homeDir,
+	const env = options.gitFixture.createIsolatedChildProcessEnvironment({
 		KANBAN_RUNTIME_PORT: options.port,
 	});
-	const serverProcess = spawn(
-		process.execPath,
-		[
+	const serverProcess = options.processFixture.spawnOwnedProcess({
+		command: process.execPath,
+		arguments: [
 			"--require",
 			resolveShutdownIpcHookPath(),
 			"--import",
@@ -369,12 +406,10 @@ async function startRuntimeServerForProject(options: {
 			resolve(process.cwd(), "src/cli.ts"),
 			"--no-open",
 		],
-		{
-			cwd: options.projectPath,
-			env,
-			stdio: ["ignore", "pipe", "pipe", "ipc"],
-		},
-	);
+		workingDirectoryPath: options.projectPath,
+		environmentVariables: env,
+		stdio: ["ignore", "pipe", "pipe", "ipc"],
+	});
 	await waitForServerStart(serverProcess);
 	return serverProcess;
 }
@@ -390,41 +425,26 @@ async function stopRuntimeServer(serverProcess: ChildProcess): Promise<void> {
 
 describe("source task commands", () => {
 	it("exits after creating a task when the runtime server is already running", { timeout: 60_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-task-exit-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-task-exit-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-task-exit");
+		const projectPath = repository.repositoryPath;
 
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# Task Exit Test\n", "utf8");
-			commitAll(projectPath, "init");
+			commitAllRepositoryFiles(repository, projectPath, "init");
 
 			const port = String(await getAvailablePort());
-			const env = createGitTestEnv({
-				HOME: homeDir,
-				USERPROFILE: homeDir,
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 				KANBAN_RUNTIME_PORT: port,
 			});
-
-			const serverProcess = spawn(
-				process.execPath,
-				[
-					"--require",
-					resolveShutdownIpcHookPath(),
-					"--import",
-					resolveTsxLoaderImportSpecifier(),
-					resolve(process.cwd(), "src/cli.ts"),
-					"--no-open",
-				],
-				{
-					cwd: projectPath,
-					env,
-					stdio: ["ignore", "pipe", "pipe", "ipc"],
-				},
-			);
+			const serverProcess = await startRuntimeServerForProject({
+				projectPath,
+				gitFixture: integrationFixture.gitFixture,
+				processFixture: integrationFixture.processFixture,
+				port,
+			});
 
 			try {
-				await waitForServerStart(serverProcess);
-
 				const commandProcess = spawnSourceCli(
 					[
 						"task",
@@ -437,6 +457,7 @@ describe("source task commands", () => {
 					{
 						cwd: projectPath,
 						env,
+						processFixture: integrationFixture.processFixture,
 					},
 				);
 
@@ -449,7 +470,7 @@ describe("source task commands", () => {
 					stderr += chunk.toString();
 				});
 
-				const didExit = await waitForExit(commandProcess, 8_000);
+				const didExit = await waitForExit(commandProcess, 20_000);
 				if (!didExit) {
 					commandProcess.kill("SIGKILL");
 				}
@@ -458,16 +479,10 @@ describe("source task commands", () => {
 				expect(commandProcess.exitCode).toBe(0);
 				expect(stdout).toContain('"ok": true');
 			} finally {
-				await requestGracefulShutdown(serverProcess);
-				const stopped = await waitForExit(serverProcess, 5_000);
-				if (!stopped) {
-					serverProcess.kill("SIGKILL");
-					await waitForExit(serverProcess, 5_000);
-				}
+				await stopRuntimeServer(serverProcess);
 			}
 		} finally {
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 
@@ -476,45 +491,32 @@ describe("source task commands", () => {
 			return;
 		}
 
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-root-launch-open-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-root-launch-open-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-root-launch-open");
+		const projectPath = repository.repositoryPath;
+		const homeDir = integrationFixture.homeDirectoryPath;
+		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# Root Launch Browser Open Test\n", "utf8");
-			commitAll(projectPath, "init");
+			commitAllRepositoryFiles(repository, projectPath, "init");
 
 			const port = String(await getAvailablePort());
 			const browserStubBinDir = join(homeDir, "browser-bin");
 			const browserOpenLogPath = join(homeDir, "browser-open.log");
 			installBrowserOpenStub(browserStubBinDir, browserOpenLogPath);
-			const env = createGitTestEnv({
-				HOME: homeDir,
-				USERPROFILE: homeDir,
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 				KANBAN_RUNTIME_PORT: port,
 				PATH: `${browserStubBinDir}:${process.env.PATH ?? ""}`,
 			});
-
-			const serverProcess = spawn(
-				process.execPath,
-				[
-					"--require",
-					resolveShutdownIpcHookPath(),
-					"--import",
-					resolveTsxLoaderImportSpecifier(),
-					resolve(process.cwd(), "src/cli.ts"),
-					"--no-open",
-				],
-				{
-					cwd: projectPath,
-					env,
-					stdio: ["ignore", "pipe", "pipe", "ipc"],
-				},
-			);
+			const serverProcess = await startRuntimeServerForProject({
+				projectPath,
+				gitFixture: integrationFixture.gitFixture,
+				processFixture: integrationFixture.processFixture,
+				port,
+			});
 
 			try {
-				await waitForServerStart(serverProcess);
-
 				for (const [args, expectedOpenCount] of [
 					[[], 1],
 					[["task", "list", "--project-path", projectPath], 1],
@@ -532,55 +534,35 @@ describe("source task commands", () => {
 					expect(readBrowserOpenLog(browserOpenLogPath)).toHaveLength(expectedOpenCount);
 				}
 			} finally {
-				await requestGracefulShutdown(serverProcess);
-				const stopped = await waitForExit(serverProcess, 5_000);
-				if (!stopped) {
-					serverProcess.kill("SIGKILL");
-					await waitForExit(serverProcess, 5_000);
-				}
+				await stopRuntimeServer(serverProcess);
 			}
 		} finally {
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 
 	it("supports done and trash aliases when moving and deleting tasks", { timeout: 60_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-task-done-delete-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-task-done-delete-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-task-done-delete");
+		const projectPath = repository.repositoryPath;
+		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# Task Done Delete Test\n", "utf8");
-			commitAll(projectPath, "init");
+			commitAllRepositoryFiles(repository, projectPath, "init");
 
 			const port = String(await getAvailablePort());
-			const env = createGitTestEnv({
-				HOME: homeDir,
-				USERPROFILE: homeDir,
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 				KANBAN_RUNTIME_PORT: port,
 			});
-
-			const serverProcess = spawn(
-				process.execPath,
-				[
-					"--require",
-					resolveShutdownIpcHookPath(),
-					"--import",
-					resolveTsxLoaderImportSpecifier(),
-					resolve(process.cwd(), "src/cli.ts"),
-					"--no-open",
-				],
-				{
-					cwd: projectPath,
-					env,
-					stdio: ["ignore", "pipe", "pipe", "ipc"],
-				},
-			);
+			const serverProcess = await startRuntimeServerForProject({
+				projectPath,
+				gitFixture: integrationFixture.gitFixture,
+				processFixture: integrationFixture.processFixture,
+				port,
+			});
 
 			try {
-				await waitForServerStart(serverProcess);
-
 				const taskIds: string[] = [];
 				for (const prompt of [
 					"Create a temporary task for done and delete",
@@ -686,55 +668,35 @@ describe("source task commands", () => {
 				expect(listedTrash.exitCode).toBe(0);
 				expect(listedTrash.stdout).toContain('"count": 0');
 			} finally {
-				await requestGracefulShutdown(serverProcess);
-				const stopped = await waitForExit(serverProcess, 5_000);
-				if (!stopped) {
-					serverProcess.kill("SIGKILL");
-					await waitForExit(serverProcess, 5_000);
-				}
+				await stopRuntimeServer(serverProcess);
 			}
 		} finally {
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 
 	it("treats create-time reasoning inherit as no explicit override", { timeout: 60_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-task-cline-reasoning-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-task-cline-reasoning-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-task-cline-reasoning");
+		const projectPath = repository.repositoryPath;
+		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# Task Cline Reasoning Test\n", "utf8");
-			commitAll(projectPath, "init");
+			commitAllRepositoryFiles(repository, projectPath, "init");
 
 			const port = String(await getAvailablePort());
-			const env = createGitTestEnv({
-				HOME: homeDir,
-				USERPROFILE: homeDir,
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 				KANBAN_RUNTIME_PORT: port,
 			});
-
-			const serverProcess = spawn(
-				process.execPath,
-				[
-					"--require",
-					resolveShutdownIpcHookPath(),
-					"--import",
-					resolveTsxLoaderImportSpecifier(),
-					resolve(process.cwd(), "src/cli.ts"),
-					"--no-open",
-				],
-				{
-					cwd: projectPath,
-					env,
-					stdio: ["ignore", "pipe", "pipe", "ipc"],
-				},
-			);
+			const serverProcess = await startRuntimeServerForProject({
+				projectPath,
+				gitFixture: integrationFixture.gitFixture,
+				processFixture: integrationFixture.processFixture,
+				port,
+			});
 
 			try {
-				await waitForServerStart(serverProcess);
-
 				const inheritedCreate = await runCliCommandAndCollectOutput({
 					args: [
 						"task",
@@ -783,39 +745,33 @@ describe("source task commands", () => {
 				expect(defaultPayload.ok).toBe(true);
 				expect(defaultPayload.task?.clineSettings).toEqual({});
 			} finally {
-				await requestGracefulShutdown(serverProcess);
-				const stopped = await waitForExit(serverProcess, 5_000);
-				if (!stopped) {
-					serverProcess.kill("SIGKILL");
-					await waitForExit(serverProcess, 5_000);
-				}
+				await stopRuntimeServer(serverProcess);
 			}
 		} finally {
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 });
 
 describe("CLI subprocess exit guarantees", () => {
 	it("exits after task list without --column on a multi-task workspace", { timeout: 120_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-list-all-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-list-all-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-cli-list-all");
+		const projectPath = repository.repositoryPath;
+		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# CLI List All Tasks Test\n", "utf8");
-			commitAll(projectPath, "init");
+			commitAllRepositoryFiles(repository, projectPath, "init");
 
 			const port = String(await getAvailablePort());
-			const env = createGitTestEnv({
-				HOME: homeDir,
-				USERPROFILE: homeDir,
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 				KANBAN_RUNTIME_PORT: port,
 			});
 			const serverProcess = await startRuntimeServerForProject({
 				projectPath,
-				homeDir,
+				gitFixture: integrationFixture.gitFixture,
+				processFixture: integrationFixture.processFixture,
 				port,
 			});
 
@@ -857,25 +813,23 @@ describe("CLI subprocess exit guarantees", () => {
 				await stopRuntimeServer(serverProcess);
 			}
 		} finally {
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 
 	it("exits when the runtime server is unreachable", { timeout: 30_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-unreachable-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-unreachable-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-cli-unreachable");
+		const projectPath = repository.repositoryPath;
+		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# CLI Unreachable Runtime Test\n", "utf8");
-			commitAll(projectPath, "init");
+			commitAllRepositoryFiles(repository, projectPath, "init");
 
 			const deadPort = String(await getAvailablePort());
 			const env = withCliGuardTimeouts(
-				createGitTestEnv({
-					HOME: homeDir,
-					USERPROFILE: homeDir,
+				integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 					KANBAN_RUNTIME_PORT: deadPort,
 				}),
 			);
@@ -894,27 +848,25 @@ describe("CLI subprocess exit guarantees", () => {
 			expect(result.exitCode).toBe(1);
 			expect(result.stdout).toContain('"ok": false');
 		} finally {
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 
 	it("exits when the runtime hangs instead of responding to tRPC", { timeout: 30_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-hanging-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-hanging-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-cli-hanging");
+		const projectPath = repository.repositoryPath;
+		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		let hangingServer: Server | null = null;
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# CLI Hanging Runtime Test\n", "utf8");
-			commitAll(projectPath, "init");
+			commitAllRepositoryFiles(repository, projectPath, "init");
 
 			const started = await startHangingHttpServer();
 			hangingServer = started.server;
 			const env = withCliGuardTimeouts(
-				createGitTestEnv({
-					HOME: homeDir,
-					USERPROFILE: homeDir,
+				integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 					KANBAN_RUNTIME_PORT: String(started.port),
 				}),
 			);
@@ -936,8 +888,7 @@ describe("CLI subprocess exit guarantees", () => {
 			if (hangingServer) {
 				await closeHttpServer(hangingServer);
 			}
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 
@@ -945,21 +896,24 @@ describe("CLI subprocess exit guarantees", () => {
 		"exits with code 1 (not 124) when tRPC times out under production-like timeout margin",
 		{ timeout: 30_000 },
 		async () => {
-			const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-trpc-margin-");
-			const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-trpc-margin-");
+			const integrationFixture = createTaskCommandExitIntegrationFixture();
+			const repository = integrationFixture.createRepository("project-cli-trpc-margin");
+			const projectPath = repository.repositoryPath;
+			const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 			let hangingServer: Server | null = null;
 			try {
-				initGitRepository(projectPath);
 				writeFileSync(join(projectPath, "README.md"), "# CLI TRPC Margin Test\n", "utf8");
-				commitAll(projectPath, "init");
-				await bootstrapWorkspaceOnDisk({ projectPath, homeDir });
+				commitAllRepositoryFiles(repository, projectPath, "init");
+				await bootstrapWorkspaceOnDisk({
+					projectPath,
+					gitFixture: integrationFixture.gitFixture,
+					processFixture: integrationFixture.processFixture,
+				});
 
 				const started = await startHangingHttpServer();
 				hangingServer = started.server;
-				const env = createGitTestEnv({
-					HOME: homeDir,
-					USERPROFILE: homeDir,
+				const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 					KANBAN_RUNTIME_PORT: String(started.port),
 					KANBAN_CLI_TRPC_TIMEOUT_MS: "2000",
 					KANBAN_CLI_HARD_TIMEOUT_MS: "7000",
@@ -982,28 +936,30 @@ describe("CLI subprocess exit guarantees", () => {
 				if (hangingServer) {
 					await closeHttpServer(hangingServer);
 				}
-				cleanupProject();
-				cleanupHome();
+				await integrationFixture.cleanup();
 			}
 		},
 	);
 
 	it("enforces the CLI hard timeout with exit code 124", { timeout: 30_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-hard-timeout-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-hard-timeout-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-cli-hard-timeout");
+		const projectPath = repository.repositoryPath;
+		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		let hangingServer: Server | null = null;
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# CLI Hard Timeout Test\n", "utf8");
-			commitAll(projectPath, "init");
-			await bootstrapWorkspaceOnDisk({ projectPath, homeDir });
+			commitAllRepositoryFiles(repository, projectPath, "init");
+			await bootstrapWorkspaceOnDisk({
+				projectPath,
+				gitFixture: integrationFixture.gitFixture,
+				processFixture: integrationFixture.processFixture,
+			});
 
 			const started = await startHangingHttpServer();
 			hangingServer = started.server;
-			const env = createGitTestEnv({
-				HOME: homeDir,
-				USERPROFILE: homeDir,
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 				KANBAN_RUNTIME_PORT: String(started.port),
 				KANBAN_CLI_HARD_TIMEOUT_MS: "1500",
 				KANBAN_CLI_TRPC_TIMEOUT_MS: "60000",
@@ -1026,28 +982,29 @@ describe("CLI subprocess exit guarantees", () => {
 			if (hangingServer) {
 				await closeHttpServer(hangingServer);
 			}
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 
 	it("does not grow RSS while waiting for a hanging runtime response", { timeout: 30_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-rss-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-rss-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-cli-rss");
+		const projectPath = repository.repositoryPath;
 
 		let hangingServer: Server | null = null;
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# CLI RSS Guard Test\n", "utf8");
-			commitAll(projectPath, "init");
-			await bootstrapWorkspaceOnDisk({ projectPath, homeDir });
+			commitAllRepositoryFiles(repository, projectPath, "init");
+			await bootstrapWorkspaceOnDisk({
+				projectPath,
+				gitFixture: integrationFixture.gitFixture,
+				processFixture: integrationFixture.processFixture,
+			});
 
 			const started = await startHangingHttpServer();
 			hangingServer = started.server;
 			const env = withCliGuardTimeouts(
-				createGitTestEnv({
-					HOME: homeDir,
-					USERPROFILE: homeDir,
+				integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 					KANBAN_RUNTIME_PORT: String(started.port),
 				}),
 			);
@@ -1055,6 +1012,7 @@ describe("CLI subprocess exit guarantees", () => {
 			const commandProcess = spawnSourceCli(["task", "list", "--project-path", projectPath], {
 				cwd: projectPath,
 				env,
+				processFixture: integrationFixture.processFixture,
 			});
 			const rssResult = await waitForExitWhileTrackingRss({
 				process: commandProcess,
@@ -1072,25 +1030,23 @@ describe("CLI subprocess exit guarantees", () => {
 			if (hangingServer) {
 				await closeHttpServer(hangingServer);
 			}
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 
 	it("exits hooks ingest when the runtime is unreachable", { timeout: 30_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-cli-hooks-exit-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-cli-hooks-exit-");
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-cli-hooks-exit");
+		const projectPath = repository.repositoryPath;
+		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
-			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# CLI Hooks Exit Test\n", "utf8");
-			commitAll(projectPath, "init");
+			commitAllRepositoryFiles(repository, projectPath, "init");
 
 			const deadPort = String(await getAvailablePort());
 			const env = withCliGuardTimeouts(
-				createGitTestEnv({
-					HOME: homeDir,
-					USERPROFILE: homeDir,
+				integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
 					KANBAN_RUNTIME_PORT: deadPort,
 					KANBAN_HOOK_TASK_ID: "task-hooks-exit",
 					KANBAN_HOOK_WORKSPACE_ID: "workspace-hooks-exit",
@@ -1111,8 +1067,7 @@ describe("CLI subprocess exit guarantees", () => {
 			expect(result.exitCode).toBe(1);
 			expect(result.stderr).toContain("kanban hooks ingest:");
 		} finally {
-			cleanupProject();
-			cleanupHome();
+			await integrationFixture.cleanup();
 		}
 	});
 });

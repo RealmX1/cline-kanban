@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -16,8 +15,10 @@ import {
 	removeWorkspaceIndexEntry,
 	saveWorkspaceState,
 } from "../../src/state/workspace-state";
-import { createGitTestEnv } from "../utilities/git-env";
-import { createTempDir } from "../utilities/temp-dir";
+import {
+	createIsolatedGitTestWorkspaceFixture,
+	type IsolatedGitTestRepository,
+} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
 
 function createBoard(title: string): RuntimeBoardData {
 	return {
@@ -62,14 +63,25 @@ function createSessionSummary(taskId: string): RuntimeTaskSessionSummary {
 	};
 }
 
-async function withTemporaryHome<T>(run: () => Promise<T>): Promise<T> {
-	const { path: tempHome, cleanup } = createTempDir("kanban-home-");
+async function withIsolatedWorkspaceStateHome<T>(
+	run: (context: {
+		createRepository: (relativePathSegments: readonly string[]) => IsolatedGitTestRepository;
+	}) => Promise<T>,
+): Promise<T> {
+	const gitFixture = createIsolatedGitTestWorkspaceFixture();
+	const tempHome = gitFixture.isolatedHomeDirectoryPath;
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
 	process.env.HOME = tempHome;
 	process.env.USERPROFILE = tempHome;
 	try {
-		return await run();
+		return await run({
+			createRepository(relativePathSegments) {
+				const repositoryPath = join(gitFixture.ownedIntegrationProjectsDirectoryPath, ...relativePathSegments);
+				mkdirSync(repositoryPath, { recursive: true });
+				return gitFixture.createNonBareRepositoryAtOwnedPath({ repositoryPath, initialBranchName: "main" });
+			},
+		});
 	} finally {
 		if (previousHome === undefined) {
 			delete process.env.HOME;
@@ -81,326 +93,240 @@ async function withTemporaryHome<T>(run: () => Promise<T>): Promise<T> {
 		} else {
 			process.env.USERPROFILE = previousUserProfile;
 		}
-		cleanup();
+		gitFixture.cleanup();
 	}
 }
 
-function initGitRepository(path: string): void {
-	const init = spawnSync("git", ["init"], {
-		cwd: path,
-		stdio: "ignore",
-		env: createGitTestEnv(),
-	});
-	if (init.status !== 0) {
-		throw new Error(`Failed to initialize git repository at ${path}`);
-	}
-}
-
-function runGit(cwd: string, args: string[], envOverrides: NodeJS.ProcessEnv = {}): string {
-	const result = spawnSync("git", args, {
-		cwd,
-		encoding: "utf8",
-		env: createGitTestEnv(envOverrides),
-	});
-	if (result.status !== 0) {
-		throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
-	}
-	return result.stdout.trim();
-}
-
-function commitAllAt(cwd: string, message: string, isoDate: string): string {
-	runGit(cwd, ["add", "."], {
+function commitAllRepositoryFilesAtDate(
+	repository: IsolatedGitTestRepository,
+	message: string,
+	isoDate: string,
+): string {
+	const environmentVariableOverrides = {
 		GIT_AUTHOR_DATE: isoDate,
 		GIT_COMMITTER_DATE: isoDate,
-	});
-	runGit(cwd, ["commit", "-qm", message], {
-		GIT_AUTHOR_DATE: isoDate,
-		GIT_COMMITTER_DATE: isoDate,
-	});
-	return runGit(cwd, ["rev-parse", "HEAD"]);
+	};
+	repository.runGit(["add", "."], { environmentVariableOverrides });
+	repository.runGit(["commit", "--quiet", "-m", message], { environmentVariableOverrides });
+	return repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
 }
 
 describe.sequential("workspace-state integration", () => {
 	it("returns local branch metadata with last commit dates in recency order", async () => {
-		await withTemporaryHome(async () => {
-			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-git-info-");
-			try {
-				const workspacePath = join(sandboxRoot, "project-a");
-				mkdirSync(workspacePath, { recursive: true });
-				initGitRepository(workspacePath);
-				runGit(workspacePath, ["config", "user.name", "Test User"]);
-				runGit(workspacePath, ["config", "user.email", "test@example.com"]);
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const repository = createRepository(["project-a"]);
+			const workspacePath = repository.repositoryPath;
 
-				writeFileSync(join(workspacePath, "main.txt"), "main\n", "utf8");
-				commitAllAt(workspacePath, "main commit", "2026-05-08T10:00:00+08:00");
-				const mainBranch = runGit(workspacePath, ["symbolic-ref", "--short", "HEAD"]);
+			writeFileSync(join(workspacePath, "main.txt"), "main\n", "utf8");
+			commitAllRepositoryFilesAtDate(repository, "main commit", "2026-05-08T10:00:00+08:00");
+			const mainBranch = repository.runGit(["symbolic-ref", "--short", "HEAD"]).stdout.trim();
 
-				runGit(workspacePath, ["checkout", "-qb", "feature/recent"]);
-				writeFileSync(join(workspacePath, "feature.txt"), "feature\n", "utf8");
-				commitAllAt(workspacePath, "feature commit", "2026-05-10T12:34:56+08:00");
+			repository.runGit(["checkout", "--quiet", "-b", "feature/recent"]);
+			writeFileSync(join(workspacePath, "feature.txt"), "feature\n", "utf8");
+			commitAllRepositoryFilesAtDate(repository, "feature commit", "2026-05-10T12:34:56+08:00");
 
-				runGit(workspacePath, ["checkout", "-q", mainBranch]);
+			repository.runGit(["checkout", "--quiet", mainBranch]);
 
-				const state = await loadWorkspaceState(workspacePath);
+			const state = await loadWorkspaceState(workspacePath);
 
-				expect(state.git.currentBranch).toBe(mainBranch);
-				expect(state.git.branches).toEqual([
-					{ name: "feature/recent", lastCommitDate: "2026-05-10T12:34:56+08:00" },
-					{ name: mainBranch, lastCommitDate: "2026-05-08T10:00:00+08:00" },
-				]);
-			} finally {
-				cleanup();
-			}
+			expect(state.git.currentBranch).toBe(mainBranch);
+			expect(state.git.branches).toEqual([
+				{ name: "feature/recent", lastCommitDate: "2026-05-10T12:34:56+08:00" },
+				{ name: mainBranch, lastCommitDate: "2026-05-08T10:00:00+08:00" },
+			]);
 		});
 	});
 
 	it("persists revision numbers and rejects stale writes", async () => {
-		await withTemporaryHome(async () => {
-			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-");
-			try {
-				const workspacePath = join(sandboxRoot, "project-a");
-				mkdirSync(workspacePath, { recursive: true });
-				initGitRepository(workspacePath);
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-a"]).repositoryPath;
 
-				const initial = await loadWorkspaceState(workspacePath);
-				expect(initial.revision).toBe(0);
+			const initial = await loadWorkspaceState(workspacePath);
+			expect(initial.revision).toBe(0);
 
-				const firstSave = await saveWorkspaceState(workspacePath, {
-					board: createBoard("Task One"),
-					sessions: {},
-					expectedRevision: initial.revision,
-				});
-				expect(firstSave.revision).toBe(1);
-				expect(firstSave.board.columns[0]?.cards[0]?.prompt).toBe("Task One");
+			const firstSave = await saveWorkspaceState(workspacePath, {
+				board: createBoard("Task One"),
+				sessions: {},
+				expectedRevision: initial.revision,
+			});
+			expect(firstSave.revision).toBe(1);
+			expect(firstSave.board.columns[0]?.cards[0]?.prompt).toBe("Task One");
 
-				const secondSave = await saveWorkspaceState(workspacePath, {
-					board: createBoard("Task Two"),
+			const secondSave = await saveWorkspaceState(workspacePath, {
+				board: createBoard("Task Two"),
+				sessions: {},
+				expectedRevision: firstSave.revision,
+			});
+			expect(secondSave.revision).toBe(2);
+			expect(secondSave.board.columns[0]?.cards[0]?.prompt).toBe("Task Two");
+
+			await expect(
+				saveWorkspaceState(workspacePath, {
+					board: createBoard("Stale Task"),
 					sessions: {},
 					expectedRevision: firstSave.revision,
-				});
-				expect(secondSave.revision).toBe(2);
-				expect(secondSave.board.columns[0]?.cards[0]?.prompt).toBe("Task Two");
+				}),
+			).rejects.toMatchObject({
+				name: "WorkspaceStateConflictError",
+				currentRevision: secondSave.revision,
+			} satisfies Partial<WorkspaceStateConflictError>);
 
-				await expect(
-					saveWorkspaceState(workspacePath, {
-						board: createBoard("Stale Task"),
-						sessions: {},
-						expectedRevision: firstSave.revision,
-					}),
-				).rejects.toMatchObject({
-					name: "WorkspaceStateConflictError",
-					currentRevision: secondSave.revision,
-				} satisfies Partial<WorkspaceStateConflictError>);
-
-				const loadedAfterConflict = await loadWorkspaceState(workspacePath);
-				expect(loadedAfterConflict.revision).toBe(2);
-				expect(loadedAfterConflict.board.columns[0]?.cards[0]?.prompt).toBe("Task Two");
-			} finally {
-				cleanup();
-			}
+			const loadedAfterConflict = await loadWorkspaceState(workspacePath);
+			expect(loadedAfterConflict.revision).toBe(2);
+			expect(loadedAfterConflict.board.columns[0]?.cards[0]?.prompt).toBe("Task Two");
 		});
 	});
 
 	it("lists and removes workspace index entries across multiple projects", async () => {
-		await withTemporaryHome(async () => {
-			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspaces-");
-			try {
-				const workspaceAPath = join(sandboxRoot, "alpha");
-				const workspaceBPath = join(sandboxRoot, "beta");
-				mkdirSync(workspaceAPath, { recursive: true });
-				mkdirSync(workspaceBPath, { recursive: true });
-				initGitRepository(workspaceAPath);
-				initGitRepository(workspaceBPath);
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspaceAPath = createRepository(["alpha"]).repositoryPath;
+			const workspaceBPath = createRepository(["beta"]).repositoryPath;
 
-				const contextA = await loadWorkspaceContext(workspaceAPath);
-				const contextB = await loadWorkspaceContext(workspaceBPath);
+			const contextA = await loadWorkspaceContext(workspaceAPath);
+			const contextB = await loadWorkspaceContext(workspaceBPath);
 
-				const entries = await listWorkspaceIndexEntries();
-				expect(entries).toHaveLength(2);
-				expect(entries.map((entry) => entry.workspaceId).sort()).toEqual(
-					[contextA.workspaceId, contextB.workspaceId].sort(),
-				);
+			const entries = await listWorkspaceIndexEntries();
+			expect(entries).toHaveLength(2);
+			expect(entries.map((entry) => entry.workspaceId).sort()).toEqual(
+				[contextA.workspaceId, contextB.workspaceId].sort(),
+			);
 
-				expect(await loadWorkspaceContextById(contextA.workspaceId)).not.toBeNull();
-				expect(await removeWorkspaceIndexEntry(contextA.workspaceId)).toBe(true);
-				expect(await loadWorkspaceContextById(contextA.workspaceId)).toBeNull();
-				expect(await removeWorkspaceIndexEntry(contextA.workspaceId)).toBe(false);
+			expect(await loadWorkspaceContextById(contextA.workspaceId)).not.toBeNull();
+			expect(await removeWorkspaceIndexEntry(contextA.workspaceId)).toBe(true);
+			expect(await loadWorkspaceContextById(contextA.workspaceId)).toBeNull();
+			expect(await removeWorkspaceIndexEntry(contextA.workspaceId)).toBe(false);
 
-				const entriesAfterRemoval = await listWorkspaceIndexEntries();
-				expect(entriesAfterRemoval).toHaveLength(1);
-				expect(entriesAfterRemoval[0]?.workspaceId).toBe(contextB.workspaceId);
-			} finally {
-				cleanup();
-			}
+			const entriesAfterRemoval = await listWorkspaceIndexEntries();
+			expect(entriesAfterRemoval).toHaveLength(1);
+			expect(entriesAfterRemoval[0]?.workspaceId).toBe(contextB.workspaceId);
 		});
 	});
 
 	it("keeps all workspace index entries when projects are added concurrently", async () => {
-		await withTemporaryHome(async () => {
-			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspaces-concurrent-");
-			try {
-				const workspaceAPath = join(sandboxRoot, "alpha");
-				const workspaceBPath = join(sandboxRoot, "beta");
-				mkdirSync(workspaceAPath, { recursive: true });
-				mkdirSync(workspaceBPath, { recursive: true });
-				initGitRepository(workspaceAPath);
-				initGitRepository(workspaceBPath);
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspaceAPath = createRepository(["alpha"]).repositoryPath;
+			const workspaceBPath = createRepository(["beta"]).repositoryPath;
 
-				const [contextA, contextB] = await Promise.all([
-					loadWorkspaceContext(workspaceAPath),
-					loadWorkspaceContext(workspaceBPath),
-				]);
+			const [contextA, contextB] = await Promise.all([
+				loadWorkspaceContext(workspaceAPath),
+				loadWorkspaceContext(workspaceBPath),
+			]);
 
-				const entries = await listWorkspaceIndexEntries();
-				expect(entries).toHaveLength(2);
-				expect(entries.map((entry) => entry.workspaceId).sort()).toEqual(
-					[contextA.workspaceId, contextB.workspaceId].sort(),
-				);
-			} finally {
-				cleanup();
-			}
+			const entries = await listWorkspaceIndexEntries();
+			expect(entries).toHaveLength(2);
+			expect(entries.map((entry) => entry.workspaceId).sort()).toEqual(
+				[contextA.workspaceId, contextB.workspaceId].sort(),
+			);
 		});
 	});
 
 	it("creates readable workspace ids from folder names with random suffix on collisions", async () => {
-		await withTemporaryHome(async () => {
-			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-id-format-");
-			try {
-				const workspaceAPath = join(sandboxRoot, "one", "vscrui");
-				const workspaceBPath = join(sandboxRoot, "two", "vscrui");
-				const workspaceCPath = join(sandboxRoot, "three", "My Cool Repo");
-				mkdirSync(workspaceAPath, { recursive: true });
-				mkdirSync(workspaceBPath, { recursive: true });
-				mkdirSync(workspaceCPath, { recursive: true });
-				initGitRepository(workspaceAPath);
-				initGitRepository(workspaceBPath);
-				initGitRepository(workspaceCPath);
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspaceAPath = createRepository(["one", "vscrui"]).repositoryPath;
+			const workspaceBPath = createRepository(["two", "vscrui"]).repositoryPath;
+			const workspaceCPath = createRepository(["three", "My Cool Repo"]).repositoryPath;
 
-				const contextA = await loadWorkspaceContext(workspaceAPath);
-				const contextB = await loadWorkspaceContext(workspaceBPath);
-				const contextC = await loadWorkspaceContext(workspaceCPath);
+			const contextA = await loadWorkspaceContext(workspaceAPath);
+			const contextB = await loadWorkspaceContext(workspaceBPath);
+			const contextC = await loadWorkspaceContext(workspaceCPath);
 
-				expect(contextA.workspaceId).toBe("vscrui");
-				expect(contextB.workspaceId).toMatch(/^vscrui-[a-z0-9]{4}$/);
-				expect(contextB.workspaceId).not.toBe(contextA.workspaceId);
-				expect(contextC.workspaceId).toBe("my-cool-repo");
+			expect(contextA.workspaceId).toBe("vscrui");
+			expect(contextB.workspaceId).toMatch(/^vscrui-[a-z0-9]{4}$/);
+			expect(contextB.workspaceId).not.toBe(contextA.workspaceId);
+			expect(contextC.workspaceId).toBe("my-cool-repo");
 
-				const contextAAgain = await loadWorkspaceContext(workspaceAPath);
-				expect(contextAAgain.workspaceId).toBe(contextA.workspaceId);
-			} finally {
-				cleanup();
-			}
+			const contextAAgain = await loadWorkspaceContext(workspaceAPath);
+			expect(contextAAgain.workspaceId).toBe(contextA.workspaceId);
 		});
 	});
 
 	it("can require an existing project without auto-creating workspace entries", async () => {
-		await withTemporaryHome(async () => {
-			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-autocreate-");
-			try {
-				const workspacePath = join(sandboxRoot, "gamma");
-				mkdirSync(workspacePath, { recursive: true });
-				initGitRepository(workspacePath);
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["gamma"]).repositoryPath;
 
-				await expect(
-					loadWorkspaceContext(workspacePath, {
-						autoCreateIfMissing: false,
-					}),
-				).rejects.toThrow("is not added to Kanban yet");
-
-				const created = await loadWorkspaceContext(workspacePath);
-				expect(created.repoPath).toBeTruthy();
-
-				const existing = await loadWorkspaceContext(workspacePath, {
+			await expect(
+				loadWorkspaceContext(workspacePath, {
 					autoCreateIfMissing: false,
-				});
-				expect(existing.workspaceId).toBe(created.workspaceId);
-			} finally {
-				cleanup();
-			}
+				}),
+			).rejects.toThrow("is not added to Kanban yet");
+
+			const created = await loadWorkspaceContext(workspacePath);
+			expect(created.repoPath).toBeTruthy();
+
+			const existing = await loadWorkspaceContext(workspacePath, {
+				autoCreateIfMissing: false,
+			});
+			expect(existing.workspaceId).toBe(created.workspaceId);
 		});
 	});
 
 	it("fails loudly when persisted board data is malformed", async () => {
-		await withTemporaryHome(async () => {
-			const { path: sandboxRoot, cleanup } = createTempDir("kanban-malformed-board-");
-			try {
-				const workspacePath = join(sandboxRoot, "project-bad-board");
-				mkdirSync(workspacePath, { recursive: true });
-				initGitRepository(workspacePath);
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-bad-board"]).repositoryPath;
 
-				const context = await loadWorkspaceContext(workspacePath);
-				mkdirSync(context.statePath, { recursive: true });
-				writeFileSync(
-					join(context.statePath, "board.json"),
-					JSON.stringify(
-						{
-							columns: [
-								{
-									id: "backlog",
-									title: "Backlog",
-									cards: [
-										{
-											prompt: "Missing ID and baseRef",
-											startInPlanMode: false,
-											createdAt: Date.now(),
-											updatedAt: Date.now(),
-										},
-									],
-								},
-								{ id: "in_progress", title: "In Progress", cards: [] },
-								{ id: "review", title: "Review", cards: [] },
-								{ id: "trash", title: "Done", cards: [] },
-							],
-						},
-						null,
-						2,
-					),
-					"utf8",
-				);
+			const context = await loadWorkspaceContext(workspacePath);
+			mkdirSync(context.statePath, { recursive: true });
+			writeFileSync(
+				join(context.statePath, "board.json"),
+				JSON.stringify(
+					{
+						columns: [
+							{
+								id: "backlog",
+								title: "Backlog",
+								cards: [
+									{
+										prompt: "Missing ID and baseRef",
+										startInPlanMode: false,
+										createdAt: Date.now(),
+										updatedAt: Date.now(),
+									},
+								],
+							},
+							{ id: "in_progress", title: "In Progress", cards: [] },
+							{ id: "review", title: "Review", cards: [] },
+							{ id: "trash", title: "Done", cards: [] },
+						],
+					},
+					null,
+					2,
+				),
+				"utf8",
+			);
 
-				await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("board.json");
-				await expect(loadWorkspaceState(workspacePath)).rejects.toThrow(/id|baseRef/);
-			} finally {
-				cleanup();
-			}
+			await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("board.json");
+			await expect(loadWorkspaceState(workspacePath)).rejects.toThrow(/id|baseRef/);
 		});
 	});
 
 	it("fails loudly when persisted sessions include unknown states", async () => {
-		await withTemporaryHome(async () => {
-			const { path: sandboxRoot, cleanup } = createTempDir("kanban-malformed-sessions-");
-			try {
-				const workspacePath = join(sandboxRoot, "project-bad-sessions");
-				mkdirSync(workspacePath, { recursive: true });
-				initGitRepository(workspacePath);
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-bad-sessions"]).repositoryPath;
 
-				const context = await loadWorkspaceContext(workspacePath);
-				mkdirSync(context.statePath, { recursive: true });
-				writeFileSync(
-					join(context.statePath, "board.json"),
-					JSON.stringify(createBoard("Valid board"), null, 2),
-					"utf8",
-				);
-				writeFileSync(
-					join(context.statePath, "sessions.json"),
-					JSON.stringify(
-						{
-							"task-1": {
-								...createSessionSummary("task-1"),
-								state: "not-a-valid-state",
-							},
+			const context = await loadWorkspaceContext(workspacePath);
+			mkdirSync(context.statePath, { recursive: true });
+			writeFileSync(
+				join(context.statePath, "board.json"),
+				JSON.stringify(createBoard("Valid board"), null, 2),
+				"utf8",
+			);
+			writeFileSync(
+				join(context.statePath, "sessions.json"),
+				JSON.stringify(
+					{
+						"task-1": {
+							...createSessionSummary("task-1"),
+							state: "not-a-valid-state",
 						},
-						null,
-						2,
-					),
-					"utf8",
-				);
+					},
+					null,
+					2,
+				),
+				"utf8",
+			);
 
-				await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("sessions.json");
-				await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("state");
-			} finally {
-				cleanup();
-			}
+			await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("sessions.json");
+			await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("state");
 		});
 	});
 
@@ -408,80 +334,73 @@ describe.sequential("workspace-state integration", () => {
 	// 与 legacy state 自洽的三 facet + schemaVersion；已带 facet 的 session 不被 clobber；且纯读
 	// 无副作用——on-disk 文件不被改写（回填只在内存、随下次 save 落盘）。
 	it("backfills consistent session facets on read without rewriting the file", async () => {
-		await withTemporaryHome(async () => {
-			const { path: sandboxRoot, cleanup } = createTempDir("kanban-session-facet-backfill-");
-			try {
-				const workspacePath = join(sandboxRoot, "project-legacy-sessions");
-				mkdirSync(workspacePath, { recursive: true });
-				initGitRepository(workspacePath);
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-legacy-sessions"]).repositoryPath;
 
-				const context = await loadWorkspaceContext(workspacePath);
-				mkdirSync(context.statePath, { recursive: true });
-				writeFileSync(
-					join(context.statePath, "board.json"),
-					JSON.stringify(createBoard("Valid board"), null, 2),
-					"utf8",
-				);
+			const context = await loadWorkspaceContext(workspacePath);
+			mkdirSync(context.statePath, { recursive: true });
+			writeFileSync(
+				join(context.statePath, "board.json"),
+				JSON.stringify(createBoard("Valid board"), null, 2),
+				"utf8",
+			);
 
-				// 旧盘：两个无-facet legacy session（running / awaiting_review 进程已退）+ 一个已带 facet 的。
-				const legacyRunning: RuntimeTaskSessionSummary = {
-					...createSessionSummary("legacy-running"),
-					state: "running",
-					pid: 4321,
-					lastOutputAt: Date.now(),
-				};
-				const legacyExited: RuntimeTaskSessionSummary = {
-					...createSessionSummary("legacy-exited"),
-					state: "awaiting_review",
-					pid: null,
-					reviewReason: "exit",
-				};
-				const alreadyFaceted = applySessionFacets({
-					...createSessionSummary("already-faceted"),
-					state: "awaiting_review",
-					pid: 99,
-					reviewReason: "hook",
-				});
-				const sessionsPath = join(context.statePath, "sessions.json");
-				const rawSessionsOnDisk = JSON.stringify(
-					{
-						"legacy-running": legacyRunning,
-						"legacy-exited": legacyExited,
-						"already-faceted": alreadyFaceted,
-					},
-					null,
-					2,
-				);
-				writeFileSync(sessionsPath, rawSessionsOnDisk, "utf8");
+			// 旧盘：两个无-facet legacy session（running / awaiting_review 进程已退）+ 一个已带 facet 的。
+			const legacyRunning: RuntimeTaskSessionSummary = {
+				...createSessionSummary("legacy-running"),
+				state: "running",
+				pid: 4321,
+				lastOutputAt: Date.now(),
+			};
+			const legacyExited: RuntimeTaskSessionSummary = {
+				...createSessionSummary("legacy-exited"),
+				state: "awaiting_review",
+				pid: null,
+				reviewReason: "exit",
+			};
+			const alreadyFaceted = applySessionFacets({
+				...createSessionSummary("already-faceted"),
+				state: "awaiting_review",
+				pid: 99,
+				reviewReason: "hook",
+			});
+			const sessionsPath = join(context.statePath, "sessions.json");
+			const rawSessionsOnDisk = JSON.stringify(
+				{
+					"legacy-running": legacyRunning,
+					"legacy-exited": legacyExited,
+					"already-faceted": alreadyFaceted,
+				},
+				null,
+				2,
+			);
+			writeFileSync(sessionsPath, rawSessionsOnDisk, "utf8");
 
-				const loaded = await loadWorkspaceState(workspacePath);
+			const loaded = await loadWorkspaceState(workspacePath);
 
-				// running 旧盘 → agent/live；盖 schemaVersion。
-				const running = loaded.sessions["legacy-running"];
-				expect(running?.turnOwner).toBe("agent");
-				expect(running?.liveness).toBe("live");
-				expect(running?.userTurnKind).toBe(null);
-				expect(running?.schemaVersion).toBe(SESSION_SUMMARY_SCHEMA_VERSION);
+			// running 旧盘 → agent/live；盖 schemaVersion。
+			const running = loaded.sessions["legacy-running"];
+			expect(running?.turnOwner).toBe("agent");
+			expect(running?.liveness).toBe("live");
+			expect(running?.userTurnKind).toBe(null);
+			expect(running?.schemaVersion).toBe(SESSION_SUMMARY_SCHEMA_VERSION);
 
-				// awaiting_review + pid:null 旧盘 → exited（legacy state 表达不了、读时回填保真）。
-				const exited = loaded.sessions["legacy-exited"];
-				expect(exited?.turnOwner).toBe("user");
-				expect(exited?.liveness).toBe("exited");
-				expect(exited?.userTurnKind).toBe("review");
+			// awaiting_review + pid:null 旧盘 → exited（legacy state 表达不了、读时回填保真）。
+			const exited = loaded.sessions["legacy-exited"];
+			expect(exited?.turnOwner).toBe("user");
+			expect(exited?.liveness).toBe("exited");
+			expect(exited?.userTurnKind).toBe("review");
 
-				// 已带 facet 的 session 原样保留、不被 clobber。
-				expect(loaded.sessions["already-faceted"]).toEqual(alreadyFaceted);
+			// 已带 facet 的 session 原样保留、不被 clobber。
+			expect(loaded.sessions["already-faceted"]).toEqual(alreadyFaceted);
 
-				// 纯读无副作用：on-disk sessions.json 未被改写（回填只在内存，随下次 save 落盘）。
-				expect(readFileSync(sessionsPath, "utf8")).toBe(rawSessionsOnDisk);
-			} finally {
-				cleanup();
-			}
+			// 纯读无副作用：on-disk sessions.json 未被改写（回填只在内存，随下次 save 落盘）。
+			expect(readFileSync(sessionsPath, "utf8")).toBe(rawSessionsOnDisk);
 		});
 	});
 
 	it("fails loudly when persisted workspace index data is malformed", async () => {
-		await withTemporaryHome(async () => {
+		await withIsolatedWorkspaceStateHome(async () => {
 			mkdirSync(getWorkspacesRootPath(), { recursive: true });
 			writeFileSync(
 				join(getWorkspacesRootPath(), "index.json"),

@@ -1,21 +1,19 @@
-import { spawnSync } from "node:child_process";
-
 import { describe, expect, it, vi } from "vitest";
 
 import { createWorkspaceRegistry } from "../../../src/server/workspace-registry";
 import { loadWorkspaceContext, loadWorkspaceState } from "../../../src/state/workspace-state";
-import { createGitTestEnv } from "../../utilities/git-env";
-import { createTempDir } from "../../utilities/temp-dir";
+import { createIsolatedGitTestWorkspaceFixture } from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
 
 describe("workspace registry runtime project availability cache", () => {
 	it("reuses availability for summary broadcasts and refreshes it only when explicitly requested", async () => {
-		const { path: temporaryHomePath, cleanup } = createTempDir("kanban-availability-cache-home-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-availability-cache-project-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const temporaryHomePath = gitFixture.isolatedHomeDirectoryPath;
+		const projectPath = gitFixture.createNonBareRepository({
+			repositoryDirectoryName: "workspace-registry-availability-project",
+		}).repositoryPath;
 		const previousHome = process.env.HOME;
 		process.env.HOME = temporaryHomePath;
 		try {
-			const gitInit = spawnSync("git", ["init"], { cwd: projectPath, env: createGitTestEnv(), stdio: "ignore" });
-			expect(gitInit.status).toBe(0);
 			await loadWorkspaceState(projectPath);
 			const workspaceContext = await loadWorkspaceContext(projectPath);
 			const inspectRuntimeProjectAvailability = vi.fn(async () => ({ status: "available" as const }));
@@ -41,8 +39,6 @@ describe("workspace registry runtime project availability cache", () => {
 		} finally {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;
-			cleanupProject();
-			cleanup();
 		}
 	});
 });

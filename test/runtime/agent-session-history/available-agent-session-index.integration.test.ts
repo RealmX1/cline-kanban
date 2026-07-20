@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,7 +9,7 @@ import {
 	listAvailableAgentSessions,
 	resetAvailableAgentSessionIndexStateForTests,
 } from "../../../src/agent-session-history/available-agent-session-index";
-import { createGitProcessEnv } from "../../../src/core/git-process-env";
+import { createIsolatedGitTestWorkspaceFixture } from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
 
 const originalHome = process.env.HOME;
 const originalCodexHome = process.env.CODEX_HOME;
@@ -41,9 +40,10 @@ afterEach(() => {
 describe("listAvailableAgentSessions", () => {
 	it("indexes Claude sessions and keeps repository scope inside the current Git repository", async () => {
 		const root = createTemporaryRoot();
-		const workspacePath = join(root, "repository");
-		mkdirSync(workspacePath, { recursive: true });
-		execFileSync("git", ["init"], { cwd: workspacePath, env: createGitProcessEnv(), stdio: "ignore" });
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const workspacePath = gitFixture.createNonBareRepository({
+			repositoryDirectoryName: "claude-session-index-repository",
+		}).repositoryPath;
 		const sessionId = "11111111-2222-3333-8444-555555555555";
 		writeJsonLines(join(root, ".claude", "projects", "repository", `${sessionId}.jsonl`), [
 			{
@@ -83,9 +83,10 @@ describe("listAvailableAgentSessions", () => {
 
 	it("indexes Codex user sessions, excludes workers, and paginates all-local results", async () => {
 		const root = createTemporaryRoot();
-		const workspacePath = join(root, "repository");
-		mkdirSync(workspacePath, { recursive: true });
-		execFileSync("git", ["init"], { cwd: workspacePath, env: createGitProcessEnv(), stdio: "ignore" });
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const workspacePath = gitFixture.createNonBareRepository({
+			repositoryDirectoryName: "codex-session-index-repository",
+		}).repositoryPath;
 		const sessionsDirectory = join(root, ".codex", "sessions", "2026", "07", "12");
 		for (const [index, sessionId] of [
 			"21111111-2222-3333-8444-555555555555",
@@ -125,9 +126,10 @@ describe("listAvailableAgentSessions", () => {
 
 	it("indexes Cursor agent transcripts and returns their chat UUID", async () => {
 		const root = createTemporaryRoot();
-		const workspacePath = join(root, "repository");
-		mkdirSync(workspacePath, { recursive: true });
-		execFileSync("git", ["init"], { cwd: workspacePath, env: createGitProcessEnv(), stdio: "ignore" });
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const workspacePath = gitFixture.createNonBareRepository({
+			repositoryDirectoryName: "cursor-session-index-repository",
+		}).repositoryPath;
 		const sessionId = "51111111-2222-3333-8444-555555555555";
 		const encodedWorkspacePath = workspacePath.replace(/[^a-zA-Z0-9]/gu, "-").replace(/^-+/u, "");
 		writeJsonLines(
@@ -154,23 +156,29 @@ describe("listAvailableAgentSessions", () => {
 
 	it("reads bounded transcript head and tail while discarding partial JSONL boundary lines", async () => {
 		const root = createTemporaryRoot();
-		const workspacePath = join(root, "repository");
-		mkdirSync(workspacePath, { recursive: true });
-		execFileSync("git", ["init"], { cwd: workspacePath, env: createGitProcessEnv(), stdio: "ignore" });
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const workspacePath = gitFixture.createNonBareRepository({
+			repositoryDirectoryName: "bounded-transcript-session-index-repository",
+		}).repositoryPath;
+		const sessionId = "61111111-2222-3333-8444-555555555555";
+		const headRecord = {
+			type: "user",
+			sessionId,
+			cwd: workspacePath,
+			timestamp: "2026-07-12T01:00:00.000Z",
+			message: { content: "Head message" },
+		};
+		const maximumTranscriptBytesPerFile = Math.max(
+			1_600,
+			(Buffer.byteLength(`${JSON.stringify(headRecord)}\n`, "utf8") + 1) * 4,
+		);
 		configureAvailableAgentSessionIndexLimitsForTests({
-			maximumTranscriptBytesPerFile: 1_200,
+			maximumTranscriptBytesPerFile,
 			maximumTranscriptBytesPerScan: 8_000,
 			sessionScanDeadlineMilliseconds: 10_000,
 		});
-		const sessionId = "61111111-2222-3333-8444-555555555555";
 		writeJsonLines(join(root, ".claude", "projects", "repository", `${sessionId}.jsonl`), [
-			{
-				type: "user",
-				sessionId,
-				cwd: workspacePath,
-				timestamp: "2026-07-12T01:00:00.000Z",
-				message: { content: "Head message" },
-			},
+			headRecord,
 			{ type: "progress", payload: "x".repeat(8_000) },
 			{
 				type: "assistant",

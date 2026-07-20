@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,19 +9,25 @@ import {
 	ensureVerificationAssetsDir,
 	getVerificationAssetsRoot,
 } from "../../../src/deployment/verification-assets";
-import { createTempDir } from "../../utilities/temp-dir";
+import {
+	createProtectedFilesystemMutationTestFixture,
+	type ProtectedFilesystemMutationTestFixture,
+} from "../../dangerous-capability-test-infrastructure/protected-filesystem-mutation-test-fixture";
 
 describe.sequential("cleanupVerificationAssets 护栏", () => {
-	let sandbox: ReturnType<typeof createTempDir>;
+	let filesystemFixture: ProtectedFilesystemMutationTestFixture;
 	let previousHome: string | undefined;
 	let previousUserProfile: string | undefined;
 
 	beforeEach(() => {
-		sandbox = createTempDir("kanban-verification-cleanup-");
+		filesystemFixture = createProtectedFilesystemMutationTestFixture();
+		const isolatedHomeDirectoryPath = filesystemFixture.createOwnedMutationDirectory({
+			ownedDirectoryName: "verification-assets-cleanup-home",
+		});
 		previousHome = process.env.HOME;
 		previousUserProfile = process.env.USERPROFILE;
-		process.env.HOME = sandbox.path;
-		process.env.USERPROFILE = sandbox.path;
+		process.env.HOME = isolatedHomeDirectoryPath;
+		process.env.USERPROFILE = isolatedHomeDirectoryPath;
 	});
 
 	afterEach(() => {
@@ -35,7 +41,8 @@ describe.sequential("cleanupVerificationAssets 护栏", () => {
 		} else {
 			process.env.USERPROFILE = previousUserProfile;
 		}
-		sandbox.cleanup();
+		filesystemFixture.assertProtectedCanariesIntact();
+		filesystemFixture.cleanup();
 	});
 
 	it("删除 verifications 根下的资产目录", async () => {
@@ -66,8 +73,7 @@ describe.sequential("cleanupVerificationAssets 护栏", () => {
 
 	it("symlink 逃逸到根目录外时拒删（out-of-bounds），且外部目标不被删除", async () => {
 		// 在 verifications 根外造一个「机密」目录，再用一个 verificationId 目录 symlink 指向它。
-		const outsideDir = join(sandbox.path, "outside-secret");
-		mkdirSync(outsideDir, { recursive: true });
+		const outsideDir = filesystemFixture.protectedSiblingDirectoryPath;
 		writeFileSync(join(outsideDir, "keep.txt"), "important", "utf8");
 
 		const verificationId = randomUUID();
