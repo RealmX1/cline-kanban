@@ -5,7 +5,7 @@ import { probeGitWorkspaceState } from "../../../src/workspace/git-sync";
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
-} from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+} from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 function createRepositoryForGitWorkspaceProbeTest(): IsolatedGitTestRepository {
 	const fixture = createIsolatedGitTestWorkspaceFixture();

@@ -29,9 +29,9 @@ export interface IsolatedGitTestRepository {
 		options?: {
 			workingDirectoryPath?: string;
 			expectedExitCodes?: readonly number[];
-			environmentVariableOverrides?: NodeJS.ProcessEnv;
 		},
 	): GitCommandResult;
+	commitAllRepositoryFilesAtDate(options: { message: string; authorAndCommitterIsoDate: string }): string;
 	createLinkedWorktree(options: { worktreeDirectoryName: string; branchName: string; startPoint?: string }): {
 		worktreePath: string;
 	};
@@ -68,7 +68,6 @@ const ISOLATION_OWNED_ENVIRONMENT_VARIABLE_NAMES = new Set([
 	"TEMP",
 	"TMP",
 ]);
-const ALLOWED_PER_COMMAND_GIT_ENVIRONMENT_VARIABLE_NAMES = new Set(["GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE"]);
 const GIT_REPOSITORY_REDIRECTION_ARGUMENT_PREFIXES = [
 	"-C",
 	"-c",
@@ -200,18 +199,17 @@ export function createIsolatedGitTestWorkspaceFixture(): IsolatedGitTestWorkspac
 		arguments_: readonly string[];
 		workingDirectoryPath: string;
 		expectedExitCodes?: readonly number[];
-		environmentVariableOverrides?: NodeJS.ProcessEnv;
+		authorAndCommitterIsoDate?: string;
 	}): GitCommandResult {
 		const expectedExitCodes = options.expectedExitCodes ?? [0];
-		const environment: NodeJS.ProcessEnv = { ...isolatedGitEnvironment };
-		for (const [name, value] of Object.entries(options.environmentVariableOverrides ?? {})) {
-			if (!ALLOWED_PER_COMMAND_GIT_ENVIRONMENT_VARIABLE_NAMES.has(name)) {
-				throw new Error(`Git command environment variable ${name} is not allowed by the isolated fixture`);
-			}
-			if (value === undefined) delete environment[name];
-			else environment[name] = value;
-		}
 		const workingDirectoryPath = assertExistingPathInsideFixture(options.workingDirectoryPath, "Git command cwd");
+		const environment = options.authorAndCommitterIsoDate
+			? {
+					...isolatedGitEnvironment,
+					GIT_AUTHOR_DATE: options.authorAndCommitterIsoDate,
+					GIT_COMMITTER_DATE: options.authorAndCommitterIsoDate,
+				}
+			: isolatedGitEnvironment;
 		const result = spawnSync("git", [...options.arguments_], {
 			cwd: workingDirectoryPath,
 			encoding: "utf8",
@@ -311,6 +309,9 @@ export function createIsolatedGitTestWorkspaceFixture(): IsolatedGitTestWorkspac
 		) {
 			throw new Error("Git config cannot address configuration outside the isolated repository");
 		}
+		if (arguments_[0] === "config" && arguments_.some((argument) => /^alias\./iu.test(argument))) {
+			throw new Error("Git aliases are not permitted because shell aliases bypass fixture command boundaries");
+		}
 		if (arguments_[0] === "remote" && ["add", "set-url"].includes(arguments_[1] ?? "")) {
 			const remoteUrl = arguments_.at(-1);
 			if (remoteUrl) assertRemoteUrlInsideFixture(repositoryPath, remoteUrl);
@@ -337,10 +338,22 @@ export function createIsolatedGitTestWorkspaceFixture(): IsolatedGitTestWorkspac
 					arguments_,
 					workingDirectoryPath: options.workingDirectoryPath ?? repositoryPath,
 					expectedExitCodes: options.expectedExitCodes,
-					environmentVariableOverrides: options.environmentVariableOverrides,
 				});
-				assertAllRepositoriesInsideFixture();
+				assertRepositoryInsideFixture(repositoryPath);
 				return result;
+			},
+			commitAllRepositoryFilesAtDate(options) {
+				executeGit({ arguments_: ["add", "."], workingDirectoryPath: repositoryPath });
+				executeGit({
+					arguments_: ["commit", "--quiet", "-m", options.message],
+					workingDirectoryPath: repositoryPath,
+					authorAndCommitterIsoDate: options.authorAndCommitterIsoDate,
+				});
+				assertRepositoryInsideFixture(repositoryPath);
+				return executeGit({
+					arguments_: ["rev-parse", "HEAD"],
+					workingDirectoryPath: repositoryPath,
+				}).stdout.trim();
 			},
 			createLinkedWorktree(options) {
 				assertSimpleDirectoryName(options.worktreeDirectoryName, "worktreeDirectoryName");

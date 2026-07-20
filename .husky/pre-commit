@@ -9,7 +9,7 @@ if [ $? -ne 0 ]; then
 	exit 1
 fi
 
-echo "Running type checking and protected pre-commit test projects..."
+echo "Running type checking and fast tests..."
 npm run typecheck && npm run test:precommit
 if [ $? -ne 0 ]; then
 	echo "Checks failed."

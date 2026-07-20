@@ -11,7 +11,7 @@ import {
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
-} from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+} from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 describe("getWorkspaceChanges batching + cache", () => {
 	let repoPath: string;

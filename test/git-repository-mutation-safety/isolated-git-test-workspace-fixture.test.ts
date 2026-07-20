@@ -152,6 +152,21 @@ describe("isolated Git test workspace fixture", () => {
 		expect(repository.runGit(["remote"]).stdout).toBe("");
 	});
 
+	it("拒绝通过 Git shell alias 绕过 fixture 的命令边界", () => {
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "alias-containment-repository" });
+		const escapedCommandSentinelPath = join(fixture.fixtureRootDirectoryPath, "escaped-command-sentinel");
+
+		expect(() =>
+			repository.runGit([
+				"config",
+				"alias.write-escaped-command-sentinel",
+				`!touch ${JSON.stringify(escapedCommandSentinelPath)}`,
+			]),
+		).toThrow(/Git aliases are not permitted/);
+		expect(existsSync(escapedCommandSentinelPath)).toBe(false);
+	});
+
 	it("rejects working directories, linked-worktree targets, and symlinks that escape the fixture root", () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "contained-repository" });
@@ -195,7 +210,7 @@ describe("isolated Git test workspace fixture", () => {
 		);
 	});
 
-	it("initializes repositories only at explicitly owned fixture paths and supports isolated commit dates", () => {
+	it("initializes repositories only at explicitly owned fixture paths", () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const ownedRepositoryPath = join(fixture.ownedIntegrationProjectsDirectoryPath, "owned-integration-project");
 		mkdirSync(ownedRepositoryPath);
@@ -203,22 +218,14 @@ describe("isolated Git test workspace fixture", () => {
 			repositoryPath: ownedRepositoryPath,
 			initialBranchName: "main",
 		});
-		writeFileSync(join(repository.repositoryPath, "dated.txt"), "dated\n");
-		repository.runGit(["add", "dated.txt"]);
-		repository.runGit(["commit", "-m", "dated commit"], {
-			environmentVariableOverrides: {
-				GIT_AUTHOR_DATE: "2026-01-02T03:04:05Z",
-				GIT_COMMITTER_DATE: "2026-01-02T03:04:05Z",
-			},
-		});
+		writeFileSync(join(repository.repositoryPath, "owned.txt"), "owned\n");
+		repository.runGit(["add", "owned.txt"]);
+		repository.runGit(["commit", "-m", "owned commit"]);
 
-		expect(repository.runGit(["show", "-s", "--format=%at/%ct", "HEAD"]).stdout.trim()).toBe("1767323045/1767323045");
+		expect(repository.runGit(["show", "-s", "--format=%s", "HEAD"]).stdout.trim()).toBe("owned commit");
 		expect(() => fixture.createNonBareRepositoryAtOwnedPath({ repositoryPath: process.cwd() })).toThrow(
 			/escaped isolated Git fixture root/,
 		);
-		expect(() =>
-			repository.runGit(["status"], { environmentVariableOverrides: { GIT_DIR: "/unsafe-git-directory" } }),
-		).toThrow(/Git command environment variable GIT_DIR/);
 	});
 
 	it("cleanup root identity 被篡改时停止删除并保留现场", () => {

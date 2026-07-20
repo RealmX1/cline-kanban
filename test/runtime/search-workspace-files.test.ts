@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { searchWorkspaceFiles } from "../../src/workspace/search-workspace-files";
-import { createIsolatedGitTestWorkspaceFixture } from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 describe.sequential("search workspace files runtime", () => {
 	it("finds modified tracked files with non-ASCII paths using UTF-8 query text", async () => {

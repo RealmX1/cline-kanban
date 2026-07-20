@@ -18,7 +18,7 @@ import {
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
-} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+} from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 function createBoard(title: string): RuntimeBoardData {
 	return {
@@ -97,20 +97,6 @@ async function withIsolatedWorkspaceStateHome<T>(
 	}
 }
 
-function commitAllRepositoryFilesAtDate(
-	repository: IsolatedGitTestRepository,
-	message: string,
-	isoDate: string,
-): string {
-	const environmentVariableOverrides = {
-		GIT_AUTHOR_DATE: isoDate,
-		GIT_COMMITTER_DATE: isoDate,
-	};
-	repository.runGit(["add", "."], { environmentVariableOverrides });
-	repository.runGit(["commit", "--quiet", "-m", message], { environmentVariableOverrides });
-	return repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
-}
-
 describe.sequential("workspace-state integration", () => {
 	it("returns local branch metadata with last commit dates in recency order", async () => {
 		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
@@ -118,12 +104,18 @@ describe.sequential("workspace-state integration", () => {
 			const workspacePath = repository.repositoryPath;
 
 			writeFileSync(join(workspacePath, "main.txt"), "main\n", "utf8");
-			commitAllRepositoryFilesAtDate(repository, "main commit", "2026-05-08T10:00:00+08:00");
+			repository.commitAllRepositoryFilesAtDate({
+				message: "main commit",
+				authorAndCommitterIsoDate: "2026-05-08T10:00:00+08:00",
+			});
 			const mainBranch = repository.runGit(["symbolic-ref", "--short", "HEAD"]).stdout.trim();
 
 			repository.runGit(["checkout", "--quiet", "-b", "feature/recent"]);
 			writeFileSync(join(workspacePath, "feature.txt"), "feature\n", "utf8");
-			commitAllRepositoryFilesAtDate(repository, "feature commit", "2026-05-10T12:34:56+08:00");
+			repository.commitAllRepositoryFilesAtDate({
+				message: "feature commit",
+				authorAndCommitterIsoDate: "2026-05-10T12:34:56+08:00",
+			});
 
 			repository.runGit(["checkout", "--quiet", mainBranch]);
 
