@@ -7,7 +7,7 @@ import { loadWorkspaceState, saveWorkspaceState } from "../../src/state/workspac
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestWorkspaceFixture,
-} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+} from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 async function withIsolatedGitWorkspaceHome<T>(
 	run: (context: { gitFixture: IsolatedGitTestWorkspaceFixture }) => Promise<T>,

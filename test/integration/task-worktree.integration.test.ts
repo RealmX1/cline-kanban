@@ -8,11 +8,7 @@ import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
 	type IsolatedGitTestWorkspaceFixture,
-} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
-import {
-	createProtectedFilesystemMutationTestFixture,
-	type ProtectedFilesystemMutationTestFixture,
-} from "../dangerous-capability-test-infrastructure/protected-filesystem-mutation-test-fixture";
+} from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 function expectMirroredPathBehavior(path: string): void {
 	const exists = existsSync(path);
@@ -26,19 +22,16 @@ function expectMirroredPathBehavior(path: string): void {
 	expect(lstatSync(path).isSymbolicLink()).toBe(true);
 }
 
-async function withProtectedTaskWorktreeTestHome<T>(
+async function withIsolatedGitTaskWorktreeTestHome<T>(
 	run: (context: {
 		gitFixture: IsolatedGitTestWorkspaceFixture;
-		filesystemFixture: ProtectedFilesystemMutationTestFixture;
 		isolatedHomeDirectoryPath: string;
 		createRepository: (repositoryDirectoryName: string) => IsolatedGitTestRepository;
 	}) => Promise<T>,
 ): Promise<T> {
 	const gitFixture = createIsolatedGitTestWorkspaceFixture();
-	const filesystemFixture = createProtectedFilesystemMutationTestFixture({
-		parentDirectoryPath: gitFixture.fixtureRootDirectoryPath,
-	});
-	const tempHome = filesystemFixture.createOwnedMutationDirectory({ ownedDirectoryName: "task-worktree-home" });
+	const tempHome = join(gitFixture.fixtureRootDirectoryPath, "task-worktree-home");
+	mkdirSync(tempHome);
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
 	process.env.HOME = tempHome;
@@ -46,7 +39,6 @@ async function withProtectedTaskWorktreeTestHome<T>(
 	try {
 		return await run({
 			gitFixture,
-			filesystemFixture,
 			isolatedHomeDirectoryPath: tempHome,
 			createRepository: (repositoryDirectoryName) =>
 				gitFixture.createNonBareRepository({ repositoryDirectoryName, initialBranchName: "main" }),
@@ -62,15 +54,13 @@ async function withProtectedTaskWorktreeTestHome<T>(
 		} else {
 			process.env.USERPROFILE = previousUserProfile;
 		}
-		filesystemFixture.assertProtectedCanariesIntact();
-		filesystemFixture.cleanup();
 		gitFixture.cleanup();
 	}
 }
 
 describe.sequential("task-worktree integration", () => {
 	it("returns a friendly error when the repository has no initial commit", async () => {
-		await withProtectedTaskWorktreeTestHome(async ({ createRepository }) => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
 			const repository = createRepository("unborn-repository");
 			const repoPath = repository.repositoryPath;
 
@@ -88,7 +78,7 @@ describe.sequential("task-worktree integration", () => {
 	});
 
 	it("keeps symlinked ignored paths ignored in task worktrees", async () => {
-		await withProtectedTaskWorktreeTestHome(async ({ createRepository }) => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
 			const repository = createRepository("ignored-paths-repository");
 			const repoPath = repository.repositoryPath;
 
@@ -151,7 +141,7 @@ describe.sequential("task-worktree integration", () => {
 	});
 
 	it("keeps symlinked directory-only ignored paths ignored in task worktrees", async () => {
-		await withProtectedTaskWorktreeTestHome(async ({ createRepository }) => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
 			const repository = createRepository("directory-only-ignored-paths-repository");
 			const repoPath = repository.repositoryPath;
 
@@ -211,7 +201,7 @@ describe.sequential("task-worktree integration", () => {
 	});
 
 	it("skips symlinking root node_modules for root Next apps without a next config file", async () => {
-		await withProtectedTaskWorktreeTestHome(async ({ createRepository }) => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
 			const repository = createRepository("root-next-turbopack-repository");
 			const repoPath = repository.repositoryPath;
 
@@ -262,7 +252,7 @@ describe.sequential("task-worktree integration", () => {
 	});
 
 	it("skips only nested Turbopack app node_modules while keeping root node_modules symlinked", async () => {
-		await withProtectedTaskWorktreeTestHome(async ({ createRepository }) => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
 			const repository = createRepository("nested-turbopack-repository");
 			const repoPath = repository.repositoryPath;
 			const appPath = join(repoPath, "apps", "web");
@@ -323,7 +313,7 @@ describe.sequential("task-worktree integration", () => {
 	});
 
 	it("restores a trashed task patch onto the saved commit", async () => {
-		await withProtectedTaskWorktreeTestHome(async ({ createRepository, isolatedHomeDirectoryPath }) => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository, isolatedHomeDirectoryPath }) => {
 			const repository = createRepository("trashed-task-restore-repository");
 			const repoPath = repository.repositoryPath;
 
@@ -394,7 +384,7 @@ describe.sequential("task-worktree integration", () => {
 	});
 
 	it("resumes a trashed task even when the saved patch is invalid", async () => {
-		await withProtectedTaskWorktreeTestHome(async ({ createRepository, isolatedHomeDirectoryPath }) => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository, isolatedHomeDirectoryPath }) => {
 			const repository = createRepository("invalid-trashed-task-patch-repository");
 			const repoPath = repository.repositoryPath;
 

@@ -9,7 +9,7 @@ import {
 	listAvailableAgentSessions,
 	resetAvailableAgentSessionIndexStateForTests,
 } from "../../../src/agent-session-history/available-agent-session-index";
-import { createIsolatedGitTestWorkspaceFixture } from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 const originalHome = process.env.HOME;
 const originalCodexHome = process.env.CODEX_HOME;

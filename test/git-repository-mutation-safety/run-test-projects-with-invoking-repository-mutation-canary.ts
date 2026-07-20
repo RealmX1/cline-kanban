@@ -56,6 +56,16 @@ const SIGNAL_EXIT_CODES: Partial<Record<NodeJS.Signals, number>> = {
 	SIGINT: 130,
 	SIGTERM: 143,
 };
+const ALL_INVOKING_REPOSITORY_MUTATION_CATEGORIES: readonly InvokingRepositoryMutationCategory[] = [
+	"worktree-identity",
+	"git-directory-identity",
+	"common-git-directory-identity",
+	"symbolic-head",
+	"head-oid",
+	"local-config",
+	"index",
+	"working-tree-status",
+];
 
 function createGitEnvironmentWithoutInheritedRepositoryLocationVariables(): NodeJS.ProcessEnv {
 	const environmentVariables: NodeJS.ProcessEnv = {};
@@ -300,8 +310,6 @@ function writeMutationDiagnosticReport(options: {
 	diagnosticDirectoryPath: string;
 	before: InvokingRepositoryEvidenceSnapshot;
 	after: InvokingRepositoryEvidenceSnapshot | null;
-	afterCaptureFailed: boolean;
-	childProcessStartFailed: boolean;
 	mutationCategories: readonly InvokingRepositoryMutationCategory[];
 	childCompletion: SpawnedCommandCompletion;
 }): string {
@@ -315,8 +323,6 @@ function writeMutationDiagnosticReport(options: {
 				originalChildSignal: options.childCompletion.signal,
 				before: options.before,
 				after: options.after,
-				afterCaptureFailed: options.afterCaptureFailed,
-				childProcessStartFailed: options.childProcessStartFailed,
 			},
 			null,
 			2,
@@ -334,7 +340,6 @@ export async function runCommandWithInvokingRepositoryMutationCanary(options: {
 	const before = captureInvokingRepositoryEvidenceSnapshot(options.invokingDirectoryPath);
 	const diagnosticDirectoryPath = mkdtempSync(join(tmpdir(), "cline-kanban-invoking-repository-canary-"));
 	let childCompletion: SpawnedCommandCompletion;
-	let childProcessStartFailed = false;
 	try {
 		childCompletion = await spawnCommandAndForwardTerminationSignals({
 			command: options.command,
@@ -343,7 +348,6 @@ export async function runCommandWithInvokingRepositoryMutationCanary(options: {
 			environmentVariables: createIsolatedChildTestEnvironment(diagnosticDirectoryPath),
 		});
 	} catch {
-		childProcessStartFailed = true;
 		childCompletion = { exitCode: 1, signal: null };
 	}
 	let after: InvokingRepositoryEvidenceSnapshot | null = null;
@@ -354,23 +358,12 @@ export async function runCommandWithInvokingRepositoryMutationCanary(options: {
 	}
 	const mutationCategories: InvokingRepositoryMutationCategory[] = after
 		? compareInvokingRepositoryEvidenceSnapshots(before, after)
-		: [
-				"worktree-identity",
-				"git-directory-identity",
-				"common-git-directory-identity",
-				"symbolic-head",
-				"head-oid",
-				"local-config",
-				"index",
-				"working-tree-status",
-			];
+		: [...ALL_INVOKING_REPOSITORY_MUTATION_CATEGORIES];
 	if (mutationCategories.length > 0) {
 		const diagnosticReportPath = writeMutationDiagnosticReport({
 			diagnosticDirectoryPath,
 			before,
 			after,
-			afterCaptureFailed: after === null,
-			childProcessStartFailed,
 			mutationCategories,
 			childCompletion,
 		});
@@ -400,7 +393,7 @@ async function runInvokingRepositoryMutationCanaryCommand(): Promise<void> {
 	const command = commandArguments[0];
 	if (!command) {
 		throw new Error(
-			"Usage: tsx test/dangerous-capability-test-infrastructure/run-test-projects-with-invoking-repository-mutation-canary.ts -- <command> [args...]",
+			"Usage: tsx test/git-repository-mutation-safety/run-test-projects-with-invoking-repository-mutation-canary.ts -- <command> [args...]",
 		);
 	}
 	const result = await runCommandWithInvokingRepositoryMutationCanary({

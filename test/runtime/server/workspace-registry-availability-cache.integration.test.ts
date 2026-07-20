@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createWorkspaceRegistry } from "../../../src/server/workspace-registry";
 import { loadWorkspaceContext, loadWorkspaceState } from "../../../src/state/workspace-state";
-import { createIsolatedGitTestWorkspaceFixture } from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 describe("workspace registry runtime project availability cache", () => {
 	it("reuses availability for summary broadcasts and refreshes it only when explicitly requested", async () => {

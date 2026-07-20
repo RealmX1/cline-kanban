@@ -7,7 +7,7 @@ import { getWorkspaceChanges } from "../../../src/workspace/get-workspace-change
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
-} from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+} from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 // 生成一份 old+new 合计远超内联上限（1MB）的大文件内容。
 function makeLargeContent(marker: string): string {

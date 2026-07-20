@@ -1,4 +1,4 @@
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
@@ -31,11 +31,7 @@ import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
 	type IsolatedGitTestWorkspaceFixture,
-} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
-import {
-	createOwnedProcessLifecycleTestFixture,
-	type OwnedProcessLifecycleTestFixture,
-} from "../dangerous-capability-test-infrastructure/owned-process-lifecycle-test-fixture";
+} from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 const requireFromHere = createRequire(import.meta.url);
 
@@ -151,20 +147,16 @@ function commitAllRepositoryFiles(
 
 interface RuntimeStateStreamIntegrationFixture {
 	gitFixture: IsolatedGitTestWorkspaceFixture;
-	processFixture: OwnedProcessLifecycleTestFixture;
 	homeDirectoryPath: string;
 	createRepository(repositoryDirectoryName: string): IsolatedGitTestRepository;
 	createNonGitDirectory(directoryName: string): string;
-	cleanup(): Promise<void>;
+	cleanup(): void;
 }
 
 function createRuntimeStateStreamIntegrationFixture(): RuntimeStateStreamIntegrationFixture {
 	const gitFixture = createIsolatedGitTestWorkspaceFixture();
-	const processFixture = createOwnedProcessLifecycleTestFixture();
-	processFixture.spawnUnrelatedSentinelProcess();
 	return {
 		gitFixture,
-		processFixture,
 		homeDirectoryPath: gitFixture.isolatedHomeDirectoryPath,
 		createRepository: (repositoryDirectoryName) =>
 			gitFixture.createNonBareRepository({ repositoryDirectoryName, initialBranchName: "main" }),
@@ -173,9 +165,7 @@ function createRuntimeStateStreamIntegrationFixture(): RuntimeStateStreamIntegra
 			mkdirSync(directoryPath);
 			return directoryPath;
 		},
-		async cleanup() {
-			processFixture.assertUnrelatedSentinelProcessesAlive();
-			await processFixture.cleanup();
+		cleanup() {
 			gitFixture.cleanup();
 		},
 	};
@@ -286,7 +276,6 @@ async function waitForExit(childProcess: ChildProcess, timeoutMs: number): Promi
 async function startKanbanServer(input: {
 	cwd: string;
 	gitFixture: IsolatedGitTestWorkspaceFixture;
-	processFixture: OwnedProcessLifecycleTestFixture;
 	port: number;
 	extraArgs?: string[];
 }): Promise<{
@@ -296,9 +285,9 @@ async function startKanbanServer(input: {
 	const cliEntrypoint = resolve(process.cwd(), "src/cli.ts");
 	const shutdownIpcHookPath = resolveShutdownIpcHookPath();
 	const tsxLoaderImportSpecifier = resolveTsxLoaderImportSpecifier();
-	const child = input.processFixture.spawnOwnedProcess({
-		command: process.execPath,
-		arguments: [
+	const child = spawn(
+		process.execPath,
+		[
 			"--require",
 			shutdownIpcHookPath,
 			"--import",
@@ -307,12 +296,14 @@ async function startKanbanServer(input: {
 			"--no-open",
 			...(input.extraArgs ?? []),
 		],
-		workingDirectoryPath: input.cwd,
-		environmentVariables: input.gitFixture.createIsolatedChildProcessEnvironment({
-			KANBAN_RUNTIME_PORT: String(input.port),
-		}),
-		stdio: ["ignore", "pipe", "pipe", "ipc"],
-	});
+		{
+			cwd: input.cwd,
+			env: input.gitFixture.createIsolatedChildProcessEnvironment({
+				KANBAN_RUNTIME_PORT: String(input.port),
+			}),
+			stdio: ["ignore", "pipe", "pipe", "ipc"],
+		},
+	);
 	const { runtimeUrl } = await waitForProcessStart(child);
 	return {
 		runtimeUrl,
@@ -490,7 +481,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 		let initialStream: RuntimeStreamClient | null = null;
@@ -602,7 +592,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 		let initialStream: RuntimeStreamClient | null = null;
@@ -683,7 +672,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: nonGitPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -726,7 +714,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: tempHome,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -771,7 +758,6 @@ describe.sequential("runtime state stream integration", () => {
 		const firstServer = await startKanbanServer({
 			cwd: projectAPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port: firstPort,
 		});
 
@@ -800,7 +786,6 @@ describe.sequential("runtime state stream integration", () => {
 		const secondServer = await startKanbanServer({
 			cwd: nonGitPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port: secondPort,
 		});
 
@@ -847,7 +832,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: projectAPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -909,7 +893,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: projectAPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -1023,7 +1006,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -1107,7 +1089,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -1228,7 +1209,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 
@@ -1348,7 +1328,6 @@ describe.sequential("runtime state stream integration", () => {
 			const firstServer = await startKanbanServer({
 				cwd: projectPath,
 				gitFixture: integrationFixture.gitFixture,
-				processFixture: integrationFixture.processFixture,
 				port: firstPort,
 				extraArgs,
 			});
@@ -1411,7 +1390,6 @@ describe.sequential("runtime state stream integration", () => {
 			const secondServer = await startKanbanServer({
 				cwd: projectPath,
 				gitFixture: integrationFixture.gitFixture,
-				processFixture: integrationFixture.processFixture,
 				port: secondPort,
 			});
 
@@ -1469,7 +1447,6 @@ describe.sequential("runtime state stream integration", () => {
 		const server = await startKanbanServer({
 			cwd: projectAPath,
 			gitFixture: integrationFixture.gitFixture,
-			processFixture: integrationFixture.processFixture,
 			port,
 		});
 

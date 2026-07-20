@@ -24,7 +24,7 @@ import {
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestWorkspaceFixture,
-} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+} from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 async function withIsolatedNotificationLogWorkspaces<T>(
 	run: (registerWorkspace: (name: string) => Promise<{ workspaceId: string; path: string }>) => Promise<T>,

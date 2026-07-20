@@ -1,4 +1,4 @@
-import { type ChildProcess, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
@@ -11,11 +11,7 @@ import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
 	type IsolatedGitTestWorkspaceFixture,
-} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
-import {
-	createOwnedProcessLifecycleTestFixture,
-	type OwnedProcessLifecycleTestFixture,
-} from "../dangerous-capability-test-infrastructure/owned-process-lifecycle-test-fixture";
+} from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 const requireFromHere = createRequire(import.meta.url);
 
@@ -39,32 +35,20 @@ function commitAllRepositoryFiles(
 
 interface TaskCommandExitIntegrationFixture {
 	gitFixture: IsolatedGitTestWorkspaceFixture;
-	processFixture: OwnedProcessLifecycleTestFixture;
 	homeDirectoryPath: string;
 	createRepository(repositoryDirectoryName: string): IsolatedGitTestRepository;
-	runCliCommandAndCollectOutput(
-		options: Omit<RunCliCommandAndCollectOutputOptions, "processFixture">,
-	): Promise<CliCommandCollectedOutput>;
-	cleanup(): Promise<void>;
+	cleanup(): void;
 }
 
 function createTaskCommandExitIntegrationFixture(): TaskCommandExitIntegrationFixture {
 	const gitFixture = createIsolatedGitTestWorkspaceFixture();
-	const processFixture = createOwnedProcessLifecycleTestFixture();
-	processFixture.spawnUnrelatedSentinelProcess();
 	return {
 		gitFixture,
-		processFixture,
 		homeDirectoryPath: gitFixture.isolatedHomeDirectoryPath,
 		createRepository(repositoryDirectoryName) {
 			return gitFixture.createNonBareRepository({ repositoryDirectoryName, initialBranchName: "main" });
 		},
-		runCliCommandAndCollectOutput(options) {
-			return runCliCommandAndCollectOutput({ ...options, processFixture });
-		},
-		async cleanup() {
-			processFixture.assertUnrelatedSentinelProcessesAlive();
-			await processFixture.cleanup();
+		cleanup() {
 			gitFixture.cleanup();
 		},
 	};
@@ -217,19 +201,12 @@ async function requestGracefulShutdown(process: ChildProcess): Promise<void> {
 
 function spawnSourceCli(
 	args: string[],
-	options: {
-		cwd: string;
-		env: NodeJS.ProcessEnv;
-		processFixture: OwnedProcessLifecycleTestFixture;
-		stdio?: ChildProcess["stdio"];
-	},
+	options: { cwd: string; env: NodeJS.ProcessEnv; stdio?: ChildProcess["stdio"] },
 ) {
 	const cliEntrypoint = resolve(process.cwd(), "src/cli.ts");
-	return options.processFixture.spawnOwnedProcess({
-		command: process.execPath,
-		arguments: ["--import", resolveTsxLoaderImportSpecifier(), cliEntrypoint, ...args],
-		workingDirectoryPath: options.cwd,
-		environmentVariables: options.env,
+	return spawn(process.execPath, ["--import", resolveTsxLoaderImportSpecifier(), cliEntrypoint, ...args], {
+		cwd: options.cwd,
+		env: options.env,
 		stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
 	});
 }
@@ -238,7 +215,6 @@ interface RunCliCommandAndCollectOutputOptions {
 	args: string[];
 	cwd: string;
 	env: NodeJS.ProcessEnv;
-	processFixture: OwnedProcessLifecycleTestFixture;
 	timeoutMs?: number;
 }
 
@@ -255,7 +231,6 @@ async function runCliCommandAndCollectOutput(
 	const process = spawnSourceCli(options.args, {
 		cwd: options.cwd,
 		env: options.env,
-		processFixture: options.processFixture,
 	});
 
 	let stdout = "";
@@ -340,13 +315,11 @@ function readProcessRssKb(pid: number): number | null {
 async function bootstrapWorkspaceOnDisk(options: {
 	projectPath: string;
 	gitFixture: IsolatedGitTestWorkspaceFixture;
-	processFixture: OwnedProcessLifecycleTestFixture;
 }): Promise<string> {
 	const port = String(await getAvailablePort());
 	const serverProcess = await startRuntimeServerForProject({
 		projectPath: options.projectPath,
 		gitFixture: options.gitFixture,
-		processFixture: options.processFixture,
 		port,
 	});
 	await stopRuntimeServer(serverProcess);
@@ -390,15 +363,14 @@ async function waitForExitWhileTrackingRss(options: {
 async function startRuntimeServerForProject(options: {
 	projectPath: string;
 	gitFixture: IsolatedGitTestWorkspaceFixture;
-	processFixture: OwnedProcessLifecycleTestFixture;
 	port: string;
 }): Promise<ChildProcess> {
 	const env = options.gitFixture.createIsolatedChildProcessEnvironment({
 		KANBAN_RUNTIME_PORT: options.port,
 	});
-	const serverProcess = options.processFixture.spawnOwnedProcess({
-		command: process.execPath,
-		arguments: [
+	const serverProcess = spawn(
+		process.execPath,
+		[
 			"--require",
 			resolveShutdownIpcHookPath(),
 			"--import",
@@ -406,10 +378,12 @@ async function startRuntimeServerForProject(options: {
 			resolve(process.cwd(), "src/cli.ts"),
 			"--no-open",
 		],
-		workingDirectoryPath: options.projectPath,
-		environmentVariables: env,
-		stdio: ["ignore", "pipe", "pipe", "ipc"],
-	});
+		{
+			cwd: options.projectPath,
+			env,
+			stdio: ["ignore", "pipe", "pipe", "ipc"],
+		},
+	);
 	await waitForServerStart(serverProcess);
 	return serverProcess;
 }
@@ -440,7 +414,6 @@ describe("source task commands", () => {
 			const serverProcess = await startRuntimeServerForProject({
 				projectPath,
 				gitFixture: integrationFixture.gitFixture,
-				processFixture: integrationFixture.processFixture,
 				port,
 			});
 
@@ -457,7 +430,6 @@ describe("source task commands", () => {
 					{
 						cwd: projectPath,
 						env,
-						processFixture: integrationFixture.processFixture,
 					},
 				);
 
@@ -495,7 +467,6 @@ describe("source task commands", () => {
 		const repository = integrationFixture.createRepository("project-root-launch-open");
 		const projectPath = repository.repositoryPath;
 		const homeDir = integrationFixture.homeDirectoryPath;
-		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
 			writeFileSync(join(projectPath, "README.md"), "# Root Launch Browser Open Test\n", "utf8");
@@ -512,7 +483,6 @@ describe("source task commands", () => {
 			const serverProcess = await startRuntimeServerForProject({
 				projectPath,
 				gitFixture: integrationFixture.gitFixture,
-				processFixture: integrationFixture.processFixture,
 				port,
 			});
 
@@ -545,7 +515,6 @@ describe("source task commands", () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-task-done-delete");
 		const projectPath = repository.repositoryPath;
-		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
 			writeFileSync(join(projectPath, "README.md"), "# Task Done Delete Test\n", "utf8");
@@ -558,7 +527,6 @@ describe("source task commands", () => {
 			const serverProcess = await startRuntimeServerForProject({
 				projectPath,
 				gitFixture: integrationFixture.gitFixture,
-				processFixture: integrationFixture.processFixture,
 				port,
 			});
 
@@ -679,7 +647,6 @@ describe("source task commands", () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-task-cline-reasoning");
 		const projectPath = repository.repositoryPath;
-		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
 			writeFileSync(join(projectPath, "README.md"), "# Task Cline Reasoning Test\n", "utf8");
@@ -692,7 +659,6 @@ describe("source task commands", () => {
 			const serverProcess = await startRuntimeServerForProject({
 				projectPath,
 				gitFixture: integrationFixture.gitFixture,
-				processFixture: integrationFixture.processFixture,
 				port,
 			});
 
@@ -758,7 +724,6 @@ describe("CLI subprocess exit guarantees", () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-cli-list-all");
 		const projectPath = repository.repositoryPath;
-		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
 			writeFileSync(join(projectPath, "README.md"), "# CLI List All Tasks Test\n", "utf8");
@@ -771,7 +736,6 @@ describe("CLI subprocess exit guarantees", () => {
 			const serverProcess = await startRuntimeServerForProject({
 				projectPath,
 				gitFixture: integrationFixture.gitFixture,
-				processFixture: integrationFixture.processFixture,
 				port,
 			});
 
@@ -821,7 +785,6 @@ describe("CLI subprocess exit guarantees", () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-cli-unreachable");
 		const projectPath = repository.repositoryPath;
-		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
 			writeFileSync(join(projectPath, "README.md"), "# CLI Unreachable Runtime Test\n", "utf8");
@@ -856,7 +819,6 @@ describe("CLI subprocess exit guarantees", () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-cli-hanging");
 		const projectPath = repository.repositoryPath;
-		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		let hangingServer: Server | null = null;
 		try {
@@ -899,7 +861,6 @@ describe("CLI subprocess exit guarantees", () => {
 			const integrationFixture = createTaskCommandExitIntegrationFixture();
 			const repository = integrationFixture.createRepository("project-cli-trpc-margin");
 			const projectPath = repository.repositoryPath;
-			const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 			let hangingServer: Server | null = null;
 			try {
@@ -908,7 +869,6 @@ describe("CLI subprocess exit guarantees", () => {
 				await bootstrapWorkspaceOnDisk({
 					projectPath,
 					gitFixture: integrationFixture.gitFixture,
-					processFixture: integrationFixture.processFixture,
 				});
 
 				const started = await startHangingHttpServer();
@@ -945,7 +905,6 @@ describe("CLI subprocess exit guarantees", () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-cli-hard-timeout");
 		const projectPath = repository.repositoryPath;
-		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		let hangingServer: Server | null = null;
 		try {
@@ -954,7 +913,6 @@ describe("CLI subprocess exit guarantees", () => {
 			await bootstrapWorkspaceOnDisk({
 				projectPath,
 				gitFixture: integrationFixture.gitFixture,
-				processFixture: integrationFixture.processFixture,
 			});
 
 			const started = await startHangingHttpServer();
@@ -998,7 +956,6 @@ describe("CLI subprocess exit guarantees", () => {
 			await bootstrapWorkspaceOnDisk({
 				projectPath,
 				gitFixture: integrationFixture.gitFixture,
-				processFixture: integrationFixture.processFixture,
 			});
 
 			const started = await startHangingHttpServer();
@@ -1012,7 +969,6 @@ describe("CLI subprocess exit guarantees", () => {
 			const commandProcess = spawnSourceCli(["task", "list", "--project-path", projectPath], {
 				cwd: projectPath,
 				env,
-				processFixture: integrationFixture.processFixture,
 			});
 			const rssResult = await waitForExitWhileTrackingRss({
 				process: commandProcess,
@@ -1038,7 +994,6 @@ describe("CLI subprocess exit guarantees", () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-cli-hooks-exit");
 		const projectPath = repository.repositoryPath;
-		const runCliCommandAndCollectOutput = integrationFixture.runCliCommandAndCollectOutput;
 
 		try {
 			writeFileSync(join(projectPath, "README.md"), "# CLI Hooks Exit Test\n", "utf8");

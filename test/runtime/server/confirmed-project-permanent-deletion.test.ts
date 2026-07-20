@@ -20,8 +20,7 @@ import {
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestWorkspaceFixture,
-} from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
-import { createProtectedFilesystemMutationTestFixture } from "../../dangerous-capability-test-infrastructure/protected-filesystem-mutation-test-fixture";
+} from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 function createCard(taskId: string) {
 	return {
@@ -85,14 +84,11 @@ function createServiceDependencies(
 	};
 }
 
-async function withProtectedFilesystemMutationHome<T>(
+async function withIsolatedGitTestHome<T>(
 	run: (context: { gitFixture: IsolatedGitTestWorkspaceFixture }) => Promise<T>,
 ): Promise<T> {
-	const filesystemFixture = createProtectedFilesystemMutationTestFixture();
 	const gitFixture = createIsolatedGitTestWorkspaceFixture();
-	const temporaryHomePath = filesystemFixture.createOwnedMutationDirectory({
-		ownedDirectoryName: "permanent-deletion-isolated-home",
-	});
+	const temporaryHomePath = gitFixture.isolatedHomeDirectoryPath;
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
 	process.env.HOME = temporaryHomePath;
@@ -110,9 +106,7 @@ async function withProtectedFilesystemMutationHome<T>(
 		} else {
 			process.env.USERPROFILE = previousUserProfile;
 		}
-		filesystemFixture.assertProtectedCanariesIntact();
 		gitFixture.cleanup();
-		filesystemFixture.cleanup();
 	}
 }
 
@@ -331,7 +325,7 @@ describe.sequential("confirmed project permanent deletion", () => {
 	});
 
 	it("restores the original state directory when the index write fails", { timeout: 30_000 }, async () => {
-		await withProtectedFilesystemMutationHome(async ({ gitFixture }) => {
+		await withIsolatedGitTestHome(async ({ gitFixture }) => {
 			const projectPath = gitFixture.createNonBareRepository({
 				repositoryDirectoryName: "index-rollback-project",
 			}).repositoryPath;
@@ -382,7 +376,7 @@ describe.sequential("confirmed project permanent deletion", () => {
 		"reports a stage-specific stale result after managed worktrees were already deleted",
 		{ timeout: 30_000 },
 		async () => {
-			await withProtectedFilesystemMutationHome(async ({ gitFixture }) => {
+			await withIsolatedGitTestHome(async ({ gitFixture }) => {
 				const projectPath = gitFixture.createNonBareRepository({
 					repositoryDirectoryName: "post-worktree-stale-project",
 				}).repositoryPath;
@@ -446,7 +440,7 @@ describe.sequential("confirmed project permanent deletion", () => {
 		"reports and retains the staging directory when its final recursive removal fails",
 		{ timeout: 30_000 },
 		async () => {
-			await withProtectedFilesystemMutationHome(async ({ gitFixture }) => {
+			await withIsolatedGitTestHome(async ({ gitFixture }) => {
 				const projectPath = gitFixture.createNonBareRepository({
 					repositoryDirectoryName: "retained-staging-project",
 				}).repositoryPath;

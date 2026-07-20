@@ -14,7 +14,7 @@ import { discardGitChanges, getGitSyncSummary } from "../../src/workspace/git-sy
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
-} from "../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+} from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 function commitAllRepositoryFiles(repository: IsolatedGitTestRepository, message: string): string {
 	repository.runGit(["add", "."]);

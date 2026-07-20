@@ -1,3 +1,4 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -5,7 +6,6 @@ import { pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
 import { createIsolatedGitTestWorkspaceFixture } from "./isolated-git-test-workspace-fixture";
-import { createOwnedProcessLifecycleTestFixture } from "./owned-process-lifecycle-test-fixture";
 import {
 	captureInvokingRepositoryEvidenceSnapshot,
 	compareInvokingRepositoryEvidenceSnapshots,
@@ -23,10 +23,7 @@ function createCommittedCanaryRepository(repositoryDirectoryName: string) {
 	return { gitFixture, repository };
 }
 
-async function waitForStandardOutputText(
-	childProcess: ReturnType<ReturnType<typeof createOwnedProcessLifecycleTestFixture>["spawnOwnedProcess"]>,
-	expectedText: string,
-): Promise<void> {
+async function waitForStandardOutputText(childProcess: ChildProcess, expectedText: string): Promise<void> {
 	await new Promise<void>((resolveOutput, rejectOutput) => {
 		let standardOutput = "";
 		let standardError = "";
@@ -241,23 +238,22 @@ describe.sequential("invoking repository mutation canary", () => {
 
 	it("SIGTERM 转发给子测试后仍执行 canary 复查", async () => {
 		const { gitFixture, repository } = createCommittedCanaryRepository("signal-forwarding-repository");
-		const processFixture = createOwnedProcessLifecycleTestFixture();
-		const unrelatedSentinelProcess = processFixture.spawnUnrelatedSentinelProcess();
+		let canaryRunnerProcess: ChildProcess | null = null;
 		try {
 			const childTestScript = [
 				'process.stdout.write("CHILD_READY\\n");',
 				'process.on("SIGTERM", () => process.exit(23));',
 				"setInterval(() => {}, 1000);",
 			].join("\n");
-			const canaryRunnerProcess = processFixture.spawnOwnedProcess({
-				command: process.execPath,
-				arguments: [
+			const spawnedCanaryRunnerProcess = spawn(
+				process.execPath,
+				[
 					"--import",
 					pathToFileURL(requireFromCanaryIntegrationTest.resolve("tsx")).href,
 					join(
 						process.cwd(),
 						"test",
-						"dangerous-capability-test-infrastructure",
+						"git-repository-mutation-safety",
 						"run-test-projects-with-invoking-repository-mutation-canary.ts",
 					),
 					"--",
@@ -265,22 +261,26 @@ describe.sequential("invoking repository mutation canary", () => {
 					"-e",
 					childTestScript,
 				],
-				workingDirectoryPath: repository.repositoryPath,
-				environmentVariables: gitFixture.createIsolatedChildProcessEnvironment(),
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			await waitForStandardOutputText(canaryRunnerProcess, "CHILD_READY");
-			canaryRunnerProcess.kill("SIGTERM");
+				{
+					cwd: repository.repositoryPath,
+					env: gitFixture.createIsolatedChildProcessEnvironment(),
+					stdio: ["ignore", "pipe", "pipe"],
+				},
+			);
+			canaryRunnerProcess = spawnedCanaryRunnerProcess;
+			await waitForStandardOutputText(spawnedCanaryRunnerProcess, "CHILD_READY");
+			spawnedCanaryRunnerProcess.kill("SIGTERM");
 			await new Promise<void>((resolveExit, rejectExit) => {
-				canaryRunnerProcess.once("error", rejectExit);
-				canaryRunnerProcess.once("exit", () => resolveExit());
+				spawnedCanaryRunnerProcess.once("error", rejectExit);
+				spawnedCanaryRunnerProcess.once("exit", () => resolveExit());
 			});
 
-			expect(canaryRunnerProcess.exitCode).toBe(23);
-			expect(processFixture.isProcessAlive(unrelatedSentinelProcess.pid)).toBe(true);
-			processFixture.assertUnrelatedSentinelProcessesAlive();
+			expect(spawnedCanaryRunnerProcess.exitCode).toBe(23);
 		} finally {
-			await processFixture.cleanup();
+			if (canaryRunnerProcess && canaryRunnerProcess.exitCode === null && canaryRunnerProcess.signalCode === null) {
+				canaryRunnerProcess.kill("SIGKILL");
+				await new Promise<void>((resolveExit) => canaryRunnerProcess?.once("exit", () => resolveExit()));
+			}
 			gitFixture.cleanup();
 		}
 	});

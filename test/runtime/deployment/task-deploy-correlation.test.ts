@@ -8,7 +8,7 @@ import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
 	type IsolatedGitTestWorkspaceFixture,
-} from "../../dangerous-capability-test-infrastructure/isolated-git-test-workspace-fixture";
+} from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 function commitFile(
 	repository: IsolatedGitTestRepository,
