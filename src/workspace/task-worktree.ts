@@ -117,6 +117,37 @@ async function withTaskWorktreeSetupLock<T>(repoPath: string, operation: () => P
 	return await lockedFileSystem.withLock(await getTaskWorktreeSetupLock(repoPath), operation);
 }
 
+export const TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX = "Task worktree not found for task ";
+export const TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX = "Task worktree is still being set up for task ";
+
+// 进程内 setup-in-progress registry：`git worktree add` 先建目录、写 HEAD，之后才铺工作树文件，
+// 所以裸 pathExists / rev-parse HEAD 都会把「半 checkout」的 worktree 误判为已就绪——metadata monitor
+// 的 `git diff HEAD` 探针会在这个窗口算出瞬时巨大 +/-（新建任务时顶栏闪现 +几万 -几万 的根因）。
+// setup 期间在此登记 worktreePath（计数以容忍并发 ensure 叠加），读侧（getTaskWorkspacePathInfo /
+// resolveTaskCwd(ensure:false)）与 ensure 快速路径据此把 setup 中的 worktree 视为未就绪。
+// Known limitation：registry 仅进程内有效。server 在 worktree add 的亚秒~数秒窗口内被 SIGKILL 时，
+// 遗留半成品仍会被后续 ensure 的 rev-parse 探测当作已存在——这是本 registry 引入前就存在的既有行为，
+// 概率极低；若将来真实观测到，再考虑持久化「setup 进行中哨兵」+ ensure 检测哨兵强拆重建的修复路径。
+const inProgressTaskWorktreeSetupCountByWorktreePath = new Map<string, number>();
+
+function isTaskWorktreeSetupInProgress(worktreePath: string): boolean {
+	return inProgressTaskWorktreeSetupCountByWorktreePath.has(worktreePath);
+}
+
+function markTaskWorktreeSetupInProgress(worktreePath: string): void {
+	const currentCount = inProgressTaskWorktreeSetupCountByWorktreePath.get(worktreePath) ?? 0;
+	inProgressTaskWorktreeSetupCountByWorktreePath.set(worktreePath, currentCount + 1);
+}
+
+function clearTaskWorktreeSetupInProgress(worktreePath: string): void {
+	const currentCount = inProgressTaskWorktreeSetupCountByWorktreePath.get(worktreePath) ?? 0;
+	if (currentCount <= 1) {
+		inProgressTaskWorktreeSetupCountByWorktreePath.delete(worktreePath);
+		return;
+	}
+	inProgressTaskWorktreeSetupCountByWorktreePath.set(worktreePath, currentCount - 1);
+}
+
 function getWorktreesRootPath(taskId: string): string {
 	const normalizedTaskId = normalizeTaskIdForWorktreePath(taskId);
 	return join(getTaskWorktreesHomePath(), normalizedTaskId);
@@ -486,111 +517,122 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 		// compared the worktree HEAD to the latest baseRef commit and recreated the worktree
 		// when the base branch advanced, which could destroy valid task progress. Existing
 		// worktrees are now treated as authoritative and only missing worktrees are created.
-		const existingResult = await runGit(worktreePath, ["rev-parse", "HEAD"]);
-		if (existingResult.ok && existingResult.stdout) {
-			await syncIgnoredPathsIntoWorktree(context.repoPath, worktreePath);
-			await syncProjectLocalAgentConfigIntoWorktree(context.repoPath, worktreePath);
-			return {
-				ok: true,
-				path: worktreePath,
-				baseRef: options.baseRef.trim(),
-				baseCommit: existingResult.stdout,
-			};
-		}
-
-		return await withTaskWorktreeSetupLock(context.repoPath, async () => {
-			const lockedExistingCommit = await tryRunGit(worktreePath, ["rev-parse", "HEAD"]);
-			if (lockedExistingCommit) {
+		// 就绪门控：并发 ensure 正在 setup 时，半 checkout 的 worktree 已能通过 rev-parse HEAD
+		//（git worktree add 先写 HEAD 后铺文件），快速路径不可信任，跳过并进锁排队等 setup 完成
+		//（锁内 lockedExistingCommit 复查会返回真实结果）。
+		if (!isTaskWorktreeSetupInProgress(worktreePath)) {
+			const existingResult = await runGit(worktreePath, ["rev-parse", "HEAD"]);
+			// rev-parse 的 await 期间 setup 可能刚开始，返回前复查一次标记关闭 TOCTOU 窗口。
+			if (existingResult.ok && existingResult.stdout && !isTaskWorktreeSetupInProgress(worktreePath)) {
 				await syncIgnoredPathsIntoWorktree(context.repoPath, worktreePath);
 				await syncProjectLocalAgentConfigIntoWorktree(context.repoPath, worktreePath);
 				return {
 					ok: true,
 					path: worktreePath,
 					baseRef: options.baseRef.trim(),
-					baseCommit: lockedExistingCommit,
+					baseCommit: existingResult.stdout,
 				};
 			}
+		}
 
-			const requestedBaseRef = options.baseRef.trim();
-			if (!requestedBaseRef) {
-				return {
-					ok: false,
-					path: null,
-					baseRef: requestedBaseRef,
-					baseCommit: null,
-					error: "Task base branch is required for worktree creation.",
-				};
-			}
+		markTaskWorktreeSetupInProgress(worktreePath);
+		try {
+			return await withTaskWorktreeSetupLock(context.repoPath, async () => {
+				const lockedExistingCommit = await tryRunGit(worktreePath, ["rev-parse", "HEAD"]);
+				if (lockedExistingCommit) {
+					await syncIgnoredPathsIntoWorktree(context.repoPath, worktreePath);
+					await syncProjectLocalAgentConfigIntoWorktree(context.repoPath, worktreePath);
+					return {
+						ok: true,
+						path: worktreePath,
+						baseRef: options.baseRef.trim(),
+						baseCommit: lockedExistingCommit,
+					};
+				}
 
-			const baseRefResult = await runGit(context.repoPath, [
-				"rev-parse",
-				"--verify",
-				`${requestedBaseRef}^{commit}`,
-			]);
-			if (!baseRefResult.ok) {
-				return {
-					ok: false,
-					path: null,
-					baseRef: requestedBaseRef,
-					baseCommit: null,
-					error: getWorktreeBaseRefResolutionErrorMessage(
-						requestedBaseRef,
-						baseRefResult.stderr || baseRefResult.output,
-					),
-				};
-			}
-			const requestedBaseCommit = baseRefResult.stdout;
-
-			const storedPatch = await findTaskPatch(taskId);
-			let baseCommit = storedPatch?.commit ?? requestedBaseCommit;
-			let warning: string | undefined;
-
-			if (await pathExists(worktreePath)) {
-				await removeTaskWorktreeInternal(context.repoPath, worktreePath);
-			}
-
-			// Clean up stale worktree registrations that can linger when git
-			// worktree remove fails or the process is interrupted. Without this,
-			// git worktree add refuses with "missing but already registered".
-			await runGit(context.repoPath, ["worktree", "prune"]);
-
-			await mkdir(dirname(worktreePath), { recursive: true });
-			const addResult = await runGit(context.repoPath, ["worktree", "add", "--detach", worktreePath, baseCommit]);
-			if (!addResult.ok) {
-				if (!storedPatch) {
+				const requestedBaseRef = options.baseRef.trim();
+				if (!requestedBaseRef) {
 					return {
 						ok: false,
 						path: null,
 						baseRef: requestedBaseRef,
 						baseCommit: null,
-						error: addResult.stderr || addResult.output,
+						error: "Task base branch is required for worktree creation.",
 					};
 				}
 
-				baseCommit = requestedBaseCommit;
-				warning =
-					"Could not restore the saved task patch onto its original commit. Started from the task base ref instead.";
-				await getGitStdout(["worktree", "add", "--detach", worktreePath, baseCommit], context.repoPath);
-			}
-			await prepareNewTaskWorktree(context.repoPath, worktreePath);
-
-			if (storedPatch && baseCommit === storedPatch.commit) {
-				try {
-					await applyTaskPatch(storedPatch.path, worktreePath);
-					await rm(storedPatch.path, { force: true });
-				} catch (error) {
-					warning = `Saved task changes could not be reapplied automatically. ${getGitCommandErrorMessage(error)}`;
+				const baseRefResult = await runGit(context.repoPath, [
+					"rev-parse",
+					"--verify",
+					`${requestedBaseRef}^{commit}`,
+				]);
+				if (!baseRefResult.ok) {
+					return {
+						ok: false,
+						path: null,
+						baseRef: requestedBaseRef,
+						baseCommit: null,
+						error: getWorktreeBaseRefResolutionErrorMessage(
+							requestedBaseRef,
+							baseRefResult.stderr || baseRefResult.output,
+						),
+					};
 				}
-			}
+				const requestedBaseCommit = baseRefResult.stdout;
 
-			return {
-				ok: true,
-				path: worktreePath,
-				baseRef: requestedBaseRef,
-				baseCommit,
-				warning,
-			};
-		});
+				const storedPatch = await findTaskPatch(taskId);
+				let baseCommit = storedPatch?.commit ?? requestedBaseCommit;
+				let warning: string | undefined;
+
+				if (await pathExists(worktreePath)) {
+					await removeTaskWorktreeInternal(context.repoPath, worktreePath);
+				}
+
+				// Clean up stale worktree registrations that can linger when git
+				// worktree remove fails or the process is interrupted. Without this,
+				// git worktree add refuses with "missing but already registered".
+				await runGit(context.repoPath, ["worktree", "prune"]);
+
+				await mkdir(dirname(worktreePath), { recursive: true });
+				const addResult = await runGit(context.repoPath, ["worktree", "add", "--detach", worktreePath, baseCommit]);
+				if (!addResult.ok) {
+					if (!storedPatch) {
+						return {
+							ok: false,
+							path: null,
+							baseRef: requestedBaseRef,
+							baseCommit: null,
+							error: addResult.stderr || addResult.output,
+						};
+					}
+
+					baseCommit = requestedBaseCommit;
+					warning =
+						"Could not restore the saved task patch onto its original commit. Started from the task base ref instead.";
+					await getGitStdout(["worktree", "add", "--detach", worktreePath, baseCommit], context.repoPath);
+				}
+				await prepareNewTaskWorktree(context.repoPath, worktreePath);
+
+				if (storedPatch && baseCommit === storedPatch.commit) {
+					try {
+						await applyTaskPatch(storedPatch.path, worktreePath);
+						await rm(storedPatch.path, { force: true });
+					} catch (error) {
+						warning = `Saved task changes could not be reapplied automatically. ${getGitCommandErrorMessage(error)}`;
+					}
+				}
+
+				return {
+					ok: true,
+					path: worktreePath,
+					baseRef: requestedBaseRef,
+					baseCommit,
+					warning,
+				};
+			});
+		} finally {
+			clearTaskWorktreeSetupInProgress(worktreePath);
+		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return {
@@ -687,10 +729,21 @@ export async function resolveTaskCwd(options: {
 	}
 
 	const worktreePath = getTaskWorktreePath(context.repoPath, options.taskId);
+	// setup 中的半 checkout worktree 目录已存在但不可读（diff 会算出垃圾结果），视为尚未就绪。
+	if (isTaskWorktreeSetupInProgress(worktreePath)) {
+		throw new Error(`${TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX}"${options.taskId}".`);
+	}
 	if (await pathExists(worktreePath)) {
+		// pathExists 的 await 期间并发 ensure 可能刚登记 setup（markTaskWorktreeSetupInProgress 后
+		// `git worktree add` 建出半 checkout 目录，先建目录使 pathExists 转真），返回前复查一次标记，
+		// 关闭 check-then-act 的 TOCTOU 窗口——与 ensure 快速路径（rev-parse 后复查）以及
+		// getTaskWorkspacePathInfo（&& 短路已在 pathExists 后检查）对称，避免把半 checkout 路径交给读侧。
+		if (isTaskWorktreeSetupInProgress(worktreePath)) {
+			throw new Error(`${TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX}"${options.taskId}".`);
+		}
 		return worktreePath;
 	}
-	throw new Error(`Task worktree not found for task "${options.taskId}".`);
+	throw new Error(`${TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX}"${options.taskId}".`);
 }
 
 export async function getTaskWorkspacePathInfo(options: {
@@ -721,10 +774,12 @@ export async function getTaskWorkspacePathInfo(options: {
 	}
 
 	const worktreePath = getTaskWorktreePath(repoPath, taskId);
+	// setup 中视为不存在：metadata monitor 据 exists:false 下发 additions/deletions=null（顶栏显示 +0 -0），
+	// 避免对半 checkout 工作树跑 git diff 闪现巨大数字。
 	return {
 		taskId,
 		path: worktreePath,
-		exists: await pathExists(worktreePath),
+		exists: (await pathExists(worktreePath)) && !isTaskWorktreeSetupInProgress(worktreePath),
 		baseRef: normalizedBaseRef,
 	};
 }

@@ -3,7 +3,12 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { deleteTaskWorktree, ensureTaskWorktreeIfDoesntExist } from "../../src/workspace/task-worktree";
+import {
+	deleteTaskWorktree,
+	ensureTaskWorktreeIfDoesntExist,
+	getTaskWorkspacePathInfo,
+	resolveTaskCwd,
+} from "../../src/workspace/task-worktree";
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
@@ -446,6 +451,46 @@ describe.sequential("task-worktree integration", () => {
 			expect(repository.runGit(["rev-parse", "HEAD"], { workingDirectoryPath: restored.path }).stdout.trim()).toBe(
 				createdCommit,
 			);
+		});
+	});
+
+	// 就绪门控回归护栏:setup 完成后的 worktree 必须立即被读侧判为就绪
+	//(防止 setup-in-progress registry 对已完成的 worktree 过度拦截)。
+	it("reports a fully set up worktree as ready for readers", async () => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
+			const repository = createRepository("readiness-repository");
+			const repoPath = repository.repositoryPath;
+
+			writeFileSync(join(repoPath, "README.md"), "readiness\n", "utf8");
+			repository.runGit(["add", "README.md"]);
+			repository.runGit(["commit", "-m", "init"]);
+
+			const ensured = await ensureTaskWorktreeIfDoesntExist({
+				cwd: repoPath,
+				taskId: "task-readiness-integration",
+				baseRef: "HEAD",
+			});
+			expect(ensured.ok).toBe(true);
+			if (!ensured.ok || !ensured.path) {
+				throw new Error("Task worktree was not created");
+			}
+
+			const pathInfo = await getTaskWorkspacePathInfo({
+				cwd: repoPath,
+				taskId: "task-readiness-integration",
+				baseRef: "HEAD",
+			});
+			expect(pathInfo.exists).toBe(true);
+			expect(pathInfo.path).toBe(ensured.path);
+
+			await expect(
+				resolveTaskCwd({
+					cwd: repoPath,
+					taskId: "task-readiness-integration",
+					baseRef: "HEAD",
+					ensure: false,
+				}),
+			).resolves.toBe(ensured.path);
 		});
 	});
 });
