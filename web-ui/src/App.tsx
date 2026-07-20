@@ -54,6 +54,7 @@ import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
 import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
+import { useNotificationTaskFocusRouting } from "@/hooks/use-notification-task-focus-routing";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { usePostDeployVerification } from "@/hooks/use-post-deploy-verification";
 import { useProjectNavigation } from "@/hooks/use-project-navigation";
@@ -400,37 +401,15 @@ export default function App(): ReactElement {
 		onClearWorkspace: handleClearWorkspaceNotifications,
 	});
 
-	// 跨 repo 点击通知定位 task：同项目直接选中；跨项目先切项目，待目标项目数据落地（currentProjectId 到位、
-	// 非切换中）后再选中——否则会被 useDetailTaskNavigation 切项目时的 closeDetail 清掉。
-	const pendingNotificationFocusRef = useRef<{ workspaceId: string; taskId: string } | null>(null);
-	const focusNotificationTask = useCallback(
-		(workspaceId: string, taskId: string) => {
-			// 目标项目已完全落地（loaded 且非切换中）才直接选中——与下方 pending-effect 同轴（currentProjectId）。
-			// 若只看 navigationCurrentProjectId（导航意图），切换在途时会过早 setSelectedTaskId，随后被
-			// useDetailTaskNavigation 切项目的 closeDetail 清掉且无 pending 恢复，通知点击打不开详情。
-			if (workspaceId === currentProjectId && !isProjectSwitching) {
-				setSelectedTaskId(taskId);
-				return;
-			}
-			// 否则挂 pending，待目标项目落地后由 effect 选中；仅当导航意图尚未指向目标时才触发切项目
-			// （已在切往目标时重复 handleSelectProject 无意义）。
-			pendingNotificationFocusRef.current = { workspaceId, taskId };
-			if (workspaceId !== navigationCurrentProjectId) {
-				void handleSelectProject(workspaceId);
-			}
-		},
-		[currentProjectId, isProjectSwitching, navigationCurrentProjectId, setSelectedTaskId, handleSelectProject],
-	);
-	useEffect(() => {
-		const pending = pendingNotificationFocusRef.current;
-		if (!pending) {
-			return;
-		}
-		if (currentProjectId === pending.workspaceId && !isProjectSwitching) {
-			pendingNotificationFocusRef.current = null;
-			setSelectedTaskId(pending.taskId);
-		}
-	}, [currentProjectId, isProjectSwitching, setSelectedTaskId]);
+	// 跨 repo 点击通知定位 task：同项目直接选中；跨项目经 SW 中转定位既有目标项目标签页
+	// （无则新开深链标签页），本 tab 保持不动，仅机制不可用时降级为 in-tab 切项目。见 hook 内注释。
+	const { focusNotificationTask } = useNotificationTaskFocusRouting({
+		currentProjectId,
+		isProjectSwitching,
+		navigationCurrentProjectId,
+		setSelectedTaskId,
+		handleSelectProject,
+	});
 
 	useEffect(() => {
 		replaceWorkspaceMetadata(workspaceMetadata);

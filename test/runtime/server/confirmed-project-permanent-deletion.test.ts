@@ -1,5 +1,3 @@
-import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { basename } from "node:path";
 
@@ -19,8 +17,10 @@ import {
 	loadWorkspaceState,
 	saveWorkspaceState,
 } from "../../../src/state/workspace-state";
-import { createGitTestEnv } from "../../utilities/git-env";
-import { createTempDir } from "../../utilities/temp-dir";
+import {
+	createIsolatedGitTestWorkspaceFixture,
+	type IsolatedGitTestWorkspaceFixture,
+} from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 function createCard(taskId: string) {
 	return {
@@ -64,17 +64,6 @@ function createSession(taskId: string, state: "running" | "idle"): RuntimeTaskSe
 	};
 }
 
-function initializeGitRepository(projectPath: string): void {
-	const result = spawnSync("git", ["init"], {
-		cwd: projectPath,
-		stdio: "ignore",
-		env: createGitTestEnv(),
-	});
-	if (result.status !== 0) {
-		throw new Error(`Could not initialize test Git repository at ${projectPath}.`);
-	}
-}
-
 function createServiceDependencies(
 	overrides: Partial<ConfirmedProjectPermanentDeletionServiceDependencies> = {},
 ): ConfirmedProjectPermanentDeletionServiceDependencies {
@@ -95,14 +84,17 @@ function createServiceDependencies(
 	};
 }
 
-async function withTemporaryHome<T>(run: () => Promise<T>): Promise<T> {
-	const { path: temporaryHomePath, cleanup } = createTempDir("kanban-permanent-deletion-home-");
+async function withIsolatedGitTestHome<T>(
+	run: (context: { gitFixture: IsolatedGitTestWorkspaceFixture }) => Promise<T>,
+): Promise<T> {
+	const gitFixture = createIsolatedGitTestWorkspaceFixture();
+	const temporaryHomePath = gitFixture.isolatedHomeDirectoryPath;
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
 	process.env.HOME = temporaryHomePath;
 	process.env.USERPROFILE = temporaryHomePath;
 	try {
-		return await run();
+		return await run({ gitFixture });
 	} finally {
 		if (previousHome === undefined) {
 			delete process.env.HOME;
@@ -114,7 +106,7 @@ async function withTemporaryHome<T>(run: () => Promise<T>): Promise<T> {
 		} else {
 			process.env.USERPROFILE = previousUserProfile;
 		}
-		cleanup();
+		gitFixture.cleanup();
 	}
 }
 
@@ -332,65 +324,62 @@ describe.sequential("confirmed project permanent deletion", () => {
 		expect(stageWorkspaceStateDirectoryAndRemoveProjectIndex).not.toHaveBeenCalled();
 	});
 
-	it("restores the original state directory when the index write fails", async () => {
-		await withTemporaryHome(async () => {
-			const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-index-rollback-project-");
-			try {
-				mkdirSync(projectPath, { recursive: true });
-				initializeGitRepository(projectPath);
-				const context = await loadWorkspaceContext(projectPath);
-				const initialState = await loadWorkspaceState(projectPath);
-				await saveWorkspaceState(projectPath, {
-					board: createBoard([]),
-					sessions: {},
-					expectedRevision: initialState.revision,
-				});
+	it("restores the original state directory when the index write fails", { timeout: 30_000 }, async () => {
+		await withIsolatedGitTestHome(async ({ gitFixture }) => {
+			const projectPath = gitFixture.createNonBareRepository({
+				repositoryDirectoryName: "index-rollback-project",
+			}).repositoryPath;
+			const context = await loadWorkspaceContext(projectPath);
+			const initialState = await loadWorkspaceState(projectPath);
+			await saveWorkspaceState(projectPath, {
+				board: createBoard([]),
+				sessions: {},
+				expectedRevision: initialState.revision,
+			});
 
-				const service = createConfirmedProjectPermanentDeletionService(
-					createServiceDependencies({
-						getActiveWorkspaceId: vi.fn(() => context.workspaceId),
-						getTaskWorkspacePathInfo: vi.fn(async ({ taskId, baseRef }) => ({
-							taskId,
-							path: `/worktrees/${taskId}`,
-							exists: false,
-							baseRef,
-						})),
-						removeWorkspaceIndexEntry: vi.fn(async () => {
-							throw new Error("simulated index write failure");
-						}),
+			const service = createConfirmedProjectPermanentDeletionService(
+				createServiceDependencies({
+					getActiveWorkspaceId: vi.fn(() => context.workspaceId),
+					getTaskWorkspacePathInfo: vi.fn(async ({ taskId, baseRef }) => ({
+						taskId,
+						path: `/worktrees/${taskId}`,
+						exists: false,
+						baseRef,
+					})),
+					removeWorkspaceIndexEntry: vi.fn(async () => {
+						throw new Error("simulated index write failure");
 					}),
-				);
-				const previewResponse = await service.getPermanentDeletionPreview({ projectId: context.workspaceId });
-				if (!previewResponse.ok || previewResponse.preview.workspaceStateRevision === null) {
-					throw new Error("Expected a valid deletion preview.");
-				}
-
-				const result = await service.permanentlyDeleteProjectData({
-					projectId: context.workspaceId,
-					expectedWorkspaceStateRevision: previewResponse.preview.workspaceStateRevision,
-					confirmationProjectName: basename(projectPath),
-				});
-
-				expect(result.failureCode).toBe("workspace_index_deletion_failed");
-				expect(await stat(getWorkspaceDirectoryPath(context.workspaceId))).toBeDefined();
-				expect((await listWorkspaceIndexEntries()).map((entry) => entry.workspaceId)).toContain(
-					context.workspaceId,
-				);
-				expect(
-					(await readdir(getWorkspacesRootPath())).some((name) => name.includes("pending-permanent-deletion")),
-				).toBe(false);
-				await expect(loadPersistedWorkspaceStateById(context.workspaceId)).resolves.toBeDefined();
-			} finally {
-				cleanupProject();
+				}),
+			);
+			const previewResponse = await service.getPermanentDeletionPreview({ projectId: context.workspaceId });
+			if (!previewResponse.ok || previewResponse.preview.workspaceStateRevision === null) {
+				throw new Error("Expected a valid deletion preview.");
 			}
+
+			const result = await service.permanentlyDeleteProjectData({
+				projectId: context.workspaceId,
+				expectedWorkspaceStateRevision: previewResponse.preview.workspaceStateRevision,
+				confirmationProjectName: basename(projectPath),
+			});
+
+			expect(result.failureCode).toBe("workspace_index_deletion_failed");
+			expect(await stat(getWorkspaceDirectoryPath(context.workspaceId))).toBeDefined();
+			expect((await listWorkspaceIndexEntries()).map((entry) => entry.workspaceId)).toContain(context.workspaceId);
+			expect(
+				(await readdir(getWorkspacesRootPath())).some((name) => name.includes("pending-permanent-deletion")),
+			).toBe(false);
+			await expect(loadPersistedWorkspaceStateById(context.workspaceId)).resolves.toBeDefined();
 		});
 	});
 
-	it("reports a stage-specific stale result after managed worktrees were already deleted", async () => {
-		await withTemporaryHome(async () => {
-			const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-post-worktree-stale-project-");
-			try {
-				initializeGitRepository(projectPath);
+	it(
+		"reports a stage-specific stale result after managed worktrees were already deleted",
+		{ timeout: 30_000 },
+		async () => {
+			await withIsolatedGitTestHome(async ({ gitFixture }) => {
+				const projectPath = gitFixture.createNonBareRepository({
+					repositoryDirectoryName: "post-worktree-stale-project",
+				}).repositoryPath;
 				const context = await loadWorkspaceContext(projectPath);
 				const initialState = await loadWorkspaceState(projectPath);
 				await saveWorkspaceState(projectPath, {
@@ -443,17 +432,18 @@ describe.sequential("confirmed project permanent deletion", () => {
 					context.workspaceId,
 				);
 				await expect(loadPersistedWorkspaceStateById(context.workspaceId)).resolves.toBeDefined();
-			} finally {
-				cleanupProject();
-			}
-		});
-	});
+			});
+		},
+	);
 
-	it("reports and retains the staging directory when its final recursive removal fails", async () => {
-		await withTemporaryHome(async () => {
-			const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-retained-staging-project-");
-			try {
-				initializeGitRepository(projectPath);
+	it(
+		"reports and retains the staging directory when its final recursive removal fails",
+		{ timeout: 30_000 },
+		async () => {
+			await withIsolatedGitTestHome(async ({ gitFixture }) => {
+				const projectPath = gitFixture.createNonBareRepository({
+					repositoryDirectoryName: "retained-staging-project",
+				}).repositoryPath;
 				const context = await loadWorkspaceContext(projectPath);
 				await loadWorkspaceState(projectPath);
 				const service = createConfirmedProjectPermanentDeletionService(
@@ -487,9 +477,7 @@ describe.sequential("confirmed project permanent deletion", () => {
 				expect((await listWorkspaceIndexEntries()).map((entry) => entry.workspaceId)).not.toContain(
 					context.workspaceId,
 				);
-			} finally {
-				cleanupProject();
-			}
-		});
-	});
+			});
+		},
+	);
 });

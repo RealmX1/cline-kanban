@@ -93,6 +93,13 @@ export function buildDetailTaskUrl(input: {
 	return `${input.pathname}${nextSearch ? `?${nextSearch}` : ""}${input.hash}`;
 }
 
+// 新开浏览器 tab 直达某项目某任务的完整深链 URL（/<project>?task=<taskId>）。
+// 与 public/sw.js notificationclick 的 openWindow 深链形态一致，并与冷启动解析
+// （parseProjectIdFromPathname + parseDetailTaskIdFromSearch）互逆。
+export function buildProjectTaskDeepLinkUrl(projectId: string, taskId: string): string {
+	return buildDetailTaskUrl({ pathname: buildProjectPathname(projectId), search: "", hash: "", taskId });
+}
+
 export function createIdleTaskSession(taskId: string): RuntimeTaskSessionSummary {
 	return {
 		taskId,
