@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildDetailTaskUrl, parseDetailTaskIdFromSearch } from "@/hooks/app-utils";
+import {
+	buildDetailTaskUrl,
+	buildProjectTaskDeepLinkUrl,
+	parseDetailTaskIdFromSearch,
+	parseProjectIdFromPathname,
+} from "@/hooks/app-utils";
 
 describe("parseDetailTaskIdFromSearch", () => {
 	it("returns the selected task id when present", () => {
@@ -35,5 +40,26 @@ describe("buildDetailTaskUrl", () => {
 				taskId: null,
 			}),
 		).toBe("/project-1?view=board");
+	});
+});
+
+describe("buildProjectTaskDeepLinkUrl", () => {
+	it("builds /<project>?task=<taskId> for plain identifiers", () => {
+		expect(buildProjectTaskDeepLinkUrl("project-1", "task-123")).toBe("/project-1?task=task-123");
+	});
+
+	it("percent-encodes the project id and task id where needed", () => {
+		expect(buildProjectTaskDeepLinkUrl("my project/α", "task with space")).toBe(
+			"/my%20project%2F%CE%B1?task=task+with+space",
+		);
+	});
+
+	it("round-trips through the cold-start URL parsers (parseProjectIdFromPathname + parseDetailTaskIdFromSearch)", () => {
+		const projectId = "my project/α";
+		const taskId = "task-123";
+		const deepLinkUrl = buildProjectTaskDeepLinkUrl(projectId, taskId);
+		const parsedUrl = new URL(deepLinkUrl, "http://localhost");
+		expect(parseProjectIdFromPathname(parsedUrl.pathname)).toBe(projectId);
+		expect(parseDetailTaskIdFromSearch(parsedUrl.search)).toBe(taskId);
 	});
 });

@@ -24,12 +24,21 @@ const workspaceStateMocks = vi.hoisted(() => ({
 	saveWorkspaceState: vi.fn(),
 }));
 
-vi.mock("../../../src/workspace/task-worktree.js", () => ({
-	deleteTaskWorktree: vi.fn(),
-	ensureTaskWorktreeIfDoesntExist: vi.fn(),
-	getTaskWorkspaceInfo: vi.fn(),
-	resolveTaskCwd: workspaceTaskWorktreeMocks.resolveTaskCwd,
-}));
+vi.mock("../../../src/workspace/task-worktree.js", async (importOriginal) => {
+	// 错误消息前缀常量取真实模块的值，保证谓词测试与生产文案不漂移。
+	const actual = (await importOriginal()) as {
+		TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX: string;
+		TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX: string;
+	};
+	return {
+		TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX: actual.TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX,
+		TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX: actual.TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX,
+		deleteTaskWorktree: vi.fn(),
+		ensureTaskWorktreeIfDoesntExist: vi.fn(),
+		getTaskWorkspaceInfo: vi.fn(),
+		resolveTaskCwd: workspaceTaskWorktreeMocks.resolveTaskCwd,
+	};
+});
 
 vi.mock("../../../src/workspace/get-workspace-changes.js", () => ({
 	createEmptyWorkspaceChangesResponse: workspaceChangesMocks.createEmptyWorkspaceChangesResponse,
@@ -384,6 +393,39 @@ describe("createWorkspaceApi loadChanges", () => {
 	it("returns an empty diff when the task worktree does not exist yet", async () => {
 		workspaceTaskWorktreeMocks.resolveTaskCwd.mockRejectedValue(
 			new Error('Task worktree not found for task "task-1".'),
+		);
+
+		const emptyResponse = createChangesResponse();
+		workspaceChangesMocks.createEmptyWorkspaceChangesResponse.mockResolvedValue(emptyResponse);
+
+		const api = createWorkspaceApiForTest({
+			ensureTerminalManagerForWorkspace: vi.fn(),
+			getScopedClineTaskSessionService: vi.fn(),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastRuntimeProjectsUpdated: vi.fn(),
+			buildWorkspaceStateSnapshot: vi.fn(),
+		});
+
+		const response = await api.loadChanges(
+			{
+				workspaceId: "workspace-1",
+				workspacePath: "/tmp/repo",
+			},
+			{
+				taskId: "task-1",
+				baseRef: "main",
+				mode: "working_copy",
+			},
+		);
+
+		expect(response).toBe(emptyResponse);
+		expect(workspaceChangesMocks.createEmptyWorkspaceChangesResponse).toHaveBeenCalledWith("/tmp/repo");
+		expect(workspaceChangesMocks.getWorkspaceChanges).not.toHaveBeenCalled();
+	});
+
+	it("returns an empty diff while the task worktree is still being set up", async () => {
+		workspaceTaskWorktreeMocks.resolveTaskCwd.mockRejectedValue(
+			new Error('Task worktree is still being set up for task "task-1".'),
 		);
 
 		const emptyResponse = createChangesResponse();
