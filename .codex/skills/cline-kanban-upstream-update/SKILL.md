@@ -1,6 +1,6 @@
 ---
 name: cline-kanban-upstream-update
-description: Safely integrate official Cline/Kanban upstream source changes into this local cline-kanban checkout or custom branch while preserving local custom commits, rollback points, dirty work, and lockfile intent. Use in this project when asked to take the latest official cline/kanban update, fetch/rebase/cherry-pick upstream changes, compare local custom commits against official upstream, or prepare the source checkout for a later local runtime rebuild. Do not use to rebuild, relink, restart, or mutate a running Kanban instance; use the local runtime update workflow after source integration when the runtime must be refreshed.
+description: Safely integrate official Cline/Kanban upstream source changes into this local checkout or custom branch while preserving local custom commits, rollback points, dirty work, and lockfile intent, then produce an evidence-backed major-update summary, complete commit inventory, and visualization-platform update map. Use when asked to take the latest official Cline/Kanban update, fetch/rebase/cherry-pick upstream changes, compare local custom commits against official upstream, or prepare the source checkout for a later local runtime rebuild. Do not use to rebuild, relink, restart, or mutate a running Kanban instance; use the local runtime update workflow after source integration when the runtime must be refreshed.
 ---
 
 # Cline Kanban Upstream Update
@@ -71,7 +71,13 @@ This skill does not own:
 
 7. 收尾:汇总本次集成纳入的 upstream commit 与保留/丢弃的本地 custom commit(source 级,不涉及 runtime)。
    - 门控:仅在 rebase/merge/cherry-pick 确实落地后执行;若在任一边界中止、源历史并未改变,跳过本汇总。
+   - **先解释这次更新实际带来了什么,再报 Git 证据。** 非空 delta 必须先完成“主要更新提炼”,不得只给 SHA、commit 数或逐条 commit 清单:
+     1. 采集证据:至少运行 `git diff --shortstat <old_upstream>..<new_upstream>`、`git diff --dirstat=files,0 <old_upstream>..<new_upstream>`、`git diff --name-status <old_upstream>..<new_upstream>` 与对应 `git log`;区间内存在 release/tag/changelog 时一并读取。commit 标题含糊时检查代表性 commit diff 或相关源码,不能靠标题猜功能。
+     2. 提炼 **4–8 个按用户影响排序的主题**。每个主题说明“用户现在能做什么 / 什么行为更可靠或更快”、影响的 Kanban/agent/runtime/CLI 表面,并给出 2–5 个代表 commit 或关键路径证据;兼容性、迁移、性能与已知风险单列。明确区分源码事实与推断。
+     3. 正文以“本次主要更新”开头;运行步骤、分支拓扑和完整 commit 清单放在其后。规模统计不能替代功能总结。
+   - **生成可视化更新地图**:非空 delta 时,优先读取并严格遵循 sibling checkout `../my-ai-setup/skills/visualization-platform/SKILL.md`;找不到时使用当前会话可发现的 `visualization-platform` skill。至少生成一张“主要更新地图”(主题层级优先 `mindmap`;版本演进用 `timeline`;文字密集的影响/证据矩阵用 `html`)。超过 100 个 commit 或跨多个 release 时生成“主题地图 + 影响/证据矩阵”两张卡,最终回复提供可点击的 `VIEW` URL。平台确实不可用时降级为正文高信息密度表格并说明原因;不得省略主要更新提炼。
    - 新纳入的 upstream commit(commit 级,逐条):优先复用步骤 4 `git log --left-right --cherry-pick` 的 upstream-only 侧结果(已排除与本地等价的 commit),避免把已 cherry-pick 的算重;裸两点区间 `git log --oneline --no-decorate <old_merge_base>..<new_upstream_target>` 仅作粗略对照。
+   - 完整 commit 清单仍须保留:`N <= 30` 时可在正文逐条列出;`N > 30` 时写入**仓库外**的可点击本地 Markdown artifact(不得污染或 commit 到目标 repo),正文给出数量、区间、artifact 链接和少量代表 commit。
    - 本地 custom commit 的保留/丢弃:取自步骤 4/6 的 `git range-diff`,逐条列出仍在 upstream 之上的 custom commit,以及被丢弃 / 被 upstream 等价取代的 custom commit——丢弃的必须列出,别只报保留的。
    - 边界:若 merge-base 已等于 upstream target(已是最新),报「无新 upstream commit」;若没有 custom commit,如实说明。
    - 措辞全程锚在 source 级:「本次集成新纳入了这些 upstream commit / 这些 custom commit 被保留或丢弃」;显式重申「本 skill 未重启、未 relink、未触碰任何运行中的 runtime」。
@@ -84,12 +90,14 @@ This skill does not own:
 
 Report:
 
+- 结果导向的“本次主要更新”必须位于正文最前:4–8 个主题、用户影响、代表证据、兼容性/风险;禁止只报 commit 清单。
+- 非空 delta 的 visualization-platform `VIEW` URL;平台不可用时给出等价正文表格和降级原因。
 - Official remote, branch/tag/commit, and resolved new upstream SHA.
 - Previous local HEAD and backup branch.
 - Dirty-work preservation location if any existed.
 - Integration method used: rebase, merge, or cherry-pick onto a new branch.
 - Whether version files were intentionally changed.
 - Whether custom commits remain on top of upstream.
-- 本次集成 delta 摘要(source 级、commit 级):逐条列出本次新纳入的 upstream commit,以及被保留 / 被丢弃的本地 custom commit;若已是最新则报「无新 upstream commit」。
+- 本次集成 delta 摘要(source 级、commit 级):完整列出本次新纳入的 upstream commit(正文逐条或仓库外 artifact),以及被保留 / 被丢弃的本地 custom commit;若已是最新则报「无新 upstream commit」。
 - Validation commands and results.
 - Explicit note that no running runtime was restarted or relinked by this skill.
