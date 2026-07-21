@@ -2,7 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 
 export function renderFuzzyHighlightedText(
 	value: string,
-	positions: Set<number> | undefined,
+	positions: ReadonlySet<number> | undefined,
 	matchedTextStyle: CSSProperties,
 ): ReactNode {
 	if (!positions || positions.size === 0) {

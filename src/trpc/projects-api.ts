@@ -1,6 +1,8 @@
 import { readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
+import pLimit from "p-limit";
 import type {
+	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeDirectoryListResponse,
 	RuntimeProjectAddResponse,
 	RuntimeProjectSummary,
@@ -13,9 +15,19 @@ import {
 	parseProjectPermanentDeletionPreviewRequest,
 	parseProjectPermanentDeletionRequest,
 } from "../core/api-validation";
+import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
 import type { ActiveRuntimeSessionShutdownResult } from "../server/active-runtime-session-shutdown";
+import {
+	type AllProjectsTaskSearchIndexProjectInput,
+	projectAllProjectsTaskSearchIndex,
+} from "../server/all-projects-task-search-index-projection";
 import { createConfirmedProjectPermanentDeletionService } from "../server/confirmed-project-permanent-deletion";
-import { listWorkspaceIndexEntries, loadWorkspaceContext, loadWorkspaceContextById } from "../state/workspace-state";
+import {
+	listWorkspaceIndexEntries,
+	loadWorkspaceBoardById,
+	loadWorkspaceContext,
+	loadWorkspaceContextById,
+} from "../state/workspace-state";
 import { cloneGitRepository } from "../workspace/git-clone";
 import { ensureInitialCommit, initializeGitRepository } from "../workspace/initialize-repo";
 import { isPathWithinRoot } from "../workspace/path-sandbox";
@@ -50,6 +62,22 @@ export interface CreateProjectsApiDependencies {
 	pickDirectoryPathFromSystemDialog: () => string | null;
 	serverCwd: string;
 }
+
+/**
+ * 跨项目任务搜索索引构建时，逐项目加载 board 的**并发上限**（保守小常数，可调）。
+ *
+ * 动机：`getAllProjectsTaskSearchIndex` 对 `listWorkspaceIndexEntries()` 返回的**全部**注册项目直接
+ * `Promise.all(entries.map(loadWorkspaceBoardById))`。每个 `loadWorkspaceBoardById` 会读盘（sessions/meta
+ * 的 `readFile`）并在主线程 `JSON.parse`。项目/board 数增长时，这个 fan-out 的并发会**随项目数线性增长**，
+ * 在同一 tick 里同步触发 N 次 fs 读 + N 次大块 JSON.parse，短时占满 Node 单事件循环主线程。
+ *
+ * 参照 `src/workspace/git-concurrency.ts` / `src/server/workspace-metadata-monitor.ts` 的既有模式：把逐项目
+ * board 加载钳进一个**跨所有请求共享的模块级 p-limit 单例**，使任意负载下的并发 board 读取恒为常数、不再随
+ * 项目数增长。共享是关键——即便多个 tRPC 请求同时各自 fan-out，总并发也被钳成 WORKSPACE_BOARD_LOAD_CONCURRENCY_LIMIT。
+ */
+const WORKSPACE_BOARD_LOAD_CONCURRENCY_LIMIT = 8;
+
+const workspaceBoardLoadConcurrencyLimiter = pLimit(WORKSPACE_BOARD_LOAD_CONCURRENCY_LIMIT);
 
 export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeTrpcContext["projectsApi"] {
 	const filesystemRoot = resolve(deps.serverCwd, "/");
@@ -296,6 +324,32 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 							: message,
 				} satisfies RuntimeDirectoryListResponse;
 			}
+		},
+		getAllProjectsTaskSearchIndex: async (): Promise<RuntimeAllProjectsTaskSearchIndexResponse> => {
+			const entries = await listWorkspaceIndexEntries();
+			const projectInputs = await Promise.all(
+				entries.map(
+					(entry): Promise<AllProjectsTaskSearchIndexProjectInput> =>
+						// 逐项目 board 加载经共享的模块级 p-limit 单例钳流，避免项目数增长时无界并发读盘 + 主线程 JSON.parse
+						// 停摆事件循环（参见 WORKSPACE_BOARD_LOAD_CONCURRENCY_LIMIT 的动机说明）。
+						workspaceBoardLoadConcurrencyLimiter(async () => {
+							const projectName = deriveProjectDisplayNameFromRepoPath(entry.repoPath);
+							try {
+								const board = await loadWorkspaceBoardById(entry.workspaceId);
+								return { projectId: entry.workspaceId, projectName, board };
+							} catch (error) {
+								// 单个项目读盘失败（盘损坏 / 迁移中等）不阻断整体索引：跳过该项目。
+								deps.warn(
+									`Failed to load board for cross-project task search index (workspace ${entry.workspaceId}): ${
+										error instanceof Error ? error.message : String(error)
+									}`,
+								);
+								return { projectId: entry.workspaceId, projectName, board: null };
+							}
+						}),
+				),
+			);
+			return projectAllProjectsTaskSearchIndex(projectInputs);
 		},
 	};
 }
