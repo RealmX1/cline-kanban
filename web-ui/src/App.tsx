@@ -24,8 +24,8 @@ import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
-import { TaskBoardSearchToolbar } from "@/components/task-board-search-toolbar";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
+import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
 import { TopBar } from "@/components/top-bar";
 import { Button } from "@/components/ui/button";
 import {
@@ -64,6 +64,7 @@ import { useStartupOnboarding } from "@/hooks/use-startup-onboarding";
 import { useTaskBranchOptions } from "@/hooks/use-task-branch-options";
 import { useTaskEditor } from "@/hooks/use-task-editor";
 import { useTaskSessions } from "@/hooks/use-task-sessions";
+import { useTaskSpotlightSearchController } from "@/hooks/use-task-spotlight-search-controller";
 import { useTaskStartActions } from "@/hooks/use-task-start-actions";
 import { useTerminalPanels } from "@/hooks/use-terminal-panels";
 import { useWorkspaceSync } from "@/hooks/use-workspace-sync";
@@ -82,8 +83,6 @@ import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { saveWorkspaceState } from "@/runtime/workspace-state-query";
-import type { TaskBoardSearchMode } from "@/search/task-board-search";
-import { useTaskBoardSearch } from "@/search/use-task-board-search";
 import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
 import {
 	getTaskWorkspaceInfo,
@@ -97,10 +96,6 @@ import type { BoardData, TaskCommentEntry } from "@/types";
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
 	const [board, setBoard] = useState<BoardData>(() => createInitialBoardData());
-	const [taskSearchQuery, setTaskSearchQuery] = useState("");
-	// 默认 fuzzy（fzf）：语义（hybrid/semantic）栈重，且其相似度分并不用于看板排序（列内不重排卡片），
-	// 默认走 fuzzy 省去每次搜索的 embedding 开销；需要语义召回时用户可在工具栏切到 Hybrid/Semantic。
-	const [taskSearchMode, setTaskSearchMode] = useState<TaskBoardSearchMode>("fuzzy");
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
 	const [canPersistWorkspaceState, setCanPersistWorkspaceState] = useState(false);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -115,7 +110,6 @@ export default function App(): ReactElement {
 	const handleProjectSwitchStart = useCallback(() => {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
-		setTaskSearchQuery("");
 		setPendingTaskStartAfterEditId(null);
 		taskEditorResetRef.current();
 	}, []);
@@ -271,11 +265,6 @@ export default function App(): ReactElement {
 		}
 		return views;
 	}, [board, sessions]);
-	const taskBoardSearch = useTaskBoardSearch({
-		board,
-		query: taskSearchQuery,
-		mode: taskSearchMode,
-	});
 
 	const handleContinueConnectionRetrySessions = useCallback(
 		(taskIds: string[]) => {
@@ -330,9 +319,10 @@ export default function App(): ReactElement {
 
 	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 CONTEXT.md）开关 + 跨-workspace 打开某 task 的待定跳转。
 	const [isBoardOverviewOpen, setIsBoardOverviewOpen] = useState(false);
-	const [pendingOverviewTaskOpen, setPendingOverviewTaskOpen] = useState<{ repoId: string; taskId: string } | null>(
-		null,
-	);
+	const [pendingCrossProjectTaskOpen, setPendingCrossProjectTaskOpen] = useState<{
+		repoId: string;
+		taskId: string;
+	} | null>(null);
 	const handleToggleBoardOverview = useCallback(() => {
 		setIsBoardOverviewOpen((open) => {
 			const next = !open;
@@ -342,7 +332,7 @@ export default function App(): ReactElement {
 			return next;
 		});
 	}, []);
-	const handleOpenOverviewTask = useCallback(
+	const handleOpenTaskInProject = useCallback(
 		(repoId: string, taskId: string) => {
 			// 刻意不关概览：detail 打开时 home layout 只是 visibility:hidden（非卸载），概览仍在其下；
 			// 从 detail 返回（handleBack 清 selectedTaskId）即重现概览——与 Post-Deploy Verification 面板点 task
@@ -352,11 +342,34 @@ export default function App(): ReactElement {
 				return;
 			}
 			// 跨 repo：先切 workspace，待目标 board 加载出该 task 再打开 detail（见下方 effect）。
-			setPendingOverviewTaskOpen({ repoId, taskId });
+			setPendingCrossProjectTaskOpen({ repoId, taskId });
 			handleSelectProject(repoId);
 		},
 		[currentProjectId, handleSelectProject, setSelectedTaskId],
 	);
+	// Spotlight 全局任务搜索（mod+k 呼出的纯结果列表弹层）。跨项目结果剔除：当前项目（实时 board 流更新鲜）
+	// 与不可用项目（读盘/连接不可靠）。
+	const crossProjectTaskSearchExcludeProjectIds = useMemo(() => {
+		const excludeProjectIds = new Set<string>();
+		if (currentProjectId) {
+			excludeProjectIds.add(currentProjectId);
+		}
+		for (const project of projects) {
+			if (project.availability.status === "unavailable") {
+				excludeProjectIds.add(project.id);
+			}
+		}
+		return excludeProjectIds;
+	}, [currentProjectId, projects]);
+	const taskSpotlightSearch = useTaskSpotlightSearchController({
+		board,
+		currentProjectId,
+		currentProjectName: currentProjectSummary?.name ?? null,
+		canOpen: !hasNoProjects,
+		crossProjectWorkspaceId: currentProjectId,
+		crossProjectExcludeProjectIds: crossProjectTaskSearchExcludeProjectIds,
+		onOpenTaskInProject: handleOpenTaskInProject,
+	});
 	const handleOpenOverviewStage = useCallback(
 		(repoId: string) => {
 			setIsBoardOverviewOpen(false);
@@ -367,15 +380,15 @@ export default function App(): ReactElement {
 	// 跨-workspace 打开 task 的收尾：目标 repo 已激活、且其 board 加载出该 task 后，再 setSelectedTaskId
 	// ——绕开 project-switch 时 use-detail-task-navigation 的 closeDetail 竞态（见该 hook）。
 	useEffect(() => {
-		if (!pendingOverviewTaskOpen || currentProjectId !== pendingOverviewTaskOpen.repoId) {
+		if (!pendingCrossProjectTaskOpen || currentProjectId !== pendingCrossProjectTaskOpen.repoId) {
 			return;
 		}
-		if (!findCardSelection(board, pendingOverviewTaskOpen.taskId)) {
+		if (!findCardSelection(board, pendingCrossProjectTaskOpen.taskId)) {
 			return;
 		}
-		setSelectedTaskId(pendingOverviewTaskOpen.taskId);
-		setPendingOverviewTaskOpen(null);
-	}, [board, currentProjectId, pendingOverviewTaskOpen, setSelectedTaskId]);
+		setSelectedTaskId(pendingCrossProjectTaskOpen.taskId);
+		setPendingCrossProjectTaskOpen(null);
+	}, [board, currentProjectId, pendingCrossProjectTaskOpen, setSelectedTaskId]);
 
 	// 应用内通知中心（跨 repo 铃铛）。mark/clear 是跨 repo mutation：用 notification 的 workspaceId 起 tRPC 客户端，
 	// input 显式携带同一 workspaceId（服务端 t.procedure 忽略连接 scope，按 input.workspaceId 操作）。
@@ -869,11 +882,13 @@ export default function App(): ReactElement {
 		isHomeTerminalOpen: showHomeBottomTerminal,
 		isHomeGitHistoryOpen: !selectedCard && isGitHistoryOpen,
 		canUseCreateTaskShortcut: !hasNoProjects && projectRuntimeWorkspaceId !== null,
+		canUseTaskSpotlightSearch: taskSpotlightSearch.canOpen,
 		handleToggleDetailTerminal,
 		handleToggleHomeTerminal,
 		handleToggleExpandDetailTerminal,
 		handleToggleExpandHomeTerminal: handleToggleExpandHomeTerminal,
 		handleOpenCreateTask,
+		handleToggleTaskSpotlightSearch: taskSpotlightSearch.toggle,
 		handleOpenSettings,
 		handleToggleGitHistory,
 		handleCloseGitHistory,
@@ -1192,7 +1207,7 @@ export default function App(): ReactElement {
 										{isBoardOverviewOpen ? (
 											<CrossRepositoryStageFirstOverview
 												projects={projects}
-												onOpenTask={handleOpenOverviewTask}
+												onOpenTask={handleOpenTaskInProject}
 												onOpenStage={handleOpenOverviewStage}
 											/>
 										) : isGitHistoryOpen ? (
@@ -1209,17 +1224,8 @@ export default function App(): ReactElement {
 											/>
 										) : (
 											<div className="flex flex-1 flex-col min-h-0 min-w-0 bg-surface-0">
-												<TaskBoardSearchToolbar
-													query={taskSearchQuery}
-													mode={taskSearchMode}
-													visibleTaskCount={taskBoardSearch.visibleTaskCount}
-													totalTaskCount={taskBoardSearch.totalTaskCount}
-													semanticSearchStatus={taskBoardSearch.semanticSearchStatus}
-													onQueryChange={setTaskSearchQuery}
-													onModeChange={setTaskSearchMode}
-												/>
 												<KanbanBoard
-													data={taskBoardSearch.filteredBoard}
+													data={board}
 													taskSessions={sessions}
 													workspacePath={workspacePath}
 													onCardSelect={handleCardSelect}
@@ -1241,21 +1247,17 @@ export default function App(): ReactElement {
 													onMoveToReviewTask={handleMoveCardToReview}
 													onRestoreFromTrashTask={handleRestoreTaskFromTrash}
 													onDeleteTask={handleOpenDeleteTask}
-													dependencies={taskBoardSearch.filteredDependencies}
+													dependencies={board.dependencies}
 													onCreateDependency={handleCreateDependency}
 													onDeleteDependency={handleDeleteDependency}
 													onRequestProgrammaticCardMoveReady={
-														selectedCard || taskBoardSearch.isSearchActive
-															? undefined
-															: handleProgrammaticCardMoveReady
+														selectedCard ? undefined : handleProgrammaticCardMoveReady
 													}
 													onDragEnd={handleDragEnd}
 													defaultClineModelId={
 														runtimeProjectConfig?.clineProviderSettings?.modelId ?? null
 													}
 													defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-													taskSearchResultById={taskBoardSearch.resultByTaskId}
-													isCardDragDisabled={taskBoardSearch.isSearchActive}
 												/>
 											</div>
 										)}
@@ -1529,6 +1531,8 @@ export default function App(): ReactElement {
 					onCancel={cancelMoveToDone}
 					onConfirm={confirmMoveToDone}
 				/>
+
+				<TaskSpotlightSearchDialog controller={taskSpotlightSearch} />
 
 				<StartAllReadyBacklogTasksConfirmDialog
 					tasks={pendingStartAllReadyBacklogTaskCards}

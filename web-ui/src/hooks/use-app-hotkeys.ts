@@ -6,17 +6,23 @@ function isEventInsideDialog(target: EventTarget | null): boolean {
 	return target instanceof Element && target.closest("[role='dialog']") !== null;
 }
 
+function isEventInsideTaskSpotlightSearchDialog(target: EventTarget | null): boolean {
+	return target instanceof Element && target.closest("[data-task-spotlight-search-dialog]") !== null;
+}
+
 interface UseAppHotkeysInput {
 	selectedCard: CardSelection | null;
 	isDetailTerminalOpen: boolean;
 	isHomeTerminalOpen: boolean;
 	isHomeGitHistoryOpen: boolean;
 	canUseCreateTaskShortcut: boolean;
+	canUseTaskSpotlightSearch: boolean;
 	handleToggleDetailTerminal: () => void;
 	handleToggleHomeTerminal: () => void;
 	handleToggleExpandDetailTerminal: () => void;
 	handleToggleExpandHomeTerminal: () => void;
 	handleOpenCreateTask: () => void;
+	handleToggleTaskSpotlightSearch: () => void;
 	handleOpenSettings: () => void;
 	handleToggleGitHistory: () => void;
 	handleCloseGitHistory: () => void;
@@ -29,11 +35,13 @@ export function useAppHotkeys({
 	isHomeTerminalOpen,
 	isHomeGitHistoryOpen,
 	canUseCreateTaskShortcut,
+	canUseTaskSpotlightSearch,
 	handleToggleDetailTerminal,
 	handleToggleHomeTerminal,
 	handleToggleExpandDetailTerminal,
 	handleToggleExpandHomeTerminal,
 	handleOpenCreateTask,
+	handleToggleTaskSpotlightSearch,
 	handleOpenSettings,
 	handleToggleGitHistory,
 	handleCloseGitHistory,
@@ -104,6 +112,27 @@ export function useAppHotkeys({
 		},
 		{ preventDefault: true },
 		[canUseCreateTaskShortcut, handleOpenCreateTask],
+	);
+
+	useHotkeys(
+		"mod+k",
+		(event) => {
+			// 事件落在其它 dialog（非 Spotlight）内时放行给该 dialog，不劫持 mod+k。
+			if (isEventInsideDialog(event.target) && !isEventInsideTaskSpotlightSearchDialog(event.target)) {
+				return;
+			}
+			if (!canUseTaskSpotlightSearch) {
+				return;
+			}
+			// 弹层内再按 mod+k = toggle 关闭；其它位置 = 打开。
+			handleToggleTaskSpotlightSearch();
+		},
+		{
+			enableOnFormTags: true,
+			enableOnContentEditable: true,
+			preventDefault: true,
+		},
+		[canUseTaskSpotlightSearch, handleToggleTaskSpotlightSearch],
 	);
 
 	useHotkeys(

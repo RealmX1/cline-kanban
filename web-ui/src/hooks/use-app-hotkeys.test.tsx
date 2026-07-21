@@ -61,6 +61,8 @@ describe("useAppHotkeys", () => {
 					handleToggleExpandDetailTerminal={() => {}}
 					handleToggleExpandHomeTerminal={() => {}}
 					handleOpenCreateTask={() => {}}
+					canUseTaskSpotlightSearch
+					handleToggleTaskSpotlightSearch={() => {}}
 					handleOpenSettings={handleOpenSettings}
 					handleToggleGitHistory={handleToggleGitHistory}
 					handleCloseGitHistory={() => {}}
@@ -105,6 +107,8 @@ describe("useAppHotkeys", () => {
 					handleToggleExpandDetailTerminal={() => {}}
 					handleToggleExpandHomeTerminal={() => {}}
 					handleOpenCreateTask={() => {}}
+					canUseTaskSpotlightSearch
+					handleToggleTaskSpotlightSearch={() => {}}
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={handleCloseGitHistory}
@@ -142,6 +146,8 @@ describe("useAppHotkeys", () => {
 					handleToggleExpandDetailTerminal={() => {}}
 					handleToggleExpandHomeTerminal={() => {}}
 					handleOpenCreateTask={() => {}}
+					canUseTaskSpotlightSearch
+					handleToggleTaskSpotlightSearch={() => {}}
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
@@ -179,6 +185,8 @@ describe("useAppHotkeys", () => {
 					handleToggleExpandDetailTerminal={() => {}}
 					handleToggleExpandHomeTerminal={() => {}}
 					handleOpenCreateTask={handleOpenCreateTask}
+					canUseTaskSpotlightSearch={false}
+					handleToggleTaskSpotlightSearch={() => {}}
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
@@ -198,5 +206,83 @@ describe("useAppHotkeys", () => {
 		});
 
 		expect(handleOpenCreateTask).not.toHaveBeenCalled();
+	});
+
+	it("toggles the task spotlight search on Mod+K when enabled", async () => {
+		const handleToggleTaskSpotlightSearch = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					selectedCard={null}
+					isDetailTerminalOpen={false}
+					isHomeTerminalOpen={false}
+					isHomeGitHistoryOpen={false}
+					canUseCreateTaskShortcut
+					canUseTaskSpotlightSearch
+					handleToggleDetailTerminal={() => {}}
+					handleToggleHomeTerminal={() => {}}
+					handleToggleExpandDetailTerminal={() => {}}
+					handleToggleExpandHomeTerminal={() => {}}
+					handleOpenCreateTask={() => {}}
+					handleToggleTaskSpotlightSearch={handleToggleTaskSpotlightSearch}
+					handleOpenSettings={() => {}}
+					handleToggleGitHistory={() => {}}
+					handleCloseGitHistory={() => {}}
+					onRequestStartAllReadyBacklogTasks={() => {}}
+				/>,
+			);
+		});
+
+		const spotlightCall = mockUseHotkeys.mock.calls.find(([shortcut]) => shortcut === "mod+k");
+		if (!spotlightCall || typeof spotlightCall[1] !== "function") {
+			throw new Error("Expected task spotlight search shortcut to be registered.");
+		}
+
+		act(() => {
+			const spotlightHandler = spotlightCall[1] as (event: KeyboardEvent) => void;
+			spotlightHandler(new KeyboardEvent("keydown", { cancelable: true }));
+		});
+
+		expect(handleToggleTaskSpotlightSearch).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not toggle the task spotlight search on Mod+K when disabled", async () => {
+		const handleToggleTaskSpotlightSearch = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					selectedCard={null}
+					isDetailTerminalOpen={false}
+					isHomeTerminalOpen={false}
+					isHomeGitHistoryOpen={false}
+					canUseCreateTaskShortcut
+					canUseTaskSpotlightSearch={false}
+					handleToggleDetailTerminal={() => {}}
+					handleToggleHomeTerminal={() => {}}
+					handleToggleExpandDetailTerminal={() => {}}
+					handleToggleExpandHomeTerminal={() => {}}
+					handleOpenCreateTask={() => {}}
+					handleToggleTaskSpotlightSearch={handleToggleTaskSpotlightSearch}
+					handleOpenSettings={() => {}}
+					handleToggleGitHistory={() => {}}
+					handleCloseGitHistory={() => {}}
+					onRequestStartAllReadyBacklogTasks={() => {}}
+				/>,
+			);
+		});
+
+		const spotlightCall = mockUseHotkeys.mock.calls.find(([shortcut]) => shortcut === "mod+k");
+		if (!spotlightCall || typeof spotlightCall[1] !== "function") {
+			throw new Error("Expected task spotlight search shortcut to be registered.");
+		}
+
+		act(() => {
+			const spotlightHandler = spotlightCall[1] as (event: KeyboardEvent) => void;
+			spotlightHandler(new KeyboardEvent("keydown", { cancelable: true }));
+		});
+
+		expect(handleToggleTaskSpotlightSearch).not.toHaveBeenCalled();
 	});
 });

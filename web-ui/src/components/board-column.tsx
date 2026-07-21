@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
-import type { TaskBoardSearchResult } from "@/search/task-board-search";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumnId, BoardColumn as BoardColumnModel } from "@/types";
 
@@ -50,8 +49,6 @@ export function BoardColumn({
 	workspacePath,
 	defaultClineModelId,
 	defaultAgentId,
-	taskSearchResultById,
-	isCardDragDisabled = false,
 }: {
 	column: BoardColumnModel;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
@@ -86,8 +83,6 @@ export function BoardColumn({
 	workspacePath?: string | null;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
-	taskSearchResultById?: ReadonlyMap<string, TaskBoardSearchResult>;
-	isCardDragDisabled?: boolean;
 }): React.ReactElement {
 	const canCreate = column.id === "backlog" && onCreateTask;
 	const canRequestStartAllReadyBacklogTasks = column.id === "backlog" && onRequestStartAllReadyBacklogTasks;
@@ -182,9 +177,7 @@ export function BoardColumn({
 											card={card}
 											index={draggableIndex}
 											columnId={column.id}
-											isDragDisabled={isCardDragDisabled}
 											sessionSummary={taskSessions[card.id]}
-											searchMatchSources={taskSearchResultById?.get(card.id)?.matchSources ?? []}
 											onStart={onStartTask}
 											onMoveToTrash={onMoveToTrashTask}
 											onMoveToValidation={onMoveToValidationTask}

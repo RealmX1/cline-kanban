@@ -9,13 +9,9 @@ import { TaskCardBody, type TaskCardBusinessProps } from "@/components/task-card
  * 卡体因此与 `<Draggable>` 解耦，可被 Focus View 浮动钉住条以非拖拽克隆形式复用
  * （同一 `draggableId` 不会重复出现在 DnD 上下文里）。
  */
-export function BoardCard({
-	index,
-	isDragDisabled = false,
-	...businessProps
-}: TaskCardBusinessProps & { index: number; isDragDisabled?: boolean }): React.ReactElement {
+export function BoardCard({ index, ...businessProps }: TaskCardBusinessProps & { index: number }): React.ReactElement {
 	return (
-		<Draggable draggableId={businessProps.card.id} index={index} isDragDisabled={isDragDisabled}>
+		<Draggable draggableId={businessProps.card.id} index={index}>
 			{(provided, snapshot) => (
 				<TaskCardBody
 					{...businessProps}

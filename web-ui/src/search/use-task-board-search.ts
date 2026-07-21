@@ -1,26 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-	buildTaskBoardSearchDocuments,
-	createTaskBoardSearchState,
 	findFuzzyTaskBoardSearchResults,
 	mergeTaskBoardSearchResults,
 	normalizeSearchQuery,
 	type TaskBoardSearchDocument,
 	type TaskBoardSearchMode,
 	type TaskBoardSearchResult,
-	type TaskBoardSearchState,
 } from "@/search/task-board-search";
 import {
 	createTaskBoardSemanticSearchIndex,
 	type TaskBoardSemanticSearchIndex,
 } from "@/search/task-board-semantic-search";
-import type { BoardData } from "@/types";
+import { findDirectSubstringTaskBoardSearchResults } from "@/search/task-direct-substring-search";
 import { useDebouncedEffect } from "@/utils/react-use";
 
 export type TaskBoardSemanticSearchStatus = "idle" | "loading" | "ready" | "error";
 
-export interface UseTaskBoardSearchResult extends TaskBoardSearchState {
+export interface UseTaskBoardSearchResult {
+	isSearchActive: boolean;
+	orderedResults: TaskBoardSearchResult[];
 	semanticSearchStatus: TaskBoardSemanticSearchStatus;
 }
 
@@ -36,37 +35,42 @@ interface TaskBoardSemanticSearchResultSnapshot {
 	results: TaskBoardSearchResult[];
 }
 
+function sortResultsByScoreDescending(results: readonly TaskBoardSearchResult[]): TaskBoardSearchResult[] {
+	return [...results].sort((first, second) => second.score - first.score);
+}
+
+/**
+ * 任务搜索计算核心：吃已装配好的 documents（当前项目在前、可含跨项目），按 mode 分发匹配，产出有序结果。
+ *
+ * documents 的内容签名稳定化（实时 board 流每 tick 换引用却内容不变时保持旧引用、免语义索引反复重建）
+ * 由调用方（controller）负责——本 hook 的语义索引缓存直接以 documents 引用相等为键。
+ */
 export function useTaskBoardSearch({
-	board,
+	documents,
 	query,
 	mode,
 }: {
-	board: BoardData;
+	documents: readonly TaskBoardSearchDocument[];
 	query: string;
 	mode: TaskBoardSearchMode;
 }): UseTaskBoardSearchResult {
 	const normalizedQuery = normalizeSearchQuery(query);
 	const isSearchActive = normalizedQuery.length > 0;
-	// 语义索引以 documents 引用为缓存键；board 实时流每 tick 换引用会让 TF/Orama 索引反复从零重建（agent 边跑边搜
-	// 时尤甚）。故按可搜索内容（taskId+title+prompt）算签名，内容未变则保持旧引用，索引不再无谓重建、也不重触发搜索。
-	const documentsSignatureRef = useRef<string>("");
-	const documentsRef = useRef<TaskBoardSearchDocument[]>([]);
-	const documents = useMemo(() => {
-		const next = buildTaskBoardSearchDocuments(board);
-		const nextSignature = next.map((doc) => `${doc.taskId}\t${doc.title}\t${doc.prompt}`).join("\n");
-		if (nextSignature === documentsSignatureRef.current) {
-			return documentsRef.current;
+
+	const directResults = useMemo(() => {
+		if (!isSearchActive || mode !== "direct") {
+			return [] satisfies TaskBoardSearchResult[];
 		}
-		documentsSignatureRef.current = nextSignature;
-		documentsRef.current = next;
-		return next;
-	}, [board]);
+		return findDirectSubstringTaskBoardSearchResults(documents, normalizedQuery);
+	}, [documents, isSearchActive, mode, normalizedQuery]);
+
 	const fuzzyResults = useMemo(() => {
-		if (!isSearchActive || mode === "semantic") {
+		if (!isSearchActive || mode === "direct" || mode === "semantic") {
 			return [] satisfies TaskBoardSearchResult[];
 		}
 		return findFuzzyTaskBoardSearchResults(documents, normalizedQuery);
 	}, [documents, isSearchActive, mode, normalizedQuery]);
+
 	const [semanticResultSnapshot, setSemanticResultSnapshot] = useState<TaskBoardSemanticSearchResultSnapshot | null>(
 		null,
 	);
@@ -128,32 +132,42 @@ export function useTaskBoardSearch({
 		[documents, mode, normalizedQuery, shouldRunSemanticSearch],
 	);
 
-	const displayedResults = useMemo(() => {
+	const orderedResults = useMemo(() => {
 		if (!isSearchActive) {
 			return [] satisfies TaskBoardSearchResult[];
 		}
+		if (mode === "direct") {
+			// direct 已按 D2 位置规则排好序，不再按 score 重排。
+			return directResults;
+		}
 		if (mode === "fuzzy") {
+			// fzf.find 已按分数降序返回。
 			return fuzzyResults;
 		}
 		if (mode === "semantic") {
-			return (
+			const results =
 				semanticResults ??
-				(semanticSearchStatus === "error" ? findFuzzyTaskBoardSearchResults(documents, normalizedQuery) : [])
-			);
+				(semanticSearchStatus === "error" ? findFuzzyTaskBoardSearchResults(documents, normalizedQuery) : []);
+			return sortResultsByScoreDescending(results);
 		}
 		if (semanticSearchStatus === "error") {
 			return fuzzyResults;
 		}
-		return mergeTaskBoardSearchResults(fuzzyResults, semanticResults ?? []);
-	}, [documents, fuzzyResults, isSearchActive, mode, normalizedQuery, semanticResults, semanticSearchStatus]);
-
-	const searchState = useMemo(
-		() => createTaskBoardSearchState(board, displayedResults, isSearchActive),
-		[board, displayedResults, isSearchActive],
-	);
+		return sortResultsByScoreDescending(mergeTaskBoardSearchResults(fuzzyResults, semanticResults ?? []));
+	}, [
+		directResults,
+		documents,
+		fuzzyResults,
+		isSearchActive,
+		mode,
+		normalizedQuery,
+		semanticResults,
+		semanticSearchStatus,
+	]);
 
 	return {
-		...searchState,
+		isSearchActive,
+		orderedResults,
 		semanticSearchStatus,
 	};
 }

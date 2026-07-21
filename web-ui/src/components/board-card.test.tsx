@@ -9,16 +9,11 @@ import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { ReviewTaskWorkspaceSnapshot } from "@/types";
 
 let mockWorkspaceSnapshot: ReviewTaskWorkspaceSnapshot | undefined;
-const draggableMock = vi.hoisted(() => ({
-	lastIsDragDisabled: null as boolean | null,
-}));
 
 vi.mock("@hello-pangea/dnd", () => ({
 	Draggable: ({
 		children,
-		isDragDisabled,
 	}: {
-		isDragDisabled?: boolean;
 		children: (
 			provided: {
 				innerRef: (element: HTMLDivElement | null) => void;
@@ -28,7 +23,6 @@ vi.mock("@hello-pangea/dnd", () => ({
 			snapshot: { isDragging: boolean },
 		) => ReactNode;
 	}): React.ReactElement => {
-		draggableMock.lastIsDragDisabled = isDragDisabled ?? false;
 		return <>{children({ innerRef: () => {}, draggableProps: {}, dragHandleProps: {} }, { isDragging: false })}</>;
 	},
 }));
@@ -127,7 +121,6 @@ describe("BoardCard", () => {
 
 	beforeEach(() => {
 		mockWorkspaceSnapshot = undefined;
-		draggableMock.lastIsDragDisabled = null;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -215,25 +208,6 @@ describe("BoardCard", () => {
 		const doneButton = container.querySelector('button[aria-label="Move task to done"]');
 		expect(doneButton?.querySelector("svg.lucide-archive")).toBeTruthy();
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
-	});
-
-	it("passes search drag disabled state to the draggable wrapper", async () => {
-		await act(async () => {
-			root.render(<BoardCard card={createCard()} index={0} columnId="backlog" isDragDisabled />);
-		});
-
-		expect(draggableMock.lastIsDragDisabled).toBe(true);
-	});
-
-	it("shows source badges for task search matches", async () => {
-		await act(async () => {
-			root.render(
-				<BoardCard card={createCard()} index={0} columnId="backlog" searchMatchSources={["title", "prompt"]} />,
-			);
-		});
-
-		expect(container.textContent).toContain("Name");
-		expect(container.textContent).toContain("Prompt");
 	});
 
 	// 双轴重构 Stage 3「computing 脉动」（distinction ①）：agent 回合且最近 5s 内仍在产出 → 状态点

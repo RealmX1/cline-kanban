@@ -9,6 +9,7 @@ import type {
 	RuntimeProjectUnavailableReason,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
+import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
 import {
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
@@ -185,9 +186,7 @@ function toProjectSummary(project: {
 	// on the next projects_updated/snapshot broadcast via buildProjectsPayload.
 	gitRemoteOriginUrl?: string | null;
 }): RuntimeProjectSummary {
-	const normalized = project.repoPath.replaceAll("\\", "/").replace(/\/+$/g, "");
-	const segments = normalized.split("/").filter((segment) => segment.length > 0);
-	const name = segments[segments.length - 1] ?? normalized;
+	const name = deriveProjectDisplayNameFromRepoPath(project.repoPath);
 	return {
 		id: project.workspaceId,
 		path: project.repoPath,

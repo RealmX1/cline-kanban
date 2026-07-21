@@ -8,6 +8,7 @@ import { z } from "zod";
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
+	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeAvailableAgentSessionsRequest,
 	RuntimeAvailableAgentSessionsResponse,
 	RuntimeClineAccountBalanceResponse,
@@ -139,6 +140,7 @@ import type {
 import {
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
+	runtimeAllProjectsTaskSearchIndexResponseSchema,
 	runtimeAvailableAgentSessionsRequestSchema,
 	runtimeAvailableAgentSessionsResponseSchema,
 	runtimeClineAccountBalanceResponseSchema,
@@ -506,6 +508,7 @@ export interface RuntimeTrpcContext {
 			preferredWorkspaceId: string | null,
 			input: RuntimeDirectoryListRequest,
 		) => Promise<RuntimeDirectoryListResponse>;
+		getAllProjectsTaskSearchIndex: () => Promise<RuntimeAllProjectsTaskSearchIndexResponse>;
 	};
 	hooksApi: {
 		ingest: (input: RuntimeHookIngestRequest) => Promise<RuntimeHookIngestResponse>;
@@ -967,6 +970,13 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeDirectoryListResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.projectsApi.listDirectoryContents(ctx.requestedWorkspaceId, input);
+			}),
+		// 跨全部注册项目的任务搜索索引：非 workspace-scoped（t.procedure，忽略连接 scope），供 Spotlight
+		// 「包含其它项目」按需拉取。
+		getAllProjectsTaskSearchIndex: t.procedure
+			.output(runtimeAllProjectsTaskSearchIndexResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.projectsApi.getAllProjectsTaskSearchIndex();
 			}),
 	}),
 	hooks: t.router({

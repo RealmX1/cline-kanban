@@ -925,6 +925,32 @@ export const runtimeProjectsResponseSchema = z.object({
 });
 export type RuntimeProjectsResponse = z.infer<typeof runtimeProjectsResponseSchema>;
 
+// 跨全部注册项目的任务搜索索引（Spotlight 全局搜索「包含其它项目」时按需拉取）。仅携带搜索所需的最小字段
+// （taskId + title + prompt + columnId），不含 session / 工作区元数据，避免放进高频广播的 projects payload。
+export const runtimeAllProjectsTaskSearchIndexTaskEntrySchema = z.object({
+	taskId: z.string(),
+	title: z.string(),
+	prompt: z.string(),
+	columnId: runtimeBoardColumnIdSchema,
+});
+export type RuntimeAllProjectsTaskSearchIndexTaskEntry = z.infer<
+	typeof runtimeAllProjectsTaskSearchIndexTaskEntrySchema
+>;
+
+export const runtimeAllProjectsTaskSearchIndexProjectEntrySchema = z.object({
+	projectId: z.string(),
+	projectName: z.string(),
+	tasks: z.array(runtimeAllProjectsTaskSearchIndexTaskEntrySchema),
+});
+export type RuntimeAllProjectsTaskSearchIndexProjectEntry = z.infer<
+	typeof runtimeAllProjectsTaskSearchIndexProjectEntrySchema
+>;
+
+export const runtimeAllProjectsTaskSearchIndexResponseSchema = z.object({
+	projects: z.array(runtimeAllProjectsTaskSearchIndexProjectEntrySchema),
+});
+export type RuntimeAllProjectsTaskSearchIndexResponse = z.infer<typeof runtimeAllProjectsTaskSearchIndexResponseSchema>;
+
 export const runtimeProjectAddRequestSchema = z
 	.object({
 		path: z.string().optional(),
