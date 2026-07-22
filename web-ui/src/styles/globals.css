@@ -378,25 +378,36 @@ body,
 }
 
 /*
- * Focus View 跨 stage 浮动钉住条：选中卡任一前沿一触滚动视口边沿，即在该边（顶沿 pinTop /
- * 底沿 pinBottom）浮现「stage 卡头 + 完整选中卡」，作为选中卡的唯一钉住机制（stage 内 + 跨 stage）。
- * 脱离文档流的 overlay，不挤动布局；`right` 让出滚动条宽度由内联样式动态给出。横向 padding 复刻
- * scrollport 的 p-2(8px)，使钉住卡与列表卡左右对齐。z-index:5 高于原生 sticky 区段卡头（z-index:4）。
+ * Focus View 全 stage 卡头手风琴：顶沿 rail（已滚过卡头，顶→下堆叠）+ 底沿 rail（未到达卡头）。
+ * 脱离文档流的 overlay，不挤动布局；条目用 flexbox 自然堆叠（不手算逐条偏移）。焦点 stage 的条目在
+ * 焦点卡钉在同侧时额外挂「stage 卡头 + 完整焦点卡克隆」。
+ * - 不透明 surface-0 底：遮住被钉卡头覆盖的滚动内容，避免条目间隙透出内容（与列表 section 间的 surface-0 一致）。
+ * - `left:0` + 内联 `right`（让出滚动条宽度）；横向 padding 复刻 scrollport 的 p-2(8px) 使条目与列表卡左右对齐。
+ * - `pointer-events:none` 让 rail 底与条目间隙透传滚轮/点击到下层列表；条目自身恢复 auto 以可点击。
+ * - z-index:5 高于卡壳（1/2）与随内容滚动的 section 卡头。
  */
-.kb-detail-pin-bar {
+.kb-stage-header-rail {
 	position: absolute;
 	left: 0;
 	z-index: 5;
 	padding: 0 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	pointer-events: none;
 	background: var(--color-surface-0);
 }
 
-.kb-detail-pin-bar[data-pin="top"] {
+.kb-stage-header-rail[data-edge="top"] {
 	top: 0;
 }
 
-.kb-detail-pin-bar[data-pin="bottom"] {
+.kb-stage-header-rail[data-edge="bottom"] {
 	bottom: 0;
+}
+
+.kb-stage-header-rail > * {
+	pointer-events: auto;
 }
 
 .kb-board-card-dependency-source {
