@@ -76,6 +76,14 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: ["--yolo"],
 		installUrl: "https://github.com/google-gemini/gemini-cli",
 	},
+	{
+		id: "kimi",
+		label: "Kimi Code",
+		binary: "kimi",
+		baseArgs: [],
+		autonomousArgs: ["--yolo"],
+		installUrl: "https://github.com/MoonshotAI/kimi-code",
+	},
 ];
 
 // Temporarily keep launch support scoped to the core agent set.
@@ -87,6 +95,7 @@ export const RUNTIME_LAUNCH_SUPPORTED_AGENT_IDS: readonly RuntimeAgentId[] = [
 	"cursor",
 	"droid",
 	"kiro",
+	"kimi",
 	// "opencode",
 	// "gemini",
 ];

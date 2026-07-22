@@ -97,6 +97,7 @@ export const runtimeAgentIdSchema = z.enum([
 	"kiro",
 	"cline",
 	"cursor",
+	"kimi",
 ]);
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
 export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
