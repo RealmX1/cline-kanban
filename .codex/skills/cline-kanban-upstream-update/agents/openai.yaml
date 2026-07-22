@@ -1,4 +1,4 @@
 interface:
   display_name: "Cline Kanban Upstream Update"
-  short_description: "Safely take official Cline/Kanban updates"
-  default_prompt: "Use $cline-kanban-upstream-update to bring official Cline/Kanban upstream changes into this local checkout while preserving local custom commits and rollback points."
+  short_description: "安全集成 Cline Kanban，并总结主要更新"
+  default_prompt: "Use $cline-kanban-upstream-update to safely integrate official upstream changes while preserving custom work, then explain and visualize the major user-visible updates with commit-level evidence."

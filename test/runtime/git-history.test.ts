@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -12,41 +11,26 @@ import {
 	getGitRefs,
 } from "../../src/workspace/git-history";
 import { discardGitChanges, getGitSyncSummary } from "../../src/workspace/git-sync";
-import { createGitTestEnv } from "../utilities/git-env";
-import { createTempDir } from "../utilities/temp-dir";
+import {
+	createIsolatedGitTestWorkspaceFixture,
+	type IsolatedGitTestRepository,
+} from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
-function runGit(cwd: string, args: string[]): string {
-	const result = spawnSync("git", args, {
-		cwd,
-		encoding: "utf8",
-		env: createGitTestEnv(),
-	});
-	if (result.status !== 0) {
-		throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
-	}
-	return result.stdout.trim();
-}
-
-function initRepository(path: string): void {
-	runGit(path, ["init", "-q"]);
-	runGit(path, ["config", "user.name", "Test User"]);
-	runGit(path, ["config", "user.email", "test@example.com"]);
-}
-
-function commitAll(cwd: string, message: string): string {
-	runGit(cwd, ["add", "."]);
-	runGit(cwd, ["commit", "-qm", message]);
-	return runGit(cwd, ["rev-parse", "HEAD"]);
+function commitAllRepositoryFiles(repository: IsolatedGitTestRepository, message: string): string {
+	repository.runGit(["add", "."]);
+	repository.runGit(["commit", "--quiet", "-m", message]);
+	return repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
 }
 
 describe.sequential("git history runtime", () => {
 	it("returns commit changed file metadata without patches", async () => {
-		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-metadata-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const repository = gitFixture.createNonBareRepository({ repositoryDirectoryName: "history-metadata" });
+		const repoPath = repository.repositoryPath;
 		try {
-			initRepository(repoPath);
 			writeFileSync(join(repoPath, "first.txt"), "hello\n", "utf8");
 			writeFileSync(join(repoPath, "second.txt"), "world\nagain\n", "utf8");
-			const commitHash = commitAll(repoPath, "add files");
+			const commitHash = commitAllRepositoryFiles(repository, "add files");
 
 			const response = await getCommitChangedFileMetadata({
 				cwd: repoPath,
@@ -72,16 +56,17 @@ describe.sequential("git history runtime", () => {
 			);
 			expect(response.files[0]).not.toHaveProperty("patch");
 		} finally {
-			cleanup();
+			gitFixture.cleanup();
 		}
 	});
 
 	it("reports an error when commit changed file metadata cannot be read", async () => {
-		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-invalid-metadata-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const repository = gitFixture.createNonBareRepository({ repositoryDirectoryName: "history-invalid-metadata" });
+		const repoPath = repository.repositoryPath;
 		try {
-			initRepository(repoPath);
 			writeFileSync(join(repoPath, "first.txt"), "hello\n", "utf8");
-			commitAll(repoPath, "init");
+			commitAllRepositoryFiles(repository, "init");
 
 			const response = await getCommitChangedFileMetadata({
 				cwd: repoPath,
@@ -92,21 +77,22 @@ describe.sequential("git history runtime", () => {
 			expect(response.files).toEqual([]);
 			expect(response.error).toBeTruthy();
 		} finally {
-			cleanup();
+			gitFixture.cleanup();
 		}
 	});
 
 	it("returns only the requested file patch for a commit", async () => {
-		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-file-patch-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const repository = gitFixture.createNonBareRepository({ repositoryDirectoryName: "history-file-patch" });
+		const repoPath = repository.repositoryPath;
 		try {
-			initRepository(repoPath);
 			writeFileSync(join(repoPath, "first.txt"), "old first\n", "utf8");
 			writeFileSync(join(repoPath, "second.txt"), "old second\n", "utf8");
-			commitAll(repoPath, "init");
+			commitAllRepositoryFiles(repository, "init");
 
 			writeFileSync(join(repoPath, "first.txt"), "new first\n", "utf8");
 			writeFileSync(join(repoPath, "second.txt"), "new second\n", "utf8");
-			const commitHash = commitAll(repoPath, "edit files");
+			const commitHash = commitAllRepositoryFiles(repository, "edit files");
 
 			const response = await getCommitFileDiffPatch({
 				cwd: repoPath,
@@ -120,16 +106,17 @@ describe.sequential("git history runtime", () => {
 			expect(response.patch).not.toContain("second.txt");
 			expect(response.patch).not.toContain("+new second");
 		} finally {
-			cleanup();
+			gitFixture.cleanup();
 		}
 	});
 
 	it("returns correct metadata for root commit diffs", async () => {
-		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-root-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const repository = gitFixture.createNonBareRepository({ repositoryDirectoryName: "history-root-commit" });
+		const repoPath = repository.repositoryPath;
 		try {
-			initRepository(repoPath);
 			writeFileSync(join(repoPath, "first.txt"), "hello\nworld\n", "utf8");
-			const rootCommit = commitAll(repoPath, "first commit");
+			const rootCommit = commitAllRepositoryFiles(repository, "first commit");
 
 			const response = await getCommitDiff({
 				cwd: repoPath,
@@ -146,19 +133,20 @@ describe.sequential("git history runtime", () => {
 			});
 			expect(response.files[0]?.patch).toContain("+++ b/first.txt");
 		} finally {
-			cleanup();
+			gitFixture.cleanup();
 		}
 	});
 
 	it("returns rename metadata for rename-only commits", async () => {
-		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-rename-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const repository = gitFixture.createNonBareRepository({ repositoryDirectoryName: "history-rename" });
+		const repoPath = repository.repositoryPath;
 		try {
-			initRepository(repoPath);
 			writeFileSync(join(repoPath, "old.txt"), "hello\n", "utf8");
-			commitAll(repoPath, "init");
+			commitAllRepositoryFiles(repository, "init");
 
-			runGit(repoPath, ["mv", "old.txt", "new.txt"]);
-			const renameCommit = commitAll(repoPath, "rename file");
+			repository.runGit(["mv", "old.txt", "new.txt"]);
+			const renameCommit = commitAllRepositoryFiles(repository, "rename file");
 
 			const response = await getCommitDiff({
 				cwd: repoPath,
@@ -177,19 +165,20 @@ describe.sequential("git history runtime", () => {
 			expect(response.files[0]?.patch).toContain("rename from old.txt");
 			expect(response.files[0]?.patch).toContain("rename to new.txt");
 		} finally {
-			cleanup();
+			gitFixture.cleanup();
 		}
 	});
 
 	it("discards tracked, staged, and untracked working copy changes", async () => {
-		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-discard-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const repository = gitFixture.createNonBareRepository({ repositoryDirectoryName: "history-discard" });
+		const repoPath = repository.repositoryPath;
 		try {
-			initRepository(repoPath);
 			writeFileSync(join(repoPath, "tracked.txt"), "original\n", "utf8");
-			commitAll(repoPath, "init");
+			commitAllRepositoryFiles(repository, "init");
 
 			writeFileSync(join(repoPath, "tracked.txt"), "changed\n", "utf8");
-			runGit(repoPath, ["add", "tracked.txt"]);
+			repository.runGit(["add", "tracked.txt"]);
 			mkdirSync(join(repoPath, "scratch"), { recursive: true });
 			writeFileSync(join(repoPath, "scratch", "note.txt"), "temp\n", "utf8");
 
@@ -200,20 +189,21 @@ describe.sequential("git history runtime", () => {
 			expect(readFileSync(join(repoPath, "tracked.txt"), "utf8").replace(/\r\n/gu, "\n")).toBe("original\n");
 			expect(existsSync(join(repoPath, "scratch", "note.txt"))).toBe(false);
 		} finally {
-			cleanup();
+			gitFixture.cleanup();
 		}
 	});
 
 	it("returns correct UTF-8 paths for non-ASCII filenames", async () => {
-		const { path: repoPath, cleanup } = createTempDir("kanban-git-history-nonascii-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const repository = gitFixture.createNonBareRepository({ repositoryDirectoryName: "history-nonascii" });
+		const repoPath = repository.repositoryPath;
 		try {
-			initRepository(repoPath);
 			const dirName = "提出書類";
 			const fileName = "設計書.md";
 			const relativePath = `${dirName}/${fileName}`;
 			mkdirSync(join(repoPath, dirName), { recursive: true });
 			writeFileSync(join(repoPath, dirName, fileName), "# 設計書\n", "utf8");
-			const commitHash = commitAll(repoPath, "add non-ASCII path");
+			const commitHash = commitAllRepositoryFiles(repository, "add non-ASCII path");
 
 			const response = await getCommitDiff({
 				cwd: repoPath,
@@ -228,38 +218,41 @@ describe.sequential("git history runtime", () => {
 			});
 			expect(response.files[0]?.patch).toContain(`+++ b/${relativePath}`);
 		} finally {
-			cleanup();
+			gitFixture.cleanup();
 		}
 	});
 
 	it("reads ahead and behind counts from tracked branches", { timeout: 15_000 }, async () => {
-		const { path: sandboxRoot, cleanup } = createTempDir("kanban-git-history-refs-");
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
 		try {
-			const remotePath = join(sandboxRoot, "remote.git");
-			const localPath = join(sandboxRoot, "local");
-			const peerPath = join(sandboxRoot, "peer");
-
-			mkdirSync(remotePath, { recursive: true });
-			runGit(remotePath, ["init", "--bare", "-q"]);
-
-			mkdirSync(localPath, { recursive: true });
-			initRepository(localPath);
+			const remoteRepository = gitFixture.createBareRepository({ repositoryDirectoryName: "history-remote.git" });
+			const localRepository = gitFixture.createNonBareRepository({
+				repositoryDirectoryName: "history-local",
+				initialBranchName: "main",
+			});
+			const peerRepository = gitFixture.createNonBareRepository({
+				repositoryDirectoryName: "history-peer",
+				initialBranchName: "main",
+			});
+			const remotePath = remoteRepository.repositoryPath;
+			const localPath = localRepository.repositoryPath;
+			const peerPath = peerRepository.repositoryPath;
 			writeFileSync(join(localPath, "file.txt"), "base\n", "utf8");
-			commitAll(localPath, "init");
-			runGit(localPath, ["remote", "add", "origin", remotePath]);
-			const currentBranch = runGit(localPath, ["symbolic-ref", "--short", "HEAD"]);
-			runGit(localPath, ["push", "-u", "origin", currentBranch]);
+			commitAllRepositoryFiles(localRepository, "init");
+			localRepository.runGit(["remote", "add", "origin", remotePath]);
+			const currentBranch = localRepository.runGit(["symbolic-ref", "--short", "HEAD"]).stdout.trim();
+			localRepository.runGit(["push", "-u", "origin", currentBranch]);
 
-			runGit(sandboxRoot, ["clone", "-q", remotePath, peerPath]);
-			runGit(peerPath, ["config", "user.name", "Peer User"]);
-			runGit(peerPath, ["config", "user.email", "peer@example.com"]);
+			peerRepository.runGit(["remote", "add", "origin", remotePath]);
+			peerRepository.runGit(["fetch", "origin"]);
+			peerRepository.runGit(["checkout", "-B", currentBranch, `origin/${currentBranch}`]);
 			writeFileSync(join(peerPath, "peer.txt"), "remote\n", "utf8");
-			commitAll(peerPath, "remote commit");
-			runGit(peerPath, ["push", "origin", currentBranch]);
+			commitAllRepositoryFiles(peerRepository, "remote commit");
+			peerRepository.runGit(["push", "origin", currentBranch]);
 
 			writeFileSync(join(localPath, "local.txt"), "local\n", "utf8");
-			commitAll(localPath, "local commit");
-			runGit(localPath, ["fetch", "origin"]);
+			commitAllRepositoryFiles(localRepository, "local commit");
+			localRepository.runGit(["fetch", "origin"]);
 
 			const refsResponse = await getGitRefs(localPath);
 			expect(refsResponse.ok).toBe(true);
@@ -303,7 +296,7 @@ describe.sequential("git history runtime", () => {
 				]),
 			);
 		} finally {
-			cleanup();
+			gitFixture.cleanup();
 		}
 	});
 });

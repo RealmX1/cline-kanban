@@ -44,7 +44,6 @@ import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
-import type { TaskBoardSearchMatchSource } from "@/search/task-board-search";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
@@ -98,36 +97,6 @@ function TaskCardRowHoverActions({
 	);
 }
 
-function TaskSearchMatchSourceBadges({
-	sources,
-}: {
-	sources: readonly TaskBoardSearchMatchSource[];
-}): React.ReactElement | null {
-	if (sources.length === 0) {
-		return null;
-	}
-	return (
-		<div className="mt-1 flex flex-wrap gap-1">
-			{sources.map((source) => {
-				const isTitleSource = source === "title";
-				return (
-					<span
-						key={source}
-						className={cn(
-							"inline-flex h-4 items-center rounded-sm border px-1.5 text-[10px] font-medium leading-none",
-							isTitleSource
-								? "border-status-blue/35 bg-status-blue/10 text-status-blue"
-								: "border-status-purple/35 bg-status-purple/10 text-status-purple",
-						)}
-					>
-						{isTitleSource ? "Name" : "Prompt"}
-					</span>
-				);
-			})}
-		</div>
-	);
-}
-
 /**
  * 卡片的业务 props：与 DnD/钉住克隆等渲染容器无关的领域回调与数据。
  * `BoardCard`（看板内的可拖卡）、`TaskCardBody`（纯卡体）、`SelectedTaskPinBar`
@@ -164,7 +133,6 @@ export interface TaskCardBusinessProps {
 	workspacePath?: string | null;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
-	searchMatchSources?: readonly TaskBoardSearchMatchSource[];
 }
 
 /**
@@ -216,7 +184,6 @@ export function TaskCardBody({
 	workspacePath,
 	defaultClineModelId = null,
 	defaultAgentId = null,
-	searchMatchSources = [],
 	drag = null,
 	pinnedClone = false,
 }: TaskCardBusinessProps & {
@@ -281,7 +248,6 @@ export function TaskCardBody({
 		() => normalizePromptForDisplay(card.title) || truncateTaskPromptLabel(card.prompt),
 		[card.prompt, card.title],
 	);
-	const hasSearchMatchSources = searchMatchSources.length > 0;
 
 	// 卸载时清掉尚未触发的延迟单击计时器，避免对已销毁卡片调用 onClick。
 	useEffect(
@@ -686,7 +652,6 @@ export function TaskCardBody({
 								>
 									{displayTitle}
 								</p>
-								{hasSearchMatchSources ? <TaskSearchMatchSourceBadges sources={searchMatchSources} /> : null}
 							</>
 						)}
 						{showTitleEditButton ? (

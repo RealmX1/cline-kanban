@@ -2,14 +2,26 @@ import { Fzf, type FzfResultItem } from "fzf";
 
 import type { BoardData } from "@/types";
 
-export type TaskBoardSearchMode = "hybrid" | "fuzzy" | "semantic";
+export type TaskBoardSearchMode = "direct" | "hybrid" | "fuzzy" | "semantic";
 export type TaskBoardSearchMatchSource = "title" | "prompt";
 
+/** 文档所属项目的身份信息：taskId 仅在单 board 内唯一（5 hex），跨项目合并/跳转必须携带 project 身份。 */
+export interface TaskBoardSearchProjectContext {
+	projectId: string;
+	projectName: string;
+}
+
 export interface TaskBoardSearchDocument {
+	projectId: string;
+	projectName: string;
 	taskId: string;
 	columnId: string;
 	title: string;
 	prompt: string;
+	// direct 子串匹配每键都要 lowercase 两个字段，预计算免每次搜索重复归一。
+	titleLowerCase: string;
+	promptLowerCase: string;
+	// fuzzy（fzf）在 title+"\n"+prompt 合并主体上做子序列匹配；下面的偏移用于把主体命中位置拆回 title/prompt。
 	taskSearchSubjectText: string;
 	titleSubjectStartIndex: number;
 	titleSubjectEndIndex: number;
@@ -18,19 +30,13 @@ export interface TaskBoardSearchDocument {
 }
 
 export interface TaskBoardSearchResult {
-	taskId: string;
+	// 携带 document 引用（而非裸 taskId）：跨项目同 taskId 不碰撞，merge/去重按引用，列表 key 用 projectId:taskId。
+	document: TaskBoardSearchDocument;
 	score: number;
 	matchSources: TaskBoardSearchMatchSource[];
-}
-
-export interface TaskBoardSearchState {
-	isSearchActive: boolean;
-	filteredBoard: BoardData;
-	filteredDependencies: BoardData["dependencies"];
-	visibleTaskIds: Set<string>;
-	resultByTaskId: Map<string, TaskBoardSearchResult>;
-	totalTaskCount: number;
-	visibleTaskCount: number;
+	// 命中字符位置集：相对各自字段（title / prompt）的字符下标，供 renderFuzzyHighlightedText 高亮。
+	titleMatchCharacterPositions: ReadonlySet<number>;
+	promptMatchCharacterPositions: ReadonlySet<number>;
 }
 
 export function normalizeSearchQuery(query: string): string {
@@ -49,42 +55,7 @@ function getTaskSearchSubjectText(title: string, prompt: string): string {
 	return `${normalizedTitle}\n${normalizedPrompt}`;
 }
 
-function collectMatchSourcesFromSubjectPositions(
-	document: TaskBoardSearchDocument,
-	positions: ReadonlySet<number>,
-): Set<TaskBoardSearchMatchSource> {
-	const sources = new Set<TaskBoardSearchMatchSource>();
-	for (const position of positions) {
-		if (position >= document.titleSubjectStartIndex && position < document.titleSubjectEndIndex) {
-			sources.add("title");
-		}
-		if (position >= document.promptSubjectStartIndex && position < document.promptSubjectEndIndex) {
-			sources.add("prompt");
-		}
-	}
-	return sources;
-}
-
-function collectTokenMatchSources(document: TaskBoardSearchDocument, query: string): Set<TaskBoardSearchMatchSource> {
-	const sources = new Set<TaskBoardSearchMatchSource>();
-	const tokens = normalizeSearchQuery(query)
-		.toLocaleLowerCase()
-		.split(" ")
-		.filter((token) => token.length > 0);
-	const normalizedTitle = document.title.toLocaleLowerCase();
-	const normalizedPrompt = document.prompt.toLocaleLowerCase();
-	for (const token of tokens) {
-		if (normalizedTitle.includes(token)) {
-			sources.add("title");
-		}
-		if (normalizedPrompt.includes(token)) {
-			sources.add("prompt");
-		}
-	}
-	return sources;
-}
-
-function orderMatchSources(sources: ReadonlySet<TaskBoardSearchMatchSource>): TaskBoardSearchMatchSource[] {
+export function orderMatchSources(sources: ReadonlySet<TaskBoardSearchMatchSource>): TaskBoardSearchMatchSource[] {
 	const orderedSources: TaskBoardSearchMatchSource[] = [];
 	if (sources.has("title")) {
 		orderedSources.push("title");
@@ -95,28 +66,71 @@ function orderMatchSources(sources: ReadonlySet<TaskBoardSearchMatchSource>): Ta
 	return orderedSources;
 }
 
-export function buildTaskBoardSearchDocuments(board: BoardData): TaskBoardSearchDocument[] {
+/** 从命中位置集推导 matchSources（direct / fuzzy 用；semantic 无位置集，自行给出 sources）。 */
+export function deriveMatchSourcesFromPositions(
+	titleMatchCharacterPositions: ReadonlySet<number>,
+	promptMatchCharacterPositions: ReadonlySet<number>,
+): TaskBoardSearchMatchSource[] {
+	const sources = new Set<TaskBoardSearchMatchSource>();
+	if (titleMatchCharacterPositions.size > 0) {
+		sources.add("title");
+	}
+	if (promptMatchCharacterPositions.size > 0) {
+		sources.add("prompt");
+	}
+	return orderMatchSources(sources);
+}
+
+/** 从单个任务的原始字段装配一篇搜索文档（当前项目 board 卡与跨项目索引条目共用，避免偏移/归一逻辑漂移）。 */
+export function buildTaskBoardSearchDocument(params: {
+	projectId: string;
+	projectName: string;
+	taskId: string;
+	columnId: string;
+	title: string;
+	prompt: string;
+}): TaskBoardSearchDocument {
+	const title = params.title.trim();
+	const prompt = params.prompt.trim();
+	const taskSearchSubjectText = getTaskSearchSubjectText(title, prompt);
+	const titleSubjectStartIndex = 0;
+	const titleSubjectEndIndex = title.length;
+	const promptSubjectStartIndex = title.length > 0 && prompt.length > 0 ? title.length + 1 : 0;
+	const promptSubjectEndIndex = promptSubjectStartIndex + prompt.length;
+	return {
+		projectId: params.projectId,
+		projectName: params.projectName,
+		taskId: params.taskId,
+		columnId: params.columnId,
+		title,
+		prompt,
+		titleLowerCase: title.toLocaleLowerCase(),
+		promptLowerCase: prompt.toLocaleLowerCase(),
+		taskSearchSubjectText,
+		titleSubjectStartIndex,
+		titleSubjectEndIndex,
+		promptSubjectStartIndex,
+		promptSubjectEndIndex,
+	};
+}
+
+export function buildTaskBoardSearchDocuments(
+	board: BoardData,
+	projectContext: TaskBoardSearchProjectContext,
+): TaskBoardSearchDocument[] {
 	const documents: TaskBoardSearchDocument[] = [];
 	for (const column of board.columns) {
 		for (const card of column.cards) {
-			const title = card.title.trim();
-			const prompt = card.prompt.trim();
-			const taskSearchSubjectText = getTaskSearchSubjectText(title, prompt);
-			const titleSubjectStartIndex = 0;
-			const titleSubjectEndIndex = title.length;
-			const promptSubjectStartIndex = title.length > 0 && prompt.length > 0 ? title.length + 1 : 0;
-			const promptSubjectEndIndex = promptSubjectStartIndex + prompt.length;
-			documents.push({
-				taskId: card.id,
-				columnId: column.id,
-				title,
-				prompt,
-				taskSearchSubjectText,
-				titleSubjectStartIndex,
-				titleSubjectEndIndex,
-				promptSubjectStartIndex,
-				promptSubjectEndIndex,
-			});
+			documents.push(
+				buildTaskBoardSearchDocument({
+					projectId: projectContext.projectId,
+					projectName: projectContext.projectName,
+					taskId: card.id,
+					columnId: column.id,
+					title: card.title,
+					prompt: card.prompt,
+				}),
+			);
 		}
 	}
 	return documents;
@@ -133,21 +147,28 @@ export function findFuzzyTaskBoardSearchResults(
 	const finder = new Fzf(documents, {
 		selector: (document) => document.taskSearchSubjectText,
 	});
-	return finder.find(normalizedQuery).map((match) => buildFuzzyTaskBoardSearchResult(match, normalizedQuery));
+	return finder.find(normalizedQuery).map((match) => buildFuzzyTaskBoardSearchResult(match));
 }
 
-function buildFuzzyTaskBoardSearchResult(
-	match: FzfResultItem<TaskBoardSearchDocument>,
-	query: string,
-): TaskBoardSearchResult {
-	const sources = collectMatchSourcesFromSubjectPositions(match.item, match.positions);
-	for (const source of collectTokenMatchSources(match.item, query)) {
-		sources.add(source);
+function buildFuzzyTaskBoardSearchResult(match: FzfResultItem<TaskBoardSearchDocument>): TaskBoardSearchResult {
+	const document = match.item;
+	const titleMatchCharacterPositions = new Set<number>();
+	const promptMatchCharacterPositions = new Set<number>();
+	// fzf 的 positions 是合并主体上的字符下标；减去各字段在主体中的起始偏移，还原为字段内局部下标。
+	for (const position of match.positions) {
+		if (position >= document.titleSubjectStartIndex && position < document.titleSubjectEndIndex) {
+			titleMatchCharacterPositions.add(position - document.titleSubjectStartIndex);
+		}
+		if (position >= document.promptSubjectStartIndex && position < document.promptSubjectEndIndex) {
+			promptMatchCharacterPositions.add(position - document.promptSubjectStartIndex);
+		}
 	}
 	return {
-		taskId: match.item.taskId,
+		document,
 		score: match.score,
-		matchSources: orderMatchSources(sources),
+		matchSources: deriveMatchSourcesFromPositions(titleMatchCharacterPositions, promptMatchCharacterPositions),
+		titleMatchCharacterPositions,
+		promptMatchCharacterPositions,
 	};
 }
 
@@ -155,13 +176,17 @@ export function mergeTaskBoardSearchResults(
 	primaryResults: readonly TaskBoardSearchResult[],
 	secondaryResults: readonly TaskBoardSearchResult[],
 ): TaskBoardSearchResult[] {
-	const resultByTaskId = new Map<string, TaskBoardSearchResult>();
+	// 按 document 引用合并（fuzzy 与 semantic 结果均引用同一 documents 数组的对象，引用相等即同一任务）。
+	const resultByDocument = new Map<TaskBoardSearchDocument, TaskBoardSearchResult>();
 	for (const result of [...primaryResults, ...secondaryResults]) {
-		const existingResult = resultByTaskId.get(result.taskId);
+		const existingResult = resultByDocument.get(result.document);
 		if (!existingResult) {
-			resultByTaskId.set(result.taskId, {
-				...result,
+			resultByDocument.set(result.document, {
+				document: result.document,
+				score: result.score,
 				matchSources: [...result.matchSources],
+				titleMatchCharacterPositions: new Set(result.titleMatchCharacterPositions),
+				promptMatchCharacterPositions: new Set(result.promptMatchCharacterPositions),
 			});
 			continue;
 		}
@@ -169,55 +194,21 @@ export function mergeTaskBoardSearchResults(
 		for (const source of result.matchSources) {
 			sources.add(source);
 		}
-		resultByTaskId.set(result.taskId, {
-			taskId: result.taskId,
+		const titleMatchCharacterPositions = new Set(existingResult.titleMatchCharacterPositions);
+		for (const position of result.titleMatchCharacterPositions) {
+			titleMatchCharacterPositions.add(position);
+		}
+		const promptMatchCharacterPositions = new Set(existingResult.promptMatchCharacterPositions);
+		for (const position of result.promptMatchCharacterPositions) {
+			promptMatchCharacterPositions.add(position);
+		}
+		resultByDocument.set(result.document, {
+			document: result.document,
 			score: Math.max(existingResult.score, result.score),
 			matchSources: orderMatchSources(sources),
+			titleMatchCharacterPositions,
+			promptMatchCharacterPositions,
 		});
 	}
-	return [...resultByTaskId.values()];
-}
-
-export function createTaskBoardSearchState(
-	board: BoardData,
-	results: readonly TaskBoardSearchResult[],
-	isSearchActive: boolean,
-): TaskBoardSearchState {
-	const totalTaskCount = board.columns.reduce((count, column) => count + column.cards.length, 0);
-	if (!isSearchActive) {
-		return {
-			isSearchActive: false,
-			filteredBoard: board,
-			filteredDependencies: board.dependencies,
-			visibleTaskIds: new Set(board.columns.flatMap((column) => column.cards.map((card) => card.id))),
-			resultByTaskId: new Map(),
-			totalTaskCount,
-			visibleTaskCount: totalTaskCount,
-		};
-	}
-	const resultByTaskId = new Map(results.map((result) => [result.taskId, result] as const));
-	const visibleTaskIds = new Set(resultByTaskId.keys());
-	const filteredBoard: BoardData = {
-		...board,
-		columns: board.columns.map((column) => ({
-			...column,
-			cards: column.cards.filter((card) => visibleTaskIds.has(card.id)),
-		})),
-	};
-	const filteredDependencies = board.dependencies.filter(
-		(dependency) => visibleTaskIds.has(dependency.fromTaskId) && visibleTaskIds.has(dependency.toTaskId),
-	);
-	return {
-		isSearchActive: true,
-		filteredBoard,
-		filteredDependencies,
-		visibleTaskIds,
-		resultByTaskId,
-		totalTaskCount,
-		visibleTaskCount: visibleTaskIds.size,
-	};
-}
-
-export function createEmptyTaskBoardSearchState(board: BoardData): TaskBoardSearchState {
-	return createTaskBoardSearchState(board, [], false);
+	return [...resultByDocument.values()];
 }

@@ -42,6 +42,8 @@ import {
 	ensureTaskWorktreeIfDoesntExist,
 	getTaskWorkspaceInfo,
 	resolveTaskCwd,
+	TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX,
+	TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX,
 } from "../workspace/task-worktree";
 import type { RuntimeTrpcContext } from "./app-router";
 
@@ -206,11 +208,14 @@ function createEmptyGitDiscardErrorResponse(error: unknown): RuntimeGitDiscardRe
 	};
 }
 
-function isMissingTaskWorktreeError(error: unknown): boolean {
+function isTaskWorktreeMissingOrStillSettingUpError(error: unknown): boolean {
 	if (!(error instanceof Error)) {
 		return false;
 	}
-	return error.message.startsWith("Task worktree not found for task ");
+	return (
+		error.message.startsWith(TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX) ||
+		error.message.startsWith(TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX)
+	);
 }
 
 export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): RuntimeTrpcContext["workspaceApi"] {
@@ -304,7 +309,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					...(normalizedInput.worktreeMode ? { worktreeMode: normalizedInput.worktreeMode } : {}),
 				});
 			} catch (error) {
-				if (!isMissingTaskWorktreeError(error)) {
+				if (!isTaskWorktreeMissingOrStillSettingUpError(error)) {
 					throw error;
 				}
 				return await createEmptyWorkspaceChangesResponse(workspaceScope.workspacePath);

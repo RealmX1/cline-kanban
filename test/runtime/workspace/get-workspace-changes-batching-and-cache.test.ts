@@ -1,59 +1,39 @@
-import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import {
 	getWorkspaceChanges,
 	getWorkspaceChangesBetweenRefs,
 	getWorkspaceChangesFromRef,
 } from "../../../src/workspace/get-workspace-changes";
-import { createGitTestEnv } from "../../utilities/git-env";
-import { createTempDir } from "../../utilities/temp-dir";
-
-const gitEnv = createGitTestEnv();
-
-function git(cwd: string, args: string[]): string {
-	const result = spawnSync("git", args, { cwd, env: gitEnv, encoding: "utf8" });
-	if (result.status !== 0) {
-		throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
-	}
-	return result.stdout.trim();
-}
-
-function initRepo(repoPath: string): void {
-	git(repoPath, ["init", "-q"]);
-	git(repoPath, ["config", "user.name", "Test User"]);
-	git(repoPath, ["config", "user.email", "test@example.com"]);
-}
+import {
+	createIsolatedGitTestWorkspaceFixture,
+	type IsolatedGitTestRepository,
+} from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 describe("getWorkspaceChanges batching + cache", () => {
 	let repoPath: string;
-	let cleanup: () => void;
+	let repository: IsolatedGitTestRepository;
 
 	beforeEach(() => {
-		const temp = createTempDir("kanban-workspace-batching-");
-		repoPath = temp.path;
-		cleanup = temp.cleanup;
-		initRepo(repoPath);
-	});
-
-	afterEach(() => {
-		cleanup();
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		repository = fixture.createNonBareRepository({ repositoryDirectoryName: "workspace-changes-batching" });
+		repoPath = repository.repositoryPath;
 	});
 
 	it("parses a renamed file's batch numstat (pair format) between two refs", async () => {
 		writeFileSync(join(repoPath, "a.txt"), "line1\nline2\nline3\nline4\nline5\n");
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "c1"]);
-		const fromRef = git(repoPath, ["rev-parse", "HEAD"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "c1"]);
+		const fromRef = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
 		// rename + 追加一行：相似度足够高，git 检测为 rename（numstat -z 走「空 path + 两条 NUL 路径」的 pair 格式）。
-		git(repoPath, ["mv", "a.txt", "b.txt"]);
+		repository.runGit(["mv", "a.txt", "b.txt"]);
 		writeFileSync(join(repoPath, "b.txt"), "line1\nline2\nline3\nline4\nline5\nline6\n");
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "c2"]);
-		const toRef = git(repoPath, ["rev-parse", "HEAD"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "c2"]);
+		const toRef = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
 
 		const response = await getWorkspaceChangesBetweenRefs({ cwd: repoPath, fromRef, toRef });
 
@@ -73,8 +53,8 @@ describe("getWorkspaceChanges batching + cache", () => {
 	it("reports zero additions/deletions for a binary file and toLineCount for an untracked file", async () => {
 		const binaryOriginal = Buffer.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
 		writeFileSync(join(repoPath, "blob.bin"), binaryOriginal);
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "init"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "init"]);
 		// 修改二进制文件（tracked，numstat 记为 `-\t-` → {0,0}）。
 		writeFileSync(join(repoPath, "blob.bin"), Buffer.from([9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 42]));
 		// 新增 untracked 文本文件（走 toLineCount 路径，不进 numstat）。
@@ -98,8 +78,8 @@ describe("getWorkspaceChanges batching + cache", () => {
 
 	it("returns the cached response object on repeat working_copy calls and invalidates on change", async () => {
 		writeFileSync(join(repoPath, "tracked.txt"), "one\ntwo\n");
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "init"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "init"]);
 		writeFileSync(join(repoPath, "tracked.txt"), "one\ntwo\nthree\n");
 
 		const first = await getWorkspaceChanges(repoPath);
@@ -116,13 +96,13 @@ describe("getWorkspaceChanges batching + cache", () => {
 
 	it("caches between-refs results keyed by the immutable ref pair", async () => {
 		writeFileSync(join(repoPath, "x.txt"), "a\n");
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "c1"]);
-		const fromRef = git(repoPath, ["rev-parse", "HEAD"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "c1"]);
+		const fromRef = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
 		writeFileSync(join(repoPath, "x.txt"), "a\nb\n");
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "c2"]);
-		const toRef = git(repoPath, ["rev-parse", "HEAD"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "c2"]);
+		const toRef = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
 
 		const first = await getWorkspaceChangesBetweenRefs({ cwd: repoPath, fromRef, toRef });
 		const second = await getWorkspaceChangesBetweenRefs({ cwd: repoPath, fromRef, toRef });
@@ -134,14 +114,14 @@ describe("getWorkspaceChanges batching + cache", () => {
 		// 基线是不可变 commit；toRef 是可移动分支 feature。base..feature 恒为 `M m.txt`，
 		// 仅内容在两次 feature 提交间变化 → name-status 输出不变、ref 字符串不变，唯有解析后的 SHA 变化。
 		writeFileSync(join(repoPath, "m.txt"), "base\n");
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "base"]);
-		const baseRef = git(repoPath, ["rev-parse", "HEAD"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "base"]);
+		const baseRef = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
 
-		git(repoPath, ["checkout", "-q", "-b", "feature"]);
+		repository.runGit(["checkout", "--quiet", "-b", "feature"]);
 		writeFileSync(join(repoPath, "m.txt"), "content-one\n");
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "feature-1"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "feature-1"]);
 
 		const first = await getWorkspaceChangesBetweenRefs({ cwd: repoPath, fromRef: baseRef, toRef: "feature" });
 		const firstFile = first.files.find((file) => file.path === "m.txt");
@@ -150,8 +130,8 @@ describe("getWorkspaceChanges batching + cache", () => {
 
 		// feature 前进到新提交：文件集合与 name-status 状态字母不变（仍是 `M m.txt`），仅内容改变。
 		writeFileSync(join(repoPath, "m.txt"), "content-two\n");
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "feature-2"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "feature-2"]);
 
 		const second = await getWorkspaceChangesBetweenRefs({ cwd: repoPath, fromRef: baseRef, toRef: "feature" });
 		// ref 移动 → 解析后的 SHA 变化 → stateKey 变化 → 必须重算，不得跨内容误命中旧缓存。
@@ -168,9 +148,9 @@ describe("getWorkspaceChanges batching + cache", () => {
 		for (let index = 0; index < FILE_COUNT; index += 1) {
 			writeFileSync(join(repoPath, `file-${String(index).padStart(3, "0")}.txt`), `base-${index}\n`);
 		}
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "init"]);
-		const fromRef = git(repoPath, ["rev-parse", "HEAD"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "init"]);
+		const fromRef = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
 		for (let index = 0; index < FILE_COUNT; index += 1) {
 			writeFileSync(
 				join(repoPath, `file-${String(index).padStart(3, "0")}.txt`),
@@ -201,9 +181,9 @@ describe("getWorkspaceChanges batching + cache", () => {
 
 	it("caches from-ref results while the working tree is idle and invalidates on change", async () => {
 		writeFileSync(join(repoPath, "y.txt"), "base\n");
-		git(repoPath, ["add", "."]);
-		git(repoPath, ["commit", "-qm", "c1"]);
-		const fromRef = git(repoPath, ["rev-parse", "HEAD"]);
+		repository.runGit(["add", "."]);
+		repository.runGit(["commit", "--quiet", "-m", "c1"]);
+		const fromRef = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
 		writeFileSync(join(repoPath, "y.txt"), "base\nworking-change\n");
 
 		const first = await getWorkspaceChangesFromRef({ cwd: repoPath, fromRef });
