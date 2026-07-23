@@ -38,9 +38,12 @@ import {
 } from "./agent-session-adapters";
 import { materializeTaskAgentSessionForExecutionWorkingDirectory } from "./agent-session-materialization";
 import {
-	CLAUDE_STARTUP_READINESS_TIMEOUT_MS,
 	hasClaudeInteractivePrompt,
 	hasClaudeStartupUiRendered,
+	// startup readiness 的 wall-clock 兜底超时值。source-of-truth 常量名在 claude-readiness.ts
+	// 仍为 claude 前缀（该文件超出本 issue 的改动范围），但该机制现由 claude 与 kimi 共用，
+	// 故在此以 agent-generic 别名引入，使共享使用点读起来不含歧义。
+	CLAUDE_STARTUP_READINESS_TIMEOUT_MS as STARTUP_READINESS_TIMEOUT_MS,
 } from "./claude-readiness";
 import {
 	hasClaudeWorkspaceTrustPrompt,
@@ -50,6 +53,7 @@ import {
 } from "./claude-workspace-trust";
 import { hasCodexInteractivePrompt, hasCodexStartupUiRendered } from "./codex-readiness";
 import { hasCodexWorkspaceTrustPrompt, shouldAutoConfirmCodexWorkspaceTrust } from "./codex-workspace-trust";
+import { hasKimiInteractivePrompt, hasKimiStartupUiRendered } from "./kimi-readiness";
 import {
 	getDefaultOutputReactionEngine,
 	type OutputReactionActions,
@@ -156,17 +160,18 @@ interface ActiveProcessState {
 	awaitingCodexPromptAfterEnter: boolean;
 	autoConfirmedWorkspaceTrust: boolean;
 	workspaceTrustConfirmTimer: NodeJS.Timeout | null;
-	// Claude Code TUI 启动 readiness 兜底时刻：在该时间点之前，session-manager
-	// 仅在 readiness predicate（输入框 / 启动横幅）命中时才注入 prompt；
-	// 之后回退到"任意 output 即触发"，保留旧行为防止 readiness predicate 漏识别
-	// 导致 prompt 永远注不进去。null 表示当前会话不需要 gate（非 Claude 或没有
-	// deferred prompt）。
-	claudeStartupReadinessDeadlineAt: number | null;
-	// 独立的 wall-clock 兜底 timer：当 Claude TUI 在一个 chunk 里渲染完整启动 UI、
+	// TUI 启动 readiness 兜底时刻：在该时间点之前，session-manager 仅在 readiness
+	// predicate（输入框 / 启动横幅）命中时才注入 prompt；之后回退到"任意 output 即触发"，
+	// 保留旧行为防止 readiness predicate 漏识别导致 prompt 永远注不进去。null 表示当前会话
+	// 不需要 gate（非 claude/kimi 或没有 deferred prompt）。claude 与 kimi 共用该兜底。
+	startupReadinessDeadlineAt: number | null;
+	// 独立的 wall-clock 兜底 timer：当 TUI 在一个（或被切分的）chunk 里渲染完整启动 UI、
 	// 而 readiness predicate 漏识别时，后续不会再有新 chunk 触发 deadline 检查，
 	// 导致 deferred prompt 永远注不进去。这个一次性 setTimeout 在到点后强制调用
 	// trySendDeferredStartupInput；命中 predicate 或 session 退出时由调用方清掉。
-	claudeStartupReadinessTimer: NodeJS.Timeout | null;
+	// claude 与 kimi 共用该兜底（kimi 启动后通常只渲染一次输入框即空闲等待输入，
+	// 若该唯一渲染被 chunk 边界拆分，signal-only 判定会漏识别）。
+	startupReadinessTimer: NodeJS.Timeout | null;
 	// 输出反应框架（连接中断自动续跑等）。仅在开关开启且 agent 适用时非 null。
 	outputReactionEngine: OutputReactionEngine | null;
 	outputReactionSession: OutputReactionSessionState | null;
@@ -399,10 +404,19 @@ export function shouldSuppressTerminalScrollbackErasureForAgentLaunch(
 	return true;
 }
 
-function clearClaudeStartupReadinessTimer(state: { claudeStartupReadinessTimer: NodeJS.Timeout | null }): void {
-	if (state.claudeStartupReadinessTimer) {
-		clearTimeout(state.claudeStartupReadinessTimer);
-		state.claudeStartupReadinessTimer = null;
+// startup readiness 的 wall-clock 兜底目前适用于 claude 与 kimi：两者都可能把启动横幅 /
+// 输入框渲染到单个（或被 PTF / UTF-8 chunk 边界切分的）chunk 后即空闲等待输入，若 readiness
+// 信号被拆分漏识别，deferred prompt 将永远注不进去、任务假死。codex 暂不纳入（保持既有
+// signal-only 行为，避免改动其现有语义）。
+const AGENT_IDS_WITH_STARTUP_READINESS_DEADLINE_FALLBACK: ReadonlySet<AgentAdapterLaunchInput["agentId"]> = new Set([
+	"claude",
+	"kimi",
+]);
+
+function clearStartupReadinessTimer(state: { startupReadinessTimer: NodeJS.Timeout | null }): void {
+	if (state.startupReadinessTimer) {
+		clearTimeout(state.startupReadinessTimer);
+		state.startupReadinessTimer = null;
 	}
 }
 
@@ -482,6 +496,9 @@ function resolveTuiInteractivePromptPredicate(agentId: RuntimeAgentId | null): (
 	if (agentId === "codex") {
 		return hasCodexInteractivePrompt;
 	}
+	if (agentId === "kimi") {
+		return hasKimiInteractivePrompt;
+	}
 	return null;
 }
 
@@ -523,7 +540,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		active.deferredStartupInput = null;
 		// Deferred input 已经注入，wall-clock 兜底 timer 不再需要，立即清除以避免
 		// 在已经 idle 的 session 上空跑回调。
-		clearClaudeStartupReadinessTimer(active);
+		clearStartupReadinessTimer(active);
 		active.session.write(deferredInput);
 		logTuiFreezeWarning(
 			`[tui-freeze] startup-prompt-flushed taskId=${taskId} agentId=${entry.summary.agentId} chars=${deferredInput.length}`,
@@ -691,6 +708,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		if (entry.summary.agentId === "claude") {
 			return hasClaudeInteractivePrompt(scan);
+		}
+		if (entry.summary.agentId === "kimi") {
+			return hasKimiInteractivePrompt(scan);
 		}
 		return false;
 	}
@@ -1357,7 +1377,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 		if (entry.active) {
 			stopWorkspaceTrustTimers(entry.active);
-			clearClaudeStartupReadinessTimer(entry.active);
+			clearStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
@@ -1502,8 +1522,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// Startup input is deferred until the TUI is alive so the task prompt creates a
 			// persisted interactive session instead of a short-lived argv prompt run.
 			//
-			// Claude 路径在 readiness predicate 命中之前保持等待；超过
-			// claudeStartupReadinessDeadlineAt 后回退到"任意 output 即触发"，
+			// claude / kimi 路径在 readiness predicate 命中之前保持等待；超过
+			// startupReadinessDeadlineAt 后回退到"任意 output 即触发"，
 			// 兜底 predicate 漏识别的极端 TUI 渲染，避免回归到 prompt 永远注不进去。
 			if (entry.active.deferredStartupInput !== null && data.length > 0) {
 				const claudeBuffer = entry.active.workspaceTrustBuffer ?? "";
@@ -1520,11 +1540,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 						hasClaudeStartupUiRendered(data) ||
 						hasClaudeInteractivePrompt(claudeBuffer) ||
 						hasClaudeStartupUiRendered(claudeBuffer));
-				const claudeReadyByDeadline =
-					entry.summary.agentId === "claude" &&
-					entry.active.claudeStartupReadinessDeadlineAt !== null &&
-					now() >= entry.active.claudeStartupReadinessDeadlineAt;
-				if (codexReady || claudeReadyBySignal || claudeReadyByDeadline) {
+				// Kimi 与 codex 同为信号驱动就绪（启动横幅 / 输入提示符重现）。
+				const kimiReady =
+					entry.summary.agentId === "kimi" && (hasKimiInteractivePrompt(data) || hasKimiStartupUiRendered(data));
+				// wall-clock 兜底：deadline 仅对 claude/kimi 非 null（见启动处 gating），故这里无需
+				// 再按 agentId 判定——deadline 是否存在本身即把兜底钳定在 claude+kimi，codex 不受影响。
+				// kimi 启动横幅 / Unicode 输入框 `│ >` 可能被 chunk 边界拆分，signal-only 判定漏识别时，
+				// 该兜底保证 deferred prompt 仍会在 timeout 后强制注入。
+				const readyByDeadline =
+					entry.active.startupReadinessDeadlineAt !== null && now() >= entry.active.startupReadinessDeadlineAt;
+				if (codexReady || claudeReadyBySignal || kimiReady || readyByDeadline) {
 					this.trySendDeferredStartupInput(request.taskId);
 				}
 			}
@@ -1555,7 +1580,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 						return;
 					}
 					stopWorkspaceTrustTimers(currentActive);
-					clearClaudeStartupReadinessTimer(currentActive);
+					clearStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
 					clearTaskChatInputDeliveryTimer(currentActive);
 					clearSubmitConfirmTimer(currentActive);
@@ -1662,11 +1687,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			awaitingCodexPromptAfterEnter: false,
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
-			claudeStartupReadinessDeadlineAt:
-				request.agentId === "claude" && launch.deferredStartupInput
-					? now() + CLAUDE_STARTUP_READINESS_TIMEOUT_MS
+			startupReadinessDeadlineAt:
+				AGENT_IDS_WITH_STARTUP_READINESS_DEADLINE_FALLBACK.has(request.agentId) && launch.deferredStartupInput
+					? now() + STARTUP_READINESS_TIMEOUT_MS
 					: null,
-			claudeStartupReadinessTimer: null,
+			startupReadinessTimer: null,
 			outputReactionEngine,
 			outputReactionSession,
 			outputReactionScanBuffer: outputReactionEngine !== null ? "" : null,
@@ -1688,20 +1713,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry.lastStallLoggedAt = null;
 		this.ensureStallScanRunning();
 
-		// 独立的 wall-clock 兜底：Claude 可能在一个 chunk 里渲染完启动 UI，而 readiness
-		// predicate 漏识别（例如 TUI 文案改写、边框被切分到两块 chunk 里），此后不会
+		// 独立的 wall-clock 兜底：claude / kimi 可能在一个 chunk 里渲染完启动 UI，而 readiness
+		// predicate 漏识别（例如 TUI 文案改写、边框 / 输入框被切分到两块 chunk 里），此后不会
 		// 再有 output 触发 handleTaskOutput 里的 deadline 检查。注册一次性 timer 强制
 		// 在 timeout 时调用 trySendDeferredStartupInput，避免 prompt 永远注不进去。
-		if (request.agentId === "claude" && launch.deferredStartupInput) {
-			active.claudeStartupReadinessTimer = setTimeout(() => {
+		if (AGENT_IDS_WITH_STARTUP_READINESS_DEADLINE_FALLBACK.has(request.agentId) && launch.deferredStartupInput) {
+			active.startupReadinessTimer = setTimeout(() => {
 				const entryAtTimeout = this.entries.get(request.taskId);
 				const activeAtTimeout = entryAtTimeout?.active;
 				if (!activeAtTimeout) {
 					return;
 				}
-				activeAtTimeout.claudeStartupReadinessTimer = null;
+				activeAtTimeout.startupReadinessTimer = null;
 				this.trySendDeferredStartupInput(request.taskId);
-			}, CLAUDE_STARTUP_READINESS_TIMEOUT_MS);
+			}, STARTUP_READINESS_TIMEOUT_MS);
 		}
 
 		const startedAt = now();
@@ -1747,7 +1772,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 		if (entry.active) {
 			stopWorkspaceTrustTimers(entry.active);
-			clearClaudeStartupReadinessTimer(entry.active);
+			clearStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
@@ -1817,7 +1842,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 						return;
 					}
 					stopWorkspaceTrustTimers(currentActive);
-					clearClaudeStartupReadinessTimer(currentActive);
+					clearStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
 					clearTaskChatInputDeliveryTimer(currentActive);
 					clearSubmitConfirmTimer(currentActive);
@@ -1882,8 +1907,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			awaitingCodexPromptAfterEnter: false,
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
-			claudeStartupReadinessDeadlineAt: null,
-			claudeStartupReadinessTimer: null,
+			startupReadinessDeadlineAt: null,
+			startupReadinessTimer: null,
 			outputReactionEngine: null,
 			outputReactionSession: null,
 			outputReactionScanBuffer: null,
@@ -2193,7 +2218,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const cleanupFn = entry.active.onSessionCleanup;
 		entry.active.onSessionCleanup = null;
 		stopWorkspaceTrustTimers(entry.active);
-		clearClaudeStartupReadinessTimer(entry.active);
+		clearStartupReadinessTimer(entry.active);
 		clearOutputReactionTimer(entry.active);
 		clearTaskChatInputDeliveryTimer(entry.active);
 		clearSubmitConfirmTimer(entry.active);
@@ -2220,7 +2245,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const cleanupFn = active.onSessionCleanup;
 		active.onSessionCleanup = null;
 		stopWorkspaceTrustTimers(active);
-		clearClaudeStartupReadinessTimer(active);
+		clearStartupReadinessTimer(active);
 		clearOutputReactionTimer(active);
 		clearTaskChatInputDeliveryTimer(active);
 		clearSubmitConfirmTimer(active);
@@ -2286,7 +2311,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				continue;
 			}
 			stopWorkspaceTrustTimers(entry.active);
-			clearClaudeStartupReadinessTimer(entry.active);
+			clearStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);

@@ -25,6 +25,8 @@ import { getRuntimeHomePath } from "../state/workspace-state";
 import { hasClaudeInteractivePrompt, hasClaudeStartupUiRendered } from "./claude-readiness";
 import { configureCodexHooks, hasCodexConfigOverride } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
+import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
+import { hasKimiInteractivePrompt } from "./kimi-readiness";
 import {
 	getOpenCodeAuthPathCandidates,
 	getOpenCodeConfigPathCandidates,
@@ -1723,6 +1725,83 @@ const clineAdapter: AgentSessionAdapter = {
 	},
 };
 
+// Kimi Code TUI 的「等待用户审查 → 回到 running」输出探测：与 claudePromptDetector 对齐（而非 codex）。
+// kimi 与 claude 同为 Stop hook 驱动 to_review，故门控口径必须一致——仅在 awaiting-review 且
+// reviewReason === "attention" 时，凭输入提示符重现判定 agent 已回到空闲。
+function kimiPromptDetector(data: string, summary: RuntimeTaskSessionSummary): SessionTransitionEvent | null {
+	if (!isAwaitingUserReviewTurn(resolveSessionFacets(summary))) {
+		return null;
+	}
+	// 仅在 reviewReason === "attention"（如 resumeFromTrash 恢复会话）时根据 TUI 输出回到 running。
+	// reviewReason === "hook" 表示 kimi 在 Stop / StopFailure hook 后等待用户审查，而 kimi 的 TUI
+	// 输入框会随每一次重绘出现 — 若在 "hook" 下也接受 prompt-ready，hook 触发后下一帧 TUI 重绘就会
+	// 立刻把状态翻回 running，"等待审查" 的语义（含完成通知）就丢失了。codex 靠 session-manager 的
+	// awaitingCodexPromptAfterEnter enter 守卫兜住这次即时翻转，kimi 没有该守卫、也没有 claude 曾缺的
+	// 门控，故必须在此对齐 claude。"hook" -> running 应由 UserPromptSubmit hook 走 `hook.to_in_progress`
+	// 路径触发，而不是靠终端输出探测。
+	if (summary.reviewReason !== "attention") {
+		return null;
+	}
+	if (hasKimiInteractivePrompt(data)) {
+		return { type: "agent.prompt-ready" };
+	}
+	return null;
+}
+
+function shouldInspectKimiOutputForTransition(summary: RuntimeTaskSessionSummary): boolean {
+	// 与 kimiPromptDetector / claude 保持一致：仅在 reviewReason === "attention" 时才需要解码输出来探测
+	// prompt-ready 转移；"hook" -> running 由 UserPromptSubmit hook 驱动，不走输出探测。
+	return isAwaitingUserReviewTurn(resolveSessionFacets(summary)) && summary.reviewReason === "attention";
+}
+
+// Kimi Code CLI（Moonshot 的原生终端 agent）。与 codexAdapter 同为「全屏 TUI + 无位置
+// prompt」形态，故任务 prompt 一律经 deferredStartupInput 在 TUI 就绪后 bracketed-paste 注入
+//（`kimi -p` 是单发 print 模式，不产生持久交互会话，不能用于托管会话）。
+const kimiAdapter: AgentSessionAdapter = {
+	async prepare(input) {
+		const args = [...input.args];
+		const env: Record<string, string | undefined> = {
+			// 会话中途自升级会打断托管会话（tui.toml [upgrade] auto_install 默认开）；关掉它。
+			KIMI_CLI_NO_AUTO_UPDATE: "1",
+		};
+
+		if (input.autonomousModeEnabled && !hasCliOption(args, "--yolo") && !hasCliOption(args, "-y")) {
+			args.push("--yolo");
+		}
+		if (input.startInPlanMode && !hasCliOption(args, "--plan")) {
+			args.push("--plan");
+		}
+		if (input.resumeFromTrash && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
+			args.push("--continue");
+		}
+
+		// hook 只能声明在 kimi 已解析 home 的 config.toml；派生一个 Kanban 托管的 seeded
+		// KIMI_CODE_HOME（软链登录态 + 注入 Kanban hooks），不改动用户全局 ~/.kimi-code。
+		const hooks = resolveHookContext(input);
+		if (hooks) {
+			env.KIMI_CODE_HOME = await seedKanbanManagedKimiCodeHome(process.env);
+			Object.assign(
+				env,
+				createHookRuntimeEnv({
+					taskId: hooks.taskId,
+					workspaceId: hooks.workspaceId,
+				}),
+			);
+		}
+
+		const trimmed = input.prompt.trim();
+		const deferredStartupInput = !input.resumeFromTrash && trimmed ? toBracketedPasteSubmission(trimmed) : undefined;
+
+		return {
+			args,
+			env,
+			deferredStartupInput,
+			detectOutputTransition: kimiPromptDetector,
+			shouldInspectOutputForTransition: shouldInspectKimiOutputForTransition,
+		};
+	},
+};
+
 const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	claude: claudeAdapter,
 	codex: codexAdapter,
@@ -1732,6 +1811,7 @@ const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	droid: droidAdapter,
 	kiro: kiroAdapter,
 	cline: clineAdapter,
+	kimi: kimiAdapter,
 };
 
 export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promise<PreparedAgentLaunch> {

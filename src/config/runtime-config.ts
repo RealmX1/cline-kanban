@@ -145,7 +145,8 @@ function normalizeAgentId(agentId: RuntimeAgentId | string | null | undefined): 
 			agentId === "droid" ||
 			agentId === "kiro" ||
 			agentId === "cursor" ||
-			agentId === "cline") &&
+			agentId === "cline" ||
+			agentId === "kimi") &&
 		isRuntimeAgentLaunchSupported(agentId)
 	) {
 		return agentId;
