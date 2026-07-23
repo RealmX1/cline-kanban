@@ -1,15 +1,16 @@
 import { type BeforeCapture, DragDropContext, Droppable, type DropResult } from "@hello-pangea/dnd";
 import { ChevronDown, ChevronRight, Play, RotateCcw, Trash2 } from "lucide-react";
-import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BoardCard } from "@/components/board-card";
-import { SelectedTaskPinBar } from "@/components/detail-panels/selected-task-pin-bar";
 import { StageHeaderLabel } from "@/components/detail-panels/stage-header-label";
+import { StageHeaderRails } from "@/components/detail-panels/stage-header-rails";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
+import { TaskCardBody, type TaskCardBusinessProps } from "@/components/task-card-body";
 import { Button } from "@/components/ui/button";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
-import { type SelectedCardPinState, useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
+import { useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
+import { useStageHeaderPinLayout } from "@/hooks/use-stage-header-pin-layout";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { findCardColumnId, isCardDropDisabled } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumn, BoardColumnId, CardSelection } from "@/types";
@@ -22,7 +23,6 @@ function ColumnSection({
 	column,
 	selectedCardId,
 	defaultOpen,
-	pinState,
 	onCardClick,
 	taskSessions,
 	onStartTask,
@@ -48,8 +48,6 @@ function ColumnSection({
 	column: BoardColumn;
 	selectedCardId: string;
 	defaultOpen: boolean;
-	/** 选中卡当前的钉住状态：用于「含选中卡 section」在 pinTop 时去重原生卡头（见下方 headerSticky）。 */
-	pinState: SelectedCardPinState;
 	onCardClick: (card: BoardCardModel) => void;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	onStartTask?: (taskId: string) => void;
@@ -94,30 +92,57 @@ function ColumnSection({
 		ensureVisibleIndex: selectedIndex >= 0 ? selectedIndex : undefined,
 	});
 
-	useEffect(() => {
-		if (!column.cards.some((card) => card.id === selectedCardId)) {
-			return;
-		}
-		setOpen(true);
-	}, [column.cards, selectedCardId]);
-
-	// 原生 sticky 区段卡头（解决「滚过在视 stage 卡头后分不清当前所属 stage」）：浏览器自动 swap、零 JS 抖动。
-	// 去重：含选中卡的 section 在 pinTop 时，其原生卡头与浮动条里的卡头重复 → 该 section 卡头改非 sticky；
-	// 其余情形（pinBottom / hidden，或不含选中卡的 section）照常 sticky，充当「当前在视 stage 卡头」。
-	// top 引用 scrollport 上由面板写的 --kb-selected-pin-top：pinTop 时 = 浮动条高度，使卡头停在浮动条下方。
 	const containsSelectedCard = selectedIndex >= 0;
-	const headerSticky = !(containsSelectedCard && pinState === "pinTop");
+	// 折叠焦点 stage 时焦点卡仍「留存」：只渲染焦点卡本身（保活真实 data-task-id 几何），其余卡不渲染。
+	// 焦点卡因此永不 0×0 → useSelectedCardPinState / useStageHeaderPinLayout 无需特判，且钉住 rail 里的
+	// 焦点卡是 pinnedClone（不带 data-task-id），唯一性不破。非焦点 section 折叠仍整体 display:none（保留
+	// 原 MutationObserver 的 style 翻转触发）。卡头本身改为随内容自然滚动（static）——「当前所属 stage」
+	// 现由 StageHeaderRails 的顶/底手风琴始终呈现，不再依赖各 section 的原生 sticky 卡头。
+	const isCollapsedFocusedPeek = !open && containsSelectedCard;
+	const isBodyHidden = !open && !containsSelectedCard;
+	const renderedCards = isCollapsedFocusedPeek
+		? column.cards.filter((card) => card.id === selectedCardId)
+		: column.cards.slice(0, visibleCount);
+
+	// 卡片的领域 props（与是否包 Draggable 无关），供列表内可拖卡（BoardCard）与折叠 peek 的非拖卡
+	// （裸 TaskCardBody）共用，确保两处业务行为一致。
+	const buildCardBusinessProps = (card: BoardCardModel): TaskCardBusinessProps => ({
+		card,
+		columnId: column.id,
+		sessionSummary: taskSessions[card.id],
+		selected: card.id === selectedCardId,
+		onStart: onStartTask,
+		onMoveToTrash: onMoveToTrashTask,
+		onMoveToValidation: onMoveToValidationTask,
+		onMoveToReview: onMoveToReviewTask,
+		onRestoreFromTrash: onRestoreFromTrashTask,
+		onDeleteTask,
+		onCommit: onCommitTask,
+		onOpenPr: onOpenPrTask,
+		isCommitLoading: commitTaskLoadingById?.[card.id] ?? false,
+		isOpenPrLoading: openPrTaskLoadingById?.[card.id] ?? false,
+		isMoveToTrashLoading: moveToTrashLoadingById?.[card.id] ?? false,
+		workspacePath,
+		defaultClineModelId,
+		defaultAgentId,
+		onSaveTitle,
+		onOpenTaskEditor: column.id === "backlog" && onEditTask ? () => onEditTask(card) : undefined,
+		onClick: () => {
+			if (column.id === "backlog") {
+				onEditTask?.(card);
+				return;
+			}
+			onCardClick(card);
+		},
+	});
 
 	return (
-		<div className="bg-surface-1 rounded-lg shrink-0 border border-border">
+		<div className="bg-surface-1 rounded-lg shrink-0 border border-border" data-stage-section-id={column.id}>
 			<div
 				style={{
 					display: "flex",
 					alignItems: "center",
 					height: 40,
-					position: headerSticky ? "sticky" : "static",
-					top: "var(--kb-selected-pin-top, 0px)",
-					zIndex: 4,
 					background: "var(--color-surface-1)",
 				}}
 			>
@@ -190,7 +215,7 @@ function ColumnSection({
 					/>
 				) : null}
 			</div>
-			<div style={{ display: open ? "block" : "none" }}>
+			<div style={{ display: isBodyHidden ? "none" : "block" }}>
 				<Droppable droppableId={column.id} type={cardDropType} isDropDisabled={isDropDisabled}>
 					{(provided) => {
 						return (
@@ -203,50 +228,22 @@ function ColumnSection({
 									padding: 8,
 								}}
 							>
-								{(() => {
-									const items: ReactNode[] = [];
-									let draggableIndex = 0;
-									for (const card of column.cards.slice(0, visibleCount)) {
-										items.push(
-											<BoardCard
-												key={card.id}
-												card={card}
-												index={draggableIndex}
-												columnId={column.id}
-												sessionSummary={taskSessions[card.id]}
-												selected={card.id === selectedCardId}
-												onStart={onStartTask}
-												onMoveToTrash={onMoveToTrashTask}
-												onMoveToValidation={onMoveToValidationTask}
-												onMoveToReview={onMoveToReviewTask}
-												onRestoreFromTrash={onRestoreFromTrashTask}
-												onDeleteTask={onDeleteTask}
-												onCommit={onCommitTask}
-												onOpenPr={onOpenPrTask}
-												isCommitLoading={commitTaskLoadingById?.[card.id] ?? false}
-												isOpenPrLoading={openPrTaskLoadingById?.[card.id] ?? false}
-												isMoveToTrashLoading={moveToTrashLoadingById?.[card.id] ?? false}
-												workspacePath={workspacePath}
-												defaultClineModelId={defaultClineModelId}
-												defaultAgentId={defaultAgentId}
-												onSaveTitle={onSaveTitle}
-												onOpenTaskEditor={
-													column.id === "backlog" && onEditTask ? () => onEditTask(card) : undefined
-												}
-												onClick={() => {
-													if (column.id === "backlog") {
-														onEditTask?.(card);
-														return;
-													}
-													onCardClick(card);
-												}}
-											/>,
-										);
-										draggableIndex += 1;
-									}
-									return items;
-								})()}
-								{hasMore ? (
+								{isCollapsedFocusedPeek
+									? // 折叠焦点 stage 的 peek：焦点卡渲染为非拖拽的裸 TaskCardBody（不包 <Draggable>、
+										// 不传 index/drag）。此前它经 BoardCard 走 draggableIndex 从 0 起算的循环，得到假的
+										// Draggable index=0；而落地 splice 用真实 source.index，焦点卡真实索引非 0 时会跨列
+										// 移错卡（数据损坏）。裸 TaskCardBody 仍输出唯一真实 data-task-id、保留 onClick 与动作
+										// 按钮、维持折叠留存 peek，且 peek 卡本身不可拖，从根上消除假 index。
+										renderedCards.map((card) => (
+											<TaskCardBody key={card.id} {...buildCardBusinessProps(card)} />
+										))
+									: // 展开：BoardCard 包 <Draggable>，index 从 0 连续（@hello-pangea/dnd 要求 Droppable 内
+										// draggable index 连续从 0），且 renderedCards 是 column.cards.slice(0, …)，故 Draggable
+										// index 与真实 column.cards 索引一致，落地 splice 用的 source.index 精确对应被拖卡。
+										renderedCards.map((card, draggableIndex) => (
+											<BoardCard key={card.id} index={draggableIndex} {...buildCardBusinessProps(card)} />
+										))}
+								{open && hasMore ? (
 									<LoadMoreTasksSentinel
 										ref={loadMoreSentinelRef}
 										remainingCount={remainingCount}
@@ -319,7 +316,6 @@ export function ColumnContextPanel({
 }): React.ReactElement {
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-	const pinBarRootRef = useRef<HTMLDivElement | null>(null);
 
 	const handleBeforeCapture = useCallback(
 		(start: BeforeCapture) => {
@@ -336,49 +332,26 @@ export function ColumnContextPanel({
 		[onTaskDragEnd],
 	);
 
-	// 选中卡是左列唯一钉住机制：前沿一触视口边即由浮动钉住条接管（stage 内 + 跨 stage 持续可见）。
-	// 拖拽进行中真实卡会被 portal 到 body 致目标丢失，故拖拽期暂停侦测、归 hidden。
+	// 焦点「卡」是否滚出视口（hidden / pinTop / pinBottom）：决定焦点 stage 的 rail 条目是否挂焦点卡克隆、
+	// 以及 scrollport 是否标 data-selected-pinned 隐藏真实焦点卡。拖拽期真实卡被 portal 到 body 致目标丢失，
+	// 故暂停侦测、归 hidden。
 	const selectedCardPinState = useSelectedCardPinState({
 		selectedTaskId: selection.card.id,
 		scrollRootRef: scrollContainerRef,
 		enabled: activeDragSourceColumnId == null,
 	});
 
-	// 浮动条钉顶（pinTop）时，原生 sticky 区段卡头须停在浮动条「下方」，否则被不透明浮动条（z-5）盖住。
-	// 实测浮动条高度写入 scrollport 的 --kb-selected-pin-top（区段卡头 top 引用它）；pinBottom/hidden
-	// 时浮动条不在顶沿、offset 归 0，卡头照常停在 top:0。用 ResizeObserver 跟随浮动条高度变化（卡体展开等）。
-	useEffect(() => {
-		const scrollContainer = scrollContainerRef.current;
-		if (!scrollContainer) {
-			return;
-		}
-		if (selectedCardPinState !== "pinTop") {
-			scrollContainer.style.setProperty("--kb-selected-pin-top", "0px");
-			return;
-		}
-		const pinBarRoot = pinBarRootRef.current;
-		if (!pinBarRoot) {
-			scrollContainer.style.setProperty("--kb-selected-pin-top", "0px");
-			return;
-		}
-		const applyOffset = (): void => {
-			// 原生 sticky 卡头的 top 从 scrollport「内容盒」上沿（即 p-2 顶 padding 之下）起算，而浮动条
-			// overlay 贴在 scrollport 边框盒上沿（top:0）。若直接用浮动条全高，卡头会比浮动条底沿再低 paddingTop，
-			// 露出 paddingTop 宽的「可透视缝」。故扣掉 scrollport 顶 padding，使卡头上沿与浮动条底沿严丝合缝。
-			const paddingTop = Number.parseFloat(getComputedStyle(scrollContainer).paddingTop) || 0;
-			const offset = Math.max(0, pinBarRoot.offsetHeight - paddingTop);
-			scrollContainer.style.setProperty("--kb-selected-pin-top", `${offset}px`);
-		};
-		applyOffset();
-		if (typeof ResizeObserver === "undefined") {
-			return;
-		}
-		const resizeObserver = new ResizeObserver(applyOffset);
-		resizeObserver.observe(pinBarRoot);
-		return () => {
-			resizeObserver.disconnect();
-		};
-	}, [selectedCardPinState]);
+	// 全部 stage「卡头」的手风琴钉住布局（已滚过钉顶、未到达钉底、中间随流）。把单卡钉住的几何模式推广到
+	// N 个卡头；由 StageHeaderRails 以脱流 overlay 渲染。拖拽期同样暂停（真实卡 portal 到 body、几何失真）。
+	const columnIds = useMemo(() => selection.allColumns.map((column) => column.id), [selection.allColumns]);
+	const stageHeaderPinLayout = useStageHeaderPinLayout({
+		scrollRootRef: scrollContainerRef,
+		columnIds,
+		focusedColumnId: selection.column.id,
+		focusedTaskId: selection.card.id,
+		focusedCardPinState: selectedCardPinState,
+		enabled: activeDragSourceColumnId == null,
+	});
 
 	useEffect(() => {
 		const scrollContainer = scrollContainerRef.current;
@@ -458,7 +431,6 @@ export function ColumnContextPanel({
 							column={column}
 							selectedCardId={selection.card.id}
 							defaultOpen={column.id !== "trash"}
-							pinState={selectedCardPinState}
 							onCardClick={(card) => onCardSelect(card.id)}
 							taskSessions={taskSessions}
 							onStartTask={column.id === "backlog" ? onStartTask : undefined}
@@ -490,28 +462,27 @@ export function ColumnContextPanel({
 					))}
 				</div>
 			</DragDropContext>
-			{selectedCardPinState !== "hidden" ? (
-				<SelectedTaskPinBar
-					selection={selection}
-					pinState={selectedCardPinState}
-					scrollRootRef={scrollContainerRef}
-					pinBarRootRef={pinBarRootRef}
-					taskSessions={taskSessions}
-					onStartTask={onStartTask}
-					onMoveToTrashTask={onMoveToTrashTask}
-					onMoveToValidationTask={onMoveToValidationTask}
-					onRestoreFromTrashTask={onRestoreFromTrashTask}
-					onDeleteTask={onDeleteTask}
-					onCommitTask={onCommitTask}
-					onOpenPrTask={onOpenPrTask}
-					commitTaskLoadingById={commitTaskLoadingById}
-					openPrTaskLoadingById={openPrTaskLoadingById}
-					moveToTrashLoadingById={moveToTrashLoadingById}
-					workspacePath={workspacePath}
-					defaultClineModelId={defaultClineModelId}
-					defaultAgentId={defaultAgentId}
-				/>
-			) : null}
+			<StageHeaderRails
+				selection={selection}
+				topPinnedColumnIds={stageHeaderPinLayout.topPinnedColumnIds}
+				bottomPinnedColumnIds={stageHeaderPinLayout.bottomPinnedColumnIds}
+				focusedCardPinState={selectedCardPinState}
+				scrollRootRef={scrollContainerRef}
+				taskSessions={taskSessions}
+				onStartTask={onStartTask}
+				onMoveToTrashTask={onMoveToTrashTask}
+				onMoveToValidationTask={onMoveToValidationTask}
+				onRestoreFromTrashTask={onRestoreFromTrashTask}
+				onDeleteTask={onDeleteTask}
+				onCommitTask={onCommitTask}
+				onOpenPrTask={onOpenPrTask}
+				commitTaskLoadingById={commitTaskLoadingById}
+				openPrTaskLoadingById={openPrTaskLoadingById}
+				moveToTrashLoadingById={moveToTrashLoadingById}
+				workspacePath={workspacePath}
+				defaultClineModelId={defaultClineModelId}
+				defaultAgentId={defaultAgentId}
+			/>
 		</div>
 	);
 }

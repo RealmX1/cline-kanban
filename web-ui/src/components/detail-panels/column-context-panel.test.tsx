@@ -6,20 +6,68 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import type { BoardColumn, CardSelection } from "@/types";
 
+// BoardCard = 列表内的可拖卡（包 <Draggable>）。mock 暴露 data-card-variant="draggable" 与它收到的
+// Draggable index（data-draggable-index），供断言「展开态焦点卡以真实、连续的 index 拖拽」。
 vi.mock("@/components/board-card", () => ({
 	BoardCard: ({
 		card,
+		index,
 		selected,
 		onMoveToTrash,
 		onMoveToValidation,
 	}: {
 		card: { id: string; prompt: string };
+		index: number;
 		selected?: boolean;
 		onMoveToTrash?: (taskId: string) => void;
 		onMoveToValidation?: (taskId: string) => void;
 	}): React.ReactElement => {
 		return (
-			<div data-task-id={card.id} data-selected={selected ? "true" : "false"}>
+			<div
+				data-task-id={card.id}
+				data-selected={selected ? "true" : "false"}
+				data-card-variant="draggable"
+				data-draggable-index={String(index)}
+			>
+				{card.prompt}
+				{onMoveToTrash ? (
+					<button type="button" aria-label={`move-to-done-${card.id}`} onClick={() => onMoveToTrash(card.id)} />
+				) : null}
+				{onMoveToValidation ? (
+					<button
+						type="button"
+						aria-label={`move-to-validation-${card.id}`}
+						onClick={() => onMoveToValidation(card.id)}
+					/>
+				) : null}
+			</div>
+		);
+	},
+}));
+
+// TaskCardBody = 裸卡体（无 <Draggable>、不收 index）。折叠 peek 的焦点卡与 StageHeaderRails 的钉住克隆
+// 都走这里。mock 忠实还原真实契约：pinnedClone 不输出 data-task-id（保全局唯一），非 clone 输出真实 id 且
+// data-card-variant="static"（不可拖），供断言「peek 卡不带假 Draggable index、不可拖」。
+vi.mock("@/components/task-card-body", () => ({
+	TaskCardBody: ({
+		card,
+		selected,
+		pinnedClone,
+		onMoveToTrash,
+		onMoveToValidation,
+	}: {
+		card: { id: string; prompt: string };
+		selected?: boolean;
+		pinnedClone?: boolean;
+		onMoveToTrash?: (taskId: string) => void;
+		onMoveToValidation?: (taskId: string) => void;
+	}): React.ReactElement => {
+		return (
+			<div
+				data-task-id={pinnedClone ? undefined : card.id}
+				data-selected={selected ? "true" : "false"}
+				data-card-variant={pinnedClone ? "pinned-clone" : "static"}
+			>
 				{card.prompt}
 				{onMoveToTrash ? (
 					<button type="button" aria-label={`move-to-done-${card.id}`} onClick={() => onMoveToTrash(card.id)} />
@@ -376,6 +424,62 @@ describe("ColumnContextPanel", () => {
 		});
 
 		expect(onRestoreFromTrashTask).not.toHaveBeenCalled();
+	});
+
+	it("keeps only the focused card visible when its stage is collapsed (peek), as a non-draggable card with a unique data-task-id", async () => {
+		// 焦点卡故意放在 review 列的第 2 位（真实 index 1，非 0）——这是原缺陷的触发条件：折叠 peek 若把它
+		// 当成 Draggable index=0 渲染，跨列拖放会按 source.index=0 splice 掉第 1 张（task-review-sibling）而非焦点卡。
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: [] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{
+				id: "review",
+				title: "Review",
+				cards: [createCard("task-review-sibling", "Other review task"), createCard("task-review", "Review task")],
+			},
+			{ id: "trash", title: "Done", cards: [] },
+		];
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-review")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+				/>,
+			);
+		});
+
+		// Review starts expanded: both cards render as draggable BoardCards, each carrying its REAL, contiguous
+		// column index (sibling=0, focused=1). This is what makes cross-column drop splice the correct card.
+		const expandedSibling = container.querySelector('[data-task-id="task-review-sibling"]');
+		const expandedFocused = container.querySelector('[data-task-id="task-review"]');
+		expect(expandedSibling).not.toBeNull();
+		expect(expandedFocused).not.toBeNull();
+		expect(expandedSibling?.getAttribute("data-card-variant")).toBe("draggable");
+		expect(expandedSibling?.getAttribute("data-draggable-index")).toBe("0");
+		expect(expandedFocused?.getAttribute("data-card-variant")).toBe("draggable");
+		expect(expandedFocused?.getAttribute("data-draggable-index")).toBe("1");
+
+		// Collapse the focused stage via its header toggle (the button carrying the "Review" label).
+		const reviewToggle = [...container.querySelectorAll("button")].find((button) =>
+			button.textContent?.includes("Review"),
+		);
+		expect(reviewToggle).toBeInstanceOf(HTMLButtonElement);
+		await act(async () => {
+			reviewToggle?.click();
+		});
+
+		// Peek: the focused card remains (exactly once — the rail clone carries no data-task-id), the sibling is gone.
+		expect(container.querySelectorAll('[data-task-id="task-review"]').length).toBe(1);
+		expect(container.querySelector('[data-task-id="task-review-sibling"]')).toBeNull();
+
+		// And it is rendered NON-draggable (static TaskCardBody, no Draggable index) — so it can no longer be
+		// dragged with a fake index-0 that would splice the wrong card. No draggable index is emitted for it.
+		const peekCard = container.querySelector('[data-task-id="task-review"]');
+		expect(peekCard?.getAttribute("data-card-variant")).toBe("static");
+		expect(peekCard?.getAttribute("data-draggable-index")).toBeNull();
 	});
 
 	it("wires the compact move actions per column (review gets both, in_progress none, validation done only)", async () => {

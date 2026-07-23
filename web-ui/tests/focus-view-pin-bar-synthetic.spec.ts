@@ -5,21 +5,20 @@ import { fileURLToPath } from "node:url";
 import { expect, type Page, test } from "@playwright/test";
 
 /**
- * Focus View 选中卡钉住条（重构后单一机制）的「真实浏览器」验证。
+ * Focus View「全 stage 卡头手风琴 + 折叠时焦点卡留存」的「真实浏览器」验证。
  *
- * 不连接 runtime（避免改动用户真实看板，也绕开 CORS 网关）。改用 page.setContent 在真实
- * Chromium 里忠实复刻实现：
- *  - 从 globals.css **逐字**注入「钉住期隐藏真实选中卡」规则与 .kb-detail-pin-bar overlay 规则；
- *  - 复刻 ColumnContextPanel → scrollport(.kb-detail-task-list-scroll) → stage section（含
- *    **原生 sticky 卡头**）→ Droppable padding → .kb-board-card-shell 的真实 DOM 嵌套与布局样式；
- *  - 用与 useSelectedCardPinState **逐行一致**的实时几何判定（sticky 语义：选中卡任一前沿触/越
- *    视口对应边沿即钉到该边；整卡在视口内 → hidden；零尺寸 → hidden），并镜像面板的三项副作用：
- *    ① scrollport 写 data-selected-pinned；② pinTop 时把浮动条实测高度写入 --kb-selected-pin-top
- *    使原生 sticky 卡头停在浮动条下方；③ 含选中卡 section 的原生卡头在 pinTop 时改非 sticky 去重。
+ * 不连接 runtime（避免改动用户真实看板，也绕开 CORS 网关）。改用 page.setContent 在真实 Chromium
+ * 里忠实复刻实现：
+ *  - 从 globals.css **逐字**注入「钉住期隐藏真实焦点卡」规则与 `.kb-stage-header-rail` overlay 规则；
+ *  - 复刻 ColumnContextPanel → scrollport(.kb-detail-task-list-scroll) → stage section（`data-stage-section-id`，
+ *    卡头随内容自然滚动的 static 卡头）→ Droppable padding → .kb-board-card-shell 的真实 DOM 嵌套与布局；
+ *  - 用与 useSelectedCardPinState / useStageHeaderPinLayout **逐行一致**的实时几何：焦点卡 hidden/pinTop/
+ *    pinBottom；全 stage 卡头的前向（钉顶）/后向（钉底）分类（焦点条目按真实卡高计入堆叠偏移），并按结果
+ *    渲染顶/底两条脱流 rail（焦点 stage 的条目在焦点卡钉同侧时挂 pinnedClone，克隆不带 data-task-id）。
  *
- * 由此验证「真实 getBoundingClientRect 实时几何 + 真实 position:sticky 卡头几何 + overlay 定位 +
- * visibility 隐藏」这一集成层——mock 掉布局几何的 jsdom 单测无法覆盖。hook 自身的判定逻辑另由
- * src/hooks/use-selected-card-pin-state.test.ts 覆盖。
+ * 由此验证「真实 getBoundingClientRect 实时几何 + overlay 定位 + visibility 隐藏 + 折叠留存」这一集成层——
+ * mock 掉布局几何的 jsdom 单测无法覆盖。分类算法本身另由 src/hooks/use-stage-header-pin-layout.test.ts、
+ * 焦点卡钉住判定由 src/hooks/use-selected-card-pin-state.test.ts 覆盖。
  */
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -44,13 +43,20 @@ const hideRealCardRule = extractCssRule(
 	globalsCss,
 	'.kb-detail-task-list-scroll[data-selected-pinned="true"] .kb-board-card-shell[data-selected="true"]',
 );
-const pinBarBaseRule = extractCssRule(globalsCss, ".kb-detail-pin-bar {");
-const pinTopRule = extractCssRule(globalsCss, '.kb-detail-pin-bar[data-pin="top"]');
-const pinBottomRule = extractCssRule(globalsCss, '.kb-detail-pin-bar[data-pin="bottom"]');
+const railBaseRule = extractCssRule(globalsCss, ".kb-stage-header-rail {");
+const railTopRule = extractCssRule(globalsCss, '.kb-stage-header-rail[data-edge="top"]');
+const railBottomRule = extractCssRule(globalsCss, '.kb-stage-header-rail[data-edge="bottom"]');
+const railEntryPointerRule = extractCssRule(globalsCss, ".kb-stage-header-rail > *");
 
-const SELECTED_TASK_ID = "selected-card";
-const SELECTED_STAGE_TITLE = "In Progress";
-const IN_VIEW_STAGE_TITLE = "Review";
+const FOCUSED_TASK_ID = "selected-card";
+const FOCUSED_COLUMN_ID = "in_progress";
+// 顺序即文档序；焦点为 in_progress（index 1）。
+const STAGES: { id: string; title: string; count: number }[] = [
+	{ id: "backlog", title: "Backlog", count: 8 },
+	{ id: "in_progress", title: "In Progress", count: 4 },
+	{ id: "review", title: "Review", count: 8 },
+	{ id: "done", title: "Done", count: 3 },
+];
 
 function buildSyntheticPage(): string {
 	return `<!doctype html>
@@ -69,11 +75,12 @@ function buildSyntheticPage(): string {
   .kb-board-card-shell { position: relative; z-index: 1; }
   .kb-board-card-shell[data-selected="true"] { outline: 1px solid var(--color-accent); border-radius: var(--radius-md); }
 
-  /* >>> 以下四块从 globals.css 逐字注入 <<< */
+  /* >>> 以下从 globals.css 逐字注入 <<< */
   ${hideRealCardRule}
-  ${pinBarBaseRule}
-  ${pinTopRule}
-  ${pinBottomRule}
+  ${railBaseRule}
+  ${railTopRule}
+  ${railBottomRule}
+  ${railEntryPointerRule}
 
   /* 复刻面板/滚动容器/section 的真实布局（与 column-context-panel.tsx 内联样式一致）。 */
   #panel { position: relative; display: flex; flex-direction: column; width: 360px; height: 480px;
@@ -82,9 +89,9 @@ function buildSyntheticPage(): string {
            overscroll-behavior: contain; overflow-anchor: none;
            display: flex; flex-direction: column; gap: 8px; padding: 8px; }
   .stage-section { background: var(--color-surface-1); border-radius: 8px; border: 1px solid var(--color-border); flex-shrink: 0; }
-  /* 原生 sticky 区段卡头（镜像 column-context-panel.tsx 的卡头内联 style）：top 引用 --kb-selected-pin-top。 */
+  /* 卡头随内容自然滚动（static）——「当前所属 stage」现由 rail 手风琴呈现。 */
   .stage-header { display: flex; align-items: center; height: 40px; padding: 0 12px; font-weight: 600; font-size: 13px;
-           position: sticky; top: var(--kb-selected-pin-top, 0px); z-index: 4; background: var(--color-surface-1); }
+           background: var(--color-surface-1); }
   .stage-droppable { display: flex; flex-direction: column; padding: 8px; }
   .card-visual { border: 1px solid var(--color-border-bright); background: var(--color-surface-2); border-radius: 6px;
                  padding: 10px; height: 64px; overflow: hidden; }
@@ -99,12 +106,18 @@ function buildSyntheticPage(): string {
   (function () {
     var scroll = document.getElementById("scroll");
     var panel = document.getElementById("panel");
-    var selectedHeader = null; // 含选中卡 section 的原生卡头，用于 pinTop 去重。
+    var STAGES = ${JSON.stringify(STAGES)};
+    var COLUMN_IDS = STAGES.map(function (s) { return s.id; });
+    var TITLE_BY_ID = {};
+    STAGES.forEach(function (s) { TITLE_BY_ID[s.id] = s.title; });
+    var FOCUSED_COLUMN_ID = ${JSON.stringify(FOCUSED_COLUMN_ID)};
+    var FOCUSED_TASK_ID = ${JSON.stringify(FOCUSED_TASK_ID)};
+    var HEADER = 40, GAP = 8, SECTION_BORDER = 2, FOCUSED_CARD_PADDING = 16;
 
     function makeCard(id, label, selected) {
       var shell = document.createElement("div");
       shell.className = "kb-board-card-shell";
-      shell.setAttribute("data-task-id", id);
+      if (id) shell.setAttribute("data-task-id", id);
       shell.setAttribute("data-selected", selected ? "true" : "false");
       var visual = document.createElement("div");
       visual.className = "card-visual";
@@ -113,98 +126,130 @@ function buildSyntheticPage(): string {
       return shell;
     }
 
-    function makeStage(title, count, opts) {
+    STAGES.forEach(function (stage) {
       var section = document.createElement("div");
       section.className = "stage-section";
+      section.setAttribute("data-stage-section-id", stage.id);
       var header = document.createElement("div");
       header.className = "stage-header";
-      header.setAttribute("data-stage", title);
-      header.textContent = title;
+      header.setAttribute("data-stage", stage.id);
+      header.textContent = stage.title;
       section.appendChild(header);
       var droppable = document.createElement("div");
       droppable.className = "stage-droppable";
-      for (var i = 0; i < count; i++) {
-        var isSel = opts && opts.selectedIndex === i;
+      for (var i = 0; i < stage.count; i++) {
+        var isSel = stage.id === FOCUSED_COLUMN_ID && i === 0;
         droppable.appendChild(
-          makeCard(isSel ? ${JSON.stringify(SELECTED_TASK_ID)} : title + "-card-" + i, title + " task " + (i + 1), isSel)
+          makeCard(isSel ? FOCUSED_TASK_ID : stage.id + "-card-" + i, stage.title + " task " + (i + 1), isSel),
         );
       }
       section.appendChild(droppable);
-      if (opts && opts.selectedIndex != null) selectedHeader = header;
-      return section;
+      scroll.appendChild(section);
+    });
+
+    // --- 焦点卡钉住判定（逐行同 useSelectedCardPinState：sticky 语义 + 0×0→hidden）。 ---
+    function computePinState() {
+      var target = scroll.querySelector('[data-task-id="' + FOCUSED_TASK_ID + '"]');
+      if (!target) return "hidden";
+      var cardRect = target.getBoundingClientRect();
+      if (cardRect.width === 0 && cardRect.height === 0) return "hidden";
+      var rootRect = scroll.getBoundingClientRect();
+      if (cardRect.top <= rootRect.top) return "pinTop";
+      if (cardRect.bottom >= rootRect.bottom) return "pinBottom";
+      return "hidden";
     }
 
-    scroll.appendChild(makeStage("Backlog", 8));
-    scroll.appendChild(makeStage(${JSON.stringify(SELECTED_STAGE_TITLE)}, 4, { selectedIndex: 0 }));
-    scroll.appendChild(makeStage(${JSON.stringify(IN_VIEW_STAGE_TITLE)}, 8));
+    // --- 全 stage 卡头钉住布局（逐行同 useStageHeaderPinLayout）。 ---
+    function computeLayout(pinState) {
+      var rootRect = scroll.getBoundingClientRect();
+      if (rootRect.bottom <= rootRect.top) return { top: [], bottom: [] };
+      var rootTop = rootRect.top, rootBottom = rootRect.bottom;
+      var focusedIndex = COLUMN_IDS.indexOf(FOCUSED_COLUMN_ID);
+      var focusedCardHeight = 0;
+      if (focusedIndex >= 0) {
+        var fc = scroll.querySelector('[data-task-id="' + FOCUSED_TASK_ID + '"]');
+        if (fc) focusedCardHeight = fc.getBoundingClientRect().height;
+      }
+      var tops = [], bottoms = [];
+      COLUMN_IDS.forEach(function (id) {
+        var sec = scroll.querySelector('[data-stage-section-id="' + id + '"]');
+        if (!sec) { tops.push(NaN); bottoms.push(NaN); return; }
+        var r = sec.getBoundingClientRect();
+        tops.push(r.top); bottoms.push(r.bottom);
+      });
+      function entryHeight(i, edge) {
+        var base = HEADER + SECTION_BORDER;
+        return i === focusedIndex && pinState === edge ? base + FOCUSED_CARD_PADDING + focusedCardHeight : base;
+      }
+      var topOffset = rootTop, topPinned = [], lastTop = -1;
+      for (var i = 0; i < COLUMN_IDS.length; i++) {
+        if (isNaN(tops[i])) break;
+        if (tops[i] <= topOffset) {
+          topPinned.push(COLUMN_IDS[i]); lastTop = i;
+          topOffset += entryHeight(i, "pinTop") + GAP;
+        } else break;
+      }
+      var botOffset = rootBottom, botRev = [];
+      for (var j = COLUMN_IDS.length - 1; j > lastTop; j--) {
+        if (isNaN(tops[j]) || isNaN(bottoms[j])) break;
+        var slot = botOffset - entryHeight(j, "pinBottom");
+        var overflow = bottoms[j] > rootBottom;
+        if (tops[j] >= slot && (overflow || botRev.length > 0)) {
+          botRev.push(COLUMN_IDS[j]);
+          botOffset -= entryHeight(j, "pinBottom") + GAP;
+        } else break;
+      }
+      botRev.reverse();
+      return { top: topPinned, bottom: botRev };
+    }
 
-    // --- 浮动钉住条（含 stage 卡头 + 选中卡克隆）。 ---
-    var pinBar = null;
-    function removePinBar() { if (pinBar) { pinBar.remove(); pinBar = null; } }
-    function renderPinBar(state) {
-      if (state === "hidden") { removePinBar(); return; }
-      if (!pinBar) {
-        pinBar = document.createElement("div");
-        pinBar.className = "kb-detail-pin-bar";
-        pinBar.setAttribute("data-testid", "selected-task-pin-bar");
-        var section = document.createElement("div");
-        section.className = "stage-section";
+    // --- rail 渲染：清空后按分类重建顶/底两条 overlay。 ---
+    function removeRail(edge) {
+      var existing = panel.querySelector('.kb-stage-header-rail[data-edge="' + edge + '"]');
+      if (existing) existing.remove();
+    }
+    function buildRail(edge, ids, pinState) {
+      if (!ids.length) return;
+      var rail = document.createElement("div");
+      rail.className = "kb-stage-header-rail";
+      rail.setAttribute("data-edge", edge);
+      rail.setAttribute("data-testid", "stage-header-rail");
+      rail.style.right = (scroll.offsetWidth - scroll.clientWidth) + "px";
+      ids.forEach(function (id) {
+        var entry = document.createElement("div");
+        entry.className = "stage-section";
         var header = document.createElement("div");
         header.className = "stage-header";
-        header.setAttribute("data-testid", "pin-bar-stage-title");
-        // 浮动条里的卡头不参与 scrollport sticky（它在脱流的 overlay 内），固定为 static 即可。
-        header.style.position = "static";
-        header.textContent = ${JSON.stringify(SELECTED_STAGE_TITLE)};
-        var droppable = document.createElement("div");
-        droppable.className = "stage-droppable";
-        var clone = makeCard("pinned-clone", ${JSON.stringify(SELECTED_STAGE_TITLE)} + " task 1", true);
-        clone.removeAttribute("data-task-id"); // 钉住克隆不得携带 data-task-id（保证全局唯一）。
-        droppable.appendChild(clone);
-        section.appendChild(header);
-        section.appendChild(droppable);
-        pinBar.appendChild(section);
-        pinBar.style.right = (scroll.offsetWidth - scroll.clientWidth) + "px";
-        panel.appendChild(pinBar);
-      }
-      pinBar.setAttribute("data-pin", state === "pinTop" ? "top" : "bottom");
+        header.setAttribute("data-rail-stage", id);
+        header.textContent = TITLE_BY_ID[id];
+        entry.appendChild(header);
+        var withCard = id === FOCUSED_COLUMN_ID && pinState === (edge === "top" ? "pinTop" : "pinBottom");
+        if (withCard) {
+          var wrap = document.createElement("div");
+          wrap.className = "stage-droppable";
+          wrap.setAttribute("data-testid", "stage-header-rail-focused-card");
+          var clone = makeCard(null, TITLE_BY_ID[FOCUSED_COLUMN_ID] + " clone", true);
+          wrap.appendChild(clone);
+          entry.appendChild(wrap);
+        }
+        rail.appendChild(entry);
+      });
+      panel.appendChild(rail);
     }
 
-    // 镜像面板三项副作用：data-selected-pinned / --kb-selected-pin-top / 选中 section 卡头去重。
-    function applyModel(state) {
-      renderPinBar(state);
-      if (state === "hidden") scroll.removeAttribute("data-selected-pinned");
-      else scroll.setAttribute("data-selected-pinned", "true");
-      if (state === "pinTop" && pinBar) {
-        // 镜像 column-context-panel：扣掉 scrollport 顶 padding，使原生 sticky 卡头底贴浮动条无缝。
-        var paddingTop = parseFloat(getComputedStyle(scroll).paddingTop) || 0;
-        scroll.style.setProperty("--kb-selected-pin-top", Math.max(0, pinBar.offsetHeight - paddingTop) + "px");
-      } else {
-        scroll.style.setProperty("--kb-selected-pin-top", "0px");
-      }
-      if (selectedHeader) selectedHeader.style.position = state === "pinTop" ? "static" : "";
-    }
-
-    // 与 useSelectedCardPinState 逐行一致：sticky 语义的实时几何判定，rAF 合并。
     var frameId = 0;
     function computeNow() {
       frameId = 0;
-      var target = scroll.querySelector('[data-task-id="' + ${JSON.stringify(SELECTED_TASK_ID)} + '"]');
-      var state;
-      if (!target) {
-        state = "hidden";
-      } else {
-        var cardRect = target.getBoundingClientRect();
-        if (cardRect.width === 0 && cardRect.height === 0) {
-          state = "hidden";
-        } else {
-          var rootRect = scroll.getBoundingClientRect();
-          if (cardRect.top <= rootRect.top) state = "pinTop";
-          else if (cardRect.bottom >= rootRect.bottom) state = "pinBottom";
-          else state = "hidden";
-        }
-      }
-      applyModel(state);
-      window.__pinState = state;
+      var pinState = computePinState();
+      if (pinState === "hidden") scroll.removeAttribute("data-selected-pinned");
+      else scroll.setAttribute("data-selected-pinned", "true");
+      var layout = computeLayout(pinState);
+      removeRail("top"); removeRail("bottom");
+      buildRail("top", layout.top, pinState);
+      buildRail("bottom", layout.bottom, pinState);
+      window.__pinState = pinState;
+      window.__topPinned = layout.top.join(",");
+      window.__bottomPinned = layout.bottom.join(",");
     }
     function schedule() {
       if (frameId !== 0) return;
@@ -217,9 +262,14 @@ function buildSyntheticPage(): string {
     new MutationObserver(schedule).observe(scroll, {
       childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["style"],
     });
-    // 折叠选中卡所在 stage（镜像 ColumnSection 的 display:none 折叠）：纯样式属性变更使真实卡变 0×0。
+
+    // 折叠焦点 stage：镜像 ColumnSection 的 peek 支路——只留焦点卡可见，隐藏同 stage 其余卡（纯样式变更，
+    // 焦点卡保活真实几何、永不 0×0）。MutationObserver 的 style 过滤据此重算。
     window.__collapseSelectedStage = function () {
-      scroll.children[1].querySelector(".stage-droppable").style.display = "none";
+      var sec = scroll.querySelector('[data-stage-section-id="' + FOCUSED_COLUMN_ID + '"]');
+      sec.querySelectorAll(".stage-droppable .kb-board-card-shell").forEach(function (card) {
+        if (card.getAttribute("data-task-id") !== FOCUSED_TASK_ID) card.style.display = "none";
+      });
     };
     window.__pinReady = true;
   })();
@@ -238,15 +288,14 @@ async function setScrollTop(page: Page, top: number | "max"): Promise<void> {
 	}, top);
 }
 
-// 把真实选中卡居中带回视口（确定性，不依赖硬编码的 scrollTop 估算）。
-async function scrollSelectedCardIntoView(page: Page): Promise<void> {
+async function scrollFocusedCardIntoView(page: Page): Promise<void> {
 	await page.evaluate((id) => {
 		document.querySelector(`[data-task-id="${id}"]`)?.scrollIntoView({ block: "center", inline: "nearest" });
-	}, SELECTED_TASK_ID);
+	}, FOCUSED_TASK_ID);
 }
 
-// 把选中卡上沿推到视口上沿之上（仍在自己 stage 内：后续 In Progress 卡仍在视）→ stage 内即产生 pinTop。
-async function scrollSelectedTopAboveViewport(page: Page): Promise<void> {
+// 把焦点卡上沿推到视口上沿之上（仍在自己 stage 内）→ stage 内即产生 pinTop。
+async function scrollFocusedTopAboveViewport(page: Page): Promise<void> {
 	await page.evaluate((id) => {
 		const scroll = document.getElementById("scroll");
 		const card = document.querySelector(`[data-task-id="${id}"]`);
@@ -256,7 +305,7 @@ async function scrollSelectedTopAboveViewport(page: Page): Promise<void> {
 		const cardRect = card.getBoundingClientRect();
 		const scrollRect = scroll.getBoundingClientRect();
 		scroll.scrollTop += cardRect.top - scrollRect.top + 24;
-	}, SELECTED_TASK_ID);
+	}, FOCUSED_TASK_ID);
 }
 
 function readState(page: Page): Promise<string | undefined> {
@@ -267,134 +316,132 @@ function realCardVisibility(page: Page): Promise<string | null> {
 	return page.evaluate((id) => {
 		const card = document.querySelector(`[data-task-id="${id}"]`);
 		return card ? getComputedStyle(card as HTMLElement).visibility : null;
-	}, SELECTED_TASK_ID);
+	}, FOCUSED_TASK_ID);
 }
 
-test.describe("Focus View pin bar (synthetic, real browser)", () => {
+test.describe("Focus View stage-header accordion (synthetic, real browser)", () => {
 	test.beforeEach(async ({ page }) => {
 		await page.setContent(buildSyntheticPage(), { waitUntil: "load" });
 		await page.waitForFunction(() => (window as unknown as { __pinReady?: boolean }).__pinReady === true);
 	});
 
-	test("selected card centered in view → no pin bar, real card visible, not pinned", async ({ page }) => {
-		await scrollSelectedCardIntoView(page);
+	test("focused card centered → no focused-card clone, real card visible, not pinned", async ({ page }) => {
+		await scrollFocusedCardIntoView(page);
 		await page.waitForFunction(() => (window as unknown as { __pinState?: string }).__pinState === "hidden");
-		await expect(page.getByTestId("selected-task-pin-bar")).toHaveCount(0);
+		await expect(page.getByTestId("stage-header-rail-focused-card")).toHaveCount(0);
 		expect(await realCardVisibility(page)).toBe("visible");
 		await expect(page.locator("#scroll")).not.toHaveAttribute("data-selected-pinned", "true");
 	});
 
-	test("scrolling the card's top past the viewport top (still in its own stage) pins to TOP, hides the real card, dedups the owning header", async ({
+	test("scrolling the focused card's top past the viewport top pins its stage to the TOP rail, with the card, hiding the real card", async ({
 		page,
 	}) => {
-		await scrollSelectedCardIntoView(page);
-		await scrollSelectedTopAboveViewport(page);
+		await scrollFocusedCardIntoView(page);
+		await scrollFocusedTopAboveViewport(page);
 		await page.waitForFunction(() => (window as unknown as { __pinState?: string }).__pinState === "pinTop");
 
-		const pinBar = page.getByTestId("selected-task-pin-bar");
-		await expect(pinBar).toBeVisible();
-		await expect(pinBar).toHaveAttribute("data-pin", "top");
-		// stage 卡头随行（无缝接管，卡头始终在钉住条里）。
-		await expect(page.getByTestId("pin-bar-stage-title")).toHaveText(SELECTED_STAGE_TITLE);
-		await expect(pinBar).toContainText(`${SELECTED_STAGE_TITLE} task 1`);
-		// 真实选中卡被隐藏（visibility:hidden）以免与克隆重影；scrollport 标记 data-selected-pinned。
+		// 焦点 stage 卡头进顶 rail（__topPinned 含之），且顶 rail 挂焦点卡克隆。
+		expect(await page.evaluate(() => (window as unknown as { __topPinned?: string }).__topPinned)).toContain(
+			FOCUSED_COLUMN_ID,
+		);
+		const focusedClone = page.locator(
+			'.kb-stage-header-rail[data-edge="top"] [data-testid="stage-header-rail-focused-card"]',
+		);
+		await expect(focusedClone).toHaveCount(1);
+		await expect(focusedClone).toContainText("In Progress");
+		// 真实焦点卡被 visibility:hidden 以免与克隆重影；scrollport 标 data-selected-pinned。
 		expect(await realCardVisibility(page)).toBe("hidden");
 		await expect(page.locator("#scroll")).toHaveAttribute("data-selected-pinned", "true");
-		// 去重：含选中卡 section 的原生卡头在 pinTop 时改为非 sticky（static），不与浮动条卡头重复。
-		const owningHeaderPosition = await page.evaluate(
-			(title) =>
-				getComputedStyle(document.querySelector(`#scroll .stage-header[data-stage="${title}"]`) as HTMLElement)
-					.position,
-			SELECTED_STAGE_TITLE,
-		);
-		expect(owningHeaderPosition).toBe("static");
 	});
 
-	test("scrolling to the bottom stage keeps pinTop and stacks the in-view stage header BELOW the pin bar (offset applied)", async ({
+	test("scrolling to the bottom stacks every passed stage header in the top rail, in document order", async ({
 		page,
 	}) => {
 		await setScrollTop(page, "max");
 		await page.waitForFunction(() => (window as unknown as { __pinState?: string }).__pinState === "pinTop");
-		const pinBar = page.getByTestId("selected-task-pin-bar");
-		await expect(pinBar).toHaveAttribute("data-pin", "top");
-
-		const geometry = await page.evaluate((title) => {
-			const bar = document.querySelector(".kb-detail-pin-bar") as HTMLElement | null;
-			const header = document.querySelector(`#scroll .stage-header[data-stage="${title}"]`) as HTMLElement | null;
-			if (!bar || !header) {
-				return null;
-			}
-			const barRect = bar.getBoundingClientRect();
-			const headerRect = header.getBoundingClientRect();
-			return {
-				barBottom: barRect.bottom,
-				headerTop: headerRect.top,
-				headerPosition: getComputedStyle(header).position,
-			};
-		}, IN_VIEW_STAGE_TITLE);
-
-		expect(geometry).not.toBeNull();
-		// 在视 stage（Review）的原生 sticky 卡头底贴浮动条「严丝合缝」——既不被压到下方留缝（旧 bug：露出
-		// scrollport 顶 padding 宽的可透视缝），也不卡在 top:0（offset 未生效）高于浮动条底沿。容差 1px。
-		expect(geometry?.headerPosition).toBe("sticky");
-		expect(Math.abs((geometry?.headerTop ?? -999) - (geometry?.barBottom ?? 999))).toBeLessThanOrEqual(1);
+		// 滚过的 backlog / in_progress / review 卡头按文档序堆叠进顶 rail（末列 done 可能随内容在中间带，也可能
+		// 因焦点卡使顶 rail 变高而被其覆盖一并进 rail——两者都合法，故只校验「文档序前缀」而非 done 的去留）。
+		const railOrder = await page.evaluate(() =>
+			[...document.querySelectorAll('.kb-stage-header-rail[data-edge="top"] [data-rail-stage]')].map((node) =>
+				node.getAttribute("data-rail-stage"),
+			),
+		);
+		expect(railOrder.slice(0, 3)).toEqual(["backlog", "in_progress", "review"]);
+		// 顶 rail 挂焦点卡克隆（焦点 stage 在顶 rail 且焦点卡 pinTop）。
+		await expect(
+			page.locator('.kb-stage-header-rail[data-edge="top"] [data-testid="stage-header-rail-focused-card"]'),
+		).toHaveCount(1);
 	});
 
-	test("scrolling above the selected stage pins the card to the BOTTOM edge, in-view header at the top", async ({
+	test("scrolling above the focused stage pins its card to the BOTTOM rail; earlier stages sit at the top", async ({
 		page,
 	}) => {
 		await setScrollTop(page, 0);
 		await page.waitForFunction(() => (window as unknown as { __pinState?: string }).__pinState === "pinBottom");
-		const pinBar = page.getByTestId("selected-task-pin-bar");
-		await expect(pinBar).toBeVisible();
-		await expect(pinBar).toHaveAttribute("data-pin", "bottom");
-		// pinBottom：offset=0，在视 stage（Backlog）卡头自然停在顶部（top:0 区域），不被浮动条压到下方。
-		const geometry = await page.evaluate(() => {
-			const header = document.querySelector('#scroll .stage-header[data-stage="Backlog"]') as HTMLElement | null;
-			const scroll = document.getElementById("scroll") as HTMLElement | null;
-			if (!header || !scroll) {
-				return null;
-			}
-			return { headerTop: header.getBoundingClientRect().top, scrollTop: scroll.getBoundingClientRect().top };
-		});
-		expect(geometry).not.toBeNull();
-		// 卡头贴近视口顶沿（容差含 scrollport 的 8px padding）。
-		expect(Math.abs((geometry?.headerTop ?? -999) - (geometry?.scrollTop ?? 999))).toBeLessThanOrEqual(12);
+		const focusedClone = page.locator(
+			'.kb-stage-header-rail[data-edge="bottom"] [data-testid="stage-header-rail-focused-card"]',
+		);
+		await expect(focusedClone).toHaveCount(1);
+		// 底 rail 含焦点及其后列；顶 rail 此时不含焦点。
+		expect(await page.evaluate(() => (window as unknown as { __bottomPinned?: string }).__bottomPinned)).toContain(
+			FOCUSED_COLUMN_ID,
+		);
 	});
 
-	test("the pinned clone carries no data-task-id (global uniqueness preserved)", async ({ page }) => {
+	test("the focused-card clone carries no data-task-id (global uniqueness preserved)", async ({ page }) => {
 		await setScrollTop(page, "max");
-		await expect(page.getByTestId("selected-task-pin-bar")).toBeVisible();
-		await expect(page.locator(`[data-task-id="${SELECTED_TASK_ID}"]`)).toHaveCount(1);
+		await expect(page.getByTestId("stage-header-rail-focused-card")).toHaveCount(1);
+		await expect(page.locator(`[data-task-id="${FOCUSED_TASK_ID}"]`)).toHaveCount(1);
 	});
 
-	test("regression: a single abrupt scroll jump (scrollbar drag) flips bottom→top", async ({ page }) => {
+	test("regression: a single abrupt scroll jump (scrollbar drag) flips the focused card bottom→top rail", async ({
+		page,
+	}) => {
 		await setScrollTop(page, 0);
-		const pinBar = page.getByTestId("selected-task-pin-bar");
-		await expect(pinBar).toHaveAttribute("data-pin", "bottom");
-		// 一次性跳到底：卡片从下方瞬移到上方（中途从不相交）。纯 IntersectionObserver 会停留在
-		// 过时的 "bottom"；实时几何重算正确翻到 "top"。
+		await expect(
+			page.locator('.kb-stage-header-rail[data-edge="bottom"] [data-testid="stage-header-rail-focused-card"]'),
+		).toHaveCount(1);
+		// 一次性跳到底：焦点卡从下方瞬移到上方（中途从不相交）。实时几何重算正确翻到 top rail。
 		await setScrollTop(page, "max");
-		await expect(pinBar).toHaveAttribute("data-pin", "top");
+		await expect(
+			page.locator('.kb-stage-header-rail[data-edge="top"] [data-testid="stage-header-rail-focused-card"]'),
+		).toHaveCount(1);
+		expect(await readState(page)).toBe("pinTop");
 	});
 
-	test("seam: returning the card to view hides the pin bar and restores the real card", async ({ page }) => {
+	test("seam: returning the focused card to view drops its clone and restores the real card", async ({ page }) => {
 		await setScrollTop(page, "max");
-		await expect(page.getByTestId("selected-task-pin-bar")).toBeVisible();
+		await expect(page.getByTestId("stage-header-rail-focused-card")).toHaveCount(1);
 		expect(await realCardVisibility(page)).toBe("hidden");
-		await scrollSelectedCardIntoView(page);
-		await expect(page.getByTestId("selected-task-pin-bar")).toHaveCount(0);
+		await scrollFocusedCardIntoView(page);
+		await expect(page.getByTestId("stage-header-rail-focused-card")).toHaveCount(0);
 		expect(await realCardVisibility(page)).toBe("visible");
 		await expect(page.locator("#scroll")).not.toHaveAttribute("data-selected-pinned", "true");
 	});
 
-	test("collapsing the selected card's stage (display:none) hides the pin bar (no stale clone)", async ({ page }) => {
-		await setScrollTop(page, "max");
-		await expect(page.getByTestId("selected-task-pin-bar")).toBeVisible();
+	// 需求核心（旧「折叠 → 钉住条消失」断言的反转）：折叠焦点 stage 后焦点任务仍留存。
+	test("collapsing the focused stage while its card is in view keeps the card visible (peek)", async ({ page }) => {
+		await scrollFocusedCardIntoView(page);
+		await page.waitForFunction(() => (window as unknown as { __pinState?: string }).__pinState === "hidden");
 		await page.evaluate(() =>
 			(window as unknown as { __collapseSelectedStage: () => void }).__collapseSelectedStage(),
 		);
-		await expect(page.getByTestId("selected-task-pin-bar")).toHaveCount(0);
-		expect(await readState(page)).toBe("hidden");
+		// 焦点卡仍在原位露出（真实卡，唯一 data-task-id），可见。
+		await expect(page.locator(`[data-task-id="${FOCUSED_TASK_ID}"]`)).toHaveCount(1);
+		expect(await realCardVisibility(page)).toBe("visible");
+	});
+
+	test("collapsing the focused stage while its card is scrolled off keeps it visible via the rail clone", async ({
+		page,
+	}) => {
+		await setScrollTop(page, "max");
+		await page.waitForFunction(() => (window as unknown as { __pinState?: string }).__pinState === "pinTop");
+		await expect(page.getByTestId("stage-header-rail-focused-card")).toHaveCount(1);
+		await page.evaluate(() =>
+			(window as unknown as { __collapseSelectedStage: () => void }).__collapseSelectedStage(),
+		);
+		// 折叠后焦点卡仍经 rail 克隆可见（不再像旧钉住条那样消失）。
+		await expect(page.getByTestId("stage-header-rail-focused-card")).toHaveCount(1);
+		expect(await readState(page)).toBe("pinTop");
 	});
 });

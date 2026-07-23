@@ -99,8 +99,8 @@ function TaskCardRowHoverActions({
 
 /**
  * 卡片的业务 props：与 DnD/钉住克隆等渲染容器无关的领域回调与数据。
- * `BoardCard`（看板内的可拖卡）、`TaskCardBody`（纯卡体）、`SelectedTaskPinBar`
- * （Focus View 跨 stage 浮动钉住条里的克隆卡）共用同一套，确保三处行为一致。
+ * `BoardCard`（看板内的可拖卡）、`TaskCardBody`（纯卡体）、`StageHeaderRails`
+ * （Focus View 卡头手风琴里焦点条目的克隆卡）共用同一套，确保三处行为一致。
  */
 export interface TaskCardBusinessProps {
 	card: BoardCardModel;
