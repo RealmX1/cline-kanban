@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 
-vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
+// 部分 mock：只替换 prepareAgentLaunch，其余导出（toBracketedPasteSubmission 等，程序化投递路径要用）
+// 保留真身——否则投递写入时会抛 "No export is defined on the mock" 的 unhandled rejection。
+vi.mock("../../../src/terminal/agent-session-adapters.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../../src/terminal/agent-session-adapters.js")>()),
 	prepareAgentLaunch: prepareAgentLaunchMock,
 }));
 
@@ -282,6 +285,175 @@ describe("TerminalSessionManager resume substantive guard", () => {
 		spawnedSessions[0]?.triggerData("Edited foo.ts and reran the tests.\n");
 		await settleOutputAnalysisBatch();
 		expect(manager.getSummary("task-codex-resume")?.lastSubstantiveOutputAt).not.toBeNull();
+	});
+
+	// 本 bug 的核心回归：`--resume <sessionId>` / `--fork-session` 这类续跑启动会重播整段既有
+	// transcript，却不带 resumeFromTrash，历史上因此漏武装 guard，重播把卡片「agent 上次响应」
+	// 刷成「刚刚」。武装判据改读 PreparedAgentLaunch.resumesPriorAgentConversation 后被覆盖。
+	// （adapter 侧「什么时候置这个位」由 agent-session-adapters.test.ts 覆盖；此处只钉 manager 的接线。）
+	it("arms the resume guard when the launch resumes a prior conversation without resumeFromTrash", async () => {
+		const spawnedSessions: MockPtySession[] = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		let launchResumesPriorAgentConversation = false;
+		prepareAgentLaunchMock.mockImplementation(async (input: { args: string[]; binary?: string }) => ({
+			binary: input.binary,
+			args: [...input.args],
+			env: {},
+			resumesPriorAgentConversation: launchResumesPriorAgentConversation,
+		}));
+
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-resume-existing",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-resume-existing",
+			prompt: "Implement the task",
+		});
+
+		spawnedSessions[0]?.triggerData("⏺ Earlier real agent response before the resume.\n");
+		await settleOutputAnalysisBatch();
+		const substantiveBefore = manager.getSummary("task-resume-existing")?.lastSubstantiveOutputAt ?? null;
+		expect(substantiveBefore).not.toBeNull();
+
+		// 第二次启动续跑既有会话（resumeFromTrash 仍缺省 false）。
+		launchResumesPriorAgentConversation = true;
+		wireStopToExit(spawnedSessions);
+		await manager.refreshTaskTerminal({
+			taskId: "task-resume-existing",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-resume-existing",
+			prompt: "Implement the task",
+		});
+
+		// 新进程重播整段旧 transcript：签名记忆是空的，若无 guard 这些行会被判为「全新实质产出」。
+		spawnedSessions[1]?.triggerData("⏺ Earlier real agent response before the resume.\n");
+		await settleOutputAnalysisBatch();
+		spawnedSessions[1]?.triggerData("⏺ And a second reprinted line.\n");
+		await settleOutputAnalysisBatch();
+
+		expect(manager.getSummary("task-resume-existing")?.lastSubstantiveOutputAt).toBe(substantiveBefore);
+	});
+
+	// 反向护栏：崩溃后的 auto-restart 用原始 prompt 全新重跑（args 里没有任何续跑旗标），
+	// 毫无重播——武装它只会把真实的新产出误冻住。故必须**不**武装。
+	it("does not arm the resume guard on a crash auto-restart that replays nothing", async () => {
+		const spawnedSessions: MockPtySession[] = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		// auto-restart 要求该 task 至少有一个 listener（见 shouldAutoRestart）。
+		manager.attach("task-auto-restart", {
+			onState: vi.fn(),
+			onOutput: vi.fn(),
+			onExit: vi.fn(),
+		});
+
+		await manager.startTaskSession({
+			taskId: "task-auto-restart",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-auto-restart",
+			prompt: "Implement the task",
+		});
+
+		spawnedSessions[0]?.triggerData("⏺ Earlier real agent response before the crash.\n");
+		await settleOutputAnalysisBatch();
+		const substantiveBefore = manager.getSummary("task-auto-restart")?.lastSubstantiveOutputAt ?? null;
+		expect(substantiveBefore).not.toBeNull();
+
+		spawnedSessions[0]?.triggerExit(1);
+		await vi.advanceTimersByTimeAsync(50);
+		expect(spawnedSessions[1]).toBeDefined();
+
+		// 全新一轮的真实产出必须照常推进时间戳。
+		await vi.advanceTimersByTimeAsync(5_000);
+		spawnedSessions[1]?.triggerData("⏺ Brand new output from the restarted run.\n");
+		await settleOutputAnalysisBatch();
+
+		expect(manager.getSummary("task-auto-restart")?.lastSubstantiveOutputAt ?? 0).toBeGreaterThan(
+			substantiveBefore ?? 0,
+		);
+	});
+
+	// 反向护栏：全新首次启动不带任何续跑旗标 → 必须不武装，否则卡片永远不显示响应时间。
+	it("does not arm the resume guard on a first-ever spawn", async () => {
+		const spawnedSessions: MockPtySession[] = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(111, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-first-spawn",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-first-spawn",
+			prompt: "Implement the task",
+		});
+
+		expect(manager.getSummary("task-first-spawn")?.lastSubstantiveOutputAt ?? null).toBeNull();
+		spawnedSessions[0]?.triggerData("⏺ The very first real response.\n");
+		await settleOutputAnalysisBatch();
+
+		expect(manager.getSummary("task-first-spawn")?.lastSubstantiveOutputAt ?? null).not.toBeNull();
+	});
+
+	// task-chat / RVF 的程序化投递是一条「已提交用户轮」，与手敲等价 → 必须解除 guard，
+	// 否则 Gemini 之外那些经 paste 恢复的路径在 re-spawn 后会永久冻住实质戳。
+	it("clears the resume guard when a task-chat submission is delivered", async () => {
+		const spawnedSessions: MockPtySession[] = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(111, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+		prepareAgentLaunchMock.mockImplementation(async (input: { args: string[]; binary?: string }) => ({
+			binary: input.binary,
+			args: [...input.args],
+			env: {},
+		}));
+
+		const manager = new TerminalSessionManager();
+		// droid 无可门控的交互提示符信号 → 投递就绪判定为 "immediate"，沉降窗口后即写入。
+		await manager.startTaskSession({
+			taskId: "task-chat-clears-guard",
+			agentId: "droid",
+			binary: "droid",
+			args: [],
+			cwd: "/tmp/task-chat-clears-guard",
+			prompt: "",
+			resumeFromTrash: true,
+		});
+
+		manager.transitionToRunning("task-chat-clears-guard");
+		spawnedSessions[0]?.triggerData("Replayed transcript from the previous session.\n");
+		await settleOutputAnalysisBatch();
+		expect(manager.getSummary("task-chat-clears-guard")?.lastSubstantiveOutputAt ?? null).toBeNull();
+
+		manager.submitTaskChatInputWhenReady("task-chat-clears-guard", "Please continue with the next step.");
+		// 沉降 TASK_CHAT_INPUT_DELIVERY_SETTLE_MS 后投递落地并解除 guard。
+		await vi.advanceTimersByTimeAsync(1_500);
+
+		spawnedSessions[0]?.triggerData("Working on the next step now.\n");
+		await settleOutputAnalysisBatch();
+		expect(manager.getSummary("task-chat-clears-guard")?.lastSubstantiveOutputAt ?? null).not.toBeNull();
 	});
 
 	it("does not clear resume guard on PostToolUse-driven to_in_progress (no UserPromptSubmit)", async () => {

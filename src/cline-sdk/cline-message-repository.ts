@@ -179,10 +179,59 @@ export function createTaskEntryFromPersistedSession(
 	entry.summary = applySessionFacets({
 		...entry.summary,
 		...summaryPatch,
+		// Cline 的 summary 不跨进程重启持久化，重建后 lastSubstantiveOutputAt 会是 null，
+		// 随后第一个 status 心跳就把它镜像成「刚刚」——卡片因此在重启后谎报 agent 刚响应过。
+		// 从落盘消息里回捞真实的 agent 产出时间戳来重建它。优先级：调用方显式给的 > 落盘回捞 >
+		// 默认（null）。回捞不到（旧盘无 ts）时保持 null——卡片隐去该段，宁可不显示也不显示错的。
+		lastSubstantiveOutputAt:
+			summaryPatch.lastSubstantiveOutputAt ??
+			resolveLastAgentOutputMessageTimestamp(messages) ??
+			entry.summary.lastSubstantiveOutputAt ??
+			null,
 		taskId,
 		updatedAt: Date.now(),
 	});
 	return entry;
+}
+
+// 落盘消息里最后一条「agent 产出」消息的时间戳（毫秒），无可用 ts 时返回 null。
+// 取 max 而非「最后一条的 ts」：落盘顺序理论上单调，但 max 对乱序 / 缺 ts 的条目天然稳健。
+function resolveLastAgentOutputMessageTimestamp(messages: ClineSdkPersistedMessage[]): number | null {
+	let latest: number | null = null;
+	for (const message of messages) {
+		if (!isPersistedAgentOutputMessage(message)) {
+			continue;
+		}
+		const timestamp = message.ts;
+		if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) {
+			continue;
+		}
+		if (latest === null || timestamp > latest) {
+			latest = timestamp;
+		}
+	}
+	return latest;
+}
+
+// 该落盘消息记录的是不是「agent 侧产出」——回捞口径必须与 live 路径一致。
+// assistant 消息（文本 / reasoning / tool_use）显然算。
+// 工具执行结果同样算：live 的 tool-finished 事件只发 lastOutputAt，经 updateSummary 漏斗镜像推进
+// lastSubstantiveOutputAt（见 cline-event-adapter.ts 的 tool-finished / content_end(tool) 分支），
+// 而 SDK 把这条消息落盘成 role:"user" —— @clinebot/core 内部 role:"tool" 的 ModelMessage 在回写
+// MessageWithMetadata 时被改写成 "user"、ts 取工具完成时刻的 createdAt。若只认 assistant，
+// 「以工具完成收尾」的会话重启后会回捞到更早的时间、甚至整轮无 assistant 文本时回捞成 null。
+// 反之，真正的用户发言（字符串正文，或含 text / image / file 块）不能算——那是「用户上次说话」。
+// 判据取「纯 tool_result 载体」：SDK 的拆分保证工具结果不与用户正文同处一条消息
+// （@clinebot/shared 的 MessageWithMetadata.role 只有 "user" | "assistant"），混合内容一律按用户
+// 发言处理——宁可少报一次 agent 响应，也不把用户发言错认成 agent 响应。
+function isPersistedAgentOutputMessage(message: ClineSdkPersistedMessage): boolean {
+	if (message.role === "assistant") {
+		return true;
+	}
+	if (typeof message.content === "string") {
+		return false;
+	}
+	return message.content.length > 0 && message.content.every((block) => block.type === "tool_result");
 }
 
 function hydratePersistedSessionMessages(taskId: string, messages: ClineSdkPersistedMessage[]): ClineTaskMessage[] {
