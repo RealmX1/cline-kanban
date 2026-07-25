@@ -1605,11 +1605,28 @@ export type RuntimeTerminalAgentModelSelectionOptionsRequest = z.infer<
 	typeof runtimeTerminalAgentModelSelectionOptionsRequestSchema
 >;
 
+/**
+ * 一个 terminal agent 模型选项属于哪一档：
+ * - `latest_tracking_alias`：别名，语义是「该家族的最新模型」，由 CLI 在启动时解析到当时的具体版本
+ *   （如 `--model opus`）。label 不含版本号，因此永远不会因上游发布新模型而错标。
+ * - `pinned_version`：钉死到某个具体版本的完整模型名（如 `claude-opus-4-8`），label 带版本号。
+ *
+ * 运行时不变量：后端产出的每个 option 都带分档（`terminal-agent-model-selection.ts` 的
+ * `deduplicateModelOptions` 对 codex / cursor 这类不区分档位的解析结果缺省补 `latest_tracking_alias`）。
+ * 字段仍保持 optional，只是为了容纳本字段引入**之前**写入的 localStorage 缓存；前端正是靠
+ * 「有 option 却无一条带分档」这条跨 agent 通用判据识别那批旧缓存并当作 cache miss 丢弃，
+ * 否则升级用户首屏会重新渲染出旧的错标标签（如 `opus` 标成 "Opus 4.8"）。
+ * 读取侧解析时未标注一律按 `latest_tracking_alias` 处理。
+ */
+export const runtimeTerminalAgentModelSelectionGroupSchema = z.enum(["latest_tracking_alias", "pinned_version"]);
+export type RuntimeTerminalAgentModelSelectionGroup = z.infer<typeof runtimeTerminalAgentModelSelectionGroupSchema>;
+
 export const runtimeTerminalAgentModelSelectionOptionSchema = z.object({
 	modelId: z.string(),
 	label: z.string(),
 	description: z.string().optional(),
 	isCurrent: z.boolean().optional(),
+	modelSelectionGroup: runtimeTerminalAgentModelSelectionGroupSchema.optional(),
 });
 export type RuntimeTerminalAgentModelSelectionOption = z.infer<typeof runtimeTerminalAgentModelSelectionOptionSchema>;
 

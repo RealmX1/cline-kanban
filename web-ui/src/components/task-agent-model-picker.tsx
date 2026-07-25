@@ -1,8 +1,10 @@
+import * as Collapsible from "@radix-ui/react-collapsible";
 import {
 	getRuntimeAgentCatalogEntry,
 	getRuntimeLaunchSupportedAgentCatalog,
 	KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
 } from "@runtime-agent-catalog";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -31,6 +33,7 @@ import type {
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTerminalAgentModelSelectionAgentId,
+	RuntimeTerminalAgentModelSelectionGroup,
 	RuntimeTerminalAgentModelSelectionOptionsResponse,
 } from "@/runtime/types";
 
@@ -47,6 +50,66 @@ export interface TaskAgentPickerTerminalModelOption {
 	value: string;
 	label: string;
 	description?: string;
+	/**
+	 * 决定渲染在哪一档：`latest_tracking_alias`（永远可见的别名行）还是 `pinned_version`
+	 * （默认收起的具体版本行）。缺省视作别名，于是 codex / cursor 与升级前的缓存条目都照旧单行渲染。
+	 */
+	modelSelectionGroup?: RuntimeTerminalAgentModelSelectionGroup;
+}
+
+/** 收起组里没有条目时（codex / cursor / 降级 fallback）不渲染展开触发器，UI 与改动前完全一致。 */
+function isPinnedVersionModelOption(option: TaskAgentPickerTerminalModelOption): boolean {
+	return option.modelSelectionGroup === "pinned_version";
+}
+
+/**
+ * 判定一条 localStorage 缓存是否写于 `modelSelectionGroup` 引入之前。
+ *
+ * 后端保证「每个 option 都带分档」（`deduplicateModelOptions` 对 codex / cursor 这类不区分档位的
+ * 解析结果缺省补 `latest_tracking_alias`），所以「有 option 却无一条带分档」只可能来自旧版本写下的
+ * 响应。这类缓存的标签停留在改动前的错标状态（`opus` 标成 "Opus 4.8"，而它实跑的是最新 Opus），
+ * 必须当作 cache miss 丢弃，否则升级用户首屏又会看到错标 chip、且 pinned 折叠区恒为空。
+ *
+ * 判据刻意是「无一条带分档」而不是「存在某条缺分档」：后者会把 codex / cursor 的合法响应
+ * （历史上整份都不带该字段）永久判成过期，缓存再也 seed 不了。
+ */
+function isTaskAgentModelCacheWrittenBeforeModelSelectionGroup(
+	response: RuntimeTerminalAgentModelSelectionOptionsResponse,
+): boolean {
+	return response.options.length > 0 && !response.options.some((option) => option.modelSelectionGroup);
+}
+
+/** 别名行与「具体版本」收起行渲染的是同一种 chip，抽出来避免两处各维护一份样式与选中态。 */
+function TerminalAgentModelOptionButton({
+	option,
+	isSelected,
+	disabled,
+	onSelect,
+}: {
+	option: TaskAgentPickerTerminalModelOption;
+	isSelected: boolean;
+	disabled: boolean;
+	onSelect: (option: TaskAgentPickerTerminalModelOption) => void;
+}): ReactElement {
+	return (
+		<Tooltip content={option.description ?? option.label}>
+			<button
+				type="button"
+				aria-label={option.label}
+				aria-pressed={isSelected}
+				className={cn(
+					"inline-flex h-8 items-center justify-center rounded-md border px-2 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-border-focus focus:ring-offset-1 focus:ring-offset-surface-0",
+					isSelected
+						? "border-accent bg-accent/10 text-text-primary"
+						: "border-border-bright bg-surface-2 text-text-secondary hover:border-border-focus hover:bg-surface-3 hover:text-text-primary",
+				)}
+				disabled={disabled}
+				onClick={() => onSelect(option)}
+			>
+				{option.label}
+			</button>
+		</Tooltip>
+	);
 }
 
 /** Stable empty default so the agentOptions memo doesn't rebuild when no agents prop is passed. */
@@ -185,6 +248,7 @@ export function useTaskAgentModelPicker({
 			const defaultOption: TaskAgentPickerTerminalModelOption = {
 				value: "",
 				label: response.defaultLabel || fallbackDefaultOption.label,
+				modelSelectionGroup: "latest_tracking_alias",
 			};
 			const explicitOptions = response.options
 				.filter((option) => option.modelId.trim().length > 0)
@@ -193,15 +257,25 @@ export function useTaskAgentModelPicker({
 					value: option.modelId,
 					label: option.label || option.modelId,
 					...(option.description ? { description: option.description } : {}),
+					...(option.modelSelectionGroup ? { modelSelectionGroup: option.modelSelectionGroup } : {}),
 				}));
 			setTerminalAgentDefaultModelId(response.defaultModelId);
 			setTerminalAgentModelOptions([defaultOption, ...explicitOptions]);
 		};
 
-		const cached = readTaskAgentModelListCache<RuntimeTerminalAgentModelSelectionOptionsResponse>(cacheKey);
-		// 带 warning 的历史缓存是修复前被降级 fallback 污染的结果（列表退化为单条 Default）——不拿它 seed，
-		// 改显示 fallbackDefaultOption 等首次成功探测覆盖，让修复前的旧污染不必等下次成功即自愈。
-		if (cached && !cached.warning) {
+		const cachedResponse = readTaskAgentModelListCache<RuntimeTerminalAgentModelSelectionOptionsResponse>(cacheKey);
+		// 只有「真实成功探测 + 带分档」的缓存才配 seed，其余一律降级成 cache miss（`cached = null`），
+		// 这样下面的 warning 分支与 .catch 分支也会把降级响应 apply 出来，而不是把旧内容一直挂在界面上：
+		//   - 带 warning 的历史缓存是修复前被降级 fallback 污染的结果（列表退化为单条 Default）；
+		//   - 无分档的历史缓存写于 `modelSelectionGroup` 引入之前，标签停在错标状态（`opus` → "Opus 4.8"）。
+		// 两者都改显示 fallbackDefaultOption 等首次成功探测覆盖，让旧污染不必等下次成功即自愈。
+		const cached =
+			cachedResponse &&
+			!cachedResponse.warning &&
+			!isTaskAgentModelCacheWrittenBeforeModelSelectionGroup(cachedResponse)
+				? cachedResponse
+				: null;
+		if (cached) {
 			applyResponse(cached);
 		} else {
 			setTerminalAgentModelOptions([fallbackDefaultOption]);
@@ -630,6 +704,41 @@ export function TaskAgentModelPicker({
 			? terminalAgentModelOverrideSettings.modelId
 			: "";
 
+	// 别名（含 Default 占位）常驻第一行；钉版本项进入默认收起的第二行。
+	const latestTrackingAliasModelOptions = useMemo(
+		() => terminalAgentModelOptions.filter((option) => !isPinnedVersionModelOption(option)),
+		[terminalAgentModelOptions],
+	);
+	const pinnedVersionModelOptions = useMemo(
+		() => terminalAgentModelOptions.filter(isPinnedVersionModelOption),
+		[terminalAgentModelOptions],
+	);
+	const [isPinnedVersionGroupOpen, setIsPinnedVersionGroupOpen] = useState(false);
+	// 选中项落在收起组里时（例如上次选的是 Opus 4.8）必须自动展开，否则选中的 chip 不可见、
+	// 看上去像是选择丢了。只负责「打开」，用户之后仍可手动收起。
+	const isSelectedTerminalAgentModelPinned = pinnedVersionModelOptions.some(
+		(option) => option.value === selectedTerminalAgentModelId,
+	);
+	useEffect(() => {
+		if (isSelectedTerminalAgentModelPinned) {
+			setIsPinnedVersionGroupOpen(true);
+		}
+	}, [isSelectedTerminalAgentModelPinned]);
+
+	const selectTerminalAgentModelOption = useCallback(
+		(option: TaskAgentPickerTerminalModelOption) => {
+			if (!isTerminalAgentModelSelectionAgentId(effectiveAgentId)) {
+				return;
+			}
+			if (!option.value) {
+				onTerminalAgentModelOverrideSettingsChange?.(undefined);
+				return;
+			}
+			onTerminalAgentModelOverrideSettingsChange?.({ agentId: effectiveAgentId, modelId: option.value });
+		},
+		[effectiveAgentId, onTerminalAgentModelOverrideSettingsChange],
+	);
+
 	// When models finish loading and the currently selected model isn't in the
 	// options list, auto-select the first real model so the button never shows
 	// "No models available". Pick the first non-empty option (skipping the
@@ -836,44 +945,46 @@ export function TaskAgentModelPicker({
 						Model{isLoadingTerminalAgentModels ? " (loading\u2026)" : ""}
 					</span>
 					<div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Agent model">
-						{terminalAgentModelOptions.map((option) => {
-							const isSelectedModelOption = selectedTerminalAgentModelId === option.value;
-							return (
-								<Tooltip
-									key={option.value || "default-terminal-agent-model"}
-									content={option.description ?? option.label}
-								>
-									<button
-										type="button"
-										aria-label={option.label}
-										aria-pressed={isSelectedModelOption}
-										className={cn(
-											"inline-flex h-8 items-center justify-center rounded-md border px-2 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-border-focus focus:ring-offset-1 focus:ring-offset-surface-0",
-											isSelectedModelOption
-												? "border-accent bg-accent/10 text-text-primary"
-												: "border-border-bright bg-surface-2 text-text-secondary hover:border-border-focus hover:bg-surface-3 hover:text-text-primary",
-										)}
-										disabled={isLoadingTerminalAgentModels && terminalAgentModelOptions.length <= 1}
-										onClick={() => {
-											if (!isTerminalAgentModelSelectionAgentId(effectiveAgentId)) {
-												return;
-											}
-											if (!option.value) {
-												onTerminalAgentModelOverrideSettingsChange?.(undefined);
-												return;
-											}
-											onTerminalAgentModelOverrideSettingsChange?.({
-												agentId: effectiveAgentId,
-												modelId: option.value,
-											});
-										}}
-									>
-										{option.label}
-									</button>
-								</Tooltip>
-							);
-						})}
+						{latestTrackingAliasModelOptions.map((option) => (
+							<TerminalAgentModelOptionButton
+								key={option.value || "default-terminal-agent-model"}
+								option={option}
+								isSelected={selectedTerminalAgentModelId === option.value}
+								disabled={isLoadingTerminalAgentModels && terminalAgentModelOptions.length <= 1}
+								onSelect={selectTerminalAgentModelOption}
+							/>
+						))}
 					</div>
+					{pinnedVersionModelOptions.length > 0 ? (
+						<Collapsible.Root open={isPinnedVersionGroupOpen} onOpenChange={setIsPinnedVersionGroupOpen}>
+							<Collapsible.Trigger asChild>
+								<button
+									type="button"
+									className="group flex cursor-pointer items-center gap-1 rounded text-[11px] text-text-tertiary transition-colors hover:text-text-secondary"
+								>
+									{isPinnedVersionGroupOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+									Pinned versions ({pinnedVersionModelOptions.length})
+								</button>
+							</Collapsible.Trigger>
+							<Collapsible.Content>
+								<div
+									className="mt-1.5 flex flex-wrap items-center gap-1.5"
+									role="group"
+									aria-label="Pinned agent model versions"
+								>
+									{pinnedVersionModelOptions.map((option) => (
+										<TerminalAgentModelOptionButton
+											key={option.value}
+											option={option}
+											isSelected={selectedTerminalAgentModelId === option.value}
+											disabled={isLoadingTerminalAgentModels && terminalAgentModelOptions.length <= 1}
+											onSelect={selectTerminalAgentModelOption}
+										/>
+									))}
+								</div>
+							</Collapsible.Content>
+						</Collapsible.Root>
+					) : null}
 				</div>
 			) : null}
 		</div>

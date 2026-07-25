@@ -9,6 +9,7 @@ import type {
 	RuntimeClineProviderCatalogItem,
 	RuntimeClineProviderModel,
 	RuntimeTaskClineSettings,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
 } from "@/runtime/types";
 
 const fetchClineProviderCatalogMock = vi.hoisted(() => vi.fn());
@@ -68,8 +69,19 @@ beforeEach(() => {
 afterEach(() => {
 	act(() => root.unmount());
 	container.remove();
+	window.localStorage.clear();
 	vi.restoreAllMocks();
 });
+
+const TASK_AGENT_MODEL_LIST_CACHE_KEY_PREFIX = "kanban:task-agent-model-cache:";
+
+function seedTaskAgentModelListCache(key: string, value: unknown): void {
+	window.localStorage.setItem(TASK_AGENT_MODEL_LIST_CACHE_KEY_PREFIX + key, JSON.stringify(value));
+}
+
+function readTaskAgentModelListCacheRaw(key: string): string | null {
+	return window.localStorage.getItem(TASK_AGENT_MODEL_LIST_CACHE_KEY_PREFIX + key);
+}
 
 describe("useTaskAgentModelPicker – clineProviderOptions", () => {
 	it("shows all providers except the default, regardless of enabled flag", async () => {
@@ -926,7 +938,7 @@ describe("useTaskAgentModelPicker – installed + terminal model description pas
 		expect(installedByValue.get("cursor")).toBeNull();
 	});
 
-	it("carries the concrete model-id description through terminalAgentModelOptions", async () => {
+	it("carries the concrete model-id description and selection group through terminalAgentModelOptions", async () => {
 		fetchClineProviderCatalogMock.mockResolvedValue([]);
 		fetchClineProviderModelsMock.mockResolvedValue([]);
 		fetchTerminalAgentModelSelectionOptionsMock.mockResolvedValue({
@@ -934,8 +946,18 @@ describe("useTaskAgentModelPicker – installed + terminal model description pas
 			defaultModelId: null,
 			defaultLabel: "Default",
 			options: [
-				{ modelId: "opus", label: "Opus 4.8", description: "claude-opus-4-8" },
-				{ modelId: "haiku", label: "Haiku 4.5", description: "claude-haiku-4-5-20251001" },
+				{
+					modelId: "opus",
+					label: "Opus",
+					description: "--model opus · latest Opus",
+					modelSelectionGroup: "latest_tracking_alias",
+				},
+				{
+					modelId: "claude-opus-4-8",
+					label: "Opus 4.8",
+					description: "claude-opus-4-8 · previous Opus version",
+					modelSelectionGroup: "pinned_version",
+				},
 			],
 		});
 
@@ -964,12 +986,167 @@ describe("useTaskAgentModelPicker – installed + terminal model description pas
 		});
 
 		const byValue = new Map(snapshot!.terminalAgentModelOptions.map((o) => [o.value, o]));
-		expect(byValue.get("opus")).toEqual({ value: "opus", label: "Opus 4.8", description: "claude-opus-4-8" });
-		expect(byValue.get("haiku")).toEqual({
-			value: "haiku",
-			label: "Haiku 4.5",
-			description: "claude-haiku-4-5-20251001",
+		expect(byValue.get("opus")).toEqual({
+			value: "opus",
+			label: "Opus",
+			description: "--model opus · latest Opus",
+			modelSelectionGroup: "latest_tracking_alias",
 		});
+		expect(byValue.get("claude-opus-4-8")).toEqual({
+			value: "claude-opus-4-8",
+			label: "Opus 4.8",
+			description: "claude-opus-4-8 · previous Opus version",
+			modelSelectionGroup: "pinned_version",
+		});
+		// The synthetic "Default" placeholder belongs to the always-visible alias row.
+		expect(byValue.get("")?.modelSelectionGroup).toBe("latest_tracking_alias");
+	});
+});
+
+describe("useTaskAgentModelPicker – terminal agent model cache staleness", () => {
+	async function renderTerminalAgentHarness(agentId: RuntimeAgentId): Promise<UseTaskAgentModelPickerResult> {
+		fetchClineProviderCatalogMock.mockResolvedValue([]);
+		fetchClineProviderModelsMock.mockResolvedValue([]);
+
+		let snapshot: UseTaskAgentModelPickerResult | null = null;
+		const { useTaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+
+		function Harness() {
+			const result = useTaskAgentModelPicker({
+				active: true,
+				workspaceId: null,
+				agentId,
+				clineSettings: undefined,
+				defaultAgentId: "cline",
+				defaultProviderId: "cline",
+				defaultModelId: null,
+			});
+			useEffect(() => {
+				snapshot = result;
+			});
+			return null;
+		}
+
+		await act(async () => renderWithTooltipProvider(<Harness />));
+		await act(async () => {
+			await new Promise((r) => setTimeout(r, 0));
+		});
+
+		expect(snapshot).not.toBeNull();
+		return snapshot!;
+	}
+
+	it("discards a cache written before modelSelectionGroup instead of re-showing its mislabeled options", async () => {
+		// 升级前写下的响应：`opus` 的 label 钉着 "Opus 4.8"，而 `--model opus` 实跑的是最新 Opus。
+		// 整份缓存都没有 modelSelectionGroup —— 这正是「写于本字段引入之前」的指纹。
+		seedTaskAgentModelListCache("terminal:claude", {
+			agentId: "claude",
+			defaultModelId: null,
+			defaultLabel: "Default",
+			options: [
+				{ modelId: "opus", label: "Opus 4.8", description: "claude-opus-4-8" },
+				{ modelId: "sonnet", label: "Sonnet 4.6", description: "claude-sonnet-4-6" },
+			],
+		});
+		// 后端 `claude --help` 探测失败会 resolve 成带 warning 的降级响应而非 reject。修复前这条路径
+		// 会因「已有缓存」而短路，于是错标列表跨会话永久留存；现在旧缓存已被判成 cache miss，降级响应
+		// 会被 apply 出来，界面立刻退回 Default 而不是继续说谎。
+		fetchTerminalAgentModelSelectionOptionsMock.mockResolvedValue({
+			agentId: "claude",
+			defaultModelId: null,
+			defaultLabel: "Default",
+			options: [],
+			warning: "claude --help failed",
+		});
+
+		const snapshot = await renderTerminalAgentHarness("claude");
+
+		expect(snapshot.terminalAgentModelOptions.map((option) => option.label)).toEqual(["Default"]);
+		expect(snapshot.terminalAgentModelOptions.some((option) => option.label.includes("4.8"))).toBe(false);
+		// 降级响应绝不能落盘，否则会把好端端的列表污染成单条 Default 并跨会话持久化。
+		expect(readTaskAgentModelListCacheRaw("terminal:claude")).toContain("Opus 4.8");
+	});
+
+	it("still seeds an agent whose options are all latest-tracking aliases (cursor / codex regression guard)", async () => {
+		// 回归陷阱：若判据写成「存在某条缺分档 ⇒ 过期」或「必须有 pinned_version ⇒ 才算新」，
+		// cursor / codex 这种整份都只有别名档的响应就会被永久判成过期、缓存再也 seed 不了。
+		seedTaskAgentModelListCache("terminal:cursor", {
+			agentId: "cursor",
+			defaultModelId: "grok-4.5-high",
+			defaultLabel: "Default · Cursor Grok 4.5 High",
+			options: [
+				{ modelId: "auto", label: "Auto", modelSelectionGroup: "latest_tracking_alias" },
+				{
+					modelId: "grok-4.5-fast-high",
+					label: "Cursor Grok 4.5 High Fast",
+					modelSelectionGroup: "latest_tracking_alias",
+				},
+			],
+		});
+		// 探测失败时保留缓存列表，才能证明下面这些选项确实来自 seed 而不是本次请求。
+		fetchTerminalAgentModelSelectionOptionsMock.mockRejectedValue(new Error("cursor-agent missing"));
+
+		const snapshot = await renderTerminalAgentHarness("cursor");
+
+		expect(snapshot.terminalAgentModelOptions.map((option) => option.label)).toEqual([
+			"Default · Cursor Grok 4.5 High",
+			"Auto",
+			"Cursor Grok 4.5 High Fast",
+		]);
+		expect(snapshot.terminalAgentDefaultModelId).toBe("grok-4.5-high");
+	});
+});
+
+describe("TaskAgentModelPicker – pinned model version group", () => {
+	const CLAUDE_TERMINAL_MODEL_OPTIONS = [
+		{ value: "", label: "Default", modelSelectionGroup: "latest_tracking_alias" as const },
+		{ value: "opus", label: "Opus", modelSelectionGroup: "latest_tracking_alias" as const },
+		{ value: "claude-opus-4-8", label: "Opus 4.8", modelSelectionGroup: "pinned_version" as const },
+	];
+
+	async function renderClaudeModelPicker(
+		terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings,
+	) {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={"claude" as RuntimeAgentId}
+					onAgentIdChange={() => {}}
+					defaultAgentId={"claude" as RuntimeAgentId}
+					terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
+					onTerminalAgentModelOverrideSettingsChange={() => {}}
+					agentOptions={[{ value: "", label: "Claude Code" }]}
+					clineProviderOptions={[]}
+					clineModelOptions={[]}
+					terminalAgentModelOptions={CLAUDE_TERMINAL_MODEL_OPTIONS}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					providerDefaultModels={{}}
+				/>,
+			),
+		);
+		await act(async () => {
+			await new Promise((r) => setTimeout(r, 0));
+		});
+	}
+
+	it("hides pinned versions behind a collapsed trigger while alias options stay visible", async () => {
+		await renderClaudeModelPicker();
+
+		expect(findButtonByAriaLabel("Opus")).not.toBeNull();
+		expect(container.textContent).toContain("Pinned versions (1)");
+		// Radix keeps a collapsed Content unmounted, so the pinned chip must not be in the DOM at all.
+		expect(findButtonByAriaLabel("Opus 4.8")).toBeNull();
+	});
+
+	it("auto-expands the group when the selected model is a pinned version", async () => {
+		// Otherwise the selected chip lives inside a collapsed section and the selection looks lost.
+		await renderClaudeModelPicker({ agentId: "claude", modelId: "claude-opus-4-8" });
+
+		const pinnedOptionButton = findButtonByAriaLabel("Opus 4.8");
+		expect(pinnedOptionButton).not.toBeNull();
+		expect(pinnedOptionButton?.getAttribute("aria-pressed")).toBe("true");
 	});
 });
 
