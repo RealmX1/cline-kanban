@@ -22,6 +22,7 @@ import {
 	isSessionInActiveTurn,
 	mergeSummaryWithFacets,
 	resolveSessionFacets,
+	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 } from "../core/session-activity";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
@@ -124,6 +125,21 @@ const MIRROR_SERIALIZE_WARN_THRESHOLD_MS = 50;
 const OUTPUT_ANALYSIS_BATCH_WINDOW_MS = 50;
 // 攒批文本上限：达到即立即 flush，封顶单窗口内存与检测延迟（洪水输出时窗口内可积累的量）。
 const MAX_PENDING_OUTPUT_ANALYSIS_CHARS = 64 * 1024;
+// 实质输出分类器（agent-output-substance 的 strip + 行级签名比对）在 agent 回合的**额外**节流窗口：
+// 攒批已把频率压到 ≤20 次/秒，但重绘密集的 TUI 下这仍是 flush 里最贵的一项，而 lastSubstantiveOutputAt
+// 的两个消费者都不需要 50ms 精度（卡片展示是分钟尺度；Validation 停留判据只问「是否落在 5s 窗口内」）。
+// 故按本窗口节流实质检测＋打戳，adapter 输出转移检测与 output-reaction 扫描仍留在 50ms 攒批上（二者延迟敏感）。
+//
+// 取值**结构性**绑定 Validation 活跃窗口减 1s 安全余量，而非硬编码 4000：只要节流窗口 < 该活跃窗口，
+// 真正持续产出的会话每轮打戳间隔就必然短于窗口，isAgentActivelyProducingOutput 绝不会读到虚假的 >5s 空档。
+// 若日后有人调大 VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS，本值自动跟随，不会悄悄破坏该不变量。
+const SUBSTANTIVE_OUTPUT_ANALYSIS_THROTTLE_MS = VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS - 1_000;
+// 落在节流空档里的攒批**不被丢弃**，而是原样挂进「待分析尾巴」，等窗口末尾的补分析一并判定
+// （见 flushPendingOutputAnalysis 的 leading + trailing 双边节流）。本上限是该尾巴的字符封顶：
+// 超限丢最旧、保留最新（真实回复总在尾部，且尾巴只服务「这段窗口里有没有新内容」这一问）。
+// 它同时是节流真正的 CPU 收益来源——洪水输出下单个节流窗口能喂给分类器的字符数被钳成常数，
+// 而不是「按 50ms 逐批分析全部字节」。
+const MAX_DEFERRED_SUBSTANTIVE_OUTPUT_ANALYSIS_CHARS = 64 * 1024;
 
 function readStallThresholdMs(): number {
 	const raw = process.env.CLINE_TUI_STALL_MS;
@@ -192,12 +208,29 @@ interface ActiveProcessState {
 	// 只有带来「最近未见过的新词内容」的 chunk 才推进 summary.lastSubstantiveOutputAt
 	// （Validation 列自动打回判据 isAgentActivelyProducingOutput 读它）。见 agent-output-substance.ts。
 	agentOutputSubstanceMemory: AgentOutputSubstanceMemory;
-	// resumeFromTrash / refresh 后 agent 恢复 UI（Claude --continue 的 cache past due 三选一、
-	// 启动横幅、整段旧 transcript 重播）不是「agent 上次响应」——此 guard 为 true 时 handleTaskOutput
-	// 不推进 lastSubstantiveOutputAt。全部 TUI agent + resumeFromTrash 武装。
-	// 清除条件仅认「用户真·继续」：writeInput（人工手敲 / task-chat 提交，全 agent）或源自
-	// UserPromptSubmit 的 hook.to_in_progress（Claude）。刻意不认重播里的 ⏺/● 前缀、也不认
-	// PostToolUse 映射的 to_in_progress（自动续跑旧回合的中途活动），二者都会被旧 transcript 误触发。仅内存态。
+	// 上一次真正执行实质输出分类器的时刻（仅内存态，null = 本会话尚未跑过）。按
+	// SUBSTANTIVE_OUTPUT_ANALYSIS_THROTTLE_MS 节流 flushPendingOutputAnalysis 里的检测＋打戳，
+	// 与同一 flush 里的 adapter 转移检测 / output-reaction 扫描解耦（后两者仍逐攒批执行）。
+	lastSubstantiveOutputAnalysisAt: number | null;
+	// 落在节流空档里、尚未交给实质输出分类器的原始（未 strip）输出尾巴。节流只推迟判定、绝不丢内容：
+	// 曾经的实现整段丢弃空档内的攒批，于是「先 spinner chrome 吃掉配额 → 空档内产出唯一一段简短
+	// 真实回复 → 随即静默」这一序列里，那段回复永远无人分析。上限见
+	// MAX_DEFERRED_SUBSTANTIVE_OUTPUT_ANALYSIS_CHARS。空串 = 当前无待分析尾巴。仅内存态。
+	deferredSubstantiveOutputAnalysisText: string;
+	// 上述尾巴的「节流窗口末尾补分析」一次性定时器（同一时刻至多一个）。这是 trailing 边：
+	// 回合最后一段落在空档里的产出不会再有新的 flush 来触发分析，只能靠它兜住。
+	deferredSubstantiveOutputAnalysisTimer: NodeJS.Timeout | null;
+	// 续跑启动后 agent 的恢复 UI（Claude --continue 的 cache past due 三选一、启动横幅、整段旧
+	// transcript 重播）都不是「agent 上次响应」——此 guard 为 true 时 flushPendingOutputAnalysis
+	// 不推进 lastSubstantiveOutputAt，卡片因此保留续跑前的真实响应时间，而不是被重播刷成「刚刚」。
+	// 武装条件＝「本次启动会重播既有对话」：request.resumeFromTrash（全 adapter 共同的续跑触发器）
+	// 或 PreparedAgentLaunch.resumesPriorAgentConversation（--resume <sessionId> / fork 等其余续跑路径，
+	// 历史上只认前者、后者漏武装）。**不**按「该任务此前是否产出过」反推：崩溃后从原始 prompt 全新
+	// 重跑的 auto-restart 毫无重播，武装它只会把真实新产出误冻住。
+	// 清除条件仅认「用户真·继续」：writeInput（人工手敲，全 agent）、task-chat / RVF 的程序化已提交
+	// 用户轮投递、或源自 UserPromptSubmit / BeforeAgent 的 hook.to_in_progress（Gemini 走 paste 恢复、
+	// 不过 writeInput，必须靠该 hook 信号解除）。刻意不认重播里的 ⏺/● 前缀、不认 PostToolUse 映射的
+	// to_in_progress（自动续跑旧回合的中途活动）、也不认连接中断自动续跑注入，三者都非用户继续。仅内存态。
 	suppressSubstantiveOutputUntilContinues: boolean;
 	// 程序化「已提交用户轮」投递（RVF followup 等）的待决就绪轮询定时器：同一时刻至多一个，
 	// last-write-wins；命中就绪/deadline 写入后或 session 退出时清除。null 表示当前无待决投递。
@@ -450,14 +483,30 @@ function discardPendingOutputAnalysisTimerOnly(state: { outputAnalysisFlushTimer
 	}
 }
 
+// 清空「节流空档待分析尾巴」及其窗口末尾补分析定时器。两处调用：分析器真正执行时（尾巴已被消费）、
+// 以及会话 teardown（死会话的尾巴没有消费者）。
+function discardDeferredSubstantiveOutputAnalysis(state: {
+	deferredSubstantiveOutputAnalysisText: string;
+	deferredSubstantiveOutputAnalysisTimer: NodeJS.Timeout | null;
+}): void {
+	if (state.deferredSubstantiveOutputAnalysisTimer) {
+		clearTimeout(state.deferredSubstantiveOutputAnalysisTimer);
+		state.deferredSubstantiveOutputAnalysisTimer = null;
+	}
+	state.deferredSubstantiveOutputAnalysisText = "";
+}
+
 // 会话 teardown（替换 / 停止 / 退出 / 强停 / 全体中断）时丢弃攒批中的输出分析：清 flush 定时器 +
-// 清 pending 文本。死会话的分析尾巴没有消费者，绝不能套在后继会话的状态上。
+// 清 pending 文本 + 清节流空档的待分析尾巴。死会话的分析尾巴没有消费者，绝不能套在后继会话的状态上。
 function discardPendingOutputAnalysis(state: {
 	outputAnalysisFlushTimer: NodeJS.Timeout | null;
 	pendingOutputAnalysisText: string;
+	deferredSubstantiveOutputAnalysisText: string;
+	deferredSubstantiveOutputAnalysisTimer: NodeJS.Timeout | null;
 }): void {
 	discardPendingOutputAnalysisTimerOnly(state);
 	state.pendingOutputAnalysisText = "";
+	discardDeferredSubstantiveOutputAnalysis(state);
 }
 
 function clearResumeSubstantiveGuard(active: ActiveProcessState): void {
@@ -622,19 +671,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 		// lastSubstantiveOutputAt 仅在「agent 回合且本批带来新实质内容」时推进——Validation 列
 		// 自动打回判据读它，从而 spinner 空转不再误判为「仍在产出」。
+		// 门控 ①② 决定「本批是否算 agent 产出」（依次短路，越靠前越省）：① agent 回合；
+		// ② guard 未武装（re-spawn 重播期整段跳过，连分类器都不跑、也不留尾巴）。
+		// 门控 ③ 是节流，它只决定「现在判还是待会儿一起判」，**不**决定「判不判」：落在空档里的攒批
+		// 挂进有上限的待分析尾巴并排定窗口末尾补分析，故真实内容绝不会因节流而被永久丢弃。
 		const inAgentTurn = entry.summary.agentId !== null && resolveSessionFacets(entry.summary).turnOwner === "agent";
+		const flushedAt = now();
+		const batchCarriesAgentOutput = inAgentTurn && !active.suppressSubstantiveOutputUntilContinues;
+		const throttleWindowElapsed =
+			active.lastSubstantiveOutputAnalysisAt === null ||
+			flushedAt - active.lastSubstantiveOutputAnalysisAt >= SUBSTANTIVE_OUTPUT_ANALYSIS_THROTTLE_MS;
+		const shouldAnalyzeSubstance = batchCarriesAgentOutput && throttleWindowElapsed;
 		const needsReactionScan = active.outputReactionEngine !== null;
-		const strippedBatchText = inAgentTurn || needsReactionScan ? stripAnsiAndControl(batchText) : "";
-		let hasFreshSubstantiveOutput =
-			inAgentTurn &&
-			detectFreshSubstantiveAgentOutputFromStripped(active.agentOutputSubstanceMemory, strippedBatchText);
-		if (active.suppressSubstantiveOutputUntilContinues) {
-			hasFreshSubstantiveOutput = false;
-		}
-		if (hasFreshSubstantiveOutput) {
-			// 取 lastOutputAt 而非 now()：实质内容随批内 chunk 到达，保持
-			// lastSubstantiveOutputAt ≤ lastOutputAt 的既有关系。
-			updateSummary(entry, { lastSubstantiveOutputAt: entry.summary.lastOutputAt ?? now() });
+		// strip 是本 flush 最贵的单项：仅在真有消费者时才做。节流空档 / guard 武装期且未挂 reaction 引擎
+		// 的攒批直接跳过 strip（空档里只做常数级字符串拼接），这正是节流的主要收益来源。
+		const strippedBatchText = shouldAnalyzeSubstance || needsReactionScan ? stripAnsiAndControl(batchText) : "";
+		if (shouldAnalyzeSubstance) {
+			this.analyzeSubstantiveOutput(entry, active, strippedBatchText, flushedAt);
+		} else if (batchCarriesAgentOutput) {
+			this.deferSubstantiveOutputAnalysisUntilThrottleWindowEnds(taskId, active, batchText, flushedAt);
 		}
 
 		const adapterEvent = active.detectOutputTransition?.(batchText, entry.summary) ?? null;
@@ -658,6 +713,64 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (active.outputReactionEngine !== null) {
 			this.processOutputReactionChunk(taskId, entry, strippedBatchText);
 		}
+	}
+
+	// 实质输出分类器的唯一执行点（节流的 leading 边＝新攒批，trailing 边＝窗口末尾补分析，都走这里）。
+	// 把节流空档里攒下的待分析尾巴与本批合并判定，命中即推进 lastSubstantiveOutputAt，
+	// 并把节流计时器重置到本次分析时刻。
+	private analyzeSubstantiveOutput(
+		entry: SessionEntry,
+		active: ActiveProcessState,
+		strippedBatchText: string,
+		analyzedAt: number,
+	): void {
+		const deferredText = active.deferredSubstantiveOutputAnalysisText;
+		discardDeferredSubstantiveOutputAnalysis(active);
+		active.lastSubstantiveOutputAnalysisAt = analyzedAt;
+		// 尾巴与本批各自 strip 后拼接，而非把尾巴混进本批一起 strip：本批的 strip 结果要共享给
+		// output-reaction 扫描，而尾巴的原文早已作为它自己的攒批喂过那条扫描，重喂会污染其滚动缓冲。
+		// 尾巴的边界正是既有的攒批边界，故分段 strip 与逐批 strip 的行切分完全一致。
+		const analyzedText =
+			deferredText.length > 0 ? stripAnsiAndControl(deferredText) + strippedBatchText : strippedBatchText;
+		if (!detectFreshSubstantiveAgentOutputFromStripped(active.agentOutputSubstanceMemory, analyzedText)) {
+			return;
+		}
+		// 取 lastOutputAt 而非 now()：实质内容随批内 chunk 到达，保持
+		// lastSubstantiveOutputAt ≤ lastOutputAt 的既有关系。
+		updateSummary(entry, { lastSubstantiveOutputAt: entry.summary.lastOutputAt ?? analyzedAt });
+	}
+
+	// 节流空档内的攒批：不跑分类器，只把原始文本挂进有上限的待分析尾巴，并排定「窗口末尾补分析」。
+	// 这条 trailing 边是本设计的承重件——回合最后一段落在空档里的真实回复之后不会再有任何输出触发
+	// flush，没有它就永远无人分析（曾经的丢弃语义正是这个 bug）。
+	private deferSubstantiveOutputAnalysisUntilThrottleWindowEnds(
+		taskId: string,
+		active: ActiveProcessState,
+		batchText: string,
+		deferredAt: number,
+	): void {
+		const appendedText = active.deferredSubstantiveOutputAnalysisText + batchText;
+		active.deferredSubstantiveOutputAnalysisText =
+			appendedText.length > MAX_DEFERRED_SUBSTANTIVE_OUTPUT_ANALYSIS_CHARS
+				? appendedText.slice(-MAX_DEFERRED_SUBSTANTIVE_OUTPUT_ANALYSIS_CHARS)
+				: appendedText;
+		if (active.deferredSubstantiveOutputAnalysisTimer !== null) {
+			return;
+		}
+		const lastAnalyzedAt = active.lastSubstantiveOutputAnalysisAt ?? deferredAt;
+		const remainingThrottleMs = Math.max(0, lastAnalyzedAt + SUBSTANTIVE_OUTPUT_ANALYSIS_THROTTLE_MS - deferredAt);
+		active.deferredSubstantiveOutputAnalysisTimer = setTimeout(() => {
+			active.deferredSubstantiveOutputAnalysisTimer = null;
+			const currentEntry = this.entries.get(taskId);
+			// 会话在窗口内被替换 / 停止：尾巴属于旧 active，绝不把旧会话的分析套在新会话状态上
+			//（teardown 已 discard，此处按 active 身份再兜底一层，与攒批 flush 定时器同构）。
+			if (!currentEntry || currentEntry.active !== active) {
+				return;
+			}
+			// 刻意**不**复查「是否仍在 agent 回合」：入队时已确认这段文本是 agent 产出，而回合最后一段
+			// 真实回复恰恰常在 turnOwner 翻回 user 之后才轮到补分析——复查会把要修的 bug 原样修回来。
+			this.analyzeSubstantiveOutput(currentEntry, active, "", now());
+		}, remainingThrottleMs);
 	}
 
 	// 每个新 chunk：维护滚动扫描缓冲并驱动引擎。入参已由调用方 stripAnsiAndControl
@@ -941,6 +1054,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			);
 			return;
 		}
+		// 程序化投递的是一条**已提交的用户轮**（task-chat 手动发送 / RVF followup），语义上等价于用户在
+		// 终端里手敲提交，故与 writeInput 一样解除 resume substantive guard——此后 agent 的新产出才重新
+		// 推进 lastSubstantiveOutputAt。刻意不下沉进 writePasteSubmissionWithConfirm：那个 writer 同时
+		// 服务连接中断自动续跑（submitConnectionDropContinuation），自动恢复不是用户继续、绝不可解除 guard。
+		clearResumeSubstantiveGuard(currentActive);
 		// 就绪命中 或 deadline 兜底：经写后确认闭环写 PTY（不走 writeInput，避免把程序化投递记成 lastUserInputAt
 		// 而自我抑制——与 submitConnectionDropContinuation 一致）。toBracketedPasteSubmission 结尾已含单个 CR，
 		// 若该 CR 被 TUI 重绘吞掉（粘贴进框但不发送），writePasteSubmissionWithConfirm 的确认 tick 会补发裸 `\r`；
@@ -1700,9 +1818,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputAnalysisFlushTimer: null,
 			lastUserInputAt: null,
 			agentOutputSubstanceMemory: createAgentOutputSubstanceMemory(),
-			// 全部 TUI agent 恢复时都武装：startTaskSession 是终端 agent 专用路径，resumeFromTrash===true
-			// 已隐含 TUI agent。非 Claude 的解除依赖 writeInput（人工手敲）；见字段注释的取舍说明。
-			suppressSubstantiveOutputUntilContinues: request.resumeFromTrash === true,
+			lastSubstantiveOutputAnalysisAt: null,
+			deferredSubstantiveOutputAnalysisText: "",
+			deferredSubstantiveOutputAnalysisTimer: null,
+			// 凡是会重播既有对话的启动都武装。resumeFromTrash 是全 adapter 共同的续跑触发器，故在此兜底；
+			// launch.resumesPriorAgentConversation 覆盖 resumeFromTrash 之外的续跑路径（Claude/Cursor 的
+			// `--resume <sessionId>`、Claude/Codex 的 fork），历史上只认 resumeFromTrash，那些路径漏武装、
+			// 让重播的旧 transcript 把卡片刷成「刚刚响应」。反过来，崩溃后从原始 prompt 全新重跑的
+			// auto-restart 不带任何续跑旗标 → 不武装，其真实新产出照常推进时间戳。
+			suppressSubstantiveOutputUntilContinues:
+				request.resumeFromTrash === true || launch.resumesPriorAgentConversation === true,
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
@@ -1917,6 +2042,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			outputAnalysisFlushTimer: null,
 			lastUserInputAt: null,
 			agentOutputSubstanceMemory: createAgentOutputSubstanceMemory(),
+			lastSubstantiveOutputAnalysisAt: null,
+			deferredSubstantiveOutputAnalysisText: "",
+			deferredSubstantiveOutputAnalysisTimer: null,
 			suppressSubstantiveOutputUntilContinues: false,
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,

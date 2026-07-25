@@ -69,6 +69,15 @@ export interface PreparedAgentLaunch {
 	env: Record<string, string | undefined>;
 	cleanup?: () => Promise<void>;
 	deferredStartupInput?: string;
+	// 本次启动是否会接续 / 重播一段既有的 agent 对话（`--continue` / `--resume <id>` / `--fork-session`
+	// 等已被拼进 args）。session-manager 用它武装 resume substantive guard：重播出来的旧 transcript
+	// 不是「agent 刚刚响应」，不得推进 lastSubstantiveOutputAt（卡片左上角的「agent 上次响应」读它）。
+	// 必须由**决定是否加 resume 旗标的那段代码**如实置位——它是唯一知道真相的地方；用「该任务此前是否
+	// 产出过」等外部状态反推会误判崩溃后从原始 prompt 全新重跑的 auto-restart（那种启动毫无重播）。
+	// 只在 resumeFromTrash 时续跑的 adapter 可以不设本字段：那条触发器对全部 adapter 一致，
+	// session-manager 已在武装点统一 OR 进去。本字段专门覆盖 resumeFromTrash 之外的续跑路径
+	// （taskAgentSessionInitialization 的 --resume <id>、forkLatestWorkingDirectorySession 的 fork）。
+	resumesPriorAgentConversation?: boolean;
 	detectOutputTransition?: AgentOutputTransitionDetector;
 	shouldInspectOutputForTransition?: AgentOutputTransitionInspectionPredicate;
 }
@@ -761,6 +770,10 @@ const claudeAdapter: AgentSessionAdapter = {
 		) {
 			args.push("--dangerously-skip-permissions");
 		}
+		// 三条互斥的续跑分支任一命中 ⇒ 本次启动会重播既有对话（见 PreparedAgentLaunch 同名字段）。
+		const resumesPriorAgentConversation = Boolean(
+			input.resumeFromTrash || taskAgentSessionInitialization || input.forkLatestWorkingDirectorySession,
+		);
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
 			args.push("--continue");
 		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
@@ -889,6 +902,7 @@ const claudeAdapter: AgentSessionAdapter = {
 			env: {
 				...env,
 			},
+			resumesPriorAgentConversation,
 			detectOutputTransition: claudePromptDetector,
 			shouldInspectOutputForTransition: shouldInspectClaudeOutputForTransition,
 		};
@@ -1034,22 +1048,19 @@ const codexAdapter: AgentSessionAdapter = {
 			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${forksSession} hasResume=${resumesSession} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
 		);
 
-		if (hooks) {
-			return {
-				binary,
-				args: codexArgs,
-				env,
-				deferredStartupInput,
-				detectOutputTransition: codexPromptDetector,
-				shouldInspectOutputForTransition: shouldInspectCodexOutputForTransition,
-			};
-		}
-
+		// 这里刻意只保留**唯一一个** return：hooks 配置只是就地改写 codexArgs / env（见上方
+		// `if (hooks)` 块），并不改变 PreparedAgentLaunch 的形状，所以不需要按 hooks 分叉出第二个
+		// return。曾经存在的「hooks 分支 return + 默认 return」两份逐字重复的对象字面量，导致给
+		// PreparedAgentLaunch 新增字段时只补了其中一份，而生产任务会话恒有 workspaceId、恒走
+		// hooks 分支，字段静默丢失（resumesPriorAgentConversation 就这样漏过一次）。单 return 从
+		// 结构上根除这类漏改。
 		return {
 			binary,
 			args: codexArgs,
 			env,
 			deferredStartupInput,
+			// resume 与 fork 都会把既有会话的 transcript 重播进新 TUI（见 PreparedAgentLaunch 同名字段）。
+			resumesPriorAgentConversation: resumesSession || forksSession,
 			detectOutputTransition: codexPromptDetector,
 			shouldInspectOutputForTransition: shouldInspectCodexOutputForTransition,
 		};
@@ -1076,6 +1087,7 @@ const cursorAdapter: AgentSessionAdapter = {
 			args.push("--force");
 		}
 
+		const resumesPriorAgentConversation = Boolean(input.resumeFromTrash || taskAgentSessionInitialization);
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
 			args.push("--continue");
 		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
@@ -1094,6 +1106,7 @@ const cursorAdapter: AgentSessionAdapter = {
 		return {
 			args,
 			env,
+			resumesPriorAgentConversation,
 		};
 	},
 };

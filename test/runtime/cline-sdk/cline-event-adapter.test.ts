@@ -816,4 +816,91 @@ describe("applyClineSessionEvent", () => {
 		expect(result.entry.summary.latestHookActivity?.finalMessage).toBe("Unauthorized");
 		expect(result.entry.activeAssistantMessageId).toBeNull();
 	});
+
+	// 卡片左上角的「agent 上次响应」读 lastSubstantiveOutputAt。updateSummary 漏斗默认把 lastOutputAt
+	// 镜像过去，但「只推进存活度」的事件（重连补发的 status、回合 ended、用户取消）并不带来产出——
+	// 让它们镜像正是「重启 / 长时间离开后回来时间被刷成刚刚」在 Cline 侧的病灶。
+	describe("liveness-only events preserve lastSubstantiveOutputAt", () => {
+		const EARLIER_SUBSTANTIVE_AT = 1_700_000_000_000;
+
+		it("does not advance the substantive stamp on a status keepalive (re-attach / reconnect)", () => {
+			const entry = createEntry("task-1");
+			seedSummaryState(entry, { state: "running", lastSubstantiveOutputAt: EARLIER_SUBSTANTIVE_AT });
+
+			const result = applyEvent({
+				entry,
+				event: {
+					type: "status",
+					payload: {
+						sessionId: "session-1",
+						status: "running",
+					},
+				},
+			});
+
+			expect(result.entry.summary.lastSubstantiveOutputAt).toBe(EARLIER_SUBSTANTIVE_AT);
+			// 存活度仍然推进——只有「响应时间」被保护，computing / 活跃窗口判定不受影响。
+			expect(result.entry.summary.lastOutputAt ?? 0).toBeGreaterThan(EARLIER_SUBSTANTIVE_AT);
+		});
+
+		it("does not advance the substantive stamp on a turn ended event", () => {
+			const entry = createEntry("task-1");
+			seedSummaryState(entry, { state: "running", lastSubstantiveOutputAt: EARLIER_SUBSTANTIVE_AT });
+
+			const result = applyEvent({
+				entry,
+				event: {
+					type: "ended",
+					payload: {
+						sessionId: "session-1",
+						reason: "completed",
+					},
+				},
+			});
+
+			expect(result.entry.summary.state).toBe("awaiting_review");
+			expect(result.entry.summary.lastSubstantiveOutputAt).toBe(EARLIER_SUBSTANTIVE_AT);
+			expect(result.entry.summary.lastOutputAt ?? 0).toBeGreaterThan(EARLIER_SUBSTANTIVE_AT);
+		});
+
+		it("does not advance the substantive stamp when the user cancels the turn", () => {
+			const entry = createEntry("task-1");
+			seedSummaryState(entry, { state: "running", lastSubstantiveOutputAt: EARLIER_SUBSTANTIVE_AT });
+
+			const result = applyEvent({
+				entry,
+				event: {
+					type: "ended",
+					payload: {
+						sessionId: "session-1",
+						reason: "aborted",
+					},
+				},
+				pendingTurnCancelTaskIds: new Set(["task-1"]),
+			});
+
+			expect(result.entry.summary.latestHookActivity?.activityText).toBe("Turn canceled");
+			expect(result.entry.summary.lastSubstantiveOutputAt).toBe(EARLIER_SUBSTANTIVE_AT);
+		});
+
+		// 正向对照：真内容事件必须照常推进，否则上面三条会把整条链一起冻住。
+		it("still advances the substantive stamp on real assistant content", () => {
+			const entry = createEntry("task-1");
+			seedSummaryState(entry, { state: "running", lastSubstantiveOutputAt: EARLIER_SUBSTANTIVE_AT });
+
+			const result = applyEvent({
+				entry,
+				event: {
+					type: "chunk",
+					payload: {
+						sessionId: "session-1",
+						stream: "agent",
+						chunk: "Here is the real answer.",
+					},
+				},
+			});
+
+			expect(result.entry.summary.lastSubstantiveOutputAt ?? 0).toBeGreaterThan(EARLIER_SUBSTANTIVE_AT);
+		});
+	});
 });

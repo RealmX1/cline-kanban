@@ -784,7 +784,8 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		}
 		clearActiveTurnState(entry);
 		const endedReviewReason = interrupted ? "interrupted" : "exit";
-		emitSummary(input, {
+		// 回合边界事件：本身不带新产出（正文早已由 assistant-text / tool 事件打过戳），故不刷实质戳。
+		emitLivenessOnlySummary(input, {
 			reviewReason: endedReviewReason,
 			...deriveClineFacetPatch(interrupted ? "interrupted" : "awaiting_review", endedReviewReason),
 			lastOutputAt: now(),
@@ -802,7 +803,9 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const shouldReturnToRunning =
 			statusEvent.payload.status === "running" &&
 			!(isAwaitingUserReviewTurn(statusFacets) && canReturnToRunning(entry.summary.reviewReason));
-		emitSummary(input, {
+		// 存活心跳 / 重连补发：status 事件不携带任何 agent 产出，故只推进 lastOutputAt。
+		// 这是「重启或长时间离开后回来，卡片时间被刷成刚刚」在 Cline 侧的直接病灶。
+		emitLivenessOnlySummary(input, {
 			lastOutputAt: now(),
 			...(shouldReturnToRunning ? deriveClineFacetPatch("running", null) : {}),
 		});
@@ -813,10 +816,23 @@ function emitSummary(input: ApplyClineSessionEventInput, patch: Partial<RuntimeT
 	input.emitSummary(updateSummary(input.entry, patch));
 }
 
+// 「只推进存活度、不算一次 agent 响应」的发射口。updateSummary 漏斗默认把 lastOutputAt 镜像成
+// lastSubstantiveOutputAt（Cline 的 output 事件绝大多数是真内容，见 cline-session-state.ts），但少数
+// 事件只是**回合边界或存活心跳**、并不带来新产出：re-attach / 重连时补发的 status、turn 的 ended、
+// 用户取消。让它们镜像会把卡片的「agent 上次响应」刷成「刚刚」——这正是 Cline 侧重连后时间跳变的病灶。
+// 此处显式带上当前实质戳，漏斗见到 lastSubstantiveOutputAt 已存在即跳过镜像，从而只推进 lastOutputAt。
+function emitLivenessOnlySummary(input: ApplyClineSessionEventInput, patch: Partial<RuntimeTaskSessionSummary>): void {
+	emitSummary(input, {
+		...patch,
+		lastSubstantiveOutputAt: input.entry.summary.lastSubstantiveOutputAt ?? null,
+	});
+}
+
 function emitTurnCanceled(input: ApplyClineSessionEventInput): void {
 	input.pendingTurnCancelTaskIds.delete(input.taskId);
 	clearActiveTurnState(input.entry);
-	emitSummary(input, {
+	// 用户取消回合：终止信号而非 agent 产出，故不刷实质戳（取消不该让卡片显示「agent 刚响应」）。
+	emitLivenessOnlySummary(input, {
 		...deriveClineFacetPatch("idle", null),
 		reviewReason: null,
 		lastOutputAt: now(),

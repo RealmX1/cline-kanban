@@ -163,11 +163,13 @@ export function updateSummary(
 	entry: ClineTaskSessionEntry,
 	patch: Partial<RuntimeTaskSessionSummary>,
 ): RuntimeTaskSessionSummary {
-	// Cline（in-process SDK）的 output 事件都是真内容（assistant 增量 / 工具活动），非 TUI 重绘，故在
+	// Cline（in-process SDK）的 output 事件绝大多数是真内容（assistant 增量 / 工具活动），非 TUI 重绘，故在
 	// 此单一漏斗镜像 lastSubstantiveOutputAt = lastOutputAt（一处覆盖全部 Cline 写点）——使 Cline 任务的
 	// Validation 停留判据行为与迁移前一致。仅当 patch 显式给了 lastOutputAt 而未给实质戳时镜像；显式给
-	// 实质戳（理论上）或未动 lastOutputAt 的 patch 不干预。终端 agent 侧绝不在此镜像——那侧必须由
-	// agent-output-substance.ts 分类器把关（见 session-manager.ts handleTaskOutput）。
+	// 实质戳或未动 lastOutputAt 的 patch 不干预。少数「只推进存活度」的事件（re-attach 补发的 status、
+	// 回合 ended、用户取消）正是靠显式带上当前实质戳来退出本镜像，见 cline-event-adapter.ts
+	// emitLivenessOnlySummary——否则重连心跳会把卡片的「agent 上次响应」刷成「刚刚」。
+	// 终端 agent 侧绝不在此镜像——那侧必须由 agent-output-substance.ts 分类器把关（见 session-manager.ts）。
 	const mirroredPatch =
 		patch.lastOutputAt !== undefined && patch.lastSubstantiveOutputAt === undefined
 			? { ...patch, lastSubstantiveOutputAt: patch.lastOutputAt }
