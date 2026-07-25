@@ -1380,3 +1380,185 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(kiroLaunch.args).toContain("--trust-all-tools");
 	});
 });
+
+// resumesPriorAgentConversation 是 session-manager 武装 resume substantive guard 的唯一依据：
+// 续跑启动会把整段旧 transcript 重播进新 TUI，那不是「agent 刚刚响应」，不得刷新卡片时间戳。
+// 反过来，全新启动必须为 false，否则真实新产出会被误冻住。
+describe("prepareAgentLaunch resumesPriorAgentConversation", () => {
+	it("marks a Claude --resume launch as resuming a prior conversation", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-resume-flag",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Continue this work",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "claude",
+				sourceSessionId: "11111111-2222-3333-4444-555555555555",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args).toContain("--resume");
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	it("marks a Claude fork-latest launch as resuming a prior conversation", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-fork-latest-flag",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Explain this module",
+			forkLatestWorkingDirectorySession: true,
+		});
+
+		expect(launch.args).toContain("--fork-session");
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	it("marks a Codex fork launch as resuming a prior conversation", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-fork-flag",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Explain this module",
+			forkLatestWorkingDirectorySession: true,
+		});
+
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	it("marks a Cursor --resume launch as resuming a prior conversation", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-resume-flag",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Continue this work",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "cursor",
+				sourceSessionId: "cursor-prior-session",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args).toContain("--resume");
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	it("does not mark a brand new launch as resuming a prior conversation", async () => {
+		setupTempHome();
+		for (const agentId of ["claude", "codex", "cursor"] as const) {
+			const launch = await prepareAgentLaunch({
+				taskId: `task-${agentId}-fresh-flag`,
+				agentId,
+				binary: agentId === "cursor" ? "cursor-agent" : agentId,
+				args: [],
+				cwd: "/tmp",
+				prompt: "Implement the task",
+			});
+			expect(launch.resumesPriorAgentConversation ?? false).toBe(false);
+		}
+	});
+
+	// 回归护栏：生产任务会话恒带 workspaceId（→ resolveHookContext 非空 → 走各 adapter 的 hooks
+	// 配置路径）。上面不带 workspaceId 的用例覆盖不到那条路径，历史上 codexAdapter 正是因为
+	// hooks 分支另有一份重复的 return 对象字面量，新增字段只补到默认分支，使生产路径静默丢字段。
+	// 下面这组用例把「带 hooks 上下文」的续跑启动钉死。
+	it("keeps marking resumed launches when hook wiring is active (workspaceId present)", async () => {
+		setupTempHome();
+
+		const codexForkLaunch = await prepareAgentLaunch({
+			taskId: "task-codex-fork-flag-with-hooks",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Explain this module",
+			workspaceId: "workspace-1",
+			forkLatestWorkingDirectorySession: true,
+		});
+		expect(codexForkLaunch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
+		expect(codexForkLaunch.args).toContain("fork");
+		expect(codexForkLaunch.resumesPriorAgentConversation).toBe(true);
+
+		const codexResumeLaunch = await prepareAgentLaunch({
+			taskId: "task-codex-resume-flag-with-hooks",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Continue this work",
+			workspaceId: "workspace-1",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "codex",
+				sourceSessionId: "codex-prior-session",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(codexResumeLaunch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
+		expect(codexResumeLaunch.args).toContain("resume");
+		expect(codexResumeLaunch.resumesPriorAgentConversation).toBe(true);
+
+		const claudeResumeLaunch = await prepareAgentLaunch({
+			taskId: "task-claude-resume-flag-with-hooks",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Continue this work",
+			workspaceId: "workspace-1",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "claude",
+				sourceSessionId: "11111111-2222-3333-4444-555555555555",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(claudeResumeLaunch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
+		expect(claudeResumeLaunch.args).toContain("--resume");
+		expect(claudeResumeLaunch.resumesPriorAgentConversation).toBe(true);
+
+		const cursorResumeLaunch = await prepareAgentLaunch({
+			taskId: "task-cursor-resume-flag-with-hooks",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Continue this work",
+			workspaceId: "workspace-1",
+			taskAgentSessionInitialization: {
+				sourceAgentId: "cursor",
+				sourceSessionId: "cursor-prior-session",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(cursorResumeLaunch.args).toContain("--resume");
+		expect(cursorResumeLaunch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	it("does not mark a brand new launch as resuming when hook wiring is active", async () => {
+		setupTempHome();
+		for (const agentId of ["claude", "codex", "cursor"] as const) {
+			const launch = await prepareAgentLaunch({
+				taskId: `task-${agentId}-fresh-flag-with-hooks`,
+				agentId,
+				binary: agentId === "cursor" ? "cursor-agent" : agentId,
+				args: [],
+				cwd: "/tmp",
+				prompt: "Implement the task",
+				workspaceId: "workspace-1",
+			});
+			expect(launch.resumesPriorAgentConversation ?? false).toBe(false);
+		}
+	});
+});
