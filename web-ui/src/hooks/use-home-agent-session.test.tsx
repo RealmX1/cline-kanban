@@ -172,6 +172,8 @@ function HookHarness({
 	onSnapshot,
 	workspaceGit = DEFAULT_WORKSPACE_GIT,
 	seedSessionSummary = false,
+	// 既有用例断言的是「面板正在被看」时的启动/轮换行为，故默认分段可见；懒启动本身由专门用例覆盖。
+	isHomeSidebarAgentSectionCurrentlyVisible = true,
 }: {
 	config: RuntimeConfigResponse | null;
 	clineSessionContextVersion?: number;
@@ -179,6 +181,7 @@ function HookHarness({
 	onSnapshot: (snapshot: HookSnapshot) => void;
 	workspaceGit?: RuntimeGitRepositoryInfo | null;
 	seedSessionSummary?: boolean;
+	isHomeSidebarAgentSectionCurrentlyVisible?: boolean;
 }): null {
 	const [sessionSummaries, setSessionSummaries] = useState<Record<string, RuntimeTaskSessionSummary>>({});
 	const upsertSessionSummary = useCallback((summary: RuntimeTaskSessionSummary) => {
@@ -195,6 +198,7 @@ function HookHarness({
 		sessionSummaries,
 		setSessionSummaries,
 		upsertSessionSummary,
+		isHomeSidebarAgentSectionCurrentlyVisible,
 	});
 
 	useEffect(() => {
@@ -310,6 +314,230 @@ describe("useHomeAgentSession", () => {
 			taskId: initialTaskId,
 		});
 		expect(rotatedSnapshot.sessionKeys).toEqual([rotatedSnapshot.taskId]);
+	});
+
+	it("does not spawn a home terminal session while the Kanban agent section is not visible", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-1"
+					isHomeSidebarAgentSectionCurrentlyVisible={false}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		const snapshot = requireSnapshot(latestSnapshot);
+		// 会话身份照常派生（面板一旦可见即可立刻挂载），但进程绝不提前 spawn。
+		expect(snapshot.panelMode).toBe("terminal");
+		expect(snapshot.taskId).toMatch(/^__home_agent__:workspace-1:codex$/);
+		expect(snapshot.sessionKeys).toEqual([]);
+		expect(startTaskSessionMutateMock).not.toHaveBeenCalled();
+		expect(stopTaskSessionMutateMock).not.toHaveBeenCalled();
+	});
+
+	it("spawns the home terminal session when the Kanban agent section first becomes visible", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-1"
+					isHomeSidebarAgentSectionCurrentlyVisible={false}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		const gatedTaskId = requireTaskId(requireSnapshot(latestSnapshot).taskId);
+		expect(startTaskSessionMutateMock).not.toHaveBeenCalled();
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-1"
+					isHomeSidebarAgentSectionCurrentlyVisible
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		const openedSnapshot = requireSnapshot(latestSnapshot);
+		// 会话身份不因可见性翻转而轮换：打开面板拿到的就是之前那个 task id。
+		expect(openedSnapshot.taskId).toBe(gatedTaskId);
+		expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(1);
+		expect(startTaskSessionMutateMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				workspaceId: "workspace-1",
+				taskId: gatedTaskId,
+				prompt: "",
+				baseRef: "main",
+			}),
+		);
+		expect(openedSnapshot.sessionKeys).toEqual([gatedTaskId]);
+	});
+
+	it("keeps the home terminal session alive after the sidebar switches back to projects", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-1"
+					isHomeSidebarAgentSectionCurrentlyVisible
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		const startedTaskId = requireTaskId(requireSnapshot(latestSnapshot).taskId);
+		expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(1);
+
+		// 切回 projects（分段不再可见）只是不再允许「首次启动」，绝不停止已启动的会话——
+		// 侧边栏会话的对话内容零持久化，停掉即不可恢复。
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-1"
+					isHomeSidebarAgentSectionCurrentlyVisible={false}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		expect(requireTaskId(requireSnapshot(latestSnapshot).taskId)).toBe(startedTaskId);
+		expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(1);
+		expect(stopTaskSessionMutateMock).not.toHaveBeenCalled();
+
+		// 再切回 agent 分段：已启动的会话按 workspace+taskId 记住，既不重启也不轮换身份。
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-1"
+					isHomeSidebarAgentSectionCurrentlyVisible
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		expect(requireTaskId(requireSnapshot(latestSnapshot).taskId)).toBe(startedTaskId);
+		expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(1);
+		expect(stopTaskSessionMutateMock).not.toHaveBeenCalled();
+	});
+
+	it("does not spawn a home terminal session for a newly selected workspace whose agent section was never visible", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		// workspace-1：用户真的打开过 agent 分段，会话如常启动。
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-1"
+					isHomeSidebarAgentSectionCurrentlyVisible
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		const workspaceOneTaskId = requireTaskId(requireSnapshot(latestSnapshot).taskId);
+		expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(1);
+
+		// 切回 projects 分段后换项目：workspace-2 的 agent 面板从未可见过，绝不能顺带 spawn 一个隐藏进程。
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-2"
+					isHomeSidebarAgentSectionCurrentlyVisible={false}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		const workspaceTwoSnapshot = requireSnapshot(latestSnapshot);
+		const workspaceTwoTaskId = requireTaskId(workspaceTwoSnapshot.taskId);
+		expect(workspaceTwoTaskId).toMatch(/^__home_agent__:workspace-2:codex$/);
+		expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(1);
+		expect(startTaskSessionMutateMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({ workspaceId: "workspace-1", taskId: workspaceOneTaskId }),
+		);
+		// workspace-1 已启动的会话不因切换项目而被停止。
+		expect(stopTaskSessionMutateMock).not.toHaveBeenCalled();
+
+		// 用户在 workspace-2 主动打开 agent 分段后才启动，且只启动它自己那一个。
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-2"
+					isHomeSidebarAgentSectionCurrentlyVisible
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		expect(requireTaskId(requireSnapshot(latestSnapshot).taskId)).toBe(workspaceTwoTaskId);
+		expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(2);
+		expect(startTaskSessionMutateMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({ workspaceId: "workspace-2", taskId: workspaceTwoTaskId }),
+		);
+
+		// 切回 workspace-1：两个会话都还在，谁都不重启、谁都不被停止。
+		await act(async () => {
+			root.render(
+				<HookHarness
+					config={createRuntimeConfig()}
+					currentProjectId="workspace-1"
+					isHomeSidebarAgentSectionCurrentlyVisible
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await createFlushPromises();
+		});
+
+		const returnedSnapshot = requireSnapshot(latestSnapshot);
+		expect(returnedSnapshot.taskId).toBe(workspaceOneTaskId);
+		expect([...returnedSnapshot.sessionKeys].sort()).toEqual([workspaceOneTaskId, workspaceTwoTaskId].sort());
+		expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(2);
+		expect(stopTaskSessionMutateMock).not.toHaveBeenCalled();
 	});
 
 	it("does not restart the home terminal session on a no-op rerender", async () => {

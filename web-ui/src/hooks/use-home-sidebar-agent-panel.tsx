@@ -32,6 +32,8 @@ interface UseHomeSidebarAgentPanelInput {
 	workspaceGit: RuntimeGitRepositoryInfo | null;
 	latestTaskChatMessage: RuntimeStateStreamTaskChatMessage | null;
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
+	// 懒启动门控（见 App.tsx 同名派生值）：agent 分段此刻不可见时，不得启动终端侧边栏会话进程。
+	isHomeSidebarAgentSectionCurrentlyVisible: boolean;
 }
 
 async function stopHomeSidebarTaskSession(workspaceId: string, taskId: string): Promise<void> {
@@ -53,6 +55,7 @@ export function useHomeSidebarAgentPanel({
 	workspaceGit,
 	latestTaskChatMessage,
 	taskChatMessagesByTaskId,
+	isHomeSidebarAgentSectionCurrentlyVisible,
 }: UseHomeSidebarAgentPanelInput): ReactElement | null {
 	const isMobile = useIsMobile();
 	const terminalThemeColors = useTerminalThemeColors();
@@ -88,6 +91,7 @@ export function useHomeSidebarAgentPanel({
 		sessionSummaries: effectiveSessionSummaries,
 		setSessionSummaries,
 		upsertSessionSummary,
+		isHomeSidebarAgentSectionCurrentlyVisible,
 	});
 	const currentTaskIdRef = useRef<string | null>(null);
 
