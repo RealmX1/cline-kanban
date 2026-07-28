@@ -16,7 +16,7 @@ import {
 	X,
 } from "lucide-react";
 import type { Dispatch, ReactElement, SetStateAction } from "react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 
 import type { BranchSelectOption } from "@/components/branch-select-dropdown";
@@ -43,9 +43,9 @@ import type {
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
-import type { TaskAutoReviewMode, TaskImage } from "@/types";
+import type { TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
-import { useRawLocalStorageValue } from "@/utils/react-use";
+import { useDebouncedEffect, useRawLocalStorageValue } from "@/utils/react-use";
 
 const AUTO_REVIEW_MODE_OPTIONS: Array<{ value: TaskAutoReviewMode; label: string }> = [
 	{ value: "commit", label: "Make commit" },
@@ -141,6 +141,16 @@ function ButtonShortcut({
 	);
 }
 
+/**
+ * 本地草稿在停止输入这么久之后主动上抛一次。
+ *
+ * 这不是第二层去抖，而是崩溃兜底：正常的上抛时机是失焦 / 关闭 / 提交，但用户可能一口气
+ * 敲很久都不失焦，期间浏览器崩溃就会丢掉全部内容。按「停顿」而非「固定周期」触发的好处是
+ * ——匀速连续输入时它永远不会在中途触发（击键间隔远小于该窗口），因此不会给 `App` 贡献
+ * 任何一次额外重渲；只有用户停下来思考时才落一次盘。
+ */
+const PROMPT_DRAFT_IDLE_PROPAGATION_DELAY_MS = 1_500;
+
 function parseListItems(text: string): string[] {
 	const lines = text.split("\n");
 	const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
@@ -210,11 +220,11 @@ export function TaskEditorDialog({
 	onPromptChange: (value: string) => void;
 	images: TaskImage[];
 	onImagesChange: Dispatch<SetStateAction<TaskImage[]>>;
-	onCreate: (options?: { keepDialogOpen?: boolean }) => string | null;
-	onCreateAndStart?: (options?: { keepDialogOpen?: boolean }) => string | null;
+	onCreate: (options?: TaskEditorSubmitOptions) => string | null;
+	onCreateAndStart?: (options?: TaskEditorSubmitOptions) => string | null;
 	onCreateMultiple: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
 	onCreateAndStartMultiple?: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
-	onCreateStartAndOpen?: (options?: { keepDialogOpen?: boolean }) => string | null;
+	onCreateStartAndOpen?: (options?: TaskEditorSubmitOptions) => string | null;
 	startInPlanMode: boolean;
 	onStartInPlanModeChange: (value: boolean) => void;
 	autoReviewEnabled: boolean;
@@ -251,6 +261,56 @@ export function TaskEditorDialog({
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	onTaskAgentSessionInitializationChange?: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
 }): ReactElement {
+	// 逐字输入下沉到这里，不再每次按键都经 `onPromptChange` 打到 `App` 根节点。
+	// 那条老路径会把 1566 行的 `App` 连同整棵卡片树一起重渲，是「在任务创建界面打字很卡」的主因。
+	const [promptDraft, setPromptDraft] = useState(prompt);
+	// 父层值发生了非本组件引起的变化（打开编辑另一张卡、create-more 重置、切回单任务模式等）
+	// 时采纳它。渲染期直接 setState 是 React 官方的「随 prop 变化调整 state」写法，
+	// 比 effect 少一次多余提交；父层回声（值与本地一致）会被 React 自动 bail out。
+	const lastPromptFromParentRef = useRef(prompt);
+	if (prompt !== lastPromptFromParentRef.current) {
+		lastPromptFromParentRef.current = prompt;
+		setPromptDraft(prompt);
+	}
+	// 组件在对话框关闭后仍保持挂载（`App` 无条件渲染 `<TaskEditorDialog open={...}/>`），
+	// 所以本地草稿必须在关闭那一刻显式拉回父层当前值。create 路径下父层 `newTaskPrompt`
+	// 本就是空串，提交 / Discard 关闭都不产生 prop 变化，上面那段「随 prop 变化调整 state」
+	// 因此不会被触发；若不在这里对齐，已提交的文本会作为幽灵草稿留在本地 state 里，
+	// 下次打开 New task 时原样重现（再点一次 Create 就是重复任务）。
+	const previousDialogOpenStateRef = useRef(open);
+	if (previousDialogOpenStateRef.current !== open) {
+		previousDialogOpenStateRef.current = open;
+		if (!open) {
+			lastPromptFromParentRef.current = prompt;
+			setPromptDraft(prompt);
+		}
+	}
+	const propagatePromptDraft = useCallback(
+		(nextPrompt: string) => {
+			if (nextPrompt === lastPromptFromParentRef.current) {
+				return;
+			}
+			lastPromptFromParentRef.current = nextPrompt;
+			onPromptChange(nextPrompt);
+		},
+		[onPromptChange],
+	);
+	// 见 PROMPT_DRAFT_IDLE_PROPAGATION_DELAY_MS：停止输入后的崩溃兜底上抛。
+	// `open` 守卫是必需的：底层 `react-use` 的 useTimeoutFn 只在卸载时清定时器，且每次渲染
+	// 都会把最新闭包写进 callback ref。对话框关闭并不会取消已挂起的这一拍，于是「最后一次
+	// 击键后 1.5 秒内提交」（点 Create / Cmd+Enter，textarea 不失焦）会让它在关闭之后才 fire，
+	// 把已提交或已丢弃的文本重新写回父层。关闭后本地草稿已由上面的开关同步拉平，这里不再上抛。
+	useDebouncedEffect(
+		() => {
+			if (!open) {
+				return;
+			}
+			propagatePromptDraft(promptDraft);
+		},
+		PROMPT_DRAFT_IDLE_PROPAGATION_DELAY_MS,
+		[open, promptDraft, propagatePromptDraft],
+	);
+
 	const [mode, setMode] = useState<"single" | "multi">("single");
 	const [createMore, setCreateMore] = useState(false);
 	const [composerResetKey, setComposerResetKey] = useState(0);
@@ -289,7 +349,12 @@ export function TaskEditorDialog({
 		defaultModelId,
 	});
 
-	const detectedItems = useMemo(() => parseListItems(prompt), [prompt]);
+	// `useDeferredValue` 在这里是划算的，与「不要把它放在 hook / App 根节点」并不矛盾：
+	// 双 commit 的代价完全取决于被重渲的子树大小。放根节点要把 51 个 hook 调用点付两遍；
+	// 放这里，deferred 那一遍只重渲对话框内「检测到 N 项」这一小块提示。
+	const deferredPromptDraft = useDeferredValue(promptDraft);
+	const detectedItems = useMemo(() => parseListItems(deferredPromptDraft), [deferredPromptDraft]);
+	const hasPromptDraftContent = useMemo(() => promptDraft.trim().length > 0, [promptDraft]);
 	const validTaskCount = useMemo(() => taskPrompts.filter((p) => p.trim()).length, [taskPrompts]);
 	const effectivePrimaryStartAction =
 		onCreateStartAndOpen || primaryStartAction === "start" ? primaryStartAction : DEFAULT_PRIMARY_START_ACTION;
@@ -331,10 +396,11 @@ export function TaskEditorDialog({
 			.filter((p) => p.trim())
 			.map((p, i) => `${i + 1}. ${p}`)
 			.join("\n");
-		onPromptChange(joined);
+		setPromptDraft(joined);
+		propagatePromptDraft(joined);
 		setMode("single");
 		setTaskPrompts([]);
-	}, [taskPrompts, onPromptChange]);
+	}, [taskPrompts, propagatePromptDraft]);
 
 	const handleUpdateTaskPrompt = useCallback((index: number, value: string) => {
 		setTaskPrompts((prev) => {
@@ -369,35 +435,36 @@ export function TaskEditorDialog({
 	}, [taskPrompts]);
 
 	const resetForCreateMore = useCallback(() => {
-		onPromptChange("");
+		setPromptDraft("");
+		propagatePromptDraft("");
 		onImagesChange([]);
 		setMode("single");
 		setTaskPrompts([]);
 		inputRefs.current = [];
 		nextFocusIndexRef.current = null;
 		setComposerResetKey((current) => current + 1);
-	}, [onImagesChange, onPromptChange]);
+	}, [onImagesChange, propagatePromptDraft]);
 
 	const handleCreateSingle = useCallback(() => {
-		const createdTaskId = onCreate({ keepDialogOpen: createMore });
+		const createdTaskId = onCreate({ keepDialogOpen: createMore, promptOverride: promptDraft });
 		if (createMore && createdTaskId) {
 			resetForCreateMore();
 		}
-	}, [createMore, onCreate, resetForCreateMore]);
+	}, [createMore, onCreate, promptDraft, resetForCreateMore]);
 
 	const handleCreateAndStartSingle = useCallback(() => {
-		const createdTaskId = onCreateAndStart?.({ keepDialogOpen: createMore });
+		const createdTaskId = onCreateAndStart?.({ keepDialogOpen: createMore, promptOverride: promptDraft });
 		if (createMore && createdTaskId) {
 			resetForCreateMore();
 		}
-	}, [createMore, onCreateAndStart, resetForCreateMore]);
+	}, [createMore, onCreateAndStart, promptDraft, resetForCreateMore]);
 
 	const handleCreateStartAndOpenSingle = useCallback(() => {
-		const createdTaskId = onCreateStartAndOpen?.({ keepDialogOpen: createMore });
+		const createdTaskId = onCreateStartAndOpen?.({ keepDialogOpen: createMore, promptOverride: promptDraft });
 		if (createMore && createdTaskId) {
 			resetForCreateMore();
 		}
-	}, [createMore, onCreateStartAndOpen, resetForCreateMore]);
+	}, [createMore, onCreateStartAndOpen, promptDraft, resetForCreateMore]);
 
 	const handleRunSingleStartAction = useCallback(
 		(action: TaskCreateStartAction) => {
@@ -519,7 +586,7 @@ export function TaskEditorDialog({
 
 	// 每次渲染刷新「当前表单」快照，供关闭时与打开时的基线比较。
 	const currentFormSnapshot: TaskCreateFormSnapshot = {
-		prompt,
+		prompt: promptDraft,
 		multiPromptContent: taskPrompts
 			.map((value) => value.trim())
 			.filter(Boolean)
@@ -628,8 +695,9 @@ export function TaskEditorDialog({
 						<div>
 							<TaskPromptComposer
 								key={composerResetKey}
-								value={prompt}
-								onValueChange={onPromptChange}
+								value={promptDraft}
+								onValueChange={setPromptDraft}
+								onValueBlur={() => propagatePromptDraft(promptDraft)}
 								images={images}
 								onImagesChange={onImagesChange}
 								onSubmit={handleCreateSingle}
@@ -840,7 +908,7 @@ export function TaskEditorDialog({
 					)}
 					{mode === "single" ? (
 						<>
-							<Button size="sm" onClick={handleCreateSingle} disabled={!prompt.trim() || !branchRef}>
+							<Button size="sm" onClick={handleCreateSingle} disabled={!hasPromptDraftContent || !branchRef}>
 								<span className="inline-flex items-center">
 									{taskEditorMode === "edit" ? "Save changes" : "Create"}
 									<ButtonShortcut />
@@ -853,7 +921,7 @@ export function TaskEditorDialog({
 											variant="primary"
 											size="sm"
 											onClick={() => handleRunSingleStartAction(primaryStartAction)}
-											disabled={!prompt.trim() || !branchRef}
+											disabled={!hasPromptDraftContent || !branchRef}
 											className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
 										>
 											<span className="inline-flex items-center">
@@ -866,7 +934,7 @@ export function TaskEditorDialog({
 												<Button
 													variant="primary"
 													size="sm"
-													disabled={!prompt.trim() || !branchRef}
+													disabled={!hasPromptDraftContent || !branchRef}
 													className="rounded-l-none border-l border-white/20 px-1"
 													aria-label="More start options"
 												>

@@ -1,6 +1,7 @@
 import { Droppable } from "@hello-pangea/dnd";
 import { Play, Plus, Trash2 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 
 import { BoardCard } from "@/components/board-card";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
@@ -9,6 +10,7 @@ import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
+import { readBoardColumnScrollOffset, writeBoardColumnScrollOffset } from "@/stores/board-column-scroll-offset-store";
 import type { BoardCard as BoardCardModel, BoardColumnId, BoardColumn as BoardColumnModel } from "@/types";
 
 // 模块级常量，保持引用稳定（避免每次渲染都给 hook 传新函数触发 observer 重建）。
@@ -87,11 +89,65 @@ export function BoardColumn({
 	const canCreate = column.id === "backlog" && onCreateTask;
 	const canRequestStartAllReadyBacklogTasks = column.id === "backlog" && onRequestStartAllReadyBacklogTasks;
 	const canClearTrash = column.id === "trash" && onClearTrash;
+	// 打开 Focus View 会真正卸载看板（不再是 visibility:hidden），因此返回时要把这一列的
+	// 滚动位置与「已展开到第几批」补回来，否则用户每次从详情页返回都被弹回列顶。
+	// 只在挂载那一次读取：后续渲染沿用同一份初值，避免自己写进去的值又反过来改初值。
+	const restoredScrollOffsetRef = useRef(readBoardColumnScrollOffset(workspacePath ?? null, column.id));
 	const { visibleCount, hasMore, remainingCount, loadMoreSentinelRef, revealMore } = useProgressiveRenderCount({
 		totalCount: column.cards.length,
 		getScrollRoot: getColumnCardsScrollRoot,
 		enabled: activeDragTaskId == null,
+		initialCount: restoredScrollOffsetRef.current?.revealedCardCount,
 	});
+
+	const cardsScrollContainerRef = useRef<HTMLDivElement | null>(null);
+	const visibleCountRef = useRef(visibleCount);
+	visibleCountRef.current = visibleCount;
+
+	// 布局提交后、绘制之前还原滚动位置，避免先闪一帧列顶再跳。
+	useLayoutEffect(() => {
+		const restored = restoredScrollOffsetRef.current;
+		const container = cardsScrollContainerRef.current;
+		if (!restored || !container || restored.scrollTop <= 0) {
+			return;
+		}
+		container.scrollTop = restored.scrollTop;
+	}, []);
+
+	// 滚动是高频事件，用 rAF 折叠成每帧至多一次写入。
+	const pendingScrollRecordFrameRef = useRef(0);
+	const handleCardsScroll = useCallback(() => {
+		if (pendingScrollRecordFrameRef.current !== 0) {
+			return;
+		}
+		pendingScrollRecordFrameRef.current = window.requestAnimationFrame(() => {
+			pendingScrollRecordFrameRef.current = 0;
+			const container = cardsScrollContainerRef.current;
+			if (!container) {
+				return;
+			}
+			writeBoardColumnScrollOffset(workspacePath ?? null, column.id, {
+				scrollTop: container.scrollTop,
+				revealedCardCount: visibleCountRef.current,
+			});
+		});
+	}, [column.id, workspacePath]);
+
+	useLayoutEffect(
+		() => () => {
+			if (pendingScrollRecordFrameRef.current !== 0) {
+				window.cancelAnimationFrame(pendingScrollRecordFrameRef.current);
+				pendingScrollRecordFrameRef.current = 0;
+			}
+			// 卸载前落一次最终值：用户可能展开了更多卡片却没有再滚动过。
+			const container = cardsScrollContainerRef.current;
+			writeBoardColumnScrollOffset(workspacePath ?? null, column.id, {
+				scrollTop: container?.scrollTop ?? restoredScrollOffsetRef.current?.scrollTop ?? 0,
+				revealedCardCount: visibleCountRef.current,
+			});
+		},
+		[column.id, workspacePath],
+	);
 	const cardDropType = "CARD";
 	const isDropDisabled = isCardDropDisabled(column.id, activeDragSourceColumnId ?? null, {
 		activeDragTaskId,
@@ -154,7 +210,15 @@ export function BoardColumn({
 
 				<Droppable droppableId={column.id} type={cardDropType} isDropDisabled={isDropDisabled}>
 					{(cardProvided) => (
-						<div ref={cardProvided.innerRef} {...cardProvided.droppableProps} className="kb-column-cards">
+						<div
+							ref={(element: HTMLDivElement | null) => {
+								cardsScrollContainerRef.current = element;
+								cardProvided.innerRef(element);
+							}}
+							{...cardProvided.droppableProps}
+							className="kb-column-cards"
+							onScroll={handleCardsScroll}
+						>
 							{canCreate ? (
 								<Button
 									icon={<Plus size={14} />}

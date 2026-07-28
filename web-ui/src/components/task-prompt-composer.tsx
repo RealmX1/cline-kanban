@@ -29,6 +29,8 @@ interface TaskPromptComposerProps {
 	id?: string;
 	value: string;
 	onValueChange: (value: string) => void;
+	/** 输入框失焦。`TaskEditorDialog` 用它把本地草稿上抛给拥有 board 状态的父层。 */
+	onValueBlur?: () => void;
 	images?: TaskImage[];
 	onImagesChange?: (images: TaskImage[]) => void;
 	onSubmit?: () => void;
@@ -46,6 +48,7 @@ export function TaskPromptComposer({
 	id,
 	value,
 	onValueChange,
+	onValueBlur,
 	images = [],
 	onImagesChange,
 	onSubmit,
@@ -374,6 +377,7 @@ export function TaskPromptComposer({
 							setCursorIndex(event.target.selectionStart ?? event.target.value.length);
 						}}
 						onKeyDown={handleTextareaKeyDown}
+						onBlur={onValueBlur}
 						onClick={(event) =>
 							setCursorIndex(event.currentTarget.selectionStart ?? event.currentTarget.value.length)
 						}
