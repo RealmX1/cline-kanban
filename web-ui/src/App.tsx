@@ -102,6 +102,7 @@ export default function App(): ReactElement {
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 	const [settingsInitialSection, setSettingsInitialSection] = useState<RuntimeSettingsSection | null>(null);
 	const [homeSidebarSection, setHomeSidebarSection] = useState<"projects" | "agent">("projects");
+	const sidebarLayout = useProjectNavigationLayout();
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
 	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
@@ -633,6 +634,15 @@ export default function App(): ReactElement {
 		sendTaskSessionInput,
 	});
 	const homeTerminalSummary = sessions[homeTerminalTaskId] ?? null;
+	// 侧边栏 agent 的懒启动门控：Kanban agent 分段此刻真的渲染在屏幕上时，才允许为当前 workspace 首次
+	// spawn 终端会话。默认视图是 "projects"，agent 面板从未渲染，而 useHomeAgentSession 的终端启动
+	// effect 过去无条件 startTaskSession，于是每个打开的标签页都为一个没人在看的面板拉起一个 agent 进程。
+	// 判据必须是「此刻可见」而非「曾经打开过」：曾经打开过是 App 级单向闩锁，用户在 workspace A 打开一次
+	// 之后，每切到一个新 workspace 都会为其静默 spawn 一个隐藏进程，懒启动对多项目用户即告失效。
+	// 这里只门控「首次启动」——已启动的会话由 useHomeAgentSession 内部按 workspace+taskId 记住，切走分段、
+	// 折叠侧边栏、进入任务详情、切换项目都不会停止它（侧边栏会话的对话内容零持久化，停掉即不可恢复）。
+	const isHomeSidebarAgentSectionCurrentlyVisible =
+		!selectedCard && !sidebarLayout.isCollapsed && homeSidebarSection === "agent";
 	const homeSidebarAgentPanel = useHomeSidebarAgentPanel({
 		currentProjectId: projectRuntimeWorkspaceId,
 		hasNoProjects,
@@ -642,6 +652,7 @@ export default function App(): ReactElement {
 		workspaceGit,
 		latestTaskChatMessage,
 		taskChatMessagesByTaskId,
+		isHomeSidebarAgentSectionCurrentlyVisible,
 	});
 	const { runningShortcutLabel, handleSelectShortcutLabel, handleRunShortcut, handleCreateShortcut } =
 		useShortcutActions({
@@ -930,7 +941,6 @@ export default function App(): ReactElement {
 		return undefined;
 	}, [selectedCard]);
 
-	const sidebarLayout = useProjectNavigationLayout();
 	const handleToggleSidebar = useCallback(() => {
 		sidebarLayout.setSidebarCollapsed(!sidebarLayout.isCollapsed);
 	}, [sidebarLayout]);
