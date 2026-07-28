@@ -8,6 +8,7 @@ import {
 	parseToolOutput,
 } from "@/components/detail-panels/cline-chat-message-utils";
 import { ClineMarkdownContent } from "@/components/detail-panels/cline-markdown-content";
+import { TaskAgentUserDecisionBlock } from "@/components/detail-panels/task-agent-user-decision-block";
 import { TaskImageStrip } from "@/components/task-image-strip";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
@@ -182,9 +183,29 @@ function ReasoningMessageBlock({ message }: { message: ClineChatMessage }): Reac
  */
 export const ClineChatMessageItem = React.memo(function ClineChatMessageItem({
 	message,
+	taskId,
+	onResolveUserDecision,
 }: {
 	message: ClineChatMessage;
+	taskId?: string | null;
+	onResolveUserDecision?: (
+		taskId: string,
+		decisionId: string,
+		optionId: string | null,
+	) => Promise<{ ok: boolean; message?: string }>;
 }): ReactElement {
+	// 「等你拍板」的消息优先于 role 分派：它虽然以 status 消息承载，但要渲染成可操作卡片。
+	const userDecision = message.meta?.userDecision;
+	if (userDecision && taskId && onResolveUserDecision) {
+		return (
+			<TaskAgentUserDecisionBlock
+				taskId={taskId}
+				decision={userDecision}
+				promptMarkdown={message.content}
+				onResolveDecision={onResolveUserDecision}
+			/>
+		);
+	}
 	if (message.role === "tool") {
 		return <ToolMessageBlock message={message} />;
 	}

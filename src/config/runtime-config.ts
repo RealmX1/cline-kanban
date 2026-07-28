@@ -5,7 +5,7 @@ import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
-import type { RuntimeAgentId, RuntimeProjectShortcut } from "../core/api-contract";
+import { type RuntimeAgentId, type RuntimeProjectShortcut, runtimeAgentIdSchema } from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import { detectInstalledCommands } from "../terminal/agent-registry";
 import { areRuntimeProjectShortcutsEqual } from "./shortcut-utils";
@@ -136,20 +136,12 @@ function getRuntimeHomePath(): string {
 	return join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_HOME_DIR);
 }
 
+// 以 runtimeAgentIdSchema 为唯一真源做校验，而不是手写 OR 链——手写链在新增 agent 时
+// 不会编译报错，漏改会让持久化的 agent 选择静默回落到 DEFAULT_AGENT_ID。
 function normalizeAgentId(agentId: RuntimeAgentId | string | null | undefined): RuntimeAgentId {
-	if (
-		(agentId === "claude" ||
-			agentId === "codex" ||
-			agentId === "gemini" ||
-			agentId === "opencode" ||
-			agentId === "droid" ||
-			agentId === "kiro" ||
-			agentId === "cursor" ||
-			agentId === "cline" ||
-			agentId === "kimi") &&
-		isRuntimeAgentLaunchSupported(agentId)
-	) {
-		return agentId;
+	const parsed = runtimeAgentIdSchema.safeParse(agentId);
+	if (parsed.success && isRuntimeAgentLaunchSupported(parsed.data)) {
+		return parsed.data;
 	}
 	return DEFAULT_AGENT_ID;
 }

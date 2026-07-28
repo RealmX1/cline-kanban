@@ -1,3 +1,4 @@
+import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { resolveSessionFacets } from "@runtime-session-activity";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
@@ -428,9 +429,14 @@ class PersistentTerminal {
 			return;
 		}
 		const summary = this.latestSummary;
-		// agentId===null → 无 agent 会话可续（全新 backlog / shell）；"cline" 是进程内 SDK、不走 PTY；
-		// pid!==null → 已有活 PTY，无需续跑。
-		if (!summary || summary.agentId === null || summary.agentId === "cline" || summary.pid !== null) {
+		// agentId===null → 无 agent 会话可续（全新 backlog / shell）；会话面板型 agent（Cline SDK /
+		// ACP）压根不走 PTY；pid!==null → 已有活 PTY，无需续跑。
+		if (
+			!summary ||
+			summary.agentId === null ||
+			isRuntimeAgentSessionRenderedAsConversationPanel(summary.agentId) ||
+			summary.pid !== null
+		) {
 			return;
 		}
 		// 让位守卫（铁律：consumer 一律经 resolveSessionFacets 读 facet 做决策，不臆测 pid/state）：会话若停在

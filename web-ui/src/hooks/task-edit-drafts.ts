@@ -1,5 +1,6 @@
 import type {
 	RuntimeAgentId,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -15,6 +16,7 @@ import type { BoardCard, TaskAutoReviewMode, TaskImage } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
 import {
 	runtimeAgentIdSchema,
+	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskClineSettingsSchema,
 	runtimeTaskImageSchema,
@@ -26,6 +28,7 @@ export interface TaskEditDraft {
 	prompt: string;
 	images: TaskImage[];
 	startInPlanMode: boolean;
+	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode;
 	autoReviewEnabled: boolean;
 	autoReviewMode: TaskAutoReviewMode;
 	branchRef: string;
@@ -55,6 +58,11 @@ function readOptionalString(value: unknown): string | undefined {
 
 function readOptionalAgentId(value: unknown): RuntimeAgentId | undefined {
 	const parsed = runtimeAgentIdSchema.safeParse(value);
+	return parsed.success ? parsed.data : undefined;
+}
+
+function readOptionalTaskAgentPermissionMode(value: unknown): RuntimeTaskAgentPermissionMode | undefined {
+	const parsed = runtimeTaskAgentPermissionModeSchema.safeParse(value);
 	return parsed.success ? parsed.data : undefined;
 }
 
@@ -113,6 +121,7 @@ function readTaskEditDraft(value: unknown): TaskEditDraft | null {
 		prompt,
 		images: readTaskImages(value.images),
 		startInPlanMode: value.startInPlanMode === true,
+		taskAgentPermissionMode: readOptionalTaskAgentPermissionMode(value.taskAgentPermissionMode),
 		autoReviewEnabled: value.autoReviewEnabled === true,
 		autoReviewMode: resolveTaskAutoReviewMode(
 			readOptionalString(value.autoReviewMode) as TaskAutoReviewMode | undefined,
@@ -191,6 +200,7 @@ export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">
 		draft.prompt === task.prompt.trim() &&
 		JSON.stringify(draft.images) === JSON.stringify(task.images ?? []) &&
 		draft.startInPlanMode === task.startInPlanMode &&
+		draft.taskAgentPermissionMode === task.taskAgentPermissionMode &&
 		draft.autoReviewEnabled === (task.autoReviewEnabled === true) &&
 		draft.autoReviewMode === resolveTaskAutoReviewMode(task.autoReviewMode) &&
 		draft.branchRef === task.baseRef &&

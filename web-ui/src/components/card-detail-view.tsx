@@ -1,4 +1,5 @@
 import type { DropResult } from "@hello-pangea/dnd";
+import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import {
 	AlertTriangle,
 	Files,
@@ -37,7 +38,6 @@ import {
 	useCardDetailLayout,
 } from "@/resize/use-card-detail-layout";
 import { useResizeDrag } from "@/resize/use-resize-drag";
-import { isNativeClineAgentSelected } from "@/runtime/native-agent";
 import type {
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
@@ -534,6 +534,7 @@ export function CardDetailView({
 	onSendReviewComments,
 	onSendClineChatMessage,
 	onCancelClineChatTurn,
+	onResolveTaskAgentUserDecision,
 	onLoadClineChatMessages,
 	latestClineChatMessage,
 	streamedClineChatMessages,
@@ -604,6 +605,11 @@ export function CardDetailView({
 		options?: { mode?: RuntimeTaskSessionMode },
 	) => Promise<ClineChatActionResult>;
 	onCancelClineChatTurn?: (taskId: string) => Promise<{ ok: boolean; message?: string }>;
+	onResolveTaskAgentUserDecision?: (
+		taskId: string,
+		decisionId: string,
+		optionId: string | null,
+	) => Promise<{ ok: boolean; message?: string }>;
 	onLoadClineChatMessages?: (taskId: string) => Promise<ClineChatMessage[] | null>;
 	latestClineChatMessage?: ClineChatMessage | null;
 	streamedClineChatMessages?: ClineChatMessage[] | null;
@@ -771,7 +777,11 @@ export function CardDetailView({
 		taskSessions[selectedTaskConversationSessionId] ?? sessionSummary ?? taskSessions[selection.card.id] ?? null;
 	const effectiveTaskConversationSessionAgentId =
 		activeTaskConversationSessionSummary?.agentId ?? effectiveTaskAgentId;
-	const showClineAgentChatPanel = isNativeClineAgentSelected(effectiveTaskConversationSessionAgentId);
+	// 分流依据是「会话传输形态」而不是「是不是 Cline」：Cline SDK 与 ACP（omp）都由 Kanban
+	// 直接持有结构化消息，渲染成会话面板；只有 PTY 终端 agent 才渲染 xterm。
+	const showClineAgentChatPanel = isRuntimeAgentSessionRenderedAsConversationPanel(
+		effectiveTaskConversationSessionAgentId ?? null,
+	);
 	const agentPanelStyle: CSSProperties = showClineAgentChatPanel
 		? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
 		: {
@@ -980,6 +990,8 @@ export function CardDetailView({
 			ref={clineAgentChatPanelRef}
 			taskId={selectedTaskConversationSessionId}
 			summary={activeTaskConversationSessionSummary}
+			// 会话面板由多种传输形态共用，面板内部据此决定是否显示 Cline 专属的 provider/模型控件。
+			agentId={effectiveTaskConversationSessionAgentId ?? undefined}
 			taskColumnId={selection.column.id}
 			defaultMode={isMainTaskConversationSessionSelected ? "act" : "plan"}
 			showComposerModeToggle={false}
@@ -991,6 +1003,7 @@ export function CardDetailView({
 			onTaskClineSettingsChanged={onTaskClineSettingsChanged}
 			onSendMessage={onSendClineChatMessage}
 			onCancelTurn={onCancelClineChatTurn}
+			onResolveUserDecision={onResolveTaskAgentUserDecision}
 			onLoadMessages={onLoadClineChatMessages}
 			incomingMessages={activeTaskConversationSessionMessages}
 			incomingMessage={isMainTaskConversationSessionSelected ? latestClineChatMessage : null}

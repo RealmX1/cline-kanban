@@ -6,6 +6,7 @@ import { isKanbanCursorAgentModelId, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from
 import type {
 	RuntimeAgentId,
 	RuntimeHookEvent,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
@@ -14,6 +15,7 @@ import type {
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
 import { quoteShellArg } from "../core/shell";
+import { resolveTaskAgentPermissionModeForAgent } from "../core/task-agent-permission-mode";
 import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import {
@@ -41,7 +43,10 @@ export interface AgentAdapterLaunchInput {
 	agentId: RuntimeAgentId;
 	binary?: string;
 	args: string[];
-	autonomousModeEnabled?: boolean;
+	// 每任务的放权档位。与 startInPlanMode **正交**：plan 起步只决定开局模式，不得在这里
+	// 被翻译成「降权」——不能同时表达两者的 harness（droid）是显式例外，见
+	// doesPlanModeStartOverridePermissionModeForAgent。
+	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode;
 	cwd: string;
 	prompt: string;
 	images?: RuntimeTaskImage[];
@@ -747,6 +752,60 @@ function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): str
 	return `${taskSessionPrompt}\n\n# Task\n${input.prompt}`;
 }
 
+// 解析本次启动实际生效的放权档位：不能原生表达中间档的 harness 在此保守降级到「每次询问」。
+function resolveLaunchPermissionMode(input: AgentAdapterLaunchInput): RuntimeTaskAgentPermissionMode {
+	return resolveTaskAgentPermissionModeForAgent(input.agentId, input.taskAgentPermissionMode).effectivePermissionMode;
+}
+
+// Claude Code 的「plan 起步」与「放权档位」都落在 --permission-mode 这一个旗标上，所以必须
+// 在一处统一决策，否则两个分支各推一次会产生重复且互相打架的 --permission-mode。
+// 正交语义靠 --allow-dangerously-skip-permissions 达成：它不是「现在就放行」，而是「预授权本会话
+// 后续可以切到 bypass」——于是 plan 起步的会话仍保有用户选定的 bypass 档。
+// 注意：只有 readOnly / plan 这两个「开局必须只读」的分支才剔除已存在的放行旗标；其余情况下
+// 调用方（快捷方式等）显式传入的旗标一律原样保留。
+function stripClaudeImmediateBypassAndPermissionModeArgs(args: string[]): void {
+	const stripped = removeCliOptionsWithValues(
+		args.filter((arg) => arg !== "--dangerously-skip-permissions"),
+		["--permission-mode"],
+	);
+	args.length = 0;
+	args.push(...stripped);
+}
+
+function applyClaudePermissionAndPlanModeArgs(args: string[], input: AgentAdapterLaunchInput): void {
+	const permissionMode = resolveLaunchPermissionMode(input);
+
+	// 只读提问会话是最强约束，压过其余一切。
+	if (input.readOnlyQuestionSession) {
+		stripClaudeImmediateBypassAndPermissionModeArgs(args);
+		args.push("--permission-mode", "plan", "--tools", "Read,Glob,Grep,WebSearch,WebFetch");
+		return;
+	}
+
+	if (input.startInPlanMode) {
+		stripClaudeImmediateBypassAndPermissionModeArgs(args);
+		if (
+			permissionMode === "bypass_all_permission_prompts" &&
+			!hasCliOption(args, "--allow-dangerously-skip-permissions")
+		) {
+			args.push("--allow-dangerously-skip-permissions");
+		}
+		args.push("--permission-mode", "plan");
+		return;
+	}
+
+	if (permissionMode === "bypass_all_permission_prompts") {
+		if (!hasCliOption(args, "--dangerously-skip-permissions")) {
+			args.push("--dangerously-skip-permissions");
+		}
+		return;
+	}
+	if (permissionMode === "auto_approve_file_edits_only" && !hasCliOption(args, "--permission-mode")) {
+		args.push("--permission-mode", "acceptEdits");
+	}
+	// ask_for_every_tool_use：不加任何旗标，走 Claude Code 自身的逐次询问默认。
+}
+
 const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
@@ -757,19 +816,7 @@ const claudeAdapter: AgentSessionAdapter = {
 			FORCE_HYPERLINK: "1",
 		};
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
-		if (input.readOnlyQuestionSession) {
-			const withoutBypass = args.filter((arg) => arg !== "--dangerously-skip-permissions");
-			args.length = 0;
-			args.push(...withoutBypass, "--permission-mode", "plan", "--tools", "Read,Glob,Grep,WebSearch,WebFetch");
-		}
-		if (
-			input.autonomousModeEnabled &&
-			!input.readOnlyQuestionSession &&
-			!input.startInPlanMode &&
-			!hasCliOption(args, "--dangerously-skip-permissions")
-		) {
-			args.push("--dangerously-skip-permissions");
-		}
+		applyClaudePermissionAndPlanModeArgs(args, input);
 		// 三条互斥的续跑分支任一命中 ⇒ 本次启动会重播既有对话（见 PreparedAgentLaunch 同名字段）。
 		const resumesPriorAgentConversation = Boolean(
 			input.resumeFromTrash || taskAgentSessionInitialization || input.forkLatestWorkingDirectorySession,
@@ -803,16 +850,6 @@ const claudeAdapter: AgentSessionAdapter = {
 		if (!explicitModelId && !hasCliOption(args, "--model")) {
 			args.push("--model", "default");
 		}
-		if (input.startInPlanMode) {
-			const withoutImmediateBypass = args.filter((arg) => arg !== "--dangerously-skip-permissions");
-			args.length = 0;
-			args.push(...withoutImmediateBypass);
-			if (!hasCliOption(args, "--allow-dangerously-skip-permissions")) {
-				args.push("--allow-dangerously-skip-permissions");
-			}
-			args.push("--permission-mode", "plan");
-		}
-
 		const hooks = resolveHookContext(input);
 		if (hooks) {
 			const settingsPath = join(getHookAgentDirectory("claude"), "settings.json");
@@ -971,8 +1008,26 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("-c", "check_for_update_on_startup=false");
 		}
 
-		if (input.autonomousModeEnabled && !hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")) {
+		// codex 的放权是 sandbox × approval 两个正交旗标，但它表达不出「改文件放行、执行命令仍询问」
+		// 这一中间档（理由见 task-agent-permission-mode.ts 里 codex 那段注释），所以中间档已在领域层
+		// 保守降级成「每次询问」，这里只剩两档要落地。
+		// 「每次询问」必须显式推 --ask-for-approval untrusted：codex 的默认审批策略来自用户自己的
+		// config.toml，什么都不推等于把档位交给用户全局配置决定——那会静默放宽用户在本任务上选的档。
+		// 与 startInPlanMode 无关——codex 的 plan 起步走 deferred `/plan` 斜杠命令，不占用这两个旗标。
+		const codexPermissionMode = resolveLaunchPermissionMode(input);
+		const hasExplicitCodexApprovalPolicy =
+			hasCliOption(codexArgs, "--ask-for-approval") || hasCliOption(codexArgs, "-a");
+		if (
+			codexPermissionMode === "bypass_all_permission_prompts" &&
+			!hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")
+		) {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
+		} else if (
+			codexPermissionMode === "ask_for_every_tool_use" &&
+			!hasExplicitCodexApprovalPolicy &&
+			!hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")
+		) {
+			codexArgs.push("--ask-for-approval", "untrusted");
 		}
 		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
 		if (input.readOnlyQuestionSession) {
@@ -1078,9 +1133,11 @@ const cursorAdapter: AgentSessionAdapter = {
 			args.push("--workspace", input.cwd);
 		}
 
+		// cursor-agent 的 --force（放行命令）与 --plan（开局只读规划）是两个独立布尔旗标，实测可并存，
+		// 故这里不再让 plan 起步压掉放权档。cursor 无法表达「只放行编辑」，中间档已由
+		// resolveLaunchPermissionMode 保守降级为「每次询问」。
 		if (
-			input.autonomousModeEnabled &&
-			!input.startInPlanMode &&
+			resolveLaunchPermissionMode(input) === "bypass_all_permission_prompts" &&
 			!hasCliOption(args, "--force") &&
 			!hasCliOption(args, "--yolo")
 		) {
@@ -1116,14 +1173,19 @@ const geminiAdapter: AgentSessionAdapter = {
 		const args = [...input.args];
 		const env: Record<string, string | undefined> = {};
 
-		if (input.autonomousModeEnabled && !hasCliOption(args, "--yolo")) {
+		const geminiPermissionMode = resolveLaunchPermissionMode(input);
+		if (geminiPermissionMode === "bypass_all_permission_prompts" && !hasCliOption(args, "--yolo")) {
 			args.push("--yolo");
+		} else if (geminiPermissionMode === "auto_approve_file_edits_only" && !hasCliOption(args, "--approval-mode")) {
+			args.push("--approval-mode=auto_edit");
 		}
 
 		if (input.resumeFromTrash && !hasCliOption(args, "--resume")) {
 			args.push("--resume", "latest");
 		}
 
+		// plan 起步用 --approval-mode=plan 表达，会盖掉上面的 auto_edit（同一旗标）；--yolo 是独立
+		// 旗标故 bypass 档在 plan 起步下依然保留。
 		if (input.startInPlanMode) {
 			args.push("--approval-mode=plan");
 		}
@@ -1495,11 +1557,19 @@ const droidAdapter: AgentSessionAdapter = {
 		}
 
 		const hooks = resolveHookContext(input);
-		const shouldWriteSettings = Boolean(hooks) || input.startInPlanMode || input.autonomousModeEnabled !== undefined;
-		if (shouldWriteSettings) {
+		// settings.json 必写：autonomyMode 要如实反映当前放权档（"normal" 同样是一个有意义的档位，
+		// 不写就会退回 droid 自己的默认，权限档形同虚设）。
+		{
 			const settingsPath = join(getHookAgentDirectory("droid"), "settings.json");
 			const settings: Record<string, unknown> = {
-				autonomyMode: input.startInPlanMode ? "spec" : input.autonomousModeEnabled ? "auto-high" : "normal",
+				// droid 的 autonomyMode 是**单轴**（spec / normal / auto-high），无法同时表达
+				// 「plan 起步」与「放权档位」。这是已知的 harness 限制，由
+				// doesPlanModeStartOverridePermissionModeForAgent 在 UI 侧明示，此处不静默假装两者都生效。
+				autonomyMode: input.startInPlanMode
+					? "spec"
+					: resolveLaunchPermissionMode(input) === "bypass_all_permission_prompts"
+						? "auto-high"
+						: "normal",
 			};
 
 			if (hooks) {
@@ -1572,7 +1642,11 @@ const kiroAdapter: AgentSessionAdapter = {
 		const args = [...input.args];
 		const env: Record<string, string | undefined> = {};
 
-		if (input.autonomousModeEnabled && !hasCliOption(args, "--trust-all-tools")) {
+		// kiro 的 plan 起步是纯 prompt 注入，与 --trust-all-tools 天然正交。
+		if (
+			resolveLaunchPermissionMode(input) === "bypass_all_permission_prompts" &&
+			!hasCliOption(args, "--trust-all-tools")
+		) {
 			args.push("--trust-all-tools");
 		}
 
@@ -1686,7 +1760,10 @@ const clineAdapter: AgentSessionAdapter = {
 		const args = [...input.args];
 		const env: Record<string, string | undefined> = {};
 
-		if (input.autonomousModeEnabled && !hasCliOption(args, "--auto-approve-all")) {
+		if (
+			resolveLaunchPermissionMode(input) === "bypass_all_permission_prompts" &&
+			!hasCliOption(args, "--auto-approve-all")
+		) {
 			args.push("--auto-approve-all");
 		}
 
@@ -1778,7 +1855,12 @@ const kimiAdapter: AgentSessionAdapter = {
 			KIMI_CLI_NO_AUTO_UPDATE: "1",
 		};
 
-		if (input.autonomousModeEnabled && !hasCliOption(args, "--yolo") && !hasCliOption(args, "-y")) {
+		// kimi 的 --plan 与 --yolo 是独立旗标，plan 起步不影响放权档。
+		if (
+			resolveLaunchPermissionMode(input) === "bypass_all_permission_prompts" &&
+			!hasCliOption(args, "--yolo") &&
+			!hasCliOption(args, "-y")
+		) {
 			args.push("--yolo");
 		}
 		if (input.startInPlanMode && !hasCliOption(args, "--plan")) {
@@ -1815,6 +1897,18 @@ const kimiAdapter: AgentSessionAdapter = {
 	},
 };
 
+// oh-my-pi 没有 PTY 会话形态：它经 ACP（JSON-RPC over stdio）由 src/acp-client-session/ 驱动。
+// 这里放一个显式抛错的占位，好让「路由错到终端路径」在第一时间炸出来，而不是静默起一个
+// 没有 hook、状态永远不前进的 TUI。
+const ompTerminalPathUnsupportedAdapter: AgentSessionAdapter = {
+	async prepare() {
+		throw new Error(
+			"oh-my-pi (omp) sessions are driven over ACP, not a PTY terminal. " +
+				"Route this task through the ACP task session service instead of terminalManager.startTaskSession.",
+		);
+	},
+};
+
 const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	claude: claudeAdapter,
 	codex: codexAdapter,
@@ -1825,6 +1919,7 @@ const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	kiro: kiroAdapter,
 	cline: clineAdapter,
 	kimi: kimiAdapter,
+	omp: ompTerminalPathUnsupportedAdapter,
 };
 
 export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promise<PreparedAgentLaunch> {

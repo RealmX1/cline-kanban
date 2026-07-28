@@ -3,7 +3,7 @@ import type {
 	DraggableProvidedDragHandleProps,
 	DraggableStyle,
 } from "@hello-pangea/dnd";
-import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
+import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import {
 	deriveDisplayLiveness,
 	isParkedAwaitingDispatchedBackgroundWork,
@@ -742,7 +742,9 @@ export function TaskCardBody({
 					) : null}
 					{/* 仅终端 agent（claude/codex…，排除进程内 Cline SDK 与无会话）的 In Progress 卡：手动翻入 Review。
 					    用于会话卡死/空闲（Stop hook 未触发、进程未退）拖不进 Review 列、被反复打回的兜底。 */}
-					{columnId === "in_progress" && sessionSummary?.agentId != null && sessionSummary.agentId !== "cline" ? (
+					{columnId === "in_progress" &&
+					sessionSummary?.agentId != null &&
+					!isRuntimeAgentSessionRenderedAsConversationPanel(sessionSummary.agentId) ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to review")}>
 							<Button
 								icon={isMoveToReviewLoading ? <Spinner size={12} /> : <Eye size={12} />}

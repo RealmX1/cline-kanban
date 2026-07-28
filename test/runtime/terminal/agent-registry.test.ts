@@ -9,6 +9,7 @@ vi.mock("../../../src/terminal/command-discovery.js", () => ({
 }));
 
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
+import { RUNTIME_AGENT_CATALOG } from "../../../src/core/agent-catalog";
 import {
 	buildRuntimeConfigResponse,
 	detectInstalledCommands,
@@ -51,7 +52,9 @@ describe("agent-registry", () => {
 		const detected = detectInstalledCommands();
 
 		expect(detected).toEqual(["claude"]);
-		expect(commandDiscoveryMocks.isBinaryAvailableOnPath).toHaveBeenCalledTimes(10);
+		// 每个 catalog 条目的 binary 各探一次，外加 "npx"。从 catalog 推导而非硬编码，
+		// 否则每加一个 agent 都要来改这个数字。
+		expect(commandDiscoveryMocks.isBinaryAvailableOnPath).toHaveBeenCalledTimes(RUNTIME_AGENT_CATALOG.length + 1);
 	});
 
 	it("treats shell-only agents as unavailable", () => {
@@ -91,6 +94,7 @@ describe("buildRuntimeConfigResponse", () => {
 			"droid",
 			"kiro",
 			"kimi",
+			"omp",
 		]);
 		expect(response.agents.find((agent) => agent.id === "claude")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "codex")?.defaultArgs).toEqual([]);
@@ -128,6 +132,7 @@ describe("buildRuntimeConfigResponse", () => {
 			"droid",
 			"kiro",
 			"kimi",
+			"omp",
 		]);
 		expect(response.agents.find((agent) => agent.id === "claude")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "codex")?.defaultArgs).toEqual([]);

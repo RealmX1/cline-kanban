@@ -1,3 +1,4 @@
+import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import "@xterm/xterm/css/xterm.css";
 
 import { isSessionInActiveTurn, resolveSessionFacets } from "@runtime-session-activity";
@@ -406,7 +407,11 @@ function AgentTerminalPanelLayout({
 	const isStreamClosed = sessionFacets?.liveness === "exited";
 	const isSyntheticHomeSession = taskId.startsWith("__home_");
 	const showRefreshButton = !isSyntheticHomeSession;
-	const canRefresh = showRefreshButton && summary !== null && summary.agentId !== null && summary.agentId !== "cline";
+	const canRefresh =
+		showRefreshButton &&
+		summary !== null &&
+		summary.agentId !== null &&
+		!isRuntimeAgentSessionRenderedAsConversationPanel(summary.agentId);
 	const showCompactHeader = !showSessionToolbar;
 	const statusLabel = useMemo(() => describeState(summary), [summary]);
 	const statusTagStyle = useMemo(() => getStateTagStyle(summary), [summary]);

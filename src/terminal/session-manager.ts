@@ -270,7 +270,7 @@ export interface StartTaskSessionRequest {
 	agentId: AgentAdapterLaunchInput["agentId"];
 	binary: string;
 	args: string[];
-	autonomousModeEnabled?: boolean;
+	taskAgentPermissionMode?: AgentAdapterLaunchInput["taskAgentPermissionMode"];
 	autoContinueOnConnectionDropEnabled?: boolean;
 	cwd: string;
 	prompt: string;
@@ -1606,7 +1606,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			agentId: request.agentId,
 			binary: request.binary,
 			args: request.args,
-			autonomousModeEnabled: request.autonomousModeEnabled,
+			taskAgentPermissionMode: request.taskAgentPermissionMode,
 			cwd: request.cwd,
 			prompt: request.prompt,
 			images: request.images,

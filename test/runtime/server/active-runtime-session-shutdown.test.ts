@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { applySessionFacets } from "../../../src/core/session-activity";
-import { stopActiveTerminalAndClineRuntimeSessionsForWorkspace } from "../../../src/server/active-runtime-session-shutdown";
+import { stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace } from "../../../src/server/active-runtime-session-shutdown";
 import { persistSafelyStoppedRuntimeSessionsByWorkspaceId } from "../../../src/server/safely-stopped-runtime-session-persistence";
 import { loadWorkspaceContext, loadWorkspaceState, saveWorkspaceState } from "../../../src/state/workspace-state";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
@@ -11,7 +11,7 @@ import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-muta
 function createSummary(
 	taskId: string,
 	state: "running" | "awaiting_review" | "idle",
-	agentId: "codex" | "cline",
+	agentId: "codex" | "cline" | "omp",
 ): RuntimeTaskSessionSummary {
 	return applySessionFacets({
 		taskId,
@@ -39,9 +39,10 @@ describe("active runtime session shutdown", () => {
 		const terminalManager = new TerminalSessionManager();
 		terminalManager.hydrateFromRecord({ "terminal-exited": terminalExitedAwaitingUser });
 
-		const result = await stopActiveTerminalAndClineRuntimeSessionsForWorkspace({
+		const result = await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
 			terminalManager,
 			clineTaskSessionService: null,
+			acpTaskSessionService: null,
 		});
 
 		expect(result.stoppedRuntimeSessionSummaries).toEqual([]);
@@ -69,7 +70,7 @@ describe("active runtime session shutdown", () => {
 		};
 		const stopTaskSessionForSafeShutdown = vi.fn(async () => safelyStoppedClineRunning);
 
-		const result = await stopActiveTerminalAndClineRuntimeSessionsForWorkspace({
+		const result = await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
 			terminalManager: {
 				listSummaries: () => [terminalRunning],
 				markInterruptedAndStopAll: () => [terminalRunning],
@@ -78,6 +79,7 @@ describe("active runtime session shutdown", () => {
 				listSummaries: () => [clineRunning, clineIdle],
 				stopTaskSessionForSafeShutdown,
 			},
+			acpTaskSessionService: null,
 		});
 
 		expect(stopTaskSessionForSafeShutdown).toHaveBeenCalledWith("cline-running");
@@ -89,6 +91,37 @@ describe("active runtime session shutdown", () => {
 			"cline-idle",
 			"cline-running",
 			"terminal-running",
+		]);
+	});
+
+	it("stops live ACP agent subprocesses alongside terminal and Cline sessions", async () => {
+		const acpRunning = createSummary("acp-running", "running", "omp");
+		const acpIdle = createSummary("acp-idle", "idle", "omp");
+		const safelyStoppedAcpRunning = {
+			...acpRunning,
+			state: "interrupted" as const,
+			pid: null,
+			turnOwner: "user" as const,
+			liveness: "interrupted" as const,
+			userTurnKind: "interrupted" as const,
+		};
+		const stopTaskSession = vi.fn(async () => safelyStoppedAcpRunning);
+
+		const result = await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
+			terminalManager: null,
+			clineTaskSessionService: null,
+			acpTaskSessionService: {
+				listSummaries: () => [acpRunning, acpIdle],
+				stopTaskSession,
+			},
+		});
+
+		expect(stopTaskSession).toHaveBeenCalledTimes(1);
+		expect(stopTaskSession).toHaveBeenCalledWith("acp-running");
+		expect(result.stoppedRuntimeSessionSummaries.map((summary) => summary.taskId)).toEqual(["acp-running"]);
+		expect(result.runtimeSessionSummariesForSafePersistence.map((summary) => summary.taskId).sort()).toEqual([
+			"acp-idle",
+			"acp-running",
 		]);
 	});
 

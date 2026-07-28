@@ -6,6 +6,7 @@ import { createInitialBoardData } from "@/data/board-data";
 import type {
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -25,12 +26,16 @@ import {
 	type TaskCommentEntry,
 	type TaskImage,
 } from "@/types";
-import { runtimeTaskAgentSessionInitializationSchema } from "../../../src/core/api-contract";
+import {
+	runtimeTaskAgentPermissionModeSchema,
+	runtimeTaskAgentSessionInitializationSchema,
+} from "../../../src/core/api-contract";
 
 export interface TaskDraft {
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
+	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode;
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
@@ -235,6 +240,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		title?: unknown;
 		prompt?: unknown;
 		startInPlanMode?: unknown;
+		taskAgentPermissionMode?: unknown;
 		autoReviewEnabled?: unknown;
 		autoReviewMode?: unknown;
 		images?: unknown;
@@ -296,12 +302,19 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 	const prepFilePath = typeof card.prepFilePath === "string" ? card.prepFilePath.trim() : "";
 	const worktreeMode =
 		card.worktreeMode === "branch" || card.worktreeMode === "inplace" ? card.worktreeMode : undefined;
+	// 老卡片没有这个字段：这里留 undefined，由服务端在启动任务时按当时的全局 autonomous 开关推导，
+	// 前端不猜（前端拿不到那个开关的历史值）。
+	const parsedTaskAgentPermissionMode = runtimeTaskAgentPermissionModeSchema.safeParse(card.taskAgentPermissionMode);
+	const taskAgentPermissionMode = parsedTaskAgentPermissionMode.success
+		? parsedTaskAgentPermissionMode.data
+		: undefined;
 
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
 		title,
 		prompt,
 		startInPlanMode: typeof card.startInPlanMode === "boolean" ? card.startInPlanMode : false,
+		...(taskAgentPermissionMode !== undefined ? { taskAgentPermissionMode } : {}),
 		autoReviewEnabled: typeof card.autoReviewEnabled === "boolean" ? card.autoReviewEnabled : false,
 		autoReviewMode: resolveTaskAutoReviewMode(
 			typeof card.autoReviewMode === "string" ? (card.autoReviewMode as TaskAutoReviewMode) : undefined,
@@ -458,6 +471,7 @@ export function addTaskToColumnWithResult(
 			title: draft.title,
 			prompt,
 			startInPlanMode: draft.startInPlanMode,
+			taskAgentPermissionMode: draft.taskAgentPermissionMode,
 			autoReviewEnabled: draft.autoReviewEnabled,
 			autoReviewMode: draft.autoReviewMode,
 			images: draft.images,
@@ -642,6 +656,9 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 	}
 	const shouldUpdateTaskAgentSessionInitialization = Object.hasOwn(draft, "taskAgentSessionInitialization");
 	const shouldUpdateWorktreeMode = Object.hasOwn(draft, "worktreeMode");
+	// updateTask 是全量覆盖语义，而不少调用点（例如取消自动提交）只重建了部分 draft。
+	// 用 Object.hasOwn 区分「显式改成 undefined」与「压根没提」，否则那些调用点会把权限档清零。
+	const shouldUpdateTaskAgentPermissionMode = Object.hasOwn(draft, "taskAgentPermissionMode");
 
 	let updated = false;
 	const columns = board.columns.map((column) => {
@@ -657,6 +674,9 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				title: title || card.title,
 				prompt,
 				startInPlanMode: Boolean(draft.startInPlanMode),
+				taskAgentPermissionMode: shouldUpdateTaskAgentPermissionMode
+					? draft.taskAgentPermissionMode
+					: card.taskAgentPermissionMode,
 				autoReviewEnabled: Boolean(draft.autoReviewEnabled),
 				autoReviewMode: resolveTaskAutoReviewMode(draft.autoReviewMode ?? DEFAULT_TASK_AUTO_REVIEW_MODE),
 				images:

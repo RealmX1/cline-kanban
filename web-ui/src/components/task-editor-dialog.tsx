@@ -1,6 +1,7 @@
 import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as RadixSwitch from "@radix-ui/react-switch";
+import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 
 import {
 	ArrowBigUp,
@@ -27,6 +28,7 @@ import {
 	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
 	useTaskAgentModelPicker,
 } from "@/components/task-agent-model-picker";
+import { TaskAgentPermissionModeControl } from "@/components/task-agent-permission-mode-control";
 import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control";
@@ -37,6 +39,7 @@ import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -75,6 +78,7 @@ export interface TaskCreateFormSnapshot {
 	multiPromptContent: string;
 	imageCount: number;
 	startInPlanMode: boolean;
+	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	autoReviewEnabled: boolean;
 	autoReviewMode: TaskAutoReviewMode;
 	branchRef: string;
@@ -104,6 +108,7 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		current.multiPromptContent !== baseline.multiPromptContent ||
 		current.imageCount !== baseline.imageCount ||
 		current.startInPlanMode !== baseline.startInPlanMode ||
+		current.taskAgentPermissionMode !== baseline.taskAgentPermissionMode ||
 		current.autoReviewEnabled !== baseline.autoReviewEnabled ||
 		current.autoReviewMode !== baseline.autoReviewMode ||
 		current.branchRef !== baseline.branchRef ||
@@ -188,6 +193,8 @@ export function TaskEditorDialog({
 	onCreateStartAndOpen,
 	startInPlanMode,
 	onStartInPlanModeChange,
+	taskAgentPermissionMode,
+	onTaskAgentPermissionModeChange,
 	autoReviewEnabled,
 	onAutoReviewEnabledChange,
 	autoReviewMode,
@@ -227,6 +234,8 @@ export function TaskEditorDialog({
 	onCreateStartAndOpen?: (options?: TaskEditorSubmitOptions) => string | null;
 	startInPlanMode: boolean;
 	onStartInPlanModeChange: (value: boolean) => void;
+	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
+	onTaskAgentPermissionModeChange: (value: RuntimeTaskAgentPermissionMode) => void;
 	autoReviewEnabled: boolean;
 	onAutoReviewEnabledChange: (value: boolean) => void;
 	autoReviewMode: TaskAutoReviewMode;
@@ -348,6 +357,14 @@ export function TaskEditorDialog({
 		defaultProviderId,
 		defaultModelId,
 	});
+
+	// 权限档位的能力标注要跟随「这张卡实际会用哪个 agent」：卡片没显式选就落到工作区默认 agent。
+	const effectiveTaskAgentPermissionModeAgentId = agentId ?? defaultAgentId ?? null;
+	const effectiveTaskAgentPermissionModeAgentLabel =
+		(effectiveTaskAgentPermissionModeAgentId === null
+			? null
+			: (agents?.find((agent) => agent.id === effectiveTaskAgentPermissionModeAgentId)?.label ??
+				getRuntimeAgentCatalogEntry(effectiveTaskAgentPermissionModeAgentId)?.label)) ?? "This agent";
 
 	// `useDeferredValue` 在这里是划算的，与「不要把它放在 hook / App 根节点」并不矛盾：
 	// 双 commit 的代价完全取决于被重渲的子树大小。放根节点要把 51 个 hook 调用点付两遍；
@@ -593,6 +610,7 @@ export function TaskEditorDialog({
 			.join("\n"),
 		imageCount: images.length,
 		startInPlanMode,
+		taskAgentPermissionMode,
 		autoReviewEnabled,
 		autoReviewMode,
 		branchRef,
@@ -794,6 +812,22 @@ export function TaskEditorDialog({
 							</RadixCheckbox.Root>
 							Start in plan mode
 						</label>
+
+						<div>
+							{/* 权限档位与「Start in plan mode」是两条正交轴：plan 只决定开局先只读规划，
+							    不影响这里选定的放权程度（不能同时表达两者的 agent 会在选项 tooltip 里明示）。
+							    少数 harness（droid）把两条轴压在同一个单轴设置上，plan 起步会吃掉权限档——
+							    所以必须把 startInPlanMode 一并传下去，让控件当场把这个冲突说出来。 */}
+							<span className="text-[11px] text-text-secondary block mb-1">Agent permissions</span>
+							<TaskAgentPermissionModeControl
+								value={taskAgentPermissionMode}
+								onChange={onTaskAgentPermissionModeChange}
+								selectedAgentId={effectiveTaskAgentPermissionModeAgentId}
+								selectedAgentLabel={effectiveTaskAgentPermissionModeAgentLabel}
+								startInPlanMode={startInPlanMode}
+								idPrefix="task-create-agent-permission-mode"
+							/>
+						</div>
 
 						<div>
 							<span className="text-[11px] text-text-secondary block mb-1">Task workspace</span>

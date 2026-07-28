@@ -83,7 +83,7 @@ export const TASK_START_ONBOARDING_SLIDES: OnboardingSlide[] = [
 	},
 ];
 
-const ONBOARDING_AGENT_IDS: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "droid", "kiro"];
+const ONBOARDING_AGENT_IDS: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "omp", "droid", "kiro"];
 const FALLBACK_ONBOARDING_SLIDE: OnboardingSlide = {
 	kind: "agent-selection",
 	title: "",
@@ -304,6 +304,9 @@ function resolveInstallInstructions(agentId: RuntimeAgentId): string {
 	}
 	if (agentId === "kiro") {
 		return "Amazon's coding agent with access to the latest frontier models.";
+	}
+	if (agentId === "omp") {
+		return "Oh My Pi, driven over the Agent Client Protocol instead of a terminal.";
 	}
 	return "Install from the official docs.";
 }

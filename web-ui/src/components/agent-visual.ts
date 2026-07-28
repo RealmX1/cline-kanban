@@ -1,4 +1,4 @@
-import { Bot, Cpu, MousePointer2, Wind } from "lucide-react";
+import { Bot, CircleDot, Cpu, MousePointer2, Sparkles, Wind } from "lucide-react";
 import type { ComponentType } from "react";
 
 import { ClaudeIcon, CodexIcon, GeminiIcon } from "@/components/ui/agent-brand-icons";
@@ -29,6 +29,8 @@ const AGENT_VISUAL_BY_ID: Partial<Record<RuntimeAgentId, AgentVisual>> = {
 	cursor: { Icon: MousePointer2, className: "text-status-green" },
 	droid: { Icon: Cpu, className: "text-status-red" },
 	kiro: { Icon: Wind, className: "text-status-gold" },
+	kimi: { Icon: Sparkles, className: "text-status-purple" },
+	omp: { Icon: CircleDot, className: "text-status-green" },
 };
 
 const FALLBACK_AGENT_VISUAL: AgentVisual = { Icon: Bot, className: "text-text-secondary" };

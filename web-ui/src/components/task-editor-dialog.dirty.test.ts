@@ -8,6 +8,7 @@ function baseline(overrides: Partial<TaskCreateFormSnapshot> = {}): TaskCreateFo
 		multiPromptContent: "",
 		imageCount: 0,
 		startInPlanMode: false,
+		taskAgentPermissionMode: "bypass_all_permission_prompts",
 		autoReviewEnabled: false,
 		autoReviewMode: "commit",
 		branchRef: "main",

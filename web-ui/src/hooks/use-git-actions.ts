@@ -1,10 +1,15 @@
+import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { useCallback, useMemo, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import { type UseGitHistoryDataResult, useGitHistoryData } from "@/components/git-history/use-git-history-data";
 import { buildTaskGitActionPrompt, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
-import { isNativeClineAgentSelected } from "@/runtime/native-agent";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
-import type { RuntimeConfigResponse, RuntimeGitSyncAction, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeConfigResponse,
+	RuntimeGitSyncAction,
+	RuntimeTaskWorkspaceInfoResponse,
+} from "@/runtime/types";
 import { findCardSelection } from "@/state/board-state";
 import {
 	getTaskWorkspaceInfo,
@@ -215,8 +220,13 @@ export function useGitActions({
 		return next;
 	}, [taskGitActionLoadingByTaskId]);
 
-	const shouldUseClineChatForTaskGitActions = isNativeClineAgentSelected(
-		runtimeProjectConfig?.selectedAgentId ?? null,
+	// Commit / Open PR 的投递通道必须按**该任务实际使用的 agent** 判定，而不是工作区默认 agent，
+	// 更不是「是不是 cline」：会话以对话面板呈现的 agent（cline 与 omp 这类 ACP agent）走
+	// sendTaskChatMessage，只有 PTY 型终端 agent 才粘贴进终端。判错会把指令粘进不存在的 PTY。
+	const resolveShouldUseChatChannelForTaskGitActions = useCallback(
+		(taskAgentId: RuntimeAgentId | null | undefined): boolean =>
+			isRuntimeAgentSessionRenderedAsConversationPanel(taskAgentId ?? runtimeProjectConfig?.selectedAgentId ?? null),
+		[runtimeProjectConfig?.selectedAgentId],
 	);
 
 	const runTaskGitAction = useCallback(
@@ -287,7 +297,7 @@ export function useGitActions({
 							}
 						: null,
 				});
-				if (shouldUseClineChatForTaskGitActions) {
+				if (resolveShouldUseChatChannelForTaskGitActions(selection.card.agentId)) {
 					const sent = await sendTaskChatMessage(taskId, prompt, { mode: "act" });
 					if (!sent.ok) {
 						showAppToast({
@@ -335,7 +345,7 @@ export function useGitActions({
 			sendTaskChatMessage,
 			sendTaskSessionInput,
 			setTaskGitActionLoading,
-			shouldUseClineChatForTaskGitActions,
+			resolveShouldUseChatChannelForTaskGitActions,
 			taskGitActionLoadingByTaskId,
 		],
 	);

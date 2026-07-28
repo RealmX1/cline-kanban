@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
-import type { RuntimeTaskHookActivity, RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeConfigResponse, RuntimeTaskHookActivity, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { resetWorkspaceMetadataStore, setTaskWorkspaceSnapshot } from "@/stores/workspace-metadata-store";
 
 function createSummary(
@@ -29,6 +29,51 @@ function createSummary(
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
 		...overrides,
+	};
+}
+
+function createClineRuntimeConfigResponse(): RuntimeConfigResponse {
+	return {
+		selectedAgentId: "cline",
+		selectedShortcutLabel: null,
+		agentAutonomousModeEnabled: true,
+		newTaskStartInPlanModeByDefault: true,
+		effectiveCommand: "cline",
+		globalConfigPath: "/tmp/global-config.json",
+		projectConfigPath: "/tmp/project/.cline/kanban/config.json",
+		readyForReviewNotificationsEnabled: true,
+		notificationSoundEnabled: true,
+		autoContinueOnConnectionDropEnabled: true,
+		postDeployVerificationForceCompleteEnabled: false,
+		detectedCommands: ["cline"],
+		agents: [
+			{
+				id: "cline",
+				label: "Cline",
+				binary: "cline",
+				command: "cline",
+				defaultArgs: [],
+				installed: true,
+				configured: true,
+			},
+		],
+		shortcuts: [],
+		clineProviderSettings: {
+			providerId: "cline",
+			modelId: "claude-sonnet-4-6",
+			baseUrl: null,
+			reasoningEffort: null,
+			apiKeyConfigured: false,
+			oauthProvider: "cline",
+			oauthAccessTokenConfigured: false,
+			oauthRefreshTokenConfigured: false,
+			oauthAccountId: null,
+			oauthExpiresAt: null,
+		},
+		commitPromptTemplate: "",
+		openPrPromptTemplate: "",
+		commitPromptTemplateDefault: "",
+		openPrPromptTemplateDefault: "",
 	};
 }
 
@@ -1227,5 +1272,80 @@ describe("ClineAgentChatPanel", () => {
 
 		expect(container.textContent).toContain("Move Card To Done");
 		expect(container.textContent).not.toContain("Move Card To Validation");
+	});
+
+	it("renders the Cline provider model picker for native Cline SDK sessions", async () => {
+		await act(async () => {
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					taskId="task-1"
+					summary={createSummary("idle")}
+					workspaceId="workspace-1"
+					runtimeConfig={createClineRuntimeConfigResponse()}
+					onLoadMessages={async () => []}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		expect(container.querySelector("#cline-chat-model-picker")).toBeInstanceOf(HTMLElement);
+	});
+
+	it("hides Cline provider controls for ACP sessions so they cannot rewrite unrelated Cline settings", async () => {
+		await act(async () => {
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					taskId="task-1"
+					agentId="omp"
+					summary={createSummary("idle", null, { agentId: "omp" })}
+					workspaceId="workspace-1"
+					runtimeConfig={createClineRuntimeConfigResponse()}
+					onLoadMessages={async () => []}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		expect(container.querySelector("#cline-chat-model-picker")).toBeNull();
+		expect(container.querySelector("textarea")?.getAttribute("placeholder")).toContain("Oh My Pi");
+	});
+
+	it("sends from an ACP session without being blocked by unsaved Cline model settings", async () => {
+		const onSendMessage = vi.fn(async () => ({
+			ok: true,
+			chatMessage: {
+				id: "sent-acp",
+				role: "user" as const,
+				content: "Ship it",
+				createdAt: 2,
+			},
+		}));
+		const panelRef = createRef<ClineAgentChatPanelHandle>();
+
+		await act(async () => {
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					ref={panelRef}
+					taskId="task-1"
+					agentId="omp"
+					summary={createSummary("idle", null, { agentId: "omp" })}
+					workspaceId="workspace-1"
+					runtimeConfig={createClineRuntimeConfigResponse()}
+					onLoadMessages={async () => []}
+					onSendMessage={onSendMessage}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		await act(async () => {
+			await panelRef.current?.sendText("Ship it");
+		});
+
+		expect(onSendMessage).toHaveBeenCalledWith("task-1", "Ship it", { mode: "act" });
+		expect(container.textContent).not.toContain("Choose a Cline provider");
 	});
 });

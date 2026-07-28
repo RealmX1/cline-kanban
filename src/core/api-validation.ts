@@ -25,6 +25,7 @@ import {
 	type RuntimeProjectPermanentDeletionPreviewRequest,
 	type RuntimeProjectPermanentDeletionRequest,
 	type RuntimeShellSessionStartRequest,
+	type RuntimeTaskAgentUserDecisionResolveRequest,
 	type RuntimeTaskChatAbortRequest,
 	type RuntimeTaskChatCancelRequest,
 	type RuntimeTaskChatMessagesRequest,
@@ -70,6 +71,7 @@ import {
 	runtimeProjectPermanentDeletionPreviewRequestSchema,
 	runtimeProjectPermanentDeletionRequestSchema,
 	runtimeShellSessionStartRequestSchema,
+	runtimeTaskAgentUserDecisionResolveRequestSchema,
 	runtimeTaskChatAbortRequestSchema,
 	runtimeTaskChatCancelRequestSchema,
 	runtimeTaskChatMessagesRequestSchema,
@@ -458,6 +460,22 @@ export function parseTaskChatReloadRequest(value: unknown): RuntimeTaskChatReloa
 	return {
 		taskId,
 	};
+}
+
+export function parseTaskAgentUserDecisionResolveRequest(value: unknown): RuntimeTaskAgentUserDecisionResolveRequest {
+	const parsed = parseWithSchema(runtimeTaskAgentUserDecisionResolveRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	if (!taskId) {
+		throw new Error("Task agent user decision taskId cannot be empty.");
+	}
+	const decisionId = parsed.decisionId.trim();
+	if (!decisionId) {
+		throw new Error("Task agent user decision decisionId cannot be empty.");
+	}
+	if (parsed.outcome === "selected" && !parsed.optionId?.trim()) {
+		throw new Error("Selecting a task agent user decision option requires an optionId.");
+	}
+	return { ...parsed, taskId, decisionId };
 }
 
 export function parseTaskChatCancelRequest(value: unknown): RuntimeTaskChatCancelRequest {

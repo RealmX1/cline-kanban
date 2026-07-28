@@ -3,7 +3,20 @@
 // shared API contract, and fans out workspace-scoped snapshots and deltas.
 import type { IncomingMessage } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import type { ClineTaskMessage, ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
+import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
+
+// 「会话型」任务来源：Kanban 直接持有结构化消息、在卡片详情里渲染成会话面板的那一类 agent。
+// 目前是 Cline SDK（进程内）与 ACP（stdio 子进程）两种。
+export type ConversationTaskSessionSourceKind = "cline" | "acp";
+const CONVERSATION_TASK_SESSION_SOURCE_KINDS: readonly ConversationTaskSessionSourceKind[] = ["cline", "acp"];
+
+// 推流只需要这三件事，故按结构订阅而不是绑死某个具体 service 类。
+export interface ConversationTaskSessionSubscriptionSource {
+	listSummaries(): RuntimeTaskSessionSummary[];
+	onSummary(listener: (summary: RuntimeTaskSessionSummary) => void): () => void;
+	onMessage(listener: (taskId: string, message: RuntimeTaskChatMessage) => void): () => void;
+}
+
 import type {
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeNotificationFeedEntry,
@@ -20,6 +33,7 @@ import type {
 	RuntimeStateStreamTaskSessionsMessage,
 	RuntimeStateStreamWorkspaceMetadataMessage,
 	RuntimeStateStreamWorkspaceStateMessage,
+	RuntimeTaskChatMessage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionUserTurnKind,
 } from "../core/api-contract";
@@ -48,7 +62,13 @@ export interface CreateRuntimeStateHubDependencies {
 export interface RuntimeStateHub {
 	trackTerminalManager: (workspaceId: string, manager: TerminalSessionManager) => void;
 	trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => void;
-	broadcastTaskChatMessage: (workspaceId: string, taskId: string, message: ClineTaskMessage) => void;
+	broadcastTaskChatMessage: (workspaceId: string, taskId: string, message: RuntimeTaskChatMessage) => void;
+	// ACP 会话与 Cline SDK 会话共用同一套 summary/message 推流；两者只是来源不同。
+	trackAcpTaskSessionService: (
+		workspaceId: string,
+		workspacePath: string,
+		service: ConversationTaskSessionSubscriptionSource,
+	) => void;
 	broadcastTaskChatCleared: (workspaceId: string, taskId: string) => void;
 	handleUpgrade: (
 		request: IncomingMessage,
@@ -76,9 +96,21 @@ export interface RuntimeStateHub {
 
 export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): RuntimeStateHub {
 	const terminalSummaryUnsubscribeByWorkspaceId = new Map<string, () => void>();
-	const clineSummaryUnsubscribeByWorkspaceId = new Map<string, () => void>();
-	const clineMessageUnsubscribeByWorkspaceId = new Map<string, () => void>();
-	const clinePreviousSummaryByWorkspaceId = new Map<string, Map<string, RuntimeTaskSessionSummary>>();
+	// 一个 workspace 可能同时挂着多种「会话型」来源（Cline SDK 与 ACP），故按
+	// `${workspaceId}::${sourceKind}` 复合键登记订阅，避免二者互相顶掉。
+	const conversationSummaryUnsubscribeBySubscriptionKey = new Map<string, () => void>();
+	const conversationMessageUnsubscribeBySubscriptionKey = new Map<string, () => void>();
+	const conversationPreviousSummariesBySubscriptionKey = new Map<string, Map<string, RuntimeTaskSessionSummary>>();
+	const buildConversationSubscriptionKey = (workspaceId: string, sourceKind: ConversationTaskSessionSourceKind) =>
+		`${workspaceId}::${sourceKind}`;
+	const listConversationSubscriptionKeys = (workspaceId: string) =>
+		CONVERSATION_TASK_SESSION_SOURCE_KINDS.map((sourceKind) =>
+			buildConversationSubscriptionKey(workspaceId, sourceKind),
+		);
+	const collectTrackedConversationSummaries = (workspaceId: string): RuntimeTaskSessionSummary[] =>
+		listConversationSubscriptionKeys(workspaceId).flatMap((key) =>
+			Array.from(conversationPreviousSummariesBySubscriptionKey.get(key)?.values() ?? []),
+		);
 	const pendingTaskSessionSummariesByWorkspaceId = new Map<string, Map<string, RuntimeTaskSessionSummary>>();
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
@@ -199,7 +231,57 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		taskSessionBroadcastTimersByWorkspaceId.set(workspaceId, timer);
 	};
 
-	const broadcastTaskChatMessage = (workspaceId: string, taskId: string, message: ClineTaskMessage) => {
+	// Cline SDK 会话与 ACP 会话的推流逻辑完全一致（都是「summary 批量广播 + 等人回合边沿通知 +
+	// 聊天消息转发」），只是来源不同，故共用这一段而不是各写一份。
+	const trackConversationTaskSessionService = (
+		workspaceId: string,
+		workspacePath: string,
+		service: ConversationTaskSessionSubscriptionSource,
+		sourceKind: ConversationTaskSessionSourceKind,
+	): void => {
+		const subscriptionKey = buildConversationSubscriptionKey(workspaceId, sourceKind);
+		if (conversationSummaryUnsubscribeBySubscriptionKey.has(subscriptionKey)) {
+			return;
+		}
+		const previousSummariesByTaskId = new Map<string, RuntimeTaskSessionSummary>();
+		conversationPreviousSummariesBySubscriptionKey.set(subscriptionKey, previousSummariesByTaskId);
+		for (const summary of service.listSummaries()) {
+			previousSummariesByTaskId.set(summary.taskId, summary);
+			queueTaskSessionSummaryBroadcast(workspaceId, summary);
+		}
+		const unsubscribe = service.onSummary((summary) => {
+			const previousSummary = previousSummariesByTaskId.get(summary.taskId);
+			previousSummariesByTaskId.set(summary.taskId, summary);
+			queueTaskSessionSummaryBroadcast(workspaceId, summary);
+			const didCheckpointChange =
+				previousSummary?.latestTurnCheckpoint?.commit !== summary.latestTurnCheckpoint?.commit ||
+				previousSummary?.previousTurnCheckpoint?.commit !== summary.previousTurnCheckpoint?.commit;
+			if (didCheckpointChange) {
+				void broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
+			}
+			// 通知触发：从 legacy reviewReason 白名单切到 userTurnKind 轴的「广·阻塞即提醒」判据
+			// （决策 B，单一真相源 isNotifiableUserTurn）。边沿 = 上一帧非「可通知等人回合」→ 本帧是，
+			// 故停在等人回合期间不重复 ping；exit/completion/null-reason 的等人回合现也纳入（broad）。
+			// 触发瞬间把当前 facet 的 userTurnKind 内联进 ready 事件 payload（③(b)）：前端通知标题据此
+			// 措辞，不回读延迟批处理的 summary 流，杜绝上次「标题读 stale userTurnKind」竞态。
+			const currentFacets = resolveSessionFacets(summary);
+			if (
+				previousSummary &&
+				summary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way" &&
+				!isNotifiableUserTurn(resolveSessionFacets(previousSummary)) &&
+				isNotifiableUserTurn(currentFacets)
+			) {
+				broadcastTaskReadyForReview(workspaceId, summary.taskId, currentFacets.userTurnKind);
+			}
+		});
+		conversationSummaryUnsubscribeBySubscriptionKey.set(subscriptionKey, unsubscribe);
+		const unsubscribeMessage = service.onMessage((taskId, message) => {
+			broadcastTaskChatMessage(workspaceId, taskId, message);
+		});
+		conversationMessageUnsubscribeBySubscriptionKey.set(subscriptionKey, unsubscribeMessage);
+	};
+
+	const broadcastTaskChatMessage = (workspaceId: string, taskId: string, message: RuntimeTaskChatMessage) => {
 		const runtimeClients = runtimeStateClientsByWorkspaceId.get(workspaceId);
 		if (!runtimeClients || runtimeClients.size === 0) {
 			return;
@@ -265,25 +347,23 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 		}
 		terminalSummaryUnsubscribeByWorkspaceId.delete(workspaceId);
-		const unsubscribeClineSummary = clineSummaryUnsubscribeByWorkspaceId.get(workspaceId);
-		if (unsubscribeClineSummary) {
-			try {
-				unsubscribeClineSummary();
-			} catch {
-				// Ignore listener cleanup errors during project removal.
+		for (const subscriptionKey of listConversationSubscriptionKeys(workspaceId)) {
+			for (const unsubscribeMap of [
+				conversationSummaryUnsubscribeBySubscriptionKey,
+				conversationMessageUnsubscribeBySubscriptionKey,
+			]) {
+				const unsubscribe = unsubscribeMap.get(subscriptionKey);
+				if (unsubscribe) {
+					try {
+						unsubscribe();
+					} catch {
+						// Ignore listener cleanup errors during project removal.
+					}
+				}
+				unsubscribeMap.delete(subscriptionKey);
 			}
+			conversationPreviousSummariesBySubscriptionKey.delete(subscriptionKey);
 		}
-		clineSummaryUnsubscribeByWorkspaceId.delete(workspaceId);
-		clinePreviousSummaryByWorkspaceId.delete(workspaceId);
-		const unsubscribeClineMessage = clineMessageUnsubscribeByWorkspaceId.get(workspaceId);
-		if (unsubscribeClineMessage) {
-			try {
-				unsubscribeClineMessage();
-			} catch {
-				// Ignore listener cleanup errors during project removal.
-			}
-		}
-		clineMessageUnsubscribeByWorkspaceId.delete(workspaceId);
 		disposeTaskSessionSummaryBroadcast(workspaceId);
 		workspaceMetadataMonitor.disposeWorkspace(workspaceId);
 	};
@@ -503,14 +583,12 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					workspaceClients.add(client);
 					runtimeStateClientsByWorkspaceId.set(monitorWorkspaceId, workspaceClients);
 					runtimeStateWorkspaceIdByClient.set(client, monitorWorkspaceId);
-					const clineSummaries = Array.from(
-						clinePreviousSummaryByWorkspaceId.get(monitorWorkspaceId)?.values() ?? [],
-					);
-					if (clineSummaries.length > 0) {
+					const conversationSummaries = collectTrackedConversationSummaries(monitorWorkspaceId);
+					if (conversationSummaries.length > 0) {
 						sendRuntimeStateMessage(client, {
 							type: "task_sessions_updated",
 							workspaceId: monitorWorkspaceId,
-							summaries: clineSummaries,
+							summaries: conversationSummaries,
 						} satisfies RuntimeStateStreamTaskSessionsMessage);
 					}
 				}
@@ -545,45 +623,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			terminalSummaryUnsubscribeByWorkspaceId.set(workspaceId, unsubscribe);
 		},
 		trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => {
-			if (clineSummaryUnsubscribeByWorkspaceId.has(workspaceId)) {
-				return;
-			}
-			const previousSummariesByTaskId = new Map<string, RuntimeTaskSessionSummary>();
-			clinePreviousSummaryByWorkspaceId.set(workspaceId, previousSummariesByTaskId);
-			for (const summary of service.listSummaries()) {
-				previousSummariesByTaskId.set(summary.taskId, summary);
-				queueTaskSessionSummaryBroadcast(workspaceId, summary);
-			}
-			const unsubscribe = service.onSummary((summary) => {
-				const previousSummary = previousSummariesByTaskId.get(summary.taskId);
-				previousSummariesByTaskId.set(summary.taskId, summary);
-				queueTaskSessionSummaryBroadcast(workspaceId, summary);
-				const didCheckpointChange =
-					previousSummary?.latestTurnCheckpoint?.commit !== summary.latestTurnCheckpoint?.commit ||
-					previousSummary?.previousTurnCheckpoint?.commit !== summary.previousTurnCheckpoint?.commit;
-				if (didCheckpointChange) {
-					void broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
-				}
-				// 通知触发：从 legacy reviewReason 白名单切到 userTurnKind 轴的「广·阻塞即提醒」判据
-				// （决策 B，单一真相源 isNotifiableUserTurn）。边沿 = 上一帧非「可通知等人回合」→ 本帧是，
-				// 故停在等人回合期间不重复 ping；exit/completion/null-reason 的等人回合现也纳入（broad）。
-				// 触发瞬间把当前 facet 的 userTurnKind 内联进 ready 事件 payload（③(b)）：前端通知标题据此
-				// 措辞，不回读延迟批处理的 summary 流，杜绝上次「标题读 stale userTurnKind」竞态。
-				const currentFacets = resolveSessionFacets(summary);
-				if (
-					previousSummary &&
-					summary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way" &&
-					!isNotifiableUserTurn(resolveSessionFacets(previousSummary)) &&
-					isNotifiableUserTurn(currentFacets)
-				) {
-					broadcastTaskReadyForReview(workspaceId, summary.taskId, currentFacets.userTurnKind);
-				}
-			});
-			clineSummaryUnsubscribeByWorkspaceId.set(workspaceId, unsubscribe);
-			const unsubscribeMessage = service.onMessage((taskId, message) => {
-				broadcastTaskChatMessage(workspaceId, taskId, message);
-			});
-			clineMessageUnsubscribeByWorkspaceId.set(workspaceId, unsubscribeMessage);
+			trackConversationTaskSessionService(workspaceId, workspacePath, service, "cline");
+		},
+		trackAcpTaskSessionService: (workspaceId, workspacePath, service) => {
+			trackConversationTaskSessionService(workspaceId, workspacePath, service, "acp");
 		},
 		broadcastTaskChatMessage,
 		broadcastTaskChatCleared,
@@ -613,23 +656,23 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				}
 			}
 			terminalSummaryUnsubscribeByWorkspaceId.clear();
-			for (const unsubscribe of clineSummaryUnsubscribeByWorkspaceId.values()) {
+			for (const unsubscribe of conversationSummaryUnsubscribeBySubscriptionKey.values()) {
 				try {
 					unsubscribe();
 				} catch {
 					// Ignore listener cleanup errors during shutdown.
 				}
 			}
-			clineSummaryUnsubscribeByWorkspaceId.clear();
-			clinePreviousSummaryByWorkspaceId.clear();
-			for (const unsubscribe of clineMessageUnsubscribeByWorkspaceId.values()) {
+			conversationSummaryUnsubscribeBySubscriptionKey.clear();
+			conversationPreviousSummariesBySubscriptionKey.clear();
+			for (const unsubscribe of conversationMessageUnsubscribeBySubscriptionKey.values()) {
 				try {
 					unsubscribe();
 				} catch {
 					// Ignore listener cleanup errors during shutdown.
 				}
 			}
-			clineMessageUnsubscribeByWorkspaceId.clear();
+			conversationMessageUnsubscribeBySubscriptionKey.clear();
 			workspaceMetadataMonitor.close();
 			for (const client of runtimeStateClients) {
 				try {

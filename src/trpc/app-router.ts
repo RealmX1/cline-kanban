@@ -92,6 +92,8 @@ import type {
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
 	RuntimeSlashCommandsResponse,
+	RuntimeTaskAgentUserDecisionResolveRequest,
+	RuntimeTaskAgentUserDecisionResolveResponse,
 	RuntimeTaskChatAbortRequest,
 	RuntimeTaskChatAbortResponse,
 	RuntimeTaskChatCancelRequest,
@@ -224,6 +226,8 @@ import {
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
 	runtimeSlashCommandsResponseSchema,
+	runtimeTaskAgentUserDecisionResolveRequestSchema,
+	runtimeTaskAgentUserDecisionResolveResponseSchema,
 	runtimeTaskChatAbortRequestSchema,
 	runtimeTaskChatAbortResponseSchema,
 	runtimeTaskChatCancelRequestSchema,
@@ -357,6 +361,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatCancelRequest,
 		) => Promise<RuntimeTaskChatCancelResponse>;
+		resolveTaskAgentUserDecision: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskAgentUserDecisionResolveRequest,
+		) => Promise<RuntimeTaskAgentUserDecisionResolveResponse>;
 		getClineProviderCatalog: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 		) => Promise<RuntimeClineProviderCatalogResponse>;
@@ -712,6 +720,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatCancelResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.cancelTaskChatTurn(ctx.workspaceScope, input);
+			}),
+		resolveTaskAgentUserDecision: workspaceProcedure
+			.input(runtimeTaskAgentUserDecisionResolveRequestSchema)
+			.output(runtimeTaskAgentUserDecisionResolveResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.resolveTaskAgentUserDecision(ctx.workspaceScope, input);
 			}),
 		getClineProviderCatalog: t.procedure.output(runtimeClineProviderCatalogResponseSchema).query(async ({ ctx }) => {
 			return await ctx.runtimeApi.getClineProviderCatalog(ctx.workspaceScope);

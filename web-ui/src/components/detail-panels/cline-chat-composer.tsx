@@ -47,6 +47,7 @@ export function ClineChatComposer({
 	images = [],
 	onImagesChange,
 	placeholder,
+	showClineProviderControls = true,
 	mode,
 	onModeChange,
 	showModeToggle = true,
@@ -77,6 +78,9 @@ export function ClineChatComposer({
 	images?: TaskImage[];
 	onImagesChange?: (images: TaskImage[]) => void;
 	placeholder: string;
+	// 这套 composer 也服务非 Cline 的会话面板 agent（ACP 传输的 omp）。它们的模型由 agent 自己管、
+	// 也没有 Cline slash 命令，所以这两个 Cline 专属控件在那里必须整体隐藏，而不是显示成空/禁用态。
+	showClineProviderControls?: boolean;
 	mode: RuntimeTaskSessionMode;
 	onModeChange: (mode: RuntimeTaskSessionMode) => void;
 	showModeToggle?: boolean;
@@ -115,7 +119,14 @@ export function ClineChatComposer({
 	const [isSlashSearchLoading, setIsSlashSearchLoading] = useState(false);
 	const canSubmit = canSend && !isModelSaving && (draft.trim().length > 0 || images.length > 0);
 
-	const activeToken = useMemo(() => detectActiveClineComposerToken(draft, cursorIndex), [cursorIndex, draft]);
+	const activeToken = useMemo(() => {
+		const detectedToken = detectActiveClineComposerToken(draft, cursorIndex);
+		// `@` 文件补全对所有 agent 都成立，`/` 命令补全读的是 Cline 的 slash 命令，非 Cline 会话不该弹。
+		if (detectedToken?.kind === "slash" && !showClineProviderControls) {
+			return null;
+		}
+		return detectedToken;
+	}, [cursorIndex, draft, showClineProviderControls]);
 	const completionSuggestions = useMemo(() => {
 		if (!activeToken) {
 			return [] as ClineComposerCompletionSuggestion[];
@@ -492,22 +503,24 @@ export function ClineChatComposer({
 				<TaskImageStrip images={images} onRemoveImage={handleRemoveImage} className="mt-2" />
 			) : null}
 			<div className="mt-2 flex min-w-0 items-center gap-2">
-				<div className="min-w-0 shrink overflow-hidden">
-					<ClineChatModelSelector
-						modelOptions={modelOptions}
-						recommendedModelIds={recommendedModelIds}
-						pinSelectedModelToTop={pinSelectedModelToTop}
-						selectedModelId={selectedModelId}
-						selectedModelButtonText={selectedModelButtonText}
-						onSelectModel={onSelectModel}
-						reasoningEnabledModelIds={reasoningEnabledModelIds}
-						selectedReasoningEffort={selectedReasoningEffort}
-						onSelectReasoningEffort={onSelectReasoningEffort}
-						disabled={modelPickerDisabled}
-						isModelLoading={isModelLoading}
-						isModelSaving={isModelSaving}
-					/>
-				</div>
+				{showClineProviderControls ? (
+					<div className="min-w-0 shrink overflow-hidden">
+						<ClineChatModelSelector
+							modelOptions={modelOptions}
+							recommendedModelIds={recommendedModelIds}
+							pinSelectedModelToTop={pinSelectedModelToTop}
+							selectedModelId={selectedModelId}
+							selectedModelButtonText={selectedModelButtonText}
+							onSelectModel={onSelectModel}
+							reasoningEnabledModelIds={reasoningEnabledModelIds}
+							selectedReasoningEffort={selectedReasoningEffort}
+							onSelectReasoningEffort={onSelectReasoningEffort}
+							disabled={modelPickerDisabled}
+							isModelLoading={isModelLoading}
+							isModelSaving={isModelSaving}
+						/>
+					</div>
+				) : null}
 				<div className="ml-auto flex shrink-0 items-center gap-2">
 					{showModeToggle ? (
 						<Tooltip

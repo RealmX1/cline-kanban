@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createAcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 
@@ -139,11 +140,17 @@ import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
 
 function createTestRuntimeApi(
-	deps: Omit<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow"> &
-		Partial<Pick<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow">>,
+	deps: Omit<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "getScopedAcpTaskSessionService"> &
+		Partial<
+			Pick<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "getScopedAcpTaskSessionService">
+		>,
 ): RuntimeTrpcContext["runtimeApi"] {
 	return createRuntimeApi({
 		...deps,
+		// 用真实的（空的）ACP service 而不是抛错桩：聊天类端点是「先问 ACP，没有该会话再回落
+		// Cline」，空 service 会如实返回 null，回落路径才测得到。它在 startTaskSession 之前不起任何进程。
+		getScopedAcpTaskSessionService:
+			deps.getScopedAcpTaskSessionService ?? vi.fn(async () => createAcpTaskSessionService()),
 		getUpdateStatus:
 			deps.getUpdateStatus ??
 			vi.fn(() => ({

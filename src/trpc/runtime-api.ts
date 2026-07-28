@@ -7,6 +7,7 @@ import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TRPCError } from "@trpc/server";
+import type { AcpTaskSessionService } from "../acp-client-session/acp-task-session-service";
 import { listAvailableAgentSessions } from "../agent-session-history/available-agent-session-index";
 import { createClineMcpRuntimeService } from "../cline-sdk/cline-mcp-runtime-service";
 import { createClineMcpSettingsService } from "../cline-sdk/cline-mcp-settings-service";
@@ -15,10 +16,12 @@ import { isClineClearSlashCommand } from "../cline-sdk/cline-slash-commands";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtime-config";
+import { isRuntimeAgentSessionDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskWorktreeMode,
@@ -39,6 +42,7 @@ import {
 	parseDismissConnectionRetrySessionsRequest,
 	parseRuntimeConfigSaveRequest,
 	parseShellSessionStartRequest,
+	parseTaskAgentUserDecisionResolveRequest,
 	parseTaskChatAbortRequest,
 	parseTaskChatCancelRequest,
 	parseTaskChatMessagesRequest,
@@ -55,6 +59,7 @@ import {
 	parseTerminalAgentModelSelectionOptionsRequest,
 } from "../core/api-validation";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
+import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { openInBrowser } from "../server/browser";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
@@ -66,6 +71,18 @@ import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
 
+// 老看板卡片没有 taskAgentPermissionMode。缺失时按「当时的全局 agentAutonomousModeEnabled」
+// 推出等价档位，使升级前后行为不变——schema 层看不到 runtime config，兼容只能落在这里。
+function resolveEffectiveTaskAgentPermissionMode(
+	requestedTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode | undefined,
+	agentAutonomousModeEnabled: boolean,
+): RuntimeTaskAgentPermissionMode {
+	return (
+		requestedTaskAgentPermissionMode ??
+		resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(agentAutonomousModeEnabled)
+	);
+}
+
 export interface CreateRuntimeApiDependencies {
 	getActiveWorkspaceId: () => string | null;
 	getActiveRuntimeConfig?: () => RuntimeConfigState;
@@ -73,6 +90,7 @@ export interface CreateRuntimeApiDependencies {
 	setActiveRuntimeConfig: (config: RuntimeConfigState) => void;
 	getScopedTerminalManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<TerminalSessionManager>;
 	getScopedClineTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<ClineTaskSessionService>;
+	getScopedAcpTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<AcpTaskSessionService>;
 	resolveInteractiveShellCommand: () => { binary: string; args: string[] };
 	runCommand: (command: string, cwd: string) => Promise<RuntimeCommandRunResponse>;
 	broadcastClineMcpAuthStatusesUpdated?: (
@@ -297,6 +315,39 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						);
 					}
 				}
+				// ACP 会话（omp 等）既不是 PTY 终端 agent 也不是 Cline SDK，走自己的服务。
+				if (isRuntimeAgentSessionDrivenByAcpProtocol(effectiveAgentId)) {
+					const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+					const acpSummary = await acpTaskSessionService.startTaskSession({
+						taskId: body.taskId,
+						agentId: effectiveAgentId,
+						cwd: taskCwd,
+						prompt: body.prompt,
+						taskTitle: body.taskTitle,
+						images: body.images,
+						permissionMode: resolveEffectiveTaskAgentPermissionMode(
+							body.taskAgentPermissionMode,
+							scopedRuntimeConfig.agentAutonomousModeEnabled,
+						),
+						startInPlanMode: body.startInPlanMode,
+					});
+					let nextAcpSummary = acpSummary;
+					if (shouldCaptureTurnCheckpoint) {
+						try {
+							const nextTurn = (acpSummary.latestTurnCheckpoint?.turn ?? 0) + 1;
+							const checkpoint = await captureTaskTurnCheckpoint({
+								cwd: taskCwd,
+								taskId: body.taskId,
+								turn: nextTurn,
+							});
+							nextAcpSummary = acpTaskSessionService.applyTurnCheckpoint(body.taskId, checkpoint) ?? acpSummary;
+						} catch {
+							// Best effort checkpointing only.
+						}
+					}
+					return { ok: true, summary: nextAcpSummary };
+				}
+
 				let useClinePath = effectiveAgentId === "cline";
 				const shouldProbePersistedClineSession =
 					body.resumeFromTrash && !useClinePath && previousTerminalAgentId === null;
@@ -392,7 +443,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					agentId: resolved.agentId,
 					binary: resolved.binary,
 					args: resolved.args,
-					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
+					taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
+						body.taskAgentPermissionMode,
+						scopedRuntimeConfig.agentAutonomousModeEnabled,
+					),
 					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
 					cwd: taskCwd,
 					prompt: body.prompt,
@@ -500,7 +554,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					agentId: resolved.agentId,
 					binary: resolved.binary,
 					args: resolved.args,
-					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
+					taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
+						card.taskAgentPermissionMode,
+						scopedRuntimeConfig.agentAutonomousModeEnabled,
+					),
 					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
 					cwd: taskCwd,
 					prompt: "",
@@ -535,6 +592,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		stopTaskSession: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskSessionStopRequest(input);
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const acpStoppedSummary = await acpTaskSessionService.stopTaskSession(body.taskId);
+				if (acpStoppedSummary) {
+					return { ok: true, summary: acpStoppedSummary };
+				}
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const relatedTaskConversationSessionIds = new Set<string>([body.taskId]);
@@ -701,6 +763,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		getTaskChatMessages: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatMessagesRequest(input);
+				// ACP 会话与 Cline 会话共用同一条聊天通道；先问 ACP（它对非 ACP 任务返回空），再回落 Cline。
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				if (acpTaskSessionService.getSummary(body.taskId)) {
+					return { ok: true, messages: acpTaskSessionService.listMessages(body.taskId) };
+				}
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				const summary = clineTaskSessionService.getSummary(body.taskId);
 				const messages = await clineTaskSessionService.loadTaskSessionMessages(body.taskId);
@@ -777,6 +844,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		abortTaskChatTurn: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatAbortRequest(input);
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const acpSummary = await acpTaskSessionService.abortTaskSession(body.taskId);
+				if (acpSummary) {
+					return { ok: true, summary: acpSummary };
+				}
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				const summary = await clineTaskSessionService.abortTaskSession(body.taskId);
 				if (!summary) {
@@ -799,9 +871,30 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
+		resolveTaskAgentUserDecision: async (workspaceScope, input) => {
+			try {
+				const body = parseTaskAgentUserDecisionResolveRequest(input);
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const resolved = acpTaskSessionService.resolveUserDecision(body.taskId, body.decisionId, {
+					outcome: body.outcome,
+					optionId: body.optionId ?? null,
+				});
+				if (!resolved) {
+					return { ok: false, error: "This request is no longer waiting for a decision." };
+				}
+				return { ok: true };
+			} catch (error) {
+				return { ok: false, error: error instanceof Error ? error.message : String(error) };
+			}
+		},
 		cancelTaskChatTurn: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatCancelRequest(input);
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const acpSummary = await acpTaskSessionService.cancelTaskTurn(body.taskId);
+				if (acpSummary) {
+					return { ok: true, summary: acpSummary };
+				}
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				const summary = await clineTaskSessionService.cancelTaskTurn(body.taskId);
 				if (!summary) {
@@ -919,6 +1012,23 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		sendTaskChatMessage: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatSendRequest(input);
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				if (acpTaskSessionService.getSummary(body.taskId)) {
+					if (isClineClearSlashCommand(body.text)) {
+						const clearedSummary = await acpTaskSessionService.clearTaskSession(body.taskId);
+						deps.broadcastTaskChatCleared?.(workspaceScope.workspaceId, body.taskId);
+						return { ok: true, summary: clearedSummary, message: null };
+					}
+					const acpSummary = await acpTaskSessionService.sendTaskSessionInput(body.taskId, body.text, body.images);
+					if (acpSummary) {
+						return {
+							ok: true,
+							summary: acpSummary,
+							message: acpTaskSessionService.listMessages(body.taskId).at(-1) ?? null,
+						};
+					}
+					return { ok: false, summary: null, error: "The ACP agent session is not connected." };
+				}
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				if (isClineClearSlashCommand(body.text)) {
 					const summary = await clineTaskSessionService.clearTaskSession(body.taskId);

@@ -1,4 +1,5 @@
 import { isKanbanCursorAgentModelId } from "@runtime-agent-catalog";
+import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "@runtime-task-agent-permission-mode";
 import { deriveTaskTitleFromPrompt } from "@runtime-task-title";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -16,6 +17,7 @@ import {
 } from "@/hooks/task-edit-drafts";
 import type {
 	RuntimeAgentId,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -136,6 +138,7 @@ interface UseTaskEditorInput {
 	selectedAgentId: RuntimeAgentId | null;
 	newTaskStartInPlanModeByDefault: boolean;
 	isNewTaskStartInPlanModeDefaultLoaded: boolean;
+	newTaskAgentPermissionModeByDefault: RuntimeTaskAgentPermissionMode;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	queueTaskStartAfterEdit?: (taskId: string) => void;
 }
@@ -158,6 +161,8 @@ export interface UseTaskEditorResult {
 	setNewTaskImages: Dispatch<SetStateAction<TaskImage[]>>;
 	newTaskStartInPlanMode: boolean;
 	setNewTaskStartInPlanMode: Dispatch<SetStateAction<boolean>>;
+	newTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
+	setNewTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
 	newTaskAutoReviewEnabled: boolean;
 	setNewTaskAutoReviewEnabled: Dispatch<SetStateAction<boolean>>;
 	newTaskAutoReviewMode: TaskAutoReviewMode;
@@ -182,6 +187,8 @@ export interface UseTaskEditorResult {
 	setEditTaskImages: Dispatch<SetStateAction<TaskImage[]>>;
 	editTaskStartInPlanMode: boolean;
 	setEditTaskStartInPlanMode: Dispatch<SetStateAction<boolean>>;
+	editTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
+	setEditTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
 	editTaskAutoReviewEnabled: boolean;
 	setEditTaskAutoReviewEnabled: Dispatch<SetStateAction<boolean>>;
 	editTaskAutoReviewMode: TaskAutoReviewMode;
@@ -224,6 +231,7 @@ export function useTaskEditor({
 	selectedAgentId,
 	newTaskStartInPlanModeByDefault,
 	isNewTaskStartInPlanModeDefaultLoaded,
+	newTaskAgentPermissionModeByDefault,
 	setSelectedTaskId,
 	queueTaskStartAfterEdit,
 }: UseTaskEditorInput): UseTaskEditorResult {
@@ -231,6 +239,9 @@ export function useTaskEditor({
 	const [newTaskPrompt, setNewTaskPrompt] = useState("");
 	const [newTaskImages, setNewTaskImages] = useState<TaskImage[]>([]);
 	const [newTaskStartInPlanMode, setNewTaskStartInPlanMode] = useState(newTaskStartInPlanModeByDefault);
+	const [newTaskAgentPermissionMode, setNewTaskAgentPermissionMode] = useState<RuntimeTaskAgentPermissionMode>(
+		newTaskAgentPermissionModeByDefault,
+	);
 	const [newTaskAutoReviewEnabled, setNewTaskAutoReviewEnabled] = useBooleanLocalStorageValue(
 		TASK_AUTO_REVIEW_ENABLED_STORAGE_KEY,
 		false,
@@ -247,6 +258,9 @@ export function useTaskEditor({
 	const [editTaskPrompt, setEditTaskPrompt] = useState("");
 	const [editTaskImages, setEditTaskImages] = useState<TaskImage[]>([]);
 	const [editTaskStartInPlanMode, setEditTaskStartInPlanMode] = useState(false);
+	const [editTaskAgentPermissionMode, setEditTaskAgentPermissionMode] = useState<RuntimeTaskAgentPermissionMode>(
+		DEFAULT_TASK_AGENT_PERMISSION_MODE,
+	);
 	const [editTaskAutoReviewEnabled, setEditTaskAutoReviewEnabled] = useState(false);
 	const [editTaskAutoReviewMode, setEditTaskAutoReviewMode] = useState<TaskAutoReviewMode>("commit");
 	const isEditTaskStartInPlanModeDisabled = false;
@@ -307,7 +321,8 @@ export function useTaskEditor({
 			return;
 		}
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
-	}, [isInlineTaskCreateOpen, newTaskStartInPlanModeByDefault]);
+		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
+	}, [isInlineTaskCreateOpen, newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault]);
 
 	useEffect(() => {
 		const isCurrentValid = createTaskBranchOptions.some((option) => option.value === newTaskBranchRef);
@@ -372,6 +387,7 @@ export function useTaskEditor({
 
 			setEditTaskPrompt("");
 			setEditTaskStartInPlanMode(false);
+			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
 			setEditTaskAutoReviewEnabled(false);
 			setEditTaskAutoReviewMode("commit");
 			setEditTaskImages([]);
@@ -409,6 +425,7 @@ export function useTaskEditor({
 				// 图片可能是几 MB 的 dataURL，深拷贝要等到确定「真的要写盘」之后再做。
 				images: editTaskImages,
 				startInPlanMode: editTaskStartInPlanMode,
+				taskAgentPermissionMode: editTaskAgentPermissionMode,
 				autoReviewEnabled: editTaskAutoReviewEnabled,
 				autoReviewMode: editTaskAutoReviewMode,
 				branchRef: editTaskBranchRef || resolvedDefaultTaskBranchRef,
@@ -432,6 +449,7 @@ export function useTaskEditor({
 		[
 			currentProjectId,
 			editTaskAgentId,
+			editTaskAgentPermissionMode,
 			editTaskAutoReviewEnabled,
 			editTaskAutoReviewMode,
 			editTaskBranchRef,
@@ -462,11 +480,13 @@ export function useTaskEditor({
 		);
 		setNewTaskAgentSessionInitialization(undefined);
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
+		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setIsInlineTaskCreateOpen(true);
 	}, [
 		currentProjectId,
 		isNewTaskStartInPlanModeDefaultLoaded,
+		newTaskAgentPermissionModeByDefault,
 		newTaskStartInPlanModeByDefault,
 		resolvedDefaultCreateTaskBranchRef,
 		selectedAgentId,
@@ -478,13 +498,14 @@ export function useTaskEditor({
 		setNewTaskPrompt("");
 		setNewTaskImages([]);
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
+		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setNewTaskWorktreeMode("branch");
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(undefined);
 		setNewTaskAgentSessionInitialization(undefined);
-	}, [newTaskStartInPlanModeByDefault, resolvedDefaultCreateTaskBranchRef]);
+	}, [newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault, resolvedDefaultCreateTaskBranchRef]);
 
 	const handleOpenEditTask = useCallback(
 		(task: BoardCard, options?: OpenEditTaskOptions) => {
@@ -508,6 +529,9 @@ export function useTaskEditor({
 						: [],
 			);
 			setEditTaskStartInPlanMode(savedDraft?.startInPlanMode ?? task.startInPlanMode);
+			setEditTaskAgentPermissionMode(
+				savedDraft?.taskAgentPermissionMode ?? task.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault,
+			);
 			setEditTaskAutoReviewEnabled(savedDraft?.autoReviewEnabled ?? task.autoReviewEnabled === true);
 			setEditTaskAutoReviewMode(savedDraft?.autoReviewMode ?? resolveTaskAutoReviewMode(task.autoReviewMode));
 			const fallbackBranch = task.baseRef || resolvedDefaultTaskBranchRef;
@@ -522,7 +546,7 @@ export function useTaskEditor({
 				savedDraft?.taskAgentSessionInitialization ?? task.taskAgentSessionInitialization,
 			);
 		},
-		[currentProjectId, resolvedDefaultTaskBranchRef, setSelectedTaskId],
+		[currentProjectId, newTaskAgentPermissionModeByDefault, resolvedDefaultTaskBranchRef, setSelectedTaskId],
 	);
 
 	const handleCancelEditTask = useCallback(() => {
@@ -533,6 +557,7 @@ export function useTaskEditor({
 
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
+		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
 		setEditTaskAutoReviewEnabled(false);
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
@@ -568,6 +593,7 @@ export function useTaskEditor({
 					title,
 					prompt,
 					startInPlanMode: editTaskStartInPlanMode,
+					taskAgentPermissionMode: editTaskAgentPermissionMode,
 					autoReviewEnabled: editTaskAutoReviewEnabled,
 					autoReviewMode: editTaskAutoReviewMode,
 					images: editTaskImages,
@@ -584,6 +610,7 @@ export function useTaskEditor({
 
 			setEditTaskPrompt("");
 			setEditTaskStartInPlanMode(false);
+			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
 			setEditTaskAutoReviewEnabled(false);
 			setEditTaskAutoReviewMode("commit");
 			setEditTaskImages([]);
@@ -597,6 +624,7 @@ export function useTaskEditor({
 		},
 		[
 			editTaskAgentId,
+			editTaskAgentPermissionMode,
 			editTaskAutoReviewEnabled,
 			editTaskAutoReviewMode,
 			editTaskBranchRef,
@@ -653,6 +681,7 @@ export function useTaskEditor({
 				title,
 				prompt,
 				startInPlanMode: newTaskStartInPlanMode,
+				taskAgentPermissionMode: newTaskAgentPermissionMode,
 				autoReviewEnabled: newTaskAutoReviewEnabled,
 				autoReviewMode: newTaskAutoReviewMode,
 				images: newTaskImages,
@@ -673,6 +702,9 @@ export function useTaskEditor({
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
+			setNewTaskAgentPermissionMode(
+				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
+			);
 			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
@@ -698,6 +730,8 @@ export function useTaskEditor({
 			newTaskAgentSessionInitialization,
 			newTaskImages,
 			newTaskPrompt,
+			newTaskAgentPermissionMode,
+			newTaskAgentPermissionModeByDefault,
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultCreateTaskBranchRef,
@@ -730,6 +764,7 @@ export function useTaskEditor({
 				const created = addTaskToColumnWithResult(updatedBoard, "backlog", {
 					prompt,
 					startInPlanMode: newTaskStartInPlanMode,
+					taskAgentPermissionMode: newTaskAgentPermissionMode,
 					autoReviewEnabled: newTaskAutoReviewEnabled,
 					autoReviewMode: newTaskAutoReviewMode,
 					images: newTaskImages,
@@ -754,6 +789,9 @@ export function useTaskEditor({
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
+			setNewTaskAgentPermissionMode(
+				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
+			);
 			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
@@ -777,6 +815,8 @@ export function useTaskEditor({
 			newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings,
 			newTaskImages,
+			newTaskAgentPermissionMode,
+			newTaskAgentPermissionModeByDefault,
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultCreateTaskBranchRef,
@@ -796,9 +836,11 @@ export function useTaskEditor({
 
 		setNewTaskPrompt("");
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
+		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
 
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
+		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
 		setEditTaskAutoReviewEnabled(false);
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
@@ -812,7 +854,7 @@ export function useTaskEditor({
 		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(undefined);
 		setNewTaskAgentSessionInitialization(undefined);
-	}, [newTaskStartInPlanModeByDefault]);
+	}, [newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault]);
 
 	return {
 		isInlineTaskCreateOpen,
@@ -822,6 +864,8 @@ export function useTaskEditor({
 		setNewTaskImages,
 		newTaskStartInPlanMode,
 		setNewTaskStartInPlanMode,
+		newTaskAgentPermissionMode,
+		setNewTaskAgentPermissionMode,
 		newTaskAutoReviewEnabled,
 		setNewTaskAutoReviewEnabled,
 		newTaskAutoReviewMode,
@@ -846,6 +890,8 @@ export function useTaskEditor({
 		setEditTaskImages,
 		editTaskStartInPlanMode,
 		setEditTaskStartInPlanMode,
+		editTaskAgentPermissionMode,
+		setEditTaskAgentPermissionMode,
 		editTaskAutoReviewEnabled,
 		setEditTaskAutoReviewEnabled,
 		editTaskAutoReviewMode,
