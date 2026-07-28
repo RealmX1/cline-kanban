@@ -66,6 +66,17 @@ Object.defineProperty(globalThis, "IntersectionObserver", {
 	value: MockIntersectionObserver,
 });
 
+// jsdom does not implement Element.scrollIntoView. Components that keep a keyboard-highlighted
+// row in view call it unconditionally (it always exists in real browsers), and an unhandled
+// TypeError inside an effect tears the whole React tree down mid-test.
+if (typeof Element !== "undefined" && typeof Element.prototype.scrollIntoView !== "function") {
+	Object.defineProperty(Element.prototype, "scrollIntoView", {
+		writable: true,
+		configurable: true,
+		value: () => {},
+	});
+}
+
 // jsdom does not implement window.matchMedia. Provide a minimal stub so that
 // hooks like useIsMobile and react-use's useMedia work during tests.
 if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {

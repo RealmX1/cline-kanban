@@ -17,6 +17,13 @@ export enum LocalStorageKey {
 	PromptLibraryGlobal = "kanban.prompt-library.global.v1",
 	PromptLibraryByTask = "kanban.prompt-library.by-task.v1",
 	PromptLibraryByProject = "kanban.prompt-library.by-project.v1",
+	// 顶栏项目快速切换器：projectId → 最近一次成为「当前项目」的 epoch ms。用于 recency 排序与
+	// Last visited 列。刻意不进 LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS——「重置布局」不该抹掉访问历史。
+	RecentlyUsedProjectSwitchHistory = "kanban.recently-used-project-switch-history.v1",
+	// 顶栏项目快速切换器：《红警》式编组槽位，slot(1-9) → projectId。同样不属于布局自定义。
+	ProjectNumericSlotGroupAssignments = "kanban.project-numeric-slot-group-assignments.v1",
+	ProjectSwitcherTableColumnVisibility = "kanban.project-switcher-table-column-visibility.v1",
+	ProjectSwitcherTableSortOrder = "kanban.project-switcher-table-sort-order.v1",
 	ProjectNavigationPanelWidth = "kb-sidebar-width",
 	ProjectNavigationPanelCollapsed = "kanban.project-navigation-panel-collapsed",
 	GitHistoryRefsPanelWidth = "kanban.git-history-refs-panel-width",

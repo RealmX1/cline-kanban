@@ -137,6 +137,80 @@ describe("TopBar script shortcut onboarding", () => {
 		expect(onOpenSettings).toHaveBeenCalledTimes(1);
 	});
 
+	it("renders no project switcher unless one is supplied", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						workspacePath="/repos/alpha"
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector('[data-testid="top-bar-project-switcher-trigger"]')).toBeNull();
+	});
+
+	it("places the project switcher before the workspace path breadcrumb", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						workspacePath="/repos/alpha"
+						projectSwitcher={{
+							projects: [
+								{
+									id: "alpha",
+									name: "alpha",
+									path: "/repos/alpha",
+									taskCounts: {
+										backlog: 0,
+										in_progress: 0,
+										review: 0,
+										validation: 0,
+										trash: 0,
+									},
+									availability: { status: "available" },
+									inProgressTaskDetails: [],
+								},
+							],
+							currentProjectId: "alpha",
+							navigationCurrentProjectId: "alpha",
+							lastVisitedEpochMsByProjectId: {},
+							numericSlotGroupNumberByProjectId: new Map(),
+							isProjectListLoading: false,
+							isProjectSwitching: false,
+							onSelectProject: () => {},
+							onAddProject: () => {},
+							onAssignProjectToNumericSlotGroupNumber: () => {},
+							onClearNumericSlotGroupNumber: () => {},
+						}}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const switcherTrigger = container.querySelector('[data-testid="top-bar-project-switcher-trigger"]');
+		const workspacePath = container.querySelector('[data-testid="workspace-path"]');
+		if (!switcherTrigger || !workspacePath) {
+			throw new Error("Expected both the project switcher trigger and the workspace path breadcrumb.");
+		}
+		// 把「切换器在面包屑左侧」这一位置决策钉成回归护栏——面包屑本身刻意一行未改。
+		expect(switcherTrigger.compareDocumentPosition(workspacePath) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
 	it("toggles the focused task Changes sidebar from the top navigation", async () => {
 		const onToggleTaskChangesSidebar = vi.fn();
 		await act(async () => {

@@ -4,7 +4,10 @@ import { Check, ChevronDown, Plus } from "lucide-react";
 import type { CSSProperties, KeyboardEvent, ReactElement, ReactNode, WheelEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { renderFuzzyHighlightedText } from "@/components/shared/render-fuzzy-highlighted-text";
+import {
+	FUZZY_MATCHED_TEXT_STYLE,
+	renderFuzzyHighlightedText,
+} from "@/components/shared/render-fuzzy-highlighted-text";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 
@@ -12,11 +15,6 @@ export interface SearchSelectOption {
 	value: string;
 	label: string;
 }
-
-const MATCHED_TEXT_STYLE = {
-	color: "var(--color-text-primary)",
-	fontWeight: 600,
-} as const;
 
 const DEFAULT_CUSTOM_VALUE_LABEL = (query: string) => `Use "${query}" as custom ID`;
 
@@ -295,7 +293,7 @@ export function SearchSelectDropdown({
 				<span className="flex-1 break-all">
 					{isCustomValue
 						? option.label
-						: renderFuzzyHighlightedText(option.label, match?.positions, MATCHED_TEXT_STYLE)}
+						: renderFuzzyHighlightedText(option.label, match?.positions, FUZZY_MATCHED_TEXT_STYLE)}
 				</span>
 				{isSelected ? <Check size={14} className="shrink-0 text-text-secondary" /> : null}
 			</button>

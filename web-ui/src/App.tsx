@@ -27,6 +27,7 @@ import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog"
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
 import { TopBar } from "@/components/top-bar";
+import type { TopBarProjectSwitcherState } from "@/components/top-bar-project-switcher/top-bar-project-switcher";
 import { Button } from "@/components/ui/button";
 import {
 	AlertDialog,
@@ -58,6 +59,7 @@ import { useNotificationTaskFocusRouting } from "@/hooks/use-notification-task-f
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { usePostDeployVerification } from "@/hooks/use-post-deploy-verification";
 import { useProjectNavigation } from "@/hooks/use-project-navigation";
+import { useProjectNumericSlotGroupHotkeys } from "@/hooks/use-project-numeric-slot-group-hotkeys";
 import { useProjectUiState } from "@/hooks/use-project-ui-state";
 import { useReviewReadyNotifications } from "@/hooks/use-review-ready-notifications";
 import { useShortcutActions } from "@/hooks/use-shortcut-actions";
@@ -134,6 +136,11 @@ export default function App(): ReactElement {
 		permanentlyDeletingProjectId,
 		hasNoProjects,
 		isProjectSwitching,
+		lastVisitedEpochMsByProjectId,
+		numericSlotGroupAssignments,
+		numericSlotGroupNumberByProjectId,
+		assignProjectToNumericSlotGroupNumber,
+		clearNumericSlotGroupNumber,
 		handleSelectProject,
 		handleAddProject,
 		handleAddProjectSuccess,
@@ -866,6 +873,14 @@ export default function App(): ReactElement {
 		setPostDeployVerificationCollapsed(false);
 	}, [setPostDeployVerificationCollapsed]);
 
+	useProjectNumericSlotGroupHotkeys({
+		projects,
+		currentProjectId,
+		numericSlotGroupAssignments,
+		onSelectProject: handleSelectProject,
+		onAssignProjectToNumericSlotGroupNumber: assignProjectToNumericSlotGroupNumber,
+	});
+
 	useAppHotkeys({
 		selectedCard,
 		isDetailTerminalOpen,
@@ -951,6 +966,37 @@ export default function App(): ReactElement {
 	const shouldHideProjectDependentTopBarActions =
 		isCurrentProjectRuntimeUnavailable ||
 		(!selectedCard && (isProjectSwitching || isAwaitingWorkspaceSnapshot || isWorkspaceMetadataPending));
+
+	// 顶栏最左侧的项目快速切换器。用 displayedProjects 而非 projects：前者把当前项目的 taskCounts
+	// 换成了本地 board 的实时计数，切换器里的数字才与主看板一致。
+	const topBarProjectSwitcherState = useMemo<TopBarProjectSwitcherState>(
+		() => ({
+			projects: displayedProjects,
+			currentProjectId,
+			navigationCurrentProjectId,
+			lastVisitedEpochMsByProjectId,
+			numericSlotGroupNumberByProjectId,
+			isProjectListLoading,
+			isProjectSwitching,
+			onSelectProject: handleSelectProject,
+			onAddProject: handleAddProject,
+			onAssignProjectToNumericSlotGroupNumber: assignProjectToNumericSlotGroupNumber,
+			onClearNumericSlotGroupNumber: clearNumericSlotGroupNumber,
+		}),
+		[
+			assignProjectToNumericSlotGroupNumber,
+			clearNumericSlotGroupNumber,
+			currentProjectId,
+			displayedProjects,
+			handleAddProject,
+			handleSelectProject,
+			isProjectListLoading,
+			isProjectSwitching,
+			lastVisitedEpochMsByProjectId,
+			navigationCurrentProjectId,
+			numericSlotGroupNumberByProjectId,
+		],
+	);
 
 	const {
 		openTargetOptions,
@@ -1069,6 +1115,7 @@ export default function App(): ReactElement {
 				<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
 					<TopBar
 						onToggleSidebar={!selectedCard ? handleToggleSidebar : undefined}
+						projectSwitcher={topBarProjectSwitcherState}
 						onToggleBoardOverview={
 							!selectedCard && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
 								? handleToggleBoardOverview

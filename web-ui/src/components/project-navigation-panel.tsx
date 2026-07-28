@@ -554,6 +554,8 @@ const ESSENTIAL_SHORTCUTS = [
 ];
 
 const MORE_SHORTCUTS = [
+	{ keys: [MOD, "Shift", "1-9"], label: "Jump to project slot" },
+	{ keys: [MOD, ALT, "1-9"], label: "Bind project to slot" },
 	{ keys: [MOD, "Shift", "A"], label: "Toggle plan / act" },
 	{ keys: [ALT, "Shift", "Enter"], label: "Start and open task" },
 	{ keys: [MOD, "M"], label: "Expand terminal" },
