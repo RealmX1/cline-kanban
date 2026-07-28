@@ -1,5 +1,11 @@
 import type { CSSProperties, ReactNode } from "react";
 
+/** 模糊搜索命中字符的统一强调样式，供所有带 fzf 高亮的列表/表格共用。 */
+export const FUZZY_MATCHED_TEXT_STYLE: CSSProperties = {
+	color: "var(--color-text-primary)",
+	fontWeight: 600,
+};
+
 export function renderFuzzyHighlightedText(
 	value: string,
 	positions: ReadonlySet<number> | undefined,

@@ -1,7 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { buildProjectPathname, parseProjectIdFromPathname } from "@/hooks/app-utils";
+import {
+	type ProjectNumericSlotGroupAssignments,
+	type ProjectNumericSlotGroupNumber,
+	useProjectNumericSlotGroupAssignments,
+} from "@/hooks/use-project-numeric-slot-group-assignments";
+import {
+	type RecentlyUsedProjectSwitchHistory,
+	useRecentlyUsedProjectSwitchHistory,
+} from "@/hooks/use-recently-used-project-switch-history";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeProjectPermanentDeletionPreview,
@@ -57,6 +66,11 @@ export interface UseProjectNavigationResult {
 	recheckProjectAvailability: () => void;
 	hasNoProjects: boolean;
 	isProjectSwitching: boolean;
+	lastVisitedEpochMsByProjectId: RecentlyUsedProjectSwitchHistory;
+	numericSlotGroupAssignments: ProjectNumericSlotGroupAssignments;
+	numericSlotGroupNumberByProjectId: ReadonlyMap<string, ProjectNumericSlotGroupNumber>;
+	assignProjectToNumericSlotGroupNumber: (slotNumber: ProjectNumericSlotGroupNumber, projectId: string) => void;
+	clearNumericSlotGroupNumber: (slotNumber: ProjectNumericSlotGroupNumber) => void;
 	handleSelectProject: (projectId: string) => void;
 	handleAddProject: () => void;
 	handleAddProjectSuccess: (projectId: string) => void;
@@ -99,6 +113,24 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 	const hasNoProjects = hasReceivedSnapshot && projects.length === 0 && currentProjectId === null;
 	const isProjectSwitching = requestedProjectId !== null && requestedProjectId !== currentProjectId && !hasNoProjects;
 	const navigationCurrentProjectId = requestedProjectId ?? currentProjectId;
+
+	const knownProjectIds = useMemo(() => projects.map((project) => project.id), [projects]);
+	// 首帧与断连期 projects 为空，此时裁剪会把访问历史与编组全部清空。
+	const canPruneMissingProjects = hasReceivedSnapshot && projects.length > 0;
+
+	// recency 的记录点刻意放在这里、以运行时已激活的 currentProjectId 为唯一触发源，而不是包住
+	// handleSelectProject：后者会漏掉 popstate 回退、深链首帧的 pathname 解析、以及永久删除后的回落。
+	const { lastVisitedEpochMsByProjectId } = useRecentlyUsedProjectSwitchHistory({
+		currentProjectId,
+		knownProjectIds,
+		canPruneMissingProjects,
+	});
+	const {
+		numericSlotGroupAssignments,
+		numericSlotGroupNumberByProjectId,
+		assignProjectToNumericSlotGroupNumber,
+		clearNumericSlotGroupNumber,
+	} = useProjectNumericSlotGroupAssignments({ knownProjectIds, canPruneMissingProjects });
 
 	const handleSelectProject = useCallback(
 		(projectId: string) => {
@@ -305,6 +337,11 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		recheckProjectAvailability,
 		hasNoProjects,
 		isProjectSwitching,
+		lastVisitedEpochMsByProjectId,
+		numericSlotGroupAssignments,
+		numericSlotGroupNumberByProjectId,
+		assignProjectToNumericSlotGroupNumber,
+		clearNumericSlotGroupNumber,
 		handleSelectProject,
 		handleAddProject,
 		handleAddProjectSuccess,
