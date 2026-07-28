@@ -28,6 +28,7 @@ import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog"
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
 import { TopBar } from "@/components/top-bar";
+import type { TopBarProjectSwitcherState } from "@/components/top-bar-project-switcher/top-bar-project-switcher";
 import { Button } from "@/components/ui/button";
 import {
 	AlertDialog,
@@ -59,6 +60,7 @@ import { useNotificationTaskFocusRouting } from "@/hooks/use-notification-task-f
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { usePostDeployVerification } from "@/hooks/use-post-deploy-verification";
 import { useProjectNavigation } from "@/hooks/use-project-navigation";
+import { useProjectNumericSlotGroupHotkeys } from "@/hooks/use-project-numeric-slot-group-hotkeys";
 import { useProjectUiState } from "@/hooks/use-project-ui-state";
 import { useReviewReadyNotifications } from "@/hooks/use-review-ready-notifications";
 import { useShortcutActions } from "@/hooks/use-shortcut-actions";
@@ -103,6 +105,7 @@ export default function App(): ReactElement {
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 	const [settingsInitialSection, setSettingsInitialSection] = useState<RuntimeSettingsSection | null>(null);
 	const [homeSidebarSection, setHomeSidebarSection] = useState<"projects" | "agent">("projects");
+	const sidebarLayout = useProjectNavigationLayout();
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
 	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
@@ -134,6 +137,11 @@ export default function App(): ReactElement {
 		permanentlyDeletingProjectId,
 		hasNoProjects,
 		isProjectSwitching,
+		lastVisitedEpochMsByProjectId,
+		numericSlotGroupAssignments,
+		numericSlotGroupNumberByProjectId,
+		assignProjectToNumericSlotGroupNumber,
+		clearNumericSlotGroupNumber,
 		handleSelectProject,
 		handleAddProject,
 		handleAddProjectSuccess,
@@ -643,6 +651,15 @@ export default function App(): ReactElement {
 		sendTaskSessionInput,
 	});
 	const homeTerminalSummary = sessions[homeTerminalTaskId] ?? null;
+	// 侧边栏 agent 的懒启动门控：Kanban agent 分段此刻真的渲染在屏幕上时，才允许为当前 workspace 首次
+	// spawn 终端会话。默认视图是 "projects"，agent 面板从未渲染，而 useHomeAgentSession 的终端启动
+	// effect 过去无条件 startTaskSession，于是每个打开的标签页都为一个没人在看的面板拉起一个 agent 进程。
+	// 判据必须是「此刻可见」而非「曾经打开过」：曾经打开过是 App 级单向闩锁，用户在 workspace A 打开一次
+	// 之后，每切到一个新 workspace 都会为其静默 spawn 一个隐藏进程，懒启动对多项目用户即告失效。
+	// 这里只门控「首次启动」——已启动的会话由 useHomeAgentSession 内部按 workspace+taskId 记住，切走分段、
+	// 折叠侧边栏、进入任务详情、切换项目都不会停止它（侧边栏会话的对话内容零持久化，停掉即不可恢复）。
+	const isHomeSidebarAgentSectionCurrentlyVisible =
+		!selectedCard && !sidebarLayout.isCollapsed && homeSidebarSection === "agent";
 	const homeSidebarAgentPanel = useHomeSidebarAgentPanel({
 		currentProjectId: projectRuntimeWorkspaceId,
 		hasNoProjects,
@@ -652,6 +669,7 @@ export default function App(): ReactElement {
 		workspaceGit,
 		latestTaskChatMessage,
 		taskChatMessagesByTaskId,
+		isHomeSidebarAgentSectionCurrentlyVisible,
 	});
 	const { runningShortcutLabel, handleSelectShortcutLabel, handleRunShortcut, handleCreateShortcut } =
 		useShortcutActions({
@@ -865,6 +883,14 @@ export default function App(): ReactElement {
 		setPostDeployVerificationCollapsed(false);
 	}, [setPostDeployVerificationCollapsed]);
 
+	useProjectNumericSlotGroupHotkeys({
+		projects,
+		currentProjectId,
+		numericSlotGroupAssignments,
+		onSelectProject: handleSelectProject,
+		onAssignProjectToNumericSlotGroupNumber: assignProjectToNumericSlotGroupNumber,
+	});
+
 	useAppHotkeys({
 		selectedCard,
 		isDetailTerminalOpen,
@@ -940,7 +966,6 @@ export default function App(): ReactElement {
 		return undefined;
 	}, [selectedCard]);
 
-	const sidebarLayout = useProjectNavigationLayout();
 	const handleToggleSidebar = useCallback(() => {
 		sidebarLayout.setSidebarCollapsed(!sidebarLayout.isCollapsed);
 	}, [sidebarLayout]);
@@ -951,6 +976,37 @@ export default function App(): ReactElement {
 	const shouldHideProjectDependentTopBarActions =
 		isCurrentProjectRuntimeUnavailable ||
 		(!selectedCard && (isProjectSwitching || isAwaitingWorkspaceSnapshot || isWorkspaceMetadataPending));
+
+	// 顶栏最左侧的项目快速切换器。用 displayedProjects 而非 projects：前者把当前项目的 taskCounts
+	// 换成了本地 board 的实时计数，切换器里的数字才与主看板一致。
+	const topBarProjectSwitcherState = useMemo<TopBarProjectSwitcherState>(
+		() => ({
+			projects: displayedProjects,
+			currentProjectId,
+			navigationCurrentProjectId,
+			lastVisitedEpochMsByProjectId,
+			numericSlotGroupNumberByProjectId,
+			isProjectListLoading,
+			isProjectSwitching,
+			onSelectProject: handleSelectProject,
+			onAddProject: handleAddProject,
+			onAssignProjectToNumericSlotGroupNumber: assignProjectToNumericSlotGroupNumber,
+			onClearNumericSlotGroupNumber: clearNumericSlotGroupNumber,
+		}),
+		[
+			assignProjectToNumericSlotGroupNumber,
+			clearNumericSlotGroupNumber,
+			currentProjectId,
+			displayedProjects,
+			handleAddProject,
+			handleSelectProject,
+			isProjectListLoading,
+			isProjectSwitching,
+			lastVisitedEpochMsByProjectId,
+			navigationCurrentProjectId,
+			numericSlotGroupNumberByProjectId,
+		],
+	);
 
 	const {
 		openTargetOptions,
@@ -1069,6 +1125,7 @@ export default function App(): ReactElement {
 				<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
 					<TopBar
 						onToggleSidebar={!selectedCard ? handleToggleSidebar : undefined}
+						projectSwitcher={topBarProjectSwitcherState}
 						onToggleBoardOverview={
 							!selectedCard && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
 								? handleToggleBoardOverview
@@ -1193,7 +1250,13 @@ export default function App(): ReactElement {
 							) : (
 								<div className="flex flex-1 flex-col min-h-0 min-w-0">
 									<div className="flex flex-1 min-h-0 min-w-0">
-										{isBoardOverviewOpen ? (
+										{/* Focus View 打开时真正卸载看板视图，而不是只让外层 `visibility: hidden`。
+										    隐藏保留布局盒：DependencyOverlay 的强制同步布局照样要遍历全部卡片，
+										    两个 `DragDropContext`（看板 + Focus View 左侧栏）也会同时挂载。
+										    只卸载这一层：外层 wrapper 与底部 home 终端保持挂载——隐藏的 xterm
+										    本就已暂停渲染，卸载它只会换来一次多余的重连 + 快照恢复。
+										    列的滚动位置与渐进渲染进度由 `board-column-scroll-offset-store` 补回。 */}
+										{selectedCard ? null : isBoardOverviewOpen ? (
 											<CrossRepositoryStageFirstOverview
 												projects={projects}
 												onOpenTask={handleOpenTaskInProject}
@@ -1435,8 +1498,10 @@ export default function App(): ReactElement {
 					onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
 					onCreateAndStart={
 						editingTaskId
-							? () => {
-									handleSaveAndStartEditedTask();
+							? (options) => {
+									// options 必须原样转交：里面携带对话框本地草稿的 promptOverride，
+									// 丢掉它会让「保存并启动」写回上一次上抛的旧文本。
+									handleSaveAndStartEditedTask(options);
 									return editingTaskId;
 								}
 							: handleCreateAndStartTask

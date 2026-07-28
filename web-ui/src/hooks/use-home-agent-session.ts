@@ -30,6 +30,9 @@ interface UseHomeAgentSessionInput {
 	sessionSummaries: Record<string, RuntimeTaskSessionSummary>;
 	setSessionSummaries: Dispatch<SetStateAction<Record<string, RuntimeTaskSessionSummary>>>;
 	upsertSessionSummary: (summary: RuntimeTaskSessionSummary) => void;
+	// 懒启动门控（见 App.tsx 同名派生值）：agent 分段此刻不可见时，终端会话不得 spawn。仅门控启动
+	// effect，不门控 descriptor 轮换 / chat 重载 / 卸载清理——那三处不起进程。
+	isHomeSidebarAgentSectionCurrentlyVisible: boolean;
 }
 
 interface UseHomeAgentSessionResult {
@@ -116,6 +119,7 @@ export function useHomeAgentSession({
 	sessionSummaries,
 	setSessionSummaries,
 	upsertSessionSummary,
+	isHomeSidebarAgentSectionCurrentlyVisible,
 }: UseHomeAgentSessionInput): UseHomeAgentSessionResult {
 	const latestBaseRefRef = useRef("HEAD");
 	const homeDescriptorByWorkspaceRef = useRef(new Map<string, HomeAgentWorkspaceDescriptor>());
@@ -291,6 +295,15 @@ export function useHomeAgentSession({
 			return;
 		}
 
+		// 懒启动：Kanban agent 面板此刻不可见时，绝不 spawn 进程。判据按「此刻可见」而非「曾经打开过」，
+		// 否则在 workspace A 打开过一次之后，每切一个新 workspace 都会为其静默 spawn 一个隐藏进程。
+		// 这里只是「不启动」，绝不停止：已启动的会话记在下面的 startedSessionKeysRef 里（按 workspace+taskId），
+		// 于是切走分段 / 切换项目后再回来既不会重启也不会被杀（侧边栏会话对话零持久化，杀掉即不可恢复），
+		// 重新打开面板走既有 snapshot 重连。
+		if (!isHomeSidebarAgentSectionCurrentlyVisible) {
+			return;
+		}
+
 		const session = {
 			workspaceId: currentProjectId,
 			taskId: descriptor.taskId,
@@ -360,7 +373,13 @@ export function useHomeAgentSession({
 				notifyError(message);
 			}
 		})();
-	}, [currentProjectId, descriptor, sessionSummaries, upsertSessionSummary]);
+	}, [
+		currentProjectId,
+		descriptor,
+		isHomeSidebarAgentSectionCurrentlyVisible,
+		sessionSummaries,
+		upsertSessionSummary,
+	]);
 
 	useEffect(() => {
 		return () => {

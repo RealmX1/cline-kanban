@@ -17,6 +17,22 @@ export type TaskAutoReviewMode = RuntimeTaskAutoReviewMode;
 export type TaskImage = RuntimeTaskImage;
 export type TaskCommentEntry = RuntimeTaskCommentEntry;
 
+/**
+ * 从任务编辑对话框发起的「创建 / 保存」类动作的入参。
+ *
+ * `promptOverride` 让对话框把「此刻真正在编辑框里的那段文本」直接交给处理方，而不是让
+ * 处理方去读自己的 state。`TaskEditorDialog` 已把逐字输入下沉为组件本地 state（否则每次
+ * 按键都会重渲 `App` 根节点连同整棵卡片树），只在失焦 / 关闭 / 提交 / 长时间停顿时才上抛，
+ * 因此提交那一瞬间父层 state 必然落后一拍——React 的 setState 不同步生效，先调
+ * `onPromptChange` 再提交也救不回来。由调用方显式传值是唯一没有竞态的交接方式。
+ *
+ * 省略时由处理方回落到自己的 state，保留给测试与非对话框调用方。
+ */
+export interface TaskEditorSubmitOptions {
+	keepDialogOpen?: boolean;
+	promptOverride?: string;
+}
+
 export const DEFAULT_TASK_AUTO_REVIEW_MODE: TaskAutoReviewMode = "commit";
 
 export function resolveTaskAutoReviewMode(mode: TaskAutoReviewMode | null | undefined): TaskAutoReviewMode {

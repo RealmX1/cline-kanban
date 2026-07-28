@@ -7,6 +7,7 @@ import type {
 	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
+	RuntimeTaskSessionLiveness,
 	RuntimeTaskSessionReviewReason,
 	RuntimeTaskSessionState,
 	RuntimeTaskSessionSummary,
@@ -351,6 +352,76 @@ function buildTerminalFacetPatch(
 		agentId: overrides.agentId,
 	});
 	return { turnOwner: facets.turnOwner, liveness: facets.liveness, userTurnKind: facets.userTurnKind };
+}
+
+// 「该磁盘记录声称仍有一个正在运行的、OS 级的 agent 进程」。
+//   - pid 非空：终端/PTY agent 在 launch 时记录真实 pid，exit/fail 写点一律把 pid 置回 null，故「pid 非空」
+//     正是「这条记录声称自己还挂着一个 OS 进程」的标记。Cline SDK 在进程内跑、pid 恒 null，天然被排除在外
+//     （它的 awaiting 是 pid=null + liveness=live，属跨重启保留的合法状态，绝不能被本对账波及）。
+//   - liveness 属 starting/live/retrying：agent 进程侧仍被声称在跑。`exited`/`interrupted`/`failed`/`none`
+//     都表示进程侧已终结，一律不参与对账（`exited` + 等人审是设计上要跨重启保留的状态）。
+const LIVENESS_VALUES_CLAIMING_RUNNING_AGENT_PROCESS: readonly RuntimeTaskSessionLiveness[] = [
+	"starting",
+	"live",
+	"retrying",
+];
+
+function summaryClaimsRunningAgentProcess(summary: RuntimeTaskSessionSummary): boolean {
+	if (summary.pid === null || summary.pid <= 0) {
+		return false;
+	}
+	return LIVENESS_VALUES_CLAIMING_RUNNING_AGENT_PROCESS.includes(resolveSessionFacets(summary).liveness);
+}
+
+// 从磁盘重建时，把「声称仍挂着一个正在运行的 agent 进程」的会话无条件对账为 idle。
+//
+// 背景：`sessions.json` 只在 graceful shutdown 落盘，且落盘的 liveness/pid 是写入那一刻的快照。
+// 运行时重启会带走全部子进程，但没有任何一方观察到它们的 exit 事件，于是磁盘上的 `live` 会永久留存
+// （实测曾累积到 88 条声称 live、仅 5 条进程真实存在）。这些僵尸会让卡片徽章与会话面板显示成活跃。
+//
+// 为什么**不**去探测那个 pid 是否还在（`process.kill(pid, 0)`）：hydrateFromRecord 重建的条目恒为
+// `active: null`，而本 manager 只能通过自己 spawn 的 node-pty 会话操作 agent——writeInput / stopTaskSession /
+// forceStopTaskSession / refreshTaskTerminal 全部以 `entry.active` 为前置，没有任何路径能把一个外部 pid
+// 认领回来。也就是说，只要是重建出来的条目，其「进程仍在跑」的声称就**按构造不可恢复**，那个 pid 究竟
+// 是否还活着与本会话能否继续毫无关系。何况 pid 存在性本身也是弱判据：重启后 pid 会被复用，探测成功只能
+// 证明「此刻有某个进程占着这个数字」，不能证明它还是本会话的 agent（EPERM 判活更是直接把别人的进程认成
+// 自己的）。因此判据取「不可恢复即归零」，与 recoverStaleSession 的 `active === null` 判据同源，只是把
+// 它从「用户碰到该任务时按需修正」提前到磁盘重载这一单一 chokepoint。
+//
+// 归零后 pid 变 null，正好让 web-ui persistent-terminal-manager 的 maybeAutoResumeStaleSession 判据
+// （`pid !== null` 视为「已有活 PTY、无需续跑」）恢复成立：聚焦该任务时可经 --continue 真正接回会话。
+//
+// 对账只改会话 facet，不碰 board 列归属：turnOwner 由 `user` 归零为 null 会让 isAwaitingUserReviewTurn
+// 转假，方向是**取消** project-task-counts-live-session-overlay 的 in_progress→review 计入，不会制造它。
+// 字段清空与 recoverStaleSession 保持一致（agentId 有意保留，供 canRefresh / 恢复路径路由 agent 类型），
+// 额外多清一个 connectionRetry：进程都不在了，不该继续渲染重连中。
+function reconcileSummaryWithUnrecoverableRunningAgentProcessClaim(
+	summary: RuntimeTaskSessionSummary,
+): RuntimeTaskSessionSummary {
+	if (!summaryClaimsRunningAgentProcess(summary)) {
+		return summary;
+	}
+	logTuiFreezeWarning(
+		`[session-hydrate-reconcile] taskId=${summary.taskId} agentId=${summary.agentId ?? "unknown"} pid=${summary.pid} 重建会话无法认领该进程，重置为 idle`,
+	);
+	return mergeSummaryWithFacets(summary, {
+		...buildTerminalFacetPatch(summary, "idle", {
+			reviewReason: null,
+			pid: null,
+			agentId: summary.agentId,
+		}),
+		workspacePath: null,
+		pid: null,
+		startedAt: null,
+		lastOutputAt: null,
+		reviewReason: null,
+		exitCode: null,
+		lastHookAt: null,
+		latestHookActivity: null,
+		latestTurnCheckpoint: null,
+		previousTurnCheckpoint: null,
+		connectionRetry: null,
+	});
 }
 
 // 「会话处于活跃回合」判据（Stage 3 余区：legacy `state` 读 → 双轴 facet 真相源）。
@@ -1415,8 +1486,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 其 mergeSummaryWithFacets 的 {...prev,...patch} 合并会保留这个 stale sidecar，使全新 agent run 恒被
 			// isParkedAwaitingDispatchedBackgroundWork 误判为 parked → 真实 Stop 在 to_review 闸被误抑制、漏发一次通知。
 			// 在磁盘重载这一单一 chokepoint 清掉该 optional sidecar，任何内存条目都不再带 stale marker 诞生。
+			//
+			// 同一 chokepoint 顺带做运行态对账：磁盘记录里声称仍挂着活 agent 进程的会话，在重建条目
+			// （恒 active: null）里按构造已不可认领，故在这里就归零为 idle，而不是等用户碰到该任务时
+			// 才由 recoverStaleSession 按需修正。
 			this.entries.set(taskId, {
-				summary: cloneSummary({ ...summary, awaitingDispatchedBackgroundWork: null }),
+				summary: cloneSummary(
+					reconcileSummaryWithUnrecoverableRunningAgentProcessClaim({
+						...summary,
+						awaitingDispatchedBackgroundWork: null,
+					}),
+				),
 				active: null,
 				terminalStateMirror: null,
 				listenerIdCounter: 1,

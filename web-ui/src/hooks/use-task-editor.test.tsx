@@ -15,6 +15,21 @@ import type {
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
+/**
+ * 编辑草稿改成了去抖写盘（`use-task-editor.ts` 的 `TASK_EDIT_DRAFT_PERSIST_DEBOUNCE_MS`，
+ * 目的是不让每次击键都触发一次 localStorage 写入）。断言草稿内容前必须真的等过那个窗口，
+ * 单靠 `await act(async () => {})` 冲一遍 effect 队列是等不到的。
+ */
+const TASK_EDIT_DRAFT_PERSIST_SETTLE_MS = 600;
+
+async function settleTaskEditDraftPersistence(): Promise<void> {
+	await act(async () => {
+		await new Promise((resolve) => {
+			setTimeout(resolve, TASK_EDIT_DRAFT_PERSIST_SETTLE_MS);
+		});
+	});
+}
+
 vi.mock("@/components/task-agent-model-picker", () => ({
 	TaskAgentModelPicker: () => null,
 	useTaskAgentModelPicker: () => ({
@@ -543,7 +558,7 @@ describe("useTaskEditor", () => {
 		await act(async () => {
 			requireSnapshot(latestSnapshot).setEditTaskPrompt("Autosaved draft prompt");
 		});
-		await act(async () => {});
+		await settleTaskEditDraftPersistence();
 
 		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toContain("Autosaved draft prompt");
 
@@ -601,7 +616,7 @@ describe("useTaskEditor", () => {
 		await act(async () => {
 			requireSnapshot(latestSnapshot).setEditTaskPrompt("Saved draft prompt");
 		});
-		await act(async () => {});
+		await settleTaskEditDraftPersistence();
 
 		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toContain("Saved draft prompt");
 
@@ -639,7 +654,7 @@ describe("useTaskEditor", () => {
 		await act(async () => {
 			requireSnapshot(latestSnapshot).setEditTaskPrompt("Canceled draft prompt");
 		});
-		await act(async () => {});
+		await settleTaskEditDraftPersistence();
 
 		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toContain("Canceled draft prompt");
 

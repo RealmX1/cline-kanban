@@ -21,12 +21,17 @@ import {
 import { useState } from "react";
 import { ConnectionRetryIndicator, type ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
 import { OpenWorkspaceButton } from "@/components/open-workspace-button";
+import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import {
 	getRuntimeShortcutIconComponent,
 	getRuntimeShortcutPickerOption,
 	RUNTIME_SHORTCUT_ICON_OPTIONS,
 	type RuntimeShortcutPickerIconId,
 } from "@/components/shared/runtime-shortcut-icons";
+import {
+	TopBarProjectSwitcher,
+	type TopBarProjectSwitcherState,
+} from "@/components/top-bar-project-switcher/top-bar-project-switcher";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
@@ -45,8 +50,6 @@ import { isMacPlatform } from "@/utils/platform";
 
 type SettingsSection = "shortcuts";
 type CreateShortcutResult = { ok: boolean; message?: string };
-
-const MOBILE_TOUCH_TARGET = "min-w-[44px] min-h-[44px]";
 
 function getWorkspacePathSegments(path: string): string[] {
 	return path
@@ -284,6 +287,7 @@ function TopBarGitStatusSection({
 
 export function TopBar({
 	onToggleSidebar,
+	projectSwitcher,
 	onBack,
 	workspacePath,
 	isWorkspacePathLoading = false,
@@ -329,6 +333,10 @@ export function TopBar({
 	onOpenPostDeployVerification,
 }: {
 	onToggleSidebar?: () => void;
+	// 顶栏最左侧的项目快速切换器。可选：不传就完全不渲染（既有的 top-bar 测试因此零改动）。
+	// 刻意不受 `hideProjectDependentActions` 影响——切换中、项目不可用、任务详情页里它都必须可用，
+	// 因为任务详情页会把左侧 ProjectNavigationPanel 整个卸载，这里是那时唯一的换项目入口。
+	projectSwitcher?: TopBarProjectSwitcherState;
 	onBack?: () => void;
 	workspacePath?: string;
 	isWorkspacePathLoading?: boolean;
@@ -428,7 +436,8 @@ export function TopBar({
 			<nav
 				className="kb-top-bar flex flex-nowrap items-center h-10 min-h-[40px] min-w-0 bg-surface-1"
 				style={{
-					paddingLeft: onBack ? 6 : 12,
+					// 返回箭头与项目切换器都是自带内边距的 ghost 按钮，再叠 12px 外留白会显得左边空一大块。
+					paddingLeft: onBack || projectSwitcher ? 6 : 12,
 					paddingRight: 8,
 					borderBottom: "1px solid var(--color-divider)",
 				}}
@@ -442,7 +451,7 @@ export function TopBar({
 							icon={<Menu size={16} />}
 							onClick={onToggleSidebar}
 							aria-label="Toggle sidebar"
-							className={cn("shrink-0", MOBILE_TOUCH_TARGET)}
+							className={cn("shrink-0", MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
 						/>
 					) : null}
 					{onBack ? (
@@ -453,10 +462,12 @@ export function TopBar({
 								icon={<ArrowLeft size={16} />}
 								onClick={onBack}
 								aria-label="Back to board"
-								className={cn("mr-1 shrink-0", isMobile && MOBILE_TOUCH_TARGET)}
+								className={cn("mr-1 shrink-0", isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
 							/>
 						</div>
 					) : null}
+
+					{projectSwitcher ? <TopBarProjectSwitcher {...projectSwitcher} /> : null}
 
 					{/* Workspace path */}
 					{isWorkspacePathLoading ? (
@@ -683,7 +694,7 @@ export function TopBar({
 									disabled={Boolean(runningShortcutLabel)}
 									onClick={() => onRunShortcut(selectedShortcut.label)}
 									aria-label={selectedShortcut.label}
-									className={MOBILE_TOUCH_TARGET}
+									className={MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME}
 								/>
 							) : null}
 							{onToggleTerminal ? (
@@ -694,7 +705,7 @@ export function TopBar({
 									onClick={onToggleTerminal}
 									disabled={Boolean(isTerminalLoading)}
 									aria-label={isTerminalOpen ? "Close terminal" : "Open terminal"}
-									className={MOBILE_TOUCH_TARGET}
+									className={MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME}
 								/>
 							) : null}
 						</>
@@ -711,7 +722,7 @@ export function TopBar({
 								aria-pressed={isTaskChangesSidebarOpen}
 								className={cn(
 									"ml-0.5",
-									isMobile && MOBILE_TOUCH_TARGET,
+									isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME,
 									isTaskChangesSidebarOpen && "ring-1 ring-accent",
 								)}
 							/>
@@ -735,7 +746,7 @@ export function TopBar({
 								onClick={onOpenPostDeployVerification}
 								aria-label="Open Post-Deploy Verification"
 								data-testid="open-post-deploy-verification-button"
-								className={cn("ml-0.5", isMobile && MOBILE_TOUCH_TARGET)}
+								className={cn("ml-0.5", isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
 							>
 								{postDeployVerificationPendingCount > 0 ? (
 									<span className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-status-orange px-1 text-[11px] font-semibold text-black">
@@ -766,7 +777,7 @@ export function TopBar({
 							className={cn(
 								"ml-0.5",
 								isBoardOverviewOpen && "ring-1 ring-accent",
-								isMobile && MOBILE_TOUCH_TARGET,
+								isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME,
 							)}
 						/>
 					) : null}
@@ -782,7 +793,7 @@ export function TopBar({
 						onClick={() => onOpenSettings?.()}
 						aria-label="Settings"
 						data-testid="open-settings-button"
-						className={cn("ml-0.5 mr-0.5", isMobile && MOBILE_TOUCH_TARGET)}
+						className={cn("ml-0.5 mr-0.5", isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
 					/>
 				</div>
 			</nav>

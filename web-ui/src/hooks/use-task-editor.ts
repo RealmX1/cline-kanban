@@ -2,7 +2,7 @@ import { isKanbanCursorAgentModelId } from "@runtime-agent-catalog";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "@runtime-task-agent-permission-mode";
 import { deriveTaskTitleFromPrompt } from "@runtime-task-title";
 import type { Dispatch, SetStateAction } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
 	normalizeStoredTaskAutoReviewMode,
@@ -27,9 +27,9 @@ import type {
 import { addTaskToColumnWithResult, findCardSelection, updateTask, updateTaskTitle } from "@/state/board-state";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 import { toTelemetrySelectedAgentId, trackTaskCreated } from "@/telemetry/events";
-import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
+import type { BoardCard, BoardData, TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
-import { useBooleanLocalStorageValue, useRawLocalStorageValue } from "@/utils/react-use";
+import { useBooleanLocalStorageValue, useDebouncedEffect, useRawLocalStorageValue } from "@/utils/react-use";
 
 interface StoredTaskCreateTerminalAgentModelSelections {
 	selections: Record<string, string>;
@@ -147,9 +147,11 @@ interface OpenEditTaskOptions {
 	preserveDetailSelection?: boolean;
 }
 
-interface CreateTaskOptions {
-	keepDialogOpen?: boolean;
-}
+/**
+ * 编辑草稿写盘的去抖窗口。草稿是崩溃恢复用的兜底副本，不需要与击键同频落盘；
+ * 真正的提交路径不经过它（见 {@link TaskEditorSubmitOptions.promptOverride}）。
+ */
+const TASK_EDIT_DRAFT_PERSIST_DEBOUNCE_MS = 400;
 
 export interface UseTaskEditorResult {
 	isInlineTaskCreateOpen: boolean;
@@ -210,11 +212,11 @@ export interface UseTaskEditorResult {
 	handleCancelCreateTask: () => void;
 	handleOpenEditTask: (task: BoardCard, options?: OpenEditTaskOptions) => void;
 	handleCancelEditTask: () => void;
-	handleSaveEditedTask: () => string | null;
-	handleSaveAndStartEditedTask: () => void;
+	handleSaveEditedTask: (options?: TaskEditorSubmitOptions) => string | null;
+	handleSaveAndStartEditedTask: (options?: TaskEditorSubmitOptions) => void;
 	handleSaveTaskTitle: (taskId: string, title: string) => void;
-	handleCreateTask: (options?: CreateTaskOptions) => string | null;
-	handleCreateTasks: (prompts: string[], options?: CreateTaskOptions) => string[];
+	handleCreateTask: (options?: TaskEditorSubmitOptions) => string | null;
+	handleCreateTasks: (prompts: string[], options?: TaskEditorSubmitOptions) => string[];
 	resetTaskEditorState: () => void;
 }
 
@@ -398,56 +400,70 @@ export function useTaskEditor({
 		}
 	}, [board, currentProjectId, editingTaskId]);
 
-	useEffect(() => {
-		if (!editingTaskId) {
-			return;
-		}
-		const selection = findCardSelection(board, editingTaskId);
-		if (!selection || selection.column.id !== "backlog") {
-			return;
-		}
-		const draft = {
-			taskId: editingTaskId,
-			prompt: editTaskPrompt,
-			images: editTaskImages.map((image) => ({ ...image })),
-			startInPlanMode: editTaskStartInPlanMode,
-			taskAgentPermissionMode: editTaskAgentPermissionMode,
-			autoReviewEnabled: editTaskAutoReviewEnabled,
-			autoReviewMode: editTaskAutoReviewMode,
-			branchRef: editTaskBranchRef || resolvedDefaultTaskBranchRef,
-			worktreeMode: editTaskWorktreeMode,
-			agentId: editTaskAgentId,
-			clineSettings: editTaskClineSettings,
-			terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
-			taskAgentSessionInitialization: editTaskAgentSessionInitialization,
-		};
-		if (isTaskEditDraftEqualToTask(draft, selection.card)) {
-			clearTaskEditDraft(currentProjectId, editingTaskId);
-			return;
-		}
-		saveTaskEditDraft(currentProjectId, {
-			...draft,
-			savedAt: Date.now(),
-		});
-	}, [
-		board,
-		currentProjectId,
-		editTaskAgentId,
-		editTaskAgentPermissionMode,
-		editTaskAutoReviewEnabled,
-		editTaskAutoReviewMode,
-		editTaskBranchRef,
-		editTaskClineSettings,
-		editTaskTerminalAgentModelOverrideSettings,
-		editTaskAgentSessionInitialization,
-		editTaskAgentPermissionMode,
-		editTaskImages,
-		editTaskPrompt,
-		editTaskStartInPlanMode,
-		editTaskWorktreeMode,
-		editingTaskId,
-		resolvedDefaultTaskBranchRef,
-	]);
+	// `board` 只在这里被当作只读查表用（拿到被编辑卡片以做「草稿是否等于任务本体」的比较）。
+	// 放进 deps 会让本 effect 随每一次看板刷新（含 150ms 一拍的 session 广播）重跑一遍，
+	// 而它做的是 localStorage 写盘。改走 ref：读到的永远是最新 board，但不参与依赖触发。
+	const boardRef = useRef(board);
+	boardRef.current = board;
+
+	// 去抖写盘：草稿只是崩溃恢复用的兜底副本，不需要与每一次击键同频落盘。
+	// 注意这是整条链路上**唯一**一处去抖——`TaskEditorDialog` 的上抛是事件驱动
+	// （失焦 / 关闭 / 提交 / 长时间停顿），不是第二层去抖，因此不存在「两级去抖串联导致
+	// 同步 flush 读到过期 state」的问题；提交路径另有 `promptOverride` 显式交接。
+	useDebouncedEffect(
+		() => {
+			if (!editingTaskId) {
+				return;
+			}
+			const selection = findCardSelection(boardRef.current, editingTaskId);
+			if (!selection || selection.column.id !== "backlog") {
+				return;
+			}
+			const draft = {
+				taskId: editingTaskId,
+				prompt: editTaskPrompt,
+				// 图片可能是几 MB 的 dataURL，深拷贝要等到确定「真的要写盘」之后再做。
+				images: editTaskImages,
+				startInPlanMode: editTaskStartInPlanMode,
+				taskAgentPermissionMode: editTaskAgentPermissionMode,
+				autoReviewEnabled: editTaskAutoReviewEnabled,
+				autoReviewMode: editTaskAutoReviewMode,
+				branchRef: editTaskBranchRef || resolvedDefaultTaskBranchRef,
+				worktreeMode: editTaskWorktreeMode,
+				agentId: editTaskAgentId,
+				clineSettings: editTaskClineSettings,
+				terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
+				taskAgentSessionInitialization: editTaskAgentSessionInitialization,
+			};
+			if (isTaskEditDraftEqualToTask(draft, selection.card)) {
+				clearTaskEditDraft(currentProjectId, editingTaskId);
+				return;
+			}
+			saveTaskEditDraft(currentProjectId, {
+				...draft,
+				images: draft.images.map((image) => ({ ...image })),
+				savedAt: Date.now(),
+			});
+		},
+		TASK_EDIT_DRAFT_PERSIST_DEBOUNCE_MS,
+		[
+			currentProjectId,
+			editTaskAgentId,
+			editTaskAgentPermissionMode,
+			editTaskAutoReviewEnabled,
+			editTaskAutoReviewMode,
+			editTaskBranchRef,
+			editTaskClineSettings,
+			editTaskTerminalAgentModelOverrideSettings,
+			editTaskAgentSessionInitialization,
+			editTaskImages,
+			editTaskPrompt,
+			editTaskStartInPlanMode,
+			editTaskWorktreeMode,
+			editingTaskId,
+			resolvedDefaultTaskBranchRef,
+		],
+	);
 
 	const handleOpenCreateTask = useCallback(() => {
 		if (!isNewTaskStartInPlanModeDefaultLoaded) {
@@ -553,82 +569,89 @@ export function useTaskEditor({
 		setEditTaskAgentSessionInitialization(undefined);
 	}, [currentProjectId, editingTaskId]);
 
-	const handleSaveEditedTask = useCallback((): string | null => {
-		if (!editingTaskId) {
-			return null;
-		}
-		const prompt = editTaskPrompt.trim();
-		if (!prompt) {
-			return null;
-		}
-		if (!(editTaskBranchRef || resolvedDefaultTaskBranchRef)) {
-			return null;
-		}
+	const handleSaveEditedTask = useCallback(
+		(options?: TaskEditorSubmitOptions): string | null => {
+			if (!editingTaskId) {
+				return null;
+			}
+			const prompt = (options?.promptOverride ?? editTaskPrompt).trim();
+			if (!prompt) {
+				return null;
+			}
+			if (!(editTaskBranchRef || resolvedDefaultTaskBranchRef)) {
+				return null;
+			}
 
-		const baseRef = editTaskBranchRef || resolvedDefaultTaskBranchRef;
-		const savedTaskId = editingTaskId;
-		clearTaskEditDraft(currentProjectId, savedTaskId);
+			const baseRef = editTaskBranchRef || resolvedDefaultTaskBranchRef;
+			const savedTaskId = editingTaskId;
+			clearTaskEditDraft(currentProjectId, savedTaskId);
 
-		setBoard((currentBoard) => {
-			const currentCard = currentBoard.columns.flatMap((c) => c.cards).find((c) => c.id === savedTaskId);
-			const title = currentCard?.title ?? "";
-			const updated = updateTask(currentBoard, savedTaskId, {
-				title,
-				prompt,
-				startInPlanMode: editTaskStartInPlanMode,
-				taskAgentPermissionMode: editTaskAgentPermissionMode,
-				autoReviewEnabled: editTaskAutoReviewEnabled,
-				autoReviewMode: editTaskAutoReviewMode,
-				images: editTaskImages,
-				agentId: editTaskAgentId,
-				clineSettings: editTaskClineSettings,
-				terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
-				taskAgentSessionInitialization: editTaskAgentSessionInitialization,
-				baseRef,
-				worktreeMode: editTaskWorktreeMode,
+			setBoard((currentBoard) => {
+				const currentCard = currentBoard.columns.flatMap((c) => c.cards).find((c) => c.id === savedTaskId);
+				const title = currentCard?.title ?? "";
+				const updated = updateTask(currentBoard, savedTaskId, {
+					title,
+					prompt,
+					startInPlanMode: editTaskStartInPlanMode,
+					taskAgentPermissionMode: editTaskAgentPermissionMode,
+					autoReviewEnabled: editTaskAutoReviewEnabled,
+					autoReviewMode: editTaskAutoReviewMode,
+					images: editTaskImages,
+					agentId: editTaskAgentId,
+					clineSettings: editTaskClineSettings,
+					terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
+					taskAgentSessionInitialization: editTaskAgentSessionInitialization,
+					baseRef,
+					worktreeMode: editTaskWorktreeMode,
+				});
+				return updated.updated ? updated.board : currentBoard;
 			});
-			return updated.updated ? updated.board : currentBoard;
-		});
-		setEditingTaskId(null);
+			setEditingTaskId(null);
 
-		setEditTaskPrompt("");
-		setEditTaskStartInPlanMode(false);
-		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
-		setEditTaskAutoReviewEnabled(false);
-		setEditTaskAutoReviewMode("commit");
-		setEditTaskImages([]);
-		setEditTaskBranchRef("");
-		setEditTaskWorktreeMode("branch");
-		setEditTaskAgentId(undefined);
-		setEditTaskClineSettings(undefined);
-		setEditTaskTerminalAgentModelOverrideSettings(undefined);
-		setEditTaskAgentSessionInitialization(undefined);
-		return savedTaskId;
-	}, [
-		editTaskAgentId,
-		editTaskAutoReviewEnabled,
-		editTaskAutoReviewMode,
-		editTaskBranchRef,
-		editTaskClineSettings,
-		editTaskTerminalAgentModelOverrideSettings,
-		editTaskAgentSessionInitialization,
-		editTaskPrompt,
-		editTaskImages,
-		editTaskStartInPlanMode,
-		editTaskWorktreeMode,
-		editingTaskId,
-		currentProjectId,
-		resolvedDefaultTaskBranchRef,
-		setBoard,
-	]);
+			setEditTaskPrompt("");
+			setEditTaskStartInPlanMode(false);
+			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+			setEditTaskAutoReviewEnabled(false);
+			setEditTaskAutoReviewMode("commit");
+			setEditTaskImages([]);
+			setEditTaskBranchRef("");
+			setEditTaskWorktreeMode("branch");
+			setEditTaskAgentId(undefined);
+			setEditTaskClineSettings(undefined);
+			setEditTaskTerminalAgentModelOverrideSettings(undefined);
+			setEditTaskAgentSessionInitialization(undefined);
+			return savedTaskId;
+		},
+		[
+			editTaskAgentId,
+			editTaskAgentPermissionMode,
+			editTaskAutoReviewEnabled,
+			editTaskAutoReviewMode,
+			editTaskBranchRef,
+			editTaskClineSettings,
+			editTaskTerminalAgentModelOverrideSettings,
+			editTaskAgentSessionInitialization,
+			editTaskPrompt,
+			editTaskImages,
+			editTaskStartInPlanMode,
+			editTaskWorktreeMode,
+			editingTaskId,
+			currentProjectId,
+			resolvedDefaultTaskBranchRef,
+			setBoard,
+		],
+	);
 
-	const handleSaveAndStartEditedTask = useCallback(() => {
-		const taskId = handleSaveEditedTask();
-		if (!taskId) {
-			return;
-		}
-		queueTaskStartAfterEdit?.(taskId);
-	}, [handleSaveEditedTask, queueTaskStartAfterEdit]);
+	const handleSaveAndStartEditedTask = useCallback(
+		(options?: TaskEditorSubmitOptions) => {
+			const taskId = handleSaveEditedTask(options);
+			if (!taskId) {
+				return;
+			}
+			queueTaskStartAfterEdit?.(taskId);
+		},
+		[handleSaveEditedTask, queueTaskStartAfterEdit],
+	);
 
 	const handleSaveTaskTitle = useCallback(
 		(taskId: string, title: string) => {
@@ -641,11 +664,11 @@ export function useTaskEditor({
 	);
 
 	const handleCreateTask = useCallback(
-		(options?: CreateTaskOptions): string | null => {
+		(options?: TaskEditorSubmitOptions): string | null => {
 			if (!isNewTaskStartInPlanModeDefaultLoaded) {
 				return null;
 			}
-			const prompt = newTaskPrompt.trim();
+			const prompt = (options?.promptOverride ?? newTaskPrompt).trim();
 			if (!prompt) {
 				return null;
 			}
@@ -723,7 +746,7 @@ export function useTaskEditor({
 	);
 
 	const handleCreateTasks = useCallback(
-		(prompts: string[], options?: CreateTaskOptions): string[] => {
+		(prompts: string[], options?: TaskEditorSubmitOptions): string[] => {
 			if (!isNewTaskStartInPlanModeDefaultLoaded) {
 				return [];
 			}
