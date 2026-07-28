@@ -169,3 +169,215 @@ describe("TaskEditorDialog close guard", () => {
 		expect(findButtonByText("Discard")).toBeUndefined();
 	});
 });
+
+/**
+ * 逐字输入已下沉为对话框本地 state（A-P0-1）：不再每次按键都经 `onPromptChange` 打到
+ * `App` 根节点连同整棵卡片树重渲。下面几例钉住这次下沉的三条不变量——不逐键上抛、
+ * 失焦上抛、以及提交时必须把最新草稿交出去（否则用户刚敲完就点提交会丢掉最后一段）。
+ */
+describe("TaskEditorDialog prompt draft ownership", () => {
+	let container: HTMLDivElement;
+	let root: Root;
+	let previousActEnvironment: boolean | undefined;
+
+	beforeEach(() => {
+		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
+			.IS_REACT_ACT_ENVIRONMENT;
+		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+		if (typeof globalThis.ResizeObserver === "undefined") {
+			globalThis.ResizeObserver = class {
+				observe(): void {}
+				unobserve(): void {}
+				disconnect(): void {}
+			} as unknown as typeof ResizeObserver;
+		}
+		Element.prototype.scrollIntoView ??= () => {};
+		Element.prototype.hasPointerCapture ??= () => false;
+		Element.prototype.setPointerCapture ??= () => {};
+		Element.prototype.releasePointerCapture ??= () => {};
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({
+				ok: true,
+				status: 200,
+				json: async () => ({}),
+				text: async () => "{}",
+			})),
+		);
+		container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+	});
+
+	afterEach(() => {
+		act(() => {
+			root.unmount();
+		});
+		container.remove();
+		vi.unstubAllGlobals();
+		if (previousActEnvironment === undefined) {
+			delete (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+		} else {
+			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+				previousActEnvironment;
+		}
+	});
+
+	function getPromptTextarea(): HTMLTextAreaElement {
+		const textarea = document.body.querySelector<HTMLTextAreaElement>("textarea");
+		if (!textarea) {
+			throw new Error("Expected the prompt textarea to be rendered.");
+		}
+		return textarea;
+	}
+
+	// React 受控 textarea：直接赋值不触发 onChange，需走原生 setter + input 事件。
+	async function typeIntoPrompt(value: string): Promise<void> {
+		const textarea = getPromptTextarea();
+		const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+		await act(async () => {
+			setter?.call(textarea, value);
+			textarea.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+	}
+
+	it("does not push every keystroke up to the parent", async () => {
+		const onPromptChange = vi.fn();
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ onPromptChange })} />);
+		});
+
+		for (const value of ["F", "Fi", "Fix", "Fix ", "Fix t", "Fix th", "Fix the"]) {
+			await typeIntoPrompt(value);
+		}
+
+		expect(onPromptChange).not.toHaveBeenCalled();
+		expect(getPromptTextarea().value).toBe("Fix the");
+	});
+
+	it("pushes the draft up on blur", async () => {
+		const onPromptChange = vi.fn();
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ onPromptChange })} />);
+		});
+
+		await typeIntoPrompt("Fix the bug");
+		expect(onPromptChange).not.toHaveBeenCalled();
+
+		// React 的 onBlur 由委托在 root 上的 focusout 合成，派发不冒泡的 blur 事件到不了它。
+		await act(async () => {
+			getPromptTextarea().focus();
+			getPromptTextarea().blur();
+		});
+
+		expect(onPromptChange).toHaveBeenCalledWith("Fix the bug");
+	});
+
+	it("hands the newest draft to onCreate even when the textarea never lost focus", async () => {
+		// 回归保护：提交那一刻父层 state 必然落后一拍，若不经 promptOverride 显式交接，
+		// 「敲完直接点 Create」会用上一次上抛的旧文本建卡。
+		const onCreate: Props["onCreate"] = vi.fn(() => "task-1");
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ onCreate, prompt: "" })} />);
+		});
+
+		await typeIntoPrompt("Ship the fix");
+
+		await act(async () => {
+			findButtonByText("Create")?.click();
+		});
+
+		expect(onCreate).toHaveBeenCalledTimes(1);
+		expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ promptOverride: "Ship the fix" }));
+	});
+
+	it("adopts a prompt value changed by the parent (reopening on a different task)", async () => {
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ prompt: "First task body" })} />);
+		});
+		expect(getPromptTextarea().value).toBe("First task body");
+
+		await typeIntoPrompt("Locally edited body");
+		expect(getPromptTextarea().value).toBe("Locally edited body");
+
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ prompt: "Second task body" })} />);
+		});
+
+		expect(getPromptTextarea().value).toBe("Second task body");
+	});
+
+	// 对话框关闭后组件仍保持挂载（App 无条件渲染 <TaskEditorDialog open={...}/>），
+	// 所以「关闭」必须同时做两件事：把本地草稿拉回父层当前值、并让挂起的停顿上抛失效。
+	// 下面三例分别钉住这两条以及它们不能误伤的既有行为。
+	async function waitPastIdlePropagation(): Promise<void> {
+		await act(async () => {
+			await new Promise((resolve) => {
+				// 需真实超过 PROMPT_DRAFT_IDLE_PROPAGATION_DELAY_MS（1500ms）。
+				setTimeout(resolve, 1800);
+			});
+		});
+	}
+
+	it("does not write the submitted prompt back to the parent after the dialog closed", async () => {
+		// 回归保护：提交后父层 newTaskPrompt 本就是空串，setNewTaskPrompt("") 被 React bail out、
+		// prop 不变，渲染期 prop 同步无从触发。若挂起的停顿上抛不受 open 约束，它会在关闭之后
+		// 才 fire，把已提交的文本写回父层——下次打开 New task 就是幽灵内容，再点一次 Create 即重复建卡。
+		const onPromptChange = vi.fn();
+		const onCreate: Props["onCreate"] = vi.fn(() => "task-1");
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ onPromptChange, onCreate, prompt: "" })} />);
+		});
+
+		await typeIntoPrompt("Ship the fix");
+		await act(async () => {
+			findButtonByText("Create")?.click();
+		});
+
+		// create 路径关闭：open 翻 false，而父层 prompt 依旧是空串。
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ onPromptChange, onCreate, prompt: "", open: false })} />);
+		});
+
+		await waitPastIdlePropagation();
+
+		expect(onPromptChange).not.toHaveBeenCalled();
+	});
+
+	it("still propagates the draft after an idle pause while the dialog is open", async () => {
+		// 守住崩溃兜底：给去抖回调加 open 守卫不能顺手把「停顿即上抛」杀掉，
+		// 否则编辑模式的草稿写盘会永远等不到内容。
+		const onPromptChange = vi.fn();
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ onPromptChange, prompt: "" })} />);
+		});
+
+		await typeIntoPrompt("Typed but never blurred");
+		expect(onPromptChange).not.toHaveBeenCalled();
+
+		await waitPastIdlePropagation();
+
+		expect(onPromptChange).toHaveBeenCalledWith("Typed but never blurred");
+	});
+
+	it("restores the parent prompt into the local draft when an edit dialog is reopened", async () => {
+		// 守住关闭同步不能吃掉编辑模式的正文：重新打开同一张卡时应看到父层正文，
+		// 而不是上次未提交的本地草稿。
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ taskEditorMode: "edit", prompt: "Original body" })} />);
+		});
+		expect(getPromptTextarea().value).toBe("Original body");
+
+		await typeIntoPrompt("Abandoned local edit");
+		expect(getPromptTextarea().value).toBe("Abandoned local edit");
+
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ taskEditorMode: "edit", prompt: "", open: false })} />);
+		});
+		await act(async () => {
+			root.render(<TaskEditorDialog {...makeProps({ taskEditorMode: "edit", prompt: "Original body" })} />);
+		});
+
+		expect(getPromptTextarea().value).toBe("Original body");
+	});
+});

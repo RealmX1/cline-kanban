@@ -43,6 +43,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
@@ -191,6 +192,15 @@ export function TaskCardBody({
 	pinnedClone?: boolean;
 }): React.ReactElement {
 	const [isHovered, setIsHovered] = useState(false);
+	// 卡片右上角动作组里每个按钮都裹了一层 Radix Tooltip，而 Radix 在关闭态仍会挂 Root+Trigger
+	// （Popper context + state + 一串事件绑定）。200 张卡 × 数个按钮 = 上千个常驻实例，看板每次
+	// 重渲都要 reconcile 一遍。`Tooltip` 对 falsy `content` 直接返回 children，于是把 content 收成
+	// 「hover 时才给」，空闲态就退化成裸 Button。
+	//
+	// 注意这里刻意**不**改成条件挂载整个动作组：未挂载的按钮无法被 Tab 到，而卡壳本身不可聚焦，
+	// backlog 这类没有标题编辑按钮的卡会因此彻底失去键盘可达性。DOM 常驻 + CSS `focus-within`
+	// 才是原本保住 Tab 可达的机制。
+	const revealHoverActionTooltip = (label: string): string | undefined => (isHovered ? label : undefined);
 	const [isPromptViewerOpen, setIsPromptViewerOpen] = useState(false);
 	const [isEditingTitle, setIsEditingTitle] = useState(false);
 	const [draftTitle, setDraftTitle] = useState(card.title);
@@ -237,8 +247,9 @@ export function TaskCardBody({
 	// 且常开不分 live/idle（与上面仅 live 卡的 1s computing tick 解耦）。lastSubstantiveOutputAt 只在 agent 产出
 	// 新正文/工具内容时推进——过滤 TUI 装饰性重绘、与 board.json 分离，故列间拖动与终端 restart refresh
 	// （resume guard）都不会扰动它；无实质戳时隐藏响应段（不回退 lastOutputAt，避免 PTY 噪声带偏展示）。
-	const [elapsedNowMs, setElapsedNowMs] = useState(() => Date.now());
-	useInterval(() => setElapsedNowMs(Date.now()), 30_000);
+	// 走进程内单例时钟而非每卡一个 setInterval：200 张卡原先 = 200 个常开定时器，且完全不分
+	// 标签页可见性。共享时钟只留一个定时器 + 一个 visibilitychange 监听，隐藏时整体停摆。
+	const elapsedNowMs = useSharedCoarseClockTimestampMs();
 	const lastAgentResponseAt = sessionSummary?.lastSubstantiveOutputAt ?? null;
 	const isAgentComputing =
 		isLiveAgentTurn && !isParkedAwaitingBackgroundWork && sessionSummary != null && sessionFacets != null
@@ -685,7 +696,7 @@ export function TaskCardBody({
 						isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
 					)}
 				>
-					<Tooltip side="bottom" content="View original prompt">
+					<Tooltip side="bottom" content={revealHoverActionTooltip("View original prompt")}>
 						<Button
 							icon={<FileText size={12} />}
 							variant="ghost"
@@ -699,7 +710,7 @@ export function TaskCardBody({
 						/>
 					</Tooltip>
 					{columnId === "backlog" ? (
-						<Tooltip side="bottom" content="Start task">
+						<Tooltip side="bottom" content={revealHoverActionTooltip("Start task")}>
 							<Button
 								icon={<Play size={12} />}
 								variant="ghost"
@@ -714,7 +725,7 @@ export function TaskCardBody({
 						</Tooltip>
 					) : null}
 					{columnId === "review" ? (
-						<Tooltip side="bottom" content="Move to validation">
+						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to validation")}>
 							<Button
 								icon={isMoveToValidationLoading ? <Spinner size={12} /> : <ClipboardCheck size={12} />}
 								variant="ghost"
@@ -732,7 +743,7 @@ export function TaskCardBody({
 					{/* 仅终端 agent（claude/codex…，排除进程内 Cline SDK 与无会话）的 In Progress 卡：手动翻入 Review。
 					    用于会话卡死/空闲（Stop hook 未触发、进程未退）拖不进 Review 列、被反复打回的兜底。 */}
 					{columnId === "in_progress" && sessionSummary?.agentId != null && sessionSummary.agentId !== "cline" ? (
-						<Tooltip side="bottom" content="Move to review">
+						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to review")}>
 							<Button
 								icon={isMoveToReviewLoading ? <Spinner size={12} /> : <Eye size={12} />}
 								variant="ghost"
@@ -748,7 +759,7 @@ export function TaskCardBody({
 						</Tooltip>
 					) : null}
 					{columnId === "review" || columnId === "validation" ? (
-						<Tooltip side="bottom" content="Move to done">
+						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to done")}>
 							<Button
 								icon={isMoveToTrashLoading ? <Spinner size={12} /> : <Archive size={12} />}
 								variant="ghost"
@@ -767,11 +778,13 @@ export function TaskCardBody({
 						<Tooltip
 							side="bottom"
 							content={
-								<>
-									Restore session
-									<br />
-									in new worktree
-								</>
+								isHovered ? (
+									<>
+										Restore session
+										<br />
+										in new worktree
+									</>
+								) : undefined
 							}
 						>
 							<Button
@@ -788,7 +801,7 @@ export function TaskCardBody({
 						</Tooltip>
 					) : null}
 					{onDeleteTask ? (
-						<Tooltip side="bottom" content="Delete permanently">
+						<Tooltip side="bottom" content={revealHoverActionTooltip("Delete permanently")}>
 							<Button
 								icon={<Trash2 size={12} />}
 								variant="danger"

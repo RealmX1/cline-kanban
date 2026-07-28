@@ -29,14 +29,7 @@ export const ClineThinkingIndicator = React.memo(function ClineThinkingIndicator
 		<div className="px-1.5" role="status" aria-live="polite">
 			<div className="inline-flex items-center gap-1.5">
 				<BrailleSpinner />
-				<ShimmeringText
-					text="Thinking..."
-					className="text-sm"
-					duration={2.5}
-					spread={5}
-					repeatDelay={0}
-					startOnView={false}
-				/>
+				<ShimmeringText text="Thinking..." className="text-sm" durationSeconds={2.5} spread={5} />
 			</div>
 		</div>
 	);

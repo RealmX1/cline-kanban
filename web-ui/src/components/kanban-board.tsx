@@ -375,6 +375,16 @@ export function KanbanBoard({
 		programmaticCardMoveInFlight?.toColumnId ??
 		(activeDragTaskId !== null && activeDragSourceColumnId === "backlog" ? "in_progress" : null);
 
+	// Boards without dependency edges are the common case, and a mounted overlay
+	// still installs a subtree MutationObserver plus a ResizeObserver over the
+	// whole board. Motion keeps it mounted so a link removed mid-drag can still
+	// play its transient fade-out.
+	const shouldMountDependencyOverlay =
+		dependencies.length > 0 ||
+		dependencyLinking.draft !== null ||
+		activeDragTaskId !== null ||
+		programmaticCardMoveInFlight !== null;
+
 	return (
 		<DragDropContext
 			onBeforeCapture={handleBeforeCapture}
@@ -435,15 +445,17 @@ export function KanbanBoard({
 						}}
 					/>
 				))}
-				<DependencyOverlay
-					containerRef={boardRef}
-					dependencies={dependencies}
-					draft={dependencyLinking.draft}
-					activeTaskId={activeDragTaskId ?? programmaticCardMoveInFlight?.taskId ?? null}
-					activeTaskEffectiveColumnId={activeTaskEffectiveColumnId}
-					isMotionActive={activeDragTaskId !== null || programmaticCardMoveInFlight !== null}
-					onDeleteDependency={onDeleteDependency}
-				/>
+				{shouldMountDependencyOverlay && (
+					<DependencyOverlay
+						containerRef={boardRef}
+						dependencies={dependencies}
+						draft={dependencyLinking.draft}
+						activeTaskId={activeDragTaskId ?? programmaticCardMoveInFlight?.taskId ?? null}
+						activeTaskEffectiveColumnId={activeTaskEffectiveColumnId}
+						isMotionActive={activeDragTaskId !== null || programmaticCardMoveInFlight !== null}
+						onDeleteDependency={onDeleteDependency}
+					/>
+				)}
 			</section>
 		</DragDropContext>
 	);
