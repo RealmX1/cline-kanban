@@ -805,7 +805,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			agentId: "claude",
 			binary: "claude",
 			args: [],
-			autonomousModeEnabled: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
 			cwd: "/tmp/task-worktree",
 			prompt: "Explain this module",
 			readOnlyQuestionSession: true,
@@ -923,7 +923,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			agentId: "droid",
 			binary: "droid",
 			args: [],
-			autonomousModeEnabled: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
 			cwd: "/tmp",
 			prompt: "",
 			workspaceId: "workspace-1",
@@ -967,7 +967,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			agentId: "kiro",
 			binary: "kiro-cli",
 			args: ["chat"],
-			autonomousModeEnabled: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
 			cwd: "/tmp",
 			prompt: "Investigate deployment drift",
 			startInPlanMode: true,
@@ -1262,122 +1262,235 @@ describe("prepareAgentLaunch hook strategies", () => {
 		}
 	});
 
-	it("applies autonomous mode flags in adapters for non-droid CLIs", async () => {
+	it("applies the bypass permission tier to every harness that can express it", async () => {
 		setupTempHome();
 
+		const bypassFlagByAgentId: ReadonlyArray<{
+			agentId: RuntimeAgentId;
+			binary: string;
+			args: string[];
+			flag: string;
+		}> = [
+			{ agentId: "claude", binary: "claude", args: [], flag: "--dangerously-skip-permissions" },
+			{ agentId: "codex", binary: "codex", args: [], flag: "--dangerously-bypass-approvals-and-sandbox" },
+			{ agentId: "gemini", binary: "gemini", args: [], flag: "--yolo" },
+			{ agentId: "kiro", binary: "kiro-cli", args: ["chat"], flag: "--trust-all-tools" },
+			{ agentId: "cline", binary: "cline", args: [], flag: "--auto-approve-all" },
+			{ agentId: "kimi", binary: "kimi", args: [], flag: "--yolo" },
+			{ agentId: "cursor", binary: "cursor-agent", args: [], flag: "--force" },
+		];
+
+		for (const { agentId, binary, args, flag } of bypassFlagByAgentId) {
+			const launch = await prepareAgentLaunch({
+				taskId: `task-${agentId}-bypass`,
+				agentId,
+				binary,
+				args: [...args],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+				cwd: "/tmp",
+				prompt: "",
+			});
+			expect(launch.args, `${agentId} should receive ${flag}`).toContain(flag);
+		}
+	});
+
+	it("omits bypass flags for the ask tier without stripping explicitly provided ones", async () => {
+		setupTempHome();
+
+		const explicitFlagByAgentId: ReadonlyArray<{
+			agentId: RuntimeAgentId;
+			binary: string;
+			args: string[];
+			flag: string;
+		}> = [
+			{
+				agentId: "claude",
+				binary: "claude",
+				args: ["--dangerously-skip-permissions"],
+				flag: "--dangerously-skip-permissions",
+			},
+			{
+				agentId: "codex",
+				binary: "codex",
+				args: ["--dangerously-bypass-approvals-and-sandbox"],
+				flag: "--dangerously-bypass-approvals-and-sandbox",
+			},
+			{ agentId: "gemini", binary: "gemini", args: ["--yolo"], flag: "--yolo" },
+			{ agentId: "cline", binary: "cline", args: ["--auto-approve-all"], flag: "--auto-approve-all" },
+			{ agentId: "kiro", binary: "kiro-cli", args: ["chat", "--trust-all-tools"], flag: "--trust-all-tools" },
+		];
+
+		for (const { agentId, binary, args, flag } of explicitFlagByAgentId) {
+			const launch = await prepareAgentLaunch({
+				taskId: `task-${agentId}-ask`,
+				agentId,
+				binary,
+				args: [...args],
+				taskAgentPermissionMode: "ask_for_every_tool_use",
+				cwd: "/tmp",
+				prompt: "",
+			});
+			expect(launch.args, `${agentId} should keep an explicitly provided ${flag}`).toContain(flag);
+		}
+
+		// 没有显式旗标时，ask 档不得自行添加任何放行旗标。
 		const claudeLaunch = await prepareAgentLaunch({
-			taskId: "task-claude-auto",
+			taskId: "task-claude-ask-clean",
 			agentId: "claude",
 			binary: "claude",
 			args: [],
-			autonomousModeEnabled: true,
+			taskAgentPermissionMode: "ask_for_every_tool_use",
 			cwd: "/tmp",
 			prompt: "",
 		});
-		expect(claudeLaunch.args).toContain("--dangerously-skip-permissions");
+		expect(claudeLaunch.args).not.toContain("--dangerously-skip-permissions");
+		expect(claudeLaunch.args).not.toContain("--permission-mode");
 
-		const codexLaunch = await prepareAgentLaunch({
-			taskId: "task-codex-auto",
+		// codex 相反：它的默认审批策略取自用户自己的 ~/.codex/config.toml（可能是 never），
+		// 所以 ask 档必须显式钉死最严的 untrusted，否则选了「每次询问」也可能什么都不问。
+		const codexAskLaunch = await prepareAgentLaunch({
+			taskId: "task-codex-ask-clean",
 			agentId: "codex",
 			binary: "codex",
 			args: [],
-			autonomousModeEnabled: true,
+			taskAgentPermissionMode: "ask_for_every_tool_use",
 			cwd: "/tmp",
 			prompt: "",
 		});
-		expect(codexLaunch.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+		expect(codexAskLaunch.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+		expect(codexAskLaunch.args).toContain("--ask-for-approval");
+		expect(codexAskLaunch.args).toContain("untrusted");
+	});
 
-		const geminiLaunch = await prepareAgentLaunch({
-			taskId: "task-gemini-auto",
-			agentId: "gemini",
-			binary: "gemini",
+	it("expresses the middle tier natively where supported and degrades to ask elsewhere", async () => {
+		setupTempHome();
+
+		const claudeLaunch = await prepareAgentLaunch({
+			taskId: "task-claude-accept-edits",
+			agentId: "claude",
+			binary: "claude",
 			args: [],
-			autonomousModeEnabled: true,
+			taskAgentPermissionMode: "auto_approve_file_edits_only",
 			cwd: "/tmp",
 			prompt: "",
 		});
-		expect(geminiLaunch.args).toContain("--yolo");
+		expect(claudeLaunch.args).toContain("--permission-mode");
+		expect(claudeLaunch.args).toContain("acceptEdits");
+		expect(claudeLaunch.args).not.toContain("--dangerously-skip-permissions");
 
-		const kiroLaunch = await prepareAgentLaunch({
-			taskId: "task-kiro-auto",
-			agentId: "kiro",
-			binary: "kiro-cli",
-			args: ["chat"],
-			autonomousModeEnabled: true,
+		// codex 表达不出中间档：on-request 会让普通 shell 命令不经询问就跑（语义是「由模型决定
+		// 何时询问」），并不满足本档承诺的「跑命令仍会询问」；untrusted 又连改文件也一律询问。
+		// 于是必须保守降级到 ask，并显式推 untrusted——什么都不推等于把档位交给用户的
+		// ~/.codex/config.toml 决定，那同样是静默放宽。
+		const codexLaunch = await prepareAgentLaunch({
+			taskId: "task-codex-accept-edits",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			taskAgentPermissionMode: "auto_approve_file_edits_only",
 			cwd: "/tmp",
 			prompt: "",
 		});
-		expect(kiroLaunch.args).toContain("--trust-all-tools");
+		expect(codexLaunch.args).not.toContain("on-request");
+		expect(codexLaunch.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+		expect(codexLaunch.args).toContain("--ask-for-approval");
+		expect(codexLaunch.args).toContain("untrusted");
 
+		// cursor / kimi 无法表达中间档：必须保守降级到 ask，绝不回落成全放行。
+		for (const { agentId, binary, forbiddenFlag } of [
+			{ agentId: "cursor", binary: "cursor-agent", forbiddenFlag: "--force" },
+			{ agentId: "kimi", binary: "kimi", forbiddenFlag: "--yolo" },
+		] as const) {
+			const launch = await prepareAgentLaunch({
+				taskId: `task-${agentId}-accept-edits`,
+				agentId,
+				binary,
+				args: [],
+				taskAgentPermissionMode: "auto_approve_file_edits_only",
+				cwd: "/tmp",
+				prompt: "",
+			});
+			expect(launch.args, `${agentId} must not silently widen to full bypass`).not.toContain(forbiddenFlag);
+		}
+
+		// cline 是个刻意的例外：agentId "cline" 在 Kanban 里路由到进程内 Cline SDK，而那条路径的
+		// requestToolApproval 目前恒批准，所以它只能表达「全放行」一档。这个「无法收紧」的事实由
+		// resolveTaskAgentPermissionModeForAgent 如实报告 degraded，并在任务创建界面明示，
+		// 而不是让用户以为选了更严的档位就真的更严。
 		const clineLaunch = await prepareAgentLaunch({
-			taskId: "task-cline-auto",
+			taskId: "task-cline-accept-edits",
 			agentId: "cline",
 			binary: "cline",
 			args: [],
-			autonomousModeEnabled: true,
+			taskAgentPermissionMode: "auto_approve_file_edits_only",
 			cwd: "/tmp",
 			prompt: "",
 		});
 		expect(clineLaunch.args).toContain("--auto-approve-all");
 	});
 
-	it("preserves explicit autonomous args when autonomous mode is disabled", async () => {
+	// 用户拍板的正交约束：plan 起步只决定「开局先只读规划」，不得剥夺所选放权档。
+	it("keeps plan-mode start orthogonal to the permission tier", async () => {
 		setupTempHome();
 
-		const claudeLaunch = await prepareAgentLaunch({
-			taskId: "task-claude-no-auto",
+		const claudePlanBypass = await prepareAgentLaunch({
+			taskId: "task-claude-plan-bypass",
 			agentId: "claude",
 			binary: "claude",
-			args: ["--dangerously-skip-permissions"],
-			autonomousModeEnabled: false,
+			args: [],
+			startInPlanMode: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
 			cwd: "/tmp",
 			prompt: "",
 		});
-		expect(claudeLaunch.args).toContain("--dangerously-skip-permissions");
+		// 开局只读，但预授权本会话后续可切到 bypass。
+		expect(claudePlanBypass.args).toContain("--permission-mode");
+		expect(claudePlanBypass.args).toContain("plan");
+		expect(claudePlanBypass.args).toContain("--allow-dangerously-skip-permissions");
+		expect(claudePlanBypass.args).not.toContain("--dangerously-skip-permissions");
+		// --permission-mode 只能出现一次，否则两个分支各推一个会互相打架。
+		expect(claudePlanBypass.args.filter((arg) => arg === "--permission-mode")).toHaveLength(1);
 
-		const codexLaunch = await prepareAgentLaunch({
-			taskId: "task-codex-no-auto",
-			agentId: "codex",
-			binary: "codex",
-			args: ["--dangerously-bypass-approvals-and-sandbox"],
-			autonomousModeEnabled: false,
+		const claudePlanAsk = await prepareAgentLaunch({
+			taskId: "task-claude-plan-ask",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			startInPlanMode: true,
+			taskAgentPermissionMode: "ask_for_every_tool_use",
 			cwd: "/tmp",
 			prompt: "",
 		});
-		expect(codexLaunch.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+		// ask 档没选 bypass，就不该预授权升档。
+		expect(claudePlanAsk.args).not.toContain("--allow-dangerously-skip-permissions");
 
-		const geminiLaunch = await prepareAgentLaunch({
-			taskId: "task-gemini-no-auto",
-			agentId: "gemini",
-			binary: "gemini",
-			args: ["--yolo"],
-			autonomousModeEnabled: false,
+		// cursor 的 --plan 与 --force 是独立旗标，实测可并存，故两者都要在。
+		const cursorPlanBypass = await prepareAgentLaunch({
+			taskId: "task-cursor-plan-bypass",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			startInPlanMode: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
 			cwd: "/tmp",
 			prompt: "",
 		});
-		expect(geminiLaunch.args).toContain("--yolo");
+		expect(cursorPlanBypass.args).toContain("--plan");
+		expect(cursorPlanBypass.args).toContain("--force");
 
-		const clineLaunch = await prepareAgentLaunch({
-			taskId: "task-cline-no-auto",
-			agentId: "cline",
-			binary: "cline",
-			args: ["--auto-approve-all"],
-			autonomousModeEnabled: false,
+		// kimi 同理：--plan 与 --yolo 各自独立。
+		const kimiPlanBypass = await prepareAgentLaunch({
+			taskId: "task-kimi-plan-bypass",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			startInPlanMode: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
 			cwd: "/tmp",
 			prompt: "",
 		});
-		expect(clineLaunch.args).toContain("--auto-approve-all");
-
-		const kiroLaunch = await prepareAgentLaunch({
-			taskId: "task-kiro-no-auto",
-			agentId: "kiro",
-			binary: "kiro-cli",
-			args: ["chat", "--trust-all-tools"],
-			autonomousModeEnabled: false,
-			cwd: "/tmp",
-			prompt: "",
-		});
-		expect(kiroLaunch.args).toContain("--trust-all-tools");
+		expect(kimiPlanBypass.args).toContain("--plan");
+		expect(kimiPlanBypass.args).toContain("--yolo");
 	});
 });
 

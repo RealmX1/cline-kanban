@@ -3,12 +3,13 @@
 // stays open and rotates it only when the selected agent configuration
 // meaningfully changes.
 
+import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { createHomeAgentSessionId, isHomeAgentSessionIdForWorkspace } from "@runtime-home-agent-session";
 import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useMemo, useRef } from "react";
 
 import { notifyError } from "@/components/app-toaster";
-import { getRuntimeClineProviderSettings, isNativeClineAgentSelected } from "@/runtime/native-agent";
+import { getRuntimeClineProviderSettings } from "@/runtime/native-agent";
 import { estimateTaskSessionGeometry } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeConfigResponse, RuntimeGitRepositoryInfo, RuntimeTaskSessionSummary } from "@/runtime/types";
@@ -137,7 +138,9 @@ export function useHomeAgentSession({
 
 		let panelMode: HomeAgentPanelMode;
 		let descriptorKey: string;
-		if (isNativeClineAgentSelected(runtimeProjectConfig.selectedAgentId)) {
+		// 判据必须是「会话以对话面板呈现」而不是「是不是 cline」：服务端按 sessionTransport 分流，
+		// omp 这类 ACP agent 也走对话通道。只认 cline 会让主页侧栏渲染 xterm、真实会话却在 ACP 上。
+		if (isRuntimeAgentSessionRenderedAsConversationPanel(runtimeProjectConfig.selectedAgentId)) {
 			panelMode = "chat";
 			descriptorKey = buildClineDescriptor(runtimeProjectConfig);
 		} else {

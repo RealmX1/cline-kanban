@@ -34,6 +34,17 @@ export type RuntimeWorkspaceFileChange = z.infer<typeof runtimeWorkspaceFileChan
 export const runtimeTaskWorktreeModeSchema = z.enum(["branch", "inplace"]);
 export type RuntimeTaskWorktreeMode = z.infer<typeof runtimeTaskWorktreeModeSchema>;
 
+// 每个任务的放权档位，跨全部 harness 共用。这条轴与 `startInPlanMode` **正交**：
+// plan 起步只决定「开局先只读规划」，不得剥夺此处选定的权限档（例如 Claude Code 在
+// plan 起步时改用 --allow-dangerously-skip-permissions 预授权后续升档）。
+// 各档位到每个 agent 的具体旗标映射见 src/core/task-agent-permission-mode.ts。
+export const runtimeTaskAgentPermissionModeSchema = z.enum([
+	"ask_for_every_tool_use",
+	"auto_approve_file_edits_only",
+	"bypass_all_permission_prompts",
+]);
+export type RuntimeTaskAgentPermissionMode = z.infer<typeof runtimeTaskAgentPermissionModeSchema>;
+
 export const runtimeWorkspaceChangesRequestSchema = z.object({
 	taskId: z.string(),
 	baseRef: z.string(),
@@ -98,6 +109,10 @@ export const runtimeAgentIdSchema = z.enum([
 	"cline",
 	"cursor",
 	"kimi",
+	// oh-my-pi（CLI 名 omp）。它不是 PTY 终端 agent：Kanban 通过 ACP（Agent Client Protocol,
+	// JSON-RPC over stdio）与 `omp acp` 通话，会话状态由结构化 SessionUpdate 驱动而非刮 TUI。
+	// 见 src/acp-client-session/。
+	"omp",
 ]);
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
 export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
@@ -239,6 +254,10 @@ export const runtimeBoardCardSchema = z
 		title: z.string().optional(),
 		prompt: z.string(),
 		startInPlanMode: z.boolean(),
+		// 老卡片没有这个字段；读时不在这里补默认值，而是在启动任务处按当时的全局
+		// agentAutonomousModeEnabled 推导（见 resolveTaskAgentPermissionModeFromLegacyAutonomousFlag），
+		// 因为 schema 层看不到 runtime config。
+		taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
 		autoReviewEnabled: z.boolean().optional(),
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
@@ -1570,6 +1589,8 @@ export const runtimeTaskSessionStartRequestSchema = z
 		taskTitle: z.string().optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
 		startInPlanMode: z.boolean().optional(),
+		// 省略时由服务端按全局 agentAutonomousModeEnabled 推导（老卡片兼容路径）。
+		taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
 		mode: runtimeTaskSessionModeSchema.optional(),
 		resumeFromTrash: z.boolean().optional(),
 		baseRef: z.string(),
@@ -1845,6 +1866,49 @@ export const runtimeTaskSessionInputResponseSchema = z.object({
 });
 export type RuntimeTaskSessionInputResponse = z.infer<typeof runtimeTaskSessionInputResponseSchema>;
 
+export const runtimeTaskAgentUserDecisionOptionSchema = z.object({
+	optionId: z.string(),
+	label: z.string(),
+	// ACP 的 PermissionOptionKind：allow_once | allow_always | reject_once | reject_always。
+	// 用 string 而非枚举，好让未来新增的选项类型不至于让整条消息解析失败。
+	kind: z.string(),
+});
+export type RuntimeTaskAgentUserDecisionOption = z.infer<typeof runtimeTaskAgentUserDecisionOptionSchema>;
+
+export const runtimeTaskAgentUserDecisionKindSchema = z.enum(["tool_permission", "elicitation_form"]);
+export type RuntimeTaskAgentUserDecisionKind = z.infer<typeof runtimeTaskAgentUserDecisionKindSchema>;
+
+export const runtimeTaskAgentUserDecisionOutcomeSchema = z.enum(["selected", "cancelled", "declined"]);
+export type RuntimeTaskAgentUserDecisionOutcome = z.infer<typeof runtimeTaskAgentUserDecisionOutcomeSchema>;
+
+export const runtimeTaskAgentUserDecisionSchema = z.object({
+	decisionId: z.string(),
+	kind: runtimeTaskAgentUserDecisionKindSchema,
+	options: z.array(runtimeTaskAgentUserDecisionOptionSchema),
+	// 未决时为 null；决出后写回，用于让前端把按钮换成「已选 X」。
+	resolvedOutcome: runtimeTaskAgentUserDecisionOutcomeSchema.nullable(),
+	resolvedOptionId: z.string().nullable(),
+});
+export type RuntimeTaskAgentUserDecision = z.infer<typeof runtimeTaskAgentUserDecisionSchema>;
+
+export const runtimeTaskAgentUserDecisionResolveRequestSchema = z.object({
+	taskId: z.string(),
+	decisionId: z.string(),
+	outcome: runtimeTaskAgentUserDecisionOutcomeSchema,
+	optionId: z.string().optional(),
+});
+export type RuntimeTaskAgentUserDecisionResolveRequest = z.infer<
+	typeof runtimeTaskAgentUserDecisionResolveRequestSchema
+>;
+
+export const runtimeTaskAgentUserDecisionResolveResponseSchema = z.object({
+	ok: z.boolean(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskAgentUserDecisionResolveResponse = z.infer<
+	typeof runtimeTaskAgentUserDecisionResolveResponseSchema
+>;
+
 export const runtimeTaskChatMessageSchema = z.object({
 	id: z.string(),
 	role: z.enum(["user", "assistant", "system", "tool", "reasoning", "status"]),
@@ -1863,6 +1927,15 @@ export const runtimeTaskChatMessageSchema = z.object({
 			source: z.string().nullable().optional(),
 			idempotencyKey: z.string().nullable().optional(),
 			promptSha256: z.string().nullable().optional(),
+			// ACP 会话专用：工具调用的语义类别与状态，用于聊天面板给工具消息选图标/配色。
+			// 其余富信息（diff、文件位置、plan 条目）直接渲染进 content 的 markdown，
+			// 以复用既有的 markdown 渲染器，避免为每种结构再造一套 schema 与渲染分支。
+			toolKind: z.string().nullable().optional(),
+			toolCallStatus: z.string().nullable().optional(),
+			// 等待用户拍板的决策（ACP 的 session/request_permission 与 form 型 elicitation）。
+			// 挂在消息上而不是另开一条 UI 通道：决策天然属于会话流的一部分，且刷新/重连后
+			// 能随消息历史一起恢复，不会丢。
+			userDecision: runtimeTaskAgentUserDecisionSchema.nullable().optional(),
 		})
 		.nullable()
 		.optional(),

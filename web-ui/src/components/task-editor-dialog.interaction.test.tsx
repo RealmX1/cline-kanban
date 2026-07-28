@@ -20,6 +20,8 @@ function makeProps(overrides: Partial<Props> = {}): Props {
 		onCreateMultiple: vi.fn(() => []),
 		startInPlanMode: false,
 		onStartInPlanModeChange: vi.fn(),
+		taskAgentPermissionMode: "bypass_all_permission_prompts",
+		onTaskAgentPermissionModeChange: vi.fn(),
 		autoReviewEnabled: false,
 		onAutoReviewEnabledChange: vi.fn(),
 		autoReviewMode: "commit",
@@ -46,7 +48,11 @@ function findCloseButton(): HTMLButtonElement | null {
 	return document.body.querySelector<HTMLButtonElement>('[aria-label="Close"]');
 }
 
-describe("TaskEditorDialog close guard", () => {
+function hasPlanModeOverridesPermissionTierNotice(): boolean {
+	return document.body.textContent?.includes('"Start in plan mode" overrides this tier') ?? false;
+}
+
+describe("TaskEditorDialog interactions", () => {
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
@@ -167,5 +173,20 @@ describe("TaskEditorDialog close guard", () => {
 
 		expect(onOpenChange).toHaveBeenCalledWith(false);
 		expect(findButtonByText("Discard")).toBeUndefined();
+	});
+
+	// droid 的 autonomyMode 是单轴（spec / normal / auto-high）：勾了 plan 起步就写 spec，
+	// 权限档根本不会被写入。用户看到的两条正交设置与实际执行不一致，必须当场明示。
+	it("warns that plan-mode start swallows the permission tier on single-axis harnesses", async () => {
+		await render(makeProps({ defaultAgentId: "droid", startInPlanMode: true }));
+		expect(hasPlanModeOverridesPermissionTierNotice()).toBe(true);
+	});
+
+	it("does not warn about a plan-mode conflict when the harness keeps the two axes independent", async () => {
+		await render(makeProps({ defaultAgentId: "droid", startInPlanMode: false }));
+		expect(hasPlanModeOverridesPermissionTierNotice()).toBe(false);
+
+		await render(makeProps({ defaultAgentId: "claude", startInPlanMode: true }));
+		expect(hasPlanModeOverridesPermissionTierNotice()).toBe(false);
 	});
 });

@@ -1,6 +1,7 @@
 // Main React composition root for the browser app.
 // Keep this file focused on wiring top-level hooks and surfaces together, and
 // push runtime-specific orchestration down into hooks and service modules.
+import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "@runtime-task-agent-permission-mode";
 import { FolderOpen } from "lucide-react";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -234,6 +235,7 @@ export default function App(): ReactElement {
 		sendTaskSessionInput,
 		sendTaskChatMessage,
 		cancelTaskChatTurn,
+		resolveTaskAgentUserDecision,
 		fetchTaskChatMessages,
 		cleanupTaskWorkspace,
 		fetchTaskWorkspaceInfo,
@@ -481,6 +483,8 @@ export default function App(): ReactElement {
 		setNewTaskImages,
 		newTaskStartInPlanMode,
 		setNewTaskStartInPlanMode,
+		newTaskAgentPermissionMode,
+		setNewTaskAgentPermissionMode,
 		newTaskAutoReviewEnabled,
 		setNewTaskAutoReviewEnabled,
 		newTaskAutoReviewMode,
@@ -505,6 +509,8 @@ export default function App(): ReactElement {
 		setEditTaskImages,
 		editTaskStartInPlanMode,
 		setEditTaskStartInPlanMode,
+		editTaskAgentPermissionMode,
+		setEditTaskAgentPermissionMode,
 		editTaskAutoReviewEnabled,
 		setEditTaskAutoReviewEnabled,
 		editTaskAutoReviewMode,
@@ -543,6 +549,10 @@ export default function App(): ReactElement {
 		selectedAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
 		newTaskStartInPlanModeByDefault: runtimeProjectConfig?.newTaskStartInPlanModeByDefault ?? true,
 		isNewTaskStartInPlanModeDefaultLoaded: runtimeProjectConfig !== null,
+		// 全局那个旧开关如今只决定「新任务的默认权限档」，不再直接作用于会话启动。
+		newTaskAgentPermissionModeByDefault: resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(
+			runtimeProjectConfig?.agentAutonomousModeEnabled ?? true,
+		),
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 	});
@@ -1354,6 +1364,7 @@ export default function App(): ReactElement {
 									}}
 									onSendClineChatMessage={sendTaskChatMessage}
 									onCancelClineChatTurn={cancelTaskChatTurn}
+									onResolveTaskAgentUserDecision={resolveTaskAgentUserDecision}
 									onLoadClineChatMessages={fetchTaskChatMessages}
 									latestClineChatMessage={latestSelectedTaskChatMessage}
 									streamedClineChatMessages={selectedTaskChatMessages}
@@ -1435,6 +1446,10 @@ export default function App(): ReactElement {
 					onCreateAndStartMultiple={handleCreateAndStartTasks}
 					startInPlanMode={editingTaskId ? editTaskStartInPlanMode : newTaskStartInPlanMode}
 					onStartInPlanModeChange={editingTaskId ? setEditTaskStartInPlanMode : setNewTaskStartInPlanMode}
+					taskAgentPermissionMode={editingTaskId ? editTaskAgentPermissionMode : newTaskAgentPermissionMode}
+					onTaskAgentPermissionModeChange={
+						editingTaskId ? setEditTaskAgentPermissionMode : setNewTaskAgentPermissionMode
+					}
 					startInPlanModeDisabled={
 						editingTaskId ? isEditTaskStartInPlanModeDisabled : isNewTaskStartInPlanModeDisabled
 					}

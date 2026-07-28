@@ -84,8 +84,12 @@ vi.mock("@runtime-agent-catalog", () => ({
 	getRuntimeAgentCatalogEntry: vi.fn((agentId: string) => ({
 		id: agentId,
 		installUrl: null,
+		baseArgs: [],
 		autonomousArgs: [],
 	})),
+	getRuntimeAgentSessionTransport: vi.fn((agentId: string) =>
+		agentId === "cline" ? "in_process_cline_sdk" : "pty_terminal",
+	),
 	getRuntimeLaunchSupportedAgentCatalog: vi.fn(() => [
 		{ id: "cline", label: "Cline", binary: "cline" },
 		{ id: "claude", label: "Claude Code", binary: "claude" },

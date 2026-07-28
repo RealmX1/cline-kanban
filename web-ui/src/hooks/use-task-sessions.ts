@@ -90,6 +90,11 @@ export interface UseTaskSessionsResult {
 	) => Promise<ClineChatActionResult>;
 	abortTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;
 	cancelTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;
+	resolveTaskAgentUserDecision: (
+		taskId: string,
+		decisionId: string,
+		optionId: string | null,
+	) => Promise<ClineChatActionResult>;
 	fetchTaskChatMessages: (taskId: string) => Promise<RuntimeTaskChatMessage[] | null>;
 	cleanupTaskWorkspace: (
 		taskId: string,
@@ -141,6 +146,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		loadTaskChatMessages: fetchTaskChatMessages,
 		abortTaskChatTurn,
 		cancelTaskChatTurn,
+		resolveTaskAgentUserDecision,
 	} = useClineChatRuntimeActions({
 		currentProjectId,
 		onSessionSummary: upsertSession,
@@ -213,6 +219,8 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					taskTitle: task.title,
 					images: options?.resumeFromTrash ? undefined : task.images,
 					startInPlanMode: options?.resumeFromTrash ? undefined : task.startInPlanMode,
+					// 权限档位在续跑时同样适用（与 startInPlanMode 不同：那是「开局」语义，续跑没有开局）。
+					taskAgentPermissionMode: task.taskAgentPermissionMode,
 					resumeFromTrash: options?.resumeFromTrash,
 					baseRef: task.baseRef,
 					cols: geometry.cols,
@@ -471,6 +479,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		sendTaskChatMessage,
 		abortTaskChatTurn,
 		cancelTaskChatTurn,
+		resolveTaskAgentUserDecision,
 		fetchTaskChatMessages,
 		cleanupTaskWorkspace,
 		fetchTaskWorkspaceInfo,

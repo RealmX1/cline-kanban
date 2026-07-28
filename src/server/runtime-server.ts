@@ -4,12 +4,17 @@ import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
 
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
+import {
+	type AcpTaskSessionService,
+	createAcpTaskSessionService,
+} from "../acp-client-session/acp-task-session-service";
 import { handleClineMcpOauthCallback } from "../cline-sdk/cline-mcp-runtime-service";
 import {
 	type ClineTaskSessionService,
 	createInMemoryClineTaskSessionService,
 } from "../cline-sdk/cline-task-session-service";
 import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
+import { isRuntimeAgentSessionDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
@@ -48,7 +53,7 @@ import { createRuntimeApi } from "../trpc/runtime-api";
 import { createWorkspaceApi } from "../trpc/workspace-api";
 import {
 	type ActiveRuntimeSessionShutdownResult,
-	stopActiveTerminalAndClineRuntimeSessionsForWorkspace,
+	stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace,
 } from "./active-runtime-session-shutdown";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
@@ -154,6 +159,30 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
+	// ACP（omp 等）会话按 workspace 作用域持有，与 Cline SDK 服务并列。
+	const acpTaskSessionServiceByWorkspaceId = new Map<string, AcpTaskSessionService>();
+	// 与 clineWorkspacePathByWorkspaceId 对位：关服 / 重置时要遍历「只跑过 ACP 会话」的 workspace，
+	// 它们未必在 workspaceRegistry 或 Cline 的账本里出现过。
+	const acpWorkspacePathByWorkspaceId = new Map<string, string>();
+	const getScopedAcpTaskSessionService = async (scope: RuntimeTrpcWorkspaceScope): Promise<AcpTaskSessionService> => {
+		let service = acpTaskSessionServiceByWorkspaceId.get(scope.workspaceId);
+		if (!service) {
+			service = createAcpTaskSessionService();
+			acpTaskSessionServiceByWorkspaceId.set(scope.workspaceId, service);
+			acpWorkspacePathByWorkspaceId.set(scope.workspaceId, scope.workspacePath);
+			deps.runtimeStateHub.trackAcpTaskSessionService(scope.workspaceId, scope.workspacePath, service);
+		}
+		return service;
+	};
+	const disposeAcpTaskSessionService = (workspaceId: string): void => {
+		const service = acpTaskSessionServiceByWorkspaceId.get(workspaceId);
+		if (!service) {
+			return;
+		}
+		acpTaskSessionServiceByWorkspaceId.delete(workspaceId);
+		acpWorkspacePathByWorkspaceId.delete(workspaceId);
+		service.disposeAllTaskSessions();
+	};
 	const clineTaskSessionServiceByWorkspaceId = new Map<string, ClineTaskSessionService>();
 	const clineWorkspacePathByWorkspaceId = new Map<string, string>();
 	const clineWatcherRegistry = createClineWatcherRegistry();
@@ -190,6 +219,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		for (const summary of clineTaskSessionService?.listSummaries() ?? []) {
 			summariesByTaskId.set(summary.taskId, summary);
 		}
+		const acpTaskSessionService = acpTaskSessionServiceByWorkspaceId.get(workspaceId);
+		for (const summary of acpTaskSessionService?.listSummaries() ?? []) {
+			summariesByTaskId.set(summary.taskId, summary);
+		}
 		return Array.from(summariesByTaskId.values());
 	};
 	const stopAndCollectProjectRuntimeSessionsForSafePersistence = async (
@@ -197,9 +230,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	): Promise<ActiveRuntimeSessionShutdownResult> => {
 		const terminalManager = deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId);
 		const clineTaskSessionService = clineTaskSessionServiceByWorkspaceId.get(workspaceId);
-		return await stopActiveTerminalAndClineRuntimeSessionsForWorkspace({
+		const acpTaskSessionService = acpTaskSessionServiceByWorkspaceId.get(workspaceId);
+		return await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
 			terminalManager,
 			clineTaskSessionService: clineTaskSessionService ?? null,
+			acpTaskSessionService: acpTaskSessionService ?? null,
 		});
 	};
 	const stopAllActiveRuntimeSessionsForShutdown = async () => {
@@ -208,6 +243,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			workspacePathByWorkspaceId.set(workspaceId, workspacePath);
 		}
 		for (const [workspaceId, workspacePath] of clineWorkspacePathByWorkspaceId) {
+			workspacePathByWorkspaceId.set(workspaceId, workspacePath);
+		}
+		for (const [workspaceId, workspacePath] of acpWorkspacePathByWorkspaceId) {
 			workspacePathByWorkspaceId.set(workspaceId, workspacePath);
 		}
 
@@ -235,11 +273,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		for (const workspaceId of clineTaskSessionServiceByWorkspaceId.keys()) {
 			workspaceIds.add(workspaceId);
 		}
+		for (const workspaceId of acpTaskSessionServiceByWorkspaceId.keys()) {
+			workspaceIds.add(workspaceId);
+		}
 		const activeWorkspaceId = deps.workspaceRegistry.getActiveWorkspaceId();
 		if (activeWorkspaceId) {
 			workspaceIds.add(activeWorkspaceId);
 		}
 		for (const workspaceId of workspaceIds) {
+			disposeAcpTaskSessionService(workspaceId);
 			await disposeClineTaskSessionServiceAsync(workspaceId);
 			deps.disposeWorkspace(workspaceId, {
 				stopTerminalSessions: true,
@@ -261,6 +303,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
 				getScopedTerminalManager,
 				getScopedClineTaskSessionService,
+				getScopedAcpTaskSessionService,
 				resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
 				runCommand: deps.runCommand,
 				broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
@@ -296,6 +339,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				disposeProjectRuntime: async (workspaceId) => {
 					const disposalFailureMessages: string[] = [];
 					try {
+						disposeAcpTaskSessionService(workspaceId);
 						await disposeClineTaskSessionServiceAsync(workspaceId);
 					} catch (error) {
 						disposalFailureMessages.push(error instanceof Error ? error.message : String(error));
@@ -348,6 +392,21 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 							}
 						}
 						return lastAssistantMessageContent;
+					}
+					// ACP agent（omp 等）：既没有 hook finalMessage，也不在 Cline 账本里；只认 cline 会让
+					// 预览对它恒为 null。ACP service 的消息全在内存，读它同样廉价，不会 boot 任何 SDK host。
+					const acpTaskSessionService = await getScopedAcpTaskSessionService(scope);
+					const isAcpTask =
+						isRuntimeAgentSessionDrivenByAcpProtocol(acpTaskSessionService.getSummary(taskId)?.agentId ?? null) ||
+						isRuntimeAgentSessionDrivenByAcpProtocol(card?.agentId ?? null);
+					if (isAcpTask) {
+						let lastAcpAssistantMessageContent: string | null = null;
+						for (const message of acpTaskSessionService.listMessages(taskId)) {
+							if (message.role === "assistant") {
+								lastAcpAssistantMessageContent = message.content;
+							}
+						}
+						return lastAcpAssistantMessageContent;
 					}
 					// 终端 agent（Claude 等）：取 hook 采集的最近 finalMessage；无则优雅降级为 null。
 					const manager = await getScopedTerminalManager(scope);
@@ -608,6 +667,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
+			// ACP agent 是持有 stdio 的真子进程：不在这里拆掉，关服后它还活着、还能改仓库，
+			// 而且它占着的 stdio 管道会把 Kanban 进程本身的退出一起拖住。
+			for (const service of acpTaskSessionServiceByWorkspaceId.values()) {
+				service.disposeAllTaskSessions();
+			}
+			acpTaskSessionServiceByWorkspaceId.clear();
+			acpWorkspacePathByWorkspaceId.clear();
 			await Promise.all(
 				Array.from(clineTaskSessionServiceByWorkspaceId.values()).map(async (service) => {
 					await service.dispose();

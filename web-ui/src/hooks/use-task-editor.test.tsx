@@ -6,6 +6,7 @@ import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { useTaskEditor } from "@/hooks/use-task-editor";
 import type {
 	RuntimeAgentId,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -127,6 +128,7 @@ function HookHarness({
 	currentProjectId = "project-1",
 	selectedAgentId = null,
 	newTaskStartInPlanModeByDefault = true,
+	newTaskAgentPermissionModeByDefault = "bypass_all_permission_prompts" as const,
 	isNewTaskStartInPlanModeDefaultLoaded = true,
 }: {
 	initialBoard: BoardData;
@@ -139,6 +141,7 @@ function HookHarness({
 	currentProjectId?: string | null;
 	selectedAgentId?: RuntimeAgentId | null;
 	newTaskStartInPlanModeByDefault?: boolean;
+	newTaskAgentPermissionModeByDefault?: RuntimeTaskAgentPermissionMode;
 	isNewTaskStartInPlanModeDefaultLoaded?: boolean;
 }): null {
 	const [board, setBoard] = useState<BoardData>(initialBoard);
@@ -153,6 +156,7 @@ function HookHarness({
 		currentProjectId,
 		selectedAgentId,
 		newTaskStartInPlanModeByDefault,
+		newTaskAgentPermissionModeByDefault,
 		isNewTaskStartInPlanModeDefaultLoaded,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
@@ -1189,6 +1193,8 @@ describe("useTaskEditor", () => {
 					images={[]}
 					onImagesChange={vi.fn()}
 					onCreate={() => null}
+					taskAgentPermissionMode="bypass_all_permission_prompts"
+					onTaskAgentPermissionModeChange={vi.fn()}
 					onCreateMultiple={() => []}
 					startInPlanMode={false}
 					onStartInPlanModeChange={vi.fn()}

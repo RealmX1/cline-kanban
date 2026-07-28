@@ -4,6 +4,7 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeBoardDependency,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
@@ -12,6 +13,7 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "./api-contract";
+import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "./task-agent-permission-mode";
 import { createUniqueTaskId } from "./task-id";
 import { resolveTaskTitle } from "./task-title";
 
@@ -20,6 +22,7 @@ export interface RuntimeCreateTaskInput {
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
+	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode;
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
@@ -38,6 +41,7 @@ export interface RuntimeUpdateTaskInput {
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
+	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode | null;
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
@@ -366,6 +370,7 @@ export function addTaskToColumn(
 		title: resolveTaskTitle(input.title, prompt),
 		prompt,
 		startInPlanMode: input.startInPlanMode ?? true,
+		taskAgentPermissionMode: input.taskAgentPermissionMode ?? DEFAULT_TASK_AGENT_PERMISSION_MODE,
 		autoReviewEnabled: Boolean(input.autoReviewEnabled),
 		autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 		images: cloneTaskImages(input.images),
@@ -718,6 +723,17 @@ export function updateTask(
 				title: resolveTaskTitle(input.title, prompt),
 				prompt,
 				startInPlanMode: Boolean(input.startInPlanMode),
+				// 三态：undefined 原样保留卡片现值（**包括「字段缺失」本身**）、null 复位到默认档、其余按传入值。
+				// 「缺失」在本设计里不是「等同默认档」：它触发 runtime-api 的 legacy 兼容推导，按当时的全局
+				// agentAutonomousModeEnabled 取档（关闭时是 ask）。若在这里把 undefined 物化成 DEFAULT
+				// （= bypass），那么在关闭了全局 bypass 的工作区里，只要对一张老卡片跑一次 task update
+				// （CLI 恰好传 undefined，因为卡片本来就没有该字段），它就被永久钉成「全部工具自动放行」——
+				// 用户从未选过、UI 也不会打降级星标，正是本轮明令禁止的「静默放宽权限」。
+				// 前端 board-state.ts 的 updateTask 用 Object.hasOwn 保留缺失，这里必须与之同语义。
+				taskAgentPermissionMode:
+					input.taskAgentPermissionMode === undefined
+						? card.taskAgentPermissionMode
+						: (input.taskAgentPermissionMode ?? DEFAULT_TASK_AGENT_PERMISSION_MODE),
 				autoReviewEnabled: Boolean(input.autoReviewEnabled),
 				autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 				images: input.images === undefined ? card.images : cloneTaskImages(input.images),

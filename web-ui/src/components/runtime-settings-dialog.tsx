@@ -5,7 +5,11 @@ import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import * as RadixPopover from "@radix-ui/react-popover";
 import * as RadixSelect from "@radix-ui/react-select";
 import * as RadixSwitch from "@radix-ui/react-switch";
-import { getRuntimeAgentCatalogEntry, getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
+import {
+	getRuntimeAgentCatalogEntry,
+	getRuntimeAgentSessionTransport,
+	getRuntimeLaunchSupportedAgentCatalog,
+} from "@runtime-agent-catalog";
 import { areRuntimeProjectShortcutsEqual } from "@runtime-shortcuts";
 import {
 	Bell,
@@ -74,12 +78,21 @@ function quoteCommandPartForDisplay(part: string): string {
 	return JSON.stringify(part);
 }
 
-function buildDisplayedAgentCommand(agentId: RuntimeAgentId, binary: string, autonomousModeEnabled: boolean): string {
-	if (agentId === "cline") {
+// 进程内运行的 agent（Cline SDK）没有可展示的命令行。其余 agent 展示 binary + baseArgs +（默认档为
+// bypass 时的）放权旗标；baseArgs 不能漏——例如 omp 的 ACP 会话是 `omp acp`，少了子命令就是错的。
+function buildDisplayedAgentCommand(
+	agentId: RuntimeAgentId,
+	binary: string,
+	newTaskDefaultsToBypassPermissions: boolean,
+): string {
+	// 进程内 SDK agent 根本不起子进程，没有命令行可展示。
+	if (getRuntimeAgentSessionTransport(agentId) === "in_process_cline_sdk") {
 		return "";
 	}
-	const args = autonomousModeEnabled ? (getRuntimeAgentCatalogEntry(agentId)?.autonomousArgs ?? []) : [];
-	return [binary, ...args.map(quoteCommandPartForDisplay)].join(" ");
+	const catalogEntry = getRuntimeAgentCatalogEntry(agentId);
+	const baseArgs = catalogEntry?.baseArgs ?? [];
+	const autonomousArgs = newTaskDefaultsToBypassPermissions ? (catalogEntry?.autonomousArgs ?? []) : [];
+	return [binary, ...[...baseArgs, ...autonomousArgs].map(quoteCommandPartForDisplay)].join(" ");
 }
 
 function normalizeTemplateForComparison(value: string): string {
@@ -93,7 +106,7 @@ const GIT_PROMPT_VARIANT_OPTIONS: Array<{ value: TaskGitAction; label: string }>
 
 export type RuntimeSettingsSection = "shortcuts";
 
-const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "droid", "kiro"];
+const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "omp", "droid", "kiro"];
 
 type SettingsNavId =
 	| "general"
@@ -848,7 +861,7 @@ export function RuntimeSettingsDialog({
 						>
 							<RadixCheckbox.Root
 								id={bypassPermissionsCheckboxId}
-								aria-label="Enable bypass permissions flag"
+								aria-label="Default new tasks to bypass permissions"
 								checked={agentAutonomousModeEnabled}
 								disabled={controlsDisabled}
 								onCheckedChange={(checked) => setAgentAutonomousModeEnabled(checked === true)}
@@ -858,10 +871,11 @@ export function RuntimeSettingsDialog({
 									<Check size={12} className="text-white" />
 								</RadixCheckbox.Indicator>
 							</RadixCheckbox.Root>
-							<span>Enable bypass permissions flag</span>
+							<span>Default new tasks to bypass permissions</span>
 						</label>
 						<p className="text-text-secondary text-[13px] ml-6 mt-0 mb-0">
-							Allows agents to use tools without stopping for permission. Use at your own risk.
+							Sets the starting value of each new task's Agent permissions field. Every task carries its own
+							tier, so changing this never affects tasks that already exist. Use at your own risk.
 						</p>
 						<div className="flex items-center gap-2 mt-3">
 							<RadixSwitch.Root

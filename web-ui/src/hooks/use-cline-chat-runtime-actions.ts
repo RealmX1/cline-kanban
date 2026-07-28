@@ -36,6 +36,11 @@ interface UseClineChatRuntimeActionsResult {
 	loadTaskChatMessages: (taskId: string) => Promise<RuntimeTaskChatMessage[] | null>;
 	abortTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;
 	cancelTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;
+	resolveTaskAgentUserDecision: (
+		taskId: string,
+		decisionId: string,
+		optionId: string | null,
+	) => Promise<ClineChatActionResult>;
 }
 
 function toErrorMessage(error: unknown): string {
@@ -111,6 +116,30 @@ export function useClineChatRuntimeActions({
 		[currentProjectId, onSessionSummary],
 	);
 
+	// ACP agent 在等用户拍板（工具授权 / 计划批准）时把决策回传给它。
+	const resolveTaskAgentUserDecision = useCallback(
+		async (taskId: string, decisionId: string, optionId: string | null): Promise<ClineChatActionResult> => {
+			if (!currentProjectId) {
+				return { ok: false, message: "No project selected." };
+			}
+			try {
+				const payload = await getRuntimeTrpcClient(currentProjectId).runtime.resolveTaskAgentUserDecision.mutate({
+					taskId,
+					decisionId,
+					outcome: optionId ? "selected" : "cancelled",
+					...(optionId ? { optionId } : {}),
+				});
+				if (!payload.ok) {
+					return { ok: false, message: payload.error ?? "Could not send that decision to the agent." };
+				}
+				return { ok: true };
+			} catch (error) {
+				return { ok: false, message: toErrorMessage(error) };
+			}
+		},
+		[currentProjectId],
+	);
+
 	const cancelTaskChatTurn = useCallback(
 		async (taskId: string): Promise<ClineChatActionResult> => {
 			if (!currentProjectId) {
@@ -133,6 +162,7 @@ export function useClineChatRuntimeActions({
 	);
 
 	return {
+		resolveTaskAgentUserDecision,
 		sendTaskChatMessage,
 		loadTaskChatMessages,
 		abortTaskChatTurn,

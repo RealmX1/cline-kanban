@@ -2,6 +2,10 @@
 // Rendering lives here, while session state and action wiring come from the
 // controller hook so multiple surfaces can share the same behavior.
 
+import {
+	getRuntimeAgentCatalogEntry,
+	isRuntimeAgentModelSelectedThroughClineProviderSettings,
+} from "@runtime-agent-catalog";
 import { AlertTriangle } from "lucide-react";
 import React, {
 	type ReactElement,
@@ -30,6 +34,7 @@ import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actio
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
 import type {
+	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
 	RuntimeTaskClineSettings,
@@ -40,6 +45,7 @@ import type { TaskImage } from "@/types";
 
 const BOTTOM_LOCK_THRESHOLD_PX = 24;
 const CLINE_BUY_CREDITS_URL = "https://app.cline.bot/";
+const NATIVE_CLINE_SESSION_COMPOSER_PLACEHOLDER = "Ask Cline to add, edit, start, or link tasks";
 
 const ClineCreditLimitNotice = React.memo(function ClineCreditLimitNotice() {
 	return (
@@ -64,6 +70,9 @@ export interface ClineAgentChatPanelHandle {
 export interface ClineAgentChatPanelProps {
 	taskId: string;
 	summary: RuntimeTaskSessionSummary | null;
+	// 该会话真正跑的 agent。这个面板服务所有「结构化消息」传输形态（进程内 Cline SDK 与
+	// ACP 子进程），只有原生 Cline SDK 会话才该显示并保存 Cline provider / 模型设置。
+	agentId?: RuntimeAgentId;
 	taskColumnId?: string;
 	defaultMode?: RuntimeTaskSessionMode;
 	composerPlaceholder?: string;
@@ -84,6 +93,11 @@ export interface ClineAgentChatPanelProps {
 		options?: { mode?: RuntimeTaskSessionMode; images?: TaskImage[] },
 	) => Promise<ClineChatActionResult>;
 	onCancelTurn?: (taskId: string) => Promise<{ ok: boolean; message?: string }>;
+	onResolveUserDecision?: (
+		taskId: string,
+		decisionId: string,
+		optionId: string | null,
+	) => Promise<{ ok: boolean; message?: string }>;
 	onLoadMessages?: (taskId: string) => Promise<ClineChatMessage[] | null>;
 	incomingMessages?: ClineChatMessage[] | null;
 	incomingMessage?: ClineChatMessage | null;
@@ -106,9 +120,10 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 		{
 			taskId,
 			summary,
+			agentId = "cline",
 			taskColumnId = "in_progress",
 			defaultMode = "act",
-			composerPlaceholder = "Ask Cline to add, edit, start, or link tasks",
+			composerPlaceholder,
 			showComposerModeToggle = true,
 			workspaceId = null,
 			runtimeConfig = null,
@@ -118,6 +133,7 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			onTaskClineSettingsChanged,
 			onSendMessage,
 			onCancelTurn,
+			onResolveUserDecision,
 			onLoadMessages,
 			incomingMessages,
 			incomingMessage,
@@ -181,13 +197,22 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			return persistedMode ?? summary?.mode ?? defaultMode;
 		});
 		const [draftImages, setDraftImages] = useState<TaskImage[]>([]);
+		// ACP agent（omp）复用这套会话布局，但它的模型由 agent 自己管：对它显示 Cline provider 模型
+		// 选择器不仅无效，选中还会把全局 Cline provider 设置改掉。故 Cline 专属控件按会话传输形态开关，
+		// 关闭时连 provider catalog / 模型列表都不去拉。
+		const isClineProviderModelSelectionApplicable = isRuntimeAgentModelSelectedThroughClineProviderSettings(agentId);
 		const clineSettings = useRuntimeSettingsClineController({
-			open: true,
+			open: isClineProviderModelSelectionApplicable,
 			workspaceId,
-			selectedAgentId: "cline",
+			selectedAgentId: agentId,
 			config: runtimeConfig,
 			taskClineSettings,
 		});
+		const composerPlaceholderText =
+			composerPlaceholder ??
+			(isClineProviderModelSelectionApplicable
+				? NATIVE_CLINE_SESSION_COMPOSER_PLACEHOLDER
+				: `Ask ${getRuntimeAgentCatalogEntry(agentId)?.label ?? "the agent"} to work on this task`);
 
 		const modelPickerOptions = useMemo(
 			() => buildClineAgentModelPickerOptions(clineSettings.providerId, clineSettings.providerModels),
@@ -292,6 +317,11 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 
 		const persistClineModelSettings = useCallback(
 			async (overrides?: PersistClineModelSettingsOverrides): Promise<boolean> => {
+				// 非原生 Cline SDK 会话（ACP agent）没有可保存的 Cline 模型设置：这里必须直接放行，
+				// 既不写全局 Cline provider 配置，也不能因为「有未保存改动」把发送流程堵住。
+				if (!isClineProviderModelSelectionApplicable) {
+					return true;
+				}
 				if (!workspaceId) {
 					setComposerError("Select a workspace before choosing a Cline model.");
 					return false;
@@ -330,7 +360,14 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 					setIsSavingModel(false);
 				}
 			},
-			[clineSettings, onClineSettingsSaved, onTaskClineSettingsChanged, taskHasExplicitClineSettings, workspaceId],
+			[
+				clineSettings,
+				isClineProviderModelSelectionApplicable,
+				onClineSettingsSaved,
+				onTaskClineSettingsChanged,
+				taskHasExplicitClineSettings,
+				workspaceId,
+			],
 		);
 
 		const handleSelectModel = useCallback(
@@ -426,7 +463,12 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 					onScroll={handleMessageListScroll}
 				>
 					{messages.map((message) => (
-						<ClineChatMessageItem key={message.id} message={message} />
+						<ClineChatMessageItem
+							key={message.id}
+							message={message}
+							taskId={taskId}
+							onResolveUserDecision={onResolveUserDecision}
+						/>
 					))}
 					{showAgentProgressIndicator ? <ClineThinkingIndicator /> : null}
 					{isCreditLimitNoticeVisible ? <ClineCreditLimitNotice /> : null}
@@ -443,7 +485,8 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 						onDraftChange={setDraft}
 						images={draftImages}
 						onImagesChange={setDraftImages}
-						placeholder={composerPlaceholder}
+						placeholder={composerPlaceholderText}
+						showClineProviderControls={isClineProviderModelSelectionApplicable}
 						mode={mode}
 						onModeChange={handleModeChange}
 						showModeToggle={showComposerModeToggle}

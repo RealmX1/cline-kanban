@@ -10,6 +10,7 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardDependency,
 	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAgentSessionInitializationReuseMode,
 	RuntimeTaskClineSettings,
@@ -20,6 +21,7 @@ import type {
 import {
 	runtimeAgentIdSchema,
 	runtimeClineReasoningEffortSchema,
+	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationReuseModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskWorktreeModeSchema,
@@ -27,6 +29,10 @@ import {
 import { mergeAbortSignals, resolveCliTrpcTimeoutMs, safeStringify } from "../core/cli-process-guards";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
+import {
+	DEFAULT_TASK_AGENT_PERMISSION_MODE,
+	resolveTaskAgentPermissionModeFromLegacyAutonomousFlag,
+} from "../core/task-agent-permission-mode";
 import {
 	addTaskDependency,
 	addTaskToColumn,
@@ -105,6 +111,7 @@ function parseAutoReviewMode(value: string | undefined): "commit" | "pr" | undef
 }
 
 const VALID_WORKTREE_MODES = runtimeTaskWorktreeModeSchema.options;
+const VALID_TASK_AGENT_PERMISSION_MODES = runtimeTaskAgentPermissionModeSchema.options;
 
 function parseWorktreeMode(value: string | undefined): RuntimeTaskWorktreeMode | undefined {
 	if (value === undefined) {
@@ -115,6 +122,19 @@ function parseWorktreeMode(value: string | undefined): RuntimeTaskWorktreeMode |
 		return result.data;
 	}
 	throw new Error(`Invalid worktree mode "${value}". Expected one of: ${VALID_WORKTREE_MODES.join(", ")}.`);
+}
+
+function parseTaskAgentPermissionMode(value: string | undefined): RuntimeTaskAgentPermissionMode | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	const result = runtimeTaskAgentPermissionModeSchema.safeParse(value);
+	if (result.success) {
+		return result.data;
+	}
+	throw new Error(
+		`Invalid task agent permission mode "${value}". Expected one of: ${VALID_TASK_AGENT_PERMISSION_MODES.join(", ")}.`,
+	);
 }
 
 function parseOptionalWorktreeModeOrInherit(value: string | undefined): RuntimeTaskWorktreeMode | null | undefined {
@@ -452,6 +472,7 @@ function formatTaskRecord(
 		column: columnId,
 		baseRef: task.baseRef,
 		startInPlanMode: task.startInPlanMode,
+		taskAgentPermissionMode: task.taskAgentPermissionMode ?? DEFAULT_TASK_AGENT_PERMISSION_MODE,
 		autoReviewEnabled: task.autoReviewEnabled === true,
 		autoReviewMode: task.autoReviewMode ?? "commit",
 		taskCommentEntries: task.taskCommentEntries ?? [],
@@ -589,6 +610,7 @@ async function createTask(input: {
 	projectPath?: string;
 	baseRef?: string;
 	startInPlanMode?: boolean;
+	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode;
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId;
@@ -614,6 +636,9 @@ async function createTask(input: {
 				title: input.title,
 				prompt: input.prompt,
 				startInPlanMode: input.startInPlanMode ?? runtimeConfig.newTaskStartInPlanModeByDefault,
+				taskAgentPermissionMode:
+					input.taskAgentPermissionMode ??
+					resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(runtimeConfig.agentAutonomousModeEnabled),
 				autoReviewEnabled: input.autoReviewEnabled,
 				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,
@@ -642,6 +667,7 @@ async function createTask(input: {
 			prompt: created.prompt,
 			baseRef: created.baseRef,
 			startInPlanMode: created.startInPlanMode,
+			taskAgentPermissionMode: created.taskAgentPermissionMode ?? DEFAULT_TASK_AGENT_PERMISSION_MODE,
 			autoReviewEnabled: created.autoReviewEnabled === true,
 			autoReviewMode: created.autoReviewMode ?? "commit",
 			...(created.agentId ? { agentId: created.agentId } : {}),
@@ -664,6 +690,7 @@ async function updateTaskCommand(input: {
 	prompt?: string;
 	baseRef?: string;
 	startInPlanMode?: boolean;
+	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode;
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId | null;
@@ -681,6 +708,7 @@ async function updateTaskCommand(input: {
 		input.prompt === undefined &&
 		input.baseRef === undefined &&
 		input.startInPlanMode === undefined &&
+		input.taskAgentPermissionMode === undefined &&
 		input.autoReviewEnabled === undefined &&
 		input.autoReviewMode === undefined &&
 		input.agentId === undefined &&
@@ -724,6 +752,7 @@ async function updateTaskCommand(input: {
 			prompt: input.prompt ?? taskRecord.task.prompt,
 			baseRef: input.baseRef ?? taskRecord.task.baseRef,
 			startInPlanMode: input.startInPlanMode ?? taskRecord.task.startInPlanMode,
+			taskAgentPermissionMode: input.taskAgentPermissionMode ?? taskRecord.task.taskAgentPermissionMode,
 			autoReviewEnabled: input.autoReviewEnabled ?? taskRecord.task.autoReviewEnabled === true,
 			autoReviewMode: input.autoReviewMode ?? taskRecord.task.autoReviewMode ?? "commit",
 			agentId: input.agentId,
@@ -907,6 +936,7 @@ export function buildCliTaskSessionStartRequest(task: RuntimeBoardCard): Runtime
 		prompt: task.prompt,
 		taskTitle: task.title,
 		startInPlanMode: task.startInPlanMode,
+		taskAgentPermissionMode: task.taskAgentPermissionMode,
 		baseRef: task.baseRef,
 		agentId: task.agentId,
 		clineSettings: task.clineSettings,
@@ -1605,6 +1635,10 @@ export function registerTaskCommand(program: Command): void {
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.option("--base-ref <branch>", "Task base branch/ref.")
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
+		.option(
+			"--task-agent-permission-mode <mode>",
+			`Agent permission tier: ${VALID_TASK_AGENT_PERMISSION_MODES.join(" | ")}.`,
+		)
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
 		.option("--agent-id <id>", "Agent override: cline | claude | codex | droid | gemini | opencode | default.")
@@ -1635,6 +1669,7 @@ export function registerTaskCommand(program: Command): void {
 				projectPath?: string;
 				baseRef?: string;
 				startInPlanMode?: unknown;
+				taskAgentPermissionMode?: string;
 				autoReviewEnabled?: unknown;
 				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
@@ -1656,6 +1691,7 @@ export function registerTaskCommand(program: Command): void {
 							projectPath: options.projectPath,
 							baseRef: options.baseRef,
 							startInPlanMode: parseOptionalBooleanOption(options.startInPlanMode, "--start-in-plan-mode"),
+							taskAgentPermissionMode: parseTaskAgentPermissionMode(options.taskAgentPermissionMode),
 							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId) ?? undefined,
@@ -1691,6 +1727,10 @@ export function registerTaskCommand(program: Command): void {
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.option("--base-ref <branch>", "Replacement base branch/ref.")
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
+		.option(
+			"--task-agent-permission-mode <mode>",
+			`Agent permission tier: ${VALID_TASK_AGENT_PERMISSION_MODES.join(" | ")}.`,
+		)
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
 		.option(
@@ -1731,6 +1771,7 @@ export function registerTaskCommand(program: Command): void {
 				projectPath?: string;
 				baseRef?: string;
 				startInPlanMode?: unknown;
+				taskAgentPermissionMode?: string;
 				autoReviewEnabled?: unknown;
 				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
@@ -1753,6 +1794,7 @@ export function registerTaskCommand(program: Command): void {
 							prompt: options.prompt,
 							baseRef: options.baseRef,
 							startInPlanMode: parseOptionalBooleanOption(options.startInPlanMode, "--start-in-plan-mode"),
+							taskAgentPermissionMode: parseTaskAgentPermissionMode(options.taskAgentPermissionMode),
 							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId),

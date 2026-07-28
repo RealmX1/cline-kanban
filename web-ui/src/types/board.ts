@@ -1,6 +1,7 @@
 import type {
 	RuntimeAgentId,
 	RuntimeBoardColumnId,
+	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
@@ -46,6 +47,7 @@ export interface BoardCard {
 	title: string;
 	prompt: string;
 	startInPlanMode: boolean;
+	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode;
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];

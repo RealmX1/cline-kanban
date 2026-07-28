@@ -469,3 +469,58 @@ describe("dispatch / fork-flow fields", () => {
 		expect(updated.task?.prepFilePath).toBeUndefined();
 	});
 });
+
+describe("updateTask taskAgentPermissionMode", () => {
+	// 回归：老卡片没有该字段时，「缺失」是有意义的第三态——它让 runtime-api 按当时的全局
+	// agentAutonomousModeEnabled 推导档位（关闭时为 ask）。若 update 把 undefined 物化成默认档
+	// （= bypass），则在关闭了全局 bypass 的工作区里，一次普通的 task update 就会把老任务
+	// 永久钉成「全部工具自动放行」，且 UI 不会打降级星标——这正是禁止的静默放宽权限。
+	it("keeps the field absent on a legacy card when the update omits it", () => {
+		const created = addTaskToColumn(createBoard(), "backlog", { prompt: "Task", baseRef: "main" }, () => "aaaaa111");
+		const legacyBoard: RuntimeBoardData = {
+			...created.board,
+			columns: created.board.columns.map((column) => ({
+				...column,
+				cards: column.cards.map((card) => {
+					const { taskAgentPermissionMode: _dropped, ...legacyCard } = card;
+					return legacyCard;
+				}),
+			})),
+		};
+
+		const updated = updateTask(legacyBoard, created.task.id, { prompt: "Renamed", baseRef: "main" });
+
+		expect(updated.updated).toBe(true);
+		expect(updated.task?.taskAgentPermissionMode).toBeUndefined();
+	});
+
+	it("preserves an explicitly chosen stricter tier when the update omits it", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main", taskAgentPermissionMode: "ask_for_every_tool_use" },
+			() => "aaaaa111",
+		);
+
+		const updated = updateTask(created.board, created.task.id, { prompt: "Renamed", baseRef: "main" });
+
+		expect(updated.task?.taskAgentPermissionMode).toBe("ask_for_every_tool_use");
+	});
+
+	it("resets to the default tier when the update passes null", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main", taskAgentPermissionMode: "ask_for_every_tool_use" },
+			() => "aaaaa111",
+		);
+
+		const updated = updateTask(created.board, created.task.id, {
+			prompt: "Renamed",
+			baseRef: "main",
+			taskAgentPermissionMode: null,
+		});
+
+		expect(updated.task?.taskAgentPermissionMode).toBe("bypass_all_permission_prompts");
+	});
+});
