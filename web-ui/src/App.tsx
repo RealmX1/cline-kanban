@@ -1240,7 +1240,13 @@ export default function App(): ReactElement {
 							) : (
 								<div className="flex flex-1 flex-col min-h-0 min-w-0">
 									<div className="flex flex-1 min-h-0 min-w-0">
-										{isBoardOverviewOpen ? (
+										{/* Focus View 打开时真正卸载看板视图，而不是只让外层 `visibility: hidden`。
+										    隐藏保留布局盒：DependencyOverlay 的强制同步布局照样要遍历全部卡片，
+										    两个 `DragDropContext`（看板 + Focus View 左侧栏）也会同时挂载。
+										    只卸载这一层：外层 wrapper 与底部 home 终端保持挂载——隐藏的 xterm
+										    本就已暂停渲染，卸载它只会换来一次多余的重连 + 快照恢复。
+										    列的滚动位置与渐进渲染进度由 `board-column-scroll-offset-store` 补回。 */}
+										{selectedCard ? null : isBoardOverviewOpen ? (
 											<CrossRepositoryStageFirstOverview
 												projects={projects}
 												onOpenTask={handleOpenTaskInProject}
@@ -1481,8 +1487,10 @@ export default function App(): ReactElement {
 					onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
 					onCreateAndStart={
 						editingTaskId
-							? () => {
-									handleSaveAndStartEditedTask();
+							? (options) => {
+									// options 必须原样转交：里面携带对话框本地草稿的 promptOverride，
+									// 丢掉它会让「保存并启动」写回上一次上抛的旧文本。
+									handleSaveAndStartEditedTask(options);
 									return editingTaskId;
 								}
 							: handleCreateAndStartTask

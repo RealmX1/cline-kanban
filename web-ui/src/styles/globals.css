@@ -1130,6 +1130,29 @@ body.kb-dependency-link-mode {
 	50% { opacity: 0.7; }
 }
 
+/* -- 文字流光（ShimmeringText） --
+   走 CSS 而非 JS 动画库：这是 agent 流式期间常驻的 "Thinking..." 指示器，用
+   motion/react 的话每帧都要过一次 JS 主线程。纯 CSS 动画交给合成器，主线程零成本。
+   `--kb-text-shimmer-sweep-duration` / `--spread` 由组件以 inline style 注入。 */
+@keyframes kb-text-shimmer-sweep {
+	from {
+		background-position: 125% center;
+	}
+	to {
+		background-position: -25% center;
+	}
+}
+
+.kb-text-shimmer-sweep {
+	animation: kb-text-shimmer-sweep var(--kb-text-shimmer-sweep-duration, 2s) linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.kb-text-shimmer-sweep {
+		animation: none;
+	}
+}
+
 .kb-skeleton {
 	animation: kb-skeleton 1.5s ease-in-out infinite;
 	background: var(--color-surface-3);

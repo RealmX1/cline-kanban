@@ -2,22 +2,22 @@ import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { findCardSelection } from "@/state/board-state";
-import type { BoardCard, BoardData } from "@/types";
+import type { BoardCard, BoardData, TaskEditorSubmitOptions } from "@/types";
 
 interface UseTaskStartActionsInput {
 	board: BoardData;
 	currentProjectId: string | null;
-	handleCreateTask: (options?: { keepDialogOpen?: boolean }) => string | null;
-	handleCreateTasks: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
+	handleCreateTask: (options?: TaskEditorSubmitOptions) => string | null;
+	handleCreateTasks: (prompts: string[], options?: TaskEditorSubmitOptions) => string[];
 	handleStartTask: (taskId: string) => void;
 	handleStartAllBacklogTasks: (taskIds?: string[]) => void;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 }
 
 export interface UseTaskStartActionsResult {
-	handleCreateAndStartTask: (options?: { keepDialogOpen?: boolean }) => string | null;
-	handleCreateAndStartTasks: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
-	handleCreateStartAndOpenTask: (options?: { keepDialogOpen?: boolean }) => string | null;
+	handleCreateAndStartTask: (options?: TaskEditorSubmitOptions) => string | null;
+	handleCreateAndStartTasks: (prompts: string[], options?: TaskEditorSubmitOptions) => string[];
+	handleCreateStartAndOpenTask: (options?: TaskEditorSubmitOptions) => string | null;
 	handleStartTaskFromBoard: (taskId: string) => void;
 	pendingStartAllReadyBacklogTaskCards: BoardCard[] | null;
 	requestStartAllReadyBacklogTasksConfirmation: () => void;
@@ -160,7 +160,7 @@ export function useTaskStartActions({
 	}, [pendingStartAllReadyBacklogTaskCards, pendingStartAllReadyBacklogTasksConfirmation]);
 
 	const handleCreateAndStartTask = useCallback(
-		(options?: { keepDialogOpen?: boolean }): string | null => {
+		(options?: TaskEditorSubmitOptions): string | null => {
 			const taskId = handleCreateTask(options);
 			if (!taskId) {
 				return null;
@@ -172,7 +172,7 @@ export function useTaskStartActions({
 	);
 
 	const handleCreateAndStartTasks = useCallback(
-		(prompts: string[], options?: { keepDialogOpen?: boolean }): string[] => {
+		(prompts: string[], options?: TaskEditorSubmitOptions): string[] => {
 			const taskIds = handleCreateTasks(prompts, options);
 			if (taskIds.length === 0) {
 				return [];
@@ -184,7 +184,7 @@ export function useTaskStartActions({
 	);
 
 	const handleCreateStartAndOpenTask = useCallback(
-		(options?: { keepDialogOpen?: boolean }): string | null => {
+		(options?: TaskEditorSubmitOptions): string | null => {
 			const taskId = handleCreateTask(options);
 			if (!taskId) {
 				return null;

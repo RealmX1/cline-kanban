@@ -1,6 +1,6 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { Brain, ChevronDown, ChevronRight, XCircle } from "lucide-react";
-import { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
+import React, { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import {
 	formatToolInputForDisplay,
 	getToolDisplay,
@@ -175,7 +175,16 @@ function ReasoningMessageBlock({ message }: { message: ClineChatMessage }): Reac
 	);
 }
 
-export function ClineChatMessageItem({ message }: { message: ClineChatMessage }): ReactElement {
+/**
+ * `React.memo` 的命中依据：`use-cline-chat-session.ts` 的 `upsertMessage` 只替换被更新
+ * 的那一条消息、其余元素引用原样保留，所以 agent 流式输出时这里只会重渲最后一条。
+ * 没有这层 memo，每个 chunk 都要把整条会话（含全部代码块高亮）重跑一遍。
+ */
+export const ClineChatMessageItem = React.memo(function ClineChatMessageItem({
+	message,
+}: {
+	message: ClineChatMessage;
+}): ReactElement {
 	if (message.role === "tool") {
 		return <ToolMessageBlock message={message} />;
 	}
@@ -211,4 +220,4 @@ export function ClineChatMessageItem({ message }: { message: ClineChatMessage })
 			{message.content}
 		</div>
 	);
-}
+});

@@ -602,6 +602,12 @@ export function DependencyOverlay({
 		if (!container) {
 			return;
 		}
+		// Nothing to lay out when the board has no dependency edges and no
+		// in-progress link draft. Skipping the observers entirely keeps the
+		// common (dependency-free) board off this whole code path.
+		if (dependencies.length === 0 && !draft) {
+			return;
+		}
 		let animationFrameId = 0;
 		const scheduleRefresh = () => {
 			window.cancelAnimationFrame(animationFrameId);
@@ -629,6 +635,14 @@ export function DependencyOverlay({
 			subtree: true,
 			childList: true,
 			attributes: true,
+			// Without an explicit filter every `className` flip inside the board
+			// wakes this observer — including `task-card-body`'s per-card
+			// `isHovered` toggle — and each wake-up calls `refreshLayout`, which
+			// runs `getBoundingClientRect()` over every card and forces a
+			// synchronous layout. Only these attributes can actually move an
+			// anchor. Mirrors `use-selected-card-pin-state.ts`'s filter, which
+			// already documents the same hazard.
+			attributeFilter: ["style", "data-task-id", "data-column-id", "data-programmatic-card-move"],
 		});
 		return () => {
 			window.removeEventListener("resize", scheduleRefresh);
@@ -637,11 +651,15 @@ export function DependencyOverlay({
 			resizeObserver?.disconnect();
 			window.cancelAnimationFrame(animationFrameId);
 		};
-	}, [containerRef, refreshLayout]);
+	}, [containerRef, dependencies, draft, refreshLayout]);
 
 	useEffect(() => {
 		let animationFrameId = 0;
 		if (!draft && !isMotionActive) {
+			return;
+		}
+		// A drag with no edges to reroute has nothing to recompute per frame.
+		if (dependencies.length === 0 && !draft) {
 			return;
 		}
 		const tick = () => {
@@ -652,7 +670,7 @@ export function DependencyOverlay({
 		return () => {
 			window.cancelAnimationFrame(animationFrameId);
 		};
-	}, [draft, isMotionActive, refreshLayout]);
+	}, [dependencies, draft, isMotionActive, refreshLayout]);
 
 	const renderedDependencies = useMemo((): RenderedDependency[] => {
 		const displayedDependencies = new Map<string, { dependency: BoardDependency; isTransient: boolean }>();
