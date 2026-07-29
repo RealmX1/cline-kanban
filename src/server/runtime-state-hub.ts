@@ -38,6 +38,7 @@ import type {
 	RuntimeTaskSessionUserTurnKind,
 } from "../core/api-contract";
 import { isNotifiableUserTurn, resolveSessionFacets } from "../core/session-activity";
+import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
 import {
 	appendNotificationLogEntry,
@@ -45,6 +46,7 @@ import {
 	readNotificationLog,
 } from "../state/notification-log-store";
 import type { TerminalSessionManager } from "../terminal/session-manager";
+import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
 import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
 
@@ -112,6 +114,16 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			Array.from(conversationPreviousSummariesBySubscriptionKey.get(key)?.values() ?? []),
 		);
 	const pendingTaskSessionSummariesByWorkspaceId = new Map<string, Map<string, RuntimeTaskSessionSummary>>();
+	// 三 transport 共用的「停止生成响应」边沿观察器（见 queueTaskSessionSummaryBroadcast 的挂载点注释）。
+	const agentSessionResponseGenerationStopObserver = createAgentSessionResponseGenerationStopObserver({
+		onPersistError: (error, context) => {
+			logAgentSessionRetentionWarning(
+				`deadline-persist-failed workspaceId=${context.workspaceId} taskId=${context.taskId} reason=${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		},
+	});
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
@@ -216,6 +228,11 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const queueTaskSessionSummaryBroadcast = (workspaceId: string, summary: RuntimeTaskSessionSummary) => {
+		// 「停止生成响应后固定宽限期」回收的归一化边沿检测。刻意挂在这里而不是各 transport 内部：
+		// 终端 / Cline SDK / ACP 三条 summary 流全部经此排队，是唯一的跨 transport 汇聚点；且这一句
+		// 位于下方「0 客户端提前返回」之前，故计时与「有没有人在看」彻底解耦——关标签页 / 切项目 /
+		// 折叠侧栏都不影响期限。观察器内部只在状态边沿动账本，不会被高频 summary 刷成 IO 风暴。
+		agentSessionResponseGenerationStopObserver.observeTaskSessionSummary(workspaceId, summary);
 		const pending =
 			pendingTaskSessionSummariesByWorkspaceId.get(workspaceId) ?? new Map<string, RuntimeTaskSessionSummary>();
 		pending.set(summary.taskId, summary);
@@ -365,6 +382,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			conversationPreviousSummariesBySubscriptionKey.delete(subscriptionKey);
 		}
 		disposeTaskSessionSummaryBroadcast(workspaceId);
+		agentSessionResponseGenerationStopObserver.forgetWorkspace(workspaceId);
 		workspaceMetadataMonitor.disposeWorkspace(workspaceId);
 	};
 

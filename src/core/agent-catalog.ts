@@ -1,17 +1,13 @@
-import type { RuntimeAgentId } from "./api-contract";
+import type { RuntimeAgentId, RuntimeAgentSessionTransport } from "./api-contract";
 
 export { isKanbanCursorAgentModelId, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "./cursor-agent-models";
 
 // Kanban 与一个 agent 通话的方式。这是「卡片详情渲染 xterm 还是会话面板」「启动走
 // terminalManager 还是进程内 service」等一系列分叉的单一真源——以前这些分叉各自硬写
 // `agentId === "cline"`，新增非 PTY agent 时极易漏改其中一处。
-export type RuntimeAgentSessionTransport =
-	// PTY 里跑一个 CLI，靠刮 TUI 输出 + agent 侧 hook 回调 `kanban hooks` 判状态。
-	| "pty_terminal"
-	// 在 Kanban 服务进程内直接实例化 @clinebot/core，订阅结构化事件。
-	| "in_process_cline_sdk"
-	// spawn 一个子进程，用 ACP（JSON-RPC over stdio）通话，状态由 SessionUpdate 驱动。
-	| "acp_stdio_subprocess";
+// canonical 定义（含各取值语义注释）在 api-contract 的 runtimeAgentSessionTransportSchema：
+// 它同时被回收审计结果 schema 复用，故必须是可校验的 zod 源，这里只做类型再导出。
+export type { RuntimeAgentSessionTransport };
 
 export interface RuntimeAgentCatalogEntry {
 	id: RuntimeAgentId;

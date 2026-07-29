@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+	type RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 	type RuntimeAuthoredVerificationDefinitionInputFile,
 	type RuntimeAuthoredVerificationDefinitionsFile,
 	type RuntimeClineAccountSwitchRequest,
@@ -47,6 +48,7 @@ import {
 	type RuntimeWorkspaceStateSaveRequest,
 	type RuntimeWorktreeDeleteRequest,
 	type RuntimeWorktreeEnsureRequest,
+	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
 	runtimeAuthoredVerificationDefinitionInputFileSchema,
 	runtimeAuthoredVerificationDefinitionsFileSchema,
 	runtimeClineAccountSwitchRequestSchema,
@@ -303,6 +305,24 @@ export function parseTaskSessionStopRequest(value: unknown): RuntimeTaskSessionS
 	}
 	return {
 		taskId,
+	};
+}
+
+export function parseAnswerAgentRaisedPendingUserDecisionRequest(
+	value: unknown,
+): RuntimeAnswerAgentRaisedPendingUserDecisionRequest {
+	const parsed = parseWithSchema(runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema, value);
+	const decisionId = parsed.decisionId.trim();
+	if (!decisionId) {
+		throw new Error("Invalid answer-agent-raised-pending-user-decision payload.");
+	}
+	const freeformText = parsed.freeformText?.trim() ?? null;
+	return {
+		decisionId,
+		selectedOptionIds: parsed.selectedOptionIds
+			.map((optionId) => optionId.trim())
+			.filter((optionId) => optionId !== ""),
+		freeformText: freeformText === "" ? null : freeformText,
 	};
 }
 

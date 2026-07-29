@@ -15,52 +15,8 @@ import {
 	readAllNotificationLogs,
 	readNotificationLog,
 } from "../../src/state/notification-log-store";
-import {
-	getWorkspacesRootPath,
-	loadWorkspaceContext,
-	loadWorkspaceState,
-	saveWorkspaceState,
-} from "../../src/state/workspace-state";
-import {
-	createIsolatedGitTestWorkspaceFixture,
-	type IsolatedGitTestWorkspaceFixture,
-} from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
-
-async function withIsolatedNotificationLogWorkspaces<T>(
-	run: (registerWorkspace: (name: string) => Promise<{ workspaceId: string; path: string }>) => Promise<T>,
-): Promise<T> {
-	const gitFixture = createIsolatedGitTestWorkspaceFixture();
-	const tempHome = gitFixture.isolatedHomeDirectoryPath;
-	const previousHome = process.env.HOME;
-	const previousUserProfile = process.env.USERPROFILE;
-	process.env.HOME = tempHome;
-	process.env.USERPROFILE = tempHome;
-	try {
-		return await run((name) => registerWorkspace(gitFixture, name));
-	} finally {
-		if (previousHome === undefined) {
-			delete process.env.HOME;
-		} else {
-			process.env.HOME = previousHome;
-		}
-		if (previousUserProfile === undefined) {
-			delete process.env.USERPROFILE;
-		} else {
-			process.env.USERPROFILE = previousUserProfile;
-		}
-		gitFixture.cleanup();
-	}
-}
-
-async function registerWorkspace(
-	gitFixture: IsolatedGitTestWorkspaceFixture,
-	name: string,
-): Promise<{ workspaceId: string; path: string }> {
-	const workspacePath = gitFixture.createNonBareRepository({ repositoryDirectoryName: name }).repositoryPath;
-	await loadWorkspaceState(workspacePath);
-	const context = await loadWorkspaceContext(workspacePath);
-	return { workspaceId: context.workspaceId, path: workspacePath };
-}
+import { getWorkspacesRootPath, loadWorkspaceState, saveWorkspaceState } from "../../src/state/workspace-state";
+import { withIsolatedWorkspaceHome as withIsolatedNotificationLogWorkspaces } from "./isolated-workspace-home-fixture";
 
 function boardWith(cards: { columnId: "review" | "trash"; id: string; title: string }[]): RuntimeBoardData {
 	const columnCards = (columnId: "review" | "trash") =>

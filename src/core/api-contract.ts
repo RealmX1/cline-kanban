@@ -507,10 +507,95 @@ export const runtimeTaskAwaitingDispatchedBackgroundWorkSchema = z.object({
 	sinceMs: z.number(),
 	// 可选的人类可读标签（例：被派发的子任务 id / 简述），仅用于 UI 与诊断。
 	label: z.string().optional(),
+	// park 兜底期限（epoch ms 绝对时刻）：到此刻仍未被 unpark ⇒ 走可审计的 park_abandoned 回收。
+	// null = 调用方显式声明「无期限」（`kanban task park --no-expiry`，用于合法的超长后台工作）；
+	// undefined = 未声明 ⇒ 由回收调度器套用默认上限。存绝对时刻而非时长，故 Kanban / OS 停机期间
+	// 流逝的墙钟时间自然计入（与 agentSessionRuntimeReclamationEligibleAt 同口径）。
+	maxRetentionUntilMs: z.number().nullable().optional(),
+	// 最近一次 `kanban task park --renew` 心跳续期时刻（epoch ms）。仅用于 UI 与诊断，
+	// 真正决定是否到期的是上面已被续期推进过的 maxRetentionUntilMs。
+	lastRenewedAtMs: z.number().optional(),
 });
 export type RuntimeTaskAwaitingDispatchedBackgroundWork = z.infer<
 	typeof runtimeTaskAwaitingDispatchedBackgroundWorkSchema
 >;
+
+// ── 会话「停止生成响应后固定宽限期」回收（加性 sidecar，与 connectionRetry / park 同侧）────────
+// 设计与核验见 .plan/docs/cross-harness-agent-session-inactivity-grace-period-reclamation-and-
+// pending-user-decision-carry-forward-implementation-plan.md。
+//
+// 铁律：以下字段全部是 metadata-only sidecar——不参与三 facet、不进 superRefine、不影响
+// projectLegacyState。写入一律经两个 updateSummary 漏斗（cline-sdk/cline-session-state.ts、
+// terminal/session-manager.ts），绝不手写 `state:`，也绝不裸写单个 facet 字段。
+
+// 「agent 停止生成响应」这一**离散状态转移**的信号来源（置信度降序）。
+// 刻意不从 lastOutputAt / lastSubstantiveOutputAt / updatedAt 任何既有时间戳反推——它们分别被
+// spinner 重绘、实质分类器节流、任意元数据写推进，都不表达「这一轮已经结束」。
+export const runtimeAgentResponseGenerationStopSignalConfidenceSchema = z.enum([
+	// harness 明确宣告本轮结束：Claude `Stop` / Codex `agent-turn-complete`+rollout `task_complete` /
+	// Gemini `AfterAgent` / droid·kiro `TaskComplete` / ACP `session/prompt` resolve / Cline SDK 回合结束。
+	"harness_turn_complete",
+	// facet 转移到 turnOwner==="user"（review / question / plan_review / permission / error /
+	// interrupted / needs_input 皆算）——结构化的「球在人这边」，等价于 agent 不再生成。
+	"structured_user_turn",
+	// 会话已就绪但从未收到过任何用户提交（turnSequence === 0）⇒ 锚点 = 就绪时刻。
+	// 这一条精确覆盖「空闲侧栏项目会话」，且不伪造任何「曾经输出过」的语义。
+	"session_ready_never_prompted",
+	// 最低置信度兜底：scanForStalls 的 idle_stall 自愈（停在交互提示符 + 实质静默 5 分钟）翻入
+	// 人回合时顺带产生。harness 漏发 hook 时靠它兜底。
+	"prompt_ready_fallback",
+]);
+export type RuntimeAgentResponseGenerationStopSignalConfidence = z.infer<
+	typeof runtimeAgentResponseGenerationStopSignalConfidenceSchema
+>;
+
+export const runtimeAgentResponseGenerationStoppedSchema = z.object({
+	// 进入非生成态的时刻（epoch ms）。宽限期从这里起算。
+	stoppedAt: z.number(),
+	signalConfidence: runtimeAgentResponseGenerationStopSignalConfidenceSchema,
+	// 产生该停止事件时的回合序号快照。与 runtimeSessionIncarnationId 一起构成「陈旧定时器」防护的
+	// 双重判据：回收触发时若二者与当前 summary 不一致，说明会话已经继续跑过，绝不回收。
+	turnSequence: z.number().int().nonnegative(),
+});
+export type RuntimeAgentResponseGenerationStopped = z.infer<typeof runtimeAgentResponseGenerationStoppedSchema>;
+
+// Kanban 与一个 agent 通话的方式（PTY / 进程内 Cline SDK / ACP 子进程）。canonical zod 源放在
+// api-contract（契约叶子模块），src/core/agent-catalog.ts 由此派生 TS 类型并挂到 catalog 条目上，
+// 避免 api-contract → agent-catalog 的反向依赖。
+export const runtimeAgentSessionTransportSchema = z.enum([
+	// PTY 里跑一个 CLI，靠刮 TUI 输出 + agent 侧 hook 回调 `kanban hooks` 判状态。
+	"pty_terminal",
+	// 在 Kanban 服务进程内直接实例化 @clinebot/core，订阅结构化事件。
+	"in_process_cline_sdk",
+	// spawn 一个子进程，用 ACP（JSON-RPC over stdio）通话，状态由 SessionUpdate 驱动。
+	"acp_stdio_subprocess",
+]);
+export type RuntimeAgentSessionTransport = z.infer<typeof runtimeAgentSessionTransportSchema>;
+
+// 一次回收尝试的**可审计**结果。三种 transport 共用同一形状，故「回收到底做成了没有」在 UI /
+// 日志 / 测试里是同一套判据，而不是各 transport 各说各话。
+export const runtimeAgentSessionReclamationOutcomeSchema = z.object({
+	runtimeSessionIncarnationId: z.string(),
+	sessionTransport: runtimeAgentSessionTransportSchema,
+	// 触发本次回收的原因：宽限期到期 vs park 兜底期到期。二者的用户可见措辞不同。
+	reclamationTrigger: z.enum(["response_generation_grace_period_expired", "park_abandoned"]),
+	attemptedAt: z.number(),
+	completedAt: z.number().nullable(),
+	// pty_terminal / acp_stdio_subprocess：根进程确实已退出（kill(pid,0) 报 ESRCH）。
+	// in_process_cline_sdk 无 OS 进程，语义收窄为「SDK 会话已 stop 且 task MCP bundle 已释放」，
+	// 故读这个字段时**必须**同时读 sessionTransport，勿把它当成「有个进程死了」。
+	rootProcessExitConfirmed: z.boolean(),
+	descendantProcessesExitConfirmed: z.boolean(),
+	// 回收后复核仍存活的后代 pid（仅用于存活性判定与诊断，**绝不**据此对 RSS 求和——
+	// 现场观测到过 6.7 GiB 的临时 ugrep 子进程，求和口径会把它算成「会话内存」）。
+	survivingDescendantPids: z.array(z.number().int()),
+	usedForcefulEscalation: z.boolean(),
+	// 已释放的资源标签（"pty" / "terminal_state_mirror" / "cline_mcp_tool_bundle" / "acp_connection" …）。
+	releasedResources: z.array(z.string()),
+	failureReason: z.string().nullable(),
+	nextRetryAt: z.number().nullable(),
+});
+export type RuntimeAgentSessionReclamationOutcome = z.infer<typeof runtimeAgentSessionReclamationOutcomeSchema>;
 
 const runtimeTaskSessionSummaryObjectSchema = z.object({
 	taskId: z.string(),
@@ -542,6 +627,21 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// present = parked；判据 / 时序见 runtimeTaskAwaitingDispatchedBackgroundWorkSchema 与 session-activity.ts
 	// 的 isParkedAwaitingDispatchedBackgroundWork。不参与 facet / superRefine（与 connectionRetry-only 写同形）。
 	awaitingDispatchedBackgroundWork: runtimeTaskAwaitingDispatchedBackgroundWorkSchema.nullable().optional(),
+	// 「停止生成后固定宽限期」回收的四个加性 sidecar（不参与 facet / superRefine，见上方 schema 注释）。
+	// 每次真实 spawn / ACP 连接 / SDK 会话创建生成一个新 id：它是「这一条 summary 说的还是同一个活体」的
+	// 唯一判据，防止陈旧回收定时器杀掉重启后的新会话。
+	runtimeSessionIncarnationId: z.string().nullable().optional(),
+	// 每次用户提交 / 新 agent 回合单调 +1。与 incarnationId 正交：同一活体内多轮对话靠它区分，
+	// 于是「宽限期跑到一半用户又发了一句」也能被回收侧检出并放弃。
+	agentResponseGenerationTurnSequence: z.number().int().nonnegative().optional(),
+	// 当前这次「进入非生成态」的离散事件；agent 回合 / park 期间为 null。
+	agentResponseGenerationStopped: runtimeAgentResponseGenerationStoppedSchema.nullable().optional(),
+	// 可回收时刻（epoch ms 绝对时刻，= stoppedAt + 宽限期）。存绝对时刻而非剩余时长，故停机期间
+	// 流逝的墙钟时间自然计入，重启后按同一口径判定。
+	agentSessionRuntimeReclamationEligibleAt: z.number().nullable().optional(),
+	// 最近一次回收尝试的可审计结果（成功 / 失败皆记）。UI 的「会话已被回收」标注读它——用户重进
+	// 任务时必须看到明确说明，而不是一个空终端让人误以为只是加载慢。
+	agentSessionRuntimeReclamationOutcome: runtimeAgentSessionReclamationOutcomeSchema.nullable().optional(),
 	taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
 	// 双轴 facet（加性、可选）+ per-session schema 版本。三 facet 共生（要么全置、要么全缺）：
 	// 全缺=未迁移的旧盘数据（Stage 2 读时回填）；全置=经 applySessionFacets 漏斗写入、组合受
@@ -2250,11 +2350,46 @@ export const runtimeReportEventMetadataSchema = z.object({
 });
 export type RuntimeReportEventMetadata = z.infer<typeof runtimeReportEventMetadataSchema>;
 
+// agent 发起的「等你拍板」决策 payload。**白名单字段**，由 `kanban hooks ingest` 从已解析的
+// stdin JSON 里挑出来——刻意不把整个 hook payload 透传给 daemon（既是隐私边界，也避免把 harness
+// 的私有形状固化成 Kanban 契约）。
+//
+// 为什么需要它：会话在宽限期到期后会被回收，进程一死，那个「agent 刚问了你一个问题」的 TUI 画面
+// 就没了。有了结构化 payload，Kanban 才能在用户下次进入任务时**独立于会话进程**重现问题与选项。
+export const runtimeAgentRaisedDecisionOptionSchema = z.object({
+	optionId: z.string(),
+	label: z.string(),
+	description: z.string().optional(),
+});
+export type RuntimeAgentRaisedDecisionOption = z.infer<typeof runtimeAgentRaisedDecisionOptionSchema>;
+
+export const runtimeAgentRaisedUserQuestionPayloadSchema = z.object({
+	// harness 提供的稳定标识（Claude 的 tool_use_id），用于跨重发去重。
+	decisionSourceId: z.string(),
+	questionMarkdown: z.string(),
+	options: z.array(runtimeAgentRaisedDecisionOptionSchema),
+	allowsFreeformAnswer: z.boolean(),
+	multiSelect: z.boolean(),
+});
+export type RuntimeAgentRaisedUserQuestionPayload = z.infer<typeof runtimeAgentRaisedUserQuestionPayloadSchema>;
+
+// 工具授权请求：只带工具名与参数**摘要**，绝不带参数正文——避免把命令行 / 路径 / 密钥落进盘。
+export const runtimeAgentRaisedToolPermissionPayloadSchema = z.object({
+	decisionSourceId: z.string(),
+	toolName: z.string(),
+	toolInputSummary: z.string().nullable(),
+});
+export type RuntimeAgentRaisedToolPermissionPayload = z.infer<typeof runtimeAgentRaisedToolPermissionPayloadSchema>;
+
 export const runtimeHookIngestRequestSchema = z.object({
 	taskId: z.string(),
 	workspaceId: z.string(),
 	event: runtimeHookEventSchema,
 	metadata: runtimeTaskHookActivitySchema.partial().optional(),
+	// 仅在 agent 确实发起了「等你拍板」的决策时携带（AskUserQuestion / PermissionRequest）。
+	// 两者互斥：一次 hook 只可能是其中一种。
+	agentRaisedUserQuestion: runtimeAgentRaisedUserQuestionPayloadSchema.optional(),
+	agentRaisedToolPermission: runtimeAgentRaisedToolPermissionPayloadSchema.optional(),
 });
 export type RuntimeHookIngestRequest = z.infer<typeof runtimeHookIngestRequestSchema>;
 
@@ -2263,6 +2398,57 @@ export const runtimeHookIngestResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeHookIngestResponse = z.infer<typeof runtimeHookIngestResponseSchema>;
+
+// ── 待答用户决策的读写契约（会话被回收后仍能重现并作答）─────────────────────────────────
+// decisionKind 刻意只有两种、**没有 plan_review**：计划审批不做 carry-forward。
+export const runtimeAgentRaisedPendingUserDecisionSchema = z.object({
+	decisionId: z.string(),
+	taskId: z.string(),
+	agentId: runtimeAgentIdSchema.nullable(),
+	decisionKind: z.enum(["ordinary_user_question", "tool_permission_request"]),
+	questionMarkdown: z.string(),
+	options: z.array(runtimeAgentRaisedDecisionOptionSchema),
+	allowsFreeformAnswer: z.boolean(),
+	askedAt: z.number(),
+	// 会话已被回收的时刻；null = 提问它的那个会话还活着，可以直接答给它。
+	reclaimedAt: z.number().nullable(),
+	answerDeliveryState: z.enum([
+		"not_answered",
+		"answer_recorded",
+		"delivery_in_progress",
+		"delivered",
+		"delivery_failed",
+	]),
+	lastAnswerDeliveryFailureReason: z.string().nullable(),
+});
+export type RuntimeAgentRaisedPendingUserDecision = z.infer<typeof runtimeAgentRaisedPendingUserDecisionSchema>;
+
+export const runtimeListAgentRaisedPendingUserDecisionsResponseSchema = z.object({
+	decisions: z.array(runtimeAgentRaisedPendingUserDecisionSchema),
+});
+export type RuntimeListAgentRaisedPendingUserDecisionsResponse = z.infer<
+	typeof runtimeListAgentRaisedPendingUserDecisionsResponseSchema
+>;
+
+export const runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema = z.object({
+	decisionId: z.string(),
+	selectedOptionIds: z.array(z.string()),
+	freeformText: z.string().nullable(),
+});
+export type RuntimeAnswerAgentRaisedPendingUserDecisionRequest = z.infer<
+	typeof runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema
+>;
+
+export const runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema = z.object({
+	ok: z.boolean(),
+	// 答案是否已经真正送进（恢复出来的）agent 会话。false 且 ok=true = 已 durable 记下，
+	// 但会话还没起来，稍后由重试送达——绝不会重复送。
+	delivered: z.boolean(),
+	error: z.string().optional(),
+});
+export type RuntimeAnswerAgentRaisedPendingUserDecisionResponse = z.infer<
+	typeof runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema
+>;
 
 // ==========================================================================
 // Deployment / Post-Deploy Verification（plan「Post-Deploy Verification Spike」1a / 1c /
