@@ -9,6 +9,8 @@ import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
 	RuntimeAllProjectsTaskSearchIndexResponse,
+	RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
+	RuntimeAnswerAgentRaisedPendingUserDecisionResponse,
 	RuntimeAvailableAgentSessionsRequest,
 	RuntimeAvailableAgentSessionsResponse,
 	RuntimeClineAccountBalanceResponse,
@@ -71,6 +73,7 @@ import type {
 	RuntimeGitSyncResponse,
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
+	RuntimeListAgentRaisedPendingUserDecisionsResponse,
 	RuntimeNotificationClearRequest,
 	RuntimeNotificationMarkVisitedRequest,
 	RuntimeNotificationMutationResponse,
@@ -143,6 +146,8 @@ import {
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
+	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
+	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema,
 	runtimeAvailableAgentSessionsRequestSchema,
 	runtimeAvailableAgentSessionsResponseSchema,
 	runtimeClineAccountBalanceResponseSchema,
@@ -205,6 +210,7 @@ import {
 	runtimeGitSyncResponseSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeHookIngestResponseSchema,
+	runtimeListAgentRaisedPendingUserDecisionsResponseSchema,
 	runtimeNotificationClearRequestSchema,
 	runtimeNotificationMarkVisitedRequestSchema,
 	runtimeNotificationMutationResponseSchema,
@@ -312,6 +318,13 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionTransitionToReviewRequest,
 		) => Promise<RuntimeTaskSessionTransitionToReviewResponse>;
+		listAgentRaisedPendingUserDecisions: (
+			scope: RuntimeTrpcWorkspaceScope,
+		) => Promise<RuntimeListAgentRaisedPendingUserDecisionsResponse>;
+		answerAgentRaisedPendingUserDecision: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
+		) => Promise<RuntimeAnswerAgentRaisedPendingUserDecisionResponse>;
 		continueConnectionRetrySessions: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeContinueConnectionRetrySessionsRequest,
@@ -645,6 +658,19 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskSessionTransitionToReviewResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.transitionTaskToReview(ctx.workspaceScope, input);
+			}),
+		// 「agent 问了你一个问题、但那个会话可能已经被回收」——列出仍需你拍板 / 仍待送达的决策。
+		// 数据源是 durable 账本，与会话进程是否还活着完全无关。
+		listAgentRaisedPendingUserDecisions: workspaceProcedure
+			.output(runtimeListAgentRaisedPendingUserDecisionsResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.listAgentRaisedPendingUserDecisions(ctx.workspaceScope);
+			}),
+		answerAgentRaisedPendingUserDecision: workspaceProcedure
+			.input(runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema)
+			.output(runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.answerAgentRaisedPendingUserDecision(ctx.workspaceScope, input);
 			}),
 		continueConnectionRetrySessions: workspaceProcedure
 			.input(runtimeContinueConnectionRetrySessionsRequestSchema)

@@ -28,6 +28,7 @@ import type {
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
 import {
+	parseAnswerAgentRaisedPendingUserDecisionRequest,
 	parseClineAccountSwitchRequest,
 	parseClineAddProviderRequest,
 	parseClineDeviceAuthCompleteRequest,
@@ -59,9 +60,15 @@ import {
 	parseTerminalAgentModelSelectionOptionsRequest,
 } from "../core/api-validation";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
+import { resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
 import { resolveTaskTitle } from "../core/task-title.js";
+import { createAgentRaisedPendingUserDecisionAnswerDelivery } from "../server/agent-raised-pending-user-decision-answer-delivery";
 import { openInBrowser } from "../server/browser";
+import {
+	isOpenAgentRaisedPendingUserDecision,
+	readAgentRaisedPendingUserDecisions,
+} from "../state/agent-raised-pending-user-decision-store";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { loadWorkspaceBoardById } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
@@ -630,6 +637,86 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					summary: null,
 					error: message,
 				};
+			}
+		},
+		// 「agent 问了你一个问题」的 durable 账本读侧。刻意**不**读会话内存：提问它的那个进程可能
+		// 早已被回收，UI 要呈现的正是「独立于会话存活」的那份记录。
+		listAgentRaisedPendingUserDecisions: async (workspaceScope) => {
+			const decisions = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+			return {
+				decisions: decisions.filter(isOpenAgentRaisedPendingUserDecision).map((decision) => ({
+					decisionId: decision.decisionId,
+					taskId: decision.taskId,
+					agentId: decision.agentId,
+					decisionKind: decision.decisionKind,
+					questionMarkdown: decision.questionMarkdown,
+					options: decision.options,
+					allowsFreeformAnswer: decision.allowsFreeformAnswer,
+					askedAt: decision.askedAt,
+					reclaimedAt: decision.reclaimedAt,
+					answerDeliveryState: decision.answerDeliveryState,
+					lastAnswerDeliveryFailureReason: decision.lastAnswerDeliveryFailureReason,
+				})),
+			};
+		},
+		answerAgentRaisedPendingUserDecision: async (workspaceScope, input) => {
+			try {
+				const body = parseAnswerAgentRaisedPendingUserDecisionRequest(input);
+				return await createAgentRaisedPendingUserDecisionAnswerDelivery({
+					ensureTaskSessionReadyForDelivery: async ({ taskId, sessionTransport }) => {
+						// 三种 transport 的「让会话回到可投递状态」手法不同；返回 false 表示恢复不了、
+						// 这次投不出去（不是「答案丢了」——答案已经 durable 落库）。
+						// 关键：**不能只看 summary 是否存在**。会话被回收后账本条目与 summary 原样保留
+						// （回收只终止运行时），光看 summary 会得出「已就绪」的假结论，随后投递必然落空：
+						// ACP 的 connection 已被摘除、终端的 entry.active 已置空、Cline 会话已 stop 且
+						// 活体被写成 interrupted（sendTaskSessionInput 恰恰拒绝 interrupted）。
+						// 故这里必须真的把运行时拉回来——这正是计划 §7.4 第 2 步。
+						if (sessionTransport === "acp_stdio_subprocess") {
+							const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+							return await acpService.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(taskId);
+						}
+						if (sessionTransport === "in_process_cline_sdk") {
+							const clineService = await deps.getScopedClineTaskSessionService(workspaceScope);
+							const reboundSummary = await clineService.rebindPersistedTaskSession(taskId);
+							if (!reboundSummary) {
+								return false;
+							}
+							if (resolveSessionFacets(reboundSummary).liveness !== "interrupted") {
+								return true;
+							}
+							// 被回收 / 被中断的 Cline 会话：reloadTaskSession 是既有的「停掉残留会话并用空
+							// prompt 重新起一个」路径（reloadTaskChatSession 用的同一条），跑完活体不再是
+							// interrupted，sendTaskSessionInput 才会受理。
+							const reloadedSummary = await clineService.reloadTaskSession(taskId);
+							return (
+								reloadedSummary !== null && resolveSessionFacets(reloadedSummary).liveness !== "interrupted"
+							);
+						}
+						const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+						return await terminalManager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(taskId);
+					},
+					deliverTaskSessionInput: async ({ taskId, sessionTransport, text }) => {
+						if (sessionTransport === "acp_stdio_subprocess") {
+							const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+							return (await acpService.sendTaskSessionInput(taskId, text)) !== null;
+						}
+						if (sessionTransport === "in_process_cline_sdk") {
+							const clineService = await deps.getScopedClineTaskSessionService(workspaceScope);
+							return (await clineService.sendTaskSessionInput(taskId, text)) !== null;
+						}
+						// 终端 agent：submitTaskChatInputWhenReady 要求 entry.active 存在，故必须在
+						// ensureTaskSessionReadyForDelivery 之后调用（见交付顺序注释）。
+						const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+						return terminalManager.submitTaskChatInputWhenReady(taskId, text) !== null;
+					},
+				}).answerPendingUserDecision({
+					workspaceId: workspaceScope.workspaceId,
+					decisionId: body.decisionId,
+					selectedOptionIds: body.selectedOptionIds,
+					freeformText: body.freeformText,
+				});
+			} catch (error) {
+				return { ok: false, delivered: false, error: error instanceof Error ? error.message : String(error) };
 			}
 		},
 		transitionTaskToReview: async (workspaceScope, input) => {

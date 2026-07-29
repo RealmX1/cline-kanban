@@ -1,8 +1,10 @@
 // PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
+import { randomUUID } from "node:crypto";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionReclamationOutcome,
 	RuntimeTaskConnectionRetry,
 	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskHookActivity,
@@ -1382,6 +1384,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
+	// 把一次会话回收的可审计结果写回 summary sidecar。UI 的「会话已被回收」标注读它——用户重进任务
+	// 时必须看到明确说明（含 worktree / 提交 / 消息历史均保留），而不是一个空终端让人误以为只是加载慢。
+	// metadata-only 补丁：不携带 facet / state，回收本身造成的活性变化由各自的停止路径写。
+	applyAgentSessionReclamationOutcome(
+		taskId: string,
+		outcome: RuntimeAgentSessionReclamationOutcome,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return null;
+		}
+		const summary = updateSummary(entry, { agentSessionRuntimeReclamationOutcome: outcome });
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
 	// 某任务当前是否 parked + park 元数据（源自内存 entry.summary 的 sidecar）。RVF is-parked 查询用。
 	getAwaitingDispatchedBackgroundWork(taskId: string): {
 		parked: boolean;
@@ -1941,6 +1959,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 				pid: session.pid,
 				agentId: request.agentId,
 			}),
+			// 新活体：每次真实 spawn 换一个 id。回收调度器据此判断「已落盘的期限说的还是不是同一个
+			// 活体」——同 taskId 重启出来的新会话绝不会被上一个活体留下的陈旧期限误杀。
+			runtimeSessionIncarnationId: randomUUID(),
 			agentId: request.agentId,
 			workspacePath: request.cwd,
 			pid: session.pid,
@@ -2510,6 +2531,38 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 		}
 		return summary;
+	}
+
+	// 会话被回收（或进程自行退出）之后，账本条目与 summary 仍然在——回收只终止运行时、不删账本——
+	// 但 entry.active 已被置空，于是 submitTaskChatInputWhenReady 无处可写、只会返回 null。
+	// 「agent 提问 → 会话被回收 → 用户回来作答」这条 carry-forward 闭环要成立，必须先真的把 PTY 拉回来。
+	// 复用 startTaskSession 时已存下的完整启动参数（entry.restartRequest，与崩溃自动重启同一份），
+	// 并刻意覆盖两个字段：
+	//   - prompt / images 清空：这是「续跑一个已有任务好回答它」，不是把原始任务 prompt 再跑一遍；
+	//   - resumeFromTrash=true：走各 adapter 既有的续跑分支（--continue / --resume），同时让
+	//     session-manager 武装 suppressSubstantiveOutputUntilContinues，避免整段重播的旧 transcript
+	//     被误判成刚刚产出的实质输出。
+	// 返回「现在是否真的有活体可投」。没有账本条目、或没有可复用的启动参数（例如 Kanban 进程重启后
+	// restartRequest 这份纯内存态尚未重建）时如实返回 false，绝不假装就绪。
+	async resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(taskId: string): Promise<boolean> {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return false;
+		}
+		if (entry.active) {
+			return true;
+		}
+		const restartRequest = entry.restartRequest;
+		if (!restartRequest || restartRequest.kind !== "task") {
+			return false;
+		}
+		await this.startTaskSession({
+			...cloneStartTaskSessionRequest(restartRequest.request),
+			prompt: "",
+			images: undefined,
+			resumeFromTrash: true,
+		});
+		return this.entries.get(taskId)?.active != null;
 	}
 
 	markInterruptedAndStopAll(): RuntimeTaskSessionSummary[] {
