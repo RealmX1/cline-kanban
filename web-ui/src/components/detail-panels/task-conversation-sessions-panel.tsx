@@ -1,9 +1,14 @@
-import { MessageCircleQuestion, Plus } from "lucide-react";
+import { FileText, MessageCircleQuestion, Plus } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
+import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
+import type { BoardCard } from "@/types";
+
+type TaskOriginalPromptCard = Pick<BoardCard, "title" | "prompt" | "images" | "createdAt">;
 
 type TaskConversationSessionsPanelTab = "sessions" | "create_session";
 type NewTaskConversationSessionContextSource = "started_from_scratch" | "forked_from_main_current_turn";
@@ -58,6 +63,7 @@ export function TaskConversationSessionsPanel({
 	workspaceTaskId,
 	mainSessionSummary,
 	mainSessionUserMessagePreview,
+	mainSessionOriginalPromptCard,
 	effectiveAgentId,
 	taskSessions,
 	selectedTaskConversationSessionId,
@@ -67,12 +73,17 @@ export function TaskConversationSessionsPanel({
 	workspaceTaskId: string;
 	mainSessionSummary: RuntimeTaskSessionSummary;
 	mainSessionUserMessagePreview: string;
+	// 任务的初始 prompt 全文。移动端 Focus View 不渲染左侧 ColumnContextPanel，卡片上的
+	// 「View original prompt」入口因此整个消失 —— 这里的 Main session 行本就在展示这段 prompt
+	// 的两行预览，把「看全文」挂在它旁边是移动端唯一自然的落点。
+	mainSessionOriginalPromptCard: TaskOriginalPromptCard;
 	effectiveAgentId: RuntimeAgentId;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	selectedTaskConversationSessionId: string;
 	onSelectTaskConversationSession: (taskConversationSessionId: string) => void;
 	onCreateByTheWaySession: (request: CreateByTheWaySessionRequest) => Promise<{ ok: boolean; message?: string }>;
 }): React.ReactElement {
+	const [isOriginalPromptDialogOpen, setIsOriginalPromptDialogOpen] = useState(false);
 	const [activeTab, setActiveTab] = useState<TaskConversationSessionsPanelTab>("sessions");
 	const [initialUserQuestion, setInitialUserQuestion] = useState("");
 	const [contextSource, setContextSource] = useState<NewTaskConversationSessionContextSource>(() =>
@@ -206,22 +217,41 @@ export function TaskConversationSessionsPanel({
 
 			{activeTab === "sessions" ? (
 				<div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-					<button
-						type="button"
-						className={cn(
-							"mb-1 w-full rounded-md px-2 py-2 text-left hover:bg-surface-3",
-							selectedTaskConversationSessionId === workspaceTaskId && "bg-surface-3",
-						)}
-						onClick={() => selectSession(mainSessionSummary)}
-					>
-						<div className="flex items-center gap-2">
-							<span className="text-xs font-medium text-text-primary">Main session</span>
-							<span className="ml-auto text-[11px] text-text-tertiary">
-								{getSessionStatusLabel(mainSessionSummary)}
-							</span>
-						</div>
-						<p className="mt-1 line-clamp-2 text-xs text-text-secondary">{mainSessionUserMessagePreview}</p>
-					</button>
+					{/* 「查看完整 prompt」是行内 button，不能嵌在选择会话的 button 里（嵌套 button 是无效 HTML），
+					    故两者作为兄弟元素放进同一个 relative 容器，前者绝对定位到右下角。 */}
+					<div className="relative mb-1">
+						<button
+							type="button"
+							className={cn(
+								"w-full rounded-md px-2 py-2 text-left hover:bg-surface-3",
+								selectedTaskConversationSessionId === workspaceTaskId && "bg-surface-3",
+							)}
+							onClick={() => selectSession(mainSessionSummary)}
+						>
+							<div className="flex items-center gap-2">
+								<span className="text-xs font-medium text-text-primary">Main session</span>
+								<span className="ml-auto text-[11px] text-text-tertiary">
+									{getSessionStatusLabel(mainSessionSummary)}
+								</span>
+							</div>
+							<p className="mt-1 line-clamp-2 pr-9 text-xs text-text-secondary">
+								{mainSessionUserMessagePreview}
+							</p>
+						</button>
+						<Button
+							variant="ghost"
+							size="sm"
+							icon={<FileText size={14} />}
+							onClick={() => setIsOriginalPromptDialogOpen(true)}
+							aria-label="View the original prompt for this task"
+							className={cn("absolute bottom-1 right-1", MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
+						/>
+					</div>
+					<TaskOriginalPromptDialog
+						open={isOriginalPromptDialogOpen}
+						card={mainSessionOriginalPromptCard}
+						onClose={() => setIsOriginalPromptDialogOpen(false)}
+					/>
 					{byTheWaySessions.map((summary) => {
 						const metadata = summary.taskConversationSessionMetadata;
 						if (!metadata) {

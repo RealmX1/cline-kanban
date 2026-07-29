@@ -1,7 +1,6 @@
+import { MOBILE_VIEWPORT_MEDIA_QUERY } from "@/utils/mobile-viewport-breakpoint";
 import { useMedia } from "@/utils/react-use";
 
-const MOBILE_BREAKPOINT = "(max-width: 768px)";
-
 export function useIsMobile(): boolean {
-	return useMedia(MOBILE_BREAKPOINT, false);
+	return useMedia(MOBILE_VIEWPORT_MEDIA_QUERY, false);
 }
