@@ -962,6 +962,7 @@ export function CardDetailView({
 				workspaceTaskId={selection.card.id}
 				mainSessionSummary={sessionSummary}
 				mainSessionUserMessagePreview={selection.card.prompt}
+				mainSessionOriginalPromptCard={selection.card}
 				effectiveAgentId={effectiveTaskConversationSessionAgentId}
 				taskSessions={taskSessions}
 				selectedTaskConversationSessionId={selectedTaskConversationSessionId}
@@ -1100,7 +1101,8 @@ export function CardDetailView({
 				/>
 				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-						{/* Chat panel */}
+						{/* Chat panel. 终端 agent 的阅读模式与虚拟按键条都由 AgentTerminalPanel 自己承载，
+						    不在这里另开 tab —— 否则读到 agent 的提问后还得切回本 tab 才能按方向键回答。 */}
 						<div
 							className="min-h-0 min-w-0 flex-1 flex-col"
 							style={{ display: mobileTab === "chat" ? "flex" : "none" }}

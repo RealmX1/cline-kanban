@@ -24,6 +24,11 @@ import {
 	hasInterruptAcknowledgement,
 	hasLikelyShellPrompt,
 } from "@/terminal/terminal-prompt-heuristics";
+import {
+	extractTerminalScrollbackTranscriptLogicalLines,
+	hasTerminalScrollbackTranscriptContent,
+	type TerminalScrollbackTranscriptLogicalLine,
+} from "@/terminal/terminal-scrollback-transcript-extraction";
 import { isMacPlatform, isSafari } from "@/utils/platform";
 
 const SHIFT_ENTER_SEQUENCE = "\n";
@@ -64,6 +69,8 @@ interface PersistentTerminalSubscriber {
 	onOutputText?: (text: string) => void;
 	onSearchOpenRequested?: () => void;
 	onSearchResults?: (results: TerminalSearchResultState) => void;
+	/** 用户是否已把视口从最新输出处滚开 —— 驱动「跳到最新」按钮的显隐。 */
+	onScrolledAwayFromLatestChange?: (isScrolledAwayFromLatest: boolean) => void;
 }
 
 interface MountPersistentTerminalOptions {
@@ -250,6 +257,7 @@ class PersistentTerminal {
 	// 后重放。5s 兜底超时防控制消息丢失导致白屏。
 	private awaitingRestoreSnapshot = false;
 	private awaitingRestoreSnapshotTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+	private scrolledAwayFromLatest = false;
 
 	constructor(
 		private readonly taskId: string,
@@ -315,6 +323,9 @@ class PersistentTerminal {
 		});
 		this.searchAddon.onDidChangeResults((results) => {
 			this.notifySearchResults(results);
+		});
+		this.terminal.onScroll(() => {
+			this.refreshScrolledAwayFromLatest();
 		});
 
 		if (!isSafari) {
@@ -460,6 +471,19 @@ class PersistentTerminal {
 	private notifySearchResults(results: TerminalSearchResultState): void {
 		for (const subscriber of this.subscribers) {
 			subscriber.onSearchResults?.(results);
+		}
+	}
+
+	// 复用写入路径的贴底判据（shouldKeepScrolledToBottom）的反面，两处保持同一个阈值语义：
+	// 写入侧用它决定「要不要跟随输出」，这里用它决定「要不要提示用户跳回最新」。
+	private refreshScrolledAwayFromLatest(): void {
+		const nextScrolledAwayFromLatest = !this.shouldKeepScrolledToBottom();
+		if (nextScrolledAwayFromLatest === this.scrolledAwayFromLatest) {
+			return;
+		}
+		this.scrolledAwayFromLatest = nextScrolledAwayFromLatest;
+		for (const subscriber of this.subscribers) {
+			subscriber.onScrolledAwayFromLatestChange?.(nextScrolledAwayFromLatest);
 		}
 	}
 
@@ -611,6 +635,14 @@ class PersistentTerminal {
 			proposedDimensions && Number.isFinite(proposedDimensions.cols)
 				? Math.max(1, Math.floor(proposedDimensions.cols))
 				: this.terminal.cols;
+		// 行数与列数一样如实跟随可视高度（含移动端）。曾短暂尝试过「移动端把行数钉在首次
+		// 适配值以躲开软键盘抖动」，已移除：(1) 其依据——codex resize 触发 ESC[2J ESC[3J 全量
+		// 重印 + 20k 行 mirror 重放——是 `--no-alt-screen` 强制 inline 专属的历史顽疾，codex 现在
+		// 跑原生 alt-screen（`agent-session-adapters.test.ts` 有防回灌断言），resize 只原地重绘
+		// 一屏，服务端 resize 路径也不回放 mirror；(2) app 根布局是 `h-[100svh]`（静态小视口
+		// 单位），软键盘开合只改 visual viewport，本就不会驱动这里的 ResizeObserver；(3) 钉住
+		// 行数会让 TUI 把输入行/选择区绘到已被裁掉且不属于 scrollback 的底部行里，用户无法靠
+		// 滚动找回，直接毁掉「手机上就地回答 AskUserQuestion」这一目标。
 		const nextRows =
 			proposedDimensions && Number.isFinite(proposedDimensions.rows)
 				? Math.max(1, Math.floor(proposedDimensions.rows))
@@ -945,6 +977,23 @@ class PersistentTerminal {
 		}
 		this.terminal.paste(text);
 		return true;
+	}
+
+	readScrollbackTranscript(): TerminalScrollbackTranscriptLogicalLine[] {
+		return extractTerminalScrollbackTranscriptLogicalLines(this.terminal);
+	}
+
+	hasScrollbackTranscriptContent(): boolean {
+		return hasTerminalScrollbackTranscriptContent(this.terminal);
+	}
+
+	isScrolledAwayFromLatest(): boolean {
+		return this.scrolledAwayFromLatest;
+	}
+
+	scrollToLatest(): void {
+		this.terminal.scrollToBottom();
+		this.refreshScrolledAwayFromLatest();
 	}
 
 	clear(): void {

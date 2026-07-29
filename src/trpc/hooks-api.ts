@@ -1,12 +1,17 @@
+import { getRuntimeAgentSessionTransport } from "../core/agent-catalog";
 import type {
+	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
+	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionUserTurnKind,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import { parseHookIngestRequest } from "../core/api-validation";
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
+import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
+import { recordAgentRaisedPendingUserDecision } from "../state/agent-raised-pending-user-decision-store";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
@@ -28,6 +33,62 @@ export interface CreateHooksApiDependencies {
 		turn: number;
 	}) => Promise<RuntimeTaskTurnCheckpoint>;
 	deleteTaskTurnCheckpointRef?: (input: { cwd: string; ref: string }) => Promise<void>;
+}
+
+// 把 hook 携带的白名单决策 payload 投影成 durable 记录。二者互斥，且**没有 plan_review**——
+// 计划审批不做 carry-forward，它在 store 的 decisionKind 枚举里根本不存在（类型层面杜绝冒充）。
+async function recordAgentRaisedPendingUserDecisionFromHookIngest(input: {
+	workspaceId: string;
+	taskId: string;
+	summary: RuntimeTaskSessionSummary;
+	body: RuntimeHookIngestRequest;
+}): Promise<void> {
+	const { workspaceId, taskId, summary, body } = input;
+	const agentId = summary.agentId;
+	if (agentId === null) {
+		return;
+	}
+	const shared = {
+		taskId,
+		workspaceId,
+		agentId,
+		sessionTransport: getRuntimeAgentSessionTransport(agentId),
+		askedAt: Date.now(),
+		graceDeadlineAt: summary.agentSessionRuntimeReclamationEligibleAt ?? null,
+		originRuntimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? null,
+		originTurnSequence: summary.agentResponseGenerationTurnSequence ?? 0,
+	};
+	const question = body.agentRaisedUserQuestion;
+	if (question) {
+		await recordAgentRaisedPendingUserDecision(workspaceId, {
+			...shared,
+			decisionId: `${taskId}:${question.decisionSourceId}`,
+			decisionKind: "ordinary_user_question",
+			questionMarkdown: question.questionMarkdown,
+			options: question.options,
+			allowsFreeformAnswer: question.allowsFreeformAnswer,
+			sourceHarnessSignal: `${body.metadata?.source ?? "unknown"}:AskUserQuestion`,
+		});
+		return;
+	}
+	const permission = body.agentRaisedToolPermission;
+	if (permission) {
+		await recordAgentRaisedPendingUserDecision(workspaceId, {
+			...shared,
+			decisionId: `${taskId}:${permission.decisionSourceId}`,
+			decisionKind: "tool_permission_request",
+			// 只渲染工具名与参数摘要——参数正文可能含命令行 / 路径 / 密钥，绝不落盘。
+			questionMarkdown: permission.toolInputSummary
+				? `agent 请求使用工具 \`${permission.toolName}\`\n\n${permission.toolInputSummary}`
+				: `agent 请求使用工具 \`${permission.toolName}\``,
+			options: [
+				{ optionId: "allow", label: "允许" },
+				{ optionId: "deny", label: "拒绝" },
+			],
+			allowsFreeformAnswer: true,
+			sourceHarnessSignal: `${body.metadata?.source ?? "unknown"}:PermissionRequest`,
+		});
+	}
 }
 
 export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcContext["hooksApi"] {
@@ -153,6 +214,23 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				if (body.metadata) {
 					manager.applyHookActivity(taskId, body.metadata);
 				}
+
+				// agent 停下来等人拍板 → 立刻把问题与结构化选项落 durable 账本（**在提问的那一刻**，
+				// 不是等宽限期到期才落）。这样 crash / kill -9 / 断电、以及后续的会话回收，都不会让
+				// 「agent 问了你什么」丢失；用户下次进入任务时由 UI 独立于会话进程重现。
+				// 落库失败绝不回滚已落定的转审——carry-forward 是增强，不是 hook 投递的前置条件。
+				void recordAgentRaisedPendingUserDecisionFromHookIngest({
+					workspaceId,
+					taskId,
+					summary: transitionedSummary,
+					body,
+				}).catch((error: unknown) => {
+					logAgentSessionRetentionWarning(
+						`pending-user-decision-persist-failed workspaceId=${workspaceId} taskId=${taskId} reason=${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				});
 
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
 				if (

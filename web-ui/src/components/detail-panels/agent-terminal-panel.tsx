@@ -11,16 +11,22 @@ import {
 	MessageSquare,
 	Minimize2,
 	RotateCcw,
+	ScrollText,
 	Search,
+	TerminalSquare,
 	Unplug,
 	X,
 } from "lucide-react";
 import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { TerminalScrollToLatestButton } from "@/components/detail-panels/terminal-scroll-to-latest-button";
+import { TerminalScrollbackTranscriptReaderPanel } from "@/components/detail-panels/terminal-scrollback-transcript-reader-panel";
+import { TerminalVirtualKeyInputBar } from "@/components/detail-panels/terminal-virtual-key-input-bar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useIsMobile } from "@/hooks/use-is-mobile";
 
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
@@ -34,6 +40,7 @@ interface AgentTerminalSessionControls {
 	isStopping: boolean;
 	isRefreshing: boolean;
 	isSearchOpen: boolean;
+	isScrolledAwayFromLatest: boolean;
 	lastError: string | null;
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
@@ -43,6 +50,7 @@ interface AgentTerminalSessionControls {
 	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	openTerminalSearch: () => void;
+	scrollTerminalToLatest: () => void;
 }
 
 export interface AgentTerminalPanelProps {
@@ -174,6 +182,35 @@ function formatSearchResultLabel(query: string, results: TerminalSearchResultSta
 function isTerminalFindShortcut(event: KeyboardEvent<HTMLInputElement>): boolean {
 	const isFindModifier = isMacPlatform ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
 	return isFindModifier && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f";
+}
+
+/**
+ * 「阅读模式」开关。桌面与移动端共用同一个入口 —— 长 transcript 在宽屏上同样值得用可选中、
+ * 可按屏宽重排的文档视图来读，而不是只在小屏才有价值。
+ */
+function TerminalTranscriptReaderToggleButton({
+	isOpen,
+	onToggle,
+	iconSize,
+	variant,
+}: {
+	isOpen: boolean;
+	onToggle: () => void;
+	iconSize: number;
+	variant: "default" | "ghost";
+}): ReactElement {
+	return (
+		<Tooltip side="top" content={isOpen ? "Back to the live terminal" : "Read the transcript as a document"}>
+			<Button
+				icon={isOpen ? <TerminalSquare size={iconSize} /> : <ScrollText size={iconSize} />}
+				variant={isOpen ? "primary" : variant}
+				size="sm"
+				onClick={onToggle}
+				aria-label={isOpen ? "Back to the live terminal" : "Read the transcript as a document"}
+				aria-pressed={isOpen}
+			/>
+		</Tooltip>
+	);
 }
 
 function TerminalSearchBar({
@@ -397,7 +434,9 @@ function AgentTerminalPanelLayout({
 		findPreviousInTerminal,
 		openTerminalSearch,
 		refreshTerminal,
+		scrollTerminalToLatest,
 		stopTerminal,
+		isScrolledAwayFromLatest,
 	} = sessionControls;
 	// canStop 由 legacy `state∈{running,awaiting_review}` 翻为 facet 活跃回合判据（isSessionInActiveTurn 与之等价）。
 	const sessionFacets = summary ? resolveSessionFacets(summary) : null;
@@ -413,6 +452,11 @@ function AgentTerminalPanelLayout({
 		summary.agentId !== null &&
 		!isRuntimeAgentSessionRenderedAsConversationPanel(summary.agentId);
 	const showCompactHeader = !showSessionToolbar;
+	const isMobile = useIsMobile();
+	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
+	// 合成 shell 终端（home / detail shell）不是 agent TUI，不需要代按 Ctrl+C / 方向键 / double-ESC。
+	const isSyntheticShellSession = isSyntheticHomeSession || taskId.startsWith("__detail_terminal__:");
+	const showVirtualKeyInputBar = isMobile && !isSyntheticShellSession;
 	const statusLabel = useMemo(() => describeState(summary), [summary]);
 	const statusTagStyle = useMemo(() => getStateTagStyle(summary), [summary]);
 	const stallElapsedMs = useStallElapsedMs(summary);
@@ -459,6 +503,12 @@ function AgentTerminalPanelLayout({
 							) : null}
 						</div>
 						<div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+							<TerminalTranscriptReaderToggleButton
+								isOpen={isTranscriptReaderOpen}
+								onToggle={() => setIsTranscriptReaderOpen((current) => !current)}
+								iconSize={14}
+								variant="default"
+							/>
 							<Tooltip side="top" content="Find in terminal">
 								<Button
 									icon={<Search size={14} />}
@@ -529,6 +579,12 @@ function AgentTerminalPanelLayout({
 						) : null}
 					</div>
 					<div style={{ display: "flex", alignItems: "center", gap: 2, marginRight: "-6px" }}>
+						<TerminalTranscriptReaderToggleButton
+							isOpen={isTranscriptReaderOpen}
+							onToggle={() => setIsTranscriptReaderOpen((current) => !current)}
+							iconSize={12}
+							variant="ghost"
+						/>
 						<Tooltip side="top" content="Find in terminal">
 							<Button
 								icon={<Search size={12} />}
@@ -614,13 +670,36 @@ function AgentTerminalPanelLayout({
 					<span>Terminal stream closed — the agent process has exited. The output above is final.</span>
 				</div>
 			) : null}
-			<div style={{ flex: "1 1 0", minHeight: 0, overflow: "hidden", padding: "3px 1.5px 3px 3px" }}>
+			{/* 阅读模式是叠加而非替换：xterm 始终挂载、PTY 继续跑、输出继续进 buffer（xterm 的渲染
+			    挂起只由整个浏览器标签页的 visibilitychange 驱动，不看元素是否可见），所以两种模式
+			    可以随时来回切且切回时没有积压回放。阅读视图读的也正是这同一个 buffer。 */}
+			<div
+				style={{
+					position: "relative",
+					flex: "1 1 0",
+					minHeight: 0,
+					overflow: "hidden",
+					padding: "3px 1.5px 3px 3px",
+				}}
+			>
 				<div
 					ref={containerRef}
 					className="kb-terminal-container"
 					style={{ height: "100%", width: "100%", background: terminalBackgroundColor }}
 				/>
+				{isTranscriptReaderOpen ? null : (
+					<TerminalScrollToLatestButton
+						isScrolledAwayFromLatest={isScrolledAwayFromLatest}
+						onScrollToLatest={scrollTerminalToLatest}
+					/>
+				)}
+				{isTranscriptReaderOpen ? (
+					<div className="absolute inset-0 z-10 flex">
+						<TerminalScrollbackTranscriptReaderPanel taskId={taskId} isVisible />
+					</div>
+				) : null}
 			</div>
+			{showVirtualKeyInputBar ? <TerminalVirtualKeyInputBar taskId={taskId} /> : null}
 			{lastError ? (
 				<div className="flex gap-2 rounded-none border-t border-status-red/30 bg-status-red/10 p-3 text-[13px] text-status-red">
 					{lastError}

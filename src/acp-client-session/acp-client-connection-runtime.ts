@@ -5,6 +5,7 @@
 // 聊天消息的翻译在 acp-session-update-adapter.ts。
 import { type ChildProcessByStdio, spawn } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
+import treeKill from "tree-kill";
 import type { RuntimeAgentId, RuntimeTaskAgentPermissionMode } from "../core/api-contract";
 import { isBinaryAvailableOnPath } from "../terminal/command-discovery";
 import { requireAcpAgentLaunchDefinition } from "./acp-agent-launch-catalog";
@@ -111,6 +112,12 @@ export class AcpClientConnectionRuntime {
 			cwd: input.cwd,
 			env: { ...process.env, ...input.env, ...spawnCommand.env },
 			stdio: ["pipe", "pipe", "pipe"],
+			// 独立进程组（POSIX）：agent 自己还会派生子进程（工具执行、语言服务器…），只对直接 child
+			// 发信号会把这些后代留成孤儿。有了独立 pgid 就能像 PTY 侧一样 `process.kill(-pid, …)` 覆盖整棵树。
+			// 之所以安全：stdio 是 pipe 而非 inherit，故脱离进程组不改变本进程的终端信号语义；Kanban 退出时
+			// 由 disposeAllTaskConnections 显式拆连接，不依赖信号沿进程组传播。Windows 上 detached 语义不同
+			// （新建控制台），且该平台的树杀由 tree-kill 负责，故不开。
+			detached: process.platform !== "win32",
 		}) as ChildProcessByStdio<Writable, Readable, Readable>;
 
 		// stdout 是 JSON-RPC 通道，诊断信息只可能出现在 stderr；留一段环形缓冲，
@@ -286,13 +293,94 @@ export class AcpClientConnectionRuntime {
 		record.disposedByKanban = true;
 		this.forgetTaskConnection(record);
 		record.connection.close();
-		record.child.kill("SIGTERM");
+		terminateAcpChildProcessTree(record.child, { force: false });
+	}
+
+	// 回收专用的「拆连接并确认真的退出了」路径。与 disposeTaskConnection 的差别只在于**等待与升级**：
+	//   SIGTERM（整个进程组）→ 轮询到 gracefulTimeoutMs → SIGKILL（整个进程组）→ 再轮询一小段。
+	// 返回根进程是否已确认退出，供回收审计结果如实填写（而不是发完信号就宣称成功）。
+	async stopTaskConnectionAndConfirmExit(
+		taskId: string,
+		options: { gracefulTimeoutMs?: number; forcefulTimeoutMs?: number } = {},
+	): Promise<{ rootPid: number | null; rootProcessExitConfirmed: boolean; usedForcefulEscalation: boolean }> {
+		const record = this.connectionsByTaskId.get(taskId);
+		if (!record) {
+			return { rootPid: null, rootProcessExitConfirmed: true, usedForcefulEscalation: false };
+		}
+		const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 2_000;
+		const forcefulTimeoutMs = options.forcefulTimeoutMs ?? 500;
+		const child = record.child;
+		const rootPid = typeof child.pid === "number" ? child.pid : null;
+
+		record.disposedByKanban = true;
+		this.forgetTaskConnection(record);
+		record.connection.close();
+		terminateAcpChildProcessTree(child, { force: false });
+
+		const hasExited = () => child.exitCode !== null || child.signalCode !== null;
+		await waitUntil(hasExited, gracefulTimeoutMs);
+		if (hasExited()) {
+			return { rootPid, rootProcessExitConfirmed: true, usedForcefulEscalation: false };
+		}
+		terminateAcpChildProcessTree(child, { force: true });
+		await waitUntil(hasExited, forcefulTimeoutMs);
+		return { rootPid, rootProcessExitConfirmed: hasExited(), usedForcefulEscalation: true };
 	}
 
 	disposeAllTaskConnections(): void {
 		for (const taskId of [...this.connectionsByTaskId.keys()]) {
 			this.disposeTaskConnection(taskId);
 		}
+	}
+}
+
+// 向 ACP agent 子进程发信号。POSIX 下优先打整个进程组（spawn 时 detached 拿到了独立 pgid），
+// 这样 agent 派生出来的工具进程 / 语言服务器不会变成孤儿；进程组调用失败时回落到只打根进程。
+// Windows 没有进程组概念，交给 tree-kill 展开整棵树。
+function terminateAcpChildProcessTree(
+	child: ChildProcessByStdio<Writable, Readable, Readable>,
+	options: { force: boolean },
+): void {
+	const signal: NodeJS.Signals = options.force ? "SIGKILL" : "SIGTERM";
+	const pid = typeof child.pid === "number" ? child.pid : 0;
+	if (process.platform === "win32") {
+		try {
+			child.kill(signal);
+		} catch {
+			// Best effort only.
+		}
+		if (pid > 0) {
+			try {
+				treeKill(pid, signal, () => {
+					// Best effort only.
+				});
+			} catch {
+				// Best effort only.
+			}
+		}
+		return;
+	}
+	try {
+		child.kill(signal);
+	} catch {
+		// Best effort only.
+	}
+	if (pid > 0) {
+		try {
+			process.kill(-pid, signal);
+		} catch {
+			// 进程组可能已经整体退出（ESRCH），或从未成功 detach（EPERM）——两种都无需处理。
+		}
+	}
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number, pollIntervalMs = 25): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (predicate()) {
+			return;
+		}
+		await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
 	}
 }
 

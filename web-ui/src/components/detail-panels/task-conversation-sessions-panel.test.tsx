@@ -6,6 +6,13 @@ import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-c
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
+const ORIGINAL_PROMPT_CARD = {
+	title: "Build sessions",
+	prompt: "Build sessions end to end.",
+	images: undefined,
+	createdAt: 1,
+};
+
 function createSessionSummary(
 	taskId: string,
 	overrides: Partial<RuntimeTaskSessionSummary> = {},
@@ -85,6 +92,7 @@ describe("TaskConversationSessionsPanel", () => {
 					workspaceTaskId="task-1"
 					mainSessionSummary={mainSessionSummary}
 					mainSessionUserMessagePreview="Build sessions"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
 					effectiveAgentId="codex"
 					taskSessions={{ "task-1": mainSessionSummary, "side-1": sideSessionSummary }}
 					selectedTaskConversationSessionId="task-1"
@@ -118,6 +126,7 @@ describe("TaskConversationSessionsPanel", () => {
 					workspaceTaskId="task-1"
 					mainSessionSummary={mainSessionSummary}
 					mainSessionUserMessagePreview="Build sessions"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
 					effectiveAgentId="codex"
 					taskSessions={{ "task-1": mainSessionSummary }}
 					selectedTaskConversationSessionId="task-1"
@@ -159,6 +168,7 @@ describe("TaskConversationSessionsPanel", () => {
 					workspaceTaskId="task-1"
 					mainSessionSummary={mainSessionSummary}
 					mainSessionUserMessagePreview="Build sessions"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
 					effectiveAgentId="gemini"
 					taskSessions={{ "task-1": mainSessionSummary }}
 					selectedTaskConversationSessionId="task-1"
@@ -194,6 +204,7 @@ describe("TaskConversationSessionsPanel", () => {
 					workspaceTaskId="task-1"
 					mainSessionSummary={mainSessionSummary}
 					mainSessionUserMessagePreview="Build sessions"
+					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
 					effectiveAgentId="codex"
 					taskSessions={{ "task-1": mainSessionSummary, "side-existing": existingByTheWaySummary }}
 					selectedTaskConversationSessionId="task-1"

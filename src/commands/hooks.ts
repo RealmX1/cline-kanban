@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createTRPCProxyClient, httpBatchLink, TRPCClientError } from "@trpc/client";
 import type { Command } from "commander";
-import type { RuntimeHookEvent, RuntimeHookIngestResponse, RuntimeTaskHookActivity } from "../core/api-contract";
+import type {
+	RuntimeAgentRaisedToolPermissionPayload,
+	RuntimeAgentRaisedUserQuestionPayload,
+	RuntimeHookEvent,
+	RuntimeHookIngestResponse,
+	RuntimeTaskHookActivity,
+} from "../core/api-contract";
 import { mergeAbortSignals } from "../core/cli-process-guards";
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { buildKanbanRuntimeUrl, getRuntimeFetch } from "../core/runtime-endpoint";
@@ -15,6 +21,10 @@ import {
 } from "../diagnostics/hook-ingest-delivery-failure-logger";
 import { parseHookRuntimeContextFromEnv } from "../terminal/hook-runtime-context";
 import type { RuntimeAppRouter } from "../trpc/app-router";
+import {
+	extractAgentRaisedToolPermissionPayload,
+	extractAgentRaisedUserQuestionPayload,
+} from "./agent-raised-decision-payload-extraction";
 import {
 	type CodexMappedHookEvent,
 	resolveCodexRolloutFinalMessageForCwd,
@@ -39,6 +49,9 @@ interface HooksIngestArgs {
 	workspaceId: string;
 	metadata?: Partial<RuntimeTaskHookActivity>;
 	payload?: Record<string, unknown> | null;
+	// agent 正在等你拍板时才携带的白名单 payload（二者互斥）。会话被回收后靠它重现问题。
+	agentRaisedUserQuestion?: RuntimeAgentRaisedUserQuestionPayload;
+	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
 }
 
 interface HookCommandMetadataOptionValues {
@@ -380,7 +393,67 @@ function parseHooksIngestArgs(
 		workspaceId: context.workspaceId,
 		metadata,
 		payload,
+		...buildAgentRaisedDecisionPayloads(payload, metadata),
 	};
+}
+
+// Claude 原生「等人拍板」工具的名字判定。与 core/harness-user-turn-kind-collection.ts 的
+// classifyHookUserTurnKind 同源同写法（含 snake_case 容错）：那条链路把同一批工具名映射成 userTurnKind，
+// 本链路把它们映射成待答决策 payload，两处必须对同一个工具给出同一个语义，否则会出现「人轴标成
+// plan_review、账本却记成 tool_permission_request」这种自相矛盾。
+function isClaudePlanApprovalToolName(normalizedToolName: string | null): boolean {
+	return normalizedToolName === "exitplanmode" || normalizedToolName === "exit_plan_mode";
+}
+
+function isClaudeUserQuestionToolName(normalizedToolName: string | null): boolean {
+	return normalizedToolName === "askuserquestion" || normalizedToolName === "ask_user_question";
+}
+
+// 只在「agent 确实停下来等人拍板」的 hook 上采集：AskUserQuestion（普通提问）与权限请求（工具授权）。
+// 计划审批（ExitPlanMode）刻意**不**采集——计划审批不做 durable carry-forward，且它在 store 的
+// decisionKind 枚举里根本不存在。
+//
+// ⚠️ 判定顺序是承重的，必须**先按 toolName 分流、再落通用权限分支**：ExitPlanMode / AskUserQuestion 的
+// 那个「批准计划 / 允许提问」对话框同样会 fire PermissionRequest（与
+// core/harness-user-turn-kind-collection.ts 记录的是同一条不变量：PermissionRequest 会携带
+// toolName=ExitPlanMode 抵达）。若不显式分流，一次计划审批会顺着通用权限分支被写进决策账本、
+// decisionKind=tool_permission_request，并在会话被回收后被 UI 当成「工具授权请求」重现——恰好绕过
+// store 里「decisionKind 枚举刻意不含 plan_review」所要表达的产品契约。
+export function buildAgentRaisedDecisionPayloads(
+	payload: Record<string, unknown> | null,
+	metadata: Partial<RuntimeTaskHookActivity> | undefined,
+): {
+	agentRaisedUserQuestion?: RuntimeAgentRaisedUserQuestionPayload;
+	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
+} {
+	if (!payload) {
+		return {};
+	}
+	const toolUseId =
+		readStringField(payload, "tool_use_id") ??
+		readStringField(payload, "toolUseId") ??
+		readNestedString(payload, ["preToolUse", "toolUseId"]);
+	const toolName = metadata?.toolName ?? null;
+	const normalizedToolName = toolName?.trim().toLowerCase() ?? null;
+	if (isClaudeUserQuestionToolName(normalizedToolName)) {
+		const question = extractAgentRaisedUserQuestionPayload({ toolUseId, toolInput: extractToolInput(payload) });
+		return question ? { agentRaisedUserQuestion: question } : {};
+	}
+	// 计划审批：无论以 PreToolUse 还是 PermissionRequest 形态抵达，一律不采集（终止分流，绝不下落）。
+	if (isClaudePlanApprovalToolName(normalizedToolName)) {
+		return {};
+	}
+	const hookEventName = metadata?.hookEventName?.toLowerCase() ?? null;
+	const notificationType = metadata?.notificationType?.toLowerCase() ?? null;
+	if (hookEventName === "permissionrequest" || notificationType === "permission_prompt") {
+		const permission = extractAgentRaisedToolPermissionPayload({
+			toolUseId,
+			toolName,
+			toolInputSummary: metadata?.toolInputSummary ?? null,
+		});
+		return permission ? { agentRaisedToolPermission: permission } : {};
+	}
+	return {};
 }
 
 // F2：单次投递的客户端超时（ms）。env 可调（过度指定命名），默认略宽于旧硬编码 3000——F1 落地后
@@ -493,6 +566,8 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<void> {
 				workspaceId: args.workspaceId,
 				event: args.event,
 				metadata: args.metadata,
+				...(args.agentRaisedUserQuestion ? { agentRaisedUserQuestion: args.agentRaisedUserQuestion } : {}),
+				...(args.agentRaisedToolPermission ? { agentRaisedToolPermission: args.agentRaisedToolPermission } : {}),
 			});
 		},
 		{

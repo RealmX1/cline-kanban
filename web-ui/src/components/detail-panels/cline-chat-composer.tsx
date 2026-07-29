@@ -32,6 +32,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeSlashCommand, RuntimeTaskSessionMode } from "@/runtime/types";
 import type { TaskImage } from "@/types";
+import { matchesMobileViewportNow } from "@/utils/mobile-viewport-breakpoint";
 import { isMacPlatform } from "@/utils/platform";
 import { useDebouncedEffect } from "@/utils/react-use";
 
@@ -168,7 +169,7 @@ export function ClineChatComposer({
 			return;
 		}
 		// Skip auto-focus on mobile to prevent iOS Safari viewport shift
-		if (window.matchMedia("(max-width: 768px)").matches) {
+		if (matchesMobileViewportNow()) {
 			return;
 		}
 		textareaRef.current?.focus();

@@ -1,7 +1,9 @@
 // 任务级门面：runtime-api 唯一的 ACP 入口。编排「连接运行时 + 会话账本 + SessionUpdate 适配器」
 // 三者，对位 src/cline-sdk/cline-task-session-service.ts。
+import { randomUUID } from "node:crypto";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionReclamationOutcome,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
@@ -135,6 +137,10 @@ export class AcpTaskSessionService {
 		},
 	});
 	private readonly decisionMessageIdByDecisionId = new Map<string, string>();
+	// 最近一次启动该任务 ACP 会话时用的完整参数。会话被回收后要重新拉起连接，必须复用同一套
+	// （cwd / 权限档 / plan 起步），否则等于拿默认档悄悄换了一个语义不同的会话跑下去。
+	// 与终端侧的 entry.restartRequest 对位：纯内存，Kanban 进程重启后不复存在（届时如实报「起不来」）。
+	private readonly latestStartRequestByTaskId = new Map<string, StartAcpTaskSessionRequest>();
 	private userDecisionBroker: AcpUserDecisionBroker = DENY_ALL_USER_DECISION_BROKER;
 
 	constructor() {
@@ -223,6 +229,7 @@ export class AcpTaskSessionService {
 
 	async startTaskSession(request: StartAcpTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
 		const entry = this.registry.ensureEntry(request.taskId, request.agentId);
+		this.latestStartRequestByTaskId.set(request.taskId, { ...request });
 		const startedAt = now();
 
 		// 乐观 UI：先落 user 消息并把卡片推成 running，再去起进程——与 Cline 侧一致，
@@ -263,6 +270,9 @@ export class AcpTaskSessionService {
 					withCurrentSubstantiveOutputTimestamp(entry, {
 						...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: request.agentId }),
 						pid: connection.pid,
+						// 新活体：ACP 侧的活体就是这个刚 spawn 出来的子进程 + 握手完成的连接。回收调度器据此
+						// 判断「已落盘的期限说的还是不是同一个活体」，重连出来的新会话不会被陈旧期限误杀。
+						runtimeSessionIncarnationId: randomUUID(),
 					}),
 				),
 			);
@@ -297,6 +307,28 @@ export class AcpTaskSessionService {
 		this.emitSummary(summary);
 		void this.runPromptTurn(taskId, connection, buildAcpPromptBlocks(text, images));
 		return summary;
+	}
+
+	// 会话被回收之后，registry 里的 entry / summary 仍在（回收只拆连接与子进程、不删账本），
+	// 但 connectionRuntime 里那条连接已经没了——此时 sendTaskSessionInput 只会返回 null。
+	// 「agent 提问 → 会话被回收 → 用户回来作答」这条 carry-forward 闭环要成立，必须先真的重建连接。
+	// ACP 侧没有 session/load 续跑（见 acp-task-session-registry 注释），故这里就是计划 §7.4 说的
+	// 「ACP：新连接」——agent 不必重新发问，因为答案正文本身就带着原问题。
+	// prompt / images 清空：只重建连接，答案随后由调用方经 sendTaskSessionInput 投递。
+	// 没有账本条目、或没有可复用的启动参数时如实返回 false，绝不假装就绪。
+	async resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(taskId: string): Promise<boolean> {
+		if (!this.registry.getEntry(taskId)) {
+			return false;
+		}
+		if (this.connectionRuntime.getConnection(taskId)) {
+			return true;
+		}
+		const latestStartRequest = this.latestStartRequestByTaskId.get(taskId);
+		if (!latestStartRequest) {
+			return false;
+		}
+		await this.startTaskSession({ ...latestStartRequest, prompt: "", images: undefined });
+		return this.connectionRuntime.getConnection(taskId) !== null;
 	}
 
 	async cancelTaskTurn(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
@@ -358,6 +390,55 @@ export class AcpTaskSessionService {
 		return summary;
 	}
 
+	// 会话回收专用的停止路径。与 stopTaskSession 的差别有三处，缺一不可：
+	//   ① 先发 session/cancel 让 agent 有机会自己收束（stopTaskSession 直接拆连接）；
+	//   ② 等待子进程真的退出并在超时后升级到 SIGKILL（整个进程组），而不是发完 SIGTERM 就返回；
+	//   ③ 返回退出确认，供回收审计结果如实填写。
+	// 「发出 cancel 后必须把 pending 的 requestPermission 用 cancelled 回掉」是 ACP 规范的硬要求，
+	// 漏掉会让 agent 侧永远挂着等回复——故 cancelPendingDecisions 放在最前面。
+	async stopTaskSessionForReclamation(
+		taskId: string,
+		options: { gracefulTimeoutMs?: number; forcefulTimeoutMs?: number } = {},
+	): Promise<{ rootPid: number | null; rootProcessExitConfirmed: boolean; usedForcefulEscalation: boolean }> {
+		const entry = this.registry.getEntry(taskId);
+		this.userDecisionBroker.cancelPendingDecisions(taskId);
+		const connection = this.connectionRuntime.getConnection(taskId);
+		if (connection) {
+			await connection.cancel().catch(() => null);
+		}
+		const exitConfirmation = await this.connectionRuntime.stopTaskConnectionAndConfirmExit(taskId, options);
+		if (entry) {
+			this.emitSummary(
+				updateAcpSummary(
+					entry,
+					withCurrentSubstantiveOutputTimestamp(entry, {
+						...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
+						pid: null,
+						reviewReason: null,
+					}),
+				),
+			);
+		}
+		return exitConfirmation;
+	}
+
+	// 把一次会话回收的可审计结果写回 summary sidecar（与终端 / Cline 侧同名同义）。
+	applyAgentSessionReclamationOutcome(
+		taskId: string,
+		outcome: RuntimeAgentSessionReclamationOutcome,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.registry.getEntry(taskId);
+		if (!entry) {
+			return null;
+		}
+		const summary = updateAcpSummary(
+			entry,
+			withCurrentSubstantiveOutputTimestamp(entry, { agentSessionRuntimeReclamationOutcome: outcome }),
+		);
+		this.emitSummary(summary);
+		return summary;
+	}
+
 	async clearTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
 		const entry = this.registry.getEntry(taskId);
 		if (!entry) {
@@ -367,6 +448,8 @@ export class AcpTaskSessionService {
 		// 与 stop 同理：清空会话前先把等人拍板的决策回掉，免得 agent 侧挂着等一个永远不会来的答复。
 		this.userDecisionBroker.cancelPendingDecisions(taskId);
 		this.connectionRuntime.disposeTaskConnection(taskId);
+		// 会话被清空 ⇒ 旧启动参数连同旧对话一起作废，绝不能被后续的「恢复投递」拿去复活。
+		this.latestStartRequestByTaskId.delete(taskId);
 		this.registry.deleteEntry(taskId);
 		const freshEntry = this.registry.ensureEntry(taskId, agentId);
 		const summary = cloneAcpSummary(freshEntry.summary);

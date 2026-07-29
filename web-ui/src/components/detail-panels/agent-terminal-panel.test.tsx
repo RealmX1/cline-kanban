@@ -6,8 +6,11 @@ import { AgentTerminalPanel, describeState, getStateTagStyle } from "@/component
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 
-const { mockRefreshTerminal } = vi.hoisted(() => ({
+const { mockRefreshTerminal, mockUseIsMobile, mockTerminalInput, mockReadScrollbackTranscript } = vi.hoisted(() => ({
 	mockRefreshTerminal: vi.fn(async () => {}),
+	mockUseIsMobile: vi.fn(() => false),
+	mockTerminalInput: vi.fn((_sequence: string) => true),
+	mockReadScrollbackTranscript: vi.fn(() => [] as { text: string; sourceBufferRowIndex: number }[]),
 }));
 
 vi.mock("@/terminal/use-persistent-terminal-session", () => ({
@@ -19,14 +22,25 @@ vi.mock("@/terminal/use-persistent-terminal-session", () => ({
 		isSearchOpen: false,
 		searchOpenRequestKey: 0,
 		searchResults: { resultCount: 0, resultIndex: -1 },
+		isScrolledAwayFromLatest: false,
 		clearTerminal: vi.fn(),
 		closeTerminalSearch: vi.fn(),
 		findNextInTerminal: vi.fn(() => false),
 		findPreviousInTerminal: vi.fn(() => false),
 		openTerminalSearch: vi.fn(),
 		refreshTerminal: mockRefreshTerminal,
+		scrollTerminalToLatest: vi.fn(),
 		stopTerminal: vi.fn(async () => {}),
 	}),
+}));
+
+vi.mock("@/hooks/use-is-mobile", () => ({
+	useIsMobile: () => mockUseIsMobile(),
+}));
+
+vi.mock("@/terminal/terminal-controller-registry", () => ({
+	getTerminalController: () => ({ input: mockTerminalInput, paste: vi.fn(() => true) }),
+	readTerminalScrollbackTranscript: () => mockReadScrollbackTranscript(),
 }));
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
@@ -59,6 +73,9 @@ describe("AgentTerminalPanel", () => {
 		document.body.appendChild(container);
 		root = createRoot(container);
 		mockRefreshTerminal.mockClear();
+		mockTerminalInput.mockClear();
+		mockReadScrollbackTranscript.mockClear();
+		mockUseIsMobile.mockReturnValue(false);
 	});
 
 	afterEach(() => {
@@ -93,6 +110,114 @@ describe("AgentTerminalPanel", () => {
 		});
 
 		expect(mockRefreshTerminal).toHaveBeenCalledTimes(1);
+	});
+
+	it("offers the transcript reader toggle on desktop too, not just on mobile", () => {
+		mockUseIsMobile.mockReturnValue(false);
+		mockReadScrollbackTranscript.mockReturnValue([{ text: "earlier output", sourceBufferRowIndex: 0 }]);
+
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createSummary("codex")}
+						showSessionToolbar
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const toggle = container.querySelector<HTMLButtonElement>('[aria-label="Read the transcript as a document"]');
+		expect(toggle).not.toBeNull();
+		expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+
+		act(() => {
+			toggle?.click();
+		});
+
+		// 阅读视图叠加在 xterm 之上；xterm 容器仍留在 DOM 里（终端不卸载、PTY 继续跑）。
+		expect(container.querySelector('[aria-label="Filter transcript lines"]')).not.toBeNull();
+		expect(container.querySelector(".kb-terminal-container")).not.toBeNull();
+		// 断言行数标签而非行内容：列表走 react-virtuoso，jsdom 里没有真实布局高度、算不出可视区，
+		// 因而不渲染任何 item。行数标签同样证明 transcript 已从终端读到。
+		expect(container.textContent).toContain("1 lines");
+
+		const backToTerminal = container.querySelector<HTMLButtonElement>('[aria-label="Back to the live terminal"]');
+		expect(backToTerminal?.getAttribute("aria-pressed")).toBe("true");
+		act(() => {
+			backToTerminal?.click();
+		});
+		expect(container.querySelector('[aria-label="Filter transcript lines"]')).toBeNull();
+	});
+
+	it("shows the virtual key bar only on mobile and sends the exact control sequences", () => {
+		mockUseIsMobile.mockReturnValue(false);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createSummary("codex")}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.querySelector('[aria-label="Arrow up"]')).toBeNull();
+
+		mockUseIsMobile.mockReturnValue(true);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createSummary("codex")}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		act(() => {
+			container
+				.querySelector<HTMLButtonElement>('[aria-label="Interrupt the agent, or clear the current input line"]')
+				?.click();
+		});
+		act(() => {
+			container
+				.querySelector<HTMLButtonElement>('[aria-label="Open the rewind history view (double escape)"]')
+				?.click();
+		});
+		act(() => {
+			container.querySelector<HTMLButtonElement>('[aria-label="Arrow up"]')?.click();
+		});
+
+		expect(mockTerminalInput.mock.calls.map((call) => call[0])).toEqual(["\u0003", "\u001b\u001b", "\u001b[A"]);
+	});
+
+	it("keeps the virtual key bar off synthetic shell terminals, which are not agent TUIs", () => {
+		mockUseIsMobile.mockReturnValue(true);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="__detail_terminal__:task-1"
+						workspaceId="workspace-1"
+						summary={createSummary("codex", "__detail_terminal__:task-1")}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector('[aria-label="Arrow up"]')).toBeNull();
 	});
 
 	it("does not show refresh for compact synthetic home terminals", () => {
