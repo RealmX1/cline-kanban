@@ -989,6 +989,24 @@ body.kb-dependency-link-mode {
 	border-radius: 999px;
 }
 
+/* -- Terminal touch scrolling --
+   .xterm-viewport 是浮在渲染层之上的透明滚动容器。不声明 touch-action 时浏览器要先做一轮
+   「双击缩放 / 横滑 / 纵滚」的手势歧义判定才把事件交给它，触屏上表现为按下有延迟、手势常被吞；
+   不声明 overscroll-behavior 时滚到顶/底继续滑会把整个 Focus View 带走（rubber-band），
+   用户体感就是「滚不动」。两者一起声明才让终端在触屏上真正可滚。 */
+
+.kb-terminal-container .xterm-viewport {
+	touch-action: pan-y;
+	overscroll-behavior: contain;
+	-webkit-overflow-scrolling: touch;
+}
+
+/* transcript 阅读视图是普通 DOM 滚动，只需挡住 rubber-band 外溢。 */
+
+.kb-terminal-transcript-reader-scroll-area {
+	overscroll-behavior: contain;
+}
+
 /* -- Terminal light-mode inversion --
    Terminal renders dark internally so CLI agents output correct ANSI colors.
    CSS filter inverts the xterm canvas, then a multiply-blend overlay tints
@@ -1223,6 +1241,17 @@ body.kb-dependency-link-mode {
 
 	.kb-project-row:active {
 		background: var(--color-surface-3);
+	}
+
+	/* 桌面端 6px 的滚动条 slider 在触屏上几乎点不到，且 WebGL 渲染层本身不提供任何
+	   「这里可以滚」的视觉提示。移动端加宽命中区。 */
+	.kb-terminal-container .xterm .xterm-scrollable-element > .scrollbar.vertical {
+		width: 16px !important;
+	}
+
+	.kb-terminal-container .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
+		left: 3px !important;
+		width: 10px !important;
 	}
 }
 

@@ -31,12 +31,14 @@ export interface UsePersistentTerminalSessionResult {
 	isSearchOpen: boolean;
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
+	isScrolledAwayFromLatest: boolean;
 	clearTerminal: () => void;
 	closeTerminalSearch: () => void;
 	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	openTerminalSearch: () => void;
 	refreshTerminal: () => Promise<void>;
+	scrollTerminalToLatest: () => void;
 	stopTerminal: () => Promise<void>;
 }
 
@@ -79,6 +81,7 @@ export function usePersistentTerminalSession({
 	const [isSearchOpen, setIsSearchOpen] = useState(false);
 	const [searchOpenRequestKey, setSearchOpenRequestKey] = useState(0);
 	const [searchResults, setSearchResults] = useState<TerminalSearchResultState>(getEmptyTerminalSearchResults);
+	const [isScrolledAwayFromLatest, setIsScrolledAwayFromLatest] = useState(false);
 	callbackRef.current = {
 		onSummary,
 		onConnectionReady,
@@ -181,7 +184,10 @@ export function usePersistentTerminalSession({
 				setSearchOpenRequestKey((current) => current + 1);
 			},
 			onSearchResults: setSearchResults,
+			onScrolledAwayFromLatestChange: setIsScrolledAwayFromLatest,
 		});
+		// 换任务/重挂载时用新终端的当前位置重置，避免沿用上一个终端的滚动态。
+		setIsScrolledAwayFromLatest(terminal.isScrolledAwayFromLatest());
 		terminal.mount(
 			container,
 			{
@@ -223,8 +229,15 @@ export function usePersistentTerminalSession({
 			input: (text) => terminalRef.current?.input(text) ?? false,
 			paste: (text) => terminalRef.current?.paste(text) ?? false,
 			waitForLikelyPrompt: async (timeoutMs) => await (terminalRef.current?.waitForLikelyPrompt(timeoutMs) ?? false),
+			readScrollbackTranscript: () => terminalRef.current?.readScrollbackTranscript() ?? [],
+			hasScrollbackTranscriptContent: () => terminalRef.current?.hasScrollbackTranscriptContent() ?? false,
+			scrollToLatest: () => terminalRef.current?.scrollToLatest(),
 		});
 	}, [taskId]);
+
+	const scrollTerminalToLatest = useCallback(() => {
+		terminalRef.current?.scrollToLatest();
+	}, []);
 
 	const stopTerminal = useCallback(async () => {
 		const terminal = terminalRef.current;
@@ -293,12 +306,14 @@ export function usePersistentTerminalSession({
 		isSearchOpen,
 		searchOpenRequestKey,
 		searchResults,
+		isScrolledAwayFromLatest,
 		clearTerminal,
 		closeTerminalSearch,
 		findNextInTerminal,
 		findPreviousInTerminal,
 		openTerminalSearch,
 		refreshTerminal,
+		scrollTerminalToLatest,
 		stopTerminal,
 	};
 }

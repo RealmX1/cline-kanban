@@ -11,6 +11,11 @@ const fitAddonProposeDimensionsMock = vi.hoisted(() => vi.fn<() => { cols: numbe
 const screenPixelSize = vi.hoisted(() => ({ width: 480, height: 320 }));
 const createdTerminalOptions = vi.hoisted(() => [] as Array<{ cols?: number; rows?: number }>);
 const terminalBuffer = vi.hoisted(() => ({ baseY: 0, viewportY: 0 }));
+// transcript 提取读的是 normal buffer（见 terminal-scrollback-transcript-extraction.ts）。
+const terminalNormalBuffer = vi.hoisted(() => ({
+	length: 0,
+	getLine: (_lineIndex: number) => undefined,
+}));
 const terminalScrollToBottomMock = vi.hoisted(() => vi.fn());
 const terminalWriteSideEffect = vi.hoisted(() => ({ current: null as null | ((data: string | Uint8Array) => void) }));
 const webglAddonConstructions = vi.hoisted(() => ({ count: 0 }));
@@ -93,7 +98,7 @@ vi.mock("@xterm/xterm", () => ({
 		options: { theme?: unknown };
 		rows: number;
 		unicode = { activeVersion: "" };
-		buffer = { active: terminalBuffer };
+		buffer = { active: terminalBuffer, normal: terminalNormalBuffer };
 
 		constructor(options: { cols?: number; rows?: number; theme?: unknown }) {
 			this.cols = options.cols ?? 80;
@@ -130,6 +135,8 @@ vi.mock("@xterm/xterm", () => ({
 		onBinary(_handler: (data: string) => void): void {}
 
 		onData(_handler: (data: string) => void): void {}
+
+		onScroll(_handler: (viewportY: number) => void): void {}
 
 		open(hostElement: HTMLElement): void {
 			this.element = hostElement;
@@ -370,6 +377,50 @@ describe("persistent-terminal-manager", () => {
 			[80, 30],
 			[100, 31],
 		]);
+	});
+
+	// 防回灌守卫：移动视口下行数必须与桌面一样如实跟随 fit 结果，不得被「钉在首次适配值」。
+	// 曾短暂存在过一个 mobileLockedRows 软键盘锁，它把首次 fit 的行数永久锁死：既可能锁进
+	// display:none 容器算出的极小值且再也抬不回来，也会在可视高度真的变小时让 TUI 把输入行
+	// 绘到已被裁掉、且不属于 scrollback 的底部行里（手机上无法靠滚动找回）。若未来又有人以
+	// 「防软键盘抖动」为由把行数锁回去，这条会当场失败。
+	it("keeps rows following fitted dimensions on a mobile viewport instead of pinning the first fit", () => {
+		const matchMediaSpy = vi.spyOn(window, "matchMedia").mockImplementation(
+			(query: string) =>
+				({
+					matches: true,
+					media: query,
+					onchange: null,
+					addListener: () => {},
+					removeListener: () => {},
+					addEventListener: () => {},
+					removeEventListener: () => {},
+					dispatchEvent: () => false,
+				}) as MediaQueryList,
+		);
+		// 第一次 fit 落在一个高度极小的容器上（模拟 display:none 的 tab），随后容器恢复正常高度，
+		// 最后可视高度真的变小（软键盘/横屏）——三段都必须原样传播。
+		fitAddonProposeDimensionsMock
+			.mockReturnValueOnce({ cols: 40, rows: 2 })
+			.mockReturnValueOnce({ cols: 40, rows: 24 })
+			.mockReturnValueOnce({ cols: 40, rows: 10 });
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		const container = createContainer();
+
+		terminal.mount(container, appearance, { isVisible: true });
+		terminal.mount(container, appearance, { isVisible: true });
+		terminal.mount(container, appearance, { isVisible: true });
+
+		expect(getResizeMessages().map((message) => [message.cols, message.rows])).toEqual([
+			[40, 2],
+			[40, 24],
+			[40, 10],
+		]);
+		matchMediaSpy.mockRestore();
 	});
 
 	it("initializes shell persistent terminals with shell columns", () => {
