@@ -38,7 +38,10 @@ export const ProjectSwitcherTriggerButton = forwardRef<HTMLButtonElement, Projec
 				aria-label="Switch project"
 				data-testid="top-bar-project-switcher-trigger"
 				className={cn(
-					"shrink-0 gap-1.5 px-1.5",
+					// mobile 顶栏左区（overflow-hidden）在 375px 上只有约 187px：汉堡 44 + 切换器 + 搜索入口 44
+					// 三个 shrink-0 会直接把最后一个挤出裁剪边界、看起来「按钮不见了」。这里改为可收缩，
+					// 由 min-w-[44px] 兜住触控下限，项目名靠自身 truncate 让位。
+					isMobile ? "shrink gap-1.5 px-1.5" : "shrink-0 gap-1.5 px-1.5",
 					isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME,
 					isOpen && "bg-surface-3 text-text-primary",
 					className,

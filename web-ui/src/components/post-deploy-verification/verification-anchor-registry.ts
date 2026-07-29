@@ -36,6 +36,13 @@ export function verificationPanelTaskAnchorKey(taskId: string): string {
 	return `verification-panel-task:${taskId}`;
 }
 
+// 顶栏里打开任务 Spotlight 搜索的常驻入口。单例、不带 id：全局同时只存在一个。
+// 它的真机可达性（窄屏是否被顶栏左区裁掉、触控目标是否够大）只有真实设备才验得到，
+// 因此这个锚点由引导人工型验证消费。
+export function topBarTaskSpotlightSearchTriggerAnchorKey(): string {
+	return "top-bar-task-spotlight-search-trigger";
+}
+
 // 把某 anchorKey 对应的元素滚入视野并临时高亮。返回是否命中元素（未命中 → 调用方走降级路径）。
 // 用 querySelectorAll + getAttribute 精确比对，避免 agent 自由字符串 key 进 CSS 选择器时的转义问题。
 export function spotlightAnchor(anchorKey: string, options?: { durationMs?: number }): boolean {
