@@ -204,6 +204,17 @@ describe("ProjectNavigationPanel width persistence", () => {
 		expect(container.textContent).toContain("Report issue");
 	});
 
+	it("lists the task search shortcut in the always-visible shortcut hints", () => {
+		renderPanel();
+		// Spotlight 长期只有热键一个入口且 UI 上无任何 ⌘K 文案；速查卡是不打开弹层就能看到它的唯一位置，
+		// 且必须落在常驻区（折叠区默认不展开）。
+		const searchHint = Array.from(container.querySelectorAll("div")).find(
+			(row) => row.firstElementChild?.textContent === "Search tasks",
+		);
+		expect(searchHint).toBeInstanceOf(HTMLElement);
+		expect(Array.from(searchHint?.querySelectorAll("kbd") ?? []).map((kbd) => kbd.textContent)).toContain("K");
+	});
+
 	it("shows a persistent warning on an unavailable project row", () => {
 		renderPanel({
 			projects: [

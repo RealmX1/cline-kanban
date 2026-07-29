@@ -20,12 +20,15 @@ export function TaskSpotlightSearchResultRow({
 	result,
 	isActive,
 	isCrossProject,
+	shouldUseMobileMinimumTouchTarget,
 	onSelect,
 	onHover,
 }: {
 	result: TaskBoardSearchResult;
 	isActive: boolean;
 	isCrossProject: boolean;
+	/** 由弹层统一传入（见调用处注释）：mobile 下把行高抬到 44px 触控下限。 */
+	shouldUseMobileMinimumTouchTarget: boolean;
 	onSelect: () => void;
 	onHover: () => void;
 }): React.ReactElement {
@@ -53,7 +56,8 @@ export function TaskSpotlightSearchResultRow({
 			onClick={onSelect}
 			onMouseMove={onHover}
 			className={cn(
-				"flex w-full items-start gap-2.5 rounded-md px-3 py-2 text-left",
+				"flex w-full items-start gap-2.5 rounded-md px-3 text-left",
+				shouldUseMobileMinimumTouchTarget ? "min-h-[44px] py-3" : "py-2",
 				isActive ? "bg-surface-3" : "hover:bg-surface-2",
 			)}
 		>

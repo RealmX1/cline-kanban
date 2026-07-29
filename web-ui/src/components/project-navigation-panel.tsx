@@ -545,15 +545,16 @@ const MOD = isMacPlatform ? "⌘" : modifierKeyLabel;
 const ALT = isMacPlatform ? "⌥" : "Alt";
 
 const ESSENTIAL_SHORTCUTS = [
+	{ keys: [MOD, "K"], label: "Search tasks" },
 	{ keys: ["C"], label: "New task" },
 	{ keys: [MOD, "B"], label: "Start ready backlog tasks" },
 	{ keys: [MOD, "Shift", "S"], label: "Settings" },
-	{ keys: ["Click", MOD], label: "Hold to link tasks" },
 	{ keys: [MOD, "G"], label: "Toggle git view" },
 	{ keys: [MOD, "J"], label: "Toggle terminal" },
 ];
 
 const MORE_SHORTCUTS = [
+	{ keys: ["Click", MOD], label: "Hold to link tasks" },
 	{ keys: [MOD, "Shift", "1-9"], label: "Jump to project slot" },
 	{ keys: [MOD, ALT, "1-9"], label: "Bind project to slot" },
 	{ keys: [MOD, "Shift", "A"], label: "Toggle plan / act" },

@@ -1126,6 +1126,7 @@ export default function App(): ReactElement {
 					<TopBar
 						onToggleSidebar={!selectedCard ? handleToggleSidebar : undefined}
 						projectSwitcher={topBarProjectSwitcherState}
+						onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
 						onToggleBoardOverview={
 							!selectedCard && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
 								? handleToggleBoardOverview
