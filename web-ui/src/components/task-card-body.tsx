@@ -709,13 +709,16 @@ export function TaskCardBody({
 							}}
 						/>
 					</Tooltip>
-					{columnId === "backlog" ? (
-						<Tooltip side="bottom" content={revealHoverActionTooltip("Start task")}>
+					{columnId === "backlog" || (columnId === "in_progress" && sessionSummary == null && onStart) ? (
+						<Tooltip
+							side="bottom"
+							content={revealHoverActionTooltip(columnId === "in_progress" ? "Retry task start" : "Start task")}
+						>
 							<Button
 								icon={<Play size={12} />}
 								variant="ghost"
 								size="xs"
-								aria-label="Start task"
+								aria-label={columnId === "in_progress" ? "Retry task start" : "Start task"}
 								onMouseDown={stopEvent}
 								onClick={(event) => {
 									stopEvent(event);

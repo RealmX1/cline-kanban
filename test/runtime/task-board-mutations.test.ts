@@ -80,6 +80,26 @@ describe("task plan mode defaults", () => {
 	});
 });
 
+describe("task stage monotonicity", () => {
+	it("never moves an already-started task back into backlog", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task A", baseRef: "main" },
+			() => "aaaaa111",
+		);
+		const started = moveTaskToColumn(created.board, created.task.id, "in_progress");
+		const attemptedBacklogMove = moveTaskToColumn(started.board, created.task.id, "backlog");
+
+		expect(started.moved).toBe(true);
+		expect(attemptedBacklogMove.moved).toBe(false);
+		expect(attemptedBacklogMove.board).toBe(started.board);
+		expect(attemptedBacklogMove.board.columns.find((column) => column.id === "in_progress")?.cards[0]?.id).toBe(
+			created.task.id,
+		);
+	});
+});
+
 describe("task images", () => {
 	it("preserves images when creating and updating tasks", () => {
 		const created = addTaskToColumn(
