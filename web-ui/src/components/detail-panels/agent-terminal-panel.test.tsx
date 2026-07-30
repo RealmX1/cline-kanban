@@ -5,12 +5,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentTerminalPanel, describeState, getStateTagStyle } from "@/components/detail-panels/agent-terminal-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { TerminalScrollbackTranscriptLogicalLine } from "@/terminal/terminal-scrollback-transcript-extraction";
 
+// 返回类型直接绑定生产类型（而不是就地写一个窄结构），这样 transcript 逻辑行的形状再变时
+// `tsc` 会在这里报错，而不是靠运行期是否恰好走到渲染路径来暴露漂移。
 const { mockRefreshTerminal, mockUseIsMobile, mockTerminalInput, mockReadScrollbackTranscript } = vi.hoisted(() => ({
 	mockRefreshTerminal: vi.fn(async () => {}),
 	mockUseIsMobile: vi.fn(() => false),
 	mockTerminalInput: vi.fn((_sequence: string) => true),
-	mockReadScrollbackTranscript: vi.fn(() => [] as { text: string; sourceBufferRowIndex: number }[]),
+	mockReadScrollbackTranscript: vi.fn((): TerminalScrollbackTranscriptLogicalLine[] => []),
 }));
 
 vi.mock("@/terminal/use-persistent-terminal-session", () => ({
@@ -46,6 +49,31 @@ vi.mock("@/terminal/terminal-controller-registry", () => ({
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => undefined,
 }));
+
+/** 一条只有单段默认样式的 transcript 逻辑行，形状与提取层产出的生产类型一致。 */
+function createTranscriptLogicalLine(
+	text: string,
+	sourceBufferRowIndex: number,
+): TerminalScrollbackTranscriptLogicalLine {
+	return {
+		text,
+		segments: [
+			{
+				text,
+				foregroundColor: null,
+				backgroundColor: null,
+				isBold: false,
+				isDim: false,
+				isItalic: false,
+				isUnderline: false,
+				isStrikethrough: false,
+				isInverse: false,
+				isInvisible: false,
+			},
+		],
+		sourceBufferRowIndex,
+	};
+}
 
 function createSummary(agentId: RuntimeAgentId, taskId = "task-1"): RuntimeTaskSessionSummary {
 	return {
@@ -114,7 +142,7 @@ describe("AgentTerminalPanel", () => {
 
 	it("offers the transcript reader toggle on desktop too, not just on mobile", () => {
 		mockUseIsMobile.mockReturnValue(false);
-		mockReadScrollbackTranscript.mockReturnValue([{ text: "earlier output", sourceBufferRowIndex: 0 }]);
+		mockReadScrollbackTranscript.mockReturnValue([createTranscriptLogicalLine("earlier output", 0)]);
 
 		act(() => {
 			root.render(
@@ -141,7 +169,9 @@ describe("AgentTerminalPanel", () => {
 		expect(container.querySelector('[aria-label="Filter transcript lines"]')).not.toBeNull();
 		expect(container.querySelector(".kb-terminal-container")).not.toBeNull();
 		// 断言行数标签而非行内容：列表走 react-virtuoso，jsdom 里没有真实布局高度、算不出可视区，
-		// 因而不渲染任何 item。行数标签同样证明 transcript 已从终端读到。
+		// 因而 itemContent 一次都不会被调用、不渲染任何 item。行数标签同样证明 transcript 已从终端读到。
+		// 逐行渲染（含配色还原）由组件级测试 `terminal-scrollback-transcript-styled-line.test.tsx` 覆盖，
+		// 别在这里补断言 —— 在这一层它只会因为「压根没渲染」而恒真，是假绿灯。
 		expect(container.textContent).toContain("1 lines");
 
 		const backToTerminal = container.querySelector<HTMLButtonElement>('[aria-label="Back to the live terminal"]');

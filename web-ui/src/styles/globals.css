@@ -1007,6 +1007,21 @@ body.kb-dependency-link-mode {
 	overscroll-behavior: contain;
 }
 
+/* -- Viewport-bottom floating pills --
+   Report bug / Post-Deploy Verification 两枚 pill 是 fixed 挂在 body 上的浮层，与移动端
+   Focus View 底部那条常驻虚拟按键条互不知情 —— 不让位就正好压在方向键和 Enter 上。
+   按键条挂载时把自己的实测高度写进下面这个变量（terminal-virtual-key-bar-viewport-bottom-inset.ts），
+   pill 读它整体抬高；变量缺省 0px，所以桌面端和任何没有按键条的视图位置不变。
+   这属于「跨组件、无共同父节点的布局粘合」，Tailwind 类表达不了，故落在这里。 */
+
+.kb-viewport-bottom-pill-primary {
+	bottom: calc(1rem + var(--kb-terminal-virtual-key-bar-viewport-bottom-inset, 0px));
+}
+
+.kb-viewport-bottom-pill-stacked {
+	bottom: calc(5rem + var(--kb-terminal-virtual-key-bar-viewport-bottom-inset, 0px));
+}
+
 /* -- Terminal light-mode inversion --
    Terminal renders dark internally so CLI agents output correct ANSI colors.
    CSS filter inverts the xterm canvas, then a multiply-blend overlay tints
