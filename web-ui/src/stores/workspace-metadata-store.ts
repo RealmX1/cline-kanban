@@ -69,7 +69,8 @@ function toTaskWorkspaceSnapshot(metadata: RuntimeTaskWorkspaceMetadata): Review
 		isDetached: metadata.isDetached,
 		headCommit: metadata.headCommit,
 		baseCommit: metadata.baseCommit,
-		commitsSinceFork: metadata.commitsSinceFork,
+		commitsAheadOfBaseRef: metadata.commitsAheadOfBaseRef,
+		commitsBehindBaseRef: metadata.commitsBehindBaseRef,
 		changedFiles: metadata.changedFiles,
 		additions: metadata.additions,
 		deletions: metadata.deletions,
@@ -148,7 +149,8 @@ function areTaskWorkspaceSnapshotsEqual(
 		a.isDetached === b.isDetached &&
 		a.headCommit === b.headCommit &&
 		a.baseCommit === b.baseCommit &&
-		a.commitsSinceFork === b.commitsSinceFork &&
+		a.commitsAheadOfBaseRef === b.commitsAheadOfBaseRef &&
+		a.commitsBehindBaseRef === b.commitsBehindBaseRef &&
 		a.changedFiles === b.changedFiles &&
 		a.additions === b.additions &&
 		a.deletions === b.deletions

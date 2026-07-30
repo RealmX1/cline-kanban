@@ -36,6 +36,11 @@ vi.mock("../../src/workspace/git-change-token.js", () => ({
 
 // fork-point（git merge-base HEAD <baseRef>）的确定性返回；非 merge-base 调用退化为失败。
 const FORK_POINT_COMMIT = "f00ba4c0ffee1234";
+// base 分支 tip（git rev-parse --verify <baseRef>^{commit}）。仅用于门控失效判定，不下发前端。
+const BASE_REF_TIP_COMMIT = "ba5e7100dec0de99";
+// `git rev-list --left-right --count <baseRef>...HEAD` 的输出：左=behind、右=ahead。
+const DEFAULT_COMMITS_BEHIND_BASE_REF = 12;
+const DEFAULT_COMMITS_AHEAD_OF_BASE_REF = 3;
 
 import type { RuntimeBoardCard, RuntimeBoardData, RuntimeTaskWorktreeMode } from "../../src/core/api-contract";
 import {
@@ -85,9 +90,15 @@ function createBoard(): RuntimeBoardData {
 
 describe("createWorkspaceMetadataMonitor", () => {
 	let monitor: WorkspaceMetadataMonitor;
+	// 可变，供「base 分支单方面推进」的用例改写 rev-parse 的返回。
+	let stubbedBaseRefTipCommit: string;
 	const onMetadataUpdated = vi.fn();
 
+	const countRevParseCalls = () =>
+		gitUtilsMocks.runGit.mock.calls.filter((call) => (call[1] as string[])[0] === "rev-parse").length;
+
 	beforeEach(() => {
+		stubbedBaseRefTipCommit = BASE_REF_TIP_COMMIT;
 		onMetadataUpdated.mockReset();
 		gitSyncMocks.getGitSyncSummary.mockReset();
 		gitSyncMocks.probeGitWorkspaceState.mockReset();
@@ -104,8 +115,19 @@ describe("createWorkspaceMetadataMonitor", () => {
 					exitCode: 0,
 				};
 			}
-			if (args[0] === "rev-list" && args[1] === "--count") {
-				return { ok: true, stdout: "3", stderr: "", output: "3", error: null, exitCode: 0 };
+			if (args[0] === "rev-parse") {
+				return {
+					ok: true,
+					stdout: stubbedBaseRefTipCommit,
+					stderr: "",
+					output: stubbedBaseRefTipCommit,
+					error: null,
+					exitCode: 0,
+				};
+			}
+			if (args[0] === "rev-list" && args[1] === "--left-right" && args[2] === "--count") {
+				const divergence = `${DEFAULT_COMMITS_BEHIND_BASE_REF}\t${DEFAULT_COMMITS_AHEAD_OF_BASE_REF}`;
+				return { ok: true, stdout: divergence, stderr: "", output: divergence, error: null, exitCode: 0 };
 			}
 			return { ok: false, stdout: "", stderr: "", output: "", error: "unexpected git call", exitCode: 1 };
 		});
@@ -196,7 +218,9 @@ describe("createWorkspaceMetadataMonitor", () => {
 			branch: "main",
 			// fork-point（git merge-base HEAD <baseRef>）现算并随 metadata 暴露。
 			baseCommit: FORK_POINT_COMMIT,
-			commitsSinceFork: 3,
+			// 一条 `rev-list --left-right --count` 同出双向分歧：左=behind、右=ahead。
+			commitsAheadOfBaseRef: DEFAULT_COMMITS_AHEAD_OF_BASE_REF,
+			commitsBehindBaseRef: DEFAULT_COMMITS_BEHIND_BASE_REF,
 			changedFiles: 2,
 			additions: 5,
 			deletions: 1,
@@ -204,8 +228,9 @@ describe("createWorkspaceMetadataMonitor", () => {
 		expect(gitUtilsMocks.runGit).toHaveBeenCalledWith(WORKSPACE_PATH, ["merge-base", "HEAD", "main"]);
 		expect(gitUtilsMocks.runGit).toHaveBeenCalledWith(WORKSPACE_PATH, [
 			"rev-list",
+			"--left-right",
 			"--count",
-			`${FORK_POINT_COMMIT}..HEAD`,
+			"main...HEAD",
 		]);
 
 		const branchTask = metadata.taskWorkspaces.find((task) => task.taskId === "task-branch");
@@ -213,9 +238,10 @@ describe("createWorkspaceMetadataMonitor", () => {
 			path: BRANCH_TASK_WORKTREE_PATH,
 			exists: false,
 			branch: null,
-			// 未落地的 worktree（exists:false）不探测分叉点 → baseCommit 为 null。
+			// 未落地的 worktree（exists:false）不探测分叉点 → baseCommit 与双向分歧均为 null。
 			baseCommit: null,
-			commitsSinceFork: null,
+			commitsAheadOfBaseRef: null,
+			commitsBehindBaseRef: null,
 			changedFiles: null,
 		});
 	});
@@ -249,6 +275,110 @@ describe("createWorkspaceMetadataMonitor", () => {
 			board: createBoard(),
 		});
 		expect(gitSyncMocks.probeGitWorkspaceState.mock.calls.length).toBe(probeCallsAfterFirstRefresh);
+	});
+
+	it("base 分支单方面推进时击穿两层门控，behind 随之更新", async () => {
+		// 这是 behind 的承重回归：worktree 自身完全没动（廉价 token 与 probe 的 stateToken 都恒定），
+		// 只有 base 分支前进。若门控不比对 base tip，commitsBehindBaseRef 会被永久冻结在首次算出的值。
+		gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("stable-token");
+		const firstMetadata = await monitor.connectWorkspace({
+			workspaceId: "workspace-1",
+			workspacePath: WORKSPACE_PATH,
+			board: createBoard(),
+		});
+		expect(firstMetadata.taskWorkspaces.find((task) => task.taskId === "task-inplace")).toMatchObject({
+			commitsBehindBaseRef: DEFAULT_COMMITS_BEHIND_BASE_REF,
+		});
+		const probeCallsAfterFirstRefresh = gitSyncMocks.probeGitWorkspaceState.mock.calls.length;
+
+		// base 分支推进（如本地 main 新落了提交）→ rev-parse 返回新 tip，同时分歧计数改口。
+		stubbedBaseRefTipCommit = "ba5e7100dec0de99-advanced";
+		const advancedCommitsBehind = DEFAULT_COMMITS_BEHIND_BASE_REF + 4;
+		gitUtilsMocks.runGit.mockImplementation(async (_cwd: string, args: string[]) => {
+			if (args[0] === "merge-base") {
+				return {
+					ok: true,
+					stdout: FORK_POINT_COMMIT,
+					stderr: "",
+					output: FORK_POINT_COMMIT,
+					error: null,
+					exitCode: 0,
+				};
+			}
+			if (args[0] === "rev-parse") {
+				return {
+					ok: true,
+					stdout: stubbedBaseRefTipCommit,
+					stderr: "",
+					output: stubbedBaseRefTipCommit,
+					error: null,
+					exitCode: 0,
+				};
+			}
+			if (args[0] === "rev-list" && args[1] === "--left-right" && args[2] === "--count") {
+				const divergence = `${advancedCommitsBehind}\t${DEFAULT_COMMITS_AHEAD_OF_BASE_REF}`;
+				return { ok: true, stdout: divergence, stderr: "", output: divergence, error: null, exitCode: 0 };
+			}
+			return { ok: false, stdout: "", stderr: "", output: "", error: "unexpected git call", exitCode: 1 };
+		});
+
+		const secondMetadata = await monitor.updateWorkspaceState({
+			workspaceId: "workspace-1",
+			workspacePath: WORKSPACE_PATH,
+			board: createBoard(),
+		});
+
+		expect(gitSyncMocks.probeGitWorkspaceState.mock.calls.length).toBeGreaterThan(probeCallsAfterFirstRefresh);
+		expect(secondMetadata.taskWorkspaces.find((task) => task.taskId === "task-inplace")).toMatchObject({
+			commitsBehindBaseRef: advancedCommitsBehind,
+			commitsAheadOfBaseRef: DEFAULT_COMMITS_AHEAD_OF_BASE_REF,
+		});
+	});
+
+	it("base tip 未变时不因新增的 rev-parse 而破坏既有的「跳过 probe」门控", async () => {
+		gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("stable-token");
+		await monitor.connectWorkspace({
+			workspaceId: "workspace-1",
+			workspacePath: WORKSPACE_PATH,
+			board: createBoard(),
+		});
+		const probeCallsAfterFirstRefresh = gitSyncMocks.probeGitWorkspaceState.mock.calls.length;
+
+		await monitor.updateWorkspaceState({
+			workspaceId: "workspace-1",
+			workspacePath: WORKSPACE_PATH,
+			board: createBoard(),
+		});
+
+		expect(gitSyncMocks.probeGitWorkspaceState.mock.calls.length).toBe(probeCallsAfterFirstRefresh);
+	});
+
+	it("同一刷新周期内，共享同一 baseRef 的所有任务只解析一次 base tip", async () => {
+		const trackedTaskCount = 8;
+		const sharedBaseRefBoard: RuntimeBoardData = {
+			columns: [
+				{
+					id: "in_progress",
+					title: "In Progress",
+					cards: Array.from({ length: trackedTaskCount }, (_unused, index) =>
+						createBoardCard(`task-${index}`, "inplace"),
+					),
+				},
+			],
+			dependencies: [],
+		};
+
+		const metadata = await monitor.connectWorkspace({
+			workspaceId: "workspace-dedupe",
+			workspacePath: WORKSPACE_PATH,
+			board: sharedBaseRefBoard,
+		});
+
+		// 前置校验：确实有多个任务参与本轮刷新（否则去重断言不成立）。
+		expect(metadata.taskWorkspaces).toHaveLength(trackedTaskCount);
+		// 核心断言：rev-parse 按 baseRef 去重，开销与任务数无关。
+		expect(countRevParseCalls()).toBe(1);
+		expect(gitUtilsMocks.runGit).toHaveBeenCalledWith(WORKSPACE_PATH, ["rev-parse", "--verify", "main^{commit}"]);
 	});
 
 	it("廉价 token 变化时，二次刷新重新跑 probe", async () => {
