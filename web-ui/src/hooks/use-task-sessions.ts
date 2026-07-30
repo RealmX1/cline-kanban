@@ -62,6 +62,23 @@ interface StartTaskSessionOptions {
 	resumeFromTrash?: boolean;
 }
 
+function logTaskSessionStartClientFailure(input: {
+	workspaceId: string;
+	taskId: string;
+	elapsedMs: number;
+	error: string;
+}): void {
+	console.error(
+		[
+			"[task-session-start-client]",
+			`workspaceId=${input.workspaceId}`,
+			`taskId=${input.taskId}`,
+			`elapsedMs=${input.elapsedMs}`,
+			`error=${JSON.stringify(input.error)}`,
+		].join(" "),
+	);
+}
+
 export interface UseTaskSessionsResult {
 	upsertSession: (summary: RuntimeTaskSessionSummary) => void;
 	ensureTaskWorkspace: (task: BoardCard) => Promise<EnsureTaskWorkspaceResult>;
@@ -184,6 +201,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			if (!currentProjectId) {
 				return { ok: false, message: "No project selected." };
 			}
+			const startRequestSentAt = Date.now();
 			try {
 				const kickoffPrompt = options?.resumeFromTrash ? "" : task.prompt.trim();
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
@@ -236,9 +254,16 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					...(task.prepFilePath ? { prepFilePath: task.prepFilePath } : {}),
 				});
 				if (!payload.ok || !payload.summary) {
+					const message = payload.error ?? "Task session start failed.";
+					logTaskSessionStartClientFailure({
+						workspaceId: currentProjectId,
+						taskId: task.id,
+						elapsedMs: Date.now() - startRequestSentAt,
+						error: message,
+					});
 					return {
 						ok: false,
-						message: payload.error ?? "Task session start failed.",
+						message,
 					};
 				}
 				upsertSession(payload.summary);
@@ -248,6 +273,12 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				return { ok: true };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				logTaskSessionStartClientFailure({
+					workspaceId: currentProjectId,
+					taskId: task.id,
+					elapsedMs: Date.now() - startRequestSentAt,
+					error: message,
+				});
 				return { ok: false, message };
 			}
 		},

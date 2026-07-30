@@ -122,7 +122,7 @@ function StageHeaderRailEntry({
 						columnId={columnId}
 						sessionSummary={taskSessions[card.id]}
 						selected
-						onStart={columnId === "backlog" ? onStartTask : undefined}
+						onStart={columnId === "backlog" || columnId === "in_progress" ? onStartTask : undefined}
 						onMoveToValidation={isReview ? onMoveToValidationTask : undefined}
 						onMoveToTrash={isReviewOrValidation ? onMoveToTrashTask : undefined}
 						onRestoreFromTrash={columnId === "trash" ? onRestoreFromTrashTask : undefined}

@@ -5,6 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TopBar } from "@/components/top-bar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
+const { mockUseIsMobile } = vi.hoisted(() => ({ mockUseIsMobile: vi.fn(() => false) }));
+
+// 默认必须是 desktop（false），否则本文件其余用例会跟着切到 mobile 形态。
+vi.mock("@/hooks/use-is-mobile", () => ({
+	useIsMobile: () => mockUseIsMobile(),
+}));
+
 function findButtonByText(container: HTMLElement, text: string): HTMLButtonElement | null {
 	return (Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.trim() === text) ??
 		null) as HTMLButtonElement | null;
@@ -22,6 +29,7 @@ describe("TopBar script shortcut onboarding", () => {
 	let previousActEnvironment: boolean | undefined;
 
 	beforeEach(() => {
+		mockUseIsMobile.mockReturnValue(false);
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -209,6 +217,80 @@ describe("TopBar script shortcut onboarding", () => {
 		}
 		// 把「切换器在面包屑左侧」这一位置决策钉成回归护栏——面包屑本身刻意一行未改。
 		expect(switcherTrigger.compareDocumentPosition(workspacePath) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
+	it("renders no task spotlight search trigger unless a handler is supplied", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						workspacePath="/repos/alpha"
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector('[data-testid="open-task-spotlight-search-button"]')).toBeNull();
+	});
+
+	it("opens task spotlight search from the top navigation and shows the shortcut badge", async () => {
+		const onOpenTaskSpotlightSearch = vi.fn();
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						workspacePath="/repos/alpha"
+						onOpenTaskSpotlightSearch={onOpenTaskSpotlightSearch}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const trigger = container.querySelector('[data-testid="open-task-spotlight-search-button"]');
+		expect(trigger).toBeInstanceOf(HTMLButtonElement);
+		// 常驻键帽徽标是这次要补的可发现性本体——顶栏此前没有任何 ⌘K 文案。
+		expect(Array.from(trigger?.querySelectorAll("kbd") ?? []).map((kbd) => kbd.textContent)).toContain("K");
+
+		await act(async () => (trigger as HTMLButtonElement).click());
+		expect(onOpenTaskSpotlightSearch).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the mobile task spotlight search trigger at the minimum touch target size", async () => {
+		mockUseIsMobile.mockReturnValue(true);
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						workspacePath="/repos/alpha"
+						onOpenTaskSpotlightSearch={() => {}}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		// mobile 没有物理键盘，这个按钮是 Spotlight 的唯一入口，必须存在且可点得中。
+		const trigger = container.querySelector('[data-testid="open-task-spotlight-search-button"]');
+		expect(trigger).toBeInstanceOf(HTMLButtonElement);
+		expect(trigger?.className).toContain("min-w-[44px]");
+		expect(trigger?.className).toContain("min-h-[44px]");
 	});
 
 	it("toggles the focused task Changes sidebar from the top navigation", async () => {

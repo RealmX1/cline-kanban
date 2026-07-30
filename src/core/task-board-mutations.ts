@@ -590,6 +590,16 @@ export function moveTaskToColumn(
 			fromColumnId: found.columnId,
 		};
 	}
+	// Backlog 是尚未启动任务的单向入口。任务一旦离开，就不能被失败回滚或其它通用移列调用
+	// 重新塞回 Backlog；启动失败仍应留在 In Progress，让会话状态与错误保持可见。
+	if (targetColumnId === "backlog") {
+		return {
+			moved: false,
+			board,
+			task: found.task,
+			fromColumnId: found.columnId,
+		};
+	}
 	const targetColumnIndex = board.columns.findIndex((column) => column.id === targetColumnId);
 	if (targetColumnIndex === -1) {
 		return {

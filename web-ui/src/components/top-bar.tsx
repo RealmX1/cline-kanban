@@ -28,6 +28,7 @@ import {
 	RUNTIME_SHORTCUT_ICON_OPTIONS,
 	type RuntimeShortcutPickerIconId,
 } from "@/components/shared/runtime-shortcut-icons";
+import { TaskSpotlightSearchTriggerButton } from "@/components/task-spotlight-search-trigger-button";
 import {
 	TopBarProjectSwitcher,
 	type TopBarProjectSwitcherState,
@@ -288,6 +289,7 @@ function TopBarGitStatusSection({
 export function TopBar({
 	onToggleSidebar,
 	projectSwitcher,
+	onOpenTaskSpotlightSearch,
 	onBack,
 	workspacePath,
 	isWorkspacePathLoading = false,
@@ -337,6 +339,9 @@ export function TopBar({
 	// 刻意不受 `hideProjectDependentActions` 影响——切换中、项目不可用、任务详情页里它都必须可用，
 	// 因为任务详情页会把左侧 ProjectNavigationPanel 整个卸载，这里是那时唯一的换项目入口。
 	projectSwitcher?: TopBarProjectSwitcherState;
+	// 打开任务 Spotlight 搜索。不传就不渲染入口（无项目态）。与项目切换器同理，刻意不受
+	// `hideProjectDependentActions` 影响——跨项目搜索在任务详情页里同样有效。
+	onOpenTaskSpotlightSearch?: () => void;
 	onBack?: () => void;
 	workspacePath?: string;
 	isWorkspacePathLoading?: boolean;
@@ -443,7 +448,15 @@ export function TopBar({
 				}}
 			>
 				{/* ---- Left side: hamburger/back, path, hints, git ---- */}
-				<div className="flex flex-nowrap items-center h-10 flex-1 min-w-0 overflow-hidden gap-1.5">
+				{/* mobile 左区在 375px 上只分到约 143px，而汉堡/切换器/搜索三个 44px 触控目标本身就要 132px：
+				    保留 1.5 的间距会让最后一个入口正好压在 overflow-hidden 的裁剪边界上（实测 150 vs 149）。
+				    窄屏收紧到 0.5，触控目标尺寸不变、只让出留白。 */}
+				<div
+					className={cn(
+						"flex flex-nowrap items-center h-10 flex-1 min-w-0 overflow-hidden",
+						isMobile ? "gap-0.5" : "gap-1.5",
+					)}
+				>
 					{isMobile && onToggleSidebar ? (
 						<Button
 							variant="ghost"
@@ -468,6 +481,13 @@ export function TopBar({
 					) : null}
 
 					{projectSwitcher ? <TopBarProjectSwitcher {...projectSwitcher} /> : null}
+
+					{onOpenTaskSpotlightSearch ? (
+						<TaskSpotlightSearchTriggerButton
+							onOpenTaskSpotlightSearch={onOpenTaskSpotlightSearch}
+							isMobile={isMobile}
+						/>
+					) : null}
 
 					{/* Workspace path */}
 					{isWorkspacePathLoading ? (

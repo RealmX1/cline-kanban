@@ -433,7 +433,7 @@ export function ColumnContextPanel({
 							defaultOpen={column.id !== "trash"}
 							onCardClick={(card) => onCardSelect(card.id)}
 							taskSessions={taskSessions}
-							onStartTask={column.id === "backlog" ? onStartTask : undefined}
+							onStartTask={column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined}
 							onRequestStartAllReadyBacklogTasks={
 								column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
 							}

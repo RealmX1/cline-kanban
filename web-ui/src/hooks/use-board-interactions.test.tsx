@@ -479,6 +479,47 @@ describe("useBoardInteractions", () => {
 		expect(startTaskSession).toHaveBeenCalledWith(backlogTask);
 	});
 
+	it("retries an In Progress task in place when no session was created", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopLinkedBacklogTaskActions();
+		const board = createBoardWithTaskInColumn("task-1", "in_progress");
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>();
+		const ensureTaskWorkspace = vi.fn(async () => ({
+			ok: true as const,
+			response: {
+				ok: true as const,
+				path: "/tmp/task-1",
+				baseRef: "main",
+				baseCommit: "abc123",
+			},
+		}));
+		const startTaskSession = vi.fn(async () => ({ ok: true as const }));
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					setBoard={setBoard}
+					ensureTaskWorkspace={ensureTaskWorkspace}
+					startTaskSession={startTaskSession}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			(latestSnapshot as HookSnapshot | null)?.handleStartTask("task-1");
+		});
+
+		const inProgressTask = board.columns.find((column) => column.id === "in_progress")?.cards[0];
+		expect(inProgressTask).toBeDefined();
+		expect(ensureTaskWorkspace).toHaveBeenCalledWith(inProgressTask);
+		expect(startTaskSession).toHaveBeenCalledWith(inProgressTask);
+	});
+
 	it("permanently deletes one task from any column without clearing the rest of the board", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 		let latestBoard: BoardData | null = null;

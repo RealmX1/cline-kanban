@@ -178,6 +178,35 @@ describe("useTaskSessions", () => {
 		expect(trackTaskResumedFromTrashMock).not.toHaveBeenCalled();
 	});
 
+	it("logs the original client-side task start failure with task identity and elapsed time", async () => {
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+		startTaskSessionMutateMock.mockRejectedValue(new Error("response transport closed"));
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const hookSnapshot = latestSnapshot as HookSnapshot | null;
+		if (hookSnapshot === null) {
+			throw new Error("Expected a hook snapshot.");
+		}
+
+		const result = await hookSnapshot.startTaskSession(createTask());
+
+		expect(result).toEqual({ ok: false, message: "response transport closed" });
+		expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("[task-session-start-client]"));
+		expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("workspaceId=project-1"));
+		expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("taskId=task-1"));
+		expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('error="response transport closed"'));
+	});
+
 	it("creates a read-only By the way session related to the current main turn", async () => {
 		vi.spyOn(crypto, "randomUUID").mockReturnValue("11111111-1111-4111-8111-111111111111");
 		let latestSnapshot: HookSnapshot | null = null;

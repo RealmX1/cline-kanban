@@ -989,6 +989,39 @@ body.kb-dependency-link-mode {
 	border-radius: 999px;
 }
 
+/* -- Terminal touch scrolling --
+   .xterm-viewport 是浮在渲染层之上的透明滚动容器。不声明 touch-action 时浏览器要先做一轮
+   「双击缩放 / 横滑 / 纵滚」的手势歧义判定才把事件交给它，触屏上表现为按下有延迟、手势常被吞；
+   不声明 overscroll-behavior 时滚到顶/底继续滑会把整个 Focus View 带走（rubber-band），
+   用户体感就是「滚不动」。两者一起声明才让终端在触屏上真正可滚。 */
+
+.kb-terminal-container .xterm-viewport {
+	touch-action: pan-y;
+	overscroll-behavior: contain;
+	-webkit-overflow-scrolling: touch;
+}
+
+/* transcript 阅读视图是普通 DOM 滚动，只需挡住 rubber-band 外溢。 */
+
+.kb-terminal-transcript-reader-scroll-area {
+	overscroll-behavior: contain;
+}
+
+/* -- Viewport-bottom floating pills --
+   Report bug / Post-Deploy Verification 两枚 pill 是 fixed 挂在 body 上的浮层，与移动端
+   Focus View 底部那条常驻虚拟按键条互不知情 —— 不让位就正好压在方向键和 Enter 上。
+   按键条挂载时把自己的实测高度写进下面这个变量（terminal-virtual-key-bar-viewport-bottom-inset.ts），
+   pill 读它整体抬高；变量缺省 0px，所以桌面端和任何没有按键条的视图位置不变。
+   这属于「跨组件、无共同父节点的布局粘合」，Tailwind 类表达不了，故落在这里。 */
+
+.kb-viewport-bottom-pill-primary {
+	bottom: calc(1rem + var(--kb-terminal-virtual-key-bar-viewport-bottom-inset, 0px));
+}
+
+.kb-viewport-bottom-pill-stacked {
+	bottom: calc(5rem + var(--kb-terminal-virtual-key-bar-viewport-bottom-inset, 0px));
+}
+
 /* -- Terminal light-mode inversion --
    Terminal renders dark internally so CLI agents output correct ANSI colors.
    CSS filter inverts the xterm canvas, then a multiply-blend overlay tints
@@ -1223,6 +1256,17 @@ body.kb-dependency-link-mode {
 
 	.kb-project-row:active {
 		background: var(--color-surface-3);
+	}
+
+	/* 桌面端 6px 的滚动条 slider 在触屏上几乎点不到，且 WebGL 渲染层本身不提供任何
+	   「这里可以滚」的视觉提示。移动端加宽命中区。 */
+	.kb-terminal-container .xterm .xterm-scrollable-element > .scrollbar.vertical {
+		width: 16px !important;
+	}
+
+	.kb-terminal-container .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
+		left: 3px !important;
+		width: 10px !important;
 	}
 }
 

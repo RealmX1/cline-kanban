@@ -134,7 +134,10 @@ function createSelection(): CardSelection {
 	};
 }
 
-function createSessionSummary(taskId = "task-1"): RuntimeTaskSessionSummary {
+function createSessionSummary(
+	taskId = "task-1",
+	overrides: Partial<RuntimeTaskSessionSummary> = {},
+): RuntimeTaskSessionSummary {
 	return {
 		taskId,
 		state: "running",
@@ -153,6 +156,7 @@ function createSessionSummary(taskId = "task-1"): RuntimeTaskSessionSummary {
 		turnOwner: "agent",
 		liveness: "live",
 		userTurnKind: null,
+		...overrides,
 	};
 }
 

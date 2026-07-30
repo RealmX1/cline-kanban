@@ -181,6 +181,33 @@ describe("BoardCard", () => {
 		expect(nextCancelButton).toBeUndefined();
 	});
 
+	it("offers an in-place retry only when an In Progress task has no session", async () => {
+		const onStart = vi.fn();
+		await act(async () => {
+			root.render(<BoardCard card={createCard()} index={0} columnId="in_progress" onStart={onStart} />);
+		});
+
+		const retryButton = container.querySelector<HTMLButtonElement>('button[aria-label="Retry task start"]');
+		expect(retryButton).not.toBeNull();
+		await act(async () => {
+			retryButton?.click();
+		});
+		expect(onStart).toHaveBeenCalledWith("task-1");
+
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard()}
+					index={0}
+					columnId="in_progress"
+					sessionSummary={createSummary("running")}
+					onStart={onStart}
+				/>,
+			);
+		});
+		expect(container.querySelector('button[aria-label="Retry task start"]')).toBeNull();
+	});
+
 	it("shows a loading state on the review done button while moving to done", async () => {
 		await act(async () => {
 			root.render(

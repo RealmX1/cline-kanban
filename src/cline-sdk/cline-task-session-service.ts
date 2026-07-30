@@ -2,7 +2,9 @@
 // runtime-api.ts uses this service to start sessions, send messages, load
 // history, and subscribe to summaries and chat events without knowing SDK
 // host, repository, or event-adapter details.
+import { randomUUID } from "node:crypto";
 import type {
+	RuntimeAgentSessionReclamationOutcome,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskImage,
@@ -116,6 +118,10 @@ export interface ClineTaskSessionService {
 	loadTaskSessionMessages(taskId: string): Promise<ClineTaskMessage[]>;
 	loadPersistedTaskSessionMessages(taskId: string): Promise<ClineSdkPersistedMessage[]>;
 	applyTurnCheckpoint(taskId: string, checkpoint: RuntimeTaskTurnCheckpoint): RuntimeTaskSessionSummary | null;
+	applyAgentSessionReclamationOutcome(
+		taskId: string,
+		outcome: RuntimeAgentSessionReclamationOutcome,
+	): RuntimeTaskSessionSummary | null;
 	dispose(): Promise<void>;
 }
 
@@ -399,6 +405,10 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 				} satisfies ClineTaskSessionEntry);
 		this.messageRepository.setTaskEntry(request.taskId, entry);
 		this.pendingTurnCancelTaskIds.delete(request.taskId);
+		// 新活体：每次建立一个新的 Cline SDK 任务会话就换一个 id（含 resumeFromTrash / resumeFromPersistence
+		// 这两条重建路径）。回收调度器据此判断「已落盘的期限说的还是不是同一个活体」，故重建出来的新会话
+		// 绝不会被上一个活体留下的陈旧期限误杀。metadata-only 补丁，不携带 facet / state。
+		updateSummary(entry, { runtimeSessionIncarnationId: randomUUID() });
 
 		if (!request.resumeFromTrash && (normalizedPrompt.length > 0 || hasRequestImages)) {
 			const message = createMessage(request.taskId, "user", normalizedPrompt, request.images);
@@ -881,6 +891,25 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		if (!summary) {
 			return null;
 		}
+		this.emitSummary(summary);
+		return summary;
+	}
+
+	// 把一次会话回收的可审计结果写回 summary sidecar（与终端 / ACP 侧同名同义）。
+	// 显式带上当前实质戳，退出 updateSummary 的 lastOutputAt 镜像——回收是「只推进存活度」的事件，
+	// 绝不能把卡片上的「agent 上次响应」刷成「刚刚」。
+	applyAgentSessionReclamationOutcome(
+		taskId: string,
+		outcome: RuntimeAgentSessionReclamationOutcome,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.messageRepository.getTaskEntry(taskId);
+		if (!entry) {
+			return null;
+		}
+		const summary = updateSummary(entry, {
+			agentSessionRuntimeReclamationOutcome: outcome,
+			lastSubstantiveOutputAt: entry.summary.lastSubstantiveOutputAt ?? null,
+		});
 		this.emitSummary(summary);
 		return summary;
 	}

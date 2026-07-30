@@ -249,30 +249,65 @@ export function mergeSummaryWithFacets(
 		patch.turnOwner !== undefined || patch.liveness !== undefined || patch.userTurnKind !== undefined;
 	const patchHasState = patch.state !== undefined;
 
-	if (patchHasFacet && !patchHasState) {
-		// facet 权威：state 由唯一 reducer 投影；三 facet 直接采信（merged 必完整）。
-		const facets = resolveSessionFacets(merged);
-		return {
-			...merged,
-			turnOwner: facets.turnOwner,
-			liveness: facets.liveness,
-			userTurnKind: facets.userTurnKind,
-			state: projectLegacyState(facets),
-			schemaVersion: SESSION_SUMMARY_SCHEMA_VERSION,
-		};
-	}
+	const mergedWithFacets = ((): RuntimeTaskSessionSummary => {
+		if (patchHasFacet && !patchHasState) {
+			// facet 权威：state 由唯一 reducer 投影；三 facet 直接采信（merged 必完整）。
+			const facets = resolveSessionFacets(merged);
+			return {
+				...merged,
+				turnOwner: facets.turnOwner,
+				liveness: facets.liveness,
+				userTurnKind: facets.userTurnKind,
+				state: projectLegacyState(facets),
+				schemaVersion: SESSION_SUMMARY_SCHEMA_VERSION,
+			};
+		}
 
-	if (patchHasState) {
-		// legacy 向（state 权威）：旧路兼容 / shutdown 持久化 / constructor seed（state+facet 同在）。
-		return applySessionFacets(merged);
-	}
+		if (patchHasState) {
+			// legacy 向（state 权威）：旧路兼容 / shutdown 持久化 / constructor seed（state+facet 同在）。
+			return applySessionFacets(merged);
+		}
 
-	// metadata-only：重派 agent 轴（turnOwner/liveness），preserve 已采集的 userTurnKind。
-	const refreshed = applySessionFacets(merged);
-	if (merged.userTurnKind !== undefined) {
-		return { ...refreshed, userTurnKind: merged.userTurnKind };
+		// metadata-only：重派 agent 轴（turnOwner/liveness），preserve 已采集的 userTurnKind。
+		const refreshed = applySessionFacets(merged);
+		if (merged.userTurnKind !== undefined) {
+			return { ...refreshed, userTurnKind: merged.userTurnKind };
+		}
+		return refreshed;
+	})();
+
+	if (!didEnterAgentTurn(prev, patch, mergedWithFacets)) {
+		// 没有开始新的 agent 回合：序号原样透传（含「从未开始过任何回合、字段仍缺失」这一态）。
+		// 刻意不在此把缺失字段补成 0——那会给每一条历史 summary 平白加一个字段、也让
+		// mergeSummaryWithFacets 与 applySessionFacets 的既有等价关系产生无谓差异。
+		return mergedWithFacets;
 	}
-	return refreshed;
+	return {
+		...mergedWithFacets,
+		agentResponseGenerationTurnSequence: (prev.agentResponseGenerationTurnSequence ?? 0) + 1,
+	};
+}
+
+// 回合序号推进：本函数是终端 / Cline SDK / ACP **三条 transport 共用**的唯一 summary 写漏斗，
+// 故序号只在这里推进一次，三侧自动一致，不需要各写一份（也就不会各自漂移）。
+//
+// 语义精确定义：`agentResponseGenerationTurnSequence` = 「这个会话条目至今开始过多少个 agent 回合」。
+// 判据是一次 facet 转移（非 agent 回合 → agent 回合），因此用户手敲、程序化投递、hook 的
+// UserPromptSubmit、自动续跑、崩溃重启后重跑——凡是让球回到 agent 手上的路径，全部计入，
+// 无一遗漏。它与 runtimeSessionIncarnationId 正交：incarnation 分辨「还是不是同一个活体」，
+// 序号分辨「同一活体内是不是同一轮」，两者共同构成陈旧回收定时器的双重防护。
+function didEnterAgentTurn(
+	prev: RuntimeTaskSessionSummary,
+	patch: Partial<RuntimeTaskSessionSummary>,
+	mergedWithFacets: RuntimeTaskSessionSummary,
+): boolean {
+	if (patch.agentResponseGenerationTurnSequence !== undefined) {
+		// 显式覆写优先：磁盘水合、测试构造等按原值采信（已在 merged 里），不在此重新推算。
+		return false;
+	}
+	return (
+		resolveSessionFacets(prev).turnOwner !== "agent" && resolveSessionFacets(mergedWithFacets).turnOwner === "agent"
+	);
 }
 
 // ── 读侧 facet 权威解析（Stage 2 翻转真相源）─────────────────────────────────────
@@ -352,6 +387,84 @@ export function isParkedAwaitingDispatchedBackgroundWork(
 	summary: RuntimeTaskSessionSummary | null | undefined,
 ): boolean {
 	return summary != null && summary.awaitingDispatchedBackgroundWork != null;
+}
+
+// ── 「停止生成响应后固定宽限期」回收：领域常量与纯判据 ────────────────────────────────────
+// 完整设计与核验见 .plan/docs/cross-harness-agent-session-inactivity-grace-period-reclamation-
+// and-pending-user-decision-carry-forward-implementation-plan.md。
+//
+// 与本文件既有五个时间常量的关系（全部保留、互不替代，切勿合并）：
+//   2s  AGENT_OUTPUT_QUIET_THRESHOLD_MS            读 lastOutputAt        自动续跑注入门控
+//   5s  VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS 读 lastSubstantiveOutputAt Validation 列自动打回
+//   5min RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS      读 lastOutputAt        Active/Stale 二分
+//   5min IDLE_STALL_AUTO_REVIEW_THRESHOLD_MS（session-manager） 读实质戳   停在提示符时自愈翻人回合
+//   2h   本常量                                     读**离散停止事件**      回收 agent 进程 + 其 MCP 后代
+// 关键区别：上面四个都读「时间戳新鲜度」，本常量读的是一次明确的状态转移（agentResponseGenerationStopped）。
+// spinner 重绘会推进 lastOutputAt、实质分类器有节流窗口，二者都不表达「这一轮已经结束」。
+//
+// 2 小时统一适用于 task 会话、sidebar 项目会话（__home_agent__:*）、以及 error / interrupted / failed
+// 等人回合——单一常数、零 per-kind 分档（用户拍板）。
+export const AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS = 2 * 60 * 60_000;
+
+// park 轨道的独立兜底上限（默认值）：park 不走上面的宽限期——它表示「主 agent 正在等自己派发的
+// 后台工作」，那本就可能跑很久。24h 只是**未显式声明期限时**的兜底；`kanban task park --max-retention`
+// / `--no-expiry` / `--renew` 可覆盖（见 park 兜底一节）。到期不静默杀，走可审计的 park_abandoned。
+export const PARKED_AGENT_SESSION_ABANDONED_DEFAULT_MAX_RETENTION_MS = 24 * 60 * 60_000;
+
+// 由「进入非生成态的时刻」算出「可回收时刻」。刻意返回绝对 epoch ms 而非剩余时长：
+// 记录落盘后，Kanban / OS 停机期间流逝的墙钟时间自然计入，重启恢复时按同一口径判定。
+export function computeAgentSessionRuntimeReclamationEligibleAt(
+	retentionAnchorAt: number,
+	gracePeriodMs: number = AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS,
+): number {
+	return retentionAnchorAt + gracePeriodMs;
+}
+
+// 是否已到可回收时刻。eligibleAt 为 null = 调用方显式声明「无期限」（park --no-expiry）⇒ 恒不到期。
+// 取「大于等于」：恰好等于期限视为已到期（与上面新鲜度判据的「严格小于」互补，边界不重叠）。
+export function isAgentSessionRuntimeReclamationDue(eligibleAt: number | null | undefined, nowMs: number): boolean {
+	return eligibleAt !== null && eligibleAt !== undefined && nowMs >= eligibleAt;
+}
+
+// 保守判据：这个会话此刻是否仍被认为「在生成响应」（⇒ 绝不起算宽限期、任何既有期限立即作废）。
+// agent 回合 = 球在 agent 那边，即便它其实卡死了也一律按仍在生成处理——宁可漏回收，不可杀掉正在
+// 干活的会话。park 是例外：parked 的主 agent 真相是普通 agent 三元组，但它已经结束了自己这一轮，
+// 走 park 独立轨道（见 PARKED_AGENT_SESSION_ABANDONED_DEFAULT_MAX_RETENTION_MS）。
+export function isAgentSessionCurrentlyGeneratingResponse(
+	facets: SessionFacets,
+	summary: RuntimeTaskSessionSummary | null | undefined,
+): boolean {
+	return facets.turnOwner === "agent" && !isParkedAwaitingDispatchedBackgroundWork(summary);
+}
+
+// 「这个会话此刻还占着值得回收的运行时资源吗」——即回收动作真有事可做。
+// 只认 liveness==="live"：
+//   - starting / retrying 只出现在 agent 回合，已被上面的「仍在生成」判据挡在门外；
+//   - exited / failed / interrupted 表示 agent 进程侧已终结（终端 agent 完工退出后等人审查即属此列），
+//     回收无进程可杀、无连接可关，起算宽限期只会产生噪音记录；
+//   - none 表示压根没有会话。
+// 这条判据同时天然处理了「进程重启后水合出的历史会话」：hydrateFromRecord 会把无法恢复的
+// running-agent 声称对账掉，那些记录的 liveness 不是 live，于是不会被起算期限。
+export function hasReclaimableAgentSessionRuntime(facets: SessionFacets): boolean {
+	return facets.liveness === "live";
+}
+
+// 陈旧定时器防护：一条已落盘的回收期限记录，是否仍然说的是「当前这个活体的这一轮」。
+// 双重判据（incarnation + turnSequence）缺一不可：
+//   - incarnation 变了 ⇒ 会话被重启过，旧期限指向的是一个已经不存在的活体；
+//   - incarnation 没变但 turnSequence 变了 ⇒ 同一活体内用户又发了一句、agent 已经继续跑过。
+// 任一不匹配即返回 false，调用方必须放弃回收并把记录置 superseded。
+export function isReclamationDeadlineStillCurrentForSession(
+	deadline: { runtimeSessionIncarnationId: string; agentResponseGenerationTurnSequence: number },
+	summary: RuntimeTaskSessionSummary | null | undefined,
+): boolean {
+	if (summary == null) {
+		return false;
+	}
+	if (summary.runtimeSessionIncarnationId !== deadline.runtimeSessionIncarnationId) {
+		return false;
+	}
+	return (summary.agentResponseGenerationTurnSequence ?? 0) === deadline.agentResponseGenerationTurnSequence;
 }
 
 // ── 展示叠加：把存储基值 liveness 的 "live" 按新鲜度细分为 computing / quiet ──────────────

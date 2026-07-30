@@ -30,7 +30,7 @@ export function VerificationGuidanceOverlay({
 	}
 
 	return createPortal(
-		<div className="fixed bottom-20 left-4 z-[80] flex max-h-[70vh] w-[340px] flex-col rounded-lg border border-border-bright bg-surface-2 shadow-2xl">
+		<div className="kb-viewport-bottom-pill-stacked fixed left-4 z-[80] flex max-h-[70vh] w-[340px] max-w-[calc(100vw-2rem)] flex-col rounded-lg border border-border-bright bg-surface-2 shadow-2xl">
 			{/* 标题栏 */}
 			<div className="flex shrink-0 items-center justify-between gap-2 rounded-t-lg border-b border-border bg-surface-1 px-3 py-2">
 				<div className="flex min-w-0 items-center gap-2">

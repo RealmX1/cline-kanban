@@ -55,9 +55,11 @@ import {
 	type ActiveRuntimeSessionShutdownResult,
 	stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace,
 } from "./active-runtime-session-shutdown";
+import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import type { RuntimeStateHub } from "./runtime-state-hub";
+import { createTransportAwareAgentSessionReclamationExecutor } from "./transport-aware-agent-session-reclamation";
 import type { WorkspaceRegistry } from "./workspace-registry";
 
 interface DisposeTrackedWorkspaceResult {
@@ -225,6 +227,46 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		return Array.from(summariesByTaskId.values());
 	};
+	// 「停止生成响应后固定宽限期」回收调度器。放在这里是因为三种 transport 的服务持有者都在本作用域：
+	// listProjectRuntimeSessionSummaries 已经把三条 summary 流合并成一个查询面，正是陈旧定时器防护
+	// 需要的「当前这个 task 的 summary 到底长什么样」。
+	//
+	// 回收是**真实生效**的：到期会真的终止进程 / 连接 / SDK 会话。安全性由三重防护保证——agent 回合
+	// 永不计时、动手前双重比对（活体 id + 回合序号）、只回收 liveness==="live" 的会话；且回收只终止
+	// 运行时，worktree / 未提交改动 / 提交 / 消息历史一律不动。
+	const findRuntimeSessionSummary = (workspaceId: string, taskId: string): RuntimeTaskSessionSummary | null =>
+		listProjectRuntimeSessionSummaries(workspaceId).find((summary) => summary.taskId === taskId) ?? null;
+	const agentSessionInactivityReclamationScheduler = createAgentSessionInactivityReclamationScheduler({
+		getTaskSessionSummary: findRuntimeSessionSummary,
+		reclaimAgentSession: createTransportAwareAgentSessionReclamationExecutor({
+			getTerminalManager: (workspaceId) => deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId),
+			getClineTaskSessionService: (workspaceId) => clineTaskSessionServiceByWorkspaceId.get(workspaceId) ?? null,
+			getAcpTaskSessionService: (workspaceId) => acpTaskSessionServiceByWorkspaceId.get(workspaceId) ?? null,
+		}),
+		// 审计结果写回 summary sidecar，供卡片 / Focus View 显示「会话已被回收」。
+		// 用户重进任务时必须看到明确说明（worktree、未提交改动、提交、消息历史均保留），
+		// 而不是一个空终端让人误以为只是加载慢。
+		onReclamationOutcome: ({ workspaceId, record, outcome }) => {
+			switch (record.sessionTransport) {
+				case "pty_terminal":
+					deps.workspaceRegistry
+						.getTerminalManagerForWorkspace(workspaceId)
+						?.applyAgentSessionReclamationOutcome(record.taskId, outcome);
+					return;
+				case "in_process_cline_sdk":
+					clineTaskSessionServiceByWorkspaceId
+						.get(workspaceId)
+						?.applyAgentSessionReclamationOutcome(record.taskId, outcome);
+					return;
+				case "acp_stdio_subprocess":
+					acpTaskSessionServiceByWorkspaceId
+						.get(workspaceId)
+						?.applyAgentSessionReclamationOutcome(record.taskId, outcome);
+					return;
+			}
+		},
+	});
+
 	const stopAndCollectProjectRuntimeSessionsForSafePersistence = async (
 		workspaceId: string,
 	): Promise<ActiveRuntimeSessionShutdownResult> => {
@@ -663,10 +705,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		? buildKanbanRuntimeUrl(`/${encodeURIComponent(activeWorkspaceId)}`)
 		: getKanbanRuntimeOrigin();
 
+	// 启动即扫一次：账本里存的是绝对到期时刻，故 Kanban 停机期间流逝的时间自然计入，
+	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
+	agentSessionInactivityReclamationScheduler.start();
+
 	return {
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
+			agentSessionInactivityReclamationScheduler.stop();
 			// ACP agent 是持有 stdio 的真子进程：不在这里拆掉，关服后它还活着、还能改仓库，
 			// 而且它占着的 stdio 管道会把 Kanban 进程本身的退出一起拖住。
 			for (const service of acpTaskSessionServiceByWorkspaceId.values()) {

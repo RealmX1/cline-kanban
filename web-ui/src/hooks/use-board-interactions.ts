@@ -343,16 +343,6 @@ export function useBoardInteractions({
 			const ensured = await ensureTaskWorkspace(task);
 			if (!ensured.ok) {
 				notifyError(ensured.message ?? "Could not set up task workspace.");
-				if (optimisticMove) {
-					setBoard((currentBoard) => {
-						const currentColumnId = getTaskColumnId(currentBoard, taskId);
-						if (currentColumnId !== "in_progress") {
-							return currentBoard;
-						}
-						const reverted = moveTaskToColumn(currentBoard, taskId, fromColumnId);
-						return reverted.moved ? reverted.board : currentBoard;
-					});
-				}
 				return false;
 			}
 			if (ensured.response?.warning) {
@@ -383,16 +373,6 @@ export function useBoardInteractions({
 			const started = await startTaskSession(task);
 			if (!started.ok) {
 				notifyError(started.message ?? "Could not start task session.");
-				if (optimisticMove) {
-					setBoard((currentBoard) => {
-						const currentColumnId = getTaskColumnId(currentBoard, taskId);
-						if (currentColumnId !== "in_progress") {
-							return currentBoard;
-						}
-						const reverted = moveTaskToColumn(currentBoard, taskId, fromColumnId);
-						return reverted.moved ? reverted.board : currentBoard;
-					});
-				}
 				return false;
 			}
 			if (!optimisticMove) {
@@ -747,13 +727,27 @@ export function useBoardInteractions({
 	const handleStartTask = useCallback(
 		(taskId: string) => {
 			const selection = findCardSelection(board, taskId);
-			if (!selection || selection.column.id !== "backlog") {
+			if (!selection) {
+				return;
+			}
+			if (selection.column.id === "in_progress" && sessions[taskId] == null) {
+				maybeRequestNotificationPermissionForTaskStart();
+				void kickoffTaskInProgress(selection.card, taskId, "in_progress");
+				return;
+			}
+			if (selection.column.id !== "backlog") {
 				return;
 			}
 			maybeRequestNotificationPermissionForTaskStart();
 			void startBacklogTaskWithAnimation(selection.card);
 		},
-		[board, maybeRequestNotificationPermissionForTaskStart, startBacklogTaskWithAnimation],
+		[
+			board,
+			kickoffTaskInProgress,
+			maybeRequestNotificationPermissionForTaskStart,
+			sessions,
+			startBacklogTaskWithAnimation,
+		],
 	);
 
 	const handleStartAllBacklogTasks = useCallback(
