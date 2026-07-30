@@ -39,6 +39,7 @@ import {
 } from "@/components/detail-panels/cline-model-picker-options";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
+import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
@@ -355,7 +356,6 @@ export function TaskCardBody({
 					: null
 				: reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
 			: null;
-	const reviewRefLabel = reviewWorkspaceSnapshot?.headCommit?.slice(0, 8) ?? "HEAD";
 	const reviewChangeSummary = reviewWorkspaceSnapshot
 		? reviewWorkspaceSnapshot.changedFiles == null
 			? null
@@ -414,13 +414,22 @@ export function TaskCardBody({
 		const parts = [agentLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentLabel, modelOverrideLabel]);
-	// 简写目录行：{worktree/inplace} @ {HEAD} {N commits} ({changed files} +{add} -{del})。
-	// commitsSinceFork = fork-point..HEAD；工作区脏统计仍相对 HEAD。
+	// 简写目录行：{worktree/inplace} ↑{ahead} ↓{behind} ({changed files} +{add} -{del})。
+	// ahead/behind 是与 base 分支的双向分歧（两侧皆 0 时整体不渲染）；工作区脏统计仍相对 HEAD。
 	const worktreeModeLabel = card.worktreeMode === "inplace" ? "inplace" : "worktree";
-	const commitsSinceForkLabel =
-		reviewWorkspaceSnapshot?.commitsSinceFork != null
-			? `${reviewWorkspaceSnapshot.commitsSinceFork} ${reviewWorkspaceSnapshot.commitsSinceFork === 1 ? "commit" : "commits"}`
-			: null;
+	const commitsAheadOfBaseRef = reviewWorkspaceSnapshot?.commitsAheadOfBaseRef ?? null;
+	const commitsBehindBaseRef = reviewWorkspaceSnapshot?.commitsBehindBaseRef ?? null;
+	const baseRefDivergenceTooltip = useMemo(() => {
+		const pluralizeCommits = (count: number) => `${count} ${count === 1 ? "commit" : "commits"}`;
+		const parts: string[] = [];
+		if (commitsAheadOfBaseRef) {
+			parts.push(`${pluralizeCommits(commitsAheadOfBaseRef)} ahead of ${card.baseRef}`);
+		}
+		if (commitsBehindBaseRef) {
+			parts.push(`${pluralizeCommits(commitsBehindBaseRef)} behind ${card.baseRef}`);
+		}
+		return parts.length > 0 ? parts.join(" · ") : null;
+	}, [commitsAheadOfBaseRef, commitsBehindBaseRef, card.baseRef]);
 	// 复制源优先绝对路径（snapshot.path），trash 无快照时退回重建的展示路径，再退回 base 仓库路径。
 	const copyableDirectoryPath = reviewWorkspaceSnapshot?.path ?? reviewWorkspacePath ?? workspacePath ?? null;
 	const showDirectoryCopyButton = showDirectoryRow && Boolean(copyableDirectoryPath);
@@ -894,14 +903,19 @@ export function TaskCardBody({
 						)}
 						<span className={cn("min-w-0 flex-1 break-words", isTrashCard && "line-through")}>
 							<span>{worktreeModeLabel}</span>
-							<span className="mx-1" style={{ color: SESSION_ACTIVITY_COLOR.muted }}>
-								@
-							</span>
-							<span>{reviewRefLabel}</span>
-							{commitsSinceForkLabel ? (
-								<>
-									<span className="mx-1">{commitsSinceForkLabel}</span>
-								</>
+							{baseRefDivergenceTooltip ? (
+								// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，
+								// 不能直接是不转发 props/ref 的函数组件——否则 hover 根本触发不了 tooltip。
+								<Tooltip side="bottom" content={baseRefDivergenceTooltip}>
+									<span className="mx-1 inline-flex align-middle">
+										<AheadBehindIndicator
+											ahead={commitsAheadOfBaseRef}
+											behind={commitsBehindBaseRef}
+											tone="semantic"
+											iconSize={10}
+										/>
+									</span>
+								</Tooltip>
 							) : null}
 							{reviewChangeSummary ? (
 								<>

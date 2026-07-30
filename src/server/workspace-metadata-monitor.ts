@@ -57,6 +57,9 @@ interface CachedTaskWorkspaceMetadata {
 	data: RuntimeTaskWorkspaceMetadata;
 	stateToken: string | null;
 	cheapChangeToken: string | null;
+	// 上次算出这份数据时 base 分支的 tip commit。**门控必读**：廉价 fs-stat token 与 probe 的 stateToken
+	// 都只反映 worktree 自身，捕获不到 base 分支单方面推进；不比对这一项，commitsBehindBaseRef 会被永久冻结。
+	baseRefTipCommit: string | null;
 	lastFullRefreshAtMs: number;
 }
 
@@ -135,7 +138,8 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.exists === b.exists &&
 		a.baseRef === b.baseRef &&
 		a.baseCommit === b.baseCommit &&
-		a.commitsSinceFork === b.commitsSinceFork &&
+		a.commitsAheadOfBaseRef === b.commitsAheadOfBaseRef &&
+		a.commitsBehindBaseRef === b.commitsBehindBaseRef &&
 		a.branch === b.branch &&
 		a.isDetached === b.isDetached &&
 		a.headCommit === b.headCommit &&
@@ -251,23 +255,66 @@ async function loadTaskForkPointCommit(workspacePath: string, baseRef: string): 
 	return result.ok && result.stdout ? result.stdout : null;
 }
 
-/** fork-point..HEAD 的 commit 数；无 fork/HEAD 或 git 失败 → null。 */
-async function loadCommitsSinceFork(workspacePath: string, baseCommit: string | null): Promise<number | null> {
-	if (!baseCommit) {
-		return null;
-	}
-	const result = await runGit(workspacePath, ["rev-list", "--count", `${baseCommit}..HEAD`]);
+interface TaskBaseRefDivergence {
+	/** HEAD 独有的提交数（任务开工后落在这个 worktree 上的提交）。 */
+	commitsAheadOfBaseRef: number | null;
+	/** base 分支独有、任务尚未吸收的提交数。 */
+	commitsBehindBaseRef: number | null;
+}
+
+const UNKNOWN_TASK_BASE_REF_DIVERGENCE: TaskBaseRefDivergence = {
+	commitsAheadOfBaseRef: null,
+	commitsBehindBaseRef: null,
+};
+
+/**
+ * 任务 worktree 与 base 分支的双向分歧，一条命令同出：
+ * `git rev-list --left-right --count <baseRef>...HEAD`（三个点 = 对称差）输出 `<behind>\t<ahead>`，
+ * 左侧为 baseRef 独有、右侧为 HEAD 独有。ahead 与旧的 `merge-base..HEAD` 计数是同一个集合，
+ * 所以这条命令**顶替**了原先的 rev-list，per-task git spawn 数不增加。
+ * baseRef 不可解析 / git 失败 / 输出不合预期 → 两项皆 null，优雅降级。
+ */
+async function loadTaskBaseRefDivergence(workspacePath: string, baseRef: string): Promise<TaskBaseRefDivergence> {
+	const result = await runGit(workspacePath, ["rev-list", "--left-right", "--count", `${baseRef}...HEAD`]);
 	if (!result.ok || !result.stdout) {
-		return null;
+		return UNKNOWN_TASK_BASE_REF_DIVERGENCE;
 	}
-	const parsed = Number.parseInt(result.stdout, 10);
-	return Number.isFinite(parsed) ? parsed : null;
+	const [behindText, aheadText] = result.stdout.split(/\s+/);
+	const behind = Number.parseInt(behindText ?? "", 10);
+	const ahead = Number.parseInt(aheadText ?? "", 10);
+	if (!Number.isFinite(behind) || !Number.isFinite(ahead)) {
+		return UNKNOWN_TASK_BASE_REF_DIVERGENCE;
+	}
+	return { commitsAheadOfBaseRef: ahead, commitsBehindBaseRef: behind };
+}
+
+/**
+ * 解析 base 分支当前 tip。**按 workspace 去重、每个刷新周期每个 distinct baseRef 只解析一次**，
+ * 而不是每个任务各跑一遍——实际几乎总是只有一个 baseRef（如 `main`），于是每 poll tick 每仓库 ≈1 次
+ * `rev-parse`，与任务数无关。`rev-parse` 不读 index、不扫工作树，是最廉价的 git 命令之一。
+ * 该 tip 只用于门控失效判定（见 CachedTaskWorkspaceMetadata.baseRefTipCommit），不直接下发前端。
+ */
+function createBaseRefTipResolver(workspacePath: string): (baseRef: string) => Promise<string | null> {
+	const tipByBaseRef = new Map<string, Promise<string | null>>();
+	return (baseRef: string) => {
+		const cached = tipByBaseRef.get(baseRef);
+		if (cached) {
+			return cached;
+		}
+		const pending = workspaceMetadataGitSpawnConcurrencyLimiter(async () => {
+			const result = await runGit(workspacePath, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
+			return result.ok && result.stdout ? result.stdout : null;
+		});
+		tipByBaseRef.set(baseRef, pending);
+		return pending;
+	};
 }
 
 async function loadTaskWorkspaceMetadata(
 	workspacePath: string,
 	task: TrackedTaskWorkspace,
 	current: CachedTaskWorkspaceMetadata | null,
+	resolveBaseRefTip: (baseRef: string) => Promise<string | null>,
 ): Promise<CachedTaskWorkspaceMetadata | null> {
 	const pathInfo = await getTaskWorkspacePathInfo({
 		cwd: workspacePath,
@@ -292,7 +339,8 @@ async function loadTaskWorkspaceMetadata(
 				exists: false,
 				baseRef: pathInfo.baseRef,
 				baseCommit: null,
-				commitsSinceFork: null,
+				commitsAheadOfBaseRef: null,
+				commitsBehindBaseRef: null,
 				branch: null,
 				isDetached: false,
 				headCommit: null,
@@ -303,18 +351,23 @@ async function loadTaskWorkspaceMetadata(
 			},
 			stateToken: null,
 			cheapChangeToken: null,
+			baseRefTipCommit: null,
 			lastFullRefreshAtMs: 0,
 		};
 	}
 
 	try {
 		const now = Date.now();
-		// 第一层门控（不 spawn git）：廉价 token 未变、路径/baseRef 一致且未超兜底窗口 → 复用缓存。
+		// base 分支 tip 必须在两层门控**之前**拿到：worktree 自身的 token 反映不出 base 单方面推进，
+		// 不比对 tip 就会把 commitsBehindBaseRef 永久冻结在首次算出的值。按 baseRef 去重后每周期仅 1 次 spawn。
+		const baseRefTipCommit = await resolveBaseRefTip(pathInfo.baseRef);
+		// 第一层门控（不 spawn git）：廉价 token 与 base tip 均未变、路径/baseRef 一致且未超兜底窗口 → 复用缓存。
 		const cheapTokenBeforeProbe = await computeWorktreeGitChangeToken(pathInfo.path);
 		if (
 			current &&
 			current.cheapChangeToken !== null &&
 			current.cheapChangeToken === cheapTokenBeforeProbe &&
+			current.baseRefTipCommit === baseRefTipCommit &&
 			current.data.path === pathInfo.path &&
 			current.data.baseRef === pathInfo.baseRef &&
 			now - current.lastFullRefreshAtMs < GIT_METADATA_FULL_REFRESH_INTERVAL_MS
@@ -322,7 +375,7 @@ async function loadTaskWorkspaceMetadata(
 			return current;
 		}
 		// 门控放行后才进入限流器：真正 spawn git 的探针工作（probe + getGitSyncSummary +
-		// loadTaskForkPointCommit + loadCommitsSinceFork）钳进共享并发上限。
+		// loadTaskForkPointCommit + loadTaskBaseRefDivergence）钳进共享并发上限。
 		return await workspaceMetadataGitSpawnConcurrencyLimiter(async () => {
 			const probe = await probeGitWorkspaceState(pathInfo.path, { knownRepoRoot: pathInfo.path });
 			// 真探针可能刷新 index 的 stat 缓存，故其后重算 token 存下，保证后续跳过判定稳定。
@@ -330,6 +383,7 @@ async function loadTaskWorkspaceMetadata(
 			if (
 				current &&
 				current.stateToken === probe.stateToken &&
+				current.baseRefTipCommit === baseRefTipCommit &&
 				current.data.path === pathInfo.path &&
 				current.data.baseRef === pathInfo.baseRef
 			) {
@@ -341,7 +395,7 @@ async function loadTaskWorkspaceMetadata(
 			}
 			const summary = await getGitSyncSummary(pathInfo.path, { probe });
 			const baseCommit = await loadTaskForkPointCommit(pathInfo.path, pathInfo.baseRef);
-			const commitsSinceFork = await loadCommitsSinceFork(pathInfo.path, baseCommit);
+			const divergence = await loadTaskBaseRefDivergence(pathInfo.path, pathInfo.baseRef);
 			return {
 				data: {
 					taskId: task.taskId,
@@ -349,7 +403,8 @@ async function loadTaskWorkspaceMetadata(
 					exists: true,
 					baseRef: pathInfo.baseRef,
 					baseCommit,
-					commitsSinceFork,
+					commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
+					commitsBehindBaseRef: divergence.commitsBehindBaseRef,
 					branch: probe.currentBranch,
 					isDetached: probe.headCommit !== null && probe.currentBranch === null,
 					headCommit: probe.headCommit,
@@ -360,6 +415,7 @@ async function loadTaskWorkspaceMetadata(
 				},
 				stateToken: probe.stateToken,
 				cheapChangeToken: cheapTokenAfterProbe,
+				baseRefTipCommit,
 				lastFullRefreshAtMs: now,
 			};
 		});
@@ -374,7 +430,8 @@ async function loadTaskWorkspaceMetadata(
 				exists: true,
 				baseRef: pathInfo.baseRef,
 				baseCommit: null,
-				commitsSinceFork: null,
+				commitsAheadOfBaseRef: null,
+				commitsBehindBaseRef: null,
 				branch: null,
 				isDetached: false,
 				headCommit: null,
@@ -385,6 +442,7 @@ async function loadTaskWorkspaceMetadata(
 			},
 			stateToken: null,
 			cheapChangeToken: null,
+			baseRefTipCommit: null,
 			lastFullRefreshAtMs: 0,
 		};
 	}
@@ -416,10 +474,12 @@ export function createWorkspaceMetadataMonitor(
 			const previousSnapshot = buildWorkspaceMetadataSnapshot(entry);
 			entry.homeGit = await loadHomeGitMetadata(entry);
 
+			// 每个刷新周期一个新的解析器：base tip 在周期内保持一致，且同 baseRef 的所有任务共享一次 rev-parse。
+			const resolveBaseRefTip = createBaseRefTipResolver(entry.workspacePath);
 			const nextTaskEntries = await Promise.all(
 				entry.trackedTasks.map(async (task) => {
 					const current = entry.taskMetadataByTaskId.get(task.taskId) ?? null;
-					const next = await loadTaskWorkspaceMetadata(entry.workspacePath, task, current);
+					const next = await loadTaskWorkspaceMetadata(entry.workspacePath, task, current, resolveBaseRefTip);
 					return next ? [task.taskId, next] : null;
 				}),
 			);

@@ -1,8 +1,9 @@
 import { Fzf } from "fzf";
-import { AlertCircle, ArrowDown, ArrowUp, Cloud, FileText, GitBranch, Info, Locate, Search } from "lucide-react";
+import { AlertCircle, Cloud, FileText, GitBranch, Info, Locate, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { renderFuzzyHighlightedText } from "@/components/shared/render-fuzzy-highlighted-text";
+import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { RuntimeGitRef } from "@/runtime/types";
@@ -21,45 +22,6 @@ const HEAD_BADGE_BACKGROUND = "color-mix(in srgb, var(--color-status-blue) 15%, 
 const HEAD_BADGE_BACKGROUND_SELECTED = "color-mix(in srgb, white 18%, transparent)";
 const isMacPlatform =
 	typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
-
-function AheadBehindIndicator({
-	ahead,
-	behind,
-	isSelected = false,
-}: {
-	ahead?: number;
-	behind?: number;
-	isSelected?: boolean;
-}): React.ReactElement | null {
-	if (!ahead && !behind) {
-		return null;
-	}
-	return (
-		<span
-			style={{
-				display: "inline-flex",
-				alignItems: "center",
-				gap: 3,
-				fontSize: 10,
-				color: isSelected ? SELECTED_SUBTLE_TEXT_COLOR : "var(--color-text-tertiary)",
-				flexShrink: 0,
-			}}
-		>
-			{ahead ? (
-				<span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
-					<ArrowUp size={9} />
-					{ahead}
-				</span>
-			) : null}
-			{behind ? (
-				<span style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
-					<ArrowDown size={9} />
-					{behind}
-				</span>
-			) : null}
-		</span>
-	);
-}
 
 export function GitRefsPanel({
 	refs,
@@ -230,6 +192,7 @@ export function GitRefsPanel({
 									ahead={headBranch.ahead}
 									behind={headBranch.behind}
 									isSelected={isHeadBranchSelected}
+									className="text-[10px]"
 								/>
 								<span
 									className="inline-flex items-center rounded-full px-1.5 py-0.5 text-xs font-medium"
@@ -280,7 +243,12 @@ export function GitRefsPanel({
 											isSelected ? MATCHED_TEXT_STYLE_SELECTED : MATCHED_TEXT_STYLE,
 										)}
 									</span>
-									<AheadBehindIndicator ahead={ref.ahead} behind={ref.behind} isSelected={isSelected} />
+									<AheadBehindIndicator
+										ahead={ref.ahead}
+										behind={ref.behind}
+										isSelected={isSelected}
+										className="text-[10px]"
+									/>
 								</RefRow>
 							);
 						})}
