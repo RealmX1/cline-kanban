@@ -1479,6 +1479,18 @@ describe("useBoardInteractions", () => {
 		const cardIdsIn = (board: BoardData, columnId: BoardData["columns"][number]["id"]): string[] =>
 			(board.columns.find((column) => column.id === columnId)?.cards ?? []).map((card) => card.id);
 
+		it("已有 live session 的 Backlog 卡自动归位 In Progress", async () => {
+			let currentBoard = createBoardWithTaskInColumn("task-live", "backlog");
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			await renderWithSessions(currentBoard, setBoard, {
+				"task-live": createRunningSession("task-live"),
+			});
+			expect(cardIdsIn(currentBoard, "backlog")).toEqual([]);
+			expect(cardIdsIn(currentBoard, "in_progress")).toEqual(["task-live"]);
+		});
+
 		it("awaiting_review 会话从 In Progress 自动落位 Review（等价旧 state==='awaiting_review'）", async () => {
 			let currentBoard = createBoardWithTaskInColumn("task-ar", "in_progress");
 			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {

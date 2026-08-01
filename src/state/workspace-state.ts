@@ -19,7 +19,7 @@ import {
 } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
 import { applySessionFacets } from "../core/session-activity";
-import { updateTaskDependencies } from "../core/task-board-mutations";
+import { getTaskColumnId, moveTaskToColumn, updateTaskDependencies } from "../core/task-board-mutations";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
@@ -318,6 +318,56 @@ function parseWorkspaceStateSavePayload(payload: RuntimeWorkspaceStateSaveReques
 		throw new Error(`Invalid workspace state save payload. ${formatSchemaIssues(parsed.error)}`);
 	}
 	return parsed.data;
+}
+
+function reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
+	persistedBoard: RuntimeBoardData,
+	incomingBoard: RuntimeBoardData,
+	reconciledSessions: Record<string, RuntimeTaskSessionSummary>,
+): RuntimeBoardData {
+	let reconciledBoard = reconcileBoardColumns(incomingBoard);
+	const incomingBacklogTaskIds =
+		reconciledBoard.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id) ?? [];
+
+	for (const taskId of incomingBacklogTaskIds) {
+		const persistedColumnId = getTaskColumnId(persistedBoard, taskId);
+		const taskHasStartedSession = reconciledSessions[taskId]?.startedAt != null;
+		const targetColumnId =
+			persistedColumnId && persistedColumnId !== "backlog"
+				? persistedColumnId
+				: taskHasStartedSession
+					? "in_progress"
+					: null;
+		if (!targetColumnId) {
+			continue;
+		}
+		const moved = moveTaskToColumn(reconciledBoard, taskId, targetColumnId);
+		if (moved.moved) {
+			reconciledBoard = moved.board;
+		}
+	}
+
+	return reconciledBoard;
+}
+
+function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
+	incomingBoard: RuntimeBoardData,
+	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
+	incomingSessions: Record<string, RuntimeTaskSessionSummary>,
+): Record<string, RuntimeTaskSessionSummary> {
+	let reconciledSessions = incomingSessions;
+	for (const column of incomingBoard.columns) {
+		for (const card of column.cards) {
+			if (incomingSessions[card.id] || persistedSessions[card.id]?.startedAt == null) {
+				continue;
+			}
+			if (reconciledSessions === incomingSessions) {
+				reconciledSessions = { ...incomingSessions };
+			}
+			reconciledSessions[card.id] = persistedSessions[card.id];
+		}
+	}
+	return reconciledSessions;
 }
 
 async function readWorkspaceBoard(workspaceId: string): Promise<RuntimeBoardData> {
@@ -766,8 +816,18 @@ export async function saveWorkspaceState(
 		) {
 			throw new WorkspaceStateConflictError(expectedRevision, currentMeta.revision);
 		}
-		const board = parsedPayload.board;
-		const sessions = parsedPayload.sessions;
+		const persistedBoard = await readWorkspaceBoard(context.workspaceId);
+		const persistedSessions = await readWorkspaceSessions(context.workspaceId);
+		const sessions = preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
+			parsedPayload.board,
+			persistedSessions,
+			parsedPayload.sessions,
+		);
+		const board = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
+			persistedBoard,
+			parsedPayload.board,
+			sessions,
+		);
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {
 			revision: nextRevision,
@@ -821,8 +881,16 @@ export async function mutateWorkspaceState<T>(
 			};
 		}
 
-		const nextBoard = mutation.board;
-		const nextSessions = mutation.sessions ?? currentSessions;
+		const nextSessions = preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
+			mutation.board,
+			currentSessions,
+			mutation.sessions ?? currentSessions,
+		);
+		const nextBoard = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
+			currentBoard,
+			mutation.board,
+			nextSessions,
+		);
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {
 			revision: nextRevision,

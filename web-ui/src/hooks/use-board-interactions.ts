@@ -470,7 +470,7 @@ export function useBoardInteractions({
 				if (previous && previous.updatedAt > summary.updatedAt) {
 					continue;
 				}
-				const columnId = getTaskColumnId(nextBoard, summary.taskId);
+				let columnId = getTaskColumnId(nextBoard, summary.taskId);
 				// 双轴迁移（Stage 3 ④，行为保持）：列自动流转的 state 读全部翻为 facet 权威
 				// （resolveSessionFacets），绕开 projectLegacyState 对 live↔exited 的有损压扁。各判据
 				// 严格等价旧 legacy state：isAwaitingUserReviewTurn ⟺ awaiting_review（含 user+exited
@@ -478,6 +478,13 @@ export function useBoardInteractions({
 				// turnOwner==="agent" ⟺ running、liveness==="interrupted" ⟺ interrupted。
 				const facets = resolveSessionFacets(summary);
 				const previousFacets = previous ? resolveSessionFacets(previous) : undefined;
+				if (columnId === "backlog" && summary.startedAt != null) {
+					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
+					if (moved.moved) {
+						nextBoard = moved.board;
+						columnId = "in_progress";
+					}
+				}
 				if (isAwaitingUserReviewTurn(facets) && columnId === "in_progress") {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review");
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
@@ -502,7 +509,7 @@ export function useBoardInteractions({
 						!isParkedAwaitingDispatchedBackgroundWork(summary) &&
 						isAgentActivelyProducingOutput(summary, nowMs)) ||
 					(columnId === "validation" && isAgentActivelyProducingOutput(summary, nowMs));
-				if (shouldBounceRunningToInProgress) {
+				if (shouldBounceRunningToInProgress && (columnId === "review" || columnId === "validation")) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
 						skipKickoff: true,
 					});
