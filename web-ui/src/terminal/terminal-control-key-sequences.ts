@@ -54,6 +54,19 @@ export interface TerminalControlKeyDefinition {
 	/** 无障碍标签：说清这个键对 agent 做什么，触摸端没有 hover tooltip 可依赖。 */
 	accessibleDescription: string;
 	sequence: string;
+	/**
+	 * 误触代价是否明显高于其余键（当前只有 Ctrl+C：它会打断正在生成的回合）。
+	 * 用于让键帽换用告警配色，在密排的按键簇里拉开视觉距离。
+	 */
+	isDestructive: boolean;
+	/**
+	 * 按住是否连发（对齐物理键盘的 typematic 重复）。
+	 *
+	 * 只有方向键开：在 AskUserQuestion 的长选项列表或 rewind 历史里逐下点按翻十几项非常折磨人。
+	 * 其余键一律关 —— Ctrl+C 连发会把打断信号刷屏、Enter 连发会重复提交、Tab/⇧Tab 连发会把
+	 * 权限/计划模式循环到用户没预期的档位，这些都是不可逆或代价明显高于省下几次点按的操作。
+	 */
+	supportsAutoRepeatOnLongPress: boolean;
 }
 
 export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId, TerminalControlKeyDefinition> = {
@@ -62,69 +75,97 @@ export const TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID: Record<TerminalControlKeyId
 		label: "Ctrl+C",
 		accessibleDescription: "Interrupt the agent, or clear the current input line",
 		sequence: TERMINAL_INTERRUPT_AND_CLEAR_INPUT_LINE_SEQUENCE,
+		isDestructive: true,
+		supportsAutoRepeatOnLongPress: false,
 	},
 	rewind_double_escape: {
 		id: "rewind_double_escape",
 		label: "Esc Esc",
 		accessibleDescription: "Open the rewind history view (double escape)",
 		sequence: TERMINAL_REWIND_DOUBLE_ESCAPE_SEQUENCE,
+		isDestructive: false,
+		supportsAutoRepeatOnLongPress: false,
 	},
 	arrow_up: {
 		id: "arrow_up",
 		label: "↑",
 		accessibleDescription: "Arrow up",
 		sequence: TERMINAL_ARROW_UP_SEQUENCE,
+		isDestructive: false,
+		supportsAutoRepeatOnLongPress: true,
 	},
 	arrow_down: {
 		id: "arrow_down",
 		label: "↓",
 		accessibleDescription: "Arrow down",
 		sequence: TERMINAL_ARROW_DOWN_SEQUENCE,
+		isDestructive: false,
+		supportsAutoRepeatOnLongPress: true,
 	},
 	arrow_left: {
 		id: "arrow_left",
 		label: "←",
 		accessibleDescription: "Arrow left",
 		sequence: TERMINAL_ARROW_LEFT_SEQUENCE,
+		isDestructive: false,
+		supportsAutoRepeatOnLongPress: true,
 	},
 	arrow_right: {
 		id: "arrow_right",
 		label: "→",
 		accessibleDescription: "Arrow right",
 		sequence: TERMINAL_ARROW_RIGHT_SEQUENCE,
+		isDestructive: false,
+		supportsAutoRepeatOnLongPress: true,
 	},
 	submit: {
 		id: "submit",
 		label: "Enter",
 		accessibleDescription: "Submit the current selection or input",
 		sequence: TERMINAL_SUBMIT_CARRIAGE_RETURN_SEQUENCE,
+		isDestructive: false,
+		supportsAutoRepeatOnLongPress: false,
 	},
 	tab: {
 		id: "tab",
 		label: "Tab",
 		accessibleDescription: "Tab",
 		sequence: TERMINAL_TAB_SEQUENCE,
+		isDestructive: false,
+		supportsAutoRepeatOnLongPress: false,
 	},
 	back_tab: {
 		id: "back_tab",
 		label: "⇧Tab",
 		accessibleDescription: "Shift tab (reverse cycle)",
 		sequence: TERMINAL_BACK_TAB_SEQUENCE,
+		isDestructive: false,
+		supportsAutoRepeatOnLongPress: false,
 	},
 };
 
-/** 虚拟按键条的分行布局：方向键单独成行，其余为动作键。 */
-export const TERMINAL_VIRTUAL_KEY_BAR_NAVIGATION_ROW_KEY_IDS: readonly TerminalControlKeyId[] = [
-	"arrow_left",
-	"arrow_up",
-	"arrow_down",
-	"arrow_right",
-	"submit",
-];
+// ---------------------------------------------------------------------------
+// 虚拟按键条布局
+//
+// 方向键必须排成实体键盘那样的倒 T 形簇，而不是摊平在一行里：拇指靠的是空间记忆而非读标签，
+// 「↑ 在上、↓ 在下、左右分居两侧」的相对位置本身就是可供性。摊成一行后四个键退化成一排等价
+// 方块，每次都得先读字形再点，且横向拉满还会把整条按键条撑得又高又空。
+// ---------------------------------------------------------------------------
 
-export const TERMINAL_VIRTUAL_KEY_BAR_ACTION_ROW_KEY_IDS: readonly TerminalControlKeyId[] = [
+/** 方向键簇的物理排布（倒 T 形）。`null` 是占位空格，用于把 ↑ 顶在中列。 */
+export const TERMINAL_VIRTUAL_KEY_BAR_DIRECTIONAL_CLUSTER_ROWS: readonly (readonly (TerminalControlKeyId | null)[])[] =
+	[
+		[null, "arrow_up", null],
+		["arrow_left", "arrow_down", "arrow_right"],
+	];
+
+/** 动作键，排成 2×2 与方向键簇等高，占住按键条的另一半宽度。 */
+export const TERMINAL_VIRTUAL_KEY_BAR_ACTION_KEY_IDS: readonly TerminalControlKeyId[] = [
 	"interrupt_and_clear_input_line",
 	"rewind_double_escape",
 	"tab",
 	"back_tab",
 ];
+
+/** Enter 紧邻方向键簇右侧且占满两行高：它是「导航到目标后确认」这条动作链的终点。 */
+export const TERMINAL_VIRTUAL_KEY_BAR_SUBMIT_KEY_ID: TerminalControlKeyId = "submit";

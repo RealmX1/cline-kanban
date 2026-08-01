@@ -705,6 +705,71 @@ describe("BoardCard", () => {
 		expect(directoryRow?.getAttribute("title")).toContain("~/.cline/worktrees/trash-task-1/kanban");
 	});
 
+	it("目录行展示与 base 分支的双向分歧，且不再展示 HEAD 短 SHA", async () => {
+		mockWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/tmp/worktrees/task-1",
+			branch: null,
+			isDetached: true,
+			headCommit: "1234567890abcdef",
+			baseCommit: "fedcba0987654321",
+			commitsAheadOfBaseRef: 3,
+			commitsBehindBaseRef: 12,
+			changedFiles: 2,
+			additions: 5,
+			deletions: 1,
+		};
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="review" />
+				</TooltipProvider>,
+			);
+		});
+
+		const directoryRow = container.querySelector("[data-task-directory]");
+		expect(directoryRow?.textContent).toContain("worktree");
+		expect(directoryRow?.textContent).toContain("3");
+		expect(directoryRow?.textContent).toContain("12");
+		expect(directoryRow?.querySelector("svg.lucide-arrow-up")).not.toBeNull();
+		expect(directoryRow?.querySelector("svg.lucide-arrow-down")).not.toBeNull();
+		// 短 SHA 槽位已移除：既不展示 HEAD，也不展示 fork-point。
+		expect(directoryRow?.textContent).not.toContain("12345678");
+		expect(directoryRow?.textContent).not.toContain("fedcba09");
+	});
+
+	it("两侧分歧均为 0 时目录行不渲染分歧指示器", async () => {
+		mockWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/tmp/worktrees/task-1",
+			branch: null,
+			isDetached: true,
+			headCommit: "1234567890abcdef",
+			baseCommit: "1234567890abcdef",
+			commitsAheadOfBaseRef: 0,
+			commitsBehindBaseRef: 0,
+			changedFiles: 2,
+			additions: 5,
+			deletions: 1,
+		};
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="review" />
+				</TooltipProvider>,
+			);
+		});
+
+		const directoryRow = container.querySelector("[data-task-directory]");
+		// 刚开工、尚未提交也未落后的任务不该多出一对 "0"，脏文件统计仍照常展示。
+		expect(directoryRow?.textContent).toContain("worktree");
+		expect(directoryRow?.textContent).toContain("2 files");
+		expect(directoryRow?.querySelector("svg.lucide-arrow-up")).toBeNull();
+		expect(directoryRow?.querySelector("svg.lucide-arrow-down")).toBeNull();
+	});
+
 	it("shows formatted agent override details with model name and reasoning effort", async () => {
 		mockWorkspaceSnapshot = {
 			taskId: "task-1",
@@ -713,7 +778,8 @@ describe("BoardCard", () => {
 			isDetached: false,
 			headCommit: "1234567890abcdef",
 			baseCommit: null,
-			commitsSinceFork: null,
+			commitsAheadOfBaseRef: null,
+			commitsBehindBaseRef: null,
 			changedFiles: 2,
 			additions: 5,
 			deletions: 1,

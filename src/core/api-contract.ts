@@ -857,9 +857,14 @@ export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	baseRef: z.string(),
 	// 任务从 base 分叉时的提交（fork-point，git merge-base HEAD <baseRef>）。
 	// 稳定不随 base 分支推进而变；未探测 / 计算失败 / inplace 无分叉等情形为 null。
+	// 注意它会随 base-branch-sync 吸收 base 而前移，故**不是**「任务最初创建自哪个 commit」。
 	baseCommit: z.string().nullable(),
-	// fork-point..HEAD 的 commit 数（任务开工后落在当前 worktree 上的提交数）。
-	commitsSinceFork: z.number().int().nonnegative().nullable(),
+	// 与 base 分支的双向分歧，一次 `git rev-list --left-right --count <baseRef>...HEAD` 同时得出。
+	// ahead = HEAD 独有的提交数（任务开工后落在当前 worktree 上的提交，含吸收 base 时产生的 merge commit）；
+	// 与旧的 fork-point..HEAD 计数是同一个集合，仅命名更对称。
+	commitsAheadOfBaseRef: z.number().int().nonnegative().nullable(),
+	// behind = base 分支独有、任务尚未吸收的提交数。base 分支推进时增长，任务吸收（base-branch-sync）后归零。
+	commitsBehindBaseRef: z.number().int().nonnegative().nullable(),
 	branch: z.string().nullable(),
 	isDetached: z.boolean(),
 	headCommit: z.string().nullable(),

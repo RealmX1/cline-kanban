@@ -3,12 +3,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 
 import { TerminalScrollToLatestButton } from "@/components/detail-panels/terminal-scroll-to-latest-button";
+import { TerminalScrollbackTranscriptStyledLine } from "@/components/detail-panels/terminal-scrollback-transcript-styled-line";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { getTerminalController, readTerminalScrollbackTranscript } from "@/terminal/terminal-controller-registry";
 import type { TerminalScrollbackTranscriptLogicalLine } from "@/terminal/terminal-scrollback-transcript-extraction";
+import { useTerminalThemeColors } from "@/terminal/theme-colors";
 
 interface TerminalScrollbackTranscriptReaderPanelProps {
 	taskId: string;
@@ -23,6 +25,11 @@ interface TerminalScrollbackTranscriptReaderPanelProps {
  * 本视图为「阅读」而生 —— 逻辑行按屏宽软换行、系统原生长按选中、原生 DOM 滚动。读长 transcript
  * （尤其 agent 提问时需要回看完整 context）走这里，操作仍回 xterm。
  *
+ * **配色与终端一致，不是纯文本 dump。** 提取层保留了每个字符的前景/背景色与字形属性，本视图
+ * 逐 run 还原 —— agent TUI 靠颜色区分工具输出、diff 增删、消息类型与强调，丢掉颜色这些区别
+ * 在视觉上就没了。底色也直接取终端主题色（各主题的终端色恒为深色，见 `use-theme.ts`），
+ * 让 ANSI 色落在它本来预期的底上；本视图是 DOM 而非画布，不经浅色主题那层反相滤镜。
+ *
  * 呈现形态：它不是独立 tab，而是叠加在同一个 AgentTerminalPanel 之上的显示模式，由面板头部的
  * 阅读模式 toggle 在「实时终端」与「本视图」之间切换 —— 用户看到本视图时人就在终端面板里，
  * 所以任何面向用户的文案都必须以「用头部 toggle 切回实时终端」作为出路，不得指向别处。
@@ -34,6 +41,7 @@ export function TerminalScrollbackTranscriptReaderPanel({
 	isVisible = true,
 }: TerminalScrollbackTranscriptReaderPanelProps) {
 	const isMobile = useIsMobile();
+	const terminalThemeColors = useTerminalThemeColors();
 	const virtuosoRef = useRef<VirtuosoHandle | null>(null);
 	const [logicalLines, setLogicalLines] = useState<TerminalScrollbackTranscriptLogicalLine[]>([]);
 	const [isTerminalAttached, setIsTerminalAttached] = useState(false);
@@ -66,7 +74,10 @@ export function TerminalScrollbackTranscriptReaderPanel({
 	}, [visibleLogicalLines.length]);
 
 	return (
-		<div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-surface-0">
+		<div
+			className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+			style={{ background: terminalThemeColors.surfacePrimary }}
+		>
 			<div className="flex shrink-0 items-center gap-1.5 border-b border-border px-2 py-1.5">
 				<div className="relative flex min-w-0 flex-1 items-center">
 					<Search size={12} className="pointer-events-none absolute left-2 text-text-tertiary" />
@@ -112,9 +123,11 @@ export function TerminalScrollbackTranscriptReaderPanel({
 					atBottomStateChange={(isAtBottom) => setIsScrolledAwayFromLatest(!isAtBottom)}
 					computeItemKey={(index, logicalLine) => `${logicalLine.sourceBufferRowIndex}-${index}`}
 					itemContent={(_, logicalLine) => (
-						<div className="whitespace-pre-wrap break-words px-3 font-mono text-xs leading-relaxed text-text-primary">
-							{logicalLine.text.length > 0 ? logicalLine.text : " "}
-						</div>
+						<TerminalScrollbackTranscriptStyledLine
+							logicalLine={logicalLine}
+							defaultForegroundColor={terminalThemeColors.textPrimary}
+							defaultBackgroundColor={terminalThemeColors.surfacePrimary}
+						/>
 					)}
 				/>
 			)}

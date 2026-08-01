@@ -105,9 +105,12 @@ export interface ReviewTaskWorkspaceSnapshot {
 	isDetached: boolean;
 	headCommit: string | null;
 	// 任务从 base 分叉时的提交（fork-point）；未探测 / 计算失败 / inplace 无分叉为 null。
+	// 会随 base-branch-sync 吸收 base 而前移，故不是「任务最初创建自哪个 commit」。
 	baseCommit: string | null;
-	// fork-point..HEAD 的 commit 数（任务开工后落在当前 worktree 上的提交数）。
-	commitsSinceFork: number | null;
+	// 与 base 分支的双向分歧。ahead = 任务开工后落在当前 worktree 上的提交数。
+	commitsAheadOfBaseRef: number | null;
+	// behind = base 分支独有、任务尚未吸收的提交数；base 推进时增长，吸收后归零。
+	commitsBehindBaseRef: number | null;
 	changedFiles: number | null;
 	additions: number | null;
 	deletions: number | null;
