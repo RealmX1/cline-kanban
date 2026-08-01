@@ -57,6 +57,7 @@ export interface CreateWorkspaceApiDependencies {
 	broadcastRuntimeWorkspaceStateUpdated: (workspaceId: string, workspacePath: string) => Promise<void> | void;
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void> | void;
 	buildWorkspaceStateSnapshot: (workspaceId: string, workspacePath: string) => Promise<RuntimeWorkspaceStateResponse>;
+	listProjectRuntimeSessionSummaries: (workspaceId: string) => RuntimeTaskSessionSummary[];
 }
 
 function normalizeOptionalTaskWorkspaceScopeInput(
@@ -393,11 +394,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		saveState: async (workspaceScope, input) => {
 			try {
-				const terminalManager = await deps.ensureTerminalManagerForWorkspace(
-					workspaceScope.workspaceId,
-					workspaceScope.workspacePath,
-				);
-				for (const summary of terminalManager.listSummaries()) {
+				for (const summary of deps.listProjectRuntimeSessionSummaries(workspaceScope.workspaceId)) {
 					input.sessions[summary.taskId] = summary;
 				}
 				const response = await saveWorkspaceState(workspaceScope.workspacePath, input);

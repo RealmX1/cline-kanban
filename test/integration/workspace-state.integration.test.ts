@@ -12,6 +12,7 @@ import {
 	loadWorkspaceContext,
 	loadWorkspaceContextById,
 	loadWorkspaceState,
+	mutateWorkspaceState,
 	removeWorkspaceIndexEntry,
 	saveWorkspaceState,
 } from "../../src/state/workspace-state";
@@ -43,6 +44,28 @@ function createBoard(title: string): RuntimeBoardData {
 			{ id: "trash", title: "Done", cards: [] },
 		],
 		dependencies: [],
+	};
+}
+
+function createBoardWithTaskInColumn(
+	title: string,
+	columnId: RuntimeBoardData["columns"][number]["id"],
+): RuntimeBoardData {
+	const board = createBoard(title);
+	const task = board.columns.find((column) => column.id === "backlog")?.cards[0];
+	if (!task) {
+		throw new Error("Expected createBoard to create one backlog task.");
+	}
+	const columns = board.columns.map((column) => ({
+		...column,
+		cards: column.id === columnId ? [task] : [],
+	}));
+	if (!columns.some((column) => column.id === columnId)) {
+		columns.push({ id: columnId, title: "Validation", cards: [task] });
+	}
+	return {
+		...board,
+		columns,
 	};
 }
 
@@ -166,6 +189,103 @@ describe.sequential("workspace-state integration", () => {
 			const loadedAfterConflict = await loadWorkspaceState(workspacePath);
 			expect(loadedAfterConflict.revision).toBe(2);
 			expect(loadedAfterConflict.board.columns[0]?.cards[0]?.prompt).toBe("Task Two");
+		});
+	});
+
+	it("prevents whole-board saves from leaving a started task in backlog", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-started-task-stage"]).repositoryPath;
+			const initial = await loadWorkspaceState(workspacePath);
+			const startedAt = Date.now();
+			const startedSession = applySessionFacets({
+				...createSessionSummary("task-1"),
+				state: "running",
+				agentId: "kimi",
+				pid: 1234,
+				startedAt,
+				updatedAt: startedAt,
+			});
+
+			const saved = await saveWorkspaceState(workspacePath, {
+				board: createBoard("Started task"),
+				sessions: { "task-1": startedSession },
+				expectedRevision: initial.revision,
+			});
+
+			expect(saved.board.columns.find((column) => column.id === "backlog")?.cards).toEqual([]);
+			expect(saved.board.columns.find((column) => column.id === "in_progress")?.cards[0]?.id).toBe("task-1");
+
+			const savedFromStaleWholeBoardSnapshot = await saveWorkspaceState(workspacePath, {
+				board: createBoard("Stale task snapshot"),
+				sessions: {},
+				expectedRevision: saved.revision,
+			});
+			expect(
+				savedFromStaleWholeBoardSnapshot.board.columns.find((column) => column.id === "backlog")?.cards,
+			).toEqual([]);
+			expect(
+				savedFromStaleWholeBoardSnapshot.board.columns.find((column) => column.id === "in_progress")?.cards[0]?.id,
+			).toBe("task-1");
+			expect(savedFromStaleWholeBoardSnapshot.sessions["task-1"]).toEqual(startedSession);
+		});
+	});
+
+	it.each(["review", "validation"] as const)(
+		"restores a persisted started task to its %s column when a whole-board snapshot is stale",
+		async (columnId) => {
+			await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+				const workspacePath = createRepository([`project-stale-${columnId}-stage`]).repositoryPath;
+				const initial = await loadWorkspaceState(workspacePath);
+				const startedSession = applySessionFacets({
+					...createSessionSummary("task-1"),
+					state: "awaiting_review",
+					agentId: "claude",
+					startedAt: Date.now(),
+				});
+				const saved = await saveWorkspaceState(workspacePath, {
+					board: createBoardWithTaskInColumn("Started task", columnId),
+					sessions: { "task-1": startedSession },
+					expectedRevision: initial.revision,
+				});
+
+				const staleSave = await saveWorkspaceState(workspacePath, {
+					board: createBoard("Stale task snapshot"),
+					sessions: {},
+					expectedRevision: saved.revision,
+				});
+
+				expect(staleSave.board.columns.find((column) => column.id === columnId)?.cards[0]?.id).toBe("task-1");
+				expect(staleSave.sessions["task-1"]).toEqual(startedSession);
+			});
+		},
+	);
+
+	it("applies the started-task backlog invariant to direct atomic mutations", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-direct-mutation-stage"]).repositoryPath;
+			const initial = await loadWorkspaceState(workspacePath);
+			const startedSession = applySessionFacets({
+				...createSessionSummary("task-1"),
+				state: "running",
+				agentId: "kimi",
+				startedAt: Date.now(),
+			});
+			await saveWorkspaceState(workspacePath, {
+				board: createBoardWithTaskInColumn("Started task", "in_progress"),
+				sessions: { "task-1": startedSession },
+				expectedRevision: initial.revision,
+			});
+
+			const mutation = await mutateWorkspaceState(workspacePath, () => ({
+				board: createBoard("Regressed task"),
+				sessions: {},
+				value: null,
+			}));
+
+			expect(mutation.state.board.columns.find((column) => column.id === "in_progress")?.cards[0]?.id).toBe(
+				"task-1",
+			);
+			expect(mutation.state.sessions["task-1"]).toEqual(startedSession);
 		});
 	});
 

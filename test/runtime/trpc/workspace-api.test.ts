@@ -148,10 +148,37 @@ function createWorkspaceApiForTest(
 		broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
 		broadcastRuntimeProjectsUpdated: vi.fn(),
 		buildWorkspaceStateSnapshot: vi.fn(),
+		listProjectRuntimeSessionSummaries: vi.fn(() => []),
 		loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 		...deps,
 	});
 }
+
+describe("createWorkspaceApi saveState", () => {
+	it("overlays terminal, Cline, and ACP runtime summaries before persistence", async () => {
+		const terminalSummary = createSummary({ taskId: "terminal-task", agentId: "claude" });
+		const clineSummary = createSummary({ taskId: "cline-task", agentId: "cline" });
+		const acpSummary = createSummary({ taskId: "acp-task", agentId: "omp" });
+		const expectedResponse = createWorkspaceState();
+		workspaceStateMocks.saveWorkspaceState.mockResolvedValue(expectedResponse);
+		const api = createWorkspaceApiForTest({
+			listProjectRuntimeSessionSummaries: vi.fn(() => [terminalSummary, clineSummary, acpSummary]),
+		});
+		const payload = { board: createBoard(), sessions: {}, expectedRevision: 1 };
+
+		const response = await api.saveState({ workspaceId: "workspace-1", workspacePath: "/tmp/repo" }, payload);
+
+		expect(response).toBe(expectedResponse);
+		expect(workspaceStateMocks.saveWorkspaceState).toHaveBeenCalledWith("/tmp/repo", {
+			...payload,
+			sessions: {
+				"terminal-task": terminalSummary,
+				"cline-task": clineSummary,
+				"acp-task": acpSummary,
+			},
+		});
+	});
+});
 
 describe("createWorkspaceApi loadChanges", () => {
 	beforeEach(() => {
