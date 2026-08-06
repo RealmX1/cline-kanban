@@ -45,6 +45,8 @@ kanban
 ```
 Run this from the root of any git repo. Kanban will detect your installed CLI agent and launch a local running webserver in your browser. No account or setup required, it works right out of the box.
 
+Building from source instead? Prerequisites, the three-project dependency install, and linking the global `kanban` command are all in [`installation.md`](./installation.md).
+
 ### 2. Create tasks
 Create a task card manually, or open the sidebar chat and ask your agent to break work down into tasks for you. Kanban injects board-management instructions into that session so you can simply ask it to add tasks, link tasks, or start work on your board.
 
