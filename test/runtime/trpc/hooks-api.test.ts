@@ -29,6 +29,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
 		const api = createHooksApi({
@@ -55,6 +56,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -97,6 +99,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(() => transitionedSummary),
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -141,6 +144,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(() => transitionedSummary),
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -182,6 +186,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(() => transitionedSummary),
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -224,6 +229,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(() => transitionedSummary),
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -268,6 +274,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(() => transitionedSummary),
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -309,6 +316,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -348,6 +356,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -381,6 +390,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -411,6 +421,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -440,6 +451,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			transitionToRunning: vi.fn(() => createSummary({ agentId: "gemini", state: "running" })),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -467,6 +479,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -494,6 +507,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -538,6 +552,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(() => transitionedSummary),
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 

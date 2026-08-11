@@ -30,6 +30,10 @@ export function collectInProgressTaskDetailsFromBoard(
 			createdAt: card.createdAt,
 			lastOutputAt: summary?.lastOutputAt ?? null,
 			lastSubstantiveOutputAt: summary?.lastSubstantiveOutputAt ?? null,
+			// 概览行与主看板卡片头部显示同样的两颗时长药丸，故两个量都要投影过来。
+			// 只投影、不在此合并或推断——合并是 mergeSummaryWithFacets 里那个唯一 reducer 的事。
+			agentResponseGenerationStopped: summary?.agentResponseGenerationStopped ?? null,
+			lastConversationProgressObservation: summary?.lastConversationProgressObservation ?? null,
 			turnOwner: facets?.turnOwner ?? null,
 			liveness: facets?.liveness ?? "none",
 		};

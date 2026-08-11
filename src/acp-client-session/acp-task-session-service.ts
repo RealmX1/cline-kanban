@@ -32,7 +32,6 @@ import {
 	now,
 	replaceAcpMessage,
 	updateAcpSummary,
-	withCurrentSubstantiveOutputTimestamp,
 } from "./acp-session-state";
 import {
 	type AcpSessionUpdateContext,
@@ -97,18 +96,15 @@ export class AcpTaskSessionService {
 			// agent 停下来等人了：把卡片翻成「等你处理」，人轴按决策类型区分
 			// （plan 审批 → plan_review，工具授权 → permission）。
 			this.emitSummary(
-				updateAcpSummary(
-					entry,
-					withCurrentSubstantiveOutputTimestamp(entry, {
-						...deriveAcpFacetPatch(
-							"awaiting_review",
-							"hook",
-							{ pid: entry.summary.pid, agentId: entry.summary.agentId ?? "omp" },
-							decision.kind === "elicitation_form" ? "plan_review" : "permission",
-						),
-						reviewReason: "hook",
-					}),
-				),
+				updateAcpSummary(entry, {
+					...deriveAcpFacetPatch(
+						"awaiting_review",
+						"hook",
+						{ pid: entry.summary.pid, agentId: entry.summary.agentId ?? "omp" },
+						decision.kind === "elicitation_form" ? "plan_review" : "permission",
+					),
+					reviewReason: "hook",
+				}),
 			);
 		},
 		settleDecision: (taskId, decisionId, resolution) => {
@@ -195,13 +191,10 @@ export class AcpTaskSessionService {
 		if (entry && connection) {
 			// 决策已回给 agent，回合重新归 agent。
 			this.emitSummary(
-				updateAcpSummary(
-					entry,
-					withCurrentSubstantiveOutputTimestamp(entry, {
-						...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: connection.agentId }),
-						reviewReason: null,
-					}),
-				),
+				updateAcpSummary(entry, {
+					...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: connection.agentId }),
+					reviewReason: null,
+				}),
 			);
 		}
 		return true;
@@ -265,16 +258,13 @@ export class AcpTaskSessionService {
 				startInPlanMode: request.startInPlanMode,
 			});
 			this.emitSummary(
-				updateAcpSummary(
-					entry,
-					withCurrentSubstantiveOutputTimestamp(entry, {
-						...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: request.agentId }),
-						pid: connection.pid,
-						// 新活体：ACP 侧的活体就是这个刚 spawn 出来的子进程 + 握手完成的连接。回收调度器据此
-						// 判断「已落盘的期限说的还是不是同一个活体」，重连出来的新会话不会被陈旧期限误杀。
-						runtimeSessionIncarnationId: randomUUID(),
-					}),
-				),
+				updateAcpSummary(entry, {
+					...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: request.agentId }),
+					pid: connection.pid,
+					// 新活体：ACP 侧的活体就是这个刚 spawn 出来的子进程 + 握手完成的连接。回收调度器据此
+					// 判断「已落盘的期限说的还是不是同一个活体」，重连出来的新会话不会被陈旧期限误杀。
+					runtimeSessionIncarnationId: randomUUID(),
+				}),
 			);
 			if (promptText || (request.images?.length ?? 0) > 0) {
 				void this.runPromptTurn(request.taskId, connection, buildAcpPromptBlocks(request.prompt, request.images));
@@ -341,13 +331,10 @@ export class AcpTaskSessionService {
 		// 用 cancelled outcome 回掉，否则 agent 侧会一直挂着等回复。
 		this.userDecisionBroker.cancelPendingDecisions(taskId);
 		await connection.cancel().catch(() => null);
-		const summary = updateAcpSummary(
-			entry,
-			withCurrentSubstantiveOutputTimestamp(entry, {
-				...deriveAcpFacetPatch("idle", null, { pid: connection.pid, agentId: connection.agentId }),
-				reviewReason: null,
-			}),
-		);
+		const summary = updateAcpSummary(entry, {
+			...deriveAcpFacetPatch("idle", null, { pid: connection.pid, agentId: connection.agentId }),
+			reviewReason: null,
+		});
 		this.emitSummary(summary);
 		return summary;
 	}
@@ -360,13 +347,10 @@ export class AcpTaskSessionService {
 		}
 		this.userDecisionBroker.cancelPendingDecisions(taskId);
 		await connection.cancel().catch(() => null);
-		const summary = updateAcpSummary(
-			entry,
-			withCurrentSubstantiveOutputTimestamp(entry, {
-				...deriveAcpFacetPatch("interrupted", null, { pid: connection.pid, agentId: connection.agentId }),
-				reviewReason: null,
-			}),
-		);
+		const summary = updateAcpSummary(entry, {
+			...deriveAcpFacetPatch("interrupted", null, { pid: connection.pid, agentId: connection.agentId }),
+			reviewReason: null,
+		});
 		this.emitSummary(summary);
 		return summary;
 	}
@@ -378,14 +362,11 @@ export class AcpTaskSessionService {
 		}
 		this.userDecisionBroker.cancelPendingDecisions(taskId);
 		this.connectionRuntime.disposeTaskConnection(taskId);
-		const summary = updateAcpSummary(
-			entry,
-			withCurrentSubstantiveOutputTimestamp(entry, {
-				...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
-				pid: null,
-				reviewReason: null,
-			}),
-		);
+		const summary = updateAcpSummary(entry, {
+			...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
+			pid: null,
+			reviewReason: null,
+		});
 		this.emitSummary(summary);
 		return summary;
 	}
@@ -409,14 +390,11 @@ export class AcpTaskSessionService {
 		const exitConfirmation = await this.connectionRuntime.stopTaskConnectionAndConfirmExit(taskId, options);
 		if (entry) {
 			this.emitSummary(
-				updateAcpSummary(
-					entry,
-					withCurrentSubstantiveOutputTimestamp(entry, {
-						...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
-						pid: null,
-						reviewReason: null,
-					}),
-				),
+				updateAcpSummary(entry, {
+					...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
+					pid: null,
+					reviewReason: null,
+				}),
 			);
 		}
 		return exitConfirmation;
@@ -431,10 +409,7 @@ export class AcpTaskSessionService {
 		if (!entry) {
 			return null;
 		}
-		const summary = updateAcpSummary(
-			entry,
-			withCurrentSubstantiveOutputTimestamp(entry, { agentSessionRuntimeReclamationOutcome: outcome }),
-		);
+		const summary = updateAcpSummary(entry, { agentSessionRuntimeReclamationOutcome: outcome });
 		this.emitSummary(summary);
 		return summary;
 	}
@@ -462,13 +437,10 @@ export class AcpTaskSessionService {
 		if (!entry) {
 			return null;
 		}
-		const summary = updateAcpSummary(
-			entry,
-			withCurrentSubstantiveOutputTimestamp(entry, {
-				previousTurnCheckpoint: entry.summary.latestTurnCheckpoint,
-				latestTurnCheckpoint: checkpoint,
-			}),
-		);
+		const summary = updateAcpSummary(entry, {
+			previousTurnCheckpoint: entry.summary.latestTurnCheckpoint,
+			latestTurnCheckpoint: checkpoint,
+		});
 		this.emitSummary(summary);
 		return summary;
 	}

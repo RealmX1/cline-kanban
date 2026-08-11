@@ -414,6 +414,206 @@ describe("InMemoryClineTaskSessionService", () => {
 		expect(service.listMessages("task-1").map((message) => message.content)).toEqual(["Investigate startup"]);
 	});
 
+	// ── 回归（RVF-002）：启动路径必须**真的走过**一次「非 agent 回合 → agent 回合」边沿 ─────────────
+	// agentResponseGenerationTurnSequence 只由 mergeSummaryWithFacets 的 didEnterAgentTurn 在这条边沿上推进，
+	// 而 applySessionFacets 是**幂等重投影**、压根不认边沿。旧写法在构造点就把 entry.summary 直接落成
+	// running，于是「非 agent → agent」这一刻从未发生过：序号从头到尾停在缺失（等价 0）。
+	// 后果在首轮真正结束时才暴露——球翻回人这边、写侧漏斗落停止事件时，
+	// deriveAgentResponseGenerationStopSignalConfidence 的第一条判据 `(序号 ?? 0) === 0` 命中，把这次停止
+	// 误标成 session_ready_never_prompted（语义：会话已就绪但从未收到过任何用户提交），而事实上这个会话
+	// 刚刚跑完一整轮、产出了内容。该标签会出现在卡片药丸的诊断与回收期限账本里。
+	// 对照：PTY 通道的 createDefaultSummary 产出 idle entry、随后经 updateSummary 写 running，天然跨边沿；
+	// ACP 通道同形（createAcpTaskSessionEntry 恒 idle + updateAcpSummary 写 running），只有 Cline 例外。
+	it("首轮结束的停止事件标成 harness_turn_complete（启动路径真的跨过 agent 回合边沿）", async () => {
+		const { service, runtime } = createTrackedService();
+
+		const started = await service.startTaskSession({
+			taskId: "task-1",
+			cwd: "/tmp/worktree",
+			prompt: "Investigate startup",
+		});
+
+		// 序号 1 = 「这个会话条目至今开始过 1 个 agent 回合」——启动即计入，与三 transport 共用漏斗一致。
+		expect(started.state).toBe("running");
+		expect(started.agentResponseGenerationTurnSequence).toBe(1);
+		// agent 回合期间球在 agent 手上，没有可谈的停止时刻，也不该凭空补一个空字段。
+		expect("agentResponseGenerationStopped" in started).toBe(false);
+
+		const sessionId = await waitForTaskSessionId(runtime, "task-1");
+		runtime.emitAgentEvent(sessionId, {
+			type: "done",
+			reason: "completed",
+			text: "Done.",
+		});
+
+		const stopped = service.getSummary("task-1");
+		expect(stopped?.state).toBe("awaiting_review");
+		expect(stopped?.agentResponseGenerationStopped).toEqual(
+			expect.objectContaining({
+				signalConfidence: "harness_turn_complete",
+				turnSequence: 1,
+			}),
+		);
+
+		// 第二轮：用户再发一句 → 又是一次边沿，序号推到 2，且停止事件被清空（球回到 agent 手上）。
+		const resumed = await service.sendTaskSessionInput("task-1", "Keep going");
+		expect(resumed?.agentResponseGenerationTurnSequence).toBe(2);
+		expect(resumed?.agentResponseGenerationStopped ?? null).toBeNull();
+	});
+
+	// 无 prompt 启动（只建会话、不投递首轮）不构成 agent 回合：序号必须保持缺失，绝不被构造点凭空播种。
+	// 这条与上一条合起来精确划出「什么算一个 agent 回合」的边界——序号是回收期限账本稳定记录 id
+	// `${taskId}:${incarnationId}:${turnSequence}` 的一部分，多播一个序号就是多一条对不上的期限记录。
+	it("无 prompt 启动 ⇒ 停在 idle、回合序号保持缺失（不是被播种成 1）", async () => {
+		const { service } = createTrackedService();
+
+		const started = await service.startTaskSession({
+			taskId: "task-1",
+			cwd: "/tmp/worktree",
+			prompt: "",
+		});
+
+		expect(started.state).toBe("idle");
+		expect(started.turnOwner).toBeNull();
+		expect("agentResponseGenerationTurnSequence" in started).toBe(false);
+	});
+
+	// ── 写侧默认反转回归：只有 agent 真产出才推进 lastSubstantiveOutputAt ──────────────────────────
+	// 卡片左上角的「agent 上次响应」读这个戳。反转前 cline-session-state.updateSummary 漏斗默认把它镜像成
+	// lastOutputAt，而本文件里 9 处经漏斗的写（SDK start/send 失败、用户提交首轮 prompt、stop /
+	// safe-shutdown / abort、取消回合、用户发消息 ×2、reload）**无一** opt-out——于是用户自己的操作就会把
+	// 「agent 上次响应」刷成「刚刚」，safe-shutdown 那处还会把污染值一路写进落盘 summary。
+	// 反转后漏斗不做任何隐式推断，只有 cline-event-adapter 里真正携带 agent 产出的事件经
+	// withAgentSubstantiveOutputTimestamp 显式推进。
+	describe("用户侧操作不推进 agent 实质产出戳", () => {
+		const AGENT_OUTPUT_AT = 1_700_000_000_000;
+		const USER_ACTION_AT = AGENT_OUTPUT_AT + 3_600_000;
+
+		beforeEach(() => {
+			// 只 fake Date：now() 就是 Date.now()，而真实 setTimeout / 微任务仍要跑（服务内部全是异步的，
+			// 连 setTimeout 一起 fake 会让 await 永远等不到）。
+			vi.useFakeTimers({ toFake: ["Date"] });
+			vi.setSystemTime(AGENT_OUTPUT_AT);
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		// 起一个会话并让 agent 真的吐一段文本，记下此刻的实质戳；随后把时钟整整推后一小时，于是
+		// 「这次用户操作有没有把戳刷掉」在断言里黑白分明，不受同毫秒内写入的干扰。
+		// 记录实际值而非硬断言 AGENT_OUTPUT_AT：只 fake Date 时钟在 await 之间仍会小幅前进，
+		// 本用例要守的是「戳没被这次操作改动」，不是「戳等于某个常量」。
+		async function startSessionWithAgentOutputThenAdvanceClock(): Promise<
+			TaskSessionServiceHarness & { substantiveAtAgentOutput: number }
+		> {
+			const harness = createTrackedService();
+			await harness.service.startTaskSession({
+				taskId: "task-1",
+				cwd: "/tmp/worktree",
+				prompt: "Investigate startup",
+			});
+			const sessionId = await waitForTaskSessionId(harness.runtime, "task-1");
+			harness.runtime.emitAgentEvent(sessionId, {
+				type: "assistant-text-delta",
+				text: "Looking into it",
+				accumulatedText: "Looking into it",
+			});
+			const substantiveAtAgentOutput = harness.service.getSummary("task-1")?.lastSubstantiveOutputAt ?? null;
+			expect(substantiveAtAgentOutput).not.toBeNull();
+			expect(substantiveAtAgentOutput).toBeLessThan(USER_ACTION_AT);
+			vi.setSystemTime(USER_ACTION_AT);
+			return { ...harness, substantiveAtAgentOutput: substantiveAtAgentOutput as number };
+		}
+
+		it.each([
+			[
+				"用户发送后续消息",
+				async (service: ClineTaskSessionService) => service.sendTaskSessionInput("task-1", "继续"),
+			],
+			["停止会话", async (service: ClineTaskSessionService) => service.stopTaskSession("task-1")],
+			[
+				"安全关停（会落盘）",
+				async (service: ClineTaskSessionService) => service.stopTaskSessionForSafeShutdown("task-1"),
+			],
+			["中止会话", async (service: ClineTaskSessionService) => service.abortTaskSession("task-1")],
+			["取消当前回合", async (service: ClineTaskSessionService) => service.cancelTaskTurn("task-1")],
+			["重载会话", async (service: ClineTaskSessionService) => service.reloadTaskSession("task-1")],
+		])("%s ⇒ 实质戳停在 agent 上次产出时刻，只有 lastOutputAt 前进", async (_label, operate) => {
+			const { service, substantiveAtAgentOutput } = await startSessionWithAgentOutputThenAdvanceClock();
+
+			await operate(service);
+
+			const summary = service.getSummary("task-1");
+			expect(summary?.lastSubstantiveOutputAt).toBe(substantiveAtAgentOutput);
+			// 对照断言：这次写确实发生了（存活度前进到当下）。若少了它，上面那条在「写点被整个删掉」时也会绿。
+			expect(summary?.lastOutputAt ?? 0).toBeGreaterThanOrEqual(USER_ACTION_AT);
+		});
+
+		// 上面那组只覆盖「用户操作自己经漏斗写 summary」这一半。另一半更隐蔽：用户中止后 **SDK 补发的
+		// done(aborted)** 会绕回事件适配器，而 abortTaskSession 是 delete pendingTurnCancelTaskIds
+		// （只有 cancelTaskTurn 才 add），于是它走不到 emitTurnCanceled 的提前返回、落进 done 分支。
+		// done 分支若无条件按实质产出记账，用户的中止动作照样把两个戳刷成中止那一刻。
+		it("用户中止后 SDK 补发的空正文 done(aborted) 不推进实质戳与对话推进观测", async () => {
+			const { service, runtime, substantiveAtAgentOutput } = await startSessionWithAgentOutputThenAdvanceClock();
+			const progressAtAgentOutput = service.getSummary("task-1")?.lastConversationProgressObservation ?? null;
+			expect(progressAtAgentOutput).not.toBeNull();
+
+			// 真实时序：SDK 在 abort 落定的过程中回吐 done(aborted)，此时会话绑定尚未解除。
+			const sessionId = await waitForTaskSessionId(runtime, "task-1");
+			runtime.abortTaskSessionMock.mockImplementationOnce(async () => {
+				runtime.emitAgentEvent(sessionId, {
+					type: "done",
+					reason: "aborted",
+				});
+			});
+
+			await service.abortTaskSession("task-1");
+
+			const summary = service.getSummary("task-1");
+			expect(summary?.lastSubstantiveOutputAt).toBe(substantiveAtAgentOutput);
+			expect(summary?.lastConversationProgressObservation).toEqual(progressAtAgentOutput);
+			// 对照断言：这次收尾确实被处理了（存活度前进、卡片进入中止态），否则上面两条在事件被整个丢掉时也会绿。
+			expect(summary?.lastOutputAt ?? 0).toBeGreaterThanOrEqual(USER_ACTION_AT);
+			expect(summary?.state).toBe("interrupted");
+		});
+
+		// 对照面：带 finalText 的正常收尾是此刻才出现的新正文，实质戳必须照旧前进——修的是默认方向，
+		// 不是把 done 分支整条路堵死。
+		it("带 finalText 的正常 done 仍推进实质戳", async () => {
+			const { service, runtime, substantiveAtAgentOutput } = await startSessionWithAgentOutputThenAdvanceClock();
+
+			const sessionId = await waitForTaskSessionId(runtime, "task-1");
+			runtime.emitAgentEvent(sessionId, {
+				type: "done",
+				reason: "completed",
+				text: "结论：已修复。",
+			});
+
+			const summary = service.getSummary("task-1");
+			expect(summary?.lastSubstantiveOutputAt ?? 0).toBeGreaterThan(substantiveAtAgentOutput);
+			expect(summary?.lastConversationProgressObservation).toEqual(
+				expect.objectContaining({ evidenceKind: "structured_agent_session_event" }),
+			);
+			expect(summary?.lastConversationProgressObservation?.observedAtMs ?? 0).toBeGreaterThanOrEqual(USER_ACTION_AT);
+		});
+
+		it("agent 的新产出仍然推进实质戳（反转的是默认，不是把这条路堵死）", async () => {
+			const { service, runtime, substantiveAtAgentOutput } = await startSessionWithAgentOutputThenAdvanceClock();
+
+			const sessionId = await waitForTaskSessionId(runtime, "task-1");
+			runtime.emitAgentEvent(sessionId, {
+				type: "assistant-text-delta",
+				text: " — 有结论了",
+				accumulatedText: "Looking into it — 有结论了",
+			});
+
+			const advanced = service.getSummary("task-1")?.lastSubstantiveOutputAt ?? 0;
+			expect(advanced).toBeGreaterThan(substantiveAtAgentOutput);
+			expect(advanced).toBeGreaterThanOrEqual(USER_ACTION_AT);
+		});
+	});
+
 	it("disposes cached runtime setups when the service shuts down", async () => {
 		const runtime = createFakeClineSessionRuntime();
 		const runtimeSetup = createFakeRuntimeSetup();

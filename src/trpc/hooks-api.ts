@@ -134,6 +134,17 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					manager.unparkTaskSession(taskId);
 				}
 
+				// 「对话上次推进」的低延迟前进信号。**只认 agent 侧事件**：
+				//   - activity（PostToolUse 等中途活动）与 to_review（Stop / 回合结束）⇒ agent 确实又往前走了一步。
+				//   - to_in_progress（UserPromptSubmit / BeforeAgent）⇒ 说话的是**用户**，绝不推进；把它算进来
+				//     就等于让用户自己的输入刷新「agent 上次回复」，正是本次要根治的那类错误。
+				// 放在转移门之前：activity 事件通常过不了 canTransitionTaskForHookEvent（它不改变列状态），
+				// 但它同样是货真价实的 agent 推进证据，不能因为「没换列」就丢掉。
+				const isAgentSideConversationProgressHookEvent = event === "activity" || event === "to_review";
+				if (isAgentSideConversationProgressHookEvent) {
+					manager.recordAgentLifecycleHookConversationProgress(taskId);
+				}
+
 				if (!canTransitionTaskForHookEvent(summary, event)) {
 					if (body.metadata) {
 						manager.applyHookActivity(taskId, body.metadata);

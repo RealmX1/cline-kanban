@@ -20,7 +20,7 @@ import {
 	now,
 	replaceAcpMessage,
 	updateAcpSummary,
-	withCurrentSubstantiveOutputTimestamp,
+	withAgentSubstantiveOutputTimestamp,
 } from "./acp-session-state";
 import {
 	renderAcpContentBlockAsText,
@@ -217,18 +217,27 @@ function readCurrentModeId(update: Extract<AcpSessionUpdate, { sessionUpdate: "c
 //      applyAcpPromptTurnCompletion 写好的 awaiting_review 永久改回 running。终端侧还有
 //      scanForStalls 兜底，ACP 侧没有，改回去就再也回不来。
 // 因此回合归属为「用户」时只推进 lastOutputAt，facet 三元组保持原样。
+//
+// 本函数是 ACP 侧**唯一**推进 lastSubstantiveOutputAt 的地方：它的调用方全是携带新内容的流式
+// SessionUpdate（agent_message_chunk / agent_thought_chunk / tool_call / tool_call_update / plan）。
+// 两条分支都要推进——「回合归属已是用户」只影响要不要夺回 facet，不改变「agent 确实刚吐了东西」这个事实。
 function emitRunningSummary(context: AcpSessionUpdateContext): void {
 	const timestamp = now();
 	if (isAwaitingUserTurn(context.entry.summary)) {
-		context.emitSummary(updateAcpSummary(context.entry, { lastOutputAt: timestamp }));
+		context.emitSummary(
+			updateAcpSummary(context.entry, withAgentSubstantiveOutputTimestamp({ lastOutputAt: timestamp })),
+		);
 		return;
 	}
 	context.emitSummary(
-		updateAcpSummary(context.entry, {
-			...deriveAcpFacetPatch("running", null, { pid: context.pid, agentId: context.agentId }),
-			reviewReason: null,
-			lastOutputAt: timestamp,
-		}),
+		updateAcpSummary(
+			context.entry,
+			withAgentSubstantiveOutputTimestamp({
+				...deriveAcpFacetPatch("running", null, { pid: context.pid, agentId: context.agentId }),
+				reviewReason: null,
+				lastOutputAt: timestamp,
+			}),
+		),
 	);
 }
 
@@ -244,16 +253,17 @@ export function applyAcpPromptTurnCompletion(
 	clearAcpStreamingGrouping(context.entry);
 	const timestamp = now();
 
+	// 三条分支都不推进实质产出戳：stopReason 是**回合边界**，本轮正文早已由流式 SessionUpdate 经
+	// emitRunningSummary 逐条打过戳，边界本身不带新内容。这与 Cline 侧 endedEvent 的处置同构。
+	// 反转前 refusal / end_turn 两条会经漏斗隐式镜像而误推进（cancelled 当时靠显式 opt-out 才躲过），
+	// 于是「续跑一个旧 ACP 会话、它立刻以 end_turn 收束」就会把卡片刷成「agent 刚刚响应」。
 	if (stopReason === "cancelled") {
-		// 用户主动取消不是错误：不刷新实质产出戳，也不落成 error 人轴。
-		return updateAcpSummary(
-			context.entry,
-			withCurrentSubstantiveOutputTimestamp(context.entry, {
-				...deriveAcpFacetPatch("interrupted", null, { pid: context.pid, agentId: context.agentId }),
-				reviewReason: null,
-				lastOutputAt: timestamp,
-			}),
-		);
+		// 用户主动取消不是错误：也不落成 error 人轴。
+		return updateAcpSummary(context.entry, {
+			...deriveAcpFacetPatch("interrupted", null, { pid: context.pid, agentId: context.agentId }),
+			reviewReason: null,
+			lastOutputAt: timestamp,
+		});
 	}
 
 	if (stopReason === "refusal") {
@@ -272,7 +282,8 @@ export function applyAcpPromptTurnCompletion(
 	});
 }
 
-// 会话进程消失。走「只推进存活度」路径：显式带上当前实质戳，避免把「agent 上次响应」刷成刚刚。
+// 会话进程消失。进程退出不是 agent 产出，故不经 withAgentSubstantiveOutputTimestamp——漏斗默认就不
+// 推进实质戳（反转前这里必须显式带当前实质戳来 opt-out，现在那道手续没必要了）。
 export function applyAcpConnectionClosed(
 	context: AcpSessionUpdateContext,
 	detail: { exitCode: number | null; errorMessage: string | null },
@@ -288,17 +299,14 @@ export function applyAcpConnectionClosed(
 			),
 		);
 	}
-	return updateAcpSummary(
-		context.entry,
-		withCurrentSubstantiveOutputTimestamp(context.entry, {
-			// pid 置空是「进程已退」的唯一真相源：facet 推导据此把 awaiting 判为 exited。
-			...deriveAcpFacetPatch("awaiting_review", detail.errorMessage ? "error" : "completion", {
-				pid: null,
-				agentId: context.agentId,
-			}),
+	return updateAcpSummary(context.entry, {
+		// pid 置空是「进程已退」的唯一真相源：facet 推导据此把 awaiting 判为 exited。
+		...deriveAcpFacetPatch("awaiting_review", detail.errorMessage ? "error" : "completion", {
 			pid: null,
-			exitCode: detail.exitCode,
-			reviewReason: detail.errorMessage ? "error" : "completion",
+			agentId: context.agentId,
 		}),
-	);
+		pid: null,
+		exitCode: detail.exitCode,
+		reviewReason: detail.errorMessage ? "error" : "completion",
+	});
 }

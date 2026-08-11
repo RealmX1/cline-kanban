@@ -1,6 +1,7 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
+import { isLowConfidenceLastConversationProgressEvidence } from "@runtime-last-conversation-progress-observation";
 import { isAgentOutputWithinActiveWindow, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS } from "@runtime-session-activity";
-import { Activity, ChevronRight, Clock } from "lucide-react";
+import { Activity, ChevronRight, Clock, MessagesSquare } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { getAgentVisual } from "@/components/agent-visual";
 import { SESSION_ACTIVITY_COLOR } from "@/components/board-card-session-activity";
@@ -251,10 +252,13 @@ function OverviewTaskRow({
 			/>
 			<visual.Icon size={14} className={cn("shrink-0", visual.className)} />
 			<span className="min-w-0 flex-1 truncate text-sm text-text-primary">{task.title}</span>
-			{/* 时间元数据（同主看板卡片头部）：Clock=自创建至今（恒显）；Activity=agent 上次「实质」响应至今
-			    （有戳才显）。Activity 读 lastSubstantiveOutputAt（非 lastOutputAt）——与主看板 lastAgentResponseAt
-			    同源，滤掉 spinner/footer 装饰性重绘，避免虚假「刚响应」。绝对本地时间走原生 title——避免把
-			    Radix Tooltip 嵌进行按钮产生嵌套交互元素。 */}
+			{/* 时间元数据（与主看板卡片头部逐字同源、同语义）：Clock=自创建至今（恒显）；
+			    Activity=本轮停止生成至今（agent 回合 / park 期间无值 ⇒ 不显）；
+			    MessagesSquare=对话上次推进至今（低置信来源加 `~` 前缀）。
+			    这两颗刻意不合并成一颗：前者是 per-incarnation 的离散状态转移（会话重开时刷新是**对**的），
+			    后者是跨 incarnation 的历史事实（会话重开时**不该**动）。历史上用一个
+			    lastSubstantiveOutputAt 冒充两者，正是「重开旧会话后时间被刷成 now」的成因。
+			    绝对本地时间走原生 title——避免把 Radix Tooltip 嵌进行按钮产生嵌套交互元素。 */}
 			<span className="ml-1 flex shrink-0 items-center gap-1.5 text-[10px] leading-none text-text-tertiary">
 				<span
 					className="inline-flex items-center gap-0.5"
@@ -263,13 +267,31 @@ function OverviewTaskRow({
 					<Clock size={10} className="shrink-0" />
 					{formatCompactElapsedSince(task.createdAt, nowMs)}
 				</span>
-				{task.lastSubstantiveOutputAt != null ? (
+				{task.agentResponseGenerationStopped != null ? (
 					<span
 						className="inline-flex items-center gap-0.5"
-						title={`Agent last responded · ${new Date(task.lastSubstantiveOutputAt).toLocaleString()}`}
+						title={`Stopped generating · ${new Date(
+							task.agentResponseGenerationStopped.stoppedAt,
+						).toLocaleString()}`}
 					>
 						<Activity size={10} className="shrink-0" />
-						{formatCompactElapsedSince(task.lastSubstantiveOutputAt, nowMs)}
+						{formatCompactElapsedSince(task.agentResponseGenerationStopped.stoppedAt, nowMs)}
+					</span>
+				) : null}
+				{task.lastConversationProgressObservation != null ? (
+					<span
+						className="inline-flex items-center gap-0.5"
+						title={`Conversation last advanced · ${new Date(
+							task.lastConversationProgressObservation.observedAtMs,
+						).toLocaleString()} · source: ${task.lastConversationProgressObservation.evidenceKind}`}
+					>
+						<MessagesSquare size={10} className="shrink-0" />
+						{isLowConfidenceLastConversationProgressEvidence(
+							task.lastConversationProgressObservation.evidenceKind,
+						)
+							? "~"
+							: ""}
+						{formatCompactElapsedSince(task.lastConversationProgressObservation.observedAtMs, nowMs)}
 					</span>
 				) : null}
 			</span>

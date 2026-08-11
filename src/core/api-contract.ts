@@ -559,6 +559,47 @@ export const runtimeAgentResponseGenerationStoppedSchema = z.object({
 });
 export type RuntimeAgentResponseGenerationStopped = z.infer<typeof runtimeAgentResponseGenerationStoppedSchema>;
 
+// ── 「对话上次推进」观测（加性 sidecar；卡片时长药丸 B 的唯一真相源）──────────────────────────
+// 回答的问题是：**这个任务的对话，上一次真正往前走，是什么时候？**
+//
+// 它与另外两个极易混淆的量刻意分开命名、互不推断（三者都必须存在，谁也替代不了谁）：
+//   ① lastSubstantiveOutputAt   ——「此刻 agent 有没有在吐东西」。刮 TUI 猜出来的新鲜度，秒级粒度，
+//      服务 Validation 列 5s 自动打回与 idle-stall 5min 自愈。**会话重开必然被重播刷新，这是正确的**。
+//   ② agentResponseGenerationStopped ——「本次 incarnation 何时进入非生成态」。会话重开时刷新同样正确
+//      （新活体新一轮），驱动 2h 回收与药丸 A。
+//   ③ 本字段                    ——「对话上次推进」。**跨 incarnation 的历史事实**：进程重启、会话
+//      重开、旧对话被重播进新 TUI，它都不该动。
+// 历史上卡片拿 ① 冒充 ③，于是「今天重开一个七天前的会话」会把卡片时间刷成 now——26% 的 claude 任务
+// 因此显示错误（偏差中位数 26.8 小时）。修法不是继续给 ① 打补丁，而是给 ③ 一个自己的真相源。
+//
+// evidenceKind 记录「这一次前进是靠什么看出来的」，用途有二：UI 对低置信来源加 `~` 前缀降级展示；
+// 合并 reducer 据此决定会话重开时能否 rebaseline（见 src/core/last-conversation-progress-observation.ts）。
+export const runtimeLastConversationProgressEvidenceKindSchema = z.enum([
+	// 最高置信：agent 自己落盘的转录里最后一条 agent 产出（Claude/Codex/Cursor 的 JSONL、Cline 消息账本）。
+	// 唯一跨进程重启、跨会话重开仍成立的来源，故也是唯一被授权做 rebaseline 的证据。
+	"persisted_agent_transcript",
+	// 高置信：agent 自报的生命周期语义事件（Claude Stop / PostToolUse 等经 `kanban hooks` 投递）。
+	// 低延迟但会丢投（见 ~/.cline/kanban/agent-hook-delivery-failures/），故只前进、不做权威纠偏。
+	"agent_lifecycle_hook_event",
+	// 高置信：结构化会话事件（Cline SDK assistant 消息 / ACP agent_message_chunk），无需刮 TUI。
+	"structured_agent_session_event",
+	// 低置信兜底：TUI 输出实质分类器（agent-output-substance.ts）。无转录、无 hook 的 agent 才落到这里；
+	// 它正是历史上被会话重开重播骗到的那条路径，故 UI 以 `~` 标注。
+	"terminal_output_heuristic_classification",
+]);
+export type RuntimeLastConversationProgressEvidenceKind = z.infer<
+	typeof runtimeLastConversationProgressEvidenceKindSchema
+>;
+
+export const runtimeLastConversationProgressObservationSchema = z.object({
+	// 对话上次推进的时刻（epoch ms）。
+	observedAtMs: z.number(),
+	evidenceKind: runtimeLastConversationProgressEvidenceKindSchema,
+});
+export type RuntimeLastConversationProgressObservation = z.infer<
+	typeof runtimeLastConversationProgressObservationSchema
+>;
+
 // Kanban 与一个 agent 通话的方式（PTY / 进程内 Cline SDK / ACP 子进程）。canonical zod 源放在
 // api-contract（契约叶子模块），src/core/agent-catalog.ts 由此派生 TS 类型并挂到 catalog 条目上，
 // 避免 api-contract → agent-catalog 的反向依赖。
@@ -615,6 +656,13 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 探针、卡片 computing 展示、终端面板基线）仍读 lastOutputAt（spinner 期应计为活动）。加性可选：
 	// 旧盘数据 / web-ui 手构造 summary 缺它 → undefined ⇒ 判据回退「不在产出」（见判据注释）。
 	lastSubstantiveOutputAt: z.number().nullable().optional(),
+	// 「对话上次推进」观测（跨 incarnation 的历史事实，卡片药丸 B 读它）。语义、与上面两个时间戳的
+	// 分工、以及为什么必须是独立字段，见 runtimeLastConversationProgressObservationSchema 的注释。
+	// 合并只经 src/core/last-conversation-progress-observation.ts 的唯一 reducer（稳态单调前进、
+	// 仅持久转录在 incarnation 边界或「非 agent 回合 + 已存值低置信」时可 rebaseline）。加性可选：
+	// 旧盘数据 / 手构造 summary 缺它 ⇒
+	// 药丸 B 隐藏（而非退回读 lastSubstantiveOutputAt——那正是本 bug 的成因）。
+	lastConversationProgressObservation: runtimeLastConversationProgressObservationSchema.nullable().optional(),
 	reviewReason: runtimeTaskSessionReviewReasonSchema,
 	exitCode: z.number().nullable(),
 	lastHookAt: z.number().nullable().default(null),
@@ -824,6 +872,14 @@ export const runtimeInProgressTaskDetailSchema = z.object({
 	// 「agent 上次响应至今」药丸读它——与主看板卡片头部同源（task-card-body 的 lastAgentResponseAt），
 	// 避免终端 agent 仅 spinner 重绘时显示虚假「刚响应」。
 	lastSubstantiveOutputAt: z.number().nullable(),
+	// 概览行的两颗时长药丸（与主看板卡片头部同源、同语义）：
+	//   Stopped   —— 本次 incarnation 何时进入非生成态；agent 回合 / park 期间为 null。
+	//   Progress  —— 这个任务的对话上次真正往前走到哪一刻（跨 incarnation 的历史事实）。
+	// 二者为什么必须分开、以及为什么都不能用 lastSubstantiveOutputAt 冒充，见
+	// runtimeLastConversationProgressObservationSchema 的注释。
+	// 加性 optional：旧 runtime payload 不带 ⇒ 该颗药丸隐藏，绝不回退读上面那个实质戳。
+	agentResponseGenerationStopped: runtimeAgentResponseGenerationStoppedSchema.nullable().optional(),
+	lastConversationProgressObservation: runtimeLastConversationProgressObservationSchema.nullable().optional(),
 	turnOwner: runtimeTaskSessionTurnOwnerSchema,
 	liveness: runtimeTaskSessionLivenessSchema,
 });

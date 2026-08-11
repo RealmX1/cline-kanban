@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionReclamationOutcome,
+	RuntimeLastConversationProgressObservation,
 	RuntimeTaskConnectionRetry,
 	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskHookActivity,
@@ -810,7 +811,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		// 取 lastOutputAt 而非 now()：实质内容随批内 chunk 到达，保持
 		// lastSubstantiveOutputAt ≤ lastOutputAt 的既有关系。
-		updateSummary(entry, { lastSubstantiveOutputAt: entry.summary.lastOutputAt ?? analyzedAt });
+		const substantiveOutputAt = entry.summary.lastOutputAt ?? analyzedAt;
+		updateSummary(entry, {
+			lastSubstantiveOutputAt: substantiveOutputAt,
+			// 同刻记一条「对话上次推进」观测，但置信度标成**最低的那一档**——这是刮 TUI 渲染猜出来的，
+			// 而它恰恰是本 bug 的病灶来源：会话重开时旧对话被重播进新 TUI、行签名记忆是全新空 Set，
+			// 整段旧内容会被这里判成「新实质产出」。所以它只是「无转录、无 hook 时的兜底」：
+			//   - 卡片对这一档加 `~` 前缀降级展示（isLowConfidenceLastConversationProgressEvidence）；
+			//   - 回合交回用户后，持久转录探针**无需任何额外授权**就能把这一档的值拉回真相（见合并 reducer
+			//     的纠偏规则；回合进行中刻意不许回拉，否则转录的天然滞后会与本分类器来回拉扯）。
+			// 有转录（claude / codex / cursor）或有 hook 的 agent 会很快被更高置信的证据覆盖掉。
+			lastConversationProgressObservation: {
+				observedAtMs: substantiveOutputAt,
+				evidenceKind: "terminal_output_heuristic_classification",
+			},
+		});
 	}
 
 	// 节流空档内的攒批：不跑分类器，只把原始文本挂进有上限的待分析尾巴，并排定「窗口末尾补分析」。
@@ -2387,6 +2402,51 @@ export class TerminalSessionManager implements TerminalSessionService {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));
 			}
+		}
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
+	// 记一条来自 agent 生命周期 hook 的「对话上次推进」观测（Claude Stop / PostToolUse 等，经
+	// `kanban hooks ingest` 投递）。
+	//
+	// 它的角色是**低延迟前进**，不是权威：hook 会丢投（证据在 ~/.cline/kanban/agent-hook-delivery-failures/），
+	// 所以它只被允许把值往前推，纠偏留给持久转录探针。合并规则（单调、拒收未来时刻）由
+	// mergeSummaryWithFacets 统一执行，本方法只如实上报。
+	//
+	// **绝不可**在 to_in_progress（UserPromptSubmit）上调用：那一刻说话的是用户，不是 agent；
+	// 把它算作「对话推进」就等于让用户自己的输入刷新「agent 上次回复」——正是本次要根治的那类错误。
+	recordAgentLifecycleHookConversationProgress(taskId: string): RuntimeTaskSessionSummary | null {
+		return this.recordLastConversationProgressObservation(taskId, {
+			observedAtMs: now(),
+			evidenceKind: "agent_lifecycle_hook_event",
+		});
+	}
+
+	// 记一条来自**持久转录**的观测（最高置信、唯一跨会话重开仍成立的证据）。
+	// 观测由 persisted-agent-transcript-last-conversation-progress-probe 读盘得出，本方法只负责写回。
+	// 它是唯一能把「被重播刷到刚刚」的低置信值拉回真相的路径，纠偏授权在合并 reducer 里判定。
+	recordPersistedAgentTranscriptConversationProgress(
+		taskId: string,
+		observation: RuntimeLastConversationProgressObservation,
+	): RuntimeTaskSessionSummary | null {
+		return this.recordLastConversationProgressObservation(taskId, observation);
+	}
+
+	private recordLastConversationProgressObservation(
+		taskId: string,
+		observation: RuntimeLastConversationProgressObservation,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return null;
+		}
+		const previousObservation = entry.summary.lastConversationProgressObservation ?? null;
+		const summary = updateSummary(entry, { lastConversationProgressObservation: observation });
+		if (summary.lastConversationProgressObservation === previousObservation) {
+			// 合并 reducer 判定这条观测不改变任何东西（滞后 / 重复 / 被拒收）⇒ 不广播。
+			// 周期性转录探测绝大多数时候都落在这一支，没有这道门就会平白给推流加一条恒定的空转流量。
+			return cloneSummary(summary);
 		}
 		this.emitSummary(summary);
 		return cloneSummary(summary);
