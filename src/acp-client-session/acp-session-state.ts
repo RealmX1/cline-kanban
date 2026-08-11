@@ -107,28 +107,35 @@ export function cloneAcpMessage(message: AcpTaskMessage): AcpTaskMessage {
 	};
 }
 
-// 唯一 summary 写漏斗。与 Cline 侧同构地镜像 lastSubstantiveOutputAt = lastOutputAt：
-// ACP 的 SessionUpdate 都是结构化事件（不是 TUI 重绘），所以每条都算真实产出。
-// 「只推进存活度」的事件（连接关闭、回合取消）必须显式带上当前实质戳来退出镜像，
-// 见 emitAcpLivenessOnlySummaryPatch——否则卡片的「agent 上次响应」会被刷成「刚刚」。
+// ACP 侧唯一 summary 写漏斗。与 Cline 侧同构：**不对 lastSubstantiveOutputAt 做任何隐式推断**，
+// 推进它只能靠调用方显式经 withAgentSubstantiveOutputTimestamp 声明。
+// 反转前这里默认把 lastSubstantiveOutputAt 镜像成 lastOutputAt、靠写点 opt-out，
+// 完整的代价与理由见 src/cline-sdk/cline-session-state.ts updateSummary 的注释（两侧同因同修）。
 export function updateAcpSummary(
 	entry: AcpTaskSessionEntry,
 	patch: Partial<RuntimeTaskSessionSummary>,
 ): RuntimeTaskSessionSummary {
-	const mirroredPatch =
-		patch.lastOutputAt !== undefined && patch.lastSubstantiveOutputAt === undefined
-			? { ...patch, lastSubstantiveOutputAt: patch.lastOutputAt }
-			: patch;
-	entry.summary = mergeSummaryWithFacets(entry.summary, { ...mirroredPatch, updatedAt: now() });
+	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: now() });
 	return cloneAcpSummary(entry.summary);
 }
 
-// 显式带上当前实质戳，使 updateAcpSummary 的镜像不生效。
-export function withCurrentSubstantiveOutputTimestamp(
-	entry: AcpTaskSessionEntry,
+// 显式声明「这一次写带来了新的 agent 实质产出」——推进 lastSubstantiveOutputAt 的唯一方式。
+// ACP 侧真正符合的只有流式 SessionUpdate（agent_message_chunk / agent_thought_chunk / tool_call /
+// tool_call_update / plan），见 acp-session-update-adapter.ts 的 emitRunningSummary。
+// 回合完成的 stopReason（end_turn / refusal / cancelled）是**回合边界**，正文早已由上面那些流式事件
+// 打过戳，不再重复推进；连接关闭、进程失败、用户发消息、会话回收同理。
+// 同时记一条「对话上次推进」观测：ACP 的 SessionUpdate 是**结构化**协议事件（不是刮 TUI 猜出来的），
+// 故与 Cline 侧同取 structured_agent_session_event。合并规则由 mergeSummaryWithFacets 统一执行，
+// 此处只如实上报一次观测、不做裁决。
+export function withAgentSubstantiveOutputTimestamp(
 	patch: Partial<RuntimeTaskSessionSummary>,
 ): Partial<RuntimeTaskSessionSummary> {
-	return { ...patch, lastSubstantiveOutputAt: entry.summary.lastSubstantiveOutputAt ?? null };
+	const observedAtMs = now();
+	return {
+		...patch,
+		lastSubstantiveOutputAt: observedAtMs,
+		lastConversationProgressObservation: { observedAtMs, evidenceKind: "structured_agent_session_event" },
+	};
 }
 
 export function createAcpMessage(

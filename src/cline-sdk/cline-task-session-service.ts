@@ -9,6 +9,7 @@ import type {
 	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskImage,
 	RuntimeTaskSessionMode,
+	RuntimeTaskSessionState,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
@@ -359,11 +360,31 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		const resolvedMode: RuntimeTaskSessionMode = request.startInPlanMode ? "act" : (request.mode ?? "act");
 		const normalizedPrompt = request.prompt.trim();
 		const hasRequestImages = Boolean(request.images && request.images.length > 0);
-		const initialState = request.resumeFromTrash
+		// 这次启动是否要立刻投递首轮 user prompt（文本或图片）。刻意抽成**一个**布尔量：它同时驱动
+		// 「构造点停在 idle」与「下方经 updateSummary 把会话推进 running」两件事，两者必须严格同生同灭，
+		// 绝不能各判一次——否则「构造点已落 running、那次 running 写却没发生」就会重现下面这个缺陷。
+		const shouldSubmitInitialUserPromptOnStart =
+			!request.resumeFromTrash && (normalizedPrompt.length > 0 || hasRequestImages);
+		// 构造点刻意**不**直接落 running：`agentResponseGenerationTurnSequence` 只由写侧漏斗
+		// mergeSummaryWithFacets 的 didEnterAgentTurn 在「非 agent 回合 → agent 回合」这条**边沿**上推进，
+		// 而构造点用的 applySessionFacets 是幂等重投影、压根不认边沿。一出生就是 running 的 entry 从此
+		// 再也跨不过那条边沿，序号恒停在缺失（等价 0）；等首轮真正结束、球翻回人这边时，
+		// deriveAgentResponseGenerationStopSignalConfidence 的第一条判据 `(序号 ?? 0) === 0` 命中，把这次
+		// 停止误标成 session_ready_never_prompted（语义：会话已就绪但从未收到过任何用户提交），而事实上
+		// 这个会话刚刚跑完一整轮。故新 entry 一律从「尚未开始任何 agent 回合」的 idle 出发，由下方那次
+		// running 写构成货真价实的边沿——与 PTY 通道（session-manager 的 idle createDefaultSummary +
+		// updateSummary 写 running）、ACP 通道（createAcpTaskSessionEntry 恒 idle + updateAcpSummary 写
+		// running）三侧同形。
+		// resumeFromTrash 是唯一例外：它恢复出来的会话本就是「等人处理」，这条路径从不经过 agent 回合，
+		// 构造点直接落 awaiting_review 与今日逐字一致。
+		// 回收侧安全性：序号变化只发生在**这条全新构造**的 entry 上，而它在同一段同步代码里就换了一个
+		// 全新的 runtimeSessionIncarnationId（见下方 randomUUID），已落盘的旧期限本就因 incarnation 不匹配
+		// 而被 isReclamationDeadlineStillCurrentForSession 判为 superseded，与序号取 0 还是 1 无关。
+		// 刻意**不**采用「事后给已存在的 summary 归一化序号」那种改法——那会让在途期限凭空作废、改变
+		// 2 小时回收的时序。
+		const sessionStateAtEntryConstruction: RuntimeTaskSessionState = request.resumeFromTrash
 			? "awaiting_review"
-			: normalizedPrompt.length > 0 || hasRequestImages
-				? "running"
-				: "idle";
+			: "idle";
 		const initialReviewReason = request.resumeFromTrash ? "attention" : null;
 		const shouldHydratePersistedHistory = request.resumeFromTrash || request.resumeFromPersistence;
 		const persistedResumeSnapshot = shouldHydratePersistedHistory
@@ -372,7 +393,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 
 		const entry = persistedResumeSnapshot
 			? createTaskEntryFromPersistedSession(request.taskId, persistedResumeSnapshot.messages, {
-					state: initialState,
+					state: sessionStateAtEntryConstruction,
 					mode: resolvedMode,
 					workspacePath: request.cwd,
 					startedAt: now(),
@@ -390,7 +411,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 						...(request.taskConversationSessionMetadata
 							? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
 							: {}),
-						state: initialState,
+						state: sessionStateAtEntryConstruction,
 						mode: resolvedMode,
 						workspacePath: request.cwd,
 						startedAt: now(),
@@ -410,7 +431,10 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		// 绝不会被上一个活体留下的陈旧期限误杀。metadata-only 补丁，不携带 facet / state。
 		updateSummary(entry, { runtimeSessionIncarnationId: randomUUID() });
 
-		if (!request.resumeFromTrash && (normalizedPrompt.length > 0 || hasRequestImages)) {
+		// 这次写就是本条会话的第一条「非 agent 回合 → agent 回合」边沿：entry 构造在 idle（见
+		// sessionStateAtEntryConstruction），此处经写侧漏斗 updateSummary 推进 running，didEnterAgentTurn
+		// 因而把 agentResponseGenerationTurnSequence 推到 1。别把它改回构造点直接落 running。
+		if (shouldSubmitInitialUserPromptOnStart) {
 			const message = createMessage(request.taskId, "user", normalizedPrompt, request.images);
 			entry.messages.push(message);
 			this.emitMessage(request.taskId, message);
@@ -896,8 +920,8 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 	}
 
 	// 把一次会话回收的可审计结果写回 summary sidecar（与终端 / ACP 侧同名同义）。
-	// 显式带上当前实质戳，退出 updateSummary 的 lastOutputAt 镜像——回收是「只推进存活度」的事件，
-	// 绝不能把卡片上的「agent 上次响应」刷成「刚刚」。
+	// 回收不是 agent 产出，故不经 withAgentSubstantiveOutputTimestamp——漏斗默认就不推进实质戳
+	// （反转前这里必须显式带当前实质戳来 opt-out，现在那道手续没必要了）。
 	applyAgentSessionReclamationOutcome(
 		taskId: string,
 		outcome: RuntimeAgentSessionReclamationOutcome,
@@ -908,7 +932,6 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		}
 		const summary = updateSummary(entry, {
 			agentSessionRuntimeReclamationOutcome: outcome,
-			lastSubstantiveOutputAt: entry.summary.lastSubstantiveOutputAt ?? null,
 		});
 		this.emitSummary(summary);
 		return summary;

@@ -19,6 +19,8 @@ function detail(overrides: Partial<RuntimeInProgressTaskDetail> & { taskId: stri
 		createdAt: 0,
 		lastOutputAt: null,
 		lastSubstantiveOutputAt: null,
+		agentResponseGenerationStopped: null,
+		lastConversationProgressObservation: null,
 		turnOwner: null,
 		liveness: "none",
 		...overrides,
@@ -67,6 +69,15 @@ function buttonWithText(host: HTMLElement, text: string): HTMLButtonElement | un
 // task 行按钮的文本已含时间元药丸（Clock/Activity），不再等于纯标题，故按稳定 testid 定位。
 function taskRow(host: HTMLElement, taskId: string): HTMLButtonElement | null {
 	return host.querySelector<HTMLButtonElement>(`[data-testid="overview-task-${taskId}"]`);
+}
+
+// Stale 区默认折叠、其 task 行不在 DOM 里。「已停止生成 / 等人审查」的任务按 ADR-0001 口径本来就归
+// Stale（turnOwner=user），所以验它们的时长药丸必须先展开——而不是把它们伪装成 agent 回合塞进 Active。
+function expandStaleSection(host: HTMLElement): void {
+	const trigger = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Stale"));
+	act(() => {
+		trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+	});
 }
 
 describe("CrossRepositoryStageFirstOverview", () => {
@@ -133,45 +144,61 @@ describe("CrossRepositoryStageFirstOverview", () => {
 		expect(buttonWithText(host, "solo3")).toBeTruthy();
 	});
 
-	it("task 行显示时间元数据：自创建至今 + agent 上次实质响应至今", () => {
+	it("task 行显示三段时间元数据：自创建至今 + 本轮停了多久 + 对话上次推进", () => {
 		const projects = [
 			project({
 				id: "solo",
 				rawColumnTaskCounts: counts({ in_progress: 1 }),
 				inProgressTaskDetails: [
-					// createdAt 3min 前 → Clock "3m"；lastSubstantiveOutputAt 1s 前 → Activity "now"。
+					// createdAt 3h 前 → Clock "3h"；停止 5min 前 → "5m"；对话推进 2d 前 → "2d"。
+					// 三个刻意取不同量级，避免某一段渲染错了却被另一段的相同读数掩盖过去。
 					detail({
 						taskId: "t1",
-						turnOwner: "agent",
+						turnOwner: "user",
 						liveness: "live",
-						createdAt: now - 3 * 60_000,
+						createdAt: now - 3 * 60 * 60_000,
 						lastOutputAt: now - FRESH,
-						lastSubstantiveOutputAt: now - FRESH,
+						agentResponseGenerationStopped: {
+							stoppedAt: now - 5 * 60_000,
+							signalConfidence: "harness_turn_complete",
+							turnSequence: 1,
+						},
+						lastConversationProgressObservation: {
+							observedAtMs: now - 2 * 24 * 60 * 60_000,
+							evidenceKind: "persisted_agent_transcript",
+						},
 					}),
 				],
 			}),
 		];
 		const host = render(<CrossRepositoryStageFirstOverview projects={projects} onOpenTask={vi.fn()} />);
+		expandStaleSection(host);
 		const row = taskRow(host, "t1");
 		expect(row).toBeTruthy();
-		expect(row?.textContent).toContain("3m");
-		expect(row?.textContent).toContain("now");
+		expect(row?.textContent).toContain("3h");
+		expect(row?.textContent).toContain("5m");
+		expect(row?.textContent).toContain("2d");
 	});
 
-	it("Activity 药丸读 lastSubstantiveOutputAt 而非 lastOutputAt（spinner 噪声不显示虚假『刚响应』）", () => {
+	// 根因回归：spinner 重绘会把 lastOutputAt / lastSubstantiveOutputAt 刷到「刚刚」，但那两个量都
+	// **不再**被任何一颗药丸读取。药丸只读两个各自有明确真相源的字段，二者都无值就一颗也不显示——
+	// 绝不回退去读实质戳（那正是「重开旧会话后显示 now」的成因）。
+	it("只有 spinner 噪声（无停止事件、无推进观测）⇒ 一颗时长药丸都不显示", () => {
 		const projects = [
 			project({
 				id: "solo",
 				rawColumnTaskCounts: counts({ in_progress: 1 }),
 				inProgressTaskDetails: [
-					// lastOutputAt 刚刷新（spinner 重绘）但无实质产出 → Active（分类读 lastOutputAt）、但 Activity 段隐藏。
 					detail({
 						taskId: "t-spinner",
 						turnOwner: "agent",
 						liveness: "live",
 						createdAt: now - 3 * 60_000,
+						// 两个「此刻在不在吐东西」的量都被刷到刚刚——但它们不参与药丸展示。
 						lastOutputAt: now - FRESH,
-						lastSubstantiveOutputAt: null,
+						lastSubstantiveOutputAt: now - FRESH,
+						agentResponseGenerationStopped: null,
+						lastConversationProgressObservation: null,
 					}),
 				],
 			}),
@@ -179,9 +206,42 @@ describe("CrossRepositoryStageFirstOverview", () => {
 		const host = render(<CrossRepositoryStageFirstOverview projects={projects} onOpenTask={vi.fn()} />);
 		const row = taskRow(host, "t-spinner");
 		expect(row).toBeTruthy();
-		// Clock 恒显（createdAt 3min → "3m"）；lastSubstantiveOutputAt=null → 无 Activity 段 → 不出现 "now"。
+		// Clock 恒显（createdAt 3min → "3m"）；另两颗隐藏 ⇒ 不出现 "now"。
 		expect(row?.textContent).toContain("3m");
 		expect(row?.textContent).not.toContain("now");
+	});
+
+	// 低置信来源（无转录、无 hook 的 agent 落到 TUI 刮取分类器）如实标 `~`，而不是假装精确。
+	it("低置信推进证据加 `~` 前缀降级展示；高置信不加", () => {
+		const projects = [
+			project({
+				id: "solo",
+				rawColumnTaskCounts: counts({ in_progress: 2 }),
+				inProgressTaskDetails: [
+					detail({
+						taskId: "t-heuristic",
+						createdAt: now,
+						lastConversationProgressObservation: {
+							observedAtMs: now - 2 * 60 * 60_000,
+							evidenceKind: "terminal_output_heuristic_classification",
+						},
+					}),
+					detail({
+						taskId: "t-transcript",
+						createdAt: now,
+						lastConversationProgressObservation: {
+							observedAtMs: now - 2 * 60 * 60_000,
+							evidenceKind: "persisted_agent_transcript",
+						},
+					}),
+				],
+			}),
+		];
+		const host = render(<CrossRepositoryStageFirstOverview projects={projects} onOpenTask={vi.fn()} />);
+		expandStaleSection(host);
+		expect(taskRow(host, "t-heuristic")?.textContent).toContain("~2h");
+		expect(taskRow(host, "t-transcript")?.textContent).toContain("2h");
+		expect(taskRow(host, "t-transcript")?.textContent).not.toContain("~2h");
 	});
 
 	it("点击 in-progress task 冒泡 (repoId, taskId)", () => {

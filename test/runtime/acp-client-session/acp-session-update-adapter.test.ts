@@ -196,6 +196,46 @@ describe("applyAcpPromptTurnCompletion", () => {
 		const summary = applyAcpPromptTurnCompletion(context, "cancelled");
 		expect(summary.lastSubstantiveOutputAt).toBe(substantiveAfterOutput);
 	});
+
+	// 写侧默认反转回归：stopReason 是**回合边界**，本轮正文早已由流式 SessionUpdate 逐条打过实质戳，
+	// 边界本身不带新内容。反转前 updateAcpSummary 漏斗默认把 lastSubstantiveOutputAt 镜像成
+	// lastOutputAt，于是 end_turn / refusal 会误推进（当时只有 cancelled 靠显式 opt-out 躲过）——
+	// 「续跑一个旧 ACP 会话、它立刻以 end_turn 收束」因此把卡片刷成「agent 刚刚响应」。
+	it.each(["end_turn", "refusal"] as const)(
+		"does not advance the substantive output timestamp on a %s stop reason",
+		(stopReason) => {
+			const { context } = createContext();
+			applyAcpSessionUpdate(
+				context,
+				notify({ sessionUpdate: "agent_message_chunk", messageId: "m1", content: { type: "text", text: "hi" } }),
+			);
+			const substantiveAfterOutput = context.entry.summary.lastSubstantiveOutputAt;
+			expect(substantiveAfterOutput).not.toBeNull();
+
+			const summary = applyAcpPromptTurnCompletion(context, stopReason);
+			expect(summary.lastSubstantiveOutputAt).toBe(substantiveAfterOutput);
+			// 存活度仍然推进——被摘掉的只是「算一次 agent 响应」的语义，不是这条写本身。
+			expect(summary.lastOutputAt ?? 0).toBeGreaterThanOrEqual(substantiveAfterOutput ?? 0);
+		},
+	);
+
+	// 对位断言：真正携带内容的流式更新**必须**推进实质戳，否则反转就从「默认安全」滑成「永远不推进」。
+	it.each([
+		[
+			"agent_message_chunk",
+			{ sessionUpdate: "agent_message_chunk", messageId: "m1", content: { type: "text", text: "hi" } },
+		],
+		[
+			"agent_thought_chunk",
+			{ sessionUpdate: "agent_thought_chunk", messageId: "t1", content: { type: "text", text: "think" } },
+		],
+		["tool_call", { sessionUpdate: "tool_call", toolCallId: "c1", title: "Read", status: "pending" }],
+	] as const)("advances the substantive output timestamp on a %s update", (_label, update) => {
+		const { context } = createContext();
+		expect(context.entry.summary.lastSubstantiveOutputAt ?? null).toBeNull();
+		applyAcpSessionUpdate(context, notify(update as AcpSessionNotification["update"]));
+		expect(context.entry.summary.lastSubstantiveOutputAt ?? null).not.toBeNull();
+	});
 });
 
 describe("applyAcpConnectionClosed", () => {

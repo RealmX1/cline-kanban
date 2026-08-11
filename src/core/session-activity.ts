@@ -12,6 +12,8 @@
 
 import type {
 	RuntimeAgentId,
+	RuntimeAgentResponseGenerationStopped,
+	RuntimeAgentResponseGenerationStopSignalConfidence,
 	RuntimeTaskSessionLiveness,
 	RuntimeTaskSessionReviewReason,
 	RuntimeTaskSessionState,
@@ -19,6 +21,7 @@ import type {
 	RuntimeTaskSessionTurnOwner,
 	RuntimeTaskSessionUserTurnKind,
 } from "./api-contract.js";
+import { mergeLastConversationProgressObservation } from "./last-conversation-progress-observation.js";
 
 // 「agent 仍在持续产出」的活跃窗口阈值（毫秒）。前后端有意取不同值、语义相反，故分别命名、
 // 不强行统一为一个常量：
@@ -276,16 +279,150 @@ export function mergeSummaryWithFacets(
 		return refreshed;
 	})();
 
-	if (!didEnterAgentTurn(prev, patch, mergedWithFacets)) {
-		// 没有开始新的 agent 回合：序号原样透传（含「从未开始过任何回合、字段仍缺失」这一态）。
-		// 刻意不在此把缺失字段补成 0——那会给每一条历史 summary 平白加一个字段、也让
-		// mergeSummaryWithFacets 与 applySessionFacets 的既有等价关系产生无谓差异。
+	const withTurnSequence = didEnterAgentTurn(prev, patch, mergedWithFacets)
+		? {
+				...mergedWithFacets,
+				agentResponseGenerationTurnSequence: (prev.agentResponseGenerationTurnSequence ?? 0) + 1,
+			}
+		: // 没有开始新的 agent 回合：序号原样透传（含「从未开始过任何回合、字段仍缺失」这一态）。
+			// 刻意不在此把缺失字段补成 0——那会给每一条历史 summary 平白加一个字段、也让
+			// mergeSummaryWithFacets 与 applySessionFacets 的既有等价关系产生无谓差异。
+			mergedWithFacets;
+
+	const withProgressObservation = resolveLastConversationProgressObservation(prev, patch, withTurnSequence);
+
+	const stopped = resolveAgentResponseGenerationStopped(prev, patch, withProgressObservation);
+	// `?? null` 是要点不是噪声：字段缺失（undefined）与「已判定为无停止事件」（null）在语义上同为
+	// 「没有可显示的停止时刻」，但若在此把 undefined 视作不等于 null，每一次 agent 回合期间的
+	// metadata-only 写都会给 summary 凭空补一个 `agentResponseGenerationStopped: null`——历史盘上
+	// 743×N 条 summary 集体多出一个空字段，且与上面回合序号「刻意不把缺失补成 0」的原则自相矛盾。
+	// 缺失就让它继续缺失；只有真需要落一个对象、或需要把已有对象清掉时才写。
+	if (stopped === (withProgressObservation.agentResponseGenerationStopped ?? null)) {
+		return withProgressObservation;
+	}
+	return { ...withProgressObservation, agentResponseGenerationStopped: stopped };
+}
+
+// 「对话上次推进」观测的合并落点。放在这条三 transport 共用的写侧漏斗里，是为了让**单调性成为结构性
+// 保证**而不是各写点的自觉：任何一条通道、任何一个写点，只要在 patch 里带上一条观测，就必然经过
+// mergeLastConversationProgressObservation 这一个 reducer（稳态取 max、只有持久转录能在**非 agent 回合**
+// 里纠正低置信猜测、未来时刻拒收）。没有任何写点能绕过它把值往回改或往未来推。
+//
+// 不在 patch 里带观测的写（绝大多数）原样透传，字段缺失就继续缺失——同「不给历史 summary 平白加字段」
+// 的原则（见下方写回门注释）。
+function resolveLastConversationProgressObservation(
+	prev: RuntimeTaskSessionSummary,
+	patch: Partial<RuntimeTaskSessionSummary>,
+	mergedWithFacets: RuntimeTaskSessionSummary,
+): RuntimeTaskSessionSummary {
+	const incoming = patch.lastConversationProgressObservation;
+	if (incoming == null) {
+		// undefined = 这次写与观测无关；null = 调用方显式要求清空（例：清空会话重开一段新对话）。
+		// 两种情形 mergedWithFacets 里都已经是对的值（它由 {...prev, ...patch} 派生），原样返回即可——
+		// 刻意不重建对象，免得给没有这个字段的历史 summary 平白塞一个 undefined 键。
 		return mergedWithFacets;
 	}
+	const merged = mergeLastConversationProgressObservation(prev.lastConversationProgressObservation, incoming, {
+		nowMs: mergedWithFacets.updatedAt,
+		// 「此刻球在不在 agent 手上」只有这条漏斗知道，而 reducer 需要它来关掉「低置信已存值可被转录直接
+		// 纠偏」那条授权：TUI 分类器只在 agent 回合里写低置信值，转录恰在同一段时间里滞后，两者相遇就是
+		// 每个探测周期抖一次的来回拉扯（见 reducer 模块注释第 2 条）。用 mergedWithFacets 而非 prev——
+		// 判据要的是「本次写落定后」的回合归属，与下方停止事件判据取同一口径。
+		isAgentResponseGenerationTurnInProgress: resolveSessionFacets(mergedWithFacets).turnOwner === "agent",
+	});
+	if (merged === mergedWithFacets.lastConversationProgressObservation) {
+		return mergedWithFacets;
+	}
+	// merged 此刻装的是 patch 里那条**未经裁决**的原始观测，必须换成 reducer 的裁决结果。
+	return { ...mergedWithFacets, lastConversationProgressObservation: merged };
+}
+
+// 「本轮何时停止生成」离散事件的唯一写点（与回合序号同处这条三 transport 共用漏斗，故三侧自动一致）。
+//
+// 判据只看 turnOwner，不看 liveness / reviewReason：
+//   - turnOwner==="agent"（含 park——parked 主 agent 的真相就是普通 agent 回合）⇒ 球在 agent 手上，
+//     没有「停止」可言 ⇒ null。药丸此刻不显示时长，由既有 computing 脉动 / parked 徽标表达。
+//   - turnOwner===null（idle：压根没有会话）⇒ 同样没有可谈的停止时刻 ⇒ null。
+//   - turnOwner==="user" ⇒ 球回到人这边，这一刻就是本轮停止生成的时刻。
+// 这与回收侧 isAgentSessionRetentionDeadlineBearing 的第一条门（isAgentSessionCurrentlyGeneratingResponse）
+// 同源同概念：卡片显示的「停了多久」与回收计时的起算点谈的是同一件事，一处对处处对。两处**有意**的
+// 差异各有理由，改动前请先确认你要动的不是其中之一：
+//   1) 回收侧额外要求 liveness==="live" 才起算——回收对已退进程无事可做；展示侧不设这道门，进程已退
+//      但等人审查的会话照样该显示「停了多久」。
+//   2) park：回收侧把 parked 判为「已停止生成」（走 park 独立回收轨道）；展示侧仍判为 agent 回合 ⇒ null，
+//      因为卡片此刻已由 parked 徽标表达「在等后台工作」，再叠一颗「停了多久」只会让人误以为会话闲置。
+//
+// 停止事件一旦落定就**冻结**，直到进入新的边沿为止：绝不在后续每一次 metadata-only 写上重算。
+// 否则 reviewReason 的后续变化会悄悄改写 signalConfidence，让「这一次停止是怎么看出来的」失真。
+//
+// **边沿触发，不是电平触发**（这是本函数的命门，与上方 didEnterAgentTurn 严格对偶）：事件只在
+// didEnterUserTurnEndingAgentResponseGeneration 判定的那一次转移上落地；「当前处于 user 回合」这个
+// **电平**本身绝不构成落事件的理由。
+// 为什么这不是细节：本字段在契约里是 nullable+optional，而它落地之前 src/ 里从来没有任何写入点，
+// 因此历史盘上每一条已处于 awaiting_review（user 回合）的 summary 都**没有**这个字段。若判据写成
+// 「在 user 回合且字段为空就新建」，这些会话的下一次任意 metadata-only 写（lastOutputAt bump /
+// latestHookActivity 更新 / connectionRetry 变化——全都流经本漏斗）都会把 stoppedAt 写成「此刻」，
+// 随后被冻结住：一个几天前就停下的会话，卡片药丸显示「刚刚停止」。这正是本次把「一个字段冒充三个量」
+// 拆开所要根治的那一类缺陷（无关写入把时间戳刷成当下），绝不能在新字段上原样复现。
+function resolveAgentResponseGenerationStopped(
+	prev: RuntimeTaskSessionSummary,
+	patch: Partial<RuntimeTaskSessionSummary>,
+	mergedWithFacets: RuntimeTaskSessionSummary,
+): RuntimeAgentResponseGenerationStopped | null {
+	if (patch.agentResponseGenerationStopped !== undefined) {
+		// 显式覆写优先：磁盘水合、回收流程、测试构造按原值采信（已在 merged 里），不在此重新推算。
+		return mergedWithFacets.agentResponseGenerationStopped ?? null;
+	}
+	if (resolveSessionFacets(mergedWithFacets).turnOwner !== "user") {
+		return null;
+	}
+	if (!didEnterUserTurnEndingAgentResponseGeneration(prev, mergedWithFacets)) {
+		// user→user 稳态（同一活体同一轮的后续写）：既有事件原样透传、原样冻结。
+		// `?? null` 让「从未落过事件、字段仍缺失」这一态也走同一条路：返回 null 后，下方写回门比对
+		// `stopped === (withTurnSequence.agentResponseGenerationStopped ?? null)` 恒成立而整段跳过，
+		// 于是**字段继续缺失**、不会被补成 null。刻意不在此补 null——与回合序号「不把缺失补成 0」同一
+		// 原则：那会给历史盘上每一条 summary 平白加一个空字段（详见下方写回门注释）。
+		return prev.agentResponseGenerationStopped ?? null;
+	}
 	return {
-		...mergedWithFacets,
-		agentResponseGenerationTurnSequence: (prev.agentResponseGenerationTurnSequence ?? 0) + 1,
+		// 锚点取本次写入时刻——那正是这次状态转移发生的瞬间。刻意不取 lastOutputAt /
+		// lastSubstantiveOutputAt：前者被 spinner 重绘推进，后者有节流窗口，都不表达「这一轮结束了」。
+		stoppedAt: mergedWithFacets.updatedAt,
+		signalConfidence: deriveAgentResponseGenerationStopSignalConfidence(mergedWithFacets),
+		turnSequence: mergedWithFacets.agentResponseGenerationTurnSequence ?? 0,
 	};
+}
+
+// 停止事件的边沿判据：本次写是不是「球刚回到人这边、本活体这一轮刚刚停止生成」的那一刻。
+// 仅在 mergedWithFacets 已确认处于 user 回合时调用（agent 回合 / idle 在上游已直接返回 null）。
+//
+// 判据①「prev 不在 user 回合」取**宽**口径（非 user → user），而非更窄的「agent → user」，与
+// didEnterAgentTurn 的「非 agent → agent」严格对偶。两者在本仓库转移图上的唯一差别是 turnOwner===null
+// （idle，即 state==="idle"）这一侧：spawn 失败（idle → state:"failed"）、以及构造点直接落
+// interrupted / awaiting_review 的会话，都是从未经过任何 agent 回合的 idle→user。窄判据会让这些会话
+// 永远拿不到停止事件（药丸无从显示「停了多久」）；宽判据给它们一个 turnSequence===0 的事件，
+// signalConfidence 自然落到 session_ready_never_prompted——那条枚举正是为「就绪但从未被 prompt」而设。
+//
+// 判据②「换活体也算新边沿」：本字段的语义是「**本次 incarnation** 何时进入非生成态」，上一个活体留下的
+// 事件说的是上一个进程的事，代表不了新活体的这一轮（停止事件与 runtimeSessionIncarnationId 共同构成
+// 回收侧「陈旧定时器」防护的双键，跨活体沿用会直接毁掉这重防护）。跨活体的「对话上次推进」是另一个量
+// lastConversationProgressObservation 的职责，不该由本字段兼任。
+// 这不构成「无关写入刷时间戳」的口子：merged = {...prev, ...patch}，两者只有在 patch **显式携带**新 id
+// 时才不同，而写入点只有 src/terminal/session-manager.ts、src/cline-sdk/cline-task-session-service.ts、
+// src/acp-client-session/acp-task-session-service.ts 三处真实 spawn / SDK 会话创建 / ACP 连接的
+// randomUUID()——那正是货真价实的会话生命周期事件，不是元数据噪声。
+//
+// 刻意**不**再把回合序号并入判据：序号只由 didEnterAgentTurn 在「进入 agent 回合」时推进，而那一刻
+// turnOwner==="agent" 已在上游直接返回 null，故 user 稳态内序号根本不会自行变化。剩下唯一能改动它的是
+// 磁盘水合式的显式 patch——而那恰恰是最不该被当成「刚刚停止」的一类写（历史序号回填 ≠ 此刻停止）。
+function didEnterUserTurnEndingAgentResponseGeneration(
+	prev: RuntimeTaskSessionSummary,
+	mergedWithFacets: RuntimeTaskSessionSummary,
+): boolean {
+	if (resolveSessionFacets(prev).turnOwner !== "user") {
+		return true;
+	}
+	return prev.runtimeSessionIncarnationId !== mergedWithFacets.runtimeSessionIncarnationId;
 }
 
 // 回合序号推进：本函数是终端 / Cline SDK / ACP **三条 transport 共用**的唯一 summary 写漏斗，
@@ -435,6 +572,32 @@ export function isAgentSessionCurrentlyGeneratingResponse(
 	summary: RuntimeTaskSessionSummary | null | undefined,
 ): boolean {
 	return facets.turnOwner === "agent" && !isParkedAwaitingDispatchedBackgroundWork(summary);
+}
+
+// 停止信号的置信度标签。**纯诊断 / 展示用**：它不改变宽限期长度、不改变回收行为，只让「这一次停止是
+// 靠什么信号看出来的」在账本、排查与卡片药丸上可见。因此这里读 reviewReason 是刻意的、且仅限于打标签——
+// 任何**决策**仍只读 facet（见本文件 freshness 分层约定）。
+//
+// 放在 core 而非 server 的原因：写侧（mergeSummaryWithFacets 在停止边沿把它连同 stoppedAt 写进 summary）
+// 与回收侧（agent-session-response-generation-stop-observer 落进期限账本）必须用**同一份**判定，
+// 否则「卡片说是 harness_turn_complete、账本说是 prompt_ready_fallback」这类漂移迟早出现。
+export function deriveAgentResponseGenerationStopSignalConfidence(
+	summary: RuntimeTaskSessionSummary,
+): RuntimeAgentResponseGenerationStopSignalConfidence {
+	if ((summary.agentResponseGenerationTurnSequence ?? 0) === 0) {
+		// 会话已就绪但从未开始过任何 agent 回合。锚点是「就绪」而非「产出过什么」——
+		// 刻意不伪造一个 lastOutputAt 式的时间戳。
+		return "session_ready_never_prompted";
+	}
+	if (summary.reviewReason === "idle_stall") {
+		// scanForStalls 的自愈兜底：harness 没给回合结束信号，靠「停在交互提示符 + 实质静默 5 分钟」推断。
+		return "prompt_ready_fallback";
+	}
+	if (summary.reviewReason === "hook" || summary.reviewReason === "completion" || summary.reviewReason === "exit") {
+		// harness 明确宣告了本轮结束（Claude Stop / Codex agent-turn-complete / Cline SDK 回合结束 / 进程退出）。
+		return "harness_turn_complete";
+	}
+	return "structured_user_turn";
 }
 
 // 「这个会话此刻还占着值得回收的运行时资源吗」——即回收动作真有事可做。

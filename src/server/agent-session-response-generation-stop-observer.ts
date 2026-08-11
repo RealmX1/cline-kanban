@@ -13,6 +13,7 @@ import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS,
 	computeAgentSessionRuntimeReclamationEligibleAt,
+	deriveAgentResponseGenerationStopSignalConfidence,
 	hasReclaimableAgentSessionRuntime,
 	isAgentSessionCurrentlyGeneratingResponse,
 	isParkedAwaitingDispatchedBackgroundWork,
@@ -43,27 +44,10 @@ export function isAgentSessionRetentionDeadlineBearing(summary: RuntimeTaskSessi
 	return summary.agentId !== null && summary.runtimeSessionIncarnationId != null;
 }
 
-// 停止信号的置信度标签。**纯诊断用**：它不改变宽限期长度、不改变回收行为，只让「这条期限是靠
-// 什么信号起算的」在账本与排查时可见。因此这里读 reviewReason 是刻意的、且仅限于打标签——
-// 任何**决策**仍只读 facet（见 session-activity.ts 的 freshness 分层约定）。
-export function deriveAgentResponseGenerationStopSignalConfidence(
-	summary: RuntimeTaskSessionSummary,
-): RecordAgentSessionRetentionDeadlineInput["responseGenerationStopSignalConfidence"] {
-	if ((summary.agentResponseGenerationTurnSequence ?? 0) === 0) {
-		// 会话已就绪但从未开始过任何 agent 回合。锚点是「就绪」而非「产出过什么」——
-		// 刻意不伪造一个 lastOutputAt 式的时间戳。
-		return "session_ready_never_prompted";
-	}
-	if (summary.reviewReason === "idle_stall") {
-		// scanForStalls 的自愈兜底：harness 没给回合结束信号，靠「停在交互提示符 + 实质静默 5 分钟」推断。
-		return "prompt_ready_fallback";
-	}
-	if (summary.reviewReason === "hook" || summary.reviewReason === "completion" || summary.reviewReason === "exit") {
-		// harness 明确宣告了本轮结束（Claude Stop / Codex agent-turn-complete / Cline SDK 回合结束 / 进程退出）。
-		return "harness_turn_complete";
-	}
-	return "structured_user_turn";
-}
+// 置信度判定已上提到 src/core/session-activity.ts——写侧（summary 里的 agentResponseGenerationStopped）
+// 与回收侧（本模块落进期限账本）必须共用同一份判定，否则两处标签会各自漂移。此处仅转出，保持既有
+// import 路径可用。
+export { deriveAgentResponseGenerationStopSignalConfidence };
 
 export type AgentSessionRetentionDeadlineTransition =
 	| { kind: "none" }

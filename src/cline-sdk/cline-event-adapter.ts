@@ -24,6 +24,7 @@ import {
 	setOrCreateReasoningMessage,
 	startToolCallMessage,
 	updateSummary,
+	withAgentSubstantiveOutputTimestamp,
 } from "./cline-session-state";
 import { formatClineToolCallLabel, getClineToolCallDisplay } from "./cline-tool-call-display";
 import type { ClineSdkAgentEvent, ClineSdkSessionEvent } from "./sdk-runtime-boundary";
@@ -169,7 +170,7 @@ function emitAssistantTextSummary(input: ApplyClineSessionEventInput, text: stri
 	const fullPreviewText = normalizePreviewText(text);
 	const previewText = toPreviewText(fullPreviewText);
 	const retainedToolActivity = getRetainedClineToolActivity(input.entry);
-	emitSummary(input, {
+	emitAgentSubstantiveOutputSummary(input, {
 		...deriveClineFacetPatch("running", null),
 		lastOutputAt: now(),
 		lastHookAt: now(),
@@ -256,7 +257,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			entry.messages.push(retryMsg);
 			input.emitMessage(taskId, retryMsg);
 		}
-		emitSummary(input, {
+		emitAgentSubstantiveOutputSummary(input, {
 			...(recoverable
 				? {}
 				: {
@@ -289,7 +290,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const errorMessage = "error" in agentEvent ? extractAgentErrorMessage(agentEvent.error) : null;
 		const retainedToolActivity = getRetainedClineToolActivity(entry);
 		clearActiveTurnState(entry);
-		emitSummary(input, {
+		emitAgentSubstantiveOutputSummary(input, {
 			reviewReason: "error",
 			...deriveClineFacetPatch("awaiting_review", "error"),
 			warningMessage: errorMessage ?? "Unknown agent error",
@@ -413,7 +414,13 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		}
 
 		clearActiveTurnState(entry);
-		emitSummary(input, summaryPatch);
+		// 判据同下面的 done 分支（那里写着完整理由）：run-finished 只有真的带回 outputText 才算新产出，
+		// 空 finalText 时它只是回合边界。
+		if (finalText) {
+			emitAgentSubstantiveOutputSummary(input, summaryPatch);
+		} else {
+			emitSummary(input, summaryPatch);
+		}
 		return;
 	}
 
@@ -463,7 +470,19 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		}
 
 		clearActiveTurnState(entry);
-		emitSummary(input, summaryPatch);
+		// 回合边界只有真的带回新正文才算 agent 实质产出，判据与同文件 endedEvent 一致：
+		//   - 空 finalText 的 done(completed)：本轮正文早已由前面的 assistant-text-delta / content_end
+		//     逐条打过戳，这个事件只是边界、不带任何新内容；
+		//   - 空 finalText 的 done(aborted)：这是**用户自己按下中止**后 SDK 补发的收尾。它走不到上面的
+		//     emitTurnCanceled 提前返回——只有 cancelTaskTurn 会 add 进 pendingTurnCancelTaskIds，
+		//     abortTaskSession 反而是 delete（见 cline-task-session-service.ts）——于是一路落到这里。
+		//     让它推进实质戳，就是用用户的中止动作把卡片刷成「agent 刚刚响应」。
+		// 反过来，带 finalText 的正常收尾确实是此刻才出现的新正文，仍走实质产出口。
+		if (finalText) {
+			emitAgentSubstantiveOutputSummary(input, summaryPatch);
+		} else {
+			emitSummary(input, summaryPatch);
+		}
 		return;
 	}
 
@@ -471,7 +490,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const reasoning = typeof agentEvent.text === "string" ? agentEvent.text : null;
 		if (reasoning && reasoning.length > 0) {
 			input.emitMessage(taskId, appendReasoningChunk(entry, taskId, reasoning));
-			emitSummary(input, {
+			emitAgentSubstantiveOutputSummary(input, {
 				...deriveClineFacetPatch("running", null),
 				lastOutputAt: now(),
 			});
@@ -497,7 +516,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 				createReasoningMessage(entry, taskId, reasoning, "reasoning_end");
 			input.emitMessage(taskId, message);
 			entry.activeReasoningMessageId = null;
-			emitSummary(input, {
+			emitAgentSubstantiveOutputSummary(input, {
 				lastOutputAt: now(),
 			});
 		}
@@ -508,7 +527,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const reasoning = typeof agentEvent.reasoning === "string" ? agentEvent.reasoning : null;
 		if (reasoning && reasoning.length > 0) {
 			input.emitMessage(taskId, appendReasoningChunk(entry, taskId, reasoning));
-			emitSummary(input, {
+			emitAgentSubstantiveOutputSummary(input, {
 				...deriveClineFacetPatch("running", null),
 				lastOutputAt: now(),
 			});
@@ -525,7 +544,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			input.emitMessage(taskId, message);
 		}
 		entry.activeReasoningMessageId = null;
-		emitSummary(input, {
+		emitAgentSubstantiveOutputSummary(input, {
 			lastOutputAt: now(),
 		});
 		return;
@@ -578,7 +597,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			summaryPatch.reviewReason = null;
 			Object.assign(summaryPatch, deriveClineFacetPatch("running", null));
 		}
-		emitSummary(input, summaryPatch);
+		emitAgentSubstantiveOutputSummary(input, summaryPatch);
 		return;
 	}
 
@@ -618,7 +637,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			summaryPatch.reviewReason = null;
 			Object.assign(summaryPatch, deriveClineFacetPatch("running", null));
 		}
-		emitSummary(input, summaryPatch);
+		emitAgentSubstantiveOutputSummary(input, summaryPatch);
 		return;
 	}
 
@@ -668,7 +687,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			summaryPatch.reviewReason = null;
 			Object.assign(summaryPatch, deriveClineFacetPatch("running", null));
 		}
-		emitSummary(input, summaryPatch);
+		emitAgentSubstantiveOutputSummary(input, summaryPatch);
 		return;
 	}
 
@@ -709,7 +728,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			summaryPatch.reviewReason = null;
 			Object.assign(summaryPatch, deriveClineFacetPatch("running", null));
 		}
-		emitSummary(input, summaryPatch);
+		emitAgentSubstantiveOutputSummary(input, summaryPatch);
 		return;
 	}
 
@@ -721,7 +740,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			input.emitMessage(taskId, message);
 			emitAssistantTextSummary(input, text);
 		} else {
-			emitSummary(input, {
+			emitAgentSubstantiveOutputSummary(input, {
 				lastOutputAt: now(),
 			});
 		}
@@ -738,7 +757,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const fullPreviewText = normalizePreviewText(chunk);
 		const previewText = toPreviewText(fullPreviewText);
 		const retainedToolActivity = getRetainedClineToolActivity(entry);
-		emitSummary(input, {
+		emitAgentSubstantiveOutputSummary(input, {
 			...deriveClineFacetPatch("running", null),
 			lastOutputAt: now(),
 			lastHookAt: now(),
@@ -785,7 +804,7 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		clearActiveTurnState(entry);
 		const endedReviewReason = interrupted ? "interrupted" : "exit";
 		// 回合边界事件：本身不带新产出（正文早已由 assistant-text / tool 事件打过戳），故不刷实质戳。
-		emitLivenessOnlySummary(input, {
+		emitSummary(input, {
 			reviewReason: endedReviewReason,
 			...deriveClineFacetPatch(interrupted ? "interrupted" : "awaiting_review", endedReviewReason),
 			lastOutputAt: now(),
@@ -805,34 +824,37 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 			!(isAwaitingUserReviewTurn(statusFacets) && canReturnToRunning(entry.summary.reviewReason));
 		// 存活心跳 / 重连补发：status 事件不携带任何 agent 产出，故只推进 lastOutputAt。
 		// 这是「重启或长时间离开后回来，卡片时间被刷成刚刚」在 Cline 侧的直接病灶。
-		emitLivenessOnlySummary(input, {
+		emitSummary(input, {
 			lastOutputAt: now(),
 			...(shouldReturnToRunning ? deriveClineFacetPatch("running", null) : {}),
 		});
 	}
 }
 
+// 默认发射口：**不**推进 lastSubstantiveOutputAt。回合边界（ended）、存活心跳 / 重连补发的 status、
+// 用户取消、以及纯 hook 元数据都走这里——它们要么不带新产出（正文早已由内容事件打过戳），要么压根不是
+// agent 产出。让它们推进实质戳，就是「重启或长时间离开后回来、卡片时间被刷成刚刚」在 Cline 侧的病灶。
 function emitSummary(input: ApplyClineSessionEventInput, patch: Partial<RuntimeTaskSessionSummary>): void {
 	input.emitSummary(updateSummary(input.entry, patch));
 }
 
-// 「只推进存活度、不算一次 agent 响应」的发射口。updateSummary 漏斗默认把 lastOutputAt 镜像成
-// lastSubstantiveOutputAt（Cline 的 output 事件绝大多数是真内容，见 cline-session-state.ts），但少数
-// 事件只是**回合边界或存活心跳**、并不带来新产出：re-attach / 重连时补发的 status、turn 的 ended、
-// 用户取消。让它们镜像会把卡片的「agent 上次响应」刷成「刚刚」——这正是 Cline 侧重连后时间跳变的病灶。
-// 此处显式带上当前实质戳，漏斗见到 lastSubstantiveOutputAt 已存在即跳过镜像，从而只推进 lastOutputAt。
-function emitLivenessOnlySummary(input: ApplyClineSessionEventInput, patch: Partial<RuntimeTaskSessionSummary>): void {
-	emitSummary(input, {
-		...patch,
-		lastSubstantiveOutputAt: input.entry.summary.lastSubstantiveOutputAt ?? null,
-	});
+// 「这一次事件确实带来了新的 agent 实质产出」的发射口——推进 lastSubstantiveOutputAt 的唯一途径。
+// 覆盖 assistant 文本 / reasoning 的增量与收束、工具调用与结果、agent 错误收束（错误正文是此刻才出现的
+// 新内容，不同于 ended 那种「正文已经打过戳」的纯边界）、以及裸 agent chunk 流。
+// 与之相对的默认口 emitSummary 见上；反转前二者的默认方向是反的，代价与理由见
+// cline-session-state.ts updateSummary 的注释。
+function emitAgentSubstantiveOutputSummary(
+	input: ApplyClineSessionEventInput,
+	patch: Partial<RuntimeTaskSessionSummary>,
+): void {
+	emitSummary(input, withAgentSubstantiveOutputTimestamp(patch));
 }
 
 function emitTurnCanceled(input: ApplyClineSessionEventInput): void {
 	input.pendingTurnCancelTaskIds.delete(input.taskId);
 	clearActiveTurnState(input.entry);
 	// 用户取消回合：终止信号而非 agent 产出，故不刷实质戳（取消不该让卡片显示「agent 刚响应」）。
-	emitLivenessOnlySummary(input, {
+	emitSummary(input, {
 		...deriveClineFacetPatch("idle", null),
 		reviewReason: null,
 		lastOutputAt: now(),

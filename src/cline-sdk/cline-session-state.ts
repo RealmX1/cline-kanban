@@ -159,24 +159,51 @@ export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary 
 	});
 }
 
+// Cline 侧唯一 summary 写漏斗。
+//
+// **本漏斗不对 lastSubstantiveOutputAt 做任何隐式推断**——推进它只能靠调用方显式经
+// withAgentSubstantiveOutputTimestamp 声明「这一次写确实带来了新的 agent 产出」。
+//
+// 这里曾经反着来：漏斗默认把 lastSubstantiveOutputAt 镜像成 lastOutputAt，靠少数「只推进存活度」的写点
+// 显式带上当前实质戳来 opt-out。那个默认方向是错的，理由不是风格而是实测——
+//   - opt-out 是「记得做才对」，于是必然漏：反转前 cline-task-session-service.ts 里 9 处经本漏斗的写
+//     （SDK start/send 失败、用户提交首轮 prompt、stop / safe-shutdown / abort、取消回合、用户发消息 ×2、
+//     reload）全都没 opt-out，于是**用户自己的操作**会把卡片上的「agent 上次响应」刷成「刚刚」。
+//     其中 safe-shutdown 那处还会把污染值一路写进落盘 summary。
+//   - 漏的代价是静默的：写错不会报错、不会掉测试，只是卡片时间悄悄不对——正是这颗药丸反复复发四次的
+//     那类缺陷。反过来，opt-in 漏了只会让实质戳「暂时不前进」，是保守失败。
+// 新增写点默认安全，是这次反转的全部目的。别再把默认改回去。
+//
+// 终端 agent 侧从来不在漏斗里做这种推断——那侧必须由 agent-output-substance.ts 分类器把关
+// （见 session-manager.ts），因为 PTY 字节里混着大量 spinner 重绘。
 export function updateSummary(
 	entry: ClineTaskSessionEntry,
 	patch: Partial<RuntimeTaskSessionSummary>,
 ): RuntimeTaskSessionSummary {
-	// Cline（in-process SDK）的 output 事件绝大多数是真内容（assistant 增量 / 工具活动），非 TUI 重绘，故在
-	// 此单一漏斗镜像 lastSubstantiveOutputAt = lastOutputAt（一处覆盖全部 Cline 写点）——使 Cline 任务的
-	// Validation 停留判据行为与迁移前一致。仅当 patch 显式给了 lastOutputAt 而未给实质戳时镜像；显式给
-	// 实质戳或未动 lastOutputAt 的 patch 不干预。少数「只推进存活度」的事件（re-attach 补发的 status、
-	// 回合 ended、用户取消）正是靠显式带上当前实质戳来退出本镜像，见 cline-event-adapter.ts
-	// emitLivenessOnlySummary——否则重连心跳会把卡片的「agent 上次响应」刷成「刚刚」。
-	// 终端 agent 侧绝不在此镜像——那侧必须由 agent-output-substance.ts 分类器把关（见 session-manager.ts）。
-	const mirroredPatch =
-		patch.lastOutputAt !== undefined && patch.lastSubstantiveOutputAt === undefined
-			? { ...patch, lastSubstantiveOutputAt: patch.lastOutputAt }
-			: patch;
 	// 单一写侧漏斗：经 mergeSummaryWithFacets 派发（facet 写时主真相源，详见该函数）。
-	entry.summary = mergeSummaryWithFacets(entry.summary, { ...mirroredPatch, updatedAt: now() });
+	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: now() });
 	return cloneSummary(entry.summary);
+}
+
+// 显式声明「这一次写带来了新的 agent 实质产出」——推进 lastSubstantiveOutputAt 的唯一方式。
+// 判据是「本次事件是否携带 agent 侧的新内容」，而不是「会话是否还活着」：assistant 文本 / reasoning /
+// 工具调用与结果算；回合边界（ended / 回合完成 stopReason）、存活心跳、用户操作、错误收束都不算——
+// 前者的正文早已由内容事件打过戳，后者压根不是 agent 产出。
+//
+// 同时记一条「对话上次推进」观测：Cline 是进程内 SDK，事件是**结构化**的（不是刮 TUI 猜出来的），
+// 故置信度取 structured_agent_session_event 而非 terminal_output_heuristic_classification。
+// 这两个戳有意分开写、不互相推断：前者秒级、服务 Validation 打回与卡顿自愈；后者是跨 incarnation 的
+// 历史事实、只服务卡片药丸。合并规则（单调前进 / 未来时刻拒收）由 mergeSummaryWithFacets 统一执行，
+// 此处只负责**如实上报一次观测**，不做任何裁决。
+export function withAgentSubstantiveOutputTimestamp(
+	patch: Partial<RuntimeTaskSessionSummary>,
+): Partial<RuntimeTaskSessionSummary> {
+	const observedAtMs = now();
+	return {
+		...patch,
+		lastSubstantiveOutputAt: observedAtMs,
+		lastConversationProgressObservation: { observedAtMs, evidenceKind: "structured_agent_session_event" },
+	};
 }
 
 export function createMessage(

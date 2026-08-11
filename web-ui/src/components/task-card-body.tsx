@@ -4,6 +4,7 @@ import type {
 	DraggableStyle,
 } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { isLowConfidenceLastConversationProgressEvidence } from "@runtime-last-conversation-progress-observation";
 import {
 	deriveDisplayLiveness,
 	isParkedAwaitingDispatchedBackgroundWork,
@@ -24,6 +25,7 @@ import {
 	GitBranch,
 	Home,
 	Hourglass,
+	MessagesSquare,
 	Pencil,
 	Play,
 	RotateCcw,
@@ -244,14 +246,29 @@ export function TaskCardBody({
 	const isExitedAwaiting = sessionFacets?.liveness === "exited";
 	const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
 	useInterval(() => setActivityNowMs(Date.now()), isLiveAgentTurn && !isParkedAwaitingBackgroundWork ? 1000 : null);
-	// 头部「创建至今 / agent 上次响应至今」双时长读数的常开粗 tick（30s）：读数粒度是分/时/天，30s 足够，
-	// 且常开不分 live/idle（与上面仅 live 卡的 1s computing tick 解耦）。lastSubstantiveOutputAt 只在 agent 产出
-	// 新正文/工具内容时推进——过滤 TUI 装饰性重绘、与 board.json 分离，故列间拖动与终端 restart refresh
-	// （resume guard）都不会扰动它；无实质戳时隐藏响应段（不回退 lastOutputAt，避免 PTY 噪声带偏展示）。
-	// 走进程内单例时钟而非每卡一个 setInterval：200 张卡原先 = 200 个常开定时器，且完全不分
-	// 标签页可见性。共享时钟只留一个定时器 + 一个 visibilitychange 监听，隐藏时整体停摆。
+	// 头部时长读数的常开粗 tick（30s）：读数粒度是分/时/天，30s 足够，且常开不分 live/idle
+	// （与上面仅 live 卡的 1s computing tick 解耦）。走进程内单例时钟而非每卡一个 setInterval：
+	// 200 张卡原先 = 200 个常开定时器，且完全不分标签页可见性。共享时钟只留一个定时器 +
+	// 一个 visibilitychange 监听，隐藏时整体停摆。
 	const elapsedNowMs = useSharedCoarseClockTimestampMs();
-	const lastAgentResponseAt = sessionSummary?.lastSubstantiveOutputAt ?? null;
+
+	// ── 头部两颗时长药丸，读的是**两个不同的量**，别再合并回一个 ────────────────────────────────
+	// 历史上这里只有一颗，读 lastSubstantiveOutputAt 冒充「agent 上次回复」，于是「今天重开一个七天前
+	// 的会话」会把它刷成 now——旧对话被重播进新 TUI，实质分类器的行签名记忆是空的，整段旧内容被判成
+	// 新产出。实测 26% 的 claude 任务因此显示错误（偏差中位数 26.8 小时）。修法不是继续给分类器打补丁，
+	// 而是承认这里本来就要显示两件不同的事：
+	//   Stopped（本轮停了多久）——读 agentResponseGenerationStopped，per-incarnation 的离散状态转移。
+	//     会话重开时刷新是**正确**的（新活体新一轮），它与 2h 回收共用同一个锚点定义。
+	//     agent 回合 / park 期间为 null ⇒ 不显示，此刻由 computing 脉动 / parked 徽标表达。
+	//   Progress（对话上次推进）——读 lastConversationProgressObservation，**跨 incarnation 的历史事实**。
+	//     进程重启、会话重开、旧对话被重播，它都不该动；权威来源是 agent 自己的落盘转录。
+	const agentResponseGenerationStoppedAt = sessionSummary?.agentResponseGenerationStopped?.stoppedAt ?? null;
+	const lastConversationProgressObservation = sessionSummary?.lastConversationProgressObservation ?? null;
+	// 低置信来源（无转录、无 hook 的 agent 落到 TUI 刮取分类器）以 `~` 前缀如实标注「大约」，
+	// 而不是假装精确。判据集中在 core，避免前端各处手写枚举比对。
+	const isConversationProgressApproximate =
+		lastConversationProgressObservation !== null &&
+		isLowConfidenceLastConversationProgressEvidence(lastConversationProgressObservation.evidenceKind);
 	const isAgentComputing =
 		isLiveAgentTurn && !isParkedAwaitingBackgroundWork && sessionSummary != null && sessionFacets != null
 			? deriveDisplayLiveness(sessionFacets, sessionSummary.lastOutputAt, activityNowMs) === "computing"
@@ -627,18 +644,43 @@ export function TaskCardBody({
 							{formatCompactElapsedSince(card.createdAt, elapsedNowMs)}
 						</span>
 					</Tooltip>
-					{lastAgentResponseAt != null ? (
+					{agentResponseGenerationStoppedAt != null ? (
 						<>
 							<span className="text-text-tertiary">·</span>
-							<Tooltip content={`Agent last responded · ${new Date(lastAgentResponseAt).toLocaleString()}`}>
+							<Tooltip
+								content={`Stopped generating · ${new Date(agentResponseGenerationStoppedAt).toLocaleString()}`}
+							>
 								<span
+									data-agent-response-generation-stopped-pill=""
 									className={cn(
 										"inline-flex items-center gap-0.5 text-[10px] leading-none",
 										isTrashCard ? "text-text-tertiary" : "text-text-secondary",
 									)}
 								>
 									<Activity size={8} className="shrink-0" />
-									{formatCompactElapsedSince(lastAgentResponseAt, elapsedNowMs)}
+									{formatCompactElapsedSince(agentResponseGenerationStoppedAt, elapsedNowMs)}
+								</span>
+							</Tooltip>
+						</>
+					) : null}
+					{lastConversationProgressObservation != null ? (
+						<>
+							<span className="text-text-tertiary">·</span>
+							<Tooltip
+								content={`Conversation last advanced · ${new Date(
+									lastConversationProgressObservation.observedAtMs,
+								).toLocaleString()} · source: ${lastConversationProgressObservation.evidenceKind}`}
+							>
+								<span
+									data-last-conversation-progress-pill=""
+									className={cn(
+										"inline-flex items-center gap-0.5 text-[10px] leading-none",
+										isTrashCard ? "text-text-tertiary" : "text-text-secondary",
+									)}
+								>
+									<MessagesSquare size={8} className="shrink-0" />
+									{isConversationProgressApproximate ? "~" : ""}
+									{formatCompactElapsedSince(lastConversationProgressObservation.observedAtMs, elapsedNowMs)}
 								</span>
 							</Tooltip>
 						</>

@@ -79,6 +79,9 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 				createdAt: 0,
 				lastOutputAt: null,
 				lastSubstantiveOutputAt: null,
+				// 两颗时长药丸的字段同样只是**透传**：无 session ⇒ 都是 null ⇒ 前端两颗都隐藏。
+				agentResponseGenerationStopped: null,
+				lastConversationProgressObservation: null,
 				turnOwner: null,
 				liveness: "none",
 			},
@@ -107,6 +110,9 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 				createdAt: 0,
 				lastOutputAt: 5_000,
 				lastSubstantiveOutputAt: 4_000,
+				// agent 回合期间没有停止事件；本用例的 summary 也没带推进观测 ⇒ 两颗都是 null。
+				agentResponseGenerationStopped: null,
+				lastConversationProgressObservation: null,
 				turnOwner: "agent",
 				liveness: "live",
 			},

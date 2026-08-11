@@ -47,6 +47,7 @@ import {
 } from "../state/notification-log-store";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
+import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
 import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
 
@@ -124,6 +125,16 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			);
 		},
 	});
+	const persistedAgentTranscriptConversationProgressObserver =
+		createPersistedAgentTranscriptConversationProgressObserver({
+			onProbeFailed: (error, context) => {
+				logAgentSessionRetentionWarning(
+					`transcript-conversation-progress-probe-failed workspaceId=${context.workspaceId} taskId=${
+						context.taskId
+					} reason=${error instanceof Error ? error.message : String(error)}`,
+				);
+			},
+		});
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
@@ -383,6 +394,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 		disposeTaskSessionSummaryBroadcast(workspaceId);
 		agentSessionResponseGenerationStopObserver.forgetWorkspace(workspaceId);
+		persistedAgentTranscriptConversationProgressObserver.forgetWorkspace(workspaceId);
 		workspaceMetadataMonitor.disposeWorkspace(workspaceId);
 	};
 
@@ -637,7 +649,32 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 			const unsubscribe = manager.onSummary((summary) => {
 				queueTaskSessionSummaryBroadcast(workspaceId, summary);
+				// 转录探测只挂在终端通道：能按工作目录直接寻址转录的目前只有 claude（PTY），Cline/ACP 的
+				// 「对话上次推进」由它们自己的结构化事件直接给出，不需要读盘反推。观察器内部自带
+				// 「支持性判定 + 在途去重 + 冷却（换活体时绕过）+ 全局并发上限」四道闸门，故这里直调即可；
+				// 闸门账本按 workspace + task 计账（观察器是被所有 project 共享的单例，taskId 只是 board-local
+				// 短 id），故 workspaceId 必须一路传进去。
+				persistedAgentTranscriptConversationProgressObserver.observeTaskSessionSummary(
+					workspaceId,
+					summary,
+					manager,
+				);
 			});
+			// 水合会话的一次性回填。**必须有**：hydrateFromRecord 只往 entries 里塞条目、不发 summary，
+			// 所以进程重启后那些「已被回收 / 停在等人审查、不会再产出任何东西」的任务永远等不到上面那条
+			// onSummary，「对话上次推进」也就永远是空的——而它们恰恰是最需要显示这个量的一批（正在跑的
+			// 任务你本来就看得见）。这里在管理器刚被 track 时扫一遍已水合的 summary 补上。
+			// 时序前提：workspace-registry 的 notifyTerminalManagerReady 在 hydrateFromRecord **之后**才调，
+			// 故此刻 listSummaries() 已经是完整的历史会话集合。
+			// 这个循环的条数 = 该 project 下的全部历史任务（数百条量级），但它**不是**同等数量的瞬时读盘：
+			// 观察器的闸门④把整个进程的在途探测压到常数，这里只是把条目一次性喂进它的队列。
+			for (const hydratedSummary of manager.listSummaries()) {
+				persistedAgentTranscriptConversationProgressObserver.observeTaskSessionSummary(
+					workspaceId,
+					hydratedSummary,
+					manager,
+				);
+			}
 			terminalSummaryUnsubscribeByWorkspaceId.set(workspaceId, unsubscribe);
 		},
 		trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => {
@@ -674,6 +711,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				}
 			}
 			terminalSummaryUnsubscribeByWorkspaceId.clear();
+			// 关停后在途探测的回调不得再写 summary（会写进一个正在被拆掉的管理器）。
+			persistedAgentTranscriptConversationProgressObserver.dispose();
 			for (const unsubscribe of conversationSummaryUnsubscribeBySubscriptionKey.values()) {
 				try {
 					unsubscribe();
