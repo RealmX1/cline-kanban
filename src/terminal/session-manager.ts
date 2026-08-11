@@ -72,6 +72,11 @@ import {
 } from "./output-reactions/network-interruption-continuation-instructions";
 import { PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
+import {
+	CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR,
+	locateTerminalInputBox,
+	type TerminalInputBoxGrammar,
+} from "./terminal-input-box-reader";
 import { stripAnsiAndControl } from "./terminal-output-normalization";
 import {
 	createTerminalProtocolFilterState,
@@ -607,6 +612,15 @@ function resolveTaskChatInputDeliveryVia(readiness: TaskChatInputDeliveryReadine
 		default:
 			return "deadline-fallback";
 	}
+}
+
+// 取某 agent 的输入框结构语法。返回 null 表示该 agent 尚未建模输入框结构，
+// 调用方回退到基于字符串正则的就绪预测。
+function resolveTerminalInputBoxGrammar(agentId: RuntimeAgentId | null): TerminalInputBoxGrammar | null {
+	if (agentId === "claude") {
+		return CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR;
+	}
+	return null;
 }
 
 // 取某 agent 的 TUI 提示符就绪预测（仅 claude / codex 有交互式输入框可探测）。返回 null 表示
@@ -1240,9 +1254,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft - 1);
 	}
 
-	// 提示符就绪判定（双通道）：① 快路径——默认配置下输出反应扫描缓冲在线，复用同步的
-	// isAtInteractivePromptForReaction（便宜、可测）；② 兜底——永远在线的全屏镜像快照（即便反应引擎关闭，
-	// 也已捕获 Stop 后的最终提示符渲染），去 ANSI 后跑同一组提示符就绪预测。任一命中即就绪。
+	// 提示符就绪判定（多通道）：① 快路径——尚未建模输入框结构的 agent，在输出反应扫描缓冲在线时复用同步的
+	// isAtInteractivePromptForReaction（便宜、可测）；② 结构判定——读镜像 buffer 行判输入框形状；
+	// ③ 兜底——永远在线的全屏镜像快照（即便反应引擎关闭，也已捕获 Stop 后的最终提示符渲染），
+	// 去 ANSI 后跑同一组提示符就绪预测。任一命中即就绪。
 	private async resolveInteractivePromptReadiness(entry: SessionEntry): Promise<TaskChatInputDeliveryReadiness> {
 		const active = entry.active;
 		if (!active) {
@@ -1254,10 +1269,40 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (predicate === null) {
 			return "immediate";
 		}
-		if (active.outputReactionScanBuffer !== null && this.isAtInteractivePromptForReaction(entry)) {
+		const boxGrammar = resolveTerminalInputBoxGrammar(entry.summary.agentId);
+		// ① 快路径**只给尚未建模输入框结构的 agent**（codex / kimi）。
+		//
+		// 它读的是 outputReactionScanBuffer——一个 MAX_OUTPUT_REACTION_SCAN_BUFFER_CHARS 的滚动窗口，
+		// processOutputReactionChunk 只追加、只从左截断，**从不按回合清空**。因此它是 scrollback 形状的
+		// 证据、不是「当前屏」：一次真实 idle 提示符进了窗口后，只要后续输出还没把它挤出去，agent 正在
+		// 输出 / 重绘期间也会被判成就绪，投递因而写进正在重绘的 TUI——正是本特性要消除的「粘贴了但 CR
+		// 被吞、不发送」竞态（与下面视口通道刻意不看 scrollback 是同一条理由）。
+		// 已建模输入框语法的 agent（claude）改由下面的结构判定负责：它读当前活动屏，天然没有这个陈旧窗口。
+		// 结构判定不命中时仍有视口正则通道与 quiet / deadline 兜底，不会退化成永不投递。
+		if (
+			boxGrammar === null &&
+			active.outputReactionScanBuffer !== null &&
+			this.isAtInteractivePromptForReaction(entry)
+		) {
 			return "prompt";
 		}
 		const mirror = entry.terminalStateMirror;
+		// ② 结构判定（对已建模输入框语法的 agent 优先于下面的正则通道）：直接读镜像 buffer，判「屏上
+		// 存在一个被两条边界线夹住、且首行以提示符开头的区域」。
+		//
+		// 它买到的**不是**「字形无关」——语法里同样写死了 `❯`，Claude 再换提示符字符仍要改。买到的是：
+		//   ① 精度：要求整个框的形状，而不是「屏上任何位置出现一个提示符字符」。正则通道会被
+		//      agent 输出里偶然出现的提示符字符钓中，把投递写进正在出输出的非就绪窗口。
+		//   ② 单点：同一份语法被就绪判定 / 让路判定 / Ctrl+S 取文共用，换版本时只改一处、且有测试钉住；
+		//      旧结构下这套画法知识散在正则里，2026-08-08 的事故就是它悄悄失效了没人知道。
+		//   ③ 成本：只遍历 rows 行，不走 serialize（后者同步阻塞整个事件循环）。
+		// 正则通道保留在下面：对尚未建模输入框的 agent 仍是唯一判据。
+		if (mirror && boxGrammar) {
+			const screenSnapshot = await mirror.getScreenSnapshot();
+			if (locateTerminalInputBox(screenSnapshot, boxGrammar) !== null) {
+				return "prompt";
+			}
+		}
 		if (mirror) {
 			const serializeStartedAtMs = now();
 			// 仅按当前视口（最后 rows 行）判定就绪——历史里早先出现过的提示符框会误判「当前屏」就绪，
