@@ -87,8 +87,29 @@ describe("hasClaudeInteractivePrompt", () => {
 		expect(hasClaudeInteractivePrompt("[2m╭────╮[0m")).toBe(true);
 	});
 
+	// 回归守卫（2026-08-08 事故）：v2.1.226+ 把输入框从 `╭`/`╰` 框线 + 半角 `>` 改成了
+	// 「整行 U+2500 横线 + `❯`(U+276F)」。旧的三条正则对这套渲染**恒不命中**，本函数因此对当前
+	// Claude 永久返回 false——它与另外两个缺陷叠加，造成程序化投递在输入框里躺了 49 分钟。
+	// 真机实测形态（v2.1.227，cols=100）。
+	it("matches the current Claude rendering: full-width rule + U+276F chevron prompt", () => {
+		const boundary = "─".repeat(100);
+		const currentRendering = [boundary, "❯ ", boundary, "  ⏸ manual mode on"].join("\n");
+
+		expect(hasClaudeInteractivePrompt(currentRendering)).toBe(true);
+	});
+
+	it("matches a bare line-leading chevron prompt even with no trailing space", () => {
+		expect(hasClaudeInteractivePrompt("some preamble\n❯")).toBe(true);
+	});
+
 	it("returns false for plain output without input box or '>' marker", () => {
 		expect(hasClaudeInteractivePrompt("Loading hooks settings…")).toBe(false);
+	});
+
+	// 刻意不把「整行长横线」单独当就绪信号：它与 agent 输出里的分隔线不可区分，
+	// 会把投递写进正在出输出的非就绪窗口（正是「粘贴了但 CR 被吞」那个竞态）。
+	it("does not treat a horizontal rule alone as an interactive prompt", () => {
+		expect(hasClaudeInteractivePrompt(`${"─".repeat(100)}\nagent output section`)).toBe(false);
 	});
 
 	it("returns false for the banner alone (banner is handled by hasClaudeStartupUiRendered)", () => {

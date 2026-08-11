@@ -69,6 +69,16 @@ function createMockPtySession(pid: number, request: MockSpawnRequest) {
 // 纯净的 Claude 输入框就绪信号（无连接错误文案，避免触发 connection-drop episode 干扰投递）。
 const CLAUDE_READY_PROMPT = "╭──────────────────────╮\n│ > │\n╰──────────────────────╯";
 
+// 结构就绪判定（terminal-input-box-reader）读的是 buffer 行，不是 serialize 出来的字符串。
+// fake 按同一契约从视口文本派生行快照。注意本套件的提示符 fixture 用的是**旧版** `╭` / `>` 画法，
+// 结构判定对它不命中 → 判定继续落到下面的正则通道，既有用例语义原样保持。
+function toScreenSnapshot(viewportText: string, columnCount = 80) {
+	return {
+		lines: viewportText.split("\n").map((text) => ({ text, isWrapped: false })),
+		columnCount,
+	};
+}
+
 // submitTaskChatInputWhenReady 的就绪门控时序常量（须与 session-manager.ts 同步）：
 //   TASK_CHAT_INPUT_DELIVERY_SETTLE_MS=1000 / _RECHECK_MS=1500 / _DEADLINE_MS=60000。
 const SETTLE_MS = 1_000;
@@ -119,6 +129,7 @@ function installFakeClaudeEntry(
 		terminalStateMirror: {
 			getSnapshot: async () => ({ snapshot: options.mirrorSnapshot, cols: 80, rows: 24 }),
 			getViewportSnapshot: async () => ({ snapshot: options.mirrorSnapshot, cols: 80, rows: 24 }),
+			getScreenSnapshot: async () => toScreenSnapshot(options.mirrorSnapshot),
 		},
 		listenerIdCounter: 1,
 		listeners: new Map(),
@@ -303,6 +314,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			terminalStateMirror: {
 				getSnapshot: async () => ({ snapshot: CLAUDE_READY_PROMPT, cols: 80, rows: 24 }),
 				getViewportSnapshot: async () => ({ snapshot: CLAUDE_READY_PROMPT, cols: 80, rows: 24 }),
+				getScreenSnapshot: async () => toScreenSnapshot(CLAUDE_READY_PROMPT),
 			},
 			listenerIdCounter: 1,
 			listeners: new Map(),
@@ -314,6 +326,98 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+	});
+
+	// 形态 1 回归守卫（2026-08-08 事故）：Claude v2.1.226+ 把输入框改成「整行 U+2500 横线 + `❯`」，
+	// 旧的提示符正则对它恒不命中，于是 readiness 的 "prompt" 通道对当前 Claude 永久失效。
+	// 结构判定（读镜像 buffer 行、判「有被边界线夹住且首行以提示符开头的区域」）必须在此命中并投递，
+	// 而不是拖满 60s deadline——那正是「消息在输入框里躺了 49 分钟」的第一层成因。
+	it("形态 1：当前版 Claude 渲染（❯ + 长横线）经结构判定就绪并投递，不拖到 deadline", async () => {
+		const manager = new TerminalSessionManager();
+		const write = vi.fn();
+		// state:"running" → turnOwner:"agent"，关掉 A2 quiet 兜底，确保本例只能靠 "prompt" 通道命中。
+		const summary = {
+			taskId: "task-deliver-current-rendering",
+			agentId: "claude",
+			state: "running",
+		} as unknown as RuntimeTaskSessionSummary;
+		// 真机形态：横线宽度 == cols，提示符是 `❯` + U+00A0，框下面还有状态行。
+		const boundary = "─".repeat(80);
+		const currentRenderingViewport = ["  ⏺ 上一轮 agent 输出", boundary, "❯ ", boundary, "  ⏸ manual mode on"].join(
+			"\n",
+		);
+		const entry = {
+			summary,
+			active: {
+				session: { write },
+				outputReactionScanBuffer: null,
+				deferredStartupInput: null,
+				lastUserInputAt: null,
+				taskChatInputDeliveryTimer: null,
+				taskChatInputDeliveryGeneration: 0,
+				awaitingCodexPromptAfterEnter: false,
+			},
+			terminalStateMirror: {
+				getSnapshot: async () => ({ snapshot: currentRenderingViewport, cols: 80, rows: 24 }),
+				getViewportSnapshot: async () => ({ snapshot: currentRenderingViewport, cols: 80, rows: 24 }),
+				getScreenSnapshot: async () => toScreenSnapshot(currentRenderingViewport),
+			},
+			listenerIdCounter: 1,
+			listeners: new Map(),
+		};
+		(manager as unknown as { entries: Map<string, typeof entry> }).entries.set(
+			"task-deliver-current-rendering",
+			entry,
+		);
+
+		const accepted = manager.submitTaskChatInputWhenReady("task-deliver-current-rendering", "继续 RVF");
+		expect(accepted).not.toBeNull();
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+	});
+
+	// 结构判定不得把 agent 输出里的装饰性横线当成输入框——那会把投递写进正在出输出的非就绪窗口，
+	// 正是「粘贴了但 CR 被吞、不发送」那个竞态。没有提示符行就不算框。
+	it("形态 1 反向：只有装饰性横线、没有提示符行 → 结构判定不命中，不提前投递", async () => {
+		const manager = new TerminalSessionManager();
+		const write = vi.fn();
+		const summary = {
+			taskId: "task-decorative-rules",
+			agentId: "claude",
+			state: "running",
+		} as unknown as RuntimeTaskSessionSummary;
+		const boundary = "─".repeat(80);
+		const decorativeOnlyViewport = [boundary, "  agent 正在打印一张表格", boundary, "  还在出输出"].join("\n");
+		const entry = {
+			summary,
+			active: {
+				session: { write },
+				outputReactionScanBuffer: null,
+				deferredStartupInput: null,
+				lastUserInputAt: null,
+				taskChatInputDeliveryTimer: null,
+				taskChatInputDeliveryGeneration: 0,
+				awaitingCodexPromptAfterEnter: false,
+			},
+			terminalStateMirror: {
+				getSnapshot: async () => ({ snapshot: decorativeOnlyViewport, cols: 80, rows: 24 }),
+				getViewportSnapshot: async () => ({ snapshot: decorativeOnlyViewport, cols: 80, rows: 24 }),
+				getScreenSnapshot: async () => toScreenSnapshot(decorativeOnlyViewport),
+			},
+			listenerIdCounter: 1,
+			listeners: new Map(),
+		};
+		(manager as unknown as { entries: Map<string, typeof entry> }).entries.set("task-decorative-rules", entry);
+
+		manager.submitTaskChatInputWhenReady("task-decorative-rules", "继续 RVF");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write).not.toHaveBeenCalled();
+
+		// 仍由 deadline 兜底，行为与就绪门控引入前一致。
+		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
+		expect(write).toHaveBeenCalledTimes(1);
 	});
 
 	it("镜像就绪只看当前视口：提示符仅存在于 scrollback 历史时不判就绪（仅 deadline 兜底）", async () => {
@@ -354,6 +458,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			terminalStateMirror: {
 				getSnapshot: async () => ({ snapshot: snapshotWithPromptOnlyInScrollback, cols: 80, rows: 5 }),
 				getViewportSnapshot: async () => ({ snapshot: midOutputViewport, cols: 80, rows: 5 }),
+				// 结构判定同样只看活动屏：提示符只在 scrollback 里时，行快照里也不该有它。
+				getScreenSnapshot: async () => toScreenSnapshot(midOutputViewport),
 			},
 			listenerIdCounter: 1,
 			listeners: new Map(),
@@ -368,6 +474,112 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		expect(write).not.toHaveBeenCalled();
 		// 始终非就绪 → 只在 deadline 兜底写入一次。
 		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+	});
+
+	it("扫描缓冲里的陈旧提示符不判就绪：Claude 正在出输出时不提前投递（仅 deadline 兜底）", async () => {
+		// 回归守卫：outputReactionScanBuffer 是 16K 滚动窗口，只追加、只从左截断、**从不按回合清空**，
+		// 因此是 scrollback 形状的证据而非「当前屏」。生产中（autoContinue 默认开）它对 claude 恒非 null，
+		// 一次真实 idle 提示符进窗口后会让就绪判定在 agent 正在重绘期间仍判 "prompt"，投递写进重绘中的
+		// TUI —— 就是「粘贴了但 CR 被吞、不发送」的竞态。就绪必须只由当前活动屏（结构判定 / 视口正则）决定。
+		const manager = new TerminalSessionManager();
+		const write = vi.fn();
+		// state:"running" → turnOwner:"agent"，关掉 A2 quiet 兜底，使本例只可能经 "prompt" 通道提前写。
+		const summary = {
+			taskId: "task-stale-scan-buffer",
+			agentId: "claude",
+			state: "running",
+		} as unknown as RuntimeTaskSessionSummary;
+		const boundary = "─".repeat(80);
+		// 缓冲里先有一帧真实 idle 输入框（当前版渲染），随后 agent 又开始出输出——但框还没被挤出窗口。
+		const scanBufferWithStalePrompt = [
+			"  ⏺ 上一轮结束",
+			boundary,
+			"❯ ",
+			boundary,
+			"  ⏸ manual mode on",
+			"  ⏺ 新一轮开始：正在执行第 1 步…",
+			"  ⏺ 正在执行第 2 步…",
+		].join("\n");
+		// 当前活动屏正在出输出：既无输入框结构、也无提示符字符。
+		const midOutputViewport = ["  ⏺ 正在执行第 3 步…", "  ⏺ 正在执行第 4 步…", "  ⏺ 正在执行第 5 步…"].join("\n");
+		const entry = {
+			summary,
+			active: {
+				session: { write },
+				// 关键：非 null 且含陈旧提示符——生产中启用 output-reaction 时的真实形态。
+				outputReactionScanBuffer: scanBufferWithStalePrompt,
+				outputReactionEngine: null,
+				outputReactionSession: null,
+				deferredStartupInput: null,
+				lastUserInputAt: null,
+				taskChatInputDeliveryTimer: null,
+				taskChatInputDeliveryGeneration: 0,
+				awaitingCodexPromptAfterEnter: false,
+			},
+			terminalStateMirror: {
+				getSnapshot: async () => ({ snapshot: midOutputViewport, cols: 80, rows: 3 }),
+				getViewportSnapshot: async () => ({ snapshot: midOutputViewport, cols: 80, rows: 3 }),
+				getScreenSnapshot: async () => toScreenSnapshot(midOutputViewport),
+			},
+			listenerIdCounter: 1,
+			listeners: new Map(),
+		};
+		(manager as unknown as { entries: Map<string, typeof entry> }).entries.set("task-stale-scan-buffer", entry);
+
+		manager.submitTaskChatInputWhenReady("task-stale-scan-buffer", "继续 RVF");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(RECHECK_MS);
+		expect(write).not.toHaveBeenCalled();
+
+		// 始终非就绪 → 只在 deadline 兜底写入一次，且 via=deadline-fallback（不是 prompt-ready）。
+		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(
+			tuiFreezeWarnings.some(
+				(line) => line.includes("task-chat-input-delivered") && line.includes("via=deadline-fallback"),
+			),
+		).toBe(true);
+	});
+
+	it("尚未建模输入框结构的 agent（codex）：扫描缓冲快路径保持既有语义，命中即投递", async () => {
+		// 上一条回归守卫刻意只关掉 claude 的扫描缓冲快路径（它有结构判定顶上）。codex / kimi 尚未建模
+		// 输入框结构，快路径仍是它们最便宜的就绪信号，语义必须原样保留——本例即该不对称性的钉子。
+		const manager = new TerminalSessionManager();
+		const write = vi.fn();
+		const summary = {
+			taskId: "task-codex-scan-fast-path",
+			agentId: "codex",
+			state: "running",
+		} as unknown as RuntimeTaskSessionSummary;
+		const entry = {
+			summary,
+			active: {
+				session: { write },
+				outputReactionScanBuffer: "OpenAI Codex (v1.0.0)\n› ",
+				outputReactionEngine: null,
+				outputReactionSession: null,
+				deferredStartupInput: null,
+				lastUserInputAt: null,
+				taskChatInputDeliveryTimer: null,
+				taskChatInputDeliveryGeneration: 0,
+				awaitingCodexPromptAfterEnter: false,
+			},
+			// 镜像通道给不出就绪信号：若快路径被误删，本例只能拖到 deadline，测试即失败。
+			terminalStateMirror: {
+				getSnapshot: async () => ({ snapshot: "正在执行…", cols: 80, rows: 3 }),
+				getViewportSnapshot: async () => ({ snapshot: "正在执行…", cols: 80, rows: 3 }),
+				getScreenSnapshot: async () => toScreenSnapshot("正在执行…"),
+			},
+			listenerIdCounter: 1,
+			listeners: new Map(),
+		};
+		(manager as unknown as { entries: Map<string, typeof entry> }).entries.set("task-codex-scan-fast-path", entry);
+
+		manager.submitTaskChatInputWhenReady("task-codex-scan-fast-path", "继续 RVF");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
 	});
@@ -420,6 +632,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			},
 			terminalStateMirror: {
 				getSnapshot: async () => ({ snapshot: CLAUDE_READY_PROMPT, cols: 80, rows: 24 }),
+				// 旧画法 fixture 上结构判定不命中，故挂起点仍落在 getViewportSnapshot（本用例的模拟对象）。
+				getScreenSnapshot: async () => toScreenSnapshot(CLAUDE_READY_PROMPT),
 				getViewportSnapshot: async () => {
 					snapshotCalls += 1;
 					if (snapshotCalls === 1) {
