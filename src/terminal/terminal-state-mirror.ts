@@ -1,6 +1,8 @@
 import serializeAddonModule from "@xterm/addon-serialize";
 import headlessTerminalModule from "@xterm/headless";
 
+import type { TerminalScreenLineSnapshot, TerminalScreenSnapshot } from "./terminal-input-box-reader";
+
 const { SerializeAddon } = serializeAddonModule as typeof import("@xterm/addon-serialize");
 const { Terminal } = headlessTerminalModule as typeof import("@xterm/headless");
 
@@ -87,6 +89,32 @@ export class TerminalStateMirror {
 			cols: this.terminal.cols,
 			rows: this.terminal.rows,
 		};
+	}
+
+	// 按「行 + 软折行标记」读取当前活动屏，供 terminal-input-box-reader 做结构化读框
+	// （提示符就绪判定、人机争用让路判定、Ctrl+S 暂存取文）。
+	//
+	// 为什么不复用 getViewportSnapshot()：那条路返回 serialize() 出来的**带 ANSI 的字符串**，
+	// 行边界已被压平、逐行的软折行标记也没了，消费者只能再用正则去屏幕文本里捞特征。
+	// 这里直接交出行结构，让消费者按「框的形状」判定，并且能原样取到框内文本（Ctrl+S 暂存需要）。
+	//
+	// 成本远低于 getViewportSnapshot：只遍历 rows 行、不做序列化，也不吃 serialize 那份
+	// 阻塞事件循环的开销。仍排进 operationQueue，保证相对写入严格有序（否则会读到写入尚未
+	// 应用的中间态）。
+	async getScreenSnapshot(): Promise<TerminalScreenSnapshot> {
+		await this.operationQueue;
+		const buffer = this.terminal.buffer.active;
+		const lines: TerminalScreenLineSnapshot[] = [];
+		for (let rowOffset = 0; rowOffset < this.terminal.rows; rowOffset += 1) {
+			const line = buffer.getLine(buffer.baseY + rowOffset);
+			lines.push({
+				// translateToString(false)：保留行内空白。输入框的续行缩进与提示符后的 U+00A0
+				// 都是有意义的定位信息，去掉就没法剥前缀了。
+				text: line?.translateToString(false) ?? "",
+				isWrapped: line?.isWrapped ?? false,
+			});
+		}
+		return { lines, columnCount: this.terminal.cols };
 	}
 
 	dispose(): void {

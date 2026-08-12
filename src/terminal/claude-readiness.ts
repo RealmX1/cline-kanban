@@ -38,12 +38,23 @@ export function hasClaudeStartupUiRendered(text: string): boolean {
 	return false;
 }
 
-// 检测 Claude TUI 输入框是否已就绪：
-//   - 框线字符（box drawing `╭` / `╰` 加横线）作为强信号
-//   - 或独立一行的 `>` 输入提示符
+// 检测 Claude TUI 输入框是否已就绪。
+//
+// ⚠️ 这是**逐版本漂移的外部契约**，历史上已经栽过一次：下面前三条正则匹配的是旧版画法
+// （`╭`/`╰` 框线 + 半角 `>` 提示符），而 v2.1.226+ 改成了「整行 U+2500 横线 + `❯`(U+276F)」，
+// 于是本函数对当前 Claude **恒返回 false**。它与另外两个缺陷叠加，造成 2026-08-08 那次
+// 「程序化投递在输入框里躺了 49 分钟」的事故。
+//
+// 因此：**程序化投递的就绪判定不再依赖本函数**，改走 terminal-input-box-reader 的结构判定
+// （读终端镜像 buffer，判「存在一个被两条边界线夹住、且首行以提示符开头的区域」，不赌具体画法）。
+// 本函数只保留给拿不到镜像、只有原始输出字符串的调用点（adapter 的启动横幅识别等），
+// 并保持「新旧画法都认」——旧版渲染仍可能出现在历史 scrollback 与旧版 CLI 上。
 const CLAUDE_PROMPT_BOX_TOP_REGEX = /╭[─━]+/u;
 const CLAUDE_PROMPT_BOX_BOTTOM_REGEX = /╰[─━]+/u;
 const CLAUDE_PROMPT_MARKER_REGEX = /(?:^|\n)\s*>\s/u;
+// v2.1.226+ 的提示符：行首的 `❯`(U+276F)。与 Codex 的 `›` 谓词同形。
+// 刻意**不**把「整行长横线」也当信号：那与 agent 输出里的分隔线不可区分，会造成过早注入。
+const CLAUDE_PROMPT_CHEVRON_MARKER_REGEX = /(?:^|[\n\r])\s*❯/u;
 
 export function hasClaudeInteractivePrompt(text: string): boolean {
 	const stripped = stripAnsi(text);
@@ -51,6 +62,9 @@ export function hasClaudeInteractivePrompt(text: string): boolean {
 		return true;
 	}
 	if (CLAUDE_PROMPT_MARKER_REGEX.test(stripped)) {
+		return true;
+	}
+	if (CLAUDE_PROMPT_CHEVRON_MARKER_REGEX.test(stripped)) {
 		return true;
 	}
 	return false;

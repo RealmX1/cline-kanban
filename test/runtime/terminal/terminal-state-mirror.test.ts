@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+	CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR,
+	measureTerminalDisplayColumnWidth,
+	readTerminalInputBox,
+} from "../../../src/terminal/terminal-input-box-reader";
 import { TerminalStateMirror } from "../../../src/terminal/terminal-state-mirror";
 
 const mirrors: TerminalStateMirror[] = [];
@@ -72,6 +77,64 @@ describe("TerminalStateMirror", () => {
 
 		expect(snapshot.snapshot).toContain("\u001b[?1049h");
 		expect(snapshot.snapshot).toContain("fullscreen");
+	});
+
+	// 读框接缝：镜像交出的行 + 软折行标记，必须能被 terminal-input-box-reader 直接消费。
+	// 这条路径替代了「serialize 出带 ANSI 的字符串再用正则猜 TUI 画法」，是 W1 就绪判定的新底座。
+	it("exposes buffer lines that terminal-input-box-reader can parse into the input box content", async () => {
+		const mirror = createMirror(100, 30);
+		const boundary = "─".repeat(100);
+		// 真机形态：横线 / `❯` + U+00A0 + 内容 / 横线，框下面还有状态行。
+		mirror.applyOutput(
+			Buffer.from(
+				["banner", boundary, "❯ typed-but-not-submitted", boundary, "  ⏸ manual mode on"].join("\r\n"),
+				"utf8",
+			),
+		);
+
+		const screenSnapshot = await mirror.getScreenSnapshot();
+		const reading = readTerminalInputBox(screenSnapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR);
+
+		expect(screenSnapshot.columnCount).toBe(100);
+		expect(reading?.text).toBe("typed-but-not-submitted");
+	});
+
+	// 宽字符走真 xterm buffer 才看得出问题：48 个中文字占满 96 列，但 translateToString 交出来的
+	// 字符串只有 48 个码元（宽字符的第二个单元格宽度为 0、不产出字符）。按码元数判「写满」会漏判，
+	// 于是自折出来的续行被误当作硬换行，还原出的文本凭空多出一个换行 —— 静默的数据损坏。
+	it("还原被中文写满整行后自折的输入时不凭空多出换行", async () => {
+		const mirror = createMirror(100, 30);
+		const boundary = "─".repeat(100);
+		const chineseFullRow = "中".repeat(48);
+
+		mirror.applyOutput(
+			Buffer.from(["banner", boundary, `❯ ${chineseFullRow}`, "  尾巴", boundary].join("\r\n"), "utf8"),
+		);
+
+		const screenSnapshot = await mirror.getScreenSnapshot();
+		const reading = readTerminalInputBox(screenSnapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR);
+
+		// 真 buffer 行确实只交出 48 个中文码元（宽字符的第二个单元格宽度为 0、不产出字符），
+		// 而它占满了 96 列 —— 「码元数 ≠ 显示列宽」在此坐实。
+		const rawContentRow = screenSnapshot.lines[2].text
+			.replace(CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR.promptPrefixPattern, "")
+			.replace(/\s+$/u, "");
+		expect(rawContentRow).toHaveLength(48);
+		expect(measureTerminalDisplayColumnWidth(rawContentRow)).toBe(96);
+		expect(reading?.logicalLines).toEqual([`${chineseFullRow}尾巴`]);
+		expect(reading?.text).not.toContain("\n");
+	});
+
+	it("reports an empty input box as empty text rather than a bare prompt glyph", async () => {
+		const mirror = createMirror(100, 30);
+		const boundary = "─".repeat(100);
+
+		mirror.applyOutput(Buffer.from(["banner", boundary, "❯ ", boundary].join("\r\n"), "utf8"));
+
+		const reading = readTerminalInputBox(await mirror.getScreenSnapshot(), CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR);
+
+		expect(reading).not.toBeNull();
+		expect(reading?.text).toBe("");
 	});
 
 	it("applies queued resizes before generating a snapshot", async () => {

@@ -51,6 +51,10 @@ function makeEntry(summaryOverrides: Partial<RuntimeTaskSessionSummary> = {}) {
 		terminalStateMirror: null as {
 			getSnapshot: () => Promise<{ snapshot: string; cols: number; rows: number }>;
 			getViewportSnapshot: () => Promise<{ snapshot: string; cols: number; rows: number }>;
+			getScreenSnapshot: () => Promise<{
+				lines: { text: string; isWrapped: boolean }[];
+				columnCount: number;
+			}>;
 		} | null,
 		listenerIdCounter: 1,
 		listeners: new Map(),
@@ -265,9 +269,16 @@ describe("TerminalSessionManager idle-live 自愈（scanForStalls → transition
 
 	function fakeMirror(snapshot: string) {
 		// 就绪判定读 getViewportSnapshot(活动屏);park 测试的 fake 快照本身就是一屏内容,两者同值。
+		// getScreenSnapshot 是结构就绪判定（terminal-input-box-reader）读的行快照，从同一份内容派生。
+		// 注意 attemptIdleStallAutoReview 把就绪判定包在 try/catch 里、异常即当作「本轮不自愈」——
+		// 这里漏掉任一方法都会让自愈**静默**失效而不是报错，故 fake 必须与真 mirror 的方法集同步。
 		return {
 			getSnapshot: async () => ({ snapshot, cols: 80, rows: 24 }),
 			getViewportSnapshot: async () => ({ snapshot, cols: 80, rows: 24 }),
+			getScreenSnapshot: async () => ({
+				lines: snapshot.split("\n").map((text) => ({ text, isWrapped: false })),
+				columnCount: 80,
+			}),
 		};
 	}
 
