@@ -86,6 +86,8 @@ const RECHECK_MS = 1_500;
 const PAST_DEADLINE_MS = 65_000;
 // 须与 session-manager.ts 同步：用户手敲抑制窗 8s、deadline(60s) 后让路防饿死硬上限 15s。
 const USER_INPUT_SUPPRESS_MS = 8_000;
+// Fix B 让位的饿死上限（TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS）。
+const MAX_USER_TURN_YIELD_MS = 120_000;
 const DEADLINE_PLUS_MAX_YIELD_MS = 60_000 + 15_000;
 // 写后确认闭环常量（须与 session-manager.ts 同步）：确认延时 2.5s、最多补发 3 次裸回车。
 const SUBMIT_CONFIRM_DELAY_MS = 2_500;
@@ -102,6 +104,9 @@ function installFakeClaudeEntry(
 		reviewReason?: string | null;
 		lastOutputAt?: number | null;
 		lastUserInputAt?: number | null;
+		// 直接给三元 facet 时走 facet 权威路径（resolveSessionFacets 要求三者同时非 undefined），
+		// 用于构造 legacy reviewReason 投影不出来的模态待答态（question / plan_review / permission）。
+		facets?: { turnOwner: string | null; liveness: string; userTurnKind: string | null };
 	},
 ) {
 	const write = vi.fn();
@@ -111,6 +116,7 @@ function installFakeClaudeEntry(
 		state: options.state,
 		reviewReason: options.reviewReason ?? null,
 		lastOutputAt: options.lastOutputAt ?? null,
+		...(options.facets ?? {}),
 	} as unknown as RuntimeTaskSessionSummary;
 	const entry = {
 		summary,
@@ -123,6 +129,7 @@ function installFakeClaudeEntry(
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
+			programmaticDeliveryReceipt: null,
 			awaitingCodexPromptAfterEnter: false,
 		},
 		// 就绪判定读 getViewportSnapshot（活动屏，scrollback:0）；fake 的 mirrorSnapshot 即视口内容。
@@ -848,28 +855,72 @@ describe("session-manager · submitTaskChatInputWhenReady 后台注入让位（F
 		vi.useRealTimers();
 	});
 
-	it("deferWhileUserTurn=true + user 回合：越过 deadline 仍不写；turnOwner 回 agent 后的下一轮 recheck 才投递一次", async () => {
+	// 2026-08-08 事故形态 1 的第二条根因回归守卫。
+	// 修复前：让位判据是 turnOwner !== "agent"，把 `review`（agent 自然完工、输入框空闲）也算成「等用户」，
+	// 于是 RVF followup 的**目标态**恰好是永不投递的状态——本用例在修复前必红（0 次投递）。
+	it("形态 1 回归：awaiting_review（agent 完工待审、userTurnKind=review）不是模态待答 → 后台注入照常投递，不让位", async () => {
 		const manager = new TerminalSessionManager();
-		// awaiting_review = user 回合（agent 正 AskUserQuestion 等用户）。就绪信号在镜像里（框在），故一旦让位解除即可投递。
-		const { write, entry } = installFakeClaudeEntry(manager, "task-defer-user-turn", {
+		const { write } = installFakeClaudeEntry(manager, "task-defer-review-turn", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
 			state: "awaiting_review",
 			reviewReason: "hook",
 			lastOutputAt: null,
 		});
 
-		manager.submitTaskChatInputWhenReady("task-defer-user-turn", "再跑一轮 RVF", { deferWhileUserTurn: true });
-		// 后台注入遇 user 回合 → 让位：即便越过 deadline 兜底也绝不强写（这正是 connection-drop 让位不变量补到本路径）。
-		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
-		const submitsWhileDeferred = write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["));
-		expect(submitsWhileDeferred).toHaveLength(0);
+		manager.submitTaskChatInputWhenReady("task-defer-review-turn", "再跑一轮 RVF", { deferWhileUserTurn: true });
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		const submits = write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["));
+		expect(submits).toHaveLength(1);
+		expect(submits[0]?.[0]).toBe("SUBMIT[再跑一轮 RVF]");
+	});
 
-		// agent 回合恢复（用户答完、agent 续跑）→ 挂起的注入在下一轮 recheck 放行、恰投递一次。
-		entry.summary.state = "running";
+	it("deferWhileUserTurn=true + 模态待答（permission）：越过 deadline 仍不写；模态解除后的下一轮 recheck 才投递一次", async () => {
+		const manager = new TerminalSessionManager();
+		// 真正该让位的形态：agent 正在等用户拍板（权限确认），此时注入会经 UserPromptSubmit 把会话翻回 agent 回合。
+		const { write, entry } = installFakeClaudeEntry(manager, "task-defer-modal-turn", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+			facets: { turnOwner: "user", liveness: "live", userTurnKind: "permission" },
+		});
+
+		manager.submitTaskChatInputWhenReady("task-defer-modal-turn", "再跑一轮 RVF", { deferWhileUserTurn: true });
+		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
+		expect(write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["))).toHaveLength(0);
+
+		// 用户答完权限确认 → agent 回合恢复 → 挂起的注入在下一轮 recheck 放行、恰投递一次。
+		(entry.summary as unknown as { turnOwner: string; userTurnKind: string | null }).turnOwner = "agent";
+		(entry.summary as unknown as { turnOwner: string; userTurnKind: string | null }).userTurnKind = null;
 		await vi.advanceTimersByTimeAsync(RECHECK_MS);
 		const submitsAfterResume = write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["));
 		expect(submitsAfterResume).toHaveLength(1);
 		expect(submitsAfterResume[0]?.[0]).toBe("SUBMIT[再跑一轮 RVF]");
+	});
+
+	// 事故的第三条根因：让位分支无饿死上限 ⇒ 永远挂起、既不落地也不报错（那 49 分钟的直接形态）。
+	// 修复前本用例必红：投递数恒 0 且回执永远拿不到。
+	it("形态 1 回归：模态待答一直不解除 → 让位预算耗尽后转终态 delivery_failed{agent_awaiting_user_decision_timeout}，不再无限空探", async () => {
+		const manager = new TerminalSessionManager();
+		const { write } = installFakeClaudeEntry(manager, "task-defer-starve", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+			facets: { turnOwner: "user", liveness: "live", userTurnKind: "question" },
+		});
+
+		const outcomes: { status: string; reason: string | null }[] = [];
+		manager.submitTaskChatInputWhenReady("task-defer-starve", "再跑一轮 RVF", {
+			deferWhileUserTurn: true,
+			idempotencyKey: "key-starve",
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+		});
+
+		// 推进越过 deadline + 让位预算硬上限。
+		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS + MAX_USER_TURN_YIELD_MS + RECHECK_MS);
+		expect(write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["))).toHaveLength(0);
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "agent_awaiting_user_decision_timeout" }]);
 	});
 
 	it("deferWhileUserTurn=false（用户发起）+ user 回合：不让位，就绪即照常投递", async () => {
@@ -887,5 +938,216 @@ describe("session-manager · submitTaskChatInputWhenReady 后台注入让位（F
 		const submits = write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["));
 		expect(submits).toHaveLength(1);
 		expect(submits[0]?.[0]).toBe("SUBMIT[用户手输的消息]");
+	});
+});
+
+// 诚实回执（terminal_delivery_status 四态）与取消接口。
+// 这一组守的是 2026-08-08 事故的核心教训：链路上**每一个出口**都必须给出结论，
+// 「没有结论」不再是一种合法状态——旧实现只有「写进去了」这条路径有反馈，其余出口一律静默。
+describe("session-manager · 程序化投递的诚实回执与取消", () => {
+	beforeEach(() => {
+		prepareAgentLaunchMock.mockReset();
+		ptySessionSpawnMock.mockReset();
+		ensureInstructionsFileMock.mockClear();
+		tuiFreezeWarnings.length = 0;
+		tuiFreezeErrors.length = 0;
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	function collectOutcomes() {
+		const outcomes: { status: string; reason: string | null }[] = [];
+		return {
+			outcomes,
+			onDeliveryOutcome: (outcome: { status: string; reason: string | null }) => {
+				outcomes.push(outcome);
+			},
+		};
+	}
+
+	it("写入后确认到提交 → delivered_and_submit_confirmed", async () => {
+		const manager = new TerminalSessionManager();
+		const { entry } = installFakeClaudeEntry(manager, "task-receipt-confirmed", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+
+		manager.submitTaskChatInputWhenReady("task-receipt-confirmed", "继续 RVF", {
+			idempotencyKey: "key-confirmed",
+			onDeliveryOutcome,
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		// 写入完成、尚未确认：此刻不得有任何结论（pending 就是「还没有结论」的诚实表达）。
+		expect(outcomes).toHaveLength(0);
+
+		// agent 开始干活 → 输出恢复流动 → 确认 tick 判定已提交。
+		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
+		expect(outcomes).toEqual([{ status: "delivered_and_submit_confirmed", reason: null }]);
+	});
+
+	it("写入时 agent 已在自己的回合中 → delivered_queued_behind_active_agent_turn（该标记在写入时捕获，不是确认时）", async () => {
+		const manager = new TerminalSessionManager();
+		const { entry } = installFakeClaudeEntry(manager, "task-receipt-queued", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastOutputAt: null,
+		});
+		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+
+		manager.submitTaskChatInputWhenReady("task-receipt-queued", "继续 RVF", {
+			idempotencyKey: "key-queued",
+			onDeliveryOutcome,
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
+		expect(outcomes).toEqual([{ status: "delivered_queued_behind_active_agent_turn", reason: null }]);
+	});
+
+	it("补发预算耗尽仍确认不到提交 → delivery_failed{submit_confirmation_budget_exhausted}（旧实现只打日志、回执仍是成功）", async () => {
+		const manager = new TerminalSessionManager();
+		installFakeClaudeEntry(manager, "task-receipt-unconfirmed", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+
+		manager.submitTaskChatInputWhenReady("task-receipt-unconfirmed", "继续 RVF", {
+			idempotencyKey: "key-unconfirmed",
+			onDeliveryOutcome,
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		// 输出始终静默（lastOutputAt 恒 null）→ 每拍补发裸 CR，直至预算耗尽。
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1));
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }]);
+	});
+
+	it("被更晚的投递抢占单飞槽 → 旧投递立刻拿到 delivery_failed{superseded_by_later_delivery}，不会永远挂着", async () => {
+		const manager = new TerminalSessionManager();
+		installFakeClaudeEntry(manager, "task-receipt-superseded", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+
+		manager.submitTaskChatInputWhenReady("task-receipt-superseded", "旧消息", {
+			idempotencyKey: "key-old",
+			onDeliveryOutcome,
+		});
+		manager.submitTaskChatInputWhenReady("task-receipt-superseded", "新消息", { idempotencyKey: "key-new" });
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "superseded_by_later_delivery" }]);
+	});
+
+	it("会话在 await 期间被替换 → delivery_failed{session_ended_before_delivery}", async () => {
+		const manager = new TerminalSessionManager();
+		// 受控 mirror：把 attempt 卡在就绪判定的 await 上，期间把 entry.active 换掉，
+		// 精确复现「await 返回时会话已不是当初那份」这条出口。
+		let releaseSnapshot: (() => void) | null = null;
+		const { entry } = installFakeClaudeEntry(manager, "task-receipt-session-end", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		entry.terminalStateMirror.getScreenSnapshot = (async () => {
+			await new Promise<void>((resolve) => {
+				releaseSnapshot = resolve;
+			});
+			return toScreenSnapshot(CLAUDE_READY_PROMPT);
+		}) as typeof entry.terminalStateMirror.getScreenSnapshot;
+
+		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+		manager.submitTaskChatInputWhenReady("task-receipt-session-end", "继续 RVF", {
+			idempotencyKey: "key-session-end",
+			onDeliveryOutcome,
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(releaseSnapshot).not.toBeNull();
+
+		// 会话被替换成另一份 active（新 active 不带任何回执登记）。
+		entry.active = {
+			session: { write: vi.fn() },
+			outputReactionScanBuffer: null,
+			deferredStartupInput: null,
+			lastUserInputAt: null,
+			taskChatInputDeliveryTimer: null,
+			taskChatInputDeliveryGeneration: 0,
+			submitConfirmTimer: null,
+			submitConfirmGeneration: 0,
+			programmaticDeliveryReceipt: null,
+			awaitingCodexPromptAfterEnter: false,
+		} as unknown as typeof entry.active;
+
+		(releaseSnapshot as unknown as () => void)();
+		// 就绪判定内部还有若干 await，单纯 flush 两个微任务不够；推进 0ms 让整条链跑完。
+		await vi.advanceTimersByTimeAsync(0);
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "session_ended_before_delivery" }]);
+	});
+
+	it("取消（写入前）：拦下投递、PTY 一个字节都不写，回执为 delivery_failed{cancelled_before_delivery}", async () => {
+		const manager = new TerminalSessionManager();
+		const { write } = installFakeClaudeEntry(manager, "task-cancel-before", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+
+		manager.submitTaskChatInputWhenReady("task-cancel-before", "继续 RVF", {
+			idempotencyKey: "key-cancel",
+			onDeliveryOutcome,
+		});
+		expect(manager.cancelTaskChatInputDelivery("task-cancel-before", "key-cancel")).toBe("cancelled_before_delivery");
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "cancelled_before_delivery" }]);
+
+		// 取消后继续推进：在途 attempt 复查代际发现已过时 → 绝不补写。
+		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
+		expect(write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["))).toHaveLength(0);
+	});
+
+	it("取消（写入后）：诚实返回 already_delivered，不伪造取消成功", async () => {
+		const manager = new TerminalSessionManager();
+		const { write } = installFakeClaudeEntry(manager, "task-cancel-late", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+
+		manager.submitTaskChatInputWhenReady("task-cancel-late", "继续 RVF", {
+			idempotencyKey: "key-cancel-late",
+			onDeliveryOutcome,
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["))).toHaveLength(1);
+
+		expect(manager.cancelTaskChatInputDelivery("task-cancel-late", "key-cancel-late")).toBe("already_delivered");
+		// 晚到的取消不得篡改结论：此刻仍无终态（等确认链落定）。
+		expect(outcomes).toHaveLength(0);
+	});
+
+	it("取消未知 key / 无在途投递 → no_pending_delivery（幂等，无副作用）", async () => {
+		const manager = new TerminalSessionManager();
+		installFakeClaudeEntry(manager, "task-cancel-unknown", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		expect(manager.cancelTaskChatInputDelivery("task-cancel-unknown", "never-submitted")).toBe("no_pending_delivery");
+		expect(manager.cancelTaskChatInputDelivery("task-missing", "any-key")).toBe("no_pending_delivery");
 	});
 });

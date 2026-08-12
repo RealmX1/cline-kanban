@@ -16,6 +16,8 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionUserTurnKind,
 	RuntimeTaskTurnCheckpoint,
+	TerminalDeliveryFailureReason,
+	TerminalDeliveryStatus,
 } from "../core/api-contract";
 import {
 	applySessionFacets,
@@ -107,6 +109,21 @@ const TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS = 60_000;
 // 投递让路防饿死硬上限：deadline 之后即便用户仍在手敲，也至多再为其让路这么久，到点无条件保底强写。
 // 守住「投递绝不丢」与 :88 的 best-effort 承诺——用户持续打字也不会把 RVF followup 永久饿死。
 const TASK_CHAT_INPUT_DELIVERY_MAX_DEADLINE_INPUT_YIELD_MS = 15_000;
+// Fix B 让位（agent 停在模态待答，见 runTaskChatInputDeliveryAttempt）的**饿死上限**。
+// 没有它就是 2026-08-08 那 49 分钟事故的第三条根因：让位分支置于 deadline 判定之前且无上限，
+// 于是 deadline 强写永远够不到，投递每 RECHECK_MS 空探一次、既不落地也不报错、无限挂起。
+// 到点转终态 delivery_failed{agent_awaiting_user_decision_timeout}——诚实失败远好于永远沉默。
+const TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS = 120_000;
+// Fix B 让位只认「agent 真的在等用户拍板」这几种模态待答。
+// 收窄的理由（恢复 Fix B 的原始意图）：其 commit 正文写的是「agent 正 AskUserQuestion / 计划评审 /
+// 权限确认等待用户」，但实现用的是 turnOwner !== "agent"，把 `review`（agent 自然完工、输入框空闲）
+// 也一并纳入了——而 `review` 恰恰是 RVF followup 的**目标态**，于是每次都让位、永不投递。
+const MODAL_USER_DECISION_TURN_KINDS = new Set<RuntimeTaskSessionUserTurnKind>([
+	"question",
+	"plan_review",
+	"permission",
+	"needs_input",
+]);
 // 写后确认（CR-swallow 闭环）：两处程序化 paste 注入（RVF followup 与连接中断续跑）写完 bracketed paste 后，
 // 隔这么久起一个确认 tick，检查输出是否在 paste 回显后重新流动。须 ≥ AGENT_OUTPUT_QUIET_THRESHOLD_MS（2s），
 // 使被吞 CR 的 paste 在首个 tick 即读到「输出静默」；留 ~0.5s 余量避免边界抖动。
@@ -254,6 +271,58 @@ interface ActiveProcessState {
 	submitConfirmTimer: NodeJS.Timeout | null;
 	// 确认「代际」单调计数：每次 writePasteSubmissionWithConfirm 自增并被本确认链捕获，被更晚的 paste 提交取代者放弃。
 	submitConfirmGeneration: number;
+	// 当前在途程序化投递的**诚实回执登记**：谁在等这条投递的结论、取消要认哪个 idempotency key、
+	// 以及它此刻走到了哪一步。至多一个（单飞槽，与 taskChatInputDeliveryGeneration 同源 last-write-wins）。
+	// null 表示当前没有任何等待结论的程序化投递。仅内存态——runtime 重启后由账本启动清扫兜底。
+	programmaticDeliveryReceipt: PendingProgrammaticDeliveryReceipt | null;
+}
+
+// 一条程序化投递的回执登记。存在的意义：让投递链路上**每一个出口**都能给出结论，
+// 而不是像 2026-08-08 之前那样只有「写进去了」这一条路径有反馈、其余出口一律静默。
+interface PendingProgrammaticDeliveryReceipt {
+	// 取消要认的 key；用户发起的发送没有 key（不写账本），恒 null。
+	idempotencyKey: string | null;
+	// awaiting_readiness：还没写进 PTY，取消能真正拦下。
+	// awaiting_submit_confirmation：已写入、正在等提交确认，取消已经晚了。
+	phase: "awaiting_readiness" | "awaiting_submit_confirmation";
+	// 写入 PTY 那一刻 agent 是否正在自己的回合中——决定确认后报 delivered_and_submit_confirmed
+	// 还是 delivered_queued_behind_active_agent_turn。必须在写入时捕获：确认 tick 跑到时回合早就变了。
+	queuedBehindActiveAgentTurn: boolean;
+	// 进程内的「终态写一次即定」前哨。账本侧锁内还有一道同样的守卫，两道都要有：
+	// 这一道防同一进程内重复上报，那一道防跨进程（CLI 与 runtime）竞争。
+	settled: boolean;
+	observer: TaskChatInputDeliveryOutcomeObserver;
+}
+
+export interface TaskChatInputDeliveryOutcome {
+	status: TerminalDeliveryStatus;
+	reason: TerminalDeliveryFailureReason | null;
+}
+
+export type TaskChatInputDeliveryOutcomeObserver = (outcome: TaskChatInputDeliveryOutcome) => void;
+
+// 上报一条投递结论并注销登记。写一次即定：已 settled 的登记再来一次是 no-op（不是错误——
+// 多个出口可能同时判定，比如 teardown 与确认 tick 撞上）。
+function settleProgrammaticDeliveryReceipt(
+	receipt: PendingProgrammaticDeliveryReceipt | null,
+	status: TerminalDeliveryStatus,
+	reason: TerminalDeliveryFailureReason | null,
+): void {
+	if (!receipt || receipt.settled) {
+		return;
+	}
+	receipt.settled = true;
+	receipt.observer({ status, reason });
+}
+
+// 会话侧统一注销入口：把 active 上的登记结掉并清空槽位。
+function settleActiveProgrammaticDelivery(
+	active: { programmaticDeliveryReceipt: PendingProgrammaticDeliveryReceipt | null },
+	status: TerminalDeliveryStatus,
+	reason: TerminalDeliveryFailureReason | null,
+): void {
+	settleProgrammaticDeliveryReceipt(active.programmaticDeliveryReceipt, status, reason);
+	active.programmaticDeliveryReceipt = null;
 }
 
 interface SessionEntry {
@@ -1044,10 +1113,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 非 agent 回合（agent 正用 AskUserQuestion / 计划评审 / 权限确认等待用户）时让位、挂起延迟，直到 turnOwner 回到
 	// agent 才投递（见 runTaskChatInputDeliveryAttempt）。用户发起的发送（人类聊天 / commit·openPR 按钮，无 source）
 	// 保持 false，任何回合都照常送达（含 deadline 强写）——这两个本就是故意向 review 态会话发指令。
+	// options.idempotencyKey / options.onDeliveryOutcome：程序化投递的诚实回执登记。传了就意味着
+	// 「有人在等这条投递的真实结论」——链路上每个出口都会经 settleProgrammaticDeliveryReceipt 上报一次。
 	submitTaskChatInputWhenReady(
 		taskId: string,
 		text: string,
-		options?: { deferWhileUserTurn?: boolean },
+		options?: {
+			deferWhileUserTurn?: boolean;
+			idempotencyKey?: string | null;
+			onDeliveryOutcome?: TaskChatInputDeliveryOutcomeObserver;
+		},
 	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
@@ -1064,6 +1139,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearTaskChatInputDeliveryTimer(active);
 		// 新投递取代任何上一条 paste 提交的待决确认链（其自身写入后会再起一条新的）。
 		clearSubmitConfirmTimer(active);
+		// 单飞槽被抢占：上一条投递从此再无人推进，必须当场给它一个诚实结论，
+		// 否则它的等待者（RVF）会永远停在 pending——这正是契约里 superseded_by_later_delivery 的用途。
+		settleActiveProgrammaticDelivery(active, "delivery_failed", "superseded_by_later_delivery");
+		if (options?.onDeliveryOutcome) {
+			active.programmaticDeliveryReceipt = {
+				idempotencyKey: options.idempotencyKey ?? null,
+				phase: "awaiting_readiness",
+				queuedBehindActiveAgentTurn: false,
+				settled: false,
+				observer: options.onDeliveryOutcome,
+			};
+		}
 		const generation = ++active.taskChatInputDeliveryGeneration;
 		const deadlineAt = now() + TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS;
 		const timer = setTimeout(() => {
@@ -1072,6 +1159,36 @@ export class TerminalSessionManager implements TerminalSessionService {
 		timer.unref?.();
 		active.taskChatInputDeliveryTimer = timer;
 		return cloneSummary(entry.summary);
+	}
+
+	// 取消一条在途程序化投递。按 RVF 的建议复用既有代际计数（自增即令在途 attempt 在写入前自行放弃），
+	// 不新建取消状态机——这样「取消」与「被更晚投递取代」走的是同一条作废路径，不会出现两套竞争语义。
+	//
+	// 三个返回值对应契约里的 cancel_result：
+	//   cancelled_before_delivery —— 确实拦下了，文本没有进入终端。
+	//   already_delivered —— 已经写进 PTY、正在等提交确认，取消晚了（真实终态稍后由确认链落定）。
+	//   no_pending_delivery —— runtime 内存里没有这条在途投递（从未到达、已落定、或已被取代）。
+	//
+	// 竞争安全性来自「同步 + 单事件循环」：本方法全程无 await，与确认链、投递 attempt 天然序列化，
+	// 不存在「既取消又送达」的中间态。
+	cancelTaskChatInputDelivery(
+		taskId: string,
+		idempotencyKey: string,
+	): "cancelled_before_delivery" | "already_delivered" | "no_pending_delivery" {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active ?? null;
+		const receipt = active?.programmaticDeliveryReceipt ?? null;
+		if (!active || !receipt || receipt.idempotencyKey !== idempotencyKey) {
+			return "no_pending_delivery";
+		}
+		if (receipt.phase === "awaiting_submit_confirmation") {
+			return "already_delivered";
+		}
+		clearTaskChatInputDeliveryTimer(active);
+		// 自增代际：正 await 就绪判定的在途 attempt 返回后会复查代际、发现已过时而放弃写入。
+		active.taskChatInputDeliveryGeneration += 1;
+		settleActiveProgrammaticDelivery(active, "delivery_failed", "cancelled_before_delivery");
+		return "cancelled_before_delivery";
 	}
 
 	// 一次投递 attempt：就绪命中或 deadline 兜底则写 PTY，否则隔 RECHECK_MS 再探（不消耗额外语义，只是轮询）。
@@ -1086,10 +1203,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
 		if (!entry || !active) {
-			// session 已结束：放弃投递（timer 已随 teardown 清除）。
+			// session 已结束：放弃投递（timer 已随 teardown 清除）。回执由 teardown 侧上报——
+			// 这里已经够不到那份 active，拿不到登记。
 			return;
 		}
 		// 进入 await 前先校验代际：已被更晚的投递取代则不再触发就绪判定（避免无谓 await 后写旧文本）。
+		// 结论已由抢占方在自增代际时上报（superseded_by_later_delivery），此处不重复上报。
 		if (active.taskChatInputDeliveryGeneration !== generation) {
 			return;
 		}
@@ -1099,6 +1218,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const currentEntry = this.entries.get(taskId);
 		const currentActive = currentEntry?.active;
 		if (!currentEntry || !currentActive || currentActive !== active) {
+			// await 期间会话被替换/结束：这条投递永远到不了 PTY 了。捕获的 active 仍在手上，就地上报。
+			settleActiveProgrammaticDelivery(active, "delivery_failed", "session_ended_before_delivery");
 			return;
 		}
 		// await 期间可能有更晚的投递（submitTaskChatInputWhenReady）已自增代际：本 attempt 已过时，
@@ -1106,15 +1227,33 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (currentActive.taskChatInputDeliveryGeneration !== generation) {
 			return;
 		}
-		// Fix B 让位守卫：后台自动注入（deferWhileUserTurn=true）遇「非 agent 回合」（agent 正 AskUserQuestion /
-		// 计划评审 / 权限确认等待用户）时，不写 PTY、不走下面的 deadline 强写，改排一次重探，直到 turnOwner 回到 agent
-		// 才真正投递。等价把 connection-drop 注入路径的 isAgentTurnActive 让位不变量（turnOwner≠agent 就绝不打进正等
-		// 用户的对话框、以免 UserPromptSubmit 把会话翻回 agent 回合）补到本路径——但仅对后台注入生效。语义为「延迟」
-		// 而非「丢弃」：保住这一轮 followup（RVF CLI 不自动重试，丢弃=永久跳过一轮）。须置于 pastDeadline 判定之前，
-		// 才能盖过 deadline 兜底强写。用户发起的发送（deferWhileUserTurn=false）不经此分支，任何回合照常送达。
-		// ponytail: 若 agent 长期停在用户回合，此注入将每 RECHECK_MS 空探一次、无限挂起——unref 定时器、代际管理已有、
-		// 会话 teardown 随 clearTaskChatInputDeliveryTimer 清除，无泄漏；且卡片此时本应在 Review，与线 A 只扫 agent 回合不冲突。
-		if (deferWhileUserTurn && resolveSessionFacets(currentEntry.summary).turnOwner !== "agent") {
+		// Fix B 让位守卫：后台自动注入（deferWhileUserTurn=true）遇 agent **正在等用户拍板**（AskUserQuestion /
+		// 计划评审 / 权限确认 / 兜底待输入）时，不写 PTY、不走下面的 deadline 强写，改排一次重探，直到该模态解除
+		// 才真正投递。等价把 connection-drop 注入路径的让位不变量（绝不打进正等用户的对话框、以免 UserPromptSubmit
+		// 把会话翻回 agent 回合）补到本路径——但仅对后台注入生效。须置于 pastDeadline 判定之前才能盖过 deadline 兜底。
+		// 用户发起的发送（deferWhileUserTurn=false）不经此分支，任何回合照常送达。
+		//
+		// 判据用 userTurnKind ∈ 模态待答集合，**不是** turnOwner !== "agent"：后者把 `review`（agent 自然完工、
+		// 输入框空闲）也算成「等用户」，而 review 恰恰是 RVF followup 的目标态，于是每次都让位、永不投递——
+		// 这是 2026-08-08 事故的第二条根因。收窄回 Fix B commit 正文原本描述的那几种模态。
+		//
+		// 让位有硬预算（MAX_USER_TURN_YIELD_MS）：到点转终态失败而不是继续空探。旧实现无上限，
+		// 是事故的第三条根因。语义仍是「延迟而非丢弃」，只是延迟现在有尽头、且尽头处会诚实报错。
+		const currentUserTurnKind = resolveSessionFacets(currentEntry.summary).userTurnKind;
+		if (
+			deferWhileUserTurn &&
+			currentUserTurnKind !== null &&
+			MODAL_USER_DECISION_TURN_KINDS.has(currentUserTurnKind)
+		) {
+			if (now() >= deadlineAt + TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS) {
+				settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "agent_awaiting_user_decision_timeout");
+				logTuiFreezeError(
+					`[tui-freeze] task-chat-input-delivery-abandoned taskId=${taskId} ` +
+						`agentId=${currentEntry.summary.agentId} reason=agent_awaiting_user_decision_timeout ` +
+						`userTurnKind=${currentUserTurnKind}`,
+				);
+				return;
+			}
 			this.scheduleTaskChatInputDeliveryRecheck(
 				taskId,
 				text,
@@ -1165,7 +1304,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 而自我抑制——与 submitConnectionDropContinuation 一致）。toBracketedPasteSubmission 结尾已含单个 CR，
 		// 若该 CR 被 TUI 重绘吞掉（粘贴进框但不发送），writePasteSubmissionWithConfirm 的确认 tick 会补发裸 `\r`；
 		// Codex 置位 awaitingCodexPromptAfterEnter 亦由其统一处理。
-		this.writePasteSubmissionWithConfirm(taskId, currentEntry, currentActive, text);
+		// 回执推进到「已写入、等确认」。queuedBehindActiveAgentTurn 必须在**此刻**捕获：确认 tick 在
+		// 2.5s 之后才跑，那时 turnOwner 早就被这次投递本身翻成 agent 了，届时再读一律是 agent，
+		// 就再也分不出「排在既有回合之后」与「agent 因这条消息才开始干活」。
+		const deliveryReceipt = currentActive.programmaticDeliveryReceipt;
+		if (deliveryReceipt) {
+			deliveryReceipt.phase = "awaiting_submit_confirmation";
+			deliveryReceipt.queuedBehindActiveAgentTurn = resolveSessionFacets(currentEntry.summary).turnOwner === "agent";
+		}
+		this.writePasteSubmissionWithConfirm(taskId, currentEntry, currentActive, text, {
+			retainsProgrammaticDeliveryReceipt: true,
+		});
 		logTuiFreezeWarning(
 			`[tui-freeze] task-chat-input-delivered taskId=${taskId} agentId=${currentEntry.summary.agentId} ` +
 				`via=${resolveTaskChatInputDeliveryVia(readiness)} chars=${text.length}`,
@@ -1195,12 +1344,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 「真提交 vs CR 被吞」的判据对两条路径都成立：真提交 → agent 干活 → 持续产出 → 非静默；CR 被吞 → 终端回落
 	// idle 框、再无字节 → 静默（见 src/core/session-activity.ts）。故确认统一用 output-quiet，不把 turnOwner 写进门控
 	// （连接中断注入时 turnOwner 已是 agent，区分不了 landed/swallowed）。
+	// options.retainsProgrammaticDeliveryReceipt：本次写入是否就是那条待回执投递自己的写入。
+	// 只有 task-chat 投递路径传 true。连接中断自动续跑（submitConnectionDropContinuation）不传——
+	// 它会夺走确认通道，被夺走的那条投递从此确认不到提交，只能诚实报 submit_confirmation_budget_exhausted
+	// （契约里这条 reason 的含义正是「写进去了但确认不到，文本可能残留在框里，重投前宜人工确认」）。
 	private writePasteSubmissionWithConfirm(
 		taskId: string,
 		entry: SessionEntry,
 		active: ActiveProcessState,
 		text: string,
+		options?: { retainsProgrammaticDeliveryReceipt?: boolean },
 	): void {
+		if (!options?.retainsProgrammaticDeliveryReceipt) {
+			settleActiveProgrammaticDelivery(active, "delivery_failed", "submit_confirmation_budget_exhausted");
+		}
 		active.session.write(toBracketedPasteSubmission(text));
 		if (entry.summary.agentId === "codex") {
 			active.awaitingCodexPromptAfterEnter = true;
@@ -1243,6 +1400,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 这也避免把裸 `\r` 发进对话框误答。
 		if (!evaluateAgentOutputQuiet(entry.summary.lastOutputAt ?? null, now())) {
 			logTuiFreezeWarning(`[tui-freeze] submit-confirmed taskId=${taskId} agentId=${entry.summary.agentId}`);
+			// 提交已确认。两种终态的区别只在「写入那一刻 agent 是否已在自己的回合中」，
+			// 该标记在写入时就捕获好了（见 runTaskChatInputDeliveryAttempt）。
+			settleActiveProgrammaticDelivery(
+				active,
+				active.programmaticDeliveryReceipt?.queuedBehindActiveAgentTurn
+					? "delivered_queued_behind_active_agent_turn"
+					: "delivered_and_submit_confirmed",
+				null,
+			);
 			return;
 		}
 		// 仍静默但用户近 OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS（8s）内手敲过 → 让位、绝不替他提交（保护 stashed/在打的
@@ -1260,6 +1426,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 				`[tui-freeze] submit-unconfirmed taskId=${taskId} agentId=${entry.summary.agentId} ` +
 					`after ${SUBMIT_CONFIRM_MAX_RESENDS} resends`,
 			);
+			// 补发预算耗尽仍确认不到提交：文本很可能还躺在输入框里。这条必须诚实报失败——
+			// 旧实现只打一行日志就收尾，调用方拿到的仍是「成功」，正是事故里 RVF 被误导的那一环。
+			settleActiveProgrammaticDelivery(active, "delivery_failed", "submit_confirmation_budget_exhausted");
 			return;
 		}
 		active.session.write("\r");
@@ -1655,6 +1824,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			stopWorkspaceTrustTimers(entry.active);
 			clearStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
+			settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
 			discardPendingOutputAnalysis(entry.active);
@@ -1858,6 +2028,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					stopWorkspaceTrustTimers(currentActive);
 					clearStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
+					settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "session_ended_before_delivery");
 					clearTaskChatInputDeliveryTimer(currentActive);
 					clearSubmitConfirmTimer(currentActive);
 					discardPendingOutputAnalysis(currentActive);
@@ -1990,6 +2161,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
+			programmaticDeliveryReceipt: null,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -2060,6 +2232,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			stopWorkspaceTrustTimers(entry.active);
 			clearStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
+			settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
 			discardPendingOutputAnalysis(entry.active);
@@ -2130,6 +2303,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					stopWorkspaceTrustTimers(currentActive);
 					clearStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
+					settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "session_ended_before_delivery");
 					clearTaskChatInputDeliveryTimer(currentActive);
 					clearSubmitConfirmTimer(currentActive);
 					discardPendingOutputAnalysis(currentActive);
@@ -2211,6 +2385,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
+			programmaticDeliveryReceipt: null,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -2554,6 +2729,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		stopWorkspaceTrustTimers(entry.active);
 		clearStartupReadinessTimer(entry.active);
 		clearOutputReactionTimer(entry.active);
+		settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
 		clearTaskChatInputDeliveryTimer(entry.active);
 		clearSubmitConfirmTimer(entry.active);
 		discardPendingOutputAnalysis(entry.active);
@@ -2581,6 +2757,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		stopWorkspaceTrustTimers(active);
 		clearStartupReadinessTimer(active);
 		clearOutputReactionTimer(active);
+		settleActiveProgrammaticDelivery(active, "delivery_failed", "session_ended_before_delivery");
 		clearTaskChatInputDeliveryTimer(active);
 		clearSubmitConfirmTimer(active);
 		discardPendingOutputAnalysis(active);
@@ -2679,6 +2856,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			stopWorkspaceTrustTimers(entry.active);
 			clearStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
+			settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
 			discardPendingOutputAnalysis(entry.active);

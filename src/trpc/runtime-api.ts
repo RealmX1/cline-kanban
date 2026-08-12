@@ -62,6 +62,10 @@ import {
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
+import {
+	getTaskMessageInjectionLedgerPath,
+	recordTaskMessageTerminalDeliveryOutcome,
+} from "../core/task-message-injection-ledger";
 import { resolveTaskTitle } from "../core/task-title.js";
 import {
 	recordTaskSessionStartDiagnostic,
@@ -74,7 +78,7 @@ import {
 	readAgentRaisedPendingUserDecisions,
 } from "../state/agent-raised-pending-user-decision-store";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
-import { loadWorkspaceBoardById } from "../state/workspace-state";
+import { getWorkspaceDirectoryPath, loadWorkspaceBoardById } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { getTerminalAgentModelSelectionOptions } from "../terminal/terminal-agent-model-selection";
@@ -1240,13 +1244,41 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							// deferWhileUserTurn=（带 source 即后台自动注入）：后台注入遇会话处于非 agent 回合（agent 正等用户
 							// 回答 AskUserQuestion / 计划评审 / 权限确认）时让位挂起、待 agent 回合恢复再投递，绝不把正等用户的
 							// 会话经 UserPromptSubmit 翻回 agent 回合。用户发起的发送（人类聊天 / commit·openPR，无 source）不受影响。
+							// 诚实回执登记：带 idempotencyKey 就意味着这条投递被记在账本里、有人在等它的真实结论。
+							// runtime 在投递落定（或失败）后就地改写同一条记录——CLI 早已退出，这是唯一能把
+							// 「pending → 终态」补上的地方。写账本失败不阻断会话：启动清扫会兜底判失败。
+							const injectionIdempotencyKey = body.idempotencyKey ?? null;
+							const injectionLedgerPath = injectionIdempotencyKey
+								? getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceScope.workspaceId))
+								: null;
 							const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
 								deferWhileUserTurn: body.source != null,
+								idempotencyKey: injectionIdempotencyKey,
+								...(injectionLedgerPath && injectionIdempotencyKey
+									? {
+											onDeliveryOutcome: (outcome) => {
+												void recordTaskMessageTerminalDeliveryOutcome({
+													ledgerPath: injectionLedgerPath,
+													taskId: body.taskId,
+													idempotencyKey: injectionIdempotencyKey,
+													status: outcome.status,
+													...(outcome.reason ? { failureReason: outcome.reason } : {}),
+													nowIso: new Date().toISOString(),
+												}).catch(() => {
+													// 账本写失败不影响会话本身；仍 pending 的记录由 runtime 启动清扫兜底判失败。
+												});
+											},
+										}
+									: {}),
 							});
 							if (terminalSummary) {
 								return {
 									ok: true,
 									summary: terminalSummary,
+									terminalDelivery: {
+										status: "accepted_pending_submit_confirmation" as const,
+										reason: null,
+									},
 									message: buildTerminalTaskChatDeliveryMessage({
 										taskId: body.taskId,
 										text: body.text,
@@ -1260,6 +1292,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								ok: false,
 								summary: null,
 								error: "Task chat session is not running.",
+								terminalDelivery: {
+									status: "delivery_failed" as const,
+									reason: "no_active_terminal_session" as const,
+								},
 							};
 						}
 					} else {
@@ -1284,6 +1320,18 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					ok: true,
 					summary,
 					message: latestMessage,
+					// Cline SDK 会话是进程内摄入：调到这里就说明消息已经进了会话，摄入本身是同步确认的，
+					// 不存在 PTY 那种「粘进框但 CR 被吞」的失败形态，故直接给确认终态、无 pending 阶段。
+					// 不报 queued_behind：那个区分描述的是「写进 TUI 输入框时 agent 正占着回合」，
+					// 是终端通道特有的现象；SDK 侧队列由 runtime 自己持有，摄入即确认。
+					...(body.idempotencyKey
+						? {
+								terminalDelivery: {
+									status: "delivered_and_submit_confirmed" as const,
+									reason: null,
+								},
+							}
+						: {}),
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -1291,6 +1339,24 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					ok: false,
 					summary: null,
 					error: message,
+				};
+			}
+		},
+		// 取消一条在途程序化投递。账本的终态改写不在这里做——取消成功时 session-manager 会经
+		// 投递登记的 observer 触发同一条回写路径（delivery_failed{cancelled_before_delivery}），
+		// 与「确认落定」共用那一把写一次即定的锁，取消与确认的竞争因此是确定性的。
+		cancelTaskChatDelivery: async (workspaceScope, input) => {
+			try {
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				return {
+					ok: true,
+					cancelResult: terminalManager.cancelTaskChatInputDelivery(input.taskId, input.idempotencyKey),
+				};
+			} catch (error) {
+				return {
+					ok: false,
+					cancelResult: "no_pending_delivery" as const,
+					error: error instanceof Error ? error.message : String(error),
 				};
 			}
 		},

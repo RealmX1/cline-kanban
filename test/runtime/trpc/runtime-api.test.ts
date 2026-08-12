@@ -134,6 +134,10 @@ vi.mock("../../../src/server/browser.js", () => ({
 
 vi.mock("../../../src/state/workspace-state.js", () => ({
 	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
+	// 程序化投递要按 workspaceId 解析注入账本路径。这个 mock 是刻意部分的，
+	// 漏一个符号不会报「未 mock」而是让整条 sendTaskChatMessage 被 catch 成 ok:false——
+	// 静默降级，所以新增运行时依赖时必须同步补齐这里。
+	getWorkspaceDirectoryPath: (workspaceId: string) => `/tmp/kanban-workspaces/${workspaceId}`,
 }));
 
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
@@ -2039,9 +2043,13 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
 		// RVF followup 终端回退：经就绪门控投递，以原始文本调用（bracketed-paste 编码与就绪判定下沉到
 		// TerminalSessionManager.submitTaskChatInputWhenReady，由 session-manager 单测覆盖）。带 source（后台自动
-		// 注入）→ deferWhileUserTurn=true：遇非 agent 回合时让位挂起、不打断正等用户的会话（Fix B）。
+		// 注入）→ deferWhileUserTurn=true：遇 agent 正等用户拍板的模态时让位挂起、不打断（Fix B）。
+		// 带 idempotencyKey → 同时登记诚实回执：runtime 在投递落定后经 onDeliveryOutcome 回写注入账本，
+		// 这是「CLI 已退出不再意味着状态不会变」的接线点。
 		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue", {
 			deferWhileUserTurn: true,
+			idempotencyKey: "rvf-run-1",
+			onDeliveryOutcome: expect.any(Function),
 		});
 		expect(response.summary).toEqual(summary);
 		expect(response.message).toEqual({

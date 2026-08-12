@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
 import { loadRuntimeConfig } from "../config/runtime-config";
@@ -44,7 +43,20 @@ import {
 	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
 } from "../core/task-board-mutations";
-import { lockedFileSystem } from "../fs/locked-file-system";
+import type {
+	TaskMessageInjectionRecord,
+	TaskMessageTerminalDeliveryFailureReason,
+	TaskMessageTerminalDeliveryStatus,
+} from "../core/task-message-injection-ledger";
+import {
+	createPendingTaskMessageInjectionRecord,
+	findTaskMessageInjectionRecord,
+	getTaskMessageInjectionLedgerPath,
+	isTaskMessageTerminalDeliveryStatusSettled,
+	readTaskMessageInjectionLedger,
+	recordTaskMessageTerminalDeliveryOutcome,
+	withTaskMessageInjectionLedgerLock,
+} from "../core/task-message-injection-ledger";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
@@ -1322,66 +1334,21 @@ async function deleteTaskCommand(input: {
 	};
 }
 
-const TASK_MESSAGE_INJECTIONS_FILENAME = "task-message-injections.json";
-const TASK_MESSAGE_PENDING_STATUS = "pending";
-
-interface TaskMessageInjectionRecord {
-	task_id: string;
-	attempt_id?: string;
-	source: string;
-	idempotency_key: string;
-	prompt_sha256: string;
-	message_id: string;
-	turn_id?: string;
-	checkpoint_id?: string;
-	status?: string;
-	created_at: string;
-}
+// 注入账本的读写全部下沉到 src/core/task-message-injection-ledger.ts —— CLI 与 runtime 必须共用
+// 同一份真相与同一把跨进程锁，否则 runtime 就无法在 CLI 退出后把 pending 改写成终态。
 
 interface TaskMessageCommandResult extends JsonRecord {
 	ok: true;
 	task_id: string;
-	attempt_id?: string;
+	idempotency_key: string;
 	message_id: string;
+	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
+	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
+	terminal_delivery_status_updated_at: string;
+	attempt_id?: string;
 	turn_id?: string;
 	checkpoint_id?: string;
 	status?: string;
-}
-
-function isTaskMessageInjectionRecord(value: unknown): value is TaskMessageInjectionRecord {
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		return false;
-	}
-	const record = value as Record<string, unknown>;
-	return (
-		typeof record.task_id === "string" &&
-		typeof record.source === "string" &&
-		typeof record.idempotency_key === "string" &&
-		typeof record.prompt_sha256 === "string" &&
-		typeof record.message_id === "string" &&
-		typeof record.created_at === "string"
-	);
-}
-
-async function readTaskMessageInjectionRecords(path: string): Promise<TaskMessageInjectionRecord[]> {
-	let raw: string;
-	try {
-		raw = await readFile(path, "utf8");
-	} catch (error) {
-		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
-			return [];
-		}
-		throw error;
-	}
-	const parsed = JSON.parse(raw) as unknown;
-	if (!Array.isArray(parsed) || !parsed.every(isTaskMessageInjectionRecord)) {
-		throw new Error(`Invalid ${TASK_MESSAGE_INJECTIONS_FILENAME}. Fix or remove the file before retrying.`);
-	}
-	return parsed;
-}
-
-async function writeTaskMessageInjectionRecords(path: string, records: TaskMessageInjectionRecord[]): Promise<void> {
-	await lockedFileSystem.writeJsonFileAtomic(path, records, { lock: null });
 }
 
 function hashPrompt(prompt: string): string {
@@ -1392,56 +1359,18 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 	return {
 		ok: true,
 		task_id: record.task_id,
-		...(record.attempt_id ? { attempt_id: record.attempt_id } : {}),
+		idempotency_key: record.idempotency_key,
 		message_id: record.message_id,
+		terminal_delivery_status: record.terminal_delivery_status,
+		...(record.terminal_delivery_failure_reason
+			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
+			: {}),
+		terminal_delivery_status_updated_at: record.terminal_delivery_status_updated_at,
+		...(record.attempt_id ? { attempt_id: record.attempt_id } : {}),
 		...(record.turn_id ? { turn_id: record.turn_id } : {}),
 		...(record.checkpoint_id ? { checkpoint_id: record.checkpoint_id } : {}),
 		...(record.status ? { status: record.status } : {}),
 	};
-}
-
-function createPendingTaskMessageRecord(input: {
-	taskId: string;
-	attemptId?: string;
-	source: string;
-	idempotencyKey: string;
-	promptSha256: string;
-}): TaskMessageInjectionRecord {
-	return {
-		task_id: input.taskId,
-		...(input.attemptId ? { attempt_id: input.attemptId } : {}),
-		source: input.source,
-		idempotency_key: input.idempotencyKey,
-		prompt_sha256: input.promptSha256,
-		message_id: `${input.taskId}-${input.idempotencyKey}`,
-		status: TASK_MESSAGE_PENDING_STATUS,
-		created_at: new Date().toISOString(),
-	};
-}
-
-function replaceTaskMessageInjectionRecord(
-	records: TaskMessageInjectionRecord[],
-	nextRecord: TaskMessageInjectionRecord,
-): TaskMessageInjectionRecord[] {
-	return records.map((record) =>
-		record.task_id === nextRecord.task_id && record.idempotency_key === nextRecord.idempotency_key
-			? nextRecord
-			: record,
-	);
-}
-
-async function removeTaskMessageInjectionRecord(
-	path: string,
-	records: TaskMessageInjectionRecord[],
-	recordToRemove: TaskMessageInjectionRecord,
-): Promise<void> {
-	await writeTaskMessageInjectionRecords(
-		path,
-		records.filter(
-			(record) =>
-				record.task_id !== recordToRemove.task_id || record.idempotency_key !== recordToRemove.idempotency_key,
-		),
-	);
 }
 
 function resolvePromptInput(input: { prompt?: string; promptFile?: string }): Promise<string> {
@@ -1468,6 +1397,8 @@ async function sendTaskMessageCommand(input: {
 	source: string;
 	idempotencyKey: string;
 	attemptId?: string;
+	waitForTerminalStatus?: boolean;
+	waitTimeoutMs?: number;
 }): Promise<TaskMessageCommandResult> {
 	const taskId = input.taskId.trim();
 	if (!taskId) {
@@ -1500,76 +1431,245 @@ async function sendTaskMessageCommand(input: {
 		throw new Error(`Task "${taskId}" was not found in workspace ${workspace.repoPath}.`);
 	}
 
-	const recordPath = join(workspace.statePath, TASK_MESSAGE_INJECTIONS_FILENAME);
-	return await lockedFileSystem.withLock({ path: recordPath, type: "file" }, async () => {
-		const records = await readTaskMessageInjectionRecords(recordPath);
-		const existing = records.find((record) => record.task_id === taskId && record.idempotency_key === idempotencyKey);
+	const ledgerPath = getTaskMessageInjectionLedgerPath(workspace.statePath);
+
+	// 第一段（锁内）：幂等判定 + 落一条 pending。
+	// 与旧实现的差别：上一条仍 pending 时**不再报错**。pending 现在是合法的、会自行收敛的状态，
+	// 报错反而逼得调用方要么盲等要么换 key 重投——后者恰恰会造成重复投递。
+	const preflight = await withTaskMessageInjectionLedgerLock<{
+		kind: "existing" | "created";
+		record: TaskMessageInjectionRecord;
+	}>(ledgerPath, async (records) => {
+		const existing = findTaskMessageInjectionRecord(records, taskId, idempotencyKey);
 		if (existing) {
 			if (existing.prompt_sha256 !== promptSha256) {
 				throw new Error(
 					`Idempotency conflict for task "${taskId}" and key "${idempotencyKey}": prompt hash differs.`,
 				);
 			}
-			if (existing.status === TASK_MESSAGE_PENDING_STATUS) {
-				throw new Error(
-					`Previous task message delivery for task "${taskId}" and key "${idempotencyKey}" is incomplete; not retrying automatically.`,
-				);
-			}
-			return toTaskMessageCommandResult(existing);
+			return { result: { kind: "existing", record: existing } };
 		}
-
-		// A3 读迁移：旧 `state==="running"`（消息注入排队判据）→ facet `turnOwner==="agent"`。
-		const previousSession = state.sessions[taskId] ?? null;
-		const previousIsAgentTurn = previousSession ? resolveSessionFacets(previousSession).turnOwner === "agent" : false;
-		const pendingRecord = createPendingTaskMessageRecord({
+		const pendingRecord = createPendingTaskMessageInjectionRecord({
 			taskId,
-			attemptId,
+			...(attemptId ? { attemptId } : {}),
 			source,
 			idempotencyKey,
 			promptSha256,
+			nowIso: new Date().toISOString(),
 		});
-		const recordsWithPending = [...records, pendingRecord];
-		await writeTaskMessageInjectionRecords(recordPath, recordsWithPending);
-
-		const chatResponse = await runtimeClient.runtime.sendTaskChatMessage
-			.mutate({
-				taskId,
-				text: prompt,
-				mode: "act",
-				source,
-				idempotencyKey,
-				promptSha256,
-			})
-			.catch(async (error: unknown) => {
-				await removeTaskMessageInjectionRecord(recordPath, recordsWithPending, pendingRecord);
-				throw error;
-			});
-		const messageId = chatResponse.message?.id ?? null;
-		const summary = chatResponse.summary ?? null;
-		if (!chatResponse.ok || !messageId) {
-			await removeTaskMessageInjectionRecord(recordPath, recordsWithPending, pendingRecord);
-			throw new Error(chatResponse.error ?? "task has no active Cline chat session");
-		}
-		if (!summary) {
-			await removeTaskMessageInjectionRecord(recordPath, recordsWithPending, pendingRecord);
-			throw new Error("task has no active agent session");
-		}
-
-		const checkpoint = summary.latestTurnCheckpoint ?? null;
-		const record: TaskMessageInjectionRecord = {
-			task_id: taskId,
-			...(attemptId ? { attempt_id: attemptId } : {}),
-			source,
-			idempotency_key: idempotencyKey,
-			prompt_sha256: promptSha256,
-			message_id: messageId,
-			...(checkpoint ? { turn_id: String(checkpoint.turn), checkpoint_id: checkpoint.ref } : {}),
-			status: previousIsAgentTurn ? "queued" : "started",
-			created_at: new Date().toISOString(),
-		};
-		await writeTaskMessageInjectionRecords(recordPath, replaceTaskMessageInjectionRecord(recordsWithPending, record));
-		return toTaskMessageCommandResult(record);
+		return { records: [...records, pendingRecord], result: { kind: "created", record: pendingRecord } };
 	});
+
+	// 同 key 已存在：直接返回当前记录，不重新投递（idempotency 的定义）。想重投请换新 key。
+	if (preflight.kind === "existing") {
+		return await resolveTaskMessageResult({
+			ledgerPath,
+			taskId,
+			idempotencyKey,
+			fallbackRecord: preflight.record,
+			waitForTerminalStatus: input.waitForTerminalStatus ?? false,
+			waitTimeoutMs: input.waitTimeoutMs,
+		});
+	}
+
+	// 第二段（锁外）：真正投递。锁外是必须的——投递要等 runtime 往返，占着账本锁会把 runtime
+	// 自己的终态回写堵死（runtime settle 时要拿同一把锁），直接死锁。
+	const settleFailure = async (reason: TaskMessageTerminalDeliveryFailureReason) => {
+		await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath,
+			taskId,
+			idempotencyKey,
+			status: "delivery_failed",
+			failureReason: reason,
+			nowIso: new Date().toISOString(),
+		});
+	};
+
+	const chatResponse = await runtimeClient.runtime.sendTaskChatMessage
+		.mutate({
+			taskId,
+			text: prompt,
+			mode: "act",
+			source,
+			idempotencyKey,
+			promptSha256,
+		})
+		.catch(async (error: unknown) => {
+			// 调用 runtime 本身失败（进程不可达 / 内部错）。此时投递必定没有发生，且终端会话都活在
+			// runtime 进程里——runtime 够不到就等于没有活着的终端会话，故 no_active_terminal_session
+			// 是准确的（不是权宜之计）。记录保留而非删除：RVF 因此能区分「失败了」与「从没请求过」。
+			await settleFailure("no_active_terminal_session");
+			throw error;
+		});
+
+	const messageId = chatResponse.message?.id ?? null;
+	const summary = chatResponse.summary ?? null;
+	if (!chatResponse.ok || !messageId || !summary) {
+		await settleFailure(chatResponse.terminalDelivery?.reason ?? "no_active_terminal_session");
+		const failureResult = await readTaskMessageRecordOrThrow(ledgerPath, taskId, idempotencyKey);
+		return toTaskMessageCommandResult(failureResult);
+	}
+
+	// runtime 给了即时终态（Cline SDK 通道摄入即确认）就当场落定；给的是 pending 则原样保留，
+	// 由 runtime 在确认链跑完后就地改写——这正是「CLI 已退出不再意味着状态不会变」的那一步。
+	const checkpoint = summary.latestTurnCheckpoint ?? null;
+	const immediateStatus = chatResponse.terminalDelivery?.status ?? "accepted_pending_submit_confirmation";
+	if (isTaskMessageTerminalDeliveryStatusSettled(immediateStatus)) {
+		await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath,
+			taskId,
+			idempotencyKey,
+			status: immediateStatus,
+			...(chatResponse.terminalDelivery?.reason ? { failureReason: chatResponse.terminalDelivery.reason } : {}),
+			...(checkpoint ? { turnId: String(checkpoint.turn), checkpointId: checkpoint.ref } : {}),
+			nowIso: new Date().toISOString(),
+		});
+	} else if (checkpoint) {
+		// 仍 pending，但 turn/checkpoint 已知：先补上，别等终态才写（RVF 可能马上就要用）。
+		await withTaskMessageInjectionLedgerLock<null>(ledgerPath, async (records) => {
+			const current = findTaskMessageInjectionRecord(records, taskId, idempotencyKey);
+			if (!current || isTaskMessageTerminalDeliveryStatusSettled(current.terminal_delivery_status)) {
+				return { result: null };
+			}
+			const withCheckpoint: TaskMessageInjectionRecord = {
+				...current,
+				turn_id: String(checkpoint.turn),
+				checkpoint_id: checkpoint.ref,
+			};
+			return {
+				records: records.map((record) => (record === current ? withCheckpoint : record)),
+				result: null,
+			};
+		});
+	}
+
+	return await resolveTaskMessageResult({
+		ledgerPath,
+		taskId,
+		idempotencyKey,
+		fallbackRecord: null,
+		waitForTerminalStatus: input.waitForTerminalStatus ?? false,
+		waitTimeoutMs: input.waitTimeoutMs,
+	});
+}
+
+const TASK_MESSAGE_TERMINAL_STATUS_WAIT_DEFAULT_TIMEOUT_MS = 30_000;
+const TASK_MESSAGE_TERMINAL_STATUS_POLL_INTERVAL_MS = 500;
+
+async function readTaskMessageRecordOrThrow(
+	ledgerPath: string,
+	taskId: string,
+	idempotencyKey: string,
+): Promise<TaskMessageInjectionRecord> {
+	const records = await readTaskMessageInjectionLedger(ledgerPath);
+	const record = findTaskMessageInjectionRecord(records, taskId, idempotencyKey);
+	if (!record) {
+		throw new Error("unknown_idempotency_key");
+	}
+	return record;
+}
+
+// --wait-for-terminal-status：阻塞到终态或超时。**超时不代表失败**——返回的仍是当时的真实状态
+// （可能仍是 pending），调用方继续用 message-status 轮询即可。轮询账本文件而不是订阅 runtime：
+// 账本是唯一真相，且这样即便 runtime 中途重启，读到的也是启动清扫写下的诚实结论。
+async function resolveTaskMessageResult(input: {
+	ledgerPath: string;
+	taskId: string;
+	idempotencyKey: string;
+	fallbackRecord: TaskMessageInjectionRecord | null;
+	waitForTerminalStatus: boolean;
+	waitTimeoutMs?: number;
+}): Promise<TaskMessageCommandResult> {
+	if (!input.waitForTerminalStatus) {
+		const record =
+			input.fallbackRecord ??
+			(await readTaskMessageRecordOrThrow(input.ledgerPath, input.taskId, input.idempotencyKey));
+		return toTaskMessageCommandResult(record);
+	}
+	const timeoutMs = input.waitTimeoutMs ?? TASK_MESSAGE_TERMINAL_STATUS_WAIT_DEFAULT_TIMEOUT_MS;
+	const deadlineAt = Date.now() + timeoutMs;
+	let latest = await readTaskMessageRecordOrThrow(input.ledgerPath, input.taskId, input.idempotencyKey);
+	while (!isTaskMessageTerminalDeliveryStatusSettled(latest.terminal_delivery_status) && Date.now() < deadlineAt) {
+		await new Promise((resolve) => setTimeout(resolve, TASK_MESSAGE_TERMINAL_STATUS_POLL_INTERVAL_MS));
+		latest = await readTaskMessageRecordOrThrow(input.ledgerPath, input.taskId, input.idempotencyKey);
+	}
+	return toTaskMessageCommandResult(latest);
+}
+
+async function readTaskMessageStatusCommand(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	idempotencyKey: string;
+}): Promise<TaskMessageCommandResult> {
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, { autoCreateIfMissing: false });
+	const record = await readTaskMessageRecordOrThrow(
+		getTaskMessageInjectionLedgerPath(workspace.statePath),
+		input.taskId.trim(),
+		input.idempotencyKey.trim(),
+	);
+	return toTaskMessageCommandResult(record);
+}
+
+interface TaskMessageCancelCommandResult extends JsonRecord {
+	ok: true;
+	task_id: string;
+	idempotency_key: string;
+	cancel_result: "cancelled_before_delivery" | "already_delivered";
+	terminal_delivery_status: TaskMessageTerminalDeliveryStatus;
+	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
+}
+
+// 取消是幂等的：对同一 key 重复调用返回相同结果、无副作用。
+// 判据只看账本终态与 runtime 的在途登记，不新建取消状态机。
+async function cancelTaskMessageCommand(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	idempotencyKey: string;
+}): Promise<TaskMessageCancelCommandResult> {
+	const taskId = input.taskId.trim();
+	const idempotencyKey = input.idempotencyKey.trim();
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, { autoCreateIfMissing: false });
+	const ledgerPath = getTaskMessageInjectionLedgerPath(workspace.statePath);
+	// 先确认这条记录存在（不存在 → unknown_idempotency_key，退出码 1）。
+	const before = await readTaskMessageRecordOrThrow(ledgerPath, taskId, idempotencyKey);
+
+	// 已经是终态：取消无事可做，如实回报当时的真实结果。
+	if (isTaskMessageTerminalDeliveryStatusSettled(before.terminal_delivery_status)) {
+		return buildCancelResult(before);
+	}
+
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	await runtimeClient.runtime.cancelTaskChatDelivery.mutate({ taskId, idempotencyKey });
+	// 真相以账本为准：取消成功时 runtime 已经经同一把锁把记录写成
+	// delivery_failed{cancelled_before_delivery}；取消晚到则记录已是（或即将是）某个 delivered 终态。
+	const after = await readTaskMessageRecordOrThrow(ledgerPath, taskId, idempotencyKey);
+	return buildCancelResult(after);
+}
+
+function buildCancelResult(record: TaskMessageInjectionRecord): TaskMessageCancelCommandResult {
+	const cancelledByUs =
+		record.terminal_delivery_status === "delivery_failed" &&
+		record.terminal_delivery_failure_reason === "cancelled_before_delivery";
+	return {
+		ok: true,
+		task_id: record.task_id,
+		idempotency_key: record.idempotency_key,
+		cancel_result: cancelledByUs ? "cancelled_before_delivery" : "already_delivered",
+		terminal_delivery_status: record.terminal_delivery_status,
+		...(record.terminal_delivery_failure_reason
+			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
+			: {}),
+	};
+}
+
+function parsePositiveIntegerOption(value: string, flagName: string): number {
+	const parsed = Number(value.trim());
+	if (!Number.isInteger(parsed) || parsed <= 0) {
+		throw new Error(`Invalid value for ${flagName}: "${value}". Use a positive integer.`);
+	}
+	return parsed;
 }
 
 function parseOptionalBooleanOption(value: unknown, flagName: string): boolean | undefined {
@@ -1872,6 +1972,11 @@ export function registerTaskCommand(program: Command): void {
 		.requiredOption("--source <source>", "Message source label.")
 		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key.")
 		.option("--attempt-id <id>", "Optional task attempt/session ID.")
+		.option(
+			"--wait-for-terminal-status",
+			"Block until the delivery reaches a terminal status (or --wait-timeout-ms elapses). Timing out is not a failure: the reported status is still the true current one.",
+		)
+		.option("--wait-timeout-ms <ms>", "Timeout for --wait-for-terminal-status. Defaults to 30000.")
 		.action(
 			async (options: {
 				projectPath: string;
@@ -1881,6 +1986,8 @@ export function registerTaskCommand(program: Command): void {
 				source: string;
 				idempotencyKey: string;
 				attemptId?: string;
+				waitForTerminalStatus?: boolean;
+				waitTimeoutMs?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -1893,10 +2000,50 @@ export function registerTaskCommand(program: Command): void {
 							source: options.source,
 							idempotencyKey: options.idempotencyKey,
 							attemptId: options.attemptId,
+							waitForTerminalStatus: options.waitForTerminalStatus ?? false,
+							...(options.waitTimeoutMs
+								? { waitTimeoutMs: parsePositiveIntegerOption(options.waitTimeoutMs, "--wait-timeout-ms") }
+								: {}),
 						}),
 				);
 			},
 		);
+
+	task
+		.command("message-status")
+		.description("Read the honest delivery status of a previously injected task message.")
+		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key of the injected message.")
+		.action(async (options: { projectPath: string; taskId: string; idempotencyKey: string }) => {
+			await runTaskCommand(
+				async () =>
+					await readTaskMessageStatusCommand({
+						cwd: process.cwd(),
+						projectPath: options.projectPath,
+						taskId: options.taskId,
+						idempotencyKey: options.idempotencyKey,
+					}),
+			);
+		});
+
+	task
+		.command("message-cancel")
+		.description("Cancel an in-flight task message delivery that has not reached the terminal yet.")
+		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key of the injected message.")
+		.action(async (options: { projectPath: string; taskId: string; idempotencyKey: string }) => {
+			await runTaskCommand(
+				async () =>
+					await cancelTaskMessageCommand({
+						cwd: process.cwd(),
+						projectPath: options.projectPath,
+						taskId: options.taskId,
+						idempotencyKey: options.idempotencyKey,
+					}),
+			);
+		});
 
 	task
 		.command("link")

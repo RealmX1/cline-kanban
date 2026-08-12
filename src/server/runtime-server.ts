@@ -58,6 +58,7 @@ import {
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
+import { sweepPendingTaskMessageInjectionsForAllWorkspaces } from "./pending-task-message-injection-startup-sweep";
 import type { RuntimeStateHub } from "./runtime-state-hub";
 import { createTransportAwareAgentSessionReclamationExecutor } from "./transport-aware-agent-session-reclamation";
 import type { WorkspaceRegistry } from "./workspace-registry";
@@ -128,6 +129,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	} catch {
 		throw new Error("Could not find web UI assets. Run `npm run build` to generate and package the web UI.");
 	}
+
+	// 启动清扫：上一次 runtime 生命周期里没落定的程序化投递，其收敛完全依赖已经消失的内存态，
+	// 不清扫就会永远停在 pending。不 await 阻塞启动——清扫是纠偏动作，不是服务可用性的前置条件。
+	void sweepPendingTaskMessageInjectionsForAllWorkspaces();
 
 	const resolveWorkspaceScopeFromRequest = async (
 		request: IncomingMessage,
