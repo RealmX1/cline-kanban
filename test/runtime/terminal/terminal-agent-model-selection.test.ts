@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	isClaudeCodeCuratedTerminalAgentModelSelectionOptionId,
+	isClaudeCodeLatestTrackingAliasModelSelectionOptionId,
+	isClaudeCodePhaseSwitchingCompositeModelSelectionOptionId,
 	parseClaudeHelpModelAliases,
 	parseCodexModelCatalog,
+	resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity,
 } from "../../../src/terminal/terminal-agent-model-selection";
 
 // A representative `claude --help` `--model` line: only 3 example aliases, no haiku, no versions.
@@ -86,5 +90,60 @@ describe("terminal agent model selection", () => {
 
 		const claudeOptions = parseClaudeHelpModelAliases(CLAUDE_HELP_STDOUT);
 		expect(claudeOptions.every((option) => option.modelSelectionGroup !== undefined)).toBe(true);
+	});
+});
+
+// 恢复既有会话时要把「转录里观测到的裸 model id」翻译成能交给 CLI 的启动 id。
+// 转录物理上从不记录 `[1m]` 后缀，直接用裸 id 启动会把 1M 会话静默降到 200k。
+describe("resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity", () => {
+	it("upgrades an observed bare model id to its 1M variant so resuming never silently drops to 200k", () => {
+		expect(resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity("claude-opus-5")).toBe(
+			"claude-opus-5[1m]",
+		);
+		expect(resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity("claude-fable-5")).toBe(
+			"claude-fable-5[1m]",
+		);
+	});
+
+	it("keeps the bare id when the curated table has no 1M variant for it", () => {
+		// claude-haiku-4-5 / claude-sonnet-4-6 在策展表里都只有 200k 一档。
+		expect(resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity("claude-haiku-4-5")).toBe(
+			"claude-haiku-4-5",
+		);
+		expect(resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity("claude-sonnet-4-6")).toBe(
+			"claude-sonnet-4-6",
+		);
+	});
+
+	it("passes through ids the curated table has never heard of so a new upstream model keeps its generation", () => {
+		// 策展表漏补新版本时，保住「代次正确」优先于保住 1M——总好过继续跑在完全不同的模型上。
+		expect(resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity("claude-opus-9")).toBe("claude-opus-9");
+	});
+
+	it("returns null for blank input instead of emitting an empty --model value", () => {
+		expect(resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity("   ")).toBeNull();
+	});
+});
+
+// 恢复流程用这三个谓词决定「能不能回写卡片」「要不要连启动都别顶替」。
+describe("claude model selection option tier predicates", () => {
+	it("recognises curated ids from both tiers and rejects unknown ones", () => {
+		expect(isClaudeCodeCuratedTerminalAgentModelSelectionOptionId("opus")).toBe(true);
+		expect(isClaudeCodeCuratedTerminalAgentModelSelectionOptionId("claude-opus-5[1m]")).toBe(true);
+		expect(isClaudeCodeCuratedTerminalAgentModelSelectionOptionId("claude-opus-9")).toBe(false);
+	});
+
+	it("separates latest-tracking aliases from pinned versions so resuming never demotes a follow-latest card", () => {
+		expect(isClaudeCodeLatestTrackingAliasModelSelectionOptionId("opus")).toBe(true);
+		expect(isClaudeCodeLatestTrackingAliasModelSelectionOptionId("fable[1m]")).toBe(true);
+		expect(isClaudeCodeLatestTrackingAliasModelSelectionOptionId("opusplan")).toBe(true);
+		expect(isClaudeCodeLatestTrackingAliasModelSelectionOptionId("claude-opus-5")).toBe(false);
+	});
+
+	it("flags opusplan as phase-switching so a transcript model can never replace the strategy", () => {
+		// opusplan 是「计划期 Opus、其余 Sonnet」的策略，不是模型；转录只记录当轮实际模型。
+		expect(isClaudeCodePhaseSwitchingCompositeModelSelectionOptionId("opusplan")).toBe(true);
+		expect(isClaudeCodePhaseSwitchingCompositeModelSelectionOptionId("opus")).toBe(false);
+		expect(isClaudeCodePhaseSwitchingCompositeModelSelectionOptionId("claude-sonnet-5[1m]")).toBe(false);
 	});
 });

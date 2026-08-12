@@ -111,6 +111,68 @@ const CLAUDE_CODE_PINNED_VERSION_OPTIONS: RuntimeTerminalAgentModelSelectionOpti
 //                            无法证实解析结果，故本轮不列；上游恢复后按下方方式复核再补。
 // 复核方式：`claude --model <id> -p 1 --output-format json --tools ""`，读 modelUsage 的键与 contextWindow。
 
+const CLAUDE_CODE_CURATED_MODEL_IDS: ReadonlySet<string> = new Set(
+	[...CLAUDE_CODE_LATEST_TRACKING_ALIAS_OPTIONS, ...CLAUDE_CODE_PINNED_VERSION_OPTIONS].map(
+		(option) => option.modelId,
+	),
+);
+const CLAUDE_CODE_PINNED_VERSION_MODEL_IDS: ReadonlySet<string> = new Set(
+	CLAUDE_CODE_PINNED_VERSION_OPTIONS.map((option) => option.modelId),
+);
+const CLAUDE_CODE_LATEST_TRACKING_ALIAS_MODEL_IDS: ReadonlySet<string> = new Set(
+	CLAUDE_CODE_LATEST_TRACKING_ALIAS_OPTIONS.map((option) => option.modelId),
+);
+// 别名档里唯一「按阶段在多个模型间切换」的条目：opusplan = 计划期 Opus、其余阶段 Sonnet。
+// 它是一条**策略**而不是一个模型，转录里只会留下某一阶段跑的具体 model id，因此「从转录读回的模型」
+// 根本无法表达它——把它换成具体 id 就等于永久销毁用户选的策略。单独成集是为了让这条语义在调用点可判定。
+const CLAUDE_CODE_PHASE_SWITCHING_COMPOSITE_MODEL_IDS: ReadonlySet<string> = new Set(["opusplan"]);
+
+// 这个 model id 是不是策展表里的条目 ⇒ 模型选择器一定认得、能显示出选中态。
+// 纯同步判断，刻意**不**走 getTerminalAgentModelSelectionOptions：那个要 spawn `claude --help`，
+// 不该压在会话启动路径上；而策展表本来就是那个响应里恒定在前的那一段。
+export function isClaudeCodeCuratedTerminalAgentModelSelectionOptionId(modelId: string): boolean {
+	return CLAUDE_CODE_CURATED_MODEL_IDS.has(modelId.trim());
+}
+
+// 这个 model id 是不是「跟随最新版本」的别名档条目（opus / sonnet / fable / haiku / opusplan …）。
+// 别名表达的是**策略**（永远跟最新那一代），钉版本 id 表达的是**具体版本**；把前者改写成后者，用户下次
+// 上游发新模型时就再也跟不上了，且卡片上看不出发生过降级。恢复流程据此避免回写这类卡片。
+export function isClaudeCodeLatestTrackingAliasModelSelectionOptionId(modelId: string): boolean {
+	return CLAUDE_CODE_LATEST_TRACKING_ALIAS_MODEL_IDS.has(modelId.trim());
+}
+
+// 这个 model id 是不是「按阶段切换模型」的复合策略（当前只有 opusplan）。
+// 这类选择连**本次启动**都不能用转录读回的具体模型顶替：一旦顶替，恢复出来的会话就被钉死在某一阶段的
+// 模型上，此后进入计划态也不会再切回去。
+export function isClaudeCodePhaseSwitchingCompositeModelSelectionOptionId(modelId: string): boolean {
+	return CLAUDE_CODE_PHASE_SWITCHING_COMPOSITE_MODEL_IDS.has(modelId.trim());
+}
+
+// 把「转录里观测到的裸 model id」翻译成「能交给 CLI 的启动 id」。
+//
+// 转录物理上**从不记录 `[1m]` 后缀**（assistant 记录只有 `message.model: "claude-opus-5"`），所以拿裸 id
+// 原样去启动，等于把一段本来跑在 1M 上的会话静默降到 200k——那正是当初要用 `--model default` 压过
+// `--continue` 模型重建的原因。故这里在策展表里存在 1M 变体时一律取 1M 变体。
+//
+// 代价（已知且是刻意选的一侧）：用户若在 TUI 里主动选了 200k 变体，恢复时会被升成 1M。裸 id 里没有任何
+// 能分辨这两者的信息，而「掉档」是本模块要修的那个方向的错，「升档」不是。
+//
+// 策展表里完全没有的 id（上游发了新模型、表还没补）返回裸 id 本身：保住**代次正确**优先于保住 1M，
+// 总好过继续跑在一个完全不同的模型上。
+export function resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity(
+	observedModelId: string,
+): string | null {
+	const observed = observedModelId.trim();
+	if (!observed) {
+		return null;
+	}
+	const oneMillionContextVariantModelId = `${observed}[1m]`;
+	if (CLAUDE_CODE_PINNED_VERSION_MODEL_IDS.has(oneMillionContextVariantModelId)) {
+		return oneMillionContextVariantModelId;
+	}
+	return observed;
+}
+
 export function parseClaudeHelpModelAliases(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
 	const helpAliases: string[] = [];
 	const aliasMatch = stdout.match(/e\.g\.\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*or\s*'([^']+)'/);
