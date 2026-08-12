@@ -1,10 +1,16 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
-import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import type {
+	RuntimeBoardCard,
+	RuntimeBoardData,
+	RuntimeTaskSessionSummary,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
+} from "../../../src/core/api-contract";
 
 const agentRegistryMocks = vi.hoisted(() => ({
 	resolveAgentCommand: vi.fn(),
@@ -61,6 +67,7 @@ const browserMocks = vi.hoisted(() => ({
 
 const workspaceStateMocks = vi.hoisted(() => ({
 	loadWorkspaceBoardById: vi.fn(),
+	mutateWorkspaceState: vi.fn(),
 }));
 
 vi.mock("../../../src/terminal/agent-registry.js", () => ({
@@ -138,6 +145,7 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 	// 漏一个符号不会报「未 mock」而是让整条 sendTaskChatMessage 被 catch 成 ok:false——
 	// 静默降级，所以新增运行时依赖时必须同步补齐这里。
 	getWorkspaceDirectoryPath: (workspaceId: string) => `/tmp/kanban-workspaces/${workspaceId}`,
+	mutateWorkspaceState: workspaceStateMocks.mutateWorkspaceState,
 }));
 
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
@@ -3464,5 +3472,303 @@ describe("createRuntimeApi update handlers", () => {
 			message: "Updated Kanban to 0.2.0.",
 		});
 		expect(runUpdateNow).toHaveBeenCalledTimes(1);
+	});
+});
+
+// 恢复既有对话（`--continue`）时的模型来源。原 bug：点「Restart terminal session」后会话被恢复到
+// 卡片上那个「记住上次选择」自动回填的模型（实测多为 Fable 5），而不是这段对话自己在跑的模型。
+// 探针本身与裸 id → 启动 id 的映射各有专门套件；这里守的是**接线**：两条恢复入口有没有真的把
+// 解析结果下发给启动请求、有没有按分档决定回写，以及全新启动有没有被误伤。
+describe("createRuntimeApi resumed claude session model", () => {
+	const RESUMED_TASK_ID = "task-1";
+	let temporaryHomeDirectoryPath: string;
+	let taskWorktreePath: string;
+	let originalHomeDirectoryPath: string | undefined;
+
+	// Claude Code 落盘的转录目录名由**已解析软链的** cwd 编码而成（macOS 的 /tmp→/private/tmp 就靠这一步），
+	// 与探针里的 realpath 是同一条契约；这里也走 realpathSync，否则夹具会写到一个探针永远找不到的目录。
+	function writeTranscriptRecordsForTaskWorktree(records: unknown[]): void {
+		const projectDirectoryPath = join(
+			temporaryHomeDirectoryPath,
+			".claude",
+			"projects",
+			realpathSync(taskWorktreePath).replace(/[^a-zA-Z0-9]/gu, "-"),
+		);
+		mkdirSync(projectDirectoryPath, { recursive: true });
+		writeFileSync(
+			join(projectDirectoryPath, "1041c594-8f2b-4c7d-9a3e-5b6d7e8f9a0b.jsonl"),
+			`${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+			"utf8",
+		);
+	}
+
+	function assistantRecord(modelId: string): unknown {
+		return {
+			type: "assistant",
+			timestamp: "2026-08-12T10:00:00.000Z",
+			message: { role: "assistant", model: modelId },
+		};
+	}
+
+	function createResumedTaskCard(
+		terminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
+	): RuntimeBoardCard {
+		return {
+			id: RESUMED_TASK_ID,
+			title: "Task 1",
+			prompt: "Implement task",
+			startInPlanMode: true,
+			autoReviewEnabled: true,
+			autoReviewMode: "pr",
+			baseRef: "main",
+			createdAt: 1,
+			updatedAt: 1,
+			...(terminalAgentModelOverrideSettings ? { terminalAgentModelOverrideSettings } : {}),
+		} as RuntimeBoardCard;
+	}
+
+	function createBoardWithResumedTaskCard(card: RuntimeBoardCard): RuntimeBoardData {
+		return {
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [] },
+				{ id: "in_progress", title: "In Progress", cards: [card] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		} as RuntimeBoardData;
+	}
+
+	// 只把 mutator 跑在内存 board 上，不碰真实文件锁——这里要验的是「传给 updateTask 的输入对不对」。
+	function stubWorkspaceStateMutationAgainst(board: RuntimeBoardData): { nextBoard: RuntimeBoardData | null } {
+		const captured: { nextBoard: RuntimeBoardData | null } = { nextBoard: null };
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (
+				_workspacePath: string,
+				mutate: (state: { board: RuntimeBoardData }) => {
+					board: RuntimeBoardData;
+					value: unknown;
+					save?: boolean;
+				},
+			) => {
+				const mutation = mutate({ board });
+				if (mutation.save !== false) {
+					captured.nextBoard = mutation.board;
+				}
+				return { value: mutation.value, state: { board: mutation.board }, saved: mutation.save !== false };
+			},
+		);
+		return captured;
+	}
+
+	function createTerminalManagerStub() {
+		return {
+			getSummary: vi.fn(() => createSummary({ agentId: "claude", workspacePath: taskWorktreePath })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+			startTaskSession: vi.fn(async () => createSummary({ agentId: "claude" })),
+			applyTurnCheckpoint: vi.fn(() => null),
+			listSummaries: vi.fn(() => []),
+		};
+	}
+
+	function createApiWithTerminalManager(terminalManager: ReturnType<typeof createTerminalManagerStub>) {
+		return createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+	}
+
+	beforeEach(() => {
+		originalHomeDirectoryPath = process.env.HOME;
+		temporaryHomeDirectoryPath = mkdtempSync(join(tmpdir(), "kanban-resumed-model-home-"));
+		process.env.HOME = temporaryHomeDirectoryPath;
+		taskWorktreePath = join(temporaryHomeDirectoryPath, "worktree");
+		mkdirSync(taskWorktreePath, { recursive: true });
+
+		agentRegistryMocks.resolveAgentCommand.mockReset();
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+			agentId: "claude",
+			label: "Claude Code",
+			command: "claude",
+			binary: "claude",
+			args: [],
+		});
+		taskWorktreeMocks.resolveTaskCwd.mockReset();
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue(taskWorktreePath);
+		turnCheckpointMocks.captureTaskTurnCheckpoint.mockReset();
+		turnCheckpointMocks.captureTaskTurnCheckpoint.mockRejectedValue(new Error("checkpoint disabled in this suite"));
+		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
+		workspaceStateMocks.mutateWorkspaceState.mockReset();
+	});
+
+	afterEach(() => {
+		if (originalHomeDirectoryPath === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = originalHomeDirectoryPath;
+		}
+		rmSync(temporaryHomeDirectoryPath, { recursive: true, force: true });
+	});
+
+	it("restarts onto the model the transcript last used and syncs a pinned-version card to it", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-opus-5")]);
+		const card = createResumedTaskCard({ agentId: "claude", modelId: "claude-fable-5" });
+		const board = createBoardWithResumedTaskCard(card);
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		const capturedMutation = stubWorkspaceStateMutationAgainst(board);
+		const terminalManager = createTerminalManagerStub();
+		const api = createApiWithTerminalManager(terminalManager);
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: RESUMED_TASK_ID, cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(true);
+		// 转录只记裸 id，故启动 id 必须补回 1M 变体，否则恢复会静默从 1M 掉到 200k。
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				resumeFromTrash: true,
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-opus-5[1m]" },
+			}),
+		);
+		const updatedCard = capturedMutation.nextBoard?.columns
+			.flatMap((column) => column.cards)
+			.find((entry) => entry.id === RESUMED_TASK_ID);
+		expect(updatedCard?.terminalAgentModelOverrideSettings).toEqual({
+			agentId: "claude",
+			modelId: "claude-opus-5[1m]",
+		});
+		// updateTask 的这几个字段不是三态，回写时漏传就会被静默复位——卡片会因为「重启了一次」丢掉计划态与自动 review 设置。
+		expect(updatedCard?.title).toBe("Task 1");
+		expect(updatedCard?.prompt).toBe("Implement task");
+		expect(updatedCard?.baseRef).toBe("main");
+		expect(updatedCard?.startInPlanMode).toBe(true);
+		expect(updatedCard?.autoReviewEnabled).toBe(true);
+		expect(updatedCard?.autoReviewMode).toBe("pr");
+	});
+
+	it("keeps the card override when the transcript cannot answer", async () => {
+		const card = createResumedTaskCard({ agentId: "claude", modelId: "claude-fable-5" });
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(createBoardWithResumedTaskCard(card));
+		const terminalManager = createTerminalManagerStub();
+		const api = createApiWithTerminalManager(terminalManager);
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: RESUMED_TASK_ID, cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
+			}),
+		);
+		expect(workspaceStateMocks.mutateWorkspaceState).not.toHaveBeenCalled();
+	});
+
+	it("follows the transcript but leaves a latest-tracking alias card unwritten", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-opus-5")]);
+		const card = createResumedTaskCard({ agentId: "claude", modelId: "fable" });
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(createBoardWithResumedTaskCard(card));
+		const terminalManager = createTerminalManagerStub();
+		const api = createApiWithTerminalManager(terminalManager);
+
+		await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: RESUMED_TASK_ID, cols: 120, rows: 40 },
+		);
+
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-opus-5[1m]" },
+			}),
+		);
+		// 把 `fable`（永远跟最新那一代）改写成钉版本 id 是单向信息损失，且会波及此后的全新启动。
+		expect(workspaceStateMocks.mutateWorkspaceState).not.toHaveBeenCalled();
+	});
+
+	it("never replaces a phase-switching opusplan card, not even for this launch", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-sonnet-5")]);
+		const card = createResumedTaskCard({ agentId: "claude", modelId: "opusplan" });
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(createBoardWithResumedTaskCard(card));
+		const terminalManager = createTerminalManagerStub();
+		const api = createApiWithTerminalManager(terminalManager);
+
+		await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: RESUMED_TASK_ID, cols: 120, rows: 40 },
+		);
+
+		// opusplan 是「计划期 Opus、其余 Sonnet」的策略；顶替成转录里那一阶段的具体模型会把它永久钉死。
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "opusplan" },
+			}),
+		);
+		expect(workspaceStateMocks.mutateWorkspaceState).not.toHaveBeenCalled();
+	});
+
+	it("applies the same rule when a task session is restored from trash", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-opus-5")]);
+		const board = createBoardWithResumedTaskCard(createResumedTaskCard(undefined));
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		stubWorkspaceStateMutationAgainst(board);
+		const terminalManager = createTerminalManagerStub();
+		terminalManager.getSummary = vi.fn(() => null as never);
+		const api = createApiWithTerminalManager(terminalManager);
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: RESUMED_TASK_ID,
+				baseRef: "main",
+				prompt: "",
+				resumeFromTrash: true,
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				resumeFromTrash: true,
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-opus-5[1m]" },
+			}),
+		);
+	});
+
+	it("leaves a fresh start on the card override without reading any transcript", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-opus-5")]);
+		const board = createBoardWithResumedTaskCard(createResumedTaskCard(undefined));
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		const terminalManager = createTerminalManagerStub();
+		terminalManager.getSummary = vi.fn(() => null as never);
+		const api = createApiWithTerminalManager(terminalManager);
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: RESUMED_TASK_ID,
+				baseRef: "main",
+				prompt: "Start something new",
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		// 全新启动不重播任何对话，卡片 override 仍是唯一的意图来源。
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
+			}),
+		);
+		expect(workspaceStateMocks.mutateWorkspaceState).not.toHaveBeenCalled();
 	});
 });

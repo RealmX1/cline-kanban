@@ -9,6 +9,10 @@ import { join } from "node:path";
 import { TRPCError } from "@trpc/server";
 import type { AcpTaskSessionService } from "../acp-client-session/acp-task-session-service";
 import { listAvailableAgentSessions } from "../agent-session-history/available-agent-session-index";
+import {
+	probePersistedAgentTranscriptLastConversationModelIdentity,
+	supportsPersistedAgentTranscriptLastConversationModelProbe,
+} from "../agent-session-history/persisted-agent-transcript-last-conversation-model-probe";
 import { createClineMcpRuntimeService } from "../cline-sdk/cline-mcp-runtime-service";
 import { createClineMcpSettingsService } from "../cline-sdk/cline-mcp-settings-service";
 import { createClineProviderService } from "../cline-sdk/cline-provider-service";
@@ -19,11 +23,14 @@ import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtim
 import { isRuntimeAgentSessionDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
+	RuntimeBoardCard,
+	RuntimeBoardData,
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
@@ -62,6 +69,7 @@ import {
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
+import { updateTask } from "../core/task-board-mutations";
 import {
 	getTaskMessageInjectionLedgerPath,
 	recordTaskMessageTerminalDeliveryOutcome,
@@ -78,10 +86,16 @@ import {
 	readAgentRaisedPendingUserDecisions,
 } from "../state/agent-raised-pending-user-decision-store";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
-import { getWorkspaceDirectoryPath, loadWorkspaceBoardById } from "../state/workspace-state";
+import { getWorkspaceDirectoryPath, loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
-import { getTerminalAgentModelSelectionOptions } from "../terminal/terminal-agent-model-selection";
+import {
+	getTerminalAgentModelSelectionOptions,
+	isClaudeCodeCuratedTerminalAgentModelSelectionOptionId,
+	isClaudeCodeLatestTrackingAliasModelSelectionOptionId,
+	isClaudeCodePhaseSwitchingCompositeModelSelectionOptionId,
+	resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity,
+} from "../terminal/terminal-agent-model-selection";
 import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
@@ -113,6 +127,7 @@ export interface CreateRuntimeApiDependencies {
 	) => void;
 	broadcastTaskChatCleared?: (workspaceId: string, taskId: string) => void;
 	broadcastNotificationLogUpdated?: (workspaceId: string) => Promise<void> | void;
+	broadcastRuntimeWorkspaceStateUpdated?: (workspaceId: string, workspacePath: string) => Promise<void> | void;
 	bumpClineSessionContextVersion?: () => void;
 	prepareForStateReset?: () => Promise<void>;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
@@ -173,6 +188,153 @@ const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["
 function isByTheWaySessionForWorkspaceTask(summary: RuntimeTaskSessionSummary, workspaceTaskId: string): boolean {
 	const metadata = summary.taskConversationSessionMetadata;
 	return metadata?.workspaceTaskId === workspaceTaskId && metadata.taskConversationSessionRole === "by_the_way";
+}
+
+function findWorkspaceBoardCard(board: RuntimeBoardData, taskId: string): RuntimeBoardCard | null {
+	for (const column of board.columns) {
+		const found = column.cards.find((entry) => entry.id === taskId);
+		if (found) {
+			return found;
+		}
+	}
+	return null;
+}
+
+// 恢复既有对话（终端 agent 的「Restart terminal session」与从 trash 拖回，两者都走 `--continue`）时，
+// 模型该听谁的。
+//
+// 答案是**听会话自己的**：`--continue` 重播的是同一段对话，用户在 TUI 里 `/model` 切过的模型才是它的真实状态。
+// 卡片上的 model override 退化为「全新启动时的初始值」——它常年是新建任务时由「记住上次选择」自动回填的
+// 那个模型，恢复时再施加一次，就会把跑了半天的对话无声拽回去（本模块存在的直接原因）。
+// 探针问不出结论时（不支持的 agent / 没有转录 / 会话还没产出过回合）原样退回卡片值，行为与本改动前一致。
+//
+// 只覆盖 `--continue` 这条路：`taskAgentSessionInitialization` 的 `--resume <id>` 播种与 By the way 的
+// fork 都是「基于某段历史开一段新对话」，那里卡片 override 仍是正确的意图表达。
+//
+// ── 别名档卡片的两条例外 ──────────────────────────────────────────────────────────
+// 「跟随会话」的前提是卡片上存的是**一个具体模型**，它与会话实况可能矛盾。若卡片存的是别名档条目，
+// 那它表达的是**策略**而非模型，转录读回的具体 id 并不与之矛盾，替换它只会造成单向的信息损失：
+//   1. opusplan（按阶段切换 Opus/Sonnet）：连本次启动都不顶替。顶替后恢复出来的会话被钉死在某一阶段的
+//      模型上，此后进入计划态也切不回 Opus，用户选的策略被静默销毁。
+//   2. opus / sonnet / fable / haiku（跟随最新）：本次启动仍按转录模型走（这才是修 M2 的要点——用户在
+//      TUI 里切走后不能再被卡片拽回去），但**不回写卡片**：把 `opus` 改写成 `claude-opus-5[1m]` 会
+//      把「永远跟最新」降级成一个钉死的版本，且卡片上看不出发生过降级，还会波及此后的全新启动与
+//      By the way fork（两者仍读卡片值）。
+async function resolveResumedTerminalAgentSessionModelOverrideSettings(options: {
+	agentId: RuntimeAgentId;
+	taskId: string;
+	taskCwd: string;
+	workspaceScope: RuntimeTrpcWorkspaceScope;
+	cardTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
+	broadcastRuntimeWorkspaceStateUpdated?: (workspaceId: string, workspacePath: string) => Promise<void> | void;
+}): Promise<RuntimeTaskTerminalAgentModelOverrideSettings | undefined> {
+	const cardModelOverrideSettings =
+		options.cardTerminalAgentModelOverrideSettings?.agentId === options.agentId
+			? options.cardTerminalAgentModelOverrideSettings
+			: undefined;
+	if (!supportsPersistedAgentTranscriptLastConversationModelProbe(options.agentId)) {
+		return cardModelOverrideSettings;
+	}
+	if (
+		cardModelOverrideSettings &&
+		isClaudeCodePhaseSwitchingCompositeModelSelectionOptionId(cardModelOverrideSettings.modelId)
+	) {
+		// 连探针都不必跑：无论转录里是什么，答案都只能是卡片上那条策略。
+		return cardModelOverrideSettings;
+	}
+	let observedModelId: string | null = null;
+	try {
+		observedModelId = await probePersistedAgentTranscriptLastConversationModelIdentity({
+			agentId: options.agentId,
+			workspacePath: options.taskCwd,
+		});
+	} catch {
+		// 探针是「锦上添花」，读转录失败绝不能挡住会话恢复。
+		return cardModelOverrideSettings;
+	}
+	if (!observedModelId) {
+		return cardModelOverrideSettings;
+	}
+	const launchModelId = resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity(observedModelId);
+	if (!launchModelId) {
+		return cardModelOverrideSettings;
+	}
+	const resolvedModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings = {
+		agentId: "claude",
+		modelId: launchModelId,
+	};
+	// 卡片存的是「跟随最新」的别名档时不回写：见函数头「别名档卡片的两条例外」第 2 条。
+	// 其余情况一律调用回写——**不**在这里先比一次「和卡片值一样就别写了」：这里手上的卡片值是 await 探针
+	// **之前**读到的，另一标签页在这段窗口里改掉卡片、且旧值恰好等于转录模型时，那个提前返回就会让卡片
+	// 与本次启动的模型分叉。唯一权威的比较在下面的写入函数里、锁内重做，值相同时它自己会 save:false 早退。
+	if (
+		!(
+			cardModelOverrideSettings &&
+			isClaudeCodeLatestTrackingAliasModelSelectionOptionId(cardModelOverrideSettings.modelId)
+		)
+	) {
+		await persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard({
+			workspaceScope: options.workspaceScope,
+			taskId: options.taskId,
+			resolvedTerminalAgentModelOverrideSettings: resolvedModelOverrideSettings,
+			broadcastRuntimeWorkspaceStateUpdated: options.broadcastRuntimeWorkspaceStateUpdated,
+		});
+	}
+	return resolvedModelOverrideSettings;
+}
+
+// 把恢复时解析出的真实模型同步回卡片，让 UI 上的模型 chip 与会话实际状态一致。
+//
+// 守卫：只回写策展表里认得的 id。目录外的 id（上游发了新模型、表还没补）交给本次启动就够了——落盘会让
+// 模型选择器显示不出选中态，等于把一个用户无法通过 UI 修改的值钉在卡片上。
+// 失败一律吞掉：卡片没同步只是显示滞后，不该连累会话恢复。
+async function persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard(options: {
+	workspaceScope: RuntimeTrpcWorkspaceScope;
+	taskId: string;
+	resolvedTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings;
+	broadcastRuntimeWorkspaceStateUpdated?: (workspaceId: string, workspacePath: string) => Promise<void> | void;
+}): Promise<void> {
+	const { resolvedTerminalAgentModelOverrideSettings } = options;
+	if (!isClaudeCodeCuratedTerminalAgentModelSelectionOptionId(resolvedTerminalAgentModelOverrideSettings.modelId)) {
+		return;
+	}
+	try {
+		const mutation = await mutateWorkspaceState(options.workspaceScope.workspacePath, (state) => {
+			const card = findWorkspaceBoardCard(state.board, options.taskId);
+			if (
+				!card ||
+				(card.terminalAgentModelOverrideSettings?.agentId === resolvedTerminalAgentModelOverrideSettings.agentId &&
+					card.terminalAgentModelOverrideSettings.modelId === resolvedTerminalAgentModelOverrideSettings.modelId)
+			) {
+				return { board: state.board, value: false, save: false };
+			}
+			// updateTask 里只有 terminalAgentModelOverrideSettings 之外的三态字段会「缺省即保留」；
+			// title / prompt / baseRef / startInPlanMode / autoReview* 不是三态，漏传就会被复位，
+			// 故这几个必须从卡片原值显式回填。
+			const updated = updateTask(state.board, options.taskId, {
+				title: card.title,
+				prompt: card.prompt,
+				baseRef: card.baseRef,
+				startInPlanMode: card.startInPlanMode,
+				taskAgentPermissionMode: card.taskAgentPermissionMode,
+				autoReviewEnabled: card.autoReviewEnabled === true,
+				autoReviewMode: card.autoReviewMode ?? "commit",
+				terminalAgentModelOverrideSettings: resolvedTerminalAgentModelOverrideSettings,
+			});
+			if (!updated.updated) {
+				return { board: state.board, value: false, save: false };
+			}
+			return { board: updated.board, value: true };
+		});
+		if (mutation.value) {
+			void options.broadcastRuntimeWorkspaceStateUpdated?.(
+				options.workspaceScope.workspaceId,
+				options.workspaceScope.workspacePath,
+			);
+		}
+	} catch {
+		// 看板状态没同步不影响会话本身，静默放过。
+	}
 }
 
 export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrpcContext["runtimeApi"] {
@@ -509,6 +671,21 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						error: "No runnable agent command is configured. Open Settings, install a supported CLI, and select it.",
 					};
 				}
+				// 从 trash 拖回同样走 `--continue`（见 claudeAdapter），故与「Restart terminal session」同规则：
+				// 恢复既有对话时听会话自己的模型。全新启动不经这里，卡片 override 在那里仍是唯一意图来源。
+				startFailurePhase = "resolve_resumed_terminal_agent_session_model";
+				const startTerminalAgentModelOverrideSettings = body.resumeFromTrash
+					? await resolveResumedTerminalAgentSessionModelOverrideSettings({
+							agentId: resolved.agentId,
+							taskId: body.taskId,
+							taskCwd,
+							workspaceScope,
+							cardTerminalAgentModelOverrideSettings: body.terminalAgentModelOverrideSettings,
+							broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
+						})
+					: body.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
+						? body.terminalAgentModelOverrideSettings
+						: undefined;
 				startFailurePhase = "start_pty_terminal_runtime_session";
 				const summary = await terminalManager.startTaskSession({
 					taskId: body.taskId,
@@ -533,10 +710,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					projectPath: workspaceScope.workspacePath,
 					parentSessionId: body.parentSessionId,
 					taskAgentSessionInitialization: body.taskAgentSessionInitialization,
-					terminalAgentModelOverrideSettings:
-						body.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
-							? body.terminalAgentModelOverrideSettings
-							: undefined,
+					terminalAgentModelOverrideSettings: startTerminalAgentModelOverrideSettings,
 				});
 				latestStartedSummaryForDiagnostics = summary;
 				recordStartDiagnostic("runtime_started", startFailurePhase);
@@ -592,14 +766,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					};
 				}
 				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
-				let card: (typeof board.columns)[number]["cards"][number] | null = null;
-				for (const column of board.columns) {
-					const found = column.cards.find((entry) => entry.id === body.taskId);
-					if (found) {
-						card = found;
-						break;
-					}
-				}
+				const card = findWorkspaceBoardCard(board, body.taskId);
 				if (!card) {
 					return {
 						ok: false,
@@ -629,6 +796,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							baseRef: card.baseRef,
 							worktreeMode: card.worktreeMode,
 						});
+				// 「Restart terminal session」永远走 `--continue`（下面的 resumeFromTrash: true），
+				// 故模型一律以转录里读到的会话真实模型为准，卡片值只在探针问不出结论时兜底。
+				const resumedTerminalAgentModelOverrideSettings =
+					await resolveResumedTerminalAgentSessionModelOverrideSettings({
+						agentId: resolved.agentId,
+						taskId: body.taskId,
+						taskCwd,
+						workspaceScope,
+						cardTerminalAgentModelOverrideSettings: card.terminalAgentModelOverrideSettings,
+						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
+					});
 				const summary = await terminalManager.refreshTaskTerminal({
 					taskId: body.taskId,
 					agentId: resolved.agentId,
@@ -650,10 +828,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					projectPath: workspaceScope.workspacePath,
 					parentSessionId: undefined,
 					taskAgentSessionInitialization: undefined,
-					terminalAgentModelOverrideSettings:
-						card.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
-							? card.terminalAgentModelOverrideSettings
-							: undefined,
+					terminalAgentModelOverrideSettings: resumedTerminalAgentModelOverrideSettings,
 				});
 				return {
 					ok: true,

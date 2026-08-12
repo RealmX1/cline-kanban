@@ -358,6 +358,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
 				broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
 				broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
+				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 				bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
 				prepareForStateReset,
 				getUpdateStatus: deps.getUpdateStatus,
