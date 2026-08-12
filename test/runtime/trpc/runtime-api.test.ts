@@ -2066,6 +2066,101 @@ describe("createRuntimeApi startTaskSession", () => {
 		});
 	});
 
+	// ACP（omp）通道的程序化投递必须当场落终态。这条链路上没有 onDeliveryOutcome 这样的登记点，
+	// 回执一旦停在 accepted_pending_submit_confirmation 就再没有任何人会改写它：
+	// `--wait-for-terminal-status` 必然空等到超时，账本要挂到下次 runtime 启动清扫才被判失败，
+	// 直接违反「唯一非终态必然在有界时间内收敛」这条不变量。
+	it("settles ACP programmatic delivery on the spot instead of leaving it pending forever", async () => {
+		const summary = createSummary({ agentId: "omp", state: "running" });
+		const latestMessage = {
+			id: "message-acp-1",
+			role: "user" as const,
+			content: "please continue",
+			createdAt: Date.now(),
+		};
+		const acpTaskSessionService = {
+			getSummary: vi.fn(() => summary),
+			sendTaskSessionInput: vi.fn(async () => summary),
+			listMessages: vi.fn(() => [latestMessage]),
+			clearTaskSession: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-acp-1",
+				text: "please continue",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-acp-1",
+				promptSha256: "abc123",
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(acpTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
+			"task-acp-1",
+			"please continue",
+			undefined,
+		);
+		expect(response.terminalDelivery).toEqual({
+			status: "delivered_and_submit_confirmed",
+			reason: null,
+		});
+		expect(response.message).toEqual(latestMessage);
+		expect(clineTaskSessionService.sendTaskSessionInput).not.toHaveBeenCalled();
+	});
+
+	// 有 ACP 会话账本但连接已经没了：同样不能留 pending，如实判失败。
+	it("reports ACP delivery failure when the agent connection is already gone", async () => {
+		const summary = createSummary({ agentId: "omp", state: "idle" });
+		const acpTaskSessionService = {
+			getSummary: vi.fn(() => summary),
+			sendTaskSessionInput: vi.fn(async () => null),
+			listMessages: vi.fn(() => []),
+			clearTaskSession: vi.fn(),
+		};
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-acp-1",
+				text: "please continue",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-acp-2",
+				promptSha256: "abc123",
+			},
+		);
+
+		expect(response.ok).toBe(false);
+		expect(response.terminalDelivery).toEqual({
+			status: "delivery_failed",
+			reason: "no_active_terminal_session",
+		});
+	});
+
 	it("does not fall back to terminal input for chat messages with images", async () => {
 		const terminalManager = {
 			submitTaskChatInputWhenReady: vi.fn(),

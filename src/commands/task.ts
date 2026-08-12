@@ -25,7 +25,12 @@ import {
 	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskWorktreeModeSchema,
 } from "../core/api-contract";
-import { mergeAbortSignals, resolveCliTrpcTimeoutMs, safeStringify } from "../core/cli-process-guards";
+import {
+	mergeAbortSignals,
+	resolveCliHardTimeoutMs,
+	resolveCliTrpcTimeoutMs,
+	safeStringify,
+} from "../core/cli-process-guards";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
 import {
@@ -1555,6 +1560,32 @@ async function sendTaskMessageCommand(input: {
 
 const TASK_MESSAGE_TERMINAL_STATUS_WAIT_DEFAULT_TIMEOUT_MS = 30_000;
 const TASK_MESSAGE_TERMINAL_STATUS_POLL_INTERVAL_MS = 500;
+// 等待收敛前要留给「读账本 + 打印 JSON + 遥测 flush + 退出」的余量，别卡着硬超时的最后一刻才收手。
+const TASK_MESSAGE_TERMINAL_STATUS_WAIT_HARD_TIMEOUT_MARGIN_MS = 2_000;
+
+// --wait-for-terminal-status 的等待必须留在 CLI 硬超时（KANBAN_CLI_HARD_TIMEOUT_MS，默认 35s）之内。
+// `kanban task message` 是非 server-style 调用，cli.ts 会给它装硬超时，到点直接 exit(124) 且 **stdout 一个
+// 字节都没有**——在最需要诚实回执的场景反而什么都不返回。而契约要求调用方按 190s 设超时，一旦真传
+// `--wait-timeout-ms 190000` 就必然撞上这个杀进程。
+// 所以宁可提前收敛：超时不代表失败，返回的仍是当时的真实状态（可能仍是 pending），调用方继续用
+// message-status 轮询即可。真要在单次调用里等满 190s，请把 KANBAN_CLI_HARD_TIMEOUT_MS 一并调大——
+// 这里读的就是同一个环境变量，调大即自动放开。
+export function resolveTaskMessageTerminalStatusWaitBudgetMs(input: {
+	requestedWaitTimeoutMs: number;
+	cliHardTimeoutMs: number;
+	elapsedSinceCliStartMs: number;
+	marginMs?: number;
+}): number {
+	const remaining =
+		input.cliHardTimeoutMs -
+		input.elapsedSinceCliStartMs -
+		(input.marginMs ?? TASK_MESSAGE_TERMINAL_STATUS_WAIT_HARD_TIMEOUT_MARGIN_MS);
+	if (remaining <= 0) {
+		// 预算已经耗尽：不再等待，直接把当前真实状态吐出去，好过被硬超时杀掉后毫无输出。
+		return 0;
+	}
+	return Math.min(input.requestedWaitTimeoutMs, remaining);
+}
 
 async function readTaskMessageRecordOrThrow(
 	ledgerPath: string,
@@ -1586,7 +1617,13 @@ async function resolveTaskMessageResult(input: {
 			(await readTaskMessageRecordOrThrow(input.ledgerPath, input.taskId, input.idempotencyKey));
 		return toTaskMessageCommandResult(record);
 	}
-	const timeoutMs = input.waitTimeoutMs ?? TASK_MESSAGE_TERMINAL_STATUS_WAIT_DEFAULT_TIMEOUT_MS;
+	// process.uptime() 是从进程启动算的，而硬超时的计时器装在 run() 开头（更晚一点点），
+	// 故这里的 elapsed 只会略微高估——偏保守，正是我们要的方向。
+	const timeoutMs = resolveTaskMessageTerminalStatusWaitBudgetMs({
+		requestedWaitTimeoutMs: input.waitTimeoutMs ?? TASK_MESSAGE_TERMINAL_STATUS_WAIT_DEFAULT_TIMEOUT_MS,
+		cliHardTimeoutMs: resolveCliHardTimeoutMs(),
+		elapsedSinceCliStartMs: process.uptime() * 1000,
+	});
 	const deadlineAt = Date.now() + timeoutMs;
 	let latest = await readTaskMessageRecordOrThrow(input.ledgerPath, input.taskId, input.idempotencyKey);
 	while (!isTaskMessageTerminalDeliveryStatusSettled(latest.terminal_delivery_status) && Date.now() < deadlineAt) {
@@ -1620,6 +1657,17 @@ interface TaskMessageCancelCommandResult extends JsonRecord {
 	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
 }
 
+// runtime 侧的权威取消结论（tRPC cancelTaskChatDelivery 的 cancelResult）。比对外契约多一个取值：
+// no_pending_delivery —— runtime 内存里根本没有这条在途投递（从未到达、已落定、或已被取代）。
+type RuntimeTaskChatDeliveryCancelResult = "cancelled_before_delivery" | "already_delivered" | "no_pending_delivery";
+
+// 账本回写是 fire-and-forget 的：runtime 在投递登记 observer 里 void 掉那次「mkdir + 跨进程加锁 + 读 + 写 +
+// rename」，所以 tRPC 响应完全可能先于那次写落盘返回。取消后必须给账本一点收敛时间再读，否则读到的仍是
+// accepted_pending_submit_confirmation——明明拦下了却报成已送达，正是本轮要根除的撒谎形态。
+// 上界同时覆盖「取消晚了」那条路径上确认链自己落定的预算（契约：2.5s × 4 = 10s）。
+const TASK_MESSAGE_CANCEL_LEDGER_SETTLE_TIMEOUT_MS = 12_000;
+const TASK_MESSAGE_CANCEL_LEDGER_SETTLE_POLL_INTERVAL_MS = 200;
+
 // 取消是幂等的：对同一 key 重复调用返回相同结果、无副作用。
 // 判据只看账本终态与 runtime 的在途登记，不新建取消状态机。
 async function cancelTaskMessageCommand(input: {
@@ -1635,28 +1683,78 @@ async function cancelTaskMessageCommand(input: {
 	// 先确认这条记录存在（不存在 → unknown_idempotency_key，退出码 1）。
 	const before = await readTaskMessageRecordOrThrow(ledgerPath, taskId, idempotencyKey);
 
-	// 已经是终态：取消无事可做，如实回报当时的真实结果。
+	// 已经是终态：取消无事可做，如实回报当时的真实结果（此时不需要 runtime 的结论）。
 	if (isTaskMessageTerminalDeliveryStatusSettled(before.terminal_delivery_status)) {
-		return buildCancelResult(before);
+		return buildTaskMessageCancelResult({ record: before, runtimeCancelResult: null });
 	}
 
 	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
-	await runtimeClient.runtime.cancelTaskChatDelivery.mutate({ taskId, idempotencyKey });
-	// 真相以账本为准：取消成功时 runtime 已经经同一把锁把记录写成
-	// delivery_failed{cancelled_before_delivery}；取消晚到则记录已是（或即将是）某个 delivered 终态。
-	const after = await readTaskMessageRecordOrThrow(ledgerPath, taskId, idempotencyKey);
-	return buildCancelResult(after);
+	const cancelResponse = await runtimeClient.runtime.cancelTaskChatDelivery.mutate({ taskId, idempotencyKey });
+	if (!cancelResponse.ok) {
+		// 取消调用本身失败：此时既不知道拦下没有、也不知道送到没有，只能如实报错（ok:false，退出码 1），
+		// 绝不能拿一个编出来的 cancel_result 顶上。
+		throw new Error(cancelResponse.error ?? "cancelTaskChatDelivery failed.");
+	}
+	return await resolveTaskMessageCancelResult({
+		runtimeCancelResult: cancelResponse.cancelResult,
+		readRecord: async () => await readTaskMessageRecordOrThrow(ledgerPath, taskId, idempotencyKey),
+	});
 }
 
-function buildCancelResult(record: TaskMessageInjectionRecord): TaskMessageCancelCommandResult {
-	const cancelledByUs =
-		record.terminal_delivery_status === "delivery_failed" &&
-		record.terminal_delivery_failure_reason === "cancelled_before_delivery";
+// 等账本追上 runtime 已经做出的落定，再按最终记录出回执。等待有界；等不到也不编，照实报当时的状态。
+export async function resolveTaskMessageCancelResult(input: {
+	runtimeCancelResult: RuntimeTaskChatDeliveryCancelResult;
+	readRecord: () => Promise<TaskMessageInjectionRecord>;
+	settleTimeoutMs?: number;
+	pollIntervalMs?: number;
+	sleep?: (ms: number) => Promise<void>;
+	now?: () => number;
+}): Promise<TaskMessageCancelCommandResult> {
+	const now = input.now ?? (() => Date.now());
+	const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+	const deadlineAt = now() + (input.settleTimeoutMs ?? TASK_MESSAGE_CANCEL_LEDGER_SETTLE_TIMEOUT_MS);
+	const pollIntervalMs = input.pollIntervalMs ?? TASK_MESSAGE_CANCEL_LEDGER_SETTLE_POLL_INTERVAL_MS;
+	let record = await input.readRecord();
+	while (!isTaskMessageTerminalDeliveryStatusSettled(record.terminal_delivery_status) && now() < deadlineAt) {
+		await sleep(pollIntervalMs);
+		record = await input.readRecord();
+	}
+	return buildTaskMessageCancelResult({ record, runtimeCancelResult: input.runtimeCancelResult });
+}
+
+// cancel_result 是二值的，它回答的只有一件事：**这条消息是否已经确认进入 agent**。
+// 谁造成的、有没有残留，由同一份回执里的 terminal_delivery_status / terminal_delivery_failure_reason 承载。
+//
+// 为什么不能把「已落定的其他失败」也叫 already_delivered（旧实现的做法）：调用方按契约会据此走「已送达」
+// 分支，而消息其实要么根本没投出去（no_active_terminal_session 等），要么还躺在输入框里没确认提交
+// （submit_confirmation_budget_exhausted）——那正是 2026-08-08 那 49 分钟事故的形态。
+function resolveTaskMessageCancelResultValue(
+	status: TaskMessageTerminalDeliveryStatus,
+	runtimeCancelResult: RuntimeTaskChatDeliveryCancelResult | null,
+): "cancelled_before_delivery" | "already_delivered" {
+	// 只有「已确认提交给 agent」的两个终态才算已送达。
+	if (status === "delivered_and_submit_confirmed" || status === "delivered_queued_behind_active_agent_turn") {
+		return "already_delivered";
+	}
+	// delivery_failed：无论 reason 是什么都不是「已送达」，一律报未送达。
+	if (status === "delivery_failed") {
+		return "cancelled_before_delivery";
+	}
+	// 账本收敛超时仍是 pending：退回 runtime 的权威结论。它是唯一知道「这次取消到底拦下了没有」的一方，
+	// 而旧实现把它整个丢弃了。no_pending_delivery（runtime 手里没有在途投递）同样不是「已送达」。
+	return runtimeCancelResult === "already_delivered" ? "already_delivered" : "cancelled_before_delivery";
+}
+
+export function buildTaskMessageCancelResult(input: {
+	record: TaskMessageInjectionRecord;
+	runtimeCancelResult: RuntimeTaskChatDeliveryCancelResult | null;
+}): TaskMessageCancelCommandResult {
+	const { record } = input;
 	return {
 		ok: true,
 		task_id: record.task_id,
 		idempotency_key: record.idempotency_key,
-		cancel_result: cancelledByUs ? "cancelled_before_delivery" : "already_delivered",
+		cancel_result: resolveTaskMessageCancelResultValue(record.terminal_delivery_status, input.runtimeCancelResult),
 		terminal_delivery_status: record.terminal_delivery_status,
 		...(record.terminal_delivery_failure_reason
 			? { terminal_delivery_failure_reason: record.terminal_delivery_failure_reason }
@@ -1976,7 +2074,10 @@ export function registerTaskCommand(program: Command): void {
 			"--wait-for-terminal-status",
 			"Block until the delivery reaches a terminal status (or --wait-timeout-ms elapses). Timing out is not a failure: the reported status is still the true current one.",
 		)
-		.option("--wait-timeout-ms <ms>", "Timeout for --wait-for-terminal-status. Defaults to 30000.")
+		.option(
+			"--wait-timeout-ms <ms>",
+			"Timeout for --wait-for-terminal-status. Defaults to 30000. Clamped to the CLI hard timeout (KANBAN_CLI_HARD_TIMEOUT_MS, default 35000) minus a small margin, so the command always prints its JSON receipt instead of being killed with exit code 124. Raise KANBAN_CLI_HARD_TIMEOUT_MS to actually wait longer.",
+		)
 		.action(
 			async (options: {
 				projectPath: string;

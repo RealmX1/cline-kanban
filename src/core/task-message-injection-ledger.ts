@@ -273,30 +273,78 @@ export async function recordTaskMessageTerminalDeliveryOutcome(input: {
 	);
 }
 
-// runtime 启动清扫：把所有仍 pending 的记录判失败。
-// 判据不是「超期多久」而是「runtime 刚起来、内存里没有任何在途投递」——启动那一刻不可能存在
-// 合法的 pending，所以全扫是精确的，不需要挑时间阈值。语义等同「不知道有没有送到」，
-// 这正是契约里 runtime_restarted_before_confirmation 的定义。
-export async function sweepPendingTaskMessageInjectionsAfterRuntimeRestart(input: {
+export interface StalePendingTaskMessageInjectionSweepResult {
+	sweptCount: number;
+	// 本轮因「还没超期」被放过的 pending 里，最早会超期的那条的绝对时刻（epoch ms）；没放过任何一条时为 null。
+	// 调用方必须据此排一次延迟复扫：本轮放过的那些记录，其属主进程也可能早就死了，
+	// 没有复扫它们就要一直躺到下一次 runtime 启动——那正是本轮改动要根除的「永远 pending」。
+	earliestSkippedPendingBecomesStaleAtEpochMs: number | null;
+}
+
+// 账本时间戳读不出来（手改坏 / 更旧的格式）时返回 null，调用方按「已超期」处理：
+// 判失败是安全的那一侧，留着才会变成永远没人收敛的 pending。
+function resolvePendingRecordBecomesStaleAtEpochMs(
+	record: TaskMessageInjectionRecord,
+	stalePendingThresholdMs: number,
+): number | null {
+	const statusUpdatedAtMs = Date.parse(record.terminal_delivery_status_updated_at);
+	if (Number.isNaN(statusUpdatedAtMs)) {
+		return null;
+	}
+	return statusUpdatedAtMs + stalePendingThresholdMs;
+}
+
+// runtime 启动清扫：把**超期**仍 pending 的记录判失败（契约 § 时序保证 2 的原文就是「超期」）。
+//
+// 判据为什么必须是「超期」而不是「本进程刚起来」：账本落在全机共享的 workspaces 根下（getWorkspacesRootPath
+// 固定在 homedir 下、没有实例级隔离），而「本进程刚起来」说明不了「这条 pending 归本进程管」。按后者全扫，
+// 任何第二个 runtime 实例启动（并行 checkout 的 dev:full、dogfood、起真服务器的集成测试）都会把常驻实例
+// 此刻**真正在途**的投递写成 delivery_failed。而终态写一次即定，随后真正落定的 delivered_* 会被判
+// already_settled 丢弃 ⇒ 调用方拿到一个**不可纠正的假失败**，比「不知道结果」更坏。
+//
+// 「超期」不需要新发明策略：契约 § 时序保证 1 已承诺 pending 必然在最坏预算内转终态，因此
+// 「记录岁数 > 最坏预算」就等价于「不可能还有人在正常投递它」——无论它属于哪个实例，判失败都是对的。
+// 预算由调用方注入（真相在 TerminalSessionManager 那几个 deadline 常量里，见
+// TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS），本模块不自持策略数字。
+export async function sweepStalePendingTaskMessageInjectionsAfterRuntimeRestart(input: {
 	ledgerPath: string;
 	nowIso: string;
-}): Promise<{ sweptCount: number }> {
+	stalePendingThresholdMs: number;
+}): Promise<StalePendingTaskMessageInjectionSweepResult> {
+	const nowMs = Date.parse(input.nowIso);
 	return await withTaskMessageInjectionLedgerLock(input.ledgerPath, async (records) => {
-		const pendingRecords = records.filter(
-			(record) => !isTaskMessageTerminalDeliveryStatusSettled(record.terminal_delivery_status),
-		);
-		if (pendingRecords.length === 0) {
-			return { result: { sweptCount: 0 } };
+		let sweptCount = 0;
+		let earliestSkippedPendingBecomesStaleAtEpochMs: number | null = null;
+		const sweptRecords: TaskMessageInjectionRecord[] = [];
+		for (const record of records) {
+			if (isTaskMessageTerminalDeliveryStatusSettled(record.terminal_delivery_status)) {
+				sweptRecords.push(record);
+				continue;
+			}
+			const becomesStaleAtEpochMs = resolvePendingRecordBecomesStaleAtEpochMs(record, input.stalePendingThresholdMs);
+			if (becomesStaleAtEpochMs !== null && becomesStaleAtEpochMs > nowMs) {
+				earliestSkippedPendingBecomesStaleAtEpochMs =
+					earliestSkippedPendingBecomesStaleAtEpochMs === null
+						? becomesStaleAtEpochMs
+						: Math.min(earliestSkippedPendingBecomesStaleAtEpochMs, becomesStaleAtEpochMs);
+				sweptRecords.push(record);
+				continue;
+			}
+			sweptCount += 1;
+			sweptRecords.push(
+				applyTerminalDeliveryOutcomeToRecord(record, {
+					status: "delivery_failed",
+					failureReason: "runtime_restarted_before_confirmation",
+					nowIso: input.nowIso,
+				}),
+			);
 		}
-		const sweptRecords = records.map((record) =>
-			isTaskMessageTerminalDeliveryStatusSettled(record.terminal_delivery_status)
-				? record
-				: applyTerminalDeliveryOutcomeToRecord(record, {
-						status: "delivery_failed",
-						failureReason: "runtime_restarted_before_confirmation",
-						nowIso: input.nowIso,
-					}),
-		);
-		return { records: sweptRecords, result: { sweptCount: pendingRecords.length } };
+		if (sweptCount === 0) {
+			return { result: { sweptCount: 0, earliestSkippedPendingBecomesStaleAtEpochMs } };
+		}
+		return {
+			records: sweptRecords,
+			result: { sweptCount, earliestSkippedPendingBecomesStaleAtEpochMs },
+		};
 	});
 }

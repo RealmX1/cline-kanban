@@ -130,6 +130,26 @@ const MODAL_USER_DECISION_TURN_KINDS = new Set<RuntimeTaskSessionUserTurnKind>([
 const SUBMIT_CONFIRM_DELAY_MS = 2_500;
 // 未确认（输出仍静默 = CR 被吞、框卡 idle）时至多补发这么多次裸回车 `\r`；耗尽仍静默则打醒目 unconfirmed 日志收尾。
 const SUBMIT_CONFIRM_MAX_RESENDS = 3;
+// 整条确认链（含「用户正在手敲」让位重排）自 paste 写入起算的**绝对收敛上界**。
+// 单靠补发预算兜不住：让位重排刻意不消耗预算（用户停手后仍要留着预算把被吞的回车补上），
+// 于是用户持续打字即可让确认链无限重排，回执永远停在 accepted_pending_submit_confirmation——
+// 这是 2026-08-08「永远没有结论」那类缺陷在确认链上的残余形态。到点无论卡在哪一支都诚实收尾。
+// 取值与投递阶段的人类打字让路预算 TASK_CHAT_INPUT_DELIVERY_MAX_DEADLINE_INPUT_YIELD_MS 一致（同为
+// 跨仓契约里「人类打字让路」那一档），且 > 补发预算 SUBMIT_CONFIRM_DELAY_MS × (MAX_RESENDS + 1) = 10s，
+// 故纯静默路径的收尾时机不变，本上界只对被让位拖长的链生效。
+const SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS = 15_000;
+// 一条程序化投递从受理到必然落定的最坏预算：就绪等待 deadline + 二选一让路里更长的那条 +
+// 确认链真正的收敛上界（补发预算与绝对收敛上界取大者——后者正是为「让位重排不消耗补发预算」补的兜底，
+// 只看补发预算会低估）。导出是给 runtime 启动清扫当「这条 pending 还可能有人在正常投递吗」的判据用的。
+//
+// 必须由上面这些常量**算**出来而不是写死一个数字：谁调大让路预算或收敛上界却漏改它，清扫就会开始把
+// 并存实例的在途投递判成 delivery_failed，而终态写一次即定 —— 那种假失败事后不可纠正。
+// 当前取值 195s，比跨仓契约 § 时序保证 1 公布的 190s 多出确认链绝对收敛上界超过补发预算的那 5s。
+// 清扫阈值只能往保守（更大）一侧偏：早判一秒就是假失败，晚判一秒只是回执慢一秒。
+export const TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS =
+	TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS +
+	Math.max(TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS, TASK_CHAT_INPUT_DELIVERY_MAX_DEADLINE_INPUT_YIELD_MS) +
+	Math.max(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1), SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS);
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
 const DEFAULT_STALL_THRESHOLD_MS = 45_000;
@@ -323,6 +343,22 @@ function settleActiveProgrammaticDelivery(
 ): void {
 	settleProgrammaticDeliveryReceipt(active.programmaticDeliveryReceipt, status, reason);
 	active.programmaticDeliveryReceipt = null;
+}
+
+// 「提交确认」这一族出口的专用注销入口：只对**已经写进 PTY、正在等确认**的那条投递下结论。
+// 登记仍停在 awaiting_readiness 时，当前在跑的确认链必然属于别人的写入（连接中断自动续跑抢走了
+// 确认通道），那条链的成败与这条尚未写入的投递毫无关系——替它落定就是撒谎，而且是双向的：
+// 判成功则「回执说送达、文本从没写过」，判失败则「回执说失败、文本随后照样送达并被重复投递」。
+// 这条投递此刻还活着（定时器与代际都没动），它自己的出口稍后会给出真正的结论。
+function settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+	active: { programmaticDeliveryReceipt: PendingProgrammaticDeliveryReceipt | null },
+	status: TerminalDeliveryStatus,
+	reason: TerminalDeliveryFailureReason | null,
+): void {
+	if (active.programmaticDeliveryReceipt?.phase !== "awaiting_submit_confirmation") {
+		return;
+	}
+	settleActiveProgrammaticDelivery(active, status, reason);
 }
 
 interface SessionEntry {
@@ -1348,6 +1384,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 只有 task-chat 投递路径传 true。连接中断自动续跑（submitConnectionDropContinuation）不传——
 	// 它会夺走确认通道，被夺走的那条投递从此确认不到提交，只能诚实报 submit_confirmation_budget_exhausted
 	// （契约里这条 reason 的含义正是「写进去了但确认不到，文本可能残留在框里，重投前宜人工确认」）。
+	// 但「被夺走」只对**已写进 PTY、正在等确认**的投递成立：仍停在 awaiting_readiness 的投递一个字节都还没写，
+	// 那条 reason 对它是假的，而且这里既不清投递定时器也不自增投递代际，判它失败之后它照样会写入并提交——
+	// 「回执说失败、文本其实送达」，调用方按契约换新 key 重投就把同一段文本送进终端两次。故按 phase 分流。
 	private writePasteSubmissionWithConfirm(
 		taskId: string,
 		entry: SessionEntry,
@@ -1356,7 +1395,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		options?: { retainsProgrammaticDeliveryReceipt?: boolean },
 	): void {
 		if (!options?.retainsProgrammaticDeliveryReceipt) {
-			settleActiveProgrammaticDelivery(active, "delivery_failed", "submit_confirmation_budget_exhausted");
+			settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+				active,
+				"delivery_failed",
+				"submit_confirmation_budget_exhausted",
+			);
 		}
 		active.session.write(toBracketedPasteSubmission(text));
 		if (entry.summary.agentId === "codex") {
@@ -1365,18 +1408,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// last-write-wins：清掉上一条 paste 提交的待决确认链，自增代际令本次成为唯一有效确认。
 		clearSubmitConfirmTimer(active);
 		const generation = ++active.submitConfirmGeneration;
-		this.scheduleSubmitConfirmTick(taskId, active, generation, SUBMIT_CONFIRM_MAX_RESENDS);
+		this.scheduleSubmitConfirmTick(
+			taskId,
+			active,
+			generation,
+			SUBMIT_CONFIRM_MAX_RESENDS,
+			now() + SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS,
+		);
 	}
 
-	// 排一个 SUBMIT_CONFIRM_DELAY_MS 后的确认/补发 tick，沿用捕获的代际与剩余补发预算。
+	// 排一个 SUBMIT_CONFIRM_DELAY_MS 后的确认/补发 tick，沿用捕获的代际、剩余补发预算与本链的收敛上界时刻。
 	private scheduleSubmitConfirmTick(
 		taskId: string,
 		active: ActiveProcessState,
 		generation: number,
 		resendsLeft: number,
+		convergenceDeadlineAt: number,
 	): void {
 		const timer = setTimeout(() => {
-			this.runSubmitConfirmAttempt(taskId, generation, resendsLeft);
+			this.runSubmitConfirmAttempt(taskId, generation, resendsLeft, convergenceDeadlineAt);
 		}, SUBMIT_CONFIRM_DELAY_MS);
 		timer.unref?.();
 		active.submitConfirmTimer = timer;
@@ -1384,7 +1434,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	// 一次确认/补发 attempt：read 输出是否恢复流动决定 confirmed / 补发裸 `\r` / 让位 / 收尾。
 	// generation 为 writePasteSubmissionWithConfirm 调度时捕获的代际；被更晚的 paste 提交取代（代际不再相等）者放弃。
-	private runSubmitConfirmAttempt(taskId: string, generation: number, resendsLeft: number): void {
+	// convergenceDeadlineAt 为整条链的绝对收敛上界（见 SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS）。
+	private runSubmitConfirmAttempt(
+		taskId: string,
+		generation: number,
+		resendsLeft: number,
+		convergenceDeadlineAt: number,
+	): void {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
 		if (!entry || !active) {
@@ -1402,7 +1458,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			logTuiFreezeWarning(`[tui-freeze] submit-confirmed taskId=${taskId} agentId=${entry.summary.agentId}`);
 			// 提交已确认。两种终态的区别只在「写入那一刻 agent 是否已在自己的回合中」，
 			// 该标记在写入时就捕获好了（见 runTaskChatInputDeliveryAttempt）。
-			settleActiveProgrammaticDelivery(
+			// 只认自己那条投递：本确认链可能属于连接中断自动续跑的写入，此时在途投递可能还停在
+			// awaiting_readiness（一个字节都没写），把「续跑那段文本被 agent 收下了」当成它送达是最危险的谎。
+			settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
 				active,
 				active.programmaticDeliveryReceipt?.queuedBehindActiveAgentTurn
 					? "delivered_queued_behind_active_agent_turn"
@@ -1411,12 +1469,46 @@ export class TerminalSessionManager implements TerminalSessionService {
 			);
 			return;
 		}
+		// 仍静默且本链已到绝对收敛上界：无论卡在补发还是让位，都必须就此给出结论。旧实现里让位那一支
+		// 在预算耗尽时直接 return——不再排 tick、也不 settle，于是这条 receipt 从此无人推进，账本永远停在
+		// accepted_pending_submit_confirmation（只能等会话 teardown 或 runtime 重启兜底），
+		// 正是「投递链路上每个出口都要给出一次结论」这条不变量在确认链上的破口。
+		// 文本此刻已经粘进输入框、只是确认不到提交，契约里 submit_confirmation_budget_exhausted 的含义
+		// （「写进去了但确认不到、可能残留在输入框里，重投前宜人工确认」）正好覆盖这种收尾。
+		// 与本函数其余出口同理，只认自己那条投递：本链可能属于连接中断自动续跑的写入，而在途投递
+		// 可能还停在 awaiting_readiness——它一个字节都没写，本链到没到上界与它无关；替它判失败之后
+		// 它照样会写入并提交，就成了「回执说失败、文本其实送达」，调用方换新 key 重投还会重复送达。
+		if (now() >= convergenceDeadlineAt) {
+			logTuiFreezeError(
+				`[tui-freeze] submit-unconfirmed taskId=${taskId} agentId=${entry.summary.agentId} ` +
+					`reason=confirm-chain-convergence-deadline`,
+			);
+			settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+				active,
+				"delivery_failed",
+				"submit_confirmation_budget_exhausted",
+			);
+			return;
+		}
 		// 仍静默但用户近 OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS（8s）内手敲过 → 让位、绝不替他提交（保护 stashed/在打的
 		// prompt）；预算还在则再排一拍等待（不消耗预算），用户停手越过抑制窗后的下一拍才可能补发。
+		// 让位本身要保留，但它必须有尽头：上界由 convergenceDeadlineAt 兜住（上面那一支），
+		// 补发预算已耗尽时更是再等也无事可做——继续排 tick 只会让回执一直没有结论，故当场诚实收尾。
 		if (!this.canInjectIntoTerminalNow(active)) {
 			if (resendsLeft > 0) {
-				this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft);
+				this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft, convergenceDeadlineAt);
+				return;
 			}
+			logTuiFreezeError(
+				`[tui-freeze] submit-unconfirmed taskId=${taskId} agentId=${entry.summary.agentId} ` +
+					`reason=user-input-yield-with-resends-exhausted`,
+			);
+			// 同样只认自己那条投递：仍停在 awaiting_readiness 的在途投递不受本确认链成败牵连。
+			settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+				active,
+				"delivery_failed",
+				"submit_confirmation_budget_exhausted",
+			);
 			return;
 		}
 		// 仍静默且可注入 → CR 被吞、框卡 idle：补发裸回车（绝不重 paste；空/已提交框上是 no-op，故万一误判已提交也无害）。
@@ -1428,14 +1520,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 			);
 			// 补发预算耗尽仍确认不到提交：文本很可能还躺在输入框里。这条必须诚实报失败——
 			// 旧实现只打一行日志就收尾，调用方拿到的仍是「成功」，正是事故里 RVF 被误导的那一环。
-			settleActiveProgrammaticDelivery(active, "delivery_failed", "submit_confirmation_budget_exhausted");
+			// 同样只认自己那条投递：仍停在 awaiting_readiness 的在途投递不受本确认链成败牵连。
+			settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+				active,
+				"delivery_failed",
+				"submit_confirmation_budget_exhausted",
+			);
 			return;
 		}
 		active.session.write("\r");
 		logTuiFreezeWarning(
 			`[tui-freeze] submit-resend-cr taskId=${taskId} agentId=${entry.summary.agentId} remaining=${resendsLeft - 1}`,
 		);
-		this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft - 1);
+		this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft - 1, convergenceDeadlineAt);
 	}
 
 	// 提示符就绪判定（多通道）：① 快路径——尚未建模输入框结构的 agent，在输出反应扫描缓冲在线时复用同步的

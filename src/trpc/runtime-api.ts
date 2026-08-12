@@ -1185,9 +1185,34 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							ok: true,
 							summary: acpSummary,
 							message: acpTaskSessionService.listMessages(body.taskId).at(-1) ?? null,
+							// ACP 通道摄入即确认：sendTaskSessionInput 只在「账本里有该会话且 stdio 连接还活着」时返回
+							// summary，返回前用户消息已进会话记录、session/prompt 已派发到那条连接上。没有 PTY 那种
+							// 「粘进输入框但 CR 被吞」的中间态可等，因此这里不能留 pending——ACP 分支不存在
+							// onDeliveryOutcome 这样的登记点，留下的 pending 没有任何人会来收敛，只会一直挂到下次
+							// runtime 启动清扫，违反账本自己的「唯一非终态必然有界收敛」不变量。
+							// 不报 queued_behind：那描述的是「写进 TUI 输入框时 agent 正占着回合」，ACP 侧压根没有
+							// 排队模型（并发投递就是并发 session/prompt），报「排在后面」等于编造不存在的语义。
+							...(body.idempotencyKey
+								? {
+										terminalDelivery: {
+											status: "delivered_and_submit_confirmed" as const,
+											reason: null,
+										},
+									}
+								: {}),
 						};
 					}
-					return { ok: false, summary: null, error: "The ACP agent session is not connected." };
+					// 有会话账本但连接已经没了（会话被回收 / 子进程已退）：此刻确实没有活着的会话可投，
+					// 如实落终态，别让调用方空等一个不会到来的确认。
+					return {
+						ok: false,
+						summary: null,
+						error: "The ACP agent session is not connected.",
+						terminalDelivery: {
+							status: "delivery_failed" as const,
+							reason: "no_active_terminal_session" as const,
+						},
+					};
 				}
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				if (isClineClearSlashCommand(body.text)) {
