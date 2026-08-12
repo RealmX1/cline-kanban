@@ -141,6 +141,10 @@ vi.mock("../../../src/server/browser.js", () => ({
 
 vi.mock("../../../src/state/workspace-state.js", () => ({
 	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
+	// 程序化投递要按 workspaceId 解析注入账本路径。这个 mock 是刻意部分的，
+	// 漏一个符号不会报「未 mock」而是让整条 sendTaskChatMessage 被 catch 成 ok:false——
+	// 静默降级，所以新增运行时依赖时必须同步补齐这里。
+	getWorkspaceDirectoryPath: (workspaceId: string) => `/tmp/kanban-workspaces/${workspaceId}`,
 	mutateWorkspaceState: workspaceStateMocks.mutateWorkspaceState,
 }));
 
@@ -2047,9 +2051,13 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
 		// RVF followup 终端回退：经就绪门控投递，以原始文本调用（bracketed-paste 编码与就绪判定下沉到
 		// TerminalSessionManager.submitTaskChatInputWhenReady，由 session-manager 单测覆盖）。带 source（后台自动
-		// 注入）→ deferWhileUserTurn=true：遇非 agent 回合时让位挂起、不打断正等用户的会话（Fix B）。
+		// 注入）→ deferWhileUserTurn=true：遇 agent 正等用户拍板的模态时让位挂起、不打断（Fix B）。
+		// 带 idempotencyKey → 同时登记诚实回执：runtime 在投递落定后经 onDeliveryOutcome 回写注入账本，
+		// 这是「CLI 已退出不再意味着状态不会变」的接线点。
 		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue", {
 			deferWhileUserTurn: true,
+			idempotencyKey: "rvf-run-1",
+			onDeliveryOutcome: expect.any(Function),
 		});
 		expect(response.summary).toEqual(summary);
 		expect(response.message).toEqual({
@@ -2063,6 +2071,101 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: "rvf-run-1",
 				promptSha256: "abc123",
 			},
+		});
+	});
+
+	// ACP（omp）通道的程序化投递必须当场落终态。这条链路上没有 onDeliveryOutcome 这样的登记点，
+	// 回执一旦停在 accepted_pending_submit_confirmation 就再没有任何人会改写它：
+	// `--wait-for-terminal-status` 必然空等到超时，账本要挂到下次 runtime 启动清扫才被判失败，
+	// 直接违反「唯一非终态必然在有界时间内收敛」这条不变量。
+	it("settles ACP programmatic delivery on the spot instead of leaving it pending forever", async () => {
+		const summary = createSummary({ agentId: "omp", state: "running" });
+		const latestMessage = {
+			id: "message-acp-1",
+			role: "user" as const,
+			content: "please continue",
+			createdAt: Date.now(),
+		};
+		const acpTaskSessionService = {
+			getSummary: vi.fn(() => summary),
+			sendTaskSessionInput: vi.fn(async () => summary),
+			listMessages: vi.fn(() => [latestMessage]),
+			clearTaskSession: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-acp-1",
+				text: "please continue",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-acp-1",
+				promptSha256: "abc123",
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(acpTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
+			"task-acp-1",
+			"please continue",
+			undefined,
+		);
+		expect(response.terminalDelivery).toEqual({
+			status: "delivered_and_submit_confirmed",
+			reason: null,
+		});
+		expect(response.message).toEqual(latestMessage);
+		expect(clineTaskSessionService.sendTaskSessionInput).not.toHaveBeenCalled();
+	});
+
+	// 有 ACP 会话账本但连接已经没了：同样不能留 pending，如实判失败。
+	it("reports ACP delivery failure when the agent connection is already gone", async () => {
+		const summary = createSummary({ agentId: "omp", state: "idle" });
+		const acpTaskSessionService = {
+			getSummary: vi.fn(() => summary),
+			sendTaskSessionInput: vi.fn(async () => null),
+			listMessages: vi.fn(() => []),
+			clearTaskSession: vi.fn(),
+		};
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-acp-1",
+				text: "please continue",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-acp-2",
+				promptSha256: "abc123",
+			},
+		);
+
+		expect(response.ok).toBe(false);
+		expect(response.terminalDelivery).toEqual({
+			status: "delivery_failed",
+			reason: "no_active_terminal_session",
 		});
 	});
 

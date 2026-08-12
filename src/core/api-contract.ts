@@ -2126,13 +2126,61 @@ export const runtimeTaskChatSendRequestSchema = z.object({
 });
 export type RuntimeTaskChatSendRequest = z.infer<typeof runtimeTaskChatSendRequestSchema>;
 
+// 程序化投递的诚实回执。取值集合与语义由跨仓契约固定（terminal-delivery-interface-contract.md），
+// 唯一真相在 src/core/task-message-injection-ledger.ts —— 这里只是把 runtime 的**即时**判定带回 CLI，
+// 让 CLI 能立刻落一个不撒谎的初始状态；终态由 runtime 事后就地改写账本。
+export const terminalDeliveryStatusSchema = z.enum([
+	"delivered_and_submit_confirmed",
+	"delivered_queued_behind_active_agent_turn",
+	"accepted_pending_submit_confirmation",
+	"delivery_failed",
+]);
+export type TerminalDeliveryStatus = z.infer<typeof terminalDeliveryStatusSchema>;
+
+export const terminalDeliveryFailureReasonSchema = z.enum([
+	"no_active_terminal_session",
+	"terminal_prompt_readiness_timeout",
+	"submit_confirmation_budget_exhausted",
+	"human_terminal_contention_timeout",
+	"agent_awaiting_user_decision_timeout",
+	"superseded_by_later_delivery",
+	"session_ended_before_delivery",
+	"cancelled_before_delivery",
+	"runtime_restarted_before_confirmation",
+]);
+export type TerminalDeliveryFailureReason = z.infer<typeof terminalDeliveryFailureReasonSchema>;
+
+export const terminalDeliveryReceiptSchema = z.object({
+	status: terminalDeliveryStatusSchema,
+	reason: terminalDeliveryFailureReasonSchema.nullable(),
+});
+export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
+
 export const runtimeTaskChatSendResponseSchema = z.object({
 	ok: z.boolean(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
 	message: runtimeTaskChatMessageSchema.nullable().optional(),
 	error: z.string().optional(),
+	// 仅程序化投递（请求带 idempotencyKey）才有；人类聊天不写账本，故为 null。
+	terminalDelivery: terminalDeliveryReceiptSchema.nullable().optional(),
 });
 export type RuntimeTaskChatSendResponse = z.infer<typeof runtimeTaskChatSendResponseSchema>;
+
+export const runtimeTaskChatDeliveryCancelRequestSchema = z.object({
+	taskId: z.string(),
+	idempotencyKey: z.string(),
+});
+export type RuntimeTaskChatDeliveryCancelRequest = z.infer<typeof runtimeTaskChatDeliveryCancelRequestSchema>;
+
+export const runtimeTaskChatDeliveryCancelResponseSchema = z.object({
+	ok: z.boolean(),
+	// cancelled_before_delivery：确实拦下了，文本没有进入终端。
+	// already_delivered：取消晚到，在途投递已落定（真实终态在账本里）。
+	// no_pending_delivery：runtime 内存里没有这条在途投递（可能从未到达 runtime，或已被取代）。
+	cancelResult: z.enum(["cancelled_before_delivery", "already_delivered", "no_pending_delivery"]),
+	error: z.string().optional(),
+});
+export type RuntimeTaskChatDeliveryCancelResponse = z.infer<typeof runtimeTaskChatDeliveryCancelResponseSchema>;
 
 export const runtimeTaskChatReloadRequestSchema = z.object({
 	taskId: z.string(),
