@@ -2,6 +2,10 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import { Brain, ChevronDown, ChevronRight, XCircle } from "lucide-react";
 import React, { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import {
+	isAgentChatReasoningMessageStillStreaming,
+	isAgentChatToolMessageStillRunning,
+} from "@/components/detail-panels/agent-chat-message-activity-state";
+import {
 	formatToolInputForDisplay,
 	getToolDisplay,
 	parseToolMessageContent,
@@ -16,7 +20,7 @@ import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 
 function ToolMessageBlock({ message }: { message: ClineChatMessage }): ReactElement {
 	const parsed = useMemo(() => parseToolMessageContent(message.content), [message.content]);
-	const isRunning = message.meta?.hookEventName === "tool_call_start";
+	const isRunning = isAgentChatToolMessageStillRunning(message);
 	const hasError = Boolean(parsed.error);
 	const [expanded, setExpanded] = useState(false);
 
@@ -130,7 +134,7 @@ function ToolMessageBlock({ message }: { message: ClineChatMessage }): ReactElem
 }
 
 function ReasoningMessageBlock({ message }: { message: ClineChatMessage }): ReactElement {
-	const isStreaming = message.meta?.hookEventName === "reasoning_delta";
+	const isStreaming = isAgentChatReasoningMessageStillStreaming(message);
 	const [expanded, setExpanded] = useState(isStreaming);
 	const wasStreamingRef = useRef(isStreaming);
 

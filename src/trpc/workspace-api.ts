@@ -545,6 +545,10 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						title: input.title,
 						prompt,
 						startInPlanMode: runtimeConfig.newTaskStartInPlanModeByDefault,
+						ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
+						// 这条入口不让用户挑 agent，卡片 agentId 恒为空 ⇒ 这张卡实际会跑工作区默认 agent。
+						// 不把它传下去的话，「工作区默认是 omp」的新卡不会固化通道，之后改全局默认会反向改掉它。
+						workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
 						baseRef: resolvedBaseRef,
 						images: input.images,
 					},

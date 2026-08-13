@@ -17,6 +17,7 @@ import {
 	clearAcpStreamingGrouping,
 	createAcpMessage,
 	deriveAcpFacetPatch,
+	finishAcpStreamedReasoningMessages,
 	now,
 	replaceAcpMessage,
 	updateAcpSummary,
@@ -34,6 +35,13 @@ export interface AcpSessionUpdateContext {
 	agentId: RuntimeAgentId;
 	pid: number | null;
 	entry: AcpTaskSessionEntry;
+	// 这一批 update 是否来自 session/load 的**历史重播**（而不是 agent 此刻正在产出）。
+	// omp 的 #replaySessionHistory 把整段既往对话当成普通 agent_message_chunk / tool_call 重发，
+	// 与真实产出在协议层完全同形，只能靠「我们正处在 session/load 之中」这个外部事实区分。
+	// 它是终端侧 suppressSubstantiveOutputUntilContinues 的对位物：重播必须只补消息、
+	// 不推进 lastSubstantiveOutputAt、不把卡片翻成 running（否则每次切到 ACP 都会把一张
+	// 停在 Review 的卡片凭空推回 In Progress，并把「agent 上次响应」刷成刚刚）。
+	isReplayingPersistedConversationHistory: boolean;
 	emitSummary(summary: RuntimeTaskSessionSummary): void;
 	emitMessage(message: AcpTaskMessage): void;
 }
@@ -222,6 +230,11 @@ function readCurrentModeId(update: Extract<AcpSessionUpdate, { sessionUpdate: "c
 // SessionUpdate（agent_message_chunk / agent_thought_chunk / tool_call / tool_call_update / plan）。
 // 两条分支都要推进——「回合归属已是用户」只影响要不要夺回 facet，不改变「agent 确实刚吐了东西」这个事实。
 function emitRunningSummary(context: AcpSessionUpdateContext): void {
+	// 重播守卫的**唯一**闸口：历史重播只往聊天流里补消息，绝不碰回合归属与产出时间戳。
+	// 放在这里而不是每个 apply* 分支里，是因为所有「有产出」的分支最终都汇到这一个函数。
+	if (context.isReplayingPersistedConversationHistory) {
+		return;
+	}
 	const timestamp = now();
 	if (isAwaitingUserTurn(context.entry.summary)) {
 		context.emitSummary(
@@ -250,6 +263,10 @@ export function applyAcpPromptTurnCompletion(
 	context: AcpSessionUpdateContext,
 	stopReason: AcpStopReason,
 ): RuntimeTaskSessionSummary {
+	// 顺序承重：先把本回合的 reasoning 标成已收束（读的正是分组表），再清分组。
+	for (const finishedReasoningMessage of finishAcpStreamedReasoningMessages(context.entry)) {
+		context.emitMessage(finishedReasoningMessage);
+	}
 	clearAcpStreamingGrouping(context.entry);
 	const timestamp = now();
 

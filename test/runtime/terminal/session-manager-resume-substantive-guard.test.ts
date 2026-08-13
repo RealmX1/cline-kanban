@@ -486,4 +486,49 @@ describe("TerminalSessionManager resume substantive guard", () => {
 
 		expect(manager.getSummary("task-guard-posttool")?.lastSubstantiveOutputAt).toBe(beforeAutoContinue);
 	});
+
+	// 通道切换重开与「从垃圾桶拖回」都不投新 prompt，但**成因**不同，而成因决定 userTurnKind：
+	//   resumeFromTrash → attention / needs_input（确实需要人来看一眼）
+	//   通道切换      → hook / review（agent 只是把回合交回来，没有任何东西在等你拍板）
+	// 这条不是风格问题：needs_input 落在 MODAL_USER_DECISION_TURN_KINDS 里，后台程序化投递
+	// （RVF followup / `kanban task message`）会一直让位到预算耗尽、报
+	// agent_awaiting_user_decision_timeout —— 而这条会话其实空闲着、随时可以收消息。
+	// 实测踩到过：omp 从 ACP 切回 TUI 后，第一条 task message 就这样被判失败。
+	it("通道切换重开停在 review（可收投递），垃圾桶恢复才停在 needs_input", async () => {
+		prepareAgentLaunchMock.mockResolvedValue({ args: [], env: {} });
+		const spawnedSessions: MockPtySession[] = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(900 + spawnedSessions.length, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+		const manager = new TerminalSessionManager();
+
+		await manager.startTaskSession({
+			taskId: "task-transport-switch-resume",
+			agentId: "omp",
+			binary: "omp",
+			args: [],
+			cwd: "/tmp/task-transport-switch-resume",
+			prompt: "Implement the task",
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+		});
+		const switchResumed = manager.getSummary("task-transport-switch-resume");
+		expect(switchResumed?.reviewReason).toBe("hook");
+		expect(switchResumed?.userTurnKind).toBe("review");
+		expect(switchResumed?.turnOwner).toBe("user");
+
+		await manager.startTaskSession({
+			taskId: "task-trash-restore-resume",
+			agentId: "omp",
+			binary: "omp",
+			args: [],
+			cwd: "/tmp/task-trash-restore-resume",
+			prompt: "Implement the task",
+			resumeFromTrash: true,
+		});
+		const trashRestored = manager.getSummary("task-trash-restore-resume");
+		expect(trashRestored?.reviewReason).toBe("attention");
+		expect(trashRestored?.userTurnKind).toBe("needs_input");
+	});
 });

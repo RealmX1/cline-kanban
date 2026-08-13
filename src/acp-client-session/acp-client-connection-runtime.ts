@@ -31,6 +31,17 @@ import {
 // agent 进程写到 stderr 的诊断信息保留最近这么多字符，用于把启动失败的真实原因带回给用户。
 const AGENT_STDERR_DIAGNOSTIC_BUFFER_CHARACTER_LIMIT = 8_000;
 
+// session/list 返回的 `updatedAt` 是 ISO 8601 字符串（omp 的 #toSessionInfo 写的是
+// `session.modified.toISOString()`）。解析不出来的一律当成「最旧」，好让格式变化只会让排序退化，
+// 而不是让整个挑选逻辑抛异常。
+function readAgentSessionUpdatedAtMs(session: { updatedAt?: unknown }): number {
+	if (typeof session.updatedAt !== "string") {
+		return Number.NEGATIVE_INFINITY;
+	}
+	const parsedMs = Date.parse(session.updatedAt);
+	return Number.isNaN(parsedMs) ? Number.NEGATIVE_INFINITY : parsedMs;
+}
+
 export interface AcpTaskConnectionStartInput {
 	taskId: string;
 	agentId: RuntimeAgentId;
@@ -38,6 +49,11 @@ export interface AcpTaskConnectionStartInput {
 	cwd: string;
 	permissionMode: RuntimeTaskAgentPermissionMode;
 	startInPlanMode?: boolean;
+	// 续跑既有对话而不是开新会话：用 session/list({cwd}) 找到该 worktree 下最近的一条 omp 会话，
+	// 再 session/load 把它接上（omp 声明 loadSession: true 并实现了这两个方法）。
+	// 找不到或加载失败一律**抛错**，绝不静默回落到 session/new：静默开一个空会话会让用户以为
+	// 上下文接上了，而且这条新会话会顶掉「最近一条」，令之后切回 TUI 的 --continue 也接错。
+	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
 	env?: Record<string, string | undefined>;
 }
 
@@ -86,11 +102,22 @@ interface AcpTaskConnectionRecord extends AcpTaskConnection {
 export class AcpClientConnectionRuntime {
 	private readonly connectionsByTaskId = new Map<string, AcpTaskConnectionRecord>();
 	private readonly taskIdBySessionId = new Map<string, string>();
+	// 正在跑 session/load 的 task。协议层分不出「历史重播」与「agent 此刻在产出」——两者都是
+	// agent_message_chunk / tool_call，唯一的区分事实就是「我们正处在 session/load 之中」。
+	// session/load 的 await 期间同步到达的每一条 update 都落在这个窗口里（omp 在返回响应前
+	// 就把历史推完），于是 add/delete 这对括号足以覆盖整段重播。
+	private readonly replayingHistoryTaskIds = new Set<string>();
 
 	constructor(private readonly handlers: AcpConnectionRuntimeHandlers) {}
 
 	getConnection(taskId: string): AcpTaskConnection | null {
 		return this.connectionsByTaskId.get(taskId) ?? null;
+	}
+
+	// 该 task 此刻是否正在重播 session/load 的历史。会话服务据此挂重播守卫
+	// （见 AcpSessionUpdateContext.isReplayingPersistedConversationHistory）。
+	isReplayingPersistedConversationHistory(taskId: string): boolean {
+		return this.replayingHistoryTaskIds.has(taskId);
 	}
 
 	async startTaskConnection(input: AcpTaskConnectionStartInput): Promise<AcpTaskConnection> {
@@ -163,6 +190,10 @@ export class AcpClientConnectionRuntime {
 				cwd: input.cwd,
 				initializeResponse,
 				agentId: input.agentId,
+				resumePriorAgentConversationWithoutResendingPrompt: Boolean(
+					input.resumePriorAgentConversationWithoutResendingPrompt,
+				),
+				taskId: input.taskId,
 			});
 
 			const record: AcpTaskConnectionRecord = {
@@ -235,9 +266,18 @@ export class AcpClientConnectionRuntime {
 
 	private async openAgentSession(
 		connection: AcpClientConnection,
-		input: { cwd: string; initializeResponse: AcpInitializeResponse; agentId: RuntimeAgentId },
+		input: {
+			cwd: string;
+			initializeResponse: AcpInitializeResponse;
+			agentId: RuntimeAgentId;
+			taskId: string;
+			resumePriorAgentConversationWithoutResendingPrompt: boolean;
+		},
 	) {
 		try {
+			if (input.resumePriorAgentConversationWithoutResendingPrompt) {
+				return await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
+			}
 			return await connection.agent.request(ACP_AGENT_METHODS.session_new, {
 				cwd: input.cwd,
 				mcpServers: [],
@@ -254,11 +294,66 @@ export class AcpClientConnectionRuntime {
 				throw error;
 			}
 			await connection.agent.request(ACP_AGENT_METHODS.authenticate, { methodId: authMethodId });
+			if (input.resumePriorAgentConversationWithoutResendingPrompt) {
+				return await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
+			}
 			return await connection.agent.request(ACP_AGENT_METHODS.session_new, {
 				cwd: input.cwd,
 				mcpServers: [],
 			});
 		}
+	}
+
+	// 接上该 worktree 下最近的一条 agent 会话。
+	//
+	// 为什么「最近一条」就够精确：Kanban 每个 task 一个 worktree，而 omp 的会话库按 cwd 建，
+	// 于是 `cwd == 该任务的 worktree` 这一条件本身就把候选集收敛到了这个任务的对话。
+	// 它与 TUI 侧 `--continue` 的语义完全一致（omp 的 terminal breadcrumb 在新 PTY 上必然失配，
+	// 从而回落到同一个「该 cwd 下最近的 session」规则），所以两条通道来回切换接的是同一段对话。
+	//
+	// session/load 会把整段历史当成普通 SessionUpdate 重播回来（omp 的 #replaySessionHistory）。
+	// 重播期间必须挂上重播守卫，否则会把卡片刷成 running、把「agent 上次响应」刷成刚刚——
+	// 守卫在 handleSessionUpdate 一侧按 taskId 判定，见 replayingHistoryTaskIds。
+	private async loadMostRecentAgentSessionForWorkingDirectory(
+		connection: AcpClientConnection,
+		input: { cwd: string; taskId: string },
+	) {
+		const listResponse = await connection.agent.request(ACP_AGENT_METHODS.session_list, { cwd: input.cwd });
+		const sessions = Array.isArray(listResponse?.sessions) ? listResponse.sessions : [];
+		const mostRecentSession = sessions.reduce<(typeof sessions)[number] | null>((mostRecent, candidate) => {
+			if (!mostRecent) {
+				return candidate;
+			}
+			return readAgentSessionUpdatedAtMs(candidate) >= readAgentSessionUpdatedAtMs(mostRecent)
+				? candidate
+				: mostRecent;
+		}, null);
+		if (!mostRecentSession) {
+			throw new Error(
+				"The agent reported no previous conversation in this task worktree, so there is nothing to continue. " +
+					"Start a fresh session instead.",
+			);
+		}
+		// sessionId → taskId 必须**在** session/load 之前登记：重播的 update 在该请求 await 期间就已到达，
+		// 而 handleSessionUpdate 靠这张表反查 taskId，晚登记会让整段历史被静默丢弃（走 taskId 未知的丢弃分支）。
+		// 正常路径上这一行稍后会被 startTaskConnection 用同样的键值再写一次，是幂等的。
+		this.taskIdBySessionId.set(mostRecentSession.sessionId, input.taskId);
+		this.replayingHistoryTaskIds.add(input.taskId);
+		try {
+			await connection.agent.request(ACP_AGENT_METHODS.session_load, {
+				sessionId: mostRecentSession.sessionId,
+				cwd: input.cwd,
+				mcpServers: [],
+			});
+		} catch (error) {
+			// 加载失败 ⇒ 这条连接不会被登记，提前写进去的反查项必须撤掉，否则会一直挂着一条
+			// 指向不存在连接的映射，把后续同 sessionId 的通知错投给这个 task。
+			this.taskIdBySessionId.delete(mostRecentSession.sessionId);
+			throw error;
+		} finally {
+			this.replayingHistoryTaskIds.delete(input.taskId);
+		}
+		return { sessionId: mostRecentSession.sessionId };
 	}
 
 	// elicitation 的作用域可能是 session 级也可能是 request 级；session 级带 sessionId，

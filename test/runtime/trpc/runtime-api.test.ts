@@ -1,10 +1,16 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
-import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import type {
+	RuntimeBoardCard,
+	RuntimeBoardData,
+	RuntimeTaskSessionSummary,
+	RuntimeTaskTerminalAgentModelOverrideSettings,
+} from "../../../src/core/api-contract";
 
 const agentRegistryMocks = vi.hoisted(() => ({
 	resolveAgentCommand: vi.fn(),
@@ -61,6 +67,10 @@ const browserMocks = vi.hoisted(() => ({
 
 const workspaceStateMocks = vi.hoisted(() => ({
 	loadWorkspaceBoardById: vi.fn(),
+	mutateWorkspaceState: vi.fn(),
+	// Prompt Library 的全局桶落在 kanban 根目录下。测试要一个自己的根，否则终端暂存用例会在
+	// 开发者**真实**的 ~/.cline/kanban 上取锁写文件。每次运行取唯一路径，避免并行 worker 互踩。
+	runtimeHomePath: `/tmp/kanban-runtime-api-test-home-${process.pid}-${Math.random().toString(16).slice(2)}`,
 }));
 
 vi.mock("../../../src/terminal/agent-registry.js", () => ({
@@ -134,8 +144,19 @@ vi.mock("../../../src/server/browser.js", () => ({
 
 vi.mock("../../../src/state/workspace-state.js", () => ({
 	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
+	// 程序化投递要按 workspaceId 解析注入账本路径。这个 mock 是刻意部分的，
+	// 漏一个符号不会报「未 mock」而是让整条 sendTaskChatMessage 被 catch 成 ok:false——
+	// 静默降级，所以新增运行时依赖时必须同步补齐这里。
+	getWorkspaceDirectoryPath: (workspaceId: string) => `/tmp/kanban-workspaces/${workspaceId}`,
+	getRuntimeHomePath: () => workspaceStateMocks.runtimeHomePath,
+	getWorkspacesRootPath: () => "/tmp/kanban-workspaces",
+	mutateWorkspaceState: workspaceStateMocks.mutateWorkspaceState,
 }));
 
+import {
+	getWorkspacePromptLibraryPath,
+	readWorkspacePromptLibrarySnapshot,
+} from "../../../src/state/prompt-library-store";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
 
@@ -197,6 +218,7 @@ function createRuntimeConfigState(): RuntimeConfigState {
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
 		newTaskStartInPlanModeByDefault: true,
+		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
@@ -1417,6 +1439,338 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(response.mode).toBe("resume");
 	});
 
+	// ── 「首轮未结束被硬中断 → 重启后 TUI 全白且重启按钮不可用」的回归护栏 ────────────────────
+	// 中断后 agentId 是最容易丢的字段。以前 refreshTaskTerminal 在解析卡片**之前**就以「没有活体
+	// summary」「summary.agentId 为 null」两条 gate 拒绝，于是那句 `?? card.agentId ?? selectedAgentId`
+	// 兜底永远够不着——用户只剩一个既全白、又点不动的面板。
+
+	it("rebuilds the session when the summary is gone entirely（硬中断后没有任何活体条目）", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+			agentId: "claude",
+			label: "Claude Code",
+			command: "claude",
+			binary: "claude",
+			args: [],
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({ agentId: "claude", resumeFromTrash: true }),
+		);
+	});
+
+	it("rebuilds the session from the card's most recently launched agent when the summary lost its agentId", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		// 卡片没有 agentId（用户从未显式选过 agent，走项目默认档）——正是 2026-07 那次修复漏掉的那类卡片。
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [
+				{
+					id: "in_progress",
+					title: "In Progress",
+					cards: [
+						{
+							id: "task-1",
+							title: "Task 1",
+							prompt: "Implement task",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+							mostRecentlyLaunchedAgentSessionAgentId: "codex",
+						},
+					],
+				},
+			],
+			dependencies: [],
+		});
+		agentRegistryMocks.resolveAgentCommand.mockImplementation((config: { selectedAgentId: string }) => ({
+			agentId: config.selectedAgentId,
+			label: config.selectedAgentId,
+			command: config.selectedAgentId,
+			binary: config.selectedAgentId,
+			args: [],
+		}));
+		const terminalManager = {
+			getSummary: vi.fn(() => createSummary({ agentId: null, startedAt: null, pid: null })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "codex" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			// 项目默认档是 claude；卡片记下的最近一次启动是 codex，后者才是这个会话的真相。
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(expect.objectContaining({ agentId: "codex" }));
+	});
+
+	// ── 兜底优先级排序护栏：观测事实 > 卡片意图 ──────────────────────────────────────────────
+	// `refreshTaskTerminal` 下游是 `resumeFromTrash: true` → `--continue`，解析的是「这条**既存**会话由谁跑起来」，
+	// 与 `backfillMissingSessionAgentIdsFromDurableSources` 同问题、必须同序。
+
+	it("prefers the observed launched agent over the card's agentId when the two disagree", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		// 卡片意图是 claude（「下次想用 claude 启动」），但上一次真正跑起来的是 codex。
+		// 续的是那条既存会话，故必须取观测值 codex。
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [
+				{
+					id: "in_progress",
+					title: "In Progress",
+					cards: [
+						{
+							id: "task-1",
+							title: "Task 1",
+							prompt: "Implement task",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+							agentId: "claude",
+							mostRecentlyLaunchedAgentSessionAgentId: "codex",
+						},
+					],
+				},
+			],
+			dependencies: [],
+		});
+		agentRegistryMocks.resolveAgentCommand.mockImplementation((config: { selectedAgentId: string }) => ({
+			agentId: config.selectedAgentId,
+			label: config.selectedAgentId,
+			command: config.selectedAgentId,
+			binary: config.selectedAgentId,
+			args: [],
+		}));
+		const terminalManager = {
+			getSummary: vi.fn(() => createSummary({ agentId: null, startedAt: null, pid: null })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "codex" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(expect.objectContaining({ agentId: "codex" }));
+	});
+
+	it("rejects refresh when the observed launched agent is a conversation-panel agent even if the card names a PTY agent", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		// `startTaskSession` 的 `shouldProbePersistedClineSession` 分支会在 `card.agentId` 仍是 PTY agent 时
+		// 探测到持久化的 Cline 会话并改走 Cline——真正跑起来的与卡片意图天然不一致。若让 card.agentId 胜出，
+		// 下面那道「非 PTY agent 一律拒绝刷新」的能力谓词闸门会被骗过，把 Cline 会话用 PTY agent 重启掉。
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [
+				{
+					id: "in_progress",
+					title: "In Progress",
+					cards: [
+						{
+							id: "task-1",
+							title: "Task 1",
+							prompt: "Implement task",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+							agentId: "codex",
+							mostRecentlyLaunchedAgentSessionAgentId: "cline",
+						},
+					],
+				},
+			],
+			dependencies: [],
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => createSummary({ agentId: null, startedAt: null, pid: null })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "cline" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(false);
+		expect(response.error).toBe("Refresh is only available for active TUI terminal agents.");
+		expect(terminalManager.refreshTaskTerminal).not.toHaveBeenCalled();
+	});
+
+	it("still rejects refresh for agents that are not PTY terminals（按能力谓词，不按 agentId 字面量）", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [
+				{
+					id: "in_progress",
+					title: "In Progress",
+					cards: [
+						{
+							id: "task-1",
+							title: "Task 1",
+							prompt: "Implement task",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+							agentId: "cline",
+						},
+					],
+				},
+			],
+			dependencies: [],
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => createSummary({ agentId: null, startedAt: null, pid: null })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "cline" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(false);
+		expect(response.error).toBe("Refresh is only available for active TUI terminal agents.");
+		expect(terminalManager.refreshTaskTerminal).not.toHaveBeenCalled();
+	});
+
+	it("records the launched agent onto the card so a hard interruption can be recovered from", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+			agentId: "codex",
+			label: "OpenAI Codex",
+			command: "codex",
+			binary: "codex",
+			args: [],
+		});
+		const boardBeforeLaunch = {
+			columns: [
+				{
+					id: "in_progress",
+					title: "In Progress",
+					cards: [
+						{
+							id: "task-1",
+							title: "Task 1",
+							prompt: "Implement task",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+					],
+				},
+			],
+			dependencies: [],
+		} as unknown as RuntimeBoardData;
+		let savedBoard: RuntimeBoardData | null = null;
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (
+				_workspacePath: string,
+				mutate: (state: { board: RuntimeBoardData }) => {
+					board: RuntimeBoardData;
+					value: unknown;
+					save?: boolean;
+				},
+			) => {
+				const mutation = mutate({ board: boardBeforeLaunch });
+				if (mutation.save !== false) {
+					savedBoard = mutation.board;
+				}
+				return { value: mutation.value, state: { board: mutation.board }, saved: mutation.save !== false };
+			},
+		);
+		const terminalManager = {
+			startTaskSession: vi.fn(async () => createSummary({ agentId: "codex" })),
+			applyTurnCheckpoint: vi.fn(() => null),
+			getSummary: vi.fn(() => null),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => {
+				const runtimeConfigState = createRuntimeConfigState();
+				runtimeConfigState.selectedAgentId = "codex";
+				return runtimeConfigState;
+			}),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", baseRef: "main", prompt: "Do the thing" },
+		);
+
+		expect(response.ok).toBe(true);
+		const launchedCard = (savedBoard as RuntimeBoardData | null)?.columns
+			.flatMap((column) => column.cards)
+			.find((entry) => entry.id === "task-1");
+		expect(launchedCard?.mostRecentlyLaunchedAgentSessionAgentId).toBe("codex");
+		// 观测值不得伪装成用户的 per-task 覆盖，也不得 bump 用户可见的「上次修改时间」。
+		expect(launchedCard?.agentId).toBeUndefined();
+		expect(launchedCard?.updatedAt).toBe(1);
+	});
+
 	it("does not resolve cline OAuth when starting a non-cline task session", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
@@ -2039,9 +2393,13 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
 		// RVF followup 终端回退：经就绪门控投递，以原始文本调用（bracketed-paste 编码与就绪判定下沉到
 		// TerminalSessionManager.submitTaskChatInputWhenReady，由 session-manager 单测覆盖）。带 source（后台自动
-		// 注入）→ deferWhileUserTurn=true：遇非 agent 回合时让位挂起、不打断正等用户的会话（Fix B）。
+		// 注入）→ deferWhileUserTurn=true：遇 agent 正等用户拍板的模态时让位挂起、不打断（Fix B）。
+		// 带 idempotencyKey → 同时登记诚实回执：runtime 在投递落定后经 onDeliveryOutcome 回写注入账本，
+		// 这是「CLI 已退出不再意味着状态不会变」的接线点。
 		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue", {
 			deferWhileUserTurn: true,
+			idempotencyKey: "rvf-run-1",
+			onDeliveryOutcome: expect.any(Function),
 		});
 		expect(response.summary).toEqual(summary);
 		expect(response.message).toEqual({
@@ -2055,6 +2413,112 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: "rvf-run-1",
 				promptSha256: "abc123",
 			},
+		});
+	});
+
+	// ACP（omp）通道的程序化投递必须当场落终态。这条链路上没有 onDeliveryOutcome 这样的登记点，
+	// 回执一旦停在 accepted_pending_submit_confirmation 就再没有任何人会改写它：
+	// `--wait-for-terminal-status` 必然空等到超时，账本要挂到下次 runtime 启动清扫才被判失败，
+	// 直接违反「唯一非终态必然在有界时间内收敛」这条不变量。
+	it("settles ACP programmatic delivery on the spot instead of leaving it pending forever", async () => {
+		// ACP 会话的 summary 恒由 createDefaultAcpSummary 盖上通道章。这里必须显式带上：
+		// 不带章的 omp summary 现在意味着一条 **TUI** 会话（omp 的 catalog 默认已是 pty_terminal），
+		// 聊天端点会正确地不把它当 ACP 任务分派。
+		const summary = createSummary({
+			agentId: "omp",
+			state: "running",
+			sessionTransport: "acp_stdio_subprocess",
+		});
+		const latestMessage = {
+			id: "message-acp-1",
+			role: "user" as const,
+			content: "please continue",
+			createdAt: Date.now(),
+		};
+		const acpTaskSessionService = {
+			getSummary: vi.fn(() => summary),
+			sendTaskSessionInput: vi.fn(async () => summary),
+			listMessages: vi.fn(() => [latestMessage]),
+			clearTaskSession: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-acp-1",
+				text: "please continue",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-acp-1",
+				promptSha256: "abc123",
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(acpTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
+			"task-acp-1",
+			"please continue",
+			undefined,
+		);
+		expect(response.terminalDelivery).toEqual({
+			status: "delivered_and_submit_confirmed",
+			reason: null,
+		});
+		expect(response.message).toEqual(latestMessage);
+		expect(clineTaskSessionService.sendTaskSessionInput).not.toHaveBeenCalled();
+	});
+
+	// 有 ACP 会话账本但连接已经没了：同样不能留 pending，如实判失败。
+	it("reports ACP delivery failure when the agent connection is already gone", async () => {
+		const summary = createSummary({
+			agentId: "omp",
+			state: "idle",
+			sessionTransport: "acp_stdio_subprocess",
+		});
+		const acpTaskSessionService = {
+			getSummary: vi.fn(() => summary),
+			sendTaskSessionInput: vi.fn(async () => null),
+			listMessages: vi.fn(() => []),
+			clearTaskSession: vi.fn(),
+		};
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.sendTaskChatMessage(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-acp-1",
+				text: "please continue",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-acp-2",
+				promptSha256: "abc123",
+			},
+		);
+
+		expect(response.ok).toBe(false);
+		expect(response.terminalDelivery).toEqual({
+			status: "delivery_failed",
+			reason: "no_active_terminal_session",
 		});
 	});
 
@@ -3361,5 +3825,749 @@ describe("createRuntimeApi update handlers", () => {
 			message: "Updated Kanban to 0.2.0.",
 		});
 		expect(runUpdateNow).toHaveBeenCalledTimes(1);
+	});
+});
+
+// 恢复既有对话（`--continue`）时的模型来源。原 bug：点「Restart terminal session」后会话被恢复到
+// 卡片上那个「记住上次选择」自动回填的模型（实测多为 Fable 5），而不是这段对话自己在跑的模型。
+// 探针本身与裸 id → 启动 id 的映射各有专门套件；这里守的是**接线**：两条恢复入口有没有真的把
+// 解析结果下发给启动请求、有没有按分档决定回写，以及全新启动有没有被误伤。
+describe("createRuntimeApi resumed claude session model", () => {
+	const RESUMED_TASK_ID = "task-1";
+	let temporaryHomeDirectoryPath: string;
+	let taskWorktreePath: string;
+	let originalHomeDirectoryPath: string | undefined;
+
+	// Claude Code 落盘的转录目录名由**已解析软链的** cwd 编码而成（macOS 的 /tmp→/private/tmp 就靠这一步），
+	// 与探针里的 realpath 是同一条契约；这里也走 realpathSync，否则夹具会写到一个探针永远找不到的目录。
+	function writeTranscriptRecordsForTaskWorktree(records: unknown[]): void {
+		const projectDirectoryPath = join(
+			temporaryHomeDirectoryPath,
+			".claude",
+			"projects",
+			realpathSync(taskWorktreePath).replace(/[^a-zA-Z0-9]/gu, "-"),
+		);
+		mkdirSync(projectDirectoryPath, { recursive: true });
+		writeFileSync(
+			join(projectDirectoryPath, "1041c594-8f2b-4c7d-9a3e-5b6d7e8f9a0b.jsonl"),
+			`${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+			"utf8",
+		);
+	}
+
+	function assistantRecord(modelId: string): unknown {
+		return {
+			type: "assistant",
+			timestamp: "2026-08-12T10:00:00.000Z",
+			message: { role: "assistant", model: modelId },
+		};
+	}
+
+	function createResumedTaskCard(
+		terminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
+	): RuntimeBoardCard {
+		return {
+			id: RESUMED_TASK_ID,
+			title: "Task 1",
+			prompt: "Implement task",
+			startInPlanMode: true,
+			autoReviewEnabled: true,
+			autoReviewMode: "pr",
+			baseRef: "main",
+			createdAt: 1,
+			updatedAt: 1,
+			...(terminalAgentModelOverrideSettings ? { terminalAgentModelOverrideSettings } : {}),
+		} as RuntimeBoardCard;
+	}
+
+	function createBoardWithResumedTaskCard(card: RuntimeBoardCard): RuntimeBoardData {
+		return {
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [] },
+				{ id: "in_progress", title: "In Progress", cards: [card] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		} as RuntimeBoardData;
+	}
+
+	// 只把 mutator 跑在内存 board 上，不碰真实文件锁——这里要验的是「传给 updateTask 的输入对不对」。
+	//
+	// 收集**每一次**落盘的 board 而不是只留最后一次：同一次启动/重启现在会发生两次互不相关的卡片写入，
+	// 「按转录模型回写 override」与「记下最近一次启动用的 agent」各一次。用「最后一次」或用
+	// `mutateWorkspaceState` 的调用次数做断言，都会把这两条链路混为一谈。
+	interface CapturedWorkspaceStateMutations {
+		savedBoards: RuntimeBoardData[];
+	}
+
+	function stubWorkspaceStateMutationAgainst(board: RuntimeBoardData): CapturedWorkspaceStateMutations {
+		const captured: CapturedWorkspaceStateMutations = { savedBoards: [] };
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (
+				_workspacePath: string,
+				mutate: (state: { board: RuntimeBoardData }) => {
+					board: RuntimeBoardData;
+					value: unknown;
+					save?: boolean;
+				},
+			) => {
+				const mutation = mutate({ board });
+				if (mutation.save !== false) {
+					captured.savedBoards.push(mutation.board);
+				}
+				return { value: mutation.value, state: { board: mutation.board }, saved: mutation.save !== false };
+			},
+		);
+		return captured;
+	}
+
+	function collectSavedResumedTaskCards(captured: CapturedWorkspaceStateMutations): RuntimeBoardCard[] {
+		return captured.savedBoards
+			.flatMap((savedBoard) => savedBoard.columns.flatMap((column) => column.cards))
+			.filter((entry) => entry.id === RESUMED_TASK_ID);
+	}
+
+	// 「模型 override 没有被改写」的判据：所有落盘过的卡片版本上，该字段都还是原值。
+	// 不用「mutateWorkspaceState 没被调用过」——那条断言会被无关的 agent 身份回写误伤。
+	function expectNoTerminalAgentModelOverrideWrite(
+		captured: CapturedWorkspaceStateMutations,
+		unchangedSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
+	): void {
+		for (const savedCard of collectSavedResumedTaskCards(captured)) {
+			expect(savedCard.terminalAgentModelOverrideSettings).toEqual(unchangedSettings);
+		}
+	}
+
+	function createTerminalManagerStub() {
+		return {
+			getSummary: vi.fn(() => createSummary({ agentId: "claude", workspacePath: taskWorktreePath })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+			startTaskSession: vi.fn(async () => createSummary({ agentId: "claude" })),
+			applyTurnCheckpoint: vi.fn(() => null),
+			listSummaries: vi.fn(() => []),
+		};
+	}
+
+	function createApiWithTerminalManager(terminalManager: ReturnType<typeof createTerminalManagerStub>) {
+		return createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+	}
+
+	beforeEach(() => {
+		originalHomeDirectoryPath = process.env.HOME;
+		temporaryHomeDirectoryPath = mkdtempSync(join(tmpdir(), "kanban-resumed-model-home-"));
+		process.env.HOME = temporaryHomeDirectoryPath;
+		taskWorktreePath = join(temporaryHomeDirectoryPath, "worktree");
+		mkdirSync(taskWorktreePath, { recursive: true });
+
+		agentRegistryMocks.resolveAgentCommand.mockReset();
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+			agentId: "claude",
+			label: "Claude Code",
+			command: "claude",
+			binary: "claude",
+			args: [],
+		});
+		taskWorktreeMocks.resolveTaskCwd.mockReset();
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue(taskWorktreePath);
+		turnCheckpointMocks.captureTaskTurnCheckpoint.mockReset();
+		turnCheckpointMocks.captureTaskTurnCheckpoint.mockRejectedValue(new Error("checkpoint disabled in this suite"));
+		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
+		workspaceStateMocks.mutateWorkspaceState.mockReset();
+	});
+
+	afterEach(() => {
+		if (originalHomeDirectoryPath === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = originalHomeDirectoryPath;
+		}
+		rmSync(temporaryHomeDirectoryPath, { recursive: true, force: true });
+	});
+
+	it("restarts onto the model the transcript last used and syncs a pinned-version card to it", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-opus-5")]);
+		const card = createResumedTaskCard({ agentId: "claude", modelId: "claude-fable-5" });
+		const board = createBoardWithResumedTaskCard(card);
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		const capturedMutation = stubWorkspaceStateMutationAgainst(board);
+		const terminalManager = createTerminalManagerStub();
+		const api = createApiWithTerminalManager(terminalManager);
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: RESUMED_TASK_ID, cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(true);
+		// 转录只记裸 id，故启动 id 必须补回 1M 变体，否则恢复会静默从 1M 掉到 200k。
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				resumeFromTrash: true,
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-opus-5[1m]" },
+			}),
+		);
+		const updatedCard = collectSavedResumedTaskCards(capturedMutation).find(
+			(entry) => entry.terminalAgentModelOverrideSettings?.modelId === "claude-opus-5[1m]",
+		);
+		expect(updatedCard?.terminalAgentModelOverrideSettings).toEqual({
+			agentId: "claude",
+			modelId: "claude-opus-5[1m]",
+		});
+		// updateTask 的这几个字段不是三态，回写时漏传就会被静默复位——卡片会因为「重启了一次」丢掉计划态与自动 review 设置。
+		expect(updatedCard?.title).toBe("Task 1");
+		expect(updatedCard?.prompt).toBe("Implement task");
+		expect(updatedCard?.baseRef).toBe("main");
+		expect(updatedCard?.startInPlanMode).toBe(true);
+		expect(updatedCard?.autoReviewEnabled).toBe(true);
+		expect(updatedCard?.autoReviewMode).toBe("pr");
+	});
+
+	it("keeps the card override when the transcript cannot answer", async () => {
+		const card = createResumedTaskCard({ agentId: "claude", modelId: "claude-fable-5" });
+		const board = createBoardWithResumedTaskCard(card);
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		const capturedMutation = stubWorkspaceStateMutationAgainst(board);
+		const terminalManager = createTerminalManagerStub();
+		const api = createApiWithTerminalManager(terminalManager);
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: RESUMED_TASK_ID, cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
+			}),
+		);
+		expectNoTerminalAgentModelOverrideWrite(capturedMutation, { agentId: "claude", modelId: "claude-fable-5" });
+	});
+
+	it("follows the transcript but leaves a latest-tracking alias card unwritten", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-opus-5")]);
+		const card = createResumedTaskCard({ agentId: "claude", modelId: "fable" });
+		const board = createBoardWithResumedTaskCard(card);
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		const capturedMutation = stubWorkspaceStateMutationAgainst(board);
+		const terminalManager = createTerminalManagerStub();
+		const api = createApiWithTerminalManager(terminalManager);
+
+		await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: RESUMED_TASK_ID, cols: 120, rows: 40 },
+		);
+
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-opus-5[1m]" },
+			}),
+		);
+		// 把 `fable`（永远跟最新那一代）改写成钉版本 id 是单向信息损失，且会波及此后的全新启动。
+		expectNoTerminalAgentModelOverrideWrite(capturedMutation, { agentId: "claude", modelId: "fable" });
+	});
+
+	it("never replaces a phase-switching opusplan card, not even for this launch", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-sonnet-5")]);
+		const card = createResumedTaskCard({ agentId: "claude", modelId: "opusplan" });
+		const board = createBoardWithResumedTaskCard(card);
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		const capturedMutation = stubWorkspaceStateMutationAgainst(board);
+		const terminalManager = createTerminalManagerStub();
+		const api = createApiWithTerminalManager(terminalManager);
+
+		await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: RESUMED_TASK_ID, cols: 120, rows: 40 },
+		);
+
+		// opusplan 是「计划期 Opus、其余 Sonnet」的策略；顶替成转录里那一阶段的具体模型会把它永久钉死。
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "opusplan" },
+			}),
+		);
+		expectNoTerminalAgentModelOverrideWrite(capturedMutation, { agentId: "claude", modelId: "opusplan" });
+	});
+
+	it("applies the same rule when a task session is restored from trash", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-opus-5")]);
+		const board = createBoardWithResumedTaskCard(createResumedTaskCard(undefined));
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		stubWorkspaceStateMutationAgainst(board);
+		const terminalManager = createTerminalManagerStub();
+		terminalManager.getSummary = vi.fn(() => null as never);
+		const api = createApiWithTerminalManager(terminalManager);
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: RESUMED_TASK_ID,
+				baseRef: "main",
+				prompt: "",
+				resumeFromTrash: true,
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				resumeFromTrash: true,
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-opus-5[1m]" },
+			}),
+		);
+	});
+
+	it("leaves a fresh start on the card override without reading any transcript", async () => {
+		writeTranscriptRecordsForTaskWorktree([assistantRecord("claude-opus-5")]);
+		const board = createBoardWithResumedTaskCard(createResumedTaskCard(undefined));
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(board);
+		const capturedMutation = stubWorkspaceStateMutationAgainst(board);
+		const terminalManager = createTerminalManagerStub();
+		terminalManager.getSummary = vi.fn(() => null as never);
+		const api = createApiWithTerminalManager(terminalManager);
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: RESUMED_TASK_ID,
+				baseRef: "main",
+				prompt: "Start something new",
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		// 全新启动不重播任何对话，卡片 override 仍是唯一的意图来源。
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
+			}),
+		);
+		expectNoTerminalAgentModelOverrideWrite(capturedMutation, undefined);
+	});
+});
+
+// omp 的会话可以在 TUI（PTY）与 ACP 之间随时切换。切换在服务端一次做完：
+// 停当前会话 → 作废落盘的通道快照 → 把新通道钉到卡上 → 用新通道续跑。
+// 失败一律**停在已停止并如实报错**，不回滚也不降级。
+describe("createRuntimeApi switchAgentSessionTransport", () => {
+	beforeEach(() => {
+		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
+		workspaceStateMocks.mutateWorkspaceState.mockReset();
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [
+				{
+					id: "in_progress",
+					title: "In Progress",
+					cards: [
+						{
+							id: "task-omp",
+							title: "Omp task",
+							prompt: "Implement task",
+							startInPlanMode: false,
+							autoReviewEnabled: false,
+							autoReviewMode: "commit",
+							agentId: "omp",
+							ompAgentSessionTransport: "acp_stdio_subprocess",
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+					],
+				},
+			],
+			dependencies: [],
+		});
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_path: string, mutate: never) => {
+			const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
+				board: { columns: [], dependencies: [] },
+			});
+			return { saved: true, value: mutation.value };
+		});
+	});
+
+	function createAcpServiceMockWithLiveSession() {
+		const acpSummary = createSummary({
+			taskId: "task-omp",
+			agentId: "omp",
+			state: "running",
+			sessionTransport: "acp_stdio_subprocess",
+		});
+		return {
+			getSummary: vi.fn(() => acpSummary),
+			stopTaskSession: vi.fn(async () => acpSummary),
+			discardTaskSessionLedgerEntry: vi.fn(),
+			startTaskSession: vi.fn(async () => acpSummary),
+			listMessages: vi.fn(() => []),
+			clearTaskSession: vi.fn(),
+			applyTurnCheckpoint: vi.fn(() => null),
+		};
+	}
+
+	it("rejects a switch for an agent that has only one transport", async () => {
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(
+				async () =>
+					({ getSummary: () => createSummary({ agentId: "claude" }), stopTaskSession: () => null }) as never,
+			),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => ({ getSummary: () => null }) as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.switchAgentSessionTransport(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+		);
+		expect(response.ok).toBe(false);
+		expect(response.error).toContain("only one session transport");
+	});
+
+	// 承重回归：切离 ACP 必须把 ACP 账本条目摘掉。stopTaskSession 刻意保留条目（UI 要显示终态），
+	// 而 getTaskChatMessages / sendTaskChatMessage 是按「ACP 账本里有没有这条会话」分派的——
+	// 留着条目，切回 TUI 的会话就会被 ACP 永久劫持这两个端点、聊天面板恒读 ACP 的旧消息表。
+	it("discards the ACP ledger entry when switching away from ACP so chat endpoints stop being hijacked", async () => {
+		const acpTaskSessionService = createAcpServiceMockWithLiveSession();
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			stopTaskSession: vi.fn(() => null),
+			startTaskSession: vi.fn(async () =>
+				createSummary({ taskId: "task-omp", agentId: "omp", sessionTransport: "pty_terminal" }),
+			),
+			applyTurnCheckpoint: vi.fn(() => null),
+			listSummaries: vi.fn(() => []),
+		};
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({ agentId: "omp", binary: "omp", args: [] });
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.switchAgentSessionTransport(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+		);
+
+		expect(acpTaskSessionService.stopTaskSession).toHaveBeenCalledWith("task-omp");
+		expect(acpTaskSessionService.discardTaskSessionLedgerEntry).toHaveBeenCalledWith("task-omp");
+		expect(response.priorAgentSessionStopped).toBe(true);
+		expect(response.error).toBeUndefined();
+		expect(response.ok).toBe(true);
+		// 新会话必须以「续跑既有对话、不重投 prompt」形态起来，否则会凭空多一轮。
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({ resumePriorAgentConversationWithoutResendingPrompt: true }),
+		);
+	});
+
+	// 失败口径：新通道起不来时**不回滚**。旧会话已经停了就如实说停了，卡片字段保持用户选的那条，
+	// 用户修好问题后点 Start 即可——静默回滚会让他以为切成功了。
+	it("stays stopped and reports the failure when the new transport cannot start", async () => {
+		const acpTaskSessionService = createAcpServiceMockWithLiveSession();
+		const terminalManager = {
+			getSummary: vi.fn(() => null),
+			stopTaskSession: vi.fn(() => null),
+			startTaskSession: vi.fn(async () => {
+				throw new Error("omp is not authenticated");
+			}),
+			applyTurnCheckpoint: vi.fn(() => null),
+			listSummaries: vi.fn(() => []),
+		};
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({ agentId: "omp", binary: "omp", args: [] });
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");
+
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.switchAgentSessionTransport(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+		);
+
+		expect(response.ok).toBe(false);
+		expect(response.priorAgentSessionStopped).toBe(true);
+		expect(response.error).toContain("omp is not authenticated");
+		// 卡片字段已经改成用户选的那条通道，且**没有**被回滚。
+		const cardMutation = workspaceStateMocks.mutateWorkspaceState.mock.calls.length;
+		expect(cardMutation).toBeGreaterThan(0);
+	});
+});
+
+// W2 Ctrl+S 暂存的**顺序红线**：先写库、后清框。
+// 反过来一旦写库失败，用户打了一半的字既不在库里、又已被清出框，只剩 agent 自己的暂存区里一份
+// 用户未必知道存在的副本——那正是这一整条工作流要根除的「回执说成功、东西不在」。
+//
+// 同源的另外两条红线（都是「回执必须等于事实」）：
+//   - 清框要回传取文时的 incarnation 令牌，并且**返回值不许吞**：转发没做成时回执必须说「已入库但框没清」。
+//   - 整条链路跑在 manager 的 per-task 独占闸门里：连按 / 多标签页并发不得让同一份正文重复入库，
+//     被挡下的那一次也不许静默——用户按了键就得知道这一次为什么没生效。
+describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
+	const createdWorkspaceDirectoryPaths: string[] = [];
+
+	const STASH_CAPTURE_FIDELITY = {
+		softWrapJoinCount: 0,
+		foldedPastePlaceholderCount: 0,
+		backfilledPlaceholderCount: 0,
+		placeholdersLeftUnbackfilledBecausePayloadWasDropped: 0,
+		placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: 0,
+		placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: 0,
+		unrecoverablePasteCount: 0,
+	};
+
+	type StashCaptureStatus =
+		| "captured_stashable_text"
+		| "input_box_empty"
+		| "input_box_content_unreadable"
+		| "screen_text_not_corroborated_by_keystroke_tracking";
+
+	interface StashCaptureDouble {
+		status: StashCaptureStatus;
+		text: string;
+		fidelity: typeof STASH_CAPTURE_FIDELITY;
+		terminalSessionIncarnationToken: string;
+	}
+
+	function createStashCapture(
+		status: StashCaptureStatus,
+		text: string,
+		terminalSessionIncarnationToken = "incarnation-1",
+	): StashCaptureDouble {
+		return { status, text, fidelity: STASH_CAPTURE_FIDELITY, terminalSessionIncarnationToken };
+	}
+
+	// 串行化在真实链路里归 TerminalSessionManager（per-workspace 长驻单例）所有，handler 只是借它的闸门。
+	// 替身必须把这层一并模拟，否则并发用例测到的就不是真实形状。
+	function createPerTaskStashExclusivityDouble() {
+		const taskIdsWithAttemptInFlight = new Set<string>();
+		return async <AttemptResult>(
+			taskId: string,
+			runAttempt: () => Promise<AttemptResult>,
+			buildResultWhenAnotherAttemptIsAlreadyInFlight: () => AttemptResult,
+		): Promise<AttemptResult> => {
+			if (taskIdsWithAttemptInFlight.has(taskId)) {
+				return buildResultWhenAnotherAttemptIsAlreadyInFlight();
+			}
+			taskIdsWithAttemptInFlight.add(taskId);
+			try {
+				return await runAttempt();
+			} finally {
+				taskIdsWithAttemptInFlight.delete(taskId);
+			}
+		};
+	}
+
+	function createStashTerminalManagerDouble(args: {
+		capture: () => Promise<StashCaptureDouble | null>;
+		forward: (taskId: string, expectedTerminalSessionIncarnationToken: string) => boolean;
+	}) {
+		return {
+			captureTaskTerminalInputBoxContentForPromptLibraryStash: vi.fn(args.capture),
+			forwardStashKeyToClearTaskTerminalInputBox: vi.fn(args.forward),
+			runTaskTerminalInputBoxStashAttemptExclusivelyPerTask: createPerTaskStashExclusivityDouble(),
+		};
+	}
+
+	function createStashWorkspaceScope(): { workspaceId: string; workspacePath: string } {
+		const workspaceId = `stash-${process.pid}-${Math.random().toString(16).slice(2)}`;
+		createdWorkspaceDirectoryPaths.push(`/tmp/kanban-workspaces/${workspaceId}`);
+		return { workspaceId, workspacePath: "/tmp/repo" };
+	}
+
+	function createStashApi(scope: { workspaceId: string }, terminalManager: unknown) {
+		return createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => scope.workspaceId),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+	}
+
+	afterEach(() => {
+		for (const path of createdWorkspaceDirectoryPaths.splice(0)) {
+			rmSync(path, { recursive: true, force: true });
+		}
+		rmSync(workspaceStateMocks.runtimeHomePath, { recursive: true, force: true });
+	});
+
+	it("取到正文 → 写库成功之后才转发 Ctrl+S 清框，且带上取文时的 incarnation 令牌", async () => {
+		const scope = createStashWorkspaceScope();
+		const promptLibraryFileExistedWhenBoxWasCleared: boolean[] = [];
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("captured_stashable_text", "打了一半的输入"),
+			forward: () => {
+				promptLibraryFileExistedWhenBoxWasCleared.push(
+					existsSync(getWorkspacePromptLibraryPath(scope.workspaceId)),
+				);
+				return true;
+			},
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		expect(response.ok).toBe(true);
+		expect(response.outcome).toBe("stashed_into_prompt_library");
+		expect(response.stashedTextCharacterCount).toBe("打了一半的输入".length);
+		// 落盘的是真文件：条目进了这个任务自己的桶，并带上「用户在终端按了 Ctrl+S」这个来源。
+		const library = await readWorkspacePromptLibrarySnapshot(scope.workspaceId);
+		expect(library.taskScopedPromptsByTaskId["task-1"]).toEqual([
+			expect.objectContaining({
+				id: response.stashedPromptId,
+				text: "打了一半的输入",
+				scope: "task",
+				origin: "terminal_stash_by_user",
+			}),
+		]);
+		// 顺序红线：清框那一刻，库文件必须已经在磁盘上。
+		expect(promptLibraryFileExistedWhenBoxWasCleared).toEqual([true]);
+		// incarnation 红线：清框认的是取文时那条 PTY，不是「此刻这个 taskId 上碰巧有个 active」。
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).toHaveBeenCalledWith(
+			"task-1",
+			"incarnation-1",
+		);
+	});
+
+	it("写库期间终端被 refresh（清框被拒） → 回执必须说「已入库但框没清」，不许报纯成功", async () => {
+		const scope = createStashWorkspaceScope();
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("captured_stashable_text", "写库期间会被换代的输入"),
+			// 真实 manager 在令牌对不上时就是这样：拒绝转发，绝不把清框字节打到新会话上。
+			forward: () => false,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		expect(response.outcome).toBe("stashed_into_prompt_library_but_input_box_not_cleared");
+		// 正文确实进库了，这半边不能被说成失败——库里查得到才是真相。
+		expect(response.stashedPromptId).toBeTruthy();
+		const library = await readWorkspacePromptLibrarySnapshot(scope.workspaceId);
+		expect(library.taskScopedPromptsByTaskId["task-1"]).toEqual([
+			expect.objectContaining({ id: response.stashedPromptId, text: "写库期间会被换代的输入" }),
+		]);
+	});
+
+	it("同一 task 并发重入 → 只入库一次，被挡下的那次如实报「已有一次在进行中」", async () => {
+		const scope = createStashWorkspaceScope();
+		let releaseFirstCapture = (): void => {};
+		const firstCaptureCanFinish = new Promise<void>((resolve) => {
+			releaseFirstCapture = resolve;
+		});
+		let signalFirstCaptureHasStarted = (): void => {};
+		const firstCaptureHasStarted = new Promise<void>((resolve) => {
+			signalFirstCaptureHasStarted = resolve;
+		});
+		let captureCallCount = 0;
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => {
+				captureCallCount += 1;
+				signalFirstCaptureHasStarted();
+				// 第一次取文卡住，模拟「写库还没做完」的那段窗口——第二次按键正是在这里挤进来的。
+				await firstCaptureCanFinish;
+				return createStashCapture("captured_stashable_text", "连按两次 Ctrl+S 的同一份正文");
+			},
+			forward: () => true,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const firstResponse = api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+		// 等第一次真的进了闸门再按第二次，否则用例测的是「谁先跑到」而不是重入。
+		await firstCaptureHasStarted;
+		const secondResponse = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+		releaseFirstCapture();
+		const firstResponseResolved = await firstResponse;
+
+		expect(secondResponse.outcome).toBe("another_terminal_input_box_stash_attempt_already_in_flight_for_this_task");
+		expect(secondResponse.ok).toBe(false);
+		expect(secondResponse.stashedPromptId).toBeNull();
+		expect(firstResponseResolved.outcome).toBe("stashed_into_prompt_library");
+		// 重入的那次连取文都不该跑：否则两次读到同一份正文，各自以不同 promptId 各写一条。
+		expect(captureCallCount).toBe(1);
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).toHaveBeenCalledTimes(1);
+		const library = await readWorkspacePromptLibrarySnapshot(scope.workspaceId);
+		expect(library.taskScopedPromptsByTaskId["task-1"]).toHaveLength(1);
+	});
+
+	it("框是空的 → 不写库，但仍把 Ctrl+S 转发给 agent（保住这个键的原生语义）", async () => {
+		const scope = createStashWorkspaceScope();
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("input_box_empty", ""),
+			forward: () => true,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		expect(response.outcome).toBe("input_box_empty_nothing_to_stash");
+		expect(response.stashedPromptId).toBeNull();
+		expect(existsSync(getWorkspacePromptLibraryPath(scope.workspaceId))).toBe(false);
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).toHaveBeenCalledTimes(1);
+	});
+
+	it("没有可入库的正文、且连转发都没做成 → 不许硬说「已交给 agent 自己处理」", async () => {
+		const scope = createStashWorkspaceScope();
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("input_box_content_unreadable", ""),
+			forward: () => false,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		// 既没入库也没转发：什么都没发生，如实报「没有可信的终端会话」。
+		expect(response.outcome).toBe("no_active_terminal_session");
+		expect(response.stashedPromptId).toBeNull();
+	});
+
+	it("写库失败 → **不**清框，正文原样留在输入框里，回执如实报失败", async () => {
+		const scope = createStashWorkspaceScope();
+		// 在 workspace 目录本该在的位置放一个文件：存储层建目录时必然 ENOTDIR，写入确定性失败。
+		mkdirSync("/tmp/kanban-workspaces", { recursive: true });
+		writeFileSync(`/tmp/kanban-workspaces/${scope.workspaceId}`, "不是目录", "utf8");
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("captured_stashable_text", "会写失败的内容"),
+			forward: () => true,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		expect(response.ok).toBe(false);
+		expect(response.outcome).toBe("prompt_library_write_failed");
+		expect(response.error).toBeTruthy();
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).not.toHaveBeenCalled();
 	});
 });

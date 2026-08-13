@@ -32,7 +32,7 @@ export function readTerminalScrollbackTranscript(taskId: string): TerminalScroll
 }
 
 /**
- * 该任务终端是否存在值得单独阅读的 scrollback。alt-screen agent（Codex 等）在自己的
+ * 该任务终端是否存在值得单独阅读的 scrollback。alt-screen agent（Claude Code、Codex 等）在自己的
  * alternate buffer 里原地重绘、normal buffer 不增长，故这里返回 false、入口自动隐藏，
  * 而不是给出一个空壳阅读视图。
  */

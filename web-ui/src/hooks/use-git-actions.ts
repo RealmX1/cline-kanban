@@ -1,4 +1,7 @@
-import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import {
+	isRuntimeAgentSessionRenderedAsConversationPanel,
+	isRuntimeAgentSessionSummaryRenderedAsConversationPanel,
+} from "@runtime-agent-catalog";
 import { useCallback, useMemo, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import { type UseGitHistoryDataResult, useGitHistoryData } from "@/components/git-history/use-git-history-data";
@@ -8,6 +11,7 @@ import type {
 	RuntimeAgentId,
 	RuntimeConfigResponse,
 	RuntimeGitSyncAction,
+	RuntimeTaskSessionSummary,
 	RuntimeTaskWorkspaceInfoResponse,
 } from "@/runtime/types";
 import { findCardSelection } from "@/state/board-state";
@@ -47,6 +51,9 @@ interface UseGitActionsInput {
 		options?: { mode?: "plan" | "act" },
 	) => Promise<{ ok: boolean; message?: string }>;
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
+	// 按 taskId 取当前活会话摘要。Commit / Open PR 的投递通道判定必须读它而不是卡片 agentId：
+	// omp 会话可在 TUI ⇄ ACP 之间切换，两种形态下 agentId 都是 "omp"。
+	taskConversationSessionSummariesByTaskId: Record<string, RuntimeTaskSessionSummary>;
 	isGitHistoryOpen: boolean;
 	refreshWorkspaceState: () => Promise<void>;
 }
@@ -97,6 +104,7 @@ export function useGitActions({
 	sendTaskSessionInput,
 	sendTaskChatMessage,
 	fetchTaskWorkspaceInfo,
+	taskConversationSessionSummariesByTaskId,
 	isGitHistoryOpen,
 	refreshWorkspaceState,
 }: UseGitActionsInput): UseGitActionsResult {
@@ -220,13 +228,22 @@ export function useGitActions({
 		return next;
 	}, [taskGitActionLoadingByTaskId]);
 
-	// Commit / Open PR 的投递通道必须按**该任务实际使用的 agent** 判定，而不是工作区默认 agent，
-	// 更不是「是不是 cline」：会话以对话面板呈现的 agent（cline 与 omp 这类 ACP agent）走
-	// sendTaskChatMessage，只有 PTY 型终端 agent 才粘贴进终端。判错会把指令粘进不存在的 PTY。
+	// Commit / Open PR 的投递通道必须按**该任务当前这条活会话实际在用的通道**判定，而不是工作区默认
+	// agent，也不是卡片 agentId，更不是「是不是 cline」：会话以对话面板呈现的通道（Cline SDK 与 ACP）
+	// 走 sendTaskChatMessage，只有 PTY 通道才粘贴进终端。判错会把指令粘进不存在的 PTY。
+	// omp 一个 agentId 对应两条通道，所以有活会话时必须读会话自己盖的通道章；没有活会话才回落
+	// 到按 agentId 预判（此时两条通道都不存在，粘不粘得进去都是后话）。
 	const resolveShouldUseChatChannelForTaskGitActions = useCallback(
-		(taskAgentId: RuntimeAgentId | null | undefined): boolean =>
-			isRuntimeAgentSessionRenderedAsConversationPanel(taskAgentId ?? runtimeProjectConfig?.selectedAgentId ?? null),
-		[runtimeProjectConfig?.selectedAgentId],
+		(taskId: string, taskAgentId: RuntimeAgentId | null | undefined): boolean => {
+			const sessionSummary = taskConversationSessionSummariesByTaskId[taskId];
+			if (sessionSummary) {
+				return isRuntimeAgentSessionSummaryRenderedAsConversationPanel(sessionSummary);
+			}
+			return isRuntimeAgentSessionRenderedAsConversationPanel(
+				taskAgentId ?? runtimeProjectConfig?.selectedAgentId ?? null,
+			);
+		},
+		[runtimeProjectConfig?.selectedAgentId, taskConversationSessionSummariesByTaskId],
 	);
 
 	const runTaskGitAction = useCallback(
@@ -297,7 +314,7 @@ export function useGitActions({
 							}
 						: null,
 				});
-				if (resolveShouldUseChatChannelForTaskGitActions(selection.card.agentId)) {
+				if (resolveShouldUseChatChannelForTaskGitActions(taskId, selection.card.agentId)) {
 					const sent = await sendTaskChatMessage(taskId, prompt, { mode: "act" });
 					if (!sent.ok) {
 						showAppToast({

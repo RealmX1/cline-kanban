@@ -18,7 +18,7 @@ import {
 	runtimeWorkspaceStateSaveRequestSchema,
 } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
-import { applySessionFacets } from "../core/session-activity";
+import { applySessionFacets, isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
 import { getTaskColumnId, moveTaskToColumn, updateTaskDependencies } from "../core/task-board-mutations";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
@@ -366,6 +366,36 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 			}
 			reconciledSessions[card.id] = persistedSessions[card.id];
 		}
+	}
+	return reconciledSessions;
+}
+
+// 上面那条守卫只挡「incoming 里整条不见了」；本条挡的是更隐蔽的一种——**incoming 里在，但是一条空壳**。
+//
+// 硬中断后前端一聚焦卡片，服务端就会就地造出一条全 null 的默认 summary（session-manager 的
+// `ensureEntry` → `createDefaultSummary`）。它带着最新的 updatedAt 一路广播、并被下一次 saveState 并进
+// 落盘 payload；没有这条守卫，它就会把盘上那条记着 agentId / startedAt 的真实记录整条盖掉，把一次
+// 「本来重启就能自愈」的中断变成永久损坏。
+//
+// 只在「persisted 不是空壳」时保留——两边都是空壳时留谁都一样，放行 incoming 免得把陈旧 updatedAt 钉住。
+function preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
+	incomingSessions: Record<string, RuntimeTaskSessionSummary>,
+): Record<string, RuntimeTaskSessionSummary> {
+	let reconciledSessions = incomingSessions;
+	for (const [taskId, incomingSummary] of Object.entries(incomingSessions)) {
+		const persistedSummary = persistedSessions[taskId];
+		if (
+			!persistedSummary ||
+			!isNeverStartedPlaceholderTaskSessionSummary(incomingSummary) ||
+			isNeverStartedPlaceholderTaskSessionSummary(persistedSummary)
+		) {
+			continue;
+		}
+		if (reconciledSessions === incomingSessions) {
+			reconciledSessions = { ...incomingSessions };
+		}
+		reconciledSessions[taskId] = persistedSummary;
 	}
 	return reconciledSessions;
 }
@@ -818,10 +848,13 @@ export async function saveWorkspaceState(
 		}
 		const persistedBoard = await readWorkspaceBoard(context.workspaceId);
 		const persistedSessions = await readWorkspaceSessions(context.workspaceId);
-		const sessions = preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
-			parsedPayload.board,
+		const sessions = preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
 			persistedSessions,
-			parsedPayload.sessions,
+			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
+				parsedPayload.board,
+				persistedSessions,
+				parsedPayload.sessions,
+			),
 		);
 		const board = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
 			persistedBoard,
@@ -881,10 +914,13 @@ export async function mutateWorkspaceState<T>(
 			};
 		}
 
-		const nextSessions = preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
-			mutation.board,
+		const nextSessions = preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
 			currentSessions,
-			mutation.sessions ?? currentSessions,
+			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
+				mutation.board,
+				currentSessions,
+				mutation.sessions ?? currentSessions,
+			),
 		);
 		const nextBoard = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
 			currentBoard,

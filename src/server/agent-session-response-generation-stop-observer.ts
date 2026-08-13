@@ -8,7 +8,7 @@
 //
 // 本模块只做两件事：边沿检测（纯函数，可单测）+ 落库。不杀进程、不碰 UI、不发通知。
 
-import { getRuntimeAgentSessionTransport } from "../core/agent-catalog";
+import { resolveRuntimeAgentSessionTransportFromSummary } from "../core/agent-catalog";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS,
@@ -102,7 +102,9 @@ function buildRetentionDeadlineInput(
 	const shared = {
 		taskId: summary.taskId,
 		agentId,
-		sessionTransport: getRuntimeAgentSessionTransport(agentId),
+		// 快照的是**这条会话当刻在用的通道**，不是该 agent 的默认通道：omp 可在 TUI ⇄ ACP 之间切换，
+		// 按 agentId 派生会让回收走错分支（去杀一个不存在的 PTY / 放过一个还活着的 ACP 子进程）。
+		sessionTransport: resolveRuntimeAgentSessionTransportFromSummary(summary),
 		runtimeSessionIncarnationId,
 		agentResponseGenerationTurnSequence: summary.agentResponseGenerationTurnSequence ?? 0,
 	};

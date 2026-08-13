@@ -115,8 +115,17 @@ export const runtimeAgentIdSchema = z.enum([
 	"omp",
 ]);
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
-export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
+// 哪些 terminal agent 有「模型选择器」这条通道：Kanban 能探测出它的模型目录、并在启动时把选中的
+// model id 传给 CLI。
+export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor", "kimi"]);
 export type RuntimeTerminalAgentModelSelectionAgentId = z.infer<typeof runtimeTerminalAgentModelSelectionAgentIdSchema>;
+// 哪些 terminal agent 的历史会话能被按 session id 索引并续接/分叉。
+//
+// 这与「有没有模型选择器」是两件互不蕴含的事，曾经共用一个枚举，导致「给某个 agent 加模型选择器」会
+// 顺带宣称它的会话可以按 id 恢复。kimi 正是这种情况：它有 `-m/--model`，但只支持 `--continue`，
+// 没有 `-S/--session <id>` 通道，所以它进模型选择枚举、不进这个枚举。
+export const runtimeResumableAgentSessionSourceAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
+export type RuntimeResumableAgentSessionSourceAgentId = z.infer<typeof runtimeResumableAgentSessionSourceAgentIdSchema>;
 export const runtimeTaskAgentSessionInitializationReuseModeSchema = z.enum([
 	"resume_existing_session",
 	"fork_existing_session",
@@ -126,7 +135,7 @@ export type RuntimeTaskAgentSessionInitializationReuseMode = z.infer<
 >;
 export const runtimeTaskAgentSessionInitializationSchema = z
 	.object({
-		sourceAgentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+		sourceAgentId: runtimeResumableAgentSessionSourceAgentIdSchema,
 		sourceSessionId: z.string().trim().uuid(),
 		sourceSessionReuseMode: runtimeTaskAgentSessionInitializationReuseModeSchema,
 		sourceSessionWorkingDirectoryPath: z.string().trim().min(1).optional(),
@@ -154,7 +163,7 @@ export const runtimeTaskTerminalAgentModelOverrideSettingsSchema = z
 			ctx.addIssue({
 				code: z.ZodIssueCode.custom,
 				path: ["modelId"],
-				message: "Cursor agent model overrides must use auto, composer, or composer-* models.",
+				message: "Cursor agent model overrides must use auto, a composer model, or a grok model.",
 			});
 		}
 	});
@@ -248,6 +257,21 @@ function normalizeRuntimeTaskCommentEntries(
 	return normalizedEntries.length > 0 ? normalizedEntries : undefined;
 }
 
+// Kanban 与一个 agent 通话的方式（PTY / 进程内 Cline SDK / ACP 子进程）。canonical zod 源放在
+// api-contract（契约叶子模块），src/core/agent-catalog.ts 由此派生 TS 类型并挂到 catalog 条目上，
+// 避免 api-contract → agent-catalog 的反向依赖。
+// 定义位置必须留在 runtimeBoardCardSchema **之前**：卡片的 ompAgentSessionTransport 字段在模块求值
+// 时就要引用它，挪到下面会踩 const 的 TDZ。
+export const runtimeAgentSessionTransportSchema = z.enum([
+	// PTY 里跑一个 CLI，靠刮 TUI 输出 + agent 侧 hook 回调 `kanban hooks` 判状态。
+	"pty_terminal",
+	// 在 Kanban 服务进程内直接实例化 @clinebot/core，订阅结构化事件。
+	"in_process_cline_sdk",
+	// spawn 一个子进程，用 ACP（JSON-RPC over stdio）通话，状态由 SessionUpdate 驱动。
+	"acp_stdio_subprocess",
+]);
+export type RuntimeAgentSessionTransport = z.infer<typeof runtimeAgentSessionTransportSchema>;
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
@@ -263,6 +287,29 @@ export const runtimeBoardCardSchema = z
 		images: z.array(runtimeTaskImageSchema).optional(),
 		taskCommentEntries: z.array(runtimeTaskCommentEntrySchema).optional(),
 		agentId: runtimeAgentIdSchema.optional(),
+		// omp 这张卡「下次启动该用哪条通道」。与 startInPlanMode / taskAgentPermissionMode 同为
+		// **建卡时固化**的快照：建卡那一刻把全局默认写死在卡上，之后改全局默认不追溯已有卡片。
+		// 只在 spawn 那一刻被消费；活会话实际用的通道读 summary.sessionTransport，不读这里。
+		// 老卡片没有这个字段 ⇒ 回退到当时的全局默认（即 TUI），这会把现存 omp 卡片从 ACP 翻到 TUI，
+		// 是本次有意为之的默认切换（ACP 会话纯内存不落盘，无数据损失）。
+		// 注意：本字段落在**卡**上，隐含「一张 omp 卡只有一条 agent 会话」。omp 一旦获得 By the way
+		// 支持（一个 task 会有多条会话），必须改成按会话 id 的映射。
+		ompAgentSessionTransport: runtimeAgentSessionTransportSchema.optional(),
+		// runtime 观测值，不是用户意图：本卡片最近一次**真正启动成功**的会话用的是哪个 agent。
+		//
+		// 为什么不复用上面的 `agentId`：那个字段的语义是「用户为这张卡做的 per-task 覆盖」，缺失即
+		// 「跟随项目默认档」。把解析出来的默认档物化进去，等于把「跟随默认」静默钉成一个用户从未选过的
+		// 永久覆盖，agent 选择器还会显示成用户主动选过——与 task-board-mutations.ts 里
+		// `taskAgentPermissionMode` 那段注释禁止的是同一类错误。
+		//
+		// 为什么需要它：sessions.json 只在 graceful shutdown 与客户端 saveState 落盘，硬中断（系统重启 /
+		// 本地 redeploy）会让「这个 task 用的是哪个 agent」在盘上彻底消失；而走默认档的卡片上又没有
+		// `agentId` 可回填，重启后该 task 就只剩一条 agentId 为 null 的空壳 summary——TUI 全白、
+		// 「重启终端会话」灰掉。本字段是这条链路上唯一在**启动那一刻**就 durable 的真相源。
+		//
+		// 只由 runtime 在会话启动成功后写入，故**不出现在** RuntimeUpdateTaskInput 里；它靠 updateTask
+		// 的 `...card` 展开穿过用户编辑。
+		mostRecentlyLaunchedAgentSessionAgentId: runtimeAgentIdSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
@@ -600,19 +647,6 @@ export type RuntimeLastConversationProgressObservation = z.infer<
 	typeof runtimeLastConversationProgressObservationSchema
 >;
 
-// Kanban 与一个 agent 通话的方式（PTY / 进程内 Cline SDK / ACP 子进程）。canonical zod 源放在
-// api-contract（契约叶子模块），src/core/agent-catalog.ts 由此派生 TS 类型并挂到 catalog 条目上，
-// 避免 api-contract → agent-catalog 的反向依赖。
-export const runtimeAgentSessionTransportSchema = z.enum([
-	// PTY 里跑一个 CLI，靠刮 TUI 输出 + agent 侧 hook 回调 `kanban hooks` 判状态。
-	"pty_terminal",
-	// 在 Kanban 服务进程内直接实例化 @clinebot/core，订阅结构化事件。
-	"in_process_cline_sdk",
-	// spawn 一个子进程，用 ACP（JSON-RPC over stdio）通话，状态由 SessionUpdate 驱动。
-	"acp_stdio_subprocess",
-]);
-export type RuntimeAgentSessionTransport = z.infer<typeof runtimeAgentSessionTransportSchema>;
-
 // 一次回收尝试的**可审计**结果。三种 transport 共用同一形状，故「回收到底做成了没有」在 UI /
 // 日志 / 测试里是同一套判据，而不是各 transport 各说各话。
 export const runtimeAgentSessionReclamationOutcomeSchema = z.object({
@@ -691,6 +725,13 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 任务时必须看到明确说明，而不是一个空终端让人误以为只是加载慢。
 	agentSessionRuntimeReclamationOutcome: runtimeAgentSessionReclamationOutcomeSchema.nullable().optional(),
 	taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
+	// 这条**活会话**实际用的通话方式。agent-catalog 的 `sessionTransport` 只是该 agent 的**默认**通道；
+	// omp 可在 TUI（pty_terminal）与 ACP（acp_stdio_subprocess）之间随时切换，切换后 agentId 不变，
+	// 于是「渲染 xterm 还是会话面板」「stop / 输入 / 消息走哪条通路」一律以本字段为准，不得再从 agentId 静态派生。
+	// 由三条通道各自在建会话时盖章（terminal / cline-sdk / acp），是纯运行期事实、不参与 facet 与 superRefine。
+	// 加性可选：旧盘数据 / web-ui 手构造 summary 缺它 ⇒ 回退按 agentId 派生（见 agent-catalog 的
+	// resolveRuntimeAgentSessionTransportFromSummary，读点一律走它而非直接读本字段）。
+	sessionTransport: runtimeAgentSessionTransportSchema.optional(),
 	// 双轴 facet（加性、可选）+ per-session schema 版本。三 facet 共生（要么全置、要么全缺）：
 	// 全缺=未迁移的旧盘数据（Stage 2 读时回填）；全置=经 applySessionFacets 漏斗写入、组合受
 	// 下方 superRefine 护栏约束。schemaVersion 为 per-session 可选字段（不引入文件级包裹、无 flag day）。
@@ -1748,6 +1789,8 @@ export const runtimeConfigResponseSchema = z.object({
 	selectedShortcutLabel: z.string().nullable(),
 	agentAutonomousModeEnabled: z.boolean(),
 	newTaskStartInPlanModeByDefault: z.boolean(),
+	// omp 新任务的默认通道（严格的「新任务默认值」：建卡时固化到卡上，改它不追溯已有卡片）。
+	ompAgentSessionTransportForNewTasks: runtimeAgentSessionTransportSchema,
 	debugModeEnabled: z.boolean().optional(),
 	effectiveCommand: z.string().nullable(),
 	globalConfigPath: z.string(),
@@ -1773,6 +1816,7 @@ export const runtimeConfigSaveRequestSchema = z.object({
 	selectedShortcutLabel: z.string().nullable().optional(),
 	agentAutonomousModeEnabled: z.boolean().optional(),
 	newTaskStartInPlanModeByDefault: z.boolean().optional(),
+	ompAgentSessionTransportForNewTasks: runtimeAgentSessionTransportSchema.optional(),
 	shortcuts: z.array(runtimeProjectShortcutSchema).optional(),
 	readyForReviewNotificationsEnabled: z.boolean().optional(),
 	notificationSoundEnabled: z.boolean().optional(),
@@ -1801,6 +1845,12 @@ export const runtimeTaskSessionStartRequestSchema = z
 		cols: z.number().int().positive().optional(),
 		rows: z.number().int().positive().optional(),
 		agentId: runtimeAgentIdSchema.optional(),
+		// 本次启动要走哪条通道。省略时服务端按「卡片固化值 → 全局默认 → catalog 默认」解析
+		// （见 core/agent-session-transport-selection.ts）；切换 procedure 会显式传它。
+		requestedAgentSessionTransport: runtimeAgentSessionTransportSchema.optional(),
+		// 「续跑既有对话、不重投 prompt」。切换通道后重开会话走它：用户已在对话中途，
+		// 重投一次原始 prompt 等于凭空多一轮。与 resumeFromTrash 的区别是后者还带回收/垃圾桶语义。
+		resumePriorAgentConversationWithoutResendingPrompt: z.boolean().optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
@@ -1877,7 +1927,7 @@ export const runtimeAvailableAgentSessionPreviewTurnSchema = z.object({
 export type RuntimeAvailableAgentSessionPreviewTurn = z.infer<typeof runtimeAvailableAgentSessionPreviewTurnSchema>;
 
 export const runtimeAvailableAgentSessionSummarySchema = z.object({
-	sourceAgentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+	sourceAgentId: runtimeResumableAgentSessionSourceAgentIdSchema,
 	sourceSessionId: z.string().uuid(),
 	sessionTitle: z.string(),
 	sessionWorkingDirectoryPath: z.string().nullable(),
@@ -1889,7 +1939,7 @@ export const runtimeAvailableAgentSessionSummarySchema = z.object({
 export type RuntimeAvailableAgentSessionSummary = z.infer<typeof runtimeAvailableAgentSessionSummarySchema>;
 
 export const runtimeAvailableAgentSessionsRequestSchema = z.object({
-	agentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+	agentId: runtimeResumableAgentSessionSourceAgentIdSchema,
 	searchScope: runtimeAvailableAgentSessionSearchScopeSchema.default("current_repository"),
 	query: z.string().trim().max(2048).default(""),
 	pageCursor: z.number().int().nonnegative().default(0),
@@ -1924,6 +1974,31 @@ export const runtimeTaskSessionStopResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeTaskSessionStopResponse = z.infer<typeof runtimeTaskSessionStopResponseSchema>;
+
+// 把一条**已存在的** agent 会话从当前通话通道切到另一条（目前只有 omp 有第二条通道）。
+// 语义是「停掉当前会话 → 立刻用另一条通道续跑同一段对话」，服务端一次做完：放前端做
+// stop→save→start 三连的话，中途任何一步失败都会留下半切状态（卡片字段已改、会话还在旧通道上）。
+//
+// taskId 是**会话 id**（详情页传的是当前选中的那条 agent 会话），不是看板卡 id ——
+// 两者在主会话上恰好相同，By the way 会话上不同。omp 目前没有 By the way 支持，
+// 一旦有了，通道字段就不能再落在卡上（见 runtimeBoardCardSchema.ompAgentSessionTransport）。
+export const runtimeAgentSessionTransportSwitchRequestSchema = z.object({
+	taskId: z.string(),
+	targetSessionTransport: runtimeAgentSessionTransportSchema,
+});
+export type RuntimeAgentSessionTransportSwitchRequest = z.infer<typeof runtimeAgentSessionTransportSwitchRequestSchema>;
+
+export const runtimeAgentSessionTransportSwitchResponseSchema = z.object({
+	ok: z.boolean(),
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	// 失败时会话**停在已停止**（不自动回滚、不降级到旧通道）；卡片的下次启动通道仍是你选的那条，
+	// 修好问题后点 Start 就能起来。这个字段告诉前端「旧会话确实已经停了」，好把提示写准。
+	priorAgentSessionStopped: z.boolean(),
+	error: z.string().optional(),
+});
+export type RuntimeAgentSessionTransportSwitchResponse = z.infer<
+	typeof runtimeAgentSessionTransportSwitchResponseSchema
+>;
 
 // 用户经卡片右上角「移至 Review」悬浮按钮把一个停在 agent 回合的终端 agent 任务手动翻入「等人审查」回合
 // （reviewReason=manual_review）。区别于 stopTaskSession（中断/收尾），此处只翻回合、不杀进程：用于卡死/空闲
@@ -2169,13 +2244,242 @@ export const runtimeTaskChatSendRequestSchema = z.object({
 });
 export type RuntimeTaskChatSendRequest = z.infer<typeof runtimeTaskChatSendRequestSchema>;
 
+// 程序化投递的诚实回执。取值集合与语义由跨仓契约固定（terminal-delivery-interface-contract.md），
+// 唯一真相在 src/core/task-message-injection-ledger.ts —— 这里只是把 runtime 的**即时**判定带回 CLI，
+// 让 CLI 能立刻落一个不撒谎的初始状态；终态由 runtime 事后就地改写账本。
+export const terminalDeliveryStatusSchema = z.enum([
+	"delivered_and_submit_confirmed",
+	"delivered_queued_behind_active_agent_turn",
+	"accepted_pending_submit_confirmation",
+	"delivery_failed",
+]);
+export type TerminalDeliveryStatus = z.infer<typeof terminalDeliveryStatusSchema>;
+
+export const terminalDeliveryFailureReasonSchema = z.enum([
+	"no_active_terminal_session",
+	"terminal_prompt_readiness_timeout",
+	"submit_confirmation_budget_exhausted",
+	"human_terminal_contention_timeout",
+	"agent_awaiting_user_decision_timeout",
+	"superseded_by_later_delivery",
+	"session_ended_before_delivery",
+	"cancelled_before_delivery",
+	"runtime_restarted_before_confirmation",
+]);
+export type TerminalDeliveryFailureReason = z.infer<typeof terminalDeliveryFailureReasonSchema>;
+
+export const terminalDeliveryReceiptSchema = z.object({
+	status: terminalDeliveryStatusSchema,
+	reason: terminalDeliveryFailureReasonSchema.nullable(),
+});
+export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
+
 export const runtimeTaskChatSendResponseSchema = z.object({
 	ok: z.boolean(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
 	message: runtimeTaskChatMessageSchema.nullable().optional(),
 	error: z.string().optional(),
+	// 仅程序化投递（请求带 idempotencyKey）才有；人类聊天不写账本，故为 null。
+	terminalDelivery: terminalDeliveryReceiptSchema.nullable().optional(),
 });
 export type RuntimeTaskChatSendResponse = z.infer<typeof runtimeTaskChatSendResponseSchema>;
+
+export const runtimeTaskChatDeliveryCancelRequestSchema = z.object({
+	taskId: z.string(),
+	idempotencyKey: z.string(),
+});
+export type RuntimeTaskChatDeliveryCancelRequest = z.infer<typeof runtimeTaskChatDeliveryCancelRequestSchema>;
+
+export const runtimeTaskChatDeliveryCancelResponseSchema = z.object({
+	ok: z.boolean(),
+	// cancelled_before_delivery：确实拦下了，文本没有进入终端。
+	// already_delivered：取消晚到，在途投递已落定（真实终态在账本里）。
+	// no_pending_delivery：runtime 内存里没有这条在途投递（可能从未到达 runtime，或已被取代）。
+	cancelResult: z.enum(["cancelled_before_delivery", "already_delivered", "no_pending_delivery"]),
+	error: z.string().optional(),
+});
+export type RuntimeTaskChatDeliveryCancelResponse = z.infer<typeof runtimeTaskChatDeliveryCancelResponseSchema>;
+
+// ── Prompt Library（服务端持久化）──────────────────────────────────────────────
+//
+// 落点与并发语义见 src/state/prompt-library-store.ts。这里只定义线上契约。
+
+export const promptLibraryScopeSchema = z.enum(["global", "repo", "task"]);
+export type PromptLibraryScope = z.infer<typeof promptLibraryScopeSchema>;
+
+// 条目从哪来。旧数据没有这个字段，读取时按 manual 处理，故是 optional 而**不是**带默认值的必填——
+// 加默认值会让「读出来再写回去」把所有历史条目都标记成手写，抹掉将来区分暂存来源的能力。
+export const promptLibraryEntryOriginSchema = z.enum([
+	// 用户在面板里手写的模板。
+	"manual",
+	// 用户自己在终端里按了 Ctrl+S，把打了一半的输入存进库。
+	"terminal_stash_by_user",
+	// W1 争用抢占：程序化投递需要输入框，运行时先把人类的未提交内容无损存进库再放行。
+	"terminal_stash_preempted_by_programmatic_delivery",
+]);
+export type PromptLibraryEntryOrigin = z.infer<typeof promptLibraryEntryOriginSchema>;
+
+export const storedPromptLibraryEntrySchema = z.object({
+	id: z.string(),
+	text: z.string(),
+	scope: promptLibraryScopeSchema,
+	origin: promptLibraryEntryOriginSchema.optional(),
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+export type StoredPromptLibraryEntry = z.infer<typeof storedPromptLibraryEntrySchema>;
+
+// 一个 workspace 视角下能看到的全部条目。global 桶来自 kanban 根目录的共用文件，
+// 另两个桶来自该 workspace 自己的文件（project.id 即 workspaceId）。
+export const workspacePromptLibrarySnapshotSchema = z.object({
+	globalScopedPrompts: z.array(storedPromptLibraryEntrySchema),
+	repoScopedPrompts: z.array(storedPromptLibraryEntrySchema),
+	taskScopedPromptsByTaskId: z.record(z.string(), z.array(storedPromptLibraryEntrySchema)),
+});
+export type WorkspacePromptLibrarySnapshot = z.infer<typeof workspacePromptLibrarySnapshotSchema>;
+
+// scope 为 task 却漏传 taskId **不是**「分类不整洁」，而是可见性事故：本该只对某个任务可见的文字，
+// 会因为调用方漏一个参数而变成整个仓库的所有任务都能看见。存储层无从知道用户原本想给哪个任务看，
+// 所以这条只能在契约边界报错，不能留给存储层去猜一个桶。空串同样拒绝——它不是任何真实任务的 id。
+function isTaskScopedPromptMutationCarryingItsTaskId(value: {
+	scope: PromptLibraryScope;
+	taskId?: string | null;
+}): boolean {
+	return value.scope !== "task" || (typeof value.taskId === "string" && value.taskId.length > 0);
+}
+
+const TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE =
+	"scope 为 task 的 prompt library 意图必须带上非空 taskId，否则该条目会对整个仓库可见";
+
+// 写操作是**意图**而不是整份 PUT：多个标签页 + 运行时自己会并发写同一个库，整份 PUT 会让
+// 「另一个标签页刚加的条目」被静默抹掉。服务端在文件锁内读-改-写，于是并发写自然合并。
+export const workspacePromptLibraryMutationSchema = z.discriminatedUnion("kind", [
+	z
+		.object({
+			// 同一条意图兼管「新建」与「改正文」：id 不存在即新建，存在即只改正文（**不**动它所在的桶）。
+			kind: z.literal("upsert_prompt"),
+			promptId: z.string(),
+			text: z.string(),
+			// 仅新建时生效；已存在的条目换桶请用 set_prompt_scope。
+			scope: promptLibraryScopeSchema,
+			// scope 为 task 时必填（由下面的 refine 强制），其余忽略。
+			taskId: z.string().nullable().optional(),
+			origin: promptLibraryEntryOriginSchema.optional(),
+		})
+		.refine(isTaskScopedPromptMutationCarryingItsTaskId, {
+			message: TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE,
+			path: ["taskId"],
+		}),
+	z.object({
+		kind: z.literal("remove_prompt"),
+		promptId: z.string(),
+	}),
+	z
+		.object({
+			kind: z.literal("set_prompt_scope"),
+			promptId: z.string(),
+			scope: promptLibraryScopeSchema,
+			// 搬进 task scope 时必填（由下面的 refine 强制）：搬去「哪个任务」正是这条意图的内容。
+			taskId: z.string().nullable().optional(),
+		})
+		.refine(isTaskScopedPromptMutationCarryingItsTaskId, {
+			message: TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE,
+			path: ["taskId"],
+		}),
+]);
+export type WorkspacePromptLibraryMutation = z.infer<typeof workspacePromptLibraryMutationSchema>;
+
+export const runtimePromptLibraryReadRequestSchema = z.object({});
+export type RuntimePromptLibraryReadRequest = z.infer<typeof runtimePromptLibraryReadRequestSchema>;
+
+export const runtimePromptLibraryResponseSchema = z.object({
+	ok: z.boolean(),
+	library: workspacePromptLibrarySnapshotSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimePromptLibraryResponse = z.infer<typeof runtimePromptLibraryResponseSchema>;
+
+export const runtimePromptLibraryMutateRequestSchema = z.object({
+	mutation: workspacePromptLibraryMutationSchema,
+});
+export type RuntimePromptLibraryMutateRequest = z.infer<typeof runtimePromptLibraryMutateRequestSchema>;
+
+// ── 终端输入框暂存进 Prompt Library（W2 Ctrl+S）──────────────────────────────────
+//
+// 一次请求就是一整条原子链路：读框 → 回填被折叠的粘贴 → 写库 → 转发 Ctrl+S 字节清框。
+// 前端只负责拦下按键，不碰内容——同一份易随版本漂移的 TUI 画法知识只在服务端存一份。
+
+export const terminalInputBoxStashOutcomeSchema = z.enum([
+	// 正文已入库，Ctrl+S 已转发（框被 agent 自己清掉）。
+	"stashed_into_prompt_library",
+	// 正文**已经**入库（stashedPromptId 有效），但清框那一步没做成：写库跨文件锁与落盘期间，读框时
+	// 的那条 PTY 已经退出、或被 refresh 换成了新 incarnation。此时绝不能把 Ctrl+S 打到新会话上——那会
+	// 清掉一段与本次暂存毫无关系的输入。剩下的真实状态就是「库里有了、框里也还在」，如实报出来即可：
+	// 报纯成功会让用户以为框被清是理所当然，随后发现内容还在反而怀疑是不是没存进去。
+	"stashed_into_prompt_library_but_input_box_not_cleared",
+	// 同一个 task 上已经有一次暂存在进行中（连按 Ctrl+S / 多标签页同时触发）。这一次按键**没有**做任何
+	// 事：没入库、也没转发 Ctrl+S，框里内容一个字都没少。刻意不排队复用前一次的结果——排队者醒来时框
+	// 已被清空，只能报「框是空的」，那是个语义已经错位的回执。静默吞掉更不行：用户按了键，就得知道
+	// 这一次为什么没生效。
+	"another_terminal_input_box_stash_attempt_already_in_flight_for_this_task",
+	// 两路判据都说框是空的：没有可暂存的东西。Ctrl+S 照常转发（对空框是无操作）。
+	"input_box_empty_nothing_to_stash",
+	// 有内容迹象却读不出可用正文（该 agent 的输入框语法尚未建模 / 当前屏定位不到框）。
+	// Ctrl+S 仍然转发：那是 agent 自己的原生 stash，内容进它自己的暂存区，不比「Kanban 完全不介入」更差。
+	"input_box_content_unreadable_forwarded_to_agent_native_stash",
+	// 屏上确实有文字，但它一个字节都没经过本运行时的 writeInput，因此无从区分「用户敲的内容」与
+	// 「agent 自己渲染的空框占位提示」（Claude 偶发的 `Try "..."`）。不入库——把 agent 的 UI 文案
+	// 当成用户资产存进去，比暂时存不了更糟。同样转发 Ctrl+S 交给 agent 原生暂存兜底。
+	"input_box_screen_text_not_corroborated_by_keystroke_tracking",
+	// 这个任务此刻没有可信的 PTY 会话。两种情形共用这一条：压根没有 active，或者读框到清框之间那条
+	// 会话退出/被换代了（此时既没入库也没清框，什么都没发生，与前者对用户等价）。
+	"no_active_terminal_session",
+	// 写库失败。**不**转发 Ctrl+S——正文原样留在框里，用户看得见也能重试；转发只会把它藏进
+	// agent 的暂存区，而 Kanban 这边什么都没有。
+	"prompt_library_write_failed",
+]);
+export type TerminalInputBoxStashOutcome = z.infer<typeof terminalInputBoxStashOutcomeSchema>;
+
+// 这次暂存的保真度。全部如实上报，不做「看起来干净」的合并——用户有权知道存进去的这段文字
+// 哪里是推断出来的、哪里还原不了。
+export const terminalInputBoxStashFidelitySchema = z.object({
+	// 读屏时按宽度判据接回上一逻辑行的次数。**不是**错误计数：一条正常长行就会产生若干次。
+	softWrapJoinCount: z.number(),
+	foldedPastePlaceholderCount: z.number(),
+	backfilledPlaceholderCount: z.number(),
+	// 占位符配到了账本条目、但那条只剩计量没有正文。
+	placeholdersLeftUnbackfilledBecausePayloadWasDropped: z.number(),
+	// 占位符在账本里找不到计量对得上的条目（经 tmux / 原生终端粘进同一 PTY 等）。
+	placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: z.number(),
+	// 整框占位符的自洽性校验没过（`+M lines` 的 M < 3 折不出来，或 `#N` 不是严格递增）：框里混着
+	// 用户手打的同形字面量、或粘贴不是按框内顺序发生的。分不清哪处是真的，于是整框放弃回填，
+	// 占位符全部原样保留并计在这里。
+	placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: z.number(),
+	// 本次组合里载荷被丢弃（超留存上限）的粘贴条数，来自输入侧账本本身。
+	unrecoverablePasteCount: z.number(),
+});
+export type TerminalInputBoxStashFidelity = z.infer<typeof terminalInputBoxStashFidelitySchema>;
+
+export const runtimeTerminalInputBoxStashRequestSchema = z.object({
+	taskId: z.string(),
+	// 省略即 task scope，与面板里「新建 prompt」的默认一致。
+	scope: promptLibraryScopeSchema.optional(),
+});
+export type RuntimeTerminalInputBoxStashRequest = z.infer<typeof runtimeTerminalInputBoxStashRequestSchema>;
+
+export const runtimeTerminalInputBoxStashResponseSchema = z.object({
+	ok: z.boolean(),
+	outcome: terminalInputBoxStashOutcomeSchema,
+	stashedPromptId: z.string().nullable(),
+	// 只回字符数不回正文：正文最大可达粘贴留存上限（1 MiB），而调用方要的只是一句「存进去多少」。
+	// 同理**不**捎带整库快照（`workspacePromptLibrarySnapshotSchema` 里每一条都带完整正文，条目数还随
+	// 使用无上限增长）——那会把上面这条取舍原样抵消掉：每按一次 Ctrl+S 都要序列化「刚存进去的那段正文
+	// + 一整个库」。要读库请单独走 getWorkspacePromptLibrary，那条 procedure 的存在意义就是它。
+	stashedTextCharacterCount: z.number(),
+	fidelity: terminalInputBoxStashFidelitySchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTerminalInputBoxStashResponse = z.infer<typeof runtimeTerminalInputBoxStashResponseSchema>;
 
 export const runtimeTaskChatReloadRequestSchema = z.object({
 	taskId: z.string(),

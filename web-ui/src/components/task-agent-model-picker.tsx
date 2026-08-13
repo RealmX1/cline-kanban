@@ -2,7 +2,7 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import {
 	getRuntimeAgentCatalogEntry,
 	getRuntimeLaunchSupportedAgentCatalog,
-	KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
+	KANBAN_CURSOR_AGENT_PROBE_FAILURE_FALLBACK_MODEL_ID,
 } from "@runtime-agent-catalog";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ReactElement } from "react";
@@ -156,7 +156,7 @@ export interface TaskTerminalAgentModelOverrideSettingsChangeOptions {
 function isTerminalAgentModelSelectionAgentId(
 	agentId: RuntimeAgentId | null | undefined,
 ): agentId is RuntimeTerminalAgentModelSelectionAgentId {
-	return agentId === "claude" || agentId === "codex" || agentId === "cursor";
+	return agentId === "claude" || agentId === "codex" || agentId === "cursor" || agentId === "kimi";
 }
 
 function getFallbackTerminalAgentDefaultModelOption(agentId: RuntimeTerminalAgentModelSelectionAgentId): {
@@ -166,9 +166,11 @@ function getFallbackTerminalAgentDefaultModelOption(agentId: RuntimeTerminalAgen
 } {
 	if (agentId === "cursor") {
 		return {
+			// 标签刻意不含版本号：这是「后端探测结果回来之前」的占位，写死版本号只会在上游发新代次时说谎。
+			// 真实标签由后端从 `cursor-agent --list-models` 解析出来后覆盖。
 			value: "",
-			label: "Default · Cursor Grok 4.5 High",
-			defaultModelId: KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
+			label: "Default · Cursor Grok",
+			defaultModelId: KANBAN_CURSOR_AGENT_PROBE_FAILURE_FALLBACK_MODEL_ID,
 		};
 	}
 	return {
@@ -704,14 +706,31 @@ export function TaskAgentModelPicker({
 			? terminalAgentModelOverrideSettings.modelId
 			: "";
 
+	// 「已选中但已不在返回列表里」的 model id 补成一颗额外 chip。
+	// 后端按「每条产品线只显示最新一代」收窄了列表，所以钉在旧代次（如 cursor-grok-4.5-high）的卡片
+	// 一定会落在列表之外；不补这颗 chip，界面上看起来就像选择丢了——而卡片实际仍会用那个模型启动。
+	// claude 侧靠 "Pinned versions" 折叠区自动展开解决了同类问题，cursor / codex / kimi 没有对应机制。
+	const terminalAgentModelOptionsIncludingSelected = useMemo(() => {
+		if (
+			!selectedTerminalAgentModelId ||
+			terminalAgentModelOptions.some((option) => option.value === selectedTerminalAgentModelId)
+		) {
+			return terminalAgentModelOptions;
+		}
+		return [
+			...terminalAgentModelOptions,
+			{ value: selectedTerminalAgentModelId, label: selectedTerminalAgentModelId },
+		];
+	}, [selectedTerminalAgentModelId, terminalAgentModelOptions]);
+
 	// 别名（含 Default 占位）常驻第一行；钉版本项进入默认收起的第二行。
 	const latestTrackingAliasModelOptions = useMemo(
-		() => terminalAgentModelOptions.filter((option) => !isPinnedVersionModelOption(option)),
-		[terminalAgentModelOptions],
+		() => terminalAgentModelOptionsIncludingSelected.filter((option) => !isPinnedVersionModelOption(option)),
+		[terminalAgentModelOptionsIncludingSelected],
 	);
 	const pinnedVersionModelOptions = useMemo(
-		() => terminalAgentModelOptions.filter(isPinnedVersionModelOption),
-		[terminalAgentModelOptions],
+		() => terminalAgentModelOptionsIncludingSelected.filter(isPinnedVersionModelOption),
+		[terminalAgentModelOptionsIncludingSelected],
 	);
 	const [isPinnedVersionGroupOpen, setIsPinnedVersionGroupOpen] = useState(false);
 	// 选中项落在收起组里时（例如上次选的是 Opus 4.8）必须自动展开，否则选中的 chip 不可见、

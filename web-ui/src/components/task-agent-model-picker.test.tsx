@@ -17,7 +17,7 @@ const fetchClineProviderModelsMock = vi.hoisted(() => vi.fn());
 const fetchTerminalAgentModelSelectionOptionsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@runtime-agent-catalog", () => ({
-	KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID: "grok-4.5-high",
+	KANBAN_CURSOR_AGENT_PROBE_FAILURE_FALLBACK_MODEL_ID: "cursor-grok-4.6-high",
 	getRuntimeLaunchSupportedAgentCatalog: vi.fn(() => [
 		{ id: "cline", label: "Cline", binary: "cline" },
 		{ id: "claude", label: "Claude Code", binary: "claude" },
@@ -690,7 +690,7 @@ describe("TaskAgentModelPicker – agent icon selector", () => {
 });
 
 describe("TaskAgentModelPicker – terminal agent model selector", () => {
-	it("shows Cursor's Kanban default as Grok 4.5 High instead of a fast default", async () => {
+	it("shows Cursor's Kanban default as the non-fast Grok high tier", async () => {
 		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
 
 		await act(async () =>
@@ -709,9 +709,9 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 					clineProviderOptions={[{ value: "", label: "Cline" }]}
 					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
 					terminalAgentModelOptions={[
-						{ value: "", label: "Default · Cursor Grok 4.5 High" },
+						{ value: "", label: "Default · Cursor Grok 4.6" },
 						{ value: "auto", label: "Auto" },
-						{ value: "grok-4.5-fast-high", label: "Cursor Grok 4.5 High Fast" },
+						{ value: "cursor-grok-4.6-high-fast", label: "Cursor Grok 4.6 Fast" },
 					]}
 					isLoadingProviders={false}
 					isLoadingModels={false}
@@ -722,8 +722,8 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 			),
 		);
 
-		expect(findButtonByAriaLabel("Default · Cursor Grok 4.5 High")).not.toBeNull();
-		expect(container.textContent).not.toContain("Default · Cursor Grok 4.5 High Fast");
+		expect(findButtonByAriaLabel("Default · Cursor Grok 4.6")).not.toBeNull();
+		expect(container.textContent).not.toContain("Default · Cursor Grok 4.6 Fast");
 	});
 
 	it("writes an explicit terminal agent model override when a non-default model is selected", async () => {
@@ -746,7 +746,7 @@ describe("TaskAgentModelPicker – terminal agent model selector", () => {
 					clineProviderOptions={[{ value: "", label: "Cline" }]}
 					clineModelOptions={[{ value: "", label: "GPT-5.4" }]}
 					terminalAgentModelOptions={[
-						{ value: "", label: "Default · Cursor Grok 4.5 High" },
+						{ value: "", label: "Default · Cursor Grok 4.6" },
 						{ value: "auto", label: "Auto" },
 					]}
 					isLoadingProviders={false}
@@ -1072,13 +1072,13 @@ describe("useTaskAgentModelPicker – terminal agent model cache staleness", () 
 		// cursor / codex 这种整份都只有别名档的响应就会被永久判成过期、缓存再也 seed 不了。
 		seedTaskAgentModelListCache("terminal:cursor", {
 			agentId: "cursor",
-			defaultModelId: "grok-4.5-high",
-			defaultLabel: "Default · Cursor Grok 4.5 High",
+			defaultModelId: "cursor-grok-4.6-high",
+			defaultLabel: "Default · Cursor Grok 4.6",
 			options: [
 				{ modelId: "auto", label: "Auto", modelSelectionGroup: "latest_tracking_alias" },
 				{
-					modelId: "grok-4.5-fast-high",
-					label: "Cursor Grok 4.5 High Fast",
+					modelId: "cursor-grok-4.6-high-fast",
+					label: "Cursor Grok 4.6 Fast",
 					modelSelectionGroup: "latest_tracking_alias",
 				},
 			],
@@ -1089,11 +1089,11 @@ describe("useTaskAgentModelPicker – terminal agent model cache staleness", () 
 		const snapshot = await renderTerminalAgentHarness("cursor");
 
 		expect(snapshot.terminalAgentModelOptions.map((option) => option.label)).toEqual([
-			"Default · Cursor Grok 4.5 High",
+			"Default · Cursor Grok 4.6",
 			"Auto",
-			"Cursor Grok 4.5 High Fast",
+			"Cursor Grok 4.6 Fast",
 		]);
-		expect(snapshot.terminalAgentDefaultModelId).toBe("grok-4.5-high");
+		expect(snapshot.terminalAgentDefaultModelId).toBe("cursor-grok-4.6-high");
 	});
 });
 
@@ -1147,6 +1147,56 @@ describe("TaskAgentModelPicker – pinned model version group", () => {
 		const pinnedOptionButton = findButtonByAriaLabel("Opus 4.8");
 		expect(pinnedOptionButton).not.toBeNull();
 		expect(pinnedOptionButton?.getAttribute("aria-pressed")).toBe("true");
+	});
+});
+
+// 后端按「每条产品线只显示最新一代」收窄了列表，钉在旧代次上的卡片一定落在列表之外。
+// claude 侧靠 pinned 折叠区自动展开解决了同类问题，cursor / codex / kimi 没有对应机制。
+describe("TaskAgentModelPicker – selected model that is no longer listed", () => {
+	async function renderCursorModelPicker(
+		terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings,
+	) {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId={"cursor" as RuntimeAgentId}
+					onAgentIdChange={() => {}}
+					defaultAgentId={"cursor" as RuntimeAgentId}
+					terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
+					onTerminalAgentModelOverrideSettingsChange={() => {}}
+					agentOptions={[{ value: "", label: "Cursor" }]}
+					clineProviderOptions={[]}
+					clineModelOptions={[]}
+					terminalAgentModelOptions={[
+						{ value: "", label: "Default · Cursor Grok 4.6" },
+						{ value: "auto", label: "Auto" },
+						{ value: "cursor-grok-4.6-xhigh", label: "Cursor Grok 4.6 Extra High" },
+					]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					providerDefaultModels={{}}
+				/>,
+			),
+		);
+		await act(async () => {
+			await new Promise((r) => setTimeout(r, 0));
+		});
+	}
+
+	it("keeps a chip for a pinned older-generation model that the latest-generation list no longer offers", async () => {
+		await renderCursorModelPicker({ agentId: "cursor", modelId: "cursor-grok-4.5-high" });
+
+		const preservedSelectionButton = findButtonByAriaLabel("cursor-grok-4.5-high");
+		expect(preservedSelectionButton).not.toBeNull();
+		expect(preservedSelectionButton?.getAttribute("aria-pressed")).toBe("true");
+	});
+
+	it("adds no extra chip when the selection is already in the list", async () => {
+		await renderCursorModelPicker({ agentId: "cursor", modelId: "cursor-grok-4.6-xhigh" });
+
+		expect(container.querySelectorAll('[aria-label="Agent model"] button')).toHaveLength(3);
+		expect(findButtonByAriaLabel("Cursor Grok 4.6 Extra High")?.getAttribute("aria-pressed")).toBe("true");
 	});
 });
 

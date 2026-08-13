@@ -14,7 +14,7 @@ import {
 	createInMemoryClineTaskSessionService,
 } from "../cline-sdk/cline-task-session-service";
 import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
-import { isRuntimeAgentSessionDrivenByAcpProtocol } from "../core/agent-catalog";
+import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
@@ -58,6 +58,7 @@ import {
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
+import { scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart } from "./pending-task-message-injection-startup-sweep";
 import type { RuntimeStateHub } from "./runtime-state-hub";
 import { createTransportAwareAgentSessionReclamationExecutor } from "./transport-aware-agent-session-reclamation";
 import type { WorkspaceRegistry } from "./workspace-registry";
@@ -128,6 +129,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	} catch {
 		throw new Error("Could not find web UI assets. Run `npm run build` to generate and package the web UI.");
 	}
+
+	// 启动清扫：上一次 runtime 生命周期里没落定的程序化投递，其收敛完全依赖已经消失的内存态，
+	// 不清扫就会永远停在 pending。只清扫**超期**的那些——账本是全机共享的，同机并存的另一个实例
+	// 此刻可能正有在途投递，全扫会把它们判成不可纠正的假失败（见清扫模块头注）。
+	// 不 await 阻塞启动——清扫是纠偏动作，不是服务可用性的前置条件。
+	scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart();
 
 	const resolveWorkspaceScopeFromRequest = async (
 		request: IncomingMessage,
@@ -351,6 +358,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
 				broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
 				broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
+				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 				bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
 				prepareForStateReset,
 				getUpdateStatus: deps.getUpdateStatus,
@@ -436,12 +444,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						}
 						return lastAssistantMessageContent;
 					}
-					// ACP agent（omp 等）：既没有 hook finalMessage，也不在 Cline 账本里；只认 cline 会让
+					// ACP 会话（omp 切到 ACP 时）：既没有 hook finalMessage，也不在 Cline 账本里；只认 cline 会让
 					// 预览对它恒为 null。ACP service 的消息全在内存，读它同样廉价，不会 boot 任何 SDK host。
+					// 判据只能是「ACP service 里有这条会话的活会话摘要且它盖的是 ACP 章」——绝不能拿卡片
+					// agentId 兜底：omp 的两条通道共用 agentId="omp"，卡片判据会把一条 TUI 会话误判成 ACP，
+					// 于是预览恒读 ACP 那份空消息表。
 					const acpTaskSessionService = await getScopedAcpTaskSessionService(scope);
-					const isAcpTask =
-						isRuntimeAgentSessionDrivenByAcpProtocol(acpTaskSessionService.getSummary(taskId)?.agentId ?? null) ||
-						isRuntimeAgentSessionDrivenByAcpProtocol(card?.agentId ?? null);
+					const isAcpTask = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
+						acpTaskSessionService.getSummary(taskId),
+					);
 					if (isAcpTask) {
 						let lastAcpAssistantMessageContent: string | null = null;
 						for (const message of acpTaskSessionService.listMessages(taskId)) {

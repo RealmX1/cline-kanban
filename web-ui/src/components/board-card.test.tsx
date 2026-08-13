@@ -770,6 +770,65 @@ describe("BoardCard", () => {
 		expect(directoryRow?.querySelector("svg.lucide-arrow-down")).toBeNull();
 	});
 
+	it("工作区文件数与增删行数全为 0 时不渲染脏统计", async () => {
+		mockWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/tmp/worktrees/task-1",
+			branch: null,
+			isDetached: true,
+			headCommit: "1234567890abcdef",
+			baseCommit: "1234567890abcdef",
+			commitsAheadOfBaseRef: 0,
+			commitsBehindBaseRef: 0,
+			changedFiles: 0,
+			additions: 0,
+			deletions: 0,
+		};
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="review" />
+				</TooltipProvider>,
+			);
+		});
+
+		const directoryRow = container.querySelector("[data-task-directory]");
+		expect(directoryRow?.textContent).toContain("worktree");
+		expect(directoryRow?.textContent).not.toContain("0 files");
+		expect(directoryRow?.textContent).not.toContain("+0");
+		expect(directoryRow?.textContent).not.toContain("-0");
+	});
+
+		it("存在文件变化但增删行数均为 0 时仍渲染脏统计", async () => {
+		mockWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/tmp/worktrees/task-1",
+			branch: null,
+			isDetached: true,
+			headCommit: "1234567890abcdef",
+			baseCommit: "1234567890abcdef",
+			commitsAheadOfBaseRef: 0,
+			commitsBehindBaseRef: 0,
+			changedFiles: 1,
+			additions: 0,
+			deletions: 0,
+		};
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="review" />
+				</TooltipProvider>,
+			);
+		});
+
+		const directoryRow = container.querySelector("[data-task-directory]");
+		expect(directoryRow?.textContent).toContain("1 file");
+		expect(directoryRow?.textContent).toContain("+0");
+		expect(directoryRow?.textContent).toContain("-0");
+	});
+
 	it("目录行展示已有证据的 task commits 回流数量", async () => {
 		mockWorkspaceSnapshot = {
 			taskId: "task-1",

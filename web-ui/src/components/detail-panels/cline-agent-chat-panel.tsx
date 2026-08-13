@@ -5,7 +5,9 @@
 import {
 	getRuntimeAgentCatalogEntry,
 	isRuntimeAgentModelSelectedThroughClineProviderSettings,
+	resolveRuntimeAgentSessionTransportFromSummary,
 } from "@runtime-agent-catalog";
+import { canAgentSessionTransportBeSwitched } from "@runtime-agent-session-transport-selection";
 import { AlertTriangle } from "lucide-react";
 import React, {
 	type ReactElement,
@@ -18,6 +20,10 @@ import React, {
 	useState,
 } from "react";
 
+// 距顶多少像素以内算「滚到顶了」，触发回填。留一点余量：滚动惯性与子像素误差常让 scrollTop 停在 0 之上。
+const OLDER_MESSAGE_BACKFILL_SCROLL_TOP_THRESHOLD_PX = 48;
+
+import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
 import { ClineChatComposer } from "@/components/detail-panels/cline-chat-composer";
 import { ClineChatMessageItem } from "@/components/detail-panels/cline-chat-message-item";
 import {
@@ -33,6 +39,7 @@ import { useClineChatPanelController } from "@/hooks/use-cline-chat-panel-contro
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
+import { useWindowedAgentChatMessageList } from "@/hooks/use-windowed-agent-chat-message-list";
 import type {
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
@@ -186,6 +193,12 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			showMoveToValidation,
 		});
 		const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+		// 只渲染最近一屏消息；滚到顶再回填。回填期间存住回填前的 scrollHeight 用于补偿滚动位置。
+		const { visibleMessages, hiddenOlderMessageCount, revealOlderMessages } = useWindowedAgentChatMessageList({
+			messages,
+			resetWindowKey: taskId,
+		});
+		const pendingOlderMessageBackfillScrollHeightRef = useRef<number | null>(null);
 		// TODO: Persist per-task mode immediately when toggled so page refresh restores unsent mode changes.
 		const modeByTaskIdRef = useRef<Map<string, RuntimeTaskSessionMode>>(new Map());
 		const [composerError, setComposerError] = useState<string | null>(null);
@@ -269,7 +282,28 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			setIsAutoScrollEnabled((currentValue) =>
 				currentValue === nextIsAutoScrollEnabled ? currentValue : nextIsAutoScrollEnabled,
 			);
-		}, [isPinnedToBottom]);
+			// 滚到顶部即回填一屏更早的消息。记下回填前的 scrollHeight，下一次布局里按增量把 scrollTop 顶回去，
+			// 否则新插入的内容会把用户正在看的那段推走（视觉上是「自己往下跳了一屏」）。
+			if (
+				hiddenOlderMessageCount > 0 &&
+				container.scrollTop <= OLDER_MESSAGE_BACKFILL_SCROLL_TOP_THRESHOLD_PX &&
+				pendingOlderMessageBackfillScrollHeightRef.current === null
+			) {
+				pendingOlderMessageBackfillScrollHeightRef.current = container.scrollHeight;
+				revealOlderMessages();
+			}
+		}, [hiddenOlderMessageCount, isPinnedToBottom, revealOlderMessages]);
+
+		// 回填后按 scrollHeight 增量补偿滚动位置。放在 layout effect 里，用户看不到中间帧。
+		useLayoutEffect(() => {
+			const container = scrollContainerRef.current;
+			const scrollHeightBeforeBackfill = pendingOlderMessageBackfillScrollHeightRef.current;
+			if (!container || scrollHeightBeforeBackfill === null) {
+				return;
+			}
+			pendingOlderMessageBackfillScrollHeightRef.current = null;
+			container.scrollTop += container.scrollHeight - scrollHeightBeforeBackfill;
+		}, [visibleMessages]);
 
 		useLayoutEffect(() => {
 			const container = scrollContainerRef.current;
@@ -279,7 +313,7 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			container.scrollTop = container.scrollHeight;
 		}, [
 			isAutoScrollEnabled,
-			messages,
+			visibleMessages,
 			showAgentProgressIndicator,
 			showActionFooter,
 			showReviewActions,
@@ -457,12 +491,41 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 
 		return (
 			<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+				{/* 会话级工具条。目前只承载「换通话通道」一个动作，故仅当该会话真能切换时才占一行高度
+				    （Cline SDK 会话上整行不渲染）。切过去看到的是 xterm 面板，所以那边也挂了同一个按钮。 */}
+				{summary && canAgentSessionTransportBeSwitched(agentId ?? null) ? (
+					<div className="flex items-center justify-end gap-1 px-2 pt-2">
+						<AgentSessionTransportSwitchButton
+							workspaceId={workspaceId}
+							taskId={taskId}
+							agentId={agentId ?? null}
+							currentSessionTransport={resolveRuntimeAgentSessionTransportFromSummary(summary)}
+							iconSize={12}
+							variant="ghost"
+						/>
+					</div>
+				) : null}
 				<div
 					ref={scrollContainerRef}
 					className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto px-2 py-3"
 					onScroll={handleMessageListScroll}
 				>
-					{messages.map((message) => (
+					{hiddenOlderMessageCount > 0 ? (
+						<button
+							type="button"
+							onClick={() => {
+								const container = scrollContainerRef.current;
+								if (container && pendingOlderMessageBackfillScrollHeightRef.current === null) {
+									pendingOlderMessageBackfillScrollHeightRef.current = container.scrollHeight;
+								}
+								revealOlderMessages();
+							}}
+							className="mx-auto rounded px-2 py-1 text-center text-xs text-fg-muted hover:text-fg-default"
+						>
+							{`Show ${hiddenOlderMessageCount} earlier message${hiddenOlderMessageCount === 1 ? "" : "s"}`}
+						</button>
+					) : null}
+					{visibleMessages.map((message) => (
 						<ClineChatMessageItem
 							key={message.id}
 							message={message}
