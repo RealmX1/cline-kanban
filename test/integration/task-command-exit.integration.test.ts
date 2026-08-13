@@ -769,10 +769,33 @@ describe("CLI subprocess exit guarantees", () => {
 				).toBe(true);
 				expect(listed.exitCode).toBe(0);
 
-				const payload = JSON.parse(listed.stdout) as { ok?: boolean; count?: number; column?: string | null };
+				const payload = JSON.parse(listed.stdout) as {
+					ok?: boolean;
+					count?: number;
+					column?: string | null;
+					tasks?: Array<{
+						workspaceGitStatus?: {
+							baseRef?: string;
+							commitsAheadOfBaseRef?: number | null;
+							commitsBehindBaseRef?: number | null;
+							taskCommitsIntegratedIntoBaseRef?: number | null;
+							taskCommitIntegrationTrackingStatus?: string;
+						};
+					}>;
+				};
 				expect(payload.ok).toBe(true);
 				expect(payload.column).toBeNull();
 				expect(payload.count).toBe(12);
+				expect(payload.tasks).toHaveLength(12);
+				for (const task of payload.tasks ?? []) {
+					expect(task.workspaceGitStatus).toMatchObject({
+						baseRef: "main",
+						commitsAheadOfBaseRef: null,
+						commitsBehindBaseRef: null,
+						taskCommitsIntegratedIntoBaseRef: null,
+						taskCommitIntegrationTrackingStatus: "legacy_history_unavailable",
+					});
+				}
 			} finally {
 				await stopRuntimeServer(serverProcess);
 			}

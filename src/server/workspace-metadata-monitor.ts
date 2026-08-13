@@ -9,6 +9,7 @@ import type {
 import { computeWorktreeGitChangeToken } from "../workspace/git-change-token";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
 import { runGit } from "../workspace/git-utils";
+import { refreshTaskCommitIntegrationProvenance } from "../workspace/task-commit-integration-provenance";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const WORKSPACE_METADATA_POLL_INTERVAL_MS = 3_000;
@@ -96,10 +97,9 @@ export interface WorkspaceMetadataMonitor {
 function collectTrackedTasks(board: RuntimeBoardData): TrackedTaskWorkspace[] {
 	const tracked: TrackedTaskWorkspace[] = [];
 	for (const column of board.columns) {
-		// Backlog and trash cards do not need git metadata polling. Tracking only
-		// active columns avoids unnecessary work, and trash paths are reconstructed
-		// from task id on the web-ui side.
-		if (column.id === "backlog" || column.id === "trash") {
+		// Backlog 尚未拥有 task worktree，不需要探针；Done 则必须保留在投影中，以便在
+		// worktree 删除后继续展示 handback 前持久化的最后快照。
+		if (column.id === "backlog") {
 			continue;
 		}
 		for (const card of column.cards) {
@@ -146,6 +146,14 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.changedFiles === b.changedFiles &&
 		a.additions === b.additions &&
 		a.deletions === b.deletions &&
+		a.workspaceGitStatus.baseRef === b.workspaceGitStatus.baseRef &&
+		a.workspaceGitStatus.commitsAheadOfBaseRef === b.workspaceGitStatus.commitsAheadOfBaseRef &&
+		a.workspaceGitStatus.commitsBehindBaseRef === b.workspaceGitStatus.commitsBehindBaseRef &&
+		a.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef === b.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef &&
+		a.workspaceGitStatus.taskCommitIntegrationTrackingStatus ===
+			b.workspaceGitStatus.taskCommitIntegrationTrackingStatus &&
+		a.workspaceGitStatus.observationSource === b.workspaceGitStatus.observationSource &&
+		a.workspaceGitStatus.observedAt === b.workspaceGitStatus.observedAt &&
 		a.stateVersion === b.stateVersion
 	);
 }
@@ -311,6 +319,7 @@ function createBaseRefTipResolver(workspacePath: string): (baseRef: string) => P
 }
 
 async function loadTaskWorkspaceMetadata(
+	workspaceId: string,
 	workspacePath: string,
 	task: TrackedTaskWorkspace,
 	current: CachedTaskWorkspaceMetadata | null,
@@ -324,14 +333,30 @@ async function loadTaskWorkspaceMetadata(
 	});
 
 	if (!pathInfo.exists) {
+		const baseRefTipCommit = await resolveBaseRefTip(pathInfo.baseRef);
 		if (
 			current &&
 			current.data.exists === false &&
 			current.data.path === pathInfo.path &&
-			current.data.baseRef === pathInfo.baseRef
+			current.data.baseRef === pathInfo.baseRef &&
+			current.baseRefTipCommit === baseRefTipCommit
 		) {
 			return current;
 		}
+		const workspaceGitStatus = await refreshTaskCommitIntegrationProvenance({
+			workspaceId,
+			taskId: task.taskId,
+			repoPath: workspacePath,
+			worktreePath: pathInfo.path,
+			baseRef: pathInfo.baseRef,
+			...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
+			worktreeExists: false,
+			headCommit: null,
+			baseRefTipCommit,
+			commitsAheadOfBaseRef: null,
+			commitsBehindBaseRef: null,
+			isDetached: false,
+		});
 		return {
 			data: {
 				taskId: task.taskId,
@@ -339,8 +364,9 @@ async function loadTaskWorkspaceMetadata(
 				exists: false,
 				baseRef: pathInfo.baseRef,
 				baseCommit: null,
-				commitsAheadOfBaseRef: null,
-				commitsBehindBaseRef: null,
+				commitsAheadOfBaseRef: workspaceGitStatus.commitsAheadOfBaseRef,
+				commitsBehindBaseRef: workspaceGitStatus.commitsBehindBaseRef,
+				workspaceGitStatus,
 				branch: null,
 				isDetached: false,
 				headCommit: null,
@@ -351,7 +377,7 @@ async function loadTaskWorkspaceMetadata(
 			},
 			stateToken: null,
 			cheapChangeToken: null,
-			baseRefTipCommit: null,
+			baseRefTipCommit,
 			lastFullRefreshAtMs: 0,
 		};
 	}
@@ -396,6 +422,21 @@ async function loadTaskWorkspaceMetadata(
 			const summary = await getGitSyncSummary(pathInfo.path, { probe });
 			const baseCommit = await loadTaskForkPointCommit(pathInfo.path, pathInfo.baseRef);
 			const divergence = await loadTaskBaseRefDivergence(pathInfo.path, pathInfo.baseRef);
+			const workspaceGitStatus = await refreshTaskCommitIntegrationProvenance({
+				workspaceId,
+				taskId: task.taskId,
+				repoPath: workspacePath,
+				worktreePath: pathInfo.path,
+				baseRef: pathInfo.baseRef,
+				...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
+				worktreeExists: true,
+				headCommit: probe.headCommit,
+				baseRefTipCommit,
+				commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
+				commitsBehindBaseRef: divergence.commitsBehindBaseRef,
+				isDetached: probe.headCommit !== null && probe.currentBranch === null,
+				observedAt: now,
+			});
 			return {
 				data: {
 					taskId: task.taskId,
@@ -405,6 +446,7 @@ async function loadTaskWorkspaceMetadata(
 					baseCommit,
 					commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
 					commitsBehindBaseRef: divergence.commitsBehindBaseRef,
+					workspaceGitStatus,
 					branch: probe.currentBranch,
 					isDetached: probe.headCommit !== null && probe.currentBranch === null,
 					headCommit: probe.headCommit,
@@ -432,6 +474,15 @@ async function loadTaskWorkspaceMetadata(
 				baseCommit: null,
 				commitsAheadOfBaseRef: null,
 				commitsBehindBaseRef: null,
+				workspaceGitStatus: {
+					baseRef: pathInfo.baseRef,
+					commitsAheadOfBaseRef: null,
+					commitsBehindBaseRef: null,
+					taskCommitsIntegratedIntoBaseRef: null,
+					taskCommitIntegrationTrackingStatus: "git_probe_unavailable",
+					observationSource: "unavailable",
+					observedAt: null,
+				},
 				branch: null,
 				isDetached: false,
 				headCommit: null,
@@ -479,7 +530,13 @@ export function createWorkspaceMetadataMonitor(
 			const nextTaskEntries = await Promise.all(
 				entry.trackedTasks.map(async (task) => {
 					const current = entry.taskMetadataByTaskId.get(task.taskId) ?? null;
-					const next = await loadTaskWorkspaceMetadata(entry.workspacePath, task, current, resolveBaseRefTip);
+					const next = await loadTaskWorkspaceMetadata(
+						workspaceId,
+						entry.workspacePath,
+						task,
+						current,
+						resolveBaseRefTip,
+					);
 					return next ? [task.taskId, next] : null;
 				}),
 			);

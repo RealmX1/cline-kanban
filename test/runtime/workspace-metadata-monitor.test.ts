@@ -17,6 +17,10 @@ const gitChangeTokenMocks = vi.hoisted(() => ({
 	computeWorktreeGitChangeToken: vi.fn(),
 }));
 
+const taskCommitIntegrationProvenanceMocks = vi.hoisted(() => ({
+	refreshTaskCommitIntegrationProvenance: vi.fn(),
+}));
+
 vi.mock("../../src/workspace/git-sync.js", () => ({
 	getGitSyncSummary: gitSyncMocks.getGitSyncSummary,
 	probeGitWorkspaceState: gitSyncMocks.probeGitWorkspaceState,
@@ -32,6 +36,10 @@ vi.mock("../../src/workspace/git-utils.js", () => ({
 
 vi.mock("../../src/workspace/git-change-token.js", () => ({
 	computeWorktreeGitChangeToken: gitChangeTokenMocks.computeWorktreeGitChangeToken,
+}));
+
+vi.mock("../../src/workspace/task-commit-integration-provenance.js", () => ({
+	refreshTaskCommitIntegrationProvenance: taskCommitIntegrationProvenanceMocks.refreshTaskCommitIntegrationProvenance,
 }));
 
 // fork-point（git merge-base HEAD <baseRef>）的确定性返回；非 merge-base 调用退化为失败。
@@ -82,7 +90,7 @@ function createBoard(): RuntimeBoardData {
 				cards: [createBoardCard("task-branch"), createBoardCard("task-inplace", "inplace")],
 			},
 			{ id: "review", title: "Review", cards: [] },
-			{ id: "trash", title: "Trash", cards: [createBoardCard("task-trash", "inplace")] },
+			{ id: "trash", title: "Trash", cards: [createBoardCard("task-trash")] },
 		],
 		dependencies: [],
 	};
@@ -170,6 +178,36 @@ describe("createWorkspaceMetadataMonitor", () => {
 		gitChangeTokenMocks.computeWorktreeGitChangeToken.mockReset();
 		// 默认：廉价 token 恒定 → 首刷后同状态复用缓存、跳过真探针。
 		gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("stable-token");
+		taskCommitIntegrationProvenanceMocks.refreshTaskCommitIntegrationProvenance.mockReset();
+		taskCommitIntegrationProvenanceMocks.refreshTaskCommitIntegrationProvenance.mockImplementation(
+			async (input: {
+				taskId: string;
+				baseRef: string;
+				worktreeMode?: RuntimeTaskWorktreeMode;
+				worktreeExists: boolean;
+				commitsAheadOfBaseRef: number | null;
+				commitsBehindBaseRef: number | null;
+			}) => ({
+				baseRef: input.baseRef,
+				commitsAheadOfBaseRef: input.taskId === "task-trash" ? 0 : input.commitsAheadOfBaseRef,
+				commitsBehindBaseRef: input.taskId === "task-trash" ? 4 : input.commitsBehindBaseRef,
+				taskCommitsIntegratedIntoBaseRef:
+					input.worktreeMode === "inplace" ? null : input.taskId === "task-trash" ? 2 : null,
+				taskCommitIntegrationTrackingStatus:
+					input.worktreeMode === "inplace"
+						? "inplace_task_commit_ownership_unavailable"
+						: input.taskId === "task-trash"
+							? "complete"
+							: "legacy_history_unavailable",
+				observationSource:
+					input.taskId === "task-trash"
+						? "persisted_final_snapshot"
+						: input.worktreeExists
+							? "live_worktree"
+							: "unavailable",
+				observedAt: 100,
+			}),
+		);
 
 		monitor = createWorkspaceMetadataMonitor({ onMetadataUpdated });
 	});
@@ -224,6 +262,10 @@ describe("createWorkspaceMetadataMonitor", () => {
 			changedFiles: 2,
 			additions: 5,
 			deletions: 1,
+			workspaceGitStatus: {
+				taskCommitsIntegratedIntoBaseRef: null,
+				taskCommitIntegrationTrackingStatus: "inplace_task_commit_ownership_unavailable",
+			},
 		});
 		expect(gitUtilsMocks.runGit).toHaveBeenCalledWith(WORKSPACE_PATH, ["merge-base", "HEAD", "main"]);
 		expect(gitUtilsMocks.runGit).toHaveBeenCalledWith(WORKSPACE_PATH, [
@@ -246,7 +288,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 		});
 	});
 
-	it("does not track backlog or trash cards", async () => {
+	it("不追踪 backlog，但保留 Done 卡片的持久 Git 状态投影", async () => {
 		const metadata = await monitor.connectWorkspace({
 			workspaceId: "workspace-1",
 			workspacePath: WORKSPACE_PATH,
@@ -254,7 +296,13 @@ describe("createWorkspaceMetadataMonitor", () => {
 		});
 
 		const trackedTaskIds = metadata.taskWorkspaces.map((task) => task.taskId);
-		expect(trackedTaskIds).toEqual(["task-branch", "task-inplace"]);
+		expect(trackedTaskIds).toEqual(["task-branch", "task-inplace", "task-trash"]);
+		expect(metadata.taskWorkspaces.find((task) => task.taskId === "task-trash")?.workspaceGitStatus).toMatchObject({
+			commitsAheadOfBaseRef: 0,
+			commitsBehindBaseRef: 4,
+			taskCommitsIntegratedIntoBaseRef: 2,
+			observationSource: "persisted_final_snapshot",
+		});
 	});
 
 	it("廉价 token 未变且在兜底窗口内时，二次刷新跳过 probe（不再 spawn git）", async () => {

@@ -6,8 +6,10 @@ import type {
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskCommentEntry,
+	RuntimeTaskCommitIntegrationTrackingStatus,
 	RuntimeTaskImage,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
+	RuntimeTaskWorkspaceGitStatusObservationSource,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
 
@@ -111,6 +113,11 @@ export interface ReviewTaskWorkspaceSnapshot {
 	commitsAheadOfBaseRef: number | null;
 	// behind = base 分支独有、任务尚未吸收的提交数；base 推进时增长，吸收后归零。
 	commitsBehindBaseRef: number | null;
+	// 新 runtime metadata 始终携带；optional 仅用于兼容旧 stream / 测试快照。
+	taskCommitsIntegratedIntoBaseRef?: number | null;
+	taskCommitIntegrationTrackingStatus?: RuntimeTaskCommitIntegrationTrackingStatus;
+	workspaceGitStatusObservationSource?: RuntimeTaskWorkspaceGitStatusObservationSource;
+	workspaceGitStatusObservedAt?: number | null;
 	changedFiles: number | null;
 	additions: number | null;
 	deletions: number | null;

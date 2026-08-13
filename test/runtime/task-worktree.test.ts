@@ -28,6 +28,10 @@ const taskWorktreePathMocks = vi.hoisted(() => ({
 	normalizeTaskIdForWorktreePath: vi.fn(),
 }));
 
+const taskCommitIntegrationProvenanceMocks = vi.hoisted(() => ({
+	recordTaskWorktreeCreationCommitProvenance: vi.fn(),
+}));
+
 // 仅 TOCTOU 单测按需覆写:在 resolveTaskCwd 的 pathExists(access) await 返回「真」之前注入并发 setup 登记,
 // 复现「pathExists 之后 setup 才登记」的 check-then-act 时序。默认 null 时该包装纯透传真实 access,
 // 其余用例(以及本文件其它 describe)完全不受影响。
@@ -58,6 +62,11 @@ vi.mock("../../src/workspace/task-worktree-path.js", () => ({
 	getWorkspaceFolderLabelForWorktreePath: taskWorktreePathMocks.getWorkspaceFolderLabelForWorktreePath,
 	KANBAN_TASK_WORKTREES_DIR_NAME: "worktrees",
 	normalizeTaskIdForWorktreePath: taskWorktreePathMocks.normalizeTaskIdForWorktreePath,
+}));
+
+vi.mock("../../src/workspace/task-commit-integration-provenance.js", () => ({
+	recordTaskWorktreeCreationCommitProvenance:
+		taskCommitIntegrationProvenanceMocks.recordTaskWorktreeCreationCommitProvenance,
 }));
 
 // node:fs/promises 部分 mock:只包装 access(pathExists 依赖它),其余导出透传真实实现。
@@ -142,6 +151,8 @@ function installTaskWorktreeTestMockDefaults(): void {
 	workspaceStateMocks.loadWorkspaceContext.mockReset();
 	taskWorktreePathMocks.getWorkspaceFolderLabelForWorktreePath.mockReset();
 	taskWorktreePathMocks.normalizeTaskIdForWorktreePath.mockReset();
+	taskCommitIntegrationProvenanceMocks.recordTaskWorktreeCreationCommitProvenance.mockReset();
+	taskCommitIntegrationProvenanceMocks.recordTaskWorktreeCreationCommitProvenance.mockResolvedValue(undefined);
 
 	let lockQueue = Promise.resolve();
 	lockedFileSystemMocks.withLock.mockImplementation(async (_request: unknown, operation: () => Promise<unknown>) => {
