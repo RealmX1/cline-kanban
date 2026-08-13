@@ -205,6 +205,9 @@ export function parseWorktreeDeleteRequest(value: unknown): RuntimeWorktreeDelet
 	return {
 		taskId,
 		...(parsed.worktreeMode ? { worktreeMode: parsed.worktreeMode } : {}),
+		...(parsed.removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion === true
+			? { removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true }
+			: {}),
 	};
 }
 

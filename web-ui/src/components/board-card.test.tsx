@@ -800,7 +800,7 @@ describe("BoardCard", () => {
 		expect(directoryRow?.textContent).not.toContain("-0");
 	});
 
-	it("存在文件变化但增删行数均为 0 时仍渲染脏统计", async () => {
+		it("存在文件变化但增删行数均为 0 时仍渲染脏统计", async () => {
 		mockWorkspaceSnapshot = {
 			taskId: "task-1",
 			path: "/tmp/worktrees/task-1",
@@ -827,6 +827,68 @@ describe("BoardCard", () => {
 		expect(directoryRow?.textContent).toContain("1 file");
 		expect(directoryRow?.textContent).toContain("+0");
 		expect(directoryRow?.textContent).toContain("-0");
+	});
+
+	it("目录行展示已有证据的 task commits 回流数量", async () => {
+		mockWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/tmp/worktrees/task-1",
+			branch: null,
+			isDetached: true,
+			headCommit: "1234567890abcdef",
+			baseCommit: "fedcba0987654321",
+			commitsAheadOfBaseRef: 1,
+			commitsBehindBaseRef: 0,
+			taskCommitsIntegratedIntoBaseRef: 2,
+			taskCommitIntegrationTrackingStatus: "complete",
+			workspaceGitStatusObservationSource: "persisted_final_snapshot",
+			workspaceGitStatusObservedAt: 100,
+			changedFiles: 0,
+			additions: 0,
+			deletions: 0,
+		};
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="trash" />
+				</TooltipProvider>,
+			);
+		});
+
+		const integratedIndicator = container.querySelector("[data-task-commits-integrated-into-base-ref]");
+		expect(integratedIndicator?.textContent).toBe("2");
+		expect(integratedIndicator?.className).toContain("text-status-green");
+	});
+
+	it("证据不足的 legacy task 将回流数量显示为问号", async () => {
+		mockWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/tmp/worktrees/task-1",
+			branch: null,
+			isDetached: true,
+			headCommit: null,
+			baseCommit: null,
+			commitsAheadOfBaseRef: null,
+			commitsBehindBaseRef: null,
+			taskCommitsIntegratedIntoBaseRef: null,
+			taskCommitIntegrationTrackingStatus: "legacy_history_unavailable",
+			workspaceGitStatusObservationSource: "unavailable",
+			workspaceGitStatusObservedAt: null,
+			changedFiles: null,
+			additions: null,
+			deletions: null,
+		};
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="trash" />
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector("[data-task-commits-integrated-into-base-ref]")?.textContent).toBe("?");
 	});
 
 	it("shows formatted agent override details with model name and reasoning effort", async () => {

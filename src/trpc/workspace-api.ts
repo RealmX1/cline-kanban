@@ -1,4 +1,5 @@
 import { TRPCError } from "@trpc/server";
+import pLimit from "p-limit";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import type {
@@ -8,6 +9,8 @@ import type {
 	RuntimeGitSyncAction,
 	RuntimeGitSyncResponse,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskWorkspaceGitStatus,
+	RuntimeTaskWorkspaceGitStatusesResponse,
 	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceChangesMode,
 	RuntimeWorkspaceFileSearchResponse,
@@ -20,7 +23,12 @@ import {
 } from "../core/api-validation";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
-import { mutateWorkspaceState, saveWorkspaceState, WorkspaceStateConflictError } from "../state/workspace-state";
+import {
+	loadWorkspaceBoardById,
+	mutateWorkspaceState,
+	saveWorkspaceState,
+	WorkspaceStateConflictError,
+} from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import {
 	createEmptyWorkspaceChangesResponse,
@@ -36,16 +44,37 @@ import {
 	getGitRefs,
 } from "../workspace/git-history";
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
+import { runGit } from "../workspace/git-utils";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
+import {
+	probeAndRefreshTaskCommitIntegrationProvenance,
+	removeTaskCommitIntegrationProvenance,
+} from "../workspace/task-commit-integration-provenance";
 import {
 	deleteTaskWorktree,
 	ensureTaskWorktreeIfDoesntExist,
 	getTaskWorkspaceInfo,
+	getTaskWorkspacePathInfo,
 	resolveTaskCwd,
 	TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX,
 	TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX,
 } from "../workspace/task-worktree";
 import type { RuntimeTrpcContext } from "./app-router";
+
+const TASK_WORKSPACE_GIT_STATUS_BATCH_CONCURRENCY_LIMIT = 4;
+const taskWorkspaceGitStatusBatchConcurrencyLimiter = pLimit(TASK_WORKSPACE_GIT_STATUS_BATCH_CONCURRENCY_LIMIT);
+
+function createGitProbeUnavailableTaskWorkspaceStatus(baseRef: string): RuntimeTaskWorkspaceGitStatus {
+	return {
+		baseRef,
+		commitsAheadOfBaseRef: null,
+		commitsBehindBaseRef: null,
+		taskCommitsIntegratedIntoBaseRef: null,
+		taskCommitIntegrationTrackingStatus: "git_probe_unavailable",
+		observationSource: "unavailable",
+		observedAt: null,
+	};
+}
 
 export interface CreateWorkspaceApiDependencies {
 	ensureTerminalManagerForWorkspace: (workspaceId: string, repoPath: string) => Promise<TerminalSessionManager>;
@@ -358,11 +387,88 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		deleteWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeDeleteRequest(input);
-			return await deleteTaskWorktree({
+			// 删除目录前尽力落最后一份 Git 状态快照。Done-stage guard 属独立任务；这里的
+			// provenance 采集失败不得把既有 worktree cleanup 变成破坏性行为变化。
+			try {
+				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+				const card = board.columns
+					.flatMap((column) => column.cards)
+					.find((candidate) => candidate.id === body.taskId);
+				if (card) {
+					const pathInfo = await getTaskWorkspacePathInfo({
+						cwd: workspaceScope.workspacePath,
+						taskId: body.taskId,
+						baseRef: card.baseRef,
+						worktreeMode: body.worktreeMode,
+					});
+					await probeAndRefreshTaskCommitIntegrationProvenance({
+						workspaceId: workspaceScope.workspaceId,
+						taskId: body.taskId,
+						repoPath: workspaceScope.workspacePath,
+						worktreePath: pathInfo.path,
+						baseRef: card.baseRef,
+						worktreeMode: body.worktreeMode,
+						worktreeExists: pathInfo.exists,
+					});
+				}
+			} catch {
+				// best effort，真正的保护由另一个 Done-stage guard task 实现。
+			}
+			const deletionResult = await deleteTaskWorktree({
 				repoPath: workspaceScope.workspacePath,
 				taskId: body.taskId,
 				worktreeMode: body.worktreeMode,
 			});
+			if (deletionResult.ok && body.removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion === true) {
+				await removeTaskCommitIntegrationProvenance(workspaceScope.workspaceId, body.taskId);
+			}
+			return deletionResult;
+		},
+		loadTaskWorkspaceGitStatuses: async (workspaceScope): Promise<RuntimeTaskWorkspaceGitStatusesResponse> => {
+			const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+			const cards = board.columns.flatMap((column) => column.cards);
+			const baseRefTipCommitPromises = new Map<string, Promise<string | null>>();
+			const resolveBaseRefTipCommit = (baseRef: string): Promise<string | null> => {
+				const existing = baseRefTipCommitPromises.get(baseRef);
+				if (existing) {
+					return existing;
+				}
+				const pending = runGit(workspaceScope.workspacePath, ["rev-parse", "--verify", `${baseRef}^{commit}`]).then(
+					(result) => (result.ok && result.stdout ? result.stdout : null),
+				);
+				baseRefTipCommitPromises.set(baseRef, pending);
+				return pending;
+			};
+			const statusEntries = await Promise.all(
+				cards.map(
+					async (card) =>
+						await taskWorkspaceGitStatusBatchConcurrencyLimiter(async () => {
+							try {
+								const knownBaseRefTipCommit = await resolveBaseRefTipCommit(card.baseRef);
+								const pathInfo = await getTaskWorkspacePathInfo({
+									cwd: workspaceScope.workspacePath,
+									taskId: card.id,
+									baseRef: card.baseRef,
+									...(card.worktreeMode ? { worktreeMode: card.worktreeMode } : {}),
+								});
+								const status = await probeAndRefreshTaskCommitIntegrationProvenance({
+									workspaceId: workspaceScope.workspaceId,
+									taskId: card.id,
+									repoPath: workspaceScope.workspacePath,
+									worktreePath: pathInfo.path,
+									baseRef: card.baseRef,
+									...(card.worktreeMode ? { worktreeMode: card.worktreeMode } : {}),
+									worktreeExists: pathInfo.exists,
+									knownBaseRefTipCommit,
+								});
+								return [card.id, status] as const;
+							} catch {
+								return [card.id, createGitProbeUnavailableTaskWorkspaceStatus(card.baseRef)] as const;
+							}
+						}),
+				),
+			);
+			return { taskWorkspaceGitStatuses: Object.fromEntries(statusEntries) };
 		},
 		loadTaskContext: async (workspaceScope, input) => {
 			const normalizedInput = normalizeRequiredTaskWorkspaceScopeInput(input);
