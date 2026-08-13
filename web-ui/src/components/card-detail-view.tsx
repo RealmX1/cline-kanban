@@ -772,7 +772,25 @@ export function CardDetailView({
 	const showMoveToValidationActions = selection.column.id === "review";
 	const isTaskTerminalEnabled =
 		selection.column.id === "in_progress" || selection.column.id === "review" || selection.column.id === "validation";
-	const effectiveTaskAgentId = sessionSummary?.agentId ?? selection.card.agentId ?? selectedAgentId;
+	// 详情页分流回答的是「这个**既存**会话该渲染成什么面板」，所以兜底顺序是「运行时观测事实 → 用户意图」，
+	// 与服务端的 `backfillMissingSessionAgentIdsFromDurableSources`、`refreshTaskTerminal` 严格同序：
+	//
+	// 1. `sessionSummary?.agentId` —— 活体会话自己报告的身份，最硬的事实。
+	// 2. `selection.card.mostRecentlyLaunchedAgentSessionAgentId` —— runtime 在上一次会话**启动成功那一刻**记下的
+	//    观测值，说的正是「这条会话当时真的由谁跑起来」，与第 1 级同指一个会话。
+	// 3. `selection.card.agentId` —— 用户为这张卡做的 per-task 覆盖，表达的是「**下次**想用谁启动」的意图，可能
+	//    还没有任何会话兑现过它（改了卡片 agent 但尚未重启时，既存会话的身份仍是上一次跑起来的那个），故必须
+	//    排在观测值之后，只在观测值缺席（本字段上线前的存量卡片）时兜底。
+	// 4. `selectedAgentId` —— 项目默认档。
+	//
+	// 第 1 级为什么会失效（本 bug 的成因）：硬中断后盘上没有该 task 条目时，前端会用 `createIdleTaskSession`
+	// （web-ui/src/hooks/app-utils.tsx）合成一条 summary，其 `agentId` 恒为 null；那是纯前端合成的对象，服务端
+	// hydrate 时的 agentId 回填够不到它——于是分流只能靠第 2 级往后的卡片字段兜底。
+	const effectiveTaskAgentId =
+		sessionSummary?.agentId ??
+		selection.card.mostRecentlyLaunchedAgentSessionAgentId ??
+		selection.card.agentId ??
+		selectedAgentId;
 	const activeTaskConversationSessionSummary =
 		taskSessions[selectedTaskConversationSessionId] ?? sessionSummary ?? taskSessions[selection.card.id] ?? null;
 	const effectiveTaskConversationSessionAgentId =

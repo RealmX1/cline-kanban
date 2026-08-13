@@ -776,6 +776,56 @@ describe("board dependency state", () => {
 		]);
 	});
 
+	// 归一化后的 board 会被原样 saveState 回盘，而服务端是整块覆盖 board.json（不按字段合并）。
+	// 所以归一化层一旦剥掉这个只由 runtime 写入的 durable 字段，硬中断恢复的主真相源就会被抹掉。
+	it("preserves the runtime-written mostRecentlyLaunchedAgentSessionAgentId across normalization and edits", () => {
+		const rawBoard = {
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "launched-task",
+							prompt: "Task started with a resolved default agent",
+							startInPlanMode: false,
+							baseRef: "main",
+							mostRecentlyLaunchedAgentSessionAgentId: "codex",
+						},
+						{
+							id: "unknown-agent-task",
+							prompt: "Task carrying an unknown agent id",
+							startInPlanMode: false,
+							baseRef: "main",
+							mostRecentlyLaunchedAgentSessionAgentId: "not-a-real-agent",
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "validation", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalized = normalizeBoardData(rawBoard);
+		const backlogCards = normalized?.columns.find((column) => column.id === "backlog")?.cards ?? [];
+		expect(backlogCards[0]?.mostRecentlyLaunchedAgentSessionAgentId).toBe("codex");
+		expect(backlogCards[1]?.mostRecentlyLaunchedAgentSessionAgentId).toBeUndefined();
+
+		if (!normalized) {
+			throw new Error("expected normalized board");
+		}
+		const edited = updateTask(normalized, "launched-task", {
+			prompt: "Task started with a resolved default agent",
+			baseRef: "main",
+		});
+		const editedCard = edited.board.columns
+			.find((column) => column.id === "backlog")
+			?.cards.find((card) => card.id === "launched-task");
+		expect(editedCard?.mostRecentlyLaunchedAgentSessionAgentId).toBe("codex");
+	});
+
 	it("backfills an empty validation column for legacy four-column boards", () => {
 		const rawBoard = {
 			columns: [

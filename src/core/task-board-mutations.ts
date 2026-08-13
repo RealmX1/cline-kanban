@@ -796,3 +796,49 @@ export function updateTask(
 		updated: true,
 	};
 }
+
+export interface RuntimeApplyMostRecentlyLaunchedAgentSessionAgentIdResult {
+	board: RuntimeBoardData;
+	/** 卡片确实被改写时才为 true；卡片不存在或该字段值本就相同时为 false（调用方据此跳过落盘）。 */
+	updated: boolean;
+}
+
+// 把「这张卡最近一次真正启动成功的会话用的是哪个 agent」记到卡片上。
+//
+// 刻意不复用 updateTask：那个入口是**用户编辑意图**的载体，要求 prompt / baseRef 非空，且
+// title / startInPlanMode / autoReview* 不是三态字段——漏传即复位（见 runtime-api.ts 里
+// persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard 的同款警告）。为写一个
+// runtime 观测值而去回填七个用户字段，是纯粹白送的踩雷面。
+//
+// 同样刻意不 bump `updatedAt`：那是用户可见的「上次修改时间」，参与看板排序与展示，
+// 不该被一次后台观测污染。本字段的时效性由「会话启动成功」这一事件本身保证。
+export function applyMostRecentlyLaunchedAgentSessionAgentIdToTask(
+	board: RuntimeBoardData,
+	taskId: string,
+	mostRecentlyLaunchedAgentSessionAgentId: RuntimeAgentId,
+): RuntimeApplyMostRecentlyLaunchedAgentSessionAgentIdResult {
+	const normalizedTaskId = taskId.trim();
+	if (!normalizedTaskId) {
+		return { board, updated: false };
+	}
+	let updated = false;
+	const columns = board.columns.map((column) => {
+		let columnUpdated = false;
+		const cards = column.cards.map((card) => {
+			if (
+				card.id !== normalizedTaskId ||
+				card.mostRecentlyLaunchedAgentSessionAgentId === mostRecentlyLaunchedAgentSessionAgentId
+			) {
+				return card;
+			}
+			columnUpdated = true;
+			return { ...card, mostRecentlyLaunchedAgentSessionAgentId };
+		});
+		if (!columnUpdated) {
+			return column;
+		}
+		updated = true;
+		return { ...column, cards };
+	});
+	return updated ? { board: { ...board, columns }, updated: true } : { board, updated: false };
+}
