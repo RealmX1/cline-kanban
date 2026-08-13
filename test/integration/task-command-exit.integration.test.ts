@@ -643,6 +643,97 @@ describe("source task commands", () => {
 		}
 	});
 
+	it("looks a single task up by its task ID, worktree path included", { timeout: 60_000 }, async () => {
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-task-get");
+		const projectPath = repository.repositoryPath;
+
+		try {
+			writeFileSync(join(projectPath, "README.md"), "# Task Get Test\n", "utf8");
+			commitAllRepositoryFiles(repository, projectPath, "init");
+
+			const port = String(await getAvailablePort());
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
+				KANBAN_RUNTIME_PORT: port,
+			});
+			const serverProcess = await startRuntimeServerForProject({
+				projectPath,
+				gitFixture: integrationFixture.gitFixture,
+				port,
+			});
+
+			try {
+				const created = await runCliCommandAndCollectOutput({
+					args: [
+						"task",
+						"create",
+						"--title",
+						"Look me up by ID",
+						"--prompt",
+						"Reference this task from another agent using only its task ID",
+						"--project-path",
+						projectPath,
+					],
+					cwd: projectPath,
+					env,
+				});
+				expect(
+					created.didExit,
+					`task create did not exit in time.\nstdout:\n${created.stdout}\nstderr:\n${created.stderr}`,
+				).toBe(true);
+				expect(created.exitCode).toBe(0);
+				const createdTaskId = (JSON.parse(created.stdout) as { task?: { id?: string } }).task?.id ?? "";
+				expect(createdTaskId).not.toBe("");
+
+				const fetched = await runCliCommandAndCollectOutput({
+					args: ["task", "get", "--task-id", createdTaskId, "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+				});
+				expect(
+					fetched.didExit,
+					`task get did not exit in time.\nstdout:\n${fetched.stdout}\nstderr:\n${fetched.stderr}`,
+				).toBe(true);
+				expect(fetched.exitCode).toBe(0);
+
+				const fetchedPayload = JSON.parse(fetched.stdout) as {
+					ok?: boolean;
+					task?: { id?: string; title?: string; column?: string };
+					taskWorkspace?: { taskId?: string; path?: string; exists?: boolean };
+					dependencies?: unknown[];
+				};
+				expect(fetchedPayload.ok).toBe(true);
+				expect(fetchedPayload.task?.id).toBe(createdTaskId);
+				expect(fetchedPayload.task?.title).toBe("Look me up by ID");
+				expect(fetchedPayload.task?.column).toBe("backlog");
+				expect(fetchedPayload.dependencies).toEqual([]);
+				// worktree 路径把 task ID 原样嵌在目录层级里，这正是「拿 worktree 路径反推 task ID」赖以成立的前提。
+				expect(fetchedPayload.taskWorkspace?.taskId).toBe(createdTaskId);
+				expect(fetchedPayload.taskWorkspace?.path).toContain(`/${createdTaskId}/`);
+				// 任务尚未启动，工作树还没建出来——调用方需要能据此判断能不能直接进目录。
+				expect(fetchedPayload.taskWorkspace?.exists).toBe(false);
+
+				const missing = await runCliCommandAndCollectOutput({
+					args: ["task", "get", "--task-id", "no-such-task", "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+				});
+				expect(
+					missing.didExit,
+					`task get did not exit in time.\nstdout:\n${missing.stdout}\nstderr:\n${missing.stderr}`,
+				).toBe(true);
+				expect(missing.exitCode).toBe(1);
+				const missingPayload = JSON.parse(missing.stdout) as { ok?: boolean; error?: string };
+				expect(missingPayload.ok).toBe(false);
+				expect(missingPayload.error).toContain('Task "no-such-task" was not found');
+			} finally {
+				await stopRuntimeServer(serverProcess);
+			}
+		} finally {
+			await integrationFixture.cleanup();
+		}
+	});
+
 	it("treats create-time reasoning inherit as no explicit override", { timeout: 60_000 }, async () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-task-cline-reasoning");

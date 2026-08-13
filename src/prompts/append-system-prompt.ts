@@ -5,7 +5,7 @@ import packageJson from "../../package.json" with { type: "json" };
 import type { RuntimeAgentId } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveKanbanCommandParts } from "../core/kanban-command";
-import { buildShellCommandLine } from "../core/shell";
+import { buildShellCommandLine, quoteShellArg } from "../core/shell";
 import { detectAutoUpdateInstallation, UpdatePackageManager } from "../update/update";
 
 const DEFAULT_COMMAND_PREFIX = "kanban";
@@ -146,6 +146,7 @@ If the user asks you to write code, fix a bug, implement a feature, refactor, or
 - How linking works: when a task in the review column is moved to done, any linked backlog tasks automatically start. This is how you chain work so tasks kick off autonomously without manual intervention.
 - Tasks can also enable automatic review actions: auto-commit or auto-open-pr once completed, which then moves the task to done and kicks off any linked tasks. Combining auto-review with linking is how you can set up fully autonomous pipelines when the user wants it. For example, enabling auto-commit on each task in a chain: task A finishes, auto-commits and is moved to done, task B auto-starts from backlog, auto-commits and is moved to done, task C auto-starts, and so on.
 - If your current working directory is inside \`.cline/worktrees/\`, you are inside a Kanban task worktree. In that case, create or manage tasks against the main workspace path, not the task worktree path. Pass the main workspace with \`--project-path\`.
+- Task worktrees are laid out as \`.cline/worktrees/<task_id>/<repo_folder>\`, so the directory name immediately under \`worktrees/\` **is** that task's task ID. When the user gives you a task worktree path instead of a task ID, read the ID out of the path and look the task up with \`task get\`. From inside such a worktree, on a POSIX shell, \`basename "$(dirname "$(git rev-parse --show-toplevel)")"\` yields the task ID and \`dirname "$(git rev-parse --git-common-dir)"\` yields the main workspace path to pass as \`--project-path\`; on PowerShell or cmd, read the same two values out of \`git rev-parse --show-toplevel\` and \`git rev-parse --git-common-dir\` by hand.
 - If a task command fails because the runtime is unavailable, tell the user to start Kanban in that workspace first with \`${kanbanCommand}\`, then retry the task command.
 
 # Command Prefix
@@ -187,6 +188,17 @@ Command:
 Parameters:
 - \`--project-path <path>\` optional workspace path. If omitted, uses the current working directory workspace.
 - \`--column <value>\` optional filter. Allowed values: \`backlog\`, \`in_progress\`, \`review\`, \`done\` (\`trash\` is also accepted).
+
+## task get
+
+Purpose: look up one Kanban task by its task ID, including its title, column, session state, dependency links, and its task worktree path and git state. Use this when you are given a task ID (or a task worktree path you can read the ID out of) and need the task behind it. Task titles are neither unique nor stable, so a task ID is the only reliable way to reference a task.
+
+Command:
+\`${kanbanCommand} task get --task-id <task_id> [--project-path <path>]\`
+
+Parameters:
+- \`--task-id <task_id>\` required task ID.
+- \`--project-path <path>\` optional workspace path. If omitted, uses the current working directory workspace.
 
 ## task create
 
@@ -299,6 +311,7 @@ Parameters:
 # Workflow Notes
 
 - Prefer \`task list\` first when task IDs or dependency IDs are needed.
+- When you already have a task ID, prefer \`task get\` over scanning \`task list\` output.
 - To create multiple linked tasks, create tasks first, then call \`task link\` for each dependency edge.
 `;
 }
@@ -315,7 +328,14 @@ export function resolveHomeAgentAppendSystemPrompt(
 	});
 }
 
-export function renderTaskSessionWorktreeGuardPrompt(cwd: string): string {
+export function renderTaskSessionWorktreeGuardPrompt(
+	taskId: string,
+	cwd: string,
+	commandPrefix: string = DEFAULT_COMMAND_PREFIX,
+): string {
+	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
+	const trimmedTaskId = taskId.trim();
+	const quotedTaskId = quoteShellArg(trimmedTaskId);
 	return `# Kanban Task Workspace
 
 This is a Kanban-managed task session. Your assigned task workspace is the current working directory:
@@ -326,10 +346,26 @@ Anchor the task's source changes and commits here by default. No confirmation is
 - Worktrees derived from this workspace by this task's tooling (for example an RVF fix-attempt worktree created via \`git worktree add\`; they share this repository's \`git rev-parse --git-common-dir\`). Read, edit, run, and commit in them without stopping to ask.
 - Workflows the user explicitly invoked (for example base-branch-sync): the invocation itself authorizes every checkout or worktree that workflow's own procedure operates on.
 
-Only when a plan, handoff, or referenced document — not the user — directs edits into an unrelated repository or checkout should you stop and ask the user to confirm which workspace owns the work before making changes.`;
+Only when a plan, handoff, or referenced document — not the user — directs edits into an unrelated repository or checkout should you stop and ask the user to confirm which workspace owns the work before making changes.
+
+# Referencing Kanban Tasks By Their Task ID
+
+You are running as Kanban task \`${trimmedTaskId}\`. Use that ID verbatim, and never re-derive it from your current directory: the directory you are standing in may be a worktree derived from this workspace, an \`inplace\` task whose workspace is the main repository itself, or any other path that does not encode the task ID.
+
+\`${kanbanCommand} task get --task-id ${quotedTaskId} --project-path <main repository path>\`
+
+Always point \`--project-path\` at the main repository, never at a task worktree: Kanban registers only main repository paths, so a task command run from inside a worktree fails without it. Run \`git rev-parse --git-common-dir\` here and pass its parent directory. On a POSIX shell that collapses into one line; on PowerShell or cmd, run the \`git\` command first and paste its parent directory in:
+
+\`${kanbanCommand} task get --task-id ${quotedTaskId} --project-path "$(dirname "$(git rev-parse --git-common-dir)")"\`
+
+To look up a *different* task instead: Kanban lays task worktrees out as \`.cline/worktrees/<task_id>/<repo_folder>\`, so when you are handed a task worktree path under \`.cline/worktrees/\` (for example \`~/.cline/worktrees/ab12c/my-repo\`), the directory name immediately under \`worktrees/\` **is** that task's Kanban task ID — \`ab12c\` here, no lookup table, no truncation — and \`task get\` takes it the same way. That reading holds only for paths under \`.cline/worktrees/\`.`;
 }
 
-export function resolveTaskSessionAppendSystemPrompt(taskId: string, cwd: string): string | null {
+export function resolveTaskSessionAppendSystemPrompt(
+	taskId: string,
+	cwd: string,
+	options: ResolveAppendSystemPromptCommandPrefixOptions = {},
+): string | null {
 	if (isHomeAgentSessionId(taskId)) {
 		return null;
 	}
@@ -337,7 +373,7 @@ export function resolveTaskSessionAppendSystemPrompt(taskId: string, cwd: string
 	if (!trimmedCwd) {
 		return null;
 	}
-	return renderTaskSessionWorktreeGuardPrompt(trimmedCwd);
+	return renderTaskSessionWorktreeGuardPrompt(taskId, trimmedCwd, resolveAppendSystemPromptCommandPrefix(options));
 }
 
 export function combineAppendSystemPrompts(...prompts: Array<string | null | undefined>): string | null {
