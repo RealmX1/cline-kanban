@@ -1,4 +1,4 @@
-import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { resolveSessionFacets } from "@runtime-session-activity";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
@@ -474,7 +474,7 @@ class PersistentTerminal {
 		if (
 			!summary ||
 			summary.agentId === null ||
-			isRuntimeAgentSessionRenderedAsConversationPanel(summary.agentId) ||
+			isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary) ||
 			summary.pid !== null
 		) {
 			return;

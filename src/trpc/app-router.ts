@@ -8,6 +8,8 @@ import { z } from "zod";
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
+	RuntimeAgentSessionTransportSwitchRequest,
+	RuntimeAgentSessionTransportSwitchResponse,
 	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 	RuntimeAnswerAgentRaisedPendingUserDecisionResponse,
@@ -147,6 +149,8 @@ import type {
 import {
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
+	runtimeAgentSessionTransportSwitchRequestSchema,
+	runtimeAgentSessionTransportSwitchResponseSchema,
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema,
@@ -318,6 +322,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStopRequest,
 		) => Promise<RuntimeTaskSessionStopResponse>;
+		switchAgentSessionTransport: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeAgentSessionTransportSwitchRequest,
+		) => Promise<RuntimeAgentSessionTransportSwitchResponse>;
 		transitionTaskToReview: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionTransitionToReviewRequest,
@@ -660,6 +668,14 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskSessionStopResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.stopTaskSession(ctx.workspaceScope, input);
+			}),
+		// 停掉当前 agent 会话并立刻用另一条通话通道续跑同一段对话（目前只有 omp 有第二条通道）。
+		// 失败时会话停在已停止、如实报错，不回滚也不降级——见响应 schema 的注释。
+		switchAgentSessionTransport: workspaceProcedure
+			.input(runtimeAgentSessionTransportSwitchRequestSchema)
+			.output(runtimeAgentSessionTransportSwitchResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.switchAgentSessionTransport(ctx.workspaceScope, input);
 			}),
 		transitionTaskToReview: workspaceProcedure
 			.input(runtimeTaskSessionTransitionToReviewRequestSchema)

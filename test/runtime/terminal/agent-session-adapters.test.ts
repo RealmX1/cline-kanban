@@ -1699,3 +1699,132 @@ describe("prepareAgentLaunch resumesPriorAgentConversation", () => {
 		}
 	});
 });
+
+// oh-my-pi 的 PTY TUI 通道。它与 ACP 通道共用同一份 omp 磁盘会话存储，可随时互切，
+// 所以这些断言不只是「参数拼对了」，还钉住了几条会让托管会话直接卡死的前提。
+describe("ompAdapter", () => {
+	async function prepareOmpLaunch(
+		overrides: Partial<Parameters<typeof prepareAgentLaunch>[0]> = {},
+	): ReturnType<typeof prepareAgentLaunch> {
+		setupTempHome();
+		return await prepareAgentLaunch({
+			taskId: "task-omp",
+			agentId: "omp",
+			binary: "omp",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			...overrides,
+		});
+	}
+
+	function readOmpLaunchConfigOverlay(args: string[]): Record<string, unknown> {
+		const configIndex = args.indexOf("--config");
+		expect(configIndex).toBeGreaterThanOrEqual(0);
+		const configPath = args[configIndex + 1];
+		expect(existsSync(configPath)).toBe(true);
+		return JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+	}
+
+	it("maps each permission tier onto omp's --approval-mode", async () => {
+		const expectedApprovalModeByPermissionMode = {
+			bypass_all_permission_prompts: "yolo",
+			auto_approve_file_edits_only: "write",
+			ask_for_every_tool_use: "always-ask",
+		} as const;
+		for (const [permissionMode, expectedApprovalMode] of Object.entries(expectedApprovalModeByPermissionMode)) {
+			const launch = await prepareOmpLaunch({
+				taskId: `task-omp-${permissionMode}`,
+				taskAgentPermissionMode: permissionMode as keyof typeof expectedApprovalModeByPermissionMode,
+			});
+			const approvalModeIndex = launch.args.indexOf("--approval-mode");
+			expect(approvalModeIndex).toBeGreaterThanOrEqual(0);
+			expect(launch.args[approvalModeIndex + 1]).toBe(expectedApprovalMode);
+		}
+	});
+
+	// 绝不能起成 ACP server：`acp` 子命令只属于另一条通道。
+	it("launches the interactive TUI, not the ACP server", async () => {
+		const launch = await prepareOmpLaunch();
+		expect(launch.args).not.toContain("acp");
+	});
+
+	// 位置 prompt 会在 TUI 初始化完成后由 omp 自动提交，因此不需要 deferredStartupInput。
+	it("passes the task prompt positionally and does not defer startup input", async () => {
+		const launch = await prepareOmpLaunch({ prompt: "Implement the feature" });
+		expect(launch.args.some((argument) => argument.includes("Implement the feature"))).toBe(true);
+		expect(launch.deferredStartupInput).toBeUndefined();
+	});
+
+	// 坑 ①：omp 的大粘贴菜单默认 100 行触发，会挂住会话等人选。overlay 必须把它关掉（0）。
+	// 同时 titleState 必须开着——Kanban 的状态判定全靠 OSC 标题。
+	it("writes a launch overlay that disables the blocking large-paste menu and keeps title state on", async () => {
+		const launch = await prepareOmpLaunch();
+		const overlay = readOmpLaunchConfigOverlay(launch.args);
+		expect(overlay.paste).toEqual({ largeMenuThreshold: 0 });
+		expect(overlay.tui).toEqual({ titleState: true });
+		expect(overlay.startup).toEqual({ showSplash: false });
+	});
+
+	// 坑 ②：plan 起步只能经 plan.defaultOnStartup 表达。`--plan-yolo` 会自动批准计划并立刻开始实现，
+	// 与「先只读规划、停下等人批准」的语义相反。plan 起步也不得动放权档（正交轴铁律）。
+	it("expresses plan start through the overlay without touching the permission tier", async () => {
+		const launch = await prepareOmpLaunch({
+			taskId: "task-omp-plan-start",
+			startInPlanMode: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+		});
+		const overlay = readOmpLaunchConfigOverlay(launch.args);
+		expect(overlay.plan).toEqual({ enabled: true, defaultOnStartup: true });
+		expect(launch.args).not.toContain("--plan-yolo");
+		const approvalModeIndex = launch.args.indexOf("--approval-mode");
+		expect(launch.args[approvalModeIndex + 1]).toBe("yolo");
+	});
+
+	it("omits the plan overlay when plan start is off", async () => {
+		const launch = await prepareOmpLaunch({ taskId: "task-omp-no-plan-start" });
+		expect(readOmpLaunchConfigOverlay(launch.args).plan).toBeUndefined();
+	});
+
+	// 续跑：垃圾桶恢复与通道切换重开是同一条分支——加 --continue、不重投 prompt、武装重播守卫。
+	// 而且**绝不**发裸 --resume：无值时 omp 会弹全屏 session picker 等人上下键选，托管会话就此卡死。
+	for (const [caseName, resumeOverrides] of [
+		["restored from trash", { resumeFromTrash: true }],
+		["reopened after a transport switch", { resumePriorAgentConversationWithoutResendingPrompt: true }],
+	] as const) {
+		it(`continues the prior conversation without resending the prompt when ${caseName}`, async () => {
+			const launch = await prepareOmpLaunch({
+				taskId: `task-omp-${caseName.replaceAll(" ", "-")}`,
+				prompt: "Implement the feature",
+				...resumeOverrides,
+			});
+			expect(launch.args).toContain("--continue");
+			expect(launch.args).not.toContain("--resume");
+			expect(launch.args).not.toContain("-r");
+			expect(launch.args.some((argument) => argument.includes("Implement the feature"))).toBe(false);
+			expect(launch.resumesPriorAgentConversation).toBe(true);
+		});
+	}
+
+	it("does not replay plan start when continuing a prior conversation", async () => {
+		const launch = await prepareOmpLaunch({
+			taskId: "task-omp-resume-no-plan-replay",
+			startInPlanMode: true,
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+		});
+		expect(readOmpLaunchConfigOverlay(launch.args).plan).toBeUndefined();
+	});
+
+	// 首启的全屏 setup 向导会切 alt-screen 盖住 TUI 并等人操作。
+	it("skips the full-screen setup wizard", async () => {
+		const launch = await prepareOmpLaunch({ taskId: "task-omp-skip-setup" });
+		expect(launch.env.OMP_SKIP_SETUP).toBe("1");
+	});
+
+	it("detects run state from omp's OSC terminal title", async () => {
+		const launch = await prepareOmpLaunch({ taskId: "task-omp-detector" });
+		expect(typeof launch.detectOutputTransition).toBe("function");
+		// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
+		expect(launch.shouldInspectOutputForTransition).toBeUndefined();
+	});
+});

@@ -3,7 +3,10 @@ import type {
 	DraggableProvidedDragHandleProps,
 	DraggableStyle,
 } from "@hello-pangea/dnd";
-import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import {
+	getRuntimeAgentCatalogEntry,
+	isRuntimeAgentSessionSummaryRenderedAsConversationPanel,
+} from "@runtime-agent-catalog";
 import { isLowConfidenceLastConversationProgressEvidence } from "@runtime-last-conversation-progress-observation";
 import {
 	deriveDisplayLiveness,
@@ -805,7 +808,7 @@ export function TaskCardBody({
 					    用于会话卡死/空闲（Stop hook 未触发、进程未退）拖不进 Review 列、被反复打回的兜底。 */}
 					{columnId === "in_progress" &&
 					sessionSummary?.agentId != null &&
-					!isRuntimeAgentSessionRenderedAsConversationPanel(sessionSummary.agentId) ? (
+					!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(sessionSummary) ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to review")}>
 							<Button
 								icon={isMoveToReviewLoading ? <Spinner size={12} /> : <Eye size={12} />}

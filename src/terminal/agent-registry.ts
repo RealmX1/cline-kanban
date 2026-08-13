@@ -112,6 +112,7 @@ export function buildRuntimeConfigResponse(
 		selectedShortcutLabel: runtimeConfig.selectedShortcutLabel,
 		agentAutonomousModeEnabled: runtimeConfig.agentAutonomousModeEnabled,
 		newTaskStartInPlanModeByDefault: runtimeConfig.newTaskStartInPlanModeByDefault,
+		ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
 		debugModeEnabled: isRuntimeDebugModeEnabled(),
 		effectiveCommand,
 		globalConfigPath: runtimeConfig.globalConfigPath,
