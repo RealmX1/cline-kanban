@@ -18,6 +18,7 @@ import type {
 	RuntimeTaskTurnCheckpoint,
 	TerminalDeliveryFailureReason,
 	TerminalDeliveryStatus,
+	TerminalInputBoxStashFidelity,
 } from "../core/api-contract";
 import {
 	applySessionFacets,
@@ -75,9 +76,11 @@ import {
 } from "./output-reactions/network-interruption-continuation-instructions";
 import { PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
+import { backfillFoldedPastePlaceholdersFromPasteLedger } from "./terminal-input-box-folded-paste-placeholder-backfill";
 import {
 	createTerminalInputBoxOccupancyTrackerState,
 	recordTerminalInputBytesIntoOccupancyTracker,
+	resetTerminalInputBoxOccupancyTrackerComposition,
 	resolveTerminalInputBoxOccupancy,
 	type TerminalInputBoxOccupancy,
 	type TerminalInputBoxOccupancyTrackerState,
@@ -194,6 +197,18 @@ const SUBSTANTIVE_OUTPUT_ANALYSIS_THROTTLE_MS = VALIDATION_KEEP_WHILE_AGENT_OUTP
 // 它同时是节流真正的 CPU 收益来源——洪水输出下单个节流窗口能喂给分类器的字符数被钳成常数，
 // 而不是「按 50ms 逐批分析全部字节」。
 const MAX_DEFERRED_SUBSTANTIVE_OUTPUT_ANALYSIS_CHARS = 64 * 1024;
+// Ctrl+S 暂存前的镜像沉降窗。击键 → PTY → TUI 重绘 → 输出 → 服务端镜像这条链上有几十毫秒延迟，
+// 用户敲完最后一个字符立刻按 Ctrl+S 时，那几个字符可能还没画进镜像。读框前先等**终端输出**与
+// **人类击键**双双静默这么久，让重绘落定（两条都要，理由见
+// waitForTerminalMirrorToSettleBeforeInputBoxRead）。取值远小于 AGENT_OUTPUT_QUIET_THRESHOLD_MS
+// （2s，那是「agent 是否在干活」的尺度）——这里问的只是「上一次重绘画完了没有」，是按键响应的尺度。
+const TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_QUIET_MS = 150;
+// 沉降等待的总预算。agent 正在刷 spinner 时字节永远不会静默，等不到就按现状读——**绝不**因为等不到
+// 静默就拒绝暂存：那等于把用户打了一半的输入扣在框里不给存，而 Ctrl+S 是用户主动按下的。
+const TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_MAX_WAIT_MS = 750;
+const TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_POLL_MS = 50;
+// Ctrl+S（DC3）。写成转义：这个字节在编辑器里不可见，字面量形式极易在复制粘贴中被悄悄弄丢。
+const TERMINAL_STASH_KEY_SEQUENCE = "\u0013";
 
 function readStallThresholdMs(): number {
 	const raw = process.env.CLINE_TUI_STALL_MS;
@@ -307,6 +322,12 @@ interface ActiveProcessState {
 	// 只由 writeInput 喂养，因此只看得见人类输入——程序化投递直写 session.write，不会把自己
 	// 记成「用户正在打字」。判空与粘贴账本的语义见 terminal-input-box-occupancy.ts。仅内存态。
 	inputBoxOccupancyTracker: TerminalInputBoxOccupancyTrackerState;
+	// 这条 PTY「代」的稳定标识，创建时生成、此后不变。refresh / 自动重启会整体换掉 entry.active
+	// （连同 terminalStateMirror），于是任何**跨 await 的多步链路**都必须能判定「我手上这份读数还
+	// 属于当前这条会话吗」。manager 内部靠对象身份即可（active !== capturedActive），但 manager
+	// 之外的调用方（runtime-api）不该去摸 entries 结构，这个字符串就是给它们的等价物：
+	// 取文时拿到、清框时回传，对不上就必须失败而不是照打。仅内存态。
+	terminalSessionIncarnationToken: string;
 }
 
 // 一条程序化投递的回执登记。存在的意义：让投递链路上**每一个出口**都能给出结论，
@@ -332,6 +353,27 @@ export interface TaskChatInputDeliveryOutcome {
 }
 
 export type TaskChatInputDeliveryOutcomeObserver = (outcome: TaskChatInputDeliveryOutcome) => void;
+
+// Ctrl+S 暂存链路第一步「取文」的结果。正文与保真度分开返回：调用方先看 status 决定这次能不能写库，
+// 再看 fidelity 决定要不要在条目上挂「有 N 段粘贴还原不了」的警告。
+export interface TaskTerminalInputBoxStashCapture {
+	// captured_stashable_text                            框里有可暂存的正文（text 非空）。
+	// input_box_empty                                    两路判据都说框是空的。
+	// input_box_content_unreadable                       输入侧说有内容，但读屏拿不到正文
+	//                                                    （该 agent 的输入框语法未建模 / 当前屏定位不到框）。
+	// screen_text_not_corroborated_by_keystroke_tracking 读屏有文字、输入侧却没见过任何字节。
+	status:
+		| "captured_stashable_text"
+		| "input_box_empty"
+		| "input_box_content_unreadable"
+		| "screen_text_not_corroborated_by_keystroke_tracking";
+	text: string;
+	fidelity: TerminalInputBoxStashFidelity;
+	// 这份读数取自哪一条 PTY「代」。调用方写完库之后必须把它原样回传给
+	// forwardStashKeyToClearTaskTerminalInputBox：写库要跨文件锁与落盘，期间用户完全可能 refresh
+	// 终端换掉 active，只按 taskId 重查会把清框字节打到一条与本次暂存毫无关系的新会话上。
+	terminalSessionIncarnationToken: string;
+}
 
 // 上报一条投递结论并注销登记。写一次即定：已 settled 的登记再来一次是 no-op（不是错误——
 // 多个出口可能同时判定，比如 teardown 与确认 tick 撞上）。
@@ -2272,6 +2314,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			submitConfirmGeneration: 0,
 			programmaticDeliveryReceipt: null,
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+			terminalSessionIncarnationToken: randomUUID(),
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -2497,6 +2540,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			submitConfirmGeneration: 0,
 			programmaticDeliveryReceipt: null,
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+			terminalSessionIncarnationToken: randomUUID(),
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -2633,6 +2677,197 @@ export class TerminalSessionManager implements TerminalSessionService {
 			trackerState: active.inputBoxOccupancyTracker,
 			inputBoxReading,
 		});
+	}
+
+	// 等终端字节短暂静默，好让最后几次 TUI 重绘落进镜像再读框。等不到就返回，调用方照常读——
+	// 沉降是提高保真度的尽力而为，不是暂存的前置条件。
+	//
+	// 判据是两条静默的**合取**，缺一不可：
+	//   - 输出侧（summary.lastOutputAt）：距最近一次 PTY 输出已过沉降窗 ⇒ 上一轮重绘已经画完并进了镜像。
+	//   - 输入侧（active.lastUserInputAt，由 writeInput 维护，只记人类手敲）：距最近一次人类击键也已过
+	//     沉降窗 ⇒ 那几个字符的回显要么已经回来（回来时会推进 lastOutputAt，于是被上一条接手继续等），
+	//     要么至少已给它一个沉降窗的时间。
+	// 只看输出侧不成立（这正是本条判据曾经的形态）：evaluateAgentOutputQuiet 对 lastOutputAt 为 null
+	// （会话尚未产出过）或已陈旧（上一次重绘发生在 500ms 前、而刚敲下那几个字符的回显还在路上）**都**
+	// 直接返回 true，循环立即退出，读到的是缺了最后几个字符的框——库里存进截断文本，随后转发的
+	// Ctrl+S 又把完整输入清掉。普通击键走 IO WebSocket、暂存走 HTTP tRPC，两条通道之间无序，这个
+	// 窗口是真实存在的，不是理论推演。
+	// lastUserInputAt 为 null（本会话还没有人手敲过）不构成阻塞：那种情形下不存在「在路上的回显」。
+	//
+	// 残留窗口（**没有**被这条判据关掉，别当成已解决）：
+	//   - 读框发生在某个时刻，此后到 Ctrl+S 字节被转发之间用户仍可能继续敲字；
+	//   - 击键字节本身还没到达服务端（writeInput 尚未被调用，lastUserInputAt 还是旧值）时，本判据同样
+	//     拦不住——跨通道无序无法靠单侧时间戳彻底消除。
+	// 两者的代价都是「那几个字符没进库」，而不是「丢失」：转发的 Ctrl+S 交给 agent 自己清框，agent 的
+	// 原生 stash 会把框里当时的全部内容接住，用户始终能拿回来。
+	private async waitForTerminalMirrorToSettleBeforeInputBoxRead(taskId: string): Promise<void> {
+		const waitStartedAtMs = now();
+		while (now() - waitStartedAtMs < TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_MAX_WAIT_MS) {
+			const entry = this.entries.get(taskId);
+			if (!entry?.active) {
+				return;
+			}
+			const nowMs = now();
+			const terminalOutputHasBeenQuietForSettleWindow = evaluateAgentOutputQuiet(
+				entry.summary.lastOutputAt ?? null,
+				nowMs,
+				TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_QUIET_MS,
+			);
+			// 与 isAgentOutputWithinActiveWindow 的边界语义保持一致：恰好等于窗口视为「已静默」。
+			const humanKeystrokesHaveBeenQuietForSettleWindow =
+				entry.active.lastUserInputAt === null ||
+				nowMs - entry.active.lastUserInputAt >= TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_QUIET_MS;
+			if (terminalOutputHasBeenQuietForSettleWindow && humanKeystrokesHaveBeenQuietForSettleWindow) {
+				return;
+			}
+			await new Promise<void>((resolve) => setTimeout(resolve, TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_POLL_MS));
+		}
+	}
+
+	// Ctrl+S 暂存链路的第一步：把框里那段未提交的正文取出来（含把折叠占位符换回粘贴原文）。
+	// **只读**，绝不动框——清框要等写库成功之后才由 forwardStashKeyToClearTaskTerminalInputBox 做。
+	// 这个顺序保证任何一步失败时「库里没有 ⇒ 框里还在」，用户的字始终看得见。
+	// 返回 null 表示该任务此刻没有可信的 PTY 会话（没有 active，或读取期间换了 incarnation）。
+	async captureTaskTerminalInputBoxContentForPromptLibraryStash(
+		taskId: string,
+	): Promise<TaskTerminalInputBoxStashCapture | null> {
+		if (!this.entries.get(taskId)?.active) {
+			return null;
+		}
+		await this.waitForTerminalMirrorToSettleBeforeInputBoxRead(taskId);
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			return null;
+		}
+		const boxGrammar = resolveTerminalInputBoxGrammar(entry.summary.agentId);
+		const mirror = entry.terminalStateMirror;
+		const inputBoxReading =
+			mirror && boxGrammar ? readTerminalInputBox(await mirror.getScreenSnapshot(), boxGrammar) : null;
+		// 与 resolveTaskTerminalInputBoxOccupancy 同一条理由：上面两处 await 都跨宏任务边界，期间 PTY 可能
+		// 退出、或被 refresh 换成新 incarnation。换代即返回 null，绝不把上一条会话读到的正文写进库、
+		// 再把清框字节发给新会话——那会同时污染库和清掉新会话里别的东西。
+		const currentActive = this.entries.get(taskId)?.active;
+		if (!currentActive || currentActive !== active) {
+			return null;
+		}
+		const occupancy = resolveTerminalInputBoxOccupancy({
+			trackerState: active.inputBoxOccupancyTracker,
+			inputBoxReading,
+		});
+		const backfill = backfillFoldedPastePlaceholdersFromPasteLedger({
+			inputBoxText: inputBoxReading?.text ?? "",
+			pasteLedger: active.inputBoxOccupancyTracker.pasteLedger,
+		});
+		const fidelity: TerminalInputBoxStashFidelity = {
+			softWrapJoinCount: inputBoxReading?.softWrapJoinCount ?? 0,
+			foldedPastePlaceholderCount: backfill.foldedPastePlaceholderCount,
+			backfilledPlaceholderCount: backfill.backfilledPlaceholderCount,
+			placeholdersLeftUnbackfilledBecausePayloadWasDropped:
+				backfill.placeholdersLeftUnbackfilledBecausePayloadWasDropped,
+			placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched:
+				backfill.placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched,
+			placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed:
+				backfill.placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed,
+			unrecoverablePasteCount: occupancy.unrecoverablePasteCount,
+		};
+		// 判空以**输入侧字节跟踪**为准，读屏只提供正文——这正是两个模块分工的定义（见
+		// terminal-input-box-reader.ts 文件头 3）。屏上有字、输入侧却一个字节都没见过，最常见的解释是
+		// Claude 在空框里渲染了占位提示（`Try "..."`，7 次探针里出现过 1 次），把那段 UI 文案当成用户资产
+		// 存进库是纯污染。代价是输入侧的两处盲区（经 tmux / 原生终端直连同一 PTY 敲入、runtime 重启前
+		// 敲下的内容）在这里也存不进库；但 Ctrl+S 字节照常转发，agent 的原生暂存仍然接得住，没有内容丢失。
+		if (!occupancy.inputSideByteTrackingSaysNonEmpty) {
+			return {
+				status:
+					backfill.text.trim().length > 0
+						? "screen_text_not_corroborated_by_keystroke_tracking"
+						: "input_box_empty",
+				text: "",
+				fidelity,
+				terminalSessionIncarnationToken: active.terminalSessionIncarnationToken,
+			};
+		}
+		if (backfill.text.trim().length === 0) {
+			// 输入侧确知有内容，读屏却拿不到正文。报「读不到」而不是「空」——两者是不同的事实，
+			// 把前者说成后者就是 2026-08-08 那类反向撒谎的同一种形态。
+			return {
+				status: "input_box_content_unreadable",
+				text: "",
+				fidelity,
+				terminalSessionIncarnationToken: active.terminalSessionIncarnationToken,
+			};
+		}
+		return {
+			status: "captured_stashable_text",
+			text: backfill.text,
+			fidelity,
+			terminalSessionIncarnationToken: active.terminalSessionIncarnationToken,
+		};
+	}
+
+	// Ctrl+S 暂存的 per-task 独占闸门。
+	//
+	// 为什么落在 manager 而不是 runtime-api：manager 是 per-workspace 且长驻的，runtime-api 的 handler
+	// 是每次请求新建的无状态闭包——把在途集合放进后者，作用域一散就没了，也拦不住两个浏览器标签页
+	// 各发一份请求。放这里才是同一进程里唯一那份真相。
+	//
+	// 拦的是这条竞态：取文只读、不动框，写库又要跨文件锁与落盘（数十毫秒）。同一 taskId 上连按
+	// Ctrl+S、或多标签页同时触发，两次取文会读到**同一份**正文，各自以不同 promptId 入库（库里凭空
+	// 多出一条重复），然后各清一次框。
+	//
+	// 刻意**不**排队等前一次做完：排队的第二次醒来时框已被第一次清空，它只能报「框是空的」——用户按
+	// 了两次却只有一次回执解释得通。当场如实回一句「已有一次暂存在进行中」，比一个语义已经错位的
+	// 成功/空框回执诚实。代价是第二次按键不转发 Ctrl+S（agent 的原生 stash 这一次不参与），但框里的
+	// 内容一个字都没少，用户可以再按。
+	private readonly taskIdsWithTerminalInputBoxStashAttemptInFlight = new Set<string>();
+
+	async runTaskTerminalInputBoxStashAttemptExclusivelyPerTask<AttemptResult>(
+		taskId: string,
+		runAttempt: () => Promise<AttemptResult>,
+		buildResultWhenAnotherAttemptIsAlreadyInFlight: () => AttemptResult,
+	): Promise<AttemptResult> {
+		if (this.taskIdsWithTerminalInputBoxStashAttemptInFlight.has(taskId)) {
+			return buildResultWhenAnotherAttemptIsAlreadyInFlight();
+		}
+		this.taskIdsWithTerminalInputBoxStashAttemptInFlight.add(taskId);
+		try {
+			return await runAttempt();
+		} finally {
+			// finally 而不是成功路径末尾：闸门泄漏一次，这个 task 此后再也暂存不了任何东西。
+			this.taskIdsWithTerminalInputBoxStashAttemptInFlight.delete(taskId);
+		}
+	}
+
+	// Ctrl+S 暂存链路的最后一步：把 Ctrl+S 字节转发给 agent，由它自己清框。
+	//
+	// 为什么是转发而不是我们自己发 Ctrl+C 清框：实测 Ctrl+U 只杀行、清不掉整框，Ctrl+C 才能清，而
+	// Ctrl+C 在 agent 正生成回合时会打断回合。转发还顺带消解了「覆盖 Ctrl+S」与「另起一个快捷键」的
+	// 取舍——agent 侧仍留一份原生 stash 作兜底，一个键做两件事，用户什么都没失去。
+	//
+	// 走 session.write 直写 PTY（不过 writeInput）：这不是人类击键，不该记 lastUserInputAt、更不该进
+	// 粘贴账本。代价是跟踪器看不见这个字节，所以必须在这里显式把当前组合归零。
+	//
+	// expectedTerminalSessionIncarnationToken 必传，取自本次取文返回的 capture。取文只在自己内部复查过
+	// incarnation，而**取文返回之后**调用方还要跨过写库（文件锁 + 落盘，数十毫秒）；这段时间里用户
+	// refresh 终端就会整体换掉 entry.active，只按 taskId 重查会把清框字节打到新 PTY 上，清掉一段与本次
+	// 暂存毫无关系的输入。令牌对不上一律返回 false，绝不「反正有个 active 就照打」。
+	//
+	// 返回值是这条链路的最后一个事实来源，调用方**不许吞**：false = 框没被清，回执必须如实反映
+	// 「已入库但框还在」，不能继续报纯成功。
+	forwardStashKeyToClearTaskTerminalInputBox(
+		taskId: string,
+		expectedTerminalSessionIncarnationToken: string,
+	): boolean {
+		const entry = this.entries.get(taskId);
+		if (!entry?.active) {
+			return false;
+		}
+		if (entry.active.terminalSessionIncarnationToken !== expectedTerminalSessionIncarnationToken) {
+			return false;
+		}
+		entry.active.session.write(TERMINAL_STASH_KEY_SEQUENCE);
+		resetTerminalInputBoxOccupancyTrackerComposition(entry.active.inputBoxOccupancyTracker);
+		return true;
 	}
 
 	resize(taskId: string, cols: number, rows: number, pixelWidth?: number, pixelHeight?: number): boolean {

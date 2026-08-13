@@ -2286,6 +2286,83 @@ export const runtimePromptLibraryMutateRequestSchema = z.object({
 });
 export type RuntimePromptLibraryMutateRequest = z.infer<typeof runtimePromptLibraryMutateRequestSchema>;
 
+// ── 终端输入框暂存进 Prompt Library（W2 Ctrl+S）──────────────────────────────────
+//
+// 一次请求就是一整条原子链路：读框 → 回填被折叠的粘贴 → 写库 → 转发 Ctrl+S 字节清框。
+// 前端只负责拦下按键，不碰内容——同一份易随版本漂移的 TUI 画法知识只在服务端存一份。
+
+export const terminalInputBoxStashOutcomeSchema = z.enum([
+	// 正文已入库，Ctrl+S 已转发（框被 agent 自己清掉）。
+	"stashed_into_prompt_library",
+	// 正文**已经**入库（stashedPromptId 有效），但清框那一步没做成：写库跨文件锁与落盘期间，读框时
+	// 的那条 PTY 已经退出、或被 refresh 换成了新 incarnation。此时绝不能把 Ctrl+S 打到新会话上——那会
+	// 清掉一段与本次暂存毫无关系的输入。剩下的真实状态就是「库里有了、框里也还在」，如实报出来即可：
+	// 报纯成功会让用户以为框被清是理所当然，随后发现内容还在反而怀疑是不是没存进去。
+	"stashed_into_prompt_library_but_input_box_not_cleared",
+	// 同一个 task 上已经有一次暂存在进行中（连按 Ctrl+S / 多标签页同时触发）。这一次按键**没有**做任何
+	// 事：没入库、也没转发 Ctrl+S，框里内容一个字都没少。刻意不排队复用前一次的结果——排队者醒来时框
+	// 已被清空，只能报「框是空的」，那是个语义已经错位的回执。静默吞掉更不行：用户按了键，就得知道
+	// 这一次为什么没生效。
+	"another_terminal_input_box_stash_attempt_already_in_flight_for_this_task",
+	// 两路判据都说框是空的：没有可暂存的东西。Ctrl+S 照常转发（对空框是无操作）。
+	"input_box_empty_nothing_to_stash",
+	// 有内容迹象却读不出可用正文（该 agent 的输入框语法尚未建模 / 当前屏定位不到框）。
+	// Ctrl+S 仍然转发：那是 agent 自己的原生 stash，内容进它自己的暂存区，不比「Kanban 完全不介入」更差。
+	"input_box_content_unreadable_forwarded_to_agent_native_stash",
+	// 屏上确实有文字，但它一个字节都没经过本运行时的 writeInput，因此无从区分「用户敲的内容」与
+	// 「agent 自己渲染的空框占位提示」（Claude 偶发的 `Try "..."`）。不入库——把 agent 的 UI 文案
+	// 当成用户资产存进去，比暂时存不了更糟。同样转发 Ctrl+S 交给 agent 原生暂存兜底。
+	"input_box_screen_text_not_corroborated_by_keystroke_tracking",
+	// 这个任务此刻没有可信的 PTY 会话。两种情形共用这一条：压根没有 active，或者读框到清框之间那条
+	// 会话退出/被换代了（此时既没入库也没清框，什么都没发生，与前者对用户等价）。
+	"no_active_terminal_session",
+	// 写库失败。**不**转发 Ctrl+S——正文原样留在框里，用户看得见也能重试；转发只会把它藏进
+	// agent 的暂存区，而 Kanban 这边什么都没有。
+	"prompt_library_write_failed",
+]);
+export type TerminalInputBoxStashOutcome = z.infer<typeof terminalInputBoxStashOutcomeSchema>;
+
+// 这次暂存的保真度。全部如实上报，不做「看起来干净」的合并——用户有权知道存进去的这段文字
+// 哪里是推断出来的、哪里还原不了。
+export const terminalInputBoxStashFidelitySchema = z.object({
+	// 读屏时按宽度判据接回上一逻辑行的次数。**不是**错误计数：一条正常长行就会产生若干次。
+	softWrapJoinCount: z.number(),
+	foldedPastePlaceholderCount: z.number(),
+	backfilledPlaceholderCount: z.number(),
+	// 占位符配到了账本条目、但那条只剩计量没有正文。
+	placeholdersLeftUnbackfilledBecausePayloadWasDropped: z.number(),
+	// 占位符在账本里找不到计量对得上的条目（经 tmux / 原生终端粘进同一 PTY 等）。
+	placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: z.number(),
+	// 整框占位符的自洽性校验没过（`+M lines` 的 M < 3 折不出来，或 `#N` 不是严格递增）：框里混着
+	// 用户手打的同形字面量、或粘贴不是按框内顺序发生的。分不清哪处是真的，于是整框放弃回填，
+	// 占位符全部原样保留并计在这里。
+	placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: z.number(),
+	// 本次组合里载荷被丢弃（超留存上限）的粘贴条数，来自输入侧账本本身。
+	unrecoverablePasteCount: z.number(),
+});
+export type TerminalInputBoxStashFidelity = z.infer<typeof terminalInputBoxStashFidelitySchema>;
+
+export const runtimeTerminalInputBoxStashRequestSchema = z.object({
+	taskId: z.string(),
+	// 省略即 task scope，与面板里「新建 prompt」的默认一致。
+	scope: promptLibraryScopeSchema.optional(),
+});
+export type RuntimeTerminalInputBoxStashRequest = z.infer<typeof runtimeTerminalInputBoxStashRequestSchema>;
+
+export const runtimeTerminalInputBoxStashResponseSchema = z.object({
+	ok: z.boolean(),
+	outcome: terminalInputBoxStashOutcomeSchema,
+	stashedPromptId: z.string().nullable(),
+	// 只回字符数不回正文：正文最大可达粘贴留存上限（1 MiB），而调用方要的只是一句「存进去多少」。
+	// 同理**不**捎带整库快照（`workspacePromptLibrarySnapshotSchema` 里每一条都带完整正文，条目数还随
+	// 使用无上限增长）——那会把上面这条取舍原样抵消掉：每按一次 Ctrl+S 都要序列化「刚存进去的那段正文
+	// + 一整个库」。要读库请单独走 getWorkspacePromptLibrary，那条 procedure 的存在意义就是它。
+	stashedTextCharacterCount: z.number(),
+	fidelity: terminalInputBoxStashFidelitySchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTerminalInputBoxStashResponse = z.infer<typeof runtimeTerminalInputBoxStashResponseSchema>;
+
 export const runtimeTaskChatReloadRequestSchema = z.object({
 	taskId: z.string(),
 });
