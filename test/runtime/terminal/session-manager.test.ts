@@ -3,6 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { buildShellCommandLine } from "../../../src/core/shell";
 import { buildTerminalEnvironment, TerminalSessionManager } from "../../../src/terminal/session-manager";
+import {
+	createTerminalInputBoxOccupancyTrackerState,
+	type TerminalInputBoxOccupancyTrackerState,
+} from "../../../src/terminal/terminal-input-box-occupancy";
 
 function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
 	return {
@@ -316,6 +320,72 @@ describe("TerminalSessionManager", () => {
 		expect(getSnapshotSpy).toHaveBeenCalledTimes(1);
 	});
 
+	// resolveTaskTerminalInputBoxOccupancy 的读屏要排进镜像 operationQueue，那段 await 会跨越宏任务：
+	// 期间 PTY 可能退出（exit handler 置 entry.active = null）、或被 refresh 换成新 incarnation。
+	// 这两条钉住「await 前捕获 active、await 后复查仍是同一条命」：缺了复查，前者解引用 null 抛 TypeError，
+	// 后者把上一条会话的读屏结论与新会话的输入侧账本拼成一个撒谎的占用结论。
+	describe("resolveTaskTerminalInputBoxOccupancy 跨 await 的会话代际复查", () => {
+		const BOX_BOUNDARY_LINE = "─".repeat(80);
+		// 屏上是一个「框里有人类未提交内容」的 Claude 输入框——只有把这份读屏错配到别的会话上，
+		// 错误结论才可见（新会话的输入侧账本自己是空的）。
+		const OCCUPIED_INPUT_BOX_SCREEN_SNAPSHOT = {
+			lines: [BOX_BOUNDARY_LINE, "❯ 人类正在打字", BOX_BOUNDARY_LINE].map((text) => ({ text, isWrapped: false })),
+			columnCount: 80,
+		};
+
+		function injectClaudeEntryWithDeferredScreenRead(manager: TerminalSessionManager): {
+			entry: { active: { inputBoxOccupancyTracker: TerminalInputBoxOccupancyTrackerState } | null };
+			releaseScreenRead: () => void;
+		} {
+			// 读屏挂在一个外部可控的 promise 上，模拟 operationQueue 里还压着写入：
+			// 测试得以在 await 未决期间插入退出 / 换代，精确复现竞态窗口。
+			let releaseScreenRead = (): void => undefined;
+			const screenReadGate = new Promise<void>((resolve) => {
+				releaseScreenRead = resolve;
+			});
+			const entry = {
+				summary: createSummary({ taskId: "task-occupancy-race", agentId: "claude", state: "running" }),
+				active: {
+					inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+				} as { inputBoxOccupancyTracker: TerminalInputBoxOccupancyTrackerState } | null,
+				terminalStateMirror: {
+					getScreenSnapshot: async () => {
+						await screenReadGate;
+						return OCCUPIED_INPUT_BOX_SCREEN_SNAPSHOT;
+					},
+				},
+				listenerIdCounter: 1,
+				listeners: new Map(),
+			};
+			(manager as unknown as { entries: Map<string, typeof entry> }).entries.set("task-occupancy-race", entry);
+			return { entry, releaseScreenRead };
+		}
+
+		it("读屏期间 PTY 退出（active 被置 null）→ 返回 null，不解引用已消失的 active", async () => {
+			const manager = new TerminalSessionManager();
+			const { entry, releaseScreenRead } = injectClaudeEntryWithDeferredScreenRead(manager);
+
+			const occupancyPromise = manager.resolveTaskTerminalInputBoxOccupancy("task-occupancy-race");
+			entry.active = null;
+			releaseScreenRead();
+
+			await expect(occupancyPromise).resolves.toBeNull();
+		});
+
+		it("读屏期间会话被 refresh 换代 → 返回 null，不把旧屏读框结论拼到新会话的输入侧账本上", async () => {
+			const manager = new TerminalSessionManager();
+			const { entry, releaseScreenRead } = injectClaudeEntryWithDeferredScreenRead(manager);
+
+			const occupancyPromise = manager.resolveTaskTerminalInputBoxOccupancy("task-occupancy-race");
+			// refresh 后的新 incarnation：输入框是全新的空框，账本自然为空。
+			entry.active = { inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState() };
+			releaseScreenRead();
+
+			// 缺复查时这里会拿到 hasUncommittedInput=true（旧屏「人类正在打字」+ 新会话空账本）。
+			await expect(occupancyPromise).resolves.toBeNull();
+		});
+	});
+
 	// Stage 3 余区：session-manager 的活跃回合 / Codex 回车门控从 legacy `state` 读 → 双轴 facet 真相源。
 	// 锁定「迁移前可见行为基线」：isActiveState(running|awaiting_review) ⟺ isSummaryInActiveTurn(facets)；
 	// Codex 回车旧 `state==="awaiting_review"` ⟺ isAwaitingUserReviewTurn(facets) + reviewReason 门控保留。
@@ -382,6 +452,10 @@ describe("TerminalSessionManager", () => {
 				active: {
 					session: { write: writeSpy },
 					awaitingCodexPromptAfterEnter: false,
+					// writeInput 每次调用都会喂输入侧字节跟踪器（判空 + 粘贴账本的唯一数据源），
+					// 它不是可选装饰：漏给这个假 active 配上，writeInput 会直接抛。刻意**不**在生产代码里
+					// 对缺失做兼容——那等于让「跟踪器没接上」静默退化成「框永远判空」。
+					inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
 				},
 				listenerIdCounter: 1,
 				listeners: new Map(),

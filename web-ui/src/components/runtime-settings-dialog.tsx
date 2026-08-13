@@ -50,6 +50,7 @@ import { useLayoutCustomizations } from "@/resize/layout-customizations";
 import { openFileOnHost } from "@/runtime/runtime-config-query";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeConfigResponse,
 	RuntimeProjectShortcut,
@@ -79,20 +80,26 @@ function quoteCommandPartForDisplay(part: string): string {
 }
 
 // 进程内运行的 agent（Cline SDK）没有可展示的命令行。其余 agent 展示 binary + baseArgs +（默认档为
-// bypass 时的）放权旗标；baseArgs 不能漏——例如 omp 的 ACP 会话是 `omp acp`，少了子命令就是错的。
+// bypass 时的）放权旗标。
+//
+// 通道相关的子命令不能从 catalog 的 baseArgs 里读：omp 有两条通道，`acp` 子命令只属于 ACP 那条，
+// 放进 baseArgs 会让 PTY 路径也去起 ACP server（所以它已被移出）。这里按**新任务默认通道**补回来，
+// 免得设置页对着一个默认走 TUI 的 agent 展示 `omp acp`——那是在说谎。
 function buildDisplayedAgentCommand(
 	agentId: RuntimeAgentId,
 	binary: string,
 	newTaskDefaultsToBypassPermissions: boolean,
+	newTaskAgentSessionTransport: RuntimeAgentSessionTransport,
 ): string {
 	// 进程内 SDK agent 根本不起子进程，没有命令行可展示。
 	if (getRuntimeAgentSessionTransport(agentId) === "in_process_cline_sdk") {
 		return "";
 	}
 	const catalogEntry = getRuntimeAgentCatalogEntry(agentId);
+	const transportArgs = agentId === "omp" && newTaskAgentSessionTransport === "acp_stdio_subprocess" ? ["acp"] : [];
 	const baseArgs = catalogEntry?.baseArgs ?? [];
 	const autonomousArgs = newTaskDefaultsToBypassPermissions ? (catalogEntry?.autonomousArgs ?? []) : [];
-	return [binary, ...[...baseArgs, ...autonomousArgs].map(quoteCommandPartForDisplay)].join(" ");
+	return [binary, ...[...transportArgs, ...baseArgs, ...autonomousArgs].map(quoteCommandPartForDisplay)].join(" ");
 }
 
 function normalizeTemplateForComparison(value: string): string {
@@ -391,6 +398,10 @@ export function RuntimeSettingsDialog({
 	const [selectedAgentId, setSelectedAgentId] = useState<RuntimeAgentId>("claude");
 	const [agentAutonomousModeEnabled, setAgentAutonomousModeEnabled] = useState(true);
 	const [newTaskStartInPlanModeByDefault, setNewTaskStartInPlanModeByDefault] = useState(true);
+	// omp 新任务的默认通话通道。严格是「新任务默认值」：建卡时固化到卡上，改它不追溯已有卡片。
+	// 已存在的会话要换通道走详情页会话工具条上的那个开关，与本项无关。
+	const [ompAgentSessionTransportForNewTasks, setOmpAgentSessionTransportForNewTasks] =
+		useState<RuntimeAgentSessionTransport>("pty_terminal");
 	const [readyForReviewNotificationsEnabled, setReadyForReviewNotificationsEnabled] = useState(true);
 	const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(true);
 	const [autoContinueOnConnectionDropEnabled, setAutoContinueOnConnectionDropEnabled] = useState(true);
@@ -455,9 +466,14 @@ export function RuntimeSettingsDialog({
 		});
 		return orderedAgents.map((agent) => ({
 			...agent,
-			command: buildDisplayedAgentCommand(agent.id, agent.binary, agentAutonomousModeEnabled),
+			command: buildDisplayedAgentCommand(
+				agent.id,
+				agent.binary,
+				agentAutonomousModeEnabled,
+				ompAgentSessionTransportForNewTasks,
+			),
 		}));
-	}, [agentAutonomousModeEnabled, config?.agents]);
+	}, [agentAutonomousModeEnabled, config?.agents, ompAgentSessionTransportForNewTasks]);
 	const displayedAgents = useMemo(() => supportedAgents, [supportedAgents]);
 	const navItems = useMemo(
 		() => SETTINGS_NAV_ITEMS.filter((item) => !item.clineOnly || selectedAgentId === "cline"),
@@ -469,6 +485,8 @@ export function RuntimeSettingsDialog({
 	const initialSelectedAgentId = configuredAgentId ?? fallbackAgentId;
 	const initialAgentAutonomousModeEnabled = config?.agentAutonomousModeEnabled ?? true;
 	const initialNewTaskStartInPlanModeByDefault = config?.newTaskStartInPlanModeByDefault ?? true;
+	const initialOmpAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport =
+		config?.ompAgentSessionTransportForNewTasks ?? "pty_terminal";
 	const initialReadyForReviewNotificationsEnabled = config?.readyForReviewNotificationsEnabled ?? true;
 	const initialNotificationSoundEnabled = config?.notificationSoundEnabled ?? true;
 	const initialAutoContinueOnConnectionDropEnabled = config?.autoContinueOnConnectionDropEnabled ?? true;
@@ -500,6 +518,9 @@ export function RuntimeSettingsDialog({
 			return true;
 		}
 		if (newTaskStartInPlanModeByDefault !== initialNewTaskStartInPlanModeByDefault) {
+			return true;
+		}
+		if (ompAgentSessionTransportForNewTasks !== initialOmpAgentSessionTransportForNewTasks) {
 			return true;
 		}
 		if (readyForReviewNotificationsEnabled !== initialReadyForReviewNotificationsEnabled) {
@@ -559,6 +580,8 @@ export function RuntimeSettingsDialog({
 		openPrPromptTemplate,
 		readyForReviewNotificationsEnabled,
 		newTaskStartInPlanModeByDefault,
+		initialOmpAgentSessionTransportForNewTasks,
+		ompAgentSessionTransportForNewTasks,
 		notificationSoundEnabled,
 		selectedAgentId,
 		shortcuts,
@@ -571,6 +594,7 @@ export function RuntimeSettingsDialog({
 		setSelectedAgentId(configuredAgentId ?? fallbackAgentId);
 		setAgentAutonomousModeEnabled(config?.agentAutonomousModeEnabled ?? true);
 		setNewTaskStartInPlanModeByDefault(config?.newTaskStartInPlanModeByDefault ?? true);
+		setOmpAgentSessionTransportForNewTasks(config?.ompAgentSessionTransportForNewTasks ?? "pty_terminal");
 		setReadyForReviewNotificationsEnabled(config?.readyForReviewNotificationsEnabled ?? true);
 		setNotificationSoundEnabled(config?.notificationSoundEnabled ?? true);
 		setAutoContinueOnConnectionDropEnabled(config?.autoContinueOnConnectionDropEnabled ?? true);
@@ -585,6 +609,7 @@ export function RuntimeSettingsDialog({
 		config?.postDeployVerificationForceCompleteEnabled,
 		config?.commitPromptTemplate,
 		config?.newTaskStartInPlanModeByDefault,
+		config?.ompAgentSessionTransportForNewTasks,
 		config?.openPrPromptTemplate,
 		config?.readyForReviewNotificationsEnabled,
 		config?.notificationSoundEnabled,
@@ -761,6 +786,7 @@ export function RuntimeSettingsDialog({
 			selectedAgentId,
 			agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled,
 			notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled,
@@ -888,6 +914,26 @@ export function RuntimeSettingsDialog({
 							</RadixSwitch.Root>
 							<span className="text-[13px] text-text-primary">Start new tasks in plan mode by default</span>
 						</div>
+						{/* omp 有两条通话通道（终端 TUI 与 ACP）。这里定的只是**新任务**的起点，建卡时固化到卡上；
+						    已存在的会话要换通道，用详情页会话工具条上的切换按钮。 */}
+						<div className="flex items-center gap-2 mt-3">
+							<RadixSwitch.Root
+								checked={ompAgentSessionTransportForNewTasks === "acp_stdio_subprocess"}
+								disabled={controlsDisabled}
+								onCheckedChange={(checked) =>
+									setOmpAgentSessionTransportForNewTasks(checked ? "acp_stdio_subprocess" : "pty_terminal")
+								}
+								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer disabled:opacity-40"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+							</RadixSwitch.Root>
+							<span className="text-[13px] text-text-primary">Start new Oh My Pi tasks over ACP</span>
+						</div>
+						<p className="text-text-secondary text-[13px] ml-11 mt-0 mb-0">
+							Off (default) runs Oh My Pi as a terminal TUI, like Claude Code and Codex. ACP renders the session
+							as a chat panel instead. Either way you can switch an individual session at any time from its
+							toolbar; this only sets the starting point for new tasks.
+						</p>
 					</div>
 
 					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">

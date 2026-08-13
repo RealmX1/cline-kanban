@@ -23,6 +23,7 @@ function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): 
 		selectedAgentId: "claude",
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
+		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		newTaskStartInPlanModeByDefault: true,
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,

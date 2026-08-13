@@ -1,4 +1,4 @@
-import type { RuntimeAgentId, RuntimeAgentSessionTransport } from "./api-contract";
+import type { RuntimeAgentId, RuntimeAgentSessionTransport, RuntimeTaskSessionSummary } from "./api-contract";
 
 export {
 	isKanbanCursorAgentGrokModelId,
@@ -109,12 +109,14 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		id: "omp",
 		label: "Oh My Pi (omp)",
 		binary: "omp",
-		// `omp acp` 把 omp 起成 ACP server（NDJSON JSON-RPC over stdio）。所有根命令 flag
-		// 在该子命令下依然有效（commands/acp.ts 复用同一个 parseArgs 后强制 mode="acp"）。
-		baseArgs: ["acp"],
+		// baseArgs 必须留空：omp 有两条通道，`acp` 子命令只属于 ACP 那条。把它写在这里会同时
+		// 被 PTY 路径（agent-registry.ts 的 getDefaultArgs）读走，于是 TUI 通道也去起 ACP server。
+		// ACP 的子命令由 acp-agent-launch-catalog.ts 的 buildSpawnCommand 自持。
+		baseArgs: [],
 		autonomousArgs: ["--approval-mode", "yolo"],
 		installUrl: "https://omp.sh",
-		sessionTransport: "acp_stdio_subprocess",
+		// omp 的**默认**通道是 TUI；ACP 是可切换的第二条通道（见 agent-session-transport-selection.ts）。
+		sessionTransport: "pty_terminal",
 	},
 ];
 
@@ -147,8 +149,24 @@ export function getRuntimeAgentCatalogEntry(agentId: RuntimeAgentId): RuntimeAge
 	return RUNTIME_AGENT_CATALOG.find((entry) => entry.id === agentId) ?? null;
 }
 
+// 该 agent 的**默认**通道。注意它不再等同于「某条活会话在用的通道」——omp 可在 TUI 与 ACP
+// 之间随时切换（agentId 不变）。只有「还没有活会话、要预判形态」的场景才该读这个函数
+//（主页侧栏按全局 selectedAgentId 预判、设置页展示默认命令行）；凡手上有 summary 的读点，
+// 一律走下面的 resolveRuntimeAgentSessionTransportFromSummary。
 export function getRuntimeAgentSessionTransport(agentId: RuntimeAgentId): RuntimeAgentSessionTransport {
 	return getRuntimeAgentCatalogEntry(agentId)?.sessionTransport ?? "pty_terminal";
+}
+
+// 一条活会话实际在用的通话方式——本仓库判断「这条会话长什么样」的唯一真相源。
+// summary.sessionTransport 由三条通道各自在建会话时盖章；缺失（旧盘数据 / web-ui 手构造 summary）
+// 时回退按 agentId 派生，与本次改动之前的行为一致。
+export function resolveRuntimeAgentSessionTransportFromSummary(
+	summary: Pick<RuntimeTaskSessionSummary, "agentId" | "sessionTransport">,
+): RuntimeAgentSessionTransport {
+	if (summary.sessionTransport !== undefined) {
+		return summary.sessionTransport;
+	}
+	return summary.agentId === null ? "pty_terminal" : getRuntimeAgentSessionTransport(summary.agentId);
 }
 
 // 该 agent 的会话是否由 Kanban 直接持有结构化消息（因而在卡片详情里渲染成会话面板、
@@ -162,6 +180,26 @@ export function isRuntimeAgentSessionRenderedAsConversationPanel(agentId: Runtim
 
 export function isRuntimeAgentSessionDrivenByAcpProtocol(agentId: RuntimeAgentId | null): boolean {
 	return agentId !== null && getRuntimeAgentSessionTransport(agentId) === "acp_stdio_subprocess";
+}
+
+// 上面两个谓词的会话版。手上有 summary 时必须用这两个：agentId 版对一条切到 TUI 的 omp 会话
+// 仍会返回「会话面板 / ACP」，于是 stop、输入投递、Commit·Open PR 全部会走错通道。
+export function isRuntimeAgentSessionSummaryRenderedAsConversationPanel(
+	summary: Pick<RuntimeTaskSessionSummary, "agentId" | "sessionTransport"> | null | undefined,
+): boolean {
+	if (!summary) {
+		return false;
+	}
+	return resolveRuntimeAgentSessionTransportFromSummary(summary) !== "pty_terminal";
+}
+
+export function isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
+	summary: Pick<RuntimeTaskSessionSummary, "agentId" | "sessionTransport"> | null | undefined,
+): boolean {
+	if (!summary) {
+		return false;
+	}
+	return resolveRuntimeAgentSessionTransportFromSummary(summary) === "acp_stdio_subprocess";
 }
 
 // 该 agent 的模型 / provider 是否由 Kanban 的 Cline provider 设置决定。会话面板里的 Cline 专属控件

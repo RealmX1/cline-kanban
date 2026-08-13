@@ -17,6 +17,7 @@ import {
 } from "@/hooks/task-edit-drafts";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
@@ -138,6 +139,9 @@ interface UseTaskEditorInput {
 	selectedAgentId: RuntimeAgentId | null;
 	newTaskStartInPlanModeByDefault: boolean;
 	isNewTaskStartInPlanModeDefaultLoaded: boolean;
+	// 全局「omp 新任务默认通道」。建卡时随草稿一起下沉，由域层固化到卡上（只对可切换 agent 落值）。
+	// 详情页的通道开关改的是**已存在的会话**，与本值无关。
+	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	newTaskAgentPermissionModeByDefault: RuntimeTaskAgentPermissionMode;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	queueTaskStartAfterEdit?: (taskId: string) => void;
@@ -231,6 +235,7 @@ export function useTaskEditor({
 	selectedAgentId,
 	newTaskStartInPlanModeByDefault,
 	isNewTaskStartInPlanModeDefaultLoaded,
+	ompAgentSessionTransportForNewTasks,
 	newTaskAgentPermissionModeByDefault,
 	setSelectedTaskId,
 	queueTaskStartAfterEdit,
@@ -686,6 +691,10 @@ export function useTaskEditor({
 				autoReviewMode: newTaskAutoReviewMode,
 				images: newTaskImages,
 				agentId: newTaskAgentId,
+				// 用户没在建卡对话框里挑 agent 时 newTaskAgentId 是空的，这张卡会跑工作区默认 agent。
+				// 会话通道要不要固化看的正是「实际会跑哪个 agent」，所以工作区默认也得一起下沉到域层。
+				workspaceDefaultAgentIdForNewTasks: selectedAgentId ?? undefined,
+				ompAgentSessionTransportForNewTasks,
 				clineSettings: newTaskClineSettings,
 				terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
 				taskAgentSessionInitialization: newTaskAgentSessionInitialization,
@@ -729,6 +738,9 @@ export function useTaskEditor({
 			newTaskTerminalAgentModelOverrideSettings,
 			newTaskAgentSessionInitialization,
 			newTaskImages,
+			// 全局默认只在建卡那一刻固化，所以必须进依赖：漏掉它时闭包会一直捕获旧通道，
+			// 用户在设置页切换后新建的卡仍被写成切换前的值。
+			ompAgentSessionTransportForNewTasks,
 			newTaskPrompt,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
@@ -769,6 +781,9 @@ export function useTaskEditor({
 					autoReviewMode: newTaskAutoReviewMode,
 					images: newTaskImages,
 					agentId: newTaskAgentId,
+					// 同 handleCreateTask：agentId 留空的卡片跑的是工作区默认 agent，固化判据要看它。
+					workspaceDefaultAgentIdForNewTasks: selectedAgentId ?? undefined,
+					ompAgentSessionTransportForNewTasks,
 					clineSettings: newTaskClineSettings,
 					terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
 					baseRef,
@@ -815,6 +830,8 @@ export function useTaskEditor({
 			newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings,
 			newTaskImages,
+			// 同 handleCreateTask：全局默认只在建卡那一刻固化，漏进依赖会让批量建卡整批写成旧通道。
+			ompAgentSessionTransportForNewTasks,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
 			newTaskStartInPlanMode,

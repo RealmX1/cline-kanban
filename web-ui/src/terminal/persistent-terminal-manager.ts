@@ -1,4 +1,4 @@
-import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { resolveSessionFacets } from "@runtime-session-activity";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
@@ -18,6 +18,10 @@ import type {
 } from "@/runtime/types";
 import { sliceRestoreSnapshotForIncrementalWrite } from "@/terminal/restore-snapshot-slicing";
 import { clearTerminalGeometry, reportTerminalGeometry } from "@/terminal/terminal-geometry-registry";
+import {
+	isStashTerminalInputBoxToPromptLibraryShortcut,
+	stashTerminalInputBoxToPromptLibrary,
+} from "@/terminal/terminal-input-box-stash-shortcut";
 import { createKanbanTerminalOptions } from "@/terminal/terminal-options";
 import {
 	appendTerminalHeuristicText,
@@ -329,6 +333,16 @@ class PersistentTerminal {
 				this.notifySearchOpenRequested();
 				return false;
 			}
+			if (!isShellTerminalTaskId(this.taskId) && isStashTerminalInputBoxToPromptLibraryShortcut(event)) {
+				// 只接管 agent 任务终端。shell 终端里 Ctrl+S 是 XOFF、没有可读的输入框，接管它等于改掉
+				// 一个与本特性无关的终端语义。
+				//
+				// preventDefault 挡的是 macOS 上 Cmd+S 漏给浏览器的「存储页面」对话框；返回 false 让 xterm
+				// 不要把这个字节发给 PTY——它由服务端在写库成功之后才转发，从而保证「库里没有 ⇒ 框里还在」。
+				event.preventDefault();
+				void stashTerminalInputBoxToPromptLibrary({ workspaceId: this.workspaceId, taskId: this.taskId });
+				return false;
+			}
 			return true;
 		});
 		this.searchAddon.onDidChangeResults((results) => {
@@ -474,7 +488,7 @@ class PersistentTerminal {
 		if (
 			!summary ||
 			summary.agentId === null ||
-			isRuntimeAgentSessionRenderedAsConversationPanel(summary.agentId) ||
+			isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary) ||
 			summary.pid !== null
 		) {
 			return;

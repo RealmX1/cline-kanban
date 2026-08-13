@@ -1,4 +1,5 @@
-import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
 import "@xterm/xterm/css/xterm.css";
 
 import { isSessionInActiveTurn, resolveSessionFacets } from "@runtime-session-activity";
@@ -452,6 +453,7 @@ function AgentTerminalReviewActions({
 
 function AgentTerminalPanelLayout({
 	taskId,
+	workspaceId,
 	summary,
 	onSummary: _onSummary,
 	onCommit,
@@ -516,10 +518,11 @@ function AgentTerminalPanelLayout({
 	// **不**要求 summary.agentId 已知。渲染到这个面板本身就已经由 card-detail-view 判定过「这是个 PTY
 	// agent 会话」，而 agentId 恰恰是硬中断后最容易丢的字段——一旦把「不知道用的哪个 agent」当成禁用理由，
 	// 用户拿到的就是一个既全白、又点不动的面板，也就是这个按钮本该解决的那个故障本身。
-	// 只在 agentId **已知且**确属对话面板 agent（Cline）时才禁用；与服务端 refreshTaskTerminal 的判据对齐。
-	const canRefresh =
-		showRefreshButton &&
-		(summary?.agentId == null || !isRuntimeAgentSessionRenderedAsConversationPanel(summary.agentId));
+	// 只在这条会话**确实跑在非 PTY 通道**上时才禁用；与服务端 refreshTaskTerminal 的判据对齐。
+	// 判据读会话盖的通道章而不是 agentId：omp 有 TUI / ACP 两条通道，agentId 版谓词只认得它的
+	// catalog 默认，会把一条 ACP 会话当成可刷新的 PTY 会话。summary 缺席（会话已经没了）时按
+	// 「不知道 ⇒ 不禁用」放行，正是这个按钮存在的场景。
+	const canRefresh = showRefreshButton && !isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary);
 	const showCompactHeader = !showSessionToolbar;
 	const isMobile = useIsMobile();
 	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
@@ -604,6 +607,14 @@ function AgentTerminalPanelLayout({
 									/>
 								</Tooltip>
 							) : null}
+							<AgentSessionTransportSwitchButton
+								workspaceId={workspaceId}
+								taskId={taskId}
+								agentId={summary?.agentId ?? null}
+								currentSessionTransport="pty_terminal"
+								iconSize={14}
+								variant="default"
+							/>
 							<Button variant="default" size="sm" onClick={clearTerminal}>
 								Clear
 							</Button>

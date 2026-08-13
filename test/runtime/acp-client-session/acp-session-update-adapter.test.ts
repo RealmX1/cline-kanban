@@ -19,7 +19,10 @@ import { resolveSessionFacets } from "../../../src/core/session-activity";
 
 const SESSION_ID = "session-1";
 
-function createContext(pid: number | null = 4242): {
+function createContext(
+	pid: number | null = 4242,
+	options: { isReplayingPersistedConversationHistory?: boolean } = {},
+): {
 	context: AcpSessionUpdateContext;
 	emittedSummaries: RuntimeTaskSessionSummary[];
 	emittedMessages: AcpTaskMessage[];
@@ -35,6 +38,7 @@ function createContext(pid: number | null = 4242): {
 			agentId: "omp",
 			pid,
 			entry,
+			isReplayingPersistedConversationHistory: options.isReplayingPersistedConversationHistory ?? false,
 			emitSummary: (summary) => emittedSummaries.push(summary),
 			emitMessage: (message) => emittedMessages.push(message),
 		},
@@ -75,7 +79,8 @@ describe("applyAcpSessionUpdate", () => {
 			notify({ sessionUpdate: "agent_thought_chunk", messageId: "t1", content: { type: "text", text: "thinking" } }),
 		);
 		expect(context.entry.messages[0].role).toBe("reasoning");
-		expect(context.entry.messages[0].meta?.streamType).toBe("reasoning");
+		// 流式期间是 "reasoning_streaming"，回合边界才被改写成 "reasoning"（见下方 reasoning stream phase）。
+		expect(context.entry.messages[0].meta?.streamType).toBe("reasoning_streaming");
 	});
 
 	it("keeps one tool message per toolCallId and replaces its content on update", () => {
@@ -338,5 +343,87 @@ describe("applyAcpSessionUpdate keeps the user turn", () => {
 		);
 
 		expect(resolveSessionFacets(context.entry.summary).turnOwner).toBe("agent");
+	});
+});
+
+// session/load 的历史重播在协议层与真实产出完全同形（都是 agent_message_chunk / tool_call），
+// 只能靠「我们正处在 session/load 之中」这个外部事实区分。它是终端侧
+// suppressSubstantiveOutputUntilContinues 的对位物：漏了这道守卫，每次切到 ACP 都会把一张停在
+// Review 的卡片凭空推回 In Progress，并把「agent 上次响应」刷成刚刚——而且只会静默写错时间戳。
+describe("session/load history replay guard", () => {
+	it("appends replayed messages without advancing the turn or the substantive output timestamp", () => {
+		const { context, emittedSummaries, emittedMessages } = createContext(4242, {
+			isReplayingPersistedConversationHistory: true,
+		});
+		// 先把会话置成「等人审查」，模拟切换前那条会话的真实终态。
+		updateAcpSummary(context.entry, {
+			...deriveAcpFacetPatch("awaiting_review", "hook", { pid: 4242, agentId: "omp" }),
+			reviewReason: "hook",
+		});
+		const summaryBeforeReplay = { ...context.entry.summary };
+
+		applyAcpSessionUpdate(
+			context,
+			notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "earlier ask" } }),
+		);
+		applyAcpSessionUpdate(
+			context,
+			notify({
+				sessionUpdate: "agent_message_chunk",
+				messageId: "old-1",
+				content: { type: "text", text: "earlier answer" },
+			}),
+		);
+		applyAcpSessionUpdate(
+			context,
+			notify({
+				sessionUpdate: "agent_thought_chunk",
+				messageId: "old-2",
+				content: { type: "text", text: "earlier thought" },
+			}),
+		);
+		applyAcpSessionUpdate(
+			context,
+			notify({ sessionUpdate: "tool_call", toolCallId: "t1", title: "Read file", status: "completed" }),
+		);
+
+		// 消息照常补进聊天流——重播的意义就在于把历史渲染出来。
+		expect(emittedMessages.length).toBeGreaterThan(0);
+		// 但一条 summary 都不该发：回合归属、reviewReason、两个时间戳全部原样。
+		expect(emittedSummaries).toEqual([]);
+		expect(context.entry.summary.lastSubstantiveOutputAt).toBe(summaryBeforeReplay.lastSubstantiveOutputAt);
+		expect(context.entry.summary.lastOutputAt).toBe(summaryBeforeReplay.lastOutputAt);
+		expect(resolveSessionFacets(context.entry.summary).turnOwner).toBe("user");
+		expect(context.entry.summary.reviewReason).toBe("hook");
+	});
+
+	it("still advances state for genuine output once the replay window is over", () => {
+		const { context, emittedSummaries } = createContext();
+		applyAcpSessionUpdate(
+			context,
+			notify({ sessionUpdate: "agent_message_chunk", messageId: "live-1", content: { type: "text", text: "live" } }),
+		);
+		expect(emittedSummaries.length).toBeGreaterThan(0);
+		expect(resolveSessionFacets(context.entry.summary).turnOwner).toBe("agent");
+		expect(context.entry.summary.lastSubstantiveOutputAt).not.toBeNull();
+	});
+});
+
+// ACP 协议不区分「这段思考还在写」与「写完了」，唯一可观测的收束时刻是回合边界。
+// 面板据此自动展开 / 收起思考块；没有这个标记，ACP 会话的思考块永远不会自动展开。
+describe("reasoning stream phase", () => {
+	it("marks reasoning as streaming while chunks arrive and as finished at the turn boundary", () => {
+		const { context, emittedMessages } = createContext();
+		applyAcpSessionUpdate(
+			context,
+			notify({ sessionUpdate: "agent_thought_chunk", messageId: "r1", content: { type: "text", text: "thinking" } }),
+		);
+		const streamingMessage = emittedMessages.at(-1);
+		expect(streamingMessage?.role).toBe("reasoning");
+		expect(streamingMessage?.meta?.streamType).toBe("reasoning_streaming");
+
+		applyAcpPromptTurnCompletion(context, "end_turn");
+		const finishedMessage = emittedMessages.filter((message) => message.role === "reasoning").at(-1);
+		expect(finishedMessage?.meta?.streamType).toBe("reasoning");
 	});
 });

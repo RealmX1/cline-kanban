@@ -13,6 +13,7 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 } from "../core/api-contract";
 import { buildKanbanCommandParts } from "../core/kanban-command";
+import { resolveOmpApprovalModeFlagValue } from "../core/omp-approval-mode-flag";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
 import { quoteShellArg } from "../core/shell";
 import { resolveTaskAgentPermissionModeForAgent } from "../core/task-agent-permission-mode";
@@ -29,6 +30,8 @@ import { configureCodexHooks, hasCodexConfigOverride } from "./codex-hook-config
 import { createHookRuntimeEnv } from "./hook-runtime-context";
 import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
 import { hasKimiInteractivePrompt } from "./kimi-readiness";
+import { detectOmpTerminalTitleStateTransition } from "./omp-terminal-title-state";
+import { writeOmpTuiLaunchConfigOverlay } from "./omp-tui-launch-config";
 import {
 	getOpenCodeAuthPathCandidates,
 	getOpenCodeConfigPathCandidates,
@@ -53,6 +56,11 @@ export interface AgentAdapterLaunchInput {
 	images?: RuntimeTaskImage[];
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
+	// 「续跑既有对话、不重投 prompt」，但**不**带垃圾桶语义（不清聊天、不按转录反查模型）。
+	// 目前唯一的来源是通道切换后重开会话（omp 的 TUI ⇄ ACP）。语义上与 resumeFromTrash 的续跑
+	// 部分一致，故 adapter 里两者一律并为同一条分支处理；只有 omp 需要认它——别的 agent 不可切换，
+	// 到不了这条路径（可切换 agent 集合见 core/agent-session-transport-selection.ts）。
+	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	parentSessionId?: string;
@@ -1941,15 +1949,69 @@ const kimiAdapter: AgentSessionAdapter = {
 	},
 };
 
-// oh-my-pi 没有 PTY 会话形态：它经 ACP（JSON-RPC over stdio）由 src/acp-client-session/ 驱动。
-// 这里放一个显式抛错的占位，好让「路由错到终端路径」在第一时间炸出来，而不是静默起一个
-// 没有 hook、状态永远不前进的 TUI。
-const ompTerminalPathUnsupportedAdapter: AgentSessionAdapter = {
-	async prepare() {
-		throw new Error(
-			"oh-my-pi (omp) sessions are driven over ACP, not a PTY terminal. " +
-				"Route this task through the ACP task session service instead of terminalManager.startTaskSession.",
+// oh-my-pi（omp）的 PTY TUI 通道。omp 还有一条 ACP 通道（src/acp-client-session/），两条通道
+// 共用同一份 omp 磁盘会话存储（omp 的 SessionManager 按 cwd 建库），因而可以随时互相切换——
+// 走哪条由 core/agent-session-transport-selection.ts 决定，不是这里。
+//
+// 形态上模板是 cursorAdapter 而不是 codex/kimi：omp 的根命令吃**位置 prompt** 并在 mode.init()
+// 完成后自动提交（main.ts 的 `session.prompt(initialMessage)`），所以不需要 deferredStartupInput，
+// 也就完全不必碰 session-manager 的就绪判定与注入闸。
+const ompAdapter: AgentSessionAdapter = {
+	async prepare(input) {
+		const args = [...input.args];
+		const env: Record<string, string | undefined> = {
+			// 首启的全屏 setup 向导会切 alt-screen 盖住 TUI 并等人操作，托管会话必须跳过。
+			// 这是 omp 侧唯一的读取点（setup-wizard/index.ts）。
+			OMP_SKIP_SETUP: "1",
+		};
+
+		// 放权档三档与 omp 的 `--approval-mode` 一一对应；映射表与 ACP 通道共用一份
+		// （core/omp-approval-mode-flag.ts），否则切换通道会静默改变放权语义。
+		// 必须**显式**传：omp 的 schema 默认虽是 yolo，但「默认值」不算 isConfigured，权限门仍会保留。
+		if (!hasCliOption(args, "--approval-mode")) {
+			args.push("--approval-mode", resolveOmpApprovalModeFlagValue(resolveLaunchPermissionMode(input)));
+		}
+
+		// plan 起步经 Kanban 托管的设置 overlay 表达，**不动放权档**（AGENTS.md 的正交轴铁律）。
+		// 续跑时不重放 plan 起步：用户已在对话中途，omp 的会话记录里存着当前模式。
+		// 续跑（垃圾桶恢复 / 通道切换）在 adapter 里是同一条分支：都不重投 prompt、都加 --continue、
+		// 都武装重播守卫、都不重放 plan 起步。
+		const shouldContinuePriorConversation = Boolean(
+			input.resumeFromTrash || input.resumePriorAgentConversationWithoutResendingPrompt,
 		);
+		const shouldStartInPlanMode = Boolean(input.startInPlanMode) && !shouldContinuePriorConversation;
+		const launchConfigOverlay = await writeOmpTuiLaunchConfigOverlay({
+			hookAgentDirectory: getHookAgentDirectory("omp"),
+			taskId: input.taskId,
+			startInPlanMode: shouldStartInPlanMode,
+		});
+		args.push("--config", launchConfigOverlay.configFilePath);
+
+		// 续跑用 `--continue`。**绝不**发裸 `-r` / `--resume`：无值时 omp 会弹一个全屏 session picker
+		// 等人上下键选（main.ts），托管会话会就此卡死。
+		// omp 的 terminal breadcrumb 认的是 TTY 设备路径（ttyid.ts），新 PTY 每次 id 都不同，于是
+		// `--continue` 落到 fallback「该 cwd 下最近的一条 session」——每 task 一个 worktree，这个
+		// fallback 恰好正确。注意它并不锁定某个具体 sessionId。
+		const resumesPriorAgentConversation = shouldContinuePriorConversation;
+		if (shouldContinuePriorConversation && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
+			args.push("--continue");
+		}
+
+		// 位置 prompt：omp 在 TUI 初始化完成后自动提交它。续跑时不重投——那会凭空多出一轮。
+		const trimmed = prependTaskSessionGuidanceToPrompt(input).trim();
+		if (!shouldContinuePriorConversation && trimmed) {
+			args.push(trimmed);
+		}
+
+		return {
+			args,
+			env,
+			resumesPriorAgentConversation,
+			// 状态判定读 OSC 终端标题（omp 把三态编码在标题分隔符里），比 cursor/kiro/droid 那种
+			// 「只能靠 scanForStalls 兜底」结构化得多，且不需要写 omp extension。
+			// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
+			detectOutputTransition: detectOmpTerminalTitleStateTransition,
+		};
 	},
 };
 
@@ -1963,7 +2025,7 @@ const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	kiro: kiroAdapter,
 	cline: clineAdapter,
 	kimi: kimiAdapter,
-	omp: ompTerminalPathUnsupportedAdapter,
+	omp: ompAdapter,
 };
 
 export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promise<PreparedAgentLaunch> {

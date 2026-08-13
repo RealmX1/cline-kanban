@@ -65,6 +65,7 @@ function createRuntimeConfig(overrides: Partial<RuntimeConfigResponse> = {}): Ru
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
 		newTaskStartInPlanModeByDefault: true,
+		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		effectiveCommand: "codex --dangerously-bypass-approvals-and-sandbox",
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project-config.json",

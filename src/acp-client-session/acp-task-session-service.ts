@@ -26,9 +26,11 @@ import {
 	type AcpTaskMessage,
 	type AcpTaskSessionEntry,
 	appendAcpMessage,
+	clearAcpStreamingGrouping,
 	cloneAcpSummary,
 	createAcpMessage,
 	deriveAcpFacetPatch,
+	finishAcpStreamedReasoningMessages,
 	now,
 	replaceAcpMessage,
 	updateAcpSummary,
@@ -50,6 +52,12 @@ export interface StartAcpTaskSessionRequest {
 	images?: RuntimeTaskImage[];
 	permissionMode: RuntimeTaskAgentPermissionMode;
 	startInPlanMode?: boolean;
+	// 「续跑既有对话、不重投 prompt」。通道切换后重开会话走它：用户已在对话中途，重投一次原始
+	// prompt 等于凭空多一轮。置位时 prompt / images 一律被忽略（不落乐观 user 消息、不发 session/prompt），
+	// 会话内容改由 session/load 的历史重播补齐。
+	// **同时不重放 startInPlanMode**：omp 的 loadSession 会返回该会话当前的 modes，
+	// 重新按 plan 起步会把用户在对话中途已经切走的模式按回去。
+	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
 }
 
 // 等待用户决策的双向通道由外部注入（见 S5 的 broker）。默认实现保守拒绝，
@@ -224,11 +232,13 @@ export class AcpTaskSessionService {
 		const entry = this.registry.ensureEntry(request.taskId, request.agentId);
 		this.latestStartRequestByTaskId.set(request.taskId, { ...request });
 		const startedAt = now();
+		const shouldResumeWithoutResendingPrompt = Boolean(request.resumePriorAgentConversationWithoutResendingPrompt);
 
 		// 乐观 UI：先落 user 消息并把卡片推成 running，再去起进程——与 Cline 侧一致，
 		// 免得进程冷启动那几秒里卡片看起来毫无反应。
-		const promptText = request.prompt.trim();
-		if (promptText || (request.images?.length ?? 0) > 0) {
+		// 续跑重开不走这条：没有新的用户输入可落，卡片也不该被推成 running（会话很可能正停在 Review）。
+		const promptText = shouldResumeWithoutResendingPrompt ? "" : request.prompt.trim();
+		if (promptText || (!shouldResumeWithoutResendingPrompt && (request.images?.length ?? 0) > 0)) {
 			this.emitMessage(
 				request.taskId,
 				appendAcpMessage(
@@ -237,12 +247,28 @@ export class AcpTaskSessionService {
 				),
 			);
 		}
+		// 开局 facet 必须跟着同一个分支走，否则「不落乐观 user 消息」只做了一半：续跑重开在 session/load
+		// 期间**没有任何 agent 产出**，把卡片推成 running 等于让它假装进 In Progress，直到重播结束才翻回
+		// Review——一次没有任何 agent 产出的假 running。回合从开局起就归用户。
+		// 成因取 "hook"（agent 只是把回合交回来了，没有任何东西在等你拍板），与 PTY 侧同一场景的
+		// startWithoutPromptReviewReason 同款；换成 "attention" 会派生出 userTurnKind=needs_input，
+		// 落进 MODAL_USER_DECISION_TURN_KINDS，让后台程序化投递一直让位到超时。
+		// 连接还没起，pid 只能如实写 null（liveness 因此是 exited，而不是撒谎说有个活进程）。
+		// 失败路径不受影响：起不来时 catch 里的 recordTaskFailure 会用 failed/error 覆写，绝不会停在这里。
+		const sessionStateWhileConnectionIsBeingEstablished = shouldResumeWithoutResendingPrompt
+			? "awaiting_review"
+			: "running";
+		const reviewReasonWhileConnectionIsBeingEstablished = shouldResumeWithoutResendingPrompt ? "hook" : null;
 		this.emitSummary(
 			updateAcpSummary(entry, {
-				...deriveAcpFacetPatch("running", null, { pid: null, agentId: request.agentId }),
+				...deriveAcpFacetPatch(
+					sessionStateWhileConnectionIsBeingEstablished,
+					reviewReasonWhileConnectionIsBeingEstablished,
+					{ pid: null, agentId: request.agentId },
+				),
 				agentId: request.agentId,
 				workspacePath: request.cwd,
-				reviewReason: null,
+				reviewReason: reviewReasonWhileConnectionIsBeingEstablished,
 				startedAt,
 				exitCode: null,
 				warningMessage: null,
@@ -255,7 +281,9 @@ export class AcpTaskSessionService {
 				agentId: request.agentId,
 				cwd: request.cwd,
 				permissionMode: request.permissionMode,
-				startInPlanMode: request.startInPlanMode,
+				// 续跑重开一律不重放 plan 起步（理由见 StartAcpTaskSessionRequest 的字段注释）。
+				startInPlanMode: shouldResumeWithoutResendingPrompt ? false : request.startInPlanMode,
+				resumePriorAgentConversationWithoutResendingPrompt: shouldResumeWithoutResendingPrompt,
 			});
 			this.emitSummary(
 				updateAcpSummary(entry, {
@@ -266,7 +294,25 @@ export class AcpTaskSessionService {
 					runtimeSessionIncarnationId: randomUUID(),
 				}),
 			);
-			if (promptText || (request.images?.length ?? 0) > 0) {
+			if (shouldResumeWithoutResendingPrompt) {
+				// session/load 的历史在 startTaskConnection 返回前就已推完，所以这里是这条分支唯一的**回合边界**
+				// ——它不发 session/prompt，永远走不到 applyAcpPromptTurnCompletion 那个收尾点。不收尾会留下两笔
+				// 烂账：重播回来的 reasoning 永远停在「仍在流」（面板据此保持自动展开一段早就写完的思考），
+				// 且分组表里残留的历史 messageId 会把这条会话下一回合的 chunk 追加到历史消息上而不是新建消息。
+				// 顺序承重：先 finish（读的正是分组表）再 clear，与 applyAcpPromptTurnCompletion 同构。
+				for (const finishedReasoningMessage of finishAcpStreamedReasoningMessages(entry)) {
+					this.emitMessage(request.taskId, finishedReasoningMessage);
+				}
+				clearAcpStreamingGrouping(entry);
+				// 续跑重开没有要发的 prompt：回合归用户，卡片停在「等你说话」而不是假装 agent 在跑。
+				// 重播出来的历史已由重播守卫挡在时间戳与回合归属之外，这里是唯一给出终态的地方。
+				this.emitSummary(
+					updateAcpSummary(entry, {
+						...deriveAcpFacetPatch("awaiting_review", "hook", { pid: connection.pid, agentId: request.agentId }),
+						reviewReason: "hook",
+					}),
+				);
+			} else if (promptText || (request.images?.length ?? 0) > 0) {
 				void this.runPromptTurn(request.taskId, connection, buildAcpPromptBlocks(request.prompt, request.images));
 			}
 		} catch (error) {
@@ -426,10 +472,27 @@ export class AcpTaskSessionService {
 		// 会话被清空 ⇒ 旧启动参数连同旧对话一起作废，绝不能被后续的「恢复投递」拿去复活。
 		this.latestStartRequestByTaskId.delete(taskId);
 		this.registry.deleteEntry(taskId);
+		// 重建一条空 entry：`/clear` 只是清空对话，这**仍然是一条 ACP 会话**，下一条消息还得走 ACP。
+		// 不重建的话 getSummary 变 null，聊天端点会回落到 Cline，给一个 omp 任务起 Cline 会话。
+		//
+		// 代价是「账本里有 entry」不等于「这个 task 现在归 ACP 管」——通道切换必须**显式**把条目弃置，
+		// 见 discardTaskSessionLedgerEntry。历史上正是漏了那一步，才让一个跑过 ACP 的 task
+		// 被永久劫持 getTaskChatMessages / sendTaskChatMessage 两个端点。
 		const freshEntry = this.registry.ensureEntry(taskId, agentId);
 		const summary = cloneAcpSummary(freshEntry.summary);
 		this.emitSummary(summary);
 		return summary;
+	}
+
+	// 把这条 task 从 ACP 账本里彻底摘掉。**只**该在会话已经不归 ACP 管的时候调用——目前唯一的
+	// 调用方是通道切换（omp 从 ACP 切到 TUI）。与 clearTaskSession 的区别是承重的：
+	// clear 后这仍是一条 ACP 会话（重建空 entry），而切换之后它已经是一条 PTY 会话了，
+	// 账本里再留着条目就会让 chat 端点继续把它当 ACP 任务分派。
+	discardTaskSessionLedgerEntry(taskId: string): void {
+		this.userDecisionBroker.cancelPendingDecisions(taskId);
+		this.connectionRuntime.disposeTaskConnection(taskId);
+		this.latestStartRequestByTaskId.delete(taskId);
+		this.registry.deleteEntry(taskId);
 	}
 
 	applyTurnCheckpoint(taskId: string, checkpoint: RuntimeTaskTurnCheckpoint): RuntimeTaskSessionSummary | null {
@@ -510,6 +573,8 @@ export class AcpTaskSessionService {
 			agentId: connection?.agentId ?? entry.summary.agentId ?? "omp",
 			pid: connection?.pid ?? entry.summary.pid,
 			entry,
+			isReplayingPersistedConversationHistory:
+				this.connectionRuntime.isReplayingPersistedConversationHistory(taskId),
 			emitSummary: (summary) => {
 				this.emitSummary(summary);
 			},
