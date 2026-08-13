@@ -1,6 +1,10 @@
 import type { RuntimeAgentId, RuntimeAgentSessionTransport } from "./api-contract";
 
-export { isKanbanCursorAgentModelId, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "./cursor-agent-models";
+export {
+	isKanbanCursorAgentGrokModelId,
+	isKanbanCursorAgentModelId,
+	KANBAN_CURSOR_AGENT_PROBE_FAILURE_FALLBACK_MODEL_ID,
+} from "./cursor-agent-models";
 
 // Kanban 与一个 agent 通话的方式。这是「卡片详情渲染 xterm 还是会话面板」「启动走
 // terminalManager 还是进程内 service」等一系列分叉的单一真源——以前这些分叉各自硬写

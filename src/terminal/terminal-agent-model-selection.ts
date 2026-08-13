@@ -1,15 +1,15 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-import { isKanbanCursorAgentModelId, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "../core/agent-catalog";
+import {
+	isKanbanCursorAgentGrokModelId,
+	isKanbanCursorAgentModelId,
+	KANBAN_CURSOR_AGENT_PROBE_FAILURE_FALLBACK_MODEL_ID,
+} from "../core/agent-catalog";
 import type {
 	RuntimeTerminalAgentModelSelectionAgentId,
 	RuntimeTerminalAgentModelSelectionOption,
 	RuntimeTerminalAgentModelSelectionOptionsResponse,
 } from "../core/api-contract";
-
-const execFileAsync = promisify(execFile);
-const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+import { type AgentCliCapabilityProbeContract, runAgentCliCapabilityProbe } from "./agent-cli-capability-probe-runner";
+import { filterTerminalAgentModelOptionsToLatestProductLineGeneration } from "./agent-model-product-line-latest-generation-filter";
 
 function deduplicateModelOptions(
 	options: RuntimeTerminalAgentModelSelectionOption[],
@@ -200,11 +200,17 @@ export function parseClaudeHelpModelAliases(stdout: string): RuntimeTerminalAgen
 	]);
 }
 
-function parseCursorModelList(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
-	const stripped = stdout.replace(ANSI_PATTERN, "");
+// `cursor-agent --list-models` 打的是给人看的 TUI 表（带 ANSI 颜色，driver 已先剥掉）：
+//   auto - Auto (current, default)
+//   cursor-grok-4.6-high - Cursor Grok 4.6
+//   composer-2.5-fast - Composer 2.5 Fast
+// 上游没有 `--json`，两个子命令（`--list-models` / `models`）输出完全一致，所以只能按行刮。
+export function parseCursorModelList(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
 	const options: RuntimeTerminalAgentModelSelectionOption[] = [];
-	for (const line of stripped.split(/\r?\n/)) {
-		const match = line.match(/^\s*([A-Za-z0-9_.:-]+)\s+-\s+(.+?)\s*$/);
+	for (const line of stdout.split(/\r?\n/)) {
+		// id 的字符集里带上 `/`：上游若改用命名空间前缀（`xai/grok-…`），至少解析得出来、由下游谓词裁决，
+		// 而不是在这一层就整行落地——本次的 bug 正是「上游改了 id 形状，某一层默默丢掉」。
+		const match = line.match(/^\s*([A-Za-z0-9_./:-]+)\s+-\s+(.+?)\s*$/);
 		if (!match) {
 			continue;
 		}
@@ -216,10 +222,125 @@ function parseCursorModelList(stdout: string): RuntimeTerminalAgentModelSelectio
 		options.push({
 			modelId,
 			label,
-			...(label.includes("(current)") ? { isCurrent: true } : {}),
+			// 实际输出是 `(current, default)`，不是 `(current)`——旧的整串包含判断永远匹配不到，
+			// 于是「当前模型」标记从来没亮起过。
+			...(/\(current\b[^)]*\)/i.test(label) ? { isCurrent: true } : {}),
 		});
 	}
 	return deduplicateModelOptions(options);
+}
+
+// `kimi provider list --json` 是这几个 CLI 里唯一结构化的模型目录：`.models` 以 alias 为键，
+// 值里的 `displayName` 才带版本号（`kimi-code/k3` → "K3"）。
+// 注意只能用 `list --json`：同族的 `kimi provider catalog` 会**写**配置文件，绝不能进探测路径。
+export function parseKimiProviderModelCatalog(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
+	const parsed = JSON.parse(stdout) as { models?: Record<string, { displayName?: unknown }> };
+	const models = parsed.models && typeof parsed.models === "object" ? parsed.models : {};
+	return deduplicateModelOptions(
+		Object.entries(models).flatMap(([modelAlias, model]): RuntimeTerminalAgentModelSelectionOption[] => {
+			const modelId = modelAlias.trim();
+			if (!modelId) {
+				return [];
+			}
+			const displayName = typeof model?.displayName === "string" ? model.displayName.trim() : "";
+			return [{ modelId, label: displayName || modelId }];
+		}),
+	);
+}
+
+type TerminalAgentModelCatalogProbeContract = AgentCliCapabilityProbeContract<
+	RuntimeTerminalAgentModelSelectionOption[]
+>;
+
+// 每个有模型选择通道的 agent 一行契约。binary / args / timeout / maxBuffer 是纯数据，`parseStdout`
+// 是必须写代码的那一半——把两者放进同一张表，就不必为「加一个 agent」再复制一遍执行、超时与降级逻辑。
+// 表与解析器同文件，是因为表要引用解析器；执行器（driver）与产品线过滤器各自独立成文件。
+const TERMINAL_AGENT_MODEL_CATALOG_PROBE_CONTRACTS: Record<
+	RuntimeTerminalAgentModelSelectionAgentId,
+	TerminalAgentModelCatalogProbeContract
+> = {
+	claude: {
+		probeId: "claude-code-model-catalog",
+		binary: "claude",
+		args: ["--help"],
+		timeoutMs: 10_000,
+		maxBufferBytes: 512 * 1024,
+		parseStdout: parseClaudeHelpModelAliases,
+	},
+	codex: {
+		probeId: "codex-model-catalog",
+		binary: "codex",
+		args: ["debug", "models"],
+		timeoutMs: 10_000,
+		maxBufferBytes: 1024 * 1024,
+		parseStdout: parseCodexModelCatalog,
+	},
+	cursor: {
+		probeId: "cursor-agent-model-catalog",
+		binary: "cursor-agent",
+		args: ["--list-models"],
+		timeoutMs: 15_000,
+		maxBufferBytes: 1024 * 1024,
+		stripAnsiStyleEscapeSequencesFromStdout: true,
+		parseStdout: parseCursorModelList,
+	},
+	kimi: {
+		probeId: "kimi-code-model-catalog",
+		binary: "kimi",
+		args: ["provider", "list", "--json"],
+		timeoutMs: 15_000,
+		maxBufferBytes: 1024 * 1024,
+		parseStdout: parseKimiProviderModelCatalog,
+	},
+};
+
+/**
+ * 从（已收敛到最新一代的）Cursor 模型目录里挑出会话启动用的默认 model id。
+ *
+ * 取 grok 的 `-high` 档且非 `-fast`：`-fast` 是低延迟/低质量档，不该成为默认。
+ *
+ * 回退刻意分三级，而不是「精确 `-high` 找不到就取目录第一条 grok」：真实 `--list-models` 里第一条 grok
+ * 恰恰是 `cursor-grok-4.6-high-fast`（`-low` / `-medium` / `-xhigh` 全排在它后面），所以一旦精确 `-high`
+ * 档因上游改名或账号权限而缺席，「取第一条」就会静默把 fast 档钉成每一次 Cursor 会话的启动默认值——
+ * 与上面这条约束正好相反。fast 档只在整代 grok 全是 fast 时才轮得到。
+ */
+export function selectCursorLaunchDefaultModelIdFromCatalog(
+	options: readonly RuntimeTerminalAgentModelSelectionOption[],
+): string | null {
+	const grokOptions = options.filter((option) => isKanbanCursorAgentGrokModelId(option.modelId));
+	const highTierOption = grokOptions.find((option) => option.modelId.trim().toLowerCase().endsWith("-high"));
+	// 判 fast 用 includes 而非 endsWith：`[context=…,effort=…]` 参数化后缀是上游明文支持的写法，
+	// 挂上之后 `-fast` 就不在结尾了，但那依然是 fast 档。
+	const nonFastOption = grokOptions.find((option) => !option.modelId.trim().toLowerCase().includes("-fast"));
+	return highTierOption?.modelId ?? nonFastOption?.modelId ?? grokOptions[0]?.modelId ?? null;
+}
+
+async function loadLatestGenerationTerminalAgentModelOptions(
+	agentId: RuntimeTerminalAgentModelSelectionAgentId,
+): Promise<{ options: RuntimeTerminalAgentModelSelectionOption[]; warning?: string }> {
+	const outcome = await runAgentCliCapabilityProbe(TERMINAL_AGENT_MODEL_CATALOG_PROBE_CONTRACTS[agentId]);
+	if (!outcome.ok) {
+		return { options: [], warning: outcome.warning };
+	}
+	return { options: filterTerminalAgentModelOptionsToLatestProductLineGeneration(agentId, outcome.value) };
+}
+
+/**
+ * Cursor 会话启动时要传的 `--model` 值。cursor 是唯一**无条件**注入 `--model` 的 adapter，所以这个值
+ * 一旦落后于上游，每一次 Cursor 会话都会带着一个不存在的 model id 启动——上一版的 `grok-4.5-high`
+ * 正是如此。因此这里从实际模型目录动态解析，写死的常量只在探测失败时兜底。
+ */
+export async function resolveCursorLaunchDefaultModelId(): Promise<string> {
+	const { options } = await loadLatestGenerationTerminalAgentModelOptions("cursor");
+	return selectCursorLaunchDefaultModelIdFromCatalog(options) ?? KANBAN_CURSOR_AGENT_PROBE_FAILURE_FALLBACK_MODEL_ID;
+}
+
+function buildCursorDefaultModelLabel(
+	options: readonly RuntimeTerminalAgentModelSelectionOption[],
+	defaultModelId: string,
+): string {
+	const defaultOption = options.find((option) => option.modelId === defaultModelId);
+	return defaultOption ? `Default · ${defaultOption.label}` : "Default";
 }
 
 function buildFallbackResponse(
@@ -229,15 +350,12 @@ function buildFallbackResponse(
 	if (agentId === "cursor") {
 		return {
 			agentId,
-			defaultModelId: KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
-			defaultLabel: "Default · Cursor Grok 4.5 High",
+			defaultModelId: KANBAN_CURSOR_AGENT_PROBE_FAILURE_FALLBACK_MODEL_ID,
+			defaultLabel: "Default · Cursor Grok",
 			// 也走 dedupe 是为了守住「本模块产出的每个 option 都带分档」这条不变量：降级响应通常带
 			// warning 因而不会被前端缓存，但 `error.message` 为空时 warning 字段会被省略、响应看起来
 			// 「成功」并落盘，届时缺分档就会被误判成旧缓存。
-			options: deduplicateModelOptions([
-				{ modelId: "auto", label: "Auto" },
-				{ modelId: "grok-4.5-fast-high", label: "Cursor Grok 4.5 High Fast" },
-			]),
+			options: deduplicateModelOptions([{ modelId: "auto", label: "Auto" }]),
 			...(warning ? { warning } : {}),
 		};
 	}
@@ -250,50 +368,24 @@ function buildFallbackResponse(
 	};
 }
 
-async function loadCodexModelOptions(): Promise<RuntimeTerminalAgentModelSelectionOption[]> {
-	const result = await execFileAsync("codex", ["debug", "models"], { timeout: 10_000, maxBuffer: 1024 * 1024 });
-	return parseCodexModelCatalog(result.stdout);
-}
-
-async function loadClaudeModelOptions(): Promise<RuntimeTerminalAgentModelSelectionOption[]> {
-	const result = await execFileAsync("claude", ["--help"], { timeout: 10_000, maxBuffer: 512 * 1024 });
-	return parseClaudeHelpModelAliases(result.stdout);
-}
-
-async function loadCursorModelOptions(): Promise<RuntimeTerminalAgentModelSelectionOption[]> {
-	const result = await execFileAsync("cursor-agent", ["--list-models"], { timeout: 15_000, maxBuffer: 1024 * 1024 });
-	return parseCursorModelList(result.stdout);
-}
-
 export async function getTerminalAgentModelSelectionOptions(
 	agentId: RuntimeTerminalAgentModelSelectionAgentId,
 ): Promise<RuntimeTerminalAgentModelSelectionOptionsResponse> {
-	try {
-		if (agentId === "codex") {
-			return {
-				agentId,
-				defaultModelId: null,
-				defaultLabel: "Default",
-				options: await loadCodexModelOptions(),
-			};
-		}
-		if (agentId === "claude") {
-			return {
-				agentId,
-				defaultModelId: null,
-				defaultLabel: "Default",
-				options: await loadClaudeModelOptions(),
-			};
-		}
-		const options = await loadCursorModelOptions();
-		return {
-			agentId,
-			defaultModelId: KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID,
-			defaultLabel: "Default · Cursor Grok 4.5 High",
-			options,
-		};
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		return buildFallbackResponse(agentId, message);
+	const { options, warning } = await loadLatestGenerationTerminalAgentModelOptions(agentId);
+	if (warning !== undefined) {
+		return buildFallbackResponse(agentId, warning);
 	}
+	if (agentId !== "cursor") {
+		return { agentId, defaultModelId: null, defaultLabel: "Default", options };
+	}
+	const defaultModelId = selectCursorLaunchDefaultModelIdFromCatalog(options);
+	if (!defaultModelId) {
+		return buildFallbackResponse(agentId, "cursor-agent listed no grok models to use as the session default.");
+	}
+	return {
+		agentId,
+		defaultModelId,
+		defaultLabel: buildCursorDefaultModelLabel(options, defaultModelId),
+		options,
+	};
 }

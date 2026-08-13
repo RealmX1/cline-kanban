@@ -2,7 +2,7 @@ import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { isKanbanCursorAgentModelId, KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "../core/agent-catalog";
+import { isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeHookEvent,
@@ -37,6 +37,7 @@ import {
 import { stripAnsi } from "./output-utils";
 import type { SessionTransitionEvent } from "./session-state-machine";
 import { prepareTaskPromptWithImages } from "./task-image-prompt";
+import { resolveCursorLaunchDefaultModelId } from "./terminal-agent-model-selection";
 
 export interface AgentAdapterLaunchInput {
 	taskId: string;
@@ -1163,7 +1164,10 @@ const cursorAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "cursor");
-		const args = setModelCliOption(input.args, explicitModelId ?? KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID);
+		// cursor 是唯一**无条件**传 `--model` 的 adapter（claude / codex 只在有显式 override 时才传），
+		// 所以这个默认值必须跟得上上游改名：从实际模型目录解析（带 TTL 缓存，热路径零开销），
+		// 探测失败才回落写死的常量。上一版直接用常量，结果每次会话都在传一个上游早已删除的 model id。
+		const args = setModelCliOption(input.args, explicitModelId ?? (await resolveCursorLaunchDefaultModelId()));
 		const env: Record<string, string | undefined> = {};
 
 		if (!hasCliOption(args, "--workspace")) {
@@ -1886,7 +1890,10 @@ function shouldInspectKimiOutputForTransition(summary: RuntimeTaskSessionSummary
 //（`kimi -p` 是单发 print 模式，不产生持久交互会话，不能用于托管会话）。
 const kimiAdapter: AgentSessionAdapter = {
 	async prepare(input) {
-		const args = [...input.args];
+		// 仅在有显式 override 时才注入 `-m/--model`（setModelCliOption 正好清理这两个写法）；
+		// 无 override 时不传，交回 kimi config.toml 的 default_model——与 claude / codex adapter 一致。
+		const explicitModelId = resolveTerminalAgentModelOverride(input, "kimi");
+		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {
 			// 会话中途自升级会打断托管会话（tui.toml [upgrade] auto_install 默认开）；关掉它。
 			KIMI_CLI_NO_AUTO_UPDATE: "1",

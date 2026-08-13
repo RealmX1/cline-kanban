@@ -3,12 +3,20 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "../../../src/core/agent-catalog";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import {
 	KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR,
 	prepareAgentLaunch,
 } from "../../../src/terminal/agent-session-adapters";
+
+// cursorAdapter 会从模型目录动态解析启动默认值。这里换成一个**故意不存在于任何真实目录**的哨兵值，
+// 既让测试不去 spawn `cursor-agent`，又能证明 argv 里的 `--model` 确实来自探测结果而非某个写死的常量：
+// 上游发布新代次时无需改代码就会跟上。
+const CURSOR_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL = "cursor-grok-9.9-high";
+vi.mock("../../../src/terminal/terminal-agent-model-selection", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../../src/terminal/terminal-agent-model-selection")>()),
+	resolveCursorLaunchDefaultModelId: vi.fn(async () => CURSOR_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL),
+}));
 
 const originalHome = process.env.HOME;
 const originalAppData = process.env.APPDATA;
@@ -86,7 +94,7 @@ afterEach(() => {
 });
 
 describe("cursorAdapter", () => {
-	it("uses the Kanban Cursor default model instead of Cursor Agent's raw fast default", async () => {
+	it("launches with the dynamically probed Cursor default model instead of a hardcoded model id", async () => {
 		const launch = await prepareAgentLaunch({
 			taskId: "task-cursor-default-model",
 			agentId: "cursor" as RuntimeAgentId,
@@ -99,10 +107,8 @@ describe("cursorAdapter", () => {
 
 		const modelIndex = launch.args.indexOf("--model");
 		expect(modelIndex).toBeGreaterThan(-1);
-		expect(launch.args[modelIndex + 1]).toBe(KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID);
-		expect(launch.args[modelIndex + 1]).toBe("grok-4.5-high");
+		expect(launch.args[modelIndex + 1]).toBe(CURSOR_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL);
 		expect(launch.args).not.toContain("composer-2.5-fast");
-		expect(launch.args).not.toContain("grok-4.5-fast-high");
 	});
 
 	it("uses an explicit Cursor model override when present", async () => {
@@ -1515,6 +1521,56 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 		expect(kimiPlanBypass.args).toContain("--plan");
 		expect(kimiPlanBypass.args).toContain("--yolo");
+	});
+});
+
+describe("kimiAdapter model selection", () => {
+	it("passes an explicit Kimi model override through to the CLI", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kimi-explicit-model",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			terminalAgentModelOverrideSettings: { agentId: "kimi", modelId: "kimi-code/k3-256k" },
+		});
+
+		const modelIndex = launch.args.indexOf("--model");
+		expect(modelIndex).toBeGreaterThan(-1);
+		expect(launch.args[modelIndex + 1]).toBe("kimi-code/k3-256k");
+	});
+
+	it("passes no model flag at all without an override so kimi's own default_model still applies", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kimi-default-model",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			terminalAgentModelOverrideSettings: undefined,
+		});
+
+		expect(launch.args).not.toContain("--model");
+		expect(launch.args).not.toContain("-m");
+	});
+
+	it("ignores a model override that belongs to a different agent", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kimi-foreign-model-override",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			terminalAgentModelOverrideSettings: { agentId: "cursor", modelId: "cursor-grok-4.6-high" },
+		});
+
+		expect(launch.args).not.toContain("--model");
 	});
 });
 
