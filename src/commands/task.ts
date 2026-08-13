@@ -653,6 +653,10 @@ async function createTask(input: {
 				title: input.title,
 				prompt: input.prompt,
 				startInPlanMode: input.startInPlanMode ?? runtimeConfig.newTaskStartInPlanModeByDefault,
+				ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
+				// --agent-id 省略时这张卡实际会跑工作区默认 agent；固化判据要看后者，否则
+				// 「工作区默认是 omp」的新卡不落通道，之后改全局默认会反向改掉它。
+				workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
 				taskAgentPermissionMode:
 					input.taskAgentPermissionMode ??
 					resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(runtimeConfig.agentAutonomousModeEnabled),

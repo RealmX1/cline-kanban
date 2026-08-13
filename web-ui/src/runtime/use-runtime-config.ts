@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchRuntimeConfig, saveRuntimeConfig } from "@/runtime/runtime-config-query";
-import type { RuntimeAgentId, RuntimeConfigResponse, RuntimeProjectShortcut } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
+	RuntimeConfigResponse,
+	RuntimeProjectShortcut,
+} from "@/runtime/types";
 import { useTrpcQuery } from "@/runtime/use-trpc-query";
 
 export interface UseRuntimeConfigResult {
@@ -14,6 +19,7 @@ export interface UseRuntimeConfigResult {
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
 		newTaskStartInPlanModeByDefault?: boolean;
+		ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 		shortcuts?: RuntimeProjectShortcut[];
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
@@ -85,6 +91,7 @@ export function useRuntimeConfig(
 			selectedShortcutLabel?: string | null;
 			agentAutonomousModeEnabled?: boolean;
 			newTaskStartInPlanModeByDefault?: boolean;
+			ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 			shortcuts?: RuntimeProjectShortcut[];
 			readyForReviewNotificationsEnabled?: boolean;
 			notificationSoundEnabled?: boolean;

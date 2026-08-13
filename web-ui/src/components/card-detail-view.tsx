@@ -1,5 +1,6 @@
 import type { DropResult } from "@hello-pangea/dnd";
-import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { resolveAgentSessionTransportForLaunch } from "@runtime-agent-session-transport-selection";
 import {
 	AlertTriangle,
 	Files,
@@ -40,6 +41,7 @@ import {
 import { useResizeDrag } from "@/resize/use-resize-drag";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
 	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
 	RuntimeTaskChatMessage,
@@ -777,11 +779,23 @@ export function CardDetailView({
 		taskSessions[selectedTaskConversationSessionId] ?? sessionSummary ?? taskSessions[selection.card.id] ?? null;
 	const effectiveTaskConversationSessionAgentId =
 		activeTaskConversationSessionSummary?.agentId ?? effectiveTaskAgentId;
+	// 没有活会话（新卡、会话已被回收 / 停止）时，面板要按「这张卡下次启动会走哪条通道」预判，
+	// 而不是按 agentId 取 catalog 默认——omp 的 catalog 默认是 TUI，但卡上可能固化着 ACP，
+	// 只看 agentId 会给一张下次必走 ACP 的卡渲染 xterm。这里复用启动侧那份解析（卡片固化值 →
+	// 全局默认 → catalog 默认），与服务端 spawn 时的判断同源，避免两边各算一套。
+	const nextLaunchAgentSessionTransport: RuntimeAgentSessionTransport | null = effectiveTaskConversationSessionAgentId
+		? resolveAgentSessionTransportForLaunch({
+				agentId: effectiveTaskConversationSessionAgentId,
+				cardPinnedSessionTransport: selection.card.ompAgentSessionTransport ?? null,
+				globalDefaultSessionTransportForNewTasks: runtimeConfig?.ompAgentSessionTransportForNewTasks ?? null,
+			}).effectiveSessionTransport
+		: null;
 	// 分流依据是「会话传输形态」而不是「是不是 Cline」：Cline SDK 与 ACP（omp）都由 Kanban
 	// 直接持有结构化消息，渲染成会话面板；只有 PTY 终端 agent 才渲染 xterm。
-	const showClineAgentChatPanel = isRuntimeAgentSessionRenderedAsConversationPanel(
-		effectiveTaskConversationSessionAgentId ?? null,
-	);
+	// 有活会话时读会话自己盖的通道章（omp 可在 TUI ⇄ ACP 之间切换，agentId 判不出来）。
+	const showClineAgentChatPanel = activeTaskConversationSessionSummary
+		? isRuntimeAgentSessionSummaryRenderedAsConversationPanel(activeTaskConversationSessionSummary)
+		: nextLaunchAgentSessionTransport !== null && nextLaunchAgentSessionTransport !== "pty_terminal";
 	const agentPanelStyle: CSSProperties = showClineAgentChatPanel
 		? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
 		: {

@@ -1,4 +1,5 @@
-import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
 import "@xterm/xterm/css/xterm.css";
 
 import { isSessionInActiveTurn, resolveSessionFacets } from "@runtime-session-activity";
@@ -389,6 +390,7 @@ function AgentTerminalReviewActions({
 
 function AgentTerminalPanelLayout({
 	taskId,
+	workspaceId,
 	summary,
 	onSummary: _onSummary,
 	onCommit,
@@ -450,7 +452,7 @@ function AgentTerminalPanelLayout({
 		showRefreshButton &&
 		summary !== null &&
 		summary.agentId !== null &&
-		!isRuntimeAgentSessionRenderedAsConversationPanel(summary.agentId);
+		!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary);
 	const showCompactHeader = !showSessionToolbar;
 	const isMobile = useIsMobile();
 	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
@@ -532,6 +534,14 @@ function AgentTerminalPanelLayout({
 									/>
 								</Tooltip>
 							) : null}
+							<AgentSessionTransportSwitchButton
+								workspaceId={workspaceId}
+								taskId={taskId}
+								agentId={summary?.agentId ?? null}
+								currentSessionTransport="pty_terminal"
+								iconSize={14}
+								variant="default"
+							/>
 							<Button variant="default" size="sm" onClick={clearTerminal}>
 								Clear
 							</Button>

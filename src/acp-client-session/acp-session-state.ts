@@ -61,6 +61,9 @@ export function createDefaultAcpSummary(taskId: string, agentId: RuntimeAgentId)
 		state: "idle",
 		mode: null,
 		agentId,
+		// 通道盖章：这条会话是 ACP 的。omp 的 agentId 在 TUI 与 ACP 两条通道上是同一个，
+		// 故一切「这条会话长什么样」的判断都必须读它，不能再从 agentId 派生。
+		sessionTransport: "acp_stdio_subprocess",
 		workspacePath: null,
 		pid: null,
 		startedAt: null,
@@ -204,7 +207,10 @@ export function appendAcpStreamedChunk(
 	}
 
 	const created = createAcpMessage(taskId, input.role, input.chunk, {
-		streamType: input.role === "reasoning" ? "reasoning" : null,
+		// reasoning 用两个取值区分「仍在流」与「已收束」：面板据此决定要不要自动展开思考块，
+		// 并在流结束时自动收起（对位 Cline 侧的 hookEventName reasoning_delta）。
+		// 收束由 finishAcpStreamedReasoningMessages 在回合边界统一改写，见那里的注释。
+		streamType: input.role === "reasoning" ? ACP_REASONING_STREAM_TYPE_WHILE_STREAMING : null,
 		source: "acp",
 	});
 	entry.messages.push(created);
@@ -220,6 +226,36 @@ export function appendAcpStreamedChunk(
 
 // 回合边界：清掉流式分组，使下一回合从新消息开始。工具映射不清——tool_call_update
 // 可能在回合结束后才到（例如 release 之后仍在渲染的终端输出）。
+// reasoning 消息的两种流式阶段。ACP 协议本身不区分「这段思考还在写」与「写完了」——
+// agent_thought_chunk 只管追加。唯一能观测到收束的时刻是回合边界（session/prompt 的 stopReason），
+// 于是在那里把仍挂在分组表里的 reasoning 消息统一改写成已收束。
+export const ACP_REASONING_STREAM_TYPE_WHILE_STREAMING = "reasoning_streaming";
+export const ACP_REASONING_STREAM_TYPE_AFTER_STREAM_COMPLETED = "reasoning";
+
+// 把本回合仍标记为「在流」的 reasoning 消息改写成已收束，返回被改写的消息（调用方负责发出去）。
+// 必须在 clearAcpStreamingGrouping **之前**调用：分组表正是「本回合有哪些 reasoning 消息」的唯一记录。
+export function finishAcpStreamedReasoningMessages(entry: AcpTaskSessionEntry): AcpTaskMessage[] {
+	const reasoningMessageIds = new Set<string>(entry.reasoningMessageIdByAcpMessageId.values());
+	if (entry.fallbackReasoningMessageId) {
+		reasoningMessageIds.add(entry.fallbackReasoningMessageId);
+	}
+	const finishedMessages: AcpTaskMessage[] = [];
+	for (const messageId of reasoningMessageIds) {
+		const updated = replaceAcpMessage(entry, messageId, (message) =>
+			message.meta?.streamType === ACP_REASONING_STREAM_TYPE_WHILE_STREAMING
+				? {
+						...message,
+						meta: { ...message.meta, streamType: ACP_REASONING_STREAM_TYPE_AFTER_STREAM_COMPLETED },
+					}
+				: message,
+		);
+		if (updated && updated.meta?.streamType === ACP_REASONING_STREAM_TYPE_AFTER_STREAM_COMPLETED) {
+			finishedMessages.push(updated);
+		}
+	}
+	return finishedMessages;
+}
+
 export function clearAcpStreamingGrouping(entry: AcpTaskSessionEntry): void {
 	entry.assistantMessageIdByAcpMessageId.clear();
 	entry.reasoningMessageIdByAcpMessageId.clear();

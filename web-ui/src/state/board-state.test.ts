@@ -707,6 +707,55 @@ describe("board dependency state", () => {
 		expect(normalizedTask?.taskAgentSessionInitialization).toBeUndefined();
 	});
 
+	// 水合出来的这份 board 会被原样回写持久化，所以 normalizeCard 丢字段等于把服务端卡片上
+	// 已固化的通道抹平；详情视图在无活会话时也就再没有东西可据以预判下次启动走哪条通道。
+	it("keeps the pinned omp session transport on persisted cards", () => {
+		const rawBoard = {
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "pinned-acp-task",
+							prompt: "Task pinned to ACP",
+							startInPlanMode: false,
+							baseRef: "main",
+							agentId: "omp",
+							ompAgentSessionTransport: "acp_stdio_subprocess",
+						},
+						{
+							id: "legacy-task",
+							prompt: "Task without a pinned transport",
+							startInPlanMode: false,
+							baseRef: "main",
+							agentId: "omp",
+						},
+						{
+							id: "garbage-transport-task",
+							prompt: "Task with an unreadable pinned transport",
+							startInPlanMode: false,
+							baseRef: "main",
+							agentId: "omp",
+							ompAgentSessionTransport: "not-a-transport",
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "validation", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalizedCards = normalizeBoardData(rawBoard)?.columns[0]?.cards;
+
+		expect(normalizedCards?.[0]?.ompAgentSessionTransport).toBe("acp_stdio_subprocess");
+		// 老卡片留 undefined，由启动处回落到当时的全局默认——这里不替它猜。
+		expect(normalizedCards?.[1]?.ompAgentSessionTransport).toBeUndefined();
+		expect(normalizedCards?.[2]?.ompAgentSessionTransport).toBeUndefined();
+	});
+
 	it("keeps cards in the validation column when normalizing", () => {
 		const rawBoard = {
 			columns: [

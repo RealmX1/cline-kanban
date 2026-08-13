@@ -3,6 +3,7 @@
 // 其余 ACP 代码保持通用。
 import { getRuntimeAgentCatalogEntry } from "../core/agent-catalog";
 import type { RuntimeAgentId, RuntimeTaskAgentPermissionMode } from "../core/api-contract";
+import { resolveOmpApprovalModeFlagValue } from "../core/omp-approval-mode-flag";
 
 export interface AcpAgentSpawnCommand {
 	binary: string;
@@ -26,7 +27,9 @@ const ompAcpLaunchDefinition: AcpAgentLaunchDefinition = {
 		const catalogEntry = getRuntimeAgentCatalogEntry("omp");
 		return {
 			binary: catalogEntry?.binary ?? "omp",
-			args: [...(catalogEntry?.baseArgs ?? ["acp"]), "--approval-mode", resolveOmpApprovalMode(permissionMode)],
+			// `acp` 子命令写在这里而不是 catalog 的 baseArgs：omp 还有一条 TUI 通道，共享 baseArgs
+			// 会让 PTY 路径也去起 ACP server。
+			args: ["acp", "--approval-mode", resolveOmpApprovalModeFlagValue(permissionMode)],
 			env: {
 				// setup 向导本就只在 TTY 下触发（ACP 走管道 stdio，不会命中），这里再显式关一层，
 				// 免得将来换成带 TTY 的 spawn 方式时被全屏向导卡死握手。
@@ -37,19 +40,6 @@ const ompAcpLaunchDefinition: AcpAgentLaunchDefinition = {
 		};
 	},
 };
-
-// omp 的 tools.approvalMode 三档正好与 Kanban 的权限轴一一对应。注意必须**显式**传：
-// omp 的 schema 默认虽是 yolo，但「默认值」不算 isConfigured，ACP 权限门仍会保留。
-function resolveOmpApprovalMode(permissionMode: RuntimeTaskAgentPermissionMode): string {
-	switch (permissionMode) {
-		case "bypass_all_permission_prompts":
-			return "yolo";
-		case "auto_approve_file_edits_only":
-			return "write";
-		case "ask_for_every_tool_use":
-			return "always-ask";
-	}
-}
 
 const ACP_AGENT_LAUNCH_DEFINITIONS: readonly AcpAgentLaunchDefinition[] = [ompAcpLaunchDefinition];
 

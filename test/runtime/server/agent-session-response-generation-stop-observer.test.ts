@@ -250,11 +250,32 @@ describe("deriveAgentSessionRetentionDeadlineTransition（边沿检测）", () =
 			["omp", "acp_stdio_subprocess"],
 		] as const)("%s → %s", (agentId, expectedTransport) => {
 			// Cline SDK 在进程内跑、pid 恒 null，但 liveness=live 时同样是可回收的运行时资源。
-			const previous = makeSummary({ agentId: agentId as RuntimeAgentId, pid: null });
-			const next = awaitingUserTurnSummary({ agentId: agentId as RuntimeAgentId, pid: null });
+			// 通道章由三条通道各自在建会话时盖上，快照必须读它而不是从 agentId 派生。
+			const previous = makeSummary({
+				agentId: agentId as RuntimeAgentId,
+				pid: null,
+				sessionTransport: expectedTransport,
+			});
+			const next = awaitingUserTurnSummary({
+				agentId: agentId as RuntimeAgentId,
+				pid: null,
+				sessionTransport: expectedTransport,
+			});
 			const transition = deriveAgentSessionRetentionDeadlineTransition(previous, next, options);
 			expect(transition.kind === "start_retention_deadline" && transition.input.sessionTransport).toBe(
 				expectedTransport,
+			);
+		});
+
+		// 通道切换后的回归：同一个 agentId（omp）在两条通道上都跑得起来，快照必须跟着**会话**走。
+		// 按 agentId 派生的话，一条切到 TUI 的 omp 会话会被记成 ACP，回收就会去杀一个不存在的子进程、
+		// 放过还活着的 PTY。
+		it("omp 切到 TUI 后，回收快照记的是 PTY 而不是 ACP", () => {
+			const previous = makeSummary({ agentId: "omp", pid: 4242, sessionTransport: "pty_terminal" });
+			const next = awaitingUserTurnSummary({ agentId: "omp", pid: 4242, sessionTransport: "pty_terminal" });
+			const transition = deriveAgentSessionRetentionDeadlineTransition(previous, next, options);
+			expect(transition.kind === "start_retention_deadline" && transition.input.sessionTransport).toBe(
+				"pty_terminal",
 			);
 		});
 	});

@@ -124,6 +124,7 @@ function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): 
 		projectConfigPath: "/tmp/project-config.json",
 		selectedAgentId: "claude",
 		selectedShortcutLabel: null,
+		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		agentAutonomousModeEnabled: true,
 		newTaskStartInPlanModeByDefault: true,
 		readyForReviewNotificationsEnabled: true,

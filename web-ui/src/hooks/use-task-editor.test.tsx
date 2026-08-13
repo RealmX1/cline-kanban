@@ -170,6 +170,7 @@ function HookHarness({
 		defaultCreateTaskBranchRef,
 		currentProjectId,
 		selectedAgentId,
+		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		newTaskStartInPlanModeByDefault,
 		newTaskAgentPermissionModeByDefault,
 		isNewTaskStartInPlanModeDefaultLoaded,
