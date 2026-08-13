@@ -42,6 +42,18 @@ These guards apply to **short-lived subcommands** (`kanban task …`, `kanban ho
 
 If either is missing, ingest fails immediately with a clear stderr message and a non-zero exit code.
 
+## Agent terminal rendering
+
+Read from the runtime process environment when a PTY agent session is launched.
+
+| Variable | Default | Applies to | Description |
+|----------|---------|------------|-------------|
+| `KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE` | `fullscreen` | Claude Code sessions | Which Claude Code TUI renderer Kanban starts sessions on. `inline` falls back to the classic main-screen renderer (`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`); any other value, including unset, uses the flicker-free fullscreen alt-screen renderer (`CLAUDE_CODE_NO_FLICKER=1`). |
+
+Kanban writes the corresponding `CLAUDE_CODE_*` variable itself and blanks out the other one, so an inherited value — which is what happens when Kanban is itself launched from inside a Claude Code session — never decides the renderer. Set this variable on the Kanban runtime process, not on the agent.
+
+Under `fullscreen`, Claude Code keeps its history inside the alternate screen buffer like Codex does, so the terminal panel's scrollback reading view has nothing to show for those sessions and hides its entry point. Switch to `inline` if you need session history in terminal scrollback.
+
 ## Related documentation
 
 - [`../DEVELOPMENT.md`](../DEVELOPMENT.md) — local dev, dogfood, and hook event overview.

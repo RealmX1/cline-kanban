@@ -270,6 +270,33 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		expect(write).not.toHaveBeenCalled();
 	});
 
+	// 通道切换会停掉当前 PTY 会话再用另一条通道重开。停会话的那一刻，任何在途的程序化投递
+	// 都必须当场落定——否则它的等待者（RVF / `kanban task message --wait-for-terminal-status`）
+	// 会一直挂到下次 runtime 启动清扫，违反投递账本「唯一非终态必然有界收敛」的不变量。
+	// 这条走的是 stopTaskSession 这条通用出口，故对「用户手动 Stop」「回收」「通道切换」一体生效。
+	it("停会话时把在途程序化投递当场落定为 delivery_failed{session_ended_before_delivery}", async () => {
+		spawnManagerWithSession(2050);
+		const manager = new TerminalSessionManager();
+		await startSession(manager, "task-deliver-stopped-receipt");
+
+		const outcomes: { status: string; reason: string | null }[] = [];
+		const onDeliveryOutcome = (outcome: { status: string; reason: string | null }): void => {
+			outcomes.push(outcome);
+		};
+		manager.submitTaskChatInputWhenReady("task-deliver-stopped-receipt", "继续 RVF", {
+			idempotencyKey: "key-stopped-receipt",
+			onDeliveryOutcome,
+		});
+		expect(outcomes).toEqual([]);
+
+		manager.stopTaskSession("task-deliver-stopped-receipt");
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "session_ended_before_delivery" }]);
+
+		// 落定是一次性的：后续推进时间不会再补发第二条结论。
+		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
+		expect(outcomes).toHaveLength(1);
+	});
+
 	it("Codex：deadline 兜底写入后置位 awaitingCodexPromptAfterEnter（末尾 CR 即回车）", async () => {
 		const getSession = spawnManagerWithSession(2005);
 		const manager = new TerminalSessionManager();

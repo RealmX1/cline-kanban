@@ -161,5 +161,5 @@ function describeEmptyTranscriptReason(input: { isTerminalAttached: boolean; has
 	if (!input.isTerminalAttached) {
 		return "The live terminal behind this reading view has not connected yet, so there is no scrollback to read. Use the reader toggle in the panel header to go back to the live terminal, then return here once the session has produced output.";
 	}
-	return "Nothing to read here yet. Agents that draw a full-screen interface (such as Codex) keep their history inside that interface rather than in terminal scrollback, so there is nothing for this reading view to show — use the reader toggle in the panel header to go back to the live terminal and scroll there instead.";
+	return "Nothing to read here yet. Agents that draw a full-screen interface (such as Claude Code or Codex) keep their history inside that interface rather than in terminal scrollback, so there is nothing for this reading view to show — use the reader toggle in the panel header to go back to the live terminal and scroll there instead.";
 }

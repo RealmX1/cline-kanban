@@ -14,7 +14,7 @@ import {
 	createInMemoryClineTaskSessionService,
 } from "../cline-sdk/cline-task-session-service";
 import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
-import { isRuntimeAgentSessionDrivenByAcpProtocol } from "../core/agent-catalog";
+import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
@@ -444,12 +444,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						}
 						return lastAssistantMessageContent;
 					}
-					// ACP agent（omp 等）：既没有 hook finalMessage，也不在 Cline 账本里；只认 cline 会让
+					// ACP 会话（omp 切到 ACP 时）：既没有 hook finalMessage，也不在 Cline 账本里；只认 cline 会让
 					// 预览对它恒为 null。ACP service 的消息全在内存，读它同样廉价，不会 boot 任何 SDK host。
+					// 判据只能是「ACP service 里有这条会话的活会话摘要且它盖的是 ACP 章」——绝不能拿卡片
+					// agentId 兜底：omp 的两条通道共用 agentId="omp"，卡片判据会把一条 TUI 会话误判成 ACP，
+					// 于是预览恒读 ACP 那份空消息表。
 					const acpTaskSessionService = await getScopedAcpTaskSessionService(scope);
-					const isAcpTask =
-						isRuntimeAgentSessionDrivenByAcpProtocol(acpTaskSessionService.getSummary(taskId)?.agentId ?? null) ||
-						isRuntimeAgentSessionDrivenByAcpProtocol(card?.agentId ?? null);
+					const isAcpTask = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
+						acpTaskSessionService.getSummary(taskId),
+					);
 					if (isAcpTask) {
 						let lastAcpAssistantMessageContent: string | null = null;
 						for (const message of acpTaskSessionService.listMessages(taskId)) {

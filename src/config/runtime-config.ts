@@ -5,7 +5,13 @@ import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
-import { type RuntimeAgentId, type RuntimeProjectShortcut, runtimeAgentIdSchema } from "../core/api-contract";
+import {
+	type RuntimeAgentId,
+	type RuntimeAgentSessionTransport,
+	type RuntimeProjectShortcut,
+	runtimeAgentIdSchema,
+	runtimeAgentSessionTransportSchema,
+} from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import { detectInstalledCommands } from "../terminal/agent-registry";
 import { areRuntimeProjectShortcutsEqual } from "./shortcut-utils";
@@ -15,6 +21,7 @@ interface RuntimeGlobalConfigFileShape {
 	selectedShortcutLabel?: string;
 	agentAutonomousModeEnabled?: boolean;
 	newTaskStartInPlanModeByDefault?: boolean;
+	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
@@ -37,6 +44,7 @@ export interface RuntimeConfigState {
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
 	newTaskStartInPlanModeByDefault: boolean;
+	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
@@ -53,6 +61,7 @@ export interface RuntimeConfigUpdateInput {
 	selectedShortcutLabel?: string | null;
 	agentAutonomousModeEnabled?: boolean;
 	newTaskStartInPlanModeByDefault?: boolean;
+	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
@@ -72,6 +81,11 @@ const DEFAULT_AGENT_ID: RuntimeAgentId = "cline";
 const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = ["claude", "codex", "cursor", "droid", "kiro"];
 const DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED = true;
 const DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT = true;
+// omp 新任务默认走 TUI（PTY）而不是 ACP：ACP 通道尚有一批未收口的缺口（历史纯内存、无 stall 兜底、
+// mcpServers 恒空、provider 错误伪装成正常回答），TUI 与 Claude Code / Codex / Kimi 同构、可直接用。
+// 这只是**新任务默认值**——建卡时固化到卡上，改它不追溯已有卡片（见 runtimeBoardCardSchema 的
+// ompAgentSessionTransport）。活会话当刻在用哪条通道读 summary.sessionTransport，与本值无关。
+const DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS: RuntimeAgentSessionTransport = "pty_terminal";
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
 const DEFAULT_NOTIFICATION_SOUND_ENABLED = true;
 const DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED = true;
@@ -144,6 +158,16 @@ function normalizeAgentId(agentId: RuntimeAgentId | string | null | undefined): 
 		return parsed.data;
 	}
 	return DEFAULT_AGENT_ID;
+}
+
+// 以 runtimeAgentSessionTransportSchema 为唯一真源做校验，与 normalizeAgentId 同理：
+// 手写字面量比较在新增 transport 取值时不会编译报错，漏改会让持久化的选择静默回落。
+function normalizeAgentSessionTransport(
+	transport: RuntimeAgentSessionTransport | string | null | undefined,
+	fallback: RuntimeAgentSessionTransport,
+): RuntimeAgentSessionTransport {
+	const parsed = runtimeAgentSessionTransportSchema.safeParse(transport);
+	return parsed.success ? parsed.data : fallback;
 }
 
 function pickBestInstalledAgentId(): RuntimeAgentId | null {
@@ -297,6 +321,10 @@ function toRuntimeConfigState({
 			globalConfig?.newTaskStartInPlanModeByDefault,
 			DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT,
 		),
+		ompAgentSessionTransportForNewTasks: normalizeAgentSessionTransport(
+			globalConfig?.ompAgentSessionTransportForNewTasks,
+			DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS,
+		),
 		readyForReviewNotificationsEnabled: normalizeBoolean(
 			globalConfig?.readyForReviewNotificationsEnabled,
 			DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED,
@@ -341,6 +369,7 @@ async function writeRuntimeGlobalConfigFile(
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
 		newTaskStartInPlanModeByDefault?: boolean;
+		ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
@@ -367,6 +396,13 @@ async function writeRuntimeGlobalConfigFile(
 		config.newTaskStartInPlanModeByDefault === undefined
 			? DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT
 			: normalizeBoolean(config.newTaskStartInPlanModeByDefault, DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT);
+	const ompAgentSessionTransportForNewTasks =
+		config.ompAgentSessionTransportForNewTasks === undefined
+			? DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS
+			: normalizeAgentSessionTransport(
+					config.ompAgentSessionTransportForNewTasks,
+					DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS,
+				);
 	const readyForReviewNotificationsEnabled =
 		config.readyForReviewNotificationsEnabled === undefined
 			? DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED
@@ -424,6 +460,12 @@ async function writeRuntimeGlobalConfigFile(
 		newTaskStartInPlanModeByDefault !== DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT
 	) {
 		payload.newTaskStartInPlanModeByDefault = newTaskStartInPlanModeByDefault;
+	}
+	if (
+		hasOwnKey(existing, "ompAgentSessionTransportForNewTasks") ||
+		ompAgentSessionTransportForNewTasks !== DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS
+	) {
+		payload.ompAgentSessionTransportForNewTasks = ompAgentSessionTransportForNewTasks;
 	}
 	if (
 		hasOwnKey(existing, "readyForReviewNotificationsEnabled") ||
@@ -534,6 +576,7 @@ function createRuntimeConfigStateFromValues(input: {
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
 	newTaskStartInPlanModeByDefault: boolean;
+	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
@@ -554,6 +597,10 @@ function createRuntimeConfigStateFromValues(input: {
 		newTaskStartInPlanModeByDefault: normalizeBoolean(
 			input.newTaskStartInPlanModeByDefault,
 			DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT,
+		),
+		ompAgentSessionTransportForNewTasks: normalizeAgentSessionTransport(
+			input.ompAgentSessionTransportForNewTasks,
+			DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS,
 		),
 		readyForReviewNotificationsEnabled: normalizeBoolean(
 			input.readyForReviewNotificationsEnabled,
@@ -584,6 +631,7 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		selectedShortcutLabel: current.selectedShortcutLabel,
 		agentAutonomousModeEnabled: current.agentAutonomousModeEnabled,
 		newTaskStartInPlanModeByDefault: current.newTaskStartInPlanModeByDefault,
+		ompAgentSessionTransportForNewTasks: current.ompAgentSessionTransportForNewTasks,
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: current.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: current.autoContinueOnConnectionDropEnabled,
@@ -623,6 +671,7 @@ export async function saveRuntimeConfig(
 		selectedShortcutLabel: string | null;
 		agentAutonomousModeEnabled: boolean;
 		newTaskStartInPlanModeByDefault: boolean;
+		ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 		readyForReviewNotificationsEnabled: boolean;
 		notificationSoundEnabled: boolean;
 		autoContinueOnConnectionDropEnabled: boolean;
@@ -639,6 +688,7 @@ export async function saveRuntimeConfig(
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks: config.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
@@ -654,6 +704,7 @@ export async function saveRuntimeConfig(
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks: config.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
@@ -679,6 +730,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault:
 				updates.newTaskStartInPlanModeByDefault ?? current.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks:
+				updates.ompAgentSessionTransportForNewTasks ?? current.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled:
 				updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
@@ -696,6 +749,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 			nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
 			nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
+			nextConfig.ompAgentSessionTransportForNewTasks !== current.ompAgentSessionTransportForNewTasks ||
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 			nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 			nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
@@ -713,6 +767,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
@@ -730,6 +785,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
@@ -763,6 +819,8 @@ export async function updateGlobalRuntimeConfig(
 				agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
 				newTaskStartInPlanModeByDefault:
 					updates.newTaskStartInPlanModeByDefault ?? current.newTaskStartInPlanModeByDefault,
+				ompAgentSessionTransportForNewTasks:
+					updates.ompAgentSessionTransportForNewTasks ?? current.ompAgentSessionTransportForNewTasks,
 				readyForReviewNotificationsEnabled:
 					updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
@@ -780,6 +838,7 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 				nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
 				nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
+				nextConfig.ompAgentSessionTransportForNewTasks !== current.ompAgentSessionTransportForNewTasks ||
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 				nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 				nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
@@ -797,6 +856,7 @@ export async function updateGlobalRuntimeConfig(
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
+				ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
@@ -812,6 +872,7 @@ export async function updateGlobalRuntimeConfig(
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
+				ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,

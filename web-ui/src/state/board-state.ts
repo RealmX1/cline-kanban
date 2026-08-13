@@ -5,6 +5,7 @@ import * as runtimeTaskState from "@runtime-task-state";
 import { createInitialBoardData } from "@/data/board-data";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
@@ -27,6 +28,8 @@ import {
 	type TaskImage,
 } from "@/types";
 import {
+	runtimeAgentIdSchema,
+	runtimeAgentSessionTransportSchema,
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
 } from "../../../src/core/api-contract";
@@ -41,6 +44,13 @@ export interface TaskDraft {
 	images?: TaskImage[];
 	taskCommentEntries?: TaskCommentEntry[];
 	agentId?: RuntimeAgentId;
+	// 建卡那一刻的工作区默认 agent（runtimeProjectConfig 的 selectedAgentId）。上面的 agentId 是
+	// override，用户没在建卡对话框里挑 agent 时它是空的——但这张卡照样会跑工作区默认 agent，
+	// 而「要不要固化会话通道」正是看后者。漏传它就等于「工作区默认是 omp」建出来的卡不落固化值。
+	workspaceDefaultAgentIdForNewTasks?: RuntimeAgentId;
+	// 建卡那一刻的全局「omp 新任务默认通道」。由调用方从 runtimeProjectConfig 取，
+	// 域函数决定要不要固化到卡上（只对可切换 agent 落值）。
+	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
@@ -247,6 +257,8 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		taskCommentEntries?: unknown;
 		baseRef?: unknown;
 		agentId?: unknown;
+		ompAgentSessionTransport?: unknown;
+		mostRecentlyLaunchedAgentSessionAgentId?: unknown;
 		clineSettings?: unknown;
 		terminalAgentModelOverrideSettings?: unknown;
 		taskAgentSessionInitialization?: unknown;
@@ -308,6 +320,24 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 	const taskAgentPermissionMode = parsedTaskAgentPermissionMode.success
 		? parsedTaskAgentPermissionMode.data
 		: undefined;
+	// normalizeCard 是白名单式拷贝，而水合出来的这份 board 会被原样回写持久化：漏掉这个字段
+	// 不只是详情视图预判不出下次启动的通道，还会在下一次保存时把服务端卡片上已固化的值抹平。
+	// 老卡片没有该字段 ⇒ 留 undefined，由启动处回落到当时的全局默认（见解析优先级注释）。
+	const parsedOmpAgentSessionTransport = runtimeAgentSessionTransportSchema.safeParse(card.ompAgentSessionTransport);
+	const ompAgentSessionTransport = parsedOmpAgentSessionTransport.success
+		? parsedOmpAgentSessionTransport.data
+		: undefined;
+
+	// 纯 runtime 观测值：服务端在会话启动成功时写进卡片，前端既不生成也不编辑，只负责原样带过归一化。
+	// 这里不保留就等于剥掉——归一化后的 board 会被 useWorkspacePersistence 原样 saveState 回盘，
+	// 而服务端 saveWorkspaceState 是整块覆盖 board.json（不按字段与盘上旧卡片合并），
+	// 于是硬中断恢复的主 durable 真相源被抹掉，只剩 reclamation 记录 / 项目默认档这两个更弱的源。
+	const parsedMostRecentlyLaunchedAgentSessionAgentId = runtimeAgentIdSchema.safeParse(
+		card.mostRecentlyLaunchedAgentSessionAgentId,
+	);
+	const mostRecentlyLaunchedAgentSessionAgentId = parsedMostRecentlyLaunchedAgentSessionAgentId.success
+		? parsedMostRecentlyLaunchedAgentSessionAgentId.data
+		: undefined;
 
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
@@ -323,6 +353,8 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		taskCommentEntries: normalizeTaskCommentEntries(card.taskCommentEntries),
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
+		...(ompAgentSessionTransport !== undefined ? { ompAgentSessionTransport } : {}),
+		...(mostRecentlyLaunchedAgentSessionAgentId !== undefined ? { mostRecentlyLaunchedAgentSessionAgentId } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
 		...(terminalAgentModelOverrideSettings !== undefined ? { terminalAgentModelOverrideSettings } : {}),
 		...(taskAgentSessionInitialization !== undefined ? { taskAgentSessionInitialization } : {}),
@@ -477,6 +509,8 @@ export function addTaskToColumnWithResult(
 			images: draft.images,
 			taskCommentEntries: draft.taskCommentEntries,
 			agentId: draft.agentId,
+			workspaceDefaultAgentIdForNewTasks: draft.workspaceDefaultAgentIdForNewTasks,
+			ompAgentSessionTransportForNewTasks: draft.ompAgentSessionTransportForNewTasks,
 			clineSettings: draft.clineSettings,
 			terminalAgentModelOverrideSettings: draft.terminalAgentModelOverrideSettings,
 			taskAgentSessionInitialization: draft.taskAgentSessionInitialization,

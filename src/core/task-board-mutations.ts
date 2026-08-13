@@ -1,5 +1,7 @@
+import { resolveAgentSessionTransportPinnedAtTaskCreation } from "./agent-session-transport-selection";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
@@ -28,6 +30,16 @@ export interface RuntimeCreateTaskInput {
 	images?: RuntimeTaskImage[];
 	taskCommentEntries?: RuntimeTaskCommentEntry[];
 	agentId?: RuntimeAgentId;
+	// 建卡那一刻的工作区默认 agent（runtime config 的 selectedAgentId）。上面的 agentId 是
+	// **override**，用户不在建卡对话框里挑 agent 时它就是空的、这张卡跑的是工作区默认 agent。
+	// 「要不要固化会话通道」看的是后者，所以两个值都得下沉到域层；只传 agentId 会让
+	// 「工作区默认是 omp」建出来的卡漏掉固化值。仅用于固化判据，不写回卡片的 agentId——
+	// 不选 agent 的卡片本来就跟随工作区默认 agent，那份语义不变。
+	workspaceDefaultAgentIdForNewTasks?: RuntimeAgentId;
+	// 建卡时把「全局新任务默认通道」固化到卡上（只对可切换 agent 有意义，见
+	// resolveAgentSessionTransportPinnedAtTaskCreation）。调用方传的是全局默认值本身，
+	// 由域函数决定要不要落到卡上——省得每个建卡入口各判一次「这个 agent 能不能切」。
+	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
@@ -47,6 +59,9 @@ export interface RuntimeUpdateTaskInput {
 	images?: RuntimeTaskImage[];
 	taskCommentEntries?: RuntimeTaskCommentEntry[] | null;
 	agentId?: RuntimeAgentId | null;
+	// 三态：undefined = 保留卡片原值，null = 清除固化值（回落到全局默认），具体值 = 改成该通道。
+	// 通道切换 procedure 用它把新通道钉到卡上，使「下次启动」（含自动续跑、从垃圾桶拖回）也走新通道。
+	ompAgentSessionTransport?: RuntimeAgentSessionTransport | null;
 	clineSettings?: RuntimeTaskClineSettings | null;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings | null;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization | null;
@@ -365,6 +380,12 @@ export function addTaskToColumn(
 	}
 	const parentSessionId = input.parentSessionId?.trim();
 	const prepFilePath = input.prepFilePath?.trim();
+	// 建卡快照：与 startInPlanMode / taskAgentPermissionMode 同一范式——固化「此刻」的全局默认，
+	// 之后改全局默认不追溯本卡。调用方没传全局默认时（老调用点 / 测试）落到 catalog 默认。
+	const ompAgentSessionTransport = resolveAgentSessionTransportPinnedAtTaskCreation({
+		agentIdTheNewTaskWillRunWith: input.agentId ?? input.workspaceDefaultAgentIdForNewTasks,
+		globalDefaultSessionTransportForNewTasks: input.ompAgentSessionTransportForNewTasks,
+	});
 	const task: RuntimeBoardCard = {
 		id: explicitTaskId || createUniqueTaskId(existingIds, randomUuid),
 		title: resolveTaskTitle(input.title, prompt),
@@ -376,6 +397,7 @@ export function addTaskToColumn(
 		images: cloneTaskImages(input.images),
 		taskCommentEntries: cloneTaskCommentEntries(input.taskCommentEntries),
 		...(input.agentId ? { agentId: input.agentId } : {}),
+		...(ompAgentSessionTransport !== undefined ? { ompAgentSessionTransport } : {}),
 		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
 		...(input.terminalAgentModelOverrideSettings !== undefined
 			? {
@@ -754,6 +776,12 @@ export function updateTask(
 							? undefined
 							: cloneTaskCommentEntries(input.taskCommentEntries),
 				agentId: input.agentId === undefined ? card.agentId : (input.agentId ?? undefined),
+				// 与 taskAgentPermissionMode 同一三态语义：undefined 原样保留（**含「字段缺失」本身**，
+				// 那是「回落到全局默认」的表达），null 显式清除固化值，其余按传入值钉住。
+				ompAgentSessionTransport:
+					input.ompAgentSessionTransport === undefined
+						? card.ompAgentSessionTransport
+						: (input.ompAgentSessionTransport ?? undefined),
 				clineSettings:
 					input.clineSettings === undefined
 						? cloneTaskClineSettings(card.clineSettings)
@@ -795,4 +823,50 @@ export function updateTask(
 		task: updatedTask,
 		updated: true,
 	};
+}
+
+export interface RuntimeApplyMostRecentlyLaunchedAgentSessionAgentIdResult {
+	board: RuntimeBoardData;
+	/** 卡片确实被改写时才为 true；卡片不存在或该字段值本就相同时为 false（调用方据此跳过落盘）。 */
+	updated: boolean;
+}
+
+// 把「这张卡最近一次真正启动成功的会话用的是哪个 agent」记到卡片上。
+//
+// 刻意不复用 updateTask：那个入口是**用户编辑意图**的载体，要求 prompt / baseRef 非空，且
+// title / startInPlanMode / autoReview* 不是三态字段——漏传即复位（见 runtime-api.ts 里
+// persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard 的同款警告）。为写一个
+// runtime 观测值而去回填七个用户字段，是纯粹白送的踩雷面。
+//
+// 同样刻意不 bump `updatedAt`：那是用户可见的「上次修改时间」，参与看板排序与展示，
+// 不该被一次后台观测污染。本字段的时效性由「会话启动成功」这一事件本身保证。
+export function applyMostRecentlyLaunchedAgentSessionAgentIdToTask(
+	board: RuntimeBoardData,
+	taskId: string,
+	mostRecentlyLaunchedAgentSessionAgentId: RuntimeAgentId,
+): RuntimeApplyMostRecentlyLaunchedAgentSessionAgentIdResult {
+	const normalizedTaskId = taskId.trim();
+	if (!normalizedTaskId) {
+		return { board, updated: false };
+	}
+	let updated = false;
+	const columns = board.columns.map((column) => {
+		let columnUpdated = false;
+		const cards = column.cards.map((card) => {
+			if (
+				card.id !== normalizedTaskId ||
+				card.mostRecentlyLaunchedAgentSessionAgentId === mostRecentlyLaunchedAgentSessionAgentId
+			) {
+				return card;
+			}
+			columnUpdated = true;
+			return { ...card, mostRecentlyLaunchedAgentSessionAgentId };
+		});
+		if (!columnUpdated) {
+			return column;
+		}
+		updated = true;
+		return { ...column, cards };
+	});
+	return updated ? { board: { ...board, columns }, updated: true } : { board, updated: false };
 }

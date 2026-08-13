@@ -248,6 +248,21 @@ function normalizeRuntimeTaskCommentEntries(
 	return normalizedEntries.length > 0 ? normalizedEntries : undefined;
 }
 
+// Kanban 与一个 agent 通话的方式（PTY / 进程内 Cline SDK / ACP 子进程）。canonical zod 源放在
+// api-contract（契约叶子模块），src/core/agent-catalog.ts 由此派生 TS 类型并挂到 catalog 条目上，
+// 避免 api-contract → agent-catalog 的反向依赖。
+// 定义位置必须留在 runtimeBoardCardSchema **之前**：卡片的 ompAgentSessionTransport 字段在模块求值
+// 时就要引用它，挪到下面会踩 const 的 TDZ。
+export const runtimeAgentSessionTransportSchema = z.enum([
+	// PTY 里跑一个 CLI，靠刮 TUI 输出 + agent 侧 hook 回调 `kanban hooks` 判状态。
+	"pty_terminal",
+	// 在 Kanban 服务进程内直接实例化 @clinebot/core，订阅结构化事件。
+	"in_process_cline_sdk",
+	// spawn 一个子进程，用 ACP（JSON-RPC over stdio）通话，状态由 SessionUpdate 驱动。
+	"acp_stdio_subprocess",
+]);
+export type RuntimeAgentSessionTransport = z.infer<typeof runtimeAgentSessionTransportSchema>;
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
@@ -263,6 +278,29 @@ export const runtimeBoardCardSchema = z
 		images: z.array(runtimeTaskImageSchema).optional(),
 		taskCommentEntries: z.array(runtimeTaskCommentEntrySchema).optional(),
 		agentId: runtimeAgentIdSchema.optional(),
+		// omp 这张卡「下次启动该用哪条通道」。与 startInPlanMode / taskAgentPermissionMode 同为
+		// **建卡时固化**的快照：建卡那一刻把全局默认写死在卡上，之后改全局默认不追溯已有卡片。
+		// 只在 spawn 那一刻被消费；活会话实际用的通道读 summary.sessionTransport，不读这里。
+		// 老卡片没有这个字段 ⇒ 回退到当时的全局默认（即 TUI），这会把现存 omp 卡片从 ACP 翻到 TUI，
+		// 是本次有意为之的默认切换（ACP 会话纯内存不落盘，无数据损失）。
+		// 注意：本字段落在**卡**上，隐含「一张 omp 卡只有一条 agent 会话」。omp 一旦获得 By the way
+		// 支持（一个 task 会有多条会话），必须改成按会话 id 的映射。
+		ompAgentSessionTransport: runtimeAgentSessionTransportSchema.optional(),
+		// runtime 观测值，不是用户意图：本卡片最近一次**真正启动成功**的会话用的是哪个 agent。
+		//
+		// 为什么不复用上面的 `agentId`：那个字段的语义是「用户为这张卡做的 per-task 覆盖」，缺失即
+		// 「跟随项目默认档」。把解析出来的默认档物化进去，等于把「跟随默认」静默钉成一个用户从未选过的
+		// 永久覆盖，agent 选择器还会显示成用户主动选过——与 task-board-mutations.ts 里
+		// `taskAgentPermissionMode` 那段注释禁止的是同一类错误。
+		//
+		// 为什么需要它：sessions.json 只在 graceful shutdown 与客户端 saveState 落盘，硬中断（系统重启 /
+		// 本地 redeploy）会让「这个 task 用的是哪个 agent」在盘上彻底消失；而走默认档的卡片上又没有
+		// `agentId` 可回填，重启后该 task 就只剩一条 agentId 为 null 的空壳 summary——TUI 全白、
+		// 「重启终端会话」灰掉。本字段是这条链路上唯一在**启动那一刻**就 durable 的真相源。
+		//
+		// 只由 runtime 在会话启动成功后写入，故**不出现在** RuntimeUpdateTaskInput 里；它靠 updateTask
+		// 的 `...card` 展开穿过用户编辑。
+		mostRecentlyLaunchedAgentSessionAgentId: runtimeAgentIdSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
@@ -600,19 +638,6 @@ export type RuntimeLastConversationProgressObservation = z.infer<
 	typeof runtimeLastConversationProgressObservationSchema
 >;
 
-// Kanban 与一个 agent 通话的方式（PTY / 进程内 Cline SDK / ACP 子进程）。canonical zod 源放在
-// api-contract（契约叶子模块），src/core/agent-catalog.ts 由此派生 TS 类型并挂到 catalog 条目上，
-// 避免 api-contract → agent-catalog 的反向依赖。
-export const runtimeAgentSessionTransportSchema = z.enum([
-	// PTY 里跑一个 CLI，靠刮 TUI 输出 + agent 侧 hook 回调 `kanban hooks` 判状态。
-	"pty_terminal",
-	// 在 Kanban 服务进程内直接实例化 @clinebot/core，订阅结构化事件。
-	"in_process_cline_sdk",
-	// spawn 一个子进程，用 ACP（JSON-RPC over stdio）通话，状态由 SessionUpdate 驱动。
-	"acp_stdio_subprocess",
-]);
-export type RuntimeAgentSessionTransport = z.infer<typeof runtimeAgentSessionTransportSchema>;
-
 // 一次回收尝试的**可审计**结果。三种 transport 共用同一形状，故「回收到底做成了没有」在 UI /
 // 日志 / 测试里是同一套判据，而不是各 transport 各说各话。
 export const runtimeAgentSessionReclamationOutcomeSchema = z.object({
@@ -691,6 +716,13 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 任务时必须看到明确说明，而不是一个空终端让人误以为只是加载慢。
 	agentSessionRuntimeReclamationOutcome: runtimeAgentSessionReclamationOutcomeSchema.nullable().optional(),
 	taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
+	// 这条**活会话**实际用的通话方式。agent-catalog 的 `sessionTransport` 只是该 agent 的**默认**通道；
+	// omp 可在 TUI（pty_terminal）与 ACP（acp_stdio_subprocess）之间随时切换，切换后 agentId 不变，
+	// 于是「渲染 xterm 还是会话面板」「stop / 输入 / 消息走哪条通路」一律以本字段为准，不得再从 agentId 静态派生。
+	// 由三条通道各自在建会话时盖章（terminal / cline-sdk / acp），是纯运行期事实、不参与 facet 与 superRefine。
+	// 加性可选：旧盘数据 / web-ui 手构造 summary 缺它 ⇒ 回退按 agentId 派生（见 agent-catalog 的
+	// resolveRuntimeAgentSessionTransportFromSummary，读点一律走它而非直接读本字段）。
+	sessionTransport: runtimeAgentSessionTransportSchema.optional(),
 	// 双轴 facet（加性、可选）+ per-session schema 版本。三 facet 共生（要么全置、要么全缺）：
 	// 全缺=未迁移的旧盘数据（Stage 2 读时回填）；全置=经 applySessionFacets 漏斗写入、组合受
 	// 下方 superRefine 护栏约束。schemaVersion 为 per-session 可选字段（不引入文件级包裹、无 flag day）。
@@ -1705,6 +1737,8 @@ export const runtimeConfigResponseSchema = z.object({
 	selectedShortcutLabel: z.string().nullable(),
 	agentAutonomousModeEnabled: z.boolean(),
 	newTaskStartInPlanModeByDefault: z.boolean(),
+	// omp 新任务的默认通道（严格的「新任务默认值」：建卡时固化到卡上，改它不追溯已有卡片）。
+	ompAgentSessionTransportForNewTasks: runtimeAgentSessionTransportSchema,
 	debugModeEnabled: z.boolean().optional(),
 	effectiveCommand: z.string().nullable(),
 	globalConfigPath: z.string(),
@@ -1730,6 +1764,7 @@ export const runtimeConfigSaveRequestSchema = z.object({
 	selectedShortcutLabel: z.string().nullable().optional(),
 	agentAutonomousModeEnabled: z.boolean().optional(),
 	newTaskStartInPlanModeByDefault: z.boolean().optional(),
+	ompAgentSessionTransportForNewTasks: runtimeAgentSessionTransportSchema.optional(),
 	shortcuts: z.array(runtimeProjectShortcutSchema).optional(),
 	readyForReviewNotificationsEnabled: z.boolean().optional(),
 	notificationSoundEnabled: z.boolean().optional(),
@@ -1758,6 +1793,12 @@ export const runtimeTaskSessionStartRequestSchema = z
 		cols: z.number().int().positive().optional(),
 		rows: z.number().int().positive().optional(),
 		agentId: runtimeAgentIdSchema.optional(),
+		// 本次启动要走哪条通道。省略时服务端按「卡片固化值 → 全局默认 → catalog 默认」解析
+		// （见 core/agent-session-transport-selection.ts）；切换 procedure 会显式传它。
+		requestedAgentSessionTransport: runtimeAgentSessionTransportSchema.optional(),
+		// 「续跑既有对话、不重投 prompt」。切换通道后重开会话走它：用户已在对话中途，
+		// 重投一次原始 prompt 等于凭空多一轮。与 resumeFromTrash 的区别是后者还带回收/垃圾桶语义。
+		resumePriorAgentConversationWithoutResendingPrompt: z.boolean().optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
@@ -1881,6 +1922,31 @@ export const runtimeTaskSessionStopResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeTaskSessionStopResponse = z.infer<typeof runtimeTaskSessionStopResponseSchema>;
+
+// 把一条**已存在的** agent 会话从当前通话通道切到另一条（目前只有 omp 有第二条通道）。
+// 语义是「停掉当前会话 → 立刻用另一条通道续跑同一段对话」，服务端一次做完：放前端做
+// stop→save→start 三连的话，中途任何一步失败都会留下半切状态（卡片字段已改、会话还在旧通道上）。
+//
+// taskId 是**会话 id**（详情页传的是当前选中的那条 agent 会话），不是看板卡 id ——
+// 两者在主会话上恰好相同，By the way 会话上不同。omp 目前没有 By the way 支持，
+// 一旦有了，通道字段就不能再落在卡上（见 runtimeBoardCardSchema.ompAgentSessionTransport）。
+export const runtimeAgentSessionTransportSwitchRequestSchema = z.object({
+	taskId: z.string(),
+	targetSessionTransport: runtimeAgentSessionTransportSchema,
+});
+export type RuntimeAgentSessionTransportSwitchRequest = z.infer<typeof runtimeAgentSessionTransportSwitchRequestSchema>;
+
+export const runtimeAgentSessionTransportSwitchResponseSchema = z.object({
+	ok: z.boolean(),
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	// 失败时会话**停在已停止**（不自动回滚、不降级到旧通道）；卡片的下次启动通道仍是你选的那条，
+	// 修好问题后点 Start 就能起来。这个字段告诉前端「旧会话确实已经停了」，好把提示写准。
+	priorAgentSessionStopped: z.boolean(),
+	error: z.string().optional(),
+});
+export type RuntimeAgentSessionTransportSwitchResponse = z.infer<
+	typeof runtimeAgentSessionTransportSwitchResponseSchema
+>;
 
 // 用户经卡片右上角「移至 Review」悬浮按钮把一个停在 agent 回合的终端 agent 任务手动翻入「等人审查」回合
 // （reviewReason=manual_review）。区别于 stopTaskSession（中断/收尾），此处只翻回合、不杀进程：用于卡死/空闲

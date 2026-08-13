@@ -13,6 +13,7 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 } from "../core/api-contract";
 import { buildKanbanCommandParts } from "../core/kanban-command";
+import { resolveOmpApprovalModeFlagValue } from "../core/omp-approval-mode-flag";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
 import { quoteShellArg } from "../core/shell";
 import { resolveTaskAgentPermissionModeForAgent } from "../core/task-agent-permission-mode";
@@ -29,6 +30,8 @@ import { configureCodexHooks, hasCodexConfigOverride } from "./codex-hook-config
 import { createHookRuntimeEnv } from "./hook-runtime-context";
 import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
 import { hasKimiInteractivePrompt } from "./kimi-readiness";
+import { detectOmpTerminalTitleStateTransition } from "./omp-terminal-title-state";
+import { writeOmpTuiLaunchConfigOverlay } from "./omp-tui-launch-config";
 import {
 	getOpenCodeAuthPathCandidates,
 	getOpenCodeConfigPathCandidates,
@@ -52,6 +55,11 @@ export interface AgentAdapterLaunchInput {
 	images?: RuntimeTaskImage[];
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
+	// 「续跑既有对话、不重投 prompt」，但**不**带垃圾桶语义（不清聊天、不按转录反查模型）。
+	// 目前唯一的来源是通道切换后重开会话（omp 的 TUI ⇄ ACP）。语义上与 resumeFromTrash 的续跑
+	// 部分一致，故 adapter 里两者一律并为同一条分支处理；只有 omp 需要认它——别的 agent 不可切换，
+	// 到不了这条路径（可切换 agent 集合见 core/agent-session-transport-selection.ts）。
+	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	parentSessionId?: string;
@@ -806,13 +814,50 @@ function applyClaudePermissionAndPlanModeArgs(args: string[], input: AgentAdapte
 	// ask_for_every_tool_use：不加任何旗标，走 Claude Code 自身的逐次询问默认。
 }
 
+// Kanban 侧的 Claude Code 渲染模式逃生阀。取值 "inline" 时退回旧的 main-screen 渲染，
+// 其余取值（含未设置）一律走 Kanban 默认的 fullscreen。
+//
+// 为什么另起一个 Kanban 命名空间的变量、而不是直接尊重继承来的 CLAUDE_CODE_* ：那些变量是
+// **Claude Code 注入给自己子进程的**，无法区分「用户表态」与「Kanban 恰好被一个 Claude Code
+// 会话启动」。若把继承值当表态，从 Claude Code 终端里起的 Kanban 会让全部 task agent 静默退回
+// inline，而用户从未做过这个选择。
+export const KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR = "KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE";
+
+// Claude Code 的 TUI 渲染模式（它自己 `/tui` 的两档：`fullscreen` / `default`）。Kanban 默认选
+// fullscreen——即 alt-screen 上的无闪烁渲染器，与 Codex 等其余 alt-screen agent 形态一致。
+//
+// 历史：2026-05-08「修复 Claude Code 交互式任务启动」曾写死 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
+// 把 Claude 摁成 inline，当时是为了让 deferred startup input 的就绪判定能在 normal buffer 的
+// 输出里看到提示符。该前提已经不成立：就绪与人机争用让路都改走 terminal-input-box-reader 的
+// 结构判定，而它读的是 TerminalStateMirror.getScreenSnapshot() → `buffer.active`，alt-screen 下
+// 读的正是 Claude 重绘的那块备用屏。真机实测（v2.1.228，cols=100）：fullscreen 下输入框画法不变
+// （两条 U+2500 边界线夹 `❯`），只是从屏顶移到屏底，readTerminalInputBox 照常命中。
+//
+// 代价是已知且与 Codex 同构的：alt-screen agent 的会话历史留在备用屏内、normal buffer 不增长，
+// 因此「阅读 scrollback transcript」入口对 Claude 会话不再出现（见 terminal-scrollback-transcript-extraction）。
+//
+// 为什么用 CLAUDE_CODE_NO_FLICKER 而不是写用户 settings.json 的 `tui` 键：env 在 Claude 的判定
+// 顺序里压过用户设置，才能保证「Kanban 起的会话默认 fullscreen」不被宿主机的 `/tui default` 偏好
+// 推翻；而写用户 settings 则会污染用户在 Kanban 之外的 Claude 会话。
+//
+// 两档都**成对**写出：另一档显式置 undefined 以抹掉继承值（buildTerminalEnvironment 会据此删键）。
+// 缺了这一步，从 Claude Code 会话里起的 Kanban 会把继承来的 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
+// 一路传下去——它在 Claude 的判定顺序里排在 NO_FLICKER 之前，会把 fullscreen 直接否决掉。
+function resolveClaudeCodeTerminalRenderingModeEnv(): Record<string, string | undefined> {
+	const requestedMode = process.env[KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR]?.trim().toLowerCase();
+	if (requestedMode === "inline") {
+		return { CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1", CLAUDE_CODE_NO_FLICKER: undefined };
+	}
+	return { CLAUDE_CODE_NO_FLICKER: "1", CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: undefined };
+}
+
 const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "claude");
 		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {
-			CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1",
+			...resolveClaudeCodeTerminalRenderingModeEnv(),
 			FORCE_HYPERLINK: "1",
 		};
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
@@ -1897,15 +1942,69 @@ const kimiAdapter: AgentSessionAdapter = {
 	},
 };
 
-// oh-my-pi 没有 PTY 会话形态：它经 ACP（JSON-RPC over stdio）由 src/acp-client-session/ 驱动。
-// 这里放一个显式抛错的占位，好让「路由错到终端路径」在第一时间炸出来，而不是静默起一个
-// 没有 hook、状态永远不前进的 TUI。
-const ompTerminalPathUnsupportedAdapter: AgentSessionAdapter = {
-	async prepare() {
-		throw new Error(
-			"oh-my-pi (omp) sessions are driven over ACP, not a PTY terminal. " +
-				"Route this task through the ACP task session service instead of terminalManager.startTaskSession.",
+// oh-my-pi（omp）的 PTY TUI 通道。omp 还有一条 ACP 通道（src/acp-client-session/），两条通道
+// 共用同一份 omp 磁盘会话存储（omp 的 SessionManager 按 cwd 建库），因而可以随时互相切换——
+// 走哪条由 core/agent-session-transport-selection.ts 决定，不是这里。
+//
+// 形态上模板是 cursorAdapter 而不是 codex/kimi：omp 的根命令吃**位置 prompt** 并在 mode.init()
+// 完成后自动提交（main.ts 的 `session.prompt(initialMessage)`），所以不需要 deferredStartupInput，
+// 也就完全不必碰 session-manager 的就绪判定与注入闸。
+const ompAdapter: AgentSessionAdapter = {
+	async prepare(input) {
+		const args = [...input.args];
+		const env: Record<string, string | undefined> = {
+			// 首启的全屏 setup 向导会切 alt-screen 盖住 TUI 并等人操作，托管会话必须跳过。
+			// 这是 omp 侧唯一的读取点（setup-wizard/index.ts）。
+			OMP_SKIP_SETUP: "1",
+		};
+
+		// 放权档三档与 omp 的 `--approval-mode` 一一对应；映射表与 ACP 通道共用一份
+		// （core/omp-approval-mode-flag.ts），否则切换通道会静默改变放权语义。
+		// 必须**显式**传：omp 的 schema 默认虽是 yolo，但「默认值」不算 isConfigured，权限门仍会保留。
+		if (!hasCliOption(args, "--approval-mode")) {
+			args.push("--approval-mode", resolveOmpApprovalModeFlagValue(resolveLaunchPermissionMode(input)));
+		}
+
+		// plan 起步经 Kanban 托管的设置 overlay 表达，**不动放权档**（AGENTS.md 的正交轴铁律）。
+		// 续跑时不重放 plan 起步：用户已在对话中途，omp 的会话记录里存着当前模式。
+		// 续跑（垃圾桶恢复 / 通道切换）在 adapter 里是同一条分支：都不重投 prompt、都加 --continue、
+		// 都武装重播守卫、都不重放 plan 起步。
+		const shouldContinuePriorConversation = Boolean(
+			input.resumeFromTrash || input.resumePriorAgentConversationWithoutResendingPrompt,
 		);
+		const shouldStartInPlanMode = Boolean(input.startInPlanMode) && !shouldContinuePriorConversation;
+		const launchConfigOverlay = await writeOmpTuiLaunchConfigOverlay({
+			hookAgentDirectory: getHookAgentDirectory("omp"),
+			taskId: input.taskId,
+			startInPlanMode: shouldStartInPlanMode,
+		});
+		args.push("--config", launchConfigOverlay.configFilePath);
+
+		// 续跑用 `--continue`。**绝不**发裸 `-r` / `--resume`：无值时 omp 会弹一个全屏 session picker
+		// 等人上下键选（main.ts），托管会话会就此卡死。
+		// omp 的 terminal breadcrumb 认的是 TTY 设备路径（ttyid.ts），新 PTY 每次 id 都不同，于是
+		// `--continue` 落到 fallback「该 cwd 下最近的一条 session」——每 task 一个 worktree，这个
+		// fallback 恰好正确。注意它并不锁定某个具体 sessionId。
+		const resumesPriorAgentConversation = shouldContinuePriorConversation;
+		if (shouldContinuePriorConversation && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
+			args.push("--continue");
+		}
+
+		// 位置 prompt：omp 在 TUI 初始化完成后自动提交它。续跑时不重投——那会凭空多出一轮。
+		const trimmed = prependTaskSessionGuidanceToPrompt(input).trim();
+		if (!shouldContinuePriorConversation && trimmed) {
+			args.push(trimmed);
+		}
+
+		return {
+			args,
+			env,
+			resumesPriorAgentConversation,
+			// 状态判定读 OSC 终端标题（omp 把三态编码在标题分隔符里），比 cursor/kiro/droid 那种
+			// 「只能靠 scanForStalls 兜底」结构化得多，且不需要写 omp extension。
+			// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
+			detectOutputTransition: detectOmpTerminalTitleStateTransition,
+		};
 	},
 };
 
@@ -1919,7 +2018,7 @@ const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	kiro: kiroAdapter,
 	cline: clineAdapter,
 	kimi: kimiAdapter,
-	omp: ompTerminalPathUnsupportedAdapter,
+	omp: ompAdapter,
 };
 
 export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promise<PreparedAgentLaunch> {

@@ -444,6 +444,9 @@ export interface StartTaskSessionRequest {
 	images?: RuntimeTaskImage[];
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
+	// 通道切换后重开会话：续跑既有对话、不重投 prompt，但不带垃圾桶语义。
+	// 与 resumeFromTrash 一样，会话开局停在「等你说话」而不是假装 agent 在跑——没有新 prompt 被发出去。
+	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
 	cols?: number;
 	rows?: number;
 	env?: Record<string, string | undefined>;
@@ -474,6 +477,9 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		taskId,
 		state: "idle",
 		agentId: null,
+		// 通道盖章：terminalManager 持有的会话恒是 PTY 的。omp 的 agentId 在 TUI 与 ACP 两条通道上
+		// 是同一个，故一切「这条会话长什么样」的判断都必须读它，不能再从 agentId 派生。
+		sessionTransport: "pty_terminal",
 		workspacePath: null,
 		pid: null,
 		startedAt: null,
@@ -643,13 +649,24 @@ export function buildTerminalEnvironment(
 	options: TerminalEnvironmentOptions,
 	...sources: Array<Record<string, string | undefined> | undefined>
 ): Record<string, string | undefined> {
-	const env = {
+	const env: Record<string, string | undefined> = {
 		...process.env,
 		...Object.assign({}, ...sources),
 		COLORTERM: "truecolor",
 		TERM: "xterm-256color",
 		TERM_PROGRAM: "kanban",
 	};
+	// source 里值为 undefined 的键，语义是「抹掉继承自 process.env 的这一项」，必须真正删键：
+	// node-pty 会把留下来的 undefined 序列化成**字符串 "undefined"** 传给子进程，而这对任何
+	// 「只看变量存不存在」的消费者都是 truthy —— 等于把「抹除」写成了「设置成开」，与本意反号。
+	// 真实用例：Kanban 自己可能跑在一个 Claude Code 会话里，继承了它注入的 CLAUDE_CODE_* 变量，
+	// adapter 需要把这些污染抹掉才能按 Kanban 自己的意图起 agent（见 agent-session-adapters 的
+	// resolveClaudeCodeTerminalRenderingModeEnv）。
+	for (const [key, value] of Object.entries(env)) {
+		if (value === undefined) {
+			delete env[key];
+		}
+	}
 	if (options.forceColor) {
 		env.CLICOLOR = "1";
 		env.CLICOLOR_FORCE = "1";
@@ -1893,6 +1910,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 					reconcileSummaryWithUnrecoverableRunningAgentProcessClaim({
 						...summary,
 						awaitingDispatchedBackgroundWork: null,
+						// 同一 chokepoint 顺带补盖通道章：本改动之前落盘的记录没有这个字段，而
+						// terminalManager 持有的会话按构造恒是 PTY 的，明写好过依赖读时回退派生。
+						sessionTransport: "pty_terminal",
 					}),
 				),
 				active: null,
@@ -2011,6 +2031,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			images: request.images,
 			startInPlanMode: request.startInPlanMode,
 			resumeFromTrash: request.resumeFromTrash,
+			resumePriorAgentConversationWithoutResendingPrompt: request.resumePriorAgentConversationWithoutResendingPrompt,
 			env: request.env,
 			workspaceId: request.workspaceId,
 			parentSessionId: request.parentSessionId,
@@ -2307,7 +2328,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 让重播的旧 transcript 把卡片刷成「刚刚响应」。反过来，崩溃后从原始 prompt 全新重跑的
 			// auto-restart 不带任何续跑旗标 → 不武装，其真实新产出照常推进时间戳。
 			suppressSubstantiveOutputUntilContinues:
-				request.resumeFromTrash === true || launch.resumesPriorAgentConversation === true,
+				request.resumeFromTrash === true ||
+				request.resumePriorAgentConversationWithoutResendingPrompt === true ||
+				launch.resumesPriorAgentConversation === true,
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
@@ -2337,10 +2360,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}, STARTUP_READINESS_TIMEOUT_MS);
 		}
 
+		// 「本次启动没有新 prompt 被投出去」⇒ 开局回合归用户。垃圾桶恢复与通道切换重开都属此列。
+		const startsWithoutSendingNewPrompt = Boolean(
+			request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt,
+		);
+		// 但两者的**成因**不同，而成因决定 userTurnKind，进而决定后台程序化投递会不会让位：
+		//   resumeFromTrash → "attention"（userTurnKind=needs_input）：从垃圾桶拖回来的会话确实需要人来看一眼。
+		//   通道切换重开 → "hook"（userTurnKind=review）：agent 只是把回合交回来了，**没有任何东西在等你拍板**。
+		// 用错成因的代价是实测出来的：needs_input 落在 MODAL_USER_DECISION_TURN_KINDS 里，
+		// 于是 RVF / task message 这类后台投递会一直让位到预算耗尽，报 agent_awaiting_user_decision_timeout——
+		// 而这条会话其实空闲着、随时可以收消息。ACP 侧同一场景用的也是 "hook"，两条通道必须一致。
+		const startWithoutPromptReviewReason: RuntimeTaskSessionReviewReason = request.resumeFromTrash
+			? "attention"
+			: "hook";
 		const startedAt = now();
 		updateSummary(entry, {
-			...buildTerminalFacetPatch(entry.summary, request.resumeFromTrash ? "awaiting_review" : "running", {
-				reviewReason: request.resumeFromTrash ? "attention" : null,
+			...buildTerminalFacetPatch(entry.summary, startsWithoutSendingNewPrompt ? "awaiting_review" : "running", {
+				reviewReason: startsWithoutSendingNewPrompt ? startWithoutPromptReviewReason : null,
 				pid: session.pid,
 				agentId: request.agentId,
 			}),
@@ -2352,7 +2388,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			pid: session.pid,
 			startedAt,
 			lastOutputAt: null,
-			reviewReason: request.resumeFromTrash ? "attention" : null,
+			reviewReason: startsWithoutSendingNewPrompt ? startWithoutPromptReviewReason : null,
 			exitCode: null,
 			lastHookAt: null,
 			latestHookActivity: null,
