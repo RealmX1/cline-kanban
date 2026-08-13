@@ -2248,6 +2248,187 @@ export const runtimeTaskChatDeliveryCancelResponseSchema = z.object({
 });
 export type RuntimeTaskChatDeliveryCancelResponse = z.infer<typeof runtimeTaskChatDeliveryCancelResponseSchema>;
 
+// ── Prompt Library（服务端持久化）──────────────────────────────────────────────
+//
+// 落点与并发语义见 src/state/prompt-library-store.ts。这里只定义线上契约。
+
+export const promptLibraryScopeSchema = z.enum(["global", "repo", "task"]);
+export type PromptLibraryScope = z.infer<typeof promptLibraryScopeSchema>;
+
+// 条目从哪来。旧数据没有这个字段，读取时按 manual 处理，故是 optional 而**不是**带默认值的必填——
+// 加默认值会让「读出来再写回去」把所有历史条目都标记成手写，抹掉将来区分暂存来源的能力。
+export const promptLibraryEntryOriginSchema = z.enum([
+	// 用户在面板里手写的模板。
+	"manual",
+	// 用户自己在终端里按了 Ctrl+S，把打了一半的输入存进库。
+	"terminal_stash_by_user",
+	// W1 争用抢占：程序化投递需要输入框，运行时先把人类的未提交内容无损存进库再放行。
+	"terminal_stash_preempted_by_programmatic_delivery",
+]);
+export type PromptLibraryEntryOrigin = z.infer<typeof promptLibraryEntryOriginSchema>;
+
+export const storedPromptLibraryEntrySchema = z.object({
+	id: z.string(),
+	text: z.string(),
+	scope: promptLibraryScopeSchema,
+	origin: promptLibraryEntryOriginSchema.optional(),
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+export type StoredPromptLibraryEntry = z.infer<typeof storedPromptLibraryEntrySchema>;
+
+// 一个 workspace 视角下能看到的全部条目。global 桶来自 kanban 根目录的共用文件，
+// 另两个桶来自该 workspace 自己的文件（project.id 即 workspaceId）。
+export const workspacePromptLibrarySnapshotSchema = z.object({
+	globalScopedPrompts: z.array(storedPromptLibraryEntrySchema),
+	repoScopedPrompts: z.array(storedPromptLibraryEntrySchema),
+	taskScopedPromptsByTaskId: z.record(z.string(), z.array(storedPromptLibraryEntrySchema)),
+});
+export type WorkspacePromptLibrarySnapshot = z.infer<typeof workspacePromptLibrarySnapshotSchema>;
+
+// scope 为 task 却漏传 taskId **不是**「分类不整洁」，而是可见性事故：本该只对某个任务可见的文字，
+// 会因为调用方漏一个参数而变成整个仓库的所有任务都能看见。存储层无从知道用户原本想给哪个任务看，
+// 所以这条只能在契约边界报错，不能留给存储层去猜一个桶。空串同样拒绝——它不是任何真实任务的 id。
+function isTaskScopedPromptMutationCarryingItsTaskId(value: {
+	scope: PromptLibraryScope;
+	taskId?: string | null;
+}): boolean {
+	return value.scope !== "task" || (typeof value.taskId === "string" && value.taskId.length > 0);
+}
+
+const TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE =
+	"scope 为 task 的 prompt library 意图必须带上非空 taskId，否则该条目会对整个仓库可见";
+
+// 写操作是**意图**而不是整份 PUT：多个标签页 + 运行时自己会并发写同一个库，整份 PUT 会让
+// 「另一个标签页刚加的条目」被静默抹掉。服务端在文件锁内读-改-写，于是并发写自然合并。
+export const workspacePromptLibraryMutationSchema = z.discriminatedUnion("kind", [
+	z
+		.object({
+			// 同一条意图兼管「新建」与「改正文」：id 不存在即新建，存在即只改正文（**不**动它所在的桶）。
+			kind: z.literal("upsert_prompt"),
+			promptId: z.string(),
+			text: z.string(),
+			// 仅新建时生效；已存在的条目换桶请用 set_prompt_scope。
+			scope: promptLibraryScopeSchema,
+			// scope 为 task 时必填（由下面的 refine 强制），其余忽略。
+			taskId: z.string().nullable().optional(),
+			origin: promptLibraryEntryOriginSchema.optional(),
+		})
+		.refine(isTaskScopedPromptMutationCarryingItsTaskId, {
+			message: TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE,
+			path: ["taskId"],
+		}),
+	z.object({
+		kind: z.literal("remove_prompt"),
+		promptId: z.string(),
+	}),
+	z
+		.object({
+			kind: z.literal("set_prompt_scope"),
+			promptId: z.string(),
+			scope: promptLibraryScopeSchema,
+			// 搬进 task scope 时必填（由下面的 refine 强制）：搬去「哪个任务」正是这条意图的内容。
+			taskId: z.string().nullable().optional(),
+		})
+		.refine(isTaskScopedPromptMutationCarryingItsTaskId, {
+			message: TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE,
+			path: ["taskId"],
+		}),
+]);
+export type WorkspacePromptLibraryMutation = z.infer<typeof workspacePromptLibraryMutationSchema>;
+
+export const runtimePromptLibraryReadRequestSchema = z.object({});
+export type RuntimePromptLibraryReadRequest = z.infer<typeof runtimePromptLibraryReadRequestSchema>;
+
+export const runtimePromptLibraryResponseSchema = z.object({
+	ok: z.boolean(),
+	library: workspacePromptLibrarySnapshotSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimePromptLibraryResponse = z.infer<typeof runtimePromptLibraryResponseSchema>;
+
+export const runtimePromptLibraryMutateRequestSchema = z.object({
+	mutation: workspacePromptLibraryMutationSchema,
+});
+export type RuntimePromptLibraryMutateRequest = z.infer<typeof runtimePromptLibraryMutateRequestSchema>;
+
+// ── 终端输入框暂存进 Prompt Library（W2 Ctrl+S）──────────────────────────────────
+//
+// 一次请求就是一整条原子链路：读框 → 回填被折叠的粘贴 → 写库 → 转发 Ctrl+S 字节清框。
+// 前端只负责拦下按键，不碰内容——同一份易随版本漂移的 TUI 画法知识只在服务端存一份。
+
+export const terminalInputBoxStashOutcomeSchema = z.enum([
+	// 正文已入库，Ctrl+S 已转发（框被 agent 自己清掉）。
+	"stashed_into_prompt_library",
+	// 正文**已经**入库（stashedPromptId 有效），但清框那一步没做成：写库跨文件锁与落盘期间，读框时
+	// 的那条 PTY 已经退出、或被 refresh 换成了新 incarnation。此时绝不能把 Ctrl+S 打到新会话上——那会
+	// 清掉一段与本次暂存毫无关系的输入。剩下的真实状态就是「库里有了、框里也还在」，如实报出来即可：
+	// 报纯成功会让用户以为框被清是理所当然，随后发现内容还在反而怀疑是不是没存进去。
+	"stashed_into_prompt_library_but_input_box_not_cleared",
+	// 同一个 task 上已经有一次暂存在进行中（连按 Ctrl+S / 多标签页同时触发）。这一次按键**没有**做任何
+	// 事：没入库、也没转发 Ctrl+S，框里内容一个字都没少。刻意不排队复用前一次的结果——排队者醒来时框
+	// 已被清空，只能报「框是空的」，那是个语义已经错位的回执。静默吞掉更不行：用户按了键，就得知道
+	// 这一次为什么没生效。
+	"another_terminal_input_box_stash_attempt_already_in_flight_for_this_task",
+	// 两路判据都说框是空的：没有可暂存的东西。Ctrl+S 照常转发（对空框是无操作）。
+	"input_box_empty_nothing_to_stash",
+	// 有内容迹象却读不出可用正文（该 agent 的输入框语法尚未建模 / 当前屏定位不到框）。
+	// Ctrl+S 仍然转发：那是 agent 自己的原生 stash，内容进它自己的暂存区，不比「Kanban 完全不介入」更差。
+	"input_box_content_unreadable_forwarded_to_agent_native_stash",
+	// 屏上确实有文字，但它一个字节都没经过本运行时的 writeInput，因此无从区分「用户敲的内容」与
+	// 「agent 自己渲染的空框占位提示」（Claude 偶发的 `Try "..."`）。不入库——把 agent 的 UI 文案
+	// 当成用户资产存进去，比暂时存不了更糟。同样转发 Ctrl+S 交给 agent 原生暂存兜底。
+	"input_box_screen_text_not_corroborated_by_keystroke_tracking",
+	// 这个任务此刻没有可信的 PTY 会话。两种情形共用这一条：压根没有 active，或者读框到清框之间那条
+	// 会话退出/被换代了（此时既没入库也没清框，什么都没发生，与前者对用户等价）。
+	"no_active_terminal_session",
+	// 写库失败。**不**转发 Ctrl+S——正文原样留在框里，用户看得见也能重试；转发只会把它藏进
+	// agent 的暂存区，而 Kanban 这边什么都没有。
+	"prompt_library_write_failed",
+]);
+export type TerminalInputBoxStashOutcome = z.infer<typeof terminalInputBoxStashOutcomeSchema>;
+
+// 这次暂存的保真度。全部如实上报，不做「看起来干净」的合并——用户有权知道存进去的这段文字
+// 哪里是推断出来的、哪里还原不了。
+export const terminalInputBoxStashFidelitySchema = z.object({
+	// 读屏时按宽度判据接回上一逻辑行的次数。**不是**错误计数：一条正常长行就会产生若干次。
+	softWrapJoinCount: z.number(),
+	foldedPastePlaceholderCount: z.number(),
+	backfilledPlaceholderCount: z.number(),
+	// 占位符配到了账本条目、但那条只剩计量没有正文。
+	placeholdersLeftUnbackfilledBecausePayloadWasDropped: z.number(),
+	// 占位符在账本里找不到计量对得上的条目（经 tmux / 原生终端粘进同一 PTY 等）。
+	placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: z.number(),
+	// 整框占位符的自洽性校验没过（`+M lines` 的 M < 3 折不出来，或 `#N` 不是严格递增）：框里混着
+	// 用户手打的同形字面量、或粘贴不是按框内顺序发生的。分不清哪处是真的，于是整框放弃回填，
+	// 占位符全部原样保留并计在这里。
+	placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: z.number(),
+	// 本次组合里载荷被丢弃（超留存上限）的粘贴条数，来自输入侧账本本身。
+	unrecoverablePasteCount: z.number(),
+});
+export type TerminalInputBoxStashFidelity = z.infer<typeof terminalInputBoxStashFidelitySchema>;
+
+export const runtimeTerminalInputBoxStashRequestSchema = z.object({
+	taskId: z.string(),
+	// 省略即 task scope，与面板里「新建 prompt」的默认一致。
+	scope: promptLibraryScopeSchema.optional(),
+});
+export type RuntimeTerminalInputBoxStashRequest = z.infer<typeof runtimeTerminalInputBoxStashRequestSchema>;
+
+export const runtimeTerminalInputBoxStashResponseSchema = z.object({
+	ok: z.boolean(),
+	outcome: terminalInputBoxStashOutcomeSchema,
+	stashedPromptId: z.string().nullable(),
+	// 只回字符数不回正文：正文最大可达粘贴留存上限（1 MiB），而调用方要的只是一句「存进去多少」。
+	// 同理**不**捎带整库快照（`workspacePromptLibrarySnapshotSchema` 里每一条都带完整正文，条目数还随
+	// 使用无上限增长）——那会把上面这条取舍原样抵消掉：每按一次 Ctrl+S 都要序列化「刚存进去的那段正文
+	// + 一整个库」。要读库请单独走 getWorkspacePromptLibrary，那条 procedure 的存在意义就是它。
+	stashedTextCharacterCount: z.number(),
+	fidelity: terminalInputBoxStashFidelitySchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTerminalInputBoxStashResponse = z.infer<typeof runtimeTerminalInputBoxStashResponseSchema>;
+
 export const runtimeTaskChatReloadRequestSchema = z.object({
 	taskId: z.string(),
 });

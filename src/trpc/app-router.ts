@@ -89,6 +89,9 @@ import type {
 	RuntimeProjectPermanentDeletionRequest,
 	RuntimeProjectPermanentDeletionResult,
 	RuntimeProjectsResponse,
+	RuntimePromptLibraryMutateRequest,
+	RuntimePromptLibraryReadRequest,
+	RuntimePromptLibraryResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
@@ -131,6 +134,8 @@ import type {
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeTerminalAgentModelSelectionOptionsRequest,
 	RuntimeTerminalAgentModelSelectionOptionsResponse,
+	RuntimeTerminalInputBoxStashRequest,
+	RuntimeTerminalInputBoxStashResponse,
 	RuntimeUpdateStatusResponse,
 	RuntimeUpdateVerificationChecklistRequest,
 	RuntimeUpdateVerificationChecklistResponse,
@@ -230,6 +235,9 @@ import {
 	runtimeProjectPermanentDeletionRequestSchema,
 	runtimeProjectPermanentDeletionResultSchema,
 	runtimeProjectsResponseSchema,
+	runtimePromptLibraryMutateRequestSchema,
+	runtimePromptLibraryReadRequestSchema,
+	runtimePromptLibraryResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
 	runtimeRunPostDeployVerificationItemRequestSchema,
@@ -272,6 +280,8 @@ import {
 	runtimeTaskWorkspaceInfoResponseSchema,
 	runtimeTerminalAgentModelSelectionOptionsRequestSchema,
 	runtimeTerminalAgentModelSelectionOptionsResponseSchema,
+	runtimeTerminalInputBoxStashRequestSchema,
+	runtimeTerminalInputBoxStashResponseSchema,
 	runtimeUpdateStatusResponseSchema,
 	runtimeUpdateVerificationChecklistRequestSchema,
 	runtimeUpdateVerificationChecklistResponseSchema,
@@ -378,6 +388,18 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatDeliveryCancelRequest,
 		) => Promise<RuntimeTaskChatDeliveryCancelResponse>;
+		getWorkspacePromptLibrary: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimePromptLibraryReadRequest,
+		) => Promise<RuntimePromptLibraryResponse>;
+		mutateWorkspacePromptLibrary: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimePromptLibraryMutateRequest,
+		) => Promise<RuntimePromptLibraryResponse>;
+		stashTerminalInputBoxToPromptLibrary: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTerminalInputBoxStashRequest,
+		) => Promise<RuntimeTerminalInputBoxStashResponse>;
 		reloadTaskChatSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatReloadRequest,
@@ -764,6 +786,26 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatDeliveryCancelResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.cancelTaskChatDelivery(ctx.workspaceScope, input);
+			}),
+		getWorkspacePromptLibrary: workspaceProcedure
+			.input(runtimePromptLibraryReadRequestSchema)
+			.output(runtimePromptLibraryResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getWorkspacePromptLibrary(ctx.workspaceScope, input);
+			}),
+		mutateWorkspacePromptLibrary: workspaceProcedure
+			.input(runtimePromptLibraryMutateRequestSchema)
+			.output(runtimePromptLibraryResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.mutateWorkspacePromptLibrary(ctx.workspaceScope, input);
+			}),
+		// 读框 → 回填折叠粘贴 → 写库 → 转发 Ctrl+S 清框，一次请求走完整条链。
+		// 前端只拦按键、不碰内容：同一份易随 agent 版本漂移的 TUI 画法知识只在服务端存一份。
+		stashTerminalInputBoxToPromptLibrary: workspaceProcedure
+			.input(runtimeTerminalInputBoxStashRequestSchema)
+			.output(runtimeTerminalInputBoxStashResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.stashTerminalInputBoxToPromptLibrary(ctx.workspaceScope, input);
 			}),
 		abortTaskChatTurn: workspaceProcedure
 			.input(runtimeTaskChatAbortRequestSchema)

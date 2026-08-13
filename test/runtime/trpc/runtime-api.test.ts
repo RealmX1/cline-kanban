@@ -68,6 +68,9 @@ const browserMocks = vi.hoisted(() => ({
 const workspaceStateMocks = vi.hoisted(() => ({
 	loadWorkspaceBoardById: vi.fn(),
 	mutateWorkspaceState: vi.fn(),
+	// Prompt Library 的全局桶落在 kanban 根目录下。测试要一个自己的根，否则终端暂存用例会在
+	// 开发者**真实**的 ~/.cline/kanban 上取锁写文件。每次运行取唯一路径，避免并行 worker 互踩。
+	runtimeHomePath: `/tmp/kanban-runtime-api-test-home-${process.pid}-${Math.random().toString(16).slice(2)}`,
 }));
 
 vi.mock("../../../src/terminal/agent-registry.js", () => ({
@@ -145,10 +148,15 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 	// 漏一个符号不会报「未 mock」而是让整条 sendTaskChatMessage 被 catch 成 ok:false——
 	// 静默降级，所以新增运行时依赖时必须同步补齐这里。
 	getWorkspaceDirectoryPath: (workspaceId: string) => `/tmp/kanban-workspaces/${workspaceId}`,
+	getRuntimeHomePath: () => workspaceStateMocks.runtimeHomePath,
 	getWorkspacesRootPath: () => "/tmp/kanban-workspaces",
 	mutateWorkspaceState: workspaceStateMocks.mutateWorkspaceState,
 }));
 
+import {
+	getWorkspacePromptLibraryPath,
+	readWorkspacePromptLibrarySnapshot,
+} from "../../../src/state/prompt-library-store";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
 
@@ -4312,5 +4320,254 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		// 卡片字段已经改成用户选的那条通道，且**没有**被回滚。
 		const cardMutation = workspaceStateMocks.mutateWorkspaceState.mock.calls.length;
 		expect(cardMutation).toBeGreaterThan(0);
+	});
+});
+
+// W2 Ctrl+S 暂存的**顺序红线**：先写库、后清框。
+// 反过来一旦写库失败，用户打了一半的字既不在库里、又已被清出框，只剩 agent 自己的暂存区里一份
+// 用户未必知道存在的副本——那正是这一整条工作流要根除的「回执说成功、东西不在」。
+//
+// 同源的另外两条红线（都是「回执必须等于事实」）：
+//   - 清框要回传取文时的 incarnation 令牌，并且**返回值不许吞**：转发没做成时回执必须说「已入库但框没清」。
+//   - 整条链路跑在 manager 的 per-task 独占闸门里：连按 / 多标签页并发不得让同一份正文重复入库，
+//     被挡下的那一次也不许静默——用户按了键就得知道这一次为什么没生效。
+describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
+	const createdWorkspaceDirectoryPaths: string[] = [];
+
+	const STASH_CAPTURE_FIDELITY = {
+		softWrapJoinCount: 0,
+		foldedPastePlaceholderCount: 0,
+		backfilledPlaceholderCount: 0,
+		placeholdersLeftUnbackfilledBecausePayloadWasDropped: 0,
+		placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: 0,
+		placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: 0,
+		unrecoverablePasteCount: 0,
+	};
+
+	type StashCaptureStatus =
+		| "captured_stashable_text"
+		| "input_box_empty"
+		| "input_box_content_unreadable"
+		| "screen_text_not_corroborated_by_keystroke_tracking";
+
+	interface StashCaptureDouble {
+		status: StashCaptureStatus;
+		text: string;
+		fidelity: typeof STASH_CAPTURE_FIDELITY;
+		terminalSessionIncarnationToken: string;
+	}
+
+	function createStashCapture(
+		status: StashCaptureStatus,
+		text: string,
+		terminalSessionIncarnationToken = "incarnation-1",
+	): StashCaptureDouble {
+		return { status, text, fidelity: STASH_CAPTURE_FIDELITY, terminalSessionIncarnationToken };
+	}
+
+	// 串行化在真实链路里归 TerminalSessionManager（per-workspace 长驻单例）所有，handler 只是借它的闸门。
+	// 替身必须把这层一并模拟，否则并发用例测到的就不是真实形状。
+	function createPerTaskStashExclusivityDouble() {
+		const taskIdsWithAttemptInFlight = new Set<string>();
+		return async <AttemptResult>(
+			taskId: string,
+			runAttempt: () => Promise<AttemptResult>,
+			buildResultWhenAnotherAttemptIsAlreadyInFlight: () => AttemptResult,
+		): Promise<AttemptResult> => {
+			if (taskIdsWithAttemptInFlight.has(taskId)) {
+				return buildResultWhenAnotherAttemptIsAlreadyInFlight();
+			}
+			taskIdsWithAttemptInFlight.add(taskId);
+			try {
+				return await runAttempt();
+			} finally {
+				taskIdsWithAttemptInFlight.delete(taskId);
+			}
+		};
+	}
+
+	function createStashTerminalManagerDouble(args: {
+		capture: () => Promise<StashCaptureDouble | null>;
+		forward: (taskId: string, expectedTerminalSessionIncarnationToken: string) => boolean;
+	}) {
+		return {
+			captureTaskTerminalInputBoxContentForPromptLibraryStash: vi.fn(args.capture),
+			forwardStashKeyToClearTaskTerminalInputBox: vi.fn(args.forward),
+			runTaskTerminalInputBoxStashAttemptExclusivelyPerTask: createPerTaskStashExclusivityDouble(),
+		};
+	}
+
+	function createStashWorkspaceScope(): { workspaceId: string; workspacePath: string } {
+		const workspaceId = `stash-${process.pid}-${Math.random().toString(16).slice(2)}`;
+		createdWorkspaceDirectoryPaths.push(`/tmp/kanban-workspaces/${workspaceId}`);
+		return { workspaceId, workspacePath: "/tmp/repo" };
+	}
+
+	function createStashApi(scope: { workspaceId: string }, terminalManager: unknown) {
+		return createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => scope.workspaceId),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+	}
+
+	afterEach(() => {
+		for (const path of createdWorkspaceDirectoryPaths.splice(0)) {
+			rmSync(path, { recursive: true, force: true });
+		}
+		rmSync(workspaceStateMocks.runtimeHomePath, { recursive: true, force: true });
+	});
+
+	it("取到正文 → 写库成功之后才转发 Ctrl+S 清框，且带上取文时的 incarnation 令牌", async () => {
+		const scope = createStashWorkspaceScope();
+		const promptLibraryFileExistedWhenBoxWasCleared: boolean[] = [];
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("captured_stashable_text", "打了一半的输入"),
+			forward: () => {
+				promptLibraryFileExistedWhenBoxWasCleared.push(
+					existsSync(getWorkspacePromptLibraryPath(scope.workspaceId)),
+				);
+				return true;
+			},
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		expect(response.ok).toBe(true);
+		expect(response.outcome).toBe("stashed_into_prompt_library");
+		expect(response.stashedTextCharacterCount).toBe("打了一半的输入".length);
+		// 落盘的是真文件：条目进了这个任务自己的桶，并带上「用户在终端按了 Ctrl+S」这个来源。
+		const library = await readWorkspacePromptLibrarySnapshot(scope.workspaceId);
+		expect(library.taskScopedPromptsByTaskId["task-1"]).toEqual([
+			expect.objectContaining({
+				id: response.stashedPromptId,
+				text: "打了一半的输入",
+				scope: "task",
+				origin: "terminal_stash_by_user",
+			}),
+		]);
+		// 顺序红线：清框那一刻，库文件必须已经在磁盘上。
+		expect(promptLibraryFileExistedWhenBoxWasCleared).toEqual([true]);
+		// incarnation 红线：清框认的是取文时那条 PTY，不是「此刻这个 taskId 上碰巧有个 active」。
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).toHaveBeenCalledWith(
+			"task-1",
+			"incarnation-1",
+		);
+	});
+
+	it("写库期间终端被 refresh（清框被拒） → 回执必须说「已入库但框没清」，不许报纯成功", async () => {
+		const scope = createStashWorkspaceScope();
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("captured_stashable_text", "写库期间会被换代的输入"),
+			// 真实 manager 在令牌对不上时就是这样：拒绝转发，绝不把清框字节打到新会话上。
+			forward: () => false,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		expect(response.outcome).toBe("stashed_into_prompt_library_but_input_box_not_cleared");
+		// 正文确实进库了，这半边不能被说成失败——库里查得到才是真相。
+		expect(response.stashedPromptId).toBeTruthy();
+		const library = await readWorkspacePromptLibrarySnapshot(scope.workspaceId);
+		expect(library.taskScopedPromptsByTaskId["task-1"]).toEqual([
+			expect.objectContaining({ id: response.stashedPromptId, text: "写库期间会被换代的输入" }),
+		]);
+	});
+
+	it("同一 task 并发重入 → 只入库一次，被挡下的那次如实报「已有一次在进行中」", async () => {
+		const scope = createStashWorkspaceScope();
+		let releaseFirstCapture = (): void => {};
+		const firstCaptureCanFinish = new Promise<void>((resolve) => {
+			releaseFirstCapture = resolve;
+		});
+		let signalFirstCaptureHasStarted = (): void => {};
+		const firstCaptureHasStarted = new Promise<void>((resolve) => {
+			signalFirstCaptureHasStarted = resolve;
+		});
+		let captureCallCount = 0;
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => {
+				captureCallCount += 1;
+				signalFirstCaptureHasStarted();
+				// 第一次取文卡住，模拟「写库还没做完」的那段窗口——第二次按键正是在这里挤进来的。
+				await firstCaptureCanFinish;
+				return createStashCapture("captured_stashable_text", "连按两次 Ctrl+S 的同一份正文");
+			},
+			forward: () => true,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const firstResponse = api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+		// 等第一次真的进了闸门再按第二次，否则用例测的是「谁先跑到」而不是重入。
+		await firstCaptureHasStarted;
+		const secondResponse = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+		releaseFirstCapture();
+		const firstResponseResolved = await firstResponse;
+
+		expect(secondResponse.outcome).toBe("another_terminal_input_box_stash_attempt_already_in_flight_for_this_task");
+		expect(secondResponse.ok).toBe(false);
+		expect(secondResponse.stashedPromptId).toBeNull();
+		expect(firstResponseResolved.outcome).toBe("stashed_into_prompt_library");
+		// 重入的那次连取文都不该跑：否则两次读到同一份正文，各自以不同 promptId 各写一条。
+		expect(captureCallCount).toBe(1);
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).toHaveBeenCalledTimes(1);
+		const library = await readWorkspacePromptLibrarySnapshot(scope.workspaceId);
+		expect(library.taskScopedPromptsByTaskId["task-1"]).toHaveLength(1);
+	});
+
+	it("框是空的 → 不写库，但仍把 Ctrl+S 转发给 agent（保住这个键的原生语义）", async () => {
+		const scope = createStashWorkspaceScope();
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("input_box_empty", ""),
+			forward: () => true,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		expect(response.outcome).toBe("input_box_empty_nothing_to_stash");
+		expect(response.stashedPromptId).toBeNull();
+		expect(existsSync(getWorkspacePromptLibraryPath(scope.workspaceId))).toBe(false);
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).toHaveBeenCalledTimes(1);
+	});
+
+	it("没有可入库的正文、且连转发都没做成 → 不许硬说「已交给 agent 自己处理」", async () => {
+		const scope = createStashWorkspaceScope();
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("input_box_content_unreadable", ""),
+			forward: () => false,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		// 既没入库也没转发：什么都没发生，如实报「没有可信的终端会话」。
+		expect(response.outcome).toBe("no_active_terminal_session");
+		expect(response.stashedPromptId).toBeNull();
+	});
+
+	it("写库失败 → **不**清框，正文原样留在输入框里，回执如实报失败", async () => {
+		const scope = createStashWorkspaceScope();
+		// 在 workspace 目录本该在的位置放一个文件：存储层建目录时必然 ENOTDIR，写入确定性失败。
+		mkdirSync("/tmp/kanban-workspaces", { recursive: true });
+		writeFileSync(`/tmp/kanban-workspaces/${scope.workspaceId}`, "不是目录", "utf8");
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("captured_stashable_text", "会写失败的内容"),
+			forward: () => true,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		expect(response.ok).toBe(false);
+		expect(response.outcome).toBe("prompt_library_write_failed");
+		expect(response.error).toBeTruthy();
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).not.toHaveBeenCalled();
 	});
 });
