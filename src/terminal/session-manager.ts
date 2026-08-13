@@ -589,13 +589,24 @@ export function buildTerminalEnvironment(
 	options: TerminalEnvironmentOptions,
 	...sources: Array<Record<string, string | undefined> | undefined>
 ): Record<string, string | undefined> {
-	const env = {
+	const env: Record<string, string | undefined> = {
 		...process.env,
 		...Object.assign({}, ...sources),
 		COLORTERM: "truecolor",
 		TERM: "xterm-256color",
 		TERM_PROGRAM: "kanban",
 	};
+	// source 里值为 undefined 的键，语义是「抹掉继承自 process.env 的这一项」，必须真正删键：
+	// node-pty 会把留下来的 undefined 序列化成**字符串 "undefined"** 传给子进程，而这对任何
+	// 「只看变量存不存在」的消费者都是 truthy —— 等于把「抹除」写成了「设置成开」，与本意反号。
+	// 真实用例：Kanban 自己可能跑在一个 Claude Code 会话里，继承了它注入的 CLAUDE_CODE_* 变量，
+	// adapter 需要把这些污染抹掉才能按 Kanban 自己的意图起 agent（见 agent-session-adapters 的
+	// resolveClaudeCodeTerminalRenderingModeEnv）。
+	for (const [key, value] of Object.entries(env)) {
+		if (value === undefined) {
+			delete env[key];
+		}
+	}
 	if (options.forceColor) {
 		env.CLICOLOR = "1";
 		env.CLICOLOR_FORCE = "1";

@@ -2,10 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "../../../src/core/agent-catalog";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
-import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
+import {
+	KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR,
+	prepareAgentLaunch,
+} from "../../../src/terminal/agent-session-adapters";
 
 const originalHome = process.env.HOME;
 const originalAppData = process.env.APPDATA;
@@ -54,6 +57,7 @@ function getCodexConfigOverrideValues(args: string[], key: string): string[] {
 }
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	if (originalHome === undefined) {
 		delete process.env.HOME;
 	} else {
@@ -335,10 +339,30 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.args).not.toContain("--no-alt-screen");
 	});
 
-	it("launches Claude without alternate screen so terminal scrollback keeps session history", async () => {
+	it("launches Claude on the fullscreen renderer by default", async () => {
 		setupTempHome();
+		// Kanban 自己可能跑在一个 Claude Code 会话里，从而继承到它注入的这个变量。它在 Claude 的
+		// 判定顺序里排在 NO_FLICKER 之前，若原样传下去会把 fullscreen 否决掉——必须被抹成 undefined。
+		vi.stubEnv("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
 		const launch = await prepareAgentLaunch({
-			taskId: "task-claude-inline-history",
+			taskId: "task-claude-fullscreen-renderer",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+		});
+
+		expect(launch.env.CLAUDE_CODE_NO_FLICKER).toBe("1");
+		expect(launch.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBeUndefined();
+		expect(launch.env.FORCE_HYPERLINK).toBe("1");
+	});
+
+	it("falls back to the inline renderer when the Kanban escape hatch asks for it", async () => {
+		setupTempHome();
+		vi.stubEnv(KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR, "inline");
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-renderer-escape-hatch",
 			agentId: "claude",
 			binary: "claude",
 			args: [],
@@ -347,7 +371,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 
 		expect(launch.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBe("1");
-		expect(launch.env.FORCE_HYPERLINK).toBe("1");
+		expect(launch.env.CLAUDE_CODE_NO_FLICKER).toBeUndefined();
 	});
 
 	it("passes Claude task prompts as startup argv", async () => {

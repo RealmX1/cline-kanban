@@ -806,13 +806,50 @@ function applyClaudePermissionAndPlanModeArgs(args: string[], input: AgentAdapte
 	// ask_for_every_tool_use：不加任何旗标，走 Claude Code 自身的逐次询问默认。
 }
 
+// Kanban 侧的 Claude Code 渲染模式逃生阀。取值 "inline" 时退回旧的 main-screen 渲染，
+// 其余取值（含未设置）一律走 Kanban 默认的 fullscreen。
+//
+// 为什么另起一个 Kanban 命名空间的变量、而不是直接尊重继承来的 CLAUDE_CODE_* ：那些变量是
+// **Claude Code 注入给自己子进程的**，无法区分「用户表态」与「Kanban 恰好被一个 Claude Code
+// 会话启动」。若把继承值当表态，从 Claude Code 终端里起的 Kanban 会让全部 task agent 静默退回
+// inline，而用户从未做过这个选择。
+export const KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR = "KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE";
+
+// Claude Code 的 TUI 渲染模式（它自己 `/tui` 的两档：`fullscreen` / `default`）。Kanban 默认选
+// fullscreen——即 alt-screen 上的无闪烁渲染器，与 Codex 等其余 alt-screen agent 形态一致。
+//
+// 历史：2026-05-08「修复 Claude Code 交互式任务启动」曾写死 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
+// 把 Claude 摁成 inline，当时是为了让 deferred startup input 的就绪判定能在 normal buffer 的
+// 输出里看到提示符。该前提已经不成立：就绪与人机争用让路都改走 terminal-input-box-reader 的
+// 结构判定，而它读的是 TerminalStateMirror.getScreenSnapshot() → `buffer.active`，alt-screen 下
+// 读的正是 Claude 重绘的那块备用屏。真机实测（v2.1.228，cols=100）：fullscreen 下输入框画法不变
+// （两条 U+2500 边界线夹 `❯`），只是从屏顶移到屏底，readTerminalInputBox 照常命中。
+//
+// 代价是已知且与 Codex 同构的：alt-screen agent 的会话历史留在备用屏内、normal buffer 不增长，
+// 因此「阅读 scrollback transcript」入口对 Claude 会话不再出现（见 terminal-scrollback-transcript-extraction）。
+//
+// 为什么用 CLAUDE_CODE_NO_FLICKER 而不是写用户 settings.json 的 `tui` 键：env 在 Claude 的判定
+// 顺序里压过用户设置，才能保证「Kanban 起的会话默认 fullscreen」不被宿主机的 `/tui default` 偏好
+// 推翻；而写用户 settings 则会污染用户在 Kanban 之外的 Claude 会话。
+//
+// 两档都**成对**写出：另一档显式置 undefined 以抹掉继承值（buildTerminalEnvironment 会据此删键）。
+// 缺了这一步，从 Claude Code 会话里起的 Kanban 会把继承来的 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
+// 一路传下去——它在 Claude 的判定顺序里排在 NO_FLICKER 之前，会把 fullscreen 直接否决掉。
+function resolveClaudeCodeTerminalRenderingModeEnv(): Record<string, string | undefined> {
+	const requestedMode = process.env[KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR]?.trim().toLowerCase();
+	if (requestedMode === "inline") {
+		return { CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1", CLAUDE_CODE_NO_FLICKER: undefined };
+	}
+	return { CLAUDE_CODE_NO_FLICKER: "1", CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: undefined };
+}
+
 const claudeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "claude");
 		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {
-			CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1",
+			...resolveClaudeCodeTerminalRenderingModeEnv(),
 			FORCE_HYPERLINK: "1",
 		};
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
