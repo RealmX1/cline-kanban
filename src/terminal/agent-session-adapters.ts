@@ -736,12 +736,29 @@ function withPrompt(args: string[], prompt: string, mode: "append" | "flag", fla
 	};
 }
 
+// Wraps a command in bracketed-paste framing WITHOUT the trailing Enter, so the caller can write
+// the framing and the submitting CR as two separate writes.
+//
+// 为什么必须能分开写：把 `ESC[200~…ESC[201~CR` 拼进同一次 write 时，TUI 在重绘中途一次性收到整串，
+// 实测会把末尾 CR 连同 `ESC[201~` 一起吞掉——文本粘进输入框但不发送（2026-08-08 事故的形态 2）。
+// 分两次写、且第二次以「TUI 已摄入这段 paste」为门，才真正消掉这个竞态；门控实现在 session-manager 的
+// writePasteSubmissionWithConfirm，补发裸 CR 的确认链自此退居真正的 backstop。
+export function toBracketedPasteFramingWithoutTrailingSubmit(command: string): string {
+	return `\u001b[200~${command}\u001b[201~`;
+}
+
+// 提交用的那个单独的 CR。写成 \u 转义而非字面量：控制字符在编辑器里不可见，极易在复制粘贴中被悄悄弄丢。
+export const BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN = "\u000d";
+
 // Wraps a command in bracketed-paste framing so a TUI agent (Claude Code, Codex)
 // treats it as a single pasted submission terminated by Enter. Exported so the
 // output-reactions framework can inject continuation prompts through the same
 // mechanism used for deferred startup input.
+//
+// ⚠️ 这个合并形态仍把 CR 拼在同一串里，故只保留给 deferred startup input 那条路径（启动时注入一次，
+// 自带就绪 deadline 兜底）。程序化投递与连接中断续跑一律改走上面两个导出分离写。
 export function toBracketedPasteSubmission(command: string): string {
-	return `\u001b[200~${command}\u001b[201~\r`;
+	return `${toBracketedPasteFramingWithoutTrailingSubmit(command)}${BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN}`;
 }
 
 function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string | null {

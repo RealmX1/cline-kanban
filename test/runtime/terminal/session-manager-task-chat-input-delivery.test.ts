@@ -17,12 +17,15 @@ vi.mock("../../../src/diagnostics/tui-freeze-logger.js", () => ({
 	},
 }));
 
-// toBracketedPasteSubmission 用哨兵替身：本套件验证 submitTaskChatInputWhenReady 的「就绪门控 +
-// 以原始文本委托编码 + 写一次 + Codex 置位」契约；bracketed-paste + 末尾单 CR 的真实编码由
+// paste 框架用哨兵替身：本套件验证 submitTaskChatInputWhenReady 的「就绪门控 + 争用让路 +
+// 以原始文本委托编码 + 分离写 + Codex 置位」契约；bracketed-paste 的真实编码由
 // agent-session-adapters 自身单测与 session-manager-connection-drop 集成测试覆盖。
 vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
 	prepareAgentLaunch: prepareAgentLaunchMock,
-	toBracketedPasteSubmission: (command: string) => `SUBMIT[${command}]`,
+	// 形态 2 之后，投递路径写的是「paste 框架」+「单独的提交 CR」两次。哨兵只替身框架那一半，
+	// CR 用真实字节，于是「分两次写、第二次才是 CR」这条契约在断言里看得见。
+	toBracketedPasteFramingWithoutTrailingSubmit: (command: string) => `SUBMIT[${command}]`,
+	BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN: "\u000d",
 }));
 
 vi.mock("../../../src/terminal/pty-session.js", () => ({
@@ -43,6 +46,12 @@ import {
 	TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS,
 	TerminalSessionManager,
 } from "../../../src/terminal/session-manager";
+import {
+	createTerminalInputBoxOccupancyTrackerState,
+	recordTerminalInputBytesIntoOccupancyTracker,
+	resetTerminalInputBoxOccupancyTrackerComposition,
+	type TerminalInputBoxOccupancyTrackerState,
+} from "../../../src/terminal/terminal-input-box-occupancy";
 
 interface MockSpawnRequest {
 	env?: Record<string, string | undefined>;
@@ -92,6 +101,13 @@ const USER_INPUT_SUPPRESS_MS = 8_000;
 // Fix B 让位的饿死上限（TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS）。
 const MAX_USER_TURN_YIELD_MS = 120_000;
 const DEADLINE_PLUS_MAX_YIELD_MS = 60_000 + 15_000;
+// 分离写的摄入证据等待预算（PASTE_INGESTION_EVIDENCE_MAX_WAIT_BEFORE_SUBMIT_MS）。本套件的 fake PTY
+// 不回流输出 ⇒ 证据永不出现 ⇒ 每次都等满预算才单独发出提交 CR，确认链自那一刻才起跑。
+const PASTE_INGESTION_MAX_WAIT_MS = 1_500;
+// 摄入证据的轮询间隔（PASTE_INGESTION_EVIDENCE_POLL_BEFORE_SUBMIT_MS）。
+const PASTE_INGESTION_EVIDENCE_POLL_MS = 60;
+// 「人此刻在不在这个终端跟前」的判据窗（HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS）。
+const HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS = 5 * 60_000;
 // 写后确认闭环常量（须与 session-manager.ts 同步）：确认延时 2.5s、最多补发 3 次裸回车。
 const SUBMIT_CONFIRM_DELAY_MS = 2_500;
 const SUBMIT_CONFIRM_MAX_RESENDS = 3;
@@ -112,6 +128,8 @@ function installFakeClaudeEntry(
 		// 直接给三元 facet 时走 facet 权威路径（resolveSessionFacets 要求三者同时非 undefined），
 		// 用于构造 legacy reviewReason 投影不出来的模态待答态（question / plan_review / permission）。
 		facets?: { turnOwner: string | null; liveness: string; userTurnKind: string | null };
+		// 让用例直接给一份「人类已经打了字、尚未提交」的输入侧账本，用于争用分层。
+		inputBoxOccupancyTracker?: TerminalInputBoxOccupancyTrackerState;
 	},
 ) {
 	const write = vi.fn();
@@ -136,6 +154,11 @@ function installFakeClaudeEntry(
 			submitConfirmGeneration: 0,
 			programmaticDeliveryReceipt: null,
 			awaitingCodexPromptAfterEnter: false,
+			// 争用判据（框空即放行）读它；默认空账本 = 输入侧说「框里没有未提交内容」。
+			inputBoxOccupancyTracker: options.inputBoxOccupancyTracker ?? createTerminalInputBoxOccupancyTrackerState(),
+			// paste 摄入证据的计数器；fake PTY 不产生输出，故恒为 0，摄入门控每次都走到预算上限再发 CR。
+			ptyOutputChunkArrivalSequenceNumber: 0,
+			terminalSessionIncarnationToken: `${taskId}-incarnation`,
 		},
 		// 就绪判定读 getViewportSnapshot（活动屏，scrollback:0）；fake 的 mirrorSnapshot 即视口内容。
 		terminalStateMirror: {
@@ -238,20 +261,28 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		manager.stopTaskSession("task-deliver-later");
 	});
 
-	it("始终未就绪：到 deadline 兜底强制写入且仅一次", async () => {
+	it("始终未就绪：deadline 到点不再无条件强写，转终态 delivery_failed{terminal_prompt_readiness_timeout}", async () => {
+		// 形态 3 的行为反转。旧实现在这里 best-effort 强写，于是「TUI 从没就绪过」永远不会成为失败，
+		// 调用方拿到的回执与真实情况脱节；文本还被泼进一个未知形态的界面。
 		const getSession = spawnManagerWithSession(2003);
 		const manager = new TerminalSessionManager();
 		await startSession(manager, "task-deliver-deadline");
 		const session = getSession();
 		const write = (session as NonNullable<typeof session>).write;
 
-		manager.submitTaskChatInputWhenReady("task-deliver-deadline", "继续 RVF");
+		const outcomes: { status: string; reason: string | null }[] = [];
+		manager.submitTaskChatInputWhenReady("task-deliver-deadline", "继续 RVF", {
+			idempotencyKey: "key-readiness-timeout",
+			onDeliveryOutcome: (outcome) => {
+				outcomes.push({ status: outcome.status, reason: outcome.reason });
+			},
+		});
 		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
-		// 只数「paste 投递」（`SUBMIT[…]`）：deadline 兜底写入后，mock 始终静默（无输出回流）会触发写后确认补发裸 `\r`，
-		// 那是另一条安全层、非投递；paste 投递应恒为一次。
+
 		const pasteSubmissions = write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["));
-		expect(pasteSubmissions).toHaveLength(1);
-		expect(pasteSubmissions[0]?.[0]).toBe("SUBMIT[继续 RVF]");
+		expect(pasteSubmissions).toHaveLength(0);
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "terminal_prompt_readiness_timeout" }]);
+		expect(tuiFreezeErrors.some((line) => line.includes("reason=terminal_prompt_readiness_timeout"))).toBe(true);
 
 		manager.stopTaskSession("task-deliver-deadline");
 	});
@@ -297,25 +328,36 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		expect(outcomes).toHaveLength(1);
 	});
 
-	it("Codex：deadline 兜底写入后置位 awaitingCodexPromptAfterEnter（末尾 CR 即回车）", async () => {
+	// enter 守卫（awaitingCodexPromptAfterEnter）的语义是「刚刚发过回车、下一个 prompt-ready 该被消费」，
+	// 所以它必须跟着**提交 CR** 置位，而不是跟着 paste 框架。分离写之后这两件事相差最多一个摄入等待窗
+	// （1.5s）：窗内 codex 的 paste 回显会重画行首 `›`、触发 prompt-ready，若守卫已提前武装，那一帧就会被
+	// 当成「回车已发」，把 awaiting_review 误翻成 running——而消息其实一个字节都还没提交。
+	it("Codex：awaitingCodexPromptAfterEnter 跟着提交 CR 置位，摄入等待窗内不武装", async () => {
 		const getSession = spawnManagerWithSession(2005);
 		const manager = new TerminalSessionManager();
 		await startSession(manager, "task-deliver-codex", { agentId: "codex" });
 		const session = getSession();
 		const write = (session as NonNullable<typeof session>).write;
+		const readAwaitingFlag = (): boolean | undefined =>
+			(
+				manager as unknown as {
+					entries: Map<string, { active: { awaitingCodexPromptAfterEnter: boolean } | null }>;
+				}
+			).entries.get("task-deliver-codex")?.active?.awaitingCodexPromptAfterEnter;
 
+		// codex 的就绪信号走扫描缓冲快路径（尚未建模输入框结构）。
+		(session as NonNullable<typeof session>).triggerData("OpenAI Codex (v1.0.0)\n› ");
 		manager.submitTaskChatInputWhenReady("task-deliver-codex", "继续 RVF");
-		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
-		// 只数 paste 投递（写后确认在 mock 静默下补发的裸 `\r` 不计入）。
-		const pasteSubmissions = write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["));
-		expect(pasteSubmissions).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["))).toHaveLength(1);
+		// 摄入等待窗内：CR 尚未写出 ⇒ enter 守卫必须仍未武装。
+		expect(write.mock.calls.some((call) => String(call[0]) === "\r")).toBe(false);
+		expect(readAwaitingFlag()).toBe(false);
 
-		const awaitingFlag = (
-			manager as unknown as {
-				entries: Map<string, { active: { awaitingCodexPromptAfterEnter: boolean } | null }>;
-			}
-		).entries.get("task-deliver-codex")?.active?.awaitingCodexPromptAfterEnter;
-		expect(awaitingFlag).toBe(true);
+		// 摄入预算耗尽 ⇒ 提交 CR 单独写出 ⇒ 此刻才置位。
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
+		expect(write.mock.calls.some((call) => String(call[0]) === "\r")).toBe(true);
+		expect(readAwaitingFlag()).toBe(true);
 
 		manager.stopTaskSession("task-deliver-codex");
 	});
@@ -348,6 +390,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
+				inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+				ptyOutputChunkArrivalSequenceNumber: 0,
 				awaitingCodexPromptAfterEnter: false,
 			},
 			terminalStateMirror: {
@@ -394,6 +438,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
+				inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+				ptyOutputChunkArrivalSequenceNumber: 0,
 				awaitingCodexPromptAfterEnter: false,
 			},
 			terminalStateMirror: {
@@ -438,6 +484,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
+				inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+				ptyOutputChunkArrivalSequenceNumber: 0,
 				awaitingCodexPromptAfterEnter: false,
 			},
 			terminalStateMirror: {
@@ -454,9 +502,9 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		expect(write).not.toHaveBeenCalled();
 
-		// 仍由 deadline 兜底，行为与就绪门控引入前一致。
+		// 到 deadline 也不写：装饰性横线不是输入框，硬写就是把 paste 泼进正在出输出的屏幕。
 		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
-		expect(write).toHaveBeenCalledTimes(1);
+		expect(write).not.toHaveBeenCalled();
 	});
 
 	it("镜像就绪只看当前视口：提示符仅存在于 scrollback 历史时不判就绪（仅 deadline 兜底）", async () => {
@@ -489,6 +537,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
+				inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+				ptyOutputChunkArrivalSequenceNumber: 0,
 				awaitingCodexPromptAfterEnter: false,
 			},
 			// 真实 mirror 的 getViewportSnapshot 只序列化活动屏（scrollback:0）——提示符框只存在于
@@ -511,10 +561,10 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		expect(write).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(RECHECK_MS);
 		expect(write).not.toHaveBeenCalled();
-		// 始终非就绪 → 只在 deadline 兜底写入一次。
+		// 始终非就绪 → 一个字节都不写，最终以 terminal_prompt_readiness_timeout 收尾。
 		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
-		expect(write).toHaveBeenCalledTimes(1);
-		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+		expect(write).not.toHaveBeenCalled();
+		expect(tuiFreezeErrors.some((line) => line.includes("reason=terminal_prompt_readiness_timeout"))).toBe(true);
 	});
 
 	it("扫描缓冲里的陈旧提示符不判就绪：Claude 正在出输出时不提前投递（仅 deadline 兜底）", async () => {
@@ -555,6 +605,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
+				inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+				ptyOutputChunkArrivalSequenceNumber: 0,
 				awaitingCodexPromptAfterEnter: false,
 			},
 			terminalStateMirror: {
@@ -573,14 +625,11 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		await vi.advanceTimersByTimeAsync(RECHECK_MS);
 		expect(write).not.toHaveBeenCalled();
 
-		// 始终非就绪 → 只在 deadline 兜底写入一次，且 via=deadline-fallback（不是 prompt-ready）。
+		// 始终非就绪 → 一个字节都不写（旧实现在这里 deadline 强写，via=deadline-fallback）。
 		await vi.advanceTimersByTimeAsync(PAST_DEADLINE_MS);
-		expect(write).toHaveBeenCalledTimes(1);
-		expect(
-			tuiFreezeWarnings.some(
-				(line) => line.includes("task-chat-input-delivered") && line.includes("via=deadline-fallback"),
-			),
-		).toBe(true);
+		expect(write).not.toHaveBeenCalled();
+		expect(tuiFreezeWarnings.some((line) => line.includes("task-chat-input-delivered"))).toBe(false);
+		expect(tuiFreezeErrors.some((line) => line.includes("reason=terminal_prompt_readiness_timeout"))).toBe(true);
 	});
 
 	it("尚未建模输入框结构的 agent（codex）：扫描缓冲快路径保持既有语义，命中即投递", async () => {
@@ -604,6 +653,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
+				inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+				ptyOutputChunkArrivalSequenceNumber: 0,
 				awaitingCodexPromptAfterEnter: false,
 			},
 			// 镜像通道给不出就绪信号：若快路径被误删，本例只能拖到 deadline，测试即失败。
@@ -667,6 +718,8 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
+				inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+				ptyOutputChunkArrivalSequenceNumber: 0,
 				awaitingCodexPromptAfterEnter: false,
 			},
 			terminalStateMirror: {
@@ -732,51 +785,480 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		).toBe(true);
 	});
 
-	it("A1 让路：就绪（框在）但用户近 8s 内手敲 → 沉降后不插队；越过抑制窗后的下一轮才投递", async () => {
+	// 形态 3：让路判据从「距上次击键不足 8s」换成读框。旧判据分不出「刚敲完回车提交了」（框已空，
+	// 正该投）与「打了一半停下来想」（框非空，一个字节都不能写），于是前者白等 8s、后者被强写插字。
+	it("框空即放行：用户刚敲过但内容已提交（输入侧账本为空）→ 不再白等 8s 抑制窗，沉降后即投递", async () => {
 		const manager = new TerminalSessionManager();
-		const typedAt = Date.now();
-		const { write } = installFakeClaudeEntry(manager, "task-deliver-yield", {
+		const { write } = installFakeClaudeEntry(manager, "task-deliver-clear-box", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
 			state: "running",
-			lastUserInputAt: typedAt,
+			// 刚刚才敲过（旧判据下必让路），但账本里没有未提交内容 —— 因为那一敲是回车、消息已提交。
+			lastUserInputAt: Date.now(),
 		});
 
-		manager.submitTaskChatInputWhenReady("task-deliver-yield", "继续 RVF");
-		// 就绪命中（框在镜像视口），但用户近 OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS 内手敲过 → 让路、不写。
+		manager.submitTaskChatInputWhenReady("task-deliver-clear-box", "继续 RVF");
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
-		expect(write).not.toHaveBeenCalled();
-		// 推进越过抑制窗（其间不再刷新 lastUserInputAt = 用户停手）→ 下一轮 recheck 放行投递。
-		await vi.advanceTimersByTimeAsync(USER_INPUT_SUPPRESS_MS + RECHECK_MS);
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
 		expect(tuiFreezeWarnings.some((m) => m.includes("via=prompt-ready"))).toBe(true);
 	});
 
-	it("A1 防饿死：用户持续手敲不停 → 在 deadline + MAX_DEADLINE_INPUT_YIELD_MS 硬上限保底强写一次", async () => {
+	it("争用挂起：框非空且人在场 → 一个字节都不写、不抢占，预算耗尽转 delivery_failed{human_terminal_contention_timeout}", async () => {
 		const manager = new TerminalSessionManager();
-		const base = Date.now();
-		const { write, entry } = installFakeClaudeEntry(manager, "task-deliver-starve", {
+		const trackerWithHalfTypedSentence = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(trackerWithHalfTypedSentence, Buffer.from("我正在打一半", "utf8"));
+		const { write, entry } = installFakeClaudeEntry(manager, "task-contention-hold", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
 			state: "running",
-			lastUserInputAt: base,
+			lastUserInputAt: Date.now(),
+			inputBoxOccupancyTracker: trackerWithHalfTypedSentence,
 		});
+		let preemptiveStashCalls = 0;
+		const outcomes: { status: string; reason: string | null }[] = [];
 
-		manager.submitTaskChatInputWhenReady("task-deliver-starve", "继续 RVF");
+		manager.submitTaskChatInputWhenReady("task-contention-hold", "继续 RVF", {
+			idempotencyKey: "key-contention-hold",
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			mayAutoStashAbsentHumanInputBox: true,
+			preemptivelyStashHumanInputBox: async () => {
+				preemptiveStashCalls += 1;
+				return true;
+			},
+		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		expect(write).not.toHaveBeenCalled();
+		// 挂起必须看得见：派生 sidecar 上了会话广播，且明说「不会自动放行、等你处理」。
+		expect(entry.summary.terminalDeliveryContention).toEqual({
+			pendingProgrammaticDeliveryCount: 1,
+			inputBoxHasUncommittedText: true,
+			waitingForHumanBecauseAutomaticPreemptionIsUnavailable: true,
+		});
 
-		// 模拟连续打字：每个 recheck 间隔前把 lastUserInputAt 刷新到当前时刻，使 A1 让路条件恒成立——
-		// 直到越过 deadline(60s) + MAX(15s) 硬上限，投递无条件保底强写（守住「投递绝不丢」）。
+		// 人一直在场（每拍刷新 lastUserInputAt）→ 恒不抢占，一直挂到预算耗尽。
 		for (
 			let elapsed = SETTLE_MS;
-			elapsed < DEADLINE_PLUS_MAX_YIELD_MS + RECHECK_MS && write.mock.calls.length === 0;
+			elapsed < DEADLINE_PLUS_MAX_YIELD_MS + RECHECK_MS && outcomes.length === 0;
 			elapsed += RECHECK_MS
 		) {
 			entry.active.lastUserInputAt = Date.now();
 			await vi.advanceTimersByTimeAsync(RECHECK_MS);
 		}
+		expect(preemptiveStashCalls).toBe(0);
+		expect(write).not.toHaveBeenCalled();
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "human_terminal_contention_timeout" }]);
+		// 收尾后不再有人在等这个框，挂起可见性必须随之消失。
+		expect(entry.summary.terminalDeliveryContention ?? null).toBeNull();
+	});
+
+	it("自动暂存抢占：框非空但人不在场 → 先把人类输入无损存进 Prompt Library，清框后的下一拍才投递", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerWithAbandonedSentence = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerWithAbandonedSentence,
+			Buffer.from("走开前留下的半句", "utf8"),
+		);
+		const { write, entry } = installFakeClaudeEntry(manager, "task-contention-preempt", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			// 很久没敲过 = 人不在场（判据窗是分钟量级）。
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerWithAbandonedSentence,
+		});
+		let preemptiveStashCalls = 0;
+
+		manager.submitTaskChatInputWhenReady("task-contention-preempt", "继续 RVF", {
+			mayAutoStashAbsentHumanInputBox: true,
+			preemptivelyStashHumanInputBox: async () => {
+				preemptiveStashCalls += 1;
+				// 真实执行者写库成功后会转发 Ctrl+S 清框；账本随之作废，这里等价模拟。
+				resetTerminalInputBoxOccupancyTrackerComposition(trackerWithAbandonedSentence);
+				return true;
+			},
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		// 抢占这一拍只暂存、不写：清框后要重新走完整判定（就绪 + 读框）再投。
+		expect(preemptiveStashCalls).toBe(1);
+		expect(write).not.toHaveBeenCalled();
+
+		await vi.advanceTimersByTimeAsync(RECHECK_MS);
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+		expect(preemptiveStashCalls).toBe(1);
+		expect(entry.summary.terminalDeliveryContention ?? null).toBeNull();
+	});
+
+	// 抢占的授权前提是「人不在场」，但那是**进入抢占前**的读数：抢占执行者要跨读框沉降、prompt library
+	// 文件锁与落盘，回来时框已经被清了。人在这段窗口里回到终端开始打字，就成了「人在场时机器动了框」——
+	// 本轮的核心不变量被破坏。守卫下沉到链路上最后一个由 manager 说了算的点（转发清框键那一刻）。
+	it("抢占在途人回到终端打字 → 转发清框被前提闩拒掉，投递退回挂起而不是照写", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerWithAbandonedSentence = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerWithAbandonedSentence,
+			Buffer.from("走开前留下的半句", "utf8"),
+		);
+		const { write, entry } = installFakeClaudeEntry(manager, "task-contention-human-returned", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerWithAbandonedSentence,
+		});
+		const forwardResults: boolean[] = [];
+
+		manager.submitTaskChatInputWhenReady("task-contention-human-returned", "继续 RVF", {
+			mayAutoStashAbsentHumanInputBox: true,
+			// 真实执行者的形状：写库成功后经 manager 转发清框，并把转发结果当作自己的返回值
+			// （「入库且框已清」才算放行）。这里在转发之前让人回到终端敲一下字。
+			preemptivelyStashHumanInputBox: async (taskId) => {
+				entry.active.lastUserInputAt = Date.now();
+				const cleared = manager.forwardStashKeyToClearTaskTerminalInputBox(
+					taskId,
+					entry.active.terminalSessionIncarnationToken,
+				);
+				forwardResults.push(cleared);
+				return cleared;
+			},
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+
+		// 转发被拒 ⇒ 框里内容一个字没少（清框键都没写出去），投递这一拍不写。
+		expect(forwardResults).toEqual([false]);
+		expect(write).not.toHaveBeenCalled();
+		// 下一拍重探时人已在场、框仍非空 ⇒ 恒不抢占，继续挂起等人处理。
+		await vi.advanceTimersByTimeAsync(RECHECK_MS);
+		expect(write).not.toHaveBeenCalled();
+		expect(entry.summary.terminalDeliveryContention).toEqual({
+			pendingProgrammaticDeliveryCount: 1,
+			inputBoxHasUncommittedText: true,
+			waitingForHumanBecauseAutomaticPreemptionIsUnavailable: true,
+		});
+	});
+
+	// 对照：W2 用户自己按 Ctrl+S 那条路径从不武装前提闩，所以「刚敲完字就按 Ctrl+S」必须照常清框——
+	// 那正是这个键的用途。守卫只对机器发起的抢占生效。
+	// 抢占在途期间这条投递被取消 / 被更晚的投递取代 ⇒ 授权它清框的那份前提已经作废。清框发生在
+	// 抢占执行者内部（manager 的代际复查在 await 之后才跑），所以拦截点只能在转发那一刻。
+	it("抢占在途被取消 → 转发清框必须拒掉，作废的投递不许再动人类的框", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerWithAbandonedSentence = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerWithAbandonedSentence,
+			Buffer.from("走开前留下的半句", "utf8"),
+		);
+		const { write, entry } = installFakeClaudeEntry(manager, "task-contention-cancelled-midflight", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerWithAbandonedSentence,
+		});
+		const forwardResults: boolean[] = [];
+
+		manager.submitTaskChatInputWhenReady("task-contention-cancelled-midflight", "继续 RVF", {
+			idempotencyKey: "key-cancelled-midflight",
+			onDeliveryOutcome: () => {},
+			mayAutoStashAbsentHumanInputBox: true,
+			preemptivelyStashHumanInputBox: async (taskId) => {
+				// 抢占已经在途（库都写完了），此刻这条投递被取消。
+				manager.cancelTaskChatInputDelivery(taskId, "key-cancelled-midflight");
+				const cleared = manager.forwardStashKeyToClearTaskTerminalInputBox(
+					taskId,
+					entry.active.terminalSessionIncarnationToken,
+				);
+				forwardResults.push(cleared);
+				return cleared;
+			},
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+
+		expect(forwardResults).toEqual([false]);
+		expect(write).not.toHaveBeenCalled();
+	});
+
+	it("抢占在途被更晚的投递取代 → 转发清框同样必须拒掉", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerWithAbandonedSentence = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerWithAbandonedSentence,
+			Buffer.from("走开前留下的半句", "utf8"),
+		);
+		const { entry } = installFakeClaudeEntry(manager, "task-contention-superseded-midflight", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerWithAbandonedSentence,
+		});
+		const forwardResults: boolean[] = [];
+
+		manager.submitTaskChatInputWhenReady("task-contention-superseded-midflight", "旧的一条", {
+			mayAutoStashAbsentHumanInputBox: true,
+			preemptivelyStashHumanInputBox: async (taskId) => {
+				// 抢占在途时来了更晚的一条投递：代际自增，旧的这条就此作废。
+				manager.submitTaskChatInputWhenReady(taskId, "更晚的一条");
+				const cleared = manager.forwardStashKeyToClearTaskTerminalInputBox(
+					taskId,
+					entry.active.terminalSessionIncarnationToken,
+				);
+				forwardResults.push(cleared);
+				return cleared;
+			},
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+
+		expect(forwardResults).toEqual([false]);
+	});
+
+	it("用户手按 Ctrl+S：即便此刻刚敲过字，转发清框也必须放行（守卫只拦机器发起的抢占）", async () => {
+		const manager = new TerminalSessionManager();
+		const { entry } = installFakeClaudeEntry(manager, "task-manual-stash-after-typing", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: Date.now(),
+		});
+
+		expect(
+			manager.forwardStashKeyToClearTaskTerminalInputBox(
+				"task-manual-stash-after-typing",
+				entry.active.terminalSessionIncarnationToken,
+			),
+		).toBe(true);
+	});
+
+	it("never_preempt（关掉自动抢占）：人不在场也绝不动框，恒定挂起到预算耗尽", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerWithAbandonedSentence = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerWithAbandonedSentence,
+			Buffer.from("走开前留下的半句", "utf8"),
+		);
+		const { write } = installFakeClaudeEntry(manager, "task-contention-never-preempt", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerWithAbandonedSentence,
+		});
+		let preemptiveStashCalls = 0;
+		const outcomes: { status: string; reason: string | null }[] = [];
+
+		manager.submitTaskChatInputWhenReady("task-contention-never-preempt", "继续 RVF", {
+			idempotencyKey: "key-never-preempt",
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			mayAutoStashAbsentHumanInputBox: false,
+			preemptivelyStashHumanInputBox: async () => {
+				preemptiveStashCalls += 1;
+				return true;
+			},
+		});
+		await vi.advanceTimersByTimeAsync(DEADLINE_PLUS_MAX_YIELD_MS + RECHECK_MS);
+		expect(preemptiveStashCalls).toBe(0);
+		expect(write).not.toHaveBeenCalled();
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "human_terminal_contention_timeout" }]);
+	});
+
+	it("有还原不了的粘贴时降级为挂起：绝不为投递成功率去赌一段还原不了的人类输入", async () => {
+		const manager = new TerminalSessionManager();
+		// 同一次组合里粘贴超过账本条目上限（32）→ 溢出的那些只记数、不留正文，unrecoverablePasteCount > 0。
+		const trackerWithUnrecoverablePaste = createTerminalInputBoxOccupancyTrackerState();
+		for (let index = 0; index < 33; index += 1) {
+			recordTerminalInputBytesIntoOccupancyTracker(
+				trackerWithUnrecoverablePaste,
+				Buffer.from(`\u001b[200~片段${index}\u001b[201~`, "utf8"),
+			);
+		}
+		expect(trackerWithUnrecoverablePaste.unrecoverablePasteCount).toBeGreaterThan(0);
+		const { write } = installFakeClaudeEntry(manager, "task-contention-unrecoverable", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerWithUnrecoverablePaste,
+		});
+		let preemptiveStashCalls = 0;
+		const outcomes: { status: string; reason: string | null }[] = [];
+
+		manager.submitTaskChatInputWhenReady("task-contention-unrecoverable", "继续 RVF", {
+			idempotencyKey: "key-unrecoverable",
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			mayAutoStashAbsentHumanInputBox: true,
+			preemptivelyStashHumanInputBox: async () => {
+				preemptiveStashCalls += 1;
+				return true;
+			},
+		});
+		await vi.advanceTimersByTimeAsync(DEADLINE_PLUS_MAX_YIELD_MS + RECHECK_MS);
+		expect(preemptiveStashCalls).toBe(0);
+		expect(write).not.toHaveBeenCalled();
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "human_terminal_contention_timeout" }]);
+	});
+
+	it("屏上有字但输入侧从未见过这条 PTY 的人类字节 → 既不写也不抢占，挂到预算耗尽", async () => {
+		// 用户只经 tmux / 原生终端直连同一 PTY 时，输入侧这只眼睛是瞎的，必须采信读屏。
+		const manager = new TerminalSessionManager();
+		const boundary = "─".repeat(80);
+		const viewportWithTypedText = [
+			"  ⏺ 上一轮 agent 输出",
+			boundary,
+			"❯ 有人从 tmux 里打了半句",
+			boundary,
+			"  ⏸ manual mode on",
+		].join("\n");
+		const { write } = installFakeClaudeEntry(manager, "task-contention-uncorroborated", {
+			mirrorSnapshot: viewportWithTypedText,
+			state: "running",
+			lastUserInputAt: null,
+		});
+		let preemptiveStashCalls = 0;
+		const outcomes: { status: string; reason: string | null }[] = [];
+
+		manager.submitTaskChatInputWhenReady("task-contention-uncorroborated", "继续 RVF", {
+			idempotencyKey: "key-uncorroborated",
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			mayAutoStashAbsentHumanInputBox: true,
+			preemptivelyStashHumanInputBox: async () => {
+				preemptiveStashCalls += 1;
+				return true;
+			},
+		});
+		await vi.advanceTimersByTimeAsync(DEADLINE_PLUS_MAX_YIELD_MS + RECHECK_MS);
+		// 不抢占：抢占要入库，而这段文本可能是 agent 自绘的 UI 文案，存进库就是把它冒充成用户资产。
+		expect(preemptiveStashCalls).toBe(0);
+		expect(write).not.toHaveBeenCalled();
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "human_terminal_contention_timeout" }]);
+	});
+
+	// 硬约束的钉子：读屏对**未建模输入框语法**的 agent（codex / kimi / droid）恒无结论。若把「读不出框」
+	// 一律当成争用，它们的每一条程序化投递都会挂到预算耗尽、100% 以 human_terminal_contention_timeout
+	// 收场——比本轮修复前更差。对它们，输入侧字节跟踪才是判空的唯一主力，必须照常放行。
+	it("未建模输入框语法的 agent（codex）：读屏恒无结论 + 输入侧从未见过人类字节 → 仍照常投递，绝不挂起", async () => {
+		const manager = new TerminalSessionManager();
+		const write = vi.fn();
+		const summary = {
+			taskId: "task-codex-no-box-grammar",
+			agentId: "codex",
+			state: "running",
+		} as unknown as RuntimeTaskSessionSummary;
+		const entry = {
+			summary,
+			active: {
+				session: { write },
+				// codex 走扫描缓冲快路径判就绪（它没有可读的输入框结构）。
+				outputReactionScanBuffer: "OpenAI Codex (v1.0.0)\n› ",
+				outputReactionEngine: null,
+				outputReactionSession: null,
+				deferredStartupInput: null,
+				lastUserInputAt: null,
+				taskChatInputDeliveryTimer: null,
+				taskChatInputDeliveryGeneration: 0,
+				submitConfirmTimer: null,
+				submitConfirmGeneration: 0,
+				programmaticDeliveryReceipt: null,
+				awaitingCodexPromptAfterEnter: false,
+				// 从未 writeInput：输入侧这只眼睛也没接上人。两只眼睛都闭着，但对 codex 只能放行。
+				inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+				ptyOutputChunkArrivalSequenceNumber: 0,
+				terminalSessionIncarnationToken: "task-codex-no-box-grammar-incarnation",
+			},
+			terminalStateMirror: {
+				getSnapshot: async () => ({ snapshot: "正在执行…", cols: 80, rows: 3 }),
+				getViewportSnapshot: async () => ({ snapshot: "正在执行…", cols: 80, rows: 3 }),
+				getScreenSnapshot: async () => toScreenSnapshot("正在执行…"),
+			},
+			listenerIdCounter: 1,
+			listeners: new Map(),
+		};
+		(manager as unknown as { entries: Map<string, typeof entry> }).entries.set("task-codex-no-box-grammar", entry);
+
+		manager.submitTaskChatInputWhenReady("task-codex-no-box-grammar", "继续 RVF");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["))).toHaveLength(1);
+		expect(entry.summary.terminalDeliveryContention ?? null).toBeNull();
+	});
+
+	it("屏上有字但输入侧接得上人（该会话收到过人类字节）→ 判为 agent 自绘的空框占位提示，照常投递", async () => {
+		// Claude 偶发在空框里渲染 `Try "..."`。它恰好出现在 followup 的目标态（agent 完工、框空），
+		// 若被当成人类内容，每一条 followup 都会挂到预算耗尽——比修复前更差。
+		const manager = new TerminalSessionManager();
+		const boundary = "─".repeat(80);
+		const viewportWithPlaceholderHint = [
+			"  ⏺ 上一轮 agent 输出",
+			boundary,
+			'❯ Try "edit session-manager.ts to..."',
+			boundary,
+			"  ⏸ manual mode on",
+		].join("\n");
+		// 这条 PTY 收到过人类字节（且已提交）：输入侧接得上人，它说「框里没有未提交内容」就可信。
+		const trackerThatHasSeenHuman = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(trackerThatHasSeenHuman, Buffer.from("已经提交掉的一句\r", "utf8"));
+		const { write } = installFakeClaudeEntry(manager, "task-contention-placeholder", {
+			mirrorSnapshot: viewportWithPlaceholderHint,
+			state: "running",
+			lastUserInputAt: null,
+			inputBoxOccupancyTracker: trackerThatHasSeenHuman,
+		});
+
+		manager.submitTaskChatInputWhenReady("task-contention-placeholder", "继续 RVF");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+	});
+
+	// 形态 2 的合成复现台：伪 PTY 按实测规则建模「CR 与 `ESC[201~` 同一次 write 到达即被吞」。
+	// 修复前（框架与 CR 拼在同一次 write）本用例必红：submittedTexts 恒为空——粘贴进了框，但没提交。
+	it("形态 2 合成复现：CR 与 paste 结束标记同 chunk 会被吞，分离写之后消息真的提交了", async () => {
+		const submittedTexts: string[] = [];
+		let textSittingInInputBox = "";
+		// 伪 TUI：收到 paste 框架就把正文放进输入框；收到**单独一次**只有 CR 的写才算提交。
+		// 同一次 write 里既有框架又有 CR 时，CR 连同结束标记一起被吞掉 —— 框里有字，但什么都没发生。
+		const swallowingTerminalWrite = vi.fn((data: string) => {
+			const carriesPasteFraming = data.includes("SUBMIT[");
+			const endsWithCarriageReturn = data.endsWith("\r");
+			if (carriesPasteFraming) {
+				textSittingInInputBox = data.slice("SUBMIT[".length, data.indexOf("]"));
+				return; // 末尾若还带着 CR，它就在这里被吞掉
+			}
+			if (endsWithCarriageReturn && textSittingInInputBox !== "") {
+				submittedTexts.push(textSittingInInputBox);
+				textSittingInInputBox = "";
+			}
+		});
+		const manager = new TerminalSessionManager();
+		const { entry } = installFakeClaudeEntry(manager, "task-swallowed-cr", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastOutputAt: null,
+		});
+		entry.active.session.write = swallowingTerminalWrite as unknown as typeof entry.active.session.write;
+
+		manager.submitTaskChatInputWhenReady("task-swallowed-cr", "继续 RVF");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		// 第一次写只有框架：文本进了框，尚未提交。
+		expect(textSittingInInputBox).toBe("继续 RVF");
+		expect(submittedTexts).toEqual([]);
+
+		// 提交 CR 单独发出 → 这一次不再被吞。
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
+		expect(submittedTexts).toEqual(["继续 RVF"]);
+		expect(textSittingInInputBox).toBe("");
+	});
+
+	// 形态 2 的门本身：CR 不再与 `ESC[201~` 同一次 write 发出，而是等到「TUI 已摄入这段 paste」
+	// （PTY 有新输出到达）才单独发。摄入证据一到就立刻发，不必等满预算。
+	it("分离写 · 摄入证据一到就立刻发提交 CR，不等满预算", async () => {
+		const manager = new TerminalSessionManager();
+		const { write, entry } = installFakeClaudeEntry(manager, "task-paste-ingested", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastOutputAt: null,
+		});
+
+		manager.submitTaskChatInputWhenReady("task-paste-ingested", "继续 RVF");
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+
+		// TUI 回显这段 paste：输出 chunk 到达序号推进 = 摄入证据。
+		entry.active.ptyOutputChunkArrivalSequenceNumber += 1;
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_EVIDENCE_POLL_MS);
+		expect(write).toHaveBeenCalledTimes(2);
+		expect(write.mock.calls[1]?.[0]).toBe("\r");
 	});
 
 	it("写后确认 · CR 被吞（投递后输出仍静默）→ 过确认延时补发裸回车 `\\r`，绝不重发 paste", async () => {
@@ -791,14 +1273,20 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 
 		manager.submitTaskChatInputWhenReady("task-confirm-swallow", "继续 RVF");
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		// 形态 2 的分离写：第一次只写 paste 框架，**不带**提交 CR。
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
 
-		// 过确认延时（≥静默阈值）→ 判定 CR 被吞 → 补发一个裸回车（非又一段 paste）。
-		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
+		// 摄入证据等满预算仍不出现（fake PTY 无回流）→ 照发提交 CR（write #2）。
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
 		expect(write).toHaveBeenCalledTimes(2);
 		expect(write.mock.calls[1]?.[0]).toBe("\r");
-		expect(write.mock.calls[1]?.[0]).not.toContain("SUBMIT[");
+
+		// 过确认延时（≥静默阈值）→ 判定 CR 被吞 → 补发一个裸回车（非又一段 paste）。
+		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
+		expect(write).toHaveBeenCalledTimes(3);
+		expect(write.mock.calls[2]?.[0]).toBe("\r");
+		expect(write.mock.calls[2]?.[0]).not.toContain("SUBMIT[");
 		expect(tuiFreezeWarnings.some((m) => m.includes("submit-resend-cr"))).toBe(true);
 	});
 
@@ -813,13 +1301,15 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		manager.submitTaskChatInputWhenReady("task-confirm-landed", "继续 RVF");
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		expect(write).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR（write #2）
+		expect(write).toHaveBeenCalledTimes(2);
 
 		// 推进到接近确认时刻后，模拟 prompt 真提交：agent 开始干活、输出恢复流动 → lastOutputAt 刷新到当刻（非静默）。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS - 500);
 		entry.summary.lastOutputAt = Date.now();
 		await vi.advanceTimersByTimeAsync(500); // 触发确认 tick
 		// 非静默 → 判定已落地 → 不补发裸回车。
-		expect(write).toHaveBeenCalledTimes(1);
+		expect(write).toHaveBeenCalledTimes(2);
 		expect(tuiFreezeWarnings.some((m) => m.includes("submit-confirmed"))).toBe(true);
 	});
 
@@ -834,17 +1324,19 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		manager.submitTaskChatInputWhenReady("task-confirm-yield", "继续 RVF");
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		expect(write).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR（write #2）
+		expect(write).toHaveBeenCalledTimes(2);
 
 		// 确认 tick 触发前的瞬间用户手敲：lastUserInputAt 刷新到抑制窗内 → 让位、绝不替他提交。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS - 200);
 		entry.active.lastUserInputAt = Date.now();
 		await vi.advanceTimersByTimeAsync(200); // 触发首个确认 tick
-		expect(write).toHaveBeenCalledTimes(1); // 让位：无裸回车
+		expect(write).toHaveBeenCalledTimes(2); // 让位：无补发裸回车
 
 		// 用户停手、越过 8s 抑制窗 → 后续某一拍确认 tick 放行补发裸回车。
 		await vi.advanceTimersByTimeAsync(USER_INPUT_SUPPRESS_MS + SUBMIT_CONFIRM_DELAY_MS);
-		expect(write).toHaveBeenCalledTimes(2);
-		expect(write.mock.calls[1]?.[0]).toBe("\r");
+		expect(write).toHaveBeenCalledTimes(3);
+		expect(write.mock.calls[2]?.[0]).toBe("\r");
 	});
 
 	it("写后确认 · 持续静默：补发至 SUBMIT_CONFIRM_MAX_RESENDS 次后打 submit-unconfirmed 收尾、不再补发", async () => {
@@ -856,18 +1348,20 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		});
 
 		manager.submitTaskChatInputWhenReady("task-confirm-exhaust", "继续 RVF");
-		await vi.advanceTimersByTimeAsync(SETTLE_MS); // 投递 paste（write #1）
+		await vi.advanceTimersByTimeAsync(SETTLE_MS); // 投递 paste 框架（write #1）
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR（write #2）
 
 		// 始终静默 + 可注入 → 每隔确认延时补发一次裸回车，至多 MAX_RESENDS 次，之后打醒目 submit-unconfirmed 收尾。
+		// CR 写入总数 = 提交 CR 1 次 + 补发 MAX_RESENDS 次（两者字节相同，只能按序数区分）。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1));
-		const crResends = write.mock.calls.filter((call) => call[0] === "\r");
-		expect(crResends).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS);
+		const crWrites = write.mock.calls.filter((call) => call[0] === "\r");
+		expect(crWrites).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
 		expect(tuiFreezeErrors.some((m) => m.includes("submit-unconfirmed"))).toBe(true);
 
 		// 预算耗尽后再推进也不会有第 4 次补发。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * 2);
-		const crResendsAfter = write.mock.calls.filter((call) => call[0] === "\r");
-		expect(crResendsAfter).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS);
+		const crWritesAfter = write.mock.calls.filter((call) => call[0] === "\r");
+		expect(crWritesAfter).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
 	});
 
 	// 让位那一支曾是回执链路上唯一没有结论的出口。以下两例分别钉住它的两个破口：
@@ -888,16 +1382,17 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR
 
-		// 前几拍用户不在场 → 正常补发裸回车，直到预算耗尽。
+		// 前几拍用户不在场 → 正常补发裸回车，直到预算耗尽（CR 总数含最前面那次提交 CR）。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * SUBMIT_CONFIRM_MAX_RESENDS);
-		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS);
+		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
 		expect(outcomes).toEqual([]);
 
 		// 收尾那一拍之前用户手敲 → 走让位分支（预算已为 0）。
 		entry.active.lastUserInputAt = Date.now();
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
-		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS);
+		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
 		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }]);
 	});
 
@@ -916,6 +1411,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		expect(write.mock.calls.filter((call) => String(call[0]).startsWith("SUBMIT["))).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR
 
 		// 每一拍确认 tick 之前都刷新 lastUserInputAt = 用户持续打字，让位条件恒成立。
 		for (
@@ -926,8 +1422,9 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			entry.active.lastUserInputAt = Date.now();
 			await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
 		}
-		// 让位语义原样保留：绝不替他按回车。
-		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(0);
+		// 让位语义原样保留：绝不**替他补发**回车。唯一那次 CR 是本条投递自己的提交 CR
+		// （分离写的第二步，属于投递本身；不发它，我们粘进去的文本会永远躺在框里）。
+		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(1);
 		// 但让位不再是无底洞：到收敛上界诚实转终态（旧实现无限重排、回执永远 pending）。
 		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }]);
 	});
@@ -1077,6 +1574,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			onDeliveryOutcome,
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR
 		// 写入完成、尚未确认：此刻不得有任何结论（pending 就是「还没有结论」的诚实表达）。
 		expect(outcomes).toHaveLength(0);
 
@@ -1100,6 +1598,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			onDeliveryOutcome,
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR
 		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
 		expect(outcomes).toEqual([{ status: "delivered_queued_behind_active_agent_turn", reason: null }]);
@@ -1120,6 +1619,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			onDeliveryOutcome,
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR
 		// 输出始终静默（lastOutputAt 恒 null）→ 每拍补发裸 CR，直至预算耗尽。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1));
 		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }]);
@@ -1181,6 +1681,8 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			submitConfirmGeneration: 0,
 			programmaticDeliveryReceipt: null,
 			awaitingCodexPromptAfterEnter: false,
+			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+			ptyOutputChunkArrivalSequenceNumber: 0,
 		} as unknown as typeof entry.active;
 
 		(releaseSnapshot as unknown as () => void)();
@@ -1290,7 +1792,8 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		expect(write.mock.calls.filter((call) => call[0] === "SUBMIT[继续 RVF]")).toHaveLength(1);
 		expect(outcomes).toEqual([]);
 
-		// 它自己的确认链才有资格下结论。
+		// 它自己的确认链才有资格下结论（分离写：先等摄入预算发出提交 CR，确认链自那一刻起跑）。
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
 		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
 		expect(outcomes).toEqual([{ status: "delivered_queued_behind_active_agent_turn", reason: null }]);
@@ -1311,6 +1814,9 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		triggerConnectionDropContinuation(manager, "task-receipt-continuation-confirmed");
+
+		// 续跑那条链同样是分离写：等满摄入预算发出提交 CR 之后，它的确认链才起跑。
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
 
 		// agent 收下的是**续跑指令**，输出恢复流动 → 续跑那条确认链判定已提交。
 		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
@@ -1337,6 +1843,9 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		triggerConnectionDropContinuation(manager, "task-receipt-continuation-exhausted");
 
+		// 续跑那条链同样是分离写：等满摄入预算发出提交 CR 之后，它的确认链才起跑。
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
+
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1));
 		expect(tuiFreezeErrors.some((m) => m.includes("submit-unconfirmed"))).toBe(true);
 		expect(write.mock.calls.filter((call) => call[0] === "SUBMIT[继续 RVF]")).toHaveLength(0);
@@ -1361,6 +1870,9 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		triggerConnectionDropContinuation(manager, "task-receipt-continuation-convergence");
+
+		// 续跑那条链同样是分离写：等满摄入预算发出提交 CR 之后，它的确认链才起跑。
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
 
 		// 用户持续手敲 → 续跑那条链一路让位（不消耗补发预算），最终撞上绝对收敛上界那一支。
 		for (
@@ -1392,9 +1904,13 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
 		triggerConnectionDropContinuation(manager, "task-receipt-continuation-yield-exhausted");
 
+		// 续跑那条链同样是分离写：等满摄入预算发出提交 CR 之后，它的确认链才起跑。
+		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
+
 		// 用户不在场的前几拍：续跑链正常补发裸回车，直到预算耗尽。
+		// CR 写入总数含续跑自己那次提交 CR（分离写的第二步），故补发次数要 +1 才对得上。
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS * SUBMIT_CONFIRM_MAX_RESENDS);
-		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS);
+		expect(write.mock.calls.filter((call) => call[0] === "\r")).toHaveLength(SUBMIT_CONFIRM_MAX_RESENDS + 1);
 		expect(outcomes).toEqual([]);
 
 		// 收尾那一拍之前用户手敲 → 走「让位 + 补发预算已耗尽」那一支。
@@ -1412,9 +1928,10 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 	it("投递最坏预算 = 就绪 deadline + 最长让路 + 确认链收敛上界，且不低于契约 § 时序保证 1 的 190s", () => {
 		// 契约 § 时序保证 1 公布的 190s 是清扫阈值的**下限**：阈值只能往保守（更大）一侧偏。
 		expect(TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS).toBeGreaterThanOrEqual(190_000);
-		// 当前常量集下的真实最坏路径：60s 就绪 + 120s 模态让位 + 15s 确认链绝对收敛上界。
-		// 确认链那一项取的是「补发预算 10s」与「绝对收敛上界 15s」的**大者**——后者正是为
-		// 「让位重排不消耗补发预算」补的兜底，只按补发预算算会低估 5s。
-		expect(TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS).toBe(195_000);
+		// 当前常量集下的真实最坏路径：60s 就绪 + 120s 模态让位 + 1.5s 等 paste 摄入证据 +
+		// 15s 确认链绝对收敛上界。确认链那一项取的是「补发预算 10s」与「绝对收敛上界 15s」的**大者**
+		// ——后者正是为「让位重排不消耗补发预算」补的兜底，只按补发预算算会低估 5s。
+		// 摄入证据那 1.5s 必须单独计入：分离写之后，确认链是从**提交 CR 写入**才起算的。
+		expect(TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS).toBe(196_500);
 	});
 });

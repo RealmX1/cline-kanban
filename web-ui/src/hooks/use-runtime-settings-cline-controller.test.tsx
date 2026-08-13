@@ -79,6 +79,7 @@ function createRuntimeConfigResponse(
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: true,
 		postDeployVerificationForceCompleteEnabled: false,
 		detectedCommands: ["cline"],
 		agents: [

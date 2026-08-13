@@ -4,6 +4,7 @@ import {
 	createTerminalInputBoxOccupancyTrackerState,
 	recordTerminalInputBytesIntoOccupancyTracker,
 	resetTerminalInputBoxOccupancyTrackerComposition,
+	resolveProgrammaticDeliveryInputBoxContention,
 	resolveTerminalInputBoxOccupancy,
 	type TerminalInputBoxOccupancyTrackerState,
 } from "../../../src/terminal/terminal-input-box-occupancy";
@@ -349,5 +350,56 @@ describe("resolveTerminalInputBoxOccupancy — 两路保守的并", () => {
 		feed(state, `${PASTE_START}${"x".repeat(1_048_577)}${PASTE_END}`);
 		const occupancy = resolveTerminalInputBoxOccupancy({ trackerState: state, inputBoxReading: null });
 		expect(occupancy.unrecoverablePasteCount).toBe(1);
+	});
+});
+
+// 程序化投递的争用判据：分歧时（输入侧说空、读屏说有）问的不是「信谁」，而是「输入侧此刻可不可信」。
+describe("resolveProgrammaticDeliveryInputBoxContention — 争用判据", () => {
+	function contentionOf(
+		trackerState: ReturnType<typeof createTerminalInputBoxOccupancyTrackerState>,
+		inputBoxReading: Parameters<typeof resolveTerminalInputBoxOccupancy>[0]["inputBoxReading"],
+	) {
+		return resolveProgrammaticDeliveryInputBoxContention({
+			occupancy: resolveTerminalInputBoxOccupancy({ trackerState, inputBoxReading }),
+			inputSideByteTrackingHasEverObservedHumanBytes: trackerState.hasEverObservedHumanInputBytesFromWriteInput,
+		});
+	}
+
+	it("两路都说空 → 放行", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		expect(contentionOf(state, reading(""))).toBe("input_box_clear_for_programmatic_delivery");
+	});
+
+	it("输入侧亲眼见到未提交内容 → 真争用", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, "half-typed");
+		expect(contentionOf(state, reading("half-typed"))).toBe("human_uncommitted_input_present");
+	});
+
+	// Claude 偶发在空框里渲染 `Try "..."`，且恰好出现在 followup 的目标态（agent 完工、框空）。
+	// 输入侧接得上人（这条 PTY 收到过人类字节）时，屏上这段字最可能就是它 —— 采信输入侧，放行。
+	it("屏上有字但输入侧接得上人且说空 → 判为 agent 自绘，放行", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, "已经提交掉的一句\r");
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(false);
+		expect(contentionOf(state, reading('Try "edit session-manager.ts to..."'))).toBe(
+			"input_box_clear_for_programmatic_delivery",
+		);
+	});
+
+	// 反过来：输入侧一个字节都没见过（用户只经 tmux / 原生终端直连该 PTY）⇒ 它是瞎的，必须采信读屏。
+	it("屏上有字且输入侧从未见过人类字节 → 存疑占用，既不写也不抢占", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		expect(state.hasEverObservedHumanInputBytesFromWriteInput).toBe(false);
+		expect(contentionOf(state, reading("有人从 tmux 里打了半句"))).toBe(
+			"screen_text_uncorroborated_while_input_side_tracking_is_blind",
+		);
+	});
+
+	it("提交 / 清空不会让输入侧重新变瞎：hasEverObserved 不随组合复位", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, "一句话\r");
+		resetTerminalInputBoxOccupancyTrackerComposition(state);
+		expect(state.hasEverObservedHumanInputBytesFromWriteInput).toBe(true);
 	});
 });

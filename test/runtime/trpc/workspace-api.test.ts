@@ -130,6 +130,7 @@ function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): 
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: true,
 		postDeployVerificationForceCompleteEnabled: false,
 		shortcuts: [],
 		commitPromptTemplate: "commit",

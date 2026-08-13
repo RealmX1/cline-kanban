@@ -92,6 +92,14 @@ export interface TerminalInputBoxPasteLedgerEntry {
 export interface TerminalInputBoxOccupancyTrackerState {
 	// 输入侧字节跟踪给出的结论：当前组合里有没有尚未提交的内容。
 	hasUncommittedInputFromInputSideByteTracking: boolean;
+	// 这条 PTY 一生中有没有从 writeInput 收到过哪怕一个人类字节。**不随提交 / 清空复位**——它衡量的
+	// 不是「框里有什么」，而是「输入侧这只眼睛到底接没接上人」。
+	//
+	// 用途只有一个，见 resolveProgrammaticDeliveryInputBoxContention：区分「屏上有字但输入侧说空」的
+	// 两种成因。为 true ⇒ 人类确实经本运行时打过字，那么此刻这段屏上文本最可能是 agent 自绘的空框占位
+	// 提示（Claude 实测偶发 `Try "..."`）；为 false ⇒ 输入侧压根没接上人（用户只经 tmux / 原生终端直连
+	// 这条 PTY），必须采信读屏。
+	hasEverObservedHumanInputBytesFromWriteInput: boolean;
 	pasteLedger: TerminalInputBoxPasteLedgerEntry[];
 	// 本次组合里载荷已被丢弃（超上限）的粘贴条数。>0 意味着「无损暂存」的前提不成立——
 	// W1 争用抢占必须据此降级为挂起可见、不抢占，绝不为投递成功率去赌一段还原不了的人类输入。
@@ -124,6 +132,7 @@ export interface TerminalInputBoxOccupancyTrackerState {
 export function createTerminalInputBoxOccupancyTrackerState(): TerminalInputBoxOccupancyTrackerState {
 	return {
 		hasUncommittedInputFromInputSideByteTracking: false,
+		hasEverObservedHumanInputBytesFromWriteInput: false,
 		pasteLedger: [],
 		unrecoverablePasteCount: 0,
 		insideBracketedPaste: false,
@@ -161,6 +170,8 @@ export function resetTerminalInputBoxOccupancyTrackerComposition(state: Terminal
 	state.pasteCountWithinCurrentComposition = 0;
 	// pendingUnparsedText 与解码器**不**清：它们装的是「被 chunk 边界切断的半个字符 / 半条序列」，
 	// 属于传输层残留而非组合内容，清掉等于主动制造乱码。
+	// hasEverObservedHumanInputBytesFromWriteInput 同样**不**清：它是「这条 PTY 的输入侧接没接上人」，
+	// 与「当前组合里有什么」正交，一次提交不会让输入侧重新变瞎。
 }
 
 // 一条转义序列有多长。返回 "incomplete" 表示当前文本还不足以判断——调用方应把它整段留到下一 chunk。
@@ -333,6 +344,9 @@ export function recordTerminalInputBytesIntoOccupancyTracker(
 	// 上一 chunk 结转过来的那截未解析尾巴总是以 ESC 开头（它就是「疑似被切断的转义序列 / 粘贴标记」），
 	// 且总是坐在拼接后文本的最前面。记下它的长度，就能认出「哪个 ESC 跨过了 chunk 边界」。
 	const carriedOverUnparsedTextLength = state.pendingUnparsedText.length;
+	// 只要有字节流过这里，输入侧这只眼睛就是接在人身上的（本函数唯一的喂养者是 writeInput，
+	// 而程序化投递直写 session.write、永远到不了这里）。空 Buffer 也算：它同样只可能来自人类那一侧。
+	state.hasEverObservedHumanInputBytesFromWriteInput = true;
 	const text = state.pendingUnparsedText + state.utf8StreamDecoder.write(data);
 	let index = 0;
 	while (index < text.length) {
@@ -427,4 +441,44 @@ export function resolveTerminalInputBoxOccupancy(args: {
 		screenReadingSaysNonEmpty,
 		unrecoverablePasteCount: args.trackerState.unrecoverablePasteCount,
 	};
+}
+
+// ── 程序化投递的争用判据 ────────────────────────────────────────────────────────
+//
+// 让路判据是「框空即放行」，但「框空」这件事有两个观测者，且它们的失效模式不同：
+//
+//   输入侧字节跟踪  确定性高（敲了什么、提交没提交是事件，不受 TUI 画法影响），
+//                   但看不见经 tmux / 原生终端直连同一 PTY 的输入。
+//   读屏            覆盖面全（屏上有什么就是什么），但有一个**已实测**的假阳性：
+//                   Claude 偶发在空框里渲染占位提示 `Try "..."`。
+//
+// 单纯取「保守的并」在这里不成立：followup 投递的目标态恰恰是「agent 完工、框空」，而那正是占位
+// 提示最可能出现的时刻——并死的结果是每一条 followup 都让路到预算耗尽、诚实地失败，比修复前更差。
+//
+// 所以分歧时（输入侧说空、读屏说有）要问的不是「信谁」，而是「输入侧这只眼睛此刻可不可信」：
+// 它在这条 PTY 上收到过人类字节，就说明人是经本运行时打字的，那么这段屏上文本最可能是 agent 自己
+// 画的；它一个字节都没收到过，才是真瞎，必须采信读屏。
+export type ProgrammaticDeliveryInputBoxContentionVerdict =
+	// 框是空的（或屏上那点东西已被判定为 agent 自绘）：可以写。
+	| "input_box_clear_for_programmatic_delivery"
+	// 人类有尚未提交的内容，且是输入侧亲眼所见：真争用，进入分层策略（挂起可见 / 自动暂存抢占）。
+	| "human_uncommitted_input_present"
+	// 屏上有字，但一个字节都没经过本运行时，且输入侧从未见过这条 PTY 的人类输入 —— 无从判断那是
+	// 人打的还是 agent 画的。绝不写（可能插进人类的行），也绝不抢占（抢占要入库，而把 agent 的 UI
+	// 文案当用户资产存进库更糟）：只挂起，到预算耗尽诚实失败。
+	| "screen_text_uncorroborated_while_input_side_tracking_is_blind";
+
+export function resolveProgrammaticDeliveryInputBoxContention(args: {
+	occupancy: TerminalInputBoxOccupancy;
+	inputSideByteTrackingHasEverObservedHumanBytes: boolean;
+}): ProgrammaticDeliveryInputBoxContentionVerdict {
+	if (args.occupancy.inputSideByteTrackingSaysNonEmpty) {
+		return "human_uncommitted_input_present";
+	}
+	if (args.occupancy.screenReadingSaysNonEmpty !== true) {
+		return "input_box_clear_for_programmatic_delivery";
+	}
+	return args.inputSideByteTrackingHasEverObservedHumanBytes
+		? "input_box_clear_for_programmatic_delivery"
+		: "screen_text_uncorroborated_while_input_side_tracking_is_blind";
 }

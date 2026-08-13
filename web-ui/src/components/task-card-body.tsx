@@ -52,6 +52,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
+import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
@@ -242,6 +243,10 @@ export function TaskCardBody({
 	// 是在等自己派发的后台工作。读 sidecar（非 facet，deriveDisplayLiveness 不动），抑制 computing 脉冲并渲染
 	// parked 徽标，让卡片不再误显示「转圈在算」。
 	const isParkedAwaitingBackgroundWork = isParkedAwaitingDispatchedBackgroundWork(sessionSummary);
+	// 程序化投递正等着这张卡的终端输入框腾出来（计划 §4.4）：在看板上就要看得见，否则又是一次「机器在等、屏幕不说」。
+	const terminalDeliveryContentionNotice = describeTerminalDeliveryContention(
+		sessionSummary?.terminalDeliveryContention ?? null,
+	);
 	const isLiveAgentTurn = sessionFacets?.turnOwner === "agent" && sessionFacets.liveness === "live";
 	// channel B（distinction ②）：终端 agent 进程已退、任务仍等你审 → liveness==="exited"（Cline SDK 在
 	// 进程内运行、恒 live，永不进此分支）。卡片状态点改「空心环」表达「进程已退但仍待你处理」，与实心 live
@@ -894,6 +899,14 @@ export function TaskCardBody({
 									? `Parked — awaiting ${sessionSummary.awaitingDispatchedBackgroundWork.label}`
 									: "Parked — awaiting dispatched background work"}
 							</span>
+						</span>
+					</div>
+				) : null}
+				{!isTrashCard && terminalDeliveryContentionNotice ? (
+					<div className="mt-1">
+						<span className="inline-flex max-w-full items-center gap-1 rounded-md border border-status-orange/30 bg-status-orange/10 px-1.5 py-0.5 text-xs text-status-orange">
+							<Hourglass size={12} className="shrink-0" />
+							<span className="truncate">{terminalDeliveryContentionNotice.headline}</span>
 						</span>
 					</div>
 				) : null}

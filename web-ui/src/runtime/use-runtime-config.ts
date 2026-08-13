@@ -24,6 +24,7 @@ export interface UseRuntimeConfigResult {
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 		postDeployVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
@@ -96,6 +97,7 @@ export function useRuntimeConfig(
 			readyForReviewNotificationsEnabled?: boolean;
 			notificationSoundEnabled?: boolean;
 			autoContinueOnConnectionDropEnabled?: boolean;
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 			postDeployVerificationForceCompleteEnabled?: boolean;
 			commitPromptTemplate?: string;
 			openPrPromptTemplate?: string;

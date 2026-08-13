@@ -529,6 +529,28 @@ export const runtimeTaskConnectionRetrySchema = z.object({
 });
 export type RuntimeTaskConnectionRetry = z.infer<typeof runtimeTaskConnectionRetrySchema>;
 
+// 程序化投递（RVF followup / task-chat 发送）与人类抢同一个终端输入框时的**挂起可见性** sidecar。
+//
+// 存在的理由就是 2026-08-08 那 49 分钟：投递在等，而屏幕上什么都不说。让路本身是对的——绝不能把
+// paste 插进人类打了一半的那一行——但「在等」必须看得见，否则等待与静默故障对用户完全同形。
+//
+// **派生 + 节流，绝不把输入框内容本身推上这条热广播链路**：只在真的有投递挂起时才计算并写入
+// （最快也就投递重探的节拍，1.5s 一次），值不变则不写 —— 输入框每次击键都在变，把原始框状态推上
+// 会话广播会把最热的那条链路直接压垮。
+export const runtimeTaskTerminalDeliveryContentionSchema = z.object({
+	// 此刻挂在这个会话上、正等输入框腾出来的程序化投递条数。单飞槽决定了它只会是 1（无投递挂起时
+	// 整个 sidecar 为 null，而不是这里写 0）。保留计数形态是给「有几条在等」留位置，也让 UI 文案
+	// 不必依赖「sidecar 存在即恰好一条」这个当前实现细节。
+	pendingProgrammaticDeliveryCount: z.number().int().nonnegative(),
+	// 挂起的原因：输入框里有人类尚未提交的内容（含「屏上有字但一个字节都没经过本运行时」那种存疑占用）。
+	inputBoxHasUncommittedText: z.boolean(),
+	// 这次挂起是否**不会**被自动抢占放行（人在场 / 策略关掉了自动抢占 / 框里有还原不了的粘贴）。
+	// UI 据此决定措辞与是否摆出「暂存我的输入并放行」：为 true 时，用户不动手就真的只会等到预算耗尽、
+	// 以 delivery_failed{human_terminal_contention_timeout} 收尾。
+	waitingForHumanBecauseAutomaticPreemptionIsUnavailable: z.boolean(),
+});
+export type RuntimeTaskTerminalDeliveryContention = z.infer<typeof runtimeTaskTerminalDeliveryContentionSchema>;
+
 // 主 agent 以「非 native」方式 dispatch 了一个后台任务（例：把 reviewer 计划作为独立 Kanban 任务发出），
 // 并结束自己这一轮去等它完成时，由外部编排（RVF / 自研 Kanban）置上的「已 park、正在等待已派发后台工作」
 // sidecar。present = parked：此刻主 agent 停在空闲提示符，但它**不是**在等用户审查，而是在等自己派发的后台
@@ -696,6 +718,9 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	connectionRetry: runtimeTaskConnectionRetrySchema.nullable().optional(),
+	// 程序化投递被人类输入框占用而挂起时的可见性 sidecar（加性、nullable + optional，仅内存态）。
+	// present = 此刻确实有投递在等这个终端的输入框；null = 没有任何投递在等（绝大多数时刻）。
+	terminalDeliveryContention: runtimeTaskTerminalDeliveryContentionSchema.nullable().optional(),
 	// 「已 park、正在等待已派发后台工作」sidecar（加性、nullable + optional，仅内存态、随 connectionRetry 同侧）。
 	// present = parked；判据 / 时序见 runtimeTaskAwaitingDispatchedBackgroundWorkSchema 与 session-activity.ts
 	// 的 isParkedAwaitingDispatchedBackgroundWork。不参与 facet / superRefine（与 connectionRetry-only 写同形）。
@@ -1746,6 +1771,8 @@ export const runtimeConfigResponseSchema = z.object({
 	readyForReviewNotificationsEnabled: z.boolean(),
 	notificationSoundEnabled: z.boolean(),
 	autoContinueOnConnectionDropEnabled: z.boolean(),
+	// 程序化投递与人类抢输入框时，人不在场是否允许自动暂存抢占（false = 恒定只挂起可见）。
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: z.boolean(),
 	// Post-Deploy Verification 「一键强制完成（跳过 token 两步确认）」的全局总闸；配合 CLI `--force` 才生效（plan Grilling #9）。
 	postDeployVerificationForceCompleteEnabled: z.boolean(),
 	detectedCommands: z.array(z.string()),
@@ -1769,6 +1796,7 @@ export const runtimeConfigSaveRequestSchema = z.object({
 	readyForReviewNotificationsEnabled: z.boolean().optional(),
 	notificationSoundEnabled: z.boolean().optional(),
 	autoContinueOnConnectionDropEnabled: z.boolean().optional(),
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: z.boolean().optional(),
 	postDeployVerificationForceCompleteEnabled: z.boolean().optional(),
 	commitPromptTemplate: z.string().optional(),
 	openPrPromptTemplate: z.string().optional(),
