@@ -86,6 +86,7 @@ import {
 	readAgentRaisedPendingUserDecisions,
 } from "../state/agent-raised-pending-user-decision-store";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
+import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import { getWorkspaceDirectoryPath, loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -1556,6 +1557,33 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				return {
 					ok: false,
 					cancelResult: "no_pending_delivery" as const,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+		getWorkspacePromptLibrary: async (workspaceScope) => {
+			try {
+				return { ok: true, library: await readWorkspacePromptLibrarySnapshot(workspaceScope.workspaceId) };
+			} catch (error) {
+				return {
+					ok: false,
+					library: null,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+		mutateWorkspacePromptLibrary: async (workspaceScope, input) => {
+			try {
+				return {
+					ok: true,
+					library: await mutateWorkspacePromptLibrary(workspaceScope.workspaceId, input.mutation),
+				};
+			} catch (error) {
+				// library 返回 null 而不是「变更前的快照」：写失败时前端必须知道自己手上的那份不再可信，
+				// 拿一份看起来正常的旧快照回去会让用户以为改动生效了。
+				return {
+					ok: false,
+					library: null,
 					error: error instanceof Error ? error.message : String(error),
 				};
 			}

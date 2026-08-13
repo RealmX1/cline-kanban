@@ -2182,6 +2182,110 @@ export const runtimeTaskChatDeliveryCancelResponseSchema = z.object({
 });
 export type RuntimeTaskChatDeliveryCancelResponse = z.infer<typeof runtimeTaskChatDeliveryCancelResponseSchema>;
 
+// ── Prompt Library（服务端持久化）──────────────────────────────────────────────
+//
+// 落点与并发语义见 src/state/prompt-library-store.ts。这里只定义线上契约。
+
+export const promptLibraryScopeSchema = z.enum(["global", "repo", "task"]);
+export type PromptLibraryScope = z.infer<typeof promptLibraryScopeSchema>;
+
+// 条目从哪来。旧数据没有这个字段，读取时按 manual 处理，故是 optional 而**不是**带默认值的必填——
+// 加默认值会让「读出来再写回去」把所有历史条目都标记成手写，抹掉将来区分暂存来源的能力。
+export const promptLibraryEntryOriginSchema = z.enum([
+	// 用户在面板里手写的模板。
+	"manual",
+	// 用户自己在终端里按了 Ctrl+S，把打了一半的输入存进库。
+	"terminal_stash_by_user",
+	// W1 争用抢占：程序化投递需要输入框，运行时先把人类的未提交内容无损存进库再放行。
+	"terminal_stash_preempted_by_programmatic_delivery",
+]);
+export type PromptLibraryEntryOrigin = z.infer<typeof promptLibraryEntryOriginSchema>;
+
+export const storedPromptLibraryEntrySchema = z.object({
+	id: z.string(),
+	text: z.string(),
+	scope: promptLibraryScopeSchema,
+	origin: promptLibraryEntryOriginSchema.optional(),
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+export type StoredPromptLibraryEntry = z.infer<typeof storedPromptLibraryEntrySchema>;
+
+// 一个 workspace 视角下能看到的全部条目。global 桶来自 kanban 根目录的共用文件，
+// 另两个桶来自该 workspace 自己的文件（project.id 即 workspaceId）。
+export const workspacePromptLibrarySnapshotSchema = z.object({
+	globalScopedPrompts: z.array(storedPromptLibraryEntrySchema),
+	repoScopedPrompts: z.array(storedPromptLibraryEntrySchema),
+	taskScopedPromptsByTaskId: z.record(z.string(), z.array(storedPromptLibraryEntrySchema)),
+});
+export type WorkspacePromptLibrarySnapshot = z.infer<typeof workspacePromptLibrarySnapshotSchema>;
+
+// scope 为 task 却漏传 taskId **不是**「分类不整洁」，而是可见性事故：本该只对某个任务可见的文字，
+// 会因为调用方漏一个参数而变成整个仓库的所有任务都能看见。存储层无从知道用户原本想给哪个任务看，
+// 所以这条只能在契约边界报错，不能留给存储层去猜一个桶。空串同样拒绝——它不是任何真实任务的 id。
+function isTaskScopedPromptMutationCarryingItsTaskId(value: {
+	scope: PromptLibraryScope;
+	taskId?: string | null;
+}): boolean {
+	return value.scope !== "task" || (typeof value.taskId === "string" && value.taskId.length > 0);
+}
+
+const TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE =
+	"scope 为 task 的 prompt library 意图必须带上非空 taskId，否则该条目会对整个仓库可见";
+
+// 写操作是**意图**而不是整份 PUT：多个标签页 + 运行时自己会并发写同一个库，整份 PUT 会让
+// 「另一个标签页刚加的条目」被静默抹掉。服务端在文件锁内读-改-写，于是并发写自然合并。
+export const workspacePromptLibraryMutationSchema = z.discriminatedUnion("kind", [
+	z
+		.object({
+			// 同一条意图兼管「新建」与「改正文」：id 不存在即新建，存在即只改正文（**不**动它所在的桶）。
+			kind: z.literal("upsert_prompt"),
+			promptId: z.string(),
+			text: z.string(),
+			// 仅新建时生效；已存在的条目换桶请用 set_prompt_scope。
+			scope: promptLibraryScopeSchema,
+			// scope 为 task 时必填（由下面的 refine 强制），其余忽略。
+			taskId: z.string().nullable().optional(),
+			origin: promptLibraryEntryOriginSchema.optional(),
+		})
+		.refine(isTaskScopedPromptMutationCarryingItsTaskId, {
+			message: TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE,
+			path: ["taskId"],
+		}),
+	z.object({
+		kind: z.literal("remove_prompt"),
+		promptId: z.string(),
+	}),
+	z
+		.object({
+			kind: z.literal("set_prompt_scope"),
+			promptId: z.string(),
+			scope: promptLibraryScopeSchema,
+			// 搬进 task scope 时必填（由下面的 refine 强制）：搬去「哪个任务」正是这条意图的内容。
+			taskId: z.string().nullable().optional(),
+		})
+		.refine(isTaskScopedPromptMutationCarryingItsTaskId, {
+			message: TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE,
+			path: ["taskId"],
+		}),
+]);
+export type WorkspacePromptLibraryMutation = z.infer<typeof workspacePromptLibraryMutationSchema>;
+
+export const runtimePromptLibraryReadRequestSchema = z.object({});
+export type RuntimePromptLibraryReadRequest = z.infer<typeof runtimePromptLibraryReadRequestSchema>;
+
+export const runtimePromptLibraryResponseSchema = z.object({
+	ok: z.boolean(),
+	library: workspacePromptLibrarySnapshotSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimePromptLibraryResponse = z.infer<typeof runtimePromptLibraryResponseSchema>;
+
+export const runtimePromptLibraryMutateRequestSchema = z.object({
+	mutation: workspacePromptLibraryMutationSchema,
+});
+export type RuntimePromptLibraryMutateRequest = z.infer<typeof runtimePromptLibraryMutateRequestSchema>;
+
 export const runtimeTaskChatReloadRequestSchema = z.object({
 	taskId: z.string(),
 });

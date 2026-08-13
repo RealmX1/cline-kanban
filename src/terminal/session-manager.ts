@@ -76,8 +76,16 @@ import {
 import { PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
 import {
+	createTerminalInputBoxOccupancyTrackerState,
+	recordTerminalInputBytesIntoOccupancyTracker,
+	resolveTerminalInputBoxOccupancy,
+	type TerminalInputBoxOccupancy,
+	type TerminalInputBoxOccupancyTrackerState,
+} from "./terminal-input-box-occupancy";
+import {
 	CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR,
 	locateTerminalInputBox,
+	readTerminalInputBox,
 	type TerminalInputBoxGrammar,
 } from "./terminal-input-box-reader";
 import { stripAnsiAndControl } from "./terminal-output-normalization";
@@ -295,6 +303,10 @@ interface ActiveProcessState {
 	// 以及它此刻走到了哪一步。至多一个（单飞槽，与 taskChatInputDeliveryGeneration 同源 last-write-wins）。
 	// null 表示当前没有任何等待结论的程序化投递。仅内存态——runtime 重启后由账本启动清扫兜底。
 	programmaticDeliveryReceipt: PendingProgrammaticDeliveryReceipt | null;
+	// 输入侧字节跟踪：人类往这个终端敲进去了什么、提交了没有、被 TUI 折叠掉的粘贴原文是什么。
+	// 只由 writeInput 喂养，因此只看得见人类输入——程序化投递直写 session.write，不会把自己
+	// 记成「用户正在打字」。判空与粘贴账本的语义见 terminal-input-box-occupancy.ts。仅内存态。
+	inputBoxOccupancyTracker: TerminalInputBoxOccupancyTrackerState;
 }
 
 // 一条程序化投递的回执登记。存在的意义：让投递链路上**每一个出口**都能给出结论，
@@ -2259,6 +2271,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
 			programmaticDeliveryReceipt: null,
+			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -2483,6 +2496,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
 			programmaticDeliveryReceipt: null,
+			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -2554,6 +2568,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		// 记录用户手动输入时刻，用于抑制自动续跑注入打断正在打字的用户。
 		entry.active.lastUserInputAt = now();
+		// 输入侧字节跟踪：维护「框里有没有未提交内容」并给被 TUI 折叠掉的粘贴留原文账本。
+		// 必须在 session.write 之前记：这是纯内存计算，放前面才能保证「字节已进 PTY 但账没记上」
+		// 这个窗口不存在——争用判定与 Ctrl+S 取文都读这本账，漏一段就是把人类内容判丢。
+		recordTerminalInputBytesIntoOccupancyTracker(entry.active.inputBoxOccupancyTracker, data);
 		// 人工手敲（含在 Claude resume 三选一菜单里选 1/2/3、或提交新消息）是「用户真·继续」的
 		// agent 无关信号：解除 resume substantive guard，此后 agent 的新产出才推进 lastSubstantiveOutputAt。
 		clearResumeSubstantiveGuard(entry.active);
@@ -2582,6 +2600,39 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.emitSummary(summary);
 		}
 		return cloneSummary(entry.summary);
+	}
+
+	// 「这个终端的输入框此刻被人类占着吗」——输入侧字节跟踪与读屏两路的保守并集。
+	// 返回 null 表示「拿不到关于当前这条 PTY 会话的可信结论」：要么该任务此刻没有 active PTY 会话
+	// （也就无框可争），要么读屏期间这条会话已经退出 / 被 refresh 换成了新 incarnation（见下方复查）。
+	//
+	// 两路各自的盲区互补，所以必须都要：输入侧看不见经 tmux / 原生终端直连同一 PTY 敲进去的字，
+	// 也看不见 runtime 重启前敲下的内容；读屏看不出空框与占位提示的区别、且对未建模输入框语法的
+	// agent 直接失效。调用方若要按场景取舍，读返回值里两路分开的结论字段，别只看合并后的布尔。
+	async resolveTaskTerminalInputBoxOccupancy(taskId: string): Promise<TerminalInputBoxOccupancy | null> {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			return null;
+		}
+		const boxGrammar = resolveTerminalInputBoxGrammar(entry.summary.agentId);
+		const mirror = entry.terminalStateMirror;
+		const inputBoxReading =
+			mirror && boxGrammar ? readTerminalInputBox(await mirror.getScreenSnapshot(), boxGrammar) : null;
+		// 读屏要排进镜像的 operationQueue，这段 await 会跨越宏任务边界：期间 PTY 可能退出（exit handler
+		// 把 entry.active 置 null）、或被用户 refresh 换成新 incarnation（startTaskSession 把 active 与
+		// terminalStateMirror 一起换新）。所以在 await 前捕获 active，await 后复查它仍是当前这条命——
+		// 否则既会解引用已被置空的 active，又会把**上一条会话**的读屏结论和新会话的输入侧账本拼成一个
+		// 占用结论。换代即返回 null（无结论）而不是拿旧屏硬答，与程序化投递链路
+		// （runTaskChatInputDeliveryAttempt）跨 await 复查 active 的写法一致。
+		const currentActive = this.entries.get(taskId)?.active;
+		if (!currentActive || currentActive !== active) {
+			return null;
+		}
+		return resolveTerminalInputBoxOccupancy({
+			trackerState: active.inputBoxOccupancyTracker,
+			inputBoxReading,
+		});
 	}
 
 	resize(taskId: string, cols: number, rows: number, pixelWidth?: number, pixelHeight?: number): boolean {

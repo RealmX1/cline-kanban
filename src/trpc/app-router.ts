@@ -87,6 +87,9 @@ import type {
 	RuntimeProjectPermanentDeletionRequest,
 	RuntimeProjectPermanentDeletionResult,
 	RuntimeProjectsResponse,
+	RuntimePromptLibraryMutateRequest,
+	RuntimePromptLibraryReadRequest,
+	RuntimePromptLibraryResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
@@ -226,6 +229,9 @@ import {
 	runtimeProjectPermanentDeletionRequestSchema,
 	runtimeProjectPermanentDeletionResultSchema,
 	runtimeProjectsResponseSchema,
+	runtimePromptLibraryMutateRequestSchema,
+	runtimePromptLibraryReadRequestSchema,
+	runtimePromptLibraryResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
 	runtimeRunPostDeployVerificationItemRequestSchema,
@@ -370,6 +376,14 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatDeliveryCancelRequest,
 		) => Promise<RuntimeTaskChatDeliveryCancelResponse>;
+		getWorkspacePromptLibrary: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimePromptLibraryReadRequest,
+		) => Promise<RuntimePromptLibraryResponse>;
+		mutateWorkspacePromptLibrary: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimePromptLibraryMutateRequest,
+		) => Promise<RuntimePromptLibraryResponse>;
 		reloadTaskChatSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatReloadRequest,
@@ -748,6 +762,18 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatDeliveryCancelResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.cancelTaskChatDelivery(ctx.workspaceScope, input);
+			}),
+		getWorkspacePromptLibrary: workspaceProcedure
+			.input(runtimePromptLibraryReadRequestSchema)
+			.output(runtimePromptLibraryResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getWorkspacePromptLibrary(ctx.workspaceScope, input);
+			}),
+		mutateWorkspacePromptLibrary: workspaceProcedure
+			.input(runtimePromptLibraryMutateRequestSchema)
+			.output(runtimePromptLibraryResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.mutateWorkspacePromptLibrary(ctx.workspaceScope, input);
 			}),
 		abortTaskChatTurn: workspaceProcedure
 			.input(runtimeTaskChatAbortRequestSchema)
