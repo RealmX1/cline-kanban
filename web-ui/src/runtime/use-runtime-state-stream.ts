@@ -1,3 +1,4 @@
+import { isNeverStartedPlaceholderTaskSessionSummary } from "@runtime-session-activity";
 import { useCallback, useEffect, useReducer, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import type {
@@ -22,6 +23,11 @@ import type {
 const STREAM_RECONNECT_BASE_DELAY_MS = 500;
 const STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
 
+// 合并规则是「updatedAt 单调」：只接受不比手上更旧的记录。
+//
+// 注意本函数**只合并、从不删除**：某个 taskId 一旦进过这张表，就不会因为后续推流不再包含它而消失。
+// 「跨 workspace 的外来条目在此累积」是另一个已知问题（看板卡 c0724），本文件的守卫不覆盖它——
+// 别因为这里有守卫就以为归属问题已经解决了。
 function mergeTaskSessionSummaries(
 	currentSessions: Record<string, RuntimeTaskSessionSummary>,
 	summaries: RuntimeTaskSessionSummary[],
@@ -32,12 +38,26 @@ function mergeTaskSessionSummaries(
 	const nextSessions = { ...currentSessions };
 	for (const summary of summaries) {
 		const existing = nextSessions[summary.taskId];
+		// 唯一一种「更新的 updatedAt 反而信息更少」的情况：服务端因为前端聚焦了这张卡而就地造出一条
+		// 全 null 的占位 summary（session-manager 的 ensureEntry）。它的 updatedAt 是「刚被凭空造出来」，
+		// 不是「掌握了更新的事实」。放它盖掉手上那条记着 agentId 的记录，就会让 TUI 变全白、
+		// 「重启终端会话」灰掉，且这条空壳还会随下一次 saveState 落盘、把损坏变成永久性的。
+		if (
+			existing &&
+			!isNeverStartedPlaceholderTaskSessionSummary(existing) &&
+			isNeverStartedPlaceholderTaskSessionSummary(summary)
+		) {
+			continue;
+		}
 		if (!existing || existing.updatedAt <= summary.updatedAt) {
 			nextSessions[summary.taskId] = summary;
 		}
 	}
 	return nextSessions;
 }
+
+/** 仅供测试：这条合并规则是「空壳把真实记录盖掉」那条 bug 的最后一道闸，值得单独钉住。 */
+export const mergeTaskSessionSummariesForTest = mergeTaskSessionSummaries;
 
 // 快照下发的是「跨全部 workspace 的扁平 feed」，按 workspaceId 分桶存，便于 notification_log_updated 增量按桶替换。
 function bucketNotificationFeedByWorkspaceId(

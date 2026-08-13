@@ -38,6 +38,7 @@ import { isMacPlatform } from "@/utils/platform";
 interface AgentTerminalSessionControls {
 	clearTerminal: () => void;
 	containerRef: MutableRefObject<HTMLDivElement | null>;
+	hasRenderedAnyTerminalContent: boolean;
 	isStopping: boolean;
 	isRefreshing: boolean;
 	isSearchOpen: boolean;
@@ -135,6 +136,68 @@ const statusTagColors: Record<StatusTagStyle, string> = {
 	warning: "bg-status-orange/15 text-status-orange",
 	danger: "bg-status-red/15 text-status-red",
 };
+
+// 终端一片空白时的可解释空态。
+//
+// 这块 UI 存在的直接原因：会话在首轮结束前被系统重启 / 本地 redeploy 打断后，新运行时既没有快照可发、
+// 也不会再有输出，用户拿到的是一块**纯白无字**的 div —— 分不清是加载慢、是坏了、还是该做点什么。
+// 契约层早就要求把回收结果讲给用户听（api-contract 的 agentSessionRuntimeReclamationOutcome 注释：
+// 「用户重进任务时必须看到明确说明，而不是一个空终端让人误以为只是加载慢」），但前端一直没实现。
+function describeEmptyTerminalSessionCause(summary: RuntimeTaskSessionSummary | null): {
+	headline: string;
+	detail: string;
+} {
+	const reclamationOutcome = summary?.agentSessionRuntimeReclamationOutcome;
+	if (reclamationOutcome) {
+		return {
+			headline:
+				reclamationOutcome.reclamationTrigger === "park_abandoned"
+					? "This session was reclaimed after waiting too long on dispatched background work."
+					: "This session was reclaimed after sitting idle past its retention window.",
+			detail: "Its conversation is still on disk. Restarting resumes it in the same worktree.",
+		};
+	}
+	return {
+		headline: "This session is no longer running.",
+		detail:
+			"It most likely ended with the previous runtime — a machine restart or a local redeploy. " +
+			"Its conversation is still on disk. Restarting resumes it in the same worktree.",
+	};
+}
+
+function AgentTerminalEmptySessionRecoveryNotice({
+	summary,
+	canRefresh,
+	isRefreshing,
+	onRefreshTerminal,
+}: {
+	summary: RuntimeTaskSessionSummary | null;
+	canRefresh: boolean;
+	isRefreshing: boolean;
+	onRefreshTerminal: () => Promise<void>;
+}): ReactElement {
+	const { headline, detail } = describeEmptyTerminalSessionCause(summary);
+	return (
+		<div className="flex max-w-md flex-col items-center gap-3 rounded-md border border-border-subtle bg-surface-2 p-5 text-center">
+			<Unplug size={18} className="text-text-secondary" />
+			<div className="text-[13px] font-medium text-text-primary">{headline}</div>
+			<div className="text-[12px] leading-relaxed text-text-secondary">{detail}</div>
+			{canRefresh ? (
+				<Button
+					size="sm"
+					variant="default"
+					disabled={isRefreshing}
+					onClick={() => {
+						void onRefreshTerminal();
+					}}
+				>
+					{isRefreshing ? <Spinner size={12} /> : <RotateCcw size={12} />}
+					<span className="ml-1.5">Restart terminal session</span>
+				</Button>
+			) : null}
+		</div>
+	);
+}
 
 // Mirror the backend stall probe threshold (src/terminal/session-manager.ts).
 // We don't take an action — just surface the dwell time so users can decide.
@@ -425,6 +488,7 @@ function AgentTerminalPanelLayout({
 	const {
 		containerRef,
 		lastError,
+		hasRenderedAnyTerminalContent,
 		isStopping,
 		isRefreshing,
 		isSearchOpen,
@@ -447,18 +511,27 @@ function AgentTerminalPanelLayout({
 	// muted 提示，解释「终端为何不再更新/冻结」。Cline SDK 在进程内运行、恒 live，永不进此分支。
 	const isStreamClosed = sessionFacets?.liveness === "exited";
 	const isSyntheticHomeSession = taskId.startsWith("__home_");
-	const showRefreshButton = !isSyntheticHomeSession;
-	const canRefresh =
-		showRefreshButton &&
-		summary !== null &&
-		summary.agentId !== null &&
-		!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary);
+	// 合成 shell 终端（home / detail shell）不是 agent TUI，不需要代按 Ctrl+C / 方向键 / double-ESC。
+	const isSyntheticShellSession = isSyntheticHomeSession || taskId.startsWith("__detail_terminal__:");
+	// detail shell 同样不是 agent 会话，「重启终端会话」对它没有意义（服务端也会以「找不到卡片」拒绝）。
+	const showRefreshButton = !isSyntheticShellSession;
+	// **不**要求 summary.agentId 已知。渲染到这个面板本身就已经由 card-detail-view 判定过「这是个 PTY
+	// agent 会话」，而 agentId 恰恰是硬中断后最容易丢的字段——一旦把「不知道用的哪个 agent」当成禁用理由，
+	// 用户拿到的就是一个既全白、又点不动的面板，也就是这个按钮本该解决的那个故障本身。
+	// 只在这条会话**确实跑在非 PTY 通道**上时才禁用；与服务端 refreshTaskTerminal 的判据对齐。
+	// 判据读会话盖的通道章而不是 agentId：omp 有 TUI / ACP 两条通道，agentId 版谓词只认得它的
+	// catalog 默认，会把一条 ACP 会话当成可刷新的 PTY 会话。summary 缺席（会话已经没了）时按
+	// 「不知道 ⇒ 不禁用」放行，正是这个按钮存在的场景。
+	const canRefresh = showRefreshButton && !isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary);
 	const showCompactHeader = !showSessionToolbar;
 	const isMobile = useIsMobile();
 	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
-	// 合成 shell 终端（home / detail shell）不是 agent TUI，不需要代按 Ctrl+C / 方向键 / double-ESC。
-	const isSyntheticShellSession = isSyntheticHomeSession || taskId.startsWith("__detail_terminal__:");
 	const showVirtualKeyInputBar = isMobile && !isSyntheticShellSession;
+	// 终端一片空白且没有任何回合在跑 —— 这正是「会话随运行时一起没了」的样子。给出解释与出路，
+	// 而不是留一块纯白的 div 让用户猜是加载慢还是坏了。
+	// 合成 shell 排除在外：它本来就可能长时间没有输出，且没有「agent 会话」可重启。
+	const showEmptyTerminalRecoveryState =
+		!hasRenderedAnyTerminalContent && !isSyntheticShellSession && !isTranscriptReaderOpen && !canStop;
 	const statusLabel = useMemo(() => describeState(summary), [summary]);
 	const statusTagStyle = useMemo(() => getStateTagStyle(summary), [summary]);
 	const stallElapsedMs = useStallElapsedMs(summary);
@@ -706,6 +779,16 @@ function AgentTerminalPanelLayout({
 				{isTranscriptReaderOpen ? (
 					<div className="absolute inset-0 z-10 flex">
 						<TerminalScrollbackTranscriptReaderPanel taskId={taskId} isVisible />
+					</div>
+				) : null}
+				{showEmptyTerminalRecoveryState ? (
+					<div className="absolute inset-0 z-10 flex items-center justify-center p-6">
+						<AgentTerminalEmptySessionRecoveryNotice
+							summary={summary}
+							canRefresh={canRefresh}
+							isRefreshing={isRefreshing}
+							onRefreshTerminal={refreshTerminal}
+						/>
 					</div>
 				) : null}
 			</div>

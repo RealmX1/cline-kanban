@@ -23,6 +23,7 @@ import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtim
 import {
 	isRuntimeAgentSessionSummaryDrivenByAcpProtocol,
 	isRuntimeAgentSessionSummaryRenderedAsConversationPanel,
+	resolveRuntimeAgentSessionTransportFromSummary,
 } from "../core/agent-catalog";
 import {
 	canAgentSessionTransportBeSwitched,
@@ -78,7 +79,7 @@ import {
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
-import { updateTask } from "../core/task-board-mutations";
+import { applyMostRecentlyLaunchedAgentSessionAgentIdToTask, updateTask } from "../core/task-board-mutations";
 import {
 	getTaskMessageInjectionLedgerPath,
 	recordTaskMessageTerminalDeliveryOutcome,
@@ -348,6 +349,49 @@ async function persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard(
 	}
 }
 
+// 会话启动成功后，把「这一次用的是哪个 agent」记到卡片上。
+//
+// 这是「重启后 TUI 全白且无法重启会话」那条 bug 的根因修复点。sessions.json 只在 graceful shutdown 与
+// 客户端 saveState 落盘，系统重启 / 本地 redeploy 这类硬中断会让首轮尚未结束的 task 在盘上**没有任何
+// session 条目**；而走项目默认档的卡片上又没有 `agentId` 可回填（`addTaskToColumn` 对未显式选 agent 的
+// 卡片根本不写该字段），于是新 runtime 起来后这个 task 只剩一条 agentId 为 null 的空壳 summary。
+// 卡片是唯一在硬中断中幸存的载体，所以「用的是哪个 agent」必须在**启动那一刻**就写到这里。
+//
+// 三条 transport（PTY / Cline SDK / ACP）都要写：三者都会遇到同一种中断。
+// 失败一律吞掉——卡片没同步只是少一条回填源，绝不该连累会话启动本身。
+async function persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard(options: {
+	workspaceScope: RuntimeTrpcWorkspaceScope;
+	taskId: string;
+	agentId: RuntimeAgentId;
+	broadcastRuntimeWorkspaceStateUpdated?: (workspaceId: string, workspacePath: string) => Promise<void> | void;
+}): Promise<void> {
+	// Home agent 会话不是看板任务，board 上没有对应卡片，跳过省一次无谓的读写。
+	if (isHomeAgentSessionId(options.taskId)) {
+		return;
+	}
+	try {
+		const mutation = await mutateWorkspaceState(options.workspaceScope.workspacePath, (state) => {
+			const applied = applyMostRecentlyLaunchedAgentSessionAgentIdToTask(
+				state.board,
+				options.taskId,
+				options.agentId,
+			);
+			if (!applied.updated) {
+				return { board: state.board, value: false, save: false };
+			}
+			return { board: applied.board, value: true };
+		});
+		if (mutation.value) {
+			void options.broadcastRuntimeWorkspaceStateUpdated?.(
+				options.workspaceScope.workspaceId,
+				options.workspaceScope.workspacePath,
+			);
+		}
+	} catch {
+		// 看板状态没同步不影响会话本身，静默放过。
+	}
+}
+
 export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrpcContext["runtimeApi"] {
 	const clineProviderService = createClineProviderService();
 	const clineMcpSettingsService = createClineMcpSettingsService();
@@ -599,6 +643,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						return { ok: false, summary: acpSummary, error: acpStartFailureMessage };
 					}
 					recordStartDiagnostic("runtime_started", startFailurePhase);
+					await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
+						workspaceScope,
+						taskId: body.taskId,
+						agentId: effectiveAgentId,
+						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
+					});
 					let nextAcpSummary = acpSummary;
 					startFailurePhase = "capture_initial_turn_checkpoint";
 					if (shouldCaptureTurnCheckpoint) {
@@ -678,6 +728,15 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					});
 					latestStartedSummaryForDiagnostics = summary;
 					recordStartDiagnostic("runtime_started", startFailurePhase);
+					// 记 summary 的 agentId 而不是 effectiveAgentId：`shouldProbePersistedClineSession` 那条
+					// 分支会在 effectiveAgentId 仍是别的 agent 时把 useClinePath 翻成 true，此时真正跑起来的
+					// 是 Cline，卡片上必须记下这个事实。
+					await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
+						workspaceScope,
+						taskId: body.taskId,
+						agentId: summary.agentId ?? effectiveAgentId,
+						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
+					});
 
 					let nextSummary = summary;
 					startFailurePhase = "capture_initial_turn_checkpoint";
@@ -761,6 +820,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				});
 				latestStartedSummaryForDiagnostics = summary;
 				recordStartDiagnostic("runtime_started", startFailurePhase);
+				await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
+					workspaceScope,
+					taskId: body.taskId,
+					agentId: resolved.agentId,
+					broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
+				});
 
 				let nextSummary = summary;
 				startFailurePhase = "capture_initial_turn_checkpoint";
@@ -798,26 +863,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const body = parseTaskTerminalRefreshRequest(input);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const currentSummary = terminalManager.getSummary(body.taskId);
-				if (!currentSummary) {
-					return {
-						ok: false,
-						summary: null,
-						error: "No terminal session to refresh.",
-					};
-				}
-				// 按会话盖的通道章拒绝非 PTY 会话，而不是硬编码 `=== "cline"`：Refresh 的实现是重开一个
-				// PTY，对任何非 PTY 通道都无意义。（这条 summary 来自 terminalManager，理论上恒是 PTY；
-				// 判据仍留着是为了不依赖那个隐含前提——它正是本次改动之前那批硬编码分叉的成因。）
-				if (
-					currentSummary.agentId === null ||
-					isRuntimeAgentSessionSummaryRenderedAsConversationPanel(currentSummary)
-				) {
-					return {
-						ok: false,
-						summary: null,
-						error: "Refresh is only available for active TUI terminal agents.",
-					};
-				}
+				// 这里刻意**不**在解析卡片之前就以「没有活体 summary」或「summary.agentId 为 null」拒绝。
+				//
+				// 「重启终端会话」正是给「会话已经不在了」准备的按钮：下游的 terminalManager.refreshTaskTerminal
+				// 本身就是 forceStopTaskSession + startTaskSession，不要求存在活体条目。而硬中断后 agentId
+				// 恰恰是最容易丢的那个字段——一旦在这里提前拒绝，用户就只剩一个既全白、又点不动的面板，
+				// 也就是本 bug 的最终形态。真正该拒绝的只有「这个 agent 根本不用 PTY 终端」，那需要先把
+				// 卡片解析出来、把 agentId 兜底求全之后才能判断。
 				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 				const card = findWorkspaceBoardCard(board, body.taskId);
 				if (!card) {
@@ -828,7 +880,53 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					};
 				}
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
-				const effectiveAgentId = currentSummary.agentId ?? card.agentId ?? scopedRuntimeConfig.selectedAgentId;
+				// 兜底顺序与 `backfillMissingSessionAgentIdsFromDurableSources`（src/server/workspace-registry.ts）
+				// 严格同序：**运行时观测事实优先于卡片上的用户意图**。两处解析的是同一个问题——「这条**既存**
+				// 会话当时到底由谁跑起来」——同问题必须同答案，否则回填与重启会在同一张卡上给出两个身份。
+				//
+				// 为什么这里同样是「既存会话」的问题：本 procedure 下游是 `resumeFromTrash: true` → `--continue`，
+				// 续的就是那条已经存在的会话，不是新开一条。
+				//
+				// 为什么观测值必须压过 `card.agentId`：`startTaskSession` 的 `shouldProbePersistedClineSession`
+				// 分支会在 `card.agentId` 仍是别的 agent 时探测到持久化的 Cline 会话并改走 Cline，此时真正跑起来
+				// 的与卡片意图天然不一致（只有 `mostRecentlyLaunchedAgentSessionAgentId` 记下了这个事实）。旧顺序
+				// 让 `card.agentId` 胜出，会直接**骗过下面那道「非 PTY agent 一律拒绝刷新」的能力谓词闸门**——
+				// 闸门看到的是 PTY agent，于是放行，把一个 Cline 会话用 PTY agent 重启掉。
+				//
+				// `card.agentId` 表达的是「下次想用谁启动」的意图，可能还没有任何会话兑现过它（用户改了卡片 agent
+				// 但尚未重启，既存会话的身份仍是上一次跑起来的那个），故只作为观测值缺席时的兜底。
+				const effectiveAgentId =
+					currentSummary?.agentId ??
+					card.mostRecentlyLaunchedAgentSessionAgentId ??
+					card.agentId ??
+					scopedRuntimeConfig.selectedAgentId;
+				// 用能力谓词而非 agentId 字面量比较：见 CLAUDE.md「分支判定一律用能力谓词」。
+				// 新增非 PTY agent 时这里自动跟上，不会像硬编码那样漏改。
+				//
+				// 但**光看 agentId 已经不够**：omp 有 TUI / ACP 两条通道，catalog 只记得它的默认通道，
+				// 于是一条被钉成 ACP 的 omp 会话会被 agentId 版谓词判成「PTY agent」而放行，然后被
+				// 当作 PTY 重启掉。判据因此改读通道本身，且优先级与「这条会话到底跑在哪」一致：
+				//   有活体 PTY summary ⇒ 读它盖的章（terminalManager 的 summary 理论上恒是 PTY，
+				//   仍照读是为了不依赖这个隐含前提——那正是本次改动之前那批硬编码分叉的成因）；
+				//   硬中断后没有活体 summary ⇒ 按「下次启动该走哪条通道」解析（卡片固化 → 全局默认 →
+				//   catalog 默认），与 card-detail-view 无活会话时的面板分流同一套优先级。
+				const effectiveSessionTransport = currentSummary
+					? resolveRuntimeAgentSessionTransportFromSummary({
+							agentId: effectiveAgentId,
+							sessionTransport: currentSummary.sessionTransport,
+						})
+					: resolveAgentSessionTransportForLaunch({
+							agentId: effectiveAgentId,
+							cardPinnedSessionTransport: card.ompAgentSessionTransport,
+							globalDefaultSessionTransportForNewTasks: scopedRuntimeConfig.ompAgentSessionTransportForNewTasks,
+						}).effectiveSessionTransport;
+				if (effectiveSessionTransport !== "pty_terminal") {
+					return {
+						ok: false,
+						summary: null,
+						error: "Refresh is only available for active TUI terminal agents.",
+					};
+				}
 				const resolvedConfig =
 					effectiveAgentId !== scopedRuntimeConfig.selectedAgentId
 						? { ...scopedRuntimeConfig, selectedAgentId: effectiveAgentId }
@@ -882,6 +980,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					parentSessionId: undefined,
 					taskAgentSessionInitialization: undefined,
 					terminalAgentModelOverrideSettings: resumedTerminalAgentModelOverrideSettings,
+				});
+				// 重启也是一次启动：把 agent 身份重新钉到卡片上，让「靠兜底才救回来的会话」在下一次硬中断时
+				// 不必再靠兜底。
+				await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
+					workspaceScope,
+					taskId: body.taskId,
+					agentId: resolved.agentId,
+					broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
 				});
 				return {
 					ok: true,

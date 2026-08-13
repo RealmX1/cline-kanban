@@ -26,6 +26,8 @@ interface UsePersistentTerminalSessionInput {
 export interface UsePersistentTerminalSessionResult {
 	containerRef: MutableRefObject<HTMLDivElement | null>;
 	lastError: string | null;
+	/** 终端至今有没有渲染出过任何内容 —— 驱动「一片空白」时的可解释空态。 */
+	hasRenderedAnyTerminalContent: boolean;
 	isStopping: boolean;
 	isRefreshing: boolean;
 	isSearchOpen: boolean;
@@ -76,6 +78,7 @@ export function usePersistentTerminalSession({
 		sessionStartedAt: number | null;
 	} | null>(null);
 	const [lastError, setLastError] = useState<string | null>(null);
+	const [hasRenderedAnyTerminalContent, setHasRenderedAnyTerminalContent] = useState(false);
 	const [isStopping, setIsStopping] = useState(false);
 	const [isRefreshing, setIsRefreshing] = useState(false);
 	const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -176,6 +179,7 @@ export function usePersistentTerminalSession({
 				callbackRef.current.onConnectionReady?.(connectedTaskId);
 			},
 			onLastError: setLastError,
+			onTerminalContentPresenceChange: setHasRenderedAnyTerminalContent,
 			onSummary: (summary) => {
 				callbackRef.current.onSummary?.(summary);
 			},
@@ -301,6 +305,7 @@ export function usePersistentTerminalSession({
 	return {
 		containerRef,
 		lastError,
+		hasRenderedAnyTerminalContent,
 		isStopping,
 		isRefreshing,
 		isSearchOpen,

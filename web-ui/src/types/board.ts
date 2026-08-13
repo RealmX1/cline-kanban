@@ -74,6 +74,11 @@ export interface BoardCard {
 	// 浏览器侧必须声明它：详情视图在**没有活会话**时只能靠它预判该渲染 xterm 还是会话面板，
 	// 而 normalizeCard 是白名单式拷贝——字段不在类型里就既读不到、也会在水合时被丢掉并回写抹平。
 	ompAgentSessionTransport?: RuntimeAgentSessionTransport;
+	// runtime 观测值，不是用户意图：本卡片最近一次**真正启动成功**的会话用的是哪个 agent，
+	// 只由服务端在会话启动成功后写入（见 api-contract.ts 的 runtimeBoardCardSchema）。
+	// 前端既不生成也不编辑它，唯一职责是原样保留——归一化层一旦丢掉它，下一次 saveState
+	// 就会用剥干净的 board 覆盖盘上这条硬中断恢复的主 durable 真相源。
+	mostRecentlyLaunchedAgentSessionAgentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;

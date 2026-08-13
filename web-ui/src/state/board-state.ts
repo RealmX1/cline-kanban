@@ -28,6 +28,7 @@ import {
 	type TaskImage,
 } from "@/types";
 import {
+	runtimeAgentIdSchema,
 	runtimeAgentSessionTransportSchema,
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
@@ -257,6 +258,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef?: unknown;
 		agentId?: unknown;
 		ompAgentSessionTransport?: unknown;
+		mostRecentlyLaunchedAgentSessionAgentId?: unknown;
 		clineSettings?: unknown;
 		terminalAgentModelOverrideSettings?: unknown;
 		taskAgentSessionInitialization?: unknown;
@@ -326,6 +328,17 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		? parsedOmpAgentSessionTransport.data
 		: undefined;
 
+	// 纯 runtime 观测值：服务端在会话启动成功时写进卡片，前端既不生成也不编辑，只负责原样带过归一化。
+	// 这里不保留就等于剥掉——归一化后的 board 会被 useWorkspacePersistence 原样 saveState 回盘，
+	// 而服务端 saveWorkspaceState 是整块覆盖 board.json（不按字段与盘上旧卡片合并），
+	// 于是硬中断恢复的主 durable 真相源被抹掉，只剩 reclamation 记录 / 项目默认档这两个更弱的源。
+	const parsedMostRecentlyLaunchedAgentSessionAgentId = runtimeAgentIdSchema.safeParse(
+		card.mostRecentlyLaunchedAgentSessionAgentId,
+	);
+	const mostRecentlyLaunchedAgentSessionAgentId = parsedMostRecentlyLaunchedAgentSessionAgentId.success
+		? parsedMostRecentlyLaunchedAgentSessionAgentId.data
+		: undefined;
+
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
 		title,
@@ -341,6 +354,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(ompAgentSessionTransport !== undefined ? { ompAgentSessionTransport } : {}),
+		...(mostRecentlyLaunchedAgentSessionAgentId !== undefined ? { mostRecentlyLaunchedAgentSessionAgentId } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
 		...(terminalAgentModelOverrideSettings !== undefined ? { terminalAgentModelOverrideSettings } : {}),
 		...(taskAgentSessionInitialization !== undefined ? { taskAgentSessionInitialization } : {}),

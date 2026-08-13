@@ -286,6 +286,21 @@ export const runtimeBoardCardSchema = z
 		// 注意：本字段落在**卡**上，隐含「一张 omp 卡只有一条 agent 会话」。omp 一旦获得 By the way
 		// 支持（一个 task 会有多条会话），必须改成按会话 id 的映射。
 		ompAgentSessionTransport: runtimeAgentSessionTransportSchema.optional(),
+		// runtime 观测值，不是用户意图：本卡片最近一次**真正启动成功**的会话用的是哪个 agent。
+		//
+		// 为什么不复用上面的 `agentId`：那个字段的语义是「用户为这张卡做的 per-task 覆盖」，缺失即
+		// 「跟随项目默认档」。把解析出来的默认档物化进去，等于把「跟随默认」静默钉成一个用户从未选过的
+		// 永久覆盖，agent 选择器还会显示成用户主动选过——与 task-board-mutations.ts 里
+		// `taskAgentPermissionMode` 那段注释禁止的是同一类错误。
+		//
+		// 为什么需要它：sessions.json 只在 graceful shutdown 与客户端 saveState 落盘，硬中断（系统重启 /
+		// 本地 redeploy）会让「这个 task 用的是哪个 agent」在盘上彻底消失；而走默认档的卡片上又没有
+		// `agentId` 可回填，重启后该 task 就只剩一条 agentId 为 null 的空壳 summary——TUI 全白、
+		// 「重启终端会话」灰掉。本字段是这条链路上唯一在**启动那一刻**就 durable 的真相源。
+		//
+		// 只由 runtime 在会话启动成功后写入，故**不出现在** RuntimeUpdateTaskInput 里；它靠 updateTask
+		// 的 `...card` 展开穿过用户编辑。
+		mostRecentlyLaunchedAgentSessionAgentId: runtimeAgentIdSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
