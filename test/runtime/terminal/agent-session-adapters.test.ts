@@ -2,10 +2,21 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
-import { KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID } from "../../../src/core/agent-catalog";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
-import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
+import {
+	KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR,
+	prepareAgentLaunch,
+} from "../../../src/terminal/agent-session-adapters";
+
+// cursorAdapter 会从模型目录动态解析启动默认值。这里换成一个**故意不存在于任何真实目录**的哨兵值，
+// 既让测试不去 spawn `cursor-agent`，又能证明 argv 里的 `--model` 确实来自探测结果而非某个写死的常量：
+// 上游发布新代次时无需改代码就会跟上。
+const CURSOR_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL = "cursor-grok-9.9-high";
+vi.mock("../../../src/terminal/terminal-agent-model-selection", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../../src/terminal/terminal-agent-model-selection")>()),
+	resolveCursorLaunchDefaultModelId: vi.fn(async () => CURSOR_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL),
+}));
 
 const originalHome = process.env.HOME;
 const originalAppData = process.env.APPDATA;
@@ -54,6 +65,7 @@ function getCodexConfigOverrideValues(args: string[], key: string): string[] {
 }
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	if (originalHome === undefined) {
 		delete process.env.HOME;
 	} else {
@@ -82,7 +94,7 @@ afterEach(() => {
 });
 
 describe("cursorAdapter", () => {
-	it("uses the Kanban Cursor default model instead of Cursor Agent's raw fast default", async () => {
+	it("launches with the dynamically probed Cursor default model instead of a hardcoded model id", async () => {
 		const launch = await prepareAgentLaunch({
 			taskId: "task-cursor-default-model",
 			agentId: "cursor" as RuntimeAgentId,
@@ -95,10 +107,8 @@ describe("cursorAdapter", () => {
 
 		const modelIndex = launch.args.indexOf("--model");
 		expect(modelIndex).toBeGreaterThan(-1);
-		expect(launch.args[modelIndex + 1]).toBe(KANBAN_CURSOR_AGENT_DEFAULT_MODEL_ID);
-		expect(launch.args[modelIndex + 1]).toBe("grok-4.5-high");
+		expect(launch.args[modelIndex + 1]).toBe(CURSOR_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL);
 		expect(launch.args).not.toContain("composer-2.5-fast");
-		expect(launch.args).not.toContain("grok-4.5-fast-high");
 	});
 
 	it("uses an explicit Cursor model override when present", async () => {
@@ -335,10 +345,30 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.args).not.toContain("--no-alt-screen");
 	});
 
-	it("launches Claude without alternate screen so terminal scrollback keeps session history", async () => {
+	it("launches Claude on the fullscreen renderer by default", async () => {
 		setupTempHome();
+		// Kanban 自己可能跑在一个 Claude Code 会话里，从而继承到它注入的这个变量。它在 Claude 的
+		// 判定顺序里排在 NO_FLICKER 之前，若原样传下去会把 fullscreen 否决掉——必须被抹成 undefined。
+		vi.stubEnv("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
 		const launch = await prepareAgentLaunch({
-			taskId: "task-claude-inline-history",
+			taskId: "task-claude-fullscreen-renderer",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+		});
+
+		expect(launch.env.CLAUDE_CODE_NO_FLICKER).toBe("1");
+		expect(launch.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBeUndefined();
+		expect(launch.env.FORCE_HYPERLINK).toBe("1");
+	});
+
+	it("falls back to the inline renderer when the Kanban escape hatch asks for it", async () => {
+		setupTempHome();
+		vi.stubEnv(KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR, "inline");
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-renderer-escape-hatch",
 			agentId: "claude",
 			binary: "claude",
 			args: [],
@@ -347,7 +377,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 
 		expect(launch.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBe("1");
-		expect(launch.env.FORCE_HYPERLINK).toBe("1");
+		expect(launch.env.CLAUDE_CODE_NO_FLICKER).toBeUndefined();
 	});
 
 	it("passes Claude task prompts as startup argv", async () => {
@@ -1494,6 +1524,56 @@ describe("prepareAgentLaunch hook strategies", () => {
 	});
 });
 
+describe("kimiAdapter model selection", () => {
+	it("passes an explicit Kimi model override through to the CLI", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kimi-explicit-model",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			terminalAgentModelOverrideSettings: { agentId: "kimi", modelId: "kimi-code/k3-256k" },
+		});
+
+		const modelIndex = launch.args.indexOf("--model");
+		expect(modelIndex).toBeGreaterThan(-1);
+		expect(launch.args[modelIndex + 1]).toBe("kimi-code/k3-256k");
+	});
+
+	it("passes no model flag at all without an override so kimi's own default_model still applies", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kimi-default-model",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			terminalAgentModelOverrideSettings: undefined,
+		});
+
+		expect(launch.args).not.toContain("--model");
+		expect(launch.args).not.toContain("-m");
+	});
+
+	it("ignores a model override that belongs to a different agent", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kimi-foreign-model-override",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			terminalAgentModelOverrideSettings: { agentId: "cursor", modelId: "cursor-grok-4.6-high" },
+		});
+
+		expect(launch.args).not.toContain("--model");
+	});
+});
+
 // resumesPriorAgentConversation 是 session-manager 武装 resume substantive guard 的唯一依据：
 // 续跑启动会把整段旧 transcript 重播进新 TUI，那不是「agent 刚刚响应」，不得刷新卡片时间戳。
 // 反过来，全新启动必须为 false，否则真实新产出会被误冻住。
@@ -1673,5 +1753,134 @@ describe("prepareAgentLaunch resumesPriorAgentConversation", () => {
 			});
 			expect(launch.resumesPriorAgentConversation ?? false).toBe(false);
 		}
+	});
+});
+
+// oh-my-pi 的 PTY TUI 通道。它与 ACP 通道共用同一份 omp 磁盘会话存储，可随时互切，
+// 所以这些断言不只是「参数拼对了」，还钉住了几条会让托管会话直接卡死的前提。
+describe("ompAdapter", () => {
+	async function prepareOmpLaunch(
+		overrides: Partial<Parameters<typeof prepareAgentLaunch>[0]> = {},
+	): ReturnType<typeof prepareAgentLaunch> {
+		setupTempHome();
+		return await prepareAgentLaunch({
+			taskId: "task-omp",
+			agentId: "omp",
+			binary: "omp",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			...overrides,
+		});
+	}
+
+	function readOmpLaunchConfigOverlay(args: string[]): Record<string, unknown> {
+		const configIndex = args.indexOf("--config");
+		expect(configIndex).toBeGreaterThanOrEqual(0);
+		const configPath = args[configIndex + 1];
+		expect(existsSync(configPath)).toBe(true);
+		return JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+	}
+
+	it("maps each permission tier onto omp's --approval-mode", async () => {
+		const expectedApprovalModeByPermissionMode = {
+			bypass_all_permission_prompts: "yolo",
+			auto_approve_file_edits_only: "write",
+			ask_for_every_tool_use: "always-ask",
+		} as const;
+		for (const [permissionMode, expectedApprovalMode] of Object.entries(expectedApprovalModeByPermissionMode)) {
+			const launch = await prepareOmpLaunch({
+				taskId: `task-omp-${permissionMode}`,
+				taskAgentPermissionMode: permissionMode as keyof typeof expectedApprovalModeByPermissionMode,
+			});
+			const approvalModeIndex = launch.args.indexOf("--approval-mode");
+			expect(approvalModeIndex).toBeGreaterThanOrEqual(0);
+			expect(launch.args[approvalModeIndex + 1]).toBe(expectedApprovalMode);
+		}
+	});
+
+	// 绝不能起成 ACP server：`acp` 子命令只属于另一条通道。
+	it("launches the interactive TUI, not the ACP server", async () => {
+		const launch = await prepareOmpLaunch();
+		expect(launch.args).not.toContain("acp");
+	});
+
+	// 位置 prompt 会在 TUI 初始化完成后由 omp 自动提交，因此不需要 deferredStartupInput。
+	it("passes the task prompt positionally and does not defer startup input", async () => {
+		const launch = await prepareOmpLaunch({ prompt: "Implement the feature" });
+		expect(launch.args.some((argument) => argument.includes("Implement the feature"))).toBe(true);
+		expect(launch.deferredStartupInput).toBeUndefined();
+	});
+
+	// 坑 ①：omp 的大粘贴菜单默认 100 行触发，会挂住会话等人选。overlay 必须把它关掉（0）。
+	// 同时 titleState 必须开着——Kanban 的状态判定全靠 OSC 标题。
+	it("writes a launch overlay that disables the blocking large-paste menu and keeps title state on", async () => {
+		const launch = await prepareOmpLaunch();
+		const overlay = readOmpLaunchConfigOverlay(launch.args);
+		expect(overlay.paste).toEqual({ largeMenuThreshold: 0 });
+		expect(overlay.tui).toEqual({ titleState: true });
+		expect(overlay.startup).toEqual({ showSplash: false });
+	});
+
+	// 坑 ②：plan 起步只能经 plan.defaultOnStartup 表达。`--plan-yolo` 会自动批准计划并立刻开始实现，
+	// 与「先只读规划、停下等人批准」的语义相反。plan 起步也不得动放权档（正交轴铁律）。
+	it("expresses plan start through the overlay without touching the permission tier", async () => {
+		const launch = await prepareOmpLaunch({
+			taskId: "task-omp-plan-start",
+			startInPlanMode: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+		});
+		const overlay = readOmpLaunchConfigOverlay(launch.args);
+		expect(overlay.plan).toEqual({ enabled: true, defaultOnStartup: true });
+		expect(launch.args).not.toContain("--plan-yolo");
+		const approvalModeIndex = launch.args.indexOf("--approval-mode");
+		expect(launch.args[approvalModeIndex + 1]).toBe("yolo");
+	});
+
+	it("omits the plan overlay when plan start is off", async () => {
+		const launch = await prepareOmpLaunch({ taskId: "task-omp-no-plan-start" });
+		expect(readOmpLaunchConfigOverlay(launch.args).plan).toBeUndefined();
+	});
+
+	// 续跑：垃圾桶恢复与通道切换重开是同一条分支——加 --continue、不重投 prompt、武装重播守卫。
+	// 而且**绝不**发裸 --resume：无值时 omp 会弹全屏 session picker 等人上下键选，托管会话就此卡死。
+	for (const [caseName, resumeOverrides] of [
+		["restored from trash", { resumeFromTrash: true }],
+		["reopened after a transport switch", { resumePriorAgentConversationWithoutResendingPrompt: true }],
+	] as const) {
+		it(`continues the prior conversation without resending the prompt when ${caseName}`, async () => {
+			const launch = await prepareOmpLaunch({
+				taskId: `task-omp-${caseName.replaceAll(" ", "-")}`,
+				prompt: "Implement the feature",
+				...resumeOverrides,
+			});
+			expect(launch.args).toContain("--continue");
+			expect(launch.args).not.toContain("--resume");
+			expect(launch.args).not.toContain("-r");
+			expect(launch.args.some((argument) => argument.includes("Implement the feature"))).toBe(false);
+			expect(launch.resumesPriorAgentConversation).toBe(true);
+		});
+	}
+
+	it("does not replay plan start when continuing a prior conversation", async () => {
+		const launch = await prepareOmpLaunch({
+			taskId: "task-omp-resume-no-plan-replay",
+			startInPlanMode: true,
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+		});
+		expect(readOmpLaunchConfigOverlay(launch.args).plan).toBeUndefined();
+	});
+
+	// 首启的全屏 setup 向导会切 alt-screen 盖住 TUI 并等人操作。
+	it("skips the full-screen setup wizard", async () => {
+		const launch = await prepareOmpLaunch({ taskId: "task-omp-skip-setup" });
+		expect(launch.env.OMP_SKIP_SETUP).toBe("1");
+	});
+
+	it("detects run state from omp's OSC terminal title", async () => {
+		const launch = await prepareOmpLaunch({ taskId: "task-omp-detector" });
+		expect(typeof launch.detectOutputTransition).toBe("function");
+		// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
+		expect(launch.shouldInspectOutputForTransition).toBeUndefined();
 	});
 });

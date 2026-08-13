@@ -556,6 +556,8 @@ export default function App(): ReactElement {
 		currentProjectId: projectRuntimeWorkspaceId,
 		selectedAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
 		newTaskStartInPlanModeByDefault: runtimeProjectConfig?.newTaskStartInPlanModeByDefault ?? true,
+		// 配置还没到（首屏）时回落 TUI —— 与运行时 DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS 同值。
+		ompAgentSessionTransportForNewTasks: runtimeProjectConfig?.ompAgentSessionTransportForNewTasks ?? "pty_terminal",
 		isNewTaskStartInPlanModeDefaultLoaded: runtimeProjectConfig !== null,
 		// 全局那个旧开关如今只决定「新任务的默认权限档」，不再直接作用于会话启动。
 		newTaskAgentPermissionModeByDefault: resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(
@@ -612,6 +614,7 @@ export default function App(): ReactElement {
 		sendTaskSessionInput,
 		sendTaskChatMessage,
 		fetchTaskWorkspaceInfo,
+		taskConversationSessionSummariesByTaskId: sessions,
 		isGitHistoryOpen,
 		refreshWorkspaceState,
 	});

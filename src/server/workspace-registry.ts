@@ -1,5 +1,6 @@
 import { type RuntimeConfigState, toGlobalRuntimeConfigState } from "../config/runtime-config";
 import type {
+	RuntimeAgentId,
 	RuntimeBoardCard,
 	RuntimeBoardData,
 	RuntimeInProgressTaskDetail,
@@ -9,7 +10,12 @@ import type {
 	RuntimeProjectUnavailableReason,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
+import { isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
+import {
+	type PersistedAgentSessionReclamationDeadlineRecord,
+	readAgentSessionReclamationDeadlineRecords,
+} from "../state/agent-session-reclamation-deadline-store";
 import {
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
@@ -42,37 +48,98 @@ export interface DisposeWorkspaceRegistryOptions {
 }
 
 /**
- * `sessions.json` 只在 graceful shutdown 落盘。非优雅退出（进程被杀）会
- * 留下 agent 完全启动之前的默认快照——`startTaskSession` 的 `agentId: request.agentId` 尚未写入，
- * 于是 summary.agentId 恒为 null。board card 才是「该 task 用哪个 agent」的 durable 真相源，故在
- * hydrate 之前用它回填丢失的 agentId。否则 summary.agentId===null 会同时击穿三条恢复路径：
- * canRefresh（Refresh 按钮禁用）、refreshTaskTerminal 的 agentId gate、以及聚焦时的自动续跑判据，
- * 令「进程随运行时重启而死」的任务彻底无法恢复。只回填、不覆盖已有 agentId；无 card 的 shell /
- * home / synthetic 会话正确保留 null。
+ * `sessions.json` 只在 graceful shutdown 与客户端 saveState 落盘。非优雅退出（系统重启 / 本地
+ * redeploy / 进程被杀）会让 summary.agentId 丢成 null——要么盘上留着 agent 完全启动之前的默认快照，
+ * 要么该 task 在盘上根本没有条目、由 `ensureEntry` 就地补一条全 null 的占位。
+ *
+ * summary.agentId===null 会同时击穿三条恢复路径：canRefresh（「重启终端会话」按钮禁用）、
+ * refreshTaskTerminal 的 agentId gate、以及聚焦时的自动续跑判据，令任务彻底无法恢复（TUI 全白）。
+ * 所以 hydrate 之前必须尽最大努力把它找回来。
+ *
+ * **曾经的错误假设**：这里原先写着「board card 才是该 task 用哪个 agent 的 durable 真相源」。
+ * 对**没有显式选过 agent、走项目默认档**的卡片这句话不成立——`addTaskToColumn` 对这类卡片根本不写
+ * `agentId` 字段（`...(input.agentId ? { agentId } : {})`），于是整个回填对它们是 no-op。这正是本 bug
+ * 在 2026-07 那次修复之后仍然复发的原因。故本函数按可信度依次尝试三个 durable 源，缺一不可。
+ *
+ * **排序原则**：回填复原的是「一个已经存在过的会话是谁跑的」，不是「下一次该用谁启动」，所以对该会话的
+ * **运行时观测事实**一律排在卡片上的**用户意图**之前（见下方各源注释）。
+ *
+ * 只回填、不覆盖已有 agentId；三个源都问不出结论时（无 card 的 shell / home / synthetic 会话）
+ * 正确保留 null。
  */
-export function applyBoardCardAgentIdsToSessions(
-	board: RuntimeBoardData,
+export function backfillMissingSessionAgentIdsFromDurableSources(
+	sources: {
+		board: RuntimeBoardData;
+		/** 该 workspace 的全部回收期限记录；读不到时传空数组即可，本函数不因此报错。 */
+		agentSessionReclamationDeadlineRecords: readonly PersistedAgentSessionReclamationDeadlineRecord[];
+	},
 	sessions: RuntimeWorkspaceStateResponse["sessions"],
 ): void {
-	const cardAgentIdByTaskId = new Map<string, NonNullable<RuntimeBoardCard["agentId"]>>();
-	for (const column of board.columns) {
+	const cardByTaskId = new Map<string, RuntimeBoardCard>();
+	for (const column of sources.board.columns) {
 		for (const card of column.cards) {
-			if (card.agentId) {
-				cardAgentIdByTaskId.set(card.id, card.agentId);
-			}
+			cardByTaskId.set(card.id, card);
 		}
 	}
 	for (const summary of Object.values(sessions)) {
-		if (summary.agentId === null) {
-			const cardAgentId = cardAgentIdByTaskId.get(summary.taskId);
-			if (cardAgentId) {
-				summary.agentId = cardAgentId;
-			}
+		if (summary.agentId !== null) {
+			continue;
 		}
+		const card = cardByTaskId.get(summary.taskId);
+		summary.agentId =
+			// 源 3（最优先）：runtime 在上一次会话**启动成功那一刻**记下的观测值，说的正是「这条丢了 agentId
+			// 的 summary 所指的会话当时真的由谁跑起来」——与本字段要复原的东西同指一个会话。走项目默认档的
+			// 卡片也只有这一条。
+			card?.mostRecentlyLaunchedAgentSessionAgentId ??
+			// 源 2：用户为这张卡做的 per-task 覆盖。它表达的是「下一次启动想用谁」的意图，可能还没有任何会话
+			// 兑现过它，故只在观测值缺席（本字段上线前的存量卡片）时兜底。
+			//
+			// **为什么观测值必须压过用户意图**：`startTaskSession` 的 `shouldProbePersistedClineSession` 分支会在
+			// `card.agentId` 仍是别的 agent 时探测到持久化的 Cline 会话并改走 Cline，真正跑起来的与卡片意图天然
+			// 不一致（卡片上只有 `mostRecentlyLaunchedAgentSessionAgentId` 记下了这个事实）。此时若让 card.agentId
+			// 胜出，重启后会把一个 Cline 会话标成 PTY agent：详情页分流、canRefresh、自动续跑判据全部走错分支；
+			// 更糟的是 `previousTerminalAgentId` 不再是 null，会连那条 Cline 探针分支一起跳过——**填错比留 null
+			// 更坏**。同理，用户改了卡片 agent 但尚未重启时，既存会话的身份也仍是上一次跑起来的那个。
+			card?.agentId ??
+			// 源 4：回收期限记录。它是本修复上线**之前**就已损坏的存量任务唯一的回血通道——源 3 是新写的，
+			// 老卡片上不会有，而这些任务的回收记录里完好保存着 agentId。
+			resolveMostRecentAgentSessionReclamationDeadlineRecordAgentId(
+				sources.agentSessionReclamationDeadlineRecords,
+				summary.taskId,
+			);
 	}
 }
 
-async function backfillSessionAgentIdsFromBoard(
+/**
+ * 取该 task 最近一条回收期限记录里的 agentId。
+ *
+ * 刻意**不**用 `findLiveAgentSessionReclamationDeadlineRecord`（只认 live 状态）：`agentId` 是记录的必备
+ * 字段，在 `reclaimed` / `superseded` 这些终态里同样保留，它是历史事实、不随状态失效。用「不限状态」还
+ * 让本回填与「把超期 live 记录推进到终态」的对账彻底解耦——否则对账一跑，回血源就被掐死了。
+ */
+function resolveMostRecentAgentSessionReclamationDeadlineRecordAgentId(
+	records: readonly PersistedAgentSessionReclamationDeadlineRecord[],
+	taskId: string,
+): RuntimeAgentId | null {
+	let mostRecentRecord: PersistedAgentSessionReclamationDeadlineRecord | null = null;
+	for (const record of records) {
+		if (record.taskId !== taskId || record.agentId === null) {
+			continue;
+		}
+		// `updatedAt` 相等时必须取**数组中更靠后**的那条（故意用 `>=` 而非 `>`）。
+		// 理由在写入侧：`recordAgentSessionRetentionDeadline` 追加新记录时，会用同一个 `recordedAt`
+		// 同时把该 task 既有 live 记录置为 `superseded`、并把新记录 push 到数组末尾——于是「旧记录被作废」
+		// 与「新记录诞生」共享一个时间戳，`updatedAt` 无法区分先后，只剩数组次序还保留着因果顺序。
+		// 此时更靠后的那条才是刚落地的当前记录，它的 agentId 才是该 task 最新在用的 harness；
+		// 取更靠前的那条会回填成换 agent 之前的旧 harness，把存量损坏任务恢复错。
+		if (!mostRecentRecord || record.updatedAt >= mostRecentRecord.updatedAt) {
+			mostRecentRecord = record;
+		}
+	}
+	return mostRecentRecord?.agentId ?? null;
+}
+
+async function backfillSessionAgentIdsBeforeHydrate(
 	workspaceId: string,
 	sessions: RuntimeWorkspaceStateResponse["sessions"],
 ): Promise<void> {
@@ -82,7 +149,11 @@ async function backfillSessionAgentIdsFromBoard(
 	} catch {
 		return;
 	}
-	applyBoardCardAgentIdsToSessions(board, sessions);
+	// 回收记录读不出来只损失第四个源，不该连累前两个源的回填。
+	const agentSessionReclamationDeadlineRecords = await readAgentSessionReclamationDeadlineRecords(workspaceId).catch(
+		() => [] as PersistedAgentSessionReclamationDeadlineRecord[],
+	);
+	backfillMissingSessionAgentIdsFromDurableSources({ board, agentSessionReclamationDeadlineRecords }, sessions);
 }
 
 export type ResolvedWorkspaceStreamTarget =
@@ -265,7 +336,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			const manager = new TerminalSessionManager();
 			try {
 				const existingWorkspace = await loadWorkspaceState(repoPath, { autoCreateIfMissing: false });
-				await backfillSessionAgentIdsFromBoard(workspaceId, existingWorkspace.sessions);
+				await backfillSessionAgentIdsBeforeHydrate(workspaceId, existingWorkspace.sessions);
 				manager.hydrateFromRecord(existingWorkspace.sessions);
 			} catch {
 				// Workspace state will be created on demand.
@@ -373,6 +444,16 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		const response = await loadWorkspaceState(workspacePath, { autoCreateIfMissing: false });
 		const terminalManager = await ensureTerminalManagerForWorkspace(workspaceId, workspacePath);
 		for (const summary of terminalManager.listSummaries()) {
+			// 活体 summary 通常比盘上那条新，但有一种例外必须挡住：前端一聚焦某张卡，`ensureEntry` 就会
+			// 就地造出一条全 null 的占位 summary。让它盖掉盘上记着 agentId / startedAt 的记录，等于把
+			// 「重启就能自愈」的中断变成永久损坏（TUI 全白 + 「重启终端会话」灰掉）。
+			if (
+				isNeverStartedPlaceholderTaskSessionSummary(summary) &&
+				response.sessions[summary.taskId] &&
+				!isNeverStartedPlaceholderTaskSessionSummary(response.sessions[summary.taskId])
+			) {
+				continue;
+			}
 			response.sessions[summary.taskId] = summary;
 		}
 		return response;

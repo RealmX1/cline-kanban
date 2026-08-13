@@ -707,6 +707,55 @@ describe("board dependency state", () => {
 		expect(normalizedTask?.taskAgentSessionInitialization).toBeUndefined();
 	});
 
+	// 水合出来的这份 board 会被原样回写持久化，所以 normalizeCard 丢字段等于把服务端卡片上
+	// 已固化的通道抹平；详情视图在无活会话时也就再没有东西可据以预判下次启动走哪条通道。
+	it("keeps the pinned omp session transport on persisted cards", () => {
+		const rawBoard = {
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "pinned-acp-task",
+							prompt: "Task pinned to ACP",
+							startInPlanMode: false,
+							baseRef: "main",
+							agentId: "omp",
+							ompAgentSessionTransport: "acp_stdio_subprocess",
+						},
+						{
+							id: "legacy-task",
+							prompt: "Task without a pinned transport",
+							startInPlanMode: false,
+							baseRef: "main",
+							agentId: "omp",
+						},
+						{
+							id: "garbage-transport-task",
+							prompt: "Task with an unreadable pinned transport",
+							startInPlanMode: false,
+							baseRef: "main",
+							agentId: "omp",
+							ompAgentSessionTransport: "not-a-transport",
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "validation", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalizedCards = normalizeBoardData(rawBoard)?.columns[0]?.cards;
+
+		expect(normalizedCards?.[0]?.ompAgentSessionTransport).toBe("acp_stdio_subprocess");
+		// 老卡片留 undefined，由启动处回落到当时的全局默认——这里不替它猜。
+		expect(normalizedCards?.[1]?.ompAgentSessionTransport).toBeUndefined();
+		expect(normalizedCards?.[2]?.ompAgentSessionTransport).toBeUndefined();
+	});
+
 	it("keeps cards in the validation column when normalizing", () => {
 		const rawBoard = {
 			columns: [
@@ -774,6 +823,56 @@ describe("board dependency state", () => {
 				updatedAt: 110,
 			},
 		]);
+	});
+
+	// 归一化后的 board 会被原样 saveState 回盘，而服务端是整块覆盖 board.json（不按字段合并）。
+	// 所以归一化层一旦剥掉这个只由 runtime 写入的 durable 字段，硬中断恢复的主真相源就会被抹掉。
+	it("preserves the runtime-written mostRecentlyLaunchedAgentSessionAgentId across normalization and edits", () => {
+		const rawBoard = {
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "launched-task",
+							prompt: "Task started with a resolved default agent",
+							startInPlanMode: false,
+							baseRef: "main",
+							mostRecentlyLaunchedAgentSessionAgentId: "codex",
+						},
+						{
+							id: "unknown-agent-task",
+							prompt: "Task carrying an unknown agent id",
+							startInPlanMode: false,
+							baseRef: "main",
+							mostRecentlyLaunchedAgentSessionAgentId: "not-a-real-agent",
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "validation", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalized = normalizeBoardData(rawBoard);
+		const backlogCards = normalized?.columns.find((column) => column.id === "backlog")?.cards ?? [];
+		expect(backlogCards[0]?.mostRecentlyLaunchedAgentSessionAgentId).toBe("codex");
+		expect(backlogCards[1]?.mostRecentlyLaunchedAgentSessionAgentId).toBeUndefined();
+
+		if (!normalized) {
+			throw new Error("expected normalized board");
+		}
+		const edited = updateTask(normalized, "launched-task", {
+			prompt: "Task started with a resolved default agent",
+			baseRef: "main",
+		});
+		const editedCard = edited.board.columns
+			.find((column) => column.id === "backlog")
+			?.cards.find((card) => card.id === "launched-task");
+		expect(editedCard?.mostRecentlyLaunchedAgentSessionAgentId).toBe("codex");
 	});
 
 	it("backfills an empty validation column for legacy four-column boards", () => {

@@ -3,7 +3,10 @@ import type {
 	DraggableProvidedDragHandleProps,
 	DraggableStyle,
 } from "@hello-pangea/dnd";
-import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import {
+	getRuntimeAgentCatalogEntry,
+	isRuntimeAgentSessionSummaryRenderedAsConversationPanel,
+} from "@runtime-agent-catalog";
 import { isLowConfidenceLastConversationProgressEvidence } from "@runtime-last-conversation-progress-observation";
 import {
 	deriveDisplayLiveness,
@@ -45,6 +48,7 @@ import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
+import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
@@ -373,14 +377,20 @@ export function TaskCardBody({
 					: null
 				: reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
 			: null;
-	const reviewChangeSummary = reviewWorkspaceSnapshot
-		? reviewWorkspaceSnapshot.changedFiles == null
-			? null
-			: {
-					filesLabel: `${reviewWorkspaceSnapshot.changedFiles} ${reviewWorkspaceSnapshot.changedFiles === 1 ? "file" : "files"}`,
-					additions: reviewWorkspaceSnapshot.additions ?? 0,
-					deletions: reviewWorkspaceSnapshot.deletions ?? 0,
-				}
+	const reviewWorkspaceChangedFilesCount = reviewWorkspaceSnapshot?.changedFiles ?? null;
+	const reviewWorkspaceAddedLinesCount = reviewWorkspaceSnapshot?.additions ?? 0;
+	const reviewWorkspaceRemovedLinesCount = reviewWorkspaceSnapshot?.deletions ?? 0;
+	const shouldDisplayReviewWorkspaceChangeSummary =
+		reviewWorkspaceChangedFilesCount != null &&
+		(reviewWorkspaceChangedFilesCount !== 0 ||
+			reviewWorkspaceAddedLinesCount !== 0 ||
+			reviewWorkspaceRemovedLinesCount !== 0);
+	const reviewChangeSummary = shouldDisplayReviewWorkspaceChangeSummary
+		? {
+				filesLabel: `${reviewWorkspaceChangedFilesCount} ${reviewWorkspaceChangedFilesCount === 1 ? "file" : "files"}`,
+				additions: reviewWorkspaceAddedLinesCount,
+				deletions: reviewWorkspaceRemovedLinesCount,
+			}
 		: null;
 	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath);
 	const showTitleEditButton = (onSaveTitle != null || onOpenTaskEditor != null) && !pinnedClone && !isEditingTitle;
@@ -432,11 +442,15 @@ export function TaskCardBody({
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentLabel, modelOverrideLabel]);
 	// 简写目录行：{worktree/inplace} ↑{ahead} ↓{behind} ({changed files} +{add} -{del})。
-	// ahead/behind 是与 base 分支的双向分歧（两侧皆 0 时整体不渲染）；工作区脏统计仍相对 HEAD。
+	// ahead/behind 是与 base 分支的双向分歧（两侧皆 0 时整体不渲染）；工作区脏统计仍相对 HEAD，
+	// 但文件数与增删行数全为 0 时同样整体隐藏，避免无变化任务与真实脏任务争夺注意力。
 	const worktreeModeLabel = card.worktreeMode === "inplace" ? "inplace" : "worktree";
 	const commitsAheadOfBaseRef = reviewWorkspaceSnapshot?.commitsAheadOfBaseRef ?? null;
 	const commitsBehindBaseRef = reviewWorkspaceSnapshot?.commitsBehindBaseRef ?? null;
-	const baseRefDivergenceTooltip = useMemo(() => {
+	const taskCommitsIntegratedIntoBaseRef = reviewWorkspaceSnapshot?.taskCommitsIntegratedIntoBaseRef ?? null;
+	const taskCommitIntegrationTrackingStatus = reviewWorkspaceSnapshot?.taskCommitIntegrationTrackingStatus;
+	const showTaskCommitIntegrationIndicator = taskCommitIntegrationTrackingStatus !== undefined;
+	const taskWorkspaceGitStatusTooltip = useMemo(() => {
 		const pluralizeCommits = (count: number) => `${count} ${count === 1 ? "commit" : "commits"}`;
 		const parts: string[] = [];
 		if (commitsAheadOfBaseRef) {
@@ -445,8 +459,25 @@ export function TaskCardBody({
 		if (commitsBehindBaseRef) {
 			parts.push(`${pluralizeCommits(commitsBehindBaseRef)} behind ${card.baseRef}`);
 		}
+		if (taskCommitsIntegratedIntoBaseRef !== null) {
+			parts.push(
+				`${pluralizeCommits(taskCommitsIntegratedIntoBaseRef)} from this task integrated into ${card.baseRef}`,
+			);
+		} else if (taskCommitIntegrationTrackingStatus === "legacy_history_unavailable") {
+			parts.push(`Integrated commit history is unavailable for this legacy task`);
+		} else if (taskCommitIntegrationTrackingStatus === "inplace_task_commit_ownership_unavailable") {
+			parts.push(`Integrated task commit ownership cannot be isolated in inplace mode`);
+		} else if (taskCommitIntegrationTrackingStatus === "git_probe_unavailable") {
+			parts.push(`Integrated task commit count is temporarily unavailable`);
+		}
 		return parts.length > 0 ? parts.join(" · ") : null;
-	}, [commitsAheadOfBaseRef, commitsBehindBaseRef, card.baseRef]);
+	}, [
+		commitsAheadOfBaseRef,
+		commitsBehindBaseRef,
+		card.baseRef,
+		taskCommitIntegrationTrackingStatus,
+		taskCommitsIntegratedIntoBaseRef,
+	]);
 	// 复制源优先绝对路径（snapshot.path），trash 无快照时退回重建的展示路径，再退回 base 仓库路径。
 	const copyableDirectoryPath = reviewWorkspaceSnapshot?.path ?? reviewWorkspacePath ?? workspacePath ?? null;
 	const showDirectoryCopyButton = showDirectoryRow && Boolean(copyableDirectoryPath);
@@ -798,7 +829,7 @@ export function TaskCardBody({
 					    用于会话卡死/空闲（Stop hook 未触发、进程未退）拖不进 Review 列、被反复打回的兜底。 */}
 					{columnId === "in_progress" &&
 					sessionSummary?.agentId != null &&
-					!isRuntimeAgentSessionRenderedAsConversationPanel(sessionSummary.agentId) ? (
+					!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(sessionSummary) ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to review")}>
 							<Button
 								icon={isMoveToReviewLoading ? <Spinner size={12} /> : <Eye size={12} />}
@@ -945,10 +976,10 @@ export function TaskCardBody({
 						)}
 						<span className={cn("min-w-0 flex-1 break-words", isTrashCard && "line-through")}>
 							<span>{worktreeModeLabel}</span>
-							{baseRefDivergenceTooltip ? (
+							{taskWorkspaceGitStatusTooltip ? (
 								// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，
 								// 不能直接是不转发 props/ref 的函数组件——否则 hover 根本触发不了 tooltip。
-								<Tooltip side="bottom" content={baseRefDivergenceTooltip}>
+								<Tooltip side="bottom" content={taskWorkspaceGitStatusTooltip}>
 									<span className="mx-1 inline-flex align-middle">
 										<AheadBehindIndicator
 											ahead={commitsAheadOfBaseRef}
@@ -956,6 +987,13 @@ export function TaskCardBody({
 											tone="semantic"
 											iconSize={10}
 										/>
+										{showTaskCommitIntegrationIndicator ? (
+											<span className="ml-1">
+												<TaskCommitsIntegratedIntoBaseRefIndicator
+													taskCommitsIntegratedIntoBaseRef={taskCommitsIntegratedIntoBaseRef}
+												/>
+											</span>
+										) : null}
 									</span>
 								</Tooltip>
 							) : null}

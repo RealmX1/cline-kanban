@@ -10,6 +10,7 @@ import type {
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath, getTaskWorktreesHomePath, loadWorkspaceContext } from "../state/workspace-state";
 import { getGitCommandErrorMessage, getGitStdout, readGitHeadInfo, runGit } from "./git-utils";
+import { recordTaskWorktreeCreationCommitProvenance } from "./task-commit-integration-provenance";
 import { getWorkspaceFolderLabelForWorktreePath, normalizeTaskIdForWorktreePath } from "./task-worktree-path";
 import { listTurbopackNodeModulesSymlinkSkipPaths } from "./task-worktree-turbopack";
 
@@ -621,6 +622,15 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 						warning = `Saved task changes could not be reapplied automatically. ${getGitCommandErrorMessage(error)}`;
 					}
 				}
+
+				await recordTaskWorktreeCreationCommitProvenance({
+					workspaceId: context.workspaceId,
+					taskId,
+					baseRef: requestedBaseRef,
+					// restored patch 可能以旧 task HEAD 为物理 checkout 起点；所有权边界仍必须是
+					// task 所声明的 baseRef tip，否则会把旧 task commits 静默当成 base 历史。
+					initialBaseCommit: requestedBaseCommit,
+				});
 
 				return {
 					ok: true,
