@@ -27,12 +27,17 @@ export interface UseNotificationCenterInput {
 export interface UseNotificationCenterResult {
 	// 铃铛面板：排除 done 的组，按最新触发时间降序。
 	panelGroups: NotificationGroup[];
-	// 完整日志：全部组（含 done），按最新触发时间降序。
+	// 历史弹窗的「按 task 分组」排列：全部组（含 done），按各组最新触发时间降序。
 	allGroups: NotificationGroup[];
+	// 历史弹窗的「时间流」排列：跨全部 workspace 展平的一维条目，按 triggeredAt 降序（含已读、含 done）。
+	allEntriesSortedByTriggeredAtDescending: RuntimeNotificationFeedEntry[];
 	// 铃铛徽标：面板中仍有未读的组数（跨 repo，非 done）。
 	unreadCount: number;
 	markGroupVisited: (workspaceId: string, taskId: string) => void;
-	markAllVisited: () => void;
+	// 铃铛面板的「全部已读」：范围 = panelGroups（非 done），与徽标 unreadCount 同口径。
+	markAllPanelGroupsVisited: () => void;
+	// 历史弹窗的「全部已读」：范围 = allGroups（含 done），与历史视图里看得见的未读同口径。
+	markAllHistoryGroupsVisited: () => void;
 	clearAll: () => void;
 }
 
@@ -72,11 +77,44 @@ export function buildNotificationGroups(
 	return groups.sort((left, right) => right.latestTriggeredAt - left.latestTriggeredAt);
 }
 
+// 历史弹窗「时间流」排列的数据源：跨全部 workspace 展平成一维，按 triggeredAt 降序。
+// 刻意不做任何过滤——已读条目与 done 组的条目一律保留，历史视图的职责就是「全部看得见」。
+export function buildNotificationEntriesSortedByTriggeredAtDescending(
+	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>,
+): RuntimeNotificationFeedEntry[] {
+	const entries: RuntimeNotificationFeedEntry[] = [];
+	for (const workspaceEntries of Object.values(notificationLogByWorkspaceId)) {
+		entries.push(...workspaceEntries);
+	}
+	return entries.sort((left, right) => {
+		if (right.triggeredAt !== left.triggeredAt) {
+			return right.triggeredAt - left.triggeredAt;
+		}
+		// 同毫秒（不同 task 在同一毫秒触发）用 id 兜底，保证跨渲染顺序稳定、不随快照重建抖动。
+		return left.id.localeCompare(right.id);
+	});
+}
+
+function markGroupsWithUnvisitedEntries(
+	groups: NotificationGroup[],
+	onMarkTaskVisited: (workspaceId: string, taskId: string) => void,
+): void {
+	for (const group of groups) {
+		if (group.hasUnvisited) {
+			onMarkTaskVisited(group.workspaceId, group.taskId);
+		}
+	}
+}
+
 export function useNotificationCenter(input: UseNotificationCenterInput): UseNotificationCenterResult {
 	const { notificationLogByWorkspaceId, selectedTaskId, onMarkTaskVisited, onClearWorkspace } = input;
 
 	const allGroups = useMemo(
 		() => buildNotificationGroups(notificationLogByWorkspaceId),
+		[notificationLogByWorkspaceId],
+	);
+	const allEntriesSortedByTriggeredAtDescending = useMemo(
+		() => buildNotificationEntriesSortedByTriggeredAtDescending(notificationLogByWorkspaceId),
 		[notificationLogByWorkspaceId],
 	);
 	const panelGroups = useMemo(() => allGroups.filter((group) => !group.isDone), [allGroups]);
@@ -96,15 +134,16 @@ export function useNotificationCenter(input: UseNotificationCenterInput): UseNot
 		[onMarkTaskVisited],
 	);
 
-	// 「全部已读」仅覆盖 panel（非 done）组，与铃铛徽标/gate 的 unreadCount 同范围；
-	// done 组的未读继续由「打开 task 自动已读」处理，避免 gate（panel）与 action（all）范围不一致。
-	const markAllVisited = useCallback(() => {
-		for (const group of panelGroups) {
-			if (group.hasUnvisited) {
-				onMarkTaskVisited(group.workspaceId, group.taskId);
-			}
-		}
+	// 两个「全部已读」各自与自己的可见范围对齐，杜绝「看得到却清不掉的未读」：
+	// 铃铛面板只看得见非 done 组，故它的 action 也只覆盖 panelGroups（与徽标 unreadCount 同口径）；
+	// 历史弹窗看得见含 done 的全部组，故它的 action 覆盖 allGroups。
+	const markAllPanelGroupsVisited = useCallback(() => {
+		markGroupsWithUnvisitedEntries(panelGroups, onMarkTaskVisited);
 	}, [panelGroups, onMarkTaskVisited]);
+
+	const markAllHistoryGroupsVisited = useCallback(() => {
+		markGroupsWithUnvisitedEntries(allGroups, onMarkTaskVisited);
+	}, [allGroups, onMarkTaskVisited]);
 
 	const clearAll = useCallback(() => {
 		for (const workspaceId of Object.keys(notificationLogByWorkspaceId)) {
@@ -134,9 +173,11 @@ export function useNotificationCenter(input: UseNotificationCenterInput): UseNot
 	return {
 		panelGroups,
 		allGroups,
+		allEntriesSortedByTriggeredAtDescending,
 		unreadCount,
 		markGroupVisited,
-		markAllVisited,
+		markAllPanelGroupsVisited,
+		markAllHistoryGroupsVisited,
 		clearAll,
 	};
 }

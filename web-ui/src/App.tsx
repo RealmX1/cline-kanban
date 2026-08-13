@@ -1205,10 +1205,14 @@ export default function App(): ReactElement {
 							<NotificationCenter
 								panelGroups={notificationCenter.panelGroups}
 								allGroups={notificationCenter.allGroups}
+								allEntriesSortedByTriggeredAtDescending={
+									notificationCenter.allEntriesSortedByTriggeredAtDescending
+								}
 								unreadCount={notificationCenter.unreadCount}
 								onFocusTask={focusNotificationTask}
 								onMarkGroupVisited={handleMarkTaskNotificationsVisited}
-								onMarkAllVisited={notificationCenter.markAllVisited}
+								onMarkAllPanelGroupsVisited={notificationCenter.markAllPanelGroupsVisited}
+								onMarkAllHistoryGroupsVisited={notificationCenter.markAllHistoryGroupsVisited}
 								onClearAll={notificationCenter.clearAll}
 							/>
 						}

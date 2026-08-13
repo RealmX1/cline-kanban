@@ -1,5 +1,8 @@
 // 顶栏全局通知铃铛：跨全部 repo 聚合的应用内通知中心。徽标显示「未读且非 done」的组数（跨 repo），
-// 点开是 Popover 面板（排除 done 的组），点某组跳到对应 repo/task 并标记整组已读。底部「全部已读」+「完整日志」。
+// 点开是 Popover 面板（排除 done 的组），点某组跳到对应 repo/task 并标记整组已读。底部「全部已读」+「全部历史」。
+//
+// 面板刻意只做「待处理速览」：每组只显示最新一条、且不含 done 组。要看含已读/含 done 的全量历史，
+// 走「全部历史」弹窗（NotificationLogDialog），那里才有时间流 / 按 task 分组的排列 toggle。
 //
 // 与 OS 系统通知并行：OS 横幅一点即消失、不留历史；这里持久化、可回看、可管理。
 // 自身无数据获取：分组数据与回调由 App.tsx 经 useNotificationCenter 派生后下传。
@@ -7,10 +10,15 @@ import * as RadixPopover from "@radix-ui/react-popover";
 import { Bell, CheckCheck } from "lucide-react";
 import { useState } from "react";
 import { NotificationLogDialog } from "@/components/notification-log-dialog";
+import {
+	topBarNotificationCenterBellTriggerAnchorKey,
+	VERIFICATION_ANCHOR_ATTR,
+} from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { NotificationGroup } from "@/hooks/use-notification-center";
 import { resolveReviewReadyNotificationTitle } from "@/hooks/use-review-ready-notifications";
+import type { RuntimeNotificationFeedEntry } from "@/runtime/types";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 
 function formatUnreadBadge(count: number): string {
@@ -20,18 +28,22 @@ function formatUnreadBadge(count: number): string {
 export function NotificationCenter({
 	panelGroups,
 	allGroups,
+	allEntriesSortedByTriggeredAtDescending,
 	unreadCount,
 	onFocusTask,
 	onMarkGroupVisited,
-	onMarkAllVisited,
+	onMarkAllPanelGroupsVisited,
+	onMarkAllHistoryGroupsVisited,
 	onClearAll,
 }: {
 	panelGroups: NotificationGroup[];
 	allGroups: NotificationGroup[];
+	allEntriesSortedByTriggeredAtDescending: RuntimeNotificationFeedEntry[];
 	unreadCount: number;
 	onFocusTask: (workspaceId: string, taskId: string) => void;
 	onMarkGroupVisited: (workspaceId: string, taskId: string) => void;
-	onMarkAllVisited: () => void;
+	onMarkAllPanelGroupsVisited: () => void;
+	onMarkAllHistoryGroupsVisited: () => void;
 	onClearAll: () => void;
 }): React.ReactElement {
 	const [open, setOpen] = useState(false);
@@ -50,6 +62,7 @@ export function NotificationCenter({
 				<RadixPopover.Trigger asChild>
 					<button
 						type="button"
+						{...{ [VERIFICATION_ANCHOR_ATTR]: topBarNotificationCenterBellTriggerAnchorKey() }}
 						aria-label={unreadCount > 0 ? `${unreadCount} 条未读通知` : "通知"}
 						className="relative ml-0.5 inline-flex h-8 w-8 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-surface-3 hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-border-focus"
 					>
@@ -74,7 +87,7 @@ export function NotificationCenter({
 							<button
 								type="button"
 								disabled={unreadCount === 0}
-								onClick={onMarkAllVisited}
+								onClick={onMarkAllPanelGroupsVisited}
 								className="inline-flex items-center gap-1 rounded-sm text-[12px] text-text-secondary transition-colors hover:text-text-primary disabled:cursor-default disabled:opacity-40"
 							>
 								<CheckCheck size={13} />
@@ -141,7 +154,7 @@ export function NotificationCenter({
 									setOpen(false);
 								}}
 							>
-								完整日志
+								全部历史
 							</Button>
 						</div>
 					</RadixPopover.Content>
@@ -151,7 +164,10 @@ export function NotificationCenter({
 				open={isLogOpen}
 				onOpenChange={setIsLogOpen}
 				groups={allGroups}
+				entriesSortedByTriggeredAtDescending={allEntriesSortedByTriggeredAtDescending}
 				onFocusTask={onFocusTask}
+				onMarkGroupVisited={onMarkGroupVisited}
+				onMarkAllHistoryVisited={onMarkAllHistoryGroupsVisited}
 				onClearAll={onClearAll}
 			/>
 		</>
