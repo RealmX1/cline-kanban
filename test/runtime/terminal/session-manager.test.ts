@@ -120,6 +120,18 @@ describe("TerminalSessionManager", () => {
 		expect(env.NODE_DISABLE_COLORS).toBe("1");
 	});
 
+	it("deletes inherited variables that a source explicitly blanks out", () => {
+		vi.stubEnv("KANBAN_TEST_INHERITED_VARIABLE", "inherited-value");
+
+		const env = buildTerminalEnvironment({ forceColor: false }, { KANBAN_TEST_INHERITED_VARIABLE: undefined });
+
+		// 键必须真的不在了，而不是留一个 undefined 值：node-pty 会把它序列化成字符串 "undefined"
+		// 传给子进程，对「只看变量存不存在」的消费者反而是 truthy，与「抹除」的本意反号。
+		expect(Object.hasOwn(env, "KANBAN_TEST_INHERITED_VARIABLE")).toBe(false);
+
+		vi.unstubAllEnvs();
+	});
+
 	it("stores hook activity metadata on sessions", () => {
 		const manager = new TerminalSessionManager();
 		manager.hydrateFromRecord({

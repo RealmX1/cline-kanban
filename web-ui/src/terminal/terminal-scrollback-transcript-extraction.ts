@@ -10,11 +10,15 @@
 // 丢掉颜色等于丢掉这份 transcript 一半的信息量。本模块因此逐单元格读取并按样式合并成 run。
 //
 // 为什么固定读 `buffer.normal` 而非 `buffer.active`：
-//   - inline agent（Claude Code 被 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 强制 inline）
-//     的会话历史堆在 normal buffer 的 scrollback 里，正是本视图要读的东西；
-//   - alt-screen agent（Codex 等）在 alternate buffer 里原地重绘，normal buffer
+//   - inline agent 的会话历史堆在 normal buffer 的 scrollback 里，正是本视图要读的东西；
+//   - alt-screen agent（Claude Code、Codex 等）在 alternate buffer 里原地重绘，normal buffer
 //     基本是空的。读 normal 让这类 agent 自然落到「没有可读 transcript」，
 //     由调用方隐藏入口，而不是渲染出一个空壳视图。
+//
+// 注意 Claude Code 归在哪一类是**会变的**：它曾被 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 摁成
+// inline，现在默认跑 fullscreen 渲染器（见 src/terminal/agent-session-adapters.ts 的
+// resolveClaudeCodeTerminalRenderingModeEnv），故按 alt-screen 对待。本模块的判据是
+// buffer 形态而非 agentId，两种形态都已自洽，改渲染器默认时这里无需跟着改。
 
 import { resolveAnsiPaletteColor, resolveTrueColorFromPackedRgb } from "@/terminal/terminal-ansi-color-palette";
 
