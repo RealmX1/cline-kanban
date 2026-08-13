@@ -71,6 +71,15 @@ interface PersistentTerminalSubscriber {
 	onSearchResults?: (results: TerminalSearchResultState) => void;
 	/** 用户是否已把视口从最新输出处滚开 —— 驱动「跳到最新」按钮的显隐。 */
 	onScrolledAwayFromLatestChange?: (isScrolledAwayFromLatest: boolean) => void;
+	/**
+	 * 这个终端到目前为止有没有渲染出过任何内容（恢复快照或实时输出）。
+	 *
+	 * 用来把「TUI 区域一片空白」这个哑状态变成可解释、可操作的空态。硬中断后会话进程随上一个 runtime
+	 * 一起没了，服务端既没有快照可发、也不会再有输出，用户看到的就是一块纯白 div——既不知道发生了什么，
+	 * 也不知道能做什么。双向：实时输出/非空恢复快照把它抬为 true，空恢复快照（xterm 刚被 reset 清成白板）
+	 * 把它落回 false；只在值真的变化时通知。
+	 */
+	onTerminalContentPresenceChange?: (hasRenderedAnyTerminalContent: boolean) => void;
 }
 
 interface MountPersistentTerminalOptions {
@@ -228,6 +237,7 @@ class PersistentTerminal {
 	private controlSocket: WebSocket | null = null;
 	private connectionReady = false;
 	private restoreCompleted = false;
+	private hasRenderedAnyTerminalContent = false;
 	// 一次性防抖：运行时重启后首次聚焦该任务、检测到「空终端 + 无活会话」时自动续跑一次。manager 实例
 	// 跨 mount/unmount parked 存活，故一生只放一次电；dispose 重建（关面板/刷页）才允许再试。
 	private autoResumeAttempted = false;
@@ -417,9 +427,28 @@ class PersistentTerminal {
 	}
 
 	private notifyOutputText(text: string): void {
+		this.markTerminalContentPresent();
 		for (const subscriber of this.subscribers) {
 			subscriber.onOutputText?.(text);
 		}
+	}
+
+	// 跟随「屏幕上此刻是否真的有内容」的双向标志，而非一次性闸门：运行时 redeploy 时两条 socket 只是关闭
+	// 重连（scheduleReconnect → ensureConnected 都作用在同一个实例上，dispose 只由关面板/换任务/LRU 回收触发），
+	// 所以「此前渲染过内容的终端」会活着看到 applyRestore 的 reset + 空快照——不落回 false 的话，屏幕已被清成
+	// 白板而空态卡片却不显示。只在值真的变化时通知订阅者，避免每次 restore 都刷一遍。
+	private setHasRenderedAnyTerminalContent(nextHasRenderedAnyTerminalContent: boolean): void {
+		if (this.hasRenderedAnyTerminalContent === nextHasRenderedAnyTerminalContent) {
+			return;
+		}
+		this.hasRenderedAnyTerminalContent = nextHasRenderedAnyTerminalContent;
+		for (const subscriber of this.subscribers) {
+			subscriber.onTerminalContentPresenceChange?.(nextHasRenderedAnyTerminalContent);
+		}
+	}
+
+	private markTerminalContentPresent(): void {
+		this.setHasRenderedAnyTerminalContent(true);
 	}
 
 	private notifyConnectionReady(): void {
@@ -598,9 +627,13 @@ class PersistentTerminal {
 			this.terminal.resize(cols, rows);
 		}
 		if (!snapshot) {
+			// 空快照 = 服务端 mirror 已随运行时重启丢失：上面的 reset() 刚把 xterm 清成白板，屏幕上确实
+			// 一无所有，标志必须跟着落回 false，「会话已随运行时结束」的空态卡片才会出现。
+			this.setHasRenderedAnyTerminalContent(false);
 			this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 			return;
 		}
+		this.markTerminalContentPresent();
 		// 快照分片写入:整段写会让 xterm 在一次 write 里同步解析数 MB(其 12ms 时间预算只在
 		// chunk 之间生效),页面冻结且 restore_complete 被推迟。切片后写队列逐段解析,主线程
 		// 在片间保持可响应。滚动定位保持在全部写完之后。
@@ -882,6 +915,7 @@ class PersistentTerminal {
 	subscribe(subscriber: PersistentTerminalSubscriber): () => void {
 		this.subscribers.add(subscriber);
 		subscriber.onLastError?.(this.lastError);
+		subscriber.onTerminalContentPresenceChange?.(this.hasRenderedAnyTerminalContent);
 		if (this.latestSummary) {
 			subscriber.onSummary?.(this.latestSummary);
 		}

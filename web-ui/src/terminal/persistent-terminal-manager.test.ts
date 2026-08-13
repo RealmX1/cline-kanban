@@ -472,6 +472,57 @@ describe("persistent-terminal-manager", () => {
 		expect(lastErrors.at(-1)).toBe("Terminal stream closed. Reconnecting...");
 	});
 
+	// 运行时 redeploy（服务端重启）不会重建 PersistentTerminal：两条 socket 关闭只走 scheduleReconnect →
+	// ensureConnected，在同一个实例上重连。重连后服务端 mirror 已丢 ⇒ 空 restore 快照把 xterm reset 成白板，
+	// 「有没有渲染过内容」必须跟着落回 false，面板的可解释空态（+「重启终端会话」按钮）才会出现。
+	it("resets rendered-content presence when an empty restore snapshot clears a reconnected terminal", async () => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-a",
+			workspaceId: "workspace-1",
+		});
+		terminal.mount(createContainer(), appearance, { isVisible: true });
+		const terminalContentPresenceChanges: boolean[] = [];
+		terminal.subscribe({
+			onTerminalContentPresenceChange: (hasRenderedAnyTerminalContent) => {
+				terminalContentPresenceChanges.push(hasRenderedAnyTerminalContent);
+			},
+		});
+		const ioSocket = webSocketInstances.find((socket) => socket.url.includes("/api/terminal/io"));
+		const controlSocket = webSocketInstances.find((socket) => socket.url.includes("/api/terminal/control"));
+		if (!ioSocket || !controlSocket) {
+			throw new Error("Expected both control and io sockets.");
+		}
+
+		dispatchSocketMessage(
+			controlSocket,
+			JSON.stringify({ type: "restore", snapshot: "restored screen", cols: 80, rows: 30 }),
+		);
+		await vi.waitFor(() => {
+			expect(terminalContentPresenceChanges).toEqual([false, true]);
+		});
+
+		// 服务端重启：两条 socket 关闭，同一实例（未 dispose）退避重连。
+		ioSocket.close();
+		controlSocket.close();
+		await vi.advanceTimersByTimeAsync(1000);
+		const reconnectedControlSocket = webSocketInstances
+			.filter((socket) => socket.url.includes("/api/terminal/control"))
+			.at(-1);
+		if (!reconnectedControlSocket || reconnectedControlSocket === controlSocket) {
+			throw new Error("Expected a reconnected control socket.");
+		}
+
+		dispatchSocketMessage(
+			reconnectedControlSocket,
+			JSON.stringify({ type: "restore", snapshot: "", cols: 80, rows: 30 }),
+		);
+		await vi.waitFor(() => {
+			expect(terminalContentPresenceChanges).toEqual([false, true, false]);
+		});
+	});
+
 	it("suspends rendering while hidden and snaps to a fresh snapshot on return", () => {
 		const terminal = ensurePersistentTerminal({
 			...appearance,
@@ -617,6 +668,10 @@ describe("persistent-terminal-manager", () => {
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
+		// 这条负例在「hydrate 多源回填 agentId」之后依然成立，且是刻意保留的：自动续跑是**静默**动作，
+		// agentId 完全问不出来时不该靠猜去拉起一个 agent。真实的中断场景已由回填补上 agentId，走上面的正例；
+		// 三个源全灭时用户仍有出路——面板会渲染可解释空态 + 「重启终端会话」按钮（那是显式动作，
+		// 服务端可以安全地退回项目默认档）。
 		it("does not auto-refresh when agentId is null (fresh/never-started or shell session)", async () => {
 			const terminal = mountedTerminal();
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });

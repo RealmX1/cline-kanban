@@ -373,14 +373,20 @@ export function TaskCardBody({
 					: null
 				: reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
 			: null;
-	const reviewChangeSummary = reviewWorkspaceSnapshot
-		? reviewWorkspaceSnapshot.changedFiles == null
-			? null
-			: {
-					filesLabel: `${reviewWorkspaceSnapshot.changedFiles} ${reviewWorkspaceSnapshot.changedFiles === 1 ? "file" : "files"}`,
-					additions: reviewWorkspaceSnapshot.additions ?? 0,
-					deletions: reviewWorkspaceSnapshot.deletions ?? 0,
-				}
+	const reviewWorkspaceChangedFilesCount = reviewWorkspaceSnapshot?.changedFiles ?? null;
+	const reviewWorkspaceAddedLinesCount = reviewWorkspaceSnapshot?.additions ?? 0;
+	const reviewWorkspaceRemovedLinesCount = reviewWorkspaceSnapshot?.deletions ?? 0;
+	const shouldDisplayReviewWorkspaceChangeSummary =
+		reviewWorkspaceChangedFilesCount != null &&
+		(reviewWorkspaceChangedFilesCount !== 0 ||
+			reviewWorkspaceAddedLinesCount !== 0 ||
+			reviewWorkspaceRemovedLinesCount !== 0);
+	const reviewChangeSummary = shouldDisplayReviewWorkspaceChangeSummary
+		? {
+				filesLabel: `${reviewWorkspaceChangedFilesCount} ${reviewWorkspaceChangedFilesCount === 1 ? "file" : "files"}`,
+				additions: reviewWorkspaceAddedLinesCount,
+				deletions: reviewWorkspaceRemovedLinesCount,
+			}
 		: null;
 	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath);
 	const showTitleEditButton = (onSaveTitle != null || onOpenTaskEditor != null) && !pinnedClone && !isEditingTitle;
@@ -432,7 +438,8 @@ export function TaskCardBody({
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentLabel, modelOverrideLabel]);
 	// 简写目录行：{worktree/inplace} ↑{ahead} ↓{behind} ({changed files} +{add} -{del})。
-	// ahead/behind 是与 base 分支的双向分歧（两侧皆 0 时整体不渲染）；工作区脏统计仍相对 HEAD。
+	// ahead/behind 是与 base 分支的双向分歧（两侧皆 0 时整体不渲染）；工作区脏统计仍相对 HEAD，
+	// 但文件数与增删行数全为 0 时同样整体隐藏，避免无变化任务与真实脏任务争夺注意力。
 	const worktreeModeLabel = card.worktreeMode === "inplace" ? "inplace" : "worktree";
 	const commitsAheadOfBaseRef = reviewWorkspaceSnapshot?.commitsAheadOfBaseRef ?? null;
 	const commitsBehindBaseRef = reviewWorkspaceSnapshot?.commitsBehindBaseRef ?? null;
