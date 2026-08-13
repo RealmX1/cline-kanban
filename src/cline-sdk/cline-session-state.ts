@@ -143,6 +143,8 @@ export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary 
 		state: "idle",
 		mode: null,
 		agentId: "cline",
+		// 通道盖章：这条会话是进程内 Cline SDK 的（见 api-contract 的 sessionTransport 注释）。
+		sessionTransport: "in_process_cline_sdk",
 		workspacePath: null,
 		pid: null,
 		startedAt: null,

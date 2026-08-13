@@ -4,6 +4,7 @@ import {
 	parseHookIngestRequest,
 	parseTaskSessionStartRequest,
 	parseWorkspaceFileSearchRequest,
+	parseWorktreeDeleteRequest,
 } from "../../src/core/api-validation";
 
 describe("parseWorkspaceFileSearchRequest", () => {
@@ -33,6 +34,20 @@ describe("parseWorkspaceFileSearchRequest", () => {
 		expect(() => {
 			parseWorkspaceFileSearchRequest(new URLSearchParams({ q: "board", limit: "0" }));
 		}).toThrow("Invalid file search limit parameter.");
+	});
+});
+
+describe("parseWorktreeDeleteRequest", () => {
+	it("保留永久删除 task 时清理 commit integration provenance 的显式标记", () => {
+		expect(
+			parseWorktreeDeleteRequest({
+				taskId: "  task-1  ",
+				removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true,
+			}),
+		).toEqual({
+			taskId: "task-1",
+			removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true,
+		});
 	});
 });
 

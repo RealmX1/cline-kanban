@@ -116,6 +116,7 @@ export interface UseTaskSessionsResult {
 	cleanupTaskWorkspace: (
 		taskId: string,
 		worktreeMode?: RuntimeTaskWorktreeMode,
+		removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion?: boolean,
 	) => Promise<RuntimeWorktreeDeleteResponse | null>;
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
 }
@@ -451,7 +452,11 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 	);
 
 	const cleanupTaskWorkspace = useCallback(
-		async (taskId: string, worktreeMode?: RuntimeTaskWorktreeMode): Promise<RuntimeWorktreeDeleteResponse | null> => {
+		async (
+			taskId: string,
+			worktreeMode?: RuntimeTaskWorktreeMode,
+			removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion = false,
+		): Promise<RuntimeWorktreeDeleteResponse | null> => {
 			if (!currentProjectId) {
 				return null;
 			}
@@ -460,6 +465,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				const payload = await trpcClient.workspace.deleteWorktree.mutate({
 					taskId,
 					...(worktreeMode ? { worktreeMode } : {}),
+					...(removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion
+						? { removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true }
+						: {}),
 				});
 				if (!payload.ok) {
 					const message = payload.error ?? "Could not clean up task workspace.";

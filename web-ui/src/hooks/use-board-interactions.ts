@@ -1056,7 +1056,7 @@ export function useBoardInteractions({
 
 		void (async () => {
 			await stopTaskSession(task.id);
-			await cleanupTaskWorkspace(task.id, task.worktreeMode);
+			await cleanupTaskWorkspace(task.id, task.worktreeMode, true);
 		})();
 	}, [
 		board,
@@ -1126,7 +1126,7 @@ export function useBoardInteractions({
 			await Promise.all(
 				trashCards.map(async (card) => {
 					await stopTaskSession(card.id);
-					await cleanupTaskWorkspace(card.id, card.worktreeMode);
+					await cleanupTaskWorkspace(card.id, card.worktreeMode, true);
 				}),
 			);
 		})();

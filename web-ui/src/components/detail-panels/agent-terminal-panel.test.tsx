@@ -9,17 +9,25 @@ import type { TerminalScrollbackTranscriptLogicalLine } from "@/terminal/termina
 
 // 返回类型直接绑定生产类型（而不是就地写一个窄结构），这样 transcript 逻辑行的形状再变时
 // `tsc` 会在这里报错，而不是靠运行期是否恰好走到渲染路径来暴露漂移。
-const { mockRefreshTerminal, mockUseIsMobile, mockTerminalInput, mockReadScrollbackTranscript } = vi.hoisted(() => ({
+const {
+	mockRefreshTerminal,
+	mockUseIsMobile,
+	mockTerminalInput,
+	mockReadScrollbackTranscript,
+	mockHasRenderedAnyTerminalContent,
+} = vi.hoisted(() => ({
 	mockRefreshTerminal: vi.fn(async () => {}),
 	mockUseIsMobile: vi.fn(() => false),
 	mockTerminalInput: vi.fn((_sequence: string) => true),
 	mockReadScrollbackTranscript: vi.fn((): TerminalScrollbackTranscriptLogicalLine[] => []),
+	mockHasRenderedAnyTerminalContent: vi.fn(() => true),
 }));
 
 vi.mock("@/terminal/use-persistent-terminal-session", () => ({
 	usePersistentTerminalSession: () => ({
 		containerRef: { current: null },
 		lastError: null,
+		hasRenderedAnyTerminalContent: mockHasRenderedAnyTerminalContent(),
 		isStopping: false,
 		isRefreshing: false,
 		isSearchOpen: false,
@@ -104,6 +112,7 @@ describe("AgentTerminalPanel", () => {
 		mockTerminalInput.mockClear();
 		mockReadScrollbackTranscript.mockClear();
 		mockUseIsMobile.mockReturnValue(false);
+		mockHasRenderedAnyTerminalContent.mockReturnValue(true);
 	});
 
 	afterEach(() => {
@@ -337,6 +346,173 @@ describe("AgentTerminalPanel", () => {
 			);
 		});
 		expect(container.textContent).not.toContain("Terminal stream closed");
+	});
+
+	// ── 「重启后 TUI 全白且重启按钮不可用」的前端回归护栏 ──────────────────────────────────
+	// 会话在首轮结束前被系统重启 / 本地 redeploy 打断后，新运行时既没有快照可发也不会再有输出，
+	// 而 summary.agentId 恰恰是这类中断里最容易丢的字段。以前这两件事叠在一起就是：一块纯白的 div，
+	// 外加一个被 `summary.agentId !== null` 判据灰掉的「重启终端会话」按钮 —— 无解释、无出路。
+
+	function createBlankInterruptedSummary(
+		overrides: Partial<RuntimeTaskSessionSummary> = {},
+	): RuntimeTaskSessionSummary {
+		return {
+			taskId: "task-1",
+			state: "idle",
+			agentId: null,
+			workspacePath: null,
+			pid: null,
+			startedAt: null,
+			updatedAt: 1,
+			lastOutputAt: null,
+			reviewReason: null,
+			exitCode: null,
+			lastHookAt: null,
+			latestHookActivity: null,
+			...overrides,
+		} as RuntimeTaskSessionSummary;
+	}
+
+	it("空终端 + agentId 未知 → 给出可解释空态，且重启按钮可点", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary()}
+						showSessionToolbar={false}
+						minimalHeaderTitle="Terminal"
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("This session is no longer running.");
+		expect(container.textContent).toContain("machine restart or a local redeploy");
+		const refreshButton = container.querySelector<HTMLButtonElement>('[aria-label="Refresh terminal session"]');
+		expect(refreshButton?.disabled).toBe(false);
+	});
+
+	it("空态里的重启按钮真的会发起重启", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary()}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const restartButtons = [...container.querySelectorAll("button")].filter((button) =>
+			button.textContent?.includes("Restart terminal session"),
+		);
+		expect(restartButtons).toHaveLength(1);
+		act(() => {
+			restartButtons[0]?.click();
+		});
+		expect(mockRefreshTerminal).toHaveBeenCalledTimes(1);
+	});
+
+	it("会话是被回收掉的 → 空态换成回收措辞（契约要求 UI 讲清楚，而不是留个空终端）", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary({
+							agentSessionRuntimeReclamationOutcome: {
+								runtimeSessionIncarnationId: "incarnation-1",
+								sessionTransport: "pty_terminal",
+								reclamationTrigger: "response_generation_grace_period_expired",
+								attemptedAt: 1,
+								completedAt: 2,
+								rootProcessExitConfirmed: true,
+								descendantProcessesExitConfirmed: true,
+								survivingDescendantPids: [],
+								usedForcefulEscalation: false,
+								releasedResources: ["pty"],
+								failureReason: null,
+								nextRetryAt: null,
+							},
+						})}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("reclaimed after sitting idle past its retention window");
+		expect(container.textContent).not.toContain("This session is no longer running.");
+	});
+
+	it("对话面板 agent（Cline）仍然禁用重启，且空态不给重启按钮", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary({ agentId: "cline" })}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const refreshButton = container.querySelector<HTMLButtonElement>('[aria-label="Refresh terminal session"]');
+		expect(refreshButton?.disabled).toBe(true);
+		expect(
+			[...container.querySelectorAll("button")].filter((button) =>
+				button.textContent?.includes("Restart terminal session"),
+			),
+		).toHaveLength(0);
+	});
+
+	it("detail shell 终端既不给重启按钮也不给空态（它不是 agent 会话）", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="__detail_terminal__:task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary({ taskId: "__detail_terminal__:task-1" })}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector('[aria-label="Refresh terminal session"]')).toBeNull();
+		expect(container.textContent).not.toContain("This session is no longer running.");
+	});
+
+	it("终端有内容时不显示空态（哪怕会话已经不跑了）", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(true);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary()}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).not.toContain("This session is no longer running.");
 	});
 });
 

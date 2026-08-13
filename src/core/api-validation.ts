@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+	type RuntimeAgentSessionTransportSwitchRequest,
 	type RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 	type RuntimeAuthoredVerificationDefinitionInputFile,
 	type RuntimeAuthoredVerificationDefinitionsFile,
@@ -48,6 +49,7 @@ import {
 	type RuntimeWorkspaceStateSaveRequest,
 	type RuntimeWorktreeDeleteRequest,
 	type RuntimeWorktreeEnsureRequest,
+	runtimeAgentSessionTransportSwitchRequestSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
 	runtimeAuthoredVerificationDefinitionInputFileSchema,
 	runtimeAuthoredVerificationDefinitionsFileSchema,
@@ -203,6 +205,9 @@ export function parseWorktreeDeleteRequest(value: unknown): RuntimeWorktreeDelet
 	return {
 		taskId,
 		...(parsed.worktreeMode ? { worktreeMode: parsed.worktreeMode } : {}),
+		...(parsed.removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion === true
+			? { removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true }
+			: {}),
 	};
 }
 
@@ -295,6 +300,15 @@ export function parseTerminalAgentModelSelectionOptionsRequest(
 	value: unknown,
 ): RuntimeTerminalAgentModelSelectionOptionsRequest {
 	return parseWithSchema(runtimeTerminalAgentModelSelectionOptionsRequestSchema, value);
+}
+
+export function parseAgentSessionTransportSwitchRequest(value: unknown): RuntimeAgentSessionTransportSwitchRequest {
+	const parsed = parseWithSchema(runtimeAgentSessionTransportSwitchRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	if (!taskId) {
+		throw new Error("Invalid agent session transport switch payload.");
+	}
+	return { ...parsed, taskId };
 }
 
 export function parseTaskSessionStopRequest(value: unknown): RuntimeTaskSessionStopRequest {
