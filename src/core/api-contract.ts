@@ -115,8 +115,17 @@ export const runtimeAgentIdSchema = z.enum([
 	"omp",
 ]);
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
-export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
+// 哪些 terminal agent 有「模型选择器」这条通道：Kanban 能探测出它的模型目录、并在启动时把选中的
+// model id 传给 CLI。
+export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor", "kimi"]);
 export type RuntimeTerminalAgentModelSelectionAgentId = z.infer<typeof runtimeTerminalAgentModelSelectionAgentIdSchema>;
+// 哪些 terminal agent 的历史会话能被按 session id 索引并续接/分叉。
+//
+// 这与「有没有模型选择器」是两件互不蕴含的事，曾经共用一个枚举，导致「给某个 agent 加模型选择器」会
+// 顺带宣称它的会话可以按 id 恢复。kimi 正是这种情况：它有 `-m/--model`，但只支持 `--continue`，
+// 没有 `-S/--session <id>` 通道，所以它进模型选择枚举、不进这个枚举。
+export const runtimeResumableAgentSessionSourceAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
+export type RuntimeResumableAgentSessionSourceAgentId = z.infer<typeof runtimeResumableAgentSessionSourceAgentIdSchema>;
 export const runtimeTaskAgentSessionInitializationReuseModeSchema = z.enum([
 	"resume_existing_session",
 	"fork_existing_session",
@@ -126,7 +135,7 @@ export type RuntimeTaskAgentSessionInitializationReuseMode = z.infer<
 >;
 export const runtimeTaskAgentSessionInitializationSchema = z
 	.object({
-		sourceAgentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+		sourceAgentId: runtimeResumableAgentSessionSourceAgentIdSchema,
 		sourceSessionId: z.string().trim().uuid(),
 		sourceSessionReuseMode: runtimeTaskAgentSessionInitializationReuseModeSchema,
 		sourceSessionWorkingDirectoryPath: z.string().trim().min(1).optional(),
@@ -154,7 +163,7 @@ export const runtimeTaskTerminalAgentModelOverrideSettingsSchema = z
 			ctx.addIssue({
 				code: z.ZodIssueCode.custom,
 				path: ["modelId"],
-				message: "Cursor agent model overrides must use auto, composer, or composer-* models.",
+				message: "Cursor agent model overrides must use auto, a composer model, or a grok model.",
 			});
 		}
 	});
@@ -963,6 +972,47 @@ export const runtimeProjectSummarySchema = z.object({
 });
 export type RuntimeProjectSummary = z.infer<typeof runtimeProjectSummarySchema>;
 
+export const runtimeTaskCommitIntegrationTrackingStatusSchema = z.enum([
+	"complete",
+	"legacy_history_unavailable",
+	"inplace_task_commit_ownership_unavailable",
+	"git_probe_unavailable",
+]);
+export type RuntimeTaskCommitIntegrationTrackingStatus = z.infer<
+	typeof runtimeTaskCommitIntegrationTrackingStatusSchema
+>;
+
+export const runtimeTaskWorkspaceGitStatusObservationSourceSchema = z.enum([
+	"live_worktree",
+	"persisted_final_snapshot",
+	"unavailable",
+]);
+export type RuntimeTaskWorkspaceGitStatusObservationSource = z.infer<
+	typeof runtimeTaskWorkspaceGitStatusObservationSourceSchema
+>;
+
+/**
+ * 一个 task 与其本地 baseRef 的统一 Git 状态投影。
+ *
+ * ahead / behind 是此刻的拓扑分歧；taskCommitsIntegratedIntoBaseRef 则来自持久 task commit
+ * provenance，不能用当前 merge-base 反推。null 一律表示没有足够证据，绝不等价于 0。
+ */
+export const runtimeTaskWorkspaceGitStatusSchema = z.object({
+	baseRef: z.string(),
+	commitsAheadOfBaseRef: z.number().int().nonnegative().nullable(),
+	commitsBehindBaseRef: z.number().int().nonnegative().nullable(),
+	taskCommitsIntegratedIntoBaseRef: z.number().int().nonnegative().nullable(),
+	taskCommitIntegrationTrackingStatus: runtimeTaskCommitIntegrationTrackingStatusSchema,
+	observationSource: runtimeTaskWorkspaceGitStatusObservationSourceSchema,
+	observedAt: z.number().nullable(),
+});
+export type RuntimeTaskWorkspaceGitStatus = z.infer<typeof runtimeTaskWorkspaceGitStatusSchema>;
+
+export const runtimeTaskWorkspaceGitStatusesResponseSchema = z.object({
+	taskWorkspaceGitStatuses: z.record(z.string(), runtimeTaskWorkspaceGitStatusSchema),
+});
+export type RuntimeTaskWorkspaceGitStatusesResponse = z.infer<typeof runtimeTaskWorkspaceGitStatusesResponseSchema>;
+
 export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	taskId: z.string(),
 	path: z.string(),
@@ -978,6 +1028,7 @@ export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	commitsAheadOfBaseRef: z.number().int().nonnegative().nullable(),
 	// behind = base 分支独有、任务尚未吸收的提交数。base 分支推进时增长，任务吸收（base-branch-sync）后归零。
 	commitsBehindBaseRef: z.number().int().nonnegative().nullable(),
+	workspaceGitStatus: runtimeTaskWorkspaceGitStatusSchema,
 	branch: z.string().nullable(),
 	isDetached: z.boolean(),
 	headCommit: z.string().nullable(),
@@ -1382,6 +1433,7 @@ export type RuntimeWorktreeEnsureResponse = z.infer<typeof runtimeWorktreeEnsure
 export const runtimeWorktreeDeleteRequestSchema = z.object({
 	taskId: z.string(),
 	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
+	removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: z.boolean().optional(),
 });
 export type RuntimeWorktreeDeleteRequest = z.infer<typeof runtimeWorktreeDeleteRequestSchema>;
 
@@ -1903,7 +1955,7 @@ export const runtimeAvailableAgentSessionPreviewTurnSchema = z.object({
 export type RuntimeAvailableAgentSessionPreviewTurn = z.infer<typeof runtimeAvailableAgentSessionPreviewTurnSchema>;
 
 export const runtimeAvailableAgentSessionSummarySchema = z.object({
-	sourceAgentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+	sourceAgentId: runtimeResumableAgentSessionSourceAgentIdSchema,
 	sourceSessionId: z.string().uuid(),
 	sessionTitle: z.string(),
 	sessionWorkingDirectoryPath: z.string().nullable(),
@@ -1915,7 +1967,7 @@ export const runtimeAvailableAgentSessionSummarySchema = z.object({
 export type RuntimeAvailableAgentSessionSummary = z.infer<typeof runtimeAvailableAgentSessionSummarySchema>;
 
 export const runtimeAvailableAgentSessionsRequestSchema = z.object({
-	agentId: runtimeTerminalAgentModelSelectionAgentIdSchema,
+	agentId: runtimeResumableAgentSessionSourceAgentIdSchema,
 	searchScope: runtimeAvailableAgentSessionSearchScopeSchema.default("current_repository"),
 	query: z.string().trim().max(2048).default(""),
 	pageCursor: z.number().int().nonnegative().default(0),

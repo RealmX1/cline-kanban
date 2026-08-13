@@ -14,6 +14,7 @@ import type {
 	RuntimeTaskAgentSessionInitializationReuseMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskSessionStartRequest,
+	RuntimeTaskWorkspaceGitStatus,
 	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
@@ -480,6 +481,7 @@ function formatTaskRecord(
 	state: RuntimeWorkspaceStateResponse,
 	task: RuntimeBoardCard,
 	columnId: RuntimeBoardColumnId,
+	workspaceGitStatus: RuntimeTaskWorkspaceGitStatus | null = null,
 ): JsonRecord {
 	const session = state.sessions[task.id] ?? null;
 	const sessionFacets = session ? resolveSessionFacets(session) : null;
@@ -497,6 +499,7 @@ function formatTaskRecord(
 		...formatTaskClineSettings(task.clineSettings),
 		createdAt: task.createdAt,
 		updatedAt: task.updatedAt,
+		workspaceGitStatus,
 		session:
 			session && sessionFacets
 				? {
@@ -567,7 +570,10 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 		autoCreateIfMissing: false,
 	});
 	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
-	const state = await runtimeClient.workspace.getState.query();
+	const [state, taskWorkspaceGitStatusesResponse] = await Promise.all([
+		runtimeClient.workspace.getState.query(),
+		runtimeClient.workspace.getTaskWorkspaceGitStatuses.query(),
+	]);
 
 	const tasks = state.board.columns.flatMap((boardColumn) => {
 		if (!input.column && boardColumn.id === "trash") {
@@ -576,7 +582,14 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 		if (input.column && boardColumn.id !== input.column) {
 			return [];
 		}
-		return boardColumn.cards.map((task) => formatTaskRecord(state, task, boardColumn.id));
+		return boardColumn.cards.map((task) =>
+			formatTaskRecord(
+				state,
+				task,
+				boardColumn.id,
+				taskWorkspaceGitStatusesResponse.taskWorkspaceGitStatuses[task.id] ?? null,
+			),
+		);
 	});
 
 	return {
@@ -603,10 +616,14 @@ async function stopTaskRuntimeSession(
 async function deleteTaskWorkspace(
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
 	taskId: string,
+	removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion = false,
 ): Promise<{ removed: boolean; error?: string }> {
 	try {
 		const deleted = await runtimeClient.workspace.deleteWorktree.mutate({
 			taskId,
+			...(removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion
+				? { removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true }
+				: {}),
 		});
 		return {
 			removed: deleted.removed,
@@ -1329,7 +1346,7 @@ async function deleteTaskCommand(input: {
 	const workspaceCleanupResults = await Promise.all(
 		mutation.value.deletedTaskIds.map(async (taskId) => ({
 			taskId,
-			...(await deleteTaskWorkspace(runtimeClient, taskId)),
+			...(await deleteTaskWorkspace(runtimeClient, taskId, true)),
 		})),
 	);
 

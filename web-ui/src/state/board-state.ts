@@ -224,7 +224,10 @@ function normalizeTaskTerminalAgentModelOverrideSettings(
 		modelId?: unknown;
 	};
 	const agentId =
-		settings.agentId === "claude" || settings.agentId === "codex" || settings.agentId === "cursor"
+		settings.agentId === "claude" ||
+		settings.agentId === "codex" ||
+		settings.agentId === "cursor" ||
+		settings.agentId === "kimi"
 			? settings.agentId
 			: null;
 	const modelId = typeof settings.modelId === "string" ? settings.modelId.trim() : "";

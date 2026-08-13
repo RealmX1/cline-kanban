@@ -39,7 +39,7 @@ interface StoredTaskCreateTerminalAgentModelSelections {
 function isTerminalAgentModelSelectionAgentId(
 	agentId: RuntimeAgentId | null | undefined,
 ): agentId is RuntimeTerminalAgentModelSelectionAgentId {
-	return agentId === "claude" || agentId === "codex" || agentId === "cursor";
+	return agentId === "claude" || agentId === "codex" || agentId === "cursor" || agentId === "kimi";
 }
 
 function getTaskCreateTerminalAgentModelSelectionStorageKey(

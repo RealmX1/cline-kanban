@@ -1,8 +1,11 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { loadWorkspaceContext } from "../../src/state/workspace-state";
+import type * as GitUtilsModule from "../../src/workspace/git-utils";
+import { probeAndRefreshTaskCommitIntegrationProvenance } from "../../src/workspace/task-commit-integration-provenance";
 import {
 	deleteTaskWorktree,
 	ensureTaskWorktreeIfDoesntExist,
@@ -14,6 +17,44 @@ import {
 	type IsolatedGitTestRepository,
 	type IsolatedGitTestWorkspaceFixture,
 } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+
+interface ControllablePromise {
+	promise: Promise<void>;
+	resolve: () => void;
+}
+
+const concurrentRefreshGitDelay = vi.hoisted(() => ({
+	delayedRevisionRange: null as string | null,
+	delayedRevisionListEntered: null as ControllablePromise | null,
+	releaseDelayedRevisionList: null as ControllablePromise | null,
+}));
+
+function createControllablePromise(): ControllablePromise {
+	let resolvePromise = (): void => {};
+	const promise = new Promise<void>((resolve) => {
+		resolvePromise = resolve;
+	});
+	return { promise, resolve: resolvePromise };
+}
+
+vi.mock("../../src/workspace/git-utils.js", async (importOriginal) => {
+	const original = await importOriginal<typeof GitUtilsModule>();
+	return {
+		...original,
+		runGit: async (cwd: string, args: string[], options?: GitUtilsModule.RunGitOptions) => {
+			if (
+				args[0] === "rev-list" &&
+				args.at(-1) === concurrentRefreshGitDelay.delayedRevisionRange &&
+				concurrentRefreshGitDelay.delayedRevisionListEntered !== null &&
+				concurrentRefreshGitDelay.releaseDelayedRevisionList !== null
+			) {
+				concurrentRefreshGitDelay.delayedRevisionListEntered.resolve();
+				await concurrentRefreshGitDelay.releaseDelayedRevisionList.promise;
+			}
+			return await original.runGit(cwd, args, options);
+		},
+	};
+});
 
 function expectMirroredPathBehavior(path: string): void {
 	const exists = existsSync(path);
@@ -64,6 +105,210 @@ async function withIsolatedGitTaskWorktreeTestHome<T>(
 }
 
 describe.sequential("task-worktree integration", () => {
+	it("does not mistake a pure base fast-forward for task-owned commits before any task commit was observed", async () => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
+			const repository = createRepository("task-commit-provenance-pure-base-fast-forward-repository");
+			const repoPath = repository.repositoryPath;
+			writeFileSync(join(repoPath, "README.md"), "initial\n", "utf8");
+			repository.runGit(["add", "README.md"]);
+			repository.runGit(["commit", "-m", "initial"]);
+
+			const ensured = await ensureTaskWorktreeIfDoesntExist({
+				cwd: repoPath,
+				taskId: "task-pure-base-fast-forward",
+				baseRef: "main",
+			});
+			expect(ensured.ok).toBe(true);
+			if (!ensured.ok || !ensured.path) {
+				throw new Error("Task worktree was not created");
+			}
+
+			writeFileSync(join(repoPath, "base-change.txt"), "base change\n", "utf8");
+			repository.runGit(["add", "base-change.txt"]);
+			repository.runGit(["commit", "-m", "advance base"]);
+			repository.runGit(["merge", "--ff-only", "main"], { workingDirectoryPath: ensured.path });
+
+			const workspaceContext = await loadWorkspaceContext(repoPath);
+			const status = await probeAndRefreshTaskCommitIntegrationProvenance({
+				workspaceId: workspaceContext.workspaceId,
+				taskId: "task-pure-base-fast-forward",
+				repoPath,
+				worktreePath: ensured.path,
+				baseRef: "main",
+				worktreeExists: true,
+				observedAt: 0,
+			});
+
+			expect(status).toMatchObject({
+				commitsAheadOfBaseRef: 0,
+				commitsBehindBaseRef: 0,
+				taskCommitsIntegratedIntoBaseRef: null,
+				taskCommitIntegrationTrackingStatus: "legacy_history_unavailable",
+			});
+		});
+	});
+
+	it("keeps live integrated counts and persisted observations monotonic when an older refresh finishes last", async () => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
+			const repository = createRepository("task-commit-provenance-concurrent-refresh-repository");
+			const repoPath = repository.repositoryPath;
+			writeFileSync(join(repoPath, "README.md"), "initial\n", "utf8");
+			repository.runGit(["add", "README.md"]);
+			repository.runGit(["commit", "-m", "initial"]);
+			const initialBaseCommit = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
+
+			const ensured = await ensureTaskWorktreeIfDoesntExist({
+				cwd: repoPath,
+				taskId: "task-concurrent-live-refresh",
+				baseRef: "main",
+			});
+			expect(ensured.ok).toBe(true);
+			if (!ensured.ok || !ensured.path) {
+				throw new Error("Task worktree was not created");
+			}
+			writeFileSync(join(ensured.path, "task-change.txt"), "task change\n", "utf8");
+			repository.runGit(["add", "task-change.txt"], { workingDirectoryPath: ensured.path });
+			repository.runGit(["commit", "-m", "task change"], { workingDirectoryPath: ensured.path });
+			const taskCommit = repository
+				.runGit(["rev-parse", "HEAD"], {
+					workingDirectoryPath: ensured.path,
+				})
+				.stdout.trim();
+			const workspaceContext = await loadWorkspaceContext(repoPath);
+
+			await probeAndRefreshTaskCommitIntegrationProvenance({
+				workspaceId: workspaceContext.workspaceId,
+				taskId: "task-concurrent-live-refresh",
+				repoPath,
+				worktreePath: ensured.path,
+				baseRef: "main",
+				worktreeExists: true,
+				observedAt: 0,
+			});
+
+			writeFileSync(join(repoPath, "stale-base-history.txt"), "stale\n", "utf8");
+			repository.runGit(["add", "stale-base-history.txt"]);
+			repository.runGit(["commit", "-m", "stale base history"]);
+			const staleBaseTipCommit = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
+			repository.runGit(["branch", "stale-base-history", staleBaseTipCommit]);
+			repository.runGit(["reset", "--hard", initialBaseCommit]);
+			repository.runGit(["cherry-pick", taskCommit]);
+			const currentBaseTipCommit = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
+
+			concurrentRefreshGitDelay.delayedRevisionRange = `${initialBaseCommit}..${staleBaseTipCommit}`;
+			concurrentRefreshGitDelay.delayedRevisionListEntered = createControllablePromise();
+			concurrentRefreshGitDelay.releaseDelayedRevisionList = createControllablePromise();
+			try {
+				const staleRefresh = probeAndRefreshTaskCommitIntegrationProvenance({
+					workspaceId: workspaceContext.workspaceId,
+					taskId: "task-concurrent-live-refresh",
+					repoPath,
+					worktreePath: ensured.path,
+					baseRef: "main",
+					worktreeExists: true,
+					knownBaseRefTipCommit: staleBaseTipCommit,
+					observedAt: 1_000,
+				});
+				await concurrentRefreshGitDelay.delayedRevisionListEntered.promise;
+				const currentResult = await probeAndRefreshTaskCommitIntegrationProvenance({
+					workspaceId: workspaceContext.workspaceId,
+					taskId: "task-concurrent-live-refresh",
+					repoPath,
+					worktreePath: ensured.path,
+					baseRef: "main",
+					worktreeExists: true,
+					knownBaseRefTipCommit: currentBaseTipCommit,
+					observedAt: 2_000,
+				});
+				concurrentRefreshGitDelay.releaseDelayedRevisionList.resolve();
+				const staleResult = await staleRefresh;
+
+				expect(currentResult.taskCommitsIntegratedIntoBaseRef).toBe(1);
+				expect(staleResult.taskCommitsIntegratedIntoBaseRef).toBe(1);
+				expect(staleResult.observedAt).toBe(2_000);
+			} finally {
+				concurrentRefreshGitDelay.releaseDelayedRevisionList.resolve();
+				concurrentRefreshGitDelay.delayedRevisionRange = null;
+				concurrentRefreshGitDelay.delayedRevisionListEntered = null;
+				concurrentRefreshGitDelay.releaseDelayedRevisionList = null;
+			}
+
+			const persisted = await probeAndRefreshTaskCommitIntegrationProvenance({
+				workspaceId: workspaceContext.workspaceId,
+				taskId: "task-concurrent-live-refresh",
+				repoPath,
+				worktreePath: ensured.path,
+				baseRef: "main",
+				worktreeExists: false,
+				knownBaseRefTipCommit: null,
+			});
+			expect(persisted.taskCommitsIntegratedIntoBaseRef).toBe(1);
+			expect(persisted.observedAt).toBe(2_000);
+		});
+	});
+
+	it("tracks patch-equivalent task commits integrated into base and preserves the final snapshot after worktree deletion", async () => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
+			const repository = createRepository("task-commit-integration-provenance-repository");
+			const repoPath = repository.repositoryPath;
+			writeFileSync(join(repoPath, "README.md"), "initial\n", "utf8");
+			repository.runGit(["add", "README.md"]);
+			repository.runGit(["commit", "-m", "initial"]);
+
+			const ensured = await ensureTaskWorktreeIfDoesntExist({
+				cwd: repoPath,
+				taskId: "task-integrated-count",
+				baseRef: "main",
+			});
+			expect(ensured.ok).toBe(true);
+			if (!ensured.ok || !ensured.path) {
+				throw new Error("Task worktree was not created");
+			}
+			writeFileSync(join(ensured.path, "task-change.txt"), "task change\n", "utf8");
+			repository.runGit(["add", "task-change.txt"], { workingDirectoryPath: ensured.path });
+			repository.runGit(["commit", "-m", "task change"], { workingDirectoryPath: ensured.path });
+			const taskCommitSha = repository
+				.runGit(["rev-parse", "HEAD"], {
+					workingDirectoryPath: ensured.path,
+				})
+				.stdout.trim();
+			const workspaceContext = await loadWorkspaceContext(repoPath);
+
+			const beforeHandback = await probeAndRefreshTaskCommitIntegrationProvenance({
+				workspaceId: workspaceContext.workspaceId,
+				taskId: "task-integrated-count",
+				repoPath,
+				worktreePath: ensured.path,
+				baseRef: "main",
+				worktreeExists: true,
+			});
+			expect(beforeHandback).toMatchObject({
+				commitsAheadOfBaseRef: 1,
+				taskCommitsIntegratedIntoBaseRef: 0,
+				taskCommitIntegrationTrackingStatus: "complete",
+			});
+
+			writeFileSync(join(repoPath, "base-change.txt"), "base change\n", "utf8");
+			repository.runGit(["add", "base-change.txt"]);
+			repository.runGit(["commit", "-m", "advance base"]);
+			await deleteTaskWorktree({ repoPath, taskId: "task-integrated-count" });
+			repository.runGit(["cherry-pick", taskCommitSha]);
+			const afterDeletion = await probeAndRefreshTaskCommitIntegrationProvenance({
+				workspaceId: workspaceContext.workspaceId,
+				taskId: "task-integrated-count",
+				repoPath,
+				worktreePath: ensured.path,
+				baseRef: "main",
+				worktreeExists: false,
+			});
+			expect(afterDeletion).toMatchObject({
+				taskCommitsIntegratedIntoBaseRef: 1,
+				taskCommitIntegrationTrackingStatus: "complete",
+				observationSource: "persisted_final_snapshot",
+			});
+		});
+	});
+
 	it("returns a friendly error when the repository has no initial commit", async () => {
 		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
 			const repository = createRepository("unborn-repository");
