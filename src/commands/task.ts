@@ -468,6 +468,9 @@ function formatTaskRecord(
 	const sessionFacets = session ? resolveSessionFacets(session) : null;
 	return {
 		id: task.id,
+		// 卡片 schema 的 transform 已把 title 归一成「卡片上实际显示的标题」（缺省时由 prompt 派生），
+		// 这里直接透出，让 CLI 消费方看到的标题与看板一致。
+		title: task.title,
 		prompt: task.prompt,
 		column: columnId,
 		baseRef: task.baseRef,
@@ -569,6 +572,42 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 		tasks,
 		dependencies: state.board.dependencies.map((dependency) => formatDependencyRecord(state, dependency)),
 		count: tasks.length,
+	};
+}
+
+// 「task get」：按 task ID 取回单条任务的只读快照。存在的意义是补上「别的 agent 拿到一个 task ID
+// （或一条 worktree 路径）之后该怎么找回这个任务」这一段——task list 要求调用方自己在整块 JSON 里筛，
+// 而任务标题既不唯一也会随 prompt 编辑而变，ID 才是唯一可靠的引用键。
+async function getTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const state = await runtimeClient.workspace.getState.query();
+
+	const found = findTaskRecord(state, input.taskId);
+	if (!found) {
+		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspace.repoPath}.`);
+	}
+
+	// worktree 路径与 HEAD 状态由运行时给出而非本地拼接：调用方通常正是为了「进到那个目录去」才来查的，
+	// 顺带还能知道 worktree 是否仍然存在。取不到时不让整条命令失败——任务本身的信息仍然有用。
+	const taskWorkspaceInfo = await runtimeClient.workspace.getTaskContext
+		.query({
+			taskId: found.task.id,
+			baseRef: found.task.baseRef,
+			...(found.task.worktreeMode ? { worktreeMode: found.task.worktreeMode } : {}),
+		})
+		.catch(() => null);
+
+	return {
+		ok: true,
+		workspacePath: workspace.repoPath,
+		task: formatTaskRecord(state, found.task, found.columnId),
+		taskWorkspace: taskWorkspaceInfo,
+		dependencies: state.board.dependencies
+			.filter((dependency) => dependency.fromTaskId === found.task.id || dependency.toTaskId === found.task.id)
+			.map((dependency) => formatDependencyRecord(state, dependency)),
 	};
 }
 
@@ -1623,6 +1662,22 @@ export function registerTaskCommand(program: Command): void {
 						cwd: process.cwd(),
 						projectPath: options.projectPath,
 						column: options.column,
+					}),
+			);
+		});
+
+	task
+		.command("get")
+		.description("Look up a single Kanban task by its task ID, including its task worktree path and state.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { taskId: string; projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await getTask({
+						cwd: process.cwd(),
+						taskId: options.taskId,
+						projectPath: options.projectPath,
 					}),
 			);
 		});

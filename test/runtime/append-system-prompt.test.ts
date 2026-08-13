@@ -68,6 +68,7 @@ describe("renderAppendSystemPrompt", () => {
 		expect(rendered).not.toContain("`--start-in-plan-mode <true|false>` optional. Default false.");
 		expect(rendered).toContain("Provide exactly one of");
 		expect(rendered).toContain("task delete --column done");
+		expect(rendered).toContain("kanban task get --task-id <task_id>");
 		expect(rendered).toContain("kanban task link");
 		expect(rendered).toContain("If a task command fails because the runtime is unavailable");
 		expect(rendered).toContain("If the user asks for GitHub work");
@@ -161,6 +162,49 @@ describe("resolveTaskSessionAppendSystemPrompt", () => {
 		expect(prompt).toContain("Workflows the user explicitly invoked");
 		expect(prompt).toContain("base-branch-sync");
 		expect(prompt).toContain("the invocation itself authorizes");
+	});
+
+	it("teaches how to resolve the task back from a worktree directory", () => {
+		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo", {
+			currentVersion: "0.1.10",
+			cwd: "/Users/example/repo",
+			execPath: "/usr/local/bin/node",
+			execArgv: [],
+			argv: ["node", "/Users/example/repo/dist/cli.js"],
+			resolveRealPath: (path) => path,
+		});
+		expect(prompt).toContain(".cline/worktrees/<task_id>/<repo_folder>");
+		expect(prompt).toContain(
+			`'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task get --task-id 'task-1' --project-path "$(dirname "$(git rev-parse --git-common-dir)")"`,
+		);
+		// 另一种输入形态：别人递来一个 worktree 路径字符串，而不是 agent 自己就在那个 worktree 里。
+		expect(prompt).toContain("~/.cline/worktrees/ab12c/my-repo");
+		expect(prompt).toContain("never at a task worktree");
+	});
+
+	// 自己的 task ID 必须来自调用方已持有的真值，不能靠 cwd 反推：派生 worktree 与 inplace 任务的
+	// workspace 路径里根本没有 `worktrees/<task_id>` 段，反推会静默算出一个看似合法的错误 ID。
+	it("states the caller-known task ID instead of deriving it from the current directory", () => {
+		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/Users/example/repo", {
+			currentVersion: "0.1.10",
+			cwd: "/Users/example/repo",
+			execPath: "/usr/local/bin/node",
+			execArgv: [],
+			argv: ["node", "/Users/example/repo/dist/cli.js"],
+			resolveRealPath: (path) => path,
+		});
+		expect(prompt).toContain("You are running as Kanban task `task-1`");
+		expect(prompt).toContain("never re-derive it from your current directory");
+		expect(prompt).not.toContain("git rev-parse --show-toplevel");
+		expect(prompt).not.toContain("basename");
+	});
+
+	// `--project-path` 的推导仍需一条 git 命令，但不得只教 POSIX 命令替换：Windows 默认 shell 没有
+	// `$(...)`/`basename`/`dirname`。
+	it("gives a non-POSIX shell fallback for deriving the main repository path", () => {
+		const prompt = resolveTaskSessionAppendSystemPrompt("task-1", "/tmp/worktrees/task-1/repo");
+		expect(prompt).toContain("on PowerShell or cmd");
+		expect(prompt).toContain("git rev-parse --git-common-dir");
 	});
 
 	it("does not inject a task workspace guard for home sidebar sessions", () => {
