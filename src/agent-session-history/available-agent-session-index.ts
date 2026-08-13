@@ -7,7 +7,7 @@ import type {
 	RuntimeAvailableAgentSessionPreviewTurn,
 	RuntimeAvailableAgentSessionsRequest,
 	RuntimeAvailableAgentSessionsResponse,
-	RuntimeTerminalAgentModelSelectionAgentId,
+	RuntimeResumableAgentSessionSourceAgentId,
 } from "../core/api-contract";
 import { runGit } from "../workspace/git-utils";
 import {
@@ -18,7 +18,7 @@ import {
 } from "./bounded-agent-transcript-reader";
 
 interface SessionFileCandidate {
-	agentId: RuntimeTerminalAgentModelSelectionAgentId;
+	agentId: RuntimeResumableAgentSessionSourceAgentId;
 	filePath: string;
 	modifiedAt: string;
 	mtimeMs: number;
@@ -26,7 +26,7 @@ interface SessionFileCandidate {
 }
 
 interface IndexedAvailableAgentSession {
-	sourceAgentId: RuntimeTerminalAgentModelSelectionAgentId;
+	sourceAgentId: RuntimeResumableAgentSessionSourceAgentId;
 	sourceSessionId: string;
 	sessionTitle: string;
 	sessionWorkingDirectoryPath: string | null;
@@ -149,7 +149,7 @@ function cacheParsedSession(cacheKey: string, value: CachedParsedSession): void 
 
 async function collectSessionFiles(
 	rootDirectoryPath: string,
-	agentId: RuntimeTerminalAgentModelSelectionAgentId,
+	agentId: RuntimeResumableAgentSessionSourceAgentId,
 	includeFile: (filePath: string) => boolean,
 ): Promise<SessionFileCandidate[]> {
 	const candidates: SessionFileCandidate[] = [];
@@ -194,7 +194,7 @@ async function collectSessionFiles(
 }
 
 async function discoverSessionFiles(
-	agentId: RuntimeTerminalAgentModelSelectionAgentId,
+	agentId: RuntimeResumableAgentSessionSourceAgentId,
 ): Promise<SessionFileCandidate[]> {
 	if (agentId === "claude") {
 		return collectSessionFiles(join(homedir(), ".claude", "projects"), agentId, () => true);
