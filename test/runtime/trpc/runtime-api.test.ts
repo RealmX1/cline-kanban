@@ -222,6 +222,7 @@ function createRuntimeConfigState(): RuntimeConfigState {
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: true,
 		postDeployVerificationForceCompleteEnabled: false,
 		shortcuts: [],
 		commitPromptTemplate: "commit",
@@ -2396,10 +2397,14 @@ describe("createRuntimeApi startTaskSession", () => {
 		// 注入）→ deferWhileUserTurn=true：遇 agent 正等用户拍板的模态时让位挂起、不打断（Fix B）。
 		// 带 idempotencyKey → 同时登记诚实回执：runtime 在投递落定后经 onDeliveryOutcome 回写注入账本，
 		// 这是「CLI 已退出不再意味着状态不会变」的接线点。
+		// 争用分层：策略取自配置（默认 auto = 允许在人不在场时自动暂存抢占），抢占执行者就是
+		// Ctrl+S 那条暂存链路本身（只是 origin 标成「被程序化投递抢占」）。
 		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith("task-1", "please continue", {
 			deferWhileUserTurn: true,
 			idempotencyKey: "rvf-run-1",
 			onDeliveryOutcome: expect.any(Function),
+			mayAutoStashAbsentHumanInputBox: true,
+			preemptivelyStashHumanInputBox: expect.any(Function),
 		});
 		expect(response.summary).toEqual(summary);
 		expect(response.message).toEqual({
@@ -4458,6 +4463,74 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			"task-1",
 			"incarnation-1",
 		);
+	});
+
+	// W1 争用抢占复用的就是这条链路（计划 §3.4 / §4.1 形态 3）：同一段代码、只换 origin。
+	// 两条红线：① 抢占存进去的条目要标成「被程序化投递抢占」，用户才能在面板里认出并一键取回；
+	// ② 只有「入库**且**框已清」才算放行——库里有了但框还在时照写，就会把 paste 接在人类那半句后面。
+	it("争用抢占：走同一条暂存链路，条目标成被抢占，且只有「入库且框已清」才算放行", async () => {
+		const scope = createStashWorkspaceScope();
+		const summary = createSummary({ agentId: "claude", state: "awaiting_review" });
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
+		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
+		let inputBoxWasCleared = true;
+		const terminalManager = {
+			...createStashTerminalManagerDouble({
+				capture: async () => createStashCapture("captured_stashable_text", "走开前留下的半句"),
+				forward: () => inputBoxWasCleared,
+			}),
+			// 显式给形参类型：下面要读第三个参数（投递 options），mock 不带签名时 `mock.calls` 会被推成 `[]`，
+			// `calls[0]?.[2]` 直接是类型错误——这正是本文件曾把 npm run typecheck 跑红的地方。
+			submitTaskChatInputWhenReady: vi.fn(
+				(
+					_taskId: string,
+					_text: string,
+					_options?: {
+						mayAutoStashAbsentHumanInputBox?: boolean;
+						preemptivelyStashHumanInputBox?: (taskId: string) => Promise<boolean>;
+					},
+				) => summary,
+			),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => scope.workspaceId),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		await api.sendTaskChatMessage(scope, {
+			taskId: "task-1",
+			text: "继续 RVF",
+			source: "review-validate-fix",
+			idempotencyKey: "rvf-contention-1",
+			promptSha256: "abc123",
+		});
+
+		const deliveryOptions = terminalManager.submitTaskChatInputWhenReady.mock.calls[0]?.[2];
+		if (!deliveryOptions?.preemptivelyStashHumanInputBox) {
+			throw new Error("投递 options 必须带上争用抢占执行者");
+		}
+		// 策略取自配置（默认允许在人不在场时抢占）。
+		expect(deliveryOptions.mayAutoStashAbsentHumanInputBox).toBe(true);
+
+		await expect(deliveryOptions.preemptivelyStashHumanInputBox("task-1")).resolves.toBe(true);
+		const library = await readWorkspacePromptLibrarySnapshot(scope.workspaceId);
+		expect(library.taskScopedPromptsByTaskId["task-1"]).toEqual([
+			expect.objectContaining({
+				text: "走开前留下的半句",
+				origin: "terminal_stash_preempted_by_programmatic_delivery",
+			}),
+		]);
+
+		// 框没清成（读框到清框之间终端被 refresh）：内容确实进了库，但输入框里一个字都没少，
+		// 此时绝不能报「已放行」——投递必须退回挂起。
+		inputBoxWasCleared = false;
+		await expect(deliveryOptions.preemptivelyStashHumanInputBox("task-1")).resolves.toBe(false);
 	});
 
 	it("写库期间终端被 refresh（清框被拒） → 回执必须说「已入库但框没清」，不许报纯成功", async () => {

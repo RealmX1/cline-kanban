@@ -6,6 +6,7 @@ import {
 	Files,
 	FileText,
 	GitCompareArrows,
+	Hourglass,
 	List,
 	Maximize2,
 	MessageSquare,
@@ -47,10 +48,13 @@ import type {
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskTerminalDeliveryContention,
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
 import { useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
+import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
+import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel, type TaskCommentEntry } from "@/types";
 import { useWindowEvent } from "@/utils/react-use";
@@ -238,7 +242,12 @@ function BottomTerminalSection({
 			onCollapse={onCollapse}
 			isExpanded={isExpanded}
 		>
-			<div className="flex min-w-0 flex-1 px-3">
+			<div className="flex min-h-0 min-w-0 flex-1 flex-col px-3">
+				<TerminalDeliveryContentionBanner
+					taskId={taskId}
+					workspaceId={workspaceId}
+					contention={summary?.terminalDeliveryContention ?? null}
+				/>
 				<AgentTerminalPanel
 					taskId={taskId}
 					workspaceId={workspaceId}
@@ -260,6 +269,48 @@ function BottomTerminalSection({
 				/>
 			</div>
 		</ResizableBottomPane>
+	);
+}
+
+// 程序化投递正等着这个输入框腾出来时的挂起可见性（计划 §4.4）。摆在终端正上方，因为要说的正是
+// 「你手上这个框」的事；`terminalDeliveryContention` 为空时整块不渲染，日常不占任何高度。
+function TerminalDeliveryContentionBanner({
+	taskId,
+	workspaceId,
+	contention,
+}: {
+	taskId: string;
+	workspaceId: string | null;
+	contention: RuntimeTaskTerminalDeliveryContention | null;
+}): React.ReactElement | null {
+	const [isStashInFlight, setIsStashInFlight] = useState(false);
+	const notice = describeTerminalDeliveryContention(contention);
+	if (!notice) {
+		return null;
+	}
+	return (
+		<div className="mb-1 flex items-start gap-2 rounded-md border border-status-orange/30 bg-status-orange/10 px-2 py-1.5 text-xs text-status-orange">
+			<Hourglass size={13} className="mt-0.5 shrink-0" />
+			<div className="min-w-0 flex-1">
+				<div className="font-medium">{notice.headline}</div>
+				<div className="mt-0.5 text-text-secondary">{notice.detail}</div>
+			</div>
+			{notice.shouldOfferStashAndYieldAction && workspaceId ? (
+				<Button
+					variant="default"
+					size="xs"
+					disabled={isStashInFlight}
+					onClick={() => {
+						setIsStashInFlight(true);
+						void stashTerminalInputBoxToPromptLibrary({ workspaceId, taskId }).finally(() => {
+							setIsStashInFlight(false);
+						});
+					}}
+				>
+					{isStashInFlight ? "暂存中…" : "暂存我的输入并放行"}
+				</Button>
+			) : null}
+		</div>
 	);
 }
 

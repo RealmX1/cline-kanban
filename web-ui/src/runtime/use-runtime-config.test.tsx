@@ -27,6 +27,7 @@ function createRuntimeConfigResponse(selectedAgentId: RuntimeConfigResponse["sel
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: true,
 		postDeployVerificationForceCompleteEnabled: false,
 		detectedCommands: [selectedAgentId],
 		agents: [

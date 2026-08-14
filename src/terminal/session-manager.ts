@@ -15,6 +15,7 @@ import type {
 	RuntimeTaskSessionState,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionUserTurnKind,
+	RuntimeTaskTerminalDeliveryContention,
 	RuntimeTaskTurnCheckpoint,
 	TerminalDeliveryFailureReason,
 	TerminalDeliveryStatus,
@@ -41,8 +42,9 @@ import {
 	type AgentAdapterLaunchInput,
 	type AgentOutputTransitionDetector,
 	type AgentOutputTransitionInspectionPredicate,
+	BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN,
 	prepareAgentLaunch,
-	toBracketedPasteSubmission,
+	toBracketedPasteFramingWithoutTrailingSubmit,
 } from "./agent-session-adapters";
 import { materializeTaskAgentSessionForExecutionWorkingDirectory } from "./agent-session-materialization";
 import {
@@ -79,8 +81,10 @@ import { reduceSessionTransition, type SessionTransitionEvent } from "./session-
 import { backfillFoldedPastePlaceholdersFromPasteLedger } from "./terminal-input-box-folded-paste-placeholder-backfill";
 import {
 	createTerminalInputBoxOccupancyTrackerState,
+	type ProgrammaticDeliveryInputBoxContentionVerdict,
 	recordTerminalInputBytesIntoOccupancyTracker,
 	resetTerminalInputBoxOccupancyTrackerComposition,
+	resolveProgrammaticDeliveryInputBoxContention,
 	resolveTerminalInputBoxOccupancy,
 	type TerminalInputBoxOccupancy,
 	type TerminalInputBoxOccupancyTrackerState,
@@ -114,12 +118,28 @@ const OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS = 8_000;
 const TASK_CHAT_INPUT_DELIVERY_SETTLE_MS = 1_000;
 // 未就绪时的就绪轮询间隔。
 const TASK_CHAT_INPUT_DELIVERY_RECHECK_MS = 1_500;
-// 就绪轮询总时长上限：到点仍未就绪则尽力强制写一次（best-effort，行为不劣于今日的立即写）。
-// 远小于 RVF prep 文件 300s TTL（rvf_prep_file.py DEFAULT_TTL_SECONDS），故即便兜底强制写，prep 仍有效。
+// 就绪轮询总时长上限：到点仍未就绪即转终态 delivery_failed{terminal_prompt_readiness_timeout}。
+// 这里曾经是「尽力强制写一次」，形态 3 把它换成了诚实失败——TUI 从没就绪过时硬写，只是把文本泼进一个
+// 未知形态的界面，而回执还说送达了。结构判定命中通常只要 1–3s，等满整个 deadline 意味着这个终端确实
+// 不在能收消息的状态。仍远小于 RVF prep 文件 300s TTL（rvf_prep_file.py DEFAULT_TTL_SECONDS），
+// 故调用方拿到失败后换新 key 重投时 prep 仍然有效。
 const TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS = 60_000;
-// 投递让路防饿死硬上限：deadline 之后即便用户仍在手敲，也至多再为其让路这么久，到点无条件保底强写。
-// 守住「投递绝不丢」与 :88 的 best-effort 承诺——用户持续打字也不会把 RVF followup 永久饿死。
-const TASK_CHAT_INPUT_DELIVERY_MAX_DEADLINE_INPUT_YIELD_MS = 15_000;
+// 人类争用输入框时的让路预算：deadline 之后至多再为人类让路这么久，到点转终态
+// delivery_failed{human_terminal_contention_timeout}。
+//
+// 旧实现在这里做的是「到点**无条件保底强写**」，理由是旧不变量「投递绝不丢」。那条不变量已被替换：
+// 把 paste 插进人类打了一半的那一行，是比丢一条投递更坏的结果——它会把两段互不相干的文本拼成一条
+// 消息提交给 agent，而人类那半句再也拿不回来。新不变量是「投递结果绝不撒谎 + 可重投」：到点诚实
+// 失败，RVF 拿到 human_terminal_contention_timeout 自行择机重投（那也正是「人在改这个仓库时，
+// 这一轮评审本就不该跑」的语义）。
+const TASK_CHAT_INPUT_DELIVERY_MAX_HUMAN_CONTENTION_YIELD_MS = 15_000;
+// 「人此刻在不在这个终端跟前」的判据窗：距上次向**这个终端**手敲已超过它，就按人不在场处理。
+// 取分钟量级而不是 OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS 那 8 秒：8 秒判的是「正在打字」，
+// 这里判的是「人还在不在」——打字停顿几十秒的人显然还在，只是在想。
+//
+// 判据对争用分层的两个分支恰好都对：框非空 + 刚敲过 = 人正在打，绝不动他的框；
+// 框非空 + 很久没敲 = 人走开了、留了半句残字在框里，此时自动暂存抢占才是对他有利的处理。
+const HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS = 5 * 60_000;
 // Fix B 让位（agent 停在模态待答，见 runTaskChatInputDeliveryAttempt）的**饿死上限**。
 // 没有它就是 2026-08-08 那 49 分钟事故的第三条根因：让位分支置于 deadline 判定之前且无上限，
 // 于是 deadline 强写永远够不到，投递每 RECHECK_MS 空探一次、既不落地也不报错、无限挂起。
@@ -141,7 +161,8 @@ const MODAL_USER_DECISION_TURN_KINDS = new Set<RuntimeTaskSessionUserTurnKind>([
 const SUBMIT_CONFIRM_DELAY_MS = 2_500;
 // 未确认（输出仍静默 = CR 被吞、框卡 idle）时至多补发这么多次裸回车 `\r`；耗尽仍静默则打醒目 unconfirmed 日志收尾。
 const SUBMIT_CONFIRM_MAX_RESENDS = 3;
-// 整条确认链（含「用户正在手敲」让位重排）自 paste 写入起算的**绝对收敛上界**。
+// 整条确认链（含「用户正在手敲」让位重排）自**提交 CR 写入**起算的绝对收敛上界（等摄入证据那一段在它之前，
+// 单独计入最坏预算，见下）。
 // 单靠补发预算兜不住：让位重排刻意不消耗预算（用户停手后仍要留着预算把被吞的回车补上），
 // 于是用户持续打字即可让确认链无限重排，回执永远停在 accepted_pending_submit_confirmation——
 // 这是 2026-08-08「永远没有结论」那类缺陷在确认链上的残余形态。到点无论卡在哪一支都诚实收尾。
@@ -149,17 +170,30 @@ const SUBMIT_CONFIRM_MAX_RESENDS = 3;
 // 跨仓契约里「人类打字让路」那一档），且 > 补发预算 SUBMIT_CONFIRM_DELAY_MS × (MAX_RESENDS + 1) = 10s，
 // 故纯静默路径的收尾时机不变，本上界只对被让位拖长的链生效。
 const SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS = 15_000;
+// 形态 2（粘贴进框但回车被吞）的**根治**：bracketed paste 的框架与提交用的 CR 分两次写，第二次以
+// 「TUI 已摄入这段 paste」为门。旧实现把 `ESC[200~…ESC[201~CR` 拼在同一次 write 里，TUI 在重绘中途
+// 一次性收到整串时会把末尾 CR 连同 `ESC[201~` 一起吞掉。补发裸 CR 的确认链自此退居真正的 backstop：
+// 它兜的是「摄入证据出现了、CR 也发了、但 TUI 仍没提交」这类残余，而不再是主机制。
+//
+// 摄入证据取「PTY 有新输出到达」（TUI 收下 paste 必然回显或重绘），**不做文本匹配**：≥4 行的粘贴会被
+// 折叠成 `[Pasted text #N +M lines]`，屏上根本没有原文可比对。
+const PASTE_INGESTION_EVIDENCE_POLL_BEFORE_SUBMIT_MS = 60;
+// 等摄入证据的预算。到点仍无证据也照发 CR：那时的行为不劣于旧实现（旧实现连等都不等），且确认链仍在
+// 后面兜底。故本门只消掉「同 chunk 到达即被吞」这一确定条件，不引入新的挂起点。
+const PASTE_INGESTION_EVIDENCE_MAX_WAIT_BEFORE_SUBMIT_MS = 1_500;
 // 一条程序化投递从受理到必然落定的最坏预算：就绪等待 deadline + 二选一让路里更长的那条 +
+// 等 paste 摄入证据的预算（分离写引入，确认链自 CR 写入才起算，故这一段要单独计入）+
 // 确认链真正的收敛上界（补发预算与绝对收敛上界取大者——后者正是为「让位重排不消耗补发预算」补的兜底，
 // 只看补发预算会低估）。导出是给 runtime 启动清扫当「这条 pending 还可能有人在正常投递吗」的判据用的。
 //
 // 必须由上面这些常量**算**出来而不是写死一个数字：谁调大让路预算或收敛上界却漏改它，清扫就会开始把
 // 并存实例的在途投递判成 delivery_failed，而终态写一次即定 —— 那种假失败事后不可纠正。
-// 当前取值 195s，比跨仓契约 § 时序保证 1 公布的 190s 多出确认链绝对收敛上界超过补发预算的那 5s。
+// 当前取值 196.5s，= 60s 就绪 + 120s 模态待答让位 + 1.5s 等摄入证据 + 15s 确认链收敛上界。
 // 清扫阈值只能往保守（更大）一侧偏：早判一秒就是假失败，晚判一秒只是回执慢一秒。
 export const TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS =
 	TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS +
-	Math.max(TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS, TASK_CHAT_INPUT_DELIVERY_MAX_DEADLINE_INPUT_YIELD_MS) +
+	Math.max(TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS, TASK_CHAT_INPUT_DELIVERY_MAX_HUMAN_CONTENTION_YIELD_MS) +
+	PASTE_INGESTION_EVIDENCE_MAX_WAIT_BEFORE_SUBMIT_MS +
 	Math.max(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1), SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS);
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
@@ -314,6 +348,11 @@ interface ActiveProcessState {
 	submitConfirmTimer: NodeJS.Timeout | null;
 	// 确认「代际」单调计数：每次 writePasteSubmissionWithConfirm 自增并被本确认链捕获，被更晚的 paste 提交取代者放弃。
 	submitConfirmGeneration: number;
+	// PTY 输出 chunk 到达序号，单调自增。用途只有一个：给「bracketed paste 已被 TUI 摄入」当证据——
+	// 写完 paste 框架后序号有推进 ⇒ TUI 已回显/重绘 ⇒ 这时再补提交用的 CR 才不会与 `ESC[201~` 同 chunk
+	// 被吞掉（见 PASTE_INGESTION_EVIDENCE_*）。刻意不用 summary.lastOutputAt 的时间戳：同毫秒内到达的
+	// 两段输出时间戳相等，会被误读成「没有新输出」。仅内存态。
+	ptyOutputChunkArrivalSequenceNumber: number;
 	// 当前在途程序化投递的**诚实回执登记**：谁在等这条投递的结论、取消要认哪个 idempotency key、
 	// 以及它此刻走到了哪一步。至多一个（单飞槽，与 taskChatInputDeliveryGeneration 同源 last-write-wins）。
 	// null 表示当前没有任何等待结论的程序化投递。仅内存态——runtime 重启后由账本启动清扫兜底。
@@ -322,12 +361,83 @@ interface ActiveProcessState {
 	// 只由 writeInput 喂养，因此只看得见人类输入——程序化投递直写 session.write，不会把自己
 	// 记成「用户正在打字」。判空与粘贴账本的语义见 terminal-input-box-occupancy.ts。仅内存态。
 	inputBoxOccupancyTracker: TerminalInputBoxOccupancyTrackerState;
+	// 这条 PTY 一生中有没有**至少一次**在屏上定位到过输入框。单调置位、永不复位——它衡量的不是
+	// 「此刻框在哪」，而是「读屏这只眼睛对这条会话到底管不管用」。
+	//
+	// 用途只有一个，见 resolveProgrammaticDeliveryInputBoxContentionForTask：区分「读屏给不出结论」
+	// 的两种成因。恒为 false ⇒ 该 agent 压根没建模输入框语法（codex / kimi / droid，
+	// resolveTerminalInputBoxGrammar 返回 null）或这套镜像在本环境从来读不出框 ⇒ 读屏这一路对它
+	// 是**结构性缺席**而非异常，判空只能全交给输入侧字节跟踪，否则它们的程序化投递会 100% 挂到
+	// 预算耗尽。为 true ⇒ 同一条会话此前明明读得出框、这一帧却读不出（TUI 正在重绘 / 框被全屏输出
+	// 盖住）⇒ 这是**瞬态异常**，可以安全地挂起等下一拍重读。
+	hasEverLocatedTerminalInputBoxOnScreen: boolean;
 	// 这条 PTY「代」的稳定标识，创建时生成、此后不变。refresh / 自动重启会整体换掉 entry.active
 	// （连同 terminalStateMirror），于是任何**跨 await 的多步链路**都必须能判定「我手上这份读数还
 	// 属于当前这条会话吗」。manager 内部靠对象身份即可（active !== capturedActive），但 manager
 	// 之外的调用方（runtime-api）不该去摸 entries 结构，这个字符串就是给它们的等价物：
 	// 取文时拿到、清框时回传，对不上就必须失败而不是照打。仅内存态。
 	terminalSessionIncarnationToken: string;
+}
+
+// 争用抢占的执行者：把人类未提交的输入无损暂存进 Prompt Library，并清空输入框。
+//
+// 由调用方（runtime-api）注入而不是 manager 自己实现：写库要 workspace 作用域与跨进程文件锁，
+// 那是 manager 够不到、也不该够到的层。manager 只负责判定「此刻该不该抢占」，不负责怎么存。
+//
+// 返回值必须诚实：true 仅当正文确实入库**且**框确实被清。其余一切（库写失败 / 同一 task 上已有
+// 一次暂存在跑 / 读框到清框之间会话已换代 / 屏上文本无法被击键跟踪佐证）一律 false —— 投递退回
+// 挂起继续等，绝不把「没存成」当作已放行而照写，那正是这条工作流要根除的撒谎。
+export type ProgrammaticDeliveryPreemptiveInputBoxStashHandler = (taskId: string) => Promise<boolean>;
+
+// manager 在纯判据函数 resolveProgrammaticDeliveryInputBoxContention 的三个结论之外多出来的一个：
+// 「这一帧根本读不出框，而输入侧同时是瞎的」。它进不了那个纯函数，因为判据来自 manager 独有的会话
+// 状态（hasEverLocatedTerminalInputBoxOnScreen——该纯函数拿到的 occupancy 里没有、也不该有这条
+// 「这条会话的读屏一贯管不管用」的历史）。行为与 screen_text_uncorroborated_… 完全一致（挂起、
+// 绝不抢占），单列一个名字只为让日志说的是实话：那一条说的是「屏上有字但佐证不了」，这一条说的是
+// 「屏上什么都读不到」，两者的补救方向不同。
+type TaskChatInputDeliveryContentionVerdict =
+	| ProgrammaticDeliveryInputBoxContentionVerdict
+	| "input_box_unreadable_while_input_side_tracking_is_blind";
+
+// 一次读框得到的争用结论 + 抢占前置条件。unrecoverablePasteCount 必须与 verdict 同批取回：
+// 分两次读会读到两个时刻的框，可能出现「按 A 时刻判定可抢占、却把 B 时刻多出来的一段不可还原粘贴
+// 一起清掉」。
+interface ProgrammaticDeliveryInputBoxContentionReading {
+	verdict: TaskChatInputDeliveryContentionVerdict;
+	unrecoverablePasteCount: number;
+}
+
+// 一次投递 attempt 跨重探必须原样带走的全部输入。攒成一个对象而不是继续加参数：这些值一旦在某条
+// 重探路径上漏传（历史上 deferWhileUserTurn 就险些如此），语义会在重探时悄悄退化成另一种策略。
+interface TaskChatInputDeliveryAttemptPlan {
+	taskId: string;
+	text: string;
+	// 等 TUI 就绪的绝对截止时刻；两条让路预算都以它为起点再加各自的上限。
+	deadlineAt: number;
+	// 调度时捕获的投递代际；写入 / 重排前复查，被更晚的投递取代者直接放弃。
+	generation: number;
+	// 后台自动注入（RVF followup 等）遇 agent 模态待答时让位，见 Fix B 让位守卫。
+	deferWhileUserTurn: boolean;
+	// 争用策略：人不在场时是否允许自动暂存抢占（计划里的 auto / never_preempt 两档）。
+	// 在受理时捕获而不是每次重探重读配置：一条投递最多活 ~196s，用同一份策略走完全程，
+	// 好过让它在半途因为用户改了设置而换一套语义。
+	mayAutoStashAbsentHumanInputBox: boolean;
+	// 抢占执行者；null = 本次投递不具备抢占能力（调用方没给），此时恒定停在挂起可见。
+	preemptivelyStashHumanInputBox: ProgrammaticDeliveryPreemptiveInputBoxStashHandler | null;
+}
+
+// 一次争用抢占在**授权那一刻**捕获的全部前提。清框（forwardStashKeyToClearTaskTerminalInputBox）
+// 是在这些前提成立时才被批准的动作，而批准与执行之间隔着一整条跨进程链路，所以每一项都要带到执行点
+// 去复查一遍。详见 taskTerminalInputBoxPreemptionHumanAbsencePremises 的注释。
+interface TaskTerminalInputBoxPreemptionAuthorizationPremises {
+	// 授权时的 PTY「代」本体。换代（refresh / 重启）之后这次授权就属于上一条命，不能再兑现。
+	activeWhenPreemptionWasAuthorized: ActiveProcessState;
+	// 授权时的人类击键时钟。推进过 ⇒ 人在抢占在途期间回到了终端，「人不在场」这个前提被推翻。
+	lastUserInputAtWhenPreemptionWasAuthorized: number | null;
+	// 授权这次抢占的那条投递的代际。取消（cancelTaskChatInputDelivery）与被更晚的投递取代
+	// （submitTaskChatInputWhenReady）都会自增它——两者都意味着「这次抢占是替一条已经作废的投递
+	// 腾框」，那条投递再也不会写进这个框，凭它清掉人类的输入就是纯粹的破坏。
+	taskChatInputDeliveryGenerationWhenPreemptionWasAuthorized: number;
 }
 
 // 一条程序化投递的回执登记。存在的意义：让投递链路上**每一个出口**都能给出结论，
@@ -387,6 +497,18 @@ function settleProgrammaticDeliveryReceipt(
 	}
 	receipt.settled = true;
 	receipt.observer({ status, reason });
+}
+
+// 会话已经不在了 / 这条投递再也不会去争那个框了：挂起可见性必须跟着消失，否则卡片与终端上方会一直
+// 挂着「有投递在等你的输入框」，而实际上再没有人在等——那正是这条工作流要根除的那种不诚实。
+// 只改 summary、不自己 emit：调用点随后都会走各自的 emit（teardown 的 applySessionEvent / 落定后的
+// 显式 emit），合并后的那一份自然带着清空后的值。
+function clearTaskChatInputDeliveryContentionVisibility(entry: SessionEntry): boolean {
+	if ((entry.summary.terminalDeliveryContention ?? null) === null) {
+		return false;
+	}
+	updateSummary(entry, { terminalDeliveryContention: null });
+	return true;
 }
 
 // 会话侧统一注销入口：把 active 上的登记结掉并清空槽位。
@@ -1191,15 +1313,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 		});
 		const instructionsPath = getNetworkInterruptionResumeInstructionsPath();
 		const line = buildNetworkInterruptionContinuationLine(instructionsPath);
-		// 经写后确认闭环注入：toBracketedPasteSubmission 结尾已含单个 `\r`，若该 CR 被 TUI 重绘吞掉（框卡 idle、
+		// 经写后确认闭环注入：paste 框架与提交 CR 分两次写、第二次以 TUI 摄入为门；若 CR 仍被重绘吞掉（框卡 idle、
 		// 续跑不发送），确认 tick 会补发裸 `\r`——绝不重发整段 paste（重 paste 正是连接中断路径旧的「文本翻倍」病）。
-		// Codex 置位 awaitingCodexPromptAfterEnter 由 writePasteSubmissionWithConfirm 统一处理。
-		this.writePasteSubmissionWithConfirm(taskId, entry, active, line);
+		// Codex 置位 awaitingCodexPromptAfterEnter 由该闭环统一处理，且跟着第二次写（提交 CR）而非框架。
+		this.writePasteSubmissionWithConfirm(taskId, active, line);
 	}
 
 	// 当前是否可向终端注入程序化输入：deferred-startup 仍待发、或用户近 OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS（8s）
-	// 内手敲过，都视为不可注入（避免抢在启动 prompt 之前 / 打断正在打字的用户）。被 output-reaction 的 canInjectNow
-	// 动作（连接中断自动续跑）与 task-chat-input 投递的让路守卫共享，保证两条程序化注入路径同源判断。
+	// 内手敲过，都视为不可注入（避免抢在启动 prompt 之前 / 打断正在打字的用户）。
+	// 现在的消费者是 output-reaction 的 canInjectNow 动作（连接中断自动续跑）与**写后确认链的补发让位**。
+	// task-chat-input 投递的让路已改用读输入框的争用判据（框空即放行，见 runTaskChatInputDeliveryAttempt）：
+	// 时间戳窗口分不出「刚敲完回车提交了」与「打了一半」，而那正是形态 3 要解决的问题。
 	private canInjectIntoTerminalNow(active: ActiveProcessState): boolean {
 		if (active.deferredStartupInput !== null) {
 			return false;
@@ -1229,6 +1353,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			deferWhileUserTurn?: boolean;
 			idempotencyKey?: string | null;
 			onDeliveryOutcome?: TaskChatInputDeliveryOutcomeObserver;
+			// 争用策略与抢占执行者，见 TaskChatInputDeliveryAttemptPlan。默认不抢占：
+			// 缺省即最保守的一档，调用方必须显式把能力交进来才可能动人类的框。
+			mayAutoStashAbsentHumanInputBox?: boolean;
+			preemptivelyStashHumanInputBox?: ProgrammaticDeliveryPreemptiveInputBoxStashHandler;
 		},
 	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
@@ -1260,8 +1388,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const generation = ++active.taskChatInputDeliveryGeneration;
 		const deadlineAt = now() + TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS;
+		const plan: TaskChatInputDeliveryAttemptPlan = {
+			taskId,
+			text,
+			deadlineAt,
+			generation,
+			deferWhileUserTurn,
+			mayAutoStashAbsentHumanInputBox: options?.mayAutoStashAbsentHumanInputBox ?? false,
+			preemptivelyStashHumanInputBox: options?.preemptivelyStashHumanInputBox ?? null,
+		};
+		// 上一条投递留下的挂起可见性属于上一条投递，本次受理即作废（新投递会自己重新算一份）。
+		this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 		const timer = setTimeout(() => {
-			void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation, deferWhileUserTurn);
+			void this.runTaskChatInputDeliveryAttempt(plan);
 		}, TASK_CHAT_INPUT_DELIVERY_SETTLE_MS);
 		timer.unref?.();
 		active.taskChatInputDeliveryTimer = timer;
@@ -1295,18 +1434,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 自增代际：正 await 就绪判定的在途 attempt 返回后会复查代际、发现已过时而放弃写入。
 		active.taskChatInputDeliveryGeneration += 1;
 		settleActiveProgrammaticDelivery(active, "delivery_failed", "cancelled_before_delivery");
+		// 取消掉的投递不再挂在这个终端上等框，挂起可见性必须随之消失，否则 UI 会一直摆着一条
+		// 「有投递在等你让路」而实际上再没有人在等。
+		this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 		return "cancelled_before_delivery";
 	}
 
-	// 一次投递 attempt：就绪命中或 deadline 兜底则写 PTY，否则隔 RECHECK_MS 再探（不消耗额外语义，只是轮询）。
-	// generation 为调度时捕获的代际；写入/重排前复查，被后续投递取代（代际不再相等）者直接放弃。
-	private async runTaskChatInputDeliveryAttempt(
-		taskId: string,
-		text: string,
-		deadlineAt: number,
-		generation: number,
-		deferWhileUserTurn: boolean,
-	): Promise<void> {
+	// 一次投递 attempt：就绪 ∧ 输入框空 才写 PTY；未就绪或框被人占着则隔 RECHECK_MS 再探，两条预算各自到点
+	// 转终态（terminal_prompt_readiness_timeout / human_terminal_contention_timeout）。**没有任何一条路径会
+	// 无条件强写**——那是形态 3 移除掉的东西。
+	// plan.generation 为调度时捕获的代际；写入/重排前复查，被后续投递取代（代际不再相等）者直接放弃。
+	private async runTaskChatInputDeliveryAttempt(plan: TaskChatInputDeliveryAttemptPlan): Promise<void> {
+		const { taskId, text, deadlineAt, generation, deferWhileUserTurn } = plan;
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
 		if (!entry || !active) {
@@ -1354,6 +1493,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		) {
 			if (now() >= deadlineAt + TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS) {
 				settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "agent_awaiting_user_decision_timeout");
+				this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 				logTuiFreezeError(
 					`[tui-freeze] task-chat-input-delivery-abandoned taskId=${taskId} ` +
 						`agentId=${currentEntry.summary.agentId} reason=agent_awaiting_user_decision_timeout ` +
@@ -1361,56 +1501,69 @@ export class TerminalSessionManager implements TerminalSessionService {
 				);
 				return;
 			}
-			this.scheduleTaskChatInputDeliveryRecheck(
-				taskId,
-				text,
-				deadlineAt,
-				generation,
-				currentActive,
-				deferWhileUserTurn,
-			);
+			this.scheduleTaskChatInputDeliveryRecheck(plan, currentActive);
 			return;
 		}
+		// deferred-startup 仍待发 ⇒ 这条会话连启动 prompt 都还没送出去，绝不能插到它前面：与「尚未就绪」
+		// 同等对待（旧实现把它混在 A1 让路里，语义上一直是「还不能写」而不是「在给人让路」）。
+		const readyToWriteIntoInputBox = readiness !== null && currentActive.deferredStartupInput === null;
 		const pastDeadline = now() >= deadlineAt;
-		if (readiness === null && !pastDeadline) {
+		if (!readyToWriteIntoInputBox && !pastDeadline) {
 			// 尚未就绪且未过 deadline：隔 RECHECK_MS 再探（纯轮询，不消耗额外语义）。
-			this.scheduleTaskChatInputDeliveryRecheck(
-				taskId,
-				text,
-				deadlineAt,
-				generation,
-				currentActive,
-				deferWhileUserTurn,
+			this.scheduleTaskChatInputDeliveryRecheck(plan, currentActive);
+			return;
+		}
+		if (!readyToWriteIntoInputBox) {
+			// 就绪等待预算耗尽。旧实现在这里**无条件强写**（best-effort），于是「TUI 从没就绪过」这件事
+			// 永远不会成为失败，调用方拿到的回执与真实情况脱节。契约里 terminal_prompt_readiness_timeout
+			// 就是为这一刻留的：结构判定命中通常只要 1–3s，等满整个 deadline 仍不就绪意味着这个终端确实
+			// 不在能收消息的状态，硬写只会把文本泼进一个未知形态的界面。
+			settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "terminal_prompt_readiness_timeout");
+			this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
+			logTuiFreezeError(
+				`[tui-freeze] task-chat-input-delivery-abandoned taskId=${taskId} ` +
+					`agentId=${currentEntry.summary.agentId} reason=terminal_prompt_readiness_timeout`,
 			);
 			return;
 		}
-		// A1 让路：用户近窗口在手敲（或 deferred-startup 仍待发）→ 不插进用户正在打字的那一行中间，
-		// 改排一次重试；ready 与 deadline 两支都覆盖（用户正往 Claude 输入框里打字时框线仍在，ready 也会插队）。
-		// 防饿死硬上限：deadline 之后再让路至多 MAX_DEADLINE_INPUT_YIELD_MS，到点无条件保底强写（投递绝不丢）。
-		// 仍不写自身 lastUserInputAt（程序化投递只读人类的、不写自己的），故让路判断只受真人手敲影响。
-		if (
-			!this.canInjectIntoTerminalNow(currentActive) &&
-			now() < deadlineAt + TASK_CHAT_INPUT_DELIVERY_MAX_DEADLINE_INPUT_YIELD_MS
-		) {
-			this.scheduleTaskChatInputDeliveryRecheck(
-				taskId,
-				text,
-				deadlineAt,
-				generation,
-				currentActive,
-				deferWhileUserTurn,
-			);
+		// 让路判据：**框空即放行**，框非空才进入争用分层。
+		//
+		// 判据从「距上次击键不足 8 秒」换成读框，是因为时间戳窗口区分不了两件语义完全不同的事：
+		// 「刚敲完回车把消息提交了」（框已空，此刻正是最该投的时机）与「打了一半停下来想」（框非空，
+		// 一个字节都不能写进去）。旧判据把前者也当成让路对象，白等 8 秒；又在预算耗尽后对后者强写，
+		// 把 paste 插进人类没写完的那一行。
+		const contention = await this.resolveProgrammaticDeliveryInputBoxContentionForTask(taskId, currentActive);
+		// 读框要排进镜像 operationQueue，这段 await 同样跨宏任务：与上面的就绪判定 await 一样复查会话与代际。
+		const entryAfterContentionRead = this.entries.get(taskId);
+		const activeAfterContentionRead = entryAfterContentionRead?.active;
+		if (!entryAfterContentionRead || !activeAfterContentionRead || activeAfterContentionRead !== currentActive) {
+			// 只结算这条投递自己的回执，**不碰**挂起可见性：清空 helper 按 taskId 查的是**当前** entry，
+			// 而换代只替换 entry.active、entry 与 summary 仍是同一份。若新 incarnation 上已经有一条新投递
+			// 发布了争用 sidecar，这里按 taskId 清就会把它抹掉，那条真在等框的投递从此毫无可见性——
+			// 又变回「机器在等、屏幕不说」的静默挂起。属于旧 incarnation 的那份可见性无需在此补清：
+			// 每一条 teardown / 换代路径（startTaskSession / onExit / stopTaskSession / forceStopTaskSession /
+			// markInterruptedAndStopAll）都已在 settle 旁边配了 clearTaskChatInputDeliveryContentionVisibility(entry)。
+			settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "session_ended_before_delivery");
 			return;
 		}
+		if (activeAfterContentionRead.taskChatInputDeliveryGeneration !== generation) {
+			return;
+		}
+		if (contention !== null && contention.verdict !== "input_box_clear_for_programmatic_delivery") {
+			await this.holdOrPreemptContendedTerminalInputBox(plan, entryAfterContentionRead, currentActive, contention);
+			return;
+		}
+		// 框是空的（或读框拿不到结论）：本条投递不再挂在争用上，清掉挂起可见性再写。
+		this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 		// 程序化投递的是一条**已提交的用户轮**（task-chat 手动发送 / RVF followup），语义上等价于用户在
 		// 终端里手敲提交，故与 writeInput 一样解除 resume substantive guard——此后 agent 的新产出才重新
 		// 推进 lastSubstantiveOutputAt。刻意不下沉进 writePasteSubmissionWithConfirm：那个 writer 同时
 		// 服务连接中断自动续跑（submitConnectionDropContinuation），自动恢复不是用户继续、绝不可解除 guard。
 		clearResumeSubstantiveGuard(currentActive);
 		// 就绪命中 或 deadline 兜底：经写后确认闭环写 PTY（不走 writeInput，避免把程序化投递记成 lastUserInputAt
-		// 而自我抑制——与 submitConnectionDropContinuation 一致）。toBracketedPasteSubmission 结尾已含单个 CR，
-		// 若该 CR 被 TUI 重绘吞掉（粘贴进框但不发送），writePasteSubmissionWithConfirm 的确认 tick 会补发裸 `\r`；
-		// Codex 置位 awaitingCodexPromptAfterEnter 亦由其统一处理。
+		// 而自我抑制——与 submitConnectionDropContinuation 一致）。writePasteSubmissionWithConfirm 把 paste 框架与
+		// 提交 CR 分两次写（第二次以摄入证据为门）；若 CR 仍被吞掉（粘贴进框但不发送），其确认 tick 会补发裸 CR；
+		// Codex 置位 awaitingCodexPromptAfterEnter 亦由其统一处理，且跟着第二次写（提交 CR）而非框架。
 		// 回执推进到「已写入、等确认」。queuedBehindActiveAgentTurn 必须在**此刻**捕获：确认 tick 在
 		// 2.5s 之后才跑，那时 turnOwner 早就被这次投递本身翻成 agent 了，届时再读一律是 agent，
 		// 就再也分不出「排在既有回合之后」与「agent 因这条消息才开始干活」。
@@ -1419,7 +1572,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			deliveryReceipt.phase = "awaiting_submit_confirmation";
 			deliveryReceipt.queuedBehindActiveAgentTurn = resolveSessionFacets(currentEntry.summary).turnOwner === "agent";
 		}
-		this.writePasteSubmissionWithConfirm(taskId, currentEntry, currentActive, text, {
+		this.writePasteSubmissionWithConfirm(taskId, currentActive, text, {
 			retainsProgrammaticDeliveryReceipt: true,
 		});
 		logTuiFreezeWarning(
@@ -1428,25 +1581,207 @@ export class TerminalSessionManager implements TerminalSessionService {
 		);
 	}
 
-	// 排一次 RECHECK_MS 后的投递重试（未就绪轮询 / A1 让路重排 / Fix B 让位重探共用），沿用捕获的 deadlineAt + generation
-	// + deferWhileUserTurn（后台注入让位标记须跨重试保持，否则重探时会丢失让位语义、退回无条件强写）。
+	// 排一次 RECHECK_MS 后的投递重试（未就绪轮询 / 争用挂起 / Fix B 让位重探共用）。整份 plan 原样带走，
+	// 任何一项（尤其让位标记与抢占能力）在某条重探路径上漏传，都会让语义在半途悄悄换成另一种策略。
 	private scheduleTaskChatInputDeliveryRecheck(
-		taskId: string,
-		text: string,
-		deadlineAt: number,
-		generation: number,
+		plan: TaskChatInputDeliveryAttemptPlan,
 		active: ActiveProcessState,
-		deferWhileUserTurn: boolean,
 	): void {
 		const timer = setTimeout(() => {
-			void this.runTaskChatInputDeliveryAttempt(taskId, text, deadlineAt, generation, deferWhileUserTurn);
+			void this.runTaskChatInputDeliveryAttempt(plan);
 		}, TASK_CHAT_INPUT_DELIVERY_RECHECK_MS);
 		timer.unref?.();
 		active.taskChatInputDeliveryTimer = timer;
 	}
 
-	// 两处程序化 paste 注入（RVF followup 与连接中断续跑）的统一写入入口 + 写后确认闭环。写一次 bracketed paste
-	// （末尾已含单个 CR），Codex 置位 awaitingCodexPromptAfterEnter，然后起一个确认 tick：隔 SUBMIT_CONFIRM_DELAY_MS
+	// 争用分层：框非空时决定「挂起可见」还是「自动暂存抢占」，并在预算耗尽时诚实收尾。
+	//
+	// | 开关 | 人在场 | 人不在场 |
+	// | auto（默认） | 挂起可见，机器不动框 | 自动暂存抢占：无损存进 Prompt Library → 清框 → 下一拍投递 |
+	// | never_preempt | 挂起可见 | 挂起可见（恒定不抢占） |
+	//
+	// 四条额外的降级（任一成立即退回挂起，绝不抢占）：
+	//   - 框里有还原不了的粘贴（unrecoverablePasteCount > 0）：抢占的前提是「无损」，赌不起。
+	//   - 屏上有字但击键跟踪佐证不了：那可能是 agent 自绘的 UI 文案，存进库就是把 agent 的话冒充成用户资产。
+	//   - 这一帧读不出框、输入侧又从未见过人类字节（input_box_unreadable_…）：对框里有什么一无所知，
+	//     既不能写（可能插进人类的行）也不能抢占（不知道要存什么进库）。
+	//   - 抢占执行者没给 / 执行失败：没存成就照写，等于用「写不丢」换掉了人类那半句话。
+	private async holdOrPreemptContendedTerminalInputBox(
+		plan: TaskChatInputDeliveryAttemptPlan,
+		entry: SessionEntry,
+		active: ActiveProcessState,
+		contention: ProgrammaticDeliveryInputBoxContentionReading,
+	): Promise<void> {
+		const { taskId, deadlineAt, generation } = plan;
+		const humanIsPresentAtThisTerminal =
+			active.lastUserInputAt !== null && now() - active.lastUserInputAt < HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS;
+		const mayPreemptRightNow =
+			plan.mayAutoStashAbsentHumanInputBox &&
+			plan.preemptivelyStashHumanInputBox !== null &&
+			!humanIsPresentAtThisTerminal &&
+			contention.verdict === "human_uncommitted_input_present" &&
+			contention.unrecoverablePasteCount === 0;
+		this.publishTaskChatInputDeliveryContentionVisibility(taskId, {
+			pendingProgrammaticDeliveryCount: 1,
+			// 「框里有未提交内容」是一句关于框的**断言**，只在真读到东西时才配说。
+			// input_box_unreadable_… 这一格恰恰是「读不到框」，说 true 就是拿一句我们没有证据的话去
+			// 解释挂起；置 false 时 UI 退回不谈内容的那句「有 N 条程序化投递正在等这个终端」（见
+			// web-ui/src/terminal/terminal-delivery-contention-notice.ts），仍然看得见、但不撒谎。
+			inputBoxHasUncommittedText: contention.verdict !== "input_box_unreadable_while_input_side_tracking_is_blind",
+			waitingForHumanBecauseAutomaticPreemptionIsUnavailable: !mayPreemptRightNow,
+		});
+		if (now() >= deadlineAt + TASK_CHAT_INPUT_DELIVERY_MAX_HUMAN_CONTENTION_YIELD_MS) {
+			settleActiveProgrammaticDelivery(active, "delivery_failed", "human_terminal_contention_timeout");
+			this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
+			logTuiFreezeError(
+				`[tui-freeze] task-chat-input-delivery-abandoned taskId=${taskId} ` +
+					`agentId=${entry.summary.agentId} reason=human_terminal_contention_timeout ` +
+					`verdict=${contention.verdict} humanPresent=${humanIsPresentAtThisTerminal}`,
+			);
+			return;
+		}
+		if (!mayPreemptRightNow) {
+			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
+			return;
+		}
+		const preemptivelyStashHumanInputBox = plan.preemptivelyStashHumanInputBox;
+		if (preemptivelyStashHumanInputBox === null) {
+			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
+			return;
+		}
+		// 进抢占前武装授权前提闩：上面那次 humanIsPresentAtThisTerminal 是**此刻**的读数，而抢占
+		// 执行者返回时框已经被清掉了，回来再复查一遍人类活动也来不及。真正的复查必须发生在链路上最后一个
+		// 由 manager 说了算的点（forwardStashKeyToClearTaskTerminalInputBox），闩就是把这里的授权前提带
+		// 到那里去的载体。详见 taskTerminalInputBoxPreemptionHumanAbsencePremises。
+		//
+		// 代际一并存进闩：本方法之前的每一处跨 await 复查（runTaskChatInputDeliveryAttempt 的三处）都只
+		// 能保证「进抢占的这一刻这条投递还是最新的」。抢占本身又是一段长 await，期间这条投递可能被取消或
+		// 被更晚的投递取代，而那两条路径都无法把已经进了执行者的抢占叫回来——它们能做的只有自增代际。
+		// 于是「这次清框还属不属于一条活着的投递」也必须在兑现点复查，与「人是否仍不在场」同一条理由。
+		const premisesThisPreemptionWasAuthorizedOn: TaskTerminalInputBoxPreemptionAuthorizationPremises = {
+			activeWhenPreemptionWasAuthorized: active,
+			lastUserInputAtWhenPreemptionWasAuthorized: active.lastUserInputAt,
+			taskChatInputDeliveryGenerationWhenPreemptionWasAuthorized: generation,
+		};
+		this.armTaskTerminalInputBoxPreemptionAuthorizationPremises(taskId, premisesThisPreemptionWasAuthorizedOn);
+		let humanInputWasStashedAndInputBoxCleared: boolean;
+		try {
+			humanInputWasStashedAndInputBoxCleared = await preemptivelyStashHumanInputBox(taskId);
+		} finally {
+			// 只撤自己那一份（见 arm/disarm 两个 helper 与闩本身的注释）：同一 task 上可能同时挂着别的
+			// 在途抢占的前提，撤错人等于把它们的清框复查一起拆掉。
+			this.disarmTaskTerminalInputBoxPreemptionAuthorizationPremises(taskId, premisesThisPreemptionWasAuthorizedOn);
+		}
+		// 抢占跨了文件锁与落盘：与其余每一处 await 同理，回来必须复查这条会话与代际还是不是原来那条。
+		const entryAfterStash = this.entries.get(taskId);
+		const activeAfterStash = entryAfterStash?.active;
+		if (!entryAfterStash || !activeAfterStash || activeAfterStash !== active) {
+			// 同上：换代之后按 taskId 清可见性会误伤新 incarnation 上另一条投递刚发布的 sidecar。
+			// 本条投递在本方法开头挂起时发布的那一份，已由换代/结束路径自己的 clear 收走。
+			settleActiveProgrammaticDelivery(active, "delivery_failed", "session_ended_before_delivery");
+			return;
+		}
+		if (activeAfterStash.taskChatInputDeliveryGeneration !== generation) {
+			return;
+		}
+		if (!humanInputWasStashedAndInputBoxCleared) {
+			// 没存成就退回挂起：让路预算继续走，到点以 human_terminal_contention_timeout 收尾。
+			// 「人在抢占在途期间回来打字、清框被前提闩拒掉」也走这一条：拒清 ⇒ 执行者返回 false ⇒ 挂起。
+			// 挂起可见性无需在此重写——下一拍重探会再读一次框，届时人已在场、框又非空，
+			// mayPreemptRightNow 恒为 false，可见性自然翻回「等人处理」。
+			logTuiFreezeWarning(
+				`[tui-freeze] task-chat-input-contention-preemption-declined taskId=${taskId} ` +
+					`agentId=${entryAfterStash.summary.agentId}`,
+			);
+			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
+			return;
+		}
+		logTuiFreezeWarning(
+			`[tui-freeze] task-chat-input-contention-preempted taskId=${taskId} ` +
+				`agentId=${entryAfterStash.summary.agentId} stashedIntoPromptLibrary=1`,
+		);
+		// 框已清空，但不在这里直接写：下一拍重新走完整判定（就绪 + 读框）再写，既复用同一条路径，
+		// 也让「清框之后 TUI 还没重绘完」这种瞬态自然被下一次读框吸收。
+		this.scheduleTaskChatInputDeliveryRecheck(plan, active);
+	}
+
+	// 读一次「这个终端的输入框此刻被谁占着」并给出争用结论。null = 拿不到关于当前这条 PTY 的可信读数
+	// （无 active / 读屏期间会话换代），调用方按「无争用」处理——此时继续挂起没有意义，真正的会话
+	// 换代会在调用方的跨 await 复查里被判成 session_ended_before_delivery。
+	private async resolveProgrammaticDeliveryInputBoxContentionForTask(
+		taskId: string,
+		active: ActiveProcessState,
+	): Promise<ProgrammaticDeliveryInputBoxContentionReading | null> {
+		const occupancy = await this.resolveTaskTerminalInputBoxOccupancy(taskId);
+		if (!occupancy) {
+			return null;
+		}
+		const inputSideByteTrackingHasEverObservedHumanBytes =
+			active.inputBoxOccupancyTracker.hasEverObservedHumanInputBytesFromWriteInput;
+		// 两只眼睛此刻**同时**闭着的那一格：读屏这一帧给不出结论（screenReadingSaysNonEmpty === null），
+		// 而输入侧从未在这条 PTY 上见过人类字节 ⇒ 我们对这个框一无所知，「空」只是默认值而不是观测。
+		// 若此刻放行，经 tmux / 原生终端直连同一 PTY 打进去的半行就会被 paste 接在后面。
+		//
+		// 收紧只敢用在**曾经读得出框**的会话上（hasEverLocatedTerminalInputBoxOnScreen）。这一格必须
+		// 与「该 agent 根本没建模输入框语法」严格分开：codex / kimi / droid 的读屏恒为 null，把它们一并
+		// 判成争用，等于让它们的每一条程序化投递都挂到预算耗尽、100% 以
+		// human_terminal_contention_timeout 收场——比本轮修复前更差。对它们，输入侧字节跟踪本就是判空
+		// 的唯一且有效的主力，照旧放行。
+		// 反过来，读得出框的会话（claude）在这一帧读不出，只可能是 TUI 正在重绘 / 框被全屏输出盖住这类
+		// 瞬态：挂起 1.5s 后重探即恢复，让路预算（deadline + 15s）也在兜底，不会变成静默挂起。
+		if (
+			!occupancy.inputSideByteTrackingSaysNonEmpty &&
+			occupancy.screenReadingSaysNonEmpty === null &&
+			active.hasEverLocatedTerminalInputBoxOnScreen &&
+			!inputSideByteTrackingHasEverObservedHumanBytes
+		) {
+			return {
+				verdict: "input_box_unreadable_while_input_side_tracking_is_blind",
+				unrecoverablePasteCount: occupancy.unrecoverablePasteCount,
+			};
+		}
+		return {
+			verdict: resolveProgrammaticDeliveryInputBoxContention({
+				occupancy,
+				inputSideByteTrackingHasEverObservedHumanBytes,
+			}),
+			unrecoverablePasteCount: occupancy.unrecoverablePasteCount,
+		};
+	}
+
+	// 挂起可见性的唯一写点。派生 + 去重：值没变就不写，于是这条**会话广播**热链路只在争用状态真的
+	// 翻转时才多一次扇出（最快也就投递重探的节拍，1.5s 一次）。输入框内容本身永远不上这条链路。
+	private publishTaskChatInputDeliveryContentionVisibility(
+		taskId: string,
+		contention: RuntimeTaskTerminalDeliveryContention | null,
+	): void {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return;
+		}
+		if (contention === null) {
+			// 清空走共享的那条（teardown 也用它），但这里要把清空的结果广播出去：挂起提示消失得让 UI 知道。
+			if (clearTaskChatInputDeliveryContentionVisibility(entry)) {
+				this.emitSummary(entry.summary);
+			}
+			return;
+		}
+		const current = entry.summary.terminalDeliveryContention ?? null;
+		if (
+			current !== null &&
+			current.pendingProgrammaticDeliveryCount === contention.pendingProgrammaticDeliveryCount &&
+			current.inputBoxHasUncommittedText === contention.inputBoxHasUncommittedText &&
+			current.waitingForHumanBecauseAutomaticPreemptionIsUnavailable ===
+				contention.waitingForHumanBecauseAutomaticPreemptionIsUnavailable
+		) {
+			return;
+		}
+		this.emitSummary(updateSummary(entry, { terminalDeliveryContention: contention }));
+	}
+
+	// 两处程序化 paste 注入（RVF followup 与连接中断续跑）的统一写入入口 + 写后确认闭环。先写 bracketed paste
+	// 框架、待 TUI 摄入后再单独写提交用的 CR（Codex 的 awaitingCodexPromptAfterEnter 跟着那次 CR 置位，
+	// 理由见 runSubmitCarriageReturnAfterPasteIngestionAttempt），然后起一个确认 tick：隔 SUBMIT_CONFIRM_DELAY_MS
 	// 检查输出是否在 paste 回显后重新流动——未恢复（CR 被吞、框卡 idle）且用户未在打字时补发裸 `\r`（绝不重 paste）。
 	// 「真提交 vs CR 被吞」的判据对两条路径都成立：真提交 → agent 干活 → 持续产出 → 非静默；CR 被吞 → 终端回落
 	// idle 框、再无字节 → 静默（见 src/core/session-activity.ts）。故确认统一用 output-quiet，不把 turnOwner 写进门控
@@ -1458,9 +1793,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 但「被夺走」只对**已写进 PTY、正在等确认**的投递成立：仍停在 awaiting_readiness 的投递一个字节都还没写，
 	// 那条 reason 对它是假的，而且这里既不清投递定时器也不自增投递代际，判它失败之后它照样会写入并提交——
 	// 「回执说失败、文本其实送达」，调用方按契约换新 key 重投就把同一段文本送进终端两次。故按 phase 分流。
+	// 不收 entry：本步只写框架，agent 形态（Codex enter 守卫）与它无关；需要 entry 的那一步在
+	// runSubmitCarriageReturnAfterPasteIngestionAttempt 里按 taskId 重新取，取到的才是写 CR 那一刻的会话。
 	private writePasteSubmissionWithConfirm(
 		taskId: string,
-		entry: SessionEntry,
 		active: ActiveProcessState,
 		text: string,
 		options?: { retainsProgrammaticDeliveryReceipt?: boolean },
@@ -1472,13 +1808,77 @@ export class TerminalSessionManager implements TerminalSessionService {
 				"submit_confirmation_budget_exhausted",
 			);
 		}
-		active.session.write(toBracketedPasteSubmission(text));
+		// 分离写第一步：只写 bracketed paste 框架，**不带**提交用的 CR。
+		// 刻意**不**在这里置 awaitingCodexPromptAfterEnter：那个标志的语义是「回车刚发出去」，
+		// 必须跟着 CR（见 runSubmitCarriageReturnAfterPasteIngestionAttempt），不能跟着框架。
+		active.session.write(toBracketedPasteFramingWithoutTrailingSubmit(text));
+		// last-write-wins：清掉上一条 paste 提交的待决确认链（含它可能还停在「等摄入证据」那一步的定时器），
+		// 自增代际令本次成为唯一有效确认。
+		clearSubmitConfirmTimer(active);
+		const generation = ++active.submitConfirmGeneration;
+		this.scheduleSubmitCarriageReturnAfterPasteIngestionPoll(taskId, active, generation, {
+			outputChunkArrivalSequenceNumberAtPasteWrite: active.ptyOutputChunkArrivalSequenceNumber,
+			ingestionEvidenceDeadlineAt: now() + PASTE_INGESTION_EVIDENCE_MAX_WAIT_BEFORE_SUBMIT_MS,
+		});
+	}
+
+	// 排一次「TUI 摄入了没有」的探测。定时器仍占用 submitConfirmTimer 槽位：确认链与本探测在时间上首尾相接、
+	// 同属一条 paste 提交，共用一个槽位才能让 last-write-wins 与 teardown 一次清干净。
+	private scheduleSubmitCarriageReturnAfterPasteIngestionPoll(
+		taskId: string,
+		active: ActiveProcessState,
+		generation: number,
+		ingestionWatch: { outputChunkArrivalSequenceNumberAtPasteWrite: number; ingestionEvidenceDeadlineAt: number },
+	): void {
+		const timer = setTimeout(() => {
+			this.runSubmitCarriageReturnAfterPasteIngestionAttempt(taskId, generation, ingestionWatch);
+		}, PASTE_INGESTION_EVIDENCE_POLL_BEFORE_SUBMIT_MS);
+		timer.unref?.();
+		active.submitConfirmTimer = timer;
+	}
+
+	// 分离写第二步：摄入证据出现（或等到预算上限）后单独写提交用的 CR，随即起确认链。
+	private runSubmitCarriageReturnAfterPasteIngestionAttempt(
+		taskId: string,
+		generation: number,
+		ingestionWatch: { outputChunkArrivalSequenceNumberAtPasteWrite: number; ingestionEvidenceDeadlineAt: number },
+	): void {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			// session 已结束：CR 无处可发（teardown 已清定时器）。这条投递的结论由 teardown 侧上报。
+			return;
+		}
+		if (active.submitConfirmGeneration !== generation) {
+			// 被更晚的 paste 提交取代：绝不再补发本次的 CR，否则它会提交别人刚粘进去的内容。
+			return;
+		}
+		active.submitConfirmTimer = null;
+		const pasteIngestionWitnessed =
+			active.ptyOutputChunkArrivalSequenceNumber !== ingestionWatch.outputChunkArrivalSequenceNumberAtPasteWrite;
+		if (!pasteIngestionWitnessed && now() < ingestionWatch.ingestionEvidenceDeadlineAt) {
+			this.scheduleSubmitCarriageReturnAfterPasteIngestionPoll(taskId, active, generation, ingestionWatch);
+			return;
+		}
+		active.session.write(BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN);
+		// awaitingCodexPromptAfterEnter 必须在**这里**置位，与 writeInput 只在 data 含 CR/LF 时置位同形：
+		// 该标志的语义是「回车刚发出去、下一个 agent.prompt-ready 才该被消费」，flushPendingOutputAnalysis
+		// 用它当 enter 守卫（未置位则丢弃 prompt-ready、维持 awaiting_review）。分离写把框架与 CR 拆成两次写后，
+		// 两者之间隔着最长 PASTE_INGESTION_EVIDENCE_MAX_WAIT_BEFORE_SUBMIT_MS 的摄入等待窗；若跟着框架置位，
+		// 窗内 paste 回显（codexPromptDetector 认的正是行首 `›`，粘贴重绘必然产出）就会被当成「回车已发」，
+		// 把 awaiting_review 误翻成 running 并清掉守卫——此后 CR 若被吞或确认失败，会话卡在假 running，
+		// 而输入框里仍挂着未提交的文本。跟着 CR 置位才恢复分离写之前「置位与 CR 同刻」的时序前提。
 		if (entry.summary.agentId === "codex") {
 			active.awaitingCodexPromptAfterEnter = true;
 		}
-		// last-write-wins：清掉上一条 paste 提交的待决确认链，自增代际令本次成为唯一有效确认。
-		clearSubmitConfirmTimer(active);
-		const generation = ++active.submitConfirmGeneration;
+		if (!pasteIngestionWitnessed) {
+			// 预算耗尽仍无回显：照发 CR（不劣于旧实现的同 chunk 写），并留一条可检索的日志——
+			// 若这条日志开始批量出现，说明该 agent 的 TUI 不回显 paste，摄入门控对它形同虚设。
+			logTuiFreezeWarning(
+				`[tui-freeze] paste-ingestion-unwitnessed taskId=${taskId} agentId=${entry.summary.agentId} ` +
+					`waitedMs=${PASTE_INGESTION_EVIDENCE_MAX_WAIT_BEFORE_SUBMIT_MS}`,
+			);
+		}
 		this.scheduleSubmitConfirmTick(
 			taskId,
 			active,
@@ -1652,6 +2052,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (mirror && boxGrammar) {
 			const screenSnapshot = await mirror.getScreenSnapshot();
 			if (locateTerminalInputBox(screenSnapshot, boxGrammar) !== null) {
+				// 读屏这只眼睛对这条会话管用——单调置位（见字段注释）。就绪判定与紧随其后的让路判定读的是
+				// **两次**快照，中间 TUI 可能重绘掉整个框；这个置位正是让后者能把「这一帧读不出框」认成
+				// 瞬态异常而不是结构性缺席的唯一依据。
+				active.hasEverLocatedTerminalInputBoxOnScreen = true;
 				return "prompt";
 			}
 		}
@@ -1910,6 +2314,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 					reconcileSummaryWithUnrecoverableRunningAgentProcessClaim({
 						...summary,
 						awaitingDispatchedBackgroundWork: null,
+						// 投递挂起可见性同理，且更窄：它是「活 active 上此刻真有一条投递在等这个输入框」的派生读数，
+						// 登记本体（单飞槽、重探定时器、回执 observer）全挂在 active 上，而重建条目恒 active: null，
+						// 按构造不可能有任何在途投递。但它照样会上盘：完整 summary 经 listSummaries() 进 saveState /
+						// shutdown 持久化，这个 sidecar 一起写下去。不在这里清，重启后就会广播一条「有 1 条程序化投递
+						// 在等这个输入框」的假挂起，并在终端上方摆出「暂存我的输入并放行」，用户还可能对一条根本不
+						// 存在的投递执行暂存——正是本轮工作要根除的那种不诚实。
+						terminalDeliveryContention: null,
 						// 同一 chokepoint 顺带补盖通道章：本改动之前落盘的记录没有这个字段，而
 						// terminalManager 持有的会话按构造恒是 PTY 的，明写好过依赖读时回退派生。
 						sessionTransport: "pty_terminal",
@@ -1996,6 +2407,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
 			settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
+			clearTaskChatInputDeliveryContentionVisibility(entry);
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
 			discardPendingOutputAnalysis(entry.active);
@@ -2135,6 +2547,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 卡片 computing 展示读取，保持每 chunk 一次 metadata-only updateSummary。重分析
 			// （实质输出检测 → lastSubstantiveOutputAt、输出转移检测、output-reaction 扫描）不在
 			// 每 chunk 执行——decoded 文本并入攒批，由 flushPendingOutputAnalysis 统一处理。
+			// paste 摄入证据的唯一来源（见 ptyOutputChunkArrivalSequenceNumber）。放在 lastOutputAt 之前，
+			// 两者同批推进，读者拿到序号变化时镜像也已 applyOutput 完毕。
+			entry.active.ptyOutputChunkArrivalSequenceNumber += 1;
 			updateSummary(entry, { lastOutputAt: now() });
 
 			// Startup input is deferred until the TUI is alive so the task prompt creates a
@@ -2201,6 +2616,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					clearStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
 					settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "session_ended_before_delivery");
+					clearTaskChatInputDeliveryContentionVisibility(currentEntry);
 					clearTaskChatInputDeliveryTimer(currentActive);
 					clearSubmitConfirmTimer(currentActive);
 					discardPendingOutputAnalysis(currentActive);
@@ -2335,8 +2751,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
+			ptyOutputChunkArrivalSequenceNumber: 0,
 			programmaticDeliveryReceipt: null,
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
 		};
 		entry.active = active;
@@ -2422,6 +2840,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
 			settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
+			clearTaskChatInputDeliveryContentionVisibility(entry);
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
 			discardPendingOutputAnalysis(entry.active);
@@ -2474,6 +2893,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 							);
 						}
 					}
+					// paste 摄入证据的唯一来源（见 ptyOutputChunkArrivalSequenceNumber）。放在 lastOutputAt 之前，
+					// 两者同批推进，读者拿到序号变化时镜像也已 applyOutput 完毕。
+					entry.active.ptyOutputChunkArrivalSequenceNumber += 1;
 					updateSummary(entry, { lastOutputAt: now() });
 
 					for (const taskListener of entry.listeners.values()) {
@@ -2493,6 +2915,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					clearStartupReadinessTimer(currentActive);
 					clearOutputReactionTimer(currentActive);
 					settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "session_ended_before_delivery");
+					clearTaskChatInputDeliveryContentionVisibility(currentEntry);
 					clearTaskChatInputDeliveryTimer(currentActive);
 					clearSubmitConfirmTimer(currentActive);
 					discardPendingOutputAnalysis(currentActive);
@@ -2574,8 +2997,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
+			ptyOutputChunkArrivalSequenceNumber: 0,
 			programmaticDeliveryReceipt: null,
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
+			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
 		};
 		entry.active = active;
@@ -2709,6 +3134,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!currentActive || currentActive !== active) {
 			return null;
 		}
+		if (inputBoxReading !== null) {
+			active.hasEverLocatedTerminalInputBoxOnScreen = true;
+		}
 		return resolveTerminalInputBoxOccupancy({
 			trackerState: active.inputBoxOccupancyTracker,
 			inputBoxReading,
@@ -2787,6 +3215,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!currentActive || currentActive !== active) {
 			return null;
 		}
+		if (inputBoxReading !== null) {
+			active.hasEverLocatedTerminalInputBoxOnScreen = true;
+		}
 		const occupancy = resolveTerminalInputBoxOccupancy({
 			trackerState: active.inputBoxOccupancyTracker,
 			inputBoxReading,
@@ -2857,6 +3288,91 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 内容一个字都没少，用户可以再按。
 	private readonly taskIdsWithTerminalInputBoxStashAttemptInFlight = new Set<string>();
 
+	// 争用抢占的授权前提闩：只在 holdOrPreemptContendedTerminalInputBox 调用注入的抢占执行者期间武装，
+	// 键为 taskId，值是**授权那一刻**的全部前提（见 TaskTerminalInputBoxPreemptionAuthorizationPremises）。
+	//
+	// 为什么值是 Set 而不是单份记录：武装发生在 per-task 独占闸门
+	// （runTaskTerminalInputBoxStashAttemptExclusivelyPerTask）**之外**——闸门在抢占执行者内部才关上，
+	// 而武装必须在把控制权交给执行者之前完成。于是同一 task 上完全可以有两条抢占同时挂着前提：先来的 A
+	// 正拿着闸门做写库，更晚的投递 B 走到抢占点、武装、被闸门当场拒掉。旧实现用 `Map<taskId, 单份记录>`
+	// + 「身份判等后再删」，在这个交错下会：B 的 set 静默盖掉 A 的记录，B 被拒后判等成立又把它删掉，
+	// 于是 A 的清框回到「无闩」——也就是下面兑现点的默认放行分支，等同于「人手按了 Ctrl+S」，
+	// 人已经回到终端在打字也照清不误。Set + 各撤各的，才让「谁武装的谁负责」这句话在重叠时仍然成立。
+	//
+	// 为什么需要它：抢占许可是在进入抢占**之前**读一次 lastUserInputAt 得出的（人已 5 分钟没敲过），
+	// 而从那一刻到 Ctrl+S 真正被转发之间隔着一整条链路——per-task 独占闸门、读框沉降（最长
+	// TERMINAL_INPUT_BOX_STASH_MIRROR_SETTLE_MAX_WAIT_MS=750ms）、镜像快照排队、prompt library 的
+	// 跨进程文件锁与落盘（数十至数百毫秒）。这段窗口里人完全可能回到终端开始打字，而抢占执行者返回时
+	// 框**已经被清掉了**：manager 在 await 之后只复查 active 身份与投递代际，救不回来。所以「人是否
+	// 仍不在场」的复查必须下沉到链路上最后一个由 manager 说了算的点，也就是清框本身。
+	//
+	// 为什么挂在 manager 而不是 ActiveProcessState：闩必须能在「武装时的 active 已经被换掉」之后仍然
+	// 判定得出「那次授权属于上一条命」——存进 active 就随 refresh 一起没了，正好在最需要它的换代情形下
+	// 失效。manager 是 per-workspace 长驻的同一份真相，与 taskIdsWithTerminalInputBoxStashAttemptInFlight
+	// 同理（见其注释）。
+	//
+	// 沉降判据（waitForTerminalMirrorToSettleBeforeInputBoxRead 里的击键静默合取）**不能**替代本闩：
+	// 那条判据最多把读框推迟 750ms，等满就照读照清；且它只覆盖到读框那一刻，读框之后的写库与转发全程
+	// 无人看守。
+	private readonly taskTerminalInputBoxPreemptionHumanAbsencePremises = new Map<
+		string,
+		Set<TaskTerminalInputBoxPreemptionAuthorizationPremises>
+	>();
+
+	private armTaskTerminalInputBoxPreemptionAuthorizationPremises(
+		taskId: string,
+		premises: TaskTerminalInputBoxPreemptionAuthorizationPremises,
+	): void {
+		const premisesAlreadyArmedForThisTask = this.taskTerminalInputBoxPreemptionHumanAbsencePremises.get(taskId);
+		if (premisesAlreadyArmedForThisTask) {
+			premisesAlreadyArmedForThisTask.add(premises);
+			return;
+		}
+		this.taskTerminalInputBoxPreemptionHumanAbsencePremises.set(taskId, new Set([premises]));
+	}
+
+	private disarmTaskTerminalInputBoxPreemptionAuthorizationPremises(
+		taskId: string,
+		premises: TaskTerminalInputBoxPreemptionAuthorizationPremises,
+	): void {
+		const premisesArmedForThisTask = this.taskTerminalInputBoxPreemptionHumanAbsencePremises.get(taskId);
+		if (!premisesArmedForThisTask) {
+			return;
+		}
+		premisesArmedForThisTask.delete(premises);
+		// 空 Set 要连键一起删：兑现点用「这个 task 有没有挂着前提」区分 W1 抢占与 W2 手按 Ctrl+S，
+		// 留一个空壳会把此后每一次手按 Ctrl+S 都错判成机器抢占（虽然空集合的全称判定恒真、目前放行，
+		// 但那是靠巧合成立的，不该留给下一个人）。
+		if (premisesArmedForThisTask.size === 0) {
+			this.taskTerminalInputBoxPreemptionHumanAbsencePremises.delete(taskId);
+		}
+	}
+
+	// 一次抢占授权在兑现那一刻是否仍然成立。三项全中才算成立，任一被推翻即不许清框。
+	private taskTerminalInputBoxPreemptionAuthorizationPremisesStillHold(
+		premises: TaskTerminalInputBoxPreemptionAuthorizationPremises,
+		active: ActiveProcessState,
+	): boolean {
+		// 换代：这次授权属于上一条 PTY 命。通常在兑现点的 incarnation 令牌复查处就被挡下，但那道复查用的是
+		// **取文那一刻**的令牌——若换代发生在武装之后、取文之前，令牌是新的、对得上，闩却是旧的。
+		// 这一格补的就是那个错位：授权不是给这条 active 的，一律不兑现。
+		if (premises.activeWhenPreemptionWasAuthorized !== active) {
+			return false;
+		}
+		// 人在抢占在途期间回到了这个终端敲字（lastUserInputAt 只由 writeInput 推进，程序化投递直写
+		// session.write 不会污染它，所以推进过就一定是人）。
+		if (active.lastUserInputAt !== premises.lastUserInputAtWhenPreemptionWasAuthorized) {
+			return false;
+		}
+		// 授权这次抢占的那条投递已被取消或被更晚的投递取代：这个框腾出来也没人写了。
+		if (
+			active.taskChatInputDeliveryGeneration !== premises.taskChatInputDeliveryGenerationWhenPreemptionWasAuthorized
+		) {
+			return false;
+		}
+		return true;
+	}
+
 	async runTaskTerminalInputBoxStashAttemptExclusivelyPerTask<AttemptResult>(
 		taskId: string,
 		runAttempt: () => Promise<AttemptResult>,
@@ -2890,6 +3406,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 	//
 	// 返回值是这条链路的最后一个事实来源，调用方**不许吞**：false = 框没被清，回执必须如实反映
 	// 「已入库但框还在」，不能继续报纯成功。
+	//
+	// 这里同时是抢占授权前提闩的兑现点（见 taskTerminalInputBoxPreemptionHumanAbsencePremises）。
+	// 守卫**只在这个 task 此刻挂着抢占授权时生效**：W2 用户自己按下 Ctrl+S 那条路径从不武装闩，于是恒定
+	// 放行——那条路径上人当然在场（他刚按了这个键），若按「人在场就不清」一刀切，等于把这个快捷键整个废掉。
+	// 所以判据不是「人在不在」，而是「本次清框所依据的授权前提是不是已经被推翻」。
+	//
+	// 已知残留：本方法的签名里没有「这次清框属于哪条抢占 / 哪个投递代际」的身份，身份只能由 manager 从
+	// 闩反推。签名归 W1 抢占与 W2 手按 Ctrl+S 共用，加必填参数要改到 src/trpc/runtime-api.ts 的两个调用
+	// 点，故本轮维持现签名。可观察后果只有一种：W2 的转发恰好落在某条 W1 抢占「已武装、尚未撤闩」的窗口
+	// 里（抢占武装后被 per-task 独占闸门当场拒掉的那一两个微任务）时，会跟着 W1 的前提一起被判——那一刻
+	// 若前提已被推翻，用户这次 Ctrl+S 会拿到「已入库但框没清」。窗口是微任务量级、且退化方向安全（框里
+	// 内容一个字不少、用户可再按一次）。
 	forwardStashKeyToClearTaskTerminalInputBox(
 		taskId: string,
 		expectedTerminalSessionIncarnationToken: string,
@@ -2899,6 +3427,44 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return false;
 		}
 		if (entry.active.terminalSessionIncarnationToken !== expectedTerminalSessionIncarnationToken) {
+			return false;
+		}
+		const activeThisClearWouldRideOn = entry.active;
+		const premisesThisClearWouldRideOn = this.taskTerminalInputBoxPreemptionHumanAbsencePremises.get(taskId) ?? null;
+		if (
+			premisesThisClearWouldRideOn !== null &&
+			![...premisesThisClearWouldRideOn].every((premises) =>
+				this.taskTerminalInputBoxPreemptionAuthorizationPremisesStillHold(premises, activeThisClearWouldRideOn),
+			)
+		) {
+			// 授权这次抢占的前提已经不成立（人回来打字 / 换代 / 投递被取消或被取代），不清框。
+			//
+			// 为什么是「所有挂着的前提都要成立」而不是挑一份：转发调用里没有任何「这次清框属于哪条抢占」
+			// 的身份（forwardStashKeyToClearTaskTerminalInputBox 的签名归 W2 那条路径共用，加必填参数会
+			// 改到 src/trpc/runtime-api.ts 的调用点），manager 只能从「此刻这个 task 上还挂着谁的授权」
+			// 反推。全称判定是这里唯一守得住的读法：真正在兑现的那条抢占一定在集合里，只要它已失效就必被
+			// 拦下；集合里另有一条尚未失效的抢占也不会把它放行。代价是「另一条抢占已失效、正在兑现的这条
+			// 还有效」时也一并拒清——那是保守方向的误拒，框里内容一个字不少，可接受。
+			//
+			// 此刻正文**已经**进了 Prompt Library（写库在前、清框在后，这个次序本身是为「库里没有 ⇒ 框里
+			// 还在」的安全性设的，不能倒过来）。于是留下的残留是：库里多一条与框里内容重复的条目，用户看得见、
+			// 可删。用这条重复换掉「人正打字时框被清」，方向明确——本轮的核心不变量是「人在场时机器绝不动框」。
+			// 调用方拿到 false ⇒ 回执落在既有的 stashed_into_prompt_library_but_input_box_not_cleared，
+			// 抢占执行者据此返回 false，投递退回挂起等人处理。
+			//
+			// 这个窗口**没有被关死**，剩下的残留有多大：
+			//   - 击键字节还在路上（人已经在敲，但 writeInput 尚未在服务端执行，lastUserInputAt 还是旧值）时，
+			//     本守卫与沉降判据一样看不见——普通击键走 IO WebSocket、抢占走 HTTP tRPC，两条通道之间无序，
+			//     单侧时间戳无法彻底消除这个错位；
+			//   - 经 tmux / 原生终端直连同一条 PTY 敲入的字节根本不过 writeInput，输入侧账本全程是盲的；
+			//   - 人恰好在清框字节写出去之后的下一毫秒才回来打字：那已经不在任何守卫能覆盖的范围内。
+			// 三者的代价都是「那半句被 agent 自己的原生 stash 接住 / 已在库里」，不是丢失；剩余窗口从
+			// 「整条抢占链路（可达数百毫秒至 1s+）」收窄到「转发那一刻的单次同步判定」。
+			//
+			// 代际这一格另有一条残留：被更晚的投递取代时这次清框被拒，那条更晚的投递下一拍重探仍会看见
+			// 非空的框，于是**再**抢占一次、库里再多一条同样内容的条目。宁可留下这条可见可删的重复，
+			// 也不能凭一条已经作废的投递去清框——它的抢占许可是按当时的争用策略与人类在场读数批的，
+			// 取代它的那条投递必须自己重新过一遍那两道判定。
 			return false;
 		}
 		entry.active.session.write(TERMINAL_STASH_KEY_SEQUENCE);
@@ -3149,6 +3715,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearStartupReadinessTimer(entry.active);
 		clearOutputReactionTimer(entry.active);
 		settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
+		clearTaskChatInputDeliveryContentionVisibility(entry);
 		clearTaskChatInputDeliveryTimer(entry.active);
 		clearSubmitConfirmTimer(entry.active);
 		discardPendingOutputAnalysis(entry.active);
@@ -3177,6 +3744,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearStartupReadinessTimer(active);
 		clearOutputReactionTimer(active);
 		settleActiveProgrammaticDelivery(active, "delivery_failed", "session_ended_before_delivery");
+		clearTaskChatInputDeliveryContentionVisibility(entry);
 		clearTaskChatInputDeliveryTimer(active);
 		clearSubmitConfirmTimer(active);
 		discardPendingOutputAnalysis(active);
@@ -3276,6 +3844,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearStartupReadinessTimer(entry.active);
 			clearOutputReactionTimer(entry.active);
 			settleActiveProgrammaticDelivery(entry.active, "delivery_failed", "session_ended_before_delivery");
+			clearTaskChatInputDeliveryContentionVisibility(entry);
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
 			discardPendingOutputAnalysis(entry.active);

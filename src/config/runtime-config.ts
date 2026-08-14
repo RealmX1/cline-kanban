@@ -25,6 +25,7 @@ interface RuntimeGlobalConfigFileShape {
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 	postDeployVerificationForceCompleteEnabled?: boolean;
 	// Legacy 键（Post-Deploy Verification 全量重命名前叫 guidedVerificationForceCompleteEnabled）。
 	// 仅用于读时兼容:旧 config.json 里若只有这个键,回退读它;下一次写入只落新键,旧键随原子覆盖自然消失。
@@ -48,6 +49,7 @@ export interface RuntimeConfigState {
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: boolean;
 	postDeployVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
@@ -65,6 +67,7 @@ export interface RuntimeConfigUpdateInput {
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 	postDeployVerificationForceCompleteEnabled?: boolean;
 	shortcuts?: RuntimeProjectShortcut[];
 	commitPromptTemplate?: string;
@@ -89,6 +92,10 @@ const DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS: RuntimeAgentSessionTran
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
 const DEFAULT_NOTIFICATION_SOUND_ENABLED = true;
 const DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED = true;
+// 程序化投递撞上「人类输入框里有未提交内容」时的争用策略开关（计划里的 auto / never_preempt 两档）。
+// true（默认，auto）：人**不在场**时先把那段未提交内容无损暂存进 Prompt Library 再放行投递；人在场时
+// 仍只挂起可见、绝不动框。false（never_preempt）：任何情况下都只挂起，等人自己让路或预算耗尽诚实失败。
+const DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED = true;
 // 部署后验证的「强制完成」是绕过安全确认的逃生阀，默认关闭；CLI 传 --force 且此开关开启才生效。
 const DEFAULT_POST_DEPLOY_VERIFICATION_FORCE_COMPLETE_ENABLED = false;
 const DEFAULT_COMMIT_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD. When you are finished with the task, commit the working changes onto {{base_ref}}.
@@ -337,6 +344,10 @@ function toRuntimeConfigState({
 			globalConfig?.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
 		),
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: normalizeBoolean(
+			globalConfig?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+			DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED,
+		),
 		postDeployVerificationForceCompleteEnabled: normalizeBoolean(
 			globalConfig?.postDeployVerificationForceCompleteEnabled ??
 				globalConfig?.guidedVerificationForceCompleteEnabled,
@@ -373,6 +384,7 @@ async function writeRuntimeGlobalConfigFile(
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 		postDeployVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
@@ -417,6 +429,13 @@ async function writeRuntimeGlobalConfigFile(
 			: normalizeBoolean(
 					config.autoContinueOnConnectionDropEnabled,
 					DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
+				);
+	const programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled =
+		config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled === undefined
+			? DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED
+			: normalizeBoolean(
+					config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+					DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED,
 				);
 	const postDeployVerificationForceCompleteEnabled =
 		config.postDeployVerificationForceCompleteEnabled === undefined
@@ -484,6 +503,14 @@ async function writeRuntimeGlobalConfigFile(
 		autoContinueOnConnectionDropEnabled !== DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED
 	) {
 		payload.autoContinueOnConnectionDropEnabled = autoContinueOnConnectionDropEnabled;
+	}
+	if (
+		hasOwnKey(existing, "programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled") ||
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
+			DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED
+	) {
+		payload.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled =
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled;
 	}
 	if (
 		hasOwnKey(existing, "postDeployVerificationForceCompleteEnabled") ||
@@ -580,6 +607,7 @@ function createRuntimeConfigStateFromValues(input: {
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: boolean;
 	postDeployVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
@@ -611,6 +639,10 @@ function createRuntimeConfigStateFromValues(input: {
 			input.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
 		),
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: normalizeBoolean(
+			input.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+			DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED,
+		),
 		postDeployVerificationForceCompleteEnabled: normalizeBoolean(
 			input.postDeployVerificationForceCompleteEnabled,
 			DEFAULT_POST_DEPLOY_VERIFICATION_FORCE_COMPLETE_ENABLED,
@@ -635,6 +667,8 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: current.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: current.autoContinueOnConnectionDropEnabled,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+			current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		postDeployVerificationForceCompleteEnabled: current.postDeployVerificationForceCompleteEnabled,
 		shortcuts: [],
 		commitPromptTemplate: current.commitPromptTemplate,
@@ -675,6 +709,7 @@ export async function saveRuntimeConfig(
 		readyForReviewNotificationsEnabled: boolean;
 		notificationSoundEnabled: boolean;
 		autoContinueOnConnectionDropEnabled: boolean;
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: boolean;
 		postDeployVerificationForceCompleteEnabled: boolean;
 		shortcuts: RuntimeProjectShortcut[];
 		commitPromptTemplate: string;
@@ -692,6 +727,8 @@ export async function saveRuntimeConfig(
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: config.postDeployVerificationForceCompleteEnabled,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
@@ -708,6 +745,8 @@ export async function saveRuntimeConfig(
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: config.postDeployVerificationForceCompleteEnabled,
 			shortcuts: config.shortcuts,
 			commitPromptTemplate: config.commitPromptTemplate,
@@ -737,6 +776,9 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled:
 				updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				updates.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ??
+				current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled:
 				updates.postDeployVerificationForceCompleteEnabled ?? current.postDeployVerificationForceCompleteEnabled,
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
@@ -753,6 +795,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 			nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 			nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+			nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
+				current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ||
 			nextConfig.postDeployVerificationForceCompleteEnabled !== current.postDeployVerificationForceCompleteEnabled ||
 			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
@@ -771,6 +815,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
@@ -789,6 +835,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 			shortcuts: nextConfig.shortcuts,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
@@ -826,6 +874,9 @@ export async function updateGlobalRuntimeConfig(
 				notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled:
 					updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+				programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+					updates.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ??
+					current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 				postDeployVerificationForceCompleteEnabled:
 					updates.postDeployVerificationForceCompleteEnabled ?? current.postDeployVerificationForceCompleteEnabled,
 				shortcuts: current.shortcuts,
@@ -842,6 +893,8 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 				nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 				nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+				nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
+					current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ||
 				nextConfig.postDeployVerificationForceCompleteEnabled !==
 					current.postDeployVerificationForceCompleteEnabled ||
 				nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
@@ -860,6 +913,8 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+					nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 				postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
@@ -876,6 +931,8 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+					nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 				postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 				shortcuts: nextConfig.shortcuts,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,

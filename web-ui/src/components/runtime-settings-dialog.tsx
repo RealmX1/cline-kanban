@@ -405,6 +405,10 @@ export function RuntimeSettingsDialog({
 	const [readyForReviewNotificationsEnabled, setReadyForReviewNotificationsEnabled] = useState(true);
 	const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(true);
 	const [autoContinueOnConnectionDropEnabled, setAutoContinueOnConnectionDropEnabled] = useState(true);
+	const [
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+		setProgrammaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+	] = useState(true);
 	// Post-Deploy Verification break-glass 总闸：默认关闭，开启后 CLI `--force` 才能跳过 token 两步确认直接入 Done。
 	const [postDeployVerificationForceCompleteEnabled, setPostDeployVerificationForceCompleteEnabled] = useState(false);
 	const [initialThemeId, setInitialThemeId] = useState<ThemeId>(readStoredThemeId);
@@ -490,6 +494,8 @@ export function RuntimeSettingsDialog({
 	const initialReadyForReviewNotificationsEnabled = config?.readyForReviewNotificationsEnabled ?? true;
 	const initialNotificationSoundEnabled = config?.notificationSoundEnabled ?? true;
 	const initialAutoContinueOnConnectionDropEnabled = config?.autoContinueOnConnectionDropEnabled ?? true;
+	const initialProgrammaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled =
+		config?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ?? true;
 	const initialPostDeployVerificationForceCompleteEnabled =
 		config?.postDeployVerificationForceCompleteEnabled ?? false;
 	const initialShortcuts = config?.shortcuts ?? [];
@@ -532,6 +538,12 @@ export function RuntimeSettingsDialog({
 		if (autoContinueOnConnectionDropEnabled !== initialAutoContinueOnConnectionDropEnabled) {
 			return true;
 		}
+		if (
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
+			initialProgrammaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled
+		) {
+			return true;
+		}
 		if (postDeployVerificationForceCompleteEnabled !== initialPostDeployVerificationForceCompleteEnabled) {
 			return true;
 		}
@@ -560,6 +572,7 @@ export function RuntimeSettingsDialog({
 	}, [
 		agentAutonomousModeEnabled,
 		autoContinueOnConnectionDropEnabled,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		postDeployVerificationForceCompleteEnabled,
 		clineMcpSettings.hasUnsavedChanges,
 		clineSettings.hasUnsavedChanges,
@@ -598,6 +611,9 @@ export function RuntimeSettingsDialog({
 		setReadyForReviewNotificationsEnabled(config?.readyForReviewNotificationsEnabled ?? true);
 		setNotificationSoundEnabled(config?.notificationSoundEnabled ?? true);
 		setAutoContinueOnConnectionDropEnabled(config?.autoContinueOnConnectionDropEnabled ?? true);
+		setProgrammaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled(
+			config?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ?? true,
+		);
 		setPostDeployVerificationForceCompleteEnabled(config?.postDeployVerificationForceCompleteEnabled ?? false);
 		setShortcuts(config?.shortcuts ?? []);
 		setCommitPromptTemplate(config?.commitPromptTemplate ?? "");
@@ -606,6 +622,7 @@ export function RuntimeSettingsDialog({
 	}, [
 		config?.agentAutonomousModeEnabled,
 		config?.autoContinueOnConnectionDropEnabled,
+		config?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		config?.postDeployVerificationForceCompleteEnabled,
 		config?.commitPromptTemplate,
 		config?.newTaskStartInPlanModeByDefault,
@@ -790,6 +807,7 @@ export function RuntimeSettingsDialog({
 			readyForReviewNotificationsEnabled,
 			notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled,
 			shortcuts,
 			commitPromptTemplate,
@@ -1121,6 +1139,28 @@ export function RuntimeSettingsDialog({
 						<p className="text-text-secondary text-[13px] mt-2 mb-0">
 							当 Claude Code、Codex 等终端 agent 因网络抖动打印连接错误并停在空闲提示符时， Kanban
 							会按指数退避自动注入一条续跑指令，让 agent 自查并恢复被打断的工作；agent 恢复推进后自动停止重试。
+						</p>
+					</div>
+					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
+						<div className="flex items-center gap-2">
+							<RadixSwitch.Root
+								checked={programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled}
+								disabled={controlsDisabled}
+								onCheckedChange={setProgrammaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled}
+								className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer disabled:opacity-40"
+							>
+								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+							</RadixSwitch.Root>
+							<span className="text-[13px] text-text-primary">
+								人不在场时，自动暂存输入框内容以放行程序化投递
+							</span>
+						</div>
+						<p className="text-text-secondary text-[13px] mt-2 mb-0">
+							RVF followup 等程序化投递撞上「输入框里有你还没提交的内容」时一律让路。开启本项后，若你已经很久
+							没在这个终端敲过键（视为不在场），Kanban 会先把那段内容无损存进 Prompt
+							Library、清空输入框，再投递；
+							关闭则任何情况下都只挂起等你处理，直到让路预算耗尽、投递诚实地报失败。
+							无论开关如何，你在场时机器都不会动你的输入框，框里有还原不了的粘贴时也绝不抢占。
 						</p>
 					</div>
 

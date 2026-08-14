@@ -102,6 +102,7 @@ function createRuntimeConfig(selectedAgentId: RuntimeConfigResponse["selectedAge
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: true,
 		postDeployVerificationForceCompleteEnabled: false,
 		detectedCommands: [],
 		agents: [

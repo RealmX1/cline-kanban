@@ -120,6 +120,8 @@ export function buildRuntimeConfigResponse(
 		readyForReviewNotificationsEnabled: runtimeConfig.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: runtimeConfig.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: runtimeConfig.autoContinueOnConnectionDropEnabled,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+			runtimeConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		postDeployVerificationForceCompleteEnabled: runtimeConfig.postDeployVerificationForceCompleteEnabled,
 		detectedCommands,
 		agents,
