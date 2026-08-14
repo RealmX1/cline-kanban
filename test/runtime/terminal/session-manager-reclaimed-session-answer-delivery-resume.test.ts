@@ -9,6 +9,7 @@ const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
+	BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN: "\r",
 	prepareAgentLaunch: prepareAgentLaunchMock,
 	toBracketedPasteFramingWithoutTrailingSubmit: (text: string) => `SUBMIT[${text}]`,
 }));
