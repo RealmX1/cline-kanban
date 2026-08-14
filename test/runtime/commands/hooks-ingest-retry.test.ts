@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deliverHookIngestWithRetry } from "../../../src/commands/hooks";
+import { deliverHookIngestWithRetry, serializeHarnessUserPromptProcessingDirective } from "../../../src/commands/hooks";
 import type { RuntimeHookIngestResponse } from "../../../src/core/api-contract";
 
 // F2 有界重试核心的行为锁测。用永不 resolve 的 mutate + 极小 timeoutMs 模拟「传输层超时」，
@@ -34,7 +34,9 @@ describe("deliverHookIngestWithRetry", () => {
 		});
 		const onFinalFailure = vi.fn();
 
-		await expect(deliverHookIngestWithRetry(mutate, { ...FAST_OPTIONS, onFinalFailure })).resolves.toBeUndefined();
+		await expect(deliverHookIngestWithRetry(mutate, { ...FAST_OPTIONS, onFinalFailure })).resolves.toEqual({
+			ok: true,
+		});
 
 		expect(mutate).toHaveBeenCalledTimes(2);
 		expect(onFinalFailure).not.toHaveBeenCalled();
@@ -59,9 +61,40 @@ describe("deliverHookIngestWithRetry", () => {
 		const mutate = vi.fn((): Promise<RuntimeHookIngestResponse> => Promise.resolve({ ok: true }));
 		const onFinalFailure = vi.fn();
 
-		await expect(deliverHookIngestWithRetry(mutate, { ...FAST_OPTIONS, onFinalFailure })).resolves.toBeUndefined();
+		await expect(deliverHookIngestWithRetry(mutate, { ...FAST_OPTIONS, onFinalFailure })).resolves.toEqual({
+			ok: true,
+		});
 
 		expect(mutate).toHaveBeenCalledTimes(1);
 		expect(onFinalFailure).not.toHaveBeenCalled();
+	});
+});
+
+describe("serializeHarnessUserPromptProcessingDirective", () => {
+	it("把恢复期自动 prompt 拦截序列化为 Claude UserPromptSubmit block JSON", () => {
+		expect(
+			JSON.parse(
+				serializeHarnessUserPromptProcessingDirective({
+					processingDecision: "block_and_defer_until_explicit_user_input",
+					userVisibleReason: "恢复中",
+				}) ?? "null",
+			),
+		).toEqual({ decision: "block", reason: "恢复中" });
+	});
+
+	it("把暂存通知序列化为允许 prompt 的 additionalContext", () => {
+		expect(
+			JSON.parse(
+				serializeHarnessUserPromptProcessingDirective({
+					processingDecision: "allow",
+					additionalContextMarkdown: "补充通知",
+				}) ?? "null",
+			),
+		).toEqual({
+			hookSpecificOutput: {
+				hookEventName: "UserPromptSubmit",
+				additionalContext: "补充通知",
+			},
+		});
 	});
 });

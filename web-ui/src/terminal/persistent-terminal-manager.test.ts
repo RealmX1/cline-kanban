@@ -617,6 +617,25 @@ describe("persistent-terminal-manager", () => {
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
+		it("restores an empty-snapshot question session without treating restoration as an agent turn", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState({
+				taskId: "task-a",
+				agentId: "claude",
+				pid: null,
+				state: "awaiting_review",
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "question",
+			});
+			dispatchRestore("");
+
+			await vi.waitFor(() => {
+				expect(refreshSpy).toHaveBeenCalledTimes(1);
+			});
+		});
+
 		it("does not auto-refresh when agentId is null (fresh/never-started or shell session)", async () => {
 			const terminal = mountedTerminal();
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });

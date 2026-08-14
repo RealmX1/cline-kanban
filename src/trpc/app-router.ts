@@ -51,6 +51,8 @@ import type {
 	RuntimeDebugResetAllStateResponse,
 	RuntimeDirectoryListRequest,
 	RuntimeDirectoryListResponse,
+	RuntimeDismissAgentRaisedPendingUserDecisionRequest,
+	RuntimeDismissAgentRaisedPendingUserDecisionResponse,
 	RuntimeDismissConnectionRetrySessionsRequest,
 	RuntimeDismissConnectionRetrySessionsResponse,
 	RuntimeFeaturebaseTokenResponse,
@@ -73,6 +75,7 @@ import type {
 	RuntimeGitSyncResponse,
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
+	RuntimeListAgentRaisedPendingUserDecisionsRequest,
 	RuntimeListAgentRaisedPendingUserDecisionsResponse,
 	RuntimeNotificationClearRequest,
 	RuntimeNotificationMarkVisitedRequest,
@@ -188,6 +191,8 @@ import {
 	runtimeDebugResetAllStateResponseSchema,
 	runtimeDirectoryListRequestSchema,
 	runtimeDirectoryListResponseSchema,
+	runtimeDismissAgentRaisedPendingUserDecisionRequestSchema,
+	runtimeDismissAgentRaisedPendingUserDecisionResponseSchema,
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeDismissConnectionRetrySessionsResponseSchema,
 	runtimeFeaturebaseTokenResponseSchema,
@@ -210,6 +215,7 @@ import {
 	runtimeGitSyncResponseSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeHookIngestResponseSchema,
+	runtimeListAgentRaisedPendingUserDecisionsRequestSchema,
 	runtimeListAgentRaisedPendingUserDecisionsResponseSchema,
 	runtimeNotificationClearRequestSchema,
 	runtimeNotificationMarkVisitedRequestSchema,
@@ -320,11 +326,16 @@ export interface RuntimeTrpcContext {
 		) => Promise<RuntimeTaskSessionTransitionToReviewResponse>;
 		listAgentRaisedPendingUserDecisions: (
 			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeListAgentRaisedPendingUserDecisionsRequest,
 		) => Promise<RuntimeListAgentRaisedPendingUserDecisionsResponse>;
 		answerAgentRaisedPendingUserDecision: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 		) => Promise<RuntimeAnswerAgentRaisedPendingUserDecisionResponse>;
+		dismissAgentRaisedPendingUserDecision: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeDismissAgentRaisedPendingUserDecisionRequest,
+		) => Promise<RuntimeDismissAgentRaisedPendingUserDecisionResponse>;
 		continueConnectionRetrySessions: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeContinueConnectionRetrySessionsRequest,
@@ -662,15 +673,22 @@ export const runtimeAppRouter = t.router({
 		// 「agent 问了你一个问题、但那个会话可能已经被回收」——列出仍需你拍板 / 仍待送达的决策。
 		// 数据源是 durable 账本，与会话进程是否还活着完全无关。
 		listAgentRaisedPendingUserDecisions: workspaceProcedure
+			.input(runtimeListAgentRaisedPendingUserDecisionsRequestSchema)
 			.output(runtimeListAgentRaisedPendingUserDecisionsResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.listAgentRaisedPendingUserDecisions(ctx.workspaceScope);
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.listAgentRaisedPendingUserDecisions(ctx.workspaceScope, input);
 			}),
 		answerAgentRaisedPendingUserDecision: workspaceProcedure
 			.input(runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema)
 			.output(runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.answerAgentRaisedPendingUserDecision(ctx.workspaceScope, input);
+			}),
+		dismissAgentRaisedPendingUserDecision: workspaceProcedure
+			.input(runtimeDismissAgentRaisedPendingUserDecisionRequestSchema)
+			.output(runtimeDismissAgentRaisedPendingUserDecisionResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.dismissAgentRaisedPendingUserDecision(ctx.workspaceScope, input);
 			}),
 		continueConnectionRetrySessions: workspaceProcedure
 			.input(runtimeContinueConnectionRetrySessionsRequestSchema)

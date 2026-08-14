@@ -491,6 +491,18 @@ export const runtimeTaskConnectionRetrySchema = z.object({
 });
 export type RuntimeTaskConnectionRetry = z.infer<typeof runtimeTaskConnectionRetrySchema>;
 
+// 恢复一个落盘会话只负责重建上下文，绝不等价于开始新一轮生成。PTY agent 恢复期间用这条
+// 加性 sidecar 把「恢复历史」与「用户显式继续」分开：只有 UserPromptSubmit / BeforeAgent 这类
+// 货真价实的用户提交才能解除守卫。旧 sessions.json 缺字段时按 inactive 处理。
+export const runtimeTaskSessionRestorationContinuationGuardStateSchema = z.enum([
+	"inactive",
+	"restoring_agent_conversation_without_starting_new_turn",
+	"restored_agent_conversation_waiting_for_explicit_user_input",
+]);
+export type RuntimeTaskSessionRestorationContinuationGuardState = z.infer<
+	typeof runtimeTaskSessionRestorationContinuationGuardStateSchema
+>;
+
 // 主 agent 以「非 native」方式 dispatch 了一个后台任务（例：把 reviewer 计划作为独立 Kanban 任务发出），
 // 并结束自己这一轮去等它完成时，由外部编排（RVF / 自研 Kanban）置上的「已 park、正在等待已派发后台工作」
 // sidecar。present = parked：此刻主 agent 停在空闲提示符，但它**不是**在等用户审查，而是在等自己派发的后台
@@ -671,6 +683,7 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	connectionRetry: runtimeTaskConnectionRetrySchema.nullable().optional(),
+	restorationContinuationGuardState: runtimeTaskSessionRestorationContinuationGuardStateSchema.optional(),
 	// 「已 park、正在等待已派发后台工作」sidecar（加性、nullable + optional，仅内存态、随 connectionRetry 同侧）。
 	// present = parked；判据 / 时序见 runtimeTaskAwaitingDispatchedBackgroundWorkSchema 与 session-activity.ts
 	// 的 isParkedAwaitingDispatchedBackgroundWork。不参与 facet / superRefine（与 connectionRetry-only 写同形）。
@@ -2424,6 +2437,16 @@ export const runtimeAgentRaisedDecisionOptionSchema = z.object({
 });
 export type RuntimeAgentRaisedDecisionOption = z.infer<typeof runtimeAgentRaisedDecisionOptionSchema>;
 
+export const runtimeAgentRaisedDecisionQuestionSchema = z.object({
+	decisionQuestionId: z.string(),
+	headerMarkdown: z.string().nullable(),
+	questionMarkdown: z.string(),
+	selectionMode: z.enum(["single", "multiple"]),
+	options: z.array(runtimeAgentRaisedDecisionOptionSchema),
+	allowsFreeformAnswer: z.boolean(),
+});
+export type RuntimeAgentRaisedDecisionQuestion = z.infer<typeof runtimeAgentRaisedDecisionQuestionSchema>;
+
 export const runtimeAgentRaisedUserQuestionPayloadSchema = z.object({
 	// harness 提供的稳定标识（Claude 的 tool_use_id），用于跨重发去重。
 	decisionSourceId: z.string(),
@@ -2431,6 +2454,7 @@ export const runtimeAgentRaisedUserQuestionPayloadSchema = z.object({
 	options: z.array(runtimeAgentRaisedDecisionOptionSchema),
 	allowsFreeformAnswer: z.boolean(),
 	multiSelect: z.boolean(),
+	orderedQuestions: z.array(runtimeAgentRaisedDecisionQuestionSchema),
 });
 export type RuntimeAgentRaisedUserQuestionPayload = z.infer<typeof runtimeAgentRaisedUserQuestionPayloadSchema>;
 
@@ -2451,12 +2475,25 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// 两者互斥：一次 hook 只可能是其中一种。
 	agentRaisedUserQuestion: runtimeAgentRaisedUserQuestionPayloadSchema.optional(),
 	agentRaisedToolPermission: runtimeAgentRaisedToolPermissionPayloadSchema.optional(),
+	// UserPromptSubmit 的 prompt 只在同步 hook 请求内短暂流转，用于区分真人输入与 harness 在恢复时
+	// 自动塞入的任务通知；普通诊断日志与 session summary 均不得记录它。
+	submittedPromptText: z.string().optional(),
 });
 export type RuntimeHookIngestRequest = z.infer<typeof runtimeHookIngestRequestSchema>;
+
+export const runtimeHarnessUserPromptProcessingDirectiveSchema = z.object({
+	processingDecision: z.enum(["allow", "block_and_defer_until_explicit_user_input"]),
+	userVisibleReason: z.string().optional(),
+	additionalContextMarkdown: z.string().optional(),
+});
+export type RuntimeHarnessUserPromptProcessingDirective = z.infer<
+	typeof runtimeHarnessUserPromptProcessingDirectiveSchema
+>;
 
 export const runtimeHookIngestResponseSchema = z.object({
 	ok: z.boolean(),
 	error: z.string().optional(),
+	harnessUserPromptProcessingDirective: runtimeHarnessUserPromptProcessingDirectiveSchema.optional(),
 });
 export type RuntimeHookIngestResponse = z.infer<typeof runtimeHookIngestResponseSchema>;
 
@@ -2470,6 +2507,7 @@ export const runtimeAgentRaisedPendingUserDecisionSchema = z.object({
 	questionMarkdown: z.string(),
 	options: z.array(runtimeAgentRaisedDecisionOptionSchema),
 	allowsFreeformAnswer: z.boolean(),
+	orderedQuestions: z.array(runtimeAgentRaisedDecisionQuestionSchema),
 	askedAt: z.number(),
 	// 会话已被回收的时刻；null = 提问它的那个会话还活着，可以直接答给它。
 	reclaimedAt: z.number().nullable(),
@@ -2491,10 +2529,26 @@ export type RuntimeListAgentRaisedPendingUserDecisionsResponse = z.infer<
 	typeof runtimeListAgentRaisedPendingUserDecisionsResponseSchema
 >;
 
+export const runtimeListAgentRaisedPendingUserDecisionsRequestSchema = z.object({
+	taskId: z.string().trim().min(1).optional(),
+});
+export type RuntimeListAgentRaisedPendingUserDecisionsRequest = z.infer<
+	typeof runtimeListAgentRaisedPendingUserDecisionsRequestSchema
+>;
+
 export const runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema = z.object({
 	decisionId: z.string(),
 	selectedOptionIds: z.array(z.string()),
 	freeformText: z.string().nullable(),
+	orderedQuestionAnswers: z
+		.array(
+			z.object({
+				decisionQuestionId: z.string(),
+				selectedOptionIds: z.array(z.string()),
+				freeformText: z.string().nullable(),
+			}),
+		)
+		.optional(),
 });
 export type RuntimeAnswerAgentRaisedPendingUserDecisionRequest = z.infer<
 	typeof runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema
@@ -2509,6 +2563,21 @@ export const runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema = z.objec
 });
 export type RuntimeAnswerAgentRaisedPendingUserDecisionResponse = z.infer<
 	typeof runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema
+>;
+
+export const runtimeDismissAgentRaisedPendingUserDecisionRequestSchema = z.object({
+	decisionId: z.string(),
+});
+export type RuntimeDismissAgentRaisedPendingUserDecisionRequest = z.infer<
+	typeof runtimeDismissAgentRaisedPendingUserDecisionRequestSchema
+>;
+
+export const runtimeDismissAgentRaisedPendingUserDecisionResponseSchema = z.object({
+	ok: z.boolean(),
+	error: z.string().optional(),
+});
+export type RuntimeDismissAgentRaisedPendingUserDecisionResponse = z.infer<
+	typeof runtimeDismissAgentRaisedPendingUserDecisionResponseSchema
 >;
 
 // ==========================================================================

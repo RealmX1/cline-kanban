@@ -519,3 +519,28 @@ dry-run 执行器（`createDryRunAgentSessionReclamationExecutor`）保留在代
 **新增**：`src/state/agent-session-reclamation-deadline-store.ts`、`src/state/agent-raised-pending-user-decision-store.ts`、`src/server/agent-session-response-generation-stop-observer.ts`、`src/server/agent-session-inactivity-reclamation-scheduler.ts`、`src/server/transport-aware-agent-session-reclamation.ts`。
 
 **复用（不要重写）**：`notification-log-store.ts` 的存储骨架、`src/commands/task.ts:1325-1600` 的幂等投递账本、`process-termination.ts` + `tree-kill` 依赖、`forceStopTaskSession` 的升级逻辑、`submitTaskChatInputWhenReady` 的就绪投递、`getRuntimeAgentSessionTransport` 的三态分派。
+
+---
+
+## 十七、2026-08-13：跨重启恢复误续跑补充实现
+
+针对真实轨迹「Claude 在 `AskUserQuestion` 等待用户 → Kanban 重启 → 重开任务出现
+`No completion record was found` 并意外继续生成」，本轮在 S5 基础上补齐以下契约：
+
+- parked 会话的 `AskUserQuestion` / 权限 / 计划评审先分类并同步持久化，再过 parked gate；裸 `Stop`
+  仍保持抑制。这样重启前的待答问题不会因 park 而漏账。
+- PTY `resumeFromTrash` 新增恢复续跑守卫：启动只恢复历史，不代表开始新 agent 回合；输出反应自动续跑
+  也必须在守卫期间让位。Claude 由真正的 `UserPromptSubmit`，Codex 由 Enter 或明确的程序化用户消息解除。
+- 恢复期 Claude 自动注入的结构化 `<task-notification>` 由同步 hook 精确拦截并 durable 暂存；下一条
+  真人/结构化用户提交到来时才作为 `additionalContext` 附带，通知本身不再充当新用户请求。
+- Focus/Detail 视图顶部直接呈现 durable 待答问题，保留多问归属、单选/多选/自由文本。折叠是本地 UI
+  状态；直接在终端继续会自动折叠但不删除问题；显式取消写 `dismissed`，不向 agent 投递任何内容。
+- 结构化回答重述全部问题、全部选项及逐问答案；Kanban 完整重启、内存 `restartRequest` 丢失时，
+  从 board + runtime config 重建 terminal resume 请求再投递。
+- 旧版本漏记的问题只做按需保守补录：Claude 仅查该 task worktree 当前/已知 session 转录；Codex 仅在
+  card 已知精确 session id 时查找。只有尾部问题没有配对结果且之后没有真人输入才补录；`plan_review`
+  继续排除。
+
+本轮部署前验证：Biome 全仓、后端 typecheck、后端 1566 tests、web-ui 1145 tests、web-ui production
+build 均通过。部署后真实 Claude/重启行为已为 task `c5b8d` 登记两条 guided verification：
+`50a8b555-7e6b-45af-8ea9-96d57b9bd6d6` 与 `a6b67bc8-62fc-49af-ad98-c3b548793e4a`。

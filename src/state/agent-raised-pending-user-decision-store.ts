@@ -18,7 +18,12 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
-import { runtimeAgentIdSchema, runtimeAgentSessionTransportSchema } from "../core/api-contract";
+import {
+	type RuntimeAgentRaisedDecisionQuestion,
+	runtimeAgentIdSchema,
+	runtimeAgentRaisedDecisionQuestionSchema,
+	runtimeAgentSessionTransportSchema,
+} from "../core/api-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath, listWorkspaceIndexEntries } from "./workspace-state";
 
@@ -27,7 +32,7 @@ const AGENT_RAISED_PENDING_USER_DECISION_FILENAME = "agent-raised-pending-user-d
 // 每 workspace 上限。已回答 / 已放弃的记录留作审计与「答案是否已送达」追踪，超限丢最旧。
 const MAX_RECORDS_PER_WORKSPACE = 200;
 
-export const AGENT_RAISED_PENDING_USER_DECISION_SCHEMA_VERSION = 1;
+export const AGENT_RAISED_PENDING_USER_DECISION_SCHEMA_VERSION = 2;
 
 // ⚠️ 有意不包含 plan_review：计划审批不做 durable carry-forward。新增取值前请回读本文件头部注释。
 export const agentRaisedPendingUserDecisionKindSchema = z.enum([
@@ -72,6 +77,15 @@ export type AgentRaisedPendingUserDecisionOption = z.infer<typeof agentRaisedPen
 const agentRaisedPendingUserDecisionAnswerSchema = z.object({
 	selectedOptionIds: z.array(z.string()),
 	freeformText: z.string().nullable(),
+	orderedQuestionAnswers: z
+		.array(
+			z.object({
+				decisionQuestionId: z.string(),
+				selectedOptionIds: z.array(z.string()),
+				freeformText: z.string().nullable(),
+			}),
+		)
+		.optional(),
 	answeredAt: z.number(),
 });
 export type AgentRaisedPendingUserDecisionAnswer = z.infer<typeof agentRaisedPendingUserDecisionAnswerSchema>;
@@ -89,6 +103,7 @@ const persistedAgentRaisedPendingUserDecisionSchema = z.object({
 	questionMarkdown: z.string(),
 	options: z.array(agentRaisedPendingUserDecisionOptionSchema),
 	allowsFreeformAnswer: z.boolean(),
+	orderedQuestions: z.array(runtimeAgentRaisedDecisionQuestionSchema).optional(),
 	askedAt: z.number(),
 	// 提问当时该会话的回收期限（epoch ms，null = 无期限）。仅用于 UI 说明「这个问题等了多久才被回收」。
 	graceDeadlineAt: z.number().nullable(),
@@ -126,11 +141,33 @@ export interface RecordAgentRaisedPendingUserDecisionInput {
 	questionMarkdown: string;
 	options: AgentRaisedPendingUserDecisionOption[];
 	allowsFreeformAnswer: boolean;
+	orderedQuestions?: RuntimeAgentRaisedDecisionQuestion[];
 	askedAt: number;
 	graceDeadlineAt: number | null;
 	originRuntimeSessionIncarnationId: string | null;
 	originTurnSequence: number;
 	sourceHarnessSignal: string;
+}
+
+export function resolveAgentRaisedPendingUserDecisionOrderedQuestions(
+	record: Pick<
+		PersistedAgentRaisedPendingUserDecision,
+		"allowsFreeformAnswer" | "options" | "orderedQuestions" | "questionMarkdown"
+	>,
+): RuntimeAgentRaisedDecisionQuestion[] {
+	if (record.orderedQuestions && record.orderedQuestions.length > 0) {
+		return record.orderedQuestions;
+	}
+	return [
+		{
+			decisionQuestionId: "question-0",
+			headerMarkdown: null,
+			questionMarkdown: record.questionMarkdown,
+			selectionMode: "single",
+			options: record.options,
+			allowsFreeformAnswer: record.allowsFreeformAnswer,
+		},
+	];
 }
 
 export function buildAgentRaisedPendingUserDecisionAnswerDeliveryIdempotencyKey(decisionId: string): string {
@@ -257,6 +294,16 @@ export async function recordAgentRaisedPendingUserDecision(
 			questionMarkdown: input.questionMarkdown,
 			options: input.options,
 			allowsFreeformAnswer: input.allowsFreeformAnswer,
+			orderedQuestions: input.orderedQuestions ?? [
+				{
+					decisionQuestionId: "question-0",
+					headerMarkdown: null,
+					questionMarkdown: input.questionMarkdown,
+					selectionMode: "single",
+					options: input.options,
+					allowsFreeformAnswer: input.allowsFreeformAnswer,
+				},
+			],
 			askedAt: input.askedAt,
 			graceDeadlineAt: input.graceDeadlineAt,
 			reclaimedAt: null,

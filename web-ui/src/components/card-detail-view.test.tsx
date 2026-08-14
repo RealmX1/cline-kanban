@@ -18,6 +18,8 @@ const {
 	mockClineSendText,
 	mockUseIsMobile,
 	mockPromptLibraryPanel,
+	mockUseAgentRaisedPendingUserDecision,
+	mockAgentRaisedPendingUserDecisionPanel,
 } = vi.hoisted(() => ({
 	mockAgentTerminalPanel: vi.fn((_props: { panelBackgroundColor?: string; terminalBackgroundColor?: string }) => null),
 	mockClineAgentChatPanel: vi.fn((..._args: unknown[]) => null),
@@ -26,6 +28,8 @@ const {
 	mockClineSendText: vi.fn(async () => {}),
 	mockUseIsMobile: vi.fn(() => false),
 	mockPromptLibraryPanel: vi.fn((_props: unknown) => null),
+	mockUseAgentRaisedPendingUserDecision: vi.fn(),
+	mockAgentRaisedPendingUserDecisionPanel: vi.fn((_props: unknown) => null),
 }));
 
 vi.mock("react-hotkeys-hook", () => ({
@@ -38,6 +42,14 @@ vi.mock("@/hooks/use-is-mobile", () => ({
 
 vi.mock("@/components/detail-panels/agent-terminal-panel", () => ({
 	AgentTerminalPanel: mockAgentTerminalPanel,
+}));
+
+vi.mock("@/components/detail-panels/agent-raised-pending-user-decision-panel", () => ({
+	AgentRaisedPendingUserDecisionPanel: mockAgentRaisedPendingUserDecisionPanel,
+}));
+
+vi.mock("@/hooks/use-agent-raised-pending-user-decision", () => ({
+	useAgentRaisedPendingUserDecision: (input: unknown) => mockUseAgentRaisedPendingUserDecision(input),
 }));
 
 vi.mock("@/components/detail-panels/cline-agent-chat-panel", () => ({
@@ -267,6 +279,15 @@ describe("CardDetailView", () => {
 		mockClineSendText.mockClear();
 		mockUseIsMobile.mockReturnValue(false);
 		mockPromptLibraryPanel.mockClear();
+		mockUseAgentRaisedPendingUserDecision.mockReset();
+		mockUseAgentRaisedPendingUserDecision.mockReturnValue({
+			decision: null,
+			isLoading: false,
+			isSubmitting: false,
+			answer: vi.fn(),
+			dismiss: vi.fn(),
+		});
+		mockAgentRaisedPendingUserDecisionPanel.mockClear();
 		mockUseRuntimeWorkspaceChanges.mockReturnValue({
 			changes: {
 				files: [
@@ -299,6 +320,8 @@ describe("CardDetailView", () => {
 		mockClineSendText.mockClear();
 		mockUseIsMobile.mockReset();
 		mockPromptLibraryPanel.mockClear();
+		mockUseAgentRaisedPendingUserDecision.mockReset();
+		mockAgentRaisedPendingUserDecisionPanel.mockClear();
 		vi.restoreAllMocks();
 		container.remove();
 		if (previousActEnvironment === undefined) {
@@ -337,6 +360,111 @@ describe("CardDetailView", () => {
 		expect(container.textContent).toContain("Main session");
 		expect(container.querySelector('[data-testid="prompt-library-panel"]')).not.toBeNull();
 		expect(container.querySelector('[data-testid="diff-viewer-panel"]')).toBeNull();
+	});
+
+	it("按当前选中的主/By-the-way 会话隔离待答 taskId、实时 hook signal 与 turn sequence", async () => {
+		const mainHookActivity = {
+			activityText: "main activity",
+			toolName: "Read",
+			toolInputSummary: null,
+			finalMessage: null,
+			hookEventName: "PostToolUse",
+			notificationType: null,
+			source: "claude",
+		};
+		const childHookActivity = {
+			...mainHookActivity,
+			activityText: "child question",
+			toolName: "AskUserQuestion",
+			hookEventName: "PreToolUse",
+		};
+		const mainSummary = createSessionSummary("task-1", {
+			latestHookActivity: mainHookActivity,
+			agentResponseGenerationTurnSequence: 3,
+		});
+		const childTaskId = "task-conversation-session-child";
+		const childSummary = createSessionSummary(childTaskId, {
+			latestHookActivity: childHookActivity,
+			agentResponseGenerationTurnSequence: 9,
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "task-1",
+				taskConversationSessionRole: "by_the_way",
+				taskConversationSessionContextSource: "started_from_scratch",
+				parentTaskConversationSessionId: null,
+				mainSessionOriginTurnNumber: 1,
+				mainSessionOriginUserMessagePreview: "main prompt",
+				latestUserMessagePreview: "side question",
+			},
+		});
+		mockUseAgentRaisedPendingUserDecision.mockImplementation(({ taskId }: { taskId: string }) => ({
+			decision:
+				taskId === childTaskId
+					? {
+							decisionId: `${childTaskId}:question-1`,
+							taskId: childTaskId,
+							agentId: "claude",
+							decisionKind: "ordinary_user_question",
+							questionMarkdown: "side question",
+							options: [],
+							allowsFreeformAnswer: true,
+							orderedQuestions: [],
+							askedAt: 1,
+							reclaimedAt: null,
+							answerDeliveryState: "not_answered",
+							lastAnswerDeliveryFailureReason: null,
+						}
+					: null,
+			isLoading: false,
+			isSubmitting: false,
+			answer: vi.fn(),
+			dismiss: vi.fn(),
+		}));
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					selectedAgentId="claude"
+					sessionSummary={mainSummary}
+					taskSessions={{ "task-1": mainSummary, [childTaskId]: childSummary }}
+					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+		expect(mockUseAgentRaisedPendingUserDecision).toHaveBeenLastCalledWith({
+			workspaceId: "workspace-1",
+			taskId: "task-1",
+			runtimeSessionLatestHookActivity: mainHookActivity,
+		});
+
+		const byTheWaySessionButton = Array.from(container.querySelectorAll("button")).find((button) =>
+			button.textContent?.includes("By the way"),
+		);
+		expect(byTheWaySessionButton).toBeInstanceOf(HTMLButtonElement);
+		await act(async () => {
+			byTheWaySessionButton?.click();
+		});
+
+		expect(mockUseAgentRaisedPendingUserDecision).toHaveBeenLastCalledWith({
+			workspaceId: "workspace-1",
+			taskId: childTaskId,
+			runtimeSessionLatestHookActivity: childHookActivity,
+		});
+		expect(mockAgentRaisedPendingUserDecisionPanel.mock.calls.at(-1)?.[0]).toEqual(
+			expect.objectContaining({
+				decision: expect.objectContaining({ taskId: childTaskId }),
+				agentResponseGenerationTurnSequence: 9,
+			}),
+		);
 	});
 
 	it("keeps mobile Sessions and Prompts reachable without rendering disabled workspace changes", async () => {

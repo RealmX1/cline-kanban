@@ -14,6 +14,7 @@ import {
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
+import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
@@ -25,6 +26,7 @@ import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-c
 import { taskDetailAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useIsMobile } from "@/hooks/use-is-mobile";
@@ -724,6 +726,15 @@ export function CardDetailView({
 		startRightPromptResize,
 	);
 	const taskWorkspaceStateVersion = useTaskWorkspaceStateVersionValue(selection.card.id);
+	const activeTaskConversationSessionSummary =
+		selectedTaskConversationSessionId === selection.card.id
+			? (taskSessions[selection.card.id] ?? sessionSummary ?? null)
+			: (taskSessions[selectedTaskConversationSessionId] ?? null);
+	const pendingUserDecision = useAgentRaisedPendingUserDecision({
+		workspaceId: currentProjectId,
+		taskId: selectedTaskConversationSessionId,
+		runtimeSessionLatestHookActivity: activeTaskConversationSessionSummary?.latestHookActivity ?? null,
+	});
 	const lastTurnViewKey =
 		diffMode === "last_turn"
 			? [
@@ -773,8 +784,6 @@ export function CardDetailView({
 	const isTaskTerminalEnabled =
 		selection.column.id === "in_progress" || selection.column.id === "review" || selection.column.id === "validation";
 	const effectiveTaskAgentId = sessionSummary?.agentId ?? selection.card.agentId ?? selectedAgentId;
-	const activeTaskConversationSessionSummary =
-		taskSessions[selectedTaskConversationSessionId] ?? sessionSummary ?? taskSessions[selection.card.id] ?? null;
 	const effectiveTaskConversationSessionAgentId =
 		activeTaskConversationSessionSummary?.agentId ?? effectiveTaskAgentId;
 	// 分流依据是「会话传输形态」而不是「是不是 Cline」：Cline SDK 与 ACP（omp）都由 Kanban
@@ -986,7 +995,7 @@ export function CardDetailView({
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
 		(isMainTaskConversationSessionSelected ? streamedClineChatMessages : null);
 
-	const agentChatPanel = showClineAgentChatPanel ? (
+	const agentSessionContent = showClineAgentChatPanel ? (
 		<ClineAgentChatPanel
 			ref={clineAgentChatPanelRef}
 			taskId={selectedTaskConversationSessionId}
@@ -1083,6 +1092,22 @@ export function CardDetailView({
 			cursorColor={terminalThemeColors.textPrimary}
 			taskColumnId={selection.column.id}
 		/>
+	);
+	const agentChatPanel = (
+		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+			{pendingUserDecision.decision ? (
+				<AgentRaisedPendingUserDecisionPanel
+					decision={pendingUserDecision.decision}
+					isSubmitting={pendingUserDecision.isSubmitting}
+					onAnswer={pendingUserDecision.answer}
+					onDismiss={pendingUserDecision.dismiss}
+					agentResponseGenerationTurnSequence={
+						activeTaskConversationSessionSummary?.agentResponseGenerationTurnSequence ?? 0
+					}
+				/>
+			) : null}
+			{agentSessionContent}
+		</div>
 	);
 
 	if (isMobile) {
