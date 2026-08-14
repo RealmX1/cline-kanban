@@ -11,6 +11,10 @@ import { TRPCError } from "@trpc/server";
 import type { AcpTaskSessionService } from "../acp-client-session/acp-task-session-service";
 import { listAvailableAgentSessions } from "../agent-session-history/available-agent-session-index";
 import {
+	salvageLatestUnansweredClaudeUserQuestionForTask,
+	salvageLatestUnansweredCodexUserQuestionForKnownSession,
+} from "../agent-session-history/pending-user-decision-transcript-salvage";
+import {
 	probePersistedAgentTranscriptLastConversationModelIdentity,
 	supportsPersistedAgentTranscriptLastConversationModelProbe,
 } from "../agent-session-history/persisted-agent-transcript-last-conversation-model-probe";
@@ -22,6 +26,8 @@ import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-se
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtime-config";
 import {
+	getRuntimeAgentSessionTransport,
+	isRuntimeAgentSessionDrivenByAcpProtocol,
 	isRuntimeAgentSessionSummaryDrivenByAcpProtocol,
 	resolveRuntimeAgentSessionTransportFromSummary,
 } from "../core/agent-catalog";
@@ -98,6 +104,8 @@ import {
 	dismissAgentRaisedPendingUserDecision,
 	isOpenAgentRaisedPendingUserDecision,
 	readAgentRaisedPendingUserDecisions,
+	recordAgentRaisedPendingUserDecision,
+	resolveAgentRaisedPendingUserDecisionOrderedQuestions,
 } from "../state/agent-raised-pending-user-decision-store";
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
@@ -412,6 +420,74 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 
 	const buildConfigResponse = (runtimeConfig: RuntimeConfigState) =>
 		buildRuntimeConfigResponse(runtimeConfig, clineProviderService.getProviderSettingsSummary());
+
+	const resumeTerminalTaskSessionForPendingUserDecisionAnswerDelivery = async (
+		workspaceScope: RuntimeTrpcWorkspaceScope,
+		taskId: string,
+	): Promise<boolean> => {
+		const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+		const resumedFromInMemoryRestartRequest =
+			typeof terminalManager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery === "function"
+				? await terminalManager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(taskId)
+				: false;
+		if (resumedFromInMemoryRestartRequest) {
+			return true;
+		}
+		// Kanban 完整重启后 entry.restartRequest 是纯内存态、必然丢失；从 durable board + runtime config
+		// 重建与 refreshTaskTerminal 相同的续跑请求，使“已保存答案”不会永久卡在 delivery_failed。
+		const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+		const card = board.columns.flatMap((column) => column.cards).find((candidate) => candidate.id === taskId);
+		if (!card) {
+			return false;
+		}
+		const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+		const effectiveAgentId =
+			terminalManager.getSummary(taskId)?.agentId ?? card.agentId ?? scopedRuntimeConfig.selectedAgentId;
+		if (effectiveAgentId === "cline" || isRuntimeAgentSessionDrivenByAcpProtocol(effectiveAgentId)) {
+			return false;
+		}
+		const resolvedConfig =
+			effectiveAgentId === scopedRuntimeConfig.selectedAgentId
+				? scopedRuntimeConfig
+				: { ...scopedRuntimeConfig, selectedAgentId: effectiveAgentId };
+		const resolved = resolveAgentCommand(resolvedConfig);
+		if (!resolved) {
+			return false;
+		}
+		const taskCwd = isHomeAgentSessionId(taskId)
+			? workspaceScope.workspacePath
+			: await resolveExistingTaskCwdOrEnsure({
+					cwd: workspaceScope.workspacePath,
+					taskId,
+					baseRef: card.baseRef,
+					worktreeMode: card.worktreeMode,
+				});
+		const startedSummary = await terminalManager.startTaskSession({
+			taskId,
+			agentId: resolved.agentId,
+			binary: resolved.binary,
+			args: resolved.args,
+			taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
+				card.taskAgentPermissionMode,
+				scopedRuntimeConfig.agentAutonomousModeEnabled,
+			),
+			autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
+			cwd: taskCwd,
+			prompt: "",
+			images: undefined,
+			startInPlanMode: undefined,
+			resumeFromTrash: true,
+			workspaceId: workspaceScope.workspaceId,
+			projectPath: workspaceScope.workspacePath,
+			parentSessionId: undefined,
+			taskAgentSessionInitialization: undefined,
+			terminalAgentModelOverrideSettings:
+				card.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
+					? card.terminalAgentModelOverrideSettings
+					: undefined,
+		});
+		return startedSummary.pid != null;
+	};
 
 	// W2 Ctrl+S 暂存的整条原子链路：读框 → 回填被折叠的粘贴 → 写库 → 转发 Ctrl+S 清框。
 	//
@@ -1176,22 +1252,93 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 		// 「agent 问了你一个问题」的 durable 账本读侧。刻意**不**读会话内存：提问它的那个进程可能
 		// 早已被回收，UI 要呈现的正是「独立于会话存活」的那份记录。
-		listAgentRaisedPendingUserDecisions: async (workspaceScope) => {
-			const decisions = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+		listAgentRaisedPendingUserDecisions: async (workspaceScope, input) => {
+			let decisions = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+			const taskId = input.taskId?.trim();
+			const alreadyHasOpenDecisionForTask =
+				taskId !== undefined &&
+				decisions.some((decision) => decision.taskId === taskId && isOpenAgentRaisedPendingUserDecision(decision));
+			if (taskId && !alreadyHasOpenDecisionForTask) {
+				// 历史补录只在用户打开一个具体任务时触发。Claude 只查该 worktree 可直接寻址的目录；
+				// Codex 只接受卡片已知的精确 session id，绝不为此跑全盘 rollout 内容扫描。
+				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+				const card = board.columns.flatMap((column) => column.cards).find((candidate) => candidate.id === taskId);
+				if (card) {
+					const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+					const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+					const agentId =
+						terminalManager.getSummary(taskId)?.agentId ?? card.agentId ?? scopedRuntimeConfig.selectedAgentId;
+					let taskCwd: string | null = null;
+					try {
+						taskCwd = isHomeAgentSessionId(taskId)
+							? workspaceScope.workspacePath
+							: await resolveTaskCwd({
+									cwd: workspaceScope.workspacePath,
+									taskId,
+									baseRef: card.baseRef,
+									ensure: false,
+									worktreeMode: card.worktreeMode,
+								});
+					} catch {
+						// Worktree 已不存在时不为了 salvage 重建它；这是只读、按需的保守恢复。
+					}
+					const knownSessionInitialization = card.taskAgentSessionInitialization;
+					const salvaged =
+						agentId === "claude" && taskCwd
+							? await salvageLatestUnansweredClaudeUserQuestionForTask({
+									workspacePath: taskCwd,
+									...(knownSessionInitialization?.sourceAgentId === "claude"
+										? { knownSessionId: knownSessionInitialization.sourceSessionId }
+										: {}),
+								})
+							: agentId === "codex" && knownSessionInitialization?.sourceAgentId === "codex"
+								? await salvageLatestUnansweredCodexUserQuestionForKnownSession({
+										sessionId: knownSessionInitialization.sourceSessionId,
+									})
+								: null;
+					if (salvaged) {
+						const summary = terminalManager.getSummary(taskId);
+						await recordAgentRaisedPendingUserDecision(workspaceScope.workspaceId, {
+							decisionId: `${taskId}:${salvaged.payload.decisionSourceId}`,
+							taskId,
+							workspaceId: workspaceScope.workspaceId,
+							agentId,
+							sessionTransport: getRuntimeAgentSessionTransport(agentId),
+							decisionKind: "ordinary_user_question",
+							questionMarkdown: salvaged.payload.questionMarkdown,
+							options: salvaged.payload.options,
+							allowsFreeformAnswer: salvaged.payload.allowsFreeformAnswer,
+							orderedQuestions: salvaged.payload.orderedQuestions,
+							askedAt: salvaged.askedAt,
+							graceDeadlineAt: summary?.agentSessionRuntimeReclamationEligibleAt ?? null,
+							originRuntimeSessionIncarnationId: summary?.runtimeSessionIncarnationId ?? null,
+							originTurnSequence: summary?.agentResponseGenerationTurnSequence ?? 0,
+							sourceHarnessSignal: salvaged.sourceHarnessSignal,
+						});
+						decisions = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+					}
+				}
+			}
 			return {
-				decisions: decisions.filter(isOpenAgentRaisedPendingUserDecision).map((decision) => ({
-					decisionId: decision.decisionId,
-					taskId: decision.taskId,
-					agentId: decision.agentId,
-					decisionKind: decision.decisionKind,
-					questionMarkdown: decision.questionMarkdown,
-					options: decision.options,
-					allowsFreeformAnswer: decision.allowsFreeformAnswer,
-					askedAt: decision.askedAt,
-					reclaimedAt: decision.reclaimedAt,
-					answerDeliveryState: decision.answerDeliveryState,
-					lastAnswerDeliveryFailureReason: decision.lastAnswerDeliveryFailureReason,
-				})),
+				decisions: decisions
+					.filter(
+						(decision) =>
+							isOpenAgentRaisedPendingUserDecision(decision) && (!taskId || decision.taskId === taskId),
+					)
+					.map((decision) => ({
+						decisionId: decision.decisionId,
+						taskId: decision.taskId,
+						agentId: decision.agentId,
+						decisionKind: decision.decisionKind,
+						questionMarkdown: decision.questionMarkdown,
+						options: decision.options,
+						allowsFreeformAnswer: decision.allowsFreeformAnswer,
+						orderedQuestions: resolveAgentRaisedPendingUserDecisionOrderedQuestions(decision),
+						askedAt: decision.askedAt,
+						reclaimedAt: decision.reclaimedAt,
+						answerDeliveryState: decision.answerDeliveryState,
+						lastAnswerDeliveryFailureReason: decision.lastAnswerDeliveryFailureReason,
+					})),
 			};
 		},
 		answerAgentRaisedPendingUserDecision: async (workspaceScope, input) => {
@@ -1227,8 +1374,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								reloadedSummary !== null && resolveSessionFacets(reloadedSummary).liveness !== "interrupted"
 							);
 						}
-						const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-						return await terminalManager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(taskId);
+						return await resumeTerminalTaskSessionForPendingUserDecisionAnswerDelivery(workspaceScope, taskId);
 					},
 					deliverTaskSessionInput: async ({ taskId, sessionTransport, text }) => {
 						if (sessionTransport === "acp_stdio_subprocess") {
@@ -1243,32 +1389,59 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						// ensureTaskSessionReadyForDelivery 之后调用（见交付顺序注释）。
 						// 与 RVF followup 那条路径一样交出争用能力：这条投递同样绝不能插进人类打了一半的那一行，
 						// 而人不在场时把那半句无损暂存进 Prompt Library 再放行，对用户严格更好。
+						// durable 待答答案只有在 base 的诚实回执确认提交后才标 delivered；同步 summary 只代表
+						// 「已受理」。任何就绪超时、会话退出、被取代或提交确认失败都会结算 false，保留重试资格。
 						const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 						const contentionPolicyConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
-						return (
-							terminalManager.submitTaskChatInputWhenReady(taskId, text, {
-								mayAutoStashAbsentHumanInputBox:
-									contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
-								preemptivelyStashHumanInputBox: async (contendedTaskId) => {
-									const stash = await stashTaskTerminalInputBoxIntoPromptLibrary({
-										workspaceScope,
-										taskId: contendedTaskId,
-										scope: "task",
-										origin: "terminal_stash_preempted_by_programmatic_delivery",
-									});
-									return stash.outcome === "stashed_into_prompt_library";
-								},
-							}) !== null
-						);
+						let resolveConfirmedDelivery: (delivered: boolean) => void = () => undefined;
+						const confirmedDelivery = new Promise<boolean>((resolve) => {
+							resolveConfirmedDelivery = resolve;
+						});
+						const acceptedSummary = terminalManager.submitTaskChatInputWhenReady(taskId, text, {
+							onDeliveryOutcome: (outcome) => {
+								resolveConfirmedDelivery(outcome.status !== "delivery_failed");
+							},
+							mayAutoStashAbsentHumanInputBox:
+								contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+							preemptivelyStashHumanInputBox: async (contendedTaskId) => {
+								const stash = await stashTaskTerminalInputBoxIntoPromptLibrary({
+									workspaceScope,
+									taskId: contendedTaskId,
+									scope: "task",
+									origin: "terminal_stash_preempted_by_programmatic_delivery",
+								});
+								return stash.outcome === "stashed_into_prompt_library";
+							},
+						});
+						return acceptedSummary ? await confirmedDelivery : false;
 					},
 				}).answerPendingUserDecision({
 					workspaceId: workspaceScope.workspaceId,
 					decisionId: body.decisionId,
 					selectedOptionIds: body.selectedOptionIds,
 					freeformText: body.freeformText,
+					...(body.orderedQuestionAnswers ? { orderedQuestionAnswers: body.orderedQuestionAnswers } : {}),
 				});
 			} catch (error) {
 				return { ok: false, delivered: false, error: error instanceof Error ? error.message : String(error) };
+			}
+		},
+		dismissAgentRaisedPendingUserDecision: async (workspaceScope, input) => {
+			try {
+				const decisionId = input.decisionId.trim();
+				if (!decisionId) {
+					return { ok: false, error: "decisionId is required" };
+				}
+				const dismissed = await dismissAgentRaisedPendingUserDecision(
+					workspaceScope.workspaceId,
+					decisionId,
+					Date.now(),
+				);
+				return dismissed
+					? { ok: true }
+					: { ok: false, error: `Pending decision "${decisionId}" cannot be dismissed` };
+			} catch (error) {
+				return { ok: false, error: error instanceof Error ? error.message : String(error) };
 			}
 		},
 		transitionTaskToReview: async (workspaceScope, input) => {

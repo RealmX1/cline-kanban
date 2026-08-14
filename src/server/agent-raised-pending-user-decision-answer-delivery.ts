@@ -19,6 +19,7 @@ import {
 	type PersistedAgentRaisedPendingUserDecision,
 	readAgentRaisedPendingUserDecisions,
 	recordAgentRaisedPendingUserDecisionAnswer,
+	resolveAgentRaisedPendingUserDecisionOrderedQuestions,
 	updateAgentRaisedPendingUserDecisionAnswerDeliveryState,
 } from "../state/agent-raised-pending-user-decision-store";
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
@@ -29,27 +30,51 @@ export function buildAgentRaisedPendingUserDecisionAnswerMessage(
 	decision: PersistedAgentRaisedPendingUserDecision,
 	answer: AgentRaisedPendingUserDecisionAnswer,
 ): string {
-	const selectedLabels = answer.selectedOptionIds
-		.map((optionId) => decision.options.find((option) => option.optionId === optionId)?.label ?? optionId)
-		.filter((label) => label.length > 0);
 	const lines = [
-		"你此前向我提出了一个需要我拍板的问题，当时的会话已经结束。这是我的答复：",
+		"这是 Cline Kanban 对一个因会话回收或重启而中断的待答问题所恢复的用户答复。",
 		"",
-		"原问题：",
-		decision.questionMarkdown,
-		"",
+		"以下逐项重述你当时提出的全部问题、全部选项及用户答案；请勿假设恢复后的 active branch 仍保留原工具调用。",
 	];
-	if (selectedLabels.length > 0) {
-		lines.push(`我的选择：${selectedLabels.join("、")}`);
+	const orderedQuestions = resolveAgentRaisedPendingUserDecisionOrderedQuestions(decision);
+	for (const [questionIndex, question] of orderedQuestions.entries()) {
+		const questionAnswer = answer.orderedQuestionAnswers?.find(
+			(candidate) => candidate.decisionQuestionId === question.decisionQuestionId,
+		);
+		const selectedOptionIds =
+			questionAnswer?.selectedOptionIds ?? (questionIndex === 0 ? answer.selectedOptionIds : []);
+		const freeformText = (questionAnswer?.freeformText ?? (questionIndex === 0 ? answer.freeformText : null))?.trim();
+		lines.push("", `问题 ${questionIndex + 1}${question.headerMarkdown ? `（${question.headerMarkdown}）` : ""}：`);
+		lines.push(
+			question.questionMarkdown,
+			"",
+			`全部选项（${question.selectionMode === "multiple" ? "多选" : "单选"}）：`,
+		);
+		for (const option of question.options) {
+			lines.push(`- [${option.optionId}] ${option.label}${option.description ? ` — ${option.description}` : ""}`);
+		}
+		const selectedLabels = selectedOptionIds.map((optionId) => {
+			const structuredQuestionOptionLabel = question.options.find((option) => option.optionId === optionId)?.label;
+			if (structuredQuestionOptionLabel !== undefined) {
+				return structuredQuestionOptionLabel;
+			}
+			// 旧客户端只提交顶层 selectedOptionIds；AskUserQuestion 的单问 payload 曾让顶层选项使用
+			// `option-N`、orderedQuestions[0] 使用 `question-0-option-N`。首问在结构化 ID 未命中时
+			// 回退顶层选项，确保恢复投递给 agent 的仍是人类可读标签。
+			return questionAnswer === undefined && questionIndex === 0
+				? (decision.options.find((option) => option.optionId === optionId)?.label ?? optionId)
+				: optionId;
+		});
+		if (selectedLabels.length > 0) {
+			lines.push("", `用户选择：${selectedLabels.join("、")}`);
+		}
+		if (freeformText) {
+			lines.push(selectedLabels.length > 0 ? `用户补充：${freeformText}` : `用户自由回答：${freeformText}`);
+		}
+		if (selectedLabels.length === 0 && !freeformText) {
+			lines.push("", "我没有选择任何选项，也未填写自由回答。");
+		}
 	}
-	const freeformText = answer.freeformText?.trim();
-	if (freeformText) {
-		lines.push(selectedLabels.length > 0 ? `补充说明：${freeformText}` : `我的答复：${freeformText}`);
-	}
-	if (selectedLabels.length === 0 && !freeformText) {
-		lines.push("我没有选择任何选项，请按你认为最合理的方式继续。");
-	}
-	lines.push("", "请据此继续。");
+	lines.push("", "请仅在以上用户答复的基础上继续先前工作。");
 	return lines.join("\n");
 }
 
@@ -65,7 +90,8 @@ export interface AgentRaisedPendingUserDecisionAnswerDeliveryDependencies {
 		taskId: string;
 		sessionTransport: RuntimeAgentSessionTransport;
 	}) => Promise<boolean>;
-	// 真正把文本送进会话。返回 false = 会话还没准备好（不是错误，稍后重试）。
+	// 真正把文本送进会话。返回 true 必须表示 transport 已完成实际写入；仅排入异步定时器不算。
+	// 返回 false = 写入前会话退出、投递被取消或仍未准备好（不是答案丢失，稍后重试）。
 	deliverTaskSessionInput: (input: {
 		workspaceId: string;
 		taskId: string;
@@ -137,7 +163,7 @@ export function createAgentRaisedPendingUserDecisionAnswerDelivery(
 				idempotencyKey: decision.answerDeliveryIdempotencyKey,
 			});
 			if (!delivered) {
-				return await markFailed("投递未被会话接受");
+				return await markFailed("投递未完成实际会话写入");
 			}
 		} catch (error) {
 			return await markFailed(error instanceof Error ? error.message : String(error));
@@ -159,6 +185,7 @@ export function createAgentRaisedPendingUserDecisionAnswerDelivery(
 			decisionId: string;
 			selectedOptionIds: string[];
 			freeformText: string | null;
+			orderedQuestionAnswers?: AgentRaisedPendingUserDecisionAnswer["orderedQuestionAnswers"];
 		}): Promise<DeliverAgentRaisedPendingUserDecisionAnswerResult> {
 			const { workspaceId, decisionId } = input;
 			const existing = (await readAgentRaisedPendingUserDecisions(workspaceId)).find(
@@ -180,6 +207,7 @@ export function createAgentRaisedPendingUserDecisionAnswerDelivery(
 			const answered = await recordAgentRaisedPendingUserDecisionAnswer(workspaceId, decisionId, {
 				selectedOptionIds: input.selectedOptionIds,
 				freeformText: input.freeformText,
+				...(input.orderedQuestionAnswers ? { orderedQuestionAnswers: input.orderedQuestionAnswers } : {}),
 				answeredAt,
 			});
 			if (!answered) {

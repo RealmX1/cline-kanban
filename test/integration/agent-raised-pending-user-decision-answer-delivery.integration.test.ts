@@ -95,12 +95,53 @@ describe.sequential("agent-raised-pending-user-decision answer delivery", () => 
 			expect(result).toEqual({ ok: true, delivered: true });
 			expect(callOrder).toEqual(["ensure-ready", "deadline-already-superseded", "deliver"]);
 			expect(deliveredText).toContain("数据访问层用哪种方案？");
+			expect(deliveredText).toContain("自建 SQL");
 			expect(deliveredText).toContain("用 ORM");
 			expect(deliveredText).toContain("顺带把迁移也走 ORM");
 
 			const decisions = await readAgentRaisedPendingUserDecisions(workspaceId);
 			expect(decisions[0]?.status).toBe("answered");
 			expect(decisions[0]?.answerDeliveryState).toBe("delivered");
+		});
+	});
+
+	it("兼容仅带顶层 selectedOptionIds 的旧答案，仍按首问选项映射成人类可读标签", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("project-a");
+			await recordAgentRaisedPendingUserDecision(workspaceId, {
+				...questionInput(workspaceId),
+				orderedQuestions: [
+					{
+						decisionQuestionId: "question-0",
+						headerMarkdown: "数据访问",
+						questionMarkdown: "数据访问层用哪种方案？",
+						selectionMode: "single",
+						options: [
+							{ optionId: "question-0-option-0", label: "自建 SQL" },
+							{ optionId: "question-0-option-1", label: "用 ORM" },
+						],
+						allowsFreeformAnswer: true,
+					},
+				],
+			});
+
+			let deliveredText = "";
+			await createAgentRaisedPendingUserDecisionAnswerDelivery({
+				now: () => ASKED_AT + 1_000,
+				ensureTaskSessionReadyForDelivery: async () => true,
+				deliverTaskSessionInput: async ({ text }) => {
+					deliveredText = text;
+					return true;
+				},
+			}).answerPendingUserDecision({
+				workspaceId,
+				decisionId: DECISION_ID,
+				selectedOptionIds: ["option-1"],
+				freeformText: null,
+			});
+
+			expect(deliveredText).toContain("用户选择：用 ORM");
+			expect(deliveredText).not.toContain("用户选择：option-1");
 		});
 	});
 
@@ -163,6 +204,58 @@ describe.sequential("agent-raised-pending-user-decision answer delivery", () => 
 			// 已送达之后再重试是彻底的 no-op。
 			expect(await delivery.retryUndeliveredAnswers(workspaceId)).toBe(0);
 			expect(deliver).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	it("实际写入完成前不标 delivered；排队取消后标失败并可由既有入口重试", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("project-a");
+			await recordAgentRaisedPendingUserDecision(workspaceId, questionInput(workspaceId));
+
+			let announceFirstPtyWriteAttemptStarted: () => void = () => undefined;
+			const firstPtyWriteAttemptStarted = new Promise<void>((resolve) => {
+				announceFirstPtyWriteAttemptStarted = resolve;
+			});
+			let settleFirstPtyWriteAttempt: (writtenToPty: boolean) => void = () => undefined;
+			const firstPtyWriteCompletion = new Promise<boolean>((resolve) => {
+				settleFirstPtyWriteAttempt = resolve;
+			});
+			let deliveryAttemptCount = 0;
+			const deliver = vi.fn(async () => {
+				deliveryAttemptCount += 1;
+				if (deliveryAttemptCount === 1) {
+					announceFirstPtyWriteAttemptStarted();
+					return await firstPtyWriteCompletion;
+				}
+				return true;
+			});
+			const delivery = createAgentRaisedPendingUserDecisionAnswerDelivery({
+				now: () => ASKED_AT + 1_000,
+				ensureTaskSessionReadyForDelivery: async () => true,
+				deliverTaskSessionInput: deliver,
+			});
+
+			const pendingAnswer = delivery.answerPendingUserDecision({
+				workspaceId,
+				decisionId: DECISION_ID,
+				selectedOptionIds: ["option-0"],
+				freeformText: null,
+			});
+			await firstPtyWriteAttemptStarted;
+
+			let decisions = await readAgentRaisedPendingUserDecisions(workspaceId);
+			expect(decisions[0]?.answerDeliveryState).toBe("delivery_in_progress");
+
+			// 模拟 session-manager 在真实 PTY write 之前因会话退出/投递被取代而把 completion 结算为 false。
+			settleFirstPtyWriteAttempt(false);
+			expect(await pendingAnswer).toEqual({ ok: true, delivered: false });
+			decisions = await readAgentRaisedPendingUserDecisions(workspaceId);
+			expect(decisions[0]?.answerDeliveryState).toBe("delivery_failed");
+
+			expect(await delivery.retryUndeliveredAnswers(workspaceId)).toBe(1);
+			decisions = await readAgentRaisedPendingUserDecisions(workspaceId);
+			expect(decisions[0]?.answerDeliveryState).toBe("delivered");
+			expect(deliver).toHaveBeenCalledTimes(2);
 		});
 	});
 

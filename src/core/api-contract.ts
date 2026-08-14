@@ -538,6 +538,18 @@ export const runtimeTaskConnectionRetrySchema = z.object({
 });
 export type RuntimeTaskConnectionRetry = z.infer<typeof runtimeTaskConnectionRetrySchema>;
 
+// 恢复一个落盘会话只负责重建上下文，绝不等价于开始新一轮生成。PTY agent 恢复期间用这条
+// 加性 sidecar 把「恢复历史」与「用户显式继续」分开：只有 UserPromptSubmit / BeforeAgent 这类
+// 货真价实的用户提交才能解除守卫。旧 sessions.json 缺字段时按 inactive 处理。
+export const runtimeTaskSessionRestorationContinuationGuardStateSchema = z.enum([
+	"inactive",
+	"restoring_agent_conversation_without_starting_new_turn",
+	"restored_agent_conversation_waiting_for_explicit_user_input",
+]);
+export type RuntimeTaskSessionRestorationContinuationGuardState = z.infer<
+	typeof runtimeTaskSessionRestorationContinuationGuardStateSchema
+>;
+
 // 程序化投递（RVF followup / task-chat 发送）与人类抢同一个终端输入框时的**挂起可见性** sidecar。
 //
 // 存在的理由就是 2026-08-08 那 49 分钟：投递在等，而屏幕上什么都不说。让路本身是对的——绝不能把
@@ -727,6 +739,7 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	connectionRetry: runtimeTaskConnectionRetrySchema.nullable().optional(),
+	restorationContinuationGuardState: runtimeTaskSessionRestorationContinuationGuardStateSchema.optional(),
 	// 程序化投递被人类输入框占用而挂起时的可见性 sidecar（加性、nullable + optional，仅内存态）。
 	// present = 此刻确实有投递在等这个终端的输入框；null = 没有任何投递在等（绝大多数时刻）。
 	terminalDeliveryContention: runtimeTaskTerminalDeliveryContentionSchema.nullable().optional(),
@@ -2799,6 +2812,16 @@ export const runtimeAgentRaisedDecisionOptionSchema = z.object({
 });
 export type RuntimeAgentRaisedDecisionOption = z.infer<typeof runtimeAgentRaisedDecisionOptionSchema>;
 
+export const runtimeAgentRaisedDecisionQuestionSchema = z.object({
+	decisionQuestionId: z.string(),
+	headerMarkdown: z.string().nullable(),
+	questionMarkdown: z.string(),
+	selectionMode: z.enum(["single", "multiple"]),
+	options: z.array(runtimeAgentRaisedDecisionOptionSchema),
+	allowsFreeformAnswer: z.boolean(),
+});
+export type RuntimeAgentRaisedDecisionQuestion = z.infer<typeof runtimeAgentRaisedDecisionQuestionSchema>;
+
 export const runtimeAgentRaisedUserQuestionPayloadSchema = z.object({
 	// harness 提供的稳定标识（Claude 的 tool_use_id），用于跨重发去重。
 	decisionSourceId: z.string(),
@@ -2806,6 +2829,7 @@ export const runtimeAgentRaisedUserQuestionPayloadSchema = z.object({
 	options: z.array(runtimeAgentRaisedDecisionOptionSchema),
 	allowsFreeformAnswer: z.boolean(),
 	multiSelect: z.boolean(),
+	orderedQuestions: z.array(runtimeAgentRaisedDecisionQuestionSchema),
 });
 export type RuntimeAgentRaisedUserQuestionPayload = z.infer<typeof runtimeAgentRaisedUserQuestionPayloadSchema>;
 
@@ -2826,12 +2850,25 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// 两者互斥：一次 hook 只可能是其中一种。
 	agentRaisedUserQuestion: runtimeAgentRaisedUserQuestionPayloadSchema.optional(),
 	agentRaisedToolPermission: runtimeAgentRaisedToolPermissionPayloadSchema.optional(),
+	// UserPromptSubmit 的 prompt 只在同步 hook 请求内短暂流转，用于区分真人输入与 harness 在恢复时
+	// 自动塞入的任务通知；普通诊断日志与 session summary 均不得记录它。
+	submittedPromptText: z.string().optional(),
 });
 export type RuntimeHookIngestRequest = z.infer<typeof runtimeHookIngestRequestSchema>;
+
+export const runtimeHarnessUserPromptProcessingDirectiveSchema = z.object({
+	processingDecision: z.enum(["allow", "block_and_defer_until_explicit_user_input"]),
+	userVisibleReason: z.string().optional(),
+	additionalContextMarkdown: z.string().optional(),
+});
+export type RuntimeHarnessUserPromptProcessingDirective = z.infer<
+	typeof runtimeHarnessUserPromptProcessingDirectiveSchema
+>;
 
 export const runtimeHookIngestResponseSchema = z.object({
 	ok: z.boolean(),
 	error: z.string().optional(),
+	harnessUserPromptProcessingDirective: runtimeHarnessUserPromptProcessingDirectiveSchema.optional(),
 });
 export type RuntimeHookIngestResponse = z.infer<typeof runtimeHookIngestResponseSchema>;
 
@@ -2845,6 +2882,7 @@ export const runtimeAgentRaisedPendingUserDecisionSchema = z.object({
 	questionMarkdown: z.string(),
 	options: z.array(runtimeAgentRaisedDecisionOptionSchema),
 	allowsFreeformAnswer: z.boolean(),
+	orderedQuestions: z.array(runtimeAgentRaisedDecisionQuestionSchema),
 	askedAt: z.number(),
 	// 会话已被回收的时刻；null = 提问它的那个会话还活着，可以直接答给它。
 	reclaimedAt: z.number().nullable(),
@@ -2866,10 +2904,26 @@ export type RuntimeListAgentRaisedPendingUserDecisionsResponse = z.infer<
 	typeof runtimeListAgentRaisedPendingUserDecisionsResponseSchema
 >;
 
+export const runtimeListAgentRaisedPendingUserDecisionsRequestSchema = z.object({
+	taskId: z.string().trim().min(1).optional(),
+});
+export type RuntimeListAgentRaisedPendingUserDecisionsRequest = z.infer<
+	typeof runtimeListAgentRaisedPendingUserDecisionsRequestSchema
+>;
+
 export const runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema = z.object({
 	decisionId: z.string(),
 	selectedOptionIds: z.array(z.string()),
 	freeformText: z.string().nullable(),
+	orderedQuestionAnswers: z
+		.array(
+			z.object({
+				decisionQuestionId: z.string(),
+				selectedOptionIds: z.array(z.string()),
+				freeformText: z.string().nullable(),
+			}),
+		)
+		.optional(),
 });
 export type RuntimeAnswerAgentRaisedPendingUserDecisionRequest = z.infer<
 	typeof runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema
@@ -2884,6 +2938,21 @@ export const runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema = z.objec
 });
 export type RuntimeAnswerAgentRaisedPendingUserDecisionResponse = z.infer<
 	typeof runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema
+>;
+
+export const runtimeDismissAgentRaisedPendingUserDecisionRequestSchema = z.object({
+	decisionId: z.string(),
+});
+export type RuntimeDismissAgentRaisedPendingUserDecisionRequest = z.infer<
+	typeof runtimeDismissAgentRaisedPendingUserDecisionRequestSchema
+>;
+
+export const runtimeDismissAgentRaisedPendingUserDecisionResponseSchema = z.object({
+	ok: z.boolean(),
+	error: z.string().optional(),
+});
+export type RuntimeDismissAgentRaisedPendingUserDecisionResponse = z.infer<
+	typeof runtimeDismissAgentRaisedPendingUserDecisionResponseSchema
 >;
 
 // ==========================================================================

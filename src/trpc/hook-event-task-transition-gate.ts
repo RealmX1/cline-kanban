@@ -1,4 +1,4 @@
-import type { RuntimeHookEvent, RuntimeTaskSessionSummary } from "../core/api-contract";
+import type { RuntimeHookEvent, RuntimeTaskSessionSummary, RuntimeTaskSessionUserTurnKind } from "../core/api-contract";
 import {
 	isAwaitingUserReviewTurn,
 	isParkedAwaitingDispatchedBackgroundWork,
@@ -20,7 +20,11 @@ import {
 // `reviewReason`(attention/hook/error) 读**故意保留不动**——`deriveUserTurnKind` 是非 1:1 映射
 // （attention→needs_input，而 needs_input 亦覆盖 reviewReason===null），把它换成 `userTurnKind`
 // 会改变行为，属后续 channel-C 批次，本行为保持块绝不偷渡，只迁 `state` 轴。
-export function canTransitionTaskForHookEvent(summary: RuntimeTaskSessionSummary, event: RuntimeHookEvent): boolean {
+export function canTransitionTaskForHookEvent(
+	summary: RuntimeTaskSessionSummary,
+	event: RuntimeHookEvent,
+	explicitUserTurnKind: RuntimeTaskSessionUserTurnKind | null = null,
+): boolean {
 	if (event === "activity") {
 		return false;
 	}
@@ -29,7 +33,10 @@ export function canTransitionTaskForHookEvent(summary: RuntimeTaskSessionSummary
 		// {agent,live,null}，但它发出的裸 Stop 不是「收尾等用户审查」而是「park 等后台」，放行会经
 		// transitionToReview → broadcastTaskReadyForReview 误发 OS 通知。闸在此返回 false → hooks-api 走
 		// no-transition 路径（仅 applyHookActivity）→ 通知分支不可达。判据读 sidecar（非 facet），不绕开 facet 真相源。
-		return resolveSessionFacets(summary).turnOwner === "agent" && !isParkedAwaitingDispatchedBackgroundWork(summary);
+		return (
+			resolveSessionFacets(summary).turnOwner === "agent" &&
+			(explicitUserTurnKind !== null || !isParkedAwaitingDispatchedBackgroundWork(summary))
+		);
 	}
 	// manual_review 与 idle_stall（scanForStalls 对「完工不退出」终端会话的自愈翻入）加入放行集，与 reducer 的
 	// canReturnToRunning 保持一致（缺一则闸/reducer 不一致、该 reviewReason 的卡仍翻不回）。本闸先于 reducer，故两处必须同步。

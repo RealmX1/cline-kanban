@@ -338,6 +338,11 @@ interface ActiveProcessState {
 	// 程序化「已提交用户轮」投递（RVF followup 等）的待决就绪轮询定时器：同一时刻至多一个，
 	// last-write-wins；命中就绪/deadline 写入后或 session 退出时清除。null 表示当前无待决投递。
 	taskChatInputDeliveryTimer: NodeJS.Timeout | null;
+	// Claude 恢复旧会话后，真人 UserPromptSubmit 会解除广义恢复守卫，使 agent 新一轮产出与连接
+	// 中断恢复恢复正常；但恢复时排队的 task-notification 可能稍晚才抵达。这个窄守卫只让
+	// hooks-api 继续拦截结构化 harness 通知，绝不拦真人输入，也不参与 output-reaction 门控；
+	// 首轮真人恢复回合自然 Stop 后关闭，进程退出时随 active state 一起销毁。
+	interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds: boolean;
 	// 投递「代际」单调计数：每次 submitTaskChatInputWhenReady 自增并被本次 attempt 捕获。
 	// 清掉定时器无法取消「已过定时器、正 await resolveInteractivePromptReadiness」的在途 attempt，
 	// 它 await 返回后仍会写旧文本——故 attempt 在写/重排前复查代际，被新投递取代者直接放弃，
@@ -616,6 +621,7 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
 		connectionRetry: null,
+		restorationContinuationGuardState: "inactive",
 	});
 }
 
@@ -888,6 +894,13 @@ function discardPendingOutputAnalysis(state: {
 
 function clearResumeSubstantiveGuard(active: ActiveProcessState): void {
 	active.suppressSubstantiveOutputUntilContinues = false;
+}
+
+function isRestorationContinuationGuardArmed(summary: RuntimeTaskSessionSummary): boolean {
+	return (
+		summary.restorationContinuationGuardState === "restoring_agent_conversation_without_starting_new_turn" ||
+		summary.restorationContinuationGuardState === "restored_agent_conversation_waiting_for_explicit_user_input"
+	);
 }
 
 // 程序化「已提交用户轮」投递的就绪判别式（替代裸 boolean，使兜底写的 via= 日志能区分命中哪条通道，
@@ -1290,6 +1303,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 				if (isParkedAwaitingDispatchedBackgroundWork(entry.summary)) {
 					return false;
 				}
+				if (isRestorationContinuationGuardArmed(entry.summary)) {
+					return false;
+				}
 				// dual-axis facet 真相源：仅 turnOwner==="agent" 才算活跃 agent 回合（与 connection-drop
 				// 检测器的主门控对齐）。会话不存在 / 已翻入 user 回合（agent 提问 / 计划评审 / 权限确认）
 				// 时返回 false，让检测器让位、绝不把续跑注入到等待用户的对话框里。
@@ -1560,6 +1576,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 推进 lastSubstantiveOutputAt。刻意不下沉进 writePasteSubmissionWithConfirm：那个 writer 同时
 		// 服务连接中断自动续跑（submitConnectionDropContinuation），自动恢复不是用户继续、绝不可解除 guard。
 		clearResumeSubstantiveGuard(currentActive);
+		// Codex 没有可供 Kanban 识别真人提交的可靠 UserPromptSubmit hook，故在这个明确的程序化提交
+		// 边沿解除。Claude 必须把守卫保留到其 UserPromptSubmit hook：那条同步 hook 还要原子取出恢复期
+		// 暂存的 task-notification，并作为 additionalContext 附到本次用户提交；在这里提前解除会漏掉它。
+		if (currentEntry.summary.agentId === "codex") {
+			this.disarmRestorationContinuationGuard(taskId);
+		}
 		// 就绪命中 或 deadline 兜底：经写后确认闭环写 PTY（不走 writeInput，避免把程序化投递记成 lastUserInputAt
 		// 而自我抑制——与 submitConnectionDropContinuation 一致）。writePasteSubmissionWithConfirm 把 paste 框架与
 		// 提交 CR 分两次写（第二次以摄入证据为门）；若 CR 仍被吞掉（粘贴进框但不发送），其确认 tick 会补发裸 CR；
@@ -2416,7 +2438,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		entry.terminalStateMirror?.dispose();
 		entry.terminalStateMirror = null;
-
 		const cols = Number.isFinite(request.cols) && (request.cols ?? 0) > 0 ? Math.floor(request.cols ?? 0) : 120;
 		const rows = Number.isFinite(request.rows) && (request.rows ?? 0) > 0 ? Math.floor(request.rows ?? 0) : 40;
 		const terminalStateMirror = new TerminalStateMirror(cols, rows, {
@@ -2591,6 +2612,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 				this.appendPendingOutputAnalysisText(request.taskId, entry, data);
 			}
 		};
+		// 必须紧贴 spawn 且位于它之前武装：Claude 子进程一启动就可能恢复后台 task notification，
+		// 继而同步触发 UserPromptSubmit hook。放在 prepareAgentLaunch 之后可避免 launch 准备失败留下假守卫；
+		// 若等 spawn 返回后才写，通知又可能在守卫落定前穿过去并启动新一轮生成。
+		if (request.resumeFromTrash === true) {
+			const restoringSummary = updateSummary(entry, {
+				restorationContinuationGuardState: "restoring_agent_conversation_without_starting_new_turn",
+			});
+			this.emitSummary(restoringSummary);
+		}
 		let session: PtySession;
 		try {
 			session = PtySession.spawn({
@@ -2676,6 +2706,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				latestHookActivity: null,
 				latestTurnCheckpoint: null,
 				previousTurnCheckpoint: null,
+				restorationContinuationGuardState: "inactive",
 				...(request.taskConversationSessionMetadata
 					? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
 					: {}),
@@ -2748,6 +2779,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				request.resumePriorAgentConversationWithoutResendingPrompt === true ||
 				launch.resumesPriorAgentConversation === true,
 			taskChatInputDeliveryTimer: null,
+			interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds:
+				request.agentId === "claude" && request.resumeFromTrash === true,
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
@@ -2792,12 +2825,27 @@ export class TerminalSessionManager implements TerminalSessionService {
 			? "attention"
 			: "hook";
 		const startedAt = now();
+		// 恢复已有对话只重建运行时，不能改变仍待用户处理的决策种类。reviewReason="attention" 是
+		// 恢复期的通用运行时成因，不足以反推出 question / permission；若让 facet 构造器自行派生，
+		// 两者都会降级成 needs_input，下一次服务重启的空快照便失去安全自动恢复资格。
+		const userTurnKindBeforeAgentConversationRestoration = resolveSessionFacets(entry.summary).userTurnKind;
+		const pendingUserDecisionKindPreservedAcrossRestoration =
+			request.resumeFromTrash === true &&
+			(userTurnKindBeforeAgentConversationRestoration === "question" ||
+				userTurnKindBeforeAgentConversationRestoration === "permission")
+				? userTurnKindBeforeAgentConversationRestoration
+				: undefined;
 		updateSummary(entry, {
 			...buildTerminalFacetPatch(entry.summary, startsWithoutSendingNewPrompt ? "awaiting_review" : "running", {
 				reviewReason: startsWithoutSendingNewPrompt ? startWithoutPromptReviewReason : null,
 				pid: session.pid,
 				agentId: request.agentId,
 			}),
+			// buildTerminalFacetPatch 仍提供完整三元组；这里只在同一个 facet patch 内替换人轴种类，
+			// 不会产生裸写单 facet 的中间态。
+			...(pendingUserDecisionKindPreservedAcrossRestoration === undefined
+				? {}
+				: { userTurnKind: pendingUserDecisionKindPreservedAcrossRestoration }),
 			// 新活体：每次真实 spawn 换一个 id。回收调度器据此判断「已落盘的期限说的还是不是同一个
 			// 活体」——同 taskId 重启出来的新会话绝不会被上一个活体留下的陈旧期限误杀。
 			runtimeSessionIncarnationId: randomUUID(),
@@ -2813,6 +2861,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			warningMessage: null,
 			latestTurnCheckpoint: null,
 			previousTurnCheckpoint: null,
+			restorationContinuationGuardState:
+				request.resumeFromTrash === true
+					? "restored_agent_conversation_waiting_for_explicit_user_input"
+					: "inactive",
 			...(request.taskConversationSessionMetadata
 				? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
 				: {}),
@@ -2994,6 +3046,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			deferredSubstantiveOutputAnalysisTimer: null,
 			suppressSubstantiveOutputUntilContinues: false,
 			taskChatInputDeliveryTimer: null,
+			interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds: false,
 			taskChatInputDeliveryGeneration: 0,
 			submitConfirmTimer: null,
 			submitConfirmGeneration: 0,
@@ -3080,6 +3133,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 人工手敲（含在 Claude resume 三选一菜单里选 1/2/3、或提交新消息）是「用户真·继续」的
 		// agent 无关信号：解除 resume substantive guard，此后 agent 的新产出才推进 lastSubstantiveOutputAt。
 		clearResumeSubstantiveGuard(entry.active);
+		// PTY 字节可能只是仍在编辑，真正的 Claude/Kimi 用户提交由 hook 解除；Codex 当前没有可靠的
+		// UserPromptSubmit hook，因此只在 Enter/换行这一提交边沿解除恢复续跑守卫。
+		if (entry.summary.agentId === "codex" && (data.includes(13) || data.includes(10))) {
+			this.disarmRestorationContinuationGuard(taskId);
+		}
 		// 旧门控 `state==="awaiting_review"` → facet 真相源 isAwaitingUserReviewTurn（涵盖 live↔exited
 		// 折叠、零行为漂移）。reviewReason∈{hook,attention,error} 读保留——deriveUserTurnKind 非 1:1
 		// （attention→needs_input 而 needs_input 亦覆盖 null），换 userTurnKind 会改行为，留 channel-C 批次。
@@ -3663,12 +3721,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return null;
 		}
 		const before = entry.summary;
-		const summary = this.applySessionEvent(entry, { type: "hook.to_in_progress" });
+		let summary = this.applySessionEvent(entry, { type: "hook.to_in_progress" });
 		// 状态机翻 running 无条件；但 resume substantive guard 只在「用户真·继续」时解除——
 		// 仅源自 UserPromptSubmit 的 to_in_progress 才算，PostToolUse 等自动续跑旧回合的中途活动不算，
 		// 否则 Claude --continue 自动续跑一次工具调用就会误解除 guard、让重播刷 lastSubstantiveOutputAt。
 		if (entry.active && options?.userInitiatedResume === true) {
 			clearResumeSubstantiveGuard(entry.active);
+		}
+		if (options?.userInitiatedResume === true && isRestorationContinuationGuardArmed(summary)) {
+			summary = updateSummary(entry, { restorationContinuationGuardState: "inactive" });
 		}
 		if (summary !== before && entry.active) {
 			for (const listener of entry.listeners.values()) {
@@ -3676,6 +3737,44 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			this.emitSummary(summary);
 		}
+		return cloneSummary(summary);
+	}
+
+	isRestorationContinuationGuardArmed(taskId: string): boolean {
+		const entry = this.entries.get(taskId);
+		return entry ? isRestorationContinuationGuardArmed(entry.summary) : false;
+	}
+
+	isRestorationHarnessGeneratedTaskNotificationInterceptionActive(taskId: string): boolean {
+		const entry = this.entries.get(taskId);
+		return (
+			entry !== undefined &&
+			(isRestorationContinuationGuardArmed(entry.summary) ||
+				entry.active?.interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds === true)
+		);
+	}
+
+	completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn(taskId: string): void {
+		const entry = this.entries.get(taskId);
+		if (!entry?.active || isRestorationContinuationGuardArmed(entry.summary)) {
+			return;
+		}
+		entry.active.interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds = false;
+	}
+
+	disarmRestorationContinuationGuard(taskId: string): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return null;
+		}
+		if (!isRestorationContinuationGuardArmed(entry.summary)) {
+			return cloneSummary(entry.summary);
+		}
+		const summary = updateSummary(entry, { restorationContinuationGuardState: "inactive" });
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
 		return cloneSummary(summary);
 	}
 
