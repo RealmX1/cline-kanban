@@ -171,6 +171,19 @@ npm run unlink
 - `npm run web:test`: run web UI tests
 - `npm run check`: lint, typecheck, and test runtime package
 
+## Manual probes against real agents
+
+These are **not** part of `npm run check` or CI: they drive real agent binaries and depend on real TUI
+rendering. Run them by hand when you touch the code they cover, or after an agent's major version bump.
+
+- `npx tsx scripts/acp-protocol-smoke.ts`: protocol-level smoke against a real ACP agent (`omp` by default).
+- `npx tsx scripts/claude-terminal-input-box-grammar-drift-probe.ts`: drift sentinel for the Claude TUI
+  input-box grammar and paste-folding thresholds that W1 (honest terminal delivery) and W2 (Ctrl+S stash)
+  are built on. Makes **zero API calls** — it never submits a message, it only observes the empty input
+  box and bracketed-paste folding. Run it after changing `CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR`
+  (`src/terminal/terminal-input-box-reader.ts`) or when Claude Code updates: the in-repo unit tests feed
+  hand-built screen snapshots, so they stay green even when the real grammar has drifted out from under them.
+
 ## Tests
 
 - `test/integration`: integration tests for runtime behavior and startup flows

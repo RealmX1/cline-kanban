@@ -33,6 +33,42 @@ export interface TaskEditDraft {
 	savedAt: number;
 }
 
+/**
+ * 一份草稿里「表单里那些值」的那部分——去掉身份（taskId）与时间戳（savedAt）。
+ *
+ * 由 `TaskEditDraft` 派生而不是另抄一份字段表：给任务加字段时，漏改这里会直接编译不过，
+ * 而不是变成一处「新字段不参与比较」的静默错位。
+ */
+export type TaskEditDraftFormValues = Omit<TaskEditDraft, "taskId" | "savedAt">;
+
+/**
+ * 两份表单值是不是同一份内容。
+ *
+ * 用途是回答「用户动过表单没有」：编辑对话框的表单是同步铺上去的，服务端草稿快照可能迟到，
+ * 迟到的快照只有在用户还没动过表单时才可以拿来重铺（见 use-task-editor.ts）。
+ */
+export function areTaskEditDraftFormValuesEqual(
+	left: TaskEditDraftFormValues,
+	right: TaskEditDraftFormValues,
+): boolean {
+	return (
+		left.prompt === right.prompt &&
+		JSON.stringify(left.images) === JSON.stringify(right.images) &&
+		left.startInPlanMode === right.startInPlanMode &&
+		left.taskAgentPermissionMode === right.taskAgentPermissionMode &&
+		left.autoReviewEnabled === right.autoReviewEnabled &&
+		left.autoReviewMode === right.autoReviewMode &&
+		left.branchRef === right.branchRef &&
+		(left.worktreeMode ?? "branch") === (right.worktreeMode ?? "branch") &&
+		left.agentId === right.agentId &&
+		JSON.stringify(left.clineSettings ?? null) === JSON.stringify(right.clineSettings ?? null) &&
+		JSON.stringify(left.terminalAgentModelOverrideSettings ?? null) ===
+			JSON.stringify(right.terminalAgentModelOverrideSettings ?? null) &&
+		JSON.stringify(left.taskAgentSessionInitialization ?? null) ===
+			JSON.stringify(right.taskAgentSessionInitialization ?? null)
+	);
+}
+
 // 下面三个函数的真相源已搬到服务端，这里只保留同步签名并委派给 task-edit-draft-store。
 // 签名不变是刻意的：`readSavedTaskEditDraft` 要给编辑表单铺初值，慢一帧就会先渲染出空表单再跳成
 // 草稿内容。store 用「内存快照 + localStorage 镜像」保证同步可读，服务端同步在后台异步进行。

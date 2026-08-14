@@ -1,4 +1,14 @@
-import { ChevronDown, ChevronUp, CornerDownLeft, FileText, GitBranch, Globe, Plus, Trash2 } from "lucide-react";
+import {
+	AlertTriangle,
+	ChevronDown,
+	ChevronUp,
+	CornerDownLeft,
+	FileText,
+	GitBranch,
+	Globe,
+	Plus,
+	Trash2,
+} from "lucide-react";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -44,14 +54,103 @@ function formatPromptMetadataTimestamp(timestamp: number): string {
 	});
 }
 
+// 只给「不是用户在面板里手写的」来源打标。`manual` 是绝大多数条目的情形，给它也挂一个徽标等于给
+// 整个列表加一列永远为真的噪音；而这两种来源恰恰是用户**没有主动创建**、事后需要认出来的那些
+// ——尤其抢占那一种：它是在用户不在场时由运行时替他写进来的。
+const PROMPT_ORIGIN_BADGE_META: Partial<
+	Record<NonNullable<StoredPrompt["origin"]>, { label: string; tooltip: string }>
+> = {
+	terminal_stash_by_user: {
+		label: "Stashed",
+		tooltip: "You pressed Ctrl+S in this task's terminal — the unsent input box text was saved here",
+	},
+	terminal_stash_preempted_by_programmatic_delivery: {
+		label: "Auto-stashed",
+		tooltip:
+			"A programmatic delivery needed this terminal's input box while you were away. Your unsent text was saved here first, then the box was cleared — fill it back in with the ↵ button.",
+	},
+};
+
+/**
+ * 这段正文里有多少处折叠粘贴没能换回原文。
+ *
+ * 口径与 stash 当下那条 toast 完全一致：三项互斥（整框自洽性校验没过时一次都没配过），相加不重复计数；
+ * 且**不**把输入侧账本的 `unrecoverablePasteCount` 加进来——两者会重叠，相加就是虚报。
+ */
+function countUnrecoveredFoldedPastesInPrompt(prompt: StoredPrompt): number {
+	const fidelity = prompt.terminalInputBoxStashFidelity;
+	if (!fidelity) {
+		// 缺字段 ≠ 保真：手写条目与升级前存的条目本来就没有这个概念，不该凭空显示一个「0 处丢失」的保证。
+		return 0;
+	}
+	return (
+		fidelity.placeholdersLeftUnbackfilledBecausePayloadWasDropped +
+		fidelity.placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched +
+		fidelity.placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed
+	);
+}
+
+/**
+ * 「这条不是你自己在面板里写的」徽标。
+ *
+ * 独立成组件而不是内联在 `PromptMetadataPill` 里：孤儿回收区的条目不复用 `PromptRow`（那里没有
+ * scope 切换、没有可编辑正文），但**来源可辨识**这条呈现契约在那个入口同样成立——恰恰更成立，
+ * 抢占来源的条目本就是用户不在场时被写进来的，落进回收区后更需要一眼认出来。
+ */
+function PromptOriginBadge({
+	prompt,
+	className,
+}: {
+	prompt: StoredPrompt;
+	className?: string;
+}): React.ReactElement | null {
+	const originMeta = prompt.origin ? PROMPT_ORIGIN_BADGE_META[prompt.origin] : undefined;
+	if (!originMeta) {
+		return null;
+	}
+	return (
+		<Tooltip content={originMeta.tooltip}>
+			<span
+				className={cn("pointer-events-auto shrink-0 rounded-full px-1.5 font-medium text-text-primary", className)}
+			>
+				{originMeta.label}
+			</span>
+		</Tooltip>
+	);
+}
+
 function PromptMetadataPill({ prompt }: { prompt: StoredPrompt }): React.ReactElement {
 	const scopeMeta = PROMPT_SCOPE_META[prompt.scope];
 	return (
 		<div className="pointer-events-none absolute -top-[7px] -left-2 z-10 flex max-w-[calc(100%+0.5rem)] items-center gap-1 overflow-hidden rounded-full border border-border-bright bg-surface-3 px-2 py-0.5 text-[10px] leading-4 text-text-secondary shadow-sm">
 			<span className="shrink-0 font-medium text-text-primary">{scopeMeta.label}</span>
+			<PromptOriginBadge prompt={prompt} className="bg-surface-1" />
 			<span className="truncate">Created {formatPromptMetadataTimestamp(prompt.createdAt)}</span>
 			<span className="shrink-0 text-text-tertiary">·</span>
 			<span className="truncate">Edited {formatPromptMetadataTimestamp(prompt.updatedAt)}</span>
+		</div>
+	);
+}
+
+/**
+ * 「这段正文里有 N 处粘贴还原不了」的常驻警告。
+ *
+ * 必须常驻在条目上，而不是只在暂存那一刻弹一次 toast：抢占来源的条目写进来时用户根本不在场，那条
+ * toast 没有任何人看见；即便他当时在场，第二天翻面板时警告也早就没了，于是会把一份缺了几段的正文
+ * 当成完好的填进 agent。
+ */
+function PromptFidelityWarning({ prompt }: { prompt: StoredPrompt }): React.ReactElement | null {
+	const unrecoveredFoldedPasteCount = countUnrecoveredFoldedPastesInPrompt(prompt);
+	if (unrecoveredFoldedPasteCount === 0) {
+		return null;
+	}
+	return (
+		<div className="flex items-center gap-1 px-1.5 pb-1 text-[10px] leading-4 text-status-orange">
+			<AlertTriangle size={11} className="shrink-0" />
+			<span className="truncate">
+				{unrecoveredFoldedPasteCount} pasted section{unrecoveredFoldedPasteCount === 1 ? "" : "s"} could not be
+				restored — the placeholder text is kept as-is
+			</span>
 		</div>
 	);
 }
@@ -167,6 +266,7 @@ function PromptRow({
 				spellCheck={false}
 				className="block min-h-[1.5rem] w-full resize-none overflow-x-hidden bg-transparent p-1.5 text-xs leading-5 text-text-primary placeholder:text-text-tertiary focus:outline-none"
 			/>
+			<PromptFidelityWarning prompt={prompt} />
 			{hasCollapsibleContent ? (
 				<Tooltip content={isExpanded ? "Collapse prompt" : "Show full prompt"}>
 					<Button
@@ -215,18 +315,106 @@ function PromptRow({
 	);
 }
 
+/**
+ * 归属任务已经不在看板上的条目的回收入口。
+ *
+ * 为什么不在任务删除时直接把这些条目也删掉：prompt 是用户攒的**资产**，「删掉一个任务」不等于
+ * 「销毁我为它写过的模板」。但只留在磁盘上而没有任何入口，等于用户永远拿不回来——所以它们必须
+ * 在这里现身，并且只能由用户自己决定是认领还是删除。
+ *
+ * 默认折叠：这是个低频回收入口，不该在每次打开面板时都占掉正常条目的视线。
+ */
+function OrphanedPromptsSection({
+	orphanedPrompts,
+	isExpanded,
+	onToggleExpanded,
+	onClaim,
+	onRemove,
+	onFill,
+}: {
+	orphanedPrompts: StoredPrompt[];
+	isExpanded: boolean;
+	onToggleExpanded: () => void;
+	onClaim: (id: string) => void;
+	onRemove: (id: string) => void;
+	onFill: (text: string) => void;
+}): React.ReactElement {
+	return (
+		<div className="mt-2 rounded-md border border-border bg-surface-2">
+			<button
+				type="button"
+				onClick={onToggleExpanded}
+				className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] text-text-secondary hover:text-text-primary"
+			>
+				{isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+				<span className="flex-1 truncate">
+					{orphanedPrompts.length} prompt{orphanedPrompts.length === 1 ? "" : "s"} from deleted tasks
+				</span>
+			</button>
+			{isExpanded ? (
+				<div className="flex flex-col gap-2 px-2 pb-2">
+					{orphanedPrompts.map((prompt) => (
+						<div key={prompt.id} className="rounded border border-border-bright bg-surface-1 p-1.5">
+							<PromptOriginBadge
+								prompt={prompt}
+								className="mb-1 inline-block bg-surface-3 text-[10px] leading-4"
+							/>
+							<p className="line-clamp-3 whitespace-pre-wrap break-words text-xs leading-5 text-text-primary">
+								{prompt.text.trim() === "" ? "(empty prompt)" : prompt.text}
+							</p>
+							<PromptFidelityWarning prompt={prompt} />
+							<div className="mt-1 flex items-center gap-1">
+								<Tooltip content="Move this prompt to the task you are looking at">
+									<Button variant="ghost" size="xs" onClick={() => onClaim(prompt.id)}>
+										Claim
+									</Button>
+								</Tooltip>
+								<Tooltip content="Fill into input">
+									<Button
+										variant="ghost"
+										size="xs"
+										icon={<CornerDownLeft size={14} />}
+										aria-label="Fill orphaned prompt into input"
+										disabled={prompt.text.trim().length === 0}
+										onClick={() => onFill(prompt.text)}
+									/>
+								</Tooltip>
+								<Tooltip content="Delete">
+									<Button
+										variant="ghost"
+										size="xs"
+										icon={<Trash2 size={14} />}
+										aria-label="Delete orphaned prompt"
+										className="hover:text-status-red"
+										onClick={() => onRemove(prompt.id)}
+									/>
+								</Tooltip>
+							</div>
+						</div>
+					))}
+				</div>
+			) : null}
+		</div>
+	);
+}
+
 export function PromptLibraryPanel({
 	taskId,
 	projectId,
 	onFillInput,
 	headerContent,
+	taskIdsOnBoard = null,
 }: {
 	taskId: string;
 	projectId: string;
 	onFillInput: (text: string) => void;
 	headerContent?: ReactNode;
+	/** 看板上此刻存在的任务 id。null = 还不知道（首屏未加载），此时一条都不标成孤儿。 */
+	taskIdsOnBoard?: ReadonlySet<string> | null;
 }): React.ReactElement {
-	const { prompts, addPrompt, updatePromptText, removePrompt, setPromptScope } = usePromptLibrary(taskId, projectId);
+	const { prompts, orphanedPrompts, addPrompt, updatePromptText, removePrompt, setPromptScope, claimOrphanedPrompt } =
+		usePromptLibrary(taskId, projectId, taskIdsOnBoard);
+	const [isOrphanedSectionExpanded, setIsOrphanedSectionExpanded] = useState(false);
 	const [pendingFocusPromptId, setPendingFocusPromptId] = useState<string | null>(null);
 	const handleAddPrompt = (): void => {
 		setPendingFocusPromptId(addPrompt());
@@ -261,6 +449,16 @@ export function PromptLibraryPanel({
 						/>
 					))
 				)}
+				{orphanedPrompts.length > 0 ? (
+					<OrphanedPromptsSection
+						orphanedPrompts={orphanedPrompts}
+						isExpanded={isOrphanedSectionExpanded}
+						onToggleExpanded={() => setIsOrphanedSectionExpanded((current) => !current)}
+						onClaim={claimOrphanedPrompt}
+						onRemove={removePrompt}
+						onFill={onFillInput}
+					/>
+				) : null}
 			</div>
 		</div>
 	);

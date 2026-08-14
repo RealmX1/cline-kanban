@@ -22,6 +22,9 @@ const {
 	readTaskEditDraftsFromBrowserLocalStorage,
 	resetTaskEditDraftStoreForTests,
 	saveTaskEditDraftToStore,
+	discardSupersededTaskEditDraftCopy,
+	promoteSupersededTaskEditDraftCopyToCurrentDraft,
+	readSupersededTaskEditDraftCopiesFromStore,
 	startLoadingWorkspaceTaskEditDrafts,
 } = await import("@/runtime/task-edit-draft-store");
 
@@ -83,6 +86,38 @@ describe("任务编辑草稿 store", () => {
 		) {
 			const { [mutation.taskId]: _removed, ...remaining } = draftsHeldByFakeServer.draftsByTaskId;
 			draftsHeldByFakeServer = { ...draftsHeldByFakeServer, draftsByTaskId: remaining };
+		}
+		if (mutation.kind === "discard_superseded_task_edit_draft_copy") {
+			draftsHeldByFakeServer = {
+				...draftsHeldByFakeServer,
+				supersededDraftCopies: draftsHeldByFakeServer.supersededDraftCopies.filter(
+					(copy) =>
+						!(copy.draft.taskId === mutation.taskId && copy.draft.savedAt === mutation.supersededDraftSavedAt),
+				),
+			};
+		}
+		if (mutation.kind === "promote_superseded_task_edit_draft_copy_to_current_draft") {
+			const promotedCopy = draftsHeldByFakeServer.supersededDraftCopies.find(
+				(copy) => copy.draft.taskId === mutation.taskId && copy.draft.savedAt === mutation.supersededDraftSavedAt,
+			);
+			if (promotedCopy) {
+				const currentDraftBeingReplaced = draftsHeldByFakeServer.draftsByTaskId[mutation.taskId];
+				draftsHeldByFakeServer = {
+					draftsByTaskId: { ...draftsHeldByFakeServer.draftsByTaskId, [mutation.taskId]: promotedCopy.draft },
+					supersededDraftCopies: [
+						...draftsHeldByFakeServer.supersededDraftCopies.filter((copy) => copy !== promotedCopy),
+						...(currentDraftBeingReplaced
+							? [
+									{
+										draft: currentDraftBeingReplaced,
+										supersededAt: 9_999,
+										supersededBySavedAt: promotedCopy.draft.savedAt,
+									},
+								]
+							: []),
+					],
+				};
+			}
 		}
 		return draftsHeldByFakeServer;
 	}
@@ -322,6 +357,107 @@ describe("任务编辑草稿 store", () => {
 			localStorage.setItem(TASK_EDIT_DRAFTS_MIRROR_KEY, "{ 这不是 JSON");
 
 			expect(readTaskEditDraftsFromBrowserLocalStorage(WORKSPACE_ID)).toEqual([]);
+		});
+	});
+
+	describe("落败副本", () => {
+		function seedServerWithSupersededCopies(): void {
+			draftsHeldByFakeServer = {
+				draftsByTaskId: { "task-1": createDraft({ taskId: "task-1", savedAt: 30, prompt: "当前这份" }) },
+				supersededDraftCopies: [
+					{
+						draft: createDraft({ taskId: "task-1", savedAt: 10, prompt: "另一个 origin 那份" }),
+						supersededAt: 1,
+						supersededBySavedAt: 30,
+					},
+					{
+						draft: createDraft({ taskId: "task-2", savedAt: 10, prompt: "别的任务" }),
+						supersededAt: 1,
+						supersededBySavedAt: 30,
+					},
+				],
+			};
+		}
+
+		it("选择器只挑这张卡片名下的副本", async () => {
+			seedServerWithSupersededCopies();
+			startLoadingWorkspaceTaskEditDrafts(WORKSPACE_ID);
+			await flushPendingTaskEditDraftStoreWork();
+
+			expect(
+				readSupersededTaskEditDraftCopiesFromStore(WORKSPACE_ID, "task-1").map((copy) => copy.draft.prompt),
+			).toEqual(["另一个 origin 那份"]);
+		});
+
+		// useSyncExternalStore 的 getSnapshot 每次渲染都会被调一遍。返回值引用一变就被判定为「store 变了」，
+		// 于是再渲染一次、再调一次——直接进死循环把整个编辑对话框卡死。按 taskId 过滤天生每次产生新数组，
+		// 所以这条不是锦上添花的性能断言，是这个选择器能不能被 useSyncExternalStore 用的前提。
+		it("快照没变时选择器返回引用相等的数组，否则 useSyncExternalStore 会进死循环", async () => {
+			seedServerWithSupersededCopies();
+			startLoadingWorkspaceTaskEditDrafts(WORKSPACE_ID);
+			await flushPendingTaskEditDraftStoreWork();
+
+			expect(readSupersededTaskEditDraftCopiesFromStore(WORKSPACE_ID, "task-1")).toBe(
+				readSupersededTaskEditDraftCopiesFromStore(WORKSPACE_ID, "task-1"),
+			);
+			// 一份副本都没有的卡片同样要引用稳定——那才是最常见的情形。
+			expect(readSupersededTaskEditDraftCopiesFromStore(WORKSPACE_ID, "task-without-copies")).toBe(
+				readSupersededTaskEditDraftCopiesFromStore(WORKSPACE_ID, "task-without-copies"),
+			);
+		});
+
+		it("提升副本后镜像也要跟上——刷新后首屏读的是它，不更新就会拿回被换下来的旧草稿", async () => {
+			seedServerWithSupersededCopies();
+			startLoadingWorkspaceTaskEditDrafts(WORKSPACE_ID);
+			await flushPendingTaskEditDraftStoreWork();
+
+			const promotedDraft = await promoteSupersededTaskEditDraftCopyToCurrentDraft(WORKSPACE_ID, "task-1", 10);
+
+			expect(promotedDraft?.prompt).toBe("另一个 origin 那份");
+			expect(readTaskEditDraftsFromBrowserLocalStorage(WORKSPACE_ID).map((draft) => draft.prompt)).toEqual([
+				"另一个 origin 那份",
+			]);
+		});
+
+		it("服务端没有那一份时如实返回 null，不假装换过了", async () => {
+			startLoadingWorkspaceTaskEditDrafts(WORKSPACE_ID);
+			await flushPendingTaskEditDraftStoreWork();
+
+			await expect(promoteSupersededTaskEditDraftCopyToCurrentDraft(WORKSPACE_ID, "task-1", 10)).resolves.toBeNull();
+		});
+
+		// RVF-004 立下的规矩：草稿类意图必须走 per-workspace 串行链。这两条新意图整体替换服务端快照，
+		// 一旦与在途的 save/clear 乱序，晚到的那份响应会把已经落定的改动整体盖回去。
+		it("两条副本意图都排在 per-workspace 串行链上，不得旁路", async () => {
+			seedServerWithSupersededCopies();
+			startLoadingWorkspaceTaskEditDrafts(WORKSPACE_ID);
+			await flushPendingTaskEditDraftStoreWork();
+
+			let releaseFirstMutation = (): void => {};
+			const firstMutationCanFinish = new Promise<void>((resolve) => {
+				releaseFirstMutation = resolve;
+			});
+			let isFirstMutation = true;
+			mutateWorkspaceTaskEditDraftsMock.mockImplementation(
+				async (_workspaceId: string, mutation: WorkspaceTaskEditDraftMutation) => {
+					if (isFirstMutation) {
+						isFirstMutation = false;
+						await firstMutationCanFinish;
+					}
+					return applyMutationToDraftsHeldByFakeServer(mutation);
+				},
+			);
+
+			const discarded = discardSupersededTaskEditDraftCopy(WORKSPACE_ID, "task-1", 10);
+			const promoted = promoteSupersededTaskEditDraftCopyToCurrentDraft(WORKSPACE_ID, "task-1", 10);
+			await flushPendingTaskEditDraftStoreWork();
+
+			// 第一条还卡着，第二条就绝不该已经打到服务端——那正是串行链的定义。
+			expect(mutateWorkspaceTaskEditDraftsMock).toHaveBeenCalledTimes(1);
+			releaseFirstMutation();
+			await discarded;
+			await promoted;
+			expect(mutateWorkspaceTaskEditDraftsMock).toHaveBeenCalledTimes(2);
 		});
 	});
 });

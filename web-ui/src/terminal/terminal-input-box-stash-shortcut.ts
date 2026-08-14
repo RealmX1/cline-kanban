@@ -48,15 +48,6 @@ function describeStashFidelityCaveat(response: RuntimeTerminalInputBoxStashRespo
 	return `，其中 ${unbackfilledPlaceholderCount} 处折叠粘贴无法还原（占位符原样保留）`;
 }
 
-// Ctrl+S 写的是**服务端**库文件，而 Prompt Library 面板（`@/hooks/use-prompt-library`）此刻仍只读
-// 浏览器 localStorage——面板的服务端化连同既有 localStorage 条目的合并迁移是后续步骤。在那之前，
-// 一句「已暂存到 Prompt Library」会把用户支到一个根本看不到这条内容的面板前，那正是这条链路要根除的
-// 「回执说成功、东西不在」。所以成功回执必须同时讲清两件事：内容落在哪（可自行取回），以及面板为什么
-// 还看不到它。等面板迁移完成，删掉这段提示即可，不必改动其余措辞。
-export const PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE =
-	"内容已落盘在 ~/.cline/kanban 下的 prompt-library.json；Prompt Library 面板目前仍只读浏览器本地存储，" +
-	"要等面板迁移到服务端库之后才会显示这一条";
-
 // 把这次暂存的结论讲成一句人话。返回 null = 不打扰用户：什么都没发生、也没有任何东西出错。
 export function describeTerminalInputBoxStashOutcome(
 	response: RuntimeTerminalInputBoxStashResponse,
@@ -65,14 +56,14 @@ export function describeTerminalInputBoxStashOutcome(
 		case "stashed_into_prompt_library":
 			return {
 				intent: describeStashFidelityCaveat(response) === "" ? "success" : "warning",
-				message: `已暂存 ${response.stashedTextCharacterCount} 个字符到服务端 Prompt Library${describeStashFidelityCaveat(response)}。${PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE}`,
+				message: `已暂存 ${response.stashedTextCharacterCount} 个字符到 Prompt Library${describeStashFidelityCaveat(response)}`,
 			};
 		case "stashed_into_prompt_library_but_input_box_not_cleared":
 			// 内容确实进库了，但读框到清框之间终端被 refresh / 退出，清框字节没敢往新会话上打。必须把
 			// 「框没清」说出来：只报成功会让用户看着还在的输入框反过来怀疑内容到底存进去没有。
 			return {
 				intent: "warning",
-				message: `已暂存 ${response.stashedTextCharacterCount} 个字符到服务端 Prompt Library${describeStashFidelityCaveat(response)}；期间终端会话已被刷新或退出，输入框未被清空（内容仍留在框里，可自行删除）。${PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE}`,
+				message: `已暂存 ${response.stashedTextCharacterCount} 个字符到 Prompt Library${describeStashFidelityCaveat(response)}；期间终端会话已被刷新或退出，输入框未被清空（内容仍留在框里，可自行删除）`,
 			};
 		case "another_terminal_input_box_stash_attempt_already_in_flight_for_this_task":
 			// 连按 / 多标签页同时触发。这一次按键什么都没做——说出来，别让用户以为存了两条或者以为存成功了。
@@ -97,6 +88,10 @@ export function describeTerminalInputBoxStashOutcome(
 			};
 		default:
 			// 框本来就是空的 / 这个任务没有运行中的终端会话——都是「什么也没发生」，不值得弹提示。
+			//
+			// `input_box_content_unreadable_and_left_untouched` 也落在这里，且必须落在这里：它只可能由
+			// W1 争用抢占产生（抢占路径读不出正文时一个字节都不打进框），而抢占发生时根本没有人按下这个
+			// 快捷键——这个函数的每一位读者都是刚按完键的用户。给他弹一句关于别的路径的提示纯属噪音。
 			return null;
 	}
 }

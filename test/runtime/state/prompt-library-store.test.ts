@@ -177,6 +177,73 @@ describe("prompt-library-store — 意图应用（纯函数）", () => {
 			"terminal_stash_preempted_by_programmatic_delivery",
 		);
 	});
+
+	it("保真度随条目一起落库——抢占来源那条 toast 根本没有任何人看见", () => {
+		const next = applyWorkspacePromptLibraryMutation(
+			emptySnapshot(),
+			{
+				kind: "upsert_prompt",
+				promptId: "p1",
+				text: "有两段粘贴没能换回原文的正文 [Pasted text #5 +11 lines]",
+				scope: "task",
+				taskId: "task-1",
+				origin: "terminal_stash_preempted_by_programmatic_delivery",
+				terminalInputBoxStashFidelity: {
+					softWrapJoinCount: 4,
+					foldedPastePlaceholderCount: 3,
+					backfilledPlaceholderCount: 1,
+					placeholdersLeftUnbackfilledBecausePayloadWasDropped: 1,
+					placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: 1,
+					placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: 0,
+					unrecoverablePasteCount: 1,
+				},
+			},
+			1_000,
+		);
+
+		expect(
+			next.taskScopedPromptsByTaskId["task-1"][0].terminalInputBoxStashFidelity
+				?.placeholdersLeftUnbackfilledBecausePayloadWasDropped,
+		).toBe(1);
+	});
+
+	// 顺手改个错别字不该把「这份正文缺了几段」的警告一并抹掉：改文分支刻意既不带新保真度、
+	// 也不清掉原有的那份。
+	it("改正文不清掉已落库的保真度", () => {
+		const created = applyWorkspacePromptLibraryMutation(
+			emptySnapshot(),
+			{
+				kind: "upsert_prompt",
+				promptId: "p1",
+				text: "原始正文",
+				scope: "task",
+				taskId: "task-1",
+				origin: "terminal_stash_by_user",
+				terminalInputBoxStashFidelity: {
+					softWrapJoinCount: 0,
+					foldedPastePlaceholderCount: 1,
+					backfilledPlaceholderCount: 0,
+					placeholdersLeftUnbackfilledBecausePayloadWasDropped: 0,
+					placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: 1,
+					placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: 0,
+					unrecoverablePasteCount: 0,
+				},
+			},
+			1_000,
+		);
+
+		const edited = applyWorkspacePromptLibraryMutation(
+			created,
+			{ kind: "upsert_prompt", promptId: "p1", text: "改过错别字的正文", scope: "task", taskId: "task-1" },
+			2_000,
+		);
+
+		expect(edited.taskScopedPromptsByTaskId["task-1"][0].text).toBe("改过错别字的正文");
+		expect(
+			edited.taskScopedPromptsByTaskId["task-1"][0].terminalInputBoxStashFidelity
+				?.placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched,
+		).toBe(1);
+	});
 });
 
 // scope 为 task 却漏传 taskId，不是「分类不整洁」而是**可见性事故**：本该只给某个任务看的文字会被

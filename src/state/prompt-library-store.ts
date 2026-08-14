@@ -392,6 +392,10 @@ export function applyWorkspacePromptLibraryMutation(
 		text: mutation.text,
 		scope: mutation.scope,
 		origin: mutation.origin,
+		// 只在新建时记：改文之后这段正文已经是用户自己打的，「当初从输入框读出来时还原不了几段」
+		// 这句话对它不再成立。改文那条分支刻意不带这个字段，也不清掉原有的——那会让一次顺手的
+		// 错别字修正把「这份正文缺了几段」的警告抹掉。
+		terminalInputBoxStashFidelity: mutation.terminalInputBoxStashFidelity,
 		createdAt: nowEpochMs,
 		updatedAt: nowEpochMs,
 	};

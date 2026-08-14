@@ -5,11 +5,18 @@ import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+	areTaskEditDraftFormValuesEqual,
 	clearTaskEditDraft,
 	isTaskEditDraftEqualToTask,
 	readSavedTaskEditDraft,
 	saveTaskEditDraft,
+	type TaskEditDraft,
+	type TaskEditDraftFormValues,
 } from "@/hooks/task-edit-drafts";
+import {
+	hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror,
+	subscribeToTaskEditDraftStore,
+} from "@/runtime/task-edit-draft-store";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
@@ -130,6 +137,12 @@ interface OpenEditTaskOptions {
 	preserveDetailSelection?: boolean;
 }
 
+/** 这次把编辑表单铺成现在这样的那份「种子」：用的是哪份草稿（null = 任务本体），铺进去的是哪些值。 */
+interface EditTaskFormSeed {
+	savedDraftSavedAt: number | null;
+	formValues: TaskEditDraftFormValues;
+}
+
 /**
  * 编辑草稿写盘的去抖窗口。草稿是崩溃恢复用的兜底副本，不需要与击键同频落盘；
  * 真正的提交路径不经过它（见 {@link TaskEditorSubmitOptions.promptOverride}）。
@@ -193,6 +206,10 @@ export interface UseTaskEditorResult {
 	setEditTaskAgentSessionInitialization: Dispatch<SetStateAction<RuntimeTaskAgentSessionInitialization | undefined>>;
 	handleOpenCreateTask: () => void;
 	handleCancelCreateTask: () => void;
+	// 值 = 铺表单用的那份草稿的 savedAt；null = 表单就是任务本体。
+	editTaskFormSeededFromSavedDraftAt: number | null;
+	handleRevertEditTaskFormToSavedTaskContent: () => void;
+	handleAdoptPromotedTaskEditDraft: (promotedDraft: TaskEditDraft) => void;
 	handleOpenEditTask: (task: BoardCard, options?: OpenEditTaskOptions) => void;
 	handleCancelEditTask: () => void;
 	handleSaveEditedTask: (options?: TaskEditorSubmitOptions) => string | null;
@@ -232,6 +249,9 @@ export function useTaskEditor({
 	const [newTaskBranchRef, setNewTaskBranchRef] = useState("");
 	const [newTaskWorktreeMode, setNewTaskWorktreeMode] = useState<RuntimeTaskWorktreeMode>("branch");
 	const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+	// 这次打开编辑对话框时，表单是不是被草稿铺过（值 = 那份草稿的 savedAt）。通知栏的文案与
+	//「改回已保存内容」按钮都挂在它上面；null = 表单就是任务本体，通知栏那一条不出现。
+	const [editTaskFormSeededFromSavedDraftAt, setEditTaskFormSeededFromSavedDraftAt] = useState<number | null>(null);
 	const [editTaskPrompt, setEditTaskPrompt] = useState("");
 	const [editTaskImages, setEditTaskImages] = useState<TaskImage[]>([]);
 	const [editTaskStartInPlanMode, setEditTaskStartInPlanMode] = useState(false);
@@ -377,6 +397,26 @@ export function useTaskEditor({
 		}
 	}, [board, currentProjectId, editingTaskId]);
 
+	// 表单此刻的值，与「这次是用什么铺上去的」。两者都得能在渲染循环之外被读到：重铺的判据挂在草稿
+	// store 的订阅回调上，而那是 React 之外的调用；进依赖数组则会让订阅随每一次击键重挂一遍。
+	const editTaskFormValues: TaskEditDraftFormValues = {
+		prompt: editTaskPrompt,
+		images: editTaskImages,
+		startInPlanMode: editTaskStartInPlanMode,
+		taskAgentPermissionMode: editTaskAgentPermissionMode,
+		autoReviewEnabled: editTaskAutoReviewEnabled,
+		autoReviewMode: editTaskAutoReviewMode,
+		branchRef: editTaskBranchRef,
+		worktreeMode: editTaskWorktreeMode,
+		agentId: editTaskAgentId,
+		clineSettings: editTaskClineSettings,
+		terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
+		taskAgentSessionInitialization: editTaskAgentSessionInitialization,
+	};
+	const editTaskFormValuesRef = useRef(editTaskFormValues);
+	editTaskFormValuesRef.current = editTaskFormValues;
+	const editTaskFormSeedRef = useRef<EditTaskFormSeed | null>(null);
+
 	// `board` 只在这里被当作只读查表用（拿到被编辑卡片以做「草稿是否等于任务本体」的比较）。
 	// 放进 deps 会让本 effect 随每一次看板刷新（含 150ms 一拍的 session 广播）重跑一遍，
 	// 而它做的是 localStorage 写盘。改走 ref：读到的永远是最新 board，但不参与依赖触发。
@@ -484,6 +524,100 @@ export function useTaskEditor({
 		setNewTaskAgentSessionInitialization(undefined);
 	}, [newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault, resolvedDefaultCreateTaskBranchRef]);
 
+	// 把编辑表单铺成「任务本体 + 可选的草稿覆盖」。打开对话框与通知栏的「改回任务已保存的内容」共用
+	// 这一段：两处各写一份的话，将来给任务多加一个字段就只会在其中一处被想起，而漏掉的那处会让用户点完
+	// 「改回已保存内容」之后某个字段仍旧停在草稿里的值——一个没人会去核对的静默错位。
+	const resolveEditTaskFormValuesFromTask = useCallback(
+		(task: BoardCard, savedDraft: TaskEditDraft | null): TaskEditDraftFormValues => ({
+			prompt: savedDraft?.prompt ?? task.prompt.trim(),
+			images: savedDraft
+				? savedDraft.images.map((image) => ({ ...image }))
+				: task.images
+					? task.images.map((image) => ({ ...image }))
+					: [],
+			startInPlanMode: savedDraft?.startInPlanMode ?? task.startInPlanMode,
+			taskAgentPermissionMode:
+				savedDraft?.taskAgentPermissionMode ?? task.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault,
+			autoReviewEnabled: savedDraft?.autoReviewEnabled ?? task.autoReviewEnabled === true,
+			autoReviewMode: savedDraft?.autoReviewMode ?? resolveTaskAutoReviewMode(task.autoReviewMode),
+			branchRef: savedDraft?.branchRef ?? (task.baseRef || resolvedDefaultTaskBranchRef),
+			worktreeMode: savedDraft?.worktreeMode ?? task.worktreeMode ?? "branch",
+			agentId: savedDraft?.agentId ?? task.agentId,
+			clineSettings: savedDraft?.clineSettings ?? task.clineSettings,
+			terminalAgentModelOverrideSettings:
+				savedDraft?.terminalAgentModelOverrideSettings ?? task.terminalAgentModelOverrideSettings,
+			taskAgentSessionInitialization:
+				savedDraft?.taskAgentSessionInitialization ?? task.taskAgentSessionInitialization,
+		}),
+		[newTaskAgentPermissionModeByDefault, resolvedDefaultTaskBranchRef],
+	);
+
+	const applyEditTaskFormValuesFromTask = useCallback(
+		(task: BoardCard, savedDraft: TaskEditDraft | null) => {
+			const formValues = resolveEditTaskFormValuesFromTask(task, savedDraft);
+			// 记下这一铺用的是什么：迟到的服务端快照只有在表单仍与它逐字相等（＝用户还没动过）时才可以重铺。
+			editTaskFormSeedRef.current = { savedDraftSavedAt: savedDraft?.savedAt ?? null, formValues };
+			setEditTaskPrompt(formValues.prompt);
+			setEditTaskImages(formValues.images);
+			setEditTaskStartInPlanMode(formValues.startInPlanMode);
+			setEditTaskAgentPermissionMode(formValues.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault);
+			setEditTaskAutoReviewEnabled(formValues.autoReviewEnabled);
+			setEditTaskAutoReviewMode(formValues.autoReviewMode);
+			setEditTaskBranchRef(formValues.branchRef);
+			setEditTaskWorktreeMode(formValues.worktreeMode ?? "branch");
+			setEditTaskAgentId(formValues.agentId);
+			setEditTaskClineSettings(formValues.clineSettings);
+			setEditTaskTerminalAgentModelOverrideSettings(formValues.terminalAgentModelOverrideSettings);
+			setEditTaskAgentSessionInitialization(formValues.taskAgentSessionInitialization);
+		},
+		[newTaskAgentPermissionModeByDefault, resolveEditTaskFormValuesFromTask],
+	);
+
+	/**
+	 * 打开编辑对话框时表单是**同步**铺的（见 handleOpenEditTask：慢一帧就会先闪一个空表单）。那一刻服务端
+	 * 草稿快照往往还没到，铺上去的是本地镜像里那份——它可能已经在服务端合并里落败、或者服务端上根本另有
+	 * 一份更新的。快照到达后必须重铺一次：不重铺的话，上面那条去抖自动保存会把落败内容当成用户此刻的意图
+	 * 写回「当前草稿」，而 `save_task_edit_draft` 是直接覆盖、**不**产生落败副本——胜出那份就此静默消失，
+	 * 正是「草稿绝不静默丢」要防的事。表单铺的是任务本体、服务端其实有草稿时更糟：去抖那一拍会判定
+	 * 「表单等于任务本体」并发出 clear，把服务端那份直接删掉。
+	 *
+	 * 两条闸门：只在用户还没动过表单时重铺（他敲下的字永远优先），且每次打开最多重铺一次——无上限地
+	 * 跟随服务端快照会与自己的去抖保存互相触发，转成一个每 400ms 保存一次的死循环。
+	 */
+	const isEditTaskFormAwaitingServerDraftSnapshotRebaseRef = useRef(false);
+
+	useEffect(() => {
+		if (!currentProjectId || !editingTaskId) {
+			return;
+		}
+		const rebaseEditTaskFormOnServerDraftSnapshot = (): void => {
+			if (!isEditTaskFormAwaitingServerDraftSnapshotRebaseRef.current) {
+				return;
+			}
+			if (!hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror(currentProjectId)) {
+				return;
+			}
+			isEditTaskFormAwaitingServerDraftSnapshotRebaseRef.current = false;
+			const seed = editTaskFormSeedRef.current;
+			const selection = findCardSelection(boardRef.current, editingTaskId);
+			if (!seed || !selection) {
+				return;
+			}
+			const authoritativeDraft = readSavedTaskEditDraft(currentProjectId, editingTaskId);
+			if ((authoritativeDraft?.savedAt ?? null) === seed.savedDraftSavedAt) {
+				return;
+			}
+			if (!areTaskEditDraftFormValuesEqual(editTaskFormValuesRef.current, seed.formValues)) {
+				return;
+			}
+			setEditTaskFormSeededFromSavedDraftAt(authoritativeDraft?.savedAt ?? null);
+			applyEditTaskFormValuesFromTask(selection.card, authoritativeDraft);
+		};
+		// 快照可能在这条 effect 挂上之前就到了，所以先自查一次，再挂订阅等后到的那一份。
+		rebaseEditTaskFormOnServerDraftSnapshot();
+		return subscribeToTaskEditDraftStore(rebaseEditTaskFormOnServerDraftSnapshot);
+	}, [applyEditTaskFormValuesFromTask, currentProjectId, editingTaskId]);
+
 	const handleOpenEditTask = useCallback(
 		(task: BoardCard, options?: OpenEditTaskOptions) => {
 			if (!options?.preserveDetailSelection) {
@@ -493,37 +627,61 @@ export function useTaskEditor({
 
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
-			const taskPrompt = task.prompt.trim();
 			const savedDraft = readSavedTaskEditDraft(currentProjectId, task.id);
+			// 这一读顺带把服务端快照的后台载入踢了起来；此刻它还没到的话，表单铺的就只是本地镜像，
+			// 得等快照落定后重铺（见上面的 rebaseEditTaskFormOnServerDraftSnapshot）。
+			isEditTaskFormAwaitingServerDraftSnapshotRebaseRef.current =
+				currentProjectId !== null &&
+				!hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror(currentProjectId);
 			setEditingTaskId(task.id);
-
-			setEditTaskPrompt(savedDraft?.prompt ?? taskPrompt);
-			setEditTaskImages(
-				savedDraft
-					? savedDraft.images.map((image) => ({ ...image }))
-					: task.images
-						? task.images.map((image) => ({ ...image }))
-						: [],
-			);
-			setEditTaskStartInPlanMode(savedDraft?.startInPlanMode ?? task.startInPlanMode);
-			setEditTaskAgentPermissionMode(
-				savedDraft?.taskAgentPermissionMode ?? task.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault,
-			);
-			setEditTaskAutoReviewEnabled(savedDraft?.autoReviewEnabled ?? task.autoReviewEnabled === true);
-			setEditTaskAutoReviewMode(savedDraft?.autoReviewMode ?? resolveTaskAutoReviewMode(task.autoReviewMode));
-			const fallbackBranch = task.baseRef || resolvedDefaultTaskBranchRef;
-			setEditTaskBranchRef(savedDraft?.branchRef ?? fallbackBranch);
-			setEditTaskWorktreeMode(savedDraft?.worktreeMode ?? task.worktreeMode ?? "branch");
-			setEditTaskAgentId(savedDraft?.agentId ?? task.agentId);
-			setEditTaskClineSettings(savedDraft?.clineSettings ?? task.clineSettings);
-			setEditTaskTerminalAgentModelOverrideSettings(
-				savedDraft?.terminalAgentModelOverrideSettings ?? task.terminalAgentModelOverrideSettings,
-			);
-			setEditTaskAgentSessionInitialization(
-				savedDraft?.taskAgentSessionInitialization ?? task.taskAgentSessionInitialization,
-			);
+			// 「这次打开用的是草稿」**必须**说出来。在此之前它完全静默：用户看到的是草稿，却以为看到的是
+			// 任务本体，界面上没有任何提示、也没有改回去的退路。记下的是草稿自己的 savedAt 而不是一个
+			// 布尔——「保存于 <相对时间>」是这条提示的全部信息量，没有它用户无从判断该不该采信眼前这份。
+			setEditTaskFormSeededFromSavedDraftAt(savedDraft?.savedAt ?? null);
+			applyEditTaskFormValuesFromTask(task, savedDraft);
 		},
-		[currentProjectId, newTaskAgentPermissionModeByDefault, resolvedDefaultTaskBranchRef, setSelectedTaskId],
+		[applyEditTaskFormValuesFromTask, currentProjectId, setSelectedTaskId],
+	);
+
+	/**
+	 * 通知栏的「改回任务已保存的内容」：丢掉这份草稿，把表单重置成任务本体。
+	 *
+	 * 这是草稿静默套用的**退路**。没有它，用户发现表单里是草稿之后只能一个字段一个字段地手动改回去——
+	 * 而他恰恰无从知道任务本体原本长什么样。
+	 */
+	const handleRevertEditTaskFormToSavedTaskContent = useCallback(() => {
+		if (!editingTaskId) {
+			return;
+		}
+		const selection = findCardSelection(boardRef.current, editingTaskId);
+		if (!selection) {
+			return;
+		}
+		clearTaskEditDraft(currentProjectId, editingTaskId);
+		// 用户已经明确表态要任务本体。此后再让迟到的快照把某份草稿重铺回来，等于当场推翻他刚点的这一下。
+		isEditTaskFormAwaitingServerDraftSnapshotRebaseRef.current = false;
+		setEditTaskFormSeededFromSavedDraftAt(null);
+		applyEditTaskFormValuesFromTask(selection.card, null);
+	}, [applyEditTaskFormValuesFromTask, currentProjectId, editingTaskId]);
+
+	/**
+	 * 通知栏的「用这份替换当前」落定之后，把表单重铺成被提升上来的那份草稿。
+	 *
+	 * 复用 applyEditTaskFormValuesFromTask（任务本体打底 + 草稿覆盖），与打开对话框走的是同一段：
+	 * 草稿里那几个可选字段为 undefined 时该回落到任务本体的哪个值，只在那一处定义。
+	 */
+	const handleAdoptPromotedTaskEditDraft = useCallback(
+		(promotedDraft: TaskEditDraft) => {
+			const selection = editingTaskId ? findCardSelection(boardRef.current, editingTaskId) : null;
+			if (!selection) {
+				return;
+			}
+			// 同「改回已保存内容」：用户刚显式挑了这一份，迟到的快照不得再把它换掉。
+			isEditTaskFormAwaitingServerDraftSnapshotRebaseRef.current = false;
+			setEditTaskFormSeededFromSavedDraftAt(promotedDraft.savedAt);
+			applyEditTaskFormValuesFromTask(selection.card, promotedDraft);
+		},
+		[applyEditTaskFormValuesFromTask, editingTaskId],
 	);
 
 	const handleCancelEditTask = useCallback(() => {
@@ -531,6 +689,7 @@ export function useTaskEditor({
 			clearTaskEditDraft(currentProjectId, editingTaskId);
 		}
 		setEditingTaskId(null);
+		setEditTaskFormSeededFromSavedDraftAt(null);
 
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
@@ -822,6 +981,7 @@ export function useTaskEditor({
 	const resetTaskEditorState = useCallback(() => {
 		setIsInlineTaskCreateOpen(false);
 		setEditingTaskId(null);
+		setEditTaskFormSeededFromSavedDraftAt(null);
 
 		setNewTaskPrompt("");
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
@@ -900,6 +1060,9 @@ export function useTaskEditor({
 		setEditTaskAgentSessionInitialization,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
+		editTaskFormSeededFromSavedDraftAt,
+		handleRevertEditTaskFormToSavedTaskContent,
+		handleAdoptPromotedTaskEditDraft,
 		handleOpenEditTask,
 		handleCancelEditTask,
 		handleSaveEditedTask,

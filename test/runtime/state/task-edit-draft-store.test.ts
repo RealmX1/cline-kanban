@@ -91,6 +91,175 @@ describe("task-edit-draft-store — 意图应用（纯函数）", () => {
 		expect(Object.keys(next.draftsByTaskId)).toEqual(["task-2"]);
 		expect(next.supersededDraftCopies.map((copy) => copy.draft.taskId)).toEqual(["task-2"]);
 	});
+
+	// §五：副本的删除**只有**用户显式点「丢弃」这一条路径，而且只掉他点的那一份。
+	it("丢弃落败副本：只掉指定的那一份，当前草稿与其余副本一个不动", () => {
+		const seeded: WorkspaceTaskEditDraftsSnapshot = {
+			draftsByTaskId: { "task-1": createDraft({ taskId: "task-1", prompt: "当前", savedAt: 30 }) },
+			supersededDraftCopies: [
+				{
+					draft: createDraft({ taskId: "task-1", prompt: "落败甲", savedAt: 10 }),
+					supersededAt: 1,
+					supersededBySavedAt: 30,
+				},
+				{
+					draft: createDraft({ taskId: "task-1", prompt: "落败乙", savedAt: 20 }),
+					supersededAt: 1,
+					supersededBySavedAt: 30,
+				},
+				{
+					draft: createDraft({ taskId: "task-2", prompt: "别的任务", savedAt: 10 }),
+					supersededAt: 1,
+					supersededBySavedAt: 30,
+				},
+			],
+		};
+
+		const next = applyWorkspaceTaskEditDraftMutation(
+			seeded,
+			{ kind: "discard_superseded_task_edit_draft_copy", taskId: "task-1", supersededDraftSavedAt: 10 },
+			0,
+		);
+
+		expect(next.supersededDraftCopies.map((copy) => copy.draft.prompt)).toEqual(["落败乙", "别的任务"]);
+		expect(next.draftsByTaskId["task-1"]?.prompt).toBe("当前");
+	});
+
+	it("丢弃落败副本幂等：重复丢弃同一份既不报错，也不多写一次盘", () => {
+		const discardMutation: WorkspaceTaskEditDraftMutation = {
+			kind: "discard_superseded_task_edit_draft_copy",
+			taskId: "task-1",
+			supersededDraftSavedAt: 10,
+		};
+		const seeded: WorkspaceTaskEditDraftsSnapshot = {
+			draftsByTaskId: {},
+			supersededDraftCopies: [
+				{ draft: createDraft({ taskId: "task-1", savedAt: 10 }), supersededAt: 1, supersededBySavedAt: 30 },
+			],
+		};
+
+		const afterFirstDiscard = applyWorkspaceTaskEditDraftMutation(seeded, discardMutation, 0);
+		const afterSecondDiscard = applyWorkspaceTaskEditDraftMutation(afterFirstDiscard, discardMutation, 0);
+
+		expect(afterFirstDiscard.supersededDraftCopies).toEqual([]);
+		// 引用相等是「这条意图什么都没改」的信号，mutateWorkspaceTaskEditDrafts 据此跳过写盘。
+		expect(afterSecondDiscard).toBe(afterFirstDiscard);
+	});
+
+	// §五 不可让步的语义：「用这份替换当前」**不是**丢弃——被换下来的那份必须按同一规则再进副本，
+	// 否则这个按钮自己就成了新的静默丢字点。
+	it("提升落败副本：副本升为当前草稿，被顶下来的当前草稿必须转存为副本", () => {
+		const seeded: WorkspaceTaskEditDraftsSnapshot = {
+			draftsByTaskId: { "task-1": createDraft({ taskId: "task-1", prompt: "当前这份", savedAt: 30 }) },
+			supersededDraftCopies: [
+				{
+					draft: createDraft({ taskId: "task-1", prompt: "另一个 origin 那份", savedAt: 10 }),
+					supersededAt: 1,
+					supersededBySavedAt: 30,
+				},
+			],
+		};
+
+		const next = applyWorkspaceTaskEditDraftMutation(
+			seeded,
+			{
+				kind: "promote_superseded_task_edit_draft_copy_to_current_draft",
+				taskId: "task-1",
+				supersededDraftSavedAt: 10,
+			},
+			7_777,
+		);
+
+		expect(next.draftsByTaskId["task-1"]?.prompt).toBe("另一个 origin 那份");
+		expect(next.supersededDraftCopies).toEqual([
+			{
+				draft: expect.objectContaining({ prompt: "当前这份", savedAt: 30 }),
+				supersededAt: 7_777,
+				// 顶掉它的正是刚被提升上去的那份，如实记下来用户才看得出两份差了多久。
+				supersededBySavedAt: 10,
+			},
+		]);
+	});
+
+	it("提升时当前没有草稿 → 直接升位，不凭空造出一份副本", () => {
+		const seeded: WorkspaceTaskEditDraftsSnapshot = {
+			draftsByTaskId: {},
+			supersededDraftCopies: [
+				{
+					draft: createDraft({ taskId: "task-1", prompt: "唯一还剩的那份", savedAt: 10 }),
+					supersededAt: 1,
+					supersededBySavedAt: 30,
+				},
+			],
+		};
+
+		const next = applyWorkspaceTaskEditDraftMutation(
+			seeded,
+			{
+				kind: "promote_superseded_task_edit_draft_copy_to_current_draft",
+				taskId: "task-1",
+				supersededDraftSavedAt: 10,
+			},
+			7_777,
+		);
+
+		expect(next.draftsByTaskId["task-1"]?.prompt).toBe("唯一还剩的那份");
+		expect(next.supersededDraftCopies).toEqual([]);
+	});
+
+	// 去重键是 (taskId, savedAt)，于是两个 origin 在同一毫秒各存过一次时，被顶下来的当前草稿会与刚被
+	// 提升走的那份撞上同一个键。「先把被提升的那份摘掉、再判断当前草稿要不要留存」的次序就是为这一格
+	// 设的——判在前就会把当前草稿当成「早就存过了」直接扔掉。
+	it("提升时两份 savedAt 相同 → 被顶下来的当前草稿仍必须留存", () => {
+		const seeded: WorkspaceTaskEditDraftsSnapshot = {
+			draftsByTaskId: { "task-1": createDraft({ taskId: "task-1", prompt: "本机这份", savedAt: 10 }) },
+			supersededDraftCopies: [
+				{
+					draft: createDraft({ taskId: "task-1", prompt: "同一毫秒的另一份", savedAt: 10 }),
+					supersededAt: 1,
+					supersededBySavedAt: 10,
+				},
+			],
+		};
+
+		const next = applyWorkspaceTaskEditDraftMutation(
+			seeded,
+			{
+				kind: "promote_superseded_task_edit_draft_copy_to_current_draft",
+				taskId: "task-1",
+				supersededDraftSavedAt: 10,
+			},
+			7_777,
+		);
+
+		expect(next.draftsByTaskId["task-1"]?.prompt).toBe("同一毫秒的另一份");
+		expect(next.supersededDraftCopies).toEqual([
+			{
+				draft: expect.objectContaining({ prompt: "本机这份" }),
+				supersededAt: 7_777,
+				supersededBySavedAt: 10,
+			},
+		]);
+	});
+
+	it("提升幂等：那一份已被提升 / 已被丢弃 / 从来不存在时原样返回，不写盘也不凭空造草稿", () => {
+		const seeded: WorkspaceTaskEditDraftsSnapshot = {
+			draftsByTaskId: { "task-1": createDraft({ taskId: "task-1", prompt: "当前", savedAt: 30 }) },
+			supersededDraftCopies: [],
+		};
+
+		const next = applyWorkspaceTaskEditDraftMutation(
+			seeded,
+			{
+				kind: "promote_superseded_task_edit_draft_copy_to_current_draft",
+				taskId: "task-1",
+				supersededDraftSavedAt: 10,
+			},
+			7_777,
+		);
+
+		expect(next).toBe(seeded);
+	});
 });
 
 describe("task-edit-draft-store — 从浏览器 localStorage 合并迁移", () => {

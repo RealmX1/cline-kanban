@@ -209,6 +209,47 @@ function withBrowserLocalStorageDraftMerged(
 	};
 }
 
+/**
+ * 把某一份落败副本升回「当前草稿」，被顶下来的那份当前草稿按同一去重规则转存为副本。
+ *
+ * 次序是刻意的：**先**把被提升的那份从副本列表里摘掉，**再**判断当前草稿要不要留存。反过来的话，
+ * 当两份的 savedAt 恰好相同（两个 origin 在同一毫秒各保存过一次）时，去重会把当前草稿误判成「早就
+ * 存过了」而直接扔掉——那正是这条意图本身要防的静默丢字。
+ *
+ * 找不到那一份副本时原样返回快照（引用相等，上层据此跳过写盘）：重复提升、或它已被丢弃，都不该报错，
+ * 更不该凭空造出一份。
+ */
+function withSupersededDraftCopyPromotedToCurrentDraft(
+	snapshot: WorkspaceTaskEditDraftsSnapshot,
+	taskId: string,
+	supersededDraftSavedAt: number,
+	nowEpochMs: number,
+): WorkspaceTaskEditDraftsSnapshot {
+	const promotedCopy = snapshot.supersededDraftCopies.find(
+		(copy) => copy.draft.taskId === taskId && copy.draft.savedAt === supersededDraftSavedAt,
+	);
+	if (!promotedCopy) {
+		return snapshot;
+	}
+	const copiesWithoutPromoted = snapshot.supersededDraftCopies.filter((copy) => copy !== promotedCopy);
+	const currentDraftBeingReplaced = snapshot.draftsByTaskId[taskId];
+	return {
+		draftsByTaskId: { ...snapshot.draftsByTaskId, [taskId]: promotedCopy.draft },
+		supersededDraftCopies:
+			currentDraftBeingReplaced === undefined ||
+			hasAlreadyStoredSupersededDraftCopy(copiesWithoutPromoted, currentDraftBeingReplaced)
+				? copiesWithoutPromoted
+				: [
+						...copiesWithoutPromoted,
+						{
+							draft: currentDraftBeingReplaced,
+							supersededAt: nowEpochMs,
+							supersededBySavedAt: promotedCopy.draft.savedAt,
+						},
+					],
+	};
+}
+
 /** 把一条意图应用到快照上。纯函数——并发合并的正确性来自调用方持锁重读，这里只负责语义。 */
 export function applyWorkspaceTaskEditDraftMutation(
 	snapshot: WorkspaceTaskEditDraftsSnapshot,
@@ -236,6 +277,24 @@ export function applyWorkspaceTaskEditDraftMutation(
 			return withoutDraft;
 		}
 		return { ...withoutDraft, supersededDraftCopies: remainingCopies };
+	}
+	if (mutation.kind === "discard_superseded_task_edit_draft_copy") {
+		// 用户在通知栏里显式点了「丢弃这一份」。只掉这一份，当前草稿与其余副本一个都不动。
+		const remainingCopies = snapshot.supersededDraftCopies.filter(
+			(copy) => !(copy.draft.taskId === mutation.taskId && copy.draft.savedAt === mutation.supersededDraftSavedAt),
+		);
+		// 幂等：重复丢弃同一份既不报错也不写盘。
+		return remainingCopies.length === snapshot.supersededDraftCopies.length
+			? snapshot
+			: { ...snapshot, supersededDraftCopies: remainingCopies };
+	}
+	if (mutation.kind === "promote_superseded_task_edit_draft_copy_to_current_draft") {
+		return withSupersededDraftCopyPromotedToCurrentDraft(
+			snapshot,
+			mutation.taskId,
+			mutation.supersededDraftSavedAt,
+			nowEpochMs,
+		);
 	}
 	let merged = snapshot;
 	for (const incomingDraft of mutation.drafts) {

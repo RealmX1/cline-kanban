@@ -44,10 +44,43 @@ export type StoredPrompt = StoredPromptLibraryEntry;
 
 export interface PromptLibraryController {
 	prompts: StoredPrompt[];
+	/**
+	 * 归属的任务已经不在看板上的 task-scoped 条目。
+	 *
+	 * 为什么有这种东西：prompt 是用户攒的**资产**，刻意不随任务删除而毁（与草稿相反，见
+	 * src/state/task-edit-draft-store.ts 顶部那段对比）。代价就是任务没了之后，它名下的条目对
+	 * **任何**任务视角都不再可见——`resolveVisiblePrompts` 只取 `taskScopedPromptsByTaskId[taskId]`，
+	 * 而那个 taskId 再也不会被打开。不给回收入口的话，「不随任务删除而毁」保住的只是磁盘上的字节。
+	 */
+	orphanedPrompts: StoredPrompt[];
 	addPrompt: () => string;
 	updatePromptText: (id: string, text: string) => void;
 	removePrompt: (id: string) => void;
 	setPromptScope: (id: string, scope: PromptScope) => void;
+	/** 把一条孤儿条目认领到当前任务名下（它随即出现在上面的 prompts 里）。 */
+	claimOrphanedPrompt: (id: string) => void;
+}
+
+/**
+ * 挑出归属任务已不在看板上的 task-scoped 条目。
+ *
+ * 判据由**调用方注入**而不是存进库里：库文件只按 taskId 分桶，不知道任务是否还存在；而「任务是否
+ * 还在看板上」会变（trash 里的任务还能恢复、任务也可能在另一个标签页被删掉）。存一个 `orphaned: true`
+ * 标记就等于把一个会过期的判断固化进用户资产里，任务一恢复它就开始撒谎。
+ *
+ * `taskIdsOnBoard` 为 null = 调用方此刻还不知道看板上有哪些任务（首屏未加载）。此时**一条都不标**：
+ * 把「还不知道」当成「都不存在」，会让整个库在加载完成前的一瞬间全变成孤儿。
+ */
+export function resolveOrphanedPrompts(
+	snapshot: WorkspacePromptLibrarySnapshot,
+	taskIdsOnBoard: ReadonlySet<string> | null,
+): StoredPrompt[] {
+	if (taskIdsOnBoard === null) {
+		return [];
+	}
+	return Object.entries(snapshot.taskScopedPromptsByTaskId).flatMap(([taskId, prompts]) =>
+		taskIdsOnBoard.has(taskId) ? [] : prompts,
+	);
 }
 
 /** 某个任务视角下可见的条目：全局组在前，然后是本仓库组，最后是这个任务自己的组。 */
@@ -95,7 +128,11 @@ function withOptimisticallyCreatedPrompt(
 	};
 }
 
-export function usePromptLibrary(taskId: string, projectId: string): PromptLibraryController {
+export function usePromptLibrary(
+	taskId: string,
+	projectId: string,
+	taskIdsOnBoard: ReadonlySet<string> | null = null,
+): PromptLibraryController {
 	const [librarySnapshot, setLibrarySnapshot] = useState<WorkspacePromptLibrarySnapshot>(
 		EMPTY_WORKSPACE_PROMPT_LIBRARY_SNAPSHOT,
 	);
@@ -277,5 +314,19 @@ export function usePromptLibrary(taskId: string, projectId: string): PromptLibra
 		[applyMutation, taskId],
 	);
 
-	return { prompts, addPrompt, updatePromptText, removePrompt, setPromptScope };
+	// 认领 = 把这条搬到当前任务的桶里。复用 set_prompt_scope 而不是新开一条意图：搬桶正是它的语义，
+	// 而多一条做同一件事的意图就多一处并发时可能与它互相覆盖的写入。
+	const claimOrphanedPrompt = useCallback(
+		(promptId: string) => {
+			void applyMutation({ kind: "set_prompt_scope", promptId, scope: "task", taskId });
+		},
+		[applyMutation, taskId],
+	);
+
+	const orphanedPrompts = useMemo(
+		() => resolveOrphanedPrompts(librarySnapshot, taskIdsOnBoard),
+		[librarySnapshot, taskIdsOnBoard],
+	);
+
+	return { prompts, orphanedPrompts, addPrompt, updatePromptText, removePrompt, setPromptScope, claimOrphanedPrompt };
 }

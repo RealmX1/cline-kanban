@@ -2422,11 +2422,37 @@ export const promptLibraryEntryOriginSchema = z.enum([
 ]);
 export type PromptLibraryEntryOrigin = z.infer<typeof promptLibraryEntryOriginSchema>;
 
+// 这次暂存的保真度。全部如实上报，不做「看起来干净」的合并——用户有权知道存进去的这段文字
+// 哪里是推断出来的、哪里还原不了。
+export const terminalInputBoxStashFidelitySchema = z.object({
+	// 读屏时按宽度判据接回上一逻辑行的次数。**不是**错误计数：一条正常长行就会产生若干次。
+	softWrapJoinCount: z.number(),
+	foldedPastePlaceholderCount: z.number(),
+	backfilledPlaceholderCount: z.number(),
+	// 占位符配到了账本条目、但那条只剩计量没有正文。
+	placeholdersLeftUnbackfilledBecausePayloadWasDropped: z.number(),
+	// 占位符在账本里找不到计量对得上的条目（经 tmux / 原生终端粘进同一 PTY 等）。
+	placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: z.number(),
+	// 整框占位符的自洽性校验没过（`+M lines` 的 M < 3 折不出来，或 `#N` 不是严格递增）：框里混着
+	// 用户手打的同形字面量、或粘贴不是按框内顺序发生的。分不清哪处是真的，于是整框放弃回填，
+	// 占位符全部原样保留并计在这里。
+	placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: z.number(),
+	// 本次组合里载荷被丢弃（超留存上限）的粘贴条数，来自输入侧账本本身。
+	unrecoverablePasteCount: z.number(),
+});
+export type TerminalInputBoxStashFidelity = z.infer<typeof terminalInputBoxStashFidelitySchema>;
+
 export const storedPromptLibraryEntrySchema = z.object({
 	id: z.string(),
 	text: z.string(),
 	scope: promptLibraryScopeSchema,
 	origin: promptLibraryEntryOriginSchema.optional(),
+	// 这段正文当初从终端输入框读出来时的保真度。**必须落库**，不能只在 stash 当下弹一次 toast：
+	// ① 抢占来源的条目是在用户不在场时写进来的，那条 toast 根本没有任何人看见；
+	// ② 即便用户在场，第二天翻面板时「有 N 段粘贴还原不了」这句话已经不存在了，他会把一份缺了几段
+	//    的正文当成完好的拿去用。
+	// 缺字段 ≠ 保真：手写条目与升级前存的条目本来就没有这个概念，面板据此不显示任何保真度标记。
+	terminalInputBoxStashFidelity: terminalInputBoxStashFidelitySchema.optional(),
 	createdAt: z.number(),
 	updatedAt: z.number(),
 });
@@ -2468,6 +2494,9 @@ export const workspacePromptLibraryMutationSchema = z.discriminatedUnion("kind",
 			// scope 为 task 时必填（由下面的 refine 强制），其余忽略。
 			taskId: z.string().nullable().optional(),
 			origin: promptLibraryEntryOriginSchema.optional(),
+			// 仅新建时随条目落库（与 origin 同理）：它描述的是「这段正文当初是怎么读出来的」，
+			// 而后续在面板里改文是用户自己打的字，那时的保真度概念已经不适用。
+			terminalInputBoxStashFidelity: terminalInputBoxStashFidelitySchema.optional(),
 		})
 		.refine(isTaskScopedPromptMutationCarryingItsTaskId, {
 			message: TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE,
@@ -2591,6 +2620,29 @@ export const workspaceTaskEditDraftMutationSchema = z.discriminatedUnion("kind",
 		taskId: z.string(),
 	}),
 	z.object({
+		// 用户在编辑对话框的通知栏里显式丢弃某一份落败副本。**这是副本唯一的删除路径**：副本绝不因为
+		// 超时、因为任务被编辑过、因为它「看起来旧」而自动过期——那是原创内容，判错一次就再也拿不回来。
+		// （唯一的例外仍是 discard_all_task_edit_drafts_for_deleted_task：任务本体都没了。）
+		kind: z.literal("discard_superseded_task_edit_draft_copy"),
+		taskId: z.string(),
+		// 定位这一份副本用的是**它自己的 savedAt**，而不是 supersededAt / supersededBySavedAt。
+		// 唯一性直接来自留存时的去重规则（同 taskId + 同 savedAt 视为同一次编辑，只留一份），所以
+		// (taskId, savedAt) 天然是主键，不必再引入 copyId。反过来用 (supersededAt, supersededBySavedAt)
+		// 则**没有**任何不变量保证唯一：同一次迁移里两份 savedAt 不同的草稿被同一份胜出草稿顶掉时，
+		// 它俩的这两个字段完全相同。
+		supersededDraftSavedAt: z.number(),
+	}),
+	// 把某一份落败副本升回「当前草稿」，被顶下来的那份当前草稿按同一规则转存为副本。
+	//
+	// 必须是**一条**意图：拆成「先清当前、再存副本」两次请求就有中间态，而中间态一旦被另一个标签页
+	// 的写入撞上就会丢字。「用这份替换当前」也**不是**丢弃——被换下来的那份不进副本，这个按钮自己
+	// 就成了新的静默丢字点。
+	z.object({
+		kind: z.literal("promote_superseded_task_edit_draft_copy_to_current_draft"),
+		taskId: z.string(),
+		supersededDraftSavedAt: z.number(),
+	}),
+	z.object({
 		kind: z.literal("merge_task_edit_drafts_migrated_from_browser_local_storage"),
 		drafts: z.array(runtimeTaskEditDraftSchema),
 	}),
@@ -2634,7 +2686,15 @@ export const terminalInputBoxStashOutcomeSchema = z.enum([
 	"input_box_empty_nothing_to_stash",
 	// 有内容迹象却读不出可用正文（该 agent 的输入框语法尚未建模 / 当前屏定位不到框）。
 	// Ctrl+S 仍然转发：那是 agent 自己的原生 stash，内容进它自己的暂存区，不比「Kanban 完全不介入」更差。
+	// **仅出现在用户亲手按键那条路径上**——转发的正当性全部来自「这个键是他按的」。
 	"input_box_content_unreadable_forwarded_to_agent_native_stash",
+	// 同一个捕获结果（输入侧确知框里有未提交内容、读屏拿不到正文），但这次暂存是 W1 争用抢占发起的：
+	// **什么都没做**，没入库也没转发 Ctrl+S，框里那半句话一个字没少。
+	//
+	// 为什么两条路径在这里的正确行为恰好相反：抢占路径上根本没有人按键，转发就不再是「替用户把他按的
+	// 键送到 agent」，而是凭空拿走人类打了一半的内容——正文被 agent 自己的暂存区吞掉、Kanban 侧一无所有，
+	// 而抢占方还会如实返回失败、这次投递也不会发生。也就是说：**内容没了，却连一次投递都没换到**。
+	"input_box_content_unreadable_and_left_untouched",
 	// 屏上确实有文字，但它一个字节都没经过本运行时的 writeInput，因此无从区分「用户敲的内容」与
 	// 「agent 自己渲染的空框占位提示」（Claude 偶发的 `Try "..."`）。不入库——把 agent 的 UI 文案
 	// 当成用户资产存进去，比暂时存不了更糟。同样转发 Ctrl+S 交给 agent 原生暂存兜底。
@@ -2647,26 +2707,6 @@ export const terminalInputBoxStashOutcomeSchema = z.enum([
 	"prompt_library_write_failed",
 ]);
 export type TerminalInputBoxStashOutcome = z.infer<typeof terminalInputBoxStashOutcomeSchema>;
-
-// 这次暂存的保真度。全部如实上报，不做「看起来干净」的合并——用户有权知道存进去的这段文字
-// 哪里是推断出来的、哪里还原不了。
-export const terminalInputBoxStashFidelitySchema = z.object({
-	// 读屏时按宽度判据接回上一逻辑行的次数。**不是**错误计数：一条正常长行就会产生若干次。
-	softWrapJoinCount: z.number(),
-	foldedPastePlaceholderCount: z.number(),
-	backfilledPlaceholderCount: z.number(),
-	// 占位符配到了账本条目、但那条只剩计量没有正文。
-	placeholdersLeftUnbackfilledBecausePayloadWasDropped: z.number(),
-	// 占位符在账本里找不到计量对得上的条目（经 tmux / 原生终端粘进同一 PTY 等）。
-	placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: z.number(),
-	// 整框占位符的自洽性校验没过（`+M lines` 的 M < 3 折不出来，或 `#N` 不是严格递增）：框里混着
-	// 用户手打的同形字面量、或粘贴不是按框内顺序发生的。分不清哪处是真的，于是整框放弃回填，
-	// 占位符全部原样保留并计在这里。
-	placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: z.number(),
-	// 本次组合里载荷被丢弃（超留存上限）的粘贴条数，来自输入侧账本本身。
-	unrecoverablePasteCount: z.number(),
-});
-export type TerminalInputBoxStashFidelity = z.infer<typeof terminalInputBoxStashFidelitySchema>;
 
 export const runtimeTerminalInputBoxStashRequestSchema = z.object({
 	taskId: z.string(),

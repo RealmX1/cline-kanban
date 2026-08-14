@@ -30,11 +30,16 @@ import {
 } from "@/components/task-agent-model-picker";
 import { TaskAgentPermissionModeControl } from "@/components/task-agent-permission-mode-control";
 import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
+import {
+	type TaskEditDraftComparableValues,
+	TaskEditDraftRecoveryNotice,
+} from "@/components/task-edit-draft-recovery-notice";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
+import type { TaskEditDraft } from "@/hooks/task-edit-drafts";
 import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
@@ -213,6 +218,10 @@ export function TaskEditorDialog({
 	taskEditorMode = "create",
 	taskAgentSessionInitialization,
 	onTaskAgentSessionInitializationChange,
+	editingTaskId = null,
+	editTaskFormSeededFromSavedDraftAt = null,
+	onRevertEditTaskFormToSavedTaskContent,
+	onAdoptPromotedTaskEditDraft,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -262,6 +271,12 @@ export function TaskEditorDialog({
 	taskEditorMode?: "create" | "edit";
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	onTaskAgentSessionInitializationChange?: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
+	/** edit 模式下正在编辑的任务 id。草稿通知栏按它取这张卡片的落败副本。 */
+	editingTaskId?: string | null;
+	/** 值 = 铺表单用的那份草稿的 savedAt；null = 表单就是任务本体，通知栏那一条不出现。 */
+	editTaskFormSeededFromSavedDraftAt?: number | null;
+	onRevertEditTaskFormToSavedTaskContent?: () => void;
+	onAdoptPromotedTaskEditDraft?: (promotedDraft: TaskEditDraft) => void;
 }): ReactElement {
 	// 逐字输入下沉到这里，不再每次按键都经 `onPromptChange` 打到 `App` 根节点。
 	// 那条老路径会把 1566 行的 `App` 连同整棵卡片树一起重渲，是「在任务创建界面打字很卡」的主因。
@@ -698,6 +713,37 @@ export function TaskEditorDialog({
 			>
 				<DialogHeader title={dialogTitle} icon={<PencilLine size={16} />} />
 				<DialogBody>
+					{/* 草稿通知栏。只在 edit 模式出现：create 模式没有「任务已保存的内容」可以改回去，
+					    也不存在按 taskId 归属的落败副本。它不阻塞保存——只是把一直存在却看不见的事实说出来。 */}
+					{taskEditorMode === "edit" && editingTaskId !== null ? (
+						<TaskEditDraftRecoveryNotice
+							workspaceId={workspaceId}
+							taskId={editingTaskId}
+							seededFromSavedDraftAt={editTaskFormSeededFromSavedDraftAt}
+							currentFormValues={
+								{
+									// 用 dialog 内部的 promptDraft 而不是父层 prompt：逐字输入下沉在这里，
+									// 父层那份要等失焦/提交才追平，拿它做对照会把「已经改过了」说成没差别。
+									prompt: promptDraft,
+									images,
+									startInPlanMode,
+									taskAgentPermissionMode,
+									autoReviewEnabled,
+									autoReviewMode,
+									branchRef,
+									worktreeMode,
+									agentId,
+									clineSettings,
+									terminalAgentModelOverrideSettings,
+									taskAgentSessionInitialization,
+								} satisfies TaskEditDraftComparableValues
+							}
+							onRevertToSavedTaskContent={() => onRevertEditTaskFormToSavedTaskContent?.()}
+							onSupersededCopyPromotedToCurrentDraft={(promotedDraft) =>
+								onAdoptPromotedTaskEditDraft?.(promotedDraft)
+							}
+						/>
+					) : null}
 					{mode === "single" ? (
 						<div>
 							<TaskPromptComposer

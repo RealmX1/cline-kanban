@@ -100,6 +100,7 @@ import {
 	readAgentRaisedPendingUserDecisions,
 } from "../state/agent-raised-pending-user-decision-store";
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
+import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
@@ -206,6 +207,24 @@ function isByTheWaySessionForWorkspaceTask(summary: RuntimeTaskSessionSummary, w
 	const metadata = summary.taskConversationSessionMetadata;
 	return metadata?.workspaceTaskId === workspaceTaskId && metadata.taskConversationSessionRole === "by_the_way";
 }
+
+// 一次终端输入框暂存是谁发起的。
+//
+// **必须是单一参数**：它同时决定两件事——① 入库条目的 origin 标签；② 读不出正文时**能不能**转发
+// Ctrl+S 清框。两者必须由同一个事实推出。拆成「origin 标签」+「允许清框」两个参数，迟早会出现
+// 「标成抢占来源、却按用户按键的策略清了框」这种自相矛盾的组合，而那正是本参数要根除的缺陷本身：
+// 在此之前 origin 已经传进来了，却只用来贴标签，一个字都没参与清框判定。
+type TerminalInputBoxStashInitiator =
+	| "human_pressed_stash_key_in_terminal"
+	| "programmatic_delivery_contention_preemption";
+
+const PROMPT_LIBRARY_ENTRY_ORIGIN_BY_TERMINAL_INPUT_BOX_STASH_INITIATOR: Record<
+	TerminalInputBoxStashInitiator,
+	PromptLibraryEntryOrigin
+> = {
+	human_pressed_stash_key_in_terminal: "terminal_stash_by_user",
+	programmatic_delivery_contention_preemption: "terminal_stash_preempted_by_programmatic_delivery",
+};
 
 function findWorkspaceBoardCard(board: RuntimeBoardData, taskId: string): RuntimeBoardCard | null {
 	for (const column of board.columns) {
@@ -424,7 +443,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		workspaceScope: RuntimeTrpcWorkspaceScope;
 		taskId: string;
 		scope: PromptLibraryScope;
-		origin: PromptLibraryEntryOrigin;
+		initiatedBy: TerminalInputBoxStashInitiator;
 	}): Promise<RuntimeTerminalInputBoxStashResponse> => {
 		let terminalManager: Awaited<ReturnType<typeof deps.getScopedTerminalManager>>;
 		try {
@@ -453,8 +472,38 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					};
 				}
 				if (capture.status !== "captured_stashable_text") {
-					// 没有可入库的正文。仍然转发 Ctrl+S：那是这个键的原生语义，agent 自己的暂存区会接住任何
-					// 我们读不到的内容——不入库不等于要把用户的按键吞掉。
+					// 转发 Ctrl+S 与否**只看发起方**，不按捕获状态分类讨论。
+					//
+					// 争用抢占这条路径上根本没有人按键，也就没有任何键需要「替他送到 agent」。此时转发就是
+					// 凭空清掉人类打了一半的那半句：正文被 agent 自己的暂存区吞掉、Kanban 侧一无所有，而
+					// 抢占方随后如实返回失败、这次投递压根不会发生——内容没了，连一次投递都没换到。
+					//
+					// 只有 input_box_content_unreadable 是真正会丢字的那一格（输入侧字节跟踪确知框里有未提交
+					// 内容、读屏拿不到正文）；另两格不丢字（两侧都说空 / 屏上有字但一个字节都没经过 writeInput，
+					// 多半是 agent 自己渲染的占位提示）。即便如此这里也不按状态开口子：判据是「没人按键」，
+					// 一句话说得完、也没有下一个状态被漏掉的余地，而按状态枚举一旦将来新增一格就会默认落进
+					// 「照常清框」那一侧。
+					if (args.initiatedBy === "programmatic_delivery_contention_preemption") {
+						return {
+							ok: true,
+							// 三格里只有「读不到正文」需要一个专属取值：它与用户按键路径的
+							// ..._forwarded_to_agent_native_stash 是同一个捕获结果、相反的处置，共用一个名字
+							// 就等于让回执自己撒谎（名字里明写着 forwarded）。另两格的名字本就不含处置，
+							// 两条路径共用不会说错话——而它们之间那点事实差别（有没有把一个键打进一个我们
+							// 认定为空的框）不改变任何调用方的决策。
+							outcome:
+								capture.status === "input_box_empty"
+									? ("input_box_empty_nothing_to_stash" as const)
+									: capture.status === "input_box_content_unreadable"
+										? ("input_box_content_unreadable_and_left_untouched" as const)
+										: ("input_box_screen_text_not_corroborated_by_keystroke_tracking" as const),
+							stashedPromptId: null,
+							stashedTextCharacterCount: 0,
+							fidelity: capture.fidelity,
+						};
+					}
+					// 用户亲手按了 Ctrl+S：没有可入库的正文，但仍然转发。那是这个键的原生语义，agent 自己的
+					// 暂存区会接住任何我们读不到的内容——不入库不等于要把用户的按键吞掉。
 					const forwardedToSameTerminalSessionIncarnation =
 						terminalManager.forwardStashKeyToClearTaskTerminalInputBox(
 							args.taskId,
@@ -494,7 +543,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						scope,
 						// scope 非 task 时传 null：带着一个用不上的 taskId 只会让存储层的桶判定多一个歧义输入。
 						taskId: scope === "task" ? args.taskId : null,
-						origin: args.origin,
+						origin: PROMPT_LIBRARY_ENTRY_ORIGIN_BY_TERMINAL_INPUT_BOX_STASH_INITIATOR[args.initiatedBy],
+						// 保真度随条目一起落库，别只回给这一次请求的调用方：抢占来源的条目写进来时用户
+						// 根本不在场，那条只弹一次的 toast 没有任何人看得见。
+						terminalInputBoxStashFidelity: capture.fidelity,
 					});
 				} catch (error) {
 					// **不**转发 Ctrl+S：正文原样留在框里，用户看得见、能重试。转发只会把它藏进 agent 的
@@ -1255,7 +1307,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 										workspaceScope,
 										taskId: contendedTaskId,
 										scope: "task",
-										origin: "terminal_stash_preempted_by_programmatic_delivery",
+										initiatedBy: "programmatic_delivery_contention_preemption",
 									});
 									return stash.outcome === "stashed_into_prompt_library";
 								},
@@ -1775,7 +1827,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 										workspaceScope,
 										taskId,
 										scope: "task",
-										origin: "terminal_stash_preempted_by_programmatic_delivery",
+										initiatedBy: "programmatic_delivery_contention_preemption",
 									});
 									return stash.outcome === "stashed_into_prompt_library";
 								},
@@ -1925,9 +1977,16 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 		mutateWorkspaceTaskEditDrafts: async (workspaceScope, input) => {
 			try {
+				// 浏览器镜像是迁移的种子且刻意不删，于是每次页面加载都会整份重发；任务被删掉之后镜像里那条仍在。
+				// 不在入口拦掉，saveState 的差集清理刚清掉的草稿下一次加载就被原样迁回来（见
+				// discard-task-edit-drafts-for-tasks-removed-from-board.ts）。
+				const mutation = await withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped(
+					workspaceScope.workspaceId,
+					input.mutation,
+				);
 				return {
 					ok: true,
-					drafts: await mutateWorkspaceTaskEditDrafts(workspaceScope.workspaceId, input.mutation),
+					drafts: await mutateWorkspaceTaskEditDrafts(workspaceScope.workspaceId, mutation),
 				};
 			} catch (error) {
 				// 同 prompt library：写失败时回 null 而不是变更前的快照。拿一份看起来正常的旧快照回去，
@@ -1954,7 +2013,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				workspaceScope,
 				taskId: input.taskId,
 				scope: input.scope ?? "task",
-				origin: "terminal_stash_by_user",
+				initiatedBy: "human_pressed_stash_key_in_terminal",
 			}),
 		startShellSession: async (workspaceScope, input) => {
 			try {

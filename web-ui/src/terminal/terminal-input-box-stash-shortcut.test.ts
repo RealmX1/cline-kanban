@@ -9,11 +9,9 @@ vi.mock("@/utils/platform", () => ({
 	},
 }));
 
-const {
-	describeTerminalInputBoxStashOutcome,
-	isStashTerminalInputBoxToPromptLibraryShortcut,
-	PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE,
-} = await import("@/terminal/terminal-input-box-stash-shortcut");
+const { describeTerminalInputBoxStashOutcome, isStashTerminalInputBoxToPromptLibraryShortcut } = await import(
+	"@/terminal/terminal-input-box-stash-shortcut"
+);
 
 function createKeyEvent(init: KeyboardEventInit & { type?: string } = {}): KeyboardEvent {
 	const { type = "keydown", ...rest } = init;
@@ -67,21 +65,24 @@ describe("isStashTerminalInputBoxToPromptLibraryShortcut", () => {
 });
 
 describe("describeTerminalInputBoxStashOutcome", () => {
-	it("入库成功报字符数，并附上「面板暂时看不到」的说明", () => {
+	it("入库成功报字符数", () => {
 		const toast = describeTerminalInputBoxStashOutcome(
 			createStashResponse({ outcome: "stashed_into_prompt_library", stashedTextCharacterCount: 128 }),
 		);
 		expect(toast?.intent).toBe("success");
 		expect(toast?.message).toContain("128");
-		expect(toast?.message).toContain(PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE);
 	});
 
-	// 钉的是语义不是字句：面板迁移完成前，成功回执不能把用户支到一个看不到这条内容的面板前，
-	// 必须同时讲清「东西落在哪」和「面板为什么还没有它」。措辞可改，这两件事不能少。
-	it("成功回执必须说清内容落盘位置、以及面板要等迁移完成才显示", () => {
-		expect(PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE).toContain("prompt-library.json");
-		expect(PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE).toMatch(/面板/);
-		expect(PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE).toMatch(/迁移/);
+	// 曾经这里附着一句「Prompt Library 面板目前仍只读浏览器本地存储，要等面板迁移到服务端库之后才会
+	// 显示这一条」。面板已经服务端化（见 @/hooks/use-prompt-library 的文件头），那句话从「诚实的免责
+	// 声明」变成了一条**反向的谎**：把一条明明看得见的条目说成看不见，用户会去翻一个其实有内容的面板
+	// 然后放弃。回执只该讲此刻为真的事。
+	it("成功回执不再声称面板看不到这条——面板早就服务端化了", () => {
+		const toast = describeTerminalInputBoxStashOutcome(
+			createStashResponse({ outcome: "stashed_into_prompt_library", stashedTextCharacterCount: 128 }),
+		);
+		expect(toast?.message).not.toMatch(/迁移/);
+		expect(toast?.message).not.toMatch(/本地存储/);
 	});
 
 	it("有还原不了的折叠粘贴时降为 warning 并说清有几处", () => {
@@ -125,8 +126,6 @@ describe("describeTerminalInputBoxStashOutcome", () => {
 		);
 		expect(toast?.intent).toBe("warning");
 		expect(toast?.message).toContain("2 处折叠粘贴无法还原");
-		// 降级成 warning 也仍然是「存进去了」，同样要说清面板此刻看不到它。
-		expect(toast?.message).toContain(PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE);
 	});
 
 	it("软折行合并次数不算问题，不该把成功降级成告警", () => {
@@ -169,7 +168,6 @@ describe("describeTerminalInputBoxStashOutcome", () => {
 		expect(toast?.intent).toBe("warning");
 		expect(toast?.message).toContain("42");
 		expect(toast?.message).toContain("未被清空");
-		expect(toast?.message).toContain(PROMPT_LIBRARY_PANEL_STILL_LOCAL_ONLY_UNTIL_MIGRATION_NOTICE);
 	});
 
 	it("被重入闸门挡下的那一次必须有回执，不许静默吞掉按键", () => {
