@@ -8,6 +8,8 @@ import { z } from "zod";
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
+	RuntimeAgentSessionTransportSwitchRequest,
+	RuntimeAgentSessionTransportSwitchResponse,
 	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 	RuntimeAnswerAgentRaisedPendingUserDecisionResponse,
@@ -90,6 +92,9 @@ import type {
 	RuntimeProjectPermanentDeletionRequest,
 	RuntimeProjectPermanentDeletionResult,
 	RuntimeProjectsResponse,
+	RuntimePromptLibraryMutateRequest,
+	RuntimePromptLibraryReadRequest,
+	RuntimePromptLibraryResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
@@ -104,6 +109,8 @@ import type {
 	RuntimeTaskChatAbortResponse,
 	RuntimeTaskChatCancelRequest,
 	RuntimeTaskChatCancelResponse,
+	RuntimeTaskChatDeliveryCancelRequest,
+	RuntimeTaskChatDeliveryCancelResponse,
 	RuntimeTaskChatMessagesRequest,
 	RuntimeTaskChatMessagesResponse,
 	RuntimeTaskChatReloadRequest,
@@ -126,10 +133,13 @@ import type {
 	RuntimeTaskTerminalRefreshResponse,
 	RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkResponse,
+	RuntimeTaskWorkspaceGitStatusesResponse,
 	RuntimeTaskWorkspaceInfoRequest,
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeTerminalAgentModelSelectionOptionsRequest,
 	RuntimeTerminalAgentModelSelectionOptionsResponse,
+	RuntimeTerminalInputBoxStashRequest,
+	RuntimeTerminalInputBoxStashResponse,
 	RuntimeUpdateStatusResponse,
 	RuntimeUpdateVerificationChecklistRequest,
 	RuntimeUpdateVerificationChecklistResponse,
@@ -148,6 +158,8 @@ import type {
 import {
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
+	runtimeAgentSessionTransportSwitchRequestSchema,
+	runtimeAgentSessionTransportSwitchResponseSchema,
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema,
@@ -230,6 +242,9 @@ import {
 	runtimeProjectPermanentDeletionRequestSchema,
 	runtimeProjectPermanentDeletionResultSchema,
 	runtimeProjectsResponseSchema,
+	runtimePromptLibraryMutateRequestSchema,
+	runtimePromptLibraryReadRequestSchema,
+	runtimePromptLibraryResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
 	runtimeRunPostDeployVerificationItemRequestSchema,
@@ -244,6 +259,8 @@ import {
 	runtimeTaskChatAbortResponseSchema,
 	runtimeTaskChatCancelRequestSchema,
 	runtimeTaskChatCancelResponseSchema,
+	runtimeTaskChatDeliveryCancelRequestSchema,
+	runtimeTaskChatDeliveryCancelResponseSchema,
 	runtimeTaskChatMessagesRequestSchema,
 	runtimeTaskChatMessagesResponseSchema,
 	runtimeTaskChatReloadRequestSchema,
@@ -266,10 +283,13 @@ import {
 	runtimeTaskTerminalRefreshResponseSchema,
 	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkResponseSchema,
+	runtimeTaskWorkspaceGitStatusesResponseSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
 	runtimeTaskWorkspaceInfoResponseSchema,
 	runtimeTerminalAgentModelSelectionOptionsRequestSchema,
 	runtimeTerminalAgentModelSelectionOptionsResponseSchema,
+	runtimeTerminalInputBoxStashRequestSchema,
+	runtimeTerminalInputBoxStashResponseSchema,
 	runtimeUpdateStatusResponseSchema,
 	runtimeUpdateVerificationChecklistRequestSchema,
 	runtimeUpdateVerificationChecklistResponseSchema,
@@ -320,6 +340,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStopRequest,
 		) => Promise<RuntimeTaskSessionStopResponse>;
+		switchAgentSessionTransport: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeAgentSessionTransportSwitchRequest,
+		) => Promise<RuntimeAgentSessionTransportSwitchResponse>;
 		transitionTaskToReview: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionTransitionToReviewRequest,
@@ -373,6 +397,22 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatSendRequest,
 		) => Promise<RuntimeTaskChatSendResponse>;
+		cancelTaskChatDelivery: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskChatDeliveryCancelRequest,
+		) => Promise<RuntimeTaskChatDeliveryCancelResponse>;
+		getWorkspacePromptLibrary: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimePromptLibraryReadRequest,
+		) => Promise<RuntimePromptLibraryResponse>;
+		mutateWorkspacePromptLibrary: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimePromptLibraryMutateRequest,
+		) => Promise<RuntimePromptLibraryResponse>;
+		stashTerminalInputBoxToPromptLibrary: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTerminalInputBoxStashRequest,
+		) => Promise<RuntimeTerminalInputBoxStashResponse>;
 		reloadTaskChatSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatReloadRequest,
@@ -484,6 +524,9 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeWorktreeDeleteRequest,
 		) => Promise<RuntimeWorktreeDeleteResponse>;
+		loadTaskWorkspaceGitStatuses: (
+			scope: RuntimeTrpcWorkspaceScope,
+		) => Promise<RuntimeTaskWorkspaceGitStatusesResponse>;
 		loadTaskContext: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskWorkspaceInfoRequest,
@@ -664,6 +707,14 @@ export const runtimeAppRouter = t.router({
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.stopTaskSession(ctx.workspaceScope, input);
 			}),
+		// 停掉当前 agent 会话并立刻用另一条通话通道续跑同一段对话（目前只有 omp 有第二条通道）。
+		// 失败时会话停在已停止、如实报错，不回滚也不降级——见响应 schema 的注释。
+		switchAgentSessionTransport: workspaceProcedure
+			.input(runtimeAgentSessionTransportSwitchRequestSchema)
+			.output(runtimeAgentSessionTransportSwitchResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.switchAgentSessionTransport(ctx.workspaceScope, input);
+			}),
 		transitionTaskToReview: workspaceProcedure
 			.input(runtimeTaskSessionTransitionToReviewRequestSchema)
 			.output(runtimeTaskSessionTransitionToReviewResponseSchema)
@@ -752,6 +803,32 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatSendResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.sendTaskChatMessage(ctx.workspaceScope, input);
+			}),
+		cancelTaskChatDelivery: workspaceProcedure
+			.input(runtimeTaskChatDeliveryCancelRequestSchema)
+			.output(runtimeTaskChatDeliveryCancelResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.cancelTaskChatDelivery(ctx.workspaceScope, input);
+			}),
+		getWorkspacePromptLibrary: workspaceProcedure
+			.input(runtimePromptLibraryReadRequestSchema)
+			.output(runtimePromptLibraryResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getWorkspacePromptLibrary(ctx.workspaceScope, input);
+			}),
+		mutateWorkspacePromptLibrary: workspaceProcedure
+			.input(runtimePromptLibraryMutateRequestSchema)
+			.output(runtimePromptLibraryResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.mutateWorkspacePromptLibrary(ctx.workspaceScope, input);
+			}),
+		// 读框 → 回填折叠粘贴 → 写库 → 转发 Ctrl+S 清框，一次请求走完整条链。
+		// 前端只拦按键、不碰内容：同一份易随 agent 版本漂移的 TUI 画法知识只在服务端存一份。
+		stashTerminalInputBoxToPromptLibrary: workspaceProcedure
+			.input(runtimeTerminalInputBoxStashRequestSchema)
+			.output(runtimeTerminalInputBoxStashResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.stashTerminalInputBoxToPromptLibrary(ctx.workspaceScope, input);
 			}),
 		abortTaskChatTurn: workspaceProcedure
 			.input(runtimeTaskChatAbortRequestSchema)
@@ -931,6 +1008,11 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeWorktreeDeleteResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.deleteWorktree(ctx.workspaceScope, input);
+			}),
+		getTaskWorkspaceGitStatuses: workspaceProcedure
+			.output(runtimeTaskWorkspaceGitStatusesResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.workspaceApi.loadTaskWorkspaceGitStatuses(ctx.workspaceScope);
 			}),
 		getTaskContext: workspaceProcedure
 			.input(runtimeTaskWorkspaceInfoRequestSchema)

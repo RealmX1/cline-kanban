@@ -211,6 +211,93 @@ describe("task comment entries", () => {
 	});
 });
 
+describe("omp session transport pinned at task creation", () => {
+	// 这一组钉的是「建卡时固化、改全局默认不追溯已有卡片」这条契约里最容易漏的那一半：
+	// 卡片上的 agentId 是 **override**，用户用工作区默认 agent 建卡时它本来就是空的。
+	// 固化判据必须看「这张卡实际会跑哪个 agent」，否则「工作区默认是 omp」建出来的卡不落固化值，
+	// 之后在设置页改全局默认就会反向改变这些已存在卡片的启动通道。
+	it("pins the transport when the card has no agent override but the workspace default agent is switchable", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Task",
+				baseRef: "main",
+				workspaceDefaultAgentIdForNewTasks: "omp",
+				ompAgentSessionTransportForNewTasks: "acp_stdio_subprocess",
+			},
+			() => "aaaaa111",
+		);
+
+		// 卡片仍然不写 agentId：不选 agent 的卡片跟随工作区默认 agent，那份语义没有被改动。
+		expect(created.task.agentId).toBeUndefined();
+		expect(created.task.ompAgentSessionTransport).toBe("acp_stdio_subprocess");
+	});
+
+	it("pins from the card's own agent override instead of the workspace default", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Task",
+				baseRef: "main",
+				agentId: "omp",
+				workspaceDefaultAgentIdForNewTasks: "claude",
+				ompAgentSessionTransportForNewTasks: "acp_stdio_subprocess",
+			},
+			() => "aaaaa111",
+		);
+
+		expect(created.task.ompAgentSessionTransport).toBe("acp_stdio_subprocess");
+	});
+
+	it("keeps the field absent when the card's agent override is not switchable", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Task",
+				baseRef: "main",
+				agentId: "claude",
+				workspaceDefaultAgentIdForNewTasks: "omp",
+				ompAgentSessionTransportForNewTasks: "acp_stdio_subprocess",
+			},
+			() => "aaaaa111",
+		);
+
+		expect(created.task.ompAgentSessionTransport).toBeUndefined();
+	});
+
+	it("keeps the field absent when neither the override nor the workspace default is switchable", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Task",
+				baseRef: "main",
+				workspaceDefaultAgentIdForNewTasks: "claude",
+				ompAgentSessionTransportForNewTasks: "acp_stdio_subprocess",
+			},
+			() => "aaaaa111",
+		);
+
+		expect(created.task.ompAgentSessionTransport).toBeUndefined();
+	});
+
+	// 老调用点（还没接工作区默认 agent 的建卡入口）仍然是「不知道会跑哪个 agent」，
+	// 此时不落值是唯一诚实的行为——不能凭空猜一个通道钉上去。
+	it("keeps the field absent when the caller supplies neither an override nor a workspace default", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main", ompAgentSessionTransportForNewTasks: "acp_stdio_subprocess" },
+			() => "aaaaa111",
+		);
+
+		expect(created.task.ompAgentSessionTransport).toBeUndefined();
+	});
+});
+
 describe("per-task agent/model/provider overrides", () => {
 	it("persists agentId on the card when creating a task", () => {
 		const created = addTaskToColumn(

@@ -1,10 +1,12 @@
 import type { DropResult } from "@hello-pangea/dnd";
-import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { resolveAgentSessionTransportForLaunch } from "@runtime-agent-session-transport-selection";
 import {
 	AlertTriangle,
 	Files,
 	FileText,
 	GitCompareArrows,
+	Hourglass,
 	List,
 	Maximize2,
 	MessageSquare,
@@ -42,15 +44,19 @@ import {
 import { useResizeDrag } from "@/resize/use-resize-drag";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
 	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskTerminalDeliveryContention,
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
 import { useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
+import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
+import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel, type TaskCommentEntry } from "@/types";
 import { useWindowEvent } from "@/utils/react-use";
@@ -238,7 +244,12 @@ function BottomTerminalSection({
 			onCollapse={onCollapse}
 			isExpanded={isExpanded}
 		>
-			<div className="flex min-w-0 flex-1 px-3">
+			<div className="flex min-h-0 min-w-0 flex-1 flex-col px-3">
+				<TerminalDeliveryContentionBanner
+					taskId={taskId}
+					workspaceId={workspaceId}
+					contention={summary?.terminalDeliveryContention ?? null}
+				/>
 				<AgentTerminalPanel
 					taskId={taskId}
 					workspaceId={workspaceId}
@@ -260,6 +271,48 @@ function BottomTerminalSection({
 				/>
 			</div>
 		</ResizableBottomPane>
+	);
+}
+
+// 程序化投递正等着这个输入框腾出来时的挂起可见性（计划 §4.4）。摆在终端正上方，因为要说的正是
+// 「你手上这个框」的事；`terminalDeliveryContention` 为空时整块不渲染，日常不占任何高度。
+function TerminalDeliveryContentionBanner({
+	taskId,
+	workspaceId,
+	contention,
+}: {
+	taskId: string;
+	workspaceId: string | null;
+	contention: RuntimeTaskTerminalDeliveryContention | null;
+}): React.ReactElement | null {
+	const [isStashInFlight, setIsStashInFlight] = useState(false);
+	const notice = describeTerminalDeliveryContention(contention);
+	if (!notice) {
+		return null;
+	}
+	return (
+		<div className="mb-1 flex items-start gap-2 rounded-md border border-status-orange/30 bg-status-orange/10 px-2 py-1.5 text-xs text-status-orange">
+			<Hourglass size={13} className="mt-0.5 shrink-0" />
+			<div className="min-w-0 flex-1">
+				<div className="font-medium">{notice.headline}</div>
+				<div className="mt-0.5 text-text-secondary">{notice.detail}</div>
+			</div>
+			{notice.shouldOfferStashAndYieldAction && workspaceId ? (
+				<Button
+					variant="default"
+					size="xs"
+					disabled={isStashInFlight}
+					onClick={() => {
+						setIsStashInFlight(true);
+						void stashTerminalInputBoxToPromptLibrary({ workspaceId, taskId }).finally(() => {
+							setIsStashInFlight(false);
+						});
+					}}
+				>
+					{isStashInFlight ? "暂存中…" : "暂存我的输入并放行"}
+				</Button>
+			) : null}
+		</div>
 	);
 }
 
@@ -783,14 +836,44 @@ export function CardDetailView({
 	const showMoveToValidationActions = selection.column.id === "review";
 	const isTaskTerminalEnabled =
 		selection.column.id === "in_progress" || selection.column.id === "review" || selection.column.id === "validation";
-	const effectiveTaskAgentId = sessionSummary?.agentId ?? selection.card.agentId ?? selectedAgentId;
+	// 详情页分流回答的是「这个**既存**会话该渲染成什么面板」，所以兜底顺序是「运行时观测事实 → 用户意图」，
+	// 与服务端的 `backfillMissingSessionAgentIdsFromDurableSources`、`refreshTaskTerminal` 严格同序：
+	//
+	// 1. `sessionSummary?.agentId` —— 活体会话自己报告的身份，最硬的事实。
+	// 2. `selection.card.mostRecentlyLaunchedAgentSessionAgentId` —— runtime 在上一次会话**启动成功那一刻**记下的
+	//    观测值，说的正是「这条会话当时真的由谁跑起来」，与第 1 级同指一个会话。
+	// 3. `selection.card.agentId` —— 用户为这张卡做的 per-task 覆盖，表达的是「**下次**想用谁启动」的意图，可能
+	//    还没有任何会话兑现过它（改了卡片 agent 但尚未重启时，既存会话的身份仍是上一次跑起来的那个），故必须
+	//    排在观测值之后，只在观测值缺席（本字段上线前的存量卡片）时兜底。
+	// 4. `selectedAgentId` —— 项目默认档。
+	//
+	// 第 1 级为什么会失效（本 bug 的成因）：硬中断后盘上没有该 task 条目时，前端会用 `createIdleTaskSession`
+	// （web-ui/src/hooks/app-utils.tsx）合成一条 summary，其 `agentId` 恒为 null；那是纯前端合成的对象，服务端
+	// hydrate 时的 agentId 回填够不到它——于是分流只能靠第 2 级往后的卡片字段兜底。
+	const effectiveTaskAgentId =
+		sessionSummary?.agentId ??
+		selection.card.mostRecentlyLaunchedAgentSessionAgentId ??
+		selection.card.agentId ??
+		selectedAgentId;
 	const effectiveTaskConversationSessionAgentId =
 		activeTaskConversationSessionSummary?.agentId ?? effectiveTaskAgentId;
+	// 没有活会话（新卡、会话已被回收 / 停止）时，面板要按「这张卡下次启动会走哪条通道」预判，
+	// 而不是按 agentId 取 catalog 默认——omp 的 catalog 默认是 TUI，但卡上可能固化着 ACP，
+	// 只看 agentId 会给一张下次必走 ACP 的卡渲染 xterm。这里复用启动侧那份解析（卡片固化值 →
+	// 全局默认 → catalog 默认），与服务端 spawn 时的判断同源，避免两边各算一套。
+	const nextLaunchAgentSessionTransport: RuntimeAgentSessionTransport | null = effectiveTaskConversationSessionAgentId
+		? resolveAgentSessionTransportForLaunch({
+				agentId: effectiveTaskConversationSessionAgentId,
+				cardPinnedSessionTransport: selection.card.ompAgentSessionTransport ?? null,
+				globalDefaultSessionTransportForNewTasks: runtimeConfig?.ompAgentSessionTransportForNewTasks ?? null,
+			}).effectiveSessionTransport
+		: null;
 	// 分流依据是「会话传输形态」而不是「是不是 Cline」：Cline SDK 与 ACP（omp）都由 Kanban
 	// 直接持有结构化消息，渲染成会话面板；只有 PTY 终端 agent 才渲染 xterm。
-	const showClineAgentChatPanel = isRuntimeAgentSessionRenderedAsConversationPanel(
-		effectiveTaskConversationSessionAgentId ?? null,
-	);
+	// 有活会话时读会话自己盖的通道章（omp 可在 TUI ⇄ ACP 之间切换，agentId 判不出来）。
+	const showClineAgentChatPanel = activeTaskConversationSessionSummary
+		? isRuntimeAgentSessionSummaryRenderedAsConversationPanel(activeTaskConversationSessionSummary)
+		: nextLaunchAgentSessionTransport !== null && nextLaunchAgentSessionTransport !== "pty_terminal";
 	const agentPanelStyle: CSSProperties = showClineAgentChatPanel
 		? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
 		: {

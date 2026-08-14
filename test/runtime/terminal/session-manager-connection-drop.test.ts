@@ -6,8 +6,10 @@ const ensureInstructionsFileMock = vi.hoisted(() => vi.fn(async () => "/tmp/netw
 
 vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
 	prepareAgentLaunch: prepareAgentLaunchMock,
-	// 真实 bracketed-paste 实现，保证注入体框定正确。
-	toBracketedPasteSubmission: (command: string) => `[200~${command}[201~\r`,
+	// 分离写：框架与提交 CR 分两次发出（见 session-manager 的摄入门控）。这里给真实实现，
+	// 保证注入体框定与提交字节都是真的。
+	toBracketedPasteFramingWithoutTrailingSubmit: (command: string) => `\u001b[200~${command}\u001b[201~`,
+	BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN: "\u000d",
 }));
 
 vi.mock("../../../src/terminal/pty-session.js", () => ({

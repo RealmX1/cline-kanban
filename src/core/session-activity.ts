@@ -473,6 +473,33 @@ export function resolveSessionFacets(summary: RuntimeTaskSessionSummary): Sessio
 	});
 }
 
+// 「从未启动过的空白占位」判据：与 session-manager 的 `createDefaultSummary` 逐字段同形。
+//
+// 这条谓词存在的唯一原因是它是**数据损坏的形状**，不是一个正常的会话状态。链路是：
+// 硬中断让 sessions.json 里没有该 task 的条目 → 前端聚焦卡片触发 attach → `ensureEntry` 就地造出一条
+// 全 null 的默认 summary → 它带着**最新的 updatedAt** 被广播出去 → 前端按 updatedAt 单调合并接受了它
+// → 下一次客户端 saveState 把它写进 sessions.json。至此「这个 task 用的是哪个 agent」被一条空壳
+// 永久覆盖，后续重启不再自愈，用户看到的就是全白 TUI 加一个灰掉的「重启终端会话」。
+//
+// 因此凡是「用新记录覆盖旧记录」的接缝，都要用它拦一道：占位记录携带的信息严格少于任何真实记录，
+// 它更新的 updatedAt 表达的是「刚被凭空造出来」，而不是「掌握了更新的事实」。
+//
+// 判据取 createDefaultSummary 的完整形状而非其中一两个字段：宁可漏判一条形状略有出入的记录
+// （退化成现状，不会更糟），也不能误判一条真实记录并把它钉死（那会挡住合法更新）。
+export function isNeverStartedPlaceholderTaskSessionSummary(summary: RuntimeTaskSessionSummary): boolean {
+	return (
+		summary.state === "idle" &&
+		summary.agentId === null &&
+		summary.workspacePath === null &&
+		summary.pid === null &&
+		summary.startedAt === null &&
+		summary.lastOutputAt === null &&
+		summary.lastHookAt === null &&
+		summary.exitCode === null &&
+		summary.latestTurnCheckpoint == null
+	);
+}
+
 // 决策型「会话是否处于活跃回合」判据（facet 权威，绕开有损 legacy 投影）。
 // 严格等价于 legacy `state ∈ {running, awaiting_review}`：有回合主（turnOwner 非 null）且未落入
 // 终止态（failed=spawn 失败 / interrupted=被中断）。

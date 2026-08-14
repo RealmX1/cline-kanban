@@ -179,6 +179,7 @@ const savedClineOauthConfig = {
 	readyForReviewNotificationsEnabled: false,
 	notificationSoundEnabled: false,
 	autoContinueOnConnectionDropEnabled: false,
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: false,
 	effectiveCommand: "cline",
 	detectedCommands: [],
 	shortcuts: [],

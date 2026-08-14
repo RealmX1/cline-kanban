@@ -5,7 +5,13 @@ import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
-import { type RuntimeAgentId, type RuntimeProjectShortcut, runtimeAgentIdSchema } from "../core/api-contract";
+import {
+	type RuntimeAgentId,
+	type RuntimeAgentSessionTransport,
+	type RuntimeProjectShortcut,
+	runtimeAgentIdSchema,
+	runtimeAgentSessionTransportSchema,
+} from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import { detectInstalledCommands } from "../terminal/agent-registry";
 import { areRuntimeProjectShortcutsEqual } from "./shortcut-utils";
@@ -15,9 +21,11 @@ interface RuntimeGlobalConfigFileShape {
 	selectedShortcutLabel?: string;
 	agentAutonomousModeEnabled?: boolean;
 	newTaskStartInPlanModeByDefault?: boolean;
+	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 	postDeployVerificationForceCompleteEnabled?: boolean;
 	// Legacy 键（Post-Deploy Verification 全量重命名前叫 guidedVerificationForceCompleteEnabled）。
 	// 仅用于读时兼容:旧 config.json 里若只有这个键,回退读它;下一次写入只落新键,旧键随原子覆盖自然消失。
@@ -37,9 +45,11 @@ export interface RuntimeConfigState {
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
 	newTaskStartInPlanModeByDefault: boolean;
+	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: boolean;
 	postDeployVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
@@ -53,9 +63,11 @@ export interface RuntimeConfigUpdateInput {
 	selectedShortcutLabel?: string | null;
 	agentAutonomousModeEnabled?: boolean;
 	newTaskStartInPlanModeByDefault?: boolean;
+	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled?: boolean;
 	notificationSoundEnabled?: boolean;
 	autoContinueOnConnectionDropEnabled?: boolean;
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 	postDeployVerificationForceCompleteEnabled?: boolean;
 	shortcuts?: RuntimeProjectShortcut[];
 	commitPromptTemplate?: string;
@@ -72,9 +84,18 @@ const DEFAULT_AGENT_ID: RuntimeAgentId = "cline";
 const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = ["claude", "codex", "cursor", "droid", "kiro"];
 const DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED = true;
 const DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT = true;
+// omp 新任务默认走 TUI（PTY）而不是 ACP：ACP 通道尚有一批未收口的缺口（历史纯内存、无 stall 兜底、
+// mcpServers 恒空、provider 错误伪装成正常回答），TUI 与 Claude Code / Codex / Kimi 同构、可直接用。
+// 这只是**新任务默认值**——建卡时固化到卡上，改它不追溯已有卡片（见 runtimeBoardCardSchema 的
+// ompAgentSessionTransport）。活会话当刻在用哪条通道读 summary.sessionTransport，与本值无关。
+const DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS: RuntimeAgentSessionTransport = "pty_terminal";
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
 const DEFAULT_NOTIFICATION_SOUND_ENABLED = true;
 const DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED = true;
+// 程序化投递撞上「人类输入框里有未提交内容」时的争用策略开关（计划里的 auto / never_preempt 两档）。
+// true（默认，auto）：人**不在场**时先把那段未提交内容无损暂存进 Prompt Library 再放行投递；人在场时
+// 仍只挂起可见、绝不动框。false（never_preempt）：任何情况下都只挂起，等人自己让路或预算耗尽诚实失败。
+const DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED = true;
 // 部署后验证的「强制完成」是绕过安全确认的逃生阀，默认关闭；CLI 传 --force 且此开关开启才生效。
 const DEFAULT_POST_DEPLOY_VERIFICATION_FORCE_COMPLETE_ENABLED = false;
 const DEFAULT_COMMIT_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD. When you are finished with the task, commit the working changes onto {{base_ref}}.
@@ -144,6 +165,16 @@ function normalizeAgentId(agentId: RuntimeAgentId | string | null | undefined): 
 		return parsed.data;
 	}
 	return DEFAULT_AGENT_ID;
+}
+
+// 以 runtimeAgentSessionTransportSchema 为唯一真源做校验，与 normalizeAgentId 同理：
+// 手写字面量比较在新增 transport 取值时不会编译报错，漏改会让持久化的选择静默回落。
+function normalizeAgentSessionTransport(
+	transport: RuntimeAgentSessionTransport | string | null | undefined,
+	fallback: RuntimeAgentSessionTransport,
+): RuntimeAgentSessionTransport {
+	const parsed = runtimeAgentSessionTransportSchema.safeParse(transport);
+	return parsed.success ? parsed.data : fallback;
 }
 
 function pickBestInstalledAgentId(): RuntimeAgentId | null {
@@ -297,6 +328,10 @@ function toRuntimeConfigState({
 			globalConfig?.newTaskStartInPlanModeByDefault,
 			DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT,
 		),
+		ompAgentSessionTransportForNewTasks: normalizeAgentSessionTransport(
+			globalConfig?.ompAgentSessionTransportForNewTasks,
+			DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS,
+		),
 		readyForReviewNotificationsEnabled: normalizeBoolean(
 			globalConfig?.readyForReviewNotificationsEnabled,
 			DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED,
@@ -308,6 +343,10 @@ function toRuntimeConfigState({
 		autoContinueOnConnectionDropEnabled: normalizeBoolean(
 			globalConfig?.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
+		),
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: normalizeBoolean(
+			globalConfig?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+			DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED,
 		),
 		postDeployVerificationForceCompleteEnabled: normalizeBoolean(
 			globalConfig?.postDeployVerificationForceCompleteEnabled ??
@@ -341,9 +380,11 @@ async function writeRuntimeGlobalConfigFile(
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
 		newTaskStartInPlanModeByDefault?: boolean;
+		ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 		postDeployVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
@@ -367,6 +408,13 @@ async function writeRuntimeGlobalConfigFile(
 		config.newTaskStartInPlanModeByDefault === undefined
 			? DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT
 			: normalizeBoolean(config.newTaskStartInPlanModeByDefault, DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT);
+	const ompAgentSessionTransportForNewTasks =
+		config.ompAgentSessionTransportForNewTasks === undefined
+			? DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS
+			: normalizeAgentSessionTransport(
+					config.ompAgentSessionTransportForNewTasks,
+					DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS,
+				);
 	const readyForReviewNotificationsEnabled =
 		config.readyForReviewNotificationsEnabled === undefined
 			? DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED
@@ -381,6 +429,13 @@ async function writeRuntimeGlobalConfigFile(
 			: normalizeBoolean(
 					config.autoContinueOnConnectionDropEnabled,
 					DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
+				);
+	const programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled =
+		config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled === undefined
+			? DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED
+			: normalizeBoolean(
+					config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+					DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED,
 				);
 	const postDeployVerificationForceCompleteEnabled =
 		config.postDeployVerificationForceCompleteEnabled === undefined
@@ -426,6 +481,12 @@ async function writeRuntimeGlobalConfigFile(
 		payload.newTaskStartInPlanModeByDefault = newTaskStartInPlanModeByDefault;
 	}
 	if (
+		hasOwnKey(existing, "ompAgentSessionTransportForNewTasks") ||
+		ompAgentSessionTransportForNewTasks !== DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS
+	) {
+		payload.ompAgentSessionTransportForNewTasks = ompAgentSessionTransportForNewTasks;
+	}
+	if (
 		hasOwnKey(existing, "readyForReviewNotificationsEnabled") ||
 		readyForReviewNotificationsEnabled !== DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED
 	) {
@@ -442,6 +503,14 @@ async function writeRuntimeGlobalConfigFile(
 		autoContinueOnConnectionDropEnabled !== DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED
 	) {
 		payload.autoContinueOnConnectionDropEnabled = autoContinueOnConnectionDropEnabled;
+	}
+	if (
+		hasOwnKey(existing, "programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled") ||
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
+			DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED
+	) {
+		payload.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled =
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled;
 	}
 	if (
 		hasOwnKey(existing, "postDeployVerificationForceCompleteEnabled") ||
@@ -534,9 +603,11 @@ function createRuntimeConfigStateFromValues(input: {
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
 	newTaskStartInPlanModeByDefault: boolean;
+	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	autoContinueOnConnectionDropEnabled: boolean;
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: boolean;
 	postDeployVerificationForceCompleteEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
@@ -555,6 +626,10 @@ function createRuntimeConfigStateFromValues(input: {
 			input.newTaskStartInPlanModeByDefault,
 			DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT,
 		),
+		ompAgentSessionTransportForNewTasks: normalizeAgentSessionTransport(
+			input.ompAgentSessionTransportForNewTasks,
+			DEFAULT_OMP_AGENT_SESSION_TRANSPORT_FOR_NEW_TASKS,
+		),
 		readyForReviewNotificationsEnabled: normalizeBoolean(
 			input.readyForReviewNotificationsEnabled,
 			DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED,
@@ -563,6 +638,10 @@ function createRuntimeConfigStateFromValues(input: {
 		autoContinueOnConnectionDropEnabled: normalizeBoolean(
 			input.autoContinueOnConnectionDropEnabled,
 			DEFAULT_AUTO_CONTINUE_ON_CONNECTION_DROP_ENABLED,
+		),
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: normalizeBoolean(
+			input.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
+			DEFAULT_PROGRAMMATIC_DELIVERY_MAY_AUTO_STASH_ABSENT_HUMAN_INPUT_BOX_ENABLED,
 		),
 		postDeployVerificationForceCompleteEnabled: normalizeBoolean(
 			input.postDeployVerificationForceCompleteEnabled,
@@ -584,9 +663,12 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		selectedShortcutLabel: current.selectedShortcutLabel,
 		agentAutonomousModeEnabled: current.agentAutonomousModeEnabled,
 		newTaskStartInPlanModeByDefault: current.newTaskStartInPlanModeByDefault,
+		ompAgentSessionTransportForNewTasks: current.ompAgentSessionTransportForNewTasks,
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
 		notificationSoundEnabled: current.notificationSoundEnabled,
 		autoContinueOnConnectionDropEnabled: current.autoContinueOnConnectionDropEnabled,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+			current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		postDeployVerificationForceCompleteEnabled: current.postDeployVerificationForceCompleteEnabled,
 		shortcuts: [],
 		commitPromptTemplate: current.commitPromptTemplate,
@@ -623,9 +705,11 @@ export async function saveRuntimeConfig(
 		selectedShortcutLabel: string | null;
 		agentAutonomousModeEnabled: boolean;
 		newTaskStartInPlanModeByDefault: boolean;
+		ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 		readyForReviewNotificationsEnabled: boolean;
 		notificationSoundEnabled: boolean;
 		autoContinueOnConnectionDropEnabled: boolean;
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: boolean;
 		postDeployVerificationForceCompleteEnabled: boolean;
 		shortcuts: RuntimeProjectShortcut[];
 		commitPromptTemplate: string;
@@ -639,9 +723,12 @@ export async function saveRuntimeConfig(
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks: config.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: config.postDeployVerificationForceCompleteEnabled,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
@@ -654,9 +741,12 @@ export async function saveRuntimeConfig(
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks: config.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: config.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: config.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				config.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: config.postDeployVerificationForceCompleteEnabled,
 			shortcuts: config.shortcuts,
 			commitPromptTemplate: config.commitPromptTemplate,
@@ -679,11 +769,16 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault:
 				updates.newTaskStartInPlanModeByDefault ?? current.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks:
+				updates.ompAgentSessionTransportForNewTasks ?? current.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled:
 				updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled:
 				updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				updates.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ??
+				current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled:
 				updates.postDeployVerificationForceCompleteEnabled ?? current.postDeployVerificationForceCompleteEnabled,
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
@@ -696,9 +791,12 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 			nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
 			nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
+			nextConfig.ompAgentSessionTransportForNewTasks !== current.ompAgentSessionTransportForNewTasks ||
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 			nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 			nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+			nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
+				current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ||
 			nextConfig.postDeployVerificationForceCompleteEnabled !== current.postDeployVerificationForceCompleteEnabled ||
 			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
@@ -713,9 +811,12 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
@@ -730,9 +831,12 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
+			ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 			autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+				nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 			shortcuts: nextConfig.shortcuts,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
@@ -763,11 +867,16 @@ export async function updateGlobalRuntimeConfig(
 				agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
 				newTaskStartInPlanModeByDefault:
 					updates.newTaskStartInPlanModeByDefault ?? current.newTaskStartInPlanModeByDefault,
+				ompAgentSessionTransportForNewTasks:
+					updates.ompAgentSessionTransportForNewTasks ?? current.ompAgentSessionTransportForNewTasks,
 				readyForReviewNotificationsEnabled:
 					updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: updates.notificationSoundEnabled ?? current.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled:
 					updates.autoContinueOnConnectionDropEnabled ?? current.autoContinueOnConnectionDropEnabled,
+				programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+					updates.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ??
+					current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 				postDeployVerificationForceCompleteEnabled:
 					updates.postDeployVerificationForceCompleteEnabled ?? current.postDeployVerificationForceCompleteEnabled,
 				shortcuts: current.shortcuts,
@@ -780,9 +889,12 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 				nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
 				nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
+				nextConfig.ompAgentSessionTransportForNewTasks !== current.ompAgentSessionTransportForNewTasks ||
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 				nextConfig.notificationSoundEnabled !== current.notificationSoundEnabled ||
 				nextConfig.autoContinueOnConnectionDropEnabled !== current.autoContinueOnConnectionDropEnabled ||
+				nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled !==
+					current.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled ||
 				nextConfig.postDeployVerificationForceCompleteEnabled !==
 					current.postDeployVerificationForceCompleteEnabled ||
 				nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
@@ -797,9 +909,12 @@ export async function updateGlobalRuntimeConfig(
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
+				ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+					nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 				postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
@@ -812,9 +927,12 @@ export async function updateGlobalRuntimeConfig(
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
+				ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				notificationSoundEnabled: nextConfig.notificationSoundEnabled,
 				autoContinueOnConnectionDropEnabled: nextConfig.autoContinueOnConnectionDropEnabled,
+				programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
+					nextConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 				postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 				shortcuts: nextConfig.shortcuts,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,

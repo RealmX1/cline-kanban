@@ -511,6 +511,95 @@ describe.sequential("workspace-state integration", () => {
 		});
 	});
 
+	// ── 「空壳 summary 把真实记录盖掉」的回归护栏 ──────────────────────────────────────────
+	// 硬中断后前端一聚焦卡片，服务端 `ensureEntry` 就会就地造出一条全 null 的默认 summary。它带着最新的
+	// updatedAt 被并进落盘 payload，把盘上记着 agentId / startedAt 的记录整条盖掉——一次「重启就能自愈」
+	// 的中断由此变成永久损坏（TUI 全白 + 「重启终端会话」灰掉）。
+
+	it("saveWorkspaceState keeps a started session when the incoming snapshot only has a blank placeholder", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-a"]).repositoryPath;
+			const initial = await loadWorkspaceState(workspacePath);
+			const startedSession: RuntimeTaskSessionSummary = {
+				...createSessionSummary("task-1"),
+				agentId: "claude",
+				workspacePath,
+				pid: 4242,
+				startedAt: 1_000,
+				updatedAt: 1_000,
+			};
+			const afterFirstSave = await saveWorkspaceState(workspacePath, {
+				board: createBoardWithTaskInColumn("Task One", "in_progress"),
+				sessions: { "task-1": startedSession },
+				expectedRevision: initial.revision,
+			});
+
+			await saveWorkspaceState(workspacePath, {
+				board: createBoardWithTaskInColumn("Task One", "in_progress"),
+				// 空壳的 updatedAt 更新，但它表达的是「刚被凭空造出来」，不是「掌握了更新的事实」。
+				sessions: { "task-1": { ...createSessionSummary("task-1"), updatedAt: 9_000 } },
+				expectedRevision: afterFirstSave.revision,
+			});
+
+			const reloaded = await loadWorkspaceState(workspacePath);
+			expect(reloaded.sessions["task-1"].agentId).toBe("claude");
+			expect(reloaded.sessions["task-1"].startedAt).toBe(1_000);
+			expect(reloaded.sessions["task-1"].pid).toBe(4242);
+		});
+	});
+
+	it("mutateWorkspaceState keeps a started session when the mutation carries a blank placeholder", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-a"]).repositoryPath;
+			const initial = await loadWorkspaceState(workspacePath);
+			const startedSession: RuntimeTaskSessionSummary = {
+				...createSessionSummary("task-1"),
+				agentId: "codex",
+				workspacePath,
+				pid: 77,
+				startedAt: 1_000,
+				updatedAt: 1_000,
+			};
+			await saveWorkspaceState(workspacePath, {
+				board: createBoardWithTaskInColumn("Task One", "in_progress"),
+				sessions: { "task-1": startedSession },
+				expectedRevision: initial.revision,
+			});
+
+			await mutateWorkspaceState(workspacePath, (state) => ({
+				board: state.board,
+				sessions: { "task-1": { ...createSessionSummary("task-1"), updatedAt: 9_000 } },
+				value: null,
+			}));
+
+			const reloaded = await loadWorkspaceState(workspacePath);
+			expect(reloaded.sessions["task-1"].agentId).toBe("codex");
+			expect(reloaded.sessions["task-1"].startedAt).toBe(1_000);
+		});
+	});
+
+	it("still accepts a blank placeholder when the persisted record is itself blank", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-a"]).repositoryPath;
+			const initial = await loadWorkspaceState(workspacePath);
+			const afterFirstSave = await saveWorkspaceState(workspacePath, {
+				board: createBoardWithTaskInColumn("Task One", "in_progress"),
+				sessions: { "task-1": { ...createSessionSummary("task-1"), updatedAt: 1_000 } },
+				expectedRevision: initial.revision,
+			});
+
+			await saveWorkspaceState(workspacePath, {
+				board: createBoardWithTaskInColumn("Task One", "in_progress"),
+				sessions: { "task-1": { ...createSessionSummary("task-1"), updatedAt: 9_000 } },
+				expectedRevision: afterFirstSave.revision,
+			});
+
+			const reloaded = await loadWorkspaceState(workspacePath);
+			// 两边都是空壳时留谁都一样，放行 incoming 免得把陈旧 updatedAt 钉住。
+			expect(reloaded.sessions["task-1"].updatedAt).toBe(9_000);
+		});
+	});
+
 	it("fails loudly when persisted workspace index data is malformed", async () => {
 		await withIsolatedWorkspaceStateHome(async () => {
 			mkdirSync(getWorkspacesRootPath(), { recursive: true });

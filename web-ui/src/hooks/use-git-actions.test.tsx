@@ -95,12 +95,14 @@ function createRuntimeConfig(selectedAgentId: RuntimeConfigResponse["selectedAge
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
 		newTaskStartInPlanModeByDefault: true,
+		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		effectiveCommand: null,
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project-config.json",
 		readyForReviewNotificationsEnabled: true,
 		notificationSoundEnabled: true,
 		autoContinueOnConnectionDropEnabled: true,
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: true,
 		postDeployVerificationForceCompleteEnabled: false,
 		detectedCommands: [],
 		agents: [
@@ -166,6 +168,7 @@ function HookHarness({
 		sendTaskSessionInput,
 		sendTaskChatMessage,
 		fetchTaskWorkspaceInfo: async () => createWorkspaceInfo(),
+		taskConversationSessionSummariesByTaskId: {},
 		isGitHistoryOpen: false,
 		refreshWorkspaceState: async () => {},
 	});

@@ -260,6 +260,28 @@ describe("TerminalSessionManager park（已派发后台工作）", () => {
 		// 入参不应被原地改动（clone 边界）。
 		expect(persisted.awaitingDispatchedBackgroundWork).not.toBeNull();
 	});
+
+	// 同一 chokepoint 的第二条 sidecar：程序化投递的挂起可见性。它同样只在活进程作用域里有意义
+	// （登记本体挂在 entry.active 上，而重建条目恒 active: null），但同样会随 listSummaries() 落盘。
+	// 不在这里清，runtime 重启后 UI 会对着一条根本不存在的投递摆出「有投递在等你的输入框」和
+	// 「暂存我的输入并放行」按钮——正是这一整轮工作要根除的「说有人在等、其实没有」。
+	it("hydrateFromRecord：磁盘重载边界清掉 stale terminalDeliveryContention（重建会话按定义没有在途投递）", () => {
+		const manager = new TerminalSessionManager();
+		const persisted = createSummary({
+			state: "running",
+			terminalDeliveryContention: {
+				pendingProgrammaticDeliveryCount: 1,
+				inputBoxHasUncommittedText: true,
+				waitingForHumanBecauseAutomaticPreemptionIsUnavailable: true,
+			},
+		});
+
+		manager.hydrateFromRecord({ "task-1": persisted });
+
+		expect(manager.getSummary("task-1")?.terminalDeliveryContention ?? null).toBeNull();
+		// 入参不应被原地改动（clone 边界）。
+		expect(persisted.terminalDeliveryContention).not.toBeNull();
+	});
 });
 
 // Fix A：终端 agent 完工却不退出、turnOwner 卡在 agent 的 idle-live 会话，scanForStalls 自愈翻入 Review。

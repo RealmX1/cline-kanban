@@ -4,6 +4,7 @@
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
 	RuntimeClineAccountBalanceResponse,
 	RuntimeClineAccountOrganizationsResponse,
 	RuntimeClineAccountProfileResponse,
@@ -47,10 +48,12 @@ export async function saveRuntimeConfig(
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
 		newTaskStartInPlanModeByDefault?: boolean;
+		ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 		shortcuts?: RuntimeProjectShortcut[];
 		readyForReviewNotificationsEnabled?: boolean;
 		notificationSoundEnabled?: boolean;
 		autoContinueOnConnectionDropEnabled?: boolean;
+		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
 		postDeployVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;

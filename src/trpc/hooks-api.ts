@@ -1,4 +1,4 @@
-import { getRuntimeAgentSessionTransport } from "../core/agent-catalog";
+import { resolveRuntimeAgentSessionTransportFromSummary } from "../core/agent-catalog";
 import type {
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
@@ -64,7 +64,9 @@ async function recordAgentRaisedPendingUserDecisionFromHookIngest(input: {
 		taskId,
 		workspaceId,
 		agentId,
-		sessionTransport: getRuntimeAgentSessionTransport(agentId),
+		// 快照的是**这条会话当刻在用的通道**，不是该 agent 的默认通道：omp 可在 TUI ⇄ ACP 之间切换，
+		// 按 agentId 派生会把决策按错误的通道投递回去。
+		sessionTransport: resolveRuntimeAgentSessionTransportFromSummary(summary),
 		askedAt: Date.now(),
 		graceDeadlineAt: summary.agentSessionRuntimeReclamationEligibleAt ?? null,
 		originRuntimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? null,

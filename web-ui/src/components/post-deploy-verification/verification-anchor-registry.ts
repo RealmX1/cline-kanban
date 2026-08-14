@@ -43,6 +43,13 @@ export function topBarTaskSpotlightSearchTriggerAnchorKey(): string {
 	return "top-bar-task-spotlight-search-trigger";
 }
 
+// 顶栏里的应用内通知中心铃铛。单例、不带 id：全局同时只存在一个。
+// 它背后的「全部历史」弹窗要验的东西（真实多 repo 历史的时间排序、跨重启的已读持久化、
+// 真浏览器里的 header 布局）都只有真实运行实例才验得到，因此这个锚点由引导人工型验证消费。
+export function topBarNotificationCenterBellTriggerAnchorKey(): string {
+	return "top-bar-notification-center-bell-trigger";
+}
+
 // 把某 anchorKey 对应的元素滚入视野并临时高亮。返回是否命中元素（未命中 → 调用方走降级路径）。
 // 用 querySelectorAll + getAttribute 精确比对，避免 agent 自由字符串 key 进 CSS 选择器时的转义问题。
 export function spotlightAnchor(anchorKey: string, options?: { durationMs?: number }): boolean {

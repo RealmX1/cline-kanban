@@ -10,7 +10,7 @@ const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
 	prepareAgentLaunch: prepareAgentLaunchMock,
-	toBracketedPasteSubmission: (text: string) => `SUBMIT[${text}]`,
+	toBracketedPasteFramingWithoutTrailingSubmit: (text: string) => `SUBMIT[${text}]`,
 }));
 
 vi.mock("../../../src/terminal/pty-session.js", () => ({
@@ -19,7 +19,7 @@ vi.mock("../../../src/terminal/pty-session.js", () => ({
 	},
 }));
 
-import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../../src/terminal/session-manager";
 
 interface MockSpawnRequest {
 	env?: Record<string, string | undefined>;
@@ -220,14 +220,10 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 		await manager.resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery("task-reclaimed");
 
 		expect(manager.isRestorationContinuationGuardArmed("task-reclaimed")).toBe(true);
-		const queuedDelivery = manager.submitTaskChatInputWhenReadyWithPtyWriteCompletion(
-			"task-reclaimed",
-			"我选择只恢复",
-		);
+		const queuedDelivery = manager.submitTaskChatInputWhenReady("task-reclaimed", "我选择只恢复");
 		expect(queuedDelivery).not.toBeNull();
 		await vi.advanceTimersByTimeAsync(65_000);
 
-		await expect(queuedDelivery?.writtenToPty).resolves.toBe(true);
 		expect(manager.isRestorationContinuationGuardArmed("task-reclaimed")).toBe(false);
 	});
 
@@ -235,20 +231,21 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 		const manager = new TerminalSessionManager();
 		await startTaskSessionOn(manager, "task-exits-before-answer-write");
 		const session = ptySessionSpawnMock.mock.results.at(-1)?.value as ReturnType<typeof createMockPtySession>;
-		const queuedDelivery = manager.submitTaskChatInputWhenReadyWithPtyWriteCompletion(
-			"task-exits-before-answer-write",
-			"我的答案",
-		);
+		const deliveryOutcomes: TaskChatInputDeliveryOutcome[] = [];
+		const queuedDelivery = manager.submitTaskChatInputWhenReady("task-exits-before-answer-write", "我的答案", {
+			idempotencyKey: "task-exits-before-answer-write-answer",
+			onDeliveryOutcome: (outcome) => deliveryOutcomes.push(outcome),
+		});
 		expect(queuedDelivery).not.toBeNull();
 
 		manager.stopTaskSession("task-exits-before-answer-write");
 
-		await expect(queuedDelivery?.writtenToPty).resolves.toBe(false);
+		expect(deliveryOutcomes).toEqual([{ status: "delivery_failed", reason: "session_ended_before_delivery" }]);
 		await vi.advanceTimersByTimeAsync(65_000);
 		expect(session.write).not.toHaveBeenCalled();
 	});
 
-	it("答案排队被更新投递取代：旧回执失败，只有最新答案写入并成功", async () => {
+	it("答案排队被更新投递取代：旧回执失败，只有最新答案进入写后确认链", async () => {
 		const manager = new TerminalSessionManager();
 		await manager.startTaskSession({
 			taskId: "task-answer-replaced",
@@ -259,19 +256,20 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 			prompt: ORIGINAL_TASK_PROMPT,
 		});
 		const session = ptySessionSpawnMock.mock.results.at(-1)?.value as ReturnType<typeof createMockPtySession>;
+		const supersededDeliveryOutcomes: TaskChatInputDeliveryOutcome[] = [];
 
-		const supersededDelivery = manager.submitTaskChatInputWhenReadyWithPtyWriteCompletion(
-			"task-answer-replaced",
-			"旧答案",
-		);
-		const latestDelivery = manager.submitTaskChatInputWhenReadyWithPtyWriteCompletion(
-			"task-answer-replaced",
-			"新答案",
-		);
+		const supersededDelivery = manager.submitTaskChatInputWhenReady("task-answer-replaced", "旧答案", {
+			idempotencyKey: "task-answer-replaced-old-answer",
+			onDeliveryOutcome: (outcome) => supersededDeliveryOutcomes.push(outcome),
+		});
+		const latestDelivery = manager.submitTaskChatInputWhenReady("task-answer-replaced", "新答案");
 
-		await expect(supersededDelivery?.writtenToPty).resolves.toBe(false);
+		expect(supersededDelivery).not.toBeNull();
+		expect(latestDelivery).not.toBeNull();
+		expect(supersededDeliveryOutcomes).toEqual([
+			{ status: "delivery_failed", reason: "superseded_by_later_delivery" },
+		]);
 		await vi.advanceTimersByTimeAsync(1_000);
-		await expect(latestDelivery?.writtenToPty).resolves.toBe(true);
 		expect(session.write).toHaveBeenCalledTimes(1);
 		expect(session.write).toHaveBeenCalledWith("SUBMIT[新答案]");
 

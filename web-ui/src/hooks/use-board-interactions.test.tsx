@@ -622,7 +622,7 @@ describe("useBoardInteractions", () => {
 		expect(backlogCards).toEqual([]);
 		expect(requireBoard().dependencies).toEqual([]);
 		expect(stopTaskSession).toHaveBeenCalledWith("task-1");
-		expect(cleanupTaskWorkspace).toHaveBeenCalledWith("task-1", undefined);
+		expect(cleanupTaskWorkspace).toHaveBeenCalledWith("task-1", undefined, true);
 	});
 
 	it("waits for a new backlog card height to settle before starting animation", async () => {

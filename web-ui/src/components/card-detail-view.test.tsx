@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CardDetailView } from "@/components/card-detail-view";
 import { DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeAgentSessionTransport, RuntimeConfigResponse, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import { TERMINAL_THEME_COLORS } from "@/terminal/theme-colors";
 import type { BoardCard, BoardColumn, BoardColumnId, CardSelection } from "@/types";
@@ -170,6 +170,13 @@ function createSessionSummary(
 		userTurnKind: null,
 		...overrides,
 	};
+}
+
+// 面板分流只读 runtimeConfig 里的这一个字段，其余字段与本用例无关，故只造这一格。
+function createRuntimeConfigWithOmpSessionTransportDefault(
+	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport,
+): RuntimeConfigResponse {
+	return { ompAgentSessionTransportForNewTasks } as RuntimeConfigResponse;
 }
 
 function createSelectionInColumn(columnId: BoardColumnId): CardSelection {
@@ -1059,6 +1066,131 @@ describe("CardDetailView", () => {
 						latestHookActivity: null,
 						warningMessage: null,
 					}}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeNull();
+		expect(mockAgentTerminalPanel).toHaveBeenCalled();
+	});
+
+	it("shows the conversation panel for an omp card pinned to ACP while it has no live session", async () => {
+		const selection = createSelection();
+		selection.card.agentId = "omp";
+		selection.card.ompAgentSessionTransport = "acp_stdio_subprocess";
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={selection}
+					currentProjectId="workspace-1"
+					selectedAgentId="omp"
+					// 全局默认是 TUI（也是 omp 的 catalog 默认）：卡片固化值必须压过它，否则这张卡
+					// 下次启动会走 ACP、面板却先渲染成 xterm。
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("pty_terminal")}
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
+		expect(mockAgentTerminalPanel).not.toHaveBeenCalled();
+	});
+
+	it("shows the terminal panel for an omp card pinned to the TUI while it has no live session", async () => {
+		const selection = createSelection();
+		selection.card.agentId = "omp";
+		selection.card.ompAgentSessionTransport = "pty_terminal";
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={selection}
+					currentProjectId="workspace-1"
+					selectedAgentId="omp"
+					// 反向同理：全局默认已经翻到 ACP，也不能追溯改变这张固化在 TUI 上的卡。
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeNull();
+		expect(mockAgentTerminalPanel).toHaveBeenCalled();
+	});
+
+	it("falls back to the global omp default when a card has no pinned session transport", async () => {
+		const selection = createSelection();
+		selection.card.agentId = "omp";
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={selection}
+					currentProjectId="workspace-1"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
+	});
+
+	it("keeps reading the live session transport instead of the pinned card value", async () => {
+		const selection = createSelection();
+		selection.card.agentId = "omp";
+		selection.card.ompAgentSessionTransport = "acp_stdio_subprocess";
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={selection}
+					currentProjectId="workspace-1"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
+					// 这条活会话已经被切回 TUI：固化值只说明「下次启动走哪条」，压不过会话自己盖的章。
+					sessionSummary={createSessionSummary("task-1", {
+						agentId: "omp",
+						sessionTransport: "pty_terminal",
+					})}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
 					onCardSelect={() => {}}

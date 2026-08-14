@@ -71,6 +71,10 @@ function toTaskWorkspaceSnapshot(metadata: RuntimeTaskWorkspaceMetadata): Review
 		baseCommit: metadata.baseCommit,
 		commitsAheadOfBaseRef: metadata.commitsAheadOfBaseRef,
 		commitsBehindBaseRef: metadata.commitsBehindBaseRef,
+		taskCommitsIntegratedIntoBaseRef: metadata.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef,
+		taskCommitIntegrationTrackingStatus: metadata.workspaceGitStatus.taskCommitIntegrationTrackingStatus,
+		workspaceGitStatusObservationSource: metadata.workspaceGitStatus.observationSource,
+		workspaceGitStatusObservedAt: metadata.workspaceGitStatus.observedAt,
 		changedFiles: metadata.changedFiles,
 		additions: metadata.additions,
 		deletions: metadata.deletions,
@@ -151,6 +155,10 @@ function areTaskWorkspaceSnapshotsEqual(
 		a.baseCommit === b.baseCommit &&
 		a.commitsAheadOfBaseRef === b.commitsAheadOfBaseRef &&
 		a.commitsBehindBaseRef === b.commitsBehindBaseRef &&
+		a.taskCommitsIntegratedIntoBaseRef === b.taskCommitsIntegratedIntoBaseRef &&
+		a.taskCommitIntegrationTrackingStatus === b.taskCommitIntegrationTrackingStatus &&
+		a.workspaceGitStatusObservationSource === b.workspaceGitStatusObservationSource &&
+		a.workspaceGitStatusObservedAt === b.workspaceGitStatusObservedAt &&
 		a.changedFiles === b.changedFiles &&
 		a.additions === b.additions &&
 		a.deletions === b.deletions
