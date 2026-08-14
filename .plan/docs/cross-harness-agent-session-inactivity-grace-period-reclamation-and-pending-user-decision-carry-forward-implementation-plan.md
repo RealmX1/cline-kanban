@@ -2,7 +2,7 @@
 
 > 状态：**规划文档**（仅核验 + 设计，未做任何实现改动、未提交任何实现 commit）。
 > 前序交接文档（**待核验参考材料，非已证实规格**）：
-> `/Users/bominzhang/Documents/GitHub/cline-kanban/.plan/docs/cline-kanban-multi-harness-session-memory-and-two-hour-grace-period-analysis-handoff.md`
+> `.plan/docs/cline-kanban-multi-harness-session-memory-and-two-hour-grace-period-analysis-handoff.md`（仓库相对路径，task worktree 里同样可解析）
 
 ## Context（为什么做这件事）
 
