@@ -127,3 +127,48 @@ Misc. tribal knowledge
 - **oh-my-pi（`omp`）是仓库里第一个「非 PTY、非 Cline SDK」的 agent：它经 ACP（Agent Client Protocol，JSON-RPC over stdio）通话。** 三种会话传输形态现由 `src/core/agent-catalog.ts` 的 `sessionTransport` 字段单点声明（`pty_terminal` / `in_process_cline_sdk` / `acp_stdio_subprocess`）——以前「是不是 Cline」的分叉散在 `runtime-api.ts` 的 `useClinePath`、`card-detail-view.tsx` 的面板分流、`persistent-terminal-manager.ts` 的续跑守卫等多处硬编码 `agentId === "cline"`，新增非 PTY agent 时极易漏改其中一处；一律改用 `isRuntimeAgentSessionRenderedAsConversationPanel` / `isRuntimeAgentSessionDrivenByAcpProtocol`。ACP 层在 `src/acp-client-session/`，1:1 对位 `src/cline-sdk/` 的三层骨架：`acp-protocol-boundary.ts`（唯一允许 import `@agentclientprotocol/sdk` 的模块）、`acp-client-connection-runtime.ts`（每任务一个子进程 + 握手 + `taskId ↔ sessionId` 双向 Map）、`acp-session-update-adapter.ts`（SessionUpdate → facet/消息，单一入口）、`acp-session-state.ts`（唯一 summary 写漏斗）、`acp-task-session-registry.ts` + `acp-task-session-service.ts`（账本与门面）、`acp-pending-user-decision-broker.ts`（等人拍板通道）。Cline 侧那三条 facet 铁律逐字适用（绝不裸写单个 `userTurnKind`、entry 构造必过 `applySessionFacets`、只推存活度的事件必须显式带当前实质戳）；**唯一的差别是 pid**：ACP agent 是真子进程，`deriveAcpFacetPatch` 要如实传 pid（不像 Cline 写死 null），于是 `session-activity.ts` 既有的 `pid !== null ? live : exited` 判定自动正确，进程崩了卡片会如实显示 exited。推流复用了 hub 里泛化出来的 `trackConversationTaskSessionService`（Cline 与 ACP 共用同一段 summary 批量广播 + 等人回合边沿通知 + 聊天消息转发，按 `${workspaceId}::${sourceKind}` 复合键登记订阅，二者不会互相顶掉）。
 - **接 omp 的 ACP 时最容易踩的三个坑**（都不是靠读文档能发现的）：**(1) `clientCapabilities.elicitation.form` 缺失 ⇒ omp 会静默自动批准 plan**（`acp-agent.ts` 的 `#requestAcpPlanApprovalChoice`：没有确认界面就直接放行，否则 plan 模式会卡死 agent）。这是**安全语义差异不是 UI 缺失**——表现为「plan 模式一切正常但从不征求你同意」，`buildKanbanAcpClientCapabilities()` 因此必须声明它（注意类型是 `form: {}` 而非 `form: true`）。**(2) 发出 `session/cancel` 之后必须把所有 pending 的 `session/request_permission` 用 `{outcome:"cancelled"}` 回掉**，否则 agent 侧永远挂着等回复；`AcpPendingUserDecisionBroker.cancelPendingDecisions` 就是干这个的，`cancelTaskTurn`/`abortTaskSession`/连接关闭三处都要调。**(3) omp 把 provider 层错误当成普通 `agent_message_chunk` 正文发出来、`stopReason` 仍是 `end_turn`**（实测：AWS SSO 过期、OpenRouter 余额不足都是这样），协议层区分不出「真回答」与「凭据失效」，所以别指望用 stopReason 判失败。另：omp 的 `current_mode_update` 发的字段是 `currentModeId`（规范示例里写的是 `modeId`，两者都要兜）；`tool_call_update` 的 `content`/`locations` 是**整体替换**不是追加；plan 每次都是全量列表。协议冒烟脚本在 `scripts/acp-protocol-smoke.ts`（`npx tsx scripts/acp-protocol-smoke.ts`，需要 `omp` 在 PATH 且已登录）。
 - **「plan 起步」与「权限档位」是两条正交轴，不是一条。** per-task 的 `taskAgentPermissionMode`（`ask_for_every_tool_use` / `auto_approve_file_edits_only` / `bypass_all_permission_prompts`，默认 bypass，域逻辑在 `src/core/task-agent-permission-mode.ts`）取代了旧的全局 `agentAutonomousModeEnabled` 对会话启动的作用（那个开关如今只决定「新任务的默认档位」）；`startInPlanMode` 保留，语义收窄为「开局先只读规划」，**不得再被翻译成降权**。Claude Code 早就是这么做的（plan 起步时剔掉 `--dangerously-skip-permissions` 但补上 `--allow-dangerously-skip-permissions` 预授权后续升档，见 `applyClaudePermissionAndPlanModeArgs`——它必须统一决策，因为 claude 的两条轴都落在同一个 `--permission-mode` 旗标上，分两处推会产生互相打架的重复旗标）。实测 `cursor-agent --plan --force` 可并存，kimi 的 `--plan`/`--yolo` 亦然。**两个刻意的例外必须在 UI 明示、不得静默**：droid 的 `autonomyMode` 是单轴（spec/normal/auto-high），plan 起步会吃掉权限档（`doesPlanModeStartOverridePermissionModeForAgent`）；原生 Cline SDK 的 `requestToolApproval` 目前恒批准，只能表达 bypass 一档，选更严的档位会被如实报告为 degraded（后续项：把它接到与 ACP 同一条决策通道上，届时从 `AGENT_IDS_THAT_CAN_ONLY_BYPASS` 移除即可）。降级方向的铁律是**只收紧不放宽**——不能表达中间档的 harness 回落到「每次询问」，绝不回落成全放行。
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **cline-kanban** (11964 symbols, 31422 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/cline-kanban/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/cline-kanban/clusters` | All functional areas |
+| `gitnexus://repo/cline-kanban/processes` | All execution flows |
+| `gitnexus://repo/cline-kanban/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->
