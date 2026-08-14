@@ -1,0 +1,6 @@
+interface:
+  display_name: "Survey Sibling Task Work In Same Kanban Workspace"
+  short_description: "Read-only look at what other tasks in this repository are doing"
+  default_prompt: "Use $cline-kanban-survey-sibling-task-work-in-same-workspace to see, read-only, what the other kanban tasks in this repository are working on."
+policy:
+  allow_implicit_invocation: true

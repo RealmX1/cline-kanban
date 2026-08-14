@@ -29,3 +29,7 @@ packages/desktop/cli
 # 本地暂存物：local-deploy 备份补丁、临时诊断探针脚本（不纳入版本控制）
 .plan/local-deploy-backups/
 .plan/probes/
+
+# Claude Code 本机设置。只忽略这一个文件：.claude/skills/<name> 项目内软链是**要提交**的
+# （见 DEVELOPMENT.md「Agent skills」），整目录 ignore 会让下一条软链必须 git add -f。
+/.claude/settings.local.json

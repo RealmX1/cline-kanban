@@ -170,6 +170,15 @@ npm run unlink
 - `npm run test`: run runtime tests
 - `npm run web:test`: run web UI tests
 - `npm run check`: lint, typecheck, and test runtime package
+- `npm run install:agent-skills [-- --dry-run]`: link this checkout's globally invocable agent skills into `~/.claude/skills`, `~/.codex/skills` and (when present) `~/.hermes/skills`
+
+## Agent skills
+
+Skills live in `.codex/skills/<name>/`. Most are project-local and are exposed through a committed `.claude/skills/<name>` symlink, so they are only visible while working inside this repository.
+
+A skill that must be callable from *another* repository's task worktree is instead installed globally with `npm run install:agent-skills`, and must not also carry a project-local `.claude/skills` symlink — a skill belongs to exactly one scope. `cline-kanban-survey-sibling-task-work-in-same-workspace` is such a skill: agents planning work in any repository use it to see, read-only, what the other kanban tasks in that repository are doing.
+
+Run the installer from this durable main checkout only. It refuses to run from a linked git worktree or from anywhere under `~/.cline/worktrees/`, because a global symlink into a task worktree breaks as soon as that worktree is removed.
 
 ## Manual probes against real agents
 
@@ -186,6 +195,7 @@ rendering. Run them by hand when you touch the code they cover, or after an agen
 
 ## Tests
 
+- `test/agent-skills`: tests for the agent skills shipped in `.codex/skills` and their installer
 - `test/integration`: integration tests for runtime behavior and startup flows
 - `test/runtime`: runtime unit tests
 - `test/utilities`: shared test helpers
