@@ -7,6 +7,7 @@
 // 隐私红线：工具授权只取工具名与参数**摘要**，绝不取参数正文；提问只取问题正文与选项文案。
 import type {
 	RuntimeAgentRaisedDecisionOption,
+	RuntimeAgentRaisedDecisionQuestion,
 	RuntimeAgentRaisedToolPermissionPayload,
 	RuntimeAgentRaisedUserQuestionPayload,
 } from "../core/api-contract";
@@ -117,6 +118,18 @@ export function extractAgentRaisedUserQuestionPayload(input: {
 				...(option.description ? { description: option.description } : {}),
 			}))
 		: [];
+	const orderedQuestions: RuntimeAgentRaisedDecisionQuestion[] = questions.map((question, questionIndex) => ({
+		decisionQuestionId: `question-${questionIndex}`,
+		headerMarkdown: question.header,
+		questionMarkdown: question.question,
+		selectionMode: question.multiSelect ? "multiple" : "single",
+		options: question.options.map((option, optionIndex) => ({
+			optionId: `question-${questionIndex}-option-${optionIndex}`,
+			label: option.label,
+			...(option.description ? { description: option.description } : {}),
+		})),
+		allowsFreeformAnswer: true,
+	}));
 	return {
 		decisionSourceId,
 		questionMarkdown: renderQuestionMarkdown(questions),
@@ -124,6 +137,7 @@ export function extractAgentRaisedUserQuestionPayload(input: {
 		// AskUserQuestion 总是允许「其他」自由输入；多问降级时更是只能靠自由文本作答。
 		allowsFreeformAnswer: true,
 		multiSelect: isSingleQuestion ? singleQuestion.multiSelect : false,
+		orderedQuestions,
 	};
 }
 

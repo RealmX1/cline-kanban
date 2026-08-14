@@ -496,7 +496,8 @@ class PersistentTerminal {
 		// 让位守卫（铁律：consumer 一律经 resolveSessionFacets 读 facet 做决策，不臆测 pid/state）：会话若停在
 		// 「用户回合」（awaiting review / 提问 / 待授权，turnOwner==="user"）则绝不自动续跑——那会用 --continue
 		// 抢跑 agent、把等待用户处理的 Review 会话强行推进。仅 agent 回合 / 无归属（真 idle）才续。
-		if (resolveSessionFacets(summary).turnOwner === "user") {
+		const facets = resolveSessionFacets(summary);
+		if (facets.turnOwner === "user" && facets.userTurnKind !== "question" && facets.userTurnKind !== "permission") {
 			return;
 		}
 		this.autoResumeAttempted = true;

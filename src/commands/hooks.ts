@@ -7,6 +7,7 @@ import type { Command } from "commander";
 import type {
 	RuntimeAgentRaisedToolPermissionPayload,
 	RuntimeAgentRaisedUserQuestionPayload,
+	RuntimeHarnessUserPromptProcessingDirective,
 	RuntimeHookEvent,
 	RuntimeHookIngestResponse,
 	RuntimeTaskHookActivity,
@@ -52,6 +53,7 @@ interface HooksIngestArgs {
 	// agent 正在等你拍板时才携带的白名单 payload（二者互斥）。会话被回收后靠它重现问题。
 	agentRaisedUserQuestion?: RuntimeAgentRaisedUserQuestionPayload;
 	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
+	submittedPromptText?: string;
 }
 
 interface HookCommandMetadataOptionValues {
@@ -394,6 +396,9 @@ function parseHooksIngestArgs(
 		metadata,
 		payload,
 		...buildAgentRaisedDecisionPayloads(payload, metadata),
+		...(metadata?.hookEventName?.trim().toLowerCase() === "userpromptsubmit" && payload
+			? { submittedPromptText: readStringField(payload, "prompt") ?? undefined }
+			: {}),
 	};
 }
 
@@ -497,7 +502,7 @@ export async function deliverHookIngestWithRetry(
 			error: unknown;
 		}) => Promise<void> | void;
 	},
-): Promise<void> {
+): Promise<RuntimeHookIngestResponse> {
 	let lastTransportError: unknown = null;
 	for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
 		let ingestResponse: RuntimeHookIngestResponse;
@@ -517,7 +522,7 @@ export async function deliverHookIngestWithRetry(
 			await options.onFinalFailure?.({ attempts: attempt, failureKind: "rejected", error: businessError });
 			throw businessError;
 		}
-		return;
+		return ingestResponse;
 	}
 	// 不可达（循环每轮非 return 即 throw）；满足 TS 控制流分析的兜底。
 	throw lastTransportError instanceof Error ? lastTransportError : new Error("kanban hooks ingest failed");
@@ -545,8 +550,8 @@ function recordIngestDropForLifecycleEvent(
 	});
 }
 
-async function ingestHookEvent(args: HooksIngestArgs): Promise<void> {
-	await deliverHookIngestWithRetry(
+async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngestResponse> {
+	return await deliverHookIngestWithRetry(
 		async (signal) => {
 			const trpcClient = createTRPCProxyClient<RuntimeAppRouter>({
 				links: [
@@ -568,6 +573,7 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<void> {
 				metadata: args.metadata,
 				...(args.agentRaisedUserQuestion ? { agentRaisedUserQuestion: args.agentRaisedUserQuestion } : {}),
 				...(args.agentRaisedToolPermission ? { agentRaisedToolPermission: args.agentRaisedToolPermission } : {}),
+				...(args.submittedPromptText !== undefined ? { submittedPromptText: args.submittedPromptText } : {}),
 			});
 		},
 		{
@@ -578,6 +584,31 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<void> {
 				recordIngestDropForLifecycleEvent(args, attempts, failureKind, error),
 		},
 	);
+}
+
+export function serializeHarnessUserPromptProcessingDirective(
+	directive: RuntimeHarnessUserPromptProcessingDirective | undefined,
+): string | null {
+	if (!directive) {
+		return null;
+	}
+	if (directive.processingDecision === "block_and_defer_until_explicit_user_input") {
+		return JSON.stringify({
+			decision: "block",
+			reason:
+				directive.userVisibleReason ??
+				"Kanban blocked a harness-generated prompt while restoring the prior conversation.",
+		});
+	}
+	if (!directive.additionalContextMarkdown) {
+		return null;
+	}
+	return JSON.stringify({
+		hookSpecificOutput: {
+			hookEventName: "UserPromptSubmit",
+			additionalContext: directive.additionalContextMarkdown,
+		},
+	});
 }
 
 function spawnBackgroundKanban(args: string[]): void {
@@ -906,7 +937,13 @@ async function runHooksIngest(
 	}
 
 	try {
-		await ingestHookEvent(args);
+		const response = await ingestHookEvent(args);
+		const serializedDirective = serializeHarnessUserPromptProcessingDirective(
+			response.harnessUserPromptProcessingDirective,
+		);
+		if (serializedDirective) {
+			process.stdout.write(`${serializedDirective}\n`);
+		}
 	} catch (error) {
 		process.stderr.write(`kanban hooks ingest: ${formatError(error)}\n`);
 		process.exitCode = 1;

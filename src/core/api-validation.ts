@@ -337,6 +337,17 @@ export function parseAnswerAgentRaisedPendingUserDecisionRequest(
 			.map((optionId) => optionId.trim())
 			.filter((optionId) => optionId !== ""),
 		freeformText: freeformText === "" ? null : freeformText,
+		...(parsed.orderedQuestionAnswers
+			? {
+					orderedQuestionAnswers: parsed.orderedQuestionAnswers.map((answer) => ({
+						decisionQuestionId: answer.decisionQuestionId.trim(),
+						selectedOptionIds: answer.selectedOptionIds
+							.map((optionId) => optionId.trim())
+							.filter((optionId) => optionId !== ""),
+						freeformText: answer.freeformText?.trim() || null,
+					})),
+				}
+			: {}),
 	};
 }
 

@@ -51,7 +51,7 @@ describe("extractAgentRaisedUserQuestionPayload", () => {
 		expect(payload?.multiSelect).toBe(true);
 	});
 
-	it("多问 → 选项归属关系渲进正文、清空结构化选项、只能自由文本作答（如实降级不丢信息）", () => {
+	it("多问 → 保留有序问题、各自选择模式与选项归属，可逐问结构化作答", () => {
 		const payload = extractAgentRaisedUserQuestionPayload({
 			toolUseId: "toolu_multi_question",
 			toolInput: {
@@ -61,8 +61,30 @@ describe("extractAgentRaisedUserQuestionPayload", () => {
 				],
 			},
 		});
-		expect(payload?.options).toEqual([]);
-		expect(payload?.allowsFreeformAnswer).toBe(true);
+		expect(payload?.orderedQuestions).toEqual([
+			{
+				decisionQuestionId: "question-0",
+				headerMarkdown: null,
+				questionMarkdown: "先做哪个？",
+				selectionMode: "single",
+				options: [
+					{ optionId: "question-0-option-0", label: "A" },
+					{ optionId: "question-0-option-1", label: "B" },
+				],
+				allowsFreeformAnswer: true,
+			},
+			{
+				decisionQuestionId: "question-1",
+				headerMarkdown: "缓存",
+				questionMarkdown: "要不要加缓存？",
+				selectionMode: "single",
+				options: [
+					{ optionId: "question-1-option-0", label: "要" },
+					{ optionId: "question-1-option-1", label: "不要" },
+				],
+				allowsFreeformAnswer: true,
+			},
+		]);
 		expect(payload?.questionMarkdown).toContain("先做哪个？");
 		expect(payload?.questionMarkdown).toContain("要不要加缓存？");
 		// 每个选项都要挂在自己那一问下面，否则扁平化就丢了归属。

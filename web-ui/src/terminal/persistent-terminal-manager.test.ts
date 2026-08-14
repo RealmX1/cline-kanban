@@ -668,6 +668,25 @@ describe("persistent-terminal-manager", () => {
 			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 
+		it("restores an empty-snapshot question session without treating restoration as an agent turn", async () => {
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState({
+				taskId: "task-a",
+				agentId: "claude",
+				pid: null,
+				state: "awaiting_review",
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "question",
+			});
+			dispatchRestore("");
+
+			await vi.waitFor(() => {
+				expect(refreshSpy).toHaveBeenCalledTimes(1);
+			});
+		});
+
 		// 这条负例在「hydrate 多源回填 agentId」之后依然成立，且是刻意保留的：自动续跑是**静默**动作，
 		// agentId 完全问不出来时不该靠猜去拉起一个 agent。真实的中断场景已由回填补上 agentId，走上面的正例；
 		// 三个源全灭时用户仍有出路——面板会渲染可解释空态 + 「重启终端会话」按钮（那是显式动作，
