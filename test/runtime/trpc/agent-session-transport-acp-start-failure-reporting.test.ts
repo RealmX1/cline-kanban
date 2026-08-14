@@ -9,7 +9,9 @@
 // 不提示重试，用户对着一张什么都没在跑的卡以为切换成功。切换的失败口径是「停在已停止并如实报错」
 // （不回滚、不降级），故本文件同时钉住：ok:false、priorAgentSessionStopped 如实为 true、错误原文透传，
 // 且**没有**任何自动回落到旧通道的动作。
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 
@@ -60,6 +62,8 @@ const ACP_SPAWN_FAILURE_MESSAGE = "spawn omp ENOENT";
 
 function createRuntimeConfigState(): RuntimeConfigState {
 	return {
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 		selectedAgentId: "omp",
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,

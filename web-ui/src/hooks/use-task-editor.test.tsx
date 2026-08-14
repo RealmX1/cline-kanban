@@ -315,7 +315,9 @@ describe("useTaskEditor", () => {
 	});
 
 	it("ignores the legacy browser-local plan mode default when runtime setting is false", async () => {
-		localStorage.setItem(LocalStorageKey.TaskStartInPlanMode, "true");
+		// 这个键早已退役（新任务是否进计划模式的真相源是服务端的 newTaskStartInPlanModeByDefault），
+		// 所以刻意用裸字面量而不是 LocalStorageKey 成员——把它加回枚举等于承认它还是个现役键。
+		localStorage.setItem("kanban.task-start-in-plan-mode", "true");
 		let latestSnapshot: HookSnapshot | null = null;
 
 		await act(async () => {

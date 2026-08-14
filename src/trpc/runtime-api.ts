@@ -102,6 +102,7 @@ import {
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
+import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
 import { getWorkspaceDirectoryPath, loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -1907,6 +1908,33 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				return {
 					ok: false,
 					library: null,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+		getWorkspaceTaskEditDrafts: async (workspaceScope) => {
+			try {
+				return { ok: true, drafts: await readWorkspaceTaskEditDraftsSnapshot(workspaceScope.workspaceId) };
+			} catch (error) {
+				return {
+					ok: false,
+					drafts: null,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+		mutateWorkspaceTaskEditDrafts: async (workspaceScope, input) => {
+			try {
+				return {
+					ok: true,
+					drafts: await mutateWorkspaceTaskEditDrafts(workspaceScope.workspaceId, input.mutation),
+				};
+			} catch (error) {
+				// 同 prompt library：写失败时回 null 而不是变更前的快照。拿一份看起来正常的旧快照回去，
+				// 会让用户以为草稿已经存下了。
+				return {
+					ok: false,
+					drafts: null,
 					error: error instanceof Error ? error.message : String(error),
 				};
 			}

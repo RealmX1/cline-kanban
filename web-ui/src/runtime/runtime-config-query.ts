@@ -3,8 +3,6 @@
 // on state orchestration instead of transport plumbing.
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
-	RuntimeAgentId,
-	RuntimeAgentSessionTransport,
 	RuntimeClineAccountBalanceResponse,
 	RuntimeClineAccountOrganizationsResponse,
 	RuntimeClineAccountProfileResponse,
@@ -27,9 +25,9 @@ import type {
 	RuntimeClineReasoningEffort,
 	RuntimeClineUpdateProviderResponse,
 	RuntimeConfigResponse,
+	RuntimeConfigSaveRequest,
 	RuntimeDebugResetAllStateResponse,
 	RuntimeFeaturebaseTokenResponse,
-	RuntimeProjectShortcut,
 	RuntimeRunUpdateResponse,
 	RuntimeTerminalAgentModelSelectionAgentId,
 	RuntimeTerminalAgentModelSelectionOptionsResponse,
@@ -41,23 +39,11 @@ export async function fetchRuntimeConfig(workspaceId: string | null): Promise<Ru
 	return await trpcClient.runtime.getConfig.query();
 }
 
+// 直接用契约类型而不是再手抄一份字段清单：手抄那份漏加字段时不会编译报错，只会在运行时静默丢掉
+// 调用方传进来的设置。
 export async function saveRuntimeConfig(
 	workspaceId: string | null,
-	nextConfig: {
-		selectedAgentId?: RuntimeAgentId;
-		selectedShortcutLabel?: string | null;
-		agentAutonomousModeEnabled?: boolean;
-		newTaskStartInPlanModeByDefault?: boolean;
-		ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
-		shortcuts?: RuntimeProjectShortcut[];
-		readyForReviewNotificationsEnabled?: boolean;
-		notificationSoundEnabled?: boolean;
-		autoContinueOnConnectionDropEnabled?: boolean;
-		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled?: boolean;
-		postDeployVerificationForceCompleteEnabled?: boolean;
-		commitPromptTemplate?: string;
-		openPrPromptTemplate?: string;
-	},
+	nextConfig: RuntimeConfigSaveRequest,
 ): Promise<RuntimeConfigResponse> {
 	const trpcClient = getRuntimeTrpcClient(workspaceId);
 	return await trpcClient.runtime.saveConfig.mutate(nextConfig);

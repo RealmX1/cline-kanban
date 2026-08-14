@@ -9,9 +9,6 @@ import warpIcon from "@/assets/open-targets/warp.svg";
 import windsurfIcon from "@/assets/open-targets/windsurf.svg";
 import xcodeIcon from "@/assets/open-targets/xcode.svg";
 import zedIcon from "@/assets/open-targets/zed.svg";
-import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
-
-export const PREFERRED_OPEN_TARGET_STORAGE_KEY = LocalStorageKey.PreferredOpenTarget;
 
 export type OpenTargetPlatform = "mac" | "windows" | "linux" | "other";
 
@@ -271,23 +268,6 @@ export function getOpenTargetOption(targetId: OpenTargetId, platform: OpenTarget
 		...option,
 		label: getOpenTargetLabel(resolvedTargetId, platform),
 	};
-}
-
-export function loadPersistedOpenTarget(platform: OpenTargetPlatform): OpenTargetId {
-	const defaultTargetId = getDefaultOpenTargetId(platform);
-	if (typeof window === "undefined") {
-		return defaultTargetId;
-	}
-	const value = readLocalStorageItem(PREFERRED_OPEN_TARGET_STORAGE_KEY);
-	const normalized = normalizeOpenTargetId(value);
-	if (normalized && isOpenTargetSupported(normalized, platform)) {
-		return normalized;
-	}
-	return defaultTargetId;
-}
-
-export function persistOpenTarget(targetId: OpenTargetId): void {
-	writeLocalStorageItem(PREFERRED_OPEN_TARGET_STORAGE_KEY, targetId);
 }
 
 export function buildOpenCommand(targetId: OpenTargetId, path: string, platform: OpenTargetPlatform): string {

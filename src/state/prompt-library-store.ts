@@ -273,12 +273,95 @@ function withEntryAppended(
 	};
 }
 
+// 某个桶（scope + taskId）里现有的全部条目。合并迁移按「桶 + 正文」去重，所以得先取到那个桶。
+function readBucketEntries(
+	snapshot: WorkspacePromptLibrarySnapshot,
+	scope: PromptLibraryScope,
+	taskId: string | null,
+): StoredPromptLibraryEntry[] {
+	if (scope === "global") {
+		return snapshot.globalScopedPrompts;
+	}
+	if (scope === "repo") {
+		return snapshot.repoScopedPrompts;
+	}
+	return (
+		snapshot.taskScopedPromptsByTaskId[taskId ?? TASK_SCOPED_PROMPT_BUCKET_KEY_FOR_MUTATIONS_MISSING_TASK_ID] ?? []
+	);
+}
+
+function withEntryReplaced(
+	snapshot: WorkspacePromptLibrarySnapshot,
+	replacement: StoredPromptLibraryEntry,
+	taskId: string | null,
+): WorkspacePromptLibrarySnapshot {
+	return withEntryAppended(withEntryRemoved(snapshot, replacement.id), replacement, taskId);
+}
+
+/**
+ * 把一份来自某个浏览器 localStorage 的库合并进快照。
+ *
+ * 去重键是**桶 + 正文**（桶 = scope，task scope 还要算上 taskId），不是 id：各 origin 的 id 各自随机
+ * 生成，同一条模板在两个 origin 里 id 必然不同，按 id 去重一条都去不掉。
+ *
+ * 命中同正文的既有条目时不新增，只把时间戳收敛成「最早的 createdAt + 最晚的 updatedAt」——两份历史
+ * 都是真的，取并集才不丢信息。`origin` 保留既有条目的：它记录这条**最初**从哪来（手写 / 终端暂存），
+ * 被另一个 origin 的同正文条目改写会让这个来源标记失真。
+ */
+function withBrowserLocalStoragePromptsMerged(
+	snapshot: WorkspacePromptLibrarySnapshot,
+	incomingPrompts: readonly {
+		id: string;
+		text: string;
+		scope: PromptLibraryScope;
+		taskId?: string | null;
+		origin?: StoredPromptLibraryEntry["origin"];
+		createdAt: number;
+		updatedAt: number;
+	}[],
+): WorkspacePromptLibrarySnapshot {
+	let merged = snapshot;
+	for (const incoming of incomingPrompts) {
+		const taskId = incoming.scope === "task" ? (incoming.taskId ?? null) : null;
+		const existing = readBucketEntries(merged, incoming.scope, taskId).find((entry) => entry.text === incoming.text);
+		if (existing) {
+			const convergedCreatedAt = Math.min(existing.createdAt, incoming.createdAt);
+			const convergedUpdatedAt = Math.max(existing.updatedAt, incoming.updatedAt);
+			if (convergedCreatedAt === existing.createdAt && convergedUpdatedAt === existing.updatedAt) {
+				continue;
+			}
+			merged = withEntryReplaced(
+				merged,
+				{ ...existing, createdAt: convergedCreatedAt, updatedAt: convergedUpdatedAt },
+				taskId,
+			);
+			continue;
+		}
+		merged = withEntryAppended(
+			merged,
+			{
+				id: incoming.id,
+				text: incoming.text,
+				scope: incoming.scope,
+				...(incoming.origin === undefined ? {} : { origin: incoming.origin }),
+				createdAt: incoming.createdAt,
+				updatedAt: incoming.updatedAt,
+			},
+			taskId,
+		);
+	}
+	return merged;
+}
+
 // 把一条意图应用到快照上。纯函数——并发合并的正确性来自调用方持锁重读，这里只负责语义。
 export function applyWorkspacePromptLibraryMutation(
 	snapshot: WorkspacePromptLibrarySnapshot,
 	mutation: WorkspacePromptLibraryMutation,
 	nowEpochMs: number,
 ): WorkspacePromptLibrarySnapshot {
+	if (mutation.kind === "merge_prompts_migrated_from_browser_local_storage") {
+		return withBrowserLocalStoragePromptsMerged(snapshot, mutation.prompts);
+	}
 	if (mutation.kind === "remove_prompt") {
 		return withEntryRemoved(snapshot, mutation.promptId);
 	}
@@ -346,9 +429,13 @@ function collectPromptIdsHeldByWorkspaceFile(snapshot: WorkspacePromptLibrarySna
 	return promptIds;
 }
 
-// 一次 mutation 至多把一条条目从一份文件搬到另一份，所以「接收方」至多一份。返回 true 表示这次搬移的
-// 目的地是 workspace 文件（global → repo/task），它必须先于 global 文件落盘；见写序一节。
-// 不涉及跨文件搬移时（纯新增 / 纯改文 / 纯删除）只有一份文件会被写，两个分支等价，返回值无所谓。
+// 返回 true 表示这次写入会让 workspace 文件**新持有**某条条目，于是它必须先于 global 文件落盘；
+// 见写序一节。
+//
+// 只有 set_prompt_scope 会产生真正的「跨文件搬移」，也只有它需要写序保护——那条意图至多搬一条，
+// 所以「接收方」至多一份。其余意图（纯新增 / 纯改文 / 纯删除 / 合并迁移）不会让任何条目**离开**
+// 某份文件，崩在两次写之间最坏也只是「有些条目还没落盘」，源数据仍在原处（合并迁移的源是浏览器
+// localStorage，且迁移刻意不删本地），重跑即可补齐，因此两个分支对它们等价。
 function isWorkspaceFileTheDestinationOfThisMutation(
 	current: WorkspacePromptLibrarySnapshot,
 	next: WorkspacePromptLibrarySnapshot,

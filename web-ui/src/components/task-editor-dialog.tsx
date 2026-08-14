@@ -45,10 +45,10 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
-import { LocalStorageKey } from "@/storage/local-storage-store";
+import { useTaskCreateDialogPrimaryStartActionPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import type { TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
-import { useDebouncedEffect, useRawLocalStorageValue } from "@/utils/react-use";
+import { useDebouncedEffect } from "@/utils/react-use";
 
 const AUTO_REVIEW_MODE_OPTIONS: Array<{ value: TaskAutoReviewMode; label: string }> = [
 	{ value: "commit", label: "Make commit" },
@@ -58,13 +58,6 @@ const AUTO_REVIEW_MODE_OPTIONS: Array<{ value: TaskAutoReviewMode; label: string
 type TaskCreateStartAction = "start" | "start_and_open";
 
 const DEFAULT_PRIMARY_START_ACTION: TaskCreateStartAction = "start";
-
-function normalizeStoredTaskCreateStartAction(value: string): TaskCreateStartAction | null {
-	if (value === "start" || value === "start_and_open") {
-		return value;
-	}
-	return null;
-}
 
 /**
  * 关闭 New task 对话框前，用来判断「本次会话内是否改动过表单」的快照。
@@ -329,11 +322,7 @@ export function TaskEditorDialog({
 	const startInPlanModeId = useId();
 	const autoReviewEnabledId = useId();
 	const createMoreId = useId();
-	const [primaryStartAction, setPrimaryStartAction] = useRawLocalStorageValue<TaskCreateStartAction>(
-		LocalStorageKey.TaskCreatePrimaryStartAction,
-		DEFAULT_PRIMARY_START_ACTION,
-		normalizeStoredTaskCreateStartAction,
-	);
+	const [primaryStartAction, setPrimaryStartAction] = useTaskCreateDialogPrimaryStartActionPreference();
 	const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
 	const {
 		agentOptions,

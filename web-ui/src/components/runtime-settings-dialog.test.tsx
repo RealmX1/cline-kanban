@@ -2,9 +2,9 @@ import type { ReactNode } from "react";
 import { act, createContext, useContext } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { RuntimeSettingsDialog } from "@/components/runtime-settings-dialog";
 import type { RuntimeConfigResponse } from "@/runtime/types";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 
 /*
  * Radix Select depends on pointer-capture APIs that jsdom lacks.
@@ -176,6 +176,8 @@ const savedClineOauthConfig = {
 	selectedShortcutLabel: null,
 	agentAutonomousModeEnabled: true,
 	newTaskStartInPlanModeByDefault: true,
+	userInterfacePreferencesSharedAcrossBrowserOrigins:
+		USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 	readyForReviewNotificationsEnabled: false,
 	notificationSoundEnabled: false,
 	autoContinueOnConnectionDropEnabled: false,
@@ -326,6 +328,8 @@ describe("RuntimeSettingsDialog", () => {
 		});
 
 		expect(useRuntimeConfigSaveMock).toHaveBeenCalledWith(
+			// 设置对话框不碰跨 origin 共享的那组界面偏好（它们由各自的控件经外部 store 写），
+			// 所以这里刻意只断言它改动的那个字段。
 			expect.objectContaining({
 				newTaskStartInPlanModeByDefault: false,
 			}),

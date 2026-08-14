@@ -1,3 +1,8 @@
+import {
+	clearTaskEditDraftInStore,
+	readSavedTaskEditDraftFromStore,
+	saveTaskEditDraftToStore,
+} from "@/runtime/task-edit-draft-store";
 import type {
 	RuntimeAgentId,
 	RuntimeTaskAgentPermissionMode,
@@ -6,23 +11,11 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
-import {
-	LocalStorageKey,
-	readLocalStorageItem,
-	removeLocalStorageItem,
-	writeLocalStorageItem,
-} from "@/storage/local-storage-store";
 import type { BoardCard, TaskAutoReviewMode, TaskImage } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
-import {
-	runtimeAgentIdSchema,
-	runtimeTaskAgentPermissionModeSchema,
-	runtimeTaskAgentSessionInitializationSchema,
-	runtimeTaskClineSettingsSchema,
-	runtimeTaskImageSchema,
-	runtimeTaskTerminalAgentModelOverrideSettingsSchema,
-} from "../../../src/core/api-contract";
 
+// 与契约的 runtimeTaskEditDraftSchema 一一对应（store 就用那个 schema 校验磁盘/镜像数据）。
+// 这里保留一个本地 interface 只是为了让 web-ui 侧引用 TaskImage / TaskAutoReviewMode 这两个前端别名。
 export interface TaskEditDraft {
 	taskId: string;
 	prompt: string;
@@ -40,159 +33,29 @@ export interface TaskEditDraft {
 	savedAt: number;
 }
 
-interface StoredTaskEditDrafts {
-	drafts: Record<string, TaskEditDraft>;
-}
-
-function getDraftKey(projectId: string, taskId: string): string {
-	return JSON.stringify([projectId, taskId]);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readOptionalString(value: unknown): string | undefined {
-	return typeof value === "string" ? value : undefined;
-}
-
-function readOptionalAgentId(value: unknown): RuntimeAgentId | undefined {
-	const parsed = runtimeAgentIdSchema.safeParse(value);
-	return parsed.success ? parsed.data : undefined;
-}
-
-function readOptionalTaskAgentPermissionMode(value: unknown): RuntimeTaskAgentPermissionMode | undefined {
-	const parsed = runtimeTaskAgentPermissionModeSchema.safeParse(value);
-	return parsed.success ? parsed.data : undefined;
-}
-
-function readTaskImages(value: unknown): TaskImage[] {
-	if (!Array.isArray(value)) {
-		return [];
-	}
-	return value.flatMap((image): TaskImage[] => {
-		const parsed = runtimeTaskImageSchema.safeParse(image);
-		return parsed.success ? [parsed.data] : [];
-	});
-}
-
-function readClineSettings(value: unknown): RuntimeTaskClineSettings | undefined {
-	if (!isRecord(value)) {
-		return undefined;
-	}
-	const parsed = runtimeTaskClineSettingsSchema.safeParse(value);
-	if (!parsed.success) {
-		return undefined;
-	}
-	const settings = parsed.data;
-	if (!settings.providerId && !settings.modelId && !settings.reasoningEffort) {
-		return undefined;
-	}
-	return settings;
-}
-
-function readTerminalAgentModelOverrideSettings(
-	value: unknown,
-): RuntimeTaskTerminalAgentModelOverrideSettings | undefined {
-	if (!isRecord(value)) {
-		return undefined;
-	}
-	const parsed = runtimeTaskTerminalAgentModelOverrideSettingsSchema.safeParse(value);
-	return parsed.success ? parsed.data : undefined;
-}
-
-function readTaskAgentSessionInitialization(value: unknown): RuntimeTaskAgentSessionInitialization | undefined {
-	const parsed = runtimeTaskAgentSessionInitializationSchema.safeParse(value);
-	return parsed.success ? parsed.data : undefined;
-}
-
-function readTaskEditDraft(value: unknown): TaskEditDraft | null {
-	if (!isRecord(value)) {
-		return null;
-	}
-	const taskId = readOptionalString(value.taskId);
-	const prompt = readOptionalString(value.prompt);
-	const branchRef = readOptionalString(value.branchRef);
-	if (!taskId || prompt === undefined || !branchRef) {
-		return null;
-	}
-	return {
-		taskId,
-		prompt,
-		images: readTaskImages(value.images),
-		startInPlanMode: value.startInPlanMode === true,
-		taskAgentPermissionMode: readOptionalTaskAgentPermissionMode(value.taskAgentPermissionMode),
-		autoReviewEnabled: value.autoReviewEnabled === true,
-		autoReviewMode: resolveTaskAutoReviewMode(
-			readOptionalString(value.autoReviewMode) as TaskAutoReviewMode | undefined,
-		),
-		branchRef,
-		worktreeMode:
-			value.worktreeMode === "inplace" || value.worktreeMode === "branch" ? value.worktreeMode : undefined,
-		agentId: readOptionalAgentId(value.agentId),
-		clineSettings: readClineSettings(value.clineSettings),
-		terminalAgentModelOverrideSettings: readTerminalAgentModelOverrideSettings(
-			value.terminalAgentModelOverrideSettings,
-		),
-		taskAgentSessionInitialization: readTaskAgentSessionInitialization(value.taskAgentSessionInitialization),
-		savedAt: typeof value.savedAt === "number" ? value.savedAt : 0,
-	};
-}
-
-function readStoredTaskEditDrafts(): StoredTaskEditDrafts {
-	const raw = readLocalStorageItem(LocalStorageKey.TaskEditDrafts);
-	if (!raw) {
-		return { drafts: {} };
-	}
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (!isRecord(parsed) || !isRecord(parsed.drafts)) {
-			return { drafts: {} };
-		}
-		const drafts: Record<string, TaskEditDraft> = {};
-		for (const [key, value] of Object.entries(parsed.drafts)) {
-			const draft = readTaskEditDraft(value);
-			if (draft) {
-				drafts[key] = draft;
-			}
-		}
-		return { drafts };
-	} catch {
-		return { drafts: {} };
-	}
-}
-
-function writeStoredTaskEditDrafts(stored: StoredTaskEditDrafts): void {
-	if (Object.keys(stored.drafts).length === 0) {
-		removeLocalStorageItem(LocalStorageKey.TaskEditDrafts);
-		return;
-	}
-	writeLocalStorageItem(LocalStorageKey.TaskEditDrafts, JSON.stringify(stored));
-}
+// 下面三个函数的真相源已搬到服务端，这里只保留同步签名并委派给 task-edit-draft-store。
+// 签名不变是刻意的：`readSavedTaskEditDraft` 要给编辑表单铺初值，慢一帧就会先渲染出空表单再跳成
+// 草稿内容。store 用「内存快照 + localStorage 镜像」保证同步可读，服务端同步在后台异步进行。
 
 export function readSavedTaskEditDraft(projectId: string | null, taskId: string): TaskEditDraft | null {
 	if (!projectId) {
 		return null;
 	}
-	return readStoredTaskEditDrafts().drafts[getDraftKey(projectId, taskId)] ?? null;
+	return readSavedTaskEditDraftFromStore(projectId, taskId);
 }
 
 export function saveTaskEditDraft(projectId: string | null, draft: TaskEditDraft): void {
 	if (!projectId) {
 		return;
 	}
-	const stored = readStoredTaskEditDrafts();
-	stored.drafts[getDraftKey(projectId, draft.taskId)] = draft;
-	writeStoredTaskEditDrafts(stored);
+	saveTaskEditDraftToStore(projectId, draft);
 }
 
 export function clearTaskEditDraft(projectId: string | null, taskId: string): void {
 	if (!projectId) {
 		return;
 	}
-	const stored = readStoredTaskEditDrafts();
-	delete stored.drafts[getDraftKey(projectId, taskId)];
-	writeStoredTaskEditDrafts(stored);
+	clearTaskEditDraftInStore(projectId, taskId);
 }
 
 export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">, task: BoardCard): boolean {

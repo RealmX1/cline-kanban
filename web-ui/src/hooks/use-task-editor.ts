@@ -5,11 +5,6 @@ import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
-	normalizeStoredTaskAutoReviewMode,
-	TASK_AUTO_REVIEW_ENABLED_STORAGE_KEY,
-	TASK_AUTO_REVIEW_MODE_STORAGE_KEY,
-} from "@/hooks/app-utils";
-import {
 	clearTaskEditDraft,
 	isTaskEditDraftEqualToTask,
 	readSavedTaskEditDraft,
@@ -25,16 +20,19 @@ import type {
 	RuntimeTaskWorktreeMode,
 	RuntimeTerminalAgentModelSelectionAgentId,
 } from "@/runtime/types";
+import {
+	useNewTaskAutoReviewEnabledPreference,
+	useNewTaskAutoReviewModePreference,
+} from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
+import {
+	readEffectiveUserInterfacePreferenceValue,
+	saveUserInterfacePreferencesSharedAcrossBrowserOrigins,
+} from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import { addTaskToColumnWithResult, findCardSelection, updateTask, updateTaskTitle } from "@/state/board-state";
-import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 import { toTelemetrySelectedAgentId, trackTaskCreated } from "@/telemetry/events";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
-import { useBooleanLocalStorageValue, useDebouncedEffect, useRawLocalStorageValue } from "@/utils/react-use";
-
-interface StoredTaskCreateTerminalAgentModelSelections {
-	selections: Record<string, string>;
-}
+import { useDebouncedEffect } from "@/utils/react-use";
 
 function isTerminalAgentModelSelectionAgentId(
 	agentId: RuntimeAgentId | null | undefined,
@@ -49,38 +47,14 @@ function getTaskCreateTerminalAgentModelSelectionStorageKey(
 	return JSON.stringify([projectId ?? "global", agentId]);
 }
 
-function readStoredTaskCreateTerminalAgentModelSelections(): StoredTaskCreateTerminalAgentModelSelections {
-	const raw = readLocalStorageItem(LocalStorageKey.TaskCreateTerminalAgentModelSelections);
-	if (!raw) {
-		return { selections: {} };
-	}
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-			return { selections: {} };
-		}
-		const selections = (parsed as { selections?: unknown }).selections;
-		if (!selections || typeof selections !== "object" || Array.isArray(selections)) {
-			return { selections: {} };
-		}
-		const normalizedSelections: Record<string, string> = {};
-		for (const [key, value] of Object.entries(selections)) {
-			if (typeof value === "string") {
-				normalizedSelections[key] = value.trim();
-			}
-		}
-		return { selections: normalizedSelections };
-	} catch {
-		return { selections: {} };
-	}
-}
-
+// 命令式读取（不在 React 渲染里），所以直接问外部 store 拿生效值：服务端优先、回落本地镜像。
 function readRememberedTaskCreateTerminalAgentModelSelection(
 	projectId: string | null,
 	agentId: RuntimeTerminalAgentModelSelectionAgentId,
 ): string | undefined {
-	const stored = readStoredTaskCreateTerminalAgentModelSelections();
-	return stored.selections[getTaskCreateTerminalAgentModelSelectionStorageKey(projectId, agentId)];
+	const selections =
+		readEffectiveUserInterfacePreferenceValue("taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey") ?? {};
+	return selections[getTaskCreateTerminalAgentModelSelectionStorageKey(projectId, agentId)];
 }
 
 function resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(
@@ -102,9 +76,14 @@ function writeRememberedTaskCreateTerminalAgentModelSelection(
 	agentId: RuntimeTerminalAgentModelSelectionAgentId,
 	modelId: string,
 ): void {
-	const stored = readStoredTaskCreateTerminalAgentModelSelections();
-	stored.selections[getTaskCreateTerminalAgentModelSelectionStorageKey(projectId, agentId)] = modelId.trim();
-	writeLocalStorageItem(LocalStorageKey.TaskCreateTerminalAgentModelSelections, JSON.stringify(stored));
+	const currentSelections =
+		readEffectiveUserInterfacePreferenceValue("taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey") ?? {};
+	saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+		taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {
+			...currentSelections,
+			[getTaskCreateTerminalAgentModelSelectionStorageKey(projectId, agentId)]: modelId.trim(),
+		},
+	});
 }
 
 function isSameTerminalAgentModelOverrideSettings(
@@ -247,15 +226,8 @@ export function useTaskEditor({
 	const [newTaskAgentPermissionMode, setNewTaskAgentPermissionMode] = useState<RuntimeTaskAgentPermissionMode>(
 		newTaskAgentPermissionModeByDefault,
 	);
-	const [newTaskAutoReviewEnabled, setNewTaskAutoReviewEnabled] = useBooleanLocalStorageValue(
-		TASK_AUTO_REVIEW_ENABLED_STORAGE_KEY,
-		false,
-	);
-	const [newTaskAutoReviewMode, setNewTaskAutoReviewMode] = useRawLocalStorageValue<TaskAutoReviewMode>(
-		TASK_AUTO_REVIEW_MODE_STORAGE_KEY,
-		"commit",
-		normalizeStoredTaskAutoReviewMode,
-	);
+	const [newTaskAutoReviewEnabled, setNewTaskAutoReviewEnabled] = useNewTaskAutoReviewEnabledPreference();
+	const [newTaskAutoReviewMode, setNewTaskAutoReviewMode] = useNewTaskAutoReviewModePreference();
 	const isNewTaskStartInPlanModeDisabled = false;
 	const [newTaskBranchRef, setNewTaskBranchRef] = useState("");
 	const [newTaskWorktreeMode, setNewTaskWorktreeMode] = useState<RuntimeTaskWorktreeMode>("branch");

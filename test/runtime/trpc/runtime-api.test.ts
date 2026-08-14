@@ -2,9 +2,9 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { createAcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardData,
@@ -214,6 +214,8 @@ function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): Runt
 
 function createRuntimeConfigState(): RuntimeConfigState {
 	return {
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 		selectedAgentId: "claude",
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,

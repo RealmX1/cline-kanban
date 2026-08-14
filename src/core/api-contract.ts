@@ -1809,6 +1809,67 @@ export const runtimeAgentDefinitionSchema = z.object({
 });
 export type RuntimeAgentDefinition = z.infer<typeof runtimeAgentDefinitionSchema>;
 
+export const runtimeTaskCreateDialogPrimaryStartActionSchema = z.enum(["start", "start_and_open"]);
+export type RuntimeTaskCreateDialogPrimaryStartAction = z.infer<typeof runtimeTaskCreateDialogPrimaryStartActionSchema>;
+
+// 跨浏览器 origin 共享的界面偏好。
+//
+// 这些偏好原先各自躺在浏览器 localStorage 里，而 localStorage 是 **per-origin** 的：`npm run web:dev`
+// 固定在 4173、`npm run dev:full` 每次挑一个空闲端口，换个端口就是全新的一份——这比「换浏览器」频繁
+// 得多，是现实中最主要的分叉轴。落到 config.json 后它们天然跟着用户走，与从哪个 origin 打开无关。
+//
+// ## 为什么每个标量都可为 null，而 null **不等于**默认值
+//
+// null 表示「服务端从来没有过这个偏好」，与「服务端存的恰好是默认值」是两件事。合并迁移正是靠这个
+// 区分决定该采纳本地值还是保留服务端值：若把 null 折叠成默认值，第一个迁移的 origin 就无法把自己
+// 攒下的选择播种到服务端，用户升级后会看到偏好被重置。默认值由各消费方在读到 null 时自行套用。
+//
+// ## 两个字典字段为什么不可为 null
+//
+// 字典的「整体是否存在」这个维度用不上：空字典即可表达「一条都没有」，而删掉最后一条与「从没设过」
+// 对消费方是同一件事——没有哪个消费方需要靠 null 区分这两者，多一个状态只会多一条要各处照顾的分支。
+//
+// ## 字典的两种写入意图（**同一份数据，两条语义截然相反的写入路径**）
+//
+//   - 普通部分更新（`runtimeConfigSaveRequestSchema.userInterfacePreferencesSharedAcrossBrowserOrigins`）
+//     按**整份替换**。必须如此：用户解除某个槽位绑定、或裁剪掉失效项目，前端表达删除的唯一方式就是
+//     写回一份少了那个键的整份字典；若在这条路径上逐键求并，删除就永远生效不了。
+//   - 迁移采纳（`runtimeConfigSaveRequestSchema.userInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage`）
+//     按**键**并入：服务端已有的键胜出、服务端没有的键被采纳，不丢任何一侧的条目。
+//
+// 两条路径分开的理由是并发：迁移载荷是某个 origin 基于「它读到的那份服务端快照」算出来的，两个 origin
+// 首次几乎同时迁移时，各自都基于空快照算出自己那半份；若迁移也走整份替换，后到的那次会在服务端锁内
+// 把前一次的条目整份覆盖掉，用户凭空少一半编组。把「并入」放到服务端锁内算，结果才与到达顺序无关。
+export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z.object({
+	newTaskAutoReviewEnabled: z.boolean().nullable(),
+	newTaskAutoReviewMode: runtimeTaskAutoReviewModeSchema.nullable(),
+	taskCreateDialogPrimaryStartAction: runtimeTaskCreateDialogPrimaryStartActionSchema.nullable(),
+	// 键是 JSON.stringify([projectId ?? "global", terminalAgentId])，值是该组合上次选定的 modelId。
+	taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: z.record(z.string(), z.string()),
+	// 「在…中打开」的默认应用（OpenTargetId）。可选集合随平台变化，故这里只存字符串、由前端校验。
+	workspaceOpenTargetPreferredApplicationId: z.string().nullable(),
+	// 顶栏项目快速切换器的《红警》式编组：槽位号（"1"–"9"）→ projectId。
+	projectNumericSlotGroupAssignmentsBySlotNumber: z.record(z.string(), z.string()),
+});
+export type RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins = z.infer<
+	typeof runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema
+>;
+
+// 迁移采纳意图的载荷：从浏览器 localStorage 里读出来、希望服务端**逐键并入**的那些字典条目。
+//
+// 只列两个字典字段：4 个标量没有「逐键」这一层，它们的迁移播种由普通部分更新表达（服务端为 null 才写，
+// 那个判据在客户端算是安全的——标量播种撞车时两个 origin 写的是各自本地那份，谁赢都不会丢掉另一份数据，
+// 只会让落选的那份进冲突提示；字典则不然，整份覆盖是**真的少一半条目**）。
+//
+// 值语义与偏好本体一致（键 → 字符串值），但这里的每个字段都是可选的：只带这次真正要采纳的那部分。
+export const runtimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorageSchema = z.object({
+	taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: z.record(z.string(), z.string()).optional(),
+	projectNumericSlotGroupAssignmentsBySlotNumber: z.record(z.string(), z.string()).optional(),
+});
+export type RuntimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage = z.infer<
+	typeof runtimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorageSchema
+>;
+
 export const runtimeConfigResponseSchema = z.object({
 	selectedAgentId: runtimeAgentIdSchema,
 	selectedShortcutLabel: z.string().nullable(),
@@ -1835,6 +1896,7 @@ export const runtimeConfigResponseSchema = z.object({
 	openPrPromptTemplate: z.string(),
 	commitPromptTemplateDefault: z.string(),
 	openPrPromptTemplateDefault: z.string(),
+	userInterfacePreferencesSharedAcrossBrowserOrigins: runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema,
 });
 export type RuntimeConfigResponse = z.infer<typeof runtimeConfigResponseSchema>;
 
@@ -1852,6 +1914,19 @@ export const runtimeConfigSaveRequestSchema = z.object({
 	postDeployVerificationForceCompleteEnabled: z.boolean().optional(),
 	commitPromptTemplate: z.string().optional(),
 	openPrPromptTemplate: z.string().optional(),
+	// 逐字段可选，于是三种状态可分：字段缺席 = 不动它、null = 显式清回「服务端无值」、有值 = 设定。
+	// 两个字典字段在这条路径上按**整份替换**（与既有的 `shortcuts` 一致）：删除只能靠「写回一份少了某个
+	// 键的整份字典」表达，这里逐键求并就等于永远删不掉。并发写因此是 last-write-wins，但这条路径上的写
+	// 都是用户当下的一次显式操作（绑槽位 / 解绑 / 选模型），最后一次点击胜出正是用户预期。
+	userInterfacePreferencesSharedAcrossBrowserOrigins: runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema
+		.partial()
+		.optional(),
+	// 迁移采纳意图：这些条目由服务端在锁内**逐键并入**（服务端已有的键胜出），而不是整份替换。
+	// 与上面那个字段是两条独立路径，可同时出现在一次请求里——迁移一次性上传「标量播种 + 字典采纳」。
+	// 为什么不复用上面那条：迁移载荷算自客户端读到的服务端快照，整份替换会让两个 origin 首次同时迁移时
+	// 后到的那次覆盖掉前一次的条目（见 runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema 上方）。
+	userInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage:
+		runtimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorageSchema.optional(),
 });
 export type RuntimeConfigSaveRequest = z.infer<typeof runtimeConfigSaveRequestSchema>;
 
@@ -2414,6 +2489,31 @@ export const workspacePromptLibraryMutationSchema = z.discriminatedUnion("kind",
 			message: TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE,
 			path: ["taskId"],
 		}),
+	// 把某个浏览器 localStorage 里攒下的整份库合并进来。**不是** upsert_prompt 的批量版：
+	//   - 去重键是「同一个桶里的同一段正文」，不是 id。各 origin 的 id 是各自 randomUUID 生成的，
+	//     同一条模板在两个 origin 里 id 必然不同，按 id 去重等于一条都去不掉、库里堆满重复；
+	//   - 时间戳由**载荷**带来而不是服务端盖章：迁移搬的是历史数据，盖上「现在」会让所有模板的
+	//     创建时间变成升级那一刻，用户再也分不清哪条是三个月前写的。
+	// 幂等：第二次跑同一份载荷时每条正文都已存在，于是只做时间戳收敛、不新增条目。
+	z.object({
+		kind: z.literal("merge_prompts_migrated_from_browser_local_storage"),
+		prompts: z.array(
+			z
+				.object({
+					id: z.string(),
+					text: z.string(),
+					scope: promptLibraryScopeSchema,
+					taskId: z.string().nullable().optional(),
+					origin: promptLibraryEntryOriginSchema.optional(),
+					createdAt: z.number(),
+					updatedAt: z.number(),
+				})
+				.refine(isTaskScopedPromptMutationCarryingItsTaskId, {
+					message: TASK_SCOPED_PROMPT_MUTATION_MISSING_TASK_ID_MESSAGE,
+					path: ["taskId"],
+				}),
+		),
+	}),
 ]);
 export type WorkspacePromptLibraryMutation = z.infer<typeof workspacePromptLibraryMutationSchema>;
 
@@ -2431,6 +2531,86 @@ export const runtimePromptLibraryMutateRequestSchema = z.object({
 	mutation: workspacePromptLibraryMutationSchema,
 });
 export type RuntimePromptLibraryMutateRequest = z.infer<typeof runtimePromptLibraryMutateRequestSchema>;
+
+// ── 任务编辑草稿（服务端持久化）──────────────────────────────────────────────
+//
+// 用户在编辑任务对话框里打了字但还没保存的那一份。它是**无法重建的原创内容**（正文 + 内联 base64
+// 图片 + 整套 agent/权限/worktree 设置），原先只活在浏览器 localStorage 里，换 origin 就看不见了。
+//
+// 落点是每个 workspace 一份独立文件（~/.cline/kanban/workspaces/<id>/task-edit-drafts.json），
+// **不进 board.json**：草稿带内联 base64 图片，而 board.json 是每次看板改动都整体读写 + 广播的最热
+// 路径，把易膨胀数据塞进去等于把膨胀直接打在那条链上。
+export const runtimeTaskEditDraftSchema = z.object({
+	taskId: z.string(),
+	prompt: z.string(),
+	images: z.array(runtimeTaskImageSchema),
+	startInPlanMode: z.boolean(),
+	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
+	autoReviewEnabled: z.boolean(),
+	autoReviewMode: runtimeTaskAutoReviewModeSchema,
+	branchRef: z.string(),
+	agentId: runtimeAgentIdSchema.optional(),
+	clineSettings: runtimeTaskClineSettingsSchema.optional(),
+	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
+	taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
+	savedAt: z.number(),
+});
+export type RuntimeTaskEditDraft = z.infer<typeof runtimeTaskEditDraftSchema>;
+
+// 合并时按 savedAt 落败的那一份。**绝不静默丢弃**：草稿是原创内容，判错一次就再也拿不回来了。
+export const runtimeSupersededTaskEditDraftCopySchema = z.object({
+	draft: runtimeTaskEditDraftSchema,
+	// 它是在哪一次合并里落选的（epoch ms），用于在界面上说明「这份是什么时候被顶下来的」。
+	supersededAt: z.number(),
+	// 顶掉它的那一份的 savedAt，让用户一眼看出两份差了多久。
+	supersededBySavedAt: z.number(),
+});
+export type RuntimeSupersededTaskEditDraftCopy = z.infer<typeof runtimeSupersededTaskEditDraftCopySchema>;
+
+export const workspaceTaskEditDraftsSnapshotSchema = z.object({
+	draftsByTaskId: z.record(z.string(), runtimeTaskEditDraftSchema),
+	supersededDraftCopies: z.array(runtimeSupersededTaskEditDraftCopySchema),
+});
+export type WorkspaceTaskEditDraftsSnapshot = z.infer<typeof workspaceTaskEditDraftsSnapshotSchema>;
+
+// 与 prompt library 同理：写的是意图而不是整份 PUT，多标签页并发写才能在服务端的文件锁内自然合并。
+export const workspaceTaskEditDraftMutationSchema = z.discriminatedUnion("kind", [
+	z.object({
+		kind: z.literal("save_task_edit_draft"),
+		draft: runtimeTaskEditDraftSchema,
+	}),
+	z.object({
+		kind: z.literal("clear_task_edit_draft"),
+		taskId: z.string(),
+	}),
+	// 一次清掉某个任务的草稿**及其**全部落败副本。任务被删除时用——任务都没了，它的草稿留着只会
+	// 变成永远无法认领的孤儿。这与「用户保存/放弃了编辑」是两件事，故是独立意图。
+	z.object({
+		kind: z.literal("discard_all_task_edit_drafts_for_deleted_task"),
+		taskId: z.string(),
+	}),
+	z.object({
+		kind: z.literal("merge_task_edit_drafts_migrated_from_browser_local_storage"),
+		drafts: z.array(runtimeTaskEditDraftSchema),
+	}),
+]);
+export type WorkspaceTaskEditDraftMutation = z.infer<typeof workspaceTaskEditDraftMutationSchema>;
+
+export const runtimeTaskEditDraftsReadRequestSchema = z.object({});
+export type RuntimeTaskEditDraftsReadRequest = z.infer<typeof runtimeTaskEditDraftsReadRequestSchema>;
+
+export const runtimeTaskEditDraftsResponseSchema = z.object({
+	ok: z.boolean(),
+	drafts: workspaceTaskEditDraftsSnapshotSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskEditDraftsResponse = z.infer<typeof runtimeTaskEditDraftsResponseSchema>;
+
+export const runtimeTaskEditDraftsMutateRequestSchema = z.object({
+	mutation: workspaceTaskEditDraftMutationSchema,
+});
+export type RuntimeTaskEditDraftsMutateRequest = z.infer<typeof runtimeTaskEditDraftsMutateRequestSchema>;
 
 // ── 终端输入框暂存进 Prompt Library（W2 Ctrl+S）──────────────────────────────────
 //

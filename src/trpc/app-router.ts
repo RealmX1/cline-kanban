@@ -114,6 +114,9 @@ import type {
 	RuntimeTaskChatReloadResponse,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
+	RuntimeTaskEditDraftsMutateRequest,
+	RuntimeTaskEditDraftsReadRequest,
+	RuntimeTaskEditDraftsResponse,
 	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponse,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
@@ -261,6 +264,9 @@ import {
 	runtimeTaskChatReloadResponseSchema,
 	runtimeTaskChatSendRequestSchema,
 	runtimeTaskChatSendResponseSchema,
+	runtimeTaskEditDraftsMutateRequestSchema,
+	runtimeTaskEditDraftsReadRequestSchema,
+	runtimeTaskEditDraftsResponseSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema,
@@ -398,6 +404,14 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimePromptLibraryMutateRequest,
 		) => Promise<RuntimePromptLibraryResponse>;
+		getWorkspaceTaskEditDrafts: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskEditDraftsReadRequest,
+		) => Promise<RuntimeTaskEditDraftsResponse>;
+		mutateWorkspaceTaskEditDrafts: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskEditDraftsMutateRequest,
+		) => Promise<RuntimeTaskEditDraftsResponse>;
 		stashTerminalInputBoxToPromptLibrary: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTerminalInputBoxStashRequest,
@@ -803,6 +817,18 @@ export const runtimeAppRouter = t.router({
 			.output(runtimePromptLibraryResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.mutateWorkspacePromptLibrary(ctx.workspaceScope, input);
+			}),
+		getWorkspaceTaskEditDrafts: workspaceProcedure
+			.input(runtimeTaskEditDraftsReadRequestSchema)
+			.output(runtimeTaskEditDraftsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getWorkspaceTaskEditDrafts(ctx.workspaceScope, input);
+			}),
+		mutateWorkspaceTaskEditDrafts: workspaceProcedure
+			.input(runtimeTaskEditDraftsMutateRequestSchema)
+			.output(runtimeTaskEditDraftsResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.mutateWorkspaceTaskEditDrafts(ctx.workspaceScope, input);
 			}),
 		// 读框 → 回填折叠粘贴 → 写库 → 转发 Ctrl+S 清框，一次请求走完整条链。
 		// 前端只拦按键、不碰内容：同一份易随 agent 版本漂移的 TUI 画法知识只在服务端存一份。

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import type {
 	RuntimeBoardData,
 	RuntimeTaskSessionSummary,
@@ -121,6 +121,8 @@ function createWorkspaceState(board: RuntimeBoardData = createBoard()): RuntimeW
 function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): RuntimeConfigState {
 	return {
 		globalConfigPath: "/tmp/global-config.json",
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 		projectConfigPath: "/tmp/project-config.json",
 		selectedAgentId: "claude",
 		selectedShortcutLabel: null,
