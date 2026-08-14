@@ -2,9 +2,9 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { createAcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardData,
@@ -214,6 +214,8 @@ function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): Runt
 
 function createRuntimeConfigState(): RuntimeConfigState {
 	return {
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 		selectedAgentId: "claude",
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
@@ -4623,6 +4625,112 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 		// 既没入库也没转发：什么都没发生，如实报「没有可信的终端会话」。
 		expect(response.outcome).toBe("no_active_terminal_session");
 		expect(response.stashedPromptId).toBeNull();
+	});
+
+	// 拿到 W1 争用抢占那条路径上的 stash 执行者。抢占来源无法从 procedure 表面触发——它只活在投递
+	// options 里，所以必须先走一遍 sendTaskChatMessage 才能把它取出来。
+	async function resolveProgrammaticDeliveryPreemptiveStashExecutor(
+		scope: { workspaceId: string; workspacePath: string },
+		terminalManager: ReturnType<typeof createStashTerminalManagerDouble>,
+	): Promise<(taskId: string) => Promise<boolean>> {
+		const summary = createSummary({ agentId: "claude", state: "awaiting_review" });
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
+		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
+		// spread 复制的是 vi.fn 的引用，于是调用方仍可以对原 terminalManager 上那个 forward 替身做断言。
+		const terminalManagerWithDelivery = {
+			...terminalManager,
+			submitTaskChatInputWhenReady: vi.fn(
+				(
+					_taskId: string,
+					_text: string,
+					_options?: {
+						mayAutoStashAbsentHumanInputBox?: boolean;
+						preemptivelyStashHumanInputBox?: (taskId: string) => Promise<boolean>;
+					},
+				) => summary,
+			),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => scope.workspaceId),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManagerWithDelivery as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		await api.sendTaskChatMessage(scope, {
+			taskId: "task-1",
+			text: "继续 RVF",
+			source: "review-validate-fix",
+			idempotencyKey: `rvf-preemption-${scope.workspaceId}`,
+			promptSha256: "abc123",
+		});
+		const preemptivelyStashHumanInputBox =
+			terminalManagerWithDelivery.submitTaskChatInputWhenReady.mock.calls[0]?.[2]?.preemptivelyStashHumanInputBox;
+		if (!preemptivelyStashHumanInputBox) {
+			throw new Error("投递 options 必须带上争用抢占执行者");
+		}
+		return preemptivelyStashHumanInputBox;
+	}
+
+	// 下面三例钉的是同一条红线的两面：「没有可入库的正文」这一格上，抢占路径与用户按键路径的正确行为
+	// **相反**。用户按了键 ⇒ 必须转发（那是这个键的原生语义，agent 的原生暂存替他接住读不到的内容）；
+	// 抢占路径根本没有人按键 ⇒ 一个字节都不许打进框。
+	it("抢占 + 读不出正文 → 绝不转发 Ctrl+S：这是唯一真正会丢字的那一格", async () => {
+		const scope = createStashWorkspaceScope();
+		const terminalManager = createStashTerminalManagerDouble({
+			// 输入侧字节跟踪确知框里有未提交内容，读屏却拿不到正文——人类打了一半的那半句确实在框里。
+			capture: async () => createStashCapture("input_box_content_unreadable", ""),
+			// 替身照常允许转发：守卫必须来自「谁发起的」，不能靠 manager 恰好拒绝。
+			forward: () => true,
+		});
+		const preemptivelyStashHumanInputBox = await resolveProgrammaticDeliveryPreemptiveStashExecutor(
+			scope,
+			terminalManager,
+		);
+
+		await expect(preemptivelyStashHumanInputBox("task-1")).resolves.toBe(false);
+
+		// 红线：转发一次 = 那半句被 agent 自己的暂存区吞掉，而抢占已如实返回 false、这次投递根本不会
+		// 发生——内容没了，连一次投递都没换到。
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).not.toHaveBeenCalled();
+		expect(existsSync(getWorkspacePromptLibraryPath(scope.workspaceId))).toBe(false);
+	});
+
+	it("抢占 + 屏上文字无击键佐证 → 同样不动框（判据是「没人按键」，不按捕获状态开口子）", async () => {
+		const scope = createStashWorkspaceScope();
+		const terminalManager = createStashTerminalManagerDouble({
+			// 屏上有字、输入侧一个字节都没见过：多半是 Claude 自己渲染的占位提示，不该入库。
+			capture: async () => createStashCapture("screen_text_not_corroborated_by_keystroke_tracking", ""),
+			forward: () => true,
+		});
+		const preemptivelyStashHumanInputBox = await resolveProgrammaticDeliveryPreemptiveStashExecutor(
+			scope,
+			terminalManager,
+		);
+
+		await expect(preemptivelyStashHumanInputBox("task-1")).resolves.toBe(false);
+
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).not.toHaveBeenCalled();
+	});
+
+	it("用户按键 + 读不出正文 → 仍**必须**转发：这个键的原生语义不能被上面那条守卫顺手废掉", async () => {
+		const scope = createStashWorkspaceScope();
+		const terminalManager = createStashTerminalManagerDouble({
+			capture: async () => createStashCapture("input_box_content_unreadable", ""),
+			forward: () => true,
+		});
+		const api = createStashApi(scope, terminalManager);
+
+		const response = await api.stashTerminalInputBoxToPromptLibrary(scope, { taskId: "task-1" });
+
+		expect(response.outcome).toBe("input_box_content_unreadable_forwarded_to_agent_native_stash");
+		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).toHaveBeenCalledWith(
+			"task-1",
+			"incarnation-1",
+		);
 	});
 
 	it("写库失败 → **不**清框，正文原样留在输入框里，回执如实报失败", async () => {

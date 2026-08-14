@@ -557,6 +557,7 @@ export function CardDetailView({
 	selection,
 	currentProjectId,
 	workspacePath,
+	taskIdsOnBoard,
 	selectedAgentId = null,
 	runtimeConfig = null,
 	sessionSummary,
@@ -623,6 +624,8 @@ export function CardDetailView({
 	selection: CardSelection;
 	currentProjectId: string | null;
 	workspacePath?: string | null;
+	/** 看板上此刻存在的任务 id。Prompt Library 靠它认出「归属任务已被删掉」的孤儿条目。 */
+	taskIdsOnBoard?: ReadonlySet<string> | null;
 	selectedAgentId?: RuntimeAgentId | null;
 	runtimeConfig?: RuntimeConfigResponse | null;
 	sessionSummary: RuntimeTaskSessionSummary | null;
@@ -1038,6 +1041,7 @@ export function CardDetailView({
 				projectId={promptLibraryProjectId}
 				onFillInput={injectTextIntoActiveInput}
 				headerContent={detailUtilityTabs}
+				taskIdsOnBoard={taskIdsOnBoard ?? null}
 			/>
 		) : (
 			<TaskCommentsPanel

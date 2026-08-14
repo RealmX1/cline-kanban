@@ -1,5 +1,4 @@
 export enum LocalStorageKey {
-	TaskStartInPlanMode = "kanban.task-start-in-plan-mode",
 	TaskAutoReviewEnabled = "kanban.task-auto-review-enabled",
 	TaskAutoReviewMode = "kanban.task-auto-review-mode",
 	TaskEditDrafts = "kanban.task-edit-drafts.v1",
@@ -14,9 +13,15 @@ export enum LocalStorageKey {
 	DetailDiffFileTreePanelRatio = "kanban.detail-diff-file-tree-panel-ratio",
 	DetailExpandedDiffFileTreePanelRatio = "kanban.detail-expanded-diff-file-tree-panel-ratio",
 	DetailRightPromptPanelRatio = "kanban.detail-right-prompt-panel-ratio",
+	// Prompt Library 的真相源已搬到服务端（~/.cline/kanban[/workspaces/<id>]/prompt-library.json）。
+	// 下面三个键只剩「升级前留下的历史数据」这一个用途，由 prompt-library-migration-from-browser-local-storage.ts
+	// 合并上去；合并按「桶 + 正文」去重且幂等，所以刻意**不删**它们——留着既是回退备份也不会造成重复。
 	PromptLibraryGlobal = "kanban.prompt-library.global.v1",
 	PromptLibraryByTask = "kanban.prompt-library.by-task.v1",
 	PromptLibraryByProject = "kanban.prompt-library.by-project.v1",
+	// workspaceId → 该 workspace 的历史 prompt 已合并进服务端的时刻。纯优化（省掉重复发送），
+	// 不是正确性依赖：标记丢了最多多发一次请求。
+	PromptLibraryUploadedToServerAt = "kanban.prompt-library.uploaded-to-server-at.v1",
 	// 顶栏项目快速切换器：projectId → 最近一次成为「当前项目」的 epoch ms。用于 recency 排序与
 	// Last visited 列。刻意不进 LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS——「重置布局」不该抹掉访问历史。
 	RecentlyUsedProjectSwitchHistory = "kanban.recently-used-project-switch-history.v1",
@@ -24,7 +29,9 @@ export enum LocalStorageKey {
 	ProjectNumericSlotGroupAssignments = "kanban.project-numeric-slot-group-assignments.v1",
 	ProjectSwitcherTableColumnVisibility = "kanban.project-switcher-table-column-visibility.v1",
 	ProjectSwitcherTableSortOrder = "kanban.project-switcher-table-sort-order.v1",
-	ProjectNavigationPanelWidth = "kb-sidebar-width",
+	// 曾经叫 `kb-sidebar-width`——本枚举里**唯一**没有 `kanban.` 前缀的键，按前缀扫描/导出/清理的逻辑
+	// 都会漏掉它。改名后由 legacy-local-storage-key-rename-migration.ts 在启动时把旧键搬过来。
+	ProjectNavigationPanelWidth = "kanban.project-navigation-panel-width",
 	ProjectNavigationPanelCollapsed = "kanban.project-navigation-panel-collapsed",
 	GitHistoryRefsPanelWidth = "kanban.git-history-refs-panel-width",
 	GitHistoryCommitsPanelWidth = "kanban.git-history-commits-panel-width",

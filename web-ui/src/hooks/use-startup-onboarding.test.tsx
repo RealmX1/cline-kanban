@@ -1,9 +1,9 @@
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { type UseStartupOnboardingResult, useStartupOnboarding } from "@/hooks/use-startup-onboarding";
 import type { RuntimeConfigResponse } from "@/runtime/types";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
 const saveRuntimeConfigMock = vi.hoisted(() => vi.fn());
@@ -20,6 +20,8 @@ function createRuntimeConfigResponse(selectedAgentId: RuntimeConfigResponse["sel
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
 		newTaskStartInPlanModeByDefault: true,
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		effectiveCommand: selectedAgentId,
 		globalConfigPath: "/tmp/.cline/kanban/config.json",

@@ -5,7 +5,9 @@
 // sessionTransport=pty_terminal 的终态 summary（session-manager 的 onExit 没有活体身份守卫，而
 // runtime-state-hub 的广播队列按 taskId 后写覆盖先写，于是详情面板被翻回终端），且新旧两个 omp
 // 进程会在重叠期同时写同一份按 cwd 建的会话存储，而续跑语义正建立在它的单写者假设上。
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 
@@ -54,6 +56,8 @@ import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../sr
 
 function createRuntimeConfigState(): RuntimeConfigState {
 	return {
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 		selectedAgentId: "omp",
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,

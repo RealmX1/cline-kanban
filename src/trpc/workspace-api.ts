@@ -3,6 +3,7 @@ import pLimit from "p-limit";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import type {
+	RuntimeBoardData,
 	RuntimeGitCheckoutResponse,
 	RuntimeGitDiscardResponse,
 	RuntimeGitSummaryResponse,
@@ -23,6 +24,7 @@ import {
 } from "../core/api-validation";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
+import { discardTaskEditDraftsForTasksRemovedFromBoard } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import {
 	loadWorkspaceBoardById,
 	mutateWorkspaceState,
@@ -74,6 +76,33 @@ function createGitProbeUnavailableTaskWorkspaceStatus(baseRef: string): RuntimeT
 		observationSource: "unavailable",
 		observedAt: null,
 	};
+}
+
+// 「写之前的 board」与随后的差集清理是一条**纯兜底**的旁路：它存在的意义是让 CLI / 未来的服务端写入
+// 路径也别留下孤儿草稿。所以这两步的任何失败都必须就地咽掉——一次草稿清理绝不该有能力让用户的看板
+// 保存失败。（读不到旧 board 时返回 null = 这一次不做差集，而不是把「读不到」当成「一张卡都不剩」，
+// 后者会把整个 workspace 的草稿一次清空。）
+async function readBoardBeforeSaveForOrphanedDraftCleanup(workspaceId: string): Promise<RuntimeBoardData | null> {
+	try {
+		return await loadWorkspaceBoardById(workspaceId);
+	} catch {
+		return null;
+	}
+}
+
+async function discardTaskEditDraftsForTasksRemovedFromSavedBoard(
+	workspaceId: string,
+	boardBeforeSave: RuntimeBoardData | null,
+	boardAfterSave: RuntimeBoardData,
+): Promise<void> {
+	if (boardBeforeSave === null) {
+		return;
+	}
+	try {
+		await discardTaskEditDraftsForTasksRemovedFromBoard(workspaceId, boardBeforeSave, boardAfterSave);
+	} catch {
+		// 同上：残留一条看不见的孤儿草稿，比让看板保存整个失败好得多。
+	}
 }
 
 export interface CreateWorkspaceApiDependencies {
@@ -503,7 +532,21 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				for (const summary of deps.listProjectRuntimeSessionSummaries(workspaceScope.workspaceId)) {
 					input.sessions[summary.taskId] = summary;
 				}
+				// 浏览器删除一张卡片不走任何「删除 procedure」——它就是一次整份 board PUT，那张卡只是不在了。
+				// 所以「任务被删除」在这条路径上只能由前后两份 board 的差集看出来（见
+				// discard-task-edit-drafts-for-tasks-removed-from-board.ts）。
+				//
+				// 已知残留：这一次读发生在 saveWorkspaceState 的文件锁**之外**，与写之间有一个 TOCTOU 窗口。
+				// 缩小它需要把清理搬进 workspace-state 的锁内，而那会形成模块环（同上文件的注释）。代价是
+				// 偶发漏清一条孤儿草稿——不丢任何用户内容，而浏览器侧的删除 handler 本来也会各自清一次，
+				// 这里是给「不经那个 handler 的写入」兜底。
+				const boardBeforeSave = await readBoardBeforeSaveForOrphanedDraftCleanup(workspaceScope.workspaceId);
 				const response = await saveWorkspaceState(workspaceScope.workspacePath, input);
+				await discardTaskEditDraftsForTasksRemovedFromSavedBoard(
+					workspaceScope.workspaceId,
+					boardBeforeSave,
+					response.board,
+				);
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceScope.workspaceId, workspaceScope.workspacePath);
 				void deps.broadcastRuntimeProjectsUpdated(workspaceScope.workspaceId);
 				return response;

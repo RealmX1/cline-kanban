@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-
 import {
 	getTaskAgentNavbarHint,
 	isClineProviderAuthenticated,
@@ -9,6 +8,7 @@ import {
 	selectTaskChatMessagesForTask,
 } from "@/runtime/native-agent";
 import type { RuntimeConfigResponse, RuntimeStateStreamTaskChatMessage } from "@/runtime/types";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 
 function createRuntimeConfigResponse(
 	selectedAgentId: RuntimeConfigResponse["selectedAgentId"],
@@ -19,6 +19,8 @@ function createRuntimeConfigResponse(
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
 		newTaskStartInPlanModeByDefault: true,
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		effectiveCommand: selectedAgentId === "cline" ? null : selectedAgentId,
 		globalConfigPath: "/tmp/global-config.json",

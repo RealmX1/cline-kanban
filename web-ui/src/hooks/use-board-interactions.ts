@@ -13,6 +13,7 @@ import { useLinkedBacklogTaskActions } from "@/hooks/use-linked-backlog-task-act
 import { useProgrammaticCardMoves } from "@/hooks/use-programmatic-card-moves";
 import { useReviewAutoActions } from "@/hooks/use-review-auto-actions";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
+import { discardAllTaskEditDraftsForDeletedTask } from "@/runtime/task-edit-draft-store";
 import type { RuntimeTaskSessionSummary, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
 import {
 	applyDragResult,
@@ -1054,6 +1055,12 @@ export function useBoardInteractions({
 			clearTaskWorkspaceInfo(task.id);
 		}
 
+		// 草稿的真相源在服务端、且刻意不随看板文档一起写，所以任务删除时要显式清一次：任务没了之后，
+		// 留着的草稿再也没有可以认领它的地方，只会变成永远看不见的垃圾。
+		if (currentProjectId) {
+			discardAllTaskEditDraftsForDeletedTask(currentProjectId, task.id);
+		}
+
 		void (async () => {
 			await stopTaskSession(task.id);
 			await cleanupTaskWorkspace(task.id, task.worktreeMode, true);
@@ -1067,6 +1074,7 @@ export function useBoardInteractions({
 		setSelectedTaskId,
 		setSessions,
 		stopTaskSession,
+		currentProjectId,
 	]);
 
 	const handleCancelAutomaticTaskAction = useCallback(

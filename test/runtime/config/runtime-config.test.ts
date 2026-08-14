@@ -8,6 +8,7 @@ import {
 	loadRuntimeConfig,
 	pickBestInstalledAgentIdFromDetected,
 	saveRuntimeConfig,
+	updateGlobalRuntimeConfig,
 	updateRuntimeConfig,
 } from "../../../src/config/runtime-config";
 import { createTempDir } from "../../utilities/temp-dir";
@@ -522,6 +523,197 @@ describe.sequential("runtime-config auto agent selection", () => {
 				const reloaded = await loadRuntimeConfig(tempProject);
 				expect(reloaded.selectedAgentId).toBe("codex");
 				expect(reloaded.agentAutonomousModeEnabled).toBe(false);
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("跨浏览器 origin 共享的界面偏好：一条都没有时整个键不落盘", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-ui-prefs-absent-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir(
+			"kanban-project-runtime-config-ui-prefs-absent-",
+		);
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				await updateRuntimeConfig(tempProject, { selectedAgentId: "codex" });
+
+				const globalPayload = JSON.parse(
+					readFileSync(join(tempHome, ".cline", "kanban", "config.json"), "utf8"),
+				) as Record<string, unknown>;
+				expect(globalPayload.userInterfacePreferencesSharedAcrossBrowserOrigins).toBeUndefined();
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("跨浏览器 origin 共享的界面偏好：落盘、重载、且不被后续无关更新抹掉", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-ui-prefs-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir("kanban-project-runtime-config-ui-prefs-");
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				const saved = await updateRuntimeConfig(tempProject, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						newTaskAutoReviewEnabled: true,
+						workspaceOpenTargetPreferredApplicationId: "zed",
+						projectNumericSlotGroupAssignmentsBySlotNumber: { "3": "alpha" },
+					},
+				});
+				expect(saved.userInterfacePreferencesSharedAcrossBrowserOrigins.newTaskAutoReviewEnabled).toBe(true);
+				// 这一组没传的字段必须仍是 null（尚未设定），而不是被填成某个默认值。
+				expect(saved.userInterfacePreferencesSharedAcrossBrowserOrigins.newTaskAutoReviewMode).toBeNull();
+
+				// 一次完全无关的更新不得顺手清掉这一组。
+				await updateRuntimeConfig(tempProject, { selectedAgentId: "codex" });
+
+				const reloaded = await loadRuntimeConfig(tempProject);
+				expect(reloaded.selectedAgentId).toBe("codex");
+				expect(reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins).toEqual({
+					newTaskAutoReviewEnabled: true,
+					newTaskAutoReviewMode: null,
+					taskCreateDialogPrimaryStartAction: null,
+					taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {},
+					workspaceOpenTargetPreferredApplicationId: "zed",
+					projectNumericSlotGroupAssignmentsBySlotNumber: { "3": "alpha" },
+				});
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("updateGlobalRuntimeConfig 以磁盘为准，不会拿调用方的陈旧快照 revert 掉别处的写入", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-stale-snapshot-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir(
+			"kanban-project-runtime-config-stale-snapshot-",
+		);
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				// 调用方在这一刻抓到快照，之后就一直拿着它——正是 runtime 缓存 activeRuntimeConfig 的处境。
+				const staleSnapshot = await loadRuntimeConfig(tempProject);
+
+				// 另一条路径（项目作用域）写了全局字段，缓存不会被刷新。
+				await updateRuntimeConfig(tempProject, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						workspaceOpenTargetPreferredApplicationId: "zed",
+					},
+				});
+
+				// 拿陈旧快照做一次无关的全局更新，那次写入必须原样保留。
+				const updated = await updateGlobalRuntimeConfig(staleSnapshot, { notificationSoundEnabled: false });
+
+				expect(updated.notificationSoundEnabled).toBe(false);
+				expect(
+					updated.userInterfacePreferencesSharedAcrossBrowserOrigins.workspaceOpenTargetPreferredApplicationId,
+				).toBe("zed");
+
+				const reloaded = await loadGlobalRuntimeConfig();
+				expect(
+					reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins.workspaceOpenTargetPreferredApplicationId,
+				).toBe("zed");
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("跨浏览器 origin 共享的界面偏好：两个 origin 各基于同一份空快照迁移，字典条目一条都不丢", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-ui-prefs-migrate-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir(
+			"kanban-project-runtime-config-ui-prefs-migrate-",
+		);
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				// 两个 origin 首次几乎同时打开升级后的界面：各自读到的服务端快照都是「一条都没有」，
+				// 于是各自只带上自己 localStorage 里那半份编组。请求串行到达服务端。
+				await updateRuntimeConfig(tempProject, {
+					userInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage: {
+						projectNumericSlotGroupAssignmentsBySlotNumber: { "1": "alpha", "2": "beta" },
+						taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: { '["global","claude"]': "opus" },
+					},
+				});
+				const afterSecondOrigin = await updateRuntimeConfig(tempProject, {
+					userInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage: {
+						projectNumericSlotGroupAssignmentsBySlotNumber: { "4": "delta" },
+						taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: { '["global","codex"]': "gpt" },
+					},
+				});
+
+				expect(
+					afterSecondOrigin.userInterfacePreferencesSharedAcrossBrowserOrigins
+						.projectNumericSlotGroupAssignmentsBySlotNumber,
+				).toEqual({ "1": "alpha", "2": "beta", "4": "delta" });
+				expect(
+					afterSecondOrigin.userInterfacePreferencesSharedAcrossBrowserOrigins
+						.taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey,
+				).toEqual({ '["global","claude"]': "opus", '["global","codex"]': "gpt" });
+
+				const reloaded = await loadRuntimeConfig(tempProject);
+				expect(
+					reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins
+						.projectNumericSlotGroupAssignmentsBySlotNumber,
+				).toEqual({ "1": "alpha", "2": "beta", "4": "delta" });
+
+				// 对立性质：用户主动解除某个槽位绑定走的是整份替换，删除必须真的落下去，
+				// 不能因为「迁移会补键」而变得删不掉。
+				const afterUserClearedOneSlot = await updateRuntimeConfig(tempProject, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						projectNumericSlotGroupAssignmentsBySlotNumber: { "1": "alpha", "4": "delta" },
+					},
+				});
+				expect(
+					afterUserClearedOneSlot.userInterfacePreferencesSharedAcrossBrowserOrigins
+						.projectNumericSlotGroupAssignmentsBySlotNumber,
+				).toEqual({ "1": "alpha", "4": "delta" });
+
+				const reloadedAfterClear = await loadRuntimeConfig(tempProject);
+				expect(
+					reloadedAfterClear.userInterfacePreferencesSharedAcrossBrowserOrigins
+						.projectNumericSlotGroupAssignmentsBySlotNumber,
+				).toEqual({ "1": "alpha", "4": "delta" });
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("跨浏览器 origin 共享的界面偏好：显式 null 把字段清回「服务端无值」", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-ui-prefs-clear-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir(
+			"kanban-project-runtime-config-ui-prefs-clear-",
+		);
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				await updateRuntimeConfig(tempProject, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						workspaceOpenTargetPreferredApplicationId: "zed",
+					},
+				});
+
+				const cleared = await updateRuntimeConfig(tempProject, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						workspaceOpenTargetPreferredApplicationId: null,
+					},
+				});
+				expect(
+					cleared.userInterfacePreferencesSharedAcrossBrowserOrigins.workspaceOpenTargetPreferredApplicationId,
+				).toBeNull();
+
+				const reloaded = await loadRuntimeConfig(tempProject);
+				expect(
+					reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins.workspaceOpenTargetPreferredApplicationId,
+				).toBeNull();
 			});
 		} finally {
 			cleanupProject();

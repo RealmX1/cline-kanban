@@ -1,9 +1,9 @@
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import type { RuntimeConfigResponse } from "@/runtime/types";
 import { type UseRuntimeProjectConfigResult, useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 
 const fetchRuntimeConfigMock = vi.hoisted(() => vi.fn());
 
@@ -30,6 +30,8 @@ function createRuntimeConfigResponse(
 		selectedShortcutLabel: shortcuts[0]?.label ?? null,
 		agentAutonomousModeEnabled: true,
 		newTaskStartInPlanModeByDefault: true,
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		effectiveCommand: selectedAgentId,
 		globalConfigPath: "/tmp/global-config.json",

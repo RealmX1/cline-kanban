@@ -800,7 +800,7 @@ describe("BoardCard", () => {
 		expect(directoryRow?.textContent).not.toContain("-0");
 	});
 
-		it("存在文件变化但增删行数均为 0 时仍渲染脏统计", async () => {
+	it("存在文件变化但增删行数均为 0 时仍渲染脏统计", async () => {
 		mockWorkspaceSnapshot = {
 			taskId: "task-1",
 			path: "/tmp/worktrees/task-1",

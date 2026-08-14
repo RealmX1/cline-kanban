@@ -9,12 +9,20 @@ import {
 	type RuntimeAgentId,
 	type RuntimeAgentSessionTransport,
 	type RuntimeProjectShortcut,
+	type RuntimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage,
+	type RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 	runtimeAgentIdSchema,
 	runtimeAgentSessionTransportSchema,
 } from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import { detectInstalledCommands } from "../terminal/agent-registry";
 import { areRuntimeProjectShortcutsEqual } from "./shortcut-utils";
+import {
+	areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual,
+	hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet,
+	mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate,
+	normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins,
+} from "./user-interface-preferences-shared-across-browser-origins";
 
 interface RuntimeGlobalConfigFileShape {
 	selectedAgentId?: RuntimeAgentId;
@@ -32,6 +40,9 @@ interface RuntimeGlobalConfigFileShape {
 	guidedVerificationForceCompleteEnabled?: boolean;
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
+	// 原先躺在浏览器 localStorage 里的界面偏好。localStorage 是 per-origin 的，换端口即换一份；
+	// 落到这里之后它们跟着用户走。一条都没设时整个键不落盘。
+	userInterfacePreferencesSharedAcrossBrowserOrigins?: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins;
 }
 
 interface RuntimeProjectConfigFileShape {
@@ -56,6 +67,7 @@ export interface RuntimeConfigState {
 	openPrPromptTemplate: string;
 	commitPromptTemplateDefault: string;
 	openPrPromptTemplateDefault: string;
+	userInterfacePreferencesSharedAcrossBrowserOrigins: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins;
 }
 
 export interface RuntimeConfigUpdateInput {
@@ -72,6 +84,10 @@ export interface RuntimeConfigUpdateInput {
 	shortcuts?: RuntimeProjectShortcut[];
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
+	// 逐字段可选：缺席 = 不动、null = 清回「服务端无值」、有值 = 设定；两个字典按整份替换（删除靠它表达）。
+	userInterfacePreferencesSharedAcrossBrowserOrigins?: Partial<RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins>;
+	// 迁移采纳意图：字典条目在锁内逐键并入（服务端已有的键胜出），与上面那条整份替换路径互不干扰。
+	userInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage?: RuntimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage;
 }
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
@@ -361,6 +377,9 @@ function toRuntimeConfigState({
 		),
 		commitPromptTemplateDefault: DEFAULT_COMMIT_PROMPT_TEMPLATE,
 		openPrPromptTemplateDefault: DEFAULT_OPEN_PR_PROMPT_TEMPLATE,
+		userInterfacePreferencesSharedAcrossBrowserOrigins: normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
+			globalConfig?.userInterfacePreferencesSharedAcrossBrowserOrigins,
+		),
 	};
 }
 
@@ -388,6 +407,7 @@ async function writeRuntimeGlobalConfigFile(
 		postDeployVerificationForceCompleteEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
+		userInterfacePreferencesSharedAcrossBrowserOrigins?: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins;
 	},
 ): Promise<void> {
 	const existing = await readRuntimeConfigFile<RuntimeGlobalConfigFileShape>(configPath);
@@ -524,6 +544,16 @@ async function writeRuntimeGlobalConfigFile(
 	if (hasOwnKey(existing, "openPrPromptTemplate") || openPrPromptTemplate !== DEFAULT_OPEN_PR_PROMPT_TEMPLATE) {
 		payload.openPrPromptTemplate = openPrPromptTemplate;
 	}
+	// 与上面那些标量字段刻意不同：调用方**没传**这一组时保留磁盘上已有的那份，而不是回落成「一条都没有」。
+	// 这些偏好没有「默认值」可回落——回落等于把用户攒下的选择删干净，而漏传恰恰是最容易发生的调用错误。
+	const userInterfacePreferencesSharedAcrossBrowserOrigins =
+		config.userInterfacePreferencesSharedAcrossBrowserOrigins ??
+		normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
+			existing?.userInterfacePreferencesSharedAcrossBrowserOrigins,
+		);
+	if (!hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet(userInterfacePreferencesSharedAcrossBrowserOrigins)) {
+		payload.userInterfacePreferencesSharedAcrossBrowserOrigins = userInterfacePreferencesSharedAcrossBrowserOrigins;
+	}
 
 	await lockedFileSystem.writeJsonFileAtomic(configPath, payload, {
 		lock: null,
@@ -612,6 +642,7 @@ function createRuntimeConfigStateFromValues(input: {
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
 	openPrPromptTemplate: string;
+	userInterfacePreferencesSharedAcrossBrowserOrigins: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins;
 }): RuntimeConfigState {
 	return {
 		globalConfigPath: input.globalConfigPath,
@@ -652,6 +683,9 @@ function createRuntimeConfigStateFromValues(input: {
 		openPrPromptTemplate: normalizePromptTemplate(input.openPrPromptTemplate, DEFAULT_OPEN_PR_PROMPT_TEMPLATE),
 		commitPromptTemplateDefault: DEFAULT_COMMIT_PROMPT_TEMPLATE,
 		openPrPromptTemplateDefault: DEFAULT_OPEN_PR_PROMPT_TEMPLATE,
+		userInterfacePreferencesSharedAcrossBrowserOrigins: normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
+			input.userInterfacePreferencesSharedAcrossBrowserOrigins,
+		),
 	};
 }
 
@@ -673,6 +707,7 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		shortcuts: [],
 		commitPromptTemplate: current.commitPromptTemplate,
 		openPrPromptTemplate: current.openPrPromptTemplate,
+		userInterfacePreferencesSharedAcrossBrowserOrigins: current.userInterfacePreferencesSharedAcrossBrowserOrigins,
 	});
 }
 
@@ -714,10 +749,18 @@ export async function saveRuntimeConfig(
 		shortcuts: RuntimeProjectShortcut[];
 		commitPromptTemplate: string;
 		openPrPromptTemplate: string;
+		/** 省略时沿用磁盘上已有的那份——返回的 state 必须与实际落盘内容一致，不能报「一条都没有」。 */
+		userInterfacePreferencesSharedAcrossBrowserOrigins?: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins;
 	},
 ): Promise<RuntimeConfigState> {
 	const { globalConfigPath, projectConfigPath } = resolveRuntimeConfigPaths(cwd);
 	return await lockedFileSystem.withLocks(getRuntimeConfigLockRequests(cwd), async () => {
+		const userInterfacePreferencesSharedAcrossBrowserOrigins =
+			config.userInterfacePreferencesSharedAcrossBrowserOrigins ??
+			normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
+				(await readRuntimeConfigFile<RuntimeGlobalConfigFileShape>(globalConfigPath))
+					?.userInterfacePreferencesSharedAcrossBrowserOrigins,
+			);
 		await writeRuntimeGlobalConfigFile(globalConfigPath, {
 			selectedAgentId: config.selectedAgentId,
 			selectedShortcutLabel: config.selectedShortcutLabel,
@@ -732,6 +775,7 @@ export async function saveRuntimeConfig(
 			postDeployVerificationForceCompleteEnabled: config.postDeployVerificationForceCompleteEnabled,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
+			userInterfacePreferencesSharedAcrossBrowserOrigins,
 		});
 		await writeRuntimeProjectConfigFile(projectConfigPath, { shortcuts: config.shortcuts });
 		return createRuntimeConfigStateFromValues({
@@ -751,6 +795,7 @@ export async function saveRuntimeConfig(
 			shortcuts: config.shortcuts,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
+			userInterfacePreferencesSharedAcrossBrowserOrigins,
 		});
 	});
 }
@@ -784,6 +829,12 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
 			commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 			openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
+			userInterfacePreferencesSharedAcrossBrowserOrigins:
+				mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(
+					current.userInterfacePreferencesSharedAcrossBrowserOrigins,
+					updates.userInterfacePreferencesSharedAcrossBrowserOrigins,
+					updates.userInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage,
+				),
 		};
 
 		const hasChanges =
@@ -800,7 +851,11 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.postDeployVerificationForceCompleteEnabled !== current.postDeployVerificationForceCompleteEnabled ||
 			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
-			!areRuntimeProjectShortcutsEqual(nextConfig.shortcuts, current.shortcuts);
+			!areRuntimeProjectShortcutsEqual(nextConfig.shortcuts, current.shortcuts) ||
+			!areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
+				nextConfig.userInterfacePreferencesSharedAcrossBrowserOrigins,
+				current.userInterfacePreferencesSharedAcrossBrowserOrigins,
+			);
 
 		if (!hasChanges) {
 			return current;
@@ -820,6 +875,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
+			userInterfacePreferencesSharedAcrossBrowserOrigins:
+				nextConfig.userInterfacePreferencesSharedAcrossBrowserOrigins,
 		});
 		await writeRuntimeProjectConfigFile(projectConfigPath, {
 			shortcuts: nextConfig.shortcuts,
@@ -841,12 +898,24 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			shortcuts: nextConfig.shortcuts,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
+			userInterfacePreferencesSharedAcrossBrowserOrigins:
+				nextConfig.userInterfacePreferencesSharedAcrossBrowserOrigins,
 		});
 	});
 }
 
+/**
+ * 全局作用域（未选定项目）的 config 更新。
+ *
+ * `callerHeldConfigSnapshot` 只用于取项目侧的信息（`projectConfigPath` / `shortcuts`——它们不在全局
+ * config.json 里）。**全局字段一律在锁内从磁盘重读**，不信任调用方那份快照：
+ * runtime 缓存的 activeRuntimeConfig 在「另一个非活跃 workspace 经项目作用域路径写过全局字段」之后
+ * 不会被刷新（见 runtime-api.ts 的 saveConfig：workspaceId 与活跃项目不符时跳过 setActiveRuntimeConfig），
+ * 此时拿快照当底稿就会把那次写入原样revert 回去。界面偏好由**每个浏览器标签页**发起写入，撞上这个
+ * 窗口的概率远高于设置对话框里的那些字段，所以这里必须以磁盘为准。
+ */
 export async function updateGlobalRuntimeConfig(
-	current: RuntimeConfigState,
+	callerHeldConfigSnapshot: RuntimeConfigState,
 	updates: RuntimeConfigUpdateInput,
 ): Promise<RuntimeConfigState> {
 	const globalConfigPath = getRuntimeGlobalConfigPath();
@@ -858,6 +927,19 @@ export async function updateGlobalRuntimeConfig(
 			},
 		],
 		async () => {
+			const globalConfigOnDisk = await readRuntimeConfigFile<RuntimeGlobalConfigFileShape>(globalConfigPath);
+			// 磁盘上还没有全局 config.json 时不存在「更新的事实」可采信，此时必须沿用调用方快照：
+			// 首次写入前 selectedAgentId 带的是 loadRuntimeConfig 做过的装机探测结果，而从空文件重建会
+			// 把它规范化成 DEFAULT_AGENT_ID，等于把探测结果丢掉。
+			const current: RuntimeConfigState =
+				globalConfigOnDisk === null
+					? callerHeldConfigSnapshot
+					: toRuntimeConfigState({
+							globalConfigPath,
+							projectConfigPath: callerHeldConfigSnapshot.projectConfigPath,
+							globalConfig: globalConfigOnDisk,
+							projectConfig: { shortcuts: callerHeldConfigSnapshot.shortcuts },
+						});
 			const nextConfig = {
 				selectedAgentId: updates.selectedAgentId ?? current.selectedAgentId,
 				selectedShortcutLabel:
@@ -882,6 +964,12 @@ export async function updateGlobalRuntimeConfig(
 				shortcuts: current.shortcuts,
 				commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 				openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
+				userInterfacePreferencesSharedAcrossBrowserOrigins:
+					mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(
+						current.userInterfacePreferencesSharedAcrossBrowserOrigins,
+						updates.userInterfacePreferencesSharedAcrossBrowserOrigins,
+						updates.userInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage,
+					),
 			};
 
 			const hasChanges =
@@ -898,7 +986,11 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.postDeployVerificationForceCompleteEnabled !==
 					current.postDeployVerificationForceCompleteEnabled ||
 				nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
-				nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate;
+				nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
+				!areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
+					nextConfig.userInterfacePreferencesSharedAcrossBrowserOrigins,
+					current.userInterfacePreferencesSharedAcrossBrowserOrigins,
+				);
 
 			if (!hasChanges) {
 				return current;
@@ -918,6 +1010,8 @@ export async function updateGlobalRuntimeConfig(
 				postDeployVerificationForceCompleteEnabled: nextConfig.postDeployVerificationForceCompleteEnabled,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
+				userInterfacePreferencesSharedAcrossBrowserOrigins:
+					nextConfig.userInterfacePreferencesSharedAcrossBrowserOrigins,
 			});
 
 			return createRuntimeConfigStateFromValues({
@@ -937,6 +1031,8 @@ export async function updateGlobalRuntimeConfig(
 				shortcuts: nextConfig.shortcuts,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
+				userInterfacePreferencesSharedAcrossBrowserOrigins:
+					nextConfig.userInterfacePreferencesSharedAcrossBrowserOrigins,
 			});
 		},
 	);

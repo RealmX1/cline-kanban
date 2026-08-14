@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo } from "react";
 
-import { LocalStorageKey } from "@/storage/local-storage-store";
-import { useJsonLocalStorageValue } from "@/utils/react-use";
+import { useProjectNumericSlotGroupAssignmentsPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 
 /**
  * 《红警》式项目编组：把某个项目绑到 1-9 的数字槽位，之后一次按键跳过去。
@@ -129,10 +128,7 @@ export function useProjectNumericSlotGroupAssignments({
 	knownProjectIds,
 	canPruneMissingProjects,
 }: UseProjectNumericSlotGroupAssignmentsInput): UseProjectNumericSlotGroupAssignmentsResult {
-	const [storedAssignments, setStoredAssignments] = useJsonLocalStorageValue<ProjectNumericSlotGroupAssignments>(
-		LocalStorageKey.ProjectNumericSlotGroupAssignments,
-		EMPTY_PROJECT_NUMERIC_SLOT_GROUP_ASSIGNMENTS,
-	);
+	const [storedAssignments, setStoredAssignments] = useProjectNumericSlotGroupAssignmentsPreference();
 	const normalizedAssignments = useMemo(
 		() => normalizeProjectNumericSlotGroupAssignments(storedAssignments),
 		[storedAssignments],

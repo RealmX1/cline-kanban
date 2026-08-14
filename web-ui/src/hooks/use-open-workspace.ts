@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
+import { useWorkspaceOpenTargetPreferredApplicationIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import {
 	buildOpenCommand,
 	getOpenTargetOption,
@@ -9,10 +10,8 @@ import {
 	normalizeOpenTargetId,
 	type OpenTargetId,
 	type OpenTargetOption,
-	PREFERRED_OPEN_TARGET_STORAGE_KEY,
 	resolveOpenTargetPlatform,
 } from "@/utils/open-targets";
-import { useRawLocalStorageValue } from "@/utils/react-use";
 
 interface UseOpenWorkspaceParams {
 	currentProjectId: string | null;
@@ -41,11 +40,12 @@ export function useOpenWorkspace({ currentProjectId, workspacePath }: UseOpenWor
 	const openTargetPlatform = resolveOpenTargetPlatform();
 	const openTargetOptions = useMemo(() => getOpenTargetOptions(openTargetPlatform), [openTargetPlatform]);
 	const fallbackTargetId = openTargetOptions[0]?.id ?? "vscode";
-	const [preferredOpenTargetId, setPreferredOpenTargetId] = useRawLocalStorageValue<OpenTargetId>(
-		PREFERRED_OPEN_TARGET_STORAGE_KEY,
-		fallbackTargetId,
-		(value) => normalizeOpenTargetId(value),
-	);
+	const [storedOpenTargetApplicationId, setStoredOpenTargetApplicationId] =
+		useWorkspaceOpenTargetPreferredApplicationIdPreference(fallbackTargetId);
+	// 存回来的 id 要按**当前平台**的可选集合再过一遍：换机器后（macOS → Windows）可能读到一个本机
+	// 根本装不了的目标，此时回落到该平台的首选项，而不是把一个开不了的应用摆在按钮上。
+	const preferredOpenTargetId = normalizeOpenTargetId(storedOpenTargetApplicationId) ?? fallbackTargetId;
+	const setPreferredOpenTargetId = setStoredOpenTargetApplicationId;
 	const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false);
 	const selectedOpenTarget = useMemo(
 		() => getOpenTargetOption(preferredOpenTargetId, openTargetPlatform),

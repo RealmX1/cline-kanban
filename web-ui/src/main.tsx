@@ -5,12 +5,21 @@ import App from "@/App";
 import { AppErrorBoundary } from "@/components/app-error-boundary";
 import { PasscodeGateProvider } from "@/components/passcode-gate";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { UserInterfacePreferenceMigrationConflictNotice } from "@/components/user-interface-preference-migration-conflict-notice";
 import { isThemeId } from "@/hooks/use-theme";
+import { startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
+import { migrateRenamedLocalStorageKeysIntoCurrentKeys } from "@/storage/legacy-local-storage-key-rename-migration";
 import { TelemetryProvider } from "@/telemetry/posthog-provider";
 import { initializeSentry } from "@/telemetry/sentry";
 import "@/styles/globals.css";
 
 initializeSentry();
+
+// 必须早于 React 渲染：任何消费者一旦先读到空值并把默认值写回新键，搬迁就再也搬不动了。
+migrateRenamedLocalStorageKeysIntoCurrentKeys();
+
+// 异步：读到之前界面先用 localStorage 镜像跑，读到后再切到服务端那份并把本地那份合并上去。
+startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins();
 
 // Apply the persisted theme synchronously before first paint to prevent a flash.
 try {
@@ -33,6 +42,7 @@ ReactDOM.createRoot(root).render(
 			<AppErrorBoundary>
 				<TooltipProvider>
 					<App />
+					<UserInterfacePreferenceMigrationConflictNotice />
 					<Toaster
 						theme="dark"
 						position="bottom-right"

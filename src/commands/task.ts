@@ -64,6 +64,7 @@ import {
 	withTaskMessageInjectionLedgerLock,
 } from "../core/task-message-injection-ledger";
 import { resolveProjectInputPath } from "../projects/project-path";
+import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 
@@ -1377,6 +1378,10 @@ async function deleteTaskCommand(input: {
 			count: 0,
 		};
 	}
+
+	// 任务本体没了之后，它的编辑草稿与落败副本再也没有可以认领的地方——界面上连打开它的入口都不存在了。
+	// 浏览器侧的删除 handler 会自己清一次，但 CLI 这条路径完全不经过它。
+	await discardTaskEditDraftsForDeletedTasks(workspaceId, mutation.value.deletedTaskIds);
 
 	await Promise.all(
 		mutation.value.taskIdsRequiringStop.map(async (taskId) => await stopTaskRuntimeSession(runtimeClient, taskId)),

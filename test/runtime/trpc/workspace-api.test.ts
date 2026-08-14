@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import type {
 	RuntimeBoardData,
 	RuntimeTaskSessionSummary,
@@ -19,9 +19,21 @@ const workspaceChangesMocks = vi.hoisted(() => ({
 	getWorkspaceChangesFromRef: vi.fn(),
 }));
 
+const orphanedDraftCleanupMocks = vi.hoisted(() => ({
+	discardTaskEditDraftsForTasksRemovedFromBoard: vi.fn(),
+}));
+
+vi.mock("../../../src/state/discard-task-edit-drafts-for-tasks-removed-from-board.js", () => ({
+	discardTaskEditDraftsForTasksRemovedFromBoard:
+		orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard,
+}));
+
 const workspaceStateMocks = vi.hoisted(() => ({
 	mutateWorkspaceState: vi.fn(),
 	saveWorkspaceState: vi.fn(),
+	// saveState 在写盘前读一次「写之前的 board」，用来算出「哪些任务从看板上消失了」并清掉它们的
+	// 编辑草稿（见 src/state/discard-task-edit-drafts-for-tasks-removed-from-board.ts）。
+	loadWorkspaceBoardById: vi.fn(),
 }));
 
 vi.mock("../../../src/workspace/task-worktree.js", async (importOriginal) => {
@@ -50,6 +62,7 @@ vi.mock("../../../src/workspace/get-workspace-changes.js", () => ({
 vi.mock("../../../src/state/workspace-state.js", () => ({
 	mutateWorkspaceState: workspaceStateMocks.mutateWorkspaceState,
 	saveWorkspaceState: workspaceStateMocks.saveWorkspaceState,
+	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
 	WorkspaceStateConflictError: class WorkspaceStateConflictError extends Error {
 		currentRevision: number;
 
@@ -121,6 +134,8 @@ function createWorkspaceState(board: RuntimeBoardData = createBoard()): RuntimeW
 function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): RuntimeConfigState {
 	return {
 		globalConfigPath: "/tmp/global-config.json",
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
 		projectConfigPath: "/tmp/project-config.json",
 		selectedAgentId: "claude",
 		selectedShortcutLabel: null,
@@ -157,6 +172,12 @@ function createWorkspaceApiForTest(
 }
 
 describe("createWorkspaceApi saveState", () => {
+	beforeEach(() => {
+		workspaceStateMocks.saveWorkspaceState.mockReset();
+		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
+		orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard.mockReset();
+	});
+
 	it("overlays terminal, Cline, and ACP runtime summaries before persistence", async () => {
 		const terminalSummary = createSummary({ taskId: "terminal-task", agentId: "claude" });
 		const clineSummary = createSummary({ taskId: "cline-task", agentId: "cline" });
@@ -180,6 +201,62 @@ describe("createWorkspaceApi saveState", () => {
 			},
 		});
 	});
+
+	// 浏览器删卡不走任何「删除 procedure」，就是一次整份 board PUT。「任务被删除」在这条路径上只能
+	// 由写前/写后两份 board 的差集看出来——不接这一步，不经浏览器删除 handler 的写入就会留下永远
+	// 无法认领的孤儿草稿。
+	it("保存看板后按写前/写后差集清掉消失任务的编辑草稿", async () => {
+		const boardBeforeSave = createBoard();
+		const savedResponse = createWorkspaceState();
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(boardBeforeSave);
+		workspaceStateMocks.saveWorkspaceState.mockResolvedValue(savedResponse);
+		orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard.mockResolvedValue(undefined);
+		const api = createWorkspaceApiForTest({ listProjectRuntimeSessionSummaries: vi.fn(() => []) });
+
+		await api.saveState(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+		);
+
+		expect(orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard).toHaveBeenCalledWith(
+			"workspace-1",
+			boardBeforeSave,
+			savedResponse.board,
+		);
+	});
+
+	// 这条旁路是纯兜底：读不到写前的 board 时**不做**差集，绝不能把「读不到」当成「一张卡都不剩」——
+	// 那会把整个 workspace 的草稿一次清空。
+	it("读不到写前的看板时跳过差集清理，而不是把整份草稿当成孤儿清掉", async () => {
+		workspaceStateMocks.loadWorkspaceBoardById.mockRejectedValue(new Error("board 读不出来"));
+		workspaceStateMocks.saveWorkspaceState.mockResolvedValue(createWorkspaceState());
+		const api = createWorkspaceApiForTest({ listProjectRuntimeSessionSummaries: vi.fn(() => []) });
+
+		await api.saveState(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+		);
+
+		expect(orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard).not.toHaveBeenCalled();
+	});
+
+	// 一次草稿清理绝不该有能力让用户的看板保存失败。
+	it("清理抛错也不影响看板保存的返回", async () => {
+		const savedResponse = createWorkspaceState();
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(createBoard());
+		workspaceStateMocks.saveWorkspaceState.mockResolvedValue(savedResponse);
+		orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard.mockRejectedValue(
+			new Error("草稿文件写不进去"),
+		);
+		const api = createWorkspaceApiForTest({ listProjectRuntimeSessionSummaries: vi.fn(() => []) });
+
+		await expect(
+			api.saveState(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+			),
+		).resolves.toBe(savedResponse);
+	});
 });
 
 describe("createWorkspaceApi loadChanges", () => {
@@ -190,6 +267,8 @@ describe("createWorkspaceApi loadChanges", () => {
 		workspaceChangesMocks.getWorkspaceChangesBetweenRefs.mockReset();
 		workspaceChangesMocks.getWorkspaceChangesFromRef.mockReset();
 		workspaceStateMocks.mutateWorkspaceState.mockReset();
+		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
+		orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard.mockReset();
 		workspaceStateMocks.saveWorkspaceState.mockReset();
 
 		workspaceTaskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");

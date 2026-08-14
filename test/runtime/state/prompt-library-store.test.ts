@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+	type WorkspacePromptLibraryMutation,
 	type WorkspacePromptLibrarySnapshot,
 	workspacePromptLibraryMutationSchema,
 } from "../../../src/core/api-contract";
@@ -176,6 +177,73 @@ describe("prompt-library-store — 意图应用（纯函数）", () => {
 			"terminal_stash_preempted_by_programmatic_delivery",
 		);
 	});
+
+	it("保真度随条目一起落库——抢占来源那条 toast 根本没有任何人看见", () => {
+		const next = applyWorkspacePromptLibraryMutation(
+			emptySnapshot(),
+			{
+				kind: "upsert_prompt",
+				promptId: "p1",
+				text: "有两段粘贴没能换回原文的正文 [Pasted text #5 +11 lines]",
+				scope: "task",
+				taskId: "task-1",
+				origin: "terminal_stash_preempted_by_programmatic_delivery",
+				terminalInputBoxStashFidelity: {
+					softWrapJoinCount: 4,
+					foldedPastePlaceholderCount: 3,
+					backfilledPlaceholderCount: 1,
+					placeholdersLeftUnbackfilledBecausePayloadWasDropped: 1,
+					placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: 1,
+					placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: 0,
+					unrecoverablePasteCount: 1,
+				},
+			},
+			1_000,
+		);
+
+		expect(
+			next.taskScopedPromptsByTaskId["task-1"][0].terminalInputBoxStashFidelity
+				?.placeholdersLeftUnbackfilledBecausePayloadWasDropped,
+		).toBe(1);
+	});
+
+	// 顺手改个错别字不该把「这份正文缺了几段」的警告一并抹掉：改文分支刻意既不带新保真度、
+	// 也不清掉原有的那份。
+	it("改正文不清掉已落库的保真度", () => {
+		const created = applyWorkspacePromptLibraryMutation(
+			emptySnapshot(),
+			{
+				kind: "upsert_prompt",
+				promptId: "p1",
+				text: "原始正文",
+				scope: "task",
+				taskId: "task-1",
+				origin: "terminal_stash_by_user",
+				terminalInputBoxStashFidelity: {
+					softWrapJoinCount: 0,
+					foldedPastePlaceholderCount: 1,
+					backfilledPlaceholderCount: 0,
+					placeholdersLeftUnbackfilledBecausePayloadWasDropped: 0,
+					placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched: 1,
+					placeholdersLeftUnbackfilledBecausePlaceholderSelfConsistencyCheckFailed: 0,
+					unrecoverablePasteCount: 0,
+				},
+			},
+			1_000,
+		);
+
+		const edited = applyWorkspacePromptLibraryMutation(
+			created,
+			{ kind: "upsert_prompt", promptId: "p1", text: "改过错别字的正文", scope: "task", taskId: "task-1" },
+			2_000,
+		);
+
+		expect(edited.taskScopedPromptsByTaskId["task-1"][0].text).toBe("改过错别字的正文");
+		expect(
+			edited.taskScopedPromptsByTaskId["task-1"][0].terminalInputBoxStashFidelity
+				?.placeholdersLeftUnbackfilledBecauseNoLedgerEntryMatched,
+		).toBe(1);
+	});
 });
 
 // scope 为 task 却漏传 taskId，不是「分类不整洁」而是**可见性事故**：本该只给某个任务看的文字会被
@@ -310,6 +378,127 @@ describe("prompt-library-store — 落盘", () => {
 // 两次写之间，结果完全由写序决定——先写条目要**进入**的那份文件，坏结果是「条目在两处暂时重复」（用户看得
 // 见、能自己删）；先写它要**离开**的那份文件，坏结果是「条目永久丢失」（用户无从恢复）。所以写序是刻意的，
 // 这组测试就是把它钉住，免得后人按字母序或按代码书写顺序把两次写重排回去。
+describe("prompt-library-store — 从浏览器 localStorage 合并迁移", () => {
+	it("空库时整份采纳，并沿用载荷自带的时间戳而不是盖上「现在」", () => {
+		const next = applyWorkspacePromptLibraryMutation(
+			emptySnapshot(),
+			{
+				kind: "merge_prompts_migrated_from_browser_local_storage",
+				prompts: [
+					{ id: "b1", text: "全局模板", scope: "global", createdAt: 1_000, updatedAt: 2_000 },
+					{ id: "b2", text: "任务模板", scope: "task", taskId: "task-1", createdAt: 3_000, updatedAt: 4_000 },
+				],
+			},
+			9_999_999,
+		);
+
+		expect(next.globalScopedPrompts).toEqual([
+			{ id: "b1", text: "全局模板", scope: "global", createdAt: 1_000, updatedAt: 2_000 },
+		]);
+		expect(next.taskScopedPromptsByTaskId["task-1"]).toEqual([
+			{ id: "b2", text: "任务模板", scope: "task", createdAt: 3_000, updatedAt: 4_000 },
+		]);
+	});
+
+	// 去重键必须是「桶 + 正文」。各 origin 的 id 各自随机生成，按 id 去重等于一条都去不掉。
+	it("同一个桶里同正文不重复新增，且时间戳收敛成最早创建 + 最晚更新", () => {
+		const seeded = applyWorkspacePromptLibraryMutation(
+			emptySnapshot(),
+			{
+				kind: "merge_prompts_migrated_from_browser_local_storage",
+				prompts: [{ id: "from-origin-a", text: "同一段文字", scope: "global", createdAt: 5_000, updatedAt: 6_000 }],
+			},
+			0,
+		);
+
+		const next = applyWorkspacePromptLibraryMutation(
+			seeded,
+			{
+				kind: "merge_prompts_migrated_from_browser_local_storage",
+				prompts: [{ id: "from-origin-b", text: "同一段文字", scope: "global", createdAt: 1_000, updatedAt: 9_000 }],
+			},
+			0,
+		);
+
+		expect(next.globalScopedPrompts).toEqual([
+			{ id: "from-origin-a", text: "同一段文字", scope: "global", createdAt: 1_000, updatedAt: 9_000 },
+		]);
+	});
+
+	it("同正文但不同桶各留一份——它们本就是两条不同的模板", () => {
+		const next = applyWorkspacePromptLibraryMutation(
+			emptySnapshot(),
+			{
+				kind: "merge_prompts_migrated_from_browser_local_storage",
+				prompts: [
+					{ id: "g", text: "同文", scope: "global", createdAt: 1_000, updatedAt: 1_000 },
+					{ id: "r", text: "同文", scope: "repo", createdAt: 1_000, updatedAt: 1_000 },
+					{ id: "t1", text: "同文", scope: "task", taskId: "task-1", createdAt: 1_000, updatedAt: 1_000 },
+					{ id: "t2", text: "同文", scope: "task", taskId: "task-2", createdAt: 1_000, updatedAt: 1_000 },
+				],
+			},
+			0,
+		);
+
+		expect(next.globalScopedPrompts).toHaveLength(1);
+		expect(next.repoScopedPrompts).toHaveLength(1);
+		expect(next.taskScopedPromptsByTaskId["task-1"]).toHaveLength(1);
+		expect(next.taskScopedPromptsByTaskId["task-2"]).toHaveLength(1);
+	});
+
+	it("幂等：同一份载荷重跑不新增条目、也不改动已收敛的时间戳", () => {
+		const payload: WorkspacePromptLibraryMutation = {
+			kind: "merge_prompts_migrated_from_browser_local_storage",
+			prompts: [{ id: "b1", text: "模板", scope: "global", createdAt: 1_000, updatedAt: 2_000 }],
+		};
+
+		const once = applyWorkspacePromptLibraryMutation(emptySnapshot(), payload, 0);
+		const twice = applyWorkspacePromptLibraryMutation(once, payload, 0);
+
+		expect(twice.globalScopedPrompts).toEqual(once.globalScopedPrompts);
+	});
+
+	// origin 记录的是这条**最初**从哪来（手写 / 终端暂存）。被另一个 origin 的同正文条目改写会让它失真。
+	it("命中既有条目时保留既有条目的 origin，不被载荷改写", () => {
+		const seeded = applyWorkspacePromptLibraryMutation(
+			emptySnapshot(),
+			{ kind: "upsert_prompt", promptId: "p1", text: "暂存来的", scope: "global", origin: "terminal_stash_by_user" },
+			1_000,
+		);
+
+		const next = applyWorkspacePromptLibraryMutation(
+			seeded,
+			{
+				kind: "merge_prompts_migrated_from_browser_local_storage",
+				prompts: [
+					{ id: "b1", text: "暂存来的", scope: "global", origin: "manual", createdAt: 500, updatedAt: 3_000 },
+				],
+			},
+			0,
+		);
+
+		expect(next.globalScopedPrompts).toEqual([
+			{
+				id: "p1",
+				text: "暂存来的",
+				scope: "global",
+				origin: "terminal_stash_by_user",
+				createdAt: 500,
+				updatedAt: 3_000,
+			},
+		]);
+	});
+
+	it("契约层拒绝 scope 为 task 却漏传 taskId 的条目——那是可见性事故，不是分类不整洁", () => {
+		const parsed = workspacePromptLibraryMutationSchema.safeParse({
+			kind: "merge_prompts_migrated_from_browser_local_storage",
+			prompts: [{ id: "b1", text: "任务模板", scope: "task", createdAt: 1_000, updatedAt: 1_000 }],
+		});
+
+		expect(parsed.success).toBe(false);
+	});
+});
+
 describe("prompt-library-store — 换 scope 的落盘写序：目的地文件先写、来源文件后写", () => {
 	beforeEach(async () => {
 		testRuntimeHome.path = await mkdtemp(join(tmpdir(), "kanban-prompt-library-"));

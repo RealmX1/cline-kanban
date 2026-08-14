@@ -4,16 +4,102 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
 import { useTaskEditor } from "@/hooks/use-task-editor";
+import { resetTaskEditDraftStoreForTests } from "@/runtime/task-edit-draft-store";
 import type {
 	RuntimeAgentId,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
+	RuntimeTaskEditDraft,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
+	WorkspaceTaskEditDraftMutation,
+	WorkspaceTaskEditDraftsSnapshot,
 } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
+
+/**
+ * 服务端草稿的假替身。
+ *
+ * `snapshot === null` = 运行时够不着，与这套用例此前（没有服务器可连）的真实行为逐字等价，所以除了
+ * 显式给它装快照的那条用例，其余用例的行为一个字都没变。`releaseFetch` 让用例自己决定快照**什么时候**
+ * 到达——「表单先被镜像铺上、快照后到」正是要钉住的那条时序。
+ */
+const fakeWorkspaceTaskEditDraftServer = vi.hoisted(() => ({
+	snapshot: null as WorkspaceTaskEditDraftsSnapshot | null,
+	releaseFetch: null as (() => void) | null,
+}));
+
+vi.mock("@/runtime/task-edit-drafts-query", () => {
+	function applyFakeMutation(
+		snapshot: WorkspaceTaskEditDraftsSnapshot,
+		mutation: WorkspaceTaskEditDraftMutation,
+		nowEpochMs: number,
+	): WorkspaceTaskEditDraftsSnapshot {
+		if (mutation.kind === "save_task_edit_draft") {
+			return {
+				...snapshot,
+				draftsByTaskId: { ...snapshot.draftsByTaskId, [mutation.draft.taskId]: mutation.draft },
+			};
+		}
+		if (mutation.kind === "clear_task_edit_draft") {
+			const { [mutation.taskId]: _cleared, ...remainingDrafts } = snapshot.draftsByTaskId;
+			return { ...snapshot, draftsByTaskId: remainingDrafts };
+		}
+		if (mutation.kind !== "merge_task_edit_drafts_migrated_from_browser_local_storage") {
+			return snapshot;
+		}
+		let merged = snapshot;
+		for (const incomingDraft of mutation.drafts) {
+			const existingDraft = merged.draftsByTaskId[incomingDraft.taskId];
+			if (!existingDraft || existingDraft.savedAt === incomingDraft.savedAt) {
+				merged = {
+					...merged,
+					draftsByTaskId: { ...merged.draftsByTaskId, [incomingDraft.taskId]: existingDraft ?? incomingDraft },
+				};
+				continue;
+			}
+			const winningDraft = incomingDraft.savedAt > existingDraft.savedAt ? incomingDraft : existingDraft;
+			const losingDraft = winningDraft === incomingDraft ? existingDraft : incomingDraft;
+			merged = {
+				draftsByTaskId: { ...merged.draftsByTaskId, [incomingDraft.taskId]: winningDraft },
+				supersededDraftCopies: [
+					...merged.supersededDraftCopies,
+					{ draft: losingDraft, supersededAt: nowEpochMs, supersededBySavedAt: winningDraft.savedAt },
+				],
+			};
+		}
+		return merged;
+	}
+
+	return {
+		EMPTY_WORKSPACE_TASK_EDIT_DRAFTS_SNAPSHOT: { draftsByTaskId: {}, supersededDraftCopies: [] },
+		fetchWorkspaceTaskEditDrafts: async (): Promise<WorkspaceTaskEditDraftsSnapshot | null> => {
+			if (fakeWorkspaceTaskEditDraftServer.snapshot === null) {
+				throw new Error("Fake runtime is unreachable.");
+			}
+			await new Promise<void>((resolve) => {
+				fakeWorkspaceTaskEditDraftServer.releaseFetch = resolve;
+			});
+			return fakeWorkspaceTaskEditDraftServer.snapshot;
+		},
+		mutateWorkspaceTaskEditDrafts: async (
+			_workspaceId: string,
+			mutation: WorkspaceTaskEditDraftMutation,
+		): Promise<WorkspaceTaskEditDraftsSnapshot | null> => {
+			if (fakeWorkspaceTaskEditDraftServer.snapshot === null) {
+				throw new Error("Fake runtime is unreachable.");
+			}
+			fakeWorkspaceTaskEditDraftServer.snapshot = applyFakeMutation(
+				fakeWorkspaceTaskEditDraftServer.snapshot,
+				mutation,
+				Date.now(),
+			);
+			return fakeWorkspaceTaskEditDraftServer.snapshot;
+		},
+	};
+});
 
 /**
  * 编辑草稿改成了去抖写盘（`use-task-editor.ts` 的 `TASK_EDIT_DRAFT_PERSIST_DEBOUNCE_MS`，
@@ -265,6 +351,9 @@ describe("useTaskEditor", () => {
 
 	beforeEach(() => {
 		localStorage.clear();
+		resetTaskEditDraftStoreForTests();
+		fakeWorkspaceTaskEditDraftServer.snapshot = null;
+		fakeWorkspaceTaskEditDraftServer.releaseFetch = null;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -315,7 +404,9 @@ describe("useTaskEditor", () => {
 	});
 
 	it("ignores the legacy browser-local plan mode default when runtime setting is false", async () => {
-		localStorage.setItem(LocalStorageKey.TaskStartInPlanMode, "true");
+		// 这个键早已退役（新任务是否进计划模式的真相源是服务端的 newTaskStartInPlanModeByDefault），
+		// 所以刻意用裸字面量而不是 LocalStorageKey 成员——把它加回枚举等于承认它还是个现役键。
+		localStorage.setItem("kanban.task-start-in-plan-mode", "true");
 		let latestSnapshot: HookSnapshot | null = null;
 
 		await act(async () => {
@@ -531,6 +622,71 @@ describe("useTaskEditor", () => {
 
 		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Legacy draft prompt");
 		expect(requireSnapshot(latestSnapshot).editTaskWorktreeMode).toBe("inplace");
+	});
+
+	it("rebases the edit form onto the server draft that only arrives after the form was seeded from the mirror", async () => {
+		const task = createTask("task-1", "Initial prompt", 1);
+		const losingMirrorDraft: RuntimeTaskEditDraft = {
+			taskId: task.id,
+			prompt: "Losing mirror draft",
+			images: [],
+			startInPlanMode: false,
+			autoReviewEnabled: false,
+			autoReviewMode: "commit",
+			branchRef: "main",
+			worktreeMode: "branch",
+			savedAt: 1_000,
+		};
+		const winningServerDraft: RuntimeTaskEditDraft = {
+			...losingMirrorDraft,
+			prompt: "Winning server draft",
+			savedAt: 2_000,
+		};
+		window.localStorage.setItem(
+			LocalStorageKey.TaskEditDrafts,
+			JSON.stringify({ drafts: { [JSON.stringify(["project-1", task.id])]: losingMirrorDraft } }),
+		);
+		fakeWorkspaceTaskEditDraftServer.snapshot = {
+			draftsByTaskId: { [task.id]: winningServerDraft },
+			supersededDraftCopies: [],
+		};
+
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([task])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+
+		// 快照还没到，表单只能被本地镜像里那份铺上——这一步本身没有错。
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Losing mirror draft");
+
+		await act(async () => {
+			fakeWorkspaceTaskEditDraftServer.releaseFetch?.();
+			await new Promise((resolve) => {
+				setTimeout(resolve, 0);
+			});
+		});
+
+		// 快照落定后表单必须重铺成胜出那份。不重铺的话，接下来的去抖自动保存会拿落败内容直接覆盖
+		// 服务端的当前草稿，而 save 意图**不**产生落败副本——胜出那份就此静默消失。
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Winning server draft");
+
+		await settleTaskEditDraftPersistence();
+
+		expect(fakeWorkspaceTaskEditDraftServer.snapshot?.draftsByTaskId[task.id]?.prompt).toBe("Winning server draft");
+		// 落败的那份也没丢：它由合并转存进了副本，等着用户自己认领或丢弃。
+		expect(fakeWorkspaceTaskEditDraftServer.snapshot?.supersededDraftCopies.map((copy) => copy.draft.prompt)).toEqual(
+			["Losing mirror draft"],
+		);
 	});
 
 	it("restores an autosaved edit draft when reopening the same task", async () => {

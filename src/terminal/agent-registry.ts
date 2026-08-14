@@ -123,6 +123,8 @@ export function buildRuntimeConfigResponse(
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled:
 			runtimeConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		postDeployVerificationForceCompleteEnabled: runtimeConfig.postDeployVerificationForceCompleteEnabled,
+		userInterfacePreferencesSharedAcrossBrowserOrigins:
+			runtimeConfig.userInterfacePreferencesSharedAcrossBrowserOrigins,
 		detectedCommands,
 		agents,
 		shortcuts: runtimeConfig.shortcuts,

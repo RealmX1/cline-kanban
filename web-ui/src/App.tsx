@@ -311,6 +311,14 @@ export default function App(): ReactElement {
 		setSessions,
 		setCanPersistWorkspaceState,
 	});
+	// 看板上此刻存在的任务 id。Prompt Library 靠它认出归属任务已被删掉的孤儿条目——判据必须是**当下**
+	// 的看板，不能存进库里：trash 里的任务还能恢复，把一个会过期的判断固化进用户资产，任务一恢复它
+	// 就开始撒谎。
+	const taskIdsOnBoard = useMemo(
+		() => new Set(board.columns.flatMap((column) => column.cards.map((card) => card.id))),
+		[board],
+	);
+
 	const { selectedTaskId, selectedCard, setSelectedTaskId, handleBack } = useDetailTaskNavigation({
 		board,
 		currentProjectId: projectRuntimeWorkspaceId,
@@ -539,6 +547,9 @@ export default function App(): ReactElement {
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
+		editTaskFormSeededFromSavedDraftAt,
+		handleRevertEditTaskFormToSavedTaskContent,
+		handleAdoptPromotedTaskEditDraft,
 		handleCancelEditTask,
 		handleSaveEditedTask,
 		handleSaveAndStartEditedTask,
@@ -1370,6 +1381,7 @@ export default function App(): ReactElement {
 								<CardDetailView
 									selection={selectedCard}
 									currentProjectId={currentProjectId}
+									taskIdsOnBoard={taskIdsOnBoard}
 									workspacePath={workspacePath}
 									selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 									runtimeConfig={runtimeProjectConfig ?? null}
@@ -1499,6 +1511,10 @@ export default function App(): ReactElement {
 					open={!isCurrentProjectRuntimeUnavailable && (isInlineTaskCreateOpen || editingTaskId !== null)}
 					onOpenChange={handleCreateDialogOpenChange}
 					taskEditorMode={editingTaskId ? "edit" : "create"}
+					editingTaskId={editingTaskId}
+					editTaskFormSeededFromSavedDraftAt={editTaskFormSeededFromSavedDraftAt}
+					onRevertEditTaskFormToSavedTaskContent={handleRevertEditTaskFormToSavedTaskContent}
+					onAdoptPromotedTaskEditDraft={handleAdoptPromotedTaskEditDraft}
 					prompt={editingTaskId ? editTaskPrompt : newTaskPrompt}
 					onPromptChange={editingTaskId ? setEditTaskPrompt : setNewTaskPrompt}
 					images={editingTaskId ? editTaskImages : newTaskImages}
