@@ -258,7 +258,7 @@ describe("跨浏览器 origin 共享的界面偏好 store", () => {
 		});
 	});
 
-	it("整份读取给出迁移决策要的六个字段，字典缺省为空对象", () => {
+	it("整份读取给出迁移决策要的全部字段，字典缺省为空对象", () => {
 		expect(readAllUserInterfacePreferenceValuesFromBrowserLocalStorage()).toEqual({
 			newTaskAutoReviewEnabled: null,
 			newTaskAutoReviewMode: null,
@@ -266,6 +266,7 @@ describe("跨浏览器 origin 共享的界面偏好 store", () => {
 			workspaceOpenTargetPreferredApplicationId: null,
 			taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {},
 			projectNumericSlotGroupAssignmentsBySlotNumber: {},
+			mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
 		});
 	});
 });

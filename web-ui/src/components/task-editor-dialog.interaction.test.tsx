@@ -189,6 +189,68 @@ describe("TaskEditorDialog interactions", () => {
 		await render(makeProps({ defaultAgentId: "claude", startInPlanMode: true }));
 		expect(hasPlanModeOverridesPermissionTierNotice()).toBe(false);
 	});
+	// （编辑既有卡片显示的是卡自己的 baseRef、用户手动改过显示的是他自己的选择），它们就是在撒谎。
+	describe("base ref 来源提示的显示条件", () => {
+		const rememberedBaseRefProps: Partial<Props> = {
+			branchOptions: [
+				{ value: "main", label: "main" },
+				{ value: "feature/remembered", label: "feature/remembered" },
+			],
+			taskCreateBaseRefRememberedForCurrentProject: "feature/remembered",
+			repositoryDefaultBranchRef: "main",
+		};
+		const discardedRememberedBaseRefProps: Partial<Props> = {
+			rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists: "feature/deleted",
+			repositoryDefaultBranchRef: "main",
+			resolvedDefaultTaskCreateBaseRef: "main",
+		};
+
+		function hasRememberedHint(): boolean {
+			return document.body.textContent?.includes("Remembered from the last task you created") ?? false;
+		}
+		function hasDiscardedRememberedHint(): boolean {
+			return document.body.textContent?.includes("no longer exists") ?? false;
+		}
+
+		it("建卡模式下显示「记住的」提示，用户手动改回默认分支后不再显示", async () => {
+			await render(makeProps({ ...rememberedBaseRefProps, branchRef: "feature/remembered" }));
+			expect(hasRememberedHint()).toBe(true);
+
+			await render(makeProps({ ...rememberedBaseRefProps, branchRef: "main" }));
+			expect(hasRememberedHint()).toBe(false);
+		});
+
+		it("编辑既有卡片时不显示「记住的」提示——那显示的是卡自己的 baseRef", async () => {
+			await render(
+				makeProps({ ...rememberedBaseRefProps, taskEditorMode: "edit", branchRef: "feature/remembered" }),
+			);
+			expect(hasRememberedHint()).toBe(false);
+		});
+
+		it("建卡模式下显示「记忆分支已消失」提示", async () => {
+			await render(makeProps({ ...discardedRememberedBaseRefProps, branchRef: "main" }));
+			expect(hasDiscardedRememberedHint()).toBe(true);
+		});
+
+		it("编辑既有卡片时不显示「记忆分支已消失」提示", async () => {
+			await render(makeProps({ ...discardedRememberedBaseRefProps, taskEditorMode: "edit", branchRef: "main" }));
+			expect(hasDiscardedRememberedHint()).toBe(false);
+		});
+
+		it("用户手动挑了别的分支后不再把它说成自动回落的结果", async () => {
+			await render(
+				makeProps({
+					...discardedRememberedBaseRefProps,
+					branchOptions: [
+						{ value: "main", label: "main" },
+						{ value: "release/1", label: "release/1" },
+					],
+					branchRef: "release/1",
+				}),
+			);
+			expect(hasDiscardedRememberedHint()).toBe(false);
+		});
+	});
 });
 
 /**
@@ -401,4 +463,6 @@ describe("TaskEditorDialog prompt draft ownership", () => {
 
 		expect(getPromptTextarea().value).toBe("Original body");
 	});
+
+	// 这两条提示都在解释「下拉框里这个值是怎么来的」。只要下拉框显示的不是那个自动解析出来的值
 });

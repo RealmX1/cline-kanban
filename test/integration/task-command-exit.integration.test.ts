@@ -1140,3 +1140,280 @@ describe("CLI subprocess exit guarantees", () => {
 		}
 	});
 });
+
+describe("task create 预览与解析回执", () => {
+	// 预览必须是**真的**只读：它不注册项目、不建卡，因此也完全不需要运行时服务器。这条用例把这三件事
+	// 一起钉住——刻意不启动服务器，跑完之后再用 `task list` 证明项目仍未注册。
+	it("--preview 不建卡、不注册项目，也不需要运行时服务器", { timeout: 60_000 }, async () => {
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-task-create-preview");
+		const projectPath = repository.repositoryPath;
+
+		try {
+			writeFileSync(join(projectPath, "README.md"), "# Preview Test\n", "utf8");
+			commitAllRepositoryFiles(repository, projectPath, "init");
+
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
+				KANBAN_RUNTIME_PORT: String(await getAvailablePort()),
+			});
+
+			const preview = await runCliCommandAndCollectOutput({
+				args: [
+					"task",
+					"create",
+					"--preview",
+					"--prompt",
+					"Add a demo banner component to the homepage",
+					"--project-path",
+					projectPath,
+				],
+				cwd: projectPath,
+				env,
+				timeoutMs: 20_000,
+			});
+
+			expect(
+				preview.didExit,
+				`task create --preview did not exit.\nstdout:\n${preview.stdout}\nstderr:\n${preview.stderr}`,
+			).toBe(true);
+			expect(preview.exitCode).toBe(0);
+
+			const previewPayload = JSON.parse(preview.stdout) as {
+				ok: boolean;
+				preview: boolean;
+				taskCreated: boolean;
+				resolvedSettingsFingerprint: string;
+				needsAttention: boolean;
+				resolvedSettings: Record<string, { value: unknown; source: string }>;
+				warnings: { code: string }[];
+			};
+			expect(previewPayload.ok).toBe(true);
+			expect(previewPayload.preview).toBe(true);
+			expect(previewPayload.taskCreated).toBe(false);
+			expect(previewPayload.resolvedSettingsFingerprint).toMatch(/^[0-9a-f]{32}$/u);
+			expect(previewPayload.resolvedSettings.baseRef?.value).toBe("main");
+			expect(previewPayload.resolvedSettings.column?.value).toBe("backlog");
+			expect(previewPayload.needsAttention).toBe(true);
+			expect(previewPayload.warnings.map((warning) => warning.code)).toContain(
+				"project_is_not_registered_in_kanban",
+			);
+
+			// 预览若偷偷注册了项目，这条命令就会去连（并不存在的）运行时而不是当场报「尚未加入」。
+			// 刻意不套 withCliGuardTimeouts：这里要断言的是「项目没被注册」，不是看门狗行为，而机器繁忙时
+			// 一个 5 秒的硬超时会把 tsx 冷启动本身判成超时，让这条断言变成噪声。
+			const listAfterPreview = await runCliCommandAndCollectOutput({
+				args: ["task", "list", "--project-path", projectPath],
+				cwd: projectPath,
+				env,
+				timeoutMs: 20_000,
+			});
+			expect(
+				listAfterPreview.stdout,
+				`task list after preview produced no usable output.\nstderr:\n${listAfterPreview.stderr}`,
+			).toContain("is not added to Kanban yet");
+		} finally {
+			await integrationFixture.cleanup();
+		}
+	});
+
+	// 回归：workspaceId 一度被算进指纹。未注册项目的预览只能给出 null，而真实建卡会先注册再拿到真 id，
+	// 于是「新项目先预览、再带指纹建卡」这条最需要两步确认的路径在毫无漂移时也必然 fail closed。
+	it("未注册项目的预览指纹能被随后的真实建卡接受", { timeout: 90_000 }, async () => {
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-unregistered-preview-fingerprint");
+		const projectPath = repository.repositoryPath;
+
+		try {
+			writeFileSync(join(projectPath, "README.md"), "# Unregistered Preview\n", "utf8");
+			commitAllRepositoryFiles(repository, projectPath, "init");
+
+			const port = String(await getAvailablePort());
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
+				KANBAN_RUNTIME_PORT: port,
+			});
+
+			// 预览在项目注册**之前**跑，且不需要服务器。
+			const preview = await runCliCommandAndCollectOutput({
+				args: [
+					"task",
+					"create",
+					"--preview",
+					"--prompt",
+					"First task in a brand new project",
+					"--project-path",
+					projectPath,
+				],
+				cwd: projectPath,
+				env,
+				timeoutMs: 20_000,
+			});
+			expect(preview.exitCode).toBe(0);
+			const previewPayload = JSON.parse(preview.stdout) as {
+				resolvedSettingsFingerprint: string;
+				resolvedSettings: { workspaceId: { value: string | null } };
+			};
+			expect(previewPayload.resolvedSettings.workspaceId.value).toBeNull();
+
+			const serverProcess = await startRuntimeServerForProject({
+				projectPath,
+				gitFixture: integrationFixture.gitFixture,
+				port,
+			});
+			try {
+				const created = await runCliCommandAndCollectOutput({
+					args: [
+						"task",
+						"create",
+						"--prompt",
+						"First task in a brand new project",
+						"--project-path",
+						projectPath,
+						"--expect-resolved-settings-fingerprint",
+						previewPayload.resolvedSettingsFingerprint,
+					],
+					cwd: projectPath,
+					env,
+					timeoutMs: 20_000,
+				});
+				const createdPayload = JSON.parse(created.stdout) as { ok: boolean; taskCreated: boolean; error?: string };
+				expect(
+					createdPayload.ok,
+					`create rejected a fingerprint from its own preview: ${createdPayload.error ?? ""}`,
+				).toBe(true);
+				expect(createdPayload.taskCreated).toBe(true);
+				expect(created.exitCode).toBe(0);
+			} finally {
+				await stopRuntimeServer(serverProcess);
+			}
+		} finally {
+			await integrationFixture.cleanup();
+		}
+	});
+
+	// 回归：cline 走 in_process_cline_sdk（进程内 SDK 起会话），catalog 里那个 binary 名只是名义值。
+	// 照着它查 PATH 会让「只装了 SDK」这种完全合法的部署收到一条「不装就启动失败」的假告警。
+	it("SDK 内置通道的 agent 不因 PATH 上没有同名二进制而误报未安装", { timeout: 60_000 }, async () => {
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-sdk-agent-binary-probe");
+		const projectPath = repository.repositoryPath;
+
+		try {
+			writeFileSync(join(projectPath, "README.md"), "# SDK Agent\n", "utf8");
+			commitAllRepositoryFiles(repository, projectPath, "init");
+
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
+				KANBAN_RUNTIME_PORT: String(await getAvailablePort()),
+			});
+
+			const preview = await runCliCommandAndCollectOutput({
+				args: [
+					"task",
+					"create",
+					"--preview",
+					"--prompt",
+					"Run this on the SDK agent",
+					"--project-path",
+					projectPath,
+					"--agent-id",
+					"cline",
+				],
+				cwd: projectPath,
+				env,
+				timeoutMs: 20_000,
+			});
+
+			expect(preview.exitCode).toBe(0);
+			const previewPayload = JSON.parse(preview.stdout) as {
+				resolvedSettings: { effectiveAgentId: { value: string } };
+				warnings: { code: string }[];
+			};
+			expect(previewPayload.resolvedSettings.effectiveAgentId.value).toBe("cline");
+			expect(previewPayload.warnings.map((warning) => warning.code)).not.toContain(
+				"resolved_agent_binary_is_not_installed",
+			);
+		} finally {
+			await integrationFixture.cleanup();
+		}
+	});
+
+	it("真实建卡也回传 resolvedSettings，指纹不匹配时 fail closed", { timeout: 90_000 }, async () => {
+		const integrationFixture = createTaskCommandExitIntegrationFixture();
+		const repository = integrationFixture.createRepository("project-task-create-fingerprint");
+		const projectPath = repository.repositoryPath;
+
+		try {
+			writeFileSync(join(projectPath, "README.md"), "# Fingerprint Test\n", "utf8");
+			commitAllRepositoryFiles(repository, projectPath, "init");
+
+			const port = String(await getAvailablePort());
+			const env = integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
+				KANBAN_RUNTIME_PORT: port,
+			});
+			const serverProcess = await startRuntimeServerForProject({
+				projectPath,
+				gitFixture: integrationFixture.gitFixture,
+				port,
+			});
+
+			try {
+				const created = await runCliCommandAndCollectOutput({
+					args: ["task", "create", "--prompt", "Ship the pagination endpoint", "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+					timeoutMs: 20_000,
+				});
+				expect(created.exitCode).toBe(0);
+				const createdPayload = JSON.parse(created.stdout) as {
+					ok: boolean;
+					taskCreated: boolean;
+					needsAttention: boolean;
+					resolvedSettings: Record<string, { value: unknown; source: string }>;
+					warnings: { code: string }[];
+				};
+				expect(createdPayload.ok).toBe(true);
+				expect(createdPayload.taskCreated).toBe(true);
+				expect(createdPayload.resolvedSettings.baseRef?.value).toBe("main");
+				expect(createdPayload.resolvedSettings.effectiveAgentId?.source).toBe("workspace_config_default");
+				// 默认权限档就是全放行，这是这条回执最该说出来的事。
+				expect(createdPayload.warnings.map((warning) => warning.code)).toContain(
+					"task_will_run_with_all_permission_prompts_bypassed",
+				);
+
+				const rejected = await runCliCommandAndCollectOutput({
+					args: [
+						"task",
+						"create",
+						"--prompt",
+						"This one must not be created",
+						"--project-path",
+						projectPath,
+						"--expect-resolved-settings-fingerprint",
+						"00000000000000000000000000000000",
+					],
+					cwd: projectPath,
+					env,
+					timeoutMs: 20_000,
+				});
+				expect(rejected.exitCode).toBe(1);
+				const rejectedPayload = JSON.parse(rejected.stdout) as { ok: boolean; taskCreated: boolean; error: string };
+				expect(rejectedPayload.ok).toBe(false);
+				expect(rejectedPayload.taskCreated).toBe(false);
+				expect(rejectedPayload.error).toContain("Resolved task settings changed since the preview");
+
+				const listed = await runCliCommandAndCollectOutput({
+					args: ["task", "list", "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+					timeoutMs: 20_000,
+				});
+				const listedPayload = JSON.parse(listed.stdout) as { tasks: { prompt: string }[] };
+				expect(listedPayload.tasks).toHaveLength(1);
+				expect(listedPayload.tasks[0]?.prompt).toBe("Ship the pagination endpoint");
+			} finally {
+				await stopRuntimeServer(serverProcess);
+			}
+		} finally {
+			await integrationFixture.cleanup();
+		}
+	});
+});

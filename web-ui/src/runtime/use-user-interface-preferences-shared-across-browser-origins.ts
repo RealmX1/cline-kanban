@@ -112,6 +112,19 @@ export function useProjectNumericSlotGroupAssignmentsPreference(): [
 	return useUserInterfacePreference("projectNumericSlotGroupAssignmentsBySlotNumber", {});
 }
 
+/**
+ * 每个项目上次成功建卡所用的 base ref：projectId → ref 名。
+ *
+ * 只在**建卡成功**时写（见 use-task-editor.ts）。下拉框每次 change 就写会把「点开对话框翻了翻又放弃」
+ * 的误选记成项目默认值，而那正是这条记忆最需要避免的失真。
+ */
+export function useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference(): [
+	Record<string, string>,
+	Dispatch<SetStateAction<Record<string, string>>>,
+] {
+	return useUserInterfacePreference("mostRecentlyUsedTaskCreateBaseRefByProjectId", {});
+}
+
 /** 迁移时两边都有值且不一致的字段（服务端胜出）。空数组表示无冲突。 */
 export function useUserInterfacePreferenceFieldsWhereServerAndBrowserDisagree(): readonly string[] {
 	return useUserInterfacePreferenceStoreState().fieldsWhereServerAndBrowserDisagree;

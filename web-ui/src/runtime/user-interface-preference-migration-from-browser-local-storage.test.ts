@@ -12,6 +12,7 @@ const SERVER_WITH_NOTHING_SET: RuntimeUserInterfacePreferencesSharedAcrossBrowse
 	taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {},
 	workspaceOpenTargetPreferredApplicationId: null,
 	projectNumericSlotGroupAssignmentsBySlotNumber: {},
+	mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
 };
 
 const BROWSER_WITH_NOTHING_SET: UserInterfacePreferenceValuesReadFromBrowserLocalStorage = {
@@ -21,6 +22,7 @@ const BROWSER_WITH_NOTHING_SET: UserInterfacePreferenceValuesReadFromBrowserLoca
 	workspaceOpenTargetPreferredApplicationId: null,
 	taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {},
 	projectNumericSlotGroupAssignmentsBySlotNumber: {},
+	mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
 };
 
 describe("界面偏好从浏览器 localStorage 合并进服务端", () => {

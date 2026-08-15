@@ -580,7 +580,45 @@ describe.sequential("runtime-config auto agent selection", () => {
 					taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {},
 					workspaceOpenTargetPreferredApplicationId: "zed",
 					projectNumericSlotGroupAssignmentsBySlotNumber: { "3": "alpha" },
+					mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
 				});
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("每个项目上次建卡用的 base ref 落盘后能读回，且不被无关更新抹掉", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-base-ref-memory-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir(
+			"kanban-project-runtime-config-base-ref-memory-",
+		);
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				await updateRuntimeConfig(tempProject, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						mostRecentlyUsedTaskCreateBaseRefByProjectId: { "workspace-a": "feature/x" },
+					},
+				});
+				await updateRuntimeConfig(tempProject, { selectedAgentId: "codex" });
+
+				const reloaded = await loadRuntimeConfig(tempProject);
+				expect(
+					reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins.mostRecentlyUsedTaskCreateBaseRefByProjectId,
+				).toEqual({ "workspace-a": "feature/x" });
+
+				// 整份替换是这条路径的语义：前端「忘掉某个项目的记忆」只能靠写回一份少了那个键的字典。
+				await updateRuntimeConfig(tempProject, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						mostRecentlyUsedTaskCreateBaseRefByProjectId: { "workspace-b": "release/1" },
+					},
+				});
+				expect(
+					(await loadRuntimeConfig(tempProject)).userInterfacePreferencesSharedAcrossBrowserOrigins
+						.mostRecentlyUsedTaskCreateBaseRefByProjectId,
+				).toEqual({ "workspace-b": "release/1" });
 			});
 		} finally {
 			cleanupProject();

@@ -46,6 +46,7 @@ export interface UserInterfacePreferenceValuesReadFromBrowserLocalStorage {
 	workspaceOpenTargetPreferredApplicationId: string | null;
 	taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: Record<string, string>;
 	projectNumericSlotGroupAssignmentsBySlotNumber: Record<string, string>;
+	mostRecentlyUsedTaskCreateBaseRefByProjectId: Record<string, string>;
 }
 
 export interface UserInterfacePreferenceMigrationDecision {
@@ -71,7 +72,8 @@ type ScalarPreferenceFieldName =
 
 type RecordPreferenceFieldName =
 	| "taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey"
-	| "projectNumericSlotGroupAssignmentsBySlotNumber";
+	| "projectNumericSlotGroupAssignmentsBySlotNumber"
+	| "mostRecentlyUsedTaskCreateBaseRefByProjectId";
 
 const SCALAR_PREFERENCE_FIELD_NAMES: readonly ScalarPreferenceFieldName[] = [
 	"newTaskAutoReviewEnabled",
@@ -83,6 +85,7 @@ const SCALAR_PREFERENCE_FIELD_NAMES: readonly ScalarPreferenceFieldName[] = [
 const RECORD_PREFERENCE_FIELD_NAMES: readonly RecordPreferenceFieldName[] = [
 	"taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey",
 	"projectNumericSlotGroupAssignmentsBySlotNumber",
+	"mostRecentlyUsedTaskCreateBaseRefByProjectId",
 ];
 
 export function decideUserInterfacePreferenceMigrationFromBrowserLocalStorage(

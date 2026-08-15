@@ -625,7 +625,9 @@ function detectGitDefaultBranch(repoPath: string, branchNames: string[]): string
 	return branchNames[0] ?? null;
 }
 
-function detectGitRepositoryInfo(repoPath: string): RuntimeGitRepositoryInfo {
+// 导出是给 `kanban task create --preview` 用的：预览必须在**不注册项目**的前提下也能说清 base ref
+// 会怎么解析，而 loadWorkspaceContext 的 autoCreateIfMissing 路径会写工作区索引。
+export function detectGitRepositoryInfo(repoPath: string): RuntimeGitRepositoryInfo {
 	const gitRoot = detectGitRoot(repoPath);
 	if (!gitRoot) {
 		throw new Error(`No git repository detected at ${repoPath}`);
@@ -648,7 +650,8 @@ function detectGitRepositoryInfo(repoPath: string): RuntimeGitRepositoryInfo {
 	};
 }
 
-async function resolveWorkspacePath(cwd: string): Promise<string> {
+// 同 detectGitRepositoryInfo：只读预览要先把「哪个目录是仓库根」解析出来，且不能顺带注册项目。
+export async function resolveWorkspacePath(cwd: string): Promise<string> {
 	const resolvedCwd = resolve(cwd);
 	let canonicalCwd = resolvedCwd;
 	try {

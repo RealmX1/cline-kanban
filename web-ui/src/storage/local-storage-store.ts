@@ -3,6 +3,9 @@ export enum LocalStorageKey {
 	TaskAutoReviewMode = "kanban.task-auto-review-mode",
 	TaskEditDrafts = "kanban.task-edit-drafts.v1",
 	TaskCreateTerminalAgentModelSelections = "kanban.task-create-terminal-agent-model-selections.v1",
+	// projectId → 该项目上次成功建卡所用的 base ref。真相源在服务端 config.json，这里只是本地镜像
+	// （服务端写失败时不丢用户这次的选择）。
+	MostRecentlyUsedTaskCreateBaseRefByProject = "kanban.most-recently-used-task-create-base-ref-by-project.v1",
 	AgentTipsDismissed = "kanban.agent-tips-dismissed",
 	TaskCreatePrimaryStartAction = "kanban.task-create-primary-start-action",
 	TaskConversationSessionReadReceipts = "kanban.task-conversation-session-read-receipts.v1",

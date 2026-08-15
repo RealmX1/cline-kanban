@@ -71,7 +71,7 @@ describe("use-task-branch-options", () => {
 		expect(resolveDefaultTaskBranchRef(workspaceGit, options)).toBe("main");
 	});
 
-	it("uses main as the default even when another branch is listed first", () => {
+	it("uses the repository default branch even when another branch is listed first", () => {
 		const workspaceGit = createWorkspaceGit({
 			currentBranch: "main",
 			defaultBranch: "main",
@@ -85,6 +85,42 @@ describe("use-task-branch-options", () => {
 
 		expect(options[0]?.value).toBe("feature/recent");
 		expect(resolveDefaultTaskBranchRef(workspaceGit, options)).toBe("main");
+	});
+
+	// 曾经这里写死偏好字面量 "main"，于是默认分支叫别的名字、但仓库里恰好也有一条 main 的项目会被
+	// 默默带到错误的基线上。默认分支的解析归 detectGitDefaultBranch，这条断言钉住「不再有字面量」。
+	it("prefers the repository default branch over a branch that merely happens to be named main", () => {
+		const workspaceGit = createWorkspaceGit({
+			currentBranch: "feature/newest",
+			defaultBranch: "trunk",
+			branches: [{ name: "main" }, { name: "trunk" }, { name: "feature/newest" }],
+		});
+
+		expect(resolveDefaultTaskBranchRef(workspaceGit, buildCreateTaskBranchOptions(workspaceGit))).toBe("trunk");
+	});
+
+	it("prefers the branch this project most recently created a task from", () => {
+		const workspaceGit = createWorkspaceGit({
+			currentBranch: "main",
+			defaultBranch: "main",
+			branches: [{ name: "main" }, { name: "feature/remembered" }],
+		});
+
+		expect(
+			resolveDefaultTaskBranchRef(workspaceGit, buildCreateTaskBranchOptions(workspaceGit), "feature/remembered"),
+		).toBe("feature/remembered");
+	});
+
+	it("falls back to the repository default branch when the remembered branch no longer exists", () => {
+		const workspaceGit = createWorkspaceGit({
+			currentBranch: "main",
+			defaultBranch: "main",
+			branches: [{ name: "main" }],
+		});
+
+		expect(
+			resolveDefaultTaskBranchRef(workspaceGit, buildCreateTaskBranchOptions(workspaceGit), "feature/deleted"),
+		).toBe("main");
 	});
 
 	it("marks only the active branch as current when it is also the repository default branch", () => {

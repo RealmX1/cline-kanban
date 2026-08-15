@@ -1863,6 +1863,9 @@ export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z
 	workspaceOpenTargetPreferredApplicationId: z.string().nullable(),
 	// 顶栏项目快速切换器的《红警》式编组：槽位号（"1"–"9"）→ projectId。
 	projectNumericSlotGroupAssignmentsBySlotNumber: z.record(z.string(), z.string()),
+	// 键是 projectId（= 服务端 workspaceId），值是该项目上次**成功建卡**所用的 base ref。
+	// 只在建卡成功时写，不在下拉框每次 change 时写：点开对话框又放弃的误选不该变成项目默认值。
+	mostRecentlyUsedTaskCreateBaseRefByProjectId: z.record(z.string(), z.string()),
 });
 export type RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins = z.infer<
 	typeof runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema
@@ -1878,6 +1881,7 @@ export type RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins = z.infer<
 export const runtimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorageSchema = z.object({
 	taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: z.record(z.string(), z.string()).optional(),
 	projectNumericSlotGroupAssignmentsBySlotNumber: z.record(z.string(), z.string()).optional(),
+	mostRecentlyUsedTaskCreateBaseRefByProjectId: z.record(z.string(), z.string()).optional(),
 });
 export type RuntimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage = z.infer<
 	typeof runtimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorageSchema

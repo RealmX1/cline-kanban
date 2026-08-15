@@ -94,6 +94,10 @@ export default defineConfig({
 			"@runtime-session-activity": resolve(__dirname, "../src/core/session-activity.ts"),
 			"@runtime-shortcuts": resolve(__dirname, "../src/config/shortcut-utils.ts"),
 			"@runtime-task-agent-permission-mode": resolve(__dirname, "../src/core/task-agent-permission-mode.ts"),
+			"@runtime-task-create-base-ref-resolution": resolve(
+				__dirname,
+				"../src/core/task-create-base-ref-resolution.ts",
+			),
 			"@runtime-task-id": resolve(__dirname, "../src/core/task-id.ts"),
 			"@runtime-task-title": resolve(__dirname, "../src/core/task-title.ts"),
 			"@runtime-task-worktree-path": resolve(__dirname, "../src/workspace/task-worktree-path.ts"),

@@ -34,10 +34,7 @@ import {
 } from "../core/cli-process-guards";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
-import {
-	DEFAULT_TASK_AGENT_PERMISSION_MODE,
-	resolveTaskAgentPermissionModeFromLegacyAutonomousFlag,
-} from "../core/task-agent-permission-mode";
+import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../core/task-agent-permission-mode";
 import {
 	addTaskDependency,
 	addTaskToColumn,
@@ -65,8 +62,19 @@ import {
 } from "../core/task-message-injection-ledger";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
-import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
+import {
+	detectGitRepositoryInfo,
+	getTaskWorktreesHomePath,
+	loadWorkspaceBoardById,
+	loadWorkspaceContext,
+	mutateWorkspaceState,
+	resolveWorkspacePath,
+} from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
+import {
+	resolveTaskCreateEffectiveSettings,
+	type TaskCreateRequestedSettings,
+} from "./task-create-effective-settings-resolution";
 
 const LIST_TASK_COLUMNS = ["backlog", "in_progress", "review", "validation", "trash"] as const;
 type ListTaskColumn = (typeof LIST_TASK_COLUMNS)[number];
@@ -458,10 +466,6 @@ async function updateRuntimeWorkspaceState<T>(
 	return mutationResponse.value;
 }
 
-function resolveTaskBaseRef(state: RuntimeWorkspaceStateResponse): string {
-	return state.git.currentBranch ?? state.git.defaultBranch ?? state.git.branches[0]?.name ?? "";
-}
-
 function findTaskRecord(
 	state: RuntimeWorkspaceStateResponse,
 	taskId: string,
@@ -677,7 +681,7 @@ async function deleteTaskWorkspace(
 	}
 }
 
-async function createTask(input: {
+interface TaskCreateCommandInput {
 	cwd: string;
 	title?: string;
 	prompt: string;
@@ -693,30 +697,149 @@ async function createTask(input: {
 	parentSessionId?: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
 	prepFilePath?: string;
-}): Promise<JsonRecord> {
-	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	/** 见 `--expect-resolved-settings-fingerprint`：不匹配就不建卡。 */
+	expectResolvedSettingsFingerprint?: string;
+}
+
+function toTaskCreateRequestedSettings(input: TaskCreateCommandInput): TaskCreateRequestedSettings {
+	return {
+		title: input.title,
+		prompt: input.prompt,
+		baseRef: input.baseRef,
+		startInPlanMode: input.startInPlanMode,
+		taskAgentPermissionMode: input.taskAgentPermissionMode,
+		autoReviewEnabled: input.autoReviewEnabled,
+		autoReviewMode: input.autoReviewMode,
+		agentId: input.agentId,
+		clineSettings: input.clineSettings,
+		taskAgentSessionInitialization: input.taskAgentSessionInitialization,
+		parentSessionId: input.parentSessionId,
+		worktreeMode: input.worktreeMode,
+		prepFilePath: input.prepFilePath,
+	};
+}
+
+/**
+ * `--preview`：把「这条命令真跑起来会建出什么」算出来，**不建卡、不注册项目**。
+ *
+ * 只读到什么程度：不调用 `ensureRuntimeWorkspace`（那是 tRPC `projects.add`，一次写入），也不走
+ * `loadWorkspaceContext` 的 autoCreateIfMissing 路径（它会写工作区索引）。项目还没注册进 Kanban 时
+ * 不报错，改成一条告警继续预览——那恰恰是最需要先看一眼的场景。它也不需要运行时服务器在跑。
+ *
+ * 唯一可能落盘的东西：`loadRuntimeConfig` 在**首次**运行时会 bootstrap 全局 `~/.cline/kanban/config.json`
+ * （探测默认 agent 并写下）。那是任何一条 `kanban` 命令都会做的全局初始化，与本次预览要预览的东西
+ * （看板、项目注册表、任务 worktree）无关，且幂等；不为它单造一条只读配置加载路径。
+ */
+async function previewTaskCreate(input: TaskCreateCommandInput): Promise<JsonRecord> {
+	const registeredWorkspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	}).catch(() => null);
+
+	const workspaceRepoPath =
+		registeredWorkspace?.repoPath ??
+		(await resolveWorkspacePath(
+			(input.projectPath ?? "").trim() ? resolveProjectInputPath(input.projectPath ?? "", input.cwd) : input.cwd,
+		));
+	// 未注册的项目没有看板可读，现有任务视为空——这正确：它一张卡都还没有。
+	// 读看板而不是整份 state：后者会重跑一遍 detectGitRepositoryInfo，而 git 现状上面已经拿到了。
+	const existingBoardColumns = registeredWorkspace
+		? (await loadWorkspaceBoardById(registeredWorkspace.workspaceId)).columns
+		: [];
+
+	const effectiveSettings = await resolveTaskCreateEffectiveSettings({
+		workspaceRepoPath,
+		workspaceId: registeredWorkspace?.workspaceId ?? null,
+		isProjectRegisteredInKanban: registeredWorkspace !== null,
+		wasProjectPathExplicitlyRequested: (input.projectPath ?? "").trim().length > 0,
+		repositoryGitInfo: registeredWorkspace?.git ?? detectGitRepositoryInfo(workspaceRepoPath),
+		existingBoardColumns,
+		runtimeConfig: await loadRuntimeConfig(workspaceRepoPath),
+		requested: toTaskCreateRequestedSettings(input),
+	});
+
+	return {
+		ok: true,
+		preview: true,
+		taskCreated: false,
+		resolvedSettings: effectiveSettings.resolvedSettings,
+		// resolvedSettings.baseRef.source 只分到「显式 / 记忆 / 从 git 状态推出」三档；具体是默认分支、
+		// 当前分支还是分支列表第一条，差别足以改变调用方要不要干预，所以细分保留在这里。
+		baseRefProvenance: effectiveSettings.baseRefResolution.provenance,
+		resolvedSettingsFingerprint: effectiveSettings.resolvedSettingsFingerprint,
+		warnings: effectiveSettings.warnings,
+		needsAttention: effectiveSettings.needsAttention,
+		// 预览拿不到 taskId，所以给不出确切的 worktree 路径；给出父目录 + 模式，足以判断「会不会动主 checkout」。
+		taskWorkspaceParentDirectory: getTaskWorktreesHomePath(),
+		notes: [
+			"Nothing was created. Re-run without --preview to create the task.",
+			"Pass --expect-resolved-settings-fingerprint <resolvedSettingsFingerprint> on the real create to fail closed if anything drifted in between.",
+			"--base-ref is a one-shot override; it never changes the base ref remembered for this project.",
+		],
+	};
+}
+
+async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
+	// 复用这一次已经解析出来的 workspace context，而不是再走一趟 loadWorkspaceState：后者内部会重跑
+	// detectGitRepositoryInfo（4 个以上同步 git 子进程），在建卡这条本就要跑一遍的路径上等于把 git
+	// 探测的开销翻倍——机器一忙就是好几秒。看板另外单独读一次（纯文件读，不碰 git）。
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd);
+	const workspaceRepoPath = workspace.repoPath;
+	const [runtimeConfig, boardBeforeCreate] = await Promise.all([
+		loadRuntimeConfig(workspaceRepoPath),
+		loadWorkspaceBoardById(workspace.workspaceId),
+	]);
+	const effectiveSettings = await resolveTaskCreateEffectiveSettings({
+		workspaceRepoPath,
+		workspaceId: workspace.workspaceId,
+		isProjectRegisteredInKanban: true,
+		wasProjectPathExplicitlyRequested: (input.projectPath ?? "").trim().length > 0,
+		repositoryGitInfo: workspace.git,
+		existingBoardColumns: boardBeforeCreate.columns,
+		runtimeConfig,
+		requested: toTaskCreateRequestedSettings(input),
+	});
+
+	// 指纹校验刻意排在 ensureRuntimeWorkspace（tRPC `projects.add`，一次写入）**之前**：一次 fail closed
+	// 的建卡应当什么都没改，而不是「卡没建成、项目却已经被登记进看板」。
+	const expectedFingerprint = (input.expectResolvedSettingsFingerprint ?? "").trim();
+	if (expectedFingerprint && expectedFingerprint !== effectiveSettings.resolvedSettingsFingerprint) {
+		// fail closed 必须同时体现在 JSON 与退出码上：调用方通常先看退出码再解析输出，只返回
+		// `ok:false` 会让一次「没建成」在 shell 层面看起来和成功一模一样。
+		process.exitCode = 1;
+		return {
+			ok: false,
+			taskCreated: false,
+			error:
+				"Resolved task settings changed since the preview: expected fingerprint " +
+				`${expectedFingerprint}, got ${effectiveSettings.resolvedSettingsFingerprint}. Nothing was created.`,
+			resolvedSettings: effectiveSettings.resolvedSettings,
+			baseRefProvenance: effectiveSettings.baseRefResolution.provenance,
+			resolvedSettingsFingerprint: effectiveSettings.resolvedSettingsFingerprint,
+			warnings: effectiveSettings.warnings,
+			needsAttention: effectiveSettings.needsAttention,
+		};
+	}
+
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const runtimeConfig = await loadRuntimeConfig(workspaceRepoPath);
+
+	const resolvedBaseRef = effectiveSettings.resolvedSettings.baseRef.value;
+	if (!resolvedBaseRef) {
+		throw new Error("Could not determine task base branch for this workspace.");
+	}
 	const created = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (state) => {
-		const resolvedBaseRef = (input.baseRef ?? "").trim() || resolveTaskBaseRef(state);
-		if (!resolvedBaseRef) {
-			throw new Error("Could not determine task base branch for this workspace.");
-		}
 		const result = addTaskToColumn(
 			state.board,
 			"backlog",
 			{
 				title: input.title,
 				prompt: input.prompt,
-				startInPlanMode: input.startInPlanMode ?? runtimeConfig.newTaskStartInPlanModeByDefault,
+				startInPlanMode: effectiveSettings.resolvedSettings.startInPlanMode.value,
 				ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
 				// --agent-id 省略时这张卡实际会跑工作区默认 agent；固化判据要看后者，否则
 				// 「工作区默认是 omp」的新卡不落通道，之后改全局默认会反向改掉它。
 				workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
-				taskAgentPermissionMode:
-					input.taskAgentPermissionMode ??
-					resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(runtimeConfig.agentAutonomousModeEnabled),
+				taskAgentPermissionMode: effectiveSettings.resolvedSettings.requestedTaskAgentPermissionMode.value,
 				autoReviewEnabled: input.autoReviewEnabled,
 				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,
@@ -737,6 +860,14 @@ async function createTask(input: {
 
 	return {
 		ok: true,
+		taskCreated: true,
+		// 「从不拦」的代价是偏差只能事后揭示，所以真实建卡的响应也带上这三样：调用方不必先跑一次
+		// --preview 才能发现权限档是全放行、或 base ref 用的是这个项目记住的那条分支。
+		resolvedSettings: effectiveSettings.resolvedSettings,
+		baseRefProvenance: effectiveSettings.baseRefResolution.provenance,
+		resolvedSettingsFingerprint: effectiveSettings.resolvedSettingsFingerprint,
+		warnings: effectiveSettings.warnings,
+		needsAttention: effectiveSettings.needsAttention,
 		task: {
 			id: created.id,
 			column: "backlog",
@@ -1941,6 +2072,14 @@ export function registerTaskCommand(program: Command): void {
 		.option("--parent-session-id <uuid>", "Codex parent session id; agent launcher will run `codex fork <uuid>`.")
 		.option("--worktree-mode <mode>", `Worktree mode: ${VALID_WORKTREE_MODES.join(" | ")}. Defaults to branch.`)
 		.option("--prep-file-path <path>", "Absolute path to a dispatch prep file persisted on the task.")
+		.option(
+			"--preview",
+			"Resolve every effective setting and report warnings without creating anything. Read-only: it does not even register the project.",
+		)
+		.option(
+			"--expect-resolved-settings-fingerprint <hash>",
+			"Fail closed (create nothing, exit 1) unless the resolved settings still hash to this value from an earlier --preview.",
+		)
 		.action(
 			async (options: {
 				title?: string;
@@ -1960,40 +2099,45 @@ export function registerTaskCommand(program: Command): void {
 				parentSessionId?: string;
 				worktreeMode?: string;
 				prepFilePath?: string;
+				preview?: boolean;
+				expectResolvedSettingsFingerprint?: string;
 			}) => {
-				await runTaskCommand(
-					async () =>
-						await createTask({
-							cwd: process.cwd(),
-							title: options.title,
-							prompt: options.prompt,
-							projectPath: options.projectPath,
-							baseRef: options.baseRef,
-							startInPlanMode: parseOptionalBooleanOption(options.startInPlanMode, "--start-in-plan-mode"),
-							taskAgentPermissionMode: parseTaskAgentPermissionMode(options.taskAgentPermissionMode),
-							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
-							autoReviewMode: options.autoReviewMode,
-							agentId: parseAgentId(options.agentId) ?? undefined,
-							clineSettings: buildTaskClineSettingsForCreate({
-								providerId: parseOptionalStringOrDefault(options.clineProvider) ?? undefined,
-								modelId: parseOptionalStringOrDefault(options.clineModel) ?? undefined,
-								reasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
-							}),
-							taskAgentSessionInitialization:
-								buildTaskAgentSessionInitialization({
-									agentId: parseAgentId(options.agentId),
-									sourceSessionId: options.agentSessionInitializationId?.trim() || undefined,
-									sourceSessionReuseMode: options.agentSessionInitializationMode
-										? runtimeTaskAgentSessionInitializationReuseModeSchema.parse(
-												options.agentSessionInitializationMode,
-											)
-										: undefined,
-								}) ?? undefined,
-							parentSessionId: options.parentSessionId?.trim() || undefined,
-							worktreeMode: parseWorktreeMode(options.worktreeMode),
-							prepFilePath: options.prepFilePath?.trim() || undefined,
+				await runTaskCommand(async () => {
+					const taskCreateCommandInput: TaskCreateCommandInput = {
+						cwd: process.cwd(),
+						title: options.title,
+						prompt: options.prompt,
+						projectPath: options.projectPath,
+						baseRef: options.baseRef,
+						startInPlanMode: parseOptionalBooleanOption(options.startInPlanMode, "--start-in-plan-mode"),
+						taskAgentPermissionMode: parseTaskAgentPermissionMode(options.taskAgentPermissionMode),
+						autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
+						autoReviewMode: options.autoReviewMode,
+						agentId: parseAgentId(options.agentId) ?? undefined,
+						clineSettings: buildTaskClineSettingsForCreate({
+							providerId: parseOptionalStringOrDefault(options.clineProvider) ?? undefined,
+							modelId: parseOptionalStringOrDefault(options.clineModel) ?? undefined,
+							reasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
 						}),
-				);
+						taskAgentSessionInitialization:
+							buildTaskAgentSessionInitialization({
+								agentId: parseAgentId(options.agentId),
+								sourceSessionId: options.agentSessionInitializationId?.trim() || undefined,
+								sourceSessionReuseMode: options.agentSessionInitializationMode
+									? runtimeTaskAgentSessionInitializationReuseModeSchema.parse(
+											options.agentSessionInitializationMode,
+										)
+									: undefined,
+							}) ?? undefined,
+						parentSessionId: options.parentSessionId?.trim() || undefined,
+						worktreeMode: parseWorktreeMode(options.worktreeMode),
+						prepFilePath: options.prepFilePath?.trim() || undefined,
+						expectResolvedSettingsFingerprint: options.expectResolvedSettingsFingerprint?.trim() || undefined,
+					};
+					return options.preview
+						? await previewTaskCreate(taskCreateCommandInput)
+						: await createTask(taskCreateCommandInput);
+				});
 			},
 		);
 

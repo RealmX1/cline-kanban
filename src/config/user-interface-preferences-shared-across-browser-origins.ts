@@ -21,6 +21,7 @@ export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHI
 		taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {},
 		workspaceOpenTargetPreferredApplicationId: null,
 		projectNumericSlotGroupAssignmentsBySlotNumber: {},
+		mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
 	};
 
 function normalizeStringKeyedStringRecord(value: unknown): Record<string, string> {
@@ -68,6 +69,9 @@ export function normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
 		projectNumericSlotGroupAssignmentsBySlotNumber: normalizeStringKeyedStringRecord(
 			record.projectNumericSlotGroupAssignmentsBySlotNumber,
 		),
+		mostRecentlyUsedTaskCreateBaseRefByProjectId: normalizeStringKeyedStringRecord(
+			record.mostRecentlyUsedTaskCreateBaseRefByProjectId,
+		),
 	};
 }
 
@@ -81,7 +85,8 @@ export function hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet(
 		preferences.taskCreateDialogPrimaryStartAction === null &&
 		Object.keys(preferences.taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey).length === 0 &&
 		preferences.workspaceOpenTargetPreferredApplicationId === null &&
-		Object.keys(preferences.projectNumericSlotGroupAssignmentsBySlotNumber).length === 0
+		Object.keys(preferences.projectNumericSlotGroupAssignmentsBySlotNumber).length === 0 &&
+		Object.keys(preferences.mostRecentlyUsedTaskCreateBaseRefByProjectId).length === 0
 	);
 }
 
@@ -109,6 +114,10 @@ export function areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
 		areStringKeyedStringRecordsEqual(
 			left.projectNumericSlotGroupAssignmentsBySlotNumber,
 			right.projectNumericSlotGroupAssignmentsBySlotNumber,
+		) &&
+		areStringKeyedStringRecordsEqual(
+			left.mostRecentlyUsedTaskCreateBaseRefByProjectId,
+			right.mostRecentlyUsedTaskCreateBaseRefByProjectId,
 		)
 	);
 }
@@ -179,6 +188,10 @@ export function mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(
 			updates?.projectNumericSlotGroupAssignmentsBySlotNumber === undefined
 				? current.projectNumericSlotGroupAssignmentsBySlotNumber
 				: normalizeStringKeyedStringRecord(updates.projectNumericSlotGroupAssignmentsBySlotNumber),
+		mostRecentlyUsedTaskCreateBaseRefByProjectId:
+			updates?.mostRecentlyUsedTaskCreateBaseRefByProjectId === undefined
+				? current.mostRecentlyUsedTaskCreateBaseRefByProjectId
+				: normalizeStringKeyedStringRecord(updates.mostRecentlyUsedTaskCreateBaseRefByProjectId),
 	};
 	if (!dictionaryEntriesMigratedFromBrowserLocalStorage) {
 		return replaced;
@@ -192,6 +205,10 @@ export function mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(
 		projectNumericSlotGroupAssignmentsBySlotNumber: adoptDictionaryEntriesAbsentFromCurrentRecord(
 			replaced.projectNumericSlotGroupAssignmentsBySlotNumber,
 			dictionaryEntriesMigratedFromBrowserLocalStorage.projectNumericSlotGroupAssignmentsBySlotNumber,
+		),
+		mostRecentlyUsedTaskCreateBaseRefByProjectId: adoptDictionaryEntriesAbsentFromCurrentRecord(
+			replaced.mostRecentlyUsedTaskCreateBaseRefByProjectId,
+			dictionaryEntriesMigratedFromBrowserLocalStorage.mostRecentlyUsedTaskCreateBaseRefByProjectId,
 		),
 	};
 }

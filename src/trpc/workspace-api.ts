@@ -24,6 +24,7 @@ import {
 } from "../core/api-validation";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
+import { resolveTaskCreateBaseRef } from "../core/task-create-base-ref-resolution";
 import { discardTaskEditDraftsForTasksRemovedFromBoard } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import {
 	loadWorkspaceBoardById,
@@ -572,9 +573,17 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			// Reuses the exact `kanban task create` core pipeline: atomic locked
 			// load→mutate→save via mutateWorkspaceState + the pure addTaskToColumn. baseRef is
 			// resolved server-side from the workspace's git state (same rule as the CLI).
+			// 这条入口不给用户挑 base ref，所以「记住的那条」在这里是只读消费：与 UI 建卡对话框、
+			// CLI `task create` 共用同一个 resolver，免得同一个项目换条入口建卡就落到不同 base 上。
+			// 只读不写——没有可写的用户意图，快速添加不该悄悄改掉人在对话框里表达过的选择。
+			const rememberedBaseRefForProject =
+				runtimeConfig.userInterfacePreferencesSharedAcrossBrowserOrigins
+					.mostRecentlyUsedTaskCreateBaseRefByProjectId[workspaceScope.workspaceId] ?? null;
 			const mutationResponse = await mutateWorkspaceState(workspaceScope.workspacePath, (state) => {
-				const resolvedBaseRef =
-					state.git.currentBranch ?? state.git.defaultBranch ?? state.git.branches[0]?.name ?? "";
+				const resolvedBaseRef = resolveTaskCreateBaseRef({
+					rememberedBaseRefForProject,
+					repository: state.git,
+				}).baseRef;
 				if (!resolvedBaseRef) {
 					throw new TRPCError({
 						code: "BAD_REQUEST",

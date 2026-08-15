@@ -85,6 +85,7 @@ import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
+import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { saveWorkspaceState } from "@/runtime/workspace-state-query";
 import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
@@ -485,8 +486,20 @@ export default function App(): ReactElement {
 		workspacePath,
 	});
 
-	const { createTaskBranchOptions, editTaskBranchOptions, defaultTaskBranchRef, defaultCreateTaskBranchRef } =
-		useTaskBranchOptions({ workspaceGit });
+	const [mostRecentlyUsedTaskCreateBaseRefByProjectId] = useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference();
+	const rememberedTaskCreateBaseRefForCurrentProject = projectRuntimeWorkspaceId
+		? (mostRecentlyUsedTaskCreateBaseRefByProjectId[projectRuntimeWorkspaceId] ?? null)
+		: null;
+	const {
+		createTaskBranchOptions,
+		editTaskBranchOptions,
+		defaultTaskBranchRef,
+		defaultCreateTaskBranchRef,
+		rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists,
+	} = useTaskBranchOptions({
+		workspaceGit,
+		rememberedTaskCreateBaseRefForCurrentProject,
+	});
 	const queueTaskStartAfterEdit = useCallback((taskId: string) => {
 		setPendingTaskStartAfterEditId(taskId);
 	}, []);
@@ -1550,6 +1563,12 @@ export default function App(): ReactElement {
 					branchRef={editingTaskId ? editTaskBranchRef : newTaskBranchRef}
 					branchOptions={editingTaskId ? editTaskBranchOptions : createTaskBranchOptions}
 					onBranchRefChange={editingTaskId ? setEditTaskBranchRef : setNewTaskBranchRef}
+					taskCreateBaseRefRememberedForCurrentProject={rememberedTaskCreateBaseRefForCurrentProject}
+					repositoryDefaultBranchRef={workspaceGit?.defaultBranch ?? null}
+					rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists={
+						rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists
+					}
+					resolvedDefaultTaskCreateBaseRef={defaultCreateTaskBranchRef}
 					worktreeMode={editingTaskId ? editTaskWorktreeMode : newTaskWorktreeMode}
 					onWorktreeModeChange={editingTaskId ? setEditTaskWorktreeMode : setNewTaskWorktreeMode}
 					agentId={editingTaskId ? editTaskAgentId : newTaskAgentId}

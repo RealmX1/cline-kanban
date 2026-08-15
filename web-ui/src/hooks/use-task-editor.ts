@@ -93,6 +93,32 @@ function writeRememberedTaskCreateTerminalAgentModelSelection(
 	});
 }
 
+/**
+ * 记住「这个项目上次建卡用的是哪条 base ref」。
+ *
+ * 只在**建卡成功**后调用，不在下拉框 change 时调用：点开对话框翻了翻分支又放弃，不该改掉项目默认值。
+ *
+ * projectId 为空（首屏还没解析出当前项目）时**什么都不写**。退而求其次塞进一个 "global" 桶会让下一个
+ * 打开的项目读到别人仓库的分支名——那比不记更糟，而且失效分支的回落会把这类污染掩盖掉。
+ */
+function writeMostRecentlyUsedTaskCreateBaseRefForProject(projectId: string | null, baseRef: string): void {
+	const trimmedBaseRef = baseRef.trim();
+	if (!projectId || !trimmedBaseRef) {
+		return;
+	}
+	const currentBaseRefsByProjectId =
+		readEffectiveUserInterfacePreferenceValue("mostRecentlyUsedTaskCreateBaseRefByProjectId") ?? {};
+	if (currentBaseRefsByProjectId[projectId] === trimmedBaseRef) {
+		return;
+	}
+	saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+		mostRecentlyUsedTaskCreateBaseRefByProjectId: {
+			...currentBaseRefsByProjectId,
+			[projectId]: trimmedBaseRef,
+		},
+	});
+}
+
 function isSameTerminalAgentModelOverrideSettings(
 	left: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
 	right: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
@@ -833,6 +859,7 @@ export function useTaskEditor({
 				worktreeMode: newTaskWorktreeMode,
 			});
 			setBoard(created.board);
+			writeMostRecentlyUsedTaskCreateBaseRefForProject(currentProjectId, baseRef);
 			trackTaskCreated({
 				selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? selectedAgentId),
 				start_in_plan_mode: newTaskStartInPlanMode,
@@ -845,7 +872,10 @@ export function useTaskEditor({
 			setNewTaskAgentPermissionMode(
 				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
 			);
-			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
+			// 刚用掉的那条 ref 就是这个项目新的默认值（上面已写进记忆），所以两条路径都设回 baseRef。
+			// 不能沿用「关掉对话框就复位成 resolvedDefaultCreateTaskBranchRef」：那是闭包里捕获的旧值，
+			// 偏好 store 的乐观发布不保证在同一帧内把它重算出来，于是刚记住的选择会闪回旧默认。
+			setNewTaskBranchRef(baseRef);
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
@@ -877,7 +907,6 @@ export function useTaskEditor({
 			newTaskAgentPermissionModeByDefault,
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
-			resolvedDefaultCreateTaskBranchRef,
 			resolvedDefaultTaskBranchRef,
 			newTaskWorktreeMode,
 			selectedAgentId,
@@ -924,6 +953,7 @@ export function useTaskEditor({
 				createdTaskIds.push(created.task.id);
 			}
 			setBoard(updatedBoard);
+			writeMostRecentlyUsedTaskCreateBaseRefForProject(currentProjectId, baseRef);
 			for (const prompt of validPrompts) {
 				trackTaskCreated({
 					selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? selectedAgentId),
@@ -938,7 +968,10 @@ export function useTaskEditor({
 			setNewTaskAgentPermissionMode(
 				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
 			);
-			setNewTaskBranchRef(options?.keepDialogOpen ? newTaskBranchRef : resolvedDefaultCreateTaskBranchRef);
+			// 刚用掉的那条 ref 就是这个项目新的默认值（上面已写进记忆），所以两条路径都设回 baseRef。
+			// 不能沿用「关掉对话框就复位成 resolvedDefaultCreateTaskBranchRef」：那是闭包里捕获的旧值，
+			// 偏好 store 的乐观发布不保证在同一帧内把它重算出来，于是刚记住的选择会闪回旧默认。
+			setNewTaskBranchRef(baseRef);
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
@@ -967,7 +1000,6 @@ export function useTaskEditor({
 			newTaskAgentPermissionModeByDefault,
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
-			resolvedDefaultCreateTaskBranchRef,
 			resolvedDefaultTaskBranchRef,
 			newTaskWorktreeMode,
 			selectedAgentId,

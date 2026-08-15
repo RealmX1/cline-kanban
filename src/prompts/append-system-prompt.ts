@@ -205,16 +205,20 @@ Parameters:
 Purpose: create a new task in \`backlog\`, with optional plan mode and auto-review behavior.
 
 Command:
-\`${kanbanCommand} task create [--title "<text>"] --prompt "<text>" [--project-path <path>] [--base-ref <branch>] [--start-in-plan-mode <true|false>] [--auto-review-enabled <true|false>] [--auto-review-mode commit|pr]\`
+\`${kanbanCommand} task create [--title "<text>"] --prompt "<text>" [--project-path <path>] [--base-ref <branch>] [--start-in-plan-mode <true|false>] [--auto-review-enabled <true|false>] [--auto-review-mode commit|pr] [--preview] [--expect-resolved-settings-fingerprint <hash>]\`
 
 Parameters:
 - \`--title "<text>"\` optional task title. If omitted, Kanban derives one from the prompt.
 - \`--prompt "<text>"\` required task prompt text.
 - \`--project-path <path>\` optional workspace path. If not already registered in Kanban, it is auto-added for git repos.
-- \`--base-ref <branch>\` optional base branch/worktree ref. Defaults to current branch, then default branch, then first known branch.
+- \`--base-ref <branch>\` optional base branch/worktree ref. If omitted, Kanban uses the branch this project most recently created a task from, then the repository default branch, then the current branch, then the first known branch. Passing \`--base-ref\` is a one-shot override: it never changes what the project remembers.
 - \`--start-in-plan-mode <true|false>\` optional. Default follows the runtime Settings default. Set this only when you need to override that default for this task.
 - \`--auto-review-enabled <true|false>\` optional. Default false. Enables automatic action once task reaches review.
 - \`--auto-review-mode commit|pr\` optional auto-review action. Default \`commit\`.
+- \`--preview\` optional. Resolves every effective setting and reports warnings **without creating anything** (it does not even register the project). Use it when the defaults matter to you and you have not verified them for this workspace.
+- \`--expect-resolved-settings-fingerprint <hash>\` optional. Pass the \`resolvedSettingsFingerprint\` from a preview; if anything drifted in between, the create fails closed (exit 1) instead of creating a task you did not preview.
+
+Both \`--preview\` and the real create return \`resolvedSettings\` (every effective setting with the \`source\` it came from: \`explicit_flag\`, \`remembered_project_selection\`, \`workspace_config_default\`, \`built_in_default\`, \`derived_from_prompt\`), \`warnings\` (each with a stable \`code\`), and \`needsAttention\`. Read them: settings you did not pass — base ref, which agent will actually run, the permission tier (the default bypasses **all** permission prompts), plan-mode start, worktree mode — are decided by workspace config, and \`warnings\` is where the surprising ones are named.
 
 ## task update
 

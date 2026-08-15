@@ -16,6 +16,7 @@ import type {
 	WorkspaceTaskEditDraftMutation,
 	WorkspaceTaskEditDraftsSnapshot,
 } from "@/runtime/types";
+import { readEffectiveUserInterfacePreferenceValue } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
@@ -1062,7 +1063,9 @@ describe("useTaskEditor", () => {
 		});
 	});
 
-	it("defaults closed create dialogs to the current base ref instead of the last selected base ref", async () => {
+	// 这条断言的方向是**有意反过来**的：以前每次建完卡都把下拉框复位回默认分支，于是在非默认分支
+	// 上连续建卡的人每张卡都要重挑一次。现在刚用过的那条 ref 会留在框里（并由上层写进项目记忆）。
+	it("keeps the base ref just used after creating, instead of snapping back to the default", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
 		await act(async () => {
@@ -1099,14 +1102,81 @@ describe("useTaskEditor", () => {
 
 		const afterCreateSnapshot = requireSnapshot(latestSnapshot);
 		expect(afterCreateSnapshot.isInlineTaskCreateOpen).toBe(false);
-		expect(afterCreateSnapshot.newTaskBranchRef).toBe("feature/recent");
+		expect(afterCreateSnapshot.newTaskBranchRef).toBe("main");
 		expect(afterCreateSnapshot.board.columns[0]?.cards[0]?.baseRef).toBe("main");
 
+		// 建卡成功会把这条 ref 写进项目记忆，于是上层重算出来的默认值也变成它——这里用「换个 prop
+		// 再渲染一次」模拟那一步（本 hook 自己不读偏好，默认值一律由调用方算好传进来）。
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={afterCreateSnapshot.board}
+					createTaskBranchOptions={[
+						{ value: "feature/recent", label: "feature/recent" },
+						{ value: "main", label: "main (default)" },
+					]}
+					defaultTaskBranchRef="feature/recent"
+					defaultCreateTaskBranchRef="main"
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
 		await act(async () => {
 			requireSnapshot(latestSnapshot).handleOpenCreateTask();
 		});
 
-		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe("feature/recent");
+		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe("main");
+	});
+
+	it("remembers the base ref per project only once a task is actually created", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					currentProjectId="project-remembering-base-ref"
+					createTaskBranchOptions={[
+						{ value: "feature/recent", label: "feature/recent" },
+						{ value: "main", label: "main (default)" },
+					]}
+					defaultTaskBranchRef="main"
+					defaultCreateTaskBranchRef="main"
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+			requireSnapshot(latestSnapshot).setNewTaskBranchRef("feature/recent");
+		});
+		await act(async () => {});
+
+		// 只是在下拉框里挑了一下还没建卡——此时改掉项目默认值会把「点开翻了翻又放弃」记成意图。
+		expect(
+			readEffectiveUserInterfacePreferenceValue("mostRecentlyUsedTaskCreateBaseRefByProjectId")?.[
+				"project-remembering-base-ref"
+			],
+		).toBeUndefined();
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Build it on the feature branch");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+		await act(async () => {});
+
+		expect(
+			readEffectiveUserInterfacePreferenceValue("mostRecentlyUsedTaskCreateBaseRefByProjectId")?.[
+				"project-remembering-base-ref"
+			],
+		).toBe("feature/recent");
 	});
 
 	it("creates a new worktree task from the default base ref", async () => {

@@ -54,6 +54,8 @@ Subcommands:
 .RI [ --start-in-plan-mode " " true|false ]
 .RI [ --auto-review-enabled " " true|false ]
 .RI [ --auto-review-mode " " commit|pr|move_to_trash ]
+.RI [ --preview ]
+.RI [ --expect-resolved-settings-fingerprint " " hash ]
 .br
 .B update
 .B --task-id
@@ -135,6 +137,9 @@ List tasks for the current workspace:
 .TP
 Create and start a task manually:
 .B kanban task create --prompt "Implement API pagination"
+.TP
+Preview what a task would be created with, without creating it:
+.B kanban task create --preview --prompt "Implement API pagination"
 .TP
 Ingest a hook event:
 .B kanban hooks ingest --event to_review

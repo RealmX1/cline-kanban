@@ -202,6 +202,10 @@ export function TaskEditorDialog({
 	branchRef,
 	branchOptions,
 	onBranchRefChange,
+	taskCreateBaseRefRememberedForCurrentProject = null,
+	repositoryDefaultBranchRef = null,
+	rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists = null,
+	resolvedDefaultTaskCreateBaseRef = null,
 	worktreeMode,
 	onWorktreeModeChange,
 	agentId,
@@ -247,6 +251,19 @@ export function TaskEditorDialog({
 	branchRef: string;
 	branchOptions: BranchSelectOption[];
 	onBranchRefChange: (value: string) => void;
+	/** 本项目上次成功建卡用的 ref（跨 origin 偏好里记的）。仅用于说明文案，不参与解析。 */
+	taskCreateBaseRefRememberedForCurrentProject?: string | null;
+	/** 仓库默认分支。用于「不记的话本该是它」这句提示与那个复位按钮。 */
+	repositoryDefaultBranchRef?: string | null;
+	/** 记忆值指向的分支已消失、因而被丢弃时的那个名字。 */
+	rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists?: string | null;
+	/**
+	 * 建卡模式下自动解析出来的那个 base ref（`defaultCreateTaskBranchRef`）。
+	 *
+	 * 用来判定「下拉框现在显示的还是不是自动解析的结果」——用户手动改过之后，那两条解释来源的提示
+	 * 就都不再成立。
+	 */
+	resolvedDefaultTaskCreateBaseRef?: string | null;
 	worktreeMode: RuntimeTaskWorktreeMode;
 	onWorktreeModeChange: (value: RuntimeTaskWorktreeMode) => void;
 	agentId?: RuntimeAgentId | undefined;
@@ -369,6 +386,23 @@ export function TaskEditorDialog({
 			? null
 			: (agents?.find((agent) => agent.id === effectiveTaskAgentPermissionModeAgentId)?.label ??
 				getRuntimeAgentCatalogEntry(effectiveTaskAgentPermissionModeAgentId)?.label)) ?? "This agent";
+
+	// 只在「当前显示的正是被记住的那条 ref、且它确实偏离了仓库默认分支」时提示。两个条件都必要：
+	// 用户当次手动改过下拉框就不该再说是记住的；记忆值恰好等于默认分支时提示只是噪声。
+	const isShowingRememberedTaskCreateBaseRefHint =
+		taskEditorMode === "create" &&
+		!!taskCreateBaseRefRememberedForCurrentProject &&
+		branchRef === taskCreateBaseRefRememberedForCurrentProject &&
+		!!repositoryDefaultBranchRef &&
+		branchRef !== repositoryDefaultBranchRef;
+
+	// 「记忆的分支没了、已回落」这条同样只在建卡模式、且下拉框现在显示的确实就是那个回落结果时才成立。
+	// 少了任一条件，它就会把编辑模式下卡片自己的 baseRef、或用户手动挑的分支，说成是自动回落的产物。
+	const isShowingDiscardedRememberedTaskCreateBaseRefHint =
+		taskEditorMode === "create" &&
+		!!rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists &&
+		!!resolvedDefaultTaskCreateBaseRef &&
+		branchRef === resolvedDefaultTaskCreateBaseRef;
 
 	// `useDeferredValue` 在这里是划算的，与「不要把它放在 hook / App 根节点」并不矛盾：
 	// 双 commit 的代价完全取决于被重渲的子树大小。放根节点要把 51 个 hook 调用点付两遍；
@@ -885,6 +919,32 @@ export function TaskEditorDialog({
 								size="sm"
 								emptyText="No branches detected"
 							/>
+							{/* 记住上次的选择会让默认值悄悄偏离仓库默认分支——那正是这条提示存在的理由：
+							    被记住这件事必须看得见，而且要能一键退出。两条提示都只在**建卡**模式、且下拉框
+							    当前显示的正是那个自动解析出来的值时才成立；编辑既有卡片显示的是那张卡自己的
+							    baseRef、用户手动改过之后显示的是他自己的选择，那两种情况下把它说成
+							    「记住的 / 回落的结果」都是在撒谎。 */}
+							{isShowingDiscardedRememberedTaskCreateBaseRefHint ? (
+								<p className="text-[11px] text-text-tertiary mt-1">
+									Last used{" "}
+									<code className="text-text-secondary">
+										{rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists}
+									</code>{" "}
+									for this project, but that branch no longer exists — fell back to{" "}
+									<code className="text-text-secondary">{branchRef}</code>.
+								</p>
+							) : isShowingRememberedTaskCreateBaseRefHint ? (
+								<p className="text-[11px] text-text-tertiary mt-1">
+									Remembered from the last task you created in this project.{" "}
+									<button
+										type="button"
+										className="underline underline-offset-2 hover:text-text-secondary"
+										onClick={() => onBranchRefChange(repositoryDefaultBranchRef ?? "")}
+									>
+										Use {repositoryDefaultBranchRef} instead
+									</button>
+								</p>
+							) : null}
 						</div>
 
 						<div className="flex items-center gap-2 flex-wrap">

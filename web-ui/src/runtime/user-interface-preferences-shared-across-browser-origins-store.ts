@@ -43,6 +43,7 @@ export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHI
 		taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {},
 		workspaceOpenTargetPreferredApplicationId: null,
 		projectNumericSlotGroupAssignmentsBySlotNumber: {},
+		mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
 	};
 
 // 表里每一项各自持有自己字段的类型，但按 key 遍历时 TypeScript 无法把 codec 与 value 关联起来（联合
@@ -135,6 +136,12 @@ const BROWSER_LOCAL_STORAGE_MIRROR_CODECS: Record<
 		readFromMirrorText: (mirrorText) => readStringKeyedStringRecord(parseJsonOrNull(mirrorText)),
 		writeToMirrorText: (value) => JSON.stringify(value),
 	}),
+	// 这个字段没有「升级前的历史数据」要兼容（它一出生就在服务端），所以编码可以直接是裸字典。
+	mostRecentlyUsedTaskCreateBaseRefByProjectId: defineMirrorCodec<"mostRecentlyUsedTaskCreateBaseRefByProjectId">({
+		localStorageMirrorKey: LocalStorageKey.MostRecentlyUsedTaskCreateBaseRefByProject,
+		readFromMirrorText: (mirrorText) => readStringKeyedStringRecord(parseJsonOrNull(mirrorText)),
+		writeToMirrorText: (value) => JSON.stringify(value),
+	}),
 };
 
 function readFieldFromBrowserLocalStorageMirror<TFieldName extends UserInterfacePreferenceFieldName>(
@@ -162,6 +169,8 @@ export function readAllUserInterfacePreferenceValuesFromBrowserLocalStorage(): U
 			readFieldFromBrowserLocalStorageMirror("taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey") ?? {},
 		projectNumericSlotGroupAssignmentsBySlotNumber:
 			readFieldFromBrowserLocalStorageMirror("projectNumericSlotGroupAssignmentsBySlotNumber") ?? {},
+		mostRecentlyUsedTaskCreateBaseRefByProjectId:
+			readFieldFromBrowserLocalStorageMirror("mostRecentlyUsedTaskCreateBaseRefByProjectId") ?? {},
 	};
 }
 
