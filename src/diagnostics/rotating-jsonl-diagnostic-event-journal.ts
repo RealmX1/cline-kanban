@@ -34,10 +34,14 @@ const DIAGNOSTIC_EVENT_JOURNAL_RETAINED_ROTATED_FILE_COUNT = 4;
 // 既是单一声明点，也从类型上杜绝路径注入。
 export type DiagnosticEventJournalChannel = "event-loop-delay-window-sample" | "git-command-failure";
 
-// `recordedAtIso` / `channel` 由本模块权威写入，故在类型上禁止 payload 覆盖它们。
+// 以下字段由本模块权威写入。类型上的 `never` 只能挡住对象字面量与已知形状的展开：一个声明为
+// `Record<string, unknown>` 的变量传进来时 TS 不会拿索引签名去比对可选属性，编译期一个错都不报。
+// 因此运行时另有一道无条件覆盖（见 serializeDiagnosticEventJournalLine），两道一起才真的杜绝覆盖。
 export type DiagnosticEventJournalPayload = Record<string, unknown> & {
 	recordedAtIso?: never;
 	channel?: never;
+	journalWriterProcessId?: never;
+	journalWriterProcessStartedAtIso?: never;
 };
 
 interface DiagnosticEventJournalChannelWriteState {
@@ -70,6 +74,23 @@ function getDiagnosticEventJournalRotatedFilePath(
 	return join(getDiagnosticEventJournalDirectoryPath(), `${channel}.${rotationIndex}.jsonl`);
 }
 
+// journal 落点按用户固定（`~/.cline/kanban/…`），与运行实例无关：同一台机器上并行跑多个 Kanban
+// 实例（例如一个监听 3484 端口、另一个监听 3485）时，两个进程写的是**同一组文件**，样本在同一份
+// JSONL 里逐行交织。没有写入方标识就无法把任一通道拆回单进程视角，任何「A 通道的增量 ≈ B 通道的
+// 增量」式对账都不成立。因此标识写在**序列化核心**而不是各调用点：所有通道一并覆盖，调用方无从遗漏。
+//
+// 名字带 `journalWriter` 前缀是必需的消歧：像 `git-command-failure` 这样的通道，整条记录讲的都是
+// **另一个**进程（被 spawn 的 git 子进程）的事，一个光秃秃的 `processId` 摆在 `errorCode` / `args`
+// 旁边，最自然的读法恰好是错的。
+const DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID = process.pid;
+
+// pid 会被操作系统回收复用，而单通道保留 5 个文件 × 8 MiB 可覆盖数十天：同一个 pid 在一份 journal
+// 里既可能属于当前实例，也可能属于几周前那个早已退出的实例，只按 pid 分组会把两次运行的样本混成
+// 一条时间线——恰好毁掉「拆回单进程视角」这个目的。配上进程启动时刻才构成真正唯一的键。
+const DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_STARTED_AT_ISO = new Date(
+	Date.now() - Math.round(process.uptime() * 1000),
+).toISOString();
+
 // 序列化失败（循环引用、BigInt 等）不得让调用方崩溃：降级成一条自述失败原因的记录，
 // 保住「这一刻确实发生过一个事件」这个事实，而不是整条丢掉。
 export function serializeDiagnosticEventJournalLine(
@@ -77,11 +98,31 @@ export function serializeDiagnosticEventJournalLine(
 	payload: DiagnosticEventJournalPayload,
 	recordedAtIso: string,
 ): string {
+	// 权威字段先写一遍以固定 JSON 里的键序（时间戳与来源在最前，便于肉眼扫），payload 展开之后
+	// 再无条件写回一遍以夺回所有权——绕过类型约束传进来的同名键只会被覆盖，绝不会污染记录。
+	const record: Record<string, unknown> = {
+		recordedAtIso,
+		journalWriterProcessId: DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID,
+		journalWriterProcessStartedAtIso: DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_STARTED_AT_ISO,
+		channel,
+		...payload,
+	};
+	record.recordedAtIso = recordedAtIso;
+	record.journalWriterProcessId = DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID;
+	record.journalWriterProcessStartedAtIso = DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_STARTED_AT_ISO;
+	record.channel = channel;
+
 	try {
-		return `${JSON.stringify({ recordedAtIso, channel, ...payload })}\n`;
+		return `${JSON.stringify(record)}\n`;
 	} catch (error) {
 		const serializationError = error instanceof Error ? error.message : String(error);
-		return `${JSON.stringify({ recordedAtIso, channel, journalPayloadSerializationError: serializationError })}\n`;
+		return `${JSON.stringify({
+			recordedAtIso,
+			journalWriterProcessId: DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID,
+			journalWriterProcessStartedAtIso: DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_STARTED_AT_ISO,
+			channel,
+			journalPayloadSerializationError: serializationError,
+		})}\n`;
 	}
 }
 
