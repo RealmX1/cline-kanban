@@ -27,6 +27,8 @@ export default defineConfig({
 		// CI. New workspaces under `packages/` MUST get matching install/test
 		// steps in .github/workflows/test.yml or they fall out of CI coverage.
 		exclude: repositoryWorkspaceExclusionPatterns,
+		// 诊断事件 journal 是排障时要读的真实数据，测试必须写到临时目录而非用户的 ~/.cline。
+		setupFiles: ["./test/vitest-setup-diagnostic-event-journal-isolation.ts"],
 		testTimeout: 15_000,
 		projects: [
 			{

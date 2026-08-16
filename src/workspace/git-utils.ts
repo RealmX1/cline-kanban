@@ -1,6 +1,10 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { createGitProcessEnv } from "../core/git-process-env";
+import {
+	classifyGitCommandProcessLevelFailure,
+	reportGitCommandProcessLevelFailure,
+} from "../diagnostics/git-command-failure-reporter";
 
 const execFileAsync = promisify(execFile);
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
@@ -56,6 +60,8 @@ export async function runGit(cwd: string, args: string[], options: RunGitOptions
 	} catch (error) {
 		const candidate = error as {
 			code?: string | number | null;
+			killed?: unknown;
+			signal?: unknown;
 			stdout?: unknown;
 			stderr?: unknown;
 			message?: unknown;
@@ -65,8 +71,18 @@ export async function runGit(cwd: string, args: string[], options: RunGitOptions
 		const stderr = String(candidate.stderr ?? "").trim();
 		const message = String(candidate.message ?? "").trim();
 		const command = `git ${args.join(" ")} failed`;
-		const errorMessage = `Failed to run Git Command: \n Command: \n ${command} \n ${stderr || message}`;
+		// git 自身的非零退出码是本仓的常规控制流；只有进程层失败（spawn errno、被信号杀掉）才既值得
+		// 记录、也必须让错误文案带上可 grep 的错误码——否则又会重演「EBADF 全程不出现在任何日志里」。
+		const processLevelFailure = classifyGitCommandProcessLevelFailure(candidate);
+		const processLevelFailureSuffix =
+			processLevelFailure === null
+				? ""
+				: `\n processLevelFailure=${processLevelFailure.kind} errorCode=${processLevelFailure.errorCode ?? "(none)"} signal=${processLevelFailure.signal ?? "(none)"}`;
+		const errorMessage = `Failed to run Git Command: \n Command: \n ${command} \n ${stderr || message}${processLevelFailureSuffix}`;
 		const exitCode = normalizeProcessExitCode(candidate.code);
+		if (processLevelFailure !== null) {
+			reportGitCommandProcessLevelFailure(processLevelFailure, { cwd, args, message });
+		}
 
 		return {
 			ok: false,
