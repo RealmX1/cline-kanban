@@ -40,10 +40,11 @@ export type DiagnosticEventJournalChannel =
 	| "task-session-auto-restart-scheduled"
 	| "process-file-descriptor-count-sample";
 
-// `recordedAtIso` / `channel` 由本模块权威写入，故在类型上禁止 payload 覆盖它们。
+// `recordedAtIso` / `channel` / `processId` 由本模块权威写入，故在类型上禁止 payload 覆盖它们。
 export type DiagnosticEventJournalPayload = Record<string, unknown> & {
 	recordedAtIso?: never;
 	channel?: never;
+	processId?: never;
 };
 
 interface DiagnosticEventJournalChannelWriteState {
@@ -76,6 +77,12 @@ function getDiagnosticEventJournalRotatedFilePath(
 	return join(getDiagnosticEventJournalDirectoryPath(), `${channel}.${rotationIndex}.jsonl`);
 }
 
+// journal 文件按用户固定落在 ~/.cline/kanban/diagnostic-event-journals/<channel>.jsonl，与运行实例无关；
+// 同一用户同时跑多个端口实例（例如 tmux cline-kanban-3484 与 cline-kanban-3485）时，两个进程写的是同一个
+// 文件。因此每条记录必须自带进程标识，否则事后既无法按实例切分序列，「本实例 fd 增量 ≈ 本实例 pty 创建
+// 增量」这类跨通道对账也无从做起——两份互相独立的累计序列会被读成一份。
+const DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID = process.pid;
+
 // 序列化失败（循环引用、BigInt 等）不得让调用方崩溃：降级成一条自述失败原因的记录，
 // 保住「这一刻确实发生过一个事件」这个事实，而不是整条丢掉。
 export function serializeDiagnosticEventJournalLine(
@@ -83,11 +90,12 @@ export function serializeDiagnosticEventJournalLine(
 	payload: DiagnosticEventJournalPayload,
 	recordedAtIso: string,
 ): string {
+	const processId = DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID;
 	try {
-		return `${JSON.stringify({ recordedAtIso, channel, ...payload })}\n`;
+		return `${JSON.stringify({ recordedAtIso, processId, channel, ...payload })}\n`;
 	} catch (error) {
 		const serializationError = error instanceof Error ? error.message : String(error);
-		return `${JSON.stringify({ recordedAtIso, channel, journalPayloadSerializationError: serializationError })}\n`;
+		return `${JSON.stringify({ recordedAtIso, processId, channel, journalPayloadSerializationError: serializationError })}\n`;
 	}
 }
 

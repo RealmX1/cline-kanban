@@ -33,43 +33,80 @@ export function readProcessOpenFileDescriptorCount(): number | null {
 	}
 }
 
+export interface ProcessFileDescriptorSampleReport {
+	// 首个样本没有「上一份样本」可比，其读数是基线而非增量，须与后续样本区分开。
+	isBaselineSample: boolean;
+	deltaSincePreviousSample: number | null;
+	crossedStderrWatermarkTier: number | null;
+}
+
+// 抽成纯函数是为了能不依赖计时器地测「首样本不产生虚假增量、也不产生虚假越档」这条不变量。
+export function deriveProcessFileDescriptorSampleReport(
+	previousOpenFileDescriptorCount: number | null,
+	openFileDescriptorCount: number,
+): ProcessFileDescriptorSampleReport {
+	if (previousOpenFileDescriptorCount === null) {
+		return { isBaselineSample: true, deltaSincePreviousSample: null, crossedStderrWatermarkTier: null };
+	}
+	return {
+		isBaselineSample: false,
+		deltaSincePreviousSample: openFileDescriptorCount - previousOpenFileDescriptorCount,
+		crossedStderrWatermarkTier: findCrossedStderrWatermarkTier(
+			previousOpenFileDescriptorCount,
+			openFileDescriptorCount,
+			PROCESS_FILE_DESCRIPTOR_COUNT_STDERR_WATERMARK_TIERS,
+		),
+	};
+}
+
 export function startProcessFileDescriptorWatermarkMonitor(): () => void {
-	let previousOpenFileDescriptorCount = 0;
-	const sampleTimer = setInterval(() => {
+	// null 而非 0：拿 0 当上一份样本，会把进程启动时既有的全部 fd 误报成这一分钟的增长，
+	// 并用同一个虚假基线从 0 起算水位、在启动瞬间误报一次越档，污染首个对账窗口。
+	let previousOpenFileDescriptorCount: number | null = null;
+
+	const recordProcessFileDescriptorSample = (): void => {
 		const openFileDescriptorCount = readProcessOpenFileDescriptorCount();
 		if (openFileDescriptorCount === null) {
 			return;
 		}
+		const sampleReport = deriveProcessFileDescriptorSampleReport(
+			previousOpenFileDescriptorCount,
+			openFileDescriptorCount,
+		);
+		previousOpenFileDescriptorCount = openFileDescriptorCount;
 
 		// 同一条记录里带上累计 pty 创建数：「fd 增量 ≈ pty 创建增量」即为 1:1 泄漏假说的在线验证，
 		// 事后不必再去拼两个通道的时间轴。
 		const ptySessionSpawnCounts = getPtySessionSpawnCountSnapshot();
 		appendDiagnosticEventToRotatingJsonlJournal("process-file-descriptor-count-sample", {
 			openFileDescriptorCount,
-			deltaSincePreviousSample: openFileDescriptorCount - previousOpenFileDescriptorCount,
+			isBaselineSample: sampleReport.isBaselineSample,
+			deltaSincePreviousSample: sampleReport.deltaSincePreviousSample,
 			sampleIntervalMs: PROCESS_FILE_DESCRIPTOR_SAMPLE_INTERVAL_MS,
 			darwinOpenMax: 10_240,
-			cumulativePtySessionSpawnCount: ptySessionSpawnCounts.totalCount,
-			cumulativePtySessionSpawnCountsByReason: ptySessionSpawnCounts.countsByReason,
+			// 只有**成功**创建的 pty 才分配 kqueue，故对账基数取 succeeded；失败数单独带出，
+			// 用于分辨「fd 不再增长」是泄漏停了还是已经开不出 pty 了。
+			cumulativeSucceededPtySessionSpawnCount: ptySessionSpawnCounts.succeededTotalCount,
+			cumulativeFailedPtySessionSpawnCount: ptySessionSpawnCounts.failedTotalCount,
+			cumulativeSucceededPtySessionSpawnCountsByReason: ptySessionSpawnCounts.succeededCountsByReason,
 		});
 
-		const crossedTier = findCrossedStderrWatermarkTier(
-			previousOpenFileDescriptorCount,
-			openFileDescriptorCount,
-			PROCESS_FILE_DESCRIPTOR_COUNT_STDERR_WATERMARK_TIERS,
-		);
-		previousOpenFileDescriptorCount = openFileDescriptorCount;
-		if (crossedTier === null) {
+		if (sampleReport.crossedStderrWatermarkTier === null) {
 			return;
 		}
 		try {
 			process.stderr.write(
-				`[warn] [fd-watermark-probe] 本进程 fd 占用越过水位 tier=${crossedTier} openFileDescriptorCount=${openFileDescriptorCount} darwinOpenMax=10240\n`,
+				`[warn] [fd-watermark-probe] 本进程 fd 占用越过水位 tier=${sampleReport.crossedStderrWatermarkTier} openFileDescriptorCount=${openFileDescriptorCount} darwinOpenMax=10240\n`,
 			);
 		} catch {
 			// Best-effort diagnostic logging only.
 		}
-	}, PROCESS_FILE_DESCRIPTOR_SAMPLE_INTERVAL_MS);
+	};
+
+	// 启动即取一次真实基线，而不是等满一个采样周期：既让首个周期的增量有意义，也在 journal 里
+	// 留下「本进程起步时占了多少 fd」这个事后必然要用到的参照点。
+	recordProcessFileDescriptorSample();
+	const sampleTimer = setInterval(recordProcessFileDescriptorSample, PROCESS_FILE_DESCRIPTOR_SAMPLE_INTERVAL_MS);
 	// 诊断探针不得阻止进程退出。
 	sampleTimer.unref();
 	return () => {

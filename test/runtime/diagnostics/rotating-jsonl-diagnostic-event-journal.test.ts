@@ -32,7 +32,8 @@ describe("rotating JSONL diagnostic event journal", () => {
 		tempDir.cleanup();
 	});
 
-	it("stamps every record with its own recording time and channel so lines stay self-describing", () => {
+	it("stamps every record with its own recording time, writer process and channel so lines stay self-describing", () => {
+		// processId 不可省：多个 Kanban 实例共用同一组 journal 文件，没有它就无法按实例切分序列。
 		const line = serializeDiagnosticEventJournalLine(
 			"event-loop-delay-window-sample",
 			{ p99Ms: 91.4, maxMs: 412.7 },
@@ -42,6 +43,7 @@ describe("rotating JSONL diagnostic event journal", () => {
 		expect(line.endsWith("\n")).toBe(true);
 		expect(JSON.parse(line)).toEqual({
 			recordedAtIso: "2026-08-16T04:05:06.007Z",
+			processId: process.pid,
 			channel: "event-loop-delay-window-sample",
 			p99Ms: 91.4,
 			maxMs: 412.7,
@@ -61,6 +63,7 @@ describe("rotating JSONL diagnostic event journal", () => {
 
 		expect(parsed.channel).toBe("git-command-failure");
 		expect(parsed.recordedAtIso).toBe("2026-08-16T04:05:06.007Z");
+		expect(parsed.processId).toBe(process.pid);
 		expect(typeof parsed.journalPayloadSerializationError).toBe("string");
 	});
 

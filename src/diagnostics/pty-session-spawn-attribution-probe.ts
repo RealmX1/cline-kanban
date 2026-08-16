@@ -42,8 +42,13 @@ const TASK_SESSION_AUTO_RESTART_COUNT_STDERR_WATERMARK_TIERS = [
 	1, 5, 25, 100, 250, 500, 1_000, 2_500, 5_000, 7_500, 10_000,
 ];
 
-const ptySessionSpawnCountsByReason = new Map<PtySessionSpawnReason, number>();
-let ptySessionSpawnTotalCount = 0;
+// 成功与失败必须分开计数。node-pty 分配 kqueue 的 SetupExitCallback 位于 pty.cc:500，而所有 throw 点
+// 在 412/415/455/488 ——**抛错的 spawn 根本走不到 kqueue 分配，不产生本轮要对账的泄漏**。若把失败尝试
+// 混进同一个累计数，fd 增量就会去和一个并不存在的泄漏会话对账，1:1 假说的验证随即失真。
+// 失败事件本身仍要记（那是 fd 耗尽最直接的证据），只是不进「已创建的 pty」这个基数。
+const ptySessionSpawnSucceededCountsByReason = new Map<PtySessionSpawnReason, number>();
+let ptySessionSpawnSucceededTotalCount = 0;
+let ptySessionSpawnFailedTotalCount = 0;
 let taskSessionAutoRestartScheduledTotalCount = 0;
 
 // 返回本次跨过的最高档位；没跨过任何档位则返回 null。
@@ -73,10 +78,16 @@ function appendProbeEvent(channel: DiagnosticEventJournalChannel, payload: Recor
 	appendDiagnosticEventToRotatingJsonlJournal(channel, payload);
 }
 
-export function getPtySessionSpawnCountSnapshot(): { totalCount: number; countsByReason: Record<string, number> } {
+// succeededTotalCount 才是与 fd 增量对账的那个基数；failedTotalCount 单独暴露，供判断「失败是否已开始发生」。
+export function getPtySessionSpawnCountSnapshot(): {
+	succeededTotalCount: number;
+	failedTotalCount: number;
+	succeededCountsByReason: Record<string, number>;
+} {
 	return {
-		totalCount: ptySessionSpawnTotalCount,
-		countsByReason: Object.fromEntries(ptySessionSpawnCountsByReason),
+		succeededTotalCount: ptySessionSpawnSucceededTotalCount,
+		failedTotalCount: ptySessionSpawnFailedTotalCount,
+		succeededCountsByReason: Object.fromEntries(ptySessionSpawnSucceededCountsByReason),
 	};
 }
 
@@ -87,43 +98,60 @@ export function recordPtySessionSpawnOutcome(input: {
 	spawnErrorMessage: string | null;
 }): void {
 	const reason = input.attribution?.reason ?? "unattributed";
-	const previousTotalCount = ptySessionSpawnTotalCount;
-	ptySessionSpawnTotalCount += 1;
-	const reasonCount = (ptySessionSpawnCountsByReason.get(reason) ?? 0) + 1;
-	ptySessionSpawnCountsByReason.set(reason, reasonCount);
 
-	appendProbeEvent("pty-session-spawn", {
-		reason,
-		taskId: input.attribution?.taskId ?? null,
-		taskSessionStartOrigin: input.attribution?.taskSessionStartOrigin ?? null,
-		spawnedPid: input.spawnedPid,
-		spawnErrorCode: input.spawnErrorCode,
-		spawnErrorMessage: input.spawnErrorMessage,
-		cumulativeTotalCount: ptySessionSpawnTotalCount,
-		cumulativeCountForReason: reasonCount,
-	});
-
-	// spawn 失败无条件打 stderr：它稀有，且正是 fd 耗尽最直接的证据。
+	// 失败路径：只记事件与失败计数，绝不进「已创建的 pty」基数——它没有分配 kqueue，不该被对账。
 	if (input.spawnErrorCode !== null) {
+		ptySessionSpawnFailedTotalCount += 1;
+		appendProbeEvent("pty-session-spawn", {
+			outcome: "failed",
+			reason,
+			taskId: input.attribution?.taskId ?? null,
+			taskSessionStartOrigin: input.attribution?.taskSessionStartOrigin ?? null,
+			spawnedPid: null,
+			spawnErrorCode: input.spawnErrorCode,
+			spawnErrorMessage: input.spawnErrorMessage,
+			cumulativeSucceededTotalCount: ptySessionSpawnSucceededTotalCount,
+			cumulativeFailedTotalCount: ptySessionSpawnFailedTotalCount,
+		});
+		// spawn 失败无条件打 stderr（不走水位节流）：它稀有，且正是 fd 耗尽最直接的证据。
 		emitProbeStderrLine(
-			`[warn] [pty-spawn-probe] pty.spawn 失败 reason=${reason} taskId=${input.attribution?.taskId ?? "(none)"} errorCode=${input.spawnErrorCode} cumulativeTotalCount=${ptySessionSpawnTotalCount}`,
+			`[warn] [pty-spawn-probe] pty.spawn 失败 reason=${reason} taskId=${input.attribution?.taskId ?? "(none)"} errorCode=${input.spawnErrorCode} cumulativeSucceeded=${ptySessionSpawnSucceededTotalCount} cumulativeFailed=${ptySessionSpawnFailedTotalCount}`,
 		);
 		return;
 	}
 
+	const previousSucceededTotalCount = ptySessionSpawnSucceededTotalCount;
+	ptySessionSpawnSucceededTotalCount += 1;
+	const succeededCountForReason = (ptySessionSpawnSucceededCountsByReason.get(reason) ?? 0) + 1;
+	ptySessionSpawnSucceededCountsByReason.set(reason, succeededCountForReason);
+
+	appendProbeEvent("pty-session-spawn", {
+		outcome: "succeeded",
+		reason,
+		taskId: input.attribution?.taskId ?? null,
+		taskSessionStartOrigin: input.attribution?.taskSessionStartOrigin ?? null,
+		spawnedPid: input.spawnedPid,
+		spawnErrorCode: null,
+		spawnErrorMessage: null,
+		cumulativeSucceededTotalCount: ptySessionSpawnSucceededTotalCount,
+		cumulativeFailedTotalCount: ptySessionSpawnFailedTotalCount,
+		cumulativeSucceededCountForReason: succeededCountForReason,
+	});
+
 	const crossedTier = findCrossedStderrWatermarkTier(
-		previousTotalCount,
-		ptySessionSpawnTotalCount,
+		previousSucceededTotalCount,
+		ptySessionSpawnSucceededTotalCount,
 		PTY_SESSION_SPAWN_COUNT_STDERR_WATERMARK_TIERS,
 	);
 	if (crossedTier === null) {
 		return;
 	}
-	const countsByReasonSummary = Array.from(ptySessionSpawnCountsByReason, ([key, count]) => `${key}=${count}`).join(
-		" ",
-	);
+	const countsByReasonSummary = Array.from(
+		ptySessionSpawnSucceededCountsByReason,
+		([key, count]) => `${key}=${count}`,
+	).join(" ");
 	emitProbeStderrLine(
-		`[warn] [pty-spawn-probe] 本进程累计 pty 创建数越过水位 tier=${crossedTier} total=${ptySessionSpawnTotalCount} ${countsByReasonSummary}`,
+		`[warn] [pty-spawn-probe] 本进程累计 pty 创建数越过水位 tier=${crossedTier} succeededTotal=${ptySessionSpawnSucceededTotalCount} failedTotal=${ptySessionSpawnFailedTotalCount} ${countsByReasonSummary}`,
 	);
 }
 
