@@ -32,6 +32,10 @@ import {
 	resolveSessionFacets,
 	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 } from "../core/session-activity";
+import {
+	recordTaskSessionAutoRestartScheduled,
+	type TaskSessionStartOrigin,
+} from "../diagnostics/pty-session-spawn-attribution-probe";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import {
 	type AgentOutputSubstanceMemory,
@@ -2414,7 +2418,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 	}
 
-	async startTaskSession(request: StartTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
+	// 【调查专用探针】taskSessionStartOrigin 只服务归因：内部三个调用点（终端刷新、回收会话恢复、
+	// PTY 退出后自动重启）与外部入口在此前的日志里完全无法区分，而头号嫌疑恰恰是其中之一。
+	// 可选参数，默认外部入口，不影响任何既有调用点。
+	async startTaskSession(
+		request: StartTaskSessionRequest,
+		taskSessionStartOrigin: TaskSessionStartOrigin = "external_entry_point",
+	): Promise<RuntimeTaskSessionSummary> {
 		const entry = this.ensureEntry(request.taskId);
 		entry.restartRequest = {
 			kind: "task",
@@ -2630,6 +2640,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 				env,
 				cols,
 				rows,
+				spawnAttribution: {
+					reason: "task_agent_session",
+					taskId: request.taskId,
+					taskSessionStartOrigin,
+				},
 				onData: (chunk) => {
 					handleTaskOutput(chunk);
 				},
@@ -2923,6 +2938,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 				env,
 				cols,
 				rows,
+				spawnAttribution: {
+					reason: "shell_session",
+					taskId: request.taskId,
+				},
 				onData: (chunk) => {
 					if (!entry.active) {
 						return;
@@ -3885,7 +3904,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// visible scrollback banner so the user can see the refresh moment.
 	async refreshTaskTerminal(request: StartTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
 		await this.forceStopTaskSession(request.taskId, 2_000);
-		const summary = await this.startTaskSession(request);
+		const summary = await this.startTaskSession(request, "refresh_task_terminal");
 		// startTaskSession disposes the old terminal state mirror and creates a fresh one,
 		// so the banner must be written AFTER the new mirror exists. Otherwise late-attach
 		// viewers reattaching via the control socket would receive a restore snapshot from
@@ -3924,12 +3943,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!restartRequest || restartRequest.kind !== "task") {
 			return false;
 		}
-		await this.startTaskSession({
-			...cloneStartTaskSessionRequest(restartRequest.request),
-			prompt: "",
-			images: undefined,
-			resumeFromTrash: true,
-		});
+		await this.startTaskSession(
+			{
+				...cloneStartTaskSessionRequest(restartRequest.request),
+				prompt: "",
+				images: undefined,
+				resumeFromTrash: true,
+			},
+			"resume_reclaimed_task_session_for_pending_user_decision_answer_delivery",
+		);
 		return this.entries.get(taskId)?.active != null;
 	}
 
@@ -4148,10 +4170,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!restartRequest || restartRequest.kind !== "task") {
 			return;
 		}
+		// 【调查专用探针】本次 fd 泄漏的头号嫌疑，且此前零日志覆盖。这里记下判定循环所需的全部字段：
+		// 窗口内已消耗的重启配额（贴着上限 3 跑即为自动重启循环的直证）、决定循环能否持续的
+		// listeners.size（降到 0 就停，这解释了泄漏为何会自行终止）。只观测，不改限速行为——
+		// 加熔断会污染证据，修复留到拿到数据之后。
+		recordTaskSessionAutoRestartScheduled({
+			taskId: entry.summary.taskId,
+			autoRestartTimestampsInWindowCount: entry.autoRestartTimestamps.length,
+			listenerCount: entry.listeners.size,
+		});
 		let pendingAutoRestart: Promise<void> | null = null;
 		pendingAutoRestart = (async () => {
 			try {
-				await this.startTaskSession(cloneStartTaskSessionRequest(restartRequest.request));
+				await this.startTaskSession(
+					cloneStartTaskSessionRequest(restartRequest.request),
+					"auto_restart_after_pty_exit",
+				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				const summary = updateSummary(entry, {

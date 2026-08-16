@@ -1,10 +1,13 @@
 import * as pty from "node-pty";
-
 import {
 	buildWindowsCmdArgsCommandLine,
 	resolveWindowsComSpec,
 	shouldUseWindowsCmdLaunch,
 } from "../core/windows-cmd-launch";
+import {
+	type PtySessionSpawnAttribution,
+	recordPtySessionSpawnOutcome,
+} from "../diagnostics/pty-session-spawn-attribution-probe";
 
 export interface PtyExitEvent {
 	exitCode: number;
@@ -20,6 +23,9 @@ export interface SpawnPtySessionRequest {
 	rows: number;
 	onData?: (chunk: Buffer) => void;
 	onExit?: (event: PtyExitEvent) => void;
+	// 【调查专用探针】pty 创建的归因。可选：未提供时仍会计数，只是记为 unattributed——
+	// 「触发者未知」正是本次调查要回答的问题，不能假设调用点已被穷举。
+	spawnAttribution?: PtySessionSpawnAttribution;
 }
 
 type PtyOutputChunk = string | Buffer | Uint8Array;
@@ -92,7 +98,17 @@ export class PtySession {
 		});
 	}
 
-	static spawn({ binary, args = [], cwd, env, cols, rows, onData, onExit }: SpawnPtySessionRequest): PtySession {
+	static spawn({
+		binary,
+		args = [],
+		cwd,
+		env,
+		cols,
+		rows,
+		onData,
+		onExit,
+		spawnAttribution,
+	}: SpawnPtySessionRequest): PtySession {
 		const normalizedArgs = typeof args === "string" ? [args] : args;
 		const terminalName = env?.TERM?.trim() || process.env.TERM?.trim() || "xterm-256color";
 		const launchEnv: NodeJS.ProcessEnv = env ? { ...process.env, ...env } : process.env;
@@ -108,7 +124,26 @@ export class PtySession {
 			encoding: null,
 		};
 
-		const ptyProcess = pty.spawn(spawnBinary, spawnArgs, ptyOptions);
+		// 【调查专用探针】成功与失败都要记：失败时的 errno 正是 fd 耗尽最直接的证据，
+		// 而这条路径此前一行日志都没有。rethrow 保持原控制流不变。
+		let ptyProcess: pty.IPty;
+		try {
+			ptyProcess = pty.spawn(spawnBinary, spawnArgs, ptyOptions);
+		} catch (error) {
+			recordPtySessionSpawnOutcome({
+				attribution: spawnAttribution ?? null,
+				spawnedPid: null,
+				spawnErrorCode: (error as NodeJS.ErrnoException)?.code ?? "UNKNOWN",
+				spawnErrorMessage: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+		recordPtySessionSpawnOutcome({
+			attribution: spawnAttribution ?? null,
+			spawnedPid: ptyProcess.pid,
+			spawnErrorCode: null,
+			spawnErrorMessage: null,
+		});
 		return new PtySession(ptyProcess, onData, onExit);
 	}
 
