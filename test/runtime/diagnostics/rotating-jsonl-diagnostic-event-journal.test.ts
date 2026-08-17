@@ -32,22 +32,60 @@ describe("rotating JSONL diagnostic event journal", () => {
 		tempDir.cleanup();
 	});
 
-	it("stamps every record with its own recording time, writer process and channel so lines stay self-describing", () => {
-		// processId 不可省：多个 Kanban 实例共用同一组 journal 文件，没有它就无法按实例切分序列。
+	it("stamps every record with its recording time, channel and writer process so lines stay self-describing", () => {
+		// 多个 Kanban 实例共写同一组 journal 文件，缺了写入方标识就无法把样本拆回单进程视角。
 		const line = serializeDiagnosticEventJournalLine(
 			"event-loop-delay-window-sample",
 			{ p99Ms: 91.4, maxMs: 412.7 },
 			"2026-08-16T04:05:06.007Z",
 		);
+		const parsed = JSON.parse(line) as Record<string, unknown>;
 
 		expect(line.endsWith("\n")).toBe(true);
-		expect(JSON.parse(line)).toEqual({
-			recordedAtIso: "2026-08-16T04:05:06.007Z",
-			processId: process.pid,
-			channel: "event-loop-delay-window-sample",
-			p99Ms: 91.4,
-			maxMs: 412.7,
-		});
+		// 逐键断言挡不住「悄悄多写了一个键」——启动时刻是动态值，无法整体 toEqual，故单列一条键集断言
+		// 把记录形状钉死：新增权威字段必须显式改这里，不能顺手混进 JSONL 让下游解析器措手不及。
+		expect(Object.keys(parsed).sort()).toEqual([
+			"channel",
+			"journalWriterProcessId",
+			"journalWriterProcessStartedAtIso",
+			"maxMs",
+			"p99Ms",
+			"recordedAtIso",
+		]);
+		expect(parsed.recordedAtIso).toBe("2026-08-16T04:05:06.007Z");
+		expect(parsed.channel).toBe("event-loop-delay-window-sample");
+		expect(parsed.journalWriterProcessId).toBe(process.pid);
+		// pid 会被系统回收复用，而 journal 可跨越数十天：必须配上启动时刻才是唯一键。
+		expect(typeof parsed.journalWriterProcessStartedAtIso).toBe("string");
+		expect(Number.isNaN(Date.parse(parsed.journalWriterProcessStartedAtIso as string))).toBe(false);
+		expect(parsed.p99Ms).toBe(91.4);
+		expect(parsed.maxMs).toBe(412.7);
+	});
+
+	it("keeps its authoritative fields even when a payload smuggles the same keys past the type guard", () => {
+		// `processId?: never` 之类的类型约束挡不住声明为 Record<string, unknown> 的变量——TS 不会拿
+		// 索引签名去比对可选属性，编译期一个错都不报。所以运行时必须再夺回一次所有权。
+		const payloadSmugglingReservedKeys: Record<string, unknown> = {
+			journalWriterProcessId: 999_999,
+			journalWriterProcessStartedAtIso: "1999-01-01T00:00:00.000Z",
+			channel: "git-command-failure",
+			recordedAtIso: "1999-01-01T00:00:00.000Z",
+			taskId: "w0n47",
+		};
+
+		const line = serializeDiagnosticEventJournalLine(
+			"event-loop-delay-window-sample",
+			payloadSmugglingReservedKeys,
+			"2026-08-16T04:05:06.007Z",
+		);
+		const parsed = JSON.parse(line) as Record<string, unknown>;
+
+		expect(parsed.journalWriterProcessId).toBe(process.pid);
+		expect(parsed.channel).toBe("event-loop-delay-window-sample");
+		expect(parsed.recordedAtIso).toBe("2026-08-16T04:05:06.007Z");
+		expect(parsed.journalWriterProcessStartedAtIso).not.toBe("1999-01-01T00:00:00.000Z");
+		// 非保留键照常保留。
+		expect(parsed.taskId).toBe("w0n47");
 	});
 
 	it("degrades an unserializable payload into a self-explaining record instead of dropping the event", () => {
@@ -63,7 +101,8 @@ describe("rotating JSONL diagnostic event journal", () => {
 
 		expect(parsed.channel).toBe("git-command-failure");
 		expect(parsed.recordedAtIso).toBe("2026-08-16T04:05:06.007Z");
-		expect(parsed.processId).toBe(process.pid);
+		expect(parsed.journalWriterProcessId).toBe(process.pid);
+		expect(typeof parsed.journalWriterProcessStartedAtIso).toBe("string");
 		expect(typeof parsed.journalPayloadSerializationError).toBe("string");
 	});
 

@@ -1,17 +1,19 @@
-// 【调查专用探针】pty 会话创建的归因计数。
+// pty 会话创建的归因计数——「谁在创建 pty、创建了多少」的常设记录。
 //
-// 一次真实故障里，node-pty 每个 pty 生命周期泄漏 1 个 kqueue fd，13 小时累积上万个把进程 fd 表撑破
-// Darwin 的 OPEN_MAX，导致 posix_spawn 建管道 EBADF、所有 git 调用全挂。根因清楚，但**谁**在以
-// 约 0.23 次/秒的速率创建 pty 至今无法直证——因为 pty 创建这条路径上一行日志都没有：
-// 现场冻结后 pty 对象早已 GC、终端回滚缓冲盖不住一整晚、shell 会话根本没有持久记录。
+// 由来：2026-08 的一次真实故障里，node-pty 每个 pty 生命周期泄漏 1 个 kqueue fd（上游 PR #931 已修，
+// 见 package.json 对该依赖的版本下限），13 小时累积上万个把进程 fd 表撑破 Darwin 的 OPEN_MAX，导致
+// posix_spawn 建管道 EBADF、所有 git 调用全挂。泄漏本身好定位，**谁在高速创建 pty** 却完全无从直证：
+// pty 创建这条路径上原本一行日志都没有，现场冻结后 pty 对象早已 GC，终端回滚缓冲盖不住一整晚。
 //
-// 本模块补上这个盲区：
+// 修掉泄漏并不能让这个盲区消失，恰恰相反——**它把症状抹掉了，成因还在**。同样的失控创建今后不再表现
+// 为 fd 增长，只剩安静的空转（按当年速率约每小时 2000 次进程创建），届时本模块就是仅存的抓手。
+// 因此它不随调查结束而摘除，而是转为常设绊线：
 //   - 计数点放在 PtySession.spawn **内部**而非调用点，这样即便存在尚未发现的创建路径也一样被记到
-//     （reason=unattributed）——「触发者未知」正是本次调查的核心问题，不能靠假设调用点已穷举；
+//     （reason=unattributed）——不能靠假设调用点已穷举，新增调用路径时也不必记得来这里补一笔；
 //   - 任务会话再按启动来源细分：外部入口 / 终端刷新 / 回收会话恢复 / PTY 退出后自动重启。
-//     头号嫌疑是最后一种：它不是熔断器，只是「5 秒内最多 3 次」的滑动窗口限速器，无总量上限、
-//     无退避，其 0.6 次/秒的理论上限恰好覆盖实测速率，且门控 listeners.size>0 也解释了泄漏为何
-//     会随 WS 订阅断开而自行停止；
+//     最后一种最值得盯：它不是熔断器，只是「5 秒内最多 3 次」的滑动窗口限速器，无总量上限、无退避，
+//     其 0.6 次/秒的理论上限恰好覆盖当年的实测速率，且门控 listeners.size>0 也解释了泄漏为何会随
+//     WS 订阅断开而自行停止。要给它加熔断，先靠本通道的记录看清真实成环参数，别凭空设阈值；
 //   - stderr 只在累计数跨越水位档时打一次，绝不逐条打印——逐条打印会重演「探针自己刷爆日志」。
 
 import {
@@ -42,10 +44,14 @@ const TASK_SESSION_AUTO_RESTART_COUNT_STDERR_WATERMARK_TIERS = [
 	1, 5, 25, 100, 250, 500, 1_000, 2_500, 5_000, 7_500, 10_000,
 ];
 
-// 成功与失败必须分开计数。node-pty 分配 kqueue 的 SetupExitCallback 位于 pty.cc:500，而所有 throw 点
-// 在 412/415/455/488 ——**抛错的 spawn 根本走不到 kqueue 分配，不产生本轮要对账的泄漏**。若把失败尝试
-// 混进同一个累计数，fd 增量就会去和一个并不存在的泄漏会话对账，1:1 假说的验证随即失真。
+// 成功与失败必须分开计数。unix 侧 node-pty 分配 kqueue 的 SetupExitCallback 排在所有 throw 点之后——
+// **抛错的 spawn 根本走不到 kqueue 分配，不产生要对账的泄漏**。若把失败尝试混进同一个累计数，fd 增量
+// 就会去和一个并不存在的会话对账，「fd 增量 ≈ 创建数」这条对账随即失真。
 // 失败事件本身仍要记（那是 fd 耗尽最直接的证据），只是不进「已创建的 pty」这个基数。
+//
+// Windows 例外：node-pty 自 1.2.0-beta.14 起，conPTY 路径上 CreateProcessW 失败改为发 `'exit'` 事件而非
+// 抛出，PtySession.spawn 的 catch 收不到，本模块会把它记成一次成功创建。macOS/Linux 不受影响，而对账
+// 本身也只在 unix 上有意义（kqueue 是 BSD 设施），故不为此在计数侧做补偿——仅在此标明读数边界。
 const ptySessionSpawnSucceededCountsByReason = new Map<PtySessionSpawnReason, number>();
 let ptySessionSpawnSucceededTotalCount = 0;
 let ptySessionSpawnFailedTotalCount = 0;

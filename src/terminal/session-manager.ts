@@ -2418,9 +2418,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 	}
 
-	// 【调查专用探针】taskSessionStartOrigin 只服务归因：内部三个调用点（终端刷新、回收会话恢复、
-	// PTY 退出后自动重启）与外部入口在此前的日志里完全无法区分，而头号嫌疑恰恰是其中之一。
-	// 可选参数，默认外部入口，不影响任何既有调用点。
+	// taskSessionStartOrigin 只服务归因，不参与任何业务判定：内部三个调用点（终端刷新、回收会话恢复、
+	// PTY 退出后自动重启）与外部入口原本在日志里完全无法区分，而「会话是自己起来的还是人点出来的」
+	// 恰是排查会话反复重建时的第一个问题。可选参数，默认外部入口，不影响任何既有调用点。
 	async startTaskSession(
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin = "external_entry_point",
@@ -4170,10 +4170,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!restartRequest || restartRequest.kind !== "task") {
 			return;
 		}
-		// 【调查专用探针】本次 fd 泄漏的头号嫌疑，且此前零日志覆盖。这里记下判定循环所需的全部字段：
-		// 窗口内已消耗的重启配额（贴着上限 3 跑即为自动重启循环的直证）、决定循环能否持续的
-		// listeners.size（降到 0 就停，这解释了泄漏为何会自行终止）。只观测，不改限速行为——
-		// 加熔断会污染证据，修复留到拿到数据之后。
+		// 自动重启此前零日志覆盖，而它是最容易悄悄成环的一条路径：下面的限速器不是熔断器，只是
+		// 「5 秒内最多 3 次」的滑动窗口，无总量上限、无退避，理论上能以 0.6 次/秒无限空转下去。
+		// 这里记下判定是否成环所需的全部字段：窗口内已消耗的重启配额（贴着上限 3 跑即为成环直证）、
+		// 决定循环能否持续的 listeners.size（降到 0 就停，故成环往往会自行终止而不留痕迹）。
+		// 只观测、不改限速行为：要给它加熔断，得先有真实成环记录来定阈值，凭空设阈值只会误伤。
 		recordTaskSessionAutoRestartScheduled({
 			taskId: entry.summary.taskId,
 			autoRestartTimestampsInWindowCount: entry.autoRestartTimestamps.length,

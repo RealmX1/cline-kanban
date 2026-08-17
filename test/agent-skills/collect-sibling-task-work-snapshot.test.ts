@@ -35,6 +35,7 @@ interface SiblingTaskWorkSnapshot {
 	taskInventoryDegraded: boolean;
 	siblingTaskCount: number;
 	siblingTasks: SiblingTaskRecord[];
+	orphanWorktreesWithoutActiveTask: { taskId: string; worktreePath: string }[];
 	degradations: { stage: string; reason: string }[];
 }
 
@@ -226,6 +227,109 @@ describe("sibling task work snapshot collector", () => {
 		expect(snapshot.taskInventoryDegraded).toBe(true);
 		expect(snapshot.degradations.length).toBeGreaterThan(0);
 		expect(snapshot.siblingTasks.map((siblingTask) => siblingTask.taskId)).toEqual(["delta4"]);
+	});
+
+	it("kanban CLI 不可用但 durable board.json 在时，降级到 DURABLE_BOARD_STATE 且仍拿得到 prompt 与 column", () => {
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		onTestFinished(() => fixture.cleanup());
+		const projectRepository = fixture.createNonBareRepository({
+			repositoryDirectoryName: "project",
+			initialBranchName: "main",
+		});
+		writeFileSync(join(projectRepository.repositoryPath, "baseline.txt"), "baseline\n");
+		projectRepository.commitAllRepositoryFilesAtDate({
+			message: "baseline",
+			authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
+		});
+		const activeWorktree = projectRepository.createLinkedWorktree({
+			worktreeDirectoryName: "epsil5",
+			branchName: "task-epsilon",
+		});
+		const completedWorktree = projectRepository.createLinkedWorktree({
+			worktreeDirectoryName: "zeta66",
+			branchName: "task-zeta",
+		});
+		writeFileSync(join(activeWorktree.worktreePath, "durable-surface.txt"), "epsilon 正在改\n");
+
+		const temporaryDirectory = createTempDir("kanban-sibling-survey-durable-");
+		onTestFinished(() => temporaryDirectory.cleanup());
+		const workspacesDirectoryPath = join(temporaryDirectory.path, "kanban", "workspaces");
+		const workspaceDirectoryPath = join(workspacesDirectoryPath, "project");
+		mkdirSync(workspaceDirectoryPath, { recursive: true });
+		writeFileSync(
+			join(workspacesDirectoryPath, "index.json"),
+			JSON.stringify({
+				version: 1,
+				entries: { project: { workspaceId: "project", repoPath: projectRepository.repositoryPath } },
+			}),
+		);
+		// 持久化 board.json 的真实 schema（runtimeBoardDataSchema）把任务挂在 `cards`，不是 `tasks`；
+		// 这条用例正是钉住降级层按真实字段读盘，而不是恒空后被静默推翻成 GIT_WORKTREE_ONLY。
+		writeFileSync(
+			join(workspaceDirectoryPath, "board.json"),
+			JSON.stringify({
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [] },
+					{
+						id: "in_progress",
+						title: "In Progress",
+						cards: [{ id: "epsil5", title: "改 durable-surface", prompt: "改 durable-surface", baseRef: "main" }],
+					},
+					{
+						id: "trash",
+						title: "Done",
+						cards: [{ id: "zeta66", title: "已完成的任务", prompt: "已经做完了", baseRef: "main" }],
+					},
+				],
+				dependencies: [],
+			}),
+		);
+		writeFileSync(
+			join(workspaceDirectoryPath, "sessions.json"),
+			JSON.stringify({ epsil5: { state: "running", liveness: "live", turnOwner: "agent" } }),
+		);
+
+		const collectorStdout = execFileSync(
+			process.execPath,
+			[
+				snapshotCollectorScriptPath,
+				"--project-path",
+				projectRepository.repositoryPath,
+				"--self-task-id",
+				"not-a-real-task",
+				"--base-ref",
+				"main",
+				"--kanban-cli",
+				join(temporaryDirectory.path, "missing-kanban-cli"),
+				"--cline-home",
+				temporaryDirectory.path,
+				"--task-worktree-root",
+				dirname(activeWorktree.worktreePath),
+			],
+			{
+				cwd: projectRepository.repositoryPath,
+				encoding: "utf8",
+				env: fixture.createIsolatedChildProcessEnvironment(),
+			},
+		);
+		const snapshot = JSON.parse(collectorStdout) as SiblingTaskWorkSnapshot;
+
+		expect(snapshot.taskInventorySource).toBe("DURABLE_BOARD_STATE");
+		expect(snapshot.taskInventoryDegraded).toBe(true);
+		expect(snapshot.workspaceId).toBe("project");
+		expect(snapshot.degradations.map((degradation) => degradation.stage)).toEqual(["KANBAN_CLI"]);
+		expect(snapshot.siblingTasks.map((siblingTask) => siblingTask.taskId)).toEqual(["epsil5"]);
+
+		const activeTask = findSiblingTask(snapshot, "epsil5");
+		expect(activeTask.column).toBe("in_progress");
+		expect(activeTask.promptExcerpt).toBe("改 durable-surface");
+		expect(activeTask.sessionActive).toBe(true);
+		expect(activeTask.uncommittedReadStatus).toBe("READ");
+		expect(activeTask.uncommittedPaths).toEqual(["durable-surface.txt"]);
+
+		// 已完成列的任务不进清单，与 `kanban task list` 口径一致；其残留 worktree 必须仍以 orphan 形态可见。
+		expect(snapshot.orphanWorktreesWithoutActiveTask.map((orphan) => orphan.taskId)).toEqual(["zeta66"]);
+		expect(completedWorktree.worktreePath).toContain("zeta66");
 	});
 });
 

@@ -35,16 +35,22 @@ const DIAGNOSTIC_EVENT_JOURNAL_RETAINED_ROTATED_FILE_COUNT = 4;
 export type DiagnosticEventJournalChannel =
 	| "event-loop-delay-window-sample"
 	| "git-command-failure"
-	// 以下三个通道属本次 fd 泄漏调查的临时探针（build-probing 分支），定案后随探针一并摘除。
+	// 以下三个通道原是 2026-08 那次 fd 耗尽调查的临时探针，现已转为常设绊线。转正的理由是根因修复
+	// 本身会**抹掉症状而不抹掉成因**：node-pty 的 kqueue 泄漏一旦补上，「谁在高速创建 pty」就不再
+	// 表现为 fd 增长，只剩安静的空转，届时这三条通道是仅存的抓手。三者互相印证，缺一条就断链：
+	// 创建归因回答「谁在建」，自动重启打点回答「是不是它在成环」，fd 计数回答「这次有没有真的漏」。
 	| "pty-session-spawn"
 	| "task-session-auto-restart-scheduled"
 	| "process-file-descriptor-count-sample";
 
-// `recordedAtIso` / `channel` / `processId` 由本模块权威写入，故在类型上禁止 payload 覆盖它们。
+// 以下字段由本模块权威写入。类型上的 `never` 只能挡住对象字面量与已知形状的展开：一个声明为
+// `Record<string, unknown>` 的变量传进来时 TS 不会拿索引签名去比对可选属性，编译期一个错都不报。
+// 因此运行时另有一道无条件覆盖（见 serializeDiagnosticEventJournalLine），两道一起才真的杜绝覆盖。
 export type DiagnosticEventJournalPayload = Record<string, unknown> & {
 	recordedAtIso?: never;
 	channel?: never;
-	processId?: never;
+	journalWriterProcessId?: never;
+	journalWriterProcessStartedAtIso?: never;
 };
 
 interface DiagnosticEventJournalChannelWriteState {
@@ -77,11 +83,22 @@ function getDiagnosticEventJournalRotatedFilePath(
 	return join(getDiagnosticEventJournalDirectoryPath(), `${channel}.${rotationIndex}.jsonl`);
 }
 
-// journal 文件按用户固定落在 ~/.cline/kanban/diagnostic-event-journals/<channel>.jsonl，与运行实例无关；
-// 同一用户同时跑多个端口实例（例如 tmux cline-kanban-3484 与 cline-kanban-3485）时，两个进程写的是同一个
-// 文件。因此每条记录必须自带进程标识，否则事后既无法按实例切分序列，「本实例 fd 增量 ≈ 本实例 pty 创建
-// 增量」这类跨通道对账也无从做起——两份互相独立的累计序列会被读成一份。
+// journal 落点按用户固定（`~/.cline/kanban/…`），与运行实例无关：同一台机器上并行跑多个 Kanban
+// 实例（例如一个监听 3484 端口、另一个监听 3485）时，两个进程写的是**同一组文件**，样本在同一份
+// JSONL 里逐行交织。没有写入方标识就无法把任一通道拆回单进程视角，任何「A 通道的增量 ≈ B 通道的
+// 增量」式对账都不成立。因此标识写在**序列化核心**而不是各调用点：所有通道一并覆盖，调用方无从遗漏。
+//
+// 名字带 `journalWriter` 前缀是必需的消歧：像 `git-command-failure` 这样的通道，整条记录讲的都是
+// **另一个**进程（被 spawn 的 git 子进程）的事，一个光秃秃的 `processId` 摆在 `errorCode` / `args`
+// 旁边，最自然的读法恰好是错的。
 const DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID = process.pid;
+
+// pid 会被操作系统回收复用，而单通道保留 5 个文件 × 8 MiB 可覆盖数十天：同一个 pid 在一份 journal
+// 里既可能属于当前实例，也可能属于几周前那个早已退出的实例，只按 pid 分组会把两次运行的样本混成
+// 一条时间线——恰好毁掉「拆回单进程视角」这个目的。配上进程启动时刻才构成真正唯一的键。
+const DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_STARTED_AT_ISO = new Date(
+	Date.now() - Math.round(process.uptime() * 1000),
+).toISOString();
 
 // 序列化失败（循环引用、BigInt 等）不得让调用方崩溃：降级成一条自述失败原因的记录，
 // 保住「这一刻确实发生过一个事件」这个事实，而不是整条丢掉。
@@ -90,12 +107,31 @@ export function serializeDiagnosticEventJournalLine(
 	payload: DiagnosticEventJournalPayload,
 	recordedAtIso: string,
 ): string {
-	const processId = DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID;
+	// 权威字段先写一遍以固定 JSON 里的键序（时间戳与来源在最前，便于肉眼扫），payload 展开之后
+	// 再无条件写回一遍以夺回所有权——绕过类型约束传进来的同名键只会被覆盖，绝不会污染记录。
+	const record: Record<string, unknown> = {
+		recordedAtIso,
+		journalWriterProcessId: DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID,
+		journalWriterProcessStartedAtIso: DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_STARTED_AT_ISO,
+		channel,
+		...payload,
+	};
+	record.recordedAtIso = recordedAtIso;
+	record.journalWriterProcessId = DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID;
+	record.journalWriterProcessStartedAtIso = DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_STARTED_AT_ISO;
+	record.channel = channel;
+
 	try {
-		return `${JSON.stringify({ recordedAtIso, processId, channel, ...payload })}\n`;
+		return `${JSON.stringify(record)}\n`;
 	} catch (error) {
 		const serializationError = error instanceof Error ? error.message : String(error);
-		return `${JSON.stringify({ recordedAtIso, processId, channel, journalPayloadSerializationError: serializationError })}\n`;
+		return `${JSON.stringify({
+			recordedAtIso,
+			journalWriterProcessId: DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_ID,
+			journalWriterProcessStartedAtIso: DIAGNOSTIC_EVENT_JOURNAL_WRITER_PROCESS_STARTED_AT_ISO,
+			channel,
+			journalPayloadSerializationError: serializationError,
+		})}\n`;
 	}
 }
 

@@ -23,8 +23,8 @@ export interface SpawnPtySessionRequest {
 	rows: number;
 	onData?: (chunk: Buffer) => void;
 	onExit?: (event: PtyExitEvent) => void;
-	// 【调查专用探针】pty 创建的归因。可选：未提供时仍会计数，只是记为 unattributed——
-	// 「触发者未知」正是本次调查要回答的问题，不能假设调用点已被穷举。
+	// pty 创建的归因。刻意做成**可选**：未提供时仍会计数，只是记为 unattributed——归因探针的价值恰在
+	// 于能记下尚未被穷举的创建路径，若强制必填，新增调用点漏传就会变成编译错误而被就地填个假值敷衍。
 	spawnAttribution?: PtySessionSpawnAttribution;
 }
 
@@ -124,8 +124,8 @@ export class PtySession {
 			encoding: null,
 		};
 
-		// 【调查专用探针】成功与失败都要记：失败时的 errno 正是 fd 耗尽最直接的证据，
-		// 而这条路径此前一行日志都没有。rethrow 保持原控制流不变。
+		// 成功与失败都要记：失败时的 errno 是进程级资源耗尽（fd/进程数）最直接的证据，
+		// 而这条路径原本一行日志都没有。rethrow 保持原控制流不变。
 		let ptyProcess: pty.IPty;
 		try {
 			ptyProcess = pty.spawn(spawnBinary, spawnArgs, ptyOptions);

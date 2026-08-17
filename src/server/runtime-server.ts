@@ -680,8 +680,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// [tui-freeze] 诊断:终端回显链路与所有任务的输入处理共享这个 Node 事件循环,
 	// 循环被同步重活占据时键盘输入会整体延迟——在 bridge 生命周期内持续采样延迟直方图。
 	const stopEventLoopDelayMonitor = startEventLoopDelayMonitor();
-	// 【调查专用探针】fd 泄漏在上次故障里一路无声地越过 Darwin OPEN_MAX(10240) 才以
-	// 「所有 git 调用 EBADF」的形式间接显形；这条探针让 fd 水位在爆炸前就可见。
+	// fd 泄漏曾一路无声地越过 Darwin OPEN_MAX(10240)，才以「所有 git 调用 EBADF」的形式在一个毫不相干
+	// 的子系统里间接显形；这条探针让 fd 水位在爆炸前就可见，对任何一类 fd 泄漏回归都同样有效。
 	const stopProcessFileDescriptorWatermarkMonitor = startProcessFileDescriptorWatermarkMonitor();
 	const terminalWebSocketBridge = createTerminalWebSocketBridge({
 		server,

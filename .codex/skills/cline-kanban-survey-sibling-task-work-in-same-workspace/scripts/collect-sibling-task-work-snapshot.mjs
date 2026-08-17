@@ -33,10 +33,36 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 ]);
 const READ_ONLY_GIT_WORKTREE_VERBS = new Set(["list"]);
 
+// 仓库定位变量必须从子进程 env 里剔除，清单与 src/core/git-process-env.ts 的 createGitProcessEnv 一致
+// （`src/` 下所有 git 子进程都经它构造 env，本脚本是同一份处置在 .codex/skills 侧的复刻——.mjs 不经
+// TypeScript 构建，无法直接 import，只能就地对齐）。
+// 本脚本每一次只读 git 调用都靠 `-C <path>` 定向到项目主 checkout 或某个 sibling worktree，而 GIT_DIR /
+// GIT_WORK_TREE 会**压过** `-C` 的仓库发现（git 2.50 实测：设了 GIT_DIR=B 之后 `git -C A status/log/
+// worktree list` 报告的全是 B）。脚本若被 git hook 上下文间接调起，status/log/diff 就会静默读到另一个仓库，
+// 并把那边的改动当成该 sibling 任务的未提交 WIP 上报——安静地给出错误答案。
+// kanban CLI 那次 spawn 同样走这里：CLI 靠 --project-path 定位项目，从不需要继承 GIT_DIR，剔除只增不减安全。
+const GIT_REPOSITORY_LOCATION_ENV_KEYS_STRIPPED_FROM_CHILD_PROCESSES = new Set([
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_COMMON_DIR",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_PREFIX",
+]);
+
 // PATH 上可能存在多个同名 `kanban`，未必都是这个看板。候选必须证明自己属于 kanban 包
 // （realpath 落在包内，或向上能找到 name 为 kanban 的 manifest），否则宁可降级也不采信其输出。
 const KANBAN_CLI_IDENTITY_PATH_FRAGMENT = `${sep}node_modules${sep}kanban${sep}`;
 const KANBAN_PACKAGE_NAME = "kanban";
+
+// durable board.json 的真实 schema 是 runtimeBoardDataSchema（src/core/api-contract.ts）：一列长
+// `{ id, title, cards }`——任务挂在 `cards`，不是 `tasks`；列 id 的历史别名 `done` 等价于 `trash`。
+// 「已完成」列刻意排除在清单之外，与 `kanban task list` 的口径一致：CLI 不返回 trash 列的任务，
+// durable 层若把它们算进来，同一批 worktree 会因为清单来源不同而在 orphanWorktreesWithoutActiveTask
+// 里时有时无。
+const DURABLE_BOARD_LEGACY_COLUMN_ID_ALIASES = new Map([["done", "trash"]]);
+const DURABLE_BOARD_COLUMN_IDS_EXCLUDED_FROM_TASK_INVENTORY = new Set(["trash"]);
 
 class SnapshotArgumentError extends Error {}
 
@@ -110,8 +136,13 @@ function parseArguments(argumentList) {
 }
 
 function createReadOnlyChildProcessEnvironment() {
+	const inheritedEnvironmentWithoutRepositoryLocation = {};
+	for (const [name, value] of Object.entries(process.env)) {
+		if (GIT_REPOSITORY_LOCATION_ENV_KEYS_STRIPPED_FROM_CHILD_PROCESSES.has(name)) continue;
+		inheritedEnvironmentWithoutRepositoryLocation[name] = value;
+	}
 	return {
-		...process.env,
+		...inheritedEnvironmentWithoutRepositoryLocation,
 		GIT_OPTIONAL_LOCKS: "0",
 		GIT_TERMINAL_PROMPT: "0",
 		GIT_PAGER: "cat",
@@ -334,9 +365,11 @@ function readTaskInventoryFromDurableBoardState(clineHome, workspaceId) {
 	const columns = Array.isArray(parsed.value?.columns) ? parsed.value.columns : [];
 	const tasks = [];
 	for (const column of columns) {
-		const columnId = column?.id ?? column?.name ?? null;
-		for (const task of Array.isArray(column?.tasks) ? column.tasks : []) {
-			tasks.push({ ...task, column: task?.column ?? columnId });
+		const rawColumnId = column?.id ?? null;
+		const columnId = DURABLE_BOARD_LEGACY_COLUMN_ID_ALIASES.get(rawColumnId) ?? rawColumnId;
+		if (DURABLE_BOARD_COLUMN_IDS_EXCLUDED_FROM_TASK_INVENTORY.has(columnId)) continue;
+		for (const card of Array.isArray(column?.cards) ? column.cards : []) {
+			tasks.push({ ...card, column: card?.column ?? columnId });
 		}
 	}
 	const sessionsPath = join(clineHome, "kanban", "workspaces", workspaceId, "sessions.json");
