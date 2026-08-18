@@ -80,7 +80,7 @@ import {
 	ensureNetworkInterruptionResumeInstructionsFile,
 	getNetworkInterruptionResumeInstructionsPath,
 } from "./output-reactions/network-interruption-continuation-instructions";
-import { PtySession } from "./pty-session";
+import { type PtyExitEvent, PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
 import { backfillFoldedPastePlaceholdersFromPasteLedger } from "./terminal-input-box-folded-paste-placeholder-backfill";
 import {
@@ -199,6 +199,11 @@ export const TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS =
 	Math.max(TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS, TASK_CHAT_INPUT_DELIVERY_MAX_HUMAN_CONTENTION_YIELD_MS) +
 	PASTE_INGESTION_EVIDENCE_MAX_WAIT_BEFORE_SUBMIT_MS +
 	Math.max(SUBMIT_CONFIRM_DELAY_MS * (SUBMIT_CONFIRM_MAX_RESENDS + 1), SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS);
+// spawn 返回到 entry.active 装载完成之间到达的输出，先攒在这里、装完再补排空。此前无上限 push：
+// 只要有任何一条路径让装载迟迟不发生（换代竞态、或将来在这段之间插进 await 后启动失败），这个数组
+// 就会随 agent 输出一直涨。超限丢**最旧**的：终端回滚本就是「保留最近」的语义，丢开头的启动横幅
+// 远比丢掉刚刚发生的那几屏可接受。
+const MAX_PRE_ACTIVE_OUTPUT_CHUNKS_BUFFERED_BEFORE_SESSION_INSTALL = 512;
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
 const DEFAULT_STALL_THRESHOLD_MS = 45_000;
@@ -2449,8 +2454,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
 			discardPendingOutputAnalysis(entry.active);
+			// 摘跑上一代的 cleanup。形态照抄 stopTaskSession：先摘走、再置 null、再执行，保证恰好跑一次。
+			//
+			// 换代块此前全程不碰 onSessionCleanup，于是错在两头：被换掉的那一代的清理**永远不会**被执行；
+			// 而它迟到的 onExit 读到的已是新代的 active，摘走并提前跑掉的反倒是**新代**那一份。
+			// 眼下 10 个 adapter 无一给 launch.cleanup 赋值（恒为 undefined），所以这是契约加固而不是在修
+			// 一个正在发生的泄漏——但它一旦被赋值，两头的错会同时变成真实的资源泄漏。
+			const supersededSessionCleanup = entry.active.onSessionCleanup;
+			entry.active.onSessionCleanup = null;
 			entry.active.session.stop();
 			entry.active = null;
+			if (supersededSessionCleanup) {
+				supersededSessionCleanup().catch(() => {
+					// Best effort: cleanup failure is non-critical.
+				});
+			}
 		}
 		entry.terminalStateMirror?.dispose();
 		entry.terminalStateMirror = null;
@@ -2514,6 +2532,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const handleTaskOutput = (chunk: Buffer): void => {
 			if (!entry.active) {
 				preActiveOutputChunks.push(chunk);
+				if (preActiveOutputChunks.length > MAX_PRE_ACTIVE_OUTPUT_CHUNKS_BUFFERED_BEFORE_SESSION_INSTALL) {
+					preActiveOutputChunks.shift();
+				}
 				return;
 			}
 
@@ -2638,6 +2659,82 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.emitSummary(restoringSummary);
 		}
 		let session: PtySession;
+		// 「这条 PTY 在 entry.active 装载完成之前就退出了」的挂起事件。此刻还没有任何状态可更新，
+		// 直接丢弃会留下一条已死却仍标 running、且**永远等不到第二次退出事件**的会话。与输出侧的
+		// preActiveOutputChunks 是同一个道理：先挂起，装载完成后立刻补投。
+		//
+		// 装载点消费一次之后本变量再无读者，因此「正常退出后（active 已被置空）又写进来一次」是死写，
+		// 不会造成重复补投。
+		let ptyExitEventArrivedBeforeActiveWasInstalled: PtyExitEvent | null = null;
+		let hasInstalledActiveForThisSpawn = false;
+		// 提成具名闭包而不是内联在 onExit 里，是为了让装载点能复用同一条退出链路补投挂起事件——
+		// 状态迁移、监听者通知、自动重启判定、cleanup 摘跑，一步都不能少，抄第二份必然走样。
+		const handleTaskPtySessionExit = (event: PtyExitEvent): void => {
+			const currentEntry = this.entries.get(request.taskId);
+			if (!currentEntry) {
+				return;
+			}
+			const currentActive = currentEntry.active;
+			if (!currentActive) {
+				// 装载尚未发生 ⇒ 这条 PTY 死得比装载还早。挂起，等装载完成后补投（见下方消费点）。
+				// 装载之后再走到这里，说明会话是被 stop / force-stop / 换代按既定路径拆掉的，
+				// 那些路径已各自把状态收好，不该再补投任何东西。
+				if (!hasInstalledActiveForThisSpawn) {
+					ptyExitEventArrivedBeforeActiveWasInstalled = event;
+				}
+				return;
+			}
+			// 换代身份守卫。没有它，一条**上一代**的迟到退出事件会把当前这条活着的会话整个拆掉：
+			// 打掉 entry.active、把 summary 迁成已退出、通知所有监听者、再触发一次自动重启。
+			// 换代块先 stop()（只是 SIGTERM）再置空 active，而真正的 exit 事件只能异步投递，
+			// shell 侧从 stop() 到装载新代之间**逐行确认无 await**，也就是说那条路径上的错配是确定的、
+			// 不是罕见竞态。
+			//
+			// 判据取对象身份而不是 terminalSessionIncarnationToken：manager 内部已有 7 处同形先例
+			// （`currentActive !== active`），token 的既有职责是跨 manager 边界给 runtime-api 用，
+			// 那是另一个场景。对象身份还天生唯一、不可能与手写的令牌字面量失同步。
+			if (currentActive.session !== session) {
+				return;
+			}
+			stopWorkspaceTrustTimers(currentActive);
+			clearStartupReadinessTimer(currentActive);
+			clearOutputReactionTimer(currentActive);
+			settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "session_ended_before_delivery");
+			clearTaskChatInputDeliveryContentionVisibility(currentEntry);
+			clearTaskChatInputDeliveryTimer(currentActive);
+			clearSubmitConfirmTimer(currentActive);
+			discardPendingOutputAnalysis(currentActive);
+
+			const summary = this.applySessionEvent(currentEntry, {
+				type: "process.exit",
+				exitCode: event.exitCode,
+				interrupted: currentActive.session.wasInterrupted(),
+			});
+			const shouldAutoRestart = this.shouldAutoRestart(currentEntry);
+
+			for (const taskListener of currentEntry.listeners.values()) {
+				taskListener.onState?.(cloneSummary(summary));
+				taskListener.onExit?.(event.exitCode);
+			}
+			currentEntry.active = null;
+			this.emitSummary(summary);
+			// 进程退出即结束任何「连接重试」状态，避免顶栏 / 看板把已死的 session 仍标为重连中。
+			this.applyConnectionRetryState(request.taskId, null);
+			// 对称清 park：parked 主 agent 的 PTY 若真的退出（崩溃 / 用户 kill），清掉残留 sidecar，避免一个已死
+			// 会话仍被标为 parked。auto-restart 已在上方 shouldAutoRestart 处被 parked / wasSuppressed 守卫拦下。
+			this.unparkTaskSession(request.taskId);
+			if (shouldAutoRestart) {
+				this.scheduleAutoRestart(currentEntry);
+			}
+
+			const cleanupFn = currentActive.onSessionCleanup;
+			currentActive.onSessionCleanup = null;
+			if (cleanupFn) {
+				cleanupFn().catch(() => {
+					// Best effort: cleanup failure is non-critical.
+				});
+			}
+		};
 		try {
 			session = PtySession.spawn({
 				binary: commandBinary,
@@ -2657,52 +2754,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					handleTaskOutput(chunk);
 				},
 				onExit: (event) => {
-					const currentEntry = this.entries.get(request.taskId);
-					if (!currentEntry) {
-						return;
-					}
-					const currentActive = currentEntry.active;
-					if (!currentActive) {
-						return;
-					}
-					stopWorkspaceTrustTimers(currentActive);
-					clearStartupReadinessTimer(currentActive);
-					clearOutputReactionTimer(currentActive);
-					settleActiveProgrammaticDelivery(currentActive, "delivery_failed", "session_ended_before_delivery");
-					clearTaskChatInputDeliveryContentionVisibility(currentEntry);
-					clearTaskChatInputDeliveryTimer(currentActive);
-					clearSubmitConfirmTimer(currentActive);
-					discardPendingOutputAnalysis(currentActive);
-
-					const summary = this.applySessionEvent(currentEntry, {
-						type: "process.exit",
-						exitCode: event.exitCode,
-						interrupted: currentActive.session.wasInterrupted(),
-					});
-					const shouldAutoRestart = this.shouldAutoRestart(currentEntry);
-
-					for (const taskListener of currentEntry.listeners.values()) {
-						taskListener.onState?.(cloneSummary(summary));
-						taskListener.onExit?.(event.exitCode);
-					}
-					currentEntry.active = null;
-					this.emitSummary(summary);
-					// 进程退出即结束任何「连接重试」状态，避免顶栏 / 看板把已死的 session 仍标为重连中。
-					this.applyConnectionRetryState(request.taskId, null);
-					// 对称清 park：parked 主 agent 的 PTY 若真的退出（崩溃 / 用户 kill），清掉残留 sidecar，避免一个已死
-					// 会话仍被标为 parked。auto-restart 已在上方 shouldAutoRestart 处被 parked / wasSuppressed 守卫拦下。
-					this.unparkTaskSession(request.taskId);
-					if (shouldAutoRestart) {
-						this.scheduleAutoRestart(currentEntry);
-					}
-
-					const cleanupFn = currentActive.onSessionCleanup;
-					currentActive.onSessionCleanup = null;
-					if (cleanupFn) {
-						cleanupFn().catch(() => {
-							// Best effort: cleanup failure is non-critical.
-						});
-					}
+					handleTaskPtySessionExit(event);
 				},
 			});
 		} catch (error) {
@@ -2814,6 +2866,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 			terminalSessionIncarnationToken: randomUUID(),
 		};
 		entry.active = active;
+		// 新的一代上来就把 suppress 闩清账。它是一次性闩（shouldAutoRestart 读后即置 false），而有两条
+		// 路径会置了闩却永远没人来消费：① forceStopTaskSession 的强杀超时分支直接置空 entry.active，
+		// 随后真正的 onExit 在空守卫处提前返回；② 加了换代身份守卫之后，迟到的上一代退出事件同样被挡在
+		// shouldAutoRestart 之前。闩残留为 true ⇒ 刷新后新会话的第一次崩溃被静默吞掉一次自愈。
+		// 闩的语义是「这一次退出别自动重启」，它属于上一条命，装载新代时理应归零。
+		entry.suppressAutoRestartOnExit = false;
+		hasInstalledActiveForThisSpawn = true;
 		entry.terminalStateMirror = terminalStateMirror;
 		entry.lastStallLoggedAt = null;
 		this.ensureStallScanRunning();
@@ -2896,6 +2955,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 		for (const chunk of preActiveOutputChunks) {
 			handleTaskOutput(chunk);
 		}
+		// 装载完成前就退出的那条 PTY：此刻 active 与 summary 都已就位，补投一次退出事件走完整条常规退出
+		// 链路（状态迁移、监听者通知、自动重启判定、cleanup 摘跑）。位置与上面的输出补排空对称，且必须
+		// 排在 summary 落成 running 之后——否则退出迁移会打在一份还没开始的 summary 上。
+		//
+		// 真实 node-pty 下这一格打不中：spawn 返回到装载之间逐行无 await，而退出事件走 libuv 宏任务。
+		// 留着它是因为一旦将来有人在这段之间插进一个 await，症状会是会话永久卡在 running、且没有任何
+		// 日志解释得了——那种缺陷极难从现场倒推回这里。
+		const deferredPtyExitEvent = ptyExitEventArrivedBeforeActiveWasInstalled;
+		if (deferredPtyExitEvent !== null) {
+			ptyExitEventArrivedBeforeActiveWasInstalled = null;
+			handleTaskPtySessionExit(deferredPtyExitEvent);
+		}
 
 		return cloneSummary(entry.summary);
 	}
@@ -2923,8 +2994,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
 			discardPendingOutputAnalysis(entry.active);
+			// 摘跑上一代的 cleanup，理由与 startTaskSession 的换代块相同（见那边的注释）。这里不是死代码：
+			// shell 会话与 task 会话共用同一个 entry.active 槽位，被这里换掉的完全可能是一条 agent 会话。
+			const supersededSessionCleanup = entry.active.onSessionCleanup;
+			entry.active.onSessionCleanup = null;
 			entry.active.session.stop();
 			entry.active = null;
+			if (supersededSessionCleanup) {
+				supersededSessionCleanup().catch(() => {
+					// Best effort: cleanup failure is non-critical.
+				});
+			}
 		}
 		entry.terminalStateMirror?.dispose();
 		entry.terminalStateMirror = null;
@@ -2994,6 +3074,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					const currentActive = currentEntry.active;
 					if (!currentActive) {
+						return;
+					}
+					// 换代身份守卫，与 startTaskSession 那侧同形、同理由（见那边的长注释）。
+					// shell 侧尤其要紧：从换代块的 stop() 到装载新代之间**逐行确认无 await**，而 pty 的
+					// 退出事件只能异步投递——也就是说「在活体上重开 shell」时的错配是确定发生的，
+					// 不是罕见竞态。没有这道守卫，每一次重开都会让上一代的退出事件把刚起来的这条拆掉。
+					if (currentActive.session !== session) {
 						return;
 					}
 					stopWorkspaceTrustTimers(currentActive);
@@ -3988,7 +4075,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearTaskChatInputDeliveryTimer(entry.active);
 			clearSubmitConfirmTimer(entry.active);
 			discardPendingOutputAnalysis(entry.active);
+			// 同样摘跑 cleanup：这条路径（runtime 关停时批量硬中断）此前也全程不碰 onSessionCleanup，
+			// 而它之后进程就要退出了，没有任何后续路径能补上这一跑。
+			const interruptedSessionCleanup = entry.active.onSessionCleanup;
+			entry.active.onSessionCleanup = null;
 			entry.active.session.stop({ interrupted: true });
+			if (interruptedSessionCleanup) {
+				interruptedSessionCleanup().catch(() => {
+					// Best effort: cleanup failure is non-critical.
+				});
+			}
 		}
 		return activeEntries.map((entry) => cloneSummary(entry.summary));
 	}
