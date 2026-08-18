@@ -6,6 +6,7 @@ import {
 import {
 	findCrossedStderrWatermarkTier,
 	getPtySessionSpawnCountSnapshot,
+	recordPtySessionExitOutcome,
 	recordPtySessionSpawnOutcome,
 } from "../../../src/diagnostics/pty-session-spawn-attribution-probe";
 
@@ -61,6 +62,87 @@ describe("pty session spawn outcome counting", () => {
 		expect(afterSuccess.succeededCountsByReason.task_agent_session).toBe(
 			before.succeededCountsByReason.task_agent_session,
 		);
+	});
+
+	it("hands out a monotonic sequence number to every created pty and none to a failed spawn", () => {
+		// 序号是创建记录与退出记录之间唯一的配对键；失败的 spawn 没有进程、也永远等不到退出事件，
+		// 给它占一个号就会在配对时留下一个永远悬空的洞。
+		const first = recordPtySessionSpawnOutcome({
+			attribution: { reason: "task_agent_session", taskId: "task-seq-1" },
+			spawnedPid: 101,
+			spawnErrorCode: null,
+			spawnErrorMessage: null,
+		});
+		const failed = recordPtySessionSpawnOutcome({
+			attribution: { reason: "task_agent_session", taskId: "task-seq-failed" },
+			spawnedPid: null,
+			spawnErrorCode: "EMFILE",
+			spawnErrorMessage: "too many open files",
+		});
+		const second = recordPtySessionSpawnOutcome({
+			attribution: { reason: "task_agent_session", taskId: "task-seq-2" },
+			spawnedPid: 102,
+			spawnErrorCode: null,
+			spawnErrorMessage: null,
+		});
+
+		expect(first).not.toBeNull();
+		expect(failed).toBeNull();
+		expect(second).toBe((first ?? 0) + 1);
+	});
+});
+
+describe("live pty session counting", () => {
+	it("rises on creation and falls on exit so one record alone proves concurrency", () => {
+		// 「先后两次刷新」与「重叠两次刷新」在只有创建记录的通道里逐字同形。存活计数是把两者分开的读数：
+		// 先后 ⇒ 第二次创建时计数回落到与第一次相同；重叠 ⇒ 第二次创建时计数比第一次高。
+		const baseline = getPtySessionSpawnCountSnapshot().livePtySessionCount;
+
+		const firstSequenceNumber = recordPtySessionSpawnOutcome({
+			attribution: { reason: "task_agent_session", taskId: "task-live" },
+			spawnedPid: 201,
+			spawnErrorCode: null,
+			spawnErrorMessage: null,
+		});
+		const secondSequenceNumber = recordPtySessionSpawnOutcome({
+			attribution: { reason: "task_agent_session", taskId: "task-live" },
+			spawnedPid: 202,
+			spawnErrorCode: null,
+			spawnErrorMessage: null,
+		});
+		expect(getPtySessionSpawnCountSnapshot().livePtySessionCount).toBe(baseline + 2);
+
+		recordPtySessionExitOutcome({
+			attribution: { reason: "task_agent_session", taskId: "task-live" },
+			ptySessionSpawnSequenceNumber: firstSequenceNumber,
+			spawnedPid: 201,
+			exitCode: 0,
+			exitSignal: null,
+			ptySessionLifetimeMs: 1_200,
+		});
+		recordPtySessionExitOutcome({
+			attribution: { reason: "task_agent_session", taskId: "task-live" },
+			ptySessionSpawnSequenceNumber: secondSequenceNumber,
+			spawnedPid: 202,
+			exitCode: 0,
+			exitSignal: null,
+			ptySessionLifetimeMs: 900,
+		});
+		expect(getPtySessionSpawnCountSnapshot().livePtySessionCount).toBe(baseline);
+	});
+
+	it("never lets an unpaired exit push the live count below zero", () => {
+		// 没分配过序号 ⇒ 从来没计入过存活数。照减会把计数带成负数，此后所有并发判读全部作废。
+		const baseline = getPtySessionSpawnCountSnapshot().livePtySessionCount;
+		recordPtySessionExitOutcome({
+			attribution: null,
+			ptySessionSpawnSequenceNumber: null,
+			spawnedPid: 999,
+			exitCode: 1,
+			exitSignal: null,
+			ptySessionLifetimeMs: 5,
+		});
+		expect(getPtySessionSpawnCountSnapshot().livePtySessionCount).toBe(baseline);
 	});
 });
 

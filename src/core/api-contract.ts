@@ -1947,6 +1947,22 @@ export const runtimeConfigSaveRequestSchema = z.object({
 });
 export type RuntimeConfigSaveRequest = z.infer<typeof runtimeConfigSaveRequestSchema>;
 
+// 客户端可声明的会话启动来源。刻意只收口成一个**子集**：服务端自己判定的那几个来源
+// （refresh_task_terminal / auto_restart_after_pty_exit / durable_record_rebuilt_resume 等）
+// 不在其中，否则任何客户端都能把自己的自动创建伪装成别的来源，归因通道随即失去证据价值。
+//
+// 为什么非要客户端声明不可：服务端收到的请求形状完全相同——「用户手点 Restart」与「前端发现会话已
+// 陈旧、自动续跑」打到的是同一个 refreshTaskTerminal，而 refresh_task_terminal 实测占 pty 创建量的
+// 68%，不加声明就永远分不出这 68% 里有多少是人点的。
+export const runtimeTaskSessionStartOriginDeclaredByClientSchema = z.enum([
+	"external_entry_point",
+	"stale_session_client_auto_resume",
+	"home_agent_panel_auto_start",
+]);
+export type RuntimeTaskSessionStartOriginDeclaredByClient = z.infer<
+	typeof runtimeTaskSessionStartOriginDeclaredByClientSchema
+>;
+
 export const runtimeTaskSessionStartRequestSchema = z
 	.object({
 		taskId: z.string(),
@@ -1977,6 +1993,8 @@ export const runtimeTaskSessionStartRequestSchema = z
 		parentSessionId: z.string().optional(),
 		worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
 		prepFilePath: z.string().optional(),
+		// 纯归因，不参与任何业务判定。省略时服务端按 external_entry_point 记账，故老客户端行为不变。
+		taskSessionStartOriginDeclaredByClient: runtimeTaskSessionStartOriginDeclaredByClientSchema.optional(),
 	})
 	.superRefine((request, ctx) => {
 		if (
@@ -2240,6 +2258,9 @@ export const runtimeTaskTerminalRefreshRequestSchema = z.object({
 	taskId: z.string(),
 	cols: z.number().int().positive().optional(),
 	rows: z.number().int().positive().optional(),
+	// 纯归因，不参与任何业务判定。省略时服务端按 refresh_task_terminal 记账（即「人点的刷新」），
+	// 故老客户端行为不变；前端的自动续跑路径必须显式声明 stale_session_client_auto_resume。
+	taskSessionStartOriginDeclaredByClient: runtimeTaskSessionStartOriginDeclaredByClientSchema.optional(),
 });
 export type RuntimeTaskTerminalRefreshRequest = z.infer<typeof runtimeTaskTerminalRefreshRequestSchema>;
 

@@ -2425,6 +2425,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin = "external_entry_point",
 	): Promise<RuntimeTaskSessionSummary> {
+		// 本次启动尝试的「请求区间」左端，右端是随后那条 pty 创建记录自己的时刻。归因通道原本只有点、
+		// 没有区间，于是先后两次启动与重叠两次启动逐字同形。刻意在 manager 入口生成而不是由调用方传入：
+		// 要观测的竞态窗口恰好是「置空 entry.active → 两次 await → 装载新代」这一段，它整个落在本方法
+		// 内部；从 trpc 层起算反而会把与竞态无关的解析 / IO 时间一并画进区间。
+		const taskSessionStartRequestId = randomUUID();
+		const taskSessionStartRequestStartedAtIso = new Date().toISOString();
 		const entry = this.ensureEntry(request.taskId);
 		entry.restartRequest = {
 			kind: "task",
@@ -2644,6 +2650,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 					reason: "task_agent_session",
 					taskId: request.taskId,
 					taskSessionStartOrigin,
+					taskSessionStartRequestId,
+					taskSessionStartRequestStartedAtIso,
 				},
 				onData: (chunk) => {
 					handleTaskOutput(chunk);
@@ -2893,6 +2901,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	async startShellSession(request: StartShellSessionRequest): Promise<RuntimeTaskSessionSummary> {
+		// 与 startTaskSession 同源的请求区间左端，理由见那边的注释。shell 侧同样有「置空 active →
+		// 装载新代」这段窗口，只是中间没有 await，因此区间通常极短——区间长度本身就是这条差异的读数。
+		const taskSessionStartRequestId = randomUUID();
+		const taskSessionStartRequestStartedAtIso = new Date().toISOString();
 		const entry = this.ensureEntry(request.taskId);
 		entry.restartRequest = {
 			kind: "shell",
@@ -2941,6 +2953,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				spawnAttribution: {
 					reason: "shell_session",
 					taskId: request.taskId,
+					taskSessionStartRequestId,
+					taskSessionStartRequestStartedAtIso,
 				},
 				onData: (chunk) => {
 					if (!entry.active) {
@@ -3902,9 +3916,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// User-initiated terminal refresh. Caller resolves the agent command, cwd, and
 	// the card-derived prompt; we handle the stop/wait/respawn dance and emit a
 	// visible scrollback banner so the user can see the refresh moment.
-	async refreshTaskTerminal(request: StartTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
+	// taskSessionStartOrigin 默认「人点的刷新」，但前端的自动续跑打的也是这个入口，故允许调用方细化。
+	// 只影响归因记账，不改变刷新本身的任何行为。
+	async refreshTaskTerminal(
+		request: StartTaskSessionRequest,
+		taskSessionStartOrigin: TaskSessionStartOrigin = "refresh_task_terminal",
+	): Promise<RuntimeTaskSessionSummary> {
 		await this.forceStopTaskSession(request.taskId, 2_000);
-		const summary = await this.startTaskSession(request, "refresh_task_terminal");
+		const summary = await this.startTaskSession(request, taskSessionStartOrigin);
 		// startTaskSession disposes the old terminal state mirror and creates a fresh one,
 		// so the banner must be written AFTER the new mirror exists. Otherwise late-attach
 		// viewers reattaching via the control socket would receive a restore snapshot from

@@ -336,6 +336,8 @@ export function useHomeAgentSession({
 					baseRef: latestBaseRefRef.current,
 					cols: geometry.cols,
 					rows: geometry.rows,
+					// 纯归因：这条是 effect 自己起的，不是用户点的，与外部入口必须在日志里分得开。
+					taskSessionStartOriginDeclaredByClient: "home_agent_panel_auto_start",
 				});
 
 				if (!response.ok || !response.summary) {

@@ -15,6 +15,15 @@
 //     其 0.6 次/秒的理论上限恰好覆盖当年的实测速率，且门控 listeners.size>0 也解释了泄漏为何会随
 //     WS 订阅断开而自行停止。要给它加熔断，先靠本通道的记录看清真实成环参数，别凭空设阈值；
 //   - stderr 只在累计数跨越水位档时打一次，绝不逐条打印——逐条打印会重演「探针自己刷爆日志」。
+//
+// 2026-08 复盘补课：只记「创建」判不出**并发**。同一个 task 先后两次刷新与重叠两次刷新，在只有创建记录的
+// 通道里产生逐字相同的两行——而这恰恰是「前端重复触发」与「服务端换代竞态」这两个成因的唯一分辨点。
+// 因此本模块同时记录退出，并给每条记录带上三样东西：
+//   - ptySessionSpawnSequenceNumber：进程内单调序号，创建时分配、退出时回填，两条记录据此配对；
+//   - livePtySessionCountAfterSpawn / ...AfterExit：一行自证并发，不必跨行推理；
+//   - taskSessionStartRequestId + 请求起始时刻：把「请求区间」而不是「创建时刻」画出来。只有点没有区间，
+//     就看不见重叠窗口——而竞态窗口恰在「置空 active → 两次 await → 装载新代」这段区间里。
+// 退出记录顺带带上 exitCode 与本代存活时长，这是追「什么燃料让新生 pty 持续秒死」的直接抓手。
 
 import {
 	appendDiagnosticEventToRotatingJsonlJournal,
@@ -23,16 +32,33 @@ import {
 
 export type PtySessionSpawnReason = "task_agent_session" | "shell_session" | "unattributed";
 
+// 前四个是服务端自己判定的；后三个必须由**客户端声明**，因为服务端收到的请求形状完全相同——
+// 「用户手点 Restart」与「前端发现会话已陈旧、自动续跑」打到的是同一个 refreshTaskTerminal，
+// 实测占创建量 68% 的 refresh_task_terminal 里究竟有多少是人点的，不加声明就永远分不出来。
 export type TaskSessionStartOrigin =
 	| "external_entry_point"
 	| "refresh_task_terminal"
 	| "resume_reclaimed_task_session_for_pending_user_decision_answer_delivery"
-	| "auto_restart_after_pty_exit";
+	| "auto_restart_after_pty_exit"
+	// 前端 persistent-terminal-manager 的 maybeAutoResumeStaleSession：聚焦到一张 pid 为空且快照为空的
+	// 卡片时自动续跑。它是前端唯一由「会话已退出」驱动的自动创建路径，也是成环嫌疑最大的一条。
+	| "stale_session_client_auto_resume"
+	// 前端 Home 侧栏会话的启动 effect。
+	| "home_agent_panel_auto_start"
+	// 服务端从 durable board + runtime config 重建续跑请求（Kanban 整进程重启后内存态 restartRequest 已丢失）。
+	// 刻意不复用 resume_reclaimed_task_session_for_pending_user_decision_answer_delivery：那会抹掉
+	// 「内存 restartRequest 续跑」与「durable 重建续跑」的区别，而这两者的成因与修法完全不同。
+	| "durable_record_rebuilt_resume";
 
 export interface PtySessionSpawnAttribution {
 	reason: PtySessionSpawnReason;
 	taskId: string;
 	taskSessionStartOrigin?: TaskSessionStartOrigin;
+	// 一次会话启动尝试的标识与起始时刻，由 manager 在进入 startTaskSession / startShellSession 的那一刻生成。
+	// 记的是**区间的左端**：右端就是本条 spawn 记录自己的 recordedAtIso。两个请求区间重叠即为并发直证——
+	// 这正是「服务端 per-task 启动互斥有没有生效、还有没有第三条入口」的判据。
+	taskSessionStartRequestId?: string;
+	taskSessionStartRequestStartedAtIso?: string;
 }
 
 // 累计计数跨越这些档位时各打一次 stderr。前段密是为了让「刚开始不正常」尽早可见，
@@ -56,6 +82,18 @@ const ptySessionSpawnSucceededCountsByReason = new Map<PtySessionSpawnReason, nu
 let ptySessionSpawnSucceededTotalCount = 0;
 let ptySessionSpawnFailedTotalCount = 0;
 let taskSessionAutoRestartScheduledTotalCount = 0;
+// 进程内单调序号：每次**成功**的 pty 创建分配一个，退出记录回填同一个值，两条记录据此配对。
+// 失败的 spawn 不分配——它没有进程、也永远不会有退出事件，占号只会在配对时留下等不到的空洞。
+let ptySessionSpawnSequenceNumberCounter = 0;
+// 本进程当前存活的 pty 数（成功创建 +1、退出 -1）。孤儿堆积会直接表现为它只涨不跌。
+let livePtySessionCount = 0;
+// 存活数的历史峰值，只用于让 stderr 水位「每档一生只报一次」：存活数天然上下起伏，
+// 拿上一拍读数当基线会在同一档位反复触发。
+let peakLivePtySessionCount = 0;
+
+// 存活 pty 数的 stderr 水位。起点取 16 而非 1：一个任务一条 pty 是正常形态，本机可达的并发
+// in_progress 上限是 36，低档位只会在正常使用时刷屏。真正的异常形态是它爬到远超任务数。
+const LIVE_PTY_SESSION_COUNT_STDERR_WATERMARK_TIERS = [16, 32, 64, 128, 256, 512, 1_024, 2_048];
 
 // 返回本次跨过的最高档位；没跨过任何档位则返回 null。
 export function findCrossedStderrWatermarkTier(
@@ -85,24 +123,31 @@ function appendProbeEvent(channel: DiagnosticEventJournalChannel, payload: Recor
 }
 
 // succeededTotalCount 才是与 fd 增量对账的那个基数；failedTotalCount 单独暴露，供判断「失败是否已开始发生」。
+// liveCount / peakLiveCount 回答的是另一个问题——「这些创建是先后还是重叠」，累计数对此完全无能为力。
 export function getPtySessionSpawnCountSnapshot(): {
 	succeededTotalCount: number;
 	failedTotalCount: number;
 	succeededCountsByReason: Record<string, number>;
+	livePtySessionCount: number;
+	peakLivePtySessionCount: number;
 } {
 	return {
 		succeededTotalCount: ptySessionSpawnSucceededTotalCount,
 		failedTotalCount: ptySessionSpawnFailedTotalCount,
 		succeededCountsByReason: Object.fromEntries(ptySessionSpawnSucceededCountsByReason),
+		livePtySessionCount,
+		peakLivePtySessionCount,
 	};
 }
 
+// 返回本次分配的单调序号；spawn 失败时返回 null（失败不占号，理由见计数器声明处）。
+// 调用方（PtySession）必须把它连同创建时刻一起留在实例上，退出时回传给 recordPtySessionExitOutcome。
 export function recordPtySessionSpawnOutcome(input: {
 	attribution: PtySessionSpawnAttribution | null;
 	spawnedPid: number | null;
 	spawnErrorCode: string | null;
 	spawnErrorMessage: string | null;
-}): void {
+}): number | null {
 	const reason = input.attribution?.reason ?? "unattributed";
 
 	// 失败路径：只记事件与失败计数，绝不进「已创建的 pty」基数——它没有分配 kqueue，不该被对账。
@@ -113,36 +158,49 @@ export function recordPtySessionSpawnOutcome(input: {
 			reason,
 			taskId: input.attribution?.taskId ?? null,
 			taskSessionStartOrigin: input.attribution?.taskSessionStartOrigin ?? null,
+			taskSessionStartRequestId: input.attribution?.taskSessionStartRequestId ?? null,
+			taskSessionStartRequestStartedAtIso: input.attribution?.taskSessionStartRequestStartedAtIso ?? null,
 			spawnedPid: null,
 			spawnErrorCode: input.spawnErrorCode,
 			spawnErrorMessage: input.spawnErrorMessage,
 			cumulativeSucceededTotalCount: ptySessionSpawnSucceededTotalCount,
 			cumulativeFailedTotalCount: ptySessionSpawnFailedTotalCount,
+			livePtySessionCount,
 		});
 		// spawn 失败无条件打 stderr（不走水位节流）：它稀有，且正是 fd 耗尽最直接的证据。
 		emitProbeStderrLine(
 			`[warn] [pty-spawn-probe] pty.spawn 失败 reason=${reason} taskId=${input.attribution?.taskId ?? "(none)"} errorCode=${input.spawnErrorCode} cumulativeSucceeded=${ptySessionSpawnSucceededTotalCount} cumulativeFailed=${ptySessionSpawnFailedTotalCount}`,
 		);
-		return;
+		return null;
 	}
 
 	const previousSucceededTotalCount = ptySessionSpawnSucceededTotalCount;
 	ptySessionSpawnSucceededTotalCount += 1;
 	const succeededCountForReason = (ptySessionSpawnSucceededCountsByReason.get(reason) ?? 0) + 1;
 	ptySessionSpawnSucceededCountsByReason.set(reason, succeededCountForReason);
+	ptySessionSpawnSequenceNumberCounter += 1;
+	const ptySessionSpawnSequenceNumber = ptySessionSpawnSequenceNumberCounter;
+	livePtySessionCount += 1;
 
 	appendProbeEvent("pty-session-spawn", {
 		outcome: "succeeded",
 		reason,
 		taskId: input.attribution?.taskId ?? null,
 		taskSessionStartOrigin: input.attribution?.taskSessionStartOrigin ?? null,
+		taskSessionStartRequestId: input.attribution?.taskSessionStartRequestId ?? null,
+		taskSessionStartRequestStartedAtIso: input.attribution?.taskSessionStartRequestStartedAtIso ?? null,
+		ptySessionSpawnSequenceNumber,
 		spawnedPid: input.spawnedPid,
 		spawnErrorCode: null,
 		spawnErrorMessage: null,
 		cumulativeSucceededTotalCount: ptySessionSpawnSucceededTotalCount,
 		cumulativeFailedTotalCount: ptySessionSpawnFailedTotalCount,
 		cumulativeSucceededCountForReason: succeededCountForReason,
+		// 本条创建落地之后的存活 pty 数。一行自证并发：> 1 即此刻确有多条 pty 并存。
+		livePtySessionCountAfterSpawn: livePtySessionCount,
 	});
+
+	emitLivePtySessionCountWatermarkStderrLineIfCrossed(input.attribution?.taskId ?? null);
 
 	const crossedTier = findCrossedStderrWatermarkTier(
 		previousSucceededTotalCount,
@@ -150,15 +208,68 @@ export function recordPtySessionSpawnOutcome(input: {
 		PTY_SESSION_SPAWN_COUNT_STDERR_WATERMARK_TIERS,
 	);
 	if (crossedTier === null) {
-		return;
+		return ptySessionSpawnSequenceNumber;
 	}
 	const countsByReasonSummary = Array.from(
 		ptySessionSpawnSucceededCountsByReason,
 		([key, count]) => `${key}=${count}`,
 	).join(" ");
 	emitProbeStderrLine(
-		`[warn] [pty-spawn-probe] 本进程累计 pty 创建数越过水位 tier=${crossedTier} succeededTotal=${ptySessionSpawnSucceededTotalCount} failedTotal=${ptySessionSpawnFailedTotalCount} ${countsByReasonSummary}`,
+		`[warn] [pty-spawn-probe] 本进程累计 pty 创建数越过水位 tier=${crossedTier} succeededTotal=${ptySessionSpawnSucceededTotalCount} failedTotal=${ptySessionSpawnFailedTotalCount} live=${livePtySessionCount} ${countsByReasonSummary}`,
 	);
+	return ptySessionSpawnSequenceNumber;
+}
+
+function emitLivePtySessionCountWatermarkStderrLineIfCrossed(latestTaskId: string | null): void {
+	if (livePtySessionCount <= peakLivePtySessionCount) {
+		return;
+	}
+	const previousPeak = peakLivePtySessionCount;
+	peakLivePtySessionCount = livePtySessionCount;
+	const crossedTier = findCrossedStderrWatermarkTier(
+		previousPeak,
+		peakLivePtySessionCount,
+		LIVE_PTY_SESSION_COUNT_STDERR_WATERMARK_TIERS,
+	);
+	if (crossedTier === null) {
+		return;
+	}
+	emitProbeStderrLine(
+		`[warn] [pty-spawn-probe] 并存的 pty 数越过水位 tier=${crossedTier} live=${livePtySessionCount} latestTaskId=${latestTaskId ?? "(none)"}`,
+	);
+}
+
+// 退出记录。与创建记录同源同序号，是「先后」与「重叠」的唯一分辨器：两条 spawn 之间夹着对应的 exit ⇒ 先后；
+// 夹不到 ⇒ 重叠。exitCode 与存活时长同时是「什么燃料让新生 pty 持续秒死」的直接抓手。
+//
+// 存活时长由调用方（PtySession）从自己实例上的创建时刻算出来后传入，而不是本模块按序号建表暂存：
+// 建表就要负责清表，而「退出事件永不到达」恰恰是本模块要观测的异常本身——那种情况下表会随之泄漏。
+export function recordPtySessionExitOutcome(input: {
+	attribution: PtySessionSpawnAttribution | null;
+	ptySessionSpawnSequenceNumber: number | null;
+	spawnedPid: number;
+	exitCode: number;
+	exitSignal: number | null;
+	ptySessionLifetimeMs: number;
+}): void {
+	// 只有分配过序号（即成功创建）的会话才计入存活数，否则退出记录会把计数带成负数。
+	if (input.ptySessionSpawnSequenceNumber !== null && livePtySessionCount > 0) {
+		livePtySessionCount -= 1;
+	}
+
+	// 退出时刻即本条记录的 recordedAtIso（由 journal 无条件写入），故不再另起一个同义字段。
+	appendProbeEvent("pty-session-exit", {
+		reason: input.attribution?.reason ?? "unattributed",
+		taskId: input.attribution?.taskId ?? null,
+		taskSessionStartOrigin: input.attribution?.taskSessionStartOrigin ?? null,
+		taskSessionStartRequestId: input.attribution?.taskSessionStartRequestId ?? null,
+		ptySessionSpawnSequenceNumber: input.ptySessionSpawnSequenceNumber,
+		spawnedPid: input.spawnedPid,
+		exitCode: input.exitCode,
+		exitSignal: input.exitSignal,
+		ptySessionLifetimeMs: input.ptySessionLifetimeMs,
+		livePtySessionCountAfterExit: livePtySessionCount,
+	});
 }
 
 export function recordTaskSessionAutoRestartScheduled(input: {

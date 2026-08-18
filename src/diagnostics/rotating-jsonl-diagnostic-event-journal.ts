@@ -35,11 +35,13 @@ const DIAGNOSTIC_EVENT_JOURNAL_RETAINED_ROTATED_FILE_COUNT = 4;
 export type DiagnosticEventJournalChannel =
 	| "event-loop-delay-window-sample"
 	| "git-command-failure"
-	// 以下三个通道原是 2026-08 那次 fd 耗尽调查的临时探针，现已转为常设绊线。转正的理由是根因修复
+	// 以下四个通道原是 2026-08 那次 fd 耗尽调查的临时探针，现已转为常设绊线。转正的理由是根因修复
 	// 本身会**抹掉症状而不抹掉成因**：node-pty 的 kqueue 泄漏一旦补上，「谁在高速创建 pty」就不再
-	// 表现为 fd 增长，只剩安静的空转，届时这三条通道是仅存的抓手。三者互相印证，缺一条就断链：
-	// 创建归因回答「谁在建」，自动重启打点回答「是不是它在成环」，fd 计数回答「这次有没有真的漏」。
+	// 表现为 fd 增长，只剩安静的空转，届时这四条通道是仅存的抓手。四者互相印证，缺一条就断链：
+	// 创建归因回答「谁在建」，退出记录回答「这些创建是先后还是重叠」（少了它，先后两次刷新与重叠两次
+	// 刷新逐字同形），自动重启打点回答「是不是它在成环」，fd 计数回答「这次有没有真的漏」。
 	| "pty-session-spawn"
+	| "pty-session-exit"
 	| "task-session-auto-restart-scheduled"
 	| "process-file-descriptor-count-sample";
 

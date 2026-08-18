@@ -6,6 +6,7 @@ import {
 } from "../core/windows-cmd-launch";
 import {
 	type PtySessionSpawnAttribution,
+	recordPtySessionExitOutcome,
 	recordPtySessionSpawnOutcome,
 } from "../diagnostics/pty-session-spawn-attribution-probe";
 
@@ -84,16 +85,34 @@ export class PtySession {
 
 	private constructor(
 		ptyProcess: pty.IPty,
+		// 退出记录所需的创建侧上下文。三者都只在 spawn 那一刻可得，因此必须随实例带到退出回调里：
+		// PtySession 是全仓唯一的 pty 构造点，也就是唯一能保证「每条创建都配一条退出」的位置。
+		private readonly spawnAttribution: PtySessionSpawnAttribution | null,
+		private readonly ptySessionSpawnSequenceNumber: number | null,
+		private readonly spawnedAtEpochMs: number,
 		private readonly onDataCallback?: (chunk: Buffer) => void,
 		private readonly onExitCallback?: (event: PtyExitEvent) => void,
 	) {
 		this.ptyProcess = ptyProcess;
+		// 退出后 pid 未必还读得出来，创建时先抄一份。
+		const spawnedPid = ptyProcess.pid;
 		(this.ptyProcess.onData as unknown as (listener: (data: PtyOutputChunk) => void) => void)((data) => {
 			const chunk = normalizeOutputChunk(data);
 			this.onDataCallback?.(chunk);
 		});
 		this.ptyProcess.onExit((event) => {
 			this.exited = true;
+			// 记录排在业务回调之前：回调里有会抛的分支（session-manager 的退出链路会跑 cleanup、
+			// 广播 summary），一旦抛出就会把这条退出记录整个带走，而缺一条退出就足以让「先后 / 重叠」
+			// 的判读反过来——那正是本通道存在的唯一理由。
+			recordPtySessionExitOutcome({
+				attribution: this.spawnAttribution,
+				ptySessionSpawnSequenceNumber: this.ptySessionSpawnSequenceNumber,
+				spawnedPid,
+				exitCode: event.exitCode,
+				exitSignal: event.signal ?? null,
+				ptySessionLifetimeMs: Date.now() - this.spawnedAtEpochMs,
+			});
 			this.onExitCallback?.(event);
 		});
 	}
@@ -138,13 +157,20 @@ export class PtySession {
 			});
 			throw error;
 		}
-		recordPtySessionSpawnOutcome({
+		const ptySessionSpawnSequenceNumber = recordPtySessionSpawnOutcome({
 			attribution: spawnAttribution ?? null,
 			spawnedPid: ptyProcess.pid,
 			spawnErrorCode: null,
 			spawnErrorMessage: null,
 		});
-		return new PtySession(ptyProcess, onData, onExit);
+		return new PtySession(
+			ptyProcess,
+			spawnAttribution ?? null,
+			ptySessionSpawnSequenceNumber,
+			Date.now(),
+			onData,
+			onExit,
+		);
 	}
 
 	get pid(): number {

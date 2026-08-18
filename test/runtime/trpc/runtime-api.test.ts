@@ -525,6 +525,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			expect.objectContaining({
 				cwd: "/tmp/existing-worktree",
 			}),
+			expect.any(String),
 		);
 	});
 
@@ -576,6 +577,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				cwd: "/tmp/main-task-worktree",
 				taskConversationSessionMetadata,
 			}),
+			expect.any(String),
 		);
 		expect(terminalManager.applyTurnCheckpoint).not.toHaveBeenCalled();
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
@@ -1012,6 +1014,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				agentId: "codex",
 				resumeFromTrash: true,
 			}),
+			expect.any(String),
 		);
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
@@ -1323,6 +1326,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				taskId: homeTaskId,
 				cwd: "/tmp/repo",
 			}),
+			expect.any(String),
 		);
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
@@ -1384,6 +1388,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				agentId: "codex",
 				images,
 			}),
+			expect.any(String),
 		);
 		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();
 	});
@@ -1438,6 +1443,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				startInPlanMode: undefined,
 				resumeFromTrash: true,
 			}),
+			expect.any(String),
 		);
 		expect(response.mode).toBe("resume");
 	});
@@ -1478,6 +1484,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(response.ok).toBe(true);
 		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
 			expect.objectContaining({ agentId: "claude", resumeFromTrash: true }),
+			expect.any(String),
 		);
 	});
 
@@ -1533,7 +1540,77 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 
 		expect(response.ok).toBe(true);
-		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(expect.objectContaining({ agentId: "codex" }));
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({ agentId: "codex" }),
+			expect.any(String),
+		);
+	});
+
+	// ── 归因护栏：客户端声明的启动来源必须原样落到 manager ────────────────────────────────
+	// 「用户手点 Restart」与「前端发现会话已陈旧、自动续跑」打到的是同一个 refreshTaskTerminal，服务端
+	// 收到的请求形状完全相同。而 refresh_task_terminal 实测占 pty 创建量的 68%——这 68% 里究竟有多少
+	// 是程序自己点的，只有靠客户端声明才分得开。省略时必须维持旧行为，否则老客户端的记账会被改写。
+
+	it("records a client-declared stale auto-resume refresh under its own origin instead of a human refresh", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ id: "in_progress", cards: [{ id: "task-1", agentId: "claude" }] }],
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => createSummary({ agentId: "claude", startedAt: null, pid: null })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-1",
+				cols: 120,
+				rows: 40,
+				taskSessionStartOriginDeclaredByClient: "stale_session_client_auto_resume",
+			},
+		);
+
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.anything(),
+			"stale_session_client_auto_resume",
+		);
+	});
+
+	it("keeps recording an undeclared refresh as a human refresh so older clients read the same", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ id: "in_progress", cards: [{ id: "task-1", agentId: "claude" }] }],
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => createSummary({ agentId: "claude", startedAt: null, pid: null })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", cols: 120, rows: 40 },
+		);
+
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(expect.anything(), "refresh_task_terminal");
 	});
 
 	// ── 兜底优先级排序护栏：观测事实 > 卡片意图 ──────────────────────────────────────────────
@@ -1593,7 +1670,10 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 
 		expect(response.ok).toBe(true);
-		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(expect.objectContaining({ agentId: "codex" }));
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({ agentId: "codex" }),
+			expect.any(String),
+		);
 	});
 
 	it("rejects refresh when the observed launched agent is a conversation-panel agent even if the card names a PTY agent", async () => {
@@ -1835,6 +1915,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				agentId: "codex",
 				cwd: "/tmp/existing-worktree",
 			}),
+			expect.any(String),
 		);
 		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();
 	});
@@ -4021,6 +4102,7 @@ describe("createRuntimeApi resumed claude session model", () => {
 				resumeFromTrash: true,
 				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-opus-5[1m]" },
 			}),
+			expect.any(String),
 		);
 		const updatedCard = collectSavedResumedTaskCards(capturedMutation).find(
 			(entry) => entry.terminalAgentModelOverrideSettings?.modelId === "claude-opus-5[1m]",
@@ -4056,6 +4138,7 @@ describe("createRuntimeApi resumed claude session model", () => {
 			expect.objectContaining({
 				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
 			}),
+			expect.any(String),
 		);
 		expectNoTerminalAgentModelOverrideWrite(capturedMutation, { agentId: "claude", modelId: "claude-fable-5" });
 	});
@@ -4078,6 +4161,7 @@ describe("createRuntimeApi resumed claude session model", () => {
 			expect.objectContaining({
 				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-opus-5[1m]" },
 			}),
+			expect.any(String),
 		);
 		// 把 `fable`（永远跟最新那一代）改写成钉版本 id 是单向信息损失，且会波及此后的全新启动。
 		expectNoTerminalAgentModelOverrideWrite(capturedMutation, { agentId: "claude", modelId: "fable" });
@@ -4102,6 +4186,7 @@ describe("createRuntimeApi resumed claude session model", () => {
 			expect.objectContaining({
 				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "opusplan" },
 			}),
+			expect.any(String),
 		);
 		expectNoTerminalAgentModelOverrideWrite(capturedMutation, { agentId: "claude", modelId: "opusplan" });
 	});
@@ -4132,6 +4217,7 @@ describe("createRuntimeApi resumed claude session model", () => {
 				resumeFromTrash: true,
 				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-opus-5[1m]" },
 			}),
+			expect.any(String),
 		);
 	});
 
@@ -4160,6 +4246,7 @@ describe("createRuntimeApi resumed claude session model", () => {
 			expect.objectContaining({
 				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-fable-5" },
 			}),
+			expect.any(String),
 		);
 		expectNoTerminalAgentModelOverrideWrite(capturedMutation, undefined);
 	});
@@ -4286,6 +4373,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		// 新会话必须以「续跑既有对话、不重投 prompt」形态起来，否则会凭空多一轮。
 		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
 			expect.objectContaining({ resumePriorAgentConversationWithoutResendingPrompt: true }),
+			expect.any(String),
 		);
 	});
 

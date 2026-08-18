@@ -501,7 +501,7 @@ class PersistentTerminal {
 			return;
 		}
 		this.autoResumeAttempted = true;
-		void this.refresh().catch(() => {
+		void this.refresh("stale_session_client_auto_resume").catch(() => {
 			// 续跑失败不打断终端；Refresh 按钮仍可手动重试。
 		});
 	}
@@ -1161,7 +1161,13 @@ class PersistentTerminal {
 		await trpcClient.runtime.stopTaskSession.mutate({ taskId: this.taskId });
 	}
 
-	async refresh(): Promise<{ ok: boolean; error?: string; mode?: "resume" | "fresh" }> {
+	// taskSessionStartOriginDeclaredByClient 纯归因、不改行为：默认不传即由服务端记成 refresh_task_terminal
+	// （人点的刷新），只有 maybeAutoResumeStaleSession 这条自动路径显式声明自己。不这样声明的话，服务端
+	// 收到的两种请求逐字相同，而 refresh 实测占 pty 创建量的 68%——「这 68% 里有多少是程序自己点的」
+	// 正是排查会话反复重建时的第一个问题。
+	async refresh(
+		taskSessionStartOriginDeclaredByClient?: "stale_session_client_auto_resume",
+	): Promise<{ ok: boolean; error?: string; mode?: "resume" | "fresh" }> {
 		this.suppressNextRestartReset = true;
 		const trpcClient = getRuntimeTrpcClient(this.workspaceId);
 		try {
@@ -1169,6 +1175,7 @@ class PersistentTerminal {
 				taskId: this.taskId,
 				cols: this.terminal.cols,
 				rows: this.terminal.rows,
+				taskSessionStartOriginDeclaredByClient,
 			});
 			if (!result.ok) {
 				this.suppressNextRestartReset = false;

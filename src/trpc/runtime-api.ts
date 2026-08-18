@@ -482,30 +482,35 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					baseRef: card.baseRef,
 					worktreeMode: card.worktreeMode,
 				});
-		const startedSummary = await terminalManager.startTaskSession({
-			taskId,
-			agentId: resolved.agentId,
-			binary: resolved.binary,
-			args: resolved.args,
-			taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
-				card.taskAgentPermissionMode,
-				scopedRuntimeConfig.agentAutonomousModeEnabled,
-			),
-			autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
-			cwd: taskCwd,
-			prompt: "",
-			images: undefined,
-			startInPlanMode: undefined,
-			resumeFromTrash: true,
-			workspaceId: workspaceScope.workspaceId,
-			projectPath: workspaceScope.workspacePath,
-			parentSessionId: undefined,
-			taskAgentSessionInitialization: undefined,
-			terminalAgentModelOverrideSettings:
-				card.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
-					? card.terminalAgentModelOverrideSettings
-					: undefined,
-		});
+		const startedSummary = await terminalManager.startTaskSession(
+			{
+				taskId,
+				agentId: resolved.agentId,
+				binary: resolved.binary,
+				args: resolved.args,
+				taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
+					card.taskAgentPermissionMode,
+					scopedRuntimeConfig.agentAutonomousModeEnabled,
+				),
+				autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
+				cwd: taskCwd,
+				prompt: "",
+				images: undefined,
+				startInPlanMode: undefined,
+				resumeFromTrash: true,
+				workspaceId: workspaceScope.workspaceId,
+				projectPath: workspaceScope.workspacePath,
+				parentSessionId: undefined,
+				taskAgentSessionInitialization: undefined,
+				terminalAgentModelOverrideSettings:
+					card.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
+						? card.terminalAgentModelOverrideSettings
+						: undefined,
+			},
+			// 刻意不复用 resume_reclaimed_…：那条走的是内存里还在的 restartRequest，本条是内存态已随进程
+			// 重启丢光、从 durable board 重新拼出来的。两者的成因与修法都不同，混记就白设这个枚举了。
+			"durable_record_rebuilt_resume",
+		);
 		return startedSummary.pid != null;
 	};
 
@@ -1048,33 +1053,37 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						? body.terminalAgentModelOverrideSettings
 						: undefined;
 				startFailurePhase = "start_pty_terminal_runtime_session";
-				const summary = await terminalManager.startTaskSession({
-					taskId: body.taskId,
-					workspaceTaskId,
-					taskConversationSessionMetadata: body.taskConversationSessionMetadata,
-					agentId: resolved.agentId,
-					binary: resolved.binary,
-					args: resolved.args,
-					taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
-						body.taskAgentPermissionMode,
-						scopedRuntimeConfig.agentAutonomousModeEnabled,
-					),
-					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
-					cwd: taskCwd,
-					prompt: body.prompt,
-					images: body.images,
-					startInPlanMode: body.startInPlanMode,
-					resumeFromTrash: body.resumeFromTrash,
-					resumePriorAgentConversationWithoutResendingPrompt:
-						body.resumePriorAgentConversationWithoutResendingPrompt,
-					cols: body.cols,
-					rows: body.rows,
-					workspaceId: workspaceScope.workspaceId,
-					projectPath: workspaceScope.workspacePath,
-					parentSessionId: body.parentSessionId,
-					taskAgentSessionInitialization: body.taskAgentSessionInitialization,
-					terminalAgentModelOverrideSettings: startTerminalAgentModelOverrideSettings,
-				});
+				const summary = await terminalManager.startTaskSession(
+					{
+						taskId: body.taskId,
+						workspaceTaskId,
+						taskConversationSessionMetadata: body.taskConversationSessionMetadata,
+						agentId: resolved.agentId,
+						binary: resolved.binary,
+						args: resolved.args,
+						taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
+							body.taskAgentPermissionMode,
+							scopedRuntimeConfig.agentAutonomousModeEnabled,
+						),
+						autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
+						cwd: taskCwd,
+						prompt: body.prompt,
+						images: body.images,
+						startInPlanMode: body.startInPlanMode,
+						resumeFromTrash: body.resumeFromTrash,
+						resumePriorAgentConversationWithoutResendingPrompt:
+							body.resumePriorAgentConversationWithoutResendingPrompt,
+						cols: body.cols,
+						rows: body.rows,
+						workspaceId: workspaceScope.workspaceId,
+						projectPath: workspaceScope.workspacePath,
+						parentSessionId: body.parentSessionId,
+						taskAgentSessionInitialization: body.taskAgentSessionInitialization,
+						terminalAgentModelOverrideSettings: startTerminalAgentModelOverrideSettings,
+					},
+					// 客户端未声明即按「外部入口」记账，与本字段引入前的行为一致。
+					body.taskSessionStartOriginDeclaredByClient ?? "external_entry_point",
+				);
 				latestStartedSummaryForDiagnostics = summary;
 				recordStartDiagnostic("runtime_started", startFailurePhase);
 				await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
@@ -1215,29 +1224,34 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						cardTerminalAgentModelOverrideSettings: card.terminalAgentModelOverrideSettings,
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
 					});
-				const summary = await terminalManager.refreshTaskTerminal({
-					taskId: body.taskId,
-					agentId: resolved.agentId,
-					binary: resolved.binary,
-					args: resolved.args,
-					taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
-						card.taskAgentPermissionMode,
-						scopedRuntimeConfig.agentAutonomousModeEnabled,
-					),
-					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
-					cwd: taskCwd,
-					prompt: "",
-					images: undefined,
-					startInPlanMode: undefined,
-					resumeFromTrash: true,
-					cols: body.cols,
-					rows: body.rows,
-					workspaceId: workspaceScope.workspaceId,
-					projectPath: workspaceScope.workspacePath,
-					parentSessionId: undefined,
-					taskAgentSessionInitialization: undefined,
-					terminalAgentModelOverrideSettings: resumedTerminalAgentModelOverrideSettings,
-				});
+				const summary = await terminalManager.refreshTaskTerminal(
+					{
+						taskId: body.taskId,
+						agentId: resolved.agentId,
+						binary: resolved.binary,
+						args: resolved.args,
+						taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
+							card.taskAgentPermissionMode,
+							scopedRuntimeConfig.agentAutonomousModeEnabled,
+						),
+						autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
+						cwd: taskCwd,
+						prompt: "",
+						images: undefined,
+						startInPlanMode: undefined,
+						resumeFromTrash: true,
+						cols: body.cols,
+						rows: body.rows,
+						workspaceId: workspaceScope.workspaceId,
+						projectPath: workspaceScope.workspacePath,
+						parentSessionId: undefined,
+						taskAgentSessionInitialization: undefined,
+						terminalAgentModelOverrideSettings: resumedTerminalAgentModelOverrideSettings,
+					},
+					// 客户端未声明即按「人点的刷新」记账。前端的陈旧会话自动续跑打的是同一个入口，
+					// 靠它显式声明 stale_session_client_auto_resume 才分得开。
+					body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal",
+				);
 				// 重启也是一次启动：把 agent 身份重新钉到卡片上，让「靠兜底才救回来的会话」在下一次硬中断时
 				// 不必再靠兜底。
 				await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
