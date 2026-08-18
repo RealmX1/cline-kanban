@@ -123,6 +123,37 @@ describe("auto-restart circuit breaker", () => {
 		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(spawnCountWhileCircuitBroken + 3);
 	});
 
+	it("drops an auto-restart that is already in flight when the user stops the session", async () => {
+		// 首次退避是 0ms，所以那一次自动重启**没有计时器**可掐：它已经在跑、正排队等启动闸门。
+		// 而排队期间 entry.active 恰恰是 null，stopTaskSession 会在自己的空守卫处早退——
+		// 只取消计时器的话，用户按了停止，会话照样被机器拉起来。
+		const manager = new TerminalSessionManager();
+		manager.attach("task-1", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });
+		await manager.startTaskSession(startTaskSessionRequest());
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
+
+		spawnedSessions[0]?.triggerExit(1);
+		manager.stopTaskSession("task-1");
+		await vi.advanceTimersByTimeAsync(60_000);
+
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not resurrect sessions after the runtime interrupts and stops every session", async () => {
+		// markInterruptedAndStopAll 的两个调用方是 runtime 关停与 workspace 移除，之后 manager 就被丢弃。
+		// 它此前既不设 suppress 闩也不作废在途重启，于是被它停掉的会话退出时会真的重启一条——
+		// 一条挂在已被移除的 workspace 上、再没有任何人管的 PTY。
+		const manager = new TerminalSessionManager();
+		manager.attach("task-1", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });
+		await manager.startTaskSession(startTaskSessionRequest());
+
+		manager.markInterruptedAndStopAll();
+		spawnedSessions[0]?.triggerExit(1);
+		await vi.advanceTimersByTimeAsync(60_000);
+
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
+	});
+
 	it("cancels a pending backoff when the user stops the session in the meantime", async () => {
 		const manager = new TerminalSessionManager();
 		manager.attach("task-1", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });

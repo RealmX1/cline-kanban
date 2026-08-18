@@ -34,6 +34,7 @@ import {
 } from "../core/session-activity";
 import {
 	recordTaskSessionAutoRestartDecision,
+	recordTaskSessionStartRequestFoldedIntoRunningSession,
 	type TaskSessionStartOrigin,
 } from "../diagnostics/pty-session-spawn-attribution-probe";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
@@ -47,6 +48,7 @@ import {
 	type AgentOutputTransitionDetector,
 	type AgentOutputTransitionInspectionPredicate,
 	BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN,
+	type PreparedAgentLaunch,
 	prepareAgentLaunch,
 	toBracketedPasteFramingWithoutTrailingSubmit,
 } from "./agent-session-adapters";
@@ -584,6 +586,11 @@ interface SessionEntry {
 	// 否则一个已被人接管的会话还会在几秒后被机器再拉起一次。
 	pendingAutoRestartBackoffTimer: NodeJS.Timeout | null;
 	pendingAutoRestart: Promise<void> | null;
+	// 自动重启的作废代际。**只取消计时器是不够的**：首次退避是 0ms，此时 pendingAutoRestart 已经在跑、
+	// 正排队等启动闸门，手上没有任何计时器可掐；而那段时间里 entry.active 恰恰是 null，
+	// stop / forceStop 都会在自己的空守卫处早退，于是「用户按了停止、机器照样把会话拉起来」。
+	// 每个取消点推进这个代际，在途的自动重启拿到闸门后复查代际不符即自行放弃。
+	autoRestartCancellationGeneration: number;
 	// Reference timestamp for the most recent stall window we have already logged.
 	// Reset to null when output advances, so each new silent window gets exactly one log line.
 	lastStallLoggedAt: number | null;
@@ -628,6 +635,22 @@ export interface StartShellSessionRequest {
 
 function now(): number {
 	return Date.now();
+}
+
+// 一次会话启动请求「到达」的标识与时刻，在 per-task 启动互斥闸门**之外**取。
+//
+// 必须在闸门外取：在闸门内取的话，排队等待过的并发请求会被记成「更晚才开始」，区间自然不重叠——
+// 于是复发现场会拿到一个「请求没有并发」的错误证据，而这条证据恰恰是归因通道存在的理由之一。
+interface TaskSessionStartRequestArrival {
+	taskSessionStartRequestId: string;
+	taskSessionStartRequestStartedAtIso: string;
+}
+
+function createTaskSessionStartRequestArrival(): TaskSessionStartRequestArrival {
+	return {
+		taskSessionStartRequestId: randomUUID(),
+		taskSessionStartRequestStartedAtIso: new Date().toISOString(),
+	};
 }
 
 function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
@@ -2395,6 +2418,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				recentAutoRestartTimestampsWithinRollingHour: [],
 				pendingAutoRestartBackoffTimer: null,
 				pendingAutoRestart: null,
+				autoRestartCancellationGeneration: 0,
 				lastStallLoggedAt: null,
 			});
 		}
@@ -2505,24 +2529,27 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin = "external_entry_point",
 	): Promise<RuntimeTaskSessionSummary> {
+		const arrival = createTaskSessionStartRequestArrival();
 		return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, () =>
-			this.startTaskSessionHoldingPerTaskStartExclusivity(request, taskSessionStartOrigin),
+			this.startTaskSessionHoldingPerTaskStartExclusivity(request, taskSessionStartOrigin, arrival),
 		);
 	}
 
 	private async startTaskSessionHoldingPerTaskStartExclusivity(
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin,
+		arrival: TaskSessionStartRequestArrival,
 	): Promise<RuntimeTaskSessionSummary> {
-		// 本次启动尝试的「请求区间」左端，右端是随后那条 pty 创建记录自己的时刻。归因通道原本只有点、
-		// 没有区间，于是先后两次启动与重叠两次启动逐字同形。刻意在 manager 入口生成而不是由调用方传入：
-		// 要观测的竞态窗口恰好是「置空 entry.active → 两次 await → 装载新代」这一段，它整个落在本方法
-		// 内部；从 trpc 层起算反而会把与竞态无关的解析 / IO 时间一并画进区间。
-		const taskSessionStartRequestId = randomUUID();
-		const taskSessionStartRequestStartedAtIso = new Date().toISOString();
+		const { taskSessionStartRequestId, taskSessionStartRequestStartedAtIso } = arrival;
+		// 拿到闸门的时刻。与「请求到达时刻」分开记是有意的，见 PtySessionSpawnAttribution 上的注释：
+		// 到达时刻在闸门**之外**取，才看得见排队并发；闸门时刻在闸门**之内**取，才判得出互斥是否失效。
+		const taskSessionStartExclusivityAcquiredAtIso = new Date().toISOString();
 		const entry = this.ensureEntry(request.taskId);
-		// 有人（或别的路径）要起会话了，在途的退避重启就没有意义了：让它醒来只会把刚起的会话顶掉。
-		this.cancelPendingAutoRestartBackoff(entry);
+		// 有别的路径要起会话了，在途的自动重启就没有意义了：让它跑完只会把刚起的会话顶掉。
+		// 自动重启自己走的是同一个私有方法，故按来源排除，否则它会把自己作废掉。
+		if (taskSessionStartOrigin !== "auto_restart_after_pty_exit") {
+			this.cancelPendingAutoRestart(entry);
+		}
 		// 熔断的解除点。挂在 startTaskSession 而不是 refreshTaskTerminal，是因为它是所有人因入口的
 		// 公共下游，一次覆盖三条、更难漏；且必须放在下面那道「已在活跃回合就早退」之前，否则用户在
 		// 一个还活着的会话上点刷新时清不掉账。
@@ -2534,6 +2561,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 			request: cloneStartTaskSessionRequest(request),
 		};
 		if (entry.active && isSummaryInActiveTurn(entry.summary)) {
+			// 这次启动被折叠进了已经在跑的那条会话。它不产生 pty，此前在归因通道里没有任何痕迹——
+			// 而两个并发请求里被折叠的那个恰恰是并发的最强证据，不记的话剩下那个看起来就像一次
+			// 孤零零的正常启动。
+			recordTaskSessionStartRequestFoldedIntoRunningSession({
+				taskId: request.taskId,
+				taskSessionStartOrigin,
+				taskSessionStartRequestId,
+				taskSessionStartRequestStartedAtIso,
+				taskSessionStartExclusivityAcquiredAtIso,
+			});
 			return cloneSummary(entry.summary);
 		}
 
@@ -2578,32 +2615,51 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 		});
 
-		await materializeTaskAgentSessionForExecutionWorkingDirectory({
-			initialization: request.taskAgentSessionInitialization,
-			executionWorkingDirectoryPath: request.cwd,
-		});
-		const launch = await prepareAgentLaunch({
-			taskId: request.taskId,
-			agentId: request.agentId,
-			binary: request.binary,
-			args: request.args,
-			taskAgentPermissionMode: request.taskAgentPermissionMode,
-			cwd: request.cwd,
-			prompt: request.prompt,
-			images: request.images,
-			startInPlanMode: request.startInPlanMode,
-			resumeFromTrash: request.resumeFromTrash,
-			resumePriorAgentConversationWithoutResendingPrompt: request.resumePriorAgentConversationWithoutResendingPrompt,
-			env: request.env,
-			workspaceId: request.workspaceId,
-			parentSessionId: request.parentSessionId,
-			taskAgentSessionInitialization: request.taskAgentSessionInitialization,
-			readOnlyQuestionSession: request.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way",
-			forkLatestWorkingDirectorySession:
-				request.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
-				"forked_from_main_current_turn",
-			terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
-		});
+		// 准备阶段（工作目录物化 + adapter 启动准备）与 spawn 在「失败时留下什么」上必须一致。
+		// 此前这两次 await 抛出时：新建的镜像既没被 dispose（纯泄漏），也没被装载，而
+		// entry.terminalStateMirror 在上面的换代块里已经置空 —— 于是这个 task 的 restore 快照永久为空，
+		// 前端把空快照当作自动续跑的权威信号，反复重挂反复续跑。这条路径漏掉的话，
+		// 「切断实例 churn 放大环」这件事只做了 spawn 那一半。
+		let launch: PreparedAgentLaunch;
+		try {
+			await materializeTaskAgentSessionForExecutionWorkingDirectory({
+				initialization: request.taskAgentSessionInitialization,
+				executionWorkingDirectoryPath: request.cwd,
+			});
+			launch = await prepareAgentLaunch({
+				taskId: request.taskId,
+				agentId: request.agentId,
+				binary: request.binary,
+				args: request.args,
+				taskAgentPermissionMode: request.taskAgentPermissionMode,
+				cwd: request.cwd,
+				prompt: request.prompt,
+				images: request.images,
+				startInPlanMode: request.startInPlanMode,
+				resumeFromTrash: request.resumeFromTrash,
+				resumePriorAgentConversationWithoutResendingPrompt:
+					request.resumePriorAgentConversationWithoutResendingPrompt,
+				env: request.env,
+				workspaceId: request.workspaceId,
+				parentSessionId: request.parentSessionId,
+				taskAgentSessionInitialization: request.taskAgentSessionInitialization,
+				readOnlyQuestionSession:
+					request.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way",
+				forkLatestWorkingDirectorySession:
+					request.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+					"forked_from_main_current_turn",
+				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
+			});
+		} catch (error) {
+			const prepareFailureMessage = error instanceof Error ? error.message : String(error);
+			this.installFailureExplainingTerminalStateMirrorAndMarkTaskSessionFailed(
+				entry,
+				request,
+				terminalStateMirror,
+				prepareFailureMessage,
+			);
+			throw error;
+		}
 
 		const taskContextEnv = {
 			KANBAN_TASK_ID: request.workspaceTaskId ?? request.taskId,
@@ -2846,6 +2902,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					taskSessionStartOrigin,
 					taskSessionStartRequestId,
 					taskSessionStartRequestStartedAtIso,
+					taskSessionStartExclusivityAcquiredAtIso,
 				},
 				onData: (chunk) => {
 					handleTaskOutput(chunk);
@@ -2869,31 +2926,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 终端实例都会自动续跑一次，而每次续跑失败又把空快照续上，环就是这么闭合的。
 			// 装一份写着失败原因的镜像同时解决两件事：环断了，用户也终于看得见为什么起不来。
 			const spawnFailureMessage = formatSpawnFailure(commandBinary, error);
-			terminalStateMirror.applyOutput(Buffer.from(`\r\n[kanban] ${spawnFailureMessage}\r\n`, "utf8"));
-			entry.terminalStateMirror = terminalStateMirror;
-			const summary = updateSummary(entry, {
-				...buildTerminalFacetPatch(entry.summary, "failed", {
-					reviewReason: "error",
-					pid: null,
-					agentId: request.agentId,
-				}),
-				agentId: request.agentId,
-				workspacePath: request.cwd,
-				pid: null,
-				startedAt: null,
-				lastOutputAt: null,
-				reviewReason: "error",
-				exitCode: null,
-				lastHookAt: null,
-				latestHookActivity: null,
-				latestTurnCheckpoint: null,
-				previousTurnCheckpoint: null,
-				restorationContinuationGuardState: "inactive",
-				...(request.taskConversationSessionMetadata
-					? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
-					: {}),
-			});
-			this.emitSummary(summary);
+			this.installFailureExplainingTerminalStateMirrorAndMarkTaskSessionFailed(
+				entry,
+				request,
+				terminalStateMirror,
+				spawnFailureMessage,
+			);
 			throw new Error(spawnFailureMessage);
 		}
 
@@ -3097,19 +3135,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	async startShellSession(request: StartShellSessionRequest): Promise<RuntimeTaskSessionSummary> {
+		const arrival = createTaskSessionStartRequestArrival();
 		return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, () =>
-			this.startShellSessionHoldingPerTaskStartExclusivity(request),
+			this.startShellSessionHoldingPerTaskStartExclusivity(request, arrival),
 		);
 	}
 
 	private async startShellSessionHoldingPerTaskStartExclusivity(
 		request: StartShellSessionRequest,
+		arrival: TaskSessionStartRequestArrival,
 	): Promise<RuntimeTaskSessionSummary> {
-		// 与 startTaskSession 同源的请求区间左端，理由见那边的注释。shell 侧同样有「置空 active →
-		// 装载新代」这段窗口，只是中间没有 await，因此区间通常极短——区间长度本身就是这条差异的读数。
-		const taskSessionStartRequestId = randomUUID();
-		const taskSessionStartRequestStartedAtIso = new Date().toISOString();
+		// 与 startTaskSession 同源的到达 / 闸门两段时刻，理由见那边的注释。
+		const { taskSessionStartRequestId, taskSessionStartRequestStartedAtIso } = arrival;
+		const taskSessionStartExclusivityAcquiredAtIso = new Date().toISOString();
 		const entry = this.ensureEntry(request.taskId);
+		// shell 启动同样意味着有人接管了这个槽位，在途的自动重启必须作废。
+		this.cancelPendingAutoRestart(entry);
 		entry.restartRequest = {
 			kind: "shell",
 			request: cloneStartShellSessionRequest(request),
@@ -3170,6 +3211,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					taskId: request.taskId,
 					taskSessionStartRequestId,
 					taskSessionStartRequestStartedAtIso,
+					taskSessionStartExclusivityAcquiredAtIso,
 				},
 				onData: (chunk) => {
 					if (!entry.active) {
@@ -4076,7 +4118,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 掐在早退**之前**：退避在途时 entry.active 恰恰是 null（上一条 PTY 已经死了、新的还没起），
 		// 放在早退之后等于这条路径永远碰不到它——用户按了停止，几秒后机器照样把会话拉起来，
 		// 那是最刺眼的一种不听话。
-		this.cancelPendingAutoRestartBackoff(entry);
+		this.cancelPendingAutoRestart(entry);
 		if (!entry.active) {
 			return cloneSummary(entry.summary);
 		}
@@ -4109,7 +4151,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		// 同 stopTaskSession：必须掐在早退之前，理由见那边的注释。
-		this.cancelPendingAutoRestartBackoff(entry);
+		this.cancelPendingAutoRestart(entry);
 		if (!entry.active) {
 			return;
 		}
@@ -4167,8 +4209,31 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin = "refresh_task_terminal",
 	): Promise<RuntimeTaskSessionSummary> {
+		const arrival = createTaskSessionStartRequestArrival();
+		// 「停掉旧的 + 起一条新的」必须整体在同一把闸门里，不能只把后半段关进去。
+		//
+		// 只关后半段时：第二个刷新的 forceStop 会在第一个刷新刚装载好新代之后把它杀掉，然后排队再起一条。
+		// 结果不是孤儿（闸门仍拦住了并发覆盖），但每多一个标签页就多一轮「杀掉再重建」——多标签页下
+		// 自动续跑同一个任务时，这条串行 churn 正是要消灭的东西。
+		//
+		// 内部调私有的启动体而不是公开的 startTaskSession：后者会再抢一次同一把闸门，当场自死锁。
+		// forceStopTaskSession 自己不抢闸门，可以安全地在闸门内调用。
+		return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, () =>
+			this.refreshTaskTerminalHoldingPerTaskStartExclusivity(request, taskSessionStartOrigin, arrival),
+		);
+	}
+
+	private async refreshTaskTerminalHoldingPerTaskStartExclusivity(
+		request: StartTaskSessionRequest,
+		taskSessionStartOrigin: TaskSessionStartOrigin,
+		arrival: TaskSessionStartRequestArrival,
+	): Promise<RuntimeTaskSessionSummary> {
 		await this.forceStopTaskSession(request.taskId, 2_000);
-		const summary = await this.startTaskSession(request, taskSessionStartOrigin);
+		const summary = await this.startTaskSessionHoldingPerTaskStartExclusivity(
+			request,
+			taskSessionStartOrigin,
+			arrival,
+		);
 		// startTaskSession disposes the old terminal state mirror and creates a fresh one,
 		// so the banner must be written AFTER the new mirror exists. Otherwise late-attach
 		// viewers reattaching via the control socket would receive a restore snapshot from
@@ -4220,6 +4285,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	markInterruptedAndStopAll(): RuntimeTaskSessionSummary[] {
+		// 先把**每一个** entry 的自动重启掐掉，再处理活会话——顺序与范围都要紧。
+		//
+		// 范围：在途的自动重启恰恰挂在 active 为 null 的 entry 上（上一条 PTY 已死、新的还没起），
+		// 只遍历活会话会把它们整个漏掉。而本方法的两个调用方是 runtime 关停与 workspace 移除，
+		// 之后 manager 就被丢弃了——漏掉一个就等于在一个已被移除的 workspace 上留下一条没人管的 PTY。
+		//
+		// suppress：此前这条路径不设闩，被它停掉的会话退出时会走进自动重启判定并真的重启一条。
+		for (const entry of this.entries.values()) {
+			entry.suppressAutoRestartOnExit = true;
+			this.cancelPendingAutoRestart(entry);
+		}
 		const activeEntries = Array.from(this.entries.values()).filter((entry) => entry.active != null);
 		for (const entry of activeEntries) {
 			if (!entry.active) {
@@ -4389,7 +4465,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 在途的退避计时器必须一并掐掉：manager 都要没了，几秒后再把一个会话拉起来只会留下一条
 		// 没人管的 PTY。此前这里只清 stallScanInterval，是因为当时自动重启路径上根本没有计时器。
 		for (const entry of this.entries.values()) {
-			this.cancelPendingAutoRestartBackoff(entry);
+			this.cancelPendingAutoRestart(entry);
 		}
 	}
 
@@ -4410,6 +4486,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			recentAutoRestartTimestampsWithinRollingHour: [],
 			pendingAutoRestartBackoffTimer: null,
 			pendingAutoRestart: null,
+			autoRestartCancellationGeneration: 0,
 			lastStallLoggedAt: null,
 		};
 		this.entries.set(taskId, created);
@@ -4455,7 +4532,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry.recentAutoRestartTimestampsWithinRollingHour = [];
 	}
 
-	private cancelPendingAutoRestartBackoff(entry: SessionEntry): void {
+	// 作废这个 task 上一切在途的自动重启：既掐退避计时器，也让**已经在跑、正排队等启动闸门**的那一次
+	// 在拿到闸门后自行放弃。后者不能靠计时器解决——首次退避是 0ms，那一次压根没有计时器。
+	private cancelPendingAutoRestart(entry: SessionEntry): void {
+		entry.autoRestartCancellationGeneration += 1;
 		if (entry.pendingAutoRestartBackoffTimer === null) {
 			return;
 		}
@@ -4514,6 +4594,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			);
 			const summary = updateSummary(entry, { warningMessage: message });
 			const output = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
+			// 也写进镜像：只发给当前监听者的话，之后才挂上来的终端（换标签页、重新打开面板）拿到的
+			// restore 快照里没有这句话，用户看到的就是「会话停在这儿、屏幕上什么都没说」。
+			entry.terminalStateMirror?.applyOutput(output);
 			for (const listener of entry.listeners.values()) {
 				listener.onOutput?.(output);
 				listener.onState?.(cloneSummary(summary));
@@ -4544,10 +4627,27 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	private runAutoRestartNow(entry: SessionEntry, request: StartTaskSessionRequest): void {
+		const cancellationGenerationWhenScheduled = entry.autoRestartCancellationGeneration;
+		const arrival = createTaskSessionStartRequestArrival();
 		let pendingAutoRestart: Promise<void> | null = null;
 		pendingAutoRestart = (async () => {
 			try {
-				await this.startTaskSession(cloneStartTaskSessionRequest(request), "auto_restart_after_pty_exit");
+				// 自己拿闸门、拿到之后**再复查一次**，而不是直接调 startTaskSession：排队等闸门的这段时间里
+				// 用户完全可能已经把会话停掉、或自己重新起了一条。等待期间 entry.active 是 null，
+				// 停止入口会在各自的空守卫处早退，唯一能拦住这一次的就是这里的复查。
+				await this.runTaskSessionStartExclusivelyPerTask(request.taskId, async () => {
+					if (entry.autoRestartCancellationGeneration !== cancellationGenerationWhenScheduled) {
+						return;
+					}
+					if (entry.active !== null || entry.listeners.size === 0 || entry.restartRequest?.kind !== "task") {
+						return;
+					}
+					await this.startTaskSessionHoldingPerTaskStartExclusivity(
+						cloneStartTaskSessionRequest(request),
+						"auto_restart_after_pty_exit",
+						arrival,
+					);
+				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				const summary = updateSummary(entry, {
@@ -4566,6 +4666,48 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 		})();
 		entry.pendingAutoRestart = pendingAutoRestart;
+	}
+
+	// 任务会话启动失败的统一收尾：把失败原因写进这份新镜像并**装载**它，再把会话标成 failed 并广播。
+	//
+	// 「装载而不是 dispose」是本方法存在的全部理由：换代块已经把 entry.terminalStateMirror 置空，
+	// 失败时若不回填，这个 task 的 restore 快照就永久为空——而前端把「空快照 + pid 为空」当作
+	// 「服务器死过一次、镜像已丢」的权威信号去自动续跑，且那道守卫是 per-终端实例的。
+	// 空快照永久化 ⇒ 每个挂上来的终端实例都续跑一次，每次续跑失败又把空快照续上。
+	//
+	// 抽成一处是因为**每一条**启动失败路径都必须这样收尾。历史上只有 spawn 那一条做了，
+	// 准备阶段（工作目录物化 / adapter 准备）抛出时既漏装载又漏 dispose，环照转不误。
+	private installFailureExplainingTerminalStateMirrorAndMarkTaskSessionFailed(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+		terminalStateMirror: TerminalStateMirror,
+		failureMessage: string,
+	): void {
+		terminalStateMirror.applyOutput(Buffer.from(`\r\n[kanban] ${failureMessage}\r\n`, "utf8"));
+		entry.terminalStateMirror = terminalStateMirror;
+		const summary = updateSummary(entry, {
+			...buildTerminalFacetPatch(entry.summary, "failed", {
+				reviewReason: "error",
+				pid: null,
+				agentId: request.agentId,
+			}),
+			agentId: request.agentId,
+			workspacePath: request.cwd,
+			pid: null,
+			startedAt: null,
+			lastOutputAt: null,
+			reviewReason: "error",
+			exitCode: null,
+			lastHookAt: null,
+			latestHookActivity: null,
+			latestTurnCheckpoint: null,
+			previousTurnCheckpoint: null,
+			restorationContinuationGuardState: "inactive",
+			...(request.taskConversationSessionMetadata
+				? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+				: {}),
+		});
+		this.emitSummary(summary);
 	}
 
 	private emitSummary(summary: RuntimeTaskSessionSummary): void {

@@ -59,6 +59,12 @@ export interface PtySessionSpawnAttribution {
 	// 这正是「服务端 per-task 启动互斥有没有生效、还有没有第三条入口」的判据。
 	taskSessionStartRequestId?: string;
 	taskSessionStartRequestStartedAtIso?: string;
+	// 拿到 per-task 启动互斥闸门的时刻。与上面那个「请求到达时刻」是**两件事**，必须都记：
+	//   - [到达, 创建] 区间重叠 ⇒ 两个请求确实并发到达了（互斥随后把它们串行化，这是**预期**行为）；
+	//   - [拿到闸门, 创建] 区间重叠 ⇒ 互斥没生效，或存在绕过它的第三条入口（这才是**故障**）。
+	// 只记后者会把排队并发记成串行、让复发现场拿到「请求未重叠」的错误证据；只记前者则分不出
+	// 「并发到达但被正确串行化」与「互斥失效」。
+	taskSessionStartExclusivityAcquiredAtIso?: string;
 }
 
 // 累计计数跨越这些档位时各打一次 stderr。前段密是为了让「刚开始不正常」尽早可见，
@@ -160,6 +166,7 @@ export function recordPtySessionSpawnOutcome(input: {
 			taskSessionStartOrigin: input.attribution?.taskSessionStartOrigin ?? null,
 			taskSessionStartRequestId: input.attribution?.taskSessionStartRequestId ?? null,
 			taskSessionStartRequestStartedAtIso: input.attribution?.taskSessionStartRequestStartedAtIso ?? null,
+			taskSessionStartExclusivityAcquiredAtIso: input.attribution?.taskSessionStartExclusivityAcquiredAtIso ?? null,
 			spawnedPid: null,
 			spawnErrorCode: input.spawnErrorCode,
 			spawnErrorMessage: input.spawnErrorMessage,
@@ -189,6 +196,7 @@ export function recordPtySessionSpawnOutcome(input: {
 		taskSessionStartOrigin: input.attribution?.taskSessionStartOrigin ?? null,
 		taskSessionStartRequestId: input.attribution?.taskSessionStartRequestId ?? null,
 		taskSessionStartRequestStartedAtIso: input.attribution?.taskSessionStartRequestStartedAtIso ?? null,
+		taskSessionStartExclusivityAcquiredAtIso: input.attribution?.taskSessionStartExclusivityAcquiredAtIso ?? null,
 		ptySessionSpawnSequenceNumber,
 		spawnedPid: input.spawnedPid,
 		spawnErrorCode: null,
@@ -218,6 +226,34 @@ export function recordPtySessionSpawnOutcome(input: {
 		`[warn] [pty-spawn-probe] 本进程累计 pty 创建数越过水位 tier=${crossedTier} succeededTotal=${ptySessionSpawnSucceededTotalCount} failedTotal=${ptySessionSpawnFailedTotalCount} live=${livePtySessionCount} ${countsByReasonSummary}`,
 	);
 	return ptySessionSpawnSequenceNumber;
+}
+
+// 一次「到了闸门跟前、但因为已有活会话在跑而被折叠掉」的启动请求。
+//
+// 它不产生 pty，所以此前在归因通道里**完全没有痕迹**——而这正好抹掉了并发的最强证据：两个并发请求里
+// 被折叠的那一个不留记录，剩下那一个看起来就像一次孤零零的正常启动。追「谁在高速发起启动」时，
+// 被折叠的请求与真的创建了 pty 的请求同等重要。
+//
+// 走 pty-session-spawn 同一条通道而不是新开一条：读者要的是一条按时间排好的启动时间线，
+// 拆成两个文件反而要自己 merge。outcome 是这条记录的第一分叉，不会与创建记录混淆。
+export function recordTaskSessionStartRequestFoldedIntoRunningSession(input: {
+	taskId: string;
+	taskSessionStartOrigin: TaskSessionStartOrigin;
+	taskSessionStartRequestId: string;
+	taskSessionStartRequestStartedAtIso: string;
+	taskSessionStartExclusivityAcquiredAtIso: string;
+}): void {
+	appendProbeEvent("pty-session-spawn", {
+		outcome: "folded_into_running_session",
+		reason: "task_agent_session",
+		taskId: input.taskId,
+		taskSessionStartOrigin: input.taskSessionStartOrigin,
+		taskSessionStartRequestId: input.taskSessionStartRequestId,
+		taskSessionStartRequestStartedAtIso: input.taskSessionStartRequestStartedAtIso,
+		taskSessionStartExclusivityAcquiredAtIso: input.taskSessionStartExclusivityAcquiredAtIso,
+		spawnedPid: null,
+		livePtySessionCount,
+	});
 }
 
 function emitLivePtySessionCountWatermarkStderrLineIfCrossed(latestTaskId: string | null): void {
