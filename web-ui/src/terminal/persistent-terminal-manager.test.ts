@@ -3,6 +3,7 @@ import { SHELL_SESSION_TERMINAL_COLS, TASK_SESSION_TERMINAL_COLS } from "@/runti
 import type { RuntimeTerminalWsResizeMessage } from "@/runtime/types";
 import {
 	disposeAllPersistentTerminalsForWorkspace,
+	disposePersistentTerminal,
 	ensurePersistentTerminal,
 } from "@/terminal/persistent-terminal-manager";
 import type * as PlatformModule from "@/utils/platform";
@@ -640,6 +641,61 @@ describe("persistent-terminal-manager", () => {
 			dispatchRestore("");
 			await waitForRestoreCompleted(2);
 			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not auto-refresh again from a freshly created terminal instance for the same task", async () => {
+			// 类里那个一次性闩是 per-实例的，而实例 churn 恰恰是常态：切一张卡（disposePersistentTerminal）、
+			// 被 MAX_PARKED_TERMINALS 的 LRU 驱逐后重挂、关掉面板再打开，每次都是一份新实例。
+			// 没有跨实例冷却的话，「服务端起不来」这种持续故障会被前端反复叫醒，一次故障变成一串创建请求。
+			//
+			// 注意 socket 要取**最新**那条：上一份实例已被销毁，它那条 control socket 还留在录制数组里，
+			// 打过去等于什么都没测。
+			function findNewestControlSocket() {
+				const socket = webSocketInstances.filter((entry) => entry.url.includes("/api/terminal/control")).at(-1);
+				if (!socket) {
+					throw new Error("control socket not found");
+				}
+				return socket;
+			}
+			function dispatchStateToNewest(summary: Record<string, unknown>): void {
+				dispatchSocketMessage(findNewestControlSocket(), JSON.stringify({ type: "state", summary }));
+			}
+			function dispatchRestoreToNewest(snapshot: string): void {
+				dispatchSocketMessage(
+					findNewestControlSocket(),
+					JSON.stringify({ type: "restore", snapshot, cols: 80, rows: 30 }),
+				);
+			}
+			const staleAgentSessionState = {
+				taskId: "task-a",
+				agentId: "claude",
+				pid: null,
+				state: "idle",
+				liveness: "none",
+			};
+
+			const firstTerminal = mountedTerminal();
+			const firstRefreshSpy = vi.spyOn(firstTerminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchStateToNewest(staleAgentSessionState);
+			dispatchRestoreToNewest("");
+			await vi.waitFor(() => {
+				expect(firstRefreshSpy).toHaveBeenCalledTimes(1);
+			});
+
+			disposePersistentTerminal("workspace-1", "task-a");
+			const secondTerminal = mountedTerminal();
+			expect(secondTerminal).not.toBe(firstTerminal);
+			const secondRefreshSpy = vi.spyOn(secondTerminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchStateToNewest(staleAgentSessionState);
+			dispatchRestoreToNewest("");
+			await vi.waitFor(() => {
+				const completions = parseControlMessages(findNewestControlSocket()).filter(
+					(message) => message.type === "restore_complete",
+				);
+				expect(completions.length).toBeGreaterThanOrEqual(1);
+			});
+
+			expect(secondRefreshSpy).not.toHaveBeenCalled();
 		});
 
 		it("does not auto-refresh when the restore snapshot is non-empty (live/exited session, mirror intact)", async () => {

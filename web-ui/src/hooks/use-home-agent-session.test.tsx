@@ -1,7 +1,7 @@
 import { act, useCallback, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useHomeAgentSession } from "@/hooks/use-home-agent-session";
+import { HOME_AGENT_SESSION_START_FAILURE_BACKOFF_BASE_MS, useHomeAgentSession } from "@/hooks/use-home-agent-session";
 import type { RuntimeConfigResponse, RuntimeGitRepositoryInfo, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 
@@ -318,6 +318,51 @@ describe("useHomeAgentSession", () => {
 			taskId: initialTaskId,
 		});
 		expect(rotatedSnapshot.sessionKeys).toEqual([rotatedSnapshot.taskId]);
+	});
+
+	it("backs off after a failed home terminal start instead of retrying on every rerender", async () => {
+		// 启动失败往往是**持续性**的（agent 二进制不在、工作区不可读、服务端起不来），而这个 effect 会被
+		// 任何一次广播、任何一次可见性变化重新触发。不退避的话，一次持续故障就被放大成一串启动请求。
+		vi.useFakeTimers();
+		try {
+			startTaskSessionMutateMock.mockRejectedValue(new Error("codex binary is missing"));
+
+			const renderHarness = async (isHomeSidebarAgentSectionCurrentlyVisible: boolean) => {
+				await act(async () => {
+					root.render(
+						<HookHarness
+							config={createRuntimeConfig()}
+							currentProjectId="workspace-1"
+							isHomeSidebarAgentSectionCurrentlyVisible={isHomeSidebarAgentSectionCurrentlyVisible}
+							onSnapshot={() => {}}
+						/>,
+					);
+					await createFlushPromises();
+				});
+			};
+
+			await renderHarness(true);
+			expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(1);
+			expect(notifyErrorMock).toHaveBeenCalledTimes(1);
+
+			// 折叠再展开 agent 分段——一条真实存在、用户随手就能高频触发的重跑路径。
+			for (let attempt = 0; attempt < 3; attempt += 1) {
+				await renderHarness(false);
+				await renderHarness(true);
+			}
+			expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(1);
+
+			// 退避到期后必须自己醒过来重试。只记一个「几点之后才允许再试」是不够的：effect 只在
+			// dependency 变化时重跑，而墙钟推进不改变任何 dependency——那样「无限重试」会被换成
+			// 「永不重试」，Home 面板一直空着直到用户碰点别的。
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(HOME_AGENT_SESSION_START_FAILURE_BACKOFF_BASE_MS + 50);
+				await createFlushPromises();
+			});
+			expect(startTaskSessionMutateMock).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("does not spawn a home terminal session while the Kanban agent section is not visible", async () => {

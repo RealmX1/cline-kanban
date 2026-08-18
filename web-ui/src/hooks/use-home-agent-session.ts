@@ -6,13 +6,19 @@
 import { isRuntimeAgentSessionRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { createHomeAgentSessionId, isHomeAgentSessionIdForWorkspace } from "@runtime-home-agent-session";
 import type { Dispatch, SetStateAction } from "react";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { notifyError } from "@/components/app-toaster";
 import { getRuntimeClineProviderSettings } from "@/runtime/native-agent";
 import { estimateTaskSessionGeometry } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeConfigResponse, RuntimeGitRepositoryInfo, RuntimeTaskSessionSummary } from "@/runtime/types";
+
+// Home 面板会话启动失败后的退避。失败往往是**持续性**的（agent 二进制不在、工作区不可读、
+// 服务端起不来），而这个 effect 会被任何一次广播、任何一次可见性变化重新触发——不退避的话，
+// 一次持续故障就被放大成一串启动请求。
+export const HOME_AGENT_SESSION_START_FAILURE_BACKOFF_BASE_MS = 2_000;
+const HOME_AGENT_SESSION_START_FAILURE_BACKOFF_MAX_MS = 60_000;
 
 type HomeAgentPanelMode = "chat" | "terminal";
 
@@ -129,6 +135,43 @@ export function useHomeAgentSession({
 	const previousClineSessionContextVersionByWorkspaceRef = useRef(new Map<string, number>());
 	const nextStartRequestIdRef = useRef(0);
 	const disposedRef = useRef(false);
+	const homeAgentSessionStartFailureBackoffBySessionKeyRef = useRef(
+		new Map<string, { consecutiveFailureCount: number; nextStartAttemptAllowedAtEpochMs: number }>(),
+	);
+	const homeAgentSessionStartFailureBackoffWakeupRef = useRef<{
+		timer: ReturnType<typeof setTimeout>;
+		wakeupAtEpochMs: number;
+	} | null>(null);
+	// 退避到期时把启动 effect 叫醒的那一下。
+	//
+	// 只记一个「几点之后才允许再试」是不够的：effect 只在 dependency 变化时重跑，而墙钟推进不改变
+	// 任何 dependency。光比截止时间的话，退避期过了也没有任何东西会叫醒它——「无限重试」就被换成了
+	// 「永不重试」，Home 面板会一直空着直到用户碰点别的。
+	const [homeAgentSessionStartFailureBackoffWakeupTick, setHomeAgentSessionStartFailureBackoffWakeupTick] =
+		useState(0);
+
+	const scheduleHomeAgentSessionStartFailureBackoffWakeup = useCallback((wakeupAtEpochMs: number) => {
+		const existingWakeup = homeAgentSessionStartFailureBackoffWakeupRef.current;
+		// 已经排了一个更早（或同样早）的叫醒就不用再排：它醒来时 effect 会重跑，还没到期的那些会把
+		// 自己重新排上。反过来若新的更早，得换掉——否则近的那次要等远的那次醒来才被服务。
+		if (existingWakeup !== null && existingWakeup.wakeupAtEpochMs <= wakeupAtEpochMs) {
+			return;
+		}
+		if (existingWakeup !== null) {
+			clearTimeout(existingWakeup.timer);
+		}
+		const timer = setTimeout(
+			() => {
+				homeAgentSessionStartFailureBackoffWakeupRef.current = null;
+				if (disposedRef.current) {
+					return;
+				}
+				setHomeAgentSessionStartFailureBackoffWakeupTick((tick) => tick + 1);
+			},
+			Math.max(0, wakeupAtEpochMs - Date.now()),
+		);
+		homeAgentSessionStartFailureBackoffWakeupRef.current = { timer, wakeupAtEpochMs };
+	}, []);
 	const clineProviderSettings = getRuntimeClineProviderSettings(runtimeProjectConfig);
 
 	useEffect(() => {
@@ -322,6 +365,12 @@ export function useHomeAgentSession({
 			return;
 		}
 
+		const startFailureBackoff = homeAgentSessionStartFailureBackoffBySessionKeyRef.current.get(sessionKey);
+		if (startFailureBackoff && Date.now() < startFailureBackoff.nextStartAttemptAllowedAtEpochMs) {
+			scheduleHomeAgentSessionStartFailureBackoffWakeup(startFailureBackoff.nextStartAttemptAllowedAtEpochMs);
+			return;
+		}
+
 		const requestId = nextStartRequestIdRef.current + 1;
 		nextStartRequestIdRef.current = requestId;
 		pendingStartRequestIdsRef.current.set(sessionKey, requestId);
@@ -359,6 +408,7 @@ export function useHomeAgentSession({
 				}
 
 				startedSessionKeysRef.current.add(sessionKey);
+				homeAgentSessionStartFailureBackoffBySessionKeyRef.current.delete(sessionKey);
 				upsertSessionSummary(response.summary);
 			} catch (error) {
 				if (pendingStartRequestIdsRef.current.get(sessionKey) !== requestId) {
@@ -371,6 +421,19 @@ export function useHomeAgentSession({
 				) {
 					return;
 				}
+				const consecutiveFailureCount =
+					(homeAgentSessionStartFailureBackoffBySessionKeyRef.current.get(sessionKey)?.consecutiveFailureCount ??
+						0) + 1;
+				const backoffMs = Math.min(
+					HOME_AGENT_SESSION_START_FAILURE_BACKOFF_BASE_MS * 2 ** (consecutiveFailureCount - 1),
+					HOME_AGENT_SESSION_START_FAILURE_BACKOFF_MAX_MS,
+				);
+				const nextStartAttemptAllowedAtEpochMs = Date.now() + backoffMs;
+				homeAgentSessionStartFailureBackoffBySessionKeyRef.current.set(sessionKey, {
+					consecutiveFailureCount,
+					nextStartAttemptAllowedAtEpochMs,
+				});
+				scheduleHomeAgentSessionStartFailureBackoffWakeup(nextStartAttemptAllowedAtEpochMs);
 				const message = error instanceof Error ? error.message : String(error);
 				notifyError(message);
 			}
@@ -381,6 +444,8 @@ export function useHomeAgentSession({
 		isHomeSidebarAgentSectionCurrentlyVisible,
 		sessionSummaries,
 		upsertSessionSummary,
+		homeAgentSessionStartFailureBackoffWakeupTick,
+		scheduleHomeAgentSessionStartFailureBackoffWakeup,
 	]);
 
 	useEffect(() => {
@@ -391,6 +456,11 @@ export function useHomeAgentSession({
 			startedSessionKeysRef.current.clear();
 			pendingStartRequestIdsRef.current.clear();
 			previousClineSessionContextVersionByWorkspaceRef.current.clear();
+			homeAgentSessionStartFailureBackoffBySessionKeyRef.current.clear();
+			if (homeAgentSessionStartFailureBackoffWakeupRef.current !== null) {
+				clearTimeout(homeAgentSessionStartFailureBackoffWakeupRef.current.timer);
+				homeAgentSessionStartFailureBackoffWakeupRef.current = null;
+			}
 		};
 	}, []);
 

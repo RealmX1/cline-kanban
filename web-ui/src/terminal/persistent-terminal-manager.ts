@@ -43,6 +43,43 @@ const TERMINAL_RECONNECT_MAX_DELAY_MS = 5_000;
 const VIEWER_QUEUE_STALL_MS = 5_000;
 // 可见性恢复门控的兜底超时:request_restore 后恢复快照最长等待时间,超时解除门控防白屏。
 const AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS = 5_000;
+// 陈旧会话自动续跑的**跨实例**冷却。
+//
+// 类里那个 autoResumeAttempted 是 per-终端实例的一次性闩，它拦不住真正的重复触发：切一张卡、
+// 被 MAX_PARKED_TERMINALS 的 LRU 驱逐后重挂、关掉面板再打开，每一次都是一份新实例、都重新放一次电。
+// 于是「服务端起不来」这种持续故障会被前端反复叫醒，一次故障变成一串创建请求。
+//
+// 用冷却而不是永久闩：服务器如果真的第二次重启，这条会话仍然应该允许再续一次——永久闩会把
+// 「自动接回会话」这个功能在一次失败之后彻底关掉。
+//
+// 作用域诚实说明：模块级 = **同一个标签页内**跨实例。多标签页各有各的 JS realm，这里拦不住；
+// 那一层归服务端的 per-task 启动互斥管（见 session-manager 的
+// runTaskSessionStartExclusivelyPerTask），前端 ref 无论怎么写都覆盖不到。
+const MINIMUM_INTERVAL_BETWEEN_STALE_SESSION_AUTO_RESUME_ATTEMPTS_PER_TASK_MS = 60_000;
+const staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask = new Map<string, number>();
+
+function hasStaleSessionAutoResumeCooledDownForTask(workspaceAndTaskKey: string): boolean {
+	const lastAttemptedAtEpochMs = staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask.get(workspaceAndTaskKey);
+	return (
+		lastAttemptedAtEpochMs === undefined ||
+		Date.now() - lastAttemptedAtEpochMs >= MINIMUM_INTERVAL_BETWEEN_STALE_SESSION_AUTO_RESUME_ATTEMPTS_PER_TASK_MS
+	);
+}
+
+function recordStaleSessionAutoResumeAttemptForTask(workspaceAndTaskKey: string): void {
+	const attemptedAtEpochMs = Date.now();
+	// 顺手丢掉已经过期的键，免得这张表随会话数单调增长——它记的是「最近一分钟内续跑过谁」，
+	// 不是一份历史账。
+	for (const [key, recordedAtEpochMs] of staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask) {
+		if (
+			attemptedAtEpochMs - recordedAtEpochMs >=
+			MINIMUM_INTERVAL_BETWEEN_STALE_SESSION_AUTO_RESUME_ATTEMPTS_PER_TASK_MS
+		) {
+			staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask.delete(key);
+		}
+	}
+	staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask.set(workspaceAndTaskKey, attemptedAtEpochMs);
+}
 const PARKING_ROOT_ID = "kb-persistent-terminal-parking-root";
 const HOME_TERMINAL_TASK_ID = "__home_terminal__";
 const DETAIL_TERMINAL_TASK_PREFIX = "__detail_terminal__:";
@@ -500,7 +537,14 @@ class PersistentTerminal {
 		if (facets.turnOwner === "user" && facets.userTurnKind !== "question" && facets.userTurnKind !== "permission") {
 			return;
 		}
+		// 跨实例冷却：per-实例的 autoResumeAttempted 拦不住「换一份实例就重新放一次电」，
+		// 而持续性故障（服务端起不来）恰恰会不断制造新实例。见模块顶部该冷却表的注释。
+		const staleSessionAutoResumeCooldownKey = `${this.workspaceId}:${this.taskId}`;
+		if (!hasStaleSessionAutoResumeCooledDownForTask(staleSessionAutoResumeCooldownKey)) {
+			return;
+		}
 		this.autoResumeAttempted = true;
+		recordStaleSessionAutoResumeAttemptForTask(staleSessionAutoResumeCooldownKey);
 		void this.refresh("stale_session_client_auto_resume").catch(() => {
 			// 续跑失败不打断终端；Refresh 按钮仍可手动重试。
 		});
@@ -1283,5 +1327,10 @@ export function disposeAllPersistentTerminalsForWorkspace(workspaceId: string): 
 		}
 		terminal.dispose();
 		terminals.delete(key);
+		// 这个 workspace 的终端被整体拆掉了，它的续跑冷却也一并作废：冷却拦的是「实例churn 导致
+		// 重复放电」，而整体拆除是一条粗粒度的、由外部显式触发的边界，不属于那种 churn。
+		// 注意与 disposePersistentTerminal 的区别——**那**条恰恰是切卡片时的实例 churn 本身，
+		// 在那里清冷却等于把这道守卫整个废掉。
+		staleSessionAutoResumeAttemptedAtEpochMsByWorkspaceAndTask.delete(key);
 	}
 }

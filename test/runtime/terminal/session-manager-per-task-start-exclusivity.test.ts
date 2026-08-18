@@ -114,6 +114,24 @@ describe("per-task session start exclusivity", () => {
 		expect(manager.getSummary("task-b")?.pid).toBe(101);
 	});
 
+	it("leaves a restore snapshot explaining the failure instead of an empty one that invites auto-resume", async () => {
+		// 空 restore 快照 + pid 为空是前端判「服务器死过一次、镜像已丢」的权威信号，据此自动续跑。
+		// 启动失败若把镜像丢掉又不回填，这个 task 的空快照就**永久化**了——而前端那道守卫是
+		// per-终端实例的，换标签页 / 切卡片 / 被 LRU 驱逐重挂全都重置。于是每一个挂上来的终端实例
+		// 都续跑一次，每次续跑失败又把空快照续上，环就闭合了。
+		ptySessionSpawnMock.mockImplementationOnce(() => {
+			throw new Error("spawn exploded");
+		});
+		const manager = new TerminalSessionManager();
+		manager.attach("task-1", { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() });
+
+		await expect(manager.startTaskSession(startTaskSessionRequestFor("task-1"))).rejects.toThrow();
+
+		const restoreSnapshot = await manager.getRestoreSnapshot("task-1");
+		expect(restoreSnapshot).not.toBeNull();
+		expect(restoreSnapshot?.snapshot).toContain("spawn exploded");
+	});
+
 	it("keeps the gate usable after a start fails", async () => {
 		// 闸门一旦泄漏，这个 task 此后再也起不来任何会话——比它要拦的缺陷还严重，故单独锚定。
 		ptySessionSpawnMock.mockImplementationOnce(() => {

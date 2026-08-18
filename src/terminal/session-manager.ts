@@ -2860,7 +2860,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 					// Best effort: cleanup failure is non-critical.
 				});
 			}
-			terminalStateMirror.dispose();
+			// 把失败原因写进这份新镜像并**装载**它，而不是 dispose 掉。
+			//
+			// 此前这里 dispose 掉新镜像、又不回填 entry.terminalStateMirror（它在换代块里已被置空），
+			// 于是一次启动失败就让这个 task 的 restore 快照**永久**为空。而前端把「空快照 + pid 为空」
+			// 当作「服务器死过一次、镜像已丢」的权威信号去自动续跑，那道守卫又是 per-终端实例的——
+			// 换标签页、切卡片、被 LRU 驱逐后重挂，全都重置。空快照永久化 ⇒ 每一个挂到这个 task 上的
+			// 终端实例都会自动续跑一次，而每次续跑失败又把空快照续上，环就是这么闭合的。
+			// 装一份写着失败原因的镜像同时解决两件事：环断了，用户也终于看得见为什么起不来。
+			const spawnFailureMessage = formatSpawnFailure(commandBinary, error);
+			terminalStateMirror.applyOutput(Buffer.from(`\r\n[kanban] ${spawnFailureMessage}\r\n`, "utf8"));
+			entry.terminalStateMirror = terminalStateMirror;
 			const summary = updateSummary(entry, {
 				...buildTerminalFacetPatch(entry.summary, "failed", {
 					reviewReason: "error",
@@ -2884,7 +2894,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					: {}),
 			});
 			this.emitSummary(summary);
-			throw new Error(formatSpawnFailure(commandBinary, error));
+			throw new Error(spawnFailureMessage);
 		}
 
 		// 输出反应框架：仅当「连接中断自动续跑」开关开启、且有 reaction 适用于该 agent
@@ -3238,7 +3248,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 				},
 			});
 		} catch (error) {
-			terminalStateMirror.dispose();
+			// 同 startTaskSession 的失败分支，见那边的注释。shell 侧不喂前端那条自动续跑环
+			// （它要求 summary.agentId 非空），但「启动失败后终端一片空白、什么都不说」是一样的。
+			const shellSpawnFailureMessage = formatShellSpawnFailure(request.binary, error);
+			terminalStateMirror.applyOutput(Buffer.from(`\r\n[kanban] ${shellSpawnFailureMessage}\r\n`, "utf8"));
+			entry.terminalStateMirror = terminalStateMirror;
 			const summary = updateSummary(entry, {
 				...buildTerminalFacetPatch(entry.summary, "failed", {
 					reviewReason: "error",
@@ -3258,7 +3272,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				previousTurnCheckpoint: null,
 			});
 			this.emitSummary(summary);
-			throw new Error(formatShellSpawnFailure(request.binary, error));
+			throw new Error(shellSpawnFailureMessage);
 		}
 
 		const active: ActiveProcessState = {
