@@ -2426,9 +2426,63 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// taskSessionStartOrigin 只服务归因，不参与任何业务判定：内部三个调用点（终端刷新、回收会话恢复、
 	// PTY 退出后自动重启）与外部入口原本在日志里完全无法区分，而「会话是自己起来的还是人点出来的」
 	// 恰是排查会话反复重建时的第一个问题。可选参数，默认外部入口，不影响任何既有调用点。
+	// per-task 会话启动互斥闸门：同一 taskId 的启动一次只跑一条，后到的排队等前一条跑完。
+	//
+	// 拦的是这条竞态：startTaskSession 在**两次 await 之前**就把 entry.active 置了 null（换代块），
+	// 而唯一的去重判据 `entry.active && isSummaryInActiveTurn(...)` 恰恰读的就是它——于是同一 task 上
+	// 两个并发请求会双双穿过去、各 spawn 一条 PTY，后装载的那条把先装载的那条从 entry.active 上盖掉。
+	// 被盖掉的 PTY 此后再没有任何引用能停它，也不会被 stop / force-stop / dispose 碰到：孤儿由此产生。
+	// 而孤儿死亡时 onExit 打掉的是**当前**那条 active，随后自动重启再起一条——环就是这么转起来的。
+	//
+	// 为什么落在 manager：manager 是 per-workspace 且长驻的，trpc handler 是每次请求新建的无状态闭包，
+	// 把在途集合放进后者拦不住两个浏览器标签页各发一份请求。与
+	// taskIdsWithTerminalInputBoxStashAttemptInFlight 同理，见其注释。
+	//
+	// 为什么排队而不是像 Ctrl+S 暂存那样当场拒绝：那条链路的第二次请求醒来时框已被清空，回执必然错位，
+	// 所以只能拒。启动没有这个问题——排队的第二次醒来时若已有活会话，会在既有的
+	// `entry.active && isSummaryInActiveTurn(...)` 判据上正常早退，与「两次请求本来就先后到达」完全同形。
+	// 也就是说排队没有引入任何新语义，只是把并发折叠回串行。
+	//
+	// 为什么覆盖 startShellSession：它写的是同一个 entry.active，与 task 会话竞争的是同一个槽位。
+	// refreshTaskTerminal 不单独加闸门而是靠内部的 startTaskSession 传递性覆盖——它自己包一层会与内层
+	// 撞成自死锁，而真正的竞态窗口整个落在 startTaskSession 内部，包在外面并不多防住什么。
+	private readonly taskSessionStartExclusiveChainsByTaskId = new Map<string, Promise<void>>();
+
+	private async runTaskSessionStartExclusivelyPerTask<StartResult>(
+		taskId: string,
+		runStart: () => Promise<StartResult>,
+	): Promise<StartResult> {
+		const previousStartInChain = this.taskSessionStartExclusiveChainsByTaskId.get(taskId) ?? Promise.resolve();
+		const thisStart = previousStartInChain.then(runStart);
+		// 链上只记「跑完了没有」，既不带结果也不传播拒绝：前一次启动失败不该让排在后面的那次跟着失败，
+		// 而链本身若被拒绝会变成一个没人处理的 rejection。
+		const chainAfterThisStart = thisStart.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.taskSessionStartExclusiveChainsByTaskId.set(taskId, chainAfterThisStart);
+		try {
+			return await thisStart;
+		} finally {
+			// 身份判等后再删：本次跑完时若已有更晚的启动接在链尾，删掉的会是它的链，闸门当场失效。
+			if (this.taskSessionStartExclusiveChainsByTaskId.get(taskId) === chainAfterThisStart) {
+				this.taskSessionStartExclusiveChainsByTaskId.delete(taskId);
+			}
+		}
+	}
+
 	async startTaskSession(
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin = "external_entry_point",
+	): Promise<RuntimeTaskSessionSummary> {
+		return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, () =>
+			this.startTaskSessionHoldingPerTaskStartExclusivity(request, taskSessionStartOrigin),
+		);
+	}
+
+	private async startTaskSessionHoldingPerTaskStartExclusivity(
+		request: StartTaskSessionRequest,
+		taskSessionStartOrigin: TaskSessionStartOrigin,
 	): Promise<RuntimeTaskSessionSummary> {
 		// 本次启动尝试的「请求区间」左端，右端是随后那条 pty 创建记录自己的时刻。归因通道原本只有点、
 		// 没有区间，于是先后两次启动与重叠两次启动逐字同形。刻意在 manager 入口生成而不是由调用方传入：
@@ -2472,6 +2526,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		entry.terminalStateMirror?.dispose();
 		entry.terminalStateMirror = null;
+		// 闸门的第二道保险（见 runTaskSessionStartExclusivelyPerTask 上方）：记下走到这一步时 active 槽位
+		// 的样子（此处必为 null——要么本来就是，要么刚被上面的换代块置空），下面装载前再核对一次。
+		const activeSlotObservedBeforeSpawn = entry.active;
 		const cols = Number.isFinite(request.cols) && (request.cols ?? 0) > 0 ? Math.floor(request.cols ?? 0) : 120;
 		const rows = Number.isFinite(request.rows) && (request.rows ?? 0) > 0 ? Math.floor(request.rows ?? 0) : 40;
 		const terminalStateMirror = new TerminalStateMirror(cols, rows, {
@@ -2865,6 +2922,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
 		};
+		// 有别人在这期间把一条会话装进了同一个槽位 ⇒ 绝不能拿自己这条盖上去。被盖掉的那条 PTY 此后
+		// 再没有任何引用能停它，也不会被 stop / force-stop / dispose 碰到——那正是孤儿的成因。宁可丢掉
+		// 自己刚 spawn 的这条：它还在手里，停得掉。
+		//
+		// 闸门就位之后这一格打不中（唯二写这个槽位的就是 startTaskSession 与 startShellSession，两者
+		// 都排在同一条链上）。留着它是因为「静默产生一个再也停不掉的进程」这种缺陷，事后从现场倒推回
+		// 这里的代价极高，而 fail-closed 的成本只有一次对象比较。
+		if (entry.active !== activeSlotObservedBeforeSpawn) {
+			session.stop();
+			terminalStateMirror.dispose();
+			if (launch.cleanup) {
+				void launch.cleanup().catch(() => {
+					// Best effort: cleanup failure is non-critical.
+				});
+			}
+			return cloneSummary(entry.summary);
+		}
 		entry.active = active;
 		// 新的一代上来就把 suppress 闩清账。它是一次性闩（shouldAutoRestart 读后即置 false），而有两条
 		// 路径会置了闩却永远没人来消费：① forceStopTaskSession 的强杀超时分支直接置空 entry.active，
@@ -2972,6 +3046,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	async startShellSession(request: StartShellSessionRequest): Promise<RuntimeTaskSessionSummary> {
+		return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, () =>
+			this.startShellSessionHoldingPerTaskStartExclusivity(request),
+		);
+	}
+
+	private async startShellSessionHoldingPerTaskStartExclusivity(
+		request: StartShellSessionRequest,
+	): Promise<RuntimeTaskSessionSummary> {
 		// 与 startTaskSession 同源的请求区间左端，理由见那边的注释。shell 侧同样有「置空 active →
 		// 装载新代」这段窗口，只是中间没有 await，因此区间通常极短——区间长度本身就是这条差异的读数。
 		const taskSessionStartRequestId = randomUUID();
@@ -3008,6 +3090,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		entry.terminalStateMirror?.dispose();
 		entry.terminalStateMirror = null;
+		// 同 startTaskSession，见那边的注释。
+		const activeSlotObservedBeforeSpawn = entry.active;
 
 		const cols = Number.isFinite(request.cols) && (request.cols ?? 0) > 0 ? Math.floor(request.cols ?? 0) : 120;
 		const rows = Number.isFinite(request.rows) && (request.rows ?? 0) > 0 ? Math.floor(request.rows ?? 0) : 40;
@@ -3176,6 +3260,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
 		};
+		// 同 startTaskSession 的装载前核对，见那边的注释。
+		if (entry.active !== activeSlotObservedBeforeSpawn) {
+			session.stop();
+			terminalStateMirror.dispose();
+			return cloneSummary(entry.summary);
+		}
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
 
