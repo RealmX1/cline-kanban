@@ -272,18 +272,43 @@ export function recordPtySessionExitOutcome(input: {
 	});
 }
 
-export function recordTaskSessionAutoRestartScheduled(input: {
+// 一次自动重启**判定**的记录——不只是「排了一次重启」，也包括「这次判定决定不再重启了」。
+//
+// 通道名仍叫 task-session-auto-restart-scheduled：既有的 journal 文件与既有的判读口径都挂在这个名字上，
+// 为一次字段扩容改名会把历史数据切成两段。decisionKind 才是读这条记录时的第一分叉。
+export function recordTaskSessionAutoRestartDecision(input: {
 	taskId: string;
-	autoRestartTimestampsInWindowCount: number;
+	decisionKind: "restart_after_backoff" | "circuit_broken";
+	circuitBreakReason: string | null;
+	backoffMs: number | null;
+	previousIncarnationLifetimeMs: number | null;
+	previousIncarnationCountsAsHealthy: boolean;
+	consecutiveFailedFastExitAutoRestartCount: number;
+	autoRestartCountForThisTaskWithinRollingHour: number;
+	fastExitAutoRestartCountAcrossAllTasksWithinRollingHour: number;
 	listenerCount: number;
 }): void {
 	const previousTotalCount = taskSessionAutoRestartScheduledTotalCount;
-	taskSessionAutoRestartScheduledTotalCount += 1;
+	// 水位计数只数**真的排了重启**的那些：熔断是停手，把它算进「累计重启数」会让水位读数说谎。
+	if (input.decisionKind === "restart_after_backoff") {
+		taskSessionAutoRestartScheduledTotalCount += 1;
+	}
 
 	appendProbeEvent("task-session-auto-restart-scheduled", {
 		taskId: input.taskId,
-		// 5 秒滑动窗口内已消耗的重启配额（上限 3）——贴着上限跑即为自动重启循环的直证。
-		autoRestartTimestampsInWindowCount: input.autoRestartTimestampsInWindowCount,
+		decisionKind: input.decisionKind,
+		circuitBreakReason: input.circuitBreakReason,
+		backoffMs: input.backoffMs,
+		// 上一代活了多久 + 够不够健康门。持续的小数值就是「燃料」的直接线索：某种原因让每条新生的
+		// pty 都在数秒内死掉，而这正是本轮没能解释的那个量级缺口。
+		previousIncarnationLifetimeMs: input.previousIncarnationLifetimeMs,
+		previousIncarnationCountsAsHealthy: input.previousIncarnationCountsAsHealthy,
+		consecutiveFailedFastExitAutoRestartCount: input.consecutiveFailedFastExitAutoRestartCount,
+		// 两个滚动小时窗的当前读数。与存活时长无关，是慢环（每代都活得够久、连续计数永不增长）
+		// 唯一看得见的量。
+		autoRestartCountForThisTaskWithinRollingHour: input.autoRestartCountForThisTaskWithinRollingHour,
+		fastExitAutoRestartCountAcrossAllTasksWithinRollingHour:
+			input.fastExitAutoRestartCountAcrossAllTasksWithinRollingHour,
 		// 决定循环能否持续的门控：降到 0 就停，这解释了泄漏为何会自行终止。
 		listenerCount: input.listenerCount,
 		cumulativeTotalCount: taskSessionAutoRestartScheduledTotalCount,
@@ -298,6 +323,6 @@ export function recordTaskSessionAutoRestartScheduled(input: {
 		return;
 	}
 	emitProbeStderrLine(
-		`[warn] [pty-spawn-probe] 本进程累计任务会话自动重启数越过水位 tier=${crossedTier} total=${taskSessionAutoRestartScheduledTotalCount} latestTaskId=${input.taskId} windowRestarts=${input.autoRestartTimestampsInWindowCount} listeners=${input.listenerCount}`,
+		`[warn] [pty-spawn-probe] 本进程累计任务会话自动重启数越过水位 tier=${crossedTier} total=${taskSessionAutoRestartScheduledTotalCount} latestTaskId=${input.taskId} consecutiveFastExits=${input.consecutiveFailedFastExitAutoRestartCount} perTaskThisHour=${input.autoRestartCountForThisTaskWithinRollingHour} allTasksFastExitThisHour=${input.fastExitAutoRestartCountAcrossAllTasksWithinRollingHour} listeners=${input.listenerCount}`,
 	);
 }

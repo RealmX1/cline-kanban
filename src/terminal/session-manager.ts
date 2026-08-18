@@ -33,7 +33,7 @@ import {
 	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 } from "../core/session-activity";
 import {
-	recordTaskSessionAutoRestartScheduled,
+	recordTaskSessionAutoRestartDecision,
 	type TaskSessionStartOrigin,
 } from "../diagnostics/pty-session-spawn-attribution-probe";
 import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
@@ -82,6 +82,12 @@ import {
 } from "./output-reactions/network-interruption-continuation-instructions";
 import { type PtyExitEvent, PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
+import {
+	deriveTaskSessionAutoRestartDecision,
+	describeTaskSessionAutoRestartCircuitBreak,
+	doesTaskSessionStartOriginCountAsHumanInterventionClearingAutoRestartCircuitBreak,
+	pruneAutoRestartTimestampsToRollingHour,
+} from "./task-session-auto-restart-policy";
 import { backfillFoldedPastePlaceholdersFromPasteLedger } from "./terminal-input-box-folded-paste-placeholder-backfill";
 import {
 	createTerminalInputBoxOccupancyTrackerState,
@@ -204,8 +210,6 @@ export const TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS =
 // 就会随 agent 输出一直涨。超限丢**最旧**的：终端回滚本就是「保留最近」的语义，丢开头的启动横幅
 // 远比丢掉刚刚发生的那几屏可接受。
 const MAX_PRE_ACTIVE_OUTPUT_CHUNKS_BUFFERED_BEFORE_SESSION_INSTALL = 512;
-const AUTO_RESTART_WINDOW_MS = 5_000;
-const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
 const DEFAULT_STALL_THRESHOLD_MS = 45_000;
 const STALL_SCAN_INTERVAL_MS = 15_000;
 // idle-live 自愈进 Review 的阈值：终端 agent 完工却不退出、turnOwner 卡在 agent 时，scanForStalls 观测到
@@ -391,6 +395,17 @@ interface ActiveProcessState {
 	// 之外的调用方（runtime-api）不该去摸 entries 结构，这个字符串就是给它们的等价物：
 	// 取文时拿到、清框时回传，对不上就必须失败而不是照打。仅内存态。
 	terminalSessionIncarnationToken: string;
+	// 本代 PTY 的装载时刻，与 terminalSessionIncarnationToken 同族、同生共死。
+	//
+	// 用途只有一个：自动重启熔断器要判「上一代活了多久」——活够 MINIMUM_PTY_LIFETIME_… 算健康启动、
+	// 给连续失败计数衰减；不到就算 fast-exit，计入失败并触发退避。
+	//
+	// 为什么不复用 summary.startedAt：它有三条路径会变成 null（spawn 失败、recoverStaleSession 把会话
+	// 打回 idle、entry 初始默认值），复用就必须为 null 定一套语义，而两种定法都有实害——判「不健康」
+	// 会把「不知道」当成失败、误熔断健康会话；判「跳过」则恰好在 recoverStaleSession 这条路径上完全
+	// 失明，而那正是「反复陈旧化 → 前端自动续跑」这类成环形态的样子。本字段与 active 同生共死，结构上
+	// 不存在 null。何况 summary.startedAt 是给 UI 的展示字段，它的含义将来若被改动，不该静默改掉熔断判定。
+	terminalSessionIncarnationSpawnedAtEpochMs: number;
 }
 
 // 争用抢占的执行者：把人类未提交的输入无损暂存进 Prompt Library，并清空输入框。
@@ -559,7 +574,15 @@ interface SessionEntry {
 	listeners: Map<number, TerminalSessionListener>;
 	restartRequest: RestartableSessionRequest | null;
 	suppressAutoRestartOnExit: boolean;
-	autoRestartTimestamps: number[];
+	// 连续「快退后重启」的次数。健康存活衰减一格、快退加一；越过阈值即熔断。
+	// 人因入口（刷新 / 手动启动 / 回收会话恢复）会把它连同下面那个小时窗一起清账——熔断必须解得开。
+	consecutiveFailedFastExitAutoRestartCount: number;
+	// 本任务在滚动一小时内的自动重启时刻，**与存活时长无关**。它是慢环（每代都活得够久、连续计数
+	// 永远不增长）唯一的兜底。
+	recentAutoRestartTimestampsWithinRollingHour: number[];
+	// 退避计时器。必须可取消：人工 start / stop / refresh 与 manager dispose 都要能掐掉它，
+	// 否则一个已被人接管的会话还会在几秒后被机器再拉起一次。
+	pendingAutoRestartBackoffTimer: NodeJS.Timeout | null;
 	pendingAutoRestart: Promise<void> | null;
 	// Reference timestamp for the most recent stall window we have already logged.
 	// Reset to null when output advances, so each new silent window gets exactly one log line.
@@ -976,6 +999,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
 	private readonly stallThresholdMs = readStallThresholdMs();
 	private stallScanInterval: NodeJS.Timeout | null = null;
+	// 进程级的 fast-exit 自动重启时刻窗（滚动一小时）。刻意是 manager 级而不是 per-task：
+	// 「每轮换一个新 taskId」的成环形态（journal 里 task-conversation-session-<uuid> 这类会话 id
+	// 每次都是新 UUID）会让任何 per-task 计数器恒为 0——每一轮都是全新 SessionEntry、计数从头开始，
+	// 何况 this.entries 全仓没有 delete/clear，条目只增不减。进程级兜底在这种形态下不可替代。
+	private recentFastExitAutoRestartTimestampsAcrossAllTasksWithinRollingHour: number[] = [];
 
 	private trySendDeferredStartupInput(taskId: string): boolean {
 		const entry = this.entries.get(taskId);
@@ -2363,7 +2391,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 				listeners: new Map(),
 				restartRequest: null,
 				suppressAutoRestartOnExit: false,
-				autoRestartTimestamps: [],
+				consecutiveFailedFastExitAutoRestartCount: 0,
+				recentAutoRestartTimestampsWithinRollingHour: [],
+				pendingAutoRestartBackoffTimer: null,
 				pendingAutoRestart: null,
 				lastStallLoggedAt: null,
 			});
@@ -2491,6 +2521,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const taskSessionStartRequestId = randomUUID();
 		const taskSessionStartRequestStartedAtIso = new Date().toISOString();
 		const entry = this.ensureEntry(request.taskId);
+		// 有人（或别的路径）要起会话了，在途的退避重启就没有意义了：让它醒来只会把刚起的会话顶掉。
+		this.cancelPendingAutoRestartBackoff(entry);
+		// 熔断的解除点。挂在 startTaskSession 而不是 refreshTaskTerminal，是因为它是所有人因入口的
+		// 公共下游，一次覆盖三条、更难漏；且必须放在下面那道「已在活跃回合就早退」之前，否则用户在
+		// 一个还活着的会话上点刷新时清不掉账。
+		if (doesTaskSessionStartOriginCountAsHumanInterventionClearingAutoRestartCircuitBreak(taskSessionStartOrigin)) {
+			this.clearAutoRestartCircuitBreakStateOnHumanInitiatedStart(entry);
+		}
 		entry.restartRequest = {
 			kind: "task",
 			request: cloneStartTaskSessionRequest(request),
@@ -2767,7 +2805,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 				exitCode: event.exitCode,
 				interrupted: currentActive.session.wasInterrupted(),
 			});
-			const shouldAutoRestart = this.shouldAutoRestart(currentEntry);
+			// 本代活了多久——熔断器判「健康启动 vs 秒退」的唯一依据，必须在 currentActive 被置空之前算出来。
+			const previousIncarnationLifetimeMs = now() - currentActive.terminalSessionIncarnationSpawnedAtEpochMs;
+			const isEligibleForAutoRestart = this.isTaskSessionEligibleForAutoRestart(currentEntry);
 
 			for (const taskListener of currentEntry.listeners.values()) {
 				taskListener.onState?.(cloneSummary(summary));
@@ -2778,10 +2818,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 进程退出即结束任何「连接重试」状态，避免顶栏 / 看板把已死的 session 仍标为重连中。
 			this.applyConnectionRetryState(request.taskId, null);
 			// 对称清 park：parked 主 agent 的 PTY 若真的退出（崩溃 / 用户 kill），清掉残留 sidecar，避免一个已死
-			// 会话仍被标为 parked。auto-restart 已在上方 shouldAutoRestart 处被 parked / wasSuppressed 守卫拦下。
+			// 会话仍被标为 parked。auto-restart 已在上方的门禁处被 parked / wasSuppressed 守卫拦下。
 			this.unparkTaskSession(request.taskId);
-			if (shouldAutoRestart) {
-				this.scheduleAutoRestart(currentEntry);
+			if (isEligibleForAutoRestart) {
+				this.scheduleAutoRestart(currentEntry, previousIncarnationLifetimeMs);
 			}
 
 			const cleanupFn = currentActive.onSessionCleanup;
@@ -2921,6 +2961,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
 			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
+			terminalSessionIncarnationSpawnedAtEpochMs: now(),
 		};
 		// 有别人在这期间把一条会话装进了同一个槽位 ⇒ 绝不能拿自己这条盖上去。被盖掉的那条 PTY 此后
 		// 再没有任何引用能停它，也不会被 stop / force-stop / dispose 碰到——那正是孤儿的成因。宁可丢掉
@@ -3259,6 +3300,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			inputBoxOccupancyTracker: createTerminalInputBoxOccupancyTrackerState(),
 			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
+			terminalSessionIncarnationSpawnedAtEpochMs: now(),
 		};
 		// 同 startTaskSession 的装载前核对，见那边的注释。
 		if (entry.active !== activeSlotObservedBeforeSpawn) {
@@ -4014,8 +4056,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	stopTaskSession(taskId: string): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
-		if (!entry?.active) {
-			return entry ? cloneSummary(entry.summary) : null;
+		if (!entry) {
+			return null;
+		}
+		// 掐在早退**之前**：退避在途时 entry.active 恰恰是 null（上一条 PTY 已经死了、新的还没起），
+		// 放在早退之后等于这条路径永远碰不到它——用户按了停止，几秒后机器照样把会话拉起来，
+		// 那是最刺眼的一种不听话。
+		this.cancelPendingAutoRestartBackoff(entry);
+		if (!entry.active) {
+			return cloneSummary(entry.summary);
 		}
 		entry.suppressAutoRestartOnExit = true;
 		const cleanupFn = entry.active.onSessionCleanup;
@@ -4042,7 +4091,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// a wedged TUI cannot block a user-initiated refresh.
 	async forceStopTaskSession(taskId: string, gracefulTimeoutMs = 2_000): Promise<void> {
 		const entry = this.entries.get(taskId);
-		if (!entry?.active) {
+		if (!entry) {
+			return;
+		}
+		// 同 stopTaskSession：必须掐在早退之前，理由见那边的注释。
+		this.cancelPendingAutoRestartBackoff(entry);
+		if (!entry.active) {
 			return;
 		}
 		const active = entry.active;
@@ -4318,6 +4372,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			clearInterval(this.stallScanInterval);
 			this.stallScanInterval = null;
 		}
+		// 在途的退避计时器必须一并掐掉：manager 都要没了，几秒后再把一个会话拉起来只会留下一条
+		// 没人管的 PTY。此前这里只清 stallScanInterval，是因为当时自动重启路径上根本没有计时器。
+		for (const entry of this.entries.values()) {
+			this.cancelPendingAutoRestartBackoff(entry);
+		}
 	}
 
 	private ensureEntry(taskId: string): SessionEntry {
@@ -4333,7 +4392,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			listeners: new Map(),
 			restartRequest: null,
 			suppressAutoRestartOnExit: false,
-			autoRestartTimestamps: [],
+			consecutiveFailedFastExitAutoRestartCount: 0,
+			recentAutoRestartTimestampsWithinRollingHour: [],
+			pendingAutoRestartBackoffTimer: null,
 			pendingAutoRestart: null,
 			lastStallLoggedAt: null,
 		};
@@ -4341,7 +4402,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return created;
 	}
 
-	private shouldAutoRestart(entry: SessionEntry): boolean {
+	// 「这条会话此刻允不允许被自动重启」的门禁。刻意只做门禁、不碰任何计数：真正的判定（退避多久、
+	// 该不该熔断）与随之而来的状态变更全部落在 scheduleAutoRestart 里。
+	//
+	// 原实现把「消耗一格重启配额」写在这里，于是调用方一旦在拿到 true 之后因别的原因没有真的重启
+	// （scheduleAutoRestart 的 pendingAutoRestart 早退就是现成的一条），配额就白白少一格——留下的是
+	// 一类「计了但没发生」的账，事后没人推得回来。
+	private isTaskSessionEligibleForAutoRestart(entry: SessionEntry): boolean {
 		const wasSuppressed = entry.suppressAutoRestartOnExit;
 		entry.suppressAutoRestartOnExit = false;
 		if (wasSuppressed) {
@@ -4356,42 +4423,117 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (entry.listeners.size === 0 || entry.restartRequest?.kind !== "task") {
 			return false;
 		}
-		const currentTime = now();
-		entry.autoRestartTimestamps = entry.autoRestartTimestamps.filter(
-			(timestamp) => currentTime - timestamp < AUTO_RESTART_WINDOW_MS,
-		);
-		if (entry.autoRestartTimestamps.length >= MAX_AUTO_RESTARTS_PER_WINDOW) {
-			return false;
-		}
-		entry.autoRestartTimestamps.push(currentTime);
 		return true;
 	}
 
-	private scheduleAutoRestart(entry: SessionEntry): void {
-		if (entry.pendingAutoRestart) {
+	// 人因入口（手动启动 / 刷新 / 回收会话恢复）落地时给熔断计数清账。
+	//
+	// 这一条不能省：三条人因入口此前一条都不复位计数，而 this.entries 全仓没有任何 delete/clear——
+	// 熔断态会一直挂到进程重启，用户按刷新按不动它。复位点挂在 startTaskSession 而不是
+	// refreshTaskTerminal，是因为前者是所有人因入口的公共下游，一次覆盖三条，更难漏；判据用
+	// 「本次启动的来源不是自动重启」，否则 scheduleAutoRestart 调的也是 startTaskSession，
+	// 熔断器会自我赦免、永不触发。
+	//
+	// 进程级的 fast-exit 小时窗**不**在这里清：那是全进程共享的读数，一个任务上的人工干预
+	// 没有理由替别的任务解禁。
+	private clearAutoRestartCircuitBreakStateOnHumanInitiatedStart(entry: SessionEntry): void {
+		entry.consecutiveFailedFastExitAutoRestartCount = 0;
+		entry.recentAutoRestartTimestampsWithinRollingHour = [];
+	}
+
+	private cancelPendingAutoRestartBackoff(entry: SessionEntry): void {
+		if (entry.pendingAutoRestartBackoffTimer === null) {
+			return;
+		}
+		clearTimeout(entry.pendingAutoRestartBackoffTimer);
+		entry.pendingAutoRestartBackoffTimer = null;
+	}
+
+	private scheduleAutoRestart(entry: SessionEntry, previousIncarnationLifetimeMs: number | null): void {
+		if (entry.pendingAutoRestart || entry.pendingAutoRestartBackoffTimer) {
 			return;
 		}
 		const restartRequest = entry.restartRequest;
 		if (!restartRequest || restartRequest.kind !== "task") {
 			return;
 		}
-		// 自动重启此前零日志覆盖，而它是最容易悄悄成环的一条路径：下面的限速器不是熔断器，只是
-		// 「5 秒内最多 3 次」的滑动窗口，无总量上限、无退避，理论上能以 0.6 次/秒无限空转下去。
-		// 这里记下判定是否成环所需的全部字段：窗口内已消耗的重启配额（贴着上限 3 跑即为成环直证）、
-		// 决定循环能否持续的 listeners.size（降到 0 就停，故成环往往会自行终止而不留痕迹）。
-		// 只观测、不改限速行为：要给它加熔断，得先有真实成环记录来定阈值，凭空设阈值只会误伤。
-		recordTaskSessionAutoRestartScheduled({
+		const currentTime = now();
+		entry.recentAutoRestartTimestampsWithinRollingHour = pruneAutoRestartTimestampsToRollingHour(
+			entry.recentAutoRestartTimestampsWithinRollingHour,
+			currentTime,
+		);
+		this.recentFastExitAutoRestartTimestampsAcrossAllTasksWithinRollingHour = pruneAutoRestartTimestampsToRollingHour(
+			this.recentFastExitAutoRestartTimestampsAcrossAllTasksWithinRollingHour,
+			currentTime,
+		);
+
+		const decision = deriveTaskSessionAutoRestartDecision({
+			previousIncarnationLifetimeMs,
+			consecutiveFailedFastExitAutoRestartCount: entry.consecutiveFailedFastExitAutoRestartCount,
+			recentAutoRestartTimestampsForThisTaskWithinRollingHour: entry.recentAutoRestartTimestampsWithinRollingHour,
+			recentFastExitAutoRestartTimestampsAcrossAllTasksWithinRollingHour:
+				this.recentFastExitAutoRestartTimestampsAcrossAllTasksWithinRollingHour,
+		});
+		entry.consecutiveFailedFastExitAutoRestartCount = decision.nextConsecutiveFailedFastExitAutoRestartCount;
+
+		recordTaskSessionAutoRestartDecision({
 			taskId: entry.summary.taskId,
-			autoRestartTimestampsInWindowCount: entry.autoRestartTimestamps.length,
+			decisionKind: decision.kind,
+			circuitBreakReason: decision.kind === "circuit_broken" ? decision.circuitBreakReason : null,
+			backoffMs: decision.kind === "restart_after_backoff" ? decision.backoffMs : null,
+			previousIncarnationLifetimeMs,
+			previousIncarnationCountsAsHealthy: decision.previousIncarnationCountsAsHealthy,
+			consecutiveFailedFastExitAutoRestartCount: decision.nextConsecutiveFailedFastExitAutoRestartCount,
+			autoRestartCountForThisTaskWithinRollingHour: entry.recentAutoRestartTimestampsWithinRollingHour.length,
+			fastExitAutoRestartCountAcrossAllTasksWithinRollingHour:
+				this.recentFastExitAutoRestartTimestampsAcrossAllTasksWithinRollingHour.length,
+			// 决定循环能否持续的门控：降到 0 就停，这解释了成环为何往往自行终止而不留痕迹。
 			listenerCount: entry.listeners.size,
 		});
+
+		if (decision.kind === "circuit_broken") {
+			// 熔断是**用户可见**的终态，不是静默放弃：会话会一直停在这里直到有人手动刷新，
+			// 不说清楚的话表现就是「任务莫名其妙不动了」。
+			const message = describeTaskSessionAutoRestartCircuitBreak(decision.circuitBreakReason);
+			logTuiFreezeError(
+				`[tui-freeze] auto-restart-circuit-broken taskId=${entry.summary.taskId} agentId=${entry.summary.agentId ?? "(none)"} reason=${decision.circuitBreakReason} consecutiveFastExits=${decision.nextConsecutiveFailedFastExitAutoRestartCount} perTaskRestartsThisHour=${entry.recentAutoRestartTimestampsWithinRollingHour.length}`,
+			);
+			const summary = updateSummary(entry, { warningMessage: message });
+			const output = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
+			for (const listener of entry.listeners.values()) {
+				listener.onOutput?.(output);
+				listener.onState?.(cloneSummary(summary));
+			}
+			this.emitSummary(summary);
+			return;
+		}
+
+		entry.recentAutoRestartTimestampsWithinRollingHour.push(currentTime);
+		if (!decision.previousIncarnationCountsAsHealthy) {
+			this.recentFastExitAutoRestartTimestampsAcrossAllTasksWithinRollingHour.push(currentTime);
+		}
+
+		if (decision.backoffMs === 0) {
+			this.runAutoRestartNow(entry, restartRequest.request);
+			return;
+		}
+		entry.pendingAutoRestartBackoffTimer = setTimeout(() => {
+			entry.pendingAutoRestartBackoffTimer = null;
+			// 醒来后重新校验，而不是照着当初的判断硬跑：退避这几秒里用户完全可能已经自己把会话拉起来
+			// （active 非空）、或者关掉了终端面板（没有监听者了）、或者会话已被切成别的通道（restartRequest
+			// 不再是 task）。任何一条成立都意味着这次重启已经没有意义，甚至会把人刚起的会话顶掉。
+			if (entry.active !== null || entry.listeners.size === 0 || entry.restartRequest?.kind !== "task") {
+				return;
+			}
+			this.runAutoRestartNow(entry, entry.restartRequest.request);
+		}, decision.backoffMs);
+	}
+
+	private runAutoRestartNow(entry: SessionEntry, request: StartTaskSessionRequest): void {
 		let pendingAutoRestart: Promise<void> | null = null;
 		pendingAutoRestart = (async () => {
 			try {
-				await this.startTaskSession(
-					cloneStartTaskSessionRequest(restartRequest.request),
-					"auto_restart_after_pty_exit",
-				);
+				await this.startTaskSession(cloneStartTaskSessionRequest(request), "auto_restart_after_pty_exit");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				const summary = updateSummary(entry, {

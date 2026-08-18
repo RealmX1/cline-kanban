@@ -60,7 +60,9 @@ function makeEntry(summaryOverrides: Partial<RuntimeTaskSessionSummary> = {}) {
 		listeners: new Map(),
 		restartRequest: null,
 		suppressAutoRestartOnExit: false,
-		autoRestartTimestamps: [] as number[],
+		consecutiveFailedFastExitAutoRestartCount: 0,
+		recentAutoRestartTimestampsWithinRollingHour: [] as number[],
+		pendingAutoRestartBackoffTimer: null as NodeJS.Timeout | null,
 		pendingAutoRestart: null,
 		lastStallLoggedAt: null,
 	};
@@ -193,25 +195,25 @@ describe("TerminalSessionManager park（已派发后台工作）", () => {
 		expect(actions.isAgentTurnActive()).toBe(true);
 	});
 
-	it("空闲守卫·shouldAutoRestart：parked 时返回 false（即便 suppress 已被消费、有监听者与 task restartRequest）", () => {
+	it("空闲守卫·isTaskSessionEligibleForAutoRestart：parked 时返回 false（即便 suppress 已被消费、有监听者与 task restartRequest）", () => {
 		const manager = new TerminalSessionManager();
 		const entry = makeEntry({ state: "running" });
 		entry.listeners.set(1, {} as never);
 		entry.restartRequest = { kind: "task", request: {} } as unknown as InjectableEntry["restartRequest"];
 		injectEntry(manager, entry);
 
-		const shouldAutoRestart = (
-			manager as unknown as { shouldAutoRestart: (entry: InjectableEntry) => boolean }
-		).shouldAutoRestart.bind(manager);
+		const isTaskSessionEligibleForAutoRestart = (
+			manager as unknown as { isTaskSessionEligibleForAutoRestart: (entry: InjectableEntry) => boolean }
+		).isTaskSessionEligibleForAutoRestart.bind(manager);
 
 		// 控制组：非 parked、suppress=false、有监听者+task restartRequest → 会重启。
 		entry.suppressAutoRestartOnExit = false;
-		expect(shouldAutoRestart(entry)).toBe(true);
+		expect(isTaskSessionEligibleForAutoRestart(entry)).toBe(true);
 
 		// parked：即便把 suppress 显式置回 false（模拟其被提前消费），parked 守卫仍拦下重启。
 		manager.parkTaskSessionAwaitingDispatchedBackgroundWork("task-1");
 		entry.suppressAutoRestartOnExit = false;
-		expect(shouldAutoRestart(entry)).toBe(false);
+		expect(isTaskSessionEligibleForAutoRestart(entry)).toBe(false);
 	});
 
 	it("空闲守卫·scanForStalls：parked 会话被跳过，不报 [tui-freeze] stall-detected", () => {
