@@ -33,6 +33,7 @@ import {
 	hasTerminalScrollbackTranscriptContent,
 	type TerminalScrollbackTranscriptLogicalLine,
 } from "@/terminal/terminal-scrollback-transcript-extraction";
+import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { isMacPlatform, isSafari } from "@/utils/platform";
 
 const SHIFT_ENTER_SEQUENCE = "\n";
@@ -126,6 +127,12 @@ interface PersistentTerminalSubscriber {
 interface MountPersistentTerminalOptions {
 	autoFocus?: boolean;
 	isVisible?: boolean;
+	/**
+	 * 这次挂载所处的视图是不是「相邻卡片导航热键（alt+↑/↓）的接管者」——即它自己在 document 上注册了
+	 * 那两条 useHotkeys。只有为 true 时终端才会把 alt+↑/↓ 放行给 document；详见
+	 * shouldReleaseAdjacentTaskCardNavigationShortcutToDocumentHotkeyOwner 的说明。
+	 */
+	isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView?: boolean;
 }
 
 interface EnsurePersistentTerminalInput extends PersistentTerminalAppearance {
@@ -206,6 +213,39 @@ function isFindShortcut(event: KeyboardEvent): boolean {
 	);
 }
 
+// 详情视图把「切换到上/下一张 task 卡」绑在 alt+↑/↓（见 card-detail-view 的 shouldIgnoreAdjacentCardHotkey）。
+// 这里放行的按键集合必须与那条热键声明的修饰键集合**精确**一致，一个都不能多：react-hotkeys-hook 对
+// 未声明的修饰键做精确拒绝（dist/index.js 的匹配函数里 `declaredShift !== event.shiftKey` 即 return
+// false），所以 `alt+up` 在 shift/ctrl/meta 任一置位时都不匹配。这里一旦放行得比热键宽（例如漏掉
+// shift），Shift+Alt+↑/↓ 就会掉进两不管地带——xterm 因为放行而既不发字节也不 preventDefault，事件
+// 冒泡到 document 后又被热键精确拒绝，按键既不切卡也不进 agent。排除 ctrl/meta 同理，且 Windows 的
+// AltGr 会同时置位 ctrl 与 alt。
+function isAdjacentTaskCardNavigationShortcut(event: KeyboardEvent): boolean {
+	return (
+		event.altKey &&
+		!event.ctrlKey &&
+		!event.metaKey &&
+		!event.shiftKey &&
+		(event.key === "ArrowUp" || event.key === "ArrowDown")
+	);
+}
+
+// 「这个按键长得像切卡热键」还不足以放行——放行只有在**确实有人接管**时才成立。
+//
+// 那两条 useHotkeys("alt+up"/"alt+down") 只在 CardDetailView 挂载期间注册，而 PersistentTerminal 还
+// 被另外两处没有详情视图的地方挂载：首页底部 shell 终端（App.tsx）与首页侧栏 agent 终端
+// （use-home-sidebar-agent-panel.tsx）。在那些上下文里无条件放行 = 两不管地带：xterm 因为放行既不发
+// escape sequence 也不 preventDefault，事件冒泡到 document 后又没有任何热键接住，用户按 alt+↑/↓
+// 什么都不会发生（按键被静默吞掉）。
+//
+// 所以放行必须由挂载点显式声明「我就是那个接管者」——没声明的挂载点一律把按键留给 agent。
+function shouldReleaseAdjacentTaskCardNavigationShortcutToDocumentHotkeyOwner(
+	event: KeyboardEvent,
+	isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView: boolean,
+): boolean {
+	return isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView && isAdjacentTaskCardNavigationShortcut(event);
+}
+
 function getParkingRoot(): HTMLDivElement {
 	const existingRoot = document.getElementById(PARKING_ROOT_ID);
 	if (existingRoot instanceof HTMLDivElement) {
@@ -274,6 +314,9 @@ class PersistentTerminal {
 	private resizeObserver: ResizeObserver | null = null;
 	private resizeTimer: ReturnType<typeof setTimeout> | null = null;
 	private visibleContainer: HTMLDivElement | null = null;
+	// 当前这次挂载所处的视图是否自己注册了 alt+↑/↓ 切卡热键（见同名 mount option）。随 mount 写入、
+	// 随 unmount 归零——泊车终端没有任何可见容器，自然也就不在任何接管者内部。
+	private isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView = false;
 	private ioSocket: WebSocket | null = null;
 	private controlSocket: WebSocket | null = null;
 	private connectionReady = false;
@@ -353,6 +396,18 @@ class PersistentTerminal {
 			this.sendIoData(bytes);
 		});
 		this.terminal.attachCustomKeyEventHandler((event) => {
+			if (
+				shouldReleaseAdjacentTaskCardNavigationShortcutToDocumentHotkeyOwner(
+					event,
+					this.isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView,
+				)
+			) {
+				// alt+↑/↓ 是详情视图的切卡热键。不放行的话 xterm 会把它转成 escape sequence 发进
+				// agent TUI 并 preventDefault，焦点落在终端里时就永远切不了卡。返回 false 表示
+				// 「xterm 不要处理」——既不发字节也不 preventDefault，事件继续冒泡到 document 级热键。
+				// 只有确实挂在接管者内部时才这么做，否则按键会被吞进两不管地带（见上面那个判定函数）。
+				return false;
+			}
 			if (event.key === "Enter" && event.shiftKey) {
 				if (event.type === "keydown") {
 					this.terminal.input(SHIFT_ENTER_SEQUENCE);
@@ -996,6 +1051,8 @@ class PersistentTerminal {
 		}
 		this.ensureConnected();
 		this.updateAppearance(appearance);
+		this.isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView =
+			options.isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView === true;
 		const shouldKeepScrolledToBottom = this.shouldKeepScrolledToBottom();
 		if (this.visibleContainer !== container) {
 			this.visibleContainer = container;
@@ -1018,7 +1075,20 @@ class PersistentTerminal {
 			window.requestAnimationFrame(() => {
 				this.requestResize();
 				this.keepScrolledToBottom(shouldKeepScrolledToBottom);
-				if (options.autoFocus) {
+				// 排下这一帧到回调真正执行之间，本终端可能已经被下一次切卡 unmount 到隐藏的 parking
+				// root 去了——连按 alt+↑/↓ 翻卡时，两次 React commit 落在同一帧里就正好这样。此时若
+				// 仍然 focus，就是把键盘焦点打进屏幕外那个**旧 task** 的终端：用户看着新卡，后续击键
+				// 与 Ctrl+S 暂存却全进了旧 task 的 PTY。更糟的是这之后
+				// `shouldHandOffKeyboardFocusToAgentEntryNow()` 会把泊车终端的 helper textarea 认成
+				// 「用户正在编辑」，把随后每一次焦点交接请求都否决掉，焦点从此永久滞留在屏幕外。
+				// 所以这里补上与 `requestResize()` 里 `if (!this.visibleContainer) return;` 同源的那道
+				// 门：只有本终端此刻仍挂在发起这次 mount 的那个容器上，autoFocus 才算数。
+				const isStillMountedOnMountRequestContainer = this.visibleContainer === container;
+				if (
+					options.autoFocus &&
+					isStillMountedOnMountRequestContainer &&
+					shouldHandOffKeyboardFocusToAgentEntryNow()
+				) {
 					this.terminal.focus();
 				}
 			});
@@ -1041,6 +1111,9 @@ class PersistentTerminal {
 			return;
 		}
 		this.visibleContainer = null;
+		// 泊车终端不在任何视图内部，接管者身份随之作废：否则一个曾在详情视图里挂过的终端被泊车后
+		// 仍然放行 alt+↑/↓，而此刻详情视图早已卸载、热键无人注册，按键又落回被静默吞掉的老路。
+		this.isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView = false;
 		clearTerminalGeometry(this.taskId);
 		this.parkingRoot.appendChild(this.hostElement);
 	}

@@ -9,6 +9,7 @@ import {
 	type TerminalSearchResultState,
 } from "@/terminal/persistent-terminal-manager";
 import { registerTerminalController } from "@/terminal/terminal-controller-registry";
+import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 
 interface UsePersistentTerminalSessionInput {
 	taskId: string;
@@ -17,6 +18,15 @@ interface UsePersistentTerminalSessionInput {
 	onSummary?: (summary: RuntimeTaskSessionSummary) => void;
 	onConnectionReady?: (taskId: string) => void;
 	autoFocus?: boolean;
+	// 递增即表示「请把键盘焦点接过去」。key 不变就不重跑；请求到达时终端可能还没挂上，
+	// 此时请求保持挂起、待终端就绪再兑现。
+	agentEntryKeyboardFocusRequestKey?: number;
+	/**
+	 * 调用方所在的视图是不是「相邻卡片导航热键（alt+↑/↓）的接管者」——即它自己注册了那两条 useHotkeys。
+	 * 默认 false：没声明的挂载点一律把 alt+↑/↓ 留给 agent，免得按键掉进「xterm 不处理、document 也
+	 * 没人接」的两不管地带。
+	 */
+	isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView?: boolean;
 	isVisible?: boolean;
 	sessionStartedAt?: number | null;
 	terminalBackgroundColor: string;
@@ -55,6 +65,8 @@ export function usePersistentTerminalSession({
 	onSummary,
 	onConnectionReady,
 	autoFocus = false,
+	agentEntryKeyboardFocusRequestKey,
+	isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView = false,
 	isVisible = true,
 	sessionStartedAt = null,
 	terminalBackgroundColor,
@@ -64,6 +76,7 @@ export function usePersistentTerminalSession({
 	const themeColors = useMemo(() => getTerminalThemeColors(themeId), [themeId]);
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const terminalRef = useRef<ReturnType<typeof ensurePersistentTerminal> | null>(null);
+	const handledAgentEntryKeyboardFocusRequestKeyRef = useRef(agentEntryKeyboardFocusRequestKey);
 	const recentlyUnmountedTerminalRef = useRef<ReturnType<typeof ensurePersistentTerminal> | null>(null);
 	const callbackRef = useRef<{
 		onSummary?: (summary: RuntimeTaskSessionSummary) => void;
@@ -201,6 +214,7 @@ export function usePersistentTerminalSession({
 			},
 			{
 				autoFocus,
+				isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView,
 				isVisible,
 			},
 		);
@@ -218,6 +232,7 @@ export function usePersistentTerminalSession({
 		autoFocus,
 		cursorColor,
 		enabled,
+		isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView,
 		isVisible,
 		sessionStartedAt,
 		taskId,
@@ -227,6 +242,27 @@ export function usePersistentTerminalSession({
 		resetTerminalSearchState,
 		workspaceId,
 	]);
+
+	// 详情视图切卡后的显式聚焦请求。mount 自带的 autoFocus 只覆盖「终端刚挂上」这一刻，
+	// 覆盖不到「同一个终端还在、但用户重新选中了这张卡」的情形。
+	useEffect(() => {
+		if (agentEntryKeyboardFocusRequestKey === undefined) {
+			return;
+		}
+		if (agentEntryKeyboardFocusRequestKey === handledAgentEntryKeyboardFocusRequestKeyRef.current) {
+			return;
+		}
+		const terminal = terminalRef.current;
+		if (!enabled || !terminal) {
+			return;
+		}
+		handledAgentEntryKeyboardFocusRequestKeyRef.current = agentEntryKeyboardFocusRequestKey;
+		// 请求发出到此刻之间用户可能已经开始拖选文字或点进了别处，兑现前再查一次守卫。
+		if (!shouldHandOffKeyboardFocusToAgentEntryNow()) {
+			return;
+		}
+		terminal.focus();
+	}, [agentEntryKeyboardFocusRequestKey, enabled]);
 
 	useEffect(() => {
 		return registerTerminalController(taskId, {

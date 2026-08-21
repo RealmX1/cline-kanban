@@ -21,7 +21,13 @@ const {
 	mockUseAgentRaisedPendingUserDecision,
 	mockAgentRaisedPendingUserDecisionPanel,
 } = vi.hoisted(() => ({
-	mockAgentTerminalPanel: vi.fn((_props: { panelBackgroundColor?: string; terminalBackgroundColor?: string }) => null),
+	mockAgentTerminalPanel: vi.fn(
+		(_props: {
+			panelBackgroundColor?: string;
+			terminalBackgroundColor?: string;
+			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView?: boolean;
+		}) => null,
+	),
 	mockClineAgentChatPanel: vi.fn((..._args: unknown[]) => null),
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
 	mockClineAppendToDraft: vi.fn(),
@@ -30,10 +36,6 @@ const {
 	mockPromptLibraryPanel: vi.fn((_props: unknown) => null),
 	mockUseAgentRaisedPendingUserDecision: vi.fn(),
 	mockAgentRaisedPendingUserDecisionPanel: vi.fn((_props: unknown) => null),
-}));
-
-vi.mock("react-hotkeys-hook", () => ({
-	useHotkeys: () => {},
 }));
 
 vi.mock("@/hooks/use-is-mobile", () => ({
@@ -264,6 +266,32 @@ function requireButtonWithExactText(container: HTMLElement, buttonText: string):
 		throw new Error(`Expected a button with text "${buttonText}".`);
 	}
 	return button;
+}
+
+function createSelectionWithSiblingCards(): CardSelection {
+	const cards = [createCard("task-1"), createCard("task-2"), createCard("task-3")];
+	const columns: BoardColumn[] = [
+		{ id: "backlog", title: "Backlog", cards: [] },
+		{ id: "in_progress", title: "In Progress", cards },
+		{ id: "review", title: "Review", cards: [] },
+		{ id: "validation", title: "Validation", cards: [] },
+		{ id: "trash", title: "Done", cards: [] },
+	];
+	return {
+		card: cards[1]!,
+		column: columns[1]!,
+		allColumns: columns,
+	};
+}
+
+function dispatchKeyDown(
+	target: EventTarget,
+	init: { key: string; altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean },
+): void {
+	act(() => {
+		// react-hotkeys-hook 按 `event.code` 匹配键位，jsdom 不会自己补，测试里必须显式给。
+		target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, code: init.key, ...init }));
+	});
 }
 
 describe("CardDetailView", () => {
@@ -1654,5 +1682,135 @@ describe("CardDetailView", () => {
 		});
 		expect(document.body.textContent).not.toContain("Move directly to Done?");
 		expect(onMoveToTrash).toHaveBeenCalledTimes(1);
+	});
+
+	describe("切换相邻 task card 的热键", () => {
+		async function renderDetailViewWithSiblingCards(onCardSelect: (cardId: string) => void): Promise<void> {
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={createSelectionWithSiblingCards()}
+						currentProjectId="workspace-1"
+						selectedAgentId="cline"
+						sessionSummary={null}
+						taskSessions={{}}
+						onSessionSummary={() => {}}
+						onCardSelect={onCardSelect}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+		}
+
+		it("裸方向键不再切卡 —— 焦点已交给 agent 输入入口，上下键该归光标所有", async () => {
+			const onCardSelect = vi.fn();
+			await renderDetailViewWithSiblingCards(onCardSelect);
+
+			dispatchKeyDown(document, { key: "ArrowUp" });
+			dispatchKeyDown(document, { key: "ArrowDown" });
+			dispatchKeyDown(document, { key: "ArrowLeft" });
+			dispatchKeyDown(document, { key: "ArrowRight" });
+
+			expect(onCardSelect).not.toHaveBeenCalled();
+		});
+
+		it("alt+↑ / alt+↓ 在当前列内切到前 / 后一张卡", async () => {
+			const onCardSelect = vi.fn();
+			await renderDetailViewWithSiblingCards(onCardSelect);
+
+			dispatchKeyDown(document, { key: "ArrowUp", altKey: true });
+			expect(onCardSelect).toHaveBeenCalledWith("task-1");
+
+			dispatchKeyDown(document, { key: "ArrowDown", altKey: true });
+			expect(onCardSelect).toHaveBeenLastCalledWith("task-3");
+		});
+
+		it("焦点落在输入框里时 alt+↑ / alt+↓ 依然切卡", async () => {
+			const onCardSelect = vi.fn();
+			await renderDetailViewWithSiblingCards(onCardSelect);
+			const textarea = document.createElement("textarea");
+			document.body.appendChild(textarea);
+			textarea.focus();
+
+			dispatchKeyDown(textarea, { key: "ArrowDown", altKey: true });
+
+			expect(onCardSelect).toHaveBeenCalledWith("task-3");
+			textarea.remove();
+		});
+
+		it("对话框内不切卡 —— 对话框自己管键盘导航", async () => {
+			const onCardSelect = vi.fn();
+			await renderDetailViewWithSiblingCards(onCardSelect);
+			const dialog = document.createElement("div");
+			dialog.setAttribute("role", "dialog");
+			const dialogInput = document.createElement("input");
+			dialog.appendChild(dialogInput);
+			document.body.appendChild(dialog);
+
+			dispatchKeyDown(dialogInput, { key: "ArrowUp", altKey: true });
+
+			expect(onCardSelect).not.toHaveBeenCalled();
+			dialog.remove();
+		});
+
+		it("ctrl+alt+↑ 不切卡 —— Windows 的 AltGr 会同时置位 ctrl 与 alt", async () => {
+			const onCardSelect = vi.fn();
+			await renderDetailViewWithSiblingCards(onCardSelect);
+
+			dispatchKeyDown(document, { key: "ArrowUp", altKey: true, ctrlKey: true });
+
+			expect(onCardSelect).not.toHaveBeenCalled();
+		});
+
+		it("详情视图里的每个终端面板都声明自己是切卡热键的接管者", async () => {
+			// alt+↑/↓ 能不能穿过 xterm，取决于终端知不知道「自己挂在注册了这条热键的视图里」。
+			// 这条声明只有详情视图该给：首页底部 shell 终端与首页侧栏 agent 终端没有接管者，
+			// 它们若也拿到 true，按键就会掉进「xterm 不处理、document 也不接」的两不管地带。
+			mockAgentTerminalPanel.mockClear();
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={createSelectionWithSiblingCards()}
+						currentProjectId="workspace-1"
+						selectedAgentId="claude"
+						sessionSummary={null}
+						taskSessions={{}}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen
+						bottomTerminalTaskId="__detail_terminal__:task-2"
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+
+			expect(mockAgentTerminalPanel).toHaveBeenCalled();
+			for (const [panelProps] of mockAgentTerminalPanel.mock.calls) {
+				expect(panelProps.isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView).toBe(true);
+			}
+		});
+
+		it("已被别处 preventDefault 的按键不切卡", async () => {
+			const onCardSelect = vi.fn();
+			await renderDetailViewWithSiblingCards(onCardSelect);
+			const consumer = document.createElement("div");
+			document.body.appendChild(consumer);
+			consumer.addEventListener("keydown", (event) => {
+				event.preventDefault();
+			});
+
+			dispatchKeyDown(consumer, { key: "ArrowUp", altKey: true });
+
+			expect(onCardSelect).not.toHaveBeenCalled();
+			consumer.remove();
+		});
 	});
 });
