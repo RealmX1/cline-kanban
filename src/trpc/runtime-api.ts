@@ -1477,7 +1477,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									scope: "task",
 									initiatedBy: "programmatic_delivery_contention_preemption",
 								});
-								return stash.outcome === "stashed_into_prompt_library";
+								// 原样把 outcome 交回 manager：它要靠这个区分「瞬态失败，值得再等一拍」与
+								// 「确定性失败，再等也是同一句话」，并把真实判据写进日志。折成布尔就把这两件事
+								// 一起弄丢了（2026-08-20 事故的排查代价全压在这上面）。
+								return stash.outcome;
 							},
 						});
 						return acceptedSummary ? await confirmedDelivery : false;
@@ -2016,7 +2019,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 										scope: "task",
 										initiatedBy: "programmatic_delivery_contention_preemption",
 									});
-									return stash.outcome === "stashed_into_prompt_library";
+									// 同上：outcome 原样回传，判「成没成」由 manager 做（只有
+									// stashed_into_prompt_library 算成功）。
+									return stash.outcome;
 								},
 								...(injectionLedgerPath && injectionIdempotencyKey
 									? {

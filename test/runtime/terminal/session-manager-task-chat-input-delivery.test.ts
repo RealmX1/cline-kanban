@@ -806,7 +806,11 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 	it("争用挂起：框非空且人在场 → 一个字节都不写、不抢占，预算耗尽转 delivery_failed{human_terminal_contention_timeout}", async () => {
 		const manager = new TerminalSessionManager();
 		const trackerWithHalfTypedSentence = createTerminalInputBoxOccupancyTrackerState();
-		recordTerminalInputBytesIntoOccupancyTracker(trackerWithHalfTypedSentence, Buffer.from("我正在打一半", "utf8"));
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerWithHalfTypedSentence,
+			Buffer.from("我正在打一半", "utf8"),
+			Date.now(),
+		);
 		const { write, entry } = installFakeClaudeEntry(manager, "task-contention-hold", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
 			state: "running",
@@ -822,7 +826,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			mayAutoStashAbsentHumanInputBox: true,
 			preemptivelyStashHumanInputBox: async () => {
 				preemptiveStashCalls += 1;
-				return true;
+				return "stashed_into_prompt_library" as const;
 			},
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
@@ -856,6 +860,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		recordTerminalInputBytesIntoOccupancyTracker(
 			trackerWithAbandonedSentence,
 			Buffer.from("走开前留下的半句", "utf8"),
+			Date.now(),
 		);
 		const { write, entry } = installFakeClaudeEntry(manager, "task-contention-preempt", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
@@ -872,7 +877,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				preemptiveStashCalls += 1;
 				// 真实执行者写库成功后会转发 Ctrl+S 清框；账本随之作废，这里等价模拟。
 				resetTerminalInputBoxOccupancyTrackerComposition(trackerWithAbandonedSentence);
-				return true;
+				return "stashed_into_prompt_library" as const;
 			},
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
@@ -896,6 +901,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		recordTerminalInputBytesIntoOccupancyTracker(
 			trackerWithAbandonedSentence,
 			Buffer.from("走开前留下的半句", "utf8"),
+			Date.now(),
 		);
 		const { write, entry } = installFakeClaudeEntry(manager, "task-contention-human-returned", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
@@ -916,7 +922,10 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 					entry.active.terminalSessionIncarnationToken,
 				);
 				forwardResults.push(cleared);
-				return cleared;
+				// 真实执行者的映射：入库了但清框被拒 ⇒ stashed_..._but_input_box_not_cleared（非成功）。
+				return cleared
+					? ("stashed_into_prompt_library" as const)
+					: ("stashed_into_prompt_library_but_input_box_not_cleared" as const);
 			},
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
@@ -944,6 +953,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		recordTerminalInputBytesIntoOccupancyTracker(
 			trackerWithAbandonedSentence,
 			Buffer.from("走开前留下的半句", "utf8"),
+			Date.now(),
 		);
 		const { write, entry } = installFakeClaudeEntry(manager, "task-contention-cancelled-midflight", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
@@ -965,7 +975,10 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 					entry.active.terminalSessionIncarnationToken,
 				);
 				forwardResults.push(cleared);
-				return cleared;
+				// 真实执行者的映射：入库了但清框被拒 ⇒ stashed_..._but_input_box_not_cleared（非成功）。
+				return cleared
+					? ("stashed_into_prompt_library" as const)
+					: ("stashed_into_prompt_library_but_input_box_not_cleared" as const);
 			},
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
@@ -980,6 +993,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		recordTerminalInputBytesIntoOccupancyTracker(
 			trackerWithAbandonedSentence,
 			Buffer.from("走开前留下的半句", "utf8"),
+			Date.now(),
 		);
 		const { entry } = installFakeClaudeEntry(manager, "task-contention-superseded-midflight", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
@@ -999,7 +1013,10 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 					entry.active.terminalSessionIncarnationToken,
 				);
 				forwardResults.push(cleared);
-				return cleared;
+				// 真实执行者的映射：入库了但清框被拒 ⇒ stashed_..._but_input_box_not_cleared（非成功）。
+				return cleared
+					? ("stashed_into_prompt_library" as const)
+					: ("stashed_into_prompt_library_but_input_box_not_cleared" as const);
 			},
 		});
 		await vi.advanceTimersByTimeAsync(SETTLE_MS);
@@ -1029,6 +1046,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		recordTerminalInputBytesIntoOccupancyTracker(
 			trackerWithAbandonedSentence,
 			Buffer.from("走开前留下的半句", "utf8"),
+			Date.now(),
 		);
 		const { write } = installFakeClaudeEntry(manager, "task-contention-never-preempt", {
 			mirrorSnapshot: CLAUDE_READY_PROMPT,
@@ -1045,13 +1063,221 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			mayAutoStashAbsentHumanInputBox: false,
 			preemptivelyStashHumanInputBox: async () => {
 				preemptiveStashCalls += 1;
-				return true;
+				return "stashed_into_prompt_library" as const;
 			},
 		});
 		await vi.advanceTimersByTimeAsync(DEADLINE_PLUS_MAX_YIELD_MS + RECHECK_MS);
 		expect(preemptiveStashCalls).toBe(0);
 		expect(write).not.toHaveBeenCalled();
-		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "human_terminal_contention_timeout" }]);
+		expect(outcomes).toEqual([
+			// 人不在场 ⇒ 原因码不是 human_terminal_contention_timeout（那一条的语义是「人正在这个终端上
+			// 干活，本轮别重投」）。这里没有任何人在等，是机器这侧拿不下这个框，故可择机重投。
+			{ status: "delivery_failed", reason: "terminal_input_box_contended_but_unstashable" },
+		]);
+	});
+
+	// 2026-08-20 事故的**第一条**根因：退格删光了但退格按设计不复位输入侧闩，于是「输入侧咬定非空、
+	// 读屏看到空框」的分歧永久存在，这条 PTY 余生所有程序化投递都判成人类争用。对账自愈把「永久」
+	// 变成「连续 3 拍读屏确证空框（≈4.5s）后复位」。
+	it("输入侧闩咬死而读屏确证空框 → 3 拍后自愈并照常投递，不再挂到预算耗尽", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerLatchedByBackspace = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerLatchedByBackspace,
+			Buffer.from("半句话", "utf8"),
+			Date.now(),
+		);
+		// 退格删光：框在屏上已经空了，但闩按设计不复位（「删到空了没有」无法从字节流单独判定）。
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerLatchedByBackspace,
+			Buffer.from("\u007f\u007f\u007f"),
+			Date.now(),
+		);
+		expect(trackerLatchedByBackspace.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+		const boundary = "─".repeat(80);
+		// 读屏能定位到框、且框里是空的——这正是对账要求的那种「确证」，与「读不到框」严格不同。
+		const viewportWithLocatableEmptyInputBox = [
+			"  ⏺ 上一轮 agent 输出",
+			boundary,
+			"❯ ",
+			boundary,
+			"  ⏸ manual mode on",
+		].join("\n");
+		const { write } = installFakeClaudeEntry(manager, "task-latched-but-screen-says-empty", {
+			mirrorSnapshot: viewportWithLocatableEmptyInputBox,
+			state: "running",
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerLatchedByBackspace,
+		});
+
+		manager.submitTaskChatInputWhenReady("task-latched-but-screen-says-empty", "继续 RVF");
+
+		// 前两拍仍判争用：对账要连续 3 拍一致才敢复位（跨过 TUI 重绘这类瞬态）。
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + RECHECK_MS);
+		expect(write).not.toHaveBeenCalled();
+		expect(trackerLatchedByBackspace.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+
+		// 第 3 拍复位，同一拍里判据即翻成「框空可写」，投递照常发生。
+		await vi.advanceTimersByTimeAsync(RECHECK_MS);
+		expect(trackerLatchedByBackspace.hasUncommittedInputFromInputSideByteTracking).toBe(false);
+		expect(write).toHaveBeenCalled();
+	});
+
+	// 反面钉子：读屏归一化后 trim 为空 ≠ 框里没内容。用户只敲了几个空格（或只按了几下 Shift+Enter）
+	// 时输入侧闩说的是**对的**——框里确实有他未提交的组合。此时若按 trim 判空复位，程序化投递会把
+	// paste 接在那段空白后面一并提交，等于替他发出了一条他没写完的消息。
+	it("框里只有空白 → 读屏读回非空串，绝不复位闩，投递继续让路", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerWithWhitespaceOnlyComposition = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerWithWhitespaceOnlyComposition,
+			Buffer.from("   ", "utf8"),
+			Date.now(),
+		);
+		const boundary = "─".repeat(80);
+		// 框里渲染出来的就是那几个空格：reader 剥掉行尾空白后仍是空串以外的东西 —— 关键在于
+		// 我们判空用的是原始 text.length，而不是 trim 之后的长度。
+		const viewportWithWhitespaceOnlyInputBox = [
+			"  ⏺ 上一轮 agent 输出",
+			boundary,
+			"❯    ",
+			boundary,
+			"  ⏸ manual mode on",
+		].join("\n");
+		const { write } = installFakeClaudeEntry(manager, "task-whitespace-only-composition", {
+			mirrorSnapshot: viewportWithWhitespaceOnlyInputBox,
+			state: "running",
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerWithWhitespaceOnlyComposition,
+		});
+
+		manager.submitTaskChatInputWhenReady("task-whitespace-only-composition", "继续 RVF");
+
+		// 远超自愈所需的 3 拍：闩必须一直咬着，一个字节都不许写进去。
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + RECHECK_MS * 8);
+		expect(trackerWithWhitespaceOnlyComposition.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+		expect(write).not.toHaveBeenCalled();
+	});
+
+	// 2026-08-20 事故的第二条根因：抢占被一个**确定性** outcome 反复拒绝时，旧实现照样每 1.5s 重试
+	// 一次，把整整 75s 让路预算烧完才收尾——而调用方（RVF Stop hook）早在第一秒就退出了。
+	it("确定性拒绝：连续 6 次同一 outcome → ~9s 内落终态 terminal_input_box_contended_but_unstashable，不烧满 75s", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerLatchedNonEmpty = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerLatchedNonEmpty,
+			Buffer.from("闩住的半句", "utf8"),
+			Date.now(),
+		);
+		const { write } = installFakeClaudeEntry(manager, "task-contention-deterministic-decline", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			// 人不在场 ⇒ 允许抢占，于是每一拍都会真的调一次执行者。
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerLatchedNonEmpty,
+		});
+		let preemptiveStashCalls = 0;
+		const outcomes: { status: string; reason: string | null }[] = [];
+
+		manager.submitTaskChatInputWhenReady("task-contention-deterministic-decline", "继续 RVF", {
+			idempotencyKey: "key-deterministic-decline",
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			mayAutoStashAbsentHumanInputBox: true,
+			// 输入侧确知框里有未提交内容、读屏却拿不到正文：等多久都是同一句话。
+			preemptivelyStashHumanInputBox: async () => {
+				preemptiveStashCalls += 1;
+				return "input_box_content_unreadable_and_left_untouched" as const;
+			},
+		});
+
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + RECHECK_MS * 5);
+		expect(preemptiveStashCalls).toBe(6);
+		expect(write).not.toHaveBeenCalled();
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "terminal_input_box_contended_but_unstashable" }]);
+
+		// 收尾之后不再重探：定时器真的停了，而不是继续空转到预算耗尽。
+		await vi.advanceTimersByTimeAsync(DEADLINE_PLUS_MAX_YIELD_MS);
+		expect(preemptiveStashCalls).toBe(6);
+		expect(outcomes).toHaveLength(1);
+	});
+
+	// 「没轮到执行」不是「够不到框」：另一次暂存拿着 per-task 独占闸门时，抢占执行者回的是
+	// already_in_flight。它对「框拿没拿下来」一个字都没回答，因此绝不能推进连续拒绝计数——否则那次
+	// 暂存只要跨文件锁与落盘超过 6 拍（≈9s），本条投递就被永久判死，即便它随后成功清了框。
+	it("抢占没轮到执行（另一次暂存在跑）→ 不推进连续拒绝计数，让路预算照常走完", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerLatchedNonEmpty = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerLatchedNonEmpty,
+			Buffer.from("闩住的半句", "utf8"),
+			Date.now(),
+		);
+		installFakeClaudeEntry(manager, "task-contention-stash-already-in-flight", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerLatchedNonEmpty,
+		});
+		let preemptiveStashCalls = 0;
+		const outcomes: { status: string; reason: string | null }[] = [];
+
+		manager.submitTaskChatInputWhenReady("task-contention-stash-already-in-flight", "继续 RVF", {
+			idempotencyKey: "key-stash-already-in-flight",
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			mayAutoStashAbsentHumanInputBox: true,
+			preemptivelyStashHumanInputBox: async () => {
+				preemptiveStashCalls += 1;
+				return "another_terminal_input_box_stash_attempt_already_in_flight_for_this_task" as const;
+			},
+		});
+
+		// 远超快速收尾阈值：仍然一条终态都不该落。
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + RECHECK_MS * 10);
+		expect(preemptiveStashCalls).toBeGreaterThan(6);
+		expect(outcomes).toEqual([]);
+
+		// 预算真的耗尽时才诚实收尾。
+		await vi.advanceTimersByTimeAsync(DEADLINE_PLUS_MAX_YIELD_MS);
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "terminal_input_box_contended_but_unstashable" }]);
+	});
+
+	// 反面：outcome 在变说明撞的不是同一堵墙（库锁竞争、换代这类真瞬态），此时快速收尾是错的——
+	// 必须把让路预算走满，给瞬态留出恢复的机会。
+	it("outcome 交替出现 → 不快速收尾，照旧走满让路预算", async () => {
+		const manager = new TerminalSessionManager();
+		const trackerLatchedNonEmpty = createTerminalInputBoxOccupancyTrackerState();
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerLatchedNonEmpty,
+			Buffer.from("闩住的半句", "utf8"),
+			Date.now(),
+		);
+		installFakeClaudeEntry(manager, "task-contention-alternating-decline", {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "running",
+			lastUserInputAt: Date.now() - HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS - 1_000,
+			inputBoxOccupancyTracker: trackerLatchedNonEmpty,
+		});
+		let preemptiveStashCalls = 0;
+		const outcomes: { status: string; reason: string | null }[] = [];
+
+		manager.submitTaskChatInputWhenReady("task-contention-alternating-decline", "继续 RVF", {
+			idempotencyKey: "key-alternating-decline",
+			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
+			mayAutoStashAbsentHumanInputBox: true,
+			preemptivelyStashHumanInputBox: async () => {
+				preemptiveStashCalls += 1;
+				return preemptiveStashCalls % 2 === 1
+					? ("prompt_library_write_failed" as const)
+					: ("another_terminal_input_box_stash_attempt_already_in_flight_for_this_task" as const);
+			},
+		});
+
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + RECHECK_MS * 8);
+		expect(preemptiveStashCalls).toBeGreaterThan(6);
+		expect(outcomes).toEqual([]);
+
+		await vi.advanceTimersByTimeAsync(DEADLINE_PLUS_MAX_YIELD_MS);
+		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "terminal_input_box_contended_but_unstashable" }]);
 	});
 
 	it("有还原不了的粘贴时降级为挂起：绝不为投递成功率去赌一段还原不了的人类输入", async () => {
@@ -1062,6 +1288,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			recordTerminalInputBytesIntoOccupancyTracker(
 				trackerWithUnrecoverablePaste,
 				Buffer.from(`\u001b[200~片段${index}\u001b[201~`, "utf8"),
+				Date.now(),
 			);
 		}
 		expect(trackerWithUnrecoverablePaste.unrecoverablePasteCount).toBeGreaterThan(0);
@@ -1080,13 +1307,17 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			mayAutoStashAbsentHumanInputBox: true,
 			preemptivelyStashHumanInputBox: async () => {
 				preemptiveStashCalls += 1;
-				return true;
+				return "stashed_into_prompt_library" as const;
 			},
 		});
 		await vi.advanceTimersByTimeAsync(DEADLINE_PLUS_MAX_YIELD_MS + RECHECK_MS);
 		expect(preemptiveStashCalls).toBe(0);
 		expect(write).not.toHaveBeenCalled();
-		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "human_terminal_contention_timeout" }]);
+		expect(outcomes).toEqual([
+			// 人不在场 ⇒ 原因码不是 human_terminal_contention_timeout（那一条的语义是「人正在这个终端上
+			// 干活，本轮别重投」）。这里没有任何人在等，是机器这侧拿不下这个框，故可择机重投。
+			{ status: "delivery_failed", reason: "terminal_input_box_contended_but_unstashable" },
+		]);
 	});
 
 	it("屏上有字但输入侧从未见过这条 PTY 的人类字节 → 既不写也不抢占，挂到预算耗尽", async () => {
@@ -1114,14 +1345,18 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			mayAutoStashAbsentHumanInputBox: true,
 			preemptivelyStashHumanInputBox: async () => {
 				preemptiveStashCalls += 1;
-				return true;
+				return "stashed_into_prompt_library" as const;
 			},
 		});
 		await vi.advanceTimersByTimeAsync(DEADLINE_PLUS_MAX_YIELD_MS + RECHECK_MS);
 		// 不抢占：抢占要入库，而这段文本可能是 agent 自绘的 UI 文案，存进库就是把它冒充成用户资产。
 		expect(preemptiveStashCalls).toBe(0);
 		expect(write).not.toHaveBeenCalled();
-		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "human_terminal_contention_timeout" }]);
+		expect(outcomes).toEqual([
+			// 人不在场 ⇒ 原因码不是 human_terminal_contention_timeout（那一条的语义是「人正在这个终端上
+			// 干活，本轮别重投」）。这里没有任何人在等，是机器这侧拿不下这个框，故可择机重投。
+			{ status: "delivery_failed", reason: "terminal_input_box_contended_but_unstashable" },
+		]);
 	});
 
 	// 硬约束的钉子：读屏对**未建模输入框语法**的 agent（codex / kimi / droid）恒无结论。若把「读不出框」
@@ -1186,7 +1421,11 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 		].join("\n");
 		// 这条 PTY 收到过人类字节（且已提交）：输入侧接得上人，它说「框里没有未提交内容」就可信。
 		const trackerThatHasSeenHuman = createTerminalInputBoxOccupancyTrackerState();
-		recordTerminalInputBytesIntoOccupancyTracker(trackerThatHasSeenHuman, Buffer.from("已经提交掉的一句\r", "utf8"));
+		recordTerminalInputBytesIntoOccupancyTracker(
+			trackerThatHasSeenHuman,
+			Buffer.from("已经提交掉的一句\r", "utf8"),
+			Date.now(),
+		);
 		const { write } = installFakeClaudeEntry(manager, "task-contention-placeholder", {
 			mirrorSnapshot: viewportWithPlaceholderHint,
 			state: "running",

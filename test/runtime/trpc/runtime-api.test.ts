@@ -10,6 +10,7 @@ import type {
 	RuntimeBoardData,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
+	TerminalInputBoxStashOutcome,
 } from "../../../src/core/api-contract";
 
 const agentRegistryMocks = vi.hoisted(() => ({
@@ -4578,7 +4579,7 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 					_text: string,
 					_options?: {
 						mayAutoStashAbsentHumanInputBox?: boolean;
-						preemptivelyStashHumanInputBox?: (taskId: string) => Promise<boolean>;
+						preemptivelyStashHumanInputBox?: (taskId: string) => Promise<TerminalInputBoxStashOutcome>;
 					},
 				) => summary,
 			),
@@ -4608,7 +4609,11 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 		// 策略取自配置（默认允许在人不在场时抢占）。
 		expect(deliveryOptions.mayAutoStashAbsentHumanInputBox).toBe(true);
 
-		await expect(deliveryOptions.preemptivelyStashHumanInputBox("task-1")).resolves.toBe(true);
+		// 抢占执行者原样回传 outcome（判「成没成」由 manager 做）：这是 manager 区分「瞬态失败值得再等」
+		// 与「确定性失败该当场收尾」的唯一依据，折成布尔就把它弄丢了。
+		await expect(deliveryOptions.preemptivelyStashHumanInputBox("task-1")).resolves.toBe(
+			"stashed_into_prompt_library",
+		);
 		const library = await readWorkspacePromptLibrarySnapshot(scope.workspaceId);
 		expect(library.taskScopedPromptsByTaskId["task-1"]).toEqual([
 			expect.objectContaining({
@@ -4620,7 +4625,9 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 		// 框没清成（读框到清框之间终端被 refresh）：内容确实进了库，但输入框里一个字都没少，
 		// 此时绝不能报「已放行」——投递必须退回挂起。
 		inputBoxWasCleared = false;
-		await expect(deliveryOptions.preemptivelyStashHumanInputBox("task-1")).resolves.toBe(false);
+		await expect(deliveryOptions.preemptivelyStashHumanInputBox("task-1")).resolves.toBe(
+			"stashed_into_prompt_library_but_input_box_not_cleared",
+		);
 	});
 
 	it("写库期间终端被 refresh（清框被拒） → 回执必须说「已入库但框没清」，不许报纯成功", async () => {
@@ -4720,7 +4727,7 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 	async function resolveProgrammaticDeliveryPreemptiveStashExecutor(
 		scope: { workspaceId: string; workspacePath: string },
 		terminalManager: ReturnType<typeof createStashTerminalManagerDouble>,
-	): Promise<(taskId: string) => Promise<boolean>> {
+	): Promise<(taskId: string) => Promise<TerminalInputBoxStashOutcome>> {
 		const summary = createSummary({ agentId: "claude", state: "awaiting_review" });
 		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
@@ -4734,7 +4741,7 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 					_text: string,
 					_options?: {
 						mayAutoStashAbsentHumanInputBox?: boolean;
-						preemptivelyStashHumanInputBox?: (taskId: string) => Promise<boolean>;
+						preemptivelyStashHumanInputBox?: (taskId: string) => Promise<TerminalInputBoxStashOutcome>;
 					},
 				) => summary,
 			),
@@ -4779,10 +4786,12 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			terminalManager,
 		);
 
-		await expect(preemptivelyStashHumanInputBox("task-1")).resolves.toBe(false);
+		await expect(preemptivelyStashHumanInputBox("task-1")).resolves.toBe(
+			"input_box_content_unreadable_and_left_untouched",
+		);
 
-		// 红线：转发一次 = 那半句被 agent 自己的暂存区吞掉，而抢占已如实返回 false、这次投递根本不会
-		// 发生——内容没了，连一次投递都没换到。
+		// 红线：转发一次 = 那半句被 agent 自己的暂存区吞掉，而抢占已如实报了非成功 outcome、这次投递
+		// 根本不会发生——内容没了，连一次投递都没换到。
 		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).not.toHaveBeenCalled();
 		expect(existsSync(getWorkspacePromptLibraryPath(scope.workspaceId))).toBe(false);
 	});
@@ -4799,7 +4808,9 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			terminalManager,
 		);
 
-		await expect(preemptivelyStashHumanInputBox("task-1")).resolves.toBe(false);
+		await expect(preemptivelyStashHumanInputBox("task-1")).resolves.toBe(
+			"input_box_screen_text_not_corroborated_by_keystroke_tracking",
+		);
 
 		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).not.toHaveBeenCalled();
 	});
