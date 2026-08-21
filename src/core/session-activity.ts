@@ -536,6 +536,24 @@ export function isNotifiableUserTurn(facets: SessionFacets): boolean {
 	return isAwaitingUserReviewTurn(facets) && facets.userTurnKind !== "interrupted";
 }
 
+// ── 「agent 停在模态待答、正等用户拍板」的唯一被认可判据 ──────────────────────────────────────
+// 集合有意**只**收这四种模态待答，**绝不含 `review`**：`review` 是 agent 自然完工、输入框空闲的
+// 状态，恰恰是程序化投递（RVF followup、排队 prompt）的**目标态**。把 review 也算「等用户」会让
+// 每次投递都让位、永不落地——这正是 2026-08-08 事故的第二条根因（当时的实现用的是
+// `turnOwner !== "agent"`，一并把 review 吞了进去）。
+//
+// 定义在这里而不是 session-manager：两类消费者必须共用同一份集合——
+//   ① PTY 投递让位门控（session-manager 的 runTaskChatInputDeliveryAttempt）；
+//   ② 排队 prompt 投递的出队门控（queued-task-prompt-delivery-dispatch-eligibility）。
+// 两处各持一份副本，迟早在其中一份里漂移出「review 又被算进去了」的同一个 bug，而它上一次的代价
+// 是 49 分钟静默挂起。
+export const MODAL_USER_DECISION_TURN_KINDS: ReadonlySet<RuntimeTaskSessionUserTurnKind> =
+	new Set<RuntimeTaskSessionUserTurnKind>(["question", "plan_review", "permission", "needs_input"]);
+
+export function isAgentAwaitingModalUserDecision(facets: SessionFacets): boolean {
+	return facets.userTurnKind !== null && MODAL_USER_DECISION_TURN_KINDS.has(facets.userTurnKind);
+}
+
 // ── park：「已 park、正在等待已派发后台工作」的唯一被认可判据 ────────────────────────────────
 // 主 agent 以非 native 方式 dispatch 一个后台任务（例：把 reviewer 计划作为独立 Kanban 任务发出）后，结束自己
 // 这一轮去等它完成。Claude 此刻只发一个裸 Stop（它不知道刚才那是子 agent，不发 SubagentStop），裸 Stop 经
