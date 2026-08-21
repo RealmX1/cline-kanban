@@ -28,6 +28,7 @@ import {
 	isAwaitingUserReviewTurn,
 	isParkedAwaitingDispatchedBackgroundWork,
 	isSessionInActiveTurn,
+	MODAL_USER_DECISION_TURN_KINDS,
 	mergeSummaryWithFacets,
 	resolveSessionFacets,
 	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
@@ -157,16 +158,6 @@ const HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS = 5 * 60_000;
 // 于是 deadline 强写永远够不到，投递每 RECHECK_MS 空探一次、既不落地也不报错、无限挂起。
 // 到点转终态 delivery_failed{agent_awaiting_user_decision_timeout}——诚实失败远好于永远沉默。
 const TASK_CHAT_INPUT_DELIVERY_MAX_USER_TURN_YIELD_MS = 120_000;
-// Fix B 让位只认「agent 真的在等用户拍板」这几种模态待答。
-// 收窄的理由（恢复 Fix B 的原始意图）：其 commit 正文写的是「agent 正 AskUserQuestion / 计划评审 /
-// 权限确认等待用户」，但实现用的是 turnOwner !== "agent"，把 `review`（agent 自然完工、输入框空闲）
-// 也一并纳入了——而 `review` 恰恰是 RVF followup 的**目标态**，于是每次都让位、永不投递。
-const MODAL_USER_DECISION_TURN_KINDS = new Set<RuntimeTaskSessionUserTurnKind>([
-	"question",
-	"plan_review",
-	"permission",
-	"needs_input",
-]);
 // 写后确认（CR-swallow 闭环）：两处程序化 paste 注入（RVF followup 与连接中断续跑）写完 bracketed paste 后，
 // 隔这么久起一个确认 tick，检查输出是否在 paste 回显后重新流动。须 ≥ AGENT_OUTPUT_QUIET_THRESHOLD_MS（2s），
 // 使被吞 CR 的 paste 在首个 tick 即读到「输出静默」；留 ~0.5s 余量避免边界抖动。
@@ -1514,6 +1505,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 「有投递在等你让路」而实际上再没有人在等。
 		this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 		return "cancelled_before_delivery";
+	}
+
+	// 这个 task 的终端上此刻是否压着一条尚未落定的程序化投递（RVF followup / 待答答案 / 排队 prompt）。
+	//
+	// 存在的唯一理由是**排队投递出队前的门控**：submitTaskChatInputWhenReady 是**单飞槽**，新投递会
+	// 直接 settle 掉旧的那条（superseded_by_later_delivery）。排队 prompt 是最低优先级的那类投递——
+	// 它可以等下一个 turn 边沿，而 RVF 的收敛承诺等不了。所以由排队侧读这个访问器主动避让，而不是
+	// 反过来把单飞槽改成 FIFO（那要动代际语义、确认链提升时机与全部 teardown 点）。
+	//
+	// 两个 phase 都算「在途」：awaiting_readiness 还没写进 PTY，awaiting_submit_confirmation 已经写了、
+	// 正在等提交确认——后者更不能插队，此刻框里躺着别人的文本。
+	hasPendingProgrammaticTaskChatInputDelivery(taskId: string): boolean {
+		const receipt = this.entries.get(taskId)?.active?.programmaticDeliveryReceipt ?? null;
+		return receipt !== null && !receipt.settled;
 	}
 
 	// 一次投递 attempt：就绪 ∧ 输入框空 才写 PTY；未就绪或框被人占着则隔 RECHECK_MS 再探，两条预算各自到点

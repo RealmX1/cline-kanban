@@ -3,7 +3,6 @@
 // workspace actions, but detailed Cline, terminal, and config behavior
 // should stay in focused services instead of accumulating here.
 
-import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -21,7 +20,6 @@ import {
 import { createClineMcpRuntimeService } from "../cline-sdk/cline-mcp-runtime-service";
 import { createClineMcpSettingsService } from "../cline-sdk/cline-mcp-settings-service";
 import { createClineProviderService } from "../cline-sdk/cline-provider-service";
-import { isClineClearSlashCommand } from "../cline-sdk/cline-slash-commands";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtime-config";
@@ -37,7 +35,6 @@ import {
 	resolveAgentSessionTransportForLaunch,
 } from "../core/agent-session-transport-selection";
 import type {
-	PromptLibraryEntryOrigin,
 	PromptLibraryScope,
 	RuntimeAgentId,
 	RuntimeBoardCard,
@@ -45,7 +42,6 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
 	RuntimeTaskAgentPermissionMode,
-	RuntimeTaskChatMessage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -74,7 +70,6 @@ import {
 	parseTaskChatCancelRequest,
 	parseTaskChatMessagesRequest,
 	parseTaskChatReloadRequest,
-	parseTaskChatSendRequest,
 	parseTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
 	parseTaskParkAwaitingDispatchedBackgroundWorkRequest,
 	parseTaskSessionInputRequest,
@@ -89,10 +84,6 @@ import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
 import { applyMostRecentlyLaunchedAgentSessionAgentIdToTask, updateTask } from "../core/task-board-mutations";
-import {
-	getTaskMessageInjectionLedgerPath,
-	recordTaskMessageTerminalDeliveryOutcome,
-} from "../core/task-message-injection-ledger";
 import { resolveTaskTitle } from "../core/task-title.js";
 import {
 	recordTaskSessionStartDiagnostic,
@@ -112,9 +103,13 @@ import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../sta
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
-import { getWorkspaceDirectoryPath, loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
+import { loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
+import {
+	stashTaskTerminalInputBoxIntoPromptLibrary,
+	type TerminalInputBoxStashInitiator,
+} from "../terminal/stash-task-terminal-input-box-into-prompt-library";
 import {
 	getTerminalAgentModelSelectionOptions,
 	isClaudeCodeCuratedTerminalAgentModelSelectionOptionId,
@@ -125,6 +120,7 @@ import {
 import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
+import { sendTaskChatMessageAcrossSessionTransports } from "./task-chat-message-send-across-session-transports";
 
 // 老看板卡片没有 taskAgentPermissionMode。缺失时按「当时的全局 agentAutonomousModeEnabled」
 // 推出等价档位，使升级前后行为不变——schema 层看不到 runtime config，兼容只能落在这里。
@@ -185,54 +181,12 @@ async function resolveExistingTaskCwdOrEnsure(options: {
 	}
 }
 
-function buildTerminalTaskChatDeliveryMessage(input: {
-	taskId: string;
-	text: string;
-	source?: string;
-	idempotencyKey?: string;
-	promptSha256?: string;
-}): RuntimeTaskChatMessage {
-	const messageId = input.idempotencyKey
-		? `terminal:${input.taskId}:${input.idempotencyKey}`
-		: `terminal:${input.taskId}:${Date.now()}`;
-	return {
-		id: messageId,
-		role: "user",
-		content: input.text,
-		createdAt: Date.now(),
-		meta: {
-			messageKind: "terminal-input",
-			source: input.source ?? null,
-			idempotencyKey: input.idempotencyKey ?? null,
-			promptSha256: input.promptSha256 ?? null,
-		},
-	};
-}
-
 const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["cline", "claude", "codex"]);
 
 function isByTheWaySessionForWorkspaceTask(summary: RuntimeTaskSessionSummary, workspaceTaskId: string): boolean {
 	const metadata = summary.taskConversationSessionMetadata;
 	return metadata?.workspaceTaskId === workspaceTaskId && metadata.taskConversationSessionRole === "by_the_way";
 }
-
-// 一次终端输入框暂存是谁发起的。
-//
-// **必须是单一参数**：它同时决定两件事——① 入库条目的 origin 标签；② 读不出正文时**能不能**转发
-// Ctrl+S 清框。两者必须由同一个事实推出。拆成「origin 标签」+「允许清框」两个参数，迟早会出现
-// 「标成抢占来源、却按用户按键的策略清了框」这种自相矛盾的组合，而那正是本参数要根除的缺陷本身：
-// 在此之前 origin 已经传进来了，却只用来贴标签，一个字都没参与清框判定。
-type TerminalInputBoxStashInitiator =
-	| "human_pressed_stash_key_in_terminal"
-	| "programmatic_delivery_contention_preemption";
-
-const PROMPT_LIBRARY_ENTRY_ORIGIN_BY_TERMINAL_INPUT_BOX_STASH_INITIATOR: Record<
-	TerminalInputBoxStashInitiator,
-	PromptLibraryEntryOrigin
-> = {
-	human_pressed_stash_key_in_terminal: "terminal_stash_by_user",
-	programmatic_delivery_contention_preemption: "terminal_stash_preempted_by_programmatic_delivery",
-};
 
 function findWorkspaceBoardCard(board: RuntimeBoardData, taskId: string): RuntimeBoardCard | null {
 	for (const column of board.columns) {
@@ -514,162 +468,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		return startedSummary.pid != null;
 	};
 
-	// W2 Ctrl+S 暂存的整条原子链路：读框 → 回填被折叠的粘贴 → 写库 → 转发 Ctrl+S 清框。
-	//
-	// 两个调用方共用它，且**必须**共用：① 用户在终端按下 Ctrl+S；② W1 争用抢占（程序化投递撞上人类
-	// 未提交的输入、且人不在场时，先把那段输入无损存进库再腾出框）。两者的差别只有 origin 一个字段——
-	// 各写一份的话，「先写库后清框」「令牌对不上就不清框」「屏上文本无击键佐证就不入库」这些一步都不能
-	// 错的次序迟早会在其中一份里走样。
-	const stashTaskTerminalInputBoxIntoPromptLibrary = async (args: {
+	// workspace 作用域的薄包装：真正的暂存链路已抽到 terminal/stash-task-terminal-input-box-into-prompt-library.ts
+	// （排队投递 dispatcher 没有 TRPC 请求、拿不到这个每请求闭包，故必须共用那一份而不是复制一份）。
+	const stashTaskTerminalInputBoxIntoPromptLibraryForWorkspaceScope = async (args: {
 		workspaceScope: RuntimeTrpcWorkspaceScope;
 		taskId: string;
 		scope: PromptLibraryScope;
 		initiatedBy: TerminalInputBoxStashInitiator;
-	}): Promise<RuntimeTerminalInputBoxStashResponse> => {
-		let terminalManager: Awaited<ReturnType<typeof deps.getScopedTerminalManager>>;
-		try {
-			terminalManager = await deps.getScopedTerminalManager(args.workspaceScope);
-		} catch (error) {
-			return {
-				ok: false,
-				outcome: "no_active_terminal_session" as const,
-				stashedPromptId: null,
-				stashedTextCharacterCount: 0,
-				fidelity: null,
-				error: error instanceof Error ? error.message : String(error),
-			};
-		}
-		return await terminalManager.runTaskTerminalInputBoxStashAttemptExclusivelyPerTask<RuntimeTerminalInputBoxStashResponse>(
-			args.taskId,
-			async () => {
-				const capture = await terminalManager.captureTaskTerminalInputBoxContentForPromptLibraryStash(args.taskId);
-				if (!capture) {
-					return {
-						ok: true,
-						outcome: "no_active_terminal_session" as const,
-						stashedPromptId: null,
-						stashedTextCharacterCount: 0,
-						fidelity: null,
-					};
-				}
-				if (capture.status !== "captured_stashable_text") {
-					// 转发 Ctrl+S 与否**只看发起方**，不按捕获状态分类讨论。
-					//
-					// 争用抢占这条路径上根本没有人按键，也就没有任何键需要「替他送到 agent」。此时转发就是
-					// 凭空清掉人类打了一半的那半句：正文被 agent 自己的暂存区吞掉、Kanban 侧一无所有，而
-					// 抢占方随后如实返回失败、这次投递压根不会发生——内容没了，连一次投递都没换到。
-					//
-					// 只有 input_box_content_unreadable 是真正会丢字的那一格（输入侧字节跟踪确知框里有未提交
-					// 内容、读屏拿不到正文）；另两格不丢字（两侧都说空 / 屏上有字但一个字节都没经过 writeInput，
-					// 多半是 agent 自己渲染的占位提示）。即便如此这里也不按状态开口子：判据是「没人按键」，
-					// 一句话说得完、也没有下一个状态被漏掉的余地，而按状态枚举一旦将来新增一格就会默认落进
-					// 「照常清框」那一侧。
-					if (args.initiatedBy === "programmatic_delivery_contention_preemption") {
-						return {
-							ok: true,
-							// 三格里只有「读不到正文」需要一个专属取值：它与用户按键路径的
-							// ..._forwarded_to_agent_native_stash 是同一个捕获结果、相反的处置，共用一个名字
-							// 就等于让回执自己撒谎（名字里明写着 forwarded）。另两格的名字本就不含处置，
-							// 两条路径共用不会说错话——而它们之间那点事实差别（有没有把一个键打进一个我们
-							// 认定为空的框）不改变任何调用方的决策。
-							outcome:
-								capture.status === "input_box_empty"
-									? ("input_box_empty_nothing_to_stash" as const)
-									: capture.status === "input_box_content_unreadable"
-										? ("input_box_content_unreadable_and_left_untouched" as const)
-										: ("input_box_screen_text_not_corroborated_by_keystroke_tracking" as const),
-							stashedPromptId: null,
-							stashedTextCharacterCount: 0,
-							fidelity: capture.fidelity,
-						};
-					}
-					// 用户亲手按了 Ctrl+S：没有可入库的正文，但仍然转发。那是这个键的原生语义，agent 自己的
-					// 暂存区会接住任何我们读不到的内容——不入库不等于要把用户的按键吞掉。
-					const forwardedToSameTerminalSessionIncarnation =
-						terminalManager.forwardStashKeyToClearTaskTerminalInputBox(
-							args.taskId,
-							capture.terminalSessionIncarnationToken,
-						);
-					if (!forwardedToSameTerminalSessionIncarnation) {
-						// 读框到这一刻之间那条 PTY 已经退出/被换代。既没入库也没转发，什么都没发生——
-						// 报「没有可信的终端会话」，而不是硬说「已交给 agent 自己处理」。
-						return {
-							ok: true,
-							outcome: "no_active_terminal_session" as const,
-							stashedPromptId: null,
-							stashedTextCharacterCount: 0,
-							fidelity: capture.fidelity,
-						};
-					}
-					return {
-						ok: true,
-						outcome:
-							capture.status === "input_box_empty"
-								? ("input_box_empty_nothing_to_stash" as const)
-								: capture.status === "input_box_content_unreadable"
-									? ("input_box_content_unreadable_forwarded_to_agent_native_stash" as const)
-									: ("input_box_screen_text_not_corroborated_by_keystroke_tracking" as const),
-						stashedPromptId: null,
-						stashedTextCharacterCount: 0,
-						fidelity: capture.fidelity,
-					};
-				}
-				const scope = args.scope;
-				const stashedPromptId = randomUUID();
-				try {
-					await mutateWorkspacePromptLibrary(args.workspaceScope.workspaceId, {
-						kind: "upsert_prompt",
-						promptId: stashedPromptId,
-						text: capture.text,
-						scope,
-						// scope 非 task 时传 null：带着一个用不上的 taskId 只会让存储层的桶判定多一个歧义输入。
-						taskId: scope === "task" ? args.taskId : null,
-						origin: PROMPT_LIBRARY_ENTRY_ORIGIN_BY_TERMINAL_INPUT_BOX_STASH_INITIATOR[args.initiatedBy],
-						// 保真度随条目一起落库，别只回给这一次请求的调用方：抢占来源的条目写进来时用户
-						// 根本不在场，那条只弹一次的 toast 没有任何人看得见。
-						terminalInputBoxStashFidelity: capture.fidelity,
-					});
-				} catch (error) {
-					// **不**转发 Ctrl+S：正文原样留在框里，用户看得见、能重试。转发只会把它藏进 agent 的
-					// 暂存区，而 Kanban 这边什么都没有——那是「回执说成功、东西不在」的同一种撒谎。
-					return {
-						ok: false,
-						outcome: "prompt_library_write_failed" as const,
-						stashedPromptId: null,
-						stashedTextCharacterCount: 0,
-						fidelity: capture.fidelity,
-						error: error instanceof Error ? error.message : String(error),
-					};
-				}
-				// 上面这段 await 跨了文件锁与落盘（可达数十毫秒），期间 refresh 会整体换掉 active。
-				// 令牌对不上时 manager 拒绝转发，这里必须把「框没清」如实说出来：正文确实进库了
-				// （ok 仍为 true、stashedPromptId 有效），但框还在。
-				const clearedTheSameTerminalSessionIncarnationWeReadFrom =
-					terminalManager.forwardStashKeyToClearTaskTerminalInputBox(
-						args.taskId,
-						capture.terminalSessionIncarnationToken,
-					);
-				return {
-					ok: true,
-					outcome: clearedTheSameTerminalSessionIncarnationWeReadFrom
-						? ("stashed_into_prompt_library" as const)
-						: ("stashed_into_prompt_library_but_input_box_not_cleared" as const),
-					stashedPromptId,
-					stashedTextCharacterCount: capture.text.length,
-					fidelity: capture.fidelity,
-				};
+	}): Promise<RuntimeTerminalInputBoxStashResponse> =>
+		await stashTaskTerminalInputBoxIntoPromptLibrary(
+			{
+				getTerminalSessionManagerForWorkspace: async () => await deps.getScopedTerminalManager(args.workspaceScope),
 			},
-			() => ({
-				// 同一 task 上已有一次暂存在跑。这一次按键没入库、也没转发 Ctrl+S，框里内容一个字没少。
-				// ok 为 false：用户要求的事这一次确实没做成，静默报成功就是这条工作流要根除的那种撒谎。
-				ok: false,
-				outcome: "another_terminal_input_box_stash_attempt_already_in_flight_for_this_task" as const,
-				stashedPromptId: null,
-				stashedTextCharacterCount: 0,
-				fidelity: null,
-			}),
+			{
+				workspaceId: args.workspaceScope.workspaceId,
+				taskId: args.taskId,
+				scope: args.scope,
+				initiatedBy: args.initiatedBy,
+			},
 		);
-	};
 
 	const runtimeApi: RuntimeTrpcContext["runtimeApi"] = {
 		loadConfig: async (workspaceScope) => {
@@ -1471,7 +1288,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							mayAutoStashAbsentHumanInputBox:
 								contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 							preemptivelyStashHumanInputBox: async (contendedTaskId) => {
-								const stash = await stashTaskTerminalInputBoxIntoPromptLibrary({
+								const stash = await stashTaskTerminalInputBoxIntoPromptLibraryForWorkspaceScope({
 									workspaceScope,
 									taskId: contendedTaskId,
 									scope: "task",
@@ -1890,222 +1707,22 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			}
 			return response;
 		},
-		sendTaskChatMessage: async (workspaceScope, input) => {
-			try {
-				const body = parseTaskChatSendRequest(input);
-				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
-				// 同 getTaskChatMessages：按活会话盖的通道章分派，而不是「账本里有没有 entry」。
-				if (isRuntimeAgentSessionSummaryDrivenByAcpProtocol(acpTaskSessionService.getSummary(body.taskId))) {
-					if (isClineClearSlashCommand(body.text)) {
-						const clearedSummary = await acpTaskSessionService.clearTaskSession(body.taskId);
-						deps.broadcastTaskChatCleared?.(workspaceScope.workspaceId, body.taskId);
-						return { ok: true, summary: clearedSummary, message: null };
-					}
-					const acpSummary = await acpTaskSessionService.sendTaskSessionInput(body.taskId, body.text, body.images);
-					if (acpSummary) {
-						return {
-							ok: true,
-							summary: acpSummary,
-							message: acpTaskSessionService.listMessages(body.taskId).at(-1) ?? null,
-							// ACP 通道摄入即确认：sendTaskSessionInput 只在「账本里有该会话且 stdio 连接还活着」时返回
-							// summary，返回前用户消息已进会话记录、session/prompt 已派发到那条连接上。没有 PTY 那种
-							// 「粘进输入框但 CR 被吞」的中间态可等，因此这里不能留 pending——ACP 分支不存在
-							// onDeliveryOutcome 这样的登记点，留下的 pending 没有任何人会来收敛，只会一直挂到下次
-							// runtime 启动清扫，违反账本自己的「唯一非终态必然有界收敛」不变量。
-							// 不报 queued_behind：那描述的是「写进 TUI 输入框时 agent 正占着回合」，ACP 侧压根没有
-							// 排队模型（并发投递就是并发 session/prompt），报「排在后面」等于编造不存在的语义。
-							...(body.idempotencyKey
-								? {
-										terminalDelivery: {
-											status: "delivered_and_submit_confirmed" as const,
-											reason: null,
-										},
-									}
-								: {}),
-						};
-					}
-					// 有会话账本但连接已经没了（会话被回收 / 子进程已退）：此刻确实没有活着的会话可投，
-					// 如实落终态，别让调用方空等一个不会到来的确认。
-					return {
-						ok: false,
-						summary: null,
-						error: "The ACP agent session is not connected.",
-						terminalDelivery: {
-							status: "delivery_failed" as const,
-							reason: "no_active_terminal_session" as const,
-						},
-					};
-				}
-				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-				if (isClineClearSlashCommand(body.text)) {
-					const summary = await clineTaskSessionService.clearTaskSession(body.taskId);
-					deps.broadcastTaskChatCleared?.(workspaceScope.workspaceId, body.taskId);
-					return {
-						ok: true,
-						summary,
-						message: null,
-					};
-				}
-				const requestedMode = body.mode;
-				const messageMeta = {
-					source: body.source ?? null,
-					idempotencyKey: body.idempotencyKey ?? null,
-					promptSha256: body.promptSha256 ?? null,
-				};
-				const hasMessageMeta = Object.values(messageMeta).some((value) => value !== null);
-				const sendClineTaskSessionInput = async () => {
-					if (hasMessageMeta) {
-						return await clineTaskSessionService.sendTaskSessionInput(
-							body.taskId,
-							body.text,
-							requestedMode,
-							body.images,
-							messageMeta,
-						);
-					}
-					return await clineTaskSessionService.sendTaskSessionInput(
-						body.taskId,
-						body.text,
-						requestedMode,
-						body.images,
-					);
-				};
-				let summary = await sendClineTaskSessionInput();
-				if (!summary) {
-					if (!isHomeAgentSessionId(body.taskId)) {
-						const reboundSummary = await clineTaskSessionService.rebindPersistedTaskSession(body.taskId);
-						if (reboundSummary) {
-							summary = await sendClineTaskSessionInput();
-						}
-						if (!summary) {
-							if (body.images && body.images.length > 0) {
-								return {
-									ok: false,
-									summary: null,
-									error: "Task chat images require an active Cline chat session.",
-								};
-							}
-							const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-							// RVF followup 等程序化 chat 注入：经就绪门控投递（沉降 + 提示符就绪轮询 + deadline 兜底），
-							// 避免 Stop 后 TUI 重绘态下「粘贴进输入框但 CR 被吞、不发送」的间歇竞态。详见 submitTaskChatInputWhenReady。
-							// deferWhileUserTurn=（带 source 即后台自动注入）：后台注入遇会话处于非 agent 回合（agent 正等用户
-							// 回答 AskUserQuestion / 计划评审 / 权限确认）时让位挂起、待 agent 回合恢复再投递，绝不把正等用户的
-							// 会话经 UserPromptSubmit 翻回 agent 回合。用户发起的发送（人类聊天 / commit·openPR，无 source）不受影响。
-							// 诚实回执登记：带 idempotencyKey 就意味着这条投递被记在账本里、有人在等它的真实结论。
-							// runtime 在投递落定（或失败）后就地改写同一条记录——CLI 早已退出，这是唯一能把
-							// 「pending → 终态」补上的地方。写账本失败不阻断会话：启动清扫会兜底判失败。
-							const injectionIdempotencyKey = body.idempotencyKey ?? null;
-							const injectionLedgerPath = injectionIdempotencyKey
-								? getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceScope.workspaceId))
-								: null;
-							// 争用策略在受理这一刻读一次（一条投递最多活 ~196s，全程用同一份策略）。
-							// 抢占执行者就是 Ctrl+S 那条链路本身，只是 origin 标成「被程序化投递抢占」，
-							// 于是面板里能一眼看出这条是机器替人存的、并可一键恢复。
-							// 只有 stashed_into_prompt_library（入库**且**框已清）才算抢占成功：
-							// 「入库了但框没清」框里内容一个字没少，照写就会把 paste 接在人类那半句后面。
-							const contentionPolicyConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
-							const terminalSummary = terminalManager.submitTaskChatInputWhenReady(body.taskId, body.text, {
-								deferWhileUserTurn: body.source != null,
-								idempotencyKey: injectionIdempotencyKey,
-								mayAutoStashAbsentHumanInputBox:
-									contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
-								preemptivelyStashHumanInputBox: async (taskId) => {
-									const stash = await stashTaskTerminalInputBoxIntoPromptLibrary({
-										workspaceScope,
-										taskId,
-										scope: "task",
-										initiatedBy: "programmatic_delivery_contention_preemption",
-									});
-									return stash.outcome === "stashed_into_prompt_library";
-								},
-								...(injectionLedgerPath && injectionIdempotencyKey
-									? {
-											onDeliveryOutcome: (outcome) => {
-												void recordTaskMessageTerminalDeliveryOutcome({
-													ledgerPath: injectionLedgerPath,
-													taskId: body.taskId,
-													idempotencyKey: injectionIdempotencyKey,
-													status: outcome.status,
-													...(outcome.reason ? { failureReason: outcome.reason } : {}),
-													nowIso: new Date().toISOString(),
-												}).catch(() => {
-													// 账本写失败不影响会话本身；仍 pending 的记录由 runtime 启动清扫兜底判失败。
-												});
-											},
-										}
-									: {}),
-							});
-							if (terminalSummary) {
-								return {
-									ok: true,
-									summary: terminalSummary,
-									terminalDelivery: {
-										status: "accepted_pending_submit_confirmation" as const,
-										reason: null,
-									},
-									message: buildTerminalTaskChatDeliveryMessage({
-										taskId: body.taskId,
-										text: body.text,
-										source: body.source,
-										idempotencyKey: body.idempotencyKey,
-										promptSha256: body.promptSha256,
-									}),
-								};
-							}
-							return {
-								ok: false,
-								summary: null,
-								error: "Task chat session is not running.",
-								terminalDelivery: {
-									status: "delivery_failed" as const,
-									reason: "no_active_terminal_session" as const,
-								},
-							};
-						}
-					} else {
-						const clineLaunchConfig = await clineProviderService.resolveLaunchConfig();
-						summary = await clineTaskSessionService.startTaskSession({
-							taskId: body.taskId,
-							cwd: workspaceScope.workspacePath,
-							prompt: body.text,
-							images: body.images,
-							resumeFromPersistence: true,
-							providerId: clineLaunchConfig.providerId,
-							modelId: clineLaunchConfig.modelId,
-							mode: requestedMode,
-							apiKey: clineLaunchConfig.apiKey,
-							baseUrl: clineLaunchConfig.baseUrl,
-							reasoningEffort: clineLaunchConfig.reasoningEffort,
-						});
-					}
-				}
-				const latestMessage = clineTaskSessionService.listMessages(body.taskId).at(-1) ?? null;
-				return {
-					ok: true,
-					summary,
-					message: latestMessage,
-					// Cline SDK 会话是进程内摄入：调到这里就说明消息已经进了会话，摄入本身是同步确认的，
-					// 不存在 PTY 那种「粘进框但 CR 被吞」的失败形态，故直接给确认终态、无 pending 阶段。
-					// 不报 queued_behind：那个区分描述的是「写进 TUI 输入框时 agent 正占着回合」，
-					// 是终端通道特有的现象；SDK 侧队列由 runtime 自己持有，摄入即确认。
-					...(body.idempotencyKey
-						? {
-								terminalDelivery: {
-									status: "delivered_and_submit_confirmed" as const,
-									reason: null,
-								},
-							}
-						: {}),
-				};
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				return {
-					ok: false,
-					summary: null,
-					error: message,
-				};
-			}
-		},
+		// 三 transport 分派的实现体在 task-chat-message-send-across-session-transports.ts。
+		// 搬出去是因为排队投递 dispatcher 也要用同一条出口，而它由 turn 结束边沿驱动、手上没有请求，
+		// 拿不到这个每请求新建的 runtimeApi 闭包。
+		sendTaskChatMessage: async (workspaceScope, input) =>
+			await sendTaskChatMessageAcrossSessionTransports(
+				{
+					getScopedTerminalManager: deps.getScopedTerminalManager,
+					getScopedClineTaskSessionService: deps.getScopedClineTaskSessionService,
+					getScopedAcpTaskSessionService: deps.getScopedAcpTaskSessionService,
+					loadScopedRuntimeConfig: deps.loadScopedRuntimeConfig,
+					resolveClineTaskSessionLaunchConfig: async () => await clineProviderService.resolveLaunchConfig(),
+					...(deps.broadcastTaskChatCleared ? { broadcastTaskChatCleared: deps.broadcastTaskChatCleared } : {}),
+				},
+				workspaceScope,
+				input,
+			),
 		// 取消一条在途程序化投递。账本的终态改写不在这里做——取消成功时 session-manager 会经
 		// 投递登记的 observer 触发同一条回写路径（delivery_failed{cancelled_before_delivery}），
 		// 与「确认落定」共用那一把写一次即定的锁，取消与确认的竞争因此是确定性的。
@@ -2196,7 +1813,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		// 多标签页）。清框那一步回传取文时的 incarnation 令牌，并且**必须看它的返回值**——写库跨文件锁与
 		// 落盘期间用户可能已经 refresh 了终端。
 		stashTerminalInputBoxToPromptLibrary: async (workspaceScope, input) =>
-			await stashTaskTerminalInputBoxIntoPromptLibrary({
+			await stashTaskTerminalInputBoxIntoPromptLibraryForWorkspaceScope({
 				workspaceScope,
 				taskId: input.taskId,
 				scope: input.scope ?? "task",
