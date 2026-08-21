@@ -13,8 +13,18 @@ const HIGHLIGHTED_TEXT_STYLE: CSSProperties = {
 	fontWeight: 600,
 };
 
+// 与文本高亮同源的金色：task id 全等命中即整体高亮，不需要字符级位置集。
+const TASK_ID_BADGE_STYLE: CSSProperties = {
+	color: "var(--color-status-gold)",
+	borderColor: "var(--color-status-gold)",
+};
+
 // prompt 命中片段的截窗半径（字符）。
 const PROMPT_SNIPPET_WINDOW_RADIUS = 48;
+
+// title 与 prompt 皆空时的主行占位。既有文本搜索永远匹配不到这种任务，所以从没出现过；
+// task id 搜索**会**把它捞出来，不兜底就是一条空行。
+const MISSING_PRIMARY_TEXT_PLACEHOLDER = "Untitled task";
 
 export function TaskSpotlightSearchResultRow({
 	result,
@@ -41,6 +51,9 @@ export function TaskSpotlightSearchResultRow({
 	const primaryMatchCharacterPositions = hasTitle
 		? result.titleMatchCharacterPositions
 		: result.promptMatchCharacterPositions;
+	// 只有 task id 命中的行显示 id 徽标：这类行在 title / prompt 上通常没有任何高亮，
+	// 不显 id 用户就不知道它凭什么被顶到最前。
+	const shouldRenderTaskIdBadge = result.matchSources.includes("taskId");
 	// 仅「主行展示 title、且 prompt 命中而 title 未命中」时才补下方 prompt 片段行：此时主行（title）无法展示
 	// prompt 命中，需 snippet 补救；semantic-only（无位置集）不展示片段，只显徽标。title 为空时主行已直接展示
 	// 带高亮的 prompt，无需再补 snippet（否则与主行重复展示同一段 prompt 高亮）。
@@ -67,9 +80,21 @@ export function TaskSpotlightSearchResultRow({
 			<span className="min-w-0 flex-1">
 				<span className="flex items-center gap-2">
 					<span className="min-w-0 flex-1 truncate text-[13px] text-text-primary">
-						{renderFuzzyHighlightedText(primaryText, primaryMatchCharacterPositions, HIGHLIGHTED_TEXT_STYLE)}
+						{primaryText.length > 0 ? (
+							renderFuzzyHighlightedText(primaryText, primaryMatchCharacterPositions, HIGHLIGHTED_TEXT_STYLE)
+						) : (
+							<span className="text-text-tertiary">{MISSING_PRIMARY_TEXT_PLACEHOLDER}</span>
+						)}
 					</span>
 					<span className="inline-flex shrink-0 items-center gap-1.5">
+						{shouldRenderTaskIdBadge ? (
+							<span
+								className="inline-flex h-4 items-center rounded-sm border bg-surface-2 px-1.5 font-mono text-[10px] font-medium"
+								style={TASK_ID_BADGE_STYLE}
+							>
+								{document.taskId}
+							</span>
+						) : null}
 						{isCrossProject ? (
 							<span className="inline-flex h-4 max-w-[140px] items-center truncate rounded-sm border border-border bg-surface-2 px-1.5 text-[10px] font-medium text-text-secondary">
 								{document.projectName}

@@ -209,6 +209,85 @@ describe("useTaskSpotlightSearchController", () => {
 		expect(get().results.some((result) => result.document.taskId === "task-remote")).toBe(true);
 	});
 
+	function createTaskIdShapedBoard(): BoardData {
+		return {
+			columns: [
+				// title / prompt 都不含 "a3f21"：这条只能靠 task id 通道被捞出来。
+				{ id: "backlog", title: "Backlog", cards: [card("a3f21", "Alpha rollout", "prepare deployment")] },
+				{ id: "in_progress", title: "In Progress", cards: [card("94c87", "Beta cleanup", "refine rendering")] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "validation", title: "Validation", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		};
+	}
+
+	function createOtherProjectTaskIdShapedBoard(): BoardData {
+		return {
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [card("a3f21", "Remote same id", "other repo")] },
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "validation", title: "Validation", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		};
+	}
+
+	it("puts the current project first when two projects share the matched task id", () => {
+		// 这条契约的真正来源是 controller 的 documents 拼接顺序（当前项目在前），纯函数测试证明不了。
+		crossProjectIndexMock.documents = buildTaskBoardSearchDocuments(createOtherProjectTaskIdShapedBoard(), {
+			projectId: "proj-b",
+			projectName: "Project B",
+		});
+		const { get } = renderController(baseProps({ board: createTaskIdShapedBoard() }));
+		act(() => get().open());
+		act(() => get().setIncludeOtherProjects(true));
+		act(() => get().setQuery("a3f21"));
+
+		expect(get().results.map((result) => result.document.projectId)).toEqual(["proj-a", "proj-b"]);
+	});
+
+	it("still applies the stage filter to a task-id match and reports how many it hid", () => {
+		const { get } = renderController(baseProps({ board: createTaskIdShapedBoard() }));
+		act(() => get().open());
+		act(() => get().setQuery("a3f21"));
+		expect(get().results.map((result) => result.document.taskId)).toEqual(["a3f21"]);
+		expect(get().taskIdMatchedResultCountHiddenByStageSelection).toBe(0);
+
+		// stage chips 是用户显式设定的 scope，ID 命中不豁免——但要能说出「被挡住了」而非「不存在」。
+		act(() => get().toggleStage("backlog"));
+
+		expect(get().results).toHaveLength(0);
+		expect(get().taskIdMatchedResultCountHiddenByStageSelection).toBe(1);
+	});
+
+	it("selects the task-id match by default and still allows moving off it", () => {
+		const onOpenTaskInProject = vi.fn();
+		const { get } = renderController(baseProps({ board: createTaskIdShapedBoard(), onOpenTaskInProject }));
+		act(() => get().open());
+		act(() => get().setQuery("a3f21"));
+		expect(get().activeIndex).toBe(0);
+
+		act(() => get().openActiveResult());
+		expect(onOpenTaskInProject).toHaveBeenCalledWith("proj-a", "a3f21");
+	});
+
+	it("keeps arrow navigation working past a hoisted task-id match", () => {
+		// 引用抖动会让 useEffect([results]) 每次 render 都把 activeIndex 钉回 0，这条用来抓住那种回归。
+		const board = createTaskIdShapedBoard();
+		board.columns[1]?.cards.push(card("c1234", "Alpha follow-up", "mentions a3f21 in the prompt"));
+		const { get } = renderController(baseProps({ board }));
+		act(() => get().open());
+		act(() => get().setQuery("a3f21"));
+		expect(get().results.map((result) => result.document.taskId)).toEqual(["a3f21", "c1234"]);
+
+		act(() => get().moveActive(1));
+		expect(get().activeIndex).toBe(1);
+	});
+
 	it("closes automatically when the current project changes", () => {
 		const { get, rerender } = renderController(baseProps());
 		act(() => get().open());

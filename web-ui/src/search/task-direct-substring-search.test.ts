@@ -133,3 +133,56 @@ describe("findDirectSubstringTaskBoardSearchResults", () => {
 		expect(results[2]?.matchSources).toEqual(["prompt"]);
 	});
 });
+
+describe("direct substring search stays free of task id matching", () => {
+	function createDocumentsWithIdShapedTaskIds() {
+		const board: BoardData = {
+			columns: [
+				{
+					id: "backlog",
+					title: "Backlog",
+					cards: [
+						{
+							id: "a3f21",
+							title: "Alpha rollout",
+							prompt: "Prepare deployment",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+						{
+							id: "add12",
+							title: "Beta cleanup",
+							prompt: "Refine rendering",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+					],
+				},
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "validation", title: "Validation", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		};
+		return buildTaskBoardSearchDocuments(board, PROJECT_CONTEXT);
+	}
+
+	it("does not match a task whose id equals the query when no text contains it", () => {
+		// task id 检索是 use-task-board-search 里叠在排序之后的独立通道，direct 层本身不认 id。
+		const documents = createDocumentsWithIdShapedTaskIds();
+
+		expect(findDirectSubstringTaskBoardSearchResults(documents, "a3f21")).toEqual([]);
+	});
+
+	it("does not let a task id prefix leak into AND token matching", () => {
+		// 搜文本 "add" 不该因为某任务 id 恰是 "add12" 而误命中。
+		const documents = createDocumentsWithIdShapedTaskIds();
+
+		expect(findDirectSubstringTaskBoardSearchResults(documents, "add")).toEqual([]);
+	});
+});

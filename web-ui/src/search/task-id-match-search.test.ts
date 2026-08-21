@@ -1,0 +1,176 @@
+import { describe, expect, it } from "vitest";
+
+import {
+	buildTaskBoardSearchDocument,
+	type TaskBoardSearchDocument,
+	type TaskBoardSearchResult,
+} from "@/search/task-board-search";
+import {
+	findTaskIdExactMatchedSearchResults,
+	hoistTaskIdExactMatchedResultsToTop,
+} from "@/search/task-id-match-search";
+
+function createDocument(overrides: {
+	taskId: string;
+	projectId?: string;
+	title?: string;
+	prompt?: string;
+}): TaskBoardSearchDocument {
+	return buildTaskBoardSearchDocument({
+		projectId: overrides.projectId ?? "proj-a",
+		projectName: overrides.projectId === "proj-b" ? "Project B" : "Project A",
+		taskId: overrides.taskId,
+		columnId: "backlog",
+		title: overrides.title ?? "",
+		prompt: overrides.prompt ?? "",
+	});
+}
+
+function createTextResult(
+	document: TaskBoardSearchDocument,
+	overrides: Partial<TaskBoardSearchResult> = {},
+): TaskBoardSearchResult {
+	return {
+		document,
+		score: 1,
+		matchSources: ["title"],
+		titleMatchCharacterPositions: new Set<number>(),
+		promptMatchCharacterPositions: new Set<number>(),
+		...overrides,
+	};
+}
+
+describe("findTaskIdExactMatchedSearchResults", () => {
+	const documents = [
+		createDocument({ taskId: "a3f21", title: "Alpha rollout" }),
+		createDocument({ taskId: "94c87", title: "Search bar work" }),
+	];
+
+	it("returns nothing for an empty query", () => {
+		expect(findTaskIdExactMatchedSearchResults(documents, "")).toEqual([]);
+		expect(findTaskIdExactMatchedSearchResults(documents, "   ")).toEqual([]);
+	});
+
+	it("returns nothing when the query is not a complete task id shape", () => {
+		// 4 位、6 位、含连字符、含大写以外的非法字符——闸门一律拦下，普通文本搜索行为不受影响。
+		expect(findTaskIdExactMatchedSearchResults(documents, "a3f")).toEqual([]);
+		expect(findTaskIdExactMatchedSearchResults(documents, "a3f2")).toEqual([]);
+		expect(findTaskIdExactMatchedSearchResults(documents, "a3f210")).toEqual([]);
+		expect(findTaskIdExactMatchedSearchResults(documents, "a3f-1")).toEqual([]);
+	});
+
+	it("returns nothing for a multi-token query even when one token is a task id", () => {
+		// 「同时按 id 和文本过滤」是明确的非目标：归一化只压空白，范式正则不含空格。
+		expect(findTaskIdExactMatchedSearchResults(documents, "a3f21 fix")).toEqual([]);
+	});
+
+	it("returns nothing when a shape-valid query matches no task id", () => {
+		// "fixed" 是个正好 5 位的普通英文词，会过范式闸门，但没有任何 taskId 与之相等。
+		expect(findTaskIdExactMatchedSearchResults(documents, "fixed")).toEqual([]);
+	});
+
+	it("matches a complete task id with no character positions", () => {
+		const results = findTaskIdExactMatchedSearchResults(documents, "a3f21");
+
+		expect(results).toHaveLength(1);
+		expect(results[0]?.document).toBe(documents[0]);
+		expect(results[0]?.matchSources).toEqual(["taskId"]);
+		expect(results[0]?.titleMatchCharacterPositions.size).toBe(0);
+		expect(results[0]?.promptMatchCharacterPositions.size).toBe(0);
+	});
+
+	it("matches an uppercase pasted id against the lowercase generated id", () => {
+		const results = findTaskIdExactMatchedSearchResults(documents, "A3F21");
+
+		expect(results.map((result) => result.document.taskId)).toEqual(["a3f21"]);
+	});
+
+	it("returns both documents when two projects share a task id, preserving input order", () => {
+		const collidingDocuments = [
+			createDocument({ taskId: "a3f21", projectId: "proj-a" }),
+			createDocument({ taskId: "a3f21", projectId: "proj-b" }),
+		];
+
+		const results = findTaskIdExactMatchedSearchResults(collidingDocuments, "a3f21");
+
+		expect(results.map((result) => result.document.projectId)).toEqual(["proj-a", "proj-b"]);
+	});
+});
+
+describe("hoistTaskIdExactMatchedResultsToTop", () => {
+	it("returns the very same array reference when nothing matches by id", () => {
+		// 引用稳定性是硬约束：orderedResults 换引用会让 controller 的 useEffect([results]) 把 activeIndex 钉回 0。
+		const documents = [createDocument({ taskId: "a3f21", title: "Alpha" })];
+		const baseOrderedResults = [createTextResult(documents[0] as TaskBoardSearchDocument)];
+
+		expect(hoistTaskIdExactMatchedResultsToTop(baseOrderedResults, documents, "alpha")).toBe(baseOrderedResults);
+		expect(hoistTaskIdExactMatchedResultsToTop(baseOrderedResults, documents, "")).toBe(baseOrderedResults);
+	});
+
+	it("adds a matched document that the base results never contained", () => {
+		const idOnlyDocument = createDocument({ taskId: "a3f21", title: "Nothing textual here" });
+		const textDocument = createDocument({ taskId: "94c87", title: "Alpha rollout" });
+		const documents = [idOnlyDocument, textDocument];
+		const baseOrderedResults = [createTextResult(textDocument)];
+
+		const hoisted = hoistTaskIdExactMatchedResultsToTop(baseOrderedResults, documents, "a3f21");
+
+		expect(hoisted).toHaveLength(2);
+		expect(hoisted[0]?.document).toBe(idOnlyDocument);
+		expect(hoisted[0]?.matchSources).toEqual(["taskId"]);
+		expect(hoisted[1]).toBe(baseOrderedResults[0]);
+	});
+
+	it("merges instead of replacing when the matched document is already in the base results", () => {
+		// prompt 里互相引用 task id 很常见（「接着 a3f21 的改动继续…」），提上去之后原有高亮不能消失。
+		const matchedDocument = createDocument({ taskId: "a3f21", title: "Alpha rollout", prompt: "follows a3f21" });
+		const otherDocument = createDocument({ taskId: "94c87", title: "Other" });
+		const documents = [otherDocument, matchedDocument];
+		const baseOrderedResults = [
+			createTextResult(otherDocument),
+			createTextResult(matchedDocument, {
+				score: 9,
+				matchSources: ["title", "prompt"],
+				titleMatchCharacterPositions: new Set([0, 1]),
+				promptMatchCharacterPositions: new Set([8]),
+			}),
+		];
+
+		const hoisted = hoistTaskIdExactMatchedResultsToTop(baseOrderedResults, documents, "a3f21");
+
+		expect(hoisted).toHaveLength(2);
+		expect(hoisted[0]?.document).toBe(matchedDocument);
+		expect(hoisted[0]?.matchSources).toEqual(["taskId", "title", "prompt"]);
+		expect(hoisted[0]?.score).toBe(9);
+		expect([...(hoisted[0]?.titleMatchCharacterPositions ?? [])]).toEqual([0, 1]);
+		expect([...(hoisted[0]?.promptMatchCharacterPositions ?? [])]).toEqual([8]);
+		expect(hoisted[1]?.document).toBe(otherDocument);
+	});
+
+	it("keeps every matched document exactly once", () => {
+		const matchedDocument = createDocument({ taskId: "a3f21", title: "Alpha" });
+		const documents = [matchedDocument];
+		const baseOrderedResults = [createTextResult(matchedDocument)];
+
+		const hoisted = hoistTaskIdExactMatchedResultsToTop(baseOrderedResults, documents, "a3f21");
+
+		expect(hoisted).toHaveLength(1);
+		expect(hoisted.filter((result) => result.document === matchedDocument)).toHaveLength(1);
+	});
+
+	it("hoists both cross-project collisions with the current project first", () => {
+		const currentProjectDocument = createDocument({ taskId: "a3f21", projectId: "proj-a" });
+		const otherProjectDocument = createDocument({ taskId: "a3f21", projectId: "proj-b" });
+		const unrelatedDocument = createDocument({ taskId: "94c87", title: "Unrelated" });
+		// controller 把当前项目文档拼在前面，hoist 保持入参顺序，因此当前项目那条天然在前。
+		const documents = [currentProjectDocument, unrelatedDocument, otherProjectDocument];
+		const baseOrderedResults = [createTextResult(unrelatedDocument)];
+
+		const hoisted = hoistTaskIdExactMatchedResultsToTop(baseOrderedResults, documents, "a3f21");
+
+		expect(hoisted.map((result) => result.document.projectId)).toEqual(["proj-a", "proj-b", "proj-a"]);
+		expect(hoisted[0]?.document).toBe(currentProjectDocument);
+		expect(hoisted[1]?.document).toBe(otherProjectDocument);
+		expect(hoisted[2]?.document).toBe(unrelatedDocument);
+	});
+});

@@ -13,6 +13,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { TaskSpotlightSearchController } from "@/hooks/use-task-spotlight-search-controller";
 import type { TaskBoardSearchMode } from "@/search/task-board-search";
+import type { TaskBoardSemanticSearchStatus } from "@/search/use-task-board-search";
 
 const SEARCH_MODE_OPTIONS: ReadonlyArray<{ mode: TaskBoardSearchMode; label: string }> = [
 	{ mode: "direct", label: "Direct" },
@@ -20,6 +21,26 @@ const SEARCH_MODE_OPTIONS: ReadonlyArray<{ mode: TaskBoardSearchMode; label: str
 	{ mode: "semantic", label: "Semantic" },
 	{ mode: "hybrid", label: "Hybrid" },
 ];
+
+/**
+ * 空结果时的说明文案。ID 全等命中却被 stage 勾选挡掉时必须点破原因——否则用户拷了个完整 task id
+ * 却看到 "No matching tasks"，会以为任务根本不存在（stage 过滤刻意不为 ID 命中豁免）。
+ */
+function resolveEmptyResultsMessage({
+	semanticSearchStatus,
+	taskIdMatchedResultCountHiddenByStageSelection,
+}: {
+	semanticSearchStatus: TaskBoardSemanticSearchStatus;
+	taskIdMatchedResultCountHiddenByStageSelection: number;
+}): string {
+	if (taskIdMatchedResultCountHiddenByStageSelection > 0) {
+		return "Task ID matched, but its stage is filtered out";
+	}
+	if (semanticSearchStatus === "loading") {
+		return "Searching…";
+	}
+	return "No matching tasks";
+}
 
 export function TaskSpotlightSearchDialog({
 	controller,
@@ -44,6 +65,7 @@ export function TaskSpotlightSearchDialog({
 		isSearchActive,
 		semanticSearchStatus,
 		results,
+		taskIdMatchedResultCountHiddenByStageSelection,
 		activeIndex,
 		setActiveIndex,
 		moveActive,
@@ -242,11 +264,14 @@ export function TaskSpotlightSearchDialog({
 					<div className="min-h-0 flex-1 overscroll-contain">
 						{!isSearchActive ? (
 							<div className="flex h-full min-h-[120px] items-center justify-center px-4 py-8 text-center text-xs text-text-tertiary">
-								Type to search tasks by name or prompt
+								Type to search tasks by name, prompt, or task ID
 							</div>
 						) : results.length === 0 ? (
 							<div className="flex h-full min-h-[120px] items-center justify-center px-4 py-8 text-center text-xs text-text-tertiary">
-								{semanticSearchStatus === "loading" ? "Searching…" : "No matching tasks"}
+								{resolveEmptyResultsMessage({
+									semanticSearchStatus,
+									taskIdMatchedResultCountHiddenByStageSelection,
+								})}
 							</div>
 						) : (
 							<Virtuoso

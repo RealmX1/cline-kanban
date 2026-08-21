@@ -3,7 +3,12 @@ import { Fzf, type FzfResultItem } from "fzf";
 import type { BoardData } from "@/types";
 
 export type TaskBoardSearchMode = "direct" | "hybrid" | "fuzzy" | "semantic";
-export type TaskBoardSearchMatchSource = "title" | "prompt";
+// taskId 是一条独立于文本的命中来源：仅当查询串整体就是一个完整 task id 时才产生（见 task-id-match-search.ts），
+// 不参与 direct 的分词、不进 fuzzy 的合并主体、不进语义索引。
+export type TaskBoardSearchMatchSource = "taskId" | "title" | "prompt";
+
+/** 全体 producer 共用的空命中位置集：语义清晰且免重复分配。 */
+export const EMPTY_MATCH_CHARACTER_POSITIONS: ReadonlySet<number> = new Set<number>();
 
 /** 文档所属项目的身份信息：taskId 仅在单 board 内唯一（5 hex），跨项目合并/跳转必须携带 project 身份。 */
 export interface TaskBoardSearchProjectContext {
@@ -57,6 +62,11 @@ function getTaskSearchSubjectText(title: string, prompt: string): string {
 
 export function orderMatchSources(sources: ReadonlySet<TaskBoardSearchMatchSource>): TaskBoardSearchMatchSource[] {
 	const orderedSources: TaskBoardSearchMatchSource[] = [];
+	// taskId 排最前：它是最强信号（全等命中即唯一确定一个任务）。
+	// 这个分支不可省——mergeTaskBoardSearchResults 的合并分支会过本函数，漏了会把 "taskId" 静默丢弃。
+	if (sources.has("taskId")) {
+		orderedSources.push("taskId");
+	}
 	if (sources.has("title")) {
 		orderedSources.push("title");
 	}

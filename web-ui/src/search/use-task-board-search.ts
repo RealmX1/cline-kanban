@@ -13,6 +13,7 @@ import {
 	type TaskBoardSemanticSearchIndex,
 } from "@/search/task-board-semantic-search";
 import { findDirectSubstringTaskBoardSearchResults } from "@/search/task-direct-substring-search";
+import { hoistTaskIdExactMatchedResultsToTop } from "@/search/task-id-match-search";
 import { useDebouncedEffect } from "@/utils/react-use";
 
 export type TaskBoardSemanticSearchStatus = "idle" | "loading" | "ready" | "error";
@@ -136,24 +137,32 @@ export function useTaskBoardSearch({
 		if (!isSearchActive) {
 			return [] satisfies TaskBoardSearchResult[];
 		}
-		if (mode === "direct") {
-			// direct 已按 D2 位置规则排好序，不再按 score 重排。
-			return directResults;
+		function resolveBaseOrderedResultsForCurrentMode(): TaskBoardSearchResult[] {
+			if (mode === "direct") {
+				// direct 已按 D2 位置规则排好序，不再按 score 重排。
+				return directResults;
+			}
+			if (mode === "fuzzy") {
+				// fzf.find 已按分数降序返回。
+				return fuzzyResults;
+			}
+			if (mode === "semantic") {
+				const results =
+					semanticResults ??
+					(semanticSearchStatus === "error" ? findFuzzyTaskBoardSearchResults(documents, normalizedQuery) : []);
+				return sortResultsByScoreDescending(results);
+			}
+			if (semanticSearchStatus === "error") {
+				return fuzzyResults;
+			}
+			return sortResultsByScoreDescending(mergeTaskBoardSearchResults(fuzzyResults, semanticResults ?? []));
 		}
-		if (mode === "fuzzy") {
-			// fzf.find 已按分数降序返回。
-			return fuzzyResults;
-		}
-		if (mode === "semantic") {
-			const results =
-				semanticResults ??
-				(semanticSearchStatus === "error" ? findFuzzyTaskBoardSearchResults(documents, normalizedQuery) : []);
-			return sortResultsByScoreDescending(results);
-		}
-		if (semanticSearchStatus === "error") {
-			return fuzzyResults;
-		}
-		return sortResultsByScoreDescending(mergeTaskBoardSearchResults(fuzzyResults, semanticResults ?? []));
+		// task id 置顶层跨全部四种模式统一叠加：用户从地址栏 ?task= 或 worktree 路径拷来一个 id 时，
+		// 不该被迫先切模式。它只做「提到最前 + 补进结果集」，不改动任何模式自身的排序规则；
+		// query 不是完整 id 范式时原样返回入参引用，既有行为零变化。
+		// 刻意叠在 mode 分发**之外**：hybrid / semantic 的语义结果落地前后，被顶到第 0 位的都是同一个
+		// document，顶行因此永远不动（不会因 semantic 落地而闪烁重排）。
+		return hoistTaskIdExactMatchedResultsToTop(resolveBaseOrderedResultsForCurrentMode(), documents, normalizedQuery);
 	}, [
 		directResults,
 		documents,

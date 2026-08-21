@@ -154,6 +154,117 @@ describe("useTaskBoardSearch", () => {
 		};
 	}
 
+	function createTaskIdShapedBoard(): BoardData {
+		return {
+			columns: [
+				{
+					id: "backlog",
+					title: "Backlog",
+					cards: [
+						{
+							id: "a3f21",
+							// title / prompt 都不含 "a3f21"：这条只能靠 task id 通道被捞出来。
+							title: "Alpha rollout",
+							prompt: "Prepare API deployment",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+						{
+							id: "94c87",
+							title: "Follows a3f21 closely",
+							prompt: "Continue the work",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+						{
+							id: "b7d33",
+							title: "Beta cleanup",
+							prompt: "Mentions a3f21 in the prompt body",
+							startInPlanMode: false,
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+					],
+				},
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "validation", title: "Validation", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		};
+	}
+
+	function createTaskIdShapedDocuments(): TaskBoardSearchDocument[] {
+		return buildTaskBoardSearchDocuments(createTaskIdShapedBoard(), PROJECT_CONTEXT);
+	}
+
+	it("hoists the task-id match to the top in direct mode without disturbing the text order below it", async () => {
+		const documents = createTaskIdShapedDocuments();
+		const { getState } = await renderHook({ documents, query: "a3f21", mode: "direct" });
+
+		// 第 0 位是 id 全等命中；其后仍是 direct 自己的排序（title 命中 > 仅 prompt 命中）。
+		expect(getState().orderedResults.map((result) => result.document.taskId)).toEqual(["a3f21", "94c87", "b7d33"]);
+		expect(getState().orderedResults[0]?.matchSources).toEqual(["taskId"]);
+		expect(semanticSearchMocks.createTaskBoardSemanticSearchIndex).not.toHaveBeenCalled();
+	});
+
+	it("hoists the task-id match in fuzzy mode too (the layer is mode-agnostic)", async () => {
+		const documents = createTaskIdShapedDocuments();
+		const { getState } = await renderHook({ documents, query: "a3f21", mode: "fuzzy" });
+
+		expect(getState().orderedResults[0]?.document.taskId).toBe("a3f21");
+		expect(getState().orderedResults[0]?.matchSources).toContain("taskId");
+	});
+
+	it("keeps the task-id match pinned across the semantic result landing", async () => {
+		vi.useFakeTimers();
+		const documents = createTaskIdShapedDocuments();
+		const semanticTargetDocument = findDocument(documents, "94c87");
+		semanticSearchMocks.createTaskBoardSemanticSearchIndex.mockResolvedValue({
+			findResults: vi.fn(async () => [createSemanticResult(semanticTargetDocument)]),
+		});
+
+		const { getState } = await renderHook({ documents, query: "a3f21", mode: "hybrid" });
+
+		// 语义结果还没到货时，id 命中行已经零延迟可见（"Searching…" 空态让位于它，这是刻意的改进）。
+		expect(getState().semanticSearchStatus).toBe("loading");
+		expect(getState().orderedResults[0]?.document.taskId).toBe("a3f21");
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+			await Promise.resolve();
+		});
+
+		// 语义结果落地后顶行仍是同一个 document，不会闪烁重排。
+		expect(getState().semanticSearchStatus).toBe("ready");
+		expect(getState().orderedResults[0]?.document.taskId).toBe("a3f21");
+	});
+
+	it("keeps the ordered results reference stable when no task id matches", async () => {
+		// 引用稳定性：换引用会让 controller 的 useEffect([results]) 把 activeIndex 钉回 0，↑↓ 导航就废了。
+		const documents = createTaskIdShapedDocuments();
+		const { getState, rerender } = await renderHook({ documents, query: "alpha", mode: "direct" });
+		const firstOrderedResults = getState().orderedResults;
+
+		await rerender({ documents, query: "alpha", mode: "direct" });
+
+		expect(getState().orderedResults).toBe(firstOrderedResults);
+	});
+
+	it("returns no results for an empty query even though the id gate is in the path", async () => {
+		const documents = createTaskIdShapedDocuments();
+		const { getState } = await renderHook({ documents, query: "   ", mode: "direct" });
+
+		expect(getState().isSearchActive).toBe(false);
+		expect(getState().orderedResults).toEqual([]);
+	});
+
 	it("runs direct substring search synchronously without touching the semantic index", async () => {
 		const documents = createDocuments();
 		const { getState } = await renderHook({ documents, query: "alpha", mode: "direct" });

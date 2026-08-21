@@ -38,6 +38,7 @@ function createControllerStub(overrides: Partial<TaskSpotlightSearchController> 
 		isSearchActive: false,
 		semanticSearchStatus: "idle",
 		results: [],
+		taskIdMatchedResultCountHiddenByStageSelection: 0,
 		activeIndex: 0,
 		setActiveIndex: () => {},
 		moveActive: () => {},
@@ -137,6 +138,30 @@ describe("TaskSpotlightSearchDialog viewport adaptation", () => {
 		const allProjectsLabel = document.body.querySelector('label[for="task-spotlight-include-other-projects"]');
 		expect(allProjectsLabel?.className).toContain("min-h-[44px]");
 		expect(allProjectsLabel?.className).toContain("min-w-[44px]");
+	});
+
+	it("explains that a task id matched but its stage is filtered out", async () => {
+		// 否则用户拷了个完整 task id 却看到 "No matching tasks"，会以为任务根本不存在。
+		await renderDialog({
+			isSearchActive: true,
+			query: "a3f21",
+			results: [],
+			taskIdMatchedResultCountHiddenByStageSelection: 1,
+		});
+
+		expect(queryDialogContent()?.textContent).toContain("Task ID matched, but its stage is filtered out");
+	});
+
+	it("falls back to the generic empty state when nothing matched at all", async () => {
+		await renderDialog({ isSearchActive: true, query: "nothing", results: [] });
+
+		expect(queryDialogContent()?.textContent).toContain("No matching tasks");
+	});
+
+	it("mentions task ID in the idle hint so the capability is discoverable", async () => {
+		await renderDialog();
+
+		expect(queryDialogContent()?.textContent).toContain("Type to search tasks by name, prompt, or task ID");
 	});
 
 	it("keeps the All projects toggle right-aligned via ml-auto on desktop", async () => {

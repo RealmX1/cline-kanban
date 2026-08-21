@@ -1,16 +1,21 @@
 import {
+	EMPTY_MATCH_CHARACTER_POSITIONS,
 	orderMatchSources,
 	type TaskBoardSearchDocument,
 	type TaskBoardSearchMatchSource,
 	type TaskBoardSearchMode,
 	type TaskBoardSearchResult,
 } from "@/search/task-board-search";
+
+/** 进得了向量索引的命中来源：taskId 是 5 位随机串，嵌入毫无语义，在类型层面就排除掉。 */
+type TaskBoardSemanticSearchField = Exclude<TaskBoardSearchMatchSource, "taskId">;
+
 import { create, embeddingsType, insertMultiple, pluginEmbeddings, search } from "@/search/task-board-semantic-vendor";
 
 interface TaskBoardSemanticSearchRecord {
 	// 以 documents 数组下标为记录键：taskId 跨项目会碰撞，用下标可零歧义映射回 document 引用。
 	documentIndex: number;
-	searchField: TaskBoardSearchMatchSource;
+	searchField: TaskBoardSemanticSearchField;
 	text: string;
 }
 
@@ -22,8 +27,6 @@ export interface TaskBoardSemanticSearchIndex {
 }
 
 const SEMANTIC_SEARCH_MINIMUM_SIMILARITY = 0.42;
-// semantic 结果无字符级命中位置，只标 matchSources、不高亮。
-const NO_MATCH_POSITIONS: ReadonlySet<number> = new Set<number>();
 
 function buildSemanticSearchRecords(documents: readonly TaskBoardSearchDocument[]): TaskBoardSemanticSearchRecord[] {
 	const records: TaskBoardSemanticSearchRecord[] = [];
@@ -46,7 +49,7 @@ function buildSemanticSearchRecords(documents: readonly TaskBoardSearchDocument[
 	return records;
 }
 
-function normalizeSearchFieldSource(value: string | number): TaskBoardSearchMatchSource | null {
+function normalizeSearchFieldSource(value: string | number): TaskBoardSemanticSearchField | null {
 	if (value === "title" || value === "prompt") {
 		return value;
 	}
@@ -135,8 +138,9 @@ export async function createTaskBoardSemanticSearchIndex(
 						document,
 						score: result.score,
 						matchSources: orderMatchSources(result.sources),
-						titleMatchCharacterPositions: NO_MATCH_POSITIONS,
-						promptMatchCharacterPositions: NO_MATCH_POSITIONS,
+						// semantic 结果无字符级命中位置，只标 matchSources、不高亮。
+						titleMatchCharacterPositions: EMPTY_MATCH_CHARACTER_POSITIONS,
+						promptMatchCharacterPositions: EMPTY_MATCH_CHARACTER_POSITIONS,
 					},
 				];
 			});

@@ -4,6 +4,8 @@ import {
 	buildTaskBoardSearchDocuments,
 	findFuzzyTaskBoardSearchResults,
 	mergeTaskBoardSearchResults,
+	orderMatchSources,
+	type TaskBoardSearchMatchSource,
 	type TaskBoardSearchProjectContext,
 	type TaskBoardSearchResult,
 } from "@/search/task-board-search";
@@ -167,5 +169,35 @@ describe("task board search", () => {
 
 		expect(merged).toHaveLength(2);
 		expect(merged.map((result) => result.document.projectId).sort()).toEqual(["proj-a", "proj-b"]);
+	});
+});
+
+describe("taskId match source", () => {
+	it("orders taskId ahead of title and prompt", () => {
+		const sources = new Set<TaskBoardSearchMatchSource>(["prompt", "title", "taskId"]);
+
+		expect(orderMatchSources(sources)).toEqual(["taskId", "title", "prompt"]);
+	});
+
+	it("keeps the taskId source when merging a task-id hit with a text hit", () => {
+		// merge 的合并分支会过 orderMatchSources，漏了 taskId 分支就会在这里静默丢来源。
+		const documents = buildTaskBoardSearchDocuments(createBoard(), PROJECT_CONTEXT);
+		const targetDocument = documents[0];
+		if (!targetDocument) {
+			throw new Error("expected document");
+		}
+
+		const merged = mergeTaskBoardSearchResults(
+			[createManualResult(targetDocument, { matchSources: ["taskId"] })],
+			[
+				createManualResult(targetDocument, {
+					matchSources: ["title"],
+					titleMatchCharacterPositions: new Set([0]),
+				}),
+			],
+		);
+
+		expect(merged).toHaveLength(1);
+		expect(merged[0]?.matchSources).toEqual(["taskId", "title"]);
 	});
 });
