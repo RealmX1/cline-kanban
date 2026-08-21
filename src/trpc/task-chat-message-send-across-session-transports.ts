@@ -199,7 +199,10 @@ export async function sendTaskChatMessageAcrossSessionTransports(
 									initiatedBy: "programmatic_delivery_contention_preemption",
 								},
 							);
-							return stash.outcome === "stashed_into_prompt_library";
+							// 同 answerPendingUserDecision 那条抢占路径：outcome 原样回传，判「成没成」由 manager 做
+							// （只有 stashed_into_prompt_library 算成功）。折成布尔会同时弄丢「瞬态失败值得再等一拍」
+							// 与「确定性失败再等也是同一句话」的区分，以及日志里的真实判据。
+							return stash.outcome;
 						},
 						// 账本登记与进程内回执**并联**，不是二选一：账本是跨进程契约（CLI 早已退出，runtime 是唯一
 						// 能把 pending 补成终态的地方），进程内 observer 则是排队投递 dispatcher 结算队列条目的唯一

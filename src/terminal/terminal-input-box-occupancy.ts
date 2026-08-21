@@ -73,6 +73,33 @@ const MAX_OPEN_PASTE_PAYLOAD_CHARACTER_COUNT = MAX_RETAINED_PASTE_LEDGER_TOTAL_C
 // 尾部「疑似不完整转义序列」最多留多长的回车带。超过即认定它不是一条能补全的序列（键盘不会发出
 // 这么长的序列），消费掉那个 ESC 继续扫描，免得一个孤立 ESC 把解析器永久卡住。
 const MAX_INCOMPLETE_ESCAPE_SEQUENCE_CARRY_LENGTH = 64;
+// 一段未闭合粘贴（起始标记已到、结束标记始终没来）最多能挂多久；到点强制封账。
+//
+// 为什么必须有这条上界：未闭合期间**所有**后续字节都被 appendToOpenBracketedPastePayload 当成粘贴
+// 载荷吞掉，包括提交用的 CR——它在那里只被计成一次换行，永远走不到
+// recordTerminalInputBytesIntoOccupancyTracker 里那句 resetTerminalInputBoxOccupancyTrackerComposition。
+// 也就是说结束标记一旦丢失（TUI 中途关掉 bracketed paste 模式、传输被截断、用户在粘贴途中
+// refresh 终端），`hasUncommittedInputFromInputSideByteTracking` 就在这条 PTY 的**余生**恒为 true：
+// 此后每一条程序化投递都判成人类争用，100% 挂到预算耗尽——2026-08-20 那次 RVF 决策点横幅静默消失
+// 就是这个形态。上界把「永久」换成「有界」。
+//
+// 为什么按**时长**而不是「跨了多少次 writeInput 调用」：一次粘贴是终端发出的**一阵**字节，被传输层
+// 切成几片纯属偶然——12 KB 的粘贴按 64 字节分片就是 192 次调用，用次数作界会把这种完全正常的大粘贴
+// 中途腰斩。而「这阵字节持续了多久」不受分片影响：真实粘贴（哪怕 1 MiB）在本地 WebSocket 上远在
+// 一秒内走完；挂到 10 秒还没见到结束标记的，只可能是标记丢了、后面那些字节其实是人在逐键敲。
+//
+// 封账走 closeOpenBracketedPaste 且带 payloadIsKnownIncomplete：条目照常入账、计量照常记，但**正文
+// 一律不留**并计入 unrecoverablePasteCount——结束标记既然没来，手上这半截就一定不完整，把它当完整正文
+// 入账正是硬规则 2 要防的那种静默丢字（回填侧会拿腰斩文本替换占位符）。
+// hasUncommittedInputFromInputSideByteTracking 仍为 true，只是恢复了后续 CR 的复位能力。
+const MAX_MILLISECONDS_AN_UNTERMINATED_BRACKETED_PASTE_MAY_STAY_OPEN = 10_000;
+// 输入侧闩与「读屏确证为空」对账时，要求连续多少拍读数一致才复位。争用重探节拍是 1.5s，
+// 故 3 拍 ≈ 4.5s：足以跨过 TUI 重绘、清框回显这类瞬态，又远短于让路预算。
+//
+// 导出是给争用侧当**下界**用的：那边「连续同一 outcome 就快速收尾」的阈值必须严格大于这个数，
+// 否则自愈窗口会被收尾抢先掐掉（见 session-manager.ts 的
+// MAX_CONSECUTIVE_IDENTICAL_PREEMPTION_DECLINES_BEFORE_SETTLING）。
+export const CONSECUTIVE_CONFIRMED_EMPTY_SCREEN_READINGS_REQUIRED_TO_RECONCILE_INPUT_SIDE_LATCH = 3;
 
 // 账本里的一条粘贴。
 export interface TerminalInputBoxPasteLedgerEntry {
@@ -118,6 +145,23 @@ export interface TerminalInputBoxOccupancyTrackerState {
 	openPastePayloadPreviousCharacterWasNewlineSeparator: boolean;
 	// 未闭合粘贴是否已因超上限停止留正文。
 	openPastePayloadExceededRetentionLimit: boolean;
+	// 当前这段未闭合粘贴的起始标记是什么时候到的（null = 此刻不在粘贴中）。挂过
+	// MAX_MILLISECONDS_AN_UNTERMINATED_BRACKETED_PASTE_MAY_STAY_OPEN 即强制封账。
+	openBracketedPasteStartedAtEpochMs: number | null;
+	// 本次组合里有没有出现过**非空白**内容（可打印非空白字符，或任何一段粘贴）。
+	//
+	// 为什么单独记这一位、而不是靠读屏区分：读屏**做不到**。terminal-input-box-reader 会先剥掉每行的
+	// 行尾空白（stripTrailingWhitespace），再丢掉尾部纯空白的逻辑行——于是「空框」与「框里只有几个
+	// 空格 / 几个 Shift+Enter 空行」在读屏侧读回来完全一样，都是空串。对账若只看读屏，就会把后者
+	// 当成前者复位掉闩，而后者恰恰是闩说**对**了的情形（框里确实有他未提交的组合），复位之后
+	// 程序化投递会把 paste 接在那段空白后面一并提交，等于替他发出了一条他没写完的消息。
+	//
+	// 有了这一位，对账的前提就精确成了「输入侧见过非空白内容、而屏上现在什么都没有」——那才是
+	// 真正的闩死（内容被退格删光了，复位事件却没能到达）。纯空白组合则一律不复位。
+	compositionHasEverContainedNonWhitespaceCharacterFromInputSideByteTracking: boolean;
+	// 连续有多少拍读屏**确证**了「框在屏上、且框是空的、且人不在场」，而输入侧闩仍咬定非空。
+	// 只由 reconcileInputSideOccupancyLatchAgainstConfirmedEmptyScreenReading 维护，见其注释。
+	consecutiveConfirmedEmptyScreenReadingsWhileInputSideLatchSaysNonEmpty: number;
 	// 已入账载荷的总字符数（只数真正留了正文的那些）。
 	retainedPasteLedgerTotalCharacterCount: number;
 	// 本次组合累计出现过的粘贴条数（含只留计量的），用于给序号。
@@ -142,6 +186,9 @@ export function createTerminalInputBoxOccupancyTrackerState(): TerminalInputBoxO
 		openPastePayloadPreviousCharacterWasCarriageReturn: false,
 		openPastePayloadPreviousCharacterWasNewlineSeparator: false,
 		openPastePayloadExceededRetentionLimit: false,
+		openBracketedPasteStartedAtEpochMs: null,
+		compositionHasEverContainedNonWhitespaceCharacterFromInputSideByteTracking: false,
+		consecutiveConfirmedEmptyScreenReadingsWhileInputSideLatchSaysNonEmpty: 0,
 		retainedPasteLedgerTotalCharacterCount: 0,
 		pasteCountWithinCurrentComposition: 0,
 		pendingUnparsedText: "",
@@ -166,6 +213,9 @@ export function resetTerminalInputBoxOccupancyTrackerComposition(state: Terminal
 	state.openPastePayloadPreviousCharacterWasCarriageReturn = false;
 	state.openPastePayloadPreviousCharacterWasNewlineSeparator = false;
 	state.openPastePayloadExceededRetentionLimit = false;
+	state.openBracketedPasteStartedAtEpochMs = null;
+	state.compositionHasEverContainedNonWhitespaceCharacterFromInputSideByteTracking = false;
+	state.consecutiveConfirmedEmptyScreenReadingsWhileInputSideLatchSaysNonEmpty = 0;
 	state.retainedPasteLedgerTotalCharacterCount = 0;
 	state.pasteCountWithinCurrentComposition = 0;
 	// pendingUnparsedText 与解码器**不**清：它们装的是「被 chunk 边界切断的半个字符 / 半条序列」，
@@ -277,12 +327,16 @@ function appendToOpenBracketedPastePayload(state: TerminalInputBoxOccupancyTrack
 	state.openPastePayloadText += segment;
 }
 
-function openBracketedPaste(state: TerminalInputBoxOccupancyTrackerState): void {
+function openBracketedPaste(state: TerminalInputBoxOccupancyTrackerState, nowEpochMs: number): void {
 	state.insideBracketedPaste = true;
+	state.openBracketedPasteStartedAtEpochMs = nowEpochMs;
 	// 起始标记一到就置位，不等结束标记（硬规则 1）。粘贴被切成多个 chunk 送达时，「起始标记与部分
 	// 正文已到、结束标记未到」是一个真实存在的中间窗口；若判空要等到 closeOpenBracketedPaste 才置位，
 	// 争用判据在这个窗口里会读到「框是空的」，程序化投递被放行、插进人类正在进行中的粘贴。
 	state.hasUncommittedInputFromInputSideByteTracking = true;
+	// 粘贴载荷对我们不透明，一律按「非空白内容」记：它要么在屏上直接可见，要么被折叠成同样可见的
+	// `[Pasted text #N +M lines]` 占位符，两种形态都不会让读屏读成空框。
+	state.compositionHasEverContainedNonWhitespaceCharacterFromInputSideByteTracking = true;
 	state.openPastePayloadText = "";
 	state.openPastePayloadCharacterCount = 0;
 	state.openPastePayloadNewlineSeparatorCount = 0;
@@ -291,7 +345,17 @@ function openBracketedPaste(state: TerminalInputBoxOccupancyTrackerState): void 
 	state.openPastePayloadExceededRetentionLimit = false;
 }
 
-function closeOpenBracketedPaste(state: TerminalInputBoxOccupancyTrackerState): void {
+// payloadIsKnownIncomplete = true：这段粘贴不是正常收到结束标记而结束的，而是被超时强制封账的
+// （见 MAX_MILLISECONDS_AN_UNTERMINATED_BRACKETED_PASTE_MAY_STAY_OPEN）。此时手上这半截正文**一定**
+// 不完整——结束标记没来，后面可能还有真正的载荷尾部（延迟到达的分片就是这个形态）。把它当作完整条目
+// 入账是硬规则 2 明令禁止的那种静默丢字：回填侧会拿一段被腰斩的文本去替换占位符，用户看不出少了什么。
+// 所以强制封账一律只留计量、丢正文，并计入 unrecoverablePasteCount，让回填侧知道「这里还原不了」。
+// 副作用是正确的：unrecoverablePasteCount > 0 会让争用抢占降级为挂起（无损暂存的前提不成立），
+// 机器不会拿一段还原不了的人类输入去换一次投递成功。
+function closeOpenBracketedPaste(
+	state: TerminalInputBoxOccupancyTrackerState,
+	options: { payloadIsKnownIncomplete: boolean } = { payloadIsKnownIncomplete: false },
+): void {
 	const payloadCharacterCount = state.openPastePayloadCharacterCount;
 	// 以换行结尾的载荷不额外算出一个空行：粘 3 行文本时用户与 TUI 都认为它是 3 行。
 	const lineCount =
@@ -301,6 +365,7 @@ function closeOpenBracketedPaste(state: TerminalInputBoxOccupancyTrackerState): 
 				1 -
 				(state.openPastePayloadPreviousCharacterWasNewlineSeparator ? 1 : 0);
 	const retainPayload =
+		!options.payloadIsKnownIncomplete &&
 		!state.openPastePayloadExceededRetentionLimit &&
 		state.pasteLedger.length < MAX_RETAINED_PASTE_LEDGER_ENTRY_COUNT &&
 		state.retainedPasteLedgerTotalCharacterCount + state.openPastePayloadText.length <=
@@ -332,14 +397,19 @@ function closeOpenBracketedPaste(state: TerminalInputBoxOccupancyTrackerState): 
 	state.openPastePayloadPreviousCharacterWasCarriageReturn = false;
 	state.openPastePayloadPreviousCharacterWasNewlineSeparator = false;
 	state.openPastePayloadExceededRetentionLimit = false;
+	state.openBracketedPasteStartedAtEpochMs = null;
 	// 粘贴本身就是往框里放内容，无论是否留得住正文。
 	state.hasUncommittedInputFromInputSideByteTracking = true;
+	state.compositionHasEverContainedNonWhitespaceCharacterFromInputSideByteTracking = true;
 }
 
 // 摄入一段流向 PTY 的人类输入字节。writeInput 每次调用一次；同一段粘贴被切成多个 chunk 送达也能拼回。
 export function recordTerminalInputBytesIntoOccupancyTracker(
 	state: TerminalInputBoxOccupancyTrackerState,
 	data: Buffer,
+	// 本次字节到达的时刻。由调用方传入而不是模块自己读时钟：本模块其余部分是纯状态机，
+	// 唯一用到时间的是未闭合粘贴的封账上界，把它留在参数上，判据就能在测试里被直接钉住。
+	nowEpochMs: number,
 ): void {
 	// 上一 chunk 结转过来的那截未解析尾巴总是以 ESC 开头（它就是「疑似被切断的转义序列 / 粘贴标记」），
 	// 且总是坐在拼接后文本的最前面。记下它的长度，就能认出「哪个 ESC 跨过了 chunk 边界」。
@@ -347,6 +417,17 @@ export function recordTerminalInputBytesIntoOccupancyTracker(
 	// 只要有字节流过这里，输入侧这只眼睛就是接在人身上的（本函数唯一的喂养者是 writeInput，
 	// 而程序化投递直写 session.write、永远到不了这里）。空 Buffer 也算：它同样只可能来自人类那一侧。
 	state.hasEverObservedHumanInputBytesFromWriteInput = true;
+	// 未闭合粘贴的强制封账，必须在本 chunk 被解析**之前**做：本 chunk 里可能正躺着一个提交用的 CR，
+	// 先封账它才走得到下面那句 resetTerminalInputBoxOccupancyTrackerComposition，而不是又被当成
+	// 粘贴载荷里的一次换行吞掉。见 MAX_MILLISECONDS_AN_UNTERMINATED_BRACKETED_PASTE_MAY_STAY_OPEN 的注释。
+	if (
+		state.insideBracketedPaste &&
+		state.openBracketedPasteStartedAtEpochMs !== null &&
+		nowEpochMs - state.openBracketedPasteStartedAtEpochMs >=
+			MAX_MILLISECONDS_AN_UNTERMINATED_BRACKETED_PASTE_MAY_STAY_OPEN
+	) {
+		closeOpenBracketedPaste(state, { payloadIsKnownIncomplete: true });
+	}
 	const text = state.pendingUnparsedText + state.utf8StreamDecoder.write(data);
 	let index = 0;
 	while (index < text.length) {
@@ -368,7 +449,7 @@ export function recordTerminalInputBytesIntoOccupancyTracker(
 		const character = text[index];
 		if (character === ESCAPE) {
 			if (text.startsWith(BRACKETED_PASTE_START_MARKER, index)) {
-				openBracketedPaste(state);
+				openBracketedPaste(state, nowEpochMs);
 				index += BRACKETED_PASTE_START_MARKER.length;
 				continue;
 			}
@@ -405,6 +486,11 @@ export function recordTerminalInputBytesIntoOccupancyTracker(
 		// 它们可能把框删空，但「删到空了没有」无法从字节流单独判定，只能保守留在「有内容」。
 		if (codeUnit >= 0x20 && codeUnit !== 0x7f) {
 			state.hasUncommittedInputFromInputSideByteTracking = true;
+			// 「非空白」这条判据必须与**读屏侧的归一化**同口径：reader 用 `\s+$` 剥行尾空白，
+			// 所以这里也用 `\s` 判空白。口径不同就会在两侧之间留下一条缝——对账正是在这条缝上出事的。
+			if (!/^\s$/u.test(character)) {
+				state.compositionHasEverContainedNonWhitespaceCharacterFromInputSideByteTracking = true;
+			}
 		}
 		index += 1;
 	}
@@ -441,6 +527,87 @@ export function resolveTerminalInputBoxOccupancy(args: {
 		screenReadingSaysNonEmpty,
 		unrecoverablePasteCount: args.trackerState.unrecoverablePasteCount,
 	};
+}
+
+// ── 输入侧闩与读屏的对账自愈 ────────────────────────────────────────────────────
+//
+// 解决的是一个**确定性死局**：`hasUncommittedInputFromInputSideByteTracking` 只被流过 writeInput 的
+// CR / Ctrl+C / Ctrl+S 复位（见 recordTerminalInputBytesIntoOccupancyTracker）。退格、DEL、Ctrl+U
+// 按设计不复位；未闭合的 bracketed paste 更是把 CR 整个吞掉。于是只要复位事件一次都没能到达，这个闩
+// 在这条 PTY 的**余生**恒为 true，而争用判据 resolveProgrammaticDeliveryInputBoxContention 见它即返回
+// human_uncommitted_input_present ⇒ 此后每一条程序化投递都被判成人类争用、100% 挂到预算耗尽。
+// 2026-08-20 那次 RVF 决策点横幅静默消失（连续 ~50 次抢占被拒、烧完 75s 预算）正是这个形态。
+// 重试不可能成功：闩不会因为再等 1.5 秒而变。
+//
+// **它没有推翻文件头硬规则 1。** 硬规则 1 防的是「读屏看不见的输入」——判据不确定时（未知转义序列、
+// 退格、Ctrl+U 杀行）保守留在「有内容」。本对账的前提恰恰相反：读屏这一帧**确实定位到了框**、
+// 框里**确实是空的**，而且连续多拍都是这个读数。此时坚持「有内容」已经不是保守，而是把这条会话
+// 永久变成不可投递——那比一次误判更坏。session-manager.ts 里为 codex / kimi / droid 放行读屏恒为 null
+// 的那一段（「把它们一并判成争用等于让每一条投递都以 human_terminal_contention_timeout 收场——
+// 比修复前更差」）用的是同一条理由。
+//
+// 三条前提缺一不可，任一不成立即把连拍计数清零重来：
+//   ① 读屏这一帧定位到了输入框。**没定位到 ≠ 框是空的**——TUI 正在重绘 / 框被全屏输出盖住 /
+//      该 agent 的输入框语法根本没建模，都会读不到框。拿「读不到」当「空」正是这条工作流要根除的
+//      那种反向撒谎。
+//   ② 框里文本为空——**一个字符都没有**，不是 trim 之后为空。屏上有字（哪怕只是 Claude 偶发的
+//      `Try "..."` 占位提示）一律不复位。
+//   ②b 输入侧在本次组合里**见过非空白内容**。这一条是 ② 补不上的那半边：读屏侧会先剥掉行尾空白、
+//      再丢掉尾部纯空白逻辑行，于是「空框」与「框里只有几个空格 / 几个 Shift+Enter 空行」读回来
+//      完全一样。只靠 ② 就会把后者当成前者复位掉闩——而后者恰恰是闩说**对**了的情形，复位之后
+//      paste 会接在那段空白后面一并提交，等于替用户发出一条他没写完的消息。加上 ②b，对账的前提
+//      才精确成「输入侧见过真内容、而屏上现在什么都没有」= 真正的闩死。
+//   ③ 人不在场。人正坐在终端前时，即便这一帧读到空框也可能只是他刚删完还没接着打，凭这个清账本
+//      会让下一次抢占把他的粘贴原文弄丢。
+//
+// 为什么复位可以连粘贴账本一起清（不违反硬规则 2「绝不静默丢内容」）：账本的**唯一**用途是把屏上
+// 那些被 TUI 折叠成 `[Pasted text #N +M lines]` 的占位符回填成原文。而占位符本身是屏上的可见文本——
+// 框里若真还留着一段粘贴，读屏拿到的就是那行占位符，前提 ② 当场不成立。也就是说「屏上确证为空」
+// 与「账本里还有该还原的东西」不可能同时为真，这里清掉的账本对应的框里什么都没有。
+export function reconcileInputSideOccupancyLatchAgainstConfirmedEmptyScreenReading(
+	state: TerminalInputBoxOccupancyTrackerState,
+	screenReadingAndHumanPresenceObservation: {
+		// 读屏这一帧有没有在屏上定位到输入框（inputBoxReading !== null）。
+		screenReadingLocatedInputBox: boolean;
+		// 定位到的那个框里的文本是不是**一个字符都没有**（`text.length === 0`，不是 trim 之后为空——
+		// 见上面前提 ② 与 ②b）。未定位到时调用方传 false（「不知道」不是「空」）。
+		screenReadingSaysInputBoxIsEmpty: boolean;
+		// 距上次向**这个终端**手敲是否已超过「人还在不在」的判据窗。
+		humanIsAbsentFromThisTerminal: boolean;
+	},
+): boolean {
+	if (!state.hasUncommittedInputFromInputSideByteTracking) {
+		// 闩本来就没咬住，无账可对。计数归零，免得把「闩曾经自己复位过」之前攒的拍数带到下一次组合。
+		state.consecutiveConfirmedEmptyScreenReadingsWhileInputSideLatchSaysNonEmpty = 0;
+		return false;
+	}
+	if (!state.compositionHasEverContainedNonWhitespaceCharacterFromInputSideByteTracking) {
+		// 纯空白组合：闩是对的，读屏读回空只是它剥掉了空白。永不复位，也不攒连拍数。
+		state.consecutiveConfirmedEmptyScreenReadingsWhileInputSideLatchSaysNonEmpty = 0;
+		return false;
+	}
+	const screenReadingConfirmsTheInputBoxIsEmpty =
+		screenReadingAndHumanPresenceObservation.screenReadingLocatedInputBox &&
+		screenReadingAndHumanPresenceObservation.screenReadingSaysInputBoxIsEmpty;
+	if (
+		!screenReadingConfirmsTheInputBoxIsEmpty ||
+		!screenReadingAndHumanPresenceObservation.humanIsAbsentFromThisTerminal
+	) {
+		state.consecutiveConfirmedEmptyScreenReadingsWhileInputSideLatchSaysNonEmpty = 0;
+		return false;
+	}
+	state.consecutiveConfirmedEmptyScreenReadingsWhileInputSideLatchSaysNonEmpty += 1;
+	if (
+		state.consecutiveConfirmedEmptyScreenReadingsWhileInputSideLatchSaysNonEmpty <
+		CONSECUTIVE_CONFIRMED_EMPTY_SCREEN_READINGS_REQUIRED_TO_RECONCILE_INPUT_SIDE_LATCH
+	) {
+		return false;
+	}
+	// 复位整条组合：闩、粘贴账本、未闭合粘贴状态一起归零（连拍计数也在里面清）。
+	// hasEverObservedHumanInputBytesFromWriteInput 照旧**不**清——它衡量的是「输入侧这只眼睛接没接上人」，
+	// 与「框里此刻有什么」正交。
+	resetTerminalInputBoxOccupancyTrackerComposition(state);
+	return true;
 }
 
 // ── 程序化投递的争用判据 ────────────────────────────────────────────────────────

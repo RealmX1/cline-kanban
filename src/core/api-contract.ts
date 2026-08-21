@@ -2401,6 +2401,9 @@ export const terminalDeliveryFailureReasonSchema = z.enum([
 	"terminal_prompt_readiness_timeout",
 	"submit_confirmation_budget_exhausted",
 	"human_terminal_contention_timeout",
+	// 框被占着但人不在场、且机器拿不下这个框。语义与「可否重投」见
+	// task-message-injection-ledger.ts 的同名条目（那里是唯一真相）。
+	"terminal_input_box_contended_but_unstashable",
 	"agent_awaiting_user_decision_timeout",
 	"superseded_by_later_delivery",
 	"session_ended_before_delivery",

@@ -20,6 +20,7 @@ import type {
 	TerminalDeliveryFailureReason,
 	TerminalDeliveryStatus,
 	TerminalInputBoxStashFidelity,
+	TerminalInputBoxStashOutcome,
 } from "../core/api-contract";
 import {
 	applySessionFacets,
@@ -93,8 +94,10 @@ import {
 } from "./task-session-auto-restart-policy";
 import { backfillFoldedPastePlaceholdersFromPasteLedger } from "./terminal-input-box-folded-paste-placeholder-backfill";
 import {
+	CONSECUTIVE_CONFIRMED_EMPTY_SCREEN_READINGS_REQUIRED_TO_RECONCILE_INPUT_SIDE_LATCH,
 	createTerminalInputBoxOccupancyTrackerState,
 	type ProgrammaticDeliveryInputBoxContentionVerdict,
+	reconcileInputSideOccupancyLatchAgainstConfirmedEmptyScreenReading,
 	recordTerminalInputBytesIntoOccupancyTracker,
 	resetTerminalInputBoxOccupancyTrackerComposition,
 	resolveProgrammaticDeliveryInputBoxContention,
@@ -153,6 +156,36 @@ const TASK_CHAT_INPUT_DELIVERY_MAX_HUMAN_CONTENTION_YIELD_MS = 15_000;
 // 判据对争用分层的两个分支恰好都对：框非空 + 刚敲过 = 人正在打，绝不动他的框；
 // 框非空 + 很久没敲 = 人走开了、留了半句残字在框里，此时自动暂存抢占才是对他有利的处理。
 const HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS = 5 * 60_000;
+// 争用抢占连续被**同一个** outcome 拒绝多少次之后当场收尾（转终态
+// delivery_failed{terminal_input_box_contended_but_unstashable}），而不是继续把让路预算耗满。
+//
+// 为什么需要它：抢占的失败里有一整类是**确定性**的——比如「输入侧确知框里有未提交内容、读屏却拿不到
+// 正文」（input_box_content_unreadable_and_left_untouched）。它不会因为再等 1.5 秒而变，重试只是把
+// 同一句话再说 49 遍。2026-08-20 那次事故里，一条投递就这样被拒了约 50 次、烧完 60s+15s 预算才收尾，
+// 期间 RVF 那侧的 Stop hook 早已退出，没有任何人还在等这个结论。
+//
+// 为什么用**连续同一 outcome 计数**而不是枚举一张「确定性 outcome」白名单：白名单要求每新增一个
+// outcome 都记得回来加一行，漏掉的那个会默认落进「无限重试到预算耗尽」——也就是这次事故的形态。
+// 计数则相反，任何新 outcome 只要连着出现这么多次都会被判成「撞的是同一堵墙」而快速收尾；真正的瞬态
+// （库锁竞争、换代）不会连续这么多拍都给出同一个 outcome，仍然走满预算。
+//
+// 唯一的例外在 holdOrPreemptContendedTerminalInputBox 里就地处理，且**不是**白名单式的「这个 outcome
+// 算瞬态」，而是语义上的一整类：`another_terminal_input_box_stash_attempt_already_in_flight_for_this_task`
+// 说的是「这次抢占没轮到执行」——它对「框拿没拿下来」一个字都没回答，因此按「这一拍没发生」处理、
+// 不推进计数。把「没伸手」和「伸手没够到」混为一谈，会在另一次暂存耗时超过本阈值时把投递永久判死。
+//
+// **取值必须严格大于输入侧闩自愈所需的连拍数**，否则快速收尾会把自愈窗口整个掐掉：两者跑在同一条
+// 1.5s 重探节拍上，若阈值相同，自愈只有唯一一次机会、且不容许任何一帧读不到框（TUI 重绘中、框被
+// 全屏输出盖住都会读不到，是常态而非例外），实际等于自愈永不发生——2026-08-21 的真机复现里就是
+// 这样：3 拍全部 located=false，收尾照常，自愈一次都没轮到。取 2 倍即给自愈留出「错过几帧也还能
+// 重新攒满一轮」的余量。
+//
+// 由被除数一侧的常量**算**出来而不是各写一个数字：谁调大自愈连拍数却漏改这里，就会静默退回上面那种
+// 「自愈永不发生」的形态，而那正是这条约束存在的理由。
+// 当前取值 6：重探节拍 1.5s，故最快 ~9s 落终态（相对原先的 75s）。调用方带
+// --wait-for-terminal-status 时这个量级才真正等得到真相。
+const MAX_CONSECUTIVE_IDENTICAL_PREEMPTION_DECLINES_BEFORE_SETTLING =
+	CONSECUTIVE_CONFIRMED_EMPTY_SCREEN_READINGS_REQUIRED_TO_RECONCILE_INPUT_SIDE_LATCH * 2;
 // Fix B 让位（agent 停在模态待答，见 runTaskChatInputDeliveryAttempt）的**饿死上限**。
 // 没有它就是 2026-08-08 那 49 分钟事故的第三条根因：让位分支置于 deadline 判定之前且无上限，
 // 于是 deadline 强写永远够不到，投递每 RECHECK_MS 空探一次、既不落地也不报错、无限挂起。
@@ -406,10 +439,20 @@ interface ActiveProcessState {
 // 由调用方（runtime-api）注入而不是 manager 自己实现：写库要 workspace 作用域与跨进程文件锁，
 // 那是 manager 够不到、也不该够到的层。manager 只负责判定「此刻该不该抢占」，不负责怎么存。
 //
-// 返回值必须诚实：true 仅当正文确实入库**且**框确实被清。其余一切（库写失败 / 同一 task 上已有
-// 一次暂存在跑 / 读框到清框之间会话已换代 / 屏上文本无法被击键跟踪佐证）一律 false —— 投递退回
-// 挂起继续等，绝不把「没存成」当作已放行而照写，那正是这条工作流要根除的撒谎。
-export type ProgrammaticDeliveryPreemptiveInputBoxStashHandler = (taskId: string) => Promise<boolean>;
+// 返回值必须诚实：只有 stashed_into_prompt_library（正文确实入库**且**框确实被清）算抢占成功。
+// 其余一切（库写失败 / 同一 task 上已有一次暂存在跑 / 读框到清框之间会话已换代 / 屏上文本无法被击键
+// 跟踪佐证）都是失败——投递退回挂起继续等，绝不把「没存成」当作已放行而照写，那正是这条工作流要
+// 根除的撒谎。
+//
+// 为什么回的是**整个 outcome 而不是一个 boolean**：折成布尔之后，「这次为什么没抢占成」这句话在
+// manager 里就再也说不出口了。2026-08-20 那次事故的排查代价全部压在这上面——日志只写了「被拒」，
+// 到底是「库写失败」（瞬态，等一等真有可能成）还是「读屏拿不到正文」（确定性，等到天荒地老都一样）
+// 只能靠回读源码推。manager 拿到 outcome 才做得成两件事：把真实判据写进日志（A4），以及对
+// **连续同一 outcome** 的拒绝当场收尾而不是耗满整个让路预算（见
+// MAX_CONSECUTIVE_IDENTICAL_PREEMPTION_DECLINES_BEFORE_SETTLING）。
+export type ProgrammaticDeliveryPreemptiveInputBoxStashHandler = (
+	taskId: string,
+) => Promise<TerminalInputBoxStashOutcome>;
 
 // manager 在纯判据函数 resolveProgrammaticDeliveryInputBoxContention 的三个结论之外多出来的一个：
 // 「这一帧根本读不出框，而输入侧同时是瞎的」。它进不了那个纯函数，因为判据来自 manager 独有的会话
@@ -446,6 +489,14 @@ interface TaskChatInputDeliveryAttemptPlan {
 	mayAutoStashAbsentHumanInputBox: boolean;
 	// 抢占执行者；null = 本次投递不具备抢占能力（调用方没给），此时恒定停在挂起可见。
 	preemptivelyStashHumanInputBox: ProgrammaticDeliveryPreemptiveInputBoxStashHandler | null;
+	// 本条投递连续被**同一个** outcome 拒绝抢占的次数，与那个 outcome 本身。跨重探累计，
+	// 见 MAX_CONSECUTIVE_IDENTICAL_PREEMPTION_DECLINES_BEFORE_SETTLING。
+	//
+	// 为什么挂在 plan 而不是 active：这是「这一条投递撞上的是不是同一堵墙」，随投递生死，
+	// 不该被同一条 PTY 上下一条投递继承——那会让新投递一上来就带着两次别人的拒绝记录，
+	// 只差一拍就被判成确定性失败。
+	consecutivePreemptionDeclineCount: number;
+	lastPreemptionDeclineOutcome: TerminalInputBoxStashOutcome | null;
 }
 
 // 一次争用抢占在**授权那一刻**捕获的全部前提。清框（forwardStashKeyToClearTaskTerminalInputBox）
@@ -1463,6 +1514,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			deferWhileUserTurn,
 			mayAutoStashAbsentHumanInputBox: options?.mayAutoStashAbsentHumanInputBox ?? false,
 			preemptivelyStashHumanInputBox: options?.preemptivelyStashHumanInputBox ?? null,
+			consecutivePreemptionDeclineCount: 0,
+			lastPreemptionDeclineOutcome: null,
 		};
 		// 上一条投递留下的挂起可见性属于上一条投递，本次受理即作废（新投递会自己重新算一份）。
 		this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
@@ -1693,6 +1746,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 	//   - 这一帧读不出框、输入侧又从未见过人类字节（input_box_unreadable_…）：对框里有什么一无所知，
 	//     既不能写（可能插进人类的行）也不能抢占（不知道要存什么进库）。
 	//   - 抢占执行者没给 / 执行失败：没存成就照写，等于用「写不丢」换掉了人类那半句话。
+	//
+	// 两条收尾路径（都落终态，不存在只挂不结的分支）：
+	//   - 让路预算耗尽（deadline + MAX_HUMAN_CONTENTION_YIELD_MS）：按人在不在场二选一报
+	//     human_terminal_contention_timeout / terminal_input_box_contended_but_unstashable。
+	//   - 抢占被**连续同一 outcome** 拒绝 MAX_CONSECUTIVE_IDENTICAL_PREEMPTION_DECLINES_BEFORE_SETTLING
+	//     次：撞的是同一堵墙，当场报 terminal_input_box_contended_but_unstashable，不再耗满预算。
 	private async holdOrPreemptContendedTerminalInputBox(
 		plan: TaskChatInputDeliveryAttemptPlan,
 		entry: SessionEntry,
@@ -1718,21 +1777,40 @@ export class TerminalSessionManager implements TerminalSessionService {
 			waitingForHumanBecauseAutomaticPreemptionIsUnavailable: !mayPreemptRightNow,
 		});
 		if (now() >= deadlineAt + TASK_CHAT_INPUT_DELIVERY_MAX_HUMAN_CONTENTION_YIELD_MS) {
-			settleActiveProgrammaticDelivery(active, "delivery_failed", "human_terminal_contention_timeout");
+			// 原因码按「人到底在不在」二选一，不再一律报 human_terminal_contention_timeout。
+			//
+			// 契约把 human_terminal_contention_timeout 的语义定成「人**在场**、框里有他未提交的内容 ⇒
+			// 本轮别重投」，RVF 据此主动放弃重投。而 2026-08-20 那次事故的现场恰恰是 humanPresent=false：
+			// 人根本不在，框是被输入侧的闩咬住的，回执却拿着一个写着「人在场」的原因码把 RVF 劝退了——
+			// 同一行日志里既写着 reason=human_terminal_contention_timeout 又写着 humanPresent=false。
+			// 一个自相矛盾的回执比没有回执更坏：它让下游做出了错误但「有依据」的决定。
+			const contentionTimeoutReason: TerminalDeliveryFailureReason = humanIsPresentAtThisTerminal
+				? "human_terminal_contention_timeout"
+				: "terminal_input_box_contended_but_unstashable";
+			settleActiveProgrammaticDelivery(active, "delivery_failed", contentionTimeoutReason);
 			this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 			logTuiFreezeError(
 				`[tui-freeze] task-chat-input-delivery-abandoned taskId=${taskId} ` +
-					`agentId=${entry.summary.agentId} reason=human_terminal_contention_timeout ` +
-					`verdict=${contention.verdict} humanPresent=${humanIsPresentAtThisTerminal}`,
+					`agentId=${entry.summary.agentId} reason=${contentionTimeoutReason} ` +
+					`verdict=${contention.verdict} humanPresent=${humanIsPresentAtThisTerminal} ` +
+					`lastPreemptionDeclineOutcome=${plan.lastPreemptionDeclineOutcome ?? "none"}`,
 			);
 			return;
 		}
 		if (!mayPreemptRightNow) {
+			// 这一拍压根没调抢占执行者（人回来了 / 策略关了 / 有还原不了的粘贴 / 读不出框），
+			// 连续拒绝计数就此作废：它数的是「连续撞上同一堵墙」，中间隔了一拍不同性质的挂起，
+			// 那就不是同一段连续了。不清零的话，人短暂回来一趟再离开，会让计数带着两次旧拒绝续上，
+			// 只差一拍就把一条本该继续等的投递判成确定性失败。
+			plan.consecutivePreemptionDeclineCount = 0;
+			plan.lastPreemptionDeclineOutcome = null;
 			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
 			return;
 		}
 		const preemptivelyStashHumanInputBox = plan.preemptivelyStashHumanInputBox;
 		if (preemptivelyStashHumanInputBox === null) {
+			plan.consecutivePreemptionDeclineCount = 0;
+			plan.lastPreemptionDeclineOutcome = null;
 			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
 			return;
 		}
@@ -1751,9 +1829,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			taskChatInputDeliveryGenerationWhenPreemptionWasAuthorized: generation,
 		};
 		this.armTaskTerminalInputBoxPreemptionAuthorizationPremises(taskId, premisesThisPreemptionWasAuthorizedOn);
-		let humanInputWasStashedAndInputBoxCleared: boolean;
+		let preemptiveStashOutcome: TerminalInputBoxStashOutcome;
 		try {
-			humanInputWasStashedAndInputBoxCleared = await preemptivelyStashHumanInputBox(taskId);
+			preemptiveStashOutcome = await preemptivelyStashHumanInputBox(taskId);
 		} finally {
 			// 只撤自己那一份（见 arm/disarm 两个 helper 与闩本身的注释）：同一 task 上可能同时挂着别的
 			// 在途抢占的前提，撤错人等于把它们的清框复查一起拆掉。
@@ -1771,18 +1849,60 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (activeAfterStash.taskChatInputDeliveryGeneration !== generation) {
 			return;
 		}
-		if (!humanInputWasStashedAndInputBoxCleared) {
-			// 没存成就退回挂起：让路预算继续走，到点以 human_terminal_contention_timeout 收尾。
-			// 「人在抢占在途期间回来打字、清框被前提闩拒掉」也走这一条：拒清 ⇒ 执行者返回 false ⇒ 挂起。
-			// 挂起可见性无需在此重写——下一拍重探会再读一次框，届时人已在场、框又非空，
-			// mayPreemptRightNow 恒为 false，可见性自然翻回「等人处理」。
-			logTuiFreezeWarning(
-				`[tui-freeze] task-chat-input-contention-preemption-declined taskId=${taskId} ` +
-					`agentId=${entryAfterStash.summary.agentId}`,
-			);
+		if (preemptiveStashOutcome === "another_terminal_input_box_stash_attempt_already_in_flight_for_this_task") {
+			// 这一格与其余的失败**不同类**：它说的是「这次抢占压根没轮到执行」——同一个 task 上另一次暂存
+			// 正拿着 per-task 独占闸门（用户刚按了 Ctrl+S、或另一条投递的抢占在跑）。框有没有拿下来这件事
+			// 它一个字都没回答。
+			//
+			// 连续拒绝计数数的是「连续撞上同一堵墙」，也就是**真的伸手去够了框却没够到**；把「没轮到」
+			// 也算进去，就会在另一次暂存跨过文件锁与落盘、耗时超过 6 拍（≈9s）时把本条投递永久判死——
+			// 即便那次暂存随后成功清了框，这条消息也再不会投出去。所以按「这一拍没发生」处理：与
+			// !mayPreemptRightNow 同一条路径，计数清零、下一拍重探，让路预算照常走完。
+			plan.consecutivePreemptionDeclineCount = 0;
+			plan.lastPreemptionDeclineOutcome = null;
 			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
 			return;
 		}
+		if (preemptiveStashOutcome !== "stashed_into_prompt_library") {
+			// 没存成就退回挂起：让路预算继续走。
+			// 「人在抢占在途期间回来打字、清框被前提闩拒掉」也走这一条：拒清 ⇒ 执行者报非成功 ⇒ 挂起。
+			// 挂起可见性无需在此重写——下一拍重探会再读一次框，届时人已在场、框又非空，
+			// mayPreemptRightNow 恒为 false，可见性自然翻回「等人处理」。
+			if (plan.lastPreemptionDeclineOutcome === preemptiveStashOutcome) {
+				plan.consecutivePreemptionDeclineCount += 1;
+			} else {
+				plan.lastPreemptionDeclineOutcome = preemptiveStashOutcome;
+				plan.consecutivePreemptionDeclineCount = 1;
+			}
+			if (plan.consecutivePreemptionDeclineCount >= MAX_CONSECUTIVE_IDENTICAL_PREEMPTION_DECLINES_BEFORE_SETTLING) {
+				// 连续同一 outcome ⇒ 撞的是同一堵墙，再等下去不会有别的结果。当场诚实收尾，
+				// 把剩下的几十秒预算还给调用方（它可能正带着 --wait-for-terminal-status 在等）。
+				settleActiveProgrammaticDelivery(active, "delivery_failed", "terminal_input_box_contended_but_unstashable");
+				this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
+				logTuiFreezeError(
+					`[tui-freeze] task-chat-input-delivery-abandoned taskId=${taskId} ` +
+						`agentId=${entryAfterStash.summary.agentId} reason=terminal_input_box_contended_but_unstashable ` +
+						`outcome=${preemptiveStashOutcome} verdict=${contention.verdict} ` +
+						`humanPresent=${humanIsPresentAtThisTerminal} ` +
+						`consecutive=${plan.consecutivePreemptionDeclineCount}`,
+				);
+				return;
+			}
+			// 折叠：只在一段连续拒绝的**第一拍**出声。同一句话连打 49 遍是纯噪音，而 outcome 一变（说明
+			// 撞的是另一堵墙）计数归 1、这里又会出声，真正有信息量的那几拍一条都不会漏。
+			if (plan.consecutivePreemptionDeclineCount === 1) {
+				logTuiFreezeWarning(
+					`[tui-freeze] task-chat-input-contention-preemption-declined taskId=${taskId} ` +
+						`agentId=${entryAfterStash.summary.agentId} outcome=${preemptiveStashOutcome} ` +
+						`verdict=${contention.verdict} humanPresent=${humanIsPresentAtThisTerminal} ` +
+						`consecutive=${plan.consecutivePreemptionDeclineCount}`,
+				);
+			}
+			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
+			return;
+		}
+		plan.consecutivePreemptionDeclineCount = 0;
+		plan.lastPreemptionDeclineOutcome = null;
 		logTuiFreezeWarning(
 			`[tui-freeze] task-chat-input-contention-preempted taskId=${taskId} ` +
 				`agentId=${entryAfterStash.summary.agentId} stashedIntoPromptLibrary=1`,
@@ -3442,7 +3562,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 输入侧字节跟踪：维护「框里有没有未提交内容」并给被 TUI 折叠掉的粘贴留原文账本。
 		// 必须在 session.write 之前记：这是纯内存计算，放前面才能保证「字节已进 PTY 但账没记上」
 		// 这个窗口不存在——争用判定与 Ctrl+S 取文都读这本账，漏一段就是把人类内容判丢。
-		recordTerminalInputBytesIntoOccupancyTracker(entry.active.inputBoxOccupancyTracker, data);
+		recordTerminalInputBytesIntoOccupancyTracker(
+			entry.active.inputBoxOccupancyTracker,
+			data,
+			entry.active.lastUserInputAt,
+		);
 		// 人工手敲（含在 Claude resume 三选一菜单里选 1/2/3、或提交新消息）是「用户真·继续」的
 		// agent 无关信号：解除 resume substantive guard，此后 agent 的新产出才推进 lastSubstantiveOutputAt。
 		clearResumeSubstantiveGuard(entry.active);
@@ -3507,6 +3631,32 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		if (inputBoxReading !== null) {
 			active.hasEverLocatedTerminalInputBoxOnScreen = true;
+		}
+		// 输入侧闩与读屏对账：闩咬住不放、而读屏连续多拍确证「框在屏上且是空的、人也不在场」时复位它。
+		// 放在这里而不是争用判据里，是因为这是**唯一**一处同时拿得到读屏原始读数（定位到没有 / 框里
+		// 是什么）与这条 PTY 的输入侧账本的地方；放下游就只剩合并后的布尔，分不出「读不到框」与
+		// 「框是空的」，而这两者恰恰是对账最不能混的一对。见
+		// reconcileInputSideOccupancyLatchAgainstConfirmedEmptyScreenReading 的注释。
+		const humanIsAbsentFromThisTerminal =
+			active.lastUserInputAt === null ||
+			now() - active.lastUserInputAt >= HUMAN_PRESENT_AT_TERMINAL_ACTIVE_WINDOW_MS;
+		if (
+			reconcileInputSideOccupancyLatchAgainstConfirmedEmptyScreenReading(active.inputBoxOccupancyTracker, {
+				screenReadingLocatedInputBox: inputBoxReading !== null,
+				// 判据是**一个字符都没有**，不是 trim 之后为空。读屏侧已经剥掉行尾空白、并丢掉尾部空逻辑行，
+				// 所以再 trim 一次等于把「用户只敲了空格 / 只按了几下 Shift+Enter」也认成空框——而那两种
+				// 情况下输入侧闩是对的（框里确实有他未提交的组合），复位之后程序化投递会把 paste 接在
+				// 那段空白后面一并提交掉。真正空的框读回来就是空串（terminal-input-box-reader 的
+				// 「空框读成空文本」用例钉着这一点，真机探针也复核过 textLength=0）。
+				screenReadingSaysInputBoxIsEmpty: inputBoxReading !== null && inputBoxReading.text.length === 0,
+				humanIsAbsentFromThisTerminal,
+			})
+		) {
+			// 这条日志是这次自愈的唯一痕迹，必须留：它同时说明「之前那些争用判定是闩死造成的」。
+			logTuiFreezeWarning(
+				`[tui-freeze] terminal-input-box-occupancy-latch-reconciled taskId=${taskId} ` +
+					`agentId=${entry.summary.agentId} reason=screen_reading_confirmed_empty_input_box`,
+			);
 		}
 		return resolveTerminalInputBoxOccupancy({
 			trackerState: active.inputBoxOccupancyTracker,

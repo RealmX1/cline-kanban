@@ -34,6 +34,13 @@ export const TASK_MESSAGE_TERMINAL_DELIVERY_FAILURE_REASONS = [
 	"terminal_prompt_readiness_timeout",
 	"submit_confirmation_budget_exhausted",
 	"human_terminal_contention_timeout",
+	// 输入框被占着、而**人不在场**：机器判定框里有未提交内容，却又拿不下来（读屏读不出正文无从暂存 /
+	// 写库失败 / 清框时会话已换代）。与 human_terminal_contention_timeout 的关键差别是「人在不在」——
+	// 那一条的语义是「人正在这个终端上干活，这一轮本就不该投」，故建议不重投；这一条没有任何人在等，
+	// 纯粹是机器这侧的状态拿不下来，故**可以择机换新 idempotency key 重投**。
+	// 两者曾被合并成前者上报，结果是回执自相矛盾（reason 说人在场、同一行日志写着 humanPresent=false）
+	// 并把调用方劝退——2026-08-20 RVF 决策点横幅静默消失即此。
+	"terminal_input_box_contended_but_unstashable",
 	"agent_awaiting_user_decision_timeout",
 	"superseded_by_later_delivery",
 	"session_ended_before_delivery",

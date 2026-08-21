@@ -213,6 +213,48 @@ async function main(): Promise<void> {
 
 		session.write(CLEAR_INPUT_BOX_KEY);
 		await sleep(300);
+
+		// ── 4. 清空后的框**读成空文本** ────────────────────────────────────
+		// 这一项是「输入侧闩与读屏对账自愈」
+		// （reconcileInputSideOccupancyLatchAgainstConfirmedEmptyScreenReading）的全部前提：它只在
+		// 读屏**确证**「框在屏上、且框里是空的」时才敢复位输入侧那个咬死的占用标志。定位得到但读回
+		// 非空，对账就永远不触发，2026-08-20 那种「闩死之后整条 PTY 余生不可投递」的形态会原样复发。
+		//
+		// 已知的唯一干扰是 Claude 偶发在空框里渲染占位提示（`Try "..."`）——那会让这一帧读成非空。
+		// 所以连拍多帧再下结论。判据必须是**连续**多帧为空，不能是「多数帧为空」：生产侧的对账要的就是
+		// 连拍一致（任一帧读成非空即把计数清零重来），而空/非空/空/非空/空/空 这种交替在「多数」口径下
+		// 会绿灯、在生产里却让计数永远攒不满——哨兵一旦漏报这种形态，A1 就静默地永不可达。
+		const EMPTY_INPUT_BOX_READING_SAMPLE_COUNT = 6;
+		// 与 CONSECUTIVE_CONFIRMED_EMPTY_SCREEN_READINGS_REQUIRED_TO_RECONCILE_INPUT_SIDE_LATCH 同值。
+		// 刻意不 import：本探针是**真机哨兵**，它要独立于仓内常量去证明真实 TUI 能满足这条要求；
+		// 若直接引用那个常量，常量被调小时哨兵会跟着放水，恰好在最需要它报警的时候失灵。
+		const CONSECUTIVE_EMPTY_READINGS_THE_PRODUCTION_RECONCILER_REQUIRES = 3;
+		const EMPTY_INPUT_BOX_READING_SAMPLE_INTERVAL_MS = 800;
+		const emptyBoxSamples: string[] = [];
+		for (let sampleIndex = 0; sampleIndex < EMPTY_INPUT_BOX_READING_SAMPLE_COUNT; sampleIndex += 1) {
+			const snapshot = await mirror.getScreenSnapshot();
+			const clearedReading = readTerminalInputBox(snapshot, CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR);
+			emptyBoxSamples.push(clearedReading === null ? "<定位不到框>" : clearedReading.text);
+			await sleep(EMPTY_INPUT_BOX_READING_SAMPLE_INTERVAL_MS);
+		}
+		// 判据与生产侧完全同构：读屏读回**一个字符都没有**才算空（生产侧用的也是 text.length === 0；
+		// trim 会把「框里只有几个空格」也认成空，而那恰恰是不该复位闩的情形）。
+		let longestConsecutiveEmptyReadingRun = 0;
+		let currentConsecutiveEmptyReadingRun = 0;
+		for (const sampleText of emptyBoxSamples) {
+			currentConsecutiveEmptyReadingRun = sampleText.length === 0 ? currentConsecutiveEmptyReadingRun + 1 : 0;
+			longestConsecutiveEmptyReadingRun = Math.max(
+				longestConsecutiveEmptyReadingRun,
+				currentConsecutiveEmptyReadingRun,
+			);
+		}
+		recordCheck(
+			"Ctrl+C 清空后的框连续多帧读成空文本（对账自愈的前提）",
+			`${EMPTY_INPUT_BOX_READING_SAMPLE_COUNT} 帧里存在连续 ${CONSECUTIVE_EMPTY_READINGS_THE_PRODUCTION_RECONCILER_REQUIRES} 帧读成空文本`,
+			`最长连续为空 ${longestConsecutiveEmptyReadingRun} 帧（共 ${EMPTY_INPUT_BOX_READING_SAMPLE_COUNT} 帧）；` +
+				`非空样本：${JSON.stringify(emptyBoxSamples.filter((text) => text.length > 0).slice(0, 3))}`,
+			longestConsecutiveEmptyReadingRun >= CONSECUTIVE_EMPTY_READINGS_THE_PRODUCTION_RECONCILER_REQUIRES,
+		);
 	} finally {
 		session.kill();
 	}

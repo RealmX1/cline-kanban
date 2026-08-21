@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
 	createTerminalInputBoxOccupancyTrackerState,
+	reconcileInputSideOccupancyLatchAgainstConfirmedEmptyScreenReading,
 	recordTerminalInputBytesIntoOccupancyTracker,
 	resetTerminalInputBoxOccupancyTrackerComposition,
 	resolveProgrammaticDeliveryInputBoxContention,
@@ -23,16 +24,23 @@ const ESCAPE = "\u001b";
 const PASTE_START = "\u001b[200~";
 const PASTE_END = "\u001b[201~";
 
-function feed(state: TerminalInputBoxOccupancyTrackerState, text: string): void {
-	recordTerminalInputBytesIntoOccupancyTracker(state, Buffer.from(text, "utf8"));
+// nowEpochMs 默认 0：绝大多数用例不关心时间，让「未闭合粘贴挂了多久」恒为 0，永不触发强制封账。
+// 只有钉封账上界的那两例显式喂时刻。
+function feed(state: TerminalInputBoxOccupancyTrackerState, text: string, nowEpochMs = 0): void {
+	recordTerminalInputBytesIntoOccupancyTracker(state, Buffer.from(text, "utf8"), nowEpochMs);
 }
 
 // 把一段文本按字节切成若干块喂进去，模拟 WebSocket 二进制帧的任意分片（含把一个多字节字符
 // 或一条转义序列拦腰截断）。
-function feedInByteSlices(state: TerminalInputBoxOccupancyTrackerState, text: string, sliceLength: number): void {
+function feedInByteSlices(
+	state: TerminalInputBoxOccupancyTrackerState,
+	text: string,
+	sliceLength: number,
+	nowEpochMs = 0,
+): void {
 	const bytes = Buffer.from(text, "utf8");
 	for (let offset = 0; offset < bytes.length; offset += sliceLength) {
-		recordTerminalInputBytesIntoOccupancyTracker(state, bytes.subarray(offset, offset + sliceLength));
+		recordTerminalInputBytesIntoOccupancyTracker(state, bytes.subarray(offset, offset + sliceLength), nowEpochMs);
 	}
 }
 
@@ -401,5 +409,167 @@ describe("resolveProgrammaticDeliveryInputBoxContention — 争用判据", () =>
 		feed(state, "一句话\r");
 		resetTerminalInputBoxOccupancyTrackerComposition(state);
 		expect(state.hasEverObservedHumanInputBytesFromWriteInput).toBe(true);
+	});
+});
+
+// ── 输入侧闩的确定性死局与两条自愈路径 ──────────────────────────────────────────
+//
+// 钉的是 2026-08-20 RVF 决策点横幅静默消失那次事故的根因：闩一旦被咬住而复位事件永远到不了，
+// 这条 PTY 的**余生**所有程序化投递都被判成人类争用。两条自愈各覆盖一半：
+//   A1 对账  —— 读屏连续多拍确证「框在屏上且是空的」且人不在场 ⇒ 复位。
+//   A2 封账  —— 未闭合的 bracketed paste 挂过时长上界 ⇒ 强制封账，恢复 CR 的复位能力。判据是**挂了
+//              多久**而不是**跨了几次 writeInput**：分片次数纯属传输层偶然，用它作界会把正常大粘贴腰斩。
+describe("terminal-input-box-occupancy · 输入侧闩的自愈", () => {
+	function contentionOf(
+		trackerState: TerminalInputBoxOccupancyTrackerState,
+		inputBoxReading: Parameters<typeof resolveTerminalInputBoxOccupancy>[0]["inputBoxReading"],
+	) {
+		return resolveProgrammaticDeliveryInputBoxContention({
+			occupancy: resolveTerminalInputBoxOccupancy({ trackerState, inputBoxReading }),
+			inputSideByteTrackingHasEverObservedHumanBytes: trackerState.hasEverObservedHumanInputBytesFromWriteInput,
+		});
+	}
+
+	function reconcile(
+		state: TerminalInputBoxOccupancyTrackerState,
+		observation: {
+			screenReadingLocatedInputBox?: boolean;
+			screenReadingSaysInputBoxIsEmpty?: boolean;
+			humanIsAbsentFromThisTerminal?: boolean;
+		} = {},
+	): boolean {
+		return reconcileInputSideOccupancyLatchAgainstConfirmedEmptyScreenReading(state, {
+			screenReadingLocatedInputBox: observation.screenReadingLocatedInputBox ?? true,
+			screenReadingSaysInputBoxIsEmpty: observation.screenReadingSaysInputBoxIsEmpty ?? true,
+			humanIsAbsentFromThisTerminal: observation.humanIsAbsentFromThisTerminal ?? true,
+		});
+	}
+
+	// 事故形态本身：退格删光了，但退格按设计不复位闩（删到空没有无法从字节流单独判定），
+	// 于是输入侧咬定非空、读屏看到空框，争用判据每一拍都返回 human_uncommitted_input_present。
+	it("退格删光后闩仍咬住 → 读屏连续 3 拍确证空框且人不在场，第 3 拍复位", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, "半句话");
+		feed(state, BACKSPACE.repeat(3));
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+		expect(contentionOf(state, reading(""))).toBe("human_uncommitted_input_present");
+
+		expect(reconcile(state)).toBe(false);
+		expect(reconcile(state)).toBe(false);
+		expect(reconcile(state)).toBe(true);
+
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(false);
+		expect(contentionOf(state, reading(""))).toBe("input_box_clear_for_programmatic_delivery");
+	});
+
+	// 「读不到框」不是「框是空的」。TUI 正在重绘 / 框被全屏输出盖住 / 该 agent 的输入框语法没建模，
+	// 都会让读屏定位不到框——拿它当空就是这条工作流要根除的那种反向撒谎。
+	it("读屏定位不到框 → 永远不复位，攒多少拍都不算数", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, "半句话");
+		for (let tick = 0; tick < 10; tick += 1) {
+			expect(
+				reconcile(state, { screenReadingLocatedInputBox: false, screenReadingSaysInputBoxIsEmpty: false }),
+			).toBe(false);
+		}
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+	});
+
+	it("屏上还有字 → 不复位（框里真有东西，包括被折叠成占位符的粘贴）", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, "半句话");
+		for (let tick = 0; tick < 10; tick += 1) {
+			expect(reconcile(state, { screenReadingSaysInputBoxIsEmpty: false })).toBe(false);
+		}
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+	});
+
+	// 人正坐在终端前时，这一帧读到空框也可能只是他刚删完还没接着打。
+	it("人在场 → 不复位", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, "半句话");
+		for (let tick = 0; tick < 10; tick += 1) {
+			expect(reconcile(state, { humanIsAbsentFromThisTerminal: false })).toBe(false);
+		}
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+	});
+
+	it("连拍中断即归零：攒到 2 拍后来一拍非空，要重新攒满 3 拍", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, "半句话");
+		expect(reconcile(state)).toBe(false);
+		expect(reconcile(state)).toBe(false);
+		expect(reconcile(state, { screenReadingSaysInputBoxIsEmpty: false })).toBe(false);
+		expect(reconcile(state)).toBe(false);
+		expect(reconcile(state)).toBe(false);
+		expect(reconcile(state)).toBe(true);
+	});
+
+	// hasEverObserved 衡量的是「输入侧这只眼睛接没接上人」，与「框里此刻有什么」正交，自愈不该动它。
+	it("自愈不会让输入侧重新变瞎", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, "半句话");
+		reconcile(state);
+		reconcile(state);
+		expect(reconcile(state)).toBe(true);
+		expect(state.hasEverObservedHumanInputBytesFromWriteInput).toBe(true);
+	});
+
+	// 更硬的那条闩：未闭合粘贴里 CR 只被计成一次换行，永远走不到复位。若无上界，结束标记一丢，
+	// 用户此后按多少次回车都清不掉这个闩。
+	it("bracketed paste 结束标记丢失 → 期间的回车不复位闩（这是死局的成因）", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, `${PASTE_START}粘了一段`);
+		feed(state, CARRIAGE_RETURN);
+		expect(state.insideBracketedPaste).toBe(true);
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+	});
+
+	it("未闭合 paste 挂过上界时长 → 强制封账，其后的回车重新能复位", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, `${PASTE_START}粘了一段`, 1_000);
+		// 上界之内照旧当粘贴续传：这一拍的回车仍被吞成载荷里的换行。
+		feed(state, CARRIAGE_RETURN, 1_000 + 9_999);
+		expect(state.insideBracketedPaste).toBe(true);
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+
+		// 越过上界的这一次调用，先封账再解析——于是同一个回车这次真的复位了整条组合。
+		feed(state, CARRIAGE_RETURN, 1_000 + 10_000);
+		expect(state.insideBracketedPaste).toBe(false);
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(false);
+	});
+
+	// 硬规则 2：强制封账不静默丢内容——条目照常入账、计量照常记，但**正文一律不留**并计入
+	// unrecoverablePasteCount。手上这半截一定不完整（结束标记没来，后面可能还有真正的载荷尾部，
+	// 延迟到达的分片就是这个形态），当成完整正文入账正是「回填侧拿腰斩文本替换占位符」那种静默丢字。
+	it("强制封账只留计量、丢正文，并计入不可还原", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, `${PASTE_START}粘了一段`, 1_000);
+		feed(state, "结束标记丢了之后人又敲的字", 1_000 + 10_000);
+		expect(state.insideBracketedPaste).toBe(false);
+		expect(state.pasteLedger).toHaveLength(1);
+		expect(state.pasteLedger[0].payloadText).toBeNull();
+		expect(state.pasteLedger[0].characterCount).toBe("粘了一段".length);
+		expect(state.unrecoverablePasteCount).toBe(1);
+		expect(state.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+	});
+
+	// 正常封账（真的收到了结束标记）不受影响：正文照常留存、不计入不可还原。
+	it("正常封账仍留正文，不被强制封账的严格化波及", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		feed(state, `${PASTE_START}完整的一段${PASTE_END}`, 1_000);
+		expect(state.pasteLedger[0].payloadText).toBe("完整的一段");
+		expect(state.unrecoverablePasteCount).toBe(0);
+	});
+
+	// 上界按时长而不是调用次数，正是为了这一格：12 KB 的粘贴按 64 字节分片就是 192 次 writeInput，
+	// 用次数作界会把这种完全正常的大粘贴中途腰斩。
+	it("正常大粘贴被切成上百片仍不误封账：判据是挂了多久，不是切了几片", () => {
+		const state = createTerminalInputBoxOccupancyTrackerState();
+		const payload = "行".repeat(4_096);
+		feedInByteSlices(state, `${PASTE_START}${payload}${PASTE_END}`, 64, 5_000);
+		expect(state.insideBracketedPaste).toBe(false);
+		expect(state.openBracketedPasteStartedAtEpochMs).toBeNull();
+		expect(state.pasteLedger[0].payloadText).toBe(payload);
 	});
 });
