@@ -59,6 +59,7 @@ import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery
 import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel, type TaskCommentEntry } from "@/types";
+import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { useWindowEvent } from "@/utils/react-use";
 
 // We still poll the open detail diff because line content can change without changing
@@ -78,6 +79,16 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
 function isEventInsideDialog(target: EventTarget | null): boolean {
 	return target instanceof Element && target.closest("[role='dialog']") !== null;
+}
+
+// 切换相邻卡片的热键绑定在 alt+↑/↓，而不是裸方向键。裸方向键此前挂在 document 上、
+// 在详情视图里把上下键变成了翻卡器，与「选中新卡后焦点自动落进 agent 输入入口」直接冲突：
+// 焦点一旦进了 composer 或终端，用户按上下键的意图就是移动光标/翻历史，而不是换任务。
+// 反过来，改绑之后热键必须能在输入框内也生效，否则焦点进了输入框就再也切不了卡，
+// 键盘导航能力名存实亡——故显式开启 enableOnFormTags / enableOnContentEditable。
+function shouldIgnoreAdjacentCardHotkey(event: KeyboardEvent): boolean {
+	// Windows 的 AltGr 会同时置位 ctrlKey 与 altKey，排除 ctrl/meta 以免误吞用户的组合键。
+	return event.defaultPrevented || event.ctrlKey || event.metaKey || isEventInsideDialog(event.target);
 }
 
 /** Shared factory for the three horizontal resize-drag handlers in the detail view. */
@@ -257,6 +268,8 @@ function BottomTerminalSection({
 					onSummary={onSummary}
 					showSessionToolbar={false}
 					autoFocus
+					// 本区块只由 CardDetailView 渲染，而切卡热键 alt+↑/↓ 正是它注册的，故放行成立。
+					isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView
 					onClose={onClose}
 					minimalHeaderTitle="Terminal"
 					minimalHeaderSubtitle={subtitle}
@@ -723,6 +736,9 @@ export function CardDetailView({
 	const [diffMode, setDiffMode] = useState<RuntimeWorkspaceChangesMode>("working_copy");
 	const [isDiffExpanded, setIsDiffExpanded] = useState(false);
 	const [selectedTaskConversationSessionId, setSelectedTaskConversationSessionId] = useState(selection.card.id);
+	// 递增的请求 key 是发给两条 agent 通道的「把键盘焦点接过去」信号：key 不变就不重跑，
+	// 所以不会重复抢焦，也不需要下游回执（对照 `use-persistent-terminal-session` 的 searchOpenRequestKey）。
+	const [agentEntryKeyboardFocusRequestKey, setAgentEntryKeyboardFocusRequestKey] = useState(0);
 	const {
 		taskCardsPanelRatio,
 		setTaskCardsPanelRatio,
@@ -912,12 +928,14 @@ export function CardDetailView({
 	);
 
 	useHotkeys(
-		"up,left",
+		"alt+up",
 		() => {
 			handleSelectAdjacentCard(-1);
 		},
 		{
-			ignoreEventWhen: (event) => isTypingTarget(event.target),
+			enableOnFormTags: true,
+			enableOnContentEditable: true,
+			ignoreEventWhen: shouldIgnoreAdjacentCardHotkey,
 			preventDefault: true,
 		},
 		[handleSelectAdjacentCard],
@@ -948,12 +966,14 @@ export function CardDetailView({
 	);
 
 	useHotkeys(
-		"down,right",
+		"alt+down",
 		() => {
 			handleSelectAdjacentCard(1);
 		},
 		{
-			ignoreEventWhen: (event) => isTypingTarget(event.target),
+			enableOnFormTags: true,
+			enableOnContentEditable: true,
+			ignoreEventWhen: shouldIgnoreAdjacentCardHotkey,
 			preventDefault: true,
 		},
 		[handleSelectAdjacentCard],
@@ -972,6 +992,16 @@ export function CardDetailView({
 		setDiffMode("working_copy");
 		setSelectedTaskConversationSessionId(selection.card.id);
 	}, [selection.card.id]);
+
+	// 选中新卡（或切到该卡的另一个子会话）后，键盘焦点应当自动落进该卡的 agent 输入入口，
+	// 否则焦点会滞留在卡壳 div（@hello-pangea/dnd 的 dragHandleProps 会注入 tabIndex=0）上，
+	// 用户接着敲的键就全都打进了全局热键而不是 agent。
+	useEffect(() => {
+		if (!shouldHandOffKeyboardFocusToAgentEntryNow()) {
+			return;
+		}
+		setAgentEntryKeyboardFocusRequestKey((requestKey) => requestKey + 1);
+	}, [selectedTaskConversationSessionId]);
 
 	useEffect(() => {
 		if (!isTaskChangesSidebarOpen && (mobileTab === "diff" || mobileTab === "files")) {
@@ -1086,6 +1116,7 @@ export function CardDetailView({
 		<ClineAgentChatPanel
 			ref={clineAgentChatPanelRef}
 			taskId={selectedTaskConversationSessionId}
+			agentEntryKeyboardFocusRequestKey={agentEntryKeyboardFocusRequestKey}
 			summary={activeTaskConversationSessionSummary}
 			// 会话面板由多种传输形态共用，面板内部据此决定是否显示 Cline 专属的 provider/模型控件。
 			agentId={effectiveTaskConversationSessionAgentId ?? undefined}
@@ -1140,6 +1171,9 @@ export function CardDetailView({
 			taskId={selectedTaskConversationSessionId}
 			workspaceId={currentProjectId}
 			terminalEnabled={isTaskTerminalEnabled}
+			agentEntryKeyboardFocusRequestKey={agentEntryKeyboardFocusRequestKey}
+			// 切卡热键 alt+↑/↓ 由本视图注册，所以这个终端可以把它放行给 document。
+			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView
 			summary={activeTaskConversationSessionSummary}
 			onSummary={onSessionSummary}
 			onCommit={

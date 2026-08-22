@@ -90,6 +90,12 @@ export interface AgentTerminalPanelProps {
 	showSessionToolbar?: boolean;
 	onClose?: () => void;
 	autoFocus?: boolean;
+	// 由详情视图递增的「把键盘焦点接过去」请求信号，透传给终端会话；key 不变就不重复抢焦。
+	agentEntryKeyboardFocusRequestKey?: number;
+	// 渲染本面板的视图是不是「相邻卡片导航热键（alt+↑/↓）的接管者」。只有详情视图注册了那两条
+	// useHotkeys，所以也只有它该传 true；首页底部 shell 终端与首页侧栏 agent 终端不传，alt+↑/↓
+	// 在那里照常发给 agent，而不是被吞进两不管地带。
+	isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView?: boolean;
 	minimalHeaderTitle?: string;
 	minimalHeaderSubtitle?: string | null;
 	panelBackgroundColor?: string;
@@ -599,6 +605,9 @@ function AgentTerminalPanelLayout({
 	showSessionToolbar = true,
 	onClose,
 	autoFocus: _autoFocus = false,
+	agentEntryKeyboardFocusRequestKey: _agentEntryKeyboardFocusRequestKey,
+	isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView:
+		_isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView = false,
 	minimalHeaderTitle = "Terminal",
 	minimalHeaderSubtitle = null,
 	panelBackgroundColor = "var(--color-surface-1)",
@@ -963,6 +972,9 @@ export function AgentTerminalPanel(props: AgentTerminalPanelProps): ReactElement
 		onSummary: props.onSummary,
 		onConnectionReady: props.onConnectionReady,
 		autoFocus: props.autoFocus,
+		agentEntryKeyboardFocusRequestKey: props.agentEntryKeyboardFocusRequestKey,
+		isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView:
+			props.isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView,
 		isVisible: props.isVisible,
 		sessionStartedAt: props.summary?.startedAt ?? null,
 		terminalBackgroundColor: props.terminalBackgroundColor ?? "var(--color-surface-1)",

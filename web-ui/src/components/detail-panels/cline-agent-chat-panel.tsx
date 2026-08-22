@@ -120,6 +120,8 @@ export interface ClineAgentChatPanelProps {
 	cancelAutomaticActionLabel?: string | null;
 	showMoveToTrash?: boolean;
 	showMoveToValidation?: boolean;
+	// 由详情视图递增的「把键盘焦点接过去」请求信号，透传给 composer；key 不变就不重复抢焦。
+	agentEntryKeyboardFocusRequestKey?: number;
 }
 
 export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, ClineAgentChatPanelProps>(
@@ -132,6 +134,7 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			defaultMode = "act",
 			composerPlaceholder,
 			showComposerModeToggle = true,
+			agentEntryKeyboardFocusRequestKey,
 			workspaceId = null,
 			runtimeConfig = null,
 			taskClineSettings,
@@ -544,6 +547,7 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 				<div className="px-2 py-3">
 					<ClineChatComposer
 						taskId={taskId}
+						agentEntryKeyboardFocusRequestKey={agentEntryKeyboardFocusRequestKey}
 						draft={draft}
 						onDraftChange={setDraft}
 						images={draftImages}

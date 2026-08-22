@@ -32,7 +32,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeSlashCommand, RuntimeTaskSessionMode } from "@/runtime/types";
 import type { TaskImage } from "@/types";
-import { matchesMobileViewportNow } from "@/utils/mobile-viewport-breakpoint";
+import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { isMacPlatform } from "@/utils/platform";
 import { useDebouncedEffect } from "@/utils/react-use";
 
@@ -43,6 +43,7 @@ const CLINE_CHAT_COMPOSER_COMMAND_LIMIT = 8;
 
 export function ClineChatComposer({
 	taskId,
+	agentEntryKeyboardFocusRequestKey,
 	draft,
 	onDraftChange,
 	images = [],
@@ -74,6 +75,9 @@ export function ClineChatComposer({
 	workspaceId = null,
 }: {
 	taskId: string;
+	// 递增即表示「请把键盘焦点接过去」。key 不变就不重跑，所以不会重复抢焦；
+	// 请求到达时输入框可能还禁用着（`canSend` 尚未翻 true），此时请求保持挂起、待其可用再兑现。
+	agentEntryKeyboardFocusRequestKey?: number;
 	draft: string;
 	onDraftChange: (draft: string) => void;
 	images?: TaskImage[];
@@ -107,6 +111,7 @@ export function ClineChatComposer({
 	workspaceId?: string | null;
 }): ReactElement {
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+	const handledAgentEntryKeyboardFocusRequestKeyRef = useRef(agentEntryKeyboardFocusRequestKey);
 	const mentionSearchRequestIdRef = useRef(0);
 	const slashCommandsRequestIdRef = useRef(0);
 	const slashCommandsCacheRef = useRef(new Map<string, RuntimeSlashCommand[]>());
@@ -168,12 +173,33 @@ export function ClineChatComposer({
 		if (!canSend) {
 			return;
 		}
-		// Skip auto-focus on mobile to prevent iOS Safari viewport shift
-		if (matchesMobileViewportNow()) {
+		if (!shouldHandOffKeyboardFocusToAgentEntryNow()) {
 			return;
 		}
 		textareaRef.current?.focus();
 	}, [canSend, taskId]);
+
+	// 详情视图切卡后的显式聚焦请求。与上面那条 `[canSend, taskId]` 的区别在于它也覆盖
+	// 「taskId 没变、但用户重新选中了同一张卡」以及切换子会话的情形。
+	useEffect(() => {
+		if (agentEntryKeyboardFocusRequestKey === undefined) {
+			return;
+		}
+		if (agentEntryKeyboardFocusRequestKey === handledAgentEntryKeyboardFocusRequestKeyRef.current) {
+			return;
+		}
+		// 输入框在 `!canSend` 时是 disabled 的，disabled 元素聚焦不了。此时不认领这次请求，
+		// 等 canSend 翻 true 后本 effect 会因依赖它而重跑，把挂起的请求补上。
+		if (!canSend) {
+			return;
+		}
+		handledAgentEntryKeyboardFocusRequestKeyRef.current = agentEntryKeyboardFocusRequestKey;
+		// 请求发出到此刻之间用户可能已经开始拖选文字或点进了别处，兑现前再查一次守卫。
+		if (!shouldHandOffKeyboardFocusToAgentEntryNow()) {
+			return;
+		}
+		textareaRef.current?.focus();
+	}, [agentEntryKeyboardFocusRequestKey, canSend]);
 
 	useEffect(() => {
 		setCursorIndex((currentValue) => Math.min(currentValue, draft.length));
@@ -363,7 +389,8 @@ export function ClineChatComposer({
 				return;
 			}
 			const canNavigateCompletions = showCompletionPicker && completionSuggestions.length > 0;
-			if (canNavigateCompletions && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+			// alt+↑/↓ 是详情视图的切卡热键，补全列表开着时也不能被这里的补全导航吞掉。
+			if (canNavigateCompletions && !event.altKey && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
 				event.preventDefault();
 				const direction = event.key === "ArrowDown" ? 1 : -1;
 				setSelectedCompletionIndex((currentValue) => {
