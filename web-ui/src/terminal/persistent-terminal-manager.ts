@@ -43,6 +43,14 @@ const TERMINAL_RECONNECT_MAX_DELAY_MS = 5_000;
 const VIEWER_QUEUE_STALL_MS = 5_000;
 // 可见性恢复门控的兜底超时:request_restore 后恢复快照最长等待时间,超时解除门控防白屏。
 const AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS = 5_000;
+// 「重新同步画面」（resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession）等第一份服务端快照的
+// 截止时间。刻意远短于上面那个 5s 被动兜底：那是「标签页切回来了，顺手要一份新快照」，等久一点无所谓；
+// 这里是用户盯着一块冻住的屏幕、刚刚亲手点下按钮，1.5s 还没等到就说明服务端那条 viewer 大概率已经僵死
+// （restoreComplete 永远为 false，把实时输出全扣在 pendingOutputChunks 里），继续干等只是让人多盯 3.5s。
+const RESYNC_TERMINAL_VIEW_RESTORE_SNAPSHOT_DEADLINE_MS = 1_500;
+// 升级重连之后再等一次的截止时间。给得比上面宽，是因为这一程要重新握手两条 WebSocket 并在服务端
+// 重建一份 viewerState，本来就比「往已连着的 control socket 上发一条 request_restore」慢一个数量级。
+const RESYNC_TERMINAL_VIEW_ESCALATED_RECONNECT_RESTORE_SNAPSHOT_DEADLINE_MS = 4_000;
 // 陈旧会话自动续跑的**跨实例**冷却。
 //
 // 类里那个 autoResumeAttempted 是 per-终端实例的一次性闩，它拦不住真正的重复触发：切一张卡、
@@ -267,7 +275,11 @@ class PersistentTerminal {
 	// This identifies one browser viewer, not the PTY session itself.
 	// The server uses it to keep per-tab restore and socket state while all tabs
 	// still share the same taskId backed PTY.
-	private readonly clientId = generateTerminalClientId();
+	//
+	// 可变而非 readonly：「重新同步画面」升级到强制重连时会轮换它。服务端的 viewerState 以 clientId 为键，
+	// 沿用旧键就会重新拿到那条已经僵死的条目（restoreComplete 卡在 false、还挂在 backpressuredViewerIds
+	// 里），重连也就白连了。
+	private clientId = generateTerminalClientId();
 	private appearance: PersistentTerminalAppearance;
 	private latestSummary: RuntimeTaskSessionSummary | null = null;
 	private lastError: string | null = null;
@@ -284,6 +296,11 @@ class PersistentTerminal {
 	private autoResumeAttempted = false;
 	private outputTextDecoder = new TextDecoder();
 	private terminalWriteQueue: Promise<void> = Promise.resolve();
+	// 写队列的代次。discardStalledTerminalWriteQueue 换得掉 terminalWriteQueue 这个「队尾指针」，却取消不了
+	// 已经排在旧链上、正等着前驱 write 回调的那些 link——而写队列卡死最常见的成因（xterm 写缓冲积压、
+	// rAF/setTimeout 被节流）恰恰会稍后解冻，把整条旧链排空。每次入队记下当时的代次，执行体里发现代次
+	// 已被推进就自认属于「已丢弃的旧链」并让路，不再往刚 reset 过的屏幕里补写陈旧字节。
+	private discardedTerminalWriteQueueGeneration = 0;
 	private slowFlushLogged = false;
 	private lastSentResizeMessage: RuntimeTerminalWsResizeMessage | null = null;
 	private reconnectTimer: number | null = null;
@@ -308,6 +325,25 @@ class PersistentTerminal {
 	// 后重放。5s 兜底超时防控制消息丢失导致白屏。
 	private awaitingRestoreSnapshot = false;
 	private awaitingRestoreSnapshotTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+	// 「重新同步画面」期间抑制 maybeAutoResumeStaleSession 的一次性闩（与上面 suppressNextRestartReset 同构）。
+	//
+	// 非它不可的理由：resync 升级重连后，服务端在 control socket 连上时**无条件**重推一份快照，客户端照常
+	// 走 applyRestore → 落到 maybeAutoResumeStaleSession 的调用点。若此时服务端 mirror 恰好是空的、而客户端
+	// 手里那份 latestSummary 又是控制通道僵死前的陈旧值（pid 为 null），自动续跑的全部判据就都命中了——
+	// 用户点的是「只把画面解冻，别动 agent」，结果反而打出一次 refreshTaskTerminal 把活着的 agent 杀了。
+	// 这正是本功能存在的意义的反面，所以 resync 路径上必须显式压掉这条自动路径。
+	private suppressNextStaleSessionAutoResumeTriggeredByViewResync = false;
+	// 恢复快照的「到达序号」与「已落屏的最新到达序号」，外加等待者集合。resync 用它判断服务端到底有没有把
+	// **它这次请求的**那份快照送到并写进屏幕：序号没前进 = 服务端那条 viewer 僵死，该升级成换 clientId 重连了。
+	//
+	// 为什么按到达序号而不是只数「应用了几次」：resync 发起时可能已经有一份更早的快照在途（写队列慢、还没
+	// 落屏），它恰好在 resync 的等待窗口里落屏时，会把「只数次数」的等待顺手满足——resync 于是提前收尾、
+	// finally 清掉抑制闩，而本次真正请求到的那份快照随后才落地、不再被抑制。若它恰是空快照且 latestSummary
+	// 是控制通道僵死前的陈旧值（pid 为 null），maybeAutoResumeStaleSession 的判据就全中，「只解冻画面」当场
+	// 变成一次杀掉活 agent 的 refreshTaskTerminal。按序号比较即把「早于本次请求到达的快照」整类排除在外。
+	private restoreSnapshotArrivalSequence = 0;
+	private latestAppliedRestoreSnapshotArrivalSequence = 0;
+	private readonly restoreSnapshotApplicationWaiters = new Set<() => void>();
 	private scrolledAwayFromLatest = false;
 
 	constructor(
@@ -462,6 +498,95 @@ class PersistentTerminal {
 			clearTimeout(this.awaitingRestoreSnapshotTimeoutTimer);
 			this.awaitingRestoreSnapshotTimeoutTimer = null;
 		}
+	}
+
+	// 快照应用完成时按「它自己的到达序号」抬高水位——落屏顺序未必等于到达顺序（写队列可能把更早的一份卡在
+	// 后面），故取 max 而非直接赋值，水位只前进不回退。
+	private notifyRestoreSnapshotApplied(appliedRestoreSnapshotArrivalSequence: number): void {
+		if (appliedRestoreSnapshotArrivalSequence > this.latestAppliedRestoreSnapshotArrivalSequence) {
+			this.latestAppliedRestoreSnapshotArrivalSequence = appliedRestoreSnapshotArrivalSequence;
+		}
+		for (const waiter of [...this.restoreSnapshotApplicationWaiters]) {
+			waiter();
+		}
+	}
+
+	private async waitForRestoreSnapshotApplication(
+		restoreSnapshotArrivalSequenceBeforeWait: number,
+		deadlineMs: number,
+	): Promise<boolean> {
+		if (this.latestAppliedRestoreSnapshotArrivalSequence > restoreSnapshotArrivalSequenceBeforeWait) {
+			return true;
+		}
+		return await new Promise<boolean>((resolve) => {
+			let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+			const waiter = (): void => {
+				// 只有「到达序号晚于本次等待起点」的快照才算数：更早在途、此刻才落屏的那份顶替不了，继续等。
+				if (this.latestAppliedRestoreSnapshotArrivalSequence <= restoreSnapshotArrivalSequenceBeforeWait) {
+					return;
+				}
+				if (deadlineTimer !== null) {
+					clearTimeout(deadlineTimer);
+					deadlineTimer = null;
+				}
+				this.restoreSnapshotApplicationWaiters.delete(waiter);
+				resolve(true);
+			};
+			this.restoreSnapshotApplicationWaiters.add(waiter);
+			deadlineTimer = setTimeout(() => {
+				deadlineTimer = null;
+				this.restoreSnapshotApplicationWaiters.delete(waiter);
+				resolve(false);
+			}, deadlineMs);
+		});
+	}
+
+	// 丢掉卡住的写队列。applyRestore 的第一句就是 await 这条链，而链上任何一次 terminal.write 的回调没被
+	// 触发就会让它永久悬着——恢复快照于是永远排在一条死队列后面，画面再也不会更新。
+	//
+	// 换掉队尾指针只是把新写入接到一条干净的链上，**取消不了**旧链：旧链上每个 link 都已经作为前驱的
+	// then 回调注册好了，前驱的 write 回调一旦迟到触发（卡死最常见的成因就是「渲染只是被节流、后来还是
+	// 回来了」），整条旧链会照常排空。所以这里必须同时推进代次，让旧链上的 link 在自己的执行体里认出
+	// 「我已经被丢弃了」——否则那些陈旧字节会插进 sliceRestoreSnapshotForIncrementalWrite 按固定字符数
+	// 硬切出来的快照分片之间，把跨片的 ANSI 序列截断成重影或乱码。
+	private discardStalledTerminalWriteQueue(): void {
+		this.terminalWriteQueue = Promise.resolve();
+		this.discardedTerminalWriteQueueGeneration += 1;
+		this.slowFlushLogged = false;
+	}
+
+	// 换一个 clientId 重连两条 socket。服务端按 clientId 存 viewerState，所以「同一个 clientId 重连」拿回的
+	// 还是那条僵死条目；换 id 才等于要一份干净的 viewer。旧条目在两条 socket 关闭后被服务端
+	// cleanupViewerStateIfUnused 回收，顺带从 backpressuredViewerIds 里摘掉——如果共享 PTY 正是被这一个
+	// 慢 viewer 单独按住的，这一下也把 PTY 放开了。
+	//
+	// 先把字段置空再 close：两条 socket 的**每一个**事件处理器（onopen / onmessage / onerror / onclose）以及
+	// applyRestore 的 then/catch 续体，都以 `this.xxxSocket !== socket` 作为「我已经不是当前连接」的判据，先
+	// 置空即让它们静默退出，不会反过来把新连接的状态清掉、也不会再排一次 scheduleReconnect 与这里的
+	// ensureConnected 抢。onmessage 上那道守卫和 onclose 上的一样是必需的：close() 只是发起关闭握手，此前
+	// 已入队的 message 事件仍会派发（服务端 restore 迟到，本就是走到这个升级分支的条件本身）。
+	private reconnectTerminalSocketsUnderRotatedClientId(): void {
+		if (this.disposed) {
+			return;
+		}
+		this.clientId = generateTerminalClientId();
+		const stalledIoSocket = this.ioSocket;
+		const stalledControlSocket = this.controlSocket;
+		this.ioSocket = null;
+		this.controlSocket = null;
+		this.connectionReady = false;
+		this.restoreCompleted = false;
+		this.lastSentResizeMessage = null;
+		this.outputTextDecoder = new TextDecoder();
+		try {
+			stalledIoSocket?.close(1000, "Resyncing terminal view.");
+			stalledControlSocket?.close(1000, "Resyncing terminal view.");
+		} catch {
+			// 关不掉就让它自己超时；重要的是本实例已经不再认它。
+		}
+		this.clearReconnectTimer();
+		this.reconnectAttempt = 0;
+		this.ensureConnected();
 	}
 
 	private notifyLastError(): void {
@@ -634,12 +759,30 @@ class PersistentTerminal {
 		const ackBytes = options.ackBytes ?? 0;
 		const notifyText = options.notifyText ?? null;
 		const enqueuedAt = performance.now();
+		const generationAtEnqueue = this.discardedTerminalWriteQueueGeneration;
 		this.terminalWriteQueue = this.terminalWriteQueue
 			.catch(() => undefined)
 			.then(
 				async () =>
 					await new Promise<void>((resolve) => {
 						if (this.disposed) {
+							resolve();
+							return;
+						}
+						if (generationAtEnqueue !== this.discardedTerminalWriteQueueGeneration) {
+							// 这条 link 属于已被 discardStalledTerminalWriteQueue 丢弃的旧链：不落屏、不发文本通知、
+							// 不动滚动位置——这些字节已经被随后那份恢复快照整段覆盖，补写只会把快照分片撕开。
+							//
+							// 但 ackBytes 必须照发：服务端在**发送**时就把它们计入了 unacknowledgedOutputBytes，
+							// 而「只发 request_restore、control socket 不重连」这条非升级路径不会触发服务端的
+							// resetUnacknowledgedOutputAccounting。漏发就等于把这批字节的记账永久悬空，PTY 会在
+							// 画面看似已恢复之后继续被背压按住，直到 30s 逐出兜底才放开。
+							if (ackBytes > 0) {
+								this.sendControlMessage({
+									type: "output_ack",
+									bytes: ackBytes,
+								});
+							}
 							resolve();
 							return;
 						}
@@ -870,6 +1013,14 @@ class PersistentTerminal {
 			this.markSocketOpen();
 		};
 		controlSocket.onmessage = (event) => {
+			// 与 onopen / onerror / onclose 同源的守卫，必须在解析帧之前：升级重连
+			// （reconnectTerminalSocketsUnderRotatedClientId）先把 this.controlSocket 置空再 close()，而 close()
+			// 只是发起关闭握手——此前已入队的 message 事件仍会照常派发。旧连接上迟到的一帧 restore 若不挡下，
+			// 会拆掉刚为新连接武装好的恢复门控、把 restoreCompleted 永久压回 false（它自己的 .then() 又被下面
+			// 那道同款守卫挡住，再也没人把它置回 true），并用陈旧快照盖掉刚重画好的画面。
+			if (this.disposed || this.controlSocket !== controlSocket) {
+				return;
+			}
 			let payload: RuntimeTerminalWsServerMessage;
 			try {
 				payload = JSON.parse(String(event.data)) as RuntimeTerminalWsServerMessage;
@@ -883,6 +1034,10 @@ class PersistentTerminal {
 				// 转发实时输出(restoreComplete=false 缓冲),不存在门控漏窗。
 				this.endAwaitingRestoreSnapshotGate();
 				this.restoreCompleted = false;
+				// 到达序号在此刻定死（而非等落屏时再取），resync 才能分辨「本次请求到的那一份」与「更早在途、
+				// 恰好此刻才落屏的那一份」。
+				this.restoreSnapshotArrivalSequence += 1;
+				const arrivedRestoreSnapshotArrivalSequence = this.restoreSnapshotArrivalSequence;
 				void this.applyRestore(payload.snapshot, payload.cols, payload.rows)
 					.then(() => {
 						if (this.disposed || this.controlSocket !== controlSocket) {
@@ -896,7 +1051,14 @@ class PersistentTerminal {
 						if (this.ioSocket) {
 							this.notifyConnectionReady();
 						}
-						this.maybeAutoResumeStaleSession(Boolean(payload.snapshot));
+						// 「重新同步画面」引发的 restore 绝不允许升级成一次杀 agent 的 refreshTaskTerminal，
+						// 见 suppressNextStaleSessionAutoResumeTriggeredByViewResync 的字段注释。判定放在
+						// notifyRestoreSnapshotApplied 之前：那个通知会唤醒 resync 的等待者，而等待者返回后
+						// resync 的 finally 就把闩清了。
+						if (!this.suppressNextStaleSessionAutoResumeTriggeredByViewResync) {
+							this.maybeAutoResumeStaleSession(Boolean(payload.snapshot));
+						}
+						this.notifyRestoreSnapshotApplied(arrivedRestoreSnapshotArrivalSequence);
 					})
 					.catch(() => {
 						if (this.disposed || this.controlSocket !== controlSocket) {
@@ -1205,6 +1367,68 @@ class PersistentTerminal {
 		await trpcClient.runtime.stopTaskSession.mutate({ taskId: this.taskId });
 	}
 
+	// 只把画面重新同步一遍，**不碰 PTY、不碰 agent 进程**——与下面那个 refresh() 是彻底不同的两件事。
+	//
+	// 服务端始终维护一份独立于任何 viewer、实时更新的终端 mirror；「TUI 冻住了」几乎总是这条 viewer 侧的
+	// 通路坏了（客户端写队列卡死、服务端 restoreComplete 闸门永远解不开、半开的 socket 不触发 onclose），
+	// 而不是 agent 出了事。这个方法就是把这条通路整条重建一遍，屏幕从 mirror 重画，agent 全程不知情。
+	//
+	// 递进自愈，一个按钮覆盖已知的全部卡死形态：
+	//   ① 解掉可能正卡着的可见性恢复门控，并按当前真实的 visibilityState 重算派生位（修状态漂移）；
+	//   ② 丢掉可能已经死掉的写队列，否则快照永远排在它后面；
+	//   ③ 重新武装门控、发 request_restore，等一份新快照落屏；
+	//   ④ 等不到就升级：换 clientId 重连两条 socket，服务端在 control 连上时无条件重推快照，握手整条重来。
+	//
+	// 不变式：这条路径上不存在任何能到达 refreshTaskTerminal 的分支——全程只有 WebSocket 上的
+	// request_restore，不进 tRPC、不产生 TaskSessionStartOrigin、不参与自动重启熔断记账、不改
+	// sessionStartedAt。唯一一处需要显式堵的漏是 maybeAutoResumeStaleSession（它挂在每次 restore 应用上），
+	// 由 suppressNextStaleSessionAutoResumeTriggeredByViewResync 这道闩压住。
+	async resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession(): Promise<void> {
+		if (this.disposed) {
+			return;
+		}
+		// 闩必须在发出 request_restore **之前**置起，才能覆盖本次 resync 引发的每一次 restore 应用——
+		// 包括升级重连后服务端无条件重推的那一份。
+		this.suppressNextStaleSessionAutoResumeTriggeredByViewResync = true;
+		try {
+			this.endAwaitingRestoreSnapshotGate();
+			const documentVisible = typeof document === "undefined" || document.visibilityState === "visible";
+			this.documentVisible = documentVisible;
+			this.renderingSuspended = !documentVisible;
+			this.needsSnapshotResync = false;
+			this.discardStalledTerminalWriteQueue();
+			this.beginAwaitingRestoreSnapshotGate();
+			// 基线卡在发出请求的这一刻：在此之前就已到达、只是还没落屏的快照都不算「本次 resync 请求到的
+			// 那一份」，不能拿来提前满足下面的等待（否则闩会在本次快照落地之前就被 finally 清掉）。
+			const restoreSnapshotArrivalSequenceBeforeResyncRequest = this.restoreSnapshotArrivalSequence;
+			this.requestSnapshotResync();
+			if (
+				await this.waitForRestoreSnapshotApplication(
+					restoreSnapshotArrivalSequenceBeforeResyncRequest,
+					RESYNC_TERMINAL_VIEW_RESTORE_SNAPSHOT_DEADLINE_MS,
+				)
+			) {
+				return;
+			}
+			// 升级。重连后服务端会重新走一遍 restore 握手，所以这里不必再发 request_restore；写队列再清一次，
+			// 因为上一轮那份迟到的快照可能已经把切片排进了那条卡死的队列。
+			this.discardStalledTerminalWriteQueue();
+			// 第二段的基线独立重取：它等的是**重连之后**才到达的那份快照。第一段那份迟到的快照虽然已被
+			// applyRestore().then() 里的 `this.controlSocket !== controlSocket` 守卫挡在水位之外，但把这条
+			// 不变式押在另一个函数的守卫上太脆——在本地把基线取准，两段等待各自的语义才是自洽的。
+			const restoreSnapshotArrivalSequenceBeforeEscalatedReconnect = this.restoreSnapshotArrivalSequence;
+			this.reconnectTerminalSocketsUnderRotatedClientId();
+			await this.waitForRestoreSnapshotApplication(
+				restoreSnapshotArrivalSequenceBeforeEscalatedReconnect,
+				RESYNC_TERMINAL_VIEW_ESCALATED_RECONNECT_RESTORE_SNAPSHOT_DEADLINE_MS,
+			);
+		} finally {
+			// 无条件清闩（成功应用 / 整体超时放弃都算流程终结）：留着不清等于把「自动接回陈旧会话」这个
+			// 功能在这个终端实例上永久关掉。
+			this.suppressNextStaleSessionAutoResumeTriggeredByViewResync = false;
+		}
+	}
+
 	// taskSessionStartOriginDeclaredByClient 纯归因、不改行为：默认不传即由服务端记成 refresh_task_terminal
 	// （人点的刷新），只有 maybeAutoResumeStaleSession 这条自动路径显式声明自己。不这样声明的话，服务端
 	// 收到的两种请求逐字相同，而 refresh 实测占 pty 创建量的 68%——「这 68% 里有多少是程序自己点的」
@@ -1247,6 +1471,8 @@ class PersistentTerminal {
 		}
 		this.clearReconnectTimer();
 		this.clearAwaitingRestoreSnapshotTimeoutTimer();
+		// 在途的 resync 等待者不再可能被唤醒；丢掉引用，让它们各自到点以「没等到」收场。
+		this.restoreSnapshotApplicationWaiters.clear();
 		this.unmount(this.visibleContainer);
 		this.ioSocket?.close();
 		this.controlSocket?.close();

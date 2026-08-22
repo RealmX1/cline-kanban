@@ -35,6 +35,11 @@ export type PtySessionSpawnReason = "task_agent_session" | "shell_session" | "un
 // 前四个是服务端自己判定的；后三个必须由**客户端声明**，因为服务端收到的请求形状完全相同——
 // 「用户手点 Restart」与「前端发现会话已陈旧、自动续跑」打到的是同一个 refreshTaskTerminal，
 // 实测占创建量 68% 的 refresh_task_terminal 里究竟有多少是人点的，不加声明就永远分不出来。
+//
+// 基线变更提示（终端面板加上「重新同步画面」之后）：那 68% 里有相当一部分是「TUI 冻住了，但除了重启没
+// 别的按钮可点」。resync 走的是纯 WebSocket 的 request_restore，不产生任何会话启动，因此**不会**出现在
+// 这份归因里。于是 refresh_task_terminal 的占比预期会下降——那是归因信噪比的改善（剩下的更接近「真的
+// 需要换一代 PTY」），不是回归。下次看到这条占比骤降，先想到这件事，别当成异常去查。
 export type TaskSessionStartOrigin =
 	| "external_entry_point"
 	| "refresh_task_terminal"

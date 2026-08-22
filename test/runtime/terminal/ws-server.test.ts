@@ -661,4 +661,117 @@ describe("createTerminalWebSocketBridge", () => {
 		await closeSocket(ioSocket.socket);
 		await closeSocket(controlSocket.socket);
 	});
+
+	// 下面四条守的都是同一类故障:服务端把一条 viewer(或整条 PTY)**永久**卡住,而且不产生任何
+	// 错误信号——屏幕全静止、卡片却还在跳「agent 在算」。每一条对应一处原本没有上限的等待。
+	describe("永久卡死的兜底", () => {
+		function buildIoUrl(clientId: string): string {
+			return `${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=${clientId}`;
+		}
+
+		function buildControlUrl(clientId: string): string {
+			return `${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=${clientId}`;
+		}
+
+		// 假定时器必须在**目标定时器被武装之前**装上——vi.useFakeTimers() 只替换全局函数，
+		// 捕获不到此前已经用真 setTimeout 排好的那一个。所以下面每条用例都各自挑准切换时机。
+		// socket 收发走真实 I/O（事件驱动、不吃定时器），快进期间与之后都照常流转。
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("客户端永远不回 restore_complete 时，服务端到点强开闸门把扣住的输出放出去", async () => {
+			// 握手超时是在 control 连上的那一刻武装的，所以假定时器要赶在开 socket 之前装上。
+			vi.useFakeTimers();
+			const ioSocket = await openQueuedWebSocket(buildIoUrl("client-stuck-handshake"));
+			const controlSocket = await openQueuedWebSocket(buildControlUrl("client-stuck-handshake"));
+			await waitForControlMessage(controlSocket, (message) => message.type === "restore");
+
+			// 故意不回 restore_complete。旧实现里这条 viewer 从此一个字节都收不到，而且因为一个字节
+			// 都没发出去，连背压都不会触发——PTY 照跑、lastOutputAt 照刷、卡片照跳。
+			terminalManager.emitOutput(TASK_ID, "held behind the gate");
+			await vi.advanceTimersByTimeAsync(10_100);
+			vi.useRealTimers();
+
+			await expect(waitForIoMessage(ioSocket)).resolves.toEqual(Buffer.from("held behind the gate", "utf8"));
+
+			await closeSocket(ioSocket.socket);
+			await closeSocket(controlSocket.socket);
+		});
+
+		it("握手期间扣住的输出超过上限就强开闸门，不让服务端内存无上限增长", async () => {
+			const ioSocket = await openQueuedWebSocket(buildIoUrl("client-overflow"));
+			const controlSocket = await openQueuedWebSocket(buildControlUrl("client-overflow"));
+			await waitForControlMessage(controlSocket, (message) => message.type === "restore");
+
+			// 同样不回 restore_complete，但这次靠输出量本身把缓冲顶穿（上限 4MB）。
+			const oneMegabyteOfOutput = "y".repeat(1024 * 1024);
+			for (let emitIndex = 0; emitIndex < 5; emitIndex += 1) {
+				terminalManager.emitOutput(TASK_ID, oneMegabyteOfOutput);
+			}
+
+			// 闸门被溢出强开 ⇒ 扣住的输出开始上线。旧实现里这里永远收不到任何东西。
+			const firstFrame = await waitForIoMessage(ioSocket);
+			expect(firstFrame.byteLength).toBeGreaterThan(0);
+
+			await closeSocket(ioSocket.socket);
+			await closeSocket(controlSocket.socket);
+		});
+
+		it("一个 viewer 背压卡住超过上限时长就被逐出，共享 PTY 随之恢复", async () => {
+			const ioSocket = await openQueuedWebSocket(buildIoUrl("client-wedged-backpressure"));
+			const controlSocket = await openQueuedWebSocket(buildControlUrl("client-wedged-backpressure"));
+			await waitForControlMessage(controlSocket, (message) => message.type === "restore");
+			controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
+			// 先让一小段输出真的上线，确认服务端已经收下 restore_complete、闸门确实开了。
+			// 不确认就切假定时器的话，后面那 120KB 会被扣在握手缓冲里，压根走不到背压那一步。
+			terminalManager.emitOutput(TASK_ID, "gate-open");
+			await waitForIoMessage(ioSocket);
+
+			// 逐出定时器是在「进入背压暂停」的那一刻武装的，所以假定时器装在这一步之前即可。
+			vi.useFakeTimers();
+			// 一个 ack 都不发：跨过高水位后 PTY 被这一个 viewer 单独按住。
+			terminalManager.emitOutput(TASK_ID, "z".repeat(120_000));
+			await vi.advanceTimersByTimeAsync(20);
+			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
+			expect(terminalManager.resumeOutput).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(30_100);
+			vi.useRealTimers();
+
+			// 逐出 → close → ioState.dispose → 摘出 backpressuredViewerIds → PTY 放开。
+			await waitForAssertion(() => {
+				expect(terminalManager.resumeOutput.mock.calls.length).toBeGreaterThan(0);
+			}, 2_000);
+
+			await closeSocket(ioSocket.socket);
+			await closeSocket(controlSocket.socket);
+		});
+
+		it("control socket 重连后，丢掉的那批 ack 不再把共享 PTY 永久按住", async () => {
+			const ioSocket = await openQueuedWebSocket(buildIoUrl("client-ack-drift"));
+			const controlSocketBeforeReconnect = await openQueuedWebSocket(buildControlUrl("client-ack-drift"));
+			await waitForControlMessage(controlSocketBeforeReconnect, (message) => message.type === "restore");
+			controlSocketBeforeReconnect.socket.send(JSON.stringify({ type: "restore_complete" }));
+
+			terminalManager.emitOutput(TASK_ID, "z".repeat(120_000));
+			await waitForAssertion(() => {
+				expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
+			}, 1_000);
+			expect(terminalManager.resumeOutput).not.toHaveBeenCalled();
+
+			// control 抖断重连：在途的那批 ack 就此永远补不回来。ack 记在 io 侧、却从 control 上来，
+			// 旧实现里这份计数于是永远降不回低水位，canResumeOutput 恒假，PTY 永久暂停。
+			await closeSocket(controlSocketBeforeReconnect.socket);
+			const controlSocketAfterReconnect = await openQueuedWebSocket(buildControlUrl("client-ack-drift"));
+			await waitForControlMessage(controlSocketAfterReconnect, (message) => message.type === "restore");
+
+			await waitForAssertion(() => {
+				expect(terminalManager.resumeOutput.mock.calls.length).toBeGreaterThan(0);
+			}, 1_000);
+
+			await closeSocket(ioSocket.socket);
+			await closeSocket(controlSocketAfterReconnect.socket);
+		});
+	});
 });
