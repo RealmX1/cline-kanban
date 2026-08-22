@@ -44,6 +44,16 @@ export interface TerminalWebSocketBridge {
 interface IoOutputState {
 	enqueueOutput: (chunk: Buffer) => void;
 	acknowledgeOutput: (bytes: number) => void;
+	/**
+	 * 把未确认字节数清零并重新评估背压。
+	 *
+	 * 存在的理由是一处真实的跨 socket 记账错位：output_ack 从 control socket 上来，却记在 io socket 的
+	 * 状态里。control 抖断重连时这份计数不会归零（只有 io 重连才会重建 IoOutputState），丢掉的那批 ack
+	 * 永远补不回来——残值若卡在低水位之上且曾越过高水位，canResumeOutput 将永不为真，PTY 永久暂停。
+	 * control 重连本身就意味着这条 viewer 要重走一遍 restore 握手、屏幕会被一份新快照整段覆盖，
+	 * 在途字节全部作废，所以此刻归零不但安全，而且是唯一正确的对账方式。
+	 */
+	resetUnacknowledgedOutputAccounting: () => void;
 	dispose: () => void;
 }
 
@@ -53,12 +63,19 @@ interface IoOutputState {
 interface TerminalViewerState {
 	clientId: string;
 	pendingOutputChunks: Buffer[];
+	pendingOutputByteLength: number;
 	restoreComplete: boolean;
+	restoreHandshakeCompletionTimeoutTimer: ReturnType<typeof setTimeout> | null;
 	ioState: IoOutputState | null;
 	ioSocket: WebSocket | null;
 	controlSocket: WebSocket | null;
 	detachControlListener: (() => void) | null;
+	appendPendingOutput: (chunk: Buffer) => void;
+	resetPendingOutput: () => void;
 	flushPendingOutput: () => void;
+	/** 强开 restore 闸门并把扣住的输出放出去。兜底超时与缓冲溢出共用这一条出口。 */
+	releaseRestoreHandshakeGate: (releaseReason: "handshake-timeout" | "pending-buffer-overflow") => void;
+	clearRestoreHandshakeCompletionTimeoutTimer: () => void;
 }
 
 interface TerminalStreamState {
@@ -91,6 +108,25 @@ const OUTPUT_RESUME_CHECK_INTERVAL_MS = 16;
 // [tui-freeze] 诊断:PTY 被 ack 背压暂停期间,新按键的 shell 回显完全停产——用户体感即
 // 「键盘输入冻结」。暂停超过该阈值才打日志,短暂正常流控不刷屏。
 const OUTPUT_BACKPRESSURE_PAUSE_WARN_THRESHOLD_MS = 200;
+// 背压暂停的时长上限。既有设计写明「只有最后一个慢 viewer 追上**或断开**才 resume」——但从来没有
+// 任何东西保证这两件事会发生:一条半开的 socket 既不 drain 也不 close,它的 unack 计数就永远停在
+// 高水位之上,共享 PTY 于是被这一个 viewer 永久按住,其他标签页跟着一起哑。超过这个时长就直接把这条
+// viewer 逐出(terminate → close → ioState.dispose → resume),宁可断一个人,不能拖死一条 PTY。
+const MAX_OUTPUT_BACKPRESSURE_PAUSE_BEFORE_EVICTING_VIEWER_MS = 30_000;
+// restore 握手的服务端兜底超时。restoreComplete 为 false 期间,这条 viewer 的实时输出**一个字节都不上线**
+// (全进 pendingOutputChunks),而解锁的唯一途径是客户端回 restore_complete。客户端那边卡住(写队列死锁、
+// 控制帧丢失)就没有任何东西能把闸门放开:屏幕 100% 静止,却因为一个字节都没发出去而**永不触发背压**、
+// PTY 照跑、lastOutputAt 照刷,看板卡片仍显示「agent 在算」——正是最难判读的那种冻结。
+// 到点强开闸门 + flush:宁可让屏幕从一份过期状态续写,也不能让 viewer 永久失聪。
+const RESTORE_HANDSHAKE_COMPLETION_TIMEOUT_MS = 10_000;
+// restore 握手期间每个 viewer 能扣住的输出上限。原本无上限——一条永不回 restore_complete 的 viewer
+// 会让服务端 RSS 随 PTY 输出单调增长。溢出即强开闸门;闸门开了仍下不去(io socket 根本没连上)就从队首
+// 丢最旧的。丢弃是有据的降级:服务端 mirror 持完整 scrollback,下一份 restore 快照会把丢掉的内容带回来。
+const MAX_PENDING_OUTPUT_BYTES_BUFFERED_DURING_RESTORE_HANDSHAKE = 4 * 1024 * 1024;
+// WebSocket 心跳。半开连接(睡眠唤醒、NAT 空闲超时、中间盒静默丢弃)不会触发 close 事件:socket 停在
+// OPEN、字节永不到达、客户端也就永不重连。ping/pong 是唯一能把这种「看起来还连着」的连接判死的手段。
+const WEBSOCKET_HEARTBEAT_PING_INTERVAL_MS = 20_000;
+const MAX_CONSECUTIVE_MISSED_WEBSOCKET_HEARTBEAT_PONGS_BEFORE_TERMINATE = 2;
 
 function getWebSocketTransportSocket(ws: WebSocket): Socket | null {
 	const transportSocket = (ws as WebSocket & { _socket?: Socket })._socket;
@@ -179,7 +215,11 @@ export function createTerminalWebSocketBridge({
 		terminalStreamStates.delete(connectionKey);
 	};
 
-	const getOrCreateViewerState = (streamState: TerminalStreamState, clientId: string): TerminalViewerState => {
+	const getOrCreateViewerState = (
+		streamState: TerminalStreamState,
+		clientId: string,
+		taskId: string,
+	): TerminalViewerState => {
 		const existing = streamState.viewers.get(clientId);
 		if (existing) {
 			return existing;
@@ -187,19 +227,63 @@ export function createTerminalWebSocketBridge({
 		const created: TerminalViewerState = {
 			clientId,
 			pendingOutputChunks: [],
+			pendingOutputByteLength: 0,
 			restoreComplete: false,
+			restoreHandshakeCompletionTimeoutTimer: null,
 			ioState: null,
 			ioSocket: null,
 			controlSocket: null,
 			detachControlListener: null,
+			appendPendingOutput: (chunk: Buffer) => {
+				created.pendingOutputChunks.push(chunk);
+				created.pendingOutputByteLength += chunk.byteLength;
+				if (created.pendingOutputByteLength <= MAX_PENDING_OUTPUT_BYTES_BUFFERED_DURING_RESTORE_HANDSHAKE) {
+					return;
+				}
+				created.releaseRestoreHandshakeGate("pending-buffer-overflow");
+				if (created.pendingOutputByteLength <= MAX_PENDING_OUTPUT_BYTES_BUFFERED_DURING_RESTORE_HANDSHAKE) {
+					return;
+				}
+				// 闸门开了还下不去 = 这条 viewer 的 io socket 根本没接上，没有出口。从队首丢最旧的，
+				// 保住服务端的内存;丢掉的内容仍在服务端 mirror 里，下一份 restore 快照会带回来。
+				while (
+					created.pendingOutputChunks.length > 0 &&
+					created.pendingOutputByteLength > MAX_PENDING_OUTPUT_BYTES_BUFFERED_DURING_RESTORE_HANDSHAKE
+				) {
+					const droppedChunk = created.pendingOutputChunks.shift();
+					created.pendingOutputByteLength -= droppedChunk?.byteLength ?? 0;
+				}
+			},
+			resetPendingOutput: () => {
+				created.pendingOutputChunks = [];
+				created.pendingOutputByteLength = 0;
+			},
 			flushPendingOutput: () => {
 				if (!created.restoreComplete || !created.ioState || created.pendingOutputChunks.length === 0) {
 					return;
 				}
-				for (const chunk of created.pendingOutputChunks) {
+				const flushedChunks = created.pendingOutputChunks;
+				created.resetPendingOutput();
+				for (const chunk of flushedChunks) {
 					created.ioState.enqueueOutput(chunk);
 				}
-				created.pendingOutputChunks = [];
+			},
+			releaseRestoreHandshakeGate: (releaseReason) => {
+				created.clearRestoreHandshakeCompletionTimeoutTimer();
+				if (created.restoreComplete) {
+					return;
+				}
+				logTuiFreezeWarning(
+					`[tui-freeze] restore-handshake-force-release taskId=${taskId} clientId=${clientId} reason=${releaseReason} pendingBytes=${created.pendingOutputByteLength} hasIoSocket=${created.ioSocket !== null}`,
+				);
+				created.restoreComplete = true;
+				created.flushPendingOutput();
+			},
+			clearRestoreHandshakeCompletionTimeoutTimer: () => {
+				if (created.restoreHandshakeCompletionTimeoutTimer !== null) {
+					clearTimeout(created.restoreHandshakeCompletionTimeoutTimer);
+					created.restoreHandshakeCompletionTimeoutTimer = null;
+				}
 			},
 		};
 		streamState.viewers.set(clientId, created);
@@ -216,6 +300,8 @@ export function createTerminalWebSocketBridge({
 		}
 		viewerState.detachControlListener?.();
 		viewerState.detachControlListener = null;
+		viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
+		viewerState.resetPendingOutput();
 		streamState.viewers.delete(viewerState.clientId);
 		cleanupTerminalStreamStateIfUnused(connectionKey);
 	};
@@ -238,6 +324,36 @@ export function createTerminalWebSocketBridge({
 		let unacknowledgedOutputBytes = 0;
 		let outputPausedAt: number | null = null;
 		let outputPauseReason: "ack-high-water" | "socket-buffered" | null = null;
+		let backpressureEvictionTimer: ReturnType<typeof setTimeout> | null = null;
+
+		const clearBackpressureEvictionTimer = () => {
+			if (backpressureEvictionTimer !== null) {
+				clearTimeout(backpressureEvictionTimer);
+				backpressureEvictionTimer = null;
+			}
+		};
+
+		const armBackpressureEvictionTimer = () => {
+			clearBackpressureEvictionTimer();
+			backpressureEvictionTimer = setTimeout(() => {
+				backpressureEvictionTimer = null;
+				if (!outputPaused) {
+					return;
+				}
+				logTuiFreezeWarning(
+					`[tui-freeze] output-backpressure-eviction taskId=${taskId} clientId=${clientId} pausedForMs=${outputPausedAt === null ? "unknown" : Date.now() - outputPausedAt} reason=${outputPauseReason ?? "unknown"} unackBytes=${unacknowledgedOutputBytes} socketBufferedBytes=${ws.bufferedAmount}`,
+				);
+				// terminate 而不是 close：会拖到这一步的往往正是那种「关不掉」的半开连接，close 只是排一个
+				// 可能永远发不出去的关闭帧。terminate 直接销毁底层 socket，close 事件随之触发，
+				// dispose 在那条路径上把自己从 backpressuredViewerIds 摘掉并放开共享 PTY。
+				try {
+					ws.terminate();
+				} catch {
+					// Ignore termination errors; the close handler still runs the cleanup.
+				}
+			}, MAX_OUTPUT_BACKPRESSURE_PAUSE_BEFORE_EVICTING_VIEWER_MS);
+			backpressureEvictionTimer.unref?.();
+		};
 
 		const logOutputPauseEndedIfSlow = (endTrigger: "resume" | "dispose") => {
 			if (outputPausedAt === null) {
@@ -282,6 +398,7 @@ export function createTerminalWebSocketBridge({
 				outputPaused = false;
 				logOutputPauseEndedIfSlow("resume");
 				clearResumeCheck();
+				clearBackpressureEvictionTimer();
 				streamState.backpressuredViewerIds.delete(clientId);
 				if (streamState.backpressuredViewerIds.size === 0) {
 					terminalManager.resumeOutput(taskId);
@@ -325,6 +442,7 @@ export function createTerminalWebSocketBridge({
 					terminalManager.pauseOutput(taskId);
 				}
 				scheduleResumeCheck();
+				armBackpressureEvictionTimer();
 			}
 		};
 
@@ -390,12 +508,17 @@ export function createTerminalWebSocketBridge({
 				unacknowledgedOutputBytes = Math.max(0, unacknowledgedOutputBytes - Math.max(0, Math.floor(bytes)));
 				checkResumeAfterBackpressure();
 			},
+			resetUnacknowledgedOutputAccounting: () => {
+				unacknowledgedOutputBytes = 0;
+				checkResumeAfterBackpressure();
+			},
 			dispose: () => {
 				if (outputFlushTimer !== null) {
 					clearTimeout(outputFlushTimer);
 					outputFlushTimer = null;
 				}
 				clearResumeCheck();
+				clearBackpressureEvictionTimer();
 				if (outputPaused) {
 					outputPaused = false;
 					logOutputPauseEndedIfSlow("dispose");
@@ -427,10 +550,48 @@ export function createTerminalWebSocketBridge({
 						viewerState.ioState.enqueueOutput(chunk);
 						continue;
 					}
-					viewerState.pendingOutputChunks.push(chunk);
+					viewerState.appendPendingOutput(chunk);
 				}
 			},
 		});
+	};
+
+	// 周期 ping,连续若干次收不到 pong 即判死。没有这一层的话,半开连接会一直停在 OPEN:服务端以为
+	// 还连着(继续往一个黑洞里发字节、继续等一个永远不来的 restore_complete / output_ack),客户端也
+	// 因为没有 close 事件而不会重连。返回值是解绑函数,由各自的 close 处理器调用。
+	const attachWebSocketHeartbeat = (ws: WebSocket, socketRole: "io" | "control", taskId: string, clientId: string) => {
+		let consecutiveMissedPongCount = 0;
+		const handlePong = () => {
+			consecutiveMissedPongCount = 0;
+		};
+		ws.on("pong", handlePong);
+		const heartbeatTimer = setInterval(() => {
+			if (ws.readyState !== ws.OPEN) {
+				return;
+			}
+			if (consecutiveMissedPongCount >= MAX_CONSECUTIVE_MISSED_WEBSOCKET_HEARTBEAT_PONGS_BEFORE_TERMINATE) {
+				logTuiFreezeWarning(
+					`[tui-freeze] websocket-heartbeat-timeout taskId=${taskId} clientId=${clientId} socketRole=${socketRole} missedPongs=${consecutiveMissedPongCount}`,
+				);
+				try {
+					ws.terminate();
+				} catch {
+					// Ignore termination errors; the close handler still runs the cleanup.
+				}
+				return;
+			}
+			consecutiveMissedPongCount += 1;
+			try {
+				ws.ping();
+			} catch {
+				// Ignore ping errors; the next tick escalates to terminate.
+			}
+		}, WEBSOCKET_HEARTBEAT_PING_INTERVAL_MS);
+		heartbeatTimer.unref?.();
+		return () => {
+			clearInterval(heartbeatTimer);
+			ws.off("pong", handlePong);
+		};
 	};
 
 	server.on("upgrade", (request, socket, head) => {
@@ -486,13 +647,14 @@ export function createTerminalWebSocketBridge({
 		const connectionKey = buildConnectionKey(workspaceId, taskId);
 		terminalManager.recoverStaleSession(taskId);
 		const streamState = getOrCreateTerminalStreamState(connectionKey);
-		const viewerState = getOrCreateViewerState(streamState, clientId);
+		const viewerState = getOrCreateViewerState(streamState, clientId, taskId);
 		const previousIoSocket = viewerState.ioSocket;
 		viewerState.ioState?.dispose();
 		viewerState.ioState = createIoOutputState(ws, streamState, clientId, taskId, terminalManager);
 		viewerState.ioSocket = ws;
 		viewerState.flushPendingOutput();
 		ensureOutputListener(streamState, taskId, terminalManager);
+		const detachIoHeartbeat = attachWebSocketHeartbeat(ws, "io", taskId, clientId);
 		if (previousIoSocket && previousIoSocket !== ws) {
 			previousIoSocket.close(1000, "Replaced by newer terminal stream.");
 		}
@@ -510,6 +672,7 @@ export function createTerminalWebSocketBridge({
 		});
 
 		ws.on("close", () => {
+			detachIoHeartbeat();
 			if (viewerState.ioSocket !== ws) {
 				return;
 			}
@@ -528,12 +691,17 @@ export function createTerminalWebSocketBridge({
 		const connectionKey = buildConnectionKey(workspaceId, taskId);
 		terminalManager.recoverStaleSession(taskId);
 		const streamState = getOrCreateTerminalStreamState(connectionKey);
-		const viewerState = getOrCreateViewerState(streamState, clientId);
+		const viewerState = getOrCreateViewerState(streamState, clientId, taskId);
 		const previousControlSocket = viewerState.controlSocket;
 		viewerState.restoreComplete = false;
-		viewerState.pendingOutputChunks = [];
+		viewerState.resetPendingOutput();
 		viewerState.controlSocket = ws;
+		// control 重连意味着这条 viewer 要重走一遍 restore 握手、屏幕会被新快照整段覆盖，在途字节全部作废。
+		// 借这一刻把 io 侧的未确认字节数归零，堵掉「control 抖断丢掉那批 ack → 残值永远压在低水位之上 →
+		// PTY 永久暂停」那条路（见 resetUnacknowledgedOutputAccounting 的注释）。
+		viewerState.ioState?.resetUnacknowledgedOutputAccounting();
 		ensureOutputListener(streamState, taskId, terminalManager);
+		const detachControlHeartbeat = attachWebSocketHeartbeat(ws, "control", taskId, clientId);
 		viewerState.detachControlListener?.();
 		viewerState.detachControlListener = terminalManager.attach(taskId, {
 			onState: (summary) => {
@@ -559,7 +727,15 @@ export function createTerminalWebSocketBridge({
 		// to jump straight to the latest screen via request_restore.
 		const sendRestoreSnapshot = (): void => {
 			viewerState.restoreComplete = false;
-			viewerState.pendingOutputChunks = [];
+			viewerState.resetPendingOutput();
+			// 兜底:客户端迟迟不回 restore_complete(写队列死锁、控制帧丢失)时强开闸门,不让这条 viewer
+			// 永久失聪。见 RESTORE_HANDSHAKE_COMPLETION_TIMEOUT_MS 的注释。
+			viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
+			viewerState.restoreHandshakeCompletionTimeoutTimer = setTimeout(() => {
+				viewerState.restoreHandshakeCompletionTimeoutTimer = null;
+				viewerState.releaseRestoreHandshakeGate("handshake-timeout");
+			}, RESTORE_HANDSHAKE_COMPLETION_TIMEOUT_MS);
+			viewerState.restoreHandshakeCompletionTimeoutTimer.unref?.();
 			void terminalManager
 				.getRestoreSnapshot(taskId)
 				.then((snapshot) => {
@@ -607,6 +783,7 @@ export function createTerminalWebSocketBridge({
 			}
 
 			if (message.type === "restore_complete") {
+				viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
 				viewerState.restoreComplete = true;
 				viewerState.flushPendingOutput();
 				return;
@@ -618,12 +795,14 @@ export function createTerminalWebSocketBridge({
 		});
 
 		ws.on("close", () => {
+			detachControlHeartbeat();
 			if (viewerState.controlSocket !== ws) {
 				return;
 			}
 			viewerState.controlSocket = null;
 			viewerState.detachControlListener?.();
 			viewerState.detachControlListener = null;
+			viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
 			cleanupViewerStateIfUnused(connectionKey, streamState, viewerState);
 		});
 	});

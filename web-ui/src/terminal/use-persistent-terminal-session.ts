@@ -40,6 +40,8 @@ export interface UsePersistentTerminalSessionResult {
 	hasRenderedAnyTerminalContent: boolean;
 	isStopping: boolean;
 	isRefreshing: boolean;
+	/** 「重新同步画面」进行中 —— 与 isRefreshing（重启 agent 会话）是两件独立的事，各自转各自的 spinner。 */
+	isResyncingTerminalView: boolean;
 	isSearchOpen: boolean;
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
@@ -50,6 +52,7 @@ export interface UsePersistentTerminalSessionResult {
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	openTerminalSearch: () => void;
 	refreshTerminal: () => Promise<void>;
+	resyncTerminalView: () => Promise<void>;
 	scrollTerminalToLatest: () => void;
 	stopTerminal: () => Promise<void>;
 }
@@ -94,6 +97,7 @@ export function usePersistentTerminalSession({
 	const [hasRenderedAnyTerminalContent, setHasRenderedAnyTerminalContent] = useState(false);
 	const [isStopping, setIsStopping] = useState(false);
 	const [isRefreshing, setIsRefreshing] = useState(false);
+	const [isResyncingTerminalView, setIsResyncingTerminalView] = useState(false);
 	const [isSearchOpen, setIsSearchOpen] = useState(false);
 	const [searchOpenRequestKey, setSearchOpenRequestKey] = useState(0);
 	const [searchResults, setSearchResults] = useState<TerminalSearchResultState>(getEmptyTerminalSearchResults);
@@ -313,6 +317,24 @@ export function usePersistentTerminalSession({
 		}
 	}, []);
 
+	// 与 refreshTerminal 并列的另一件事：只重画屏幕，不动 agent 进程。走同一套 lastError 出口，
+	// 但状态位分开——两者可以各自独立地转 spinner。
+	const resyncTerminalView = useCallback(async () => {
+		const terminal = terminalRef.current;
+		if (!terminal) {
+			return;
+		}
+		setIsResyncingTerminalView(true);
+		try {
+			await terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			setLastError(message);
+		} finally {
+			setIsResyncingTerminalView(false);
+		}
+	}, []);
+
 	const clearTerminal = useCallback(() => {
 		terminalRef.current?.clear();
 	}, []);
@@ -344,6 +366,7 @@ export function usePersistentTerminalSession({
 		hasRenderedAnyTerminalContent,
 		isStopping,
 		isRefreshing,
+		isResyncingTerminalView,
 		isSearchOpen,
 		searchOpenRequestKey,
 		searchResults,
@@ -354,6 +377,7 @@ export function usePersistentTerminalSession({
 		findPreviousInTerminal,
 		openTerminalSearch,
 		refreshTerminal,
+		resyncTerminalView,
 		scrollTerminalToLatest,
 		stopTerminal,
 	};

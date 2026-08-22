@@ -11,12 +11,14 @@ import type { TerminalScrollbackTranscriptLogicalLine } from "@/terminal/termina
 // `tsc` 会在这里报错，而不是靠运行期是否恰好走到渲染路径来暴露漂移。
 const {
 	mockRefreshTerminal,
+	mockResyncTerminalView,
 	mockUseIsMobile,
 	mockTerminalInput,
 	mockReadScrollbackTranscript,
 	mockHasRenderedAnyTerminalContent,
 } = vi.hoisted(() => ({
 	mockRefreshTerminal: vi.fn(async () => {}),
+	mockResyncTerminalView: vi.fn(async () => {}),
 	mockUseIsMobile: vi.fn(() => false),
 	mockTerminalInput: vi.fn((_sequence: string) => true),
 	mockReadScrollbackTranscript: vi.fn((): TerminalScrollbackTranscriptLogicalLine[] => []),
@@ -30,6 +32,7 @@ vi.mock("@/terminal/use-persistent-terminal-session", () => ({
 		hasRenderedAnyTerminalContent: mockHasRenderedAnyTerminalContent(),
 		isStopping: false,
 		isRefreshing: false,
+		isResyncingTerminalView: false,
 		isSearchOpen: false,
 		searchOpenRequestKey: 0,
 		searchResults: { resultCount: 0, resultIndex: -1 },
@@ -40,6 +43,7 @@ vi.mock("@/terminal/use-persistent-terminal-session", () => ({
 		findPreviousInTerminal: vi.fn(() => false),
 		openTerminalSearch: vi.fn(),
 		refreshTerminal: mockRefreshTerminal,
+		resyncTerminalView: mockResyncTerminalView,
 		scrollTerminalToLatest: vi.fn(),
 		stopTerminal: vi.fn(async () => {}),
 	}),
@@ -100,6 +104,13 @@ function createSummary(agentId: RuntimeAgentId, taskId = "task-1"): RuntimeTaskS
 	};
 }
 
+/**
+ * 确认弹窗走 Radix Portal，挂在 document.body 上而不是测试容器里 —— 只查 container 会永远查不到它。
+ */
+function findPortalButtonByLabel(label: string): HTMLButtonElement | null {
+	return [...document.body.querySelectorAll("button")].find((button) => button.textContent?.trim() === label) ?? null;
+}
+
 describe("AgentTerminalPanel", () => {
 	let container: HTMLDivElement;
 	let root: Root;
@@ -109,6 +120,7 @@ describe("AgentTerminalPanel", () => {
 		document.body.appendChild(container);
 		root = createRoot(container);
 		mockRefreshTerminal.mockClear();
+		mockResyncTerminalView.mockClear();
 		mockTerminalInput.mockClear();
 		mockReadScrollbackTranscript.mockClear();
 		mockUseIsMobile.mockReturnValue(false);
@@ -122,7 +134,7 @@ describe("AgentTerminalPanel", () => {
 		container.remove();
 	});
 
-	it("shows refresh in the compact terminal header without requiring a close button", () => {
+	it("shows restart in the compact terminal header without requiring a close button", () => {
 		act(() => {
 			root.render(
 				<TooltipProvider>
@@ -137,15 +149,20 @@ describe("AgentTerminalPanel", () => {
 			);
 		});
 
-		const refreshButton = container.querySelector<HTMLButtonElement>('[aria-label="Refresh terminal session"]');
+		const refreshButton = container.querySelector<HTMLButtonElement>('[aria-label="Restart agent session"]');
 		expect(refreshButton).not.toBeNull();
 		expect(refreshButton?.disabled).toBe(false);
 		expect(container.querySelector('[aria-label="Close terminal"]')).toBeNull();
 
+		// createSummary 是 running = 活跃回合，所以这一下点出来的是确认弹窗，不是直接重启。
 		act(() => {
 			refreshButton?.click();
 		});
+		expect(mockRefreshTerminal).not.toHaveBeenCalled();
 
+		act(() => {
+			findPortalButtonByLabel("Restart session")?.click();
+		});
 		expect(mockRefreshTerminal).toHaveBeenCalledTimes(1);
 	});
 
@@ -274,7 +291,7 @@ describe("AgentTerminalPanel", () => {
 			);
 		});
 
-		expect(container.querySelector('[aria-label="Refresh terminal session"]')).toBeNull();
+		expect(container.querySelector('[aria-label="Restart agent session"]')).toBeNull();
 		expect(container.querySelector('[aria-label="Find in terminal"]')).not.toBeNull();
 	});
 
@@ -391,7 +408,7 @@ describe("AgentTerminalPanel", () => {
 
 		expect(container.textContent).toContain("This session is no longer running.");
 		expect(container.textContent).toContain("machine restart or a local redeploy");
-		const refreshButton = container.querySelector<HTMLButtonElement>('[aria-label="Refresh terminal session"]');
+		const refreshButton = container.querySelector<HTMLButtonElement>('[aria-label="Restart agent session"]');
 		expect(refreshButton?.disabled).toBe(false);
 	});
 
@@ -469,7 +486,7 @@ describe("AgentTerminalPanel", () => {
 			);
 		});
 
-		const refreshButton = container.querySelector<HTMLButtonElement>('[aria-label="Refresh terminal session"]');
+		const refreshButton = container.querySelector<HTMLButtonElement>('[aria-label="Restart agent session"]');
 		expect(refreshButton?.disabled).toBe(true);
 		expect(
 			[...container.querySelectorAll("button")].filter((button) =>
@@ -493,7 +510,7 @@ describe("AgentTerminalPanel", () => {
 			);
 		});
 
-		expect(container.querySelector('[aria-label="Refresh terminal session"]')).toBeNull();
+		expect(container.querySelector('[aria-label="Restart agent session"]')).toBeNull();
 		expect(container.textContent).not.toContain("This session is no longer running.");
 	});
 
@@ -515,6 +532,109 @@ describe("AgentTerminalPanel", () => {
 		expect(container.textContent).not.toContain("This session is no longer running.");
 	});
 });
+
+// 「重新同步画面」与「重启 agent 会话」是两个语义完全不同的动作，而这两个按钮在本面板里要渲染两遍
+// （完整工具栏 / 紧凑头部）。每条断言都在 showSessionToolbar 的两种取值下各跑一遍 —— 历史上这两处并列
+// 的 JSX 正是「改了一处、忘了另一处」的常发地。
+describe.each([true, false])(
+	"画面 resync 与 agent 会话重启的分离（showSessionToolbar=%s）",
+	(showSessionToolbar: boolean) => {
+		let container: HTMLDivElement;
+		let root: Root;
+
+		beforeEach(() => {
+			container = document.createElement("div");
+			document.body.appendChild(container);
+			root = createRoot(container);
+			mockRefreshTerminal.mockClear();
+			mockResyncTerminalView.mockClear();
+			mockUseIsMobile.mockReturnValue(false);
+			mockHasRenderedAnyTerminalContent.mockReturnValue(true);
+		});
+
+		afterEach(() => {
+			act(() => {
+				root.unmount();
+			});
+			container.remove();
+		});
+
+		function renderPanel(props: { taskId?: string; summary: RuntimeTaskSessionSummary }): void {
+			act(() => {
+				root.render(
+					<TooltipProvider>
+						<AgentTerminalPanel
+							taskId={props.taskId ?? "task-1"}
+							workspaceId="workspace-1"
+							summary={props.summary}
+							showSessionToolbar={showSessionToolbar}
+							minimalHeaderTitle="Terminal"
+						/>
+					</TooltipProvider>,
+				);
+			});
+		}
+
+		it("resync 按钮只重画画面，绝不打到重启 agent 会话那条路上", () => {
+			renderPanel({ summary: createSummary("codex") });
+
+			const resyncButton = container.querySelector<HTMLButtonElement>('[aria-label="Resync terminal view"]');
+			expect(resyncButton).not.toBeNull();
+			expect(resyncButton?.disabled).toBe(false);
+
+			act(() => {
+				resyncButton?.click();
+			});
+
+			expect(mockResyncTerminalView).toHaveBeenCalledTimes(1);
+			// 这是本次改动的核心不变式：resync 一路上不存在任何能到达 refreshTaskTerminal 的分支。
+			expect(mockRefreshTerminal).not.toHaveBeenCalled();
+			expect(findPortalButtonByLabel("Restart session")).toBeNull();
+		});
+
+		it("合成 shell 会话没有 agent 可重启，但画面冻住时照样要能 resync", () => {
+			renderPanel({
+				taskId: "__detail_terminal__:task-1",
+				summary: createSummary("codex", "__detail_terminal__:task-1"),
+			});
+
+			expect(container.querySelector('[aria-label="Restart agent session"]')).toBeNull();
+			const resyncButton = container.querySelector<HTMLButtonElement>('[aria-label="Resync terminal view"]');
+			expect(resyncButton).not.toBeNull();
+
+			act(() => {
+				resyncButton?.click();
+			});
+			expect(mockResyncTerminalView).toHaveBeenCalledTimes(1);
+		});
+
+		it("活跃回合里点重启先弹确认；取消掉就什么都不发生", () => {
+			renderPanel({ summary: createSummary("codex") });
+
+			act(() => {
+				container.querySelector<HTMLButtonElement>('[aria-label="Restart agent session"]')?.click();
+			});
+			expect(mockRefreshTerminal).not.toHaveBeenCalled();
+			expect(findPortalButtonByLabel("Restart session")).not.toBeNull();
+
+			act(() => {
+				findPortalButtonByLabel("Cancel")?.click();
+			});
+			expect(mockRefreshTerminal).not.toHaveBeenCalled();
+		});
+
+		it("没有回合在跑时重启不打扰用户，直接执行", () => {
+			renderPanel({ summary: { ...createSummary("codex"), state: "idle", pid: null } });
+
+			act(() => {
+				container.querySelector<HTMLButtonElement>('[aria-label="Restart agent session"]')?.click();
+			});
+
+			expect(mockRefreshTerminal).toHaveBeenCalledTimes(1);
+			expect(findPortalButtonByLabel("Restart session")).toBeNull();
+		});
+	},
+);
 
 describe("describeState / getStateTagStyle（facet 真相源驱动，行为与 legacy state 逐项等价）", () => {
 	function makeStatusSummary(overrides: Partial<RuntimeTaskSessionSummary>): RuntimeTaskSessionSummary {

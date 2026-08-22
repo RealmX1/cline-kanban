@@ -11,6 +11,7 @@ import {
 	Maximize2,
 	MessageSquare,
 	Minimize2,
+	RefreshCw,
 	RotateCcw,
 	ScrollText,
 	Search,
@@ -25,6 +26,16 @@ import { TerminalScrollbackTranscriptReaderPanel } from "@/components/detail-pan
 import { TerminalVirtualKeyInputBar } from "@/components/detail-panels/terminal-virtual-key-input-bar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogBody,
+	AlertDialogCancel,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useIsMobile } from "@/hooks/use-is-mobile";
@@ -41,6 +52,7 @@ interface AgentTerminalSessionControls {
 	hasRenderedAnyTerminalContent: boolean;
 	isStopping: boolean;
 	isRefreshing: boolean;
+	isResyncingTerminalView: boolean;
 	isSearchOpen: boolean;
 	isScrolledAwayFromLatest: boolean;
 	lastError: string | null;
@@ -48,6 +60,7 @@ interface AgentTerminalSessionControls {
 	searchResults: TerminalSearchResultState;
 	stopTerminal: () => Promise<void>;
 	refreshTerminal: () => Promise<void>;
+	resyncTerminalView: () => Promise<void>;
 	closeTerminalSearch: () => void;
 	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
@@ -202,6 +215,120 @@ function AgentTerminalEmptySessionRecoveryNotice({
 				</Button>
 			) : null}
 		</div>
+	);
+}
+
+// 工具条上那两个长得很像、语义却天差地别的按钮，成对抽出来共用。
+//
+// 抽出来的**唯一目的**是杜绝漏改：这两个按钮在本文件里要渲染两遍（完整工具栏 / 紧凑头部），历史上就是
+// 同一段 JSX 抄了两份，改一处忘另一处，于是「打开会话工具栏时看到的还是旧行为」。两处的差别只有
+// iconSize 与 variant，行为必须逐字一致，所以差别做成参数、行为只写一遍。
+//
+// 两个动作的分工：
+// - Resync：只把画面从服务端 mirror 重画一遍，**不碰 agent 进程**。TUI 冻住绝大多数时候坏的是 viewer 这条
+//   通路，不是 agent，所以它排在前面，是「屏幕不动了」的第一顺位解法。
+// - Restart：杀掉 agent 进程再从磁盘 transcript 续跑。它会丢掉当前这一轮（还没落盘），所以在活跃回合里
+//   先弹确认。
+function TerminalViewResyncAndAgentSessionRestartButtons({
+	showAgentSessionRestartButton,
+	canRestartAgentSession,
+	isRestartingAgentSession,
+	isResyncingTerminalView,
+	isAgentSessionInActiveTurn,
+	onResyncTerminalView,
+	onRestartAgentSession,
+	iconSize,
+	variant,
+}: {
+	showAgentSessionRestartButton: boolean;
+	canRestartAgentSession: boolean;
+	isRestartingAgentSession: boolean;
+	isResyncingTerminalView: boolean;
+	isAgentSessionInActiveTurn: boolean;
+	onResyncTerminalView: () => Promise<void>;
+	onRestartAgentSession: () => Promise<void>;
+	iconSize: number;
+	variant: "default" | "ghost";
+}): ReactElement {
+	const [isRestartConfirmOpen, setIsRestartConfirmOpen] = useState(false);
+	return (
+		<>
+			{/* 门控**刻意**与重启按钮不同：resync 不需要看板卡片、不调 tRPC、纯 WebSocket，所以合成 shell
+			    会话（__home_ / __detail_terminal__）同样能用——那边一样会遇到「屏幕冻住」。
+			    showAgentSessionRestartButton 那条排除只适用于「重启 agent 会话」。 */}
+			<Tooltip side="top" content="Resync the terminal view from the server (does not touch the agent process)">
+				<Button
+					icon={isResyncingTerminalView ? <Spinner size={iconSize} /> : <RefreshCw size={iconSize} />}
+					variant={variant}
+					size="sm"
+					onClick={() => {
+						void onResyncTerminalView();
+					}}
+					disabled={isResyncingTerminalView}
+					aria-label="Resync terminal view"
+				/>
+			</Tooltip>
+			{showAgentSessionRestartButton ? (
+				<Tooltip
+					side="top"
+					content="Restart this agent session — kills the agent process and resumes it from its transcript"
+				>
+					<Button
+						icon={isRestartingAgentSession ? <Spinner size={iconSize} /> : <RotateCcw size={iconSize} />}
+						variant={variant}
+						size="sm"
+						onClick={() => {
+							// 活跃回合里重启会丢掉正在跑的这一轮，先问一句；空闲时不打扰。
+							if (isAgentSessionInActiveTurn) {
+								setIsRestartConfirmOpen(true);
+								return;
+							}
+							void onRestartAgentSession();
+						}}
+						disabled={!canRestartAgentSession || isRestartingAgentSession}
+						aria-label="Restart agent session"
+					/>
+				</Tooltip>
+			) : null}
+			<AlertDialog
+				open={isRestartConfirmOpen}
+				onOpenChange={(isOpen) => {
+					if (!isOpen) {
+						setIsRestartConfirmOpen(false);
+					}
+				}}
+			>
+				<AlertDialogHeader>
+					<AlertDialogTitle>Restart this agent session?</AlertDialogTitle>
+				</AlertDialogHeader>
+				<AlertDialogBody>
+					<AlertDialogDescription>
+						The agent process will be killed and immediately restarted, resuming the conversation from its on-disk
+						transcript. Whatever it is working on right now is lost — the in-flight turn has not been written to
+						that transcript yet. If the terminal is merely frozen, use “Resync terminal view” instead: it repaints
+						the screen without touching the agent.
+					</AlertDialogDescription>
+				</AlertDialogBody>
+				<AlertDialogFooter>
+					<AlertDialogCancel asChild>
+						<Button variant="default" onClick={() => setIsRestartConfirmOpen(false)}>
+							Cancel
+						</Button>
+					</AlertDialogCancel>
+					<AlertDialogAction asChild>
+						<Button
+							variant="danger"
+							onClick={() => {
+								setIsRestartConfirmOpen(false);
+								void onRestartAgentSession();
+							}}
+						>
+							Restart session
+						</Button>
+					</AlertDialogAction>
+				</AlertDialogFooter>
+			</AlertDialog>
+		</>
 	);
 }
 
@@ -500,6 +627,7 @@ function AgentTerminalPanelLayout({
 		hasRenderedAnyTerminalContent,
 		isStopping,
 		isRefreshing,
+		isResyncingTerminalView,
 		isSearchOpen,
 		searchOpenRequestKey,
 		searchResults,
@@ -509,6 +637,7 @@ function AgentTerminalPanelLayout({
 		findPreviousInTerminal,
 		openTerminalSearch,
 		refreshTerminal,
+		resyncTerminalView,
 		scrollTerminalToLatest,
 		stopTerminal,
 		isScrolledAwayFromLatest,
@@ -522,7 +651,8 @@ function AgentTerminalPanelLayout({
 	const isSyntheticHomeSession = taskId.startsWith("__home_");
 	// 合成 shell 终端（home / detail shell）不是 agent TUI，不需要代按 Ctrl+C / 方向键 / double-ESC。
 	const isSyntheticShellSession = isSyntheticHomeSession || taskId.startsWith("__detail_terminal__:");
-	// detail shell 同样不是 agent 会话，「重启终端会话」对它没有意义（服务端也会以「找不到卡片」拒绝）。
+	// detail shell 同样不是 agent 会话，「重启 agent 会话」对它没有意义（服务端也会以「找不到卡片」拒绝）。
+	// 只挡重启：旁边那个「重新同步画面」纯走 WebSocket、不需要卡片，合成 shell 冻住时照样要能救。
 	const showRefreshButton = !isSyntheticShellSession;
 	// **不**要求 summary.agentId 已知。渲染到这个面板本身就已经由 card-detail-view 判定过「这是个 PTY
 	// agent 会话」，而 agentId 恰恰是硬中断后最容易丢的字段——一旦把「不知道用的哪个 agent」当成禁用理由，
@@ -602,20 +732,17 @@ function AgentTerminalPanelLayout({
 									aria-label="Find in terminal"
 								/>
 							</Tooltip>
-							{showRefreshButton ? (
-								<Tooltip side="top" content="Restart this terminal session (recovers from a frozen TUI)">
-									<Button
-										icon={isRefreshing ? <Spinner size={14} /> : <RotateCcw size={14} />}
-										variant="default"
-										size="sm"
-										onClick={() => {
-											void refreshTerminal();
-										}}
-										disabled={!canRefresh || isRefreshing}
-										aria-label="Refresh terminal session"
-									/>
-								</Tooltip>
-							) : null}
+							<TerminalViewResyncAndAgentSessionRestartButtons
+								showAgentSessionRestartButton={showRefreshButton}
+								canRestartAgentSession={canRefresh}
+								isRestartingAgentSession={isRefreshing}
+								isResyncingTerminalView={isResyncingTerminalView}
+								isAgentSessionInActiveTurn={canStop}
+								onResyncTerminalView={resyncTerminalView}
+								onRestartAgentSession={refreshTerminal}
+								iconSize={14}
+								variant="default"
+							/>
 							<AgentSessionTransportSwitchButton
 								workspaceId={workspaceId}
 								taskId={taskId}
@@ -686,20 +813,17 @@ function AgentTerminalPanelLayout({
 								aria-label="Find in terminal"
 							/>
 						</Tooltip>
-						{showRefreshButton ? (
-							<Tooltip side="top" content="Restart this terminal session (recovers from a frozen TUI)">
-								<Button
-									icon={isRefreshing ? <Spinner size={12} /> : <RotateCcw size={12} />}
-									variant="ghost"
-									size="sm"
-									onClick={() => {
-										void refreshTerminal();
-									}}
-									disabled={!canRefresh || isRefreshing}
-									aria-label="Refresh terminal session"
-								/>
-							</Tooltip>
-						) : null}
+						<TerminalViewResyncAndAgentSessionRestartButtons
+							showAgentSessionRestartButton={showRefreshButton}
+							canRestartAgentSession={canRefresh}
+							isRestartingAgentSession={isRefreshing}
+							isResyncingTerminalView={isResyncingTerminalView}
+							isAgentSessionInActiveTurn={canStop}
+							onResyncTerminalView={resyncTerminalView}
+							onRestartAgentSession={refreshTerminal}
+							iconSize={12}
+							variant="ghost"
+						/>
 						{agentLabel && onSendAgentCommand ? (
 							<Tooltip side="top" content={`Run ${agentLabel}`}>
 								<Button

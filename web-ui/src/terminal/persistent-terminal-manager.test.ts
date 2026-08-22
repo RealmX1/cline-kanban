@@ -19,6 +19,13 @@ const terminalNormalBuffer = vi.hoisted(() => ({
 }));
 const terminalScrollToBottomMock = vi.hoisted(() => vi.fn());
 const terminalWriteSideEffect = vi.hoisted(() => ({ current: null as null | ((data: string | Uint8Array) => void) }));
+// 用来复现「xterm 的 write 回调再也不触发」这一真实卡死形态：写队列是一条串行 promise 链，
+// 链上任何一次回调没来就永久悬停，applyRestore 第一句正是 await 这条链。
+const terminalWriteCallbackControl = vi.hoisted(() => ({
+	suspended: false,
+	// 被吞掉的写回调原样留档，供「渲染只是慢、后来还是回来了」这类迟到落屏场景显式放行。
+	swallowedWriteCompletionCallbacks: [] as Array<() => void>,
+}));
 const webglAddonConstructions = vi.hoisted(() => ({ count: 0 }));
 const platformOverrides = vi.hoisted(() => ({ isSafari: false }));
 const webSocketInstances = vi.hoisted(
@@ -173,6 +180,13 @@ vi.mock("@xterm/xterm", () => ({
 
 		write(data: string | Uint8Array, callback?: () => void): void {
 			terminalWriteSideEffect.current?.(data);
+			if (terminalWriteCallbackControl.suspended) {
+				// 回调故意吞掉：这一次写永远不会「完成」，写队列自此卡死。
+				if (callback) {
+					terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.push(callback);
+				}
+				return;
+			}
 			callback?.();
 		}
 	},
@@ -285,6 +299,8 @@ describe("persistent-terminal-manager", () => {
 		terminalBuffer.viewportY = 0;
 		terminalScrollToBottomMock.mockReset();
 		terminalWriteSideEffect.current = null;
+		terminalWriteCallbackControl.suspended = false;
+		terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.length = 0;
 		webglAddonConstructions.count = 0;
 		platformOverrides.isSafari = false;
 		createdTerminalOptions.length = 0;
@@ -588,6 +604,268 @@ describe("persistent-terminal-manager", () => {
 
 		await vi.waitFor(() => {
 			expect(terminalScrollToBottomMock).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	// 「重新同步画面」：只把屏幕从服务端 mirror 重画一遍，绝不碰 PTY / agent 进程。
+	// 它与 refresh()（重启 agent 会话）是两条彻底分开的路，这组用例守的就是这条边界。
+	describe("重新同步画面（不重启 agent 会话）", () => {
+		function findNewestControlSocket() {
+			const socket = webSocketInstances.filter((entry) => entry.url.includes("/api/terminal/control")).at(-1);
+			if (!socket) {
+				throw new Error("control socket not found");
+			}
+			return socket;
+		}
+
+		function readClientId(socketUrl: string): string {
+			return new URL(socketUrl, "http://127.0.0.1").searchParams.get("clientId") ?? "";
+		}
+
+		function dispatchRestoreToNewest(snapshot: string): void {
+			dispatchSocketMessage(
+				findNewestControlSocket(),
+				JSON.stringify({ type: "restore", snapshot, cols: 80, rows: 30 }),
+			);
+		}
+
+		function dispatchStateToNewest(summary: Record<string, unknown>): void {
+			dispatchSocketMessage(findNewestControlSocket(), JSON.stringify({ type: "state", summary }));
+		}
+
+		function countRestoreCompletions(socket: { sentMessages: string[] }): number {
+			return parseControlMessages(socket).filter((message) => message.type === "restore_complete").length;
+		}
+
+		function mountedTerminal(taskId: string) {
+			const terminal = ensurePersistentTerminal({ ...appearance, taskId, workspaceId: "workspace-1" });
+			terminal.mount(createContainer(), appearance, { isVisible: true });
+			return terminal;
+		}
+
+		it("只在控制通道上要一份快照，不打 refreshTaskTerminal", async () => {
+			const terminal = mountedTerminal("task-resync-basic");
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
+			const controlSocket = findNewestControlSocket();
+
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			expect(
+				parseControlMessages(controlSocket).filter((message) => message.type === "request_restore"),
+			).toHaveLength(1);
+
+			dispatchRestoreToNewest("restored screen");
+			await resync;
+
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it("写队列已经卡死时，快照依然能落屏（这正是「TUI 冻住」最常见的形态）", async () => {
+			const terminal = mountedTerminal("task-resync-stalled-write-queue");
+			// 制造一次永不回调的写：此后写队列永久悬停，applyRestore 会一直卡在它的第一句上。
+			terminalWriteCallbackControl.suspended = true;
+			dispatchRestoreToNewest("frozen screen");
+			await Promise.resolve();
+			terminalWriteCallbackControl.suspended = false;
+
+			const controlSocket = findNewestControlSocket();
+			expect(countRestoreCompletions(controlSocket)).toBe(0);
+
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			dispatchRestoreToNewest("recovered screen");
+			await resync;
+
+			expect(countRestoreCompletions(controlSocket)).toBeGreaterThan(0);
+		});
+
+		// 回归护栏：discardStalledTerminalWriteQueue 换掉的只是队尾指针，取消不了旧链——链上那些还没跑的
+		// link 会在前驱 write 回调迟到触发后（写队列卡死最常见的成因恰恰是「渲染只是被节流、后来还是回来
+		// 了」）照常排空。没有代次判据的话它们会把陈旧字节补写进刚被恢复快照重画的屏幕，还会插进
+		// sliceRestoreSnapshotForIncrementalWrite 按固定字符数硬切出来的快照分片之间截断 ANSI 序列；
+		// 反过来，若只是让它们别执行，这批字节的 output_ack 就永远发不出去——服务端在发送时已按量累加
+		// unacknowledgedOutputBytes，而「只发 request_restore、control socket 不重连」这条非升级路径不会
+		// 触发服务端的 resetUnacknowledgedOutputAccounting，PTY 会在画面看似已恢复之后继续被背压按住。
+		// 两头都得守住：不落屏，但 ack 照发。
+		it("被丢弃的旧写队列解冻后不再补写陈旧字节，但仍把它们的 output_ack 发出去", async () => {
+			const terminal = mountedTerminal("task-resync-discarded-write-queue-generation");
+			const ioSocket = webSocketInstances.filter((entry) => entry.url.includes("/api/terminal/io")).at(-1);
+			if (!ioSocket) {
+				throw new Error("terminal io socket not found");
+			}
+			const dataHandedToXtermWrite: string[] = [];
+			terminalWriteSideEffect.current = (data) => {
+				dataHandedToXtermWrite.push(typeof data === "string" ? data : new TextDecoder().decode(data));
+			};
+			const staleChunkAlreadyHandedToXterm = "stale-chunk-already-handed-to-xterm";
+			const staleChunkStillQueuedBehindTheStalledWrite = "stale-chunk-still-queued-behind-the-stalled-write";
+
+			// 写队列卡死：第一段实时输出的 write 回调被吞掉，第二段就一直排在它后面没机会跑。
+			terminalWriteCallbackControl.suspended = true;
+			dispatchSocketMessage(ioSocket, staleChunkAlreadyHandedToXterm);
+			await Promise.resolve();
+			await Promise.resolve();
+			dispatchSocketMessage(ioSocket, staleChunkStillQueuedBehindTheStalledWrite);
+			await Promise.resolve();
+			await Promise.resolve();
+			terminalWriteCallbackControl.suspended = false;
+			expect(dataHandedToXtermWrite).toEqual([staleChunkAlreadyHandedToXterm]);
+
+			const controlSocket = findNewestControlSocket();
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			dispatchRestoreToNewest("recovered screen");
+			await resync;
+
+			// 卡住的那次写回调此刻才迟到回来：旧链解冻并排空，第二段陈旧输出的 link 于是跑了起来。
+			for (const swallowedWriteCompletionCallback of terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.splice(
+				0,
+			)) {
+				swallowedWriteCompletionCallback();
+			}
+			await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+
+			expect(dataHandedToXtermWrite).not.toContain(staleChunkStillQueuedBehindTheStalledWrite);
+			// 恢复快照仍是屏幕上最后落下的东西，没有被陈旧字节追写覆盖。
+			expect(dataHandedToXtermWrite.at(-1)).toBe("recovered screen");
+			const acknowledgedOutputBytes = parseControlMessages(controlSocket)
+				.filter((message) => message.type === "output_ack")
+				.reduce((totalBytes, message) => totalBytes + (message.bytes ?? 0), 0);
+			expect(acknowledgedOutputBytes).toBe(
+				staleChunkAlreadyHandedToXterm.length + staleChunkStillQueuedBehindTheStalledWrite.length,
+			);
+		});
+
+		it("等不到快照就换一个 clientId 重连两条 socket（服务端那条 viewer 已僵死，原地重试没用）", async () => {
+			vi.useFakeTimers();
+			const terminal = mountedTerminal("task-resync-escalation");
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
+			const controlSocketBeforeResync = findNewestControlSocket();
+			const clientIdBeforeResync = readClientId(controlSocketBeforeResync.url);
+			const socketCountBeforeResync = webSocketInstances.length;
+
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			// 服务端一声不吭：截止时间一到就升级。
+			await vi.advanceTimersByTimeAsync(1_600);
+
+			expect(controlSocketBeforeResync.readyState).toBe(3);
+			expect(webSocketInstances.length).toBeGreaterThan(socketCountBeforeResync);
+			expect(readClientId(findNewestControlSocket().url)).not.toBe(clientIdBeforeResync);
+
+			dispatchRestoreToNewest("recovered after reconnect");
+			await resync;
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		// 回归护栏（本次改动的核心不变式）：maybeAutoResumeStaleSession 挂在**每一次** restore 应用上，
+		// 而升级重连必然要重走一遍 restore。判据全中时它会打出一次 refreshTaskTerminal——用户点的是
+		// 「只解冻画面」，结果把还活着的 agent 杀了。抑制闩存在的全部理由就是这一条。
+		it("升级重连后拿到空快照，也绝不能顺势变成一次重启", async () => {
+			vi.useFakeTimers();
+			const terminal = mountedTerminal("task-resync-auto-resume-guard");
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			// 自动续跑的判据逐条命中：PTY 型 agent、pid 为空、非用户回合，且这个 taskId 没进过冷却表。
+			dispatchStateToNewest({
+				taskId: "task-resync-auto-resume-guard",
+				agentId: "claude",
+				pid: null,
+				state: "idle",
+				liveness: "none",
+			});
+
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			await vi.advanceTimersByTimeAsync(1_600);
+			dispatchRestoreToNewest("");
+			await resync;
+
+			expect(refreshSpy).not.toHaveBeenCalled();
+
+			// 闩只压这一程：流程终结后，真正意义上的「空快照 = 服务端 mirror 已随运行时丢失」仍然照常续跑。
+			dispatchRestoreToNewest("");
+			await vi.advanceTimersByTimeAsync(10);
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		});
+
+		// 回归护栏（与上一条同一条不变式，堵的是另一条到达它的路）：等待必须认「本次 resync 请求到的那一份
+		// 快照」，而不是「随便哪一次 restore 落了屏」。resync 发起时若已有一份更早的快照在途（写队列慢、
+		// 还没落屏），它在等待窗口里落屏会把只数次数的等待顺手满足——resync 提前收尾、finally 清掉抑制闩，
+		// 本次真正请求到的空快照随后才落地且不再被抑制，于是打出一次杀 agent 的 refreshTaskTerminal。
+		it("第一段等待不认 resync 之前就在途、只是此刻才落屏的旧快照", async () => {
+			const terminal = mountedTerminal("task-resync-late-preexisting-snapshot");
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			// 自动续跑的判据逐条命中，闩一旦被提前清掉就会立刻兑现成一次重启。
+			dispatchStateToNewest({
+				taskId: "task-resync-late-preexisting-snapshot",
+				agentId: "claude",
+				pid: null,
+				state: "idle",
+				liveness: "none",
+			});
+
+			// resync 之前就有一份非空快照在途，写回调迟迟不来（渲染只是慢，不是死透）。
+			terminalWriteCallbackControl.suspended = true;
+			dispatchRestoreToNewest("screen frozen before resync");
+			await Promise.resolve();
+			await Promise.resolve();
+			terminalWriteCallbackControl.suspended = false;
+
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			// 那份迟到的写回调此刻才回来：**旧**快照落屏，恢复快照的落屏水位随之前进。
+			for (const swallowedWriteCompletionCallback of terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.splice(
+				0,
+			)) {
+				swallowedWriteCompletionCallback();
+			}
+			await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+			// 本次 resync 真正请求到的那份快照（服务端 mirror 已随运行时重启丢空）现在才到。
+			dispatchRestoreToNewest("");
+			await resync;
+			await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		// 回归护栏：升级重连先把 this.controlSocket 置空再 close()，而 close() 只是发起关闭握手——旧 control
+		// socket 上此前已入队的 message 事件仍会派发，而「服务端 restore 迟到」正是走到升级这一步的条件本身。
+		// 那一帧迟到的 restore 若没被 onmessage 顶部的守卫挡下，就会拆掉刚为新连接武装好的恢复门控、把
+		// restoreCompleted 永久压回 false，并真的跑一遍 applyRestore（reset + 写陈旧快照）盖掉刚重画好的屏幕；
+		// 同一条路上的 state 帧也会照样流进 notifySummary。
+		it("升级重连后，旧 control socket 上迟到的帧一律不再作数", async () => {
+			vi.useFakeTimers();
+			const terminal = mountedTerminal("task-resync-late-frame-on-stalled-control-socket");
+			const dataHandedToXtermWrite: string[] = [];
+			terminalWriteSideEffect.current = (data) => {
+				dataHandedToXtermWrite.push(typeof data === "string" ? data : new TextDecoder().decode(data));
+			};
+			const stalledControlSocket = findNewestControlSocket();
+
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			// 服务端一声不吭：截止时间一到就换 clientId 重连两条 socket。
+			await vi.advanceTimersByTimeAsync(1_600);
+			expect(findNewestControlSocket()).not.toBe(stalledControlSocket);
+
+			const screenRedrawnAfterEscalatedReconnect = "screen redrawn after escalated reconnect";
+			dispatchRestoreToNewest(screenRedrawnAfterEscalatedReconnect);
+			await resync;
+
+			// 旧连接上那两帧此刻才派发：服务端只是慢，不是没发。
+			const onSummarySpy = vi.fn();
+			const unsubscribe = terminal.subscribe({ onSummary: onSummarySpy });
+			const staleScreenFromStalledControlSocket = "stale screen from the stalled control socket";
+			dispatchSocketMessage(
+				stalledControlSocket,
+				JSON.stringify({ type: "restore", snapshot: staleScreenFromStalledControlSocket, cols: 80, rows: 30 }),
+			);
+			dispatchSocketMessage(
+				stalledControlSocket,
+				JSON.stringify({
+					type: "state",
+					summary: { taskId: "task-resync-late-frame-on-stalled-control-socket", state: "idle" },
+				}),
+			);
+			await vi.advanceTimersByTimeAsync(10);
+			unsubscribe();
+
+			expect(dataHandedToXtermWrite).not.toContain(staleScreenFromStalledControlSocket);
+			expect(dataHandedToXtermWrite.at(-1)).toBe(screenRedrawnAfterEscalatedReconnect);
+			expect(onSummarySpy).not.toHaveBeenCalled();
 		});
 	});
 
