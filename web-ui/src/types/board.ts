@@ -30,10 +30,15 @@ export type TaskCommentEntry = RuntimeTaskCommentEntry;
  * `onPromptChange` 再提交也救不回来。由调用方显式传值是唯一没有竞态的交接方式。
  *
  * 省略时由处理方回落到自己的 state，保留给测试与非对话框调用方。
+ *
+ * `taskNameOverride` 同理：建卡对话框里的名字输入框也是对话框本地 state（它连同候选名一起只在建卡
+ * 这一刻才有意义，没必要常驻在 App 根节点）。**留空与省略是同一件事**——都表示「用描述自动推导标题」，
+ * 处理方据此还会去异步取一个 AI 名字回填。
  */
 export interface TaskEditorSubmitOptions {
 	keepDialogOpen?: boolean;
 	promptOverride?: string;
+	taskNameOverride?: string;
 }
 
 export const DEFAULT_TASK_AUTO_REVIEW_MODE: TaskAutoReviewMode = "commit";

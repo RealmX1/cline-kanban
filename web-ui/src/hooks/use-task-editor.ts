@@ -17,12 +17,14 @@ import {
 	hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror,
 	subscribeToTaskEditDraftStore,
 } from "@/runtime/task-edit-draft-store";
+import { suggestTaskNamesFromTaskDescription } from "@/runtime/task-name-suggestion-query";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
+	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 	RuntimeTerminalAgentModelSelectionAgentId,
@@ -825,6 +827,43 @@ export function useTaskEditor({
 		[setBoard],
 	);
 
+	/**
+	 * 建卡时名字框留空 → 先按正则推导的标题落卡，再异步向起名端点要一个更好的名字回填。
+	 *
+	 * 三条刻意的选择：
+	 *   - fire-and-forget：起名要往外发一次网络请求，让建卡等它回来会把「点一下就出卡」变成「转两秒」；
+	 *   - 失败全静默：标题保持正则推导值，用户什么都不会丢，弹提示只会打断建卡节奏；
+	 *   - 回填前比对标题：卡片仍是当初那个推导标题才写。用户手改过、或 agent 已经改过名的卡不该被顶掉。
+	 */
+	const backfillSuggestedTaskTitleForCreatedTask = useCallback(
+		(taskId: string, prompt: string, titleWrittenAtCreateTime: string) => {
+			void (async () => {
+				let suggestion: RuntimeTaskNameSuggestionResponse;
+				try {
+					suggestion = await suggestTaskNamesFromTaskDescription(prompt);
+				} catch {
+					return;
+				}
+				if (suggestion.status !== "suggested") {
+					return;
+				}
+				const suggestedTaskName = suggestion.suggestedTaskNames[0];
+				if (!suggestedTaskName) {
+					return;
+				}
+				setBoard((currentBoard) => {
+					const selection = findCardSelection(currentBoard, taskId);
+					if (!selection || selection.card.title !== titleWrittenAtCreateTime) {
+						return currentBoard;
+					}
+					const updated = updateTaskTitle(currentBoard, taskId, suggestedTaskName);
+					return updated.updated ? updated.board : currentBoard;
+				});
+			})();
+		},
+		[setBoard],
+	);
+
 	const handleCreateTask = useCallback(
 		(options?: TaskEditorSubmitOptions): string | null => {
 			if (!isNewTaskStartInPlanModeDefaultLoaded) {
@@ -838,7 +877,9 @@ export function useTaskEditor({
 			if (!baseRef) {
 				return null;
 			}
-			const title = deriveTaskTitleFromPrompt(prompt);
+			// 留空与省略同义：两者都走「先推导、再异步回填 AI 名字」。
+			const explicitTaskName = options?.taskNameOverride?.trim() ?? "";
+			const title = explicitTaskName || deriveTaskTitleFromPrompt(prompt);
 			const created = addTaskToColumnWithResult(board, "backlog", {
 				title,
 				prompt,
@@ -859,6 +900,9 @@ export function useTaskEditor({
 				worktreeMode: newTaskWorktreeMode,
 			});
 			setBoard(created.board);
+			if (!explicitTaskName) {
+				backfillSuggestedTaskTitleForCreatedTask(created.task.id, prompt, created.task.title);
+			}
 			writeMostRecentlyUsedTaskCreateBaseRefForProject(currentProjectId, baseRef);
 			trackTaskCreated({
 				selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? selectedAgentId),
@@ -889,6 +933,7 @@ export function useTaskEditor({
 			return created.task.id;
 		},
 		[
+			backfillSuggestedTaskTitleForCreatedTask,
 			board,
 			isNewTaskStartInPlanModeDefaultLoaded,
 			newTaskAgentId,

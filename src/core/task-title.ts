@@ -21,18 +21,36 @@ function stripOuterUserInputTag(value: string): string {
 		.trim();
 }
 
+/**
+ * 剥掉一行首尾各一个 XML/HTML 标签（例如 `<user_input mode="act">…</user_input>`）后的正文。
+ *
+ * 整行就是一个裸标签时（`<trajectory>` 独占一行）返回空串，交由调用方决定要不要看下一行。
+ */
+function stripOuterMarkupTagsFromLine(line: string): string {
+	return normalizeTaskTitleWhitespace(
+		line
+			.replace(/^<[^>]+>/u, "")
+			.replace(/<\/[^>]+>$/u, "")
+			.trim(),
+	);
+}
+
 export function deriveTaskTitleFromPrompt(prompt: string, maxChars = DEFAULT_TASK_TITLE_MAX_CHARS): string {
-	const firstNonEmptyLine =
-		prompt
-			.split(/\r?\n/u)
-			.map((line) => line.trim())
-			.find((line) => line.length > 0) ?? "";
-	// Strip leading/trailing XML/HTML tags (e.g. <user_input mode="act">…</user_input>) if present.
-	const strippedLine = firstNonEmptyLine
-		.replace(/^<[^>]+>/u, "")
-		.replace(/<\/[^>]+>$/u, "")
-		.trim();
-	const normalizedLine = normalizeTaskTitleWhitespace(strippedLine);
+	// 逐行扫描而不是「只看第一行非空」：描述以伪 HTML 块开头（`<trajectory>` 独占一行）时，第一行剥完
+	// 标签就是空串，老写法会直接返回 ""，而 web-ui 的 normalizeCard 遇到空标题会把**整份 prompt** 当标题，
+	// 于是卡片标题变成一大坨正文。首行剥完非空的输入走到第一轮就返回，与老实现逐字节一致。
+	let normalizedLine = "";
+	for (const rawLine of prompt.split(/\r?\n/u)) {
+		const trimmedLine = rawLine.trim();
+		if (trimmedLine.length === 0) {
+			continue;
+		}
+		const strippedLine = stripOuterMarkupTagsFromLine(trimmedLine);
+		if (strippedLine) {
+			normalizedLine = strippedLine;
+			break;
+		}
+	}
 	if (!normalizedLine) {
 		return "";
 	}

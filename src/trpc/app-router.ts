@@ -122,6 +122,8 @@ import type {
 	RuntimeTaskEditDraftsResponse,
 	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponse,
+	RuntimeTaskNameSuggestionRequest,
+	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkResponse,
 	RuntimeTaskSessionInputRequest,
@@ -275,6 +277,8 @@ import {
 	runtimeTaskEditDraftsResponseSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema,
+	runtimeTaskNameSuggestionRequestSchema,
+	runtimeTaskNameSuggestionResponseSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema,
 	runtimeTaskSessionInputRequestSchema,
@@ -338,6 +342,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeClineUpdateProviderRequest,
 		) => Promise<RuntimeClineUpdateProviderResponse>;
+		suggestTaskNamesFromTaskDescription: (
+			scope: RuntimeTrpcWorkspaceScope | null,
+			input: RuntimeTaskNameSuggestionRequest,
+		) => Promise<RuntimeTaskNameSuggestionResponse>;
 		startTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStartRequest,
@@ -708,6 +716,14 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeClineUpdateProviderResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.updateClineProvider(ctx.workspaceScope, input);
+			}),
+		// mutation 而非 query：每次点「起名」都要真发一次外部请求拿一组**新**候选，被查询缓存去重掉
+		// 就实现不了「再按一次再给三个」。
+		suggestTaskNamesFromTaskDescription: t.procedure
+			.input(runtimeTaskNameSuggestionRequestSchema)
+			.output(runtimeTaskNameSuggestionResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input);
 			}),
 		startTaskSession: workspaceProcedure
 			.input(runtimeTaskSessionStartRequestSchema)

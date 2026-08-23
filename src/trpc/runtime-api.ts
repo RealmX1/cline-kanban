@@ -104,6 +104,7 @@ import { clearNotificationLog, markTaskNotificationsVisited } from "../state/not
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
 import { loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
+import { suggestTaskNamesFromTaskDescription } from "../task-name-suggestion/suggest-task-names-from-task-description";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import {
@@ -544,6 +545,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			const response = await clineProviderService.updateCustomProvider(body);
 			deps.bumpClineSessionContextVersion?.();
 			return response;
+		},
+		// 起名不需要任何运行时状态（无工作区、无会话），所以这里就是一层薄转发：协调者不沉淀逻辑。
+		suggestTaskNamesFromTaskDescription: async (_workspaceScope, input) => {
+			return await suggestTaskNamesFromTaskDescription(input);
 		},
 		startTaskSession: async (workspaceScope, input) => {
 			const startRequestReceivedAt = Date.now();

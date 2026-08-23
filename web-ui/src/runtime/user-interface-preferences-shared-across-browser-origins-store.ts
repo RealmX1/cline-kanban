@@ -15,6 +15,22 @@
 //
 // 镜像沿用**升级前的原编码**（布尔存 "true"/"false"、枚举存裸串、字典存 JSON），因为升级前留在这些键
 // 下的那份数据正是迁移要采纳的种子；换编码等于把用户攒下的偏好读不出来。
+//
+// ## 不是每个字段都有镜像：只活在服务端的字段一律**不留**镜像
+//
+// 上面两条职责都有前提，而这个前提不是所有字段都满足：
+//   - 职责 1（首屏回显）只在服务端那份还没到时成立；
+//   - 职责 2（写失败不丢）靠的是「下一次加载由迁移决策重新播种上去」，而迁移只看
+//     `readAllUserInterfacePreferenceValuesFromBrowserLocalStorage` 读出来的那几个字段。
+//
+// 于是一个**不在迁移路径上**的字段，它的镜像写下去就是死的：`readEffectiveUserInterfacePreferenceValue`
+// 只在服务端值为 `null` 时才回落镜像，而字典/列表字段「尚未设定」的形态是空字典 / 空数组（`!== null`），
+// 所以服务端那份一加载完就永远读不到镜像，镜像里的值也没有任何回到服务端的路径。这样的镜像不是「多一层
+// 保险」，而是**自我欺骗**——它让读代码的人以为写失败不会丢，实际会丢。
+//
+// 这类字段一律标成 `PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR`：既不写
+// 也不读 localStorage，代价是「服务端写失败时这次的输入只活到刷新为止」——对便利性记忆（用过的块名之类）
+// 这个代价可以接受，把它明说出来比留一份读不到的镜像诚实。
 
 import { fetchRuntimeConfig, saveRuntimeConfig } from "@/runtime/runtime-config-query";
 import type {
@@ -44,6 +60,7 @@ export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHI
 		workspaceOpenTargetPreferredApplicationId: null,
 		projectNumericSlotGroupAssignmentsBySlotNumber: {},
 		mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
+		taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: [],
 	};
 
 // 表里每一项各自持有自己字段的类型，但按 key 遍历时 TypeScript 无法把 codec 与 value 关联起来（联合
@@ -54,6 +71,21 @@ interface BrowserLocalStorageMirrorCodecWithErasedValueType {
 	readFromMirrorText: (mirrorText: string) => unknown;
 	writeToMirrorText: (value: unknown) => string | null;
 }
+
+/**
+ * 「这个字段只活在服务端，浏览器侧不留镜像」——写在 codec 表里的一等表达（理由见文件头那一节）。
+ *
+ * 为什么是哨兵值、而不是干脆在表里省掉这个 key：表的类型仍然是覆盖**全部**字段的 `Record`，少写一个
+ * 字段就是编译错误。于是新增一条偏好时必须当场对「它有没有镜像」表态，不会因为忘了写而悄悄失去镜像；
+ * 反过来，只活在服务端这件事也就有了一个能被读到、能被搜索到的落点，而不是一处沉默的缺席。
+ */
+const PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR = Symbol(
+	"preference-field-kept-only-on-server-without-browser-local-storage-mirror",
+);
+
+type BrowserLocalStorageMirrorPolicy =
+	| BrowserLocalStorageMirrorCodecWithErasedValueType
+	| typeof PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR;
 
 function defineMirrorCodec<TFieldName extends UserInterfacePreferenceFieldName>(codec: {
 	localStorageMirrorKey: LocalStorageKey;
@@ -92,9 +124,9 @@ function readStringKeyedStringRecord(value: unknown): Record<string, string> {
 }
 
 // 每条镜像的编解码必须与升级前那个 hook 用的编码逐字节一致，否则读不出旧数据。
-const BROWSER_LOCAL_STORAGE_MIRROR_CODECS: Record<
+const BROWSER_LOCAL_STORAGE_MIRROR_POLICY_BY_PREFERENCE_FIELD: Record<
 	UserInterfacePreferenceFieldName,
-	BrowserLocalStorageMirrorCodecWithErasedValueType
+	BrowserLocalStorageMirrorPolicy
 > = {
 	newTaskAutoReviewEnabled: defineMirrorCodec<"newTaskAutoReviewEnabled">({
 		localStorageMirrorKey: LocalStorageKey.TaskAutoReviewEnabled,
@@ -142,12 +174,21 @@ const BROWSER_LOCAL_STORAGE_MIRROR_CODECS: Record<
 		readFromMirrorText: (mirrorText) => readStringKeyedStringRecord(parseJsonOrNull(mirrorText)),
 		writeToMirrorText: (value) => JSON.stringify(value),
 	}),
+	// 纯服务端字段。它一出生就在服务端，没有「升级前的本地历史数据」要迁移，因此也进不了
+	// `readAllUserInterfacePreferenceValuesFromBrowserLocalStorage`；而不在迁移路径上的镜像是读不回来的
+	// （空数组 `!== null`，服务端那份一加载完就再也不回落镜像）——与其留一份写下去就没人读的镜像，不如
+	// 明说这里没有镜像。用过的块名是便利性记忆：保存请求失败时它只活到刷新为止，下次再用会重新记上。
+	taskPromptPseudoHtmlBlockRecentlyUsedCustomNames:
+		PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
 };
 
 function readFieldFromBrowserLocalStorageMirror<TFieldName extends UserInterfacePreferenceFieldName>(
 	fieldName: TFieldName,
 ): RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TFieldName] | null {
-	const codec = BROWSER_LOCAL_STORAGE_MIRROR_CODECS[fieldName];
+	const codec = BROWSER_LOCAL_STORAGE_MIRROR_POLICY_BY_PREFERENCE_FIELD[fieldName];
+	if (codec === PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR) {
+		return null;
+	}
 	const mirrorText = readLocalStorageItem(codec.localStorageMirrorKey);
 	if (mirrorText === null) {
 		return null;
@@ -212,6 +253,9 @@ export function getUserInterfacePreferencesSharedAcrossBrowserOriginsStoreState(
 /**
  * 读一个字段的**生效值**：服务端有值就用服务端的，否则回落本地镜像，都没有则返回 null（由调用方套默认值）。
  *
+ * 标成 `PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR` 的字段没有镜像这一层，
+ * 服务端那份到达之前一律读到 null（调用方套默认值）。
+ *
  * 命令式消费方（模块级函数）直接调它；hook 消费方经
  * `use-user-interface-preferences-shared-across-browser-origins.ts` 调它并订阅变更。
  */
@@ -233,7 +277,10 @@ function writeUpdateToBrowserLocalStorageMirrors(
 		if (value === undefined) {
 			continue;
 		}
-		const codec = BROWSER_LOCAL_STORAGE_MIRROR_CODECS[fieldName];
+		const codec = BROWSER_LOCAL_STORAGE_MIRROR_POLICY_BY_PREFERENCE_FIELD[fieldName];
+		if (codec === PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR) {
+			continue;
+		}
 		const mirrorText = codec.writeToMirrorText(value);
 		if (mirrorText !== null) {
 			writeLocalStorageItem(codec.localStorageMirrorKey, mirrorText);
@@ -280,6 +327,9 @@ function sendPreferenceSaveRequestAndAdoptServerResponse(saveRequest: RuntimeCon
  *
  * 顺序是刻意的：**先写本地镜像，再发服务端**。服务端写失败时用户这次的选择仍留在镜像里，下一次加载
  * 由迁移决策重新播种上去——反过来（先发服务端、成功才写镜像）会让一次网络抖动直接吞掉用户的点击。
+ *
+ * 这条「写失败不丢」只对**有镜像且在迁移路径上**的字段成立。纯服务端字段（见文件头「不是每个字段都有
+ * 镜像」）走的是另一套账：写失败时这次的修改只活到刷新为止，没有第二层兜底。
  *
  * 已知窗口（明知并接受）：若服务端**已有**该字段的值而这次写入失败，下次加载时服务端那份会赢，本次
  * 修改落选并被记进冲突提示。没有静默丢失，但用户需要再点一次。

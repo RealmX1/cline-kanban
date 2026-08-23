@@ -13,6 +13,7 @@ const SERVER_WITH_NOTHING_SET: RuntimeUserInterfacePreferencesSharedAcrossBrowse
 	workspaceOpenTargetPreferredApplicationId: null,
 	projectNumericSlotGroupAssignmentsBySlotNumber: {},
 	mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
+	taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: [],
 };
 
 const BROWSER_WITH_NOTHING_SET: UserInterfacePreferenceValuesReadFromBrowserLocalStorage = {

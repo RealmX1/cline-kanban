@@ -8,7 +8,7 @@ import {
 	FUZZY_MATCHED_TEXT_STYLE,
 	renderFuzzyHighlightedText,
 } from "@/components/shared/render-fuzzy-highlighted-text";
-import { Button } from "@/components/ui/button";
+import { Button, type ButtonVariant } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 
 export interface SearchSelectOption {
@@ -28,6 +28,7 @@ export function SearchSelectDropdown({
 	fill = false,
 	size,
 	buttonText,
+	buttonVariant = "default",
 	buttonClassName,
 	buttonStyle,
 	iconSize,
@@ -38,6 +39,7 @@ export function SearchSelectDropdown({
 	pinSelectedToTop = true,
 	recommendedOptionValues = [],
 	recommendedHeading = "Recommended models",
+	otherOptionsHeading = "All models",
 	matchTargetWidth = true,
 	collisionPadding = 8,
 	dropdownStyle,
@@ -46,6 +48,7 @@ export function SearchSelectDropdown({
 	footerAction,
 	allowCustomValue = false,
 	customValueLabel,
+	onContentCloseAutoFocus,
 }: {
 	options: readonly SearchSelectOption[];
 	selectedValue?: string | null;
@@ -56,6 +59,8 @@ export function SearchSelectDropdown({
 	fill?: boolean;
 	size?: "sm" | "md";
 	buttonText?: string;
+	/** 触发按钮的视觉档位。默认是有边框的 `default`，放进一条 ghost 工具栏时传 `"ghost"`。 */
+	buttonVariant?: ButtonVariant;
 	buttonClassName?: string;
 	buttonStyle?: CSSProperties;
 	iconSize?: number;
@@ -66,6 +71,8 @@ export function SearchSelectDropdown({
 	pinSelectedToTop?: boolean;
 	recommendedOptionValues?: readonly string[];
 	recommendedHeading?: string;
+	/** 推荐分组之外那一段的小标题。默认沿用模型选择器的措辞。 */
+	otherOptionsHeading?: string;
 	matchTargetWidth?: boolean;
 	collisionPadding?: number;
 	dropdownStyle?: CSSProperties;
@@ -77,6 +84,13 @@ export function SearchSelectDropdown({
 	};
 	allowCustomValue?: boolean;
 	customValueLabel?: (query: string) => string;
+	/**
+	 * 直通 Radix Popover 的 `onCloseAutoFocus`。
+	 *
+	 * 默认（不传）是 Radix 的行为：关闭时把焦点还给触发按钮。调用方需要把焦点交给别处（例如把插入结果
+	 * 的光标还给编辑器）时传它并 `preventDefault()`——那是唯一能确定性压过 Radix 焦点归还的时机。
+	 */
+	onContentCloseAutoFocus?: (event: Event) => void;
 }): ReactElement {
 	const [isOpen, setIsOpen] = useState(false);
 	const [query, setQuery] = useState("");
@@ -306,7 +320,7 @@ export function SearchSelectDropdown({
 				<Button
 					id={id}
 					size={size}
-					variant="default"
+					variant={buttonVariant}
 					fill={fill}
 					icon={resolvedIcon}
 					iconRight={<ChevronDown size={resolvedIconSize} />}
@@ -321,6 +335,7 @@ export function SearchSelectDropdown({
 				<RadixPopover.Content
 					className="z-50 max-h-[300px] rounded-lg border border-border bg-surface-1 shadow-xl overflow-hidden"
 					onWheelCapture={handleWheelCapture}
+					onCloseAutoFocus={onContentCloseAutoFocus}
 					collisionPadding={collisionPadding}
 					style={{
 						width: matchTargetWidth ? "var(--radix-popover-trigger-width)" : undefined,
@@ -369,7 +384,7 @@ export function SearchSelectDropdown({
 									<>
 										<div className="my-1 border-t border-border" />
 										<div className="px-2.5 py-1.5 text-[11px] font-medium uppercase tracking-[0.02em] text-text-tertiary">
-											All models
+											{otherOptionsHeading}
 										</div>
 									</>
 								) : null}

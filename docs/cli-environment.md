@@ -54,6 +54,26 @@ Kanban writes the corresponding `CLAUDE_CODE_*` variable itself and blanks out t
 
 Under `fullscreen`, Claude Code keeps its history inside the alternate screen buffer like Codex does, so the terminal panel's scrollback reading view has nothing to show for those sessions and hides its entry point. Switch to `inline` if you need session history in terminal scrollback.
 
+## AI task naming (task creation dialog)
+
+Read from the **runtime process** environment on every naming request, so a running Kanban server picks up changes only after a restart. The endpoint is any OpenAI-compatible `/chat/completions` service; the defaults point at DeepSeek.
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `KANBAN_TASK_NAME_SUGGESTION_OPENAI_COMPATIBLE_API_KEY` | — | Yes | Bearer token for the naming endpoint. Without it the ✨ button in the New task dialog reports that naming is off, and tasks keep the title derived from the description. |
+| `KANBAN_TASK_NAME_SUGGESTION_OPENAI_COMPATIBLE_BASE_URL` | `https://api.deepseek.com` | No | Base URL; `/chat/completions` is appended. A trailing slash is stripped. |
+| `KANBAN_TASK_NAME_SUGGESTION_MODEL_ID` | `deepseek-v4-flash` | No | Model id sent in the request body. `deepseek-v4-flash` is the stable alias for DeepSeek-V4-Flash-0731. |
+
+Requests are capped at **15 s** (`TASK_NAME_SUGGESTION_REQUEST_TIMEOUT_MS` in `src/task-name-suggestion/suggest-task-names-from-task-description.ts`) and only the first 8,000 characters of the description are sent.
+
+Every failure mode — key missing, endpoint down, timeout, non-2xx, unparsable answer — degrades to a plain "unavailable" result rather than an error. Task creation never waits on naming: the card is created immediately with the title derived from the description, and a suggested name is written back afterwards only if the title has not changed in the meantime.
+
+Configure it with:
+
+```bash
+export KANBAN_TASK_NAME_SUGGESTION_OPENAI_COMPATIBLE_API_KEY="sk-..."
+```
+
 ## Related documentation
 
 - [`../DEVELOPMENT.md`](../DEVELOPMENT.md) — local dev, dogfood, and hook event overview.
