@@ -51,6 +51,8 @@ import type {
 	RuntimeContinueConnectionRetrySessionsRequest,
 	RuntimeContinueConnectionRetrySessionsResponse,
 	RuntimeDebugResetAllStateResponse,
+	RuntimeDeferredRestorationHarnessNotificationsRequest,
+	RuntimeDeferredRestorationHarnessNotificationsResponse,
 	RuntimeDirectoryListRequest,
 	RuntimeDirectoryListResponse,
 	RuntimeDismissAgentRaisedPendingUserDecisionRequest,
@@ -95,6 +97,7 @@ import type {
 	RuntimePromptLibraryMutateRequest,
 	RuntimePromptLibraryReadRequest,
 	RuntimePromptLibraryResponse,
+	RuntimeReleaseDeferredRestorationHarnessNotificationsResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
@@ -204,6 +207,8 @@ import {
 	runtimeContinueConnectionRetrySessionsRequestSchema,
 	runtimeContinueConnectionRetrySessionsResponseSchema,
 	runtimeDebugResetAllStateResponseSchema,
+	runtimeDeferredRestorationHarnessNotificationsRequestSchema,
+	runtimeDeferredRestorationHarnessNotificationsResponseSchema,
 	runtimeDirectoryListRequestSchema,
 	runtimeDirectoryListResponseSchema,
 	runtimeDismissAgentRaisedPendingUserDecisionRequestSchema,
@@ -248,6 +253,7 @@ import {
 	runtimePromptLibraryMutateRequestSchema,
 	runtimePromptLibraryReadRequestSchema,
 	runtimePromptLibraryResponseSchema,
+	runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
 	runtimeRunPostDeployVerificationItemRequestSchema,
@@ -403,6 +409,14 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatSendRequest,
 		) => Promise<RuntimeTaskChatSendResponse>;
+		getDeferredRestorationHarnessNotifications: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeDeferredRestorationHarnessNotificationsRequest,
+		) => Promise<RuntimeDeferredRestorationHarnessNotificationsResponse>;
+		releaseDeferredRestorationHarnessNotificationsIntoTaskSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeDeferredRestorationHarnessNotificationsRequest,
+		) => Promise<RuntimeReleaseDeferredRestorationHarnessNotificationsResponse>;
 		cancelTaskChatDelivery: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatDeliveryCancelRequest,
@@ -817,6 +831,21 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatSendResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.sendTaskChatMessage(ctx.workspaceScope, input);
+			}),
+		getDeferredRestorationHarnessNotifications: workspaceProcedure
+			.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
+			.output(runtimeDeferredRestorationHarnessNotificationsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getDeferredRestorationHarnessNotifications(ctx.workspaceScope, input);
+			}),
+		releaseDeferredRestorationHarnessNotificationsIntoTaskSession: workspaceProcedure
+			.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
+			.output(runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+					ctx.workspaceScope,
+					input,
+				);
 			}),
 		cancelTaskChatDelivery: workspaceProcedure
 			.input(runtimeTaskChatDeliveryCancelRequestSchema)

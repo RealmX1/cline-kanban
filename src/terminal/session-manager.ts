@@ -993,11 +993,27 @@ function clearResumeSubstantiveGuard(active: ActiveProcessState): void {
 	active.suppressSubstantiveOutputUntilContinues = false;
 }
 
+// 恢复守卫的最长武装时长。守卫本该在恢复后的**首个**用户回合就解除，这条兜底只防「解除信号因
+// 任何未预见的路径没能送达」——那种情况下它会永久武装，把 agent 自己 dispatch 的后台工作唤醒信号
+// 一并吞掉（2026-08 实测 38 条会话记录已无解除路径）。它真正要防的「恢复瞬间 harness 重放旧通知
+// 自动续跑」只发生在 spawn 后的头几分钟，30 分钟足够宽松，不削弱保护强度。计时锚点用 summary
+// .startedAt——那正是本活体 spawn 的时刻，每次真实 spawn 都会重置。
+const RESTORATION_CONTINUATION_GUARD_MAXIMUM_ARMED_DURATION_MS = 30 * 60 * 1000;
+
+function hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(summary: RuntimeTaskSessionSummary): boolean {
+	// startedAt 为 null = 这条记录从未真正 spawn 过（durable 重建出的壳）。没有可信计时锚点就不判过期；
+	// 这类记录也没有 entry.active，hook 根本到不了，不构成永久武装的实际风险。
+	if (summary.startedAt === null) {
+		return false;
+	}
+	return now() - summary.startedAt >= RESTORATION_CONTINUATION_GUARD_MAXIMUM_ARMED_DURATION_MS;
+}
+
 function isRestorationContinuationGuardArmed(summary: RuntimeTaskSessionSummary): boolean {
-	return (
+	const declaredArmed =
 		summary.restorationContinuationGuardState === "restoring_agent_conversation_without_starting_new_turn" ||
-		summary.restorationContinuationGuardState === "restored_agent_conversation_waiting_for_explicit_user_input"
-	);
+		summary.restorationContinuationGuardState === "restored_agent_conversation_waiting_for_explicit_user_input";
+	return declaredArmed && !hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(summary);
 }
 
 // 程序化「已提交用户轮」投递的就绪判别式（替代裸 boolean，使兜底写的 via= 日志能区分命中哪条通道，
@@ -4210,16 +4226,37 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	isRestorationHarnessGeneratedTaskNotificationInterceptionActive(taskId: string): boolean {
 		const entry = this.entries.get(taskId);
+		if (entry === undefined) {
+			return false;
+		}
+		// 兜底对 A / B 两档一视同仁：B 挂在 entry.active 上、只由自然 Stop 解除，同样可能因为 Stop never
+		// arrives 而无限期悬挂，不能只给 A 上保险。
+		if (hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(entry.summary)) {
+			return false;
+		}
 		return (
-			entry !== undefined &&
-			(isRestorationContinuationGuardArmed(entry.summary) ||
-				entry.active?.interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds === true)
+			isRestorationContinuationGuardArmed(entry.summary) ||
+			entry.active?.interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds === true
 		);
 	}
 
 	completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn(taskId: string): void {
 		const entry = this.entries.get(taskId);
-		if (!entry?.active || isRestorationContinuationGuardArmed(entry.summary)) {
+		if (!entry?.active) {
+			return;
+		}
+		// 主守卫（A 档）仍武装 ⇔ 恢复之后的**显式用户回合尚未开始**：A 的每一个解除点都是显式用户轮的
+		// 起点（hooks-api 转移闸之前的真人 UserPromptSubmit / BeforeAgent、Codex 的提交边沿、前端一键放行）。
+		// 此刻到达的 Stop 只可能来自恢复过程自身跑的那一轮，不构成「首个显式用户回合已结束」，于是 no-op。
+		//
+		// 别被「拦截判据是 A || B，A 还兜着，放掉 B 无害」骗过去：那只在这一瞬成立。紧随其后的真人 prompt
+		// 会在转移闸前解除 A，于是「A 已解除、真人首轮尚未 Stop」那段窗口两档全空——迟到的孤儿通知直接
+		// 穿透给 agent，而覆盖这段迟到窗口正是 B 存在的全部理由。
+		//
+		// 这道短路一度因死锁被删除，但死锁的真正成因是 A 的解除挂在 canTransitionTaskForHookEvent 之后，
+		// 导致 A 永久武装、连带把本短路变成永久 no-op。A 的解除已前移到转移闸之前，短路不再会被焊死；
+		// 另有 30 分钟兜底：超时后 isRestorationContinuationGuardArmed 恒 false，短路自行失效。
+		if (isRestorationContinuationGuardArmed(entry.summary)) {
 			return;
 		}
 		entry.active.interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds = false;

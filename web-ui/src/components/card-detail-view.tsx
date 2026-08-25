@@ -20,6 +20,7 @@ import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
+import { DeferredRestorationHarnessNotificationReleaseBanner } from "@/components/detail-panels/deferred-restoration-harness-notification-release-banner";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
 import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
@@ -260,6 +261,11 @@ function BottomTerminalSection({
 					taskId={taskId}
 					workspaceId={workspaceId}
 					contention={summary?.terminalDeliveryContention ?? null}
+				/>
+				<DeferredRestorationHarnessNotificationReleaseBanner
+					taskId={taskId}
+					workspaceId={workspaceId}
+					isEnabled={summary?.agentId === "claude"}
 				/>
 				<AgentTerminalPanel
 					taskId={taskId}

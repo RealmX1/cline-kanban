@@ -2385,6 +2385,44 @@ export const runtimeTaskChatSendRequestSchema = z.object({
 });
 export type RuntimeTaskChatSendRequest = z.infer<typeof runtimeTaskChatSendRequestSchema>;
 
+// 恢复期被暂存的 harness 通知：列出（只读，供 UI 决定要不要渲染一键放行入口）与放行（消费账本 →
+// 组装成一条 prompt → 经既有 sendTaskChatMessage 出口投递 → 解除恢复守卫）。
+// promptTextPreview 是截断过的预览：正文可能极长（子 agent 的完整 result 会整段塞在里面），列表接口
+// 不需要也不该把它整份搬进浏览器；放行时走的是账本里的完整正文，不是这份预览。
+export const runtimeDeferredRestorationHarnessNotificationSchema = z.object({
+	sourceHarness: z.string(),
+	receivedAt: z.number(),
+	promptTextPreview: z.string(),
+});
+export type RuntimeDeferredRestorationHarnessNotification = z.infer<
+	typeof runtimeDeferredRestorationHarnessNotificationSchema
+>;
+
+export const runtimeDeferredRestorationHarnessNotificationsRequestSchema = z.object({
+	taskId: z.string(),
+});
+export type RuntimeDeferredRestorationHarnessNotificationsRequest = z.infer<
+	typeof runtimeDeferredRestorationHarnessNotificationsRequestSchema
+>;
+
+export const runtimeDeferredRestorationHarnessNotificationsResponseSchema = z.object({
+	ok: z.boolean(),
+	notifications: z.array(runtimeDeferredRestorationHarnessNotificationSchema),
+	error: z.string().optional(),
+});
+export type RuntimeDeferredRestorationHarnessNotificationsResponse = z.infer<
+	typeof runtimeDeferredRestorationHarnessNotificationsResponseSchema
+>;
+
+export const runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema = z.object({
+	ok: z.boolean(),
+	releasedNotificationCount: z.number(),
+	error: z.string().optional(),
+});
+export type RuntimeReleaseDeferredRestorationHarnessNotificationsResponse = z.infer<
+	typeof runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema
+>;
+
 // 程序化投递的诚实回执。取值集合与语义由跨仓契约固定（terminal-delivery-interface-contract.md），
 // 唯一真相在 src/core/task-message-injection-ledger.ts —— 这里只是把 runtime 的**即时**判定带回 CLI，
 // 让 CLI 能立刻落一个不撒谎的初始状态；终态由 runtime 事后就地改写账本。
