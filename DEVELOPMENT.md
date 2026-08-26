@@ -2,10 +2,12 @@
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22 or newer (`package.json` declares `engines: node >=22`); the CI matrix also runs on Node 20, so treat Node 20 as the floor when using newer Node APIs
 - npm 10+
 
 ## Install
+
+See [`installation.md`](installation.md) (the single source for prerequisites, installing all three npm projects, and the global `kanban` link). The short version:
 
 ```bash
 npm run install:all
@@ -127,35 +129,9 @@ Dogfood launcher behavior:
 
 ## Run `kanban` from any directory
 
-After cloning and installing dependencies, create/update the global CLI link from this repo:
+The global CLI link workflow (`npm run link`, verifying with `which kanban` / `kanban --version`, rebuilding after code changes, re-linking when switching worktrees, and `npm run unlink`) is documented in [`installation.md`](installation.md).
 
-```bash
-npm run link
-```
-
-Verify:
-
-```bash
-which kanban
-kanban --version
-```
-
-Then run from any project directory:
-
-```bash
-cd /path/to/your/project
-kanban
-```
-
-After local code changes, run `npm run build` again before using the linked command.
-
-When switching between worktrees, re-run `npm run link` from the worktree you want to test so the global `kanban` binary points at the right `dist/cli.js`. For sidebar agent automation guidance, inspect `src/prompts/append-system-prompt.ts`.
-
-Remove the global link:
-
-```bash
-npm run unlink
-```
+For sidebar agent automation guidance, inspect `src/prompts/append-system-prompt.ts`.
 
 ## Scripts
 
@@ -230,6 +206,10 @@ These are external agent/file-hook names where the agent config requires them.
 They are distinct from Cline SDK plugin runtime hooks such as `beforeRun`,
 `beforeTool`, `afterTool`, and `afterRun`.
 
+The authoritative wiring lives in `src/terminal/agent-session-adapters.ts` (per-agent
+adapters) and `src/terminal/kimi-hook-config.ts` (Kimi's TOML hooks) — update this list
+when those change.
+
 - Claude
   - `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` emit `to_in_progress`
   - `Stop`, `PermissionRequest`, and `Notification` with `permission_prompt` emit `to_review`
@@ -238,6 +218,10 @@ They are distinct from Cline SDK plugin runtime hooks such as `beforeRun`,
     - `task_started` and `exec_command_begin` to `to_in_progress`
     - `*_approval_request` to `to_review`
   - Codex `notify` completion path also emits `to_review`
+- Cursor
+  - no hook surface: the adapter only prepares launch args (`cursorAdapter`, `agent-session-adapters.ts:1188`)
+  - no prompt detector either: `detectOutputTransition` is registered only for claude (`:1006`), codex (`:1182`), kimi (`:1963`), and omp (`:2030`), so Cursor emits no `agent.prompt-ready` adapter events
+  - the only automatic path into Review is the idle-stall self-heal `transitionToReview(taskId, "idle_stall")` (`session-manager.ts:4648`, reason gate at `:4060-4062`); anything else is the user's manual review action
 - Gemini
   - `BeforeAgent` and `AfterTool` emit `to_in_progress`
   - `AfterAgent` emits `to_review`
@@ -250,6 +234,10 @@ They are distinct from Cline SDK plugin runtime hooks such as `beforeRun`,
   - `PreToolUse` for active tools like `Read`, `Grep`, `Glob`, `FetchUrl`, `WebSearch`, `Execute`, `Task`, `Edit`, and `Create` emits `to_in_progress`
   - `PreToolUse` for `AskUser` and `Stop` emit `to_review`
   - `PostToolUse` for `AskUser` and `UserPromptSubmit` emit `to_in_progress`
+- Kimi
+  - TOML `[[hooks]]` tables written into a Kanban-managed seeded `KIMI_CODE_HOME` (Kimi only reads hooks from its resolved home `config.toml`, not from the project)
+  - `UserPromptSubmit`, `PostToolUse`, and `PostToolUseFailure` emit `to_in_progress`; `PreToolUse` emits `activity`
+  - `PermissionRequest`, `Stop`, and `StopFailure` emit `to_review`
 
 Important behavior details:
 

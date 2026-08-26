@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CrossRepositoryStageFirstOverview } from "@/components/cross-repository-stage-first-overview";
 import type { RuntimeInProgressTaskDetail, RuntimeProjectSummary, RuntimeProjectTaskCounts } from "@/runtime/types";
 
-// Stage-First Overview 的渲染 + 交互契约（见 CONTEXT.md / ADR-0001）：In-Progress 内按活跃度二分
+// Stage-First Overview 的渲染 + 交互契约（见 docs/context-stage-first-overview.md / ADR-0001）：In-Progress 内按活跃度二分
 // Active/Stale；Review/Validation/Done 显示跨-repo 总计数（rawColumnTaskCounts）；点击 task 冒泡
 // (repoId, taskId)。用 react-dom/client 直挂（同 project-navigation-panel.test 风格）。
 

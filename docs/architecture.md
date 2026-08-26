@@ -6,15 +6,16 @@ There are three big ideas to hold in your head:
 
 1. The browser is mostly a control surface. It renders state, sends commands, and reacts to live updates.
 2. The local runtime is the source of truth for projects, worktrees, sessions, git operations, and streaming state.
-3. There are two different agent execution paths:
-   - most agents run as PTY-backed CLI processes
-   - Cline runs through a native SDK-backed chat runtime
+3. There are three different agent session transports, declared per agent via `sessionTransport` in `src/core/agent-catalog.ts`:
+   - `pty_terminal` — most agents run as PTY-backed CLI processes (`src/terminal/`)
+   - `in_process_cline_sdk` — Cline runs through a native SDK-backed chat runtime (`src/cline-sdk/`)
+   - `acp_stdio_subprocess` — oh-my-pi (`omp`) can instead talk ACP, JSON-RPC over stdio (`src/acp-client-session/`); its default channel remains the PTY TUI
 
 If you remember nothing else, remember this:
 
 - PTY-backed agents are process-oriented
-- Cline is session-oriented
-- the backend coordinates both through one runtime API and one state stream
+- Cline and ACP-backed agents are session-oriented
+- the backend coordinates all three through one runtime API and one state stream
 
 ## System Diagram
 
@@ -33,28 +34,27 @@ If you remember nothing else, remember this:
 | src/                                                                             |
 |                                                                                  |
 | trpc/app-router.ts, trpc/runtime-api.ts, server/runtime-state-hub.ts             |
-+-------------------------------+--------------------------------+------------------+
-                                |                                |
-                                |                                |
-                                v                                v
-+-------------------------------+--+          +------------------+-------------------+
-| PTY Runtime                      |          | Native Cline Integration             |
-| src/terminal/                    |          | src/cline-sdk/                       |
-|                                  |          |                                      |
-| agent-registry.ts                |          | cline-provider-service.ts            |
-| session-manager.ts               |          | cline-task-session-service.ts        |
-| pty-session.ts                   |          | cline-session-runtime.ts             |
-+-------------------------------+--+          | cline-message-repository.ts         |
-                                |             | cline-event-adapter.ts              |
-                                |             +------------------+-------------------+
-                                |                                |
-                                v                                v
-+-------------------------------+--+          +------------------+-------------------+
-| Worktrees and shell processes    |          | Published Cline SDK packages        |
-| per-task cwd, CLI agents, shell  |          | `@clinebot/core`, `@clinebot/agents`, `@clinebot/llms` |
-+----------------------------------+          | provider store, session host,       |
-                                              | session artifact persistence         |
-                                              +--------------------------------------+
++---------------+-----------------------------------+-----------------------------------+-----+
+                |                                   |                                   |
+                v                                   v                                   v
++--------------------------------+  +--------------------------------+  +--------------------------------+
+| PTY Runtime                    |  | Native Cline Integration       |  | ACP Client Session             |
+| src/terminal/                  |  | src/cline-sdk/                 |  | src/acp-client-session/        |
+|                                |  |                                |  |                                |
+| agent-registry.ts              |  | cline-provider-service.ts      |  | acp-client-connection-         |
+| session-manager.ts             |  | cline-task-session-service.ts  |  |   runtime.ts                   |
+| pty-session.ts                 |  | cline-session-runtime.ts       |  | acp-task-session-service.ts    |
+|                                |  | cline-message-repository.ts    |  | acp-session-update-adapter.ts  |
+|                                |  | cline-event-adapter.ts         |  |                                |
++--------------------------------+  +--------------------------------+  +--------------------------------+
+                |                                   |                                   |
+                v                                   v                                   v
++--------------------------------+  +--------------------------------+  +--------------------------------+
+| Worktrees and shell processes  |  | Published Cline SDK packages   |  | ACP agent subprocess           |
+| per-task cwd, CLI agents,      |  | `@clinebot/core`,              |  | (`omp acp`): JSON-RPC over     |
+| shell                          |  | `@clinebot/agents`,            |  | stdio; session updates,        |
+|                                |  | `@clinebot/llms`               |  | permissions, plan approval     |
++--------------------------------+  +--------------------------------+  +--------------------------------+
 ```
 
 ## Request and Stream Diagram
@@ -80,6 +80,8 @@ runtime-api.ts
     +--> terminal/session-manager.ts for CLI-backed agents
     |
     +--> cline-task-session-service.ts for native Cline
+    |
+    +--> acp-client-session/acp-task-session-service.ts for ACP-backed agents
 
 
 Live runtime output
@@ -87,6 +89,8 @@ Live runtime output
     +--> terminal session summaries
     |
     +--> Cline summaries and chat messages
+    |
+    +--> ACP session summaries
     |
     v
 runtime-state-hub.ts
@@ -109,7 +113,7 @@ The browser layer is the presentation and orchestration layer. It renders the bo
 
 The runtime layer is the control layer. It decides what session to start, where it should run, what worktree or workspace it belongs to, what command or SDK session should be used, and what state should be streamed back to the browser.
 
-The execution layer is the actual agent implementation. For most agents that means a CLI process attached to a PTY. For Cline that means the published SDK packages with their own provider store, session host, and persisted session artifacts.
+The execution layer is the actual agent implementation. For most agents that means a CLI process attached to a PTY. For Cline that means the published SDK packages with their own provider store, session host, and persisted session artifacts. For oh-my-pi (`omp`) on its ACP channel that means a stdio subprocess speaking the Agent Client Protocol.
 
 That split explains a lot of the architecture:
 
@@ -119,12 +123,13 @@ That split explains a lot of the architecture:
 
 ## Runtime Modes
 
-Kanban currently supports three runtime modes.
+Kanban currently supports four runtime modes.
 
 | Runtime mode | Used for | Scope | Backing implementation | Why it exists |
 | --- | --- | --- | --- | --- |
 | Native Cline chat | Cline | task-scoped, plus a project-scoped sidebar surface | Cline SDK session host | Cline exposes richer chat semantics, provider settings, OAuth, and persisted session history |
-| CLI-backed task terminal | Claude Code, Codex, Gemini, OpenCode, Droid, and similar agents | task-scoped | PTY-backed process runtime | these agents are command-driven CLIs and already fit the terminal model well |
+| CLI-backed task terminal | Claude Code, Codex, Cursor, Gemini, OpenCode, Droid, Kiro, Kimi, and similar agents | task-scoped | PTY-backed process runtime | these agents are command-driven CLIs and already fit the terminal model well |
+| ACP-backed task session | oh-my-pi (`omp`) when its ACP channel is selected | task-scoped | ACP client session over a stdio subprocess | ACP carries structured session updates, permission requests, and plan approvals that raw terminal scraping cannot express |
 | Workspace shell terminal | the bottom shell panel | workspace-scoped | PTY-backed shell process | this is for manual commands in the repo, not task execution |
 
 The crucial point is that Cline is not just "another agent command". It is a native runtime path. Treating it like a terminal process would throw away useful structure that the SDK already gives us.
@@ -145,7 +150,8 @@ Cline is different because the SDK already owns several concerns that a CLI runt
 Because of that, the architecture is intentionally split:
 
 - Cline uses a native chat path
-- other agents stay on the PTY path
+- most other agents stay on the PTY path
+- omp can use the ACP stdio path instead of terminal scraping
 - the UI still sees a shared runtime surface, but the implementation behind it differs
 
 This is one of the most important architecture choices in the repo. If someone accidentally starts pushing Cline back toward "just another CLI", the system gets worse, not simpler.
@@ -159,7 +165,7 @@ These terms come up everywhere in the codebase.
 | Workspace | an indexed git repository that Kanban has opened | most browser and runtime state is scoped to a workspace |
 | Task card | a board item with a prompt, base ref, and review settings | a task is the unit of work the board cares about |
 | Worktree | a per-task git worktree | most task agents run inside one |
-| Task session | the live runtime attached to a task card | this may be a PTY process or a native Cline session |
+| Task session | the live runtime attached to a task card | this may be a PTY process, a native Cline session, or an ACP stdio subprocess |
 | Home agent session | a synthetic, project-scoped session used by the sidebar agent surface | this lets the sidebar reuse existing runtime primitives without creating a real task card |
 | Runtime summary | the small state object the board uses to know whether a session is idle, running, awaiting review, interrupted, or failed | this is the bridge between long-running agent work and the UI |
 
@@ -201,7 +207,7 @@ The `src/terminal/` area owns everything process-oriented:
 - translating process lifecycle into Kanban runtime summaries
 - handling the workspace shell terminal
 
-This is the path for Claude Code, Codex, Gemini, OpenCode, Droid, and any other command-driven agent.
+This is the path for Claude Code, Codex, Cursor, Gemini, OpenCode, Droid, Kiro, Kimi, and any other command-driven agent.
 
 ### Native Cline integration
 
@@ -213,6 +219,12 @@ Its job is to translate between Kanban concepts and SDK concepts:
 - the SDK thinks in provider settings, session ids, raw session events, and persisted artifacts
 
 The integration layer exists so the rest of Kanban does not need to understand the SDK package layout or the details of provider auth and session hosting.
+
+### ACP client session
+
+The `src/acp-client-session/` area owns the third transport: agents that speak the Agent Client Protocol (JSON-RPC over stdio) instead of running inside a PTY. Today that means oh-my-pi (`omp`) on its ACP channel.
+
+Its shape mirrors the Cline integration: `acp-protocol-boundary.ts` is the only module that imports the ACP SDK, `acp-client-connection-runtime.ts` owns one subprocess and handshake per task, `acp-session-update-adapter.ts` translates streaming session updates into Kanban facet and message mutations, and `acp-task-session-service.ts` is the facade `runtime-api.ts` talks to. Unlike Cline, an ACP agent is a real child process, so its pid feeds the same liveness rules a PTY session would.
 
 ### Workspace and config
 
@@ -237,6 +249,17 @@ Hooks in `web-ui/src/hooks/` are where most domain logic lives. This includes pr
 Components in `web-ui/src/components/` are mostly rendering and composition. Good frontend changes often mean moving runtime-aware logic into hooks and leaving the component to render a view model.
 
 `web-ui/src/runtime/` holds client-side query helpers and persistence glue. One of the guardrails we now enforce is that raw workspace TRPC client creation should stay concentrated in the runtime query helpers rather than spread through arbitrary components.
+
+### BoardCard dual host chains
+
+The same `BoardCard` component is rendered through two parallel host chains, and per-card stage actions (move to validation, move to done, commit, open PR, restore) must be wired through both:
+
+- the main board: `kanban-board.tsx` → `board-column.tsx`
+- the Focus View left sidebar: `card-detail-view.tsx` → `detail-panels/column-context-panel.tsx`
+
+Each host independently per-column-gates which handlers it passes down (for example `onMoveToValidationTask={column.id === "review" ? ... : undefined}`). A `BoardCard` button can render because its own `columnId` condition is met, yet do nothing because that host never passed the handler — this exact bug has shipped more than once. When adding or changing a per-card action, update `board-card.tsx` (the render condition) and both hosts' gating.
+
+The move-to-done "skip validation?" confirmation is centralized in `web-ui/src/hooks/use-board-interactions.ts` (`requestMoveToTrash` → `pendingMoveToDone` → `confirmMoveToDone`/`cancelMoveToDone`) with a single `SkipValidationConfirmDialog` rendered in `App.tsx`. Both the by-id handler used by board and sidebar cards and the selected-card handler used by the agent TUI bottom button funnel through it — do not reintroduce a per-view dialog.
 
 ## Native Cline Architecture
 
@@ -368,7 +391,7 @@ These are the architectural rules that are most important to preserve.
 
 Some of the highest-value rules are enforced automatically by lint.
 
-- only the two SDK boundary modules may import directly from `@clinebot/*`
+- direct `@clinebot/core` imports are lint-blocked across `src/` **except inside `src/cline-sdk/` itself** — the biome override (`biome.json`) explicitly excludes that directory and only restricts `@clinebot/core` (not `@clinebot/shared`), so the rule keeps the rest of the codebase behind `sdk-provider-boundary.ts` / `sdk-runtime-boundary.ts` but cannot police the boundary layer (which already has a direct-import counter-example in `cline-telemetry-service.ts`); inside that directory the boundary is convention, not lint
 - in the browser app, `createWorkspaceTrpcClient` is reserved for the runtime query helpers
 - the raw home agent session prefix should not be duplicated in app code
 
@@ -381,7 +404,7 @@ Not everything is perfectly generalized, and that is okay. Some current tradeoff
 - the home sidebar uses a synthetic session identity instead of a first-class workspace-native session type
 - some agent-selection code still branches on `"cline"` directly, even though the long-term direction is more capability-based routing
 - the published SDK packages are still a real dependency boundary, so the local boundary modules matter a lot
-- Cline is native chat while the rest of the catalog is still command-driven, which means some parallel abstractions are similar but not identical
+- Cline is native chat and omp can run over ACP while most of the catalog is still command-driven, which means some parallel abstractions are similar but not identical
 
 The important thing is that these tradeoffs are now explicit. They are not random accidents spread through the codebase.
 
@@ -391,7 +414,7 @@ When you are making a change, this table is often more useful than a file list.
 
 | If you are changing... | Think about this first | Common mistake to avoid |
 | --- | --- | --- |
-| task startup for Claude Code, Codex, Gemini, OpenCode, or Droid | the PTY runtime and agent launch path | accidentally adding special logic to the Cline path |
+| task startup for Claude Code, Codex, Cursor, Gemini, OpenCode, Droid, Kiro, or Kimi | the PTY runtime and agent launch path | accidentally adding special logic to the Cline path |
 | Cline provider settings, models, or OAuth | the Cline provider service and SDK provider boundary | storing secrets in Kanban config or duplicating OAuth policy |
 | Cline message rendering or send/cancel behavior | the shared Cline hooks and task-session service | making detail view and sidebar behave differently |
 | live board updates | the runtime state hub and browser stream consumers | falling back to polling or duplicating summary logic |

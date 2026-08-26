@@ -337,7 +337,7 @@ export default function App(): ReactElement {
 	}, [selectedCard?.card.id]);
 	useNotificationTaskFocus({ currentProjectId: navigationCurrentProjectId, setSelectedTaskId });
 
-	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 CONTEXT.md）开关 + 跨-workspace 打开某 task 的待定跳转。
+	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 docs/context-stage-first-overview.md）开关 + 跨-workspace 打开某 task 的待定跳转。
 	const [isBoardOverviewOpen, setIsBoardOverviewOpen] = useState(false);
 	const [pendingCrossProjectTaskOpen, setPendingCrossProjectTaskOpen] = useState<{
 		repoId: string;
