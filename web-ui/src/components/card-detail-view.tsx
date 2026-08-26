@@ -1,6 +1,7 @@
 import type { DropResult } from "@hello-pangea/dnd";
 import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { resolveAgentSessionTransportForLaunch } from "@runtime-agent-session-transport-selection";
+import { resolveSessionFacets } from "@runtime-session-activity";
 import {
 	AlertTriangle,
 	Files,
@@ -27,12 +28,15 @@ import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-pa
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { taskDetailAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { spotlightSessionMapNodeAnchor } from "@/components/session-map/session-map-anchor-registry";
+import { SessionMapPanel } from "@/components/session-map/session-map-panel";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useIsMobile } from "@/hooks/use-is-mobile";
+import { useSessionMapPanelData } from "@/hooks/use-session-map-panel-data";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
 import { ResizeHandle } from "@/resize/resize-handle";
 import { clampBetween } from "@/resize/resize-persistence";
@@ -48,6 +52,7 @@ import type {
 	RuntimeAgentSessionTransport,
 	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
+	RuntimeExploratorySessionMapNode,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
@@ -899,6 +904,76 @@ export function CardDetailView({
 	const showClineAgentChatPanel = activeTaskConversationSessionSummary
 		? isRuntimeAgentSessionSummaryRenderedAsConversationPanel(activeTaskConversationSessionSummary)
 		: nextLaunchAgentSessionTransport !== null && nextLaunchAgentSessionTransport !== "pty_terminal";
+	// ── Session Map 面板（蓝图 §G.1，M0）──────────────────────────────────
+	// 只对「渲染为 conversation 面板」的会话出现（Cline SDK 与 ACP；PTY 终端会话 M0 不挂）。
+	// 重拉信号 = 低频精确边沿（姊妹蓝图 §2.3：投影层不新增 WS 事件，搭 summary 广播重拉）：
+	// 新 turn 开始 / 回合结束（turnOwner 翻转——投影的 in-progress 判定与它同源）、
+	// checkpoint 异步落地（latestTurnCheckpoint.turn/commit 变化）、存活度翻转（liveness，
+	// 如 agent 回合中崩溃退出后投影的 liveSummary 消失、spinner 必须停）。facet 一律经
+	// resolveSessionFacets 读（铁律：consumer 不直接读裸 facet 字段做决策）。
+	// 绝不许把 summary.updatedAt 拼回来：updateSummary 漏斗每次写都推进 updatedAt，
+	// Cline 流式期间经 ~150ms 批次广播（TASK_SESSION_STREAM_BATCH_MS），含它会让 hook
+	// 每个批次都重发两个 query——服务端 Cline 路径每次克隆/遍历全量消息并跑
+	// git for-each-ref（listTaskTurnCheckpointRefs），长会话/多标签页下形成无界历史
+	// 重算与 git 子进程轮询（本仓 AGENTS.md 记载过同类事件循环停摆事故）。上述三类
+	// 边沿与 updatedAt 在同一个广播批次里到达，去掉它不引入任何可感知延迟。
+	const sessionMapConversationSessionTaskId = showClineAgentChatPanel ? selectedTaskConversationSessionId : null;
+	const sessionMapRefreshFacets = activeTaskConversationSessionSummary
+		? resolveSessionFacets(activeTaskConversationSessionSummary)
+		: null;
+	const sessionMapSummaryRefreshKey = sessionMapConversationSessionTaskId
+		? [
+				activeTaskConversationSessionSummary?.latestTurnCheckpoint?.turn ?? 0,
+				activeTaskConversationSessionSummary?.latestTurnCheckpoint?.commit ?? "",
+				sessionMapRefreshFacets?.turnOwner ?? "none",
+				sessionMapRefreshFacets?.liveness ?? "none",
+			].join(":")
+		: null;
+	const sessionMapPanelData = useSessionMapPanelData({
+		workspaceId: currentProjectId,
+		conversationSessionTaskId: sessionMapConversationSessionTaskId,
+		refreshKey: sessionMapSummaryRefreshKey,
+	});
+	// 聊天内锚 chip 点击 → 展开面板 + spotlight 节点的信号令牌（selectedPathExpandToken 同款先例）。
+	const [sessionMapPanelExpandToken, setSessionMapPanelExpandToken] = useState(0);
+	const sessionMapNodeById = useMemo(() => {
+		const byId = new Map<string, RuntimeExploratorySessionMapNode>();
+		for (const node of sessionMapPanelData.mapCollection?.mapNodes ?? []) {
+			byId.set(node.mapNodeId, node);
+		}
+		return byId;
+	}, [sessionMapPanelData.mapCollection]);
+	// 反注入铁律（蓝图 §C.1）：chip 显示内容恒来自服务端 map 集合，按 id 查不到即不渲染。
+	const resolveSessionMapAnchor = useCallback(
+		(mapNodeId: string) => {
+			const node = sessionMapNodeById.get(mapNodeId);
+			return node ? { nodeTitle: node.nodeTitle, nodeKind: node.nodeKind } : null;
+		},
+		[sessionMapNodeById],
+	);
+	const handleSessionMapAnchorClick = useCallback(
+		(mapNodeId: string) => {
+			setSessionMapPanelExpandToken((token) => token + 1);
+			if (isMobile) {
+				// 移动端 chip 在 chat tab、map 面板在 sessions tab，先切过去再 spotlight。
+				setMobileTab("sessions");
+			}
+			// 展开是 React 状态更新，spotlight 必须等节点锚挂进 DOM；rAF 重试吸收更慢的渲染
+			// （column-context-panel 的 centerSelectedCard 同款模式），始终未命中则静默降级。
+			let attempts = 0;
+			const spotlightWhenMounted = () => {
+				if (spotlightSessionMapNodeAnchor(mapNodeId)) {
+					return;
+				}
+				if (attempts < 10) {
+					attempts += 1;
+					window.requestAnimationFrame(spotlightWhenMounted);
+				}
+			};
+			window.requestAnimationFrame(spotlightWhenMounted);
+		},
+		[isMobile],
+	);
 	const agentPanelStyle: CSSProperties = showClineAgentChatPanel
 		? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
 		: {
@@ -1114,6 +1189,16 @@ export function CardDetailView({
 			/>
 		) : null;
 	const isMainTaskConversationSessionSelected = selectedTaskConversationSessionId === selection.card.id;
+	// map 面板与 TaskConversationSessionsPanel 同位下方的独立可折叠 section（蓝图 §G.1：
+	// 不抢占其挂载点）；出现条件与聊天面板一致（conversation 面板会话）。
+	const sessionMapPanel = sessionMapConversationSessionTaskId ? (
+		<SessionMapPanel
+			queryPhase={sessionMapPanelData.queryPhase}
+			projection={sessionMapPanelData.projection}
+			mapCollection={sessionMapPanelData.mapCollection}
+			expandToken={sessionMapPanelExpandToken}
+		/>
+	) : null;
 	const activeTaskConversationSessionMessages =
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
 		(isMainTaskConversationSessionSelected ? streamedClineChatMessages : null);
@@ -1171,6 +1256,8 @@ export function CardDetailView({
 					? getTaskAutoReviewCancelButtonLabel(selection.card.autoReviewMode)
 					: null
 			}
+			resolveSessionMapAnchor={resolveSessionMapAnchor}
+			onSessionMapAnchorClick={handleSessionMapAnchorClick}
 		/>
 	) : (
 		<AgentTerminalPanel
@@ -1261,12 +1348,13 @@ export function CardDetailView({
 						>
 							{agentChatPanel}
 						</div>
-						{/* Sessions panel */}
+						{/* Sessions panel + Session Map（同位下方的独立可折叠 section） */}
 						<div
 							className="min-h-0 min-w-0 flex-1 flex-col"
 							style={{ display: mobileTab === "sessions" ? "flex" : "none" }}
 						>
-							{taskConversationSessionsPanel}
+							<div className="flex min-h-0 min-w-0 flex-1 flex-col">{taskConversationSessionsPanel}</div>
+							{sessionMapPanel}
 						</div>
 						{/* Prompts / comments utility panel */}
 						<div
@@ -1555,6 +1643,8 @@ export function CardDetailView({
 										>
 											{taskConversationSessionsPanel}
 										</div>
+										{/* Session Map：同位下方的独立可折叠 section（蓝图 §G.1） */}
+										{sessionMapPanel}
 										<ResizeHandle
 											orientation="horizontal"
 											ariaLabel="Resize task conversation sessions and utility panels"

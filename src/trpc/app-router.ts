@@ -50,6 +50,8 @@ import type {
 	RuntimeConfirmVerificationCompleteResponse,
 	RuntimeContinueConnectionRetrySessionsRequest,
 	RuntimeContinueConnectionRetrySessionsResponse,
+	RuntimeConversationSessionTurnProjectionRequest,
+	RuntimeConversationSessionTurnProjectionResponse,
 	RuntimeDebugResetAllStateResponse,
 	RuntimeDeferredRestorationHarnessNotificationsRequest,
 	RuntimeDeferredRestorationHarnessNotificationsResponse,
@@ -60,6 +62,8 @@ import type {
 	RuntimeDismissConnectionRetrySessionsRequest,
 	RuntimeDismissConnectionRetrySessionsResponse,
 	RuntimeFeaturebaseTokenResponse,
+	RuntimeGetExploratorySessionMapRequest,
+	RuntimeGetExploratorySessionMapResponse,
 	RuntimeGetPostDeployVerificationStateRequest,
 	RuntimeGetPostDeployVerificationStateResponse,
 	RuntimeGitCheckoutRequest,
@@ -206,6 +210,8 @@ import {
 	runtimeConfirmVerificationCompleteResponseSchema,
 	runtimeContinueConnectionRetrySessionsRequestSchema,
 	runtimeContinueConnectionRetrySessionsResponseSchema,
+	runtimeConversationSessionTurnProjectionRequestSchema,
+	runtimeConversationSessionTurnProjectionResponseSchema,
 	runtimeDebugResetAllStateResponseSchema,
 	runtimeDeferredRestorationHarnessNotificationsRequestSchema,
 	runtimeDeferredRestorationHarnessNotificationsResponseSchema,
@@ -216,6 +222,8 @@ import {
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeDismissConnectionRetrySessionsResponseSchema,
 	runtimeFeaturebaseTokenResponseSchema,
+	runtimeGetExploratorySessionMapRequestSchema,
+	runtimeGetExploratorySessionMapResponseSchema,
 	runtimeGetPostDeployVerificationStateRequestSchema,
 	runtimeGetPostDeployVerificationStateResponseSchema,
 	runtimeGitCheckoutRequestSchema,
@@ -637,6 +645,18 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeConfirmVerificationCompleteRequest,
 		) => Promise<RuntimeConfirmVerificationCompleteResponse>;
+	};
+	conversationTreeApi: {
+		getConversationSessionTurnProjection: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeConversationSessionTurnProjectionRequest,
+		) => Promise<RuntimeConversationSessionTurnProjectionResponse>;
+	};
+	exploratoryApi: {
+		getSessionMap: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGetExploratorySessionMapRequest,
+		) => Promise<RuntimeGetExploratorySessionMapResponse>;
 	};
 }
 
@@ -1212,6 +1232,25 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeConfirmVerificationCompleteResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.deploymentApi.confirmVerificationComplete(ctx.workspaceScope, input);
+			}),
+	}),
+	conversationTree: t.router({
+		// 会话 turn 投影（只读派生层，姊妹蓝图 §2.2）：session map 面板裸锚点骨架与
+		// （远期）会话树共享同一数据源。M0 只接 Cline SDK 源，其余 transport 按 session 粒度降级。
+		getConversationSessionTurnProjection: workspaceProcedure
+			.input(runtimeConversationSessionTurnProjectionRequestSchema)
+			.output(runtimeConversationSessionTurnProjectionResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.conversationTreeApi.getConversationSessionTurnProjection(ctx.workspaceScope, input);
+			}),
+	}),
+	exploratory: t.router({
+		// 读 per-workspace map store 中该会话的集合；null = 尚无集合（M0 恒态，UI 纯展示投影骨架）。
+		getSessionMap: workspaceProcedure
+			.input(runtimeGetExploratorySessionMapRequestSchema)
+			.output(runtimeGetExploratorySessionMapResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.getSessionMap(ctx.workspaceScope, input);
 			}),
 	}),
 });

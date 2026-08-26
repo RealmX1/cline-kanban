@@ -47,7 +47,9 @@ import { loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/works
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
+import { createConversationTreeApi } from "../trpc/conversation-tree-api";
 import { createDeploymentApi } from "../trpc/deployment-api";
+import { createExploratoryApi } from "../trpc/exploratory-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
@@ -468,6 +470,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					return manager.getSummary(taskId)?.latestHookActivity?.finalMessage ?? null;
 				},
 			}),
+			conversationTreeApi: createConversationTreeApi({
+				getScopedClineTaskSessionService,
+				loadBoardCardAgentId: async (scope, taskId) => {
+					const board = await loadWorkspaceBoardById(scope.workspaceId);
+					const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+					return card?.agentId ?? null;
+				},
+			}),
+			exploratoryApi: createExploratoryApi(),
 		};
 	};
 
