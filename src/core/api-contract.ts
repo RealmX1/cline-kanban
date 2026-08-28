@@ -1332,13 +1332,26 @@ export const runtimeProjectsResponseSchema = z.object({
 });
 export type RuntimeProjectsResponse = z.infer<typeof runtimeProjectsResponseSchema>;
 
-// 跨全部注册项目的任务搜索索引（Spotlight 全局搜索「包含其它项目」时按需拉取）。仅携带搜索所需的最小字段
-// （taskId + title + prompt + columnId），不含 session / 工作区元数据，避免放进高频广播的 projects payload。
+// 跨全部注册项目的任务搜索索引（Spotlight 全局搜索「包含其它项目」时按需拉取）。携带「匹配所需字段」
+// （taskId + title + prompt + columnId）与「结果行排序/展示所需的卡片级持久事实」（createdAt / updatedAt /
+// 两个 agent 归属字段）。刻意**仍然**不含 session 活跃度与工作区 git 元数据：那些只对当前项目可得
+// （由 runtime-state-hub 推流），塞进这个按需拉取的快照只会得到一份立刻过期的假值。
+// 本端点是按需拉取（弹层开 + All projects 打开）而非高频广播，因此这几个定长字段的体积可以接受。
 export const runtimeAllProjectsTaskSearchIndexTaskEntrySchema = z.object({
 	taskId: z.string(),
 	title: z.string(),
 	prompt: z.string(),
 	columnId: runtimeBoardColumnIdSchema,
+	// 卡片创建时刻（epoch ms）。
+	createdAt: z.number(),
+	// 用户可见的「上次修改时间」（建卡 / 跨列移动 / 用户编辑才 bump；后台观测刻意不写它，
+	// 见 task-board-mutations.ts 的注释）。**不是** agent 活跃时间，排序档命名不得混淆二者。
+	updatedAt: z.number(),
+	// 用户为这张卡做的 per-task agent 覆盖；null = 跟随该项目的默认 agent（跨项目不可知，故结果行不臆测）。
+	agentId: runtimeAgentIdSchema.nullable(),
+	// runtime 观测值：本卡最近一次**真正启动成功**的会话用的是哪个 agent。跨项目行拿不到 live session，
+	// 它是「这个任务实际在用哪个 agent」唯一可得的事实。
+	mostRecentlyLaunchedAgentSessionAgentId: runtimeAgentIdSchema.nullable(),
 });
 export type RuntimeAllProjectsTaskSearchIndexTaskEntry = z.infer<
 	typeof runtimeAllProjectsTaskSearchIndexTaskEntrySchema

@@ -1,5 +1,6 @@
 import { Fzf, type FzfResultItem } from "fzf";
 
+import type { RuntimeAgentId } from "@/runtime/types";
 import type { BoardData } from "@/types";
 
 export type TaskBoardSearchMode = "direct" | "hybrid" | "fuzzy" | "semantic";
@@ -23,6 +24,18 @@ export interface TaskBoardSearchDocument {
 	columnId: string;
 	title: string;
 	prompt: string;
+	// 下面四个字段**只**参与排序与结果行展示，一律不进 taskSearchSubjectText、不进语义索引、
+	// 不参与 direct 分词——加宽文档不得改变任何一种模式的命中集合。
+	taskCreatedAtEpochMs: number;
+	// 用户可见的「上次修改时间」：建卡 / 跨列移动 / 用户编辑才 bump。**不是** agent 活跃时间
+	// （后台观测刻意不写它，见 src/core/task-board-mutations.ts 的注释）——名字写长就是为了防止
+	// 再有人把它当成「最近活跃」来排序。
+	taskLastModifiedAtEpochMs: number;
+	// 用户为这张卡做的 per-task agent 覆盖；null = 跟随所属项目的默认 agent。
+	taskAgentOverrideAgentId: RuntimeAgentId | null;
+	// runtime 观测值：本卡最近一次真正启动成功的会话用的是哪个 agent。跨项目行没有 live session，
+	// 它是「这个任务实际在用哪个 agent」唯一可得的事实。
+	mostRecentlyLaunchedAgentSessionAgentId: RuntimeAgentId | null;
 	// direct 子串匹配每键都要 lowercase 两个字段，预计算免每次搜索重复归一。
 	titleLowerCase: string;
 	promptLowerCase: string;
@@ -99,6 +112,10 @@ export function buildTaskBoardSearchDocument(params: {
 	columnId: string;
 	title: string;
 	prompt: string;
+	taskCreatedAtEpochMs: number;
+	taskLastModifiedAtEpochMs: number;
+	taskAgentOverrideAgentId: RuntimeAgentId | null;
+	mostRecentlyLaunchedAgentSessionAgentId: RuntimeAgentId | null;
 }): TaskBoardSearchDocument {
 	const title = params.title.trim();
 	const prompt = params.prompt.trim();
@@ -114,6 +131,10 @@ export function buildTaskBoardSearchDocument(params: {
 		columnId: params.columnId,
 		title,
 		prompt,
+		taskCreatedAtEpochMs: params.taskCreatedAtEpochMs,
+		taskLastModifiedAtEpochMs: params.taskLastModifiedAtEpochMs,
+		taskAgentOverrideAgentId: params.taskAgentOverrideAgentId,
+		mostRecentlyLaunchedAgentSessionAgentId: params.mostRecentlyLaunchedAgentSessionAgentId,
 		titleLowerCase: title.toLocaleLowerCase(),
 		promptLowerCase: prompt.toLocaleLowerCase(),
 		taskSearchSubjectText,
@@ -139,6 +160,10 @@ export function buildTaskBoardSearchDocuments(
 					columnId: column.id,
 					title: card.title,
 					prompt: card.prompt,
+					taskCreatedAtEpochMs: card.createdAt,
+					taskLastModifiedAtEpochMs: card.updatedAt,
+					taskAgentOverrideAgentId: card.agentId ?? null,
+					mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId ?? null,
 				}),
 			);
 		}
