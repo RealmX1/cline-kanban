@@ -50,7 +50,11 @@ import type {
 	RuntimeConfirmVerificationCompleteResponse,
 	RuntimeContinueConnectionRetrySessionsRequest,
 	RuntimeContinueConnectionRetrySessionsResponse,
+	RuntimeConversationSessionTurnProjectionRequest,
+	RuntimeConversationSessionTurnProjectionResponse,
 	RuntimeDebugResetAllStateResponse,
+	RuntimeDeferredRestorationHarnessNotificationsRequest,
+	RuntimeDeferredRestorationHarnessNotificationsResponse,
 	RuntimeDirectoryListRequest,
 	RuntimeDirectoryListResponse,
 	RuntimeDismissAgentRaisedPendingUserDecisionRequest,
@@ -58,6 +62,8 @@ import type {
 	RuntimeDismissConnectionRetrySessionsRequest,
 	RuntimeDismissConnectionRetrySessionsResponse,
 	RuntimeFeaturebaseTokenResponse,
+	RuntimeGetExploratorySessionMapRequest,
+	RuntimeGetExploratorySessionMapResponse,
 	RuntimeGetPostDeployVerificationStateRequest,
 	RuntimeGetPostDeployVerificationStateResponse,
 	RuntimeGitCheckoutRequest,
@@ -95,6 +101,7 @@ import type {
 	RuntimePromptLibraryMutateRequest,
 	RuntimePromptLibraryReadRequest,
 	RuntimePromptLibraryResponse,
+	RuntimeReleaseDeferredRestorationHarnessNotificationsResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
@@ -203,7 +210,11 @@ import {
 	runtimeConfirmVerificationCompleteResponseSchema,
 	runtimeContinueConnectionRetrySessionsRequestSchema,
 	runtimeContinueConnectionRetrySessionsResponseSchema,
+	runtimeConversationSessionTurnProjectionRequestSchema,
+	runtimeConversationSessionTurnProjectionResponseSchema,
 	runtimeDebugResetAllStateResponseSchema,
+	runtimeDeferredRestorationHarnessNotificationsRequestSchema,
+	runtimeDeferredRestorationHarnessNotificationsResponseSchema,
 	runtimeDirectoryListRequestSchema,
 	runtimeDirectoryListResponseSchema,
 	runtimeDismissAgentRaisedPendingUserDecisionRequestSchema,
@@ -211,6 +222,8 @@ import {
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeDismissConnectionRetrySessionsResponseSchema,
 	runtimeFeaturebaseTokenResponseSchema,
+	runtimeGetExploratorySessionMapRequestSchema,
+	runtimeGetExploratorySessionMapResponseSchema,
 	runtimeGetPostDeployVerificationStateRequestSchema,
 	runtimeGetPostDeployVerificationStateResponseSchema,
 	runtimeGitCheckoutRequestSchema,
@@ -248,6 +261,7 @@ import {
 	runtimePromptLibraryMutateRequestSchema,
 	runtimePromptLibraryReadRequestSchema,
 	runtimePromptLibraryResponseSchema,
+	runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
 	runtimeRunPostDeployVerificationItemRequestSchema,
@@ -403,6 +417,14 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatSendRequest,
 		) => Promise<RuntimeTaskChatSendResponse>;
+		getDeferredRestorationHarnessNotifications: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeDeferredRestorationHarnessNotificationsRequest,
+		) => Promise<RuntimeDeferredRestorationHarnessNotificationsResponse>;
+		releaseDeferredRestorationHarnessNotificationsIntoTaskSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeDeferredRestorationHarnessNotificationsRequest,
+		) => Promise<RuntimeReleaseDeferredRestorationHarnessNotificationsResponse>;
 		cancelTaskChatDelivery: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatDeliveryCancelRequest,
@@ -624,6 +646,18 @@ export interface RuntimeTrpcContext {
 			input: RuntimeConfirmVerificationCompleteRequest,
 		) => Promise<RuntimeConfirmVerificationCompleteResponse>;
 	};
+	conversationTreeApi: {
+		getConversationSessionTurnProjection: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeConversationSessionTurnProjectionRequest,
+		) => Promise<RuntimeConversationSessionTurnProjectionResponse>;
+	};
+	exploratoryApi: {
+		getSessionMap: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGetExploratorySessionMapRequest,
+		) => Promise<RuntimeGetExploratorySessionMapResponse>;
+	};
 }
 
 interface RuntimeTrpcContextWithWorkspaceScope extends RuntimeTrpcContext {
@@ -817,6 +851,21 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatSendResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.sendTaskChatMessage(ctx.workspaceScope, input);
+			}),
+		getDeferredRestorationHarnessNotifications: workspaceProcedure
+			.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
+			.output(runtimeDeferredRestorationHarnessNotificationsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getDeferredRestorationHarnessNotifications(ctx.workspaceScope, input);
+			}),
+		releaseDeferredRestorationHarnessNotificationsIntoTaskSession: workspaceProcedure
+			.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
+			.output(runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+					ctx.workspaceScope,
+					input,
+				);
 			}),
 		cancelTaskChatDelivery: workspaceProcedure
 			.input(runtimeTaskChatDeliveryCancelRequestSchema)
@@ -1183,6 +1232,25 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeConfirmVerificationCompleteResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.deploymentApi.confirmVerificationComplete(ctx.workspaceScope, input);
+			}),
+	}),
+	conversationTree: t.router({
+		// 会话 turn 投影（只读派生层，姊妹蓝图 §2.2）：session map 面板裸锚点骨架与
+		// （远期）会话树共享同一数据源。M0 只接 Cline SDK 源，其余 transport 按 session 粒度降级。
+		getConversationSessionTurnProjection: workspaceProcedure
+			.input(runtimeConversationSessionTurnProjectionRequestSchema)
+			.output(runtimeConversationSessionTurnProjectionResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.conversationTreeApi.getConversationSessionTurnProjection(ctx.workspaceScope, input);
+			}),
+	}),
+	exploratory: t.router({
+		// 读 per-workspace map store 中该会话的集合；null = 尚无集合（M0 恒态，UI 纯展示投影骨架）。
+		getSessionMap: workspaceProcedure
+			.input(runtimeGetExploratorySessionMapRequestSchema)
+			.output(runtimeGetExploratorySessionMapResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.getSessionMap(ctx.workspaceScope, input);
 			}),
 	}),
 });

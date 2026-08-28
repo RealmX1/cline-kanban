@@ -23,6 +23,10 @@ import React, {
 // 距顶多少像素以内算「滚到顶了」，触发回填。留一点余量：滚动惯性与子像素误差常让 scrollTop 停在 0 之上。
 const OLDER_MESSAGE_BACKFILL_SCROLL_TOP_THRESHOLD_PX = 48;
 
+import {
+	buildTurnBoundaryDerivationMemoKey,
+	deriveTurnBoundariesFromChatMessages,
+} from "@/components/conversation-tree/conversation-tree-model";
 import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
 import { ClineChatComposer } from "@/components/detail-panels/cline-chat-composer";
 import { ClineChatMessageItem } from "@/components/detail-panels/cline-chat-message-item";
@@ -32,6 +36,7 @@ import {
 	getClineReasoningEnabledModelIds,
 } from "@/components/detail-panels/cline-model-picker-options";
 import { ClineThinkingIndicator } from "@/components/detail-panels/cline-thinking-indicator";
+import type { ResolveSessionMapAnchor } from "@/components/session-map/session-map-anchor-chip";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/components/ui/link";
 import { Spinner } from "@/components/ui/spinner";
@@ -122,6 +127,10 @@ export interface ClineAgentChatPanelProps {
 	showMoveToValidation?: boolean;
 	// 由详情视图递增的「把键盘焦点接过去」请求信号，透传给 composer；key 不变就不重复抢焦。
 	agentEntryKeyboardFocusRequestKey?: number;
+	// Session Map 聊天内锚（蓝图 §C.2）：按 id 查服务端 map 集合的解析器与 chip 点击回调。
+	// 不传则 marker 段不渲 chip（home 侧栏等无 map 集合上下文的面板走这条）。
+	resolveSessionMapAnchor?: ResolveSessionMapAnchor | null;
+	onSessionMapAnchorClick?: (mapNodeId: string) => void;
 }
 
 export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, ClineAgentChatPanelProps>(
@@ -159,6 +168,8 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			cancelAutomaticActionLabel,
 			showMoveToTrash = false,
 			showMoveToValidation = false,
+			resolveSessionMapAnchor = null,
+			onSessionMapAnchorClick,
 		},
 		ref,
 	): ReactElement {
@@ -201,6 +212,16 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			messages,
 			resetWindowKey: taskId,
 		});
+		// turn → 消息的位置性定位锚（姊妹蓝图 §5.5 / exploratory 蓝图 §C.3）：每条消息所属的
+		// 服务端投影 turn 号，渲染时挂成 DOM 锚 data-turn-anchor="T{n}"，供 map 面板远期
+		// reveal-to-index 滚动定位。编号权威在服务端投影层，这里只做位置性映射；绝不用消息
+		// id 做锚（id 重启即变），id 只在当次渲染期内查表。memo 键是粗粒度的（消息数,
+		// 末条 id, 末条 content 长度）——reducer 每次 upsert 都换数组引用，不能按引用 memo。
+		const turnBoundaryMemoKey = buildTurnBoundaryDerivationMemoKey(messages);
+		const turnNumberByMessageId = useMemo(
+			() => deriveTurnBoundariesFromChatMessages(messages),
+			[turnBoundaryMemoKey],
+		);
 		const pendingOlderMessageBackfillScrollHeightRef = useRef<number | null>(null);
 		// TODO: Persist per-task mode immediately when toggled so page refresh restores unsent mode changes.
 		const modeByTaskIdRef = useRef<Map<string, RuntimeTaskSessionMode>>(new Map());
@@ -528,14 +549,22 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 							{`Show ${hiddenOlderMessageCount} earlier message${hiddenOlderMessageCount === 1 ? "" : "s"}`}
 						</button>
 					) : null}
-					{visibleMessages.map((message) => (
-						<ClineChatMessageItem
-							key={message.id}
-							message={message}
-							taskId={taskId}
-							onResolveUserDecision={onResolveUserDecision}
-						/>
-					))}
+					{visibleMessages.map((message) => {
+						const turnNumber = turnNumberByMessageId.get(message.id);
+						// 包装 div 承载 per-message DOM 锚（首个 turn 边界之前的旁白消息无 turn 不挂）。
+						// user 消息的 ml-auto 右对齐在 block 级包装内照常生效（margin auto 不依赖 flex 上下文）。
+						return (
+							<div key={message.id} data-turn-anchor={turnNumber !== undefined ? `T${turnNumber}` : undefined}>
+								<ClineChatMessageItem
+									message={message}
+									taskId={taskId}
+									onResolveUserDecision={onResolveUserDecision}
+									resolveSessionMapAnchor={resolveSessionMapAnchor}
+									onSessionMapAnchorClick={onSessionMapAnchorClick}
+								/>
+							</div>
+						);
+					})}
 					{showAgentProgressIndicator ? <ClineThinkingIndicator /> : null}
 					{isCreditLimitNoticeVisible ? <ClineCreditLimitNotice /> : null}
 				</div>

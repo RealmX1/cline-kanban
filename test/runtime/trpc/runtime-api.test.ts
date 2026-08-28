@@ -158,6 +158,10 @@ import {
 	getWorkspacePromptLibraryPath,
 	readWorkspacePromptLibrarySnapshot,
 } from "../../../src/state/prompt-library-store";
+import {
+	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
+	listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
+} from "../../../src/state/restoration-deferred-harness-generated-prompt-store";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
 
@@ -4849,5 +4853,140 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 		expect(response.outcome).toBe("prompt_library_write_failed");
 		expect(response.error).toBeTruthy();
 		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).not.toHaveBeenCalled();
+	});
+});
+
+describe("createRuntimeApi releaseDeferredRestorationHarnessNotificationsIntoTaskSession", () => {
+	// 账本走真实存储层，落在被 mock 的 workspace 目录（/tmp/kanban-workspaces/<id>）下。
+	// 每个用例取唯一 workspaceId，避免并行 worker 互踩。
+	let releaseWorkspaceId = "";
+
+	beforeEach(() => {
+		releaseWorkspaceId = `release-deferred-${process.pid}-${Math.random().toString(16).slice(2)}`;
+	});
+
+	afterEach(() => {
+		rmSync(`/tmp/kanban-workspaces/${releaseWorkspaceId}`, { recursive: true, force: true });
+	});
+
+	async function seedDeferredNotifications(): Promise<void> {
+		for (const [index, receivedAt] of [1_000, 2_000].entries()) {
+			await deferHarnessGeneratedPromptDuringAgentSessionRestoration({
+				workspaceId: releaseWorkspaceId,
+				taskId: "task-1",
+				sourceHarness: "claude",
+				promptText: `<task-notification>通知 ${index + 1}</task-notification>`,
+				receivedAt,
+			});
+		}
+	}
+
+	// 终端通道「先受理、后落定」：把投递终态交给测试决定，就能覆盖「受理了但最终没送达」这个真实形态。
+	function createReleaseTerminalManagerDouble(settledOutcome: { status: string; reason: string | null }): {
+		submitTaskChatInputWhenReady: ReturnType<typeof vi.fn>;
+		disarmRestorationContinuationGuard: ReturnType<typeof vi.fn>;
+		completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: ReturnType<typeof vi.fn>;
+	} {
+		return {
+			submitTaskChatInputWhenReady: vi.fn(
+				(_taskId: string, _text: string, options?: { onDeliveryOutcome?: (outcome: unknown) => void }) => {
+					options?.onDeliveryOutcome?.(settledOutcome);
+					return createSummary({ agentId: "claude", state: "awaiting_review" });
+				},
+			),
+			disarmRestorationContinuationGuard: vi.fn(),
+			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
+		};
+	}
+
+	function createReleaseApi(terminalManager: unknown): ReturnType<typeof createTestRuntimeApi> {
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
+		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
+		return createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => releaseWorkspaceId),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+	}
+
+	// 核心验收：accepted_pending_submit_confirmation **不表示成功**。账本已经被 consume 掉，此刻报
+	// ok:true 就等于「说送到了、其实没送、通知还丢了」。
+	it("终端投递落在非成功终态时报 ok:false，并把通知原样放回账本", async () => {
+		await seedDeferredNotifications();
+		const beforeRelease = await listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration({
+			workspaceId: releaseWorkspaceId,
+			taskId: "task-1",
+		});
+		const terminalManager = createReleaseTerminalManagerDouble({
+			status: "delivery_failed",
+			reason: "agent_awaiting_user_decision_timeout",
+		});
+		const api = createReleaseApi(terminalManager);
+
+		const response = await api.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+			{ workspaceId: releaseWorkspaceId, workspacePath: "/tmp/repo" },
+			{ taskId: "task-1" },
+		);
+
+		expect(response.ok).toBe(false);
+		expect(response.releasedNotificationCount).toBe(0);
+		expect(response.error).toContain("agent_awaiting_user_decision_timeout");
+		expect(
+			await listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration({
+				workspaceId: releaseWorkspaceId,
+				taskId: "task-1",
+			}),
+		).toEqual(beforeRelease);
+	});
+
+	// 放行是用户显式点的按钮，不是后台自动注入。带 source 会被统一出口判成后台注入并对「正等用户拍板」
+	// 的会话让位，而恢复出来的会话恰恰常停在那种模态上——于是放行永远送不出去。
+	it("按真人输入投递：不置 deferWhileUserTurn，不给恢复态会话让位", async () => {
+		await seedDeferredNotifications();
+		const terminalManager = createReleaseTerminalManagerDouble({
+			status: "delivered_and_submit_confirmed",
+			reason: null,
+		});
+		const api = createReleaseApi(terminalManager);
+
+		await api.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+			{ workspaceId: releaseWorkspaceId, workspacePath: "/tmp/repo" },
+			{ taskId: "task-1" },
+		);
+
+		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith(
+			"task-1",
+			expect.stringContaining("<kanban-user-released-harness-notifications>"),
+			expect.objectContaining({ deferWhileUserTurn: false }),
+		);
+	});
+
+	it("终端投递确认送达时报 ok:true，账本清空且守卫已解除", async () => {
+		await seedDeferredNotifications();
+		const terminalManager = createReleaseTerminalManagerDouble({
+			status: "delivered_and_submit_confirmed",
+			reason: null,
+		});
+		const api = createReleaseApi(terminalManager);
+
+		const response = await api.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+			{ workspaceId: releaseWorkspaceId, workspacePath: "/tmp/repo" },
+			{ taskId: "task-1" },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(response.releasedNotificationCount).toBe(2);
+		expect(terminalManager.disarmRestorationContinuationGuard).toHaveBeenCalledWith("task-1");
+		expect(
+			await listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration({
+				workspaceId: releaseWorkspaceId,
+				taskId: "task-1",
+			}),
+		).toEqual([]);
 	});
 });

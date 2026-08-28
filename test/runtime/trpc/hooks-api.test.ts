@@ -1,8 +1,27 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
-import type { TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createHooksApi } from "../../../src/trpc/hooks-api";
+
+// 文件末尾的跨层回归用例要驱动**真实** TerminalSessionManager——两档恢复守卫的状态机住在它里面，
+// 用桩 manager 复述一遍就只是在测桩本身。真实 manager 会 spawn PTY 并做 agent 启动准备，故把这两条
+// 外部边界桩掉。本文件其余用例仍用「按需实现方法的类型级 manager 桩」，完全不受这两个 mock 影响。
+const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
+const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
+	BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN: "\r",
+	prepareAgentLaunch: prepareAgentLaunchMock,
+	toBracketedPasteFramingWithoutTrailingSubmit: (text: string) => `SUBMIT[${text}]`,
+}));
+
+vi.mock("../../../src/terminal/pty-session.js", () => ({
+	PtySession: {
+		spawn: ptySessionSpawnMock,
+	},
+}));
+
+import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 
 function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
 	return {
@@ -22,13 +41,26 @@ function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): Runt
 	};
 }
 
-const CLAUDE_HARNESS_GENERATED_TASK_NOTIFICATION = [
+// 【该拦】上一个会话活体遗留的孤儿通知：无 tool-use-id、status 非 completed。判据与真实样本见
+// test/runtime/core/harness-generated-restoration-prompt.test.ts。
+const ORPHAN_TASK_NOTIFICATION_FROM_PREVIOUS_AGENT_SESSION_INCARNATION = [
+	"<task-notification>",
+	"<task-id>background-1</task-id>",
+	"<task-id>background-2</task-id>",
+	"<status>stopped</status>",
+	"<summary>No completion record was found for 2 background agents from the previous session.</summary>",
+	"</task-notification>",
+].join("\n");
+
+// 【该放】本活体自己 dispatch 的后台工作完成通知：带 tool-use-id 且 status=completed。恢复守卫武装
+// 期间也必须放行——它是 agent 明确在等的唤醒信号，拦下来就是把它自己派出去的活儿掐死在半路。
+const LIVE_INCARNATION_BACKGROUND_WORK_COMPLETION_NOTIFICATION = [
 	"<task-notification>",
 	"<task-id>background-1</task-id>",
 	"<tool-use-id>tool-use-1</tool-use-id>",
 	"<output-file>/tmp/background-1.output</output-file>",
-	"<status>failed</status>",
-	"<summary>No completion record was found.</summary>",
+	"<status>completed</status>",
+	'<summary>Background command "wait for attempts" completed (exit code 0)</summary>',
 	"</task-notification>",
 ].join("\n");
 
@@ -62,7 +94,7 @@ describe("createHooksApi", () => {
 			workspaceId: "workspace-1",
 			event: "to_in_progress",
 			metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
-			submittedPromptText: CLAUDE_HARNESS_GENERATED_TASK_NOTIFICATION,
+			submittedPromptText: ORPHAN_TASK_NOTIFICATION_FROM_PREVIOUS_AGENT_SESSION_INCARNATION,
 		});
 
 		expect(response).toEqual({
@@ -73,7 +105,10 @@ describe("createHooksApi", () => {
 			},
 		});
 		expect(deferHarnessGeneratedPrompt).toHaveBeenCalledWith(
-			expect.objectContaining({ taskId: "task-1", promptText: CLAUDE_HARNESS_GENERATED_TASK_NOTIFICATION }),
+			expect.objectContaining({
+				taskId: "task-1",
+				promptText: ORPHAN_TASK_NOTIFICATION_FROM_PREVIOUS_AGENT_SESSION_INCARNATION,
+			}),
 		);
 		expect(manager.transitionToRunning).not.toHaveBeenCalled();
 	});
@@ -109,7 +144,7 @@ describe("createHooksApi", () => {
 			workspaceId: "workspace-1",
 			event: "to_in_progress",
 			metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
-			submittedPromptText: CLAUDE_HARNESS_GENERATED_TASK_NOTIFICATION,
+			submittedPromptText: ORPHAN_TASK_NOTIFICATION_FROM_PREVIOUS_AGENT_SESSION_INCARNATION,
 		});
 
 		expect(response).toEqual({
@@ -147,7 +182,7 @@ describe("createHooksApi", () => {
 			workspaceId: "workspace-1",
 			event: "to_in_progress",
 			metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
-			submittedPromptText: CLAUDE_HARNESS_GENERATED_TASK_NOTIFICATION,
+			submittedPromptText: ORPHAN_TASK_NOTIFICATION_FROM_PREVIOUS_AGENT_SESSION_INCARNATION,
 		});
 
 		expect(response.harnessUserPromptProcessingDirective?.processingDecision).toBe(
@@ -931,5 +966,224 @@ describe("createHooksApi", () => {
 			turn: 3,
 		});
 		expect(manager.applyTurnCheckpoint).toHaveBeenCalledTimes(1);
+	});
+	it("恢复守卫武装期间放行本活体自己 dispatch 的后台工作完成通知——那是 agent 在等的唤醒信号", async () => {
+		const manager = {
+			getSummary: vi.fn(() =>
+				createSummary({
+					state: "running",
+					restorationContinuationGuardState: "restored_agent_conversation_waiting_for_explicit_user_input",
+				}),
+			),
+			isRestorationContinuationGuardArmed: vi.fn(() => true),
+			isRestorationHarnessGeneratedTaskNotificationInterceptionActive: vi.fn(() => true),
+			transitionToRunning: vi.fn(() => createSummary()),
+			transitionToReview: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			disarmRestorationContinuationGuard: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const deferHarnessGeneratedPrompt = vi.fn(async () => undefined);
+		const consumeDeferredHarnessGeneratedPrompts = vi.fn(async () => []);
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+			deferHarnessGeneratedPromptDuringAgentSessionRestoration: deferHarnessGeneratedPrompt,
+			consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration: consumeDeferredHarnessGeneratedPrompts,
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
+			submittedPromptText: LIVE_INCARNATION_BACKGROUND_WORK_COMPLETION_NOTIFICATION,
+		});
+
+		expect(response.ok).toBe(true);
+		expect(response.harnessUserPromptProcessingDirective?.processingDecision).not.toBe(
+			"block_and_defer_until_explicit_user_input",
+		);
+		expect(deferHarnessGeneratedPrompt).not.toHaveBeenCalled();
+		// 放行不等于「当成真人提交」：harness 通知既不得解除恢复守卫，也不得消费暂存账本。
+		expect(manager.disarmRestorationContinuationGuard).not.toHaveBeenCalled();
+		expect(consumeDeferredHarnessGeneratedPrompts).not.toHaveBeenCalled();
+	});
+
+	it("会话已 running 时真人 prompt 仍解除恢复守卫——解除必须先于转移闸，否则守卫永久武装", async () => {
+		// 回归 2026-08 的死锁：守卫解除原先只挂在闸后的 transitionToRunning 上，而 running 态的
+		// to_in_progress 过不了 canTransitionTaskForHookEvent（它要 awaiting_review），于是守卫再也解除不掉。
+		const manager = {
+			getSummary: vi.fn(() =>
+				createSummary({
+					state: "running",
+					reviewReason: null,
+					restorationContinuationGuardState: "restored_agent_conversation_waiting_for_explicit_user_input",
+				}),
+			),
+			isRestorationContinuationGuardArmed: vi.fn(() => true),
+			isRestorationHarnessGeneratedTaskNotificationInterceptionActive: vi.fn(() => true),
+			transitionToRunning: vi.fn(() => createSummary()),
+			transitionToReview: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			disarmRestorationContinuationGuard: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+			deferHarnessGeneratedPromptDuringAgentSessionRestoration: vi.fn(async () => undefined),
+			consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration: vi.fn(async () => []),
+		});
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
+			submittedPromptText: "接着把 handoff 补完",
+		});
+
+		expect(manager.disarmRestorationContinuationGuard).toHaveBeenCalledWith("task-1");
+	});
+});
+
+// 回收路径与 spawn 路径都要求 PTY 桩把 pid / write / stop / hasExited 做全，否则 manager 装载
+// entry.active 时就会因缺方法炸掉——这里只需要「能起得来、能停得掉」。
+interface MockPtySpawnRequest {
+	onData?: (chunk: Buffer) => void;
+	onExit?: (event: { exitCode: number | null; signal?: number }) => void;
+}
+
+function createMockPtySessionForRestorationGuardRegression(pid: number, request: MockPtySpawnRequest) {
+	let exited = false;
+	return {
+		pid,
+		write: vi.fn(),
+		resize: vi.fn(),
+		pause: vi.fn(),
+		resume: vi.fn(),
+		stop: vi.fn(() => {
+			if (exited) {
+				return;
+			}
+			exited = true;
+			request.onExit?.({ exitCode: 0 });
+		}),
+		hasExited: () => exited,
+		wasInterrupted: vi.fn(() => false),
+	};
+}
+
+const RESTORATION_GUARD_REGRESSION_WORKSPACE_PATH = "/tmp/restoration-continuation-guard-regression";
+
+// 两档恢复守卫（A=持久化的 restorationContinuationGuardState，B=挂在 entry.active 上的窄通知拦截）
+// 的解除时序只有把 hook 摄入与真实 session manager 串起来才验得出来：任何一侧单独看都是自洽的，
+// 缺口恰恰长在两者之间。
+describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSessionManager）", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		prepareAgentLaunchMock.mockReset();
+		ptySessionSpawnMock.mockReset();
+		prepareAgentLaunchMock.mockImplementation(async (input: { args: string[]; binary?: string }) => ({
+			binary: input.binary,
+			args: [...input.args],
+			env: {},
+		}));
+		ptySessionSpawnMock.mockImplementation((request: MockPtySpawnRequest) =>
+			createMockPtySessionForRestorationGuardRegression(300 + ptySessionSpawnMock.mock.calls.length, request),
+		);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("恢复过程自身的 Stop 不解除窄通知拦截：A 已由真人 prompt 解除、真人首轮尚未 Stop 时的迟到孤儿仍被暂存", async () => {
+		const taskId = "task-restored-claude";
+		const manager = new TerminalSessionManager();
+		try {
+			await manager.startTaskSession({
+				taskId,
+				agentId: "claude",
+				binary: "claude",
+				args: [],
+				cwd: RESTORATION_GUARD_REGRESSION_WORKSPACE_PATH,
+				prompt: "",
+				resumeFromTrash: true,
+			});
+
+			const deferHarnessGeneratedPrompt = vi.fn(async () => undefined);
+			const api = createHooksApi({
+				getWorkspacePathById: vi.fn(() => RESTORATION_GUARD_REGRESSION_WORKSPACE_PATH),
+				ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastTaskReadyForReview: vi.fn(),
+				// checkpoint 捕获会对 cwd 跑真实 git；这里的 cwd 是个不存在的临时路径，必须桩掉。
+				captureTaskTurnCheckpoint: vi.fn(async () => ({
+					turn: 1,
+					ref: `refs/kanban/checkpoints/${taskId}/turn/1`,
+					commit: "1111111",
+					createdAt: 1,
+				})),
+				deleteTaskTurnCheckpointRef: vi.fn(async () => undefined),
+				deferHarnessGeneratedPromptDuringAgentSessionRestoration: deferHarnessGeneratedPrompt,
+				consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration: vi.fn(async () => []),
+			});
+
+			// resumeFromTrash 的 Claude 会话：A、B 两档同时武装。
+			expect(manager.isRestorationContinuationGuardArmed(taskId)).toBe(true);
+			expect(manager.isRestorationHarnessGeneratedTaskNotificationInterceptionActive(taskId)).toBe(true);
+
+			// ① 恢复后 Claude 以 --continue 自己跑完一轮就 Stop——真人尚未发言。这条 Stop 不是「首个显式
+			//    用户回合结束」，不得解除 B。
+			await api.ingest({
+				taskId,
+				workspaceId: "workspace-1",
+				event: "to_review",
+				metadata: { source: "claude", hookEventName: "Stop" },
+			});
+			expect(manager.isRestorationContinuationGuardArmed(taskId)).toBe(true);
+			expect(manager.isRestorationHarnessGeneratedTaskNotificationInterceptionActive(taskId)).toBe(true);
+
+			// ② 真人 prompt：A 档在转移闸之前解除（死锁修复），此后只剩 B 兜着迟到窗口。
+			await api.ingest({
+				taskId,
+				workspaceId: "workspace-1",
+				event: "to_in_progress",
+				metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
+				submittedPromptText: "接着把 handoff 补完",
+			});
+			expect(manager.isRestorationContinuationGuardArmed(taskId)).toBe(false);
+			expect(manager.isRestorationHarnessGeneratedTaskNotificationInterceptionActive(taskId)).toBe(true);
+
+			// ③ 真人首轮进行中、尚未 Stop 时到达的迟到孤儿通知：必须仍被拦截并暂存，绝不能穿透给 agent。
+			const lateOrphanResponse = await api.ingest({
+				taskId,
+				workspaceId: "workspace-1",
+				event: "to_in_progress",
+				metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
+				submittedPromptText: ORPHAN_TASK_NOTIFICATION_FROM_PREVIOUS_AGENT_SESSION_INCARNATION,
+			});
+			expect(lateOrphanResponse.harnessUserPromptProcessingDirective?.processingDecision).toBe(
+				"block_and_defer_until_explicit_user_input",
+			);
+			expect(deferHarnessGeneratedPrompt).toHaveBeenCalledOnce();
+
+			// ④ 契约的另一半：真人首轮的自然 Stop 到达时 B 必须真的放开，不能变成「永不解除」。
+			await api.ingest({
+				taskId,
+				workspaceId: "workspace-1",
+				event: "to_review",
+				metadata: { source: "claude", hookEventName: "Stop" },
+			});
+			expect(manager.isRestorationHarnessGeneratedTaskNotificationInterceptionActive(taskId)).toBe(false);
+		} finally {
+			manager.dispose();
+		}
 	});
 });

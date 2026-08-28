@@ -20,7 +20,7 @@ kanban
 
 ### 前置要求
 
-- **Node.js**：`package.json` 的 `engines` 声明 `>=22`；CI 矩阵同时在 Node 20 与 22 上验证（`DEVELOPMENT.md` 记的是 20+）。装 22 最省事，但涉及新 Node API 的改动请以 20 为下限考虑。
+- **Node.js**：`package.json` 的 `engines` 声明 `>=22`；CI 矩阵同时在 Node 20 与 22 上验证。装 22 最省事，但涉及新 Node API 的改动请以 20 为下限考虑。
 - **npm 10+**
 - **git**
 

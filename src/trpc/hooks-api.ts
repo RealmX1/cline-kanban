@@ -10,6 +10,7 @@ import { parseHookIngestRequest } from "../core/api-validation";
 import {
 	formatDeferredHarnessGeneratedPromptsAsAdditionalContext,
 	isClaudeHarnessGeneratedTaskNotificationPrompt,
+	isTaskNotificationOrphanedByPreviousAgentSessionIncarnation,
 } from "../core/harness-generated-restoration-prompt";
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
@@ -163,8 +164,16 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					event === "to_in_progress" &&
 					body.metadata?.source?.trim().toLowerCase() === "claude" &&
 					normalizedHookEventName === "userpromptsubmit";
+				// 两档判定，别混为一谈：
+				//   - isClaudeHarnessGeneratedTaskNotification：任何 <task-notification> 包裹都**不是真人提交**，
+				//     故它既不解除恢复守卫、也不消费暂存账本（否则 harness 自己的通知就能把守卫顶开）。
+				//   - isRestorationOrphanTaskNotification：其中只有「上一活体遗留的孤儿」才真的拦下来暂存。
+				//     本活体自己 dispatch 的子 agent / 后台命令完成通知照常放行——那是 agent 在等的唤醒信号。
 				const isClaudeHarnessGeneratedTaskNotification =
 					isClaudeUserPromptSubmit && isClaudeHarnessGeneratedTaskNotificationPrompt(body.submittedPromptText);
+				const isRestorationOrphanTaskNotification =
+					isClaudeUserPromptSubmit &&
+					isTaskNotificationOrphanedByPreviousAgentSessionIncarnation(body.submittedPromptText);
 				let deferredHarnessNotificationsAdditionalContext: string | undefined;
 				const isRestorationHarnessGeneratedTaskNotificationInterceptionActive =
 					isClaudeUserPromptSubmit &&
@@ -172,7 +181,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						manager.isRestorationContinuationGuardArmed?.(taskId)) === true;
 				if (
 					isRestorationHarnessGeneratedTaskNotificationInterceptionActive &&
-					isClaudeHarnessGeneratedTaskNotification
+					isRestorationOrphanTaskNotification
 				) {
 					try {
 						// 同步 durable 写成功之后才准许 hook 返回 block；先回响应再 fire-and-forget 会在 daemon
@@ -222,6 +231,19 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 							userVisibleReason: "Kanban 正在恢复旧会话；无法确认这条空输入是否来自用户，已保留恢复守卫。",
 						},
 					} satisfies RuntimeHookIngestResponse;
+				}
+				// 恢复守卫的解除**必须**在 canTransitionTaskForHookEvent 之前完成。历史上它只挂在下方
+				// transitionToRunning(userInitiatedResume) 上，而那一步位于转移闸之后：会话一旦被任意一次
+				// PostToolUse 推进 running（Claude 以 --continue 接回后自己继续干活就会发），后续真人
+				// UserPromptSubmit 的 to_in_progress 便再也过不了闸（闸要求 awaiting_review + reviewReason
+				// 落在放行集），守卫从此永久武装。B 档拦截随之一起卡死——completeRestoration…() 见主守卫仍
+				// 武装就 no-op。实测 2026-08 有 79/185 条会话记录停在武装态、其中 38 条已无任何解除路径，
+				// agent 自己 dispatch 的后台工作唤醒信号被无限期吞掉。闸后解除是这个死锁的唯一成因。
+				const isExplicitUserTurnStartHookEvent =
+					event === "to_in_progress" &&
+					(normalizedHookEventName === "userpromptsubmit" || normalizedHookEventName === "beforeagent");
+				if (isExplicitUserTurnStartHookEvent && !isClaudeHarnessGeneratedTaskNotification) {
+					manager.disarmRestorationContinuationGuard?.(taskId);
 				}
 				if (isClaudeUserPromptSubmit && !isClaudeHarnessGeneratedTaskNotification) {
 					try {
@@ -316,7 +338,9 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					normalizedHookEventName === "stop"
 				) {
 					// 仅自然 Stop 证明真人恢复后的首轮已经结束；PermissionRequest / AskUserQuestion 等
-					// 中途人轴事件不能提前放掉迟到通知拦截。主守卫仍武装时方法会保持 no-op。
+					// 中途人轴事件不能提前放掉迟到通知拦截。主守卫（A 档）仍武装即「显式用户回合尚未开始」，
+					// 这条 Stop 只可能来自恢复过程自身，方法会保持 no-op——否则真人 prompt 随后在转移闸前
+					// 解除 A 时两档全空，「真人首轮已开始、尚未 Stop」那段窗口的迟到孤儿会直接穿透。
 					manager.completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn?.(taskId);
 				}
 
