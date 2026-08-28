@@ -240,6 +240,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					startInPlanMode: options?.resumeFromTrash ? undefined : task.startInPlanMode,
 					// 权限档位在续跑时同样适用（与 startInPlanMode 不同：那是「开局」语义，续跑没有开局）。
 					taskAgentPermissionMode: task.taskAgentPermissionMode,
+					// 会话模式是「下次启动生效」的卡片声明（蓝图 §A.1）：本条就是一次启动，
+					// 从卡片原值显式回填；漏传 = 服务端静默掉回 operational 缺省。
+					taskConversationMode: task.taskConversationMode,
 					resumeFromTrash: options?.resumeFromTrash,
 					baseRef: task.baseRef,
 					cols: geometry.cols,
@@ -334,6 +337,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					agentId: input.agentId,
 					clineSettings: input.task.clineSettings,
 					terminalAgentModelOverrideSettings: input.task.terminalAgentModelOverrideSettings,
+					// By the way 侧会话刻意不传 taskConversationMode：它被 system prompt/adapter 强制
+					// 只读（无命令执行），exploratory 注入的「kanban exploratory CLI 写回 map」维护协议
+					// 永远履行不了。省略 = 服务端缺省 operational（api-contract startTaskSession 注释）。
 					...(input.task.worktreeMode ? { worktreeMode: input.task.worktreeMode } : {}),
 					taskConversationSessionMetadata: {
 						workspaceTaskId: input.task.id,

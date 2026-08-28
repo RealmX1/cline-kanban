@@ -23,7 +23,7 @@ import {
 } from "../state/restoration-deferred-harness-generated-prompt-store";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
-import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
+import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
 import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
@@ -41,7 +41,6 @@ export interface CreateHooksApiDependencies {
 		taskId: string;
 		turn: number;
 	}) => Promise<RuntimeTaskTurnCheckpoint>;
-	deleteTaskTurnCheckpointRef?: (input: { cwd: string; ref: string }) => Promise<void>;
 	recordAgentRaisedPendingUserDecision?: typeof recordAgentRaisedPendingUserDecision;
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration?: typeof deferHarnessGeneratedPromptDuringAgentSessionRestoration;
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration?: typeof consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration;
@@ -124,7 +123,6 @@ async function recordAgentRaisedPendingUserDecisionFromHookIngest(input: {
 
 export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcContext["hooksApi"] {
 	const checkpointCapture = deps.captureTaskTurnCheckpoint ?? captureTaskTurnCheckpoint;
-	const checkpointRefDelete = deps.deleteTaskTurnCheckpointRef ?? deleteTaskTurnCheckpointRef;
 	const pendingUserDecisionRecord = deps.recordAgentRaisedPendingUserDecision ?? recordAgentRaisedPendingUserDecision;
 	const restorationHarnessPromptDefer =
 		deps.deferHarnessGeneratedPromptDuringAgentSessionRestoration ??
@@ -430,11 +428,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					// UI 的 base-commit（fork-point）服务，对列状态毫无必要。旧版同步 await 它，会把 7 个 git
 					// 子进程的耗时（大仓 / 慢盘 / 与 agent 抢 .git/index.lock 时轻松破 3s）整段压进 hook 客户端
 					// 的硬超时窗口，触发误判超时 → fail-open 静默丢投。改为不 await 的后台任务：完成后
-					// applyTurnCheckpoint 再补发一次 workspace-state 广播把 base-commit 推给 UI，staleRef 清理
-					// 挂在其后。沿用既有 best-effort try/catch——checkpoint 失败绝不回滚已落定的转审。
+					// applyTurnCheckpoint 再补发一次 workspace-state 广播把 base-commit 推给 UI。沿用既有
+					// best-effort try/catch——checkpoint 失败绝不回滚已落定的转审。
+					// turn ref 保留策略（姊妹蓝图 §1.4）：任务存续期全量保留，这里只做捕获、不再轮换删旧
+					// ref；批删挂在任务删除 / trash 清空路径（deleteAllTaskTurnCheckpointRefs）。
 					const nextTurn = (transitionedSummary.latestTurnCheckpoint?.turn ?? 0) + 1;
 					const checkpointCwd = transitionedSummary.workspacePath ?? workspacePath;
-					const staleRef = transitionedSummary.previousTurnCheckpoint?.ref ?? null;
 					void (async () => {
 						try {
 							const checkpoint = await checkpointCapture({
@@ -444,14 +443,6 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 							});
 							manager.applyTurnCheckpoint(taskId, checkpoint);
 							await deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
-							if (staleRef) {
-								await checkpointRefDelete({
-									cwd: checkpointCwd,
-									ref: staleRef,
-								}).catch(() => {
-									// Best effort cleanup only.
-								});
-							}
 						} catch {
 							// Best effort checkpointing only.
 						}

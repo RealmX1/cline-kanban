@@ -10,6 +10,7 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
+	RuntimeTaskConversationMode,
 	RuntimeTaskEditDraft,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -181,11 +182,13 @@ interface HookSnapshot {
 	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
 	newTaskTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	newTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
+	newTaskConversationMode: RuntimeTaskConversationMode;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
 	editTaskStartInPlanMode: boolean;
 	editTaskWorktreeMode: RuntimeTaskWorktreeMode;
 	editTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
+	editTaskConversationMode: RuntimeTaskConversationMode;
 	isEditTaskStartInPlanModeDisabled: boolean;
 	handleOpenCreateTask: () => void;
 	handleCreateTask: (options?: { keepDialogOpen?: boolean }) => string | null;
@@ -210,6 +213,8 @@ interface HookSnapshot {
 		options?: { rememberSelectionForFutureCreateTasks?: boolean },
 	) => void;
 	setNewTaskAgentSessionInitialization: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
+	setNewTaskConversationMode: (value: RuntimeTaskConversationMode) => void;
+	setEditTaskConversationMode: (value: RuntimeTaskConversationMode) => void;
 }
 
 function requireSnapshot(snapshot: HookSnapshot | null): HookSnapshot {
@@ -278,11 +283,13 @@ function HookHarness({
 			newTaskClineSettings: editor.newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings: editor.newTaskTerminalAgentModelOverrideSettings,
 			newTaskAgentSessionInitialization: editor.newTaskAgentSessionInitialization,
+			newTaskConversationMode: editor.newTaskConversationMode,
 			editingTaskId: editor.editingTaskId,
 			editTaskPrompt: editor.editTaskPrompt,
 			editTaskStartInPlanMode: editor.editTaskStartInPlanMode,
 			editTaskWorktreeMode: editor.editTaskWorktreeMode,
 			editTaskAgentSessionInitialization: editor.editTaskAgentSessionInitialization,
+			editTaskConversationMode: editor.editTaskConversationMode,
 			isEditTaskStartInPlanModeDisabled: editor.isEditTaskStartInPlanModeDisabled,
 			handleOpenCreateTask: editor.handleOpenCreateTask,
 			handleCreateTask: editor.handleCreateTask,
@@ -304,6 +311,8 @@ function HookHarness({
 			setNewTaskClineSettings: editor.setNewTaskClineSettings,
 			setNewTaskTerminalAgentModelOverrideSettings: editor.setNewTaskTerminalAgentModelOverrideSettings,
 			setNewTaskAgentSessionInitialization: editor.setNewTaskAgentSessionInitialization,
+			setNewTaskConversationMode: editor.setNewTaskConversationMode,
+			setEditTaskConversationMode: editor.setEditTaskConversationMode,
 		});
 	}, [
 		board,
@@ -312,6 +321,7 @@ function HookHarness({
 		editor.handleOpenCreateTask,
 		editor.editTaskPrompt,
 		editor.editTaskAgentSessionInitialization,
+		editor.editTaskConversationMode,
 		editor.editTaskStartInPlanMode,
 		editor.editTaskWorktreeMode,
 		editor.editingTaskId,
@@ -329,16 +339,19 @@ function HookHarness({
 		editor.newTaskClineSettings,
 		editor.newTaskTerminalAgentModelOverrideSettings,
 		editor.newTaskAgentSessionInitialization,
+		editor.newTaskConversationMode,
 		editor.setEditTaskAutoReviewEnabled,
 		editor.setEditTaskAutoReviewMode,
 		editor.setEditTaskWorktreeMode,
 		editor.setEditTaskAgentSessionInitialization,
+		editor.setEditTaskConversationMode,
 		editor.setEditTaskPrompt,
 		editor.setNewTaskImages,
 		editor.setNewTaskBranchRef,
 		editor.setNewTaskPrompt,
 		editor.setNewTaskTerminalAgentModelOverrideSettings,
 		editor.setNewTaskAgentSessionInitialization,
+		editor.setNewTaskConversationMode,
 		onSnapshot,
 	]);
 
@@ -402,6 +415,50 @@ describe("useTaskEditor", () => {
 		});
 
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.startInPlanMode).toBe(true);
+	});
+
+	it("会话模式声明（蓝图 §A.1）：create 落卡片、edit 从卡片铺表单、保存写回", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		// create：默认 operational；切到 exploratory 建卡 → 卡片带上声明。
+		expect(requireSnapshot(latestSnapshot).newTaskConversationMode).toBe("operational");
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Explore the codebase");
+			requireSnapshot(latestSnapshot).setNewTaskConversationMode("exploratory");
+		});
+		let taskId: string | null = null;
+		await act(async () => {
+			taskId = requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+		const createdTask = requireSnapshot(latestSnapshot).board.columns[0]?.cards.find((card) => card.id === taskId);
+		expect(createdTask?.taskConversationMode).toBe("exploratory");
+		// 建卡后（非 keepDialogOpen）回到缺省。
+		expect(requireSnapshot(latestSnapshot).newTaskConversationMode).toBe("operational");
+
+		// edit：表单从卡片铺模式；改回 operational 保存 → 写回卡片。
+		await act(async () => {
+			if (createdTask) requireSnapshot(latestSnapshot).handleOpenEditTask(createdTask);
+		});
+		expect(requireSnapshot(latestSnapshot).editTaskConversationMode).toBe("exploratory");
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskConversationMode("operational");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveEditedTask();
+		});
+		const savedTask = requireSnapshot(latestSnapshot).board.columns[0]?.cards.find((card) => card.id === taskId);
+		expect(savedTask?.taskConversationMode).toBe("operational");
 	});
 
 	it("ignores the legacy browser-local plan mode default when runtime setting is false", async () => {
@@ -1437,6 +1494,8 @@ describe("useTaskEditor", () => {
 					onCreate={() => null}
 					taskAgentPermissionMode="bypass_all_permission_prompts"
 					onTaskAgentPermissionModeChange={vi.fn()}
+					taskConversationMode="operational"
+					onTaskConversationModeChange={vi.fn()}
 					onCreateMultiple={() => []}
 					startInPlanMode={false}
 					onStartInPlanModeChange={vi.fn()}

@@ -19,9 +19,11 @@ export interface ConversationTaskSessionSubscriptionSource {
 
 import type {
 	RuntimeClineMcpServerAuthStatus,
+	RuntimeExploratorySessionMapCollection,
 	RuntimeNotificationFeedEntry,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamErrorMessage,
+	RuntimeStateStreamExploratorySessionMapUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamNotificationLogUpdatedMessage,
@@ -47,6 +49,7 @@ import {
 } from "../state/notification-log-store";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
+import { createExploratorySessionMapMaintenanceObserver } from "./exploratory-session-map-maintenance-observer";
 import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
 import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
@@ -94,6 +97,18 @@ export interface RuntimeStateHub {
 	// 通知中心：某 workspace 的日志变更（mark-visited / clear / board 变更导致 isDone 刷新）后，
 	// 重建该 workspace 的派生 feed 并全局广播给所有客户端（铃铛跨 repo 聚合）。
 	broadcastNotificationLogUpdated: (workspaceId: string) => Promise<void>;
+	// Exploratory session map 集合变更（ingest apply 成功 / stale 标记翻转）后，把该会话的完整
+	// 集合发给本 workspace 在场客户端（量级 = 节点数，恒小）。不搭车 summary 广播（蓝图 §B.2）。
+	broadcastExploratorySessionMapUpdated: (
+		workspaceId: string,
+		conversationSessionTaskId: string,
+		mapCollection: RuntimeExploratorySessionMapCollection | null,
+	) => void;
+	// Exploratory session map 再维护提醒的投递出口（统一发送出口在 runtime-server 层，hub 建好后
+	// 由它注入一次）。未注入时观察器只做 stale 落账、不投递提醒。
+	setExploratorySessionMapMaintenanceNudgeSender: (
+		sender: (workspaceId: string, conversationSessionTaskId: string, text: string) => Promise<void>,
+	) => void;
 	close: () => Promise<void>;
 }
 
@@ -135,6 +150,30 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				);
 			},
 		});
+	// Exploratory session map 的漂移检测 + 防抖再维护观察器（蓝图 §B.3，M1）。挂在下方
+	// queueTaskSessionSummaryBroadcast 的 join point，与停止生成观察器同位同节律。
+	// nudge 投递出口由 runtime-server 建好后经 setter 注入（统一发送出口的 deps 不在本层）；
+	// 未注入时只做 stale 落账，不投递。
+	const clineTaskSessionServiceByWorkspaceId = new Map<string, ClineTaskSessionService>();
+	let exploratorySessionMapMaintenanceNudgeSender:
+		| ((workspaceId: string, conversationSessionTaskId: string, text: string) => Promise<void>)
+		| undefined;
+	const exploratorySessionMapMaintenanceObserver = createExploratorySessionMapMaintenanceObserver({
+		getClineTaskSessionService: (workspaceId) => clineTaskSessionServiceByWorkspaceId.get(workspaceId) ?? null,
+		onCollectionUpdated: (workspaceId, conversationSessionTaskId, mapCollection) => {
+			broadcastExploratorySessionMapUpdated(workspaceId, conversationSessionTaskId, mapCollection);
+		},
+		sendMaintenanceNudge: (workspaceId, conversationSessionTaskId, text) =>
+			exploratorySessionMapMaintenanceNudgeSender?.(workspaceId, conversationSessionTaskId, text) ??
+			Promise.resolve(),
+		onNudgeFailed: (error, context) => {
+			logAgentSessionRetentionWarning(
+				`exploratory-session-map-maintenance-nudge-failed workspaceId=${context.workspaceId} taskId=${
+					context.conversationSessionTaskId
+				} reason=${error instanceof Error ? error.message : String(error)}`,
+			);
+		},
+	});
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
@@ -244,6 +283,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		// 位于下方「0 客户端提前返回」之前，故计时与「有没有人在看」彻底解耦——关标签页 / 切项目 /
 		// 折叠侧栏都不影响期限。观察器内部只在状态边沿动账本，不会被高频 summary 刷成 IO 风暴。
 		agentSessionResponseGenerationStopObserver.observeTaskSessionSummary(workspaceId, summary);
+		// Exploratory session map 维护观察：同位挂载（join point 注释见上）。观察器内部自带
+		// 模式/transport/活体三道门，非 exploratory 会话零开销。
+		exploratorySessionMapMaintenanceObserver.observeTaskSessionSummary(workspaceId, summary);
 		const pending =
 			pendingTaskSessionSummariesByWorkspaceId.get(workspaceId) ?? new Map<string, RuntimeTaskSessionSummary>();
 		pending.set(summary.taskId, summary);
@@ -395,6 +437,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		disposeTaskSessionSummaryBroadcast(workspaceId);
 		agentSessionResponseGenerationStopObserver.forgetWorkspace(workspaceId);
 		persistedAgentTranscriptConversationProgressObserver.forgetWorkspace(workspaceId);
+		exploratorySessionMapMaintenanceObserver.forgetWorkspace(workspaceId);
+		clineTaskSessionServiceByWorkspaceId.delete(workspaceId);
 		workspaceMetadataMonitor.disposeWorkspace(workspaceId);
 	};
 
@@ -446,6 +490,29 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 		} catch {
 			// 通知 feed 重建失败不影响主流程；下次变更会重发。
+		}
+	};
+
+	// Exploratory session map 集合变更推送：持久化早已在 ingest 的串行写队列完成
+	// （durable-write-before-ack），这里只把完整集合发给本 workspace 在场客户端；
+	// 0 客户端时跳过——客户端重连后靠 getSessionMap 查询对齐，不补发。
+	const broadcastExploratorySessionMapUpdated = (
+		workspaceId: string,
+		conversationSessionTaskId: string,
+		mapCollection: RuntimeExploratorySessionMapCollection | null,
+	): void => {
+		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
+		if (!clients || clients.size === 0) {
+			return;
+		}
+		const payload: RuntimeStateStreamExploratorySessionMapUpdatedMessage = {
+			type: "exploratory_session_map_updated",
+			workspaceId,
+			conversationSessionTaskId,
+			mapCollection,
+		};
+		for (const client of clients) {
+			sendRuntimeStateMessage(client, payload);
 		}
 	};
 
@@ -678,6 +745,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			terminalSummaryUnsubscribeByWorkspaceId.set(workspaceId, unsubscribe);
 		},
 		trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => {
+			clineTaskSessionServiceByWorkspaceId.set(workspaceId, service);
 			trackConversationTaskSessionService(workspaceId, workspacePath, service, "cline");
 		},
 		trackAcpTaskSessionService: (workspaceId, workspacePath, service) => {
@@ -697,6 +765,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		bumpClineSessionContextVersion,
 		broadcastTaskReadyForReview,
 		broadcastNotificationLogUpdated,
+		broadcastExploratorySessionMapUpdated,
+		setExploratorySessionMapMaintenanceNudgeSender: (sender) => {
+			exploratorySessionMapMaintenanceNudgeSender = sender;
+		},
 		close: async () => {
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {
 				clearTimeout(timer);
@@ -713,6 +785,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			terminalSummaryUnsubscribeByWorkspaceId.clear();
 			// 关停后在途探测的回调不得再写 summary（会写进一个正在被拆掉的管理器）。
 			persistedAgentTranscriptConversationProgressObserver.dispose();
+			exploratorySessionMapMaintenanceObserver.dispose();
 			for (const unsubscribe of conversationSummaryUnsubscribeBySubscriptionKey.values()) {
 				try {
 					unsubscribe();

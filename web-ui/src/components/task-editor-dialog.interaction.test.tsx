@@ -22,6 +22,8 @@ function makeProps(overrides: Partial<Props> = {}): Props {
 		onStartInPlanModeChange: vi.fn(),
 		taskAgentPermissionMode: "bypass_all_permission_prompts",
 		onTaskAgentPermissionModeChange: vi.fn(),
+		taskConversationMode: "operational",
+		onTaskConversationModeChange: vi.fn(),
 		autoReviewEnabled: false,
 		onAutoReviewEnabledChange: vi.fn(),
 		autoReviewMode: "commit",

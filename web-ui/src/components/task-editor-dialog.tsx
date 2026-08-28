@@ -30,6 +30,7 @@ import {
 } from "@/components/task-agent-model-picker";
 import { TaskAgentPermissionModeControl } from "@/components/task-agent-permission-mode-control";
 import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
+import { TaskConversationModeControl } from "@/components/task-conversation-mode-control";
 import {
 	type TaskEditDraftComparableValues,
 	TaskEditDraftRecoveryNotice,
@@ -47,6 +48,7 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
+	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
@@ -77,6 +79,7 @@ export interface TaskCreateFormSnapshot {
 	imageCount: number;
 	startInPlanMode: boolean;
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
+	taskConversationMode: RuntimeTaskConversationMode;
 	autoReviewEnabled: boolean;
 	autoReviewMode: TaskAutoReviewMode;
 	branchRef: string;
@@ -107,6 +110,7 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		current.imageCount !== baseline.imageCount ||
 		current.startInPlanMode !== baseline.startInPlanMode ||
 		current.taskAgentPermissionMode !== baseline.taskAgentPermissionMode ||
+		current.taskConversationMode !== baseline.taskConversationMode ||
 		current.autoReviewEnabled !== baseline.autoReviewEnabled ||
 		current.autoReviewMode !== baseline.autoReviewMode ||
 		current.branchRef !== baseline.branchRef ||
@@ -193,6 +197,8 @@ export function TaskEditorDialog({
 	onStartInPlanModeChange,
 	taskAgentPermissionMode,
 	onTaskAgentPermissionModeChange,
+	taskConversationMode,
+	onTaskConversationModeChange,
 	autoReviewEnabled,
 	onAutoReviewEnabledChange,
 	autoReviewMode,
@@ -242,6 +248,8 @@ export function TaskEditorDialog({
 	onStartInPlanModeChange: (value: boolean) => void;
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	onTaskAgentPermissionModeChange: (value: RuntimeTaskAgentPermissionMode) => void;
+	taskConversationMode: RuntimeTaskConversationMode;
+	onTaskConversationModeChange: (value: RuntimeTaskConversationMode) => void;
 	autoReviewEnabled: boolean;
 	onAutoReviewEnabledChange: (value: boolean) => void;
 	autoReviewMode: TaskAutoReviewMode;
@@ -649,6 +657,7 @@ export function TaskEditorDialog({
 		imageCount: images.length,
 		startInPlanMode,
 		taskAgentPermissionMode,
+		taskConversationMode,
 		autoReviewEnabled,
 		autoReviewMode,
 		branchRef,
@@ -881,6 +890,24 @@ export function TaskEditorDialog({
 							</RadixCheckbox.Root>
 							Start in plan mode
 						</label>
+
+						<div>
+							{/* 会话模式声明（蓝图 §A.1）：探索会话的结构与结论本身是资产——默认展开
+							    session map 面板、agent 经指令文件维护 map。快照语义：只影响下一次启动，
+							    活会话不热切换。与「Start in plan mode」/权限档位都是正交轴。 */}
+							<span className="text-[11px] text-text-secondary block mb-1">Session mode</span>
+							<TaskConversationModeControl
+								value={taskConversationMode}
+								onChange={onTaskConversationModeChange}
+								idPrefix="task-editor-conversation-mode"
+							/>
+							{taskConversationMode === "exploratory" ? (
+								<p className="text-[11px] text-text-tertiary mt-1">
+									For research and exploration — the agent keeps a session map of milestones and findings.
+									Applies to the next session start.
+								</p>
+							) : null}
+						</div>
 
 						<div>
 							{/* 权限档位与「Start in plan mode」是两条正交轴：plan 只决定开局先只读规划，

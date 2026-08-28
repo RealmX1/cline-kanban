@@ -9,6 +9,7 @@ function baseline(overrides: Partial<TaskCreateFormSnapshot> = {}): TaskCreateFo
 		imageCount: 0,
 		startInPlanMode: false,
 		taskAgentPermissionMode: "bypass_all_permission_prompts",
+		taskConversationMode: "operational",
 		autoReviewEnabled: false,
 		autoReviewMode: "commit",
 		branchRef: "main",
@@ -43,6 +44,10 @@ describe("hasTaskCreateFormEdits", () => {
 
 	it("detects a plan-mode toggle", () => {
 		expect(hasTaskCreateFormEdits(baseline({ startInPlanMode: true }), baseline())).toBe(true);
+	});
+
+	it("detects a conversation-mode change", () => {
+		expect(hasTaskCreateFormEdits(baseline({ taskConversationMode: "exploratory" }), baseline())).toBe(true);
 	});
 
 	it("detects an auto-review toggle relative to the opened baseline", () => {

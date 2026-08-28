@@ -128,6 +128,8 @@ export default function App(): ReactElement {
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		exploratorySessionMapCollectionsByTaskId,
+		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,
@@ -514,6 +516,8 @@ export default function App(): ReactElement {
 		setNewTaskStartInPlanMode,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
+		newTaskConversationMode,
+		setNewTaskConversationMode,
 		newTaskAutoReviewEnabled,
 		setNewTaskAutoReviewEnabled,
 		newTaskAutoReviewMode,
@@ -540,6 +544,8 @@ export default function App(): ReactElement {
 		setEditTaskStartInPlanMode,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
+		editTaskConversationMode,
+		setEditTaskConversationMode,
 		editTaskAutoReviewEnabled,
 		setEditTaskAutoReviewEnabled,
 		editTaskAutoReviewMode,
@@ -1401,6 +1407,8 @@ export default function App(): ReactElement {
 									sessionSummary={detailSession}
 									taskSessions={sessions}
 									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
+									exploratorySessionMapCollectionsByTaskId={exploratorySessionMapCollectionsByTaskId}
+									runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
 									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
 									onCreateByTheWayTaskConversationSession={async (input) => {
 										const effectiveAgentId =
@@ -1552,6 +1560,8 @@ export default function App(): ReactElement {
 					onTaskAgentPermissionModeChange={
 						editingTaskId ? setEditTaskAgentPermissionMode : setNewTaskAgentPermissionMode
 					}
+					taskConversationMode={editingTaskId ? editTaskConversationMode : newTaskConversationMode}
+					onTaskConversationModeChange={editingTaskId ? setEditTaskConversationMode : setNewTaskConversationMode}
 					startInPlanModeDisabled={
 						editingTaskId ? isEditTaskStartInPlanModeDisabled : isNewTaskStartInPlanModeDisabled
 					}

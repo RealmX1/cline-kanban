@@ -934,7 +934,6 @@ describe("createHooksApi", () => {
 			commit: "3333333",
 			createdAt: Date.now(),
 		}));
-		const deleteTaskTurnCheckpointRef = vi.fn(async () => undefined);
 
 		const api = createHooksApi({
 			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
@@ -942,7 +941,6 @@ describe("createHooksApi", () => {
 			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
 			broadcastTaskReadyForReview: vi.fn(),
 			captureTaskTurnCheckpoint,
-			deleteTaskTurnCheckpointRef,
 		});
 
 		const response = await api.ingest({
@@ -953,18 +951,16 @@ describe("createHooksApi", () => {
 
 		expect(response).toEqual({ ok: true });
 		// F1：checkpoint 已移出响应关键路径，作为不 await 的后台任务在 ingest 返回后才落定。
-		// 故 capture/applyTurnCheckpoint/deleteRef 这些副作用要 waitFor，而非在 ingest 返回那刻断言。
+		// 故 capture/applyTurnCheckpoint 这些副作用要 waitFor，而非在 ingest 返回那刻断言。
 		await vi.waitFor(() => {
-			expect(deleteTaskTurnCheckpointRef).toHaveBeenCalledWith({
+			expect(captureTaskTurnCheckpoint).toHaveBeenCalledWith({
 				cwd: "/tmp/worktree",
-				ref: "refs/kanban/checkpoints/task-1/turn/1",
+				taskId: "task-1",
+				turn: 3,
 			});
 		});
-		expect(captureTaskTurnCheckpoint).toHaveBeenCalledWith({
-			cwd: "/tmp/worktree",
-			taskId: "task-1",
-			turn: 3,
-		});
+		// 保留策略翻转（姊妹蓝图 §1.4）：hook 路径只捕获新 checkpoint，不再轮换删除 previous ref——
+		// 批删挂在任务删除 / trash 清空路径（deleteAllTaskTurnCheckpointRefs）。
 		expect(manager.applyTurnCheckpoint).toHaveBeenCalledTimes(1);
 	});
 	it("恢复守卫武装期间放行本活体自己 dispatch 的后台工作完成通知——那是 agent 在等的唤醒信号", async () => {
@@ -1130,7 +1126,6 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 					commit: "1111111",
 					createdAt: 1,
 				})),
-				deleteTaskTurnCheckpointRef: vi.fn(async () => undefined),
 				deferHarnessGeneratedPromptDuringAgentSessionRestoration: deferHarnessGeneratedPrompt,
 				consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration: vi.fn(async () => []),
 			});

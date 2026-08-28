@@ -499,6 +499,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				images: undefined,
 				startInPlanMode: undefined,
 				resumeFromTrash: true,
+				// 会话模式的语义是「下次启动生效」——本条路径就是一次启动，从卡片原值显式回填，
+				// 与通道切换后重建 startResponse 的范式一致（漏传 = 静默掉回 operational 缺省）。
+				taskConversationMode: card.taskConversationMode,
 				workspaceId: workspaceScope.workspaceId,
 				projectPath: workspaceScope.workspacePath,
 				parentSessionId: undefined,
@@ -748,6 +751,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						startInPlanMode: body.startInPlanMode,
 						resumePriorAgentConversationWithoutResendingPrompt:
 							body.resumePriorAgentConversationWithoutResendingPrompt,
+						taskConversationMode: body.taskConversationMode,
 					});
 					latestStartedSummaryForDiagnostics = acpSummary;
 					// ACP 的 startTaskSession **不抛**：session/load、认证、spawn 的异常全被它自己 catch 成一条
@@ -835,6 +839,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					const summary = await clineTaskSessionService.startTaskSession({
 						taskId: body.taskId,
 						taskConversationSessionMetadata: body.taskConversationSessionMetadata,
+						taskConversationMode: body.taskConversationMode,
 						cwd: taskCwd,
 						prompt: body.prompt,
 						taskTitle: resolvedClineTitle.length > 0 ? resolvedClineTitle : undefined,
@@ -922,6 +927,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						taskId: body.taskId,
 						workspaceTaskId,
 						taskConversationSessionMetadata: body.taskConversationSessionMetadata,
+						taskConversationMode: body.taskConversationMode,
 						agentId: resolved.agentId,
 						binary: resolved.binary,
 						args: resolved.args,
@@ -2215,6 +2221,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					worktreeMode: card.worktreeMode,
 					requestedAgentSessionTransport: body.targetSessionTransport,
 					resumePriorAgentConversationWithoutResendingPrompt: true,
+					// 会话模式同样是「下次启动生效」的卡字段（与上方「不重放 startInPlanMode」无关——
+					// 那条说的是会话内 plan/act 模式），本次重开就是下次启动，从卡片原值显式回填。
+					taskConversationMode: card.taskConversationMode,
 				});
 				if (!startResponse.ok) {
 					return {

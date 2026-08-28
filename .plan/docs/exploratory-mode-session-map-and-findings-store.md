@@ -22,6 +22,34 @@
 > 形态待本文档补章后落地。**(2)** web-ui 的 `deriveTurnBoundariesFromChatMessages` 直接相对
 > 路径复用服务端 `classifyConversationTurnBoundaryMessage`（不镜像重写），保证客户端位置
 > 映射与服务端编号同源。
+> 实施注记（2026-08-26，**M1 已落地**）：M1（§H：模式标记 + map 写入通道 + apply 漏斗 +
+> 防抖再维护 observer，含姊妹蓝图步骤 3 checkpoint 全量保留）已实现。实施层决定记录于此：
+> **(1)** observer 的 stale 判据从「裸签名漂移」精化为「投影最新 turn > map 最新锚点 turn」
+> （存在未入图用户轮次）——裸投影签名是消息级的，agent 自身的维护动作（ingest 工具调用、
+> 收尾消息）同样推进它，会导致「刚维护完立即又 stale」的恒亮假信号与 nudge 自激循环；签名
+> 仍专任 apply 时刻的乐观并发对账键（§B.2 闸 3），不参与漂移判定。reason 枚举沿用
+> `turn_projection_signature_drift`。**(2)** M1 的再维护执行者是**活会话 agent 自己**（observer
+> 经统一发送出口 `sendTaskChatMessageAcrossSessionTransports` 投递一条提醒消息；闸：仅
+> turnOwner==="user" 的静默窗 45s、每会话并发恒 1、冷却 10min）；专属 headless 再维护作业
+> （`agent_maintenance_job` 来源）待姊妹蓝图 §4.1 Stage 0 后端落地后接。**(3)** mapNodeId
+> 派生定为 `turn-<anchorTurnNumber>-<nodeKind>`（集合已按会话隔离，id 不带会话前缀——
+> §B.1 注释的 (sessionId + ...) 三元中会话分量是冗余的）；该约定同时是聊天 marker 的 id
+> 格式，agent 可确定性预知。**(4)** ingest 载荷语义为**整份替换提案**（读-改-写协议的目标态，
+> 非增量 diff）；dedup 账本落在 collection 的加性可选字段 `recentAppliedClientProposalIds`
+> （FIFO 50 条），重试同 id 幂等 ack。**(5)** `referencedFindingId` 在 M1 只做形状校验
+> （finding_reference 时必填、其余 kind 必空）；findings store 可解析性校验属 M2，指令文件
+> 已明示 agent 当前不要使用 finding_reference。**(6)** B.1 canonical schema 物理位置上移到
+> `runtimeStateStreamMessageSchema` 之前（`exploratory_session_map_updated` 是 union 成员，
+> 模块求值序 TDZ 所限）；语义归属不变，api-contract 尾部契约区留有指针注释。**(7)** 投影
+> 加载链（双廉价信号判定 + 消息加载 + refs 枚举 + 派生）抽为
+> `src/conversation-tree/load-conversation-session-turn-projection.ts`，投影 query 与 ingest
+> 漏斗共用同一实现（三源对齐纪律）。**(8)** checkpoint 全量保留（姊妹蓝图 §1.4 步骤 3）：
+> 两处轮换删除点已翻转；`deleteAllTaskTurnCheckpointRefs` 挂 CLI `task delete` 与 saveState
+> 整板保存差集两条「任务资产永久抹除」路径；每任务 ref 上限 200 做成 `captureTaskTurnCheckpoint`
+> 可注入参数（生产默认 200，测试注小值）。**(9)** CLI 身份：task/workspace 解析为「显式 flag
+> > env（`KANBAN_HOOK_TASK_ID` / `KANBAN_HOOK_WORKSPACE_ID`）> 报错」，flag 与 env 不一致
+> 硬报错（风险 6 的单任务作用域纪律）；workspace scope 经 `x-kanban-workspace-id` 请求头
+> 传递（workspaceProcedure 与 hooks.ingest 的 input 带 scope 不同）。
 
 ## 需求（用户原语转写）
 
@@ -43,10 +71,11 @@
    `${taskId}-${now()}-${random}` 现铸 id（`:218`）——重启后同一条消息的 id 不同。一切锚点
    只能用服务端权威 turn 号 + checkpoint commit（三元冗余见姊妹蓝图风险 1）。
 2. **turn checkpoint git ref 现状**：`refs/kanban/checkpoints/{base64url(taskId)}/turn/{n}`
-   （`src/workspace/turn-checkpoints.ts:25-29`），当前轮换出 summary 的
-   `previousTurnCheckpoint` 后即被删（Cline 侧 `src/cline-sdk/cline-task-session-service.ts:982-993`；
-   终端侧经 `src/trpc/hooks-api.ts:25` 注入的 `deleteTaskTurnCheckpointRef`）。**姊妹蓝图 §1.4
-   已规划任务存续期全量保留**——本文档锚点的长期可解析性建立在该变更之上（见 §H M1 依赖）。
+   （`src/workspace/turn-checkpoints.ts:33-35`），**任务存续期全量保留**（姊妹蓝图 §1.4 已落地）：
+   捕获侧（Cline `src/cline-sdk/cline-task-session-service.ts`、终端 `src/trpc/hooks-api.ts`）只捕获
+   不轮换删除；每任务上限 `MAX_TASK_TURN_CHECKPOINT_REFS=200` 超限从最老滚动修剪；任务删除 /
+   trash 清空时 `deleteAllTaskTurnCheckpointRefs` 按前缀批删（CLI `task delete` 与浏览器整板保存
+   差集两条路径）。本文档锚点的长期可解析性即建立在该保留策略之上（见 §H M1 依赖）。
 3. **会话血缘半成品已在**：`runtimeTaskConversationSessionMetadataSchema`
    （`src/core/api-contract.ts:517-526`）已有父指针 `parentTaskConversationSessionId` 与锚点
    `mainSessionOriginTurnNumber`；姊妹蓝图 §1.2 把它泛化为树分支描述符（加性嵌套对象，

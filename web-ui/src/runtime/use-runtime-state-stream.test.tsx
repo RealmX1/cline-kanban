@@ -217,4 +217,87 @@ describe("useRuntimeStateStream", () => {
 		expect(captured.current?.notificationLogByWorkspaceId["ws-a"]).toHaveLength(2);
 		expect(captured.current?.notificationLogByWorkspaceId["ws-b"]).toHaveLength(1);
 	});
+
+	it("exploratory_session_map_updated 按会话落 store、按 workspace 过滤；快照递增重连代数且保留集合", async () => {
+		const captured: { current: UseRuntimeStateStreamResult | null } = { current: null };
+		await act(async () => {
+			root.render(
+				<RuntimeStateStreamHarness
+					onSnapshot={(snapshot) => {
+						captured.current = snapshot;
+					}}
+				/>,
+			);
+		});
+		const socket = MockRuntimeStateWebSocket.instances[0];
+		if (!socket) {
+			throw new Error("Expected the initial runtime stream socket.");
+		}
+		act(() => {
+			socket.triggerOpen();
+		});
+
+		const mapCollection = {
+			sourceTurnProjectionSignature: "1:first:10",
+			mapNodes: [],
+			mapStaleReason: null,
+			lastMaintenanceJobCompletedAt: null,
+			updatedAt: 100,
+		};
+		const triggerSnapshot = () =>
+			socket.triggerMessage({
+				type: "snapshot",
+				currentProjectId: "ws-a",
+				projects: [],
+				workspaceState: null,
+				workspaceMetadata: null,
+				clineSessionContextVersion: 0,
+				notificationLog: [],
+			});
+
+		await act(async () => {
+			triggerSnapshot();
+		});
+		expect(captured.current?.streamSnapshotGeneration).toBe(1);
+
+		await act(async () => {
+			socket.triggerMessage({
+				type: "exploratory_session_map_updated",
+				workspaceId: "ws-a",
+				conversationSessionTaskId: "session-1",
+				mapCollection,
+			});
+		});
+		expect(captured.current?.exploratorySessionMapCollectionsByTaskId["session-1"]).toEqual(mapCollection);
+
+		// 其它 workspace 的推送按 activeWorkspaceId 过滤，不得入 store。
+		await act(async () => {
+			socket.triggerMessage({
+				type: "exploratory_session_map_updated",
+				workspaceId: "ws-b",
+				conversationSessionTaskId: "session-2",
+				mapCollection,
+			});
+		});
+		expect(captured.current?.exploratorySessionMapCollectionsByTaskId["session-2"]).toBeUndefined();
+
+		// null 载荷 = 服务端明示集合已不存在，同样落 store。
+		await act(async () => {
+			socket.triggerMessage({
+				type: "exploratory_session_map_updated",
+				workspaceId: "ws-a",
+				conversationSessionTaskId: "session-1",
+				mapCollection: null,
+			});
+		});
+		expect(captured.current?.exploratorySessionMapCollectionsByTaskId["session-1"]).toBeNull();
+
+		// 重连后的新快照：代数递增（客户端据此重查 getSessionMap 对齐），
+		// 已推送的集合保留作 last-known，查询落定前不出现空窗。
+		await act(async () => {
+			triggerSnapshot();
+		});
+		expect(captured.current?.streamSnapshotGeneration).toBe(2);
+		expect(captured.current?.exploratorySessionMapCollectionsByTaskId).toHaveProperty("session-1");
+	});
 });
