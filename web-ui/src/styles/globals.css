@@ -1165,7 +1165,8 @@ body.kb-dependency-link-mode {
 
 /* -- 文字流光（ShimmeringText） --
    走 CSS 而非 JS 动画库：这是 agent 流式期间常驻的 "Thinking..." 指示器，用
-   motion/react 的话每帧都要过一次 JS 主线程。纯 CSS 动画交给合成器，主线程零成本。
+   motion/react 的话每帧都要过一次 JS 主线程。注意 background-position 不是合成器
+   属性，动画每帧仍在主线程 paint——这里省掉的是每帧 JS 执行，不是主线程绘制。
    `--kb-text-shimmer-sweep-duration` / `--spread` 由组件以 inline style 注入。 */
 @keyframes kb-text-shimmer-sweep {
 	from {

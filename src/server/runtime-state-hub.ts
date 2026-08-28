@@ -197,16 +197,31 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 	});
 
-	const sendRuntimeStateMessage = (client: WebSocket, payload: RuntimeStateStreamMessage) => {
+	const sendSerializedRuntimeStateMessage = (client: WebSocket, serializedPayload: string) => {
 		if (client.readyState !== WebSocket.OPEN) {
 			return;
 		}
 		try {
-			client.send(JSON.stringify(payload));
+			client.send(serializedPayload);
 		} catch {
 			// Ignore websocket write errors; close handlers clean up disconnected sockets.
 		}
 	};
+
+	const sendRuntimeStateMessage = (client: WebSocket, payload: RuntimeStateStreamMessage) => {
+		sendSerializedRuntimeStateMessage(client, JSON.stringify(payload));
+	};
+
+	// projects payload 是全局的（覆盖全部已注册 project、同一份发往所有在场客户端），故去重指纹也只
+	// 需一份全局值：与上次实际发送的序列化结果相同 ⇒ 每个在场客户端都已持有这份数据，可整条跳过。
+	// 命中条件是「两次构建的 payload 字节级相同」：agent 无输出窗口、纯心跳 flush 这类场景挡掉
+	// flushTaskSessionSummaries 每 150ms 触发的重发（前端每收一条 projects_updated 都要重 dispatch
+	// 一轮）；agent 活跃输出期间 inProgressTaskDetails 的 lastOutputAt 随每个非空 PTY chunk 刷新，
+	// payload 每次都不同、广播照常发送——那是合法新数据而非浪费。失效是天然的、无需按 workspace 记账：项目增删 /
+	// board 变化 / currentProjectId 切换都会改变序列化结果；新连接客户端登记进广播集合时会把指纹
+	// 置回 null（见连接握手处），保证注册后下一次广播必定发送——snapshot 全量替换可能把该客户端
+	// 回滚到旧数据，靠这次必发补洞；payload 构建失败时指纹不动，下次调用照常重试。
+	let lastBroadcastProjectsPayloadFingerprint: string | null = null;
 
 	const broadcastRuntimeProjectsUpdated = async (preferredCurrentProjectId: string | null): Promise<void> => {
 		if (runtimeStateClients.size === 0) {
@@ -217,13 +232,18 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
 					preferredCurrentProjectId,
 				);
-			for (const client of runtimeStateClients) {
-				sendRuntimeStateMessage(client, {
-					type: "projects_updated",
-					currentProjectId: payload.currentProjectId,
-					projects: payload.projects,
-				} satisfies RuntimeStateStreamProjectsMessage);
+			const serializedPayload = JSON.stringify({
+				type: "projects_updated",
+				currentProjectId: payload.currentProjectId,
+				projects: payload.projects,
+			} satisfies RuntimeStateStreamProjectsMessage);
+			if (serializedPayload === lastBroadcastProjectsPayloadFingerprint) {
+				return;
 			}
+			for (const client of runtimeStateClients) {
+				sendSerializedRuntimeStateMessage(client, serializedPayload);
+			}
+			lastBroadcastProjectsPayloadFingerprint = serializedPayload;
 		} catch {
 			// Ignore transient project summary failures; next update will resync.
 		}
@@ -620,6 +640,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				state for a client that never finished the handshake.
 			*/
 			runtimeStateClients.add(client);
+			// 去重指纹此刻对该客户端不成立（后续 snapshot 全量替换可能把它回滚到旧数据）：置回 null，
+			// 保证注册后的下一次 projects_updated 广播必定发送，自愈补洞。
+			lastBroadcastProjectsPayloadFingerprint = null;
 			let monitorWorkspaceId: string | null = null;
 			let didConnectWorkspaceMonitor = false;
 

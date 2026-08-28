@@ -47,7 +47,8 @@ function upsertMessage(currentMessages: ClineChatMessage[], nextMessage: ClineCh
 		return [...currentMessages, nextMessage];
 	}
 	const existingMessage = currentMessages[existingIndex];
-	if (!existingMessage || areMessagesEqual(existingMessage, nextMessage)) {
+	// 流式 chunk 常会带着同一引用重发同一条消息：引用相等时直接短路，跳过 areMessagesEqual 的字段比对与 JSON.stringify(meta)。
+	if (existingMessage === nextMessage || !existingMessage || areMessagesEqual(existingMessage, nextMessage)) {
 		return currentMessages;
 	}
 	const nextMessages = [...currentMessages];

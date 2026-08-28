@@ -628,8 +628,72 @@ export function DependencyOverlay({
 		if (resizeObserver) {
 			resizeObserver.observe(container);
 		}
-		const mutationObserver = new MutationObserver(() => {
-			scheduleRefresh();
+		// childList filtering walks a narrow line. Tooltip hover gating
+		// (task-card-body's `revealHoverActionTooltip`, which passes children
+		// through untouched for falsy content) unmounts/remounts the gated
+		// trigger DOM on every hover pass — churn that cannot move any anchor
+		// and must not wake the layout refresh, or every hover over a board
+		// with dependency edges runs getBoundingClientRect over every card
+		// (forced synchronous layout). But conditional rows inside a card
+		// (parked badge, delivery-contention notice, session-activity row,
+		// directory row) are childList changes too, and they change the card's
+		// height, shifting every card below it — those must remeasure, or paths
+		// stay pinned to stale coordinates until the next scroll/resize (the
+		// ResizeObserver above only watches the container, not card heights).
+		// Rule: a childList change that adds or removes a card
+		// (`[data-task-id]`) or column (`[data-column-id]`) element always
+		// refreshes; any other childList change refreshes as well, except churn
+		// fully confined to the hover-action hosts task-card-body marks with
+		// `[data-card-hover-actions]`. attribute records always refresh because
+		// attributeFilter below has already narrowed them to anchor-moving
+		// attributes.
+		const touchesAnchorElement = (nodes: NodeList): boolean => {
+			for (const node of nodes) {
+				if (!(node instanceof HTMLElement)) {
+					continue;
+				}
+				if (
+					node.matches("[data-task-id], [data-column-id]") ||
+					node.querySelector("[data-task-id], [data-column-id]")
+				) {
+					return true;
+				}
+			}
+			return false;
+		};
+		// A childList record counts as hover-trigger churn when the mutation
+		// target sits inside a marked host (trigger swap under a marked
+		// container) or when every changed node carries the mark itself (a
+		// self-marked trigger swapped as a whole — a detached removed node has
+		// no ancestors left, so only self-matching can classify it).
+		const isHoverActionChurn = (record: MutationRecord): boolean => {
+			if (record.target instanceof Element && record.target.closest("[data-card-hover-actions]") !== null) {
+				return true;
+			}
+			const changedNodes = [...record.addedNodes, ...record.removedNodes];
+			return (
+				changedNodes.length > 0 &&
+				changedNodes.every((node) => node instanceof Element && node.closest("[data-card-hover-actions]") !== null)
+			);
+		};
+		const mutationObserver = new MutationObserver((records) => {
+			for (const record of records) {
+				if (record.type === "attributes") {
+					scheduleRefresh();
+					return;
+				}
+				if (record.type !== "childList") {
+					continue;
+				}
+				if (touchesAnchorElement(record.addedNodes) || touchesAnchorElement(record.removedNodes)) {
+					scheduleRefresh();
+					return;
+				}
+				if (!isHoverActionChurn(record)) {
+					scheduleRefresh();
+					return;
+				}
+			}
 		});
 		mutationObserver.observe(container, {
 			subtree: true,

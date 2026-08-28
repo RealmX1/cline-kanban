@@ -6,7 +6,7 @@
 // 做成面板级能力而不是重播专用补丁：同样的工作量，Cline SDK 的长会话一并受益。
 //
 // 诚实边界：这里界定的只是**渲染量**。消息账本仍持有全部消息（回填要用），要连保留量也设上限是另一件事。
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // 一屏窗口的消息条数。50 条足够覆盖「刚发生的事」，又不至于让重播把上千条一次性塞进 DOM。
 export const DEFAULT_AGENT_CHAT_MESSAGE_WINDOW_SIZE = 50;
@@ -64,8 +64,15 @@ export function useWindowedAgentChatMessageList<TMessage>(input: {
 		setBackfilledOldestVisibleMessageIndex(Math.max(0, hiddenOlderMessageCount - windowSize));
 	}, [hiddenOlderMessageCount, windowSize]);
 
+	// slice 每渲染都会换新数组引用，会把依赖 visibleMessages 的下游 effect（如面板的 auto-scroll）拖进每帧重算。
+	// messages 与隐藏条数都没变时复用上一次的切片，引用保持稳定。
+	const visibleMessages = useMemo(
+		() => (hiddenOlderMessageCount > 0 ? input.messages.slice(hiddenOlderMessageCount) : input.messages),
+		[input.messages, hiddenOlderMessageCount],
+	);
+
 	return {
-		visibleMessages: hiddenOlderMessageCount > 0 ? input.messages.slice(hiddenOlderMessageCount) : input.messages,
+		visibleMessages,
 		hiddenOlderMessageCount,
 		revealOlderMessages,
 	};
