@@ -3,7 +3,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
+import { DEFAULT_TASK_SPOTLIGHT_SEARCH_RESULT_ROW_FIELD_VISIBILITY } from "@/components/task-spotlight-search-result-row-field-visibility";
 import type { TaskSpotlightSearchController } from "@/hooks/use-task-spotlight-search-controller";
+import { EMPTY_TASK_FILTER_SELECTION } from "@/task-filtering/task-filter-selection";
 
 const { mockUseIsMobile } = vi.hoisted(() => ({ mockUseIsMobile: vi.fn(() => false) }));
 
@@ -27,18 +29,37 @@ function createControllerStub(overrides: Partial<TaskSpotlightSearchController> 
 		setQuery: () => {},
 		mode: "direct",
 		setMode: () => {},
-		stageOptions: [
-			{ columnId: "backlog", label: "Backlog", isSelected: true },
-			{ columnId: "in_progress", label: "In Progress", isSelected: true },
-		],
-		toggleStage: () => {},
+		sortOrder: "relevance",
+		setSortOrder: () => {},
+		effectiveSortOrder: "relevance",
+		filterSelection: EMPTY_TASK_FILTER_SELECTION,
+		setFilterSelection: () => {},
+		availableFilterValues: {
+			stageColumnIds: [
+				{ value: "backlog", label: "Backlog" },
+				{ value: "in_progress", label: "In Progress" },
+			],
+			projects: [],
+			agents: [],
+		},
+		fieldVisibility: DEFAULT_TASK_SPOTLIGHT_SEARCH_RESULT_ROW_FIELD_VISIBILITY,
+		toggleFieldVisibility: () => {},
 		includeOtherProjects: false,
 		setIncludeOtherProjects: () => {},
 		crossProjectStatus: "idle",
 		isSearchActive: false,
+		isBrowsingAllTasksWithoutQuery: false,
 		semanticSearchStatus: "idle",
 		results: [],
-		taskIdMatchedResultCountHiddenByStageSelection: 0,
+		taskIdMatchedResultCountHiddenByFilters: 0,
+		resultCountExcludedBecauseSessionActivityIsNotObservable: 0,
+		resolveResultRowDisplayContext: () => ({
+			effectiveAgentId: null,
+			agentLabel: null,
+			sessionActivity: null,
+			agentConversationProgressAtEpochMs: null,
+		}),
+		nowEpochMs: 0,
 		activeIndex: 0,
 		setActiveIndex: () => {},
 		moveActive: () => {},
@@ -119,7 +140,7 @@ describe("TaskSpotlightSearchDialog viewport adaptation", () => {
 		expect(content?.textContent).not.toContain("navigate");
 	});
 
-	it("uses a 16px input and 44px filter chips on mobile", async () => {
+	it("uses a 16px input and 44px toolbar controls on mobile", async () => {
 		mockUseIsMobile.mockReturnValue(true);
 		await renderDialog();
 
@@ -128,10 +149,9 @@ describe("TaskSpotlightSearchDialog viewport adaptation", () => {
 		expect(input?.className).toContain("text-base");
 		expect(input?.className).not.toContain("text-[15px]");
 
-		const stageChip = Array.from(document.body.querySelectorAll("button")).find(
-			(button) => button.textContent === "Backlog",
-		);
-		expect(stageChip?.className).toContain("min-h-[44px]");
+		// stage chips 已收进 Filters 浮层（默认关着），工具栏上代表它的是这个触发按钮。
+		const filtersTrigger = document.body.querySelector('button[aria-label="Filter tasks"]');
+		expect(filtersTrigger?.className).toContain("min-h-[44px]");
 
 		// 「All projects」是同一行里唯一非 <button> 的可点控件（label+switch）；必须和相邻 chip 共用
 		// 同一 44px 触控下限，否则手指落点稍偏就会点空或误触隔壁 chip。
@@ -140,16 +160,29 @@ describe("TaskSpotlightSearchDialog viewport adaptation", () => {
 		expect(allProjectsLabel?.className).toContain("min-w-[44px]");
 	});
 
-	it("explains that a task id matched but its stage is filtered out", async () => {
+	it("explains that a task id matched but the task is filtered out", async () => {
 		// 否则用户拷了个完整 task id 却看到 "No matching tasks"，会以为任务根本不存在。
 		await renderDialog({
 			isSearchActive: true,
 			query: "a3f21",
 			results: [],
-			taskIdMatchedResultCountHiddenByStageSelection: 1,
+			taskIdMatchedResultCountHiddenByFilters: 1,
 		});
 
-		expect(queryDialogContent()?.textContent).toContain("Task ID matched, but its stage is filtered out");
+		expect(queryDialogContent()?.textContent).toContain("Task ID matched, but the task is filtered out");
+	});
+
+	it("explains that other-project rows were dropped by the session-state dimension", async () => {
+		// 会话状态只对当前项目可判。不点破的话，用户勾了「Needs your input」看不到别的项目的任务，
+		// 会以为那些任务不存在，而不是「这里判不了」。
+		await renderDialog({
+			isSearchActive: true,
+			query: "anything",
+			results: [],
+			resultCountExcludedBecauseSessionActivityIsNotObservable: 2,
+		});
+
+		expect(queryDialogContent()?.textContent).toContain("their session state is only known for the current project");
 	});
 
 	it("falls back to the generic empty state when nothing matched at all", async () => {
@@ -158,10 +191,14 @@ describe("TaskSpotlightSearchDialog viewport adaptation", () => {
 		expect(queryDialogContent()?.textContent).toContain("No matching tasks");
 	});
 
-	it("mentions task ID in the idle hint so the capability is discoverable", async () => {
-		await renderDialog();
+	it("reports the result count while browsing with an empty query", async () => {
+		// 空查询不再是「什么都不显示」而是按排序档浏览全量；计数就是「现在列出的是全部 N 个任务」这句话本身。
+		await renderDialog({ isBrowsingAllTasksWithoutQuery: true, results: [] });
 
-		expect(queryDialogContent()?.textContent).toContain("Type to search tasks by name, prompt, or task ID");
+		const resultCountElement = Array.from(document.body.querySelectorAll("span")).find(
+			(element) => element.textContent === "0" && element.className.includes("text-text-tertiary"),
+		);
+		expect(resultCountElement).toBeInstanceOf(HTMLElement);
 	});
 
 	it("keeps the All projects toggle right-aligned via ml-auto on desktop", async () => {

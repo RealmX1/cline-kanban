@@ -23,6 +23,10 @@ function createDocument(overrides: {
 		columnId: "backlog",
 		title: overrides.title ?? "",
 		prompt: overrides.prompt ?? "",
+		taskCreatedAtEpochMs: 0,
+		taskLastModifiedAtEpochMs: 0,
+		taskAgentOverrideAgentId: null,
+		mostRecentlyLaunchedAgentSessionAgentId: null,
 	});
 }
 
