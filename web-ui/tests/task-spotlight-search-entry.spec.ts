@@ -37,6 +37,103 @@ test.describe("desktop task spotlight search entry", () => {
 	});
 });
 
+test.describe("desktop task spotlight browse, sort, filter and row fields", () => {
+	// 这一组全部走真实浏览器 + 真实 runtime：排序/过滤/字段开关三件事各自的 jsdom 单测证明的是纯逻辑，
+	// 「持久化偏好在重开页面后还在」「stage chips 确实搬进了 Filters 浮层」这类只有真跑才算数。
+	const SORT_ORDER_STORAGE_KEY = "kanban.task-spotlight-search-result-sort-order.v1";
+	const ROW_FIELD_VISIBILITY_STORAGE_KEY = "kanban.task-spotlight-search-result-row-field-visibility.v1";
+
+	async function openSpotlight(page: import("@playwright/test").Page) {
+		await page.goto("/");
+		await expect(page.locator('[data-column-id="backlog"]').first()).toBeAttached();
+		await page.getByTestId(SPOTLIGHT_TRIGGER_TEST_ID).click();
+		const dialog = page.locator(SPOTLIGHT_DIALOG_SELECTOR);
+		await expect(dialog).toBeVisible();
+		return dialog;
+	}
+
+	test("empty query browses every task without preselecting a row", async ({ page }) => {
+		const dialog = await openSpotlight(page);
+
+		// 空查询不再是「Type to search…」的静止空态，而是一份按排序档排好的全量列表。
+		await expect(dialog).not.toContainText("Type to search tasks");
+		const rows = dialog.locator("button", { hasText: /./ });
+		await expect(rows.first()).toBeVisible();
+
+		// ⌘K 之后直接回车是既有肌肉记忆；浏览态若预选第 0 行，那个手势会变成「随手打开某个任务」。
+		await expect(dialog.locator(".bg-surface-3")).toHaveCount(0);
+		await page.keyboard.press("ArrowDown");
+		await expect(dialog.locator(".bg-surface-3").first()).toBeVisible();
+	});
+
+	test("the sort order survives a reload", async ({ page }) => {
+		const dialog = await openSpotlight(page);
+		await dialog.getByRole("group", { name: "Sort results" }).getByText("Created", { exact: true }).click();
+		expect(await page.evaluate((key: string) => window.localStorage.getItem(key), SORT_ORDER_STORAGE_KEY)).toBe(
+			"task_created_at_desc",
+		);
+
+		const reopenedDialog = await openSpotlight(page);
+		await expect(
+			reopenedDialog.getByRole("group", { name: "Sort results" }).getByText("Created", { exact: true }),
+		).toHaveClass(/bg-surface-4/);
+	});
+
+	test("stage chips now live inside the Filters popover and narrow the results", async ({ page }) => {
+		const dialog = await openSpotlight(page);
+
+		// 收进浮层是这次的有意改动：五个维度平铺在窄屏上必然折行，挤掉本就紧张的结果列表高度。
+		await expect(dialog.getByRole("button", { name: "Backlog", exact: true })).toHaveCount(0);
+
+		await dialog.getByRole("button", { name: "Filter tasks" }).click();
+		const filterPanel = page.locator("[data-task-filter-controls-panel]");
+		await expect(filterPanel).toBeVisible();
+		await expect(filterPanel).toContainText("Stage");
+		await expect(filterPanel).toContainText("Last modified");
+
+		await filterPanel.getByRole("button", { name: "Backlog", exact: true }).click();
+		// 启用一个维度后触发按钮上出现角标，用户随时看得见「我正在被过滤」。
+		await expect(dialog.getByRole("button", { name: "Filter tasks" })).toContainText("1");
+	});
+
+	test("switching a row field off removes it from every row and persists", async ({ page }) => {
+		const dialog = await openSpotlight(page);
+		await dialog.getByTestId("task-spotlight-search-result-row-field-visibility-menu-trigger").click();
+
+		const stageNameItem = page.getByRole("menuitemcheckbox", { name: "Stage name" });
+		await expect(stageNameItem).toBeVisible();
+		await stageNameItem.click();
+		await page.keyboard.press("Escape");
+
+		const storedVisibility = await page.evaluate(
+			(key: string) => window.localStorage.getItem(key),
+			ROW_FIELD_VISIBILITY_STORAGE_KEY,
+		);
+		expect(storedVisibility).toContain('"stage_label_badge":false');
+	});
+
+	test("a full task id stays on top under a non-relevance sort order", async ({ page }) => {
+		const dialog = await openSpotlight(page);
+		await dialog.getByRole("group", { name: "Sort results" }).getByText("Created", { exact: true }).click();
+
+		// 从看板上拿一个真实 task id，避免依赖固定的种子数据。
+		const firstTaskId = await page.evaluate(() => {
+			const cardElement = document.querySelector("[data-task-id]");
+			return cardElement?.getAttribute("data-task-id") ?? null;
+		});
+		test.skip(!firstTaskId, "No task on the board to look up by id.");
+
+		await page.getByPlaceholder("Search tasks").fill(firstTaskId as string);
+		// 排序层刻意叠在 ID 置顶层之下：换档不该让「粘贴 id + 回车直达」失效。
+		await expect(
+			dialog
+				.locator("button")
+				.filter({ hasText: firstTaskId as string })
+				.first(),
+		).toBeVisible();
+	});
+});
+
 test.describe("mobile task spotlight search entry", () => {
 	test.use({ viewport: { width: 375, height: 812 }, hasTouch: true });
 

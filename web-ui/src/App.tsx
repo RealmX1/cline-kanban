@@ -385,6 +385,10 @@ export default function App(): ReactElement {
 		board,
 		currentProjectId,
 		currentProjectName: currentProjectSummary?.name ?? null,
+		currentProjectDefaultAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
+		// 会话摘要只作为「搜索之后叠加」的展示/过滤/排序素材传入。**绝不能进 documents**——
+		// 它每 tick 换引用，会把语义索引反复重建（见 controller 里叠加层那一段）。
+		taskSessionSummariesByTaskId: sessions,
 		canOpen: !hasNoProjects,
 		crossProjectWorkspaceId: currentProjectId,
 		crossProjectExcludeProjectIds: crossProjectTaskSearchExcludeProjectIds,

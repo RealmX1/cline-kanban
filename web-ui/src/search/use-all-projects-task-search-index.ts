@@ -17,6 +17,10 @@ function buildDocumentsFromProjectEntry(
 			columnId: task.columnId,
 			title: task.title,
 			prompt: task.prompt,
+			taskCreatedAtEpochMs: task.createdAt,
+			taskLastModifiedAtEpochMs: task.updatedAt,
+			taskAgentOverrideAgentId: task.agentId,
+			mostRecentlyLaunchedAgentSessionAgentId: task.mostRecentlyLaunchedAgentSessionAgentId,
 		}),
 	);
 }
