@@ -83,6 +83,8 @@ import type {
 	RuntimeGitSyncResponse,
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
+	RuntimeIngestExploratorySessionMapUpdateRequest,
+	RuntimeIngestExploratorySessionMapUpdateResponse,
 	RuntimeListAgentRaisedPendingUserDecisionsRequest,
 	RuntimeListAgentRaisedPendingUserDecisionsResponse,
 	RuntimeNotificationClearRequest,
@@ -243,6 +245,8 @@ import {
 	runtimeGitSyncResponseSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeHookIngestResponseSchema,
+	runtimeIngestExploratorySessionMapUpdateRequestSchema,
+	runtimeIngestExploratorySessionMapUpdateResponseSchema,
 	runtimeListAgentRaisedPendingUserDecisionsRequestSchema,
 	runtimeListAgentRaisedPendingUserDecisionsResponseSchema,
 	runtimeNotificationClearRequestSchema,
@@ -657,6 +661,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeGetExploratorySessionMapRequest,
 		) => Promise<RuntimeGetExploratorySessionMapResponse>;
+		ingestSessionMapUpdate: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeIngestExploratorySessionMapUpdateRequest,
+		) => Promise<RuntimeIngestExploratorySessionMapUpdateResponse>;
 	};
 }
 
@@ -1245,12 +1253,20 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	exploratory: t.router({
-		// 读 per-workspace map store 中该会话的集合；null = 尚无集合（M0 恒态，UI 纯展示投影骨架）。
+		// 读 per-workspace map store 中该会话的集合；null = 尚无集合（UI 纯展示投影骨架）。
 		getSessionMap: workspaceProcedure
 			.input(runtimeGetExploratorySessionMapRequestSchema)
 			.output(runtimeGetExploratorySessionMapResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.exploratoryApi.getSessionMap(ctx.workspaceScope, input);
+			}),
+		// agent 写回 session map 的唯一入口（蓝图 §B.2）：apply 漏斗四道闸任一失败整体丢弃，
+		// durable 落盘后才 ack + 广播 exploratory_session_map_updated。
+		ingestSessionMapUpdate: workspaceProcedure
+			.input(runtimeIngestExploratorySessionMapUpdateRequestSchema)
+			.output(runtimeIngestExploratorySessionMapUpdateResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.ingestSessionMapUpdate(ctx.workspaceScope, input);
 			}),
 	}),
 });

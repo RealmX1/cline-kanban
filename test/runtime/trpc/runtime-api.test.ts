@@ -534,6 +534,150 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
+	describe("taskConversationMode 传参", () => {
+		it("终端分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+
+			const terminalManager = {
+				startTaskSession: vi.fn(async () => createSummary()),
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const clineTaskSessionService = createClineTaskSessionServiceMock();
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-1",
+					baseRef: "main",
+					prompt: "Map the exploration space",
+					taskConversationMode: "exploratory",
+				},
+			);
+
+			expect(response.ok).toBe(true);
+			expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+				expect.objectContaining({
+					taskId: "task-1",
+					taskConversationMode: "exploratory",
+				}),
+				expect.any(String),
+			);
+		});
+
+		it("Cline 分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+			agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
+			setSelectedProviderSettings({
+				provider: "anthropic",
+				model: "claude-sonnet-4-6",
+				apiKey: "anthropic-api-key",
+			});
+
+			const terminalManager = {
+				startTaskSession: vi.fn(async () => createSummary()),
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const clineTaskSessionService = createClineTaskSessionServiceMock();
+			clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
+
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => {
+					const runtimeConfigState = createRuntimeConfigState();
+					runtimeConfigState.selectedAgentId = "cline";
+					return runtimeConfigState;
+				}),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-1",
+					baseRef: "main",
+					prompt: "Map the exploration space",
+					taskConversationMode: "exploratory",
+				},
+			);
+
+			expect(response.ok).toBe(true);
+			expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
+				expect.objectContaining({
+					taskId: "task-1",
+					taskConversationMode: "exploratory",
+				}),
+			);
+			expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		});
+
+		it("ACP 分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+			const acpSummary = createSummary({
+				taskId: "task-1",
+				agentId: "omp",
+				state: "running",
+				sessionTransport: "acp_stdio_subprocess",
+			});
+			const acpTaskSessionService = {
+				getSummary: vi.fn(() => null),
+				startTaskSession: vi.fn(async () => acpSummary),
+				listMessages: vi.fn(() => []),
+				clearTaskSession: vi.fn(),
+				applyTurnCheckpoint: vi.fn(() => null),
+			};
+			const terminalManager = {
+				startTaskSession: vi.fn(async () => createSummary()),
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const clineTaskSessionService = createClineTaskSessionServiceMock();
+
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+				getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-1",
+					baseRef: "main",
+					prompt: "Map the exploration space",
+					agentId: "omp",
+					requestedAgentSessionTransport: "acp_stdio_subprocess",
+					taskConversationMode: "exploratory",
+				},
+			);
+
+			expect(response.ok).toBe(true);
+			expect(acpTaskSessionService.startTaskSession).toHaveBeenCalledWith(
+				expect.objectContaining({
+					taskId: "task-1",
+					taskConversationMode: "exploratory",
+				}),
+			);
+			expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		});
+	});
+
 	it("starts a By the way runtime session in the main task workspace without creating a turn checkpoint", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
 		const terminalManager = {

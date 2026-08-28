@@ -181,4 +181,99 @@ describe("SessionMapPanel", () => {
 		await expandPanel();
 		expect(container.textContent).toContain("Loading session structure…");
 	});
+
+	it("节点按 anchorTurnNumber 升序渲染（map 不存边，显示序由锚 turn 派生）", async () => {
+		const nodeAt = (turn: number, title: string) => ({
+			mapNodeId: `node-${turn}`,
+			anchorConversationSessionTaskId: "task-1",
+			anchorTurnNumber: turn,
+			anchorTurnCheckpointCommit: `commit-${turn}`,
+			anchorTurnUserMessagePreview: null,
+			nodeKind: "milestone" as const,
+			nodeTitle: title,
+			nodeSummaryMarkdown: null,
+			referencedFindingId: null,
+			nodeGenerationSource: "agent_live_session_maintenance" as const,
+			createdAt: turn,
+			updatedAt: turn,
+		});
+		await renderPanel({
+			queryPhase: "ready",
+			projection: createProjection(),
+			// 落地序乱序（apply 漏斗按提案序归并），渲染必须重排。
+			mapCollection: createMapCollection({
+				mapNodes: [nodeAt(3, "第三个点"), nodeAt(1, "第一个点"), nodeAt(2, "第二个点")],
+			}),
+		});
+		await expandPanel();
+		const renderedIds = Array.from(container.querySelectorAll("[data-session-map-node-anchor]")).map((element) =>
+			element.getAttribute("data-session-map-node-anchor"),
+		);
+		expect(renderedIds).toEqual(["node-1", "node-2", "node-3"]);
+	});
+
+	it("节点带摘要时渲染第二行摘要文本", async () => {
+		await renderPanel({
+			queryPhase: "ready",
+			projection: createProjection(),
+			mapCollection: createMapCollection({
+				mapNodes: [
+					{
+						...createMapCollection().mapNodes[0]!,
+						nodeSummaryMarkdown: "比较了三种方案后选了 WAL，理由是崩溃恢复语义最简单。",
+					},
+				],
+			}),
+		});
+		await expandPanel();
+		expect(container.textContent).toContain("定了存储方案");
+		expect(container.textContent).toContain("比较了三种方案后选了 WAL");
+	});
+
+	it("defaultOpen=true（exploratory 会话）时初始即展开，无需手动点开", async () => {
+		await renderPanel({
+			queryPhase: "ready",
+			projection: createProjection(),
+			mapCollection: null,
+			defaultOpen: true,
+		});
+		expect(container.textContent).toContain("第 1 轮的用户消息首行");
+	});
+
+	it("defaultOpen 跟随 prop 直到用户首次手动开合；用户表过态后不再被默认值推翻", async () => {
+		await renderPanel({
+			queryPhase: "ready",
+			projection: createProjection(),
+			mapCollection: null,
+			defaultOpen: false,
+		});
+		expect(container.textContent).not.toContain("第 1 轮的用户消息首行");
+
+		// 模式解析落定/切到 exploratory 会话 → 默认值翻 true，未表过态的面板跟随展开。
+		await renderPanel({
+			queryPhase: "ready",
+			projection: createProjection(),
+			mapCollection: null,
+			defaultOpen: true,
+		});
+		expect(container.textContent).toContain("第 1 轮的用户消息首行");
+
+		// 用户手动折叠后，默认值再翻转也不再推翻用户选择。
+		await expandPanel(); // 这里复用「点 header」——此刻是折叠动作
+		expect(container.textContent).not.toContain("第 1 轮的用户消息首行");
+		await renderPanel({
+			queryPhase: "ready",
+			projection: createProjection(),
+			mapCollection: null,
+			defaultOpen: false,
+		});
+		expect(container.textContent).not.toContain("第 1 轮的用户消息首行");
+		await renderPanel({
+			queryPhase: "ready",
+			projection: createProjection(),
+			mapCollection: null,
+			defaultOpen: true,
+		});
+		expect(container.textContent).not.toContain("第 1 轮的用户消息首行");
+	});
 });

@@ -8,6 +8,7 @@ import ora, { type Ora } from "ora";
 import packageJson from "../package.json" with { type: "json" };
 import { disposeCliTelemetryService } from "./cline-sdk/cline-telemetry-service.js";
 import { registerDeploymentCommand } from "./commands/deployment";
+import { registerExploratoryCommand } from "./commands/exploratory";
 import { registerHooksCommand } from "./commands/hooks";
 import { registerTaskCommand } from "./commands/task";
 import { registerVerificationCommand } from "./commands/verification";
@@ -700,6 +701,7 @@ function createProgram(invocationArgs: string[]): Command {
 
 	registerTaskCommand(program);
 	registerHooksCommand(program);
+	registerExploratoryCommand(program);
 	registerDeploymentCommand(program);
 	registerVerificationCommand(program);
 

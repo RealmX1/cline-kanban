@@ -71,6 +71,7 @@ import {
 	resolveWorkspacePath,
 } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
+import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
 import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
@@ -1524,6 +1525,22 @@ async function deleteTaskCommand(input: {
 			...(await deleteTaskWorkspace(runtimeClient, taskId, true)),
 		})),
 	);
+
+	// 批删全部 turn checkpoint ref（姊妹蓝图 §1.4：存续期全量保留，永久删除时按前缀批删）。
+	// 顺序铁律：必须排在会话停止与 worktree 清理**之后**。hooks-api 的 to_review checkpoint 捕获是
+	// runtime 侧不 await 的后台任务（hooks-api.ts F1），若先批删，枚举完成后在途捕获仍可能
+	// update-ref，给已删除任务留下再无清理方的孤儿 ref。会话停止切断新 hook 来源（任务已从看板
+	// 移除，transition 失败也不会再派生新捕获），批删放到最后给在途捕获最大收敛窗口。
+	// 残余窗口：CLI 无法 await runtime 侧已派生的在途捕获，理论上仍可能有批删后才落定的孤儿 ref——
+	// 与草稿清理同一套失败语义：这是删除已成之后的收尾，失败只吞不抛，残留几个无人认领的 ref，
+	// 不该让已经删成的任务被报成失败。
+	for (const taskId of mutation.value.deletedTaskIds) {
+		try {
+			await deleteAllTaskTurnCheckpointRefs({ cwd: workspaceRepoPath, taskId });
+		} catch {
+			// 收尾清理，best-effort。
+		}
+	}
 
 	return {
 		ok: true,

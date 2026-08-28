@@ -58,6 +58,10 @@ export interface UseProjectNavigationResult {
 	taskChatMessagesByTaskId: ReturnType<typeof useRuntimeStateStream>["taskChatMessagesByTaskId"];
 	latestTaskReadyForReview: ReturnType<typeof useRuntimeStateStream>["latestTaskReadyForReview"];
 	latestMcpAuthStatuses: ReturnType<typeof useRuntimeStateStream>["latestMcpAuthStatuses"];
+	exploratorySessionMapCollectionsByTaskId: ReturnType<
+		typeof useRuntimeStateStream
+	>["exploratorySessionMapCollectionsByTaskId"];
+	streamSnapshotGeneration: ReturnType<typeof useRuntimeStateStream>["streamSnapshotGeneration"];
 	notificationLogByWorkspaceId: ReturnType<typeof useRuntimeStateStream>["notificationLogByWorkspaceId"];
 	clineSessionContextVersion: ReturnType<typeof useRuntimeStateStream>["clineSessionContextVersion"];
 	streamError: string | null;
@@ -102,6 +106,8 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		exploratorySessionMapCollectionsByTaskId,
+		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,
@@ -329,6 +335,8 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		exploratorySessionMapCollectionsByTaskId,
+		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,

@@ -52,6 +52,7 @@ import type {
 	RuntimeAgentSessionTransport,
 	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
+	RuntimeExploratorySessionMapCollection,
 	RuntimeExploratorySessionMapNode,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionMode,
@@ -644,6 +645,8 @@ export function CardDetailView({
 	isTaskChangesSidebarOpen = false,
 	onCreateByTheWayTaskConversationSession,
 	taskChatMessagesByTaskId,
+	exploratorySessionMapCollectionsByTaskId,
+	runtimeStreamSnapshotGeneration = 0,
 }: {
 	selection: CardSelection;
 	currentProjectId: string | null;
@@ -730,6 +733,12 @@ export function CardDetailView({
 		mainSessionOriginUserMessagePreview: string | null;
 	}) => Promise<{ ok: boolean; message?: string; taskConversationSessionId?: string }>;
 	taskChatMessagesByTaskId?: Record<string, RuntimeTaskChatMessage[]>;
+	// Exploratory session map 的 WS 推送集合（exploratory_session_map_updated，M1）：
+	// 按 conversationSessionTaskId 取当前会话的条目喂给 map 面板数据 hook。
+	exploratorySessionMapCollectionsByTaskId?: Record<string, RuntimeExploratorySessionMapCollection | null>;
+	// 流（重）连握手代数：每次快照递增。断连窗口的 map ingest 不补发，客户端靠它触发
+	// getSessionMap 重查对齐（契约语义）；拼进 map 面板的 refreshKey 即可。
+	runtimeStreamSnapshotGeneration?: number;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
@@ -904,9 +913,11 @@ export function CardDetailView({
 	const showClineAgentChatPanel = activeTaskConversationSessionSummary
 		? isRuntimeAgentSessionSummaryRenderedAsConversationPanel(activeTaskConversationSessionSummary)
 		: nextLaunchAgentSessionTransport !== null && nextLaunchAgentSessionTransport !== "pty_terminal";
-	// ── Session Map 面板（蓝图 §G.1，M0）──────────────────────────────────
-	// 只对「渲染为 conversation 面板」的会话出现（Cline SDK 与 ACP；PTY 终端会话 M0 不挂）。
-	// 重拉信号 = 低频精确边沿（姊妹蓝图 §2.3：投影层不新增 WS 事件，搭 summary 广播重拉）：
+	// ── Session Map 面板（蓝图 §G.1）──────────────────────────────────────
+	// 只对「渲染为 conversation 面板」的会话出现（Cline SDK 与 ACP；PTY 终端会话不挂）。
+	// 数据双通道：WS 推送（exploratory_session_map_updated，集合变更实时到达）+ 查询重拉
+	// （投影层不新增 WS 事件，搭 summary 广播边沿；断连窗口的 map 变更不补发，靠重连
+	// 代数触发重查对齐）。重拉信号 = 低频精确边沿（姊妹蓝图 §2.3）：
 	// 新 turn 开始 / 回合结束（turnOwner 翻转——投影的 in-progress 判定与它同源）、
 	// checkpoint 异步落地（latestTurnCheckpoint.turn/commit 变化）、存活度翻转（liveness，
 	// 如 agent 回合中崩溃退出后投影的 liveSummary 消失、spinner 必须停）。facet 一律经
@@ -927,13 +938,27 @@ export function CardDetailView({
 				activeTaskConversationSessionSummary?.latestTurnCheckpoint?.commit ?? "",
 				sessionMapRefreshFacets?.turnOwner ?? "none",
 				sessionMapRefreshFacets?.liveness ?? "none",
+				// 流重连代数：断连窗口的 map ingest 不补发，靠这次重拉把投影与集合一起对齐。
+				runtimeStreamSnapshotGeneration,
 			].join(":")
 		: null;
 	const sessionMapPanelData = useSessionMapPanelData({
 		workspaceId: currentProjectId,
 		conversationSessionTaskId: sessionMapConversationSessionTaskId,
 		refreshKey: sessionMapSummaryRefreshKey,
+		// WS 推送通道（M1）：agent 写回 / stale 置位时实时刷新，不等下一次重拉边沿。
+		pushedMapCollection: sessionMapConversationSessionTaskId
+			? exploratorySessionMapCollectionsByTaskId?.[sessionMapConversationSessionTaskId]
+			: undefined,
 	});
+	// 模式驱动默认展开（蓝图 §A.2 效应 1）：活会话只看会话自己的盖章，缺字段按 operational
+	// （旧会话在功能上线前启动，卡片声明对它不适用）；没有活会话（任务尚未启动）时卡片即真相。
+	// 卡片改了模式而会话存续时，按会话盖章显示，不做任何强刷（§A.1 v1 不热切换决策）——
+	// 绝不能回退到卡片声明值，否则改卡片会立刻热切换活会话面板的默认展开。
+	const sessionMapPanelDefaultOpen =
+		(activeTaskConversationSessionSummary
+			? (activeTaskConversationSessionSummary.taskConversationMode ?? "operational")
+			: (selection.card.taskConversationMode ?? "operational")) === "exploratory";
 	// 聊天内锚 chip 点击 → 展开面板 + spotlight 节点的信号令牌（selectedPathExpandToken 同款先例）。
 	const [sessionMapPanelExpandToken, setSessionMapPanelExpandToken] = useState(0);
 	const sessionMapNodeById = useMemo(() => {
@@ -1197,6 +1222,7 @@ export function CardDetailView({
 			projection={sessionMapPanelData.projection}
 			mapCollection={sessionMapPanelData.mapCollection}
 			expandToken={sessionMapPanelExpandToken}
+			defaultOpen={sessionMapPanelDefaultOpen}
 		/>
 	) : null;
 	const activeTaskConversationSessionMessages =

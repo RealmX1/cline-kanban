@@ -8,6 +8,7 @@ import type {
 	RuntimeHookEvent,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
+	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -24,6 +25,7 @@ import {
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
+import { resolveExploratoryModeAppendSystemPrompt } from "../prompts/exploratory-mode-append-system-prompt";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { hasClaudeInteractivePrompt, hasClaudeStartupUiRendered } from "./claude-readiness";
 import { configureCodexHooks, hasCodexConfigOverride } from "./codex-hook-config";
@@ -61,6 +63,12 @@ export interface AgentAdapterLaunchInput {
 	// 部分一致，故 adapter 里两者一律并为同一条分支处理；只有 omp 需要认它——别的 agent 不可切换，
 	// 到不了这条路径（可切换 agent 集合见 core/agent-session-transport-selection.ts）。
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
+	// 启动通道声明的会话模式快照（蓝图 §A.1）。prepareAgentLaunch 据它物化 exploratory 指令文件、
+	// 把渲染好的注入段写进下方 exploratoryModeAppendSystemPrompt——adapter 只消费渲染结果，自己不碰 IO。
+	taskConversationMode?: RuntimeTaskConversationMode;
+	// prepareAgentLaunch 解析好的 exploratory 注入段（非 exploratory / 物化失败 ⇒ null），
+	// 由 resolveAgentAppendSystemPrompt 与 prependTaskSessionGuidanceToPrompt 两处组合点并入（§A.2）。
+	exploratoryModeAppendSystemPrompt?: string | null;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	parentSessionId?: string;
@@ -766,12 +774,16 @@ function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string 
 	return combineAppendSystemPrompts(
 		resolveHomeAgentAppendSystemPrompt(input.taskId),
 		resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd),
+		input.exploratoryModeAppendSystemPrompt,
 	);
 }
 
 function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): string {
 	const prompt = input.prompt.trim();
-	const taskSessionPrompt = resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd);
+	const taskSessionPrompt = combineAppendSystemPrompts(
+		resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd),
+		input.exploratoryModeAppendSystemPrompt,
+	);
 	if (!prompt || !taskSessionPrompt) {
 		return input.prompt;
 	}
@@ -2050,11 +2062,14 @@ export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promis
 		prompt: input.prompt,
 		images: input.images,
 	});
+	// Exploratory Mode 注入（§A.2）：仅 exploratory 启动物化指令文件；非 exploratory / 物化失败恒为 null。
+	const exploratoryModeAppendSystemPrompt = await resolveExploratoryModeAppendSystemPrompt(input.taskConversationMode);
 	if (input.agentId !== "codex") {
 		warnUnsupportedParentSessionId(input.agentId, input.parentSessionId);
 	}
 	return await ADAPTERS[input.agentId].prepare({
 		...input,
 		prompt: preparedPrompt,
+		exploratoryModeAppendSystemPrompt,
 	});
 }

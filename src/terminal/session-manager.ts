@@ -7,6 +7,7 @@ import type {
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeLastConversationProgressObservation,
 	RuntimeTaskConnectionRetry,
+	RuntimeTaskConversationMode,
 	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
@@ -655,6 +656,9 @@ export interface StartTaskSessionRequest {
 	// 通道切换后重开会话：续跑既有对话、不重投 prompt，但不带垃圾桶语义。
 	// 与 resumeFromTrash 一样，会话开局停在「等你说话」而不是假装 agent 在跑——没有新 prompt 被发出去。
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
+	// 卡片声明的会话模式快照（蓝图 §A.1）：建会话时盖章进 summary.taskConversationMode；
+	// 缺省不写字段 = operational。exploratory 时经 adapter 组合点注入 Kanban 托管指令文件（§A.2）。
+	taskConversationMode?: RuntimeTaskConversationMode;
 	cols?: number;
 	rows?: number;
 	env?: Record<string, string | undefined>;
@@ -2780,6 +2784,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				resumeFromTrash: request.resumeFromTrash,
 				resumePriorAgentConversationWithoutResendingPrompt:
 					request.resumePriorAgentConversationWithoutResendingPrompt,
+				taskConversationMode: request.taskConversationMode,
 				env: request.env,
 				workspaceId: request.workspaceId,
 				parentSessionId: request.parentSessionId,
@@ -3254,6 +3259,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			...(request.taskConversationSessionMetadata
 				? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
 				: {}),
+			// 会话模式盖章：每次建会话都从启动请求快照一次；缺省不物化默认值。
+			...(request.taskConversationMode !== undefined ? { taskConversationMode: request.taskConversationMode } : {}),
 		});
 		this.emitSummary(entry.summary);
 		for (const chunk of preActiveOutputChunks) {

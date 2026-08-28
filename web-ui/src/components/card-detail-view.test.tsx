@@ -1857,19 +1857,20 @@ describe("CardDetailView", () => {
 			(mockUseSessionMapPanelData.mock.calls.at(-1)?.[0] as { refreshKey: string | null }).refreshKey;
 
 		// cline 会话（conversation 面板形态）→ refreshKey 非 null，构成为
-		// `{checkpoint.turn}:{checkpoint.commit}:{turnOwner}:{liveness}`（无 updatedAt）。
+		// `{checkpoint.turn}:{checkpoint.commit}:{turnOwner}:{liveness}:{streamSnapshotGeneration}`（无 updatedAt；
+		// 末段是流重连代数，本测试未传该 prop = 0）。
 		await renderView(createSessionSummary("task-1", { agentId: "cline" }));
-		expect(lastRefreshKey()).toBe("0::agent:live");
+		expect(lastRefreshKey()).toBe("0::agent:live:0");
 
 		// 流式期间 summary 每 ~150ms 批次推进 updatedAt → refreshKey 必须不变（重拉风暴反回归）。
 		await renderView(createSessionSummary("task-1", { agentId: "cline", updatedAt: 2 }));
-		expect(lastRefreshKey()).toBe("0::agent:live");
+		expect(lastRefreshKey()).toBe("0::agent:live:0");
 
 		// 回合结束（turnOwner agent→user）→ 边沿重拉（投影 in-progress 判定与该 facet 同源）。
 		await renderView(
 			createSessionSummary("task-1", { agentId: "cline", updatedAt: 3, turnOwner: "user", userTurnKind: "review" }),
 		);
-		expect(lastRefreshKey()).toBe("0::user:live");
+		expect(lastRefreshKey()).toBe("0::user:live:0");
 
 		// checkpoint 异步落地（turn/commit 变化）→ 边沿重拉。
 		await renderView(
@@ -1886,7 +1887,7 @@ describe("CardDetailView", () => {
 				},
 			}),
 		);
-		expect(lastRefreshKey()).toBe("1:commit-1:user:live");
+		expect(lastRefreshKey()).toBe("1:commit-1:user:live:0");
 	});
 
 	it("Session Map 锚 chip 链路：resolver 只认服务端集合内的 id；点击展开面板并 spotlight 节点", async () => {
@@ -1974,5 +1975,66 @@ describe("CardDetailView", () => {
 		const nodeAnchor = container.querySelector('[data-session-map-node-anchor="node-1"]');
 		expect(nodeAnchor).not.toBeNull();
 		expect(nodeAnchor?.classList.contains("verification-spotlight-active")).toBe(true);
+	});
+
+	it("Session Map 默认展开：活会话缺模式字段不回退卡片声明值（v1 不热切换），无活会话才读卡片", async () => {
+		const renderWith = async ({
+			sessionSummary,
+			cardTaskConversationMode,
+		}: {
+			sessionSummary: RuntimeTaskSessionSummary | null;
+			cardTaskConversationMode?: "operational" | "exploratory";
+		}) => {
+			const selection = createSelectionInColumn("in_progress");
+			if (cardTaskConversationMode) {
+				selection.card.taskConversationMode = cardTaskConversationMode;
+			}
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={selection}
+						currentProjectId="workspace-1"
+						selectedAgentId="cline"
+						sessionSummary={sessionSummary}
+						taskSessions={sessionSummary ? { "task-1": sessionSummary } : {}}
+						onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+		};
+		const sessionMapToggle = (): HTMLButtonElement => {
+			const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
+				candidate.textContent?.includes("Session Map"),
+			);
+			expect(button).toBeDefined();
+			return button as HTMLButtonElement;
+		};
+
+		// 回归核心：活会话 summary 缺 taskConversationMode（功能上线前启动的旧会话），卡片存续期
+		// 被改成 exploratory——回退链若读卡片值会立刻热切换默认展开；修复后必须按 operational 折叠。
+		await renderWith({
+			sessionSummary: createSessionSummary("task-1", { agentId: "cline" }),
+			cardTaskConversationMode: "exploratory",
+		});
+		expect(sessionMapToggle().getAttribute("aria-expanded")).toBe("false");
+
+		// 正例：活会话自己盖章 exploratory（且卡片是 operational）→ 默认展开，跟随会话而非卡片。
+		await renderWith({
+			sessionSummary: createSessionSummary("task-1", { agentId: "cline", taskConversationMode: "exploratory" }),
+			cardTaskConversationMode: "operational",
+		});
+		expect(sessionMapToggle().getAttribute("aria-expanded")).toBe("true");
+
+		// 正例：无活会话（任务尚未启动）时卡片即真相——卡片 exploratory → 默认展开。
+		await renderWith({ sessionSummary: null, cardTaskConversationMode: "exploratory" });
+		expect(sessionMapToggle().getAttribute("aria-expanded")).toBe("true");
 	});
 });

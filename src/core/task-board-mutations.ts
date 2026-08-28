@@ -11,6 +11,7 @@ import type {
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskCommentEntry,
+	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -40,6 +41,8 @@ export interface RuntimeCreateTaskInput {
 	// resolveAgentSessionTransportPinnedAtTaskCreation）。调用方传的是全局默认值本身，
 	// 由域函数决定要不要落到卡上——省得每个建卡入口各判一次「这个 agent 能不能切」。
 	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
+	// 卡片声明的会话模式（探索/操作，蓝图 §A.1）；不传 = operational（缺省不落盘，字段缺失即默认档）。
+	taskConversationMode?: RuntimeTaskConversationMode;
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
@@ -62,6 +65,9 @@ export interface RuntimeUpdateTaskInput {
 	// 三态：undefined = 保留卡片原值，null = 清除固化值（回落到全局默认），具体值 = 改成该通道。
 	// 通道切换 procedure 用它把新通道钉到卡上，使「下次启动」（含自动续跑、从垃圾桶拖回）也走新通道。
 	ompAgentSessionTransport?: RuntimeAgentSessionTransport | null;
+	// 三态同上：undefined = 保留卡片原值，null = 清除声明（回落 operational 缺省），具体值 = 改声明。
+	// 改模式只影响下一次启动——活会话读的是 summary.taskConversationMode 快照（v1 不热切换）。
+	taskConversationMode?: RuntimeTaskConversationMode | null;
 	clineSettings?: RuntimeTaskClineSettings | null;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings | null;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization | null;
@@ -398,6 +404,8 @@ export function addTaskToColumn(
 		taskCommentEntries: cloneTaskCommentEntries(input.taskCommentEntries),
 		...(input.agentId ? { agentId: input.agentId } : {}),
 		...(ompAgentSessionTransport !== undefined ? { ompAgentSessionTransport } : {}),
+		// 缺省不落盘：字段缺失即 operational（蓝图 §A.1「legacy 卡片零迁移」）。
+		...(input.taskConversationMode !== undefined ? { taskConversationMode: input.taskConversationMode } : {}),
 		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
 		...(input.terminalAgentModelOverrideSettings !== undefined
 			? {
@@ -782,6 +790,11 @@ export function updateTask(
 					input.ompAgentSessionTransport === undefined
 						? card.ompAgentSessionTransport
 						: (input.ompAgentSessionTransport ?? undefined),
+				// 与 ompAgentSessionTransport 同一三态语义；缺省（字段缺失）= operational。
+				taskConversationMode:
+					input.taskConversationMode === undefined
+						? card.taskConversationMode
+						: (input.taskConversationMode ?? undefined),
 				clineSettings:
 					input.clineSettings === undefined
 						? cloneTaskClineSettings(card.clineSettings)

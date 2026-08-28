@@ -23,6 +23,7 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
+	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 	RuntimeTerminalAgentModelSelectionAgentId,
@@ -185,6 +186,8 @@ export interface UseTaskEditorResult {
 	setNewTaskStartInPlanMode: Dispatch<SetStateAction<boolean>>;
 	newTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	setNewTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
+	newTaskConversationMode: RuntimeTaskConversationMode;
+	setNewTaskConversationMode: Dispatch<SetStateAction<RuntimeTaskConversationMode>>;
 	newTaskAutoReviewEnabled: boolean;
 	setNewTaskAutoReviewEnabled: Dispatch<SetStateAction<boolean>>;
 	newTaskAutoReviewMode: TaskAutoReviewMode;
@@ -211,6 +214,8 @@ export interface UseTaskEditorResult {
 	setEditTaskStartInPlanMode: Dispatch<SetStateAction<boolean>>;
 	editTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	setEditTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
+	editTaskConversationMode: RuntimeTaskConversationMode;
+	setEditTaskConversationMode: Dispatch<SetStateAction<RuntimeTaskConversationMode>>;
 	editTaskAutoReviewEnabled: boolean;
 	setEditTaskAutoReviewEnabled: Dispatch<SetStateAction<boolean>>;
 	editTaskAutoReviewMode: TaskAutoReviewMode;
@@ -269,6 +274,7 @@ export function useTaskEditor({
 	const [newTaskAgentPermissionMode, setNewTaskAgentPermissionMode] = useState<RuntimeTaskAgentPermissionMode>(
 		newTaskAgentPermissionModeByDefault,
 	);
+	const [newTaskConversationMode, setNewTaskConversationMode] = useState<RuntimeTaskConversationMode>("operational");
 	const [newTaskAutoReviewEnabled, setNewTaskAutoReviewEnabled] = useNewTaskAutoReviewEnabledPreference();
 	const [newTaskAutoReviewMode, setNewTaskAutoReviewMode] = useNewTaskAutoReviewModePreference();
 	const isNewTaskStartInPlanModeDisabled = false;
@@ -284,6 +290,7 @@ export function useTaskEditor({
 	const [editTaskAgentPermissionMode, setEditTaskAgentPermissionMode] = useState<RuntimeTaskAgentPermissionMode>(
 		DEFAULT_TASK_AGENT_PERMISSION_MODE,
 	);
+	const [editTaskConversationMode, setEditTaskConversationMode] = useState<RuntimeTaskConversationMode>("operational");
 	const [editTaskAutoReviewEnabled, setEditTaskAutoReviewEnabled] = useState(false);
 	const [editTaskAutoReviewMode, setEditTaskAutoReviewMode] = useState<TaskAutoReviewMode>("commit");
 	const isEditTaskStartInPlanModeDisabled = false;
@@ -411,6 +418,7 @@ export function useTaskEditor({
 			setEditTaskPrompt("");
 			setEditTaskStartInPlanMode(false);
 			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+			setEditTaskConversationMode("operational");
 			setEditTaskAutoReviewEnabled(false);
 			setEditTaskAutoReviewMode("commit");
 			setEditTaskImages([]);
@@ -542,6 +550,7 @@ export function useTaskEditor({
 		setNewTaskImages([]);
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
+		setNewTaskConversationMode("operational");
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setNewTaskWorktreeMode("branch");
 		setNewTaskAgentId(undefined);
@@ -587,6 +596,9 @@ export function useTaskEditor({
 			setEditTaskImages(formValues.images);
 			setEditTaskStartInPlanMode(formValues.startInPlanMode);
 			setEditTaskAgentPermissionMode(formValues.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault);
+			// 会话模式不在编辑草稿体系里（runtimeTaskEditDraftSchema 尚未携带该字段，web 侧不能
+			// 单方面扩——store 校验会把未知字段剥掉），所以恒从卡片本体铺，草稿不参与。
+			setEditTaskConversationMode(task.taskConversationMode ?? "operational");
 			setEditTaskAutoReviewEnabled(formValues.autoReviewEnabled);
 			setEditTaskAutoReviewMode(formValues.autoReviewMode);
 			setEditTaskBranchRef(formValues.branchRef);
@@ -720,6 +732,7 @@ export function useTaskEditor({
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
 		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+		setEditTaskConversationMode("operational");
 		setEditTaskAutoReviewEnabled(false);
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
@@ -756,6 +769,7 @@ export function useTaskEditor({
 					prompt,
 					startInPlanMode: editTaskStartInPlanMode,
 					taskAgentPermissionMode: editTaskAgentPermissionMode,
+					taskConversationMode: editTaskConversationMode,
 					autoReviewEnabled: editTaskAutoReviewEnabled,
 					autoReviewMode: editTaskAutoReviewMode,
 					images: editTaskImages,
@@ -773,6 +787,7 @@ export function useTaskEditor({
 			setEditTaskPrompt("");
 			setEditTaskStartInPlanMode(false);
 			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+			setEditTaskConversationMode("operational");
 			setEditTaskAutoReviewEnabled(false);
 			setEditTaskAutoReviewMode("commit");
 			setEditTaskImages([]);
@@ -787,6 +802,7 @@ export function useTaskEditor({
 		[
 			editTaskAgentId,
 			editTaskAgentPermissionMode,
+			editTaskConversationMode,
 			editTaskAutoReviewEnabled,
 			editTaskAutoReviewMode,
 			editTaskBranchRef,
@@ -844,6 +860,7 @@ export function useTaskEditor({
 				prompt,
 				startInPlanMode: newTaskStartInPlanMode,
 				taskAgentPermissionMode: newTaskAgentPermissionMode,
+				taskConversationMode: newTaskConversationMode,
 				autoReviewEnabled: newTaskAutoReviewEnabled,
 				autoReviewMode: newTaskAutoReviewMode,
 				images: newTaskImages,
@@ -872,6 +889,9 @@ export function useTaskEditor({
 			setNewTaskAgentPermissionMode(
 				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
 			);
+			// 会话模式没有全局默认档（恒 operational 缺省），keepDialogOpen 时保留当前选择，
+			// 与 worktreeMode 的「连续建同类卡」语义一致。
+			setNewTaskConversationMode(options?.keepDialogOpen ? newTaskConversationMode : "operational");
 			// 刚用掉的那条 ref 就是这个项目新的默认值（上面已写进记忆），所以两条路径都设回 baseRef。
 			// 不能沿用「关掉对话框就复位成 resolvedDefaultCreateTaskBranchRef」：那是闭包里捕获的旧值，
 			// 偏好 store 的乐观发布不保证在同一帧内把它重算出来，于是刚记住的选择会闪回旧默认。
@@ -905,6 +925,7 @@ export function useTaskEditor({
 			newTaskPrompt,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
+			newTaskConversationMode,
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultTaskBranchRef,
@@ -937,6 +958,7 @@ export function useTaskEditor({
 					prompt,
 					startInPlanMode: newTaskStartInPlanMode,
 					taskAgentPermissionMode: newTaskAgentPermissionMode,
+					taskConversationMode: newTaskConversationMode,
 					autoReviewEnabled: newTaskAutoReviewEnabled,
 					autoReviewMode: newTaskAutoReviewMode,
 					images: newTaskImages,
@@ -968,6 +990,9 @@ export function useTaskEditor({
 			setNewTaskAgentPermissionMode(
 				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
 			);
+			// 会话模式没有全局默认档（恒 operational 缺省），keepDialogOpen 时保留当前选择，
+			// 与 worktreeMode 的「连续建同类卡」语义一致。
+			setNewTaskConversationMode(options?.keepDialogOpen ? newTaskConversationMode : "operational");
 			// 刚用掉的那条 ref 就是这个项目新的默认值（上面已写进记忆），所以两条路径都设回 baseRef。
 			// 不能沿用「关掉对话框就复位成 resolvedDefaultCreateTaskBranchRef」：那是闭包里捕获的旧值，
 			// 偏好 store 的乐观发布不保证在同一帧内把它重算出来，于是刚记住的选择会闪回旧默认。
@@ -998,6 +1023,7 @@ export function useTaskEditor({
 			ompAgentSessionTransportForNewTasks,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
+			newTaskConversationMode,
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultTaskBranchRef,
@@ -1018,10 +1044,12 @@ export function useTaskEditor({
 		setNewTaskPrompt("");
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
+		setNewTaskConversationMode("operational");
 
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
 		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+		setEditTaskConversationMode("operational");
 		setEditTaskAutoReviewEnabled(false);
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
@@ -1047,6 +1075,8 @@ export function useTaskEditor({
 		setNewTaskStartInPlanMode,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
+		newTaskConversationMode,
+		setNewTaskConversationMode,
 		newTaskAutoReviewEnabled,
 		setNewTaskAutoReviewEnabled,
 		newTaskAutoReviewMode,
@@ -1073,6 +1103,8 @@ export function useTaskEditor({
 		setEditTaskStartInPlanMode,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
+		editTaskConversationMode,
+		setEditTaskConversationMode,
 		editTaskAutoReviewEnabled,
 		setEditTaskAutoReviewEnabled,
 		editTaskAutoReviewMode,

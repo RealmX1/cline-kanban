@@ -5,6 +5,8 @@ import { type SessionMapPanelData, useSessionMapPanelData } from "@/hooks/use-se
 import type {
 	RuntimeConversationSessionTurnProjectionResponse,
 	RuntimeConversationTurnProjectionEntry,
+	RuntimeExploratorySessionMapCollection,
+	RuntimeExploratorySessionMapNode,
 } from "@/runtime/types";
 
 const { fetchProjectionMock, fetchSessionMapMock } = vi.hoisted(() => ({
@@ -42,18 +44,52 @@ function createProjection(
 	};
 }
 
+function createMapNode(overrides: Partial<RuntimeExploratorySessionMapNode> = {}): RuntimeExploratorySessionMapNode {
+	return {
+		mapNodeId: "turn-1-milestone",
+		anchorConversationSessionTaskId: "session-1",
+		anchorTurnNumber: 1,
+		anchorTurnCheckpointCommit: "commit-1",
+		anchorTurnUserMessagePreview: null,
+		nodeKind: "milestone",
+		nodeTitle: "定了存储方案",
+		nodeSummaryMarkdown: null,
+		referencedFindingId: null,
+		nodeGenerationSource: "agent_live_session_maintenance",
+		createdAt: 1,
+		updatedAt: 1,
+		...overrides,
+	};
+}
+
+function createMapCollection(
+	updatedAt: number,
+	overrides: Partial<RuntimeExploratorySessionMapCollection> = {},
+): RuntimeExploratorySessionMapCollection {
+	return {
+		sourceTurnProjectionSignature: "1:first:10",
+		mapNodes: [createMapNode()],
+		mapStaleReason: null,
+		lastMaintenanceJobCompletedAt: null,
+		updatedAt,
+		...overrides,
+	};
+}
+
 function HookHarness({
 	workspaceId,
 	conversationSessionTaskId,
 	refreshKey,
+	pushedMapCollection,
 	onSnapshot,
 }: {
 	workspaceId: string | null;
 	conversationSessionTaskId: string | null;
 	refreshKey: string | null;
+	pushedMapCollection?: RuntimeExploratorySessionMapCollection | null;
 	onSnapshot: (data: SessionMapPanelData) => void;
 }): null {
-	onSnapshot(useSessionMapPanelData({ workspaceId, conversationSessionTaskId, refreshKey }));
+	onSnapshot(useSessionMapPanelData({ workspaceId, conversationSessionTaskId, refreshKey, pushedMapCollection }));
 	return null;
 }
 
@@ -66,6 +102,7 @@ describe("useSessionMapPanelData", () => {
 		workspaceId: string | null;
 		conversationSessionTaskId: string | null;
 		refreshKey: string | null;
+		pushedMapCollection?: RuntimeExploratorySessionMapCollection | null;
 	}): Promise<void> {
 		await act(async () => {
 			root.render(<HookHarness {...props} onSnapshot={(data) => snapshots.push(data)} />);
@@ -223,5 +260,104 @@ describe("useSessionMapPanelData", () => {
 		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "2:0:" });
 		expect(lastSnapshot().queryPhase).toBe("error");
 		expect(lastSnapshot().projection?.turnProjectionSignature).toBe("1:first:10");
+	});
+
+	it("WS 推送到达即替换 map 集合，不等下一次重拉", async () => {
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		expect(lastSnapshot().mapCollection).toBeNull();
+
+		const pushed = createMapCollection(100);
+		await renderHarness({
+			workspaceId: "workspace-1",
+			conversationSessionTaskId: "session-1",
+			refreshKey: "1:0:",
+			pushedMapCollection: pushed,
+		});
+		expect(lastSnapshot().mapCollection).toBe(pushed);
+		// 推送不触发重拉（查询通道只认 refreshKey / 会话切换）。
+		expect(fetchProjectionMock).toHaveBeenCalledTimes(1);
+		expect(fetchSessionMapMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("内容与现状相等的推送保留旧 state 引用（不打扰下游 memo）", async () => {
+		const collection = createMapCollection(100);
+		fetchSessionMapMock.mockImplementation(async () => ({ mapCollection: collection }));
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		const readySnapshot = lastSnapshot();
+		expect(readySnapshot.mapCollection).toBe(collection);
+
+		await renderHarness({
+			workspaceId: "workspace-1",
+			conversationSessionTaskId: "session-1",
+			refreshKey: "1:0:",
+			// 同内容不同对象：stale 置位广播与查询响应常携带同一集合的另一份序列化拷贝。
+			pushedMapCollection: createMapCollection(100),
+		});
+		expect(lastSnapshot()).toBe(readySnapshot);
+	});
+
+	it("抓取期间到达的推送不被更旧的查询响应回退（按 updatedAt 归并）", async () => {
+		// 挂起 map 查询：推送先于响应到达，响应读自推送落盘之前（updatedAt 更旧）。
+		let resolveSessionMap!: (value: { mapCollection: RuntimeExploratorySessionMapCollection | null }) => void;
+		fetchSessionMapMock.mockImplementation(
+			async () =>
+				await new Promise<{ mapCollection: RuntimeExploratorySessionMapCollection | null }>((resolve) => {
+					resolveSessionMap = resolve;
+				}),
+		);
+		await act(async () => {
+			root.render(
+				<HookHarness
+					workspaceId="workspace-1"
+					conversationSessionTaskId="session-1"
+					refreshKey="1:0:"
+					onSnapshot={(data) => snapshots.push(data)}
+				/>,
+			);
+		});
+		const pushed = createMapCollection(200);
+		await renderHarness({
+			workspaceId: "workspace-1",
+			conversationSessionTaskId: "session-1",
+			refreshKey: "1:0:",
+			pushedMapCollection: pushed,
+		});
+		expect(lastSnapshot().mapCollection).toBe(pushed);
+
+		resolveSessionMap({ mapCollection: createMapCollection(100) });
+		await act(async () => {
+			await Promise.resolve();
+		});
+		// 响应更旧：保留推送的集合，相位照常翻 ready。
+		expect(lastSnapshot().queryPhase).toBe("ready");
+		expect(lastSnapshot().mapCollection?.updatedAt).toBe(200);
+	});
+
+	it("抓取开始前已应用的推送不阻挡更新的查询响应（响应读自 durable 写之后）", async () => {
+		const pushed = createMapCollection(100);
+		fetchSessionMapMock.mockImplementation(async () => ({ mapCollection: createMapCollection(300) }));
+		await renderHarness({
+			workspaceId: "workspace-1",
+			conversationSessionTaskId: "session-1",
+			refreshKey: "1:0:",
+			pushedMapCollection: pushed,
+		});
+		// 推送先于抓取应用，但响应 updatedAt 更新（落盘在推送之后）→ 采用响应。
+		expect(lastSnapshot().queryPhase).toBe("ready");
+		expect(lastSnapshot().mapCollection?.updatedAt).toBe(300);
+	});
+
+	it("null 推送清除集合（服务端明示此会话无集合）", async () => {
+		fetchSessionMapMock.mockImplementation(async () => ({ mapCollection: createMapCollection(100) }));
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		expect(lastSnapshot().mapCollection?.updatedAt).toBe(100);
+
+		await renderHarness({
+			workspaceId: "workspace-1",
+			conversationSessionTaskId: "session-1",
+			refreshKey: "1:0:",
+			pushedMapCollection: null,
+		});
+		expect(lastSnapshot().mapCollection).toBeNull();
 	});
 });

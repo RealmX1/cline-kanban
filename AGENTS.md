@@ -57,7 +57,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **终端 agent 检测/启动别走交互 shell**（`zsh -i`、shell fallback 命令发现等）：重 shell init（conda/nvm）下每任务一次会冻结运行时。显式 shell 终端例外。
 - **headless 远端**（SSH+tunnel）没有 zenity/kdialog：folder picker 用手动路径兜底，别引桌面包。
 - Node 22 CI 挂起：先查活体子进程 / SDK-host 启动路径，别先假设测试慢。调查史：`.plan/docs/node22-ci-hanging-tests-investigation.md`。
-- **Exploratory Mode（session map / findings）骨架已按 M0 落地**：turn 编号权威在 `src/conversation-tree/conversation-turn-projection.ts`（web-ui 复用其同源边界分类器，两侧不得各自改写）；改锚点 / map / 投影行为前先读蓝图 `.plan/docs/exploratory-mode-session-map-and-findings-store.md` 与 `docs/exploratory-mode-session-map.md`。
+- **Exploratory Mode（session map / findings）已落地 M0+M1**：turn 编号权威在 `src/conversation-tree/conversation-turn-projection.ts`（web-ui 复用其同源边界分类器，两侧不得各自改写）；map 唯一写点是 apply 漏斗 `src/state/exploratory-session-map-apply-funnel.ts`（四道闸任一失败整体丢弃，agent 经 `kanban exploratory` CLI 走 `ingestSessionMapUpdate`，绝不另开写路径）；投影查询与写回校验共用同一条加载链 `src/conversation-tree/load-conversation-session-turn-projection.ts`。改锚点 / map / 投影行为前先读蓝图 `.plan/docs/exploratory-mode-session-map-and-findings-store.md` 与 `docs/exploratory-mode-session-map.md`。
 
 ## 约定
 
@@ -91,7 +91,7 @@ web-ui：
 | `docs/cli-environment.md` | CLI/hook 环境变量 |
 | `docs/agent-context-management.md` | 上下文管理方法论（本文件的维护规则由此而来） |
 | `docs/session-facet-model.md` / `docs/agent-output-timestamps.md` | facet 模型与双时间戳机制全文 |
-| `docs/exploratory-mode-session-map.md` | Exploratory Mode M0 集成要点（投影层 / map store / 锚 marker 铁律） |
+| `docs/exploratory-mode-session-map.md` | Exploratory Mode M0+M1 集成要点（投影层 / apply 漏斗 / CLI 写回 / 维护 observer / 锚 marker 铁律） |
 | `docs/terminal-io.md` | output-reactions、终端 visibility 协议、PTY/argv 特殊字符安全 |
 | `docs/agent-harness-kimi.md` / `docs/agent-harness-omp-acp.md` | Kimi 与 oh-my-pi(ACP) 接入坑 |
 | `docs/runbooks/` | 跨层改动 runbook（summary 字段/设置开关、agent CLI 能力探测） |
