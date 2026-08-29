@@ -57,7 +57,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **终端 agent 检测/启动别走交互 shell**（`zsh -i`、shell fallback 命令发现等）：重 shell init（conda/nvm）下每任务一次会冻结运行时。显式 shell 终端例外。
 - **headless 远端**（SSH+tunnel）没有 zenity/kdialog：folder picker 用手动路径兜底，别引桌面包。
 - Node 22 CI 挂起：先查活体子进程 / SDK-host 启动路径，别先假设测试慢。调查史：`.plan/docs/node22-ci-hanging-tests-investigation.md`。
-- **Exploratory Mode（session map / findings）已落地 M0+M1**：turn 编号权威在 `src/conversation-tree/conversation-turn-projection.ts`（web-ui 复用其同源边界分类器，两侧不得各自改写）；map 唯一写点是 apply 漏斗 `src/state/exploratory-session-map-apply-funnel.ts`（四道闸任一失败整体丢弃，agent 经 `kanban exploratory` CLI 走 `ingestSessionMapUpdate`，绝不另开写路径）；投影查询与写回校验共用同一条加载链 `src/conversation-tree/load-conversation-session-turn-projection.ts`。改锚点 / map / 投影行为前先读蓝图 `.plan/docs/exploratory-mode-session-map-and-findings-store.md` 与 `docs/exploratory-mode-session-map.md`。
+- **Exploratory Mode（session map / findings）已落地 M0–M2**：turn 编号权威在 `src/conversation-tree/conversation-turn-projection.ts`（web-ui 复用其同源边界分类器，两侧不得各自改写）；map 唯一写点是 apply 漏斗 `src/state/exploratory-session-map-apply-funnel.ts`（任一闸失败整体丢弃，含 M2 新增的 referencedFindingId 可解析性闸；agent 经 `kanban exploratory` CLI 走 `ingestSessionMapUpdate`，绝不另开写路径）；findings 唯一写点是 `src/trpc/exploratory-api.ts` 的六个 procedure（UI 保存/确认/拒绝/归档 + agent 的 `ingest-finding-candidate`，全落 `src/state/exploratory-findings-store.ts` 的 mutate 原语；pending 建议确认前不是资产，reject = 物理删除）；投影查询与写回校验共用同一条加载链 `src/conversation-tree/load-conversation-session-turn-projection.ts`。改锚点 / map / findings / 投影行为前先读蓝图 `.plan/docs/exploratory-mode-session-map-and-findings-store.md` 与 `docs/exploratory-mode-session-map.md`。
 
 ## 约定
 

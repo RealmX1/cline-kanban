@@ -7,6 +7,8 @@
 //   1. zod 白名单：在 tRPC input schema 完成（含尺寸上限、finding_reference 配套校验），不在本模块；
 //   2. 锚点可解析性：投影源可用 + anchorTurnNumber ≤ 投影最新 turn；checkpoint commit 不在保留
 //      ref 集合内 → 降级 null + 标集合级 mapStaleReason（不拒绝）；
+//   2.5. referencedFindingId 可解析性（M2，蓝图 §B.1 注释）：finding_reference 节点引用的
+//      findingId 必须已在 findings store 中（任意状态都算——archived 不级联删节点），否则整份拒绝；
 //   3. sourceTurnProjectionSignature 对账：与 apply 时刻投影签名一致；
 //   4. user_manual_edit 冲突拒绝：用户修正优先级恒最高（冲突集合 = 同 mapNodeId）。
 //
@@ -53,6 +55,9 @@ export interface ApplyExploratorySessionMapUpdateFunnelInput {
 	currentCollection: RuntimeExploratorySessionMapCollection | null;
 	request: RuntimeIngestExploratorySessionMapUpdateRequest;
 	projection: ExploratorySessionMapApplyFunnelProjectionSnapshot;
+	// findings store 现有 findingId 集合（闸 2.5 referencedFindingId 可解析性的输入；
+	// 由 handler 在调本漏斗前读出）。任意状态的 finding 都算可解析。
+	existingFindingIds: ReadonlySet<string>;
 	// 本次写入的生产者（蓝图 §B.2 两类生产者共用同一漏斗）：live agent 经 CLI 实时维护 /
 	// 防抖再维护作业。绝不接受 user_manual_edit——用户修正只能来自 UI 编辑通道（M3）。
 	nodeGenerationSource: "agent_live_session_maintenance" | "agent_maintenance_job";
@@ -68,7 +73,7 @@ export type ExploratorySessionMapApplyFunnelResult =
 export function applyExploratorySessionMapUpdateFunnel(
 	input: ApplyExploratorySessionMapUpdateFunnelInput,
 ): ExploratorySessionMapApplyFunnelResult {
-	const { currentCollection, request, projection, nodeGenerationSource, now } = input;
+	const { currentCollection, request, projection, existingFindingIds, nodeGenerationSource, now } = input;
 
 	// 闸 0：dedup。重试的提案即便投影已前进也要幂等 ack——它早已应用成功。
 	if (currentCollection?.recentAppliedClientProposalIds?.includes(request.clientProposalId)) {
@@ -84,6 +89,15 @@ export function applyExploratorySessionMapUpdateFunnel(
 	for (const node of request.nodes) {
 		if (node.anchorTurnNumber > projection.latestTurnNumber) {
 			return { outcome: "rejected", rejectionReason: "anchor_turn_number_unresolvable" };
+		}
+	}
+
+	// 闸 2.5：referencedFindingId 可解析性（M2，蓝图 §B.1 注释）：finding_reference 节点
+	// 引用的 finding 必须已在 findings store 中——任意状态都算可解析（archived 不级联删
+	// 节点，map 是历史叙事）；null 不校验。引用不存在的 finding = 整份拒绝。
+	for (const node of request.nodes) {
+		if (node.referencedFindingId !== null && !existingFindingIds.has(node.referencedFindingId)) {
+			return { outcome: "rejected", rejectionReason: "referenced_finding_unresolvable" };
 		}
 	}
 

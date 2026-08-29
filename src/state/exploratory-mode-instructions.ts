@@ -6,7 +6,8 @@
 // （仅当文件缺失或内容过期时才重写），exploratory 会话启动时把 agent 指向它。
 //
 // 内容覆盖：marker 格式约定与埋锚纪律（§C.1）+ map 写回读-改-写协议（§B.2 的
-// `kanban exploratory` CLI）+ 维护节律。改正文会触发幂等写入重写旧文件。
+// `kanban exploratory` CLI）+ 维护节律 + findings 建议/引用工作流（§D.2.2，M2）。
+// 改正文会触发幂等写入重写旧文件。
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -46,8 +47,8 @@ map 节点的稳定 id 由 Kanban 按规则派生（不是自由命名）：
 未配对的 marker 不会被渲染成导航元素。同一轮次同一种类只会有一个节点（重复提交幂等归并）。
 
 \`<nodeKind>\` 取其一：\`milestone\`（阶段性结论/到达点）、\`decision_point\`（做了取舍的位置）、
-\`open_question\`（悬而未决的问题）、\`digression\`（有意识的岔路/支线）。
-（\`finding_reference\` 种类留给日后的 findings store，当前不要使用。）
+\`open_question\`（悬而未决的问题）、\`digression\`（有意识的岔路/支线）、\`finding_reference\`
+（该锚点产出了一条 finding——\`referencedFindingId\` 必填，工作流见第五节）。
 
 ## 三、写回协议（读-改-写）
 
@@ -101,6 +102,8 @@ kanban exploratory ingest-map-update --payload @payload.json
 - 返回 \`applied:false\` 时按 \`rejectionReason\` 处理：\`stale_source_turn_projection_signature\`
   （签名已旧）→ 重新从第 1 步开始；\`anchor_turn_number_unresolvable\`（锚到不存在的轮次）→
   修正后重提；\`user_manual_edit_conflict\` → 把用户节点原样补回再重提；
+  \`referenced_finding_unresolvable\` → \`finding_reference\` 节点引用的 finding 不存在，
+  先经第五节工作流确认 findingId 再重提；
   \`projection_source_unavailable\` → 本会话类型不支持写 map，停止尝试。
 
 ## 四、维护节律（何时埋锚、何时写回）
@@ -118,6 +121,65 @@ kanban exploratory ingest-map-update --payload @payload.json
 - 你可能收到一条 \`[Kanban] Session map 已落后于本会话\` 的提醒消息——按第三节协议重跑即可；
   如果这段会话没有值得登记的结构节点，回复确认即可，**不要为交差硬造锚点**。
 - 一张好的 session map 应该让人 10 秒钟看清这次探索的骨架。
+
+## 五、findings：沉淀结论资产
+
+探索中得到的可复用结论（调查结论、坑与对策、关键事实）可以沉淀为 **finding**——一份带
+标题、正文与出处链接的持久资产，独立于会话生命周期存活。你只有**建议权**：经 CLI 提交的
+finding 一律落为「待确认」（\`suggested_pending_confirmation\`），由人确认后才生效——不要
+替人宣布结论是最终事实，也不要为交差硬凑建议。
+
+### 提交建议
+
+\`\`\`bash
+kanban exploratory ingest-finding-candidate --payload @finding.json
+\`\`\`
+
+payload 形状（scope 传参与第三节相同）：
+
+\`\`\`json
+{
+  "clientProposalId": "<每次建议生成一个 uuid；重试复用同一个>",
+  "findingTitle": "≤120 字符的结论标题",
+  "findingBodyMarkdown": "≤4000 字符的正文（markdown）",
+  "provenanceLinks": [
+    {
+      "linkKind": "turn_anchor",
+      "conversationSessionTaskId": "<来源会话的任务 id，通常就是本会话>",
+      "turnNumber": 3,
+      "turnCheckpointCommit": null
+    }
+  ]
+}
+\`\`\`
+
+- \`provenanceLinks\` 至少一条、至多 8 条。\`turn_anchor\` 链接三元要真实：\`turnNumber\` 必填
+  （\`null\` 会被 schema 直接拒收），且超过该会话最新轮次会被整份拒绝；\`turnCheckpointCommit\`
+  不知道就填 \`null\`（仅时间锚），填了但不可解析会被降级为 \`null\`，不会拒绝。指不出具体
+  轮次时用 \`session_level\`（\`turnNumber\` 与 \`turnCheckpointCommit\` 必须都填 \`null\`，
+  挂了值同样被 schema 拒收），不要伪造锚。
+- 提交成功返回 \`ingested:true\`，\`finding.findingId\` 是服务端派生的稳定 id
+  （\`agent-<clientProposalId>\`）——重试用同一个 \`clientProposalId\` 不会落地两条。
+- 返回 \`ingested:false\` 时按 \`rejectionReason\` 处理：\`anchor_turn_number_unresolvable\`
+  （锚到不存在的轮次）→ 修正后重提；\`provenance_conversation_session_unresolvable\`
+  （出处会话不存在）→ 修正 \`conversationSessionTaskId\` 后重提；
+  \`findings_cap_overflow\`（findings 达每 workspace 上限且被待确认建议占满）→ 停止再提
+  新建议，提醒用户先去确认/拒绝既有待确认建议腾位。
+
+### 从 map 节点引用 finding
+
+\`finding_reference\` 节点的 \`referencedFindingId\` 必须引用**已存在**的 finding——否则整份
+map 提案被拒（\`referenced_finding_unresolvable\`）。引用前先列出现有 finding：
+
+\`\`\`bash
+kanban exploratory get-findings
+#    → { "findings": [ { "findingId": "...", "findingTitle": "...", "findingStatus": "..." } ] }
+\`\`\`
+
+- 你刚提交的建议（\`findingStatus\` 为 \`suggested_pending_confirmation\`）也可以被引用；但请
+  注意：人**拒绝**该建议后它会被删除，map 节点上的引用随之悬空（UI 会容错展示，不炸）——
+  重要结论请在节点摘要里保持自足。
+- 已 \`archived\` 的 finding 仍可被引用（map 是历史叙事，归档不抹除历史）。
 `;
 
 export function getExploratoryModeInstructionsPath(): string {

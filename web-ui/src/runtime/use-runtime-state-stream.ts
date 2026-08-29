@@ -3,10 +3,12 @@ import { useCallback, useEffect, useReducer, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import type {
 	RuntimeClineMcpServerAuthStatus,
+	RuntimeExploratoryFindingEntry,
 	RuntimeExploratorySessionMapCollection,
 	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
+	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
 	RuntimeStateStreamExploratorySessionMapUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
@@ -116,6 +118,10 @@ export interface UseRuntimeStateStreamResult {
 	// 重连信号 = streamSnapshotGeneration 递增（每次快照 = 一次（重）连握手完成）。
 	exploratorySessionMapCollectionsByTaskId: Record<string, RuntimeExploratorySessionMapCollection | null>;
 	streamSnapshotGeneration: number;
+	// Exploratory findings 推送（蓝图 §D.3 exploratory_findings_updated）：workspace 级全量
+	// 替换（集合恒小，上限 500）；null = 尚未收到过推送。与 map 同理不搭车 summary 广播，
+	// 断连窗口的变更靠重连后 getFindings 重查对齐（重连信号 = streamSnapshotGeneration）。
+	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
 	// 跨 repo 聚合的通知 feed，按 workspaceId 分桶（切项目不清空——铃铛看整台服务器）。
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
@@ -136,6 +142,7 @@ interface RuntimeStateStreamStore {
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
 	exploratorySessionMapCollectionsByTaskId: Record<string, RuntimeExploratorySessionMapCollection | null>;
 	streamSnapshotGeneration: number;
+	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
 	streamError: string | null;
@@ -158,6 +165,7 @@ type RuntimeStateStreamAction =
 	| { type: "task_ready_for_review"; payload: RuntimeStateStreamTaskReadyForReviewMessage }
 	| { type: "notification_log_updated"; payload: RuntimeStateStreamNotificationLogUpdatedMessage }
 	| { type: "exploratory_session_map_updated"; payload: RuntimeStateStreamExploratorySessionMapUpdatedMessage }
+	| { type: "exploratory_findings_updated"; payload: RuntimeStateStreamExploratoryFindingsUpdatedMessage }
 	| { type: "mcp_auth_updated"; payload: RuntimeStateStreamMcpAuthUpdatedMessage }
 	| { type: "cline_session_context_updated"; payload: RuntimeStateStreamClineSessionContextUpdatedMessage }
 	| { type: "workspace_state_updated"; workspaceState: RuntimeWorkspaceStateResponse }
@@ -177,6 +185,7 @@ function createInitialRuntimeStateStreamStore(requestedWorkspaceId: string | nul
 		latestMcpAuthStatuses: null,
 		exploratorySessionMapCollectionsByTaskId: {},
 		streamSnapshotGeneration: 0,
+		exploratoryFindings: null,
 		notificationLogByWorkspaceId: {},
 		clineSessionContextVersion: 0,
 		streamError: null,
@@ -231,6 +240,8 @@ function runtimeStateStreamReducer(
 			taskChatMessagesByTaskId: {},
 			// map 推送按 workspace 作用域隔离：切走后旧 workspace 的集合不得带进新会话面板。
 			exploratorySessionMapCollectionsByTaskId: {},
+			// findings 同理（workspace 级集合）：切 workspace 即清空，等 getFindings 重拉。
+			exploratoryFindings: null,
 			streamSnapshotGeneration: 0,
 			streamError: null,
 			isRuntimeDisconnected: false,
@@ -272,6 +283,8 @@ function runtimeStateStreamReducer(
 			// 每次快照 = 一次（重）连握手完成：递增代数给 map 面板做「重连后重查对齐」的触发
 			// （断连窗口的 ingest 不补发）。推送集合本身保留作 last-known，查询落定前不出现空窗。
 			exploratorySessionMapCollectionsByTaskId: state.exploratorySessionMapCollectionsByTaskId,
+			// findings 同款 last-known 保留（重连后由 use-exploratory-findings 经快照代数重拉对齐）。
+			exploratoryFindings: state.exploratoryFindings,
 			streamSnapshotGeneration: state.streamSnapshotGeneration + 1,
 			streamError: null,
 			isRuntimeDisconnected: false,
@@ -356,6 +369,14 @@ function runtimeStateStreamReducer(
 				...state.exploratorySessionMapCollectionsByTaskId,
 				[action.payload.conversationSessionTaskId]: action.payload.mapCollection,
 			},
+		};
+	}
+	if (action.type === "exploratory_findings_updated") {
+		// workspace 级全量替换（推送恒为完整集合，上限 500）——save/confirm/reject/archive/
+		// ingest 落盘成功后服务端广播，本地不做乐观更新，状态经推送收敛。
+		return {
+			...state,
+			exploratoryFindings: action.payload.findings,
 		};
 	}
 	if (action.type === "cline_session_context_updated") {
@@ -583,6 +604,16 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 						});
 						return;
 					}
+					if (payload.type === "exploratory_findings_updated") {
+						if (payload.workspaceId !== activeWorkspaceId) {
+							return;
+						}
+						dispatch({
+							type: "exploratory_findings_updated",
+							payload,
+						});
+						return;
+					}
 					if (payload.type === "mcp_auth_updated") {
 						dispatch({
 							type: "mcp_auth_updated",
@@ -653,6 +684,7 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 		latestMcpAuthStatuses: state.latestMcpAuthStatuses,
 		exploratorySessionMapCollectionsByTaskId: state.exploratorySessionMapCollectionsByTaskId,
 		streamSnapshotGeneration: state.streamSnapshotGeneration,
+		exploratoryFindings: state.exploratoryFindings,
 		notificationLogByWorkspaceId: state.notificationLogByWorkspaceId,
 		clineSessionContextVersion: state.clineSessionContextVersion,
 		streamError: state.streamError,

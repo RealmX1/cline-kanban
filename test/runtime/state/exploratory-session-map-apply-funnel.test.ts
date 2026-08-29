@@ -96,6 +96,7 @@ function runFunnel(
 		currentCollection: null,
 		request: makeRequest(),
 		projection: makeProjection(),
+		existingFindingIds: new Set<string>(),
 		nodeGenerationSource: "agent_live_session_maintenance",
 		now: NOW,
 		...overrides,
@@ -159,6 +160,48 @@ describe("闸 2：锚点可解析性", () => {
 			expect(result.mapCollection.mapNodes[0]?.anchorTurnCheckpointCommit).toBe("commit-a");
 			expect(result.mapCollection.mapStaleReason).toBeNull();
 		}
+	});
+});
+
+describe("闸 2.5：referencedFindingId 可解析性（M2）", () => {
+	it("引用的 finding 已存在 → applied（任意状态都算可解析）", () => {
+		const result = runFunnel({
+			existingFindingIds: new Set(["finding-1"]),
+			request: makeRequest({
+				nodes: [makeNodeProposal({ nodeKind: "finding_reference", referencedFindingId: "finding-1" })],
+			}),
+		});
+		expect(result.outcome).toBe("applied");
+		if (result.outcome === "applied") {
+			expect(result.mapCollection.mapNodes[0]?.referencedFindingId).toBe("finding-1");
+		}
+	});
+
+	it("引用的 finding 不存在 → referenced_finding_unresolvable（整份拒绝）", () => {
+		const result = runFunnel({
+			existingFindingIds: new Set(["finding-other"]),
+			request: makeRequest({
+				nodes: [makeNodeProposal({ nodeKind: "finding_reference", referencedFindingId: "finding-gone" })],
+			}),
+		});
+		expect(result).toEqual({ outcome: "rejected", rejectionReason: "referenced_finding_unresolvable" });
+	});
+
+	it("referencedFindingId 为 null → 不校验（非 finding_reference 节点照常过闸）", () => {
+		const result = runFunnel({ existingFindingIds: new Set<string>() });
+		expect(result.outcome).toBe("applied");
+	});
+
+	it("闸序：锚点不可解析与 finding 不可解析同时在场 → 先报锚点（闸 2b 先于闸 2.5）", () => {
+		const result = runFunnel({
+			existingFindingIds: new Set<string>(),
+			request: makeRequest({
+				nodes: [
+					makeNodeProposal({ anchorTurnNumber: 6, nodeKind: "finding_reference", referencedFindingId: "f-gone" }),
+				],
+			}),
+		});
+		expect(result).toEqual({ outcome: "rejected", rejectionReason: "anchor_turn_number_unresolvable" });
 	});
 });
 

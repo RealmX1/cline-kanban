@@ -61,6 +61,7 @@ export interface UseProjectNavigationResult {
 	exploratorySessionMapCollectionsByTaskId: ReturnType<
 		typeof useRuntimeStateStream
 	>["exploratorySessionMapCollectionsByTaskId"];
+	exploratoryFindings: ReturnType<typeof useRuntimeStateStream>["exploratoryFindings"];
 	streamSnapshotGeneration: ReturnType<typeof useRuntimeStateStream>["streamSnapshotGeneration"];
 	notificationLogByWorkspaceId: ReturnType<typeof useRuntimeStateStream>["notificationLogByWorkspaceId"];
 	clineSessionContextVersion: ReturnType<typeof useRuntimeStateStream>["clineSessionContextVersion"];
@@ -107,6 +108,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
 		exploratorySessionMapCollectionsByTaskId,
+		exploratoryFindings,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
@@ -336,6 +338,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
 		exploratorySessionMapCollectionsByTaskId,
+		exploratoryFindings,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,

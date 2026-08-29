@@ -519,6 +519,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						mapCollection,
 					);
 				},
+				onExploratoryFindingsUpdated: (workspaceId, findings) => {
+					deps.runtimeStateHub.broadcastExploratoryFindingsUpdated(workspaceId, findings);
+				},
 			}),
 		};
 	};

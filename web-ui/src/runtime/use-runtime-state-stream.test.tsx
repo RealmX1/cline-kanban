@@ -300,4 +300,96 @@ describe("useRuntimeStateStream", () => {
 		expect(captured.current?.streamSnapshotGeneration).toBe(2);
 		expect(captured.current?.exploratorySessionMapCollectionsByTaskId).toHaveProperty("session-1");
 	});
+
+	it("exploratory_findings_updated 全量替换落 store、按 workspace 过滤；快照保留 last-known", async () => {
+		const captured: { current: UseRuntimeStateStreamResult | null } = { current: null };
+		await act(async () => {
+			root.render(
+				<RuntimeStateStreamHarness
+					onSnapshot={(snapshot) => {
+						captured.current = snapshot;
+					}}
+				/>,
+			);
+		});
+		const socket = MockRuntimeStateWebSocket.instances[0];
+		if (!socket) {
+			throw new Error("Expected the initial runtime stream socket.");
+		}
+		act(() => {
+			socket.triggerOpen();
+		});
+
+		const finding = (findingId: string) => ({
+			findingId,
+			findingTitle: `Finding ${findingId}`,
+			findingBodyMarkdown: "正文",
+			findingStatus: "active",
+			supersededByFindingId: null,
+			findingGenerationSource: "user_saved",
+			provenanceLinks: [
+				{
+					linkKind: "turn_anchor",
+					conversationSessionTaskId: "session-1",
+					turnNumber: 1,
+					turnCheckpointCommit: null,
+				},
+			],
+			originConversationSessionTaskId: "session-1",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		const triggerSnapshot = () =>
+			socket.triggerMessage({
+				type: "snapshot",
+				currentProjectId: "ws-a",
+				projects: [],
+				workspaceState: null,
+				workspaceMetadata: null,
+				clineSessionContextVersion: 0,
+				notificationLog: [],
+			});
+
+		await act(async () => {
+			triggerSnapshot();
+		});
+		expect(captured.current?.exploratoryFindings).toBeNull();
+
+		// 全量替换：第二次推送完整覆盖第一次（不是增量合并）。
+		await act(async () => {
+			socket.triggerMessage({
+				type: "exploratory_findings_updated",
+				workspaceId: "ws-a",
+				findings: [finding("f-1"), finding("f-2")],
+			});
+		});
+		expect(captured.current?.exploratoryFindings).toHaveLength(2);
+		await act(async () => {
+			socket.triggerMessage({
+				type: "exploratory_findings_updated",
+				workspaceId: "ws-a",
+				findings: [finding("f-3")],
+			});
+		});
+		expect(captured.current?.exploratoryFindings).toHaveLength(1);
+		expect(captured.current?.exploratoryFindings?.[0]?.findingId).toBe("f-3");
+
+		// 其它 workspace 的推送按 activeWorkspaceId 过滤，不得入 store。
+		await act(async () => {
+			socket.triggerMessage({
+				type: "exploratory_findings_updated",
+				workspaceId: "ws-b",
+				findings: [finding("f-foreign")],
+			});
+		});
+		expect(captured.current?.exploratoryFindings).toHaveLength(1);
+
+		// 重连后的新快照：已推送的集合保留作 last-known（查询落定前不出现空窗），
+		// 断连窗口的变更由 use-exploratory-findings 经快照代数重拉对齐。
+		await act(async () => {
+			triggerSnapshot();
+		});
+		expect(captured.current?.streamSnapshotGeneration).toBe(2);
+		expect(captured.current?.exploratoryFindings).toHaveLength(1);
+	});
 });

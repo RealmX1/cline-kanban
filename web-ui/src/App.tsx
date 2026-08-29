@@ -16,6 +16,7 @@ import { CrossRepositoryStageFirstOverview } from "@/components/cross-repository
 import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
+import { FindingsView } from "@/components/findings/findings-view";
 import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
@@ -50,6 +51,7 @@ import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import { useDebugTools } from "@/hooks/use-debug-tools";
 import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
+import { useExploratoryFindings } from "@/hooks/use-exploratory-findings";
 import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
@@ -109,6 +111,9 @@ export default function App(): ReactElement {
 	const sidebarLayout = useProjectNavigationLayout();
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
+	// Exploratory findings 浏览器开关（蓝图 §G.2）：isGitHistoryOpen 同款形态——
+	// 开启时置换 home 主视图，非 overlay；与 git history / board overview 互斥。
+	const [isFindingsOpen, setIsFindingsOpen] = useState(false);
 	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
 	const taskEditorResetRef = useRef<() => void>(() => {});
@@ -116,6 +121,7 @@ export default function App(): ReactElement {
 	const handleProjectSwitchStart = useCallback(() => {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
+		setIsFindingsOpen(false);
 		setPendingTaskStartAfterEditId(null);
 		taskEditorResetRef.current();
 	}, []);
@@ -129,6 +135,7 @@ export default function App(): ReactElement {
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
 		exploratorySessionMapCollectionsByTaskId,
+		exploratoryFindings: pushedExploratoryFindings,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
@@ -177,6 +184,14 @@ export default function App(): ReactElement {
 		isLoading: isRuntimeProjectConfigLoading,
 		refresh: refreshRuntimeProjectConfig,
 	} = useRuntimeProjectConfig(projectRuntimeWorkspaceId);
+	// Exploratory findings（M2）：workspace 级集合的单一真相——初始 getFindings 查询 +
+	// exploratory_findings_updated 推送归并；findings 浏览器 / map 面板切片 / 「存为 finding」
+	// 查重共用这一份（不重连快照代数做断连窗口的重拉对齐信号）。
+	const exploratoryFindingsData = useExploratoryFindings({
+		workspaceId: projectRuntimeWorkspaceId,
+		refreshKey: streamSnapshotGeneration,
+		pushedFindings: pushedExploratoryFindings,
+	});
 	const { isBlocked: isKanbanAccessBlocked, refresh: refreshKanbanAccess } = useKanbanAccessGate({
 		workspaceId: projectRuntimeWorkspaceId,
 	});
@@ -350,6 +365,7 @@ export default function App(): ReactElement {
 			const next = !open;
 			if (next) {
 				setIsGitHistoryOpen(false);
+				setIsFindingsOpen(false);
 			}
 			return next;
 		});
@@ -772,6 +788,7 @@ export default function App(): ReactElement {
 		}
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
+		setIsFindingsOpen(false);
 		setSelectedTaskId(null);
 		resetTaskEditorState();
 		resetTerminalPanelsState();
@@ -820,6 +837,7 @@ export default function App(): ReactElement {
 			const next = !current;
 			if (next) {
 				setIsBoardOverviewOpen(false);
+				setIsFindingsOpen(false);
 			}
 			return next;
 		});
@@ -827,6 +845,19 @@ export default function App(): ReactElement {
 	const handleCloseGitHistory = useCallback(() => {
 		setIsGitHistoryOpen(false);
 	}, []);
+	const handleToggleFindings = useCallback(() => {
+		if (hasNoProjects) {
+			return;
+		}
+		setIsFindingsOpen((current) => {
+			const next = !current;
+			if (next) {
+				setIsBoardOverviewOpen(false);
+				setIsGitHistoryOpen(false);
+			}
+			return next;
+		});
+	}, [hasNoProjects]);
 
 	const {
 		handleProgrammaticCardMoveReady,
@@ -1230,6 +1261,12 @@ export default function App(): ReactElement {
 							hasNoProjects || isCurrentProjectRuntimeUnavailable ? undefined : handleToggleGitHistory
 						}
 						isGitHistoryOpen={isGitHistoryOpen}
+						onToggleFindings={
+							!selectedCard && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+								? handleToggleFindings
+								: undefined
+						}
+						isFindingsOpen={isFindingsOpen}
 						onToggleTaskChangesSidebar={
 							selectedCard ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
 						}
@@ -1315,6 +1352,12 @@ export default function App(): ReactElement {
 													void discardHomeWorkingChanges();
 												}}
 												isDiscardWorkingChangesPending={isDiscardingHomeWorkingChanges}
+											/>
+										) : isFindingsOpen && currentProjectId ? (
+											<FindingsView
+												workspaceId={currentProjectId}
+												findings={exploratoryFindingsData.findings}
+												queryPhase={exploratoryFindingsData.queryPhase}
 											/>
 										) : (
 											<div className="flex flex-1 flex-col min-h-0 min-w-0 bg-surface-0">
@@ -1412,6 +1455,7 @@ export default function App(): ReactElement {
 									taskSessions={sessions}
 									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
 									exploratorySessionMapCollectionsByTaskId={exploratorySessionMapCollectionsByTaskId}
+									exploratoryFindings={exploratoryFindingsData.findings}
 									runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
 									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
 									onCreateByTheWayTaskConversationSession={async (input) => {
