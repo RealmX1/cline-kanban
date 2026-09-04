@@ -135,3 +135,33 @@ describe("AcpTaskSessionService.startTaskSession 开局回合归属", () => {
 		});
 	});
 });
+
+describe("AcpTaskSessionService.startTaskSession taskConversationMode 盖章", () => {
+	it("启动请求带 taskConversationMode ⇒ 开局那次 summary 就盖上章", async () => {
+		const { service, emittedSummaries } = startServiceWithSummaryRecorder();
+		const { settleAsEstablished } = createPendingTaskConnection();
+
+		const startedSession = service.startTaskSession(buildStartRequest({ taskConversationMode: "exploratory" }));
+
+		expect(emittedSummaries).toHaveLength(1);
+		expect(emittedSummaries[0]?.taskConversationMode).toBe("exploratory");
+
+		settleAsEstablished({ pid: 4242, agentId: "omp" });
+		const summary = await startedSession;
+		expect(summary.taskConversationMode).toBe("exploratory");
+	});
+
+	it("缺省不物化：不带 taskConversationMode 的启动不在 summary 上落这个字段", async () => {
+		const { service, emittedSummaries } = startServiceWithSummaryRecorder();
+		const { settleAsEstablished } = createPendingTaskConnection();
+
+		const startedSession = service.startTaskSession(buildStartRequest());
+
+		expect(emittedSummaries).toHaveLength(1);
+		expect("taskConversationMode" in (emittedSummaries[0] ?? {})).toBe(false);
+
+		settleAsEstablished({ pid: 4242, agentId: "omp" });
+		const summary = await startedSession;
+		expect("taskConversationMode" in summary).toBe(false);
+	});
+});

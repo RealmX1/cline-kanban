@@ -10,12 +10,12 @@ import type { RuntimeInProgressTaskDetail, RuntimeProjectSummary, RuntimeProject
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 import { useInterval } from "@/utils/react-use";
 
-// Cross-Repository Stage-First Overview（见 CONTEXT.md / ADR-0001）：把整个看板（Board Scope）所有
+// Cross-Repository Stage-First Overview（见 docs/context-stage-first-overview.md / ADR-0001）：把整个看板（Board Scope）所有
 // repository 的任务按 Stage → Repository → Task 呈现——正是主看板 repo-first 范式前两级的对调。
 // In-Progress 阶段展开到 task 明细并内部二分 Active / Stale；Review/Validation/Done 折叠显示跨-repo
 // 总计数、展开显示每-repo 分计数（不下钻到 task）。各 stage 计数按「列归属」（rawColumnTaskCounts）。
 
-// Active 判据：agent 回合 + 距最近 PTY 输出在「近期活跃」窗口内（见 CONTEXT.md Active In-Progress Task）。
+// Active 判据：agent 回合 + 距最近 PTY 输出在「近期活跃」窗口内（见 docs/context-stage-first-overview.md Active In-Progress Task）。
 function isActiveInProgressTask(task: RuntimeInProgressTaskDetail, nowMs: number): boolean {
 	return (
 		task.turnOwner === "agent" &&
@@ -28,7 +28,7 @@ interface RepoTaskGroup {
 	tasks: RuntimeInProgressTaskDetail[];
 }
 
-// done 是内部 trash 列的展示名（见 CONTEXT.md Stage）。tone 沿用 project 列表 badge 的配色。
+// done 是内部 trash 列的展示名（见 docs/context-stage-first-overview.md Stage）。tone 沿用 project 列表 badge 的配色。
 const COUNT_STAGES: { key: keyof RuntimeProjectTaskCounts; label: string; tone: string }[] = [
 	{ key: "review", label: "Review", tone: "text-accent-2" },
 	{ key: "validation", label: "Validation", tone: "text-status-gold" },

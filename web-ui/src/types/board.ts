@@ -8,6 +8,7 @@ import type {
 	RuntimeTaskClineSettings,
 	RuntimeTaskCommentEntry,
 	RuntimeTaskCommitIntegrationTrackingStatus,
+	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorkspaceGitStatusObservationSource,
@@ -81,6 +82,11 @@ export interface BoardCard {
 	// 浏览器侧必须声明它：详情视图在**没有活会话**时只能靠它预判该渲染 xterm 还是会话面板，
 	// 而 normalizeCard 是白名单式拷贝——字段不在类型里就既读不到、也会在水合时被丢掉并回写抹平。
 	ompAgentSessionTransport?: RuntimeAgentSessionTransport;
+	// 这张卡的会话模式声明（探索/操作，蓝图 §A.1）：建卡/编辑对话框里声明；缺省 = operational。
+	// 与 ompAgentSessionTransport 同因必须声明在前端类型里——normalizeCard 是白名单式拷贝，
+	// 字段不在类型里就会在水合时被丢掉、下一次 saveState 把盘上已声明的值抹平。
+	// 活会话的模式读 summary.taskConversationMode 投影，卡片改模式只影响下一次启动（v1 不热切换）。
+	taskConversationMode?: RuntimeTaskConversationMode;
 	// runtime 观测值，不是用户意图：本卡片最近一次**真正启动成功**的会话用的是哪个 agent，
 	// 只由服务端在会话启动成功后写入（见 api-contract.ts 的 runtimeBoardCardSchema）。
 	// 前端既不生成也不编辑它，唯一职责是原样保留——归一化层一旦丢掉它，下一次 saveState

@@ -5,6 +5,7 @@ import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeTaskAgentPermissionMode,
+	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
@@ -52,6 +53,9 @@ export interface StartAcpTaskSessionRequest {
 	images?: RuntimeTaskImage[];
 	permissionMode: RuntimeTaskAgentPermissionMode;
 	startInPlanMode?: boolean;
+	// 卡片声明的会话模式快照（蓝图 §A.1）：每次建会话时盖章进 summary.taskConversationMode；
+	// 缺省不写字段 = operational。ACP 通道没有 system prompt 机制，exploratory 指令注入不经这里。
+	taskConversationMode?: RuntimeTaskConversationMode;
 	// 「续跑既有对话、不重投 prompt」。通道切换后重开会话走它：用户已在对话中途，重投一次原始
 	// prompt 等于凭空多一轮。置位时 prompt / images 一律被忽略（不落乐观 user 消息、不发 session/prompt），
 	// 会话内容改由 session/load 的历史重播补齐。
@@ -272,6 +276,10 @@ export class AcpTaskSessionService {
 				startedAt,
 				exitCode: null,
 				warningMessage: null,
+				// 会话模式盖章：每次建会话（含续跑重开 / 回收后重建）都从启动请求快照一次；缺省不物化。
+				...(request.taskConversationMode !== undefined
+					? { taskConversationMode: request.taskConversationMode }
+					: {}),
 			}),
 		);
 

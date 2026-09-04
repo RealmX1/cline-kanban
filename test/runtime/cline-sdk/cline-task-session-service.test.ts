@@ -20,12 +20,18 @@ const originalExecPath = process.execPath;
 
 const turnCheckpointMocks = vi.hoisted(() => ({
 	captureTaskTurnCheckpoint: vi.fn(),
-	deleteTaskTurnCheckpointRef: vi.fn(),
 }));
 
 vi.mock("../../../src/workspace/turn-checkpoints.js", () => ({
 	captureTaskTurnCheckpoint: turnCheckpointMocks.captureTaskTurnCheckpoint,
-	deleteTaskTurnCheckpointRef: turnCheckpointMocks.deleteTaskTurnCheckpointRef,
+}));
+
+const exploratoryModeInstructionsMocks = vi.hoisted(() => ({
+	ensureExploratoryModeInstructionsFile: vi.fn(),
+}));
+
+vi.mock("../../../src/state/exploratory-mode-instructions.js", () => ({
+	ensureExploratoryModeInstructionsFile: exploratoryModeInstructionsMocks.ensureExploratoryModeInstructionsFile,
 }));
 
 function createDeferred<T>() {
@@ -355,7 +361,6 @@ describe("InMemoryClineTaskSessionService", () => {
 
 	beforeEach(() => {
 		turnCheckpointMocks.captureTaskTurnCheckpoint.mockReset();
-		turnCheckpointMocks.deleteTaskTurnCheckpointRef.mockReset();
 		turnCheckpointMocks.captureTaskTurnCheckpoint.mockImplementation(
 			async (input: { taskId: string; turn: number }) => ({
 				turn: input.turn,
@@ -364,7 +369,10 @@ describe("InMemoryClineTaskSessionService", () => {
 				createdAt: input.turn,
 			}),
 		);
-		turnCheckpointMocks.deleteTaskTurnCheckpointRef.mockResolvedValue(undefined);
+		exploratoryModeInstructionsMocks.ensureExploratoryModeInstructionsFile.mockReset();
+		exploratoryModeInstructionsMocks.ensureExploratoryModeInstructionsFile.mockResolvedValue(
+			"/tmp/kanban-exploratory-mode-instructions/exploratory-mode-session-map.md",
+		);
 	});
 
 	function createTrackedService(): TaskSessionServiceHarness {
@@ -412,6 +420,24 @@ describe("InMemoryClineTaskSessionService", () => {
 		expect(summary.state).toBe("running");
 		expect(summary.workspacePath).toBe("/tmp/worktree");
 		expect(service.listMessages("task-1").map((message) => message.content)).toEqual(["Investigate startup"]);
+	});
+
+	it("getTaskSessionMessagesProjectionSignature：未知任务 → null；live 会话 → 三元与末条一致", async () => {
+		const { service } = createTrackedService();
+		expect(service.getTaskSessionMessagesProjectionSignature("task-unknown")).toBeNull();
+
+		await service.startTaskSession({
+			taskId: "task-1",
+			cwd: "/tmp/worktree",
+			prompt: "Investigate startup",
+		});
+
+		const messages = service.listMessages("task-1");
+		expect(service.getTaskSessionMessagesProjectionSignature("task-1")).toEqual({
+			messageCount: messages.length,
+			lastMessageId: messages.at(-1)?.id ?? null,
+			lastMessageContentLength: messages.at(-1)?.content.length ?? 0,
+		});
 	});
 
 	// ── 回归（RVF-002）：启动路径必须**真的走过**一次「非 agent 回合 → agent 回合」边沿 ─────────────
@@ -1236,6 +1262,140 @@ describe("InMemoryClineTaskSessionService", () => {
 				),
 			}),
 		);
+	});
+
+	describe("taskConversationMode 盖章与 exploratory 注入", () => {
+		it("启动请求带 taskConversationMode ⇒ 建会话时盖章进 summary", async () => {
+			const { service } = createTrackedService();
+
+			const summary = await service.startTaskSession({
+				taskId: "task-1",
+				cwd: "/tmp/worktree",
+				prompt: "Map the exploration space",
+				taskConversationMode: "exploratory",
+			});
+
+			expect(summary.taskConversationMode).toBe("exploratory");
+		});
+
+		it("缺省不物化：不带 taskConversationMode 的启动不在 summary 上落这个字段", async () => {
+			const { service } = createTrackedService();
+
+			const summary = await service.startTaskSession({
+				taskId: "task-1",
+				cwd: "/tmp/worktree",
+				prompt: "Investigate startup",
+			});
+
+			expect("taskConversationMode" in summary).toBe(false);
+		});
+
+		it("persisted-resume 分支同样盖章（resumeFromTrash 重建 entry）", async () => {
+			const { service, runtime } = createTrackedService();
+			runtime.readPersistedTaskSessionMock.mockResolvedValue({
+				record: {
+					sessionId: "task-1-persisted",
+					source: "core" as ClinePersistedTaskSessionSnapshot["record"]["source"],
+					status: "completed",
+					startedAt: "2026-03-17T10:00:00.000Z",
+					updatedAt: "2026-03-17T10:05:00.000Z",
+					interactive: true,
+					provider: "anthropic",
+					model: "claude-sonnet-4-6",
+					cwd: "/tmp/worktree",
+					workspaceRoot: "/tmp/workspace-root",
+					enableTools: true,
+					enableSpawn: false,
+					enableTeams: false,
+					isSubagent: false,
+				},
+				messages: [
+					{
+						role: "user",
+						content: "Recovered prompt",
+					},
+				],
+			});
+
+			const summary = await service.startTaskSession({
+				taskId: "task-1",
+				cwd: "/tmp/worktree",
+				prompt: "",
+				resumeFromTrash: true,
+				taskConversationMode: "exploratory",
+			});
+
+			expect(summary.taskConversationMode).toBe("exploratory");
+		});
+
+		it("exploratory 启动把 Kanban 托管指令文件路径注入系统提示", async () => {
+			const { service, runtime } = createTrackedService();
+
+			await service.startTaskSession({
+				taskId: "task-1",
+				cwd: "/tmp/worktree",
+				prompt: "Map the exploration space",
+				taskConversationMode: "exploratory",
+			});
+			await vi.waitFor(() => {
+				expect(runtime.startTaskSessionMock).toHaveBeenCalledTimes(1);
+			});
+
+			expect(exploratoryModeInstructionsMocks.ensureExploratoryModeInstructionsFile).toHaveBeenCalledTimes(1);
+			expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
+				expect.objectContaining({
+					systemPrompt: expect.stringContaining("Kanban Exploratory Mode"),
+				}),
+			);
+			expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
+				expect.objectContaining({
+					systemPrompt: expect.stringContaining(
+						"`/tmp/kanban-exploratory-mode-instructions/exploratory-mode-session-map.md`",
+					),
+				}),
+			);
+		});
+
+		it("非 exploratory 启动不物化指令文件、系统提示零变化", async () => {
+			const { service, runtime } = createTrackedService();
+
+			await service.startTaskSession({
+				taskId: "task-1",
+				cwd: "/tmp/worktree",
+				prompt: "Investigate startup",
+				taskConversationMode: "operational",
+			});
+			await vi.waitFor(() => {
+				expect(runtime.startTaskSessionMock).toHaveBeenCalledTimes(1);
+			});
+
+			expect(exploratoryModeInstructionsMocks.ensureExploratoryModeInstructionsFile).not.toHaveBeenCalled();
+			const systemPrompt = runtime.startTaskSessionMock.mock.calls[0]?.[0]?.systemPrompt ?? "";
+			expect(systemPrompt).not.toContain("Kanban Exploratory Mode");
+		});
+
+		it("指令文件物化失败 ⇒ 会话照常启动、注入段退化缺失", async () => {
+			const { service, runtime } = createTrackedService();
+			exploratoryModeInstructionsMocks.ensureExploratoryModeInstructionsFile.mockRejectedValue(
+				new Error("disk is read-only"),
+			);
+
+			const summary = await service.startTaskSession({
+				taskId: "task-1",
+				cwd: "/tmp/worktree",
+				prompt: "Map the exploration space",
+				taskConversationMode: "exploratory",
+			});
+			await vi.waitFor(() => {
+				expect(runtime.startTaskSessionMock).toHaveBeenCalledTimes(1);
+			});
+
+			// 盖章不受物化失败影响；只是系统提示里少了 exploratory 段。
+			expect(summary.taskConversationMode).toBe("exploratory");
+			const systemPrompt = runtime.startTaskSessionMock.mock.calls[0]?.[0]?.systemPrompt ?? "";
+			expect(systemPrompt).not.toContain("Kanban Exploratory Mode");
+			expect(summary.state).toBe("running");
+		});
 	});
 
 	it("mirrors runtime prompt resolution, rules, and approval wiring into the SDK start call", async () => {

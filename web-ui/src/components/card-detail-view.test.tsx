@@ -20,6 +20,7 @@ const {
 	mockPromptLibraryPanel,
 	mockUseAgentRaisedPendingUserDecision,
 	mockAgentRaisedPendingUserDecisionPanel,
+	mockUseSessionMapPanelData,
 } = vi.hoisted(() => ({
 	mockAgentTerminalPanel: vi.fn(
 		(_props: {
@@ -36,6 +37,14 @@ const {
 	mockPromptLibraryPanel: vi.fn((_props: unknown) => null),
 	mockUseAgentRaisedPendingUserDecision: vi.fn(),
 	mockAgentRaisedPendingUserDecisionPanel: vi.fn((_props: unknown) => null),
+	// Session Map 面板的数据 hook 默认按「无数据」返回；各用例按需覆盖，避免真实 tRPC 请求进测试。
+	mockUseSessionMapPanelData: vi.fn(
+		(_input: unknown): { queryPhase: string; projection: unknown; mapCollection: unknown } => ({
+			queryPhase: "idle",
+			projection: null,
+			mapCollection: null,
+		}),
+	),
 }));
 
 vi.mock("@/hooks/use-is-mobile", () => ({
@@ -97,6 +106,10 @@ vi.mock("@/runtime/use-runtime-workspace-changes", () => ({
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceStateVersionValue: () => 0,
+}));
+
+vi.mock("@/hooks/use-session-map-panel-data", () => ({
+	useSessionMapPanelData: (input: unknown) => mockUseSessionMapPanelData(input),
 }));
 
 vi.mock("@/resize/layout-customizations", () => ({
@@ -323,6 +336,8 @@ describe("CardDetailView", () => {
 			dismiss: vi.fn(),
 		});
 		mockAgentRaisedPendingUserDecisionPanel.mockClear();
+		mockUseSessionMapPanelData.mockReset();
+		mockUseSessionMapPanelData.mockReturnValue({ queryPhase: "idle", projection: null, mapCollection: null });
 		mockUseRuntimeWorkspaceChanges.mockReturnValue({
 			changes: {
 				files: [
@@ -357,6 +372,7 @@ describe("CardDetailView", () => {
 		mockPromptLibraryPanel.mockClear();
 		mockUseAgentRaisedPendingUserDecision.mockReset();
 		mockAgentRaisedPendingUserDecisionPanel.mockClear();
+		mockUseSessionMapPanelData.mockReset();
 		vi.restoreAllMocks();
 		container.remove();
 		if (previousActEnvironment === undefined) {
@@ -1812,5 +1828,213 @@ describe("CardDetailView", () => {
 			expect(onCardSelect).not.toHaveBeenCalled();
 			consumer.remove();
 		});
+	});
+
+	it("Session Map refreshKey 只随低频边沿变化：流式 updatedAt 推进不重拉，turnOwner / checkpoint 边沿才重拉", async () => {
+		const renderView = async (sessionSummary: RuntimeTaskSessionSummary) => {
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={createSelectionInColumn("in_progress")}
+						currentProjectId="workspace-1"
+						selectedAgentId="cline"
+						sessionSummary={sessionSummary}
+						taskSessions={{ "task-1": sessionSummary }}
+						onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+		};
+		const lastRefreshKey = (): string | null =>
+			(mockUseSessionMapPanelData.mock.calls.at(-1)?.[0] as { refreshKey: string | null }).refreshKey;
+
+		// cline 会话（conversation 面板形态）→ refreshKey 非 null，构成为
+		// `{checkpoint.turn}:{checkpoint.commit}:{turnOwner}:{liveness}:{streamSnapshotGeneration}`（无 updatedAt；
+		// 末段是流重连代数，本测试未传该 prop = 0）。
+		await renderView(createSessionSummary("task-1", { agentId: "cline" }));
+		expect(lastRefreshKey()).toBe("0::agent:live:0");
+
+		// 流式期间 summary 每 ~150ms 批次推进 updatedAt → refreshKey 必须不变（重拉风暴反回归）。
+		await renderView(createSessionSummary("task-1", { agentId: "cline", updatedAt: 2 }));
+		expect(lastRefreshKey()).toBe("0::agent:live:0");
+
+		// 回合结束（turnOwner agent→user）→ 边沿重拉（投影 in-progress 判定与该 facet 同源）。
+		await renderView(
+			createSessionSummary("task-1", { agentId: "cline", updatedAt: 3, turnOwner: "user", userTurnKind: "review" }),
+		);
+		expect(lastRefreshKey()).toBe("0::user:live:0");
+
+		// checkpoint 异步落地（turn/commit 变化）→ 边沿重拉。
+		await renderView(
+			createSessionSummary("task-1", {
+				agentId: "cline",
+				updatedAt: 4,
+				turnOwner: "user",
+				userTurnKind: "review",
+				latestTurnCheckpoint: {
+					turn: 1,
+					ref: "refs/kanban/checkpoints/task-1/turn/1",
+					commit: "commit-1",
+					createdAt: 1,
+				},
+			}),
+		);
+		expect(lastRefreshKey()).toBe("1:commit-1:user:live:0");
+	});
+
+	it("Session Map 锚 chip 链路：resolver 只认服务端集合内的 id；点击展开面板并 spotlight 节点", async () => {
+		// jsdom 未实现 scrollIntoView；spotlight 依赖它（verification-anchor-registry 测试同款 stub）。
+		Element.prototype.scrollIntoView = vi.fn();
+		mockUseSessionMapPanelData.mockReturnValue({
+			queryPhase: "ready",
+			projection: {
+				harnessSource: "exact_structured",
+				turnProjectionEntries: [],
+				turnProjectionSignature: "0:none:0",
+				turnProjectionIsIncomplete: false,
+			},
+			mapCollection: {
+				sourceTurnProjectionSignature: "0:none:0",
+				mapNodes: [
+					{
+						mapNodeId: "node-1",
+						anchorConversationSessionTaskId: "task-1",
+						anchorTurnNumber: 3,
+						anchorTurnCheckpointCommit: null,
+						anchorTurnUserMessagePreview: null,
+						nodeKind: "milestone",
+						nodeTitle: "定了存储方案",
+						nodeSummaryMarkdown: null,
+						referencedFindingId: null,
+						nodeGenerationSource: "agent_live_session_maintenance",
+						createdAt: 1,
+						updatedAt: 1,
+					},
+				],
+				mapStaleReason: null,
+				lastMaintenanceJobCompletedAt: null,
+				updatedAt: 1,
+			},
+		});
+		const sessionSummary = createSessionSummary("task-1", { agentId: "cline" });
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createSelectionInColumn("in_progress")}
+					currentProjectId="workspace-1"
+					selectedAgentId="cline"
+					sessionSummary={sessionSummary}
+					taskSessions={{ "task-1": sessionSummary }}
+					onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		// 面板挂载但默认折叠（M0 无模式字段）：节点锚尚未进 DOM。
+		expect(container.textContent).toContain("Session Map");
+		expect(container.querySelector('[data-session-map-node-anchor="node-1"]')).toBeNull();
+
+		const panelProps = getLastMockFirstArg<{
+			resolveSessionMapAnchor?: ((mapNodeId: string) => { nodeTitle: string; nodeKind: string } | null) | null;
+			onSessionMapAnchorClick?: (mapNodeId: string) => void;
+		}>(mockClineAgentChatPanel);
+
+		// 反注入铁律（蓝图 §C.1）：集合内 id 解析出服务端节点标题；集合外 id 一律 null（chip 不渲染）。
+		expect(panelProps.resolveSessionMapAnchor?.("node-1")).toEqual({
+			nodeTitle: "定了存储方案",
+			nodeKind: "milestone",
+		});
+		expect(panelProps.resolveSessionMapAnchor?.("agent-invented-id")).toBeNull();
+
+		await act(async () => {
+			panelProps.onSessionMapAnchorClick?.("node-1");
+		});
+		// spotlight 在 rAF 回调里执行（等展开后的渲染把节点锚挂进 DOM）。
+		await act(async () => {
+			await new Promise<void>((resolve) => {
+				window.requestAnimationFrame(() => resolve());
+			});
+		});
+
+		const nodeAnchor = container.querySelector('[data-session-map-node-anchor="node-1"]');
+		expect(nodeAnchor).not.toBeNull();
+		expect(nodeAnchor?.classList.contains("verification-spotlight-active")).toBe(true);
+	});
+
+	it("Session Map 默认展开：活会话缺模式字段不回退卡片声明值（v1 不热切换），无活会话才读卡片", async () => {
+		const renderWith = async ({
+			sessionSummary,
+			cardTaskConversationMode,
+		}: {
+			sessionSummary: RuntimeTaskSessionSummary | null;
+			cardTaskConversationMode?: "operational" | "exploratory";
+		}) => {
+			const selection = createSelectionInColumn("in_progress");
+			if (cardTaskConversationMode) {
+				selection.card.taskConversationMode = cardTaskConversationMode;
+			}
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={selection}
+						currentProjectId="workspace-1"
+						selectedAgentId="cline"
+						sessionSummary={sessionSummary}
+						taskSessions={sessionSummary ? { "task-1": sessionSummary } : {}}
+						onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+		};
+		const sessionMapToggle = (): HTMLButtonElement => {
+			const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
+				candidate.textContent?.includes("Session Map"),
+			);
+			expect(button).toBeDefined();
+			return button as HTMLButtonElement;
+		};
+
+		// 回归核心：活会话 summary 缺 taskConversationMode（功能上线前启动的旧会话），卡片存续期
+		// 被改成 exploratory——回退链若读卡片值会立刻热切换默认展开；修复后必须按 operational 折叠。
+		await renderWith({
+			sessionSummary: createSessionSummary("task-1", { agentId: "cline" }),
+			cardTaskConversationMode: "exploratory",
+		});
+		expect(sessionMapToggle().getAttribute("aria-expanded")).toBe("false");
+
+		// 正例：活会话自己盖章 exploratory（且卡片是 operational）→ 默认展开，跟随会话而非卡片。
+		await renderWith({
+			sessionSummary: createSessionSummary("task-1", { agentId: "cline", taskConversationMode: "exploratory" }),
+			cardTaskConversationMode: "operational",
+		});
+		expect(sessionMapToggle().getAttribute("aria-expanded")).toBe("true");
+
+		// 正例：无活会话（任务尚未启动）时卡片即真相——卡片 exploratory → 默认展开。
+		await renderWith({ sessionSummary: null, cardTaskConversationMode: "exploratory" });
+		expect(sessionMapToggle().getAttribute("aria-expanded")).toBe("true");
 	});
 });

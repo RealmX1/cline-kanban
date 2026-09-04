@@ -9,6 +9,7 @@ import {
 	createAcpTaskSessionService,
 } from "../acp-client-session/acp-task-session-service";
 import { handleClineMcpOauthCallback } from "../cline-sdk/cline-mcp-runtime-service";
+import { createClineProviderService } from "../cline-sdk/cline-provider-service";
 import {
 	type ClineTaskSessionService,
 	createInMemoryClineTaskSessionService,
@@ -47,10 +48,13 @@ import { loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/works
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
+import { createConversationTreeApi } from "../trpc/conversation-tree-api";
 import { createDeploymentApi } from "../trpc/deployment-api";
+import { createExploratoryApi } from "../trpc/exploratory-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
+import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
 import { createWorkspaceApi } from "../trpc/workspace-api";
 import {
 	type ActiveRuntimeSessionShutdownResult,
@@ -275,6 +279,31 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		},
 	});
 
+	// Exploratory session map 再维护提醒的投递出口（蓝图 §B.3，M1）：观察器在 hub 里跑，
+	// 但统一发送出口的 deps 只在本层齐备（与上方回收调度器同理），故建好 sender 注入 hub。
+	// 投递语义与人类聊天/RVF followup 完全同一条出口——不新造第四发送路径。
+	const exploratorySessionMapMaintenanceClineProviderService = createClineProviderService();
+	deps.runtimeStateHub.setExploratorySessionMapMaintenanceNudgeSender(async (workspaceId, taskId, text) => {
+		const workspacePath =
+			clineWorkspacePathByWorkspaceId.get(workspaceId) ?? deps.workspaceRegistry.getWorkspacePathById(workspaceId);
+		if (!workspacePath) {
+			throw new Error(`Cannot resolve workspace path for exploratory session map maintenance nudge: ${workspaceId}`);
+		}
+		const scope: RuntimeTrpcWorkspaceScope = { workspaceId, workspacePath };
+		await sendTaskChatMessageAcrossSessionTransports(
+			{
+				getScopedTerminalManager,
+				getScopedClineTaskSessionService,
+				getScopedAcpTaskSessionService,
+				loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+				resolveClineTaskSessionLaunchConfig: async () =>
+					await exploratorySessionMapMaintenanceClineProviderService.resolveLaunchConfig(),
+			},
+			scope,
+			{ taskId, text },
+		);
+	});
+
 	const stopAndCollectProjectRuntimeSessionsForSafePersistence = async (
 		workspaceId: string,
 	): Promise<ActiveRuntimeSessionShutdownResult> => {
@@ -466,6 +495,29 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					// 终端 agent（Claude 等）：取 hook 采集的最近 finalMessage；无则优雅降级为 null。
 					const manager = await getScopedTerminalManager(scope);
 					return manager.getSummary(taskId)?.latestHookActivity?.finalMessage ?? null;
+				},
+			}),
+			conversationTreeApi: createConversationTreeApi({
+				getScopedClineTaskSessionService,
+				loadBoardCardAgentId: async (scope, taskId) => {
+					const board = await loadWorkspaceBoardById(scope.workspaceId);
+					const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+					return card?.agentId ?? null;
+				},
+			}),
+			exploratoryApi: createExploratoryApi({
+				getScopedClineTaskSessionService,
+				loadBoardCardAgentId: async (scope, taskId) => {
+					const board = await loadWorkspaceBoardById(scope.workspaceId);
+					const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+					return card?.agentId ?? null;
+				},
+				onExploratorySessionMapUpdated: (workspaceId, conversationSessionTaskId, mapCollection) => {
+					deps.runtimeStateHub.broadcastExploratorySessionMapUpdated(
+						workspaceId,
+						conversationSessionTaskId,
+						mapCollection,
+					);
 				},
 			}),
 		};

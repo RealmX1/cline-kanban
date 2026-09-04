@@ -9,6 +9,7 @@ import {
 	type TaskBoardSearchProjectContext,
 	type TaskBoardSearchResult,
 } from "@/search/task-board-search";
+import type { TaskSearchResultSortOrder } from "@/search/task-search-result-ordering";
 import { type UseTaskBoardSearchResult, useTaskBoardSearch } from "@/search/use-task-board-search";
 import type { BoardData } from "@/types";
 
@@ -80,6 +81,21 @@ function createSemanticResult(document: TaskBoardSearchDocument): TaskBoardSearc
 	};
 }
 
+/**
+ * 测试只关心「按 mode 分发匹配 + ID 置顶」这一层，故排序档/活跃度解析/浏览开关都取不影响该层的默认值：
+ * relevance 档原样返回入参、活跃度恒 null、浏览关闭。要测排序或浏览的用例自行覆盖对应字段。
+ */
+type UseTaskBoardSearchHarnessProps = {
+	documents: readonly TaskBoardSearchDocument[];
+	query: string;
+	mode: TaskBoardSearchMode;
+	sortOrder?: TaskSearchResultSortOrder;
+	resolveAgentConversationProgressAtEpochMs?: (document: TaskBoardSearchDocument) => number | null;
+	isBrowsingAllTasksWithoutQueryEnabled?: boolean;
+};
+
+const NO_AGENT_CONVERSATION_PROGRESS = (): number | null => null;
+
 describe("useTaskBoardSearch", () => {
 	let container: HTMLDivElement;
 	let root: Root;
@@ -110,26 +126,19 @@ describe("useTaskBoardSearch", () => {
 			previousActEnvironment;
 	});
 
-	async function renderHook(initialProps: {
-		documents: readonly TaskBoardSearchDocument[];
-		query: string;
-		mode: TaskBoardSearchMode;
-	}): Promise<{
+	async function renderHook(initialProps: UseTaskBoardSearchHarnessProps): Promise<{
 		getState: () => UseTaskBoardSearchResult;
-		rerender: (nextProps: {
-			documents: readonly TaskBoardSearchDocument[];
-			query: string;
-			mode: TaskBoardSearchMode;
-		}) => Promise<void>;
+		rerender: (nextProps: UseTaskBoardSearchHarnessProps) => Promise<void>;
 	}> {
 		let hookResult: UseTaskBoardSearchResult | null = null;
 
-		function HookHarness(props: {
-			documents: readonly TaskBoardSearchDocument[];
-			query: string;
-			mode: TaskBoardSearchMode;
-		}): null {
-			hookResult = useTaskBoardSearch(props);
+		function HookHarness(props: UseTaskBoardSearchHarnessProps): null {
+			hookResult = useTaskBoardSearch({
+				sortOrder: "relevance",
+				resolveAgentConversationProgressAtEpochMs: NO_AGENT_CONVERSATION_PROGRESS,
+				isBrowsingAllTasksWithoutQueryEnabled: false,
+				...props,
+			});
 			return null;
 		}
 

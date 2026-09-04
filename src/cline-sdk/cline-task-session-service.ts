@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import type {
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeClineReasoningEffort,
+	RuntimeTaskConversationMode,
 	RuntimeTaskConversationSessionMetadata,
 	RuntimeTaskImage,
 	RuntimeTaskSessionMode,
@@ -26,7 +27,8 @@ import {
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
-import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
+import { resolveExploratoryModeAppendSystemPrompt } from "../prompts/exploratory-mode-append-system-prompt";
+import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import {
 	compactPersistedMessagesForContextOverflow,
 	isContextOverflowError,
@@ -85,6 +87,9 @@ export interface StartClineTaskSessionRequest {
 	images?: RuntimeTaskImage[];
 	resumeFromTrash?: boolean;
 	resumeFromPersistence?: boolean;
+	// 卡片声明的会话模式快照（蓝图 §A.1）：每次建会话时盖章进 summary.taskConversationMode；
+	// 缺省不写字段 = operational。exploratory 时启动注入 Kanban 托管指令文件（§A.2）。
+	taskConversationMode?: RuntimeTaskConversationMode;
 	providerId?: string | null;
 	modelId?: string | null;
 	mode?: RuntimeTaskSessionMode;
@@ -92,6 +97,15 @@ export interface StartClineTaskSessionRequest {
 	baseUrl?: string | null;
 	reasoningEffort?: RuntimeClineReasoningEffort | null;
 	systemPrompt?: string | null;
+}
+
+// 消息集的投影签名三元（与 buildConversationTurnProjectionSignature 同构成：条数 / 末条 id /
+// 末条 content 长度）。只读访问器用：O(1)、不克隆消息，供高频观察路径做「投影是否可能变了」
+// 的廉价门控——流式期间 assistant chunk 同 id 原位追加，三者任一变化都必然反映在这里。
+export interface ClineTaskMessagesProjectionSignature {
+	messageCount: number;
+	lastMessageId: string | null;
+	lastMessageContentLength: number;
 }
 
 export interface ClineTaskSessionService {
@@ -115,6 +129,9 @@ export interface ClineTaskSessionService {
 	getSummary(taskId: string): RuntimeTaskSessionSummary | null;
 	listSummaries(): RuntimeTaskSessionSummary[];
 	listMessages(taskId: string): ClineTaskMessage[];
+	// 不克隆的 O(1) 投影签名读取（条数/末条 id/末条 content 长度），供 summary 广播热路径上的
+	// 观察器做「消息集是否可能变了」的廉价门控；会话完全未知时返回 null。
+	getTaskSessionMessagesProjectionSignature(taskId: string): ClineTaskMessagesProjectionSignature | null;
 	listSlashCommands(workspacePath: string): Promise<ClineSdkSlashCommand[]>;
 	loadTaskSessionMessages(taskId: string): Promise<ClineTaskMessage[]>;
 	loadPersistedTaskSessionMessages(taskId: string): Promise<ClineSdkPersistedMessage[]>;
@@ -402,6 +419,10 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 					...(request.taskConversationSessionMetadata
 						? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
 						: {}),
+					// 会话模式盖章：每次建会话（含 resume 重建）都从启动请求快照一次；缺省不物化。
+					...(request.taskConversationMode !== undefined
+						? { taskConversationMode: request.taskConversationMode }
+						: {}),
 				})
 			: ({
 					// 经单一构造 applySessionFacets 重 stamp 双轴 facet：本内联分支覆写 state/reviewReason
@@ -410,6 +431,10 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 						...createDefaultSummary(request.taskId),
 						...(request.taskConversationSessionMetadata
 							? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
+							: {}),
+						// 会话模式盖章：与上一分支同一范式，缺省不物化默认值。
+						...(request.taskConversationMode !== undefined
+							? { taskConversationMode: request.taskConversationMode }
 							: {}),
 						state: sessionStateAtEntryConstruction,
 						mode: resolvedMode,
@@ -474,6 +499,8 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 				const appendedSystemPrompt = combineAppendSystemPrompts(
 					resolveHomeAgentAppendSystemPrompt(request.taskId),
 					resolveTaskSessionAppendSystemPrompt(request.taskId, request.cwd),
+					// Exploratory Mode 注入（§A.2）：非 exploratory 启动恒为 null，零行为变化。
+					await resolveExploratoryModeAppendSystemPrompt(request.taskConversationMode),
 				);
 				if (appendedSystemPrompt) {
 					systemPrompt = `${systemPrompt}\n\n${appendedSystemPrompt}`;
@@ -890,6 +917,21 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		return this.messageRepository.listMessages(taskId);
 	}
 
+	getTaskSessionMessagesProjectionSignature(taskId: string): ClineTaskMessagesProjectionSignature | null {
+		// 经 repository 现成的 getTaskEntry 直读 live entry（不克隆）；无水化缓存路径——观察器
+		// 只看 live 会话，entry 缺失时返回 null，调用侧保守回退全量 load。
+		const entry = this.messageRepository.getTaskEntry(taskId);
+		if (entry === null) {
+			return null;
+		}
+		const lastMessage = entry.messages.length > 0 ? entry.messages[entry.messages.length - 1] : null;
+		return {
+			messageCount: entry.messages.length,
+			lastMessageId: lastMessage?.id ?? null,
+			lastMessageContentLength: lastMessage?.content.length ?? 0,
+		};
+	}
+
 	async listSlashCommands(workspacePath: string): Promise<ClineSdkSlashCommand[]> {
 		const runtimeSetup = await this.ensureRuntimeSetup(workspacePath);
 		await Promise.all([
@@ -979,7 +1021,8 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 
 	private captureReviewCheckpoint(taskId: string, summary: RuntimeTaskSessionSummary): void {
 		const nextTurn = (summary.latestTurnCheckpoint?.turn ?? 0) + 1;
-		const staleRef = summary.previousTurnCheckpoint?.ref ?? null;
+		// turn ref 保留策略（姊妹蓝图 §1.4）：任务存续期全量保留，这里只做捕获、不再轮换删旧
+		// ref；批删挂在任务删除 / trash 清空路径（deleteAllTaskTurnCheckpointRefs）。
 		void captureTaskTurnCheckpoint({
 			cwd: summary.workspacePath ?? ".",
 			taskId,
@@ -987,15 +1030,6 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		})
 			.then((checkpoint) => {
 				this.applyTurnCheckpoint(taskId, checkpoint);
-				if (!staleRef) {
-					return;
-				}
-				void deleteTaskTurnCheckpointRef({
-					cwd: summary.workspacePath ?? ".",
-					ref: staleRef,
-				}).catch(() => {
-					// Best effort cleanup only.
-				});
 			})
 			.catch(() => {
 				// Best effort checkpointing only.

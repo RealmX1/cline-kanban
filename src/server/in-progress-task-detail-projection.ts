@@ -5,7 +5,7 @@ import type {
 } from "../core/api-contract";
 import { resolveSessionFacets } from "../core/session-activity";
 
-// 把 board `in_progress` 列的全部 task 投影为 Cross-Repository Stage-First Overview（见 CONTEXT.md）
+// 把 board `in_progress` 列的全部 task 投影为 Cross-Repository Stage-First Overview（见 docs/context-stage-first-overview.md）
 // 所需的精简明细。按「列归属」判定成员——in_progress 列有几张卡就出几条，awaiting_review / interrupted
 // 的卡也一并保留（**不**套用主看板的 live-session overlay，见 ADR-0001）；前端据 turnOwner + lastOutputAt
 // 把它们二分为 Active / Stale。turnOwner/liveness 经 facet 真相源 resolveSessionFacets 解析，无 session 的

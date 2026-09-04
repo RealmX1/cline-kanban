@@ -5,8 +5,10 @@ This package contains the Kanban frontend served by the runtime.
 ## Stack
 
 - React + TypeScript + Vite
-- Palantir Blueprint v6 (`@blueprintjs/core`, `@blueprintjs/icons`, `@blueprintjs/select`)
-- Atlassian pragmatic drag-and-drop
+- Tailwind CSS v4 (`tailwindcss`, `@tailwindcss/vite`)
+- Radix UI headless primitives (`@radix-ui/react-*`)
+- lucide-react icons
+- Drag and drop via `@hello-pangea/dnd`
 - Vitest
 - Playwright
 
@@ -30,6 +32,9 @@ Current behavior:
 
 - `npm run dev`
 - `npm run build`
+- `npm run preview`
+- `npm run lint`
 - `npm run typecheck`
 - `npm run test`
+- `npm run test:watch`
 - `npm run e2e`

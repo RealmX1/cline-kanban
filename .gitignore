@@ -35,3 +35,6 @@ packages/desktop/cli
 /.claude/settings.local.json
 
 /.claude/skills/gitnexus/
+
+# Claude Code 个人本机记忆文件（CLAUDE.md 的私人覆盖层，不入仓）
+/CLAUDE.local.md

@@ -128,6 +128,8 @@ export default function App(): ReactElement {
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		exploratorySessionMapCollectionsByTaskId,
+		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,
@@ -337,7 +339,7 @@ export default function App(): ReactElement {
 	}, [selectedCard?.card.id]);
 	useNotificationTaskFocus({ currentProjectId: navigationCurrentProjectId, setSelectedTaskId });
 
-	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 CONTEXT.md）开关 + 跨-workspace 打开某 task 的待定跳转。
+	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 docs/context-stage-first-overview.md）开关 + 跨-workspace 打开某 task 的待定跳转。
 	const [isBoardOverviewOpen, setIsBoardOverviewOpen] = useState(false);
 	const [pendingCrossProjectTaskOpen, setPendingCrossProjectTaskOpen] = useState<{
 		repoId: string;
@@ -385,6 +387,10 @@ export default function App(): ReactElement {
 		board,
 		currentProjectId,
 		currentProjectName: currentProjectSummary?.name ?? null,
+		currentProjectDefaultAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
+		// 会话摘要只作为「搜索之后叠加」的展示/过滤/排序素材传入。**绝不能进 documents**——
+		// 它每 tick 换引用，会把语义索引反复重建（见 controller 里叠加层那一段）。
+		taskSessionSummariesByTaskId: sessions,
 		canOpen: !hasNoProjects,
 		crossProjectWorkspaceId: currentProjectId,
 		crossProjectExcludeProjectIds: crossProjectTaskSearchExcludeProjectIds,
@@ -514,6 +520,8 @@ export default function App(): ReactElement {
 		setNewTaskStartInPlanMode,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
+		newTaskConversationMode,
+		setNewTaskConversationMode,
 		newTaskAutoReviewEnabled,
 		setNewTaskAutoReviewEnabled,
 		newTaskAutoReviewMode,
@@ -540,6 +548,8 @@ export default function App(): ReactElement {
 		setEditTaskStartInPlanMode,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
+		editTaskConversationMode,
+		setEditTaskConversationMode,
 		editTaskAutoReviewEnabled,
 		setEditTaskAutoReviewEnabled,
 		editTaskAutoReviewMode,
@@ -1401,6 +1411,8 @@ export default function App(): ReactElement {
 									sessionSummary={detailSession}
 									taskSessions={sessions}
 									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
+									exploratorySessionMapCollectionsByTaskId={exploratorySessionMapCollectionsByTaskId}
+									runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
 									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
 									onCreateByTheWayTaskConversationSession={async (input) => {
 										const effectiveAgentId =
@@ -1552,6 +1564,8 @@ export default function App(): ReactElement {
 					onTaskAgentPermissionModeChange={
 						editingTaskId ? setEditTaskAgentPermissionMode : setNewTaskAgentPermissionMode
 					}
+					taskConversationMode={editingTaskId ? editTaskConversationMode : newTaskConversationMode}
+					onTaskConversationModeChange={editingTaskId ? setEditTaskConversationMode : setNewTaskConversationMode}
 					startInPlanModeDisabled={
 						editingTaskId ? isEditTaskStartInPlanModeDisabled : isNewTaskStartInPlanModeDisabled
 					}

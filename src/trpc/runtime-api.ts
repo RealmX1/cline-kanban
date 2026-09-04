@@ -47,6 +47,7 @@ import type {
 	RuntimeTaskWorktreeMode,
 	RuntimeTerminalInputBoxStashResponse,
 	RuntimeUpdateStatusResponse,
+	TerminalDeliveryStatus,
 } from "../core/api-contract";
 import {
 	parseAgentSessionTransportSwitchRequest,
@@ -80,11 +81,13 @@ import {
 	parseTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
 	parseTerminalAgentModelSelectionOptionsRequest,
 } from "../core/api-validation";
+import { formatDeferredHarnessGeneratedPromptsAsExplicitUserReleasedPrompt } from "../core/harness-generated-restoration-prompt";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
 import { applyMostRecentlyLaunchedAgentSessionAgentIdToTask, updateTask } from "../core/task-board-mutations";
 import { resolveTaskTitle } from "../core/task-title.js";
+import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import {
 	recordTaskSessionStartDiagnostic,
 	type TaskSessionStartDiagnosticEvent,
@@ -102,11 +105,17 @@ import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-s
 import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
+import {
+	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
+	listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
+	type RestorationDeferredHarnessGeneratedPrompt,
+	restoreConsumedHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
+} from "../state/restoration-deferred-harness-generated-prompt-store";
 import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
 import { loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
 import { suggestTaskNamesFromTaskDescription } from "../task-name-suggestion/suggest-task-names-from-task-description";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
-import type { TerminalSessionManager } from "../terminal/session-manager";
+import type { TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../terminal/session-manager";
 import {
 	stashTaskTerminalInputBoxIntoPromptLibrary,
 	type TerminalInputBoxStashInitiator,
@@ -122,6 +131,44 @@ import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
 import { sendTaskChatMessageAcrossSessionTransports } from "./task-chat-message-send-across-session-transports";
+
+// 列表接口只回预览：单条通知正文可以很长（子 agent 的完整 result 会整段塞在里面），把它整份搬进
+// 浏览器既无必要也拖慢详情视图。放行走的是账本里的完整正文，与这份预览无关。
+const DEFERRED_RESTORATION_NOTIFICATION_PREVIEW_LENGTH = 400;
+
+// 放行只认这两个终态为「真的送到 agent 手上了」：文本已写进 PTY 且提交已确认（第二个只是写入时
+// agent 正占着回合，消息排在其后，同样已被收下）。accepted_pending_submit_confirmation 是唯一的
+// 非终态、delivery_failed 是失败，两者都不能当成功——那正是 2026-08-08 事故的成因。
+const TERMINAL_DELIVERY_STATUSES_MEANING_RELEASED_PROMPT_REACHED_AGENT: ReadonlySet<TerminalDeliveryStatus> = new Set([
+	"delivered_and_submit_confirmed",
+	"delivered_queued_behind_active_agent_turn",
+]);
+
+// consume 是破坏性的：一旦取出就从账本里消失了。投递没能成功时必须原样写回，否则用户点一次放行
+// 就把 agent 在等的唤醒信号永久弄丢。写回失败只记日志、不再抛——此刻已在失败路径上，二次抛出只会
+// 把「投递失败」这个真正有用的原因盖掉。
+// 走 store 的整批回滚入口而不是逐条 defer：defer 是「新增一条」的语义，逐条写回会占 N 次写队列操作、
+// 按追加顺序裁剪，从而挤掉 consume 之后新到达的通知并打乱顺序。回滚要的是「当作没取过」。
+async function restoreConsumedDeferredRestorationNotifications(
+	workspaceId: string,
+	consumedRecords: readonly RestorationDeferredHarnessGeneratedPrompt[],
+): Promise<void> {
+	if (consumedRecords.length === 0) {
+		return;
+	}
+	try {
+		await restoreConsumedHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration({
+			workspaceId,
+			restoredRecords: consumedRecords,
+		});
+	} catch (error) {
+		logAgentSessionRetentionWarning(
+			`restoration-deferred-notification-restore-failed workspaceId=${workspaceId} restoredNotificationCount=${
+				consumedRecords.length
+			} reason=${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
 
 // 老看板卡片没有 taskAgentPermissionMode。缺失时按「当时的全局 agentAutonomousModeEnabled」
 // 推出等价档位，使升级前后行为不变——schema 层看不到 runtime config，兼容只能落在这里。
@@ -453,6 +500,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				images: undefined,
 				startInPlanMode: undefined,
 				resumeFromTrash: true,
+				// 会话模式的语义是「下次启动生效」——本条路径就是一次启动，从卡片原值显式回填，
+				// 与通道切换后重建 startResponse 的范式一致（漏传 = 静默掉回 operational 缺省）。
+				taskConversationMode: card.taskConversationMode,
 				workspaceId: workspaceScope.workspaceId,
 				projectPath: workspaceScope.workspacePath,
 				parentSessionId: undefined,
@@ -706,6 +756,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						startInPlanMode: body.startInPlanMode,
 						resumePriorAgentConversationWithoutResendingPrompt:
 							body.resumePriorAgentConversationWithoutResendingPrompt,
+						taskConversationMode: body.taskConversationMode,
 					});
 					latestStartedSummaryForDiagnostics = acpSummary;
 					// ACP 的 startTaskSession **不抛**：session/load、认证、spawn 的异常全被它自己 catch 成一条
@@ -793,6 +844,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					const summary = await clineTaskSessionService.startTaskSession({
 						taskId: body.taskId,
 						taskConversationSessionMetadata: body.taskConversationSessionMetadata,
+						taskConversationMode: body.taskConversationMode,
 						cwd: taskCwd,
 						prompt: body.prompt,
 						taskTitle: resolvedClineTitle.length > 0 ? resolvedClineTitle : undefined,
@@ -880,6 +932,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						taskId: body.taskId,
 						workspaceTaskId,
 						taskConversationSessionMetadata: body.taskConversationSessionMetadata,
+						taskConversationMode: body.taskConversationMode,
 						agentId: resolved.agentId,
 						binary: resolved.binary,
 						args: resolved.args,
@@ -1731,6 +1784,114 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				workspaceScope,
 				input,
 			),
+		// 恢复期被暂存的 harness 通知：只读列出。UI 据此决定要不要渲染一键放行入口。
+		getDeferredRestorationHarnessNotifications: async (workspaceScope, input) => {
+			try {
+				const deferredRecords = await listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration({
+					workspaceId: workspaceScope.workspaceId,
+					taskId: input.taskId,
+				});
+				return {
+					ok: true,
+					notifications: deferredRecords.map((record) => ({
+						sourceHarness: record.sourceHarness,
+						receivedAt: record.receivedAt,
+						promptTextPreview: record.promptText.slice(0, DEFERRED_RESTORATION_NOTIFICATION_PREVIEW_LENGTH),
+					})),
+				};
+			} catch (error) {
+				return {
+					ok: false,
+					notifications: [],
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+		// 一键放行：消费账本 → 组装成一条 prompt → 经既有 sendTaskChatMessage 出口投递 → 解除恢复守卫。
+		// 解除守卫是必须的：用户点放行就是最明确不过的「显式用户输入」，不解除的话下一条通知照样被拦回去，
+		// 用户得一条一条点，等于没修。
+		releaseDeferredRestorationHarnessNotificationsIntoTaskSession: async (workspaceScope, input) => {
+			let consumedRecords: RestorationDeferredHarnessGeneratedPrompt[] = [];
+			try {
+				consumedRecords = await consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration({
+					workspaceId: workspaceScope.workspaceId,
+					taskId: input.taskId,
+				});
+				const releasedPromptText =
+					formatDeferredHarnessGeneratedPromptsAsExplicitUserReleasedPrompt(consumedRecords);
+				if (releasedPromptText === undefined) {
+					return { ok: true, releasedNotificationCount: 0 };
+				}
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				terminalManager.disarmRestorationContinuationGuard?.(input.taskId);
+				terminalManager.completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn?.(
+					input.taskId,
+				);
+				// 终端通道是「先受理、后落定」：同步返回最多到 accepted_pending_submit_confirmation，
+				// 而那**不表示成功**（见 task-message-injection-ledger.ts）。账本此刻已经被 consume 掉，
+				// 拿「受理了」当成功，等于在投递其实失败时把 agent 在等的唤醒信号永久弄丢。
+				// 因此这里登记回执并等它落定，据实回报——放行要么真送达，要么如实失败且通知回到账本可重试。
+				let settleTerminalDeliveryOutcome: (outcome: TaskChatInputDeliveryOutcome) => void = () => {};
+				const terminalDeliveryOutcome = new Promise<TaskChatInputDeliveryOutcome>((resolve) => {
+					settleTerminalDeliveryOutcome = resolve;
+				});
+				const sendResponse = await sendTaskChatMessageAcrossSessionTransports(
+					{
+						getScopedTerminalManager: deps.getScopedTerminalManager,
+						getScopedClineTaskSessionService: deps.getScopedClineTaskSessionService,
+						getScopedAcpTaskSessionService: deps.getScopedAcpTaskSessionService,
+						loadScopedRuntimeConfig: deps.loadScopedRuntimeConfig,
+						resolveClineTaskSessionLaunchConfig: async () => await clineProviderService.resolveLaunchConfig(),
+						...(deps.broadcastTaskChatCleared ? { broadcastTaskChatCleared: deps.broadcastTaskChatCleared } : {}),
+						onProgrammaticTerminalDeliverySettled: (outcome) => {
+							settleTerminalDeliveryOutcome(outcome);
+						},
+					},
+					workspaceScope,
+					{
+						taskId: input.taskId,
+						text: releasedPromptText,
+						// 刻意**不带** source：统一发送出口把「带 source」判成后台自动注入
+						// （deferWhileUserTurn=true），于是遇上恢复出来那种正等用户拍板的会话就一路让位到
+						// 预算耗尽、终态 agent_awaiting_user_decision_timeout，放行永远送不出去。
+						// 而放行是用户显式点的按钮，按真人输入投递才是实情。
+					},
+				);
+				if (!sendResponse.ok) {
+					// consume 是破坏性的。投递没成功就必须把通知原样放回账本，否则用户点一次按钮就把
+					// 唤醒信号永久弄丢了——那比一开始被拦住还糟。
+					await restoreConsumedDeferredRestorationNotifications(workspaceScope.workspaceId, consumedRecords);
+					return {
+						ok: false,
+						releasedNotificationCount: 0,
+						error: sendResponse.error ?? "投递失败，已把通知放回暂存账本",
+					};
+				}
+				if (sendResponse.terminalDelivery?.status === "accepted_pending_submit_confirmation") {
+					const settledDeliveryOutcome = await terminalDeliveryOutcome;
+					if (
+						!TERMINAL_DELIVERY_STATUSES_MEANING_RELEASED_PROMPT_REACHED_AGENT.has(settledDeliveryOutcome.status)
+					) {
+						await restoreConsumedDeferredRestorationNotifications(workspaceScope.workspaceId, consumedRecords);
+						return {
+							ok: false,
+							releasedNotificationCount: 0,
+							error: `终端投递未送达（${settledDeliveryOutcome.status}${
+								settledDeliveryOutcome.reason === null ? "" : `:${settledDeliveryOutcome.reason}`
+							}），已把通知放回暂存账本`,
+						};
+					}
+				}
+				return { ok: true, releasedNotificationCount: consumedRecords.length };
+			} catch (error) {
+				await restoreConsumedDeferredRestorationNotifications(workspaceScope.workspaceId, consumedRecords);
+				return {
+					ok: false,
+					releasedNotificationCount: 0,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
 		// 取消一条在途程序化投递。账本的终态改写不在这里做——取消成功时 session-manager 会经
 		// 投递登记的 observer 触发同一条回写路径（delivery_failed{cancelled_before_delivery}），
 		// 与「确认落定」共用那一把写一次即定的锁，取消与确认的竞争因此是确定性的。
@@ -2065,6 +2226,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					worktreeMode: card.worktreeMode,
 					requestedAgentSessionTransport: body.targetSessionTransport,
 					resumePriorAgentConversationWithoutResendingPrompt: true,
+					// 会话模式同样是「下次启动生效」的卡字段（与上方「不重放 startInPlanMode」无关——
+					// 那条说的是会话内 plan/act 模式），本次重开就是下次启动，从卡片原值显式回填。
+					taskConversationMode: card.taskConversationMode,
 				});
 				if (!startResponse.ok) {
 					return {

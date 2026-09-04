@@ -67,6 +67,8 @@ export function parseCodexModelCatalog(stdout: string): RuntimeTerminalAgentMode
 //
 // 两档的条目取自 `claude` 二进制内嵌的 `/model` 选择器表，并逐条用
 // `claude --model <id> -p … --output-format json` 回读 `modelUsage` 实测过解析结果与上下文窗口。
+// 完整探测配方（含成本压法与 404/503 判读）见 docs/runbooks/agent-cli-capability-probing.md；
+// 上游发版后按它复验本表，别凭 `--help` 或推断改条目。
 const CLAUDE_CODE_LATEST_TRACKING_ALIAS_OPTIONS: RuntimeTerminalAgentModelSelectionOption[] = (
 	[
 		{ modelId: "opus", label: "Opus", description: "--model opus · latest Opus" },

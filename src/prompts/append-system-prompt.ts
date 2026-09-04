@@ -380,6 +380,18 @@ export function resolveTaskSessionAppendSystemPrompt(
 	return renderTaskSessionWorktreeGuardPrompt(taskId, trimmedCwd, resolveAppendSystemPromptCommandPrefix(options));
 }
 
+// Exploratory Mode（蓝图 .plan/docs/exploratory-mode-session-map-and-findings-store.md §A.2 效应 2）：
+// 探索型会话启动时注入的一段 append system prompt，把 agent 指向 Kanban 托管的指令文件。
+// 纯函数：指令文件的物化（ensureExploratoryModeInstructionsFile）由调用方负责，这里只拼装文本。
+export function renderExploratoryModeAppendSystemPrompt(instructionsFilePath: string): string {
+	return `# Kanban Exploratory Mode
+
+This is an exploratory conversation: the structure and conclusions it produces are assets in their own right, and Kanban maintains a session map (a clickable structural outline) for this session.
+
+Read the Kanban-managed instructions file at the following path IN FULL and follow it for the entire session:
+\`${instructionsFilePath}\``;
+}
+
 export function combineAppendSystemPrompts(...prompts: Array<string | null | undefined>): string | null {
 	const parts = prompts.map((prompt) => prompt?.trim()).filter((prompt): prompt is string => Boolean(prompt));
 	return parts.length > 0 ? parts.join("\n\n") : null;
