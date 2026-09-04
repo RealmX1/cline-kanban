@@ -28,8 +28,13 @@ function describeTaskNameSuggestionUnavailable(
 ): string {
 	switch (response.unavailableReason) {
 		case "api_key_not_configured":
+			// 这条 reason 覆盖两种情形：「一家 provider 都没配」不带 detail，走下面那句「去配一把 key」；
+			// 「配了却没有可用的默认」由运行时带一条说清该声明哪个变量的 detail —— 那种情形下 key 早就配好了，
+			// 再照着 reason 让用户去配 key 只会给出一条指向已配置变量的、不可操作的提示。
 			// 明说变量名：这条提示的唯一作用就是让用户知道该去配什么。
-			return "AI naming is off — set KANBAN_TASK_NAME_SUGGESTION_OPENAI_COMPATIBLE_API_KEY for the Kanban runtime process.";
+			return response.unavailableDetail
+				? `AI naming is off — ${response.unavailableDetail}`
+				: "AI naming is off — set KANBAN_MODEL_PROVIDER_DEEPSEEK_API_KEY (or another provider) for the Kanban runtime process.";
 		case "task_description_empty":
 			return "Write a task description first.";
 		default:

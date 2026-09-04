@@ -54,25 +54,53 @@ Kanban writes the corresponding `CLAUDE_CODE_*` variable itself and blanks out t
 
 Under `fullscreen`, Claude Code keeps its history inside the alternate screen buffer like Codex does, so the terminal panel's scrollback reading view has nothing to show for those sessions and hides its entry point. Switch to `inline` if you need session history in terminal scrollback.
 
-## AI task naming (task creation dialog)
+## Model providers (credentials Kanban itself calls out with)
 
-Read from the **runtime process** environment on every naming request, so a running Kanban server picks up changes only after a restart. The endpoint is any OpenAI-compatible `/chat/completions` service; the defaults point at DeepSeek.
+A registry of model-provider credentials, addressed **by provider**, that anything inside Kanban can draw on. Today one consumer exists — task naming in the New task dialog — but the shape is deliberately plural: several providers can be configured side by side, and future consumers (other in-app conveniences, other agents' keys) address them by id rather than getting their own bespoke variables.
 
-| Variable | Default | Required | Description |
-|----------|---------|----------|-------------|
-| `KANBAN_TASK_NAME_SUGGESTION_OPENAI_COMPATIBLE_API_KEY` | — | Yes | Bearer token for the naming endpoint. Without it the ✨ button in the New task dialog reports that naming is off, and tasks keep the title derived from the description. |
-| `KANBAN_TASK_NAME_SUGGESTION_OPENAI_COMPATIBLE_BASE_URL` | `https://api.deepseek.com` | No | Base URL; `/chat/completions` is appended. A trailing slash is stripped. |
-| `KANBAN_TASK_NAME_SUGGESTION_MODEL_ID` | `deepseek-v4-flash` | No | Model id sent in the request body. `deepseek-v4-flash` is the stable alias for DeepSeek-V4-Flash-0731. |
+Read from the **runtime process** environment on every request, so a running Kanban server picks up changes only after a restart. Every endpoint is treated as OpenAI-compatible (`POST {base_url}/chat/completions`), so pointing a provider entry at an aggregating gateway (LiteLLM, OpenRouter, …) works with no code change. The request body stays inside the standard chat-completions schema for exactly that reason: a vendor extension is sent only to providers listed as accepting it (`MODEL_PROVIDER_IDS_ACCEPTING_THINKING_EXTENSION_FIELD` in `src/model-provider-access/request-model-provider-chat-completion.ts` — today `deepseek`, whose thinking mode Kanban turns off to keep these short interactive requests fast). An endpoint that rejects unknown fields with HTTP 400 therefore still works with nothing but the three variables below.
 
-Requests are capped at **15 s** (`TASK_NAME_SUGGESTION_REQUEST_TIMEOUT_MS` in `src/task-name-suggestion/suggest-task-names-from-task-description.ts`) and only the first 8,000 characters of the description are sent.
+### Per-provider variables
 
-Every failure mode — key missing, endpoint down, timeout, non-2xx, unparsable answer — degrades to a plain "unavailable" result rather than an error. Task creation never waits on naming: the card is created immediately with the title derived from the description, and a suggested name is written back afterwards only if the title has not changed in the meantime.
+`<ID>` is the provider id upper-cased with hyphens turned into underscores: `deepseek` → `DEEPSEEK`, `my-gateway` → `MY_GATEWAY`. Provider ids are lower-case `[a-z0-9-]+`.
 
-Configure it with:
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `KANBAN_MODEL_PROVIDER_<ID>_API_KEY` | Yes | Bearer token. Its presence is what makes a provider "configured" — Kanban discovers providers by scanning for this suffix, so a provider it has never heard of works without a code change. |
+| `KANBAN_MODEL_PROVIDER_<ID>_BASE_URL` | Only for unknown providers | Base URL; `/chat/completions` is appended and a trailing slash is stripped. Known providers (below) have a built-in default. |
+| `KANBAN_MODEL_PROVIDER_<ID>_MODEL_ID` | Only for unknown providers | Model id sent in the request body. Known providers have a built-in default. |
+| `KANBAN_DEFAULT_MODEL_PROVIDER_ID` | Only when several are configured | Which provider a caller gets when it does not name one. With exactly one provider configured this is unnecessary — but once set it is binding: if it names a provider that has no API key, calls degrade instead of falling back to that single configured provider. With several configured and no default declared, calls likewise degrade rather than silently spending on a provider you did not intend. |
+
+Providers with built-in defaults (`KNOWN_MODEL_PROVIDER_DEFAULTS` in `src/model-provider-access/model-provider-credentials-from-environment.ts`) need only the key:
+
+| Provider id | Default base URL | Default model |
+|-------------|------------------|---------------|
+| `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` (stable alias for DeepSeek-V4-Flash-0731) |
+
+A provider with a key but no resolvable base URL or model is treated as unusable rather than having an endpoint guessed for it — sending a credential to a guessed address is worse than doing nothing.
+
+Configure the common case with:
 
 ```bash
-export KANBAN_TASK_NAME_SUGGESTION_OPENAI_COMPATIBLE_API_KEY="sk-..."
+export KANBAN_MODEL_PROVIDER_DEEPSEEK_API_KEY="sk-..."
 ```
+
+### Usage metadata
+
+Every call carries a required `modelUsagePurpose` — the role the call plays inside Kanban (`task_name_suggestion` today) — and each call appends one record to the `model-provider-usage` channel of the rotating JSONL journal under `~/.cline/kanban/diagnostic-event-journals/`: purpose, provider id, model id, outcome, failure reason, HTTP status, elapsed ms, prompt character count, and token counts when the provider reports them. Attempts that never reach the network (nothing configured) are recorded too, so "never configured" is distinguishable from "never used" in later analysis.
+
+Purpose is metadata on the call, not part of the variable name, precisely so one key serves many purposes and renaming a feature is not an environment migration.
+
+### Adding another consumer
+
+`src/model-provider-access/` owns credential resolution, provider routing, timeout, JSON mode, degradation semantics and usage journaling. A new feature adds only its own prompt, its own validation of the answer, and its own wording for the failure case — see `src/task-name-suggestion/suggest-task-names-from-task-description.ts` for the pattern. Do not re-implement `fetch` + timeout + fallback per feature.
+
+- `requestModelProviderText(request, options?)` — free-form text back.
+- `requestModelProviderJsonObject(request, zodSchema, options?)` — server-side JSON mode plus schema validation. DeepSeek's JSON mode requires the word "json" to appear in the prompt, so keep it in your system prompt.
+
+Both require `modelUsagePurpose` (add a member to `ModelUsagePurpose` — that is the forced declaration point for "how should this call be counted"), accept an optional `modelProviderId` to override routing, and accept `environmentVariables` / `fetchImplementation` overrides so unit tests need neither a polluted process environment nor a network.
+
+Every failure mode — nothing configured, endpoint down, timeout, non-2xx, unparsable answer — degrades to a plain `unavailable` result rather than an error. No feature built on this layer is allowed to block on it: task creation, for instance, creates the card immediately with the title derived from the description and writes a suggested name back afterwards only if the title has not changed in the meantime.
 
 ## Related documentation
 

@@ -254,7 +254,31 @@ describe("TaskNameInputWithAiSuggestions", () => {
 			clickSuggestButton();
 		});
 
-		expect(container.textContent).toContain("KANBAN_TASK_NAME_SUGGESTION_OPENAI_COMPATIBLE_API_KEY");
+		expect(container.textContent).toContain("KANBAN_MODEL_PROVIDER_DEEPSEEK_API_KEY");
+		expect(suggestionChipLabels()).toEqual([]);
+	});
+
+	// 「配了 provider 却没有可用的默认」与「一家都没配」共用同一个 reason，只靠 unavailableDetail 区分。
+	// 前者的 key 早就配好了，若还照着 reason 提示去 set API key，用户拿到的是一条不可操作的误导提示。
+	it("shows the runtime's detail instead of the API key hint when a default provider must be declared", async () => {
+		fakeTaskNameSuggestionEndpoint.responsesToReturn = [
+			{
+				status: "unavailable",
+				unavailableReason: "api_key_not_configured",
+				unavailableDetail:
+					"no default model provider is selected. Set KANBAN_DEFAULT_MODEL_PROVIDER_ID to one of the configured providers (deepseek, openrouter) for the Kanban runtime process.",
+			},
+		];
+
+		await act(async () => {
+			root.render(<TaskNameInputHarness taskDescription="Login redirects to a blank page after SSO" />);
+		});
+		await act(async () => {
+			clickSuggestButton();
+		});
+
+		expect(container.textContent).toContain("KANBAN_DEFAULT_MODEL_PROVIDER_ID");
+		expect(container.textContent).not.toContain("KANBAN_MODEL_PROVIDER_DEEPSEEK_API_KEY");
 		expect(suggestionChipLabels()).toEqual([]);
 	});
 
