@@ -1638,6 +1638,8 @@ describe("useTaskEditor", () => {
 				onCreate={() => "created-task-1"}
 				taskAgentPermissionMode="bypass_all_permission_prompts"
 				onTaskAgentPermissionModeChange={vi.fn()}
+				taskConversationMode="operational"
+				onTaskConversationModeChange={vi.fn()}
 				onCreateMultiple={() => []}
 				startInPlanMode={false}
 				onStartInPlanModeChange={vi.fn()}
