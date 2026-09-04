@@ -35,6 +35,7 @@ import {
 	type TaskEditDraftComparableValues,
 	TaskEditDraftRecoveryNotice,
 } from "@/components/task-edit-draft-recovery-notice";
+import { TaskNameInputWithAiSuggestions } from "@/components/task-name-input-with-ai-suggestions";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control";
 import { Button } from "@/components/ui/button";
@@ -74,6 +75,8 @@ const DEFAULT_PRIMARY_START_ACTION: TaskCreateStartAction = "start";
  */
 export interface TaskCreateFormSnapshot {
 	prompt: string;
+	/** 名字输入框。留空是常态（= 用描述推导），但用户敲进去的名字同样是「改动过表单」。 */
+	taskName: string;
 	/** 多任务模式下所有非空行 trim 后拼接；单任务模式为空串 */
 	multiPromptContent: string;
 	imageCount: number;
@@ -106,6 +109,7 @@ function isSameTerminalAgentModelOverrideSettings(
 export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline: TaskCreateFormSnapshot): boolean {
 	return (
 		current.prompt.trim() !== baseline.prompt.trim() ||
+		current.taskName.trim() !== baseline.taskName.trim() ||
 		current.multiPromptContent !== baseline.multiPromptContent ||
 		current.imageCount !== baseline.imageCount ||
 		current.startInPlanMode !== baseline.startInPlanMode ||
@@ -353,6 +357,9 @@ export function TaskEditorDialog({
 		[open, promptDraft, propagatePromptDraft],
 	);
 
+	// 名字与候选名一样只在这一次建卡期间有意义，所以留在对话框本地，不上抛到 App 根节点；
+	// 提交时经 `taskNameOverride` 一次性交给处理方（与 promptDraft 同一套交接方式）。
+	const [taskName, setTaskName] = useState("");
 	const [mode, setMode] = useState<"single" | "multi">("single");
 	const [createMore, setCreateMore] = useState(false);
 	const [composerResetKey, setComposerResetKey] = useState(0);
@@ -426,6 +433,7 @@ export function TaskEditorDialog({
 	// Reset state when dialog closes
 	useEffect(() => {
 		if (!open) {
+			setTaskName("");
 			setMode("single");
 			setCreateMore(false);
 			setComposerResetKey(0);
@@ -500,6 +508,10 @@ export function TaskEditorDialog({
 	const resetForCreateMore = useCallback(() => {
 		setPromptDraft("");
 		propagatePromptDraft("");
+		// 下一张卡是新的一张，上一张的名字与候选都不该跟过去。名字在这里清；候选轮次是
+		// TaskNameInputWithAiSuggestions 的本地 state，靠下面 setComposerResetKey 换 key 重挂来清
+		//（对话框整个关掉时不需要这一步：Radix 关闭即卸载内容，那些 state 自然没了）。
+		setTaskName("");
 		onImagesChange([]);
 		setMode("single");
 		setTaskPrompts([]);
@@ -509,25 +521,37 @@ export function TaskEditorDialog({
 	}, [onImagesChange, propagatePromptDraft]);
 
 	const handleCreateSingle = useCallback(() => {
-		const createdTaskId = onCreate({ keepDialogOpen: createMore, promptOverride: promptDraft });
+		const createdTaskId = onCreate({
+			keepDialogOpen: createMore,
+			promptOverride: promptDraft,
+			taskNameOverride: taskName,
+		});
 		if (createMore && createdTaskId) {
 			resetForCreateMore();
 		}
-	}, [createMore, onCreate, promptDraft, resetForCreateMore]);
+	}, [createMore, onCreate, promptDraft, resetForCreateMore, taskName]);
 
 	const handleCreateAndStartSingle = useCallback(() => {
-		const createdTaskId = onCreateAndStart?.({ keepDialogOpen: createMore, promptOverride: promptDraft });
+		const createdTaskId = onCreateAndStart?.({
+			keepDialogOpen: createMore,
+			promptOverride: promptDraft,
+			taskNameOverride: taskName,
+		});
 		if (createMore && createdTaskId) {
 			resetForCreateMore();
 		}
-	}, [createMore, onCreateAndStart, promptDraft, resetForCreateMore]);
+	}, [createMore, onCreateAndStart, promptDraft, resetForCreateMore, taskName]);
 
 	const handleCreateStartAndOpenSingle = useCallback(() => {
-		const createdTaskId = onCreateStartAndOpen?.({ keepDialogOpen: createMore, promptOverride: promptDraft });
+		const createdTaskId = onCreateStartAndOpen?.({
+			keepDialogOpen: createMore,
+			promptOverride: promptDraft,
+			taskNameOverride: taskName,
+		});
 		if (createMore && createdTaskId) {
 			resetForCreateMore();
 		}
-	}, [createMore, onCreateStartAndOpen, promptDraft, resetForCreateMore]);
+	}, [createMore, onCreateStartAndOpen, promptDraft, resetForCreateMore, taskName]);
 
 	const handleRunSingleStartAction = useCallback(
 		(action: TaskCreateStartAction) => {
@@ -650,6 +674,7 @@ export function TaskEditorDialog({
 	// 每次渲染刷新「当前表单」快照，供关闭时与打开时的基线比较。
 	const currentFormSnapshot: TaskCreateFormSnapshot = {
 		prompt: promptDraft,
+		taskName,
 		multiPromptContent: taskPrompts
 			.map((value) => value.trim())
 			.filter(Boolean)
@@ -789,8 +814,21 @@ export function TaskEditorDialog({
 					) : null}
 					{mode === "single" ? (
 						<div>
+							{/* edit 模式本次不露出名字框：updateTask 里 title 是非三态字段，漏传即复位，
+							    那条链路的几个回填点要另外核一遍。见计划里的「明确不做」。 */}
+							{taskEditorMode === "create" ? (
+								// key 必须与下面 composer 那个**不同**：两个兄弟节点用同一个 key 会让 React 把它们
+								// 当成同一个 keyed 集合去对账，于是换 key 时该重挂的那个没重挂（上一张卡的候选名
+								// 会跟到下一张）。共用同一个计数器、各带各的前缀即可。
+								<TaskNameInputWithAiSuggestions
+									key={`task-name-input-${composerResetKey}`}
+									taskName={taskName}
+									onTaskNameChange={setTaskName}
+									taskDescription={promptDraft}
+								/>
+							) : null}
 							<TaskPromptComposer
-								key={composerResetKey}
+								key={`task-prompt-composer-${composerResetKey}`}
 								value={promptDraft}
 								onValueChange={setPromptDraft}
 								onValueBlur={() => propagatePromptDraft(promptDraft)}
@@ -801,7 +839,8 @@ export function TaskEditorDialog({
 								placeholder="Describe the task..."
 								autoFocus
 								workspaceId={workspaceId}
-								showAttachImageButton={false}
+								showAttachImageButton
+								showPseudoHtmlBlockInsertButton
 							/>
 							<div className="flex items-center justify-between mt-1.5">
 								<p className="text-[11px] text-text-tertiary">
@@ -810,7 +849,7 @@ export function TaskEditorDialog({
 									<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
 										{pasteShortcutLabel}
 									</code>{" "}
-									to add images.
+									also adds images.
 								</p>
 								{taskEditorMode === "create" && detectedItems.length >= 2 ? (
 									<button

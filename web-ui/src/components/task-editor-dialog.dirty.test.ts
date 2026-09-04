@@ -5,6 +5,7 @@ import { hasTaskCreateFormEdits, type TaskCreateFormSnapshot } from "@/component
 function baseline(overrides: Partial<TaskCreateFormSnapshot> = {}): TaskCreateFormSnapshot {
 	return {
 		prompt: "",
+		taskName: "",
 		multiPromptContent: "",
 		imageCount: 0,
 		startInPlanMode: false,
@@ -32,6 +33,14 @@ describe("hasTaskCreateFormEdits", () => {
 
 	it("detects typed prompt content", () => {
 		expect(hasTaskCreateFormEdits(baseline({ prompt: "Fix the bug" }), baseline())).toBe(true);
+	});
+
+	it("treats a whitespace-only task name as unchanged", () => {
+		expect(hasTaskCreateFormEdits(baseline({ taskName: "  " }), baseline())).toBe(false);
+	});
+
+	it("detects a typed task name", () => {
+		expect(hasTaskCreateFormEdits(baseline({ taskName: "Fix the login bug" }), baseline())).toBe(true);
 	});
 
 	it("detects multi-task prompt content", () => {
