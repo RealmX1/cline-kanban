@@ -15,6 +15,8 @@ import {
 	fileToTaskImage,
 } from "@/components/task-image-input-utils";
 import { TaskImageStrip } from "@/components/task-image-strip";
+import { TaskPromptPseudoHtmlBlockInsertControl } from "@/components/task-prompt-pseudo-html-block-insert-control";
+import { buildTaskPromptWithPseudoHtmlBlockInserted } from "@/components/task-prompt-pseudo-html-block-insertion";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
@@ -42,6 +44,7 @@ interface TaskPromptComposerProps {
 	autoFocus?: boolean;
 	workspaceId?: string | null;
 	showAttachImageButton?: boolean;
+	showPseudoHtmlBlockInsertButton?: boolean;
 }
 
 export function TaskPromptComposer({
@@ -60,17 +63,26 @@ export function TaskPromptComposer({
 	autoFocus = false,
 	workspaceId = null,
 	showAttachImageButton = true,
+	showPseudoHtmlBlockInsertButton = true,
 }: TaskPromptComposerProps): ReactElement {
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const mentionSearchRequestIdRef = useRef(0);
 	const [cursorIndex, setCursorIndex] = useState(0);
+	// `cursorIndex` 就是 selectionStart（mention 补全链路只需要它）；插入伪 HTML 块要包住整个选区，
+	// 所以另记一份 selectionEnd，而不是去改 mention 那条链路对 cursorIndex 的既有用法。
+	const [selectionEndIndex, setSelectionEndIndex] = useState(0);
 	const [mentionItems, setMentionItems] = useState<InlineCompletionItem[]>([]);
 	const [mentionInsertTextMap, setMentionInsertTextMap] = useState(new Map<string, string>());
 	const [isMentionSearchLoading, setIsMentionSearchLoading] = useState(false);
 	const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
 	const [isSuggestionPickerOpen, setIsSuggestionPickerOpen] = useState(false);
 	const [isDragOver, setIsDragOver] = useState(false);
+
+	const syncSelectionIndexesFromTextarea = useCallback((textarea: HTMLTextAreaElement) => {
+		setCursorIndex(textarea.selectionStart ?? textarea.value.length);
+		setSelectionEndIndex(textarea.selectionEnd ?? textarea.value.length);
+	}, []);
 
 	const autoResizeTextarea = useCallback(() => {
 		const textarea = textareaRef.current;
@@ -165,6 +177,7 @@ export function TaskPromptComposer({
 			textareaRef.current.focus();
 			textareaRef.current.setSelectionRange(cursor, cursor);
 			setCursorIndex(cursor);
+			setSelectionEndIndex(cursor);
 		});
 	}, [autoFocus, disabled, enabled]);
 
@@ -183,6 +196,7 @@ export function TaskPromptComposer({
 				textareaRef.current.focus();
 				textareaRef.current.setSelectionRange(next.cursor, next.cursor);
 				setCursorIndex(next.cursor);
+				setSelectionEndIndex(next.cursor);
 			});
 		},
 		[activeToken, mentionInsertTextMap, onValueChange, value],
@@ -332,6 +346,60 @@ export function TaskPromptComposer({
 		fileInputRef.current?.click();
 	}, []);
 
+	// 插完块要把光标还给 textarea，但下拉关闭时 Radix 会把焦点收回触发按钮。两件事各自需要一个不同的
+	// 时机，所以用两个独立的一次性标记，谁先跑都不会互相踩：
+	//   - 焦点：必须在 Radix 的 onCloseAutoFocus 里**同步**抢回来。晚一帧（rAF）的话，紧跟着的头几个
+	//     按键会打到触发按钮上直接丢掉；
+	//   - 选区：必须等新文本提交进 DOM 之后再设。在旧的、更短的值上调 setSelectionRange 会被截断，
+	//     所以挂在 `value` 变化的 effect 上。
+	const shouldStealFocusBackFromPseudoHtmlBlockPopoverRef = useRef(false);
+	const pendingSelectionRestoreAfterPseudoHtmlBlockInsertRef = useRef<{ start: number; end: number } | null>(null);
+
+	useEffect(() => {
+		const pendingSelectionRestore = pendingSelectionRestoreAfterPseudoHtmlBlockInsertRef.current;
+		if (!pendingSelectionRestore) {
+			return;
+		}
+		pendingSelectionRestoreAfterPseudoHtmlBlockInsertRef.current = null;
+		const textarea = textareaRef.current;
+		if (!textarea) {
+			return;
+		}
+		textarea.focus();
+		textarea.setSelectionRange(pendingSelectionRestore.start, pendingSelectionRestore.end);
+	}, [value]);
+
+	const handleInsertPseudoHtmlBlock = useCallback(
+		(blockName: string) => {
+			// 点按钮那一刻 textarea 已经失焦，现读 DOM 选区只会拿到 0/0；必须用 state 里记下的那份。
+			const inserted = buildTaskPromptWithPseudoHtmlBlockInserted({
+				promptValue: value,
+				selectionStart: cursorIndex,
+				selectionEnd: selectionEndIndex,
+				blockName,
+			});
+			onValueChange(inserted.nextPromptValue);
+			setCursorIndex(inserted.nextSelectionStart);
+			setSelectionEndIndex(inserted.nextSelectionEnd);
+			pendingSelectionRestoreAfterPseudoHtmlBlockInsertRef.current = {
+				start: inserted.nextSelectionStart,
+				end: inserted.nextSelectionEnd,
+			};
+			shouldStealFocusBackFromPseudoHtmlBlockPopoverRef.current = true;
+		},
+		[cursorIndex, onValueChange, selectionEndIndex, value],
+	);
+
+	const handlePseudoHtmlBlockPopoverCloseAutoFocus = useCallback((event: Event) => {
+		if (!shouldStealFocusBackFromPseudoHtmlBlockPopoverRef.current) {
+			// 用户按 Esc / 点外面关掉的，什么都没插入：让 Radix 照常把焦点还给触发按钮。
+			return;
+		}
+		shouldStealFocusBackFromPseudoHtmlBlockPopoverRef.current = false;
+		event.preventDefault();
+		textareaRef.current?.focus();
+	}, []);
+
 	const handleFileInputChange = useCallback(
 		(event: ChangeEvent<HTMLInputElement>) => {
 			if (!onImagesChange || !event.currentTarget.files) {
@@ -354,6 +422,9 @@ export function TaskPromptComposer({
 	);
 
 	const showSuggestions = Boolean(enabled && isSuggestionPickerOpen && activeToken);
+	// 图片按钮的前提是调用方接了 onImagesChange（没接就无处安放选中的图）；插入块只受自己那个开关约束。
+	const isAttachImageButtonVisible = Boolean(onImagesChange) && showAttachImageButton;
+	const isComposerToolbarVisible = isAttachImageButtonVisible || showPseudoHtmlBlockInsertButton;
 
 	return (
 		<div>
@@ -374,16 +445,14 @@ export function TaskPromptComposer({
 						value={value}
 						onChange={(event) => {
 							onValueChange(event.target.value);
-							setCursorIndex(event.target.selectionStart ?? event.target.value.length);
+							syncSelectionIndexesFromTextarea(event.target);
 						}}
 						onKeyDown={handleTextareaKeyDown}
 						onBlur={onValueBlur}
-						onClick={(event) =>
-							setCursorIndex(event.currentTarget.selectionStart ?? event.currentTarget.value.length)
-						}
-						onKeyUp={(event) =>
-							setCursorIndex(event.currentTarget.selectionStart ?? event.currentTarget.value.length)
-						}
+						onClick={(event) => syncSelectionIndexesFromTextarea(event.currentTarget)}
+						onKeyUp={(event) => syncSelectionIndexesFromTextarea(event.currentTarget)}
+						// 拖选与 ⌘A 只有 onSelect 一定会报到；click/keyUp 覆盖不全。
+						onSelect={(event) => syncSelectionIndexesFromTextarea(event.currentTarget)}
 						onPaste={handlePaste}
 						placeholder={placeholder ?? "Describe the task"}
 						disabled={disabled}
@@ -413,17 +482,27 @@ export function TaskPromptComposer({
 				<TaskImageStrip images={images} onRemoveImage={handleRemoveImage} className="mt-1.5" />
 			) : null}
 
-			{onImagesChange && showAttachImageButton ? (
-				<>
-					<input
-						ref={fileInputRef}
-						type="file"
-						accept={ACCEPTED_TASK_IMAGE_INPUT_ACCEPT}
-						multiple
-						className="hidden"
-						onChange={handleFileInputChange}
-					/>
-					<div className={images.length > 0 ? "mt-1" : "mt-1.5"}>
+			{isAttachImageButtonVisible ? (
+				<input
+					ref={fileInputRef}
+					type="file"
+					accept={ACCEPTED_TASK_IMAGE_INPUT_ACCEPT}
+					multiple
+					className="hidden"
+					onChange={handleFileInputChange}
+				/>
+			) : null}
+
+			{isComposerToolbarVisible ? (
+				<div className={cn("flex items-center gap-1", images.length > 0 ? "mt-1" : "mt-1.5")}>
+					{showPseudoHtmlBlockInsertButton ? (
+						<TaskPromptPseudoHtmlBlockInsertControl
+							onInsertPseudoHtmlBlock={handleInsertPseudoHtmlBlock}
+							onPopoverCloseAutoFocus={handlePseudoHtmlBlockPopoverCloseAutoFocus}
+							disabled={disabled || !enabled}
+						/>
+					) : null}
+					{isAttachImageButtonVisible ? (
 						<Button
 							variant="ghost"
 							size="sm"
@@ -433,8 +512,8 @@ export function TaskPromptComposer({
 						>
 							Attach image
 						</Button>
-					</div>
-				</>
+					) : null}
+				</div>
 			) : null}
 		</div>
 	);

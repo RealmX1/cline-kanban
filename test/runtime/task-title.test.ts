@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveTaskTitleFromPrompt, resolveTaskTitle } from "../../src/core/task-title.js";
+import {
+	DEFAULT_TASK_TITLE_MAX_CHARS,
+	deriveTaskTitleFromPrompt,
+	resolveTaskTitle,
+} from "../../src/core/task-title.js";
 
 describe("task title helpers", () => {
 	it("derives a title from the first non-empty prompt line", () => {
@@ -57,5 +61,39 @@ describe("task title helpers", () => {
 
 	it("handles a prompt that is only an XML tag", () => {
 		expect(deriveTaskTitleFromPrompt("<user_input>")).toBe("");
+	});
+
+	it("truncates an over-long first line with an ellipsis at the configured limit", () => {
+		const overLongLine = "x".repeat(DEFAULT_TASK_TITLE_MAX_CHARS + 20);
+		const derived = deriveTaskTitleFromPrompt(overLongLine);
+		expect(derived).toBe(`${"x".repeat(DEFAULT_TASK_TITLE_MAX_CHARS)}…`);
+		expect(derived).toHaveLength(DEFAULT_TASK_TITLE_MAX_CHARS + 1);
+	});
+
+	it("collapses runs of whitespace inside the derived title", () => {
+		expect(deriveTaskTitleFromPrompt("  Fix   the\t\tlogin   bug  ")).toBe("Fix the login bug");
+	});
+
+	it("keeps deriving from the first non-empty line when that line has real content", () => {
+		// 逐行扫描是为裸标签首行加的；首行本就有正文时结果必须与逐行扫描之前逐字节一致。
+		expect(deriveTaskTitleFromPrompt("Real first line\n<trajectory>\nignored")).toBe("Real first line");
+	});
+
+	// 伪 HTML 块插入按钮上线后，「描述以 <trajectory> 独占一行开头」会变成常态。
+	// 老实现在这里返回 ""，而 web-ui 的 normalizeCard 会把空标题兜成整份 prompt。
+	it("skips a bare pseudo HTML opening tag line and derives from the first line with content", () => {
+		expect(deriveTaskTitleFromPrompt("<trajectory>\nInvestigate the flaky login test\n</trajectory>")).toBe(
+			"Investigate the flaky login test",
+		);
+	});
+
+	it("skips several consecutive bare tag lines", () => {
+		expect(deriveTaskTitleFromPrompt("<question>\n</question>\n<answer>\nUse a retry budget\n</answer>")).toBe(
+			"Use a retry budget",
+		);
+	});
+
+	it("still returns an empty title when every line is a bare tag", () => {
+		expect(deriveTaskTitleFromPrompt("<trajectory>\n\n</trajectory>")).toBe("");
 	});
 });
