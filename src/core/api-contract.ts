@@ -928,6 +928,38 @@ export const runtimeAddBacklogTaskRequestSchema = z.object({
 });
 export type RuntimeAddBacklogTaskRequest = z.infer<typeof runtimeAddBacklogTaskRequestSchema>;
 
+// 建卡时按任务描述起名。请求只带描述：起名不需要工作区上下文，也刻意不带图片
+// （官方另有支持图像输入的型号，本条链路不走那条）。
+export const runtimeTaskNameSuggestionRequestSchema = z.object({
+	taskDescription: z.string(),
+});
+export type RuntimeTaskNameSuggestionRequest = z.infer<typeof runtimeTaskNameSuggestionRequestSchema>;
+
+// 「拿不到名字」是**正常返回**而不是错误：这条能力天生可缺席（没配密钥的机器上就是没有），
+// 把它做成 TRPC 错误会逼前端在 catch 里区分「真故障」与「本来就没配」。
+export const runtimeTaskNameSuggestionUnavailableReasonSchema = z.enum([
+	"api_key_not_configured",
+	"task_description_empty",
+	"request_failed",
+]);
+export type RuntimeTaskNameSuggestionUnavailableReason = z.infer<
+	typeof runtimeTaskNameSuggestionUnavailableReasonSchema
+>;
+
+export const runtimeTaskNameSuggestionResponseSchema = z.discriminatedUnion("status", [
+	z.object({
+		status: z.literal("suggested"),
+		suggestedTaskNames: z.array(z.string()).min(1).max(5),
+	}),
+	z.object({
+		status: z.literal("unavailable"),
+		unavailableReason: runtimeTaskNameSuggestionUnavailableReasonSchema,
+		// 供界面直接显示的一句话（HTTP 状态码、超时之类）。没有额外可说的就省略。
+		unavailableDetail: z.string().optional(),
+	}),
+]);
+export type RuntimeTaskNameSuggestionResponse = z.infer<typeof runtimeTaskNameSuggestionResponseSchema>;
+
 export const runtimeAddBacklogTaskResponseSchema = z.object({
 	taskId: z.string(),
 });
@@ -1984,6 +2016,9 @@ export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z
 	// 键是 projectId（= 服务端 workspaceId），值是该项目上次**成功建卡**所用的 base ref。
 	// 只在建卡成功时写，不在下拉框每次 change 时写：点开对话框又放弃的误选不该变成项目默认值。
 	mostRecentlyUsedTaskCreateBaseRefByProjectId: z.record(z.string(), z.string()),
+	// 建卡描述区「插入伪 HTML 块」用过的**自定义**块名（内置预设不进这份记忆），最近使用在前。
+	// 与上面几个字典同理不可空：空数组已经表达「一条都没有」，再用 null 表达「尚未设定」是多余的第三态。
+	taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: z.array(z.string()),
 });
 export type RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins = z.infer<
 	typeof runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema

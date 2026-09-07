@@ -43,7 +43,11 @@ export type DiagnosticEventJournalChannel =
 	| "pty-session-spawn"
 	| "pty-session-exit"
 	| "task-session-auto-restart-scheduled"
-	| "process-file-descriptor-count-sample";
+	| "process-file-descriptor-count-sample"
+	// Kanban 每次调用外部模型 provider 的一条用量记录（用途角色、provider、模型、结果、耗时、token）。
+	// 与上面那些「排障绊线」不同，这一条是为**事后统计**而留的：哪些功能在烧钱、哪家 provider 在超时、
+	// 某个用途的 token 量级是多少，事后 `jq` 就能算，不必再去翻各功能自己的日志。
+	| "model-provider-usage";
 
 // 以下字段由本模块权威写入。类型上的 `never` 只能挡住对象字面量与已知形状的展开：一个声明为
 // `Record<string, unknown>` 的变量传进来时 TS 不会拿索引签名去比对可选属性，编译期一个错都不报。

@@ -125,6 +125,18 @@ export function useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference(): [
 	return useUserInterfacePreference("mostRecentlyUsedTaskCreateBaseRefByProjectId", {});
 }
 
+/**
+ * 建卡描述区「插入伪 HTML 块」用过的自定义块名，最近使用在前。
+ *
+ * 只记**自定义**名：内置预设本来就常驻在下拉里，再进这份记忆只会把列表撑成两份重复项。
+ */
+export function useTaskPromptPseudoHtmlBlockRecentlyUsedCustomNamesPreference(): [
+	string[],
+	Dispatch<SetStateAction<string[]>>,
+] {
+	return useUserInterfacePreference("taskPromptPseudoHtmlBlockRecentlyUsedCustomNames", []);
+}
+
 /** 迁移时两边都有值且不一致的字段（服务端胜出）。空数组表示无冲突。 */
 export function useUserInterfacePreferenceFieldsWhereServerAndBrowserDisagree(): readonly string[] {
 	return useUserInterfacePreferenceStoreState().fieldsWhereServerAndBrowserDisagree;

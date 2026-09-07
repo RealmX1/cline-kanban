@@ -143,6 +143,22 @@ vi.mock("@/components/task-prompt-composer", () => ({
 	TaskPromptComposer: () => null,
 }));
 
+// 建卡时「名字框留空」会 fire-and-forget 去要一个 AI 名字回填。这套用例没有服务器，所以把那条查询
+// 换成可编排的替身：默认永不解决（= 与没有起名能力时的行为逐字一致），要测回填的用例自己放行。
+const fakeTaskNameSuggestionEndpoint = vi.hoisted(() => ({
+	respond: null as ((response: unknown) => void) | null,
+	callCount: 0,
+}));
+
+vi.mock("@/runtime/task-name-suggestion-query", () => ({
+	suggestTaskNamesFromTaskDescription: vi.fn(() => {
+		fakeTaskNameSuggestionEndpoint.callCount += 1;
+		return new Promise((resolve) => {
+			fakeTaskNameSuggestionEndpoint.respond = resolve;
+		});
+	}),
+}));
+
 function createTask(taskId: string, prompt: string, createdAt: number, overrides: Partial<BoardCard> = {}): BoardCard {
 	return {
 		id: taskId,
@@ -197,7 +213,8 @@ interface HookSnapshot {
 	editTaskConversationMode: RuntimeTaskConversationMode;
 	isEditTaskStartInPlanModeDisabled: boolean;
 	handleOpenCreateTask: () => void;
-	handleCreateTask: (options?: { keepDialogOpen?: boolean }) => string | null;
+	handleCreateTask: (options?: { keepDialogOpen?: boolean; taskNameOverride?: string }) => string | null;
+	handleSaveTaskTitle: (taskId: string, title: string) => void;
 	handleCreateTasks: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
 	setNewTaskPrompt: (value: string) => void;
 	setNewTaskImages: (value: TaskImage[]) => void;
@@ -301,6 +318,7 @@ function HookHarness({
 			isEditTaskStartInPlanModeDisabled: editor.isEditTaskStartInPlanModeDisabled,
 			handleOpenCreateTask: editor.handleOpenCreateTask,
 			handleCreateTask: editor.handleCreateTask,
+			handleSaveTaskTitle: editor.handleSaveTaskTitle,
 			handleCreateTasks: editor.handleCreateTasks,
 			setNewTaskPrompt: editor.setNewTaskPrompt,
 			setNewTaskImages: editor.setNewTaskImages,
@@ -326,6 +344,7 @@ function HookHarness({
 	}, [
 		board,
 		editor.handleCreateTask,
+		editor.handleSaveTaskTitle,
 		editor.handleCreateTasks,
 		editor.handleOpenCreateTask,
 		editor.editTaskPrompt,
@@ -379,6 +398,8 @@ describe("useTaskEditor", () => {
 		resetTaskEditDraftStoreForTests();
 		fakeWorkspaceTaskEditDraftServer.snapshot = null;
 		fakeWorkspaceTaskEditDraftServer.releaseFetch = null;
+		fakeTaskNameSuggestionEndpoint.respond = null;
+		fakeTaskNameSuggestionEndpoint.callCount = 0;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -399,6 +420,131 @@ describe("useTaskEditor", () => {
 				previousActEnvironment;
 		}
 		localStorage.clear();
+	});
+
+	it("uses the name typed in the task name field as the card title", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Login redirects to a blank page after SSO");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask({ taskNameOverride: "  Fix the SSO redirect  " });
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Fix the SSO redirect");
+		// 用户自己给了名字就不该再去问 AI。
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(0);
+	});
+
+	it("derives the title from the prompt when the name field is empty, then backfills the suggested name", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Login redirects to a blank page after SSO");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask({ taskNameOverride: "   " });
+		});
+
+		// 先落卡：标题是正则推导值，建卡完全不等起名请求。
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe(
+			"Login redirects to a blank page after SSO",
+		);
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(1);
+
+		await act(async () => {
+			fakeTaskNameSuggestionEndpoint.respond?.({
+				status: "suggested",
+				suggestedTaskNames: ["Fix the SSO redirect", "Repair post-SSO navigation"],
+			});
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Fix the SSO redirect");
+	});
+
+	it("leaves the derived title alone when the naming endpoint is unavailable", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Login redirects to a blank page after SSO");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+		await act(async () => {
+			fakeTaskNameSuggestionEndpoint.respond?.({
+				status: "unavailable",
+				unavailableReason: "api_key_not_configured",
+			});
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe(
+			"Login redirects to a blank page after SSO",
+		);
+	});
+
+	it("does not overwrite a title the user changed while the naming request was in flight", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Login redirects to a blank page after SSO");
+		});
+		let createdTaskId: string | null = null;
+		await act(async () => {
+			createdTaskId = requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveTaskTitle(String(createdTaskId), "Renamed by hand");
+		});
+		await act(async () => {
+			fakeTaskNameSuggestionEndpoint.respond?.({
+				status: "suggested",
+				suggestedTaskNames: ["Fix the SSO redirect"],
+			});
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Renamed by hand");
 	});
 
 	it("defaults new tasks to plan mode from the runtime setting", async () => {
@@ -1665,6 +1811,105 @@ describe("useTaskEditor", () => {
 		});
 		expect(requireSnapshot(latestSnapshot).editTaskWorktreeMode).toBe("inplace");
 		expect(requireSnapshot(latestSnapshot).editTaskAgentSessionInitialization).toEqual(initialization);
+	});
+
+	function renderTaskCreateDialogForSuggestionRounds(open: boolean) {
+		return (
+			<TaskEditorDialog
+				open={open}
+				onOpenChange={vi.fn()}
+				prompt="Login redirects to a blank page after SSO"
+				onPromptChange={vi.fn()}
+				images={[]}
+				onImagesChange={vi.fn()}
+				onCreate={() => "created-task-1"}
+				taskAgentPermissionMode="bypass_all_permission_prompts"
+				onTaskAgentPermissionModeChange={vi.fn()}
+				taskConversationMode="operational"
+				onTaskConversationModeChange={vi.fn()}
+				onCreateMultiple={() => []}
+				startInPlanMode={false}
+				onStartInPlanModeChange={vi.fn()}
+				autoReviewEnabled={false}
+				onAutoReviewEnabledChange={vi.fn()}
+				autoReviewMode="commit"
+				onAutoReviewModeChange={vi.fn()}
+				workspaceId="workspace-1"
+				branchRef="main"
+				branchOptions={[{ value: "main", label: "main" }]}
+				onBranchRefChange={vi.fn()}
+				worktreeMode="branch"
+				onWorktreeModeChange={vi.fn()}
+				onClineSettingsChange={vi.fn()}
+			/>
+		);
+	}
+
+	/** 关闭再打开会在 body 里留下上一次的 portal 残骸，所以一律只看「最后那个」对话框。 */
+	function currentDialogElement(): HTMLElement {
+		const dialogs = Array.from(document.body.querySelectorAll<HTMLElement>('[role="dialog"]'));
+		const currentDialog = dialogs.at(-1);
+		if (!currentDialog) {
+			throw new Error("Expected a rendered dialog.");
+		}
+		return currentDialog;
+	}
+
+	function findDialogButtonByLabel(label: string): HTMLButtonElement | undefined {
+		return Array.from(currentDialogElement().querySelectorAll("button")).find(
+			(button) => button.textContent?.trim() === label,
+		);
+	}
+
+	async function requestOneTaskNameSuggestionRound(): Promise<void> {
+		await act(async () => {
+			(findDialogButtonByLabel("Suggest names") ?? findDialogButtonByLabel("Suggest more"))?.click();
+		});
+		await act(async () => {
+			fakeTaskNameSuggestionEndpoint.respond?.({
+				status: "suggested",
+				suggestedTaskNames: ["Fix the SSO redirect"],
+			});
+		});
+	}
+
+	it("drops the name suggestion rounds when the create dialog is closed and reopened", async () => {
+		await act(async () => {
+			root.render(renderTaskCreateDialogForSuggestionRounds(true));
+		});
+		await requestOneTaskNameSuggestionRound();
+		expect(currentDialogElement().textContent).toContain("Suggestion 1");
+
+		await act(async () => {
+			root.render(renderTaskCreateDialogForSuggestionRounds(false));
+		});
+		await act(async () => {
+			root.render(renderTaskCreateDialogForSuggestionRounds(true));
+		});
+
+		// 上一次建卡的候选不该跟到下一次打开的对话框里。
+		expect(currentDialogElement().textContent).not.toContain("Suggestion 1");
+		expect(findDialogButtonByLabel("Suggest more")).toBeUndefined();
+	});
+
+	it("drops the name suggestion rounds when Create more reuses the dialog for the next task", async () => {
+		await act(async () => {
+			root.render(renderTaskCreateDialogForSuggestionRounds(true));
+		});
+		const createMoreLabel = Array.from(currentDialogElement().querySelectorAll("label")).find((label) =>
+			label.textContent?.includes("Create more"),
+		);
+		await act(async () => {
+			document.getElementById(createMoreLabel?.getAttribute("for") ?? "")?.click();
+		});
+		await requestOneTaskNameSuggestionRound();
+		expect(currentDialogElement().textContent).toContain("Suggestion 1");
+
+		// 对话框留在原地不卸载，所以这一次靠换 key 重挂来清——上一张卡的候选不该跟到下一张。
+		await act(async () => {
+			findDialogButtonByLabel("Create")?.click();
+		});
+		expect(currentDialogElement().textContent).not.toContain("Suggestion 1");
 	});
 
 	it("allows selecting a new worktree when continuing a Claude session", async () => {

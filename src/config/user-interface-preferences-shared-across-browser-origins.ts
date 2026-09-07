@@ -22,6 +22,7 @@ export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHI
 		workspaceOpenTargetPreferredApplicationId: null,
 		projectNumericSlotGroupAssignmentsBySlotNumber: {},
 		mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
+		taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: [],
 	};
 
 function normalizeStringKeyedStringRecord(value: unknown): Record<string, string> {
@@ -36,6 +37,14 @@ function normalizeStringKeyedStringRecord(value: unknown): Record<string, string
 		}
 	}
 	return normalized;
+}
+
+/** 与字典同样的逐条宽容策略：坏元素单独丢掉，不因为一个坏元素作废整份列表。 */
+function normalizeStringList(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	return value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
 }
 
 /**
@@ -72,6 +81,9 @@ export function normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
 		mostRecentlyUsedTaskCreateBaseRefByProjectId: normalizeStringKeyedStringRecord(
 			record.mostRecentlyUsedTaskCreateBaseRefByProjectId,
 		),
+		taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: normalizeStringList(
+			record.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames,
+		),
 	};
 }
 
@@ -86,7 +98,8 @@ export function hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet(
 		Object.keys(preferences.taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey).length === 0 &&
 		preferences.workspaceOpenTargetPreferredApplicationId === null &&
 		Object.keys(preferences.projectNumericSlotGroupAssignmentsBySlotNumber).length === 0 &&
-		Object.keys(preferences.mostRecentlyUsedTaskCreateBaseRefByProjectId).length === 0
+		Object.keys(preferences.mostRecentlyUsedTaskCreateBaseRefByProjectId).length === 0 &&
+		preferences.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames.length === 0
 	);
 }
 
@@ -96,6 +109,11 @@ function areStringKeyedStringRecordsEqual(left: Record<string, string>, right: R
 		return false;
 	}
 	return leftKeys.every((key) => left[key] === right[key]);
+}
+
+/** 列表是**有序**的（最近使用在前），所以逐位比较，不能当集合比。 */
+function areStringListsEqual(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((entry, index) => entry === right[index]);
 }
 
 export function areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
@@ -118,6 +136,10 @@ export function areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
 		areStringKeyedStringRecordsEqual(
 			left.mostRecentlyUsedTaskCreateBaseRefByProjectId,
 			right.mostRecentlyUsedTaskCreateBaseRefByProjectId,
+		) &&
+		areStringListsEqual(
+			left.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames,
+			right.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames,
 		)
 	);
 }
@@ -192,6 +214,11 @@ export function mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(
 			updates?.mostRecentlyUsedTaskCreateBaseRefByProjectId === undefined
 				? current.mostRecentlyUsedTaskCreateBaseRefByProjectId
 				: normalizeStringKeyedStringRecord(updates.mostRecentlyUsedTaskCreateBaseRefByProjectId),
+		// 列表与字典一样按整份替换：调用方读-改-写整份，逐项求并会让「忘掉某个块名」永远不生效。
+		taskPromptPseudoHtmlBlockRecentlyUsedCustomNames:
+			updates?.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames === undefined
+				? current.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames
+				: normalizeStringList(updates.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames),
 	};
 	if (!dictionaryEntriesMigratedFromBrowserLocalStorage) {
 		return replaced;
