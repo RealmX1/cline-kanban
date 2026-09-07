@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { TRPCClientError } from "@trpc/client";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import {
-	deliverExploratorySessionMapUpdate,
+	deliverExploratoryMutation,
+	parseExploratoryFindingCandidatePayload,
 	parseExploratoryMapUpdatePayload,
 	readExploratoryPayloadText,
 	resolveExploratoryCommandScope,
@@ -130,6 +131,66 @@ describe("parseExploratoryMapUpdatePayload", () => {
 				JSON.stringify({ clientProposalId: "p", sourceTurnProjectionSignature: "s", nodes: {} }),
 			),
 		).toThrow(/"nodes" must be an array/);
+	});
+});
+
+describe("parseExploratoryFindingCandidatePayload", () => {
+	it("接受白名单四键齐全的合法 payload", () => {
+		expect(
+			parseExploratoryFindingCandidatePayload(
+				JSON.stringify({
+					clientProposalId: "prop-1",
+					findingTitle: "结论标题",
+					findingBodyMarkdown: "正文",
+					provenanceLinks: [{ linkKind: "turn_anchor", conversationSessionTaskId: "t", turnNumber: 3 }],
+				}),
+			),
+		).toEqual({
+			clientProposalId: "prop-1",
+			findingTitle: "结论标题",
+			findingBodyMarkdown: "正文",
+			provenanceLinks: [{ linkKind: "turn_anchor", conversationSessionTaskId: "t", turnNumber: 3 }],
+		});
+	});
+
+	it("JSON.parse 失败时报人话错误", () => {
+		expect(() => parseExploratoryFindingCandidatePayload("{not json")).toThrow(/not valid JSON/);
+	});
+
+	it("非对象 JSON 报人话错误", () => {
+		expect(() => parseExploratoryFindingCandidatePayload("[1,2]")).toThrow(/must be a JSON object/);
+	});
+
+	it("缺 clientProposalId 报人话错误", () => {
+		expect(() =>
+			parseExploratoryFindingCandidatePayload(
+				JSON.stringify({ findingTitle: "t", findingBodyMarkdown: "b", provenanceLinks: [] }),
+			),
+		).toThrow(/missing required string field "clientProposalId"/);
+	});
+
+	it("缺 findingTitle 报人话错误", () => {
+		expect(() =>
+			parseExploratoryFindingCandidatePayload(
+				JSON.stringify({ clientProposalId: "p", findingBodyMarkdown: "b", provenanceLinks: [] }),
+			),
+		).toThrow(/missing required string field "findingTitle"/);
+	});
+
+	it("缺 findingBodyMarkdown 报人话错误", () => {
+		expect(() =>
+			parseExploratoryFindingCandidatePayload(
+				JSON.stringify({ clientProposalId: "p", findingTitle: "t", provenanceLinks: [] }),
+			),
+		).toThrow(/missing required string field "findingBodyMarkdown"/);
+	});
+
+	it("provenanceLinks 非数组报人话错误", () => {
+		expect(() =>
+			parseExploratoryFindingCandidatePayload(
+				JSON.stringify({ clientProposalId: "p", findingTitle: "t", findingBodyMarkdown: "b", provenanceLinks: {} }),
+			),
+		).toThrow(/"provenanceLinks" must be an array/);
 	});
 });
 
@@ -279,7 +340,7 @@ describe("resolveExploratoryCommandScope（--project-path workspace 解析）", 
 	});
 });
 
-describe("deliverExploratorySessionMapUpdate", () => {
+describe("deliverExploratoryMutation", () => {
 	it("applied=false 是业务结果而非失败：正常 resolve，rejectionReason 随响应带出", async () => {
 		const rejected = createIngestResponse({
 			applied: false,
@@ -287,7 +348,7 @@ describe("deliverExploratorySessionMapUpdate", () => {
 		});
 		const mutate = vi.fn(async () => rejected);
 
-		await expect(deliverExploratorySessionMapUpdate(mutate, FAST_DELIVERY_OPTIONS)).resolves.toEqual(rejected);
+		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).resolves.toEqual(rejected);
 		expect(mutate).toHaveBeenCalledTimes(1);
 	});
 
@@ -296,7 +357,7 @@ describe("deliverExploratorySessionMapUpdate", () => {
 			throw new TRPCClientError("referencedFindingId 仅允许出现在 finding_reference 节点上");
 		});
 
-		await expect(deliverExploratorySessionMapUpdate(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow(
+		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow(
 			"referencedFindingId 仅允许出现在 finding_reference 节点上",
 		);
 		expect(mutate).toHaveBeenCalledTimes(1);
@@ -312,9 +373,7 @@ describe("deliverExploratorySessionMapUpdate", () => {
 			return createIngestResponse();
 		});
 
-		await expect(deliverExploratorySessionMapUpdate(mutate, FAST_DELIVERY_OPTIONS)).resolves.toEqual(
-			createIngestResponse(),
-		);
+		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).resolves.toEqual(createIngestResponse());
 		expect(mutate).toHaveBeenCalledTimes(2);
 	});
 
@@ -323,7 +382,7 @@ describe("deliverExploratorySessionMapUpdate", () => {
 			throw new Error("fetch failed");
 		});
 
-		await expect(deliverExploratorySessionMapUpdate(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow("fetch failed");
+		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow("fetch failed");
 		expect(mutate).toHaveBeenCalledTimes(2);
 	});
 });

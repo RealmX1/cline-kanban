@@ -1,7 +1,7 @@
-# Exploratory Mode（Session Map / Findings）—— M0+M1 集成要点
+# Exploratory Mode（Session Map / Findings）—— M0–M2 集成要点
 
-> 设计蓝图：`.plan/docs/exploratory-mode-session-map-and-findings-store.md`（状态头有 M0/M1 实施注记，
-> §H 的 M0–M6 是技术依赖排序）。本页是改动该子系统前必读的承重集成知识；新增阶段（M2+）
+> 设计蓝图：`.plan/docs/exploratory-mode-session-map-and-findings-store.md`（状态头有 M0/M1/M2 实施注记，
+> §H 的 M0–M6 是技术依赖排序）。本页是改动该子系统前必读的承重集成知识；新增阶段（M3+）
 > 落地时同步更新本页与 `AGENTS.md` 的一行指针。
 
 ## 1. turn 编号权威与同源边界分类器
@@ -111,3 +111,56 @@ M1 起面板有两条更新源：
   形态，见 `docs/post-mortems/event-loop-stall-lock-crash.md`）。面板态保留短路用
   `JSON.stringify` 全内容比较（不用签名比对——签名只覆盖消息流，checkpoint/facet 边沿
   感知不到）。
+
+## 8. findings store 与写入通道（M2 已落地）
+
+findings 是 **workspace 级**资产（v1 不跨 workspace）：per-workspace 文件
+`exploratory-findings.json`，store 模块 `src/state/exploratory-findings-store.ts`（骨架镜像
+map store：串行写队列 / 原子写 / 损坏容错 / 路径遍历守卫）。上限 500 条，cap-and-trim
+三级裁剪序 = archived → superseded → 非 pending 最旧 updatedAt，**pending 永不静默裁**
+（蓝图 M2 实施注记 (1)）。该取舍的容量语义：容量被 pending 占满时 cap 无可裁候选，
+让超限更糟的写入被显式拒绝（store 抛 `ExploratoryFindingsCapOverflowError` → ingest 回
+`findings_cap_overflow`、人工动作经 handler 目标存活检查回 `PRECONDITION_FAILED`），
+绝不「返回成功但 finding 消失」；让总量回落的写入（reject）即使结果仍超限也放行。
+
+**唯一写点 = `src/trpc/exploratory-api.ts` 的六个 procedure**（全部落 store 的 mutate 原语，
+成功变更 durable 落盘后广播 `exploratory_findings_updated` 全量替换推送——workspace 级、
+不搭车 summary 广播，同 map 的专属 WS 决策）：
+
+- 人工主路径（zod 校验即够，蓝图 §D.2.1）：`saveFinding`（UI 生成 findingId=uuid，落库即
+  active+user_saved；同 id 幂等回现状不广播）、`confirmFinding` / `rejectFinding`（仅
+  pending；**reject = 物理删除**——建议尚未成为资产）、`archiveFinding`（active↔archived；
+  对 pending/superseded 抛 BAD_REQUEST，superseded 互链审计不经 archive 改写）。
+- agent 建议通道：`kanban exploratory ingest-finding-candidate`（CLI 骨架同 map 通道，
+  投递层泛型化为 `deliverExploratoryMutation<T>`）→ `ingestFindingCandidate` mutation，
+  落库即 `suggested_pending_confirmation`+agent_suggested；findingId 服务端派生
+  `agent-<clientProposalId>`（同建议重发幂等 ack）。provenance 的 turn_anchor link 校验
+  三态：投影可用 → turnNumber 超最新 turn 整份拒绝、checkpoint 不在保留集合降级 null；
+  PTY 源 → 接受且 checkpoint 降级 null；投影加载抛错 → 拒绝
+  `provenance_conversation_session_unresolvable`；容量被 pending 占满 → 拒绝
+  `findings_cap_overflow`（容量语义见本节开头）。
+- **map 漏斗闸 2.5（M2 新增）**：`referencedFindingId` 可解析性——任意状态含 archived 的
+  finding 均可解析（archived 不级联删节点，map 是历史叙事），不可解析整份拒绝
+  `referenced_finding_unresolvable`；闸序在锚点可解析性之后、签名对账之前。指令文件的
+  finding_reference 已解禁：agent 先 `kanban exploratory get-findings` 列出现有 finding
+  再引用（pending 可引用，但被拒后引用悬空、UI 容错展示）。
+
+## 9. findings UI 链路（M2 已落地）
+
+- **单一真相 = `web-ui/src/hooks/use-exploratory-findings.ts`**（App.tsx 实例化一次）：
+  初始 `getFindings` query + `exploratory_findings_updated` 推送全量替换归并；mutation
+  不做乐观更新，状态经推送收敛。
+- **「存为 finding」**挂在 `cline-agent-chat-panel.tsx` 消息项上（Cline 与 ACP 共用同一
+  组件，一个挂载点覆盖两种 transport；PTY 无结构化消息项不加）：选区在按钮 mousedown
+  捕获（click 时选区已坍缩），无选区预填消息正文。provenance 组装是纯函数
+  `web-ui/src/components/findings/findings-model.ts`：消息经位置性映射可锚 → turn_anchor
+  三元（checkpoint commit 取投影 entries）；不可锚 → `user_authored_freeform`，
+  **绝不伪造锚**。保存时按规范化标题（小写去空白标点）对 active+pending 做相似警告，
+  不阻断（合并入口属 M5 §F）。
+- **findings 浏览器 = `App.tsx` 的 `isFindingsOpen` home 置换**（`isGitHistoryOpen` 先例，
+  非 overlay，与 overview/git history 三向互斥；入口在 top-bar）；列表 substring 搜索
+  （标题+正文），archived 默认不进列表（开关可显）；待确认卡片行内确认/拒绝，active/
+  archived 行内归档/恢复。
+- **任务级切片**在 map 面板底部「本会话 findings」可折叠 section：过滤 provenanceLinks
+  含当前会话的条目（排除 archived），待确认带角标 + 行内确认/拒绝。§G.3 深链
+  （`?view=findings`）未做，属 M3。

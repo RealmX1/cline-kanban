@@ -13,6 +13,8 @@ import type {
 	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 	RuntimeAnswerAgentRaisedPendingUserDecisionResponse,
+	RuntimeArchiveExploratoryFindingRequest,
+	RuntimeArchiveExploratoryFindingResponse,
 	RuntimeAvailableAgentSessionsRequest,
 	RuntimeAvailableAgentSessionsResponse,
 	RuntimeClineAccountBalanceResponse,
@@ -45,6 +47,8 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeConfigResponse,
 	RuntimeConfigSaveRequest,
+	RuntimeConfirmExploratoryFindingRequest,
+	RuntimeConfirmExploratoryFindingResponse,
 	// Post-Deploy Verification / deployment tRPC I/O 类型（本阶段新增，供 RuntimeTrpcContext.deploymentApi 使用）
 	RuntimeConfirmVerificationCompleteRequest,
 	RuntimeConfirmVerificationCompleteResponse,
@@ -62,6 +66,8 @@ import type {
 	RuntimeDismissConnectionRetrySessionsRequest,
 	RuntimeDismissConnectionRetrySessionsResponse,
 	RuntimeFeaturebaseTokenResponse,
+	RuntimeGetExploratoryFindingsRequest,
+	RuntimeGetExploratoryFindingsResponse,
 	RuntimeGetExploratorySessionMapRequest,
 	RuntimeGetExploratorySessionMapResponse,
 	RuntimeGetPostDeployVerificationStateRequest,
@@ -83,6 +89,8 @@ import type {
 	RuntimeGitSyncResponse,
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
+	RuntimeIngestExploratoryFindingCandidateRequest,
+	RuntimeIngestExploratoryFindingCandidateResponse,
 	RuntimeIngestExploratorySessionMapUpdateRequest,
 	RuntimeIngestExploratorySessionMapUpdateResponse,
 	RuntimeListAgentRaisedPendingUserDecisionsRequest,
@@ -103,12 +111,16 @@ import type {
 	RuntimePromptLibraryMutateRequest,
 	RuntimePromptLibraryReadRequest,
 	RuntimePromptLibraryResponse,
+	RuntimeRejectExploratoryFindingRequest,
+	RuntimeRejectExploratoryFindingResponse,
 	RuntimeReleaseDeferredRestorationHarnessNotificationsResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
 	RuntimeRunPostDeployVerificationItemResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeSaveExploratoryFindingRequest,
+	RuntimeSaveExploratoryFindingResponse,
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
 	RuntimeSlashCommandsResponse,
@@ -177,6 +189,8 @@ import {
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema,
+	runtimeArchiveExploratoryFindingRequestSchema,
+	runtimeArchiveExploratoryFindingResponseSchema,
 	runtimeAvailableAgentSessionsRequestSchema,
 	runtimeAvailableAgentSessionsResponseSchema,
 	runtimeClineAccountBalanceResponseSchema,
@@ -209,6 +223,8 @@ import {
 	runtimeCommandRunResponseSchema,
 	runtimeConfigResponseSchema,
 	runtimeConfigSaveRequestSchema,
+	runtimeConfirmExploratoryFindingRequestSchema,
+	runtimeConfirmExploratoryFindingResponseSchema,
 	// Post-Deploy Verification / deployment tRPC I/O schemas（本阶段新增，供 deployment router 校验）
 	runtimeConfirmVerificationCompleteRequestSchema,
 	runtimeConfirmVerificationCompleteResponseSchema,
@@ -226,6 +242,8 @@ import {
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeDismissConnectionRetrySessionsResponseSchema,
 	runtimeFeaturebaseTokenResponseSchema,
+	runtimeGetExploratoryFindingsRequestSchema,
+	runtimeGetExploratoryFindingsResponseSchema,
 	runtimeGetExploratorySessionMapRequestSchema,
 	runtimeGetExploratorySessionMapResponseSchema,
 	runtimeGetPostDeployVerificationStateRequestSchema,
@@ -247,6 +265,8 @@ import {
 	runtimeGitSyncResponseSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeHookIngestResponseSchema,
+	runtimeIngestExploratoryFindingCandidateRequestSchema,
+	runtimeIngestExploratoryFindingCandidateResponseSchema,
 	runtimeIngestExploratorySessionMapUpdateRequestSchema,
 	runtimeIngestExploratorySessionMapUpdateResponseSchema,
 	runtimeListAgentRaisedPendingUserDecisionsRequestSchema,
@@ -267,12 +287,16 @@ import {
 	runtimePromptLibraryMutateRequestSchema,
 	runtimePromptLibraryReadRequestSchema,
 	runtimePromptLibraryResponseSchema,
+	runtimeRejectExploratoryFindingRequestSchema,
+	runtimeRejectExploratoryFindingResponseSchema,
 	runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
 	runtimeRunPostDeployVerificationItemRequestSchema,
 	runtimeRunPostDeployVerificationItemResponseSchema,
 	runtimeRunUpdateResponseSchema,
+	runtimeSaveExploratoryFindingRequestSchema,
+	runtimeSaveExploratoryFindingResponseSchema,
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
 	runtimeSlashCommandsResponseSchema,
@@ -673,6 +697,30 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeIngestExploratorySessionMapUpdateRequest,
 		) => Promise<RuntimeIngestExploratorySessionMapUpdateResponse>;
+		getFindings: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGetExploratoryFindingsRequest,
+		) => Promise<RuntimeGetExploratoryFindingsResponse>;
+		saveFinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeSaveExploratoryFindingRequest,
+		) => Promise<RuntimeSaveExploratoryFindingResponse>;
+		confirmFinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeConfirmExploratoryFindingRequest,
+		) => Promise<RuntimeConfirmExploratoryFindingResponse>;
+		rejectFinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRejectExploratoryFindingRequest,
+		) => Promise<RuntimeRejectExploratoryFindingResponse>;
+		archiveFinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeArchiveExploratoryFindingRequest,
+		) => Promise<RuntimeArchiveExploratoryFindingResponse>;
+		ingestFindingCandidate: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeIngestExploratoryFindingCandidateRequest,
+		) => Promise<RuntimeIngestExploratoryFindingCandidateResponse>;
 	};
 }
 
@@ -1283,6 +1331,49 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeIngestExploratorySessionMapUpdateResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.exploratoryApi.ingestSessionMapUpdate(ctx.workspaceScope, input);
+			}),
+		// workspace 级 findings 全量读取（集合恒小，上限 500；蓝图 §D.3）。
+		getFindings: workspaceProcedure
+			.input(runtimeGetExploratoryFindingsRequestSchema)
+			.output(runtimeGetExploratoryFindingsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.getFindings(ctx.workspaceScope, input);
+			}),
+		// 人工保存主路径（蓝图 §D.2.1）：落库即 active + user_saved；同 findingId 幂等。
+		saveFinding: workspaceProcedure
+			.input(runtimeSaveExploratoryFindingRequestSchema)
+			.output(runtimeSaveExploratoryFindingResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.saveFinding(ctx.workspaceScope, input);
+			}),
+		// pending 建议确认 → active（蓝图 §D.2.2）；状态机违规报错，不存在 id 幂等回 null。
+		confirmFinding: workspaceProcedure
+			.input(runtimeConfirmExploratoryFindingRequestSchema)
+			.output(runtimeConfirmExploratoryFindingResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.confirmFinding(ctx.workspaceScope, input);
+			}),
+		// pending 建议拒绝 → 物理删除（尚未成为资产，蓝图 §D.2.2）。
+		rejectFinding: workspaceProcedure
+			.input(runtimeRejectExploratoryFindingRequestSchema)
+			.output(runtimeRejectExploratoryFindingResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.rejectFinding(ctx.workspaceScope, input);
+			}),
+		// active ↔ archived 软删/恢复；pending/superseded 不可 archive（状态机违规报错）。
+		archiveFinding: workspaceProcedure
+			.input(runtimeArchiveExploratoryFindingRequestSchema)
+			.output(runtimeArchiveExploratoryFindingResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.archiveFinding(ctx.workspaceScope, input);
+			}),
+		// agent 建议通道（蓝图 §D.2.2）：落库即 suggested_pending_confirmation + agent_suggested，
+		// provenance 可解析性校验在 handler 完成；durable 落盘后广播 exploratory_findings_updated。
+		ingestFindingCandidate: workspaceProcedure
+			.input(runtimeIngestExploratoryFindingCandidateRequestSchema)
+			.output(runtimeIngestExploratoryFindingCandidateResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.ingestFindingCandidate(ctx.workspaceScope, input);
 			}),
 	}),
 });

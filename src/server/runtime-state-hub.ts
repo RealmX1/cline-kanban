@@ -19,10 +19,12 @@ export interface ConversationTaskSessionSubscriptionSource {
 
 import type {
 	RuntimeClineMcpServerAuthStatus,
+	RuntimeExploratoryFindingEntry,
 	RuntimeExploratorySessionMapCollection,
 	RuntimeNotificationFeedEntry,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamErrorMessage,
+	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
 	RuntimeStateStreamExploratorySessionMapUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
@@ -104,6 +106,10 @@ export interface RuntimeStateHub {
 		conversationSessionTaskId: string,
 		mapCollection: RuntimeExploratorySessionMapCollection | null,
 	) => void;
+	// Exploratory findings 集合变更（save/confirm/reject/archive/ingest 落盘成功）后，把该
+	// workspace 的完整 finding 集合全量替换推送给在场客户端（恒小，上限 500；蓝图 §D.3）。
+	// 不搭车 summary 广播（与 session map 同款理由）。
+	broadcastExploratoryFindingsUpdated: (workspaceId: string, findings: RuntimeExploratoryFindingEntry[]) => void;
 	// Exploratory session map 再维护提醒的投递出口（统一发送出口在 runtime-server 层，hub 建好后
 	// 由它注入一次）。未注入时观察器只做 stale 落账、不投递提醒。
 	setExploratorySessionMapMaintenanceNudgeSender: (
@@ -536,7 +542,27 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
-	// 先无条件落库（可通知边沿的持久化），再全局广播 feed。落库独立于客户端在场与否。
+	// Exploratory findings 集合变更推送：与 broadcastExploratorySessionMapUpdated 同款纪律——
+	// 持久化早已在 mutation 的串行写队列完成（durable-write-before-ack），这里只把完整集合
+	// （全量替换，恒小）发给本 workspace 在场客户端；0 客户端时跳过——客户端重连后靠
+	// getFindings 查询对齐，不补发。
+	const broadcastExploratoryFindingsUpdated = (
+		workspaceId: string,
+		findings: RuntimeExploratoryFindingEntry[],
+	): void => {
+		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
+		if (!clients || clients.size === 0) {
+			return;
+		}
+		const payload: RuntimeStateStreamExploratoryFindingsUpdatedMessage = {
+			type: "exploratory_findings_updated",
+			workspaceId,
+			findings,
+		};
+		for (const client of clients) {
+			sendRuntimeStateMessage(client, payload);
+		}
+	};
 	const persistNotification = async (
 		workspaceId: string,
 		input: { taskId: string; userTurnKind: RuntimeTaskSessionUserTurnKind; triggeredAt: number },
@@ -789,6 +815,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		broadcastTaskReadyForReview,
 		broadcastNotificationLogUpdated,
 		broadcastExploratorySessionMapUpdated,
+		broadcastExploratoryFindingsUpdated,
 		setExploratorySessionMapMaintenanceNudgeSender: (sender) => {
 			exploratorySessionMapMaintenanceNudgeSender = sender;
 		},

@@ -52,6 +52,7 @@ import type {
 	RuntimeAgentSessionTransport,
 	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
+	RuntimeExploratoryFindingEntry,
 	RuntimeExploratorySessionMapCollection,
 	RuntimeExploratorySessionMapNode,
 	RuntimeTaskChatMessage,
@@ -646,6 +647,7 @@ export function CardDetailView({
 	onCreateByTheWayTaskConversationSession,
 	taskChatMessagesByTaskId,
 	exploratorySessionMapCollectionsByTaskId,
+	exploratoryFindings,
 	runtimeStreamSnapshotGeneration = 0,
 }: {
 	selection: CardSelection;
@@ -736,6 +738,10 @@ export function CardDetailView({
 	// Exploratory session map 的 WS 推送集合（exploratory_session_map_updated，M1）：
 	// 按 conversationSessionTaskId 取当前会话的条目喂给 map 面板数据 hook。
 	exploratorySessionMapCollectionsByTaskId?: Record<string, RuntimeExploratorySessionMapCollection | null>;
+	// Exploratory findings 的 workspace 级集合（M2，App 侧 use-exploratory-findings 归并结果）：
+	// map 面板「本会话 findings」切片与聊天消息「存为 finding」查重共用同一份；undefined =
+	// 无 findings 上下文（两者都不渲染 affordance），null = 尚未加载。
+	exploratoryFindings?: RuntimeExploratoryFindingEntry[] | null;
 	// 流（重）连握手代数：每次快照递增。断连窗口的 map ingest 不补发，客户端靠它触发
 	// getSessionMap 重查对齐（契约语义）；拼进 map 面板的 refreshKey 即可。
 	runtimeStreamSnapshotGeneration?: number;
@@ -1216,6 +1222,8 @@ export function CardDetailView({
 	const isMainTaskConversationSessionSelected = selectedTaskConversationSessionId === selection.card.id;
 	// map 面板与 TaskConversationSessionsPanel 同位下方的独立可折叠 section（蓝图 §G.1：
 	// 不抢占其挂载点）；出现条件与聊天面板一致（conversation 面板会话）。
+	// 底部的「本会话 findings」切片（蓝图 §G.2）复用同一份 workspace 级 findings 集合，
+	// 只在调用方传了 findings 上下文时出现（exploratoryFindings !== undefined）。
 	const sessionMapPanel = sessionMapConversationSessionTaskId ? (
 		<SessionMapPanel
 			queryPhase={sessionMapPanelData.queryPhase}
@@ -1223,6 +1231,15 @@ export function CardDetailView({
 			mapCollection={sessionMapPanelData.mapCollection}
 			expandToken={sessionMapPanelExpandToken}
 			defaultOpen={sessionMapPanelDefaultOpen}
+			sessionFindings={
+				exploratoryFindings !== undefined && currentProjectId
+					? {
+							workspaceId: currentProjectId,
+							conversationSessionTaskId: sessionMapConversationSessionTaskId,
+							findings: exploratoryFindings,
+						}
+					: null
+			}
 		/>
 	) : null;
 	const activeTaskConversationSessionMessages =
@@ -1284,6 +1301,10 @@ export function CardDetailView({
 			}
 			resolveSessionMapAnchor={resolveSessionMapAnchor}
 			onSessionMapAnchorClick={handleSessionMapAnchorClick}
+			// 「存为 finding」（蓝图 §D.2.1）：查重集合 + turn 投影（锚三元 commit 解析）
+			// 复用 map 面板同一份数据；不传 exploratoryFindings 时消息项不出该 affordance。
+			exploratoryFindings={exploratoryFindings}
+			turnProjection={sessionMapPanelData.projection}
 		/>
 	) : (
 		<AgentTerminalPanel

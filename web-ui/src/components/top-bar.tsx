@@ -12,6 +12,7 @@ import {
 	GitBranch,
 	GitCompareArrows,
 	LayoutGrid,
+	Lightbulb,
 	Menu,
 	Play,
 	Plus,
@@ -307,6 +308,8 @@ export function TopBar({
 	isTerminalLoading,
 	onToggleGitHistory,
 	isGitHistoryOpen,
+	onToggleFindings,
+	isFindingsOpen,
 	onToggleTaskChangesSidebar,
 	isTaskChangesSidebarOpen,
 	onToggleBoardOverview,
@@ -359,6 +362,8 @@ export function TopBar({
 	isTerminalLoading?: boolean;
 	onToggleGitHistory?: () => void;
 	isGitHistoryOpen?: boolean;
+	onToggleFindings?: () => void;
+	isFindingsOpen?: boolean;
 	onToggleTaskChangesSidebar?: () => void;
 	isTaskChangesSidebarOpen?: boolean;
 	onToggleBoardOverview?: () => void;
@@ -800,6 +805,26 @@ export function TopBar({
 								isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME,
 							)}
 						/>
+					) : null}
+
+					{/* Findings 浏览器（蓝图 §G.2）：home 主视图置换开关，与 git history / 概览互斥。 */}
+					{onToggleFindings ? (
+						<Tooltip side="bottom" content="Browse exploratory findings">
+							<Button
+								variant="ghost"
+								size="sm"
+								icon={<Lightbulb size={16} />}
+								onClick={onToggleFindings}
+								aria-label={isFindingsOpen ? "Close findings" : "Open findings"}
+								aria-pressed={isFindingsOpen}
+								data-testid="toggle-findings-button"
+								className={cn(
+									"ml-0.5",
+									isFindingsOpen && "ring-1 ring-accent",
+									isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME,
+								)}
+							/>
+						</Tooltip>
 					) : null}
 
 					{/* 全局通知铃铛：跨 repo，始终可见。 */}

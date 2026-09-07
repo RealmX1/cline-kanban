@@ -1341,6 +1341,98 @@ export type RuntimeStateStreamExploratorySessionMapUpdatedMessage = z.infer<
 	typeof runtimeStateStreamExploratorySessionMapUpdatedMessageSchema
 >;
 
+// ---- Exploratory findings canonical schema（蓝图 §D.1）----
+// 与上方 session map 块同一 TDZ 约束：exploratory_findings_updated 广播消息引用
+// runtimeExploratoryFindingEntrySchema，union 在模块求值时就要拿到它，故本块也必须
+// 留在 runtimeStateStreamMessageSchema 之前。
+
+export const runtimeExploratoryFindingProvenanceLinkSchema = z
+	.object({
+		// 解法定调 3：每条 finding 至少一个 provenance 链接；turn_anchor 必须三元齐全
+		// （turnCheckpointCommit 允许 null = 仅时间锚，语义同 §B.1 锚点）。
+		// user_authored_freeform 用于「纯人工笔记」这类无锚 finding——provenance 强制但允许
+		// 显式声明「无锚」而不是伪造锚。
+		linkKind: z.enum(["turn_anchor", "session_level", "user_authored_freeform"]),
+		conversationSessionTaskId: z.string(),
+		turnNumber: z.number().int().positive().nullable(),
+		turnCheckpointCommit: z.string().nullable(),
+	})
+	.superRefine((link, ctx) => {
+		// linkKind ↔ 字段组合约束在 schema 层强制（不再只靠注释约定——裸形状下 agent 可以
+		// 交出 turn_anchor+无 turnNumber 的伪锚，或给 session_level 链接挂上未校验的
+		// turnNumber/checkpoint 混过校验原样落库）：
+		// turn_anchor 必须锚到具体轮次（turnNumber 非 null；checkpoint 允许 null = 仅时间锚，
+		// 可解析性降级是 ingest handler 的职责，不在本层）；session_level 与
+		// user_authored_freeform 是显式「无轮次锚」声明，两个锚字段必须全 null。
+		if (link.linkKind === "turn_anchor" && link.turnNumber === null) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["turnNumber"],
+				message: "turn_anchor links must anchor a concrete turn: turnNumber must be non-null.",
+			});
+		}
+		if (link.linkKind !== "turn_anchor" && link.turnNumber !== null) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["turnNumber"],
+				message: `${link.linkKind} links declare no turn anchor: turnNumber must be null.`,
+			});
+		}
+		if (link.linkKind !== "turn_anchor" && link.turnCheckpointCommit !== null) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["turnCheckpointCommit"],
+				message: `${link.linkKind} links declare no turn anchor: turnCheckpointCommit must be null.`,
+			});
+		}
+	});
+export type RuntimeExploratoryFindingProvenanceLink = z.infer<typeof runtimeExploratoryFindingProvenanceLinkSchema>;
+
+export const runtimeExploratoryFindingStatusSchema = z.enum([
+	"suggested_pending_confirmation", // agent 建议、待人确认（v1 抽取的唯一自动档）
+	"active",
+	"superseded", // 被更新的 finding 取代（supersededByFindingId 互链，审计保留）
+	"archived", // 软删：不进默认列表，可恢复
+]);
+export type RuntimeExploratoryFindingStatus = z.infer<typeof runtimeExploratoryFindingStatusSchema>;
+
+export const runtimeExploratoryFindingGenerationSourceSchema = z.enum([
+	"user_saved", // UI「存为 finding」按钮人工保存
+	"agent_suggested", // agent 经 ingestFindingCandidate 通道建议
+	// 扩展位：agent_auto_extracted（无人工在环的自动抽取）——v1 刻意不做，见蓝图 §D.2.3。
+]);
+export type RuntimeExploratoryFindingGenerationSource = z.infer<typeof runtimeExploratoryFindingGenerationSourceSchema>;
+
+export const runtimeExploratoryFindingEntrySchema = z.object({
+	// 稳定 dedup 键：用户保存 = UI 生成 uuid；agent 建议 = 服务端派生的 agent-<clientProposalId>
+	// ——同一建议重发不落成两条。
+	findingId: z.string(),
+	findingTitle: z.string().max(120),
+	findingBodyMarkdown: z.string().max(4000),
+	findingStatus: runtimeExploratoryFindingStatusSchema,
+	supersededByFindingId: z.string().nullable(),
+	findingGenerationSource: runtimeExploratoryFindingGenerationSourceSchema,
+	provenanceLinks: z.array(runtimeExploratoryFindingProvenanceLinkSchema).min(1),
+	originConversationSessionTaskId: z.string().nullable(),
+	// ── KB 预留扩展位（v1 恒缺省，蓝图 §D.1）──
+	findingTags: z.array(z.string().max(40)).max(8).optional(),
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+export type RuntimeExploratoryFindingEntry = z.infer<typeof runtimeExploratoryFindingEntrySchema>;
+
+// findings 集合变更广播（蓝图 §D.3）：save/confirm/reject/archive/ingest 落盘成功后，
+// 把该 workspace 的完整 finding 集合（恒小，上限 500）全量替换推送给在场客户端。
+// 不搭车 summary 广播——findings 变更不必然 bump summary（与 exploratory_session_map_updated 同理）。
+export const runtimeStateStreamExploratoryFindingsUpdatedMessageSchema = z.object({
+	type: z.literal("exploratory_findings_updated"),
+	workspaceId: z.string(),
+	findings: z.array(runtimeExploratoryFindingEntrySchema),
+});
+export type RuntimeStateStreamExploratoryFindingsUpdatedMessage = z.infer<
+	typeof runtimeStateStreamExploratoryFindingsUpdatedMessageSchema
+>;
+
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamSnapshotMessageSchema,
 	runtimeStateStreamWorkspaceStateMessageSchema,
@@ -1354,6 +1446,7 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamClineSessionContextUpdatedMessageSchema,
 	runtimeStateStreamNotificationLogUpdatedMessageSchema,
 	runtimeStateStreamExploratorySessionMapUpdatedMessageSchema,
+	runtimeStateStreamExploratoryFindingsUpdatedMessageSchema,
 	runtimeStateStreamErrorMessageSchema,
 ]);
 export type RuntimeStateStreamMessage = z.infer<typeof runtimeStateStreamMessageSchema>;
@@ -3877,8 +3970,8 @@ export const runtimeExploratorySessionMapNodeProposalSchema = z
 		nodeKind: runtimeExploratorySessionMapNodeKindSchema,
 		nodeTitle: z.string().min(1).max(80),
 		nodeSummaryMarkdown: z.string().max(400).nullable(),
-		// M1 只校验形状（findings store 属 M2，落地后漏斗补可解析性校验）；
-		// 仅 nodeKind=finding_reference 时非空（下方 superRefine 强制）。
+		// 形状校验在此（仅 nodeKind=finding_reference 时非空，下方 superRefine 强制）；
+		// 可解析性校验（引用的 finding 必须已存在）在 apply 漏斗的 referencedFindingId 闸完成（M2）。
 		referencedFindingId: z.string().min(1).max(200).nullable(),
 	})
 	.superRefine((proposal, ctx) => {
@@ -3923,6 +4016,9 @@ export const runtimeExploratorySessionMapIngestRejectionReasonSchema = z.enum([
 	"stale_source_turn_projection_signature",
 	// 提案缺漏/改写了 user_manual_edit 节点（用户修正优先级恒最高；冲突集合 = 同 mapNodeId）。
 	"user_manual_edit_conflict",
+	// finding_reference 节点引用的 findingId 在 findings store 中不存在（M2 漏斗闸；
+	// 任意状态的 finding 都算可解析——archived 不级联删节点，蓝图 §B.1 注释）。
+	"referenced_finding_unresolvable",
 ]);
 export type RuntimeExploratorySessionMapIngestRejectionReason = z.infer<
 	typeof runtimeExploratorySessionMapIngestRejectionReasonSchema
@@ -3938,4 +4034,122 @@ export const runtimeIngestExploratorySessionMapUpdateResponseSchema = z.object({
 });
 export type RuntimeIngestExploratorySessionMapUpdateResponse = z.infer<
 	typeof runtimeIngestExploratorySessionMapUpdateResponseSchema
+>;
+
+// ---- Exploratory findings（蓝图 §D）----
+// D.1 的 canonical schema（provenanceLink / status / generationSource / entry）与
+// exploratory_findings_updated 广播消息已上移到 runtimeStateStreamMessageSchema 之前（TDZ）。
+// 本节是 findings 的 procedure I/O（M2）：人工保存主路径（§D.2.1，用户动作 zod 校验即够、
+// 无需作业漏斗）+ agent 建议通道（§D.2.2，provenance 可解析性校验在 handler 完成）。
+// 持久化在 per-workspace exploratory-findings.json（src/state/exploratory-findings-store.ts）。
+
+// exploratory.getFindings（query）：workspace 级全量读取（集合恒小，上限 500）。
+export const runtimeGetExploratoryFindingsRequestSchema = z.object({});
+export type RuntimeGetExploratoryFindingsRequest = z.infer<typeof runtimeGetExploratoryFindingsRequestSchema>;
+
+export const runtimeGetExploratoryFindingsResponseSchema = z.object({
+	findings: z.array(runtimeExploratoryFindingEntrySchema),
+});
+export type RuntimeGetExploratoryFindingsResponse = z.infer<typeof runtimeGetExploratoryFindingsResponseSchema>;
+
+// exploratory.saveFinding（mutation，蓝图 §D.2.1 人工保存主路径）：落库即 active + user_saved。
+// findingId 由 UI 生成 uuid，作稳定 dedup 键——同 findingId 已存在 → 幂等返回现状条目，不重复落地。
+export const runtimeSaveExploratoryFindingRequestSchema = z.object({
+	findingId: z.string().min(1).max(200),
+	findingTitle: z.string().min(1).max(120),
+	findingBodyMarkdown: z.string().min(1).max(4000),
+	// 上限对齐 findingTags（max 8）：链接数无界会放大持久化体积、串行校验成本与
+	// exploratory_findings_updated 全量广播负载。
+	provenanceLinks: z.array(runtimeExploratoryFindingProvenanceLinkSchema).min(1).max(8),
+	originConversationSessionTaskId: z.string().nullable(),
+});
+export type RuntimeSaveExploratoryFindingRequest = z.infer<typeof runtimeSaveExploratoryFindingRequestSchema>;
+
+export const runtimeSaveExploratoryFindingResponseSchema = z.object({
+	finding: runtimeExploratoryFindingEntrySchema,
+});
+export type RuntimeSaveExploratoryFindingResponse = z.infer<typeof runtimeSaveExploratoryFindingResponseSchema>;
+
+// exploratory.confirmFinding（mutation，蓝图 §D.2.2）：suggested_pending_confirmation → active。
+// 不存在的 findingId → finding: null（UI 幂等）；对非 pending 条目调用 = 状态机违规，报错。
+export const runtimeConfirmExploratoryFindingRequestSchema = z.object({
+	findingId: z.string(),
+});
+export type RuntimeConfirmExploratoryFindingRequest = z.infer<typeof runtimeConfirmExploratoryFindingRequestSchema>;
+
+export const runtimeConfirmExploratoryFindingResponseSchema = z.object({
+	finding: runtimeExploratoryFindingEntrySchema.nullable(),
+});
+export type RuntimeConfirmExploratoryFindingResponse = z.infer<typeof runtimeConfirmExploratoryFindingResponseSchema>;
+
+// exploratory.rejectFinding（mutation，蓝图 §D.2.2）：物理删除 pending 建议（尚未成为资产）。
+// 不存在的 findingId → removed: false（UI 幂等）；对非 pending 条目调用 = 状态机违规，报错。
+export const runtimeRejectExploratoryFindingRequestSchema = z.object({
+	findingId: z.string(),
+});
+export type RuntimeRejectExploratoryFindingRequest = z.infer<typeof runtimeRejectExploratoryFindingRequestSchema>;
+
+export const runtimeRejectExploratoryFindingResponseSchema = z.object({
+	removed: z.boolean(),
+});
+export type RuntimeRejectExploratoryFindingResponse = z.infer<typeof runtimeRejectExploratoryFindingResponseSchema>;
+
+// exploratory.archiveFinding（mutation）：active ↔ archived 软删/恢复（已处目标态 = 幂等空转）。
+// pending 条目不可 archive（尚未成为资产，该走 reject）——状态机违规报错；不存在的 findingId → null。
+export const runtimeArchiveExploratoryFindingRequestSchema = z.object({
+	findingId: z.string(),
+	archived: z.boolean(),
+});
+export type RuntimeArchiveExploratoryFindingRequest = z.infer<typeof runtimeArchiveExploratoryFindingRequestSchema>;
+
+export const runtimeArchiveExploratoryFindingResponseSchema = z.object({
+	finding: runtimeExploratoryFindingEntrySchema.nullable(),
+});
+export type RuntimeArchiveExploratoryFindingResponse = z.infer<typeof runtimeArchiveExploratoryFindingResponseSchema>;
+
+// exploratory.ingestFindingCandidate（mutation，蓝图 §D.2.2 agent 建议通道）：落库即
+// suggested_pending_confirmation + agent_suggested，待人确认。findingId 由服务端派生 =
+// agent-<clientProposalId>（dedup：同 clientProposalId 重发不落成两条，幂等 ack 回现状条目）。
+
+// ingest 拒绝原因（schema 级拒绝在 tRPC input 校验阶段就抛错，不进本枚举）。
+export const runtimeExploratoryFindingIngestRejectionReasonSchema = z.enum([
+	// 投影可加载时 turnNumber > 该会话投影最新 turn（语义同 map 闸 2b，整份拒绝）。
+	"anchor_turn_number_unresolvable",
+	// link 声明的 conversationSessionTaskId 投影完全加载不出来（会话不存在）。
+	// 注意与「投影源不可用（PTY 会话）」区分：后者接受并降级 checkpoint 为 null（能力矩阵
+	// best-effort 锚），前者整份拒绝。
+	"provenance_conversation_session_unresolvable",
+	// findings 总量达 per-workspace 上限且被 pending 建议占满：pending 永不静默裁 ⇒ cap
+	// 无可裁候选，store 显式拒绝（ExploratoryFindingsCapOverflowError，不落盘）。
+	// 处置 = 请用户先确认/拒绝既有 pending 建议腾位后再提。
+	"findings_cap_overflow",
+]);
+export type RuntimeExploratoryFindingIngestRejectionReason = z.infer<
+	typeof runtimeExploratoryFindingIngestRejectionReasonSchema
+>;
+
+export const runtimeIngestExploratoryFindingCandidateRequestSchema = z.object({
+	// 提交方所在会话（落为 originConversationSessionTaskId）；provenance link 可指向其它会话。
+	conversationSessionTaskId: z.string(),
+	// dedup 键：重试同 id 幂等 ack、不重复落地。
+	clientProposalId: z.string().min(1).max(120),
+	findingTitle: z.string().min(1).max(120),
+	findingBodyMarkdown: z.string().min(1).max(4000),
+	// 上限对齐 findingTags（max 8），同 saveFinding；ingest 每条 turn_anchor 链接还要串行
+	// 加载投影做可解析性校验，无界数组会放大这一成本。
+	provenanceLinks: z.array(runtimeExploratoryFindingProvenanceLinkSchema).min(1).max(8),
+});
+export type RuntimeIngestExploratoryFindingCandidateRequest = z.infer<
+	typeof runtimeIngestExploratoryFindingCandidateRequestSchema
+>;
+
+export const runtimeIngestExploratoryFindingCandidateResponseSchema = z.object({
+	// true = 已 durable 落盘（durable-write-before-ack）或 dedup 幂等 ack；false = 拒绝，见 rejectionReason。
+	ingested: z.boolean(),
+	rejectionReason: runtimeExploratoryFindingIngestRejectionReasonSchema.nullable(),
+	// 落库/现状条目（dedup ack 时为未变更的现状）；拒绝时为 null。
+	finding: runtimeExploratoryFindingEntrySchema.nullable(),
+});
+export type RuntimeIngestExploratoryFindingCandidateResponse = z.infer<
+	typeof runtimeIngestExploratoryFindingCandidateResponseSchema
 >;
