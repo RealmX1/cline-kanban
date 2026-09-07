@@ -2,7 +2,10 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { UseRuntimeStateStreamResult } from "@/runtime/use-runtime-state-stream";
+import type {
+	StreamedTaskSessionSummariesApplier,
+	UseRuntimeStateStreamResult,
+} from "@/runtime/use-runtime-state-stream";
 import { useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
 
 const reloadBrowserIfServedBuildAssetsChangedMock = vi.hoisted(() => vi.fn());
@@ -48,10 +51,12 @@ class MockRuntimeStateWebSocket {
 
 function RuntimeStateStreamHarness({
 	onSnapshot,
+	onTaskSessionSummaries,
 }: {
 	onSnapshot: (snapshot: UseRuntimeStateStreamResult) => void;
+	onTaskSessionSummaries?: StreamedTaskSessionSummariesApplier;
 }): null {
-	const snapshot = useRuntimeStateStream(null);
+	const snapshot = useRuntimeStateStream(null, onTaskSessionSummaries);
 
 	useEffect(() => {
 		onSnapshot(snapshot);
@@ -299,5 +304,81 @@ describe("useRuntimeStateStream", () => {
 		});
 		expect(captured.current?.streamSnapshotGeneration).toBe(2);
 		expect(captured.current?.exploratorySessionMapCollectionsByTaskId).toHaveProperty("session-1");
+	});
+
+	it("task_sessions_updated 不再经 reducer 产新 state：summaries 经旁路回调直送、workspaceState 引用不变", async () => {
+		const applier = vi.fn();
+		const snapshotCalls: UseRuntimeStateStreamResult[] = [];
+		await act(async () => {
+			root.render(
+				<RuntimeStateStreamHarness
+					onTaskSessionSummaries={applier}
+					onSnapshot={(snapshot) => {
+						snapshotCalls.push(snapshot);
+					}}
+				/>,
+			);
+		});
+		const socket = MockRuntimeStateWebSocket.instances[0];
+		if (!socket) {
+			throw new Error("Expected the initial runtime stream socket.");
+		}
+		act(() => {
+			socket.triggerOpen();
+		});
+
+		await act(async () => {
+			socket.triggerMessage({
+				type: "snapshot",
+				currentProjectId: "ws-a",
+				projects: [],
+				workspaceState: {
+					repoPath: "/tmp/ws-a",
+					statePath: "/tmp/ws-a/.cline/kanban",
+					git: null,
+					board: { columns: [], dependencies: [] },
+					sessions: {},
+					revision: 1,
+				},
+				workspaceMetadata: null,
+				clineSessionContextVersion: 0,
+				notificationLog: [],
+			});
+		});
+		const snapshotCallsBeforeSessionsUpdate = snapshotCalls.length;
+		const workspaceStateBeforeSessionsUpdate = snapshotCalls[snapshotCalls.length - 1]?.workspaceState;
+		expect(workspaceStateBeforeSessionsUpdate).not.toBeNull();
+
+		const summary = {
+			taskId: "task-1",
+			state: "running",
+			agentId: "claude",
+			workspacePath: "/tmp/ws-a",
+			pid: 4242,
+			startedAt: 1_000,
+			updatedAt: 2_000,
+			lastOutputAt: 2_000,
+			reviewReason: null,
+			exitCode: null,
+			lastHookAt: null,
+			latestHookActivity: null,
+		};
+		await act(async () => {
+			socket.triggerMessage({ type: "task_sessions_updated", workspaceId: "ws-a", summaries: [summary] });
+		});
+
+		// 旁路：summaries 原样送达 applier（经 JSON 往返，按深比较断言）。
+		expect(applier).toHaveBeenCalledTimes(1);
+		expect(applier).toHaveBeenCalledWith([summary]);
+		// reducer 不再为该消息产新 state：没有重渲染，workspaceState 引用保持不动。
+		expect(snapshotCalls.length).toBe(snapshotCallsBeforeSessionsUpdate);
+		expect(snapshotCalls[snapshotCalls.length - 1]?.workspaceState).toBe(workspaceStateBeforeSessionsUpdate);
+
+		// 其它 workspace 的批次仍被 activeWorkspaceId 过滤，不触达 applier。
+		await act(async () => {
+			socket.triggerMessage({ type: "task_sessions_updated", workspaceId: "ws-b", summaries: [summary] });
+		});
+		expect(applier).toHaveBeenCalledTimes(1);
+		expect(snapshotCalls.length).toBe(snapshotCallsBeforeSessionsUpdate);
 	});
 });

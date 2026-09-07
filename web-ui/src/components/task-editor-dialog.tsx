@@ -667,8 +667,8 @@ export function TaskEditorDialog({
 		[open, mode, handleRunSingleStartAction, onCreateStartAndOpen],
 	);
 
-	// 关闭守卫仅在 create 模式启用：edit 模式关闭是存草稿（handleCancelEditTask），
-	// 不应弹「放弃」二次确认。
+	// 关闭守卫仅在 create 模式启用：edit 模式关闭走 handleCancelEditTask，草稿
+	// （编辑期间去抖落盘的崩溃恢复副本）随关闭一并清除，不应弹「放弃」二次确认。
 	const isCreateMode = taskEditorMode === "create";
 
 	// 每次渲染刷新「当前表单」快照，供关闭时与打开时的基线比较。
