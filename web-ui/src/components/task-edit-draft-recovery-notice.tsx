@@ -23,7 +23,7 @@ import { type ReactElement, useRef, useState, useSyncExternalStore } from "react
 
 import { showAppToast } from "@/components/app-toaster";
 import { Button } from "@/components/ui/button";
-import type { TaskEditDraft } from "@/hooks/task-edit-drafts";
+import { areTaskImagesEqual, type TaskEditDraft } from "@/hooks/task-edit-drafts";
 import {
 	discardSupersededTaskEditDraftCopy,
 	promoteSupersededTaskEditDraftCopyToCurrentDraft,
@@ -55,9 +55,7 @@ function formatDraftTimestamp(timestamp: number): string {
 
 function areFormValuesEqual(left: TaskEditDraftComparableValues, right: TaskEditDraftComparableValues): boolean {
 	return (
-		left.prompt === right.prompt &&
-		JSON.stringify(left.images) === JSON.stringify(right.images) &&
-		areSettingsEqual(left, right)
+		left.prompt === right.prompt && areTaskImagesEqual(left.images, right.images) && areSettingsEqual(left, right)
 	);
 }
 
@@ -85,7 +83,7 @@ function SupersededDraftCopyComparison({
 	copy: RuntimeSupersededTaskEditDraftCopy;
 	currentFormValues: TaskEditDraftComparableValues;
 }): ReactElement {
-	const imagesDiffer = JSON.stringify(copy.draft.images) !== JSON.stringify(currentFormValues.images);
+	const imagesDiffer = !areTaskImagesEqual(copy.draft.images, currentFormValues.images);
 	const settingsDiffer = !areSettingsEqual(copy.draft, currentFormValues);
 	return (
 		<div className="mt-2 space-y-2 rounded border border-border-bright bg-surface-1 p-2">

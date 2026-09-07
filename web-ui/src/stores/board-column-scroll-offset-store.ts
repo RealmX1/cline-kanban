@@ -21,23 +21,38 @@ const recordsByColumnKey = new Map<string, BoardColumnScrollOffsetRecord>();
  * 记忆按 project + column 分键：不同 project 的同名列（backlog/in_progress/…）
  * 各自独立，切 project 后不会串用上一个 project 的滚动位置。
  */
-function buildColumnKey(workspaceId: string | null, columnId: string): string {
-	return `${workspaceId ?? "no-workspace"}::${columnId}`;
+function buildColumnKey(workspaceKey: string | null, columnId: string): string {
+	return `${workspaceKey ?? "no-workspace"}::${columnId}`;
 }
 
 export function readBoardColumnScrollOffset(
-	workspaceId: string | null,
+	workspaceKey: string | null,
 	columnId: string,
 ): BoardColumnScrollOffsetRecord | undefined {
-	return recordsByColumnKey.get(buildColumnKey(workspaceId, columnId));
+	return recordsByColumnKey.get(buildColumnKey(workspaceKey, columnId));
 }
 
 export function writeBoardColumnScrollOffset(
-	workspaceId: string | null,
+	workspaceKey: string | null,
 	columnId: string,
 	record: BoardColumnScrollOffsetRecord,
 ): void {
-	recordsByColumnKey.set(buildColumnKey(workspaceId, columnId), record);
+	// 损坏值（NaN / 负数）一旦入记忆，重挂载时会被原样还原回 DOM，直接拒写。
+	if (
+		!Number.isFinite(record.scrollTop) ||
+		record.scrollTop < 0 ||
+		!Number.isFinite(record.revealedCardCount) ||
+		record.revealedCardCount < 0
+	) {
+		return;
+	}
+	const key = buildColumnKey(workspaceKey, columnId);
+	// 滚动经 rAF 折叠后仍是每帧一次的高频写：值没变就保留原记录，不做无意义替换。
+	const existing = recordsByColumnKey.get(key);
+	if (existing && existing.scrollTop === record.scrollTop && existing.revealedCardCount === record.revealedCardCount) {
+		return;
+	}
+	recordsByColumnKey.set(key, record);
 }
 
 /** 测试用：清空全部记忆。 */

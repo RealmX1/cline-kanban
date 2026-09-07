@@ -1,5 +1,5 @@
 import { isNeverStartedPlaceholderTaskSessionSummary } from "@runtime-session-activity";
-import { useCallback, useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import type {
 	RuntimeClineMcpServerAuthStatus,
@@ -32,16 +32,20 @@ const STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
 // 注意本函数**只合并、从不删除**：某个 taskId 一旦进过这张表，就不会因为后续推流不再包含它而消失。
 // 「跨 workspace 的外来条目在此累积」是另一个已知问题（看板卡 c0724），本文件的守卫不覆盖它——
 // 别因为这里有守卫就以为归属问题已经解决了。
-function mergeTaskSessionSummaries(
+//
+// 引用纪律：整批没有任何 key 被实际替换时返回入参原引用（惰性拷贝，首个真实写入才 spread），
+// 让 reducer / setSessions 的 Object.is bailout 生效——150ms 一批的推流里大量批次内容并没动，
+// 为它们白产新对象就是白触发一轮渲染。
+export function mergeTaskSessionSummaries(
 	currentSessions: Record<string, RuntimeTaskSessionSummary>,
 	summaries: RuntimeTaskSessionSummary[],
 ): Record<string, RuntimeTaskSessionSummary> {
 	if (summaries.length === 0) {
 		return currentSessions;
 	}
-	const nextSessions = { ...currentSessions };
+	let nextSessions: Record<string, RuntimeTaskSessionSummary> | null = null;
 	for (const summary of summaries) {
-		const existing = nextSessions[summary.taskId];
+		const existing = (nextSessions ?? currentSessions)[summary.taskId];
 		// 唯一一种「更新的 updatedAt 反而信息更少」的情况：服务端因为前端聚焦了这张卡而就地造出一条
 		// 全 null 的占位 summary（session-manager 的 ensureEntry）。它的 updatedAt 是「刚被凭空造出来」，
 		// 不是「掌握了更新的事实」。放它盖掉手上那条记着 agentId 的记录，就会让 TUI 变全白、
@@ -54,14 +58,22 @@ function mergeTaskSessionSummaries(
 			continue;
 		}
 		if (!existing || existing.updatedAt <= summary.updatedAt) {
+			if (nextSessions === null) {
+				nextSessions = { ...currentSessions };
+			}
 			nextSessions[summary.taskId] = summary;
 		}
 	}
-	return nextSessions;
+	return nextSessions ?? currentSessions;
 }
 
-/** 仅供测试：这条合并规则是「空壳把真实记录盖掉」那条 bug 的最后一道闸，值得单独钉住。 */
-export const mergeTaskSessionSummariesForTest = mergeTaskSessionSummaries;
+// task_sessions_updated 的旁路出口：这条消息 150ms 一批、是最高频推流，不再进 reducer（不为它新建
+// workspaceState、不让 App 多渲染一次）。useWorkspaceSync 挂载时把「summaries → 一次 setSessions 合并」
+// 注册成 applier，stream hook 收到该批消息直接调用；App 持有这个 ref 并在两个 hook 之间接线。
+export type StreamedTaskSessionSummariesApplier = (summaries: RuntimeTaskSessionSummary[]) => void;
+export interface StreamedTaskSessionSummariesApplierRef {
+	current: StreamedTaskSessionSummariesApplier | null;
+}
 
 // 快照下发的是「跨全部 workspace 的扁平 feed」，按 workspaceId 分桶存，便于 notification_log_updated 增量按桶替换。
 function bucketNotificationFeedByWorkspaceId(
@@ -169,7 +181,6 @@ type RuntimeStateStreamAction =
 	| { type: "mcp_auth_updated"; payload: RuntimeStateStreamMcpAuthUpdatedMessage }
 	| { type: "cline_session_context_updated"; payload: RuntimeStateStreamClineSessionContextUpdatedMessage }
 	| { type: "workspace_state_updated"; workspaceState: RuntimeWorkspaceStateResponse }
-	| { type: "task_sessions_updated"; summaries: RuntimeTaskSessionSummary[] }
 	| { type: "stream_error"; message: string }
 	| { type: "stream_disconnected"; message: string };
 
@@ -398,18 +409,6 @@ function runtimeStateStreamReducer(
 			workspaceState: mergedWorkspaceState,
 		};
 	}
-	if (action.type === "task_sessions_updated") {
-		if (!state.workspaceState) {
-			return state;
-		}
-		return {
-			...state,
-			workspaceState: {
-				...state.workspaceState,
-				sessions: mergeTaskSessionSummaries(state.workspaceState.sessions, action.summaries),
-			},
-		};
-	}
 	if (action.type === "stream_error") {
 		return {
 			...state,
@@ -427,12 +426,19 @@ function runtimeStateStreamReducer(
 	return state;
 }
 
-export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseRuntimeStateStreamResult {
+export function useRuntimeStateStream(
+	requestedWorkspaceId: string | null,
+	onTaskSessionSummaries?: StreamedTaskSessionSummariesApplier,
+): UseRuntimeStateStreamResult {
 	const [state, dispatch] = useReducer(
 		runtimeStateStreamReducer,
 		requestedWorkspaceId,
 		createInitialRuntimeStateStreamStore,
 	);
+	// render 期同步赋值（react-use useLatest 的标准实现，本仓库同款写法见 use-notification-task-focus-routing）：
+	// WS 回调经此 ref 读最新 applier，避免把回调身份编进连接 effect 的依赖（那会每次渲染都重连）。
+	const onTaskSessionSummariesRef = useRef<StreamedTaskSessionSummariesApplier | undefined>(undefined);
+	onTaskSessionSummariesRef.current = onTaskSessionSummaries;
 	const [runtimeStreamConnectionGeneration, setRuntimeStreamConnectionGeneration] = useState(0);
 	const recheckProjectAvailability = useCallback(() => {
 		setRuntimeStreamConnectionGeneration((currentGeneration) => currentGeneration + 1);
@@ -570,10 +576,9 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 						if (payload.workspaceId !== activeWorkspaceId) {
 							return;
 						}
-						dispatch({
-							type: "task_sessions_updated",
-							summaries: payload.summaries,
-						});
+						// 旁路（见 StreamedTaskSessionSummariesApplier）：summaries 直送 useWorkspaceSync 注册的
+						// applier，一次 setSessions 并入；reducer 不再为该消息产新 state，App 每批只渲染一次。
+						onTaskSessionSummariesRef.current?.(payload.summaries);
 						return;
 					}
 					if (payload.type === "task_ready_for_review") {

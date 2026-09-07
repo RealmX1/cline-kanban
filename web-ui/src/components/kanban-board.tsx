@@ -20,6 +20,14 @@ import type { BoardCard, BoardColumnId, BoardData, BoardDependency } from "@/typ
 
 const BOARD_COLUMN_ORDER: BoardColumnId[] = ["backlog", "in_progress", "review", "validation", "trash"];
 
+// sensors 数组与其中的 sensor 本体都放在模块级：写在 JSX 里的 `[programmaticSensor]` 字面量
+// 每次渲染都会新建数组。看板全应用只挂载一个，sensor 拿到的 api 用模块级 holder 承接即可。
+const programmaticSensorApiHolder: { current: SensorAPI | null } = { current: null };
+const programmaticSensor: Sensor = (api) => {
+	programmaticSensorApiHolder.current = api;
+};
+const PROGRAMMATIC_SENSORS: Sensor[] = [programmaticSensor];
+
 export type RequestProgrammaticCardMove = (move: ProgrammaticCardMoveInFlight) => boolean;
 
 function isRectVerticallyVisibleWithinContainer(rect: DOMRect, containerRect: DOMRect): boolean {
@@ -91,7 +99,6 @@ export function KanbanBoard({
 }): React.ReactElement {
 	const dragOccurredRef = useRef(false);
 	const boardRef = useRef<HTMLElement>(null);
-	const sensorApiRef = useRef<SensorAPI | null>(null);
 	const latestDataRef = useRef<BoardData>(data);
 	const programmaticCardMoveInFlightRef = useRef<ProgrammaticCardMoveInFlight | null>(null);
 	const [activeDragTaskId, setActiveDragTaskId] = useState<string | null>(null);
@@ -107,10 +114,6 @@ export function KanbanBoard({
 	useEffect(() => {
 		latestDataRef.current = data;
 	}, [data]);
-
-	const programmaticSensor: Sensor = useCallback((api: SensorAPI) => {
-		sensorApiRef.current = api;
-	}, []);
 
 	const getElementClientCenter = useCallback((element: HTMLElement): { x: number; y: number } => {
 		const rect = element.getBoundingClientRect();
@@ -209,7 +212,7 @@ export function KanbanBoard({
 				return false;
 			}
 
-			const sensorApi = sensorApiRef.current;
+			const sensorApi = programmaticSensorApiHolder.current;
 			if (!sensorApi) {
 				return false;
 			}
@@ -390,7 +393,7 @@ export function KanbanBoard({
 			onBeforeCapture={handleBeforeCapture}
 			onDragStart={handleDragStart}
 			onDragEnd={handleDragEnd}
-			sensors={[programmaticSensor]}
+			sensors={PROGRAMMATIC_SENSORS}
 		>
 			<section
 				ref={boardRef}

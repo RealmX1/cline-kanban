@@ -17,7 +17,7 @@ import type {
 	RuntimeProjectPermanentDeletionRequest,
 	RuntimeProjectPermanentDeletionResult,
 } from "@/runtime/types";
-import { useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
+import { type StreamedTaskSessionSummariesApplier, useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
 import { isLocalhostAccess } from "@/utils/localhost-detection";
 import { useWindowEvent } from "@/utils/react-use";
 
@@ -41,6 +41,8 @@ function isDirectoryPickerUnavailableError(message: string | null | undefined): 
 
 interface UseProjectNavigationInput {
 	onProjectSwitchStart: () => void;
+	// task_sessions_updated 旁路（见 use-runtime-state-stream）：summaries 直送、不经 reducer。
+	onTaskSessionSummaries: StreamedTaskSessionSummariesApplier;
 }
 
 export interface UseProjectNavigationResult {
@@ -86,7 +88,10 @@ export interface UseProjectNavigationResult {
 	resetProjectNavigationState: () => void;
 }
 
-export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigationInput): UseProjectNavigationResult {
+export function useProjectNavigation({
+	onProjectSwitchStart,
+	onTaskSessionSummaries,
+}: UseProjectNavigationInput): UseProjectNavigationResult {
 	const [requestedProjectId, setRequestedProjectId] = useState<string | null>(() => {
 		if (typeof window === "undefined") {
 			return null;
@@ -116,7 +121,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		isRuntimeDisconnected,
 		hasReceivedSnapshot,
 		recheckProjectAvailability,
-	} = useRuntimeStateStream(requestedProjectId);
+	} = useRuntimeStateStream(requestedProjectId, onTaskSessionSummaries);
 
 	const hasNoProjects = hasReceivedSnapshot && projects.length === 0 && currentProjectId === null;
 	const isProjectSwitching = requestedProjectId !== null && requestedProjectId !== currentProjectId && !hasNoProjects;

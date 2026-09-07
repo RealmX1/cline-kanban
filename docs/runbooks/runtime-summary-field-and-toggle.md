@@ -10,7 +10,7 @@
 
 1. `src/core/api-contract.ts`：在 summary 的 zod schema 加字段。加性字段用 `.nullable().optional()` 形态（旧盘数据没有该键也能 parse）。
 2. `src/server/runtime-state-hub.ts`：批量广播**自动**携带新字段，无改动。
-3. `web-ui/src/runtime/use-runtime-state-stream.ts` 的 `mergeTaskSessionSummaries`（:31；汇入点 :237 / :339 / :357）：按 `updatedAt` 合并 summary map，**自动**带上新字段，无改动。
+3. `web-ui/src/runtime/use-runtime-state-stream.ts` 的 `mergeTaskSessionSummaries`（:37）：按 `updatedAt` 合并 summary map，**自动**带上新字段，无改动。注意 150ms 一批的 `task_sessions_updated` **不进 reducer**——它由 `use-workspace-sync.ts` 注册的 applier 旁路直送，一次 `setSessions` 并入（App 每批只渲染一次）；reducer 内仅剩 snapshot 类汇入点（:264 / :381）。
 4. `App.tsx` 的 `sessions` → 看板卡片 / top-bar：消费方在这里读新字段。
 
 **例外**：`turnOwner` / `liveness` / `userTurnKind` 三个 facet 字段不适用这条「自由加」链路——它们有共现/合法组合的 `superRefine` 守卫与写入漏斗约束，动它们先读 `src/core/session-activity.ts` 与 facet 模型文档，别按本 runbook 走。

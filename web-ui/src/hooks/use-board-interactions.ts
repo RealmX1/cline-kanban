@@ -144,6 +144,11 @@ export function useBoardInteractions({
 	runAutoReviewGitAction,
 }: UseBoardInteractionsInput): UseBoardInteractionsResult {
 	const previousSessionsRef = useRef<Record<string, RuntimeTaskSessionSummary>>({});
+	// B5：Rule A 列自动流转上一帧处理时的 board 引用，配合下方 effect 的 summary 引用短路。
+	// board 自上一帧以来若发生过任何外部写入（用户拖拽等），必须放开全量重估——流转分支由
+	// (summary, board) 共同驱动，只看 summary 引用会把「外部板面变更后的 level-triggered 重估」
+	// 一并短路掉（例如把 awaiting_review 卡拖回 In Progress，下一 tick 会被自动拉回 Review）。
+	const previousAutoFlowBoardRef = useRef<BoardData | null>(null);
 	const notificationPermissionPromptInFlightRef = useRef(false);
 	const moveToTrashLoadingByIdRef = useRef<Record<string, true>>({});
 	const pendingProgrammaticStartMoveCompletionByTaskIdRef = useRef<
@@ -464,10 +469,19 @@ export function useBoardInteractions({
 		setBoard((currentBoard) => {
 			let nextBoard = currentBoard;
 			const previousSessions = previousSessionsRef.current;
-			const blockedInterruptedTaskIds = new Set<string>();
+			const boardChangedSinceLastRun = previousAutoFlowBoardRef.current !== currentBoard;
+			const deferredRetryTaskIds = new Set<string>();
 			const nowMs = Date.now();
 			for (const summary of Object.values(sessions)) {
 				const previous = previousSessions[summary.taskId];
+				// B5 引用短路：summary 引用跨 tick 稳定（runtime-state-hub merge 只替换改动 key），
+				// 引用未变即内容未变；board 也未变时本帧处理结果与上一帧相同（纯 no-op），直接跳过，
+				// 省掉每 tick 对全部 N 条 summary 的 getTaskColumnId 全板扫描与 resolveSessionFacets。
+				// 唯一的时间依赖 isAgentActivelyProducingOutput 只在持续产出时为真，而持续产出 ⇒
+				// summary 每 tick 换新引用，不会被本短路跳过。
+				if (!boardChangedSinceLastRun && previous === summary) {
+					continue;
+				}
 				if (previous && previous.updatedAt > summary.updatedAt) {
 					continue;
 				}
@@ -489,6 +503,9 @@ export function useBoardInteractions({
 				if (isAwaitingUserReviewTurn(facets) && columnId === "in_progress") {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review");
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
+						// B5：本帧未落直接移列（动画接管 / 被在途移动阻塞）的 task 不得记录为已见，
+						// 否则引用短路会吃掉下一 tick 的重试（短路前由 updatedAt guard 放行每 tick 重估）。
+						deferredRetryTaskIds.add(summary.taskId);
 						continue;
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "review", { insertAtTop: true });
@@ -515,6 +532,8 @@ export function useBoardInteractions({
 						skipKickoff: true,
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
+						// B5：同 Review 落位分支——动画接管 / 被阻塞的 task 不记录为已见，保留下一 tick 重试。
+						deferredRetryTaskIds.add(summary.taskId);
 						continue;
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
@@ -536,7 +555,7 @@ export function useBoardInteractions({
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						if (programmaticMoveAttempt === "blocked") {
-							blockedInterruptedTaskIds.add(summary.taskId);
+							deferredRetryTaskIds.add(summary.taskId);
 						}
 						setSelectedTaskId((currentSelectedTaskId) =>
 							currentSelectedTaskId === summary.taskId ? nextTaskId : currentSelectedTaskId,
@@ -553,7 +572,7 @@ export function useBoardInteractions({
 				}
 			}
 			const nextPreviousSessions = { ...sessions };
-			for (const taskId of blockedInterruptedTaskIds) {
+			for (const taskId of deferredRetryTaskIds) {
 				const previousSession = previousSessions[taskId];
 				if (previousSession) {
 					nextPreviousSessions[taskId] = previousSession;
@@ -562,6 +581,7 @@ export function useBoardInteractions({
 				delete nextPreviousSessions[taskId];
 			}
 			previousSessionsRef.current = nextPreviousSessions;
+			previousAutoFlowBoardRef.current = nextBoard;
 			return nextBoard;
 		});
 	}, [programmaticCardMoveCycle, sessions, setBoard, setSelectedTaskId, tryProgrammaticCardMove]);
@@ -1151,6 +1171,7 @@ export function useBoardInteractions({
 
 	const resetBoardInteractionsState = useCallback(() => {
 		previousSessionsRef.current = {};
+		previousAutoFlowBoardRef.current = null;
 		moveToTrashLoadingByIdRef.current = {};
 		setMoveToTrashLoadingById({});
 		for (const taskId of Object.keys(pendingProgrammaticStartMoveCompletionByTaskIdRef.current)) {

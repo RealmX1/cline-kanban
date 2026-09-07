@@ -186,6 +186,11 @@ function createBoard(tasks: BoardCard[] = []): BoardData {
 	};
 }
 
+// 字段顺序与 runtimeTaskImageSchema / fileToTaskImage 一致（id, data, mimeType, name?）。
+function createTaskImage(id: string, data: string, overrides: Partial<TaskImage> = {}): TaskImage {
+	return { id, data, mimeType: "image/png", ...overrides };
+}
+
 interface HookSnapshot {
 	board: BoardData;
 	isInlineTaskCreateOpen: boolean;
@@ -201,6 +206,7 @@ interface HookSnapshot {
 	newTaskConversationMode: RuntimeTaskConversationMode;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
+	editTaskImages: TaskImage[];
 	editTaskStartInPlanMode: boolean;
 	editTaskWorktreeMode: RuntimeTaskWorktreeMode;
 	editTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
@@ -219,6 +225,7 @@ interface HookSnapshot {
 	handleSaveEditedTask: () => string | null;
 	handleSaveAndStartEditedTask: () => void;
 	setEditTaskPrompt: (value: string) => void;
+	setEditTaskImages: (value: TaskImage[]) => void;
 	setEditTaskAutoReviewEnabled: (value: boolean) => void;
 	setEditTaskAutoReviewMode: (value: TaskAutoReviewMode) => void;
 	setEditTaskWorktreeMode: (value: RuntimeTaskWorktreeMode) => void;
@@ -303,6 +310,7 @@ function HookHarness({
 			newTaskConversationMode: editor.newTaskConversationMode,
 			editingTaskId: editor.editingTaskId,
 			editTaskPrompt: editor.editTaskPrompt,
+			editTaskImages: editor.editTaskImages,
 			editTaskStartInPlanMode: editor.editTaskStartInPlanMode,
 			editTaskWorktreeMode: editor.editTaskWorktreeMode,
 			editTaskAgentSessionInitialization: editor.editTaskAgentSessionInitialization,
@@ -321,6 +329,7 @@ function HookHarness({
 			handleSaveEditedTask: editor.handleSaveEditedTask,
 			handleSaveAndStartEditedTask: editor.handleSaveAndStartEditedTask,
 			setEditTaskPrompt: editor.setEditTaskPrompt,
+			setEditTaskImages: editor.setEditTaskImages,
 			setEditTaskAutoReviewEnabled: editor.setEditTaskAutoReviewEnabled,
 			setEditTaskAutoReviewMode: editor.setEditTaskAutoReviewMode,
 			setEditTaskWorktreeMode: editor.setEditTaskWorktreeMode,
@@ -339,6 +348,7 @@ function HookHarness({
 		editor.handleCreateTasks,
 		editor.handleOpenCreateTask,
 		editor.editTaskPrompt,
+		editor.editTaskImages,
 		editor.editTaskAgentSessionInitialization,
 		editor.editTaskConversationMode,
 		editor.editTaskStartInPlanMode,
@@ -365,6 +375,7 @@ function HookHarness({
 		editor.setEditTaskAgentSessionInitialization,
 		editor.setEditTaskConversationMode,
 		editor.setEditTaskPrompt,
+		editor.setEditTaskImages,
 		editor.setNewTaskImages,
 		editor.setNewTaskBranchRef,
 		editor.setNewTaskPrompt,
@@ -1025,6 +1036,182 @@ describe("useTaskEditor", () => {
 
 		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Initial prompt");
+	});
+
+	it("does not autosave a draft when an image-bearing edit form still matches the task", async () => {
+		// 粘贴图是 MB 级 base64：表单没动过时，去抖那一拍必须判出「等于任务本体」并什么也不写。
+		// 任务显式带上与 harness 默认一致的 permission mode，让图片成为唯一可能不等的字段。
+		const largeImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(1_000_000)}`);
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				images: [largeImage],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await settleTaskEditDraftPersistence();
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
+	});
+
+	it("autosaves a draft when an edited image keeps its byte length but changes its content", async () => {
+		// 同 id / 同 mimeType / data 长度也相同，只有内容不同：长度早退放它过去，必须靠 data 本身判出不等。
+		const originalImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(1_000_000)}`);
+		const editedImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(999_999)}b`);
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				images: [originalImage],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskImages([editedImage]);
+		});
+		await settleTaskEditDraftPersistence();
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toContain("image-1");
+	});
+
+	it("does not autosave a draft when images are replaced by copies with identical content", async () => {
+		// 内容逐字相同、引用不同的另一份图片对象（含可选 name）：也必须判等，
+		// 否则任何一次「重建图片数组」都会被当成改动而落一份假草稿。
+		const largeData = `data:image/png;base64,${"a".repeat(1_000_000)}`;
+		const taskImage = createTaskImage("image-1", largeData, { name: "paste.png" });
+		const identicalCopy = createTaskImage("image-1", largeData, { name: "paste.png" });
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				images: [taskImage],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskImages([identicalCopy]);
+		});
+		await settleTaskEditDraftPersistence();
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
+	});
+
+	it("rebases an image-bearing edit form whose images were only replaced by identical copies", async () => {
+		// 迟到的服务端快照只有在「用户还没动过表单」时才允许重铺。图片被换成内容相同的副本不算动过——
+		// 否则每一次图片数组重建都会把重铺闸门焊死，胜出的服务端草稿永远铺不上来。
+		const task = createTask("task-1", "Initial prompt", 1);
+		const mirrorImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(1_000_000)}`);
+		const serverImage = createTaskImage("image-2", `data:image/png;base64,${"c".repeat(1_000_000)}`);
+		const losingMirrorDraft: RuntimeTaskEditDraft = {
+			taskId: task.id,
+			prompt: "Losing mirror draft",
+			images: [mirrorImage],
+			startInPlanMode: false,
+			autoReviewEnabled: false,
+			autoReviewMode: "commit",
+			branchRef: "main",
+			worktreeMode: "branch",
+			savedAt: 1_000,
+		};
+		const winningServerDraft: RuntimeTaskEditDraft = {
+			...losingMirrorDraft,
+			prompt: "Winning server draft",
+			images: [serverImage],
+			savedAt: 2_000,
+		};
+		window.localStorage.setItem(
+			LocalStorageKey.TaskEditDrafts,
+			JSON.stringify({ drafts: { [JSON.stringify(["project-1", task.id])]: losingMirrorDraft } }),
+		);
+		fakeWorkspaceTaskEditDraftServer.snapshot = {
+			draftsByTaskId: { [task.id]: winningServerDraft },
+			supersededDraftCopies: [],
+		};
+
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([task])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+
+		// 用户把图片「换」成了内容逐字相同的另一份对象——表单值与铺表种子判等，重铺闸门必须放行。
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskImages([createTaskImage("image-1", mirrorImage.data)]);
+		});
+
+		await act(async () => {
+			fakeWorkspaceTaskEditDraftServer.releaseFetch?.();
+			await new Promise((resolve) => {
+				setTimeout(resolve, 0);
+			});
+		});
+
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Winning server draft");
+		expect(requireSnapshot(latestSnapshot).editTaskImages).toEqual([serverImage]);
 	});
 
 	it("does not disable start in plan mode when auto review is enabled while editing", async () => {

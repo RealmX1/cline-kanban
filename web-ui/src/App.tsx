@@ -86,6 +86,7 @@ import {
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
+import type { StreamedTaskSessionSummariesApplier } from "@/runtime/use-runtime-state-stream";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
@@ -125,6 +126,13 @@ export default function App(): ReactElement {
 		setPendingTaskStartAfterEditId(null);
 		taskEditorResetRef.current();
 	}, []);
+	// task_sessions_updated（150ms 一批的最高频推流）旁路的中转 ref：useWorkspaceSync 往里注册
+	// 「summaries → 一次 setSessions」的 applier，useRuntimeStateStream 收到批次经回调直接调用。
+	// 这样该消息不再经 stream reducer 新建 workspaceState，App 每批只渲染一次而不是两次。
+	const streamedTaskSessionSummariesApplierRef = useRef<StreamedTaskSessionSummariesApplier | null>(null);
+	const handleStreamedTaskSessionSummaries = useCallback((summaries: RuntimeTaskSessionSummary[]) => {
+		streamedTaskSessionSummariesApplierRef.current?.(summaries);
+	}, []);
 	const {
 		currentProjectId,
 		projects,
@@ -163,6 +171,7 @@ export default function App(): ReactElement {
 		resetProjectNavigationState,
 	} = useProjectNavigation({
 		onProjectSwitchStart: handleProjectSwitchStart,
+		onTaskSessionSummaries: handleStreamedTaskSessionSummaries,
 	});
 	const currentProjectSummary = projects.find((project) => project.id === currentProjectId) ?? null;
 	const currentUnavailableProject =
@@ -322,6 +331,7 @@ export default function App(): ReactElement {
 	} = useWorkspaceSync({
 		currentProjectId: projectRuntimeWorkspaceId,
 		streamedWorkspaceState,
+		streamedTaskSessionSummariesApplierRef,
 		hasNoProjects,
 		hasReceivedSnapshot,
 		isDocumentVisible,
