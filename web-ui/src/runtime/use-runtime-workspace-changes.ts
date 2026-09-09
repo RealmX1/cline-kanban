@@ -68,7 +68,8 @@ export function useRuntimeWorkspaceChanges(
 	viewKey: string | null = null,
 	clearOnViewTransition = true,
 ): UseRuntimeWorkspaceChangesResult {
-	const hasWorkspaceScope = taskId !== null && workspaceId !== null && baseRef !== null;
+	const hasWorkspaceScope =
+		worktreeMode !== "independent_directory" && taskId !== null && workspaceId !== null && baseRef !== null;
 	const normalizedViewKey = viewKey ?? "__default__";
 	const requestKey = `${workspaceId ?? "__none__"}:${taskId ?? "__none__"}:${baseRef ?? "__none__"}:${worktreeMode ?? "branch"}:${mode}:${normalizedViewKey}`;
 	const previousRequestKeyRef = useRef(requestKey);

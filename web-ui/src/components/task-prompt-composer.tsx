@@ -43,6 +43,7 @@ interface TaskPromptComposerProps {
 	enabled?: boolean;
 	autoFocus?: boolean;
 	workspaceId?: string | null;
+	taskId?: string | null;
 	showAttachImageButton?: boolean;
 	showPseudoHtmlBlockInsertButton?: boolean;
 }
@@ -62,6 +63,7 @@ export function TaskPromptComposer({
 	enabled = true,
 	autoFocus = false,
 	workspaceId = null,
+	taskId = null,
 	showAttachImageButton = true,
 	showPseudoHtmlBlockInsertButton = true,
 }: TaskPromptComposerProps): ReactElement {
@@ -112,7 +114,7 @@ export function TaskPromptComposer({
 			setMentionInsertTextMap(new Map());
 			setIsMentionSearchLoading(false);
 		}
-	}, [activeToken, enabled, workspaceId]);
+	}, [activeToken, enabled, workspaceId, taskId]);
 
 	useDebouncedEffect(
 		() => {
@@ -126,6 +128,7 @@ export function TaskPromptComposer({
 					const trpcClient = getRuntimeTrpcClient(workspaceId);
 					const payload = await trpcClient.workspace.searchFiles.query({
 						query: activeToken.query,
+						...(taskId ? { taskId } : {}),
 						limit: FILE_MENTION_LIMIT,
 					});
 					if (requestId !== mentionSearchRequestIdRef.current) {
@@ -153,7 +156,7 @@ export function TaskPromptComposer({
 			})();
 		},
 		MENTION_QUERY_DEBOUNCE_MS,
-		[activeToken, enabled, workspaceId],
+		[activeToken, enabled, workspaceId, taskId],
 	);
 
 	const suggestions = useMemo(() => {

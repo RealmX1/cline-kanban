@@ -15,11 +15,13 @@ import {
 export function ClearTrashDialog({
 	open,
 	taskCount,
+	independentTaskIds = [],
 	onCancel,
 	onConfirm,
 }: {
 	open: boolean;
 	taskCount: number;
+	independentTaskIds?: string[];
 	onCancel: () => void;
 	onConfirm: () => void;
 }): ReactElement {
@@ -40,6 +42,11 @@ export function ClearTrashDialog({
 					This will permanently delete {taskCount} {taskLabel} from Done.
 				</AlertDialogDescription>
 				<p className="text-text-primary">This action cannot be undone.</p>
+				{independentTaskIds.map((taskId) => (
+					<p key={taskId} className="text-text-primary break-all">
+						同时删除 ~/.cline/kanban/independent-task-workspaces/{taskId}/ 内的全部文件。
+					</p>
+				))}
 			</AlertDialogBody>
 			<AlertDialogFooter>
 				<AlertDialogCancel asChild>

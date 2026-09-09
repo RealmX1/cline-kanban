@@ -470,6 +470,159 @@ async function requestJson<T>(input: {
 }
 
 describe.sequential("runtime state stream integration", () => {
+	it("独立任务在无仓库实例中隔离目录、跨重启保留文件并显式永久删除", async () => {
+		const fixture = createRuntimeStateStreamIntegrationFixture();
+		const cwd = fixture.createNonGitDirectory("independent-task-launch-directory");
+		const port = await getAvailablePort();
+		let server = await startKanbanServer({ cwd, gitFixture: fixture.gitFixture, port });
+		const baseUrl = `http://127.0.0.1:${port}`;
+		const workspaceId = "kanban_independent_tasks";
+		const scope = { baseUrl, workspaceId };
+		const rootDirectory = join(fixture.homeDirectoryPath, ".cline", "kanban", "independent-task-workspaces");
+		try {
+			const projects = await requestJson<RuntimeProjectsResponse>({
+				baseUrl,
+				procedure: "projects.list",
+				type: "query",
+			});
+			expect(projects.status).toBe(200);
+			expect(projects.payload.projects).toEqual([
+				expect.objectContaining({ id: workspaceId, workspaceKind: "independent_tasks", repositoryPath: null }),
+			]);
+			const initial = await requestJson<RuntimeWorkspaceStateResponse>({
+				...scope,
+				procedure: "workspace.getState",
+				type: "query",
+			});
+			expect(initial.payload.git).toBeNull();
+			const board = createBoard("研究资料整理");
+			const backlog = board.columns[0];
+			const firstCard = backlog?.cards[0];
+			if (!backlog || !firstCard) throw new Error("缺少测试任务。");
+			backlog.cards.push({ ...firstCard, id: "task-2", title: "独立写作" });
+			const saved = await requestJson<RuntimeWorkspaceStateResponse>({
+				...scope,
+				procedure: "workspace.saveState",
+				type: "mutation",
+				payload: { board, sessions: {}, expectedRevision: initial.payload.revision },
+			});
+			expect(saved.status).toBe(200);
+			expect(saved.payload.board.columns[0]?.cards).toEqual([
+				expect.objectContaining({ baseRef: "", worktreeMode: "independent_directory" }),
+				expect.objectContaining({ baseRef: "", worktreeMode: "independent_directory" }),
+			]);
+			const firstDirectory = join(rootDirectory, "task-1");
+			const secondDirectory = join(rootDirectory, "task-2");
+			expect(existsSync(firstDirectory)).toBe(true);
+			expect(existsSync(secondDirectory)).toBe(true);
+			expect(existsSync(join(rootDirectory, ".git"))).toBe(false);
+			expect(existsSync(join(firstDirectory, ".git"))).toBe(false);
+			writeFileSync(join(firstDirectory, "研究笔记.md"), "任务一的研究成果");
+			const search = await requestJson<{ files: { path: string }[] }>({
+				...scope,
+				procedure: "workspace.searchFiles",
+				type: "query",
+				payload: { query: "研究", taskId: "task-1" },
+			});
+			expect(search.status).toBe(200);
+			expect(search.payload.files).toEqual([expect.objectContaining({ path: "研究笔记.md" })]);
+			for (const taskId of [undefined, "task-2"]) {
+				const otherSearch = await requestJson<{ files: unknown[] }>({
+					...scope,
+					procedure: "workspace.searchFiles",
+					type: "query",
+					payload: { query: "研究", taskId },
+				});
+				expect(otherSearch.payload.files).toEqual([]);
+			}
+			const git = await requestJson({ ...scope, procedure: "workspace.getGitSummary", type: "query" });
+			expect(git.status).toBe(400);
+			const shell = await requestJson<RuntimeShellSessionStartResponse>({
+				...scope,
+				procedure: "runtime.startShellSession",
+				type: "mutation",
+				payload: { taskId: "task-1", baseRef: "", worktreeMode: "independent_directory" },
+			});
+			expect(shell.payload.ok, JSON.stringify(shell.payload)).toBe(true);
+			const terminalSocket = new WebSocket(
+				`ws://127.0.0.1:${port}/api/terminal/io?workspaceId=${workspaceId}&taskId=task-1`,
+			);
+			try {
+				await new Promise<void>((resolveOpen, rejectOpen) => {
+					terminalSocket.once("open", resolveOpen);
+					terminalSocket.once("error", rejectOpen);
+				});
+				terminalSocket.send("pwd > shell-working-directory.txt\r");
+				await expect
+					.poll(() => existsSync(join(firstDirectory, "shell-working-directory.txt")), { timeout: 5000 })
+					.toBe(true);
+				expect(readFileSync(join(firstDirectory, "shell-working-directory.txt"), "utf8").trim()).toBe(
+					firstDirectory,
+				);
+			} finally {
+				terminalSocket.close();
+			}
+			await requestJson({
+				...scope,
+				procedure: "runtime.stopTaskSession",
+				type: "mutation",
+				payload: { taskId: "task-1" },
+			});
+			const fresh = await requestJson<RuntimeWorkspaceStateResponse>({
+				...scope,
+				procedure: "workspace.getState",
+				type: "query",
+			});
+			const completedBoard = fresh.payload.board;
+			const completed = completedBoard.columns[0]?.cards.shift();
+			const trash = completedBoard.columns.find((column) => column.id === "trash");
+			if (!completed || !trash) throw new Error("缺少待归档任务。");
+			trash.cards.push(completed);
+			const archived = await requestJson({
+				...scope,
+				procedure: "workspace.saveState",
+				type: "mutation",
+				payload: {
+					board: completedBoard,
+					sessions: fresh.payload.sessions,
+					expectedRevision: fresh.payload.revision,
+				},
+			});
+			expect(archived.status).toBe(200);
+			await server.stop();
+			server = await startKanbanServer({ cwd, gitFixture: fixture.gitFixture, port });
+			const restarted = await requestJson<RuntimeWorkspaceStateResponse>({
+				...scope,
+				procedure: "workspace.getState",
+				type: "query",
+			});
+			expect(restarted.payload.board.columns.find((column) => column.id === "trash")?.cards[0]?.id).toBe("task-1");
+			expect(readFileSync(join(firstDirectory, "研究笔记.md"), "utf8")).toBe("任务一的研究成果");
+			const unconfirmed = await requestJson({
+				...scope,
+				procedure: "workspace.permanentlyDeleteIndependentTask",
+				type: "mutation",
+				payload: { taskId: "task-1", confirmDeleteWorkspaceFiles: false },
+			});
+			expect(unconfirmed.status).toBe(400);
+			expect(existsSync(firstDirectory)).toBe(true);
+			const deleted = await requestJson<RuntimeWorkspaceStateResponse>({
+				...scope,
+				procedure: "workspace.permanentlyDeleteIndependentTask",
+				type: "mutation",
+				payload: { taskId: "task-1", confirmDeleteWorkspaceFiles: true },
+			});
+			expect(deleted.status, JSON.stringify(deleted.payload)).toBe(200);
+			expect(deleted.payload.board.columns.flatMap((column) => column.cards).map((card) => card.id)).toEqual([
+				"task-2",
+			]);
+			expect(existsSync(firstDirectory)).toBe(false);
+			expect(existsSync(secondDirectory)).toBe(true);
+		} finally {
+			await server.stop();
+			fixture.cleanup();
+		}
+	}, 60_000);
 	it("retains indexed project data and selection when the project path becomes unavailable", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const tempHome = integrationFixture.homeDirectoryPath;
@@ -538,7 +691,9 @@ describe.sequential("runtime state stream integration", () => {
 			expect(unavailableSnapshot.currentProjectId).toBe(workspaceId);
 			expect(unavailableSnapshot.workspaceState).toBeNull();
 			expect(unavailableSnapshot.workspaceMetadata).toBeNull();
-			expect(unavailableSnapshot.projects).toEqual([
+			expect(
+				unavailableSnapshot.projects.filter((project) => project.workspaceKind !== "independent_tasks"),
+			).toEqual([
 				expect.objectContaining({
 					id: workspaceId,
 					availability: { status: "unavailable", reason: "project_path_missing" },
@@ -562,7 +717,7 @@ describe.sequential("runtime state stream integration", () => {
 			)) as RuntimeStateStreamSnapshotMessage;
 			expect(recoveredSnapshot.currentProjectId).toBe(workspaceId);
 			expect(recoveredSnapshot.workspaceState?.board.columns[0]?.cards[0]?.title).toBe("Retained while unavailable");
-			expect(recoveredSnapshot.projects).toEqual([
+			expect(recoveredSnapshot.projects.filter((project) => project.workspaceKind !== "independent_tasks")).toEqual([
 				expect.objectContaining({ id: workspaceId, availability: { status: "available" } }),
 			]);
 		} finally {
@@ -641,7 +796,9 @@ describe.sequential("runtime state stream integration", () => {
 
 			expect(unavailableSnapshot.currentProjectId).toBe(workspaceId);
 			expect(unavailableSnapshot.workspaceState).toBeNull();
-			expect(unavailableSnapshot.projects).toEqual([
+			expect(
+				unavailableSnapshot.projects.filter((project) => project.workspaceKind !== "independent_tasks"),
+			).toEqual([
 				expect.objectContaining({
 					id: workspaceId,
 					availability: { status: "unavailable", reason: "git_work_tree_unavailable" },
@@ -664,7 +821,7 @@ describe.sequential("runtime state stream integration", () => {
 		}
 	}, 30_000);
 
-	it("starts outside a git repository with no active workspace", async () => {
+	it("starts outside a git repository with independent tasks available", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const nonGitPath = integrationFixture.createNonGitDirectory("no-git-directory");
 
@@ -679,7 +836,7 @@ describe.sequential("runtime state stream integration", () => {
 
 		try {
 			const runtimeUrl = new URL(server.runtimeUrl);
-			expect(runtimeUrl.pathname).toBe("/");
+			expect(runtimeUrl.pathname).toBe("/kanban_independent_tasks");
 
 			const projectsResponse = await requestJson<RuntimeProjectsResponse>({
 				baseUrl: `http://127.0.0.1:${port}`,
@@ -687,16 +844,18 @@ describe.sequential("runtime state stream integration", () => {
 				type: "query",
 			});
 			expect(projectsResponse.status).toBe(200);
-			expect(projectsResponse.payload.currentProjectId).toBeNull();
-			expect(projectsResponse.payload.projects).toEqual([]);
+			expect(projectsResponse.payload.currentProjectId).toBe("kanban_independent_tasks");
+			expect(projectsResponse.payload.projects).toEqual([
+				expect.objectContaining({ id: "kanban_independent_tasks", workspaceKind: "independent_tasks" }),
+			]);
 
 			stream = await connectRuntimeStream(`ws://127.0.0.1:${port}/api/runtime/ws`);
 			const snapshot = (await stream.waitForMessage(
 				(message): message is RuntimeStateStreamSnapshotMessage => message.type === "snapshot",
 			)) as RuntimeStateStreamSnapshotMessage;
-			expect(snapshot.currentProjectId).toBeNull();
-			expect(snapshot.workspaceState).toBeNull();
-			expect(snapshot.projects).toEqual([]);
+			expect(snapshot.currentProjectId).toBe("kanban_independent_tasks");
+			expect(snapshot.workspaceState).toMatchObject({ workspaceKind: "independent_tasks", git: null });
+			expect(snapshot.projects).toEqual([expect.objectContaining({ id: "kanban_independent_tasks" })]);
 		} finally {
 			if (stream) {
 				await stream.close();
@@ -706,7 +865,7 @@ describe.sequential("runtime state stream integration", () => {
 		}
 	}, 30_000);
 
-	it("starts from the home directory with no active workspace", async () => {
+	it("starts from the home directory with independent tasks available", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const tempHome = integrationFixture.homeDirectoryPath;
 
@@ -721,7 +880,7 @@ describe.sequential("runtime state stream integration", () => {
 
 		try {
 			const runtimeUrl = new URL(server.runtimeUrl);
-			expect(runtimeUrl.pathname).toBe("/");
+			expect(runtimeUrl.pathname).toBe("/kanban_independent_tasks");
 
 			const projectsResponse = await requestJson<RuntimeProjectsResponse>({
 				baseUrl: `http://127.0.0.1:${port}`,
@@ -729,16 +888,18 @@ describe.sequential("runtime state stream integration", () => {
 				type: "query",
 			});
 			expect(projectsResponse.status).toBe(200);
-			expect(projectsResponse.payload.currentProjectId).toBeNull();
-			expect(projectsResponse.payload.projects).toEqual([]);
+			expect(projectsResponse.payload.currentProjectId).toBe("kanban_independent_tasks");
+			expect(projectsResponse.payload.projects).toEqual([
+				expect.objectContaining({ id: "kanban_independent_tasks", workspaceKind: "independent_tasks" }),
+			]);
 
 			stream = await connectRuntimeStream(`ws://127.0.0.1:${port}/api/runtime/ws`);
 			const snapshot = (await stream.waitForMessage(
 				(message): message is RuntimeStateStreamSnapshotMessage => message.type === "snapshot",
 			)) as RuntimeStateStreamSnapshotMessage;
-			expect(snapshot.currentProjectId).toBeNull();
-			expect(snapshot.workspaceState).toBeNull();
-			expect(snapshot.projects).toEqual([]);
+			expect(snapshot.currentProjectId).toBe("kanban_independent_tasks");
+			expect(snapshot.workspaceState).toMatchObject({ workspaceKind: "independent_tasks", git: null });
+			expect(snapshot.projects).toEqual([expect.objectContaining({ id: "kanban_independent_tasks" })]);
 		} finally {
 			if (stream) {
 				await stream.close();
@@ -862,7 +1023,7 @@ describe.sequential("runtime state stream integration", () => {
 				workspaceId: workspaceAId,
 			});
 			expect(projectsAfterDeclinedInit.status).toBe(200);
-			expect(projectsAfterDeclinedInit.payload.projects).toHaveLength(1);
+			expect(projectsAfterDeclinedInit.payload.projects).toHaveLength(2);
 
 			const addWithInitResponse = await requestJson<RuntimeProjectAddResponse>({
 				baseUrl: `http://127.0.0.1:${port}`,
@@ -931,7 +1092,9 @@ describe.sequential("runtime state stream integration", () => {
 			)) as RuntimeStateStreamSnapshotMessage;
 			expect(snapshotA.currentProjectId).toBe(workspaceAId);
 			expect(snapshotA.workspaceState?.repoPath).toBe(expectedProjectAPath);
-			expect(snapshotA.projects.map((project) => project.id).sort()).toEqual([workspaceAId, workspaceBId].sort());
+			expect(snapshotA.projects.map((project) => project.id).sort()).toEqual(
+				[workspaceAId, workspaceBId, "kanban_independent_tasks"].sort(),
+			);
 
 			streamB = await connectRuntimeStream(
 				`ws://127.0.0.1:${port}/api/runtime/ws?workspaceId=${encodeURIComponent(workspaceBId)}`,
@@ -1162,7 +1325,8 @@ describe.sequential("runtime state stream integration", () => {
 				snapshot.workspaceMetadata?.taskWorkspaces.find((task) => task.taskId === taskId) ?? null;
 			expect(initialTaskMetadata).not.toBeNull();
 			expect(initialTaskMetadata?.changedFiles ?? 0).toBe(0);
-			expect(snapshot.workspaceMetadata?.taskWorkspaces.some((task) => task.taskId === trashTaskId)).toBe(false);
+			// Done 元数据继续保留最后快照；collectTrackedTasks 已采用这一契约。
+			expect(snapshot.workspaceMetadata?.taskWorkspaces.some((task) => task.taskId === trashTaskId)).toBe(true);
 			const messagesAfterInitialSnapshot = await stream.collectFor(250);
 			expect(messagesAfterInitialSnapshot.some((message) => message.type === "workspace_metadata_updated")).toBe(
 				false,
@@ -1531,7 +1695,9 @@ describe.sequential("runtime state stream integration", () => {
 					message.type === "projects_updated" && message.currentProjectId === workspaceBId,
 			)) as RuntimeStateStreamProjectsMessage;
 			expect(projectsUpdated.currentProjectId).toBe(workspaceBId);
-			expect(projectsUpdated.projects.map((project) => project.id)).toEqual([workspaceBId]);
+			expect(projectsUpdated.projects.map((project) => project.id).sort()).toEqual(
+				[workspaceBId, "kanban_independent_tasks"].sort(),
+			);
 
 			streamB = await connectRuntimeStream(
 				`ws://127.0.0.1:${port}/api/runtime/ws?workspaceId=${encodeURIComponent(workspaceBId)}`,
@@ -1550,7 +1716,9 @@ describe.sequential("runtime state stream integration", () => {
 			});
 			expect(projectsAfterRemoval.status).toBe(200);
 			expect(projectsAfterRemoval.payload.currentProjectId).toBe(workspaceBId);
-			expect(projectsAfterRemoval.payload.projects.map((project) => project.id)).toEqual([workspaceBId]);
+			expect(projectsAfterRemoval.payload.projects.map((project) => project.id).sort()).toEqual(
+				[workspaceBId, "kanban_independent_tasks"].sort(),
+			);
 		} finally {
 			if (streamA) {
 				await streamA.close();

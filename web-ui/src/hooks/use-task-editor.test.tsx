@@ -411,6 +411,37 @@ describe("useTaskEditor", () => {
 		localStorage.clear();
 	});
 
+	it("独立任务无需分支即可建卡并保留普通目录模式", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					currentProjectId="kanban_independent_tasks"
+					defaultTaskBranchRef=""
+					defaultCreateTaskBranchRef=""
+					createTaskBranchOptions={[]}
+					editTaskBranchOptions={[]}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("整理研究资料");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask({ taskNameOverride: "研究资料" });
+		});
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]).toMatchObject({
+			title: "研究资料",
+			baseRef: "",
+			worktreeMode: "independent_directory",
+			autoReviewEnabled: false,
+		});
+	});
+
 	it("uses the name typed in the task name field as the card title", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 

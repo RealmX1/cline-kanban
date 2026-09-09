@@ -1,11 +1,26 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	symlinkSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
+
+import {
+	INDEPENDENT_TASKS_WORKSPACE_ID,
+	type RuntimeTaskEditDraft,
+	type WorkspaceTaskEditDraftsSnapshot,
+} from "../../src/core/api-contract";
 
 import {
 	createIsolatedGitTestWorkspaceFixture,
@@ -398,6 +413,121 @@ async function stopRuntimeServer(serverProcess: ChildProcess): Promise<void> {
 }
 
 describe("source task commands", () => {
+	it("独立任务 CLI 无仓库创建、更新与确认删除", { timeout: 60_000 }, async () => {
+		const fixture = createTaskCommandExitIntegrationFixture();
+		const cwd = fixture.gitFixture.ownedIntegrationProjectsDirectoryPath;
+		const port = String(await getAvailablePort());
+		const env = fixture.gitFixture.createIsolatedChildProcessEnvironment({ KANBAN_RUNTIME_PORT: port });
+		const rootDirectory = join(fixture.homeDirectoryPath, ".cline", "kanban", "independent-task-workspaces");
+		let server: ChildProcess | null = null;
+		const run = async (command: string, args: string[] = []) => {
+			const result = await runCliCommandAndCollectOutput({
+				cwd,
+				env,
+				args: ["task", command, "--independent-tasks", ...args],
+				timeoutMs: 15_000,
+			});
+			expect(result.didExit).toBe(true);
+			expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+			return JSON.parse(result.stdout);
+		};
+		try {
+			const preview = await run("create", ["--preview", "--prompt", "研究旅行资料", "--title", "旅行研究"]);
+			expect(preview.taskCreated).toBe(false);
+			expect(preview.resolvedSettings.worktreeMode.value).toBe("independent_directory");
+			expect(preview.resolvedSettings.baseRef.value).toBe("");
+			expect(existsSync(rootDirectory)).toBe(false);
+			server = await startRuntimeServerForProject({ projectPath: cwd, gitFixture: fixture.gitFixture, port });
+			const created = await run("create", ["--prompt", "研究旅行资料", "--title", "旅行研究"]);
+			expect(created.taskCreated).toBe(true);
+			expect(created.task.worktreeMode).toBe("independent_directory");
+			const taskId = created.task.id;
+			const taskDirectory = join(rootDirectory, taskId);
+			expect(existsSync(taskDirectory)).toBe(true);
+			writeFileSync(join(taskDirectory, "行程.md"), "保留研究资料");
+			const updated = await run("update", ["--task-id", taskId, "--title", "修改研究标题"]);
+			expect(updated.ok).toBe(true);
+			const fetched = await run("get", ["--task-id", taskId]);
+			expect(fetched.task.title).toBe("修改研究标题");
+			const retainedTask = await run("create", ["--prompt", "保留任务及草稿", "--title", "保留任务"]);
+			const seededDrafts: RuntimeTaskEditDraft[] = [taskId, retainedTask.task.id].map((draftTaskId) => ({
+				taskId: draftTaskId,
+				prompt: "尚未保存的研究内容",
+				images: [],
+				startInPlanMode: false,
+				autoReviewEnabled: false,
+				autoReviewMode: "commit",
+				branchRef: "",
+				savedAt: 2,
+			}));
+			const seededDraftSnapshot: WorkspaceTaskEditDraftsSnapshot = {
+				draftsByTaskId: Object.fromEntries(seededDrafts.map((draft) => [draft.taskId, draft])),
+				supersededDraftCopies: seededDrafts.map((draft) => ({
+					draft: { ...draft, prompt: "落败副本中的研究内容", savedAt: 1 },
+					supersededAt: 3,
+					supersededBySavedAt: 2,
+				})),
+			};
+			const draftFilePath = join(
+				fixture.homeDirectoryPath,
+				".cline",
+				"kanban",
+				"workspaces",
+				INDEPENDENT_TASKS_WORKSPACE_ID,
+				"task-edit-drafts.json",
+			);
+			writeFileSync(draftFilePath, JSON.stringify(seededDraftSnapshot));
+			const readDraftSnapshot = (): WorkspaceTaskEditDraftsSnapshot =>
+				JSON.parse(readFileSync(draftFilePath, "utf8"));
+			for (const confirmationArgs of [[], ["--confirm-delete-workspace-files"]]) {
+				const missing = await runCliCommandAndCollectOutput({
+					cwd,
+					env,
+					args: ["task", "delete", "--independent-tasks", "--task-id", "no-such-task", ...confirmationArgs],
+				});
+				expect(missing.didExit).toBe(true);
+				expect.soft(missing.exitCode).toBe(1);
+				expect.soft(JSON.parse(missing.stdout)).toEqual({
+					ok: false,
+					error: expect.stringContaining('Task "no-such-task" was not found'),
+				});
+				expect(readDraftSnapshot()).toEqual(seededDraftSnapshot);
+			}
+			const deletionPreview = await run("delete", ["--task-id", taskId]);
+			expect(deletionPreview.preview).toBe(true);
+			expect(deletionPreview.directories).toEqual([taskDirectory]);
+			expect(existsSync(taskDirectory)).toBe(true);
+			expect(readDraftSnapshot()).toEqual(seededDraftSnapshot);
+			// 用 fixture 内的符号链接触发真实目录所有权校验失败，失败时不能先清掉仍存活任务的草稿。
+			const preservedTaskDirectory = `${taskDirectory}-preserved-for-deletion-failure`;
+			renameSync(taskDirectory, preservedTaskDirectory);
+			symlinkSync(preservedTaskDirectory, taskDirectory);
+			const rejectedDeletion = await runCliCommandAndCollectOutput({
+				cwd,
+				env,
+				args: ["task", "delete", "--independent-tasks", "--task-id", taskId, "--confirm-delete-workspace-files"],
+			});
+			expect(rejectedDeletion.didExit).toBe(true);
+			expect(rejectedDeletion.exitCode).toBe(1);
+			expect(JSON.parse(rejectedDeletion.stdout).ok).toBe(false);
+			expect(readDraftSnapshot()).toEqual(seededDraftSnapshot);
+			expect((await run("get", ["--task-id", taskId])).task.id).toBe(taskId);
+			unlinkSync(taskDirectory);
+			renameSync(preservedTaskDirectory, taskDirectory);
+			const deleted = await run("delete", ["--task-id", taskId, "--confirm-delete-workspace-files"]);
+			expect(deleted.deletedTaskIds).toEqual([taskId]);
+			expect(existsSync(taskDirectory)).toBe(false);
+			expect(readDraftSnapshot()).toEqual({
+				draftsByTaskId: { [retainedTask.task.id]: seededDraftSnapshot.draftsByTaskId[retainedTask.task.id] },
+				supersededDraftCopies: seededDraftSnapshot.supersededDraftCopies.filter(
+					(copy) => copy.draft.taskId === retainedTask.task.id,
+				),
+			});
+		} finally {
+			if (server) await stopRuntimeServer(server);
+			fixture.cleanup();
+		}
+	});
 	it("exits after creating a task when the runtime server is already running", { timeout: 60_000 }, async () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-task-exit");

@@ -1,12 +1,11 @@
 import { realpathSync } from "node:fs";
-
 import packageJson from "../../package.json" with { type: "json" };
-
 import type { RuntimeAgentId } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveKanbanCommandParts } from "../core/kanban-command";
 import { buildShellCommandLine, quoteShellArg } from "../core/shell";
 import { detectAutoUpdateInstallation, UpdatePackageManager } from "../update/update";
+import { isInsideIndependentTaskWorkspaces } from "../workspace/independent-task-workspace";
 
 const DEFAULT_COMMAND_PREFIX = "kanban";
 const KANBAN_VERSION = typeof packageJson.version === "string" ? packageJson.version : "0.1.0";
@@ -340,6 +339,17 @@ export function renderTaskSessionWorktreeGuardPrompt(
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const trimmedTaskId = taskId.trim();
 	const quotedTaskId = quoteShellArg(trimmedTaskId);
+	if (isInsideIndependentTaskWorkspaces(cwd))
+		return `# Cline Kanban 独立任务工作区
+
+当前 task ID：\`${trimmedTaskId}\`。专属工作目录：\`${cwd}\`。
+本任务不绑定任何仓库。请在此目录保存文件并执行本任务所需的本地操作；遵循用户选定的权限设置。
+完成任务不会删除文件，续聊和重启继续使用此目录。不要为运行 Kanban 自动初始化 Git、创建 worktree 或执行 base 同步。
+用以下命令查询本任务，直接使用给出的 task ID，不要从 Git 或目录推导：
+\`${kanbanCommand} task get --independent-tasks --task-id ${quotedTaskId}\`
+其他 task 命令同样使用 \`--independent-tasks\`，不能同时使用 \`--project-path\`。
+`;
+
 	return `# Kanban Task Workspace
 
 This is a Kanban-managed task session. Your assigned task workspace is the current working directory:

@@ -25,6 +25,10 @@ import {
 } from "../state/workspace-state";
 import { TerminalSessionManager } from "../terminal/session-manager";
 import { runGit } from "../workspace/git-utils";
+import {
+	getIndependentTasksWorkspacePath,
+	isIndependentTasksWorkspacePath,
+} from "../workspace/independent-task-workspace";
 import { collectInProgressTaskDetailsFromBoard } from "./in-progress-task-detail-projection";
 import { applyLiveSessionStateToProjectTaskCounts } from "./project-task-counts-live-session-overlay";
 import { inspectRuntimeProjectAvailability } from "./runtime-project-availability";
@@ -257,9 +261,12 @@ function toProjectSummary(project: {
 	// on the next projects_updated/snapshot broadcast via buildProjectsPayload.
 	gitRemoteOriginUrl?: string | null;
 }): RuntimeProjectSummary {
-	const name = deriveProjectDisplayNameFromRepoPath(project.repoPath);
+	const independentTasks = isIndependentTasksWorkspacePath(project.repoPath);
+	const name = independentTasks ? "独立任务" : deriveProjectDisplayNameFromRepoPath(project.repoPath);
 	return {
 		id: project.workspaceId,
+		workspaceKind: independentTasks ? "independent_tasks" : "repository_project",
+		repositoryPath: independentTasks ? null : project.repoPath,
 		path: project.repoPath,
 		name,
 		taskCounts: project.taskCounts,
@@ -271,6 +278,7 @@ function toProjectSummary(project: {
 }
 
 export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDependencies): Promise<WorkspaceRegistry> {
+	await loadWorkspaceContext(getIndependentTasksWorkspacePath());
 	const launchedFromGitRepo = deps.hasGitRepository(deps.cwd);
 	const initialWorkspace = launchedFromGitRepo ? await loadWorkspaceContext(deps.cwd) : null;
 	let indexedWorkspace: RuntimeWorkspaceIndexEntry | null = null;
@@ -460,6 +468,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	};
 
 	const resolveGitRemoteOriginUrl = async (workspaceId: string, repoPath: string): Promise<string | null> => {
+		if (isIndependentTasksWorkspacePath(repoPath)) return null;
 		const cached = gitRemoteOriginUrlByWorkspaceId.get(workspaceId);
 		if (cached !== undefined) {
 			return cached;

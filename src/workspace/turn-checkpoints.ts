@@ -1,10 +1,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import type { RuntimeTaskTurnCheckpoint } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
 import { getGitStdout, type RunGitOptions } from "./git-utils";
+import { isInsideIndependentTaskWorkspaces } from "./independent-task-workspace";
 
 const CHECKPOINT_AUTHOR_NAME = "kanban-checkpoint";
 const CHECKPOINT_AUTHOR_EMAIL = "kanban-checkpoint@local";
@@ -81,6 +81,7 @@ export async function captureTaskTurnCheckpoint(input: {
 	// 每任务 ref 上限，默认 MAX_TASK_TURN_CHECKPOINT_REFS；测试注入小值，避免真造 200+ ref。
 	maxTaskTurnCheckpointRefs?: number;
 }): Promise<RuntimeTaskTurnCheckpoint> {
+	if (isInsideIndependentTaskWorkspaces(input.cwd)) throw new Error("Independent tasks do not use Git checkpoints.");
 	const repoRoot = await runGit(input.cwd, ["rev-parse", "--show-toplevel"]);
 	const commit = await createWorkingTreeCheckpointCommit(repoRoot, input.turn, input.taskId);
 	const ref = buildCheckpointRef(input.taskId, input.turn);
@@ -127,6 +128,7 @@ export async function listTaskTurnCheckpointRefs(input: {
 	cwd: string;
 	taskId: string;
 }): Promise<TaskTurnCheckpointRefEntry[]> {
+	if (isInsideIndependentTaskWorkspaces(input.cwd)) return [];
 	const repoRoot = await runGit(input.cwd, ["rev-parse", "--show-toplevel"]);
 	return await listTaskTurnCheckpointRefsAtRepoRoot(repoRoot, input.taskId);
 }
@@ -135,6 +137,7 @@ export async function listTaskTurnCheckpointRefs(input: {
 // 浏览器整板保存的差集清理）；仅移入回收站（可恢复）不调它。cwd 不在 git 仓内时会抛——调用方
 // 都是「删除已成之后的收尾」，自行 catch（失败只是残留几个无人认领的 ref）。
 export async function deleteAllTaskTurnCheckpointRefs(input: { cwd: string; taskId: string }): Promise<void> {
+	if (isInsideIndependentTaskWorkspaces(input.cwd)) return;
 	const repoRoot = await runGit(input.cwd, ["rev-parse", "--show-toplevel"]);
 	const entries = await listTaskTurnCheckpointRefsAtRepoRoot(repoRoot, input.taskId);
 	for (const entry of entries) {

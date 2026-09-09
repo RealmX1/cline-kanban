@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
@@ -19,8 +19,22 @@ import {
 } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
 import { applySessionFacets, isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
-import { getTaskColumnId, moveTaskToColumn, updateTaskDependencies } from "../core/task-board-mutations";
+import {
+	deleteTasksFromBoard,
+	getTaskColumnId,
+	moveTaskToColumn,
+	updateTaskDependencies,
+} from "../core/task-board-mutations";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
+
+import {
+	createIndependentTaskDirectoriesForNewCards,
+	deleteIndependentTaskDirectory,
+	getIndependentTaskDirectoryPath,
+	getIndependentTasksWorkspacePath,
+	INDEPENDENT_TASKS_WORKSPACE_ID,
+	isIndependentTasksWorkspacePath,
+} from "../workspace/independent-task-workspace";
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
 const RUNTIME_HOME_DIR = "kanban";
@@ -143,7 +157,8 @@ export interface RuntimeWorkspaceContext {
 	repoPath: string;
 	workspaceId: string;
 	statePath: string;
-	git: RuntimeGitRepositoryInfo;
+	git: RuntimeGitRepositoryInfo | null;
+	workspaceKind?: "repository_project" | "independent_tasks";
 }
 
 export interface LoadWorkspaceContextOptions {
@@ -364,7 +379,8 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 			if (reconciledSessions === incomingSessions) {
 				reconciledSessions = { ...incomingSessions };
 			}
-			reconciledSessions[card.id] = persistedSessions[card.id];
+			const persistedSession = persistedSessions[card.id];
+			if (persistedSession) reconciledSessions[card.id] = persistedSession;
 		}
 	}
 	return reconciledSessions;
@@ -492,7 +508,10 @@ function createWorkspaceIdCollisionSuffix(length: number): string {
 
 function createWorkspaceId(index: WorkspaceIndexFile, repoPath: string): string {
 	const baseId = toWorkspaceIdBase(repoPath);
-	if (!index.entries[baseId] || index.entries[baseId]?.repoPath === repoPath) {
+	if (
+		baseId !== INDEPENDENT_TASKS_WORKSPACE_ID &&
+		(!index.entries[baseId] || index.entries[baseId]?.repoPath === repoPath)
+	) {
 		return baseId;
 	}
 
@@ -652,6 +671,7 @@ export function detectGitRepositoryInfo(repoPath: string): RuntimeGitRepositoryI
 
 // 同 detectGitRepositoryInfo：只读预览要先把「哪个目录是仓库根」解析出来，且不能顺带注册项目。
 export async function resolveWorkspacePath(cwd: string): Promise<string> {
+	if (isIndependentTasksWorkspacePath(cwd)) return getIndependentTasksWorkspacePath();
 	const resolvedCwd = resolve(cwd);
 	let canonicalCwd = resolvedCwd;
 	try {
@@ -681,6 +701,8 @@ function toWorkspaceStateResponse(
 ): RuntimeWorkspaceStateResponse {
 	return {
 		repoPath: context.repoPath,
+		workspaceKind: context.workspaceKind ?? "repository_project",
+		repositoryPath: context.workspaceKind === "independent_tasks" ? null : context.repoPath,
 		statePath: context.statePath,
 		git: context.git,
 		board,
@@ -703,6 +725,16 @@ export async function loadWorkspaceContext(
 	cwd: string,
 	options: LoadWorkspaceContextOptions = {},
 ): Promise<RuntimeWorkspaceContext> {
+	if (isIndependentTasksWorkspacePath(cwd)) {
+		if (options.autoCreateIfMissing !== false) await mkdir(getIndependentTasksWorkspacePath(), { recursive: true });
+		return {
+			repoPath: getIndependentTasksWorkspacePath(),
+			workspaceId: INDEPENDENT_TASKS_WORKSPACE_ID,
+			statePath: getWorkspaceDirectoryPath(INDEPENDENT_TASKS_WORKSPACE_ID),
+			git: null,
+			workspaceKind: "independent_tasks",
+		};
+	}
 	const repoPath = await resolveWorkspacePath(cwd);
 	const autoCreateIfMissing = options.autoCreateIfMissing ?? true;
 	if (!autoCreateIfMissing) {
@@ -740,6 +772,8 @@ export async function loadWorkspaceContext(
 }
 
 export async function loadWorkspaceContextById(workspaceId: string): Promise<RuntimeWorkspaceContext | null> {
+	if (workspaceId === INDEPENDENT_TASKS_WORKSPACE_ID)
+		return await loadWorkspaceContext(getIndependentTasksWorkspacePath(), { autoCreateIfMissing: false });
 	const index = await readWorkspaceIndex();
 	const entry = index.entries[workspaceId];
 	if (!entry) {
@@ -754,7 +788,10 @@ export async function loadWorkspaceContextById(workspaceId: string): Promise<Run
 
 export async function listWorkspaceIndexEntries(): Promise<RuntimeWorkspaceIndexEntry[]> {
 	const index = await readWorkspaceIndex();
-	return Object.values(index.entries)
+	return [
+		...Object.values(index.entries),
+		{ workspaceId: INDEPENDENT_TASKS_WORKSPACE_ID, repoPath: getIndependentTasksWorkspacePath() },
+	]
 		.map((entry) => ({
 			workspaceId: entry.workspaceId,
 			repoPath: entry.repoPath,
@@ -870,6 +907,12 @@ export async function saveWorkspaceState(
 			updatedAt: Date.now(),
 		};
 
+		if (context.workspaceKind === "independent_tasks")
+			await createIndependentTaskDirectoriesForNewCards(persistedBoard, board);
+		else if (
+			board.columns.some((column) => column.cards.some((card) => card.worktreeMode === "independent_directory"))
+		)
+			throw new Error("仓库项目不能使用独立任务目录模式。");
 		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceBoardPath(context.workspaceId), board, {
 			lock: null,
 		});
@@ -936,6 +979,12 @@ export async function mutateWorkspaceState<T>(
 			updatedAt: Date.now(),
 		};
 
+		if (context.workspaceKind === "independent_tasks")
+			await createIndependentTaskDirectoriesForNewCards(currentBoard, nextBoard);
+		else if (
+			nextBoard.columns.some((column) => column.cards.some((card) => card.worktreeMode === "independent_directory"))
+		)
+			throw new Error("仓库项目不能使用独立任务目录模式。");
 		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceBoardPath(context.workspaceId), nextBoard, {
 			lock: null,
 		});
@@ -951,5 +1000,37 @@ export async function mutateWorkspaceState<T>(
 			state: toWorkspaceStateResponse(context, nextBoard, nextSessions, nextRevision),
 			saved: true,
 		};
+	});
+}
+
+/** 仅在会话已停止、用户已确认永久删除后调用。持有同一看板锁，失败时不丢掉卡片。 */
+export async function permanentlyDeleteIndependentTask(taskId: string): Promise<RuntimeWorkspaceStateResponse> {
+	const context = await loadWorkspaceContext(getIndependentTasksWorkspacePath());
+	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
+		const persisted = await loadPersistedWorkspaceStateById(context.workspaceId);
+		if (!persisted.board.columns.some((column) => column.cards.some((card) => card.id === taskId))) {
+			throw new Error("Independent task was not found.");
+		}
+		await deleteIndependentTaskDirectory(taskId);
+		const board = deleteTasksFromBoard(persisted.board, [taskId]).board;
+		const sessions = { ...persisted.sessions };
+		for (const [sessionTaskId, summary] of Object.entries(sessions)) {
+			if (
+				sessionTaskId === taskId ||
+				summary.taskConversationSessionMetadata?.workspaceTaskId === taskId ||
+				summary.workspacePath === getIndependentTaskDirectoryPath(taskId)
+			)
+				delete sessions[sessionTaskId];
+		}
+		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceBoardPath(context.workspaceId), board, { lock: null });
+		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), sessions, {
+			lock: null,
+		});
+		await lockedFileSystem.writeJsonFileAtomic(
+			getWorkspaceMetaPath(context.workspaceId),
+			{ revision: persisted.revision + 1, updatedAt: Date.now() },
+			{ lock: null },
+		);
+		return toWorkspaceStateResponse(context, board, sessions, persisted.revision + 1);
 	});
 }

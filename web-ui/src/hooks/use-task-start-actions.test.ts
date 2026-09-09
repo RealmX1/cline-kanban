@@ -72,12 +72,14 @@ type TaskStartActionsSnapshot = ReturnType<typeof useTaskStartActions>;
 
 function TaskStartActionsHarness({
 	board,
+	persistedBoard,
 	currentProjectId,
 	handleStartTask,
 	handleStartAllBacklogTasks,
 	onSnapshot,
 }: {
 	board: BoardData;
+	persistedBoard?: BoardData | null;
 	currentProjectId: string | null;
 	handleStartTask: (taskId: string) => void;
 	handleStartAllBacklogTasks: (taskIds?: string[]) => void;
@@ -85,6 +87,7 @@ function TaskStartActionsHarness({
 }): null {
 	const actions = useTaskStartActions({
 		board,
+		persistedBoard,
 		currentProjectId,
 		handleCreateTask: () => null,
 		handleCreateTasks: () => [],
@@ -138,11 +141,13 @@ describe("useTaskStartActions start-all confirmation", () => {
 
 	async function renderHarness({
 		board,
+		persistedBoard,
 		currentProjectId = "project-1",
 		handleStartTask,
 		handleStartAllBacklogTasks,
 	}: {
 		board: BoardData;
+		persistedBoard?: BoardData | null;
 		currentProjectId?: string | null;
 		handleStartTask: (taskId: string) => void;
 		handleStartAllBacklogTasks: (taskIds?: string[]) => void;
@@ -151,6 +156,7 @@ describe("useTaskStartActions start-all confirmation", () => {
 			root.render(
 				createElement(TaskStartActionsHarness, {
 					board,
+					persistedBoard,
 					currentProjectId,
 					handleStartTask,
 					handleStartAllBacklogTasks,
@@ -161,6 +167,25 @@ describe("useTaskStartActions start-all confirmation", () => {
 			);
 		});
 	}
+
+	it("独立任务等待服务器保存目录后才启动", async () => {
+		const card = { ...createCard("independent-task"), baseRef: "", worktreeMode: "independent_directory" as const };
+		const board = createBoard({ backlogCards: [card] });
+		const handleStartTask = vi.fn();
+		const handleStartAllBacklogTasks = vi.fn();
+		await renderHarness({
+			board,
+			persistedBoard: createBoard({ backlogCards: [] }),
+			handleStartTask,
+			handleStartAllBacklogTasks,
+		});
+		await act(async () => {
+			requireSnapshot().handleStartTaskFromBoard(card.id);
+		});
+		expect(handleStartTask).not.toHaveBeenCalled();
+		await renderHarness({ board, persistedBoard: board, handleStartTask, handleStartAllBacklogTasks });
+		expect(handleStartTask).toHaveBeenCalledExactlyOnceWith(card.id);
+	});
 
 	it("requires confirmation before starting multiple ready backlog tasks and cancellation has no side effects", async () => {
 		const handleStartTask = vi.fn();

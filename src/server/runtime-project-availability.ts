@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
-
 import type { RuntimeProjectAvailability } from "../core/api-contract";
 import { runGit } from "../workspace/git-utils";
+import { isIndependentTasksWorkspacePath } from "../workspace/independent-task-workspace";
 
 interface RuntimeProjectPathStat {
 	isDirectory: () => boolean;
@@ -45,6 +45,7 @@ export async function inspectRuntimeProjectAvailability(
 		return { status: "unavailable", reason: "project_path_not_directory" };
 	}
 
+	if (isIndependentTasksWorkspacePath(projectPath)) return { status: "available" };
 	return (await dependencies.verifyGitWorkTree(projectPath))
 		? { status: "available" }
 		: { status: "unavailable", reason: "git_work_tree_unavailable" };

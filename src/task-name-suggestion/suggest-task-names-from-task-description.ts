@@ -32,7 +32,7 @@ export const TASK_NAME_SUGGESTION_COUNT_PER_ROUND = 3;
 const TASK_DESCRIPTION_CHARACTERS_SENT_TO_MODEL_LIMIT = 8_000;
 
 const TASK_NAME_SUGGESTION_SYSTEM_PROMPT = [
-	"You name software engineering tasks on a Kanban board.",
+	"You name tasks on a Kanban board, including research, writing, planning, everyday work, and software engineering.",
 	"",
 	`Read the task description and reply with a JSON object of the exact form {"suggestedTaskNames": ["...", "...", "..."]}.`,
 	"",
@@ -41,7 +41,7 @@ const TASK_NAME_SUGGESTION_SYSTEM_PROMPT = [
 	"- Write every name in the same language as the task description.",
 	`- At most ${DEFAULT_TASK_TITLE_MAX_CHARS} characters per name. No surrounding quotes and no trailing punctuation.`,
 	"- Name the intended outcome or the change being made, not the process of working on it.",
-	"- Be specific enough that the name is distinguishable from other tasks in the same repository.",
+	"- Be specific enough that the name is distinguishable from other tasks on the board.",
 	"- Output the JSON object and nothing else.",
 ].join("\n");
 

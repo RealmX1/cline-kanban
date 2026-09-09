@@ -1,8 +1,7 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
-
 import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { applySessionFacets, SESSION_SUMMARY_SCHEMA_VERSION } from "../../src/core/session-activity";
 import type { WorkspaceStateConflictError } from "../../src/state/workspace-state";
@@ -13,9 +12,16 @@ import {
 	loadWorkspaceContextById,
 	loadWorkspaceState,
 	mutateWorkspaceState,
+	permanentlyDeleteIndependentTask,
 	removeWorkspaceIndexEntry,
 	saveWorkspaceState,
 } from "../../src/state/workspace-state";
+import {
+	getIndependentTaskDirectoryPath,
+	getIndependentTasksWorkspacePath,
+	INDEPENDENT_TASKS_WORKSPACE_ID,
+} from "../../src/workspace/independent-task-workspace";
+import { getTaskWorkspaceInfo, resolveTaskCwd } from "../../src/workspace/task-worktree";
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
@@ -121,6 +127,83 @@ async function withIsolatedWorkspaceStateHome<T>(
 }
 
 describe.sequential("workspace-state integration", () => {
+	it("为独立任务分配普通目录，保存和恢复不重建丢失的产出", async () => {
+		await withIsolatedWorkspaceStateHome(async () => {
+			const collectionPath = getIndependentTasksWorkspacePath();
+			const initial = await loadWorkspaceState(collectionPath);
+			expect(initial.git).toBeNull();
+			expect(initial.workspaceKind).toBe("independent_tasks");
+			const board = createBoard("整理研究材料");
+			const saved = await saveWorkspaceState(collectionPath, {
+				board,
+				sessions: {},
+				expectedRevision: initial.revision,
+			});
+			const taskDirectory = getIndependentTaskDirectoryPath("task-1");
+			expect(existsSync(join(taskDirectory, ".git"))).toBe(false);
+			writeFileSync(join(taskDirectory, "研究笔记.md"), "保留这份产出");
+			expect(await resolveTaskCwd({ cwd: collectionPath, taskId: "task-1", baseRef: "", ensure: true })).toBe(
+				taskDirectory,
+			);
+			const info = await getTaskWorkspaceInfo({ cwd: collectionPath, taskId: "task-1", baseRef: "" });
+			expect(info).toMatchObject({ exists: true, headCommit: null, branch: null });
+			await saveWorkspaceState(collectionPath, {
+				board: saved.board,
+				sessions: {},
+				expectedRevision: saved.revision,
+			});
+			expect(readFileSync(join(taskDirectory, "研究笔记.md"), "utf8")).toBe("保留这份产出");
+			rmSync(taskDirectory, { recursive: true });
+			await expect(
+				resolveTaskCwd({ cwd: collectionPath, taskId: "task-1", baseRef: "", ensure: true }),
+			).rejects.toThrow();
+			expect(existsSync(taskDirectory)).toBe(false);
+		});
+	});
+
+	it("独立任务拒绝整板移除及越界符号链接删除", async () => {
+		await withIsolatedWorkspaceStateHome(async () => {
+			const collectionPath = getIndependentTasksWorkspacePath();
+			const saved = await saveWorkspaceState(collectionPath, { board: createBoard("受保护的任务"), sessions: {} });
+			const emptiedBoard = {
+				...saved.board,
+				columns: saved.board.columns.map((column) => ({ ...column, cards: [] })),
+			};
+			await expect(saveWorkspaceState(collectionPath, { board: emptiedBoard, sessions: {} })).rejects.toThrow(
+				"永久删除",
+			);
+			const directory = getIndependentTaskDirectoryPath("task-1");
+			const outsideDirectory = join(collectionPath, "retained-unrelated-files");
+			mkdirSync(outsideDirectory);
+			writeFileSync(join(outsideDirectory, "保留.md"), "不能误删");
+			rmSync(directory, { recursive: true });
+			symlinkSync(outsideDirectory, directory, "dir");
+			await expect(permanentlyDeleteIndependentTask("task-1")).rejects.toThrow("owned directory");
+			expect(readFileSync(join(outsideDirectory, "保留.md"), "utf8")).toBe("不能误删");
+			expect((await loadWorkspaceState(collectionPath)).board.columns[0]?.cards[0]?.id).toBe("task-1");
+			await expect(permanentlyDeleteIndependentTask("../retained-unrelated-files")).rejects.toThrow();
+		});
+	});
+
+	it("独立集合不会占用同名仓库的既有状态目录", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const repository = createRepository(["kanban-independent-tasks"]);
+			const context = await loadWorkspaceContext(repository.repositoryPath);
+			expect(context.workspaceId).toBe("kanban-independent-tasks");
+			await saveWorkspaceState(repository.repositoryPath, { board: createBoard("仓库原有任务"), sessions: {} });
+			const independentContext = await loadWorkspaceContext(getIndependentTasksWorkspacePath());
+			expect(independentContext.workspaceId).not.toBe(context.workspaceId);
+			expect(
+				(await loadWorkspaceState(getIndependentTasksWorkspacePath())).board.columns.flatMap(
+					(column) => column.cards,
+				),
+			).toEqual([]);
+			expect((await loadWorkspaceState(repository.repositoryPath)).board.columns[0]?.cards[0]?.title).toBe(
+				"仓库原有任务",
+			);
+		});
+	});
+
 	it("returns local branch metadata with last commit dates in recency order", async () => {
 		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
 			const repository = createRepository(["project-a"]);
@@ -144,8 +227,8 @@ describe.sequential("workspace-state integration", () => {
 
 			const state = await loadWorkspaceState(workspacePath);
 
-			expect(state.git.currentBranch).toBe(mainBranch);
-			expect(state.git.branches).toEqual([
+			expect(state.git?.currentBranch).toBe(mainBranch);
+			expect(state.git?.branches).toEqual([
 				{ name: "feature/recent", lastCommitDate: "2026-05-10T12:34:56+08:00" },
 				{ name: mainBranch, lastCommitDate: "2026-05-08T10:00:00+08:00" },
 			]);
@@ -298,9 +381,9 @@ describe.sequential("workspace-state integration", () => {
 			const contextB = await loadWorkspaceContext(workspaceBPath);
 
 			const entries = await listWorkspaceIndexEntries();
-			expect(entries).toHaveLength(2);
+			expect(entries).toHaveLength(3);
 			expect(entries.map((entry) => entry.workspaceId).sort()).toEqual(
-				[contextA.workspaceId, contextB.workspaceId].sort(),
+				[contextA.workspaceId, contextB.workspaceId, INDEPENDENT_TASKS_WORKSPACE_ID].sort(),
 			);
 
 			expect(await loadWorkspaceContextById(contextA.workspaceId)).not.toBeNull();
@@ -309,8 +392,8 @@ describe.sequential("workspace-state integration", () => {
 			expect(await removeWorkspaceIndexEntry(contextA.workspaceId)).toBe(false);
 
 			const entriesAfterRemoval = await listWorkspaceIndexEntries();
-			expect(entriesAfterRemoval).toHaveLength(1);
-			expect(entriesAfterRemoval[0]?.workspaceId).toBe(contextB.workspaceId);
+			expect(entriesAfterRemoval).toHaveLength(2);
+			expect(entriesAfterRemoval.map((entry) => entry.workspaceId)).toContain(contextB.workspaceId);
 		});
 	});
 
@@ -325,9 +408,9 @@ describe.sequential("workspace-state integration", () => {
 			]);
 
 			const entries = await listWorkspaceIndexEntries();
-			expect(entries).toHaveLength(2);
+			expect(entries).toHaveLength(3);
 			expect(entries.map((entry) => entry.workspaceId).sort()).toEqual(
-				[contextA.workspaceId, contextB.workspaceId].sort(),
+				[contextA.workspaceId, contextB.workspaceId, INDEPENDENT_TASKS_WORKSPACE_ID].sort(),
 			);
 		});
 	});

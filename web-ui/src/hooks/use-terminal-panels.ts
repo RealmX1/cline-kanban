@@ -307,6 +307,7 @@ export function useTerminalPanels({
 					rows: geometry.rows,
 					workspaceTaskId: card.id,
 					baseRef: card.baseRef,
+					worktreeMode: card.worktreeMode,
 				});
 				if (!payload.ok || !payload.summary) {
 					throw new Error(payload.error ?? "Could not start detail terminal session.");

@@ -13,6 +13,7 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			"@": resolve(__dirname, "src"),
+			"@runtime-contract": resolve(__dirname, "../src/core/api-contract.ts"),
 			"@runtime-agent-catalog": resolve(__dirname, "../src/core/agent-catalog.ts"),
 			"@runtime-agent-session-transport-selection": resolve(
 				__dirname,

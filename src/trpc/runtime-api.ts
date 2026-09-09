@@ -127,6 +127,10 @@ import {
 	isClaudeCodePhaseSwitchingCompositeModelSelectionOptionId,
 	resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity,
 } from "../terminal/terminal-agent-model-selection";
+import {
+	getIndependentTaskDirectoryPath,
+	isIndependentTasksWorkspacePath,
+} from "../workspace/independent-task-workspace";
 import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
@@ -638,6 +642,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			};
 			try {
 				const body = parseTaskSessionStartRequest(input);
+				if (isIndependentTasksWorkspacePath(workspaceScope.workspacePath) && isHomeAgentSessionId(body.taskId)) {
+					throw new Error("请先创建独立任务，每个任务使用自己的工作目录。");
+				}
 				diagnosticTaskId = body.taskId;
 				requestedAgentIdForDiagnostics = body.agentId ?? null;
 				if (body.resumeFromTrash) {
@@ -657,6 +664,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							worktreeMode: body.worktreeMode,
 						});
 				const shouldCaptureTurnCheckpoint =
+					!isIndependentTasksWorkspacePath(workspaceScope.workspacePath) &&
 					!body.resumeFromTrash &&
 					!isHomeAgentSessionId(body.taskId) &&
 					body.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way";
@@ -1154,7 +1162,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const body = parseTaskSessionStopRequest(input);
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 				const acpStoppedSummary = await acpTaskSessionService.stopTaskSession(body.taskId);
-				if (acpStoppedSummary) {
+				if (acpStoppedSummary && !isIndependentTasksWorkspacePath(workspaceScope.workspacePath)) {
 					return { ok: true, summary: acpStoppedSummary };
 				}
 				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
@@ -1166,17 +1174,42 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						: [];
 				const terminalTaskSessionSummaries =
 					typeof terminalManager.listSummaries === "function" ? terminalManager.listSummaries() : [];
-				for (const summary of [...clineTaskSessionSummaries, ...terminalTaskSessionSummaries]) {
-					if (summary.taskConversationSessionMetadata?.workspaceTaskId === body.taskId) {
+				const isIndependentWorkspace = isIndependentTasksWorkspacePath(workspaceScope.workspacePath);
+				// 只有看板任务能扩大到同目录；详情终端等会话 ID 不能当成任务目录，也不能反查父任务后全停。
+				const independentTaskBoard = isIndependentWorkspace
+					? await loadWorkspaceBoardById(workspaceScope.workspaceId)
+					: null;
+				const independentTaskDirectoryPath = independentTaskBoard?.columns.some((column) =>
+					column.cards.some((card) => card.id === body.taskId),
+				)
+					? getIndependentTaskDirectoryPath(body.taskId)
+					: null;
+				const acpTaskSessionSummaries = isIndependentWorkspace ? acpTaskSessionService.listSummaries() : [];
+				for (const summary of [
+					...clineTaskSessionSummaries,
+					...terminalTaskSessionSummaries,
+					...acpTaskSessionSummaries,
+				]) {
+					if (
+						summary.taskConversationSessionMetadata?.workspaceTaskId === body.taskId ||
+						(independentTaskDirectoryPath !== null && summary.workspacePath === independentTaskDirectoryPath)
+					) {
 						relatedTaskConversationSessionIds.add(summary.taskId);
 					}
 				}
-				let summary: RuntimeTaskSessionSummary | null = null;
+				let summary: RuntimeTaskSessionSummary | null = acpStoppedSummary;
 				for (const taskConversationSessionId of relatedTaskConversationSessionIds) {
-					const clineSummary = await clineTaskSessionService.stopTaskSession(taskConversationSessionId);
-					const terminalSummary = clineSummary ? null : terminalManager.stopTaskSession(taskConversationSessionId);
+					const acpSummary =
+						taskConversationSessionId === body.taskId
+							? acpStoppedSummary
+							: await acpTaskSessionService.stopTaskSession(taskConversationSessionId);
+					const clineSummary = acpSummary
+						? null
+						: await clineTaskSessionService.stopTaskSession(taskConversationSessionId);
+					const terminalSummary =
+						acpSummary || clineSummary ? null : terminalManager.stopTaskSession(taskConversationSessionId);
 					if (taskConversationSessionId === body.taskId) {
-						summary = clineSummary ?? terminalSummary ?? summary;
+						summary = acpSummary ?? clineSummary ?? terminalSummary;
 					}
 				}
 				return {
@@ -1993,10 +2026,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const body = parseShellSessionStartRequest(input);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const shell = deps.resolveInteractiveShellCommand();
-				const shellCwd = body.workspaceTaskId
+				const shellWorkspaceTaskId =
+					body.workspaceTaskId ??
+					(isIndependentTasksWorkspacePath(workspaceScope.workspacePath) ? body.taskId : undefined);
+				const shellCwd = shellWorkspaceTaskId
 					? await resolveTaskCwd({
 							cwd: workspaceScope.workspacePath,
-							taskId: body.workspaceTaskId,
+							taskId: shellWorkspaceTaskId,
 							baseRef: body.baseRef,
 							ensure: true,
 							...(body.worktreeMode ? { worktreeMode: body.worktreeMode } : {}),

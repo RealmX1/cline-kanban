@@ -27,15 +27,16 @@ describe("workspace registry runtime project availability cache", () => {
 
 			await registry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(null);
 			await registry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(null);
-			expect(inspectRuntimeProjectAvailability).toHaveBeenCalledTimes(1);
-
-			await registry.buildProjectsPayload(null);
 			expect(inspectRuntimeProjectAvailability).toHaveBeenCalledTimes(2);
 
+			await registry.buildProjectsPayload(null);
+			expect(inspectRuntimeProjectAvailability).toHaveBeenCalledTimes(4);
+
 			await registry.resolveWorkspaceForStream(workspaceContext.workspaceId);
-			expect(inspectRuntimeProjectAvailability).toHaveBeenCalledTimes(3);
+			// 显式解析会刷新仓库与内置独立任务入口，后续广播继续复用缓存。
+			expect(inspectRuntimeProjectAvailability).toHaveBeenCalledTimes(6);
 			await registry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(workspaceContext.workspaceId);
-			expect(inspectRuntimeProjectAvailability).toHaveBeenCalledTimes(3);
+			expect(inspectRuntimeProjectAvailability).toHaveBeenCalledTimes(6);
 		} finally {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;

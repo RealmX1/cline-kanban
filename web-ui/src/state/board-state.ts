@@ -286,7 +286,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		return null;
 	}
 	const baseRef = typeof card.baseRef === "string" ? card.baseRef.trim() : "";
-	if (!baseRef) {
+	if (!baseRef && card.worktreeMode !== "independent_directory") {
 		return null;
 	}
 	const title = (typeof card.title === "string" ? card.title.trim() : "") || prompt;
@@ -323,7 +323,9 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 
 	const prepFilePath = typeof card.prepFilePath === "string" ? card.prepFilePath.trim() : "";
 	const worktreeMode =
-		card.worktreeMode === "branch" || card.worktreeMode === "inplace" ? card.worktreeMode : undefined;
+		card.worktreeMode === "branch" || card.worktreeMode === "inplace" || card.worktreeMode === "independent_directory"
+			? card.worktreeMode
+			: undefined;
 	// 老卡片没有这个字段：这里留 undefined，由服务端在启动任务时按当时的全局 autonomous 开关推导，
 	// 前端不猜（前端拿不到那个开关的历史值）。
 	const parsedTaskAgentPermissionMode = runtimeTaskAgentPermissionModeSchema.safeParse(card.taskAgentPermissionMode);
@@ -702,7 +704,7 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 	}
 	const title = typeof draft.title === "string" ? draft.title.trim() : "";
 	const baseRef = draft.baseRef.trim();
-	if (!baseRef) {
+	if (!baseRef && draft.worktreeMode !== "independent_directory") {
 		return { board, updated: false };
 	}
 	const shouldUpdateTaskAgentSessionInitialization = Object.hasOwn(draft, "taskAgentSessionInitialization");

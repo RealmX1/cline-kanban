@@ -45,6 +45,11 @@ export function DeleteTaskDialog({
 			</AlertDialogHeader>
 			<AlertDialogBody>
 				<AlertDialogDescription>{description}</AlertDialogDescription>
+				{task?.worktreeMode === "independent_directory" ? (
+					<p className="text-text-primary break-all">
+						同时永久删除 ~/.cline/kanban/independent-task-workspaces/{task.id}/ 内的全部文件。
+					</p>
+				) : null}
 				{hasConfirmedIntent ? (
 					<p className="text-text-primary">This action cannot be undone.</p>
 				) : (

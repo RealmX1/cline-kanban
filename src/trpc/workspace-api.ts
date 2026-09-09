@@ -51,6 +51,10 @@ import {
 } from "../workspace/git-history";
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
 import { runGit } from "../workspace/git-utils";
+import {
+	isIndependentTasksWorkspacePath,
+	verifyIndependentTaskDirectory,
+} from "../workspace/independent-task-workspace";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
 import {
 	probeAndRefreshTaskCommitIntegrationProvenance,
@@ -151,7 +155,7 @@ function normalizeOptionalTaskWorkspaceScopeInput(
 	}
 	const taskId = input.taskId.trim();
 	const baseRef = input.baseRef.trim();
-	if (!taskId || !baseRef) {
+	if (!taskId || (!baseRef && input.worktreeMode !== "independent_directory")) {
 		throw new Error("baseRef query parameter requires taskId.");
 	}
 	return {
@@ -177,7 +181,7 @@ function normalizeRequiredTaskWorkspaceScopeInput(input: {
 	if (!taskId) {
 		throw new Error("Missing taskId query parameter.");
 	}
-	if (!baseRef) {
+	if (!baseRef && input.worktreeMode !== "independent_directory") {
 		throw new Error("Missing baseRef query parameter.");
 	}
 	const mode: RuntimeWorkspaceChangesMode = input.mode ?? "working_copy";
@@ -441,6 +445,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		deleteWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeDeleteRequest(input);
+			if (isIndependentTasksWorkspacePath(workspaceScope.workspacePath)) return { ok: true, removed: false };
 			// 删除目录前尽力落最后一份 Git 状态快照。Done-stage guard 属独立任务；这里的
 			// provenance 采集失败不得把既有 worktree cleanup 变成破坏性行为变化。
 			try {
@@ -479,6 +484,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			return deletionResult;
 		},
 		loadTaskWorkspaceGitStatuses: async (workspaceScope): Promise<RuntimeTaskWorkspaceGitStatusesResponse> => {
+			if (isIndependentTasksWorkspacePath(workspaceScope.workspacePath)) return { taskWorkspaceGitStatuses: {} };
 			const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 			const cards = board.columns.flatMap((column) => column.cards);
 			const baseRefTipCommitPromises = new Map<string, Promise<string | null>>();
@@ -536,7 +542,15 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		searchFiles: async (workspaceScope, input) => {
 			const query = input.query.trim();
 			const limit = input.limit;
-			const files = await searchWorkspaceFiles(workspaceScope.workspacePath, query, limit);
+			let searchDirectoryPath = workspaceScope.workspacePath;
+			if (isIndependentTasksWorkspacePath(searchDirectoryPath)) {
+				if (!input.taskId) return { query, files: [] };
+				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+				if (!board.columns.some((column) => column.cards.some((card) => card.id === input.taskId)))
+					throw new Error("Independent task was not found.");
+				searchDirectoryPath = await verifyIndependentTaskDirectory(input.taskId);
+			}
+			const files = await searchWorkspaceFiles(searchDirectoryPath, query, limit);
 			return {
 				query,
 				files,
@@ -613,7 +627,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					rememberedBaseRefForProject,
 					repository: state.git,
 				}).baseRef;
-				if (!resolvedBaseRef) {
+				if (!resolvedBaseRef && state.workspaceKind !== "independent_tasks") {
 					throw new TRPCError({
 						code: "BAD_REQUEST",
 						message: "Could not determine task base branch for this workspace.",
@@ -631,6 +645,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						// 不把它传下去的话，「工作区默认是 omp」的新卡不会固化通道，之后改全局默认会反向改掉它。
 						workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
 						baseRef: resolvedBaseRef,
+						worktreeMode: state.workspaceKind === "independent_tasks" ? "independent_directory" : "branch",
 						images: input.images,
 					},
 					() => globalThis.crypto.randomUUID(),

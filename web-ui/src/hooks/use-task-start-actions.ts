@@ -6,6 +6,7 @@ import type { BoardCard, BoardData, TaskEditorSubmitOptions } from "@/types";
 
 interface UseTaskStartActionsInput {
 	board: BoardData;
+	persistedBoard?: BoardData | null;
 	currentProjectId: string | null;
 	handleCreateTask: (options?: TaskEditorSubmitOptions) => string | null;
 	handleCreateTasks: (prompts: string[], options?: TaskEditorSubmitOptions) => string[];
@@ -60,6 +61,7 @@ export function getStartableBacklogTaskIds(board: BoardData): string[] {
 
 export function useTaskStartActions({
 	board,
+	persistedBoard,
 	currentProjectId,
 	handleCreateTask,
 	handleCreateTasks,
@@ -82,6 +84,17 @@ export function useTaskStartActions({
 				return;
 			}
 
+			if (
+				backlogTaskIds.some(
+					(taskId) =>
+						findCardSelection(board, taskId)?.card.worktreeMode === "independent_directory" &&
+						(!persistedBoard || !findCardSelection(persistedBoard, taskId)),
+				)
+			) {
+				setPendingTaskStartAfterCreateIds(backlogTaskIds);
+				return;
+			}
+
 			if (backlogTaskIds.length === 1) {
 				const firstTaskId = backlogTaskIds[0];
 				if (!firstTaskId) {
@@ -92,7 +105,7 @@ export function useTaskStartActions({
 			}
 			handleStartAllBacklogTasks(backlogTaskIds);
 		},
-		[board, handleStartAllBacklogTasks, handleStartTask],
+		[board, persistedBoard, handleStartAllBacklogTasks, handleStartTask],
 	);
 
 	const handleStartTaskFromBoard = useCallback(
@@ -204,14 +217,18 @@ export function useTaskStartActions({
 		}
 		const allInBacklog = pendingTaskStartAfterCreateIds.every((taskId) => {
 			const selection = findCardSelection(board, taskId);
-			return selection?.column.id === "backlog";
+			return (
+				selection?.column.id === "backlog" &&
+				(selection.card.worktreeMode !== "independent_directory" ||
+					Boolean(persistedBoard && findCardSelection(persistedBoard, taskId)))
+			);
 		});
 		if (!allInBacklog) {
 			return;
 		}
 		startBacklogTasks(pendingTaskStartAfterCreateIds);
 		setPendingTaskStartAfterCreateIds(null);
-	}, [board, pendingTaskStartAfterCreateIds, startBacklogTasks]);
+	}, [board, persistedBoard, pendingTaskStartAfterCreateIds, startBacklogTasks]);
 
 	return {
 		handleCreateAndStartTask,

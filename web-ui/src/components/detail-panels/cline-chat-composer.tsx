@@ -269,6 +269,7 @@ export function ClineChatComposer({
 				try {
 					const payload = await getRuntimeTrpcClient(workspaceId).workspace.searchFiles.query({
 						query: activeToken.query,
+						taskId,
 						limit: CLINE_CHAT_COMPOSER_FILE_LIMIT,
 					});
 					if (requestId !== mentionSearchRequestIdRef.current) {

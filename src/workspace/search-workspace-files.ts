@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
-
 import type { RuntimeWorkspaceFileSearchMatch } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
+import { isInsideIndependentTaskWorkspaces } from "./independent-task-workspace";
 
 const execFileAsync = promisify(execFile);
 const CACHE_TTL_MS = 10_000;
@@ -86,6 +88,24 @@ async function loadFileIndex(cwd: string): Promise<{ files: string[]; changedPat
 		};
 	}
 
+	if (isInsideIndependentTaskWorkspaces(cwd)) {
+		const files: string[] = [];
+		// ponytail: 按需遍历最多 10000 个目录项；大型产出目录需要分页索引时再替换。
+		let visitedDirectoryEntryCount = 0;
+		const visitDirectory = async (directoryPath: string, prefix: string): Promise<void> => {
+			for (const entry of await readdir(directoryPath, { withFileTypes: true })) {
+				if (visitedDirectoryEntryCount++ >= 10000) break;
+				if (entry.isSymbolicLink() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+				const relativePath = prefix + entry.name;
+				if (entry.isDirectory()) await visitDirectory(join(directoryPath, entry.name), `${relativePath}/`);
+				else if (entry.isFile()) files.push(relativePath);
+			}
+		};
+		await visitDirectory(cwd, "");
+		const changedPaths = new Set<string>();
+		fileIndexCache.set(cwd, { expiresAt: Date.now() + CACHE_TTL_MS, files, changedPaths });
+		return { files, changedPaths };
+	}
 	try {
 		const [filesResult, statusResult] = await Promise.all([
 			execFileAsync(

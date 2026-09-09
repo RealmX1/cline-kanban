@@ -9,6 +9,7 @@ import type {
 import { computeWorktreeGitChangeToken } from "../workspace/git-change-token";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
 import { runGit } from "../workspace/git-utils";
+import { isIndependentTasksWorkspacePath } from "../workspace/independent-task-workspace";
 import { refreshTaskCommitIntegrationProvenance } from "../workspace/task-commit-integration-provenance";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
@@ -146,14 +147,15 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.changedFiles === b.changedFiles &&
 		a.additions === b.additions &&
 		a.deletions === b.deletions &&
-		a.workspaceGitStatus.baseRef === b.workspaceGitStatus.baseRef &&
-		a.workspaceGitStatus.commitsAheadOfBaseRef === b.workspaceGitStatus.commitsAheadOfBaseRef &&
-		a.workspaceGitStatus.commitsBehindBaseRef === b.workspaceGitStatus.commitsBehindBaseRef &&
-		a.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef === b.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef &&
-		a.workspaceGitStatus.taskCommitIntegrationTrackingStatus ===
-			b.workspaceGitStatus.taskCommitIntegrationTrackingStatus &&
-		a.workspaceGitStatus.observationSource === b.workspaceGitStatus.observationSource &&
-		a.workspaceGitStatus.observedAt === b.workspaceGitStatus.observedAt &&
+		a.workspaceGitStatus?.baseRef === b.workspaceGitStatus?.baseRef &&
+		a.workspaceGitStatus?.commitsAheadOfBaseRef === b.workspaceGitStatus?.commitsAheadOfBaseRef &&
+		a.workspaceGitStatus?.commitsBehindBaseRef === b.workspaceGitStatus?.commitsBehindBaseRef &&
+		a.workspaceGitStatus?.taskCommitsIntegratedIntoBaseRef ===
+			b.workspaceGitStatus?.taskCommitsIntegratedIntoBaseRef &&
+		a.workspaceGitStatus?.taskCommitIntegrationTrackingStatus ===
+			b.workspaceGitStatus?.taskCommitIntegrationTrackingStatus &&
+		a.workspaceGitStatus?.observationSource === b.workspaceGitStatus?.observationSource &&
+		a.workspaceGitStatus?.observedAt === b.workspaceGitStatus?.observedAt &&
 		a.stateVersion === b.stateVersion
 	);
 }
@@ -215,6 +217,7 @@ function buildWorkspaceMetadataSnapshot(entry: WorkspaceMetadataEntry): RuntimeW
 }
 
 async function loadHomeGitMetadata(entry: WorkspaceMetadataEntry): Promise<CachedHomeGitMetadata> {
+	if (isIndependentTasksWorkspacePath(entry.workspacePath)) return entry.homeGit;
 	try {
 		const now = Date.now();
 		const cached = entry.homeGit;
@@ -332,6 +335,28 @@ async function loadTaskWorkspaceMetadata(
 		...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
 	});
 
+	if (isIndependentTasksWorkspacePath(workspacePath)) {
+		return {
+			data: {
+				...pathInfo,
+				baseCommit: null,
+				commitsAheadOfBaseRef: null,
+				commitsBehindBaseRef: null,
+				workspaceGitStatus: null,
+				branch: null,
+				isDetached: false,
+				headCommit: null,
+				changedFiles: null,
+				additions: null,
+				deletions: null,
+				stateVersion: 0,
+			},
+			stateToken: null,
+			cheapChangeToken: null,
+			baseRefTipCommit: null,
+			lastFullRefreshAtMs: 0,
+		};
+	}
 	if (!pathInfo.exists) {
 		const baseRefTipCommit = await resolveBaseRefTip(pathInfo.baseRef);
 		if (

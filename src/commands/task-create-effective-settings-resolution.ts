@@ -115,7 +115,7 @@ export interface TaskCreateEffectiveSettingsResolutionInput {
 	isProjectRegisteredInKanban: boolean;
 	/** `--project-path` 有没有被显式传进来。只影响 workspaceRepoPath 那条的 source 是否算「显式」。 */
 	wasProjectPathExplicitlyRequested: boolean;
-	repositoryGitInfo: RuntimeGitRepositoryInfo;
+	repositoryGitInfo: RuntimeGitRepositoryInfo | null;
 	/**
 	 * 现有看板列。刻意不收整份 RuntimeWorkspaceStateResponse：未注册的项目根本没有看板可读，
 	 * 那条路径只能传一个空列表，而要求整份 state 会逼调用方去伪造 sessions/revision 之类无关字段。
@@ -229,7 +229,14 @@ export async function resolveTaskCreateEffectiveSettings(
 		resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(runtimeConfig.agentAutonomousModeEnabled);
 	const resolvedPermissionMode = resolveTaskAgentPermissionModeForAgent(effectiveAgentId, requestedPermissionMode);
 	const startInPlanMode = requested.startInPlanMode ?? runtimeConfig.newTaskStartInPlanModeByDefault;
-	const worktreeMode = requested.worktreeMode ?? "branch";
+	const worktreeMode = repositoryGitInfo ? (requested.worktreeMode ?? "branch") : "independent_directory";
+	if (
+		!repositoryGitInfo &&
+		(requested.baseRef ||
+			(requested.worktreeMode && requested.worktreeMode !== "independent_directory") ||
+			requested.autoReviewEnabled)
+	)
+		throw new Error("Independent tasks do not support base refs, worktree modes, or Git auto-review.");
 
 	const resolvedSettings: TaskCreateResolvedSettings = {
 		workspaceRepoPath: {
@@ -310,19 +317,23 @@ export async function resolveTaskCreateEffectiveSettings(
 	const doesEffectiveAgentLaunchThroughABinaryOnPath =
 		getRuntimeAgentSessionTransport(effectiveAgentId) !== "in_process_cline_sdk";
 	const [commitCountBaseRefIsBehindItsRemoteTrackingBranch, baseRefCheckoutHasUncommittedChanges] = await Promise.all([
-		readCommitCountBaseRefIsBehindItsRemoteTrackingBranch(input.workspaceRepoPath, baseRefResolution.baseRef),
-		readWhetherBaseRefCheckoutHasUncommittedChanges(
-			input.workspaceRepoPath,
-			baseRefResolution.baseRef,
-			repositoryGitInfo.currentBranch,
-			worktreeMode,
-		),
+		repositoryGitInfo
+			? readCommitCountBaseRefIsBehindItsRemoteTrackingBranch(input.workspaceRepoPath, baseRefResolution.baseRef)
+			: null,
+		repositoryGitInfo
+			? readWhetherBaseRefCheckoutHasUncommittedChanges(
+					input.workspaceRepoPath,
+					baseRefResolution.baseRef,
+					repositoryGitInfo?.currentBranch ?? null,
+					worktreeMode,
+				)
+			: false,
 	]);
 
 	const warnings = deriveTaskCreateWarnings({
 		workspaceRepoPath: input.workspaceRepoPath,
 		baseRefResolution,
-		repositoryDefaultBranch: repositoryGitInfo.defaultBranch,
+		repositoryDefaultBranch: repositoryGitInfo?.defaultBranch ?? null,
 		commitCountBaseRefIsBehindItsRemoteTrackingBranch,
 		baseRefCheckoutHasUncommittedChanges,
 		effectiveAgentId,

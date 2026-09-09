@@ -4,7 +4,6 @@
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import { initTRPC, TRPCError } from "@trpc/server";
 import { z } from "zod";
-
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
@@ -256,6 +255,7 @@ import {
 	runtimeNotificationMutationResponseSchema,
 	runtimeOpenFileRequestSchema,
 	runtimeOpenFileResponseSchema,
+	runtimePermanentlyDeleteIndependentTaskRequestSchema,
 	runtimeProjectAddRequestSchema,
 	runtimeProjectAddResponseSchema,
 	runtimeProjectDirectoryPickerResponseSchema,
@@ -333,6 +333,8 @@ import {
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
 } from "../core/api-contract";
+import { permanentlyDeleteIndependentTask } from "../state/workspace-state";
+import { isIndependentTasksWorkspacePath } from "../workspace/independent-task-workspace";
 
 export interface RuntimeTrpcWorkspaceScope {
 	workspaceId: string;
@@ -725,6 +727,12 @@ const workspaceProcedure = t.procedure.use(({ ctx, next }) => {
 	});
 });
 
+const repositoryWorkspaceProcedure = workspaceProcedure.use(({ ctx, next }) => {
+	if (isIndependentTasksWorkspacePath(ctx.workspaceScope.workspacePath))
+		throw new TRPCError({ code: "BAD_REQUEST", message: "独立任务不支持 Git 仓库操作。" });
+	return next();
+});
+
 const optionalTaskWorkspaceInfoRequestSchema = runtimeTaskWorkspaceInfoRequestSchema.nullable().optional();
 const gitSyncActionInputSchema = z.object({
 	action: runtimeGitSyncActionSchema,
@@ -1066,31 +1074,43 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	workspace: t.router({
-		getGitSummary: workspaceProcedure
+		permanentlyDeleteIndependentTask: workspaceProcedure
+			.input(runtimePermanentlyDeleteIndependentTaskRequestSchema)
+			.output(runtimeWorkspaceStateResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				if (!isIndependentTasksWorkspacePath(ctx.workspaceScope.workspacePath))
+					throw new TRPCError({ code: "BAD_REQUEST", message: "此操作仅用于独立任务。" });
+				const stopped = await ctx.runtimeApi.stopTaskSession(ctx.workspaceScope, { taskId: input.taskId });
+				if (stopped.error) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: stopped.error });
+				const state = await permanentlyDeleteIndependentTask(input.taskId);
+				await ctx.workspaceApi.notifyStateUpdated(ctx.workspaceScope);
+				return state;
+			}),
+		getGitSummary: repositoryWorkspaceProcedure
 			.input(optionalTaskWorkspaceInfoRequestSchema)
 			.output(runtimeGitSummaryResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadGitSummary(ctx.workspaceScope, input ?? null);
 			}),
-		runGitSyncAction: workspaceProcedure
+		runGitSyncAction: repositoryWorkspaceProcedure
 			.input(gitSyncActionInputSchema)
 			.output(runtimeGitSyncResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.runGitSyncAction(ctx.workspaceScope, input);
 			}),
-		checkoutGitBranch: workspaceProcedure
+		checkoutGitBranch: repositoryWorkspaceProcedure
 			.input(runtimeGitCheckoutRequestSchema)
 			.output(runtimeGitCheckoutResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.checkoutGitBranch(ctx.workspaceScope, input);
 			}),
-		discardGitChanges: workspaceProcedure
+		discardGitChanges: repositoryWorkspaceProcedure
 			.input(optionalTaskWorkspaceInfoRequestSchema)
 			.output(runtimeGitDiscardResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.discardGitChanges(ctx.workspaceScope, input ?? null);
 			}),
-		getChanges: workspaceProcedure
+		getChanges: repositoryWorkspaceProcedure
 			.input(runtimeWorkspaceChangesRequestSchema)
 			.output(runtimeWorkspaceChangesResponseSchema)
 			.query(async ({ ctx, input }) => {
@@ -1145,34 +1165,36 @@ export const runtimeAppRouter = t.router({
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.addBacklogTask(ctx.workspaceScope, input);
 			}),
-		getWorkspaceChanges: workspaceProcedure.output(runtimeWorkspaceChangesResponseSchema).query(async ({ ctx }) => {
-			return await ctx.workspaceApi.loadWorkspaceChanges(ctx.workspaceScope);
-		}),
-		getGitLog: workspaceProcedure
+		getWorkspaceChanges: repositoryWorkspaceProcedure
+			.output(runtimeWorkspaceChangesResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.workspaceApi.loadWorkspaceChanges(ctx.workspaceScope);
+			}),
+		getGitLog: repositoryWorkspaceProcedure
 			.input(runtimeGitLogRequestSchema)
 			.output(runtimeGitLogResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadGitLog(ctx.workspaceScope, input);
 			}),
-		getGitRefs: workspaceProcedure
+		getGitRefs: repositoryWorkspaceProcedure
 			.input(optionalTaskWorkspaceInfoRequestSchema)
 			.output(runtimeGitRefsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadGitRefs(ctx.workspaceScope, input ?? null);
 			}),
-		getCommitDiff: workspaceProcedure
+		getCommitDiff: repositoryWorkspaceProcedure
 			.input(runtimeGitCommitDiffRequestSchema)
 			.output(runtimeGitCommitDiffResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadCommitDiff(ctx.workspaceScope, input);
 			}),
-		getCommitChangedFileMetadata: workspaceProcedure
+		getCommitChangedFileMetadata: repositoryWorkspaceProcedure
 			.input(runtimeGitCommitChangedFileMetadataRequestSchema)
 			.output(runtimeGitCommitChangedFileMetadataResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadCommitChangedFileMetadata(ctx.workspaceScope, input);
 			}),
-		getCommitFileDiffPatch: workspaceProcedure
+		getCommitFileDiffPatch: repositoryWorkspaceProcedure
 			.input(runtimeGitCommitFileDiffPatchRequestSchema)
 			.output(runtimeGitCommitFileDiffPatchResponseSchema)
 			.query(async ({ ctx, input }) => {

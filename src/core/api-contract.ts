@@ -31,7 +31,7 @@ export const runtimeWorkspaceFileChangeSchema = z.object({
 });
 export type RuntimeWorkspaceFileChange = z.infer<typeof runtimeWorkspaceFileChangeSchema>;
 
-export const runtimeTaskWorktreeModeSchema = z.enum(["branch", "inplace"]);
+export const runtimeTaskWorktreeModeSchema = z.enum(["branch", "inplace", "independent_directory"]);
 export type RuntimeTaskWorktreeMode = z.infer<typeof runtimeTaskWorktreeModeSchema>;
 
 // 每个任务的放权档位，跨全部 harness 共用。这条轴与 `startInPlanMode` **正交**：
@@ -64,6 +64,7 @@ export const runtimeWorkspaceChangesResponseSchema = z.object({
 export type RuntimeWorkspaceChangesResponse = z.infer<typeof runtimeWorkspaceChangesResponseSchema>;
 
 export const runtimeWorkspaceFileSearchRequestSchema = z.object({
+	taskId: z.string().optional(),
 	query: z.string(),
 	limit: z.number().int().positive().optional(),
 });
@@ -888,9 +889,11 @@ export const runtimeTaskSessionSummarySchema = runtimeTaskSessionSummaryObjectSc
 export type RuntimeTaskSessionSummary = z.infer<typeof runtimeTaskSessionSummarySchema>;
 
 export const runtimeWorkspaceStateResponseSchema = z.object({
+	workspaceKind: z.enum(["repository_project", "independent_tasks"]).optional(),
+	repositoryPath: z.string().nullable().optional(),
 	repoPath: z.string(),
 	statePath: z.string(),
-	git: runtimeGitRepositoryInfoSchema,
+	git: runtimeGitRepositoryInfoSchema.nullable(),
 	board: runtimeBoardDataSchema,
 	sessions: z.record(z.string(), runtimeTaskSessionSummarySchema),
 	revision: z.number(),
@@ -1020,6 +1023,8 @@ export const runtimeInProgressTaskDetailSchema = z.object({
 export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDetailSchema>;
 
 export const runtimeProjectSummarySchema = z.object({
+	workspaceKind: z.enum(["repository_project", "independent_tasks"]).optional(),
+	repositoryPath: z.string().nullable().optional(),
 	id: z.string(),
 	path: z.string(),
 	name: z.string(),
@@ -1096,7 +1101,7 @@ export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	commitsAheadOfBaseRef: z.number().int().nonnegative().nullable(),
 	// behind = base 分支独有、任务尚未吸收的提交数。base 分支推进时增长，任务吸收（base-branch-sync）后归零。
 	commitsBehindBaseRef: z.number().int().nonnegative().nullable(),
-	workspaceGitStatus: runtimeTaskWorkspaceGitStatusSchema,
+	workspaceGitStatus: runtimeTaskWorkspaceGitStatusSchema.nullable(),
 	branch: z.string().nullable(),
 	isDetached: z.boolean(),
 	headCommit: z.string().nullable(),
@@ -1579,7 +1584,7 @@ export const runtimeWorktreeEnsureResponseSchema = z.union([
 		ok: z.literal(true),
 		path: z.string(),
 		baseRef: z.string(),
-		baseCommit: z.string(),
+		baseCommit: z.string().nullable(),
 		warning: z.string().optional(),
 		error: z.string().optional(),
 	}),
@@ -3939,3 +3944,11 @@ export const runtimeIngestExploratorySessionMapUpdateResponseSchema = z.object({
 export type RuntimeIngestExploratorySessionMapUpdateResponse = z.infer<
 	typeof runtimeIngestExploratorySessionMapUpdateResponseSchema
 >;
+
+export const runtimePermanentlyDeleteIndependentTaskRequestSchema = z.object({
+	taskId: z.string().regex(/^[a-zA-Z0-9_-]+$/),
+	confirmDeleteWorkspaceFiles: z.literal(true),
+});
+
+// 仓库 ID 只含字母、数字和连字符；下划线保留名避免与既有仓库的状态目录碰撞。
+export const INDEPENDENT_TASKS_WORKSPACE_ID = "kanban_independent_tasks";

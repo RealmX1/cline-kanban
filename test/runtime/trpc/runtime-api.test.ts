@@ -12,6 +12,10 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	TerminalInputBoxStashOutcome,
 } from "../../../src/core/api-contract";
+import {
+	getIndependentTaskDirectoryPath,
+	getIndependentTasksWorkspacePath,
+} from "../../../src/workspace/independent-task-workspace";
 
 const agentRegistryMocks = vi.hoisted(() => ({
 	resolveAgentCommand: vi.fn(),
@@ -534,7 +538,14 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
-	describe("taskConversationMode 传参", () => {
+	describe.each([
+		{ workspacePath: "/tmp/repo", baseRef: "main", worktreeMode: "branch" as const },
+		{
+			workspacePath: getIndependentTasksWorkspacePath(),
+			baseRef: "",
+			worktreeMode: "independent_directory" as const,
+		},
+	])("taskConversationMode 与 $worktreeMode 工作目录", ({ workspacePath, baseRef, worktreeMode }) => {
 		it("终端分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {
 			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 
@@ -554,19 +565,23 @@ describe("createRuntimeApi startTaskSession", () => {
 			});
 
 			const response = await api.startTaskSession(
-				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ workspaceId: "workspace-1", workspacePath },
 				{
 					taskId: "task-1",
-					baseRef: "main",
+					baseRef,
+					worktreeMode,
 					prompt: "Map the exploration space",
 					taskConversationMode: "exploratory",
 				},
 			);
 
 			expect(response.ok).toBe(true);
+			if (worktreeMode === "independent_directory")
+				expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 			expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
 				expect.objectContaining({
 					taskId: "task-1",
+					cwd: "/tmp/existing-worktree",
 					taskConversationMode: "exploratory",
 				}),
 				expect.any(String),
@@ -604,19 +619,23 @@ describe("createRuntimeApi startTaskSession", () => {
 			});
 
 			const response = await api.startTaskSession(
-				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ workspaceId: "workspace-1", workspacePath },
 				{
 					taskId: "task-1",
-					baseRef: "main",
+					baseRef,
+					worktreeMode,
 					prompt: "Map the exploration space",
 					taskConversationMode: "exploratory",
 				},
 			);
 
 			expect(response.ok).toBe(true);
+			if (worktreeMode === "independent_directory")
+				expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 			expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
 				expect.objectContaining({
 					taskId: "task-1",
+					cwd: "/tmp/existing-worktree",
 					taskConversationMode: "exploratory",
 				}),
 			);
@@ -656,10 +675,11 @@ describe("createRuntimeApi startTaskSession", () => {
 			});
 
 			const response = await api.startTaskSession(
-				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ workspaceId: "workspace-1", workspacePath },
 				{
 					taskId: "task-1",
-					baseRef: "main",
+					baseRef,
+					worktreeMode,
 					prompt: "Map the exploration space",
 					agentId: "omp",
 					requestedAgentSessionTransport: "acp_stdio_subprocess",
@@ -668,9 +688,12 @@ describe("createRuntimeApi startTaskSession", () => {
 			);
 
 			expect(response.ok).toBe(true);
+			if (worktreeMode === "independent_directory")
+				expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 			expect(acpTaskSessionService.startTaskSession).toHaveBeenCalledWith(
 				expect.objectContaining({
 					taskId: "task-1",
+					cwd: "/tmp/existing-worktree",
 					taskConversationMode: "exploratory",
 				}),
 			);
@@ -2239,6 +2262,109 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(clineTaskSessionService.stopTaskSession).toHaveBeenCalledWith("task-1");
 		expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
 	});
+
+	it.each([
+		{
+			requestedSessionId: "__detail_terminal__:task-1",
+			primaryTransport: "pty_terminal",
+			independentWorkspace: true,
+		},
+		{ requestedSessionId: "acp-attached-session", primaryTransport: "pty_terminal", independentWorkspace: true },
+		{ requestedSessionId: "task-1", primaryTransport: "pty_terminal", independentWorkspace: true },
+		{ requestedSessionId: "task-1", primaryTransport: "pty_terminal", independentWorkspace: false },
+		{ requestedSessionId: "task-1", primaryTransport: "acp_stdio_subprocess", independentWorkspace: true },
+		{ requestedSessionId: "task-1", primaryTransport: "acp_stdio_subprocess", independentWorkspace: false },
+	] as const)(
+		"停止 $requestedSessionId（$primaryTransport，独立集合 $independentWorkspace）保持任务与单会话的清理边界",
+		async ({ requestedSessionId, primaryTransport, independentWorkspace }) => {
+			const taskDirectoryPath = getIndependentTaskDirectoryPath("task-1");
+			const primarySummary = createSummary({ workspacePath: taskDirectoryPath, sessionTransport: primaryTransport });
+			const detailTerminalSummary = createSummary({
+				taskId: "__detail_terminal__:task-1",
+				workspacePath: taskDirectoryPath,
+			});
+			const acpAttachedSummary = createSummary({
+				taskId: "acp-attached-session",
+				workspacePath: taskDirectoryPath,
+				sessionTransport: "acp_stdio_subprocess",
+			});
+			const unrelatedSummary = createSummary({
+				taskId: "unrelated-task",
+				workspacePath: getIndependentTaskDirectoryPath("unrelated-task"),
+			});
+			const terminalSummaries = [
+				detailTerminalSummary,
+				unrelatedSummary,
+				...(primaryTransport === "pty_terminal" ? [primarySummary] : []),
+			];
+			const acpSummaries = [
+				acpAttachedSummary,
+				unrelatedSummary,
+				...(primaryTransport === "acp_stdio_subprocess" ? [primarySummary] : []),
+			];
+			const terminalManager = {
+				listSummaries: vi.fn(() => terminalSummaries),
+				stopTaskSession: vi.fn(
+					(taskId: string) => terminalSummaries.find((summary) => summary.taskId === taskId) ?? null,
+				),
+			};
+			const acpTaskSessionService = {
+				listSummaries: vi.fn(() => acpSummaries),
+				stopTaskSession: vi.fn(
+					async (taskId: string) => acpSummaries.find((summary) => summary.taskId === taskId) ?? null,
+				),
+			};
+			const clineTaskSessionService = createClineTaskSessionServiceMock();
+			const clineAttachedSummary = createSummary({
+				taskId: "cline-attached-session",
+				workspacePath: taskDirectoryPath,
+			});
+			clineTaskSessionService.listSummaries.mockReturnValue([clineAttachedSummary]);
+			clineTaskSessionService.stopTaskSession.mockImplementation(async (taskId) =>
+				taskId === clineAttachedSummary.taskId ? clineAttachedSummary : null,
+			);
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+				getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.stopTaskSession(
+				{
+					workspaceId: "workspace-1",
+					workspacePath: independentWorkspace ? getIndependentTasksWorkspacePath() : "/tmp/repo",
+				},
+				{ taskId: requestedSessionId },
+			);
+			expect(response).toEqual({
+				ok: true,
+				summary: [primarySummary, detailTerminalSummary, acpAttachedSummary].find(
+					(summary) => summary.taskId === requestedSessionId,
+				),
+			});
+			if (requestedSessionId === "task-1" && independentWorkspace) {
+				expect(terminalManager.stopTaskSession).toHaveBeenCalledWith(detailTerminalSummary.taskId);
+				expect(acpTaskSessionService.stopTaskSession).toHaveBeenCalledWith(acpAttachedSummary.taskId);
+				expect(clineTaskSessionService.stopTaskSession).toHaveBeenCalledWith(clineAttachedSummary.taskId);
+			} else {
+				const requestedService = terminalSummaries.some((summary) => summary.taskId === requestedSessionId)
+					? terminalManager
+					: acpTaskSessionService;
+				expect(requestedService.stopTaskSession).toHaveBeenCalledWith(requestedSessionId);
+				for (const service of [terminalManager, acpTaskSessionService, clineTaskSessionService]) {
+					expect(service.stopTaskSession.mock.calls.every(([taskId]) => taskId === requestedSessionId)).toBe(true);
+				}
+			}
+			for (const service of [terminalManager, acpTaskSessionService, clineTaskSessionService]) {
+				expect(service.stopTaskSession).not.toHaveBeenCalledWith(unrelatedSummary.taskId);
+			}
+		},
+	);
 
 	it("returns cline chat messages and sends chat message through cline service", async () => {
 		const summary = createSummary({ agentId: "cline", pid: null });

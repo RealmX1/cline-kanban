@@ -61,10 +61,19 @@ export function buildProjectSwitcherRows({
 	}));
 
 	if (sortOrder === "name_asc") {
-		return rows.sort((a, b) => compareByProjectNameAscending(a.project, b.project));
+		return rows.sort(
+			(a, b) =>
+				Number(b.project.workspaceKind === "independent_tasks") -
+					Number(a.project.workspaceKind === "independent_tasks") ||
+				compareByProjectNameAscending(a.project, b.project),
+		);
 	}
 
 	return rows.sort((a, b) => {
+		const independentTasksFirst =
+			Number(b.project.workspaceKind === "independent_tasks") -
+			Number(a.project.workspaceKind === "independent_tasks");
+		if (independentTasksFirst) return independentTasksFirst;
 		if (a.lastVisitedEpochMs === null && b.lastVisitedEpochMs === null) {
 			return compareByProjectNameAscending(a.project, b.project);
 		}

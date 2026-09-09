@@ -46,7 +46,7 @@ export interface TaskCreateBaseRefResolutionInput {
 	explicitlyRequestedBaseRef?: string | null;
 	/** 该项目上次成功建卡用的 ref。仅当它仍存在于 repository.branches 时才会被采纳。 */
 	rememberedBaseRefForProject?: string | null;
-	repository: Pick<RuntimeGitRepositoryInfo, "currentBranch" | "defaultBranch" | "branches">;
+	repository: Pick<RuntimeGitRepositoryInfo, "currentBranch" | "defaultBranch" | "branches"> | null;
 }
 
 function normalizeRefName(value: string | null | undefined): string {
@@ -64,11 +64,13 @@ function doesBranchStillExistInRepository(
 	branchName: string,
 	repository: TaskCreateBaseRefResolutionInput["repository"],
 ): boolean {
-	return repository.branches.some((branch) => branch.name.trim() === branchName);
+	return repository?.branches.some((branch) => branch.name.trim() === branchName) ?? false;
 }
 
 export function resolveTaskCreateBaseRef(input: TaskCreateBaseRefResolutionInput): TaskCreateBaseRefResolution {
 	const { repository } = input;
+	if (!repository)
+		return { baseRef: "", provenance: null, rememberedBaseRefDiscardedBecauseBranchNoLongerExists: null };
 
 	const explicitlyRequestedBaseRef = normalizeRefName(input.explicitlyRequestedBaseRef);
 	if (explicitlyRequestedBaseRef) {

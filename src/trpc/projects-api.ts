@@ -29,6 +29,10 @@ import {
 	loadWorkspaceContextById,
 } from "../state/workspace-state";
 import { cloneGitRepository } from "../workspace/git-clone";
+import {
+	INDEPENDENT_TASKS_WORKSPACE_ID,
+	isIndependentTasksWorkspacePath,
+} from "../workspace/independent-task-workspace";
 import { ensureInitialCommit, initializeGitRepository } from "../workspace/initialize-repo";
 import { isPathWithinRoot } from "../workspace/path-sandbox";
 import type { RuntimeTrpcContext } from "./app-router";
@@ -130,6 +134,8 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 					// path is guaranteed to exist here by the schema refine and the gitUrl branch above.
 					projectPath = deps.resolveProjectInputPath(body.path as string, resolveBasePath);
 				}
+				if (isIndependentTasksWorkspacePath(projectPath))
+					throw new Error("独立任务集合不能绑定或初始化为仓库项目。");
 				await deps.assertPathIsDirectory(projectPath);
 				if (!deps.hasGitRepository(projectPath)) {
 					if (!body.initializeGit) {
@@ -189,10 +195,14 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 		},
 		getPermanentDeletionPreview: async (_preferredWorkspaceId, input) => {
 			const body = parseProjectPermanentDeletionPreviewRequest(input);
+			if (body.projectId === INDEPENDENT_TASKS_WORKSPACE_ID)
+				throw new Error("独立任务是内建入口，请逐任务确认永久删除。");
 			return await confirmedProjectPermanentDeletionService.getPermanentDeletionPreview(body);
 		},
 		permanentlyDeleteProjectData: async (_preferredWorkspaceId, input) => {
 			const body = parseProjectPermanentDeletionRequest(input);
+			if (body.projectId === INDEPENDENT_TASKS_WORKSPACE_ID)
+				throw new Error("独立任务是内建入口，请逐任务确认永久删除。");
 			return await confirmedProjectPermanentDeletionService.permanentlyDeleteProjectData(body);
 		},
 		pickProjectDirectory: async () => {
@@ -333,7 +343,9 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 						// 逐项目 board 加载经共享的模块级 p-limit 单例钳流，避免项目数增长时无界并发读盘 + 主线程 JSON.parse
 						// 停摆事件循环（参见 WORKSPACE_BOARD_LOAD_CONCURRENCY_LIMIT 的动机说明）。
 						workspaceBoardLoadConcurrencyLimiter(async () => {
-							const projectName = deriveProjectDisplayNameFromRepoPath(entry.repoPath);
+							const projectName = isIndependentTasksWorkspacePath(entry.repoPath)
+								? "独立任务"
+								: deriveProjectDisplayNameFromRepoPath(entry.repoPath);
 							try {
 								const board = await loadWorkspaceBoardById(entry.workspaceId);
 								return { projectId: entry.workspaceId, projectName, board };

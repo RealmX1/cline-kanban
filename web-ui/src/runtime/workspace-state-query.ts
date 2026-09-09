@@ -34,3 +34,13 @@ export async function saveWorkspaceState(
 		throw error;
 	}
 }
+
+export async function permanentlyDeleteIndependentTask(
+	workspaceId: string,
+	taskId: string,
+): Promise<RuntimeWorkspaceStateResponse> {
+	return await createWorkspaceTrpcClient(workspaceId).workspace.permanentlyDeleteIndependentTask.mutate({
+		taskId,
+		confirmDeleteWorkspaceFiles: true,
+	});
+}

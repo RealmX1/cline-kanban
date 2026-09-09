@@ -23,6 +23,7 @@ import {
 } from "../state/restoration-deferred-harness-generated-prompt-store";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
+import { isInsideIndependentTaskWorkspaces } from "../workspace/independent-task-workspace";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
 import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
@@ -436,6 +437,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					const checkpointCwd = transitionedSummary.workspacePath ?? workspacePath;
 					void (async () => {
 						try {
+							if (isInsideIndependentTaskWorkspaces(checkpointCwd)) return;
 							const checkpoint = await checkpointCapture({
 								cwd: checkpointCwd,
 								taskId,

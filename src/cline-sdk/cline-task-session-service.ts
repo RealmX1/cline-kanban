@@ -28,6 +28,7 @@ import {
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
 import { resolveExploratoryModeAppendSystemPrompt } from "../prompts/exploratory-mode-append-system-prompt";
+import { isInsideIndependentTaskWorkspaces } from "../workspace/independent-task-workspace";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import {
 	compactPersistedMessagesForContextOverflow,
@@ -1020,6 +1021,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 	}
 
 	private captureReviewCheckpoint(taskId: string, summary: RuntimeTaskSessionSummary): void {
+		if (summary.workspacePath && isInsideIndependentTaskWorkspaces(summary.workspacePath)) return;
 		const nextTurn = (summary.latestTurnCheckpoint?.turn ?? 0) + 1;
 		// turn ref 保留策略（姊妹蓝图 §1.4）：任务存续期全量保留，这里只做捕获、不再轮换删旧
 		// ref；批删挂在任务删除 / trash 清空路径（deleteAllTaskTurnCheckpointRefs）。

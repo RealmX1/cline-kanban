@@ -1,4 +1,5 @@
 import { isKanbanCursorAgentModelId } from "@runtime-agent-catalog";
+import { INDEPENDENT_TASKS_WORKSPACE_ID } from "@runtime-contract";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "@runtime-task-agent-permission-mode";
 import { deriveTaskTitleFromPrompt } from "@runtime-task-title";
 import type { Dispatch, SetStateAction } from "react";
@@ -269,6 +270,7 @@ export function useTaskEditor({
 	setSelectedTaskId,
 	queueTaskStartAfterEdit,
 }: UseTaskEditorInput): UseTaskEditorResult {
+	const isIndependentTasksWorkspace = currentProjectId === INDEPENDENT_TASKS_WORKSPACE_ID;
 	const [isInlineTaskCreateOpen, setIsInlineTaskCreateOpen] = useState(false);
 	const [newTaskPrompt, setNewTaskPrompt] = useState("");
 	const [newTaskImages, setNewTaskImages] = useState<TaskImage[]>([]);
@@ -440,10 +442,10 @@ export function useTaskEditor({
 		images: editTaskImages,
 		startInPlanMode: editTaskStartInPlanMode,
 		taskAgentPermissionMode: editTaskAgentPermissionMode,
-		autoReviewEnabled: editTaskAutoReviewEnabled,
+		autoReviewEnabled: !isIndependentTasksWorkspace && editTaskAutoReviewEnabled,
 		autoReviewMode: editTaskAutoReviewMode,
 		branchRef: editTaskBranchRef,
-		worktreeMode: editTaskWorktreeMode,
+		worktreeMode: isIndependentTasksWorkspace ? "independent_directory" : editTaskWorktreeMode,
 		agentId: editTaskAgentId,
 		clineSettings: editTaskClineSettings,
 		terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
@@ -479,10 +481,10 @@ export function useTaskEditor({
 				images: editTaskImages,
 				startInPlanMode: editTaskStartInPlanMode,
 				taskAgentPermissionMode: editTaskAgentPermissionMode,
-				autoReviewEnabled: editTaskAutoReviewEnabled,
+				autoReviewEnabled: !isIndependentTasksWorkspace && editTaskAutoReviewEnabled,
 				autoReviewMode: editTaskAutoReviewMode,
 				branchRef: editTaskBranchRef || resolvedDefaultTaskBranchRef,
-				worktreeMode: editTaskWorktreeMode,
+				worktreeMode: isIndependentTasksWorkspace ? "independent_directory" : editTaskWorktreeMode,
 				agentId: editTaskAgentId,
 				clineSettings: editTaskClineSettings,
 				terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
@@ -501,6 +503,7 @@ export function useTaskEditor({
 		TASK_EDIT_DRAFT_PERSIST_DEBOUNCE_MS,
 		[
 			currentProjectId,
+			isIndependentTasksWorkspace,
 			editTaskAgentId,
 			editTaskAgentPermissionMode,
 			editTaskAutoReviewEnabled,
@@ -755,7 +758,7 @@ export function useTaskEditor({
 			if (!prompt) {
 				return null;
 			}
-			if (!(editTaskBranchRef || resolvedDefaultTaskBranchRef)) {
+			if (!(editTaskBranchRef || resolvedDefaultTaskBranchRef) && !isIndependentTasksWorkspace) {
 				return null;
 			}
 
@@ -772,7 +775,7 @@ export function useTaskEditor({
 					startInPlanMode: editTaskStartInPlanMode,
 					taskAgentPermissionMode: editTaskAgentPermissionMode,
 					taskConversationMode: editTaskConversationMode,
-					autoReviewEnabled: editTaskAutoReviewEnabled,
+					autoReviewEnabled: !isIndependentTasksWorkspace && editTaskAutoReviewEnabled,
 					autoReviewMode: editTaskAutoReviewMode,
 					images: editTaskImages,
 					agentId: editTaskAgentId,
@@ -780,7 +783,7 @@ export function useTaskEditor({
 					terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
 					taskAgentSessionInitialization: editTaskAgentSessionInitialization,
 					baseRef,
-					worktreeMode: editTaskWorktreeMode,
+					worktreeMode: isIndependentTasksWorkspace ? "independent_directory" : editTaskWorktreeMode,
 				});
 				return updated.updated ? updated.board : currentBoard;
 			});
@@ -817,6 +820,7 @@ export function useTaskEditor({
 			editTaskWorktreeMode,
 			editingTaskId,
 			currentProjectId,
+			isIndependentTasksWorkspace,
 			resolvedDefaultTaskBranchRef,
 			setBoard,
 		],
@@ -889,8 +893,8 @@ export function useTaskEditor({
 			if (!prompt) {
 				return null;
 			}
-			const baseRef = newTaskBranchRef || resolvedDefaultTaskBranchRef;
-			if (!baseRef) {
+			const baseRef = isIndependentTasksWorkspace ? "" : newTaskBranchRef || resolvedDefaultTaskBranchRef;
+			if (!baseRef && !isIndependentTasksWorkspace) {
 				return null;
 			}
 			// 留空与省略同义：两者都走「先推导、再异步回填 AI 名字」。
@@ -902,7 +906,7 @@ export function useTaskEditor({
 				startInPlanMode: newTaskStartInPlanMode,
 				taskAgentPermissionMode: newTaskAgentPermissionMode,
 				taskConversationMode: newTaskConversationMode,
-				autoReviewEnabled: newTaskAutoReviewEnabled,
+				autoReviewEnabled: !isIndependentTasksWorkspace && newTaskAutoReviewEnabled,
 				autoReviewMode: newTaskAutoReviewMode,
 				images: newTaskImages,
 				agentId: newTaskAgentId,
@@ -914,7 +918,7 @@ export function useTaskEditor({
 				terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
 				taskAgentSessionInitialization: newTaskAgentSessionInitialization,
 				baseRef,
-				worktreeMode: newTaskWorktreeMode,
+				worktreeMode: isIndependentTasksWorkspace ? "independent_directory" : newTaskWorktreeMode,
 			});
 			setBoard(created.board);
 			if (!explicitTaskName) {
@@ -974,6 +978,7 @@ export function useTaskEditor({
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultTaskBranchRef,
+			isIndependentTasksWorkspace,
 			newTaskWorktreeMode,
 			selectedAgentId,
 			currentProjectId,
@@ -992,8 +997,8 @@ export function useTaskEditor({
 			if (validPrompts.length === 0) {
 				return [];
 			}
-			const baseRef = newTaskBranchRef || resolvedDefaultTaskBranchRef;
-			if (!baseRef) {
+			const baseRef = isIndependentTasksWorkspace ? "" : newTaskBranchRef || resolvedDefaultTaskBranchRef;
+			if (!baseRef && !isIndependentTasksWorkspace) {
 				return [];
 			}
 			const createdTaskIds: string[] = [];
@@ -1004,7 +1009,7 @@ export function useTaskEditor({
 					startInPlanMode: newTaskStartInPlanMode,
 					taskAgentPermissionMode: newTaskAgentPermissionMode,
 					taskConversationMode: newTaskConversationMode,
-					autoReviewEnabled: newTaskAutoReviewEnabled,
+					autoReviewEnabled: !isIndependentTasksWorkspace && newTaskAutoReviewEnabled,
 					autoReviewMode: newTaskAutoReviewMode,
 					images: newTaskImages,
 					agentId: newTaskAgentId,
@@ -1014,7 +1019,7 @@ export function useTaskEditor({
 					clineSettings: newTaskClineSettings,
 					terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
 					baseRef,
-					worktreeMode: newTaskWorktreeMode,
+					worktreeMode: isIndependentTasksWorkspace ? "independent_directory" : newTaskWorktreeMode,
 				});
 				updatedBoard = created.board;
 				createdTaskIds.push(created.task.id);
@@ -1072,6 +1077,7 @@ export function useTaskEditor({
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultTaskBranchRef,
+			isIndependentTasksWorkspace,
 			newTaskWorktreeMode,
 			selectedAgentId,
 			currentProjectId,
@@ -1129,7 +1135,7 @@ export function useTaskEditor({
 		isNewTaskStartInPlanModeDisabled,
 		newTaskBranchRef,
 		setNewTaskBranchRef,
-		newTaskWorktreeMode,
+		newTaskWorktreeMode: isIndependentTasksWorkspace ? "independent_directory" : newTaskWorktreeMode,
 		setNewTaskWorktreeMode,
 		newTaskAgentId,
 		setNewTaskAgentId,
@@ -1157,7 +1163,7 @@ export function useTaskEditor({
 		isEditTaskStartInPlanModeDisabled,
 		editTaskBranchRef,
 		setEditTaskBranchRef,
-		editTaskWorktreeMode,
+		editTaskWorktreeMode: isIndependentTasksWorkspace ? "independent_directory" : editTaskWorktreeMode,
 		setEditTaskWorktreeMode,
 		editTaskAgentId,
 		setEditTaskAgentId,

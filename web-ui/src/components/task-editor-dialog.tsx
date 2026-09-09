@@ -828,6 +828,7 @@ export function TaskEditorDialog({
 								/>
 							) : null}
 							<TaskPromptComposer
+								taskId={editingTaskId}
 								key={`task-prompt-composer-${composerResetKey}`}
 								value={promptDraft}
 								onValueChange={setPromptDraft}
@@ -964,85 +965,91 @@ export function TaskEditorDialog({
 							/>
 						</div>
 
-						<div>
-							<span className="text-[11px] text-text-secondary block mb-1">Task workspace</span>
-							<TaskWorktreeModeControl
-								value={worktreeMode}
-								onChange={onWorktreeModeChange}
-								idPrefix="task-create-worktree-mode"
-							/>
-						</div>
+						{worktreeMode === "independent_directory" ? (
+							<p className="text-sm text-text-secondary">此任务使用独立目录，完成后保留文件。</p>
+						) : (
+							<>
+								<div>
+									<span className="text-[11px] text-text-secondary block mb-1">Task workspace</span>
+									<TaskWorktreeModeControl
+										value={worktreeMode}
+										onChange={onWorktreeModeChange}
+										idPrefix="task-create-worktree-mode"
+									/>
+								</div>
 
-						<div>
-							<span className="text-[11px] text-text-secondary block mb-1">
-								{worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
-							</span>
-							<BranchSelectDropdown
-								options={branchOptions}
-								selectedValue={branchRef}
-								onSelect={onBranchRefChange}
-								fill
-								size="sm"
-								emptyText="No branches detected"
-							/>
-							{/* 记住上次的选择会让默认值悄悄偏离仓库默认分支——那正是这条提示存在的理由：
+								<div>
+									<span className="text-[11px] text-text-secondary block mb-1">
+										{worktreeMode === "branch" ? "Create worktree from" : "Task base ref"}
+									</span>
+									<BranchSelectDropdown
+										options={branchOptions}
+										selectedValue={branchRef}
+										onSelect={onBranchRefChange}
+										fill
+										size="sm"
+										emptyText="No branches detected"
+									/>
+									{/* 记住上次的选择会让默认值悄悄偏离仓库默认分支——那正是这条提示存在的理由：
 							    被记住这件事必须看得见，而且要能一键退出。两条提示都只在**建卡**模式、且下拉框
 							    当前显示的正是那个自动解析出来的值时才成立；编辑既有卡片显示的是那张卡自己的
 							    baseRef、用户手动改过之后显示的是他自己的选择，那两种情况下把它说成
 							    「记住的 / 回落的结果」都是在撒谎。 */}
-							{isShowingDiscardedRememberedTaskCreateBaseRefHint ? (
-								<p className="text-[11px] text-text-tertiary mt-1">
-									Last used{" "}
-									<code className="text-text-secondary">
-										{rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists}
-									</code>{" "}
-									for this project, but that branch no longer exists — fell back to{" "}
-									<code className="text-text-secondary">{branchRef}</code>.
-								</p>
-							) : isShowingRememberedTaskCreateBaseRefHint ? (
-								<p className="text-[11px] text-text-tertiary mt-1">
-									Remembered from the last task you created in this project.{" "}
-									<button
-										type="button"
-										className="underline underline-offset-2 hover:text-text-secondary"
-										onClick={() => onBranchRefChange(repositoryDefaultBranchRef ?? "")}
-									>
-										Use {repositoryDefaultBranchRef} instead
-									</button>
-								</p>
-							) : null}
-						</div>
+									{isShowingDiscardedRememberedTaskCreateBaseRefHint ? (
+										<p className="text-[11px] text-text-tertiary mt-1">
+											Last used{" "}
+											<code className="text-text-secondary">
+												{rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists}
+											</code>{" "}
+											for this project, but that branch no longer exists — fell back to{" "}
+											<code className="text-text-secondary">{branchRef}</code>.
+										</p>
+									) : isShowingRememberedTaskCreateBaseRefHint ? (
+										<p className="text-[11px] text-text-tertiary mt-1">
+											Remembered from the last task you created in this project.{" "}
+											<button
+												type="button"
+												className="underline underline-offset-2 hover:text-text-secondary"
+												onClick={() => onBranchRefChange(repositoryDefaultBranchRef ?? "")}
+											>
+												Use {repositoryDefaultBranchRef} instead
+											</button>
+										</p>
+									) : null}
+								</div>
 
-						<div className="flex items-center gap-2 flex-wrap">
-							<label
-								htmlFor={autoReviewEnabledId}
-								className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-							>
-								<RadixCheckbox.Root
-									id={autoReviewEnabledId}
-									checked={autoReviewEnabled}
-									onCheckedChange={(checked) => onAutoReviewEnabledChange(checked === true)}
-									className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent"
-								>
-									<RadixCheckbox.Indicator>
-										<Check size={10} className="text-white" />
-									</RadixCheckbox.Indicator>
-								</RadixCheckbox.Root>
-								Automatically
-							</label>
-							<NativeSelect
-								size="sm"
-								value={autoReviewMode}
-								onChange={(e) => onAutoReviewModeChange(e.currentTarget.value as TaskAutoReviewMode)}
-								style={{ width: "16ch", maxWidth: "100%" }}
-							>
-								{AUTO_REVIEW_MODE_OPTIONS.map((option) => (
-									<option key={option.value} value={option.value}>
-										{option.label}
-									</option>
-								))}
-							</NativeSelect>
-						</div>
+								<div className="flex items-center gap-2 flex-wrap">
+									<label
+										htmlFor={autoReviewEnabledId}
+										className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
+									>
+										<RadixCheckbox.Root
+											id={autoReviewEnabledId}
+											checked={autoReviewEnabled}
+											onCheckedChange={(checked) => onAutoReviewEnabledChange(checked === true)}
+											className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent"
+										>
+											<RadixCheckbox.Indicator>
+												<Check size={10} className="text-white" />
+											</RadixCheckbox.Indicator>
+										</RadixCheckbox.Root>
+										Automatically
+									</label>
+									<NativeSelect
+										size="sm"
+										value={autoReviewMode}
+										onChange={(e) => onAutoReviewModeChange(e.currentTarget.value as TaskAutoReviewMode)}
+										style={{ width: "16ch", maxWidth: "100%" }}
+									>
+										{AUTO_REVIEW_MODE_OPTIONS.map((option) => (
+											<option key={option.value} value={option.value}>
+												{option.label}
+											</option>
+										))}
+									</NativeSelect>
+								</div>
+							</>
+						)}
 
 						{onAgentIdChange && onClineSettingsChange ? (
 							<>
@@ -1103,7 +1110,11 @@ export function TaskEditorDialog({
 					)}
 					{mode === "single" ? (
 						<>
-							<Button size="sm" onClick={handleCreateSingle} disabled={!hasPromptDraftContent || !branchRef}>
+							<Button
+								size="sm"
+								onClick={handleCreateSingle}
+								disabled={!hasPromptDraftContent || (!branchRef && worktreeMode !== "independent_directory")}
+							>
 								<span className="inline-flex items-center">
 									{taskEditorMode === "edit" ? "Save changes" : "Create"}
 									<ButtonShortcut />
@@ -1116,7 +1127,9 @@ export function TaskEditorDialog({
 											variant="primary"
 											size="sm"
 											onClick={() => handleRunSingleStartAction(primaryStartAction)}
-											disabled={!hasPromptDraftContent || !branchRef}
+											disabled={
+												!hasPromptDraftContent || (!branchRef && worktreeMode !== "independent_directory")
+											}
 											className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
 										>
 											<span className="inline-flex items-center">
@@ -1129,7 +1142,10 @@ export function TaskEditorDialog({
 												<Button
 													variant="primary"
 													size="sm"
-													disabled={!hasPromptDraftContent || !branchRef}
+													disabled={
+														!hasPromptDraftContent ||
+														(!branchRef && worktreeMode !== "independent_directory")
+													}
 													className="rounded-l-none border-l border-white/20 px-1"
 													aria-label="More start options"
 												>
@@ -1172,7 +1188,11 @@ export function TaskEditorDialog({
 						</>
 					) : (
 						<>
-							<Button size="sm" onClick={handleCreateAll} disabled={validTaskCount === 0 || !branchRef}>
+							<Button
+								size="sm"
+								onClick={handleCreateAll}
+								disabled={validTaskCount === 0 || (!branchRef && worktreeMode !== "independent_directory")}
+							>
 								<span className="inline-flex items-center">
 									Create {validTaskCount} {taskCountLabel}
 									<ButtonShortcut />
@@ -1183,7 +1203,7 @@ export function TaskEditorDialog({
 									variant="primary"
 									size="sm"
 									onClick={handleCreateAndStartAll}
-									disabled={validTaskCount === 0 || !branchRef}
+									disabled={validTaskCount === 0 || (!branchRef && worktreeMode !== "independent_directory")}
 								>
 									<span className="inline-flex items-center">
 										Start {validTaskCount} {taskCountLabel}

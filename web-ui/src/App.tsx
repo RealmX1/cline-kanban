@@ -649,7 +649,7 @@ export default function App(): ReactElement {
 		sendTaskChatMessage,
 		fetchTaskWorkspaceInfo,
 		taskConversationSessionSummariesByTaskId: sessions,
-		isGitHistoryOpen,
+		isGitHistoryOpen: isGitHistoryOpen && streamedWorkspaceState?.workspaceKind !== "independent_tasks",
 		refreshWorkspaceState,
 	});
 	const agentCommand = runtimeProjectConfig?.effectiveCommand ?? null;
@@ -802,7 +802,11 @@ export default function App(): ReactElement {
 			return;
 		}
 	}, [closeHomeTerminal, currentProjectId, hasNoProjects, isHomeTerminalOpen, selectedCard]);
-	const showHomeBottomTerminal = !selectedCard && !hasNoProjects && isHomeTerminalOpen;
+	const showHomeBottomTerminal =
+		!selectedCard &&
+		!hasNoProjects &&
+		isHomeTerminalOpen &&
+		streamedWorkspaceState?.workspaceKind !== "independent_tasks";
 	const homeTerminalSubtitle = useMemo(
 		() => workspacePath ?? navigationProjectPath ?? null,
 		[navigationProjectPath, workspacePath],
@@ -813,7 +817,7 @@ export default function App(): ReactElement {
 		setIsSettingsOpen(true);
 	}, []);
 	const handleToggleGitHistory = useCallback(() => {
-		if (hasNoProjects) {
+		if (hasNoProjects || streamedWorkspaceState?.workspaceKind === "independent_tasks") {
 			return;
 		}
 		setIsGitHistoryOpen((current) => {
@@ -823,7 +827,7 @@ export default function App(): ReactElement {
 			}
 			return next;
 		});
-	}, [hasNoProjects]);
+	}, [hasNoProjects, streamedWorkspaceState?.workspaceKind]);
 	const handleCloseGitHistory = useCallback(() => {
 		setIsGitHistoryOpen(false);
 	}, []);
@@ -893,6 +897,7 @@ export default function App(): ReactElement {
 		cancelStartAllReadyBacklogTasksConfirmation,
 	} = useTaskStartActions({
 		board,
+		persistedBoard: streamedWorkspaceState?.board,
 		currentProjectId,
 		handleCreateTask,
 		handleCreateTasks,
@@ -983,7 +988,9 @@ export default function App(): ReactElement {
 	const activeWorkspacePath = selectedCard
 		? (getTaskWorkspaceInfo(selectedCard.card.id, selectedCard.card.baseRef)?.path ??
 			getTaskWorkspaceSnapshot(selectedCard.card.id)?.path ??
-			workspacePath ??
+			(selectedCard.card.worktreeMode === "independent_directory" && workspacePath
+				? `${workspacePath}/${selectedCard.card.id}`
+				: workspacePath) ??
 			undefined)
 		: shouldUseNavigationPath
 			? (navigationProjectPath ?? undefined)
@@ -998,6 +1005,8 @@ export default function App(): ReactElement {
 			return undefined;
 		}
 		if (!activeSelectedTaskWorkspaceInfo.exists) {
+			if (selectedCard.card.worktreeMode === "independent_directory")
+				return "独立任务工作区丢失，请恢复原目录后重试";
 			return selectedCard.column.id === "trash" ? "Task worktree deleted" : "Task worktree not created yet";
 		}
 		return undefined;
@@ -1140,7 +1149,11 @@ export default function App(): ReactElement {
 						permanentlyDeletingProjectId={permanentlyDeletingProjectId}
 						activeSection={homeSidebarSection}
 						onActiveSectionChange={setHomeSidebarSection}
-						canShowAgentSection={!hasNoProjects && projectRuntimeWorkspaceId !== null}
+						canShowAgentSection={
+							!hasNoProjects &&
+							projectRuntimeWorkspaceId !== null &&
+							streamedWorkspaceState?.workspaceKind !== "independent_tasks"
+						}
 						agentSectionContent={homeSidebarAgentPanel}
 						selectedAgentId={settingsRuntimeProjectConfig?.selectedAgentId ?? null}
 						clineProviderSettings={settingsRuntimeProjectConfig?.clineProviderSettings ?? null}
@@ -1203,7 +1216,9 @@ export default function App(): ReactElement {
 									}
 						}
 						onToggleTerminal={
-							hasNoProjects || isCurrentProjectRuntimeUnavailable
+							hasNoProjects ||
+							isCurrentProjectRuntimeUnavailable ||
+							(!selectedCard && streamedWorkspaceState?.workspaceKind === "independent_tasks")
 								? undefined
 								: selectedCard
 									? handleToggleDetailTerminal
@@ -1227,11 +1242,17 @@ export default function App(): ReactElement {
 						canOpenWorkspace={canOpenWorkspace}
 						isOpeningWorkspace={isOpeningWorkspace}
 						onToggleGitHistory={
-							hasNoProjects || isCurrentProjectRuntimeUnavailable ? undefined : handleToggleGitHistory
+							hasNoProjects ||
+							isCurrentProjectRuntimeUnavailable ||
+							streamedWorkspaceState?.workspaceKind === "independent_tasks"
+								? undefined
+								: handleToggleGitHistory
 						}
 						isGitHistoryOpen={isGitHistoryOpen}
 						onToggleTaskChangesSidebar={
-							selectedCard ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
+							selectedCard && streamedWorkspaceState?.workspaceKind !== "independent_tasks"
+								? () => setIsTaskChangesSidebarOpen((open) => !open)
+								: undefined
 						}
 						isTaskChangesSidebarOpen={selectedCard ? isTaskChangesSidebarOpen : false}
 						hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
@@ -1304,7 +1325,7 @@ export default function App(): ReactElement {
 												onOpenTask={handleOpenTaskInProject}
 												onOpenStage={handleOpenOverviewStage}
 											/>
-										) : isGitHistoryOpen ? (
+										) : isGitHistoryOpen && streamedWorkspaceState?.workspaceKind !== "independent_tasks" ? (
 											<GitHistoryView
 												workspaceId={currentProjectId}
 												gitHistory={gitHistory}
@@ -1413,7 +1434,9 @@ export default function App(): ReactElement {
 									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
 									exploratorySessionMapCollectionsByTaskId={exploratorySessionMapCollectionsByTaskId}
 									runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
-									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
+									isTaskChangesSidebarOpen={
+										isTaskChangesSidebarOpen && streamedWorkspaceState?.workspaceKind !== "independent_tasks"
+									}
 									onCreateByTheWayTaskConversationSession={async (input) => {
 										const effectiveAgentId =
 											detailSession.agentId ??
@@ -1610,6 +1633,13 @@ export default function App(): ReactElement {
 					defaultReasoningEffort={runtimeProjectConfig?.clineProviderSettings?.reasoningEffort ?? null}
 				/>
 				<ClearTrashDialog
+					independentTaskIds={board.columns.flatMap((column) =>
+						column.id === "trash"
+							? column.cards
+									.filter((card) => card.worktreeMode === "independent_directory")
+									.map((card) => card.id)
+							: [],
+					)}
 					open={isClearTrashDialogOpen}
 					taskCount={trashTaskCount}
 					onCancel={() => setIsClearTrashDialogOpen(false)}

@@ -376,7 +376,7 @@ export function addTaskToColumn(
 		throw new Error("Task prompt is required.");
 	}
 	const baseRef = input.baseRef.trim();
-	if (!baseRef) {
+	if (!baseRef && input.worktreeMode !== "independent_directory") {
 		throw new Error("Task baseRef is required.");
 	}
 	const existingIds = collectExistingTaskIds(board);
@@ -720,7 +720,8 @@ export function updateTask(
 	}
 
 	const baseRef = input.baseRef.trim();
-	if (!baseRef) {
+	const existingTask = board.columns.flatMap((column) => column.cards).find((card) => card.id === normalizedTaskId);
+	if (!baseRef && (input.worktreeMode ?? existingTask?.worktreeMode) !== "independent_directory") {
 		return {
 			board,
 			task: null,

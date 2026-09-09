@@ -186,7 +186,7 @@ export function parseWorktreeEnsureRequest(value: unknown): RuntimeWorktreeEnsur
 		throw new Error("Invalid worktree ensure payload.");
 	}
 	const baseRef = parsed.baseRef.trim();
-	if (!baseRef) {
+	if (!baseRef && parsed.worktreeMode !== "independent_directory") {
 		throw new Error("Invalid worktree ensure payload.");
 	}
 	return {
@@ -277,7 +277,7 @@ export function parseTaskSessionStartRequest(value: unknown): RuntimeTaskSession
 		throw new Error("Task session taskId cannot be empty.");
 	}
 	const baseRef = parsed.baseRef.trim();
-	if (!baseRef) {
+	if (!baseRef && parsed.worktreeMode !== "independent_directory") {
 		throw new Error("Task session baseRef cannot be empty.");
 	}
 	const workspaceTaskId = parsed.workspaceTaskId?.trim() || undefined;
@@ -763,7 +763,7 @@ export function parseShellSessionStartRequest(value: unknown): RuntimeShellSessi
 	}
 	const workspaceTaskId = parsed.workspaceTaskId?.trim() || undefined;
 	const baseRef = parsed.baseRef.trim();
-	if (!baseRef) {
+	if (!baseRef && parsed.worktreeMode !== "independent_directory") {
 		throw new Error("Shell session baseRef cannot be empty.");
 	}
 	return {

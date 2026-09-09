@@ -86,7 +86,11 @@ export function ProjectNavigationPanel({
 	isCollapsed: boolean;
 	setSidebarCollapsed: (collapsed: boolean, persist?: boolean) => void;
 }): React.ReactElement {
-	const sortedProjects = [...projects].sort((a, b) => a.path.localeCompare(b.path));
+	const sortedProjects = [...projects].sort(
+		(a, b) =>
+			Number(b.workspaceKind === "independent_tasks") - Number(a.workspaceKind === "independent_tasks") ||
+			a.path.localeCompare(b.path),
+	);
 	const shouldShowFeaturebaseFeedback = canShowFeaturebaseFeedbackButton({
 		selectedAgentId,
 		clineProviderSettings,
@@ -402,7 +406,11 @@ export function ProjectNavigationPanel({
 							</button>
 						) : null}
 					</div>
-					<ShortcutsCard />
+					<ShortcutsCard
+						hasRepositoryBinding={
+							projects.find((project) => project.id === currentProjectId)?.workspaceKind !== "independent_tasks"
+						}
+					/>
 					<ProjectSupportFooter
 						shouldShowFeaturebaseFeedback={shouldShowFeaturebaseFeedback}
 						featurebaseFeedbackState={featurebaseFeedbackState}
@@ -576,14 +584,16 @@ function ShortcutHint({ keys, label }: { keys: string[]; label: string }): React
 	);
 }
 
-function ShortcutsCard(): React.ReactElement {
+function ShortcutsCard({ hasRepositoryBinding }: { hasRepositoryBinding: boolean }): React.ReactElement {
 	const [expanded, setExpanded] = useState(false);
 
 	return (
 		<div style={{ padding: "8px 12px" }}>
 			<div style={{ padding: "0 8px" }}>
 				<div className="flex flex-col gap-0.5">
-					{ESSENTIAL_SHORTCUTS.map((s) => (
+					{ESSENTIAL_SHORTCUTS.filter(
+						(shortcut) => hasRepositoryBinding || shortcut.label !== "Toggle git view",
+					).map((s) => (
 						<ShortcutHint key={s.label} keys={s.keys} label={s.label} />
 					))}
 				</div>
@@ -773,43 +783,45 @@ function ProjectRow({
 					</div>
 				) : null}
 			</div>
-			<div className="kb-project-row-actions flex items-center" style={isMenuOpen ? { opacity: 1 } : undefined}>
-				<DropdownMenu.Root open={isMenuOpen} onOpenChange={setIsMenuOpen}>
-					<DropdownMenu.Trigger asChild>
-						<Button
-							variant="ghost"
-							size="sm"
-							icon={isPermanentlyDeletingProjectData ? <Spinner size={12} /> : <Ellipsis size={14} />}
-							disabled={hasAnyPermanentProjectDataDeletion && !isPermanentlyDeletingProjectData}
-							className={
-								isCurrent
-									? "text-accent-fg hover:bg-accent-fg/20 hover:text-accent-fg active:bg-accent-fg/30"
-									: undefined
-							}
-							onClick={(e) => {
-								e.stopPropagation();
-							}}
-							aria-label="Project actions"
-						/>
-					</DropdownMenu.Trigger>
-					<DropdownMenu.Portal>
-						<DropdownMenu.Content
-							side="bottom"
-							align="end"
-							sideOffset={4}
-							className="z-50 min-w-[140px] rounded-md border border-border-bright bg-surface-1 p-1 shadow-lg"
-							onCloseAutoFocus={(event) => event.preventDefault()}
-						>
-							<DropdownMenu.Item
-								className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] text-status-red cursor-pointer outline-none data-[highlighted]:bg-surface-3"
-								onSelect={() => onRequestPermanentDataDeletion(project.id)}
+			{project.workspaceKind !== "independent_tasks" ? (
+				<div className="kb-project-row-actions flex items-center" style={isMenuOpen ? { opacity: 1 } : undefined}>
+					<DropdownMenu.Root open={isMenuOpen} onOpenChange={setIsMenuOpen}>
+						<DropdownMenu.Trigger asChild>
+							<Button
+								variant="ghost"
+								size="sm"
+								icon={isPermanentlyDeletingProjectData ? <Spinner size={12} /> : <Ellipsis size={14} />}
+								disabled={hasAnyPermanentProjectDataDeletion && !isPermanentlyDeletingProjectData}
+								className={
+									isCurrent
+										? "text-accent-fg hover:bg-accent-fg/20 hover:text-accent-fg active:bg-accent-fg/30"
+										: undefined
+								}
+								onClick={(e) => {
+									e.stopPropagation();
+								}}
+								aria-label="Project actions"
+							/>
+						</DropdownMenu.Trigger>
+						<DropdownMenu.Portal>
+							<DropdownMenu.Content
+								side="bottom"
+								align="end"
+								sideOffset={4}
+								className="z-50 min-w-[140px] rounded-md border border-border-bright bg-surface-1 p-1 shadow-lg"
+								onCloseAutoFocus={(event) => event.preventDefault()}
 							>
-								Permanently Delete Project Data
-							</DropdownMenu.Item>
-						</DropdownMenu.Content>
-					</DropdownMenu.Portal>
-				</DropdownMenu.Root>
-			</div>
+								<DropdownMenu.Item
+									className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] text-status-red cursor-pointer outline-none data-[highlighted]:bg-surface-3"
+									onSelect={() => onRequestPermanentDataDeletion(project.id)}
+								>
+									Permanently Delete Project Data
+								</DropdownMenu.Item>
+							</DropdownMenu.Content>
+						</DropdownMenu.Portal>
+					</DropdownMenu.Root>
+				</div>
+			) : null}
 		</div>
 	);
 }

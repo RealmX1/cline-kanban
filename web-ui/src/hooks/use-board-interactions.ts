@@ -1,4 +1,5 @@
 import type { DropResult } from "@hello-pangea/dnd";
+import { INDEPENDENT_TASKS_WORKSPACE_ID } from "@runtime-contract";
 import {
 	isAgentActivelyProducingOutput,
 	isAwaitingUserReviewTurn,
@@ -15,6 +16,7 @@ import { useReviewAutoActions } from "@/hooks/use-review-auto-actions";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
 import { discardAllTaskEditDraftsForDeletedTask } from "@/runtime/task-edit-draft-store";
 import type { RuntimeTaskSessionSummary, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
+import { permanentlyDeleteIndependentTask } from "@/runtime/workspace-state-query";
 import {
 	applyDragResult,
 	clearColumnTasks,
@@ -1028,6 +1030,19 @@ export function useBoardInteractions({
 		}
 
 		const task = deleteTaskTarget;
+		if (currentProjectId === INDEPENDENT_TASKS_WORKSPACE_ID) {
+			setDeleteTaskTarget(null);
+			void permanentlyDeleteIndependentTask(currentProjectId, task.id)
+				.then((state) => {
+					setBoard(state.board);
+					setSessions(state.sessions);
+					if (selectedTaskId === task.id) setSelectedTaskId(null);
+					clearTaskWorkspaceInfo(task.id);
+					discardAllTaskEditDraftsForDeletedTask(currentProjectId, task.id);
+				})
+				.catch((error) => notifyError(error));
+			return;
+		}
 		const selection = findCardSelection(board, task.id);
 		setDeleteTaskTarget(null);
 		if (!selection) {
@@ -1112,6 +1127,21 @@ export function useBoardInteractions({
 		const trashColumn = board.columns.find((column) => column.id === "trash");
 		const trashCards = trashColumn ? [...trashColumn.cards] : [];
 		const taskIds = trashCards.map((card) => card.id);
+		if (currentProjectId === INDEPENDENT_TASKS_WORKSPACE_ID) {
+			setIsClearTrashDialogOpen(false);
+			void (async () => {
+				for (const card of trashCards) {
+					const state = await permanentlyDeleteIndependentTask(currentProjectId, card.id);
+					setBoard(state.board);
+					setSessions(state.sessions);
+					clearTaskWorkspaceInfo(card.id);
+					discardAllTaskEditDraftsForDeletedTask(currentProjectId, card.id);
+					if (selectedTaskId === card.id) setSelectedTaskId(null);
+				}
+			})().catch((error) => notifyError(error));
+			return;
+		}
+
 		setIsClearTrashDialogOpen(false);
 		if (taskIds.length === 0) {
 			return;
@@ -1140,6 +1170,8 @@ export function useBoardInteractions({
 		})();
 	}, [
 		board.columns,
+		currentProjectId,
+		clearTaskWorkspaceInfo,
 		cleanupTaskWorkspace,
 		selectedTaskId,
 		setBoard,

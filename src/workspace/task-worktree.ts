@@ -1,6 +1,5 @@
 import { access, lstat, mkdir, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
-
 import type {
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeTaskWorktreeMode,
@@ -10,6 +9,11 @@ import type {
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath, getTaskWorktreesHomePath, loadWorkspaceContext } from "../state/workspace-state";
 import { getGitCommandErrorMessage, getGitStdout, readGitHeadInfo, runGit } from "./git-utils";
+import {
+	getIndependentTaskDirectoryPath,
+	isIndependentTasksWorkspacePath,
+	verifyIndependentTaskDirectory,
+} from "./independent-task-workspace";
 import { recordTaskWorktreeCreationCommitProvenance } from "./task-commit-integration-provenance";
 import { getWorkspaceFolderLabelForWorktreePath, normalizeTaskIdForWorktreePath } from "./task-worktree-path";
 import { listTurbopackNodeModulesSymlinkSkipPaths } from "./task-worktree-turbopack";
@@ -502,6 +506,9 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 }): Promise<RuntimeWorktreeEnsureResponse> {
 	try {
 		const context = await loadWorkspaceContext(options.cwd);
+		if (context.workspaceKind === "independent_tasks") {
+			return { ok: true, path: await verifyIndependentTaskDirectory(options.taskId), baseRef: "", baseCommit: null };
+		}
 		if (options.worktreeMode === "inplace") {
 			const inplaceBaseRef = options.baseRef.trim();
 			const inplaceCommit = await tryRunGit(context.repoPath, ["rev-parse", "HEAD"]);
@@ -661,6 +668,7 @@ export async function deleteTaskWorktree(options: {
 	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<RuntimeWorktreeDeleteResponse> {
 	try {
+		if (isIndependentTasksWorkspacePath(options.repoPath)) return { ok: true, removed: false };
 		// Inplace tasks share an existing worktree owned by another session; never delete it.
 		if (options.worktreeMode === "inplace") {
 			return {
@@ -715,6 +723,7 @@ export async function resolveTaskCwd(options: {
 	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<string> {
 	const context = await loadWorkspaceContext(options.cwd);
+	if (context.workspaceKind === "independent_tasks") return await verifyIndependentTaskDirectory(options.taskId);
 
 	if (options.worktreeMode === "inplace") {
 		return context.repoPath;
@@ -762,6 +771,17 @@ export async function getTaskWorkspacePathInfo(options: {
 	baseRef: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<Pick<RuntimeTaskWorkspaceInfoResponse, "taskId" | "path" | "exists" | "baseRef">> {
+	if (isIndependentTasksWorkspacePath(options.cwd)) {
+		const path = getIndependentTaskDirectoryPath(options.taskId);
+		let exists = false;
+		try {
+			await verifyIndependentTaskDirectory(options.taskId);
+			exists = true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		return { taskId: options.taskId, path, exists, baseRef: "" };
+	}
 	const taskId = normalizeTaskIdForWorktreePath(options.taskId);
 	const normalizedBaseRef = options.baseRef.trim();
 	const repoPath = options.cwd.trim();
@@ -801,11 +821,11 @@ export async function getTaskWorkspaceInfo(options: {
 	worktreeMode?: RuntimeTaskWorktreeMode;
 }): Promise<RuntimeTaskWorkspaceInfoResponse> {
 	const workspacePathInfo = await getTaskWorkspacePathInfo(options);
-	if (!workspacePathInfo.exists) {
+	if (!workspacePathInfo.exists || isIndependentTasksWorkspacePath(options.cwd)) {
 		return {
 			taskId: workspacePathInfo.taskId,
 			path: workspacePathInfo.path,
-			exists: false,
+			exists: workspacePathInfo.exists,
 			baseRef: workspacePathInfo.baseRef,
 			branch: null,
 			isDetached: false,

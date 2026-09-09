@@ -25,6 +25,7 @@ import {
 	Copy,
 	Eye,
 	FileText,
+	FolderOpen,
 	GitBranch,
 	Home,
 	Hourglass,
@@ -380,7 +381,9 @@ export function TaskCardBody({
 				? workspacePath
 					? formatPathForDisplay(workspacePath)
 					: null
-				: reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
+				: card.worktreeMode === "independent_directory" && workspacePath
+					? formatPathForDisplay(`${workspacePath}/${card.id}`)
+					: reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
 			: null;
 	const reviewWorkspaceChangedFilesCount = reviewWorkspaceSnapshot?.changedFiles ?? null;
 	const reviewWorkspaceAddedLinesCount = reviewWorkspaceSnapshot?.additions ?? 0;
@@ -449,7 +452,12 @@ export function TaskCardBody({
 	// 简写目录行：{worktree/inplace} ↑{ahead} ↓{behind} ({changed files} +{add} -{del})。
 	// ahead/behind 是与 base 分支的双向分歧（两侧皆 0 时整体不渲染）；工作区脏统计仍相对 HEAD，
 	// 但文件数与增删行数全为 0 时同样整体隐藏，避免无变化任务与真实脏任务争夺注意力。
-	const worktreeModeLabel = card.worktreeMode === "inplace" ? "inplace" : "worktree";
+	const worktreeModeLabel =
+		card.worktreeMode === "independent_directory"
+			? "独立工作区"
+			: card.worktreeMode === "inplace"
+				? "inplace"
+				: "worktree";
 	const commitsAheadOfBaseRef = reviewWorkspaceSnapshot?.commitsAheadOfBaseRef ?? null;
 	const commitsBehindBaseRef = reviewWorkspaceSnapshot?.commitsBehindBaseRef ?? null;
 	const taskCommitsIntegratedIntoBaseRef = reviewWorkspaceSnapshot?.taskCommitsIntegratedIntoBaseRef ?? null;
@@ -984,10 +992,17 @@ export function TaskCardBody({
 					>
 						{card.worktreeMode === "inplace" ? (
 							<Home size={10} className="shrink-0" />
+						) : card.worktreeMode === "independent_directory" ? (
+							<FolderOpen size={10} className="shrink-0" />
 						) : (
 							<GitBranch size={10} className="shrink-0" />
 						)}
-						<span className={cn("min-w-0 flex-1 break-words", isTrashCard && "line-through")}>
+						<span
+							className={cn(
+								"min-w-0 flex-1 break-words",
+								isTrashCard && card.worktreeMode !== "independent_directory" && "line-through",
+							)}
+						>
 							<span>{worktreeModeLabel}</span>
 							{taskWorkspaceGitStatusTooltip ? (
 								// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，

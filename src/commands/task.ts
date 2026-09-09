@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
-import { loadRuntimeConfig } from "../config/runtime-config";
+import { loadGlobalRuntimeConfig, loadRuntimeConfig } from "../config/runtime-config";
 import type {
 	RuntimeAgentId,
 	RuntimeBoardCard,
@@ -71,6 +72,12 @@ import {
 	resolveWorkspacePath,
 } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
+import {
+	getIndependentTaskDirectoryPath,
+	getIndependentTasksWorkspacePath,
+	INDEPENDENT_TASKS_WORKSPACE_ID,
+	isIndependentTasksWorkspacePath,
+} from "../workspace/independent-task-workspace";
 import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
 import {
 	resolveTaskCreateEffectiveSettings,
@@ -431,6 +438,7 @@ async function resolveWorkspaceRepoPath(
 }
 
 async function ensureRuntimeWorkspace(workspaceRepoPath: string): Promise<string> {
+	if (isIndependentTasksWorkspacePath(workspaceRepoPath)) return INDEPENDENT_TASKS_WORKSPACE_ID;
 	const runtimeClient = createRuntimeTrpcClient(null);
 	const added = await runtimeClient.projects.add.mutate({
 		path: workspaceRepoPath,
@@ -752,9 +760,12 @@ async function previewTaskCreate(input: TaskCreateCommandInput): Promise<JsonRec
 		workspaceId: registeredWorkspace?.workspaceId ?? null,
 		isProjectRegisteredInKanban: registeredWorkspace !== null,
 		wasProjectPathExplicitlyRequested: (input.projectPath ?? "").trim().length > 0,
-		repositoryGitInfo: registeredWorkspace?.git ?? detectGitRepositoryInfo(workspaceRepoPath),
+		repositoryGitInfo: registeredWorkspace ? registeredWorkspace.git : detectGitRepositoryInfo(workspaceRepoPath),
 		existingBoardColumns,
-		runtimeConfig: await loadRuntimeConfig(workspaceRepoPath),
+		runtimeConfig:
+			isIndependentTasksWorkspacePath(workspaceRepoPath) && !existsSync(workspaceRepoPath)
+				? await loadGlobalRuntimeConfig()
+				: await loadRuntimeConfig(workspaceRepoPath),
 		requested: toTaskCreateRequestedSettings(input),
 	});
 
@@ -770,7 +781,9 @@ async function previewTaskCreate(input: TaskCreateCommandInput): Promise<JsonRec
 		warnings: effectiveSettings.warnings,
 		needsAttention: effectiveSettings.needsAttention,
 		// 预览拿不到 taskId，所以给不出确切的 worktree 路径；给出父目录 + 模式，足以判断「会不会动主 checkout」。
-		taskWorkspaceParentDirectory: getTaskWorktreesHomePath(),
+		taskWorkspaceParentDirectory: isIndependentTasksWorkspacePath(workspaceRepoPath)
+			? getIndependentTasksWorkspacePath()
+			: getTaskWorktreesHomePath(),
 		notes: [
 			"Nothing was created. Re-run without --preview to create the task.",
 			"Pass --expect-resolved-settings-fingerprint <resolvedSettingsFingerprint> on the real create to fail closed if anything drifted in between.",
@@ -825,7 +838,7 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 
 	const resolvedBaseRef = effectiveSettings.resolvedSettings.baseRef.value;
-	if (!resolvedBaseRef) {
+	if (!resolvedBaseRef && workspace.workspaceKind !== "independent_tasks") {
 		throw new Error("Could not determine task base branch for this workspace.");
 	}
 	const created = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (state) => {
@@ -848,7 +861,7 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 				taskAgentSessionInitialization: input.taskAgentSessionInitialization,
 				baseRef: resolvedBaseRef,
 				parentSessionId: input.parentSessionId,
-				worktreeMode: input.worktreeMode,
+				worktreeMode: effectiveSettings.resolvedSettings.worktreeMode.value,
 				prepFilePath: input.prepFilePath,
 			},
 			() => globalThis.crypto.randomUUID(),
@@ -1436,11 +1449,44 @@ async function deleteTaskCommand(input: {
 	taskId?: string;
 	column?: ListTaskColumn;
 	projectPath?: string;
+	confirmDeleteWorkspaceFiles?: boolean;
 }): Promise<JsonRecord> {
 	const target = resolveTaskCommandTarget(input, "task delete");
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	if (isIndependentTasksWorkspacePath(workspaceRepoPath)) {
+		const state = await runtimeClient.workspace.getState.query();
+		const records =
+			target.kind === "task"
+				? [findTaskRecord(state, target.taskId)].filter((record) => record !== null)
+				: findTasksInColumn(state, target.column);
+		if (target.kind === "task" && records.length === 0) {
+			throw new Error(`Task "${target.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+		}
+		const directories = records.map((record) => getIndependentTaskDirectoryPath(record.task.id));
+		if (!input.confirmDeleteWorkspaceFiles)
+			return {
+				ok: true,
+				preview: true,
+				taskDeleted: false,
+				directories,
+				message: "将永久删除这些任务及目录内全部文件。确认后使用 --confirm-delete-workspace-files。",
+			};
+		for (const record of records) {
+			await runtimeClient.workspace.permanentlyDeleteIndependentTask.mutate({
+				taskId: record.task.id,
+				confirmDeleteWorkspaceFiles: true,
+			});
+			// 逐个成功后清理，批删中途失败也只处理已经删除的任务。
+			await discardTaskEditDraftsForDeletedTasks(workspaceId, [record.task.id]);
+		}
+		return {
+			ok: true,
+			deletedTaskIds: records.map((record) => record.task.id),
+			deletedWorkspaceDirectories: directories,
+		};
+	}
 	const mutation = await mutateWorkspaceState(workspaceRepoPath, (latestState) => {
 		const latestTargetRecords =
 			target.kind === "task"
@@ -2283,6 +2329,7 @@ export function registerTaskCommand(program: Command): void {
 	task
 		.command("delete")
 		.description("Permanently delete a task or every task in a column.")
+		.option("--confirm-delete-workspace-files", "确认永久删除独立任务及其工作区文件。")
 		.option("--task-id <id>", "Task ID to permanently delete.")
 		.option(
 			"--column <column>",
@@ -2290,22 +2337,30 @@ export function registerTaskCommand(program: Command): void {
 			parseListColumn,
 		)
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.action(async (options: { taskId?: string; column?: ListTaskColumn; projectPath?: string }) => {
-			await runTaskCommand(
-				async () =>
-					await deleteTaskCommand({
-						cwd: process.cwd(),
-						taskId: options.taskId,
-						column: options.column,
-						projectPath: options.projectPath,
-					}),
-			);
-		});
+		.action(
+			async (options: {
+				taskId?: string;
+				column?: ListTaskColumn;
+				projectPath?: string;
+				confirmDeleteWorkspaceFiles?: boolean;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await deleteTaskCommand({
+							cwd: process.cwd(),
+							confirmDeleteWorkspaceFiles: options.confirmDeleteWorkspaceFiles,
+							taskId: options.taskId,
+							column: options.column,
+							projectPath: options.projectPath,
+						}),
+				);
+			},
+		);
 
 	task
 		.command("message")
 		.description("Inject a follow-up user message into an active task agent session.")
-		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
+		.option("--project-path <path>", "Workspace path for the Kanban project.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.option("--prompt-file <path>", "UTF-8 file containing the complete follow-up message.")
 		.option("--prompt <text>", "Follow-up message text.")
@@ -2355,7 +2410,7 @@ export function registerTaskCommand(program: Command): void {
 	task
 		.command("message-status")
 		.description("Read the honest delivery status of a previously injected task message.")
-		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
+		.option("--project-path <path>", "Workspace path for the Kanban project.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key of the injected message.")
 		.action(async (options: { projectPath: string; taskId: string; idempotencyKey: string }) => {
@@ -2373,7 +2428,7 @@ export function registerTaskCommand(program: Command): void {
 	task
 		.command("message-cancel")
 		.description("Cancel an in-flight task message delivery that has not reached the terminal yet.")
-		.requiredOption("--project-path <path>", "Workspace path for the Kanban project.")
+		.option("--project-path <path>", "Workspace path for the Kanban project.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.requiredOption("--idempotency-key <key>", "Task-scoped idempotency key of the injected message.")
 		.action(async (options: { projectPath: string; taskId: string; idempotencyKey: string }) => {
@@ -2505,4 +2560,16 @@ export function registerTaskCommand(program: Command): void {
 					}),
 			);
 		});
+	for (const subcommand of task.commands) {
+		subcommand.option("--independent-tasks", "使用不绑定仓库的独立任务集合。");
+	}
+	task.hook("preAction", (_command, actionCommand) => {
+		const options = actionCommand.opts();
+		if (options.independentTasks) {
+			if (options.projectPath) throw new Error("--independent-tasks and --project-path are mutually exclusive.");
+			actionCommand.setOptionValue("projectPath", getIndependentTasksWorkspacePath());
+		} else if (actionCommand.name() === "message" && !options.projectPath) {
+			throw new Error("task message requires --project-path or --independent-tasks.");
+		}
+	});
 }
