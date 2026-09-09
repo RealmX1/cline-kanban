@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	MAX_TRANSCRIPT_TAIL_BYTES_PER_MODEL_PROBE_FILE,
 	probePersistedAgentTranscriptLastConversationModelIdentity,
+	probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession,
 	supportsPersistedAgentTranscriptLastConversationModelProbe,
 } from "../../../src/agent-session-history/persisted-agent-transcript-last-conversation-model-probe";
 
@@ -223,5 +224,57 @@ describe("persisted agent transcript last conversation model probe", () => {
 		);
 
 		await expect(probe(fixture)).resolves.toBe("claude-opus-5");
+	});
+});
+
+// 按会话自己的原生 session id 取模型。存在理由：主会话与它的 By the way 侧问、以及同仓库下多个 inplace
+// 任务共用同一个工作目录，那时 `--continue` 版探针会把**别人**的模型套过来，还会写回卡片固化下来。
+describe("persisted agent transcript model probe addressed by native session id", () => {
+	async function probeById(fixture: ProbeFixture, agentNativeConversationSessionId: string | null) {
+		return probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession({
+			agentId: "claude",
+			workspacePath: fixture.workspacePath,
+			agentNativeConversationSessionId,
+			homeDirectoryPath: fixture.homeDirectoryPath,
+		});
+	}
+
+	// 同一个目录里两段对话，B 更新（`--continue` 会挑它）。按 id 问 A 就必须得到 A 的模型。
+	it("reads the named session's model even when another session in the same directory is more recent", async () => {
+		const fixture = createProbeFixture();
+		const olderTranscriptPath = writeTranscript(fixture, `${SESSION_A}.jsonl`, [
+			userRecord(),
+			assistantRecord("claude-opus-4-8"),
+		]);
+		writeTranscript(fixture, `${SESSION_B}.jsonl`, [userRecord(), assistantRecord("claude-sonnet-5")]);
+		utimesSync(olderTranscriptPath, new Date(1_700_000_000_000), new Date(1_700_000_000_000));
+
+		await expect(probe(fixture)).resolves.toBe("claude-sonnet-5");
+		await expect(probeById(fixture, SESSION_A)).resolves.toBe("claude-opus-4-8");
+		await expect(probeById(fixture, SESSION_B)).resolves.toBe("claude-sonnet-5");
+	});
+
+	// 「问不出结论」一律 null ⇒ 调用方退回原有的模型决策规则，绝不据此清空卡片上的选择。
+	it("returns null for a missing transcript, a malformed id, or no id at all", async () => {
+		const fixture = createProbeFixture();
+		writeTranscript(fixture, `${SESSION_A}.jsonl`, [userRecord(), assistantRecord("claude-opus-4-8")]);
+
+		await expect(probeById(fixture, SESSION_B)).resolves.toBeNull();
+		await expect(probeById(fixture, "not-a-session-id")).resolves.toBeNull();
+		await expect(probeById(fixture, null)).resolves.toBeNull();
+	});
+
+	it("stays limited to agents whose transcripts are addressable by working directory", async () => {
+		const fixture = createProbeFixture();
+		writeTranscript(fixture, `${SESSION_A}.jsonl`, [userRecord(), assistantRecord("claude-opus-4-8")]);
+
+		await expect(
+			probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession({
+				agentId: "codex",
+				workspacePath: fixture.workspacePath,
+				agentNativeConversationSessionId: SESSION_A,
+				homeDirectoryPath: fixture.homeDirectoryPath,
+			}),
+		).resolves.toBeNull();
 	});
 });

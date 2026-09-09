@@ -73,6 +73,17 @@ export interface AgentAdapterLaunchInput {
 	workspaceId?: string;
 	parentSessionId?: string;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
+	// 「这条会话**自己**上一世的对话在哪」——由 session-manager 每次启动现算（解析器见
+	// core/agent-conversation-session-resume-addressing.ts，唯一来源是 summary 上由 hook 落下的
+	// `agentNativeConversationSessionIdentity`）。命中即按 id 续跑，压过下面所有 cwd-latest 分支。
+	//
+	// 与上面的 taskAgentSessionInitialization **形状相同但语义正交，绝不可合并**：
+	//   taskAgentSessionInitialization = 建卡时的**播种**（这张新卡从别人的某段历史会话长出来），一次性开局参数；
+	//   本字段 = **重启寻址**（这条会话接回它自己的上一段对话），每次启动重新解析。
+	// 合并的后果是从垃圾桶拖回来的任务会去续播种源的对话而不是它自己的——`resumeFromTrash` 与播种 id
+	// 会被前端同时发出（web-ui/src/hooks/use-task-sessions.ts 的 trash 恢复），今天靠 resumeFromTrash
+	// 压过播种才是对的，故本字段必须独立于播种轴另起一档。
+	observedAgentNativeConversationSessionResumeAddressing?: RuntimeTaskAgentSessionInitialization;
 	readOnlyQuestionSession?: boolean;
 	forkLatestWorkingDirectorySession?: boolean;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
@@ -710,6 +721,24 @@ function resolveTaskAgentSessionInitialization(
 		: null;
 }
 
+// 重启寻址轴的取值口。不匹配即抛：解析器（core/agent-conversation-session-resume-addressing.ts）
+// 已经保证 sourceAgentId === 本次启动的 agent，走到这里还不一致说明有人绕过了漏斗——
+// 那种情况下继续启动只会把别的 harness 的 session id 喂给本 agent，静默换回 cwd-latest 更糟。
+function resolveObservedAgentNativeConversationSessionResumeAddressing(
+	input: AgentAdapterLaunchInput,
+): RuntimeTaskAgentSessionInitialization | null {
+	const addressing = input.observedAgentNativeConversationSessionResumeAddressing;
+	if (!addressing) {
+		return null;
+	}
+	if (addressing.sourceAgentId !== input.agentId) {
+		throw new Error(
+			`Observed agent native conversation session addressing agent "${addressing.sourceAgentId}" does not match selected agent "${input.agentId}".`,
+		);
+	}
+	return addressing;
+}
+
 function getHookAgentDirectory(agentId: RuntimeAgentId): string {
 	return join(getRuntimeHomePath(), "hooks", agentId);
 }
@@ -892,19 +921,43 @@ const claudeAdapter: AgentSessionAdapter = {
 		};
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 		applyClaudePermissionAndPlanModeArgs(args, input);
-		// 三条互斥的续跑分支任一命中 ⇒ 本次启动会重播既有对话（见 PreparedAgentLaunch 同名字段）。
+		const observedNativeSessionResumeAddressing =
+			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
+		// 四条互斥的续跑分支任一命中 ⇒ 本次启动会重播既有对话（见 PreparedAgentLaunch 同名字段）。
 		const resumesPriorAgentConversation = Boolean(
-			input.resumeFromTrash || taskAgentSessionInitialization || input.forkLatestWorkingDirectorySession,
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				taskAgentSessionInitialization ||
+				input.forkLatestWorkingDirectorySession,
 		);
-		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
-			args.push("--continue");
-		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
-			args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
-			if (
-				taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" &&
-				!hasCliOption(args, "--fork-session")
-			) {
-				args.push("--fork-session");
+		// 优先级：**重启寻址（按 id）→ resumeFromTrash（cwd-latest）→ 建卡播种 → fork cwd-latest**。
+		// 按-id 必须排在最前：`--continue` 挑的是「工作目录下最近一段对话」，而主会话与它的 By the way
+		// 侧问、以及同仓库下多个 inplace 任务都共用同一个 cwd，那时 cwd-latest 必然抢错对话。
+		// 分支选择只看轴本身，「args 里是否已有该旗标」只决定推不推——否则用户把 `--continue` 写进 agent
+		// 命令时会掉进下一条分支，拼出 `--continue --resume <id>` 这种自相矛盾的 argv。
+		if (observedNativeSessionResumeAddressing) {
+			if (!hasCliOption(args, "--resume")) {
+				args.push("--resume", observedNativeSessionResumeAddressing.sourceSessionId);
+				if (
+					observedNativeSessionResumeAddressing.sourceSessionReuseMode === "fork_existing_session" &&
+					!hasCliOption(args, "--fork-session")
+				) {
+					args.push("--fork-session");
+				}
+			}
+		} else if (input.resumeFromTrash) {
+			if (!hasCliOption(args, "--continue")) {
+				args.push("--continue");
+			}
+		} else if (taskAgentSessionInitialization) {
+			if (!hasCliOption(args, "--resume")) {
+				args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
+				if (
+					taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" &&
+					!hasCliOption(args, "--fork-session")
+				) {
+					args.push("--fork-session");
+				}
 			}
 		} else if (input.forkLatestWorkingDirectorySession) {
 			if (!hasCliOption(args, "--continue")) {
@@ -1072,6 +1125,8 @@ function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummar
 const codexAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
+		const observedNativeSessionResumeAddressing =
+			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "codex");
 		const codexArgs = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {};
@@ -1111,7 +1166,20 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push(...removeCliOptionsWithValues(withoutBypass, ["--sandbox", "-s", "--ask-for-approval", "-a"]));
 			codexArgs.push("--sandbox", "read-only", "--ask-for-approval", "never");
 		}
-		if (input.resumeFromTrash) {
+		// 优先级同 claude：**重启寻址（按 id）→ resumeFromTrash（`resume --last`）→ 建卡播种 → fork cwd-latest**。
+		// `resume --last` 与 `--continue` 是同一种「工作目录下最近一段对话」寻址，共用 cwd 时同样会抢错。
+		if (observedNativeSessionResumeAddressing) {
+			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
+				codexArgs.push("-C", input.cwd);
+			}
+			const sessionSubcommand =
+				observedNativeSessionResumeAddressing.sourceSessionReuseMode === "fork_existing_session"
+					? "fork"
+					: "resume";
+			if (!codexArgs.includes(sessionSubcommand)) {
+				codexArgs.push(sessionSubcommand, observedNativeSessionResumeAddressing.sourceSessionId);
+			}
+		} else if (input.resumeFromTrash) {
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");
 			}
@@ -1222,11 +1290,25 @@ const cursorAdapter: AgentSessionAdapter = {
 			args.push("--force");
 		}
 
-		const resumesPriorAgentConversation = Boolean(input.resumeFromTrash || taskAgentSessionInitialization);
-		if (input.resumeFromTrash && !hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
-			args.push("--continue");
-		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
-			args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
+		const observedNativeSessionResumeAddressing =
+			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
+		const resumesPriorAgentConversation = Boolean(
+			observedNativeSessionResumeAddressing || input.resumeFromTrash || taskAgentSessionInitialization,
+		);
+		// 优先级同 claude / codex：**重启寻址（按 id）→ resumeFromTrash（`--continue`）→ 建卡播种**。
+		// cursor 不支持 fork（契约层已 superRefine 拦下），故按-id 只有 resume 一种落法。
+		if (observedNativeSessionResumeAddressing) {
+			if (!hasCliOption(args, "--resume")) {
+				args.push("--resume", observedNativeSessionResumeAddressing.sourceSessionId);
+			}
+		} else if (input.resumeFromTrash) {
+			if (!hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
+				args.push("--continue");
+			}
+		} else if (taskAgentSessionInitialization) {
+			if (!hasCliOption(args, "--resume")) {
+				args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
+			}
 		}
 
 		if (input.startInPlanMode && !hasCliOption(args, "--plan") && !hasCliOption(args, "--mode")) {

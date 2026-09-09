@@ -15,6 +15,7 @@ import {
 } from "../agent-session-history/pending-user-decision-transcript-salvage";
 import {
 	probePersistedAgentTranscriptLastConversationModelIdentity,
+	probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession,
 	supportsPersistedAgentTranscriptLastConversationModelProbe,
 } from "../agent-session-history/persisted-agent-transcript-last-conversation-model-probe";
 import { createClineMcpRuntimeService } from "../cline-sdk/cline-mcp-runtime-service";
@@ -37,6 +38,7 @@ import {
 import type {
 	PromptLibraryScope,
 	RuntimeAgentId,
+	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeBoardCard,
 	RuntimeBoardData,
 	RuntimeCommandRunResponse,
@@ -270,6 +272,10 @@ async function resolveResumedTerminalAgentSessionModelOverrideSettings(options: 
 	agentId: RuntimeAgentId;
 	taskId: string;
 	taskCwd: string;
+	// 这条会话自己的 harness 原生会话身份（summary sidecar）。有它就按 id 取模型，没有才退回
+	// 「工作目录里最近那段对话」——后者在主会话与 By the way 侧问、或多个 inplace 任务共用 cwd 时
+	// 会把**别人**的模型套过来，还会顺手写回卡片固化下来。
+	agentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity | null;
 	workspaceScope: RuntimeTrpcWorkspaceScope;
 	cardTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	broadcastRuntimeWorkspaceStateUpdated?: (workspaceId: string, workspacePath: string) => Promise<void> | void;
@@ -289,11 +295,21 @@ async function resolveResumedTerminalAgentSessionModelOverrideSettings(options: 
 		return cardModelOverrideSettings;
 	}
 	let observedModelId: string | null = null;
+	const agentNativeConversationSessionIdentity =
+		options.agentNativeConversationSessionIdentity?.sourceAgentId === options.agentId
+			? options.agentNativeConversationSessionIdentity
+			: null;
 	try {
-		observedModelId = await probePersistedAgentTranscriptLastConversationModelIdentity({
-			agentId: options.agentId,
-			workspacePath: options.taskCwd,
-		});
+		observedModelId = agentNativeConversationSessionIdentity
+			? await probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession({
+					agentId: options.agentId,
+					workspacePath: options.taskCwd,
+					agentNativeConversationSessionId: agentNativeConversationSessionIdentity.nativeSessionId,
+				})
+			: await probePersistedAgentTranscriptLastConversationModelIdentity({
+					agentId: options.agentId,
+					workspacePath: options.taskCwd,
+				});
 	} catch {
 		// 探针是「锦上添花」，读转录失败绝不能挡住会话恢复。
 		return cardModelOverrideSettings;
@@ -919,6 +935,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							agentId: resolved.agentId,
 							taskId: body.taskId,
 							taskCwd,
+							// 与 refreshTaskTerminal 同源：这条路同样可能因寻址轴而按 `--resume <本会话 id>` 续跑，
+							// 模型就必须也按同一个 id 取。少了它，主会话从垃圾桶恢复时会读到「工作目录里最近那段
+							// 对话」——共用 worktree 下那多半是侧问会话——并经回写把侧问的模型固化进主卡。
+							agentNativeConversationSessionIdentity: terminalManager.getSummary(body.taskId)
+								?.agentNativeConversationSessionIdentity,
 							workspaceScope,
 							cardTerminalAgentModelOverrideSettings: body.terminalAgentModelOverrideSettings,
 							broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
@@ -1011,13 +1032,28 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				// 恰恰是最容易丢的那个字段——一旦在这里提前拒绝，用户就只剩一个既全白、又点不动的面板，
 				// 也就是本 bug 的最终形态。真正该拒绝的只有「这个 agent 根本不用 PTY 终端」，那需要先把
 				// 卡片解析出来、把 agentId 兜底求全之后才能判断。
+				// **会话 ≠ 卡片**。By the way 侧问会话的 taskId 是 `task-conversation-session-<uuid>`，看板上
+				// 根本没有这张卡；它的启动参数（baseRef / worktreeMode / 权限档 / 模型）全在**宿主任务**的卡片上，
+				// 工作目录也与宿主共用。此前这里拿会话 id 去找卡片，于是侧问会话的重启按钮恒定返回
+				// 「Card not found in the workspace board.」——按钮点了等于没点。
+				//
+				// 口径与 startTaskSession 的同名变量严格一致（那边是 `body.workspaceTaskId ?? body.taskId`），
+				// 两处一眼可对齐；这里的刷新请求不带 workspaceTaskId，故从会话自己的 summary 里取。
+				//
+				// 划界（下面每个用点都按这条规则）：`workspaceTaskId` **只**用于「读卡片取启动参数」与
+				// 「解析工作目录」；任何**写回**一律以会话自身的 body.taskId 为键，否则侧问会话会把 agent 身份
+				// 与模型污染到主卡上。
+				const workspaceTaskId = currentSummary?.taskConversationSessionMetadata?.workspaceTaskId ?? body.taskId;
 				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
-				const card = findWorkspaceBoardCard(board, body.taskId);
+				const card = findWorkspaceBoardCard(board, workspaceTaskId);
 				if (!card) {
 					return {
 						ok: false,
 						summary: null,
-						error: "Card not found in the workspace board.",
+						error:
+							workspaceTaskId === body.taskId
+								? "Card not found in the workspace board."
+								: "The board card hosting this conversation session no longer exists.",
 					};
 				}
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
@@ -1080,21 +1116,31 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						error: "No runnable agent command is configured.",
 					};
 				}
-				const taskCwd = isHomeAgentSessionId(body.taskId)
-					? workspaceScope.workspacePath
-					: await resolveExistingTaskCwdOrEnsure({
-							cwd: workspaceScope.workspacePath,
-							taskId: body.taskId,
-							baseRef: card.baseRef,
-							worktreeMode: card.worktreeMode,
-						});
-				// 「Restart terminal session」永远走 `--continue`（下面的 resumeFromTrash: true），
-				// 故模型一律以转录里读到的会话真实模型为准，卡片值只在探针问不出结论时兜底。
+				// 用 workspaceTaskId 解析工作目录：侧问会话与宿主任务共用同一个 worktree。用会话 id 解析会
+				// 让 resolveExistingTaskCwdOrEnsure 的 ensure 以 session id 另造一个空 worktree，
+				// 那才是「重启后什么上下文都没有」的实伤。
+				//
+				// 这里不再判 isHomeAgentSessionId：home agent 会话（`__home_agent__:<workspace>:<agent>`）
+				// 在看板上没有卡片，上面那道守卫已经先把它拒了，该分支按构造走不到。前端也对应地藏起了它的
+				// 重启按钮（agent-terminal-panel.tsx 的 `taskId.startsWith("__home_")`）。要让 home 会话真的
+				// 可重启，需要为 card===null 补一整套启动参数来源（baseRef / worktreeMode / 权限档 / 模型全在
+				// 卡片上），那是加功能，不在本路径的职责里。
+				const taskCwd = await resolveExistingTaskCwdOrEnsure({
+					cwd: workspaceScope.workspacePath,
+					taskId: workspaceTaskId,
+					baseRef: card.baseRef,
+					worktreeMode: card.worktreeMode,
+				});
+				// 「Restart terminal session」续的是这条会话自己的上一段对话，故模型一律以转录里读到的
+				// 真实模型为准，卡片值只在探针问不出结论时兜底。带上会话的原生会话身份，让探针按 id 取，
+				// 而不是按「工作目录里最近那段对话」——共用 cwd 时后者会把别人的模型套过来。
 				const resumedTerminalAgentModelOverrideSettings =
 					await resolveResumedTerminalAgentSessionModelOverrideSettings({
 						agentId: resolved.agentId,
+						// 写回以会话自身为键：侧问会话在看板上没有卡片，这次回写天然 no-op，绝不污染主卡。
 						taskId: body.taskId,
 						taskCwd,
+						agentNativeConversationSessionIdentity: currentSummary?.agentNativeConversationSessionIdentity,
 						workspaceScope,
 						cardTerminalAgentModelOverrideSettings: card.terminalAgentModelOverrideSettings,
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
@@ -1102,6 +1148,15 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const summary = await terminalManager.refreshTaskTerminal(
 					{
 						taskId: body.taskId,
+						// 补回这两个字段（此前重建请求把它们丢了）：
+						//   workspaceTaskId 决定 hook env 里的 KANBAN_TASK_ID 归属；
+						//   taskConversationSessionMetadata 驱动侧问会话的只读约束（session-manager 的
+						//   readOnlyQuestionSession），丢了就等于重启一次侧问会话它就能写文件了。
+						// 且这份重建请求会覆盖 entry.restartRequest，残缺一次就会被此后的崩溃自动重启永久继承。
+						workspaceTaskId,
+						...(currentSummary?.taskConversationSessionMetadata
+							? { taskConversationSessionMetadata: currentSummary.taskConversationSessionMetadata }
+							: {}),
 						agentId: resolved.agentId,
 						binary: resolved.binary,
 						args: resolved.args,
@@ -1129,6 +1184,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				);
 				// 重启也是一次启动：把 agent 身份重新钉到卡片上，让「靠兜底才救回来的会话」在下一次硬中断时
 				// 不必再靠兜底。
+				//
+				// 键**必须**是 body.taskId 而不是 workspaceTaskId（见上面的划界）：侧问会话在看板上没有卡片，
+				// 这次写回对它天然 no-op；换成 workspaceTaskId 就会把侧问会话跑的 agent 写进主卡，
+				// 主会话下一次硬中断后会被兜底解析成侧问用的那个 agent。
 				await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
 					workspaceScope,
 					taskId: body.taskId,

@@ -1,6 +1,7 @@
 import { FileText, MessageCircleQuestion, Plus } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
+import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/truncated-identifier-chip-with-copy-on-click";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -18,6 +19,38 @@ const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["
 interface CreateByTheWaySessionRequest {
 	initialUserQuestion: string;
 	contextSource: NewTaskConversationSessionContextSource;
+}
+
+// 每一行露出两个标识符：
+//   · **会话 id**（主会话时等于卡片 id）——用户拿它对照日志、URL 与运行时诊断；
+//   · **agent 原生会话 id**——harness 自己的 session id（`~/.claude/projects/**/<id>.jsonl` 就是它），
+//     标签用记录里的 sourceAgentId 渲染，**不硬编码 agent 名**：这条 sidecar 由 hook stdin 落下，
+//     跑的是哪个 harness 由它自己说了算。
+// sidecar 缺席时（Cline / ACP 会话，或还没触发过 hook 的老数据）整块不渲染，不摆占位符——
+// 一个空壳只会让人以为「这条会话的 id 是空的」。
+function TaskConversationSessionIdentifierChips({
+	summary,
+	taskConversationSessionId,
+}: {
+	summary: RuntimeTaskSessionSummary;
+	taskConversationSessionId: string;
+}): React.ReactElement {
+	const agentNativeConversationSessionIdentity = summary.agentNativeConversationSessionIdentity;
+	return (
+		// pr-9 给行右下角那个绝对定位的按钮让位（主会话行的「查看完整 prompt」）。
+		<div className="flex flex-wrap items-center gap-1 px-2 pb-2 pr-9">
+			<TruncatedIdentifierChipWithCopyOnClick
+				identifierLabel="Session"
+				identifierValue={taskConversationSessionId}
+			/>
+			{agentNativeConversationSessionIdentity ? (
+				<TruncatedIdentifierChipWithCopyOnClick
+					identifierLabel={agentNativeConversationSessionIdentity.sourceAgentId}
+					identifierValue={agentNativeConversationSessionIdentity.nativeSessionId}
+				/>
+			) : null}
+		</div>
+	);
 }
 
 function isByTheWaySessionForTask(summary: RuntimeTaskSessionSummary, workspaceTaskId: string): boolean {
@@ -219,13 +252,17 @@ export function TaskConversationSessionsPanel({
 				<div className="min-h-0 flex-1 overflow-y-auto p-1.5">
 					{/* 「查看完整 prompt」是行内 button，不能嵌在选择会话的 button 里（嵌套 button 是无效 HTML），
 					    故两者作为兄弟元素放进同一个 relative 容器，前者绝对定位到右下角。 */}
-					<div className="relative mb-1">
+					{/* 底色挂在容器上而不是 button 上：id 条是 button 的兄弟节点（见下），底色留在 button 上
+					    会让同一张卡片视觉上裂成两半。 */}
+					<div
+						className={cn(
+							"relative mb-1 rounded-md hover:bg-surface-3",
+							selectedTaskConversationSessionId === workspaceTaskId && "bg-surface-3",
+						)}
+					>
 						<button
 							type="button"
-							className={cn(
-								"w-full rounded-md px-2 py-2 text-left hover:bg-surface-3",
-								selectedTaskConversationSessionId === workspaceTaskId && "bg-surface-3",
-							)}
+							className="w-full rounded-md px-2 pb-1 pt-2 text-left"
 							onClick={() => selectSession(mainSessionSummary)}
 						>
 							<div className="flex items-center gap-2">
@@ -238,6 +275,10 @@ export function TaskConversationSessionsPanel({
 								{mainSessionUserMessagePreview}
 							</p>
 						</button>
+						<TaskConversationSessionIdentifierChips
+							summary={mainSessionSummary}
+							taskConversationSessionId={workspaceTaskId}
+						/>
 						<Button
 							variant="ghost"
 							size="sm"
@@ -263,34 +304,48 @@ export function TaskConversationSessionsPanel({
 							(readSessionUpdatedAtById[summary.taskId] ?? 0) < summary.updatedAt &&
 							selectedTaskConversationSessionId !== summary.taskId;
 						return (
-							<button
-								type="button"
+							// id 复制芯片是 button，不能嵌进这个整行可点的 button 里（嵌套 button 是无效 HTML），
+							// 故与它并列放进同一个容器；底色同样挂在容器上，保持一张卡片的观感。
+							<div
 								key={summary.taskId}
 								className={cn(
-									"mb-1 w-full rounded-md px-2 py-2 text-left hover:bg-surface-3",
+									"mb-1 rounded-md hover:bg-surface-3",
 									selectedTaskConversationSessionId === summary.taskId && "bg-surface-3",
 								)}
-								onClick={() => selectSession(summary)}
 							>
-								<div className="flex items-center gap-2">
-									<MessageCircleQuestion size={13} className="text-status-purple" />
-									<span className="text-xs font-medium text-text-primary">By the way</span>
-									{hasUnreadCompletion ? (
-										<span role="img" className="h-2 w-2 rounded-full bg-accent" aria-label="Unread answer" />
-									) : null}
-									<span className="ml-auto text-[11px] text-text-tertiary">
-										{getSessionStatusLabel(summary)}
-									</span>
-								</div>
-								<p className="mt-1 line-clamp-2 text-xs text-text-secondary">
-									{metadata.latestUserMessagePreview ?? "No question yet"}
-								</p>
-								<p className="mt-1 text-[11px] text-text-tertiary">
-									{metadata.taskConversationSessionContextSource === "forked_from_main_current_turn"
-										? `Forked from main · ${turnsAgo} turns ago`
-										: `Started from scratch · ${turnsAgo} turns ago`}
-								</p>
-							</button>
+								<button
+									type="button"
+									className="w-full rounded-md px-2 pb-1 pt-2 text-left"
+									onClick={() => selectSession(summary)}
+								>
+									<div className="flex items-center gap-2">
+										<MessageCircleQuestion size={13} className="text-status-purple" />
+										<span className="text-xs font-medium text-text-primary">By the way</span>
+										{hasUnreadCompletion ? (
+											<span
+												role="img"
+												className="h-2 w-2 rounded-full bg-accent"
+												aria-label="Unread answer"
+											/>
+										) : null}
+										<span className="ml-auto text-[11px] text-text-tertiary">
+											{getSessionStatusLabel(summary)}
+										</span>
+									</div>
+									<p className="mt-1 line-clamp-2 text-xs text-text-secondary">
+										{metadata.latestUserMessagePreview ?? "No question yet"}
+									</p>
+									<p className="mt-1 text-[11px] text-text-tertiary">
+										{metadata.taskConversationSessionContextSource === "forked_from_main_current_turn"
+											? `Forked from main · ${turnsAgo} turns ago`
+											: `Started from scratch · ${turnsAgo} turns ago`}
+									</p>
+								</button>
+								<TaskConversationSessionIdentifierChips
+									summary={summary}
+									taskConversationSessionId={summary.taskId}
+								/>
+							</div>
 						);
 					})}
 					{byTheWaySessions.length === 0 ? (
