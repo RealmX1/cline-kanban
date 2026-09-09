@@ -60,6 +60,29 @@ transcriptPath, observedAt}`——只在三个身份字段变化时真正写（`
 不碰 facet 三元组、不参与 superRefine。它是 B.2 组装核心包 `sessions[]`
 （`nativeSessionId` / `transcriptPath`）的唯一身份来源。
 
+## 3b. 启动参数快照（fork 重放用）
+
+核心包 fork 出的分身能否命中主会话的 prompt cache，取决于它的 model 与 system prompt 前缀是否与主会话
+**逐字**一致。因此 `launchArgvTemplate` 的三项一律**在启动那一刻快照**，绝不在作业触发时重算：
+`--append-system-prompt` 的文案是仓库代码的一部分，会随版本改（B.1 就改过一次），旧会话用新代码重算出来的
+prompt 与它实际在跑的那份不同 —— fork 前缀对不上，cache 全 miss，且**完全静默**（分身照常出结果，只是每次
+按未缓存价格烧全量输入 token）。
+
+`src/terminal/agent-session-fork-replay-launch-arguments-capture.ts` 是纯函数，从 `PreparedAgentLaunch.args`
+里摘 `--model` / `--append-system-prompt` / `--settings`（同时认 `-m` 与等号式写法，取最后一次出现）；
+`session-manager` 在 spawn 后那一批 summary 写入里与 `runtimeSessionIncarnationId` 同批盖章，因此天然
+「每个活体一份、换 agent 或换模型后整体替换」。**未接入的 agent 必须显式写 `null` 而不是省略字段**，否则同
+一任务从 claude 换成别的 agent 后，旧快照会留在 summary 里被误当成当前会话的启动参数。
+
+两条不可动摇的细节：
+
+- **model 存 argv 字面值**（通常是浮动别名 `default`），绝不存解析后的具体模型 id。别名的含义由 Claude Code
+  运行时解析且随上游换代漂移，固化解析结果会让 fork 在换代后用错模型（另见 `AGENTS.md` 的浮动 ref 规则，与
+  `agent-session-adapters.ts` 里 `--model default` 那段注释记录的 1M→200k 事故）。
+- **prompt 文本逐字保留**，包括内部连续空白、制表符与换行 —— cache 前缀比对是字节级的。
+
+v1 只覆盖 claude（exploration 的第一 harness，也是唯一已核实 fork 语义的 harness）。
+
 ## 4. 维护作业分身的 hook 短路
 
 核心包的 work-branch 作业以 `claude -p --resume <主会话 id> --fork-session --settings <与主会话相同的
@@ -143,7 +166,7 @@ turn 行」双向定位可复用（`data-conversation-anchor` 属性契约 + `da
 
 - cline-kanban 提供：`explorationId = workspaceTaskId`；`sessions[]`（主会话在前；每条含 N0a 的
   `nativeSessionId` / `transcriptPath`、`workingDirectory`、`launchArgvTemplate{model, appendSystemPrompt,
-  settingsPath, extraArgs}`（取自 `agent-session-adapters.ts` 的启动解析）、by-the-way 的
+  settingsPath, extraArgs}`（**读 §3b 的启动快照 `agentSessionForkReplayLaunchArguments`，绝不在触发时重算**）、by-the-way 的
   `forkedFromParentSessionTurnNumber`（= `mainSessionOriginTurnNumber`））；`storeRoot`
   = `~/.cline/kanban/workspaces/<ws>/agent-conversation-exploration-thread-graph/`；触发时机 = 终端 Stop
   边沿 + 防抖 + 每 exploration 并发 1。

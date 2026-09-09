@@ -560,6 +560,21 @@ export type RuntimeAgentNativeConversationSessionIdentity = z.infer<
 	typeof runtimeAgentNativeConversationSessionIdentitySchema
 >;
 
+// 终端 agent 启动时真正传出去的、与 fork 重放相关的 argv 三项（见
+// terminal/agent-session-fork-replay-launch-arguments-capture.ts 的完整理由）。exploration thread graph 的
+// 维护作业 fork 主会话时逐字复用它们，以命中主会话的 prompt cache；重算而非快照会在 prompt 文案改版后
+// 静默失效。model 存的是 argv 字面值（通常是浮动别名 `default`），不是解析后的模型 id。
+export const runtimeAgentSessionForkReplayLaunchArgumentsSchema = z.object({
+	sourceAgentId: z.string(),
+	modelArgumentLiteral: z.string().nullable(),
+	appendSystemPromptText: z.string().nullable(),
+	settingsFilePath: z.string().nullable(),
+	capturedAt: z.number(),
+});
+export type RuntimeAgentSessionForkReplayLaunchArguments = z.infer<
+	typeof runtimeAgentSessionForkReplayLaunchArgumentsSchema
+>;
+
 // 终端 agent 因瞬时连接错误（VPN 抖动等）停在空闲提示符时，
 // 自动续跑框架（src/terminal/output-reactions）进入「连接重试」状态：
 // 记录已尝试的续跑次数、首次出错时刻、最近一次注入时刻，以及下一次计划注入的时刻。
@@ -802,6 +817,10 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 加性可选：Cline / ACP 会话与旧盘数据缺它 ⇒ undefined；同一活体内 harness 换了 session id
 	// （--fork-session / 续接）时整体替换，只保留最新观测。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
+	// 本次启动 argv 的 fork 重放快照（见 runtimeAgentSessionForkReplayLaunchArgumentsSchema 注释）。
+	// 加性可选：只有已接入的终端 agent（v1 = claude）在建会话时盖章，其余会话与旧盘数据缺它 ⇒ undefined。
+	// 每次新起活体整体替换（同一任务换 agent / 换模型后，旧快照对新会话无意义）。
+	agentSessionForkReplayLaunchArguments: runtimeAgentSessionForkReplayLaunchArgumentsSchema.nullable().optional(),
 	// 这条**活会话**实际用的通话方式。agent-catalog 的 `sessionTransport` 只是该 agent 的**默认**通道；
 	// omp 可在 TUI（pty_terminal）与 ACP（acp_stdio_subprocess）之间随时切换，切换后 agentId 不变，
 	// 于是「渲染 xterm 还是会话面板」「stop / 输入 / 消息走哪条通路」一律以本字段为准，不得再从 agentId 静态派生。
