@@ -3,7 +3,7 @@
 // provenance 组装、查重、过滤、预填全部落在这里以便单测——铁律：绝不伪造锚，
 // 映射不到 turn 或投影不可用时显式降级 user_authored_freeform。
 
-import { extractSessionMapAnchorMarkers } from "@/components/session-map/session-map-anchor-markers";
+import { extractConversationAnchorMarkers } from "@/components/conversation-anchor/conversation-anchor-markers";
 import type {
 	RuntimeConversationSessionTurnProjectionResponse,
 	RuntimeExploratoryFindingEntry,
@@ -52,7 +52,9 @@ export function findSimilarExploratoryFindings(
 export function buildSaveFindingBodyPrefill(input: { selectedText?: string | null; messageContent: string }): string {
 	const selectedText = input.selectedText?.trim() ?? "";
 	const source =
-		selectedText.length > 0 ? selectedText : extractSessionMapAnchorMarkers(input.messageContent).cleanContent.trim();
+		selectedText.length > 0
+			? selectedText
+			: extractConversationAnchorMarkers(input.messageContent).cleanContent.trim();
 	if (source.length <= EXPLORATORY_FINDING_BODY_MAX_LENGTH) {
 		return source;
 	}

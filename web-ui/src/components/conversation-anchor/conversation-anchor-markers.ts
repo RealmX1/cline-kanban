@@ -2,7 +2,7 @@
 // 设计蓝图：.plan/docs/exploratory-mode-session-map-and-findings-store.md §C.1/§C.2。
 //
 // marker 是 agent 在助手消息正文里埋的行内 HTML 注释，独占一行：
-//   <!-- kanban:map-anchor <mapNodeId> -->
+//   <!-- kanban:map-anchor <anchorId> -->
 // 选 HTML 注释的理由（蓝图 §C.1）：未被识别时在 markdown 渲染里天然不可见——转录被复制、
 // 被旧版本 UI 渲染都不会出现垃圾文本，安全降级。
 //
@@ -14,13 +14,13 @@
 // 每条消息最多渲染的锚 chip 数（蓝图风险 9 的视觉噪声兜底）：恶意/故障 agent 可埋大量
 // 有效 id 的 marker，超出上限的 marker 不再出 chip，按纯文本段处理（注释经 markdown
 // 渲染天然不可见），但仍从 cleanContent 摘除——它本来就不是正文。
-export const SESSION_MAP_ANCHOR_CHIP_LIMIT_PER_MESSAGE = 8;
+export const CONVERSATION_ANCHOR_CHIP_LIMIT_PER_MESSAGE = 8;
 
-export type SessionMapAnchorSegment = { kind: "text"; text: string } | { kind: "marker"; mapNodeId: string };
+export type ConversationAnchorSegment = { kind: "text"; text: string } | { kind: "marker"; anchorId: string };
 
-export interface SessionMapAnchorExtraction {
+export interface ConversationAnchorExtraction {
 	// 原位渲染序列：text 段照常 markdown 渲染，marker 段渲 chip（蓝图 §C.2）。
-	segments: SessionMapAnchorSegment[];
+	segments: ConversationAnchorSegment[];
 	// 摘除全部合法 marker（含超上限的）后的正文；无 marker 时与原文恒等。
 	cleanContent: string;
 }
@@ -28,7 +28,7 @@ export interface SessionMapAnchorExtraction {
 // 独占一行的合法 marker：整行（忽略首尾空白）恰好是一个注释，载荷恰好一个非空白 token。
 // id 字符集排除 `>` 是为了绝不吞掉注释收尾的 `-->`；多余 token / 无 id / 未闭合 / 行内
 // 夹杂其他内容都因整行锚定而失配，回落普通文本。
-const SESSION_MAP_ANCHOR_MARKER_LINE_PATTERN = /^<!--\s*kanban:map-anchor\s+([^\s>]+)\s*-->$/;
+const CONVERSATION_ANCHOR_MARKER_LINE_PATTERN = /^<!--\s*kanban:map-anchor\s+([^\s>]+)\s*-->$/;
 
 // markdown 代码块 fence 行（``` 或 ~~~），捕获组是完整的 fence 字符游程。
 // fence 内的行绝不按 marker 解析：marker 是「正文里的导航锚」，而逐行切段若切开代码块会
@@ -52,7 +52,7 @@ interface OpenFence {
 // marker 状），不做传递性求值——连续相邻 marker 行仍可用。
 function isBlankOrMarkerShapedLine(line: string): boolean {
 	const trimmed = line.trim();
-	return trimmed.length === 0 || SESSION_MAP_ANCHOR_MARKER_LINE_PATTERN.test(trimmed);
+	return trimmed.length === 0 || CONVERSATION_ANCHOR_MARKER_LINE_PATTERN.test(trimmed);
 }
 
 function isStandaloneBlockPosition(lines: string[], index: number): boolean {
@@ -61,7 +61,7 @@ function isStandaloneBlockPosition(lines: string[], index: number): boolean {
 	return prevOk && nextOk;
 }
 
-export function extractSessionMapAnchorMarkers(content: string): SessionMapAnchorExtraction {
+export function extractConversationAnchorMarkers(content: string): ConversationAnchorExtraction {
 	// 快路径：不含 marker 前缀的消息（绝大多数）不逐行扫描，且保持 cleanContent 与原文恒等。
 	if (!content.includes("kanban:map-anchor")) {
 		return {
@@ -70,7 +70,7 @@ export function extractSessionMapAnchorMarkers(content: string): SessionMapAncho
 		};
 	}
 
-	const segments: SessionMapAnchorSegment[] = [];
+	const segments: ConversationAnchorSegment[] = [];
 	const cleanLines: string[] = [];
 	let pendingTextLines: string[] = [];
 	let markerSegmentCount = 0;
@@ -108,13 +108,13 @@ export function extractSessionMapAnchorMarkers(content: string): SessionMapAncho
 		}
 		const markerMatch =
 			openFence === null && isStandaloneBlockPosition(lines, index)
-				? SESSION_MAP_ANCHOR_MARKER_LINE_PATTERN.exec(line.trim())
+				? CONVERSATION_ANCHOR_MARKER_LINE_PATTERN.exec(line.trim())
 				: null;
-		if (markerMatch && markerSegmentCount < SESSION_MAP_ANCHOR_CHIP_LIMIT_PER_MESSAGE) {
+		if (markerMatch && markerSegmentCount < CONVERSATION_ANCHOR_CHIP_LIMIT_PER_MESSAGE) {
 			markerSegmentCount += 1;
 			flushPendingText();
 			// 捕获组在正则里是必填项，匹配成功必有值（noUncheckedIndexedAccess 下需断言）。
-			segments.push({ kind: "marker", mapNodeId: markerMatch[1]! });
+			segments.push({ kind: "marker", anchorId: markerMatch[1]! });
 			continue;
 		}
 		// 超上限的合法 marker 落入这里：按纯文本段处理（不出 chip），但不进 cleanLines——

@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createTRPCProxyClient, httpBatchLink, TRPCClientError } from "@trpc/client";
 import type { Command } from "commander";
 import type {
+	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentRaisedToolPermissionPayload,
 	RuntimeAgentRaisedUserQuestionPayload,
 	RuntimeHarnessUserPromptProcessingDirective,
@@ -26,12 +27,17 @@ import {
 	extractAgentRaisedToolPermissionPayload,
 	extractAgentRaisedUserQuestionPayload,
 } from "./agent-raised-decision-payload-extraction";
+import { extractAgentNativeConversationSessionIdentityFromHookPayload } from "./hook-events/agent-native-conversation-session-identity-extraction";
 import {
 	type CodexMappedHookEvent,
 	resolveCodexRolloutFinalMessageForCwd,
 	startCodexSessionWatcher,
 } from "./hook-events/codex-hook-events";
 import { enrichDroidReviewMetadata } from "./hook-events/droid-hook-events";
+import {
+	type ExplorationWorkBranchJobHookDisposition,
+	resolveExplorationWorkBranchJobHookDisposition,
+} from "./hook-events/exploration-work-branch-job-hook-short-circuit";
 import { asRecord, normalizeWhitespace, readNestedString, readStringField } from "./hook-events/hook-utils";
 import { normalizeKiroHookMetadata } from "./hook-events/kiro-hook-events";
 
@@ -54,6 +60,8 @@ interface HooksIngestArgs {
 	agentRaisedUserQuestion?: RuntimeAgentRaisedUserQuestionPayload;
 	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
 	submittedPromptText?: string;
+	// N0a：终端 agent 原生会话身份（session_id + transcript_path），每个事件都带，服务端幂等落 sidecar。
+	agentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity;
 }
 
 interface HookCommandMetadataOptionValues {
@@ -389,12 +397,17 @@ function parseHooksIngestArgs(
 	const payloadFromArg = payloadArg ? parseJsonObject(payloadArg) : null;
 	const payload = payloadFromBase64 ?? payloadFromStdin ?? payloadFromArg;
 	const metadata = normalizeHookMetadata(event, payload, flagMetadata);
+	const agentNativeConversationSessionIdentity = extractAgentNativeConversationSessionIdentityFromHookPayload({
+		payload,
+		sourceAgentId: metadata?.source ?? inferHookSourceFromPayload(payload),
+	});
 	return {
 		event,
 		taskId: context.taskId,
 		workspaceId: context.workspaceId,
 		metadata,
 		payload,
+		...(agentNativeConversationSessionIdentity ? { agentNativeConversationSessionIdentity } : {}),
 		...buildAgentRaisedDecisionPayloads(payload, metadata),
 		...(metadata?.hookEventName?.trim().toLowerCase() === "userpromptsubmit" && payload
 			? { submittedPromptText: readStringField(payload, "prompt") ?? undefined }
@@ -574,6 +587,9 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngest
 				...(args.agentRaisedUserQuestion ? { agentRaisedUserQuestion: args.agentRaisedUserQuestion } : {}),
 				...(args.agentRaisedToolPermission ? { agentRaisedToolPermission: args.agentRaisedToolPermission } : {}),
 				...(args.submittedPromptText !== undefined ? { submittedPromptText: args.submittedPromptText } : {}),
+				...(args.agentNativeConversationSessionIdentity
+					? { agentNativeConversationSessionIdentity: args.agentNativeConversationSessionIdentity }
+					: {}),
 			});
 		},
 		{
@@ -698,6 +714,23 @@ async function enrichCodexReviewMetadata(args: HooksIngestArgs, cwd: string): Pr
 	};
 }
 
+// exploration thread graph 维护作业分身的 hook 短路（判定与理由见 exploration-work-branch-job-hook-short-circuit.ts）。
+// 必须在 parseHooksIngestArgs 之前调用：作业进程未必带 KANBAN_HOOK_* 身份 env。
+function resolveExplorationWorkBranchJobHookDispositionForStdin(
+	stdinPayload: string,
+	optionHookEventName: string | undefined,
+): ExplorationWorkBranchJobHookDisposition {
+	const payload = parseJsonObject(stdinPayload.trim());
+	const hookEventName =
+		optionHookEventName ??
+		(payload
+			? (readStringField(payload, "hook_event_name") ??
+				readStringField(payload, "hookEventName") ??
+				readStringField(payload, "hookName"))
+			: null);
+	return resolveExplorationWorkBranchJobHookDisposition({ hookEventName });
+}
+
 async function runHooksNotify(
 	event: RuntimeHookEvent,
 	options: HookCommandMetadataOptionValues,
@@ -705,6 +738,16 @@ async function runHooksNotify(
 ): Promise<void> {
 	try {
 		const stdinPayload = await readStdinText();
+		const jobDisposition = resolveExplorationWorkBranchJobHookDispositionForStdin(
+			stdinPayload,
+			options.hookEventName,
+		);
+		if (jobDisposition.kind !== "ingest_normally") {
+			if (jobDisposition.kind === "short_circuit_with_pre_tool_use_deny") {
+				process.stdout.write(`${jobDisposition.stdoutJson}\n`);
+			}
+			return;
+		}
 		const parsedArgs = parseHooksIngestArgs(event, options, payloadArg, stdinPayload);
 		const codexEnrichedArgs = await enrichCodexReviewMetadata(parsedArgs, process.cwd());
 		const args = await enrichDroidReviewMetadata(codexEnrichedArgs);
@@ -751,6 +794,14 @@ async function runCodexHookSubcommand(
 		payload = "";
 	}
 
+	const jobDisposition = resolveExplorationWorkBranchJobHookDispositionForStdin(payload, options.hookEventName);
+	if (jobDisposition.kind !== "ingest_normally") {
+		process.stdout.write(
+			`${jobDisposition.kind === "short_circuit_with_pre_tool_use_deny" ? jobDisposition.stdoutJson : "{}"}\n`,
+		);
+		return;
+	}
+
 	process.stdout.write("{}\n");
 
 	try {
@@ -768,6 +819,11 @@ async function runGeminiHookSubcommand(): Promise<void> {
 		payload = await readStdinText();
 	} catch {
 		payload = "";
+	}
+
+	if (resolveExplorationWorkBranchJobHookDispositionForStdin(payload, undefined).kind !== "ingest_normally") {
+		process.stdout.write("{}\n");
+		return;
 	}
 
 	let hookEventName = "";
@@ -927,6 +983,16 @@ async function runHooksIngest(
 	let args: HooksIngestArgs;
 	try {
 		const stdinPayload = await readStdinText();
+		const jobDisposition = resolveExplorationWorkBranchJobHookDispositionForStdin(
+			stdinPayload,
+			options.hookEventName,
+		);
+		if (jobDisposition.kind !== "ingest_normally") {
+			if (jobDisposition.kind === "short_circuit_with_pre_tool_use_deny") {
+				process.stdout.write(`${jobDisposition.stdoutJson}\n`);
+			}
+			return;
+		}
 		const parsedArgs = parseHooksIngestArgs(event, options, payloadArg, stdinPayload);
 		const codexEnrichedArgs = await enrichCodexReviewMetadata(parsedArgs, process.cwd());
 		args = await enrichDroidReviewMetadata(codexEnrichedArgs);

@@ -1,16 +1,10 @@
-// exploratory-api 的 ingestSessionMapUpdate handler：投影快照 → 漏斗（串行写队列内）→
-// durable 落盘后 ack + 广播的接线契约。漏斗四道闸本身的断言在
-// test/runtime/state/exploratory-session-map-apply-funnel.test.ts，这里只钉 handler 的
-// 三态分派（applied 广播 / rejected 透传 / dedup_ack 不广播）。
-// M2 增补：findings 六个 handler（save/confirm/reject/archive/get/ingestFindingCandidate）
-// 的状态机、幂等、provenance 校验与广播纪律。
+// exploratory-api 的 findings 六个 handler（save/confirm/reject/archive/get/ingestFindingCandidate）：
+// 状态机、幂等、provenance 校验与广播纪律。旧 session map handler 已随 map 链退役。
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConversationSessionTurnProjection } from "../../../src/conversation-tree/load-conversation-session-turn-projection";
 import type {
 	RuntimeExploratoryFindingEntry,
-	RuntimeExploratorySessionMapCollection,
 	RuntimeIngestExploratoryFindingCandidateRequest,
-	RuntimeIngestExploratorySessionMapUpdateRequest,
 } from "../../../src/core/api-contract";
 import {
 	runtimeIngestExploratoryFindingCandidateRequestSchema,
@@ -23,20 +17,10 @@ import {
 	readExploratoryFindingsState,
 	type WorkspaceExploratoryFindingsState,
 } from "../../../src/state/exploratory-findings-store";
-import {
-	mutateExploratorySessionMapState,
-	readExploratorySessionMapCollection,
-	type WorkspaceExploratorySessionMapState,
-} from "../../../src/state/exploratory-session-map-store";
 import { createExploratoryApi } from "../../../src/trpc/exploratory-api";
 
 vi.mock("../../../src/conversation-tree/load-conversation-session-turn-projection", () => ({
 	loadConversationSessionTurnProjection: vi.fn(),
-}));
-
-vi.mock("../../../src/state/exploratory-session-map-store", () => ({
-	readExploratorySessionMapCollection: vi.fn(),
-	mutateExploratorySessionMapState: vi.fn(),
 }));
 
 vi.mock("../../../src/state/exploratory-findings-store", async (importOriginal) => {
@@ -52,8 +36,6 @@ vi.mock("../../../src/state/exploratory-findings-store", async (importOriginal) 
 });
 
 const loadProjectionMock = vi.mocked(loadConversationSessionTurnProjection);
-const readCollectionMock = vi.mocked(readExploratorySessionMapCollection);
-const mutateStateMock = vi.mocked(mutateExploratorySessionMapState);
 const readFindingsStateMock = vi.mocked(readExploratoryFindingsState);
 const readFindingEntriesMock = vi.mocked(readExploratoryFindingEntries);
 const mutateFindingsStateMock = vi.mocked(mutateExploratoryFindingsState);
@@ -61,27 +43,6 @@ const mutateFindingsStateMock = vi.mocked(mutateExploratoryFindingsState);
 const SCOPE = { workspaceId: "ws-1", workspacePath: "/repo" };
 const TASK_ID = "task-a";
 const SIGNATURE = "3:m3:10";
-
-function makeRequest(
-	overrides: Partial<RuntimeIngestExploratorySessionMapUpdateRequest> = {},
-): RuntimeIngestExploratorySessionMapUpdateRequest {
-	return {
-		conversationSessionTaskId: TASK_ID,
-		clientProposalId: "proposal-1",
-		sourceTurnProjectionSignature: SIGNATURE,
-		nodes: [
-			{
-				anchorTurnNumber: 3,
-				anchorTurnCheckpointCommit: null,
-				nodeKind: "milestone",
-				nodeTitle: "里程碑",
-				nodeSummaryMarkdown: null,
-				referencedFindingId: null,
-			},
-		],
-		...overrides,
-	};
-}
 
 function makeAvailableProjectionSnapshot() {
 	return {
@@ -105,36 +66,14 @@ function makeAvailableProjectionSnapshot() {
 }
 
 interface HarnessOptions {
-	collection: RuntimeExploratorySessionMapCollection | null;
 	findings?: Record<string, RuntimeExploratoryFindingEntry>;
 }
 
 function makeHarness(options: HarnessOptions) {
-	const broadcasts: Array<{
-		workspaceId: string;
-		taskId: string;
-		mapCollection: RuntimeExploratorySessionMapCollection;
-	}> = [];
 	const findingsBroadcasts: Array<{
 		workspaceId: string;
 		findings: RuntimeExploratoryFindingEntry[];
 	}> = [];
-	readCollectionMock.mockResolvedValue(options.collection);
-	mutateStateMock.mockImplementation(async (_workspaceId, mutator) => {
-		// 快照到局部常量：options.collection 会被重赋值，闭包内直接引用会被 TS 去掉窄化；
-		// 显式标注 state 类型，否则条件表达式被推断成 { "task-a"?: undefined } 的畸形可选属性。
-		const collectionAtCall = options.collection;
-		const state: WorkspaceExploratorySessionMapState = {
-			schemaVersion: 1,
-			mapCollectionsByConversationSessionTaskId: collectionAtCall ? { [TASK_ID]: collectionAtCall } : {},
-		};
-		const mutated = mutator(state);
-		if (mutated === null) {
-			return null;
-		}
-		options.collection = mutated.mapCollectionsByConversationSessionTaskId[TASK_ID] ?? null;
-		return mutated;
-	});
 	readFindingsStateMock.mockImplementation(async () => ({
 		schemaVersion: 1,
 		findingsById: options.findings ?? {},
@@ -156,74 +95,16 @@ function makeHarness(options: HarnessOptions) {
 			throw new Error("不应被调用：投影加载走 loader mock");
 		},
 		loadBoardCardAgentId: async () => null,
-		onExploratorySessionMapUpdated: (workspaceId, taskId, mapCollection) => {
-			broadcasts.push({ workspaceId, taskId, mapCollection });
-		},
 		onExploratoryFindingsUpdated: (workspaceId, findings) => {
 			findingsBroadcasts.push({ workspaceId, findings });
 		},
 	});
-	return { api, broadcasts, findingsBroadcasts };
+	return { api, findingsBroadcasts };
 }
 
 beforeEach(() => {
 	vi.clearAllMocks();
 	loadProjectionMock.mockResolvedValue(makeAvailableProjectionSnapshot());
-});
-
-describe("exploratory.getSessionMap", () => {
-	it("读路径直传 store（无集合 → null）", async () => {
-		const { api } = makeHarness({ collection: null });
-		const response = await api.getSessionMap(SCOPE, { conversationSessionTaskId: TASK_ID });
-		expect(response.mapCollection).toBeNull();
-	});
-});
-
-describe("exploratory.ingestSessionMapUpdate", () => {
-	it("applied：durable 落盘后 ack + 广播完整集合（durable-write-before-ack）", async () => {
-		const { api, broadcasts } = makeHarness({ collection: null });
-		const response = await api.ingestSessionMapUpdate(SCOPE, makeRequest());
-		expect(response.applied).toBe(true);
-		expect(response.rejectionReason).toBeNull();
-		expect(response.mapCollection?.mapNodes).toHaveLength(1);
-		expect(response.mapCollection?.mapNodes[0]?.mapNodeId).toBe("turn-3-milestone");
-		expect(response.mapCollection?.mapNodes[0]?.anchorTurnUserMessagePreview).toBe("第 3 轮");
-		expect(broadcasts).toHaveLength(1);
-		expect(broadcasts[0]?.workspaceId).toBe("ws-1");
-		expect(broadcasts[0]?.taskId).toBe(TASK_ID);
-		expect(broadcasts[0]?.mapCollection).toEqual(response.mapCollection);
-	});
-
-	it("rejected（投影源不可用）：applied=false + reason 透传 + 不广播 + 不落盘", async () => {
-		loadProjectionMock.mockResolvedValue({
-			harnessSource: "unavailable_live_terminal_pty",
-			projection: { entries: [], signature: "0:none:0" },
-			retainedCheckpointCommits: new Set<string>(),
-		});
-		const { api, broadcasts } = makeHarness({ collection: null });
-		const response = await api.ingestSessionMapUpdate(SCOPE, makeRequest());
-		expect(response.applied).toBe(false);
-		expect(response.rejectionReason).toBe("projection_source_unavailable");
-		expect(response.mapCollection).toBeNull();
-		expect(broadcasts).toHaveLength(0);
-	});
-
-	it("dedup_ack：同 clientProposalId 重试 → applied=true、不广播、回现状集合", async () => {
-		const current: RuntimeExploratorySessionMapCollection = {
-			sourceTurnProjectionSignature: SIGNATURE,
-			mapNodes: [],
-			mapStaleReason: null,
-			lastMaintenanceJobCompletedAt: null,
-			recentAppliedClientProposalIds: ["proposal-1"],
-			updatedAt: 1,
-		};
-		const { api, broadcasts } = makeHarness({ collection: current });
-		const response = await api.ingestSessionMapUpdate(SCOPE, makeRequest());
-		expect(response.applied).toBe(true);
-		expect(response.rejectionReason).toBeNull();
-		expect(response.mapCollection).toBe(current);
-		expect(broadcasts).toHaveLength(0);
-	});
 });
 
 // ---- findings（M2）----
@@ -361,7 +242,7 @@ describe("findings 写入请求 schema：provenanceLinks 组合约束与条数�
 describe("exploratory.getFindings", () => {
 	it("读路径直传 store（workspace 级全量）", async () => {
 		const entry = makeFindingEntry();
-		const { api } = makeHarness({ collection: null, findings: { [entry.findingId]: entry } });
+		const { api } = makeHarness({ findings: { [entry.findingId]: entry } });
 		const response = await api.getFindings(SCOPE, {});
 		expect(response.findings).toEqual([entry]);
 	});
@@ -369,7 +250,7 @@ describe("exploratory.getFindings", () => {
 
 describe("exploratory.saveFinding", () => {
 	it("落库即 active + user_saved，durable 落盘后广播全量新集合", async () => {
-		const { api, findingsBroadcasts } = makeHarness({ collection: null });
+		const { api, findingsBroadcasts } = makeHarness({});
 		const response = await api.saveFinding(SCOPE, {
 			findingId: "finding-1",
 			findingTitle: "调查结论",
@@ -394,7 +275,7 @@ describe("exploratory.saveFinding", () => {
 
 	it("同 findingId 已存在 → 幂等回现状条目，不变更不广播", async () => {
 		const existing = makeFindingEntry({ findingTitle: "旧标题" });
-		const { api, findingsBroadcasts } = makeHarness({ collection: null, findings: { "finding-1": existing } });
+		const { api, findingsBroadcasts } = makeHarness({ findings: { "finding-1": existing } });
 		const response = await api.saveFinding(SCOPE, {
 			findingId: "finding-1",
 			findingTitle: "新标题",
@@ -407,7 +288,7 @@ describe("exploratory.saveFinding", () => {
 	});
 
 	it("cap 裁掉了刚保存的条目（pending 占满）→ PRECONDITION_FAILED 显式失败，不广播", async () => {
-		const { api, findingsBroadcasts } = makeHarness({ collection: null });
+		const { api, findingsBroadcasts } = makeHarness({});
 		// 模拟 store 端 cap-and-trim：pending 占满时唯一可裁候选就是刚写入的非 pending
 		// 条目。真实 store 在 cap 后、写盘前执行 postCapGuard——guard 抛错即整体放弃写入
 		// （mutate reject），绝不「落盘后才发现目标消失」。handler 把它翻成显式失败。
@@ -447,19 +328,19 @@ describe("exploratory.confirmFinding", () => {
 			findingStatus: "suggested_pending_confirmation",
 			findingGenerationSource: "agent_suggested",
 		});
-		const { api, findingsBroadcasts } = makeHarness({ collection: null, findings: { "finding-1": pending } });
+		const { api, findingsBroadcasts } = makeHarness({ findings: { "finding-1": pending } });
 		const response = await api.confirmFinding(SCOPE, { findingId: "finding-1" });
 		expect(response.finding?.findingStatus).toBe("active");
 		expect(findingsBroadcasts).toHaveLength(1);
 	});
 
 	it("对 active 调 confirm → 状态机违规报错", async () => {
-		const { api } = makeHarness({ collection: null, findings: { "finding-1": makeFindingEntry() } });
+		const { api } = makeHarness({ findings: { "finding-1": makeFindingEntry() } });
 		await expect(api.confirmFinding(SCOPE, { findingId: "finding-1" })).rejects.toThrow(/not pending confirmation/);
 	});
 
 	it("不存在的 findingId → finding: null（UI 幂等），不报错不广播", async () => {
-		const { api, findingsBroadcasts } = makeHarness({ collection: null });
+		const { api, findingsBroadcasts } = makeHarness({});
 		const response = await api.confirmFinding(SCOPE, { findingId: "finding-gone" });
 		expect(response.finding).toBeNull();
 		expect(findingsBroadcasts).toHaveLength(0);
@@ -470,7 +351,7 @@ describe("exploratory.confirmFinding", () => {
 			findingStatus: "suggested_pending_confirmation",
 			findingGenerationSource: "agent_suggested",
 		});
-		const { api, findingsBroadcasts } = makeHarness({ collection: null, findings: { "finding-1": pending } });
+		const { api, findingsBroadcasts } = makeHarness({ findings: { "finding-1": pending } });
 		// 同 saveFinding 用例的 mock 手法：cap 把刚确认的 active 裁掉后，真实 store 在写盘前
 		// 执行 postCapGuard——guard 抛错即整体放弃写入（mutate reject，不落盘）。
 		mutateFindingsStateMock.mockImplementationOnce(async (_workspaceId, mutator, postCapGuard) => {
@@ -494,7 +375,7 @@ describe("exploratory.rejectFinding", () => {
 			findingStatus: "suggested_pending_confirmation",
 			findingGenerationSource: "agent_suggested",
 		});
-		const harness = makeHarness({ collection: null, findings: { "finding-1": pending } });
+		const harness = makeHarness({ findings: { "finding-1": pending } });
 		const response = await harness.api.rejectFinding(SCOPE, { findingId: "finding-1" });
 		expect(response.removed).toBe(true);
 		expect(harness.findingsBroadcasts).toHaveLength(1);
@@ -502,12 +383,12 @@ describe("exploratory.rejectFinding", () => {
 	});
 
 	it("对 active 调 reject → 状态机违规报错（已是资产，只能 archive）", async () => {
-		const { api } = makeHarness({ collection: null, findings: { "finding-1": makeFindingEntry() } });
+		const { api } = makeHarness({ findings: { "finding-1": makeFindingEntry() } });
 		await expect(api.rejectFinding(SCOPE, { findingId: "finding-1" })).rejects.toThrow(/not pending confirmation/);
 	});
 
 	it("不存在的 findingId → removed: false（UI 幂等），不报错不广播", async () => {
-		const { api, findingsBroadcasts } = makeHarness({ collection: null });
+		const { api, findingsBroadcasts } = makeHarness({});
 		const response = await api.rejectFinding(SCOPE, { findingId: "finding-gone" });
 		expect(response.removed).toBe(false);
 		expect(findingsBroadcasts).toHaveLength(0);
@@ -516,7 +397,7 @@ describe("exploratory.rejectFinding", () => {
 
 describe("exploratory.archiveFinding", () => {
 	it("active → archived + 广播；archived:false 恢复 active", async () => {
-		const harness = makeHarness({ collection: null, findings: { "finding-1": makeFindingEntry() } });
+		const harness = makeHarness({ findings: { "finding-1": makeFindingEntry() } });
 		const archived = await harness.api.archiveFinding(SCOPE, { findingId: "finding-1", archived: true });
 		expect(archived.finding?.findingStatus).toBe("archived");
 		const restored = await harness.api.archiveFinding(SCOPE, { findingId: "finding-1", archived: false });
@@ -526,7 +407,7 @@ describe("exploratory.archiveFinding", () => {
 
 	it("已处目标态 → 幂等空转（回现状条目，不变更不广播）", async () => {
 		const archived = makeFindingEntry({ findingStatus: "archived" });
-		const { api, findingsBroadcasts } = makeHarness({ collection: null, findings: { "finding-1": archived } });
+		const { api, findingsBroadcasts } = makeHarness({ findings: { "finding-1": archived } });
 		const response = await api.archiveFinding(SCOPE, { findingId: "finding-1", archived: true });
 		expect(response.finding).toBe(archived);
 		expect(findingsBroadcasts).toHaveLength(0);
@@ -534,7 +415,7 @@ describe("exploratory.archiveFinding", () => {
 
 	it("pending 条目不可 archive → 状态机违规报错", async () => {
 		const pending = makeFindingEntry({ findingStatus: "suggested_pending_confirmation" });
-		const { api } = makeHarness({ collection: null, findings: { "finding-1": pending } });
+		const { api } = makeHarness({ findings: { "finding-1": pending } });
 		await expect(api.archiveFinding(SCOPE, { findingId: "finding-1", archived: true })).rejects.toThrow(
 			/cannot be archived/,
 		);
@@ -542,14 +423,14 @@ describe("exploratory.archiveFinding", () => {
 
 	it("superseded 条目不可 archive → 状态机违规报错（审计链不改写）", async () => {
 		const superseded = makeFindingEntry({ findingStatus: "superseded", supersededByFindingId: "finding-2" });
-		const { api } = makeHarness({ collection: null, findings: { "finding-1": superseded } });
+		const { api } = makeHarness({ findings: { "finding-1": superseded } });
 		await expect(api.archiveFinding(SCOPE, { findingId: "finding-1", archived: true })).rejects.toThrow(
 			/cannot be archived/,
 		);
 	});
 
 	it("不存在的 findingId → finding: null（UI 幂等），不报错不广播", async () => {
-		const { api, findingsBroadcasts } = makeHarness({ collection: null });
+		const { api, findingsBroadcasts } = makeHarness({});
 		const response = await api.archiveFinding(SCOPE, { findingId: "finding-gone", archived: true });
 		expect(response.finding).toBeNull();
 		expect(findingsBroadcasts).toHaveLength(0);
@@ -558,7 +439,7 @@ describe("exploratory.archiveFinding", () => {
 
 describe("exploratory.ingestFindingCandidate", () => {
 	it("happy path：服务端派生 findingId、落库即 pending + agent_suggested、origin 落位、durable 后广播", async () => {
-		const { api, findingsBroadcasts } = makeHarness({ collection: null });
+		const { api, findingsBroadcasts } = makeHarness({});
 		const response = await api.ingestFindingCandidate(SCOPE, makeFindingCandidateRequest());
 		expect(response.ingested).toBe(true);
 		expect(response.rejectionReason).toBeNull();
@@ -576,7 +457,7 @@ describe("exploratory.ingestFindingCandidate", () => {
 			findingStatus: "suggested_pending_confirmation",
 			findingGenerationSource: "agent_suggested",
 		});
-		const { api, findingsBroadcasts } = makeHarness({ collection: null, findings: { "agent-prop-1": existing } });
+		const { api, findingsBroadcasts } = makeHarness({ findings: { "agent-prop-1": existing } });
 		loadProjectionMock.mockClear();
 		const response = await api.ingestFindingCandidate(SCOPE, makeFindingCandidateRequest());
 		expect(response).toEqual({ ingested: true, rejectionReason: null, finding: existing });
@@ -585,7 +466,7 @@ describe("exploratory.ingestFindingCandidate", () => {
 	});
 
 	it("turnNumber > 投影最新 turn → anchor_turn_number_unresolvable（整份拒绝，不落库不广播）", async () => {
-		const { api, findingsBroadcasts } = makeHarness({ collection: null });
+		const { api, findingsBroadcasts } = makeHarness({});
 		const response = await api.ingestFindingCandidate(
 			SCOPE,
 			makeFindingCandidateRequest({
@@ -608,7 +489,7 @@ describe("exploratory.ingestFindingCandidate", () => {
 			...makeAvailableProjectionSnapshot(),
 			retainedCheckpointCommits: new Set(["commit-kept"]),
 		});
-		const { api } = makeHarness({ collection: null });
+		const { api } = makeHarness({});
 		const response = await api.ingestFindingCandidate(
 			SCOPE,
 			makeFindingCandidateRequest({
@@ -628,7 +509,7 @@ describe("exploratory.ingestFindingCandidate", () => {
 
 	it("投影加载抛错（会话不存在）→ provenance_conversation_session_unresolvable", async () => {
 		loadProjectionMock.mockRejectedValue(new Error("task session not found"));
-		const { api, findingsBroadcasts } = makeHarness({ collection: null });
+		const { api, findingsBroadcasts } = makeHarness({});
 		const response = await api.ingestFindingCandidate(SCOPE, makeFindingCandidateRequest());
 		expect(response).toEqual({
 			ingested: false,
@@ -641,7 +522,7 @@ describe("exploratory.ingestFindingCandidate", () => {
 	it("findings 被 pending 占满达上限（store 抛 CapOverflowError）→ findings_cap_overflow，不落库不广播", async () => {
 		// pending 永不静默裁 ⇒ 容量被 pending 占满时 cap 无可裁候选，store 显式拒绝；
 		// handler 把它翻译为 agent 可程序化处置的结构化拒绝（同既有两种 rejectionReason）。
-		const { api, findingsBroadcasts } = makeHarness({ collection: null });
+		const { api, findingsBroadcasts } = makeHarness({});
 		mutateFindingsStateMock.mockRejectedValueOnce(
 			new ExploratoryFindingsCapOverflowError("cap exceeded: no trimmable entries remain"),
 		);
@@ -656,7 +537,7 @@ describe("exploratory.ingestFindingCandidate", () => {
 			projection: { entries: [], signature: "0:none:0" },
 			retainedCheckpointCommits: new Set<string>(),
 		});
-		const { api } = makeHarness({ collection: null });
+		const { api } = makeHarness({});
 		const response = await api.ingestFindingCandidate(
 			SCOPE,
 			makeFindingCandidateRequest({
@@ -677,7 +558,7 @@ describe("exploratory.ingestFindingCandidate", () => {
 	});
 
 	it("非 turn_anchor link（session_level）无锚可验 → 原样通过且不加载投影", async () => {
-		const { api } = makeHarness({ collection: null });
+		const { api } = makeHarness({});
 		loadProjectionMock.mockClear();
 		const response = await api.ingestFindingCandidate(
 			SCOPE,

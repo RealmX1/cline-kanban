@@ -386,7 +386,7 @@ export function resolveTaskSessionAppendSystemPrompt(
 export function renderExploratoryModeAppendSystemPrompt(instructionsFilePath: string): string {
 	return `# Kanban Exploratory Mode
 
-This is an exploratory conversation: the structure and conclusions it produces are assets in their own right, and Kanban maintains a session map (a clickable structural outline) for this session.
+This is an exploratory conversation: the structure and conclusions it produces are assets in their own right. Kanban automatically maintains an exploration thread graph (a git-graph style outline of the conversation's threads) for this session; you never write that structure yourself, but how explicitly you announce topic switches, returns to earlier threads and wrap-ups determines its quality.
 
 Read the Kanban-managed instructions file at the following path IN FULL and follow it for the entire session:
 \`${instructionsFilePath}\``;

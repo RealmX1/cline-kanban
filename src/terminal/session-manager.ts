@@ -2,8 +2,10 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import { randomUUID } from "node:crypto";
+import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeLastConversationProgressObservation,
 	RuntimeTaskConnectionRetry,
@@ -4280,6 +4282,31 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const summary = updateSummary(entry, { restorationContinuationGuardState: "inactive" });
 		for (const listener of entry.listeners.values()) {
 			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
+	// N0a：终端 agent 原生会话身份 sidecar（hooks.ingest 每个事件都带，这里只在值变化时写）。
+	// 经 updateSummary 漏斗写入，不碰 facet 三元组；写入即向监听者与 summary 流广播（与 applyTurnCheckpoint 同形）。
+	applyAgentNativeConversationSessionIdentity(
+		taskId: string,
+		identity: RuntimeAgentNativeConversationSessionIdentity,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return null;
+		}
+		if (
+			isSameAgentNativeConversationSessionIdentity(entry.summary.agentNativeConversationSessionIdentity, identity)
+		) {
+			return cloneSummary(entry.summary);
+		}
+		const summary = updateSummary(entry, { agentNativeConversationSessionIdentity: identity });
+		if (entry.active) {
+			for (const listener of entry.listeners.values()) {
+				listener.onState?.(cloneSummary(summary));
+			}
 		}
 		this.emitSummary(summary);
 		return cloneSummary(summary);

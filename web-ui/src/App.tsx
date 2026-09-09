@@ -142,7 +142,6 @@ export default function App(): ReactElement {
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
-		exploratorySessionMapCollectionsByTaskId,
 		exploratoryFindings: pushedExploratoryFindings,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
@@ -1464,7 +1463,6 @@ export default function App(): ReactElement {
 									sessionSummary={detailSession}
 									taskSessions={sessions}
 									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
-									exploratorySessionMapCollectionsByTaskId={exploratorySessionMapCollectionsByTaskId}
 									exploratoryFindings={exploratoryFindingsData.findings}
 									runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
 									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}

@@ -1,5 +1,7 @@
 # Exploratory Mode —— Session Map 与 Findings Store 设计蓝图
 
+> **2026-09-09 状态更新**：本蓝图的 session map 部分（§B / §C / §G.1 及 M0–M1 的 map 链）已在任务 b04a4 的 Pass B.1 退役——会话结构改由独立包 `agent-conversation-exploration-thread-graph`（`~/Documents/GitHub/` 同名仓库）以 git-graph 语义的 thread graph 建模，本仓库只做宿主胶水（现状见 `docs/exploratory-mode-host-integration.md`）。findings 部分（§D / §G.2，M2）继续有效。以下正文保留为设计史，不再更新。
+
 > 状态：**设计蓝图（blueprint）；实施时点另定**。本文档只锁定数据模型、持久化、写入通道、
 > web-ui 挂载与降级决策，不含实现代码。§H 的 M0–M6 是**技术依赖排序，不是开工时点授权**——
 > 与姊妹蓝图「Stage 0 标注 ≠ 开工时点授权」同一约定。

@@ -277,10 +277,11 @@ export type RuntimeAgentSessionTransport = z.infer<typeof runtimeAgentSessionTra
 // 定义位置必须留在 runtimeBoardCardSchema **之前**：卡片的 taskConversationMode 字段在模块求值
 // 时就要引用它（同上方 runtimeAgentSessionTransportSchema 的 TDZ 约束）。
 export const runtimeTaskConversationModeSchema = z.enum([
-	// 执行/操作型任务（缺省）：一切如常，session map 面板可手动开启但不默认展开。
+	// 执行/操作型任务（缺省）：一切如常，不注入探索礼仪指令、不跑 thread graph 维护作业。
 	"operational",
-	// 探索/研究型任务：会话产出的结构与结论本身是资产——启动时注入 exploratory 指令文件，
-	// Focus View 默认展开 session map 面板，agent 经 `kanban exploratory` CLI 维护 map。
+	// 探索/研究型任务：会话产出的结构与结论本身是资产——启动时注入 exploratory 指令文件
+	// （探索礼仪 + findings 建议工作流），并作为 exploration thread graph 维护作业的开关
+	// （作业由 agent-conversation-exploration-thread-graph 包执行，Kanban 只做宿主胶水）。
 	"exploratory",
 ]);
 export type RuntimeTaskConversationMode = z.infer<typeof runtimeTaskConversationModeSchema>;
@@ -543,6 +544,22 @@ export const runtimeTaskConversationSessionMetadataSchema = z.object({
 });
 export type RuntimeTaskConversationSessionMetadata = z.infer<typeof runtimeTaskConversationSessionMetadataSchema>;
 
+// 终端（PTY）agent 的**原生会话身份**（N0a）：harness 自己的 session id 与 transcript 路径。
+// 来源 = hook stdin（Claude Code / Codex 的 hooks 载荷都带 session_id + transcript_path），由
+// `kanban hooks` CLI 抽出、经 hooks.ingest 落到 summary 的加性 sidecar。它是 exploration thread graph
+// 维护作业（`claude -p --resume <nativeSessionId> --fork-session`）与 transcript 投影的唯一身份来源——
+// 不再从 ~/.claude/projects 目录扫描猜测。纯运行期事实，不参与 facet 与 superRefine。
+export const runtimeAgentNativeConversationSessionIdentitySchema = z.object({
+	// hook 载荷推断出的 harness 来源（claude / codex / …），与 latestHookActivity.source 同一口径。
+	sourceAgentId: z.string(),
+	nativeSessionId: z.string(),
+	transcriptPath: z.string().nullable(),
+	observedAt: z.number(),
+});
+export type RuntimeAgentNativeConversationSessionIdentity = z.infer<
+	typeof runtimeAgentNativeConversationSessionIdentitySchema
+>;
+
 // 终端 agent 因瞬时连接错误（VPN 抖动等）停在空闲提示符时，
 // 自动续跑框架（src/terminal/output-reactions）进入「连接重试」状态：
 // 记录已尝试的续跑次数、首次出错时刻、最近一次注入时刻，以及下一次计划注入的时刻。
@@ -781,6 +798,10 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 任务时必须看到明确说明，而不是一个空终端让人误以为只是加载慢。
 	agentSessionRuntimeReclamationOutcome: runtimeAgentSessionReclamationOutcomeSchema.nullable().optional(),
 	taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
+	// 终端 agent 的原生会话身份（N0a，见 runtimeAgentNativeConversationSessionIdentitySchema 注释）。
+	// 加性可选：Cline / ACP 会话与旧盘数据缺它 ⇒ undefined；同一活体内 harness 换了 session id
+	// （--fork-session / 续接）时整体替换，只保留最新观测。
+	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
 	// 这条**活会话**实际用的通话方式。agent-catalog 的 `sessionTransport` 只是该 agent 的**默认**通道；
 	// omp 可在 TUI（pty_terminal）与 ACP（acp_stdio_subprocess）之间随时切换，切换后 agentId 不变，
 	// 于是「渲染 xterm 还是会话面板」「stop / 输入 / 消息走哪条通路」一律以本字段为准，不得再从 agentId 静态派生。
@@ -1260,90 +1281,9 @@ export type RuntimeStateStreamNotificationLogUpdatedMessage = z.infer<
 	typeof runtimeStateStreamNotificationLogUpdatedMessageSchema
 >;
 
-// ---- Exploratory session map canonical schema（蓝图 §B.1）----
-// 本块设计语义见文件尾部 Exploratory Mode 契约区头部注释；物理位置必须留在
-// runtimeStateStreamMessageSchema **之前**：exploratory_session_map_updated 广播消息
-// 引用 runtimeExploratorySessionMapCollectionSchema，union 在模块求值时就要拿到它（TDZ）。
-
-export const runtimeExploratorySessionMapNodeKindSchema = z.enum([
-	"milestone", // 阶段性结论/到达点
-	"decision_point", // 做了取舍的位置
-	"open_question", // 悬而未决的问题
-	"digression", // 有意识的岔路/支线
-	"finding_reference", // 该锚点产出了一条 finding（referencedFindingId 必填）
-]);
-export type RuntimeExploratorySessionMapNodeKind = z.infer<typeof runtimeExploratorySessionMapNodeKindSchema>;
-
-export const runtimeExploratorySessionMapNodeGenerationSourceSchema = z.enum([
-	"agent_live_session_maintenance", // 探索会话 agent 运行中实时维护
-	"agent_maintenance_job", // 防抖再维护作业产出
-	"user_manual_edit", // 用户手动修正（优先级恒最高，作业永不覆盖）
-]);
-export type RuntimeExploratorySessionMapNodeGenerationSource = z.infer<
-	typeof runtimeExploratorySessionMapNodeGenerationSourceSchema
->;
-
-// 非 null = stale：UI 明示「map 落后于会话」，不静默展示过期结构。
-export const runtimeExploratorySessionMapStaleReasonSchema = z.enum([
-	"turn_projection_signature_drift",
-	"anchor_turn_checkpoint_commit_unresolvable",
-]);
-export type RuntimeExploratorySessionMapStaleReason = z.infer<typeof runtimeExploratorySessionMapStaleReasonSchema>;
-
-export const runtimeExploratorySessionMapNodeSchema = z.object({
-	// 稳定 id：apply 漏斗按 (anchorTurnNumber + nodeKind) 规范化派生（集合本身已按会话隔离，
-	// id 无需再带会话前缀）；agent 可提议但漏斗是最终赋名者。同锚点同 kind 的重复提交幂等归并。
-	mapNodeId: z.string(),
-	// ── provenance 强制三元 + 人核对冗余（蓝图解法定调 3）──
-	anchorConversationSessionTaskId: z.string(),
-	anchorTurnNumber: z.number().int().positive(),
-	// 不在该任务保留的 checkpoint ref 集合内 → 降级为 null 并标集合级 mapStaleReason；null = 仅时间锚。
-	anchorTurnCheckpointCommit: z.string().nullable(),
-	// 漏斗从投影层回填（不信 agent 自报）；仅展示用，不参与校验。
-	anchorTurnUserMessagePreview: z.string().max(200).nullable(),
-	// ── agent 所有的语义层（只有这部分归 agent 写）──
-	nodeKind: runtimeExploratorySessionMapNodeKindSchema,
-	nodeTitle: z.string().max(80),
-	nodeSummaryMarkdown: z.string().max(400).nullable(),
-	// 只持引用、禁复制正文（内容真相唯一，在 findings store）；仅 nodeKind=finding_reference 时非空；
-	// finding 被 archive 不级联删节点（map 是历史叙事）。
-	referencedFindingId: z.string().nullable(),
-	// ── 治理 ──
-	nodeGenerationSource: runtimeExploratorySessionMapNodeGenerationSourceSchema,
-	createdAt: z.number(),
-	updatedAt: z.number(),
-});
-export type RuntimeExploratorySessionMapNode = z.infer<typeof runtimeExploratorySessionMapNodeSchema>;
-
-// map 不存边：节点显示序由 anchorTurnNumber 派生；分支拓扑真相在分支描述符（姊妹蓝图 §1.2）。
-export const runtimeExploratorySessionMapCollectionSchema = z.object({
-	// apply 乐观并发对账签名（姊妹蓝图 §3.1 sourceTurnProjectionSignature 同款语义）。
-	sourceTurnProjectionSignature: z.string(),
-	mapNodes: z.array(runtimeExploratorySessionMapNodeSchema), // 上限 200/会话，超限要求重整（蓝图 §F）
-	mapStaleReason: runtimeExploratorySessionMapStaleReasonSchema.nullable(),
-	lastMaintenanceJobCompletedAt: z.number().nullable(),
-	// dedup 账本：最近应用成功的 clientProposalId（FIFO  capped，重试同 id 幂等 ack、不重复落地）。
-	recentAppliedClientProposalIds: z.array(z.string()).max(100).optional(),
-	updatedAt: z.number(),
-});
-export type RuntimeExploratorySessionMapCollection = z.infer<typeof runtimeExploratorySessionMapCollectionSchema>;
-
-// session map 集合变更广播（蓝图 §B.2）：ingest apply 成功 / stale 标记翻转时，把该会话的
-// 完整集合（恒小，量级 = 节点数）发给本 workspace 在场客户端。不搭车 summary 广播——
-// map 变更不必然 bump summary（同姊妹蓝图 §3.3 的同款理由）。
-export const runtimeStateStreamExploratorySessionMapUpdatedMessageSchema = z.object({
-	type: z.literal("exploratory_session_map_updated"),
-	workspaceId: z.string(),
-	conversationSessionTaskId: z.string(),
-	mapCollection: runtimeExploratorySessionMapCollectionSchema.nullable(),
-});
-export type RuntimeStateStreamExploratorySessionMapUpdatedMessage = z.infer<
-	typeof runtimeStateStreamExploratorySessionMapUpdatedMessageSchema
->;
-
 // ---- Exploratory findings canonical schema（蓝图 §D.1）----
-// 与上方 session map 块同一 TDZ 约束：exploratory_findings_updated 广播消息引用
-// runtimeExploratoryFindingEntrySchema，union 在模块求值时就要拿到它，故本块也必须
+// TDZ 约束：exploratory_findings_updated 广播消息引用 runtimeExploratoryFindingEntrySchema，
+// union 在模块求值时就要拿到它，故本块必须
 // 留在 runtimeStateStreamMessageSchema 之前。
 
 export const runtimeExploratoryFindingProvenanceLinkSchema = z
@@ -1423,7 +1363,7 @@ export type RuntimeExploratoryFindingEntry = z.infer<typeof runtimeExploratoryFi
 
 // findings 集合变更广播（蓝图 §D.3）：save/confirm/reject/archive/ingest 落盘成功后，
 // 把该 workspace 的完整 finding 集合（恒小，上限 500）全量替换推送给在场客户端。
-// 不搭车 summary 广播——findings 变更不必然 bump summary（与 exploratory_session_map_updated 同理）。
+// 不搭车 summary 广播——findings 变更不必然 bump summary。
 export const runtimeStateStreamExploratoryFindingsUpdatedMessageSchema = z.object({
 	type: z.literal("exploratory_findings_updated"),
 	workspaceId: z.string(),
@@ -1445,7 +1385,6 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamMcpAuthUpdatedMessageSchema,
 	runtimeStateStreamClineSessionContextUpdatedMessageSchema,
 	runtimeStateStreamNotificationLogUpdatedMessageSchema,
-	runtimeStateStreamExploratorySessionMapUpdatedMessageSchema,
 	runtimeStateStreamExploratoryFindingsUpdatedMessageSchema,
 	runtimeStateStreamErrorMessageSchema,
 ]);
@@ -3389,6 +3328,9 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// UserPromptSubmit 的 prompt 只在同步 hook 请求内短暂流转，用于区分真人输入与 harness 在恢复时
 	// 自动塞入的任务通知；普通诊断日志与 session summary 均不得记录它。
 	submittedPromptText: z.string().optional(),
+	// 终端 agent 原生会话身份（N0a）：`kanban hooks` 从 hook stdin 的 session_id / transcript_path 抽出，
+	// 每个事件都带（幂等），服务端只在值变化时写 summary sidecar。
+	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.optional(),
 });
 export type RuntimeHookIngestRequest = z.infer<typeof runtimeHookIngestRequestSchema>;
 
@@ -3853,15 +3795,17 @@ export type RuntimeConfirmVerificationCompleteResponse = z.infer<
 >;
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Exploratory Mode（session map / findings）与 harness-neutral turn 投影层契约。
-// 设计蓝图：.plan/docs/exploratory-mode-session-map-and-findings-store.md（本文档 §B/§C）
-// 及其姊妹蓝图 .plan/docs/conversation-tree-unified-fan-out-interface-deferred-asset.md（§2）。
-// 全部加性：不触碰 summary facet superRefine 护栏；session map 持久化在 per-workspace
-// exploratory-session-maps.json（src/state/exploratory-session-map-store.ts），不进 sessions.json。
+// Exploratory Mode（findings）与 harness-neutral turn 投影层契约。
+// 设计蓝图：.plan/docs/exploratory-mode-session-map-and-findings-store.md（findings §D；其 session map
+// 部分已退役——结构建模改由独立包 agent-conversation-exploration-thread-graph 承担，宿主胶水见
+// docs/exploratory-mode-host-integration.md）及姊妹蓝图
+// .plan/docs/conversation-tree-unified-fan-out-interface-deferred-asset.md（§2）。
+// 全部加性：不触碰 summary facet superRefine 护栏；findings 持久化在 per-workspace
+// exploratory-findings.json（src/state/exploratory-findings-store.ts），不进 sessions.json。
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ---- Harness-neutral turn 投影层（姊妹蓝图 §2.2）----
-// 投影层是只读派生层（无持久化真相、仅缓存），为 session map / 会话树供给统一 turn 序列。
+// 投影层是只读派生层（无持久化真相、仅缓存），为 findings 出处锚 / 会话树供给统一 turn 序列。
 // turn 编号权威在服务端投影（与 checkpoint 序数对齐）；web-ui 的消息切段只做滚动定位映射。
 
 export const runtimeConversationTurnProjectionHarnessSourceSchema = z.enum([
@@ -3927,113 +3871,6 @@ export const runtimeConversationSessionTurnProjectionResponseSchema = z.object({
 });
 export type RuntimeConversationSessionTurnProjectionResponse = z.infer<
 	typeof runtimeConversationSessionTurnProjectionResponseSchema
->;
-
-// ---- Exploratory session map（蓝图 §B.1）----
-// B.1 的 canonical schema（nodeKind / generationSource / mapStaleReason / node / collection）
-// 已上移到 runtimeStateStreamMessageSchema 之前——exploratory_session_map_updated 广播消息是
-// union 成员，模块求值序（TDZ）不允许 union 引用本尾部区域。本节只保留 ingest 写回通道
-// （M1）的 procedure I/O。
-//
-// 设计语义不变：map 节点只能挂在服务端投影的确定性锚点上（turn 号 + checkpoint commit）；
-// agent 只写标题 / 摘要 / 类型 / finding 引用，不能发明锚点。写入一律过 apply 漏斗。
-
-// ---- tRPC procedure I/O（全部 workspace-scoped）----
-
-// conversationTree.getConversationSessionTurnProjection（query）：会话 turn 投影，
-// map 面板裸锚点骨架与（远期）会话树共享同一数据源。
-// exploratory.getSessionMap（query）：读 per-workspace map store 中该会话的集合。
-export const runtimeGetExploratorySessionMapRequestSchema = z.object({
-	conversationSessionTaskId: z.string(),
-});
-export type RuntimeGetExploratorySessionMapRequest = z.infer<typeof runtimeGetExploratorySessionMapRequestSchema>;
-
-export const runtimeGetExploratorySessionMapResponseSchema = z.object({
-	// null = 该会话尚无 map 集合（agent 写入通道属 M1，M0 恒为此态）——UI 纯展示投影层 turn 骨架。
-	mapCollection: runtimeExploratorySessionMapCollectionSchema.nullable(),
-});
-export type RuntimeGetExploratorySessionMapResponse = z.infer<typeof runtimeGetExploratorySessionMapResponseSchema>;
-
-// exploratory.ingestSessionMapUpdate（mutation，蓝图 §B.2）：agent 写回 session map 的**唯一**
-// 入口。读-改-写协议：agent 先经 getSessionMap + conversationTree.getConversationSessionTurnProjection
-// 拿到当前集合与投影签名，再提交整份修订提案；apply 漏斗四道闸（zod 白名单 → 锚点可解析性 →
-// 签名对账 → user_manual_edit 冲突拒绝）任一失败整体丢弃。载荷白名单——没有自由字段。
-
-// 提案节点：不含 mapNodeId / provenance 回填字段——锚点 session id 由漏斗按写入目标填充、
-// 用户消息预览由漏斗从投影层回填、稳定 id 由漏斗规范化派生（agent 均不可自报）。
-export const runtimeExploratorySessionMapNodeProposalSchema = z
-	.object({
-		anchorTurnNumber: z.number().int().positive(),
-		// agent 自报的锚点 checkpoint commit；不在保留 ref 集合内 → 漏斗降级 null + 标集合级
-		// mapStaleReason（不拒绝）。null = 仅时间锚。
-		anchorTurnCheckpointCommit: z.string().max(120).nullable(),
-		nodeKind: runtimeExploratorySessionMapNodeKindSchema,
-		nodeTitle: z.string().min(1).max(80),
-		nodeSummaryMarkdown: z.string().max(400).nullable(),
-		// 形状校验在此（仅 nodeKind=finding_reference 时非空，下方 superRefine 强制）；
-		// 可解析性校验（引用的 finding 必须已存在）在 apply 漏斗的 referencedFindingId 闸完成（M2）。
-		referencedFindingId: z.string().min(1).max(200).nullable(),
-	})
-	.superRefine((proposal, ctx) => {
-		if (proposal.nodeKind === "finding_reference" && proposal.referencedFindingId === null) {
-			ctx.addIssue({
-				code: z.ZodIssueCode.custom,
-				path: ["referencedFindingId"],
-				message: "nodeKind=finding_reference 时 referencedFindingId 必填",
-			});
-		}
-		if (proposal.nodeKind !== "finding_reference" && proposal.referencedFindingId !== null) {
-			ctx.addIssue({
-				code: z.ZodIssueCode.custom,
-				path: ["referencedFindingId"],
-				message: "referencedFindingId 仅允许出现在 finding_reference 节点上",
-			});
-		}
-	});
-export type RuntimeExploratorySessionMapNodeProposal = z.infer<typeof runtimeExploratorySessionMapNodeProposalSchema>;
-
-export const runtimeIngestExploratorySessionMapUpdateRequestSchema = z.object({
-	conversationSessionTaskId: z.string(),
-	// dedup 键：重试同 id 幂等 ack、不重复落地（账本在 collection.recentAppliedClientProposalIds）。
-	clientProposalId: z.string().min(1).max(120),
-	// agent 读到的投影签名；与 apply 时刻服务端签名不一致 = 作业期间来了新 turn，整体丢弃
-	// （按新边沿重触发再维护）。
-	sourceTurnProjectionSignature: z.string().min(1).max(400),
-	// 整份修订提案（读-改-写协议的全量目标态），非增量。同 (anchorTurnNumber, nodeKind) 幂等归并。
-	nodes: z.array(runtimeExploratorySessionMapNodeProposalSchema).max(200),
-});
-export type RuntimeIngestExploratorySessionMapUpdateRequest = z.infer<
-	typeof runtimeIngestExploratorySessionMapUpdateRequestSchema
->;
-
-// 漏斗拒绝原因（整体丢弃时回给调用方；schema 级拒绝在 tRPC input 校验阶段就抛错，不进本枚举）。
-export const runtimeExploratorySessionMapIngestRejectionReasonSchema = z.enum([
-	// 投影源不可用（非 Cline 会话 / 重启后判定不出 harness）：锚点无从解析，整份拒绝。
-	"projection_source_unavailable",
-	// anchorTurnNumber > 服务端投影最新 turn（蓝图 §B.1：整份拒绝）。
-	"anchor_turn_number_unresolvable",
-	// 签名对账失败：提案基于的投影已落后。
-	"stale_source_turn_projection_signature",
-	// 提案缺漏/改写了 user_manual_edit 节点（用户修正优先级恒最高；冲突集合 = 同 mapNodeId）。
-	"user_manual_edit_conflict",
-	// finding_reference 节点引用的 findingId 在 findings store 中不存在（M2 漏斗闸；
-	// 任意状态的 finding 都算可解析——archived 不级联删节点，蓝图 §B.1 注释）。
-	"referenced_finding_unresolvable",
-]);
-export type RuntimeExploratorySessionMapIngestRejectionReason = z.infer<
-	typeof runtimeExploratorySessionMapIngestRejectionReasonSchema
->;
-
-export const runtimeIngestExploratorySessionMapUpdateResponseSchema = z.object({
-	// true = 已 durable 落盘（durable-write-before-ack）；false = 整体丢弃，见 rejectionReason。
-	// 注意：dedup 命中（同 clientProposalId 重试）也回 applied=true——那是幂等 ack。
-	applied: z.boolean(),
-	rejectionReason: runtimeExploratorySessionMapIngestRejectionReasonSchema.nullable(),
-	// apply/拒绝后的当前集合（拒绝时为未变更的现状），供调用方即刻重同步；null = 尚无集合。
-	mapCollection: runtimeExploratorySessionMapCollectionSchema.nullable(),
-});
-export type RuntimeIngestExploratorySessionMapUpdateResponse = z.infer<
-	typeof runtimeIngestExploratorySessionMapUpdateResponseSchema
 >;
 
 // ---- Exploratory findings（蓝图 §D）----

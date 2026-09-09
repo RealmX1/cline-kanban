@@ -222,12 +222,13 @@ describe("combineAppendSystemPrompts", () => {
 describe("renderExploratoryModeAppendSystemPrompt", () => {
 	it("把指令文件绝对路径原样内联，并要求 agent 完整阅读且遵守", () => {
 		const rendered = renderExploratoryModeAppendSystemPrompt(
-			"/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-session-map.md",
+			"/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-conversation-etiquette-and-findings.md",
 		);
 		expect(rendered).toContain("exploratory");
-		expect(rendered).toContain("session map");
+		expect(rendered).toContain("exploration thread graph");
+		expect(rendered).toContain("never write that structure yourself");
 		expect(rendered).toContain(
-			"`/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-session-map.md`",
+			"`/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-conversation-etiquette-and-findings.md`",
 		);
 		expect(rendered).toContain("IN FULL");
 	});

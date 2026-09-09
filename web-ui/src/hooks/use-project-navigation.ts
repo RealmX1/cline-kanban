@@ -60,9 +60,6 @@ export interface UseProjectNavigationResult {
 	taskChatMessagesByTaskId: ReturnType<typeof useRuntimeStateStream>["taskChatMessagesByTaskId"];
 	latestTaskReadyForReview: ReturnType<typeof useRuntimeStateStream>["latestTaskReadyForReview"];
 	latestMcpAuthStatuses: ReturnType<typeof useRuntimeStateStream>["latestMcpAuthStatuses"];
-	exploratorySessionMapCollectionsByTaskId: ReturnType<
-		typeof useRuntimeStateStream
-	>["exploratorySessionMapCollectionsByTaskId"];
 	exploratoryFindings: ReturnType<typeof useRuntimeStateStream>["exploratoryFindings"];
 	streamSnapshotGeneration: ReturnType<typeof useRuntimeStateStream>["streamSnapshotGeneration"];
 	notificationLogByWorkspaceId: ReturnType<typeof useRuntimeStateStream>["notificationLogByWorkspaceId"];
@@ -112,7 +109,6 @@ export function useProjectNavigation({
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
-		exploratorySessionMapCollectionsByTaskId,
 		exploratoryFindings,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
@@ -342,7 +338,6 @@ export function useProjectNavigation({
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
-		exploratorySessionMapCollectionsByTaskId,
 		exploratoryFindings,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,

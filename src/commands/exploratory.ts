@@ -4,8 +4,6 @@ import type { Command } from "commander";
 import type {
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeIngestExploratoryFindingCandidateResponse,
-	RuntimeIngestExploratorySessionMapUpdateRequest,
-	RuntimeIngestExploratorySessionMapUpdateResponse,
 } from "../core/api-contract";
 import { mergeAbortSignals } from "../core/cli-process-guards";
 import { buildKanbanRuntimeUrl, getRuntimeFetch } from "../core/runtime-endpoint";
@@ -15,11 +13,12 @@ import { KANBAN_HOOK_TASK_ID_ENV, KANBAN_HOOK_WORKSPACE_ID_ENV } from "../termin
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { deliverHookIngestWithRetry } from "./hooks";
 
-// Exploratory Mode（蓝图 .plan/docs/exploratory-mode-session-map-and-findings-store.md §B.2 / §D）：
-// agent 写回 session map 与提交 finding 建议的 CLI 通道。map 走读-改-写协议 = get-session-map
-// 拿现状集合 + 投影签名，再 ingest-map-update 提交整份修订提案，过服务端 apply 漏斗；
-// findings 走 get-findings 列出现有 finding（引用前发现路径）、ingest-finding-candidate
+// Exploratory Mode（蓝图 .plan/docs/exploratory-mode-session-map-and-findings-store.md §D）：
+// agent 提交 finding 建议的 CLI 通道——get-findings 列出现有 finding、ingest-finding-candidate
 // 提交建议（落库即待人确认）。
+// 旧的 session map 读-改-写通道（get-session-map / ingest-map-update）已退役：会话结构改由
+// 独立包 agent-conversation-exploration-thread-graph 的 work-branch 作业维护，agent 不再手写结构
+// （宿主胶水见 docs/exploratory-mode-host-integration.md）。
 //
 // 与 hooks ingest 的关键差异：exploratory.* / conversationTree.* 都是 workspaceProcedure，
 // workspace scope 走 `x-kanban-workspace-id` 请求头（hooks.ingest 是 input 带 workspaceId 的
@@ -205,44 +204,6 @@ export async function readExploratoryPayloadText(
 
 // ---- payload 廉价校验 ----
 
-// 只锁白名单三键的形状；节点级完整校验（含 referencedFindingId 配对 superRefine、长度/数量上限）
-// 交给服务端 schema——它的 TRPCClientError message 会原样透传到 stderr。
-export interface ExploratoryMapUpdatePayload {
-	clientProposalId: string;
-	sourceTurnProjectionSignature: string;
-	nodes: unknown[];
-}
-
-export function parseExploratoryMapUpdatePayload(payloadText: string): ExploratoryMapUpdatePayload {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(payloadText);
-	} catch (error) {
-		throw new Error(`Payload is not valid JSON: ${formatError(error)}`);
-	}
-	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-		throw new Error("Payload must be a JSON object with clientProposalId, sourceTurnProjectionSignature, and nodes.");
-	}
-	const record = parsed as Record<string, unknown>;
-	if (typeof record.clientProposalId !== "string" || record.clientProposalId.trim().length === 0) {
-		throw new Error('Payload is missing required string field "clientProposalId".');
-	}
-	if (
-		typeof record.sourceTurnProjectionSignature !== "string" ||
-		record.sourceTurnProjectionSignature.trim().length === 0
-	) {
-		throw new Error('Payload is missing required string field "sourceTurnProjectionSignature".');
-	}
-	if (!Array.isArray(record.nodes)) {
-		throw new Error('Payload field "nodes" must be an array of map node proposals.');
-	}
-	return {
-		clientProposalId: record.clientProposalId,
-		sourceTurnProjectionSignature: record.sourceTurnProjectionSignature,
-		nodes: record.nodes,
-	};
-}
-
 // ingest-finding-candidate 的廉价校验：只锁白名单四键的形状；provenance link 字段级
 // 完整校验（linkKind 枚举、三元约束、长度上限）交给服务端 schema——它的
 // TRPCClientError message 会原样透传到 stderr。
@@ -335,9 +296,8 @@ function createExploratoryTrpcClient(workspaceId: string, deliverySignal?: Abort
 //   - TRPCClientError（daemon 可达但 schema/procedure 拒绝）→ {ok:false} 业务拒绝：
 //     骨架立即抛、不重试，message 由调用方透传 stderr；
 //   - 其它抛出（超时 / daemon 不可达）→ 传输故障，走骨架的有界重试。
-// M1 只有 ingestSessionMapUpdate 一个消费者时本函数锁在它的响应类型上；M2 加了
-// ingestFindingCandidate 后泛型化——适配逻辑与响应类型零耦合，抽共用比照抄第二份
-// 更不易漂移（三行相似原则在此不适用：漂移面是整个 try/catch 适配体）。
+// 泛型化：适配逻辑与响应类型零耦合（历史上 map / findings 两个消费者共用，map 通道退役后
+// 保留泛型形态，thread graph 相关 mutation 接入时直接复用）。
 export async function deliverExploratoryMutation<TResponse>(
 	mutate: (signal: AbortSignal) => Promise<TResponse>,
 	options: { timeoutMs: number; maxAttempts: number; backoffMs: number },
@@ -359,30 +319,6 @@ export async function deliverExploratoryMutation<TResponse>(
 		throw new Error("exploratory mutation resolved without a response.");
 	}
 	return delivered;
-}
-
-async function ingestSessionMapUpdate(
-	scope: ExploratoryCommandScope,
-	payload: ExploratoryMapUpdatePayload,
-): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> {
-	const request: RuntimeIngestExploratorySessionMapUpdateRequest = {
-		conversationSessionTaskId: scope.taskId,
-		clientProposalId: payload.clientProposalId,
-		sourceTurnProjectionSignature: payload.sourceTurnProjectionSignature,
-		// 节点形状按契约类型断言——完整校验刻意留给服务端 schema（见 parseExploratoryMapUpdatePayload）。
-		nodes: payload.nodes as RuntimeIngestExploratorySessionMapUpdateRequest["nodes"],
-	};
-	return await deliverExploratoryMutation(
-		async (signal) => {
-			const trpcClient = createExploratoryTrpcClient(scope.workspaceId, signal);
-			return await trpcClient.exploratory.ingestSessionMapUpdate.mutate(request);
-		},
-		{
-			timeoutMs: resolveExploratoryIngestTimeoutMs(),
-			maxAttempts: EXPLORATORY_INGEST_MAX_ATTEMPTS,
-			backoffMs: EXPLORATORY_INGEST_RETRY_BACKOFF_MS,
-		},
-	);
 }
 
 async function ingestFindingCandidate(
@@ -411,63 +347,6 @@ async function ingestFindingCandidate(
 }
 
 // ---- 子命令实现 ----
-
-async function runGetSessionMap(options: ExploratoryScopeOptions): Promise<void> {
-	let scope: ExploratoryCommandScope;
-	try {
-		scope = await resolveExploratoryCommandScope(options);
-	} catch (error) {
-		process.stderr.write(`kanban exploratory get-session-map: ${formatError(error)}\n`);
-		process.exitCode = 1;
-		return;
-	}
-
-	try {
-		// 一个 client 依次调两个 query：agent 的读-改-写协议要「现状集合 + 当前投影签名」一次拿到。
-		const trpcClient = createExploratoryTrpcClient(scope.workspaceId);
-		const mapResponse = await trpcClient.exploratory.getSessionMap.query({
-			conversationSessionTaskId: scope.taskId,
-		});
-		const projection = await trpcClient.conversationTree.getConversationSessionTurnProjection.query({
-			conversationSessionTaskId: scope.taskId,
-		});
-		// harnessSource=unavailable_live_terminal_pty 时照常输出（mapCollection 多为 null）——
-		// agent 据此判断本会话不可写 map。
-		process.stdout.write(
-			`${JSON.stringify({
-				mapCollection: mapResponse.mapCollection,
-				harnessSource: projection.harnessSource,
-				turnProjectionSignature: projection.turnProjectionSignature,
-				latestTurnNumber: projection.turnProjectionEntries.at(-1)?.turnNumber ?? 0,
-			})}\n`,
-		);
-	} catch (error) {
-		process.stderr.write(`kanban exploratory get-session-map: ${formatError(error)}\n`);
-		process.exitCode = 1;
-	}
-}
-
-async function runIngestMapUpdate(options: ExploratoryScopeOptions & { payload: string }): Promise<void> {
-	let scope: ExploratoryCommandScope;
-	let payload: ExploratoryMapUpdatePayload;
-	try {
-		scope = await resolveExploratoryCommandScope(options);
-		payload = parseExploratoryMapUpdatePayload(await readExploratoryPayloadText(options.payload));
-	} catch (error) {
-		process.stderr.write(`kanban exploratory ingest-map-update: ${formatError(error)}\n`);
-		process.exitCode = 1;
-		return;
-	}
-
-	try {
-		const response = await ingestSessionMapUpdate(scope, payload);
-		// applied=false 时 rejectionReason 必在输出 JSON 里（schema 保证非 null）。
-		process.stdout.write(`${JSON.stringify(response)}\n`);
-	} catch (error) {
-		process.stderr.write(`kanban exploratory ingest-map-update: ${formatError(error)}\n`);
-		process.exitCode = 1;
-	}
-}
 
 async function runGetFindings(options: ExploratoryScopeOptions): Promise<void> {
 	let scope: ExploratoryCommandScope;
@@ -517,43 +396,11 @@ async function runIngestFindingCandidate(options: ExploratoryScopeOptions & { pa
 export function registerExploratoryCommand(program: Command): void {
 	const exploratory = program
 		.command("exploratory")
-		.description("Exploratory Mode session map and findings helpers for agent integrations.");
-
-	exploratory
-		.command("get-session-map")
-		.description("Print the session map collection and turn projection signature as a single JSON object.")
-		.option("--task <taskId>", `Conversation session task id (defaults to ${KANBAN_HOOK_TASK_ID_ENV}).`)
-		.option("--workspace-id <id>", `Workspace id (defaults to --project-path, then ${KANBAN_HOOK_WORKSPACE_ID_ENV}).`)
-		.option(
-			"--project-path <path>",
-			"Resolve workspace from a registered project path (pass the main repo path when invoking from a task worktree).",
-		)
-		.action(async (options: ExploratoryScopeOptions) => {
-			await runGetSessionMap(options);
-		});
-
-	exploratory
-		.command("ingest-map-update")
-		.description("Deliver a whole-map revision proposal to the runtime apply funnel.")
-		.option("--task <taskId>", `Conversation session task id (defaults to ${KANBAN_HOOK_TASK_ID_ENV}).`)
-		.option("--workspace-id <id>", `Workspace id (defaults to --project-path, then ${KANBAN_HOOK_WORKSPACE_ID_ENV}).`)
-		.option(
-			"--project-path <path>",
-			"Resolve workspace from a registered project path (pass the main repo path when invoking from a task worktree).",
-		)
-		.requiredOption(
-			"--payload <json>",
-			'Map update payload: inline JSON string, "@<path>" to read a file, or "-" to read stdin.',
-		)
-		.action(async (options: ExploratoryScopeOptions & { payload: string }) => {
-			await runIngestMapUpdate(options);
-		});
+		.description("Exploratory Mode findings helpers for agent integrations.");
 
 	exploratory
 		.command("get-findings")
-		.description(
-			"Print the workspace's findings as JSON. List existing findings before referencing one from a map node.",
-		)
+		.description("Print the workspace's findings as JSON. List existing findings before proposing a duplicate.")
 		.option("--task <taskId>", `Conversation session task id (defaults to ${KANBAN_HOOK_TASK_ID_ENV}).`)
 		.option("--workspace-id <id>", `Workspace id (defaults to --project-path, then ${KANBAN_HOOK_WORKSPACE_ID_ENV}).`)
 		.option(

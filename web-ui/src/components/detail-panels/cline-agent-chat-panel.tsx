@@ -23,6 +23,7 @@ import React, {
 // 距顶多少像素以内算「滚到顶了」，触发回填。留一点余量：滚动惯性与子像素误差常让 scrollTop 停在 0 之上。
 const OLDER_MESSAGE_BACKFILL_SCROLL_TOP_THRESHOLD_PX = 48;
 
+import type { ResolveConversationAnchor } from "@/components/conversation-anchor/conversation-anchor-chip";
 import {
 	buildTurnBoundaryDerivationMemoKey,
 	deriveTurnBoundariesFromChatMessages,
@@ -38,7 +39,6 @@ import {
 import { ClineThinkingIndicator } from "@/components/detail-panels/cline-thinking-indicator";
 import { buildSaveFindingBodyPrefill, resolveSaveFindingTurnAnchor } from "@/components/findings/findings-model";
 import { SaveFindingDialog } from "@/components/findings/save-finding-dialog";
-import type { ResolveSessionMapAnchor } from "@/components/session-map/session-map-anchor-chip";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/components/ui/link";
 import { Spinner } from "@/components/ui/spinner";
@@ -133,8 +133,8 @@ export interface ClineAgentChatPanelProps {
 	agentEntryKeyboardFocusRequestKey?: number;
 	// Session Map 聊天内锚（蓝图 §C.2）：按 id 查服务端 map 集合的解析器与 chip 点击回调。
 	// 不传则 marker 段不渲 chip（home 侧栏等无 map 集合上下文的面板走这条）。
-	resolveSessionMapAnchor?: ResolveSessionMapAnchor | null;
-	onSessionMapAnchorClick?: (mapNodeId: string) => void;
+	resolveConversationAnchor?: ResolveConversationAnchor | null;
+	onConversationAnchorClick?: (anchorId: string) => void;
 	// Exploratory findings（蓝图 §D.2.1）：workspace 级集合（查重提示用）+ 服务端 turn 投影
 	// （锚三元 commit 解析用）。undefined = 无 findings 上下文（home 侧栏等），消息项不出
 	// 「存为 finding」affordance；PTY 终端会话没有结构化消息项，本面板本就不渲染。
@@ -177,8 +177,8 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			cancelAutomaticActionLabel,
 			showMoveToTrash = false,
 			showMoveToValidation = false,
-			resolveSessionMapAnchor = null,
-			onSessionMapAnchorClick,
+			resolveConversationAnchor = null,
+			onConversationAnchorClick,
 			exploratoryFindings,
 			turnProjection = null,
 		},
@@ -609,8 +609,8 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 									message={message}
 									taskId={taskId}
 									onResolveUserDecision={onResolveUserDecision}
-									resolveSessionMapAnchor={resolveSessionMapAnchor}
-									onSessionMapAnchorClick={onSessionMapAnchorClick}
+									resolveConversationAnchor={resolveConversationAnchor}
+									onConversationAnchorClick={onConversationAnchorClick}
 								/>
 								{canSaveMessageAsFinding && isSaveableMessage ? (
 									<button

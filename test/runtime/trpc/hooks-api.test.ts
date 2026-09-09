@@ -1181,4 +1181,44 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 			manager.dispose();
 		}
 	});
+
+	it("N0a：hook 带原生会话身份时先于一切早退写 sidecar；不带时不调用", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(),
+			applyHookActivity: vi.fn(),
+			applyAgentNativeConversationSessionIdentity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+		const identity = {
+			sourceAgentId: "claude",
+			nativeSessionId: "sess-1",
+			transcriptPath: "/tmp/sess-1.jsonl",
+			observedAt: 1,
+		};
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "activity",
+			metadata: { source: "claude", hookEventName: "PostToolUse" },
+			agentNativeConversationSessionIdentity: identity,
+		});
+		expect(response).toEqual({ ok: true });
+		expect(manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledWith("task-1", identity);
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "activity",
+			metadata: { source: "claude", hookEventName: "PostToolUse" },
+		});
+		expect(manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledTimes(1);
+	});
 });

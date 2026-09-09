@@ -1,5 +1,5 @@
 // Exploratory findings 的浏览器侧传输助手（蓝图 §D，M2）。把 tRPC 细节挡在这里，
-// hook/组件只管状态编排（镜像 session-map-query.ts 的同款分层）。
+// hook/组件只管状态编排（镜像 conversation-turn-projection-query.ts 的同款分层）。
 //
 // 数据源（server 侧 M2 已落地）：
 // - exploratory.getFindings：workspace 级全量读取（集合恒小，上限 500）——进 workspace

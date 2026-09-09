@@ -2,7 +2,7 @@
 // 单一真相：App 实例化一次，findings 浏览器 / map 面板切片 / save 对话框查重都消费
 // 同一份结果，绝不在多个组件各存一份。
 //
-// 两条数据源通道（镜像 use-session-map-panel-data 的双通道范式）：
+// 两条数据源通道（查询 + WS 推送归并的双通道范式）：
 // 1. 查询：进 workspace 经 exploratory.getFindings 拉一次全量（集合恒小，上限 500）；
 //    断连窗口的变更不补发，靠 refreshKey（stream 快照代数）递增触发重拉对齐。
 // 2. 推送：exploratory_findings_updated 全量替换广播经 runtime-state-stream 以
@@ -30,7 +30,7 @@ const IDLE_EXPLORATORY_FINDINGS_DATA: ExploratoryFindingsData = {
 };
 
 // 内容相等判定（短路门槛）：集合经同一 zod schema 序列化（key 序稳定）且恒小，
-// 整体比较成本可忽略（use-session-map-panel-data 同款先例）。
+// 整体比较成本可忽略（use-conversation-session-turn-projection 同款先例）。
 function areFindingsEqual(
 	left: readonly RuntimeExploratoryFindingEntry[] | null,
 	right: readonly RuntimeExploratoryFindingEntry[] | null,

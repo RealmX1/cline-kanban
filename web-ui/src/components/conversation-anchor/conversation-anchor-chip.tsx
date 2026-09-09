@@ -1,5 +1,8 @@
-// 聊天内导航锚 chip（蓝图 §C.2）：agent 埋在助手消息里的 `<!-- kanban:map-anchor <id> -->`
-// marker 被 extractSessionMapAnchorMarkers 解析后，在原位渲染成这个小胶囊。
+// 聊天内导航锚 chip（蓝图 §C.2）：助手消息里的 `<!-- kanban:map-anchor <id> -->` marker 被
+// extractConversationAnchorMarkers 解析后，在原位渲染成这个小胶囊。
+//
+// 【休眠】marker 机制已随 session map 退役（agent 不再埋 marker；宿主不再传 resolver ⇒ 永不渲染）。
+// 保留原因见 conversation-anchor-kind-display.ts 头注释。
 //
 // 反注入铁律（蓝图 §C.1）的渲染侧落实：marker 载荷只有一个 id，chip 的显示内容恒来自
 // 服务端 map store——调用方按 id 查当前会话 map 集合，不可解析（id 不在集合里 / 没有
@@ -7,35 +10,37 @@
 
 import { MapPin } from "lucide-react";
 import type { ReactElement } from "react";
-import { getSessionMapNodeKindDisplay } from "@/components/session-map/session-map-node-kind-display";
+import {
+	type ConversationAnchorKind,
+	getConversationAnchorKindDisplay,
+} from "@/components/conversation-anchor/conversation-anchor-kind-display";
 import { cn } from "@/components/ui/cn";
-import type { RuntimeExploratorySessionMapNodeKind } from "@/runtime/types";
 
-export interface SessionMapAnchorChipNodeData {
+export interface ConversationAnchorChipNodeData {
 	nodeTitle: string;
-	nodeKind: RuntimeExploratorySessionMapNodeKind;
+	nodeKind: ConversationAnchorKind;
 }
 
-export type ResolveSessionMapAnchor = (mapNodeId: string) => SessionMapAnchorChipNodeData | null;
+export type ResolveConversationAnchor = (anchorId: string) => ConversationAnchorChipNodeData | null;
 
-export function SessionMapAnchorChip({
-	mapNodeId,
+export function ConversationAnchorChip({
+	anchorId,
 	resolve,
 	onClick,
 }: {
-	mapNodeId: string;
-	resolve: ResolveSessionMapAnchor;
-	onClick?: (mapNodeId: string) => void;
+	anchorId: string;
+	resolve: ResolveConversationAnchor;
+	onClick?: (anchorId: string) => void;
 }): ReactElement | null {
-	const node = resolve(mapNodeId);
+	const node = resolve(anchorId);
 	if (!node) {
 		return null;
 	}
-	const kindDisplay = getSessionMapNodeKindDisplay(node.nodeKind);
+	const kindDisplay = getConversationAnchorKindDisplay(node.nodeKind);
 	return (
 		<button
 			type="button"
-			onClick={onClick ? () => onClick(mapNodeId) : undefined}
+			onClick={onClick ? () => onClick(anchorId) : undefined}
 			title={`${kindDisplay.label} — locate in Session Map`}
 			className={cn(
 				"my-1 inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 py-0.5",

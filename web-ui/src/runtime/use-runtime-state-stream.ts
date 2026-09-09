@@ -4,12 +4,10 @@ import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build
 import type {
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeExploratoryFindingEntry,
-	RuntimeExploratorySessionMapCollection,
 	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
-	RuntimeStateStreamExploratorySessionMapUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamNotificationLogUpdatedMessage,
@@ -124,14 +122,11 @@ export interface UseRuntimeStateStreamResult {
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
-	// Exploratory session map 集合推送（蓝图 §B.2 exploratory_session_map_updated）：
-	// 按 conversationSessionTaskId 存最近一次推送的完整集合（null = 服务端明示此会话无集合）。
-	// 推送只覆盖「在场期间」的变更；断连窗口的变更靠重连后 getSessionMap 重查对齐（不补发），
-	// 重连信号 = streamSnapshotGeneration 递增（每次快照 = 一次（重）连握手完成）。
-	exploratorySessionMapCollectionsByTaskId: Record<string, RuntimeExploratorySessionMapCollection | null>;
+	// 流（重）连握手代数：每次快照递增（每次快照 = 一次（重）连握手完成）。推送只覆盖「在场期间」
+	// 的变更；断连窗口的变更不补发，消费者以它为重连信号重查对齐。
 	streamSnapshotGeneration: number;
 	// Exploratory findings 推送（蓝图 §D.3 exploratory_findings_updated）：workspace 级全量
-	// 替换（集合恒小，上限 500）；null = 尚未收到过推送。与 map 同理不搭车 summary 广播，
+	// 替换（集合恒小，上限 500）；null = 尚未收到过推送。不搭车 summary 广播，
 	// 断连窗口的变更靠重连后 getFindings 重查对齐（重连信号 = streamSnapshotGeneration）。
 	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
 	// 跨 repo 聚合的通知 feed，按 workspaceId 分桶（切项目不清空——铃铛看整台服务器）。
@@ -152,7 +147,6 @@ interface RuntimeStateStreamStore {
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
-	exploratorySessionMapCollectionsByTaskId: Record<string, RuntimeExploratorySessionMapCollection | null>;
 	streamSnapshotGeneration: number;
 	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
@@ -176,7 +170,6 @@ type RuntimeStateStreamAction =
 	| { type: "workspace_metadata_updated"; workspaceMetadata: RuntimeWorkspaceMetadata }
 	| { type: "task_ready_for_review"; payload: RuntimeStateStreamTaskReadyForReviewMessage }
 	| { type: "notification_log_updated"; payload: RuntimeStateStreamNotificationLogUpdatedMessage }
-	| { type: "exploratory_session_map_updated"; payload: RuntimeStateStreamExploratorySessionMapUpdatedMessage }
 	| { type: "exploratory_findings_updated"; payload: RuntimeStateStreamExploratoryFindingsUpdatedMessage }
 	| { type: "mcp_auth_updated"; payload: RuntimeStateStreamMcpAuthUpdatedMessage }
 	| { type: "cline_session_context_updated"; payload: RuntimeStateStreamClineSessionContextUpdatedMessage }
@@ -194,7 +187,6 @@ function createInitialRuntimeStateStreamStore(requestedWorkspaceId: string | nul
 		taskChatMessagesByTaskId: {},
 		latestTaskReadyForReview: null,
 		latestMcpAuthStatuses: null,
-		exploratorySessionMapCollectionsByTaskId: {},
 		streamSnapshotGeneration: 0,
 		exploratoryFindings: null,
 		notificationLogByWorkspaceId: {},
@@ -249,9 +241,7 @@ function runtimeStateStreamReducer(
 			workspaceMetadata: null,
 			latestTaskChatMessage: null,
 			taskChatMessagesByTaskId: {},
-			// map 推送按 workspace 作用域隔离：切走后旧 workspace 的集合不得带进新会话面板。
-			exploratorySessionMapCollectionsByTaskId: {},
-			// findings 同理（workspace 级集合）：切 workspace 即清空，等 getFindings 重拉。
+			// findings 是 workspace 级集合：切 workspace 即清空，等 getFindings 重拉。
 			exploratoryFindings: null,
 			streamSnapshotGeneration: 0,
 			streamError: null,
@@ -291,10 +281,9 @@ function runtimeStateStreamReducer(
 			// ?? [] 兜底旧服务端/异常 payload——缺字段时不因 for-of undefined 抛错而丢掉整个 snapshot。
 			notificationLogByWorkspaceId: bucketNotificationFeedByWorkspaceId(action.payload.notificationLog ?? []),
 			clineSessionContextVersion: action.payload.clineSessionContextVersion,
-			// 每次快照 = 一次（重）连握手完成：递增代数给 map 面板做「重连后重查对齐」的触发
-			// （断连窗口的 ingest 不补发）。推送集合本身保留作 last-known，查询落定前不出现空窗。
-			exploratorySessionMapCollectionsByTaskId: state.exploratorySessionMapCollectionsByTaskId,
-			// findings 同款 last-known 保留（重连后由 use-exploratory-findings 经快照代数重拉对齐）。
+			// 每次快照 = 一次（重）连握手完成：递增代数给消费者做「重连后重查对齐」的触发
+			// （断连窗口的变更不补发）。findings 保留作 last-known（重连后由 use-exploratory-findings
+			// 经快照代数重拉对齐），查询落定前不出现空窗。
 			exploratoryFindings: state.exploratoryFindings,
 			streamSnapshotGeneration: state.streamSnapshotGeneration + 1,
 			streamError: null,
@@ -369,17 +358,6 @@ function runtimeStateStreamReducer(
 		return {
 			...state,
 			latestMcpAuthStatuses: action.payload.statuses,
-		};
-	}
-	if (action.type === "exploratory_session_map_updated") {
-		// 全量替换该会话的集合（推送恒为完整集合，量级 = 节点数，恒小）；
-		// null 载荷 = 服务端明示集合已不存在，同样落 store（面板据此回退投影骨架）。
-		return {
-			...state,
-			exploratorySessionMapCollectionsByTaskId: {
-				...state.exploratorySessionMapCollectionsByTaskId,
-				[action.payload.conversationSessionTaskId]: action.payload.mapCollection,
-			},
 		};
 	}
 	if (action.type === "exploratory_findings_updated") {
@@ -599,16 +577,6 @@ export function useRuntimeStateStream(
 						});
 						return;
 					}
-					if (payload.type === "exploratory_session_map_updated") {
-						if (payload.workspaceId !== activeWorkspaceId) {
-							return;
-						}
-						dispatch({
-							type: "exploratory_session_map_updated",
-							payload,
-						});
-						return;
-					}
 					if (payload.type === "exploratory_findings_updated") {
 						if (payload.workspaceId !== activeWorkspaceId) {
 							return;
@@ -687,7 +655,6 @@ export function useRuntimeStateStream(
 		taskChatMessagesByTaskId: state.taskChatMessagesByTaskId,
 		latestTaskReadyForReview: state.latestTaskReadyForReview,
 		latestMcpAuthStatuses: state.latestMcpAuthStatuses,
-		exploratorySessionMapCollectionsByTaskId: state.exploratorySessionMapCollectionsByTaskId,
 		streamSnapshotGeneration: state.streamSnapshotGeneration,
 		exploratoryFindings: state.exploratoryFindings,
 		notificationLogByWorkspaceId: state.notificationLogByWorkspaceId,

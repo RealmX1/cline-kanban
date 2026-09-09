@@ -1,9 +1,9 @@
-// Exploratory Mode 的 tRPC handler 层（蓝图 .plan/docs/exploratory-mode-session-map-and-findings-store.md）。
-// 纯委托：session map 读写交给 src/state/exploratory-session-map-store.ts，写回校验交给
-// src/state/exploratory-session-map-apply-funnel.ts（闸的唯一落装点）；findings 读写交给
-// src/state/exploratory-findings-store.ts（§D，人工动作为 zod 校验即够、agent 建议通道的
-// provenance 可解析性校验在本层）；投影加载交给
+// Exploratory Mode 的 tRPC handler 层（蓝图 .plan/docs/exploratory-mode-session-map-and-findings-store.md §D）。
+// 纯委托：findings 读写交给 src/state/exploratory-findings-store.ts（人工动作为 zod 校验即够、
+// agent 建议通道的 provenance 可解析性校验在本层）；投影加载交给
 // src/conversation-tree/load-conversation-session-turn-projection.ts（与投影 query 同一条链）。
+// 旧 session map 读写通道（getSessionMap / ingestSessionMapUpdate）已退役：会话结构改由独立包
+// agent-conversation-exploration-thread-graph 建模，宿主胶水见 docs/exploratory-mode-host-integration.md。
 
 import { TRPCError } from "@trpc/server";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
@@ -18,15 +18,10 @@ import type {
 	RuntimeConfirmExploratoryFindingResponse,
 	RuntimeExploratoryFindingEntry,
 	RuntimeExploratoryFindingProvenanceLink,
-	RuntimeExploratorySessionMapCollection,
 	RuntimeGetExploratoryFindingsRequest,
 	RuntimeGetExploratoryFindingsResponse,
-	RuntimeGetExploratorySessionMapRequest,
-	RuntimeGetExploratorySessionMapResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeIngestExploratoryFindingCandidateResponse,
-	RuntimeIngestExploratorySessionMapUpdateRequest,
-	RuntimeIngestExploratorySessionMapUpdateResponse,
 	RuntimeRejectExploratoryFindingRequest,
 	RuntimeRejectExploratoryFindingResponse,
 	RuntimeSaveExploratoryFindingRequest,
@@ -39,14 +34,6 @@ import {
 	readExploratoryFindingsState,
 	type WorkspaceExploratoryFindingsState,
 } from "../state/exploratory-findings-store";
-import {
-	applyExploratorySessionMapUpdateFunnel,
-	type ExploratorySessionMapApplyFunnelResult,
-} from "../state/exploratory-session-map-apply-funnel";
-import {
-	mutateExploratorySessionMapState,
-	readExploratorySessionMapCollection,
-} from "../state/exploratory-session-map-store";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
 
 export interface CreateExploratoryApiDependencies {
@@ -54,14 +41,6 @@ export interface CreateExploratoryApiDependencies {
 		scope: ConversationSessionTurnProjectionScope,
 	) => Promise<ClineTaskSessionService>;
 	loadBoardCardAgentId: (scope: ConversationSessionTurnProjectionScope, taskId: string) => Promise<string | null>;
-	// session map 集合变更广播出口（runtime-server 注入 runtime-state-hub 的
-	// broadcastExploratorySessionMapUpdated）。只在 apply 成功落盘后调用
-	// （durable-write-before-ack，蓝图 §B.2 闸 5）。
-	onExploratorySessionMapUpdated: (
-		workspaceId: string,
-		conversationSessionTaskId: string,
-		mapCollection: RuntimeExploratorySessionMapCollection,
-	) => void;
 	// findings 集合变更广播出口（runtime-server 注入 runtime-state-hub 的
 	// broadcastExploratoryFindingsUpdated）。只在变更落盘成功后调用
 	// （durable-write-before-ack，蓝图 §D.3）；幂等空转（dedup / 已处目标态）不广播。
@@ -87,97 +66,6 @@ function assertFindingSurvivedCap(nextState: WorkspaceExploratoryFindingsState, 
 
 export function createExploratoryApi(deps: CreateExploratoryApiDependencies): RuntimeTrpcContext["exploratoryApi"] {
 	return {
-		getSessionMap: async (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: RuntimeGetExploratorySessionMapRequest,
-		): Promise<RuntimeGetExploratorySessionMapResponse> => {
-			const mapCollection = await readExploratorySessionMapCollection(
-				scope.workspaceId,
-				input.conversationSessionTaskId,
-			);
-			return { mapCollection };
-		},
-
-		ingestSessionMapUpdate: async (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: RuntimeIngestExploratorySessionMapUpdateRequest,
-		): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> => {
-			// 先把 apply 时刻的投影快照（含 checkpoint 保留集合）与 findings 现状（闸 2.5
-			// referencedFindingId 可解析性的输入）取好，再进串行写队列跑漏斗——快照取数与落盘
-			// 之间投影可能又前进，那一档由闸 3 的签名对账兜住（拒绝并按新边沿重触发再维护），
-			// 这里不追求跨子系统的完美原子性（蓝图 §B.2 的既定取舍）。
-			const [snapshot, findingsState] = await Promise.all([
-				loadConversationSessionTurnProjection(deps, scope, input.conversationSessionTaskId),
-				readExploratoryFindingsState(scope.workspaceId),
-			]);
-			const existingFindingIds = new Set(Object.keys(findingsState.findingsById));
-			const turnUserMessagePreviewByTurnNumber = new Map<number, string>();
-			let latestTurnNumber = 0;
-			for (const entry of snapshot.projection.entries) {
-				latestTurnNumber = entry.turnNumber;
-				if (entry.turnUserMessageExcerpt !== null) {
-					turnUserMessagePreviewByTurnNumber.set(entry.turnNumber, entry.turnUserMessageExcerpt);
-				}
-			}
-
-			let currentCollectionForResponse: RuntimeExploratorySessionMapCollection | null = null;
-			// 经对象属性带出闭包赋值：TS 不会对跨调用的对象属性做 null 收窄（let 变量会被
-			// 收窄成 never）。
-			const funnelOutcome: { result: ExploratorySessionMapApplyFunnelResult | null } = { result: null };
-			await mutateExploratorySessionMapState(scope.workspaceId, (state) => {
-				const currentCollection =
-					state.mapCollectionsByConversationSessionTaskId[input.conversationSessionTaskId] ?? null;
-				currentCollectionForResponse = currentCollection;
-				funnelOutcome.result = applyExploratorySessionMapUpdateFunnel({
-					currentCollection,
-					request: input,
-					projection: {
-						harnessSource: snapshot.harnessSource,
-						turnProjectionSignature: snapshot.projection.signature,
-						latestTurnNumber,
-						turnUserMessagePreviewByTurnNumber,
-						retainedCheckpointCommits: snapshot.retainedCheckpointCommits,
-					},
-					existingFindingIds,
-					nodeGenerationSource: "agent_live_session_maintenance",
-					now: Date.now(),
-				});
-				if (funnelOutcome.result.outcome !== "applied") {
-					return null;
-				}
-				return {
-					...state,
-					mapCollectionsByConversationSessionTaskId: {
-						...state.mapCollectionsByConversationSessionTaskId,
-						[input.conversationSessionTaskId]: funnelOutcome.result.mapCollection,
-					},
-				};
-			});
-
-			// mutator 在串行队列里同步执行完毕，result 必已赋值。
-			const result = funnelOutcome.result;
-			if (result === null) {
-				throw new Error("exploratory session map funnel did not run");
-			}
-			if (result.outcome === "rejected") {
-				return {
-					applied: false,
-					rejectionReason: result.rejectionReason,
-					mapCollection: currentCollectionForResponse,
-				};
-			}
-			if (result.outcome === "applied") {
-				// durable 写已成功（mutate 返回即落盘完成）→ 广播 + ack（durable-write-before-ack）。
-				deps.onExploratorySessionMapUpdated(
-					scope.workspaceId,
-					input.conversationSessionTaskId,
-					result.mapCollection,
-				);
-			}
-			// dedup_ack：幂等成功，不重写不广播，回现状集合供调用方重同步。
-			return { applied: true, rejectionReason: null, mapCollection: result.mapCollection };
-		},
-
 		// ---- findings（蓝图 §D，M2）----
 		// 人工动作（save/confirm/reject/archive）：zod 校验即够、无需作业漏斗（§D.2.1）；
 		// 每次成功变更落盘后广播全量新集合（durable-write-before-ack）。
@@ -193,7 +81,7 @@ export function createExploratoryApi(deps: CreateExploratoryApiDependencies): Ru
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeSaveExploratoryFindingRequest,
 		): Promise<RuntimeSaveExploratoryFindingResponse> => {
-			// 经对象属性带出闭包赋值（同 ingestSessionMapUpdate 的 funnelOutcome 手法）。
+			// 经对象属性带出闭包赋值：TS 不会对跨调用的对象属性做 null 收窄（let 变量会被收窄成 never）。
 			const outcome: { finding: RuntimeExploratoryFindingEntry | null; persisted: boolean } = {
 				finding: null,
 				persisted: false,
@@ -370,8 +258,8 @@ export function createExploratoryApi(deps: CreateExploratoryApiDependencies): Ru
 			}
 
 			// provenance 校验（仅 turn_anchor link；session_level / user_authored_freeform 无锚
-			// 可验，原样通过）。校验在串行写队列外做（投影加载是 IO），降级结果随落库写入——
-			// 与 map 闸 2c 同语义：checkpoint 不可解析降级 null，绝不整份拒绝。
+			// 可验，原样通过）。校验在串行写队列外做（投影加载是 IO），降级结果随落库写入：
+			// checkpoint 不可解析降级 null，绝不整份拒绝。
 			const validatedProvenanceLinks: RuntimeExploratoryFindingProvenanceLink[] = [];
 			for (const link of input.provenanceLinks) {
 				if (link.linkKind !== "turn_anchor") {

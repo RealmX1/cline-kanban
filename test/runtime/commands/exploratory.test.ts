@@ -6,25 +6,24 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import {
 	deliverExploratoryMutation,
 	parseExploratoryFindingCandidatePayload,
-	parseExploratoryMapUpdatePayload,
 	readExploratoryPayloadText,
 	resolveExploratoryCommandScope,
 	resolveExploratoryPayloadSource,
 } from "../../../src/commands/exploratory";
-import type { RuntimeIngestExploratorySessionMapUpdateResponse } from "../../../src/core/api-contract";
+import type { RuntimeIngestExploratoryFindingCandidateResponse } from "../../../src/core/api-contract";
 import { KANBAN_HOOK_TASK_ID_ENV, KANBAN_HOOK_WORKSPACE_ID_ENV } from "../../../src/terminal/hook-runtime-context";
 
 // exploratory CLI 纯函数层的行为锁测：payload 三形态、flag/env 优先级与不一致报错、廉价校验文案、
-// 投递骨架的三态适配（applied=false 业务结果 / TRPCClientError 业务拒绝 / 传输重试）。
+// 投递骨架的三态适配（ingested=false 业务结果 / TRPCClientError 业务拒绝 / 传输重试）。
 const FAST_DELIVERY_OPTIONS = { timeoutMs: 5, maxAttempts: 2, backoffMs: 0 } as const;
 
 function createIngestResponse(
-	overrides: Partial<RuntimeIngestExploratorySessionMapUpdateResponse> = {},
-): RuntimeIngestExploratorySessionMapUpdateResponse {
+	overrides: Partial<RuntimeIngestExploratoryFindingCandidateResponse> = {},
+): RuntimeIngestExploratoryFindingCandidateResponse {
 	return {
-		applied: true,
+		ingested: true,
 		rejectionReason: null,
-		mapCollection: null,
+		finding: null,
 		...overrides,
 	};
 }
@@ -85,52 +84,6 @@ describe("readExploratoryPayloadText", () => {
 		const readStdin = vi.fn(async () => '{"clientProposalId":"p2"}');
 		await expect(readExploratoryPayloadText("-", readStdin)).resolves.toBe('{"clientProposalId":"p2"}');
 		expect(readStdin).toHaveBeenCalledTimes(1);
-	});
-});
-
-describe("parseExploratoryMapUpdatePayload", () => {
-	it("接受白名单三键齐全的合法 payload", () => {
-		expect(
-			parseExploratoryMapUpdatePayload(
-				JSON.stringify({
-					clientProposalId: "proposal-1",
-					sourceTurnProjectionSignature: "12:msg-9:340",
-					nodes: [{ anchorTurnNumber: 3, nodeKind: "milestone", nodeTitle: "定下方向" }],
-				}),
-			),
-		).toEqual({
-			clientProposalId: "proposal-1",
-			sourceTurnProjectionSignature: "12:msg-9:340",
-			nodes: [{ anchorTurnNumber: 3, nodeKind: "milestone", nodeTitle: "定下方向" }],
-		});
-	});
-
-	it("JSON.parse 失败时报人话错误", () => {
-		expect(() => parseExploratoryMapUpdatePayload("{not json")).toThrow(/not valid JSON/);
-	});
-
-	it.each([["[1,2]"], ['"text"'], ["null"], ["42"]])("非对象 JSON（%s）报人话错误", (text) => {
-		expect(() => parseExploratoryMapUpdatePayload(text)).toThrow(/must be a JSON object/);
-	});
-
-	it("缺 clientProposalId 报人话错误", () => {
-		expect(() =>
-			parseExploratoryMapUpdatePayload(JSON.stringify({ sourceTurnProjectionSignature: "s", nodes: [] })),
-		).toThrow(/missing required string field "clientProposalId"/);
-	});
-
-	it("缺 sourceTurnProjectionSignature 报人话错误", () => {
-		expect(() => parseExploratoryMapUpdatePayload(JSON.stringify({ clientProposalId: "p", nodes: [] }))).toThrow(
-			/missing required string field "sourceTurnProjectionSignature"/,
-		);
-	});
-
-	it("nodes 非数组报人话错误", () => {
-		expect(() =>
-			parseExploratoryMapUpdatePayload(
-				JSON.stringify({ clientProposalId: "p", sourceTurnProjectionSignature: "s", nodes: {} }),
-			),
-		).toThrow(/"nodes" must be an array/);
 	});
 });
 
@@ -341,10 +294,10 @@ describe("resolveExploratoryCommandScope（--project-path workspace 解析）", 
 });
 
 describe("deliverExploratoryMutation", () => {
-	it("applied=false 是业务结果而非失败：正常 resolve，rejectionReason 随响应带出", async () => {
+	it("ingested=false 是业务结果而非失败：正常 resolve，rejectionReason 随响应带出", async () => {
 		const rejected = createIngestResponse({
-			applied: false,
-			rejectionReason: "stale_source_turn_projection_signature",
+			ingested: false,
+			rejectionReason: "findings_cap_overflow",
 		});
 		const mutate = vi.fn(async () => rejected);
 
@@ -353,19 +306,19 @@ describe("deliverExploratoryMutation", () => {
 	});
 
 	it("TRPCClientError（schema/procedure 拒绝）按业务拒绝处理：立即抛、不重试、message 原样保留", async () => {
-		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> => {
-			throw new TRPCClientError("referencedFindingId 仅允许出现在 finding_reference 节点上");
+		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratoryFindingCandidateResponse> => {
+			throw new TRPCClientError("provenanceLinks 至少一条");
 		});
 
 		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow(
-			"referencedFindingId 仅允许出现在 finding_reference 节点上",
+			"provenanceLinks 至少一条",
 		);
 		expect(mutate).toHaveBeenCalledTimes(1);
 	});
 
 	it("非 TRPCClientError 的抛出按传输故障处理：有界重试后抛出", async () => {
 		let attempt = 0;
-		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> => {
+		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratoryFindingCandidateResponse> => {
 			attempt += 1;
 			if (attempt === 1) {
 				throw new Error("fetch failed");
@@ -378,7 +331,7 @@ describe("deliverExploratoryMutation", () => {
 	});
 
 	it("传输故障重试耗尽后抛出最后一次错误", async () => {
-		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> => {
+		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratoryFindingCandidateResponse> => {
 			throw new Error("fetch failed");
 		});
 

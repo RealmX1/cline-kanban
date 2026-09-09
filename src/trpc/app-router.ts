@@ -68,8 +68,6 @@ import type {
 	RuntimeFeaturebaseTokenResponse,
 	RuntimeGetExploratoryFindingsRequest,
 	RuntimeGetExploratoryFindingsResponse,
-	RuntimeGetExploratorySessionMapRequest,
-	RuntimeGetExploratorySessionMapResponse,
 	RuntimeGetPostDeployVerificationStateRequest,
 	RuntimeGetPostDeployVerificationStateResponse,
 	RuntimeGitCheckoutRequest,
@@ -91,8 +89,6 @@ import type {
 	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeIngestExploratoryFindingCandidateResponse,
-	RuntimeIngestExploratorySessionMapUpdateRequest,
-	RuntimeIngestExploratorySessionMapUpdateResponse,
 	RuntimeListAgentRaisedPendingUserDecisionsRequest,
 	RuntimeListAgentRaisedPendingUserDecisionsResponse,
 	RuntimeNotificationClearRequest,
@@ -244,8 +240,6 @@ import {
 	runtimeFeaturebaseTokenResponseSchema,
 	runtimeGetExploratoryFindingsRequestSchema,
 	runtimeGetExploratoryFindingsResponseSchema,
-	runtimeGetExploratorySessionMapRequestSchema,
-	runtimeGetExploratorySessionMapResponseSchema,
 	runtimeGetPostDeployVerificationStateRequestSchema,
 	runtimeGetPostDeployVerificationStateResponseSchema,
 	runtimeGitCheckoutRequestSchema,
@@ -267,8 +261,6 @@ import {
 	runtimeHookIngestResponseSchema,
 	runtimeIngestExploratoryFindingCandidateRequestSchema,
 	runtimeIngestExploratoryFindingCandidateResponseSchema,
-	runtimeIngestExploratorySessionMapUpdateRequestSchema,
-	runtimeIngestExploratorySessionMapUpdateResponseSchema,
 	runtimeListAgentRaisedPendingUserDecisionsRequestSchema,
 	runtimeListAgentRaisedPendingUserDecisionsResponseSchema,
 	runtimeNotificationClearRequestSchema,
@@ -689,14 +681,6 @@ export interface RuntimeTrpcContext {
 		) => Promise<RuntimeConversationSessionTurnProjectionResponse>;
 	};
 	exploratoryApi: {
-		getSessionMap: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: RuntimeGetExploratorySessionMapRequest,
-		) => Promise<RuntimeGetExploratorySessionMapResponse>;
-		ingestSessionMapUpdate: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: RuntimeIngestExploratorySessionMapUpdateRequest,
-		) => Promise<RuntimeIngestExploratorySessionMapUpdateResponse>;
 		getFindings: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeGetExploratoryFindingsRequest,
@@ -1307,8 +1291,8 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	conversationTree: t.router({
-		// 会话 turn 投影（只读派生层，姊妹蓝图 §2.2）：session map 面板裸锚点骨架与
-		// （远期）会话树共享同一数据源。M0 只接 Cline SDK 源，其余 transport 按 session 粒度降级。
+		// 会话 turn 投影（只读派生层，姊妹蓝图 §2.2）：findings 出处锚与（远期）会话树共享同一
+		// 数据源。M0 只接 Cline SDK 源，其余 transport 按 session 粒度降级。
 		getConversationSessionTurnProjection: workspaceProcedure
 			.input(runtimeConversationSessionTurnProjectionRequestSchema)
 			.output(runtimeConversationSessionTurnProjectionResponseSchema)
@@ -1317,21 +1301,6 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	exploratory: t.router({
-		// 读 per-workspace map store 中该会话的集合；null = 尚无集合（UI 纯展示投影骨架）。
-		getSessionMap: workspaceProcedure
-			.input(runtimeGetExploratorySessionMapRequestSchema)
-			.output(runtimeGetExploratorySessionMapResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.getSessionMap(ctx.workspaceScope, input);
-			}),
-		// agent 写回 session map 的唯一入口（蓝图 §B.2）：apply 漏斗四道闸任一失败整体丢弃，
-		// durable 落盘后才 ack + 广播 exploratory_session_map_updated。
-		ingestSessionMapUpdate: workspaceProcedure
-			.input(runtimeIngestExploratorySessionMapUpdateRequestSchema)
-			.output(runtimeIngestExploratorySessionMapUpdateResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.ingestSessionMapUpdate(ctx.workspaceScope, input);
-			}),
 		// workspace 级 findings 全量读取（集合恒小，上限 500；蓝图 §D.3）。
 		getFindings: workspaceProcedure
 			.input(runtimeGetExploratoryFindingsRequestSchema)

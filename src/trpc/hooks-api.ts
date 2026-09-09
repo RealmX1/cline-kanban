@@ -157,6 +157,15 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					} satisfies RuntimeHookIngestResponse;
 				}
 
+				// N0a：终端 agent 原生会话身份 sidecar。放在一切早退（恢复守卫拦截 / 转移闸）之前——
+				// 它是会话事实，与本次事件是否被拦截无关；manager 只在值变化时真正写 summary。
+				if (body.agentNativeConversationSessionIdentity) {
+					manager.applyAgentNativeConversationSessionIdentity?.(
+						taskId,
+						body.agentNativeConversationSessionIdentity,
+					);
+				}
+
 				const normalizedHookEventName = body.metadata?.hookEventName?.trim().toLowerCase() ?? "";
 				const isClaudeUserPromptSubmit =
 					event === "to_in_progress" &&
