@@ -1,12 +1,20 @@
 // 启动参数快照（fork 重放用）。exploration thread graph 的维护作业要从主会话 fork 一个分身
-// （`claude -p --resume <nativeSessionId> --fork-session`），而分身能否命中主会话的 prompt cache，
-// 取决于它的 model 与 system prompt 前缀是否与主会话**逐字**一致。
+// （`claude -p --resume <nativeSessionId> --fork-session`），本模块在会话启动那一刻把分身要逐字复用的
+// argv 三项摘下来存进 summary sidecar。
 //
-// 为什么必须在启动时快照、而不能在作业触发时重算：`--append-system-prompt` 的文案是仓库代码的一部分，
-// 会随版本变化（exploratory 那段刚刚就改过一次）。一个旧版本启动、至今还活着的会话，用新版本代码重算
-// 出来的 prompt 与它实际在跑的那份不同 —— fork 的消息前缀因此对不上，cache 全 miss。这种失败完全静默：
-// 分身照常跑出结果，只是每次都按未缓存价格烧全量输入 token。唯一可靠的真相是「启动那一刻真正传出去的
-// argv」，所以在这里就地摘下来。
+// 为什么必须在启动时快照、而不能在作业触发时重算：唯一可靠的真相是「启动那一刻真正传出去的 argv」。
+// `--append-system-prompt` 的文案是仓库代码的一部分，会随版本变化（exploratory 那段刚刚就改过一次），
+// 一个旧版本启动、至今还活着的会话，用新版本代码重算出来的值与它实际在跑的那份根本不是一回事——而重算
+// 的错误完全静默，分身照常跑出结果，只是跑在了错误的前提上。
+//
+// **关于 prompt cache 的事实修正**（2026-09-09 核心包 Pass A 实测，记在这里免得后人再推一遍）：本模块
+// 最初的立论是「三项逐字一致 ⇒ fork 命中主会话 prompt cache」，实测把它证伪了两处 ——（a）`--resume`
+// 时 `--append-system-prompt` 根本不参与请求（差一字节、乃至完全不传，都照样 100% 命中）；（b）Claude
+// Code 的 `--fork-session` 在真实 Kanban 会话上**恒不命中**父会话 cache，成因是上游 open bug
+// anthropics/claude-code#77306：fork 会铸造新 session id，而 session id 被嵌在 system prompt 的 scratchpad
+// 路径里，前缀在 system 层就已经字节不一致（实测 220k 的 opus 会话 fork 一次 cache read = 0、约 $2.2）。
+// 规则本身不变，因为它的承重理由不止 cache：model 必须逐字一致，分身才跑在同一个模型上；settings 路径
+// 决定分身的 hook 行为；而 #77306 一旦修好，字节一致性的前提立刻恢复——届时不必回头补建快照。
 //
 // model 一律保留 **argv 里的字面值**（通常是浮动别名 `default`），绝不存解析后的具体模型 id：别名的含义
 // 由 Claude Code 在运行时解析且随上游换代漂移，固化解析结果会让 fork 在换代后用错模型（另见 AGENTS.md
@@ -74,7 +82,7 @@ function matchForkReplayCliOptionToken(argument: string): ForkReplayCliOptionTok
 //
 // 分离式一律**无条件**把下一个 token 当作值——值的形状说明不了任何事：以 `-` 开头的 append-system-prompt
 // 正文（比如以 markdown 列表起头的 `- Be concise`）完全合法，早先按「首字符是 -」判边界会把整段 prompt
-// 判成无值丢成 null，fork 重放的前缀因此对不上、prompt cache 静默全 miss——而那正是本模块存在的唯一理由。
+// 判成无值丢成 null，分身就拿不到主会话实际在跑的那段 prompt——而完整保住这三项正是本模块存在的唯一理由。
 // 只有选项落在 argv 末尾、确实没有后继 token 时，这次出现才算无值。
 //
 // 被消费掉的值 token 连同跳过，不再参与后续的选项匹配：否则一段形似 `--model=opus …` 的 prompt 正文

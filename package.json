@@ -103,6 +103,7 @@
     "@trpc/server": "^11.11.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
+    "agent-conversation-exploration-thread-graph": "github:RealmX1/agent-conversation-exploration-thread-graph#4fd33ae34c9e2cc6d1b24ee4a8a12b9aa6aa2bb8",
     "commander": "^14.0.3",
     "node-pty": "^1.2.0-beta.15",
     "open": "^11.0.0",

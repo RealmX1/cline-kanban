@@ -963,6 +963,147 @@ describe("createHooksApi", () => {
 		// 批删挂在任务删除 / trash 清空路径（deleteAllTaskTurnCheckpointRefs）。
 		expect(manager.applyTurnCheckpoint).toHaveBeenCalledTimes(1);
 	});
+
+	it("B.2：Claude 自然 Stop 才把 Stop 边沿交给 exploration thread graph 维护", async () => {
+		const transitionedSummary = createSummary({ state: "awaiting_review", reviewReason: "hook" });
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(() => transitionedSummary),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const notifyExplorationThreadGraphAgentTurnStopped = vi.fn();
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+			notifyExplorationThreadGraphAgentTurnStopped,
+			captureTaskTurnCheckpoint: vi.fn(async () => ({
+				turn: 1,
+				ref: "refs/kanban/checkpoints/task-1/turn/1",
+				commit: "1111111",
+				createdAt: 1,
+			})),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { source: "claude", hookEventName: "Stop" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(notifyExplorationThreadGraphAgentTurnStopped).toHaveBeenCalledWith({
+			workspaceId: "workspace-1",
+			explorationId: "task-1",
+		});
+	});
+
+	it("B.2：中途人轴的 to_review（PermissionRequest / AskUserQuestion）绝不触发维护——那一轮还没结束", async () => {
+		// 这两类事件与自然 Stop 共用 to_review。只判 event 的话，用户在权限框/提问框上想得比防抖窗口
+		// （45s）久，就会用 treatFinalTurnAsCompleted:true 的 turn 源 fork 一次分身：白烧钱，还把半截
+		// turn 当已完成轮次归位进图。
+		const transitionedSummary = createSummary({ state: "awaiting_review", reviewReason: "hook" });
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(() => transitionedSummary),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const notifyExplorationThreadGraphAgentTurnStopped = vi.fn();
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+			notifyExplorationThreadGraphAgentTurnStopped,
+			captureTaskTurnCheckpoint: vi.fn(async () => ({
+				turn: 1,
+				ref: "refs/kanban/checkpoints/task-1/turn/1",
+				commit: "1111111",
+				createdAt: 1,
+			})),
+		});
+
+		const permissionResponse = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { source: "claude", hookEventName: "PermissionRequest" },
+		});
+		const questionResponse = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { source: "claude", hookEventName: "PreToolUse", toolName: "AskUserQuestion" },
+		});
+
+		expect(permissionResponse).toEqual({ ok: true });
+		expect(questionResponse).toEqual({ ok: true });
+		expect(notifyExplorationThreadGraphAgentTurnStopped).not.toHaveBeenCalled();
+	});
+
+	it("B.2：by-the-way 会话的自然 Stop 照样触发维护，explorationId 解析回主任务卡片", async () => {
+		// 图挂在卡片上、不挂在单条会话上；这一块必须留在 by_the_way 守卫**之外**（那道守卫管的是
+		// 转审通知 + checkpoint，与图无关）。
+		const transitionedSummary = createSummary({
+			taskId: "task-1-btw",
+			state: "awaiting_review",
+			reviewReason: "hook",
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "task-1",
+				taskConversationSessionRole: "by_the_way",
+				taskConversationSessionContextSource: "started_from_scratch",
+				parentTaskConversationSessionId: null,
+				mainSessionOriginTurnNumber: null,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: null,
+			},
+		});
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ taskId: "task-1-btw", state: "running" })),
+			transitionToReview: vi.fn(() => transitionedSummary),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const notifyExplorationThreadGraphAgentTurnStopped = vi.fn();
+		const broadcastTaskReadyForReview = vi.fn();
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview,
+			notifyExplorationThreadGraphAgentTurnStopped,
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1-btw",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { source: "claude", hookEventName: "Stop" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(notifyExplorationThreadGraphAgentTurnStopped).toHaveBeenCalledWith({
+			workspaceId: "workspace-1",
+			explorationId: "task-1",
+		});
+		// by_the_way 守卫仍然照常抑制转审通知——两件事互不牵连。
+		expect(broadcastTaskReadyForReview).not.toHaveBeenCalled();
+	});
 	it("恢复守卫武装期间放行本活体自己 dispatch 的后台工作完成通知——那是 agent 在等的唤醒信号", async () => {
 		const manager = {
 			getSummary: vi.fn(() =>

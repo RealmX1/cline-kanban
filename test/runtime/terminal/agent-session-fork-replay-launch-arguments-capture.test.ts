@@ -40,7 +40,7 @@ describe("captureAgentSessionForkReplayLaunchArguments", () => {
 		expect(captured?.modelArgumentLiteral).toBe("default");
 	});
 
-	it("append-system-prompt 的内部空白与换行逐字保留（cache 前缀必须字节一致）", () => {
+	it("append-system-prompt 的内部空白与换行逐字保留（分身要拿到与主会话逐字相同的那份）", () => {
 		const promptWithAwkwardWhitespace = "line one\n\n   indented   двойной  пробел\ttab";
 		const captured = captureAgentSessionForkReplayLaunchArguments({
 			agentId: "claude",
@@ -76,7 +76,7 @@ describe("captureAgentSessionForkReplayLaunchArguments", () => {
 			launchArguments: ["--append-system-prompt", promptStartingWithDash, "--model", "default"],
 			capturedAt: 1,
 		});
-		// 按值的形状判边界会把整段 prompt 丢成 null，fork 前缀对不上 ⇒ prompt cache 静默全 miss。
+		// 按值的形状判边界会把整段 prompt 丢成 null，分身就跑在了与主会话不同的 system prompt 上。
 		expect(captured?.appendSystemPromptText).toBe(promptStartingWithDash);
 		expect(captured?.modelArgumentLiteral).toBe("default");
 	});

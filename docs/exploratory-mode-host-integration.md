@@ -62,11 +62,10 @@ transcriptPath, observedAt}`——只在三个身份字段变化时真正写（`
 
 ## 3b. 启动参数快照（fork 重放用）
 
-核心包 fork 出的分身能否命中主会话的 prompt cache，取决于它的 model 与 system prompt 前缀是否与主会话
-**逐字**一致。因此 `launchArgvTemplate` 的三项一律**在启动那一刻快照**，绝不在作业触发时重算：
-`--append-system-prompt` 的文案是仓库代码的一部分，会随版本改（B.1 就改过一次），旧会话用新代码重算出来的
-prompt 与它实际在跑的那份不同 —— fork 前缀对不上，cache 全 miss，且**完全静默**（分身照常出结果，只是每次
-按未缓存价格烧全量输入 token）。
+核心包 fork 出的分身要逐字复用主会话的启动参数，因此 `launchArgvTemplate` 的三项一律**在启动那一刻快照**，
+绝不在作业触发时重算：唯一可靠的真相是「启动那一刻真正传出去的 argv」。`--append-system-prompt` 的文案是
+仓库代码的一部分，会随版本改（B.1 就改过一次），旧会话用新代码重算出来的值与它实际在跑的那份根本不是一
+回事，而且这种错误**完全静默**——分身照常出结果，只是跑在了错误的前提上。
 
 `src/terminal/agent-session-fork-replay-launch-arguments-capture.ts` 是纯函数，从 `PreparedAgentLaunch.args`
 里摘 `--model` / `--append-system-prompt` / `--settings`（同时认 `-m` 与等号式写法，取最后一次出现）；
@@ -83,6 +82,31 @@ prompt 与它实际在跑的那份不同 —— fork 前缀对不上，cache 全
 
 v1 只覆盖 claude（exploration 的第一 harness，也是唯一已核实 fork 语义的 harness）。
 
+### prompt cache：原立论已被实测证伪（2026-09-09）
+
+本节最初的立论是「三项逐字一致 ⇒ fork 命中主会话 prompt cache」。核心包 Pass A 在做 D5 前置验证时把它实测
+证伪了两处，结论记在这里，免得后人照着假因果做决策：
+
+- `--resume` 时 **`--append-system-prompt` 根本不参与请求**：差一字节、乃至完全不传，都照样 100% 命中。
+- Claude Code 的 `--fork-session` 在真实 Kanban 会话上**恒不命中**父会话 cache，成因是上游 open bug
+  [anthropics/claude-code#77306](https://github.com/anthropics/claude-code/issues/77306) —— fork 会铸造新
+  session id，而 session id 被嵌在 system prompt 的 scratchpad 路径里，前缀在 system 层就已经字节不一致。
+  Anthropic 已复现并确认是 2026-06 scratchpad 特性引入的 regression，至今未修、无 workaround。**命不命中
+  的区分不是会话长度**，而是这段 scratchpad 由 statsig flag 门控、并非每个会话都注入：实测里受控的轻量
+  TUI 会话（sonnet 102k）首次 fork 命中 84%、再 fork 命中 100%，而真实 Kanban 会话（opus 220k）恒为 0。
+
+排除过程中一并排除掉的变量（都**不是**成因）：env 污染、`--settings`、`--append-system-prompt`、`--model`、
+`--json-schema`。
+
+**对宿主侧的两个后果**：
+
+1. **快照规则不变**，但承重理由换了：model 必须逐字一致，分身才跑在同一个模型上；settings 路径决定分身的
+   hook 行为；而 #77306 一旦修好，字节一致性的前提立刻恢复——届时不必回头补建快照。用户已就此拍板维持
+   「fork 主会话 + 同 model」，契约零改动。
+2. **成本量级要按未缓存价重估**：实测 220k 的 opus 会话 fork 一次 cache read = 0、约 **$2.2**（原估算是按
+   cache read 计价的 ~$0.3/turn）。B.2 的触发胶水因此必须把节流旋钮当**默认开启**的东西设计，而不是可选项
+   ——`minimumTurnsBetweenMaintenanceRuns` 与「便宜模型」开关的默认值要按这个量级定。
+
 ## 4. 维护作业分身的 hook 短路
 
 核心包的 work-branch 作业以 `claude -p --resume <主会话 id> --fork-session --settings <与主会话相同的
@@ -94,6 +118,83 @@ stdout `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision"
 事件静默短路、不联系运行时。四个入口（`hooks ingest` / `notify` / `codex-hook` / `gemini-hook`）
 都接了。若不短路，分身事件会被当成主任务事件：Stop 抓 checkpoint、PostToolUse 翻 facet、
 activity 推「对话上次推进」。
+
+## 4b. 触发胶水、成本闸与图的读路径（B.2）
+
+宿主侧的全部胶水在 `src/exploration-thread-graph/`。核心包只回答「被调用时该判哪些 turn」，
+**「什么时候调」完全是宿主的职责**——而这恰恰是花钱的那一半。
+
+### 四道闸（`exploration-thread-graph-maintenance-trigger.ts`）
+
+每判一次就 fork 一个分身。重型会话上一次约 $2.2（见 §3b 的实测），所以闸门不是性能调参，是成本闸：
+
+| 闸 | 判据 | 漏掉的后果 |
+| --- | --- | --- |
+| ① 模式 | `taskConversationMode === "exploratory"` | 所有任务都开始烧钱 |
+| ② 防抖 | Stop 边沿后 45s 合并窗口 | 连着几个短 turn 各 fork 一次 |
+| ③ 单飞 | 每 exploration 在途恒 1 | 并发 fork 两个分身——**store 的跨进程写锁挡不住它**，锁只覆盖落盘那一小段，不覆盖前面那次昂贵的 fork |
+| ④ 节流 | 攒够 `DEFAULT_MINIMUM_TURNS_BETWEEN_MAINTENANCE_RUNS`（5）个未归位 turn | 每 turn 一次 ≈ $2.2/turn |
+
+账本一律按 **workspace + exploration 联合计账**，绝不只用 explorationId：taskId 是 board-local 短 id，
+跨 project 撞号是常态，撞号的代价不是多跑一次而是**少跑一次**（先到的把另一个 project 同号任务的触发
+静默吞掉）——`persisted-agent-transcript-conversation-progress-observer` 为此吃过亏。
+
+顺序上「廉价判定先行」是关键：读 collection 与 transcript 增量都不花钱，只有 fork 花钱，所以四道闸
+全部在 fork 之前。
+
+**首次维护不受节流约束**：图从空到有的那一次是用户唯一能看到「这东西确实在工作」的时刻，为省一次 fork
+把它推迟到第 5 个 turn，换来的是一张长时间空着的面板。
+
+### 两个 turn 源实例，不是一个
+
+`treatFinalTurnAsCompleted` 是构造参数，而两条触发路径对它的要求相反：
+
+- **Stop 边沿必须传 `true`**——刚结束的正是末 turn。传 false 等于每次都少判一个 turn，且漏斗会拒绝
+  任何指向它的 turnRef。这是核心包交接文档点名的「最容易静默踩空的一处」。
+- **手动触发必须保持默认 `false`**——用户点按钮时 agent 可能正在生成，末 turn 尚未闭合。
+
+两个实例各自维护增量读偏移，代价是这两条路径都被用到时 transcript 读两遍。正确性优先于那点 IO。
+
+### Stop 边沿从哪里接出来
+
+`hooks-api.ts` 的 `event === "to_review"` 分支，**刻意放在 `by_the_way` 守卫之外**：by-the-way 会话的
+turn 一样要归位，只是 `explorationId` 要解析回主任务卡片（`taskConversationSessionMetadata.workspaceTaskId
+?? taskId`）。那道守卫是给「转审通知 + checkpoint」用的，与图无关。
+
+出口是可选 dep `notifyExplorationThreadGraphAgentTurnStopped`，**绝不返回 Promise**：判图会 fork 一个
+分身，压进 hook 响应关键路径会触发客户端硬超时（与 turn-checkpoint 挪出关键路径同一个教训）。
+
+### 会话清单怎么组装（`exploration-thread-graph-session-refs.ts`）
+
+判据不是 `agentId === "claude"` 这样的硬编码，而是**两个 sidecar 都在、且指向同一个 harness**：
+N0a 身份给原生 session id 与 transcript 路径，启动快照给 fork 要逐字回传的 argv。两者都只在已接入的
+harness 上盖章，所以「有没有它们」本身就是能力谓词。
+
+**还必须校验两者的 `sourceAgentId` 彼此一致、且等于会话当前的 `agentId`**：同一张卡片换过 agent 时，
+旧活体留下的 sidecar 可能还在 summary 里，照着它 fork 就是拿 A 会话的身份去跑 B 会话的参数。
+
+主会话恒在 `sessions[0]`（fork 的就是它）；主会话不可用时整体放弃——没有它这次作业无从谈起。
+by-the-way 会话缺 sidecar 只剔它自己。
+
+### 落盘位置与那个锁文件
+
+`storeRoot` = `<workspace 目录>/agent-conversation-exploration-thread-graph/`（独占一个目录，因为核心包
+在下面自己铺 `topic-registry.json`、`explorations/<id>/exploration-thread-graph.json` 与一个**跨进程写锁**）。
+
+**宿主的备份 / 体检 / 清理逻辑必须放过那个锁，且绝不删除活动锁**（核心包有 15s 陈旧回收，误删会让并发写
+丢失）。要判断某个路径是不是锁，一律用核心包导出的 `resolveExplorationThreadGraphStoreWriteLockPath`，
+别自己拼字符串。
+
+### 读路径与契约镜像
+
+「读图」恒等于「读 collection + 读每条会话的 turn 快照 + 合成」——只有 collection 摊不出任何一行
+（`exploration-thread-graph-projection-loader.ts`）。单条会话的 transcript 读不出来不炸整张图，
+那条会话的 turn 行缺席即可。
+
+web-ui **不 import 核心包**：`/core` 静态导出依赖 node `fs` 的 store，打进浏览器 bundle 会炸。所以
+`api-contract.ts` 自带一份 projection view 的 zod 镜像，lane 布局在服务端算好随行下发。两份形状的一致性
+由 `exploration-thread-graph-contract-parity.ts` 做**编译期双向对账**——核心包换 SHA 后形状若漂移，
+根 typecheck 立刻红，且错误就落在那个文件上。
 
 ## 5. findings store 与写入通道
 
@@ -162,7 +263,21 @@ turn 行」双向定位可复用（`data-conversation-anchor` 属性契约 + `da
 `ingest-map-update`、web-ui `session-map-panel.tsx` / `use-session-map-panel-data.ts` / `session-map-query.ts`
 及各自测试。**不要为 thread graph 重建任何一份**：结构建模、apply 漏斗、作业与 CLI 全在核心包。
 
-## 9. 与核心包的契约指针（B.2 接线时逐条对照 handoff A.13）
+## 9. 与核心包的契约指针（B.2 已接线；改动前对照 handoff A.13）
+
+**当前钉住的 SHA**：`4fd33ae34c9e2cc6d1b24ee4a8a12b9aa6aa2bb8`（根 `package.json` 的
+`github:RealmX1/agent-conversation-exploration-thread-graph#<sha>`）。升级 = 换这个 SHA，然后跑根
+typecheck——`exploration-thread-graph-contract-parity.ts` 会在形状漂移时当场报错。
+`.plan/` 下的 handoff 与完工交接**不进 npm 包**（`files` 只含 `dist` / `README.md` / `CONTEXT.md`），
+要读得直接看那个仓库。
+
+三条容易静默踩空的核心包语义（交接文档点名）：
+
+- `placedTurnCount` 是落盘后 placement 的**总数**，不是本次新增数；要增量得自己前后相减。
+- 一次作业最多判 `batchSize`（默认 40）个 turn，其余经 `remainingTurnCount` 回报，由调用方安排续跑。
+- `incremental` 模式即使没有新 turn 也可能因修订窗口重判——**不是空跑就一定零成本**。
+
+契约两侧的分工（与 handoff A.13 逐条对应）：
 
 - cline-kanban 提供：`explorationId = workspaceTaskId`；`sessions[]`（主会话在前；每条含 N0a 的
   `nativeSessionId` / `transcriptPath`、`workingDirectory`、`launchArgvTemplate{model, appendSystemPrompt,

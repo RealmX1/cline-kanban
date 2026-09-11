@@ -18,12 +18,16 @@ import type {
 	RuntimeConfirmExploratoryFindingResponse,
 	RuntimeExploratoryFindingEntry,
 	RuntimeExploratoryFindingProvenanceLink,
+	RuntimeGetExplorationThreadGraphRequest,
+	RuntimeGetExplorationThreadGraphResponse,
 	RuntimeGetExploratoryFindingsRequest,
 	RuntimeGetExploratoryFindingsResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeIngestExploratoryFindingCandidateResponse,
 	RuntimeRejectExploratoryFindingRequest,
 	RuntimeRejectExploratoryFindingResponse,
+	RuntimeRequestExplorationThreadGraphMaintenanceRequest,
+	RuntimeRequestExplorationThreadGraphMaintenanceResponse,
 	RuntimeSaveExploratoryFindingRequest,
 	RuntimeSaveExploratoryFindingResponse,
 } from "../core/api-contract";
@@ -45,6 +49,16 @@ export interface CreateExploratoryApiDependencies {
 	// broadcastExploratoryFindingsUpdated）。只在变更落盘成功后调用
 	// （durable-write-before-ack，蓝图 §D.3）；幂等空转（dedup / 已处目标态）不广播。
 	onExploratoryFindingsUpdated: (workspaceId: string, findings: RuntimeExploratoryFindingEntry[]) => void;
+	// exploration thread graph（B.2）的读路径与手动维护入口。两者都由 runtime-server 注入而不是在本层
+	// 组装：维护触发器持有防抖窗口与单飞账本，是个必须长活的单例——每次请求重建它等于四道闸全失效。
+	loadExplorationThreadGraphProjection: (
+		scope: RuntimeTrpcWorkspaceScope,
+		explorationId: string,
+	) => Promise<RuntimeGetExplorationThreadGraphResponse>;
+	requestExplorationThreadGraphMaintenance: (
+		scope: RuntimeTrpcWorkspaceScope,
+		explorationId: string,
+	) => Promise<RuntimeRequestExplorationThreadGraphMaintenanceResponse>;
 }
 
 // cap 沉默路径防线（容量取舍见 exploratory-findings-store 的 MAX 注释）：pending 永不
@@ -342,6 +356,24 @@ export function createExploratoryApi(deps: CreateExploratoryApiDependencies): Ru
 				deps.onExploratoryFindingsUpdated(scope.workspaceId, Object.values(nextState.findingsById));
 			}
 			return { ingested: true, rejectionReason: null, finding };
+		},
+
+		// ---- exploration thread graph（B.2，纯委托）----
+		// 读图免费、判图花钱：getExplorationThreadGraph 只合成投影，绝不触发任何 fork；
+		// 真正会 fork 的只有 requestExplorationThreadGraphMaintenance，且它仍受单飞闸约束。
+
+		getExplorationThreadGraph: async (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGetExplorationThreadGraphRequest,
+		): Promise<RuntimeGetExplorationThreadGraphResponse> => {
+			return await deps.loadExplorationThreadGraphProjection(scope, input.explorationId);
+		},
+
+		requestExplorationThreadGraphMaintenance: async (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRequestExplorationThreadGraphMaintenanceRequest,
+		): Promise<RuntimeRequestExplorationThreadGraphMaintenanceResponse> => {
+			return await deps.requestExplorationThreadGraphMaintenance(scope, input.explorationId);
 		},
 	};
 }

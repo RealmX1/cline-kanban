@@ -51,6 +51,7 @@ import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import { useDebugTools } from "@/hooks/use-debug-tools";
 import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
+import { useExplorationThreadGraph } from "@/hooks/use-exploration-thread-graph";
 import { useExploratoryFindings } from "@/hooks/use-exploratory-findings";
 import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
@@ -143,6 +144,7 @@ export default function App(): ReactElement {
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
 		exploratoryFindings: pushedExploratoryFindings,
+		latestExplorationThreadGraphUpdate,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
@@ -361,6 +363,14 @@ export default function App(): ReactElement {
 	useEffect(() => {
 		setIsTaskChangesSidebarOpen(false);
 	}, [selectedCard?.card.id]);
+	// exploration thread graph（B.2）：与 findings 不同，它是**按 exploration 分**的——作用域跟着
+	// 当前选中的卡片走，所以必须放在 selectedCard 之后。读图免费（服务端不 fork），重连重拉无成本顾虑。
+	const explorationThreadGraphData = useExplorationThreadGraph({
+		workspaceId: projectRuntimeWorkspaceId,
+		explorationId: selectedCard?.card.id ?? null,
+		refreshKey: streamSnapshotGeneration,
+		pushedUpdate: latestExplorationThreadGraphUpdate,
+	});
 	useNotificationTaskFocus({ currentProjectId: navigationCurrentProjectId, setSelectedTaskId });
 
 	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 docs/context-stage-first-overview.md）开关 + 跨-workspace 打开某 task 的待定跳转。
@@ -1464,6 +1474,7 @@ export default function App(): ReactElement {
 									taskSessions={sessions}
 									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
 									exploratoryFindings={exploratoryFindingsData.findings}
+									explorationThreadGraph={explorationThreadGraphData}
 									runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
 									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
 									onCreateByTheWayTaskConversationSession={async (input) => {

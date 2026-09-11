@@ -27,6 +27,7 @@ import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
 import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
+import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
 import { SessionFindingsSection } from "@/components/findings/session-findings-section";
 import { taskDetailAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,7 @@ import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pend
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useConversationSessionTurnProjection } from "@/hooks/use-conversation-session-turn-projection";
+import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
 import { ResizeHandle } from "@/resize/resize-handle";
@@ -644,6 +646,7 @@ export function CardDetailView({
 	onCreateByTheWayTaskConversationSession,
 	taskChatMessagesByTaskId,
 	exploratoryFindings,
+	explorationThreadGraph,
 	runtimeStreamSnapshotGeneration = 0,
 }: {
 	selection: CardSelection;
@@ -735,6 +738,9 @@ export function CardDetailView({
 	// 「本会话 findings」切片与聊天消息「存为 finding」查重共用同一份；undefined =
 	// 无 findings 上下文（两者都不渲染 affordance），null = 尚未加载。
 	exploratoryFindings?: RuntimeExploratoryFindingEntry[] | null;
+	// exploration thread graph（B.2）：当前卡片那张图的编排结果（App 侧 use-exploration-thread-graph）。
+	// undefined = 无图上下文，面板不渲染。
+	explorationThreadGraph?: ExplorationThreadGraphData;
 	// 流（重）连握手代数：每次快照递增。断连窗口的变更不补发，拼进 turn 投影的 refreshKey
 	// 让重连后重拉一次对齐。
 	runtimeStreamSnapshotGeneration?: number;
@@ -1165,6 +1171,17 @@ export function CardDetailView({
 	// 「本会话 findings」section（蓝图 §G.2）：复用同一份 workspace 级 findings 集合，只在调用方传了
 	// findings 上下文时出现（exploratoryFindings !== undefined）。旧 session map 面板退役后独立挂在
 	// sessions 面板同位下方；B.2 的 exploration thread graph 面板落地后迁入其底部。
+	// exploration thread graph 面板（B.2）：挂在 sessions 面板与「本会话 findings」之间——
+	// 图在上、从图里长出来的结论在下。explorationId 恒取**卡片 id**（不是当前选中的会话 id）：
+	// 图挂在探索场次上，by-the-way 会话的轮次也归进同一张图。
+	const explorationThreadGraphPanel =
+		explorationThreadGraph !== undefined && currentProjectId ? (
+			<ExplorationThreadGraphPanel
+				workspaceId={currentProjectId}
+				explorationId={selection.card.id}
+				data={explorationThreadGraph}
+			/>
+		) : null;
 	const sessionFindingsSection =
 		turnProjectionConversationSessionTaskId && exploratoryFindings !== undefined && currentProjectId ? (
 			<SessionFindingsSection
@@ -1330,6 +1347,7 @@ export function CardDetailView({
 							style={{ display: mobileTab === "sessions" ? "flex" : "none" }}
 						>
 							<div className="flex min-h-0 min-w-0 flex-1 flex-col">{taskConversationSessionsPanel}</div>
+							{explorationThreadGraphPanel}
 							{sessionFindingsSection}
 						</div>
 						{/* Prompts / comments utility panel */}
@@ -1619,7 +1637,8 @@ export function CardDetailView({
 										>
 											{taskConversationSessionsPanel}
 										</div>
-										{/* 本会话 findings：同位下方的独立可折叠 section（蓝图 §G.2） */}
+										{/* 探索线（B.2）+ 本会话 findings：同位下方的独立可折叠 section（蓝图 §G.2） */}
+										{explorationThreadGraphPanel}
 										{sessionFindingsSection}
 										<ResizeHandle
 											orientation="horizontal"

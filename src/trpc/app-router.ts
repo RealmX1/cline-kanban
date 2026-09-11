@@ -66,6 +66,8 @@ import type {
 	RuntimeDismissConnectionRetrySessionsRequest,
 	RuntimeDismissConnectionRetrySessionsResponse,
 	RuntimeFeaturebaseTokenResponse,
+	RuntimeGetExplorationThreadGraphRequest,
+	RuntimeGetExplorationThreadGraphResponse,
 	RuntimeGetExploratoryFindingsRequest,
 	RuntimeGetExploratoryFindingsResponse,
 	RuntimeGetPostDeployVerificationStateRequest,
@@ -110,6 +112,8 @@ import type {
 	RuntimeRejectExploratoryFindingRequest,
 	RuntimeRejectExploratoryFindingResponse,
 	RuntimeReleaseDeferredRestorationHarnessNotificationsResponse,
+	RuntimeRequestExplorationThreadGraphMaintenanceRequest,
+	RuntimeRequestExplorationThreadGraphMaintenanceResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
@@ -238,6 +242,8 @@ import {
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeDismissConnectionRetrySessionsResponseSchema,
 	runtimeFeaturebaseTokenResponseSchema,
+	runtimeGetExplorationThreadGraphRequestSchema,
+	runtimeGetExplorationThreadGraphResponseSchema,
 	runtimeGetExploratoryFindingsRequestSchema,
 	runtimeGetExploratoryFindingsResponseSchema,
 	runtimeGetPostDeployVerificationStateRequestSchema,
@@ -282,6 +288,8 @@ import {
 	runtimeRejectExploratoryFindingRequestSchema,
 	runtimeRejectExploratoryFindingResponseSchema,
 	runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema,
+	runtimeRequestExplorationThreadGraphMaintenanceRequestSchema,
+	runtimeRequestExplorationThreadGraphMaintenanceResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
 	runtimeRunPostDeployVerificationItemRequestSchema,
@@ -705,6 +713,14 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeIngestExploratoryFindingCandidateRequest,
 		) => Promise<RuntimeIngestExploratoryFindingCandidateResponse>;
+		getExplorationThreadGraph: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGetExplorationThreadGraphRequest,
+		) => Promise<RuntimeGetExplorationThreadGraphResponse>;
+		requestExplorationThreadGraphMaintenance: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRequestExplorationThreadGraphMaintenanceRequest,
+		) => Promise<RuntimeRequestExplorationThreadGraphMaintenanceResponse>;
 	};
 }
 
@@ -1343,6 +1359,19 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeIngestExploratoryFindingCandidateResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.exploratoryApi.ingestFindingCandidate(ctx.workspaceScope, input);
+			}),
+		// exploration thread graph（B.2）：读图是 query（免费），维护是 mutation（会 fork，花钱）。
+		getExplorationThreadGraph: workspaceProcedure
+			.input(runtimeGetExplorationThreadGraphRequestSchema)
+			.output(runtimeGetExplorationThreadGraphResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.getExplorationThreadGraph(ctx.workspaceScope, input);
+			}),
+		requestExplorationThreadGraphMaintenance: workspaceProcedure
+			.input(runtimeRequestExplorationThreadGraphMaintenanceRequestSchema)
+			.output(runtimeRequestExplorationThreadGraphMaintenanceResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.requestExplorationThreadGraphMaintenance(ctx.workspaceScope, input);
 			}),
 	}),
 });
