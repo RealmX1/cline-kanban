@@ -98,6 +98,13 @@ function makeHarness(options: HarnessOptions) {
 		onExploratoryFindingsUpdated: (workspaceId, findings) => {
 			findingsBroadcasts.push({ workspaceId, findings });
 		},
+		// 本套件只覆盖 findings 通道；thread graph 两条是纯委托，注入时断言不被触碰即可。
+		loadExplorationThreadGraphProjection: async () => {
+			throw new Error("不应被调用：本套件不覆盖 exploration thread graph 读路径");
+		},
+		requestExplorationThreadGraphMaintenance: async () => {
+			throw new Error("不应被调用：本套件不覆盖 exploration thread graph 维护路径");
+		},
 	});
 	return { api, findingsBroadcasts };
 }

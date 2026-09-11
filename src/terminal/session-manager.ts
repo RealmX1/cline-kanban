@@ -63,6 +63,7 @@ import {
 	prepareAgentLaunch,
 	toBracketedPasteFramingWithoutTrailingSubmit,
 } from "./agent-session-adapters";
+import { captureAgentSessionForkReplayLaunchArguments } from "./agent-session-fork-replay-launch-arguments-capture";
 import { materializeTaskAgentSessionForExecutionWorkingDirectory } from "./agent-session-materialization";
 import {
 	hasClaudeInteractivePrompt,
@@ -3374,6 +3375,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// 新活体：每次真实 spawn 换一个 id。回收调度器据此判断「已落盘的期限说的还是不是同一个
 			// 活体」——同 taskId 重启出来的新会话绝不会被上一个活体留下的陈旧期限误杀。
 			runtimeSessionIncarnationId: randomUUID(),
+			// 本次启动 argv 的 fork 重放快照：与新活体 id 同一批写入，因此天然「每个活体一份、换 agent
+			// 或换模型后整体替换」。未接入的 agent 返回 null——必须显式写 null 而不是省略，否则同一任务
+			// 从 claude 换成别的 agent 后，旧快照会留在 summary 里被误当成当前会话的启动参数。
+			agentSessionForkReplayLaunchArguments: captureAgentSessionForkReplayLaunchArguments({
+				agentId: request.agentId,
+				launchArguments: launch.args,
+				capturedAt: startedAt,
+			}),
 			agentId: request.agentId,
 			workspacePath: request.cwd,
 			pid: session.pid,

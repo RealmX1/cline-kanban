@@ -41,6 +41,9 @@ export interface CreateHooksApiDependencies {
 		taskId: string;
 		turn: number;
 	}) => Promise<RuntimeTaskTurnCheckpoint>;
+	// exploration thread graph 维护的 Stop 边沿出口（B.2）。可选：未接线时整条链路静默缺席，
+	// hook 行为零差异。绝不返回 Promise——判图会 fork 一个分身，不能压进 hook 的响应关键路径。
+	notifyExplorationThreadGraphAgentTurnStopped?: (input: { workspaceId: string; explorationId: string }) => void;
 	recordAgentRaisedPendingUserDecision?: typeof recordAgentRaisedPendingUserDecision;
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration?: typeof deferHarnessGeneratedPromptDuringAgentSessionRestoration;
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration?: typeof consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration;
@@ -420,6 +423,29 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				}
 
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
+
+				if (
+					event === "to_review" &&
+					body.metadata?.source?.trim().toLowerCase() === "claude" &&
+					normalizedHookEventName === "stop"
+				) {
+					// exploration thread graph 维护的 Stop 边沿（B.2）。判据与上面「迟到通知拦截解除」同源
+					// （source=claude + hookEventName=stop），**只认自然 Stop**：`to_review` 同样承载
+					// PermissionRequest / AskUserQuestion / ExitPlanMode 这类「agent 停下来等人拍板」的中途
+					// 人轴信号，那一刻这一轮根本还没结束。用户在权限框/提问框上想得比防抖窗口（45s）久，
+					// 光判 event 就会让触发器拿 treatFinalTurnAsCompleted:true 的 turn 源去 fork：既白烧一次
+					// 判定（≈$2.2，成因见 docs/exploratory-mode-host-integration.md §3b），又把半截 turn 当作
+					// 已完成轮次归位进图。图只对 Claude 终端会话建模（turn 源与分身执行器都是 Claude Code
+					// 专用），故 source 闸不是额外收紧，而是本来的适用域。
+					// **by-the-way 会话同样要触发**——它的 turn 一样要归位，只是 explorationId 要解析回主任务
+					// 卡片（图挂在卡片上，不挂在单条会话上）。所以这一块刻意放在下面那道 by_the_way 守卫
+					// **之外**：那道守卫是给「转审通知 + checkpoint」用的，与图无关。
+					// 触发器自带四道闸（模式 / 防抖 / 单飞 / 节流），这里只负责把「刚有一个 turn 结束了」
+					// 这个事实交出去，不判断、不等待。
+					const explorationId = transitionedSummary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId;
+					deps.notifyExplorationThreadGraphAgentTurnStopped?.({ workspaceId, explorationId });
+				}
+
 				if (
 					event === "to_review" &&
 					transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way"

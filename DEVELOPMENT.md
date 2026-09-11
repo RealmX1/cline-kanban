@@ -13,6 +13,21 @@ See [`installation.md`](installation.md) (the single source for prerequisites, i
 npm run install:all
 ```
 
+### Working on the exploration thread graph core package
+
+会话结构建模不在本仓库——它是独立包 `agent-conversation-exploration-thread-graph`，经 `github:` 依赖
+钉 SHA 引入（见 `docs/exploratory-mode-host-integration.md` §9）。日常开发本仓库时**不需要**任何额外步骤，
+`npm ci` 会自动从 GitHub 装并跑它的 `prepare` 构建。
+
+只有当你要**同时改那个包**时，才在装完依赖后接上本地副本：
+
+```bash
+npm link agent-conversation-exploration-thread-graph   # 需先在该包目录跑过 npm link
+```
+
+改完记得解除（`npm unlink` 后重新 `npm ci`），否则本仓库会一直编译在一份未提交的包上。
+升级该包 = 换根 `package.json` 里那个 SHA，然后跑 `npm run typecheck`——契约对账会在形状漂移时当场报错。
+
 ## Hot reload workflow
 
 Fast path:

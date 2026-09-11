@@ -560,6 +560,22 @@ export type RuntimeAgentNativeConversationSessionIdentity = z.infer<
 	typeof runtimeAgentNativeConversationSessionIdentitySchema
 >;
 
+// 终端 agent 启动时真正传出去的、与 fork 重放相关的 argv 三项（见
+// terminal/agent-session-fork-replay-launch-arguments-capture.ts 的完整理由，含「逐字一致才命中 prompt
+// cache」那条原立论被实测证伪的经过）。exploration thread graph 的维护作业 fork 主会话时逐字复用它们；
+// 重算而非快照，拿到的是「当前代码算出来的值」而不是「这个会话实际在跑的值」。model 存的是 argv 字面值
+// （通常是浮动别名 `default`），不是解析后的模型 id。
+export const runtimeAgentSessionForkReplayLaunchArgumentsSchema = z.object({
+	sourceAgentId: z.string(),
+	modelArgumentLiteral: z.string().nullable(),
+	appendSystemPromptText: z.string().nullable(),
+	settingsFilePath: z.string().nullable(),
+	capturedAt: z.number(),
+});
+export type RuntimeAgentSessionForkReplayLaunchArguments = z.infer<
+	typeof runtimeAgentSessionForkReplayLaunchArgumentsSchema
+>;
+
 // 终端 agent 因瞬时连接错误（VPN 抖动等）停在空闲提示符时，
 // 自动续跑框架（src/terminal/output-reactions）进入「连接重试」状态：
 // 记录已尝试的续跑次数、首次出错时刻、最近一次注入时刻，以及下一次计划注入的时刻。
@@ -802,6 +818,10 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 加性可选：Cline / ACP 会话与旧盘数据缺它 ⇒ undefined；同一活体内 harness 换了 session id
 	// （--fork-session / 续接）时整体替换，只保留最新观测。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
+	// 本次启动 argv 的 fork 重放快照（见 runtimeAgentSessionForkReplayLaunchArgumentsSchema 注释）。
+	// 加性可选：只有已接入的终端 agent（v1 = claude）在建会话时盖章，其余会话与旧盘数据缺它 ⇒ undefined。
+	// 每次新起活体整体替换（同一任务换 agent / 换模型后，旧快照对新会话无意义）。
+	agentSessionForkReplayLaunchArguments: runtimeAgentSessionForkReplayLaunchArgumentsSchema.nullable().optional(),
 	// 这条**活会话**实际用的通话方式。agent-catalog 的 `sessionTransport` 只是该 agent 的**默认**通道；
 	// omp 可在 TUI（pty_terminal）与 ACP（acp_stdio_subprocess）之间随时切换，切换后 agentId 不变，
 	// 于是「渲染 xterm 还是会话面板」「stop / 输入 / 消息走哪条通路」一律以本字段为准，不得再从 agentId 静态派生。
@@ -1373,6 +1393,130 @@ export type RuntimeStateStreamExploratoryFindingsUpdatedMessage = z.infer<
 	typeof runtimeStateStreamExploratoryFindingsUpdatedMessageSchema
 >;
 
+// ─── exploration thread graph 投影整值（B.2）───
+//
+// 领域真相在独立包 agent-conversation-exploration-thread-graph，本仓库只做宿主胶水：图由核心包
+// 建模与落盘，服务端把它合成 projection 整值后整份下发。下面这批 schema 是**边界镜像**，不是第二
+// 份定义——它们存在的唯一理由是 web-ui 不能 import 核心包（`/core` 静态导出依赖 node `fs` 的 store，
+// 打进浏览器 bundle 会炸），因此契约层必须自带一份可被 `@runtime-contract` 解析的形状。
+// 与核心包类型的一致性由 src/exploration-thread-graph/exploration-thread-graph-contract-parity.ts
+// 做编译期双向对账：核心包换 SHA 后形状若漂移，根 typecheck 立刻红。
+//
+// lane 布局**在服务端算好**随行下发（核心包的 projection 每行自带 laneLayout），前端只负责画。
+export const runtimeExplorationThreadGraphTurnRefSchema = z.object({
+	conversationSessionId: z.string(),
+	turnNumber: z.number(),
+	turnCheckpointCommit: z.string().nullable(),
+});
+export type RuntimeExplorationThreadGraphTurnRef = z.infer<typeof runtimeExplorationThreadGraphTurnRefSchema>;
+
+const runtimeExplorationThreadGraphGenerationSourceSchema = z.enum(["work_branch_maintenance_job", "user_manual_edit"]);
+
+export const runtimeExplorationThreadGraphLaneLayoutRowSchema = z.object({
+	id: z.string(),
+	rowLane: z.number(),
+	laneWaitingForIds: z.array(z.string()),
+	mergeFromLanes: z.array(z.number()),
+	splitFromLane: z.number().nullable(),
+	rowStartsLane: z.boolean(),
+	isFirstRow: z.boolean(),
+});
+
+export const runtimeExplorationThreadGraphTopicSchema = z.object({
+	topicId: z.string(),
+	topicTitle: z.string(),
+	topicAliases: z.array(z.string()),
+	topicSummaryMarkdown: z.string().nullable(),
+	supersededByTopicId: z.string().nullable(),
+	generationSource: runtimeExplorationThreadGraphGenerationSourceSchema,
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+
+export const runtimeExplorationThreadSchema = z.object({
+	threadId: z.string(),
+	threadTitle: z.string(),
+	parentThreadId: z.string().nullable(),
+	forkedFromTurnRef: runtimeExplorationThreadGraphTurnRefSchema.nullable(),
+	primaryTopicId: z.string(),
+	threadLifecycleStatus: z.enum(["active", "concluded", "parked", "abandoned"]),
+	concludedAtTurnRef: runtimeExplorationThreadGraphTurnRefSchema.nullable(),
+	generationSource: runtimeExplorationThreadGraphGenerationSourceSchema,
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+
+// 作业用量。cacheReadInputTokens 恒要回报——它是判断 fork 有没有吃到 prompt cache 的唯一依据
+// （当前受上游 bug #77306 影响恒为 0，见 docs/exploratory-mode-host-integration.md §3b）。
+export const runtimeExplorationThreadGraphMaintenanceJobUsageSchema = z.object({
+	inputTokens: z.number(),
+	cacheReadInputTokens: z.number(),
+	outputTokens: z.number(),
+	costUsd: z.number().nullable(),
+});
+
+export const runtimeExplorationThreadGraphProjectionViewTurnRowSchema = z.object({
+	turnRowId: z.string(),
+	turnRef: runtimeExplorationThreadGraphTurnRefSchema,
+	userPromptExcerpt: z.string(),
+	assistantResponseExcerpt: z.string(),
+	startedAt: z.string(),
+	endedAt: z.string(),
+	toolCallCount: z.number(),
+	// 尚未归位的 turn 这里是 null：图上仍要显示它，只是还没有 lane 身份。
+	threadId: z.string().nullable(),
+	placementConfidence: z.enum(["high", "low"]).nullable(),
+	deviationRationale: z.string().nullable(),
+	turnSubjectTags: z.array(z.string()),
+	eventMarks: z.array(
+		z.object({
+			mark: z.enum(["milestone", "decision_point", "open_question", "finding_candidate"]),
+			note: z.string().nullable(),
+			externalReferenceId: z.string().nullable(),
+		}),
+	),
+	parentTurnRowIds: z.array(z.string()),
+	laneLayout: runtimeExplorationThreadGraphLaneLayoutRowSchema,
+});
+export type RuntimeExplorationThreadGraphProjectionViewTurnRow = z.infer<
+	typeof runtimeExplorationThreadGraphProjectionViewTurnRowSchema
+>;
+
+export const runtimeExplorationThreadGraphProjectionViewSchema = z.object({
+	schemaVersion: z.number(),
+	explorationId: z.string(),
+	// **新→旧**（与 `git log` 一致）；lane 布局就是按这个序算的，前端不得重排。
+	turnRows: z.array(runtimeExplorationThreadGraphProjectionViewTurnRowSchema),
+	threads: z.array(
+		z.object({
+			thread: runtimeExplorationThreadSchema,
+			primaryTopic: runtimeExplorationThreadGraphTopicSchema.nullable(),
+			turnCount: z.number(),
+		}),
+	),
+	laneCount: z.number(),
+	staleReason: z.enum(["new_turns_not_yet_placed", "turn_source_signature_changed"]).nullable(),
+	unplacedTurnCountBySession: z.record(z.string(), z.number()),
+	lastMaintenanceJobCompletedAt: z.number().nullable(),
+	lastMaintenanceJobUsage: runtimeExplorationThreadGraphMaintenanceJobUsageSchema.nullable(),
+	anyTurnSourceIsTranscriptReconstructed: z.boolean(),
+});
+export type RuntimeExplorationThreadGraphProjectionView = z.infer<
+	typeof runtimeExplorationThreadGraphProjectionViewSchema
+>;
+
+// 单个 exploration 的整张图变更广播（全量替换）。与 findings 同款：作业落盘成功后才发，
+// 断连窗口不补发，客户端重连后靠 getExplorationThreadGraph 重查对齐。
+export const runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema = z.object({
+	type: z.literal("exploration_thread_graph_updated"),
+	workspaceId: z.string(),
+	explorationId: z.string(),
+	view: runtimeExplorationThreadGraphProjectionViewSchema,
+});
+export type RuntimeStateStreamExplorationThreadGraphUpdatedMessage = z.infer<
+	typeof runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema
+>;
+
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamSnapshotMessageSchema,
 	runtimeStateStreamWorkspaceStateMessageSchema,
@@ -1386,6 +1530,7 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamClineSessionContextUpdatedMessageSchema,
 	runtimeStateStreamNotificationLogUpdatedMessageSchema,
 	runtimeStateStreamExploratoryFindingsUpdatedMessageSchema,
+	runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema,
 	runtimeStateStreamErrorMessageSchema,
 ]);
 export type RuntimeStateStreamMessage = z.infer<typeof runtimeStateStreamMessageSchema>;
@@ -3989,4 +4134,57 @@ export const runtimeIngestExploratoryFindingCandidateResponseSchema = z.object({
 });
 export type RuntimeIngestExploratoryFindingCandidateResponse = z.infer<
 	typeof runtimeIngestExploratoryFindingCandidateResponseSchema
+>;
+
+// exploratory.getExplorationThreadGraph（query）：读一张图的投影整值。
+// 只读路径，不触发任何 fork——看图是免费的，判图才花钱。
+export const runtimeGetExplorationThreadGraphRequestSchema = z.object({
+	// = 主任务卡片 id（by-the-way 会话经 taskConversationSessionMetadata.workspaceTaskId 归到它名下）。
+	explorationId: z.string().min(1).max(200),
+});
+export type RuntimeGetExplorationThreadGraphRequest = z.infer<typeof runtimeGetExplorationThreadGraphRequestSchema>;
+
+export const runtimeGetExplorationThreadGraphResponseSchema = z.object({
+	// 恒有值：还没有任何 turn 归位时是一张空图，不是 null——「图是空的」与「读不到图」必须可区分。
+	view: runtimeExplorationThreadGraphProjectionViewSchema,
+	// 转录暂时读不出来的会话原生 id（文件被删 / 格式漂移）。这些会话的 turn 行缺席，其余照常。
+	turnSourceUnavailableSessionIds: z.array(z.string()),
+});
+export type RuntimeGetExplorationThreadGraphResponse = z.infer<typeof runtimeGetExplorationThreadGraphResponseSchema>;
+
+// exploratory.requestExplorationThreadGraphMaintenance（mutation）：面板上的「立即维护一次」。
+// 跳过防抖与节流，但**不跳过单飞闸**——同一 exploration 在途恒只有一个作业。
+export const runtimeRequestExplorationThreadGraphMaintenanceRequestSchema = z.object({
+	explorationId: z.string().min(1).max(200),
+});
+export type RuntimeRequestExplorationThreadGraphMaintenanceRequest = z.infer<
+	typeof runtimeRequestExplorationThreadGraphMaintenanceRequestSchema
+>;
+
+export const runtimeRequestExplorationThreadGraphMaintenanceResponseSchema = z.discriminatedUnion("kind", [
+	z.object({
+		kind: z.literal("completed"),
+		// 核心包作业的四种归宿。只有 accepted 意味着图真的变了（也只有它会触发广播）。
+		jobOutcome: z.enum(["accepted", "rejected", "skipped", "fork_failed"]),
+		// accepted 时：落盘后 collection 里 placement 的**总数**（不是本次新增数），以及还剩多少
+		// 待判（超出单次 batchSize 时由调用方安排续跑）。其余归宿为 null。
+		placedTurnCount: z.number().nullable(),
+		remainingTurnCount: z.number().nullable(),
+		// 被拒 / 跳过 / fork 失败的具体原因，原样透传核心包的判词，供面板显示。
+		detail: z.string().nullable(),
+	}),
+	z.object({
+		kind: z.literal("not_started"),
+		reason: z.enum([
+			"not_exploratory_mode",
+			"no_usable_sessions",
+			"already_in_flight",
+			"throttled",
+			"no_completed_turns",
+		]),
+	}),
+	z.object({ kind: z.literal("failed"), message: z.string() }),
+]);
+export type RuntimeRequestExplorationThreadGraphMaintenanceResponse = z.infer<
+	typeof runtimeRequestExplorationThreadGraphMaintenanceResponseSchema
 >;

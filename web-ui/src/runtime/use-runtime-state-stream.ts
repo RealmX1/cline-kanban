@@ -7,6 +7,7 @@ import type {
 	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
+	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
 	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
@@ -129,6 +130,11 @@ export interface UseRuntimeStateStreamResult {
 	// 替换（集合恒小，上限 500）；null = 尚未收到过推送。不搭车 summary 广播，
 	// 断连窗口的变更靠重连后 getFindings 重查对齐（重连信号 = streamSnapshotGeneration）。
 	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
+	// exploration thread graph 推送（B.2 exploration_thread_graph_updated）：**按 exploration 分**，
+	// 不是 workspace 级全量——一个 workspace 下可以有多张图。这里只保留最近一条推送（同
+	// latestTaskReadyForReview 的模式），由 use-exploration-thread-graph 按 explorationId 过滤后消费；
+	// 存成按 id 索引的表会随打开过的卡片数无界增长。
+	latestExplorationThreadGraphUpdate: RuntimeStateStreamExplorationThreadGraphUpdatedMessage | null;
 	// 跨 repo 聚合的通知 feed，按 workspaceId 分桶（切项目不清空——铃铛看整台服务器）。
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
@@ -149,6 +155,7 @@ interface RuntimeStateStreamStore {
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
 	streamSnapshotGeneration: number;
 	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
+	latestExplorationThreadGraphUpdate: RuntimeStateStreamExplorationThreadGraphUpdatedMessage | null;
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
 	streamError: string | null;
@@ -171,6 +178,10 @@ type RuntimeStateStreamAction =
 	| { type: "task_ready_for_review"; payload: RuntimeStateStreamTaskReadyForReviewMessage }
 	| { type: "notification_log_updated"; payload: RuntimeStateStreamNotificationLogUpdatedMessage }
 	| { type: "exploratory_findings_updated"; payload: RuntimeStateStreamExploratoryFindingsUpdatedMessage }
+	| {
+			type: "exploration_thread_graph_updated";
+			payload: RuntimeStateStreamExplorationThreadGraphUpdatedMessage;
+	  }
 	| { type: "mcp_auth_updated"; payload: RuntimeStateStreamMcpAuthUpdatedMessage }
 	| { type: "cline_session_context_updated"; payload: RuntimeStateStreamClineSessionContextUpdatedMessage }
 	| { type: "workspace_state_updated"; workspaceState: RuntimeWorkspaceStateResponse }
@@ -189,6 +200,7 @@ function createInitialRuntimeStateStreamStore(requestedWorkspaceId: string | nul
 		latestMcpAuthStatuses: null,
 		streamSnapshotGeneration: 0,
 		exploratoryFindings: null,
+		latestExplorationThreadGraphUpdate: null,
 		notificationLogByWorkspaceId: {},
 		clineSessionContextVersion: 0,
 		streamError: null,
@@ -285,6 +297,9 @@ function runtimeStateStreamReducer(
 			// （断连窗口的变更不补发）。findings 保留作 last-known（重连后由 use-exploratory-findings
 			// 经快照代数重拉对齐），查询落定前不出现空窗。
 			exploratoryFindings: state.exploratoryFindings,
+			// 图同样保留作 last-known：重连后由 use-exploration-thread-graph 经快照代数重拉对齐，
+			// 查询落定前不出现空窗（读图免费，重拉没有成本顾虑）。
+			latestExplorationThreadGraphUpdate: state.latestExplorationThreadGraphUpdate,
 			streamSnapshotGeneration: state.streamSnapshotGeneration + 1,
 			streamError: null,
 			isRuntimeDisconnected: false,
@@ -304,6 +319,9 @@ function runtimeStateStreamReducer(
 			latestTaskChatMessage: didProjectChange ? null : state.latestTaskChatMessage,
 			taskChatMessagesByTaskId: didProjectChange ? {} : state.taskChatMessagesByTaskId,
 			latestTaskReadyForReview: didProjectChange ? null : state.latestTaskReadyForReview,
+			// 切项目必须清：图是 per-exploration 的，换了 project 之后旧推送里的 explorationId
+			// 可能与新 project 的某张卡片撞号（taskId 是 board-local 短 id）。
+			latestExplorationThreadGraphUpdate: didProjectChange ? null : state.latestExplorationThreadGraphUpdate,
 			notificationLogByWorkspaceId: pruneNotificationLogToWorkspaces(
 				state.notificationLogByWorkspaceId,
 				liveWorkspaceIds,
@@ -358,6 +376,13 @@ function runtimeStateStreamReducer(
 		return {
 			...state,
 			latestMcpAuthStatuses: action.payload.statuses,
+		};
+	}
+	if (action.type === "exploration_thread_graph_updated") {
+		// 单张图的全量替换。按 exploration 分发，消费侧负责过滤出当前卡片那张。
+		return {
+			...state,
+			latestExplorationThreadGraphUpdate: action.payload,
 		};
 	}
 	if (action.type === "exploratory_findings_updated") {
@@ -569,6 +594,16 @@ export function useRuntimeStateStream(
 						});
 						return;
 					}
+					if (payload.type === "exploration_thread_graph_updated") {
+						if (payload.workspaceId !== activeWorkspaceId) {
+							return;
+						}
+						dispatch({
+							type: "exploration_thread_graph_updated",
+							payload,
+						});
+						return;
+					}
 					if (payload.type === "notification_log_updated") {
 						// 全局广播：不按 activeWorkspaceId 过滤（铃铛跨 repo，需接收其它 workspace 的更新）。
 						dispatch({
@@ -657,6 +692,7 @@ export function useRuntimeStateStream(
 		latestMcpAuthStatuses: state.latestMcpAuthStatuses,
 		streamSnapshotGeneration: state.streamSnapshotGeneration,
 		exploratoryFindings: state.exploratoryFindings,
+		latestExplorationThreadGraphUpdate: state.latestExplorationThreadGraphUpdate,
 		notificationLogByWorkspaceId: state.notificationLogByWorkspaceId,
 		clineSessionContextVersion: state.clineSessionContextVersion,
 		streamError: state.streamError,

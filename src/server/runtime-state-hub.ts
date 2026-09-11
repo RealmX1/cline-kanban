@@ -19,10 +19,12 @@ export interface ConversationTaskSessionSubscriptionSource {
 
 import type {
 	RuntimeClineMcpServerAuthStatus,
+	RuntimeExplorationThreadGraphProjectionView,
 	RuntimeExploratoryFindingEntry,
 	RuntimeNotificationFeedEntry,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamErrorMessage,
+	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
 	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
@@ -100,6 +102,14 @@ export interface RuntimeStateHub {
 	// workspace 的完整 finding 集合全量替换推送给在场客户端（恒小，上限 500；蓝图 §D.3）。
 	// 不搭车 summary 广播。
 	broadcastExploratoryFindingsUpdated: (workspaceId: string, findings: RuntimeExploratoryFindingEntry[]) => void;
+	// exploration thread graph（B.2）：某个 exploration 的整张图变更后全量替换推送。
+	// 按 exploration 分发而不是按 workspace 合并：一个 workspace 下可以有多张图，合并推送会让
+	// 打开 A 卡片的客户端因为 B 卡片判完图而整份重渲染。
+	broadcastExplorationThreadGraphUpdated: (
+		workspaceId: string,
+		explorationId: string,
+		view: RuntimeExplorationThreadGraphProjectionView,
+	) => void;
 	close: () => Promise<void>;
 }
 
@@ -495,6 +505,28 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			sendRuntimeStateMessage(client, payload);
 		}
 	};
+	// exploration thread graph 变更推送（B.2）：单个 exploration 的整张图全量替换。与 findings 同款
+	// 纪律——落盘成功后才发、0 客户端时跳过、断连窗口不补发（客户端重连后靠 getExplorationThreadGraph
+	// 重查对齐）。图恒小（一次探索场次的 turn 行数），全量替换比增量补丁简单且不会错位。
+	const broadcastExplorationThreadGraphUpdated = (
+		workspaceId: string,
+		explorationId: string,
+		view: RuntimeExplorationThreadGraphProjectionView,
+	): void => {
+		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
+		if (!clients || clients.size === 0) {
+			return;
+		}
+		const payload: RuntimeStateStreamExplorationThreadGraphUpdatedMessage = {
+			type: "exploration_thread_graph_updated",
+			workspaceId,
+			explorationId,
+			view,
+		};
+		for (const client of clients) {
+			sendRuntimeStateMessage(client, payload);
+		}
+	};
 	const persistNotification = async (
 		workspaceId: string,
 		input: { taskId: string; userTurnKind: RuntimeTaskSessionUserTurnKind; triggeredAt: number },
@@ -746,6 +778,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		broadcastTaskReadyForReview,
 		broadcastNotificationLogUpdated,
 		broadcastExploratoryFindingsUpdated,
+		broadcastExplorationThreadGraphUpdated,
 		close: async () => {
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {
 				clearTimeout(timer);
