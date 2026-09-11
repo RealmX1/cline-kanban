@@ -3,6 +3,12 @@
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import { randomUUID } from "node:crypto";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
+import {
+	type AgentConversationSessionResumeAddressing,
+	describeRefusedAmbiguousExecutionWorkingDirectoryResumeAddressing,
+	resolveAgentConversationSessionResumeAddressing,
+	type TaskConversationSessionSharingExecutionWorkingDirectory,
+} from "../core/agent-conversation-session-resume-addressing";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentNativeConversationSessionIdentity,
@@ -2683,6 +2689,103 @@ export class TerminalSessionManager implements TerminalSessionService {
 		);
 	}
 
+	// 「同一个执行工作目录里还住着哪些会话」——续跑寻址歧义闸门的输入。
+	//
+	// 覆盖面与诚实边界：本 manager 手上没有「每条会话的 cwd」的持久账本（summary.workspacePath 在会话
+	// 不再运行时会被清空，见 hydrate 侧的对账），所以这里取两条互补线索的并集：
+	//   ① **会话对话族**（按构造成立）：主会话与它的全部 By the way 侧问共用同一个 worktree，这条关系
+	//      记在 taskConversationSessionMetadata 里、跨运行时重启依然可读；与 stopTaskSession 的扇出同源。
+	//   ② **已解析的 cwd 相等**：本进程内起过的会话读 restartRequest 里的启动请求，仍在跑的读
+	//      summary.workspacePath。它覆盖非同族的两种共用：同仓库下多个 inplace 任务互撞、
+	//      侧边栏 home agent 会话撞任意 inplace 任务。
+	// 两条线索都够不着的会话一律**不**算竞争者：漏判只会退回今天的 cwd-latest 行为（不比现状更糟），
+	// 而误判会把一条本来能正常续跑的会话拒之门外。方向刻意偏向前者。
+	private collectTaskConversationSessionsSharingExecutionWorkingDirectory(
+		request: StartTaskSessionRequest,
+	): TaskConversationSessionSharingExecutionWorkingDirectory[] {
+		const hostWorkspaceTaskId =
+			request.workspaceTaskId ?? request.taskConversationSessionMetadata?.workspaceTaskId ?? request.taskId;
+		const sharing: TaskConversationSessionSharingExecutionWorkingDirectory[] = [];
+		for (const [taskConversationSessionId, entry] of this.entries) {
+			if (taskConversationSessionId === request.taskId) {
+				continue;
+			}
+			const metadata = entry.summary.taskConversationSessionMetadata;
+			const belongsToSameTaskConversationFamily =
+				taskConversationSessionId === hostWorkspaceTaskId || metadata?.workspaceTaskId === hostWorkspaceTaskId;
+			const knownExecutionWorkingDirectoryPath =
+				entry.restartRequest?.kind === "task" ? entry.restartRequest.request.cwd : entry.summary.workspacePath;
+			const sharesExecutionWorkingDirectory =
+				knownExecutionWorkingDirectoryPath !== null &&
+				knownExecutionWorkingDirectoryPath !== undefined &&
+				knownExecutionWorkingDirectoryPath === request.cwd;
+			if (!belongsToSameTaskConversationFamily && !sharesExecutionWorkingDirectory) {
+				continue;
+			}
+			sharing.push({
+				taskConversationSessionId,
+				agentId: entry.summary.agentId ?? null,
+				taskConversationSessionRole: metadata?.taskConversationSessionRole ?? null,
+			});
+		}
+		return sharing;
+	}
+
+	// 拒绝态的统一出口：**绝不破坏现有会话**，只把原因写进已有镜像 + warningMessage，然后抛。
+	//
+	// 为什么必须「不破坏」：本方法的两个调用点都在**销毁动作之前**——refreshTaskTerminal 的
+	// forceStopTaskSession 之前、startTaskSession 的换代块（停旧 active + dispose 旧镜像）之前。
+	// 早先版本把拒绝丢给下游那个 catch 的失败出口（installFailureExplainingTerminalStateMirrorAndMark…），
+	// 于是「拒绝重启」实际会先**杀掉一条还活着的会话**、再把它标成 failed；前端的陈旧会话自动续跑
+	// （maybeAutoResumeStaleSession）打的是同一个入口，等于每次运行时重启后聚焦这张卡都把一条本来
+	// 只是 idle 的会话推成 failed。拒绝的语义是「这次不动它」，就必须真的一动不动。
+	//
+	// facet 三元组一律不写：会话状态确实没有变化，只是这次没能续上。
+	private refuseResumeAddressingWithoutDisturbingExistingSession(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+		refusal: Extract<
+			AgentConversationSessionResumeAddressing,
+			{ kind: "refused_ambiguous_execution_working_directory" }
+		>,
+	): never {
+		const message = describeRefusedAmbiguousExecutionWorkingDirectoryResumeAddressing({
+			launchAgentId: request.agentId,
+			competingTaskConversationSessions: refusal.competingTaskConversationSessions,
+		});
+		const explanation = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
+		// 写进**已有**镜像（不新建、不替换）：一块沉默的空终端比报错更难懂，而重建镜像会丢掉现有 scrollback。
+		entry.terminalStateMirror?.applyOutput(explanation);
+		const summary = updateSummary(entry, { warningMessage: message });
+		for (const listener of entry.listeners.values()) {
+			listener.onOutput?.(explanation);
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+		throw new Error(message);
+	}
+
+	// 每次启动**现算**续跑寻址，刻意不进 StartTaskSessionRequest：entry.restartRequest 是一份长期存活的
+	// 内存快照，把 session id 烘焙进去必然陈旧（会话每被 fork / 重开一次，harness 侧的 id 就换一个）。
+	// 现算的另一层收益是三条重放入口——手动 refreshTaskTerminal、崩溃后 auto-restart、会话回收后为投递
+	// 答案而恢复——自动共享同一份真相，不必各自接线。
+	private resolveResumeAddressingForTaskSessionStart(
+		request: StartTaskSessionRequest,
+		entry: SessionEntry,
+	): AgentConversationSessionResumeAddressing {
+		return resolveAgentConversationSessionResumeAddressing({
+			resumesPriorAgentConversation: Boolean(
+				request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt,
+			),
+			launchAgentId: request.agentId,
+			// 上一代 summary 上由 hook 落下的原生会话身份。此刻尚未被本次启动的 facet patch 覆盖，
+			// 且该 sidecar 本来就不在启动侧的重置字段里，故跨 incarnation 稳定可读。
+			observedAgentNativeConversationSessionIdentity: entry.summary.agentNativeConversationSessionIdentity,
+			taskConversationSessionsSharingExecutionWorkingDirectory:
+				this.collectTaskConversationSessionsSharingExecutionWorkingDirectory(request),
+		});
+	}
+
 	private async startTaskSessionHoldingPerTaskStartExclusivity(
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin,
@@ -2720,6 +2823,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 				taskSessionStartExclusivityAcquiredAtIso,
 			});
 			return cloneSummary(entry.summary);
+		}
+
+		// 拒绝闸门必须站在换代块**之前**：下面那段会停掉旧 active 并 dispose 旧镜像，一旦先拆再拒，
+		// 「不给续跑」就变成了「顺手把会话拆了」。放在折叠早退之后，是因为那条路上根本没有要续的东西
+		// （会话正活着且在回合中），此时谈寻址没有意义。
+		const resumeAddressingResolvedBeforeAnyDestructiveStep = this.resolveResumeAddressingForTaskSessionStart(
+			request,
+			entry,
+		);
+		if (resumeAddressingResolvedBeforeAnyDestructiveStep.kind === "refused_ambiguous_execution_working_directory") {
+			this.refuseResumeAddressingWithoutDisturbingExistingSession(
+				entry,
+				request,
+				resumeAddressingResolvedBeforeAnyDestructiveStep,
+			);
 		}
 
 		if (entry.active) {
@@ -2768,6 +2886,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// entry.terminalStateMirror 在上面的换代块里已经置空 —— 于是这个 task 的 restore 快照永久为空，
 		// 前端把空快照当作自动续跑的权威信号，反复重挂反复续跑。这条路径漏掉的话，
 		// 「切断实例 churn 放大环」这件事只做了 spawn 那一半。
+		// 会话自身的元数据兜底：即便调用方漏传（refreshTaskTerminal 历史上就重建过一份不带 metadata 的
+		// 启动请求），只读约束与「从主会话当前回合分叉」这两件事也必须按会话真实身份来，不能在重启后丢掉。
+		// 方向恒为「只收紧不放宽」：request 缺席时读 summary 上一代盖的章。
+		const taskConversationSessionMetadataForLaunch =
+			request.taskConversationSessionMetadata ?? entry.summary.taskConversationSessionMetadata;
+		// 上面那道前置闸门已经把拒绝态排除干净，这里只剩「按 id」与「cwd-latest」两种。
+		const resumeAddressing = resumeAddressingResolvedBeforeAnyDestructiveStep;
 		let launch: PreparedAgentLaunch;
 		try {
 			await materializeTaskAgentSessionForExecutionWorkingDirectory({
@@ -2792,10 +2917,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 				workspaceId: request.workspaceId,
 				parentSessionId: request.parentSessionId,
 				taskAgentSessionInitialization: request.taskAgentSessionInitialization,
+				// 按-id 重启寻址。刻意**不**经 materializeTaskAgentSessionForExecutionWorkingDirectory：
+				// 那个函数是给「从别人的历史会话播种一张新卡」用的，源转录不存在时会 throw；而这里的转录
+				// 本来就在这个 cwd 里，让它把一次刷新变成硬失败没有任何道理。
+				observedAgentNativeConversationSessionResumeAddressing:
+					resumeAddressing.kind === "addressed_by_observed_agent_native_session_id"
+						? resumeAddressing.taskAgentSessionInitialization
+						: undefined,
 				readOnlyQuestionSession:
-					request.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way",
+					taskConversationSessionMetadataForLaunch?.taskConversationSessionRole === "by_the_way",
 				forkLatestWorkingDirectorySession:
-					request.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+					taskConversationSessionMetadataForLaunch?.taskConversationSessionContextSource ===
 					"forked_from_main_current_turn",
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 			});
@@ -4463,6 +4595,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskSessionStartOrigin: TaskSessionStartOrigin,
 		arrival: TaskSessionStartRequestArrival,
 	): Promise<RuntimeTaskSessionSummary> {
+		// 预检必须在 forceStopTaskSession **之前**：本方法是「停掉再起一条」，而拒绝的语义是「这次不动它」。
+		// 先停再让下游拒绝，等于用户点一次重启就把一条还活着的会话杀掉、还什么都没续上。
+		// 判据与启动漏斗里那道闸门同源（同一份 entry.summary + 同一批 entries），故结论必然一致。
+		const entryBeforeDestructiveRestart = this.entries.get(request.taskId);
+		if (entryBeforeDestructiveRestart) {
+			const resumeAddressing = this.resolveResumeAddressingForTaskSessionStart(
+				request,
+				entryBeforeDestructiveRestart,
+			);
+			if (resumeAddressing.kind === "refused_ambiguous_execution_working_directory") {
+				this.refuseResumeAddressingWithoutDisturbingExistingSession(
+					entryBeforeDestructiveRestart,
+					request,
+					resumeAddressing,
+				);
+			}
+		}
 		await this.forceStopTaskSession(request.taskId, 2_000);
 		const summary = await this.startTaskSessionHoldingPerTaskStartExclusivity(
 			request,

@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CardDetailView } from "@/components/card-detail-view";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
 import type { RuntimeAgentSessionTransport, RuntimeConfigResponse, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
@@ -304,6 +305,17 @@ function dispatchKeyDown(
 	});
 }
 
+// 真实应用把 TooltipProvider 挂在 main.tsx 的根上（Radix 的 Tooltip 没有 Provider 会直接抛），
+// 这里照同一个形态包裹整个 root，而不是给每一处 render 各加一层——后者只会制造大片与被测行为无关的改动。
+function createRootRenderingInsideTooltipProvider(mountContainer: HTMLElement): Root {
+	const reactRoot = createRoot(mountContainer);
+	return {
+		...reactRoot,
+		render: (children: React.ReactNode) => reactRoot.render(<TooltipProvider>{children}</TooltipProvider>),
+		unmount: () => reactRoot.unmount(),
+	};
+}
+
 describe("CardDetailView", () => {
 	let container: HTMLDivElement;
 	let root: Root;
@@ -316,7 +328,7 @@ describe("CardDetailView", () => {
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 		container = document.createElement("div");
 		document.body.appendChild(container);
-		root = createRoot(container);
+		root = createRootRenderingInsideTooltipProvider(container);
 		mockAgentTerminalPanel.mockClear();
 		mockClineAgentChatPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
@@ -1346,7 +1358,7 @@ describe("CardDetailView", () => {
 
 		await act(async () => {
 			root.unmount();
-			root = createRoot(container);
+			root = createRootRenderingInsideTooltipProvider(container);
 		});
 
 		await renderDetail();
@@ -1538,7 +1550,7 @@ describe("CardDetailView", () => {
 
 		await act(async () => {
 			root.unmount();
-			root = createRoot(container);
+			root = createRootRenderingInsideTooltipProvider(container);
 		});
 
 		await renderDetail();

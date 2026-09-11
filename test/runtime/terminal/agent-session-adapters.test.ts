@@ -1884,3 +1884,174 @@ describe("ompAdapter", () => {
 		expect(launch.shouldInspectOutputForTransition).toBeUndefined();
 	});
 });
+
+// 重启寻址轴（observedAgentNativeConversationSessionResumeAddressing）——本轴修的是：主会话与它的
+// By the way 侧问、以及同仓库下多个 inplace 任务共用同一个 cwd 时，`--continue` / `resume --last`
+// 这种「工作目录下最近一段对话」寻址必然抢错对话。
+describe("observed agent native conversation session resume addressing", () => {
+	const OBSERVED_NATIVE_SESSION_ID = "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c";
+	const SEEDED_SOURCE_SESSION_ID = "11111111-2222-3333-4444-555555555555";
+
+	it("resumes Claude by the observed session id without forking", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-claude-by-id",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "claude",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		const resumeIndex = launch.args.indexOf("--resume");
+		expect(resumeIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[resumeIndex + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+		// fork 会让 harness 新造 id，sidecar 追不上，下次重启就会去续被 fork 的源对话。
+		expect(launch.args).not.toContain("--fork-session");
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	// 本次修复的核心断言：重启路径恒发 resumeFromTrash，寻址轴必须压过它，否则 By the way 的重启
+	// 会用 `--continue` 抢到主会话的对话。
+	it("lets the addressing axis win over resumeFromTrash for Claude", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-claude-refresh",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "claude",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+	});
+
+	// 回归护栏：前端从垃圾桶恢复时会**同时**发 resumeFromTrash 与卡片上的播种 id，此时续的必须是
+	// 本任务自己的对话（`--continue`），不是播种源。寻址轴不得让这条既有行为改变。
+	it("keeps resumeFromTrash winning over the card's seeding initialization when no addressing is given", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-trash-restore-with-seeding",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			taskAgentSessionInitialization: {
+				sourceAgentId: "claude",
+				sourceSessionId: SEEDED_SOURCE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args).toContain("--continue");
+		expect(launch.args).not.toContain("--resume");
+		expect(launch.args).not.toContain(SEEDED_SOURCE_SESSION_ID);
+	});
+
+	it("does not weaken the read-only constraint of a By the way session addressed by id", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-claude-read-only",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			readOnlyQuestionSession: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "claude",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+		expect(launch.args).toContain("--permission-mode");
+		expect(launch.args).toContain("plan");
+	});
+
+	it("resumes Codex by the observed session id instead of `resume --last`", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-codex-by-id",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "codex",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		const resumeIndex = launch.args.indexOf("resume");
+		expect(resumeIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[resumeIndex + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+		expect(launch.args).not.toContain("--last");
+		expect(launch.args).not.toContain("fork");
+		// 按-id 续跑必须钉住工作目录，否则 codex 会在别处找这条会话。
+		expect(launch.args[launch.args.indexOf("-C") + 1]).toBe("/tmp/task-worktree");
+	});
+
+	it("resumes Cursor by the observed session id instead of `--continue`", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-cursor-by-id",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "cursor",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	// 解析器已保证两者一致；走到 adapter 还不一致说明有人绕过了漏斗，此时静默换回 cwd-latest 更糟。
+	it("throws when the addressing was recorded by a different harness than the one being launched", async () => {
+		setupTempHome();
+		await expect(
+			prepareAgentLaunch({
+				taskId: "task-conversation-session-mismatched-harness",
+				agentId: "codex",
+				binary: "codex",
+				args: [],
+				cwd: "/tmp/task-worktree",
+				prompt: "",
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: "claude",
+					sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			}),
+		).rejects.toThrow(/does not match selected agent/);
+	});
+});
