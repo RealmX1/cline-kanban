@@ -1,7 +1,7 @@
 // 维护作业的触发编排（B.2 宿主胶水的核心）。
 //
 // 「什么时候 fork 一个分身去判定话题归属」完全是宿主的职责——核心包只管「被调用时判哪些 turn」。
-// 本模块就是那个决定者，四道闸依次收窄，**每一道都在把钱挡在门外**（重型会话 fork 一次 ≈ $2.2，
+// 本模块就是那个决定者，四道闸依次收窄，**每一道都在把钱挡在门外**（重型会话 fork 一次 ≈ $4.5，
 // 成因见 docs/exploratory-mode-host-integration.md §3b）：
 //
 //   ① 模式闸：只有 `taskConversationMode === "exploratory"` 的卡片才维护。用户把任务切成探索模式
@@ -186,7 +186,7 @@ export function createExplorationThreadGraphMaintenanceTrigger(
 			});
 			// ④ 节流闸。手动触发（enforceThrottle=false）允许在未攒够阈值时也跑——这是契约
 			// （api-contract 的「跳过防抖与节流，但不跳过单飞闸」）；但「一个已完成 turn 都没有」
-			// 两条路径都拒绝：没有可判的 turn，放行只会白 fork 一次（≈ $2.2）。
+			// 两条路径都拒绝：没有可判的 turn，放行只会白 fork 一次（≈ $4.5）。
 			if (!throttleDecision.shouldRun) {
 				if (throttleDecision.reason === "no_completed_turns") {
 					return { kind: "not_started", reason: "no_completed_turns" };

@@ -12,7 +12,7 @@
 // 时 `--append-system-prompt` 根本不参与请求（差一字节、乃至完全不传，都照样 100% 命中）；（b）Claude
 // Code 的 `--fork-session` 在真实 Kanban 会话上**恒不命中**父会话 cache，成因是上游 open bug
 // anthropics/claude-code#77306：fork 会铸造新 session id，而 session id 被嵌在 system prompt 的 scratchpad
-// 路径里，前缀在 system 层就已经字节不一致（实测 220k 的 opus 会话 fork 一次 cache read = 0、约 $2.2）。
+// 路径里，前缀在 system 层就已经字节不一致（实测 446k 的 opus 会话 fork 一次 cache read = 0、$4.46）。
 // 规则本身不变，因为它的承重理由不止 cache：model 必须逐字一致，分身才跑在同一个模型上；settings 路径
 // 决定分身的 hook 行为；而 #77306 一旦修好，字节一致性的前提立刻恢复——届时不必回头补建快照。
 //

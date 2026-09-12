@@ -5,7 +5,7 @@
 // - `getExplorationThreadGraph` 是**免费**的——服务端只读落盘 collection 与 transcript 增量，
 //   合成投影后返回，绝不 fork 任何进程。想刷新就刷新。
 // - `requestExplorationThreadGraphMaintenance` 会让服务端 **fork 一个分身**去判定话题归属。
-//   在重型会话上一次约 $2.2（成因见 docs/exploratory-mode-host-integration.md §3b）。
+//   在重型会话上一次约 $4.5（成因见 docs/exploratory-mode-host-integration.md §3b）。
 //   它只该由用户的显式点击触发，绝不放进 effect / 轮询 / 重连回调里。
 
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";

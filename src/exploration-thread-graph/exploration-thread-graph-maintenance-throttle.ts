@@ -3,7 +3,8 @@
 // 为什么这是成本闸而不是性能调参：核心包的作业每跑一次，就从主会话 fork 一个分身。Pass A 实测
 // （见 docs/exploratory-mode-host-integration.md §3b）表明 Claude Code 的 `--fork-session` 在重型
 // 会话上**拿不到主会话的 prompt cache**（上游 open bug anthropics/claude-code#77306，无 ETA），
-// 一次 220k 上下文的 opus fork ≈ $2.2。每个 turn 都跑就是每个 turn 两块多美金。
+// 一次 446k 上下文的 opus fork ≈ $4.46（实测），且成本与上下文规模成正比。每个 turn 都跑就是
+// 每个 turn 四块多美金。
 //
 // 核心包侧没有替宿主实现节流（它只管「被调用时判哪些 turn」），所以闸门必须在这里。判据取
 // 「**已完成但尚未归位**的 turn 数」而不是「距上次维护过了多久」：时间与花销无关，turn 数才是。
@@ -19,8 +20,8 @@ import type {
 
 // 距上次归位至少要攒够多少个新 turn 才值得再 fork 一次。
 //
-// 取 5 的理由是成本：按实测单价，重型会话上每 5 个 turn 判一次 ≈ 每 turn 摊 $0.44，而每 turn 判
-// 一次是 $2.2。再大的间隔会让图明显落后于对话（探索场次里 5 个 turn 通常已经够走出一条岔路），
+// 取 5 的理由是成本：按实测单价，重型会话上每 5 个 turn 判一次 ≈ 每 turn 摊 $0.89，而每 turn 判
+// 一次是 $4.46。再大的间隔会让图明显落后于对话（探索场次里 5 个 turn 通常已经够走出一条岔路），
 // 再小则单价陡升。这个值是宿主策略、不是核心包语义，改它不影响任何契约。
 export const DEFAULT_MINIMUM_TURNS_BETWEEN_MAINTENANCE_RUNS = 5;
 

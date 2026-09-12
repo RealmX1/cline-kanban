@@ -44,6 +44,20 @@ const EXPLORATORY_MODE_INSTRUCTIONS = `# Exploratory Mode：探索礼仪与 find
 宁可措辞直白，不要为了行文流畅把话题切换藏进过渡句。你可能会在 Focus View 侧栏看到这张图；
 如果图把你的话题归错了线，说明表达还不够明确——在下一轮直接说清即可，**不要去改图**。
 
+### 想看这张图（只读）
+
+\`\`\`bash
+kanban exploratory get-exploration-thread-graph
+#    → { "view": { "turnRows": [...], "threads": [...], "laneCount": 2, ... },
+#        "turnSourceUnavailableSessionIds": [] }
+\`\`\`
+
+读是免费的（纯投影合成，不会 fork 任何分身），想读多少次都行。两个实际用途：**查自己当前是第几轮**
+（\`turnRows\` 带 \`turnNumber\`，提交 finding 的出处链接要填它），以及回顾这次探索已经走过哪些线。
+图还没长出来时返回的是一张空图而不是错误——那只说明作业还没跑过或还没攒够轮次。
+
+没有对应的写命令，这是有意的：结构由分身作业单独维护，你要做的只是把话说清楚。
+
 ## 二、findings：沉淀结论资产
 
 探索中得到的可复用结论（调查结论、坑与对策、关键事实）可以沉淀为 **finding**——一份带

@@ -10,7 +10,7 @@ import {
 	decideExplorationThreadGraphMaintenanceThrottle,
 } from "../../../src/exploration-thread-graph/exploration-thread-graph-maintenance-throttle";
 
-// 这道闸是宿主侧唯一的成本闸：放宽一格，每个 turn 就多烧一次 fork（重型会话实测 ≈ $2.2/次）。
+// 这道闸是宿主侧唯一的成本闸：放宽一格，每个 turn 就多烧一次 fork（重型会话实测 ≈ $4.5/次）。
 
 function makeSnapshot(conversationSessionId: string, turnNumbers: readonly number[]): CompletedTurnSequenceSnapshot {
 	return {
