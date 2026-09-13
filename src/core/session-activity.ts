@@ -580,13 +580,13 @@ export function isParkedAwaitingDispatchedBackgroundWork(
 //   5s  VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS 读 lastSubstantiveOutputAt Validation 列自动打回
 //   5min RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS      读 lastOutputAt        Active/Stale 二分
 //   5min IDLE_STALL_AUTO_REVIEW_THRESHOLD_MS（session-manager） 读实质戳   停在提示符时自愈翻人回合
-//   2h   本常量                                     读**离散停止事件**      回收 agent 进程 + 其 MCP 后代
+//   5h   本常量                                     读**离散停止事件**      回收 agent 进程 + 其 MCP 后代
 // 关键区别：上面四个都读「时间戳新鲜度」，本常量读的是一次明确的状态转移（agentResponseGenerationStopped）。
 // spinner 重绘会推进 lastOutputAt、实质分类器有节流窗口，二者都不表达「这一轮已经结束」。
 //
-// 2 小时统一适用于 task 会话、sidebar 项目会话（__home_agent__:*）、以及 error / interrupted / failed
+// 5 小时统一适用于 task 会话、sidebar 项目会话（__home_agent__:*）、以及 error / interrupted / failed
 // 等人回合——单一常数、零 per-kind 分档（用户拍板）。
-export const AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS = 2 * 60 * 60_000;
+export const AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS = 5 * 60 * 60_000;
 
 // park 轨道的独立兜底上限（默认值）：park 不走上面的宽限期——它表示「主 agent 正在等自己派发的
 // 后台工作」，那本就可能跑很久。24h 只是**未显式声明期限时**的兜底；`kanban task park --max-retention`

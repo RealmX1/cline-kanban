@@ -38,8 +38,8 @@ function facets(overrides: Partial<SessionFacets> = {}): SessionFacets {
 }
 
 describe("回收宽限期常量", () => {
-	it("统一宽限期为 2 小时", () => {
-		expect(AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS).toBe(2 * 60 * 60_000);
+	it("统一宽限期为 5 小时", () => {
+		expect(AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS).toBe(5 * 60 * 60_000);
 	});
 
 	it("park 兜底默认上限为 24 小时（独立轨道，不等于宽限期）", () => {
@@ -52,7 +52,7 @@ describe("回收宽限期常量", () => {
 
 describe("computeAgentSessionRuntimeReclamationEligibleAt", () => {
 	it("返回绝对时刻 = 锚点 + 宽限期", () => {
-		expect(computeAgentSessionRuntimeReclamationEligibleAt(NOW)).toBe(NOW + 2 * 60 * 60_000);
+		expect(computeAgentSessionRuntimeReclamationEligibleAt(NOW)).toBe(NOW + 5 * 60 * 60_000);
 	});
 
 	it("可传入自定义宽限期（park 轨道 / 设置项覆盖）", () => {
@@ -63,6 +63,13 @@ describe("computeAgentSessionRuntimeReclamationEligibleAt", () => {
 });
 
 describe("isAgentSessionRuntimeReclamationDue", () => {
+	it("默认期限在停止后两小时及五小时前未到期，满五小时到期", () => {
+		const reclamationEligibleAt = computeAgentSessionRuntimeReclamationEligibleAt(NOW);
+		expect(isAgentSessionRuntimeReclamationDue(reclamationEligibleAt, NOW + 2 * 60 * 60_000)).toBe(false);
+		expect(isAgentSessionRuntimeReclamationDue(reclamationEligibleAt, NOW + 5 * 60 * 60_000 - 1)).toBe(false);
+		expect(isAgentSessionRuntimeReclamationDue(reclamationEligibleAt, NOW + 5 * 60 * 60_000)).toBe(true);
+	});
+
 	it("未到期 → false", () => {
 		expect(isAgentSessionRuntimeReclamationDue(NOW + 1, NOW)).toBe(false);
 	});

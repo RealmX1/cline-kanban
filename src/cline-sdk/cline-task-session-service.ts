@@ -398,7 +398,7 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 		// 全新的 runtimeSessionIncarnationId（见下方 randomUUID），已落盘的旧期限本就因 incarnation 不匹配
 		// 而被 isReclamationDeadlineStillCurrentForSession 判为 superseded，与序号取 0 还是 1 无关。
 		// 刻意**不**采用「事后给已存在的 summary 归一化序号」那种改法——那会让在途期限凭空作废、改变
-		// 2 小时回收的时序。
+		// 回收宽限期的时序。
 		const sessionStateAtEntryConstruction: RuntimeTaskSessionState = request.resumeFromTrash
 			? "awaiting_review"
 			: "idle";
