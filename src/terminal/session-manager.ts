@@ -79,7 +79,11 @@ import {
 	stopWorkspaceTrustTimers,
 	WORKSPACE_TRUST_CONFIRM_DELAY_MS,
 } from "./claude-workspace-trust";
-import { hasCodexInteractivePrompt, hasCodexStartupUiRendered } from "./codex-readiness";
+import {
+	hasCodexInteractivePrompt,
+	hasCodexStartupPromptReady,
+	hasCodexUnsubmittedProgrammaticPrompt,
+} from "./codex-readiness";
 import { hasCodexWorkspaceTrustPrompt, shouldAutoConfirmCodexWorkspaceTrust } from "./codex-workspace-trust";
 import { hasKimiInteractivePrompt, hasKimiStartupUiRendered } from "./kimi-readiness";
 import {
@@ -322,7 +326,7 @@ interface ActiveProcessState {
 	rows: number;
 	terminalProtocolFilter: TerminalProtocolFilterState;
 	onSessionCleanup: (() => Promise<void>) | null;
-	deferredStartupInput: string | null;
+	deferredStartupPromptText: string | null;
 	detectOutputTransition: AgentOutputTransitionDetector | null;
 	shouldInspectOutputForTransition: AgentOutputTransitionInspectionPredicate | null;
 	awaitingCodexPromptAfterEnter: boolean;
@@ -336,7 +340,7 @@ interface ActiveProcessState {
 	// 独立的 wall-clock 兜底 timer：当 TUI 在一个（或被切分的）chunk 里渲染完整启动 UI、
 	// 而 readiness predicate 漏识别时，后续不会再有新 chunk 触发 deadline 检查，
 	// 导致 deferred prompt 永远注不进去。这个一次性 setTimeout 在到点后强制调用
-	// trySendDeferredStartupInput；命中 predicate 或 session 退出时由调用方清掉。
+	// trySubmitDeferredStartupPrompt；命中 predicate 或 session 退出时由调用方清掉。
 	// claude 与 kimi 共用该兜底（kimi 启动后通常只渲染一次输入框即空闲等待输入，
 	// 若该唯一渲染被 chunk 边界拆分，signal-only 判定会漏识别）。
 	startupReadinessTimer: NodeJS.Timeout | null;
@@ -531,6 +535,9 @@ interface PendingProgrammaticDeliveryReceipt {
 	// awaiting_readiness：还没写进 PTY，取消能真正拦下。
 	// awaiting_submit_confirmation：已写入、正在等提交确认，取消已经晚了。
 	phase: "awaiting_readiness" | "awaiting_submit_confirmation";
+	promptText: string;
+	// null 表示只粘贴、还没写提交 CR；计数器区分 CR 前的回显与提交后的新输出。
+	outputChunkArrivalSequenceNumberAtSubmitCarriageReturn: number | null;
 	// 写入 PTY 那一刻 agent 是否正在自己的回合中——决定确认后报 delivered_and_submit_confirmed
 	// 还是 delivered_queued_behind_active_agent_turn。必须在写入时捕获：确认 tick 跑到时回合早就变了。
 	queuedBehindActiveAgentTurn: boolean;
@@ -1099,13 +1106,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 何况 this.entries 全仓没有 delete/clear，条目只增不减。进程级兜底在这种形态下不可替代。
 	private recentFastExitAutoRestartTimestampsAcrossAllTasksWithinRollingHour: number[] = [];
 
-	private trySendDeferredStartupInput(taskId: string): boolean {
+	private async trySubmitDeferredStartupPrompt(taskId: string): Promise<boolean> {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
 		if (!entry || !active) {
 			return false;
 		}
-		if (active.deferredStartupInput === null) {
+		if (active.deferredStartupPromptText === null) {
 			return false;
 		}
 		const trustPromptVisible =
@@ -1115,14 +1122,27 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (trustPromptVisible) {
 			return false;
 		}
-		const deferredInput = active.deferredStartupInput;
-		active.deferredStartupInput = null;
+		if (entry.summary.agentId === "codex") {
+			const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
+			if (
+				!snapshot ||
+				!hasCodexStartupPromptReady(snapshot.lines.map((line) => line.text).join("\n")) ||
+				this.entries.get(taskId)?.active !== active ||
+				active.deferredStartupPromptText === null
+			) {
+				return false;
+			}
+		}
+		const deferredStartupPromptText = active.deferredStartupPromptText;
+		active.deferredStartupPromptText = null;
 		// Deferred input 已经注入，wall-clock 兜底 timer 不再需要，立即清除以避免
 		// 在已经 idle 的 session 上空跑回调。
 		clearStartupReadinessTimer(active);
-		active.session.write(deferredInput);
+		this.writePasteSubmissionWithConfirm(taskId, active, deferredStartupPromptText, {
+			waitsForStartupCompletion: true,
+		});
 		logTuiFreezeWarning(
-			`[tui-freeze] startup-prompt-flushed taskId=${taskId} agentId=${entry.summary.agentId} chars=${deferredInput.length}`,
+			`[tui-freeze] startup-prompt-flushed taskId=${taskId} agentId=${entry.summary.agentId} chars=${deferredStartupPromptText.length}`,
 		);
 		return true;
 	}
@@ -1472,7 +1492,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// task-chat-input 投递的让路已改用读输入框的争用判据（框空即放行，见 runTaskChatInputDeliveryAttempt）：
 	// 时间戳窗口分不出「刚敲完回车提交了」与「打了一半」，而那正是形态 3 要解决的问题。
 	private canInjectIntoTerminalNow(active: ActiveProcessState): boolean {
-		if (active.deferredStartupInput !== null) {
+		if (active.deferredStartupPromptText !== null) {
 			return false;
 		}
 		if (active.lastUserInputAt !== null && now() - active.lastUserInputAt < OUTPUT_REACTION_USER_INPUT_SUPPRESS_MS) {
@@ -1528,6 +1548,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			active.programmaticDeliveryReceipt = {
 				idempotencyKey: options.idempotencyKey ?? null,
 				phase: "awaiting_readiness",
+				promptText: text,
+				outputChunkArrivalSequenceNumberAtSubmitCarriageReturn: null,
 				queuedBehindActiveAgentTurn: false,
 				settled: false,
 				observer: options.onDeliveryOutcome,
@@ -1669,7 +1691,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		// deferred-startup 仍待发 ⇒ 这条会话连启动 prompt 都还没送出去，绝不能插到它前面：与「尚未就绪」
 		// 同等对待（旧实现把它混在 A1 让路里，语义上一直是「还不能写」而不是「在给人让路」）。
-		const readyToWriteIntoInputBox = readiness !== null && currentActive.deferredStartupInput === null;
+		const readyToWriteIntoInputBox = readiness !== null && currentActive.deferredStartupPromptText === null;
 		const pastDeadline = now() >= deadlineAt;
 		if (!readyToWriteIntoInputBox && !pastDeadline) {
 			// 尚未就绪且未过 deadline：隔 RECHECK_MS 再探（纯轮询，不消耗额外语义）。
@@ -2015,13 +2037,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.emitSummary(updateSummary(entry, { terminalDeliveryContention: contention }));
 	}
 
-	// 两处程序化 paste 注入（RVF followup 与连接中断续跑）的统一写入入口 + 写后确认闭环。先写 bracketed paste
+	// 启动首发、RVF followup 与连接中断续跑的程序化 paste 注入的统一写入入口 + 写后确认闭环。先写 bracketed paste
 	// 框架、待 TUI 摄入后再单独写提交用的 CR（Codex 的 awaitingCodexPromptAfterEnter 跟着那次 CR 置位，
 	// 理由见 runSubmitCarriageReturnAfterPasteIngestionAttempt），然后起一个确认 tick：隔 SUBMIT_CONFIRM_DELAY_MS
 	// 检查输出是否在 paste 回显后重新流动——未恢复（CR 被吞、框卡 idle）且用户未在打字时补发裸 `\r`（绝不重 paste）。
-	// 「真提交 vs CR 被吞」的判据对两条路径都成立：真提交 → agent 干活 → 持续产出 → 非静默；CR 被吞 → 终端回落
-	// idle 框、再无字节 → 静默（见 src/core/session-activity.ts）。故确认统一用 output-quiet，不把 turnOwner 写进门控
-	// （连接中断注入时 turnOwner 已是 agent，区分不了 landed/swallowed）。
+	// Codex 会在空闲输入框绘制背景动画：先排除本次文本仍在 composer 的情况，再沿用输出静默判据。
+	// 启动忙碌时只等待，真正补发仍至多三次；首发等待预算复用投递就绪的 60s，覆盖 MCP 等原生初始化。
 	// options.retainsProgrammaticDeliveryReceipt：本次写入是否就是那条待回执投递自己的写入。
 	// 只有 task-chat 投递路径传 true。连接中断自动续跑（submitConnectionDropContinuation）不传——
 	// 它会夺走确认通道，被夺走的那条投递从此确认不到提交，只能诚实报 submit_confirmation_budget_exhausted
@@ -2035,7 +2056,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskId: string,
 		active: ActiveProcessState,
 		text: string,
-		options?: { retainsProgrammaticDeliveryReceipt?: boolean },
+		options?: { retainsProgrammaticDeliveryReceipt?: boolean; waitsForStartupCompletion?: boolean },
 	): void {
 		if (!options?.retainsProgrammaticDeliveryReceipt) {
 			settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
@@ -2047,12 +2068,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 分离写第一步：只写 bracketed paste 框架，**不带**提交用的 CR。
 		// 刻意**不**在这里置 awaitingCodexPromptAfterEnter：那个标志的语义是「回车刚发出去」，
 		// 必须跟着 CR（见 runSubmitCarriageReturnAfterPasteIngestionAttempt），不能跟着框架。
-		active.session.write(toBracketedPasteFramingWithoutTrailingSubmit(text));
+		// Codex 会折叠长粘贴；若 /plan 也在占位符里，原生 composer 会把它当普通正文。
+		// 分开粘贴命令前缀与参数，保留原生斜杠解析，仍只在摄入后写一次提交 CR。
+		const shouldKeepCodexPlanCommandOutsideFoldedPaste =
+			this.entries.get(taskId)?.summary.agentId === "codex" && text.startsWith("/plan ");
+		active.session.write(
+			shouldKeepCodexPlanCommandOutsideFoldedPaste
+				? toBracketedPasteFramingWithoutTrailingSubmit("/plan ") +
+						toBracketedPasteFramingWithoutTrailingSubmit(text.slice(6))
+				: toBracketedPasteFramingWithoutTrailingSubmit(text),
+		);
 		// last-write-wins：清掉上一条 paste 提交的待决确认链（含它可能还停在「等摄入证据」那一步的定时器），
 		// 自增代际令本次成为唯一有效确认。
 		clearSubmitConfirmTimer(active);
 		const generation = ++active.submitConfirmGeneration;
 		this.scheduleSubmitCarriageReturnAfterPasteIngestionPoll(taskId, active, generation, {
+			promptText: text,
+			confirmationBudgetMs: options?.waitsForStartupCompletion
+				? TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS
+				: SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS,
 			outputChunkArrivalSequenceNumberAtPasteWrite: active.ptyOutputChunkArrivalSequenceNumber,
 			ingestionEvidenceDeadlineAt: now() + PASTE_INGESTION_EVIDENCE_MAX_WAIT_BEFORE_SUBMIT_MS,
 		});
@@ -2064,7 +2098,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskId: string,
 		active: ActiveProcessState,
 		generation: number,
-		ingestionWatch: { outputChunkArrivalSequenceNumberAtPasteWrite: number; ingestionEvidenceDeadlineAt: number },
+		ingestionWatch: {
+			promptText: string;
+			confirmationBudgetMs: number;
+			outputChunkArrivalSequenceNumberAtPasteWrite: number;
+			ingestionEvidenceDeadlineAt: number;
+		},
 	): void {
 		const timer = setTimeout(() => {
 			this.runSubmitCarriageReturnAfterPasteIngestionAttempt(taskId, generation, ingestionWatch);
@@ -2077,7 +2116,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private runSubmitCarriageReturnAfterPasteIngestionAttempt(
 		taskId: string,
 		generation: number,
-		ingestionWatch: { outputChunkArrivalSequenceNumberAtPasteWrite: number; ingestionEvidenceDeadlineAt: number },
+		ingestionWatch: {
+			promptText: string;
+			confirmationBudgetMs: number;
+			outputChunkArrivalSequenceNumberAtPasteWrite: number;
+			ingestionEvidenceDeadlineAt: number;
+		},
 	): void {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
@@ -2095,6 +2139,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!pasteIngestionWitnessed && now() < ingestionWatch.ingestionEvidenceDeadlineAt) {
 			this.scheduleSubmitCarriageReturnAfterPasteIngestionPoll(taskId, active, generation, ingestionWatch);
 			return;
+		}
+		if (active.programmaticDeliveryReceipt?.phase === "awaiting_submit_confirmation") {
+			active.programmaticDeliveryReceipt.outputChunkArrivalSequenceNumberAtSubmitCarriageReturn =
+				active.ptyOutputChunkArrivalSequenceNumber;
 		}
 		active.session.write(BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN);
 		// awaitingCodexPromptAfterEnter 必须在**这里**置位，与 writeInput 只在 data 含 CR/LF 时置位同形：
@@ -2120,7 +2168,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			active,
 			generation,
 			SUBMIT_CONFIRM_MAX_RESENDS,
-			now() + SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS,
+			now() + ingestionWatch.confirmationBudgetMs,
+			ingestionWatch.promptText,
 		);
 	}
 
@@ -2131,9 +2180,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 		generation: number,
 		resendsLeft: number,
 		convergenceDeadlineAt: number,
+		promptText: string,
 	): void {
 		const timer = setTimeout(() => {
-			this.runSubmitConfirmAttempt(taskId, generation, resendsLeft, convergenceDeadlineAt);
+			void this.runSubmitConfirmAttempt(taskId, generation, resendsLeft, convergenceDeadlineAt, promptText).catch(
+				(error: unknown) => {
+					logTuiFreezeError(`[tui-freeze] submit-confirmation-failed taskId=${taskId} error=${String(error)}`);
+					if (this.entries.get(taskId)?.active === active && active.submitConfirmGeneration === generation) {
+						settleActiveProgrammaticDeliveryOnlyWhenAwaitingSubmitConfirmation(
+							active,
+							"delivery_failed",
+							"submit_confirmation_budget_exhausted",
+						);
+					}
+				},
+			);
 		}, SUBMIT_CONFIRM_DELAY_MS);
 		timer.unref?.();
 		active.submitConfirmTimer = timer;
@@ -2142,12 +2203,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// 一次确认/补发 attempt：read 输出是否恢复流动决定 confirmed / 补发裸 `\r` / 让位 / 收尾。
 	// generation 为 writePasteSubmissionWithConfirm 调度时捕获的代际；被更晚的 paste 提交取代（代际不再相等）者放弃。
 	// convergenceDeadlineAt 为整条链的绝对收敛上界（见 SUBMIT_CONFIRM_CHAIN_MAX_CONVERGENCE_MS）。
-	private runSubmitConfirmAttempt(
+	private async runSubmitConfirmAttempt(
 		taskId: string,
 		generation: number,
 		resendsLeft: number,
 		convergenceDeadlineAt: number,
-	): void {
+		promptText: string,
+	): Promise<void> {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
 		if (!entry || !active) {
@@ -2159,9 +2221,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		active.submitConfirmTimer = null;
+		let codexPromptStillInComposer = false;
+		let codexSubmissionBlockedByStartup = false;
+		if (entry.summary.agentId === "codex" && entry.terminalStateMirror) {
+			const screen = await entry.terminalStateMirror.getScreenSnapshot();
+			if (this.entries.get(taskId)?.active !== active || active.submitConfirmGeneration !== generation) return;
+			const viewportText = screen.lines.map((line) => line.text).join("\n");
+			codexPromptStillInComposer = hasCodexUnsubmittedProgrammaticPrompt(viewportText, promptText);
+			codexSubmissionBlockedByStartup = codexPromptStillInComposer && !hasCodexStartupPromptReady(viewportText);
+		}
 		// 输出已恢复流动（非静默）→ 真提交（agent 在干活）或已弹出 question/permission 对话框 → 判定已落地/已推进，停。
 		// 这也避免把裸 `\r` 发进对话框误答。
-		if (!evaluateAgentOutputQuiet(entry.summary.lastOutputAt ?? null, now())) {
+		if (!codexPromptStillInComposer && !evaluateAgentOutputQuiet(entry.summary.lastOutputAt ?? null, now())) {
 			logTuiFreezeWarning(`[tui-freeze] submit-confirmed taskId=${taskId} agentId=${entry.summary.agentId}`);
 			// 提交已确认。两种终态的区别只在「写入那一刻 agent 是否已在自己的回合中」，
 			// 该标记在写入时就捕获好了（见 runTaskChatInputDeliveryAttempt）。
@@ -2201,9 +2272,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// prompt）；预算还在则再排一拍等待（不消耗预算），用户停手越过抑制窗后的下一拍才可能补发。
 		// 让位本身要保留，但它必须有尽头：上界由 convergenceDeadlineAt 兜住（上面那一支），
 		// 补发预算已耗尽时更是再等也无事可做——继续排 tick 只会让回执一直没有结论，故当场诚实收尾。
-		if (!this.canInjectIntoTerminalNow(active)) {
+		if (codexSubmissionBlockedByStartup || !this.canInjectIntoTerminalNow(active)) {
 			if (resendsLeft > 0) {
-				this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft, convergenceDeadlineAt);
+				this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft, convergenceDeadlineAt, promptText);
 				return;
 			}
 			logTuiFreezeError(
@@ -2239,7 +2310,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		logTuiFreezeWarning(
 			`[tui-freeze] submit-resend-cr taskId=${taskId} agentId=${entry.summary.agentId} remaining=${resendsLeft - 1}`,
 		);
-		this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft - 1, convergenceDeadlineAt);
+		this.scheduleSubmitConfirmTick(taskId, active, generation, resendsLeft - 1, convergenceDeadlineAt, promptText);
 	}
 
 	// 提示符就绪判定（多通道）：① 快路径——尚未建模输入框结构的 agent，在输出反应扫描缓冲在线时复用同步的
@@ -3000,7 +3071,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					(entry.active.shouldInspectOutputForTransition?.(entry.summary) ?? true));
 			const needsDecodedOutput =
 				entry.active.workspaceTrustBuffer !== null ||
-				entry.active.deferredStartupInput !== null ||
+				entry.active.deferredStartupPromptText !== null ||
 				hasBatchedOutputAnalysisConsumer;
 			const data = needsDecodedOutput ? filteredChunk.toString("utf8") : "";
 
@@ -3048,15 +3119,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			// claude / kimi 路径在 readiness predicate 命中之前保持等待；超过
 			// startupReadinessDeadlineAt 后回退到"任意 output 即触发"，
 			// 兜底 predicate 漏识别的极端 TUI 渲染，避免回归到 prompt 永远注不进去。
-			if (entry.active.deferredStartupInput !== null && data.length > 0) {
+			if (entry.active.deferredStartupPromptText !== null && data.length > 0) {
 				const claudeBuffer = entry.active.workspaceTrustBuffer ?? "";
-				const codexReady =
-					entry.summary.agentId === "codex" &&
-					(hasCodexInteractivePrompt(data) ||
-						hasCodexStartupUiRendered(data) ||
-						(entry.active.workspaceTrustBuffer !== null &&
-							(hasCodexInteractivePrompt(entry.active.workspaceTrustBuffer) ||
-								hasCodexStartupUiRendered(entry.active.workspaceTrustBuffer))));
+				const codexReady = entry.summary.agentId === "codex";
 				const claudeReadyBySignal =
 					entry.summary.agentId === "claude" &&
 					(hasClaudeInteractivePrompt(data) ||
@@ -3073,7 +3138,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 				const readyByDeadline =
 					entry.active.startupReadinessDeadlineAt !== null && now() >= entry.active.startupReadinessDeadlineAt;
 				if (codexReady || claudeReadyBySignal || kimiReady || readyByDeadline) {
-					this.trySendDeferredStartupInput(request.taskId);
+					void this.trySubmitDeferredStartupPrompt(request.taskId).catch((error: unknown) => {
+						logTuiFreezeError(
+							`[tui-freeze] startup-readiness-failed taskId=${request.taskId} error=${String(error)}`,
+						);
+					});
 				}
 			}
 
@@ -3248,14 +3317,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 				suppressDeviceAttributeQueries: request.agentId === "droid",
 			}),
 			onSessionCleanup: launch.cleanup ?? null,
-			deferredStartupInput: launch.deferredStartupInput ?? null,
+			deferredStartupPromptText: launch.deferredStartupPromptText ?? null,
 			detectOutputTransition: launch.detectOutputTransition ?? null,
 			shouldInspectOutputForTransition: launch.shouldInspectOutputForTransition ?? null,
 			awaitingCodexPromptAfterEnter: false,
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
 			startupReadinessDeadlineAt:
-				AGENT_IDS_WITH_STARTUP_READINESS_DEADLINE_FALLBACK.has(request.agentId) && launch.deferredStartupInput
+				AGENT_IDS_WITH_STARTUP_READINESS_DEADLINE_FALLBACK.has(request.agentId) && launch.deferredStartupPromptText
 					? now() + STARTUP_READINESS_TIMEOUT_MS
 					: null,
 			startupReadinessTimer: null,
@@ -3324,8 +3393,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 独立的 wall-clock 兜底：claude / kimi 可能在一个 chunk 里渲染完启动 UI，而 readiness
 		// predicate 漏识别（例如 TUI 文案改写、边框 / 输入框被切分到两块 chunk 里），此后不会
 		// 再有 output 触发 handleTaskOutput 里的 deadline 检查。注册一次性 timer 强制
-		// 在 timeout 时调用 trySendDeferredStartupInput，避免 prompt 永远注不进去。
-		if (AGENT_IDS_WITH_STARTUP_READINESS_DEADLINE_FALLBACK.has(request.agentId) && launch.deferredStartupInput) {
+		// 在 timeout 时调用 trySubmitDeferredStartupPrompt，避免 prompt 永远注不进去。
+		if (AGENT_IDS_WITH_STARTUP_READINESS_DEADLINE_FALLBACK.has(request.agentId) && launch.deferredStartupPromptText) {
 			active.startupReadinessTimer = setTimeout(() => {
 				const entryAtTimeout = this.entries.get(request.taskId);
 				const activeAtTimeout = entryAtTimeout?.active;
@@ -3333,7 +3402,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 					return;
 				}
 				activeAtTimeout.startupReadinessTimer = null;
-				this.trySendDeferredStartupInput(request.taskId);
+				void this.trySubmitDeferredStartupPrompt(request.taskId).catch((error: unknown) => {
+					logTuiFreezeError(
+						`[tui-freeze] startup-readiness-failed taskId=${request.taskId} error=${String(error)}`,
+					);
+				});
 			}, STARTUP_READINESS_TIMEOUT_MS);
 		}
 
@@ -3617,7 +3690,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				interceptOscColorQueries: true,
 			}),
 			onSessionCleanup: null,
-			deferredStartupInput: null,
+			deferredStartupPromptText: null,
 			detectOutputTransition: null,
 			shouldInspectOutputForTransition: null,
 			awaitingCodexPromptAfterEnter: false,
@@ -3718,11 +3791,81 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
+	// 人类接管和模态出现都永久停止自动回车；回执只按接管之前已有的提交证据结算。
+	private stopAutomaticSubmissionAndSettleInterruptedDelivery(
+		entry: SessionEntry,
+		modalDecisionObserved: boolean,
+	): void {
+		const active = entry.active;
+		if (!active) return;
+		clearSubmitConfirmTimer(active);
+		active.submitConfirmGeneration += 1;
+		active.deferredStartupPromptText = null;
+		clearStartupReadinessTimer(active);
+		const receipt = active.programmaticDeliveryReceipt;
+		if (receipt?.phase !== "awaiting_submit_confirmation") return;
+		// 同步摘下原回执，后续击键/新投递不能用其新输出再次确认这条已被接管的投递。
+		active.programmaticDeliveryReceipt = null;
+		const outputSequenceAtSubmit = receipt.outputChunkArrivalSequenceNumberAtSubmitCarriageReturn;
+		const submissionProgressObserved =
+			outputSequenceAtSubmit !== null &&
+			(modalDecisionObserved ||
+				(active.ptyOutputChunkArrivalSequenceNumber > outputSequenceAtSubmit &&
+					!evaluateAgentOutputQuiet(entry.summary.lastOutputAt ?? null, now())));
+		const settleInterruptedReceipt = (confirmed: boolean) => {
+			settleProgrammaticDeliveryReceipt(
+				receipt,
+				confirmed
+					? receipt.queuedBehindActiveAgentTurn
+						? "delivered_queued_behind_active_agent_turn"
+						: "delivered_and_submit_confirmed"
+					: "delivery_failed",
+				confirmed ? null : "submit_confirmation_budget_exhausted",
+			);
+		};
+		if (!submissionProgressObserved || modalDecisionObserved || entry.summary.agentId !== "codex") {
+			settleInterruptedReceipt(submissionProgressObserved);
+			return;
+		}
+		// 在 writeInput 写入真人字节前排队读屏；只读、不重排补发，并捕获原 incarnation 和原回执。
+		// Codex 的背景动画不算提交：沿既有确认判据排除原文仍在 composer 的情况。
+		const screenSnapshot = entry.terminalStateMirror?.getScreenSnapshot();
+		if (!screenSnapshot) {
+			settleInterruptedReceipt(false);
+			return;
+		}
+		void screenSnapshot.then(
+			(screen) => {
+				settleInterruptedReceipt(
+					this.entries.get(entry.summary.taskId)?.active === active &&
+						!hasCodexUnsubmittedProgrammaticPrompt(
+							screen.lines.map((line) => line.text).join("\n"),
+							receipt.promptText,
+						),
+				);
+			},
+			() => settleInterruptedReceipt(false),
+		);
+	}
+
 	writeInput(taskId: string, data: Buffer): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry?.active) {
 			return null;
 		}
+		// xterm 的查询应答、焦点和鼠标报告也经 io WebSocket 到这里；它们不是人工接管。
+		// onData/onBinary 每次 send 保留完整消息边界；只豁免整条协议报告，混入按键仍走人工输入。
+		// ponytail: 按当前 xterm 协议识别；若增加新的报告类型，在这里补协议及回归，不泛化豁免所有 ESC。
+		const isTerminalProtocolResponseOnly =
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: 终端协议必须识别 ESC/BEL 控制字符。
+			/^(?:\u001b\[(?:\??\d+;\d+R|[?>][\d;]*c|\??[\d;]+n|\?[\d;]+\$y|[\d;]+t|[IO]|<[\d;]+[Mm]|M[\x20-\xff]{3})|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001bP[^\u001b]*\u001b\\)+(?![\s\S])/.test(
+				data.toString("latin1"),
+			);
+		if (data.length === 0 || isTerminalProtocolResponseOnly) {
+			entry.active.session.write(data);
+			return cloneSummary(entry.summary);
+		}
+		this.stopAutomaticSubmissionAndSettleInterruptedDelivery(entry, false);
 		// 记录用户手动输入时刻，用于抑制自动续跑注入打断正在打字的用户。
 		entry.active.lastUserInputAt = now();
 		// 输入侧字节跟踪：维护「框里有没有未提交内容」并给被 TUI 折叠掉的粘贴留原文账本。
@@ -4730,6 +4873,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 			})
 		) {
 			entry.active.awaitingCodexPromptAfterEnter = false;
+		}
+		if (
+			entry.active &&
+			transition.patch.userTurnKind &&
+			MODAL_USER_DECISION_TURN_KINDS.has(transition.patch.userTurnKind)
+		) {
+			this.stopAutomaticSubmissionAndSettleInterruptedDelivery(entry, true);
 		}
 		return updateSummary(entry, transition.patch);
 	}

@@ -392,7 +392,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 
 		expect(launch.args).toContain("Implement the task");
-		expect(launch.deferredStartupInput).toBeUndefined();
+		expect(launch.deferredStartupPromptText).toBeUndefined();
 	});
 
 	it("does not replay the saved Claude task prompt when resuming a task", async () => {
@@ -409,7 +409,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 		expect(launch.args).toContain("--continue");
 		expect(launch.args).not.toContain("Original task prompt");
-		expect(launch.deferredStartupInput).toBeUndefined();
+		expect(launch.deferredStartupPromptText).toBeUndefined();
 	});
 
 	it("appends task workspace guard instructions for Claude task sessions", async () => {
@@ -1071,9 +1071,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 
 		expect(launch.args).not.toContain("Audit the deployment pipeline");
-		expect(launch.deferredStartupInput).toContain("\u001b[200~");
-		expect(launch.deferredStartupInput).toContain("/plan Audit the deployment pipeline");
-		expect(launch.deferredStartupInput?.endsWith("\r")).toBe(true);
+		expect(launch.deferredStartupPromptText).toBe("/plan Audit the deployment pipeline");
 	});
 
 	it("defers a bare /plan command when Codex plan mode has no prompt text", async () => {
@@ -1088,10 +1086,59 @@ describe("prepareAgentLaunch hook strategies", () => {
 			startInPlanMode: true,
 		});
 
-		expect(launch.deferredStartupInput).toContain("/plan");
-		expect(launch.deferredStartupInput).not.toContain("/plan ");
-		expect(launch.deferredStartupInput?.endsWith("\r")).toBe(true);
+		expect(launch.deferredStartupPromptText).toBe("/plan");
+		expect(launch.deferredStartupPromptText).not.toContain("/plan ");
 	});
+
+	it.each(["resumeFromTrash", "resumePriorAgentConversationWithoutResendingPrompt"] as const)(
+		"Codex 恢复标记 %s 不重发原任务或残留 Plan 命令",
+		async (resumeFlag) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "task-codex-plan-restoration",
+				agentId: "codex",
+				args: [],
+				cwd: "/tmp",
+				prompt: "不应重发的原始任务",
+				startInPlanMode: true,
+				[resumeFlag]: true,
+				workspaceId: "workspace-1",
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: "codex",
+					sourceSessionId: "11111111-2222-3333-4444-555555555555",
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			});
+			expect(launch.deferredStartupPromptText).toBeUndefined();
+			expect(launch.args).not.toContain("不应重发的原始任务");
+			expect(launch.args).not.toContain("--last");
+			expect(launch.args).toContain("11111111-2222-3333-4444-555555555555");
+		},
+	);
+
+	it.each(["resume_existing_session", "fork_existing_session"] as const)(
+		"Codex 从历史 %s 播种的新任务仍提交新的 Plan 文本",
+		async (sourceSessionReuseMode) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "task-codex-plan-seeding",
+				agentId: "codex",
+				args: [],
+				cwd: "/tmp",
+				prompt: "新的任务\n保留换行",
+				startInPlanMode: true,
+				workspaceId: "workspace-1",
+				taskAgentSessionInitialization: {
+					sourceAgentId: "codex",
+					sourceSessionId: "11111111-2222-3333-4444-555555555555",
+					sourceSessionReuseMode,
+				},
+			});
+			expect(launch.deferredStartupPromptText).toBe("/plan 新的任务\n保留换行");
+			expect(launch.resumesPriorAgentConversation).toBe(true);
+			expect(launch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
+		},
+	);
 
 	it("writes Cline hook scripts and injects --hooks-dir", async () => {
 		setupTempHome();
@@ -1805,11 +1852,11 @@ describe("ompAdapter", () => {
 		expect(launch.args).not.toContain("acp");
 	});
 
-	// 位置 prompt 会在 TUI 初始化完成后由 omp 自动提交，因此不需要 deferredStartupInput。
+	// 位置 prompt 会在 TUI 初始化完成后由 omp 自动提交，因此不需要 deferredStartupPromptText。
 	it("passes the task prompt positionally and does not defer startup input", async () => {
 		const launch = await prepareOmpLaunch({ prompt: "Implement the feature" });
 		expect(launch.args.some((argument) => argument.includes("Implement the feature"))).toBe(true);
-		expect(launch.deferredStartupInput).toBeUndefined();
+		expect(launch.deferredStartupPromptText).toBeUndefined();
 	});
 
 	// 坑 ①：omp 的大粘贴菜单默认 100 行触发，会挂住会话等人选。overlay 必须把它关掉（0）。
@@ -2053,5 +2100,20 @@ describe("observed agent native conversation session resume addressing", () => {
 				},
 			}),
 		).rejects.toThrow(/does not match selected agent/);
+	});
+});
+
+describe("Kimi 延迟首发文本", () => {
+	it.each([false, true])("恢复标记 %s：仅新会话保留原始多行文本", async (resumeFromTrash) => {
+		const launch = await prepareAgentLaunch({
+			taskId: "kimi-startup-text",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			cwd: "/tmp",
+			prompt: "第一行\n第二行",
+			resumeFromTrash,
+		});
+		expect(launch.deferredStartupPromptText).toBe(resumeFromTrash ? undefined : "第一行\n第二行");
 	});
 });

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 
-// 部分 mock：只替换 prepareAgentLaunch，其余导出（toBracketedPasteSubmission 等，程序化投递路径要用）
+// 部分 mock：只替换 prepareAgentLaunch，其余导出（toBracketedPasteFramingWithoutTrailingSubmit 等，程序化投递路径要用）
 // 保留真身——否则投递写入时会抛 "No export is defined on the mock" 的 unhandled rejection。
 vi.mock("../../../src/terminal/agent-session-adapters.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../../src/terminal/agent-session-adapters.js")>()),

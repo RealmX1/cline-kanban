@@ -101,7 +101,8 @@ export interface PreparedAgentLaunch {
 	args: string[];
 	env: Record<string, string | undefined>;
 	cleanup?: () => Promise<void>;
-	deferredStartupInput?: string;
+	// 待 TUI 就绪后提交的原始文本，不含粘贴框架或提交回车。
+	deferredStartupPromptText?: string;
 	// 本次启动是否会接续 / 重播一段既有的 agent 对话（`--continue` / `--resume <id>` / `--fork-session`
 	// 等已被拼进 args）。session-manager 用它武装 resume substantive guard：重播出来的旧 transcript
 	// 不是「agent 刚刚响应」，不得推进 lastSubstantiveOutputAt（卡片左上角的「agent 上次响应」读它）。
@@ -788,17 +789,6 @@ export function toBracketedPasteFramingWithoutTrailingSubmit(command: string): s
 // 提交用的那个单独的 CR。写成 \u 转义而非字面量：控制字符在编辑器里不可见，极易在复制粘贴中被悄悄弄丢。
 export const BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN = "\u000d";
 
-// Wraps a command in bracketed-paste framing so a TUI agent (Claude Code, Codex)
-// treats it as a single pasted submission terminated by Enter. Exported so the
-// output-reactions framework can inject continuation prompts through the same
-// mechanism used for deferred startup input.
-//
-// ⚠️ 这个合并形态仍把 CR 拼在同一串里，故只保留给 deferred startup input 那条路径（启动时注入一次，
-// 自带就绪 deadline 兜底）。程序化投递与连接中断续跑一律改走上面两个导出分离写。
-export function toBracketedPasteSubmission(command: string): string {
-	return `${toBracketedPasteFramingWithoutTrailingSubmit(command)}${BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN}`;
-}
-
 function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string | null {
 	return combineAppendSystemPrompts(
 		resolveHomeAgentAppendSystemPrompt(input.taskId),
@@ -1131,7 +1121,7 @@ const codexAdapter: AgentSessionAdapter = {
 		const codexArgs = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
-		let deferredStartupInput: string | undefined;
+		let deferredStartupPromptText: string | undefined;
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 
 		if (!hasCodexConfigOverride(codexArgs, "check_for_update_on_startup")) {
@@ -1225,10 +1215,12 @@ const codexAdapter: AgentSessionAdapter = {
 			);
 		}
 
-		const trimmed = input.prompt.trim();
-		if (input.startInPlanMode) {
-			const planCommand = trimmed ? `/plan ${trimmed}` : "/plan";
-			deferredStartupInput = toBracketedPasteSubmission(planCommand);
+		const continuesWithoutNewPrompt = Boolean(
+			input.resumeFromTrash || input.resumePriorAgentConversationWithoutResendingPrompt,
+		);
+		const trimmed = continuesWithoutNewPrompt ? "" : input.prompt.trim();
+		if (input.startInPlanMode && !continuesWithoutNewPrompt) {
+			deferredStartupPromptText = trimmed ? `/plan ${trimmed}` : "/plan";
 		} else if (trimmed) {
 			codexArgs.push(trimmed);
 		}
@@ -1243,7 +1235,7 @@ const codexAdapter: AgentSessionAdapter = {
 					(parentSessionId !== null || Boolean(input.forkLatestWorkingDirectorySession))));
 
 		logTuiFreezeWarning(
-			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${forksSession} hasResume=${resumesSession} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
+			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${forksSession} hasResume=${resumesSession} promptChars=${trimmed.length} deferredViaInput=${deferredStartupPromptText !== undefined}`,
 		);
 
 		// 这里刻意只保留**唯一一个** return：hooks 配置只是就地改写 codexArgs / env（见上方
@@ -1256,7 +1248,7 @@ const codexAdapter: AgentSessionAdapter = {
 			binary,
 			args: codexArgs,
 			env,
-			deferredStartupInput,
+			deferredStartupPromptText,
 			// resume 与 fork 都会把既有会话的 transcript 重播进新 TUI（见 PreparedAgentLaunch 同名字段）。
 			resumesPriorAgentConversation: resumesSession || forksSession,
 			detectOutputTransition: codexPromptDetector,
@@ -2005,7 +1997,7 @@ function shouldInspectKimiOutputForTransition(summary: RuntimeTaskSessionSummary
 }
 
 // Kimi Code CLI（Moonshot 的原生终端 agent）。与 codexAdapter 同为「全屏 TUI + 无位置
-// prompt」形态，故任务 prompt 一律经 deferredStartupInput 在 TUI 就绪后 bracketed-paste 注入
+// prompt」形态，故任务 prompt 一律经 deferredStartupPromptText 在 TUI 就绪后 bracketed-paste 注入
 //（`kimi -p` 是单发 print 模式，不产生持久交互会话，不能用于托管会话）。
 const kimiAdapter: AgentSessionAdapter = {
 	async prepare(input) {
@@ -2048,12 +2040,12 @@ const kimiAdapter: AgentSessionAdapter = {
 		}
 
 		const trimmed = input.prompt.trim();
-		const deferredStartupInput = !input.resumeFromTrash && trimmed ? toBracketedPasteSubmission(trimmed) : undefined;
+		const deferredStartupPromptText = !input.resumeFromTrash && trimmed ? trimmed : undefined;
 
 		return {
 			args,
 			env,
-			deferredStartupInput,
+			deferredStartupPromptText,
 			detectOutputTransition: kimiPromptDetector,
 			shouldInspectOutputForTransition: shouldInspectKimiOutputForTransition,
 		};
@@ -2065,7 +2057,7 @@ const kimiAdapter: AgentSessionAdapter = {
 // 走哪条由 core/agent-session-transport-selection.ts 决定，不是这里。
 //
 // 形态上模板是 cursorAdapter 而不是 codex/kimi：omp 的根命令吃**位置 prompt** 并在 mode.init()
-// 完成后自动提交（main.ts 的 `session.prompt(initialMessage)`），所以不需要 deferredStartupInput，
+// 完成后自动提交（main.ts 的 `session.prompt(initialMessage)`），所以不需要 deferredStartupPromptText，
 // 也就完全不必碰 session-manager 的就绪判定与注入闸。
 const ompAdapter: AgentSessionAdapter = {
 	async prepare(input) {

@@ -44,7 +44,7 @@ function makeEntry(summaryOverrides: Partial<RuntimeTaskSessionSummary> = {}) {
 			outputReactionScanBuffer: null as string | null,
 			taskChatInputDeliveryTimer: null as NodeJS.Timeout | null,
 			taskChatInputDeliveryGeneration: 0,
-			deferredStartupInput: null,
+			deferredStartupPromptText: null,
 			lastUserInputAt: null,
 			session: { write: vi.fn() },
 		},
