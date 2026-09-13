@@ -14,11 +14,16 @@ import type { RuntimeAppRouter } from "../trpc/app-router";
 import { deliverHookIngestWithRetry } from "./hooks";
 
 // Exploratory Mode（蓝图 .plan/docs/exploratory-mode-session-map-and-findings-store.md §D）：
-// agent 提交 finding 建议的 CLI 通道——get-findings 列出现有 finding、ingest-finding-candidate
-// 提交建议（落库即待人确认）。
+// agent 侧的 CLI 通道——get-findings 列出现有 finding、ingest-finding-candidate 提交建议
+// （落库即待人确认）、get-exploration-thread-graph 读出这次探索的会话结构图。
 // 旧的 session map 读-改-写通道（get-session-map / ingest-map-update）已退役：会话结构改由
 // 独立包 agent-conversation-exploration-thread-graph 的 work-branch 作业维护，agent 不再手写结构
 // （宿主胶水见 docs/exploratory-mode-host-integration.md）。
+//
+// **结构图只有读通道，没有写通道**，这是刻意的非对称：图由 fork 出的分身作业单独维护，
+// agent 手写结构正是 session map 时代退役掉的那条路。读是纯投影合成、零 fork、零成本，
+// 想读多少次都行；真正花钱的 requestExplorationThreadGraphMaintenance 只暴露给 UI 的显式点击，
+// 不进 CLI——否则 agent 可以在自己的回合里反复烧掉 fork 预算（重型会话一次 ≈ $4.5）。
 //
 // 与 hooks ingest 的关键差异：exploratory.* / conversationTree.* 都是 workspaceProcedure，
 // workspace scope 走 `x-kanban-workspace-id` 请求头（hooks.ingest 是 input 带 workspaceId 的
@@ -393,10 +398,53 @@ async function runIngestFindingCandidate(options: ExploratoryScopeOptions & { pa
 	}
 }
 
+// explorationId 的默认值是本会话的 taskId——主会话场景下两者本就相同（契约：explorationId
+// = 主任务卡片 id）。by-the-way 会话有自己的 taskId、其 turn 归在主卡片的图里，所以它必须用
+// --exploration-id 显式指向主卡片；默认值在那种场景下只会查出一张空图，不会串到别人的图上。
+//
+// 这里刻意**不做** scope 解析那套「两来源不一致即硬报错」：--exploration-id 与 taskId 不同
+// 恰恰是 by-the-way 会话的正常形态，冲突校验会把唯一的正确用法判成错误。读路径也没有
+// 「写错了会污染谁」的风险——读别人的图只是读不到自己的。
+export function resolveExplorationIdForThreadGraphRead(input: {
+	explicitExplorationId: string | undefined;
+	taskId: string;
+}): string {
+	return readTrimmedValue(input.explicitExplorationId) ?? input.taskId;
+}
+
+async function runGetExplorationThreadGraph(
+	options: ExploratoryScopeOptions & { explorationId?: string },
+): Promise<void> {
+	let scope: ExploratoryCommandScope;
+	try {
+		scope = await resolveExploratoryCommandScope(options);
+	} catch (error) {
+		process.stderr.write(`kanban exploratory get-exploration-thread-graph: ${formatError(error)}\n`);
+		process.exitCode = 1;
+		return;
+	}
+
+	const explorationId = resolveExplorationIdForThreadGraphRead({
+		explicitExplorationId: options.explorationId,
+		taskId: scope.taskId,
+	});
+
+	try {
+		const trpcClient = createExploratoryTrpcClient(scope.workspaceId);
+		const response = await trpcClient.exploratory.getExplorationThreadGraph.query({ explorationId });
+		// 整份响应原样输出（view + turnSourceUnavailableSessionIds）：后者是「哪些会话的转录
+		// 暂时读不出来」，缺了它，读到的空图会被误读成「还没有任何 turn 归位」。
+		process.stdout.write(`${JSON.stringify(response)}\n`);
+	} catch (error) {
+		process.stderr.write(`kanban exploratory get-exploration-thread-graph: ${formatError(error)}\n`);
+		process.exitCode = 1;
+	}
+}
+
 export function registerExploratoryCommand(program: Command): void {
 	const exploratory = program
 		.command("exploratory")
-		.description("Exploratory Mode findings helpers for agent integrations.");
+		.description("Exploratory Mode helpers for agent integrations (findings + thread graph).");
 
 	exploratory
 		.command("get-findings")
@@ -409,6 +457,26 @@ export function registerExploratoryCommand(program: Command): void {
 		)
 		.action(async (options: ExploratoryScopeOptions) => {
 			await runGetFindings(options);
+		});
+
+	exploratory
+		.command("get-exploration-thread-graph")
+		.description(
+			"Print this exploration's thread graph as JSON (read-only, never forks). " +
+				"Use it to look up your own turn numbers before citing them in a finding's provenance links.",
+		)
+		.option("--task <taskId>", `Conversation session task id (defaults to ${KANBAN_HOOK_TASK_ID_ENV}).`)
+		.option("--workspace-id <id>", `Workspace id (defaults to --project-path, then ${KANBAN_HOOK_WORKSPACE_ID_ENV}).`)
+		.option(
+			"--project-path <path>",
+			"Resolve workspace from a registered project path (pass the main repo path when invoking from a task worktree).",
+		)
+		.option(
+			"--exploration-id <id>",
+			"Exploration to read (defaults to --task). Pass the main task id from a by-the-way session.",
+		)
+		.action(async (options: ExploratoryScopeOptions & { explorationId?: string }) => {
+			await runGetExplorationThreadGraph(options);
 		});
 
 	exploratory

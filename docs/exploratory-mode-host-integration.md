@@ -103,9 +103,17 @@ v1 只覆盖 claude（exploration 的第一 harness，也是唯一已核实 fork
 1. **快照规则不变**，但承重理由换了：model 必须逐字一致，分身才跑在同一个模型上；settings 路径决定分身的
    hook 行为；而 #77306 一旦修好，字节一致性的前提立刻恢复——届时不必回头补建快照。用户已就此拍板维持
    「fork 主会话 + 同 model」，契约零改动。
-2. **成本量级要按未缓存价重估**：实测 220k 的 opus 会话 fork 一次 cache read = 0、约 **$2.2**（原估算是按
-   cache read 计价的 ~$0.3/turn）。B.2 的触发胶水因此必须把节流旋钮当**默认开启**的东西设计，而不是可选项
-   ——`minimumTurnsBetweenMaintenanceRuns` 与「便宜模型」开关的默认值要按这个量级定。
+2. **成本量级要按未缓存价重估**：实测 220k 的 opus 会话 fork 一次 cache read = 0、约 **$2.2**；2026-09-12
+   在 2.1.269 上以 446k 的 opus 会话复测，仍是 cache read = 0、cache creation 445,912，单次 **$4.46**——
+   成本与上下文规模成正比，bug 未修。B.2 的触发胶水因此必须把节流旋钮当**默认开启**的东西设计，而不是
+   可选项——`minimumTurnsBetweenMaintenanceRuns` 与「便宜模型」开关的默认值要按这个量级定。
+
+**跨 harness 横向测量（2026-09-12）**：同一个「从既有会话 fork 出分身」的问题在 Codex / Kimi / Cursor /
+DeepSeek 上各测了一遍，结论是**这不是 prompt cache 的机制上限，而是各家 fork 实现的缺陷**——Kimi 的 fork
+首轮命中 99.3%，裸 DeepSeek API 的同前缀异后缀请求命中 98.8%，而 Claude Code 与 Codex 都是 0%。完整数据、
+逐家细节、三家遥测陷阱与复现方法见 `docs/agent-session-fork-prompt-cache-measurements.md`。**其中最贵的一条
+教训：在轻量会话上验证这件事会得出「已修复」的假结论**（轻量会话没有 scratchpad 段、本来就满命中），
+任何关于 fork 缓存的验证都必须在生产量级、用真实交互式会话做。
 
 ## 4. 维护作业分身的 hook 短路
 
@@ -126,14 +134,15 @@ activity 推「对话上次推进」。
 
 ### 四道闸（`exploration-thread-graph-maintenance-trigger.ts`）
 
-每判一次就 fork 一个分身。重型会话上一次约 $2.2（见 §3b 的实测），所以闸门不是性能调参，是成本闸：
+每判一次就 fork 一个分身。重型会话上一次约 $4.5（446k opus 实测，见 §3b；成本与上下文规模成正比），
+所以闸门不是性能调参，是成本闸：
 
 | 闸 | 判据 | 漏掉的后果 |
 | --- | --- | --- |
 | ① 模式 | `taskConversationMode === "exploratory"` | 所有任务都开始烧钱 |
 | ② 防抖 | Stop 边沿后 45s 合并窗口 | 连着几个短 turn 各 fork 一次 |
 | ③ 单飞 | 每 exploration 在途恒 1 | 并发 fork 两个分身——**store 的跨进程写锁挡不住它**，锁只覆盖落盘那一小段，不覆盖前面那次昂贵的 fork |
-| ④ 节流 | 攒够 `DEFAULT_MINIMUM_TURNS_BETWEEN_MAINTENANCE_RUNS`（5）个未归位 turn | 每 turn 一次 ≈ $2.2/turn |
+| ④ 节流 | 攒够 `DEFAULT_MINIMUM_TURNS_BETWEEN_MAINTENANCE_RUNS`（5）个未归位 turn | 每 turn 一次 ≈ $4.5/turn |
 
 账本一律按 **workspace + exploration 联合计账**，绝不只用 explorationId：taskId 是 board-local 短 id，
 跨 project 撞号是常态，撞号的代价不是多跑一次而是**少跑一次**（先到的把另一个 project 同号任务的触发
@@ -195,6 +204,19 @@ web-ui **不 import 核心包**：`/core` 静态导出依赖 node `fs` 的 store
 `api-contract.ts` 自带一份 projection view 的 zod 镜像，lane 布局在服务端算好随行下发。两份形状的一致性
 由 `exploration-thread-graph-contract-parity.ts` 做**编译期双向对账**——核心包换 SHA 后形状若漂移，
 根 typecheck 立刻红，且错误就落在那个文件上。
+
+### agent 侧读通道：`kanban exploratory get-exploration-thread-graph`
+
+图是为 agent 建的，所以 agent 自己得读得到——纯委托 `getExplorationThreadGraph`，零 fork、零成本。
+`explorationId` 默认取本会话 taskId（主会话场景两者本就相同），by-the-way 会话须用 `--exploration-id`
+显式指向主卡片。这里刻意**不套** scope 解析那套「两来源不一致即硬报错」：两者不同正是 by-the-way
+会话的正常形态，冲突校验会把唯一正确的用法判成错误（判定落在纯函数
+`resolveExplorationIdForThreadGraphRead`）。
+
+**只有读命令，没有写命令**，这是有意的非对称：手写结构正是 session map 时代退役掉的那条路。
+会花钱的 `requestExplorationThreadGraphMaintenance` 也**不进 CLI**——只留给 UI 的显式点击，
+否则 agent 可以在自己的回合里反复烧掉 fork 预算。探索礼仪指令
+（`exploratory-mode-instructions.ts`）里同步写明了这条纪律与「查自己第几轮」这个实际用途。
 
 ## 5. findings store 与写入通道
 

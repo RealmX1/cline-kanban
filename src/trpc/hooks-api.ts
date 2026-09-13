@@ -434,7 +434,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					// PermissionRequest / AskUserQuestion / ExitPlanMode 这类「agent 停下来等人拍板」的中途
 					// 人轴信号，那一刻这一轮根本还没结束。用户在权限框/提问框上想得比防抖窗口（45s）久，
 					// 光判 event 就会让触发器拿 treatFinalTurnAsCompleted:true 的 turn 源去 fork：既白烧一次
-					// 判定（≈$2.2，成因见 docs/exploratory-mode-host-integration.md §3b），又把半截 turn 当作
+					// 判定（≈$4.5，成因见 docs/exploratory-mode-host-integration.md §3b），又把半截 turn 当作
 					// 已完成轮次归位进图。图只对 Claude 终端会话建模（turn 源与分身执行器都是 Claude Code
 					// 专用），故 source 闸不是额外收紧，而是本来的适用域。
 					// **by-the-way 会话同样要触发**——它的 turn 一样要归位，只是 explorationId 要解析回主任务

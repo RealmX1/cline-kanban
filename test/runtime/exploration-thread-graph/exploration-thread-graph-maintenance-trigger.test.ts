@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { createExplorationThreadGraphMaintenanceTrigger } from "../../../src/exploration-thread-graph/exploration-thread-graph-maintenance-trigger";
 
-// 四道闸各挡一次钱：模式闸 / 防抖闸 / 单飞闸 / 节流闸。任何一道漏掉，重型会话上就是每 turn ≈ $2.2。
+// 四道闸各挡一次钱：模式闸 / 防抖闸 / 单飞闸 / 节流闸。任何一道漏掉，重型会话上就是每 turn ≈ $4.5。
 // 本套件不 spawn 任何进程、不落盘：storeRoot 指向空临时目录（核心包对缺失文件退化为空集合），
 // turn 源与作业 runner 全部注入。
 

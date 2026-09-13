@@ -182,7 +182,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// exploration thread graph（B.2）。
 	//
 	// 维护触发器是**整个运行时一个单例**：防抖窗口与单飞账本都挂在它身上，每次请求重建等于四道闸
-	// 全部失效——而漏掉单飞闸的代价是同一个 exploration 并发 fork 两个分身，重型会话上一次 ≈ $2.2。
+	// 全部失效——而漏掉单飞闸的代价是同一个 exploration 并发 fork 两个分身，重型会话上一次 ≈ $4.5。
 	// 图只对终端 agent 有意义（v1 只有 claude 的 fork 语义已核实），所以会话清单只取终端管理器的。
 	// 触发器与 exploratoryApi 互为依赖：api 的手动维护要调触发器，触发器转投 finding_candidate 又要调
 	// api 的 ingest。用 late binding 打破——触发器先建好，ingest 出口在 api 工厂就位后再绑上。

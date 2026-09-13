@@ -7,6 +7,7 @@ import {
 	deliverExploratoryMutation,
 	parseExploratoryFindingCandidatePayload,
 	readExploratoryPayloadText,
+	resolveExplorationIdForThreadGraphRead,
 	resolveExploratoryCommandScope,
 	resolveExploratoryPayloadSource,
 } from "../../../src/commands/exploratory";
@@ -337,5 +338,37 @@ describe("deliverExploratoryMutation", () => {
 
 		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow("fetch failed");
 		expect(mutate).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("resolveExplorationIdForThreadGraphRead", () => {
+	it("缺 --exploration-id 时默认取本会话 taskId（主会话场景两者本就相同）", () => {
+		expect(resolveExplorationIdForThreadGraphRead({ explicitExplorationId: undefined, taskId: "task-main" })).toBe(
+			"task-main",
+		);
+	});
+
+	it("--exploration-id 覆盖 taskId——by-the-way 会话读主卡片的图靠的就是它", () => {
+		expect(resolveExplorationIdForThreadGraphRead({ explicitExplorationId: "task-main", taskId: "task-btw" })).toBe(
+			"task-main",
+		);
+	});
+
+	it("--exploration-id 与 taskId 不同不报错：这是 by-the-way 会话的正常形态，不是冲突", () => {
+		expect(() =>
+			resolveExplorationIdForThreadGraphRead({ explicitExplorationId: "task-other", taskId: "task-mine" }),
+		).not.toThrow();
+	});
+
+	it("--exploration-id 为空白 → 视为未提供，回落 taskId", () => {
+		expect(resolveExplorationIdForThreadGraphRead({ explicitExplorationId: "   ", taskId: "task-main" })).toBe(
+			"task-main",
+		);
+	});
+
+	it("--exploration-id 两侧空白被 trim（shell 引号里多带的空格不该变成另一个 exploration）", () => {
+		expect(
+			resolveExplorationIdForThreadGraphRead({ explicitExplorationId: "  task-main  ", taskId: "task-btw" }),
+		).toBe("task-main");
 	});
 });
