@@ -145,8 +145,9 @@ function installFakeClaudeEntry(
 		summary,
 		active: {
 			session: { write },
+			outputReactionEngine: null,
 			outputReactionScanBuffer: null,
-			deferredStartupInput: null,
+			deferredStartupPromptText: null,
 			lastUserInputAt: options.lastUserInputAt ?? null,
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,
@@ -386,7 +387,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			active: {
 				session: { write },
 				outputReactionScanBuffer: null,
-				deferredStartupInput: null,
+				deferredStartupPromptText: null,
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
@@ -434,7 +435,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			active: {
 				session: { write },
 				outputReactionScanBuffer: null,
-				deferredStartupInput: null,
+				deferredStartupPromptText: null,
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
@@ -480,7 +481,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			active: {
 				session: { write },
 				outputReactionScanBuffer: null,
-				deferredStartupInput: null,
+				deferredStartupPromptText: null,
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
@@ -533,7 +534,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			active: {
 				session: { write },
 				outputReactionScanBuffer: null,
-				deferredStartupInput: null,
+				deferredStartupPromptText: null,
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
@@ -601,7 +602,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				outputReactionScanBuffer: scanBufferWithStalePrompt,
 				outputReactionEngine: null,
 				outputReactionSession: null,
-				deferredStartupInput: null,
+				deferredStartupPromptText: null,
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
@@ -649,7 +650,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				outputReactionScanBuffer: "OpenAI Codex (v1.0.0)\n› ",
 				outputReactionEngine: null,
 				outputReactionSession: null,
-				deferredStartupInput: null,
+				deferredStartupPromptText: null,
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
@@ -714,7 +715,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 			active: {
 				session: { write },
 				outputReactionScanBuffer: null,
-				deferredStartupInput: null,
+				deferredStartupPromptText: null,
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
@@ -1378,7 +1379,7 @@ describe("session-manager · submitTaskChatInputWhenReady（RVF followup 就绪�
 				outputReactionScanBuffer: "OpenAI Codex (v1.0.0)\n› ",
 				outputReactionEngine: null,
 				outputReactionSession: null,
-				deferredStartupInput: null,
+				deferredStartupPromptText: null,
 				lastUserInputAt: null,
 				taskChatInputDeliveryTimer: null,
 				taskChatInputDeliveryGeneration: 0,
@@ -1798,6 +1799,120 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		};
 	}
 
+	it.each([
+		{ intervention: "human", afterSubmit: false, outputProgress: true, confirmed: false },
+		{ intervention: "human", afterSubmit: true, outputProgress: false, confirmed: false },
+		{ intervention: "human", afterSubmit: true, outputProgress: true, confirmed: true },
+		{ intervention: "permission", afterSubmit: false, outputProgress: true, confirmed: false },
+		{ intervention: "permission", afterSubmit: true, outputProgress: false, confirmed: true },
+		{ intervention: "question", afterSubmit: true, outputProgress: false, confirmed: true },
+	] as const)("接管只用已写 CR 后的证据结算，且不再自动提交真人编辑：%j", async (scenario) => {
+		const taskId = "task-interrupted-submission-receipt";
+		const manager = new TerminalSessionManager();
+		const { write, entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+		manager.submitTaskChatInputWhenReady(taskId, "继续 RVF", { idempotencyKey: "original", onDeliveryOutcome });
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(write).toHaveBeenCalledWith("SUBMIT[继续 RVF]");
+		if (scenario.afterSubmit) await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS);
+		if (scenario.outputProgress) {
+			entry.active.ptyOutputChunkArrivalSequenceNumber += 1;
+			entry.summary.lastOutputAt = Date.now();
+		}
+		if (scenario.intervention === "human") manager.writeInput(taskId, Buffer.from("真人未提交编辑"));
+		else {
+			manager.transitionToRunning(taskId);
+			manager.transitionToReview(taskId, "hook", scenario.intervention);
+		}
+		expect(outcomes).toEqual([
+			{
+				status: scenario.confirmed ? "delivered_and_submit_confirmed" : "delivery_failed",
+				reason: scenario.confirmed ? null : "submit_confirmation_budget_exhausted",
+			},
+		]);
+		// 超过旧的 8 秒击键抑制窗和确认预算，也不能恢复补发、替人提交编辑或替模态选答案。
+		await vi.advanceTimersByTimeAsync(70_000);
+		expect(write.mock.calls.filter(([input]) => input === "\r")).toHaveLength(scenario.afterSubmit ? 1 : 0);
+		expect(outcomes).toHaveLength(1);
+	});
+
+	it.each([true, false])("Codex 真人接管只读原输入框，原文仍在框内=%s", async (promptRemainsInComposer) => {
+		const taskId = "task-codex-interrupted-submission";
+		const manager = new TerminalSessionManager();
+		const { write, entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: "model: test\n› ",
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		entry.summary.agentId = "codex";
+		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+		manager.submitTaskChatInputWhenReady(taskId, "继续 RVF", { idempotencyKey: "original", onDeliveryOutcome });
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + PASTE_INGESTION_MAX_WAIT_MS);
+		entry.active.ptyOutputChunkArrivalSequenceNumber += 1;
+		entry.summary.lastOutputAt = Date.now();
+		entry.terminalStateMirror.getScreenSnapshot = async () =>
+			toScreenSnapshot(promptRemainsInComposer ? "model: test\n› 继续 RVF" : "model: test\n› ");
+		manager.writeInput(taskId, Buffer.from("真人未提交编辑"));
+		await vi.advanceTimersByTimeAsync(70_000);
+		expect(outcomes).toEqual([
+			{
+				status: promptRemainsInComposer ? "delivery_failed" : "delivered_and_submit_confirmed",
+				reason: promptRemainsInComposer ? "submit_confirmation_budget_exhausted" : null,
+			},
+		]);
+		expect(write.mock.calls.filter(([input]) => input === "\r")).toHaveLength(1);
+	});
+
+	it.each(["later_delivery", "new_incarnation"] as const)("真人接管只读确认不影响 %s", async (replacement) => {
+		const taskId = "task-interrupted-confirmation-isolation";
+		const manager = new TerminalSessionManager();
+		const { entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: "model: test\n› ",
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: null,
+		});
+		entry.summary.agentId = "codex";
+		const original = collectOutcomes();
+		manager.submitTaskChatInputWhenReady(taskId, "继续 RVF", {
+			idempotencyKey: "original",
+			onDeliveryOutcome: original.onDeliveryOutcome,
+		});
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + PASTE_INGESTION_MAX_WAIT_MS);
+		entry.active.ptyOutputChunkArrivalSequenceNumber += 1;
+		entry.summary.lastOutputAt = Date.now();
+		let finishSnapshot: (screen: ReturnType<typeof toScreenSnapshot>) => void = () => {
+			throw new Error("尚未读取快照");
+		};
+		entry.terminalStateMirror.getScreenSnapshot = () =>
+			new Promise((resolve) => {
+				finishSnapshot = resolve;
+			});
+		manager.writeInput(taskId, Buffer.from("真人编辑"));
+		const later = collectOutcomes();
+		if (replacement === "new_incarnation") entry.active = { ...entry.active };
+		manager.submitTaskChatInputWhenReady(taskId, "下一条投递", {
+			idempotencyKey: "later",
+			onDeliveryOutcome: later.onDeliveryOutcome,
+		});
+		finishSnapshot(toScreenSnapshot("model: test\n› "));
+		await Promise.resolve();
+		expect(original.outcomes).toEqual([
+			{
+				status: replacement === "new_incarnation" ? "delivery_failed" : "delivered_and_submit_confirmed",
+				reason: replacement === "new_incarnation" ? "submit_confirmation_budget_exhausted" : null,
+			},
+		]);
+		expect(later.outcomes).toEqual([]);
+		expect(manager.cancelTaskChatInputDelivery(taskId, "later")).toBe("cancelled_before_delivery");
+	});
+
 	it("写入后确认到提交 → delivered_and_submit_confirmed", async () => {
 		const manager = new TerminalSessionManager();
 		const { entry } = installFakeClaudeEntry(manager, "task-receipt-confirmed", {
@@ -1912,7 +2027,7 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		entry.active = {
 			session: { write: vi.fn() },
 			outputReactionScanBuffer: null,
-			deferredStartupInput: null,
+			deferredStartupPromptText: null,
 			lastUserInputAt: null,
 			taskChatInputDeliveryTimer: null,
 			taskChatInputDeliveryGeneration: 0,
