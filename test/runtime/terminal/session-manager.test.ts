@@ -154,6 +154,36 @@ describe("TerminalSessionManager", () => {
 		expect(typeof updated?.lastHookAt).toBe("number");
 	});
 
+	it("applyAgentNativeConversationSessionIdentity：值变化才写 sidecar，同值幂等不推进 updatedAt", () => {
+		const manager = new TerminalSessionManager();
+		manager.hydrateFromRecord({
+			"task-1": createSummary({ state: "running" }),
+		});
+		const identity = {
+			sourceAgentId: "claude",
+			nativeSessionId: "sess-1",
+			transcriptPath: "/tmp/sess-1.jsonl",
+			observedAt: 10,
+		};
+
+		const first = manager.applyAgentNativeConversationSessionIdentity("task-1", identity);
+		expect(first?.agentNativeConversationSessionIdentity).toEqual(identity);
+
+		// 同一身份重报（每个 hook 事件都会带）：不写、不推进 updatedAt、observedAt 保留首次观测。
+		const second = manager.applyAgentNativeConversationSessionIdentity("task-1", { ...identity, observedAt: 20 });
+		expect(second?.agentNativeConversationSessionIdentity?.observedAt).toBe(10);
+		expect(second?.updatedAt).toBe(first?.updatedAt);
+
+		// harness 换了 session id（--fork-session / 续接）：整体替换。
+		const forked = manager.applyAgentNativeConversationSessionIdentity("task-1", {
+			...identity,
+			nativeSessionId: "sess-2",
+		});
+		expect(forked?.agentNativeConversationSessionIdentity?.nativeSessionId).toBe("sess-2");
+
+		expect(manager.applyAgentNativeConversationSessionIdentity("missing-task", identity)).toBeNull();
+	});
+
 	it("resets stale running sessions without active processes", () => {
 		const manager = new TerminalSessionManager();
 		manager.hydrateFromRecord({

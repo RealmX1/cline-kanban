@@ -272,6 +272,20 @@ export const runtimeAgentSessionTransportSchema = z.enum([
 ]);
 export type RuntimeAgentSessionTransport = z.infer<typeof runtimeAgentSessionTransportSchema>;
 
+// Exploratory vs Operational 会话模式（探索/研究型 vs 执行/操作型）。
+// 设计蓝图：.plan/docs/exploratory-mode-session-map-and-findings-store.md §A.1。
+// 定义位置必须留在 runtimeBoardCardSchema **之前**：卡片的 taskConversationMode 字段在模块求值
+// 时就要引用它（同上方 runtimeAgentSessionTransportSchema 的 TDZ 约束）。
+export const runtimeTaskConversationModeSchema = z.enum([
+	// 执行/操作型任务（缺省）：一切如常，不注入探索礼仪指令、不跑 thread graph 维护作业。
+	"operational",
+	// 探索/研究型任务：会话产出的结构与结论本身是资产——启动时注入 exploratory 指令文件
+	// （探索礼仪 + findings 建议工作流），并作为 exploration thread graph 维护作业的开关
+	// （作业由 agent-conversation-exploration-thread-graph 包执行，Kanban 只做宿主胶水）。
+	"exploratory",
+]);
+export type RuntimeTaskConversationMode = z.infer<typeof runtimeTaskConversationModeSchema>;
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
@@ -301,6 +315,11 @@ export const runtimeBoardCardSchema = z
 		// 注意：本字段落在**卡**上，隐含「一张 omp 卡只有一条 agent 会话」。omp 一旦获得 By the way
 		// 支持（一个 task 会有多条会话），必须改成按会话 id 的映射。
 		ompAgentSessionTransport: runtimeAgentSessionTransportSchema.optional(),
+		// 这张卡的会话模式声明（探索/操作，蓝图 §A.1）：用户建卡/编辑卡片时声明；缺省 =
+		// operational，legacy 卡片零迁移。与 ompAgentSessionTransport 同为**建卡时固化**的快照——
+		// 活会话读 summary.taskConversationMode 投影，卡片改模式只影响下一次启动（v1 不做模式
+		// 热切换，避免 map 生命周期歧义）。
+		taskConversationMode: runtimeTaskConversationModeSchema.optional(),
 		// runtime 观测值，不是用户意图：本卡片最近一次**真正启动成功**的会话用的是哪个 agent。
 		//
 		// 为什么不复用上面的 `agentId`：那个字段的语义是「用户为这张卡做的 per-task 覆盖」，缺失即
@@ -530,6 +549,38 @@ export const runtimeTaskConversationSessionMetadataSchema = z.object({
 	latestUserMessagePreview: z.string().nullable(),
 });
 export type RuntimeTaskConversationSessionMetadata = z.infer<typeof runtimeTaskConversationSessionMetadataSchema>;
+
+// 终端（PTY）agent 的**原生会话身份**（N0a）：harness 自己的 session id 与 transcript 路径。
+// 来源 = hook stdin（Claude Code / Codex 的 hooks 载荷都带 session_id + transcript_path），由
+// `kanban hooks` CLI 抽出、经 hooks.ingest 落到 summary 的加性 sidecar。它是 exploration thread graph
+// 维护作业（`claude -p --resume <nativeSessionId> --fork-session`）与 transcript 投影的唯一身份来源——
+// 不再从 ~/.claude/projects 目录扫描猜测。纯运行期事实，不参与 facet 与 superRefine。
+export const runtimeAgentNativeConversationSessionIdentitySchema = z.object({
+	// hook 载荷推断出的 harness 来源（claude / codex / …），与 latestHookActivity.source 同一口径。
+	sourceAgentId: z.string(),
+	nativeSessionId: z.string(),
+	transcriptPath: z.string().nullable(),
+	observedAt: z.number(),
+});
+export type RuntimeAgentNativeConversationSessionIdentity = z.infer<
+	typeof runtimeAgentNativeConversationSessionIdentitySchema
+>;
+
+// 终端 agent 启动时真正传出去的、与 fork 重放相关的 argv 三项（见
+// terminal/agent-session-fork-replay-launch-arguments-capture.ts 的完整理由，含「逐字一致才命中 prompt
+// cache」那条原立论被实测证伪的经过）。exploration thread graph 的维护作业 fork 主会话时逐字复用它们；
+// 重算而非快照，拿到的是「当前代码算出来的值」而不是「这个会话实际在跑的值」。model 存的是 argv 字面值
+// （通常是浮动别名 `default`），不是解析后的模型 id。
+export const runtimeAgentSessionForkReplayLaunchArgumentsSchema = z.object({
+	sourceAgentId: z.string(),
+	modelArgumentLiteral: z.string().nullable(),
+	appendSystemPromptText: z.string().nullable(),
+	settingsFilePath: z.string().nullable(),
+	capturedAt: z.number(),
+});
+export type RuntimeAgentSessionForkReplayLaunchArguments = z.infer<
+	typeof runtimeAgentSessionForkReplayLaunchArgumentsSchema
+>;
 
 // 终端 agent 因瞬时连接错误（VPN 抖动等）停在空闲提示符时，
 // 自动续跑框架（src/terminal/output-reactions）进入「连接重试」状态：
@@ -769,6 +820,14 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 任务时必须看到明确说明，而不是一个空终端让人误以为只是加载慢。
 	agentSessionRuntimeReclamationOutcome: runtimeAgentSessionReclamationOutcomeSchema.nullable().optional(),
 	taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
+	// 终端 agent 的原生会话身份（N0a，见 runtimeAgentNativeConversationSessionIdentitySchema 注释）。
+	// 加性可选：Cline / ACP 会话与旧盘数据缺它 ⇒ undefined；同一活体内 harness 换了 session id
+	// （--fork-session / 续接）时整体替换，只保留最新观测。
+	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
+	// 本次启动 argv 的 fork 重放快照（见 runtimeAgentSessionForkReplayLaunchArgumentsSchema 注释）。
+	// 加性可选：只有已接入的终端 agent（v1 = claude）在建会话时盖章，其余会话与旧盘数据缺它 ⇒ undefined。
+	// 每次新起活体整体替换（同一任务换 agent / 换模型后，旧快照对新会话无意义）。
+	agentSessionForkReplayLaunchArguments: runtimeAgentSessionForkReplayLaunchArgumentsSchema.nullable().optional(),
 	// 这条**活会话**实际用的通话方式。agent-catalog 的 `sessionTransport` 只是该 agent 的**默认**通道；
 	// omp 可在 TUI（pty_terminal）与 ACP（acp_stdio_subprocess）之间随时切换，切换后 agentId 不变，
 	// 于是「渲染 xterm 还是会话面板」「stop / 输入 / 消息走哪条通路」一律以本字段为准，不得再从 agentId 静态派生。
@@ -776,6 +835,11 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 加性可选：旧盘数据 / web-ui 手构造 summary 缺它 ⇒ 回退按 agentId 派生（见 agent-catalog 的
 	// resolveRuntimeAgentSessionTransportFromSummary，读点一律走它而非直接读本字段）。
 	sessionTransport: runtimeAgentSessionTransportSchema.optional(),
+	// 这条**活会话**启动时从卡片快照下来的会话模式（探索/操作，蓝图 §A.1 挂载点 2）。纯运行期事实、
+	// 不参与 facet 与 superRefine，免费搭乘 task_sessions_updated 广播。漂移：活会话不热切换——会话
+	// 存续期卡片改模式不回写本投影，UI 对「卡片新模式 ≠ 会话投影」只显示不强刷。
+	// 加性可选：旧盘数据缺它 ⇒ 按 operational 呈现。
+	taskConversationMode: runtimeTaskConversationModeSchema.optional(),
 	// 双轴 facet（加性、可选）+ per-session schema 版本。三 facet 共生（要么全置、要么全缺）：
 	// 全缺=未迁移的旧盘数据（Stage 2 读时回填）；全置=经 applySessionFacets 漏斗写入、组合受
 	// 下方 superRefine 护栏约束。schemaVersion 为 per-session 可选字段（不引入文件级包裹、无 flag day）。
@@ -911,6 +975,38 @@ export const runtimeAddBacklogTaskRequestSchema = z.object({
 });
 export type RuntimeAddBacklogTaskRequest = z.infer<typeof runtimeAddBacklogTaskRequestSchema>;
 
+// 建卡时按任务描述起名。请求只带描述：起名不需要工作区上下文，也刻意不带图片
+// （官方另有支持图像输入的型号，本条链路不走那条）。
+export const runtimeTaskNameSuggestionRequestSchema = z.object({
+	taskDescription: z.string(),
+});
+export type RuntimeTaskNameSuggestionRequest = z.infer<typeof runtimeTaskNameSuggestionRequestSchema>;
+
+// 「拿不到名字」是**正常返回**而不是错误：这条能力天生可缺席（没配密钥的机器上就是没有），
+// 把它做成 TRPC 错误会逼前端在 catch 里区分「真故障」与「本来就没配」。
+export const runtimeTaskNameSuggestionUnavailableReasonSchema = z.enum([
+	"api_key_not_configured",
+	"task_description_empty",
+	"request_failed",
+]);
+export type RuntimeTaskNameSuggestionUnavailableReason = z.infer<
+	typeof runtimeTaskNameSuggestionUnavailableReasonSchema
+>;
+
+export const runtimeTaskNameSuggestionResponseSchema = z.discriminatedUnion("status", [
+	z.object({
+		status: z.literal("suggested"),
+		suggestedTaskNames: z.array(z.string()).min(1).max(5),
+	}),
+	z.object({
+		status: z.literal("unavailable"),
+		unavailableReason: runtimeTaskNameSuggestionUnavailableReasonSchema,
+		// 供界面直接显示的一句话（HTTP 状态码、超时之类）。没有额外可说的就省略。
+		unavailableDetail: z.string().optional(),
+	}),
+]);
+export type RuntimeTaskNameSuggestionResponse = z.infer<typeof runtimeTaskNameSuggestionResponseSchema>;
+
 export const runtimeAddBacklogTaskResponseSchema = z.object({
 	taskId: z.string(),
 });
@@ -942,7 +1038,7 @@ export const runtimeProjectAvailabilitySchema = z.discriminatedUnion("status", [
 ]);
 export type RuntimeProjectAvailability = z.infer<typeof runtimeProjectAvailabilitySchema>;
 
-// Cross-Repository Stage-First Overview（跨-repo 概览，见 CONTEXT.md）用：in_progress 列单个 task
+// Cross-Repository Stage-First Overview（跨-repo 概览，见 docs/context-stage-first-overview.md）用：in_progress 列单个 task
 // 的精简明细投影。前端据 turnOwner + lastOutputAt 把它二分为 Active / Stale
 // （见 session-activity.ts 的 RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS）。
 export const runtimeInProgressTaskDetailSchema = z.object({
@@ -1211,6 +1307,222 @@ export type RuntimeStateStreamNotificationLogUpdatedMessage = z.infer<
 	typeof runtimeStateStreamNotificationLogUpdatedMessageSchema
 >;
 
+// ---- Exploratory findings canonical schema（蓝图 §D.1）----
+// TDZ 约束：exploratory_findings_updated 广播消息引用 runtimeExploratoryFindingEntrySchema，
+// union 在模块求值时就要拿到它，故本块必须
+// 留在 runtimeStateStreamMessageSchema 之前。
+
+export const runtimeExploratoryFindingProvenanceLinkSchema = z
+	.object({
+		// 解法定调 3：每条 finding 至少一个 provenance 链接；turn_anchor 必须三元齐全
+		// （turnCheckpointCommit 允许 null = 仅时间锚，语义同 §B.1 锚点）。
+		// user_authored_freeform 用于「纯人工笔记」这类无锚 finding——provenance 强制但允许
+		// 显式声明「无锚」而不是伪造锚。
+		linkKind: z.enum(["turn_anchor", "session_level", "user_authored_freeform"]),
+		conversationSessionTaskId: z.string(),
+		turnNumber: z.number().int().positive().nullable(),
+		turnCheckpointCommit: z.string().nullable(),
+	})
+	.superRefine((link, ctx) => {
+		// linkKind ↔ 字段组合约束在 schema 层强制（不再只靠注释约定——裸形状下 agent 可以
+		// 交出 turn_anchor+无 turnNumber 的伪锚，或给 session_level 链接挂上未校验的
+		// turnNumber/checkpoint 混过校验原样落库）：
+		// turn_anchor 必须锚到具体轮次（turnNumber 非 null；checkpoint 允许 null = 仅时间锚，
+		// 可解析性降级是 ingest handler 的职责，不在本层）；session_level 与
+		// user_authored_freeform 是显式「无轮次锚」声明，两个锚字段必须全 null。
+		if (link.linkKind === "turn_anchor" && link.turnNumber === null) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["turnNumber"],
+				message: "turn_anchor links must anchor a concrete turn: turnNumber must be non-null.",
+			});
+		}
+		if (link.linkKind !== "turn_anchor" && link.turnNumber !== null) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["turnNumber"],
+				message: `${link.linkKind} links declare no turn anchor: turnNumber must be null.`,
+			});
+		}
+		if (link.linkKind !== "turn_anchor" && link.turnCheckpointCommit !== null) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["turnCheckpointCommit"],
+				message: `${link.linkKind} links declare no turn anchor: turnCheckpointCommit must be null.`,
+			});
+		}
+	});
+export type RuntimeExploratoryFindingProvenanceLink = z.infer<typeof runtimeExploratoryFindingProvenanceLinkSchema>;
+
+export const runtimeExploratoryFindingStatusSchema = z.enum([
+	"suggested_pending_confirmation", // agent 建议、待人确认（v1 抽取的唯一自动档）
+	"active",
+	"superseded", // 被更新的 finding 取代（supersededByFindingId 互链，审计保留）
+	"archived", // 软删：不进默认列表，可恢复
+]);
+export type RuntimeExploratoryFindingStatus = z.infer<typeof runtimeExploratoryFindingStatusSchema>;
+
+export const runtimeExploratoryFindingGenerationSourceSchema = z.enum([
+	"user_saved", // UI「存为 finding」按钮人工保存
+	"agent_suggested", // agent 经 ingestFindingCandidate 通道建议
+	// 扩展位：agent_auto_extracted（无人工在环的自动抽取）——v1 刻意不做，见蓝图 §D.2.3。
+]);
+export type RuntimeExploratoryFindingGenerationSource = z.infer<typeof runtimeExploratoryFindingGenerationSourceSchema>;
+
+export const runtimeExploratoryFindingEntrySchema = z.object({
+	// 稳定 dedup 键：用户保存 = UI 生成 uuid；agent 建议 = 服务端派生的 agent-<clientProposalId>
+	// ——同一建议重发不落成两条。
+	findingId: z.string(),
+	findingTitle: z.string().max(120),
+	findingBodyMarkdown: z.string().max(4000),
+	findingStatus: runtimeExploratoryFindingStatusSchema,
+	supersededByFindingId: z.string().nullable(),
+	findingGenerationSource: runtimeExploratoryFindingGenerationSourceSchema,
+	provenanceLinks: z.array(runtimeExploratoryFindingProvenanceLinkSchema).min(1),
+	originConversationSessionTaskId: z.string().nullable(),
+	// ── KB 预留扩展位（v1 恒缺省，蓝图 §D.1）──
+	findingTags: z.array(z.string().max(40)).max(8).optional(),
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+export type RuntimeExploratoryFindingEntry = z.infer<typeof runtimeExploratoryFindingEntrySchema>;
+
+// findings 集合变更广播（蓝图 §D.3）：save/confirm/reject/archive/ingest 落盘成功后，
+// 把该 workspace 的完整 finding 集合（恒小，上限 500）全量替换推送给在场客户端。
+// 不搭车 summary 广播——findings 变更不必然 bump summary。
+export const runtimeStateStreamExploratoryFindingsUpdatedMessageSchema = z.object({
+	type: z.literal("exploratory_findings_updated"),
+	workspaceId: z.string(),
+	findings: z.array(runtimeExploratoryFindingEntrySchema),
+});
+export type RuntimeStateStreamExploratoryFindingsUpdatedMessage = z.infer<
+	typeof runtimeStateStreamExploratoryFindingsUpdatedMessageSchema
+>;
+
+// ─── exploration thread graph 投影整值（B.2）───
+//
+// 领域真相在独立包 agent-conversation-exploration-thread-graph，本仓库只做宿主胶水：图由核心包
+// 建模与落盘，服务端把它合成 projection 整值后整份下发。下面这批 schema 是**边界镜像**，不是第二
+// 份定义——它们存在的唯一理由是 web-ui 不能 import 核心包（`/core` 静态导出依赖 node `fs` 的 store，
+// 打进浏览器 bundle 会炸），因此契约层必须自带一份可被 `@runtime-contract` 解析的形状。
+// 与核心包类型的一致性由 src/exploration-thread-graph/exploration-thread-graph-contract-parity.ts
+// 做编译期双向对账：核心包换 SHA 后形状若漂移，根 typecheck 立刻红。
+//
+// lane 布局**在服务端算好**随行下发（核心包的 projection 每行自带 laneLayout），前端只负责画。
+export const runtimeExplorationThreadGraphTurnRefSchema = z.object({
+	conversationSessionId: z.string(),
+	turnNumber: z.number(),
+	turnCheckpointCommit: z.string().nullable(),
+});
+export type RuntimeExplorationThreadGraphTurnRef = z.infer<typeof runtimeExplorationThreadGraphTurnRefSchema>;
+
+const runtimeExplorationThreadGraphGenerationSourceSchema = z.enum(["work_branch_maintenance_job", "user_manual_edit"]);
+
+export const runtimeExplorationThreadGraphLaneLayoutRowSchema = z.object({
+	id: z.string(),
+	rowLane: z.number(),
+	laneWaitingForIds: z.array(z.string()),
+	mergeFromLanes: z.array(z.number()),
+	splitFromLane: z.number().nullable(),
+	rowStartsLane: z.boolean(),
+	isFirstRow: z.boolean(),
+});
+
+export const runtimeExplorationThreadGraphTopicSchema = z.object({
+	topicId: z.string(),
+	topicTitle: z.string(),
+	topicAliases: z.array(z.string()),
+	topicSummaryMarkdown: z.string().nullable(),
+	supersededByTopicId: z.string().nullable(),
+	generationSource: runtimeExplorationThreadGraphGenerationSourceSchema,
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+
+export const runtimeExplorationThreadSchema = z.object({
+	threadId: z.string(),
+	threadTitle: z.string(),
+	parentThreadId: z.string().nullable(),
+	forkedFromTurnRef: runtimeExplorationThreadGraphTurnRefSchema.nullable(),
+	primaryTopicId: z.string(),
+	threadLifecycleStatus: z.enum(["active", "concluded", "parked", "abandoned"]),
+	concludedAtTurnRef: runtimeExplorationThreadGraphTurnRefSchema.nullable(),
+	generationSource: runtimeExplorationThreadGraphGenerationSourceSchema,
+	createdAt: z.number(),
+	updatedAt: z.number(),
+});
+
+// 作业用量。cacheReadInputTokens 恒要回报——它是判断 fork 有没有吃到 prompt cache 的唯一依据
+// （当前受上游 bug #77306 影响恒为 0，见 docs/exploratory-mode-host-integration.md §3b）。
+export const runtimeExplorationThreadGraphMaintenanceJobUsageSchema = z.object({
+	inputTokens: z.number(),
+	cacheReadInputTokens: z.number(),
+	outputTokens: z.number(),
+	costUsd: z.number().nullable(),
+});
+
+export const runtimeExplorationThreadGraphProjectionViewTurnRowSchema = z.object({
+	turnRowId: z.string(),
+	turnRef: runtimeExplorationThreadGraphTurnRefSchema,
+	userPromptExcerpt: z.string(),
+	assistantResponseExcerpt: z.string(),
+	startedAt: z.string(),
+	endedAt: z.string(),
+	toolCallCount: z.number(),
+	// 尚未归位的 turn 这里是 null：图上仍要显示它，只是还没有 lane 身份。
+	threadId: z.string().nullable(),
+	placementConfidence: z.enum(["high", "low"]).nullable(),
+	deviationRationale: z.string().nullable(),
+	turnSubjectTags: z.array(z.string()),
+	eventMarks: z.array(
+		z.object({
+			mark: z.enum(["milestone", "decision_point", "open_question", "finding_candidate"]),
+			note: z.string().nullable(),
+			externalReferenceId: z.string().nullable(),
+		}),
+	),
+	parentTurnRowIds: z.array(z.string()),
+	laneLayout: runtimeExplorationThreadGraphLaneLayoutRowSchema,
+});
+export type RuntimeExplorationThreadGraphProjectionViewTurnRow = z.infer<
+	typeof runtimeExplorationThreadGraphProjectionViewTurnRowSchema
+>;
+
+export const runtimeExplorationThreadGraphProjectionViewSchema = z.object({
+	schemaVersion: z.number(),
+	explorationId: z.string(),
+	// **新→旧**（与 `git log` 一致）；lane 布局就是按这个序算的，前端不得重排。
+	turnRows: z.array(runtimeExplorationThreadGraphProjectionViewTurnRowSchema),
+	threads: z.array(
+		z.object({
+			thread: runtimeExplorationThreadSchema,
+			primaryTopic: runtimeExplorationThreadGraphTopicSchema.nullable(),
+			turnCount: z.number(),
+		}),
+	),
+	laneCount: z.number(),
+	staleReason: z.enum(["new_turns_not_yet_placed", "turn_source_signature_changed"]).nullable(),
+	unplacedTurnCountBySession: z.record(z.string(), z.number()),
+	lastMaintenanceJobCompletedAt: z.number().nullable(),
+	lastMaintenanceJobUsage: runtimeExplorationThreadGraphMaintenanceJobUsageSchema.nullable(),
+	anyTurnSourceIsTranscriptReconstructed: z.boolean(),
+});
+export type RuntimeExplorationThreadGraphProjectionView = z.infer<
+	typeof runtimeExplorationThreadGraphProjectionViewSchema
+>;
+
+// 单个 exploration 的整张图变更广播（全量替换）。与 findings 同款：作业落盘成功后才发，
+// 断连窗口不补发，客户端重连后靠 getExplorationThreadGraph 重查对齐。
+export const runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema = z.object({
+	type: z.literal("exploration_thread_graph_updated"),
+	workspaceId: z.string(),
+	explorationId: z.string(),
+	view: runtimeExplorationThreadGraphProjectionViewSchema,
+});
+export type RuntimeStateStreamExplorationThreadGraphUpdatedMessage = z.infer<
+	typeof runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema
+>;
+
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamSnapshotMessageSchema,
 	runtimeStateStreamWorkspaceStateMessageSchema,
@@ -1223,6 +1535,8 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamMcpAuthUpdatedMessageSchema,
 	runtimeStateStreamClineSessionContextUpdatedMessageSchema,
 	runtimeStateStreamNotificationLogUpdatedMessageSchema,
+	runtimeStateStreamExploratoryFindingsUpdatedMessageSchema,
+	runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema,
 	runtimeStateStreamErrorMessageSchema,
 ]);
 export type RuntimeStateStreamMessage = z.infer<typeof runtimeStateStreamMessageSchema>;
@@ -1233,13 +1547,26 @@ export const runtimeProjectsResponseSchema = z.object({
 });
 export type RuntimeProjectsResponse = z.infer<typeof runtimeProjectsResponseSchema>;
 
-// 跨全部注册项目的任务搜索索引（Spotlight 全局搜索「包含其它项目」时按需拉取）。仅携带搜索所需的最小字段
-// （taskId + title + prompt + columnId），不含 session / 工作区元数据，避免放进高频广播的 projects payload。
+// 跨全部注册项目的任务搜索索引（Spotlight 全局搜索「包含其它项目」时按需拉取）。携带「匹配所需字段」
+// （taskId + title + prompt + columnId）与「结果行排序/展示所需的卡片级持久事实」（createdAt / updatedAt /
+// 两个 agent 归属字段）。刻意**仍然**不含 session 活跃度与工作区 git 元数据：那些只对当前项目可得
+// （由 runtime-state-hub 推流），塞进这个按需拉取的快照只会得到一份立刻过期的假值。
+// 本端点是按需拉取（弹层开 + All projects 打开）而非高频广播，因此这几个定长字段的体积可以接受。
 export const runtimeAllProjectsTaskSearchIndexTaskEntrySchema = z.object({
 	taskId: z.string(),
 	title: z.string(),
 	prompt: z.string(),
 	columnId: runtimeBoardColumnIdSchema,
+	// 卡片创建时刻（epoch ms）。
+	createdAt: z.number(),
+	// 用户可见的「上次修改时间」（建卡 / 跨列移动 / 用户编辑才 bump；后台观测刻意不写它，
+	// 见 task-board-mutations.ts 的注释）。**不是** agent 活跃时间，排序档命名不得混淆二者。
+	updatedAt: z.number(),
+	// 用户为这张卡做的 per-task agent 覆盖；null = 跟随该项目的默认 agent（跨项目不可知，故结果行不臆测）。
+	agentId: runtimeAgentIdSchema.nullable(),
+	// runtime 观测值：本卡最近一次**真正启动成功**的会话用的是哪个 agent。跨项目行拿不到 live session，
+	// 它是「这个任务实际在用哪个 agent」唯一可得的事实。
+	mostRecentlyLaunchedAgentSessionAgentId: runtimeAgentIdSchema.nullable(),
 });
 export type RuntimeAllProjectsTaskSearchIndexTaskEntry = z.infer<
 	typeof runtimeAllProjectsTaskSearchIndexTaskEntrySchema
@@ -1872,6 +2199,9 @@ export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z
 	// 键是 projectId（= 服务端 workspaceId），值是该项目上次**成功建卡**所用的 base ref。
 	// 只在建卡成功时写，不在下拉框每次 change 时写：点开对话框又放弃的误选不该变成项目默认值。
 	mostRecentlyUsedTaskCreateBaseRefByProjectId: z.record(z.string(), z.string()),
+	// 建卡描述区「插入伪 HTML 块」用过的**自定义**块名（内置预设不进这份记忆），最近使用在前。
+	// 与上面几个字典同理不可空：空数组已经表达「一条都没有」，再用 null 表达「尚未设定」是多余的第三态。
+	taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: z.array(z.string()),
 });
 export type RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins = z.infer<
 	typeof runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema
@@ -1990,6 +2320,10 @@ export const runtimeTaskSessionStartRequestSchema = z
 		// 本次启动要走哪条通道。省略时服务端按「卡片固化值 → 全局默认 → catalog 默认」解析
 		// （见 core/agent-session-transport-selection.ts）；切换 procedure 会显式传它。
 		requestedAgentSessionTransport: runtimeAgentSessionTransportSchema.optional(),
+		// 卡片声明的会话模式快照（蓝图 §A.1）：与 startInPlanMode 同款「客户端从卡片带进启动请求」
+		// 语义，服务端在建会话时盖章进 summary.taskConversationMode。省略 = operational（老客户端/
+		// 老卡片零迁移）。
+		taskConversationMode: runtimeTaskConversationModeSchema.optional(),
 		// 「续跑既有对话、不重投 prompt」。切换通道后重开会话走它：用户已在对话中途，
 		// 重投一次原始 prompt 等于凭空多一轮。与 resumeFromTrash 的区别是后者还带回收/垃圾桶语义。
 		resumePriorAgentConversationWithoutResendingPrompt: z.boolean().optional(),
@@ -2390,6 +2724,44 @@ export const runtimeTaskChatSendRequestSchema = z.object({
 	promptSha256: z.string().optional(),
 });
 export type RuntimeTaskChatSendRequest = z.infer<typeof runtimeTaskChatSendRequestSchema>;
+
+// 恢复期被暂存的 harness 通知：列出（只读，供 UI 决定要不要渲染一键放行入口）与放行（消费账本 →
+// 组装成一条 prompt → 经既有 sendTaskChatMessage 出口投递 → 解除恢复守卫）。
+// promptTextPreview 是截断过的预览：正文可能极长（子 agent 的完整 result 会整段塞在里面），列表接口
+// 不需要也不该把它整份搬进浏览器；放行时走的是账本里的完整正文，不是这份预览。
+export const runtimeDeferredRestorationHarnessNotificationSchema = z.object({
+	sourceHarness: z.string(),
+	receivedAt: z.number(),
+	promptTextPreview: z.string(),
+});
+export type RuntimeDeferredRestorationHarnessNotification = z.infer<
+	typeof runtimeDeferredRestorationHarnessNotificationSchema
+>;
+
+export const runtimeDeferredRestorationHarnessNotificationsRequestSchema = z.object({
+	taskId: z.string(),
+});
+export type RuntimeDeferredRestorationHarnessNotificationsRequest = z.infer<
+	typeof runtimeDeferredRestorationHarnessNotificationsRequestSchema
+>;
+
+export const runtimeDeferredRestorationHarnessNotificationsResponseSchema = z.object({
+	ok: z.boolean(),
+	notifications: z.array(runtimeDeferredRestorationHarnessNotificationSchema),
+	error: z.string().optional(),
+});
+export type RuntimeDeferredRestorationHarnessNotificationsResponse = z.infer<
+	typeof runtimeDeferredRestorationHarnessNotificationsResponseSchema
+>;
+
+export const runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema = z.object({
+	ok: z.boolean(),
+	releasedNotificationCount: z.number(),
+	error: z.string().optional(),
+});
+export type RuntimeReleaseDeferredRestorationHarnessNotificationsResponse = z.infer<
+	typeof runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema
+>;
 
 // 程序化投递的诚实回执。取值集合与语义由跨仓契约固定（terminal-delivery-interface-contract.md），
 // 唯一真相在 src/core/task-message-injection-ledger.ts —— 这里只是把 runtime 的**即时**判定带回 CLI，
@@ -3107,6 +3479,9 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// UserPromptSubmit 的 prompt 只在同步 hook 请求内短暂流转，用于区分真人输入与 harness 在恢复时
 	// 自动塞入的任务通知；普通诊断日志与 session summary 均不得记录它。
 	submittedPromptText: z.string().optional(),
+	// 终端 agent 原生会话身份（N0a）：`kanban hooks` 从 hook stdin 的 session_id / transcript_path 抽出，
+	// 每个事件都带（幂等），服务端只在值变化时写 summary sidecar。
+	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.optional(),
 });
 export type RuntimeHookIngestRequest = z.infer<typeof runtimeHookIngestRequestSchema>;
 
@@ -3568,4 +3943,254 @@ export const runtimeConfirmVerificationCompleteResponseSchema = z.object({
 });
 export type RuntimeConfirmVerificationCompleteResponse = z.infer<
 	typeof runtimeConfirmVerificationCompleteResponseSchema
+>;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Exploratory Mode（findings）与 harness-neutral turn 投影层契约。
+// 设计蓝图：.plan/docs/exploratory-mode-session-map-and-findings-store.md（findings §D；其 session map
+// 部分已退役——结构建模改由独立包 agent-conversation-exploration-thread-graph 承担，宿主胶水见
+// docs/exploratory-mode-host-integration.md）及姊妹蓝图
+// .plan/docs/conversation-tree-unified-fan-out-interface-deferred-asset.md（§2）。
+// 全部加性：不触碰 summary facet superRefine 护栏；findings 持久化在 per-workspace
+// exploratory-findings.json（src/state/exploratory-findings-store.ts），不进 sessions.json。
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ---- Harness-neutral turn 投影层（姊妹蓝图 §2.2）----
+// 投影层是只读派生层（无持久化真相、仅缓存），为 findings 出处锚 / 会话树供给统一 turn 序列。
+// turn 编号权威在服务端投影（与 checkpoint 序数对齐）；web-ui 的消息切段只做滚动定位映射。
+
+export const runtimeConversationTurnProjectionHarnessSourceSchema = z.enum([
+	// Cline SDK：从结构化 ClineTaskMessage[] 派生，turn 边界分类与 checkpoint 捕获时机同源单测。
+	"exact_structured",
+	// 终端 agent：事后从 CLI transcript JSONL 全量重建（best-effort，随 CLI 版本漂移）。
+	"transcript_reconstructed",
+	// 运行中 PTY 会话只有 scrollback、无结构化消息——UI 按 session 粒度降级。
+	"unavailable_live_terminal_pty",
+]);
+export type RuntimeConversationTurnProjectionHarnessSource = z.infer<
+	typeof runtimeConversationTurnProjectionHarnessSourceSchema
+>;
+
+export const runtimeConversationTurnCheckpointAlignmentConfidenceSchema = z.enum([
+	// 投影最新 turn 号 == 最新 checkpoint 序数：两侧同源单调递增，全序列置信对齐。
+	"exact_ordinal_match",
+	// 该 turn 的 ref 存在，但最新序数对不上（如 self-injection 轮次使 checkpoint 计数超前
+	// 于消息派生序——姊妹蓝图风险 1 的已知偏移源），逐 ref 对齐、序列级不置信。
+	"best_effort_ordinal_match",
+	// 该 turn 的 checkpoint ref 已不可解析（轮换删除 / 从未捕获）——仅时间锚。
+	"unaligned",
+]);
+export type RuntimeConversationTurnCheckpointAlignmentConfidence = z.infer<
+	typeof runtimeConversationTurnCheckpointAlignmentConfidenceSchema
+>;
+
+export const runtimeConversationTurnProjectionEntrySchema = z.object({
+	turnNumber: z.number().int().positive(),
+	turnStartedAt: z.number(),
+	turnUserMessageExcerpt: z.string().max(400).nullable(),
+	turnAssistantResponseExcerpt: z.string().max(400).nullable(),
+	turnMessageCount: z.number().int().nonnegative(),
+	turnCheckpointCommit: z.string().nullable(),
+	turnCheckpointAlignmentConfidence: runtimeConversationTurnCheckpointAlignmentConfidenceSchema,
+	// 运行中会话的末尾 turn（agent 回合未完结）； transcript 重建源同理。
+	turnIsInProgress: z.boolean(),
+	// 该 turn 是否被会话树 fan-out 锚中。M0 恒 false——by-the-way 锚 join 属姊妹蓝图树装配
+	// 步骤（其 §5.3），且不参与投影签名（锚是独立数据源，避免签名语义混杂）。
+	turnHasConversationTreeForkAnchor: z.boolean(),
+});
+export type RuntimeConversationTurnProjectionEntry = z.infer<typeof runtimeConversationTurnProjectionEntrySchema>;
+
+export const runtimeConversationSessionTurnProjectionRequestSchema = z.object({
+	conversationSessionTaskId: z.string(),
+	// 增量重拉：只返回 turnNumber > 该值的条目（签名恒按全量投影计算，见响应注释）。
+	sinceTurnNumber: z.number().int().positive().optional(),
+	maxTurnEntries: z.number().int().positive().max(500).optional(),
+});
+export type RuntimeConversationSessionTurnProjectionRequest = z.infer<
+	typeof runtimeConversationSessionTurnProjectionRequestSchema
+>;
+
+export const runtimeConversationSessionTurnProjectionResponseSchema = z.object({
+	harnessSource: runtimeConversationTurnProjectionHarnessSourceSchema,
+	turnProjectionEntries: z.array(runtimeConversationTurnProjectionEntrySchema),
+	// 全量投影签名（Cline 源 = {messageCount}:{lastMessageId}:{lastMessageContentLength}，
+	// 末项必须是末条消息 content 长度——流式期间 assistant chunk 同 id 原位追加，只有它能
+	// 感知追加）。签名兼作 map / 归组资产的 apply 乐观并发对账键，故不受 since/max 切片影响。
+	turnProjectionSignature: z.string(),
+	// 响应被 since/max 切片截断时为 true；投影源本身不可用时 entries 为空、此位为 false。
+	turnProjectionIsIncomplete: z.boolean(),
+});
+export type RuntimeConversationSessionTurnProjectionResponse = z.infer<
+	typeof runtimeConversationSessionTurnProjectionResponseSchema
+>;
+
+// ---- Exploratory findings（蓝图 §D）----
+// D.1 的 canonical schema（provenanceLink / status / generationSource / entry）与
+// exploratory_findings_updated 广播消息已上移到 runtimeStateStreamMessageSchema 之前（TDZ）。
+// 本节是 findings 的 procedure I/O（M2）：人工保存主路径（§D.2.1，用户动作 zod 校验即够、
+// 无需作业漏斗）+ agent 建议通道（§D.2.2，provenance 可解析性校验在 handler 完成）。
+// 持久化在 per-workspace exploratory-findings.json（src/state/exploratory-findings-store.ts）。
+
+// exploratory.getFindings（query）：workspace 级全量读取（集合恒小，上限 500）。
+export const runtimeGetExploratoryFindingsRequestSchema = z.object({});
+export type RuntimeGetExploratoryFindingsRequest = z.infer<typeof runtimeGetExploratoryFindingsRequestSchema>;
+
+export const runtimeGetExploratoryFindingsResponseSchema = z.object({
+	findings: z.array(runtimeExploratoryFindingEntrySchema),
+});
+export type RuntimeGetExploratoryFindingsResponse = z.infer<typeof runtimeGetExploratoryFindingsResponseSchema>;
+
+// exploratory.saveFinding（mutation，蓝图 §D.2.1 人工保存主路径）：落库即 active + user_saved。
+// findingId 由 UI 生成 uuid，作稳定 dedup 键——同 findingId 已存在 → 幂等返回现状条目，不重复落地。
+export const runtimeSaveExploratoryFindingRequestSchema = z.object({
+	findingId: z.string().min(1).max(200),
+	findingTitle: z.string().min(1).max(120),
+	findingBodyMarkdown: z.string().min(1).max(4000),
+	// 上限对齐 findingTags（max 8）：链接数无界会放大持久化体积、串行校验成本与
+	// exploratory_findings_updated 全量广播负载。
+	provenanceLinks: z.array(runtimeExploratoryFindingProvenanceLinkSchema).min(1).max(8),
+	originConversationSessionTaskId: z.string().nullable(),
+});
+export type RuntimeSaveExploratoryFindingRequest = z.infer<typeof runtimeSaveExploratoryFindingRequestSchema>;
+
+export const runtimeSaveExploratoryFindingResponseSchema = z.object({
+	finding: runtimeExploratoryFindingEntrySchema,
+});
+export type RuntimeSaveExploratoryFindingResponse = z.infer<typeof runtimeSaveExploratoryFindingResponseSchema>;
+
+// exploratory.confirmFinding（mutation，蓝图 §D.2.2）：suggested_pending_confirmation → active。
+// 不存在的 findingId → finding: null（UI 幂等）；对非 pending 条目调用 = 状态机违规，报错。
+export const runtimeConfirmExploratoryFindingRequestSchema = z.object({
+	findingId: z.string(),
+});
+export type RuntimeConfirmExploratoryFindingRequest = z.infer<typeof runtimeConfirmExploratoryFindingRequestSchema>;
+
+export const runtimeConfirmExploratoryFindingResponseSchema = z.object({
+	finding: runtimeExploratoryFindingEntrySchema.nullable(),
+});
+export type RuntimeConfirmExploratoryFindingResponse = z.infer<typeof runtimeConfirmExploratoryFindingResponseSchema>;
+
+// exploratory.rejectFinding（mutation，蓝图 §D.2.2）：物理删除 pending 建议（尚未成为资产）。
+// 不存在的 findingId → removed: false（UI 幂等）；对非 pending 条目调用 = 状态机违规，报错。
+export const runtimeRejectExploratoryFindingRequestSchema = z.object({
+	findingId: z.string(),
+});
+export type RuntimeRejectExploratoryFindingRequest = z.infer<typeof runtimeRejectExploratoryFindingRequestSchema>;
+
+export const runtimeRejectExploratoryFindingResponseSchema = z.object({
+	removed: z.boolean(),
+});
+export type RuntimeRejectExploratoryFindingResponse = z.infer<typeof runtimeRejectExploratoryFindingResponseSchema>;
+
+// exploratory.archiveFinding（mutation）：active ↔ archived 软删/恢复（已处目标态 = 幂等空转）。
+// pending 条目不可 archive（尚未成为资产，该走 reject）——状态机违规报错；不存在的 findingId → null。
+export const runtimeArchiveExploratoryFindingRequestSchema = z.object({
+	findingId: z.string(),
+	archived: z.boolean(),
+});
+export type RuntimeArchiveExploratoryFindingRequest = z.infer<typeof runtimeArchiveExploratoryFindingRequestSchema>;
+
+export const runtimeArchiveExploratoryFindingResponseSchema = z.object({
+	finding: runtimeExploratoryFindingEntrySchema.nullable(),
+});
+export type RuntimeArchiveExploratoryFindingResponse = z.infer<typeof runtimeArchiveExploratoryFindingResponseSchema>;
+
+// exploratory.ingestFindingCandidate（mutation，蓝图 §D.2.2 agent 建议通道）：落库即
+// suggested_pending_confirmation + agent_suggested，待人确认。findingId 由服务端派生 =
+// agent-<clientProposalId>（dedup：同 clientProposalId 重发不落成两条，幂等 ack 回现状条目）。
+
+// ingest 拒绝原因（schema 级拒绝在 tRPC input 校验阶段就抛错，不进本枚举）。
+export const runtimeExploratoryFindingIngestRejectionReasonSchema = z.enum([
+	// 投影可加载时 turnNumber > 该会话投影最新 turn（语义同 map 闸 2b，整份拒绝）。
+	"anchor_turn_number_unresolvable",
+	// link 声明的 conversationSessionTaskId 投影完全加载不出来（会话不存在）。
+	// 注意与「投影源不可用（PTY 会话）」区分：后者接受并降级 checkpoint 为 null（能力矩阵
+	// best-effort 锚），前者整份拒绝。
+	"provenance_conversation_session_unresolvable",
+	// findings 总量达 per-workspace 上限且被 pending 建议占满：pending 永不静默裁 ⇒ cap
+	// 无可裁候选，store 显式拒绝（ExploratoryFindingsCapOverflowError，不落盘）。
+	// 处置 = 请用户先确认/拒绝既有 pending 建议腾位后再提。
+	"findings_cap_overflow",
+]);
+export type RuntimeExploratoryFindingIngestRejectionReason = z.infer<
+	typeof runtimeExploratoryFindingIngestRejectionReasonSchema
+>;
+
+export const runtimeIngestExploratoryFindingCandidateRequestSchema = z.object({
+	// 提交方所在会话（落为 originConversationSessionTaskId）；provenance link 可指向其它会话。
+	conversationSessionTaskId: z.string(),
+	// dedup 键：重试同 id 幂等 ack、不重复落地。
+	clientProposalId: z.string().min(1).max(120),
+	findingTitle: z.string().min(1).max(120),
+	findingBodyMarkdown: z.string().min(1).max(4000),
+	// 上限对齐 findingTags（max 8），同 saveFinding；ingest 每条 turn_anchor 链接还要串行
+	// 加载投影做可解析性校验，无界数组会放大这一成本。
+	provenanceLinks: z.array(runtimeExploratoryFindingProvenanceLinkSchema).min(1).max(8),
+});
+export type RuntimeIngestExploratoryFindingCandidateRequest = z.infer<
+	typeof runtimeIngestExploratoryFindingCandidateRequestSchema
+>;
+
+export const runtimeIngestExploratoryFindingCandidateResponseSchema = z.object({
+	// true = 已 durable 落盘（durable-write-before-ack）或 dedup 幂等 ack；false = 拒绝，见 rejectionReason。
+	ingested: z.boolean(),
+	rejectionReason: runtimeExploratoryFindingIngestRejectionReasonSchema.nullable(),
+	// 落库/现状条目（dedup ack 时为未变更的现状）；拒绝时为 null。
+	finding: runtimeExploratoryFindingEntrySchema.nullable(),
+});
+export type RuntimeIngestExploratoryFindingCandidateResponse = z.infer<
+	typeof runtimeIngestExploratoryFindingCandidateResponseSchema
+>;
+
+// exploratory.getExplorationThreadGraph（query）：读一张图的投影整值。
+// 只读路径，不触发任何 fork——看图是免费的，判图才花钱。
+export const runtimeGetExplorationThreadGraphRequestSchema = z.object({
+	// = 主任务卡片 id（by-the-way 会话经 taskConversationSessionMetadata.workspaceTaskId 归到它名下）。
+	explorationId: z.string().min(1).max(200),
+});
+export type RuntimeGetExplorationThreadGraphRequest = z.infer<typeof runtimeGetExplorationThreadGraphRequestSchema>;
+
+export const runtimeGetExplorationThreadGraphResponseSchema = z.object({
+	// 恒有值：还没有任何 turn 归位时是一张空图，不是 null——「图是空的」与「读不到图」必须可区分。
+	view: runtimeExplorationThreadGraphProjectionViewSchema,
+	// 转录暂时读不出来的会话原生 id（文件被删 / 格式漂移）。这些会话的 turn 行缺席，其余照常。
+	turnSourceUnavailableSessionIds: z.array(z.string()),
+});
+export type RuntimeGetExplorationThreadGraphResponse = z.infer<typeof runtimeGetExplorationThreadGraphResponseSchema>;
+
+// exploratory.requestExplorationThreadGraphMaintenance（mutation）：面板上的「立即维护一次」。
+// 跳过防抖与节流，但**不跳过单飞闸**——同一 exploration 在途恒只有一个作业。
+export const runtimeRequestExplorationThreadGraphMaintenanceRequestSchema = z.object({
+	explorationId: z.string().min(1).max(200),
+});
+export type RuntimeRequestExplorationThreadGraphMaintenanceRequest = z.infer<
+	typeof runtimeRequestExplorationThreadGraphMaintenanceRequestSchema
+>;
+
+export const runtimeRequestExplorationThreadGraphMaintenanceResponseSchema = z.discriminatedUnion("kind", [
+	z.object({
+		kind: z.literal("completed"),
+		// 核心包作业的四种归宿。只有 accepted 意味着图真的变了（也只有它会触发广播）。
+		jobOutcome: z.enum(["accepted", "rejected", "skipped", "fork_failed"]),
+		// accepted 时：落盘后 collection 里 placement 的**总数**（不是本次新增数），以及还剩多少
+		// 待判（超出单次 batchSize 时由调用方安排续跑）。其余归宿为 null。
+		placedTurnCount: z.number().nullable(),
+		remainingTurnCount: z.number().nullable(),
+		// 被拒 / 跳过 / fork 失败的具体原因，原样透传核心包的判词，供面板显示。
+		detail: z.string().nullable(),
+	}),
+	z.object({
+		kind: z.literal("not_started"),
+		reason: z.enum([
+			"not_exploratory_mode",
+			"no_usable_sessions",
+			"already_in_flight",
+			"throttled",
+			"no_completed_turns",
+		]),
+	}),
+	z.object({ kind: z.literal("failed"), message: z.string() }),
+]);
+export type RuntimeRequestExplorationThreadGraphMaintenanceResponse = z.infer<
+	typeof runtimeRequestExplorationThreadGraphMaintenanceResponseSchema
 >;

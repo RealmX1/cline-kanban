@@ -16,6 +16,7 @@ import { CrossRepositoryStageFirstOverview } from "@/components/cross-repository
 import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
+import { FindingsView } from "@/components/findings/findings-view";
 import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { NotificationCenter } from "@/components/notification-center";
@@ -51,6 +52,8 @@ import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import { useDebugTools } from "@/hooks/use-debug-tools";
 import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
+import { useExplorationThreadGraph } from "@/hooks/use-exploration-thread-graph";
+import { useExploratoryFindings } from "@/hooks/use-exploratory-findings";
 import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
@@ -85,6 +88,7 @@ import {
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
+import type { StreamedTaskSessionSummariesApplier } from "@/runtime/use-runtime-state-stream";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
@@ -110,6 +114,9 @@ export default function App(): ReactElement {
 	const sidebarLayout = useProjectNavigationLayout();
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
+	// Exploratory findings 浏览器开关（蓝图 §G.2）：isGitHistoryOpen 同款形态——
+	// 开启时置换 home 主视图，非 overlay；与 git history / board overview 互斥。
+	const [isFindingsOpen, setIsFindingsOpen] = useState(false);
 	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
 	const taskEditorResetRef = useRef<() => void>(() => {});
@@ -117,8 +124,16 @@ export default function App(): ReactElement {
 	const handleProjectSwitchStart = useCallback(() => {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
+		setIsFindingsOpen(false);
 		setPendingTaskStartAfterEditId(null);
 		taskEditorResetRef.current();
+	}, []);
+	// task_sessions_updated（150ms 一批的最高频推流）旁路的中转 ref：useWorkspaceSync 往里注册
+	// 「summaries → 一次 setSessions」的 applier，useRuntimeStateStream 收到批次经回调直接调用。
+	// 这样该消息不再经 stream reducer 新建 workspaceState，App 每批只渲染一次而不是两次。
+	const streamedTaskSessionSummariesApplierRef = useRef<StreamedTaskSessionSummariesApplier | null>(null);
+	const handleStreamedTaskSessionSummaries = useCallback((summaries: RuntimeTaskSessionSummary[]) => {
+		streamedTaskSessionSummariesApplierRef.current?.(summaries);
 	}, []);
 	const {
 		currentProjectId,
@@ -129,6 +144,9 @@ export default function App(): ReactElement {
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
+		exploratoryFindings: pushedExploratoryFindings,
+		latestExplorationThreadGraphUpdate,
+		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
 		streamError,
@@ -155,6 +173,7 @@ export default function App(): ReactElement {
 		resetProjectNavigationState,
 	} = useProjectNavigation({
 		onProjectSwitchStart: handleProjectSwitchStart,
+		onTaskSessionSummaries: handleStreamedTaskSessionSummaries,
 	});
 	const currentProjectSummary = projects.find((project) => project.id === currentProjectId) ?? null;
 	const currentUnavailableProject =
@@ -176,6 +195,14 @@ export default function App(): ReactElement {
 		isLoading: isRuntimeProjectConfigLoading,
 		refresh: refreshRuntimeProjectConfig,
 	} = useRuntimeProjectConfig(projectRuntimeWorkspaceId);
+	// Exploratory findings（M2）：workspace 级集合的单一真相——初始 getFindings 查询 +
+	// exploratory_findings_updated 推送归并；findings 浏览器 / map 面板切片 / 「存为 finding」
+	// 查重共用这一份（不重连快照代数做断连窗口的重拉对齐信号）。
+	const exploratoryFindingsData = useExploratoryFindings({
+		workspaceId: projectRuntimeWorkspaceId,
+		refreshKey: streamSnapshotGeneration,
+		pushedFindings: pushedExploratoryFindings,
+	});
 	const { isBlocked: isKanbanAccessBlocked, refresh: refreshKanbanAccess } = useKanbanAccessGate({
 		workspaceId: projectRuntimeWorkspaceId,
 	});
@@ -306,6 +333,7 @@ export default function App(): ReactElement {
 	} = useWorkspaceSync({
 		currentProjectId: projectRuntimeWorkspaceId,
 		streamedWorkspaceState,
+		streamedTaskSessionSummariesApplierRef,
 		hasNoProjects,
 		hasReceivedSnapshot,
 		isDocumentVisible,
@@ -336,9 +364,17 @@ export default function App(): ReactElement {
 	useEffect(() => {
 		setIsTaskChangesSidebarOpen(false);
 	}, [selectedCard?.card.id]);
+	// exploration thread graph（B.2）：与 findings 不同，它是**按 exploration 分**的——作用域跟着
+	// 当前选中的卡片走，所以必须放在 selectedCard 之后。读图免费（服务端不 fork），重连重拉无成本顾虑。
+	const explorationThreadGraphData = useExplorationThreadGraph({
+		workspaceId: projectRuntimeWorkspaceId,
+		explorationId: selectedCard?.card.id ?? null,
+		refreshKey: streamSnapshotGeneration,
+		pushedUpdate: latestExplorationThreadGraphUpdate,
+	});
 	useNotificationTaskFocus({ currentProjectId: navigationCurrentProjectId, setSelectedTaskId });
 
-	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 CONTEXT.md）开关 + 跨-workspace 打开某 task 的待定跳转。
+	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 docs/context-stage-first-overview.md）开关 + 跨-workspace 打开某 task 的待定跳转。
 	const [isBoardOverviewOpen, setIsBoardOverviewOpen] = useState(false);
 	const [pendingCrossProjectTaskOpen, setPendingCrossProjectTaskOpen] = useState<{
 		repoId: string;
@@ -349,6 +385,7 @@ export default function App(): ReactElement {
 			const next = !open;
 			if (next) {
 				setIsGitHistoryOpen(false);
+				setIsFindingsOpen(false);
 			}
 			return next;
 		});
@@ -386,6 +423,10 @@ export default function App(): ReactElement {
 		board,
 		currentProjectId,
 		currentProjectName: currentProjectSummary?.name ?? null,
+		currentProjectDefaultAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
+		// 会话摘要只作为「搜索之后叠加」的展示/过滤/排序素材传入。**绝不能进 documents**——
+		// 它每 tick 换引用，会把语义索引反复重建（见 controller 里叠加层那一段）。
+		taskSessionSummariesByTaskId: sessions,
 		canOpen: !hasNoProjects,
 		crossProjectWorkspaceId: currentProjectId,
 		crossProjectExcludeProjectIds: crossProjectTaskSearchExcludeProjectIds,
@@ -515,6 +556,8 @@ export default function App(): ReactElement {
 		setNewTaskStartInPlanMode,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
+		newTaskConversationMode,
+		setNewTaskConversationMode,
 		newTaskAutoReviewEnabled,
 		setNewTaskAutoReviewEnabled,
 		newTaskAutoReviewMode,
@@ -541,6 +584,8 @@ export default function App(): ReactElement {
 		setEditTaskStartInPlanMode,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
+		editTaskConversationMode,
+		setEditTaskConversationMode,
 		editTaskAutoReviewEnabled,
 		setEditTaskAutoReviewEnabled,
 		editTaskAutoReviewMode,
@@ -763,6 +808,7 @@ export default function App(): ReactElement {
 		}
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
+		setIsFindingsOpen(false);
 		setSelectedTaskId(null);
 		resetTaskEditorState();
 		resetTerminalPanelsState();
@@ -811,6 +857,7 @@ export default function App(): ReactElement {
 			const next = !current;
 			if (next) {
 				setIsBoardOverviewOpen(false);
+				setIsFindingsOpen(false);
 			}
 			return next;
 		});
@@ -818,6 +865,19 @@ export default function App(): ReactElement {
 	const handleCloseGitHistory = useCallback(() => {
 		setIsGitHistoryOpen(false);
 	}, []);
+	const handleToggleFindings = useCallback(() => {
+		if (hasNoProjects) {
+			return;
+		}
+		setIsFindingsOpen((current) => {
+			const next = !current;
+			if (next) {
+				setIsBoardOverviewOpen(false);
+				setIsGitHistoryOpen(false);
+			}
+			return next;
+		});
+	}, [hasNoProjects]);
 
 	const {
 		handleProgrammaticCardMoveReady,
@@ -1227,6 +1287,12 @@ export default function App(): ReactElement {
 							hasNoProjects || isCurrentProjectRuntimeUnavailable ? undefined : handleToggleGitHistory
 						}
 						isGitHistoryOpen={isGitHistoryOpen}
+						onToggleFindings={
+							!selectedCard && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+								? handleToggleFindings
+								: undefined
+						}
+						isFindingsOpen={isFindingsOpen}
 						onToggleTaskChangesSidebar={
 							selectedCard ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
 						}
@@ -1312,6 +1378,12 @@ export default function App(): ReactElement {
 													void discardHomeWorkingChanges();
 												}}
 												isDiscardWorkingChangesPending={isDiscardingHomeWorkingChanges}
+											/>
+										) : isFindingsOpen && currentProjectId ? (
+											<FindingsView
+												workspaceId={currentProjectId}
+												findings={exploratoryFindingsData.findings}
+												queryPhase={exploratoryFindingsData.queryPhase}
 											/>
 										) : (
 											<div className="flex flex-1 flex-col min-h-0 min-w-0 bg-surface-0">
@@ -1411,6 +1483,9 @@ export default function App(): ReactElement {
 									sessionSummary={detailSession}
 									taskSessions={sessions}
 									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
+									exploratoryFindings={exploratoryFindingsData.findings}
+									explorationThreadGraph={explorationThreadGraphData}
+									runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
 									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
 									onCreateByTheWayTaskConversationSession={async (input) => {
 										const effectiveAgentId =
@@ -1565,6 +1640,8 @@ export default function App(): ReactElement {
 					onTaskAgentPermissionModeChange={
 						editingTaskId ? setEditTaskAgentPermissionMode : setNewTaskAgentPermissionMode
 					}
+					taskConversationMode={editingTaskId ? editTaskConversationMode : newTaskConversationMode}
+					onTaskConversationModeChange={editingTaskId ? setEditTaskConversationMode : setNewTaskConversationMode}
 					startInPlanModeDisabled={
 						editingTaskId ? isEditTaskStartInPlanModeDisabled : isNewTaskStartInPlanModeDisabled
 					}

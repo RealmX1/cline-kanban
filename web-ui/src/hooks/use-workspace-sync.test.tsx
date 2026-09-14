@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialBoardData } from "@/data/board-data";
 import { useWorkspaceSync } from "@/hooks/use-workspace-sync";
 import type { RuntimeTaskSessionSummary, RuntimeWorkspaceStateResponse } from "@/runtime/types";
+import type { StreamedTaskSessionSummariesApplierRef } from "@/runtime/use-runtime-state-stream";
 import type { BoardData } from "@/types";
 
 const fetchWorkspaceStateMock = vi.hoisted(() => vi.fn());
@@ -119,11 +120,13 @@ interface HookSnapshot {
 
 function HookHarness({
 	streamedWorkspaceState,
+	streamedTaskSessionSummariesApplierRef,
 	hasReceivedSnapshot = true,
 	isDocumentVisible = false,
 	onSnapshot,
 }: {
 	streamedWorkspaceState: RuntimeWorkspaceStateResponse | null;
+	streamedTaskSessionSummariesApplierRef: StreamedTaskSessionSummariesApplierRef;
 	hasReceivedSnapshot?: boolean;
 	isDocumentVisible?: boolean;
 	onSnapshot: (snapshot: HookSnapshot) => void;
@@ -134,6 +137,7 @@ function HookHarness({
 	const { refreshWorkspaceState, resetWorkspaceSyncState } = useWorkspaceSync({
 		currentProjectId: "project-a",
 		streamedWorkspaceState,
+		streamedTaskSessionSummariesApplierRef,
 		hasNoProjects: false,
 		hasReceivedSnapshot,
 		isDocumentVisible,
@@ -194,6 +198,7 @@ describe("useWorkspaceSync", () => {
 			root.render(
 				<HookHarness
 					streamedWorkspaceState={createWorkspaceState("persisted-task", 1)}
+					streamedTaskSessionSummariesApplierRef={{ current: null }}
 					onSnapshot={(snapshot) => {
 						latestSnapshot = snapshot;
 					}}
@@ -241,6 +246,7 @@ describe("useWorkspaceSync", () => {
 					streamedWorkspaceState={createWorkspaceStateWithSessions("persisted-task", 1, {
 						"task-1": existingSummary,
 					})}
+					streamedTaskSessionSummariesApplierRef={{ current: null }}
 					onSnapshot={(snapshot) => {
 						latestSnapshot = snapshot;
 					}}
@@ -277,6 +283,7 @@ describe("useWorkspaceSync", () => {
 					streamedWorkspaceState={createWorkspaceStateWithSessions("persisted-task", 1, {
 						"task-1": newerRunningSummary,
 					})}
+					streamedTaskSessionSummariesApplierRef={{ current: null }}
 					onSnapshot={(snapshot) => {
 						latestSnapshot = snapshot;
 					}}
@@ -297,6 +304,7 @@ describe("useWorkspaceSync", () => {
 					streamedWorkspaceState={createWorkspaceStateWithSessions("persisted-task", 2, {
 						"task-1": staleInterruptedSummary,
 					})}
+					streamedTaskSessionSummariesApplierRef={{ current: null }}
 					onSnapshot={(snapshot) => {
 						latestSnapshot = snapshot;
 					}}
@@ -310,6 +318,8 @@ describe("useWorkspaceSync", () => {
 		const rerenderedSnapshot: HookSnapshot = latestSnapshot;
 		expect(rerenderedSnapshot.sessions["task-1"]?.updatedAt).toBe(2000);
 		expect(rerenderedSnapshot.sessions["task-1"]?.state).toBe("running");
+		// 没有 key 被实际替换时合并返回入参原引用：sessions 对象引用不变。
+		expect(rerenderedSnapshot.sessions).toBe(initialSnapshot.sessions);
 	});
 
 	it("does not refresh workspace state before the initial runtime snapshot resolves", async () => {
@@ -319,6 +329,7 @@ describe("useWorkspaceSync", () => {
 			root.render(
 				<HookHarness
 					streamedWorkspaceState={null}
+					streamedTaskSessionSummariesApplierRef={{ current: null }}
 					hasReceivedSnapshot={false}
 					isDocumentVisible={true}
 					onSnapshot={(snapshot) => {
@@ -330,5 +341,60 @@ describe("useWorkspaceSync", () => {
 
 		expect(fetchWorkspaceStateMock).not.toHaveBeenCalled();
 		expect(latestSnapshot).not.toBeNull();
+	});
+
+	it("applies streamed task_sessions_updated summaries via the registered applier, stale batches keep the same reference", async () => {
+		const applierRef: StreamedTaskSessionSummariesApplierRef = { current: null };
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					streamedWorkspaceState={createWorkspaceStateWithSessions("persisted-task", 1, {
+						"task-1": createSessionSummary("task-1", 1000, null),
+					})}
+					streamedTaskSessionSummariesApplierRef={applierRef}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected an initial hook snapshot.");
+		}
+		const initialSnapshot: HookSnapshot = latestSnapshot;
+		expect(initialSnapshot.sessions["task-1"]?.updatedAt).toBe(1000);
+		if (!applierRef.current) {
+			throw new Error("Expected the streamed task session summaries applier to be registered on mount.");
+		}
+		const applier = applierRef.current;
+
+		// 旁路批次：一次 setSessions 并入——已有 key 按 updatedAt 单调更新，新 key 直接收录。
+		await act(async () => {
+			applier([createSessionSummary("task-1", 2000, "All done"), createSessionSummary("task-2", 1500, null)]);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected a hook snapshot after applying streamed summaries.");
+		}
+		const afterUpdateSnapshot: HookSnapshot = latestSnapshot;
+		expect(afterUpdateSnapshot.sessions["task-1"]?.updatedAt).toBe(2000);
+		expect(afterUpdateSnapshot.sessions["task-1"]?.latestHookActivity?.finalMessage).toBe("All done");
+		expect(afterUpdateSnapshot.sessions["task-2"]?.updatedAt).toBe(1500);
+
+		// stale 批次（updatedAt 更旧）：没有 key 被替换，sessions 引用不变、不多渲染。
+		const sessionsBeforeStaleBatch = afterUpdateSnapshot.sessions;
+		await act(async () => {
+			applier([createSessionSummary("task-1", 1500, "Stale output")]);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected the hook snapshot to survive a stale batch.");
+		}
+		const afterStaleSnapshot: HookSnapshot = latestSnapshot;
+		expect(afterStaleSnapshot.sessions).toBe(sessionsBeforeStaleBatch);
+		expect(afterStaleSnapshot.sessions["task-1"]?.updatedAt).toBe(2000);
 	});
 });

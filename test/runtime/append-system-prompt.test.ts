@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	combineAppendSystemPrompts,
 	renderAppendSystemPrompt,
+	renderExploratoryModeAppendSystemPrompt,
 	resolveAppendSystemPromptCommandPrefix,
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
@@ -215,5 +216,20 @@ describe("resolveTaskSessionAppendSystemPrompt", () => {
 describe("combineAppendSystemPrompts", () => {
 	it("joins only non-empty prompts", () => {
 		expect(combineAppendSystemPrompts("first", null, "  ", "second")).toBe("first\n\nsecond");
+	});
+});
+
+describe("renderExploratoryModeAppendSystemPrompt", () => {
+	it("把指令文件绝对路径原样内联，并要求 agent 完整阅读且遵守", () => {
+		const rendered = renderExploratoryModeAppendSystemPrompt(
+			"/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-conversation-etiquette-and-findings.md",
+		);
+		expect(rendered).toContain("exploratory");
+		expect(rendered).toContain("exploration thread graph");
+		expect(rendered).toContain("never write that structure yourself");
+		expect(rendered).toContain(
+			"`/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-conversation-etiquette-and-findings.md`",
+		);
+		expect(rendered).toContain("IN FULL");
 	});
 });

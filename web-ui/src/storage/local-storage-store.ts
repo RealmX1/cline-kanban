@@ -32,6 +32,10 @@ export enum LocalStorageKey {
 	ProjectNumericSlotGroupAssignments = "kanban.project-numeric-slot-group-assignments.v1",
 	ProjectSwitcherTableColumnVisibility = "kanban.project-switcher-table-column-visibility.v1",
 	ProjectSwitcherTableSortOrder = "kanban.project-switcher-table-sort-order.v1",
+	// ⌘K Spotlight：结果排序档与结果行字段开关。都是「看的方式」而非布局尺寸，
+	// 故同样不进 LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS——「重置布局」不该把用户选的排序与字段抹掉。
+	TaskSpotlightSearchResultSortOrder = "kanban.task-spotlight-search-result-sort-order.v1",
+	TaskSpotlightSearchResultRowFieldVisibility = "kanban.task-spotlight-search-result-row-field-visibility.v1",
 	// 曾经叫 `kb-sidebar-width`——本枚举里**唯一**没有 `kanban.` 前缀的键，按前缀扫描/导出/清理的逻辑
 	// 都会漏掉它。改名后由 legacy-local-storage-key-rename-migration.ts 在启动时把旧键搬过来。
 	ProjectNavigationPanelWidth = "kanban.project-navigation-panel-width",

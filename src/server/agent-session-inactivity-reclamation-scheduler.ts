@@ -28,7 +28,7 @@ import {
 } from "../state/agent-session-reclamation-deadline-store";
 import { isAgentSessionRetentionDeadlineBearing } from "./agent-session-response-generation-stop-observer";
 
-// tick 间隔：1 小时的宽限期下，60 秒的判定粒度绰绰有余，而扫描成本（每 workspace 读一个小 JSON）
+// tick 间隔：小时级的宽限期下，60 秒的判定粒度绰绰有余，而扫描成本（每 workspace 读一个小 JSON）
 // 可以忽略。刻意不做成可配置——粒度不是产品决策。
 export const AGENT_SESSION_RECLAMATION_SWEEP_INTERVAL_MS = 60_000;
 

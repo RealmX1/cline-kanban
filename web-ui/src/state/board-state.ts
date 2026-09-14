@@ -10,6 +10,7 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
+	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "@/runtime/types";
@@ -32,6 +33,7 @@ import {
 	runtimeAgentSessionTransportSchema,
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
+	runtimeTaskConversationModeSchema,
 } from "../../../src/core/api-contract";
 
 export interface TaskDraft {
@@ -54,6 +56,10 @@ export interface TaskDraft {
 	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
+	// 会话模式声明（蓝图 §A.1）。create：缺省 = operational（undefined 不落字段）。
+	// updateTask 三态（与域层 RuntimeUpdateTaskInput 对齐）：不提 = 保留卡上原值；null = 清除回缺省；
+	// 具体值 = 覆盖。部分重建 draft 的调用点（改标题、取消自动提交等）不提它即不碰。
+	taskConversationMode?: RuntimeTaskConversationMode | null;
 	baseRef: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
 }
@@ -263,6 +269,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef?: unknown;
 		agentId?: unknown;
 		ompAgentSessionTransport?: unknown;
+		taskConversationMode?: unknown;
 		mostRecentlyLaunchedAgentSessionAgentId?: unknown;
 		clineSettings?: unknown;
 		terminalAgentModelOverrideSettings?: unknown;
@@ -355,6 +362,10 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		typeof card.taskPinboardPinReason === "string" && card.taskPinboardPinReason.trim()
 			? card.taskPinboardPinReason
 			: undefined;
+	// 会话模式声明（蓝图 §A.1）：与 ompAgentSessionTransport 同款白名单保留——漏掉它会在下一次
+	// saveState 时把盘上已声明的模式抹回 operational 缺省。老卡片没有该字段 ⇒ undefined = operational。
+	const parsedTaskConversationMode = runtimeTaskConversationModeSchema.safeParse(card.taskConversationMode);
+	const taskConversationMode = parsedTaskConversationMode.success ? parsedTaskConversationMode.data : undefined;
 
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
@@ -373,6 +384,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(ompAgentSessionTransport !== undefined ? { ompAgentSessionTransport } : {}),
+		...(taskConversationMode !== undefined ? { taskConversationMode } : {}),
 		...(mostRecentlyLaunchedAgentSessionAgentId !== undefined ? { mostRecentlyLaunchedAgentSessionAgentId } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
 		...(terminalAgentModelOverrideSettings !== undefined ? { terminalAgentModelOverrideSettings } : {}),
@@ -533,6 +545,7 @@ export function addTaskToColumnWithResult(
 			clineSettings: draft.clineSettings,
 			terminalAgentModelOverrideSettings: draft.terminalAgentModelOverrideSettings,
 			taskAgentSessionInitialization: draft.taskAgentSessionInitialization,
+			taskConversationMode: draft.taskConversationMode ?? undefined,
 			baseRef: draft.baseRef,
 			worktreeMode: draft.worktreeMode,
 		},
@@ -712,6 +725,8 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 	// updateTask 是全量覆盖语义，而不少调用点（例如取消自动提交）只重建了部分 draft。
 	// 用 Object.hasOwn 区分「显式改成 undefined」与「压根没提」，否则那些调用点会把权限档清零。
 	const shouldUpdateTaskAgentPermissionMode = Object.hasOwn(draft, "taskAgentPermissionMode");
+	// 会话模式同款三态（TaskDraft 注释）：不提 = 保留；null = 清除回缺省；具体值 = 覆盖。
+	const shouldUpdateTaskConversationMode = Object.hasOwn(draft, "taskConversationMode");
 
 	let updated = false;
 	const columns = board.columns.map((column) => {
@@ -748,6 +763,9 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				taskAgentSessionInitialization: shouldUpdateTaskAgentSessionInitialization
 					? draft.taskAgentSessionInitialization
 					: card.taskAgentSessionInitialization,
+				taskConversationMode: shouldUpdateTaskConversationMode
+					? (draft.taskConversationMode ?? undefined)
+					: card.taskConversationMode,
 				parentSessionId: shouldUpdateTaskAgentSessionInitialization ? undefined : card.parentSessionId,
 				baseRef,
 				worktreeMode: shouldUpdateWorktreeMode ? draft.worktreeMode : card.worktreeMode,

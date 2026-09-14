@@ -1,7 +1,7 @@
 import { isNeverStartedPlaceholderTaskSessionSummary } from "@runtime-session-activity";
 import { describe, expect, it } from "vitest";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
-import { mergeTaskSessionSummariesForTest } from "@/runtime/use-runtime-state-stream";
+import { mergeTaskSessionSummaries } from "@/runtime/use-runtime-state-stream";
 
 // 「重启后 TUI 全白且重启按钮不可用」的前端半边回归护栏。
 //
@@ -42,41 +42,77 @@ function makeStartedSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}):
 
 describe("mergeTaskSessionSummaries", () => {
 	it("空壳占位不因 updatedAt 更新就覆盖已有的真实记录", () => {
-		const merged = mergeTaskSessionSummariesForTest({ "task-1": makeStartedSummary() }, [
-			makeSummary({ updatedAt: 9_000 }),
-		]);
+		const merged = mergeTaskSessionSummaries({ "task-1": makeStartedSummary() }, [makeSummary({ updatedAt: 9_000 })]);
 		expect(merged["task-1"]?.agentId).toBe("claude");
 		expect(merged["task-1"]?.startedAt).toBe(1_000);
 	});
 
 	it("手上本来就是空壳时放行 incoming（留谁都一样，不该把陈旧 updatedAt 钉住）", () => {
-		const merged = mergeTaskSessionSummariesForTest({ "task-1": makeSummary({ updatedAt: 1_000 }) }, [
+		const merged = mergeTaskSessionSummaries({ "task-1": makeSummary({ updatedAt: 1_000 }) }, [
 			makeSummary({ updatedAt: 9_000 }),
 		]);
 		expect(merged["task-1"]?.updatedAt).toBe(9_000);
 	});
 
 	it("真实记录之间仍按 updatedAt 单调合并", () => {
-		const merged = mergeTaskSessionSummariesForTest({ "task-1": makeStartedSummary() }, [
+		const merged = mergeTaskSessionSummaries({ "task-1": makeStartedSummary() }, [
 			makeStartedSummary({ agentId: "codex", updatedAt: 9_000 }),
 		]);
 		expect(merged["task-1"]?.agentId).toBe("codex");
 	});
 
 	it("更旧的真实记录不覆盖更新的真实记录", () => {
-		const merged = mergeTaskSessionSummariesForTest({ "task-1": makeStartedSummary({ updatedAt: 9_000 }) }, [
+		const merged = mergeTaskSessionSummaries({ "task-1": makeStartedSummary({ updatedAt: 9_000 }) }, [
 			makeStartedSummary({ agentId: "codex", updatedAt: 1_000 }),
 		]);
 		expect(merged["task-1"]?.agentId).toBe("claude");
 	});
 
 	it("首次见到的 task 即便是空壳也照收（没有更富的记录可保护）", () => {
-		const merged = mergeTaskSessionSummariesForTest({}, [makeSummary()]);
+		const merged = mergeTaskSessionSummaries({}, [makeSummary()]);
 		expect(merged["task-1"]).toBeDefined();
 	});
 
 	it("守卫依赖的谓词与服务端 createDefaultSummary 同形", () => {
 		expect(isNeverStartedPlaceholderTaskSessionSummary(makeSummary())).toBe(true);
 		expect(isNeverStartedPlaceholderTaskSessionSummary(makeStartedSummary())).toBe(false);
+	});
+});
+
+describe("mergeTaskSessionSummaries 引用纪律（无实际替换则返回入参原引用）", () => {
+	it("整批都是更旧的记录时返回入参原引用", () => {
+		const current = { "task-1": makeStartedSummary({ updatedAt: 9_000 }) };
+		const merged = mergeTaskSessionSummaries(current, [makeStartedSummary({ agentId: "codex", updatedAt: 1_000 })]);
+		expect(merged).toBe(current);
+	});
+
+	it("整批都被空壳守卫拦下时返回入参原引用", () => {
+		const current = { "task-1": makeStartedSummary() };
+		const merged = mergeTaskSessionSummaries(current, [makeSummary({ updatedAt: 9_000 })]);
+		expect(merged).toBe(current);
+	});
+
+	it("空批次返回入参原引用", () => {
+		const current = { "task-1": makeStartedSummary() };
+		expect(mergeTaskSessionSummaries(current, [])).toBe(current);
+	});
+
+	it("存在真实更新时返回新对象，未触及的 key 保持原记录引用", () => {
+		const untouchedSummary = makeStartedSummary({ taskId: "task-2", updatedAt: 500 });
+		const current = {
+			"task-1": makeStartedSummary({ updatedAt: 1_000 }),
+			"task-2": untouchedSummary,
+		};
+		const merged = mergeTaskSessionSummaries(current, [makeStartedSummary({ agentId: "codex", updatedAt: 2_000 })]);
+		expect(merged).not.toBe(current);
+		expect(merged["task-1"]?.agentId).toBe("codex");
+		expect(merged["task-2"]).toBe(untouchedSummary);
+	});
+
+	it("updatedAt 相同仍算真实更新（<= 不可收紧成 <，同毫秒两次写不能丢）", () => {
+		const current = { "task-1": makeStartedSummary({ updatedAt: 1_000 }) };
+		const merged = mergeTaskSessionSummaries(current, [makeStartedSummary({ agentId: "codex", updatedAt: 1_000 })]);
+		expect(merged).not.toBe(current);
+		expect(merged["task-1"]?.agentId).toBe("codex");
 	});
 });

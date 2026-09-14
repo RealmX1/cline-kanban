@@ -10,6 +10,7 @@ import { parseHookIngestRequest } from "../core/api-validation";
 import {
 	formatDeferredHarnessGeneratedPromptsAsAdditionalContext,
 	isClaudeHarnessGeneratedTaskNotificationPrompt,
+	isTaskNotificationOrphanedByPreviousAgentSessionIncarnation,
 } from "../core/harness-generated-restoration-prompt";
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
@@ -22,7 +23,7 @@ import {
 } from "../state/restoration-deferred-harness-generated-prompt-store";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
-import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
+import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
 import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
@@ -40,7 +41,9 @@ export interface CreateHooksApiDependencies {
 		taskId: string;
 		turn: number;
 	}) => Promise<RuntimeTaskTurnCheckpoint>;
-	deleteTaskTurnCheckpointRef?: (input: { cwd: string; ref: string }) => Promise<void>;
+	// exploration thread graph 维护的 Stop 边沿出口（B.2）。可选：未接线时整条链路静默缺席，
+	// hook 行为零差异。绝不返回 Promise——判图会 fork 一个分身，不能压进 hook 的响应关键路径。
+	notifyExplorationThreadGraphAgentTurnStopped?: (input: { workspaceId: string; explorationId: string }) => void;
 	recordAgentRaisedPendingUserDecision?: typeof recordAgentRaisedPendingUserDecision;
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration?: typeof deferHarnessGeneratedPromptDuringAgentSessionRestoration;
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration?: typeof consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration;
@@ -123,7 +126,6 @@ async function recordAgentRaisedPendingUserDecisionFromHookIngest(input: {
 
 export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcContext["hooksApi"] {
 	const checkpointCapture = deps.captureTaskTurnCheckpoint ?? captureTaskTurnCheckpoint;
-	const checkpointRefDelete = deps.deleteTaskTurnCheckpointRef ?? deleteTaskTurnCheckpointRef;
 	const pendingUserDecisionRecord = deps.recordAgentRaisedPendingUserDecision ?? recordAgentRaisedPendingUserDecision;
 	const restorationHarnessPromptDefer =
 		deps.deferHarnessGeneratedPromptDuringAgentSessionRestoration ??
@@ -158,13 +160,30 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					} satisfies RuntimeHookIngestResponse;
 				}
 
+				// N0a：终端 agent 原生会话身份 sidecar。放在一切早退（恢复守卫拦截 / 转移闸）之前——
+				// 它是会话事实，与本次事件是否被拦截无关；manager 只在值变化时真正写 summary。
+				if (body.agentNativeConversationSessionIdentity) {
+					manager.applyAgentNativeConversationSessionIdentity?.(
+						taskId,
+						body.agentNativeConversationSessionIdentity,
+					);
+				}
+
 				const normalizedHookEventName = body.metadata?.hookEventName?.trim().toLowerCase() ?? "";
 				const isClaudeUserPromptSubmit =
 					event === "to_in_progress" &&
 					body.metadata?.source?.trim().toLowerCase() === "claude" &&
 					normalizedHookEventName === "userpromptsubmit";
+				// 两档判定，别混为一谈：
+				//   - isClaudeHarnessGeneratedTaskNotification：任何 <task-notification> 包裹都**不是真人提交**，
+				//     故它既不解除恢复守卫、也不消费暂存账本（否则 harness 自己的通知就能把守卫顶开）。
+				//   - isRestorationOrphanTaskNotification：其中只有「上一活体遗留的孤儿」才真的拦下来暂存。
+				//     本活体自己 dispatch 的子 agent / 后台命令完成通知照常放行——那是 agent 在等的唤醒信号。
 				const isClaudeHarnessGeneratedTaskNotification =
 					isClaudeUserPromptSubmit && isClaudeHarnessGeneratedTaskNotificationPrompt(body.submittedPromptText);
+				const isRestorationOrphanTaskNotification =
+					isClaudeUserPromptSubmit &&
+					isTaskNotificationOrphanedByPreviousAgentSessionIncarnation(body.submittedPromptText);
 				let deferredHarnessNotificationsAdditionalContext: string | undefined;
 				const isRestorationHarnessGeneratedTaskNotificationInterceptionActive =
 					isClaudeUserPromptSubmit &&
@@ -172,7 +191,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						manager.isRestorationContinuationGuardArmed?.(taskId)) === true;
 				if (
 					isRestorationHarnessGeneratedTaskNotificationInterceptionActive &&
-					isClaudeHarnessGeneratedTaskNotification
+					isRestorationOrphanTaskNotification
 				) {
 					try {
 						// 同步 durable 写成功之后才准许 hook 返回 block；先回响应再 fire-and-forget 会在 daemon
@@ -222,6 +241,19 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 							userVisibleReason: "Kanban 正在恢复旧会话；无法确认这条空输入是否来自用户，已保留恢复守卫。",
 						},
 					} satisfies RuntimeHookIngestResponse;
+				}
+				// 恢复守卫的解除**必须**在 canTransitionTaskForHookEvent 之前完成。历史上它只挂在下方
+				// transitionToRunning(userInitiatedResume) 上，而那一步位于转移闸之后：会话一旦被任意一次
+				// PostToolUse 推进 running（Claude 以 --continue 接回后自己继续干活就会发），后续真人
+				// UserPromptSubmit 的 to_in_progress 便再也过不了闸（闸要求 awaiting_review + reviewReason
+				// 落在放行集），守卫从此永久武装。B 档拦截随之一起卡死——completeRestoration…() 见主守卫仍
+				// 武装就 no-op。实测 2026-08 有 79/185 条会话记录停在武装态、其中 38 条已无任何解除路径，
+				// agent 自己 dispatch 的后台工作唤醒信号被无限期吞掉。闸后解除是这个死锁的唯一成因。
+				const isExplicitUserTurnStartHookEvent =
+					event === "to_in_progress" &&
+					(normalizedHookEventName === "userpromptsubmit" || normalizedHookEventName === "beforeagent");
+				if (isExplicitUserTurnStartHookEvent && !isClaudeHarnessGeneratedTaskNotification) {
+					manager.disarmRestorationContinuationGuard?.(taskId);
 				}
 				if (isClaudeUserPromptSubmit && !isClaudeHarnessGeneratedTaskNotification) {
 					try {
@@ -316,7 +348,9 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					normalizedHookEventName === "stop"
 				) {
 					// 仅自然 Stop 证明真人恢复后的首轮已经结束；PermissionRequest / AskUserQuestion 等
-					// 中途人轴事件不能提前放掉迟到通知拦截。主守卫仍武装时方法会保持 no-op。
+					// 中途人轴事件不能提前放掉迟到通知拦截。主守卫（A 档）仍武装即「显式用户回合尚未开始」，
+					// 这条 Stop 只可能来自恢复过程自身，方法会保持 no-op——否则真人 prompt 随后在转移闸前
+					// 解除 A 时两档全空，「真人首轮已开始、尚未 Stop」那段窗口的迟到孤儿会直接穿透。
 					manager.completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn?.(taskId);
 				}
 
@@ -389,6 +423,29 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				}
 
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
+
+				if (
+					event === "to_review" &&
+					body.metadata?.source?.trim().toLowerCase() === "claude" &&
+					normalizedHookEventName === "stop"
+				) {
+					// exploration thread graph 维护的 Stop 边沿（B.2）。判据与上面「迟到通知拦截解除」同源
+					// （source=claude + hookEventName=stop），**只认自然 Stop**：`to_review` 同样承载
+					// PermissionRequest / AskUserQuestion / ExitPlanMode 这类「agent 停下来等人拍板」的中途
+					// 人轴信号，那一刻这一轮根本还没结束。用户在权限框/提问框上想得比防抖窗口（45s）久，
+					// 光判 event 就会让触发器拿 treatFinalTurnAsCompleted:true 的 turn 源去 fork：既白烧一次
+					// 判定（≈$4.5，成因见 docs/exploratory-mode-host-integration.md §3b），又把半截 turn 当作
+					// 已完成轮次归位进图。图只对 Claude 终端会话建模（turn 源与分身执行器都是 Claude Code
+					// 专用），故 source 闸不是额外收紧，而是本来的适用域。
+					// **by-the-way 会话同样要触发**——它的 turn 一样要归位，只是 explorationId 要解析回主任务
+					// 卡片（图挂在卡片上，不挂在单条会话上）。所以这一块刻意放在下面那道 by_the_way 守卫
+					// **之外**：那道守卫是给「转审通知 + checkpoint」用的，与图无关。
+					// 触发器自带四道闸（模式 / 防抖 / 单飞 / 节流），这里只负责把「刚有一个 turn 结束了」
+					// 这个事实交出去，不判断、不等待。
+					const explorationId = transitionedSummary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId;
+					deps.notifyExplorationThreadGraphAgentTurnStopped?.({ workspaceId, explorationId });
+				}
+
 				if (
 					event === "to_review" &&
 					transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way"
@@ -406,11 +463,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					// UI 的 base-commit（fork-point）服务，对列状态毫无必要。旧版同步 await 它，会把 7 个 git
 					// 子进程的耗时（大仓 / 慢盘 / 与 agent 抢 .git/index.lock 时轻松破 3s）整段压进 hook 客户端
 					// 的硬超时窗口，触发误判超时 → fail-open 静默丢投。改为不 await 的后台任务：完成后
-					// applyTurnCheckpoint 再补发一次 workspace-state 广播把 base-commit 推给 UI，staleRef 清理
-					// 挂在其后。沿用既有 best-effort try/catch——checkpoint 失败绝不回滚已落定的转审。
+					// applyTurnCheckpoint 再补发一次 workspace-state 广播把 base-commit 推给 UI。沿用既有
+					// best-effort try/catch——checkpoint 失败绝不回滚已落定的转审。
+					// turn ref 保留策略（姊妹蓝图 §1.4）：任务存续期全量保留，这里只做捕获、不再轮换删旧
+					// ref；批删挂在任务删除 / trash 清空路径（deleteAllTaskTurnCheckpointRefs）。
 					const nextTurn = (transitionedSummary.latestTurnCheckpoint?.turn ?? 0) + 1;
 					const checkpointCwd = transitionedSummary.workspacePath ?? workspacePath;
-					const staleRef = transitionedSummary.previousTurnCheckpoint?.ref ?? null;
 					void (async () => {
 						try {
 							const checkpoint = await checkpointCapture({
@@ -420,14 +478,6 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 							});
 							manager.applyTurnCheckpoint(taskId, checkpoint);
 							await deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
-							if (staleRef) {
-								await checkpointRefDelete({
-									cwd: checkpointCwd,
-									ref: staleRef,
-								}).catch(() => {
-									// Best effort cleanup only.
-								});
-							}
 						} catch {
 							// Best effort checkpointing only.
 						}

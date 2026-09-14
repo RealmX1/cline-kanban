@@ -66,6 +66,13 @@ const browserMocks = vi.hoisted(() => ({
 	openInBrowser: vi.fn(),
 }));
 
+// 转录模型探针只做**间谍**，不改行为：本套件既有用例用真实转录夹具驱动它读盘，替换实现会把那些
+// 断言一并废掉。这里只是把两条探针包一层 spy，好断言「恢复既有对话时选了哪条探针、传了什么」。
+const persistedAgentTranscriptModelProbeMocks = vi.hoisted(() => ({
+	probeByWorkingDirectory: vi.fn(),
+	probeByAgentNativeConversationSessionId: vi.fn(),
+}));
+
 const workspaceStateMocks = vi.hoisted(() => ({
 	loadWorkspaceBoardById: vi.fn(),
 	mutateWorkspaceState: vi.fn(),
@@ -143,6 +150,30 @@ vi.mock("../../../src/server/browser.js", () => ({
 	openInBrowser: browserMocks.openInBrowser,
 }));
 
+vi.mock(
+	"../../../src/agent-session-history/persisted-agent-transcript-last-conversation-model-probe.js",
+	async (importOriginal) => {
+		const actual =
+			await importOriginal<
+				typeof import("../../../src/agent-session-history/persisted-agent-transcript-last-conversation-model-probe.js")
+			>();
+		// 默认委派真身；beforeEach 用 mockClear（而非 mockReset）清调用记录，实现得以保留。
+		persistedAgentTranscriptModelProbeMocks.probeByWorkingDirectory.mockImplementation(
+			actual.probePersistedAgentTranscriptLastConversationModelIdentity,
+		);
+		persistedAgentTranscriptModelProbeMocks.probeByAgentNativeConversationSessionId.mockImplementation(
+			actual.probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession,
+		);
+		return {
+			...actual,
+			probePersistedAgentTranscriptLastConversationModelIdentity:
+				persistedAgentTranscriptModelProbeMocks.probeByWorkingDirectory,
+			probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession:
+				persistedAgentTranscriptModelProbeMocks.probeByAgentNativeConversationSessionId,
+		};
+	},
+);
+
 vi.mock("../../../src/state/workspace-state.js", () => ({
 	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
 	// 程序化投递要按 workspaceId 解析注入账本路径。这个 mock 是刻意部分的，
@@ -158,6 +189,10 @@ import {
 	getWorkspacePromptLibraryPath,
 	readWorkspacePromptLibrarySnapshot,
 } from "../../../src/state/prompt-library-store";
+import {
+	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
+	listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
+} from "../../../src/state/restoration-deferred-harness-generated-prompt-store";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
 
@@ -331,6 +366,8 @@ describe("createRuntimeApi startTaskSession", () => {
 		llmsModelMocks.resolveProviderConfig.mockReset();
 		llmsModelMocks.resolveProviderModelCatalogKeys.mockReset();
 		browserMocks.openInBrowser.mockReset();
+		persistedAgentTranscriptModelProbeMocks.probeByWorkingDirectory.mockClear();
+		persistedAgentTranscriptModelProbeMocks.probeByAgentNativeConversationSessionId.mockClear();
 		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
 			columns: [
@@ -528,6 +565,150 @@ describe("createRuntimeApi startTaskSession", () => {
 			}),
 			expect.any(String),
 		);
+	});
+
+	describe("taskConversationMode 传参", () => {
+		it("终端分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+
+			const terminalManager = {
+				startTaskSession: vi.fn(async () => createSummary()),
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const clineTaskSessionService = createClineTaskSessionServiceMock();
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-1",
+					baseRef: "main",
+					prompt: "Map the exploration space",
+					taskConversationMode: "exploratory",
+				},
+			);
+
+			expect(response.ok).toBe(true);
+			expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+				expect.objectContaining({
+					taskId: "task-1",
+					taskConversationMode: "exploratory",
+				}),
+				expect.any(String),
+			);
+		});
+
+		it("Cline 分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+			agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
+			setSelectedProviderSettings({
+				provider: "anthropic",
+				model: "claude-sonnet-4-6",
+				apiKey: "anthropic-api-key",
+			});
+
+			const terminalManager = {
+				startTaskSession: vi.fn(async () => createSummary()),
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const clineTaskSessionService = createClineTaskSessionServiceMock();
+			clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
+
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => {
+					const runtimeConfigState = createRuntimeConfigState();
+					runtimeConfigState.selectedAgentId = "cline";
+					return runtimeConfigState;
+				}),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-1",
+					baseRef: "main",
+					prompt: "Map the exploration space",
+					taskConversationMode: "exploratory",
+				},
+			);
+
+			expect(response.ok).toBe(true);
+			expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
+				expect.objectContaining({
+					taskId: "task-1",
+					taskConversationMode: "exploratory",
+				}),
+			);
+			expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		});
+
+		it("ACP 分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+			const acpSummary = createSummary({
+				taskId: "task-1",
+				agentId: "omp",
+				state: "running",
+				sessionTransport: "acp_stdio_subprocess",
+			});
+			const acpTaskSessionService = {
+				getSummary: vi.fn(() => null),
+				startTaskSession: vi.fn(async () => acpSummary),
+				listMessages: vi.fn(() => []),
+				clearTaskSession: vi.fn(),
+				applyTurnCheckpoint: vi.fn(() => null),
+			};
+			const terminalManager = {
+				startTaskSession: vi.fn(async () => createSummary()),
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const clineTaskSessionService = createClineTaskSessionServiceMock();
+
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+				getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-1",
+					baseRef: "main",
+					prompt: "Map the exploration space",
+					agentId: "omp",
+					requestedAgentSessionTransport: "acp_stdio_subprocess",
+					taskConversationMode: "exploratory",
+				},
+			);
+
+			expect(response.ok).toBe(true);
+			expect(acpTaskSessionService.startTaskSession).toHaveBeenCalledWith(
+				expect.objectContaining({
+					taskId: "task-1",
+					taskConversationMode: "exploratory",
+				}),
+			);
+			expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		});
 	});
 
 	it("starts a By the way runtime session in the main task workspace without creating a turn checkpoint", async () => {
@@ -1726,6 +1907,191 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(response.ok).toBe(false);
 		expect(response.error).toBe("Refresh is only available for active TUI terminal agents.");
 		expect(terminalManager.refreshTaskTerminal).not.toHaveBeenCalled();
+	});
+
+	// ── By the way 侧问会话的重启（**会话 ≠ 卡片**）────────────────────────────────────
+	// 侧问会话的 taskId 是 `task-conversation-session-<uuid>`，看板上没有这张卡。此前这里拿会话 id 去
+	// 找卡片，于是它的重启按钮恒定返回 "Card not found in the workspace board." —— 点了等于没点。
+
+	const BY_THE_WAY_TASK_CONVERSATION_SESSION_ID = "task-conversation-session-1111";
+	const BY_THE_WAY_CONVERSATION_SESSION_METADATA = {
+		workspaceTaskId: "task-1",
+		taskConversationSessionRole: "by_the_way" as const,
+		taskConversationSessionContextSource: "started_from_scratch" as const,
+		parentTaskConversationSessionId: null,
+		mainSessionOriginTurnNumber: null,
+		mainSessionOriginUserMessagePreview: null,
+		latestUserMessagePreview: null,
+	};
+
+	it("refreshes a By the way session through its host card and shared worktree", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		const terminalManager = {
+			getSummary: vi.fn(() =>
+				createSummary({
+					taskId: BY_THE_WAY_TASK_CONVERSATION_SESSION_ID,
+					agentId: "claude",
+					taskConversationSessionMetadata: BY_THE_WAY_CONVERSATION_SESSION_METADATA,
+				}),
+			),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: BY_THE_WAY_TASK_CONVERSATION_SESSION_ID, cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(response.error).toBeUndefined();
+		// 工作目录按**宿主任务**解析：用会话 id 解析会以 session id 另造一个空 worktree。
+		expect(taskWorktreeMocks.resolveTaskCwd).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-1" }));
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				// 会话身份仍是会话自己的。
+				taskId: BY_THE_WAY_TASK_CONVERSATION_SESSION_ID,
+				workspaceTaskId: "task-1",
+				cwd: "/tmp/existing-worktree",
+				// 只读约束靠这份 metadata 传下去；丢了就等于重启一次侧问会话它就能写文件了。
+				taskConversationSessionMetadata: BY_THE_WAY_CONVERSATION_SESSION_METADATA,
+				resumeFromTrash: true,
+			}),
+			expect.any(String),
+		);
+	});
+
+	it("does not write the By the way session's agent identity back onto the host card", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		const mutationResults: unknown[] = [];
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (
+				_workspacePath: string,
+				mutate: (state: { board: RuntimeBoardData }) => {
+					board: RuntimeBoardData;
+					value: unknown;
+					save?: boolean;
+				},
+			) => {
+				const board = await workspaceStateMocks.loadWorkspaceBoardById();
+				const mutation = mutate({ board: board as RuntimeBoardData });
+				mutationResults.push(mutation.value);
+				return { value: mutation.value, state: { board: mutation.board }, saved: mutation.save !== false };
+			},
+		);
+		const terminalManager = {
+			getSummary: vi.fn(() =>
+				createSummary({
+					taskId: BY_THE_WAY_TASK_CONVERSATION_SESSION_ID,
+					agentId: "claude",
+					taskConversationSessionMetadata: BY_THE_WAY_CONVERSATION_SESSION_METADATA,
+				}),
+			),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: BY_THE_WAY_TASK_CONVERSATION_SESSION_ID, cols: 120, rows: 40 },
+		);
+
+		// 回写以会话自身 taskId 为键 ⇒ 看板上找不到这张卡 ⇒ 每一次 mutation 都是 no-op。
+		// 若改用 workspaceTaskId，侧问会话跑的 agent 会被写进主卡，主会话下次硬中断后被兜底解析成它。
+		expect(mutationResults.every((value) => value === false)).toBe(true);
+	});
+
+	// 回归：从垃圾桶恢复走的也是「按 id 续跑」，模型就必须按同一个 id 取。少了这一步，主会话恢复时会读到
+	// 「工作目录里最近那段对话」——共用 worktree 下那多半是侧问会话——并经回写把侧问的模型固化进主卡。
+	it("probes the resumed model by the session's own native id when restoring a task from trash", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		const nativeSessionId = "aaaaaaaa-1111-4111-8111-111111111111";
+		const terminalManager = {
+			getSummary: vi.fn(() =>
+				createSummary({
+					agentId: "claude",
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId: "claude",
+						nativeSessionId,
+						transcriptPath: null,
+						observedAt: 1,
+					},
+				}),
+			),
+			startTaskSession: vi.fn(async () => createSummary({ agentId: "claude" })),
+			applyTurnCheckpoint: vi.fn(() => null),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", baseRef: "main", agentId: "claude", prompt: "", resumeFromTrash: true },
+		);
+
+		expect(persistedAgentTranscriptModelProbeMocks.probeByAgentNativeConversationSessionId).toHaveBeenCalledWith(
+			expect.objectContaining({ agentNativeConversationSessionId: nativeSessionId }),
+		);
+		// cwd-latest 那条探针在有 id 可用时绝不能被走到——它正是会套用别人模型的那一条。
+		expect(persistedAgentTranscriptModelProbeMocks.probeByWorkingDirectory).not.toHaveBeenCalled();
+	});
+
+	it("explains that the host card is gone instead of blaming the conversation session id", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ id: "in_progress", title: "In Progress", cards: [] }],
+			dependencies: [],
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() =>
+				createSummary({
+					taskId: BY_THE_WAY_TASK_CONVERSATION_SESSION_ID,
+					agentId: "claude",
+					taskConversationSessionMetadata: BY_THE_WAY_CONVERSATION_SESSION_METADATA,
+				}),
+			),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: BY_THE_WAY_TASK_CONVERSATION_SESSION_ID, cols: 120, rows: 40 },
+		);
+
+		expect(response.ok).toBe(false);
+		expect(response.error).toBe("The board card hosting this conversation session no longer exists.");
 	});
 
 	it("still rejects refresh for agents that are not PTY terminals（按能力谓词，不按 agentId 字面量）", async () => {
@@ -4849,5 +5215,140 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 		expect(response.outcome).toBe("prompt_library_write_failed");
 		expect(response.error).toBeTruthy();
 		expect(terminalManager.forwardStashKeyToClearTaskTerminalInputBox).not.toHaveBeenCalled();
+	});
+});
+
+describe("createRuntimeApi releaseDeferredRestorationHarnessNotificationsIntoTaskSession", () => {
+	// 账本走真实存储层，落在被 mock 的 workspace 目录（/tmp/kanban-workspaces/<id>）下。
+	// 每个用例取唯一 workspaceId，避免并行 worker 互踩。
+	let releaseWorkspaceId = "";
+
+	beforeEach(() => {
+		releaseWorkspaceId = `release-deferred-${process.pid}-${Math.random().toString(16).slice(2)}`;
+	});
+
+	afterEach(() => {
+		rmSync(`/tmp/kanban-workspaces/${releaseWorkspaceId}`, { recursive: true, force: true });
+	});
+
+	async function seedDeferredNotifications(): Promise<void> {
+		for (const [index, receivedAt] of [1_000, 2_000].entries()) {
+			await deferHarnessGeneratedPromptDuringAgentSessionRestoration({
+				workspaceId: releaseWorkspaceId,
+				taskId: "task-1",
+				sourceHarness: "claude",
+				promptText: `<task-notification>通知 ${index + 1}</task-notification>`,
+				receivedAt,
+			});
+		}
+	}
+
+	// 终端通道「先受理、后落定」：把投递终态交给测试决定，就能覆盖「受理了但最终没送达」这个真实形态。
+	function createReleaseTerminalManagerDouble(settledOutcome: { status: string; reason: string | null }): {
+		submitTaskChatInputWhenReady: ReturnType<typeof vi.fn>;
+		disarmRestorationContinuationGuard: ReturnType<typeof vi.fn>;
+		completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: ReturnType<typeof vi.fn>;
+	} {
+		return {
+			submitTaskChatInputWhenReady: vi.fn(
+				(_taskId: string, _text: string, options?: { onDeliveryOutcome?: (outcome: unknown) => void }) => {
+					options?.onDeliveryOutcome?.(settledOutcome);
+					return createSummary({ agentId: "claude", state: "awaiting_review" });
+				},
+			),
+			disarmRestorationContinuationGuard: vi.fn(),
+			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
+		};
+	}
+
+	function createReleaseApi(terminalManager: unknown): ReturnType<typeof createTestRuntimeApi> {
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
+		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
+		return createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => releaseWorkspaceId),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+	}
+
+	// 核心验收：accepted_pending_submit_confirmation **不表示成功**。账本已经被 consume 掉，此刻报
+	// ok:true 就等于「说送到了、其实没送、通知还丢了」。
+	it("终端投递落在非成功终态时报 ok:false，并把通知原样放回账本", async () => {
+		await seedDeferredNotifications();
+		const beforeRelease = await listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration({
+			workspaceId: releaseWorkspaceId,
+			taskId: "task-1",
+		});
+		const terminalManager = createReleaseTerminalManagerDouble({
+			status: "delivery_failed",
+			reason: "agent_awaiting_user_decision_timeout",
+		});
+		const api = createReleaseApi(terminalManager);
+
+		const response = await api.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+			{ workspaceId: releaseWorkspaceId, workspacePath: "/tmp/repo" },
+			{ taskId: "task-1" },
+		);
+
+		expect(response.ok).toBe(false);
+		expect(response.releasedNotificationCount).toBe(0);
+		expect(response.error).toContain("agent_awaiting_user_decision_timeout");
+		expect(
+			await listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration({
+				workspaceId: releaseWorkspaceId,
+				taskId: "task-1",
+			}),
+		).toEqual(beforeRelease);
+	});
+
+	// 放行是用户显式点的按钮，不是后台自动注入。带 source 会被统一出口判成后台注入并对「正等用户拍板」
+	// 的会话让位，而恢复出来的会话恰恰常停在那种模态上——于是放行永远送不出去。
+	it("按真人输入投递：不置 deferWhileUserTurn，不给恢复态会话让位", async () => {
+		await seedDeferredNotifications();
+		const terminalManager = createReleaseTerminalManagerDouble({
+			status: "delivered_and_submit_confirmed",
+			reason: null,
+		});
+		const api = createReleaseApi(terminalManager);
+
+		await api.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+			{ workspaceId: releaseWorkspaceId, workspacePath: "/tmp/repo" },
+			{ taskId: "task-1" },
+		);
+
+		expect(terminalManager.submitTaskChatInputWhenReady).toHaveBeenCalledWith(
+			"task-1",
+			expect.stringContaining("<kanban-user-released-harness-notifications>"),
+			expect.objectContaining({ deferWhileUserTurn: false }),
+		);
+	});
+
+	it("终端投递确认送达时报 ok:true，账本清空且守卫已解除", async () => {
+		await seedDeferredNotifications();
+		const terminalManager = createReleaseTerminalManagerDouble({
+			status: "delivered_and_submit_confirmed",
+			reason: null,
+		});
+		const api = createReleaseApi(terminalManager);
+
+		const response = await api.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+			{ workspaceId: releaseWorkspaceId, workspacePath: "/tmp/repo" },
+			{ taskId: "task-1" },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(response.releasedNotificationCount).toBe(2);
+		expect(terminalManager.disarmRestorationContinuationGuard).toHaveBeenCalledWith("task-1");
+		expect(
+			await listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration({
+				workspaceId: releaseWorkspaceId,
+				taskId: "task-1",
+			}),
+		).toEqual([]);
 	});
 });

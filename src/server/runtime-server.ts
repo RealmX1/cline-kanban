@@ -4,6 +4,7 @@ import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
 
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
+import { ClaudeCodeTranscriptCompletedTurnSource } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import {
 	type AcpTaskSessionService,
 	createAcpTaskSessionService,
@@ -17,6 +18,7 @@ import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry"
 import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeCommandRunResponse,
+	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeRunUpdateResponse,
 	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
@@ -31,6 +33,11 @@ import {
 } from "../core/runtime-endpoint";
 import { startEventLoopDelayMonitor } from "../diagnostics/event-loop-delay-monitor";
 import { startProcessFileDescriptorWatermarkMonitor } from "../diagnostics/process-file-descriptor-watermark-monitor";
+import { translateExplorationThreadGraphMaintenanceOutcome } from "../exploration-thread-graph/exploration-thread-graph-maintenance-outcome-translation";
+import { createExplorationThreadGraphMaintenanceTrigger } from "../exploration-thread-graph/exploration-thread-graph-maintenance-trigger";
+import { loadExplorationThreadGraphProjection } from "../exploration-thread-graph/exploration-thread-graph-projection-loader";
+import { assembleExplorationThreadGraphSessionRefs } from "../exploration-thread-graph/exploration-thread-graph-session-refs";
+import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "../exploration-thread-graph/exploration-thread-graph-store-location";
 import {
 	checkRateLimit,
 	clearRateLimit,
@@ -47,7 +54,9 @@ import { loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/works
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
+import { createConversationTreeApi } from "../trpc/conversation-tree-api";
 import { createDeploymentApi } from "../trpc/deployment-api";
+import { createExploratoryApi } from "../trpc/exploratory-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
@@ -169,6 +178,38 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
+
+	// exploration thread graph（B.2）。
+	//
+	// 维护触发器是**整个运行时一个单例**：防抖窗口与单飞账本都挂在它身上，每次请求重建等于四道闸
+	// 全部失效——而漏掉单飞闸的代价是同一个 exploration 并发 fork 两个分身，重型会话上一次 ≈ $4.5。
+	// 图只对终端 agent 有意义（v1 只有 claude 的 fork 语义已核实），所以会话清单只取终端管理器的。
+	// 触发器与 exploratoryApi 互为依赖：api 的手动维护要调触发器，触发器转投 finding_candidate 又要调
+	// api 的 ingest。用 late binding 打破——触发器先建好，ingest 出口在 api 工厂就位后再绑上。
+	// 绑定前触发的作业只是不转投标注（标注仍在图上，下一次作业会用同样的确定性 id 补投）。
+	let relayFindingCandidatesThroughExploratoryApi:
+		| ((workspaceId: string, requests: RuntimeIngestExploratoryFindingCandidateRequest[]) => Promise<void>)
+		| null = null;
+	const explorationThreadGraphMaintenanceTrigger = createExplorationThreadGraphMaintenanceTrigger({
+		relayFindingCandidates: async (workspaceId, requests) => {
+			await relayFindingCandidatesThroughExploratoryApi?.(workspaceId, requests);
+		},
+		listWorkspaceSessionSummaries: async (workspaceId) => {
+			const workspacePath = deps.workspaceRegistry.getWorkspacePathById(workspaceId);
+			if (workspacePath === null) {
+				return [];
+			}
+			const manager = await deps.ensureTerminalManagerForWorkspace(workspaceId, workspacePath);
+			return manager.listSummaries();
+		},
+		onExplorationThreadGraphUpdated: (workspaceId, explorationId, view) => {
+			deps.runtimeStateHub.broadcastExplorationThreadGraphUpdated(workspaceId, explorationId, view);
+		},
+	});
+	// 读图专用的 turn 源，与触发器内部那两个各自独立：它服务的是「打开面板看图」，末 turn 可能正在
+	// 进行中，必须保持 treatFinalTurnAsCompleted 的默认 false。实例长活是为了复用增量读偏移——
+	// 每次请求新建会让每次看图都从头重读整份 transcript。
+	const explorationThreadGraphReadOnlyTurnSource = new ClaudeCodeTranscriptCompletedTurnSource();
 	// ACP（omp 等）会话按 workspace 作用域持有，与 Cline SDK 服务并列。
 	const acpTaskSessionServiceByWorkspaceId = new Map<string, AcpTaskSessionService>();
 	// 与 clineWorkspacePathByWorkspaceId 对位：关服 / 重置时要遍历「只跑过 ACP 会话」的 workspace，
@@ -340,6 +381,64 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		deps.workspaceRegistry.clearActiveWorkspace();
 	};
 
+	// exploratoryApi 是**无状态**的：它返回的每个方法都自带 scope 参数，所以整个运行时一个实例即可
+	// （此前每次请求新建一个，纯属浪费）。提成单例还解开了 finding_candidate 转投的循环依赖——
+	// 维护触发器要调它的 ingest，而它的手动维护又要调触发器。
+	const exploratoryApi = createExploratoryApi({
+		getScopedClineTaskSessionService,
+		loadBoardCardAgentId: async (scope, taskId) => {
+			const board = await loadWorkspaceBoardById(scope.workspaceId);
+			const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+			return card?.agentId ?? null;
+		},
+		onExploratoryFindingsUpdated: (workspaceId, findings) => {
+			deps.runtimeStateHub.broadcastExploratoryFindingsUpdated(workspaceId, findings);
+		},
+		// 读图：只合成投影，绝不触发 fork。会话清单缺 sidecar 时得到一张空图而不是错误——
+		// 「还没有图」与「读不出图」对用户是两回事。
+		loadExplorationThreadGraphProjection: async (scope, explorationId) => {
+			const manager = await getScopedTerminalManager(scope);
+			const { sessionRefs } = assembleExplorationThreadGraphSessionRefs({
+				explorationId,
+				sessionSummaries: manager.listSummaries(),
+			});
+			const loaded = await loadExplorationThreadGraphProjection({
+				explorationId,
+				storeRoot: resolveWorkspaceExplorationThreadGraphStoreRoot(scope.workspaceId),
+				sessionRefs,
+				turnSource: explorationThreadGraphReadOnlyTurnSource,
+			});
+			return {
+				view: loaded.view,
+				turnSourceUnavailableSessionIds: loaded.turnSourceUnavailableSessionIds,
+			};
+		},
+		requestExplorationThreadGraphMaintenance: async (scope, explorationId) => {
+			return translateExplorationThreadGraphMaintenanceOutcome(
+				await explorationThreadGraphMaintenanceTrigger.requestImmediateMaintenance({
+					workspaceId: scope.workspaceId,
+					explorationId,
+				}),
+			);
+		},
+	});
+	// late binding 的另一半（声明见上面触发器处）：到这里 exploratoryApi 已就位，把转投出口接上。
+	// 逐条 try/catch：一条建议因容量上限等原因被拒，不该让同一批里其余的也落不进去。
+	relayFindingCandidatesThroughExploratoryApi = async (workspaceId, requests) => {
+		const workspacePath = deps.workspaceRegistry.getWorkspacePathById(workspaceId);
+		if (workspacePath === null) {
+			return;
+		}
+		const workspaceScope: RuntimeTrpcWorkspaceScope = { workspaceId, workspacePath };
+		for (const request of requests) {
+			try {
+				await exploratoryApi.ingestFindingCandidate(workspaceScope, request);
+			} catch {
+				// 转投是附加动作：标注仍在图上，下一次作业会用同样的确定性 id 再试。
+			}
+		}
+	};
+
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
@@ -415,6 +514,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 				broadcastTaskReadyForReview: deps.runtimeStateHub.broadcastTaskReadyForReview,
+				// Stop 边沿 → exploration thread graph 维护（B.2）。触发器自带四道闸，这里只交出边沿事实；
+				// 绝不 await，判图要 fork 一个分身，压进 hook 响应路径会触发客户端硬超时。
+				notifyExplorationThreadGraphAgentTurnStopped:
+					explorationThreadGraphMaintenanceTrigger.notifyAgentTurnStopped,
 			}),
 			deploymentApi: createDeploymentApi({
 				// 看板当前列快照：直读该 workspace 的 board.json，摊平 columns×cards → (taskId, columnId)。
@@ -468,6 +571,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					return manager.getSummary(taskId)?.latestHookActivity?.finalMessage ?? null;
 				},
 			}),
+			conversationTreeApi: createConversationTreeApi({
+				getScopedClineTaskSessionService,
+				loadBoardCardAgentId: async (scope, taskId) => {
+					const board = await loadWorkspaceBoardById(scope.workspaceId);
+					const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
+					return card?.agentId ?? null;
+				},
+			}),
+			exploratoryApi,
 		};
 	};
 

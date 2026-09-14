@@ -1266,3 +1266,121 @@ describe("board dependency state", () => {
 		});
 	});
 });
+
+describe("task conversation mode（蓝图 §A.1）", () => {
+	it("create：按 draft 落卡片字段，缺省不落字段", () => {
+		let board = createInitialBoardData();
+		board = addTaskToColumn(board, "backlog", {
+			prompt: "Exploratory task",
+			baseRef: "main",
+			taskConversationMode: "exploratory",
+		});
+		board = addTaskToColumn(board, "backlog", {
+			prompt: "Plain task",
+			baseRef: "main",
+		});
+
+		const cards = board.columns.find((column) => column.id === "backlog")?.cards ?? [];
+		expect(cards.find((card) => card.prompt === "Exploratory task")?.taskConversationMode).toBe("exploratory");
+		expect(cards.find((card) => card.prompt === "Plain task")?.taskConversationMode).toBeUndefined();
+	});
+
+	it("normalize：保留持久化卡片上的模式声明，非法值剥掉（不抹合法缺省）", () => {
+		const rawBoard = {
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "exploratory-task",
+							prompt: "Exploratory task",
+							startInPlanMode: false,
+							baseRef: "main",
+							taskConversationMode: "exploratory",
+						},
+						{
+							id: "legacy-task",
+							prompt: "Task without a mode",
+							startInPlanMode: false,
+							baseRef: "main",
+						},
+						{
+							id: "garbage-mode-task",
+							prompt: "Task with an unreadable mode",
+							startInPlanMode: false,
+							baseRef: "main",
+							taskConversationMode: "not-a-mode",
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "validation", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalizedCards = normalizeBoardData(rawBoard)?.columns[0]?.cards;
+
+		expect(normalizedCards?.[0]?.taskConversationMode).toBe("exploratory");
+		// 老卡片留 undefined = operational 缺省，这里不替它物化。
+		expect(normalizedCards?.[1]?.taskConversationMode).toBeUndefined();
+		expect(normalizedCards?.[2]?.taskConversationMode).toBeUndefined();
+	});
+
+	it("updateTask 三态：不提保留 / null 清除回缺省 / 具体值覆盖", () => {
+		let board = createInitialBoardData();
+		board = addTaskToColumn(board, "backlog", {
+			prompt: "Task A",
+			baseRef: "main",
+			taskConversationMode: "exploratory",
+		});
+		const task = board.columns.find((column) => column.id === "backlog")?.cards[0];
+		if (!task) {
+			throw new Error("Expected backlog task to exist");
+		}
+
+		// 不提 = 保留（改标题等部分重建 draft 的调用点不得碰它）。
+		const preserved = updateTask(board, task.id, { prompt: "Task A renamed", baseRef: "main" });
+		expect(preserved.board.columns[0]?.cards[0]?.taskConversationMode).toBe("exploratory");
+
+		// 具体值 = 覆盖。
+		const overwritten = updateTask(board, task.id, {
+			prompt: task.prompt,
+			baseRef: "main",
+			taskConversationMode: "operational",
+		});
+		expect(overwritten.board.columns[0]?.cards[0]?.taskConversationMode).toBe("operational");
+
+		// null = 清除回缺省（字段消失，下游按 operational 解析）。
+		const cleared = updateTask(board, task.id, {
+			prompt: task.prompt,
+			baseRef: "main",
+			taskConversationMode: null,
+		});
+		expect(cleared.board.columns[0]?.cards[0]?.taskConversationMode).toBeUndefined();
+	});
+
+	it("updateTaskTitle / disableTaskAutoReview 等部分重建路径保留模式声明", () => {
+		let board = createInitialBoardData();
+		board = addTaskToColumn(board, "review", {
+			title: "Initial title",
+			prompt: "Task A",
+			autoReviewEnabled: true,
+			baseRef: "main",
+			taskConversationMode: "exploratory",
+		});
+		const task = board.columns.find((column) => column.id === "review")?.cards[0];
+		if (!task) {
+			throw new Error("Expected review task to exist");
+		}
+
+		board = updateTaskTitle(board, task.id, "Updated title").board;
+		board = disableTaskAutoReview(board, task.id).board;
+
+		expect(board.columns.find((column) => column.id === "review")?.cards[0]?.taskConversationMode).toBe(
+			"exploratory",
+		);
+	});
+});

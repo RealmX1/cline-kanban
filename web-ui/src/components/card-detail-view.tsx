@@ -1,6 +1,7 @@
 import type { DropResult } from "@hello-pangea/dnd";
 import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { resolveAgentSessionTransportForLaunch } from "@runtime-agent-session-transport-selection";
+import { resolveSessionFacets } from "@runtime-session-activity";
 import {
 	AlertTriangle,
 	Files,
@@ -20,17 +21,22 @@ import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
+import { DeferredRestorationHarnessNotificationReleaseBanner } from "@/components/detail-panels/deferred-restoration-harness-notification-release-banner";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
 import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
+import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
+import { SessionFindingsSection } from "@/components/findings/session-findings-section";
 import { taskDetailAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
+import { useConversationSessionTurnProjection } from "@/hooks/use-conversation-session-turn-projection";
+import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
 import { ResizeHandle } from "@/resize/resize-handle";
@@ -47,6 +53,7 @@ import type {
 	RuntimeAgentSessionTransport,
 	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
+	RuntimeExploratoryFindingEntry,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
@@ -260,6 +267,11 @@ function BottomTerminalSection({
 					taskId={taskId}
 					workspaceId={workspaceId}
 					contention={summary?.terminalDeliveryContention ?? null}
+				/>
+				<DeferredRestorationHarnessNotificationReleaseBanner
+					taskId={taskId}
+					workspaceId={workspaceId}
+					isEnabled={summary?.agentId === "claude"}
 				/>
 				<AgentTerminalPanel
 					taskId={taskId}
@@ -636,6 +648,9 @@ export function CardDetailView({
 	isTaskChangesSidebarOpen = false,
 	onCreateByTheWayTaskConversationSession,
 	taskChatMessagesByTaskId,
+	exploratoryFindings,
+	explorationThreadGraph,
+	runtimeStreamSnapshotGeneration = 0,
 }: {
 	selection: CardSelection;
 	currentProjectId: string | null;
@@ -726,6 +741,16 @@ export function CardDetailView({
 		mainSessionOriginUserMessagePreview: string | null;
 	}) => Promise<{ ok: boolean; message?: string; taskConversationSessionId?: string }>;
 	taskChatMessagesByTaskId?: Record<string, RuntimeTaskChatMessage[]>;
+	// Exploratory findings 的 workspace 级集合（M2，App 侧 use-exploratory-findings 归并结果）：
+	// 「本会话 findings」切片与聊天消息「存为 finding」查重共用同一份；undefined =
+	// 无 findings 上下文（两者都不渲染 affordance），null = 尚未加载。
+	exploratoryFindings?: RuntimeExploratoryFindingEntry[] | null;
+	// exploration thread graph（B.2）：当前卡片那张图的编排结果（App 侧 use-exploration-thread-graph）。
+	// undefined = 无图上下文，面板不渲染。
+	explorationThreadGraph?: ExplorationThreadGraphData;
+	// 流（重）连握手代数：每次快照递增。断连窗口的变更不补发，拼进 turn 投影的 refreshKey
+	// 让重连后重拉一次对齐。
+	runtimeStreamSnapshotGeneration?: number;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
@@ -900,6 +925,39 @@ export function CardDetailView({
 	const showClineAgentChatPanel = activeTaskConversationSessionSummary
 		? isRuntimeAgentSessionSummaryRenderedAsConversationPanel(activeTaskConversationSessionSummary)
 		: nextLaunchAgentSessionTransport !== null && nextLaunchAgentSessionTransport !== "pty_terminal";
+	// ── 会话 turn 投影（姊妹蓝图 §2.2）──────────────────────────────────
+	// 只对「渲染为 conversation 面板」的会话拉取（Cline SDK 与 ACP；PTY 终端会话不拉）。消费者：
+	// 聊天面板「存为 finding」的锚三元 commit 解析；B.2 的 exploration thread graph 面板复用同一份。
+	// 投影层不新增 WS 事件，搭 summary 广播边沿重拉。重拉信号 = 低频精确边沿（姊妹蓝图 §2.3）：
+	// 新 turn 开始 / 回合结束（turnOwner 翻转——投影的 in-progress 判定与它同源）、
+	// checkpoint 异步落地（latestTurnCheckpoint.turn/commit 变化）、存活度翻转（liveness，
+	// 如 agent 回合中崩溃退出后投影的 liveSummary 消失、spinner 必须停）。facet 一律经
+	// resolveSessionFacets 读（铁律：consumer 不直接读裸 facet 字段做决策）。
+	// 绝不许把 summary.updatedAt 拼回来：updateSummary 漏斗每次写都推进 updatedAt，
+	// Cline 流式期间经 ~150ms 批次广播（TASK_SESSION_STREAM_BATCH_MS），含它会让 hook
+	// 每个批次都重发 query——服务端 Cline 路径每次克隆/遍历全量消息并跑
+	// git for-each-ref（listTaskTurnCheckpointRefs），长会话/多标签页下形成无界历史
+	// 重算与 git 子进程轮询（本仓 AGENTS.md 记载过同类事件循环停摆事故）。上述三类
+	// 边沿与 updatedAt 在同一个广播批次里到达，去掉它不引入任何可感知延迟。
+	const turnProjectionConversationSessionTaskId = showClineAgentChatPanel ? selectedTaskConversationSessionId : null;
+	const turnProjectionRefreshFacets = activeTaskConversationSessionSummary
+		? resolveSessionFacets(activeTaskConversationSessionSummary)
+		: null;
+	const turnProjectionRefreshKey = turnProjectionConversationSessionTaskId
+		? [
+				activeTaskConversationSessionSummary?.latestTurnCheckpoint?.turn ?? 0,
+				activeTaskConversationSessionSummary?.latestTurnCheckpoint?.commit ?? "",
+				turnProjectionRefreshFacets?.turnOwner ?? "none",
+				turnProjectionRefreshFacets?.liveness ?? "none",
+				// 流重连代数：断连窗口的变更不补发，靠这次重拉对齐。
+				runtimeStreamSnapshotGeneration,
+			].join(":")
+		: null;
+	const conversationSessionTurnProjection = useConversationSessionTurnProjection({
+		workspaceId: currentProjectId,
+		conversationSessionTaskId: turnProjectionConversationSessionTaskId,
+		refreshKey: turnProjectionRefreshKey,
+	});
 	const agentPanelStyle: CSSProperties = showClineAgentChatPanel
 		? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
 		: {
@@ -1115,6 +1173,30 @@ export function CardDetailView({
 			/>
 		) : null;
 	const isMainTaskConversationSessionSelected = selectedTaskConversationSessionId === selection.card.id;
+	// map 面板与 TaskConversationSessionsPanel 同位下方的独立可折叠 section（蓝图 §G.1：
+	// 不抢占其挂载点）；出现条件与聊天面板一致（conversation 面板会话）。
+	// 「本会话 findings」section（蓝图 §G.2）：复用同一份 workspace 级 findings 集合，只在调用方传了
+	// findings 上下文时出现（exploratoryFindings !== undefined）。旧 session map 面板退役后独立挂在
+	// sessions 面板同位下方；B.2 的 exploration thread graph 面板落地后迁入其底部。
+	// exploration thread graph 面板（B.2）：挂在 sessions 面板与「本会话 findings」之间——
+	// 图在上、从图里长出来的结论在下。explorationId 恒取**卡片 id**（不是当前选中的会话 id）：
+	// 图挂在探索场次上，by-the-way 会话的轮次也归进同一张图。
+	const explorationThreadGraphPanel =
+		explorationThreadGraph !== undefined && currentProjectId ? (
+			<ExplorationThreadGraphPanel
+				workspaceId={currentProjectId}
+				explorationId={selection.card.id}
+				data={explorationThreadGraph}
+			/>
+		) : null;
+	const sessionFindingsSection =
+		turnProjectionConversationSessionTaskId && exploratoryFindings !== undefined && currentProjectId ? (
+			<SessionFindingsSection
+				workspaceId={currentProjectId}
+				conversationSessionTaskId={turnProjectionConversationSessionTaskId}
+				findings={exploratoryFindings}
+			/>
+		) : null;
 	const activeTaskConversationSessionMessages =
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
 		(isMainTaskConversationSessionSelected ? streamedClineChatMessages : null);
@@ -1172,6 +1254,10 @@ export function CardDetailView({
 					? getTaskAutoReviewCancelButtonLabel(selection.card.autoReviewMode)
 					: null
 			}
+			// 「存为 finding」（蓝图 §D.2.1）：查重集合 + turn 投影（锚三元 commit 解析）；
+			// 不传 exploratoryFindings 时消息项不出该 affordance。聊天内锚 chip 已休眠：不传 resolver。
+			exploratoryFindings={exploratoryFindings}
+			turnProjection={conversationSessionTurnProjection.projection}
 		/>
 	) : (
 		<AgentTerminalPanel
@@ -1262,12 +1348,14 @@ export function CardDetailView({
 						>
 							{agentChatPanel}
 						</div>
-						{/* Sessions panel */}
+						{/* Sessions panel + 本会话 findings（同位下方的独立可折叠 section） */}
 						<div
 							className="min-h-0 min-w-0 flex-1 flex-col"
 							style={{ display: mobileTab === "sessions" ? "flex" : "none" }}
 						>
-							{taskConversationSessionsPanel}
+							<div className="flex min-h-0 min-w-0 flex-1 flex-col">{taskConversationSessionsPanel}</div>
+							{explorationThreadGraphPanel}
+							{sessionFindingsSection}
 						</div>
 						{/* Prompts / comments utility panel */}
 						<div
@@ -1559,6 +1647,9 @@ export function CardDetailView({
 										>
 											{taskConversationSessionsPanel}
 										</div>
+										{/* 探索线（B.2）+ 本会话 findings：同位下方的独立可折叠 section（蓝图 §G.2） */}
+										{explorationThreadGraphPanel}
+										{sessionFindingsSection}
 										<ResizeHandle
 											orientation="horizontal"
 											ariaLabel="Resize task conversation sessions and utility panels"

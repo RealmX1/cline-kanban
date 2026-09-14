@@ -5,10 +5,12 @@ import { hasTaskCreateFormEdits, type TaskCreateFormSnapshot } from "@/component
 function baseline(overrides: Partial<TaskCreateFormSnapshot> = {}): TaskCreateFormSnapshot {
 	return {
 		prompt: "",
+		taskName: "",
 		multiPromptContent: "",
 		imageCount: 0,
 		startInPlanMode: false,
 		taskAgentPermissionMode: "bypass_all_permission_prompts",
+		taskConversationMode: "operational",
 		autoReviewEnabled: false,
 		autoReviewMode: "commit",
 		branchRef: "main",
@@ -33,6 +35,14 @@ describe("hasTaskCreateFormEdits", () => {
 		expect(hasTaskCreateFormEdits(baseline({ prompt: "Fix the bug" }), baseline())).toBe(true);
 	});
 
+	it("treats a whitespace-only task name as unchanged", () => {
+		expect(hasTaskCreateFormEdits(baseline({ taskName: "  " }), baseline())).toBe(false);
+	});
+
+	it("detects a typed task name", () => {
+		expect(hasTaskCreateFormEdits(baseline({ taskName: "Fix the login bug" }), baseline())).toBe(true);
+	});
+
 	it("detects multi-task prompt content", () => {
 		expect(hasTaskCreateFormEdits(baseline({ multiPromptContent: "task a\ntask b" }), baseline())).toBe(true);
 	});
@@ -43,6 +53,10 @@ describe("hasTaskCreateFormEdits", () => {
 
 	it("detects a plan-mode toggle", () => {
 		expect(hasTaskCreateFormEdits(baseline({ startInPlanMode: true }), baseline())).toBe(true);
+	});
+
+	it("detects a conversation-mode change", () => {
+		expect(hasTaskCreateFormEdits(baseline({ taskConversationMode: "exploratory" }), baseline())).toBe(true);
 	});
 
 	it("detects an auto-review toggle relative to the opened baseline", () => {

@@ -42,6 +42,48 @@ export interface TaskEditDraft {
 export type TaskEditDraftFormValues = Omit<TaskEditDraft, "taskId" | "savedAt">;
 
 /**
+ * 两份图片数组是不是同一份内容。
+ *
+ * 粘贴进来的图是 MB 级 base64，裸 `JSON.stringify` 比较每次都要为两边各分配一整份序列化字符串，
+ * 而这条比较挂在草稿去抖（400ms）与通知栏渲染的热路径上。这里改成逐字段早退：
+ * 引用相等 → 数组长度 → 逐图 `id`/`mimeType`/`name`/`data.length`（判不等，几乎不碰 data 本体）→
+ * 全部通过才 `data ===`。相等的情形零分配。
+ *
+ * `name` 必须参与比较：它是 schema 里的可选字段，跳过它会把「只改了文件名」误判成没动过，
+ * 静默丢掉那次改动（判不等永远是安全方向，判等不是）。字段级比较与原 `JSON.stringify` 写法
+ * 逐字段等价——stringify 会丢掉值为 `undefined` 的可选键，属性访问读到的同样是 `undefined`。
+ */
+export function areTaskImagesEqual(left: TaskImage[], right: TaskImage[]): boolean {
+	if (left === right) {
+		return true;
+	}
+	if (left.length !== right.length) {
+		return false;
+	}
+	for (let index = 0; index < left.length; index += 1) {
+		const leftImage = left[index];
+		const rightImage = right[index];
+		// 长度已比对过，这里取不到元素不可能发生；真发生了按不等处理（判不等永远是安全方向）。
+		if (!leftImage || !rightImage) {
+			return false;
+		}
+		if (leftImage === rightImage) {
+			continue;
+		}
+		if (
+			leftImage.id !== rightImage.id ||
+			leftImage.mimeType !== rightImage.mimeType ||
+			leftImage.name !== rightImage.name ||
+			leftImage.data.length !== rightImage.data.length ||
+			leftImage.data !== rightImage.data
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
  * 两份表单值是不是同一份内容。
  *
  * 用途是回答「用户动过表单没有」：编辑对话框的表单是同步铺上去的，服务端草稿快照可能迟到，
@@ -53,7 +95,7 @@ export function areTaskEditDraftFormValuesEqual(
 ): boolean {
 	return (
 		left.prompt === right.prompt &&
-		JSON.stringify(left.images) === JSON.stringify(right.images) &&
+		areTaskImagesEqual(left.images, right.images) &&
 		left.startInPlanMode === right.startInPlanMode &&
 		left.taskAgentPermissionMode === right.taskAgentPermissionMode &&
 		left.autoReviewEnabled === right.autoReviewEnabled &&
@@ -97,7 +139,7 @@ export function clearTaskEditDraft(projectId: string | null, taskId: string): vo
 export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">, task: BoardCard): boolean {
 	return (
 		draft.prompt === task.prompt.trim() &&
-		JSON.stringify(draft.images) === JSON.stringify(task.images ?? []) &&
+		areTaskImagesEqual(draft.images, task.images ?? []) &&
 		draft.startInPlanMode === task.startInPlanMode &&
 		draft.taskAgentPermissionMode === task.taskAgentPermissionMode &&
 		draft.autoReviewEnabled === (task.autoReviewEnabled === true) &&

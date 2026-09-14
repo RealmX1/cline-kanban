@@ -17,7 +17,7 @@ import type {
 
 const NOW = 1_700_000_000_000;
 const ONE_HOUR_MS = 60 * 60_000;
-const GRACE_PERIOD_MS = 2 * ONE_HOUR_MS;
+const GRACE_PERIOD_MS = 5 * ONE_HOUR_MS;
 const INCARNATION = "incarnation-1";
 
 function makeSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
@@ -129,7 +129,7 @@ describe("deriveAgentResponseGenerationStopSignalConfidence（四类锚点标签
 describe("deriveAgentSessionRetentionDeadlineTransition（边沿检测）", () => {
 	const options = { nowMs: NOW };
 
-	it("agent 回合 → 等人回合：起算，期限 = 停止时刻 + 2 小时", () => {
+	it("agent 回合 → 等人回合：起算，期限 = 停止时刻 + 5 小时", () => {
 		const transition = deriveAgentSessionRetentionDeadlineTransition(
 			makeSummary(),
 			awaitingUserTurnSummary(),

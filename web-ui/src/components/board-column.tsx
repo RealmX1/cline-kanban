@@ -1,7 +1,7 @@
 import { Droppable } from "@hello-pangea/dnd";
 import { Play, Plus, Trash2 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { BoardCard } from "@/components/board-card";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
@@ -101,8 +101,9 @@ export function BoardColumn({
 	const canClearTrash = column.id === "trash" && onClearTrash;
 	// 打开 Focus View 会真正卸载看板（不再是 visibility:hidden），因此返回时要把这一列的
 	// 滚动位置与「已展开到第几批」补回来，否则用户每次从详情页返回都被弹回列顶。
-	// 只在挂载那一次读取：后续渲染沿用同一份初值，避免自己写进去的值又反过来改初值。
-	const restoredScrollOffsetRef = useRef(readBoardColumnScrollOffset(workspacePath ?? null, column.id));
+	// 惰性 useState 保证只在挂载那一次求值（useRef(初值) 的实参每次渲染都会求值一次）：
+	// 后续渲染沿用同一份初值，避免自己写进去的值又反过来改初值。
+	const [restoredScrollOffset] = useState(() => readBoardColumnScrollOffset(workspacePath ?? null, column.id));
 	const indexOfTaskRequestedToReveal = taskIdRequestedToReveal
 		? column.cards.findIndex((card) => card.id === taskIdRequestedToReveal)
 		: -1;
@@ -110,7 +111,7 @@ export function BoardColumn({
 		totalCount: column.cards.length,
 		getScrollRoot: getColumnCardsScrollRoot,
 		enabled: activeDragTaskId == null,
-		initialCount: restoredScrollOffsetRef.current?.revealedCardCount,
+		initialCount: restoredScrollOffset?.revealedCardCount,
 		ensureVisibleIndex: indexOfTaskRequestedToReveal >= 0 ? indexOfTaskRequestedToReveal : undefined,
 	});
 
@@ -120,7 +121,7 @@ export function BoardColumn({
 
 	// 布局提交后、绘制之前还原滚动位置，避免先闪一帧列顶再跳。
 	useLayoutEffect(() => {
-		const restored = restoredScrollOffsetRef.current;
+		const restored = restoredScrollOffset;
 		const container = cardsScrollContainerRef.current;
 		if (!restored || !container || restored.scrollTop <= 0) {
 			return;
@@ -156,7 +157,7 @@ export function BoardColumn({
 			// 卸载前落一次最终值：用户可能展开了更多卡片却没有再滚动过。
 			const container = cardsScrollContainerRef.current;
 			writeBoardColumnScrollOffset(workspacePath ?? null, column.id, {
-				scrollTop: container?.scrollTop ?? restoredScrollOffsetRef.current?.scrollTop ?? 0,
+				scrollTop: container?.scrollTop ?? restoredScrollOffset?.scrollTop ?? 0,
 				revealedCardCount: visibleCountRef.current,
 			});
 		},

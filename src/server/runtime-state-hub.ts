@@ -19,9 +19,13 @@ export interface ConversationTaskSessionSubscriptionSource {
 
 import type {
 	RuntimeClineMcpServerAuthStatus,
+	RuntimeExplorationThreadGraphProjectionView,
+	RuntimeExploratoryFindingEntry,
 	RuntimeNotificationFeedEntry,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamErrorMessage,
+	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
+	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamNotificationLogUpdatedMessage,
@@ -94,6 +98,18 @@ export interface RuntimeStateHub {
 	// 通知中心：某 workspace 的日志变更（mark-visited / clear / board 变更导致 isDone 刷新）后，
 	// 重建该 workspace 的派生 feed 并全局广播给所有客户端（铃铛跨 repo 聚合）。
 	broadcastNotificationLogUpdated: (workspaceId: string) => Promise<void>;
+	// Exploratory findings 集合变更（save/confirm/reject/archive/ingest 落盘成功）后，把该
+	// workspace 的完整 finding 集合全量替换推送给在场客户端（恒小，上限 500；蓝图 §D.3）。
+	// 不搭车 summary 广播。
+	broadcastExploratoryFindingsUpdated: (workspaceId: string, findings: RuntimeExploratoryFindingEntry[]) => void;
+	// exploration thread graph（B.2）：某个 exploration 的整张图变更后全量替换推送。
+	// 按 exploration 分发而不是按 workspace 合并：一个 workspace 下可以有多张图，合并推送会让
+	// 打开 A 卡片的客户端因为 B 卡片判完图而整份重渲染。
+	broadcastExplorationThreadGraphUpdated: (
+		workspaceId: string,
+		explorationId: string,
+		view: RuntimeExplorationThreadGraphProjectionView,
+	) => void;
 	close: () => Promise<void>;
 }
 
@@ -158,16 +174,31 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 	});
 
-	const sendRuntimeStateMessage = (client: WebSocket, payload: RuntimeStateStreamMessage) => {
+	const sendSerializedRuntimeStateMessage = (client: WebSocket, serializedPayload: string) => {
 		if (client.readyState !== WebSocket.OPEN) {
 			return;
 		}
 		try {
-			client.send(JSON.stringify(payload));
+			client.send(serializedPayload);
 		} catch {
 			// Ignore websocket write errors; close handlers clean up disconnected sockets.
 		}
 	};
+
+	const sendRuntimeStateMessage = (client: WebSocket, payload: RuntimeStateStreamMessage) => {
+		sendSerializedRuntimeStateMessage(client, JSON.stringify(payload));
+	};
+
+	// projects payload 是全局的（覆盖全部已注册 project、同一份发往所有在场客户端），故去重指纹也只
+	// 需一份全局值：与上次实际发送的序列化结果相同 ⇒ 每个在场客户端都已持有这份数据，可整条跳过。
+	// 命中条件是「两次构建的 payload 字节级相同」：agent 无输出窗口、纯心跳 flush 这类场景挡掉
+	// flushTaskSessionSummaries 每 150ms 触发的重发（前端每收一条 projects_updated 都要重 dispatch
+	// 一轮）；agent 活跃输出期间 inProgressTaskDetails 的 lastOutputAt 随每个非空 PTY chunk 刷新，
+	// payload 每次都不同、广播照常发送——那是合法新数据而非浪费。失效是天然的、无需按 workspace 记账：项目增删 /
+	// board 变化 / currentProjectId 切换都会改变序列化结果；新连接客户端登记进广播集合时会把指纹
+	// 置回 null（见连接握手处），保证注册后下一次广播必定发送——snapshot 全量替换可能把该客户端
+	// 回滚到旧数据，靠这次必发补洞；payload 构建失败时指纹不动，下次调用照常重试。
+	let lastBroadcastProjectsPayloadFingerprint: string | null = null;
 
 	const broadcastRuntimeProjectsUpdated = async (preferredCurrentProjectId: string | null): Promise<void> => {
 		if (runtimeStateClients.size === 0) {
@@ -178,13 +209,18 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
 					preferredCurrentProjectId,
 				);
-			for (const client of runtimeStateClients) {
-				sendRuntimeStateMessage(client, {
-					type: "projects_updated",
-					currentProjectId: payload.currentProjectId,
-					projects: payload.projects,
-				} satisfies RuntimeStateStreamProjectsMessage);
+			const serializedPayload = JSON.stringify({
+				type: "projects_updated",
+				currentProjectId: payload.currentProjectId,
+				projects: payload.projects,
+			} satisfies RuntimeStateStreamProjectsMessage);
+			if (serializedPayload === lastBroadcastProjectsPayloadFingerprint) {
+				return;
 			}
+			for (const client of runtimeStateClients) {
+				sendSerializedRuntimeStateMessage(client, serializedPayload);
+			}
+			lastBroadcastProjectsPayloadFingerprint = serializedPayload;
 		} catch {
 			// Ignore transient project summary failures; next update will resync.
 		}
@@ -449,7 +485,48 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
-	// 先无条件落库（可通知边沿的持久化），再全局广播 feed。落库独立于客户端在场与否。
+	// Exploratory findings 集合变更推送：持久化早已在 mutation 的串行写队列完成（durable-write-before-ack），这里只把完整集合
+	// （全量替换，恒小）发给本 workspace 在场客户端；0 客户端时跳过——客户端重连后靠
+	// getFindings 查询对齐，不补发。
+	const broadcastExploratoryFindingsUpdated = (
+		workspaceId: string,
+		findings: RuntimeExploratoryFindingEntry[],
+	): void => {
+		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
+		if (!clients || clients.size === 0) {
+			return;
+		}
+		const payload: RuntimeStateStreamExploratoryFindingsUpdatedMessage = {
+			type: "exploratory_findings_updated",
+			workspaceId,
+			findings,
+		};
+		for (const client of clients) {
+			sendRuntimeStateMessage(client, payload);
+		}
+	};
+	// exploration thread graph 变更推送（B.2）：单个 exploration 的整张图全量替换。与 findings 同款
+	// 纪律——落盘成功后才发、0 客户端时跳过、断连窗口不补发（客户端重连后靠 getExplorationThreadGraph
+	// 重查对齐）。图恒小（一次探索场次的 turn 行数），全量替换比增量补丁简单且不会错位。
+	const broadcastExplorationThreadGraphUpdated = (
+		workspaceId: string,
+		explorationId: string,
+		view: RuntimeExplorationThreadGraphProjectionView,
+	): void => {
+		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
+		if (!clients || clients.size === 0) {
+			return;
+		}
+		const payload: RuntimeStateStreamExplorationThreadGraphUpdatedMessage = {
+			type: "exploration_thread_graph_updated",
+			workspaceId,
+			explorationId,
+			view,
+		};
+		for (const client of clients) {
+			sendRuntimeStateMessage(client, payload);
+		}
+	};
 	const persistNotification = async (
 		workspaceId: string,
 		input: { taskId: string; userTurnKind: RuntimeTaskSessionUserTurnKind; triggeredAt: number },
@@ -553,6 +630,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				state for a client that never finished the handshake.
 			*/
 			runtimeStateClients.add(client);
+			// 去重指纹此刻对该客户端不成立（后续 snapshot 全量替换可能把它回滚到旧数据）：置回 null，
+			// 保证注册后的下一次 projects_updated 广播必定发送，自愈补洞。
+			lastBroadcastProjectsPayloadFingerprint = null;
 			let monitorWorkspaceId: string | null = null;
 			let didConnectWorkspaceMonitor = false;
 
@@ -697,6 +777,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		bumpClineSessionContextVersion,
 		broadcastTaskReadyForReview,
 		broadcastNotificationLogUpdated,
+		broadcastExploratoryFindingsUpdated,
+		broadcastExplorationThreadGraphUpdated,
 		close: async () => {
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {
 				clearTimeout(timer);

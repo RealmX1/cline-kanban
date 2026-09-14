@@ -33,3 +33,8 @@ packages/desktop/cli
 # Claude Code 本机设置。只忽略这一个文件：.claude/skills/<name> 项目内软链是**要提交**的
 # （见 DEVELOPMENT.md「Agent skills」），整目录 ignore 会让下一条软链必须 git add -f。
 /.claude/settings.local.json
+
+/.claude/skills/gitnexus/
+
+# Claude Code 个人本机记忆文件（CLAUDE.md 的私人覆盖层，不入仓）
+/CLAUDE.local.md

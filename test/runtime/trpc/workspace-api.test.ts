@@ -7,6 +7,7 @@ import type {
 	RuntimeWorkspaceChangesResponse,
 	RuntimeWorkspaceStateResponse,
 } from "../../../src/core/api-contract";
+import { addTaskToColumn } from "../../../src/core/task-board-mutations";
 
 const workspaceTaskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
@@ -23,9 +24,27 @@ const orphanedDraftCleanupMocks = vi.hoisted(() => ({
 	discardTaskEditDraftsForTasksRemovedFromBoard: vi.fn(),
 }));
 
-vi.mock("../../../src/state/discard-task-edit-drafts-for-tasks-removed-from-board.js", () => ({
-	discardTaskEditDraftsForTasksRemovedFromBoard:
-		orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard,
+const turnCheckpointMocks = vi.hoisted(() => ({
+	deleteAllTaskTurnCheckpointRefs: vi.fn(),
+}));
+
+vi.mock("../../../src/state/discard-task-edit-drafts-for-tasks-removed-from-board.js", async (importOriginal) => {
+	// 差集计算是纯函数、正是 saveState 两条清理共用的判据，保留真实实现；只有落盘清理本体被桩掉。
+	const actual = (await importOriginal()) as {
+		collectTaskIdsRemovedFromBoard: (
+			boardBeforeWrite: RuntimeBoardData,
+			boardAfterWrite: RuntimeBoardData,
+		) => string[];
+	};
+	return {
+		collectTaskIdsRemovedFromBoard: actual.collectTaskIdsRemovedFromBoard,
+		discardTaskEditDraftsForTasksRemovedFromBoard:
+			orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard,
+	};
+});
+
+vi.mock("../../../src/workspace/turn-checkpoints.js", () => ({
+	deleteAllTaskTurnCheckpointRefs: turnCheckpointMocks.deleteAllTaskTurnCheckpointRefs,
 }));
 
 const workspaceStateMocks = vi.hoisted(() => ({
@@ -176,6 +195,11 @@ describe("createWorkspaceApi saveState", () => {
 		workspaceStateMocks.saveWorkspaceState.mockReset();
 		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
 		orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard.mockReset();
+		turnCheckpointMocks.deleteAllTaskTurnCheckpointRefs.mockReset();
+		turnCheckpointMocks.deleteAllTaskTurnCheckpointRefs.mockResolvedValue(undefined);
+		// 差集清理用的是真实的 collectTaskIdsRemovedFromBoard，写前 board 默认给一份合法空 board；
+		// 单测要验「读不到」语义时再自行 override 成 reject。
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(createBoard());
 	});
 
 	it("overlays terminal, Cline, and ACP runtime summaries before persistence", async () => {
@@ -248,6 +272,57 @@ describe("createWorkspaceApi saveState", () => {
 		orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard.mockRejectedValue(
 			new Error("草稿文件写不进去"),
 		);
+		const api = createWorkspaceApiForTest({ listProjectRuntimeSessionSummaries: vi.fn(() => []) });
+
+		await expect(
+			api.saveState(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+			),
+		).resolves.toBe(savedResponse);
+	});
+
+	// 同一条差集旁路的另一半（姊妹蓝图 §1.4）：任务从看板上永久消失时按前缀批删它的全部 turn
+	// checkpoint ref。仅移进 trash 列的任务仍在写后 board 里，差集天然不碰它——所以这里用
+	// 「写前有、写后无」造出差集，而不是把卡移列。
+	it("保存看板后按写前/写后差集批删消失任务的 turn checkpoint ref", async () => {
+		const added = addTaskToColumn(
+			createBoard(),
+			"trash",
+			{ prompt: "已完成的任务", baseRef: "main" },
+			() => "task-gone",
+		);
+		const boardBeforeSave = added.board;
+		const removedTaskId = added.task.id;
+		const savedResponse = createWorkspaceState();
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(boardBeforeSave);
+		workspaceStateMocks.saveWorkspaceState.mockResolvedValue(savedResponse);
+		const api = createWorkspaceApiForTest({ listProjectRuntimeSessionSummaries: vi.fn(() => []) });
+
+		await api.saveState(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+		);
+
+		expect(turnCheckpointMocks.deleteAllTaskTurnCheckpointRefs).toHaveBeenCalledTimes(1);
+		expect(turnCheckpointMocks.deleteAllTaskTurnCheckpointRefs).toHaveBeenCalledWith({
+			cwd: "/tmp/repo",
+			taskId: removedTaskId,
+		});
+	});
+
+	// 批删与草稿清理同一套失败语义：这是删除已成之后的收尾，绝不反过来让看板保存失败。
+	it("checkpoint ref 批删抛错也不影响看板保存的返回", async () => {
+		const added = addTaskToColumn(
+			createBoard(),
+			"trash",
+			{ prompt: "已完成的任务", baseRef: "main" },
+			() => "task-gone",
+		);
+		const savedResponse = createWorkspaceState();
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(added.board);
+		workspaceStateMocks.saveWorkspaceState.mockResolvedValue(savedResponse);
+		turnCheckpointMocks.deleteAllTaskTurnCheckpointRefs.mockRejectedValue(new Error("ref 删不掉"));
 		const api = createWorkspaceApiForTest({ listProjectRuntimeSessionSummaries: vi.fn(() => []) });
 
 		await expect(

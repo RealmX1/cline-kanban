@@ -258,6 +258,29 @@ describe("跨浏览器 origin 共享的界面偏好 store", () => {
 		});
 	});
 
+	describe("纯服务端字段：不写也不读镜像，不假装有恢复路径", () => {
+		it("写入伪 HTML 块名记忆时不落任何 localStorage 键", async () => {
+			saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+				taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: ["constraints"],
+			});
+
+			await vi.waitFor(() => expect(saveRuntimeConfigMock).toHaveBeenCalled());
+			expect(localStorage.length).toBe(0);
+		});
+
+		it("就算旧键还留在 localStorage 里，读取也不会把它当镜像回落", () => {
+			// 服务端那份还没到（最有利于镜像的时刻）；有镜像的字段此刻会回落，这个字段必须仍然是 null。
+			localStorage.setItem(
+				"kanban.task-prompt-pseudo-html-block-recently-used-custom-names.v1",
+				JSON.stringify(["constraints"]),
+			);
+
+			expect(
+				readEffectiveUserInterfacePreferenceValue("taskPromptPseudoHtmlBlockRecentlyUsedCustomNames"),
+			).toBeNull();
+		});
+	});
+
 	it("整份读取给出迁移决策要的全部字段，字典缺省为空对象", () => {
 		expect(readAllUserInterfacePreferenceValuesFromBrowserLocalStorage()).toEqual({
 			newTaskAutoReviewEnabled: null,

@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
-import type { BoardCard, BoardData } from "@/types";
+import type * as BoardStateModule from "@/state/board-state";
+import { moveTaskToColumn } from "@/state/board-state";
+import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 
 const notifyErrorMock = vi.hoisted(() => vi.fn());
 const showAppToastMock = vi.hoisted(() => vi.fn());
@@ -29,6 +31,22 @@ vi.mock("@/hooks/use-programmatic-card-moves", () => ({
 vi.mock("@/hooks/use-review-auto-actions", () => ({
 	useReviewAutoActions: () => ({}) as ReturnType<typeof useBoardInteractions>,
 }));
+
+// B5 引用短路测试的观察点：getTaskColumnId 是 Rule A 自动流转 effect 每 tick 对每条 summary
+// 跑的全板 O(卡) 扫描。用 spy 包裹真实实现（行为不变），断言未变引用的 summary 连这次扫描
+// 都被整体跳过。
+const getTaskColumnIdSpy = vi.hoisted(() => vi.fn<(board: BoardData, taskId: string) => BoardColumnId | null>());
+
+vi.mock("@/state/board-state", async (importOriginal) => {
+	const actual = await importOriginal<typeof BoardStateModule>();
+	return {
+		...actual,
+		getTaskColumnId: (board: BoardData, taskId: string): BoardColumnId | null => {
+			getTaskColumnIdSpy(board, taskId);
+			return actual.getTaskColumnId(board, taskId);
+		},
+	};
+});
 
 function createTask(taskId: string, prompt: string, createdAt: number): BoardCard {
 	return {
@@ -212,6 +230,7 @@ function HookHarness({
 	cleanupTaskWorkspace = NOOP_CLEANUP_WORKSPACE,
 	initialSessions,
 	onSnapshot,
+	onSessionsControl,
 }: {
 	board: BoardData;
 	setBoard: Dispatch<SetStateAction<BoardData>>;
@@ -225,6 +244,9 @@ function HookHarness({
 	cleanupTaskWorkspace?: UseTaskSessionsResult["cleanupTaskWorkspace"];
 	initialSessions?: Record<string, RuntimeTaskSessionSummary>;
 	onSnapshot?: (snapshot: HookSnapshot) => void;
+	onSessionsControl?: (control: {
+		setSessions: Dispatch<SetStateAction<Record<string, RuntimeTaskSessionSummary>>>;
+	}) => void;
 }): null {
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>(initialSessions ?? {});
 	// 默认实现模拟真实链路：transitionTaskToReview 成功后 use-task-sessions 会 upsert 携 turnOwner=user 的
@@ -313,6 +335,10 @@ function HookHarness({
 		actions.moveToReviewLoadingById,
 		onSnapshot,
 	]);
+
+	useEffect(() => {
+		onSessionsControl?.({ setSessions });
+	}, [onSessionsControl]);
 
 	return null;
 }
@@ -1553,6 +1579,202 @@ describe("useBoardInteractions", () => {
 			});
 			expect(cardIdsIn(currentBoard, "trash")).toEqual(["task-int"]);
 			expect(cardIdsIn(currentBoard, "in_progress")).toEqual([]);
+		});
+	});
+
+	// B5：Rule A 自动流转的 summary 引用短路。summary 引用跨 tick 稳定（runtime-state-hub merge
+	// 只替换改动 key），未变引用且 board 未变的 summary 必须整体跳过——连 getTaskColumnId 全板
+	// 扫描都不发生；被阻塞 / 动画接管的程序性移列不得被记录为已见，保留下一 tick 的重试；
+	// board 发生外部写入（用户拖拽）时必须放开全量重估，保短路前的 level-triggered 语义。
+	// 注意：mount 后 resetBoardInteractionsState（currentProjectId effect）会清空前帧记录，
+	// 所以每个用例先跑一帧「暖帧」重建 previous 帧，再在下一帧断言短路行为。
+	describe("Rule A 引用短路（B5）", () => {
+		const cardIdsIn = (board: BoardData, columnId: BoardData["columns"][number]["id"]): string[] =>
+			(board.columns.find((column) => column.id === columnId)?.cards ?? []).map((card) => card.id);
+
+		interface SessionsControl {
+			setSessions: Dispatch<SetStateAction<Record<string, RuntimeTaskSessionSummary>>>;
+		}
+
+		const renderHarness = async (
+			board: BoardData,
+			setBoard: Dispatch<SetStateAction<BoardData>>,
+			sessions: Record<string, RuntimeTaskSessionSummary>,
+			captureControl: (control: SessionsControl) => void,
+		): Promise<void> => {
+			await act(async () => {
+				root.render(
+					<HookHarness
+						board={board}
+						setBoard={setBoard}
+						ensureTaskWorkspace={async () => ({ ok: true as const })}
+						startTaskSession={async () => ({ ok: true as const })}
+						initialSessions={sessions}
+						onSessionsControl={captureControl}
+					/>,
+				);
+			});
+		};
+
+		it("未变引用的 summary 不触发任何移列/状态写入（连 getTaskColumnId 扫描都跳过）", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopLinkedBacklogTaskActions();
+			let currentBoard = createBoardWithReviewTaskIds([], {
+				in_progress: [createTask("task-stay", "Stay task", 1), createTask("task-mover", "Mover task", 2)],
+			});
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			let sessionsControl: SessionsControl | null = null;
+			// 两个会话都空闲（实质戳远超 5s 静默阈值）：处理它们是纯 no-op，初始帧后板面稳定。
+			const staleOutputAt = Date.now() - 60_000;
+			const staySummary = createRunningSession("task-stay", {
+				lastOutputAt: staleOutputAt,
+				lastSubstantiveOutputAt: staleOutputAt,
+			});
+			await renderHarness(
+				currentBoard,
+				setBoard,
+				{
+					"task-stay": staySummary,
+					"task-mover": createRunningSession("task-mover", {
+						lastOutputAt: staleOutputAt,
+						lastSubstantiveOutputAt: staleOutputAt,
+					}),
+				},
+				(control) => {
+					sessionsControl = control;
+				},
+			);
+			// 暖帧（兼验证 effect 正常工作）：task-stay 保持同一引用（merge 只替换改动 key 的
+			// 跨 tick 稳定性）；task-mover 换新引用翻成等人审回合，驱动 Rule A 落位 Review。
+			await act(async () => {
+				sessionsControl?.setSessions((current) => {
+					const moverSummary = current["task-mover"];
+					if (!moverSummary || current["task-stay"] !== staySummary) {
+						return current;
+					}
+					return {
+						"task-stay": staySummary,
+						"task-mover": {
+							...moverSummary,
+							state: "awaiting_review",
+							turnOwner: "user",
+							liveness: "live",
+							userTurnKind: "review",
+							reviewReason: "exit",
+							updatedAt: moverSummary.updatedAt + 1,
+						},
+					};
+				});
+			});
+			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-mover"]);
+			expect(cardIdsIn(currentBoard, "in_progress")).toEqual(["task-stay"]);
+
+			// 被断言帧：新 sessions 容器、全部 summary 同一引用、board 未变（等价一次无变化心跳）。
+			const boardBeforeTick = currentBoard;
+			getTaskColumnIdSpy.mockClear();
+			await act(async () => {
+				sessionsControl?.setSessions((current) => ({ ...current }));
+			});
+
+			// 两条 summary 都被整体跳过：没有任何 getTaskColumnId 扫描，也没有任何板面写入。
+			expect(getTaskColumnIdSpy).not.toHaveBeenCalled();
+			expect(currentBoard).toBe(boardBeforeTick);
+			expect(cardIdsIn(currentBoard, "in_progress")).toEqual(["task-stay"]);
+			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-mover"]);
+		});
+
+		it("程序性移列被 blocked 的 task 不记录为已见，下一 tick 用同一引用照常重试", async () => {
+			const tryProgrammaticCardMoveMock = vi.fn(() => "blocked" as const);
+			useProgrammaticCardMovesMock.mockReturnValue({
+				handleProgrammaticCardMoveReady: () => {},
+				setRequestMoveTaskToTrashHandler: () => {},
+				tryProgrammaticCardMove: tryProgrammaticCardMoveMock,
+				consumeProgrammaticCardMove: () => ({}),
+				resolvePendingProgrammaticTrashMove: () => {},
+				waitForProgrammaticCardMoveAvailability: async () => {},
+				resetProgrammaticCardMoves: () => {},
+				requestMoveTaskToTrashWithAnimation: async () => {},
+				programmaticCardMoveCycle: 0,
+			});
+			mockNoopLinkedBacklogTaskActions();
+			let currentBoard = createBoardWithTaskInColumn("task-blocked", "review");
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			let sessionsControl: SessionsControl | null = null;
+			// Review 列 + 活跃产出的 agent 回合：每帧处理都会尝试打回 In Progress。
+			const blockedSummary = createRunningSession("task-blocked", {
+				lastOutputAt: Date.now(),
+				lastSubstantiveOutputAt: Date.now(),
+			});
+			await renderHarness(currentBoard, setBoard, { "task-blocked": blockedSummary }, (control) => {
+				sessionsControl = control;
+			});
+
+			// 暖帧：尝试打回被 blocked，板面不动；该 task 不得被记录为已见。
+			await act(async () => {
+				sessionsControl?.setSessions((current) => ({ ...current }));
+			});
+			expect(tryProgrammaticCardMoveMock).toHaveBeenCalledWith("task-blocked", "review", "in_progress", {
+				skipKickoff: true,
+			});
+			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-blocked"]);
+
+			// 被断言帧：同一 summary 引用、board 未变。若 blocked 时被错误记录为已见，
+			// 引用短路会把这帧的重试吃掉（tryProgrammaticCardMove 不再被调用）。
+			tryProgrammaticCardMoveMock.mockClear();
+			await act(async () => {
+				sessionsControl?.setSessions((current) => ({ ...current }));
+			});
+			expect(tryProgrammaticCardMoveMock).toHaveBeenCalledWith("task-blocked", "review", "in_progress", {
+				skipKickoff: true,
+			});
+			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-blocked"]);
+		});
+
+		it("board 被外部写入（用户拖拽）后，未变引用的 summary 仍被全量重估", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopLinkedBacklogTaskActions();
+			let currentBoard = createBoardWithTaskInColumn("task-drag", "review");
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			let sessionsControl: SessionsControl | null = null;
+			// 已退出进程的等人审会话：处理它是纯 no-op，初始帧后稳定停在 Review。
+			const dragSummary = createRunningSession("task-drag", {
+				state: "awaiting_review",
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "review",
+				pid: null,
+			});
+			await renderHarness(currentBoard, setBoard, { "task-drag": dragSummary }, (control) => {
+				sessionsControl = control;
+			});
+			// 暖帧：建立 previous 帧（summary 引用 + board 引用），此后才谈得上引用短路。
+			await act(async () => {
+				sessionsControl?.setSessions((current) => ({ ...current }));
+			});
+			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-drag"]);
+
+			// 模拟用户拖拽：不经 sessions 变化，直接把卡从 Review 拖回 In Progress。
+			await act(async () => {
+				setBoard((current) => moveTaskToColumn(current, "task-drag", "in_progress", { insertAtTop: true }).board);
+			});
+			// 没有 sessions tick 时 effect 不触发，卡停在 In Progress。
+			expect(cardIdsIn(currentBoard, "in_progress")).toEqual(["task-drag"]);
+
+			getTaskColumnIdSpy.mockClear();
+			await act(async () => {
+				sessionsControl?.setSessions((current) => ({ ...current }));
+			});
+
+			// board 已变 → 引用短路放开 → awaiting_review 卡被自动拉回 Review（保短路前语义）。
+			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-drag"]);
+			const scannedTaskIds = getTaskColumnIdSpy.mock.calls.map(([, taskId]) => taskId);
+			expect(scannedTaskIds).toContain("task-drag");
 		});
 	});
 

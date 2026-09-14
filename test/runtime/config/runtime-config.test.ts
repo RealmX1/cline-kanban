@@ -581,6 +581,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 					workspaceOpenTargetPreferredApplicationId: "zed",
 					projectNumericSlotGroupAssignmentsBySlotNumber: { "3": "alpha" },
 					mostRecentlyUsedTaskCreateBaseRefByProjectId: {},
+					taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: [],
 				});
 			});
 		} finally {
@@ -619,6 +620,45 @@ describe.sequential("runtime-config auto agent selection", () => {
 					(await loadRuntimeConfig(tempProject)).userInterfacePreferencesSharedAcrossBrowserOrigins
 						.mostRecentlyUsedTaskCreateBaseRefByProjectId,
 				).toEqual({ "workspace-b": "release/1" });
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("插入伪 HTML 块用过的自定义块名落盘后能读回，且按整份替换", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-pseudo-html-names-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir(
+			"kanban-project-runtime-config-pseudo-html-names-",
+		);
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				await updateRuntimeConfig(tempProject, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: ["expected_output", "constraints"],
+					},
+				});
+				await updateRuntimeConfig(tempProject, { selectedAgentId: "codex" });
+
+				const reloaded = await loadRuntimeConfig(tempProject);
+				// 顺序有意义（最近使用在前），所以断言的是数组本身而不是集合。
+				expect(
+					reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins
+						.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames,
+				).toEqual(["expected_output", "constraints"]);
+
+				// 与字典同一条语义：前端「忘掉某个块名」只能靠写回一份少了它的整份列表。
+				await updateRuntimeConfig(tempProject, {
+					userInterfacePreferencesSharedAcrossBrowserOrigins: {
+						taskPromptPseudoHtmlBlockRecentlyUsedCustomNames: ["constraints"],
+					},
+				});
+				expect(
+					(await loadRuntimeConfig(tempProject)).userInterfacePreferencesSharedAcrossBrowserOrigins
+						.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames,
+				).toEqual(["constraints"]);
 			});
 		} finally {
 			cleanupProject();

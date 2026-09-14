@@ -54,6 +54,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
+import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
@@ -61,7 +62,7 @@ import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 import { formatPathForDisplay } from "@/utils/path-display";
-import { useCopyToClipboard, useInterval } from "@/utils/react-use";
+import { useCopyToClipboard } from "@/utils/react-use";
 import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
 import { getAgentVisual } from "./agent-visual";
 import {
@@ -85,7 +86,12 @@ function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: strin
 	}
 }
 
-/** 钉在宿主行右下角；纯 overlay，不占文本流宽度；hover 时左侧渐变遮住末行被挡字符。 */
+/**
+ * 钉在宿主行右下角；纯 overlay，不占文本流宽度；hover 时左侧渐变遮住末行被挡字符。
+ * `data-card-hover-actions` 标记：内部按钮是 Tooltip 门控的 hover 换壳点，本容器绝对定位、内部
+ * childList 抖动不可能移动卡片锚点；dependency-overlay 的 MutationObserver 对完全落在标记内的
+ * 增删跳过布局重测（契约见 revealHoverActionTooltip 注释）。
+ */
 function TaskCardRowHoverActions({
 	groupName,
 	children,
@@ -95,6 +101,7 @@ function TaskCardRowHoverActions({
 }): React.ReactElement {
 	return (
 		<div
+			data-card-hover-actions=""
 			className={cn(
 				"pointer-events-none absolute bottom-0 right-0 z-10 flex items-end opacity-0 transition-opacity",
 				// 与卡面同底色的左向渐变：hover 时才显现，避免为按钮预留 pr-* 挤占换行宽度。
@@ -234,15 +241,25 @@ export function TaskCardBody({
 	onEditTaskPinboardPinReason?: () => void;
 }): React.ReactElement {
 	const [isHovered, setIsHovered] = useState(false);
-	// 卡片右上角动作组里每个按钮都裹了一层 Radix Tooltip，而 Radix 在关闭态仍会挂 Root+Trigger
-	// （Popper context + state + 一串事件绑定）。200 张卡 × 数个按钮 = 上千个常驻实例，看板每次
-	// 重渲都要 reconcile 一遍。`Tooltip` 对 falsy `content` 直接返回 children，于是把 content 收成
-	// 「hover 时才给」，空闲态就退化成裸 Button。
+	// 卡片各处的 Tooltip（右上角动作组、行内 Edit/Copy、头部药丸、git 状态）content 统一收成
+	// 「hover 时才给」：Radix 在关闭态仍会挂 Root+Trigger（Popper context + state + 一串事件绑定）。
+	// 200 张卡 × 数个 Tooltip = 上千个常驻实例，看板每次重渲都要 reconcile 一遍。`Tooltip` 对 falsy
+	// `content` 直接返回 children，空闲态就退化成裸元素。头部药丸 / git 状态的触发点是不可聚焦的
+	// span，键盘可达性不受门控影响；动作按钮靠 aria-label 保留可访问名。
 	//
 	// 注意这里刻意**不**改成条件挂载整个动作组：未挂载的按钮无法被 Tab 到，而卡壳本身不可聚焦，
 	// backlog 这类没有标题编辑按钮的卡会因此彻底失去键盘可达性。DOM 常驻 + CSS `focus-within`
 	// 才是原本保住 Tab 可达的机制。
-	const revealHoverActionTooltip = (label: string): string | undefined => (isHovered ? label : undefined);
+	//
+	// 与 dependency-overlay 的契约：门控意味着 hover 进出时这些触发元素被整体卸载重挂，每个换壳都是
+	// 一次 childList mutation。这类抖动不可能移动卡片锚点，故触发元素的宿主统一带
+	// `data-card-hover-actions` 标记（右上角动作组、TaskCardRowHoverActions、头部药丸条、git 状态
+	// span），overlay 的 MutationObserver 对完全落在标记内的增删跳过全板布局重测；其余卡片内部
+	// childList（parked 角标、投递争用提示、sessionActivity 行、目录行等会改变卡片高度的条件区块）
+	// 一律照常重测。不变量：标记宿主内的一切 childList 都不得改变卡片高度（绝对定位容器 / 同尺寸
+	// 换壳才配带此标记；git 状态 span 自身随 tooltip 有无而挂载卸载属罕见豁免，代价可接受）。
+	const revealHoverActionTooltip = (label: string | null): string | undefined =>
+		isHovered && label ? label : undefined;
 	const [isPromptViewerOpen, setIsPromptViewerOpen] = useState(false);
 	const [isEditingTitle, setIsEditingTitle] = useState(false);
 	const [draftTitle, setDraftTitle] = useState(card.title);
@@ -278,8 +295,9 @@ export function TaskCardBody({
 	const sessionActivity = rawSessionActivity ?? lastSessionActivityRef.current;
 	// 「computing 脉动」（双轴重构 Stage 3，distinction ①）：agent 回合且最近 5s 内仍在产出 PTY 输出时，
 	// 状态点脉动表示「在算」；静默(quiet)/其它态保持现状静止点。computing/quiet 是随时间漂移的派生叠加
-	// （deriveDisplayLiveness，见 session-activity.ts），summary 静默期不再广播，故需本地 tick 让卡片在跨过
-	// 静默边界后停止脉动；tick 仅在「agent 回合 + liveness=live」时开启，空闲 / 待审 / 已结束卡不计时。
+	// （deriveDisplayLiveness，见 session-activity.ts），summary 静默期不再广播，故需一个秒级 tick 让卡片在
+	// 跨过静默边界后停止脉动；tick 走共享细时钟（use-shared-fine-clock），且仅在「agent 回合 + liveness=live
+	// 且未 parked」时订阅，空闲 / 待审 / 已结束卡不订阅、不随秒级 tick 重渲。
 	const sessionFacets = sessionSummary ? resolveSessionFacets(sessionSummary) : null;
 	// parked（已派发后台工作、等自行恢复）：纯展示信号——它是普通 agent 回合 {agent,live,null}，但**不在算**，
 	// 是在等自己派发的后台工作。读 sidecar（非 facet，deriveDisplayLiveness 不动），抑制 computing 脉冲并渲染
@@ -294,8 +312,7 @@ export function TaskCardBody({
 	// 进程内运行、恒 live，永不进此分支）。卡片状态点改「空心环」表达「进程已退但仍待你处理」，与实心 live
 	// 点区分；点的颜色仍随 channel C（review绿/needs_input金/error红）。pulse 仅 agent 回合开启、与本互斥。
 	const isExitedAwaiting = sessionFacets?.liveness === "exited";
-	const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
-	useInterval(() => setActivityNowMs(Date.now()), isLiveAgentTurn && !isParkedAwaitingBackgroundWork ? 1000 : null);
+	const activityNowMs = useSharedFineClockTimestampMs(isLiveAgentTurn && !isParkedAwaitingBackgroundWork);
 	// 头部时长读数的常开粗 tick（30s）：读数粒度是分/时/天，30s 足够，且常开不分 live/idle
 	// （与上面仅 live 卡的 1s computing tick 解耦）。走进程内单例时钟而非每卡一个 setInterval：
 	// 200 张卡原先 = 200 个常开定时器，且完全不分标签页可见性。共享时钟只留一个定时器 +
@@ -319,6 +336,28 @@ export function TaskCardBody({
 	const isConversationProgressApproximate =
 		lastConversationProgressObservation !== null &&
 		isLowConfidenceLastConversationProgressEvidence(lastConversationProgressObservation.evidenceKind);
+	// 三处头部 tooltip 的绝对时间文案按时间戳记忆：toLocaleString 每次调用都不便宜，而卡片会随
+	// 1s 细时钟 / 30s 粗时钟 / hover 反复重渲，时间戳本身却极少变化。
+	const createdAtTooltipContent = useMemo(
+		() => `Created · ${new Date(card.createdAt).toLocaleString()}`,
+		[card.createdAt],
+	);
+	const agentResponseGenerationStoppedTooltipContent = useMemo(
+		() =>
+			agentResponseGenerationStoppedAt != null
+				? `Stopped generating · ${new Date(agentResponseGenerationStoppedAt).toLocaleString()}`
+				: null,
+		[agentResponseGenerationStoppedAt],
+	);
+	const lastConversationProgressTooltipContent = useMemo(
+		() =>
+			lastConversationProgressObservation != null
+				? `Conversation last advanced · ${new Date(
+						lastConversationProgressObservation.observedAtMs,
+					).toLocaleString()} · source: ${lastConversationProgressObservation.evidenceKind}`
+				: null,
+		[lastConversationProgressObservation],
+	);
 	const isAgentComputing =
 		isLiveAgentTurn && !isParkedAwaitingBackgroundWork && sessionSummary != null && sessionFacets != null
 			? deriveDisplayLiveness(sessionFacets, sessionSummary.lastOutputAt, activityNowMs) === "computing"
@@ -732,9 +771,12 @@ export function TaskCardBody({
 				    Clock=自创建至今（恒显）；Activity=agent 上次响应至今（仅有时间戳时显）。各段 hover 显绝对本地时间。 */}
 				{/* 置顶板分身在末尾多挂一段 stage 标签，胶囊会因此变宽；右侧不远就是 hover 动作组（同在 -top-[6px]），
 				    所以限宽 + 标签 truncate，窄卡上宁可截断 stage 名也不与动作组叠在一起。 */}
-				<div className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
+				<div
+					data-card-hover-actions=""
+					className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm"
+				>
 					{taskAgentSettingsLabel ? (
-						<Tooltip content={taskAgentSettingsLabel}>
+						<Tooltip content={revealHoverActionTooltip(taskAgentSettingsLabel)}>
 							<span
 								data-agent-badge=""
 								role="img"
@@ -749,7 +791,7 @@ export function TaskCardBody({
 						</Tooltip>
 					) : null}
 					{taskAgentSettingsLabel ? <span aria-hidden className="h-2.5 w-px shrink-0 bg-border-bright" /> : null}
-					<Tooltip content={`Created · ${new Date(card.createdAt).toLocaleString()}`}>
+					<Tooltip content={revealHoverActionTooltip(createdAtTooltipContent)}>
 						<span
 							className={cn(
 								"inline-flex items-center gap-0.5 text-[10px] leading-none",
@@ -763,9 +805,7 @@ export function TaskCardBody({
 					{agentResponseGenerationStoppedAt != null ? (
 						<>
 							<span className="text-text-tertiary">·</span>
-							<Tooltip
-								content={`Stopped generating · ${new Date(agentResponseGenerationStoppedAt).toLocaleString()}`}
-							>
+							<Tooltip content={revealHoverActionTooltip(agentResponseGenerationStoppedTooltipContent)}>
 								<span
 									data-agent-response-generation-stopped-pill=""
 									className={cn(
@@ -782,11 +822,7 @@ export function TaskCardBody({
 					{lastConversationProgressObservation != null ? (
 						<>
 							<span className="text-text-tertiary">·</span>
-							<Tooltip
-								content={`Conversation last advanced · ${new Date(
-									lastConversationProgressObservation.observedAtMs,
-								).toLocaleString()} · source: ${lastConversationProgressObservation.evidenceKind}`}
-							>
+							<Tooltip content={revealHoverActionTooltip(lastConversationProgressTooltipContent)}>
 								<span
 									data-last-conversation-progress-pill=""
 									className={cn(
@@ -908,7 +944,10 @@ export function TaskCardBody({
 						) : null}
 						{showTitleEditButton ? (
 							<TaskCardRowHoverActions groupName="title">
-								<Tooltip side="bottom" content={onOpenTaskEditor ? "Edit task" : "Edit title"}>
+								<Tooltip
+									side="bottom"
+									content={revealHoverActionTooltip(onOpenTaskEditor ? "Edit task" : "Edit title")}
+								>
 									<Button
 										icon={<Pencil size={12} />}
 										variant="ghost"
@@ -931,6 +970,7 @@ export function TaskCardBody({
 					</div>
 				</div>
 				<div
+					data-card-hover-actions=""
 					className={cn(
 						"absolute right-1 -top-[6px] z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
 						"focus-within:opacity-100 focus-within:pointer-events-auto",
@@ -1162,8 +1202,8 @@ export function TaskCardBody({
 							{taskWorkspaceGitStatusTooltip ? (
 								// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，
 								// 不能直接是不转发 props/ref 的函数组件——否则 hover 根本触发不了 tooltip。
-								<Tooltip side="bottom" content={taskWorkspaceGitStatusTooltip}>
-									<span className="mx-1 inline-flex align-middle">
+								<Tooltip side="bottom" content={revealHoverActionTooltip(taskWorkspaceGitStatusTooltip)}>
+									<span data-card-hover-actions="" className="mx-1 inline-flex align-middle">
 										<AheadBehindIndicator
 											ahead={commitsAheadOfBaseRef}
 											behind={commitsBehindBaseRef}
@@ -1192,7 +1232,7 @@ export function TaskCardBody({
 						</span>
 						{showDirectoryCopyButton ? (
 							<TaskCardRowHoverActions groupName="directory">
-								<Tooltip side="bottom" content="Copy directory path">
+								<Tooltip side="bottom" content={revealHoverActionTooltip("Copy directory path")}>
 									<Button
 										icon={
 											isDirectoryPathCopied ? (

@@ -6,6 +6,7 @@ import { type ClineChatMessage, useClineChatSession } from "@/hooks/use-cline-ch
 import type { RuntimeTaskImage, RuntimeTaskSessionMode } from "@/runtime/types";
 
 interface HookSnapshot {
+	messages: ClineChatMessage[];
 	messageIds: string[];
 	lastMessageContent: string | null;
 	lastMessageHookEvent: string | null;
@@ -61,6 +62,7 @@ function HookHarness({
 	useEffect(() => {
 		const lastMessage = state.messages.at(-1);
 		onSnapshot({
+			messages: state.messages,
 			messageIds: state.messages.map((message) => message.id),
 			lastMessageContent: lastMessage?.content ?? null,
 			lastMessageHookEvent: lastMessage?.meta?.hookEventName ?? null,
@@ -214,6 +216,50 @@ describe("useClineChatSession", () => {
 
 		expect(snapshots.at(-1)?.messageIds).toEqual(["tool-1"]);
 		expect(snapshots.at(-1)?.lastMessageHookEvent).toBe("tool_call_end");
+	});
+
+	it("returns the same messages array reference when the incoming message is reference-identical", async () => {
+		const message: ClineChatMessage = {
+			id: "message-1",
+			role: "assistant",
+			content: "Hello",
+			createdAt: 1,
+			meta: {
+				hookEventName: "tool_call_start",
+				toolName: "Read",
+			},
+		};
+		const onLoadMessages = vi.fn(async () => [message]);
+		const snapshots: HookSnapshot[] = [];
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskId="task-1"
+					onLoadMessages={onLoadMessages}
+					onSnapshot={(snapshot) => snapshots.push(snapshot)}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		const baselineMessages = snapshots.at(-1)?.messages;
+		expect(snapshots.at(-1)?.messageIds).toEqual(["message-1"]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					taskId="task-1"
+					onLoadMessages={onLoadMessages}
+					incomingMessage={message}
+					onSnapshot={(snapshot) => snapshots.push(snapshot)}
+				/>,
+			);
+			await Promise.resolve();
+		});
+
+		expect(snapshots.at(-1)?.messageIds).toEqual(["message-1"]);
+		expect(snapshots.at(-1)?.messages).toBe(baselineMessages);
 	});
 
 	it("appends the returned chat message after send without reloading history", async () => {

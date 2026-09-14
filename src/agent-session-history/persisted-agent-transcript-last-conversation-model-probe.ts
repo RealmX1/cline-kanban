@@ -75,6 +75,61 @@ export async function probePersistedAgentTranscriptLastConversationModelIdentity
 	return await readLastAgentOutputModelIdentityFromTranscriptTail(transcriptFile);
 }
 
+// 按**会话自己的原生 session id** 定位转录，而不是复刻 `--continue` 的挑法。
+//
+// 为什么必须另开一个入口：`--continue` 那条路问的是「这个工作目录里最近那段对话用了什么模型」，而主会话与
+// 它的 By the way 侧问、以及同仓库下多个 inplace 任务共用同一个 cwd —— 那时它会把**别人**的模型套到本会话
+// 头上，还会顺手写回卡片固化下来。会话按 id 续跑时，模型也必须按同一个 id 取。
+//
+// 刻意**不**给 resolveTranscriptFileClaudeContinueWouldResume 加一个可选参数：那个函数的全部价值在于
+// 忠实复刻 CLI 的挑法（模块头与它自己的注释都立了这条规矩），掺进 by-id 分支会毁掉它的单一答案性。
+//
+// 返回 null 的含义与 cwd 版完全一致：「这次问不出结论」，调用方按原有规则决定模型。
+export async function probePersistedAgentTranscriptModelIdentityForAgentNativeConversationSession(input: {
+	agentId: RuntimeAgentId | null | undefined;
+	// 会话真正的工作目录（任务 worktree）——转录目录名仍由它编码而成，只是目录里挑哪个文件改由 id 决定。
+	workspacePath: string | null | undefined;
+	// harness 自己的 session id（summary sidecar agentNativeConversationSessionIdentity.nativeSessionId）。
+	agentNativeConversationSessionId: string | null | undefined;
+	homeDirectoryPath?: string;
+}): Promise<string | null> {
+	const workspacePath = input.workspacePath?.trim();
+	const sessionIdentity = input.agentNativeConversationSessionId?.trim();
+	if (
+		!workspacePath ||
+		!sessionIdentity ||
+		!CLAUDE_SESSION_IDENTITY_PATTERN.test(sessionIdentity) ||
+		!supportsPersistedAgentTranscriptLastConversationModelProbe(input.agentId)
+	) {
+		return null;
+	}
+	const filePath = join(
+		input.homeDirectoryPath ?? homedir(),
+		".claude",
+		"projects",
+		encodeClaudeProjectDirectoryName(await resolveRealWorkspacePathForProjectDirectoryEncoding(workspacePath)),
+		`${sessionIdentity}${CLAUDE_TRANSCRIPT_FILE_NAME_SUFFIX}`,
+	);
+	let size: number;
+	try {
+		const fileStats = await stat(filePath);
+		if (!fileStats.isFile()) {
+			return null;
+		}
+		size = fileStats.size;
+	} catch {
+		// 这条会话在这个工作目录下还没有转录（刚建、或 harness 把它落在别处）。属正常情形。
+		return null;
+	}
+	return await readLastAgentOutputModelIdentityFromTranscriptTail({
+		filePath,
+		sessionIdentity,
+		// 排序字段在按-id 定位里用不到；给出真实值以外的任何东西都只会误导读者，故直接取 0 并说明。
+		wholeMillisecondMtime: 0,
+		size,
+	});
+}
+
 interface TranscriptFileCandidate {
 	filePath: string;
 	sessionIdentity: string;

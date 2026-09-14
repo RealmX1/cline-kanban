@@ -17,12 +17,15 @@ import {
 	hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror,
 	subscribeToTaskEditDraftStore,
 } from "@/runtime/task-edit-draft-store";
+import { suggestTaskNamesFromTaskDescription } from "@/runtime/task-name-suggestion-query";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
+	RuntimeTaskConversationMode,
+	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 	RuntimeTerminalAgentModelSelectionAgentId,
@@ -185,6 +188,8 @@ export interface UseTaskEditorResult {
 	setNewTaskStartInPlanMode: Dispatch<SetStateAction<boolean>>;
 	newTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	setNewTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
+	newTaskConversationMode: RuntimeTaskConversationMode;
+	setNewTaskConversationMode: Dispatch<SetStateAction<RuntimeTaskConversationMode>>;
 	newTaskAutoReviewEnabled: boolean;
 	setNewTaskAutoReviewEnabled: Dispatch<SetStateAction<boolean>>;
 	newTaskAutoReviewMode: TaskAutoReviewMode;
@@ -211,6 +216,8 @@ export interface UseTaskEditorResult {
 	setEditTaskStartInPlanMode: Dispatch<SetStateAction<boolean>>;
 	editTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	setEditTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
+	editTaskConversationMode: RuntimeTaskConversationMode;
+	setEditTaskConversationMode: Dispatch<SetStateAction<RuntimeTaskConversationMode>>;
 	editTaskAutoReviewEnabled: boolean;
 	setEditTaskAutoReviewEnabled: Dispatch<SetStateAction<boolean>>;
 	editTaskAutoReviewMode: TaskAutoReviewMode;
@@ -269,6 +276,7 @@ export function useTaskEditor({
 	const [newTaskAgentPermissionMode, setNewTaskAgentPermissionMode] = useState<RuntimeTaskAgentPermissionMode>(
 		newTaskAgentPermissionModeByDefault,
 	);
+	const [newTaskConversationMode, setNewTaskConversationMode] = useState<RuntimeTaskConversationMode>("operational");
 	const [newTaskAutoReviewEnabled, setNewTaskAutoReviewEnabled] = useNewTaskAutoReviewEnabledPreference();
 	const [newTaskAutoReviewMode, setNewTaskAutoReviewMode] = useNewTaskAutoReviewModePreference();
 	const isNewTaskStartInPlanModeDisabled = false;
@@ -284,6 +292,7 @@ export function useTaskEditor({
 	const [editTaskAgentPermissionMode, setEditTaskAgentPermissionMode] = useState<RuntimeTaskAgentPermissionMode>(
 		DEFAULT_TASK_AGENT_PERMISSION_MODE,
 	);
+	const [editTaskConversationMode, setEditTaskConversationMode] = useState<RuntimeTaskConversationMode>("operational");
 	const [editTaskAutoReviewEnabled, setEditTaskAutoReviewEnabled] = useState(false);
 	const [editTaskAutoReviewMode, setEditTaskAutoReviewMode] = useState<TaskAutoReviewMode>("commit");
 	const isEditTaskStartInPlanModeDisabled = false;
@@ -411,6 +420,7 @@ export function useTaskEditor({
 			setEditTaskPrompt("");
 			setEditTaskStartInPlanMode(false);
 			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+			setEditTaskConversationMode("operational");
 			setEditTaskAutoReviewEnabled(false);
 			setEditTaskAutoReviewMode("commit");
 			setEditTaskImages([]);
@@ -542,6 +552,7 @@ export function useTaskEditor({
 		setNewTaskImages([]);
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
+		setNewTaskConversationMode("operational");
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setNewTaskWorktreeMode("branch");
 		setNewTaskAgentId(undefined);
@@ -587,6 +598,9 @@ export function useTaskEditor({
 			setEditTaskImages(formValues.images);
 			setEditTaskStartInPlanMode(formValues.startInPlanMode);
 			setEditTaskAgentPermissionMode(formValues.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault);
+			// 会话模式不在编辑草稿体系里（runtimeTaskEditDraftSchema 尚未携带该字段，web 侧不能
+			// 单方面扩——store 校验会把未知字段剥掉），所以恒从卡片本体铺，草稿不参与。
+			setEditTaskConversationMode(task.taskConversationMode ?? "operational");
 			setEditTaskAutoReviewEnabled(formValues.autoReviewEnabled);
 			setEditTaskAutoReviewMode(formValues.autoReviewMode);
 			setEditTaskBranchRef(formValues.branchRef);
@@ -720,6 +734,7 @@ export function useTaskEditor({
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
 		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+		setEditTaskConversationMode("operational");
 		setEditTaskAutoReviewEnabled(false);
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
@@ -756,6 +771,7 @@ export function useTaskEditor({
 					prompt,
 					startInPlanMode: editTaskStartInPlanMode,
 					taskAgentPermissionMode: editTaskAgentPermissionMode,
+					taskConversationMode: editTaskConversationMode,
 					autoReviewEnabled: editTaskAutoReviewEnabled,
 					autoReviewMode: editTaskAutoReviewMode,
 					images: editTaskImages,
@@ -773,6 +789,7 @@ export function useTaskEditor({
 			setEditTaskPrompt("");
 			setEditTaskStartInPlanMode(false);
 			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+			setEditTaskConversationMode("operational");
 			setEditTaskAutoReviewEnabled(false);
 			setEditTaskAutoReviewMode("commit");
 			setEditTaskImages([]);
@@ -787,6 +804,7 @@ export function useTaskEditor({
 		[
 			editTaskAgentId,
 			editTaskAgentPermissionMode,
+			editTaskConversationMode,
 			editTaskAutoReviewEnabled,
 			editTaskAutoReviewMode,
 			editTaskBranchRef,
@@ -825,6 +843,43 @@ export function useTaskEditor({
 		[setBoard],
 	);
 
+	/**
+	 * 建卡时名字框留空 → 先按正则推导的标题落卡，再异步向起名端点要一个更好的名字回填。
+	 *
+	 * 三条刻意的选择：
+	 *   - fire-and-forget：起名要往外发一次网络请求，让建卡等它回来会把「点一下就出卡」变成「转两秒」；
+	 *   - 失败全静默：标题保持正则推导值，用户什么都不会丢，弹提示只会打断建卡节奏；
+	 *   - 回填前比对标题：卡片仍是当初那个推导标题才写。用户手改过、或 agent 已经改过名的卡不该被顶掉。
+	 */
+	const backfillSuggestedTaskTitleForCreatedTask = useCallback(
+		(taskId: string, prompt: string, titleWrittenAtCreateTime: string) => {
+			void (async () => {
+				let suggestion: RuntimeTaskNameSuggestionResponse;
+				try {
+					suggestion = await suggestTaskNamesFromTaskDescription(prompt);
+				} catch {
+					return;
+				}
+				if (suggestion.status !== "suggested") {
+					return;
+				}
+				const suggestedTaskName = suggestion.suggestedTaskNames[0];
+				if (!suggestedTaskName) {
+					return;
+				}
+				setBoard((currentBoard) => {
+					const selection = findCardSelection(currentBoard, taskId);
+					if (!selection || selection.card.title !== titleWrittenAtCreateTime) {
+						return currentBoard;
+					}
+					const updated = updateTaskTitle(currentBoard, taskId, suggestedTaskName);
+					return updated.updated ? updated.board : currentBoard;
+				});
+			})();
+		},
+		[setBoard],
+	);
+
 	const handleCreateTask = useCallback(
 		(options?: TaskEditorSubmitOptions): string | null => {
 			if (!isNewTaskStartInPlanModeDefaultLoaded) {
@@ -838,12 +893,15 @@ export function useTaskEditor({
 			if (!baseRef) {
 				return null;
 			}
-			const title = deriveTaskTitleFromPrompt(prompt);
+			// 留空与省略同义：两者都走「先推导、再异步回填 AI 名字」。
+			const explicitTaskName = options?.taskNameOverride?.trim() ?? "";
+			const title = explicitTaskName || deriveTaskTitleFromPrompt(prompt);
 			const created = addTaskToColumnWithResult(board, "backlog", {
 				title,
 				prompt,
 				startInPlanMode: newTaskStartInPlanMode,
 				taskAgentPermissionMode: newTaskAgentPermissionMode,
+				taskConversationMode: newTaskConversationMode,
 				autoReviewEnabled: newTaskAutoReviewEnabled,
 				autoReviewMode: newTaskAutoReviewMode,
 				images: newTaskImages,
@@ -859,6 +917,9 @@ export function useTaskEditor({
 				worktreeMode: newTaskWorktreeMode,
 			});
 			setBoard(created.board);
+			if (!explicitTaskName) {
+				backfillSuggestedTaskTitleForCreatedTask(created.task.id, prompt, created.task.title);
+			}
 			writeMostRecentlyUsedTaskCreateBaseRefForProject(currentProjectId, baseRef);
 			trackTaskCreated({
 				selected_agent_id: toTelemetrySelectedAgentId(newTaskAgentId ?? selectedAgentId),
@@ -872,6 +933,9 @@ export function useTaskEditor({
 			setNewTaskAgentPermissionMode(
 				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
 			);
+			// 会话模式没有全局默认档（恒 operational 缺省），keepDialogOpen 时保留当前选择，
+			// 与 worktreeMode 的「连续建同类卡」语义一致。
+			setNewTaskConversationMode(options?.keepDialogOpen ? newTaskConversationMode : "operational");
 			// 刚用掉的那条 ref 就是这个项目新的默认值（上面已写进记忆），所以两条路径都设回 baseRef。
 			// 不能沿用「关掉对话框就复位成 resolvedDefaultCreateTaskBranchRef」：那是闭包里捕获的旧值，
 			// 偏好 store 的乐观发布不保证在同一帧内把它重算出来，于是刚记住的选择会闪回旧默认。
@@ -889,6 +953,7 @@ export function useTaskEditor({
 			return created.task.id;
 		},
 		[
+			backfillSuggestedTaskTitleForCreatedTask,
 			board,
 			isNewTaskStartInPlanModeDefaultLoaded,
 			newTaskAgentId,
@@ -905,6 +970,7 @@ export function useTaskEditor({
 			newTaskPrompt,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
+			newTaskConversationMode,
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultTaskBranchRef,
@@ -937,6 +1003,7 @@ export function useTaskEditor({
 					prompt,
 					startInPlanMode: newTaskStartInPlanMode,
 					taskAgentPermissionMode: newTaskAgentPermissionMode,
+					taskConversationMode: newTaskConversationMode,
 					autoReviewEnabled: newTaskAutoReviewEnabled,
 					autoReviewMode: newTaskAutoReviewMode,
 					images: newTaskImages,
@@ -968,6 +1035,9 @@ export function useTaskEditor({
 			setNewTaskAgentPermissionMode(
 				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
 			);
+			// 会话模式没有全局默认档（恒 operational 缺省），keepDialogOpen 时保留当前选择，
+			// 与 worktreeMode 的「连续建同类卡」语义一致。
+			setNewTaskConversationMode(options?.keepDialogOpen ? newTaskConversationMode : "operational");
 			// 刚用掉的那条 ref 就是这个项目新的默认值（上面已写进记忆），所以两条路径都设回 baseRef。
 			// 不能沿用「关掉对话框就复位成 resolvedDefaultCreateTaskBranchRef」：那是闭包里捕获的旧值，
 			// 偏好 store 的乐观发布不保证在同一帧内把它重算出来，于是刚记住的选择会闪回旧默认。
@@ -998,6 +1068,7 @@ export function useTaskEditor({
 			ompAgentSessionTransportForNewTasks,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
+			newTaskConversationMode,
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultTaskBranchRef,
@@ -1018,10 +1089,12 @@ export function useTaskEditor({
 		setNewTaskPrompt("");
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
+		setNewTaskConversationMode("operational");
 
 		setEditTaskPrompt("");
 		setEditTaskStartInPlanMode(false);
 		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
+		setEditTaskConversationMode("operational");
 		setEditTaskAutoReviewEnabled(false);
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
@@ -1047,6 +1120,8 @@ export function useTaskEditor({
 		setNewTaskStartInPlanMode,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
+		newTaskConversationMode,
+		setNewTaskConversationMode,
 		newTaskAutoReviewEnabled,
 		setNewTaskAutoReviewEnabled,
 		newTaskAutoReviewMode,
@@ -1073,6 +1148,8 @@ export function useTaskEditor({
 		setEditTaskStartInPlanMode,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
+		editTaskConversationMode,
+		setEditTaskConversationMode,
 		editTaskAutoReviewEnabled,
 		setEditTaskAutoReviewEnabled,
 		editTaskAutoReviewMode,

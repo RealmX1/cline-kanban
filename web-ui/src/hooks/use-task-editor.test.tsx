@@ -10,6 +10,7 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
+	RuntimeTaskConversationMode,
 	RuntimeTaskEditDraft,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -142,6 +143,22 @@ vi.mock("@/components/task-prompt-composer", () => ({
 	TaskPromptComposer: () => null,
 }));
 
+// 建卡时「名字框留空」会 fire-and-forget 去要一个 AI 名字回填。这套用例没有服务器，所以把那条查询
+// 换成可编排的替身：默认永不解决（= 与没有起名能力时的行为逐字一致），要测回填的用例自己放行。
+const fakeTaskNameSuggestionEndpoint = vi.hoisted(() => ({
+	respond: null as ((response: unknown) => void) | null,
+	callCount: 0,
+}));
+
+vi.mock("@/runtime/task-name-suggestion-query", () => ({
+	suggestTaskNamesFromTaskDescription: vi.fn(() => {
+		fakeTaskNameSuggestionEndpoint.callCount += 1;
+		return new Promise((resolve) => {
+			fakeTaskNameSuggestionEndpoint.respond = resolve;
+		});
+	}),
+}));
+
 function createTask(taskId: string, prompt: string, createdAt: number, overrides: Partial<BoardCard> = {}): BoardCard {
 	return {
 		id: taskId,
@@ -169,6 +186,11 @@ function createBoard(tasks: BoardCard[] = []): BoardData {
 	};
 }
 
+// 字段顺序与 runtimeTaskImageSchema / fileToTaskImage 一致（id, data, mimeType, name?）。
+function createTaskImage(id: string, data: string, overrides: Partial<TaskImage> = {}): TaskImage {
+	return { id, data, mimeType: "image/png", ...overrides };
+}
+
 interface HookSnapshot {
 	board: BoardData;
 	isInlineTaskCreateOpen: boolean;
@@ -181,14 +203,18 @@ interface HookSnapshot {
 	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
 	newTaskTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	newTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
+	newTaskConversationMode: RuntimeTaskConversationMode;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
+	editTaskImages: TaskImage[];
 	editTaskStartInPlanMode: boolean;
 	editTaskWorktreeMode: RuntimeTaskWorktreeMode;
 	editTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
+	editTaskConversationMode: RuntimeTaskConversationMode;
 	isEditTaskStartInPlanModeDisabled: boolean;
 	handleOpenCreateTask: () => void;
-	handleCreateTask: (options?: { keepDialogOpen?: boolean }) => string | null;
+	handleCreateTask: (options?: { keepDialogOpen?: boolean; taskNameOverride?: string }) => string | null;
+	handleSaveTaskTitle: (taskId: string, title: string) => void;
 	handleCreateTasks: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
 	setNewTaskPrompt: (value: string) => void;
 	setNewTaskImages: (value: TaskImage[]) => void;
@@ -199,6 +225,7 @@ interface HookSnapshot {
 	handleSaveEditedTask: () => string | null;
 	handleSaveAndStartEditedTask: () => void;
 	setEditTaskPrompt: (value: string) => void;
+	setEditTaskImages: (value: TaskImage[]) => void;
 	setEditTaskAutoReviewEnabled: (value: boolean) => void;
 	setEditTaskAutoReviewMode: (value: TaskAutoReviewMode) => void;
 	setEditTaskWorktreeMode: (value: RuntimeTaskWorktreeMode) => void;
@@ -210,6 +237,8 @@ interface HookSnapshot {
 		options?: { rememberSelectionForFutureCreateTasks?: boolean },
 	) => void;
 	setNewTaskAgentSessionInitialization: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
+	setNewTaskConversationMode: (value: RuntimeTaskConversationMode) => void;
+	setEditTaskConversationMode: (value: RuntimeTaskConversationMode) => void;
 }
 
 function requireSnapshot(snapshot: HookSnapshot | null): HookSnapshot {
@@ -278,14 +307,18 @@ function HookHarness({
 			newTaskClineSettings: editor.newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings: editor.newTaskTerminalAgentModelOverrideSettings,
 			newTaskAgentSessionInitialization: editor.newTaskAgentSessionInitialization,
+			newTaskConversationMode: editor.newTaskConversationMode,
 			editingTaskId: editor.editingTaskId,
 			editTaskPrompt: editor.editTaskPrompt,
+			editTaskImages: editor.editTaskImages,
 			editTaskStartInPlanMode: editor.editTaskStartInPlanMode,
 			editTaskWorktreeMode: editor.editTaskWorktreeMode,
 			editTaskAgentSessionInitialization: editor.editTaskAgentSessionInitialization,
+			editTaskConversationMode: editor.editTaskConversationMode,
 			isEditTaskStartInPlanModeDisabled: editor.isEditTaskStartInPlanModeDisabled,
 			handleOpenCreateTask: editor.handleOpenCreateTask,
 			handleCreateTask: editor.handleCreateTask,
+			handleSaveTaskTitle: editor.handleSaveTaskTitle,
 			handleCreateTasks: editor.handleCreateTasks,
 			setNewTaskPrompt: editor.setNewTaskPrompt,
 			setNewTaskImages: editor.setNewTaskImages,
@@ -296,6 +329,7 @@ function HookHarness({
 			handleSaveEditedTask: editor.handleSaveEditedTask,
 			handleSaveAndStartEditedTask: editor.handleSaveAndStartEditedTask,
 			setEditTaskPrompt: editor.setEditTaskPrompt,
+			setEditTaskImages: editor.setEditTaskImages,
 			setEditTaskAutoReviewEnabled: editor.setEditTaskAutoReviewEnabled,
 			setEditTaskAutoReviewMode: editor.setEditTaskAutoReviewMode,
 			setEditTaskWorktreeMode: editor.setEditTaskWorktreeMode,
@@ -304,14 +338,19 @@ function HookHarness({
 			setNewTaskClineSettings: editor.setNewTaskClineSettings,
 			setNewTaskTerminalAgentModelOverrideSettings: editor.setNewTaskTerminalAgentModelOverrideSettings,
 			setNewTaskAgentSessionInitialization: editor.setNewTaskAgentSessionInitialization,
+			setNewTaskConversationMode: editor.setNewTaskConversationMode,
+			setEditTaskConversationMode: editor.setEditTaskConversationMode,
 		});
 	}, [
 		board,
 		editor.handleCreateTask,
+		editor.handleSaveTaskTitle,
 		editor.handleCreateTasks,
 		editor.handleOpenCreateTask,
 		editor.editTaskPrompt,
+		editor.editTaskImages,
 		editor.editTaskAgentSessionInitialization,
+		editor.editTaskConversationMode,
 		editor.editTaskStartInPlanMode,
 		editor.editTaskWorktreeMode,
 		editor.editingTaskId,
@@ -329,16 +368,20 @@ function HookHarness({
 		editor.newTaskClineSettings,
 		editor.newTaskTerminalAgentModelOverrideSettings,
 		editor.newTaskAgentSessionInitialization,
+		editor.newTaskConversationMode,
 		editor.setEditTaskAutoReviewEnabled,
 		editor.setEditTaskAutoReviewMode,
 		editor.setEditTaskWorktreeMode,
 		editor.setEditTaskAgentSessionInitialization,
+		editor.setEditTaskConversationMode,
 		editor.setEditTaskPrompt,
+		editor.setEditTaskImages,
 		editor.setNewTaskImages,
 		editor.setNewTaskBranchRef,
 		editor.setNewTaskPrompt,
 		editor.setNewTaskTerminalAgentModelOverrideSettings,
 		editor.setNewTaskAgentSessionInitialization,
+		editor.setNewTaskConversationMode,
 		onSnapshot,
 	]);
 
@@ -355,6 +398,8 @@ describe("useTaskEditor", () => {
 		resetTaskEditDraftStoreForTests();
 		fakeWorkspaceTaskEditDraftServer.snapshot = null;
 		fakeWorkspaceTaskEditDraftServer.releaseFetch = null;
+		fakeTaskNameSuggestionEndpoint.respond = null;
+		fakeTaskNameSuggestionEndpoint.callCount = 0;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -375,6 +420,131 @@ describe("useTaskEditor", () => {
 				previousActEnvironment;
 		}
 		localStorage.clear();
+	});
+
+	it("uses the name typed in the task name field as the card title", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Login redirects to a blank page after SSO");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask({ taskNameOverride: "  Fix the SSO redirect  " });
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Fix the SSO redirect");
+		// 用户自己给了名字就不该再去问 AI。
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(0);
+	});
+
+	it("derives the title from the prompt when the name field is empty, then backfills the suggested name", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Login redirects to a blank page after SSO");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask({ taskNameOverride: "   " });
+		});
+
+		// 先落卡：标题是正则推导值，建卡完全不等起名请求。
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe(
+			"Login redirects to a blank page after SSO",
+		);
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(1);
+
+		await act(async () => {
+			fakeTaskNameSuggestionEndpoint.respond?.({
+				status: "suggested",
+				suggestedTaskNames: ["Fix the SSO redirect", "Repair post-SSO navigation"],
+			});
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Fix the SSO redirect");
+	});
+
+	it("leaves the derived title alone when the naming endpoint is unavailable", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Login redirects to a blank page after SSO");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+		await act(async () => {
+			fakeTaskNameSuggestionEndpoint.respond?.({
+				status: "unavailable",
+				unavailableReason: "api_key_not_configured",
+			});
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe(
+			"Login redirects to a blank page after SSO",
+		);
+	});
+
+	it("does not overwrite a title the user changed while the naming request was in flight", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Login redirects to a blank page after SSO");
+		});
+		let createdTaskId: string | null = null;
+		await act(async () => {
+			createdTaskId = requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveTaskTitle(String(createdTaskId), "Renamed by hand");
+		});
+		await act(async () => {
+			fakeTaskNameSuggestionEndpoint.respond?.({
+				status: "suggested",
+				suggestedTaskNames: ["Fix the SSO redirect"],
+			});
+		});
+
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Renamed by hand");
 	});
 
 	it("defaults new tasks to plan mode from the runtime setting", async () => {
@@ -402,6 +572,50 @@ describe("useTaskEditor", () => {
 		});
 
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.startInPlanMode).toBe(true);
+	});
+
+	it("会话模式声明（蓝图 §A.1）：create 落卡片、edit 从卡片铺表单、保存写回", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		// create：默认 operational；切到 exploratory 建卡 → 卡片带上声明。
+		expect(requireSnapshot(latestSnapshot).newTaskConversationMode).toBe("operational");
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Explore the codebase");
+			requireSnapshot(latestSnapshot).setNewTaskConversationMode("exploratory");
+		});
+		let taskId: string | null = null;
+		await act(async () => {
+			taskId = requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+		const createdTask = requireSnapshot(latestSnapshot).board.columns[0]?.cards.find((card) => card.id === taskId);
+		expect(createdTask?.taskConversationMode).toBe("exploratory");
+		// 建卡后（非 keepDialogOpen）回到缺省。
+		expect(requireSnapshot(latestSnapshot).newTaskConversationMode).toBe("operational");
+
+		// edit：表单从卡片铺模式；改回 operational 保存 → 写回卡片。
+		await act(async () => {
+			if (createdTask) requireSnapshot(latestSnapshot).handleOpenEditTask(createdTask);
+		});
+		expect(requireSnapshot(latestSnapshot).editTaskConversationMode).toBe("exploratory");
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskConversationMode("operational");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveEditedTask();
+		});
+		const savedTask = requireSnapshot(latestSnapshot).board.columns[0]?.cards.find((card) => card.id === taskId);
+		expect(savedTask?.taskConversationMode).toBe("operational");
 	});
 
 	it("ignores the legacy browser-local plan mode default when runtime setting is false", async () => {
@@ -822,6 +1036,182 @@ describe("useTaskEditor", () => {
 
 		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Initial prompt");
+	});
+
+	it("does not autosave a draft when an image-bearing edit form still matches the task", async () => {
+		// 粘贴图是 MB 级 base64：表单没动过时，去抖那一拍必须判出「等于任务本体」并什么也不写。
+		// 任务显式带上与 harness 默认一致的 permission mode，让图片成为唯一可能不等的字段。
+		const largeImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(1_000_000)}`);
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				images: [largeImage],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await settleTaskEditDraftPersistence();
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
+	});
+
+	it("autosaves a draft when an edited image keeps its byte length but changes its content", async () => {
+		// 同 id / 同 mimeType / data 长度也相同，只有内容不同：长度早退放它过去，必须靠 data 本身判出不等。
+		const originalImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(1_000_000)}`);
+		const editedImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(999_999)}b`);
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				images: [originalImage],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskImages([editedImage]);
+		});
+		await settleTaskEditDraftPersistence();
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toContain("image-1");
+	});
+
+	it("does not autosave a draft when images are replaced by copies with identical content", async () => {
+		// 内容逐字相同、引用不同的另一份图片对象（含可选 name）：也必须判等，
+		// 否则任何一次「重建图片数组」都会被当成改动而落一份假草稿。
+		const largeData = `data:image/png;base64,${"a".repeat(1_000_000)}`;
+		const taskImage = createTaskImage("image-1", largeData, { name: "paste.png" });
+		const identicalCopy = createTaskImage("image-1", largeData, { name: "paste.png" });
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				images: [taskImage],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskImages([identicalCopy]);
+		});
+		await settleTaskEditDraftPersistence();
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
+	});
+
+	it("rebases an image-bearing edit form whose images were only replaced by identical copies", async () => {
+		// 迟到的服务端快照只有在「用户还没动过表单」时才允许重铺。图片被换成内容相同的副本不算动过——
+		// 否则每一次图片数组重建都会把重铺闸门焊死，胜出的服务端草稿永远铺不上来。
+		const task = createTask("task-1", "Initial prompt", 1);
+		const mirrorImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(1_000_000)}`);
+		const serverImage = createTaskImage("image-2", `data:image/png;base64,${"c".repeat(1_000_000)}`);
+		const losingMirrorDraft: RuntimeTaskEditDraft = {
+			taskId: task.id,
+			prompt: "Losing mirror draft",
+			images: [mirrorImage],
+			startInPlanMode: false,
+			autoReviewEnabled: false,
+			autoReviewMode: "commit",
+			branchRef: "main",
+			worktreeMode: "branch",
+			savedAt: 1_000,
+		};
+		const winningServerDraft: RuntimeTaskEditDraft = {
+			...losingMirrorDraft,
+			prompt: "Winning server draft",
+			images: [serverImage],
+			savedAt: 2_000,
+		};
+		window.localStorage.setItem(
+			LocalStorageKey.TaskEditDrafts,
+			JSON.stringify({ drafts: { [JSON.stringify(["project-1", task.id])]: losingMirrorDraft } }),
+		);
+		fakeWorkspaceTaskEditDraftServer.snapshot = {
+			draftsByTaskId: { [task.id]: winningServerDraft },
+			supersededDraftCopies: [],
+		};
+
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([task])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+
+		// 用户把图片「换」成了内容逐字相同的另一份对象——表单值与铺表种子判等，重铺闸门必须放行。
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskImages([createTaskImage("image-1", mirrorImage.data)]);
+		});
+
+		await act(async () => {
+			fakeWorkspaceTaskEditDraftServer.releaseFetch?.();
+			await new Promise((resolve) => {
+				setTimeout(resolve, 0);
+			});
+		});
+
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Winning server draft");
+		expect(requireSnapshot(latestSnapshot).editTaskImages).toEqual([serverImage]);
 	});
 
 	it("does not disable start in plan mode when auto review is enabled while editing", async () => {
@@ -1423,6 +1813,105 @@ describe("useTaskEditor", () => {
 		expect(requireSnapshot(latestSnapshot).editTaskAgentSessionInitialization).toEqual(initialization);
 	});
 
+	function renderTaskCreateDialogForSuggestionRounds(open: boolean) {
+		return (
+			<TaskEditorDialog
+				open={open}
+				onOpenChange={vi.fn()}
+				prompt="Login redirects to a blank page after SSO"
+				onPromptChange={vi.fn()}
+				images={[]}
+				onImagesChange={vi.fn()}
+				onCreate={() => "created-task-1"}
+				taskAgentPermissionMode="bypass_all_permission_prompts"
+				onTaskAgentPermissionModeChange={vi.fn()}
+				taskConversationMode="operational"
+				onTaskConversationModeChange={vi.fn()}
+				onCreateMultiple={() => []}
+				startInPlanMode={false}
+				onStartInPlanModeChange={vi.fn()}
+				autoReviewEnabled={false}
+				onAutoReviewEnabledChange={vi.fn()}
+				autoReviewMode="commit"
+				onAutoReviewModeChange={vi.fn()}
+				workspaceId="workspace-1"
+				branchRef="main"
+				branchOptions={[{ value: "main", label: "main" }]}
+				onBranchRefChange={vi.fn()}
+				worktreeMode="branch"
+				onWorktreeModeChange={vi.fn()}
+				onClineSettingsChange={vi.fn()}
+			/>
+		);
+	}
+
+	/** 关闭再打开会在 body 里留下上一次的 portal 残骸，所以一律只看「最后那个」对话框。 */
+	function currentDialogElement(): HTMLElement {
+		const dialogs = Array.from(document.body.querySelectorAll<HTMLElement>('[role="dialog"]'));
+		const currentDialog = dialogs.at(-1);
+		if (!currentDialog) {
+			throw new Error("Expected a rendered dialog.");
+		}
+		return currentDialog;
+	}
+
+	function findDialogButtonByLabel(label: string): HTMLButtonElement | undefined {
+		return Array.from(currentDialogElement().querySelectorAll("button")).find(
+			(button) => button.textContent?.trim() === label,
+		);
+	}
+
+	async function requestOneTaskNameSuggestionRound(): Promise<void> {
+		await act(async () => {
+			(findDialogButtonByLabel("Suggest names") ?? findDialogButtonByLabel("Suggest more"))?.click();
+		});
+		await act(async () => {
+			fakeTaskNameSuggestionEndpoint.respond?.({
+				status: "suggested",
+				suggestedTaskNames: ["Fix the SSO redirect"],
+			});
+		});
+	}
+
+	it("drops the name suggestion rounds when the create dialog is closed and reopened", async () => {
+		await act(async () => {
+			root.render(renderTaskCreateDialogForSuggestionRounds(true));
+		});
+		await requestOneTaskNameSuggestionRound();
+		expect(currentDialogElement().textContent).toContain("Suggestion 1");
+
+		await act(async () => {
+			root.render(renderTaskCreateDialogForSuggestionRounds(false));
+		});
+		await act(async () => {
+			root.render(renderTaskCreateDialogForSuggestionRounds(true));
+		});
+
+		// 上一次建卡的候选不该跟到下一次打开的对话框里。
+		expect(currentDialogElement().textContent).not.toContain("Suggestion 1");
+		expect(findDialogButtonByLabel("Suggest more")).toBeUndefined();
+	});
+
+	it("drops the name suggestion rounds when Create more reuses the dialog for the next task", async () => {
+		await act(async () => {
+			root.render(renderTaskCreateDialogForSuggestionRounds(true));
+		});
+		const createMoreLabel = Array.from(currentDialogElement().querySelectorAll("label")).find((label) =>
+			label.textContent?.includes("Create more"),
+		);
+		await act(async () => {
+			document.getElementById(createMoreLabel?.getAttribute("for") ?? "")?.click();
+		});
+		await requestOneTaskNameSuggestionRound();
+		expect(currentDialogElement().textContent).toContain("Suggestion 1");
+
+		// 对话框留在原地不卸载，所以这一次靠换 key 重挂来清——上一张卡的候选不该跟到下一张。
+		await act(async () => {
+			findDialogButtonByLabel("Create")?.click();
+		});
+		expect(currentDialogElement().textContent).not.toContain("Suggestion 1");
+	});
+
 	it("allows selecting a new worktree when continuing a Claude session", async () => {
 		const onWorktreeModeChange = vi.fn();
 		await act(async () => {
@@ -1437,6 +1926,8 @@ describe("useTaskEditor", () => {
 					onCreate={() => null}
 					taskAgentPermissionMode="bypass_all_permission_prompts"
 					onTaskAgentPermissionModeChange={vi.fn()}
+					taskConversationMode="operational"
+					onTaskConversationModeChange={vi.fn()}
 					onCreateMultiple={() => []}
 					startInPlanMode={false}
 					onStartInPlanModeChange={vi.fn()}

@@ -13,6 +13,8 @@ import type {
 	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 	RuntimeAnswerAgentRaisedPendingUserDecisionResponse,
+	RuntimeArchiveExploratoryFindingRequest,
+	RuntimeArchiveExploratoryFindingResponse,
 	RuntimeAvailableAgentSessionsRequest,
 	RuntimeAvailableAgentSessionsResponse,
 	RuntimeClineAccountBalanceResponse,
@@ -45,12 +47,18 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeConfigResponse,
 	RuntimeConfigSaveRequest,
+	RuntimeConfirmExploratoryFindingRequest,
+	RuntimeConfirmExploratoryFindingResponse,
 	// Post-Deploy Verification / deployment tRPC I/O 类型（本阶段新增，供 RuntimeTrpcContext.deploymentApi 使用）
 	RuntimeConfirmVerificationCompleteRequest,
 	RuntimeConfirmVerificationCompleteResponse,
 	RuntimeContinueConnectionRetrySessionsRequest,
 	RuntimeContinueConnectionRetrySessionsResponse,
+	RuntimeConversationSessionTurnProjectionRequest,
+	RuntimeConversationSessionTurnProjectionResponse,
 	RuntimeDebugResetAllStateResponse,
+	RuntimeDeferredRestorationHarnessNotificationsRequest,
+	RuntimeDeferredRestorationHarnessNotificationsResponse,
 	RuntimeDirectoryListRequest,
 	RuntimeDirectoryListResponse,
 	RuntimeDismissAgentRaisedPendingUserDecisionRequest,
@@ -58,6 +66,10 @@ import type {
 	RuntimeDismissConnectionRetrySessionsRequest,
 	RuntimeDismissConnectionRetrySessionsResponse,
 	RuntimeFeaturebaseTokenResponse,
+	RuntimeGetExplorationThreadGraphRequest,
+	RuntimeGetExplorationThreadGraphResponse,
+	RuntimeGetExploratoryFindingsRequest,
+	RuntimeGetExploratoryFindingsResponse,
 	RuntimeGetPostDeployVerificationStateRequest,
 	RuntimeGetPostDeployVerificationStateResponse,
 	RuntimeGitCheckoutRequest,
@@ -77,6 +89,8 @@ import type {
 	RuntimeGitSyncResponse,
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
+	RuntimeIngestExploratoryFindingCandidateRequest,
+	RuntimeIngestExploratoryFindingCandidateResponse,
 	RuntimeListAgentRaisedPendingUserDecisionsRequest,
 	RuntimeListAgentRaisedPendingUserDecisionsResponse,
 	RuntimeNotificationClearRequest,
@@ -95,11 +109,18 @@ import type {
 	RuntimePromptLibraryMutateRequest,
 	RuntimePromptLibraryReadRequest,
 	RuntimePromptLibraryResponse,
+	RuntimeRejectExploratoryFindingRequest,
+	RuntimeRejectExploratoryFindingResponse,
+	RuntimeReleaseDeferredRestorationHarnessNotificationsResponse,
+	RuntimeRequestExplorationThreadGraphMaintenanceRequest,
+	RuntimeRequestExplorationThreadGraphMaintenanceResponse,
 	RuntimeRequestVerificationCompleteRequest,
 	RuntimeRequestVerificationCompleteResponse,
 	RuntimeRunPostDeployVerificationItemRequest,
 	RuntimeRunPostDeployVerificationItemResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeSaveExploratoryFindingRequest,
+	RuntimeSaveExploratoryFindingResponse,
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
 	RuntimeSlashCommandsResponse,
@@ -122,6 +143,8 @@ import type {
 	RuntimeTaskEditDraftsResponse,
 	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponse,
+	RuntimeTaskNameSuggestionRequest,
+	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkResponse,
 	RuntimeTaskSessionInputRequest,
@@ -166,6 +189,8 @@ import {
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
 	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema,
+	runtimeArchiveExploratoryFindingRequestSchema,
+	runtimeArchiveExploratoryFindingResponseSchema,
 	runtimeAvailableAgentSessionsRequestSchema,
 	runtimeAvailableAgentSessionsResponseSchema,
 	runtimeClineAccountBalanceResponseSchema,
@@ -198,12 +223,18 @@ import {
 	runtimeCommandRunResponseSchema,
 	runtimeConfigResponseSchema,
 	runtimeConfigSaveRequestSchema,
+	runtimeConfirmExploratoryFindingRequestSchema,
+	runtimeConfirmExploratoryFindingResponseSchema,
 	// Post-Deploy Verification / deployment tRPC I/O schemas（本阶段新增，供 deployment router 校验）
 	runtimeConfirmVerificationCompleteRequestSchema,
 	runtimeConfirmVerificationCompleteResponseSchema,
 	runtimeContinueConnectionRetrySessionsRequestSchema,
 	runtimeContinueConnectionRetrySessionsResponseSchema,
+	runtimeConversationSessionTurnProjectionRequestSchema,
+	runtimeConversationSessionTurnProjectionResponseSchema,
 	runtimeDebugResetAllStateResponseSchema,
+	runtimeDeferredRestorationHarnessNotificationsRequestSchema,
+	runtimeDeferredRestorationHarnessNotificationsResponseSchema,
 	runtimeDirectoryListRequestSchema,
 	runtimeDirectoryListResponseSchema,
 	runtimeDismissAgentRaisedPendingUserDecisionRequestSchema,
@@ -211,6 +242,10 @@ import {
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeDismissConnectionRetrySessionsResponseSchema,
 	runtimeFeaturebaseTokenResponseSchema,
+	runtimeGetExplorationThreadGraphRequestSchema,
+	runtimeGetExplorationThreadGraphResponseSchema,
+	runtimeGetExploratoryFindingsRequestSchema,
+	runtimeGetExploratoryFindingsResponseSchema,
 	runtimeGetPostDeployVerificationStateRequestSchema,
 	runtimeGetPostDeployVerificationStateResponseSchema,
 	runtimeGitCheckoutRequestSchema,
@@ -230,6 +265,8 @@ import {
 	runtimeGitSyncResponseSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeHookIngestResponseSchema,
+	runtimeIngestExploratoryFindingCandidateRequestSchema,
+	runtimeIngestExploratoryFindingCandidateResponseSchema,
 	runtimeListAgentRaisedPendingUserDecisionsRequestSchema,
 	runtimeListAgentRaisedPendingUserDecisionsResponseSchema,
 	runtimeNotificationClearRequestSchema,
@@ -248,11 +285,18 @@ import {
 	runtimePromptLibraryMutateRequestSchema,
 	runtimePromptLibraryReadRequestSchema,
 	runtimePromptLibraryResponseSchema,
+	runtimeRejectExploratoryFindingRequestSchema,
+	runtimeRejectExploratoryFindingResponseSchema,
+	runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema,
+	runtimeRequestExplorationThreadGraphMaintenanceRequestSchema,
+	runtimeRequestExplorationThreadGraphMaintenanceResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
 	runtimeRequestVerificationCompleteResponseSchema,
 	runtimeRunPostDeployVerificationItemRequestSchema,
 	runtimeRunPostDeployVerificationItemResponseSchema,
 	runtimeRunUpdateResponseSchema,
+	runtimeSaveExploratoryFindingRequestSchema,
+	runtimeSaveExploratoryFindingResponseSchema,
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
 	runtimeSlashCommandsResponseSchema,
@@ -275,6 +319,8 @@ import {
 	runtimeTaskEditDraftsResponseSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema,
+	runtimeTaskNameSuggestionRequestSchema,
+	runtimeTaskNameSuggestionResponseSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema,
 	runtimeTaskSessionInputRequestSchema,
@@ -338,6 +384,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeClineUpdateProviderRequest,
 		) => Promise<RuntimeClineUpdateProviderResponse>;
+		suggestTaskNamesFromTaskDescription: (
+			scope: RuntimeTrpcWorkspaceScope | null,
+			input: RuntimeTaskNameSuggestionRequest,
+		) => Promise<RuntimeTaskNameSuggestionResponse>;
 		startTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStartRequest,
@@ -403,6 +453,14 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatSendRequest,
 		) => Promise<RuntimeTaskChatSendResponse>;
+		getDeferredRestorationHarnessNotifications: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeDeferredRestorationHarnessNotificationsRequest,
+		) => Promise<RuntimeDeferredRestorationHarnessNotificationsResponse>;
+		releaseDeferredRestorationHarnessNotificationsIntoTaskSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeDeferredRestorationHarnessNotificationsRequest,
+		) => Promise<RuntimeReleaseDeferredRestorationHarnessNotificationsResponse>;
 		cancelTaskChatDelivery: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatDeliveryCancelRequest,
@@ -624,6 +682,46 @@ export interface RuntimeTrpcContext {
 			input: RuntimeConfirmVerificationCompleteRequest,
 		) => Promise<RuntimeConfirmVerificationCompleteResponse>;
 	};
+	conversationTreeApi: {
+		getConversationSessionTurnProjection: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeConversationSessionTurnProjectionRequest,
+		) => Promise<RuntimeConversationSessionTurnProjectionResponse>;
+	};
+	exploratoryApi: {
+		getFindings: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGetExploratoryFindingsRequest,
+		) => Promise<RuntimeGetExploratoryFindingsResponse>;
+		saveFinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeSaveExploratoryFindingRequest,
+		) => Promise<RuntimeSaveExploratoryFindingResponse>;
+		confirmFinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeConfirmExploratoryFindingRequest,
+		) => Promise<RuntimeConfirmExploratoryFindingResponse>;
+		rejectFinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRejectExploratoryFindingRequest,
+		) => Promise<RuntimeRejectExploratoryFindingResponse>;
+		archiveFinding: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeArchiveExploratoryFindingRequest,
+		) => Promise<RuntimeArchiveExploratoryFindingResponse>;
+		ingestFindingCandidate: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeIngestExploratoryFindingCandidateRequest,
+		) => Promise<RuntimeIngestExploratoryFindingCandidateResponse>;
+		getExplorationThreadGraph: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGetExplorationThreadGraphRequest,
+		) => Promise<RuntimeGetExplorationThreadGraphResponse>;
+		requestExplorationThreadGraphMaintenance: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRequestExplorationThreadGraphMaintenanceRequest,
+		) => Promise<RuntimeRequestExplorationThreadGraphMaintenanceResponse>;
+	};
 }
 
 interface RuntimeTrpcContextWithWorkspaceScope extends RuntimeTrpcContext {
@@ -708,6 +806,14 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeClineUpdateProviderResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.updateClineProvider(ctx.workspaceScope, input);
+			}),
+		// mutation 而非 query：每次点「起名」都要真发一次外部请求拿一组**新**候选，被查询缓存去重掉
+		// 就实现不了「再按一次再给三个」。
+		suggestTaskNamesFromTaskDescription: t.procedure
+			.input(runtimeTaskNameSuggestionRequestSchema)
+			.output(runtimeTaskNameSuggestionResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input);
 			}),
 		startTaskSession: workspaceProcedure
 			.input(runtimeTaskSessionStartRequestSchema)
@@ -817,6 +923,21 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskChatSendResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.sendTaskChatMessage(ctx.workspaceScope, input);
+			}),
+		getDeferredRestorationHarnessNotifications: workspaceProcedure
+			.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
+			.output(runtimeDeferredRestorationHarnessNotificationsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getDeferredRestorationHarnessNotifications(ctx.workspaceScope, input);
+			}),
+		releaseDeferredRestorationHarnessNotificationsIntoTaskSession: workspaceProcedure
+			.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
+			.output(runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+					ctx.workspaceScope,
+					input,
+				);
 			}),
 		cancelTaskChatDelivery: workspaceProcedure
 			.input(runtimeTaskChatDeliveryCancelRequestSchema)
@@ -1183,6 +1304,74 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeConfirmVerificationCompleteResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.deploymentApi.confirmVerificationComplete(ctx.workspaceScope, input);
+			}),
+	}),
+	conversationTree: t.router({
+		// 会话 turn 投影（只读派生层，姊妹蓝图 §2.2）：findings 出处锚与（远期）会话树共享同一
+		// 数据源。M0 只接 Cline SDK 源，其余 transport 按 session 粒度降级。
+		getConversationSessionTurnProjection: workspaceProcedure
+			.input(runtimeConversationSessionTurnProjectionRequestSchema)
+			.output(runtimeConversationSessionTurnProjectionResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.conversationTreeApi.getConversationSessionTurnProjection(ctx.workspaceScope, input);
+			}),
+	}),
+	exploratory: t.router({
+		// workspace 级 findings 全量读取（集合恒小，上限 500；蓝图 §D.3）。
+		getFindings: workspaceProcedure
+			.input(runtimeGetExploratoryFindingsRequestSchema)
+			.output(runtimeGetExploratoryFindingsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.getFindings(ctx.workspaceScope, input);
+			}),
+		// 人工保存主路径（蓝图 §D.2.1）：落库即 active + user_saved；同 findingId 幂等。
+		saveFinding: workspaceProcedure
+			.input(runtimeSaveExploratoryFindingRequestSchema)
+			.output(runtimeSaveExploratoryFindingResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.saveFinding(ctx.workspaceScope, input);
+			}),
+		// pending 建议确认 → active（蓝图 §D.2.2）；状态机违规报错，不存在 id 幂等回 null。
+		confirmFinding: workspaceProcedure
+			.input(runtimeConfirmExploratoryFindingRequestSchema)
+			.output(runtimeConfirmExploratoryFindingResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.confirmFinding(ctx.workspaceScope, input);
+			}),
+		// pending 建议拒绝 → 物理删除（尚未成为资产，蓝图 §D.2.2）。
+		rejectFinding: workspaceProcedure
+			.input(runtimeRejectExploratoryFindingRequestSchema)
+			.output(runtimeRejectExploratoryFindingResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.rejectFinding(ctx.workspaceScope, input);
+			}),
+		// active ↔ archived 软删/恢复；pending/superseded 不可 archive（状态机违规报错）。
+		archiveFinding: workspaceProcedure
+			.input(runtimeArchiveExploratoryFindingRequestSchema)
+			.output(runtimeArchiveExploratoryFindingResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.archiveFinding(ctx.workspaceScope, input);
+			}),
+		// agent 建议通道（蓝图 §D.2.2）：落库即 suggested_pending_confirmation + agent_suggested，
+		// provenance 可解析性校验在 handler 完成；durable 落盘后广播 exploratory_findings_updated。
+		ingestFindingCandidate: workspaceProcedure
+			.input(runtimeIngestExploratoryFindingCandidateRequestSchema)
+			.output(runtimeIngestExploratoryFindingCandidateResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.ingestFindingCandidate(ctx.workspaceScope, input);
+			}),
+		// exploration thread graph（B.2）：读图是 query（免费），维护是 mutation（会 fork，花钱）。
+		getExplorationThreadGraph: workspaceProcedure
+			.input(runtimeGetExplorationThreadGraphRequestSchema)
+			.output(runtimeGetExplorationThreadGraphResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.getExplorationThreadGraph(ctx.workspaceScope, input);
+			}),
+		requestExplorationThreadGraphMaintenance: workspaceProcedure
+			.input(runtimeRequestExplorationThreadGraphMaintenanceRequestSchema)
+			.output(runtimeRequestExplorationThreadGraphMaintenanceResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.exploratoryApi.requestExplorationThreadGraphMaintenance(ctx.workspaceScope, input);
 			}),
 	}),
 });

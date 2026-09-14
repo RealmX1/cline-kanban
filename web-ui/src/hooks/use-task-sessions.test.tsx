@@ -259,6 +259,120 @@ describe("useTaskSessions", () => {
 		);
 	});
 
+	it("forwards the card's conversation mode declaration when starting a task（蓝图 §A.1：漏传 = 静默掉回 operational）", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected a hook snapshot.");
+		}
+
+		await act(async () => {
+			await latestSnapshot?.startTaskSession({
+				...createTask(),
+				taskConversationMode: "exploratory",
+			});
+		});
+
+		expect(startTaskSessionMutateMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				taskId: "task-1",
+				taskConversationMode: "exploratory",
+			}),
+		);
+	});
+
+	it("forwards the card's conversation mode on resume-from-trash starts too", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected a hook snapshot.");
+		}
+
+		await act(async () => {
+			await latestSnapshot?.startTaskSession(
+				{
+					...createTask(),
+					taskConversationMode: "exploratory",
+				},
+				{ resumeFromTrash: true },
+			);
+		});
+
+		expect(startTaskSessionMutateMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				taskId: "task-1",
+				resumeFromTrash: true,
+				taskConversationMode: "exploratory",
+			}),
+		);
+	});
+
+	it("by-the-way 侧会话不带卡片的会话模式声明（侧会话只读，恒按 operational 语义启动）", async () => {
+		vi.spyOn(crypto, "randomUUID").mockReturnValue("11111111-1111-4111-8111-111111111111");
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected a hook snapshot.");
+		}
+
+		await act(async () => {
+			await latestSnapshot?.createByTheWayTaskConversationSession({
+				task: { ...createTask(), taskConversationMode: "exploratory" },
+				agentId: "codex",
+				initialUserQuestion: "Why does this type exist?",
+				contextSource: "started_from_scratch",
+				mainSessionOriginTurnNumber: 4,
+				mainSessionOriginUserMessagePreview: "Implement the feature",
+			});
+		});
+
+		const payload = startTaskSessionMutateMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+		// 侧会话被强制只读（无命令执行），带上 exploratory 会让服务端注入它永远履行不了的
+		// 「kanban exploratory CLI 写回 map」维护协议；省略该字段 = 服务端缺省 operational。
+		expect("taskConversationMode" in payload).toBe(false);
+		// 其余载荷保持原样（防过度删除回归）：role 元数据与问题文本仍照常转发。
+		expect(payload).toEqual(
+			expect.objectContaining({
+				taskId: "task-conversation-session-11111111-1111-4111-8111-111111111111",
+				workspaceTaskId: "task-1",
+				prompt: "Why does this type exist?",
+				taskConversationSessionMetadata: expect.objectContaining({
+					taskConversationSessionRole: "by_the_way",
+				}),
+			}),
+		);
+	});
+
 	it("forwards start-in-plan-mode from the task card when starting a task", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 

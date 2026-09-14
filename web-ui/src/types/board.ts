@@ -8,6 +8,7 @@ import type {
 	RuntimeTaskClineSettings,
 	RuntimeTaskCommentEntry,
 	RuntimeTaskCommitIntegrationTrackingStatus,
+	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorkspaceGitStatusObservationSource,
@@ -30,10 +31,15 @@ export type TaskCommentEntry = RuntimeTaskCommentEntry;
  * `onPromptChange` 再提交也救不回来。由调用方显式传值是唯一没有竞态的交接方式。
  *
  * 省略时由处理方回落到自己的 state，保留给测试与非对话框调用方。
+ *
+ * `taskNameOverride` 同理：建卡对话框里的名字输入框也是对话框本地 state（它连同候选名一起只在建卡
+ * 这一刻才有意义，没必要常驻在 App 根节点）。**留空与省略是同一件事**——都表示「用描述自动推导标题」，
+ * 处理方据此还会去异步取一个 AI 名字回填。
  */
 export interface TaskEditorSubmitOptions {
 	keepDialogOpen?: boolean;
 	promptOverride?: string;
+	taskNameOverride?: string;
 }
 
 export const DEFAULT_TASK_AUTO_REVIEW_MODE: TaskAutoReviewMode = "commit";
@@ -81,6 +87,11 @@ export interface BoardCard {
 	// 浏览器侧必须声明它：详情视图在**没有活会话**时只能靠它预判该渲染 xterm 还是会话面板，
 	// 而 normalizeCard 是白名单式拷贝——字段不在类型里就既读不到、也会在水合时被丢掉并回写抹平。
 	ompAgentSessionTransport?: RuntimeAgentSessionTransport;
+	// 这张卡的会话模式声明（探索/操作，蓝图 §A.1）：建卡/编辑对话框里声明；缺省 = operational。
+	// 与 ompAgentSessionTransport 同因必须声明在前端类型里——normalizeCard 是白名单式拷贝，
+	// 字段不在类型里就会在水合时被丢掉、下一次 saveState 把盘上已声明的值抹平。
+	// 活会话的模式读 summary.taskConversationMode 投影，卡片改模式只影响下一次启动（v1 不热切换）。
+	taskConversationMode?: RuntimeTaskConversationMode;
 	// runtime 观测值，不是用户意图：本卡片最近一次**真正启动成功**的会话用的是哪个 agent，
 	// 只由服务端在会话启动成功后写入（见 api-contract.ts 的 runtimeBoardCardSchema）。
 	// 前端既不生成也不编辑它，唯一职责是原样保留——归一化层一旦丢掉它，下一次 saveState

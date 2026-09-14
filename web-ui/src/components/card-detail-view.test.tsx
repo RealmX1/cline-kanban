@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CardDetailView } from "@/components/card-detail-view";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
 import type { RuntimeAgentSessionTransport, RuntimeConfigResponse, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
@@ -20,6 +21,7 @@ const {
 	mockPromptLibraryPanel,
 	mockUseAgentRaisedPendingUserDecision,
 	mockAgentRaisedPendingUserDecisionPanel,
+	mockUseConversationSessionTurnProjection,
 } = vi.hoisted(() => ({
 	mockAgentTerminalPanel: vi.fn(
 		(_props: {
@@ -36,6 +38,11 @@ const {
 	mockPromptLibraryPanel: vi.fn((_props: unknown) => null),
 	mockUseAgentRaisedPendingUserDecision: vi.fn(),
 	mockAgentRaisedPendingUserDecisionPanel: vi.fn((_props: unknown) => null),
+	// 会话 turn 投影 hook 默认按「无数据」返回；各用例按需覆盖，避免真实 tRPC 请求进测试。
+	mockUseConversationSessionTurnProjection: vi.fn((_input: unknown): { queryPhase: string; projection: unknown } => ({
+		queryPhase: "idle",
+		projection: null,
+	})),
 }));
 
 vi.mock("@/hooks/use-is-mobile", () => ({
@@ -97,6 +104,10 @@ vi.mock("@/runtime/use-runtime-workspace-changes", () => ({
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceStateVersionValue: () => 0,
+}));
+
+vi.mock("@/hooks/use-conversation-session-turn-projection", () => ({
+	useConversationSessionTurnProjection: (input: unknown) => mockUseConversationSessionTurnProjection(input),
 }));
 
 vi.mock("@/resize/layout-customizations", () => ({
@@ -294,6 +305,17 @@ function dispatchKeyDown(
 	});
 }
 
+// 真实应用把 TooltipProvider 挂在 main.tsx 的根上（Radix 的 Tooltip 没有 Provider 会直接抛），
+// 这里照同一个形态包裹整个 root，而不是给每一处 render 各加一层——后者只会制造大片与被测行为无关的改动。
+function createRootRenderingInsideTooltipProvider(mountContainer: HTMLElement): Root {
+	const reactRoot = createRoot(mountContainer);
+	return {
+		...reactRoot,
+		render: (children: React.ReactNode) => reactRoot.render(<TooltipProvider>{children}</TooltipProvider>),
+		unmount: () => reactRoot.unmount(),
+	};
+}
+
 describe("CardDetailView", () => {
 	let container: HTMLDivElement;
 	let root: Root;
@@ -306,7 +328,7 @@ describe("CardDetailView", () => {
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 		container = document.createElement("div");
 		document.body.appendChild(container);
-		root = createRoot(container);
+		root = createRootRenderingInsideTooltipProvider(container);
 		mockAgentTerminalPanel.mockClear();
 		mockClineAgentChatPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
@@ -323,6 +345,8 @@ describe("CardDetailView", () => {
 			dismiss: vi.fn(),
 		});
 		mockAgentRaisedPendingUserDecisionPanel.mockClear();
+		mockUseConversationSessionTurnProjection.mockReset();
+		mockUseConversationSessionTurnProjection.mockReturnValue({ queryPhase: "idle", projection: null });
 		mockUseRuntimeWorkspaceChanges.mockReturnValue({
 			changes: {
 				files: [
@@ -357,6 +381,7 @@ describe("CardDetailView", () => {
 		mockPromptLibraryPanel.mockClear();
 		mockUseAgentRaisedPendingUserDecision.mockReset();
 		mockAgentRaisedPendingUserDecisionPanel.mockClear();
+		mockUseConversationSessionTurnProjection.mockReset();
 		vi.restoreAllMocks();
 		container.remove();
 		if (previousActEnvironment === undefined) {
@@ -1333,7 +1358,7 @@ describe("CardDetailView", () => {
 
 		await act(async () => {
 			root.unmount();
-			root = createRoot(container);
+			root = createRootRenderingInsideTooltipProvider(container);
 		});
 
 		await renderDetail();
@@ -1525,7 +1550,7 @@ describe("CardDetailView", () => {
 
 		await act(async () => {
 			root.unmount();
-			root = createRoot(container);
+			root = createRootRenderingInsideTooltipProvider(container);
 		});
 
 		await renderDetail();
@@ -1855,5 +1880,65 @@ describe("CardDetailView", () => {
 			expect(onCardSelect).not.toHaveBeenCalled();
 			consumer.remove();
 		});
+	});
+
+	it("turn 投影 refreshKey 只随低频边沿变化：流式 updatedAt 推进不重拉，turnOwner / checkpoint 边沿才重拉", async () => {
+		const renderView = async (sessionSummary: RuntimeTaskSessionSummary) => {
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={createSelectionInColumn("in_progress")}
+						currentProjectId="workspace-1"
+						selectedAgentId="cline"
+						sessionSummary={sessionSummary}
+						taskSessions={{ "task-1": sessionSummary }}
+						onCreateByTheWayTaskConversationSession={async () => ({ ok: true })}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+		};
+		const lastRefreshKey = (): string | null =>
+			(mockUseConversationSessionTurnProjection.mock.calls.at(-1)?.[0] as { refreshKey: string | null }).refreshKey;
+
+		// cline 会话（conversation 面板形态）→ refreshKey 非 null，构成为
+		// `{checkpoint.turn}:{checkpoint.commit}:{turnOwner}:{liveness}:{streamSnapshotGeneration}`（无 updatedAt；
+		// 末段是流重连代数，本测试未传该 prop = 0）。
+		await renderView(createSessionSummary("task-1", { agentId: "cline" }));
+		expect(lastRefreshKey()).toBe("0::agent:live:0");
+
+		// 流式期间 summary 每 ~150ms 批次推进 updatedAt → refreshKey 必须不变（重拉风暴反回归）。
+		await renderView(createSessionSummary("task-1", { agentId: "cline", updatedAt: 2 }));
+		expect(lastRefreshKey()).toBe("0::agent:live:0");
+
+		// 回合结束（turnOwner agent→user）→ 边沿重拉（投影 in-progress 判定与该 facet 同源）。
+		await renderView(
+			createSessionSummary("task-1", { agentId: "cline", updatedAt: 3, turnOwner: "user", userTurnKind: "review" }),
+		);
+		expect(lastRefreshKey()).toBe("0::user:live:0");
+
+		// checkpoint 异步落地（turn/commit 变化）→ 边沿重拉。
+		await renderView(
+			createSessionSummary("task-1", {
+				agentId: "cline",
+				updatedAt: 4,
+				turnOwner: "user",
+				userTurnKind: "review",
+				latestTurnCheckpoint: {
+					turn: 1,
+					ref: "refs/kanban/checkpoints/task-1/turn/1",
+					commit: "commit-1",
+					createdAt: 1,
+				},
+			}),
+		);
+		expect(lastRefreshKey()).toBe("1:commit-1:user:live:0");
 	});
 });

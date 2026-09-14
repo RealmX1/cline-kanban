@@ -25,7 +25,10 @@ import {
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
 import { resolveTaskCreateBaseRef } from "../core/task-create-base-ref-resolution";
-import { discardTaskEditDraftsForTasksRemovedFromBoard } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
+import {
+	collectTaskIdsRemovedFromBoard,
+	discardTaskEditDraftsForTasksRemovedFromBoard,
+} from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import {
 	loadWorkspaceBoardById,
 	mutateWorkspaceState,
@@ -62,6 +65,7 @@ import {
 	TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX,
 	TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX,
 } from "../workspace/task-worktree";
+import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
 
 const TASK_WORKSPACE_GIT_STATUS_BATCH_CONCURRENCY_LIMIT = 4;
@@ -103,6 +107,26 @@ async function discardTaskEditDraftsForTasksRemovedFromSavedBoard(
 		await discardTaskEditDraftsForTasksRemovedFromBoard(workspaceId, boardBeforeSave, boardAfterSave);
 	} catch {
 		// 同上：残留一条看不见的孤儿草稿，比让看板保存整个失败好得多。
+	}
+}
+
+// 与上面的草稿清理同一条兜底旁路：任务从看板上永久消失（浏览器删卡 / 清空 Done）时，按前缀批删它的
+// 全部 turn checkpoint ref（姊妹蓝图 §1.4：存续期全量保留，永久删除时批删）。仅移进 trash 列的任务
+// 仍在两份 board 里，差集天然不碰它。失败语义照旧——任何失败就地咽掉，绝不让看板保存因此失败。
+async function deleteTurnCheckpointRefsForTasksRemovedFromSavedBoard(
+	workspacePath: string,
+	boardBeforeSave: RuntimeBoardData | null,
+	boardAfterSave: RuntimeBoardData,
+): Promise<void> {
+	if (boardBeforeSave === null) {
+		return;
+	}
+	for (const taskId of collectTaskIdsRemovedFromBoard(boardBeforeSave, boardAfterSave)) {
+		try {
+			await deleteAllTaskTurnCheckpointRefs({ cwd: workspacePath, taskId });
+		} catch {
+			// 同上：残留几个无人认领的 checkpoint ref，比让看板保存整个失败好得多。
+		}
 	}
 }
 
@@ -545,6 +569,11 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				const response = await saveWorkspaceState(workspaceScope.workspacePath, input);
 				await discardTaskEditDraftsForTasksRemovedFromSavedBoard(
 					workspaceScope.workspaceId,
+					boardBeforeSave,
+					response.board,
+				);
+				await deleteTurnCheckpointRefsForTasksRemovedFromSavedBoard(
+					workspaceScope.workspacePath,
 					boardBeforeSave,
 					response.board,
 				);
