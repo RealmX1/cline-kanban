@@ -8,14 +8,17 @@ import {
 	type SensorAPI,
 	type SnapDragActions,
 } from "@hello-pangea/dnd";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BoardColumn } from "@/components/board-column";
 import { DependencyOverlay } from "@/components/dependencies/dependency-overlay";
 import { useDependencyLinking } from "@/components/dependencies/use-dependency-linking";
+import { TaskPinboardStripOnKanbanBoard } from "@/components/task-pinboard-strip-on-kanban-board";
+import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { canCreateTaskDependency } from "@/state/board-state";
 import { findCardColumnId, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
+import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
 import type { BoardCard, BoardColumnId, BoardData, BoardDependency } from "@/types";
 
 const BOARD_COLUMN_ORDER: BoardColumnId[] = ["backlog", "in_progress", "review", "validation", "trash"];
@@ -44,6 +47,9 @@ export function KanbanBoard({
 	onMoveToReviewTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
+	onRequestPinToTaskPinboard,
+	onUnpinFromTaskPinboard,
+	onEditTaskPinboardPinReason,
 	commitTaskLoadingById,
 	openPrTaskLoadingById,
 	moveToTrashLoadingById,
@@ -75,6 +81,9 @@ export function KanbanBoard({
 	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
+	onRequestPinToTaskPinboard?: (taskId: string) => void;
+	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
 	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
@@ -103,6 +112,10 @@ export function KanbanBoard({
 		canLinkTasks: (fromTaskId, toTaskId) => canCreateTaskDependency(data, fromTaskId, toTaskId),
 		onCreateDependency,
 	});
+	// 每次 board 变化都要重扫全盘卡片，memo 掉避免拖拽期间逐帧重排（拖拽会高频重渲 KanbanBoard）。
+	const pinnedTasks = useMemo(() => collectTasksPinnedToTaskPinboard(data), [data]);
+	// 点置顶板分身上的 stage 标签 → 让本体卡所在列强制渲染到它、滚进视野并脉冲高亮。
+	const { taskIdRequestedToReveal, requestRevealCanonicalTaskCard } = useRevealCanonicalTaskCard();
 
 	useEffect(() => {
 		latestDataRef.current = data;
@@ -392,71 +405,108 @@ export function KanbanBoard({
 			onDragEnd={handleDragEnd}
 			sensors={[programmaticSensor]}
 		>
-			<section
-				ref={boardRef}
-				className="kb-board kb-dependency-surface"
-				data-programmatic-card-move={programmaticCardMoveInFlight ? "true" : undefined}
-			>
-				{data.columns.map((column) => (
-					<BoardColumn
-						key={column.id}
-						column={column}
-						taskSessions={taskSessions}
-						onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
-						onStartTask={column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined}
-						onRequestStartAllReadyBacklogTasks={
-							column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
-						}
-						onClearTrash={column.id === "trash" ? onClearTrash : undefined}
-						onEditTask={column.id === "backlog" ? onEditTask : undefined}
-						onSaveTitle={onSaveTaskTitle}
-						onCommitTask={column.id === "review" ? onCommitTask : undefined}
-						onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
-						onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
-						onMoveToTrashTask={
-							column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
-						}
-						onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
-						onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
-						onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
-						onDeleteTask={onDeleteTask}
-						commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
-						openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
-						moveToTrashLoadingById={
-							column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
-						}
-						moveToValidationLoadingById={column.id === "review" ? moveToValidationLoadingById : undefined}
-						moveToReviewLoadingById={column.id === "in_progress" ? moveToReviewLoadingById : undefined}
-						activeDragTaskId={activeDragTaskId}
-						activeDragSourceColumnId={activeDragSourceColumnId}
-						programmaticCardMoveInFlight={programmaticCardMoveInFlight}
-						onDependencyPointerDown={dependencyLinking.onDependencyPointerDown}
-						onDependencyPointerEnter={dependencyLinking.onDependencyPointerEnter}
-						dependencySourceTaskId={dependencyLinking.draft?.sourceTaskId ?? null}
-						dependencyTargetTaskId={dependencyLinking.draft?.targetTaskId ?? null}
-						isDependencyLinking={dependencyLinking.draft !== null}
-						workspacePath={workspacePath}
-						defaultClineModelId={defaultClineModelId}
-						defaultAgentId={defaultAgentId}
-						onCardClick={(card) => {
-							if (!dragOccurredRef.current) {
-								onCardSelect(card.id);
+			{/* 置顶板横条在 DragDropContext 之内、`.kb-board` 之外：见 TaskPinboardStripOnKanbanBoard 的注释，
+			    进了 `.kb-board` 会被移动端的「直接子 section 即一列」规则拉宽，也会落进依赖连线的查询范围。 */}
+			<div className="flex min-h-0 flex-1 flex-col">
+				<TaskPinboardStripOnKanbanBoard
+					pinnedTasks={pinnedTasks}
+					taskSessions={taskSessions}
+					handlers={{
+						onStartTask,
+						onMoveToTrashTask,
+						onMoveToValidationTask,
+						onMoveToReviewTask,
+						onRestoreFromTrashTask,
+						onDeleteTask,
+						onCommitTask,
+						onOpenPrTask,
+						onCancelAutomaticTaskAction,
+						onSaveTitle: onSaveTaskTitle,
+						onEditTask,
+						onRequestPinToTaskPinboard,
+						onUnpinFromTaskPinboard,
+						commitTaskLoadingById,
+						openPrTaskLoadingById,
+						moveToTrashLoadingById,
+						moveToValidationLoadingById,
+						moveToReviewLoadingById,
+					}}
+					onActivateCard={(card) => onCardSelect(card.id)}
+					onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
+					onEditTaskPinboardPinReason={(taskId) => onEditTaskPinboardPinReason?.(taskId)}
+					workspacePath={workspacePath}
+					defaultClineModelId={defaultClineModelId}
+					defaultAgentId={defaultAgentId}
+				/>
+				<section
+					ref={boardRef}
+					className="kb-board kb-dependency-surface"
+					data-programmatic-card-move={programmaticCardMoveInFlight ? "true" : undefined}
+				>
+					{data.columns.map((column) => (
+						<BoardColumn
+							key={column.id}
+							column={column}
+							taskSessions={taskSessions}
+							onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
+							onStartTask={column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined}
+							onRequestStartAllReadyBacklogTasks={
+								column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
 							}
-						}}
-					/>
-				))}
-				{shouldMountDependencyOverlay && (
-					<DependencyOverlay
-						containerRef={boardRef}
-						dependencies={dependencies}
-						draft={dependencyLinking.draft}
-						activeTaskId={activeDragTaskId ?? programmaticCardMoveInFlight?.taskId ?? null}
-						activeTaskEffectiveColumnId={activeTaskEffectiveColumnId}
-						isMotionActive={activeDragTaskId !== null || programmaticCardMoveInFlight !== null}
-						onDeleteDependency={onDeleteDependency}
-					/>
-				)}
-			</section>
+							onClearTrash={column.id === "trash" ? onClearTrash : undefined}
+							onEditTask={column.id === "backlog" ? onEditTask : undefined}
+							onSaveTitle={onSaveTaskTitle}
+							onCommitTask={column.id === "review" ? onCommitTask : undefined}
+							onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
+							onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
+							onMoveToTrashTask={
+								column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
+							}
+							onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
+							onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
+							onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
+							onDeleteTask={onDeleteTask}
+							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+							taskIdRequestedToReveal={taskIdRequestedToReveal}
+							commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
+							openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
+							moveToTrashLoadingById={
+								column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
+							}
+							moveToValidationLoadingById={column.id === "review" ? moveToValidationLoadingById : undefined}
+							moveToReviewLoadingById={column.id === "in_progress" ? moveToReviewLoadingById : undefined}
+							activeDragTaskId={activeDragTaskId}
+							activeDragSourceColumnId={activeDragSourceColumnId}
+							programmaticCardMoveInFlight={programmaticCardMoveInFlight}
+							onDependencyPointerDown={dependencyLinking.onDependencyPointerDown}
+							onDependencyPointerEnter={dependencyLinking.onDependencyPointerEnter}
+							dependencySourceTaskId={dependencyLinking.draft?.sourceTaskId ?? null}
+							dependencyTargetTaskId={dependencyLinking.draft?.targetTaskId ?? null}
+							isDependencyLinking={dependencyLinking.draft !== null}
+							workspacePath={workspacePath}
+							defaultClineModelId={defaultClineModelId}
+							defaultAgentId={defaultAgentId}
+							onCardClick={(card) => {
+								if (!dragOccurredRef.current) {
+									onCardSelect(card.id);
+								}
+							}}
+						/>
+					))}
+					{shouldMountDependencyOverlay && (
+						<DependencyOverlay
+							containerRef={boardRef}
+							dependencies={dependencies}
+							draft={dependencyLinking.draft}
+							activeTaskId={activeDragTaskId ?? programmaticCardMoveInFlight?.taskId ?? null}
+							activeTaskEffectiveColumnId={activeTaskEffectiveColumnId}
+							isMotionActive={activeDragTaskId !== null || programmaticCardMoveInFlight !== null}
+							onDeleteDependency={onDeleteDependency}
+						/>
+					)}
+				</section>
+			</div>
 		</DragDropContext>
 	);
 }

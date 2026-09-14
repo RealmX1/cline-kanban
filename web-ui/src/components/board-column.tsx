@@ -34,6 +34,9 @@ export function BoardColumn({
 	onMoveToReviewTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
+	onRequestPinToTaskPinboard,
+	onUnpinFromTaskPinboard,
+	taskIdRequestedToReveal,
 	commitTaskLoadingById,
 	openPrTaskLoadingById,
 	moveToTrashLoadingById,
@@ -68,6 +71,13 @@ export function BoardColumn({
 	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
+	onRequestPinToTaskPinboard?: (taskId: string) => void;
+	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	/**
+	 * 置顶板请求「跳回本体卡」的任务 id（全局唯一，非本列时本列忽略）。
+	 * 命中本列时把该卡的索引交给渐进渲染，保证它即便排在初始 cap 之后也已挂载，供 scrollIntoView 命中。
+	 */
+	taskIdRequestedToReveal?: string | null;
 	commitTaskLoadingById?: Record<string, boolean>;
 	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
@@ -93,11 +103,15 @@ export function BoardColumn({
 	// 滚动位置与「已展开到第几批」补回来，否则用户每次从详情页返回都被弹回列顶。
 	// 只在挂载那一次读取：后续渲染沿用同一份初值，避免自己写进去的值又反过来改初值。
 	const restoredScrollOffsetRef = useRef(readBoardColumnScrollOffset(workspacePath ?? null, column.id));
+	const indexOfTaskRequestedToReveal = taskIdRequestedToReveal
+		? column.cards.findIndex((card) => card.id === taskIdRequestedToReveal)
+		: -1;
 	const { visibleCount, hasMore, remainingCount, loadMoreSentinelRef, revealMore } = useProgressiveRenderCount({
 		totalCount: column.cards.length,
 		getScrollRoot: getColumnCardsScrollRoot,
 		enabled: activeDragTaskId == null,
 		initialCount: restoredScrollOffsetRef.current?.revealedCardCount,
+		ensureVisibleIndex: indexOfTaskRequestedToReveal >= 0 ? indexOfTaskRequestedToReveal : undefined,
 	});
 
 	const cardsScrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -248,6 +262,8 @@ export function BoardColumn({
 											onMoveToReview={onMoveToReviewTask}
 											onRestoreFromTrash={onRestoreFromTrashTask}
 											onDeleteTask={onDeleteTask}
+											onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+											onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
 											onCommit={onCommitTask}
 											onOpenPr={onOpenPrTask}
 											onCancelAutomaticAction={onCancelAutomaticTaskAction}

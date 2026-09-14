@@ -30,6 +30,8 @@ import {
 	Hourglass,
 	MessagesSquare,
 	Pencil,
+	Pin,
+	PinOff,
 	Play,
 	RotateCcw,
 	Trash2,
@@ -47,6 +49,7 @@ import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dial
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { Spinner } from "@/components/ui/spinner";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -107,9 +110,9 @@ function TaskCardRowHoverActions({
 }
 
 /**
- * 卡片的业务 props：与 DnD/钉住克隆等渲染容器无关的领域回调与数据。
- * `BoardCard`（看板内的可拖卡）、`TaskCardBody`（纯卡体）、`StageHeaderRails`
- * （Focus View 卡头手风琴里焦点条目的克隆卡）共用同一套，确保三处行为一致。
+ * 卡片的业务 props：与「这份卡体被渲染成什么角色」（可拖本体 / sticky 卡头副本 / 置顶板分身）无关的
+ * 领域回调与数据。四个渲染点共用同一套，且一律经 `buildTaskCardBusinessProps` 装配，
+ * 确保「分身与原卡行为完全相同」不靠各处自觉复制粘贴。
  */
 export interface TaskCardBusinessProps {
 	card: BoardCardModel;
@@ -129,6 +132,9 @@ export interface TaskCardBusinessProps {
 	onCommit?: (taskId: string) => void;
 	onOpenPr?: (taskId: string) => void;
 	onCancelAutomaticAction?: (taskId: string) => void;
+	// Task Pinboard（置顶板）：请求置顶（由上层弹原因对话框，确认后才真正写盘）与直接取消置顶。
+	onRequestPinToTaskPinboard?: (taskId: string) => void;
+	onUnpinFromTaskPinboard?: (taskId: string) => void;
 	isCommitLoading?: boolean;
 	isOpenPrLoading?: boolean;
 	isMoveToTrashLoading?: boolean;
@@ -146,7 +152,7 @@ export interface TaskCardBusinessProps {
 
 /**
  * 注入式 DnD 绑定。由 `BoardCard` 从 `@hello-pangea/dnd` 的 `provided`/`snapshot`
- * 装配后下传；`TaskCardBody` 自身不引用 `<Draggable>`，因此可被钉住克隆（无 DnD）复用。
+ * 装配后下传；`TaskCardBody` 自身不引用 `<Draggable>`，因此可被各种无 DnD 的副本渲染角色复用。
  */
 export interface TaskCardBodyDragBindings {
 	innerRef: (element?: HTMLElement | null) => void;
@@ -157,11 +163,28 @@ export interface TaskCardBodyDragBindings {
 }
 
 /**
+ * 同一张任务卡在界面上可能同时存在多份 DOM，本枚举声明「这一份是哪一份」。
+ *
+ * 只有 `canonical_card_in_its_stage_list` 那一份携带 `data-task-id` / `data-verification-anchor`
+ * 并绑定 DnD。这不是风格偏好而是硬约束：程序化拖动、依赖连线锚点、Focus View 居中滚动、
+ * sticky 几何测量、Post-Deploy Verification 高亮全都以「`data-task-id` 全局唯一」为前提，
+ * 其中 `dependency-overlay` 的锚点表还是**后出现者覆盖先出现者**——副本一旦带上就会静默画错线。
+ */
+export type TaskCardBodyRenderRole =
+	// 本体：卡片在它自己所属 stage 列表里的那一份，唯一可拖、唯一持有 DOM 身份。
+	| "canonical_card_in_its_stage_list"
+	// Focus View：焦点卡滚出视野时，跟着 sticky stage 卡头一起留在视野里的那份只读副本。
+	// 纯为「别让我正在看的任务跑出屏幕」而存在，因此关掉全部卡级指针交互，只留 hover 动作组。
+	| "focused_card_copy_under_sticky_stage_header"
+	// Task Pinboard：被置顶的卡片在置顶板里的分身。除不可拖、不参与依赖连线、不持有 DOM 身份外，
+	// 交互与本体一致（单击进详情、双击改标题、全部动作按钮）。
+	| "pinned_card_copy_in_task_pinboard";
+
+/**
  * 任务卡的纯展示卡体（卡壳 + 内层可视卡 + 全部展示态/交互）。
  *
- * - 列表内可拖卡：由 `BoardCard` 提供 `drag` 绑定，外壳挂上 DnD ref/props 与 `data-task-id`。
- * - 钉住克隆（`pinnedClone`）：不挂 DnD、不输出 `data-task-id`（保证全局唯一）、`cursor:default`、
- *   关闭单击导航/双击改标题/依赖连线，但保留 hover 揭示动作组与各动作按钮，视觉与列表卡完全一致。
+ * 三种渲染角色见 `TaskCardBodyRenderRole`；本组件对角色差异的处理全部收敛在下方那组派生布尔里，
+ * 各处 JSX 只读布尔、不再重复判角色。
  */
 export function TaskCardBody({
 	card,
@@ -180,6 +203,8 @@ export function TaskCardBody({
 	onCommit,
 	onOpenPr,
 	onCancelAutomaticAction,
+	onRequestPinToTaskPinboard,
+	onUnpinFromTaskPinboard,
 	isCommitLoading = false,
 	isOpenPrLoading = false,
 	isMoveToTrashLoading = false,
@@ -194,10 +219,19 @@ export function TaskCardBody({
 	defaultClineModelId = null,
 	defaultAgentId = null,
 	drag = null,
-	pinnedClone = false,
+	renderRole = "canonical_card_in_its_stage_list",
+	stageDisplayNameForTaskPinboardCopy,
+	onNavigateToCanonicalCardInItsStage,
+	onEditTaskPinboardPinReason,
 }: TaskCardBusinessProps & {
 	drag?: TaskCardBodyDragBindings | null;
-	pinnedClone?: boolean;
+	renderRole?: TaskCardBodyRenderRole;
+	/** 仅置顶板分身：分身上 stage 标签的展示名，取自该卡真正所在 board 列的 `title`（trash 即 "Done"）。 */
+	stageDisplayNameForTaskPinboardCopy?: string;
+	/** 仅置顶板分身：点 stage 标签跳回原 stage 里的本体卡并高亮。 */
+	onNavigateToCanonicalCardInItsStage?: () => void;
+	/** 仅置顶板分身：点置顶原因行编辑原因。 */
+	onEditTaskPinboardPinReason?: () => void;
 }): React.ReactElement {
 	const [isHovered, setIsHovered] = useState(false);
 	// 卡片右上角动作组里每个按钮都裹了一层 Radix Tooltip，而 Radix 在关闭态仍会挂 Root+Trigger
@@ -216,12 +250,19 @@ export function TaskCardBody({
 	const titleEditCancelledRef = useRef(false);
 	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(card.id);
 	const isTrashCard = columnId === "trash";
-	// 钉住克隆是非交互镜像：单击/双击/依赖一律关闭，只保留 hover 揭示动作组。
-	const isCardInteractive = !isTrashCard && !pinnedClone;
+	// 只有本体持有 DOM 身份（data-task-id / data-verification-anchor）与 DnD 绑定，见 TaskCardBodyRenderRole。
+	const emitsCanonicalDomIdentity = renderRole === "canonical_card_in_its_stage_list";
+	// sticky 卡头副本纯为「别让焦点卡跑出屏幕」而存在，是只读镜像：卡级指针交互一律关闭。
+	const isPassiveMirrorUnderStickyStageHeader = renderRole === "focused_card_copy_under_sticky_stage_header";
+	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
+	// 依赖连线（cmd/ctrl 拖）端点靠 data-task-id 定位，副本没有身份也就画不出线，索性从源头关掉。
+	const participatesInDependencyLinking = emitsCanonicalDomIdentity;
+	const isCardInteractive = !isTrashCard && !isPassiveMirrorUnderStickyStageHeader;
 	// 会跳转的列上双击改标题需先拦截单击；这些列单击会打开详情、替换看板。
 	const isNavigatingColumn = columnId === "in_progress" || columnId === "review" || columnId === "validation";
-	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog；钉住克隆不参与编辑。
-	const isInlineTitleEditEnabled = !pinnedClone && onSaveTitle != null && (isNavigatingColumn || isTrashCard);
+	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog；只读镜像不参与编辑。
+	const isInlineTitleEditEnabled =
+		!isPassiveMirrorUnderStickyStageHeader && onSaveTitle != null && (isNavigatingColumn || isTrashCard);
 	const clickActivationTimerRef = useRef<number | null>(null);
 	const isDragging = drag?.isDragging ?? false;
 	const rawSessionActivity = useMemo(() => deriveCardSessionActivity(sessionSummary), [sessionSummary]);
@@ -398,7 +439,42 @@ export function TaskCardBody({
 			}
 		: null;
 	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath);
-	const showTitleEditButton = (onSaveTitle != null || onOpenTaskEditor != null) && !pinnedClone && !isEditingTitle;
+	const showTitleEditButton =
+		(onSaveTitle != null || onOpenTaskEditor != null) && !isPassiveMirrorUnderStickyStageHeader && !isEditingTitle;
+	// 「已置顶」由 pinnedToTaskPinboardAt 的存在表达（见 state/task-pinboard-pinning.ts），没有冗余布尔。
+	const isPinnedToTaskPinboard = card.pinnedToTaskPinboardAt !== undefined;
+	// hover 动作组里那颗按钮：图标表示**动作**（要做什么），至于「这张卡已置顶」的常驻提示走左上角胶囊，
+	// 因为动作组在非 hover 态是 opacity-0，只靠它的话浏览原 stage 时根本看不出哪张卡被置顶了。
+	const taskPinboardToggle = useMemo(() => {
+		if (isPinnedToTaskPinboard) {
+			if (!onUnpinFromTaskPinboard) {
+				return null;
+			}
+			return {
+				isPinned: true,
+				tooltip: "Unpin from pinboard",
+				ariaLabel: "Unpin task from pinboard",
+				activate: () => onUnpinFromTaskPinboard(card.id),
+			};
+		}
+		if (!onRequestPinToTaskPinboard) {
+			return null;
+		}
+		return {
+			isPinned: false,
+			tooltip: "Pin to pinboard",
+			ariaLabel: "Pin task to pinboard",
+			activate: () => onRequestPinToTaskPinboard(card.id),
+		};
+	}, [card.id, isPinnedToTaskPinboard, onRequestPinToTaskPinboard, onUnpinFromTaskPinboard]);
+	// 置顶原因行同时是「编辑置顶原因」的唯一入口，所以原因为空时这一行不能整行消失：空原因是受支持的正常置顶
+	// 路径（对话框只给一次填写机会、不设门槛）。整行消失后已置顶的分身上就只剩 Unpin，想事后补一句原因只能
+	// unpin 再 pin —— 而 re-pin 会刷新 pinnedToTaskPinboardAt，把卡顶到置顶板最前、白白丢掉原有的排序位置。
+	// 因此原因为空且接了编辑回调时，该行退化成一个弱化的「Add pin reason」入口；本体卡照旧完全不铺开原因。
+	const taskPinboardPinReasonTextOrEmpty = card.taskPinboardPinReason?.trim() ?? "";
+	const hasTaskPinboardPinReasonText = taskPinboardPinReasonTextOrEmpty !== "";
+	const showsTaskPinboardPinReasonRowOnThisCopy =
+		isTaskPinboardCopy && !isEditingTitle && (hasTaskPinboardPinReasonText || onEditTaskPinboardPinReason != null);
 	const showReviewGitActions = columnId === "review" && (reviewWorkspaceSnapshot?.changedFiles ?? 0) > 0;
 	const isAnyGitActionLoading = isCommitLoading || isOpenPrLoading;
 	const cancelAutomaticActionLabel =
@@ -510,14 +586,15 @@ export function TaskCardBody({
 			{...(drag?.draggableProps ?? {})}
 			{...(drag?.dragHandleProps ?? {})}
 			className="kb-board-card-shell"
-			// 钉住克隆不输出 data-task-id：保证全局 data-task-id 唯一（CSS sticky/scrollIntoView/测试计数依赖此唯一性）。
-			data-task-id={pinnedClone ? undefined : card.id}
-			// Post-Deploy Verification 引导定位锚点：guidance.anchor 可指向此看板任务卡（钉住克隆不输出，保唯一）。
-			data-verification-anchor={pinnedClone ? undefined : boardTaskCardAnchorKey(card.id)}
+			// 副本一律不输出 data-task-id：保证全局唯一（CSS sticky/scrollIntoView/依赖锚点/测试计数依赖此唯一性）。
+			data-task-id={emitsCanonicalDomIdentity ? card.id : undefined}
+			// Post-Deploy Verification 引导定位锚点：guidance.anchor 可指向此看板任务卡（副本不输出，保唯一）。
+			data-verification-anchor={emitsCanonicalDomIdentity ? boardTaskCardAnchorKey(card.id) : undefined}
+			data-task-card-render-role={renderRole}
 			data-column-id={columnId}
 			data-selected={selected}
 			onMouseDownCapture={
-				pinnedClone
+				!participatesInDependencyLinking
 					? undefined
 					: (event) => {
 							// Radix Portal（如 TaskOriginalPromptDialog）挂载到 document.body，
@@ -547,7 +624,7 @@ export function TaskCardBody({
 						}
 			}
 			onClick={
-				pinnedClone
+				isPassiveMirrorUnderStickyStageHeader
 					? undefined
 					: (event) => {
 							// 同上：portal 内容的合成 click 也会冒泡到这里，先做 DOM containment 检查。
@@ -592,7 +669,7 @@ export function TaskCardBody({
 						}
 			}
 			onDoubleClick={
-				pinnedClone
+				isPassiveMirrorUnderStickyStageHeader
 					? undefined
 					: (event) => {
 							if (!event.currentTarget.contains(event.target as Node)) {
@@ -618,17 +695,18 @@ export function TaskCardBody({
 			}
 			style={{
 				...(drag?.draggableStyle ?? {}),
-				marginBottom: pinnedClone ? 0 : 6,
-				cursor: pinnedClone ? "default" : "grab",
+				marginBottom: emitsCanonicalDomIdentity ? 6 : 0,
+				// 本体可拖 → grab；置顶板分身单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
+				cursor: emitsCanonicalDomIdentity ? "grab" : isTaskPinboardCopy ? "pointer" : "default",
 			}}
 			onMouseEnter={() => {
 				setIsHovered(true);
-				if (!pinnedClone) {
+				if (participatesInDependencyLinking) {
 					onDependencyPointerEnter?.(card.id);
 				}
 			}}
 			onMouseMove={
-				pinnedClone
+				!participatesInDependencyLinking
 					? undefined
 					: () => {
 							if (!isDependencyLinking) {
@@ -652,7 +730,9 @@ export function TaskCardBody({
 				{/* agent 图标 + 微型时长药丸合一：钉在卡片左上角、略微超出边框（不占标题横向空间）。
 				    最左为 agent 图标（略放大）；完整「agent · 模型」进 hover tooltip。
 				    Clock=自创建至今（恒显）；Activity=agent 上次响应至今（仅有时间戳时显）。各段 hover 显绝对本地时间。 */}
-				<div className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
+				{/* 置顶板分身在末尾多挂一段 stage 标签，胶囊会因此变宽；右侧不远就是 hover 动作组（同在 -top-[6px]），
+				    所以限宽 + 标签 truncate，窄卡上宁可截断 stage 名也不与动作组叠在一起。 */}
+				<div className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
 					{taskAgentSettingsLabel ? (
 						<Tooltip content={taskAgentSettingsLabel}>
 							<span
@@ -721,6 +801,55 @@ export function TaskCardBody({
 							</Tooltip>
 						</>
 					) : null}
+					{!isTaskPinboardCopy && isPinnedToTaskPinboard ? (
+						// 置顶板里每张都是置顶的，那边不重复这个标记，改为显示 stage 标签（见下）。
+						<>
+							<span className="text-text-tertiary">·</span>
+							<Tooltip
+								content={
+									card.taskPinboardPinReason
+										? `Pinned to pinboard · ${card.taskPinboardPinReason}`
+										: "Pinned to pinboard"
+								}
+							>
+								<span
+									data-task-pinboard-pinned-marker=""
+									className={cn(
+										"inline-flex shrink-0 items-center",
+										isTrashCard ? "text-text-tertiary" : "text-accent",
+									)}
+								>
+									<Pin size={8} className="shrink-0" />
+								</span>
+							</Tooltip>
+						</>
+					) : null}
+					{isTaskPinboardCopy && stageDisplayNameForTaskPinboardCopy ? (
+						<>
+							<span className="text-text-tertiary">·</span>
+							<Tooltip
+								content={`In ${stageDisplayNameForTaskPinboardCopy} · click to reveal the card in its stage`}
+							>
+								<button
+									type="button"
+									data-task-pinboard-stage-label=""
+									aria-label={`Reveal this task in ${stageDisplayNameForTaskPinboardCopy}`}
+									onMouseDown={stopEvent}
+									onClick={(event) => {
+										stopEvent(event);
+										onNavigateToCanonicalCardInItsStage?.();
+									}}
+									className={cn(
+										"inline-flex min-w-0 items-center gap-0.5 rounded-full text-[10px] leading-none hover:underline",
+										isTrashCard ? "text-text-tertiary" : "text-text-secondary",
+									)}
+								>
+									<ColumnIndicator columnId={columnId} size={8} />
+									<span className="truncate">{stageDisplayNameForTaskPinboardCopy}</span>
+								</button>
+							</Tooltip>
+						</>
+					) : null}
 				</div>
 				<div className="flex items-start gap-2 pt-0.5" style={{ minHeight: 24 }}>
 					{statusMarker ? <div className="inline-flex items-center">{statusMarker}</div> : null}
@@ -752,6 +881,31 @@ export function TaskCardBody({
 								</p>
 							</>
 						)}
+						{showsTaskPinboardPinReasonRowOnThisCopy ? (
+							// 置顶原因只在分身上铺开：本体卡上铺开会让每张卡凭空变高，那里原因走 pin 标记的 tooltip。
+							<button
+								type="button"
+								data-task-pinboard-pin-reason=""
+								data-task-pinboard-pin-reason-state={
+									hasTaskPinboardPinReasonText ? "shows_user_written_reason" : "blank_invites_adding_reason"
+								}
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onEditTaskPinboardPinReason?.();
+								}}
+								className={cn(
+									"mt-1 flex w-full items-start gap-1 rounded-sm text-left text-[11px] leading-snug hover:text-text-primary",
+									hasTaskPinboardPinReasonText ? "text-text-secondary" : "italic text-text-tertiary",
+								)}
+								title={hasTaskPinboardPinReasonText ? "Edit pin reason" : "Add pin reason"}
+							>
+								<Pin size={10} className="mt-[2px] shrink-0" />
+								<span className="line-clamp-2">
+									{hasTaskPinboardPinReasonText ? taskPinboardPinReasonTextOrEmpty : "Add pin reason"}
+								</span>
+							</button>
+						) : null}
 						{showTitleEditButton ? (
 							<TaskCardRowHoverActions groupName="title">
 								<Tooltip side="bottom" content={onOpenTaskEditor ? "Edit task" : "Edit title"}>
@@ -783,6 +937,22 @@ export function TaskCardBody({
 						isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
 					)}
 				>
+					{taskPinboardToggle ? (
+						<Tooltip side="bottom" content={revealHoverActionTooltip(taskPinboardToggle.tooltip)}>
+							<Button
+								icon={taskPinboardToggle.isPinned ? <PinOff size={12} /> : <Pin size={12} />}
+								variant="ghost"
+								size="xs"
+								className={taskPinboardToggle.isPinned ? "text-accent" : undefined}
+								aria-label={taskPinboardToggle.ariaLabel}
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									taskPinboardToggle.activate();
+								}}
+							/>
+						</Tooltip>
+					) : null}
 					<Tooltip side="bottom" content={revealHoverActionTooltip("View original prompt")}>
 						<Button
 							icon={<FileText size={12} />}

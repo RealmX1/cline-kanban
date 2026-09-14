@@ -258,6 +258,8 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		autoReviewMode?: unknown;
 		images?: unknown;
 		taskCommentEntries?: unknown;
+		pinnedToTaskPinboardAt?: unknown;
+		taskPinboardPinReason?: unknown;
 		baseRef?: unknown;
 		agentId?: unknown;
 		ompAgentSessionTransport?: unknown;
@@ -342,6 +344,18 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		? parsedMostRecentlyLaunchedAgentSessionAgentId.data
 		: undefined;
 
+	// Task Pinboard 置顶态：同样受上面那条白名单铁律约束——不在这里带过就等于「下一次保存把盘上的置顶抹平」。
+	// 用「字段存在即已置顶」的时间戳表达，所以非有限数一律当成未置顶（而不是当成置顶但时间未知）。
+	const pinnedToTaskPinboardAt =
+		typeof card.pinnedToTaskPinboardAt === "number" && Number.isFinite(card.pinnedToTaskPinboardAt)
+			? card.pinnedToTaskPinboardAt
+			: undefined;
+	// 原因留空 ⇒ 不写字段，避免盘上出现一堆空串。
+	const taskPinboardPinReason =
+		typeof card.taskPinboardPinReason === "string" && card.taskPinboardPinReason.trim()
+			? card.taskPinboardPinReason
+			: undefined;
+
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
 		title,
@@ -354,6 +368,8 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		),
 		images: normalizeTaskImages(card.images),
 		taskCommentEntries: normalizeTaskCommentEntries(card.taskCommentEntries),
+		...(pinnedToTaskPinboardAt !== undefined ? { pinnedToTaskPinboardAt } : {}),
+		...(taskPinboardPinReason !== undefined ? { taskPinboardPinReason } : {}),
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(ompAgentSessionTransport !== undefined ? { ompAgentSessionTransport } : {}),

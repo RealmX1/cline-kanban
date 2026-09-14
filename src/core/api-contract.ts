@@ -286,6 +286,12 @@ export const runtimeBoardCardSchema = z
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
 		taskCommentEntries: z.array(runtimeTaskCommentEntrySchema).optional(),
+		// Task Pinboard（置顶板）：**字段存在即已置顶**，值同时就是置顶板内的排序键（倒序，最近置顶的在前）。
+		// 与本文件里另外两处 "pin" 语义（模型 pinned_version、建卡固化会话通道）无关，也与 Focus View 的
+		// sticky 卡头几何无关——那些都不落盘。置顶态跟着卡片走，卡片被永久删除时字段一并消失，无孤儿可清。
+		pinnedToTaskPinboardAt: z.number().optional(),
+		// 用户在置顶时填的一句「我为什么盯着它」，可留空（留空时字段不写）。
+		taskPinboardPinReason: z.string().optional(),
 		agentId: runtimeAgentIdSchema.optional(),
 		// omp 这张卡「下次启动该用哪条通道」。与 startInPlanMode / taskAgentPermissionMode 同为
 		// **建卡时固化**的快照：建卡那一刻把全局默认写死在卡上，之后改全局默认不追溯已有卡片。

@@ -26,6 +26,7 @@ import { SkipValidationConfirmDialog } from "@/components/skip-validation-confir
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
+import { TaskPinboardPinReasonDialog } from "@/components/task-pinboard-pin-reason-dialog";
 import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-dialog";
 import { TopBar } from "@/components/top-bar";
 import type { TopBarProjectSwitcherState } from "@/components/top-bar-project-switcher/top-bar-project-switcher";
@@ -843,6 +844,12 @@ export default function App(): ReactElement {
 		handleConfirmDeleteTask,
 		deleteTaskTarget,
 		handleCancelAutomaticTaskAction,
+		handleRequestPinTaskToTaskPinboard,
+		handleRequestEditTaskPinboardPinReason,
+		handleCancelTaskPinboardPinReason,
+		handleConfirmTaskPinboardPinReason,
+		handleUnpinTaskFromTaskPinboard,
+		taskPinboardPinReasonRequest,
 		handleOpenClearTrash,
 		handleConfirmClearTrash,
 		handleAddReviewComments,
@@ -1322,6 +1329,9 @@ export default function App(): ReactElement {
 													onCommitTask={handleCommitTask}
 													onOpenPrTask={handleOpenPrTask}
 													onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
+													onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}
+													onUnpinFromTaskPinboard={handleUnpinTaskFromTaskPinboard}
+													onEditTaskPinboardPinReason={handleRequestEditTaskPinboardPinReason}
 													commitTaskLoadingById={commitTaskLoadingById}
 													openPrTaskLoadingById={openPrTaskLoadingById}
 													moveToTrashLoadingById={moveToTrashLoadingById}
@@ -1452,6 +1462,9 @@ export default function App(): ReactElement {
 									onRestoreTaskFromTrash={handleRestoreTaskFromTrash}
 									onDeleteTask={handleOpenDeleteTask}
 									onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
+									onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}
+									onUnpinFromTaskPinboard={handleUnpinTaskFromTaskPinboard}
+									onEditTaskPinboardPinReason={handleRequestEditTaskPinboardPinReason}
 									onAddReviewComments={(taskId: string, text: string) => {
 										void handleAddReviewComments(taskId, text);
 									}}
@@ -1605,6 +1618,11 @@ export default function App(): ReactElement {
 					task={deleteTaskTarget}
 					onCancel={handleCancelDeleteTask}
 					onConfirm={handleConfirmDeleteTask}
+				/>
+				<TaskPinboardPinReasonDialog
+					request={taskPinboardPinReasonRequest}
+					onCancel={handleCancelTaskPinboardPinReason}
+					onConfirm={handleConfirmTaskPinboardPinReason}
 				/>
 				<StartupOnboardingDialog
 					open={isStartupOnboardingDialogOpen}

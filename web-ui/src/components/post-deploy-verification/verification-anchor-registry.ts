@@ -11,6 +11,10 @@ export const VERIFICATION_SPOTLIGHT_CLASS = "verification-spotlight-active";
 // 默认高亮持续时长。
 const DEFAULT_SPOTLIGHT_DURATION_MS = 2800;
 
+// 每个元素上「到点摘掉高亮类」的在途定时器。同一元素被再次 spotlight 时必须先撤掉旧的，
+// 否则上一次留下的定时器会在旧时刻把新一轮高亮提前掐灭（连点同一目标时必现）。
+const pendingSpotlightRemovalTimerByElement = new WeakMap<Element, number>();
+
 // ── 稳定 key 构造器：目标组件与 authoring skill 共用同一套命名，避免手写魔法字符串 ──
 
 // 看板列上的任务卡（BoardCard）。
@@ -52,26 +56,43 @@ export function topBarNotificationCenterBellTriggerAnchorKey(): string {
 
 // 把某 anchorKey 对应的元素滚入视野并临时高亮。返回是否命中元素（未命中 → 调用方走降级路径）。
 // 用 querySelectorAll + getAttribute 精确比对，避免 agent 自由字符串 key 进 CSS 选择器时的转义问题。
+// 可重播：对同一元素连续调用时，每一次都会从头重放脉冲动画并重新计时，而不是被上一次的残留状态吞掉。
 export function spotlightAnchor(anchorKey: string, options?: { durationMs?: number }): boolean {
 	if (typeof document === "undefined") {
 		return false;
 	}
-	let target: Element | null = null;
+	let matchedTarget: Element | null = null;
 	for (const candidate of document.querySelectorAll(`[${VERIFICATION_ANCHOR_ATTR}]`)) {
 		if (candidate.getAttribute(VERIFICATION_ANCHOR_ATTR) === anchorKey) {
-			target = candidate;
+			matchedTarget = candidate;
 			break;
 		}
 	}
-	if (!target) {
+	if (!matchedTarget) {
 		return false;
 	}
-	target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-	target.classList.add(VERIFICATION_SPOTLIGHT_CLASS);
+	const spotlightTargetElement = matchedTarget;
+	spotlightTargetElement.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+
+	const pendingRemovalTimer = pendingSpotlightRemovalTimerByElement.get(spotlightTargetElement);
+	if (pendingRemovalTimer !== undefined) {
+		window.clearTimeout(pendingRemovalTimer);
+		pendingSpotlightRemovalTimerByElement.delete(spotlightTargetElement);
+	}
+	// 高亮类若还留在元素上，单纯 add 是空操作、CSS 脉冲动画不会重新播放；
+	// 必须「摘掉 → 强制一次同步重排 → 挂回」，getBoundingClientRect 就是那次强制重排。
+	spotlightTargetElement.classList.remove(VERIFICATION_SPOTLIGHT_CLASS);
+	spotlightTargetElement.getBoundingClientRect();
+	spotlightTargetElement.classList.add(VERIFICATION_SPOTLIGHT_CLASS);
+
 	const durationMs = options?.durationMs ?? DEFAULT_SPOTLIGHT_DURATION_MS;
-	window.setTimeout(() => {
-		target?.classList.remove(VERIFICATION_SPOTLIGHT_CLASS);
-	}, durationMs);
+	pendingSpotlightRemovalTimerByElement.set(
+		spotlightTargetElement,
+		window.setTimeout(() => {
+			pendingSpotlightRemovalTimerByElement.delete(spotlightTargetElement);
+			spotlightTargetElement.classList.remove(VERIFICATION_SPOTLIGHT_CLASS);
+		}, durationMs),
+	);
 	return true;
 }
 

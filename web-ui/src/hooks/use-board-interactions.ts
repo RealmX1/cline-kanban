@@ -8,6 +8,7 @@ import {
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
+import type { TaskPinboardPinReasonDialogRequest } from "@/components/task-pinboard-pin-reason-dialog";
 import type { TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
 import { useLinkedBacklogTaskActions } from "@/hooks/use-linked-backlog-task-actions";
 import { useProgrammaticCardMoves } from "@/hooks/use-programmatic-card-moves";
@@ -25,6 +26,7 @@ import {
 	removeTask,
 	updateTask,
 } from "@/state/board-state";
+import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "@/state/task-pinboard-pinning";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
@@ -113,6 +115,13 @@ export interface UseBoardInteractionsResult {
 	handleConfirmDeleteTask: () => void;
 	deleteTaskTarget: BoardCard | null;
 	handleCancelAutomaticTaskAction: (taskId: string) => void;
+	// Task Pinboard：点 pin → 打开原因对话框；确认后才真正写盘。unpin 不经对话框，直接生效。
+	handleRequestPinTaskToTaskPinboard: (taskId: string) => void;
+	handleRequestEditTaskPinboardPinReason: (taskId: string) => void;
+	handleCancelTaskPinboardPinReason: () => void;
+	handleConfirmTaskPinboardPinReason: (taskId: string, pinReason: string) => void;
+	handleUnpinTaskFromTaskPinboard: (taskId: string) => void;
+	taskPinboardPinReasonRequest: TaskPinboardPinReasonDialogRequest | null;
 	handleOpenClearTrash: () => void;
 	handleConfirmClearTrash: () => void;
 	handleAddReviewComments: (taskId: string, text: string) => Promise<void>;
@@ -159,6 +168,10 @@ export function useBoardInteractions({
 		null,
 	);
 	const [deleteTaskTarget, setDeleteTaskTarget] = useState<BoardCard | null>(null);
+	// 置顶原因对话框的在途请求（null = 未打开）。新 pin 与「编辑已有原因」共用同一个对话框，
+	// 靠 isEditingExistingPin 区分按钮文案与「确认时是否要写入置顶时间」。
+	const [taskPinboardPinReasonRequest, setTaskPinboardPinReasonRequest] =
+		useState<TaskPinboardPinReasonDialogRequest | null>(null);
 	const {
 		handleProgrammaticCardMoveReady,
 		setRequestMoveTaskToTrashHandler,
@@ -1101,6 +1114,56 @@ export function useBoardInteractions({
 		[setBoard],
 	);
 
+	const openTaskPinboardPinReasonDialog = useCallback(
+		(taskId: string, isEditingExistingPin: boolean) => {
+			const selection = findCardSelection(board, taskId);
+			if (!selection) {
+				return;
+			}
+			setTaskPinboardPinReasonRequest({
+				taskId,
+				taskTitle: selection.card.title,
+				isEditingExistingPin,
+				initialPinReason: selection.card.taskPinboardPinReason ?? "",
+			});
+		},
+		[board],
+	);
+
+	const handleRequestPinTaskToTaskPinboard = useCallback(
+		(taskId: string) => openTaskPinboardPinReasonDialog(taskId, false),
+		[openTaskPinboardPinReasonDialog],
+	);
+
+	const handleRequestEditTaskPinboardPinReason = useCallback(
+		(taskId: string) => openTaskPinboardPinReasonDialog(taskId, true),
+		[openTaskPinboardPinReasonDialog],
+	);
+
+	const handleCancelTaskPinboardPinReason = useCallback(() => setTaskPinboardPinReasonRequest(null), []);
+
+	const handleConfirmTaskPinboardPinReason = useCallback(
+		(taskId: string, pinReason: string) => {
+			setTaskPinboardPinReasonRequest(null);
+			// pinTaskToTaskPinboard 对已置顶的卡保留原 pinnedToTaskPinboardAt，所以「编辑原因」不会把它顶到板首。
+			setBoard((currentBoard) => {
+				const pinned = pinTaskToTaskPinboard(currentBoard, taskId, { pinReason });
+				return pinned.updated ? pinned.board : currentBoard;
+			});
+		},
+		[setBoard],
+	);
+
+	const handleUnpinTaskFromTaskPinboard = useCallback(
+		(taskId: string) => {
+			setBoard((currentBoard) => {
+				const unpinned = unpinTaskFromTaskPinboard(currentBoard, taskId);
+				return unpinned.updated ? unpinned.board : currentBoard;
+			});
+		},
+		[setBoard],
+	);
+
 	const handleOpenClearTrash = useCallback(() => {
 		if (trashTaskCount === 0) {
 			return;
@@ -1159,6 +1222,7 @@ export function useBoardInteractions({
 		resetProgrammaticCardMoves();
 		setIsClearTrashDialogOpen(false);
 		setDeleteTaskTarget(null);
+		setTaskPinboardPinReasonRequest(null);
 	}, [resetProgrammaticCardMoves, resolvePendingProgrammaticStartMove, setIsClearTrashDialogOpen]);
 
 	useEffect(() => {
@@ -1191,6 +1255,12 @@ export function useBoardInteractions({
 		handleConfirmDeleteTask,
 		deleteTaskTarget,
 		handleCancelAutomaticTaskAction,
+		handleRequestPinTaskToTaskPinboard,
+		handleRequestEditTaskPinboardPinReason,
+		handleCancelTaskPinboardPinReason,
+		handleConfirmTaskPinboardPinReason,
+		handleUnpinTaskFromTaskPinboard,
+		taskPinboardPinReasonRequest,
 		handleOpenClearTrash,
 		handleConfirmClearTrash,
 		handleAddReviewComments,

@@ -1730,6 +1730,49 @@ describe("CardDetailView", () => {
 			expect(onCardSelect).toHaveBeenLastCalledWith("task-3");
 		});
 
+		// 切卡遍历的是数据模型 selection.column.cards，与同一张卡在 DOM 里出现几次无关。
+		// 置顶板给卡加了「分身」这件事不该改变 alt+↑/↓ 的序列。
+		it("卡片被置顶到置顶板后 alt+↑ / alt+↓ 的切卡序列不变", async () => {
+			const onCardSelect = vi.fn();
+			const selection = createSelectionWithSiblingCards();
+			const pinnedSelection: CardSelection = {
+				...selection,
+				allColumns: selection.allColumns.map((column) =>
+					column.id === "in_progress"
+						? {
+								...column,
+								cards: column.cards.map((card) => ({ ...card, pinnedToTaskPinboardAt: 5_000 })),
+							}
+						: column,
+				),
+			};
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={pinnedSelection}
+						currentProjectId="workspace-1"
+						selectedAgentId="cline"
+						sessionSummary={null}
+						taskSessions={{}}
+						onSessionSummary={() => {}}
+						onCardSelect={onCardSelect}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+
+			dispatchKeyDown(document, { key: "ArrowUp", altKey: true });
+			expect(onCardSelect).toHaveBeenCalledWith("task-1");
+
+			dispatchKeyDown(document, { key: "ArrowDown", altKey: true });
+			expect(onCardSelect).toHaveBeenLastCalledWith("task-3");
+		});
+
 		it("焦点落在输入框里时 alt+↑ / alt+↓ 依然切卡", async () => {
 			const onCardSelect = vi.fn();
 			await renderDetailViewWithSiblingCards(onCardSelect);

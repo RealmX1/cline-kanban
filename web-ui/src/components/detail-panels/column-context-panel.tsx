@@ -5,14 +5,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BoardCard } from "@/components/board-card";
 import { StageHeaderLabel } from "@/components/detail-panels/stage-header-label";
 import { StageHeaderRails } from "@/components/detail-panels/stage-header-rails";
+import { TaskPinboardSectionInFocusView } from "@/components/detail-panels/task-pinboard-section-in-focus-view";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { TaskCardBody, type TaskCardBusinessProps } from "@/components/task-card-body";
+import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { Button } from "@/components/ui/button";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
+import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
 import { useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import { useStageHeaderPinLayout } from "@/hooks/use-stage-header-pin-layout";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { findCardColumnId, isCardDropDisabled } from "@/state/drag-rules";
+import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
 import type { BoardCard as BoardCardModel, BoardColumn, BoardColumnId, CardSelection } from "@/types";
 
 // 详情页左侧所有 section 共用一个滚动容器；模块级常量保持引用稳定。
@@ -22,7 +26,9 @@ const getDetailTaskListScrollRoot = (sentinel: HTMLElement): HTMLElement | null 
 function ColumnSection({
 	column,
 	selectedCardId,
-	defaultOpen,
+	open,
+	onToggleOpen,
+	taskIdRequestedToReveal,
 	onCardClick,
 	taskSessions,
 	onStartTask,
@@ -37,6 +43,8 @@ function ColumnSection({
 	onMoveToReviewTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
+	onRequestPinToTaskPinboard,
+	onUnpinFromTaskPinboard,
 	commitTaskLoadingById,
 	openPrTaskLoadingById,
 	moveToTrashLoadingById,
@@ -47,7 +55,14 @@ function ColumnSection({
 }: {
 	column: BoardColumn;
 	selectedCardId: string;
-	defaultOpen: boolean;
+	/**
+	 * 折叠态由 `ColumnContextPanel` 集中持有（不再是本组件的私有 state）：置顶板的「跳回本体卡」
+	 * 必须能先把目标所在的折叠分段展开——分段折叠时整段 `display:none`，`scrollIntoView` 对它无效。
+	 */
+	open: boolean;
+	onToggleOpen: () => void;
+	/** 置顶板请求跳转的任务 id；命中本列时并入 `ensureVisibleIndex`，保证本体卡已挂载。 */
+	taskIdRequestedToReveal?: string | null;
 	onCardClick: (card: BoardCardModel) => void;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	onStartTask?: (taskId: string) => void;
@@ -62,6 +77,8 @@ function ColumnSection({
 	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
+	onRequestPinToTaskPinboard?: (taskId: string) => void;
+	onUnpinFromTaskPinboard?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
 	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
@@ -70,7 +87,6 @@ function ColumnSection({
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
-	const [open, setOpen] = useState(defaultOpen);
 	const canRequestStartAllReadyBacklogTasks = column.id === "backlog" && onRequestStartAllReadyBacklogTasks;
 	const canClearTrash = column.id === "trash" && onClearTrash;
 	const latestTrashCard =
@@ -85,11 +101,16 @@ function ColumnSection({
 	const cardDropType = "CARD";
 	const isDropDisabled = isCardDropDisabled(column.id, activeDragSourceColumnId ?? null);
 	const selectedIndex = column.cards.findIndex((card) => card.id === selectedCardId);
+	const indexOfTaskRequestedToReveal = taskIdRequestedToReveal
+		? column.cards.findIndex((card) => card.id === taskIdRequestedToReveal)
+		: -1;
+	// 两个「必须已挂载」的索引取较大者即可：ensureVisibleIndex 语义是「渲染数量至少到这一格」，只增不减。
+	const indexThatMustBeRendered = Math.max(selectedIndex, indexOfTaskRequestedToReveal);
 	const { visibleCount, hasMore, remainingCount, loadMoreSentinelRef, revealMore } = useProgressiveRenderCount({
 		totalCount: column.cards.length,
 		getScrollRoot: getDetailTaskListScrollRoot,
 		enabled: activeDragSourceColumnId == null,
-		ensureVisibleIndex: selectedIndex >= 0 ? selectedIndex : undefined,
+		ensureVisibleIndex: indexThatMustBeRendered >= 0 ? indexThatMustBeRendered : undefined,
 	});
 
 	const containsSelectedCard = selectedIndex >= 0;
@@ -105,36 +126,35 @@ function ColumnSection({
 		: column.cards.slice(0, visibleCount);
 
 	// 卡片的领域 props（与是否包 Draggable 无关），供列表内可拖卡（BoardCard）与折叠 peek 的非拖卡
-	// （裸 TaskCardBody）共用，确保两处业务行为一致。
-	const buildCardBusinessProps = (card: BoardCardModel): TaskCardBusinessProps => ({
-		card,
-		columnId: column.id,
-		sessionSummary: taskSessions[card.id],
-		selected: card.id === selectedCardId,
-		onStart: onStartTask,
-		onMoveToTrash: onMoveToTrashTask,
-		onMoveToValidation: onMoveToValidationTask,
-		onMoveToReview: onMoveToReviewTask,
-		onRestoreFromTrash: onRestoreFromTrashTask,
-		onDeleteTask,
-		onCommit: onCommitTask,
-		onOpenPr: onOpenPrTask,
-		isCommitLoading: commitTaskLoadingById?.[card.id] ?? false,
-		isOpenPrLoading: openPrTaskLoadingById?.[card.id] ?? false,
-		isMoveToTrashLoading: moveToTrashLoadingById?.[card.id] ?? false,
-		workspacePath,
-		defaultClineModelId,
-		defaultAgentId,
-		onSaveTitle,
-		onOpenTaskEditor: column.id === "backlog" && onEditTask ? () => onEditTask(card) : undefined,
-		onClick: () => {
-			if (column.id === "backlog") {
-				onEditTask?.(card);
-				return;
-			}
-			onCardClick(card);
-		},
-	});
+	// （裸 TaskCardBody）共用。stage 门控本身交给 buildTaskCardBusinessProps，与看板、两个置顶板容器同源。
+	const buildCardBusinessProps = (card: BoardCardModel): TaskCardBusinessProps =>
+		buildTaskCardBusinessProps({
+			card,
+			columnId: column.id,
+			sessionSummary: taskSessions[card.id],
+			selected: card.id === selectedCardId,
+			handlers: {
+				onStartTask,
+				onMoveToTrashTask,
+				onMoveToValidationTask,
+				onMoveToReviewTask,
+				onRestoreFromTrashTask,
+				onDeleteTask,
+				onCommitTask,
+				onOpenPrTask,
+				onSaveTitle,
+				onEditTask,
+				onRequestPinToTaskPinboard,
+				onUnpinFromTaskPinboard,
+				commitTaskLoadingById,
+				openPrTaskLoadingById,
+				moveToTrashLoadingById,
+			},
+			onActivateCard: onCardClick,
+			workspacePath,
+			defaultClineModelId,
+			defaultAgentId,
+		});
 
 	return (
 		<div className="bg-surface-1 rounded-lg shrink-0 border border-border" data-stage-section-id={column.id}>
@@ -148,7 +168,7 @@ function ColumnSection({
 			>
 				<button
 					type="button"
-					onClick={() => setOpen((prev) => !prev)}
+					onClick={onToggleOpen}
 					className="hover:bg-surface-0 rounded-md"
 					style={{
 						height: 32,
@@ -284,6 +304,9 @@ export function ColumnContextPanel({
 	onMoveToReviewTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
+	onRequestPinToTaskPinboard,
+	onUnpinFromTaskPinboard,
+	onEditTaskPinboardPinReason,
 	commitTaskLoadingById,
 	openPrTaskLoadingById,
 	moveToTrashLoadingById,
@@ -307,6 +330,9 @@ export function ColumnContextPanel({
 	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
+	onRequestPinToTaskPinboard?: (taskId: string) => void;
+	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
 	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
@@ -316,6 +342,54 @@ export function ColumnContextPanel({
 }): React.ReactElement {
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+	// stage 分段的展开态集中持有：Done 默认折叠，其余默认展开（与原 ColumnSection 私有 state 的初值一致）。
+	const [expandedColumnIds, setExpandedColumnIds] = useState<Partial<Record<BoardColumnId, boolean>>>({});
+	const isColumnSectionExpanded = useCallback(
+		(columnId: BoardColumnId): boolean => expandedColumnIds[columnId] ?? columnId !== "trash",
+		[expandedColumnIds],
+	);
+	const toggleColumnSectionExpanded = useCallback((columnId: BoardColumnId): void => {
+		setExpandedColumnIds((previous) => ({
+			...previous,
+			[columnId]: !(previous[columnId] ?? columnId !== "trash"),
+		}));
+	}, []);
+
+	const pinnedTasks = useMemo(
+		() => collectTasksPinnedToTaskPinboard({ columns: selection.allColumns, dependencies: [] }),
+		[selection.allColumns],
+	);
+
+	// 点置顶板分身上的 stage 标签：先把目标所在分段展开（折叠时整段 display:none，scrollIntoView 无效），
+	// 再由控制器逐帧重试直到本体卡挂载、滚入视野并脉冲高亮。
+	const { taskIdRequestedToReveal, requestRevealCanonicalTaskCard } = useRevealCanonicalTaskCard({
+		prepareRevealTarget: (taskId) => {
+			const targetColumnId = findCardColumnId(selection.allColumns, taskId);
+			if (!targetColumnId) {
+				return;
+			}
+			setExpandedColumnIds((previous) => ({ ...previous, [targetColumnId]: true }));
+		},
+	});
+
+	const taskCardActionHandlers: TaskCardActionHandlerBundle = {
+		onStartTask,
+		onMoveToTrashTask,
+		onMoveToValidationTask,
+		onMoveToReviewTask,
+		onRestoreFromTrashTask,
+		onDeleteTask,
+		onCommitTask,
+		onOpenPrTask,
+		onSaveTitle: onSaveTaskTitle,
+		onEditTask,
+		onRequestPinToTaskPinboard,
+		onUnpinFromTaskPinboard,
+		commitTaskLoadingById,
+		openPrTaskLoadingById,
+		moveToTrashLoadingById,
+	};
 
 	const handleBeforeCapture = useCallback(
 		(start: BeforeCapture) => {
@@ -425,12 +499,26 @@ export function ColumnContextPanel({
 							</span>
 						</Button>
 					) : null}
+					<TaskPinboardSectionInFocusView
+						pinnedTasks={pinnedTasks}
+						selectedCardId={selection.card.id}
+						taskSessions={taskSessions}
+						handlers={taskCardActionHandlers}
+						onActivateCard={(card) => onCardSelect(card.id)}
+						onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
+						onEditTaskPinboardPinReason={(taskId) => onEditTaskPinboardPinReason?.(taskId)}
+						workspacePath={workspacePath}
+						defaultClineModelId={defaultClineModelId}
+						defaultAgentId={defaultAgentId}
+					/>
 					{selection.allColumns.map((column) => (
 						<ColumnSection
 							key={column.id}
 							column={column}
 							selectedCardId={selection.card.id}
-							defaultOpen={column.id !== "trash"}
+							open={isColumnSectionExpanded(column.id)}
+							onToggleOpen={() => toggleColumnSectionExpanded(column.id)}
+							taskIdRequestedToReveal={taskIdRequestedToReveal}
 							onCardClick={(card) => onCardSelect(card.id)}
 							taskSessions={taskSessions}
 							onStartTask={column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined}
@@ -449,6 +537,8 @@ export function ColumnContextPanel({
 							onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
 							onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
 							onDeleteTask={onDeleteTask}
+							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
 							commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
 							openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
 							moveToTrashLoadingById={
@@ -476,6 +566,8 @@ export function ColumnContextPanel({
 				onDeleteTask={onDeleteTask}
 				onCommitTask={onCommitTask}
 				onOpenPrTask={onOpenPrTask}
+				onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+				onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
 				commitTaskLoadingById={commitTaskLoadingById}
 				openPrTaskLoadingById={openPrTaskLoadingById}
 				moveToTrashLoadingById={moveToTrashLoadingById}
