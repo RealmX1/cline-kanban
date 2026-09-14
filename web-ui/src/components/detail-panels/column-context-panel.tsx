@@ -116,7 +116,7 @@ function ColumnSection({
 	const containsSelectedCard = selectedIndex >= 0;
 	// 折叠焦点 stage 时焦点卡仍「留存」：只渲染焦点卡本身（保活真实 data-task-id 几何），其余卡不渲染。
 	// 焦点卡因此永不 0×0 → useSelectedCardPinState / useStageHeaderPinLayout 无需特判，且钉住 rail 里的
-	// 焦点卡是 pinnedClone（不带 data-task-id），唯一性不破。非焦点 section 折叠仍整体 display:none（保留
+	// 焦点卡是 sticky 卡头副本（renderRole 非 canonical，不带 data-task-id），唯一性不破。非焦点 section 折叠仍整体 display:none（保留
 	// 原 MutationObserver 的 style 翻转触发）。卡头本身改为随内容自然滚动（static）——「当前所属 stage」
 	// 现由 StageHeaderRails 的顶/底手风琴始终呈现，不再依赖各 section 的原生 sticky 卡头。
 	const isCollapsedFocusedPeek = !open && containsSelectedCard;
