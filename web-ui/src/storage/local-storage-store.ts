@@ -53,6 +53,10 @@ export enum LocalStorageKey {
 	PostDeployVerificationStayInFront = "kanban.post-deploy-verification-stay-in-front",
 	// Post-Deploy Verification 面板折叠为右下角 badge 的偏好。
 	PostDeployVerificationCollapsed = "kanban.post-deploy-verification-collapsed",
+	// Task Pinboard（置顶板）折叠态。主看板顶部横条与 Focus View 左侧分段各自一个键：
+	// 两处的纵向空间预算完全不同（横条挤的是整个看板高度，分段挤的是左列表），用户大概率不希望联动。
+	TaskPinboardStripCollapsedOnKanbanBoard = "kanban.task-pinboard-strip-collapsed-on-kanban-board.v1",
+	TaskPinboardSectionCollapsedInFocusView = "kanban.task-pinboard-section-collapsed-in-focus-view.v1",
 }
 
 export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
@@ -68,6 +72,8 @@ export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
 	LocalStorageKey.GitHistoryRefsPanelWidth,
 	LocalStorageKey.GitHistoryCommitsPanelWidth,
 	LocalStorageKey.GitDiffFileTreePanelRatio,
+	LocalStorageKey.TaskPinboardStripCollapsedOnKanbanBoard,
+	LocalStorageKey.TaskPinboardSectionCollapsedInFocusView,
 ] as const;
 
 function getLocalStorage(): Storage | null {

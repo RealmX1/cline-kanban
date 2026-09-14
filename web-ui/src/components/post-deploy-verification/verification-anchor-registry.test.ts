@@ -47,6 +47,31 @@ describe("verification-anchor-registry", () => {
 		expect(el.classList.contains(VERIFICATION_SPOTLIGHT_CLASS)).toBe(false);
 	});
 
+	it("spotlightAnchor 对同一元素连点：重播脉冲动画，并按最后一次调用重新计时", () => {
+		const key = boardTaskCardAnchorKey("t1");
+		const el = document.createElement("div");
+		el.setAttribute(VERIFICATION_ANCHOR_ATTR, key);
+		document.body.appendChild(el);
+		const classAttributeMutations = new MutationObserver(() => {});
+		classAttributeMutations.observe(el, { attributes: true, attributeFilter: ["class"] });
+
+		spotlightAnchor(key, { durationMs: 1000 });
+		classAttributeMutations.takeRecords();
+
+		// 第一次高亮还没熄灭时再来一次：必须摘掉高亮类再挂回去，否则 CSS 动画不会从头重播。
+		vi.advanceTimersByTime(400);
+		expect(spotlightAnchor(key, { durationMs: 1000 })).toBe(true);
+		expect(classAttributeMutations.takeRecords().length).toBeGreaterThanOrEqual(2);
+		expect(el.classList.contains(VERIFICATION_SPOTLIGHT_CLASS)).toBe(true);
+
+		// 第一次留下的旧计时器本会在此刻掐灭高亮，撤掉它之后高亮应活满第二次的完整时长。
+		vi.advanceTimersByTime(600);
+		expect(el.classList.contains(VERIFICATION_SPOTLIGHT_CLASS)).toBe(true);
+
+		vi.advanceTimersByTime(400);
+		expect(el.classList.contains(VERIFICATION_SPOTLIGHT_CLASS)).toBe(false);
+	});
+
 	it("spotlightAnchor 未命中：返回 false，不抛错", () => {
 		expect(spotlightAnchor("does-not-exist")).toBe(false);
 	});

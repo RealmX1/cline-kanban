@@ -22,6 +22,8 @@ interface StageRailFocusedCardProps {
 	onDeleteTask?: (taskId: string) => void;
 	onCommitTask?: (taskId: string) => void;
 	onOpenPrTask?: (taskId: string) => void;
+	onRequestPinToTaskPinboard?: (taskId: string) => void;
+	onUnpinFromTaskPinboard?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
 	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
@@ -41,7 +43,7 @@ interface StageHeaderRailsProps extends StageRailFocusedCardProps {
 	scrollRootRef: RefObject<HTMLElement | null>;
 }
 
-/** 单条 rail 条目：始终渲染 stage 卡头；`withCard` 时其下挂焦点卡 `pinnedClone`（克隆不带 data-task-id）。 */
+/** 单条 rail 条目：始终渲染 stage 卡头；`withCard` 时其下挂焦点卡的只读副本（副本不带 data-task-id）。 */
 function StageHeaderRailEntry({
 	column,
 	withCard,
@@ -56,6 +58,8 @@ function StageHeaderRailEntry({
 	onDeleteTask,
 	onCommitTask,
 	onOpenPrTask,
+	onRequestPinToTaskPinboard,
+	onUnpinFromTaskPinboard,
 	commitTaskLoadingById,
 	openPrTaskLoadingById,
 	moveToTrashLoadingById,
@@ -117,7 +121,7 @@ function StageHeaderRailEntry({
 					onClick={onScrollToFocusedCard}
 				>
 					<TaskCardBody
-						pinnedClone
+						renderRole="focused_card_copy_under_sticky_stage_header"
 						card={card}
 						columnId={columnId}
 						sessionSummary={taskSessions[card.id]}
@@ -129,6 +133,8 @@ function StageHeaderRailEntry({
 						onDeleteTask={onDeleteTask}
 						onCommit={isReview ? onCommitTask : undefined}
 						onOpenPr={isReview ? onOpenPrTask : undefined}
+						onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+						onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
 						isCommitLoading={isReview ? (commitTaskLoadingById?.[card.id] ?? false) : false}
 						isOpenPrLoading={isReview ? (openPrTaskLoadingById?.[card.id] ?? false) : false}
 						isMoveToTrashLoading={isReviewOrValidation ? (moveToTrashLoadingById?.[card.id] ?? false) : false}

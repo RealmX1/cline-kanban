@@ -756,6 +756,65 @@ describe("board dependency state", () => {
 		expect(normalizedCards?.[2]?.ompAgentSessionTransport).toBeUndefined();
 	});
 
+	// 同一条白名单铁律的另一面：置顶态存在卡片上，normalizeCard 漏掉就等于「刷新一次页面，
+	// 所有置顶连同置顶原因被静默抹平」。这条用例是那个回归的唯一防线。
+	it("keeps the task pinboard pin state and reason on persisted cards", () => {
+		const rawBoard = {
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "pinned-with-reason",
+							prompt: "Pinned task with a reason",
+							startInPlanMode: false,
+							baseRef: "main",
+							pinnedToTaskPinboardAt: 1_700_000_000_000,
+							taskPinboardPinReason: "blocked on review feedback",
+						},
+						{
+							id: "pinned-without-reason",
+							prompt: "Pinned task without a reason",
+							startInPlanMode: false,
+							baseRef: "main",
+							pinnedToTaskPinboardAt: 1_700_000_001_000,
+						},
+						{
+							id: "never-pinned",
+							prompt: "Task that was never pinned",
+							startInPlanMode: false,
+							baseRef: "main",
+						},
+						{
+							id: "garbage-pin-timestamp",
+							prompt: "Task with an unreadable pin timestamp",
+							startInPlanMode: false,
+							baseRef: "main",
+							pinnedToTaskPinboardAt: "yesterday",
+							taskPinboardPinReason: "   ",
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "validation", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		};
+
+		const normalizedCards = normalizeBoardData(rawBoard)?.columns[0]?.cards;
+
+		expect(normalizedCards?.[0]?.pinnedToTaskPinboardAt).toBe(1_700_000_000_000);
+		expect(normalizedCards?.[0]?.taskPinboardPinReason).toBe("blocked on review feedback");
+		expect(normalizedCards?.[1]?.pinnedToTaskPinboardAt).toBe(1_700_000_001_000);
+		expect(normalizedCards?.[1]?.taskPinboardPinReason).toBeUndefined();
+		expect(normalizedCards?.[2]?.pinnedToTaskPinboardAt).toBeUndefined();
+		// 「字段存在即已置顶」，所以非有限数一律当未置顶；纯空白原因不写字段（避免盘上堆空串）。
+		expect(normalizedCards?.[3]?.pinnedToTaskPinboardAt).toBeUndefined();
+		expect(normalizedCards?.[3]?.taskPinboardPinReason).toBeUndefined();
+	});
+
 	it("keeps cards in the validation column when normalizing", () => {
 		const rawBoard = {
 			columns: [

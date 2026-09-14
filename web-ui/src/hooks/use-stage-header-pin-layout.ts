@@ -38,7 +38,7 @@ const STAGE_SECTION_BORDER_PX = 2;
 /**
  * 焦点条目在焦点卡克隆外层 `<div style={{ padding: 8 }}>` 的上下 padding 之和（8px 上 + 8px 下）。仅焦点条目
  * （`withCard`）挂此包裹层；`focusedCardHeight` 取真实卡 border box（`getBoundingClientRect().height` 不含其
- * `marginBottom: 6`，与 rail 内 `pinnedClone` 的 `marginBottom: 0` 一致），故焦点条目真实高
+ * `marginBottom: 6`，与 rail 内 sticky 卡头副本的 `marginBottom: 0` 一致），故焦点条目真实高
  * = 卡头槽高 + 外框 + 此 padding + 焦点卡高。漏计这 16px 会使焦点条目严重低估、吞掉相邻随流卡头。
  */
 const STAGE_RAIL_FOCUSED_CARD_PADDING_PX = 16;

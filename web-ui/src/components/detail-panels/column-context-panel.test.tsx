@@ -45,28 +45,29 @@ vi.mock("@/components/board-card", () => ({
 	},
 }));
 
-// TaskCardBody = 裸卡体（无 <Draggable>、不收 index）。折叠 peek 的焦点卡与 StageHeaderRails 的钉住克隆
-// 都走这里。mock 忠实还原真实契约：pinnedClone 不输出 data-task-id（保全局唯一），非 clone 输出真实 id 且
-// data-card-variant="static"（不可拖），供断言「peek 卡不带假 Draggable index、不可拖」。
+// TaskCardBody = 裸卡体（无 <Draggable>、不收 index）。折叠 peek 的焦点卡、StageHeaderRails 的 sticky 卡头副本、
+// 置顶板分身都走这里。mock 忠实还原真实契约：只有 canonical 角色输出 data-task-id（保全局唯一），
+// 且 data-card-variant="static"（不可拖），供断言「peek 卡不带假 Draggable index、不可拖」。
 vi.mock("@/components/task-card-body", () => ({
 	TaskCardBody: ({
 		card,
 		selected,
-		pinnedClone,
+		renderRole = "canonical_card_in_its_stage_list",
 		onMoveToTrash,
 		onMoveToValidation,
 	}: {
 		card: { id: string; prompt: string };
 		selected?: boolean;
-		pinnedClone?: boolean;
+		renderRole?: string;
 		onMoveToTrash?: (taskId: string) => void;
 		onMoveToValidation?: (taskId: string) => void;
 	}): React.ReactElement => {
+		const emitsCanonicalDomIdentity = renderRole === "canonical_card_in_its_stage_list";
 		return (
 			<div
-				data-task-id={pinnedClone ? undefined : card.id}
+				data-task-id={emitsCanonicalDomIdentity ? card.id : undefined}
 				data-selected={selected ? "true" : "false"}
-				data-card-variant={pinnedClone ? "pinned-clone" : "static"}
+				data-card-variant={emitsCanonicalDomIdentity ? "static" : renderRole}
 			>
 				{card.prompt}
 				{onMoveToTrash ? (
@@ -347,6 +348,35 @@ describe("ColumnContextPanel", () => {
 			block: "center",
 			inline: "nearest",
 		});
+	});
+
+	// 置顶板分身与本体卡同处一个 scrollport，唯一性一旦破掉，居中滚动 / sticky 几何 / 依赖锚点
+	// 都会随机接到分身上（dependency-overlay 的锚点表是「后出现者覆盖先出现者」）。
+	it("keeps data-task-id unique after a card gets pinned to the task pinboard", async () => {
+		const pinnedReviewCard = { ...createCard("task-review", "Review task"), pinnedToTaskPinboardAt: 5_000 };
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: [] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [pinnedReviewCard] },
+			{ id: "validation", title: "Validation", cards: [] },
+			{ id: "trash", title: "Done", cards: [] },
+		];
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-review")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+				/>,
+			);
+		});
+
+		// 置顶板分段渲染了这张卡的分身，但只有 review 列表里的本体带 data-task-id。
+		expect(container.querySelector('[data-task-pinboard-container="focus-view-section"]')).not.toBeNull();
+		expect(container.querySelectorAll('[data-task-id="task-review"]').length).toBe(1);
+		expect(container.querySelectorAll('[data-card-variant="pinned_card_copy_in_task_pinboard"]').length).toBe(1);
 	});
 
 	it("restores the most recently updated done task from the collapsed done header", async () => {

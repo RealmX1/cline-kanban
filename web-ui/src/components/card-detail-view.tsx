@@ -606,6 +606,9 @@ export function CardDetailView({
 	onRestoreTaskFromTrash,
 	onDeleteTask,
 	onCancelAutomaticTaskAction,
+	onRequestPinToTaskPinboard,
+	onUnpinFromTaskPinboard,
+	onEditTaskPinboardPinReason,
 	commitTaskLoadingById,
 	openPrTaskLoadingById,
 	agentCommitTaskLoadingById,
@@ -678,6 +681,10 @@ export function CardDetailView({
 	onRestoreTaskFromTrash?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
+	// Task Pinboard：透传给左侧任务列表（含列表顶部的置顶板分段）。
+	onRequestPinToTaskPinboard?: (taskId: string) => void;
+	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	commitTaskLoadingById?: Record<string, boolean>;
 	openPrTaskLoadingById?: Record<string, boolean>;
 	agentCommitTaskLoadingById?: Record<string, boolean>;
@@ -1511,6 +1518,9 @@ export function CardDetailView({
 							onMoveToReviewTask={onMoveCardToReview}
 							onRestoreFromTrashTask={onRestoreTaskFromTrash}
 							onDeleteTask={onDeleteTask}
+							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+							onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 							commitTaskLoadingById={commitTaskLoadingById}
 							openPrTaskLoadingById={openPrTaskLoadingById}
 							moveToTrashLoadingById={moveToTrashLoadingById}
