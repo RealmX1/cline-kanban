@@ -7,6 +7,7 @@ import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/
 import { NativeSelect } from "@/components/ui/native-select";
 import type { AddClineProviderInput, UpdateClineProviderInput } from "@/hooks/use-runtime-settings-cline-controller";
 import type { RuntimeClineProviderCapability } from "@/runtime/types";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 
 const CAPABILITY_OPTIONS: readonly RuntimeClineProviderCapability[] = [
 	"streaming",
@@ -198,6 +199,10 @@ export function ClineAddProviderDialog({
 	};
 
 	const handleModelKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+		// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+		if (isKeyboardEventEmittedDuringImeComposition(event)) {
+			return;
+		}
 		if ((event.key === "Enter" || event.key === ",") && modelInput.trim()) {
 			event.preventDefault();
 			addModel(modelInput);

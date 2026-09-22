@@ -184,6 +184,38 @@ describe("TaskEditorDialog interactions", () => {
 		expect(hasPlanModeOverridesPermissionTierNotice()).toBe(true);
 	});
 
+	// 这两条钉住「组字期间整体让开」在 document 级热键上也成立。输入框各自的局部守卫拦不住它们：
+	// 守卫早退时不再 preventDefault，而这两条热键只看 defaultPrevented，于是组字中的组合键会穿透过来
+	// 把任务真的建出来 / 启动掉——用户当时只是在敲拼音。
+	async function dispatchDocumentKeyDown(init: KeyboardEventInit): Promise<void> {
+		await act(async () => {
+			document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+		});
+	}
+
+	it("does not create the task on a Mod+Enter emitted while the IME is still composing", async () => {
+		const onCreate: Props["onCreate"] = vi.fn(() => "task-1");
+		await render(makeProps({ onCreate }));
+
+		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true, isComposing: true });
+		expect(onCreate).not.toHaveBeenCalled();
+
+		// 组字结束后的真 Mod+Enter 必须照常建卡——守卫不能把正常路径也堵死。
+		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", metaKey: true });
+		expect(onCreate).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not start-and-open on an Alt+Shift+Enter emitted while the IME is still composing", async () => {
+		const onCreateStartAndOpen: Props["onCreateStartAndOpen"] = vi.fn(() => "task-1");
+		await render(makeProps({ onCreateStartAndOpen }));
+
+		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", altKey: true, shiftKey: true, isComposing: true });
+		expect(onCreateStartAndOpen).not.toHaveBeenCalled();
+
+		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", altKey: true, shiftKey: true });
+		expect(onCreateStartAndOpen).toHaveBeenCalledTimes(1);
+	});
+
 	it("does not warn about a plan-mode conflict when the harness keeps the two axes independent", async () => {
 		await render(makeProps({ defaultAgentId: "droid", startInPlanMode: false }));
 		expect(hasPlanModeOverridesPermissionTierNotice()).toBe(false);

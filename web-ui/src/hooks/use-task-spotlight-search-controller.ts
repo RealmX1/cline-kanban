@@ -19,6 +19,11 @@ import {
 	type TaskBoardSearchResult,
 } from "@/search/task-board-search";
 import {
+	appendTaskSearchQueryToHistory,
+	normalizeTaskSearchQueryHistory,
+	removeTaskSearchQueryFromHistory,
+} from "@/search/task-search-query-history";
+import {
 	DEFAULT_TASK_SEARCH_RESULT_SORT_ORDER,
 	normalizeTaskSearchResultSortOrder,
 	type TaskSearchResultSortOrder,
@@ -62,6 +67,9 @@ const SPOTLIGHT_STAGE_FILTER_OPTIONS = SPOTLIGHT_STAGE_DEFINITIONS.map((definiti
 }));
 
 const EMPTY_DOCUMENTS: readonly TaskBoardSearchDocument[] = [];
+
+// 稳定引用：直接把字面量传给 useJsonLocalStorageValue 会每次渲染换一个新数组。
+const EMPTY_TASK_SEARCH_QUERY_HISTORY: string[] = [];
 
 interface StableDocumentsCache {
 	signature: string;
@@ -123,6 +131,10 @@ export interface TaskSpotlightSearchController {
 	toggle: () => void;
 	query: string;
 	setQuery: (query: string) => void;
+	/** 最近用过的检索串，最新在前。跨会话持久化，供「调出上次搜的东西」用。 */
+	recentSearchQueries: readonly string[];
+	/** 删掉某条历史（chips 上的 ×）。 */
+	forgetRecentSearchQuery: (query: string) => void;
 	mode: TaskBoardSearchMode;
 	setMode: (mode: TaskBoardSearchMode) => void;
 	sortOrder: TaskSearchResultSortOrder;
@@ -307,6 +319,39 @@ export function useTaskSpotlightSearchController({
 		[fieldVisibility, setStoredFieldVisibility],
 	);
 
+	const [storedSearchQueryHistory, setStoredSearchQueryHistory] = useJsonLocalStorageValue(
+		LocalStorageKey.TaskSpotlightSearchQueryHistory,
+		EMPTY_TASK_SEARCH_QUERY_HISTORY,
+	);
+	const recentSearchQueries = useMemo(
+		() => normalizeTaskSearchQueryHistory(storedSearchQueryHistory),
+		[storedSearchQueryHistory],
+	);
+	/**
+	 * 记一条「用过的检索串」。只在**终止事件**上调用（打开某个结果、关掉弹层）——逐键记录会把
+	 * `k` / `ka` / `kan` 这些前缀全塞进历史，真正想回看的那条反而被自己的前缀挤掉。
+	 */
+	const rememberSearchQuery = useCallback(
+		(usedQuery: string) => {
+			setStoredSearchQueryHistory((previous) => {
+				const normalizedPrevious = normalizeTaskSearchQueryHistory(previous);
+				const next = appendTaskSearchQueryToHistory(normalizedPrevious, usedQuery);
+				return next === normalizedPrevious ? previous : [...next];
+			});
+		},
+		[setStoredSearchQueryHistory],
+	);
+	const forgetRecentSearchQuery = useCallback(
+		(forgottenQuery: string) => {
+			setStoredSearchQueryHistory((previous) => {
+				const normalizedPrevious = normalizeTaskSearchQueryHistory(previous);
+				const next = removeTaskSearchQueryFromHistory(normalizedPrevious, forgottenQuery);
+				return next === normalizedPrevious ? previous : [...next];
+			});
+		},
+		[setStoredSearchQueryHistory],
+	);
+
 	// 跨项目索引按需拉取（弹层开 && 开关开）；enabled 由 false→true 时 useTrpcQuery 自动 refetch，
 	// 关闭再打开即重新拉取（stale-while-revalidate 保留旧数据即时可搜）。
 	const crossProjectIndex = useAllProjectsTaskSearchIndex({
@@ -314,6 +359,11 @@ export function useTaskSpotlightSearchController({
 		workspaceId: crossProjectWorkspaceId,
 		excludeProjectIds: crossProjectExcludeProjectIds,
 	});
+
+	// 关闭/打开结果这些**终止事件**要记录「刚才搜的是什么」，但不该因此让 close/toggle 的函数标识
+	// 随每次按键变化——用 ref 读最新查询串，依赖表里就只剩 rememberSearchQuery。
+	const latestQueryRef = useRef(query);
+	latestQueryRef.current = query;
 
 	const open = useCallback(() => {
 		if (!canOpen) {
@@ -325,13 +375,15 @@ export function useTaskSpotlightSearchController({
 	}, [canOpen]);
 
 	const close = useCallback(() => {
+		rememberSearchQuery(latestQueryRef.current);
 		setIsOpen(false);
 		setQuery("");
-	}, []);
+	}, [rememberSearchQuery]);
 
 	const toggle = useCallback(() => {
 		setIsOpen((previous) => {
 			if (previous) {
+				rememberSearchQuery(latestQueryRef.current);
 				setQuery("");
 				return false;
 			}
@@ -342,7 +394,7 @@ export function useTaskSpotlightSearchController({
 			setActiveIndex(-1);
 			return true;
 		});
-	}, [canOpen]);
+	}, [canOpen, rememberSearchQuery]);
 
 	// 切换项目时自动关闭弹层（当前项目上下文已失效）。
 	useEffect(() => {
@@ -572,11 +624,12 @@ export function useTaskSpotlightSearchController({
 			if (!result) {
 				return;
 			}
+			rememberSearchQuery(latestQueryRef.current);
 			setIsOpen(false);
 			setQuery("");
 			onOpenTaskInProject(result.document.projectId, result.document.taskId);
 		},
-		[results, onOpenTaskInProject],
+		[results, onOpenTaskInProject, rememberSearchQuery],
 	);
 
 	const openActiveResult = useCallback(() => {
@@ -594,6 +647,8 @@ export function useTaskSpotlightSearchController({
 		toggle,
 		query,
 		setQuery,
+		recentSearchQueries,
+		forgetRecentSearchQuery,
 		mode,
 		setMode,
 		sortOrder,

@@ -44,6 +44,7 @@ import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { TerminalSearchResultState } from "@/terminal/persistent-terminal-manager";
 import { usePersistentTerminalSession } from "@/terminal/use-persistent-terminal-session";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { isMacPlatform } from "@/utils/platform";
 
 interface AgentTerminalSessionControls {
@@ -459,6 +460,10 @@ function TerminalSearchBar({
 	};
 
 	const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+		// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+		if (isKeyboardEventEmittedDuringImeComposition(event)) {
+			return;
+		}
 		if (isTerminalFindShortcut(event)) {
 			event.preventDefault();
 			event.stopPropagation();

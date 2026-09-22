@@ -55,6 +55,7 @@ import type {
 } from "@/runtime/types";
 import { useTaskCreateDialogPrimaryStartActionPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import type { TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
 import { useDebouncedEffect } from "@/utils/react-use";
 
@@ -589,6 +590,10 @@ export function TaskEditorDialog({
 
 	const handleInputKeyDown = useCallback(
 		(index: number, event: React.KeyboardEvent<HTMLInputElement>) => {
+			// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+			if (isKeyboardEventEmittedDuringImeComposition(event)) {
+				return;
+			}
 			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
 				event.preventDefault();
 				if (event.shiftKey) {
@@ -638,6 +643,11 @@ export function TaskEditorDialog({
 			enableOnFormTags: true,
 			enableOnContentEditable: true,
 			ignoreEventWhen: (event) => {
+				// 组字期间按键归输入法，这条 document 级热键必须整体让开。判据放在 ignoreEventWhen
+				// 而不是回调首行：react-hotkeys-hook 先查 ignoreEventWhen 再执行 preventDefault，
+				// 只有在这里短路才是真的不插手。输入框各自的局部守卫拦不住它——那些守卫早退时不再
+				// preventDefault，下面这条 defaultPrevented 判据反而会把事件放行过来。
+				if (isKeyboardEventEmittedDuringImeComposition(event)) return true;
 				if (!event.defaultPrevented) return false;
 				// Only skip when a textarea or input already handled the shortcut.
 				// Radix checkbox also calls preventDefault() on Enter, but that
@@ -662,6 +672,8 @@ export function TaskEditorDialog({
 			enabled: open && Boolean(onCreateStartAndOpen),
 			enableOnFormTags: true,
 			enableOnContentEditable: true,
+			// 同上：组字期间整体让开，且必须在 preventDefault 之前短路。
+			ignoreEventWhen: (event) => isKeyboardEventEmittedDuringImeComposition(event),
 			preventDefault: true,
 		},
 		[open, mode, handleRunSingleStartAction, onCreateStartAndOpen],

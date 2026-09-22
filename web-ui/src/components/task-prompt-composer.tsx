@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { TaskImage } from "@/types";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { useDebouncedEffect } from "@/utils/react-use";
 
 const FILE_MENTION_LIMIT = 8;
@@ -204,6 +205,10 @@ export function TaskPromptComposer({
 
 	const handleTextareaKeyDown = useCallback(
 		(event: KeyboardEvent<HTMLTextAreaElement>) => {
+			// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+			if (isKeyboardEventEmittedDuringImeComposition(event)) {
+				return;
+			}
 			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
 				event.preventDefault();
 				if (event.shiftKey) {

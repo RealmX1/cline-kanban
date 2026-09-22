@@ -36,6 +36,8 @@ export enum LocalStorageKey {
 	// 故同样不进 LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS——「重置布局」不该把用户选的排序与字段抹掉。
 	TaskSpotlightSearchResultSortOrder = "kanban.task-spotlight-search-result-sort-order.v1",
 	TaskSpotlightSearchResultRowFieldVisibility = "kanban.task-spotlight-search-result-row-field-visibility.v1",
+	// ⌘K Spotlight：最近用过的检索串（最新在前）。同样不属于布局自定义——「重置布局」不该抹掉检索历史。
+	TaskSpotlightSearchQueryHistory = "kanban.task-spotlight-search-query-history.v1",
 	// 曾经叫 `kb-sidebar-width`——本枚举里**唯一**没有 `kanban.` 前缀的键，按前缀扫描/导出/清理的逻辑
 	// 都会漏掉它。改名后由 legacy-local-storage-key-rename-migration.ts 在启动时把旧键搬过来。
 	ProjectNavigationPanelWidth = "kanban.project-navigation-panel-width",

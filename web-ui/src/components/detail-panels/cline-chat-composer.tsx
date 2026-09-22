@@ -32,6 +32,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeClineReasoningEffort, RuntimeSlashCommand, RuntimeTaskSessionMode } from "@/runtime/types";
 import type { TaskImage } from "@/types";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { isMacPlatform } from "@/utils/platform";
 import { useDebouncedEffect } from "@/utils/react-use";
@@ -385,7 +386,7 @@ export function ClineChatComposer({
 
 	const handleTextareaKeyDown = useCallback(
 		(event: KeyboardEvent<HTMLTextAreaElement>) => {
-			if (event.nativeEvent.isComposing) {
+			if (isKeyboardEventEmittedDuringImeComposition(event)) {
 				return;
 			}
 			const canNavigateCompletions = showCompletionPicker && completionSuggestions.length > 0;
