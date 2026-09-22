@@ -26,6 +26,9 @@ function formatUnreadBadge(count: number): string {
 }
 
 export function NotificationCenter({
+	onLoadMorePanelGroups,
+	hasMorePanelGroups,
+	archiveReadError,
 	panelGroups,
 	allGroups,
 	allEntriesSortedByTriggeredAtDescending,
@@ -37,14 +40,17 @@ export function NotificationCenter({
 	onClearAll,
 }: {
 	panelGroups: NotificationGroup[];
+	onLoadMorePanelGroups?: () => void;
+	hasMorePanelGroups?: boolean;
+	archiveReadError?: string | null;
 	allGroups: NotificationGroup[];
 	allEntriesSortedByTriggeredAtDescending: RuntimeNotificationFeedEntry[];
 	unreadCount: number;
 	onFocusTask: (workspaceId: string, taskId: string) => void;
 	onMarkGroupVisited: (workspaceId: string, taskId: string) => void;
 	onMarkAllPanelGroupsVisited: () => void;
-	onMarkAllHistoryGroupsVisited: () => void;
-	onClearAll: () => void;
+	onMarkAllHistoryGroupsVisited: (() => void) | (() => Promise<boolean>);
+	onClearAll: (() => void) | (() => Promise<boolean>);
 }): React.ReactElement {
 	const [open, setOpen] = useState(false);
 	const [isLogOpen, setIsLogOpen] = useState(false);
@@ -95,6 +101,7 @@ export function NotificationCenter({
 							</button>
 						</div>
 						<div className="mt-1 max-h-[320px] overflow-y-auto">
+							{archiveReadError && <p role="alert">{archiveReadError}</p>}
 							{panelGroups.length === 0 ? (
 								<p className="m-0 px-1.5 py-6 text-center text-[13px] text-text-secondary">暂无待处理通知。</p>
 							) : (
@@ -144,6 +151,11 @@ export function NotificationCenter({
 								))
 							)}
 						</div>
+						{hasMorePanelGroups && (
+							<Button size="sm" variant="ghost" onClick={onLoadMorePanelGroups}>
+								更早通知
+							</Button>
+						)}
 						<div className="mt-1 border-t border-border pt-1.5">
 							<Button
 								size="sm"
@@ -161,6 +173,7 @@ export function NotificationCenter({
 				</RadixPopover.Portal>
 			</RadixPopover.Root>
 			<NotificationLogDialog
+				usePermanentArchive
 				open={isLogOpen}
 				onOpenChange={setIsLogOpen}
 				groups={allGroups}

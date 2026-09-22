@@ -424,7 +424,12 @@ describe("createHooksApi", () => {
 		// override 经 hook.to_review 下发给 reducer（第三形参）。
 		expect(manager.transitionToReview).toHaveBeenCalledWith("task-1", "hook", "permission");
 		// ready 事件 payload 内联 permission 人轴（前端通知标题据此措辞）。
-		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith("workspace-1", "task-1", "permission");
+		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith(
+			"workspace-1",
+			"task-1",
+			"permission",
+			expect.objectContaining({ candidateId: expect.any(String), summary: expect.any(Object) }),
+		);
 	});
 
 	it("B3: leaves non-Claude / non-permission to_review without an override", async () => {
@@ -513,7 +518,12 @@ describe("createHooksApi", () => {
 
 		expect(response).toEqual({ ok: true });
 		expect(manager.transitionToReview).toHaveBeenCalledWith("task-1", "hook", "plan_review");
-		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith("workspace-1", "task-1", "plan_review");
+		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith(
+			"workspace-1",
+			"task-1",
+			"plan_review",
+			expect.objectContaining({ candidateId: expect.any(String), summary: expect.any(Object) }),
+		);
 	});
 
 	it("S5: classifies Claude AskUserQuestion PreToolUse into userTurnKind=question and broadcasts it", async () => {
@@ -556,7 +566,12 @@ describe("createHooksApi", () => {
 
 		expect(response).toEqual({ ok: true });
 		expect(manager.transitionToReview).toHaveBeenCalledWith("task-1", "hook", "question");
-		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith("workspace-1", "task-1", "question");
+		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith(
+			"workspace-1",
+			"task-1",
+			"question",
+			expect.objectContaining({ candidateId: expect.any(String), summary: expect.any(Object) }),
+		);
 	});
 
 	it("S5: ExitPlanMode arriving via PermissionRequest is labeled plan_review (race-proof, not permission)", async () => {
@@ -601,7 +616,12 @@ describe("createHooksApi", () => {
 
 		expect(response).toEqual({ ok: true });
 		expect(manager.transitionToReview).toHaveBeenCalledWith("task-1", "hook", "plan_review");
-		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith("workspace-1", "task-1", "plan_review");
+		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith(
+			"workspace-1",
+			"task-1",
+			"plan_review",
+			expect.objectContaining({ candidateId: expect.any(String), summary: expect.any(Object) }),
+		);
 	});
 
 	it("S5: double-fire — the matcher `*`→activity for the same tool is a benign no-op (no transition)", async () => {
@@ -747,7 +767,12 @@ describe("createHooksApi", () => {
 		expect(recordPendingUserDecision).toHaveBeenCalledTimes(1);
 		expect(manager.unparkTaskSession).toHaveBeenCalledWith("task-1");
 		expect(manager.transitionToReview).toHaveBeenCalledWith("task-1", "hook", "question");
-		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith("workspace-1", "task-1", "question");
+		expect(broadcastTaskReadyForReview).toHaveBeenCalledWith(
+			"workspace-1",
+			"task-1",
+			"question",
+			expect.objectContaining({ candidateId: expect.any(String), summary: expect.any(Object) }),
+		);
 		expect(recordPendingUserDecision.mock.invocationCallOrder[0]).toBeLessThan(
 			vi.mocked(manager.unparkTaskSession).mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
 		);

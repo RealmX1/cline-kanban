@@ -16,6 +16,12 @@ import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collect
 import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
+import type { NotificationAssessmentInput } from "../notifications/notification-assessment-service";
+import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
+import {
+	captureNotificationSignal,
+	recordNotificationSignalDecision,
+} from "../notifications/notification-signal-capture";
 import { recordAgentRaisedPendingUserDecision } from "../state/agent-raised-pending-user-decision-store";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
@@ -35,6 +41,7 @@ export interface CreateHooksApiDependencies {
 		workspaceId: string,
 		taskId: string,
 		userTurnKind: RuntimeTaskSessionUserTurnKind,
+		evidence?: Pick<NotificationAssessmentInput, "candidateId" | "summary" | "finalMessage">,
 	) => void;
 	captureTaskTurnCheckpoint?: (input: {
 		cwd: string;
@@ -136,15 +143,38 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 
 	return {
 		ingest: async (input) => {
+			let notificationCandidateId: string | null = null;
 			try {
 				const body = parseHookIngestRequest(input);
 				const taskId = body.taskId;
 				const workspaceId = body.workspaceId;
 				const event = body.event;
+				if (event === "to_review" || body.notificationCandidateId)
+					notificationCandidateId = await captureNotificationSignal({
+						candidateId: body.notificationCandidateId,
+						workspaceId,
+						taskId,
+						sourceKind: "hook_runtime_received",
+						rawPayload: body,
+					});
+				await recordNotificationSignalDecision(notificationCandidateId, "hook_ingest_received", { event });
+				if (notificationCandidateId) {
+					const lifecycle = await getNotificationLifecycleArchive().get(notificationCandidateId);
+					if (
+						lifecycle &&
+						["eligible", "evaluating", "deferred", "published", "superseded"].includes(
+							lifecycle.candidate.notificationProcessingStatus,
+						)
+					) {
+						await recordNotificationSignalDecision(notificationCandidateId, "hook_retry_deduplicated", {});
+						return { ok: true } satisfies RuntimeHookIngestResponse;
+					}
+				}
 				const knownWorkspacePath = deps.getWorkspacePathById(workspaceId);
 				const workspaceContext = knownWorkspacePath ? null : await loadWorkspaceContextById(workspaceId);
 				const workspacePath = knownWorkspacePath ?? workspaceContext?.repoPath ?? null;
 				if (!workspacePath) {
+					await recordNotificationSignalDecision(notificationCandidateId, "workspace_not_found", {}, true);
 					return {
 						ok: false,
 						error: `Workspace "${workspaceId}" not found`,
@@ -154,6 +184,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				const manager = await deps.ensureTerminalManagerForWorkspace(workspaceId, workspacePath);
 				const summary = manager.getSummary(taskId);
 				if (!summary) {
+					await recordNotificationSignalDecision(notificationCandidateId, "session_not_found", {}, true);
 					return {
 						ok: false,
 						error: `Task "${taskId}" not found in workspace "${workspaceId}"`,
@@ -355,6 +386,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				}
 
 				if (!canTransitionTaskForHookEvent(summary, event, userTurnKindOverride)) {
+					await recordNotificationSignalDecision(
+						notificationCandidateId,
+						"hook_transition_gate_excluded",
+						{ summary, event, userTurnKindOverride },
+						true,
+					);
 					if (body.metadata) {
 						manager.applyHookActivity(taskId, body.metadata);
 					}
@@ -412,6 +449,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						? manager.transitionToReview(taskId, "hook", userTurnKindOverride ?? undefined)
 						: manager.transitionToRunning(taskId, { userInitiatedResume });
 				if (!transitionedSummary) {
+					await recordNotificationSignalDecision(notificationCandidateId, "hook_transition_failed", {}, true);
 					return {
 						ok: false,
 						error: `Task "${taskId}" transition failed`,
@@ -446,6 +484,13 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					deps.notifyExplorationThreadGraphAgentTurnStopped?.({ workspaceId, explorationId });
 				}
 
+				if (transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way")
+					await recordNotificationSignalDecision(
+						notificationCandidateId,
+						"by_the_way_notification_excluded",
+						{},
+						true,
+					);
 				if (
 					event === "to_review" &&
 					transitionedSummary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way"
@@ -456,6 +501,11 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						workspaceId,
 						taskId,
 						resolveSessionFacets(transitionedSummary).userTurnKind,
+						{
+							candidateId: notificationCandidateId ?? undefined,
+							summary: manager.getSummary(taskId) ?? transitionedSummary,
+							finalMessage: body.metadata?.finalMessage ?? undefined,
+						},
 					);
 
 					// F1：把 turn-checkpoint 的 git 工作移出 hook 客户端的响应关键路径。
@@ -496,6 +546,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						: {}),
 				} satisfies RuntimeHookIngestResponse;
 			} catch (error) {
+				await recordNotificationSignalDecision(notificationCandidateId, "hook_runtime_processing_failed", {}, true);
 				const message = error instanceof Error ? error.message : String(error);
 				return { ok: false, error: message } satisfies RuntimeHookIngestResponse;
 			}

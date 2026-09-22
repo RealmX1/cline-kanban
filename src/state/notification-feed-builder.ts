@@ -3,6 +3,7 @@
 // 拿不到其它 repo 的 board 自行解析，故这三项必须后端在发送时算好。
 import { basename } from "node:path";
 import type { RuntimeNotificationFeedEntry } from "../core/api-contract";
+import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
 import type { PersistedNotificationEntry } from "./notification-log-store";
 import { listWorkspaceIndexEntries, loadWorkspaceBoardById } from "./workspace-state";
 
@@ -39,6 +40,10 @@ async function buildTaskDisplayInfoMap(workspaceId: string): Promise<Map<string,
 	} catch {
 		// board 读失败（工作区被删 / 瞬时错误）：留空 Map，taskTitle 走 `Task {id}` 兜底、isDone=false。
 	}
+	await getNotificationLifecycleArchive().syncTaskPanelStates(
+		workspaceId,
+		Array.from(infoByTaskId, ([taskId, info]) => ({ taskId, isDone: info.isDone })),
+	);
 	return infoByTaskId;
 }
 
@@ -59,8 +64,10 @@ export async function buildNotificationFeedEntries(
 			id: entry.id,
 			workspaceId,
 			taskId: entry.taskId,
-			repoName,
-			taskTitle: info?.title ?? `Task ${entry.taskId}`,
+			repoName: entry.repositoryNameSnapshot ?? repoName,
+			candidateId: entry.candidateId,
+			summaryText: entry.summaryText,
+			taskTitle: entry.taskTitleSnapshot ?? info?.title ?? `Task ${entry.taskId}`,
 			userTurnKind: entry.userTurnKind,
 			triggeredAt: entry.triggeredAt,
 			visitedAt: entry.visitedAt,

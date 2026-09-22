@@ -22,8 +22,10 @@ import { applySessionFacets, isNeverStartedPlaceholderTaskSessionSummary } from 
 import { getTaskColumnId, moveTaskToColumn, updateTaskDependencies } from "../core/task-board-mutations";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
+import { getRuntimeHomePath } from "./runtime-home-path";
+
 const RUNTIME_HOME_PARENT_DIR = ".cline";
-const RUNTIME_HOME_DIR = "kanban";
+
 const RUNTIME_WORKTREES_DIR = "worktrees";
 const WORKSPACES_DIR = "workspaces";
 const INDEX_FILENAME = "index.json";
@@ -194,9 +196,7 @@ function createEmptyWorkspaceIndex(): WorkspaceIndexFile {
 	};
 }
 
-export function getRuntimeHomePath(): string {
-	return join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_HOME_DIR);
-}
+export { getRuntimeHomePath } from "./runtime-home-path";
 
 export function getTaskWorktreesHomePath(): string {
 	return join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_WORKTREES_DIR);
@@ -358,13 +358,14 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 	let reconciledSessions = incomingSessions;
 	for (const column of incomingBoard.columns) {
 		for (const card of column.cards) {
-			if (incomingSessions[card.id] || persistedSessions[card.id]?.startedAt == null) {
+			const persistedSession = persistedSessions[card.id];
+			if (incomingSessions[card.id] || !persistedSession || persistedSession.startedAt == null) {
 				continue;
 			}
 			if (reconciledSessions === incomingSessions) {
 				reconciledSessions = { ...incomingSessions };
 			}
-			reconciledSessions[card.id] = persistedSessions[card.id];
+			reconciledSessions[card.id] = persistedSession;
 		}
 	}
 	return reconciledSessions;

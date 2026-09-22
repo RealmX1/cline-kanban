@@ -21,6 +21,10 @@ import {
 	type HookDeliveryFailureKind,
 	recordHookDeliveryFailure,
 } from "../diagnostics/hook-ingest-delivery-failure-logger";
+import {
+	captureNotificationSignal,
+	recordNotificationSignalDecision,
+} from "../notifications/notification-signal-capture";
 import { parseHookRuntimeContextFromEnv } from "../terminal/hook-runtime-context";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import {
@@ -51,6 +55,7 @@ export {
 const VALID_EVENTS = new Set<RuntimeHookEvent>(["to_review", "to_in_progress", "activity"]);
 
 interface HooksIngestArgs {
+	notificationCandidateId?: string;
 	event: RuntimeHookEvent;
 	taskId: string;
 	workspaceId: string;
@@ -65,6 +70,7 @@ interface HooksIngestArgs {
 }
 
 interface HookCommandMetadataOptionValues {
+	notificationCandidateId?: string;
 	source?: string;
 	activityText?: string;
 	toolName?: string;
@@ -564,8 +570,12 @@ function recordIngestDropForLifecycleEvent(
 }
 
 async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngestResponse> {
-	return await deliverHookIngestWithRetry(
+	let attempt = 0;
+	const response = await deliverHookIngestWithRetry(
 		async (signal) => {
+			await recordNotificationSignalDecision(args.notificationCandidateId, "hook_transport_attempt_started", {
+				attempt: ++attempt,
+			});
 			const trpcClient = createTRPCProxyClient<RuntimeAppRouter>({
 				links: [
 					httpBatchLink({
@@ -580,6 +590,7 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngest
 				],
 			});
 			return await trpcClient.hooks.ingest.mutate({
+				notificationCandidateId: args.notificationCandidateId,
 				taskId: args.taskId,
 				workspaceId: args.workspaceId,
 				event: args.event,
@@ -596,10 +607,21 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngest
 			timeoutMs: resolveHookIngestTimeoutMs(),
 			maxAttempts: HOOK_INGEST_MAX_ATTEMPTS,
 			backoffMs: HOOK_INGEST_RETRY_BACKOFF_MS,
-			onFinalFailure: ({ attempts, failureKind, error }) =>
-				recordIngestDropForLifecycleEvent(args, attempts, failureKind, error),
+			onFinalFailure: async ({ attempts, failureKind, error }) => {
+				await recordNotificationSignalDecision(
+					args.notificationCandidateId,
+					"hook_transport_failed",
+					{ attempts, failureKind },
+					true,
+				);
+				await recordIngestDropForLifecycleEvent(args, attempts, failureKind, error);
+			},
 		},
 	);
+	await recordNotificationSignalDecision(args.notificationCandidateId, "hook_transport_accepted", {
+		attempts: attempt,
+	});
+	return response;
 }
 
 export function serializeHarnessUserPromptProcessingDirective(
@@ -736,24 +758,35 @@ async function runHooksNotify(
 	options: HookCommandMetadataOptionValues,
 	payloadArg: string | undefined,
 ): Promise<void> {
+	let notificationCandidateId: string | null = null;
 	try {
 		const stdinPayload = await readStdinText();
+		notificationCandidateId = await captureRawNotificationHook(event, stdinPayload, payloadArg, options);
 		const jobDisposition = resolveExplorationWorkBranchJobHookDispositionForStdin(
 			stdinPayload,
 			options.hookEventName,
 		);
 		if (jobDisposition.kind !== "ingest_normally") {
+			await recordNotificationSignalDecision(
+				notificationCandidateId,
+				"exploration_job_hook_excluded",
+				{ disposition: jobDisposition.kind },
+				true,
+			);
 			if (jobDisposition.kind === "short_circuit_with_pre_tool_use_deny") {
 				process.stdout.write(`${jobDisposition.stdoutJson}\n`);
 			}
 			return;
 		}
-		const parsedArgs = parseHooksIngestArgs(event, options, payloadArg, stdinPayload);
+		const parsedArgs = {
+			...parseHooksIngestArgs(event, options, payloadArg, stdinPayload),
+			notificationCandidateId: notificationCandidateId ?? undefined,
+		};
 		const codexEnrichedArgs = await enrichCodexReviewMetadata(parsedArgs, process.cwd());
 		const args = await enrichDroidReviewMetadata(codexEnrichedArgs);
 		await ingestHookEvent(args);
 	} catch {
-		// Best effort only.
+		await recordNotificationSignalDecision(notificationCandidateId, "hook_cli_processing_failed", {}, true);
 	}
 }
 
@@ -794,8 +827,15 @@ async function runCodexHookSubcommand(
 		payload = "";
 	}
 
+	const notificationCandidateId = await captureRawNotificationHook(event, payload, payloadArg, options);
 	const jobDisposition = resolveExplorationWorkBranchJobHookDispositionForStdin(payload, options.hookEventName);
 	if (jobDisposition.kind !== "ingest_normally") {
+		await recordNotificationSignalDecision(
+			notificationCandidateId,
+			"exploration_job_hook_excluded",
+			{ disposition: jobDisposition.kind },
+			true,
+		);
 		process.stdout.write(
 			`${jobDisposition.kind === "short_circuit_with_pre_tool_use_deny" ? jobDisposition.stdoutJson : "{}"}\n`,
 		);
@@ -805,11 +845,14 @@ async function runCodexHookSubcommand(
 	process.stdout.write("{}\n");
 
 	try {
-		const parsedArgs = parseHooksIngestArgs(event, options, payloadArg, payload);
+		const parsedArgs = {
+			...parseHooksIngestArgs(event, options, payloadArg, payload),
+			notificationCandidateId: notificationCandidateId ?? undefined,
+		};
 		const codexEnrichedArgs = await enrichCodexReviewMetadata(parsedArgs, process.cwd());
 		await ingestHookEvent(codexEnrichedArgs);
 	} catch {
-		// Best effort only.
+		await recordNotificationSignalDecision(notificationCandidateId, "hook_cli_processing_failed", {}, true);
 	}
 }
 
@@ -821,7 +864,11 @@ async function runGeminiHookSubcommand(): Promise<void> {
 		payload = "";
 	}
 
+	const notificationCandidateId = await captureRawNotificationHook("activity", payload, undefined, {
+		source: "gemini",
+	});
 	if (resolveExplorationWorkBranchJobHookDispositionForStdin(payload, undefined).kind !== "ingest_normally") {
+		await recordNotificationSignalDecision(notificationCandidateId, "exploration_job_hook_excluded", {}, true);
 		process.stdout.write("{}\n");
 		return;
 	}
@@ -852,7 +899,18 @@ async function runGeminiHookSubcommand(): Promise<void> {
 		source: "gemini",
 		hookEventName: hookEventName || undefined,
 	});
-	spawnBackgroundKanban(appendMetadataFlags(["hooks", "notify", "--event", mappedEvent], metadata));
+	spawnBackgroundKanban(
+		appendMetadataFlags(
+			[
+				"hooks",
+				"notify",
+				"--event",
+				mappedEvent,
+				...(notificationCandidateId ? ["--notification-candidate-id", notificationCandidateId] : []),
+			],
+			metadata,
+		),
+	);
 }
 
 export function buildCodexWrapperChildArgs(agentArgs: string[]): string[] {
@@ -983,17 +1041,27 @@ async function runHooksIngest(
 	let args: HooksIngestArgs;
 	try {
 		const stdinPayload = await readStdinText();
+		const notificationCandidateId = await captureRawNotificationHook(event, stdinPayload, payloadArg, options);
 		const jobDisposition = resolveExplorationWorkBranchJobHookDispositionForStdin(
 			stdinPayload,
 			options.hookEventName,
 		);
 		if (jobDisposition.kind !== "ingest_normally") {
+			await recordNotificationSignalDecision(
+				notificationCandidateId,
+				"exploration_job_hook_excluded",
+				{ disposition: jobDisposition.kind },
+				true,
+			);
 			if (jobDisposition.kind === "short_circuit_with_pre_tool_use_deny") {
 				process.stdout.write(`${jobDisposition.stdoutJson}\n`);
 			}
 			return;
 		}
-		const parsedArgs = parseHooksIngestArgs(event, options, payloadArg, stdinPayload);
+		const parsedArgs = {
+			...parseHooksIngestArgs(event, options, payloadArg, stdinPayload),
+			notificationCandidateId: notificationCandidateId ?? undefined,
+		};
 		const codexEnrichedArgs = await enrichCodexReviewMetadata(parsedArgs, process.cwd());
 		args = await enrichDroidReviewMetadata(codexEnrichedArgs);
 	} catch (error) {
@@ -1023,6 +1091,7 @@ export function registerHooksCommand(program: Command): void {
 		.command("ingest [payload]")
 		.description("Ingest hook event into Kanban runtime.")
 		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
 		.option("--tool-name <name>", "Tool name.")
@@ -1043,6 +1112,7 @@ export function registerHooksCommand(program: Command): void {
 		.command("notify [payload]")
 		.description("Best-effort hook ingest that never throws.")
 		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
 		.option("--tool-name <name>", "Tool name.")
@@ -1070,6 +1140,7 @@ export function registerHooksCommand(program: Command): void {
 		.command("codex-hook [payload]")
 		.description("Codex hook entrypoint.")
 		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
 		.option("--tool-name <name>", "Tool name.")
@@ -1097,4 +1168,23 @@ export function registerHooksCommand(program: Command): void {
 				agentArgs: agentArgs ?? [],
 			});
 		});
+}
+
+async function captureRawNotificationHook(
+	event: RuntimeHookEvent,
+	stdinPayload: string,
+	payloadArg: string | undefined,
+	options: HookCommandMetadataOptionValues,
+): Promise<string | null> {
+	if (options.notificationCandidateId) return options.notificationCandidateId;
+	const payload = parseJsonObject(stdinPayload.trim());
+	const hookEventName = options.hookEventName ?? (payload ? readStringField(payload, "hook_event_name") : null);
+	if (event !== "to_review" && !/stop|afteragent|notification|permission|question/iu.test(hookEventName ?? ""))
+		return null;
+	return await captureNotificationSignal({
+		workspaceId: process.env.KANBAN_HOOK_WORKSPACE_ID ?? "unresolved-workspace",
+		taskId: process.env.KANBAN_HOOK_TASK_ID ?? "unresolved-task",
+		sourceKind: "hook_cli_raw",
+		rawPayload: { event, stdinPayload, payloadArg, options },
+	});
 }

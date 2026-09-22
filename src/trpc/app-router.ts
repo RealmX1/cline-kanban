@@ -4,7 +4,6 @@
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import { initTRPC, TRPCError } from "@trpc/server";
 import { z } from "zod";
-
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
@@ -357,6 +356,29 @@ import {
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
 } from "../core/api-contract";
+import {
+	notificationIntelligenceSettingsResponseSchema,
+	notificationIntelligenceSettingsSchema,
+	saveKanbanModelProviderProfileRequestSchema,
+} from "../core/notification-intelligence-settings-contract";
+import {
+	notificationArchiveListRequestSchema,
+	notificationArchiveListResponseSchema,
+	notificationCandidateLifecycleSchema,
+} from "../core/notification-lifecycle-contract";
+import {
+	getNotificationIntelligenceSettings,
+	saveKanbanModelProviderProfile,
+	saveNotificationIntelligenceSettings,
+} from "../model-provider-access/kanban-model-provider-settings";
+import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
+import { redactNotificationEvidence } from "../notifications/notification-signal-capture";
+import { NOTIFICATION_SPEECH_MODEL_CATALOG } from "../notifications/notification-speech-provider-catalog";
+import {
+	previewNotificationSpeech,
+	readArchivedNotificationAudio,
+	synthesizeNotificationSpeech,
+} from "../notifications/notification-speech-synthesis";
 
 export interface RuntimeTrpcWorkspaceScope {
 	workspaceId: string;
@@ -558,6 +580,7 @@ export interface RuntimeTrpcContext {
 		openFile: (input: RuntimeOpenFileRequest) => Promise<RuntimeOpenFileResponse>;
 		getUpdateStatus: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeUpdateStatusResponse>;
 		runUpdateNow: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeRunUpdateResponse>;
+		broadcastNotificationArchiveChanged?: () => Promise<void>;
 		markTaskNotificationsVisited: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeNotificationMarkVisitedRequest,
@@ -779,6 +802,116 @@ const gitSyncActionInputSchema = z.object({
 });
 
 export const runtimeAppRouter = t.router({
+	notificationIntelligence: t.router({
+		getSettings: t.procedure
+			.output(notificationIntelligenceSettingsResponseSchema)
+			.query(() => getNotificationIntelligenceSettings()),
+		saveSettings: t.procedure.input(notificationIntelligenceSettingsSchema).mutation(async ({ input }) => {
+			await saveNotificationIntelligenceSettings(input);
+			return { ok: true };
+		}),
+		saveProvider: t.procedure.input(saveKanbanModelProviderProfileRequestSchema).mutation(async ({ input }) => {
+			await saveKanbanModelProviderProfile(input);
+			return { ok: true };
+		}),
+		speechModels: t.procedure.query(() => NOTIFICATION_SPEECH_MODEL_CATALOG),
+		markAllArchivedNotificationsVisited: t.procedure
+			.input(z.object({ includeCompletedTasks: z.boolean() }))
+			.mutation(async ({ input, ctx }) => {
+				const changedCount = await getNotificationLifecycleArchive().markAllVisited(input.includeCompletedTasks);
+				await ctx.runtimeApi.broadcastNotificationArchiveChanged?.();
+				return { changedCount };
+			}),
+		clearAllNotificationPanels: t.procedure.mutation(async ({ ctx }) => {
+			const changedCount = await getNotificationLifecycleArchive().clearAllPanels();
+			await ctx.runtimeApi.broadcastNotificationArchiveChanged?.();
+			return { changedCount };
+		}),
+		listPanelTaskGroups: t.procedure
+			.input(notificationArchiveListRequestSchema)
+			.output(notificationArchiveListResponseSchema)
+			.query(({ input }) => getNotificationLifecycleArchive().panelGroups(input)),
+		listArchive: t.procedure
+			.input(notificationArchiveListRequestSchema)
+			.output(notificationArchiveListResponseSchema)
+			.query(({ input }) => getNotificationLifecycleArchive().list(input)),
+		getLifecycle: t.procedure
+			.input(z.object({ candidateId: z.string() }))
+			.output(notificationCandidateLifecycleSchema.nullable())
+			.query(({ input }) => getNotificationLifecycleArchive().get(input.candidateId)),
+		claimDelivery: t.procedure
+			.input(z.object({ candidateId: z.string(), clientId: z.string().max(100) }))
+			.mutation(async ({ input }) => ({
+				claimed: await getNotificationLifecycleArchive().claimDelivery(input.candidateId, input.clientId),
+			})),
+		recordClientFilter: t.procedure
+			.input(
+				z.object({
+					candidateId: z.string(),
+					clientId: z.string().max(100),
+					reason: z.enum([
+						"notifications_disabled",
+						"foreground_visible",
+						"visible_peer_tab",
+						"eligible",
+						"stale",
+					]),
+				}),
+			)
+			.mutation(async ({ input }) => {
+				await getNotificationLifecycleArchive().update(
+					input.candidateId,
+					{},
+					"client_notification_policy_decided",
+					input,
+				);
+				return { ok: true };
+			}),
+		recordClientObservation: t.procedure
+			.input(
+				z.object({
+					candidateId: z.string(),
+					clientId: z.string().max(100),
+					observation: z.enum([
+						"desktop_accepted",
+						"desktop_blocked",
+						"speech_started",
+						"sound_disabled",
+						"chime_requested",
+						"speech_chime_fallback_requested",
+						"speech_ended",
+						"speech_failed",
+						"speech_stale_skipped",
+						"browser_speech_has_no_audio_export",
+					]),
+					detail: z.string().max(1000).optional(),
+				}),
+			)
+			.mutation(async ({ input }) => {
+				const archive = getNotificationLifecycleArchive();
+				if ((await archive.get(input.candidateId))?.candidate.deliveryClaimedBy !== input.clientId)
+					throw new TRPCError({ code: "FORBIDDEN" });
+				await archive.update(
+					input.candidateId,
+					{},
+					`client_${input.observation}`,
+					redactNotificationEvidence(input),
+				);
+				return { ok: true };
+			}),
+		synthesizeSpeech: t.procedure
+			.input(z.object({ candidateId: z.string(), clientId: z.string().max(100), retry: z.boolean().optional() }))
+			.mutation(({ input }) => synthesizeNotificationSpeech(input)),
+		retryArchivedSpeech: t.procedure
+			.input(z.object({ candidateId: z.string() }))
+			.mutation(({ input }) =>
+				synthesizeNotificationSpeech({ candidateId: input.candidateId, preview: true, retry: true }),
+			),
+		previewSpeech: t.procedure.mutation(() => previewNotificationSpeech()),
+		archivedAudio: t.procedure
+			.input(z.object({ candidateId: z.string() }))
+			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
+	}),
 	runtime: t.router({
 		getConfig: t.procedure.output(runtimeConfigResponseSchema).query(async ({ ctx }) => {
 			return await ctx.runtimeApi.loadConfig(ctx.workspaceScope);

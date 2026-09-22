@@ -114,7 +114,7 @@ import {
 	restoreConsumedHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 } from "../state/restoration-deferred-harness-generated-prompt-store";
 import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
-import { loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
+import { listWorkspaceIndexEntries, loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
 import { suggestTaskNamesFromTaskDescription } from "../task-name-suggestion/suggest-task-names-from-task-description";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../terminal/session-manager";
@@ -2126,6 +2126,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			return await deps.runUpdateNow();
 		},
 		// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。落库后重建 feed 全局广播。
+		broadcastNotificationArchiveChanged: async () => {
+			for (const workspace of await listWorkspaceIndexEntries())
+				await deps.broadcastNotificationLogUpdated?.(workspace.workspaceId);
+		},
 		markTaskNotificationsVisited: async (_workspaceScope, input) => {
 			await markTaskNotificationsVisited(input.workspaceId, input.taskId, Date.now());
 			await deps.broadcastNotificationLogUpdated?.(input.workspaceId);

@@ -4,6 +4,12 @@
 import type { IncomingMessage } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
+import {
+	createNotificationAssessmentService,
+	type NotificationAssessmentInput,
+} from "../notifications/notification-assessment-service";
+import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
+import { loadPersistedWorkspaceStateById } from "../state/workspace-state";
 
 // 「会话型」任务来源：Kanban 直接持有结构化消息、在卡片详情里渲染成会话面板的那一类 agent。
 // 目前是 Cline SDK（进程内）与 ACP（stdio 子进程）两种。
@@ -44,11 +50,7 @@ import type {
 import { isNotifiableUserTurn, resolveSessionFacets } from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
-import {
-	appendNotificationLogEntry,
-	readAllNotificationLogs,
-	readNotificationLog,
-} from "../state/notification-log-store";
+import { readAllNotificationLogs, readNotificationLog } from "../state/notification-log-store";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
 import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
@@ -94,6 +96,7 @@ export interface RuntimeStateHub {
 		workspaceId: string,
 		taskId: string,
 		userTurnKind: RuntimeTaskSessionUserTurnKind,
+		evidence?: Pick<NotificationAssessmentInput, "candidateId" | "summary" | "finalMessage">,
 	) => void;
 	// 通知中心：某 workspace 的日志变更（mark-visited / clear / board 变更导致 isDone 刷新）后，
 	// 重建该 workspace 的派生 feed 并全局广播给所有客户端（铃铛跨 repo 聚合）。
@@ -114,6 +117,8 @@ export interface RuntimeStateHub {
 }
 
 export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): RuntimeStateHub {
+	const latestNotificationAssistantMessages = new Map<string, string>();
+	const latestNotificationSummaries = new Map<string, RuntimeTaskSessionSummary>();
 	const terminalSummaryUnsubscribeByWorkspaceId = new Map<string, () => void>();
 	// 一个 workspace 可能同时挂着多种「会话型」来源（Cline SDK 与 ACP），故按
 	// `${workspaceId}::${sourceKind}` 复合键登记订阅，避免二者互相顶掉。
@@ -275,6 +280,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const queueTaskSessionSummaryBroadcast = (workspaceId: string, summary: RuntimeTaskSessionSummary) => {
+		latestNotificationSummaries.set(`${workspaceId}:${summary.taskId}`, summary);
 		// 「停止生成响应后固定宽限期」回收的归一化边沿检测。刻意挂在这里而不是各 transport 内部：
 		// 终端 / Cline SDK / ACP 三条 summary 流全部经此排队，是唯一的跨 transport 汇聚点；且这一句
 		// 位于下方「0 客户端提前返回」之前，故计时与「有没有人在看」彻底解耦——关标签页 / 切项目 /
@@ -331,15 +337,19 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			const currentFacets = resolveSessionFacets(summary);
 			if (
 				previousSummary &&
-				summary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way" &&
 				!isNotifiableUserTurn(resolveSessionFacets(previousSummary)) &&
 				isNotifiableUserTurn(currentFacets)
 			) {
-				broadcastTaskReadyForReview(workspaceId, summary.taskId, currentFacets.userTurnKind);
+				broadcastTaskReadyForReview(workspaceId, summary.taskId, currentFacets.userTurnKind, {
+					summary,
+					finalMessage: latestNotificationAssistantMessages.get(`${workspaceId}:${summary.taskId}`),
+				});
 			}
 		});
 		conversationSummaryUnsubscribeBySubscriptionKey.set(subscriptionKey, unsubscribe);
 		const unsubscribeMessage = service.onMessage((taskId, message) => {
+			if (message.role === "assistant")
+				latestNotificationAssistantMessages.set(`${workspaceId}:${taskId}`, message.content);
 			broadcastTaskChatMessage(workspaceId, taskId, message);
 		});
 		conversationMessageUnsubscribeBySubscriptionKey.set(subscriptionKey, unsubscribeMessage);
@@ -402,6 +412,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const disposeWorkspace = (workspaceId: string) => {
+		for (const key of latestNotificationSummaries.keys())
+			if (key.startsWith(`${workspaceId}:`)) latestNotificationSummaries.delete(key);
+		for (const key of latestNotificationAssistantMessages.keys())
+			if (key.startsWith(`${workspaceId}:`)) latestNotificationAssistantMessages.delete(key);
 		const unsubscribeSummary = terminalSummaryUnsubscribeByWorkspaceId.get(workspaceId);
 		if (unsubscribeSummary) {
 			try {
@@ -470,7 +484,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			return;
 		}
 		try {
-			const entries = await readNotificationLog(workspaceId);
+			const entries = await readNotificationLog(workspaceId, 50);
 			const feed = await buildNotificationFeedEntries(workspaceId, entries);
 			const payload: RuntimeStateStreamNotificationLogUpdatedMessage = {
 				type: "notification_log_updated",
@@ -527,17 +541,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			sendRuntimeStateMessage(client, payload);
 		}
 	};
-	const persistNotification = async (
-		workspaceId: string,
-		input: { taskId: string; userTurnKind: RuntimeTaskSessionUserTurnKind; triggeredAt: number },
-	): Promise<void> => {
-		try {
-			await appendNotificationLogEntry(workspaceId, input);
-		} catch {
-			// 落库失败（磁盘错误等）不应打断 OS 通知路径；容忍并继续。
-		}
-		await broadcastNotificationLogUpdated(workspaceId);
-	};
 
 	const buildAggregatedNotificationFeed = async (): Promise<RuntimeNotificationFeedEntry[]> => {
 		try {
@@ -553,31 +556,60 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
+	const notificationAssessment = createNotificationAssessmentService({
+		publishUnarchived: async (notification) => {
+			const payload: RuntimeStateStreamTaskReadyForReviewMessage = {
+				type: "task_ready_for_review",
+				workspaceId: notification.workspaceId,
+				taskId: notification.taskId,
+				triggeredAt: Date.now(),
+				userTurnKind: notification.userTurnKind,
+				summaryText: `通知留档不完整，请查看任务。${notification.finalMessage ?? ""}`,
+				archiveIncomplete: true,
+			};
+			for (const client of runtimeStateClientsByWorkspaceId.get(notification.workspaceId) ?? [])
+				sendRuntimeStateMessage(client, payload);
+		},
+		getSummary: async (workspaceId, taskId) => {
+			const live = latestNotificationSummaries.get(`${workspaceId}:${taskId}`);
+			if (live) return live;
+			try {
+				const persisted = await loadPersistedWorkspaceStateById(workspaceId);
+				return (
+					persisted.sessions[taskId] ??
+					(persisted.board.columns.some((column) => column.cards.some((card) => card.id === taskId))
+						? undefined
+						: null)
+				);
+			} catch {
+				return undefined;
+			}
+		},
+		publish: async (candidate) => {
+			await broadcastNotificationLogUpdated(candidate.workspaceId);
+			const payload: RuntimeStateStreamTaskReadyForReviewMessage = {
+				type: "task_ready_for_review",
+				workspaceId: candidate.workspaceId,
+				taskId: candidate.taskId,
+				triggeredAt: Date.now(),
+				candidateId: candidate.candidateId,
+				summaryText: candidate.summaryText,
+				summaryLanguage: candidate.summaryLanguage,
+				taskTitleSnapshot: candidate.taskTitleSnapshot,
+				userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
+			};
+			for (const client of runtimeStateClientsByWorkspaceId.get(candidate.workspaceId) ?? [])
+				sendRuntimeStateMessage(client, payload);
+		},
+	});
 	const broadcastTaskReadyForReview = (
 		workspaceId: string,
 		taskId: string,
 		userTurnKind: RuntimeTaskSessionUserTurnKind,
+		evidence?: Pick<NotificationAssessmentInput, "candidateId" | "summary" | "finalMessage">,
 	) => {
-		const triggeredAt = Date.now();
-		// ① 先无条件落库 + 全局广播通知 feed——在下方 per-workspace「0 客户端」guard 之前，
-		// 故浏览器全关时段的后台事件也进持久化日志（跨 repo 聚合方案的核心卖点）。同一 triggeredAt
-		// 复用给下方一次性 OS 通知事件，保证两条路径的 id/时间一致。
-		void persistNotification(workspaceId, { taskId, userTurnKind, triggeredAt });
-		// ② 照旧广播一次性 task_ready_for_review（OS 通知用），仅发给本 workspace 的在场客户端，行为不变。
-		const runtimeClients = runtimeStateClientsByWorkspaceId.get(workspaceId);
-		if (!runtimeClients || runtimeClients.size === 0) {
-			return;
-		}
-		const payload: RuntimeStateStreamTaskReadyForReviewMessage = {
-			type: "task_ready_for_review",
-			workspaceId,
-			taskId,
-			triggeredAt,
-			userTurnKind,
-		};
-		for (const client of runtimeClients) {
-			sendRuntimeStateMessage(client, payload);
-		}
+		if (evidence?.summary) latestNotificationSummaries.set(`${workspaceId}:${taskId}`, evidence.summary);
+		void notificationAssessment.enqueue({ workspaceId, taskId, userTurnKind, ...evidence });
 	};
 
 	runtimeStateWebSocketServer.on("connection", async (client: WebSocket, context: unknown) => {
@@ -680,6 +712,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					clineSessionContextVersion,
 					notificationLog,
 				} satisfies RuntimeStateStreamSnapshotMessage);
+
 				if (client.readyState !== WebSocket.OPEN) {
 					if (monitorWorkspaceId) {
 						workspaceMetadataMonitor.disconnectWorkspace(monitorWorkspaceId);
@@ -701,6 +734,30 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 							summaries: conversationSummaries,
 						} satisfies RuntimeStateStreamTaskSessionsMessage);
 					}
+				}
+				// 通知重放是 best-effort：先完成订阅登记，档案慢或故障均不阻塞核心推流。
+				// 重放期间断连由 close handler 释放订阅；这里不再注册或重复释放 monitor。
+				try {
+					if (workspace.projectId)
+						for (const candidate of await getNotificationLifecycleArchive().recentReady(
+							workspace.projectId,
+							Date.now() - 60_000,
+						)) {
+							if (candidate.deliveryClaimedBy) continue;
+							sendRuntimeStateMessage(client, {
+								type: "task_ready_for_review",
+								workspaceId: candidate.workspaceId,
+								taskId: candidate.taskId,
+								candidateId: candidate.candidateId,
+								triggeredAt: candidate.notificationPanelVisibilityChangedAt,
+								userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
+								summaryText: candidate.summaryText,
+								summaryLanguage: candidate.summaryLanguage,
+								taskTitleSnapshot: candidate.taskTitleSnapshot,
+							});
+						}
+				} catch {
+					logAgentSessionRetentionWarning("notification-replay-failed: 通知档案重放失败，核心状态推流继续。");
 				}
 			} catch (error) {
 				if (didConnectWorkspaceMonitor && monitorWorkspaceId) {
@@ -780,6 +837,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		broadcastExploratoryFindingsUpdated,
 		broadcastExplorationThreadGraphUpdated,
 		close: async () => {
+			notificationAssessment.close();
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {
 				clearTimeout(timer);
 			}

@@ -29,6 +29,7 @@ import {
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { NotificationIntelligenceSettingsSection } from "@/components/notification-intelligence-settings";
 import { AccountOrganizationSection } from "@/components/shared/account-organization-section";
 import { ClineSetupSection } from "@/components/shared/cline-setup-section";
 import {
@@ -1115,6 +1116,8 @@ export function RuntimeSettingsDialog({
 							) : null}
 						</div>
 					</div>
+
+					<NotificationIntelligenceSettingsSection />
 
 					{/* ---- 终端 agent 可靠性 ---- */}
 					<div data-settings-section="agent-reliability" />

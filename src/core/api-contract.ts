@@ -1174,6 +1174,8 @@ export type RuntimeClineMcpServerAuthStatus = z.infer<typeof runtimeClineMcpServ
 // taskTitle/repoName/isDone 一律后端派生——跨 repo 聚合下客户端只加载活跃 repo 的 board，拿不到
 // 其它 repo 的 board 自行解析。id = `${taskId}:${triggeredAt}`（append 幂等键）。
 export const runtimeNotificationFeedEntrySchema = z.object({
+	candidateId: z.string().optional(),
+	summaryText: z.string().optional(),
 	id: z.string(),
 	workspaceId: z.string(),
 	taskId: z.string(),
@@ -1247,6 +1249,11 @@ export type RuntimeStateStreamWorkspaceMetadataMessage = z.infer<
 >;
 
 export const runtimeStateStreamTaskReadyForReviewMessageSchema = z.object({
+	archiveIncomplete: z.boolean().optional(),
+	candidateId: z.string().optional(),
+	summaryText: z.string().optional(),
+	summaryLanguage: z.enum(["zh-CN", "en-US"]).optional(),
+	taskTitleSnapshot: z.string().optional(),
 	type: z.literal("task_ready_for_review"),
 	workspaceId: z.string(),
 	taskId: z.string(),
@@ -3468,6 +3475,7 @@ export const runtimeAgentRaisedToolPermissionPayloadSchema = z.object({
 export type RuntimeAgentRaisedToolPermissionPayload = z.infer<typeof runtimeAgentRaisedToolPermissionPayloadSchema>;
 
 export const runtimeHookIngestRequestSchema = z.object({
+	notificationCandidateId: z.string().uuid().optional(),
 	taskId: z.string(),
 	workspaceId: z.string(),
 	event: runtimeHookEventSchema,

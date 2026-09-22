@@ -122,6 +122,7 @@ export interface UseRuntimeStateStreamResult {
 	latestTaskChatMessage: RuntimeStateStreamTaskChatMessage | null;
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
+	taskReadyForReviewEvents: RuntimeStateStreamTaskReadyForReviewMessage[];
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
 	// 流（重）连握手代数：每次快照递增（每次快照 = 一次（重）连握手完成）。推送只覆盖「在场期间」
 	// 的变更；断连窗口的变更不补发，消费者以它为重连信号重查对齐。
@@ -152,6 +153,7 @@ interface RuntimeStateStreamStore {
 	latestTaskChatMessage: RuntimeStateStreamTaskChatMessage | null;
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
+	taskReadyForReviewEvents: RuntimeStateStreamTaskReadyForReviewMessage[];
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
 	streamSnapshotGeneration: number;
 	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
@@ -197,6 +199,7 @@ function createInitialRuntimeStateStreamStore(requestedWorkspaceId: string | nul
 		latestTaskChatMessage: null,
 		taskChatMessagesByTaskId: {},
 		latestTaskReadyForReview: null,
+		taskReadyForReviewEvents: [],
 		latestMcpAuthStatuses: null,
 		streamSnapshotGeneration: 0,
 		exploratoryFindings: null,
@@ -288,6 +291,7 @@ function runtimeStateStreamReducer(
 			latestTaskChatMessage: null,
 			taskChatMessagesByTaskId: {},
 			latestTaskReadyForReview: state.latestTaskReadyForReview,
+			taskReadyForReviewEvents: state.taskReadyForReviewEvents,
 			latestMcpAuthStatuses: state.latestMcpAuthStatuses,
 			// 快照是聚合日志的权威源：整体替换分桶（含重连后从后端恢复已访问态）。
 			// ?? [] 兜底旧服务端/异常 payload——缺字段时不因 for-of undefined 抛错而丢掉整个 snapshot。
@@ -319,6 +323,7 @@ function runtimeStateStreamReducer(
 			latestTaskChatMessage: didProjectChange ? null : state.latestTaskChatMessage,
 			taskChatMessagesByTaskId: didProjectChange ? {} : state.taskChatMessagesByTaskId,
 			latestTaskReadyForReview: didProjectChange ? null : state.latestTaskReadyForReview,
+			taskReadyForReviewEvents: didProjectChange ? [] : state.taskReadyForReviewEvents,
 			// 切项目必须清：图是 per-exploration 的，换了 project 之后旧推送里的 explorationId
 			// 可能与新 project 的某张卡片撞号（taskId 是 board-local 短 id）。
 			latestExplorationThreadGraphUpdate: didProjectChange ? null : state.latestExplorationThreadGraphUpdate,
@@ -360,6 +365,10 @@ function runtimeStateStreamReducer(
 		return {
 			...state,
 			latestTaskReadyForReview: action.payload,
+			taskReadyForReviewEvents: [
+				...state.taskReadyForReviewEvents.filter((event) => Date.now() - event.triggeredAt < 60_000),
+				action.payload,
+			],
 		};
 	}
 	if (action.type === "notification_log_updated") {
@@ -689,6 +698,7 @@ export function useRuntimeStateStream(
 		latestTaskChatMessage: state.latestTaskChatMessage,
 		taskChatMessagesByTaskId: state.taskChatMessagesByTaskId,
 		latestTaskReadyForReview: state.latestTaskReadyForReview,
+		taskReadyForReviewEvents: state.taskReadyForReviewEvents,
 		latestMcpAuthStatuses: state.latestMcpAuthStatuses,
 		streamSnapshotGeneration: state.streamSnapshotGeneration,
 		exploratoryFindings: state.exploratoryFindings,

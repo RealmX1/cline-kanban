@@ -143,6 +143,7 @@ export default function App(): ReactElement {
 		latestTaskChatMessage,
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
+		taskReadyForReviewEvents,
 		latestMcpAuthStatuses,
 		exploratoryFindings: pushedExploratoryFindings,
 		latestExplorationThreadGraphUpdate,
@@ -469,6 +470,8 @@ export default function App(): ReactElement {
 			});
 	}, []);
 	const notificationCenter = useNotificationCenter({
+		permanentArchiveEnabled: true,
+		selectedWorkspaceId: currentProjectId,
 		notificationLogByWorkspaceId,
 		selectedTaskId,
 		onMarkTaskVisited: handleMarkTaskNotificationsVisited,
@@ -522,6 +525,7 @@ export default function App(): ReactElement {
 		board,
 		isDocumentVisible,
 		latestTaskReadyForReview,
+		taskReadyForReviewEvents,
 		taskSessions: sessions,
 		readyForReviewNotificationsEnabled,
 		notificationSoundEnabled,
@@ -1304,6 +1308,9 @@ export default function App(): ReactElement {
 						notificationCenter={
 							<NotificationCenter
 								panelGroups={notificationCenter.panelGroups}
+								onLoadMorePanelGroups={notificationCenter.loadMorePanelGroups}
+								hasMorePanelGroups={notificationCenter.hasMorePanelGroups}
+								archiveReadError={notificationCenter.archiveReadError}
 								allGroups={notificationCenter.allGroups}
 								allEntriesSortedByTriggeredAtDescending={
 									notificationCenter.allEntriesSortedByTriggeredAtDescending

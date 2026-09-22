@@ -5,6 +5,7 @@
 // 底部「全部已读」（范围含 done 组，与本弹窗可见范围一致）+「清空」。
 import { CheckCheck, Trash2 } from "lucide-react";
 import { useState } from "react";
+import { NotificationArchiveBrowser } from "@/components/notification-archive-browser";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import {
@@ -184,6 +185,7 @@ function NotificationHistoryGroupedList({
 }
 
 export function NotificationLogDialog({
+	usePermanentArchive = false,
 	open,
 	onOpenChange,
 	groups,
@@ -193,16 +195,40 @@ export function NotificationLogDialog({
 	onMarkAllHistoryVisited,
 	onClearAll,
 }: {
+	usePermanentArchive?: boolean;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	groups: NotificationGroup[];
 	entriesSortedByTriggeredAtDescending: RuntimeNotificationFeedEntry[];
 	onFocusTask: (workspaceId: string, taskId: string) => void;
 	onMarkGroupVisited: (workspaceId: string, taskId: string) => void;
-	onMarkAllHistoryVisited: () => void;
-	onClearAll: () => void;
+	onMarkAllHistoryVisited: (() => void) | (() => Promise<boolean>);
+	onClearAll: (() => void) | (() => Promise<boolean>);
 }): React.ReactElement {
 	const [isConfirmingClear, setIsConfirmingClear] = useState(false);
+	const [archiveRefreshSequence, setArchiveRefreshSequence] = useState(0);
+	const [isMutating, setIsMutating] = useState(false);
+	const [mutationError, setMutationError] = useState("");
+	async function runHistoryMutation(
+		mutation: (() => void) | (() => Promise<boolean>),
+		failureMessage: string,
+	): Promise<boolean> {
+		setIsMutating(true);
+		setMutationError("");
+		try {
+			if ((await mutation()) === false) {
+				setMutationError(failureMessage);
+				return false;
+			}
+			setArchiveRefreshSequence((sequence) => sequence + 1);
+			return true;
+		} catch {
+			setMutationError(failureMessage);
+			return false;
+		} finally {
+			setIsMutating(false);
+		}
+	}
 	// 默认平铺时间流：历史的首要用途是「按时间回看发生过什么」，分组是次选排列。
 	const [arrangement, setArrangement] = useState<NotificationHistoryArrangement>("flat_chronological");
 
@@ -225,7 +251,14 @@ export function NotificationLogDialog({
 					<NotificationHistoryArrangementTabs arrangement={arrangement} onArrangementChange={setArrangement} />
 				</DialogHeader>
 				<DialogBody>
-					{isEmpty ? (
+					{mutationError && <p role="alert">{mutationError}</p>}
+					{usePermanentArchive ? (
+						<NotificationArchiveBrowser
+							onFocusTask={onFocusTask}
+							grouped={arrangement === "grouped_by_task"}
+							archiveRefreshSequence={archiveRefreshSequence}
+						/>
+					) : isEmpty ? (
 						<p className="m-0 py-8 text-center text-[13px] text-text-secondary">
 							{arrangement === "flat_chronological"
 								? "暂无通知历史，这里会按时间倒序列出全部通知（含已读）。"
@@ -244,15 +277,17 @@ export function NotificationLogDialog({
 					<Button
 						variant="ghost"
 						icon={<CheckCheck size={14} />}
-						disabled={!hasAnyUnvisited}
-						onClick={onMarkAllHistoryVisited}
+						disabled={isMutating || (!usePermanentArchive && !hasAnyUnvisited)}
+						onClick={() => {
+							void runHistoryMutation(onMarkAllHistoryVisited, "全部已读操作未完成");
+						}}
 					>
 						全部已读
 					</Button>
 					<Button
 						variant="ghost"
 						icon={<Trash2 size={14} />}
-						disabled={isEmpty}
+						disabled={isMutating || (!usePermanentArchive && isEmpty)}
 						onClick={() => setIsConfirmingClear(true)}
 					>
 						清空
@@ -261,11 +296,12 @@ export function NotificationLogDialog({
 			</Dialog>
 			<AlertDialog open={isConfirmingClear} onOpenChange={setIsConfirmingClear}>
 				<AlertDialogHeader>
-					<AlertDialogTitle>清空全部通知历史？</AlertDialogTitle>
+					<AlertDialogTitle>清空通知面板？</AlertDialogTitle>
 				</AlertDialogHeader>
 				<AlertDialogBody>
+					{mutationError && <p role="alert">{mutationError}</p>}
 					<AlertDialogDescription>
-						这会永久删除所有 repo 的通知日志（含已读与未读），无法撤销。
+						仅将当前面板通知标为已清空。原文、筛选判断与音频会完整保留在永久档案中。
 					</AlertDialogDescription>
 				</AlertDialogBody>
 				<AlertDialogFooter>
@@ -277,9 +313,12 @@ export function NotificationLogDialog({
 					<AlertDialogAction asChild>
 						<Button
 							variant="danger"
-							onClick={() => {
-								onClearAll();
-								setIsConfirmingClear(false);
+							disabled={isMutating}
+							onClick={(event) => {
+								event.preventDefault();
+								void runHistoryMutation(onClearAll, "清空面板未完成，历史记录仍保留").then((completed) => {
+									if (completed) setIsConfirmingClear(false);
+								});
 							}}
 						>
 							清空

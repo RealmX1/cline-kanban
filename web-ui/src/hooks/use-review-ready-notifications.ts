@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
+import { notificationIntelligenceClient } from "@/runtime/notification-intelligence-query";
 import type {
 	RuntimeStateStreamTaskReadyForReviewMessage,
 	RuntimeTaskSessionSummary,
@@ -13,6 +15,7 @@ import {
 } from "@/utils/notification-badge-sync";
 import { getBrowserNotificationPermission } from "@/utils/notification-permission";
 import { playReviewReadyNotificationSound } from "@/utils/notification-sound";
+import { playNotificationSummarySpeech } from "@/utils/notification-summary-speech";
 import { useDocumentTitle, useInterval, useUnmount, useWindowEvent } from "@/utils/react-use";
 import {
 	createTabPresenceId,
@@ -27,13 +30,13 @@ interface UseReviewReadyNotificationsOptions {
 	board: BoardData;
 	isDocumentVisible: boolean;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
+	taskReadyForReviewEvents?: RuntimeStateStreamTaskReadyForReviewMessage[];
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	readyForReviewNotificationsEnabled: boolean;
 	notificationSoundEnabled: boolean;
 	workspacePath: string | null;
 }
 
-const MAX_HANDLED_READY_EVENT_KEYS = 200;
 const TAB_VISIBILITY_HEARTBEAT_INTERVAL_MS = 5000;
 const SERVICE_WORKER_READY_TIMEOUT_MS = 1500;
 
@@ -150,6 +153,7 @@ export function useReviewReadyNotifications({
 	board,
 	isDocumentVisible,
 	latestTaskReadyForReview,
+	taskReadyForReviewEvents,
 	taskSessions,
 	readyForReviewNotificationsEnabled,
 	notificationSoundEnabled,
@@ -157,8 +161,7 @@ export function useReviewReadyNotifications({
 }: UseReviewReadyNotificationsOptions): void {
 	const notificationPresenceTabIdRef = useRef<string>(createTabPresenceId());
 	const notificationBadgeSyncSourceIdRef = useRef<string>(createNotificationBadgeSyncSourceId());
-	const handledReadyForReviewEventKeysRef = useRef<Set<string>>(new Set());
-	const handledReadyForReviewEventKeyQueueRef = useRef<string[]>([]);
+	const handledReadyForReviewEventKeysRef = useRef<Map<string, number>>(new Map());
 	const [pendingReviewReadyNotificationCount, setPendingReviewReadyNotificationCount] = useState(0);
 	const [isWindowFocused, setIsWindowFocused] = useState(() => {
 		if (typeof document === "undefined") {
@@ -222,66 +225,158 @@ export function useReviewReadyNotifications({
 	);
 
 	useEffect(() => {
-		if (!latestTaskReadyForReview) {
-			return;
-		}
-		if (!activeWorkspaceId || latestTaskReadyForReview.workspaceId !== activeWorkspaceId) {
-			return;
-		}
-		const eventKey = `${latestTaskReadyForReview.workspaceId}:${latestTaskReadyForReview.taskId}:${latestTaskReadyForReview.triggeredAt}`;
-		if (handledReadyForReviewEventKeysRef.current.has(eventKey)) {
-			return;
-		}
-		handledReadyForReviewEventKeysRef.current.add(eventKey);
-		handledReadyForReviewEventKeyQueueRef.current.push(eventKey);
-		if (handledReadyForReviewEventKeyQueueRef.current.length > MAX_HANDLED_READY_EVENT_KEYS) {
-			const oldestKey = handledReadyForReviewEventKeyQueueRef.current.shift();
-			if (oldestKey) {
-				handledReadyForReviewEventKeysRef.current.delete(oldestKey);
+		handledReadyForReviewEventKeysRef.current.clear();
+		setPendingReviewReadyNotificationCount(0);
+	}, [activeWorkspaceId]);
+
+	useEffect(() => {
+		const processEvent = (latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null) => {
+			if (!latestTaskReadyForReview) {
+				return;
 			}
-		}
-		const isVisibleNow = isDocumentCurrentlyVisible(isDocumentVisible);
-		const isWindowFocusedNow = typeof document === "undefined" ? isWindowFocused : document.hasFocus();
-		const hasVisiblePeerTabForWorkspace = hasVisibleKanbanTabForWorkspace(
-			latestTaskReadyForReview.workspaceId,
-			notificationPresenceTabIdRef.current,
-		);
-		if (
-			!readyForReviewNotificationsEnabled ||
-			(isVisibleNow && isWindowFocusedNow) ||
-			hasVisiblePeerTabForWorkspace
-		) {
-			return;
-		}
-		const selection = findCardSelection(board, latestTaskReadyForReview.taskId);
-		const taskTitle = selection
-			? truncateTaskPromptLabel(selection.card.prompt) || `Task ${latestTaskReadyForReview.taskId}`
-			: `Task ${latestTaskReadyForReview.taskId}`;
-		const finalMessage = taskSessions[latestTaskReadyForReview.taskId]?.latestHookActivity?.finalMessage;
-		const notificationBody = resolveReviewReadyNotificationBody(workspaceTitle, taskTitle, finalMessage);
-		setPendingReviewReadyNotificationCount((current) => current + 1);
-		const notificationTitle = resolveReviewReadyNotificationTitle(latestTaskReadyForReview.userTurnKind);
-		void (async () => {
-			const didShowNotification = await showReadyForReviewNotification({
-				taskId: latestTaskReadyForReview.taskId,
-				workspaceId: latestTaskReadyForReview.workspaceId,
-				title: notificationTitle,
-				body: notificationBody,
-			});
-			// 提示音与通知共享同一套门控（开关 / 可见性 / peer tab），并额外绑定「OS 通知确实弹出」：
-			// 仅当 didShowNotification 为真（浏览器权限 granted 且通知创建成功）时才发声，
-			// 杜绝「权限未授予 → 无通知横幅却照样响声」的不一致路径（角标计数已在上方无条件更新，作为降级视觉提示）。
-			// 设置里关「Play a sound」时同样被跳过——出通知不出声。
-			if (didShowNotification && notificationSoundEnabled) {
-				playReviewReadyNotificationSound(latestTaskReadyForReview.userTurnKind);
+			if (!activeWorkspaceId || latestTaskReadyForReview.workspaceId !== activeWorkspaceId) {
+				return;
 			}
-		})();
+			const eventKey =
+				latestTaskReadyForReview.candidateId ??
+				`${latestTaskReadyForReview.workspaceId}:${latestTaskReadyForReview.taskId}:${latestTaskReadyForReview.triggeredAt}`;
+			if (handledReadyForReviewEventKeysRef.current.has(eventKey)) {
+				return;
+			}
+			handledReadyForReviewEventKeysRef.current.set(eventKey, Date.now());
+			for (const [key, handledAt] of handledReadyForReviewEventKeysRef.current) {
+				if (Date.now() - handledAt > 120_000) handledReadyForReviewEventKeysRef.current.delete(key);
+			}
+			const isVisibleNow = isDocumentCurrentlyVisible(isDocumentVisible);
+			const isWindowFocusedNow = typeof document === "undefined" ? isWindowFocused : document.hasFocus();
+			if (latestTaskReadyForReview.archiveIncomplete) toast.error("通知留档不完整，请检查运行时和磁盘状态。");
+			const hasVisiblePeerTabForWorkspace = hasVisibleKanbanTabForWorkspace(
+				latestTaskReadyForReview.workspaceId,
+				notificationPresenceTabIdRef.current,
+			);
+			if (latestTaskReadyForReview.candidateId)
+				void notificationIntelligenceClient()
+					.recordClientFilter.mutate({
+						candidateId: latestTaskReadyForReview.candidateId,
+						clientId: notificationPresenceTabIdRef.current,
+						reason: !readyForReviewNotificationsEnabled
+							? "notifications_disabled"
+							: isVisibleNow && isWindowFocusedNow
+								? "foreground_visible"
+								: hasVisiblePeerTabForWorkspace
+									? "visible_peer_tab"
+									: Date.now() - latestTaskReadyForReview.triggeredAt > 60_000
+										? "stale"
+										: "eligible",
+					})
+					.catch(() => undefined);
+			if (
+				!readyForReviewNotificationsEnabled ||
+				(isVisibleNow && isWindowFocusedNow) ||
+				hasVisiblePeerTabForWorkspace
+			) {
+				return;
+			}
+			const selection = findCardSelection(board, latestTaskReadyForReview.taskId);
+			const taskTitle = selection
+				? truncateTaskPromptLabel(selection.card.prompt) || `Task ${latestTaskReadyForReview.taskId}`
+				: `Task ${latestTaskReadyForReview.taskId}`;
+			const finalMessage = taskSessions[latestTaskReadyForReview.taskId]?.latestHookActivity?.finalMessage;
+			const notificationBody = resolveReviewReadyNotificationBody(
+				workspaceTitle,
+				taskTitle,
+				latestTaskReadyForReview.summaryText ?? finalMessage,
+			);
+			const notificationTitle = resolveReviewReadyNotificationTitle(latestTaskReadyForReview.userTurnKind);
+			void (async () => {
+				const candidateId = latestTaskReadyForReview.candidateId;
+				const clientId = notificationPresenceTabIdRef.current;
+				if (Date.now() - latestTaskReadyForReview.triggeredAt > 60_000) return;
+				if (candidateId) {
+					try {
+						if (!(await notificationIntelligenceClient().claimDelivery.mutate({ candidateId, clientId })).claimed)
+							return;
+					} catch {
+						// 仅领取失败允许后续事件重放；领取完成后的通知和付费语音不得重复执行。
+						handledReadyForReviewEventKeysRef.current.delete(eventKey);
+						return;
+					}
+				}
+				setPendingReviewReadyNotificationCount((current) => current + 1);
+				const didShowNotification = await showReadyForReviewNotification({
+					taskId: latestTaskReadyForReview.taskId,
+					workspaceId: latestTaskReadyForReview.workspaceId,
+					title: notificationTitle,
+					body: notificationBody,
+				});
+				// 提示音与通知共享同一套门控（开关 / 可见性 / peer tab），并额外绑定「OS 通知确实弹出」：
+				// 仅当 didShowNotification 为真（浏览器权限 granted 且通知创建成功）时才发声，
+				// 杜绝「权限未授予 → 无通知横幅却照样响声」的不一致路径（角标计数已在上方无条件更新，作为降级视觉提示）。
+				// 设置里关「Play a sound」时同样被跳过——出通知不出声。
+				if (candidateId)
+					await notificationIntelligenceClient()
+						.recordClientObservation.mutate({
+							candidateId,
+							clientId,
+							observation: didShowNotification ? "desktop_accepted" : "desktop_blocked",
+						})
+						.catch(() => toast.error("通知投递结果未能留档"));
+				const recordSoundDisposition = (
+					observation: "sound_disabled" | "chime_requested" | "speech_chime_fallback_requested",
+					detail?: string,
+				) => {
+					if (candidateId)
+						void notificationIntelligenceClient()
+							.recordClientObservation.mutate({ candidateId, clientId, observation, detail })
+							.catch(() => toast.error("声音投递结果未能留档"));
+				};
+				if (didShowNotification && !notificationSoundEnabled)
+					recordSoundDisposition("sound_disabled", "browser_sound_setting");
+				if (didShowNotification && notificationSoundEnabled) {
+					const settings = candidateId
+						? await notificationIntelligenceClient()
+								.getSettings.query()
+								.then((result) => result.settings)
+								.catch(() => null)
+						: null;
+					if (settings?.speechMode === "off") {
+						recordSoundDisposition("sound_disabled", "runtime_speech_mode");
+						return;
+					}
+					if (
+						settings?.speechMode === "summary" &&
+						(latestTaskReadyForReview.userTurnKind ?? "review") === "review"
+					) {
+						try {
+							await playNotificationSummarySpeech({
+								settings: {
+									...settings,
+									summaryLanguage: latestTaskReadyForReview.summaryLanguage ?? settings.summaryLanguage,
+								},
+								text: latestTaskReadyForReview.summaryText ?? notificationBody,
+								candidateId,
+								clientId,
+								triggeredAt: latestTaskReadyForReview.triggeredAt,
+							});
+						} catch {
+							recordSoundDisposition("speech_chime_fallback_requested");
+							playReviewReadyNotificationSound(latestTaskReadyForReview.userTurnKind);
+						}
+					} else {
+						recordSoundDisposition("chime_requested");
+						playReviewReadyNotificationSound(latestTaskReadyForReview.userTurnKind);
+					}
+				}
+			})().catch(() => undefined);
+		};
+		for (const event of taskReadyForReviewEvents ?? [latestTaskReadyForReview]) processEvent(event);
 	}, [
 		activeWorkspaceId,
 		board,
 		isDocumentVisible,
 		isWindowFocused,
 		latestTaskReadyForReview,
+		taskReadyForReviewEvents,
 		readyForReviewNotificationsEnabled,
 		notificationSoundEnabled,
 		taskSessions,
@@ -311,12 +406,6 @@ export function useReviewReadyNotifications({
 			broadcastNotificationBadgeClear(notificationBadgeSyncSourceIdRef.current, activeWorkspaceId);
 		}
 	}, [activeWorkspaceId, readyForReviewNotificationsEnabled]);
-
-	useEffect(() => {
-		handledReadyForReviewEventKeysRef.current.clear();
-		handledReadyForReviewEventKeyQueueRef.current = [];
-		setPendingReviewReadyNotificationCount(0);
-	}, [activeWorkspaceId]);
 
 	const baseTitle = workspaceTitle || "Kanban";
 	const documentTitle =

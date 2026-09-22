@@ -18,7 +18,7 @@ import { appendDiagnosticEventToRotatingJsonlJournal } from "../diagnostics/rota
  * 用字面量联合而不是任意字符串：用途集合要能被穷举、被 grep、被统计脚本安全地当维度用。
  * 新功能接入时在这里加一个成员——那一步正是「这次调用该记成什么」的强制表态点。
  */
-export type ModelUsagePurpose = "task_name_suggestion";
+export type ModelUsagePurpose = "task_name_suggestion" | "notification_assessment";
 
 export type ModelProviderCallOutcome = "completed" | "unavailable";
 

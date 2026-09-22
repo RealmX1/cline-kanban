@@ -59,6 +59,7 @@ export interface UseProjectNavigationResult {
 	latestTaskChatMessage: ReturnType<typeof useRuntimeStateStream>["latestTaskChatMessage"];
 	taskChatMessagesByTaskId: ReturnType<typeof useRuntimeStateStream>["taskChatMessagesByTaskId"];
 	latestTaskReadyForReview: ReturnType<typeof useRuntimeStateStream>["latestTaskReadyForReview"];
+	taskReadyForReviewEvents: ReturnType<typeof useRuntimeStateStream>["taskReadyForReviewEvents"];
 	latestMcpAuthStatuses: ReturnType<typeof useRuntimeStateStream>["latestMcpAuthStatuses"];
 	exploratoryFindings: ReturnType<typeof useRuntimeStateStream>["exploratoryFindings"];
 	latestExplorationThreadGraphUpdate: ReturnType<typeof useRuntimeStateStream>["latestExplorationThreadGraphUpdate"];
@@ -109,6 +110,7 @@ export function useProjectNavigation({
 		latestTaskChatMessage,
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
+		taskReadyForReviewEvents,
 		latestMcpAuthStatuses,
 		exploratoryFindings,
 		latestExplorationThreadGraphUpdate,
@@ -339,6 +341,7 @@ export function useProjectNavigation({
 		latestTaskChatMessage,
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
+		taskReadyForReviewEvents,
 		latestMcpAuthStatuses,
 		exploratoryFindings,
 		latestExplorationThreadGraphUpdate,
