@@ -37,7 +37,11 @@ If the long-lived server is run by a `while true` supervisor script (e.g. `run-c
 
 ```sh
 cd /Users/bominzhang/Documents/GitHub/cline-kanban
-npm run typecheck && npm run build
+# 从 supervisor 的实际启动命令确认路径；下列路径只是本机示例。
+KANBAN_DEPLOY_NODE_BINARY=/Users/bominzhang/.nvm/versions/node/v24.12.0/bin/node
+export PATH="$(dirname "$KANBAN_DEPLOY_NODE_BINARY"):$PATH"
+npm run typecheck && npm run build && \
+  "$KANBAN_DEPLOY_NODE_BINARY" scripts/verify-notification-archive-native-runtime.mjs || exit 1
 
 # resolve the PID from the PORT, never from the name
 PID=$(lsof -nP -iTCP:3484 -sTCP:LISTEN -t | head -1)
@@ -68,15 +72,19 @@ When no supervisor loop owns the server, rebuild first, then recreate the tmux s
 ```sh
 cd /Users/bominzhang/Documents/GitHub/cline-kanban
 git status --short --branch
-npm run typecheck
-npm run build
+# 构建和下方服务启动使用同一 Node；预检失败时不得停止旧服务。
+export PATH="/Users/bominzhang/.nvm/versions/node/v24.12.0/bin:$PATH"
+npm run typecheck && npm run build && \
+  /Users/bominzhang/.nvm/versions/node/v24.12.0/bin/node scripts/verify-notification-archive-native-runtime.mjs || exit 1
 
 tmux kill-session -t cline-kanban-3484
 tmux new-session -d -s cline-kanban-3484 -c /Users/bominzhang/Documents/GitHub/review-validate-fix \
-'export PATH="/Users/bominzhang/.local/bin:/Users/bominzhang/.nvm/versions/node/v24.12.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; exec /Users/bominzhang/.nvm/versions/node/v24.12.0/bin/kanban --no-open --skip-shutdown-cleanup --port 3484 > /tmp/cline-kanban-3484.log 2> /tmp/cline-kanban-3484.err'
+'export PATH="/Users/bominzhang/.nvm/versions/node/v24.12.0/bin:/Users/bominzhang/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; exec /Users/bominzhang/.nvm/versions/node/v24.12.0/bin/node /Users/bominzhang/.nvm/versions/node/v24.12.0/bin/kanban --no-open --skip-shutdown-cleanup --port 3484 > /tmp/cline-kanban-3484.log 2> /tmp/cline-kanban-3484.err'
 ```
 
 Adjust paths and ports for the local machine. The important properties are: rebuild first, restart with cleanup disabled, preserve user PATH, and verify the new process. For Cline Kanban, launch the long-lived server inside a tmux session named `cline-kanban` or `cline-kanban-<port>`; RVF uses that tmux session name as the ownership signal for an existing Kanban listener and intentionally does not use the listener cwd as the repo boundary.
+
+两种示例都要求先完成备份与现场盘点。若原生依赖预检失败，在源 checkout 使用同一目标 Node 对应的 npm 执行 `npm rebuild better-sqlite3`，再从构建步骤重跑；不能跳过失败检查继续重启。部署后还须确认真实实例的 `notificationIntelligence.listArchive` 成功，首页 HTTP 200 不能证明档案数据库可用。
 
 ## Shutdown Guardrail
 

@@ -124,3 +124,33 @@ run：`~/.rvf/user-local-data/run-logs/runs/rvf-20260922T122340Z-agentic-initiat
 两路外部审查完成，1 条意见合并为 RVF-001。validate/fix 子代理在独立 attempt 中复现「误点添加 Provider 后，统一保存其它设置也落盘占位 profile」，移除新增时强制标脏，保留编辑或绑定后的保存行为。新增四种回归情形，修复前 1 失败 / 16 通过，修复后 17/17 通过，Web 类型检查及 Biome 通过；patch 已经工具合回，无 scope 扩展。
 
 此修复由自动化覆盖；部署后验证 reconcile 不需要新增或改写现场引导，保持原四个 ID。最终合并版本的验证命令、结果与缓存证据以本 run 的 `artifacts/handoff.md` 及 `artifacts/validation-records.json` 为准。本轮未提交、未部署。
+
+## 2026-09-22 部署后无语音的独立复核与防复发修复
+
+本节记录现场复核时的状态，不代表故障已在线上恢复。主 agent 与独立 SubAgent 分别查证：
+
+- 部署标记为 `e3ffbbc44343bb3bcb0eb5ec46f13b3d1246eedf`；服务 PID `10639` 使用 Node `v24.12.0`。只读查询 `notificationIntelligence.listArchive` 返回 HTTP 500，原生 `better_sqlite3.node` 的编译 ABI 为 `127`，运行时要求 `137`。
+- 永久档案目录 `~/.cline/kanban/notification-lifecycle-archive/` 为空；运行日志反复报告 `notification-archive-incomplete`。旧 `workspaces/cline-kanban/notifications.json` 有 300 条，最后一条为 2026-09-16 16:11:00（UTC+8），无任务 `8dc89`。不能据此还原用户所指单次通知的完整过滤和播放状态，也不能事后补回未落盘证据。
+- 当前保存配置为 `speechMode=chime`、`speechProvider=browser`、`notificationSpeechBinding=null`、`assessmentEnabled=false`；这只证明当前落盘状态，不能证明用户此前的保存操作失败。
+- 留档异常走 `publishUnarchived`，消息没有 `candidateId`，前端因此仅保留基础提示音，并继续受通知权限、前台可见性和声音开关限制。这是既有降级策略，不绕过候选领取/留档调用第三方 TTS。
+- `9f073e97` 仅修复设置保存、凭据展示与导航，未修复此次原生模块兼容问题。
+
+防复发修改：新增 `scripts/verify-notification-archive-native-runtime.mjs`，在内存 SQLite 中实际创建表、写入、读取并校验；通过 `prebuild` 在清理旧产物之前阻止不匹配的构建。本地部署 skill 另要求用**实际启动服务的 Node** 再运行预检，并统一安装、构建、启动的 Node；只检查构建 Node 不能覆盖跨版本启动。部署后档案 API 检查失败即不算部署成功。
+
+本轮验证：
+
+- `npm run prebuild`：Node 22.22.3 / ABI 127 通过。
+- Node 24.12.0 执行同一脚本：按预期非零退出，明确报告 ABI 不匹配和 rebuild 操作建议。
+- 固定 Node 24 的 PATH 执行 `npm run build`：在 `prebuild` 阶段拒绝；既有 `dist/cli.js` SHA-256 未变，没有执行 clean。
+- `npm run test:guarded -- --project precommit-safe test/runtime/notification-lifecycle-archive.test.ts`：4/4 通过，包含测试安全策略与仓库 mutation canary。
+
+部署后验证 reconcile：
+
+| 行为 | 部署前已证 | 部署后待验 | 处理 |
+| --- | --- | --- | --- |
+| 原生 SQLite 与构建 Node 匹配 | 内存读写成功、ABI 不匹配阻止清理旧产物 | 实际服务启动 Node 与依赖一致，档案 API 可读 | 复用 `e80b5f80-f50d-40e3-81bf-124edd13f13b` |
+| 基础提示音 / 摘要语音选择 | 本轮未修改投递或配置语义 | 原系统语音与 BYOK 验证继续适用 | 不新增条目 |
+
+`verification list` 自查仍为 `ok:true, count:4`，保持原 1 个 automated / 3 个 guided 定义及资产，不变更脚本、不重复注册；因此无新增 dry-run。后续正常 deployment record 后沿用原定义。自动资产位于 `~/.cline/kanban/verifications/e80b5f80-f50d-40e3-81bf-124edd13f13b/`，cleanup 为 automatic，兜底清理命令仍为 `kanban verification cleanup --verification-id e80b5f80-f50d-40e3-81bf-124edd13f13b`；无 repo instrumentation。
+
+此轮修改未提交、未部署；未重建线上 checkout 的依赖，也未改变用户语音配置。线上故障仍需在部署时按实际服务 Node 重建依赖并完成档案 API 验证，不能把新增预检等同于线上修复完成。
