@@ -56,6 +56,7 @@ export default defineConfig({
 	// Compared with fully minifying everything, this costs about 545 KB raw and
 	// 58.5 KB gzipped, which is the current tradeoff for keeping OpenCode stable.
 	plugins: [tailwindcss(), react(), selectiveBuildMinifyPlugin()],
+	worker: { format: "es" },
 	envPrefix: ["VITE_", "POSTHOG_"],
 	define: {
 		__APP_VERSION__: JSON.stringify(rootPkg.version),

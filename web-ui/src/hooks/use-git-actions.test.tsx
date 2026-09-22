@@ -218,6 +218,42 @@ describe("useGitActions", () => {
 		}
 	});
 
+	it("commit/PR 入口跨 summary 和 board 更新稳定，调用时使用最新列门控", async () => {
+		let actions: UseGitActionsResult | null = null;
+		const stableInput: Parameters<typeof useGitActions>[0] = {
+			currentProjectId: "project-1",
+			board: createBoard(),
+			selectedCard: null,
+			runtimeProjectConfig: createRuntimeConfig("cline"),
+			sendTaskSessionInput: vi.fn(),
+			sendTaskChatMessage: vi.fn(),
+			fetchTaskWorkspaceInfo: async () => createWorkspaceInfo(),
+			taskConversationSessionSummariesByTaskId: {},
+			isGitHistoryOpen: false,
+			refreshWorkspaceState: async () => {},
+		};
+		function Harness({ input }: { input: Parameters<typeof useGitActions>[0] }) {
+			actions = useGitActions(input);
+			return null;
+		}
+		await act(async () => root.render(<Harness input={stableInput} />));
+		const first = actions!;
+		const changedBoard = createBoard();
+		changedBoard.columns[0]!.id = "validation";
+		await act(async () =>
+			root.render(
+				<Harness input={{ ...stableInput, board: changedBoard, taskConversationSessionSummariesByTaskId: {} }} />,
+			),
+		);
+		expect(actions!.handleCommitTask).toBe(first.handleCommitTask);
+		expect(actions!.handleOpenPrTask).toBe(first.handleOpenPrTask);
+		await act(async () => first.handleCommitTask("task-1"));
+		expect(stableInput.sendTaskChatMessage).not.toHaveBeenCalled();
+		expect(showAppToastMock).toHaveBeenCalledWith(
+			expect.objectContaining({ message: "Commit and PR actions are only available for tasks in Review." }),
+		);
+	});
+
 	it("passes the selected card's worktreeMode to the git history task scope", async () => {
 		const board = createBoard({ worktreeMode: "inplace" });
 		const selection = createCardSelection(board);

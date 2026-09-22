@@ -37,7 +37,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
 	formatClineReasoningEffortLabel,
@@ -126,7 +126,7 @@ export interface TaskCardBusinessProps {
 	columnId: BoardColumnId;
 	sessionSummary?: RuntimeTaskSessionSummary;
 	selected?: boolean;
-	onClick?: () => void;
+	onClick?: (card: BoardCardModel) => void;
 	onStart?: (taskId: string) => void;
 	onMoveToTrash?: (taskId: string) => void;
 	onMoveToValidation?: (taskId: string) => void;
@@ -135,7 +135,7 @@ export interface TaskCardBusinessProps {
 	onRestoreFromTrash?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
-	onOpenTaskEditor?: () => void;
+	onOpenTaskEditor?: (card: BoardCardModel) => void;
 	onCommit?: (taskId: string) => void;
 	onOpenPr?: (taskId: string) => void;
 	onCancelAutomaticAction?: (taskId: string) => void;
@@ -193,7 +193,7 @@ export type TaskCardBodyRenderRole =
  * 三种渲染角色见 `TaskCardBodyRenderRole`；本组件对角色差异的处理全部收敛在下方那组派生布尔里，
  * 各处 JSX 只读布尔、不再重复判角色。
  */
-export function TaskCardBody({
+export const TaskCardBody = memo(function TaskCardBody({
 	card,
 	columnId,
 	sessionSummary,
@@ -236,9 +236,9 @@ export function TaskCardBody({
 	/** 仅置顶板分身：分身上 stage 标签的展示名，取自该卡真正所在 board 列的 `title`（trash 即 "Done"）。 */
 	stageDisplayNameForTaskPinboardCopy?: string;
 	/** 仅置顶板分身：点 stage 标签跳回原 stage 里的本体卡并高亮。 */
-	onNavigateToCanonicalCardInItsStage?: () => void;
+	onNavigateToCanonicalCardInItsStage?: (taskId: string) => void;
 	/** 仅置顶板分身：点置顶原因行编辑原因。 */
-	onEditTaskPinboardPinReason?: () => void;
+	onEditTaskPinboardPinReason?: (taskId: string) => void;
 }): React.ReactElement {
 	const [isHovered, setIsHovered] = useState(false);
 	// 卡片各处的 Tooltip（右上角动作组、行内 Edit/Copy、头部药丸、git 状态）content 统一收成
@@ -699,12 +699,12 @@ export function TaskCardBody({
 								}
 								clickActivationTimerRef.current = window.setTimeout(() => {
 									clickActivationTimerRef.current = null;
-									onClick();
+									onClick(card);
 								}, CLICK_ACTIVATION_DELAY_MS);
 								return;
 							}
 							// backlog 立即开编辑弹窗；trash 在上方 !isCardInteractive 已 return，到不了这里。
-							onClick();
+							onClick(card);
 						}
 			}
 			onDoubleClick={
@@ -873,7 +873,7 @@ export function TaskCardBody({
 									onMouseDown={stopEvent}
 									onClick={(event) => {
 										stopEvent(event);
-										onNavigateToCanonicalCardInItsStage?.();
+										onNavigateToCanonicalCardInItsStage?.(card.id);
 									}}
 									className={cn(
 										"inline-flex min-w-0 items-center gap-0.5 rounded-full text-[10px] leading-none hover:underline",
@@ -928,7 +928,7 @@ export function TaskCardBody({
 								onMouseDown={stopEvent}
 								onClick={(event) => {
 									stopEvent(event);
-									onEditTaskPinboardPinReason?.();
+									onEditTaskPinboardPinReason?.(card.id);
 								}}
 								className={cn(
 									"mt-1 flex w-full items-start gap-1 rounded-sm text-left text-[11px] leading-snug hover:text-text-primary",
@@ -957,7 +957,7 @@ export function TaskCardBody({
 										onClick={(event) => {
 											stopEvent(event);
 											if (onOpenTaskEditor) {
-												onOpenTaskEditor();
+												onOpenTaskEditor(card);
 												return;
 											}
 											setDraftTitle(card.title);
@@ -1312,4 +1312,4 @@ export function TaskCardBody({
 		return createPortal(cardShell, document.body);
 	}
 	return cardShell;
-}
+});

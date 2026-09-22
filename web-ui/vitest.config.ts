@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
+const require = createRequire(import.meta.url);
 const rootPkg = JSON.parse(readFileSync(resolve(__dirname, "../package.json"), "utf-8")) as { version: string };
 
 export default defineConfig({
@@ -12,6 +14,11 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
+			// 模型只由插件间接依赖；统一身份以允许离线测试替换模型。
+			"@tensorflow-models/universal-sentence-encoder": require.resolve(
+				"@tensorflow-models/universal-sentence-encoder",
+				{ paths: [require.resolve("@orama/plugin-embeddings")] },
+			),
 			"@": resolve(__dirname, "src"),
 			"@runtime-agent-catalog": resolve(__dirname, "../src/core/agent-catalog.ts"),
 			"@runtime-agent-session-transport-selection": resolve(
@@ -39,6 +46,7 @@ export default defineConfig({
 		conditions: ["import", "module", "browser", "default"],
 	},
 	test: {
+		server: { deps: { inline: ["@orama/plugin-embeddings"] } },
 		environment: "jsdom",
 		include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
 		passWithNoTests: true,

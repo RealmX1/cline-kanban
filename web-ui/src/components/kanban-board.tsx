@@ -8,7 +8,7 @@ import {
 	type SensorAPI,
 	type SnapDragActions,
 } from "@hello-pangea/dnd";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BoardColumn } from "@/components/board-column";
 import { DependencyOverlay } from "@/components/dependencies/dependency-overlay";
@@ -37,7 +37,7 @@ function isRectVerticallyVisibleWithinContainer(rect: DOMRect, containerRect: DO
 	return rect.top >= containerRect.top && rect.bottom <= containerRect.bottom;
 }
 
-export function KanbanBoard({
+export const KanbanBoard = memo(function KanbanBoard({
 	data,
 	taskSessions,
 	onCardSelect,
@@ -115,8 +115,19 @@ export function KanbanBoard({
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
 	const [programmaticCardMoveInFlight, setProgrammaticCardMoveInFlight] =
 		useState<ProgrammaticCardMoveInFlight | null>(null);
+	const canLinkTasks = useCallback(
+		(fromTaskId: string, toTaskId: string) => canCreateTaskDependency(data, fromTaskId, toTaskId),
+		[data],
+	);
+	const activateCard = useCallback((card: BoardCard) => onCardSelect(card.id), [onCardSelect]);
+	const activateCardUnlessDragged = useCallback(
+		(card: BoardCard) => {
+			if (!dragOccurredRef.current) onCardSelect(card.id);
+		},
+		[onCardSelect],
+	);
 	const dependencyLinking = useDependencyLinking({
-		canLinkTasks: (fromTaskId, toTaskId) => canCreateTaskDependency(data, fromTaskId, toTaskId),
+		canLinkTasks,
 		onCreateDependency,
 	});
 	// 每次 board 变化都要重扫全盘卡片，memo 掉避免拖拽期间逐帧重排（拖拽会高频重渲 KanbanBoard）。
@@ -434,9 +445,9 @@ export function KanbanBoard({
 						moveToValidationLoadingById,
 						moveToReviewLoadingById,
 					}}
-					onActivateCard={(card) => onCardSelect(card.id)}
+					onActivateCard={activateCard}
 					onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
-					onEditTaskPinboardPinReason={(taskId) => onEditTaskPinboardPinReason?.(taskId)}
+					onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 					workspacePath={workspacePath}
 					defaultClineModelId={defaultClineModelId}
 					defaultAgentId={defaultAgentId}
@@ -490,11 +501,7 @@ export function KanbanBoard({
 							workspacePath={workspacePath}
 							defaultClineModelId={defaultClineModelId}
 							defaultAgentId={defaultAgentId}
-							onCardClick={(card) => {
-								if (!dragOccurredRef.current) {
-									onCardSelect(card.id);
-								}
-							}}
+							onCardClick={activateCardUnlessDragged}
 						/>
 					))}
 					{shouldMountDependencyOverlay && (
@@ -512,4 +519,4 @@ export function KanbanBoard({
 			</div>
 		</DragDropContext>
 	);
-}
+});

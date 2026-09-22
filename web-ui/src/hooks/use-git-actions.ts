@@ -2,7 +2,7 @@ import {
 	isRuntimeAgentSessionRenderedAsConversationPanel,
 	isRuntimeAgentSessionSummaryRenderedAsConversationPanel,
 } from "@runtime-agent-catalog";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import { type UseGitHistoryDataResult, useGitHistoryData } from "@/components/git-history/use-git-history-data";
 import { buildTaskGitActionPrompt, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
@@ -108,6 +108,9 @@ export function useGitActions({
 	isGitHistoryOpen,
 	refreshWorkspaceState,
 }: UseGitActionsInput): UseGitActionsResult {
+	// 事件入口读取最新状态，避免每个 session tick 改变整棵卡片树的 handler 身份。
+	const latestTaskGitActionStateRef = useRef({ board, taskConversationSessionSummariesByTaskId });
+	latestTaskGitActionStateRef.current = { board, taskConversationSessionSummariesByTaskId };
 	const [runningGitAction, setRunningGitAction] = useState<RuntimeGitSyncAction | null>(null);
 	const [taskGitActionLoadingByTaskId, setTaskGitActionLoadingByTaskId] = useState<
 		Record<string, TaskGitActionLoadingState>
@@ -235,6 +238,7 @@ export function useGitActions({
 	// 到按 agentId 预判（此时两条通道都不存在，粘不粘得进去都是后话）。
 	const resolveShouldUseChatChannelForTaskGitActions = useCallback(
 		(taskId: string, taskAgentId: RuntimeAgentId | null | undefined): boolean => {
+			const { taskConversationSessionSummariesByTaskId } = latestTaskGitActionStateRef.current;
 			const sessionSummary = taskConversationSessionSummariesByTaskId[taskId];
 			if (sessionSummary) {
 				return isRuntimeAgentSessionSummaryRenderedAsConversationPanel(sessionSummary);
@@ -243,11 +247,12 @@ export function useGitActions({
 				taskAgentId ?? runtimeProjectConfig?.selectedAgentId ?? null,
 			);
 		},
-		[runtimeProjectConfig?.selectedAgentId, taskConversationSessionSummariesByTaskId],
+		[runtimeProjectConfig?.selectedAgentId],
 	);
 
 	const runTaskGitAction = useCallback(
 		async (taskId: string, action: TaskGitAction, source: TaskGitActionSource) => {
+			const { board } = latestTaskGitActionStateRef.current;
 			const taskLoadingState = taskGitActionLoadingByTaskId[taskId];
 			const actionInFlightSource = action === "commit" ? taskLoadingState?.commitSource : taskLoadingState?.prSource;
 			if (actionInFlightSource !== null && actionInFlightSource !== undefined) {
@@ -356,7 +361,6 @@ export function useGitActions({
 			}
 		},
 		[
-			board,
 			fetchTaskWorkspaceInfo,
 			runtimeProjectConfig,
 			sendTaskChatMessage,

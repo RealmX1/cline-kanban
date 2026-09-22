@@ -162,6 +162,25 @@ describe("useTaskStartActions start-all confirmation", () => {
 		});
 	}
 
+	it("稳定启动入口使用更新后的依赖关系，不启动刚变为受阻的 backlog", async () => {
+		const handleStartTask = vi.fn();
+		const handleStartAllBacklogTasks = vi.fn();
+		const board = createBoard({ backlogCards: [createCard("task-1", "First"), createCard("task-2", "Second")] });
+		await renderHarness({ board, handleStartTask, handleStartAllBacklogTasks });
+		const first = requireSnapshot();
+		const changedBoard = {
+			...board,
+			dependencies: [{ id: "dependency", fromTaskId: "task-1", toTaskId: "task-2", createdAt: 1 }],
+		};
+		await renderHarness({ board: changedBoard, handleStartTask, handleStartAllBacklogTasks });
+		expect(requireSnapshot().handleStartTaskFromBoard).toBe(first.handleStartTaskFromBoard);
+		expect(requireSnapshot().requestStartAllReadyBacklogTasksConfirmation).toBe(
+			first.requestStartAllReadyBacklogTasksConfirmation,
+		);
+		act(() => first.requestStartAllReadyBacklogTasksConfirmation());
+		expect(requireSnapshot().pendingStartAllReadyBacklogTaskCards?.map((card) => card.id)).toEqual(["task-2"]);
+	});
+
 	it("requires confirmation before starting multiple ready backlog tasks and cancellation has no side effects", async () => {
 		const handleStartTask = vi.fn();
 		const handleStartAllBacklogTasks = vi.fn();

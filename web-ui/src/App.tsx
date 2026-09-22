@@ -101,7 +101,7 @@ import {
 	resetWorkspaceMetadataStore,
 } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import type { BoardData, TaskCommentEntry } from "@/types";
+import type { BoardCard, BoardData, TaskCommentEntry } from "@/types";
 
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
@@ -658,6 +658,11 @@ export default function App(): ReactElement {
 		}
 		resetTaskEditorState();
 	}, [isProjectSwitching, resetTaskEditorState]);
+
+	const handleOpenEditTaskKeepingDetailSelection = useCallback(
+		(task: BoardCard) => handleOpenEditTask(task, { preserveDetailSelection: true }),
+		[handleOpenEditTask],
+	);
 
 	const {
 		runningGitAction,
@@ -1525,9 +1530,7 @@ export default function App(): ReactElement {
 									onStartTask={handleStartTaskFromBoard}
 									onRequestStartAllReadyBacklogTasks={requestStartAllReadyBacklogTasksConfirmation}
 									onClearTrash={handleOpenClearTrash}
-									onEditTask={(task) => {
-										handleOpenEditTask(task, { preserveDetailSelection: true });
-									}}
+									onEditTask={handleOpenEditTaskKeepingDetailSelection}
 									onSaveTaskTitle={handleSaveTaskTitle}
 									onCommitTask={handleCommitTask}
 									onOpenPrTask={handleOpenPrTask}

@@ -1,148 +1,80 @@
-import {
-	EMPTY_MATCH_CHARACTER_POSITIONS,
-	orderMatchSources,
-	type TaskBoardSearchDocument,
-	type TaskBoardSearchMatchSource,
-	type TaskBoardSearchMode,
-	type TaskBoardSearchResult,
-} from "@/search/task-board-search";
+import type { TaskBoardSearchDocument } from "@/search/task-board-search";
+import type { TaskBoardSemanticSearchIndex } from "@/search/task-board-semantic-search-engine";
+import type {
+	TaskBoardSemanticSearchWorkerRequest,
+	TaskBoardSemanticSearchWorkerResponse,
+	TaskBoardSemanticSearchWorkerResult,
+} from "@/search/task-board-semantic-search-worker-protocol";
 
-/** 进得了向量索引的命中来源：taskId 是 5 位随机串，嵌入毫无语义，在类型层面就排除掉。 */
-type TaskBoardSemanticSearchField = Exclude<TaskBoardSearchMatchSource, "taskId">;
-
-import { create, embeddingsType, insertMultiple, pluginEmbeddings, search } from "@/search/task-board-semantic-vendor";
-
-interface TaskBoardSemanticSearchRecord {
-	// 以 documents 数组下标为记录键：taskId 跨项目会碰撞，用下标可零歧义映射回 document 引用。
-	documentIndex: number;
-	searchField: TaskBoardSemanticSearchField;
-	text: string;
-}
-
-export interface TaskBoardSemanticSearchIndex {
-	findResults: (
-		query: string,
-		mode: Extract<TaskBoardSearchMode, "hybrid" | "semantic">,
-	) => Promise<TaskBoardSearchResult[]>;
-}
-
-const SEMANTIC_SEARCH_MINIMUM_SIMILARITY = 0.42;
-
-function buildSemanticSearchRecords(documents: readonly TaskBoardSearchDocument[]): TaskBoardSemanticSearchRecord[] {
-	const records: TaskBoardSemanticSearchRecord[] = [];
-	documents.forEach((document, documentIndex) => {
-		if (document.title.length > 0) {
-			records.push({
-				documentIndex,
-				searchField: "title",
-				text: document.title,
-			});
-		}
-		if (document.prompt.length > 0) {
-			records.push({
-				documentIndex,
-				searchField: "prompt",
-				text: document.prompt,
-			});
-		}
-	});
-	return records;
-}
-
-function normalizeSearchFieldSource(value: string | number): TaskBoardSemanticSearchField | null {
-	if (value === "title" || value === "prompt") {
-		return value;
-	}
-	return null;
-}
+export type { TaskBoardSemanticSearchIndex } from "@/search/task-board-semantic-search-engine";
 
 export async function createTaskBoardSemanticSearchIndex(
 	documents: readonly TaskBoardSearchDocument[],
+	signal?: AbortSignal,
 ): Promise<TaskBoardSemanticSearchIndex> {
-	const records = buildSemanticSearchRecords(documents);
-	if (records.length === 0) {
-		return {
-			findResults: async () => [],
-		};
-	}
-	const plugin = await pluginEmbeddings({
-		embeddings: {
-			defaultProperty: "embeddings",
-			onInsert: {
-				generate: true,
-				properties: ["text"],
-			},
-		},
-	});
-	const database = await create({
-		schema: {
-			documentIndex: "number",
-			searchField: "enum",
-			text: "string",
-			embeddings: embeddingsType,
-		} as const,
-		plugins: [plugin],
-	});
-	await insertMultiple(database, records);
-	const limit = Math.max(records.length, 1);
+	if (signal?.aborted) throw new Error("语义搜索已取消");
+	if (!documents.some((document) => document.title.length > 0 || document.prompt.length > 0))
+		return { findResults: async () => [] };
+	const worker = new Worker(new URL("./task-board-semantic-search-worker.ts", import.meta.url), { type: "module" });
+	let nextRequestId = 0;
+	let stoppedError: Error | null = null;
+	const pendingRequests = new Map<
+		number,
+		{
+			resolve: (results: TaskBoardSemanticSearchWorkerResult[]) => void;
+			reject: (error: Error) => void;
+			timeout: ReturnType<typeof setTimeout>;
+		}
+	>();
+	const abort = () => stop(new Error("语义搜索已取消"));
+	const stop = (error: Error) => {
+		if (stoppedError) return;
+		stoppedError = error;
+		worker.terminate();
+		signal?.removeEventListener("abort", abort);
+		for (const request of pendingRequests.values()) {
+			clearTimeout(request.timeout);
+			request.reject(error);
+		}
+		pendingRequests.clear();
+	};
+	signal?.addEventListener("abort", abort, { once: true });
+	worker.onerror = () => stop(new Error("语义搜索 Worker 加载或执行失败"));
+	worker.onmessageerror = () => stop(new Error("语义搜索 Worker 响应无法解码"));
+	worker.onmessage = (event: MessageEvent<TaskBoardSemanticSearchWorkerResponse>) => {
+		const response = event.data;
+		const pending = pendingRequests.get(response.requestId);
+		if (!pending) return;
+		if (!response.ok) {
+			stop(new Error(response.message));
+			return;
+		}
+		clearTimeout(pending.timeout);
+		pendingRequests.delete(response.requestId);
+		pending.resolve(response.results);
+	};
+	const request = (payload: TaskBoardSemanticSearchWorkerRequest) =>
+		new Promise<TaskBoardSemanticSearchWorkerResult[]>((resolve, reject) => {
+			if (stoppedError) {
+				reject(stoppedError);
+				return;
+			}
+			const timeout = setTimeout(() => stop(new Error("语义搜索超时，请重试或使用模糊搜索")), 120_000);
+			pendingRequests.set(payload.requestId, { resolve, reject, timeout });
+			try {
+				worker.postMessage(payload);
+			} catch (error) {
+				stop(error instanceof Error ? error : new Error(String(error)));
+			}
+		});
+	await request({ requestId: nextRequestId++, type: "initialize", documents });
 	return {
 		findResults: async (query, mode) => {
-			const results =
-				mode === "semantic"
-					? await search(database, {
-							term: query,
-							mode: "vector",
-							limit,
-							similarity: SEMANTIC_SEARCH_MINIMUM_SIMILARITY,
-						})
-					: await search(database, {
-							term: query,
-							mode: "hybrid",
-							properties: ["text"],
-							limit,
-							threshold: 0,
-							similarity: SEMANTIC_SEARCH_MINIMUM_SIMILARITY,
-							hybridWeights: {
-								text: 0.45,
-								vector: 0.55,
-							},
-						});
-			const groupedResults = new Map<number, { score: number; sources: Set<TaskBoardSearchMatchSource> }>();
-			for (const hit of results.hits) {
-				const searchField = normalizeSearchFieldSource(hit.document.searchField);
-				if (!searchField) {
-					continue;
-				}
-				const documentIndex = typeof hit.document.documentIndex === "number" ? hit.document.documentIndex : null;
-				if (documentIndex == null) {
-					continue;
-				}
-				const current = groupedResults.get(documentIndex);
-				if (!current) {
-					groupedResults.set(documentIndex, {
-						score: hit.score,
-						sources: new Set([searchField]),
-					});
-					continue;
-				}
-				current.score = Math.max(current.score, hit.score);
-				current.sources.add(searchField);
-			}
-			return [...groupedResults.entries()].flatMap(([documentIndex, result]) => {
+			const results = await request({ requestId: nextRequestId++, type: "search", query, mode });
+			return results.map(({ documentIndex, ...result }) => {
 				const document = documents[documentIndex];
-				if (!document) {
-					return [];
-				}
-				return [
-					{
-						document,
-						score: result.score,
-						matchSources: orderMatchSources(result.sources),
-						// semantic 结果无字符级命中位置，只标 matchSources、不高亮。
-						titleMatchCharacterPositions: EMPTY_MATCH_CHARACTER_POSITIONS,
-						promptMatchCharacterPositions: EMPTY_MATCH_CHARACTER_POSITIONS,
-					},
-				];
+				if (!document) throw new Error("语义搜索返回了无效文档下标");
+				return { ...result, document };
 			});
 		},
 	};

@@ -356,6 +356,7 @@ export function ColumnContextPanel({
 		}));
 	}, []);
 
+	const activateCard = useCallback((card: BoardCardModel) => onCardSelect(card.id), [onCardSelect]);
 	const pinnedTasks = useMemo(
 		() => collectTasksPinnedToTaskPinboard({ columns: selection.allColumns, dependencies: [] }),
 		[selection.allColumns],
@@ -504,9 +505,9 @@ export function ColumnContextPanel({
 						selectedCardId={selection.card.id}
 						taskSessions={taskSessions}
 						handlers={taskCardActionHandlers}
-						onActivateCard={(card) => onCardSelect(card.id)}
+						onActivateCard={activateCard}
 						onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
-						onEditTaskPinboardPinReason={(taskId) => onEditTaskPinboardPinReason?.(taskId)}
+						onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 						workspacePath={workspacePath}
 						defaultClineModelId={defaultClineModelId}
 						defaultAgentId={defaultAgentId}
@@ -519,7 +520,7 @@ export function ColumnContextPanel({
 							open={isColumnSectionExpanded(column.id)}
 							onToggleOpen={() => toggleColumnSectionExpanded(column.id)}
 							taskIdRequestedToReveal={taskIdRequestedToReveal}
-							onCardClick={(card) => onCardSelect(card.id)}
+							onCardClick={activateCard}
 							taskSessions={taskSessions}
 							onStartTask={column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined}
 							onRequestStartAllReadyBacklogTasks={

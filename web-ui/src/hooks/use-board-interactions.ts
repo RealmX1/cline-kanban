@@ -152,6 +152,9 @@ export function useBoardInteractions({
 	taskGitActionLoadingByTaskId,
 	runAutoReviewGitAction,
 }: UseBoardInteractionsInput): UseBoardInteractionsResult {
+	// 事件入口读取最新状态，避免每个 session tick 改变整棵卡片树的 handler 身份。
+	const latestBoardInteractionStateRef = useRef({ board, sessions });
+	latestBoardInteractionStateRef.current = { board, sessions };
 	const previousSessionsRef = useRef<Record<string, RuntimeTaskSessionSummary>>({});
 	// B5：Rule A 列自动流转上一帧处理时的 board 引用，配合下方 effect 的 summary 引用短路。
 	// board 自上一帧以来若发生过任何外部写入（用户拖拽等），必须放开全量重估——流转分支由
@@ -411,6 +414,7 @@ export function useBoardInteractions({
 
 	const startBacklogTaskImmediately = useCallback(
 		async (task: BoardCard): Promise<boolean> => {
+			const { board } = latestBoardInteractionStateRef.current;
 			const selection = findCardSelection(board, task.id);
 			if (!selection || selection.column.id !== "backlog") {
 				return false;
@@ -429,7 +433,7 @@ export function useBoardInteractions({
 				optimisticMove: true,
 			});
 		},
-		[board, kickoffTaskInProgress, setBoard],
+		[kickoffTaskInProgress, setBoard],
 	);
 
 	const startBacklogTaskWithAnimation = useCallback(
@@ -681,6 +685,7 @@ export function useBoardInteractions({
 
 	const handleDragEnd = useCallback(
 		(result: DropResult, options?: { selectDroppedTask?: boolean }) => {
+			const { board } = latestBoardInteractionStateRef.current;
 			if (options?.selectDroppedTask && result.type.startsWith("CARD") && result.destination) {
 				setSelectedTaskId(result.draggableId);
 			}
@@ -751,7 +756,6 @@ export function useBoardInteractions({
 			resolvePendingProgrammaticStartMove(moveEvent.taskId, false);
 		},
 		[
-			board,
 			consumeProgrammaticCardMove,
 			kickoffTaskInProgress,
 			maybeRequestNotificationPermissionForTaskStart,
@@ -767,6 +771,7 @@ export function useBoardInteractions({
 
 	const handleStartTask = useCallback(
 		(taskId: string) => {
+			const { board, sessions } = latestBoardInteractionStateRef.current;
 			const selection = findCardSelection(board, taskId);
 			if (!selection) {
 				return;
@@ -782,17 +787,12 @@ export function useBoardInteractions({
 			maybeRequestNotificationPermissionForTaskStart();
 			void startBacklogTaskWithAnimation(selection.card);
 		},
-		[
-			board,
-			kickoffTaskInProgress,
-			maybeRequestNotificationPermissionForTaskStart,
-			sessions,
-			startBacklogTaskWithAnimation,
-		],
+		[kickoffTaskInProgress, maybeRequestNotificationPermissionForTaskStart, startBacklogTaskWithAnimation],
 	);
 
 	const handleStartAllBacklogTasks = useCallback(
 		(taskIds?: string[]) => {
+			const { board } = latestBoardInteractionStateRef.current;
 			const requestedTaskIds =
 				taskIds ?? board.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id) ?? [];
 			if (requestedTaskIds.length === 0) {
@@ -834,7 +834,7 @@ export function useBoardInteractions({
 				void kickoffTaskInProgress(task, task.id, "backlog");
 			}
 		},
-		[board, kickoffTaskInProgress, maybeRequestNotificationPermissionForTaskStart, setBoard],
+		[kickoffTaskInProgress, maybeRequestNotificationPermissionForTaskStart, setBoard],
 	);
 
 	const handleDetailTaskDragEnd = useCallback(
@@ -846,6 +846,7 @@ export function useBoardInteractions({
 
 	const handleCardSelect = useCallback(
 		(taskId: string) => {
+			const { board } = latestBoardInteractionStateRef.current;
 			const selection = findCardSelection(board, taskId);
 			if (!selection || selection.column.id === "trash") {
 				return;
@@ -853,7 +854,7 @@ export function useBoardInteractions({
 			setSelectedTaskId(taskId);
 			setIsGitHistoryOpen(false);
 		},
-		[board, setIsGitHistoryOpen, setSelectedTaskId],
+		[setIsGitHistoryOpen, setSelectedTaskId],
 	);
 
 	// Actually perform the move to Done. Pass the card's source column so the Review→Done slide
@@ -921,9 +922,10 @@ export function useBoardInteractions({
 
 	const handleMoveReviewCardToTrash = useCallback(
 		(taskId: string) => {
+			const { board } = latestBoardInteractionStateRef.current;
 			requestMoveToTrash(taskId, getTaskColumnId(board, taskId) ?? "review");
 		},
-		[board, requestMoveToTrash],
+		[requestMoveToTrash],
 	);
 
 	const confirmMoveToDone = useCallback(() => {
@@ -942,6 +944,7 @@ export function useBoardInteractions({
 	// useWorkspacePersistence. Mirrors the manual in_progress/review → validation drag end-state.
 	const handleMoveCardToValidation = useCallback(
 		(taskId: string) => {
+			const { board, sessions } = latestBoardInteractionStateRef.current;
 			const fromColumnId = getTaskColumnId(board, taskId);
 			if (fromColumnId !== "in_progress" && fromColumnId !== "review") {
 				return;
@@ -968,7 +971,7 @@ export function useBoardInteractions({
 				}
 			}
 		},
-		[board, moveFocusedReviewTaskToNextReviewTaskAfterValidationMove, sessions, setBoard],
+		[moveFocusedReviewTaskToNextReviewTaskAfterValidationMove, setBoard],
 	);
 
 	const handleMoveSelectedCardToValidation = useCallback(() => {
@@ -984,6 +987,7 @@ export function useBoardInteractions({
 	// 卡片稳定停在 Review。仅 In Progress 卡生效（与按钮渲染门控一致，双重保险）。
 	const handleMoveCardToReview = useCallback(
 		(taskId: string) => {
+			const { board } = latestBoardInteractionStateRef.current;
 			if (getTaskColumnId(board, taskId) !== "in_progress") {
 				return;
 			}
@@ -1011,11 +1015,12 @@ export function useBoardInteractions({
 				}
 			})();
 		},
-		[board, transitionTaskToReview],
+		[transitionTaskToReview],
 	);
 
 	const handleRestoreTaskFromTrash = useCallback(
 		(taskId: string) => {
+			const { board } = latestBoardInteractionStateRef.current;
 			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review");
 			if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 				return;
@@ -1037,19 +1042,17 @@ export function useBoardInteractions({
 			}
 			void resumeTaskFromTrash(movedSelection.card, taskId, { optimisticMoveApplied: true });
 		},
-		[board, resumeTaskFromTrash, setBoard, tryProgrammaticCardMove],
+		[resumeTaskFromTrash, setBoard, tryProgrammaticCardMove],
 	);
 
-	const handleOpenDeleteTask = useCallback(
-		(taskId: string) => {
-			const selection = findCardSelection(board, taskId);
-			if (!selection) {
-				return;
-			}
-			setDeleteTaskTarget(selection.card);
-		},
-		[board],
-	);
+	const handleOpenDeleteTask = useCallback((taskId: string) => {
+		const { board } = latestBoardInteractionStateRef.current;
+		const selection = findCardSelection(board, taskId);
+		if (!selection) {
+			return;
+		}
+		setDeleteTaskTarget(selection.card);
+	}, []);
 
 	const handleCancelDeleteTask = useCallback(() => {
 		setDeleteTaskTarget(null);
@@ -1134,21 +1137,19 @@ export function useBoardInteractions({
 		[setBoard],
 	);
 
-	const openTaskPinboardPinReasonDialog = useCallback(
-		(taskId: string, isEditingExistingPin: boolean) => {
-			const selection = findCardSelection(board, taskId);
-			if (!selection) {
-				return;
-			}
-			setTaskPinboardPinReasonRequest({
-				taskId,
-				taskTitle: selection.card.title,
-				isEditingExistingPin,
-				initialPinReason: selection.card.taskPinboardPinReason ?? "",
-			});
-		},
-		[board],
-	);
+	const openTaskPinboardPinReasonDialog = useCallback((taskId: string, isEditingExistingPin: boolean) => {
+		const { board } = latestBoardInteractionStateRef.current;
+		const selection = findCardSelection(board, taskId);
+		if (!selection) {
+			return;
+		}
+		setTaskPinboardPinReasonRequest({
+			taskId,
+			taskTitle: selection.card.title,
+			isEditingExistingPin,
+			initialPinReason: selection.card.taskPinboardPinReason ?? "",
+		});
+	}, []);
 
 	const handleRequestPinTaskToTaskPinboard = useCallback(
 		(taskId: string) => openTaskPinboardPinReasonDialog(taskId, false),

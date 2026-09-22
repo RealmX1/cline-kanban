@@ -433,6 +433,54 @@ describe("useBoardInteractions", () => {
 		};
 	}
 
+	it("回调身份跨 board/session 更新稳定，旧回调仍读取最新卡片及会话", async () => {
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopLinkedBacklogTaskActions();
+		const setBoard = vi.fn();
+		const ensureTaskWorkspace = vi.fn();
+		const startTaskSession = vi.fn();
+		const transitionTaskToReview = vi.fn();
+		let snapshot: HookSnapshot | null = null;
+		let updateSessions: Dispatch<SetStateAction<Record<string, RuntimeTaskSessionSummary>>> | undefined;
+		const render = (board: BoardData) =>
+			act(() =>
+				root.render(
+					<HookHarness
+						board={board}
+						setBoard={setBoard}
+						ensureTaskWorkspace={ensureTaskWorkspace}
+						startTaskSession={startTaskSession}
+						transitionTaskToReview={transitionTaskToReview}
+						onSnapshot={(value) => {
+							snapshot = value;
+						}}
+						onSessionsControl={(value) => {
+							updateSessions = value.setSessions;
+						}}
+					/>,
+				),
+			);
+		render(createBoard());
+		const first = snapshot!;
+		const changedBoard = createBoard();
+		changedBoard.columns[0]!.cards[0]!.title = "最新标题";
+		render(changedBoard);
+		act(() => updateSessions?.({ unrelated: createRunningSession("unrelated") }));
+		for (const key of [
+			"handleStartTask",
+			"handleDragEnd",
+			"handleCardSelect",
+			"handleOpenDeleteTask",
+			"handleMoveReviewCardToTrash",
+			"handleMoveCardToValidation",
+			"handleMoveCardToReview",
+			"handleRestoreTaskFromTrash",
+		] as const)
+			expect(snapshot![key], key).toBe(first[key]);
+		act(() => first.handleOpenDeleteTask("task-1"));
+		expect(snapshot!.deleteTaskTarget?.title).toBe("最新标题");
+	});
+
 	it("starts dependency-unblocked tasks even when setBoard updater is deferred", async () => {
 		let startBacklogTaskWithAnimation: ((task: BoardCard) => Promise<boolean>) | null = null;
 

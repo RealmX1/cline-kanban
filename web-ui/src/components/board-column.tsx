@@ -1,7 +1,7 @@
 import { Droppable } from "@hello-pangea/dnd";
 import { Play, Plus, Trash2 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { BoardCard } from "@/components/board-card";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
@@ -17,7 +17,7 @@ import type { BoardCard as BoardCardModel, BoardColumnId, BoardColumn as BoardCo
 const getColumnCardsScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
 	sentinel.closest<HTMLElement>(".kb-column-cards");
 
-export function BoardColumn({
+export const BoardColumn = memo(function BoardColumn({
 	column,
 	taskSessions,
 	onCreateTask,
@@ -282,16 +282,8 @@ export function BoardColumn({
 											defaultClineModelId={defaultClineModelId}
 											defaultAgentId={defaultAgentId}
 											onSaveTitle={onSaveTitle}
-											onOpenTaskEditor={
-												column.id === "backlog" && onEditTask ? () => onEditTask(card) : undefined
-											}
-											onClick={() => {
-												if (column.id === "backlog") {
-													onEditTask?.(card);
-													return;
-												}
-												onCardClick?.(card);
-											}}
+											onOpenTaskEditor={column.id === "backlog" ? onEditTask : undefined}
+											onClick={column.id === "backlog" ? onEditTask : onCardClick}
 										/>,
 									);
 									draggableIndex += 1;
@@ -312,4 +304,4 @@ export function BoardColumn({
 			</div>
 		</section>
 	);
-}
+});

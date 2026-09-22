@@ -85,7 +85,7 @@ export function buildTaskCardBusinessProps({
 		onOpenPr: isReview ? handlers.onOpenPrTask : undefined,
 		onCancelAutomaticAction: handlers.onCancelAutomaticTaskAction,
 		onSaveTitle: handlers.onSaveTitle,
-		onOpenTaskEditor: isBacklog && handlers.onEditTask ? () => handlers.onEditTask?.(card) : undefined,
+		onOpenTaskEditor: isBacklog ? handlers.onEditTask : undefined,
 		onRequestPinToTaskPinboard: handlers.onRequestPinToTaskPinboard,
 		onUnpinFromTaskPinboard: handlers.onUnpinFromTaskPinboard,
 		isCommitLoading: isReview ? (handlers.commitTaskLoadingById?.[card.id] ?? false) : false,
@@ -96,13 +96,6 @@ export function buildTaskCardBusinessProps({
 		workspacePath,
 		defaultClineModelId,
 		defaultAgentId,
-		onClick: () => {
-			// backlog 卡没有详情视图可进，单击直接开编辑弹窗。
-			if (isBacklog) {
-				handlers.onEditTask?.(card);
-				return;
-			}
-			onActivateCard?.(card);
-		},
+		onClick: isBacklog ? handlers.onEditTask : onActivateCard,
 	};
 }

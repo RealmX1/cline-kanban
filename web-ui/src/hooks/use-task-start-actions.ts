@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { findCardSelection } from "@/state/board-state";
 import type { BoardCard, BoardData, TaskEditorSubmitOptions } from "@/types";
@@ -67,12 +67,16 @@ export function useTaskStartActions({
 	handleStartAllBacklogTasks,
 	setSelectedTaskId,
 }: UseTaskStartActionsInput): UseTaskStartActionsResult {
+	// 事件入口读取最新状态，避免每个 session tick 改变整棵卡片树的 handler 身份。
+	const latestTaskStartBoardRef = useRef({ board });
+	latestTaskStartBoardRef.current = { board };
 	const [pendingTaskStartAfterCreateIds, setPendingTaskStartAfterCreateIds] = useState<string[] | null>(null);
 	const [pendingStartAllReadyBacklogTasksConfirmation, setPendingStartAllReadyBacklogTasksConfirmation] =
 		useState<PendingStartAllReadyBacklogTasksConfirmation | null>(null);
 
 	const startBacklogTasks = useCallback(
 		(taskIds: string[]) => {
+			const { board } = latestTaskStartBoardRef.current;
 			const backlogTaskIds = [...new Set(taskIds.filter((taskId) => taskId.trim().length > 0))].filter((taskId) => {
 				const selection = findCardSelection(board, taskId);
 				return selection?.column.id === "backlog";
@@ -92,11 +96,12 @@ export function useTaskStartActions({
 			}
 			handleStartAllBacklogTasks(backlogTaskIds);
 		},
-		[board, handleStartAllBacklogTasks, handleStartTask],
+		[handleStartAllBacklogTasks, handleStartTask],
 	);
 
 	const handleStartTaskFromBoard = useCallback(
 		(taskId: string) => {
+			const { board } = latestTaskStartBoardRef.current;
 			const selection = findCardSelection(board, taskId);
 			if (!selection || selection.column.id !== "backlog") {
 				handleStartTask(taskId);
@@ -104,10 +109,11 @@ export function useTaskStartActions({
 			}
 			startBacklogTasks([taskId]);
 		},
-		[board, handleStartTask, startBacklogTasks],
+		[handleStartTask, startBacklogTasks],
 	);
 
 	const requestStartAllReadyBacklogTasksConfirmation = useCallback(() => {
+		const { board } = latestTaskStartBoardRef.current;
 		const backlogTaskIds = getStartableBacklogTaskIds(board);
 
 		if (backlogTaskIds.length === 0) {
@@ -117,7 +123,7 @@ export function useTaskStartActions({
 			projectId: currentProjectId,
 			requestedTaskIds: backlogTaskIds,
 		});
-	}, [board, currentProjectId]);
+	}, [currentProjectId]);
 
 	const pendingStartAllReadyBacklogTaskCards = useMemo(() => {
 		if (

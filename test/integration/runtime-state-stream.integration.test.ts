@@ -1162,7 +1162,13 @@ describe.sequential("runtime state stream integration", () => {
 				snapshot.workspaceMetadata?.taskWorkspaces.find((task) => task.taskId === taskId) ?? null;
 			expect(initialTaskMetadata).not.toBeNull();
 			expect(initialTaskMetadata?.changedFiles ?? 0).toBe(0);
-			expect(snapshot.workspaceMetadata?.taskWorkspaces.some((task) => task.taskId === trashTaskId)).toBe(false);
+			// Done 卡仍保留元数据投影（f51f9786），缺失 worktree 不等于缺失记录。
+			expect(snapshot.workspaceMetadata?.taskWorkspaces.find((task) => task.taskId === trashTaskId)).toMatchObject({
+				taskId: trashTaskId,
+				exists: false,
+				baseRef,
+				changedFiles: null,
+			});
 			const messagesAfterInitialSnapshot = await stream.collectFor(250);
 			expect(messagesAfterInitialSnapshot.some((message) => message.type === "workspace_metadata_updated")).toBe(
 				false,

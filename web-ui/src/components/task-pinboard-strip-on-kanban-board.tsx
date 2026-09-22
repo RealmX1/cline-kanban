@@ -39,7 +39,7 @@ export function TaskPinboardStripOnKanbanBoard({
 	handlers: TaskCardActionHandlerBundle;
 	onActivateCard: (card: BoardCard) => void;
 	onRevealCanonicalCardInItsStage: (taskId: string) => void;
-	onEditTaskPinboardPinReason: (taskId: string) => void;
+	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	workspacePath?: string | null;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
@@ -80,8 +80,8 @@ export function TaskPinboardStripOnKanbanBoard({
 							<TaskCardBody
 								renderRole="pinned_card_copy_in_task_pinboard"
 								stageDisplayNameForTaskPinboardCopy={columnTitle}
-								onNavigateToCanonicalCardInItsStage={() => onRevealCanonicalCardInItsStage(card.id)}
-								onEditTaskPinboardPinReason={() => onEditTaskPinboardPinReason(card.id)}
+								onNavigateToCanonicalCardInItsStage={onRevealCanonicalCardInItsStage}
+								onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 								{...buildTaskCardBusinessProps({
 									card,
 									columnId,
