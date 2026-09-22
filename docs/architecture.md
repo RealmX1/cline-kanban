@@ -252,12 +252,12 @@ Components in `web-ui/src/components/` are mostly rendering and composition. Goo
 
 ### BoardCard dual host chains
 
-The same `BoardCard` component is rendered through two parallel host chains, and per-card stage actions (move to validation, move to done, commit, open PR, restore) must be wired through both:
+同一个 `BoardCard` 组件通过两条平行宿主链渲染；卡片阶段动作（移入 validation、移入 done、restore）必须贯通两条链。commit / open PR 已从所有卡片入口移除，仅保留 Focus View 的 agent 面板入口（`card-detail-view.tsx` 中的 `AgentTerminalPanel` / `ClineAgentChatPanel`）：
 
 - the main board: `kanban-board.tsx` → `board-column.tsx`
 - the Focus View left sidebar: `card-detail-view.tsx` → `detail-panels/column-context-panel.tsx`
 
-Each host independently per-column-gates which handlers it passes down (for example `onMoveToValidationTask={column.id === "review" ? ... : undefined}`). A `BoardCard` button can render because its own `columnId` condition is met, yet do nothing because that host never passed the handler — this exact bug has shipped more than once. When adding or changing a per-card action, update `board-card.tsx` (the render condition) and both hosts' gating.
+宿主链按列筛选下传的 handler（例如 `onMoveToValidationTask={column.id === "review" ? ... : undefined}`），共用卡片业务 props 的路径还经过 `task-card-business-props.ts` 的 `buildTaskCardBusinessProps` 门控。卡片按钮可能满足自身 `columnId` 渲染条件，却因宿主未传入 handler 而点击无效；此类问题已多次发生。新增或修改卡片动作时，应同步 `task-card-body.tsx` 中的渲染条件、业务 props 门控及两条宿主链的 handler 传递；`board-card.tsx` 仅负责拖拽适配。
 
 The move-to-done "skip validation?" confirmation is centralized in `web-ui/src/hooks/use-board-interactions.ts` (`requestMoveToTrash` → `pendingMoveToDone` → `confirmMoveToDone`/`cancelMoveToDone`) with a single `SkipValidationConfirmDialog` rendered in `App.tsx`. Both the by-id handler used by board and sidebar cards and the selected-card handler used by the agent TUI bottom button funnel through it — do not reintroduce a per-view dialog.
 

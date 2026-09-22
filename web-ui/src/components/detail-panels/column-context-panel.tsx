@@ -36,8 +36,6 @@ function ColumnSection({
 	onClearTrash,
 	onEditTask,
 	onSaveTitle,
-	onCommitTask,
-	onOpenPrTask,
 	onMoveToTrashTask,
 	onMoveToValidationTask,
 	onMoveToReviewTask,
@@ -45,8 +43,6 @@ function ColumnSection({
 	onDeleteTask,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
-	commitTaskLoadingById,
-	openPrTaskLoadingById,
 	moveToTrashLoadingById,
 	activeDragSourceColumnId,
 	workspacePath,
@@ -70,8 +66,6 @@ function ColumnSection({
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCardModel) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
 	onMoveToValidationTask?: (taskId: string) => void;
 	onMoveToReviewTask?: (taskId: string) => void;
@@ -79,8 +73,6 @@ function ColumnSection({
 	onDeleteTask?: (taskId: string) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	activeDragSourceColumnId?: BoardColumnId | null;
 	workspacePath?: string | null;
@@ -140,14 +132,10 @@ function ColumnSection({
 				onMoveToReviewTask,
 				onRestoreFromTrashTask,
 				onDeleteTask,
-				onCommitTask,
-				onOpenPrTask,
 				onSaveTitle,
 				onEditTask,
 				onRequestPinToTaskPinboard,
 				onUnpinFromTaskPinboard,
-				commitTaskLoadingById,
-				openPrTaskLoadingById,
 				moveToTrashLoadingById,
 			},
 			onActivateCard: onCardClick,
@@ -297,8 +285,6 @@ export function ColumnContextPanel({
 	onClearTrash,
 	onEditTask,
 	onSaveTaskTitle,
-	onCommitTask,
-	onOpenPrTask,
 	onMoveToTrashTask,
 	onMoveToValidationTask,
 	onMoveToReviewTask,
@@ -307,8 +293,6 @@ export function ColumnContextPanel({
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
 	onEditTaskPinboardPinReason,
-	commitTaskLoadingById,
-	openPrTaskLoadingById,
 	moveToTrashLoadingById,
 	panelWidth,
 }: {
@@ -323,8 +307,6 @@ export function ColumnContextPanel({
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCardModel) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
 	onMoveToValidationTask?: (taskId: string) => void;
 	onMoveToReviewTask?: (taskId: string) => void;
@@ -333,8 +315,6 @@ export function ColumnContextPanel({
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	panelWidth?: string;
 	defaultClineModelId?: string | null;
@@ -381,14 +361,10 @@ export function ColumnContextPanel({
 		onMoveToReviewTask,
 		onRestoreFromTrashTask,
 		onDeleteTask,
-		onCommitTask,
-		onOpenPrTask,
 		onSaveTitle: onSaveTaskTitle,
 		onEditTask,
 		onRequestPinToTaskPinboard,
 		onUnpinFromTaskPinboard,
-		commitTaskLoadingById,
-		openPrTaskLoadingById,
 		moveToTrashLoadingById,
 	};
 
@@ -529,8 +505,6 @@ export function ColumnContextPanel({
 							onClearTrash={column.id === "trash" ? onClearTrash : undefined}
 							onEditTask={column.id === "backlog" ? onEditTask : undefined}
 							onSaveTitle={onSaveTaskTitle}
-							onCommitTask={column.id === "review" ? onCommitTask : undefined}
-							onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
 							onMoveToTrashTask={
 								column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
 							}
@@ -540,8 +514,6 @@ export function ColumnContextPanel({
 							onDeleteTask={onDeleteTask}
 							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-							commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
-							openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
 							moveToTrashLoadingById={
 								column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
 							}
@@ -565,12 +537,8 @@ export function ColumnContextPanel({
 				onMoveToValidationTask={onMoveToValidationTask}
 				onRestoreFromTrashTask={onRestoreFromTrashTask}
 				onDeleteTask={onDeleteTask}
-				onCommitTask={onCommitTask}
-				onOpenPrTask={onOpenPrTask}
 				onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 				onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-				commitTaskLoadingById={commitTaskLoadingById}
-				openPrTaskLoadingById={openPrTaskLoadingById}
 				moveToTrashLoadingById={moveToTrashLoadingById}
 				workspacePath={workspacePath}
 				defaultClineModelId={defaultClineModelId}

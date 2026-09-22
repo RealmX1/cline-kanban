@@ -47,8 +47,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 	onClearTrash,
 	onEditTask,
 	onSaveTaskTitle,
-	onCommitTask,
-	onOpenPrTask,
 	onCancelAutomaticTaskAction,
 	onMoveToTrashTask,
 	onMoveToValidationTask,
@@ -58,8 +56,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
 	onEditTaskPinboardPinReason,
-	commitTaskLoadingById,
-	openPrTaskLoadingById,
 	moveToTrashLoadingById,
 	moveToValidationLoadingById,
 	moveToReviewLoadingById,
@@ -81,8 +77,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCard) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
 	onMoveToValidationTask?: (taskId: string) => void;
@@ -92,8 +86,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	moveToValidationLoadingById?: Record<string, boolean>;
 	moveToReviewLoadingById?: Record<string, boolean>;
@@ -432,15 +424,11 @@ export const KanbanBoard = memo(function KanbanBoard({
 						onMoveToReviewTask,
 						onRestoreFromTrashTask,
 						onDeleteTask,
-						onCommitTask,
-						onOpenPrTask,
 						onCancelAutomaticTaskAction,
 						onSaveTitle: onSaveTaskTitle,
 						onEditTask,
 						onRequestPinToTaskPinboard,
 						onUnpinFromTaskPinboard,
-						commitTaskLoadingById,
-						openPrTaskLoadingById,
 						moveToTrashLoadingById,
 						moveToValidationLoadingById,
 						moveToReviewLoadingById,
@@ -470,8 +458,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 							onClearTrash={column.id === "trash" ? onClearTrash : undefined}
 							onEditTask={column.id === "backlog" ? onEditTask : undefined}
 							onSaveTitle={onSaveTaskTitle}
-							onCommitTask={column.id === "review" ? onCommitTask : undefined}
-							onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
 							onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 							onMoveToTrashTask={
 								column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
@@ -483,8 +469,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
 							taskIdRequestedToReveal={taskIdRequestedToReveal}
-							commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
-							openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
 							moveToTrashLoadingById={
 								column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
 							}

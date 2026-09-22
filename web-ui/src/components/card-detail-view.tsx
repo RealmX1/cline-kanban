@@ -596,8 +596,6 @@ export function CardDetailView({
 	onClearTrash,
 	onEditTask,
 	onSaveTaskTitle,
-	onCommitTask,
-	onOpenPrTask,
 	onAgentCommitTask,
 	onAgentOpenPrTask,
 	onMoveReviewCardToTrash,
@@ -609,8 +607,6 @@ export function CardDetailView({
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
 	onEditTaskPinboardPinReason,
-	commitTaskLoadingById,
-	openPrTaskLoadingById,
 	agentCommitTaskLoadingById,
 	agentOpenPrTaskLoadingById,
 	moveToTrashLoadingById,
@@ -670,8 +666,6 @@ export function CardDetailView({
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCard) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
 	onAgentCommitTask?: (taskId: string) => void;
 	onAgentOpenPrTask?: (taskId: string) => void;
 	onMoveReviewCardToTrash?: (taskId: string) => void;
@@ -685,8 +679,6 @@ export function CardDetailView({
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
 	agentCommitTaskLoadingById?: Record<string, boolean>;
 	agentOpenPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
@@ -1511,8 +1503,6 @@ export function CardDetailView({
 							onClearTrash={onClearTrash}
 							onEditTask={onEditTask}
 							onSaveTaskTitle={onSaveTaskTitle}
-							onCommitTask={onCommitTask}
-							onOpenPrTask={onOpenPrTask}
 							onMoveToTrashTask={onMoveReviewCardToTrash}
 							onMoveToValidationTask={onMoveReviewCardToValidation}
 							onMoveToReviewTask={onMoveCardToReview}
@@ -1521,8 +1511,6 @@ export function CardDetailView({
 							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
 							onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
-							commitTaskLoadingById={commitTaskLoadingById}
-							openPrTaskLoadingById={openPrTaskLoadingById}
 							moveToTrashLoadingById={moveToTrashLoadingById}
 							panelWidth="100%"
 							defaultClineModelId={runtimeConfig?.clineProviderSettings?.modelId ?? null}

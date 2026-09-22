@@ -245,13 +245,116 @@ describe("useGitActions", () => {
 				<Harness input={{ ...stableInput, board: changedBoard, taskConversationSessionSummariesByTaskId: {} }} />,
 			),
 		);
-		expect(actions!.handleCommitTask).toBe(first.handleCommitTask);
-		expect(actions!.handleOpenPrTask).toBe(first.handleOpenPrTask);
-		await act(async () => first.handleCommitTask("task-1"));
+		expect(actions!.handleAgentCommitTask).toBe(first.handleAgentCommitTask);
+		expect(actions!.handleAgentOpenPrTask).toBe(first.handleAgentOpenPrTask);
+		await act(async () => first.handleAgentCommitTask("task-1"));
 		expect(stableInput.sendTaskChatMessage).not.toHaveBeenCalled();
 		expect(showAppToastMock).toHaveBeenCalledWith(
 			expect.objectContaining({ message: "Commit and PR actions are only available for tasks in Review." }),
 		);
+	});
+
+	it.each(["commit", "pr"] as const)("自动 Review 的 %s 投递保持来源、防重与失败清理", async (action) => {
+		let actions: UseGitActionsResult | null = null;
+		let finishDelivery: ((result: { ok: boolean; message?: string }) => void) | undefined;
+		const sendTaskChatMessage = vi.fn(
+			() =>
+				new Promise<{ ok: boolean; message?: string }>((resolve) => {
+					finishDelivery = resolve;
+				}),
+		);
+		function Harness() {
+			actions = useGitActions({
+				currentProjectId: "project-1",
+				board: createBoard(),
+				selectedCard: null,
+				runtimeProjectConfig: createRuntimeConfig("cline"),
+				sendTaskSessionInput: vi.fn(),
+				sendTaskChatMessage,
+				fetchTaskWorkspaceInfo: async () => createWorkspaceInfo(),
+				taskConversationSessionSummariesByTaskId: {},
+				isGitHistoryOpen: false,
+				refreshWorkspaceState: async () => {},
+			});
+			return null;
+		}
+		await act(async () => root.render(<Harness />));
+		let delivery: Promise<boolean> | undefined;
+		await act(async () => {
+			delivery = actions!.runAutoReviewGitAction("task-1", action);
+		});
+		const sourceField = action === "commit" ? "commitSource" : "prSource";
+		expect(actions!.taskGitActionLoadingByTaskId["task-1"]?.[sourceField]).toBe("automatic_review");
+		expect(actions!.agentCommitTaskLoadingById).toEqual({});
+		expect(actions!.agentOpenPrTaskLoadingById).toEqual({});
+		await act(async () => {
+			expect(await actions!.runAutoReviewGitAction("task-1", action)).toBe(false);
+		});
+		expect(sendTaskChatMessage).toHaveBeenCalledExactlyOnceWith("task-1", action, { mode: "act" });
+		await act(async () => {
+			finishDelivery!({ ok: false, message: "模拟投递失败" });
+			await delivery;
+		});
+		expect(await delivery).toBe(false);
+		expect(actions!.taskGitActionLoadingByTaskId).toEqual({});
+		expect(showAppToastMock).toHaveBeenCalledWith(expect.objectContaining({ message: "模拟投递失败" }));
+		await act(async () => {
+			delivery = actions!.runAutoReviewGitAction("task-1", action);
+		});
+		await act(async () => {
+			finishDelivery!({ ok: true });
+			await delivery;
+		});
+		expect(await delivery).toBe(true);
+		expect(actions!.taskGitActionLoadingByTaskId).toEqual({});
+	});
+
+	it.each(["commit", "pr"] as const)("终端 %s 仍粘贴提示词后提交回车", async (action) => {
+		vi.useFakeTimers();
+		try {
+			let actions: UseGitActionsResult | null = null;
+			const sendTaskSessionInput = vi.fn(async () => ({ ok: true }));
+			const sendTaskChatMessage = vi.fn(async () => ({ ok: true }));
+			function Harness() {
+				actions = useGitActions({
+					currentProjectId: "project-1",
+					board: createBoard({ agentId: "codex" }),
+					selectedCard: null,
+					runtimeProjectConfig: {
+						...createRuntimeConfig("codex"),
+						commitPromptTemplate: "commit {{base_ref}}",
+						openPrPromptTemplate: "pr {{base_ref}}",
+					},
+					sendTaskSessionInput,
+					sendTaskChatMessage,
+					fetchTaskWorkspaceInfo: async () => createWorkspaceInfo(),
+					taskConversationSessionSummariesByTaskId: {},
+					isGitHistoryOpen: false,
+					refreshWorkspaceState: async () => {},
+				});
+				return null;
+			}
+			await act(async () => root.render(<Harness />));
+			await act(async () => {
+				if (action === "commit") actions!.handleAgentCommitTask("task-1");
+				else actions!.handleAgentOpenPrTask("task-1");
+			});
+			expect(sendTaskSessionInput).toHaveBeenCalledExactlyOnceWith("task-1", `${action} main`, {
+				appendNewline: false,
+				mode: "paste",
+			});
+			expect(
+				(action === "commit" ? actions!.agentCommitTaskLoadingById : actions!.agentOpenPrTaskLoadingById)["task-1"],
+			).toBe(true);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(200);
+			});
+			expect(sendTaskSessionInput).toHaveBeenNthCalledWith(2, "task-1", "\r", { appendNewline: false });
+			expect(sendTaskChatMessage).not.toHaveBeenCalled();
+			expect(actions!.taskGitActionLoadingByTaskId).toEqual({});
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("passes the selected card's worktreeMode to the git history task scope", async () => {

@@ -20,12 +20,8 @@ interface StageRailFocusedCardProps {
 	onMoveToValidationTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	workspacePath?: string | null;
 	defaultClineModelId?: string | null;
@@ -56,12 +52,8 @@ function StageHeaderRailEntry({
 	onMoveToValidationTask,
 	onRestoreFromTrashTask,
 	onDeleteTask,
-	onCommitTask,
-	onOpenPrTask,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
-	commitTaskLoadingById,
-	openPrTaskLoadingById,
 	moveToTrashLoadingById,
 	workspacePath,
 	defaultClineModelId,
@@ -131,12 +123,8 @@ function StageHeaderRailEntry({
 						onMoveToTrash={isReviewOrValidation ? onMoveToTrashTask : undefined}
 						onRestoreFromTrash={columnId === "trash" ? onRestoreFromTrashTask : undefined}
 						onDeleteTask={onDeleteTask}
-						onCommit={isReview ? onCommitTask : undefined}
-						onOpenPr={isReview ? onOpenPrTask : undefined}
 						onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 						onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-						isCommitLoading={isReview ? (commitTaskLoadingById?.[card.id] ?? false) : false}
-						isOpenPrLoading={isReview ? (openPrTaskLoadingById?.[card.id] ?? false) : false}
 						isMoveToTrashLoading={isReviewOrValidation ? (moveToTrashLoadingById?.[card.id] ?? false) : false}
 						workspacePath={workspacePath}
 						defaultClineModelId={defaultClineModelId}

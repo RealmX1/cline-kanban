@@ -11,8 +11,10 @@ import type { BoardCard } from "@/types";
 // DOM，而**只有** canonical 那份携带 data-task-id / data-verification-anchor。程序化拖动、依赖连线锚点
 // （后出现者覆盖先出现者）、居中滚动、sticky 几何测量、Post-Deploy Verification 高亮全都以该属性唯一为前提。
 
+const workspaceSnapshotMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@/stores/workspace-metadata-store", () => ({
-	useTaskWorkspaceSnapshotValue: () => undefined,
+	useTaskWorkspaceSnapshotValue: workspaceSnapshotMock,
 }));
 
 function createCard(overrides: Partial<BoardCard> = {}): BoardCard {
@@ -52,6 +54,7 @@ function cardShell(host: HTMLElement): HTMLElement | null {
 }
 
 beforeEach(() => {
+	workspaceSnapshotMock.mockReturnValue(undefined);
 	previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 		.IS_REACT_ACT_ENVIRONMENT;
 	(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -73,6 +76,18 @@ afterEach(() => {
 });
 
 describe("TaskCardBody 的渲染角色", () => {
+	it.each<TaskCardBodyRenderRole>([
+		"canonical_card_in_its_stage_list",
+		"focused_card_copy_under_sticky_stage_header",
+		"pinned_card_copy_in_task_pinboard",
+	])("Review 卡片有未提交变化时也不显示 Git 操作按钮：%s", (renderRole) => {
+		workspaceSnapshotMock.mockReturnValue({ path: "/isolated/task-1", changedFiles: 2, additions: 3, deletions: 1 });
+		const host = renderCardBody({ renderRole });
+		const buttonLabels = Array.from(host.querySelectorAll("button"), (button) => button.textContent?.trim());
+		expect(buttonLabels).not.toContain("Commit");
+		expect(buttonLabels).not.toContain("Open PR");
+	});
+
 	it("只有本体卡输出 data-task-id 与 verification 锚点", () => {
 		const canonical = cardShell(renderCardBody({ renderRole: "canonical_card_in_its_stage_list" }));
 		expect(canonical?.getAttribute("data-task-id")).toBe("task-1");

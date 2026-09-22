@@ -136,14 +136,10 @@ export interface TaskCardBusinessProps {
 	onDeleteTask?: (taskId: string) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
 	onOpenTaskEditor?: (card: BoardCardModel) => void;
-	onCommit?: (taskId: string) => void;
-	onOpenPr?: (taskId: string) => void;
 	onCancelAutomaticAction?: (taskId: string) => void;
 	// Task Pinboard（置顶板）：请求置顶（由上层弹原因对话框，确认后才真正写盘）与直接取消置顶。
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
-	isCommitLoading?: boolean;
-	isOpenPrLoading?: boolean;
 	isMoveToTrashLoading?: boolean;
 	isMoveToValidationLoading?: boolean;
 	isMoveToReviewLoading?: boolean;
@@ -207,13 +203,9 @@ export const TaskCardBody = memo(function TaskCardBody({
 	onDeleteTask,
 	onSaveTitle,
 	onOpenTaskEditor,
-	onCommit,
-	onOpenPr,
 	onCancelAutomaticAction,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
-	isCommitLoading = false,
-	isOpenPrLoading = false,
 	isMoveToTrashLoading = false,
 	isMoveToValidationLoading = false,
 	isMoveToReviewLoading = false,
@@ -514,8 +506,6 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const hasTaskPinboardPinReasonText = taskPinboardPinReasonTextOrEmpty !== "";
 	const showsTaskPinboardPinReasonRowOnThisCopy =
 		isTaskPinboardCopy && !isEditingTitle && (hasTaskPinboardPinReasonText || onEditTaskPinboardPinReason != null);
-	const showReviewGitActions = columnId === "review" && (reviewWorkspaceSnapshot?.changedFiles ?? 0) > 0;
-	const isAnyGitActionLoading = isCommitLoading || isOpenPrLoading;
 	const cancelAutomaticActionLabel =
 		!isTrashCard && card.autoReviewEnabled ? getTaskAutoReviewCancelButtonLabel(card.autoReviewMode) : null;
 	// 始终显示任务的 effective agent，按运行期同一套优先级解析：
@@ -1253,38 +1243,6 @@ export const TaskCardBody = memo(function TaskCardBody({
 								</Tooltip>
 							</TaskCardRowHoverActions>
 						) : null}
-					</div>
-				) : null}
-				{showReviewGitActions ? (
-					<div className="flex gap-1.5 mt-1.5">
-						<Button
-							variant="primary"
-							size="sm"
-							icon={isCommitLoading ? <Spinner size={12} /> : undefined}
-							disabled={isAnyGitActionLoading}
-							style={{ flex: "1 1 0" }}
-							onMouseDown={stopEvent}
-							onClick={(event) => {
-								stopEvent(event);
-								onCommit?.(card.id);
-							}}
-						>
-							Commit
-						</Button>
-						<Button
-							variant="primary"
-							size="sm"
-							icon={isOpenPrLoading ? <Spinner size={12} /> : undefined}
-							disabled={isAnyGitActionLoading}
-							style={{ flex: "1 1 0" }}
-							onMouseDown={stopEvent}
-							onClick={(event) => {
-								stopEvent(event);
-								onOpenPr?.(card.id);
-							}}
-						>
-							Open PR
-						</Button>
 					</div>
 				) : null}
 				{cancelAutomaticActionLabel && onCancelAutomaticAction ? (

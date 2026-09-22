@@ -26,8 +26,6 @@ export const BoardColumn = memo(function BoardColumn({
 	onClearTrash,
 	onEditTask,
 	onSaveTitle,
-	onCommitTask,
-	onOpenPrTask,
 	onCancelAutomaticTaskAction,
 	onMoveToTrashTask,
 	onMoveToValidationTask,
@@ -37,8 +35,6 @@ export const BoardColumn = memo(function BoardColumn({
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
 	taskIdRequestedToReveal,
-	commitTaskLoadingById,
-	openPrTaskLoadingById,
 	moveToTrashLoadingById,
 	moveToValidationLoadingById,
 	moveToReviewLoadingById,
@@ -63,8 +59,6 @@ export const BoardColumn = memo(function BoardColumn({
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCardModel) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
 	onMoveToValidationTask?: (taskId: string) => void;
@@ -78,8 +72,6 @@ export const BoardColumn = memo(function BoardColumn({
 	 * 命中本列时把该卡的索引交给渐进渲染，保证它即便排在初始 cap 之后也已挂载，供 scrollIntoView 命中。
 	 */
 	taskIdRequestedToReveal?: string | null;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	moveToValidationLoadingById?: Record<string, boolean>;
 	moveToReviewLoadingById?: Record<string, boolean>;
@@ -265,11 +257,7 @@ export const BoardColumn = memo(function BoardColumn({
 											onDeleteTask={onDeleteTask}
 											onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 											onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-											onCommit={onCommitTask}
-											onOpenPr={onOpenPrTask}
 											onCancelAutomaticAction={onCancelAutomaticTaskAction}
-											isCommitLoading={commitTaskLoadingById?.[card.id] ?? false}
-											isOpenPrLoading={openPrTaskLoadingById?.[card.id] ?? false}
 											isMoveToTrashLoading={moveToTrashLoadingById?.[card.id] ?? false}
 											isMoveToValidationLoading={moveToValidationLoadingById?.[card.id] ?? false}
 											isMoveToReviewLoading={moveToReviewLoadingById?.[card.id] ?? false}

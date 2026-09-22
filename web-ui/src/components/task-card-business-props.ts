@@ -21,16 +21,12 @@ export interface TaskCardActionHandlerBundle {
 	onMoveToReviewTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
 	onDeleteTask?: (taskId: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
 	/** 打开任务编辑弹窗（仅 backlog 卡有此入口，单击也走它）。 */
 	onEditTask?: (card: BoardCard) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	moveToValidationLoadingById?: Record<string, boolean>;
 	moveToReviewLoadingById?: Record<string, boolean>;
@@ -81,15 +77,11 @@ export function buildTaskCardBusinessProps({
 		onMoveToReview: isInProgress ? handlers.onMoveToReviewTask : undefined,
 		onRestoreFromTrash: isTrash ? handlers.onRestoreFromTrashTask : undefined,
 		onDeleteTask: handlers.onDeleteTask,
-		onCommit: isReview ? handlers.onCommitTask : undefined,
-		onOpenPr: isReview ? handlers.onOpenPrTask : undefined,
 		onCancelAutomaticAction: handlers.onCancelAutomaticTaskAction,
 		onSaveTitle: handlers.onSaveTitle,
 		onOpenTaskEditor: isBacklog ? handlers.onEditTask : undefined,
 		onRequestPinToTaskPinboard: handlers.onRequestPinToTaskPinboard,
 		onUnpinFromTaskPinboard: handlers.onUnpinFromTaskPinboard,
-		isCommitLoading: isReview ? (handlers.commitTaskLoadingById?.[card.id] ?? false) : false,
-		isOpenPrLoading: isReview ? (handlers.openPrTaskLoadingById?.[card.id] ?? false) : false,
 		isMoveToTrashLoading: isArchivableIntoDone ? (handlers.moveToTrashLoadingById?.[card.id] ?? false) : false,
 		isMoveToValidationLoading: isReview ? (handlers.moveToValidationLoadingById?.[card.id] ?? false) : false,
 		isMoveToReviewLoading: isInProgress ? (handlers.moveToReviewLoadingById?.[card.id] ?? false) : false,

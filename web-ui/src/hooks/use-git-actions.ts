@@ -28,7 +28,7 @@ import {
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardData, CardSelection } from "@/types";
 
-type TaskGitActionSource = "card" | "agent";
+type TaskGitActionSource = "automatic_review" | "agent";
 
 interface TaskGitActionLoadingState {
 	commitSource: TaskGitActionSource | null;
@@ -61,8 +61,6 @@ interface UseGitActionsInput {
 export interface UseGitActionsResult {
 	runningGitAction: RuntimeGitSyncAction | null;
 	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingState>;
-	commitTaskLoadingById: Record<string, boolean>;
-	openPrTaskLoadingById: Record<string, boolean>;
 	agentCommitTaskLoadingById: Record<string, boolean>;
 	agentOpenPrTaskLoadingById: Record<string, boolean>;
 	isSwitchingHomeBranch: boolean;
@@ -78,8 +76,6 @@ export interface UseGitActionsResult {
 	runGitAction: (action: RuntimeGitSyncAction) => Promise<void>;
 	switchHomeBranch: (branch: string) => Promise<void>;
 	discardHomeWorkingChanges: () => Promise<void>;
-	handleCommitTask: (taskId: string) => void;
-	handleOpenPrTask: (taskId: string) => void;
 	handleAgentCommitTask: (taskId: string) => void;
 	handleAgentOpenPrTask: (taskId: string) => void;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
@@ -190,26 +186,6 @@ export function useGitActions({
 		},
 		[],
 	);
-
-	const commitTaskLoadingById = useMemo(() => {
-		const next: Record<string, boolean> = {};
-		for (const [taskId, loading] of Object.entries(taskGitActionLoadingByTaskId)) {
-			if (loading.commitSource === "card") {
-				next[taskId] = true;
-			}
-		}
-		return next;
-	}, [taskGitActionLoadingByTaskId]);
-
-	const openPrTaskLoadingById = useMemo(() => {
-		const next: Record<string, boolean> = {};
-		for (const [taskId, loading] of Object.entries(taskGitActionLoadingByTaskId)) {
-			if (loading.prSource === "card") {
-				next[taskId] = true;
-			}
-		}
-		return next;
-	}, [taskGitActionLoadingByTaskId]);
 
 	const agentCommitTaskLoadingById = useMemo(() => {
 		const next: Record<string, boolean> = {};
@@ -371,20 +347,6 @@ export function useGitActions({
 		],
 	);
 
-	const handleCommitTask = useCallback(
-		(taskId: string) => {
-			void runTaskGitAction(taskId, "commit", "card");
-		},
-		[runTaskGitAction],
-	);
-
-	const handleOpenPrTask = useCallback(
-		(taskId: string) => {
-			void runTaskGitAction(taskId, "pr", "card");
-		},
-		[runTaskGitAction],
-	);
-
 	const handleAgentCommitTask = useCallback(
 		(taskId: string) => {
 			void runTaskGitAction(taskId, "commit", "agent");
@@ -532,7 +494,7 @@ export function useGitActions({
 
 	const runAutoReviewGitAction = useCallback(
 		async (taskId: string, action: TaskGitAction) => {
-			return await runTaskGitAction(taskId, action, "card");
+			return await runTaskGitAction(taskId, action, "automatic_review");
 		},
 		[runTaskGitAction],
 	);
@@ -561,8 +523,6 @@ export function useGitActions({
 	return {
 		runningGitAction,
 		taskGitActionLoadingByTaskId,
-		commitTaskLoadingById,
-		openPrTaskLoadingById,
 		agentCommitTaskLoadingById,
 		agentOpenPrTaskLoadingById,
 		isSwitchingHomeBranch,
@@ -576,8 +536,6 @@ export function useGitActions({
 		runGitAction,
 		switchHomeBranch,
 		discardHomeWorkingChanges,
-		handleCommitTask,
-		handleOpenPrTask,
 		handleAgentCommitTask,
 		handleAgentOpenPrTask,
 		runAutoReviewGitAction,

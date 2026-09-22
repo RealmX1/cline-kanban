@@ -71,8 +71,6 @@ const stableHandlers = {
 	onTaskDragEnd: vi.fn(),
 	onStartTask: vi.fn(),
 	onEditTask: vi.fn(),
-	onCommitTask: vi.fn(),
-	onOpenPrTask: vi.fn(),
 	onMoveToTrashTask: vi.fn(),
 	onMoveToValidationTask: vi.fn(),
 	onRequestPinToTaskPinboard: vi.fn(),
@@ -150,8 +148,8 @@ for (const host of ["board", "focus"] as const) {
 		cardRenderObservation.mockClear();
 		render({ second: summary });
 		expect(cardRenderObservation).not.toHaveBeenCalled();
-		const updatedCommitHandler = vi.fn();
-		render({ second: summary }, { onCommitTask: updatedCommitHandler });
+		const updatedMoveToValidationHandler = vi.fn();
+		render({ second: summary }, { onMoveToValidationTask: updatedMoveToValidationHandler });
 		expect(cardRenderObservation.mock.calls.map(([id]) => id)).toContain("first");
 	});
 }

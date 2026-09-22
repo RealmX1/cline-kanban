@@ -667,8 +667,6 @@ export default function App(): ReactElement {
 	const {
 		runningGitAction,
 		taskGitActionLoadingByTaskId,
-		commitTaskLoadingById,
-		openPrTaskLoadingById,
 		agentCommitTaskLoadingById,
 		agentOpenPrTaskLoadingById,
 		isDiscardingHomeWorkingChanges,
@@ -679,8 +677,6 @@ export default function App(): ReactElement {
 		runGitAction,
 		switchHomeBranch,
 		discardHomeWorkingChanges,
-		handleCommitTask,
-		handleOpenPrTask,
 		handleAgentCommitTask,
 		handleAgentOpenPrTask,
 		runAutoReviewGitAction,
@@ -1410,14 +1406,10 @@ export default function App(): ReactElement {
 													onClearTrash={handleOpenClearTrash}
 													onEditTask={handleOpenEditTask}
 													onSaveTaskTitle={handleSaveTaskTitle}
-													onCommitTask={handleCommitTask}
-													onOpenPrTask={handleOpenPrTask}
 													onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
 													onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}
 													onUnpinFromTaskPinboard={handleUnpinTaskFromTaskPinboard}
 													onEditTaskPinboardPinReason={handleRequestEditTaskPinboardPinReason}
-													commitTaskLoadingById={commitTaskLoadingById}
-													openPrTaskLoadingById={openPrTaskLoadingById}
 													moveToTrashLoadingById={moveToTrashLoadingById}
 													moveToReviewLoadingById={moveToReviewLoadingById}
 													onMoveToTrashTask={handleMoveReviewCardToTrash}
@@ -1532,12 +1524,8 @@ export default function App(): ReactElement {
 									onClearTrash={handleOpenClearTrash}
 									onEditTask={handleOpenEditTaskKeepingDetailSelection}
 									onSaveTaskTitle={handleSaveTaskTitle}
-									onCommitTask={handleCommitTask}
-									onOpenPrTask={handleOpenPrTask}
 									onAgentCommitTask={handleAgentCommitTask}
 									onAgentOpenPrTask={handleAgentOpenPrTask}
-									commitTaskLoadingById={commitTaskLoadingById}
-									openPrTaskLoadingById={openPrTaskLoadingById}
 									agentCommitTaskLoadingById={agentCommitTaskLoadingById}
 									agentOpenPrTaskLoadingById={agentOpenPrTaskLoadingById}
 									moveToTrashLoadingById={moveToTrashLoadingById}
