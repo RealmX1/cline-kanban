@@ -52,7 +52,7 @@
 
 ## BYOK 与语音
 
-设置入口：Runtime Settings → Notifications → 智能通知。先保存 provider，再选择用途绑定并保存通知设置。
+设置入口：Runtime Settings → Notifications → 智能通知。Provider、密钥替换/删除、用途绑定、AI 与语音设置、本机音色统一作为草稿，由底部唯一的 Save 保存，Cancel 放弃。切换 Provider 保留各自草稿；未编辑且未被用途绑定引用的新增草稿不会保存；当前编辑项显示已保存名称、ID、凭据来源与配置状态，密钥不回显。试听只播放已保存设置；有未保存修改时先 Save，再打开设置试听。保存流程按现有接口顺序执行，失败保留草稿并允许重试，已完成的写入不会自动回滚。
 
 每个 provider 明确选择 `environment` 或 `system_credential_store`。环境变量为 `KANBAN_MODEL_PROVIDER_<大写且连字符转下划线的ID>_API_KEY`；沿用已有文本 provider 默认解析。密钥留空表示保留，删除按钮显式删除；系统库不可用/锁定时提示错误，不静默切换来源、不落明文文件。Linux 强制 Secret Service，不使用库的内存回退。
 

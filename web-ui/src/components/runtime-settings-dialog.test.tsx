@@ -74,6 +74,59 @@ vi.mock("@radix-ui/react-select", () => ({
 	ItemIndicator: ({ children }: { children: ReactNode }) => <span>{children}</span>,
 }));
 
+const notificationSettingsMocks = vi.hoisted(() => ({
+	getSettings: vi.fn(),
+	saveProvider: vi.fn(),
+	saveSettings: vi.fn(),
+	previewSpeech: vi.fn(),
+}));
+vi.mock("@/runtime/notification-intelligence-query", () => ({
+	notificationIntelligenceClient: () => ({
+		getSettings: { query: notificationSettingsMocks.getSettings },
+		saveProvider: { mutate: notificationSettingsMocks.saveProvider },
+		saveSettings: { mutate: notificationSettingsMocks.saveSettings },
+		speechModels: { query: async () => [] },
+	}),
+}));
+vi.mock("@/utils/notification-summary-speech", () => ({
+	playNotificationSummarySpeech: notificationSettingsMocks.previewSpeech,
+}));
+const savedNotificationSettings = {
+	assessmentEnabled: false,
+	summaryLanguage: "zh-CN",
+	fallbackAfterMinutes: 10,
+	taskNameSuggestionBinding: null,
+	notificationAssessmentBinding: null,
+	notificationSpeechBinding: { modelProviderId: "saved-tts", modelId: "hexgrad/Kokoro-82M" },
+	speechMode: "summary",
+	speechProvider: "deepinfra",
+	speechVoice: "af_heart",
+	speechSpeed: 1,
+	speechPitch: 1,
+	speechVolume: 1,
+	speechStyleInstruction: "",
+};
+const savedNotificationProviders = [
+	{
+		modelProviderId: "saved-text",
+		displayName: "文本服务",
+		providerProtocol: "openai_compatible",
+		credentialSource: "environment",
+		alibabaRegion: "beijing",
+		credentialConfigured: true,
+		credentialStatusMessage: null,
+	},
+	{
+		modelProviderId: "saved-tts",
+		displayName: "我的语音服务",
+		providerProtocol: "deepinfra",
+		credentialSource: "system_credential_store",
+		alibabaRegion: "beijing",
+		credentialConfigured: true,
+		credentialStatusMessage: null,
+	},
+];
+
 const resetLayoutCustomizationsMock = vi.hoisted(() => vi.fn());
 const useRuntimeConfigSaveMock = vi.hoisted(() => vi.fn(async () => true));
 const clineSetupSectionOnSavedRef = vi.hoisted(() => ({
@@ -227,6 +280,13 @@ describe("RuntimeSettingsDialog", () => {
 	let previousActEnvironment: boolean | undefined;
 
 	beforeEach(() => {
+		for (const mock of Object.values(notificationSettingsMocks)) mock.mockReset();
+		notificationSettingsMocks.getSettings.mockResolvedValue({
+			settings: savedNotificationSettings,
+			providers: savedNotificationProviders,
+		});
+		notificationSettingsMocks.saveProvider.mockResolvedValue({ ok: true });
+		notificationSettingsMocks.saveSettings.mockResolvedValue({ ok: true });
 		resetLayoutCustomizationsMock.mockReset();
 		useRuntimeConfigSaveMock.mockClear();
 		useRuntimeConfigSaveMock.mockResolvedValue(true);
@@ -255,6 +315,185 @@ describe("RuntimeSettingsDialog", () => {
 			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 				previousActEnvironment;
 		}
+	});
+
+	async function renderSettings(open = true, onOpenChange = vi.fn()) {
+		await act(async () =>
+			root.render(
+				<RuntimeSettingsDialog
+					open={open}
+					workspaceId="workspace-1"
+					initialConfig={savedClineOauthConfig}
+					onOpenChange={onOpenChange}
+				/>,
+			),
+		);
+	}
+	async function changeInput(labelText: string, value: string) {
+		const label = Array.from(document.querySelectorAll("label")).find((label) =>
+			label.textContent?.trim().startsWith(labelText),
+		);
+		const input = label?.querySelector("input");
+		if (!input) throw new Error(`找不到输入框 ${labelText}`);
+		await act(async () => {
+			Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
+			input.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+	}
+	async function selectValue(label: string, value: string) {
+		const select = document.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`);
+		if (!select) throw new Error(`找不到选项 ${label}`);
+		await act(async () => {
+			select.value = value;
+			select.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+	}
+	it("统一保存多个 Provider 草稿和通知设置，显示已保存凭据，试听不隐式保存", async () => {
+		const onOpenChange = vi.fn();
+		await renderSettings(true, onOpenChange);
+		expect(document.querySelector<HTMLSelectElement>('select[aria-label="编辑 provider"]')?.value).toBe("1");
+		expect(document.body.textContent).toContain(
+			"已保存：我的语音服务（saved-tts） · 系统钥匙串 · 凭据已配置（不回显）",
+		);
+		expect(findButtonByText(document.body, "保存 provider")).toBeNull();
+		expect(findButtonByText(document.body, "保存 AI 与语音设置")).toBeNull();
+		await act(async () => findButtonByText(document.body, "试听已保存设置（产生 API 费用）")?.click());
+		expect(notificationSettingsMocks.previewSpeech).toHaveBeenCalledTimes(1);
+		expect(notificationSettingsMocks.saveSettings).not.toHaveBeenCalled();
+		await changeInput("API Key", "test-only-replacement");
+		await selectValue("编辑 provider", "0");
+		await changeInput("显示名称", "新的文本服务名称");
+		await selectValue("编辑 provider", "1");
+		expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("test-only-replacement");
+		const language = document.querySelector<HTMLSelectElement>("#notification-intelligence-selection-5");
+		if (!language) throw new Error("缺少语言选择");
+		await act(async () => {
+			language.value = "en-US";
+			language.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		expect(notificationSettingsMocks.saveProvider).not.toHaveBeenCalled();
+		expect(findButtonByText(document.body, "Save")?.disabled).toBe(false);
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(notificationSettingsMocks.saveProvider).toHaveBeenCalledTimes(2);
+		expect(notificationSettingsMocks.saveProvider).toHaveBeenCalledWith(
+			expect.objectContaining({ apiKey: "test-only-replacement" }),
+		);
+		expect(notificationSettingsMocks.saveSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ summaryLanguage: "en-US" }),
+		);
+		expect(useRuntimeConfigSaveMock).toHaveBeenCalledTimes(1);
+		expect(onOpenChange).toHaveBeenCalledWith(false);
+	});
+	it.each(["未编辑", "修改名称", "输入密钥", "用途绑定"] as const)(
+		"添加 Provider 后统一保存：%s 草稿只在编辑或绑定后持久化",
+		async (draftAction) => {
+			const onOpenChange = vi.fn();
+			await renderSettings(true, onOpenChange);
+			await act(async () => findButtonByText(document.body, "添加 Provider")?.click());
+			expect(document.querySelector<HTMLSelectElement>('select[aria-label="编辑 provider"]')?.value).toBe("2");
+			if (draftAction === "修改名称") await changeInput("显示名称", "新的语音服务");
+			if (draftAction === "输入密钥") await changeInput("API Key", "test-only-new-provider");
+			if (draftAction === "用途绑定") {
+				const binding = document.querySelector<HTMLSelectElement>("#notification-intelligence-selection-9");
+				if (!binding) throw new Error("缺少 TTS Provider 绑定");
+				await act(async () => {
+					binding.value = "provider-3";
+					binding.dispatchEvent(new Event("change", { bubbles: true }));
+				});
+			}
+			await changeInput("延期兜底", "15");
+			await act(async () => findButtonByText(document.body, "Save")?.click());
+			expect(notificationSettingsMocks.saveProvider).toHaveBeenCalledTimes(draftAction === "未编辑" ? 0 : 1);
+			if (draftAction !== "未编辑")
+				expect(notificationSettingsMocks.saveProvider).toHaveBeenCalledWith(
+					expect.objectContaining({
+						profile: expect.objectContaining({ modelProviderId: "provider-3" }),
+					}),
+				);
+			expect(notificationSettingsMocks.saveSettings).toHaveBeenCalledWith(
+				expect.objectContaining({
+					fallbackAfterMinutes: 15,
+					notificationSpeechBinding: {
+						modelProviderId: draftAction === "用途绑定" ? "provider-3" : "saved-tts",
+						modelId: "hexgrad/Kokoro-82M",
+					},
+				}),
+			);
+			expect(onOpenChange).toHaveBeenCalledWith(false);
+		},
+	);
+	it("取消丢弃密钥删除和表单草稿；重新打开回到 General", async () => {
+		const onOpenChange = vi.fn();
+		await renderSettings(true, onOpenChange);
+		const body = document.querySelector('[data-settings-section="general"]')?.parentElement;
+		if (!body) throw new Error("缺少滚动容器");
+		body.scrollTo = vi.fn();
+		await act(async () => findButtonByText(document.body, "Notifications")?.click());
+		expect(findButtonByText(document.body, "Notifications")?.getAttribute("aria-current")).toBe("location");
+		await act(async () => findButtonByText(document.body, "删除已保存密钥（待保存）")?.click());
+		await changeInput("显示名称", "待丢弃的名称");
+		await act(async () => findButtonByText(document.body, "Cancel")?.click());
+		expect(onOpenChange).toHaveBeenCalledWith(false);
+		expect(notificationSettingsMocks.saveProvider).not.toHaveBeenCalled();
+		await renderSettings(false);
+		await renderSettings();
+		expect(findButtonByText(document.body, "General")?.getAttribute("aria-current")).toBe("location");
+		expect(findButtonByText(document.body, "Notifications")?.getAttribute("aria-current")).toBeNull();
+		expect(document.body.textContent).not.toContain("待丢弃的名称");
+		expect(findButtonByText(document.body, "撤销删除密钥")).toBeNull();
+		expect(findButtonByText(document.body, "Save")?.disabled).toBe(true);
+	});
+	it("保存失败保留密钥草稿和对话框，重试后才关闭", async () => {
+		const onOpenChange = vi.fn();
+		await renderSettings(true, onOpenChange);
+		await changeInput("API Key", "test-only-retry");
+		notificationSettingsMocks.saveProvider.mockRejectedValueOnce(new Error("系统钥匙串不可用"));
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(onOpenChange).not.toHaveBeenCalled();
+		expect(useRuntimeConfigSaveMock).not.toHaveBeenCalled();
+		expect(document.body.textContent).toContain("保存未完成，草稿已保留");
+		expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("test-only-retry");
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(onOpenChange).toHaveBeenCalledWith(false);
+	});
+
+	it("浏览器音色在 Cancel 时保留原值，且仅在统一 Save 后写入", async () => {
+		localStorage.setItem("kanban-notification-browser-voice-uri", "voice-original");
+		notificationSettingsMocks.getSettings.mockResolvedValue({
+			settings: { ...savedNotificationSettings, speechProvider: "browser", notificationSpeechBinding: null },
+			providers: savedNotificationProviders,
+		});
+		await renderSettings();
+		const voiceSelect = document.querySelector<HTMLSelectElement>("#notification-intelligence-selection-8");
+		if (!voiceSelect) throw new Error("缺少浏览器音色选项");
+		await act(async () => {
+			voiceSelect.value = "";
+			voiceSelect.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		expect(localStorage.getItem("kanban-notification-browser-voice-uri")).toBe("voice-original");
+		await renderSettings(false);
+		await renderSettings();
+		expect(findButtonByText(document.body, "Save")?.disabled).toBe(true);
+		const reopenedSelect = document.querySelector<HTMLSelectElement>("#notification-intelligence-selection-8");
+		if (!reopenedSelect) throw new Error("缺少浏览器音色选项");
+		await act(async () => {
+			reopenedSelect.value = "";
+			reopenedSelect.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(localStorage.getItem("kanban-notification-browser-voice-uri")).toBe("");
+	});
+	it("通知部分已保存但整体保存失败时，仍允许点击 Save 重试", async () => {
+		const onOpenChange = vi.fn();
+		await renderSettings(true, onOpenChange);
+		await changeInput("API Key", "test-only-partial-save");
+		useRuntimeConfigSaveMock.mockResolvedValueOnce(false);
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(onOpenChange).not.toHaveBeenCalled();
+		expect(findButtonByText(document.body, "Save")?.disabled).toBe(false);
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(notificationSettingsMocks.saveProvider).toHaveBeenCalledTimes(1);
+		expect(onOpenChange).toHaveBeenCalledWith(false);
 	});
 
 	it("does not render support actions inside settings", async () => {

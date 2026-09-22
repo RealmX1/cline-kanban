@@ -93,3 +93,34 @@ rg 'KANBAN-VERIFICATION-SCOPED:' src web-ui/src
 重启后此前 `/tmp/8dc89-*` 日志已丢失；前述历史结果保留为当时观察记录，不能作为此次验证的 cache 证据。本次未提交、未部署。`.serena/project.yml` 为工具自动配置变化，不属于实现或修复范围，不应一起提交。
 
 部署后验证 reconcile 保留原四个 ID，仅更新 `301e10e1-db63-442c-81e5-dccdd54c45d7` 的凭据异常不重复提醒断言；其它修复已由自动化回归覆盖，没有新增重复定义。自动脚本未变，不额外运行现场测试；仍需部署后执行原定义。
+
+## 设置保存与导航修复（2026-09-22，原实现 land 后）
+
+通知 Provider、密钥替换/删除、AI/语音参数和浏览器本机音色接入 Settings 的统一草稿与底部 Save。Cancel 或关闭丢弃草稿；切换 Provider 保留各项草稿。编辑器默认选择已绑定的 Provider，直接展示已保存名称、ID、凭据来源、配置状态及不可用原因；API Key 不回显。试听不隐式保存，有草稿时须先保存。每次打开重置导航到 General 和滚动顶部；显式 shortcuts 入口仍保留原定位逻辑。
+
+保存复用现有接口，不具备跨配置存储与系统钥匙串的全局事务。失败时明确保留草稿并提示部分更改可能已保存；即使通知部分已成功，外层 Save 失败后也仍能重试。
+
+验证结果：
+
+- 根 TypeScript、Web TypeScript 与 Web 生产构建通过。
+- Web 全量 174 个测试文件 / 1,706 项通过；其中设置页 13 项，覆盖统一保存多个 Provider、取消、密钥草稿保留、失败重试、浏览器音色保存边界、试听不保存及导航重开。
+- 真实 Chromium 挂载生产 Settings 组件及样式，tRPC 请求由隔离 fixture 拦截：首次打开/重开 General 高亮和 scrollTop=0、点击 Notifications 后目标实际滚入顶部、已保存凭据状态、取消不写入、唯一 Save 写入及再次打开回显全部通过。没有修改现场配置或钥匙串，没有付费 API 请求。
+- 改动文件 Biome 与 `git diff --check` 通过。此次未提交、未部署。
+
+部署后验证 reconcile：
+
+| 行为 | 部署前已证 | 部署后待验 | 处理 |
+| --- | --- | --- | --- |
+| 保存、取消、重试、导航与凭据状态显示 | 组件回归 + 真实 Chromium | 无新增现场依赖 | 不新增验证 |
+| 系统语音 | 保存和试听触发边界 | 真实设备输出与语言 | 更新原 `0b7a1f36-5619-4472-a731-2efe8b9cf980` 步骤为 Save → 重开 → 试听 |
+| BYOK 语音 | 草稿、状态显示与提交调用 | 真实 OS 授权、账户权限和音频 | 更新原 `3d1f0c14-84af-4a2f-9f3b-18ecbebe3c08` 的统一保存、回显和延迟删除步骤 |
+
+两条均保持 guided_manual、automatic cleanup，资产目录仍为上文同 ID 目录；自动脚本未变，无新增 dry-run。`verification list` 自查 `ok:true, count:4`，仍为 1 个自动与 3 个人工引导，不运行、不勾选现场验证。兜底清理沿用上文同 ID 的 `kanban verification cleanup` 命令；未添加 repo instrumentation。
+
+
+### 本轮设置修复的 RVF
+
+run：`~/.rvf/user-local-data/run-logs/runs/rvf-20260922T122340Z-agentic-initiation-start-f66244a9/`。
+两路外部审查完成，1 条意见合并为 RVF-001。validate/fix 子代理在独立 attempt 中复现「误点添加 Provider 后，统一保存其它设置也落盘占位 profile」，移除新增时强制标脏，保留编辑或绑定后的保存行为。新增四种回归情形，修复前 1 失败 / 16 通过，修复后 17/17 通过，Web 类型检查及 Biome 通过；patch 已经工具合回，无 scope 扩展。
+
+此修复由自动化覆盖；部署后验证 reconcile 不需要新增或改写现场引导，保持原四个 ID。最终合并版本的验证命令、结果与缓存证据以本 run 的 `artifacts/handoff.md` 及 `artifacts/validation-records.json` 为准。本轮未提交、未部署。

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
+import type { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notification-intelligence-settings-draft";
 import {
 	type NotificationIntelligenceSettings,
 	type NotificationProviderProfile,
@@ -8,37 +9,33 @@ import {
 } from "@/runtime/notification-intelligence-query";
 import { playNotificationSummarySpeech } from "@/utils/notification-summary-speech";
 
-const emptyProvider: NotificationProviderProfile = {
-	modelProviderId: "deepinfra",
-	displayName: "DeepInfra",
-	providerProtocol: "deepinfra",
-	credentialSource: "system_credential_store",
-	alibabaRegion: "beijing",
-	credentialConfigured: false,
-	credentialStatusMessage: null,
-};
 const inputClassName = "w-full rounded border border-border bg-surface-0 px-2 py-1.5 text-sm text-text-primary";
-export function NotificationIntelligenceSettingsSection() {
-	const [settings, setSettings] = useState<NotificationIntelligenceSettings | null>(null);
-	const [providers, setProviders] = useState<NotificationProviderProfile[]>([]);
-	const [profile, setProfile] = useState<NotificationProviderProfile>(emptyProvider);
-	const [apiKey, setApiKey] = useState("");
+export function NotificationIntelligenceSettingsSection({
+	draft,
+	disabled,
+}: {
+	draft: ReturnType<typeof useNotificationIntelligenceSettingsDraft>;
+	disabled: boolean;
+}) {
+	const {
+		settings,
+		setSettings,
+		providers,
+		profile,
+		setProfile,
+		apiKey,
+		setApiKey,
+		savedProfile,
+		browserVoiceUri,
+		setBrowserVoiceUri,
+	} = draft;
 	const [notice, setNotice] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
 	const [models, setModels] = useState<
 		Awaited<ReturnType<ReturnType<typeof notificationIntelligenceClient>["speechModels"]["query"]>>[number][]
 	>([]);
-	const [browserVoiceUri, setBrowserVoiceUri] = useState(
-		() => localStorage.getItem("kanban-notification-browser-voice-uri") ?? "",
-	);
-	async function reload() {
-		const result = await notificationIntelligenceClient().getSettings.query();
-		setSettings(result.settings);
-		setProviders(result.providers);
-	}
 	useEffect(() => {
-		void reload().catch(() => setNotice("无法读取 AI 与语音设置"));
 		void notificationIntelligenceClient()
 			.speechModels.query()
 			.then((value) => setModels([...value]))
@@ -54,7 +51,7 @@ export function NotificationIntelligenceSettingsSection() {
 		setNotice("");
 		try {
 			await operation();
-			setNotice("已保存");
+			setNotice("试听结束");
 		} catch (error) {
 			setNotice(error instanceof Error ? error.message : "操作失败");
 		} finally {
@@ -64,7 +61,7 @@ export function NotificationIntelligenceSettingsSection() {
 	if (!settings)
 		return (
 			<p className="text-sm text-text-secondary" role="status">
-				{notice || "正在读取 AI 与语音设置…"}
+				{draft.loadError || notice || "正在读取 AI 与语音设置…"}
 			</p>
 		);
 	const selectedModel = models.find((model) => model.modelId === settings.notificationSpeechBinding?.modelId);
@@ -79,35 +76,36 @@ export function NotificationIntelligenceSettingsSection() {
 		>
 			<h3 className="font-semibold">智能通知与 BYOK</h3>
 			<p className="text-text-secondary">
-				凭据由本地运行时保存至系统钥匙串。环境变量与保存凭据明确二选一；失败不会自动换来源。
+				所有修改统一由底部 Save 保存；Cancel 放弃本次修改。密钥不回显，凭据来源不会自动切换。
 			</p>
-			<fieldset disabled={busy} className="space-y-3">
+			<fieldset disabled={busy || disabled} className="space-y-3">
 				<legend className="mb-2 font-medium">Provider 凭据</legend>
 				<NativeSelect
 					aria-label="编辑 provider"
-					value=""
-					onChange={(event) => {
-						const selected = providers.find((candidate) => candidate.modelProviderId === event.target.value);
-						if (selected) {
-							setProfile(selected);
-							setApiKey("");
-						}
-					}}
+					value={draft.selectedProviderIndex}
+					onChange={(event) => draft.setSelectedProviderIndex(Number(event.target.value))}
 				>
-					<option value="">选择已有配置，或填写新配置</option>
-					{providers.map((candidate) => (
-						<option key={candidate.modelProviderId} value={candidate.modelProviderId}>
-							{candidate.displayName} ·{" "}
-							{candidate.credentialSource === "environment" ? "环境变量" : "系统钥匙串"} ·{" "}
-							{candidate.credentialConfigured ? "已配置" : "不可用"}
+					{providers.map((candidate, index) => (
+						<option key={index} value={index}>
+							{candidate.displayName} · {candidate.modelProviderId}
 						</option>
 					))}
 				</NativeSelect>
+				<Button onClick={draft.addProvider}>添加 Provider</Button>
+				<p role="status" className="text-text-secondary">
+					{savedProfile
+						? `已保存：${savedProfile.displayName}（${savedProfile.modelProviderId}） · ${savedProfile.credentialSource === "environment" ? "环境变量" : "系统钥匙串"} · ${savedProfile.credentialConfigured ? "凭据已配置（不回显）" : "凭据不可用"}`
+						: "新配置，尚未保存"}
+					{savedProfile?.credentialStatusMessage ? ` · ${savedProfile.credentialStatusMessage}` : ""}
+				</p>
+				{apiKey && <p className="text-text-secondary">新密钥待保存</p>}
+				{draft.deleteSavedCredential && <p className="text-text-secondary">密钥将在点击 Save 后删除</p>}
 				<label className="block">
 					Provider ID
 					<input
 						className={inputClassName}
 						value={profile.modelProviderId}
+						disabled={Boolean(savedProfile)}
 						onChange={(event) => setProfile({ ...profile, modelProviderId: event.target.value })}
 					/>
 				</label>
@@ -217,42 +215,13 @@ export function NotificationIntelligenceSettingsSection() {
 						</label>
 					</>
 				)}
-				<div className="flex gap-2">
-					<Button
-						onClick={() =>
-							void run(async () => {
-								await notificationIntelligenceClient().saveProvider.mutate({
-									profile: { ...profile, baseUrl: profile.baseUrl || undefined },
-									apiKey: apiKey || undefined,
-								});
-								setApiKey("");
-								await reload();
-							})
-						}
-					>
-						保存 provider
+				{profile.credentialSource === "system_credential_store" && savedProfile && (
+					<Button variant="default" onClick={draft.toggleCredentialDeletion}>
+						{draft.deleteSavedCredential ? "撤销删除密钥" : "删除已保存密钥（待保存）"}
 					</Button>
-					<Button
-						variant="default"
-						onClick={() =>
-							void run(async () => {
-								await notificationIntelligenceClient().saveProvider.mutate({
-									profile: { ...profile, baseUrl: profile.baseUrl || undefined },
-									deleteSavedCredential: true,
-								});
-								setApiKey("");
-								await reload();
-							})
-						}
-					>
-						删除已保存密钥
-					</Button>
-				</div>
-				{profile.credentialStatusMessage && (
-					<p className="text-text-secondary">{profile.credentialStatusMessage}</p>
 				)}
 			</fieldset>
-			<fieldset disabled={busy} className="space-y-3">
+			<fieldset disabled={busy || disabled} className="space-y-3">
 				<legend className="mb-2 font-medium">功能模型与通知</legend>
 				{(["taskNameSuggestionBinding", "notificationAssessmentBinding"] as const).map((bindingKey) => (
 					<div key={bindingKey} className="space-y-1">
@@ -379,7 +348,6 @@ export function NotificationIntelligenceSettingsSection() {
 									value={browserVoiceUri}
 									onChange={(event) => {
 										setBrowserVoiceUri(event.target.value);
-										localStorage.setItem("kanban-notification-browser-voice-uri", event.target.value);
 									}}
 								>
 									<option value="">按语言自动选择</option>
@@ -528,22 +496,16 @@ export function NotificationIntelligenceSettingsSection() {
 						</p>
 					</>
 				)}
+				{draft.hasUnsavedChanges && (
+					<p className="text-text-secondary">有未保存的修改；请先点击底部 Save，再打开设置试听。</p>
+				)}
 				<div className="flex gap-2">
-					<Button
-						onClick={() =>
-							void run(async () => {
-								await notificationIntelligenceClient().saveSettings.mutate(settings);
-							})
-						}
-					>
-						保存 AI 与语音设置
-					</Button>
 					{settings.speechMode === "summary" && (
 						<Button
 							variant="default"
+							disabled={draft.hasUnsavedChanges}
 							onClick={() =>
 								void run(async () => {
-									await notificationIntelligenceClient().saveSettings.mutate(settings);
 									await playNotificationSummarySpeech({
 										settings,
 										text:
@@ -555,7 +517,7 @@ export function NotificationIntelligenceSettingsSection() {
 								})
 							}
 						>
-							保存并试听{settings.speechProvider !== "browser" ? "（产生 API 费用）" : ""}
+							试听已保存设置{settings.speechProvider !== "browser" ? "（产生 API 费用）" : ""}
 						</Button>
 					)}
 				</div>
