@@ -62,6 +62,7 @@ import {
 } from "../core/task-message-injection-ledger";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
+import { discardQueuedTaskPromptDeliveriesForTasks } from "../state/queued-task-prompt-delivery-store";
 import {
 	detectGitRepositoryInfo,
 	getTaskWorktreesHomePath,
@@ -1514,6 +1515,13 @@ async function deleteTaskCommand(input: {
 	// 任务本体没了之后，它的编辑草稿与落败副本再也没有可以认领的地方——界面上连打开它的入口都不存在了。
 	// 浏览器侧的删除 handler 会自己清一次，但 CLI 这条路径完全不经过它。
 	await discardTaskEditDraftsForDeletedTasks(workspaceId, mutation.value.deletedTaskIds);
+	// 排队 prompt 同理，而且更要紧：它们是待执行的机器动作，不是资产。留着只会在同 id 的任务被恢复时突然发射。
+	// runtime 里的出队引擎会在下一次兜底 sweep 时重读文件、跟上这次改动。失败只记不抛：条目 24h 后自然过期。
+	try {
+		await discardQueuedTaskPromptDeliveriesForTasks({ workspaceId, taskIds: mutation.value.deletedTaskIds });
+	} catch {
+		// 见上。
+	}
 
 	await Promise.all(
 		mutation.value.taskIdsRequiringStop.map(async (taskId) => await stopTaskRuntimeSession(runtimeClient, taskId)),

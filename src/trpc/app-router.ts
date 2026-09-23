@@ -146,6 +146,10 @@ import type {
 	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkResponse,
+	RuntimeTaskPromptDeliveryQueueMutateRequest,
+	RuntimeTaskPromptDeliveryQueueMutateResponse,
+	RuntimeTaskPromptDeliveryQueueReadRequest,
+	RuntimeTaskPromptDeliveryQueueResponse,
 	RuntimeTaskSessionInputRequest,
 	RuntimeTaskSessionInputResponse,
 	RuntimeTaskSessionStartRequest,
@@ -322,6 +326,10 @@ import {
 	runtimeTaskNameSuggestionResponseSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema,
+	runtimeTaskPromptDeliveryQueueMutateRequestSchema,
+	runtimeTaskPromptDeliveryQueueMutateResponseSchema,
+	runtimeTaskPromptDeliveryQueueReadRequestSchema,
+	runtimeTaskPromptDeliveryQueueResponseSchema,
 	runtimeTaskSessionInputRequestSchema,
 	runtimeTaskSessionInputResponseSchema,
 	runtimeTaskSessionStartRequestSchema,
@@ -495,6 +503,16 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimePromptLibraryMutateRequest,
 		) => Promise<RuntimePromptLibraryResponse>;
+		// 排队 prompt 投递（见 src/state/queued-task-prompt-delivery-store.ts）。读是 workspace 级整份快照 + 投影；
+		// 写是意图式 mutation，与 prompt library 同形。
+		getTaskPromptDeliveryQueue: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskPromptDeliveryQueueReadRequest,
+		) => Promise<RuntimeTaskPromptDeliveryQueueResponse>;
+		mutateTaskPromptDeliveryQueue: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskPromptDeliveryQueueMutateRequest,
+		) => Promise<RuntimeTaskPromptDeliveryQueueMutateResponse>;
 		getWorkspaceTaskEditDrafts: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskEditDraftsReadRequest,
@@ -1089,6 +1107,18 @@ export const runtimeAppRouter = t.router({
 			.output(runtimePromptLibraryResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.mutateWorkspacePromptLibrary(ctx.workspaceScope, input);
+			}),
+		getTaskPromptDeliveryQueue: workspaceProcedure
+			.input(runtimeTaskPromptDeliveryQueueReadRequestSchema)
+			.output(runtimeTaskPromptDeliveryQueueResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getTaskPromptDeliveryQueue(ctx.workspaceScope, input);
+			}),
+		mutateTaskPromptDeliveryQueue: workspaceProcedure
+			.input(runtimeTaskPromptDeliveryQueueMutateRequestSchema)
+			.output(runtimeTaskPromptDeliveryQueueMutateResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.mutateTaskPromptDeliveryQueue(ctx.workspaceScope, input);
 			}),
 		getWorkspaceTaskEditDrafts: workspaceProcedure
 			.input(runtimeTaskEditDraftsReadRequestSchema)

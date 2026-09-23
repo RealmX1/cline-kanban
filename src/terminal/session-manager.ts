@@ -35,8 +35,10 @@ import {
 	applySessionFacets,
 	deriveSessionFacetsFromLegacyState,
 	isAgentOutputQuiet as evaluateAgentOutputQuiet,
+	hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration,
 	isAwaitingUserReviewTurn,
 	isParkedAwaitingDispatchedBackgroundWork,
+	isRestorationContinuationGuardArmed,
 	isSessionInActiveTurn,
 	MODAL_USER_DECISION_TURN_KINDS,
 	mergeSummaryWithFacets,
@@ -1013,29 +1015,6 @@ function clearResumeSubstantiveGuard(active: ActiveProcessState): void {
 	active.suppressSubstantiveOutputUntilContinues = false;
 }
 
-// 恢复守卫的最长武装时长。守卫本该在恢复后的**首个**用户回合就解除，这条兜底只防「解除信号因
-// 任何未预见的路径没能送达」——那种情况下它会永久武装，把 agent 自己 dispatch 的后台工作唤醒信号
-// 一并吞掉（2026-08 实测 38 条会话记录已无解除路径）。它真正要防的「恢复瞬间 harness 重放旧通知
-// 自动续跑」只发生在 spawn 后的头几分钟，30 分钟足够宽松，不削弱保护强度。计时锚点用 summary
-// .startedAt——那正是本活体 spawn 的时刻，每次真实 spawn 都会重置。
-const RESTORATION_CONTINUATION_GUARD_MAXIMUM_ARMED_DURATION_MS = 30 * 60 * 1000;
-
-function hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(summary: RuntimeTaskSessionSummary): boolean {
-	// startedAt 为 null = 这条记录从未真正 spawn 过（durable 重建出的壳）。没有可信计时锚点就不判过期；
-	// 这类记录也没有 entry.active，hook 根本到不了，不构成永久武装的实际风险。
-	if (summary.startedAt === null) {
-		return false;
-	}
-	return now() - summary.startedAt >= RESTORATION_CONTINUATION_GUARD_MAXIMUM_ARMED_DURATION_MS;
-}
-
-function isRestorationContinuationGuardArmed(summary: RuntimeTaskSessionSummary): boolean {
-	const declaredArmed =
-		summary.restorationContinuationGuardState === "restoring_agent_conversation_without_starting_new_turn" ||
-		summary.restorationContinuationGuardState === "restored_agent_conversation_waiting_for_explicit_user_input";
-	return declaredArmed && !hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(summary);
-}
-
 // 程序化「已提交用户轮」投递的就绪判别式（替代裸 boolean，使兜底写的 via= 日志能区分命中哪条通道，
 // 等于免费内建复现打点）：
 // - "prompt"    交互提示符框 / `>` 标记已渲染（快路径扫描缓冲或镜像快照命中）。
@@ -1454,7 +1433,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				if (isParkedAwaitingDispatchedBackgroundWork(entry.summary)) {
 					return false;
 				}
-				if (isRestorationContinuationGuardArmed(entry.summary)) {
+				if (isRestorationContinuationGuardArmed(entry.summary, now())) {
 					return false;
 				}
 				// dual-axis facet 真相源：仅 turnOwner==="agent" 才算活跃 agent 回合（与 connection-drop
@@ -4500,7 +4479,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (entry.active && options?.userInitiatedResume === true) {
 			clearResumeSubstantiveGuard(entry.active);
 		}
-		if (options?.userInitiatedResume === true && isRestorationContinuationGuardArmed(summary)) {
+		if (options?.userInitiatedResume === true && isRestorationContinuationGuardArmed(summary, now())) {
 			summary = updateSummary(entry, { restorationContinuationGuardState: "inactive" });
 		}
 		if (summary !== before && entry.active) {
@@ -4514,7 +4493,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	isRestorationContinuationGuardArmed(taskId: string): boolean {
 		const entry = this.entries.get(taskId);
-		return entry ? isRestorationContinuationGuardArmed(entry.summary) : false;
+		return entry ? isRestorationContinuationGuardArmed(entry.summary, now()) : false;
 	}
 
 	isRestorationHarnessGeneratedTaskNotificationInterceptionActive(taskId: string): boolean {
@@ -4524,11 +4503,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		// 兜底对 A / B 两档一视同仁：B 挂在 entry.active 上、只由自然 Stop 解除，同样可能因为 Stop never
 		// arrives 而无限期悬挂，不能只给 A 上保险。
-		if (hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(entry.summary)) {
+		if (hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(entry.summary, now())) {
 			return false;
 		}
 		return (
-			isRestorationContinuationGuardArmed(entry.summary) ||
+			isRestorationContinuationGuardArmed(entry.summary, now()) ||
 			entry.active?.interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds === true
 		);
 	}
@@ -4549,7 +4528,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 这道短路一度因死锁被删除，但死锁的真正成因是 A 的解除挂在 canTransitionTaskForHookEvent 之后，
 		// 导致 A 永久武装、连带把本短路变成永久 no-op。A 的解除已前移到转移闸之前，短路不再会被焊死；
 		// 另有 30 分钟兜底：超时后 isRestorationContinuationGuardArmed 恒 false，短路自行失效。
-		if (isRestorationContinuationGuardArmed(entry.summary)) {
+		if (isRestorationContinuationGuardArmed(entry.summary, now())) {
 			return;
 		}
 		entry.active.interceptRestorationHarnessGeneratedTaskNotificationsUntilFirstExplicitUserTurnEnds = false;
@@ -4560,7 +4539,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
-		if (!isRestorationContinuationGuardArmed(entry.summary)) {
+		if (!isRestorationContinuationGuardArmed(entry.summary, now())) {
 			return cloneSummary(entry.summary);
 		}
 		const summary = updateSummary(entry, { restorationContinuationGuardState: "inactive" });
