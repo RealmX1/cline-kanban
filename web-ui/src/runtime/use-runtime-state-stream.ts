@@ -6,6 +6,7 @@ import type {
 	RuntimeExploratoryFindingEntry,
 	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
+	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
 	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
@@ -13,6 +14,7 @@ import type {
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamNotificationLogUpdatedMessage,
 	RuntimeStateStreamProjectsMessage,
+	RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage,
 	RuntimeStateStreamSnapshotMessage,
 	RuntimeStateStreamTaskChatClearedMessage,
 	RuntimeStateStreamTaskChatMessage,
@@ -136,6 +138,9 @@ export interface UseRuntimeStateStreamResult {
 	// latestTaskReadyForReview 的模式），由 use-exploration-thread-graph 按 explorationId 过滤后消费；
 	// 存成按 id 索引的表会随打开过的卡片数无界增长。
 	latestExplorationThreadGraphUpdate: RuntimeStateStreamExplorationThreadGraphUpdatedMessage | null;
+	// 排队 prompt 投影推送（queued_task_prompt_deliveries_updated）：当前 workspace 的整份替换；null = 尚未
+	// 收到过推送。与 findings 同一纪律——断连窗口不补发，重连后由消费者经 streamSnapshotGeneration 重查对齐。
+	queuedTaskPromptDeliveryProjectionsByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId | null;
 	// 跨 repo 聚合的通知 feed，按 workspaceId 分桶（切项目不清空——铃铛看整台服务器）。
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
@@ -158,6 +163,7 @@ interface RuntimeStateStreamStore {
 	streamSnapshotGeneration: number;
 	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
 	latestExplorationThreadGraphUpdate: RuntimeStateStreamExplorationThreadGraphUpdatedMessage | null;
+	queuedTaskPromptDeliveryProjectionsByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId | null;
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
 	streamError: string | null;
@@ -180,6 +186,10 @@ type RuntimeStateStreamAction =
 	| { type: "task_ready_for_review"; payload: RuntimeStateStreamTaskReadyForReviewMessage }
 	| { type: "notification_log_updated"; payload: RuntimeStateStreamNotificationLogUpdatedMessage }
 	| { type: "exploratory_findings_updated"; payload: RuntimeStateStreamExploratoryFindingsUpdatedMessage }
+	| {
+			type: "queued_task_prompt_deliveries_updated";
+			payload: RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage;
+	  }
 	| {
 			type: "exploration_thread_graph_updated";
 			payload: RuntimeStateStreamExplorationThreadGraphUpdatedMessage;
@@ -204,6 +214,7 @@ function createInitialRuntimeStateStreamStore(requestedWorkspaceId: string | nul
 		streamSnapshotGeneration: 0,
 		exploratoryFindings: null,
 		latestExplorationThreadGraphUpdate: null,
+		queuedTaskPromptDeliveryProjectionsByTaskId: null,
 		notificationLogByWorkspaceId: {},
 		clineSessionContextVersion: 0,
 		streamError: null,
@@ -258,6 +269,8 @@ function runtimeStateStreamReducer(
 			taskChatMessagesByTaskId: {},
 			// findings 是 workspace 级集合：切 workspace 即清空，等 getFindings 重拉。
 			exploratoryFindings: null,
+			// 队列投影同为 workspace 级：taskId 是 board-local 短 id，跨 workspace 沿用会撞号。
+			queuedTaskPromptDeliveryProjectionsByTaskId: null,
 			streamSnapshotGeneration: 0,
 			streamError: null,
 			isRuntimeDisconnected: false,
@@ -304,6 +317,8 @@ function runtimeStateStreamReducer(
 			// 图同样保留作 last-known：重连后由 use-exploration-thread-graph 经快照代数重拉对齐，
 			// 查询落定前不出现空窗（读图免费，重拉没有成本顾虑）。
 			latestExplorationThreadGraphUpdate: state.latestExplorationThreadGraphUpdate,
+			// 队列投影同样保留作 last-known，重连后由 use-queued-task-prompt-delivery-projection-sync 重拉对齐。
+			queuedTaskPromptDeliveryProjectionsByTaskId: state.queuedTaskPromptDeliveryProjectionsByTaskId,
 			streamSnapshotGeneration: state.streamSnapshotGeneration + 1,
 			streamError: null,
 			isRuntimeDisconnected: false,
@@ -327,6 +342,9 @@ function runtimeStateStreamReducer(
 			// 切项目必须清：图是 per-exploration 的，换了 project 之后旧推送里的 explorationId
 			// 可能与新 project 的某张卡片撞号（taskId 是 board-local 短 id）。
 			latestExplorationThreadGraphUpdate: didProjectChange ? null : state.latestExplorationThreadGraphUpdate,
+			queuedTaskPromptDeliveryProjectionsByTaskId: didProjectChange
+				? null
+				: state.queuedTaskPromptDeliveryProjectionsByTaskId,
 			notificationLogByWorkspaceId: pruneNotificationLogToWorkspaces(
 				state.notificationLogByWorkspaceId,
 				liveWorkspaceIds,
@@ -392,6 +410,13 @@ function runtimeStateStreamReducer(
 		return {
 			...state,
 			latestExplorationThreadGraphUpdate: action.payload,
+		};
+	}
+	if (action.type === "queued_task_prompt_deliveries_updated") {
+		// workspace 级整份替换：一次认领 / 落定会同时改好几条的状态与阻塞原因，增量补丁在断连重连之间极易错位。
+		return {
+			...state,
+			queuedTaskPromptDeliveryProjectionsByTaskId: action.payload.projectedEntriesByTaskId,
 		};
 	}
 	if (action.type === "exploratory_findings_updated") {
@@ -621,6 +646,16 @@ export function useRuntimeStateStream(
 						});
 						return;
 					}
+					if (payload.type === "queued_task_prompt_deliveries_updated") {
+						if (payload.workspaceId !== activeWorkspaceId) {
+							return;
+						}
+						dispatch({
+							type: "queued_task_prompt_deliveries_updated",
+							payload,
+						});
+						return;
+					}
 					if (payload.type === "exploratory_findings_updated") {
 						if (payload.workspaceId !== activeWorkspaceId) {
 							return;
@@ -703,6 +738,7 @@ export function useRuntimeStateStream(
 		streamSnapshotGeneration: state.streamSnapshotGeneration,
 		exploratoryFindings: state.exploratoryFindings,
 		latestExplorationThreadGraphUpdate: state.latestExplorationThreadGraphUpdate,
+		queuedTaskPromptDeliveryProjectionsByTaskId: state.queuedTaskPromptDeliveryProjectionsByTaskId,
 		notificationLogByWorkspaceId: state.notificationLogByWorkspaceId,
 		clineSessionContextVersion: state.clineSessionContextVersion,
 		streamError: state.streamError,

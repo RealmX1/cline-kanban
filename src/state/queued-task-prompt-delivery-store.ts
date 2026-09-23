@@ -1,5 +1,8 @@
 // 排队 Prompt 投递的 durable 真相源。
 //
+// 整套特性的语义（状态机、三条触发源、门控、失败路由、重启跨越）的单一出处是
+// .plan/docs/queued-task-prompt-delivery-semantics.md；本文件头注只讲持久化这一段。
+//
 // ## 落点：每个 workspace 一份独立文件
 //
 //   ~/.cline/kanban/workspaces/<workspaceId>/queued-task-prompt-deliveries.json

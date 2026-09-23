@@ -9,6 +9,7 @@ import {
 	GitCompareArrows,
 	Hourglass,
 	List,
+	ListOrdered,
 	Maximize2,
 	MessageSquare,
 	Minimize2,
@@ -17,6 +18,7 @@ import {
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
+import { showAppToast } from "@/components/app-toaster";
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
@@ -25,11 +27,16 @@ import { DeferredRestorationHarnessNotificationReleaseBanner } from "@/component
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
 import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
+import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/queued-task-prompt-delivery-queue-panel";
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
 import { SessionFindingsSection } from "@/components/findings/session-findings-section";
-import { taskDetailAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import {
+	queuedTaskPromptDeliveryQueueTabAnchorKey,
+	taskDetailAnchorKey,
+	VERIFICATION_ANCHOR_ATTR,
+} from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
@@ -38,6 +45,9 @@ import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useConversationSessionTurnProjection } from "@/hooks/use-conversation-session-turn-projection";
 import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
 import { useIsMobile } from "@/hooks/use-is-mobile";
+import type { StoredPrompt } from "@/hooks/use-prompt-library";
+import { useQueuedTaskPromptDeliveryQueueController } from "@/hooks/use-queued-task-prompt-delivery-queue-controller";
+import { useQueuedTaskPromptDeliveryRestartReminder } from "@/hooks/use-queued-task-prompt-delivery-restart-reminder";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
 import { ResizeHandle } from "@/resize/resize-handle";
 import { clampBetween } from "@/resize/resize-persistence";
@@ -48,6 +58,10 @@ import {
 	useCardDetailLayout,
 } from "@/resize/use-card-detail-layout";
 import { useResizeDrag } from "@/resize/use-resize-drag";
+import {
+	type QueuedTaskPromptDeliveryCountIndicator,
+	summarizeQueuedTaskPromptDeliveryCountIndicator,
+} from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
@@ -416,12 +430,13 @@ function WorkspaceChangesStaleDataWarning({
 	);
 }
 
-type MobileTab = "chat" | "sessions" | "prompts" | "comments" | "diff" | "files";
+type MobileTab = "chat" | "sessions" | "prompts" | "queue" | "comments" | "diff" | "files";
 
 const MOBILE_DEFAULT_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "chat", label: "Chat", icon: <MessageSquare size={14} /> },
 	{ id: "sessions", label: "Sessions", icon: <List size={14} /> },
 	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
+	{ id: "queue", label: "Queue", icon: <ListOrdered size={14} /> },
 	{ id: "comments", label: "Comments", icon: <MessageSquare size={14} /> },
 ];
 
@@ -430,21 +445,64 @@ const MOBILE_WORKSPACE_CHANGES_TABS: { id: MobileTab; label: string; icon: React
 	{ id: "files", label: "Files", icon: <Files size={14} /> },
 ];
 
-type DetailUtilityTab = "prompts" | "comments";
+type DetailUtilityTab = "prompts" | "queue" | "comments";
 
 const DETAIL_UTILITY_TABS: { id: DetailUtilityTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
+	{ id: "queue", label: "Queue", icon: <ListOrdered size={14} /> },
 	{ id: "comments", label: "Comments", icon: <MessageSquare size={14} /> },
 ];
+
+function isDetailUtilityTab(tab: MobileTab): tab is DetailUtilityTab {
+	return tab === "prompts" || tab === "queue" || tab === "comments";
+}
+
+// Queue 页签上的计数角标。页签条在 Prompts / Queue / Comments 三个 tab 下都渲染，所以不管停在哪个 tab，
+// 「还有几条在排队」都看得见、点一下就过去。有失败条目时转红；有重启后待确认的条目时转 warning 色。
+function QueuedTaskPromptDeliveryCountBadge({
+	indicator,
+}: {
+	indicator: QueuedTaskPromptDeliveryCountIndicator;
+}): React.ReactElement | null {
+	if (indicator.pendingCount === 0 && !indicator.hasFailedEntries) {
+		return null;
+	}
+	const toneClass = indicator.hasFailedEntries
+		? "bg-status-red/20 text-status-red"
+		: indicator.hasEntriesAwaitingReconfirmationAfterRestart
+			? "bg-status-orange/20 text-status-orange"
+			: "bg-accent/20 text-accent";
+	return (
+		<span
+			className={cn(
+				"inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] leading-4",
+				toneClass,
+			)}
+			title={
+				indicator.hasEntriesAwaitingReconfirmationAfterRestart
+					? "Queued before Kanban restarted — check whether they are still needed"
+					: indicator.hasFailedEntries
+						? "A queued prompt failed to send"
+						: `${indicator.pendingCount} queued prompt${indicator.pendingCount === 1 ? "" : "s"}`
+			}
+		>
+			{indicator.pendingCount > 0 ? indicator.pendingCount : "!"}
+		</span>
+	);
+}
 
 function MobileDetailTabBar({
 	activeTab,
 	onTabChange,
 	showWorkspaceChangesTabs,
+	queuedPromptTaskId,
+	queuedPromptCountIndicator,
 }: {
 	activeTab: MobileTab;
 	onTabChange: (tab: MobileTab) => void;
 	showWorkspaceChangesTabs: boolean;
+	queuedPromptTaskId: string;
+	queuedPromptCountIndicator: QueuedTaskPromptDeliveryCountIndicator;
 }): React.ReactElement {
 	const tabs = showWorkspaceChangesTabs
 		? [...MOBILE_DEFAULT_TABS, ...MOBILE_WORKSPACE_CHANGES_TABS]
@@ -460,9 +518,15 @@ function MobileDetailTabBar({
 						activeTab === tab.id ? "text-accent" : "text-text-secondary",
 					)}
 					onClick={() => onTabChange(tab.id)}
+					{...(tab.id === "queue"
+						? { [VERIFICATION_ANCHOR_ATTR]: queuedTaskPromptDeliveryQueueTabAnchorKey(queuedPromptTaskId) }
+						: {})}
 				>
 					{tab.icon}
 					{tab.label}
+					{tab.id === "queue" ? (
+						<QueuedTaskPromptDeliveryCountBadge indicator={queuedPromptCountIndicator} />
+					) : null}
 					{activeTab === tab.id ? <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" /> : null}
 				</button>
 			))}
@@ -473,9 +537,17 @@ function MobileDetailTabBar({
 function DetailUtilityTabList({
 	activeTab,
 	onTabChange,
+	queuedPromptTaskId,
+	queuedPromptCountIndicator,
+	emitsQueueTabAnchor,
 }: {
 	activeTab: DetailUtilityTab;
 	onTabChange: (tab: DetailUtilityTab) => void;
+	queuedPromptTaskId: string;
+	queuedPromptCountIndicator: QueuedTaskPromptDeliveryCountIndicator;
+	// 窄屏下顶部 MobileDetailTabBar 才是常驻可见的那份页签，锚点挂在那边；这里再挂一份会让 spotlight
+	// 命中到一个可能被 display:none 藏起来的元素上。
+	emitsQueueTabAnchor: boolean;
 }): React.ReactElement {
 	return (
 		<div role="tablist" aria-label="Task detail utility panel" className="flex min-w-0 items-center gap-0.5">
@@ -492,9 +564,15 @@ function DetailUtilityTabList({
 							: "text-text-secondary hover:bg-surface-3 hover:text-text-primary",
 					)}
 					onClick={() => onTabChange(tab.id)}
+					{...(tab.id === "queue" && emitsQueueTabAnchor
+						? { [VERIFICATION_ANCHOR_ATTR]: queuedTaskPromptDeliveryQueueTabAnchorKey(queuedPromptTaskId) }
+						: {})}
 				>
 					{tab.icon}
 					<span className="truncate">{tab.label}</span>
+					{tab.id === "queue" ? (
+						<QueuedTaskPromptDeliveryCountBadge indicator={queuedPromptCountIndicator} />
+					) : null}
 				</button>
 			))}
 		</div>
@@ -1118,8 +1196,47 @@ export function CardDetailView({
 		},
 		[isMobile],
 	);
+	// 排队 prompt：按**会话 id** 取队列（by-the-way 子会话有自己独立的队列），与 Prompt Library 同一口径。
+	const queuedPromptQueueController = useQueuedTaskPromptDeliveryQueueController(
+		currentProjectId,
+		selectedTaskConversationSessionId,
+	);
+	const queuedPromptCountIndicator = useMemo(
+		() => summarizeQueuedTaskPromptDeliveryCountIndicator(queuedPromptQueueController.projections),
+		[queuedPromptQueueController.projections],
+	);
+	// kanban 重启后聚焦这个任务：Queue 页签闪 5 秒 + 同时确认「人看见了」（见 hook 头注）。
+	useQueuedTaskPromptDeliveryRestartReminder({
+		taskId: selectedTaskConversationSessionId,
+		projections: queuedPromptQueueController.projections,
+		reconfirmQueuedPromptDeliveriesAfterRuntimeRestart:
+			queuedPromptQueueController.reconfirmQueuedPromptDeliveriesAfterRuntimeRestart,
+	});
+	const { enqueuePromptForDeliveryAfterCurrentTurn } = queuedPromptQueueController;
+	const handleQueuePromptForAfterCurrentTurn = useCallback(
+		(prompt: StoredPrompt) => {
+			void enqueuePromptForDeliveryAfterCurrentTurn({
+				text: prompt.text,
+				sourcePromptLibraryEntryId: prompt.id,
+			}).then((queued) => {
+				if (queued) {
+					showAppToast({
+						intent: "success",
+						message: "Queued — it will be sent after the agent finishes its current turn.",
+					});
+				}
+			});
+		},
+		[enqueuePromptForDeliveryAfterCurrentTurn],
+	);
 	const detailUtilityTabs = (
-		<DetailUtilityTabList activeTab={detailUtilityTab} onTabChange={handleDetailUtilityTabChange} />
+		<DetailUtilityTabList
+			activeTab={detailUtilityTab}
+			onTabChange={handleDetailUtilityTabChange}
+			queuedPromptTaskId={selectedTaskConversationSessionId}
+			queuedPromptCountIndicator={queuedPromptCountIndicator}
+			emitsQueueTabAnchor={!isMobile}
+		/>
 	);
 	const detailUtilityPanel =
 		detailUtilityTab === "prompts" ? (
@@ -1127,8 +1244,14 @@ export function CardDetailView({
 				taskId={selectedTaskConversationSessionId}
 				projectId={promptLibraryProjectId}
 				onFillInput={injectTextIntoActiveInput}
+				onQueuePromptForAfterCurrentTurn={currentProjectId ? handleQueuePromptForAfterCurrentTurn : undefined}
 				headerContent={detailUtilityTabs}
 				taskIdsOnBoard={taskIdsOnBoard ?? null}
+			/>
+		) : detailUtilityTab === "queue" ? (
+			<QueuedTaskPromptDeliveryQueuePanel
+				controller={queuedPromptQueueController}
+				headerContent={detailUtilityTabs}
 			/>
 		) : (
 			<TaskCommentsPanel
@@ -1319,7 +1442,7 @@ export function CardDetailView({
 	if (isMobile) {
 		const handleMobileTabChange = (tab: MobileTab) => {
 			setMobileTab(tab);
-			if (tab === "prompts" || tab === "comments") {
+			if (isDetailUtilityTab(tab)) {
 				setDetailUtilityTab(tab);
 			}
 		};
@@ -1329,6 +1452,8 @@ export function CardDetailView({
 					activeTab={mobileTab}
 					onTabChange={handleMobileTabChange}
 					showWorkspaceChangesTabs={isTaskChangesSidebarOpen}
+					queuedPromptTaskId={selectedTaskConversationSessionId}
+					queuedPromptCountIndicator={queuedPromptCountIndicator}
 				/>
 				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -1352,7 +1477,7 @@ export function CardDetailView({
 						{/* Prompts / comments utility panel */}
 						<div
 							className="min-h-0 min-w-0 flex-1 flex-col"
-							style={{ display: mobileTab === "prompts" || mobileTab === "comments" ? "flex" : "none" }}
+							style={{ display: isDetailUtilityTab(mobileTab) ? "flex" : "none" }}
 						>
 							{detailUtilityPanel}
 						</div>
