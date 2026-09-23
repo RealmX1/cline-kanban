@@ -226,19 +226,26 @@ function PendingQueuedPromptRow({
 
 function MergeWithNextToggle({
 	projection,
+	nextProjection,
 	controller,
 }: {
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
+	nextProjection: RuntimeQueuedTaskPromptDeliveryProjection;
 	controller: QueuedTaskPromptDeliveryQueueController;
 }): React.ReactElement {
 	const isMerged = projection.deliverTogetherWithNextQueuedEntry;
+	// 任一侧已在发送：那一串在认领时就冻结了，此时改开关只会让界面与实际发出去的不一致（服务端同样拒绝）。
+	const isFrozenBecauseEitherSideIsSending =
+		isQueuedTaskPromptDeliveryInFlight(projection) || isQueuedTaskPromptDeliveryInFlight(nextProjection);
 	return (
 		<div className="flex items-center justify-center">
 			<Tooltip
 				content={
-					isMerged
-						? "These two will be sent as one message. Click to send them in separate turns."
-						: "Send this and the next one together as one message"
+					isFrozenBecauseEitherSideIsSending
+						? "Already being sent — the grouping can no longer change."
+						: isMerged
+							? "These two will be sent as one message. Click to send them in separate turns."
+							: "Send this and the next one together as one message"
 				}
 			>
 				<Button
@@ -247,6 +254,7 @@ function MergeWithNextToggle({
 					icon={isMerged ? <Link2 size={12} /> : <Link2Off size={12} />}
 					aria-label={isMerged ? "Unlink from next queued prompt" : "Link with next queued prompt"}
 					aria-pressed={isMerged}
+					disabled={isFrozenBecauseEitherSideIsSending}
 					className={cn("h-4", isMerged ? "text-accent" : "text-text-tertiary")}
 					onClick={() => void controller.setQueuedPromptDeliveryMergeWithNext(projection.queueEntryId, !isMerged)}
 				/>
@@ -325,21 +333,28 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 						Queue a prompt from the Prompts tab to send it after the agent finishes its current turn.
 					</p>
 				) : (
-					pending.map((projection, index) => (
-						<div key={projection.queueEntryId} className="flex flex-col gap-1">
-							<PendingQueuedPromptRow
-								projection={projection}
-								position={index + 1}
-								isFirstPending={index === 0}
-								isLastPending={index === pending.length - 1}
-								isChainedFromPrevious={pending[index - 1]?.deliverTogetherWithNextQueuedEntry === true}
-								controller={controller}
-							/>
-							{index < pending.length - 1 ? (
-								<MergeWithNextToggle projection={projection} controller={controller} />
-							) : null}
-						</div>
-					))
+					pending.map((projection, index) => {
+						const nextPendingProjection = pending[index + 1];
+						return (
+							<div key={projection.queueEntryId} className="flex flex-col gap-1">
+								<PendingQueuedPromptRow
+									projection={projection}
+									position={index + 1}
+									isFirstPending={index === 0}
+									isLastPending={index === pending.length - 1}
+									isChainedFromPrevious={pending[index - 1]?.deliverTogetherWithNextQueuedEntry === true}
+									controller={controller}
+								/>
+								{nextPendingProjection ? (
+									<MergeWithNextToggle
+										projection={projection}
+										nextProjection={nextPendingProjection}
+										controller={controller}
+									/>
+								) : null}
+							</div>
+						);
+					})
 				)}
 				{settled.length > 0 ? (
 					<div className="mt-3 flex flex-col gap-1">

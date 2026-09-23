@@ -586,13 +586,29 @@ export function hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(
 	return nowEpochMs - summary.startedAt >= RESTORATION_CONTINUATION_GUARD_MAXIMUM_ARMED_DURATION_MS;
 }
 
+// 守卫**声明上**是否武装（两个武装态之一），不看 30 分钟兜底过期。
+//
+// 为什么要把「声明」单独导出：兜底过期是为「拦截 harness 自己的唤醒通知」这件事设的——守卫永久武装会把
+// agent 自己派发的后台工作唤醒信号无限期吞掉，所以宁可 30 分钟后放行。排队 prompt 的方向恰好相反：
+// 放行 = 在用户从没继续过对话的情况下，把几小时前排的一句话发进一个刚恢复的会话。那一侧的代价是「不提醒
+// 就发」，而等下去的代价只是「队列一直等到用户继续」（面板如实写着原因）。所以排队门控读声明态，
+// 不读带兜底过期的那一个。两态的枚举仍只在这里定义一次。
+export function isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration(
+	summary: RuntimeTaskSessionSummary,
+): boolean {
+	return (
+		summary.restorationContinuationGuardState === "restoring_agent_conversation_without_starting_new_turn" ||
+		summary.restorationContinuationGuardState === "restored_agent_conversation_waiting_for_explicit_user_input"
+	);
+}
+
 // 取 nowEpochMs 而不是自己读 Date.now()：本模块是纯函数真相源，且 session-manager 有自己的可注入
 // 时间源 now()，两边各读一次系统时钟会让「同一判定在同一刻给出两个答案」成为可能。
 export function isRestorationContinuationGuardArmed(summary: RuntimeTaskSessionSummary, nowEpochMs: number): boolean {
-	const declaredArmed =
-		summary.restorationContinuationGuardState === "restoring_agent_conversation_without_starting_new_turn" ||
-		summary.restorationContinuationGuardState === "restored_agent_conversation_waiting_for_explicit_user_input";
-	return declaredArmed && !hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(summary, nowEpochMs);
+	return (
+		isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration(summary) &&
+		!hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(summary, nowEpochMs)
+	);
 }
 
 // ── park：「已 park、正在等待已派发后台工作」的唯一被认可判据 ────────────────────────────────

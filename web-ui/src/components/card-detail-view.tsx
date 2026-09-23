@@ -1200,18 +1200,20 @@ export function CardDetailView({
 	const queuedPromptQueueController = useQueuedTaskPromptDeliveryQueueController(
 		currentProjectId,
 		selectedTaskConversationSessionId,
+		selection.card.id,
 	);
 	const queuedPromptCountIndicator = useMemo(
 		() => summarizeQueuedTaskPromptDeliveryCountIndicator(queuedPromptQueueController.projections),
 		[queuedPromptQueueController.projections],
 	);
 	// kanban 重启后聚焦这个任务：Queue 页签闪 5 秒 + 同时确认「人看见了」（见 hook 头注）。
-	useQueuedTaskPromptDeliveryRestartReminder({
-		taskId: selectedTaskConversationSessionId,
-		projections: queuedPromptQueueController.projections,
-		reconfirmQueuedPromptDeliveriesAfterRuntimeRestart:
-			queuedPromptQueueController.reconfirmQueuedPromptDeliveriesAfterRuntimeRestart,
-	});
+	const { restartReminderAnnouncement: queuedPromptRestartReminderAnnouncement } =
+		useQueuedTaskPromptDeliveryRestartReminder({
+			taskId: selectedTaskConversationSessionId,
+			projections: queuedPromptQueueController.projections,
+			reconfirmQueuedPromptDeliveriesAfterRuntimeRestart:
+				queuedPromptQueueController.reconfirmQueuedPromptDeliveriesAfterRuntimeRestart,
+		});
 	const { enqueuePromptForDeliveryAfterCurrentTurn } = queuedPromptQueueController;
 	const handleQueuePromptForAfterCurrentTurn = useCallback(
 		(prompt: StoredPrompt) => {
@@ -1230,13 +1232,19 @@ export function CardDetailView({
 		[enqueuePromptForDeliveryAfterCurrentTurn],
 	);
 	const detailUtilityTabs = (
-		<DetailUtilityTabList
-			activeTab={detailUtilityTab}
-			onTabChange={handleDetailUtilityTabChange}
-			queuedPromptTaskId={selectedTaskConversationSessionId}
-			queuedPromptCountIndicator={queuedPromptCountIndicator}
-			emitsQueueTabAnchor={!isMobile}
-		/>
+		<>
+			<DetailUtilityTabList
+				activeTab={detailUtilityTab}
+				onTabChange={handleDetailUtilityTabChange}
+				queuedPromptTaskId={selectedTaskConversationSessionId}
+				queuedPromptCountIndicator={queuedPromptCountIndicator}
+				emitsQueueTabAnchor={!isMobile}
+			/>
+			{/* 重启后提醒的屏幕阅读器播报：Queue 页签的高亮是纯视觉的，看不见它的人需要一句话。 */}
+			<span className="sr-only" role="status" aria-live="polite">
+				{queuedPromptRestartReminderAnnouncement ?? ""}
+			</span>
+		</>
 	);
 	const detailUtilityPanel =
 		detailUtilityTab === "prompts" ? (

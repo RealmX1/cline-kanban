@@ -44,7 +44,7 @@ function createControllerDouble(
 		setQueuedPromptDeliveryMergeWithNext: vi.fn(async () => {}),
 		dismissSettledQueuedPromptDelivery: vi.fn(async () => {}),
 		retrySettledFailedQueuedPromptDelivery: vi.fn(async () => {}),
-		reconfirmQueuedPromptDeliveriesAfterRuntimeRestart: vi.fn(async () => {}),
+		reconfirmQueuedPromptDeliveriesAfterRuntimeRestart: vi.fn(async () => true),
 		fetchFullText: vi.fn(async () => "全文"),
 	};
 }
@@ -129,6 +129,23 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 			linkButtons[0]?.click();
 		});
 		expect(controller.setQueuedPromptDeliveryMergeWithNext).toHaveBeenCalledWith("q1", true);
+	});
+
+	// 那一串在认领时就冻结了：此时改开关，界面显示的与实际发出去的会不一致。
+	it("任一侧已在发送时合并开关禁用", () => {
+		const controller = createControllerDouble([
+			projection("q1", { deliveryState: "handed_to_transport" }),
+			projection("q2"),
+			projection("q3"),
+		]);
+		render(controller);
+		const toggles = [
+			...buttonsWithLabel(container, "Link with next queued prompt"),
+			...buttonsWithLabel(container, "Unlink from next queued prompt"),
+		];
+		expect(toggles).toHaveLength(2);
+		expect(toggles[0]?.disabled).toBe(true);
+		expect(toggles[1]?.disabled).toBe(false);
 	});
 
 	it("重启后待确认的条目给 Keep（显式版的同一条确认）", () => {

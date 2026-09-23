@@ -179,6 +179,17 @@ describe("门控 — 恢复守卫（两个枚举值都必须阻塞）", () => {
 	it("inactive 不阻塞", () => {
 		expect(resolve({ restorationContinuationGuardState: "inactive" })).toBeNull();
 	});
+
+	// 守卫的 30 分钟兜底过期是为「别永久吞掉 harness 唤醒通知」设的；对排队投递而言放行 = 用户从没继续过对话，
+	// 旧 prompt 就在恢复半小时后自动发出（面板文案却说「你继续之后才发」）。排队门控读声明态、不看兜底过期。
+	it("守卫已武装超过 30 分钟兜底期限也照样阻塞", () => {
+		expect(
+			resolve({
+				restorationContinuationGuardState: "restored_agent_conversation_waiting_for_explicit_user_input",
+				startedAt: NOW - 6 * 60 * 60 * 1000,
+			}),
+		).toBe("session_restoring_conversation");
+	});
 });
 
 describe("门控 — PTY 单飞槽在途", () => {
@@ -194,13 +205,55 @@ describe("门控 — 重启跨越后待人确认", () => {
 		);
 	});
 
-	it("确认之后放行", () => {
+	// 用户要的是「确认，然后在**下一次** stop hook 注入」。确认那一刻 agent 往往已经闲着、停止事件是重启前留下的；
+	// 这里放行 = 5 秒高亮还没播完，旧 prompt 已经发出去了。
+	it("确认之后、agent 还没再停下过一次 → 继续等下一次停止", () => {
+		const reconfirmedAt = NOW - 1_000;
+		const confirmedEntry = {
+			survivedRuntimeRestartAtEpochMs: NOW - 60_000,
+			humanReconfirmedAfterRuntimeRestartAtEpochMs: reconfirmedAt,
+		};
+		expect(resolve({}, confirmedEntry)).toBe("awaiting_first_agent_turn_end_after_restart_reconfirmation");
 		expect(
 			resolve(
-				{},
-				{ survivedRuntimeRestartAtEpochMs: NOW - 60_000, humanReconfirmedAfterRuntimeRestartAtEpochMs: NOW },
+				{
+					agentResponseGenerationStopped: {
+						stoppedAt: reconfirmedAt - 30_000,
+						signalConfidence: "harness_turn_complete",
+						turnSequence: 7,
+					},
+				},
+				confirmedEntry,
+			),
+		).toBe("awaiting_first_agent_turn_end_after_restart_reconfirmation");
+	});
+
+	it("确认之后 agent 又停下过一次 → 放行", () => {
+		const reconfirmedAt = NOW - 1_000;
+		expect(
+			resolve(
+				{
+					agentResponseGenerationStopped: {
+						stoppedAt: reconfirmedAt + 500,
+						signalConfidence: "harness_turn_complete",
+						turnSequence: 8,
+					},
+				},
+				{
+					survivedRuntimeRestartAtEpochMs: NOW - 60_000,
+					humanReconfirmedAfterRuntimeRestartAtEpochMs: reconfirmedAt,
+				},
 			),
 		).toBeNull();
+	});
+
+	it("确认之后 agent 在干活时，报更具体的 agent_still_generating", () => {
+		expect(
+			resolve(
+				{ state: "running", turnOwner: "agent", userTurnKind: null, reviewReason: null },
+				{ survivedRuntimeRestartAtEpochMs: NOW - 60_000, humanReconfirmedAfterRuntimeRestartAtEpochMs: NOW },
+			),
+		).toBe("agent_still_generating");
 	});
 
 	// 排最前不是随意的：重启后此刻 agent 必然不在生成（会话刚被水合成 idle），其余门控都不会命中；
@@ -209,6 +262,38 @@ describe("门控 — 重启跨越后待人确认", () => {
 		expect(resolve(null, { survivedRuntimeRestartAtEpochMs: NOW - 60_000 })).toBe(
 			"awaiting_human_reconfirmation_after_runtime_restart",
 		);
+	});
+});
+
+describe("门控 — 托管者", () => {
+	function resolveAsInstance(
+		thisRuntimeProcessInstanceId: string | null,
+		custodianRuntimeProcessInstanceId: string | null | undefined,
+	) {
+		return resolveQueuedPromptDispatchBlockReason({
+			headEntry: makeEntry({ custodianRuntimeProcessInstanceId }),
+			sessionSummary: makeSummary(),
+			hasPendingProgrammaticTaskChatInputDelivery: false,
+			nowEpochMs: NOW,
+			thisRuntimeProcessInstanceId,
+		});
+	}
+
+	// 同机多实例共享 workspaces 根：两个实例各自在自己的会话边沿上认领同一条队列，就会发两遍。
+	it("由另一个（此刻活着的）实例托管 → 本实例不发", () => {
+		expect(resolveAsInstance("instance-me", "instance-other")).toBe(
+			"queued_under_another_live_kanban_runtime_instance",
+		);
+	});
+
+	it("由本实例托管 → 放行", () => {
+		expect(resolveAsInstance("instance-me", "instance-me")).toBeNull();
+	});
+
+	it("旧条目没有托管者 / 调用方不给进程身份 → 不启用这道门", () => {
+		expect(resolveAsInstance("instance-me", null)).toBeNull();
+		expect(resolveAsInstance("instance-me", undefined)).toBeNull();
+		expect(resolveAsInstance(null, "instance-other")).toBeNull();
 	});
 });
 

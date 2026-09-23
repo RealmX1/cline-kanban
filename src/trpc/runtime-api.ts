@@ -109,7 +109,8 @@ import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../sta
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import {
-	isQueuedTaskPromptDeliveryQueueFullForTask,
+	isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask,
+	isQueuedTaskPromptDeliveryWorkspaceQueueFull,
 	mutateWorkspaceQueuedTaskPromptDeliveries,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../state/queued-task-prompt-delivery-store";
@@ -2064,21 +2065,23 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						: mutation.kind === "retry_settled_failed_queued_prompt_delivery"
 							? mutation.replacementQueueEntryId
 							: null;
-				const enqueueRefusedBecauseTaskQueueIsFull =
+				const enqueueRefusedBecauseQueueCapacityIsExhausted =
 					expectedNewQueueEntryId !== null &&
 					!taskEntries.some((entry) => entry.queueEntryId === expectedNewQueueEntryId) &&
-					isQueuedTaskPromptDeliveryQueueFullForTask(queue, mutation.taskId);
+					isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(queue, mutation.taskId);
 				await deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated(workspaceId, mutation.taskId, queue);
 				return {
-					ok: !enqueueRefusedBecauseTaskQueueIsFull,
+					ok: !enqueueRefusedBecauseQueueCapacityIsExhausted,
 					queue,
 					projectedEntriesByTaskId:
 						(await deps.queuedTaskPromptDeliveryDispatcher?.buildProjectedEntriesByTaskId(workspaceId, queue)) ??
 						null,
-					...(enqueueRefusedBecauseTaskQueueIsFull
+					...(enqueueRefusedBecauseQueueCapacityIsExhausted
 						? {
-								enqueueRefusedBecauseTaskQueueIsFull: true,
-								error: "This task already has the maximum number of queued prompts.",
+								enqueueRefusedBecauseQueueCapacityIsExhausted: true,
+								error: isQueuedTaskPromptDeliveryWorkspaceQueueFull(queue)
+									? "This project already has the maximum number of queued prompts across all tasks."
+									: "This task already has the maximum number of queued prompts.",
 							}
 						: {}),
 					inFlightDeliveryCancelResult,

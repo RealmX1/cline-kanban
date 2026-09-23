@@ -1579,6 +1579,12 @@ export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
 	"session_restoring_conversation",
 	// PTY 单飞槽被另一条程序化投递（例：RVF followup）占着。
 	"another_programmatic_delivery_in_flight",
+	// 这条由**另一个此刻活着的** kanban runtime 实例托管（同机多实例共享 workspaces 根）。只有托管者会发它；
+	// 托管者一旦不在心跳里，本实例会盖 restart-crossing 章并接管，转成上面那条「等人确认」。
+	"queued_under_another_live_kanban_runtime_instance",
+	// 跨过重启、人也确认过了，但 agent 在确认之后还没停下过一次。用户要的是「确认后在**下一次** stop hook
+	// 注入」——确认那一刻 agent 已经闲着，不等于「下一次 stop」已经到了。
+	"awaiting_first_agent_turn_end_after_restart_reconfirmation",
 ]);
 export type QueuedTaskPromptDispatchBlockReason = z.infer<typeof queuedTaskPromptDispatchBlockReasonSchema>;
 
@@ -1638,6 +1644,10 @@ export const queuedTaskPromptDeliveryEntrySchema = z.object({
 	// optional（遵守本节开头那条加字段规约）：升级前存下的条目没有这个字段，清扫对它们退回按年龄判的
 	// 保守口径——多盖一次章、多让人确认一次，绝不漏盖；盖完同样接管托管权，于是只会退化这一次。
 	custodianRuntimeProcessInstanceId: z.string().nullable().optional(),
+	// 该会话所属的**看板任务** id。主会话等于 taskId；by-the-way 子会话是它的主任务。存它是为了主任务离开看板时
+	// 把子会话的队列一并丢弃——删除路径（浏览器整份 PUT 的差集 / CLI delete）手上只有看板任务 id。
+	// optional（加字段规约）：旧条目缺它时只按 taskId 精确匹配。
+	workspaceTaskId: z.string().nullable().optional(),
 });
 export type QueuedTaskPromptDeliveryEntry = z.infer<typeof queuedTaskPromptDeliveryEntrySchema>;
 
@@ -1658,6 +1668,8 @@ export const queuedTaskPromptDeliveryMutationSchema = z.discriminatedUnion("kind
 		text: z.string(),
 		sourcePromptLibraryEntryId: z.string().nullable().optional(),
 		sourcePromptLibraryEntryTextSha256: z.string().nullable().optional(),
+		// 见条目的同名字段。缺省按 taskId（主会话）。
+		workspaceTaskId: z.string().nullable().optional(),
 	}),
 	z.object({
 		kind: z.literal("cancel_queued_prompt_delivery"),
@@ -1769,9 +1781,9 @@ export type QueuedTaskPromptInFlightDeliveryCancelResult = z.infer<
 >;
 
 export const runtimeTaskPromptDeliveryQueueMutateResponseSchema = runtimeTaskPromptDeliveryQueueResponseSchema.extend({
-	// 入队 / 重排被拒是因为该任务的队列已满（非终态条目达到上限）。两者在快照上都表现为「原样返回」，
-	// 与幂等重发不可区分——必须单独说出来，否则用户会以为排上了。
-	enqueueRefusedBecauseTaskQueueIsFull: z.boolean().optional(),
+	// 入队 / 重排被拒是因为队列容量用尽（该任务或整个 workspace 的非终态条目达到上限）。被拒在快照上表现为
+	// 「原样返回」，与幂等重发不可区分——必须单独说出来，否则用户会以为排上了。
+	enqueueRefusedBecauseQueueCapacityIsExhausted: z.boolean().optional(),
 	// 仅当取消的目标已经 handed_to_transport 时才有值。
 	inFlightDeliveryCancelResult: queuedTaskPromptInFlightDeliveryCancelResultSchema.nullable().optional(),
 });

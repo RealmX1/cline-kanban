@@ -24,6 +24,7 @@ import type {
 } from "@/runtime/types";
 import {
 	getQueuedTaskPromptDeliveryProjectionsForTask,
+	getQueuedTaskPromptDeliveryProjectionWriteGeneration,
 	replaceQueuedTaskPromptDeliveryProjections,
 	useQueuedTaskPromptDeliveryProjectionsForTask,
 } from "@/stores/queued-task-prompt-delivery-projection-store";
@@ -42,7 +43,8 @@ export interface QueuedTaskPromptDeliveryQueueController {
 	) => Promise<void>;
 	dismissSettledQueuedPromptDelivery: (queueEntryId: string) => Promise<void>;
 	retrySettledFailedQueuedPromptDelivery: (queueEntryId: string) => Promise<void>;
-	reconfirmQueuedPromptDeliveriesAfterRuntimeRestart: (queueEntryIds: readonly string[]) => Promise<void>;
+	// 返回服务端是否确认落盘：重启提醒只在它为 true 时才把条目记为「已提醒」（失败要能重试）。
+	reconfirmQueuedPromptDeliveriesAfterRuntimeRestart: (queueEntryIds: readonly string[]) => Promise<boolean>;
 	fetchFullText: (queueEntryId: string) => Promise<string | null>;
 }
 
@@ -80,6 +82,8 @@ export function buildQueuedPromptDeliveryOrderAfterMove(
 export function useQueuedTaskPromptDeliveryQueueController(
 	workspaceId: string | null,
 	taskId: string,
+	// 该会话所属的看板任务（by-the-way 子会话是它的主任务）。随入队存进条目，主任务被删时连子会话的队列一并丢弃。
+	workspaceTaskId: string,
 ): QueuedTaskPromptDeliveryQueueController {
 	const projections = useQueuedTaskPromptDeliveryProjectionsForTask(taskId);
 
@@ -91,9 +95,15 @@ export function useQueuedTaskPromptDeliveryQueueController(
 				return null;
 			}
 			try {
+				const projectionWriteGenerationAtSend = getQueuedTaskPromptDeliveryProjectionWriteGeneration();
 				const response = await mutateTaskPromptDeliveryQueue(workspaceId, mutation);
-				if (response.projectedEntriesByTaskId) {
-					replaceQueuedTaskPromptDeliveryProjections(response.projectedEntriesByTaskId);
+				// 只在期间没有更新的写入时才用响应回显：服务端先推流后回响应，推送通常先到；那时响应已不是最新，
+				// 用它覆盖会把刚推来的状态回滚。workspace 已经切走时 store 自己会丢弃这次写入。
+				if (
+					response.projectedEntriesByTaskId &&
+					getQueuedTaskPromptDeliveryProjectionWriteGeneration() === projectionWriteGenerationAtSend
+				) {
+					replaceQueuedTaskPromptDeliveryProjections(workspaceId, response.projectedEntriesByTaskId);
 				}
 				if (!response.ok) {
 					showAppToast({
@@ -121,10 +131,11 @@ export function useQueuedTaskPromptDeliveryQueueController(
 				queueEntryId: createQueueEntryId(),
 				text: input.text,
 				sourcePromptLibraryEntryId: input.sourcePromptLibraryEntryId ?? null,
+				workspaceTaskId,
 			});
 			return response?.ok === true;
 		},
-		[sendMutation, taskId],
+		[sendMutation, taskId, workspaceTaskId],
 	);
 
 	const cancelQueuedPromptDelivery = useCallback(
@@ -190,13 +201,14 @@ export function useQueuedTaskPromptDeliveryQueueController(
 	const reconfirmQueuedPromptDeliveriesAfterRuntimeRestart = useCallback(
 		async (queueEntryIds: readonly string[]) => {
 			if (queueEntryIds.length === 0) {
-				return;
+				return true;
 			}
-			await sendMutation({
+			const response = await sendMutation({
 				kind: "reconfirm_queued_prompt_deliveries_after_runtime_restart",
 				taskId,
 				queueEntryIds: [...queueEntryIds],
 			});
+			return response?.ok === true;
 		},
 		[sendMutation, taskId],
 	);

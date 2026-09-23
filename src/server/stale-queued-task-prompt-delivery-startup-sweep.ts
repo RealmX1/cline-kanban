@@ -40,8 +40,10 @@ const QUEUED_PROMPT_DELIVERY_STRANDED_BY_RUNTIME_RESTART_FAILURE_NOTE =
 export interface QueuedTaskPromptDeliveryRuntimeRestartSweepInput {
 	runtimeProcessStartedAtEpochMs: number;
 	sweepingRuntimeProcessInstanceId: string;
-	// 是否在这一趟里盖 restart-crossing 章。启动那一趟盖；延迟复扫只收敛在途投递，不再盖章——复扫时刻
-	// 之后才出现的「托管者不活」是一次新的、属于别的实例的重启，该由那个实例起来时自己的清扫去盖。
+	// 是否在这一趟里盖 restart-crossing 章。启动那一趟盖；延迟复扫只收敛在途投递，不再盖章。
+	// 启动之后才判死的托管者（崩溃后心跳还在宽限期内时本实例就起来了）由 dispatcher 的**持续盖章屏障**
+	// 接手：每次出队前与每次 60s sweep 都重读心跳（见 queued-task-prompt-delivery-dispatcher.ts 头注）。
+	// 启动这一趟只是让重启后的第一屏就看得见「待确认」，不是唯一一道。
 	stampEntriesThatSurvivedRuntimeRestart: boolean;
 	inFlightSettlementBudgetMs?: number;
 	listWorkspaceIds?: () => Promise<string[]>;

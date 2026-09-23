@@ -26,7 +26,9 @@ const {
 	computeQueuedTaskPromptDeliveryTextSha256,
 	discardQueuedTaskPromptDeliveriesForTasks,
 	getWorkspaceQueuedTaskPromptDeliveriesPath,
+	isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask,
 	isQueuedTaskPromptDeliveryQueueFullForTask,
+	isQueuedTaskPromptDeliveryWorkspaceQueueFull,
 	MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK,
 	MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE,
 	MAX_QUEUED_TASK_PROMPT_DELIVERY_ATTEMPTS,
@@ -1196,5 +1198,122 @@ describe("queued-task-prompt-delivery-store — restart-crossing 盖章", () => 
 			nowEpochMs: NOW + 1_000,
 		});
 		expect(discarded.entriesByTaskId).toEqual({});
+	});
+
+	// 删除路径手上只有看板任务 id；by-the-way 子会话的队列键是它自己的会话 id。不按条目记下的
+	// workspaceTaskId 匹配，子会话的队列会在主任务删掉之后继续留着等 stop。
+	it("主任务离开看板时，它名下 by-the-way 子会话的队列一并丢弃；别的任务不受影响", async () => {
+		await mutateWorkspaceQueuedTaskPromptDeliveries(
+			WORKSPACE_ID,
+			{
+				kind: "enqueue_prompt_for_delivery_after_current_turn",
+				taskId: "btw-session-1",
+				queueEntryId: "sub-1",
+				text: "子会话里排的",
+				workspaceTaskId: TASK_ID,
+			},
+			NOW,
+		);
+		await mutateWorkspaceQueuedTaskPromptDeliveries(
+			WORKSPACE_ID,
+			{
+				kind: "enqueue_prompt_for_delivery_after_current_turn",
+				taskId: "task-other",
+				queueEntryId: "o-1",
+				text: "别的任务",
+			},
+			NOW,
+		);
+		const discarded = await discardQueuedTaskPromptDeliveriesForTasks({
+			workspaceId: WORKSPACE_ID,
+			taskIds: [TASK_ID],
+			nowEpochMs: NOW + 1_000,
+		});
+		expect(Object.keys(discarded.entriesByTaskId)).toEqual(["task-other"]);
+	});
+});
+
+describe("queued-task-prompt-delivery-store — 本轮 RVF 修复的钉子", () => {
+	it("入队时记下所属看板任务：缺省即会话自己", () => {
+		const snapshot = applyQueuedTaskPromptDeliveryMutation(emptySnapshot(), enqueue("q1", "A"), NOW);
+		expect(taskEntries(snapshot)[0]?.workspaceTaskId).toBe(TASK_ID);
+	});
+
+	// per-workspace 上限只靠裁剪约束不住（裁剪只丢终态条目）：10 个任务各排满 20 条之后，第 11 个任务照样能入队。
+	it("整个 workspace 的非终态条目到上限后，任何任务的入队都被拒绝", () => {
+		const perTask = MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK;
+		const taskCount = Math.ceil(MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE / perTask);
+		let snapshot = emptySnapshot();
+		for (let taskIndex = 0; taskIndex < taskCount; taskIndex += 1) {
+			for (let entryIndex = 0; entryIndex < perTask; entryIndex += 1) {
+				snapshot = applyQueuedTaskPromptDeliveryMutation(
+					snapshot,
+					{
+						kind: "enqueue_prompt_for_delivery_after_current_turn",
+						taskId: `task-${taskIndex}`,
+						queueEntryId: `q-${taskIndex}-${entryIndex}`,
+						text: "x",
+					},
+					NOW,
+				);
+			}
+		}
+		expect(isQueuedTaskPromptDeliveryWorkspaceQueueFull(snapshot)).toBe(true);
+		expect(isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(snapshot, "task-new")).toBe(true);
+		const refused = applyQueuedTaskPromptDeliveryMutation(
+			snapshot,
+			{
+				kind: "enqueue_prompt_for_delivery_after_current_turn",
+				taskId: "task-new",
+				queueEntryId: "overflow",
+				text: "x",
+			},
+			NOW,
+		);
+		expect(refused.entriesByTaskId["task-new"]).toBeUndefined();
+	});
+
+	// 过期却仍标着 queued 的条目：投影显示 expired（UI 给 Dismiss），底层若不先收敛，Dismiss 无操作，
+	// 20 条这样的条目还会占满容量、永久拒绝新入队。
+	it("mutation 之前先把过期条目收敛：过期条目不占容量、可以 Dismiss", () => {
+		let snapshot = emptySnapshot();
+		for (let index = 0; index < MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK; index += 1) {
+			snapshot = applyQueuedTaskPromptDeliveryMutation(snapshot, enqueue(`old-${index}`, "x"), NOW);
+		}
+		const afterExpiry = NOW + QUEUED_TASK_PROMPT_DELIVERY_EXPIRY_MS + 1;
+		const accepted = applyQueuedTaskPromptDeliveryMutation(snapshot, enqueue("fresh", "新的一条"), afterExpiry);
+		expect(taskEntries(accepted).find((entry) => entry.queueEntryId === "fresh")?.deliveryState).toBe("queued");
+		const dismissed = applyQueuedTaskPromptDeliveryMutation(
+			snapshot,
+			{ kind: "dismiss_settled_queued_prompt_delivery", taskId: TASK_ID, queueEntryId: "old-0" },
+			afterExpiry,
+		);
+		expect(queueEntryIds(dismissed)).not.toContain("old-0");
+	});
+
+	// 已认领 / 已交付的那一串在认领时就冻结了：此时改开关，磁盘与 UI 显示的与实际发出去的不一致。
+	it("合并开关只作用于仍在排队的条目", () => {
+		const snapshot = seedSnapshot([
+			{ queueEntryId: "q1", text: "A" },
+			{ queueEntryId: "q2", text: "B" },
+		]);
+		const inFlight: WorkspaceQueuedTaskPromptDeliverySnapshot = {
+			entriesByTaskId: {
+				[TASK_ID]: taskEntries(snapshot).map((entry) =>
+					entry.queueEntryId === "q1" ? { ...entry, deliveryState: "handed_to_transport" as const } : entry,
+				),
+			},
+		};
+		const toggled = applyQueuedTaskPromptDeliveryMutation(
+			inFlight,
+			{
+				kind: "set_queued_prompt_delivery_merge_with_next",
+				taskId: TASK_ID,
+				queueEntryId: "q1",
+				deliverTogetherWithNextQueuedEntry: true,
+			},
+			NOW,
+		);
+		expect(taskEntries(toggled)[0]?.deliverTogetherWithNextQueuedEntry).toBe(false);
 	});
 });

@@ -48,6 +48,10 @@ const DISPATCH_BLOCK_REASON_WORDING: Record<QueuedTaskPromptDispatchBlockReason,
 	session_restoring_conversation:
 		"The conversation was just restored. It will be sent after you continue the conversation and the agent finishes a turn.",
 	another_programmatic_delivery_in_flight: "Another automated message is being delivered to this task first.",
+	queued_under_another_live_kanban_runtime_instance:
+		"Queued through another running Kanban instance; that instance will send it.",
+	awaiting_first_agent_turn_end_after_restart_reconfirmation:
+		"Confirmed after the restart. It will be sent after the agent's next turn ends.",
 };
 
 /** 只对仍在排队的条目有意义；null = 下一个停止边沿就发（或此刻就在发）。 */

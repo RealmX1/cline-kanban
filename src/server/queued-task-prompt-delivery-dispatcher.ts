@@ -24,6 +24,15 @@
 //      sweep 或另一条边沿会把第二条也塞进同一轮，破坏用户选定的「一轮一条」。
 // 这份记账只在进程内：重启之后所有会话都是新 incarnation，轮次键天然不会撞。
 //
+// ## 重启盖章是持续屏障，不是启动时的一次性动作
+//
+// 启动清扫只在进程起来那一刻看一眼心跳。上一个实例崩溃（或整机快速重启）后心跳文件还新鲜，要等满宽限期
+// 才判死——新实例若在这 2 分钟内起来，启动清扫会以为旧托管者还活着而跳过盖章，之后就再也没人盖了，
+// 旧 prompt 会在下一次恢复会话后不经提醒直接发出。所以：
+//   - 每次尝试出队前，队首条目的托管者若不是本实例，先重读心跳、把托管者已死的条目盖章并接管；
+//   - 60s 兜底 sweep 对每个 workspace 做同一件事；
+//   - 托管者仍活着的条目由门控 -1（queued_under_another_live_kanban_runtime_instance）挡住：只有托管者发它。
+//
 // ## 与 RVF 自注入的关系
 //
 // 队列坐在发送出口**之上**，不改它一个字节。PTY 单飞槽被 RVF 占着时门控 6 让路；剩下的 TOCTOU 窗口里
@@ -63,6 +72,7 @@ import {
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 	releaseQueuedTaskPromptDeliveryClaim,
 	settleQueuedTaskPromptDelivery,
+	stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart,
 } from "../state/queued-task-prompt-delivery-store";
 import {
 	TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS,
@@ -114,6 +124,13 @@ export interface QueuedTaskPromptDeliveryDispatcherDependencies {
 	fallbackSweepIntervalMs?: number;
 	programmaticTerminalDeliveryOutcomeWaitBudgetMs?: number;
 	warn?: (message: string) => void;
+	// 本实例的进程身份与活性来源（见 runtime-process-instance-heartbeat-registry.ts）。三者齐备才启用托管门与
+	// 持续盖章屏障；缺省（单测）时两者都不启用。
+	runtimeProcessInstanceCustody?: {
+		thisRuntimeProcessInstanceId: string;
+		runtimeProcessStartedAtEpochMs: number;
+		readLiveRuntimeProcessInstanceIds: () => Promise<ReadonlySet<string>>;
+	};
 }
 
 export interface QueuedTaskPromptDeliveryDispatcher {
@@ -175,6 +192,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		deps.programmaticTerminalDeliveryOutcomeWaitBudgetMs ??
 		TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS + PROGRAMMATIC_TERMINAL_DELIVERY_OUTCOME_WAIT_MARGIN_MS;
 	const warn = deps.warn ?? (() => {});
+	const custody = deps.runtimeProcessInstanceCustody ?? null;
 
 	const knownWorkspaceIds = new Set<string>();
 	const cachedSnapshotByWorkspaceId = new Map<string, WorkspaceQueuedTaskPromptDeliverySnapshot>();
@@ -238,6 +256,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				entry.taskId,
 			),
 			nowEpochMs: now(),
+			thisRuntimeProcessInstanceId: custody?.thisRuntimeProcessInstanceId ?? null,
 		});
 
 	const buildProjectedEntriesByTaskId = async (
@@ -293,6 +312,34 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		await broadcastProjectionIfChanged(workspaceId);
 	};
 
+	// 持续盖章屏障（见文件头「重启盖章是持续屏障」）：重读心跳，给托管者已不在的非终态条目盖 restart-crossing
+	// 章并把托管权交给本实例。本实例自己恒算活着——自己的心跳续期失败不该让自己排的队被当成重启残骸。
+	const stampEntriesWhoseCustodianIsGone = async (workspaceId: string): Promise<void> => {
+		if (custody === null) {
+			return;
+		}
+		let liveRuntimeProcessInstanceIds: ReadonlySet<string>;
+		try {
+			liveRuntimeProcessInstanceIds = await custody.readLiveRuntimeProcessInstanceIds();
+		} catch {
+			// 读不到心跳按「谁都不活」：多盖章 = 多让人确认一次（安全），漏盖 = 重启后不提醒直接发（事故）。
+			liveRuntimeProcessInstanceIds = new Set();
+		}
+		const stamped = await stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart({
+			workspaceId,
+			runtimeProcessStartedAtEpochMs: custody.runtimeProcessStartedAtEpochMs,
+			sweepingRuntimeProcessInstanceId: custody.thisRuntimeProcessInstanceId,
+			liveRuntimeProcessInstanceIds: new Set([
+				...liveRuntimeProcessInstanceIds,
+				custody.thisRuntimeProcessInstanceId,
+			]),
+			nowEpochMs: now(),
+		});
+		if (stamped.stampedCount > 0) {
+			await commitSnapshotAndBroadcast(workspaceId, stamped.snapshot);
+		}
+	};
+
 	// 等 PTY 回执落定。PTY 分支同步只返回 accepted_pending_submit_confirmation，真实终态只经 observer 回来。
 	const createProgrammaticTerminalDeliveryOutcomeWaiter = () => {
 		let resolveOutcome: (outcome: TaskChatInputDeliveryOutcome | null) => void = () => {};
@@ -338,10 +385,22 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 
 	const runDispatchAttempt = async (workspaceId: string, taskId: string): Promise<void> => {
 		const taskKey = buildTaskKey(workspaceId, taskId);
-		const snapshot = await loadSnapshot(workspaceId);
-		const awaitingEntries = listAwaitingDispatchEntries(snapshot, taskId, now());
+		let awaitingEntries = listAwaitingDispatchEntries(await loadSnapshot(workspaceId), taskId, now());
 		if (awaitingEntries.length === 0) {
 			return;
+		}
+		// 队首不归本实例托管：先过一遍持续盖章屏障（托管者死了就盖章并接管），再按刷新后的快照判断。
+		const headCustodianRuntimeProcessInstanceId = awaitingEntries[0]?.custodianRuntimeProcessInstanceId ?? null;
+		if (
+			custody !== null &&
+			headCustodianRuntimeProcessInstanceId !== null &&
+			headCustodianRuntimeProcessInstanceId !== custody.thisRuntimeProcessInstanceId
+		) {
+			await stampEntriesWhoseCustodianIsGone(workspaceId);
+			awaitingEntries = listAwaitingDispatchEntries(await loadSnapshot(workspaceId), taskId, now());
+			if (awaitingEntries.length === 0) {
+				return;
+			}
 		}
 		const summary = deps.getTaskSessionSummary(workspaceId, taskId);
 		const turnKey = buildAgentResponseGenerationStopEdgeDedupeKey(summary);
@@ -353,7 +412,8 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			return;
 		}
 		// 锁外的廉价预判：绝大多数触发都会在这里被挡下（agent 还在干活），不值得为它抢文件锁。
-		if (resolveBlockReasonForEntry(workspaceId, awaitingEntries[0], summary) !== null) {
+		const headEntry = awaitingEntries[0];
+		if (headEntry === undefined || resolveBlockReasonForEntry(workspaceId, headEntry, summary) !== null) {
 			return;
 		}
 		const sessionIncarnationId = summary.runtimeSessionIncarnationId;
@@ -558,6 +618,8 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				return;
 			}
 			try {
+				// 持续盖章屏障：托管者在上一次 sweep 之后才判死的条目，在这里被盖章接管。
+				await stampEntriesWhoseCustodianIsGone(workspaceId);
 				// 绕过缓存重读：兜底 sweep 的另一半职责就是捡回别的进程对队列文件的改动。
 				const snapshot = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
 				await commitSnapshotAndBroadcast(workspaceId, snapshot);

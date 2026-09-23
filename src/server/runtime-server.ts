@@ -53,7 +53,10 @@ import {
 } from "../security/passcode-manager";
 import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-prompt-delivery-store";
-import { startRuntimeProcessInstanceHeartbeat } from "../state/runtime-process-instance-heartbeat-registry";
+import {
+	readLiveRuntimeProcessInstanceIds,
+	startRuntimeProcessInstanceHeartbeat,
+} from "../state/runtime-process-instance-heartbeat-registry";
 import { loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
@@ -378,6 +381,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		},
 		onProjectedQueueChanged: deps.runtimeStateHub.broadcastQueuedTaskPromptDeliveriesUpdated,
 		warn: deps.warn,
+		// 托管门 + 持续盖章屏障：只发本实例托管的条目；托管者判死的条目先盖章等人确认（见 dispatcher 头注）。
+		runtimeProcessInstanceCustody: {
+			thisRuntimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+			runtimeProcessStartedAtEpochMs: runtimeProcessInstanceHeartbeat.startedAtEpochMs,
+			readLiveRuntimeProcessInstanceIds: async () => await readLiveRuntimeProcessInstanceIds(),
+		},
 	});
 	const unregisterQueuedTaskPromptDeliveryDispatchObserver =
 		deps.runtimeStateHub.registerQueuedTaskPromptDeliveryDispatchObserver(queuedTaskPromptDeliveryDispatcher);

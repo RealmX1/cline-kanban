@@ -216,6 +216,66 @@ export function isQueuedTaskPromptDeliveryQueueFullForTask(
 	);
 }
 
+function countNonTerminalQueuedTaskPromptDeliveriesInWorkspace(
+	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
+): number {
+	let count = 0;
+	for (const entries of Object.values(snapshot.entriesByTaskId)) {
+		for (const entry of entries) {
+			if (isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)) {
+				count += 1;
+			}
+		}
+	}
+	return count;
+}
+
+// 整个 workspace 的非终态条目是否已到上限。per-workspace 上限只靠裁剪是约束不住的——裁剪只丢终态条目，
+// 于是 10 个任务各排满 20 条之后，第 11 个任务照样能入队、文件与全量推流无界增长。所以它和 per-task 上限
+// 一样，由入队处显式拒绝承担。
+export function isQueuedTaskPromptDeliveryWorkspaceQueueFull(
+	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
+): boolean {
+	return (
+		countNonTerminalQueuedTaskPromptDeliveriesInWorkspace(snapshot) >= MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_WORKSPACE
+	);
+}
+
+// 入队 / 重排之前的唯一容量判据：任务满或 workspace 满都拒绝。
+export function isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(
+	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
+	taskId: string,
+): boolean {
+	return (
+		isQueuedTaskPromptDeliveryQueueFullForTask(snapshot, taskId) ||
+		isQueuedTaskPromptDeliveryWorkspaceQueueFull(snapshot)
+	);
+}
+
+// 把已过保质期、却还标着 queued 的条目就地收敛成 expired。没有任何条目过期时**原样返回同一个对象**——
+// 调用方靠引用相等判断「这次有没有改动、要不要写盘」。
+//
+// 每一次意图 mutation 都先过它，再做幂等 / 容量 / dismiss / retry 判断。否则 durable 状态与投影会分裂：
+// 投影把过期条目显示成 expired（UI 给出 Dismiss），底层却仍是非终态的 queued——Dismiss 无操作，
+// 20 条这样的条目还会占满容量、永久拒绝新入队。
+function withExpiredQueuedEntriesSettled(
+	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
+	nowEpochMs: number,
+): WorkspaceQueuedTaskPromptDeliverySnapshot {
+	let changed = false;
+	const entriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
+	for (const [taskId, entries] of Object.entries(snapshot.entriesByTaskId)) {
+		entriesByTaskId[taskId] = entries.map((entry) => {
+			if (entry.deliveryState === "queued" && nowEpochMs >= entry.expiresAt) {
+				changed = true;
+				return { ...entry, deliveryState: "expired" as const, settledAt: nowEpochMs };
+			}
+			return entry;
+		});
+	}
+	return changed ? { entriesByTaskId } : snapshot;
+}
+
 // 把一份条目列表压到上限之内，**只丢终态条目、最老的先走**，非终态条目一条都不动。
 // 结果里非终态条目仍可能让长度超过 cap——那是刻意的：宁可超限，也不静默丢掉用户还在等的东西。
 function withOldestTerminalEntriesDroppedDownToCap(
@@ -245,12 +305,9 @@ function withExpiredAndOverflowingEntriesPruned(
 ): WorkspaceQueuedTaskPromptDeliverySnapshot {
 	const entriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
 	let retainedWorkspaceEntryCount = 0;
-	for (const [taskId, entries] of Object.entries(snapshot.entriesByTaskId)) {
-		const expiryResolved = entries.map((entry) =>
-			entry.deliveryState === "queued" && nowEpochMs >= entry.expiresAt
-				? { ...entry, deliveryState: "expired" as const, settledAt: nowEpochMs }
-				: entry,
-		);
+	for (const [taskId, expiryResolved] of Object.entries(
+		withExpiredQueuedEntriesSettled(snapshot, nowEpochMs).entriesByTaskId,
+	)) {
 		const retainedForTask = expiryResolved.filter((entry) => {
 			if (isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)) {
 				return true;
@@ -332,6 +389,7 @@ function buildEnqueuedEntry(
 		sourcePromptLibraryEntryTextSha256:
 			mutation.sourcePromptLibraryEntryTextSha256 ??
 			(sourcePromptLibraryEntryId === null ? null : computeQueuedTaskPromptDeliveryTextSha256(mutation.text)),
+		workspaceTaskId: mutation.workspaceTaskId ?? mutation.taskId,
 		deliveryState: "queued",
 		deliveryAttemptCount: 0,
 		lastAttemptedAt: null,
@@ -352,10 +410,12 @@ function buildEnqueuedEntry(
 
 // 把一条意图应用到快照上。纯函数——并发合并的正确性来自调用方持锁重读，这里只负责语义。
 export function applyQueuedTaskPromptDeliveryMutation(
-	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
+	snapshotAsRead: WorkspaceQueuedTaskPromptDeliverySnapshot,
 	mutation: QueuedTaskPromptDeliveryMutation,
 	nowEpochMs: number,
 ): WorkspaceQueuedTaskPromptDeliverySnapshot {
+	// 先把过期收敛进 durable 状态，后面每一条判断看到的都是与投影一致的状态（见 withExpiredQueuedEntriesSettled）。
+	const snapshot = withExpiredQueuedEntriesSettled(snapshotAsRead, nowEpochMs);
 	const entries = getTaskEntries(snapshot, mutation.taskId);
 
 	if (mutation.kind === "enqueue_prompt_for_delivery_after_current_turn") {
@@ -365,9 +425,9 @@ export function applyQueuedTaskPromptDeliveryMutation(
 		}
 		// 队列已满即**拒绝**，绝不「先收下再裁掉」。裁剪层只丢终态条目（见
 		// withOldestTerminalEntriesDroppedDownToCap），所以真正约束队列长度的就是这里这一条。
-		// 拒绝表现为快照原样返回：调用方拿 isQueuedTaskPromptDeliveryQueueFullForTask 就能分辨
+		// 拒绝表现为快照原样返回：调用方拿 isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask 就能分辨
 		// 「满了」与「幂等重发」，从而给用户一句真话，而不是让他以为排上了。
-		if (isQueuedTaskPromptDeliveryQueueFullForTask(snapshot, mutation.taskId)) {
+		if (isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(snapshot, mutation.taskId)) {
 			return snapshot;
 		}
 		return withExpiredAndOverflowingEntriesPruned(
@@ -413,11 +473,13 @@ export function applyQueuedTaskPromptDeliveryMutation(
 	}
 
 	if (mutation.kind === "set_queued_prompt_delivery_merge_with_next") {
+		// 只允许改还在排队的条目。已认领 / 已交付的那一串在认领那一刻就冻结了（dispatcher 发的是认领时的
+		// claimedEntries），此时改开关只会让磁盘与 UI 显示一条「将合并 / 已拆开」、实际发出去的却是另一回事。
 		return withTaskEntries(
 			snapshot,
 			mutation.taskId,
 			entries.map((entry) =>
-				entry.queueEntryId === mutation.queueEntryId
+				entry.queueEntryId === mutation.queueEntryId && entry.deliveryState === "queued"
 					? { ...entry, deliverTogetherWithNextQueuedEntry: mutation.deliverTogetherWithNextQueuedEntry }
 					: entry,
 			),
@@ -450,7 +512,7 @@ export function applyQueuedTaskPromptDeliveryMutation(
 		if (entries.some((entry) => entry.queueEntryId === mutation.replacementQueueEntryId)) {
 			return snapshot;
 		}
-		if (isQueuedTaskPromptDeliveryQueueFullForTask(snapshot, mutation.taskId)) {
+		if (isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(snapshot, mutation.taskId)) {
 			return snapshot;
 		}
 		// 换新 queueEntryId、清空全部尝试痕迹、重新起算保质期：这是一条**新的意图**，不是旧那条的续命。
@@ -964,11 +1026,17 @@ export async function discardQueuedTaskPromptDeliveriesForTasks(input: {
 			const entriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
 			let removedAny = false;
 			for (const [taskId, entries] of Object.entries(current.entriesByTaskId)) {
-				if (discardedTaskIds.has(taskId)) {
+				// 按会话 id 精确匹配，**或**按条目记下的看板任务 id 匹配——后者把 by-the-way 子会话的队列
+				// 一并带走（删除路径手上只有看板任务 id）。旧条目没有 workspaceTaskId，只能精确匹配。
+				const retained = discardedTaskIds.has(taskId)
+					? []
+					: entries.filter((entry) => !discardedTaskIds.has(entry.workspaceTaskId ?? taskId));
+				if (retained.length !== entries.length) {
 					removedAny = true;
-					continue;
 				}
-				entriesByTaskId[taskId] = entries;
+				if (retained.length > 0) {
+					entriesByTaskId[taskId] = retained;
+				}
 			}
 			return { next: removedAny ? { entriesByTaskId } : current, result: null };
 		},

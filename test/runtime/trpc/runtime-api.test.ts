@@ -5452,7 +5452,7 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 				text: "再排一条",
 			},
 		});
-		expect(overflow).toMatchObject({ ok: false, enqueueRefusedBecauseTaskQueueIsFull: true });
+		expect(overflow).toMatchObject({ ok: false, enqueueRefusedBecauseQueueCapacityIsExhausted: true });
 		// 幂等重发不算被拒。
 		const replay = await api.mutateTaskPromptDeliveryQueue(scope as never, {
 			mutation: {
@@ -5463,7 +5463,7 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 			},
 		});
 		expect(replay.ok).toBe(true);
-		expect(replay.enqueueRefusedBecauseTaskQueueIsFull).toBeUndefined();
+		expect(replay.enqueueRefusedBecauseQueueCapacityIsExhausted).toBeUndefined();
 	});
 
 	// already_delivered 必须让用户看见（「来不及了，已经发出去」）。

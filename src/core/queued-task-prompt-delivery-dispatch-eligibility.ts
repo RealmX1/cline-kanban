@@ -22,7 +22,7 @@ import {
 	isAgentAwaitingModalUserDecision,
 	isAgentSessionCurrentlyGeneratingResponse,
 	isParkedAwaitingDispatchedBackgroundWork,
-	isRestorationContinuationGuardArmed,
+	isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration,
 	resolveSessionFacets,
 } from "./session-activity";
 
@@ -51,6 +51,9 @@ export interface QueuedTaskPromptDispatchEligibilityInput {
 	// 非 PTY transport 由调用方恒传 false——它们没有输入框可抢。
 	hasPendingProgrammaticTaskChatInputDelivery: boolean;
 	nowEpochMs: number;
+	// 做这次判定的 runtime 进程实例。给了就启用托管门：条目由**别的**实例托管时，本实例不发它。
+	// 不给（纯投影 / 旧调用方）时不启用——托管判定只有持有进程身份的一方做得了。
+	thisRuntimeProcessInstanceId?: string | null;
 }
 
 // 返回 null = 此刻可以出队。返回枚举值 = 被这条挡住了。
@@ -61,6 +64,18 @@ export function resolveQueuedPromptDispatchBlockReason(
 	input: QueuedTaskPromptDispatchEligibilityInput,
 ): QueuedTaskPromptDispatchBlockReason | null {
 	const { headEntry, sessionSummary, hasPendingProgrammaticTaskChatInputDelivery } = input;
+
+	// -1. 由另一个此刻活着的实例托管。同机多实例共享 workspaces 根，只有托管者该发它——否则两个实例会各自
+	// 在自己的会话边沿上认领同一条队列。托管者死了之后，调用方（dispatcher）会先盖章并接管托管权，这条
+	// 就转成下面的门控 0；所以走到这里时「托管者不是我」恒等于「托管者还活着」。旧条目没有托管者，不设防。
+	const custodianRuntimeProcessInstanceId = headEntry.custodianRuntimeProcessInstanceId ?? null;
+	if (
+		input.thisRuntimeProcessInstanceId != null &&
+		custodianRuntimeProcessInstanceId !== null &&
+		custodianRuntimeProcessInstanceId !== input.thisRuntimeProcessInstanceId
+	) {
+		return "queued_under_another_live_kanban_runtime_instance";
+	}
 
 	// 0. kanban 重启跨过来、人还没在重启后看见过。
 	//
@@ -106,7 +121,9 @@ export function resolveQueuedPromptDispatchBlockReason(
 
 	// 5. 恢复守卫武装中。`--continue` 只重建上下文，不等于有人让它继续。
 	// 判据必须是完整的两态谓词——恢复重放自己那次 Stop hook 落在第二个状态上，只比第一个值等于不设防。
-	if (isRestorationContinuationGuardArmed(sessionSummary, input.nowEpochMs)) {
+	// 读**声明态**、不读带 30 分钟兜底过期的那个：兜底过期是为「别永久吞掉 harness 唤醒通知」设的，对排队
+	// 投递而言放行 = 用户从没继续过对话，几小时前排的话就发进了刚恢复的会话（理由详见 session-activity.ts）。
+	if (isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration(sessionSummary)) {
 		return "session_restoring_conversation";
 	}
 
@@ -114,6 +131,18 @@ export function resolveQueuedPromptDispatchBlockReason(
 	// superseded_by_later_delivery 被归入**可重试**——两个方向都不静默丢消息。
 	if (hasPendingProgrammaticTaskChatInputDelivery) {
 		return "another_programmatic_delivery_in_flight";
+	}
+
+	// 7. 跨过重启、人已确认，但确认之后 agent 还没停下过一次。用户要的是「提醒我确认，然后在**下一次** stop
+	// hook 注入」。确认那一刻 agent 往往已经闲着（Cline SDK / ACP 没有恢复守卫，停止事件是重启前留下的），
+	// 不设这道门，确认一落地队列就会在那个旧停止事件上立刻发出——5 秒高亮还没播完，prompt 已经发了。
+	// 排在最后：确认之后 agent 在干活 / 在问问题 / 在恢复时，那些更具体的原因更值得显示。
+	const humanReconfirmedAfterRuntimeRestartAtEpochMs = headEntry.humanReconfirmedAfterRuntimeRestartAtEpochMs;
+	if (headEntry.survivedRuntimeRestartAtEpochMs !== null && humanReconfirmedAfterRuntimeRestartAtEpochMs !== null) {
+		const stoppedAt = sessionSummary.agentResponseGenerationStopped?.stoppedAt ?? null;
+		if (stoppedAt === null || stoppedAt <= humanReconfirmedAfterRuntimeRestartAtEpochMs) {
+			return "awaiting_first_agent_turn_end_after_restart_reconfirmation";
+		}
 	}
 
 	return null;

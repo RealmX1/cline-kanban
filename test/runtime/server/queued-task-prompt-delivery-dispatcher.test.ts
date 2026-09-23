@@ -103,7 +103,13 @@ const acceptedPendingPtyConfirmation: SendBehavior = () => ({
 	terminalDelivery: { status: "accepted_pending_submit_confirmation", reason: null },
 });
 
-function createHarness(options: { sendBehavior?: SendBehavior; hasPendingPtyDelivery?: () => boolean } = {}) {
+type DispatcherCustody = Parameters<
+	typeof createQueuedTaskPromptDeliveryDispatcher
+>[0]["runtimeProcessInstanceCustody"];
+
+function createHarness(
+	options: { sendBehavior?: SendBehavior; hasPendingPtyDelivery?: () => boolean; custody?: DispatcherCustody } = {},
+) {
 	let currentSummary: RuntimeTaskSessionSummary | null = null;
 	let sendBehavior = options.sendBehavior ?? deliveredImmediately;
 	const sends: RecordedSend[] = [];
@@ -132,6 +138,7 @@ function createHarness(options: { sendBehavior?: SendBehavior; hasPendingPtyDeli
 		},
 		createDispatchIdempotencyKey: () => `idem-${++idempotencyKeyCounter}`,
 		fallbackSweepIntervalMs: 60_000,
+		...(options.custody ? { runtimeProcessInstanceCustody: options.custody } : {}),
 	});
 	return {
 		dispatcher,
@@ -354,13 +361,129 @@ describe("queued-task-prompt-delivery-dispatcher — 重启跨越", () => {
 			awaitsHumanReconfirmationAfterRuntimeRestart: true,
 		});
 
-		// 聚焦时的 5 秒高亮会同时发这条确认；确认本身就是一次队列改动，触发源 (b) 接着就出队。
+		// 聚焦时的 5 秒高亮会同时发这条确认。用户要的是「确认，然后在**下一次** stop hook 注入」：
+		// 确认那一刻 agent 停在重启前留下的那个停止事件上，这时发出去 = 高亮还没播完 prompt 已经走了。
 		await harness.applyMutation({
 			kind: "reconfirm_queued_prompt_deliveries_after_runtime_restart",
 			taskId: TASK_ID,
 			queueEntryIds: ["q1"],
 		});
+		await harness.dispatcher.runFallbackSweep();
+		await harness.dispatcher.whenIdle();
+		expect(harness.sends).toHaveLength(0);
+		expect(harness.broadcasts.at(-1)?.[TASK_ID]?.[0]?.dispatchBlockReason).toBe(
+			"awaiting_first_agent_turn_end_after_restart_reconfirmation",
+		);
+
+		// 确认之后 agent 真的跑完一轮、停下来：这才是「下一次 stop」。
+		harness.observe(generatingSummary(2));
+		harness.observe(
+			stoppedSummary(2, {
+				agentResponseGenerationStopped: {
+					stoppedAt: Date.now() + 1_000,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: 2,
+				},
+			}),
+		);
+		await harness.dispatcher.whenIdle();
 		expect(harness.sends.map((send) => send.request.text)).toEqual(["重启前排的"]);
+	});
+});
+
+describe("queued-task-prompt-delivery-dispatcher — 托管者与持续盖章屏障", () => {
+	// 条目由本测试进程入队，托管者 = 本进程的实例 id；dispatcher 扮演「另一个实例」。
+	async function enqueueUnderThisTestProcess(queueEntryId: string, text: string) {
+		await mutateWorkspaceQueuedTaskPromptDeliveries(WORKSPACE_ID, {
+			kind: "enqueue_prompt_for_delivery_after_current_turn",
+			taskId: TASK_ID,
+			queueEntryId,
+			text,
+		});
+	}
+
+	it("托管者还活着：本实例不发，投影写明归别的实例", async () => {
+		const { getThisRuntimeProcessInstanceId } = await import(
+			"../../../src/state/runtime-process-instance-heartbeat-registry"
+		);
+		const harness = createHarness({
+			custody: {
+				thisRuntimeProcessInstanceId: "instance-dispatching",
+				runtimeProcessStartedAtEpochMs: Date.now() - 1_000,
+				readLiveRuntimeProcessInstanceIds: async () => new Set([getThisRuntimeProcessInstanceId()]),
+			},
+		});
+		harness.observe(stoppedSummary(1));
+		await enqueueUnderThisTestProcess("q1", "别的实例排的");
+		await harness.dispatcher.runFallbackSweep();
+		await harness.dispatcher.whenIdle();
+		expect(harness.sends).toHaveLength(0);
+		expect(harness.broadcasts.at(-1)?.[TASK_ID]?.[0]?.dispatchBlockReason).toBe(
+			"queued_under_another_live_kanban_runtime_instance",
+		);
+	});
+
+	// 崩溃后心跳还在宽限期内时新实例就起来了：启动清扫以为托管者还活着而跳过盖章。之后托管者判死，
+	// 必须有人盖章，否则旧 prompt 会在下一次恢复会话后不经提醒直接发出。
+	it("托管者判死之后：出队前先盖章并接管，等人确认而不是直接发", async () => {
+		let liveRuntimeProcessInstanceIds: ReadonlySet<string> = new Set();
+		const { getThisRuntimeProcessInstanceId } = await import(
+			"../../../src/state/runtime-process-instance-heartbeat-registry"
+		);
+		liveRuntimeProcessInstanceIds = new Set([getThisRuntimeProcessInstanceId()]);
+		const harness = createHarness({
+			custody: {
+				thisRuntimeProcessInstanceId: "instance-dispatching",
+				runtimeProcessStartedAtEpochMs: Date.now() - 1_000,
+				readLiveRuntimeProcessInstanceIds: async () => liveRuntimeProcessInstanceIds,
+			},
+		});
+		await enqueueUnderThisTestProcess("q1", "崩溃前排的");
+		// 托管者（旧实例）的心跳过了宽限期。
+		liveRuntimeProcessInstanceIds = new Set();
+		harness.observe(stoppedSummary(1));
+		await harness.dispatcher.whenIdle();
+		expect(harness.sends).toHaveLength(0);
+		const [entry] = await readTaskEntries();
+		expect(entry).toMatchObject({
+			custodianRuntimeProcessInstanceId: "instance-dispatching",
+			humanReconfirmedAfterRuntimeRestartAtEpochMs: null,
+		});
+		expect(entry?.survivedRuntimeRestartAtEpochMs).not.toBeNull();
+	});
+
+	it("本实例托管的条目照常出队（自己的心跳读不到也不把自己当成残骸）", async () => {
+		const harness = createHarness({
+			custody: {
+				thisRuntimeProcessInstanceId: "instance-dispatching",
+				runtimeProcessStartedAtEpochMs: Date.now() - 1_000,
+				readLiveRuntimeProcessInstanceIds: async () => new Set(),
+			},
+		});
+		harness.observe(stoppedSummary(1));
+		const snapshot = await mutateWorkspaceQueuedTaskPromptDeliveries(WORKSPACE_ID, {
+			kind: "enqueue_prompt_for_delivery_after_current_turn",
+			taskId: TASK_ID,
+			queueEntryId: "q1",
+			text: "本实例排的",
+		});
+		// 入队由服务端盖托管者；这里模拟「由本实例入队」：把托管者改成本实例。
+		const { writeFile } = await import("node:fs/promises");
+		const { getWorkspaceQueuedTaskPromptDeliveriesPath } = await import(
+			"../../../src/state/queued-task-prompt-delivery-store"
+		);
+		const ownedSnapshot = {
+			entriesByTaskId: {
+				[TASK_ID]: (snapshot.entriesByTaskId[TASK_ID] ?? []).map((entry) => ({
+					...entry,
+					custodianRuntimeProcessInstanceId: "instance-dispatching",
+				})),
+			},
+		};
+		await writeFile(getWorkspaceQueuedTaskPromptDeliveriesPath(WORKSPACE_ID), JSON.stringify(ownedSnapshot), "utf8");
+		await harness.dispatcher.notifyQueueMutated(WORKSPACE_ID, TASK_ID, ownedSnapshot);
+		await harness.dispatcher.whenIdle();
+		expect(harness.sends.map((send) => send.request.text)).toEqual(["本实例排的"]);
 	});
 });
 

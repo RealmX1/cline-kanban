@@ -4,13 +4,13 @@
 // 与 use-exploratory-findings 同一套纪律：推送只覆盖「在场期间」的变更，断连窗口不补发，所以每次（重）连
 // 握手完成（refreshKey = streamSnapshotGeneration 递增）都要重拉一次。
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 import { fetchTaskPromptDeliveryQueue } from "@/runtime/queued-task-prompt-delivery-query";
 import type { RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId } from "@/runtime/types";
 import {
-	clearQueuedTaskPromptDeliveryProjections,
 	replaceQueuedTaskPromptDeliveryProjections,
+	resetQueuedTaskPromptDeliveryProjectionsForWorkspace,
 } from "@/stores/queued-task-prompt-delivery-projection-store";
 
 export function useQueuedTaskPromptDeliveryProjectionSync(input: {
@@ -23,8 +23,9 @@ export function useQueuedTaskPromptDeliveryProjectionSync(input: {
 	// 否则「推送先到、拉取后到」会把刚推来的新状态回滚成旧的。
 	const pushedProjectionGenerationRef = useRef(0);
 
-	useEffect(() => {
-		clearQueuedTaskPromptDeliveryProjections();
+	// layout effect：在浏览器绘制之前换归属并清空，切到 B 的第一帧就不会露出 A 的同名任务的队列。
+	useLayoutEffect(() => {
+		resetQueuedTaskPromptDeliveryProjectionsForWorkspace(workspaceId);
 	}, [workspaceId]);
 
 	useEffect(() => {
@@ -43,7 +44,7 @@ export function useQueuedTaskPromptDeliveryProjectionSync(input: {
 				) {
 					return;
 				}
-				replaceQueuedTaskPromptDeliveryProjections(response.projectedEntriesByTaskId);
+				replaceQueuedTaskPromptDeliveryProjections(workspaceId, response.projectedEntriesByTaskId);
 			})
 			.catch(() => {
 				// 拉不到就保持上一份（或空）：队列是附加信息，拉取失败不该弹错打扰用户；下次重连会再拉。
@@ -54,10 +55,10 @@ export function useQueuedTaskPromptDeliveryProjectionSync(input: {
 	}, [workspaceId, refreshKey]);
 
 	useEffect(() => {
-		if (pushedProjectedEntriesByTaskId === null) {
+		if (pushedProjectedEntriesByTaskId === null || workspaceId === null) {
 			return;
 		}
 		pushedProjectionGenerationRef.current += 1;
-		replaceQueuedTaskPromptDeliveryProjections(pushedProjectedEntriesByTaskId);
-	}, [pushedProjectedEntriesByTaskId]);
+		replaceQueuedTaskPromptDeliveryProjections(workspaceId, pushedProjectedEntriesByTaskId);
+	}, [pushedProjectedEntriesByTaskId, workspaceId]);
 }

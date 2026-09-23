@@ -41,7 +41,10 @@
 - 任务离开看板（浏览器整份 PUT 的差集 / CLI delete）即丢弃其队列——队列是待执行的机器动作，不是资产。
   移进 trash 列不算离开。
 - 保质期 24h（绝对时刻 `expiresAt`）：过期转 `expired`，UI 明写「没发」，绝不静默发射。
-- 上限：per-task 20 条**非终态**、per-workspace 200；裁剪只丢终态条目，队列满时入队**显式拒绝**。
+- 上限：per-task 20 条**非终态**、per-workspace 200 条**非终态**；裁剪只丢终态条目，任一上限满时入队 / 重排都
+  **显式拒绝**（响应带 `enqueueRefusedBecauseQueueCapacityIsExhausted`）。每次 mutation 先把过期条目收敛成
+  `expired` 再判断，于是过期条目不占容量、可以 Dismiss。
+- 条目记 `workspaceTaskId`（所属看板任务；by-the-way 子会话是它的主任务），主任务离开看板时子会话的队列一并丢弃。
 
 ## 4. 状态机
 
@@ -66,8 +69,8 @@ queued ──认领(锁内)──▶ claimed_for_dispatch ──写盘──▶ 
    观察器挂在 `runtime-state-hub` 的 summary 汇聚点上，位于「0 客户端提前返回」**之前**：关掉浏览器标签页，
    队列照样排空。
 2. **队列被改动之后立刻尝试一次**：覆盖「agent 已经闲着时排了一条」。
-3. **60s 兜底 sweep**：阻塞条件自行解除却没有新边沿（恢复守卫 30 分钟兜底过期、PTY 单飞槽里那条 RVF 投递
-   失败了没开新一轮），以及别的进程改了队列文件。
+3. **60s 兜底 sweep**：阻塞条件自行解除却没有新边沿（PTY 单飞槽里那条 RVF 投递失败了没开新一轮），
+   别的进程改了队列文件，以及**持续盖章屏障**（见 §8）。
 
 **一轮至多交出一次**（进程内记账，按轮次键）：同一轮内不再出队，直到 agent 开始新的一轮。
 没有它：① 可重试失败（人正在框里打字）会被 sweep 反复重投、一次次让位到超时、三次判死；
@@ -80,13 +83,15 @@ queued ──认领(锁内)──▶ claimed_for_dispatch ──写盘──▶ 
 
 | # | 阻塞原因 | 说明 |
 | --- | --- | --- |
+| -1 | `queued_under_another_live_kanban_runtime_instance` | 条目由另一个此刻活着的实例托管：只有托管者发它（同机多实例共享 workspaces 根） |
 | 0 | `awaiting_human_reconfirmation_after_runtime_restart` | 跨过了 runtime 重启且人还没在重启后看见过。**唯一不会自行解除**的一条，故排最前 |
 | 1 | `agent_still_generating` | |
 | 2 | `session_parked_awaiting_dispatched_background_work` | 必须单列：`submitTaskChatInputWhenReady` 一进门就 unpark |
 | 3 | `agent_awaiting_modal_user_decision` | 集合在 `session-activity.ts` 的 `MODAL_USER_DECISION_TURN_KINDS`。**绝不含 `review`**——review 是目标态 |
 | 4 | `session_not_live` | 保持 queued 不判失败 |
-| 5 | `session_restoring_conversation` | 完整的两态恢复守卫谓词（含 30 分钟兜底过期）。`--continue` 恢复重放自己打出的 Stop hook 落在第二个状态上——只比第一个值 = 用户点开一张卡片就引爆队列 |
+| 5 | `session_restoring_conversation` | 两态恢复守卫的**声明态**，**不看** 30 分钟兜底过期。`--continue` 恢复重放自己打出的 Stop hook 落在第二个状态上——只比第一个值 = 用户点开一张卡片就引爆队列。兜底过期是为「别永久吞掉 harness 唤醒通知」设的，对排队投递放行 = 用户没继续过对话、旧 prompt 半小时后自动发出 |
 | 6 | `another_programmatic_delivery_in_flight` | PTY 单飞槽被 RVF 占着。TOCTOU 残余由失败路由兜住 |
+| 7 | `awaiting_first_agent_turn_end_after_restart_reconfirmation` | 跨过重启、人已确认，但确认之后 agent 还没停下过一次（停止事件的 `stoppedAt` 不晚于确认时刻）。用户要的是「确认后在**下一次** stop hook 注入」；排最后，让更具体的原因先显示 |
 
 投递带 `source: "kanban_prompt_queue"`，于是 PTY 侧 `deferWhileUserTurn` 生效，是门控 3 之外的第二道保险。
 
@@ -108,6 +113,10 @@ queued ──认领(锁内)──▶ claimed_for_dispatch ──写盘──▶ 
 
 - **启动清扫**先收敛撂下的在途（按**超期**判，与注入账本启动清扫同口径；启动时还年轻的由一次延迟复扫补判），
   再给「托管实例此刻不在心跳里」的非终态条目盖章并清掉上一次的人工确认、托管权转给做清扫的实例。
+- **盖章是持续屏障，不是启动时的一次性动作**：崩溃（或整机快速重启）后旧心跳还在 2 分钟宽限期内时新实例就
+  起来了，启动清扫会以为托管者还活着而跳过。所以 dispatcher 每次出队前（队首托管者不是本实例时）与每次 60s
+  sweep 都重读心跳、给托管者已死的条目盖章并接管；托管者仍活着的条目由门控 -1 挡住。
+- 确认之后还要等 agent **再停下一次**（门控 7）：确认那一刻 agent 往往停在重启前留下的停止事件上。
 - 判据**不是**「条目比本进程老」：一台机器同时跑常驻实例 / dev:full / dogfood / 集成测试，共享 workspaces 根。
 - **托管权会转移**，不是出身：不转移的话，任何启动时刻晚于上次盖章的并存实例都会再误标一次。
 - 不按 workspace 发租约：那有 fail-unsafe 的洞（A 常驻持租约 → B 跳过 → B 续租 → A 真重启看到 B 的租约 →
@@ -115,15 +124,20 @@ queued ──认领(锁内)──▶ claimed_for_dispatch ──写盘──▶ 
 - 心跳 `stop()` 必须先拦住未开始的续期、再等在途续期落地、最后才删文件——否则已退出的进程会在磁盘上「活」
   一个宽限期，真实重启被漏盖。
 - 读不到心跳一律按「谁都不活」处理：多盖章 = 多让人确认一次（安全）；漏盖 = 重启后不提醒直接发（事故）。
-- **「人看见了」= 闪了这一下**：详情视图挂载 ∧ 页面真的可见 ∧ 有待确认条目 ⇒ 播 5 秒高亮**同时**发确认。
-  高亮没挂上就不确认（留给面板的 Keep 按钮）。`prefers-reduced-motion` 下动画关掉、静态 ring 保留。
+- **「人看见了」= 闪了这一下**：详情视图挂载 ∧ 页面可见 ∧ Queue 页签**真的**呈现在视口里（有面积、没被藏、
+  没被模态层盖住；窄屏横向溢出时先就近滚回来）∧ 有待确认条目 ⇒ 播 5 秒高亮**同时**发确认，并给屏幕阅读器一句
+  aria-live 播报。没能呈现就不确认，每 2 秒与回到前台时再试。只在服务端确认成功后才算提醒过，失败 10 秒后重试。
+  `prefers-reduced-motion` 下动画关掉、静态 ring 保留。
 
 ## 9. 前端
 
 - 服务端给阻塞原因枚举，前端只做措辞映射（`queued-task-prompt-delivery-status-wording.ts`）。
 - 推流是 workspace 级整份替换的**投影**（正文截断 200 字）；全文按需经读 procedure 拉。
 - per-task 外部 store：看板卡「N queued」药丸与详情视图各自按 taskId 订阅，不穿 props 过两条 BoardCard 宿主链。
-- 不做乐观更新：mutation 响应自带服务端锁内算好的整份投影。
+  store 记着当前 workspace，别的 workspace 的写入一律丢弃（taskId 是 board-local 短 id，会撞号）。
+- 不做乐观更新：mutation 响应自带服务端锁内算好的整份投影；但服务端先推流后回响应，期间已有更新写入时丢弃
+  这份响应（写入代数），不拿它回滚更新的推送。
+- 合并开关在任一侧已在发送时禁用（服务端同样只改 `queued` 条目）：那一串在认领时就冻结了。
 
 ## 10. 明确不做（v1）
 

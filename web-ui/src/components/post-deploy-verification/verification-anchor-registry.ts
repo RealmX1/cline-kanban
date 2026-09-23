@@ -69,8 +69,39 @@ export interface SpotlightAnchorOptions {
 	// 换一种高亮样式。默认是 Post-Deploy Verification 的蓝色导航脉冲；别的用途（例：排队 prompt 重启后的
 	// warning 色提醒）用自己的 class——两件事共用一个 class，将来任一方调时长 / 配色都会串味。
 	spotlightClassName?: string;
-	// 目标本来就一直在视野里（例：详情头部的页签）时不必滚：滚动一个常驻头部元素只会让布局跳一下。
-	scrollIntoView?: boolean;
+	// true（默认）= 平滑滚到视野中央；false = 不滚；"only_if_out_of_view" = 只在它不在视野里时就近滚一下
+	// （例：详情头部的页签——常驻可见时一动不动，窄屏横向溢出的页签条里被挤出去时才滚回来）。
+	scrollIntoView?: boolean | "only_if_out_of_view";
+	// 高亮之前先确认它**真的**呈现在用户眼前：有面积、落在视口里、没被 display/visibility 藏起来、也没被
+	// 模态层盖住。不满足时不挂高亮、返回 false。给「高亮了就算用户看见了」这类调用方用。
+	requireVisibleToUser?: boolean;
+}
+
+// 元素此刻是否真的呈现在用户眼前。只看几何与遮挡，不看颜色对比度之类的主观因素。
+export function isElementVisibleToUserInViewport(element: Element): boolean {
+	const rect = element.getBoundingClientRect();
+	if (rect.width <= 0 || rect.height <= 0) {
+		return false;
+	}
+	const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+	const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+	if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= viewportWidth || rect.top >= viewportHeight) {
+		return false;
+	}
+	const computedStyle = window.getComputedStyle(element);
+	if (computedStyle.visibility === "hidden" || computedStyle.display === "none") {
+		return false;
+	}
+	// 被模态层 / 浮层盖住：视口里那一点最上面的元素不是它（也不在它里面）。
+	if (typeof document.elementFromPoint === "function") {
+		const probeX = Math.min(Math.max(rect.left + rect.width / 2, 0), viewportWidth - 1);
+		const probeY = Math.min(Math.max(rect.top + rect.height / 2, 0), viewportHeight - 1);
+		const topmostElement = document.elementFromPoint(probeX, probeY);
+		if (topmostElement !== null && topmostElement !== element && !element.contains(topmostElement)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 export function spotlightAnchor(anchorKey: string, options?: SpotlightAnchorOptions): boolean {
@@ -89,8 +120,17 @@ export function spotlightAnchor(anchorKey: string, options?: SpotlightAnchorOpti
 	}
 	const spotlightTargetElement = matchedTarget;
 	const spotlightClassName = options?.spotlightClassName ?? VERIFICATION_SPOTLIGHT_CLASS;
-	if (options?.scrollIntoView ?? true) {
+	const scrollIntoViewMode = options?.scrollIntoView ?? true;
+	if (scrollIntoViewMode === "only_if_out_of_view") {
+		if (!isElementVisibleToUserInViewport(spotlightTargetElement)) {
+			// 即时滚动（不是 smooth）：下面紧接着要同步判断它是否已经进入视野。
+			spotlightTargetElement.scrollIntoView({ behavior: "auto", block: "nearest", inline: "nearest" });
+		}
+	} else if (scrollIntoViewMode) {
 		spotlightTargetElement.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+	}
+	if (options?.requireVisibleToUser && !isElementVisibleToUserInViewport(spotlightTargetElement)) {
+		return false;
 	}
 
 	const pendingRemovalTimer = pendingSpotlightRemovalTimerByElement.get(spotlightTargetElement);
