@@ -1,6 +1,6 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
@@ -226,7 +226,55 @@ function resolveTerminalAgentModelOverride(
 }
 
 function hasCodexWorkingDirectoryOverride(args: string[]): boolean {
-	return args.includes("-C") || hasCliOption(args, "--cd");
+	return args.some((arg) => arg.startsWith("-C")) || hasCliOption(args, "--cd");
+}
+
+// Codex 0.156 起默认把 --last 扩展到同仓库所有 worktree；Kanban 的隐式续跑必须留在任务目录。
+// 只作用于 cwd-latest：显式会话 ID 的跨目录播种 / fork 保留原生行为。
+async function constrainCodexLatestSessionToTaskWorkingDirectory(args: string[], cwd: string): Promise<void> {
+	const taskDirectory = await realpath(cwd).catch(() => resolve(cwd));
+	const conflict = (option: string): never => {
+		throw new Error(
+			`Cannot select the latest conversation in this task directory with ${option}. ` +
+				"Remove the conflicting Codex argument or select an explicit conversation ID.",
+		);
+	};
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		const optionIndex = index;
+		if (arg === "--" || hasCliOption([arg], "--all")) conflict(arg);
+		let directory: string | undefined;
+		if (arg === "-C" || arg === "--cd") directory = args[++index] ?? conflict(arg);
+		else if (arg.startsWith("--cd=")) directory = arg.slice(5);
+		else if (arg.startsWith("-C")) directory = arg.slice(2).replace(/^=/, "");
+		if (directory !== undefined) {
+			if (!directory) conflict(arg);
+			const resolvedDirectory = resolve(cwd, directory);
+			if ((await realpath(resolvedDirectory).catch(() => resolvedDirectory)) !== taskDirectory) conflict(arg);
+			args.splice(optionIndex, index - optionIndex + 1);
+			index = optionIndex - 1;
+			continue;
+		}
+		let config: string | undefined;
+		if (arg === "-c" || arg === "--config") config = args[++index] ?? conflict(arg);
+		else if (arg.startsWith("--config=")) config = arg.slice(9);
+		else if (arg.startsWith("-c")) config = arg.slice(2).replace(/^=/, "");
+		if (config !== undefined) {
+			const separator = config.indexOf("=");
+			const key = config.slice(0, separator).replace(/["'\s]/g, "");
+			const value = config.slice(separator + 1).trim();
+			if (key === "features" || (key === "features.worktrees" && value !== "false")) conflict(arg);
+			continue;
+		}
+		if (arg === "--enable" || arg.startsWith("--enable=")) {
+			const features = arg === "--enable" ? (args[++index] ?? "") : arg.slice(9);
+			if (features.split(",").some((feature) => feature.trim() === "worktrees")) conflict(arg);
+		}
+	}
+	// -C 固定执行目录；配置放在 resume/fork 子命令之后，真实 0.156.1 PTY 已验证该位置生效。
+	// EXPERIMENT_NODE: 若原生目录选择再次漂移，再评估由 Kanban 枚举校验会话并固定 ID，见目录隔离 runbook。
+	args.unshift("-C", cwd);
+	args.push("-c", "features.worktrees=false");
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1150,6 +1198,9 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("--ask-for-approval", "untrusted");
 		}
 		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
+		const continuesWithoutNewPrompt = Boolean(
+			input.resumeFromTrash || input.resumePriorAgentConversationWithoutResendingPrompt,
+		);
 		if (input.readOnlyQuestionSession) {
 			const withoutBypass = codexArgs.filter((arg) => arg !== "--dangerously-bypass-approvals-and-sandbox");
 			codexArgs.length = 0;
@@ -1169,7 +1220,7 @@ const codexAdapter: AgentSessionAdapter = {
 			if (!codexArgs.includes(sessionSubcommand)) {
 				codexArgs.push(sessionSubcommand, observedNativeSessionResumeAddressing.sourceSessionId);
 			}
-		} else if (input.resumeFromTrash) {
+		} else if (continuesWithoutNewPrompt) {
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");
 			}
@@ -1199,6 +1250,14 @@ const codexAdapter: AgentSessionAdapter = {
 			}
 		}
 
+		const selectsLatestWorkingDirectorySession =
+			!observedNativeSessionResumeAddressing &&
+			(continuesWithoutNewPrompt ||
+				(!taskAgentSessionInitialization && !parentSessionId && input.forkLatestWorkingDirectorySession));
+		if (selectsLatestWorkingDirectorySession) {
+			await constrainCodexLatestSessionToTaskWorkingDirectory(codexArgs, input.cwd);
+		}
+
 		if (appendedSystemPrompt && !hasCodexConfigOverride(codexArgs, "developer_instructions")) {
 			codexArgs.push("-c", `developer_instructions=${JSON.stringify(appendedSystemPrompt)}`);
 		}
@@ -1215,9 +1274,6 @@ const codexAdapter: AgentSessionAdapter = {
 			);
 		}
 
-		const continuesWithoutNewPrompt = Boolean(
-			input.resumeFromTrash || input.resumePriorAgentConversationWithoutResendingPrompt,
-		);
 		const trimmed = continuesWithoutNewPrompt ? "" : input.prompt.trim();
 		if (input.startInPlanMode && !continuesWithoutNewPrompt) {
 			deferredStartupPromptText = trimmed ? `/plan ${trimmed}` : "/plan";
@@ -1225,11 +1281,11 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push(trimmed);
 		}
 		const resumesSession =
-			Boolean(input.resumeFromTrash) ||
-			(!input.resumeFromTrash &&
+			continuesWithoutNewPrompt ||
+			(!continuesWithoutNewPrompt &&
 				taskAgentSessionInitialization?.sourceSessionReuseMode === "resume_existing_session");
 		const forksSession =
-			!input.resumeFromTrash &&
+			!continuesWithoutNewPrompt &&
 			(taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session" ||
 				(!taskAgentSessionInitialization &&
 					(parentSessionId !== null || Boolean(input.forkLatestWorkingDirectorySession))));

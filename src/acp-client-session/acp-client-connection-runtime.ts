@@ -4,6 +4,8 @@
 // 这层只管「连接生命周期与协议调用」，不认识 Kanban 的看板状态；SessionUpdate 到 facet /
 // 聊天消息的翻译在 acp-session-update-adapter.ts。
 import { type ChildProcessByStdio, spawn } from "node:child_process";
+import { realpath } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import treeKill from "tree-kill";
 import type { RuntimeAgentId, RuntimeTaskAgentPermissionMode } from "../core/api-contract";
@@ -21,6 +23,7 @@ import {
 	type AcpRequestPermissionRequest,
 	type AcpRequestPermissionResponse,
 	type AcpSessionId,
+	type AcpSessionInfo,
 	type AcpSessionNotification,
 	buildKanbanAcpClientCapabilities,
 	connectKanbanAcpClient,
@@ -306,10 +309,8 @@ export class AcpClientConnectionRuntime {
 
 	// 接上该 worktree 下最近的一条 agent 会话。
 	//
-	// 为什么「最近一条」就够精确：Kanban 每个 task 一个 worktree，而 omp 的会话库按 cwd 建，
-	// 于是 `cwd == 该任务的 worktree` 这一条件本身就把候选集收敛到了这个任务的对话。
-	// 它与 TUI 侧 `--continue` 的语义完全一致（omp 的 terminal breadcrumb 在新 PTY 上必然失配，
-	// 从而回落到同一个「该 cwd 下最近的 session」规则），所以两条通道来回切换接的是同一段对话。
+	// cwd 请求参数只是给 agent 的过滤提示，仍须逐条核对返回目录并遍历分页。
+	// TUI 的 terminal breadcrumb 可能优先于最近会话；这里明确按实际目录内的更新时间选择。
 	//
 	// session/load 会把整段历史当成普通 SessionUpdate 重播回来（omp 的 #replaySessionHistory）。
 	// 重播期间必须挂上重播守卫，否则会把卡片刷成 running、把「agent 上次响应」刷成刚刚——
@@ -318,16 +319,32 @@ export class AcpClientConnectionRuntime {
 		connection: AcpClientConnection,
 		input: { cwd: string; taskId: string },
 	) {
-		const listResponse = await connection.agent.request(ACP_AGENT_METHODS.session_list, { cwd: input.cwd });
-		const sessions = Array.isArray(listResponse?.sessions) ? listResponse.sessions : [];
-		const mostRecentSession = sessions.reduce<(typeof sessions)[number] | null>((mostRecent, candidate) => {
-			if (!mostRecent) {
-				return candidate;
+		const taskDirectory = await realpath(input.cwd);
+		let mostRecentSession: AcpSessionInfo | null = null;
+		let cursor: string | undefined;
+		const visitedCursors = new Set<string>();
+		do {
+			const listResponse = await connection.agent.request(ACP_AGENT_METHODS.session_list, {
+				cwd: input.cwd,
+				...(cursor === undefined ? {} : { cursor }),
+			});
+			for (const candidate of Array.isArray(listResponse?.sessions) ? listResponse.sessions : []) {
+				if (typeof candidate?.cwd !== "string" || !isAbsolute(candidate.cwd)) continue;
+				const candidateDirectory = await realpath(candidate.cwd).catch(() => null);
+				if (candidateDirectory !== taskDirectory || !candidate.sessionId) continue;
+				if (
+					!mostRecentSession ||
+					readAgentSessionUpdatedAtMs(candidate) >= readAgentSessionUpdatedAtMs(mostRecentSession)
+				) {
+					mostRecentSession = candidate;
+				}
 			}
-			return readAgentSessionUpdatedAtMs(candidate) >= readAgentSessionUpdatedAtMs(mostRecent)
-				? candidate
-				: mostRecent;
-		}, null);
+			cursor = listResponse?.nextCursor ?? undefined;
+			if (cursor !== undefined) {
+				if (visitedCursors.has(cursor)) throw new Error("The agent repeated a session/list pagination cursor.");
+				visitedCursors.add(cursor);
+			}
+		} while (cursor !== undefined);
 		if (!mostRecentSession) {
 			throw new Error(
 				"The agent reported no previous conversation in this task worktree, so there is nothing to continue. " +
