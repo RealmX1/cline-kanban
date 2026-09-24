@@ -1,6 +1,6 @@
 # Rewind 后恢复旧会话：调查、修复与验证
 
-任务：`d1bec`；工作区：`/Users/bominzhang/.cline/worktrees/d1bec/cline-kanban`。截至 2026-09-24，本文件描述未提交、未部署的本地实现。未重启共享实例，未改写 `8dc89` 或其它业务任务的历史绑定。
+任务：`d1bec`；工作区：`/Users/bominzhang/.cline/worktrees/d1bec/cline-kanban`。截至 2026-09-24，RVF 修复已提交为 `58935ec3`；尚未部署。未重启共享实例，未改写 `8dc89` 或其它业务任务的历史绑定。
 
 ## 原因与历史证据
 
@@ -107,3 +107,15 @@ rg 'KANBAN-VERIFICATION-SCOPED:(22bb6cf0-c15b-4e47-91db-d4af6bd95d00|83d1f8fd-97
 ```
 
 仅清理本验证创建且带对应 `[vrf:...]` 标记的测试任务与隔离目录；最后一条预期无匹配，不要删除业务任务。
+
+## RVF land 后的 local main 语义合并
+
+本轮 handback 吸收 `f3963548`，其中 `0b661` 的 `ba5d1d03` 已实现身份可靠持久化，`9d24c` 的 `38398fdc` 已实现 Codex / ACP 最近会话目录隔离。六处文本冲突之外，合并还需要处理三个契约差异：
+
+- 复用 main 的 `persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId`，删除本任务重复的保存入口。保留锁内重读、先增 revision 再写 sessions、失败可重试及状态广播；同身份的新 `observedAt` 必须落盘，相同时间的重复观察才幂等，较旧观察不得回退。
+- Codex 的目录隔离配置与 hooks / developer instructions 一起归一到根命令层。初次目录实验中的混合布局不能变成永久的「必须放子命令后」约束。合并后真实 0.156.1 PTY 已验证 resume / 隐式 fork 选本目录，显式 ID fork 仍可跨目录。
+- ACP 保留 main 的真实 cwd 核对、分页与重复游标拒绝，并让列表选中与显式 ID 两条路径共用按连接登记的 load；更新 main 测试对旧全局 sessionId 映射字段的引用。
+
+原先的重复确认 revision 断言也已更新：新确认增加一次 revision，同一观察重试不增加。主任务、侧问恢复、写盘失败重试、恢复守卫及业务时间语义均继续由两侧回归共同约束。
+
+RVF land 首次完整 pre-commit 暴露两个测试文件的三个 mock 缺少新增运行时查询方法；仅补齐 `listSummaries` / `getSummary`，随后 2361 项 pre-commit 测试通过。candidate evidence writer 因 handoff 缺少 canonical issue summary 拒绝写证据；未改写 handoff 或伪造 receipt，后续同步按 legacy 语义合并与验证路径执行。231 项 sibling 清单只读检查，其余未落地工作没有被吸收。

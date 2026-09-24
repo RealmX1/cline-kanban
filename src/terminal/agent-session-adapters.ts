@@ -1509,7 +1509,9 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
 		const continuesWithoutNewPrompt = Boolean(
-			observedNativeSessionResumeAddressing || input.resumeFromTrash || input.resumePriorAgentConversationWithoutResendingPrompt,
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				input.resumePriorAgentConversationWithoutResendingPrompt,
 		);
 		if (input.readOnlyQuestionSession) {
 			const withoutBypass = codexArgs.filter((arg) => arg !== "--dangerously-bypass-approvals-and-sandbox");

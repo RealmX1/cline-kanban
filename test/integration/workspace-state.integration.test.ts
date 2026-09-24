@@ -732,7 +732,20 @@ describe.sequential("原生会话身份的独立持久化", () => {
 						observedAt: 999,
 					},
 				});
-				expect((await loadPersistedWorkspaceStateById(context.workspaceId)).revision).toBe(persisted.revision);
+				const confirmed = await loadPersistedWorkspaceStateById(context.workspaceId);
+				// 同身份的新确认必须推进磁盘水位；相同观察重试才是幂等操作。
+				expect(confirmed.revision).toBe(persisted.revision + 1);
+				expect(confirmed.sessions[sessionKeys[1]].agentNativeConversationSessionIdentity?.observedAt).toBe(999);
+				await api.ingest({
+					workspaceId: context.workspaceId,
+					taskId: sessionKeys[1],
+					event: "agent_conversation_session_identity_observed",
+					agentNativeConversationSessionIdentity: {
+						...summary.agentNativeConversationSessionIdentity,
+						observedAt: 999,
+					},
+				});
+				expect((await loadPersistedWorkspaceStateById(context.workspaceId)).revision).toBe(confirmed.revision);
 			} finally {
 				manager.dispose();
 				restored.dispose();

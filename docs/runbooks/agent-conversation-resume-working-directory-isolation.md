@@ -57,7 +57,7 @@ KANBAN_CODEX_NATIVE_DIRECTORY_SMOKE_BINARY="$(command -v codex)" \
 
 注册任务 `9d24c`，verificationId `e0c30bbb-5a25-420c-8b62-50d1121962b3`，类型 `automated_script`，资产目录 `~/.cline/kanban/verifications/e0c30bbb-5a25-420c-8b62-50d1121962b3/`，`cleanup.mode=automatic`。部署 record 后预计挂载 1 条自动检查、0 条人工检查。
 
-脚本读取 `KANBAN_RUNTIME_HOST/PORT`，经 CLI 查询真实实例的任务 PID，再只读观察 Codex argv。没有可观察的 cwd-latest 进程则明确非零退出；不对用户任务执行重启或造新会话。该检查只证明生产启动参数，原生源 ID 的行为证据来自上述隔离测试。
+脚本读取 `KANBAN_RUNTIME_HOST/PORT`，经 CLI 查询真实实例的任务 PID，再经 macOS `KERN_PROCARGS2` 只读观察 Codex 原生 argv（保留参数边界，不输出环境变量）。没有可观察的 cwd-latest 进程则明确非零退出；不对用户任务执行重启或造新会话。该检查只证明生产启动参数，原生源 ID 的行为证据来自上述隔离测试。
 
 自查 `verification list` 返回 `ok=true, count=1`，kind、label、入口和资产目录均与定义一致。
 
@@ -68,3 +68,5 @@ KANBAN_CODEX_NATIVE_DIRECTORY_SMOKE_BINARY="$(command -v codex)" \
 ```bash
 kanban verification cleanup --verification-id e0c30bbb-5a25-420c-8b62-50d1121962b3
 ```
+
+2026-09-24 与 `d1bec` 合并后，以同一 verificationId reconcile 为根命令层断言；不再依赖 `ps` 文本里 developer instructions 的位置。原生 argv 边界夹具通过；旧实例 dry-run 正常非零退出，指出四个旧进程缺少新布局，无崩溃、超时或残留，未记为部署通过。
