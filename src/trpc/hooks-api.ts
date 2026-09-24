@@ -231,6 +231,9 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					? { ok: false, error: nativeIdentityPersistenceError.message }
 					: { ok: true };
 
+				// 身份确认不代表对话继续，不触碰恢复守卫、活动时间或通知。
+				if (event === "agent_conversation_session_identity_observed") return identityPersistenceResponse;
+
 				const normalizedHookEventName = body.metadata?.hookEventName?.trim().toLowerCase() ?? "";
 				const isClaudeUserPromptSubmit =
 					event === "to_in_progress" &&

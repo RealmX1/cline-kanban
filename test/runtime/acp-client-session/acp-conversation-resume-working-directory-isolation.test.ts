@@ -29,7 +29,7 @@ function createResumeFixture() {
 	const resume = () =>
 		// biome-ignore lint/complexity/useLiteralKeys: 测试私有协议边界，不增加生产公开 API。
 		runtime["loadMostRecentAgentSessionForWorkingDirectory"](connection, { cwd: taskDirectory, taskId: "task-a" });
-	return { runtime, request, resume, taskDirectory, siblingDirectory, aliasDirectory };
+	return { runtime, connection, request, resume, taskDirectory, siblingDirectory, aliasDirectory };
 }
 
 describe("ACP 续跑独立验证目录和所有分页", () => {
@@ -92,6 +92,6 @@ describe("ACP 续跑独立验证目录和所有分页", () => {
 		await expect(fixture.resume()).rejects.toThrow("load failed");
 		expect(fixture.runtime.isReplayingPersistedConversationHistory("task-a")).toBe(false);
 		// biome-ignore lint/complexity/useLiteralKeys: 核对加载失败后的私有映射清理。
-		expect(fixture.runtime["taskIdBySessionId"].has("correct")).toBe(false);
+		expect(fixture.runtime["sessionIdByConnection"].has(fixture.connection)).toBe(false);
 	});
 });

@@ -182,6 +182,7 @@ describe("createRuntimeApi switchAgentSessionTransport process lifecycle", () =>
 			listSummaries: vi.fn(() => []),
 		};
 		const acpTaskSessionService = {
+			listSummaries: vi.fn(() => []),
 			getSummary: vi.fn(() => null),
 			stopTaskSession: vi.fn(async () => null),
 			discardTaskSessionLedgerEntry: vi.fn(),
@@ -229,6 +230,7 @@ describe("createRuntimeApi switchAgentSessionTransport process lifecycle", () =>
 			listSummaries: vi.fn(() => []),
 		};
 		const acpTaskSessionService = {
+			listSummaries: vi.fn(() => []),
 			getSummary: vi.fn(() => null),
 			stopTaskSession: vi.fn(async () => null),
 			discardTaskSessionLedgerEntry: vi.fn(),

@@ -79,58 +79,39 @@ describe("agent conversation session resume addressing", () => {
 		expect(addressing.kind).toBe("refused_ambiguous_execution_working_directory");
 	});
 
-	// kimi 有 `-m/--model` 但没有 `-S/--session <id>`：它进不了按-id 枚举，只能靠歧义闸门兜底。
-	// 这正是「不只是 Claude 的问题」在实现上的落点。
-	it("does not address by id for agents without a by-id resume channel, even when an id was observed", () => {
-		const soloCwd = resolveAgentConversationSessionResumeAddressing(
-			createInput({
-				launchAgentId: "kimi",
-				observedAgentNativeConversationSessionIdentity: {
-					sourceAgentId: "kimi",
-					nativeSessionId: OBSERVED_NATIVE_SESSION_ID,
-					transcriptPath: null,
-					observedAt: 1_700_000_000_000,
-				},
-			}),
-		);
-		expect(soloCwd).toEqual({
-			kind: "latest_agent_conversation_in_execution_working_directory",
-			reason: "execution_working_directory_has_no_competing_session",
-		});
-
-		const contestedCwd = resolveAgentConversationSessionResumeAddressing(
-			createInput({
-				launchAgentId: "kimi",
-				observedAgentNativeConversationSessionIdentity: {
-					sourceAgentId: "kimi",
-					nativeSessionId: OBSERVED_NATIVE_SESSION_ID,
-					transcriptPath: null,
-					observedAt: 1_700_000_000_000,
-				},
-				taskConversationSessionsSharingExecutionWorkingDirectory: [
-					{ ...MAIN_SESSION_SHARING_WORKTREE, agentId: "kimi" },
-				],
-			}),
-		);
-		expect(contestedCwd.kind).toBe("refused_ambiguous_execution_working_directory");
-	});
-
-	it("rejects a malformed native session id and falls through to the ambiguity gate", () => {
+	it.each(["kimi", "omp"])("%s 使用原生 ID，不因共享目录回落到最近会话", (agentId) => {
+		const nativeSessionId = agentId === "kimi" ? `session_${OBSERVED_NATIVE_SESSION_ID}` : OBSERVED_NATIVE_SESSION_ID;
 		const addressing = resolveAgentConversationSessionResumeAddressing(
 			createInput({
+				launchAgentId: agentId,
 				observedAgentNativeConversationSessionIdentity: {
-					sourceAgentId: "claude",
-					nativeSessionId: "not-a-uuid",
+					sourceAgentId: agentId,
+					nativeSessionId,
 					transcriptPath: null,
-					observedAt: 1_700_000_000_000,
+					observedAt: 1,
 				},
+				taskConversationSessionsSharingExecutionWorkingDirectory: [{ ...MAIN_SESSION_SHARING_WORKTREE, agentId }],
 			}),
 		);
-
-		expect(addressing).toEqual({
-			kind: "latest_agent_conversation_in_execution_working_directory",
-			reason: "execution_working_directory_has_no_competing_session",
+		expect(addressing).toMatchObject({
+			kind: "addressed_by_observed_agent_native_session_id",
+			taskAgentSessionInitialization: { sourceSessionId: nativeSessionId },
 		});
+	});
+
+	it("非法绑定不能静默回落最近会话", () => {
+		expect(() =>
+			resolveAgentConversationSessionResumeAddressing(
+				createInput({
+					observedAgentNativeConversationSessionIdentity: {
+						sourceAgentId: "claude",
+						nativeSessionId: "--continue",
+						transcriptPath: null,
+						observedAt: 1,
+					},
+				}),
+			),
+		).toThrow("refusing latest-session fallback");
 	});
 
 	// backward compatibility 的落点：老会话没有 sidecar，但它独占 cwd ⇒ 行为与今天一模一样。

@@ -117,3 +117,16 @@ describe("serializeHarnessUserPromptProcessingDirective", () => {
 		});
 	});
 });
+
+it("身份保存失败仍保留恢复守卫 block 指令", async () => {
+	const response: RuntimeHookIngestResponse = {
+		ok: false,
+		error: "disk unavailable",
+		harnessUserPromptProcessingDirective: { processingDecision: "block_and_defer_until_explicit_user_input" },
+	};
+	const failure = vi.fn();
+	expect(await deliverHookIngestWithRetry(async () => response, { ...FAST_OPTIONS, onFinalFailure: failure })).toEqual(
+		response,
+	);
+	expect(failure).toHaveBeenCalledOnce();
+});

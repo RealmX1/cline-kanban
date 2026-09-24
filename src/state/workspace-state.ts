@@ -380,24 +380,35 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 // 「本来重启就能自愈」的中断变成永久损坏。
 //
 // 只在「persisted 不是空壳」时保留——两边都是空壳时留谁都一样，放行 incoming 免得把陈旧 updatedAt 钉住。
-function preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
 	incomingSessions: Record<string, RuntimeTaskSessionSummary>,
 ): Record<string, RuntimeTaskSessionSummary> {
 	let reconciledSessions = incomingSessions;
 	for (const [taskId, incomingSummary] of Object.entries(incomingSessions)) {
 		const persistedSummary = persistedSessions[taskId];
+		if (!persistedSummary) continue;
+		let reconciledSummary = incomingSummary;
 		if (
-			!persistedSummary ||
-			!isNeverStartedPlaceholderTaskSessionSummary(incomingSummary) ||
-			isNeverStartedPlaceholderTaskSessionSummary(persistedSummary)
+			isNeverStartedPlaceholderTaskSessionSummary(incomingSummary) &&
+			!isNeverStartedPlaceholderTaskSessionSummary(persistedSummary)
 		) {
-			continue;
+			reconciledSummary = persistedSummary;
+		} else {
+			// hook 已确认落盘后，延迟到达的整份 UI 快照不能撤销较新的原生身份。
+			const persistedIdentity = persistedSummary.agentNativeConversationSessionIdentity;
+			const incomingIdentity = incomingSummary.agentNativeConversationSessionIdentity;
+			if (
+				persistedIdentity &&
+				incomingSummary.agentId === persistedSummary.agentId &&
+				(!incomingIdentity || persistedIdentity.observedAt > incomingIdentity.observedAt)
+			) {
+				reconciledSummary = { ...incomingSummary, agentNativeConversationSessionIdentity: persistedIdentity };
+			}
 		}
-		if (reconciledSessions === incomingSessions) {
-			reconciledSessions = { ...incomingSessions };
-		}
-		reconciledSessions[taskId] = persistedSummary;
+		if (reconciledSummary === incomingSummary) continue;
+		if (reconciledSessions === incomingSessions) reconciledSessions = { ...incomingSessions };
+		reconciledSessions[taskId] = reconciledSummary;
 	}
 	return reconciledSessions;
 }
@@ -841,11 +852,13 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 		if (!identity || identity.sourceAgentId !== parsedSummary.agentId) {
 			throw new Error(`Native conversation identity does not match session "${taskId}".`);
 		}
+		const savedIdentity = sessions[taskId]?.agentNativeConversationSessionIdentity;
+		// 同身份的新确认也要落盘，跨重启保留拒绝迟到旧身份的时间水位。
 		if (
-			isSameAgentNativeConversationSessionIdentity(
-				sessions[taskId]?.agentNativeConversationSessionIdentity,
-				identity,
-			)
+			savedIdentity?.sourceAgentId === identity.sourceAgentId &&
+			(savedIdentity.observedAt > identity.observedAt ||
+				(isSameAgentNativeConversationSessionIdentity(savedIdentity, identity) &&
+					savedIdentity.observedAt === identity.observedAt))
 		) {
 			return false;
 		}
@@ -895,7 +908,7 @@ export async function saveWorkspaceState(
 		}
 		const persistedBoard = await readWorkspaceBoard(context.workspaceId);
 		const persistedSessions = await readWorkspaceSessions(context.workspaceId);
-		const sessions = preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+		const sessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			persistedSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				parsedPayload.board,
@@ -961,7 +974,7 @@ export async function mutateWorkspaceState<T>(
 			};
 		}
 
-		const nextSessions = preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+		const nextSessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			currentSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				mutation.board,

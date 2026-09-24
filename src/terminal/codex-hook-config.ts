@@ -10,7 +10,13 @@ import { quoteShellArg } from "../core/shell";
 // 正常路径 F1 后亚秒返回，这个上限极少触达。
 const CODEX_HOOK_TIMEOUT_SECONDS = 8;
 
-type CodexHookConfigEvent = "PermissionRequest" | "PostToolUse" | "PreToolUse" | "Stop" | "UserPromptSubmit";
+type CodexHookConfigEvent =
+	| "SessionStart"
+	| "PermissionRequest"
+	| "PostToolUse"
+	| "PreToolUse"
+	| "Stop"
+	| "UserPromptSubmit";
 
 type JsonValue = JsonPrimitive | JsonArray | JsonObject;
 type JsonPrimitive = boolean | null | number | string;
@@ -48,16 +54,55 @@ export function hasCodexConfigOverride(args: string[], key: string): boolean {
 	return false;
 }
 
-function findCodexConfigOverrideInsertIndex(args: string[]): number {
-	const subcommandIndex = args.findIndex((arg) => arg === "resume" || arg === "fork");
-	return subcommandIndex === -1 ? args.length : subcommandIndex;
+export const CODEX_CLI_OPTIONS_WITH_VALUES = new Set([
+	"--model",
+	"-m",
+	"--profile",
+	"-p",
+	"--cd",
+	"-C",
+	"--sandbox",
+	"-s",
+	"--ask-for-approval",
+	"-a",
+	"--image",
+	"-i",
+	"--enable",
+	"--disable",
+	"--add-dir",
+]);
+
+// Codex 的根命令与 resume/fork 同时收到 -c 时会丢根配置。先收集所有覆盖项，再整体放到根参数区。
+// 在 adapter 追加位置 prompt 之前调用；-- 之后的字节属于用户参数，不再解析。
+export function normalizeCodexConfigOverridesBeforeSubcommand(args: string[]): void {
+	const overrides: string[] = [];
+	const remaining: string[] = [];
+
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--") {
+			remaining.push(...args.slice(index));
+			break;
+		}
+		if (argument === "-c" || argument === "--config") {
+			const value = args[++index];
+			if (value === undefined) throw new Error(`Missing value for Codex ${argument}.`);
+			overrides.push(argument, value);
+		} else if (argument.startsWith("--config=") || (argument.startsWith("-c") && argument.length > 2)) {
+			overrides.push(argument);
+		} else {
+			remaining.push(argument);
+			if (CODEX_CLI_OPTIONS_WITH_VALUES.has(argument) && index + 1 < args.length) remaining.push(args[++index]);
+		}
+	}
+	args.splice(0, args.length, ...overrides, ...remaining);
 }
 
 function addCodexConfigOverrideBeforeSubcommand(args: string[], key: string, value: string): void {
 	if (hasCodexConfigOverride(args, key)) {
 		return;
 	}
-	args.splice(findCodexConfigOverrideInsertIndex(args), 0, "-c", `${key}=${value}`);
+	args.unshift("-c", `${key}=${value}`);
 }
 
 function buildCodexHookCommand(event: RuntimeHookEvent): string {
@@ -78,6 +123,8 @@ function codexSessionFlagsConfigSource(): string {
 
 function codexHookEventKeyLabel(eventName: CodexHookConfigEvent): string {
 	switch (eventName) {
+		case "SessionStart":
+			return "session_start";
 		case "PermissionRequest":
 			return "permission_request";
 		case "PostToolUse":
@@ -167,12 +214,26 @@ export function configureCodexHooks(args: string[]): void {
 		command: buildCodexHookCommand("activity"),
 		matcher: "*",
 	};
+	const sessionStartHook: CodexHookConfig = {
+		eventName: "SessionStart",
+		command: buildCodexHookCommand("agent_conversation_session_identity_observed"),
+	};
 	const trustStateConfigValue = buildCodexHookTrustStateConfigValue(
-		[inProgressHook, reviewHook, permissionRequestHook, preToolUseActivityHook, postToolUseActivityHook].map(
-			buildCodexHookTrustEntry,
-		),
+		[
+			sessionStartHook,
+			inProgressHook,
+			reviewHook,
+			permissionRequestHook,
+			preToolUseActivityHook,
+			postToolUseActivityHook,
+		].map(buildCodexHookTrustEntry),
 	);
 
+	addCodexConfigOverrideBeforeSubcommand(
+		args,
+		"hooks.SessionStart",
+		buildCodexHookConfigValue(sessionStartHook.command),
+	);
 	addCodexConfigOverrideBeforeSubcommand(args, "features.hooks", "true");
 	addCodexConfigOverrideBeforeSubcommand(args, "hooks.state", trustStateConfigValue);
 	addCodexConfigOverrideBeforeSubcommand(

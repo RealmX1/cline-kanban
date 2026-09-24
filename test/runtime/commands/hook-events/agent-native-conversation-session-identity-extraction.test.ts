@@ -117,3 +117,12 @@ describe("isSameAgentNativeConversationSessionIdentity", () => {
 		);
 	});
 });
+
+it("子 agent 的 transcript 不能覆盖主会话原生身份", () => {
+	expect(
+		extractAgentNativeConversationSessionIdentityFromHookPayload({
+			sourceAgentId: "codex",
+			payload: { session_id: "parent", agent_id: "child", transcript_path: "/child.jsonl" },
+		}),
+	).toBeUndefined();
+});

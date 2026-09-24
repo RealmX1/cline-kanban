@@ -13,7 +13,7 @@ Kanban 的隐式「继续最近会话」应在任务的执行目录内选择。�
 ## 实现边界
 
 - `agent-session-adapters.ts` 是 PTY 的统一启动入口，覆盖自动聚焦恢复、手动重启、垃圾桶恢复、进程退出 / 回收后重开和 By-the-way cwd-latest fork。
-- Codex 仅在隐式最近会话路径注入 `-C <task cwd>`，以及 **resume/fork 子命令之后**的 `-c features.worktrees=false`。真实 0.156.1 PTY 实验中，仅放在根参数区的配置仍选中 B；放在子命令之后才正确选中 A。参数排列是回归契约，不能只检查 argv 中「存在」该字符串。
+- Codex 仅在隐式最近会话路径注入 `-C <task cwd>` 和 `-c features.worktrees=false`。初次 0.156.1 PTY 实验在混合配置布局下只验证了子命令后生效；合并原生身份修复后，所有配置统一归一到根命令层，避免子命令配置遮蔽 hooks。必须联合运行真实目录选择 smoke 与 hook 身份验证，不能只检查 argv 中「存在」该字符串。
 - cwd-latest 遇到 `--all`、指向其它目录的 `-C/--cd`、显式启用 worktrees、覆盖整个 features 表、参数终止符 `--` 时，在生成启动命令阶段报清楚冲突。检查重复参数、短写和等号形式；等价真实目录可接受。prompt 在校验后追加，不把正文误当开关。
 - 新会话、明确原生 ID 恢复、明确来源 ID fork 不增加该特性覆盖。不改用户 `config.toml`，不增 public API / UI 设置。
 - ACP 续跑及 OMP 通道切换：`session/list({cwd})` 只是请求条件，返回项仍逐条通过 `realpath` 核对，遍历所有页后按更新时间选最近项。缺失、相对、消失或不匹配 cwd 均排除；没有匹配就报错，不加载兄弟任务、不静默创建新会话。重复分页游标报错；加载失败清理重播守卫与映射。
@@ -52,12 +52,12 @@ KANBAN_CODEX_NATIVE_DIRECTORY_SMOKE_BINARY="$(command -v codex)" \
 
 | 行为 | 部署前已证 | 部署后待验 | 类型 |
 | --- | --- | --- | --- |
-| 真实 Codex 范围选择 | 隔离原生 PTY + adapter 回归 | 运行实例确实发出子命令级隔离参数 | automated_script |
+| 真实 Codex 范围选择 | 隔离原生 PTY + adapter 回归 | 运行实例确实发出目录隔离参数，且不遮蔽身份 hooks | automated_script |
 | ACP 候选校验 / 分页 / load | fake 协议异常回归 + 真实 OMP ACP list/load | 无额外独占部署断言 | 无需重复注册 |
 
 注册任务 `9d24c`，verificationId `e0c30bbb-5a25-420c-8b62-50d1121962b3`，类型 `automated_script`，资产目录 `~/.cline/kanban/verifications/e0c30bbb-5a25-420c-8b62-50d1121962b3/`，`cleanup.mode=automatic`。部署 record 后预计挂载 1 条自动检查、0 条人工检查。
 
-脚本读取 `KANBAN_RUNTIME_HOST/PORT`，经 CLI 查询真实实例的任务 PID，再只读观察 Codex argv。没有可观察的 cwd-latest 进程则明确非零退出；不对用户任务执行重启或造新会话。该检查只证明生产启动参数，原生源 ID 的行为证据来自上述隔离测试。
+脚本读取 `KANBAN_RUNTIME_HOST/PORT`，经 CLI 查询真实实例的任务 PID，再经 macOS `KERN_PROCARGS2` 只读观察 Codex 原生 argv（保留参数边界，不输出环境变量）。没有可观察的 cwd-latest 进程则明确非零退出；不对用户任务执行重启或造新会话。该检查只证明生产启动参数，原生源 ID 的行为证据来自上述隔离测试。
 
 自查 `verification list` 返回 `ok=true, count=1`，kind、label、入口和资产目录均与定义一致。
 
@@ -68,3 +68,5 @@ KANBAN_CODEX_NATIVE_DIRECTORY_SMOKE_BINARY="$(command -v codex)" \
 ```bash
 kanban verification cleanup --verification-id e0c30bbb-5a25-420c-8b62-50d1121962b3
 ```
+
+2026-09-24 与 `d1bec` 合并后，以同一 verificationId reconcile 为根命令层断言；不再依赖 `ps` 文本里 developer instructions 的位置。原生 argv 边界夹具通过；旧实例 dry-run 正常非零退出，指出四个旧进程缺少新布局，无崩溃、超时或残留，未记为部署通过。

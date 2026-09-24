@@ -1,8 +1,14 @@
 // 任务级门面：runtime-api 唯一的 ACP 入口。编排「连接运行时 + 会话账本 + SessionUpdate 适配器」
 // 三者，对位 src/cline-sdk/cline-task-session-service.ts。
 import { randomUUID } from "node:crypto";
+import {
+	describeRefusedAmbiguousExecutionWorkingDirectoryResumeAddressing,
+	resolveAgentConversationSessionResumeAddressing,
+	type TaskConversationSessionSharingExecutionWorkingDirectory,
+} from "../core/agent-conversation-session-resume-addressing";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskConversationMode,
@@ -62,6 +68,8 @@ export interface StartAcpTaskSessionRequest {
 	// **同时不重放 startInPlanMode**：omp 的 loadSession 会返回该会话当前的 modes，
 	// 重新按 plan 起步会把用户在对话中途已经切走的模式按回去。
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
+	observedAgentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity | null;
+	taskConversationSessionsSharingExecutionWorkingDirectory?: TaskConversationSessionSharingExecutionWorkingDirectory[];
 }
 
 // 等待用户决策的双向通道由外部注入（见 S5 的 broker）。默认实现保守拒绝，
@@ -234,8 +242,10 @@ export class AcpTaskSessionService {
 
 	async startTaskSession(request: StartAcpTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
 		const entry = this.registry.ensureEntry(request.taskId, request.agentId);
+		if (this.connectionRuntime.getConnection(request.taskId)) return cloneAcpSummary(entry.summary);
 		this.latestStartRequestByTaskId.set(request.taskId, { ...request });
 		const startedAt = now();
+		const runtimeSessionIncarnationId = randomUUID();
 		const shouldResumeWithoutResendingPrompt = Boolean(request.resumePriorAgentConversationWithoutResendingPrompt);
 
 		// 乐观 UI：先落 user 消息并把卡片推成 running，再去起进程——与 Cline 侧一致，
@@ -274,6 +284,7 @@ export class AcpTaskSessionService {
 				workspacePath: request.cwd,
 				reviewReason: reviewReasonWhileConnectionIsBeingEstablished,
 				startedAt,
+				runtimeSessionIncarnationId,
 				exitCode: null,
 				warningMessage: null,
 				// 会话模式盖章：每次建会话（含续跑重开 / 回收后重建）都从启动请求快照一次；缺省不物化。
@@ -284,22 +295,60 @@ export class AcpTaskSessionService {
 		);
 
 		try {
+			const resumeAddressing = resolveAgentConversationSessionResumeAddressing({
+				resumesPriorAgentConversation: shouldResumeWithoutResendingPrompt,
+				launchAgentId: request.agentId,
+				observedAgentNativeConversationSessionIdentity:
+					request.observedAgentNativeConversationSessionIdentity ??
+					entry.summary.agentNativeConversationSessionIdentity,
+				taskConversationSessionsSharingExecutionWorkingDirectory:
+					request.taskConversationSessionsSharingExecutionWorkingDirectory ?? [],
+			});
+			if (resumeAddressing.kind === "refused_ambiguous_execution_working_directory") {
+				throw new Error(
+					describeRefusedAmbiguousExecutionWorkingDirectoryResumeAddressing({
+						launchAgentId: request.agentId,
+						competingTaskConversationSessions: resumeAddressing.competingTaskConversationSessions,
+					}),
+				);
+			}
 			const connection = await this.connectionRuntime.startTaskConnection({
+				isRuntimeSessionIncarnationCurrent: () =>
+					this.registry.getEntry(request.taskId) === entry &&
+					entry.summary.runtimeSessionIncarnationId === runtimeSessionIncarnationId,
 				taskId: request.taskId,
 				agentId: request.agentId,
 				cwd: request.cwd,
 				permissionMode: request.permissionMode,
+				observedAgentNativeSessionId:
+					resumeAddressing.kind === "addressed_by_observed_agent_native_session_id"
+						? resumeAddressing.taskAgentSessionInitialization.sourceSessionId
+						: undefined,
 				// 续跑重开一律不重放 plan 起步（理由见 StartAcpTaskSessionRequest 的字段注释）。
 				startInPlanMode: shouldResumeWithoutResendingPrompt ? false : request.startInPlanMode,
 				resumePriorAgentConversationWithoutResendingPrompt: shouldResumeWithoutResendingPrompt,
 			});
+			if (
+				this.registry.getEntry(request.taskId) !== entry ||
+				entry.summary.runtimeSessionIncarnationId !== runtimeSessionIncarnationId
+			) {
+				connection.close();
+				return this.getSummary(request.taskId) ?? cloneAcpSummary(entry.summary);
+			}
+
 			this.emitSummary(
 				updateAcpSummary(entry, {
 					...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: request.agentId }),
 					pid: connection.pid,
 					// 新活体：ACP 侧的活体就是这个刚 spawn 出来的子进程 + 握手完成的连接。回收调度器据此
 					// 判断「已落盘的期限说的还是不是同一个活体」，重连出来的新会话不会被陈旧期限误杀。
-					runtimeSessionIncarnationId: randomUUID(),
+					runtimeSessionIncarnationId,
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId: request.agentId,
+						nativeSessionId: connection.sessionId,
+						transcriptPath: null,
+						observedAt: now(),
+					},
 				}),
 			);
 			if (shouldResumeWithoutResendingPrompt) {
@@ -324,6 +373,11 @@ export class AcpTaskSessionService {
 				void this.runPromptTurn(request.taskId, connection, buildAcpPromptBlocks(request.prompt, request.images));
 			}
 		} catch (error) {
+			if (
+				this.registry.getEntry(request.taskId) !== entry ||
+				entry.summary.runtimeSessionIncarnationId !== runtimeSessionIncarnationId
+			)
+				return this.getSummary(request.taskId) ?? cloneAcpSummary(entry.summary);
 			this.emitSummary(this.recordTaskFailure(request.taskId, request.agentId, error));
 		}
 
@@ -356,8 +410,7 @@ export class AcpTaskSessionService {
 	// 会话被回收之后，registry 里的 entry / summary 仍在（回收只拆连接与子进程、不删账本），
 	// 但 connectionRuntime 里那条连接已经没了——此时 sendTaskSessionInput 只会返回 null。
 	// 「agent 提问 → 会话被回收 → 用户回来作答」这条 carry-forward 闭环要成立，必须先真的重建连接。
-	// ACP 侧没有 session/load 续跑（见 acp-task-session-registry 注释），故这里就是计划 §7.4 说的
-	// 「ACP：新连接」——agent 不必重新发问，因为答案正文本身就带着原问题。
+	// 新建连接并按 summary 中的原生身份 session/load；不能为一次答复凭空创建新对话。
 	// prompt / images 清空：只重建连接，答案随后由调用方经 sendTaskSessionInput 投递。
 	// 没有账本条目、或没有可复用的启动参数时如实返回 false，绝不假装就绪。
 	async resumeReclaimedTaskSessionForPendingUserDecisionAnswerDelivery(taskId: string): Promise<boolean> {
@@ -371,7 +424,14 @@ export class AcpTaskSessionService {
 		if (!latestStartRequest) {
 			return false;
 		}
-		await this.startTaskSession({ ...latestStartRequest, prompt: "", images: undefined });
+		await this.startTaskSession({
+			...latestStartRequest,
+			prompt: "",
+			images: undefined,
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+			observedAgentNativeConversationSessionIdentity:
+				this.getSummary(taskId)?.agentNativeConversationSessionIdentity,
+		});
 		return this.connectionRuntime.getConnection(taskId) !== null;
 	}
 
@@ -419,6 +479,7 @@ export class AcpTaskSessionService {
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
 			pid: null,
+			runtimeSessionIncarnationId: null,
 			reviewReason: null,
 		});
 		this.emitSummary(summary);

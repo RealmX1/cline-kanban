@@ -165,3 +165,58 @@ describe("AcpTaskSessionService.startTaskSession taskConversationMode 盖章", (
 		expect("taskConversationMode" in summary).toBe(false);
 	});
 });
+
+function createIdentityTestConnection(sessionId: string) {
+	return {
+		sessionId,
+		pid: 4242,
+		agentId: "omp" as const,
+		prompt: vi.fn(async () => ({ stopReason: "end_turn" })),
+		close: vi.fn(),
+	};
+}
+describe("ACP 原生身份恢复", () => {
+	it("保存协议 ID，下一次恢复按此 ID 且不重发 prompt", async () => {
+		const { service } = startServiceWithSummaryRecorder();
+		const first = createIdentityTestConnection("native-A");
+		acpClientConnectionRuntimeTestDouble.startTaskConnection.mockResolvedValue(first);
+		await service.startTaskSession(buildStartRequest({ prompt: "" }));
+		expect(service.getSummary(TASK_ID)?.agentNativeConversationSessionIdentity?.nativeSessionId).toBe("native-A");
+		await service.stopTaskSession(TASK_ID);
+		await service.startTaskSession(
+			buildStartRequest({ resumePriorAgentConversationWithoutResendingPrompt: true, startInPlanMode: true }),
+		);
+		expect(acpClientConnectionRuntimeTestDouble.startTaskConnection).toHaveBeenLastCalledWith(
+			expect.objectContaining({ observedAgentNativeSessionId: "native-A", startInPlanMode: false }),
+		);
+		expect(first.prompt).not.toHaveBeenCalled();
+	});
+
+	it("已连接会话重复启动保持原 incarnation，不使原连接事件失效", async () => {
+		const { service } = startServiceWithSummaryRecorder();
+		const first = createIdentityTestConnection("native-active");
+		acpClientConnectionRuntimeTestDouble.startTaskConnection.mockResolvedValue(first);
+		const before = await service.startTaskSession(buildStartRequest({ prompt: "" }));
+		const isCurrent =
+			acpClientConnectionRuntimeTestDouble.startTaskConnection.mock.lastCall?.[0].isRuntimeSessionIncarnationCurrent;
+		acpClientConnectionRuntimeTestDouble.getConnection.mockReturnValueOnce(first as never);
+		const after = await service.startTaskSession(buildStartRequest({ prompt: "" }));
+		expect(after.runtimeSessionIncarnationId).toBe(before.runtimeSessionIncarnationId);
+		expect(isCurrent()).toBe(true);
+	});
+	it("停止后才完成的旧连接不能覆盖会话身份", async () => {
+		const { service } = startServiceWithSummaryRecorder();
+		const pending = createPendingTaskConnection();
+		const start = service.startTaskSession(buildStartRequest({ prompt: "" }));
+		const isCurrent =
+			acpClientConnectionRuntimeTestDouble.startTaskConnection.mock.lastCall?.[0].isRuntimeSessionIncarnationCurrent;
+		expect(isCurrent()).toBe(true);
+		await service.stopTaskSession(TASK_ID);
+		expect(isCurrent()).toBe(false);
+		const late = createIdentityTestConnection("late-native");
+		pending.settleAsEstablished(late);
+		await start;
+		expect(late.close).toHaveBeenCalledOnce();
+		expect(service.getSummary(TASK_ID)?.agentNativeConversationSessionIdentity).toBeUndefined();
+	});
+});

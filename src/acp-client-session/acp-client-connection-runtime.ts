@@ -57,6 +57,9 @@ export interface AcpTaskConnectionStartInput {
 	// 找不到或加载失败一律**抛错**，绝不静默回落到 session/new：静默开一个空会话会让用户以为
 	// 上下文接上了，而且这条新会话会顶掉「最近一条」，令之后切回 TUI 的 --continue 也接错。
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
+	observedAgentNativeSessionId?: string;
+	// 连接完成前任务可能已停止或重开；拒绝旧连接注册和迟到事件。
+	isRuntimeSessionIncarnationCurrent?: () => boolean;
 	env?: Record<string, string | undefined>;
 }
 
@@ -104,7 +107,8 @@ interface AcpTaskConnectionRecord extends AcpTaskConnection {
 
 export class AcpClientConnectionRuntime {
 	private readonly connectionsByTaskId = new Map<string, AcpTaskConnectionRecord>();
-	private readonly taskIdBySessionId = new Map<string, string>();
+	// 原生 sessionId 可以被多个连接加载；事件与清理必须以来源连接为所有权边界。
+	private readonly sessionIdByConnection = new Map<AcpClientConnection, string>();
 	// 正在跑 session/load 的 task。协议层分不出「历史重播」与「agent 此刻在产出」——两者都是
 	// agent_message_chunk / tool_call，唯一的区分事实就是「我们正处在 session/load 之中」。
 	// session/load 的 await 期间同步到达的每一条 update 都落在这个窗口里（omp 在返回响应前
@@ -160,27 +164,25 @@ export class AcpClientConnectionRuntime {
 
 		const connection = connectKanbanAcpClient(createAcpNdJsonStreamOverChildProcessStdio(child), {
 			handleSessionUpdate: (notification) => {
-				const taskId = this.taskIdBySessionId.get(notification.sessionId);
-				if (!taskId) {
+				if (input.isRuntimeSessionIncarnationCurrent?.() === false) return;
+				if (this.sessionIdByConnection.get(connection) !== notification.sessionId) {
 					// session/new 的响应还没回来就先到的通知（omp 对此有 50ms 的 bootstrap 竞态保护），
 					// 或者会话已经关闭。丢弃比崩掉整条连接好。
 					return;
 				}
-				this.handlers.onSessionUpdate(taskId, notification);
+				this.handlers.onSessionUpdate(input.taskId, notification);
 			},
 			handlePermissionRequest: async (request) => {
-				const taskId = this.taskIdBySessionId.get(request.sessionId);
-				if (!taskId) {
+				if (input.isRuntimeSessionIncarnationCurrent?.() === false) return { outcome: { outcome: "cancelled" } };
+				if (this.sessionIdByConnection.get(connection) !== request.sessionId) {
 					return { outcome: { outcome: "cancelled" } };
 				}
-				return await this.handlers.onPermissionRequest(taskId, request);
+				return await this.handlers.onPermissionRequest(input.taskId, request);
 			},
 			handleElicitationRequest: async (request) => {
-				const taskId = this.resolveTaskIdForElicitation(request, input.taskId);
-				if (!taskId) {
-					return { action: "cancel" };
-				}
-				return await this.handlers.onElicitationRequest(taskId, request);
+				if (input.isRuntimeSessionIncarnationCurrent?.() === false) return { action: "cancel" };
+				// elicitation 可在会话创建前到达，始终归属于发起这条连接的任务。
+				return await this.handlers.onElicitationRequest(input.taskId, request);
 			},
 		});
 
@@ -192,6 +194,7 @@ export class AcpClientConnectionRuntime {
 			const newSessionResponse = await this.openAgentSession(connection, {
 				cwd: input.cwd,
 				initializeResponse,
+				observedAgentNativeSessionId: input.observedAgentNativeSessionId,
 				agentId: input.agentId,
 				resumePriorAgentConversationWithoutResendingPrompt: Boolean(
 					input.resumePriorAgentConversationWithoutResendingPrompt,
@@ -224,7 +227,13 @@ export class AcpClientConnectionRuntime {
 					});
 				},
 				close: () => {
-					this.disposeTaskConnection(input.taskId);
+					if (this.connectionsByTaskId.get(input.taskId) === record) {
+						this.disposeTaskConnection(input.taskId);
+					} else {
+						this.sessionIdByConnection.delete(connection);
+						connection.close();
+						terminateAcpChildProcessTree(child, { force: false });
+					}
 				},
 				disposedByKanban: false,
 			};
@@ -246,11 +255,15 @@ export class AcpClientConnectionRuntime {
 				}
 			}
 
+			if (input.isRuntimeSessionIncarnationCurrent?.() === false) {
+				throw new Error("ACP connection startup belongs to a stopped or superseded runtime session.");
+			}
 			this.connectionsByTaskId.set(input.taskId, record);
-			this.taskIdBySessionId.set(newSessionResponse.sessionId, input.taskId);
+			this.sessionIdByConnection.set(connection, newSessionResponse.sessionId);
 
 			child.on("exit", (exitCode, terminationSignal) => {
 				this.forgetTaskConnection(record);
+				if (input.isRuntimeSessionIncarnationCurrent?.() === false) return;
 				this.handlers.onConnectionClosed(input.taskId, {
 					exitCode,
 					terminationSignal,
@@ -261,8 +274,9 @@ export class AcpClientConnectionRuntime {
 
 			return record;
 		} catch (error) {
+			this.sessionIdByConnection.delete(connection);
 			connection.close();
-			child.kill("SIGTERM");
+			terminateAcpChildProcessTree(child, { force: false });
 			throw enrichAcpStartupError(error, spawnCommand.binary, stderrDiagnostics);
 		}
 	}
@@ -275,11 +289,14 @@ export class AcpClientConnectionRuntime {
 			agentId: RuntimeAgentId;
 			taskId: string;
 			resumePriorAgentConversationWithoutResendingPrompt: boolean;
+			observedAgentNativeSessionId?: string;
 		},
 	) {
 		try {
 			if (input.resumePriorAgentConversationWithoutResendingPrompt) {
-				return await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
+				return input.observedAgentNativeSessionId
+					? await this.loadAgentSessionById(connection, input, input.observedAgentNativeSessionId)
+					: await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
 			}
 			return await connection.agent.request(ACP_AGENT_METHODS.session_new, {
 				cwd: input.cwd,
@@ -298,7 +315,9 @@ export class AcpClientConnectionRuntime {
 			}
 			await connection.agent.request(ACP_AGENT_METHODS.authenticate, { methodId: authMethodId });
 			if (input.resumePriorAgentConversationWithoutResendingPrompt) {
-				return await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
+				return input.observedAgentNativeSessionId
+					? await this.loadAgentSessionById(connection, input, input.observedAgentNativeSessionId)
+					: await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
 			}
 			return await connection.agent.request(ACP_AGENT_METHODS.session_new, {
 				cwd: input.cwd,
@@ -351,49 +370,41 @@ export class AcpClientConnectionRuntime {
 					"Start a fresh session instead.",
 			);
 		}
-		// sessionId → taskId 必须**在** session/load 之前登记：重播的 update 在该请求 await 期间就已到达，
-		// 而 handleSessionUpdate 靠这张表反查 taskId，晚登记会让整段历史被静默丢弃（走 taskId 未知的丢弃分支）。
-		// 正常路径上这一行稍后会被 startTaskConnection 用同样的键值再写一次，是幂等的。
-		this.taskIdBySessionId.set(mostRecentSession.sessionId, input.taskId);
+		return await this.loadAgentSessionById(connection, input, mostRecentSession.sessionId);
+	}
+
+	private async loadAgentSessionById(
+		connection: AcpClientConnection,
+		input: { cwd: string; taskId: string },
+		sessionId: string,
+	) {
+		// 重播 update 在 session/load 返回前到达，所以提前登记该连接的会话身份。
+		// 以连接为键，失败回滚不会删掉另一条加载相同原生 sessionId 的连接。
+		this.sessionIdByConnection.set(connection, sessionId);
 		this.replayingHistoryTaskIds.add(input.taskId);
 		try {
 			await connection.agent.request(ACP_AGENT_METHODS.session_load, {
-				sessionId: mostRecentSession.sessionId,
+				sessionId,
 				cwd: input.cwd,
 				mcpServers: [],
 			});
 		} catch (error) {
-			// 加载失败 ⇒ 这条连接不会被登记，提前写进去的反查项必须撤掉，否则会一直挂着一条
-			// 指向不存在连接的映射，把后续同 sessionId 的通知错投给这个 task。
-			this.taskIdBySessionId.delete(mostRecentSession.sessionId);
+			this.sessionIdByConnection.delete(connection);
 			throw error;
 		} finally {
 			this.replayingHistoryTaskIds.delete(input.taskId);
 		}
-		return { sessionId: mostRecentSession.sessionId };
-	}
-
-	// elicitation 的作用域可能是 session 级也可能是 request 级；session 级带 sessionId，
-	// request 级（连接刚建立、还没有会话时）落回发起本次启动的任务。
-	private resolveTaskIdForElicitation(
-		request: AcpCreateElicitationRequest,
-		fallbackTaskId: string,
-	): string | undefined {
-		const sessionId = (request as { sessionId?: unknown }).sessionId;
-		if (typeof sessionId === "string") {
-			return this.taskIdBySessionId.get(sessionId) ?? fallbackTaskId;
-		}
-		return fallbackTaskId;
+		return { sessionId };
 	}
 
 	// 只在账本仍指向同一条连接时才摘除：任务被 stop 之后立刻重启的话，旧子进程迟到的 exit 事件
 	// 不能把已经登记好的新连接从账本里抹掉。
 	private forgetTaskConnection(record: AcpTaskConnectionRecord): void {
+		this.sessionIdByConnection.delete(record.connection);
 		if (this.connectionsByTaskId.get(record.taskId) !== record) {
 			return;
 		}
 		this.connectionsByTaskId.delete(record.taskId);
-		this.taskIdBySessionId.delete(record.sessionId);
 	}
 
 	disposeTaskConnection(taskId: string): void {

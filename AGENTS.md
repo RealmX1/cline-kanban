@@ -96,6 +96,7 @@ web-ui：
 | `docs/agent-session-fork-prompt-cache-measurements.md` | 五家 harness 的 fork prompt cache 实测（谁能命中、遥测陷阱、复现成本） |
 | `docs/terminal-io.md` | output-reactions、终端 visibility 协议、PTY/argv 特殊字符安全 |
 | `docs/agent-harness-kimi.md` / `docs/agent-harness-omp-acp.md` | Kimi 与 oh-my-pi(ACP) 接入坑 |
+| `docs/post-mortems/native-session-identity-rewind-resume-2026-09-24.md` | Rewind 原生 ID 追踪、Codex 配置层丢 hook、Kimi/OMP 恢复与跨重启验证 |
 | `docs/runbooks/` | 跨层改动 runbook（summary 字段/设置开关、agent CLI 能力探测） |
 | `docs/adr/` / `docs/post-mortems/` | 决策记录与事故复盘 |
 | `.plan/docs/` | 活跃计划与大型重构历史（非上手必读） |

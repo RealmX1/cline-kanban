@@ -122,8 +122,7 @@ export type RuntimeTerminalAgentModelSelectionAgentId = z.infer<typeof runtimeTe
 // 哪些 terminal agent 的历史会话能被按 session id 索引并续接/分叉。
 //
 // 这与「有没有模型选择器」是两件互不蕴含的事，曾经共用一个枚举，导致「给某个 agent 加模型选择器」会
-// 顺带宣称它的会话可以按 id 恢复。kimi 正是这种情况：它有 `-m/--model`，但只支持 `--continue`，
-// 没有 `-S/--session <id>` 通道，所以它进模型选择枚举、不进这个枚举。
+// 顺带开放历史会话播种。Kimi / OMP 的本任务按 ID 恢复由独立契约声明，不进入此历史选择枚举。
 export const runtimeResumableAgentSessionSourceAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
 export type RuntimeResumableAgentSessionSourceAgentId = z.infer<typeof runtimeResumableAgentSessionSourceAgentIdSchema>;
 export const runtimeTaskAgentSessionInitializationReuseModeSchema = z.enum([
@@ -133,6 +132,24 @@ export const runtimeTaskAgentSessionInitializationReuseModeSchema = z.enum([
 export type RuntimeTaskAgentSessionInitializationReuseMode = z.infer<
 	typeof runtimeTaskAgentSessionInitializationReuseModeSchema
 >;
+// 本任务重启寻址与历史播种分开：Kimi / OMP 支持前者，不因此开放历史选择器。
+export const runtimeObservedAgentNativeConversationSessionResumeAddressingSchema = z.object({
+	sourceAgentId: z.enum(["claude", "codex", "cursor", "kimi", "omp"]),
+	sourceSessionId: z
+		.string()
+		.trim()
+		.min(1)
+		.refine(
+			(id) =>
+				!id.startsWith("-") &&
+				Array.from(id).every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127),
+		),
+	sourceSessionReuseMode: z.literal("resume_existing_session"),
+});
+export type RuntimeObservedAgentNativeConversationSessionResumeAddressing = z.infer<
+	typeof runtimeObservedAgentNativeConversationSessionResumeAddressingSchema
+>;
+
 export const runtimeTaskAgentSessionInitializationSchema = z
 	.object({
 		sourceAgentId: runtimeResumableAgentSessionSourceAgentIdSchema,
@@ -3401,7 +3418,12 @@ export const runtimeGitRefsResponseSchema = z.object({
 });
 export type RuntimeGitRefsResponse = z.infer<typeof runtimeGitRefsResponseSchema>;
 
-export const runtimeHookEventSchema = z.enum(["to_review", "to_in_progress", "activity"]);
+export const runtimeHookEventSchema = z.enum([
+	"to_review",
+	"to_in_progress",
+	"activity",
+	"agent_conversation_session_identity_observed",
+]);
 export type RuntimeHookEvent = z.infer<typeof runtimeHookEventSchema>;
 
 // Canonical schema source:

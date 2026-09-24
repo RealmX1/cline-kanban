@@ -52,7 +52,12 @@ export {
 	startCodexSessionWatcher,
 } from "./hook-events/codex-hook-events";
 
-const VALID_EVENTS = new Set<RuntimeHookEvent>(["to_review", "to_in_progress", "activity"]);
+const VALID_EVENTS = new Set<RuntimeHookEvent>([
+	"to_review",
+	"to_in_progress",
+	"activity",
+	"agent_conversation_session_identity_observed",
+]);
 
 interface HooksIngestArgs {
 	notificationCandidateId?: string;
@@ -1100,7 +1105,11 @@ export function registerHooksCommand(program: Command): void {
 	hooks
 		.command("ingest [payload]")
 		.description("Ingest hook event into Kanban runtime.")
-		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.requiredOption(
+			"--event <event>",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			parseHookEvent,
+		)
 		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
@@ -1121,7 +1130,11 @@ export function registerHooksCommand(program: Command): void {
 	hooks
 		.command("notify [payload]")
 		.description("Best-effort hook ingest that never throws.")
-		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.requiredOption(
+			"--event <event>",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			parseHookEvent,
+		)
 		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
@@ -1149,7 +1162,11 @@ export function registerHooksCommand(program: Command): void {
 	hooks
 		.command("codex-hook [payload]")
 		.description("Codex hook entrypoint.")
-		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.requiredOption(
+			"--event <event>",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			parseHookEvent,
+		)
 		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")

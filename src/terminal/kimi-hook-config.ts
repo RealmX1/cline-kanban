@@ -39,6 +39,7 @@ const KIMI_SEEDED_HOME_DIRECTORY_MODE = 0o700;
 // kimi 的 Claude 风格 hook 事件 → Kanban 状态转换事件。镜像 claudeAdapter 的事件表，
 // 落到 kimi 暴露的事件集合（无 Notification / SubagentStop / matcher）。
 const KIMI_HOOK_EVENT_MAP: ReadonlyArray<{ kimiEvent: string; kanbanEvent: RuntimeHookEvent }> = [
+	{ kimiEvent: "SessionStart", kanbanEvent: "agent_conversation_session_identity_observed" },
 	{ kimiEvent: "UserPromptSubmit", kanbanEvent: "to_in_progress" },
 	{ kimiEvent: "PreToolUse", kanbanEvent: "activity" },
 	{ kimiEvent: "PostToolUse", kanbanEvent: "to_in_progress" },

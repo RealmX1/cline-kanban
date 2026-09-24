@@ -27,7 +27,7 @@ export function extractAgentNativeConversationSessionIdentityFromHookPayload(inp
 	observedAt?: number;
 }): RuntimeAgentNativeConversationSessionIdentity | undefined {
 	const { payload, sourceAgentId } = input;
-	if (!payload || !sourceAgentId) {
+	if (!payload || !sourceAgentId || readStringField(payload, "agent_id") || readStringField(payload, "agentId")) {
 		return undefined;
 	}
 	const nativeSessionId = (readStringField(payload, "session_id") ?? readStringField(payload, "sessionId"))?.trim();

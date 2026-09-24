@@ -1503,3 +1503,78 @@ it("通知已处理的重复 hook 仍补存身份，但不再次转换状态", a
 	expect(persistIdentity).toHaveBeenCalledOnce();
 	expect(manager.transitionToReview).not.toHaveBeenCalled();
 });
+
+it("SessionStart 身份事件不解除恢复守卫、不推进时间戳或通知", async () => {
+	const manager = {
+		getSummary: vi.fn(() => createSummary()),
+		applyAgentNativeConversationSessionIdentity: vi.fn(),
+		applyHookActivity: vi.fn(),
+		transitionToRunning: vi.fn(),
+		recordAgentLifecycleHookConversationProgress: vi.fn(),
+		markRestoredAgentConversationContinued: vi.fn(),
+	} as unknown as TerminalSessionManager;
+	const notify = vi.fn();
+	const api = createHooksApi({
+		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: vi.fn(async () => false),
+		getWorkspacePathById: () => "/tmp/repo",
+		ensureTerminalManagerForWorkspace: async () => manager,
+		broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+		broadcastTaskReadyForReview: notify,
+	});
+	expect(
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "agent_conversation_session_identity_observed",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "claude",
+				nativeSessionId: "session-new",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		}),
+	).toEqual({ ok: true });
+	expect(manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledOnce();
+	expect(manager.applyHookActivity).not.toHaveBeenCalled();
+	expect(manager.transitionToRunning).not.toHaveBeenCalled();
+	expect(manager.recordAgentLifecycleHookConversationProgress).not.toHaveBeenCalled();
+	expect(notify).not.toHaveBeenCalled();
+});
+
+it("身份落盘失败如实返回错误且保留恢复拦截指令", async () => {
+	const manager = {
+		getSummary: vi.fn(() => createSummary()),
+		applyAgentNativeConversationSessionIdentity: vi.fn(),
+		isRestorationHarnessGeneratedTaskNotificationInterceptionActive: () => true,
+		applyHookActivity: vi.fn(),
+		disarmRestorationContinuationGuard: vi.fn(),
+	} as unknown as TerminalSessionManager;
+	const api = createHooksApi({
+		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: async () => {
+			throw new Error("identity storage unavailable");
+		},
+		getWorkspacePathById: () => "/tmp/repo",
+		ensureTerminalManagerForWorkspace: async () => manager,
+		broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+		broadcastTaskReadyForReview: vi.fn(),
+	});
+	const response = await api.ingest({
+		taskId: "task-1",
+		workspaceId: "workspace-1",
+		event: "to_in_progress",
+		metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "claude",
+			nativeSessionId: "new-session",
+			transcriptPath: null,
+			observedAt: 1,
+		},
+	});
+	expect(response).toMatchObject({
+		ok: false,
+		error: "identity storage unavailable",
+		harnessUserPromptProcessingDirective: { processingDecision: "block_and_defer_until_explicit_user_input" },
+	});
+	expect(manager.applyHookActivity).not.toHaveBeenCalled();
+	expect(manager.disarmRestorationContinuationGuard).not.toHaveBeenCalled();
+});
