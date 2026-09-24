@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 
+import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import {
 	type RuntimeBoardColumnId,
 	type RuntimeBoardData,
@@ -818,6 +819,48 @@ export async function savePersistedWorkspaceSessionsById(
 			{ lock: null },
 		);
 		return nextRevision;
+	});
+}
+
+// 身份是重启寻址所需的会话事实，不能等待浏览器保存 board 或正常关机才落盘。
+export async function persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+	workspaceId: string,
+	taskId: string,
+	readCurrentSessionSummary: () => RuntimeTaskSessionSummary | null,
+): Promise<boolean> {
+	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
+		const sessions = await readWorkspaceSessions(workspaceId);
+		const currentMeta = await readWorkspaceMeta(workspaceId);
+		// 取锁和读盘期间可能又收到 hook；此处才取当前 summary，不能保存排队前的旧快照。
+		const currentSummary = readCurrentSessionSummary();
+		if (!currentSummary || currentSummary.taskId !== taskId) {
+			throw new Error(`Session "${taskId}" is no longer available in workspace "${workspaceId}".`);
+		}
+		const parsedSummary = runtimeTaskSessionSummarySchema.parse(currentSummary);
+		const identity = parsedSummary.agentNativeConversationSessionIdentity;
+		if (!identity || identity.sourceAgentId !== parsedSummary.agentId) {
+			throw new Error(`Native conversation identity does not match session "${taskId}".`);
+		}
+		if (
+			isSameAgentNativeConversationSessionIdentity(
+				sessions[taskId]?.agentNativeConversationSessionIdentity,
+				identity,
+			)
+		) {
+			return false;
+		}
+		// 先使旧快照的 revision 失效，再替换 sessions。后一步失败允许 revision 空增，重试仍会补存身份。
+		await lockedFileSystem.writeJsonFileAtomic(
+			getWorkspaceMetaPath(workspaceId),
+			{ revision: currentMeta.revision + 1, updatedAt: Date.now() } satisfies WorkspaceStateMeta,
+			{ lock: null },
+		);
+		await lockedFileSystem.writeJsonFileAtomic(
+			getWorkspaceSessionsPath(workspaceId),
+			{ ...sessions, [taskId]: parsedSummary },
+			{ lock: null },
+		);
+		return true;
 	});
 }
 
