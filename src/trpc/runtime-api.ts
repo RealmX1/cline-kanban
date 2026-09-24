@@ -5,7 +5,7 @@
 
 import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { TRPCError } from "@trpc/server";
 import type { AcpTaskSessionService } from "../acp-client-session/acp-task-session-service";
 import { listAvailableAgentSessions } from "../agent-session-history/available-agent-session-index";
@@ -758,6 +758,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				if (resolvedAgentSessionTransport.effectiveSessionTransport === "acp_stdio_subprocess") {
 					startFailurePhase = "start_acp_runtime_session";
 					const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+					const previousNativeIdentity =
+						acpTaskSessionService.getSummary(body.taskId)?.agentNativeConversationSessionIdentity ??
+						terminalManager.getSummary(body.taskId)?.agentNativeConversationSessionIdentity;
+					const sharedDirectorySessions = [
+						...terminalManager.listSummaries(),
+						...acpTaskSessionService.listSummaries(),
+					]
+						.filter(
+							(summary) =>
+								summary.taskId !== body.taskId &&
+								summary.workspacePath &&
+								resolve(summary.workspacePath) === resolve(taskCwd),
+						)
+						.map((summary) => ({
+							taskConversationSessionId: summary.taskId,
+							agentId: summary.agentId,
+							taskConversationSessionRole:
+								summary.taskConversationSessionMetadata?.taskConversationSessionRole ?? null,
+						}));
 					const acpSummary = await acpTaskSessionService.startTaskSession({
 						taskId: body.taskId,
 						agentId: effectiveAgentId,
@@ -770,8 +789,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							scopedRuntimeConfig.agentAutonomousModeEnabled,
 						),
 						startInPlanMode: body.startInPlanMode,
-						resumePriorAgentConversationWithoutResendingPrompt:
-							body.resumePriorAgentConversationWithoutResendingPrompt,
+						resumePriorAgentConversationWithoutResendingPrompt: Boolean(
+							body.resumeFromTrash || body.resumePriorAgentConversationWithoutResendingPrompt,
+						),
+						observedAgentNativeConversationSessionIdentity: previousNativeIdentity,
+						taskConversationSessionsSharingExecutionWorkingDirectory: sharedDirectorySessions,
 						taskConversationMode: body.taskConversationMode,
 					});
 					latestStartedSummaryForDiagnostics = acpSummary;
@@ -815,6 +837,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							// Best effort checkpointing only.
 						}
 					}
+					// 协议返回的原生 ID 必须在启动响应前落盘，关浏览器不应影响下次寻址。
+					await mutateWorkspaceState(workspaceScope.workspacePath, (state) => ({
+						board: state.board,
+						sessions: { ...state.sessions, [body.taskId]: nextAcpSummary },
+						value: true,
+					}));
 					latestStartedSummaryForDiagnostics = nextAcpSummary;
 					recordStartDiagnostic("response_ready", "response_ready");
 					return { ok: true, summary: nextAcpSummary };
@@ -2222,6 +2250,15 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				// 「ACP 账本里有没有这条会话」分派的——留着条目，切回 TUI 的会话就会继续被 ACP 劫持这两个端点，
 				// 聊天面板永远读 ACP 的旧消息表。这一步就是那条既有 bug 的根治点。
 				if (body.targetSessionTransport !== "acp_stdio_subprocess") {
+					// 先移交身份再摘除 ACP 账本；PTY 的恢复解析器只读自己的 summary。
+					if (acpStoppedSummary?.agentNativeConversationSessionIdentity) {
+						if (!terminalManager.getSummary(body.taskId))
+							terminalManager.hydrateFromRecord({ [body.taskId]: acpStoppedSummary });
+						terminalManager.applyAgentNativeConversationSessionIdentity(
+							body.taskId,
+							acpStoppedSummary.agentNativeConversationSessionIdentity,
+						);
+					}
 					acpTaskSessionService.discardTaskSessionLedgerEntry(body.taskId);
 				}
 

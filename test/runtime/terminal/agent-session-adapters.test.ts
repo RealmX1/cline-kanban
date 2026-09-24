@@ -2117,3 +2117,224 @@ describe("Kimi 延迟首发文本", () => {
 		expect(launch.deferredStartupPromptText).toBe(resumeFromTrash ? undefined : "第一行\n第二行");
 	});
 });
+
+// 回归：配置不能分别落到 Codex 根命令与 resume 子命令的独立配置层。
+describe("原生会话身份恢复回归", () => {
+	it.each(["resume", "fork"])("Codex %s 的全部配置保持在根参数区", async (subcommand) => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "identity",
+			agentId: "codex",
+			args: [
+				"--config",
+				'model="before"',
+				subcommand,
+				"6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+				"-c",
+				'model="after"',
+			],
+			cwd: "/tmp",
+			prompt: "literal resume and fork",
+			workspaceId: "workspace-1",
+		});
+		const boundary = launch.args.indexOf(subcommand);
+		expect(boundary).toBeGreaterThan(0);
+		expect(launch.args.slice(boundary)).not.toContain("-c");
+		expect(launch.args.slice(boundary)).not.toContain("--config");
+		expect(getCodexConfigOverrideValues(launch.args, "model")).toEqual(['"before"', '"after"']);
+		expect(getCodexConfigOverrideValues(launch.args, "hooks.SessionStart")[0]).toContain(
+			"agent_conversation_session_identity_observed",
+		);
+	});
+	it.each(["kimi", "omp"] as const)("%s 绑定优先于 continue，恢复不重发 prompt 或 plan", async (agentId) => {
+		setupTempHome();
+		const sessionId =
+			agentId === "kimi" ? "session_6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c" : "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c";
+		const launch = await prepareAgentLaunch({
+			taskId: "identity",
+			agentId,
+			args: ["--continue"],
+			cwd: "/tmp",
+			prompt: "must not replay",
+			startInPlanMode: true,
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: agentId,
+				sourceSessionId: sessionId,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.args).not.toContain("--plan");
+		expect(launch.args).not.toContain("must not replay");
+		expect(launch.args[launch.args.indexOf(agentId === "kimi" ? "--session" : "--resume") + 1]).toBe(sessionId);
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+		expect(launch.deferredStartupPromptText).toBeUndefined();
+	});
+});
+
+it("Codex 已绑定身份压过配置的旧 resume ID，并保留同名字面模型值", async () => {
+	setupTempHome();
+	const id = "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c";
+	const launch = await prepareAgentLaunch({
+		taskId: "identity",
+		agentId: "codex",
+		args: ["--model", "fork", "resume", "old-native-id", "--last"],
+		cwd: "/tmp",
+		prompt: "",
+		resumeFromTrash: true,
+		observedAgentNativeConversationSessionResumeAddressing: {
+			sourceAgentId: "codex",
+			sourceSessionId: id,
+			sourceSessionReuseMode: "resume_existing_session",
+		},
+	});
+	expect(launch.args).not.toContain("old-native-id");
+	expect(launch.args).not.toContain("--last");
+	expect(launch.args[launch.args.indexOf("--model") + 1]).toBe("fork");
+	expect(launch.args[launch.args.indexOf("resume") + 1]).toBe(id);
+});
+
+it.each(["claude", "codex", "kimi", "omp"] as const)("%s 已绑定身份拒绝被位置参数分隔符吞掉", async (agentId) => {
+	setupTempHome();
+	await expect(
+		prepareAgentLaunch({
+			taskId: "identity-argument-separator",
+			agentId,
+			args: ["--", "literal"],
+			cwd: "/tmp",
+			prompt: "",
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: agentId,
+				sourceSessionId: "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		}),
+	).rejects.toThrow("argument separator");
+});
+
+it.each(["claude", "codex"] as const)("%s 仅有本任务绑定也不重发开局 prompt 或 plan", async (agentId) => {
+	setupTempHome();
+	const launch = await prepareAgentLaunch({
+		taskId: "observed-resume",
+		agentId,
+		args: [],
+		cwd: "/tmp",
+		prompt: "must not replay",
+		startInPlanMode: true,
+		observedAgentNativeConversationSessionResumeAddressing: {
+			sourceAgentId: agentId,
+			sourceSessionId: "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+			sourceSessionReuseMode: "resume_existing_session",
+		},
+	});
+	expect(launch.args).not.toContain("must not replay");
+	expect(launch.args).not.toContain("plan");
+	expect(launch.deferredStartupPromptText).toBeUndefined();
+	expect(launch.resumesPriorAgentConversation).toBe(true);
+});
+
+it.each([
+	{
+		agentId: "codex",
+		args: ["--model", "fork", "resume", "old-native-id", "stale startup prompt"],
+		preserved: ["--model", "fork"],
+	},
+	{
+		agentId: "codex",
+		args: ["fork", "--model", "resume", "old-native-id", "stale startup prompt", "--all"],
+		preserved: ["--model", "resume"],
+	},
+	{
+		agentId: "claude",
+		args: ["--resume", "old-native-id", "stale startup prompt", "--append-system-prompt", "--continue"],
+		preserved: ["--append-system-prompt", "--continue"],
+	},
+	{
+		agentId: "claude",
+		args: ["--continue", "stale startup prompt", "--allowedTools", "Read", "Edit"],
+		preserved: ["--allowedTools", "Read", "Edit"],
+	},
+	{
+		agentId: "kimi",
+		args: ["--session", "old-native-id", "--prompt", "stale startup prompt", "--model", "--continue", "--plan"],
+		preserved: ["--model", "--continue"],
+	},
+	{ agentId: "kimi", args: ["-S=old-native-id", "-pstale startup prompt", "--yolo"], preserved: ["--yolo"] },
+	{
+		agentId: "omp",
+		args: ["--resume", "old-native-id", "stale startup prompt", "--append-system-prompt", "--continue"],
+		preserved: ["--append-system-prompt", "--continue"],
+	},
+	{
+		agentId: "omp",
+		args: ["--continue", "stale startup prompt", "--plan", "plan-model", "--approval-mode", "write"],
+		preserved: ["--plan", "plan-model", "--approval-mode", "write"],
+	},
+] as const)(
+	"$agentId 已绑定恢复移除已有开局输入并按本家语法保留参数值 ($args)",
+	async ({ agentId, args, preserved }) => {
+		setupTempHome();
+		const nativeSessionId = "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c";
+		const launch = await prepareAgentLaunch({
+			taskId: "observed-resume-existing-arguments",
+			agentId,
+			args: [...args],
+			cwd: "/tmp",
+			prompt: "must not replay",
+			startInPlanMode: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: agentId,
+				sourceSessionId: nativeSessionId,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(launch.args).not.toContain("old-native-id");
+		expect(launch.args.join("\n")).not.toContain("stale startup prompt");
+		expect(launch.args).not.toContain("must not replay");
+		expect(launch.args.join("\0")).toContain(preserved.join("\0"));
+		expect(launch.args).toContain(nativeSessionId);
+		expect(launch.deferredStartupPromptText).toBeUndefined();
+		if (agentId === "kimi") expect(launch.args).not.toContain("--plan");
+	},
+);
+
+it.each(["claude", "codex", "kimi", "omp"] as const)("%s 已绑定恢复拒绝歧义的未知选项值", async (agentId) => {
+	setupTempHome();
+	for (const unknownOptionValue of ["must preserve this value", "--continue"]) {
+		await expect(
+			prepareAgentLaunch({
+				taskId: "observed-resume-unknown-option",
+				agentId,
+				args: ["--future-option", unknownOptionValue],
+				cwd: "/tmp",
+				prompt: "",
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: agentId,
+					sourceSessionId: "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			}),
+		).rejects.toThrow("ambiguous value");
+	}
+});
+
+it.each(["--session", "--fork"])("OMP 已绑定恢复清理隐藏选择器 %s", async (selector) => {
+	setupTempHome();
+	const launch = await prepareAgentLaunch({
+		taskId: "observed-omp-resume-hidden-selector",
+		agentId: "omp",
+		args: [selector, "old-native-id", "stale startup prompt"],
+		cwd: "/tmp",
+		prompt: "",
+		observedAgentNativeConversationSessionResumeAddressing: {
+			sourceAgentId: "omp",
+			sourceSessionId: "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+			sourceSessionReuseMode: "resume_existing_session",
+		},
+	});
+	expect(launch.args).not.toContain(selector);
+	expect(launch.args).not.toContain("old-native-id");
+	expect(launch.args).not.toContain("stale startup prompt");
+});

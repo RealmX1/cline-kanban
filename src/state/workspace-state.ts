@@ -379,24 +379,35 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 // 「本来重启就能自愈」的中断变成永久损坏。
 //
 // 只在「persisted 不是空壳」时保留——两边都是空壳时留谁都一样，放行 incoming 免得把陈旧 updatedAt 钉住。
-function preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
 	incomingSessions: Record<string, RuntimeTaskSessionSummary>,
 ): Record<string, RuntimeTaskSessionSummary> {
 	let reconciledSessions = incomingSessions;
 	for (const [taskId, incomingSummary] of Object.entries(incomingSessions)) {
 		const persistedSummary = persistedSessions[taskId];
+		if (!persistedSummary) continue;
+		let reconciledSummary = incomingSummary;
 		if (
-			!persistedSummary ||
-			!isNeverStartedPlaceholderTaskSessionSummary(incomingSummary) ||
-			isNeverStartedPlaceholderTaskSessionSummary(persistedSummary)
+			isNeverStartedPlaceholderTaskSessionSummary(incomingSummary) &&
+			!isNeverStartedPlaceholderTaskSessionSummary(persistedSummary)
 		) {
-			continue;
+			reconciledSummary = persistedSummary;
+		} else {
+			// hook 已确认落盘后，延迟到达的整份 UI 快照不能撤销较新的原生身份。
+			const persistedIdentity = persistedSummary.agentNativeConversationSessionIdentity;
+			const incomingIdentity = incomingSummary.agentNativeConversationSessionIdentity;
+			if (
+				persistedIdentity &&
+				incomingSummary.agentId === persistedSummary.agentId &&
+				(!incomingIdentity || persistedIdentity.observedAt > incomingIdentity.observedAt)
+			) {
+				reconciledSummary = { ...incomingSummary, agentNativeConversationSessionIdentity: persistedIdentity };
+			}
 		}
-		if (reconciledSessions === incomingSessions) {
-			reconciledSessions = { ...incomingSessions };
-		}
-		reconciledSessions[taskId] = persistedSummary;
+		if (reconciledSummary === incomingSummary) continue;
+		if (reconciledSessions === incomingSessions) reconciledSessions = { ...incomingSessions };
+		reconciledSessions[taskId] = reconciledSummary;
 	}
 	return reconciledSessions;
 }
@@ -852,7 +863,7 @@ export async function saveWorkspaceState(
 		}
 		const persistedBoard = await readWorkspaceBoard(context.workspaceId);
 		const persistedSessions = await readWorkspaceSessions(context.workspaceId);
-		const sessions = preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+		const sessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			persistedSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				parsedPayload.board,
@@ -918,7 +929,7 @@ export async function mutateWorkspaceState<T>(
 			};
 		}
 
-		const nextSessions = preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+		const nextSessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			currentSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				mutation.board,
@@ -951,6 +962,38 @@ export async function mutateWorkspaceState<T>(
 			value: mutation.value,
 			state: toWorkspaceStateResponse(context, nextBoard, nextSessions, nextRevision),
 			saved: true,
+		};
+	});
+}
+
+// 在 workspace 锁内重新读取运行时身份，避免较早的异步 hook 把较新的绑定写回旧值。
+export async function persistObservedAgentNativeConversationIdentity(
+	workspacePath: string,
+	taskId: string,
+	getCurrentSummary: () => RuntimeTaskSessionSummary | null,
+): Promise<void> {
+	await mutateWorkspaceState(workspacePath, (state) => {
+		const current = getCurrentSummary();
+		const identity = current?.agentNativeConversationSessionIdentity;
+		if (!current || !identity) return { board: state.board, value: undefined, save: false };
+		const previous = state.sessions[taskId];
+		const savedIdentity = previous?.agentNativeConversationSessionIdentity;
+		if (
+			savedIdentity?.sourceAgentId === identity.sourceAgentId &&
+			(savedIdentity.observedAt > identity.observedAt ||
+				(savedIdentity.nativeSessionId === identity.nativeSessionId &&
+					savedIdentity.transcriptPath === identity.transcriptPath &&
+					savedIdentity.observedAt === identity.observedAt))
+		) {
+			return { board: state.board, value: undefined, save: false };
+		}
+		return {
+			board: state.board,
+			sessions: {
+				...state.sessions,
+				[taskId]: { ...(previous ?? current), agentNativeConversationSessionIdentity: identity },
+			},
+			value: undefined,
 		};
 	});
 }

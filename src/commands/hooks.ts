@@ -52,7 +52,12 @@ export {
 	startCodexSessionWatcher,
 } from "./hook-events/codex-hook-events";
 
-const VALID_EVENTS = new Set<RuntimeHookEvent>(["to_review", "to_in_progress", "activity"]);
+const VALID_EVENTS = new Set<RuntimeHookEvent>([
+	"to_review",
+	"to_in_progress",
+	"activity",
+	"agent_conversation_session_identity_observed",
+]);
 
 interface HooksIngestArgs {
 	notificationCandidateId?: string;
@@ -539,6 +544,12 @@ export async function deliverHookIngestWithRetry(
 		if (ingestResponse.ok === false) {
 			const businessError = new Error(ingestResponse.error ?? "Hook ingest failed");
 			await options.onFinalFailure?.({ attempts: attempt, failureKind: "rejected", error: businessError });
+			// 持久化失败不能丢掉恢复守卫的 block 指令，否则 Claude 会把失败当成 fail-open。
+			if (
+				ingestResponse.harnessUserPromptProcessingDirective?.processingDecision ===
+				"block_and_defer_until_explicit_user_input"
+			)
+				return ingestResponse;
 			throw businessError;
 		}
 		return ingestResponse;
@@ -618,9 +629,11 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngest
 			},
 		},
 	);
-	await recordNotificationSignalDecision(args.notificationCandidateId, "hook_transport_accepted", {
-		attempts: attempt,
-	});
+	if (response.ok) {
+		await recordNotificationSignalDecision(args.notificationCandidateId, "hook_transport_accepted", {
+			attempts: attempt,
+		});
+	}
 	return response;
 }
 
@@ -1090,7 +1103,11 @@ export function registerHooksCommand(program: Command): void {
 	hooks
 		.command("ingest [payload]")
 		.description("Ingest hook event into Kanban runtime.")
-		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.requiredOption(
+			"--event <event>",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			parseHookEvent,
+		)
 		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
@@ -1111,7 +1128,11 @@ export function registerHooksCommand(program: Command): void {
 	hooks
 		.command("notify [payload]")
 		.description("Best-effort hook ingest that never throws.")
-		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.requiredOption(
+			"--event <event>",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			parseHookEvent,
+		)
 		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
@@ -1139,7 +1160,11 @@ export function registerHooksCommand(program: Command): void {
 	hooks
 		.command("codex-hook [payload]")
 		.description("Codex hook entrypoint.")
-		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.requiredOption(
+			"--event <event>",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			parseHookEvent,
+		)
 		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")

@@ -748,9 +748,13 @@ function cloneSummary(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSum
 	};
 }
 
-function updateSummary(entry: SessionEntry, patch: Partial<RuntimeTaskSessionSummary>): RuntimeTaskSessionSummary {
+function updateSummary(
+	entry: SessionEntry,
+	patch: Partial<RuntimeTaskSessionSummary>,
+	summaryUpdatedAt = now(),
+): RuntimeTaskSessionSummary {
 	// 单一写侧漏斗：经 mergeSummaryWithFacets 派发（facet 写时主真相源，详见该函数）。
-	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: now() });
+	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: summaryUpdatedAt });
 	return entry.summary;
 }
 
@@ -4571,7 +4575,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
-	// N0a：终端 agent 原生会话身份 sidecar（hooks.ingest 每个事件都带，这里只在值变化时写）。
+	// N0a：身份及其最新确认水位独立于对话进展，同身份的新观察也必须写入以拒绝迟到的旧身份。
 	// 经 updateSummary 漏斗写入，不碰 facet 三元组；写入即向监听者与 summary 流广播（与 applyTurnCheckpoint 同形）。
 	applyAgentNativeConversationSessionIdentity(
 		taskId: string,
@@ -4581,12 +4585,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
+		const previousIdentity = entry.summary.agentNativeConversationSessionIdentity;
 		if (
-			isSameAgentNativeConversationSessionIdentity(entry.summary.agentNativeConversationSessionIdentity, identity)
+			previousIdentity?.sourceAgentId === identity.sourceAgentId &&
+			identity.observedAt < previousIdentity.observedAt
 		) {
 			return cloneSummary(entry.summary);
 		}
-		const summary = updateSummary(entry, { agentNativeConversationSessionIdentity: identity });
+		if (
+			isSameAgentNativeConversationSessionIdentity(previousIdentity, identity) &&
+			previousIdentity?.observedAt === identity.observedAt
+		) {
+			return cloneSummary(entry.summary);
+		}
+		const summary = updateSummary(
+			entry,
+			{ agentNativeConversationSessionIdentity: identity },
+			entry.summary.updatedAt,
+		);
 		if (entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));

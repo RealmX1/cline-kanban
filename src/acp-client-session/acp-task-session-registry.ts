@@ -1,6 +1,5 @@
 // 内存中的 ACP 会话账本：taskId → entry，外加 summary / message 两路监听器扇出。
-// 与 Cline 侧的 message-repository 对位，但没有「从磁盘水合历史」那一层——ACP 的
-// session/load 续跑不在本期范围，会话历史由 agent 自己持有。
+// 历史由 agent 持有，经 session/load 重播；原生身份随宿主 summary 持久化。
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	type AcpTaskMessage,
