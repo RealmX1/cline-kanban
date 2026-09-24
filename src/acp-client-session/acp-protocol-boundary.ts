@@ -16,6 +16,7 @@ import type {
 	RequestPermissionRequest,
 	RequestPermissionResponse,
 	SessionId,
+	SessionInfo,
 	SessionNotification,
 	SessionUpdate,
 	StopReason,
@@ -49,6 +50,7 @@ export type AcpPromptResponse = PromptResponse;
 export type AcpRequestPermissionRequest = RequestPermissionRequest;
 export type AcpRequestPermissionResponse = RequestPermissionResponse;
 export type AcpSessionId = SessionId;
+export type AcpSessionInfo = SessionInfo;
 export type AcpSessionNotification = SessionNotification;
 export type AcpSessionUpdate = SessionUpdate;
 export type AcpStopReason = StopReason;

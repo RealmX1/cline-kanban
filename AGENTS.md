@@ -54,6 +54,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **`lastSubstantiveOutputAt` 是「默认不推进、显式才推进」**：终端侧唯一防线是 `suppressSubstantiveOutputUntilContinues`（武装判据只读启动侧 `resumesPriorAgentConversation || resumeFromTrash || resumePriorAgentConversationWithoutResendingPrompt`，绝不用「此前是否产出过」反推；解除只认三处「用户真·继续」）；Cline/ACP 漏斗要推进必须显式 `withAgentSubstantiveOutputTimestamp`。全文同上。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。细节：`docs/architecture.md` 的 BoardCard 小节。
+- **隐式续跑的 cwd-latest 必须保持任务目录范围**：Codex `resume/fork --last` 的隔离配置放在子命令后；显式 ID 的跨目录复用保留。不能用「切换执行 cwd」代替「重新选会话」。原生回归、OMP 例外与后备方案见 `docs/runbooks/agent-conversation-resume-working-directory-isolation.md`。
 - **终端 agent 检测/启动别走交互 shell**（`zsh -i`、shell fallback 命令发现等）：重 shell init（conda/nvm）下每任务一次会冻结运行时。显式 shell 终端例外。
 - **headless 远端**（SSH+tunnel）没有 zenity/kdialog：folder picker 用手动路径兜底，别引桌面包。
 - Node 22 CI 挂起：先查活体子进程 / SDK-host 启动路径，别先假设测试慢。调查史：`.plan/docs/node22-ci-hanging-tests-investigation.md`。
