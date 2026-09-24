@@ -1,23 +1,27 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { resolveAgentConversationSessionResumeAddressing } from "../../src/core/agent-conversation-session-resume-addressing";
 import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { applySessionFacets, SESSION_SUMMARY_SCHEMA_VERSION } from "../../src/core/session-activity";
+import { lockedFileSystem } from "../../src/fs/locked-file-system";
 import type { WorkspaceStateConflictError } from "../../src/state/workspace-state";
 import {
 	getWorkspacesRootPath,
 	listWorkspaceIndexEntries,
+	loadPersistedWorkspaceStateById,
 	loadWorkspaceContext,
 	loadWorkspaceContextById,
 	loadWorkspaceState,
 	mutateWorkspaceState,
-	persistObservedAgentNativeConversationIdentity,
+	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 	removeWorkspaceIndexEntry,
 	saveWorkspaceState,
 } from "../../src/state/workspace-state";
 import { TerminalSessionManager } from "../../src/terminal/session-manager";
+import { createHooksApi } from "../../src/trpc/hooks-api";
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
@@ -629,6 +633,236 @@ describe.sequential("workspace-state integration", () => {
 	});
 });
 
+describe.sequential("原生会话身份的独立持久化", () => {
+	const nativeSessionIds = [
+		"aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+		"bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb",
+		"cccccccc-3333-4333-8333-cccccccccccc",
+	];
+	const sessionKeys = ["task-1", "task-conversation-session-fork", "task-conversation-session-scratch"];
+	function createNativeSummary(taskId: string, nativeSessionId: string): RuntimeTaskSessionSummary {
+		return {
+			...createSessionSummary(taskId),
+			agentId: "codex",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId,
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		};
+	}
+
+	it("无浏览器保存或正常关闭，hook 确认后重建 manager 仍按各自原生 ID 恢复", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const repo = createRepository(["native-identity-restart"]);
+			const context = await loadWorkspaceContext(repo.repositoryPath);
+			await saveWorkspaceState(repo.repositoryPath, { board: createBoard("identity"), sessions: {} });
+			const before = await loadPersistedWorkspaceStateById(context.workspaceId);
+			const manager = new TerminalSessionManager();
+			const restored = new TerminalSessionManager();
+			manager.hydrateFromRecord(
+				Object.fromEntries(
+					sessionKeys.map((key) => [
+						key,
+						{ ...createSessionSummary(key), agentId: "codex", workspacePath: repo.repositoryPath },
+					]),
+				),
+			);
+			const api = createHooksApi({
+				getWorkspacePathById: () => repo.repositoryPath,
+				ensureTerminalManagerForWorkspace: async () => manager,
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastTaskReadyForReview: vi.fn(),
+			});
+			try {
+				for (const [index, key] of sessionKeys.entries()) {
+					const previous = await loadPersistedWorkspaceStateById(context.workspaceId);
+					const identity = createNativeSummary(
+						key,
+						nativeSessionIds[index],
+					).agentNativeConversationSessionIdentity;
+					expect(
+						await api.ingest({
+							workspaceId: context.workspaceId,
+							taskId: key,
+							event: "activity",
+							agentNativeConversationSessionIdentity: identity ?? undefined,
+						}),
+					).toEqual({ ok: true });
+					const after = await loadPersistedWorkspaceStateById(context.workspaceId);
+					for (const [otherKey, value] of Object.entries(previous.sessions))
+						expect(after.sessions[otherKey]).toEqual(value);
+				}
+				const persisted = await loadPersistedWorkspaceStateById(context.workspaceId);
+				expect(persisted.board).toEqual(before.board);
+				expect(persisted.revision).toBe(before.revision + 3);
+				// 旧 manager 尚未关闭；这个新 manager 唯一的输入是磁盘记录。
+				restored.hydrateFromRecord(persisted.sessions);
+				for (const [index, key] of sessionKeys.entries()) {
+					const addressing = resolveAgentConversationSessionResumeAddressing({
+						resumesPriorAgentConversation: true,
+						launchAgentId: "codex",
+						observedAgentNativeConversationSessionIdentity:
+							restored.getSummary(key)?.agentNativeConversationSessionIdentity,
+						taskConversationSessionsSharingExecutionWorkingDirectory: sessionKeys
+							.filter((otherKey) => otherKey !== key)
+							.map((otherKey) => ({
+								taskConversationSessionId: otherKey,
+								agentId: "codex",
+								taskConversationSessionRole: "by_the_way" as const,
+							})),
+					});
+					expect(addressing).toMatchObject({
+						kind: "addressed_by_observed_agent_native_session_id",
+						taskAgentSessionInitialization: {
+							sourceSessionId: nativeSessionIds[index],
+							sourceSessionReuseMode: "resume_existing_session",
+						},
+					});
+				}
+				const summary = manager.getSummary(sessionKeys[1]);
+				if (!summary?.agentNativeConversationSessionIdentity) throw new Error("Expected captured identity");
+				await api.ingest({
+					workspaceId: context.workspaceId,
+					taskId: sessionKeys[1],
+					event: "activity",
+					agentNativeConversationSessionIdentity: {
+						...summary.agentNativeConversationSessionIdentity,
+						observedAt: 999,
+					},
+				});
+				expect((await loadPersistedWorkspaceStateById(context.workspaceId)).revision).toBe(persisted.revision);
+			} finally {
+				manager.dispose();
+				restored.dispose();
+			}
+		});
+	});
+
+	it.each(["lock", "meta.json", "sessions.json"])("%s 失败不确认，重复相同内存身份可补存", async (failurePoint) => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const repo = createRepository(["native-identity-failure"]);
+			const context = await loadWorkspaceContext(repo.repositoryPath);
+			await saveWorkspaceState(repo.repositoryPath, { board: createBoard("identity"), sessions: {} });
+			const before = await loadPersistedWorkspaceStateById(context.workspaceId);
+			const summary = createNativeSummary(sessionKeys[1], nativeSessionIds[1]);
+			const originalWrite = lockedFileSystem.writeJsonFileAtomic.bind(lockedFileSystem);
+			const failure =
+				failurePoint === "lock"
+					? vi.spyOn(lockedFileSystem, "withLock").mockRejectedValueOnce(new Error("injected failure"))
+					: vi.spyOn(lockedFileSystem, "writeJsonFileAtomic").mockImplementation(async (path, value, options) => {
+							if (path.endsWith(failurePoint)) throw new Error("injected failure");
+							return originalWrite(path, value, options);
+						});
+			try {
+				await expect(
+					persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+						context.workspaceId,
+						summary.taskId,
+						() => summary,
+					),
+				).rejects.toThrow("injected failure");
+			} finally {
+				failure.mockRestore();
+			}
+			const afterFailure = await loadPersistedWorkspaceStateById(context.workspaceId);
+			expect(afterFailure.sessions).toEqual(before.sessions);
+			expect(afterFailure.revision).toBe(before.revision + (failurePoint === "sessions.json" ? 1 : 0));
+			expect(
+				await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+					context.workspaceId,
+					summary.taskId,
+					() => summary,
+				),
+			).toBe(true);
+			expect(
+				(await loadPersistedWorkspaceStateById(context.workspaceId)).sessions[summary.taskId]
+					.agentNativeConversationSessionIdentity,
+			).toEqual(summary.agentNativeConversationSessionIdentity);
+			await expect(
+				saveWorkspaceState(repo.repositoryPath, {
+					board: before.board,
+					sessions: before.sessions,
+					expectedRevision: before.revision,
+				}),
+			).rejects.toThrow("revision mismatch");
+		});
+	});
+
+	it("锁内读取最新身份，并发保存不同会话及看板不丢修改", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const repo = createRepository(["native-identity-concurrent"]);
+			const context = await loadWorkspaceContext(repo.repositoryPath);
+			await saveWorkspaceState(repo.repositoryPath, { board: createBoard("before"), sessions: {} });
+			let summary = createNativeSummary(sessionKeys[1], nativeSessionIds[0]);
+			let queuedPersistence: Promise<boolean> = Promise.resolve(false);
+			await lockedFileSystem.withLock(
+				{
+					type: "directory",
+					path: context.statePath,
+					lockfilePath: join(getWorkspacesRootPath(), `${context.workspaceId}.lock`),
+				},
+				async () => {
+					queuedPersistence = persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+						context.workspaceId,
+						sessionKeys[1],
+						() => summary,
+					);
+					// 排队前的身份不能捕获在写操作中。
+					summary = createNativeSummary(sessionKeys[1], nativeSessionIds[1]);
+				},
+			);
+			await Promise.all([
+				queuedPersistence,
+				persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(context.workspaceId, sessionKeys[2], () =>
+					createNativeSummary(sessionKeys[2], nativeSessionIds[2]),
+				),
+				mutateWorkspaceState(repo.repositoryPath, (state) => ({
+					board: {
+						...state.board,
+						columns: state.board.columns.map((column) => ({
+							...column,
+							cards: column.cards.map((card) => ({ ...card, title: "after" })),
+						})),
+					},
+					value: null,
+				})),
+			]);
+			const persisted = await loadPersistedWorkspaceStateById(context.workspaceId);
+			expect(persisted.sessions[sessionKeys[1]].agentNativeConversationSessionIdentity?.nativeSessionId).toBe(
+				nativeSessionIds[1],
+			);
+			expect(persisted.sessions[sessionKeys[2]].agentNativeConversationSessionIdentity?.nativeSessionId).toBe(
+				nativeSessionIds[2],
+			);
+			expect(persisted.board.columns[0].cards[0].title).toBe("after");
+		});
+	});
+
+	it("不存在或 agent 不匹配的会话不能建立绑定", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const context = await loadWorkspaceContext(createRepository(["native-identity-invalid"]).repositoryPath);
+			await expect(
+				persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+					context.workspaceId,
+					"missing",
+					() => null,
+				),
+			).rejects.toThrow("no longer available");
+			const wrongAgent = { ...createNativeSummary("task-1", nativeSessionIds[0]), agentId: "claude" as const };
+			await expect(
+				persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+					context.workspaceId,
+					"task-1",
+					() => wrongAgent,
+				),
+			).rejects.toThrow("does not match");
+			expect((await loadPersistedWorkspaceStateById(context.workspaceId)).sessions).toEqual({});
+		});
+	});
+});
+
 it("原生身份在无浏览器保存时落盘，重复观察幂等且不推进对话时间", async () => {
 	await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
 		const repository = createRepository(["identity-persistence"]);
@@ -650,25 +884,26 @@ it("原生身份在无浏览器保存时落盘，重复观察幂等且不推进�
 			agentNativeConversationSessionIdentity: identity,
 		};
 		await loadWorkspaceState(cwd);
-		await persistObservedAgentNativeConversationIdentity(cwd, "task-1", () => summary);
+		const { workspaceId } = await loadWorkspaceContext(cwd);
+		await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(workspaceId, "task-1", () => summary);
 		const first = await loadWorkspaceState(cwd);
 		expect(first.sessions["task-1"].agentNativeConversationSessionIdentity).toEqual(identity);
-		await persistObservedAgentNativeConversationIdentity(cwd, "task-1", () => summary);
+		await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(workspaceId, "task-1", () => summary);
 		expect((await loadWorkspaceState(cwd)).revision).toBe(first.revision);
 		summary.agentNativeConversationSessionIdentity = { ...identity, nativeSessionId: "native-B", observedAt: 3 };
-		await persistObservedAgentNativeConversationIdentity(cwd, "task-1", () => summary);
+		await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(workspaceId, "task-1", () => summary);
 		const restored = (await loadWorkspaceState(cwd)).sessions["task-1"];
 		expect(restored.agentNativeConversationSessionIdentity?.nativeSessionId).toBe("native-B");
 		expect(restored.lastOutputAt).toBe(2);
 		const confirmedIdentity = { ...identity, nativeSessionId: "native-B", observedAt: 5 };
 		summary.agentNativeConversationSessionIdentity = confirmedIdentity;
-		await persistObservedAgentNativeConversationIdentity(cwd, "task-1", () => summary);
+		await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(workspaceId, "task-1", () => summary);
 		const confirmedState = await loadWorkspaceState(cwd);
 		expect(confirmedState.sessions["task-1"]).toEqual({
 			...restored,
 			agentNativeConversationSessionIdentity: confirmedIdentity,
 		});
-		await persistObservedAgentNativeConversationIdentity(cwd, "task-1", () => summary);
+		await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(workspaceId, "task-1", () => summary);
 		expect((await loadWorkspaceState(cwd)).revision).toBe(confirmedState.revision);
 		// 过期的同身份确认和迟到的旧身份都不得回退已落盘水位。
 		for (const staleIdentity of [
@@ -676,7 +911,7 @@ it("原生身份在无浏览器保存时落盘，重复观察幂等且不推进�
 			{ ...identity, observedAt: 4 },
 		]) {
 			summary.agentNativeConversationSessionIdentity = staleIdentity;
-			await persistObservedAgentNativeConversationIdentity(cwd, "task-1", () => summary);
+			await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(workspaceId, "task-1", () => summary);
 			expect((await loadWorkspaceState(cwd)).sessions["task-1"].agentNativeConversationSessionIdentity).toEqual(
 				confirmedIdentity,
 			);

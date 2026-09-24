@@ -57,6 +57,25 @@ describe("deliverHookIngestWithRetry", () => {
 		expect(onFinalFailure).toHaveBeenCalledWith(expect.objectContaining({ attempts: 1, failureKind: "rejected" }));
 	});
 
+	it("持久化失败仍传递恢复 block 指令，同时记录投递失败", async () => {
+		const response: RuntimeHookIngestResponse = {
+			ok: false,
+			error: "identity persistence failed",
+			harnessUserPromptProcessingDirective: {
+				processingDecision: "block_and_defer_until_explicit_user_input",
+				userVisibleReason: "恢复中",
+			},
+		};
+		const onFinalFailure = vi.fn();
+		const delivered = await deliverHookIngestWithRetry(async () => response, { ...FAST_OPTIONS, onFinalFailure });
+		expect(delivered.ok).toBe(false);
+		expect(
+			JSON.parse(
+				serializeHarnessUserPromptProcessingDirective(delivered.harnessUserPromptProcessingDirective) ?? "null",
+			),
+		).toEqual({ decision: "block", reason: "恢复中" });
+		expect(onFinalFailure).toHaveBeenCalledWith(expect.objectContaining({ failureKind: "rejected" }));
+	});
 	it("returns on first-try success without invoking the final-failure callback", async () => {
 		const mutate = vi.fn((): Promise<RuntimeHookIngestResponse> => Promise.resolve({ ok: true }));
 		const onFinalFailure = vi.fn();

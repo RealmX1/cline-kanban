@@ -27,14 +27,17 @@ import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
 } from "../state/restoration-deferred-harness-generated-prompt-store";
-import { loadWorkspaceContextById, persistObservedAgentNativeConversationIdentity } from "../state/workspace-state";
+import {
+	loadWorkspaceContextById,
+	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
+} from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
 import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
 export interface CreateHooksApiDependencies {
-	persistObservedAgentNativeConversationIdentity?: typeof persistObservedAgentNativeConversationIdentity;
+	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId?: typeof persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId;
 	getWorkspacePathById: (workspaceId: string) => string | null;
 	ensureTerminalManagerForWorkspace: (workspaceId: string, repoPath: string) => Promise<TerminalSessionManager>;
 	broadcastRuntimeWorkspaceStateUpdated: (workspaceId: string, workspacePath: string) => Promise<void> | void;
@@ -133,8 +136,9 @@ async function recordAgentRaisedPendingUserDecisionFromHookIngest(input: {
 }
 
 export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcContext["hooksApi"] {
-	const persistNativeIdentity =
-		deps.persistObservedAgentNativeConversationIdentity ?? persistObservedAgentNativeConversationIdentity;
+	const persistNativeConversationIdentity =
+		deps.persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId ??
+		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId;
 	const checkpointCapture = deps.captureTaskTurnCheckpoint ?? captureTaskTurnCheckpoint;
 	const pendingUserDecisionRecord = deps.recordAgentRaisedPendingUserDecision ?? recordAgentRaisedPendingUserDecision;
 	const restorationHarnessPromptDefer =
@@ -161,7 +165,22 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						rawPayload: body,
 					});
 				await recordNotificationSignalDecision(notificationCandidateId, "hook_ingest_received", { event });
-
+				let hookNotificationAlreadyProcessed = false;
+				if (notificationCandidateId) {
+					const lifecycle = await getNotificationLifecycleArchive().get(notificationCandidateId);
+					if (
+						lifecycle &&
+						["eligible", "evaluating", "deferred", "published", "superseded"].includes(
+							lifecycle.candidate.notificationProcessingStatus,
+						)
+					) {
+						hookNotificationAlreadyProcessed = true;
+						if (!body.agentNativeConversationSessionIdentity) {
+							await recordNotificationSignalDecision(notificationCandidateId, "hook_retry_deduplicated", {});
+							return { ok: true } satisfies RuntimeHookIngestResponse;
+						}
+					}
+				}
 				const knownWorkspacePath = deps.getWorkspacePathById(workspaceId);
 				const workspaceContext = knownWorkspacePath ? null : await loadWorkspaceContextById(workspaceId);
 				const workspacePath = knownWorkspacePath ?? workspaceContext?.repoPath ?? null;
@@ -183,33 +202,37 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					} satisfies RuntimeHookIngestResponse;
 				}
 
-				// N0a：终端 agent 原生会话身份 sidecar。放在一切早退（恢复守卫拦截 / 转移闸）之前——
-				// 它是会话事实，与本次事件是否被拦截无关；manager 只在值变化时真正写 summary。
-				if (body.agentNativeConversationSessionIdentity) {
-					if (body.agentNativeConversationSessionIdentity.sourceAgentId !== summary.agentId) {
-						throw new Error("Native conversation identity does not match the task harness.");
-					}
-					manager.applyAgentNativeConversationSessionIdentity?.(
-						taskId,
-						body.agentNativeConversationSessionIdentity,
-					);
-				}
-
-				let identityPersistenceFailure: { ok: false; error: string } | undefined;
+				// 身份先落盘再确认 hook；内存已更新但保存失败时，下次仍须比较磁盘并重试。
+				let nativeIdentityPersistenceError: Error | null = null;
 				if (body.agentNativeConversationSessionIdentity) {
 					try {
-						await persistNativeIdentity(workspacePath, taskId, () => manager.getSummary(taskId));
+						if (body.agentNativeConversationSessionIdentity.sourceAgentId !== summary.agentId) {
+							throw new Error(`Native conversation identity does not match session "${taskId}".`);
+						}
+						manager.applyAgentNativeConversationSessionIdentity(
+							taskId,
+							body.agentNativeConversationSessionIdentity,
+						);
+						const saved = await persistNativeConversationIdentity(workspaceId, taskId, () =>
+							manager.getSummary(taskId),
+						);
+						if (saved) {
+							void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
+						}
 					} catch (error) {
-						identityPersistenceFailure = {
-							ok: false,
-							error: error instanceof Error ? error.message : String(error),
-						};
+						nativeIdentityPersistenceError = error instanceof Error ? error : new Error(String(error));
+						logAgentSessionRetentionWarning(
+							`native-conversation-identity-persist-failed workspaceId=${workspaceId} taskId=${taskId} reason=${nativeIdentityPersistenceError.message}`,
+						);
 					}
 				}
-				// 启动 / 切换只报告身份，不能冒充对话推进或解除恢复守卫。
-				if (event === "agent_conversation_session_identity_observed") {
-					return identityPersistenceFailure ?? ({ ok: true } satisfies RuntimeHookIngestResponse);
-				}
+				// 持久化失败也不能绕过恢复通知的 block；失败响应必须保留原有的 harness 指令。
+				const identityPersistenceResponse = nativeIdentityPersistenceError
+					? { ok: false, error: nativeIdentityPersistenceError.message }
+					: { ok: true };
+
+				// 身份确认不代表对话继续，不触碰恢复守卫、活动时间或通知。
+				if (event === "agent_conversation_session_identity_observed") return identityPersistenceResponse;
 
 				const normalizedHookEventName = body.metadata?.hookEventName?.trim().toLowerCase() ?? "";
 				const isClaudeUserPromptSubmit =
@@ -250,11 +273,11 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						logAgentSessionRetentionWarning(
 							`restoration-harness-prompt-persist-failed workspaceId=${workspaceId} taskId=${taskId} reason=${reason}`,
 						);
-						// Claude 对普通非 2 退出码会 fail-open。这里仍返回 ok:true + block directive，让 CLI 以
-						// 退出 0 的结构化 JSON 拦截已确认的 harness 通知；只牺牲这条无法安全持久化的通知，
+						// Claude 对普通非 2 退出码会 fail-open。身份落盘失败时可返回 ok:false，但仍携带 block；
+						// CLI 保留指令并退出 0，拦截已确认的 harness 通知；只牺牲这条无法安全持久化的通知，
 						// 绝不把它放进模型并意外启动新回合。
 						return {
-							...(identityPersistenceFailure ?? { ok: true }),
+							...identityPersistenceResponse,
 							harnessUserPromptProcessingDirective: {
 								processingDecision: "block_and_defer_until_explicit_user_input",
 								userVisibleReason:
@@ -263,7 +286,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						} satisfies RuntimeHookIngestResponse;
 					}
 					return {
-						...(identityPersistenceFailure ?? { ok: true }),
+						...identityPersistenceResponse,
 						harnessUserPromptProcessingDirective: {
 							processingDecision: "block_and_defer_until_explicit_user_input",
 							userVisibleReason: "Kanban 正在恢复旧会话；这条系统任务通知已暂存，不会自动启动新的 agent 回合。",
@@ -277,25 +300,19 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					// Claude 官方 UserPromptSubmit 输入必带 prompt。恢复窗口里若字段缺失，就无法证明它是
 					// 真人输入；只拦这条畸形事件并保留守卫，普通非空真人 prompt 继续走下方 allow 路径。
 					return {
-						...(identityPersistenceFailure ?? { ok: true }),
+						...identityPersistenceResponse,
 						harnessUserPromptProcessingDirective: {
 							processingDecision: "block_and_defer_until_explicit_user_input",
 							userVisibleReason: "Kanban 正在恢复旧会话；无法确认这条空输入是否来自用户，已保留恢复守卫。",
 						},
 					} satisfies RuntimeHookIngestResponse;
 				}
-				if (identityPersistenceFailure) return identityPersistenceFailure;
-				if (notificationCandidateId) {
-					const lifecycle = await getNotificationLifecycleArchive().get(notificationCandidateId);
-					if (
-						lifecycle &&
-						["eligible", "evaluating", "deferred", "published", "superseded"].includes(
-							lifecycle.candidate.notificationProcessingStatus,
-						)
-					) {
-						await recordNotificationSignalDecision(notificationCandidateId, "hook_retry_deduplicated", {});
-						return { ok: true } satisfies RuntimeHookIngestResponse;
-					}
+				if (nativeIdentityPersistenceError) {
+					throw nativeIdentityPersistenceError;
+				}
+				if (hookNotificationAlreadyProcessed) {
+					await recordNotificationSignalDecision(notificationCandidateId, "hook_retry_deduplicated", {});
+					return { ok: true } satisfies RuntimeHookIngestResponse;
 				}
 				// 恢复守卫的解除**必须**在 canTransitionTaskForHookEvent 之前完成。历史上它只挂在下方
 				// transitionToRunning(userInitiatedResume) 上，而那一步位于转移闸之后：会话一旦被任意一次

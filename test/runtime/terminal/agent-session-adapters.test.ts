@@ -2338,3 +2338,95 @@ it.each(["--session", "--fork"])("OMP 已绑定恢复清理隐藏选择器 %s", 
 	expect(launch.args).not.toContain("old-native-id");
 	expect(launch.args).not.toContain("stale startup prompt");
 });
+
+describe("Codex 当前任务目录最近会话隔离", () => {
+	it.each(["resume", "fork", "resume-without-prompt"] as const)(
+		"%s --last 关闭跨 worktree 扩展且不解析 prompt 为参数",
+		async (operation) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "cwd-isolation",
+				agentId: "codex",
+				args: [],
+				cwd: "/tmp/task-a",
+				prompt: "--all --enable worktrees",
+				resumeFromTrash: operation === "resume",
+				resumePriorAgentConversationWithoutResendingPrompt: operation === "resume-without-prompt",
+				forkLatestWorkingDirectorySession: operation === "fork",
+			});
+			expect(launch.args[launch.args.indexOf("-C") + 1]).toBe("/tmp/task-a");
+			expect(launch.args.indexOf("features.worktrees=false")).toBeLessThan(
+				launch.args.indexOf(operation === "fork" ? "fork" : "resume"),
+			);
+			expect(launch.args).toContain(operation === "fork" ? "fork" : "resume");
+			expect(launch.args).toContain("--last");
+			expect(launch.args.filter((arg) => arg === "-C")).toHaveLength(1);
+		},
+	);
+
+	it.each([
+		["--all"],
+		["--all=true"],
+		["--cd", "/tmp/task-b"],
+		["--cd=/tmp/task-b"],
+		["-C/tmp/task-b"],
+		["-C=/tmp/task-b"],
+		["-C", "/tmp/task-a", "-C", "/tmp/task-b"],
+		["-c", "features.worktrees=true"],
+		["--config=features.worktrees=true"],
+		["-cfeatures.worktrees=true"],
+		["-c=features.worktrees=true"],
+		["-c", 'features."worktrees" = true'],
+		["-c", "features={worktrees=true}"],
+		["--enable", "worktrees"],
+		["--enable=foo,worktrees"],
+		["-c", "features.worktrees=true", "-c", "features.worktrees=false"],
+		["--"],
+	])("拒绝破坏目录隔离的参数 %j", async (...args) => {
+		setupTempHome();
+		await expect(
+			prepareAgentLaunch({
+				taskId: "cwd-isolation",
+				agentId: "codex",
+				args,
+				cwd: "/tmp/task-a",
+				prompt: "",
+				resumeFromTrash: true,
+			}),
+		).rejects.toThrow("latest conversation in this task directory");
+	});
+
+	it.each([["-C/tmp/task-a"], ["--cd=/tmp/task-a"], ["-C", "."], ["-c", "features.worktrees=false"]])(
+		"允许等价目录和显式关闭扩展 %j",
+		async (...args) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "cwd-isolation",
+				agentId: "codex",
+				args,
+				cwd: "/tmp/task-a",
+				prompt: "",
+				forkLatestWorkingDirectorySession: true,
+			});
+			expect(launch.args.filter((arg) => arg === "-C")).toHaveLength(1);
+			expect(getCodexConfigOverrideValues(launch.args, "features.worktrees")).toContain("false");
+		},
+	);
+
+	it.each([undefined, "11111111-2222-3333-4444-555555555555"])(
+		"新会话 / 显式 ID %s 不关闭扩展",
+		async (parentSessionId) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "cwd-isolation",
+				agentId: "codex",
+				args: ["--cd", "/tmp/task-b"],
+				cwd: "/tmp/task-a",
+				prompt: "",
+				parentSessionId,
+			});
+			expect(getCodexConfigOverrideValues(launch.args, "features.worktrees")).toEqual([]);
+			expect(launch.args[launch.args.indexOf("--cd") + 1]).toBe("/tmp/task-b");
+		},
+	);
+});

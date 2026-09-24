@@ -510,7 +510,8 @@ function resolveHookIngestTimeoutMs(): number {
 // F2 核心：把「有界重试 + 传输/业务失败分流」抽成纯函数（注入 mutate + 回调），使单测能在不起真实
 // tRPC/网络的前提下锁住行为。分流判据天然干净：
 //   - mutate 成功 resolve（HTTP 200，body 带逻辑结果）→ 看 .ok。{ok:false} 是 daemon **可达**但逻辑拒绝
-//     （workspace/task not found 等），重试不会变 → 立即按 "rejected" 记录并抛，**不重试**。
+//     （workspace/task not found 等），立即按 "rejected" 记录并抛，**不重试**；携带恢复 block 时保留
+//     失败响应交给调用方序列化，不能让普通错误退出丢掉拦截指令。
 //   - mutate / withTimeout **抛出** → 传输层故障（超时 / daemon 不可达 / 锁争用）→ 可重试；耗尽后按
 //     "transport" 记录并抛。
 // onFinalFailure 仅在「最终放弃」时触发一次（中途重试不触发），由调用方接 F3 的丢投记录。
@@ -544,12 +545,13 @@ export async function deliverHookIngestWithRetry(
 		if (ingestResponse.ok === false) {
 			const businessError = new Error(ingestResponse.error ?? "Hook ingest failed");
 			await options.onFinalFailure?.({ attempts: attempt, failureKind: "rejected", error: businessError });
-			// 持久化失败不能丢掉恢复守卫的 block 指令，否则 Claude 会把失败当成 fail-open。
+			// 落盘失败必须上报，但不能丢掉恢复守卫的 block，让 Claude 因普通错误退出而 fail-open。
 			if (
 				ingestResponse.harnessUserPromptProcessingDirective?.processingDecision ===
 				"block_and_defer_until_explicit_user_input"
-			)
+			) {
 				return ingestResponse;
+			}
 			throw businessError;
 		}
 		return ingestResponse;
