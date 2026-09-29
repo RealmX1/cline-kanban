@@ -364,6 +364,12 @@ export const runtimeBoardCardSchema = z
 		prepFilePath: z.string().optional(),
 		createdAt: z.number(),
 		updatedAt: z.number(),
+		// Description（prompt 文本 + 附图）最后一次**内容真正变化**的时间，Backlog 列按它倒序排序、卡片上显示。
+		// 与 updatedAt 刻意分开：后者任何用户可见修改都推进（改标题 / agent / baseRef / 移列 / 评论……），
+		// 本字段只在建卡与 Description 内容变化时推进。老卡片没有该字段 ⇒ optional，读处经
+		// resolveTaskDescriptionLastUpdatedAt 回落到 updatedAt（见 backlog-task-description-last-updated-ordering.ts）。
+		// 必须声明在这里：z.object 默认剥掉未知键，不声明就会在服务端解析时被丢掉。
+		taskDescriptionLastUpdatedAt: z.number().optional(),
 	})
 	.transform(
 		({
