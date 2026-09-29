@@ -55,6 +55,30 @@ function isLikelyHumanClaudeUserRecord(record: Record<string, unknown>): boolean
 	return origin?.kind === "human" || content.trim().length > 0;
 }
 
+// 被拒绝的提问不算「已解决」：Kanban 或系统重启后 resume，原选择器已不在，而用户从未作答——这正是
+// 需要把问题重新摆到面板上的情形。拒绝的 tool_result 形如 is_error=true，记录级
+// toolUseResult="User rejected tool use"（正文为「The user doesn't want to proceed…」）。
+// 真正的作答、以及校验错误等其它失败，仍按已解决处理（后者不是「用户没答」）。
+function isClaudeUserQuestionToolResultRejectedWithoutAnswer(
+	record: Record<string, unknown>,
+	toolResultBlock: Record<string, unknown>,
+): boolean {
+	if (toolResultBlock.is_error !== true) {
+		return false;
+	}
+	if (record.toolUseResult === "User rejected tool use") {
+		return true;
+	}
+	const content = toolResultBlock.content;
+	const contentText =
+		typeof content === "string"
+			? content
+			: asContentBlocks(content)
+					.map((entry) => (typeof entry.text === "string" ? entry.text : ""))
+					.join("\n");
+	return contentText.includes("doesn't want to proceed with this tool use");
+}
+
 export function salvageLatestUnansweredClaudeUserQuestionFromTranscriptLines(
 	lines: readonly string[],
 ): SalvagedPendingUserDecisionFromTranscript | null {
@@ -94,7 +118,12 @@ export function salvageLatestUnansweredClaudeUserQuestionFromTranscriptLines(
 				}
 				continue;
 			}
-			if (latestCandidate && block.type === "tool_result" && block.tool_use_id === latestCandidate.toolUseId) {
+			if (
+				latestCandidate &&
+				block.type === "tool_result" &&
+				block.tool_use_id === latestCandidate.toolUseId &&
+				!isClaudeUserQuestionToolResultRejectedWithoutAnswer(record, block)
+			) {
 				latestCandidate.resolved = true;
 			}
 		}

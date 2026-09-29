@@ -796,7 +796,11 @@ describe("CardDetailView", () => {
 			expandButton.click();
 		});
 
-		const toolbarButtons = Array.from(container.querySelectorAll("button"));
+		// 只数用户看得见的按钮：聊天区（含待答问题 / 问答记录栏）在放大 diff 时是 display:none 但仍挂载，
+		// 不能按整个容器的按钮顺序断言。
+		const toolbarButtons = Array.from(container.querySelectorAll("button")).filter(
+			(button) => button.closest('[style*="display: none"]') === null,
+		);
 		expect(toolbarButtons[0]?.getAttribute("aria-label")).toBe("Collapse expanded diff view");
 		expect(toolbarButtons[1]?.textContent?.trim()).toBe("All Changes");
 		expect(toolbarButtons[2]?.textContent?.trim()).toBe("Last Turn");

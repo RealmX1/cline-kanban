@@ -90,13 +90,19 @@ export function useAgentRaisedPendingUserDecision(input: {
 				if (!response.ok) {
 					throw new Error(response.error ?? "无法提交待答问题");
 				}
-				if (!response.delivered) {
-					toast.warning("答案已保存；会话恢复后将自动重试投递。");
+				if (response.delivered) {
+					toast.success("答案已送达 agent，可在「问答记录」里回看。");
+				} else {
+					// 不自动重试：面板会回显已保存的答案与未送达原因，并提供「重试投递」。
+					toast.warning("答案已保存，但尚未送达 agent，原因见问题面板。");
 				}
 				await refresh();
 				return true;
 			} catch (error) {
 				toast.error(error instanceof Error ? error.message : String(error));
+				// 失败多半是面板手里的记录已不是最新（例如同一问题在终端里已答完）：重新拉取，让面板如实反映账本，
+				// 而不是停在一个再怎么点都不会成功的旧状态上。
+				await refresh();
 				return false;
 			} finally {
 				setIsSubmitting(false);
@@ -123,11 +129,12 @@ export function useAgentRaisedPendingUserDecision(input: {
 			return true;
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : String(error));
+			await refresh();
 			return false;
 		} finally {
 			setIsSubmitting(false);
 		}
-	}, [decision, input.workspaceId, queryIdentity]);
+	}, [decision, input.workspaceId, queryIdentity, refresh]);
 
 	return { decision, isLoading, isSubmitting, answer, dismiss };
 }

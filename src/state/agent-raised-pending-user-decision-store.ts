@@ -18,8 +18,10 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
+import { splitAgentTerminalAnswerTextIntoSelectedOptionLabelsAndFreeformAnswerText } from "../core/agent-terminal-multi-select-answer-text-parsing";
 import {
 	type RuntimeAgentRaisedDecisionQuestion,
+	type RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
 	runtimeAgentIdSchema,
 	runtimeAgentRaisedDecisionQuestionSchema,
 	runtimeAgentSessionTransportSchema,
@@ -71,6 +73,7 @@ const agentRaisedPendingUserDecisionOptionSchema = z.object({
 	optionId: z.string(),
 	label: z.string(),
 	description: z.string().optional(),
+	previewText: z.string().optional(),
 });
 export type AgentRaisedPendingUserDecisionOption = z.infer<typeof agentRaisedPendingUserDecisionOptionSchema>;
 
@@ -87,6 +90,19 @@ const agentRaisedPendingUserDecisionAnswerSchema = z.object({
 		)
 		.optional(),
 	answeredAt: z.number(),
+	// 答案从哪来。旧记录没有该字段，一律是 Kanban 面板作答（本字段加入前只有这一个入口）。
+	answerSource: z.enum(["kanban_panel", "agent_terminal"]).optional(),
+	// 终端作答时 harness 回传的逐问原文（含备注）。它是问答记录的真相源：标签可能对不上结构化选项
+	// （「Other」手打的文字），备注也没有别的地方能放。
+	agentTerminalAnswersForQuestions: z
+		.array(
+			z.object({
+				questionText: z.string(),
+				answerText: z.string().nullable(),
+				notesText: z.string().nullable(),
+			}),
+		)
+		.optional(),
 });
 export type AgentRaisedPendingUserDecisionAnswer = z.infer<typeof agentRaisedPendingUserDecisionAnswerSchema>;
 
@@ -116,6 +132,8 @@ const persistedAgentRaisedPendingUserDecisionSchema = z.object({
 	// 仅存信号名，不存 payload 正文。
 	sourceHarnessSignal: z.string(),
 	status: agentRaisedPendingUserDecisionStatusSchema,
+	// status=dismissed 时由谁放弃。旧记录没有该字段，一律是 Kanban 面板上点的「取消问题」。
+	dismissalSource: z.enum(["kanban_panel", "agent_terminal", "agent_session_transport_switch"]).optional(),
 	supersededByDecisionId: z.string().nullable(),
 	answer: agentRaisedPendingUserDecisionAnswerSchema.nullable(),
 	answerDeliveryState: agentRaisedPendingUserDecisionAnswerDeliveryStateSchema,
@@ -283,6 +301,19 @@ export async function recordAgentRaisedPendingUserDecision(
 		const existing = records.find((record) => record.decisionId === input.decisionId);
 		if (existing !== undefined) {
 			return existing;
+		}
+		// 同一个问题被第二条路径观测到（另一个 hook、转录补录）时，它拿不到同一个 tool_use_id，会派生出
+		// 另一个 decisionId。若按新决策处理，就会把用户眼前那条顶成 superseded，面板手里的 id 随即作废。
+		// 正文完全相同、且旧的那条仍在等人答，就认定是同一次提问。
+		const sameQuestionStillAwaitingAnswer = records.find(
+			(record) =>
+				record.taskId === input.taskId &&
+				record.status === "pending" &&
+				record.decisionKind === input.decisionKind &&
+				record.questionMarkdown === input.questionMarkdown,
+		);
+		if (sameQuestionStillAwaitingAnswer !== undefined) {
+			return sameQuestionStillAwaitingAnswer;
 		}
 		const nextRecord: PersistedAgentRaisedPendingUserDecision = {
 			decisionId: input.decisionId,
@@ -455,6 +486,7 @@ export async function dismissAgentRaisedPendingUserDecision(
 	workspaceId: string,
 	decisionId: string,
 	dismissedAt: number,
+	dismissalSource: NonNullable<PersistedAgentRaisedPendingUserDecision["dismissalSource"]> = "kanban_panel",
 ): Promise<PersistedAgentRaisedPendingUserDecision | null> {
 	return await enqueueWrite(workspaceId, async () => {
 		const records = await readRawDecisions(workspaceId);
@@ -465,6 +497,7 @@ export async function dismissAgentRaisedPendingUserDecision(
 		const dismissed: PersistedAgentRaisedPendingUserDecision = {
 			...existing,
 			status: "dismissed",
+			dismissalSource,
 			updatedAt: dismissedAt,
 		};
 		await writeDecisions(
@@ -478,5 +511,139 @@ export async function dismissAgentRaisedPendingUserDecision(
 export async function clearAgentRaisedPendingUserDecisions(workspaceId: string): Promise<void> {
 	await enqueueWrite(workspaceId, async () => {
 		await writeDecisions(workspaceId, []);
+	});
+}
+
+// 旧版本曾把同一次提问落成两条（见 recordAgentRaisedPendingUserDecision 的正文去重注释）：前一条被
+// 后一条顶成 superseded，而 UI 可能还拿着前一条的 id。沿 supersededByDecisionId 链，只在后继正文
+// **完全相同**时继续走——那是同一次提问的重复记录；正文不同就是 agent 真的问了新问题，停在原处。
+export function resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession(
+	records: readonly PersistedAgentRaisedPendingUserDecision[],
+	decisionId: string,
+): PersistedAgentRaisedPendingUserDecision | undefined {
+	let current = records.find((record) => record.decisionId === decisionId);
+	const visitedDecisionIds = new Set<string>();
+	while (current?.status === "superseded" && current.supersededByDecisionId !== null) {
+		if (visitedDecisionIds.has(current.decisionId)) {
+			break;
+		}
+		visitedDecisionIds.add(current.decisionId);
+		const successorDecisionId = current.supersededByDecisionId;
+		const successor = records.find((record) => record.decisionId === successorDecisionId);
+		if (successor === undefined || successor.questionMarkdown !== current.questionMarkdown) {
+			break;
+		}
+		current = successor;
+	}
+	return current;
+}
+
+function matchesAgentTerminalResolutionByQuestionText(
+	record: PersistedAgentRaisedPendingUserDecision,
+	resolution: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
+): boolean {
+	if (resolution.answersForQuestions.length === 0) {
+		return false;
+	}
+	const recordedQuestionTexts = resolveAgentRaisedPendingUserDecisionOrderedQuestions(record).map(
+		(question) => question.questionMarkdown,
+	);
+	return (
+		recordedQuestionTexts.length === resolution.answersForQuestions.length &&
+		resolution.answersForQuestions.every((answer, index) => recordedQuestionTexts[index] === answer.questionText)
+	);
+}
+
+// 把 harness 回传的原文答案映射成面板同构的逐问答案：能对上选项标签的记成 selectedOptionIds，
+// 对不上的（「Other」里手打的文字）记成 freeformText。多选拼接串的切分规则（标签本身可能含「, 」）
+// 见 splitAgentTerminalAnswerTextIntoSelectedOptionLabelsAndFreeformAnswerText，问答记录展示共用同一函数。
+function mapAgentTerminalAnswersOntoRecordedQuestions(
+	record: PersistedAgentRaisedPendingUserDecision,
+	resolution: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
+): NonNullable<AgentRaisedPendingUserDecisionAnswer["orderedQuestionAnswers"]> {
+	return resolveAgentRaisedPendingUserDecisionOrderedQuestions(record).map((question, index) => {
+		const answerText = resolution.answersForQuestions[index]?.answerText ?? null;
+		if (answerText === null) {
+			return { decisionQuestionId: question.decisionQuestionId, selectedOptionIds: [], freeformText: null };
+		}
+		const optionIdByLabel = new Map(question.options.map((option) => [option.label, option.optionId]));
+		const { selectedOptionLabels, freeformAnswerText } =
+			splitAgentTerminalAnswerTextIntoSelectedOptionLabelsAndFreeformAnswerText(answerText, [
+				...optionIdByLabel.keys(),
+			]);
+		return {
+			decisionQuestionId: question.decisionQuestionId,
+			selectedOptionIds: selectedOptionLabels.flatMap((label) => {
+				const optionId = optionIdByLabel.get(label);
+				return optionId === undefined ? [] : [optionId];
+			}),
+			freeformText: freeformAnswerText,
+		};
+	});
+}
+
+// 用户直接在 agent 终端里作答 / 拒答：了结对应的待答记录。只动 status=pending 的记录——
+// 若用户已在 Kanban 面板作答（answered），随后为投递而发的 Esc 会让 harness 报一次拒答，那一次
+// 必须被忽略，否则会把刚记下的面板答案冲掉。
+// 定位顺序：tool_use_id（沿重复记录链走到仍在等答的那条）→ 同 task 仍在等答、且逐问正文完全一致的最近一条。
+export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
+	workspaceId: string,
+	input: {
+		taskId: string;
+		resolution: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload;
+		resolvedAt: number;
+	},
+): Promise<PersistedAgentRaisedPendingUserDecision | null> {
+	return await enqueueWrite(workspaceId, async () => {
+		const records = await readRawDecisions(workspaceId);
+		const { taskId, resolution, resolvedAt } = input;
+		const decisionIdFromToolUseId =
+			resolution.decisionSourceId !== null ? `${taskId}:${resolution.decisionSourceId}` : null;
+		const matchedByToolUseId =
+			decisionIdFromToolUseId !== null
+				? resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession(records, decisionIdFromToolUseId)
+				: undefined;
+		const target =
+			matchedByToolUseId?.status === "pending"
+				? matchedByToolUseId
+				: records
+						.filter(
+							(record) =>
+								record.taskId === taskId &&
+								record.status === "pending" &&
+								record.decisionKind === "ordinary_user_question" &&
+								matchesAgentTerminalResolutionByQuestionText(record, resolution),
+						)
+						.at(-1);
+		if (target === undefined) {
+			return null;
+		}
+		const resolved: PersistedAgentRaisedPendingUserDecision =
+			resolution.resolutionKind === "answered_in_agent_terminal"
+				? (() => {
+						const orderedQuestionAnswers = mapAgentTerminalAnswersOntoRecordedQuestions(target, resolution);
+						return {
+							...target,
+							status: "answered",
+							answer: {
+								selectedOptionIds: orderedQuestionAnswers[0]?.selectedOptionIds ?? [],
+								freeformText: orderedQuestionAnswers[0]?.freeformText ?? null,
+								orderedQuestionAnswers,
+								answeredAt: resolvedAt,
+								answerSource: "agent_terminal",
+								agentTerminalAnswersForQuestions: resolution.answersForQuestions,
+							},
+							// 答案本来就是 agent 自己收下的，不存在投递环节。
+							answerDeliveryState: "delivered",
+							lastAnswerDeliveryFailureReason: null,
+							updatedAt: resolvedAt,
+						};
+					})()
+				: { ...target, status: "dismissed", dismissalSource: "agent_terminal", updatedAt: resolvedAt };
+		await writeDecisions(
+			workspaceId,
+			records.map((record) => (record.decisionId === target.decisionId ? resolved : record)),
+		);
+		return resolved;
 	});
 }

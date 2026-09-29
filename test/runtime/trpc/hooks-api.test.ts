@@ -703,6 +703,65 @@ describe("createHooksApi", () => {
 		expect(manager.applyHookActivity).toHaveBeenCalledWith("task-1", { source: "claude", hookEventName: "Stop" });
 	});
 
+	it("用户在终端答完（PostToolUse → to_in_progress）：即使带着同一问题 payload 也绝不再落待答记录，只了结账本", async () => {
+		const awaitingQuestionSummary = createSummary({
+			state: "awaiting_review",
+			reviewReason: "hook",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "question",
+		});
+		const manager = {
+			getSummary: vi.fn(() => awaitingQuestionSummary),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
+			unparkTaskSession: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const recordPendingUserDecision = vi.fn(async () => ({}) as never);
+		const resolveFromAgentTerminal = vi.fn(async () => null);
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+			recordAgentRaisedPendingUserDecision: recordPendingUserDecision,
+			resolveAgentRaisedUserQuestionFromAgentTerminal: resolveFromAgentTerminal,
+		});
+		const resolution = {
+			decisionSourceId: "toolu_question",
+			resolutionKind: "answered_in_agent_terminal" as const,
+			answersForQuestions: [{ questionText: "请你拍板", answerText: "同意", notesText: "附带说明" }],
+		};
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "AskUserQuestion" },
+			// 旧版 CLI 仍可能为 PostToolUse 附上提问 payload：服务端必须按事件类型拒绝把它落成待答记录。
+			agentRaisedUserQuestion: {
+				decisionSourceId: "ask-user-question:请你拍板",
+				questionMarkdown: "请你拍板",
+				options: [],
+				allowsFreeformAnswer: true,
+				multiSelect: false,
+				orderedQuestions: [],
+			},
+			agentRaisedUserQuestionResolvedInAgentTerminal: resolution,
+		});
+
+		expect(response.ok).toBe(true);
+		expect(recordPendingUserDecision).not.toHaveBeenCalled();
+		expect(resolveFromAgentTerminal).toHaveBeenCalledWith("workspace-1", {
+			taskId: "task-1",
+			resolution,
+			resolvedAt: expect.any(Number),
+		});
+	});
+
 	it("parked + AskUserQuestion：先持久化决策、解除 park，再进入 question 人轴", async () => {
 		const parkedSummary = createSummary({
 			state: "running",
