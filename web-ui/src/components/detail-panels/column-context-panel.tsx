@@ -439,7 +439,6 @@ export function ColumnContextPanel({
 	return (
 		<div
 			style={{
-				position: "relative",
 				display: "flex",
 				flexDirection: "column",
 				width: panelWidth ?? "20%",
@@ -448,102 +447,109 @@ export function ColumnContextPanel({
 				background: "var(--color-surface-0)",
 			}}
 		>
-			<DragDropContext onBeforeCapture={handleBeforeCapture} onDragEnd={handleDragEnd}>
-				<div
-					ref={scrollContainerRef}
-					className="kb-detail-task-list-scroll flex flex-col gap-2 p-2"
-					data-selected-pinned={selectedCardPinState !== "hidden" ? "true" : undefined}
-					style={{
-						flex: "1 1 0",
-						minHeight: 0,
-						overflowY: "auto",
-						overscrollBehavior: "contain",
-						overflowAnchor: "none",
-					}}
-				>
-					{onCreateTask ? (
-						<Button
-							icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
-							aria-label="Create task"
-							fill
-							onClick={onCreateTask}
-						>
-							<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-								<span>Create task</span>
-								<span aria-hidden className="text-text-secondary">
-									(c)
-								</span>
-							</span>
-						</Button>
-					) : null}
-					<TaskPinboardSectionInFocusView
-						pinnedTasks={pinnedTasks}
-						selectedCardId={selection.card.id}
-						taskSessions={taskSessions}
-						handlers={taskCardActionHandlers}
-						onActivateCard={activateCard}
-						onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
-						onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
-						workspacePath={workspacePath}
-						defaultClineModelId={defaultClineModelId}
-						defaultAgentId={defaultAgentId}
-					/>
-					{selection.allColumns.map((column) => (
-						<ColumnSection
-							key={column.id}
-							column={column}
-							selectedCardId={selection.card.id}
-							open={isColumnSectionExpanded(column.id)}
-							onToggleOpen={() => toggleColumnSectionExpanded(column.id)}
-							taskIdRequestedToReveal={taskIdRequestedToReveal}
-							onCardClick={activateCard}
-							taskSessions={taskSessions}
-							onStartTask={column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined}
-							onRequestStartAllReadyBacklogTasks={
-								column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
-							}
-							onClearTrash={column.id === "trash" ? onClearTrash : undefined}
-							onEditTask={column.id === "backlog" ? onEditTask : undefined}
-							onSaveTitle={onSaveTaskTitle}
-							onMoveToTrashTask={
-								column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
-							}
-							onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
-							onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
-							onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
-							onDeleteTask={onDeleteTask}
-							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
-							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-							moveToTrashLoadingById={
-								column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
-							}
-							activeDragSourceColumnId={activeDragSourceColumnId}
-							workspacePath={workspacePath}
-							defaultClineModelId={defaultClineModelId}
-							defaultAgentId={defaultAgentId}
-						/>
-					))}
-				</div>
-			</DragDropContext>
-			<StageHeaderRails
-				selection={selection}
-				topPinnedColumnIds={stageHeaderPinLayout.topPinnedColumnIds}
-				bottomPinnedColumnIds={stageHeaderPinLayout.bottomPinnedColumnIds}
-				focusedCardPinState={selectedCardPinState}
-				scrollRootRef={scrollContainerRef}
+			{/* 置顶板分段是 scrollport 之外的固定区：常驻列表顶端、不随 stage 列表滚走。 */}
+			<TaskPinboardSectionInFocusView
+				pinnedTasks={pinnedTasks}
+				selectedCardId={selection.card.id}
 				taskSessions={taskSessions}
-				onStartTask={onStartTask}
-				onMoveToTrashTask={onMoveToTrashTask}
-				onMoveToValidationTask={onMoveToValidationTask}
-				onRestoreFromTrashTask={onRestoreFromTrashTask}
-				onDeleteTask={onDeleteTask}
-				onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
-				onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-				moveToTrashLoadingById={moveToTrashLoadingById}
+				handlers={taskCardActionHandlers}
+				onActivateCard={activateCard}
+				onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
+				onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 				workspacePath={workspacePath}
 				defaultClineModelId={defaultClineModelId}
 				defaultAgentId={defaultAgentId}
 			/>
+			{/* stage 列表区：StageHeaderRails 以绝对定位锚在这里，顶沿 rail 从置顶板分段下沿起算、不会盖住它。
+			    它同时必须是 rail 的裁剪边界：底沿 rail 自 bottom:0 向上堆叠，本区矮于 rail 时会越过本区上沿，
+			    以 z-index:5 的不透明底盖住上方的置顶板分段（外层面板的 overflow:hidden 只裁面板边界）。
+			    用 clip 而非 hidden：不创建滚动容器，scrollIntoView 不会把本区自身滚动错位。 */}
+			<div className="relative flex min-h-0 flex-1 flex-col overflow-clip">
+				<DragDropContext onBeforeCapture={handleBeforeCapture} onDragEnd={handleDragEnd}>
+					<div
+						ref={scrollContainerRef}
+						className="kb-detail-task-list-scroll flex flex-col gap-2 p-2"
+						data-selected-pinned={selectedCardPinState !== "hidden" ? "true" : undefined}
+						style={{
+							flex: "1 1 0",
+							minHeight: 0,
+							overflowY: "auto",
+							overscrollBehavior: "contain",
+							overflowAnchor: "none",
+						}}
+					>
+						{onCreateTask ? (
+							<Button
+								icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
+								aria-label="Create task"
+								fill
+								onClick={onCreateTask}
+							>
+								<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+									<span>Create task</span>
+									<span aria-hidden className="text-text-secondary">
+										(c)
+									</span>
+								</span>
+							</Button>
+						) : null}
+						{selection.allColumns.map((column) => (
+							<ColumnSection
+								key={column.id}
+								column={column}
+								selectedCardId={selection.card.id}
+								open={isColumnSectionExpanded(column.id)}
+								onToggleOpen={() => toggleColumnSectionExpanded(column.id)}
+								taskIdRequestedToReveal={taskIdRequestedToReveal}
+								onCardClick={activateCard}
+								taskSessions={taskSessions}
+								onStartTask={column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined}
+								onRequestStartAllReadyBacklogTasks={
+									column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
+								}
+								onClearTrash={column.id === "trash" ? onClearTrash : undefined}
+								onEditTask={column.id === "backlog" ? onEditTask : undefined}
+								onSaveTitle={onSaveTaskTitle}
+								onMoveToTrashTask={
+									column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
+								}
+								onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
+								onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
+								onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
+								onDeleteTask={onDeleteTask}
+								onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+								onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+								moveToTrashLoadingById={
+									column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
+								}
+								activeDragSourceColumnId={activeDragSourceColumnId}
+								workspacePath={workspacePath}
+								defaultClineModelId={defaultClineModelId}
+								defaultAgentId={defaultAgentId}
+							/>
+						))}
+					</div>
+				</DragDropContext>
+				<StageHeaderRails
+					selection={selection}
+					topPinnedColumnIds={stageHeaderPinLayout.topPinnedColumnIds}
+					bottomPinnedColumnIds={stageHeaderPinLayout.bottomPinnedColumnIds}
+					focusedCardPinState={selectedCardPinState}
+					scrollRootRef={scrollContainerRef}
+					taskSessions={taskSessions}
+					onStartTask={onStartTask}
+					onMoveToTrashTask={onMoveToTrashTask}
+					onMoveToValidationTask={onMoveToValidationTask}
+					onRestoreFromTrashTask={onRestoreFromTrashTask}
+					onDeleteTask={onDeleteTask}
+					onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+					onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+					moveToTrashLoadingById={moveToTrashLoadingById}
+					workspacePath={workspacePath}
+					defaultClineModelId={defaultClineModelId}
+					defaultAgentId={defaultAgentId}
+				/>
+			</div>
 		</div>
 	);
 }

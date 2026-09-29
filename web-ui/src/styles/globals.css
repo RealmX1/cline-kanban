@@ -373,8 +373,9 @@ body,
  * 会让卡变 0×0 → hook 误判 hidden → 显回 → 再测 → 抖动循环。data-selected-pinned 由
  * ColumnContextPanel 在 pinState!=="hidden" 时写到 scrollport 上。
  *
- * 限定 render-role 为本体：置顶板分段也在这个 scrollport 里，选中任务若恰好被置顶，
- * 它在置顶板里的分身同样带 data-selected，不限定就会被一起隐藏（分身与「真实卡重影」无关）。
+ * 限定 render-role 为本体：选中任务若恰好被置顶，它在置顶板里的分身同样带 data-selected。
+ * 置顶板分段现已移到 scrollport 之外的固定区、本就不会命中此选择器；限定仍保留作防御性边界，
+ * 免得分身日后再被挪进 scrollport 时被一起隐藏（分身与「真实卡重影」无关）。
  */
 .kb-detail-task-list-scroll[data-selected-pinned="true"]
 	.kb-board-card-shell[data-selected="true"][data-task-card-render-role="canonical_card_in_its_stage_list"] {

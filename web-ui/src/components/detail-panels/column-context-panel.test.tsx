@@ -350,7 +350,52 @@ describe("ColumnContextPanel", () => {
 		});
 	});
 
-	// 置顶板分身与本体卡同处一个 scrollport，唯一性一旦破掉，居中滚动 / sticky 几何 / 依赖锚点
+	// Pinned 分段要常驻列表顶端、不随 stage 列表滚走：它必须在 scrollport 之外；且 stage 卡头 rail 以
+	// 绝对定位锚在「stage 列表区」（scrollport 的父节点）上，Pinned 若也落在那个定位父级里就会被顶沿 rail 盖住。
+	it("keeps the Focus View pinned section outside the scrollport and outside the stage-header rail anchor", async () => {
+		const pinnedReviewCard = { ...createCard("task-review", "Review task"), pinnedToTaskPinboardAt: 5_000 };
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: [createCard("task-1", "Backlog task")] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [pinnedReviewCard] },
+			{ id: "trash", title: "Done", cards: [] },
+		];
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-1")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+					onCreateTask={() => {}}
+				/>,
+			);
+		});
+
+		const pinnedSection = container.querySelector('[data-task-pinboard-container="focus-view-section"]');
+		const scrollport = container.querySelector(".kb-detail-task-list-scroll");
+		expect(pinnedSection).not.toBeNull();
+		expect(scrollport).not.toBeNull();
+		if (!pinnedSection || !scrollport?.parentElement) {
+			return;
+		}
+		expect(scrollport.contains(pinnedSection)).toBe(false);
+		expect(scrollport.parentElement.contains(pinnedSection)).toBe(false);
+		expect(
+			scrollport.parentElement.style.position === "relative" ||
+				scrollport.parentElement.classList.contains("relative"),
+		).toBe(true);
+		// rail 定位锚同时须是裁剪边界：底沿 rail 向上堆叠超出本区高度时，不得溢出本区上沿去盖住 Pinned 分段。
+		expect(
+			scrollport.parentElement.style.overflow === "clip" ||
+				scrollport.parentElement.classList.contains("overflow-clip"),
+		).toBe(true);
+		// 文档序在 scrollport 之前 = 视觉上位于任务列表最顶端。
+		expect(pinnedSection.compareDocumentPosition(scrollport) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
+	// 置顶板分身与本体卡同处一个页面，唯一性一旦破掉，居中滚动 / 钉住几何 / 依赖锚点
 	// 都会随机接到分身上（dependency-overlay 的锚点表是「后出现者覆盖先出现者」）。
 	it("keeps data-task-id unique after a card gets pinned to the task pinboard", async () => {
 		const pinnedReviewCard = { ...createCard("task-review", "Review task"), pinnedToTaskPinboardAt: 5_000 };

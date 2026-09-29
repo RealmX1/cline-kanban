@@ -149,6 +149,74 @@ describe("Focus View 左侧的置顶板分段", () => {
 		expect(window.localStorage.getItem(LocalStorageKey.TaskPinboardStripCollapsedOnKanbanBoard)).toBeNull();
 	});
 
+	// Focus View 的 Pinned 分段常驻列表顶端，不限量会把下面的 stage 列表挤没；默认只露前 5 张。
+	describe("默认只显示前 5 张，其余由分段最下方的按钮展开", () => {
+		function renderedPinnedCopyTitles(host: HTMLElement): string[] {
+			return [
+				...host.querySelectorAll<HTMLElement>('[data-task-card-render-role="pinned_card_copy_in_task_pinboard"]'),
+			].map((shell) => shell.textContent ?? "");
+		}
+
+		function findShowMorePinnedTasksToggle(host: HTMLElement): HTMLButtonElement | undefined {
+			return [...host.querySelectorAll("button")].find((button) =>
+				/^Show (\d+ more|less)$/.test(button.textContent?.trim() ?? ""),
+			);
+		}
+
+		const sevenPinnedTasks = ["a", "b", "c", "d", "e", "f", "g"].map((suffix) => createPinnedTask(`task-${suffix}`));
+
+		it("超过 5 张时按传入顺序只渲染前 5 张，并在最下方给出「Show N more」", () => {
+			const host = render(<TaskPinboardSectionInFocusView {...baseProps} pinnedTasks={sevenPinnedTasks} />);
+
+			const titles = renderedPinnedCopyTitles(host);
+			expect(titles).toHaveLength(5);
+			for (const [index, suffix] of ["a", "b", "c", "d", "e"].entries()) {
+				expect(titles[index]).toContain(`task-${suffix}`);
+			}
+			const toggle = findShowMorePinnedTasksToggle(host);
+			expect(toggle?.textContent?.trim()).toBe("Show 2 more");
+			expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+			// 「最下方」：按钮在文档序上位于最后一张分身之后。
+			const lastCopy = [
+				...host.querySelectorAll('[data-task-card-render-role="pinned_card_copy_in_task_pinboard"]'),
+			].at(-1);
+			expect(
+				lastCopy && toggle ? lastCopy.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING : 0,
+			).toBeTruthy();
+			// 卡头计数仍是总数，不是可见数。
+			expect(findHeaderToggle(host)?.textContent).toContain("7");
+		});
+
+		it("点「Show N more」展开全部，再点「Show less」收回到 5 张", () => {
+			const host = render(<TaskPinboardSectionInFocusView {...baseProps} pinnedTasks={sevenPinnedTasks} />);
+
+			act(() => findShowMorePinnedTasksToggle(host)?.click());
+			expect(renderedPinnedCopyTitles(host)).toHaveLength(7);
+			expect(findShowMorePinnedTasksToggle(host)?.textContent?.trim()).toBe("Show less");
+			expect(findShowMorePinnedTasksToggle(host)?.getAttribute("aria-expanded")).toBe("true");
+
+			act(() => findShowMorePinnedTasksToggle(host)?.click());
+			expect(renderedPinnedCopyTitles(host)).toHaveLength(5);
+			expect(findShowMorePinnedTasksToggle(host)?.textContent?.trim()).toBe("Show 2 more");
+		});
+
+		it("恰好 5 张时不渲染展开按钮", () => {
+			const fivePinnedTasks = sevenPinnedTasks.slice(0, 5);
+			const host = render(<TaskPinboardSectionInFocusView {...baseProps} pinnedTasks={fivePinnedTasks} />);
+
+			expect(renderedPinnedCopyTitles(host)).toHaveLength(5);
+			expect(findShowMorePinnedTasksToggle(host)).toBeUndefined();
+		});
+
+		it("折叠卡头后分身与展开按钮一并隐藏", () => {
+			const host = render(<TaskPinboardSectionInFocusView {...baseProps} pinnedTasks={sevenPinnedTasks} />);
+			act(() => findHeaderToggle(host)?.click());
+
+			expect(renderedPinnedCopyTitles(host)).toHaveLength(0);
+			expect(findShowMorePinnedTasksToggle(host)).toBeUndefined();
+		});
+	});
+
 	it("选中的任务被置顶时，它的分身也标为 selected", () => {
 		const host = render(
 			<TaskPinboardSectionInFocusView
