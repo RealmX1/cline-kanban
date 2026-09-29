@@ -66,6 +66,10 @@ import {
 import { captureAgentSessionForkReplayLaunchArguments } from "./agent-session-fork-replay-launch-arguments-capture";
 import { materializeTaskAgentSessionForExecutionWorkingDirectory } from "./agent-session-materialization";
 import {
+	type AgentUserQuestionSelectorDismissalOutcome,
+	dismissAgentUserQuestionSelectorUntilTerminalInputBoxVisible,
+} from "./agent-user-question-selector-dismissal-before-programmatic-answer-delivery";
+import {
 	hasClaudeInteractivePrompt,
 	hasClaudeStartupUiRendered,
 	// startup readiness 的 wall-clock 兜底超时值。source-of-truth 常量名在 claude-readiness.ts
@@ -4817,6 +4821,47 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 		}
 		return summary;
+	}
+
+	// Kanban 面板上的答案要投递给**仍活着、正停在提问选择器上**的 agent 时，先用 Esc 关掉选择器，并读屏
+	// 确认输入框已出现（理由与约束见 agent-user-question-selector-dismissal-before-programmatic-answer-delivery.ts）。
+	// Esc 直接写 PTY、不走 writeInput：这不是人在敲键盘，不能记 lastUserInputAt 或动输入框占用账本。
+	async dismissAgentUserQuestionSelectorBeforeProgrammaticAnswerDelivery(
+		taskId: string,
+	): Promise<AgentUserQuestionSelectorDismissalOutcome> {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			return "no_active_agent_terminal_session";
+		}
+		const boxGrammar = resolveTerminalInputBoxGrammar(entry.summary.agentId);
+		const mirror = entry.terminalStateMirror;
+		if (!boxGrammar || !mirror) {
+			return "agent_terminal_input_box_structure_not_modeled";
+		}
+		// 每次读屏都跨 await：期间会话可能退出或被 refresh 换代，结论必须作废而不是拿旧屏硬答。
+		const isStillSameActiveSession = () => this.entries.get(taskId)?.active === active;
+		return await dismissAgentUserQuestionSelectorUntilTerminalInputBoxVisible({
+			isTerminalInputBoxVisibleOnScreen: async () => {
+				if (!isStillSameActiveSession()) {
+					return null;
+				}
+				const screenSnapshot = await mirror.getScreenSnapshot();
+				if (!isStillSameActiveSession()) {
+					return null;
+				}
+				return locateTerminalInputBox(screenSnapshot, boxGrammar) !== null;
+			},
+			writeEscapeKeyIntoAgentTerminal: () => {
+				if (!isStillSameActiveSession()) {
+					return false;
+				}
+				active.session.write("\u001b");
+				return true;
+			},
+			waitMilliseconds: (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
+			now,
+		});
 	}
 
 	// 会话被回收（或进程自行退出）之后，账本条目与 summary 仍然在——回收只终止运行时、不删账本——

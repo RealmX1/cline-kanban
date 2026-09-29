@@ -8,7 +8,15 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { TRPCError } from "@trpc/server";
 import type { AcpTaskSessionService } from "../acp-client-session/acp-task-session-service";
+import {
+	buildAgentRaisedUserDecisionHistoryEntriesFromClaudeTranscripts,
+	buildAgentRaisedUserDecisionHistoryEntriesFromDecisionLedger,
+	collectToolUseIdsAlreadyRecordedInDecisionLedger,
+	listClaudeTranscriptFilesForTaskUserDecisionHistory,
+	mergeAgentRaisedUserDecisionHistoryEntries,
+} from "../agent-session-history/agent-raised-user-decision-history-builder";
 import { listAvailableAgentSessions } from "../agent-session-history/available-agent-session-index";
+import { encodeClaudeProjectDirectoryName } from "../agent-session-history/bounded-agent-transcript-reader";
 import {
 	salvageLatestUnansweredClaudeUserQuestionForTask,
 	salvageLatestUnansweredCodexUserQuestionForKnownSession,
@@ -102,6 +110,7 @@ import {
 	readAgentRaisedPendingUserDecisions,
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedPendingUserDecisionOrderedQuestions,
+	resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession,
 } from "../state/agent-raised-pending-user-decision-store";
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
 import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
@@ -117,6 +126,7 @@ import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } fr
 import { listWorkspaceIndexEntries, loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
 import { suggestTaskNamesFromTaskDescription } from "../task-name-suggestion/suggest-task-names-from-task-description";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
+import { isAgentUserQuestionSelectorDismissedAndTerminalInputBoxVisible } from "../terminal/agent-user-question-selector-dismissal-before-programmatic-answer-delivery";
 import type { TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../terminal/session-manager";
 import {
 	stashTaskTerminalInputBoxIntoPromptLibrary,
@@ -1340,7 +1350,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							orderedQuestions: salvaged.payload.orderedQuestions,
 							askedAt: salvaged.askedAt,
 							graceDeadlineAt: summary?.agentSessionRuntimeReclamationEligibleAt ?? null,
-							originRuntimeSessionIncarnationId: summary?.runtimeSessionIncarnationId ?? null,
+							// 补录来的问题出自某个**先前**的会话活体（转录里记着它、账本却没有），绝不能标成当前活体：
+							// 那会让 UI 以为 agent 此刻正停在终端选择器上而默认折叠、投递也会去发 Esc。
+							originRuntimeSessionIncarnationId: null,
 							originTurnSequence: summary?.agentResponseGenerationTurnSequence ?? 0,
 							sourceHarnessSignal: salvaged.sourceHarnessSignal,
 						});
@@ -1367,6 +1379,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						reclaimedAt: decision.reclaimedAt,
 						answerDeliveryState: decision.answerDeliveryState,
 						lastAnswerDeliveryFailureReason: decision.lastAnswerDeliveryFailureReason,
+						originRuntimeSessionIncarnationId: decision.originRuntimeSessionIncarnationId,
+						recordedAnswerQuestionAnswers:
+							decision.answer === null
+								? null
+								: (decision.answer.orderedQuestionAnswers ?? [
+										{
+											decisionQuestionId: "question-0",
+											selectedOptionIds: decision.answer.selectedOptionIds,
+											freeformText: decision.answer.freeformText,
+										},
+									]),
 					})),
 			};
 		},
@@ -1405,7 +1428,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						}
 						return await resumeTerminalTaskSessionForPendingUserDecisionAnswerDelivery(workspaceScope, taskId);
 					},
-					deliverTaskSessionInput: async ({ taskId, sessionTransport, text }) => {
+					deliverTaskSessionInput: async ({
+						taskId,
+						sessionTransport,
+						text,
+						originRuntimeSessionIncarnationId,
+					}) => {
 						if (sessionTransport === "acp_stdio_subprocess") {
 							const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 							return (await acpService.sendTaskSessionInput(taskId, text)) !== null;
@@ -1421,6 +1449,24 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						// durable 待答答案只有在 base 的诚实回执确认提交后才标 delivered；同步 summary 只代表
 						// 「已受理」。任何就绪超时、会话退出、被取代或提交确认失败都会结算 false，保留重试资格。
 						const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+						// 提问它的那个活体还在、且仍停在提问回合：终端里此刻显示的是交互式选择器，不是输入框。
+						// 直接粘贴会被选择器吞掉、回车会替用户选中高亮项——必须先关掉选择器并读屏确认输入框出现。
+						// 会话已被回收 / resume 过（活体不同）则选择器早已不在，不发任何按键。
+						const liveTerminalSummary = terminalManager.getSummary(taskId);
+						const liveTerminalFacets = liveTerminalSummary ? resolveSessionFacets(liveTerminalSummary) : null;
+						const agentIsStoppedOnThisQuestionSelectorInLiveTerminal =
+							originRuntimeSessionIncarnationId !== null &&
+							liveTerminalSummary?.runtimeSessionIncarnationId === originRuntimeSessionIncarnationId &&
+							liveTerminalFacets?.turnOwner === "user" &&
+							liveTerminalFacets.userTurnKind === "question";
+						if (agentIsStoppedOnThisQuestionSelectorInLiveTerminal) {
+							const selectorDismissalOutcome =
+								await terminalManager.dismissAgentUserQuestionSelectorBeforeProgrammaticAnswerDelivery(taskId);
+							if (!isAgentUserQuestionSelectorDismissedAndTerminalInputBoxVisible(selectorDismissalOutcome)) {
+								// 抛出而不是返回 false：失败原因要原样进账本，让面板如实告诉用户卡在哪。
+								throw new Error(`无法关闭终端里的提问选择器，答案未投递（${selectorDismissalOutcome}）`);
+							}
+						}
 						const contentionPolicyConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
 						let resolveConfirmedDelivery: (delivered: boolean) => void = () => undefined;
 						const confirmedDelivery = new Promise<boolean>((resolve) => {
@@ -1458,15 +1504,90 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				return { ok: false, delivered: false, error: error instanceof Error ? error.message : String(error) };
 			}
 		},
+		// 问答记录：已了结的 agent 提问与用户答案（含终端作答时写下的备注）。按需读取——只在用户展开
+		// 问答记录时调用，故允许流式扫描该 task 的 Claude 转录做回填。
+		listAgentRaisedUserDecisionHistoryForTask: async (workspaceScope, input) => {
+			const taskId = input.taskId.trim();
+			const records = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
+			const ledgerEntries = buildAgentRaisedUserDecisionHistoryEntriesFromDecisionLedger(records, taskId);
+			const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+			const summary = terminalManager.getSummary(taskId);
+			const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+			const card = board.columns.flatMap((column) => column.cards).find((candidate) => candidate.id === taskId);
+			const agentId = summary?.agentId ?? card?.agentId ?? null;
+			let transcriptEntries: Awaited<
+				ReturnType<typeof buildAgentRaisedUserDecisionHistoryEntriesFromClaudeTranscripts>
+			> = [];
+			if (agentId === "claude") {
+				let taskCwd: string | null = null;
+				try {
+					taskCwd = isHomeAgentSessionId(taskId)
+						? workspaceScope.workspacePath
+						: card
+							? await resolveTaskCwd({
+									cwd: workspaceScope.workspacePath,
+									taskId,
+									baseRef: card.baseRef,
+									ensure: false,
+									worktreeMode: card.worktreeMode,
+								})
+							: null;
+				} catch {
+					// worktree 已不存在：只剩显式转录可回填。
+				}
+				const taskOwnsItsClaudeProjectDirectory =
+					taskCwd !== null &&
+					!isHomeAgentSessionId(taskId) &&
+					resolve(taskCwd) !== resolve(workspaceScope.workspacePath);
+				const currentNativeTranscriptPath =
+					summary?.agentNativeConversationSessionIdentity?.sourceAgentId === "claude"
+						? summary.agentNativeConversationSessionIdentity.transcriptPath
+						: null;
+				const transcriptFilePaths = await listClaudeTranscriptFilesForTaskUserDecisionHistory({
+					explicitTranscriptFilePaths: currentNativeTranscriptPath ? [currentNativeTranscriptPath] : [],
+					claudeProjectDirectoryOwnedExclusivelyByTask:
+						taskOwnsItsClaudeProjectDirectory && taskCwd !== null
+							? join(homedir(), ".claude", "projects", encodeClaudeProjectDirectoryName(taskCwd))
+							: null,
+				});
+				transcriptEntries = await buildAgentRaisedUserDecisionHistoryEntriesFromClaudeTranscripts({
+					taskId,
+					transcriptFilePaths,
+				});
+			}
+			const taskRecords = records.filter((record) => record.taskId === taskId);
+			return {
+				historyEntries: mergeAgentRaisedUserDecisionHistoryEntries({
+					ledgerEntries,
+					transcriptEntries,
+					toolUseIdsAlreadyRecordedInDecisionLedger: collectToolUseIdsAlreadyRecordedInDecisionLedger(
+						records,
+						taskId,
+					),
+					ledgerQuestionMarkdownsForTask: new Set(
+						taskRecords.map((record) =>
+							resolveAgentRaisedPendingUserDecisionOrderedQuestions(record)
+								.map((question) => question.questionMarkdown)
+								.join("\n"),
+						),
+					),
+				}),
+			};
+		},
 		dismissAgentRaisedPendingUserDecision: async (workspaceScope, input) => {
 			try {
 				const decisionId = input.decisionId.trim();
 				if (!decisionId) {
 					return { ok: false, error: "decisionId is required" };
 				}
+				// UI 可能还拿着同一次提问的重复记录的 id（旧版本一问两记），沿重复链找到真正在等答的那条。
+				const dismissTarget = resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession(
+					await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId),
+					decisionId,
+				);
 				const dismissed = await dismissAgentRaisedPendingUserDecision(
 					workspaceScope.workspaceId,
-					decisionId,
+					dismissTarget?.decisionId ?? decisionId,
 					Date.now(),
 				);
 				return dismissed
@@ -2274,6 +2395,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							workspaceScope.workspaceId,
 							decision.decisionId,
 							supersededAt,
+							"agent_session_transport_switch",
 						);
 					}
 				}

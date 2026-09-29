@@ -9,7 +9,9 @@ import type {
 	RuntimeAgentRaisedDecisionOption,
 	RuntimeAgentRaisedDecisionQuestion,
 	RuntimeAgentRaisedToolPermissionPayload,
+	RuntimeAgentRaisedUserQuestionAgentTerminalAnswerForQuestion,
 	RuntimeAgentRaisedUserQuestionPayload,
+	RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
 } from "../core/api-contract";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -30,7 +32,12 @@ interface ParsedQuestion {
 	header: string | null;
 	question: string;
 	multiSelect: boolean;
-	options: Array<{ label: string; description: string | null }>;
+	options: Array<{ label: string; description: string | null; previewText: string | null }>;
+}
+
+// preview 常是等宽对比矩阵：行首空白与内部对齐都承载信息，只判空、不 trim 原文。
+function asNonBlankVerbatimString(value: unknown): string | null {
+	return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 // Claude 的 AskUserQuestion 工具输入形状：`{ questions: [{ question, header, multiSelect, options: [...] }] }`。
@@ -59,7 +66,11 @@ function parseQuestions(toolInput: Record<string, unknown>): ParsedQuestion[] {
 			if (!label) {
 				continue;
 			}
-			options.push({ label, description: optionRecord ? asNonEmptyString(optionRecord.description) : null });
+			options.push({
+				label,
+				description: optionRecord ? asNonEmptyString(optionRecord.description) : null,
+				previewText: optionRecord ? asNonBlankVerbatimString(optionRecord.preview) : null,
+			});
 		}
 		parsed.push({
 			header: asNonEmptyString(questionRecord.header),
@@ -116,6 +127,7 @@ export function extractAgentRaisedUserQuestionPayload(input: {
 				optionId: `option-${index}`,
 				label: option.label,
 				...(option.description ? { description: option.description } : {}),
+				...(option.previewText ? { previewText: option.previewText } : {}),
 			}))
 		: [];
 	const orderedQuestions: RuntimeAgentRaisedDecisionQuestion[] = questions.map((question, questionIndex) => ({
@@ -127,6 +139,7 @@ export function extractAgentRaisedUserQuestionPayload(input: {
 			optionId: `question-${questionIndex}-option-${optionIndex}`,
 			label: option.label,
 			...(option.description ? { description: option.description } : {}),
+			...(option.previewText ? { previewText: option.previewText } : {}),
 		})),
 		allowsFreeformAnswer: true,
 	}));
@@ -158,5 +171,45 @@ export function extractAgentRaisedToolPermissionPayload(input: {
 		decisionSourceId: input.toolUseId ?? `tool-permission:${toolName}`,
 		toolName,
 		toolInputSummary: asNonEmptyString(input.toolInputSummary),
+	};
+}
+
+// Claude 在用户于终端里作答后，把结果放进 PostToolUse 的 tool_response：
+//   { questions: [...], answers: { "<问题原文>": "<选中的标签 | 逗号拼接的多选标签 | 手打的其他回答>" },
+//     annotations: { "<问题原文>": { preview?, notes? } } }
+// 以问题原文为键——这是 harness 的原生形状，不是我们选的；按 tool_input 的问题顺序展开成数组。
+// 拒答（PostToolUseFailure，或 tool_response 不带 answers）一律视为 declined：Kanban 不去猜用户意图。
+export function extractAgentRaisedUserQuestionResolvedInAgentTerminalPayload(input: {
+	toolUseId: string | null;
+	toolInput: Record<string, unknown> | null;
+	toolResponse: unknown;
+	toolExecutionFailed: boolean;
+}): RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload | null {
+	const toolResponseRecord = asRecord(input.toolResponse);
+	const questionsSource = input.toolInput ?? toolResponseRecord;
+	const questions = questionsSource ? parseQuestions(questionsSource) : [];
+	const answersByQuestionText = toolResponseRecord ? asRecord(toolResponseRecord.answers) : null;
+	const annotationsByQuestionText = toolResponseRecord ? asRecord(toolResponseRecord.annotations) : null;
+	if (questions.length === 0 && input.toolUseId === null) {
+		return null;
+	}
+	const answersForQuestions: RuntimeAgentRaisedUserQuestionAgentTerminalAnswerForQuestion[] = questions.map(
+		(question) => {
+			const notesRecord = annotationsByQuestionText ? asRecord(annotationsByQuestionText[question.question]) : null;
+			return {
+				questionText: question.question,
+				answerText: answersByQuestionText ? asNonEmptyString(answersByQuestionText[question.question]) : null,
+				notesText: notesRecord ? asNonEmptyString(notesRecord.notes) : null,
+			};
+		},
+	);
+	const answeredAnyQuestion = answersForQuestions.some((answer) => answer.answerText !== null);
+	return {
+		decisionSourceId: input.toolUseId,
+		resolutionKind:
+			!input.toolExecutionFailed && answeredAnyQuestion
+				? "answered_in_agent_terminal"
+				: "declined_in_agent_terminal",
+		answersForQuestions,
 	};
 }

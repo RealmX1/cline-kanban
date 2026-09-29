@@ -8,6 +8,7 @@ import type {
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentRaisedToolPermissionPayload,
 	RuntimeAgentRaisedUserQuestionPayload,
+	RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
 	RuntimeHarnessUserPromptProcessingDirective,
 	RuntimeHookEvent,
 	RuntimeHookIngestResponse,
@@ -30,6 +31,7 @@ import type { RuntimeAppRouter } from "../trpc/app-router";
 import {
 	extractAgentRaisedToolPermissionPayload,
 	extractAgentRaisedUserQuestionPayload,
+	extractAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
 } from "./agent-raised-decision-payload-extraction";
 import { extractAgentNativeConversationSessionIdentityFromHookPayload } from "./hook-events/agent-native-conversation-session-identity-extraction";
 import {
@@ -69,6 +71,7 @@ interface HooksIngestArgs {
 	// agent 正在等你拍板时才携带的白名单 payload（二者互斥）。会话被回收后靠它重现问题。
 	agentRaisedUserQuestion?: RuntimeAgentRaisedUserQuestionPayload;
 	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
+	agentRaisedUserQuestionResolvedInAgentTerminal?: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload;
 	submittedPromptText?: string;
 	// N0a：终端 agent 原生会话身份（session_id + transcript_path），每个事件都带，服务端幂等落 sidecar。
 	agentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity;
@@ -454,6 +457,7 @@ export function buildAgentRaisedDecisionPayloads(
 ): {
 	agentRaisedUserQuestion?: RuntimeAgentRaisedUserQuestionPayload;
 	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
+	agentRaisedUserQuestionResolvedInAgentTerminal?: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload;
 } {
 	if (!payload) {
 		return {};
@@ -464,7 +468,27 @@ export function buildAgentRaisedDecisionPayloads(
 		readNestedString(payload, ["preToolUse", "toolUseId"]);
 	const toolName = metadata?.toolName ?? null;
 	const normalizedToolName = toolName?.trim().toLowerCase() ?? null;
+	const hookEventName = metadata?.hookEventName?.trim().toLowerCase() ?? null;
 	if (isClaudeUserQuestionToolName(normalizedToolName)) {
+		// 同一次 AskUserQuestion 会先后经过三个 hook，各自只承担一件事：
+		//   - PreToolUse：提问的那一刻，落 durable 记录（唯一的提问采集点）；
+		//   - PermissionRequest：「允许提问」对话框。它的 stdin **不带 tool_use_id**，若也采集，问题正文
+		//     派生出的第二个 decisionId 会在 1–2 秒后把刚落库的那条顶成 superseded——实测每次提问都稳定
+		//     落两条，面板持有的旧 id 随即 answer/dismiss 全部失败。故此处既不记提问、也不记工具授权；
+		//   - PostToolUse / PostToolUseFailure：用户已在终端里作答或拒答，带回结局让账本了结这个问题。
+		// hookEventName 缺失（非 Claude hook stdin 的调用路径）时保持旧行为：按提问采集。
+		if (hookEventName === "posttooluse" || hookEventName === "posttoolusefailure") {
+			const resolution = extractAgentRaisedUserQuestionResolvedInAgentTerminalPayload({
+				toolUseId,
+				toolInput: extractToolInput(payload),
+				toolResponse: payload.tool_response ?? payload.toolResponse ?? null,
+				toolExecutionFailed: hookEventName === "posttoolusefailure",
+			});
+			return resolution ? { agentRaisedUserQuestionResolvedInAgentTerminal: resolution } : {};
+		}
+		if (hookEventName !== null && hookEventName !== "pretooluse") {
+			return {};
+		}
 		const question = extractAgentRaisedUserQuestionPayload({ toolUseId, toolInput: extractToolInput(payload) });
 		return question ? { agentRaisedUserQuestion: question } : {};
 	}
@@ -472,7 +496,6 @@ export function buildAgentRaisedDecisionPayloads(
 	if (isClaudePlanApprovalToolName(normalizedToolName)) {
 		return {};
 	}
-	const hookEventName = metadata?.hookEventName?.toLowerCase() ?? null;
 	const notificationType = metadata?.notificationType?.toLowerCase() ?? null;
 	if (hookEventName === "permissionrequest" || notificationType === "permission_prompt") {
 		const permission = extractAgentRaisedToolPermissionPayload({
@@ -610,6 +633,9 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngest
 				metadata: args.metadata,
 				...(args.agentRaisedUserQuestion ? { agentRaisedUserQuestion: args.agentRaisedUserQuestion } : {}),
 				...(args.agentRaisedToolPermission ? { agentRaisedToolPermission: args.agentRaisedToolPermission } : {}),
+				...(args.agentRaisedUserQuestionResolvedInAgentTerminal
+					? { agentRaisedUserQuestionResolvedInAgentTerminal: args.agentRaisedUserQuestionResolvedInAgentTerminal }
+					: {}),
 				...(args.submittedPromptText !== undefined ? { submittedPromptText: args.submittedPromptText } : {}),
 				...(args.agentNativeConversationSessionIdentity
 					? { agentNativeConversationSessionIdentity: args.agentNativeConversationSessionIdentity }

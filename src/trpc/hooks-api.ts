@@ -22,7 +22,10 @@ import {
 	captureNotificationSignal,
 	recordNotificationSignalDecision,
 } from "../notifications/notification-signal-capture";
-import { recordAgentRaisedPendingUserDecision } from "../state/agent-raised-pending-user-decision-store";
+import {
+	recordAgentRaisedPendingUserDecision,
+	resolveAgentRaisedUserQuestionFromAgentTerminal,
+} from "../state/agent-raised-pending-user-decision-store";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
@@ -56,6 +59,7 @@ export interface CreateHooksApiDependencies {
 	// hook 行为零差异。绝不返回 Promise——判图会 fork 一个分身，不能压进 hook 的响应关键路径。
 	notifyExplorationThreadGraphAgentTurnStopped?: (input: { workspaceId: string; explorationId: string }) => void;
 	recordAgentRaisedPendingUserDecision?: typeof recordAgentRaisedPendingUserDecision;
+	resolveAgentRaisedUserQuestionFromAgentTerminal?: typeof resolveAgentRaisedUserQuestionFromAgentTerminal;
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration?: typeof deferHarnessGeneratedPromptDuringAgentSessionRestoration;
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration?: typeof consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration;
 }
@@ -141,6 +145,8 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId;
 	const checkpointCapture = deps.captureTaskTurnCheckpoint ?? captureTaskTurnCheckpoint;
 	const pendingUserDecisionRecord = deps.recordAgentRaisedPendingUserDecision ?? recordAgentRaisedPendingUserDecision;
+	const pendingUserDecisionResolveFromAgentTerminal =
+		deps.resolveAgentRaisedUserQuestionFromAgentTerminal ?? resolveAgentRaisedUserQuestionFromAgentTerminal;
 	const restorationHarnessPromptDefer =
 		deps.deferHarnessGeneratedPromptDuringAgentSessionRestoration ??
 		deferHarnessGeneratedPromptDuringAgentSessionRestoration;
@@ -366,7 +372,9 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 
 				// 决策记录同样先于 gate 且同步完成；hook 进程只有在 durable 写成功后才收到成功响应。
 				// 失败返回可重试错误，避免 daemon 在 fire-and-forget 写入前退出造成永久丢题。
-				if (body.agentRaisedUserQuestion || body.agentRaisedToolPermission) {
+				// 只认 to_review：提问 / 请求授权是「agent 停下来等人」的边界。别的事件即使带着同样的工具名
+				// （PostToolUse 恰恰表示用户已经答完），也绝不能再落一条待答记录。
+				if (event === "to_review" && (body.agentRaisedUserQuestion || body.agentRaisedToolPermission)) {
 					try {
 						await recordAgentRaisedPendingUserDecisionFromHookIngest({
 							workspaceId,
@@ -381,6 +389,22 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 							`pending-user-decision-persist-failed workspaceId=${workspaceId} taskId=${taskId} reason=${reason}`,
 						);
 						return { ok: false, error: reason } satisfies RuntimeHookIngestResponse;
+					}
+				}
+				// 用户在终端里直接作答 / 拒答：了结账本里对应的待答记录，并把答案（含备注）留作问答记录。
+				// 了结失败只记日志——它不影响 agent 继续跑，下一次打开任务时面板会按账本如实呈现。
+				if (body.agentRaisedUserQuestionResolvedInAgentTerminal) {
+					try {
+						await pendingUserDecisionResolveFromAgentTerminal(workspaceId, {
+							taskId,
+							resolution: body.agentRaisedUserQuestionResolvedInAgentTerminal,
+							resolvedAt: Date.now(),
+						});
+					} catch (error) {
+						const reason = error instanceof Error ? error.message : String(error);
+						logAgentSessionRetentionWarning(
+							`pending-user-decision-agent-terminal-resolution-failed workspaceId=${workspaceId} taskId=${taskId} reason=${reason}`,
+						);
 					}
 				}
 
