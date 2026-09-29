@@ -10,6 +10,7 @@ import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { TaskCardBody, type TaskCardBusinessProps } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { Button } from "@/components/ui/button";
+import { useFocusViewStageSectionExpansion } from "@/hooks/use-focus-view-stage-section-expansion";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
 import { useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
@@ -18,6 +19,7 @@ import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types"
 import { findCardColumnId, isCardDropDisabled } from "@/state/drag-rules";
 import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
 import type { BoardCard as BoardCardModel, BoardColumn, BoardColumnId, CardSelection } from "@/types";
+import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
 
 // 详情页左侧所有 section 共用一个滚动容器；模块级常量保持引用稳定。
 const getDetailTaskListScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
@@ -52,8 +54,9 @@ function ColumnSection({
 	column: BoardColumn;
 	selectedCardId: string;
 	/**
-	 * 折叠态由 `ColumnContextPanel` 集中持有（不再是本组件的私有 state）：置顶板的「跳回本体卡」
-	 * 必须能先把目标所在的折叠分段展开——分段折叠时整段 `display:none`，`scrollIntoView` 对它无效。
+	 * 折叠态由 `ColumnContextPanel` 经 `useFocusViewStageSectionExpansion` 集中持有（不是本组件的私有 state）：
+	 * 钉住 rail 里的孪生卡头要呈现并切换同一份状态；置顶板的「跳回本体卡」也必须能先把目标所在的折叠分段
+	 * 展开——分段折叠时整段 `display:none`，`scrollIntoView` 对它无效。
 	 */
 	open: boolean;
 	onToggleOpen: () => void;
@@ -157,6 +160,7 @@ function ColumnSection({
 				<button
 					type="button"
 					onClick={onToggleOpen}
+					aria-expanded={open}
 					className="hover:bg-surface-0 rounded-md"
 					style={{
 						height: 32,
@@ -323,18 +327,22 @@ export function ColumnContextPanel({
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
-	// stage 分段的展开态集中持有：Done 默认折叠，其余默认展开（与原 ColumnSection 私有 state 的初值一致）。
-	const [expandedColumnIds, setExpandedColumnIds] = useState<Partial<Record<BoardColumnId, boolean>>>({});
-	const isColumnSectionExpanded = useCallback(
-		(columnId: BoardColumnId): boolean => expandedColumnIds[columnId] ?? columnId !== "trash",
-		[expandedColumnIds],
-	);
-	const toggleColumnSectionExpanded = useCallback((columnId: BoardColumnId): void => {
-		setExpandedColumnIds((previous) => ({
-			...previous,
-			[columnId]: !(previous[columnId] ?? columnId !== "trash"),
-		}));
-	}, []);
+	const columnIds = useMemo(() => selection.allColumns.map((column) => column.id), [selection.allColumns]);
+
+	// stage 分段的展开态集中持有（Done 默认折叠，其余默认展开），行内卡头与钉住 rail 的孪生卡头共读同一份；
+	// rail 卡头发起的跳转 / 折叠 / 展开各自的滚动落点也由它决定。
+	const {
+		isStageSectionExpanded,
+		toggleStageSectionExpandedFromInFlowHeader,
+		toggleStageSectionExpandedFromStageHeaderRail,
+		expandStageSectionWithoutScrolling,
+		jumpToStageSectionBelowTopRail,
+	} = useFocusViewStageSectionExpansion({
+		scrollRootRef: scrollContainerRef,
+		orderedColumnIds: columnIds,
+		focusedColumnId: selection.column.id,
+		focusedTaskId: selection.card.id,
+	});
 
 	const activateCard = useCallback((card: BoardCardModel) => onCardSelect(card.id), [onCardSelect]);
 	const pinnedTasks = useMemo(
@@ -350,7 +358,7 @@ export function ColumnContextPanel({
 			if (!targetColumnId) {
 				return;
 			}
-			setExpandedColumnIds((previous) => ({ ...previous, [targetColumnId]: true }));
+			expandStageSectionWithoutScrolling(targetColumnId);
 		},
 	});
 
@@ -394,7 +402,6 @@ export function ColumnContextPanel({
 
 	// 全部 stage「卡头」的手风琴钉住布局（已滚过钉顶、未到达钉底、中间随流）。把单卡钉住的几何模式推广到
 	// N 个卡头；由 StageHeaderRails 以脱流 overlay 渲染。拖拽期同样暂停（真实卡 portal 到 body、几何失真）。
-	const columnIds = useMemo(() => selection.allColumns.map((column) => column.id), [selection.allColumns]);
 	const stageHeaderPinLayout = useStageHeaderPinLayout({
 		scrollRootRef: scrollContainerRef,
 		columnIds,
@@ -409,7 +416,7 @@ export function ColumnContextPanel({
 		if (!scrollContainer) {
 			return;
 		}
-		const escapedTaskId = selection.card.id.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+		const escapedTaskId = escapeCssAttributeSelectorValue(selection.card.id);
 		// 在 rAF 内查询而非同步查询：被选中的卡片可能因渐进渲染（ensureVisibleIndex）
 		// 需要再渲染一帧才挂载到 DOM。若首帧未找到，则在随后的若干帧重试，
 		// 直到它出现再居中（命中后立即停止）。
@@ -498,8 +505,8 @@ export function ColumnContextPanel({
 								key={column.id}
 								column={column}
 								selectedCardId={selection.card.id}
-								open={isColumnSectionExpanded(column.id)}
-								onToggleOpen={() => toggleColumnSectionExpanded(column.id)}
+								open={isStageSectionExpanded(column.id)}
+								onToggleOpen={() => toggleStageSectionExpandedFromInFlowHeader(column.id)}
 								taskIdRequestedToReveal={taskIdRequestedToReveal}
 								onCardClick={activateCard}
 								taskSessions={taskSessions}
@@ -535,6 +542,9 @@ export function ColumnContextPanel({
 					topPinnedColumnIds={stageHeaderPinLayout.topPinnedColumnIds}
 					bottomPinnedColumnIds={stageHeaderPinLayout.bottomPinnedColumnIds}
 					focusedCardPinState={selectedCardPinState}
+					isStageSectionExpanded={isStageSectionExpanded}
+					onToggleStageSectionExpandedFromStageHeaderRail={toggleStageSectionExpandedFromStageHeaderRail}
+					onJumpToStageSectionBelowTopRail={jumpToStageSectionBelowTopRail}
 					scrollRootRef={scrollContainerRef}
 					taskSessions={taskSessions}
 					onStartTask={onStartTask}
