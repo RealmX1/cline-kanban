@@ -1,6 +1,8 @@
 import type { RefObject } from "react";
 import { useEffect, useState } from "react";
 
+import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
+
 /**
  * Focus View 左侧列表中「被选中卡」相对滚动视口的钉住位置：
  * - `hidden`：选中卡整体仍完整落在视口内（上下两沿都不触边）→ 无需浮动钉住条。
@@ -19,10 +21,6 @@ import { useEffect, useState } from "react";
  * 读两次 rect 直接判定」，对突变跳转与连续滚动同样正确，且 rAF 合并保证不抖。
  */
 export type SelectedCardPinState = "hidden" | "pinTop" | "pinBottom";
-
-function escapeAttributeValue(value: string): string {
-	return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-}
 
 export interface UseSelectedCardPinStateOptions {
 	/** 被选中任务的 id；用于在滚动容器内定位真实卡片元素（`data-task-id`）。 */
@@ -50,7 +48,7 @@ export function useSelectedCardPinState({
 			setPinState("hidden");
 			return;
 		}
-		const selector = `[data-task-id="${escapeAttributeValue(selectedTaskId)}"]`;
+		const selector = `[data-task-id="${escapeCssAttributeSelectorValue(selectedTaskId)}"]`;
 
 		let frameId = 0;
 		let target: Element | null = root.querySelector(selector);

@@ -608,3 +608,265 @@ describe("ColumnContextPanel", () => {
 		expect(onMoveToTrashTask).toHaveBeenCalledWith("task-val");
 	});
 });
+
+/**
+ * 钉住 rail 的孪生卡头：折叠状态呈现、折叠开关、跳转与折叠/展开后的滚动落点。
+ *
+ * 必须先给 `getBoundingClientRect` 铺一层受控几何——否则 jsdom 下 `rootRect.bottom <= rootRect.top`
+ * 使 `useStageHeaderPinLayout` 返回空布局、rails 根本不渲染，这些断言会全部落空。
+ *
+ * 版图（滚动口视口 [0, 500]；section 折叠后只剩 40px 卡头 + 2px 外框）：
+ *   backlog     [-300, -100]  整段在视口上沿之上 → 钉顶
+ *   in_progress [ -80,  150]  横跨视口上沿（卡片仍露在视口里）→ 钉顶
+ *   review      [ 200,  400]  随流（焦点卡 [210, 290] 完整可见 → focusedCardPinState = hidden）
+ *   validation  [ 420,  480]  钉底
+ *   trash       [ 500,  560]  钉底（Done 默认折叠）
+ * 顶 rail = backlog, in_progress；底 rail = validation, trash。
+ */
+describe("ColumnContextPanel pinned stage header rails", () => {
+	const FOCUSED_TASK_ID = "task-review";
+	const COLLAPSED_STAGE_SECTION_HEIGHT = 42;
+	const SCROLL_ROOT_RECT = { top: 0, height: 500 };
+	const FOCUSED_CARD_RECT = { top: 210, height: 80 };
+	const EXPANDED_SECTION_RECTS: Record<string, { top: number; height: number }> = {
+		backlog: { top: -300, height: 200 },
+		in_progress: { top: -80, height: 230 },
+		review: { top: 200, height: 200 },
+		validation: { top: 420, height: 60 },
+		trash: { top: 500, height: 60 },
+	};
+
+	const columns: BoardColumn[] = [
+		{ id: "backlog", title: "Backlog", cards: [createCard("task-backlog", "Backlog task")] },
+		{ id: "in_progress", title: "In Progress", cards: [createCard("task-ip", "In progress task")] },
+		{ id: "review", title: "Review", cards: [createCard(FOCUSED_TASK_ID, "Review task")] },
+		{ id: "validation", title: "Validation", cards: [createCard("task-val", "Validation task")] },
+		{ id: "trash", title: "Done", cards: [createCard("task-done", "Done task")] },
+	];
+
+	function toDomRect(top: number, height: number): DOMRect {
+		return {
+			top,
+			bottom: top + height,
+			left: 0,
+			right: 240,
+			width: 240,
+			height,
+			x: 0,
+			y: top,
+			toJSON: () => ({}),
+		} as DOMRect;
+	}
+
+	let container: HTMLDivElement;
+	let root: Root;
+	let previousActEnvironment: boolean | undefined;
+	let scrollIntoViewMock: ReturnType<typeof vi.fn>;
+
+	const railButton = (label: string): HTMLButtonElement | null =>
+		container.querySelector<HTMLButtonElement>(`[data-testid="stage-header-rail"] button[aria-label="${label}"]`);
+
+	const inFlowHeaderButton = (columnId: string): HTMLButtonElement | null =>
+		container.querySelector<HTMLButtonElement>(`[data-stage-section-id="${columnId}"] button`);
+
+	const scrollRootWithWritableScrollTop = (initialScrollTop: number): HTMLElement => {
+		const scrollRoot = container.querySelector<HTMLElement>(".kb-detail-task-list-scroll");
+		if (!scrollRoot) {
+			throw new Error("scroll root missing");
+		}
+		let scrollTop = initialScrollTop;
+		Object.defineProperty(scrollRoot, "scrollTop", {
+			configurable: true,
+			get: () => scrollTop,
+			set: (value: number) => {
+				scrollTop = value;
+			},
+		});
+		return scrollRoot;
+	};
+
+	const renderPanel = async (): Promise<void> => {
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, FOCUSED_TASK_ID)}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+				/>,
+			);
+		});
+	};
+
+	beforeEach(() => {
+		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
+			.IS_REACT_ACT_ENVIRONMENT;
+		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+		container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+		scrollIntoViewMock = vi.fn();
+		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+			configurable: true,
+			value: scrollIntoViewMock,
+		});
+		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback: FrameRequestCallback) => {
+			callback(0);
+			return 1;
+		});
+		vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+			const columnId = this.getAttribute("data-stage-section-id");
+			const expandedRect = columnId ? EXPANDED_SECTION_RECTS[columnId] : undefined;
+			if (expandedRect) {
+				// section 的第二个子节点是卡片区包裹层，折叠时整段 display:none。
+				const stageSectionBody = this.children[1] as HTMLElement | undefined;
+				const isCollapsed = stageSectionBody?.style.display === "none";
+				return toDomRect(expandedRect.top, isCollapsed ? COLLAPSED_STAGE_SECTION_HEIGHT : expandedRect.height);
+			}
+			if (this.getAttribute("data-task-id") === FOCUSED_TASK_ID) {
+				return toDomRect(FOCUSED_CARD_RECT.top, FOCUSED_CARD_RECT.height);
+			}
+			if (this.classList.contains("kb-detail-task-list-scroll")) {
+				return toDomRect(SCROLL_ROOT_RECT.top, SCROLL_ROOT_RECT.height);
+			}
+			return toDomRect(0, 0);
+		});
+	});
+
+	afterEach(() => {
+		act(() => {
+			root.unmount();
+		});
+		vi.restoreAllMocks();
+		container.remove();
+		if (previousActEnvironment === undefined) {
+			delete (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+		} else {
+			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+				previousActEnvironment;
+		}
+	});
+
+	it("renders the expected top and bottom rails for the controlled geometry", async () => {
+		await renderPanel();
+
+		const rails = container.querySelectorAll('[data-testid="stage-header-rail"]');
+		expect([...rails].map((rail) => rail.getAttribute("data-edge"))).toEqual(["top", "bottom"]);
+		for (const title of ["Backlog", "In Progress", "Validation", "Done"]) {
+			expect(railButton(`Jump to ${title}`)).toBeInstanceOf(HTMLButtonElement);
+		}
+		// 嵌套 <button> 是非法 HTML，浏览器会重整 DOM、内层控件行为不可预期；折叠与跳转必须是同级按钮。
+		expect(container.querySelectorAll('[data-testid="stage-header-rail"] button button').length).toBe(0);
+	});
+
+	it("shows the real fold state on the pinned twin header instead of a hard-coded expanded chevron", async () => {
+		await renderPanel();
+
+		expect(railButton("Collapse Backlog")?.getAttribute("aria-expanded")).toBe("true");
+		expect(railButton("Collapse In Progress")?.getAttribute("aria-expanded")).toBe("true");
+		expect(railButton("Collapse Validation")?.getAttribute("aria-expanded")).toBe("true");
+		// Done 默认折叠——钉住条目必须如实呈现，而不是永远显示「已展开」。
+		expect(railButton("Expand Done")?.getAttribute("aria-expanded")).toBe("false");
+		expect(inFlowHeaderButton("trash")?.getAttribute("aria-expanded")).toBe("false");
+	});
+
+	it("mirrors a fold made from the in-flow header onto the pinned twin header", async () => {
+		await renderPanel();
+
+		await act(async () => {
+			inFlowHeaderButton("in_progress")?.click();
+		});
+
+		expect(inFlowHeaderButton("in_progress")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("Expand In Progress")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("Collapse In Progress")).toBeNull();
+	});
+
+	it("collapses a stage whose cards are still in view from the top rail and docks its header at the rail slot", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Collapse In Progress")?.click();
+		});
+
+		// 折叠真的发生了，且与行内卡头是同一份状态……
+		expect(inFlowHeaderButton("in_progress")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("Expand In Progress")?.getAttribute("aria-expanded")).toBe("false");
+		// ……卡头停回它的 rail 槽位（其上只有 backlog 一条：50px）：1000 + (−80 − 0) − 50 = 870，
+		// 下一个 stage 紧随其后。保持 1000 不动会让下方内容整段上移 188px、视口落进 review 中段。
+		expect(scrollRoot.scrollTop).toBe(870);
+	});
+
+	it("collapses a stage that is entirely above the viewport from the top rail without moving the visible content", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Collapse Backlog")?.click();
+		});
+
+		expect(inFlowHeaderButton("backlog")?.getAttribute("aria-expanded")).toBe("false");
+		// backlog 从 200 折到 42，变矮 158：等量补偿，视口里的内容零位移。
+		expect(scrollRoot.scrollTop).toBe(1000 - 158);
+	});
+
+	it("collapses a stage from the bottom rail without scrolling (its cards are all below the viewport)", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Collapse Validation")?.click();
+		});
+
+		expect(inFlowHeaderButton("validation")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("Expand Validation")?.getAttribute("aria-expanded")).toBe("false");
+		expect(scrollRoot.scrollTop).toBe(1000);
+	});
+
+	it("expands a stage from a rail and jumps to it so its first card is actually visible", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Expand Done")?.click();
+		});
+
+		expect(inFlowHeaderButton("trash")?.getAttribute("aria-expanded")).toBe("true");
+		// 目标 index 4 → 基值 R = 4 × 50 = 200；焦点 stage（review，index 2）在目标之上，且以基值试算时
+		// 焦点卡会落到视口上沿之上（210 − 500 + 200 = −90 ≤ 0）→ 预留克隆 16 + 80。
+		// scrollTop = 1000 + (500 − 0) − (200 + 16 + 80) = 1204。
+		expect(scrollRoot.scrollTop).toBe(1204);
+	});
+
+	it("parks the jumped-to stage below the top rail instead of under it", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Jump to In Progress")?.click();
+		});
+
+		// 目标之上只有 backlog 一个条目：R = 40 + 2 + 8 = 50；焦点卡在 review（不在目标之上）→ 无克隆项。
+		// scrollTop = 1000 + (−80 − 0) − 50 = 870。旧的裸 scrollIntoView({block:"start"}) 会把 section 顶对齐到
+		// 滚动口顶沿，正好落在不透明 rail 之下。
+		expect(scrollRoot.scrollTop).toBe(870);
+		expect(scrollIntoViewMock).not.toHaveBeenCalledWith({ block: "start", inline: "nearest" });
+		// 跳转不改折叠状态。
+		expect(railButton("Collapse In Progress")?.getAttribute("aria-expanded")).toBe("true");
+	});
+
+	it("reserves the focused card clone when the focused stage would pin above the jump target", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Jump to Validation")?.click();
+		});
+
+		// 目标 index 3 → 基值 R = 150；焦点 stage（index 2）在目标之上，试算 210 − 420 + 150 = −60 ≤ 0
+		// → 预留 16 + 80。scrollTop = 1000 + 420 − (150 + 16 + 80) = 1174。
+		expect(scrollRoot.scrollTop).toBe(1174);
+	});
+});
