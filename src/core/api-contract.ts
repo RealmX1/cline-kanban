@@ -1112,7 +1112,10 @@ export type RuntimeProjectSummary = z.infer<typeof runtimeProjectSummarySchema>;
 
 export const runtimeTaskCommitIntegrationTrackingStatusSchema = z.enum([
 	"complete",
+	// 真正缺 provenance 的旧 task（功能上线前创建、且首次可追踪时 ahead=0）。
 	"legacy_history_unavailable",
+	// 有 provenance 锚点，但现存证据不足以证明 task commit 归属（例如非纯 fast-forward 的历史）。
+	"task_commit_ownership_history_incomplete",
 	"inplace_task_commit_ownership_unavailable",
 	"git_probe_unavailable",
 ]);

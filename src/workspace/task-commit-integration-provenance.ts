@@ -11,6 +11,7 @@ import type {
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath } from "../state/workspace-state";
 import { computeStablePatchId, readGitHeadInfo, runGit } from "./git-utils";
+import { proveTaskWorktreeHeadMovedOnlyByFastForwardSinceCreation } from "./task-worktree-head-reflog-fast-forward-only-evidence";
 
 const TASK_COMMIT_INTEGRATION_PROVENANCE_FILENAME = "task-commit-integration-provenance.json";
 const TASK_COMMIT_INTEGRATION_PROVENANCE_SCHEMA_VERSION = 1;
@@ -503,7 +504,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 
 	const activeIncarnation = entry.incarnations.at(-1);
 	if (!activeIncarnation) {
-		return createUnavailableWorkspaceGitStatus(input.baseRef, "legacy_history_unavailable");
+		return createUnavailableWorkspaceGitStatus(input.baseRef, "task_commit_ownership_history_incomplete");
 	}
 
 	const observedTaskCommitsBySha = new Map(
@@ -514,16 +515,27 @@ export async function refreshTaskCommitIntegrationProvenance(
 		return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
 	}
 	// 从未观察到 task commit 时，baseRef..HEAD 为空无法区分「task commits 已 handback」与
-	// 「worktree 只是 fast-forward 吸收了 base」。creation floor 只能证明提交在何时出现，不能证明所有权。
+	// 「worktree 只是 fast-forward 吸收了 base」。creation floor 只能证明提交在何时出现，不能证明所有权；
+	// 唯有「单一创建 incarnation + HEAD reflog 自创建起只有 fast-forward」能证明是后者，回流计数如实为 0。
 	if (
 		candidateCommitShas.length === 0 &&
 		observedTaskCommitsBySha.size === 0 &&
 		input.headCommit !== activeIncarnation.initialBaseCommit
 	) {
-		return createUnavailableWorkspaceGitStatus(input.baseRef, "legacy_history_unavailable", {
-			commitsAheadOfBaseRef: input.commitsAheadOfBaseRef,
-			commitsBehindBaseRef: input.commitsBehindBaseRef,
-		});
+		const worktreeHeadMovedOnlyByFastForwardSinceCreation =
+			entry.incarnations.length === 1 &&
+			activeIncarnation.captureSource === "worktree_creation" &&
+			(await proveTaskWorktreeHeadMovedOnlyByFastForwardSinceCreation({
+				worktreePath: input.worktreePath,
+				initialBaseCommit: activeIncarnation.initialBaseCommit,
+				headCommit: input.headCommit,
+			}));
+		if (!worktreeHeadMovedOnlyByFastForwardSinceCreation) {
+			return createUnavailableWorkspaceGitStatus(input.baseRef, "task_commit_ownership_history_incomplete", {
+				commitsAheadOfBaseRef: input.commitsAheadOfBaseRef,
+				commitsBehindBaseRef: input.commitsBehindBaseRef,
+			});
+		}
 	}
 	const newCommitShas = candidateCommitShas.filter((commitSha) => !observedTaskCommitsBySha.has(commitSha));
 	const newCommitIdentities = await resolveCommitIdentities(input.worktreePath, newCommitShas);
@@ -533,7 +545,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 
 	const provenanceFloorCommit = entry.incarnations[0]?.initialBaseCommit;
 	if (!provenanceFloorCommit) {
-		return createUnavailableWorkspaceGitStatus(input.baseRef, "legacy_history_unavailable");
+		return createUnavailableWorkspaceGitStatus(input.baseRef, "task_commit_ownership_history_incomplete");
 	}
 	const baseRefCommits = await loadBaseRefCommitIdentities({
 		repoPath: input.repoPath,

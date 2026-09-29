@@ -576,6 +576,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 			);
 		} else if (taskCommitIntegrationTrackingStatus === "legacy_history_unavailable") {
 			parts.push(`Integrated commit history is unavailable for this legacy task`);
+		} else if (taskCommitIntegrationTrackingStatus === "task_commit_ownership_history_incomplete") {
+			parts.push(`Integrated task commit count cannot be proven from recorded history`);
 		} else if (taskCommitIntegrationTrackingStatus === "inplace_task_commit_ownership_unavailable") {
 			parts.push(`Integrated task commit ownership cannot be isolated in inplace mode`);
 		} else if (taskCommitIntegrationTrackingStatus === "git_probe_unavailable") {
