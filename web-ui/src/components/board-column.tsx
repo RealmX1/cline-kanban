@@ -5,6 +5,7 @@ import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { BoardCard } from "@/components/board-card";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
+import { boardColumnAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
@@ -172,6 +173,7 @@ export const BoardColumn = memo(function BoardColumn({
 	return (
 		<section
 			data-column-id={column.id}
+			data-verification-anchor={boardColumnAnchorKey(column.id)}
 			className="flex flex-col min-w-0 min-h-0 bg-surface-1 rounded-lg overflow-hidden border border-border"
 			style={{
 				flex: "1 1 0",

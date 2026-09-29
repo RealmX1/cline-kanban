@@ -72,7 +72,7 @@ description: Author Post-Deploy Verification for a Cline Kanban task as it enter
 - `guidance.expectedObservation`（判定通过的观察）与 `guidance.failureSignature`（失败长什么样）**分述**。
 - `guidance.anchor` 用**稳定的 `data-verification-anchor` 键**，指向被引导的真实 UI 元素。可用键构造见 `web-ui/src/components/post-deploy-verification/verification-anchor-registry.ts`：
   - `board-task-card:<taskId>`（看板任务卡）
-  - `board-column:<columnId>`（看板某列；**需自行挂锚点的扩展键**——当前没有列容器默认挂 `data-verification-anchor`，使用时须在同一变更内给目标列容器挂上，否则 spotlight 只能降级）
+  - `board-column:<columnId>`（主看板某列，`board-column.tsx` 的列容器已挂；Focus View 的列面板**未挂**，指向那边时须在同一变更内补上，否则 spotlight 只能降级）
   - `task-detail:<taskId>`（Focus/Detail 视图任务详情容器）
   - `verification-panel-task:<taskId>`（面板内任务卡，也是无 anchor 时的降级目标）
   - `anchor.view` 为 `board`（导航回看板）或 `task_detail`（打开该任务详情）。指向新 UI 元素时，同一 PR 内给目标元素挂上对应的 `data-verification-anchor`。

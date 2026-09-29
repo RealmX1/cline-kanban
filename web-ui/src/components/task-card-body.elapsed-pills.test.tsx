@@ -233,3 +233,37 @@ describe("卡片头部时长药丸", () => {
 		expect(host.textContent).toContain("Review API changes");
 	});
 });
+
+describe("Backlog 卡片的 Description 最后更新药丸", () => {
+	function descriptionLastUpdatedPill(host: HTMLElement): HTMLElement | null {
+		return host.querySelector<HTMLElement>("[data-backlog-task-description-last-updated-pill]");
+	}
+
+	function renderBacklogCard(
+		cardOverrides: Partial<ReturnType<typeof createCard>> & {
+			taskDescriptionLastUpdatedAt?: number;
+		},
+	): HTMLDivElement {
+		act(() => root.render(<BoardCard card={{ ...createCard(), ...cardOverrides }} index={0} columnId="backlog" />));
+		return container;
+	}
+
+	it("backlog 卡读 taskDescriptionLastUpdatedAt，而非创建时间或 updatedAt", () => {
+		const host = renderBacklogCard({
+			createdAt: NOW - THREE_DAYS_MS,
+			updatedAt: NOW,
+			taskDescriptionLastUpdatedAt: NOW - TWO_HOURS_MS,
+		});
+		expect(descriptionLastUpdatedPill(host)?.textContent).toContain("2h");
+	});
+
+	it("老卡片缺该字段 ⇒ 回落到 updatedAt", () => {
+		const host = renderBacklogCard({ createdAt: NOW - THREE_DAYS_MS, updatedAt: NOW - TWO_HOURS_MS });
+		expect(descriptionLastUpdatedPill(host)?.textContent).toContain("2h");
+	});
+
+	it("非 backlog 列不渲染该药丸", () => {
+		const host = renderCard();
+		expect(descriptionLastUpdatedPill(host)).toBeNull();
+	});
+});
