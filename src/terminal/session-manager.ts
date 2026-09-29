@@ -894,12 +894,39 @@ interface TerminalEnvironmentOptions {
 	forceColor: boolean;
 }
 
+// Kanban 的 PTY 是一个全新的终端（前端 xterm.js），不是宿主 tmux / screen / zellij 的 pane，也不是
+// 宿主 iTerm 的会话。Kanban 运行时自己常跑在 tmux 里，若把这些宿主身份变量原样继承给子进程，就是
+// 在对 agent 撒谎。真实事故：Codex 0.158 起，只要看到 TMUX/TMUX_PANE 就去 `tmux display-message
+// -p '#{mouse}'` 探测（上游 codex-rs/tui/src/tui/tmux.rs），宿主 tmux `mouse off` → 放弃鼠标捕获、
+// 改开 ?1007 alternate scroll → xterm.js 在 alt buffer 里把滚轮翻译成 ↑/↓ → 滚轮不再滚 transcript，
+// 而是翻输入框的历史 prompt。TERM_PROGRAM 已被覆盖为 kanban，同源的 *_VERSION / 会话 id 等一并剥掉。
+// 只从继承的 process.env 基底里剔除：调用方经 sources 显式传入的同名键仍生效。
+// 刻意不剥 TERMINFO_DIRS 这类 terminfo 查找路径——那是能力数据库位置，不是终端身份。
+const INHERITED_HOST_TERMINAL_IDENTITY_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY: readonly string[] = [
+	"TMUX",
+	"TMUX_PANE",
+	"STY",
+	"ZELLIJ",
+	"ZELLIJ_SESSION_NAME",
+	"ZELLIJ_PANE_ID",
+	"TERM_PROGRAM_VERSION",
+	"TERM_SESSION_ID",
+	"ITERM_SESSION_ID",
+	"LC_TERMINAL",
+	"LC_TERMINAL_VERSION",
+	"TERM_FEATURES",
+];
+
 export function buildTerminalEnvironment(
 	options: TerminalEnvironmentOptions,
 	...sources: Array<Record<string, string | undefined> | undefined>
 ): Record<string, string | undefined> {
+	const inheritedProcessEnvWithoutHostTerminalIdentity: Record<string, string | undefined> = { ...process.env };
+	for (const key of INHERITED_HOST_TERMINAL_IDENTITY_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY) {
+		delete inheritedProcessEnvWithoutHostTerminalIdentity[key];
+	}
 	const env: Record<string, string | undefined> = {
-		...process.env,
+		...inheritedProcessEnvWithoutHostTerminalIdentity,
 		...Object.assign({}, ...sources),
 		COLORTERM: "truecolor",
 		TERM: "xterm-256color",

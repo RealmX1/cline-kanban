@@ -137,6 +137,37 @@ describe("TerminalSessionManager", () => {
 		vi.unstubAllEnvs();
 	});
 
+	it("does not leak the host tmux / terminal identity into the Kanban PTY", () => {
+		// Kanban 运行时跑在 tmux 里时，Codex 0.158 看到继承的 TMUX 会去探测宿主 tmux 的 mouse 选项，
+		// 得到 off 就放弃鼠标捕获，滚轮在 xterm.js 里退化成 ↑/↓ 翻历史 prompt。
+		vi.stubEnv("TMUX", "/private/tmp/tmux-503/default,1107,1");
+		vi.stubEnv("TMUX_PANE", "%1");
+		vi.stubEnv("TERM_PROGRAM_VERSION", "3.7c");
+		vi.stubEnv("LC_TERMINAL", "iTerm2");
+
+		for (const forceColor of [true, false]) {
+			const env = buildTerminalEnvironment({ forceColor });
+
+			expect(Object.hasOwn(env, "TMUX")).toBe(false);
+			expect(Object.hasOwn(env, "TMUX_PANE")).toBe(false);
+			expect(Object.hasOwn(env, "TERM_PROGRAM_VERSION")).toBe(false);
+			expect(Object.hasOwn(env, "LC_TERMINAL")).toBe(false);
+			expect(env.TERM_PROGRAM).toBe("kanban");
+		}
+
+		vi.unstubAllEnvs();
+	});
+
+	it("keeps host terminal identity variables that a source passes explicitly", () => {
+		vi.stubEnv("TMUX", "/private/tmp/tmux-503/default,1107,1");
+
+		const env = buildTerminalEnvironment({ forceColor: false }, { TMUX: "/explicit/tmux-socket,1,0" });
+
+		expect(env.TMUX).toBe("/explicit/tmux-socket,1,0");
+
+		vi.unstubAllEnvs();
+	});
+
 	it("stores hook activity metadata on sessions", () => {
 		const manager = new TerminalSessionManager();
 		manager.hydrateFromRecord({
