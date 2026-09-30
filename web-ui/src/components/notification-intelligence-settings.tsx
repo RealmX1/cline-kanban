@@ -1,3 +1,7 @@
+import {
+	describeNotificationIntelligencePurposeBindingProblem,
+	type NotificationIntelligencePurposeBindingProblem,
+} from "@runtime-notification-intelligence-purpose-binding-problems";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -10,6 +14,17 @@ import {
 import { playNotificationSummarySpeech } from "@/utils/notification-summary-speech";
 
 const inputClassName = "w-full rounded border border-border bg-surface-0 px-2 py-1.5 text-sm text-text-primary";
+function PurposeBindingProblemAlerts({ problems }: { problems: NotificationIntelligencePurposeBindingProblem[] }) {
+	return problems.map((problem) => (
+		<p
+			key={`${problem.purposeBindingKey}-${problem.modelProviderId}-${problem.problemKind}`}
+			role="alert"
+			className="text-status-orange"
+		>
+			{describeNotificationIntelligencePurposeBindingProblem(problem)}
+		</p>
+	));
+}
 export function NotificationIntelligenceSettingsSection({
 	draft,
 	disabled,
@@ -28,6 +43,7 @@ export function NotificationIntelligenceSettingsSection({
 		savedProfile,
 		browserVoiceUri,
 		setBrowserVoiceUri,
+		purposeBindingProblems,
 	} = draft;
 	const [notice, setNotice] = useState("");
 	const [busy, setBusy] = useState(false);
@@ -134,6 +150,11 @@ export function NotificationIntelligenceSettingsSection({
 						<option value="alibaba">阿里百炼 TTS</option>
 					</NativeSelect>
 				</label>
+				<PurposeBindingProblemAlerts
+					problems={purposeBindingProblems.filter(
+						(problem) => problem.modelProviderId === profile.modelProviderId,
+					)}
+				/>
 				<label className="block" htmlFor="notification-intelligence-selection-2">
 					凭据来源
 					<NativeSelect
@@ -250,8 +271,20 @@ export function NotificationIntelligenceSettingsSection({
 										{candidate.displayName}
 									</option>
 								))}
+								{/* 失效的当前绑定必须照实显示，不能落到空值选项上伪装成「沿用环境变量默认配置」。 */}
+								{settings[bindingKey] &&
+									!chatProviders.some(
+										(candidate) => candidate.modelProviderId === settings[bindingKey]?.modelProviderId,
+									) && (
+										<option value={settings[bindingKey].modelProviderId}>
+											{settings[bindingKey].modelProviderId}（已失效）
+										</option>
+									)}
 							</NativeSelect>
 						</label>
+						<PurposeBindingProblemAlerts
+							problems={purposeBindingProblems.filter((problem) => problem.purposeBindingKey === bindingKey)}
+						/>
 						{settings[bindingKey] && (
 							<label className="block">
 								模型 ID
@@ -387,8 +420,24 @@ export function NotificationIntelligenceSettingsSection({
 													{candidate.displayName} · {candidate.alibabaRegion}
 												</option>
 											))}
+										{settings.notificationSpeechBinding?.modelProviderId &&
+											!providers.some(
+												(candidate) =>
+													candidate.providerProtocol === settings.speechProvider &&
+													candidate.modelProviderId ===
+														settings.notificationSpeechBinding?.modelProviderId,
+											) && (
+												<option value={settings.notificationSpeechBinding.modelProviderId}>
+													{settings.notificationSpeechBinding.modelProviderId}（已失效）
+												</option>
+											)}
 									</NativeSelect>
 								</label>
+								<PurposeBindingProblemAlerts
+									problems={purposeBindingProblems.filter(
+										(problem) => problem.purposeBindingKey === "notificationSpeechBinding",
+									)}
+								/>
 								<label className="block" htmlFor="notification-intelligence-selection-10">
 									TTS 模型
 									<NativeSelect

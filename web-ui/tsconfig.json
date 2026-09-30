@@ -19,6 +19,9 @@
       "@runtime-contract": ["../src/core/api-contract.ts"],
       "@runtime-home-agent-session": ["../src/core/home-agent-session.ts"],
       "@runtime-last-conversation-progress-observation": ["../src/core/last-conversation-progress-observation.ts"],
+      "@runtime-notification-intelligence-purpose-binding-problems": [
+        "../src/core/notification-intelligence-purpose-binding-problems.ts"
+      ],
       "@runtime-session-activity": ["../src/core/session-activity.ts"],
       "@runtime-trpc": ["../src/trpc/app-router.ts"],
       "@runtime-shortcuts": ["../src/config/shortcut-utils.ts"],

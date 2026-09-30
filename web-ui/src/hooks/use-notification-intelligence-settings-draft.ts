@@ -1,3 +1,8 @@
+import {
+	describeNotificationIntelligencePurposeBindingProblem,
+	findNotificationIntelligencePurposeBindingProblems,
+	listNewlyIntroducedNotificationIntelligencePurposeBindingProblems,
+} from "@runtime-notification-intelligence-purpose-binding-problems";
 import { useEffect, useState } from "react";
 import {
 	type NotificationIntelligenceSettings,
@@ -89,9 +94,29 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 		providerDrafts.some((draft) => draft.changed) ||
 		JSON.stringify(settings) !== JSON.stringify(savedSettings) ||
 		browserVoiceUri !== savedBrowserVoiceUri;
+	const purposeBindingProblems = settings
+		? findNotificationIntelligencePurposeBindingProblems(
+				settings,
+				providerDrafts.map((draft) => draft.profile),
+			)
+		: [];
 	async function save() {
 		if (!hasUnsavedChanges) return;
 		if (!settings) throw new Error(loadError || "AI 与语音设置仍在加载");
+		// 写入前校验草稿的最终状态：只拦本次新引入的绑定问题，否则会先写 provider、再被 settings 校验拒绝而半保存。
+		const newlyIntroducedPurposeBindingProblems = listNewlyIntroducedNotificationIntelligencePurposeBindingProblems(
+			savedSettings
+				? findNotificationIntelligencePurposeBindingProblems(
+						savedSettings,
+						providerDrafts.flatMap((draft) => (draft.savedProfile ? [draft.savedProfile] : [])),
+					)
+				: [],
+			purposeBindingProblems,
+		);
+		if (newlyIntroducedPurposeBindingProblems.length > 0)
+			throw new Error(
+				newlyIntroducedPurposeBindingProblems.map(describeNotificationIntelligencePurposeBindingProblem).join("；"),
+			);
 		const boundProviderIds = [
 			settings.taskNameSuggestionBinding,
 			settings.notificationAssessmentBinding,
@@ -133,6 +158,7 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 		savedSettings,
 		loadError,
 		hasUnsavedChanges,
+		purposeBindingProblems,
 		save,
 		providers: providerDrafts.map((draft) => draft.profile),
 		profile: selectedProviderDraft?.profile ?? emptyProvider,
@@ -164,8 +190,21 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 		toggleCredentialDeletion: () =>
 			updateSelectedProvider({ apiKey: "", deleteSavedCredential: !selectedProviderDraft?.deleteSavedCredential }),
 		addProvider: () => {
+			// 自动 id 也要避开用途绑定引用的 id：撞上悬空绑定会把历史 not_found 问题变成「新引入」而锁死保存。
+			const occupiedProviderIds = new Set([
+				...providerDrafts.map((draft) => draft.profile.modelProviderId),
+				...[settings, savedSettings].flatMap((candidate) =>
+					candidate
+						? [
+								candidate.taskNameSuggestionBinding,
+								candidate.notificationAssessmentBinding,
+								candidate.notificationSpeechBinding,
+							].flatMap((binding) => (binding ? [binding.modelProviderId] : []))
+						: [],
+				),
+			]);
 			let suffix = providerDrafts.length + 1;
-			while (providerDrafts.some((draft) => draft.profile.modelProviderId === `provider-${suffix}`)) suffix++;
+			while (occupiedProviderIds.has(`provider-${suffix}`)) suffix++;
 			setProviderDrafts((current) => [
 				...current,
 				providerDraft(

@@ -92,6 +92,10 @@ export default defineConfig({
 				__dirname,
 				"../src/core/last-conversation-progress-observation.ts",
 			),
+			"@runtime-notification-intelligence-purpose-binding-problems": resolve(
+				__dirname,
+				"../src/core/notification-intelligence-purpose-binding-problems.ts",
+			),
 			"@runtime-session-activity": resolve(__dirname, "../src/core/session-activity.ts"),
 			"@runtime-shortcuts": resolve(__dirname, "../src/config/shortcut-utils.ts"),
 			"@runtime-task-agent-permission-mode": resolve(__dirname, "../src/core/task-agent-permission-mode.ts"),
