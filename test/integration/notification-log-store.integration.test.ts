@@ -21,6 +21,7 @@ import {
 	readNotificationLog,
 } from "../../src/state/notification-log-store";
 import { getWorkspacesRootPath, loadWorkspaceState, saveWorkspaceState } from "../../src/state/workspace-state";
+import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 import { withIsolatedWorkspaceHome as withIsolatedNotificationLogWorkspaces } from "./isolated-workspace-home-fixture";
 
 function boardWith(cards: { columnId: "review" | "trash"; id: string; title: string }[]): RuntimeBoardData {
@@ -245,7 +246,7 @@ describe.sequential("notification-log-store integration", () => {
 		await withIsolatedNotificationLogWorkspaces(async (registerIsolatedWorkspace) => {
 			const { workspaceId, path: workspacePath } = await registerIsolatedWorkspace("project-a");
 			const initial = await loadWorkspaceState(workspacePath);
-			await saveWorkspaceState(workspacePath, {
+			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: boardWith([
 					{ columnId: "review", id: "task-active", title: "Active task title" },
 					{ columnId: "trash", id: "task-done", title: "Done task title" },

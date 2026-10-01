@@ -24,6 +24,10 @@ import type {
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
 import {
+	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
+	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
+} from "../core/kanban-cli-invocation-environment-actor-claims";
+import {
 	buildKanbanRuntimeUrl,
 	getKanbanRuntimeHost,
 	getKanbanRuntimeOrigin,
@@ -38,6 +42,7 @@ import { createExplorationThreadGraphMaintenanceTrigger } from "../exploration-t
 import { loadExplorationThreadGraphProjection } from "../exploration-thread-graph/exploration-thread-graph-projection-loader";
 import { assembleExplorationThreadGraphSessionRefs } from "../exploration-thread-graph/exploration-thread-graph-session-refs";
 import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "../exploration-thread-graph/exploration-thread-graph-store-location";
+import { activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import {
 	checkRateLimit,
 	clearRateLimit,
@@ -146,6 +151,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 不 await 阻塞启动——清扫是纠偏动作，不是服务可用性的前置条件。
 	scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart();
 
+	// 工作单元间关系账本：注册后本进程每一次 board 写入先过账本（dd2db 1a）。账本打不开时 board 只读。
+	const activatedInterWorkUnitRelationLedgerLiveCapture =
+		await activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
+
 	const resolveWorkspaceScopeFromRequest = async (
 		request: IncomingMessage,
 		requestUrl: URL,
@@ -218,7 +227,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const getScopedAcpTaskSessionService = async (scope: RuntimeTrpcWorkspaceScope): Promise<AcpTaskSessionService> => {
 		let service = acpTaskSessionServiceByWorkspaceId.get(scope.workspaceId);
 		if (!service) {
-			service = createAcpTaskSessionService();
+			service = createAcpTaskSessionService({
+				workspaceId: scope.workspaceId,
+				workspaceRepositoryPath: scope.workspacePath,
+			});
 			acpTaskSessionServiceByWorkspaceId.set(scope.workspaceId, service);
 			acpWorkspacePathByWorkspaceId.set(scope.workspaceId, scope.workspacePath);
 			deps.runtimeStateHub.trackAcpTaskSessionService(scope.workspaceId, scope.workspacePath, service);
@@ -445,6 +457,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
 			workspaceScope: scope.workspaceScope,
+			kanbanRequestOriginActorEvidence: {
+				decodedCliActorClaimsRequestHeader: decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
+					req.headers[KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME],
+				),
+			},
 			runtimeApi: createRuntimeApi({
 				getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
 				getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
@@ -861,6 +878,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			stopEventLoopDelayMonitor();
 			stopProcessFileDescriptorWatermarkMonitor();
 			await terminalWebSocketBridge.close();
+			await activatedInterWorkUnitRelationLedgerLiveCapture.deactivate();
 			await new Promise<void>((resolveClose, rejectClose) => {
 				server.close((error) => {
 					if (error) {

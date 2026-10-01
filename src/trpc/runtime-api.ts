@@ -102,6 +102,7 @@ import {
 	recordTaskSessionStartDiagnostic,
 	type TaskSessionStartDiagnosticEvent,
 } from "../diagnostics/task-session-start-diagnostics-logger";
+import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
 import { createAgentRaisedPendingUserDecisionAnswerDelivery } from "../server/agent-raised-pending-user-decision-answer-delivery";
 import { openInBrowser } from "../server/browser";
 import {
@@ -123,6 +124,7 @@ import {
 	restoreConsumedHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 } from "../state/restoration-deferred-harness-generated-prompt-store";
 import { mutateWorkspaceTaskEditDrafts, readWorkspaceTaskEditDraftsSnapshot } from "../state/task-edit-draft-store";
+import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import { listWorkspaceIndexEntries, loadWorkspaceBoardById, mutateWorkspaceState } from "../state/workspace-state";
 import { suggestTaskNamesFromTaskDescription } from "../task-name-suggestion/suggest-task-names-from-task-description";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
@@ -371,33 +373,42 @@ async function persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard(
 		return;
 	}
 	try {
-		const mutation = await mutateWorkspaceState(options.workspaceScope.workspacePath, (state) => {
-			const card = findWorkspaceBoardCard(state.board, options.taskId);
-			if (
-				!card ||
-				(card.terminalAgentModelOverrideSettings?.agentId === resolvedTerminalAgentModelOverrideSettings.agentId &&
-					card.terminalAgentModelOverrideSettings.modelId === resolvedTerminalAgentModelOverrideSettings.modelId)
-			) {
-				return { board: state.board, value: false, save: false };
-			}
-			// updateTask 里只有 terminalAgentModelOverrideSettings 之外的三态字段会「缺省即保留」；
-			// title / prompt / baseRef / startInPlanMode / autoReview* 不是三态，漏传就会被复位，
-			// 故这几个必须从卡片原值显式回填。
-			const updated = updateTask(state.board, options.taskId, {
-				title: card.title,
-				prompt: card.prompt,
-				baseRef: card.baseRef,
-				startInPlanMode: card.startInPlanMode,
-				taskAgentPermissionMode: card.taskAgentPermissionMode,
-				autoReviewEnabled: card.autoReviewEnabled === true,
-				autoReviewMode: card.autoReviewMode ?? "commit",
-				terminalAgentModelOverrideSettings: resolvedTerminalAgentModelOverrideSettings,
-			});
-			if (!updated.updated) {
-				return { board: state.board, value: false, save: false };
-			}
-			return { board: updated.board, value: true };
-		});
+		const mutation = await mutateWorkspaceState(
+			options.workspaceScope.workspacePath,
+			buildTaskMutationIntentForKanbanRuntimeSystemComponent(
+				"runtime_persist_resolved_terminal_agent_model_override_settings_onto_card",
+				"task_session_start_terminal_agent_model_override_persistence",
+			),
+			(state) => {
+				const card = findWorkspaceBoardCard(state.board, options.taskId);
+				if (
+					!card ||
+					(card.terminalAgentModelOverrideSettings?.agentId ===
+						resolvedTerminalAgentModelOverrideSettings.agentId &&
+						card.terminalAgentModelOverrideSettings.modelId ===
+							resolvedTerminalAgentModelOverrideSettings.modelId)
+				) {
+					return { board: state.board, value: false, save: false };
+				}
+				// updateTask 里只有 terminalAgentModelOverrideSettings 之外的三态字段会「缺省即保留」；
+				// title / prompt / baseRef / startInPlanMode / autoReview* 不是三态，漏传就会被复位，
+				// 故这几个必须从卡片原值显式回填。
+				const updated = updateTask(state.board, options.taskId, {
+					title: card.title,
+					prompt: card.prompt,
+					baseRef: card.baseRef,
+					startInPlanMode: card.startInPlanMode,
+					taskAgentPermissionMode: card.taskAgentPermissionMode,
+					autoReviewEnabled: card.autoReviewEnabled === true,
+					autoReviewMode: card.autoReviewMode ?? "commit",
+					terminalAgentModelOverrideSettings: resolvedTerminalAgentModelOverrideSettings,
+				});
+				if (!updated.updated) {
+					return { board: state.board, value: false, save: false };
+				}
+				return { board: updated.board, value: true };
+			},
+		);
 		if (mutation.value) {
 			void options.broadcastRuntimeWorkspaceStateUpdated?.(
 				options.workspaceScope.workspaceId,
@@ -430,17 +441,24 @@ async function persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard(options: {
 		return;
 	}
 	try {
-		const mutation = await mutateWorkspaceState(options.workspaceScope.workspacePath, (state) => {
-			const applied = applyMostRecentlyLaunchedAgentSessionAgentIdToTask(
-				state.board,
-				options.taskId,
-				options.agentId,
-			);
-			if (!applied.updated) {
-				return { board: state.board, value: false, save: false };
-			}
-			return { board: applied.board, value: true };
-		});
+		const mutation = await mutateWorkspaceState(
+			options.workspaceScope.workspacePath,
+			buildTaskMutationIntentForKanbanRuntimeSystemComponent(
+				"runtime_record_most_recently_launched_agent_session_agent_id_onto_card",
+				"task_session_start_launched_agent_id_persistence",
+			),
+			(state) => {
+				const applied = applyMostRecentlyLaunchedAgentSessionAgentIdToTask(
+					state.board,
+					options.taskId,
+					options.agentId,
+				);
+				if (!applied.updated) {
+					return { board: state.board, value: false, save: false };
+				}
+				return { board: applied.board, value: true };
+			},
+		);
 		if (mutation.value) {
 			void options.broadcastRuntimeWorkspaceStateUpdated?.(
 				options.workspaceScope.workspaceId,
@@ -848,11 +866,18 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						}
 					}
 					// 协议返回的原生 ID 必须在启动响应前落盘，关浏览器不应影响下次寻址。
-					await mutateWorkspaceState(workspaceScope.workspacePath, (state) => ({
-						board: state.board,
-						sessions: { ...state.sessions, [body.taskId]: nextAcpSummary },
-						value: true,
-					}));
+					await mutateWorkspaceState(
+						workspaceScope.workspacePath,
+						buildTaskMutationIntentForKanbanRuntimeSystemComponent(
+							"runtime_persist_acp_protocol_native_session_identity_into_sessions",
+							"acp_task_session_start_native_identity_persistence",
+						),
+						(state) => ({
+							board: state.board,
+							sessions: { ...state.sessions, [body.taskId]: nextAcpSummary },
+							value: true,
+						}),
+					);
 					latestStartedSummaryForDiagnostics = nextAcpSummary;
 					recordStartDiagnostic("response_ready", "response_ready");
 					return { ok: true, summary: nextAcpSummary };
@@ -2296,7 +2321,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		//
 		// 失败口径：**停在已停止并如实报错**。不自动回滚到旧通道、不降级——静默回滚会让用户以为切成功了，
 		// 降级会让他在错误的通道上继续干活。卡片的下次启动通道保持用户选的那条，修好后点 Start 即可。
-		switchAgentSessionTransport: async (workspaceScope, input) => {
+		switchAgentSessionTransport: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
 			const body = parseAgentSessionTransportSwitchRequest(input);
 			let priorAgentSessionStopped = false;
 			try {
@@ -2403,26 +2428,35 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				// 3) 把新通道固化到卡上，使「下次启动」（含崩溃后自动续跑、从垃圾桶拖回）也走新通道。
 				//    updateTask 里非三态的字段漏传会被复位，故必须从卡片原值显式回填——与
 				//    persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard 同一注意事项。
-				const cardMutation = await mutateWorkspaceState(workspaceScope.workspacePath, (state) => {
-					const currentCard = findWorkspaceBoardCard(state.board, body.taskId);
-					if (!currentCard) {
-						return { board: state.board, value: false, save: false };
-					}
-					const updated = updateTask(state.board, body.taskId, {
-						title: currentCard.title,
-						prompt: currentCard.prompt,
-						baseRef: currentCard.baseRef,
-						startInPlanMode: currentCard.startInPlanMode,
-						taskAgentPermissionMode: currentCard.taskAgentPermissionMode,
-						autoReviewEnabled: currentCard.autoReviewEnabled === true,
-						autoReviewMode: currentCard.autoReviewMode ?? "commit",
-						ompAgentSessionTransport: body.targetSessionTransport,
-					});
-					if (!updated.updated) {
-						return { board: state.board, value: false, save: false };
-					}
-					return { board: updated.board, value: true };
-				});
+				//    行动者按请求发起方证据解析（Web UI 目前无 nonce → direct_runtime_trpc_caller，1a.3 接 nonce）；
+				//    必须在 board 锁之外解析，lookups 会读 board.json。
+				const cardMutation = await mutateWorkspaceState(
+					workspaceScope.workspacePath,
+					await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+						taskMutationIntentKind: "runtime_trpc_switch_agent_session_transport_persist_onto_card",
+						kanbanRequestOriginActorEvidence,
+					}),
+					(state) => {
+						const currentCard = findWorkspaceBoardCard(state.board, body.taskId);
+						if (!currentCard) {
+							return { board: state.board, value: false, save: false };
+						}
+						const updated = updateTask(state.board, body.taskId, {
+							title: currentCard.title,
+							prompt: currentCard.prompt,
+							baseRef: currentCard.baseRef,
+							startInPlanMode: currentCard.startInPlanMode,
+							taskAgentPermissionMode: currentCard.taskAgentPermissionMode,
+							autoReviewEnabled: currentCard.autoReviewEnabled === true,
+							autoReviewMode: currentCard.autoReviewMode ?? "commit",
+							ompAgentSessionTransport: body.targetSessionTransport,
+						});
+						if (!updated.updated) {
+							return { board: state.board, value: false, save: false };
+						}
+						return { board: updated.board, value: true };
+					},
+				);
 				if (cardMutation.value) {
 					void deps.broadcastRuntimeWorkspaceStateUpdated?.(
 						workspaceScope.workspaceId,

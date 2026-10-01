@@ -90,6 +90,8 @@ import type {
 	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeIngestExploratoryFindingCandidateResponse,
+	RuntimeKanbanCliTaskBoardMutationRequest,
+	RuntimeKanbanCliTaskBoardMutationResponse,
 	RuntimeListAgentRaisedPendingUserDecisionsRequest,
 	RuntimeListAgentRaisedPendingUserDecisionsResponse,
 	RuntimeListAgentRaisedUserDecisionHistoryForTaskRequest,
@@ -268,6 +270,8 @@ import {
 	runtimeHookIngestResponseSchema,
 	runtimeIngestExploratoryFindingCandidateRequestSchema,
 	runtimeIngestExploratoryFindingCandidateResponseSchema,
+	runtimeKanbanCliTaskBoardMutationRequestSchema,
+	runtimeKanbanCliTaskBoardMutationResponseSchema,
 	runtimeListAgentRaisedPendingUserDecisionsRequestSchema,
 	runtimeListAgentRaisedPendingUserDecisionsResponseSchema,
 	runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema,
@@ -370,6 +374,7 @@ import {
 	notificationArchiveListResponseSchema,
 	notificationCandidateLifecycleSchema,
 } from "../core/notification-lifecycle-contract";
+import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import {
 	getNotificationIntelligenceSettings,
 	saveKanbanModelProviderProfile,
@@ -392,6 +397,8 @@ export interface RuntimeTrpcWorkspaceScope {
 export interface RuntimeTrpcContext {
 	requestedWorkspaceId: string | null;
 	workspaceScope: RuntimeTrpcWorkspaceScope | null;
+	// 请求发起方的行动者证据（dd2db 1a）：CLI 调用环境声明头；1a.3 起再加页面加载 nonce。
+	kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence;
 	runtimeApi: {
 		loadConfig: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeConfigResponse>;
 		saveConfig: (
@@ -425,6 +432,7 @@ export interface RuntimeTrpcContext {
 		switchAgentSessionTransport: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeAgentSessionTransportSwitchRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeAgentSessionTransportSwitchResponse>;
 		transitionTaskToReview: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -643,11 +651,19 @@ export interface RuntimeTrpcContext {
 		saveState: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeWorkspaceStateSaveRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeWorkspaceStateResponse>;
 		addBacklogTask: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeAddBacklogTaskRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeAddBacklogTaskResponse>;
+		// dd2db 1a.2b：`kanban task` 的 board 写动词统一入口（见 api-contract 的 runtimeKanbanCliTaskBoardMutationRequestSchema）。
+		applyKanbanCliTaskBoardMutation: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeKanbanCliTaskBoardMutationRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeKanbanCliTaskBoardMutationResponse>;
 		loadWorkspaceChanges: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeWorkspaceChangesResponse>;
 		loadGitLog: (scope: RuntimeTrpcWorkspaceScope, input: RuntimeGitLogRequest) => Promise<RuntimeGitLogResponse>;
 		loadGitRefs: (
@@ -974,7 +990,11 @@ export const runtimeAppRouter = t.router({
 			.input(runtimeAgentSessionTransportSwitchRequestSchema)
 			.output(runtimeAgentSessionTransportSwitchResponseSchema)
 			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.switchAgentSessionTransport(ctx.workspaceScope, input);
+				return await ctx.runtimeApi.switchAgentSessionTransport(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
 			}),
 		transitionTaskToReview: workspaceProcedure
 			.input(runtimeTaskSessionTransitionToReviewRequestSchema)
@@ -1333,13 +1353,29 @@ export const runtimeAppRouter = t.router({
 			.input(runtimeWorkspaceStateSaveRequestSchema)
 			.output(runtimeWorkspaceStateResponseSchema)
 			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.saveState(ctx.workspaceScope, input);
+				return await ctx.workspaceApi.saveState(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence);
 			}),
 		addBacklogTask: workspaceProcedure
 			.input(runtimeAddBacklogTaskRequestSchema)
 			.output(runtimeAddBacklogTaskResponseSchema)
 			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.addBacklogTask(ctx.workspaceScope, input);
+				return await ctx.workspaceApi.addBacklogTask(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		// CLI 的 board 写动词（create / update / start 移列 / trash / delete）只经这里落盘：runtime 按请求头的
+		// CLI 行动者声明解析行动者后进入持久化漏斗。runtime 离线时 CLI 直接报错，不回退直接写盘（dd2db 1a.2b）。
+		applyKanbanCliTaskBoardMutation: workspaceProcedure
+			.input(runtimeKanbanCliTaskBoardMutationRequestSchema)
+			.output(runtimeKanbanCliTaskBoardMutationResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.applyKanbanCliTaskBoardMutation(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
 			}),
 		getWorkspaceChanges: workspaceProcedure.output(runtimeWorkspaceChangesResponseSchema).query(async ({ ctx }) => {
 			return await ctx.workspaceApi.loadWorkspaceChanges(ctx.workspaceScope);

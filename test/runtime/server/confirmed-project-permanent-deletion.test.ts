@@ -21,6 +21,7 @@ import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestWorkspaceFixture,
 } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 function createCard(taskId: string) {
 	return {
@@ -331,7 +332,7 @@ describe.sequential("confirmed project permanent deletion", () => {
 			}).repositoryPath;
 			const context = await loadWorkspaceContext(projectPath);
 			const initialState = await loadWorkspaceState(projectPath);
-			await saveWorkspaceState(projectPath, {
+			await saveWorkspaceState(projectPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoard([]),
 				sessions: {},
 				expectedRevision: initialState.revision,
@@ -382,14 +383,14 @@ describe.sequential("confirmed project permanent deletion", () => {
 				}).repositoryPath;
 				const context = await loadWorkspaceContext(projectPath);
 				const initialState = await loadWorkspaceState(projectPath);
-				await saveWorkspaceState(projectPath, {
+				await saveWorkspaceState(projectPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 					board: createBoard(["task-a"]),
 					sessions: {},
 					expectedRevision: initialState.revision,
 				});
 				const deleteTaskWorktree = vi.fn(async () => {
 					const concurrentState = await loadWorkspaceState(projectPath);
-					await saveWorkspaceState(projectPath, {
+					await saveWorkspaceState(projectPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 						board: concurrentState.board,
 						sessions: concurrentState.sessions,
 						expectedRevision: concurrentState.revision,

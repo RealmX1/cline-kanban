@@ -16,6 +16,7 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
+import { buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment } from "../terminal/kanban-task-agent-session-work-unit-identity-environment";
 import {
 	AcpClientConnectionRuntime,
 	type AcpConnectionClosedDetail,
@@ -159,7 +160,13 @@ export class AcpTaskSessionService {
 	private readonly latestStartRequestByTaskId = new Map<string, StartAcpTaskSessionRequest>();
 	private userDecisionBroker: AcpUserDecisionBroker = DENY_ALL_USER_DECISION_BROKER;
 
-	constructor() {
+	constructor(
+		// 所在 workspace 的身份，用于给 omp 进程注入工作单元身份变量（dd2db 1a）；缺省时不注入（单测）。
+		private readonly kanbanWorkspaceIdentityForTaskAgentSessionEnvironment: {
+			workspaceId: string;
+			workspaceRepositoryPath: string;
+		} | null = null,
+	) {
 		this.userDecisionBroker = this.pendingUserDecisionBroker;
 		this.connectionRuntime = new AcpClientConnectionRuntime({
 			onSessionUpdate: (taskId, notification) => {
@@ -327,6 +334,17 @@ export class AcpTaskSessionService {
 				// 续跑重开一律不重放 plan 起步（理由见 StartAcpTaskSessionRequest 的字段注释）。
 				startInPlanMode: shouldResumeWithoutResendingPrompt ? false : request.startInPlanMode,
 				resumePriorAgentConversationWithoutResendingPrompt: shouldResumeWithoutResendingPrompt,
+				// omp 每张卡一个进程：工作单元身份直接写进进程 env，工具 shell 里的 kanban CLI 才能声明「是哪张卡」。
+				// omp 的卡片只有一条 agent 会话，会话 id 就是 workspace task id。
+				env: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment
+					? buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment({
+							workspaceTaskId: request.taskId,
+							kanbanTaskConversationSessionId: request.taskId,
+							workspaceId: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment.workspaceId,
+							workspaceRepositoryPath:
+								this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment.workspaceRepositoryPath,
+						})
+					: undefined,
 			});
 			if (
 				this.registry.getEntry(request.taskId) !== entry ||
@@ -700,8 +718,13 @@ function appendStderrDiagnostics(baseMessage: string, trimmedStderrDiagnostics: 
 	return trimmedStderrDiagnostics ? `${baseMessage}\n\n${trimmedStderrDiagnostics}` : baseMessage;
 }
 
-export function createAcpTaskSessionService(): AcpTaskSessionService {
-	return new AcpTaskSessionService();
+export function createAcpTaskSessionService(
+	kanbanWorkspaceIdentityForTaskAgentSessionEnvironment: {
+		workspaceId: string;
+		workspaceRepositoryPath: string;
+	} | null = null,
+): AcpTaskSessionService {
+	return new AcpTaskSessionService(kanbanWorkspaceIdentityForTaskAgentSessionEnvironment);
 }
 
 export type { AcpTaskSessionEntry };

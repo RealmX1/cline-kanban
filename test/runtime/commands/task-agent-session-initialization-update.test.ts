@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCliTaskSessionStartRequest, buildTaskAgentSessionInitialization } from "../../../src/commands/task";
+import { buildCliTaskSessionStartRequest } from "../../../src/commands/task";
 import type { RuntimeTaskAgentSessionInitialization } from "../../../src/core/api-contract";
+import { buildTaskAgentSessionInitialization } from "../../../src/core/kanban-cli-task-card-field-input-resolution";
 
 const CLAUDE_SESSION_INITIALIZATION: RuntimeTaskAgentSessionInitialization = {
 	sourceAgentId: "claude",

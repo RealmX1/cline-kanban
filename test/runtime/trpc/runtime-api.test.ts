@@ -195,6 +195,7 @@ import {
 } from "../../../src/state/restoration-deferred-harness-generated-prompt-store";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
+import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 function createTestRuntimeApi(
 	deps: Omit<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "getScopedAcpTaskSessionService"> &
@@ -1978,6 +1979,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (
 				_workspacePath: string,
+				_taskMutationIntent: unknown,
 				mutate: (state: { board: RuntimeBoardData }) => {
 					board: RuntimeBoardData;
 					value: unknown;
@@ -2177,6 +2179,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (
 				_workspacePath: string,
+				_taskMutationIntent: unknown,
 				mutate: (state: { board: RuntimeBoardData }) => {
 					board: RuntimeBoardData;
 					value: unknown;
@@ -4364,6 +4367,7 @@ describe("createRuntimeApi resumed claude session model", () => {
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (
 				_workspacePath: string,
+				_taskMutationIntent: unknown,
 				mutate: (state: { board: RuntimeBoardData }) => {
 					board: RuntimeBoardData;
 					value: unknown;
@@ -4653,12 +4657,14 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 			],
 			dependencies: [],
 		});
-		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_path: string, mutate: never) => {
-			const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
-				board: { columns: [], dependencies: [] },
-			});
-			return { saved: true, value: mutation.value };
-		});
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (_path: string, _taskMutationIntent: unknown, mutate: never) => {
+				const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
+					board: { columns: [], dependencies: [] },
+				});
+				return { saved: true, value: mutation.value };
+			},
+		);
 	});
 
 	function createAcpServiceMockWithLiveSession() {
@@ -4697,6 +4703,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 		expect(response.ok).toBe(false);
 		expect(response.error).toContain("only one session transport");
@@ -4733,6 +4740,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(acpTaskSessionService.stopTaskSession).toHaveBeenCalledWith("task-omp");
@@ -4777,6 +4785,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(false);

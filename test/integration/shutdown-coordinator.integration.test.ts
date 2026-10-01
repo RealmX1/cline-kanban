@@ -8,6 +8,7 @@ import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestWorkspaceFixture,
 } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
 async function withIsolatedGitWorkspaceHome<T>(
 	run: (context: { gitFixture: IsolatedGitTestWorkspaceFixture }) => Promise<T>,
@@ -95,7 +96,7 @@ describe.sequential("shutdown coordinator integration", () => {
 			}).repositoryPath;
 
 			const managedInitial = await loadWorkspaceState(managedProjectPath);
-			await saveWorkspaceState(managedProjectPath, {
+			await saveWorkspaceState(managedProjectPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoard({
 					inProgress: ["managed-running", "managed-missing-session"],
 					review: ["managed-idle"],
@@ -108,7 +109,7 @@ describe.sequential("shutdown coordinator integration", () => {
 			});
 
 			const indexedInitial = await loadWorkspaceState(indexedProjectPath);
-			await saveWorkspaceState(indexedProjectPath, {
+			await saveWorkspaceState(indexedProjectPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoard({
 					inProgress: ["indexed-missing-session"],
 					review: ["indexed-awaiting-review"],
@@ -166,7 +167,7 @@ describe.sequential("shutdown coordinator integration", () => {
 			const runningSummary = applySessionFacets(createSession("running-task", "running"));
 			const awaitingUserSummary = applySessionFacets(createSession("awaiting-user-task", "awaiting_review"));
 			const idleSummary = applySessionFacets(createSession("idle-task", "idle"));
-			await saveWorkspaceState(projectPath, {
+			await saveWorkspaceState(projectPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoard({
 					inProgress: ["running-task"],
 					review: ["awaiting-user-task", "idle-task"],
