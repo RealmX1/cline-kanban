@@ -66,6 +66,7 @@ import { usePostDeployVerification } from "@/hooks/use-post-deploy-verification"
 import { useProjectNavigation } from "@/hooks/use-project-navigation";
 import { useProjectNumericSlotGroupHotkeys } from "@/hooks/use-project-numeric-slot-group-hotkeys";
 import { useProjectUiState } from "@/hooks/use-project-ui-state";
+import { useQueuedTaskPromptDeliveryProjectionSync } from "@/hooks/use-queued-task-prompt-delivery-projection-sync";
 import { useReviewReadyNotifications } from "@/hooks/use-review-ready-notifications";
 import { useShortcutActions } from "@/hooks/use-shortcut-actions";
 import { useStartupOnboarding } from "@/hooks/use-startup-onboarding";
@@ -147,6 +148,7 @@ export default function App(): ReactElement {
 		latestMcpAuthStatuses,
 		exploratoryFindings: pushedExploratoryFindings,
 		latestExplorationThreadGraphUpdate,
+		queuedTaskPromptDeliveryProjectionsByTaskId: pushedQueuedTaskPromptDeliveryProjectionsByTaskId,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
@@ -203,6 +205,12 @@ export default function App(): ReactElement {
 		workspaceId: projectRuntimeWorkspaceId,
 		refreshKey: streamSnapshotGeneration,
 		pushedFindings: pushedExploratoryFindings,
+	});
+	// 排队 prompt 投影：首屏拉取 + 推送归并 + 重连重拉，写进 per-task store（详情视图与看板卡片按 taskId 订阅）。
+	useQueuedTaskPromptDeliveryProjectionSync({
+		workspaceId: projectRuntimeWorkspaceId,
+		refreshKey: streamSnapshotGeneration,
+		pushedProjectedEntriesByTaskId: pushedQueuedTaskPromptDeliveryProjectionsByTaskId,
 	});
 	const { isBlocked: isKanbanAccessBlocked, refresh: refreshKanbanAccess } = useKanbanAccessGate({
 		workspaceId: projectRuntimeWorkspaceId,

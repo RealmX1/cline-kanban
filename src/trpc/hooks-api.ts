@@ -15,6 +15,7 @@ import {
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
+import { recordHookIngestToolCallAndHookCliResourceUsageToJournal } from "../diagnostics/hook-ingest-tool-call-and-hook-cli-resource-usage-journal-recorder";
 import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
 import type { NotificationAssessmentInput } from "../notifications/notification-assessment-service";
 import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
@@ -157,8 +158,17 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 	return {
 		ingest: async (input) => {
 			let notificationCandidateId: string | null = null;
+			// 资源占用采集（工具调用结果 + hooks CLI 开销）在所有出口统一写 journal（见 finally）；
+			// 唯一例外是「通知已处理的重试投递」：首投已在它自己的 finally 里记过（哪怕客户端因超时没收到
+			// 响应），重试无论从哪个出口离开都不再记——带原生身份的重试会越过下方的早退、走到更后面的出口。
+			let hookIngestResourceUsageJournalContext: {
+				body: RuntimeHookIngestRequest;
+				summary: RuntimeTaskSessionSummary | null;
+			} | null = null;
+			let hookNotificationAlreadyProcessed = false;
 			try {
 				const body = parseHookIngestRequest(input);
+				hookIngestResourceUsageJournalContext = { body, summary: null };
 				const taskId = body.taskId;
 				const workspaceId = body.workspaceId;
 				const event = body.event;
@@ -171,7 +181,6 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						rawPayload: body,
 					});
 				await recordNotificationSignalDecision(notificationCandidateId, "hook_ingest_received", { event });
-				let hookNotificationAlreadyProcessed = false;
 				if (notificationCandidateId) {
 					const lifecycle = await getNotificationLifecycleArchive().get(notificationCandidateId);
 					if (
@@ -200,6 +209,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 
 				const manager = await deps.ensureTerminalManagerForWorkspace(workspaceId, workspacePath);
 				const summary = manager.getSummary(taskId);
+				hookIngestResourceUsageJournalContext = { body, summary };
 				if (!summary) {
 					await recordNotificationSignalDecision(notificationCandidateId, "session_not_found", {}, true);
 					return {
@@ -614,6 +624,10 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				await recordNotificationSignalDecision(notificationCandidateId, "hook_runtime_processing_failed", {}, true);
 				const message = error instanceof Error ? error.message : String(error);
 				return { ok: false, error: message } satisfies RuntimeHookIngestResponse;
+			} finally {
+				if (hookIngestResourceUsageJournalContext && !hookNotificationAlreadyProcessed) {
+					recordHookIngestToolCallAndHookCliResourceUsageToJournal(hookIngestResourceUsageJournalContext);
+				}
 			}
 		},
 	};

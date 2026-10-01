@@ -15,6 +15,7 @@
 // 契约：**永不向调用方抛错、永不返回 Promise**。诊断记录失败绝不能影响被诊断的业务路径，也绝不能制造
 // 未处理拒绝。写入按通道串行排队，因此同一通道的行不会交织。
 
+import { existsSync } from "node:fs";
 import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +29,7 @@ export const DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR = "KANBAN_DIAGNOSTIC_EVEN
 
 // 8 MiB × (1 个活动文件 + 4 个轮转文件) = 每通道最多约 40 MiB 上限。
 const DIAGNOSTIC_EVENT_JOURNAL_ACTIVE_FILE_MAX_BYTES = 8 * 1024 * 1024;
-const DIAGNOSTIC_EVENT_JOURNAL_RETAINED_ROTATED_FILE_COUNT = 4;
+const DIAGNOSTIC_EVENT_JOURNAL_DEFAULT_RETAINED_ROTATED_FILE_COUNT = 4;
 
 // 通道名同时是文件名，故一律用这里声明的 kebab-case 字面量联合（而非任意字符串），
 // 既是单一声明点，也从类型上杜绝路径注入。
@@ -47,7 +48,45 @@ export type DiagnosticEventJournalChannel =
 	// Kanban 每次调用外部模型 provider 的一条用量记录（用途角色、provider、模型、结果、耗时、token）。
 	// 与上面那些「排障绊线」不同，这一条是为**事后统计**而留的：哪些功能在烧钱、哪家 provider 在超时、
 	// 某个用途的 token 量级是多少，事后 `jq` 就能算，不必再去翻各功能自己的日志。
-	| "model-provider-usage";
+	| "model-provider-usage"
+	// 按 task 归因的资源占用采集（见 task-attributed-process-tree-resource-sampler.ts）。同属「事后统计」
+	// 而非排障绊线：每个被归因的进程在消失时写一条生命周期记录（观测到的峰值 RSS、累计 CPU、存活
+	// 时长、是否活过了会话根），每个活会话每 5 分钟写一条按分类聚合的快照。
+	| "task-attributed-process-lifetime-episode"
+	| "task-attributed-process-tree-periodic-resource-snapshot"
+	// Kanban 运行时进程自身的内存 / CPU 基线：「固定服务器成本」的对照，也是进程内 Cline SDK 会话唯一
+	// 可见的资源面（它与 Kanban 同进程，无法按 OS 进程拆分）。
+	| "kanban-runtime-process-self-resource-sample"
+	// 每次工具调用的执行结果（Claude 等经 hook 上报；Cline SDK 经事件流）：时长、成败、中断、截断脱敏后的
+	// 命令文本、MCP server/tool。短命令的开销只能靠这里的 duration 看到——进程采样只看得见活过一个采样周期的进程。
+	| "agent-tool-call-execution-outcome"
+	// `kanban hooks` CLI 进程自身的开销（每次 hook 调用一条）：Kanban 注入到每个 agent 工具调用上的固定成本。
+	| "kanban-hook-cli-invocation-resource-usage"
+	// 模型 token 用量的「累计快照」：每条 = 截至此刻某个原生会话的累计用量（报告取每会话最后一条）。
+	| "task-agent-conversation-model-token-usage-cumulative-snapshot"
+	// task worktree 的实体磁盘体积（不跟随符号链接），低频测量。
+	| "task-worktree-disk-usage-measurement";
+
+// 默认保留深度对排障绊线足够（只需覆盖「上一次出事」），但资源占用通道要支持按 task / 时间窗回看
+// 数周：单独放宽。读取侧必须经 listExistingDiagnosticEventJournalShardFilePathsOldestFirst 走同一个
+// resolver，保证「轮转保留了什么」与「报告读到了什么」是同一个窗口。
+const DIAGNOSTIC_EVENT_JOURNAL_RETAINED_ROTATED_FILE_COUNT_OVERRIDES_BY_CHANNEL: Partial<
+	Record<DiagnosticEventJournalChannel, number>
+> = {
+	// 25 个活会话估算约 5 MB/天，12 个轮转分片 + 活动文件 ≈ 104 MiB ≈ 三周。
+	"task-attributed-process-lifetime-episode": 12,
+	"task-attributed-process-tree-periodic-resource-snapshot": 12,
+	"agent-tool-call-execution-outcome": 12,
+	"kanban-hook-cli-invocation-resource-usage": 12,
+	"task-agent-conversation-model-token-usage-cumulative-snapshot": 12,
+};
+
+export function resolveDiagnosticEventJournalRetainedRotatedFileCount(channel: DiagnosticEventJournalChannel): number {
+	return (
+		DIAGNOSTIC_EVENT_JOURNAL_RETAINED_ROTATED_FILE_COUNT_OVERRIDES_BY_CHANNEL[channel] ??
+		DIAGNOSTIC_EVENT_JOURNAL_DEFAULT_RETAINED_ROTATED_FILE_COUNT
+	);
+}
 
 // 以下字段由本模块权威写入。类型上的 `never` 只能挡住对象字面量与已知形状的展开：一个声明为
 // `Record<string, unknown>` 的变量传进来时 TS 不会拿索引签名去比对可选属性，编译期一个错都不报。
@@ -87,6 +126,29 @@ function getDiagnosticEventJournalRotatedFilePath(
 	rotationIndex: number,
 ): string {
 	return join(getDiagnosticEventJournalDirectoryPath(), `${channel}.${rotationIndex}.jsonl`);
+}
+
+// 读取侧入口：从最旧的轮转分片到活动文件，只列出实际存在的文件。按时间正序拼接即得到完整窗口。
+// 读取途中发生轮转会让某个分片改名，调用方应容忍 ENOENT（跳过即可，丢的只是边界上的几行）。
+export function listExistingDiagnosticEventJournalShardFilePathsOldestFirst(
+	channel: DiagnosticEventJournalChannel,
+): string[] {
+	const shardFilePaths: string[] = [];
+	for (
+		let rotationIndex = resolveDiagnosticEventJournalRetainedRotatedFileCount(channel);
+		rotationIndex >= 1;
+		rotationIndex--
+	) {
+		const rotatedFilePath = getDiagnosticEventJournalRotatedFilePath(channel, rotationIndex);
+		if (existsSync(rotatedFilePath)) {
+			shardFilePaths.push(rotatedFilePath);
+		}
+	}
+	const activeFilePath = getDiagnosticEventJournalActiveFilePath(channel);
+	if (existsSync(activeFilePath)) {
+		shardFilePaths.push(activeFilePath);
+	}
+	return shardFilePaths;
 }
 
 // journal 落点按用户固定（`~/.cline/kanban/…`），与运行实例无关：同一台机器上并行跑多个 Kanban
@@ -174,16 +236,10 @@ async function renameDiagnosticEventJournalFileIfPresent(fromPath: string, toPat
 
 // 轮转：删掉最旧的一档，其余整体后移一位，活动文件降为 .1。
 async function rotateDiagnosticEventJournalFiles(channel: DiagnosticEventJournalChannel): Promise<void> {
-	const oldestRotatedFilePath = getDiagnosticEventJournalRotatedFilePath(
-		channel,
-		DIAGNOSTIC_EVENT_JOURNAL_RETAINED_ROTATED_FILE_COUNT,
-	);
+	const retainedRotatedFileCount = resolveDiagnosticEventJournalRetainedRotatedFileCount(channel);
+	const oldestRotatedFilePath = getDiagnosticEventJournalRotatedFilePath(channel, retainedRotatedFileCount);
 	await rm(oldestRotatedFilePath, { force: true });
-	for (
-		let rotationIndex = DIAGNOSTIC_EVENT_JOURNAL_RETAINED_ROTATED_FILE_COUNT - 1;
-		rotationIndex >= 1;
-		rotationIndex--
-	) {
+	for (let rotationIndex = retainedRotatedFileCount - 1; rotationIndex >= 1; rotationIndex--) {
 		await renameDiagnosticEventJournalFileIfPresent(
 			getDiagnosticEventJournalRotatedFilePath(channel, rotationIndex),
 			getDiagnosticEventJournalRotatedFilePath(channel, rotationIndex + 1),

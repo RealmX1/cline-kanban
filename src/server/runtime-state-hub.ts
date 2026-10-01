@@ -27,7 +27,9 @@ import type {
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeExplorationThreadGraphProjectionView,
 	RuntimeExploratoryFindingEntry,
+	RuntimeLiveTaskResourceUsageSnapshot,
 	RuntimeNotificationFeedEntry,
+	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamErrorMessage,
 	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
@@ -36,10 +38,12 @@ import type {
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamNotificationLogUpdatedMessage,
 	RuntimeStateStreamProjectsMessage,
+	RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage,
 	RuntimeStateStreamSnapshotMessage,
 	RuntimeStateStreamTaskChatClearedMessage,
 	RuntimeStateStreamTaskChatMessage,
 	RuntimeStateStreamTaskReadyForReviewMessage,
+	RuntimeStateStreamTaskResourceUsageSnapshotsUpdatedMessage,
 	RuntimeStateStreamTaskSessionsMessage,
 	RuntimeStateStreamWorkspaceMetadataMessage,
 	RuntimeStateStreamWorkspaceStateMessage,
@@ -113,7 +117,28 @@ export interface RuntimeStateHub {
 		explorationId: string,
 		view: RuntimeExplorationThreadGraphProjectionView,
 	) => void;
+	// 排队 prompt 的出队观察器。**后绑定**：hub 在 cli.ts 里早于 runtime server 创建，而 dispatcher 要用
+	// server 作用域里的三 transport 服务，只能等 server 起来之后再挂上。返回解绑函数。
+	registerQueuedTaskPromptDeliveryDispatchObserver: (observer: QueuedTaskPromptDeliveryDispatchObserver) => () => void;
+	// 排队 prompt 投影变更推送：本 workspace 在场客户端整份替换。0 客户端时跳过——客户端重连后靠
+	// getTaskPromptDeliveryQueue 重查对齐，不补发。
+	broadcastQueuedTaskPromptDeliveriesUpdated: (
+		workspaceId: string,
+		projectedEntriesByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
+	) => void;
+	// 按 task 归因的资源占用：某 workspace 全部卡片的实时快照（全量替换）。每个采样 tick 调一次；
+	// hub 缓存最近一份，新客户端连上后立即补发，首屏不必等下一个 tick。
+	broadcastTaskResourceUsageSnapshotsUpdated: (
+		workspaceId: string,
+		snapshots: RuntimeLiveTaskResourceUsageSnapshot[],
+	) => void;
 	close: () => Promise<void>;
+}
+
+// hub 只需要知道「把每条 summary 交出去」与「workspace 没了就忘掉它」，不依赖 dispatcher 的具体实现。
+export interface QueuedTaskPromptDeliveryDispatchObserver {
+	observeTaskSessionSummary(workspaceId: string, summary: RuntimeTaskSessionSummary): void;
+	forgetWorkspace(workspaceId: string): void;
 }
 
 export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): RuntimeStateHub {
@@ -137,6 +162,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		);
 	const pendingTaskSessionSummariesByWorkspaceId = new Map<string, Map<string, RuntimeTaskSessionSummary>>();
 	// 三 transport 共用的「停止生成响应」边沿观察器（见 queueTaskSessionSummaryBroadcast 的挂载点注释）。
+	let queuedTaskPromptDeliveryDispatchObserver: QueuedTaskPromptDeliveryDispatchObserver | null = null;
 	const agentSessionResponseGenerationStopObserver = createAgentSessionResponseGenerationStopObserver({
 		onPersistError: (error, context) => {
 			logAgentSessionRetentionWarning(
@@ -286,6 +312,13 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		// 位于下方「0 客户端提前返回」之前，故计时与「有没有人在看」彻底解耦——关标签页 / 切项目 /
 		// 折叠侧栏都不影响期限。观察器内部只在状态边沿动账本，不会被高频 summary 刷成 IO 风暴。
 		agentSessionResponseGenerationStopObserver.observeTaskSessionSummary(workspaceId, summary);
+		// 排队 prompt 出队的停止边沿（触发源 (a)）。与上一句同理必须在「0 客户端提前返回」之前——
+		// 否则关掉浏览器标签页，队列就再也不会在 agent 停下时排空。观察器内部只在边沿上动 IO。
+		try {
+			queuedTaskPromptDeliveryDispatchObserver?.observeTaskSessionSummary(workspaceId, summary);
+		} catch {
+			// 出队是附加动作：它的任何异常都不能掀翻 summary 广播链路。
+		}
 		const pending =
 			pendingTaskSessionSummariesByWorkspaceId.get(workspaceId) ?? new Map<string, RuntimeTaskSessionSummary>();
 		pending.set(summary.taskId, summary);
@@ -444,6 +477,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 		disposeTaskSessionSummaryBroadcast(workspaceId);
 		agentSessionResponseGenerationStopObserver.forgetWorkspace(workspaceId);
+		queuedTaskPromptDeliveryDispatchObserver?.forgetWorkspace(workspaceId);
 		persistedAgentTranscriptConversationProgressObserver.forgetWorkspace(workspaceId);
 		workspaceMetadataMonitor.disposeWorkspace(workspaceId);
 	};
@@ -539,6 +573,41 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		};
 		for (const client of clients) {
 			sendRuntimeStateMessage(client, payload);
+		}
+	};
+
+	const broadcastQueuedTaskPromptDeliveriesUpdated = (
+		workspaceId: string,
+		projectedEntriesByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
+	): void => {
+		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
+		if (!clients || clients.size === 0) {
+			return;
+		}
+		const payload: RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage = {
+			type: "queued_task_prompt_deliveries_updated",
+			workspaceId,
+			projectedEntriesByTaskId,
+		};
+		for (const client of clients) {
+			sendRuntimeStateMessage(client, payload);
+		}
+	};
+
+	// 每个 workspace 最近一次资源快照消息（已序列化）：新客户端连上时补发。
+	const latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId = new Map<string, string>();
+	const broadcastTaskResourceUsageSnapshotsUpdated = (
+		workspaceId: string,
+		snapshots: RuntimeLiveTaskResourceUsageSnapshot[],
+	): void => {
+		const serializedPayload = JSON.stringify({
+			type: "task_resource_usage_snapshots_updated",
+			workspaceId,
+			snapshots,
+		} satisfies RuntimeStateStreamTaskResourceUsageSnapshotsUpdatedMessage);
+		latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId.set(workspaceId, serializedPayload);
+		for (const client of runtimeStateClientsByWorkspaceId.get(workspaceId) ?? []) {
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
 		}
 	};
 
@@ -734,6 +803,11 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 							summaries: conversationSummaries,
 						} satisfies RuntimeStateStreamTaskSessionsMessage);
 					}
+					const latestSerializedTaskResourceUsageSnapshotsMessage =
+						latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId.get(monitorWorkspaceId);
+					if (latestSerializedTaskResourceUsageSnapshotsMessage !== undefined) {
+						sendSerializedRuntimeStateMessage(client, latestSerializedTaskResourceUsageSnapshotsMessage);
+					}
 				}
 				// 通知重放是 best-effort：先完成订阅登记，档案慢或故障均不阻塞核心推流。
 				// 重放期间断连由 close handler 释放订阅；这里不再注册或重复释放 monitor。
@@ -836,6 +910,16 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		broadcastNotificationLogUpdated,
 		broadcastExploratoryFindingsUpdated,
 		broadcastExplorationThreadGraphUpdated,
+		registerQueuedTaskPromptDeliveryDispatchObserver: (observer) => {
+			queuedTaskPromptDeliveryDispatchObserver = observer;
+			return () => {
+				if (queuedTaskPromptDeliveryDispatchObserver === observer) {
+					queuedTaskPromptDeliveryDispatchObserver = null;
+				}
+			};
+		},
+		broadcastQueuedTaskPromptDeliveriesUpdated,
+		broadcastTaskResourceUsageSnapshotsUpdated,
 		close: async () => {
 			notificationAssessment.close();
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {

@@ -3,6 +3,8 @@
 // focused on lifecycle, storage, and task-facing orchestration.
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "../core/session-activity";
+import { recordClineSdkToolCallExecutionOutcomeToJournal } from "../diagnostics/cline-sdk-tool-call-execution-outcome-journal-recorder";
+import { recordTaskAgentConversationModelTokenUsageCumulativeSnapshotToJournal } from "../diagnostics/task-agent-conversation-model-token-usage-journal-recorder";
 import { logUserTurnKindCapture } from "../diagnostics/user-turn-kind-logger";
 import {
 	appendAssistantChunk,
@@ -550,6 +552,33 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		return;
 	}
 
+	if (agentEvent?.type === "usage-updated") {
+		// 资源占用采集：SDK 给的是本会话累计用量（含 harness 自报的累计 cost），原样落 journal。
+		const usage = asRecord((agentEvent as { usage?: unknown }).usage);
+		if (usage) {
+			const readUsageNumber = (key: string): number | null =>
+				typeof usage[key] === "number" && Number.isFinite(usage[key]) ? (usage[key] as number) : null;
+			recordTaskAgentConversationModelTokenUsageCumulativeSnapshotToJournal({
+				workspaceId: null,
+				attributedTaskCardId: taskId,
+				sessionTaskId: taskId,
+				agentId: entry.summary.agentId,
+				modelTokenUsageSource: "cline_sdk_usage_event",
+				nativeSessionId: extractClineSessionId(event),
+				totals: {
+					cumulativeInputTokens: readUsageNumber("inputTokens") ?? undefined,
+					cumulativeOutputTokens: readUsageNumber("outputTokens") ?? undefined,
+					cumulativeCacheReadInputTokens: readUsageNumber("cacheReadTokens") ?? undefined,
+					cumulativeCacheCreationInputTokens: readUsageNumber("cacheWriteTokens") ?? undefined,
+				},
+				harnessReportedCumulativeCostUsd: readUsageNumber("totalCost"),
+				contextWindowUsedTokens: null,
+				subagentTranscriptCount: null,
+			});
+		}
+		return;
+	}
+
 	if (agentEvent?.type === "tool-started") {
 		const toolCall = asRecord(agentEvent.toolCall);
 		const toolName = typeof toolCall?.toolName === "string" ? toolCall.toolName : null;
@@ -607,6 +636,16 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const toolCallId = typeof toolCall?.toolCallId === "string" ? toolCall.toolCallId : null;
 		const { output: toolOutput, error: toolError } = readToolResult(agentEvent.message);
 		const toolInput = toolCallId ? entry.toolInputByToolCallId.get(toolCallId) : undefined;
+		recordClineSdkToolCallExecutionOutcomeToJournal({
+			sessionTaskId: taskId,
+			sessionWorkspacePath: entry.summary.workspacePath,
+			agentId: entry.summary.agentId,
+			toolName,
+			toolCallId,
+			toolInput,
+			toolError,
+			toolExecutionDurationMs: null,
+		});
 		const toolDisplay = getClineToolCallDisplay(toolName, toolInput);
 		const userAttentionKind = classifyClineUserAttentionTool(toolName);
 		const isUserAttentionTool = userAttentionKind !== null;
@@ -698,6 +737,16 @@ export function applyClineSessionEvent(input: ApplyClineSessionEventInput): void
 		const toolError = typeof agentEvent.error === "string" ? agentEvent.error : null;
 		const durationMs = typeof agentEvent.durationMs === "number" ? agentEvent.durationMs : null;
 		const toolInput = toolCallId ? entry.toolInputByToolCallId.get(toolCallId) : undefined;
+		recordClineSdkToolCallExecutionOutcomeToJournal({
+			sessionTaskId: taskId,
+			sessionWorkspacePath: entry.summary.workspacePath,
+			agentId: entry.summary.agentId,
+			toolName,
+			toolCallId,
+			toolInput,
+			toolError,
+			toolExecutionDurationMs: durationMs,
+		});
 		const toolDisplay = getClineToolCallDisplay(toolName, toolInput);
 		const userAttentionKind = classifyClineUserAttentionTool(toolName);
 		const isUserAttentionTool = userAttentionKind !== null;

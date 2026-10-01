@@ -1348,3 +1348,34 @@ body.kb-dependency-link-mode {
 	border-radius: 6px;
 	animation: verification-spotlight-pulse 1.1s ease-out 2;
 }
+
+/* -- 排队 prompt：kanban 重启后聚焦任务时的 5 秒提醒 --
+   与上面的 verification spotlight 形态相同（脉冲 ring），但语义是「提醒」而不是「导航」：用 warning 色，
+   且时长正好 5 秒（1s × 5）。刻意不复用 .verification-spotlight-active——两件事共用一个 class，将来任一方
+   调时长 / 配色都会串味。由 spotlightAnchor({ spotlightClassName }) 挂上、到点摘除。 */
+
+@keyframes queued-prompt-restart-reminder-pulse {
+	0% {
+		box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-status-orange) 60%, transparent);
+	}
+	70% {
+		box-shadow: 0 0 0 6px color-mix(in srgb, var(--color-status-orange) 0%, transparent);
+	}
+	100% {
+		box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-status-orange) 0%, transparent);
+	}
+}
+
+.queued-prompt-restart-reminder-active {
+	outline: 2px solid var(--color-status-orange);
+	outline-offset: 1px;
+	border-radius: 4px;
+	animation: queued-prompt-restart-reminder-pulse 1s ease-out 5;
+}
+
+/* 减少动效 ≠ 取消提醒：动画关掉，静态 ring 保留，由同一个 5 秒计时器摘除。 */
+@media (prefers-reduced-motion: reduce) {
+	.queued-prompt-restart-reminder-active {
+		animation: none;
+	}
+}

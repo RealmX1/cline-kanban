@@ -28,6 +28,7 @@ import {
 	GitBranch,
 	Home,
 	Hourglass,
+	ListOrdered,
 	MessagesSquare,
 	Pencil,
 	Pin,
@@ -46,6 +47,7 @@ import {
 	resolveClineModelDisplayName,
 } from "@/components/detail-panels/cline-model-picker-options";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
@@ -56,7 +58,9 @@ import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-
 import { Tooltip } from "@/components/ui/tooltip";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
+import { summarizeQueuedTaskPromptDeliveryCountIndicator } from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import { useQueuedTaskPromptDeliveryProjectionsForTask } from "@/stores/queued-task-prompt-delivery-projection-store";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
@@ -297,6 +301,13 @@ export const TaskCardBody = memo(function TaskCardBody({
 	// parked 徽标，让卡片不再误显示「转圈在算」。
 	const isParkedAwaitingBackgroundWork = isParkedAwaitingDispatchedBackgroundWork(sessionSummary);
 	// 程序化投递正等着这张卡的终端输入框腾出来（计划 §4.4）：在看板上就要看得见，否则又是一次「机器在等、屏幕不说」。
+	// 排队 prompt（主会话的队列；by-the-way 子会话的队列只在详情视图里看）。按 taskId 订阅 store，
+	// 只有这张卡自己的队列变了才重渲。
+	const queuedPromptProjections = useQueuedTaskPromptDeliveryProjectionsForTask(card.id);
+	const queuedPromptCountIndicator = useMemo(
+		() => summarizeQueuedTaskPromptDeliveryCountIndicator(queuedPromptProjections),
+		[queuedPromptProjections],
+	);
 	const terminalDeliveryContentionNotice = describeTerminalDeliveryContention(
 		sessionSummary?.terminalDeliveryContention ?? null,
 	);
@@ -841,6 +852,11 @@ export const TaskCardBody = memo(function TaskCardBody({
 							</Tooltip>
 						</>
 					) : null}
+					<TaskCardResourceUsagePill
+						taskCardId={card.id}
+						isTrashCard={isTrashCard}
+						revealHoverActionTooltip={revealHoverActionTooltip}
+					/>
 					{!isTaskPinboardCopy && isPinnedToTaskPinboard ? (
 						// 置顶板里每张都是置顶的，那边不重复这个标记，改为显示 stage 标签（见下）。
 						<>
@@ -1142,6 +1158,27 @@ export const TaskCardBody = memo(function TaskCardBody({
 						<span className="inline-flex max-w-full items-center gap-1 rounded-md border border-status-orange/30 bg-status-orange/10 px-1.5 py-0.5 text-xs text-status-orange">
 							<Hourglass size={12} className="shrink-0" />
 							<span className="truncate">{terminalDeliveryContentionNotice.headline}</span>
+						</span>
+					</div>
+				) : null}
+				{/* 仅在无争用提示时显示：两条「机器在等」的提示叠在一起只会互相淹没，争用那条更紧急。 */}
+				{!isTrashCard && !terminalDeliveryContentionNotice && queuedPromptCountIndicator.pendingCount > 0 ? (
+					<div className="mt-1">
+						<span
+							className={cn(
+								"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
+								queuedPromptCountIndicator.hasEntriesAwaitingReconfirmationAfterRestart
+									? "border-status-orange/30 bg-status-orange/10 text-status-orange"
+									: "border-border-bright bg-surface-3 text-text-secondary",
+							)}
+						>
+							<ListOrdered size={12} className="shrink-0" />
+							<span className="truncate">
+								{queuedPromptCountIndicator.pendingCount} queued
+								{queuedPromptCountIndicator.hasEntriesAwaitingReconfirmationAfterRestart
+									? " · confirm after restart"
+									: ""}
+							</span>
 						</span>
 					</div>
 				) : null}
