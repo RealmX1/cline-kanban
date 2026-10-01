@@ -8,14 +8,24 @@
 // 失败原因的语义以 src/core/task-message-injection-ledger.ts 为唯一真相（那是跨仓契约的镜像），
 // 这里只做「对排队场景意味着什么」的映射。
 
-import type { TerminalDeliveryFailureReason, TerminalDeliveryStatus } from "./api-contract";
+import type {
+	InjectionLedgerTerminalDeliveryReceipt,
+	TerminalDeliveryFailureReason,
+	TerminalDeliveryStatus,
+} from "./api-contract";
 
 export interface QueuedTaskPromptDeliverySettlement {
 	// delivered = 落终态；retryable_failure = 回队首等下一次机会；terminal_failure = 落 settled_failed 并保留可见；
 	// cancelled = 用户在它已经交给 transport 之后取消、且 transport 确认拦下了（cancelled_before_delivery）。
 	// 最后这一档必须与失败分开：那是用户自己要的结果，显示成「发送失败 · 重新排队？」是在反问他。
+	//
+	// 程序化条目（programmaticInjectionLedgerReceiptLink 非空）的 retryable_failure 由 store 当 terminal_failure 落：
+	// 交给终端投递之后一次定终身，绝不回头再等 agent（见 api-contract.ts 该字段的注释）。
 	outcome: "delivered" | "retryable_failure" | "terminal_failure" | "cancelled";
 	failureNote: string | null;
+	// 本次投递真实的终端回执，原样镜像进程序化条目的注入账本记录。人排的条目忽略它。
+	// 缺省时（出队引擎之外的落定路径）由落定后的状态推出，见 queued-programmatic-injection-ledger-receipt-mirroring.ts。
+	terminalDeliveryReceiptForInjectionLedger?: InjectionLedgerTerminalDeliveryReceipt;
 }
 
 // 「确定一个字节都没进 agent」的那几种：回队首、等下一轮再试（重试预算由 store 计）。

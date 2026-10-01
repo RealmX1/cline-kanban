@@ -7,6 +7,8 @@ import { z } from "zod";
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
+	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
+	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse,
 	RuntimeAgentSessionTransportSwitchRequest,
 	RuntimeAgentSessionTransportSwitchResponse,
 	RuntimeAllProjectsTaskSearchIndexResponse,
@@ -189,6 +191,8 @@ import type {
 import {
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
+	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
+	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema,
 	runtimeAgentSessionTransportSwitchRequestSchema,
 	runtimeAgentSessionTransportSwitchResponseSchema,
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
@@ -521,6 +525,12 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskPromptDeliveryQueueMutateRequest,
 		) => Promise<RuntimeTaskPromptDeliveryQueueMutateResponse>;
+		// `kanban task message --deliver-when-agent-idle`：落注入账本 pending 记录 + 排进队列，一次调用完成
+		// （见 src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue.ts）。只给 CLI 用，浏览器不调。
+		enqueueAgentIdleGatedProgrammaticTaskChatMessage: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
+		) => Promise<RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse>;
 		getWorkspaceTaskEditDrafts: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskEditDraftsReadRequest,
@@ -1134,6 +1144,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeTaskPromptDeliveryQueueMutateResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.mutateTaskPromptDeliveryQueue(ctx.workspaceScope, input);
+			}),
+		enqueueAgentIdleGatedProgrammaticTaskChatMessage: workspaceProcedure
+			.input(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema)
+			.output(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage(ctx.workspaceScope, input);
 			}),
 		getWorkspaceTaskEditDrafts: workspaceProcedure
 			.input(runtimeTaskEditDraftsReadRequestSchema)

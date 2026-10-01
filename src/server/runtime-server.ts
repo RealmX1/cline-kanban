@@ -81,7 +81,7 @@ import {
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
-import { scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart } from "./pending-task-message-injection-startup-sweep";
+import { startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime } from "./pending-task-message-injection-startup-sweep";
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
 import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
@@ -163,8 +163,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 启动清扫：上一次 runtime 生命周期里没落定的程序化投递，其收敛完全依赖已经消失的内存态，
 	// 不清扫就会永远停在 pending。只清扫**超期**的那些——账本是全机共享的，同机并存的另一个实例
 	// 此刻可能正有在途投递，全扫会把它们判成不可纠正的假失败（见清扫模块头注）。
-	// 不 await 阻塞启动——清扫是纠偏动作，不是服务可用性的前置条件。
-	scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart();
+	// 不 await 阻塞启动——清扫是纠偏动作，不是服务可用性的前置条件。启动之后仍按超期判据持续清扫：
+	// runtime 活着期间也会冒出没人收敛的 pending（见清扫模块头注）。
+	const stalePendingTaskMessageInjectionSweepsForRuntimeLifetime =
+		startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime();
 
 	// 本实例的活性心跳。必须在任何启动清扫**之前**起：清扫要按「归属实例此刻还活不活着」判定该不该
 	// 收拾一条记录，而同刻启动的另一个实例读到的心跳目录里必须已经有我——否则它会在那一拍里把我
@@ -1035,6 +1037,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
+			stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 			agentSessionInactivityReclamationScheduler.stop();
 			// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
 			queuedTaskPromptDeliveryDispatcher.stop();

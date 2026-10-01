@@ -8,6 +8,14 @@
 //
 // 跨仓契约：~/.rvf/cross-repo-coordination-with-cline-kanban/terminal-delivery-interface-contract.md
 // 字段名与取值集合已对外发布、RVF 侧据此接线，**改动前必须先改契约文件**。
+//
+// ## 两种记录：立即投递 与 agent 空闲门控的排队投递
+//
+// 不带 --deliver-when-agent-idle 的记录由 CLI 建、立刻交给终端投递，pending 至多活一个终端投递最坏预算。
+// 带它的记录（agent_idle_wait_deadline_at 非空）由 runtime 建，先进 prompt queue 等 agent 空闲，pending 可以
+// 合法地活到调用方给的截止时刻——所以「唯一非终态必然有界收敛」对它的上界是**截止时刻 + 终端投递最坏预算**，
+// 启动清扫的「超期」判据据此放宽（见 resolvePendingRecordBecomesStaleAtEpochMs）。两种记录同一把锁、同一套
+// 写一次即定，只差这一个上界。
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -46,6 +54,12 @@ export const TASK_MESSAGE_TERMINAL_DELIVERY_FAILURE_REASONS = [
 	"session_ended_before_delivery",
 	"cancelled_before_delivery",
 	"runtime_restarted_before_confirmation",
+	// ↓ 以下两个由 **agent 空闲门**（prompt queue 层）判出，终端投递永远不会产生它们。两者都意味着「确定没送达、
+	// 没有任何残留」：条目从未交给终端投递。名字以 agent_ 开头，与终端门（开发者输入争用）那一侧的原因区分开。
+	// 到调用方给的等待上限为止 agent 一直没空闲（在生成 / park 等后台 / 等模态决定 / 会话不在 / 恢复中 / 单飞槽被占）。
+	"agent_never_became_idle_before_queued_delivery_deadline",
+	// 入队即被拒：该 task 或整个 workspace 的非终态排队条目已达上限。
+	"agent_idle_gated_delivery_queue_capacity_exhausted",
 ] as const;
 export type TaskMessageTerminalDeliveryFailureReason = (typeof TASK_MESSAGE_TERMINAL_DELIVERY_FAILURE_REASONS)[number];
 
@@ -73,6 +87,17 @@ export interface TaskMessageInjectionRecord {
 	terminal_delivery_failure_reason?: TaskMessageTerminalDeliveryFailureReason;
 	terminal_delivery_status_updated_at: string;
 	created_at: string;
+	// ↓ 仅 agent 空闲门控的排队投递（--deliver-when-agent-idle）才有。
+	// 最多等到这一刻（ISO8601 UTC）。之前一直没交给终端投递就落 agent_never_became_idle_before_queued_delivery_deadline。
+	agent_idle_wait_deadline_at?: string;
+	// 通过 agent 空闲门、交给终端投递的时刻。pending 且它缺席 ⇒ 卡在 agent 空闲门；pending 且它在 ⇒ 卡在终端门。
+	agent_idle_gate_passed_at?: string;
+	// prompt queue 里对应条目的 id（诊断用：账本 ↔ 队列文件对照）。
+	agent_idle_gated_queue_entry_id?: string;
+}
+
+export function isTaskMessageInjectionRecordGatedUntilAgentIdle(record: TaskMessageInjectionRecord): boolean {
+	return record.agent_idle_wait_deadline_at !== undefined;
 }
 
 export function getTaskMessageInjectionLedgerPath(workspaceStatePath: string): string {
@@ -123,6 +148,15 @@ function normalizeLegacyRecord(record: Record<string, unknown>): TaskMessageInje
 		...(failureReason ? { terminal_delivery_failure_reason: failureReason } : {}),
 		terminal_delivery_status_updated_at: updatedAt,
 		created_at: String(record.created_at),
+		...(typeof record.agent_idle_wait_deadline_at === "string"
+			? { agent_idle_wait_deadline_at: record.agent_idle_wait_deadline_at }
+			: {}),
+		...(typeof record.agent_idle_gate_passed_at === "string"
+			? { agent_idle_gate_passed_at: record.agent_idle_gate_passed_at }
+			: {}),
+		...(typeof record.agent_idle_gated_queue_entry_id === "string"
+			? { agent_idle_gated_queue_entry_id: record.agent_idle_gated_queue_entry_id }
+			: {}),
 	};
 }
 
@@ -200,6 +234,8 @@ export function createPendingTaskMessageInjectionRecord(input: {
 	idempotencyKey: string;
 	promptSha256: string;
 	nowIso: string;
+	// 仅 agent 空闲门控的排队投递传。
+	agentIdleGate?: { waitDeadlineAtIso: string; queueEntryId: string };
 }): TaskMessageInjectionRecord {
 	return {
 		task_id: input.taskId,
@@ -212,6 +248,12 @@ export function createPendingTaskMessageInjectionRecord(input: {
 		terminal_delivery_status: "accepted_pending_submit_confirmation",
 		terminal_delivery_status_updated_at: input.nowIso,
 		created_at: input.nowIso,
+		...(input.agentIdleGate
+			? {
+					agent_idle_wait_deadline_at: input.agentIdleGate.waitDeadlineAtIso,
+					agent_idle_gated_queue_entry_id: input.agentIdleGate.queueEntryId,
+				}
+			: {}),
 	};
 }
 
@@ -280,6 +322,30 @@ export async function recordTaskMessageTerminalDeliveryOutcome(input: {
 	);
 }
 
+// 排队投递通过 agent 空闲门、交给终端投递的那一刻，在账本上记一笔。只改仍 pending 的门控记录、只写一次
+// （重复调用保留第一次的时刻）；不动 terminal_delivery_status_updated_at——那个字段的含义是「状态何时变的」，
+// 而状态没变，仍是 pending。
+export async function recordTaskMessageInjectionAgentIdleGatePassed(input: {
+	ledgerPath: string;
+	taskId: string;
+	idempotencyKey: string;
+	nowIso: string;
+}): Promise<void> {
+	await withTaskMessageInjectionLedgerLock<null>(input.ledgerPath, async (records) => {
+		const existing = findTaskMessageInjectionRecord(records, input.taskId, input.idempotencyKey);
+		if (
+			!existing ||
+			!isTaskMessageInjectionRecordGatedUntilAgentIdle(existing) ||
+			existing.agent_idle_gate_passed_at !== undefined ||
+			isTaskMessageTerminalDeliveryStatusSettled(existing.terminal_delivery_status)
+		) {
+			return { result: null };
+		}
+		const annotated: TaskMessageInjectionRecord = { ...existing, agent_idle_gate_passed_at: input.nowIso };
+		return { records: records.map((record) => (record === existing ? annotated : record)), result: null };
+	});
+}
+
 export interface StalePendingTaskMessageInjectionSweepResult {
 	sweptCount: number;
 	// 本轮因「还没超期」被放过的 pending 里，最早会超期的那条的绝对时刻（epoch ms）；没放过任何一条时为 null。
@@ -290,7 +356,12 @@ export interface StalePendingTaskMessageInjectionSweepResult {
 
 // 账本时间戳读不出来（手改坏 / 更旧的格式）时返回 null，调用方按「已超期」处理：
 // 判失败是安全的那一侧，留着才会变成永远没人收敛的 pending。
-function resolvePendingRecordBecomesStaleAtEpochMs(
+//
+// agent 空闲门控的记录从 max(状态时间戳, 等待截止时刻) 起算：它在截止之前合法地挂着 pending，不是被撂下的。
+// 不放宽的话，并存的第二个 runtime 实例一启动，就会把常驻实例上还在合法排队的记录写成
+// runtime_restarted_before_confirmation——终态写一次即定，那是不可纠正的假失败。
+// 截止时刻读不出来时退回只看状态时间戳（偏向判失败，理由同上）。
+export function resolvePendingRecordBecomesStaleAtEpochMs(
 	record: TaskMessageInjectionRecord,
 	stalePendingThresholdMs: number,
 ): number | null {
@@ -298,7 +369,12 @@ function resolvePendingRecordBecomesStaleAtEpochMs(
 	if (Number.isNaN(statusUpdatedAtMs)) {
 		return null;
 	}
-	return statusUpdatedAtMs + stalePendingThresholdMs;
+	const agentIdleWaitDeadlineAtMs =
+		record.agent_idle_wait_deadline_at === undefined ? Number.NaN : Date.parse(record.agent_idle_wait_deadline_at);
+	const pendingLegitimatelyUntilEpochMs = Number.isNaN(agentIdleWaitDeadlineAtMs)
+		? statusUpdatedAtMs
+		: Math.max(statusUpdatedAtMs, agentIdleWaitDeadlineAtMs);
+	return pendingLegitimatelyUntilEpochMs + stalePendingThresholdMs;
 }
 
 // runtime 启动清扫：把**超期**仍 pending 的记录判失败（契约 § 时序保证 2 的原文就是「超期」）。

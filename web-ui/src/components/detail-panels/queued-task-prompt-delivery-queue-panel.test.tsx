@@ -183,6 +183,36 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 		expect(controller.retrySettledFailedQueuedPromptDelivery).toHaveBeenCalledWith("failed");
 	});
 
+	// 程序化条目（kanban task message --deliver-when-agent-idle）永远独占一次投递：服务端在它前面断链，
+	// 界面不能显示一条「会一起发」的链、也不能让人点亮它两侧的开关。
+	it("程序化条目挂 Automated 徽标；它两侧的合并开关禁用，链条竖线不跨过它", () => {
+		const controller = createControllerDouble([
+			projection("human-1", { deliverTogetherWithNextQueuedEntry: true }),
+			projection("rvf", { programmaticInjectionSource: "rvf-out-of-band-decision-point" }),
+			projection("human-2"),
+		]);
+		render(controller);
+		expect(container.textContent).toContain("Automated · rvf-out-of-band-decision-point");
+		const toggles = [
+			...buttonsWithLabel(container, "Link with next queued prompt"),
+			...buttonsWithLabel(container, "Unlink from next queued prompt"),
+		];
+		expect(toggles).toHaveLength(2);
+		expect(toggles.every((toggle) => toggle.disabled)).toBe(true);
+		// human-1 存着的开关值是 true，但它的下一条是程序化条目 ⇒ 实际不会一起发，界面不画「已合并」。
+		expect(buttonsWithLabel(container, "Unlink from next queued prompt")).toHaveLength(0);
+		const humanRow = container.querySelector('[data-queued-prompt-entry-id="human-1"]');
+		expect(humanRow?.className).not.toContain("border-l-accent");
+	});
+
+	it("程序化条目到截止仍没等到 agent 空闲 ⇒ Recent 里说清楚没发的原因", () => {
+		const controller = createControllerDouble([
+			projection("rvf", { deliveryState: "expired", programmaticInjectionSource: "rvf" }),
+		]);
+		render(controller);
+		expect(container.textContent).toContain("The agent never became idle before the automation's deadline");
+	});
+
 	it("正在发送的条目也能尝试取消（晚了由服务端回执如实告知）", () => {
 		const controller = createControllerDouble([projection("q1", { deliveryState: "handed_to_transport" })]);
 		render(controller);

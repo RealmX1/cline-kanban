@@ -5,11 +5,16 @@
 //   - 重排用「上移 / 下移」按钮，不用拖拽：对着一个会自己推流刷新的列表做 DnD，是「我拖了它又弹回去」的
 //     经典来源；
 //   - 合并开关画在**相邻两行之间**（链条图标），点亮即「这两条作为一条消息发出」。默认全部断开 ⇒ 一轮一条。
+//
+// 程序化条目（`kanban task message --deliver-when-agent-idle`，例：RVF 决策点边界标记）也会出现在这里：
+// 挂「Automated · <source>」徽标，永远独占一次投递——它两侧的合并开关禁用，链条竖线也不跨过它
+// （与服务端 collectQueuedTaskPromptDeliveryChainFromHead 同一口径）。
 
 import {
 	AlertTriangle,
 	ArrowDown,
 	ArrowUp,
+	Bot,
 	Check,
 	ChevronDown,
 	ChevronUp,
@@ -105,11 +110,25 @@ function QueuedPromptTextPreview({
 	);
 }
 
+function isProgrammaticInjectionProjection(projection: RuntimeQueuedTaskPromptDeliveryProjection): boolean {
+	return projection.programmaticInjectionSource != null;
+}
+
 function QueuedPromptSourceBadge({
 	projection,
 }: {
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
 }): React.ReactElement | null {
+	if (projection.programmaticInjectionSource != null) {
+		return (
+			<Tooltip content="Queued by an automation to be delivered once the agent is idle. It is always sent as its own message, and gives up at the automation's deadline instead of interrupting the agent.">
+				<span className="inline-flex items-center gap-1 text-[10px] leading-4 text-text-tertiary">
+					<Bot size={10} />
+					Automated · {projection.programmaticInjectionSource}
+				</span>
+			</Tooltip>
+		);
+	}
 	if (projection.sourcePromptLibraryEntryId === null) {
 		return null;
 	}
@@ -132,6 +151,7 @@ function PendingQueuedPromptRow({
 	isFirstPending,
 	isLastPending,
 	isChainedFromPrevious,
+	isChainedToNext,
 	controller,
 }: {
 	projection: RuntimeQueuedTaskPromptDeliveryProjection;
@@ -139,11 +159,11 @@ function PendingQueuedPromptRow({
 	isFirstPending: boolean;
 	isLastPending: boolean;
 	isChainedFromPrevious: boolean;
+	isChainedToNext: boolean;
 	controller: QueuedTaskPromptDeliveryQueueController;
 }): React.ReactElement {
 	const isInFlight = isQueuedTaskPromptDeliveryInFlight(projection);
 	const blockReasonWording = describeQueuedTaskPromptDispatchBlockReason(projection.dispatchBlockReason);
-	const isChainedToNext = projection.deliverTogetherWithNextQueuedEntry && !isLastPending;
 	return (
 		<div
 			data-queued-prompt-entry-id={projection.queueEntryId}
@@ -233,7 +253,10 @@ function MergeWithNextToggle({
 	nextProjection: RuntimeQueuedTaskPromptDeliveryProjection;
 	controller: QueuedTaskPromptDeliveryQueueController;
 }): React.ReactElement {
-	const isMerged = projection.deliverTogetherWithNextQueuedEntry;
+	// 任一侧是程序化条目：它永远独占一次投递，服务端在它前面断链、也不许点亮它自己的开关。
+	const isFrozenBecauseEitherSideIsAutomated =
+		isProgrammaticInjectionProjection(projection) || isProgrammaticInjectionProjection(nextProjection);
+	const isMerged = projection.deliverTogetherWithNextQueuedEntry && !isFrozenBecauseEitherSideIsAutomated;
 	// 任一侧已在发送：那一串在认领时就冻结了，此时改开关只会让界面与实际发出去的不一致（服务端同样拒绝）。
 	const isFrozenBecauseEitherSideIsSending =
 		isQueuedTaskPromptDeliveryInFlight(projection) || isQueuedTaskPromptDeliveryInFlight(nextProjection);
@@ -241,11 +264,13 @@ function MergeWithNextToggle({
 		<div className="flex items-center justify-center">
 			<Tooltip
 				content={
-					isFrozenBecauseEitherSideIsSending
-						? "Already being sent — the grouping can no longer change."
-						: isMerged
-							? "These two will be sent as one message. Click to send them in separate turns."
-							: "Send this and the next one together as one message"
+					isFrozenBecauseEitherSideIsAutomated
+						? "Automated deliveries are always sent as their own message."
+						: isFrozenBecauseEitherSideIsSending
+							? "Already being sent — the grouping can no longer change."
+							: isMerged
+								? "These two will be sent as one message. Click to send them in separate turns."
+								: "Send this and the next one together as one message"
 				}
 			>
 				<Button
@@ -254,7 +279,7 @@ function MergeWithNextToggle({
 					icon={isMerged ? <Link2 size={12} /> : <Link2Off size={12} />}
 					aria-label={isMerged ? "Unlink from next queued prompt" : "Link with next queued prompt"}
 					aria-pressed={isMerged}
-					disabled={isFrozenBecauseEitherSideIsSending}
+					disabled={isFrozenBecauseEitherSideIsAutomated || isFrozenBecauseEitherSideIsSending}
 					className={cn("h-4", isMerged ? "text-accent" : "text-text-tertiary")}
 					onClick={() => void controller.setQueuedPromptDeliveryMergeWithNext(projection.queueEntryId, !isMerged)}
 				/>
@@ -277,9 +302,16 @@ function SettledQueuedPromptRow({
 		>
 			<div className="mb-1 flex items-center gap-1.5">
 				<QueuedPromptStatusChip projection={projection} />
+				<QueuedPromptSourceBadge projection={projection} />
 				<div className="ml-auto flex items-center gap-0.5">
 					{projection.deliveryState === "settled_failed" ? (
-						<Tooltip content="Queue it again at the end">
+						<Tooltip
+							content={
+								isProgrammaticInjectionProjection(projection)
+									? "Queue it again at the end as your own prompt (the automation is not told)"
+									: "Queue it again at the end"
+							}
+						>
 							<Button
 								variant="ghost"
 								size="xs"
@@ -306,6 +338,11 @@ function SettledQueuedPromptRow({
 			</p>
 			{projection.deliveryState === "settled_failed" && projection.lastDeliveryFailureNote ? (
 				<p className="mt-1 text-[11px] leading-4 text-status-red">{projection.lastDeliveryFailureNote}</p>
+			) : null}
+			{projection.deliveryState === "expired" && isProgrammaticInjectionProjection(projection) ? (
+				<p className="mt-1 text-[11px] leading-4 text-text-tertiary">
+					The agent never became idle before the automation's deadline, so it was not sent.
+				</p>
 			) : null}
 		</div>
 	);
@@ -334,7 +371,18 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 					</p>
 				) : (
 					pending.map((projection, index) => {
+						const previousPendingProjection = pending[index - 1];
 						const nextPendingProjection = pending[index + 1];
+						// 竖线只画真的会一起发出的那几条：程序化条目两侧的链在服务端就是断的。
+						const isChainedToNext =
+							nextPendingProjection !== undefined &&
+							projection.deliverTogetherWithNextQueuedEntry &&
+							!isProgrammaticInjectionProjection(projection) &&
+							!isProgrammaticInjectionProjection(nextPendingProjection);
+						const isChainedFromPrevious =
+							previousPendingProjection?.deliverTogetherWithNextQueuedEntry === true &&
+							!isProgrammaticInjectionProjection(previousPendingProjection) &&
+							!isProgrammaticInjectionProjection(projection);
 						return (
 							<div key={projection.queueEntryId} className="flex flex-col gap-1">
 								<PendingQueuedPromptRow
@@ -342,7 +390,8 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 									position={index + 1}
 									isFirstPending={index === 0}
 									isLastPending={index === pending.length - 1}
-									isChainedFromPrevious={pending[index - 1]?.deliverTogetherWithNextQueuedEntry === true}
+									isChainedFromPrevious={isChainedFromPrevious}
+									isChainedToNext={isChainedToNext}
 									controller={controller}
 								/>
 								{nextPendingProjection ? (
