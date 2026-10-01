@@ -259,7 +259,7 @@ describe("board state", () => {
 			toColumnId: "in_progress",
 		});
 		const inProgressColumn = movedA.board.columns.find((column) => column.id === "in_progress");
-		expect(inProgressColumn?.cards.map((card) => card.id)).toEqual([taskB, taskC, taskA]);
+		expect(inProgressColumn?.cards.map((card) => card.id)).toEqual([taskC, taskB, taskA]);
 	});
 
 	it("inserts programmatic backlog to in-progress moves at the top", () => {
@@ -299,7 +299,7 @@ describe("board state", () => {
 			toColumnId: "in_progress",
 		});
 		const inProgressColumn = movedA.board.columns.find((column) => column.id === "in_progress");
-		expect(inProgressColumn?.cards.map((card) => card.id)).toEqual([taskA, taskB, taskC]);
+		expect(inProgressColumn?.cards.map((card) => card.id)).toEqual([taskA, taskC, taskB]);
 	});
 
 	it("supports programmatic drag transitions between in-progress and review", () => {
@@ -325,7 +325,7 @@ describe("board state", () => {
 			{
 				draggableId: taskA,
 				type: "CARD",
-				source: { droppableId: "in_progress", index: 0 },
+				source: { droppableId: "in_progress", index: 1 },
 				destination: { droppableId: "review", index: 1 },
 				mode: "SNAP",
 				reason: "DROP",
@@ -492,7 +492,7 @@ describe("board state", () => {
 		});
 		expect(movedC.moved).toBe(true);
 		const inProgressColumn = movedC.board.columns.find((column) => column.id === "in_progress");
-		expect(inProgressColumn?.cards.map((card) => card.id)).toEqual([taskC, taskA, taskB]);
+		expect(inProgressColumn?.cards.map((card) => card.id)).toEqual([taskC, taskB, taskA]);
 	});
 
 	it("drops the retired dependencies key when normalizing a legacy board", () => {

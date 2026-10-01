@@ -189,6 +189,7 @@ import {
 	getWorkspacePromptLibraryPath,
 	readWorkspacePromptLibrarySnapshot,
 } from "../../../src/state/prompt-library-store";
+import { MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK } from "../../../src/state/queued-task-prompt-delivery-store";
 import {
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
 	listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
@@ -5373,5 +5374,131 @@ describe("createRuntimeApi releaseDeferredRestorationHarnessNotificationsIntoTas
 				taskId: "task-1",
 			}),
 		).toEqual([]);
+	});
+});
+
+// 排队 prompt 的两条 procedure。出队引擎本身有独立的行为网（queued-task-prompt-delivery-dispatcher.test.ts），
+// 这里只钉 procedure 层自己的语义：空正文拒绝、队列满时**说出来**、在途取消的回执原样带回、改动后通知引擎。
+describe("createRuntimeApi task prompt delivery queue", () => {
+	const createdWorkspaceDirectoryPaths: string[] = [];
+
+	function createQueueWorkspaceScope(): { workspaceId: string; workspacePath: string } {
+		const workspaceId = `queued-prompt-${process.pid}-${Math.random().toString(16).slice(2)}`;
+		const workspaceDirectoryPath = `/tmp/kanban-workspaces/${workspaceId}`;
+		mkdirSync(workspaceDirectoryPath, { recursive: true });
+		createdWorkspaceDirectoryPaths.push(workspaceDirectoryPath);
+		return { workspaceId, workspacePath: "/tmp/repo" };
+	}
+
+	function createQueueApi(
+		scope: { workspaceId: string },
+		dispatcher: CreateRuntimeApiDependencies["queuedTaskPromptDeliveryDispatcher"],
+	) {
+		return createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => scope.workspaceId),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+			queuedTaskPromptDeliveryDispatcher: dispatcher,
+		});
+	}
+
+	function createDispatcherDouble() {
+		return {
+			notifyQueueMutated: vi.fn(async () => {}),
+			cancelInFlightQueuedPromptDelivery: vi.fn(async () => null),
+			buildProjectedEntriesByTaskId: vi.fn(async () => ({})),
+		};
+	}
+
+	afterEach(() => {
+		for (const path of createdWorkspaceDirectoryPaths.splice(0)) {
+			rmSync(path, { recursive: true, force: true });
+		}
+	});
+
+	it("入队后读得回，且改动之后通知出队引擎（触发源 b：agent 已经闲着时立刻出队）", async () => {
+		const scope = createQueueWorkspaceScope();
+		const dispatcher = createDispatcherDouble();
+		const api = createQueueApi(scope, dispatcher);
+		const mutated = await api.mutateTaskPromptDeliveryQueue(scope as never, {
+			mutation: {
+				kind: "enqueue_prompt_for_delivery_after_current_turn",
+				taskId: "task-1",
+				queueEntryId: "q1",
+				text: "跑测试",
+			},
+		});
+		expect(mutated.ok).toBe(true);
+		expect(dispatcher.notifyQueueMutated).toHaveBeenCalledWith(scope.workspaceId, "task-1", mutated.queue);
+		const read = await api.getTaskPromptDeliveryQueue(scope as never, {});
+		expect(read.queue?.entriesByTaskId["task-1"]?.map((entry) => entry.text)).toEqual(["跑测试"]);
+		expect(read.projectedEntriesByTaskId).toEqual({});
+	});
+
+	it("空正文拒绝入队", async () => {
+		const scope = createQueueWorkspaceScope();
+		const api = createQueueApi(scope, createDispatcherDouble());
+		const mutated = await api.mutateTaskPromptDeliveryQueue(scope as never, {
+			mutation: {
+				kind: "enqueue_prompt_for_delivery_after_current_turn",
+				taskId: "task-1",
+				queueEntryId: "q1",
+				text: "   ",
+			},
+		});
+		expect(mutated.ok).toBe(false);
+	});
+
+	// 队列满与幂等重发在快照上长得一样；不单独说出来，用户会以为自己排上了。
+	it("队列满时 ok:false 并明说是满了", async () => {
+		const scope = createQueueWorkspaceScope();
+		const api = createQueueApi(scope, createDispatcherDouble());
+		for (let index = 0; index < MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK; index += 1) {
+			await api.mutateTaskPromptDeliveryQueue(scope as never, {
+				mutation: {
+					kind: "enqueue_prompt_for_delivery_after_current_turn",
+					taskId: "task-1",
+					queueEntryId: `q${index}`,
+					text: `第 ${index} 条`,
+				},
+			});
+		}
+		const overflow = await api.mutateTaskPromptDeliveryQueue(scope as never, {
+			mutation: {
+				kind: "enqueue_prompt_for_delivery_after_current_turn",
+				taskId: "task-1",
+				queueEntryId: "overflow",
+				text: "再排一条",
+			},
+		});
+		expect(overflow).toMatchObject({ ok: false, enqueueRefusedBecauseQueueCapacityIsExhausted: true });
+		// 幂等重发不算被拒。
+		const replay = await api.mutateTaskPromptDeliveryQueue(scope as never, {
+			mutation: {
+				kind: "enqueue_prompt_for_delivery_after_current_turn",
+				taskId: "task-1",
+				queueEntryId: "q0",
+				text: "第 0 条",
+			},
+		});
+		expect(replay.ok).toBe(true);
+		expect(replay.enqueueRefusedBecauseQueueCapacityIsExhausted).toBeUndefined();
+	});
+
+	// already_delivered 必须让用户看见（「来不及了，已经发出去」）。
+	it("取消时把在途投递的取消回执原样带回", async () => {
+		const scope = createQueueWorkspaceScope();
+		const dispatcher = createDispatcherDouble();
+		dispatcher.cancelInFlightQueuedPromptDelivery.mockResolvedValue("already_delivered" as never);
+		const api = createQueueApi(scope, dispatcher);
+		const cancelled = await api.mutateTaskPromptDeliveryQueue(scope as never, {
+			mutation: { kind: "cancel_queued_prompt_delivery", taskId: "task-1", queueEntryId: "q1" },
+		});
+		expect(dispatcher.cancelInFlightQueuedPromptDelivery).toHaveBeenCalledWith(scope.workspaceId, "task-1", "q1");
+		expect(cancelled.inFlightDeliveryCancelResult).toBe("already_delivered");
 	});
 });

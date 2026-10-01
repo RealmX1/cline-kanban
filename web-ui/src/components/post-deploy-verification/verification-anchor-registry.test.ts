@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	boardColumnAnchorKey,
 	boardTaskCardAnchorKey,
+	queuedTaskPromptDeliveryQueueTabAnchorKey,
 	spotlightAnchor,
 	taskDetailAnchorKey,
 	VERIFICATION_ANCHOR_ATTR,
@@ -84,5 +85,66 @@ describe("verification-anchor-registry", () => {
 
 		expect(spotlightAnchor(trickyKey)).toBe(true);
 		expect(el.classList.contains(VERIFICATION_SPOTLIGHT_CLASS)).toBe(true);
+	});
+	// 排队 prompt 的重启提醒拿「高亮挂上了」当「用户看见了」，所以必须能拒绝不在用户眼前的目标。
+	describe("requireVisibleToUser / 自定义高亮类", () => {
+		function mountQueueTab(rect: Partial<DOMRect>): HTMLElement {
+			const el = document.createElement("button");
+			el.setAttribute(VERIFICATION_ANCHOR_ATTR, queuedTaskPromptDeliveryQueueTabAnchorKey("t1"));
+			el.getBoundingClientRect = () =>
+				({
+					left: 0,
+					top: 0,
+					right: 0,
+					bottom: 0,
+					width: 0,
+					height: 0,
+					x: 0,
+					y: 0,
+					toJSON: () => ({}),
+					...rect,
+				}) as DOMRect;
+			document.body.appendChild(el);
+			return el;
+		}
+
+		it("零面积（被 display:none 藏起来）时不挂高亮、返回 false", () => {
+			const el = mountQueueTab({});
+			expect(
+				spotlightAnchor(queuedTaskPromptDeliveryQueueTabAnchorKey("t1"), {
+					requireVisibleToUser: true,
+					spotlightClassName: "queued-prompt-restart-reminder-active",
+				}),
+			).toBe(false);
+			expect(el.classList.contains("queued-prompt-restart-reminder-active")).toBe(false);
+		});
+
+		it("完全在视口外（窄屏横向溢出）且滚不回来时返回 false", () => {
+			const el = mountQueueTab({ left: 5000, right: 5060, top: 10, bottom: 34, width: 60, height: 24 });
+			expect(
+				spotlightAnchor(queuedTaskPromptDeliveryQueueTabAnchorKey("t1"), {
+					requireVisibleToUser: true,
+					scrollIntoView: "only_if_out_of_view",
+				}),
+			).toBe(false);
+			expect(el.scrollIntoView).toHaveBeenCalledWith({ behavior: "auto", block: "nearest", inline: "nearest" });
+		});
+
+		it("在视口里且没被盖住：挂自定义高亮类（不动默认的验证高亮类），到点摘除", () => {
+			const el = mountQueueTab({ left: 10, right: 70, top: 10, bottom: 34, width: 60, height: 24 });
+			expect(
+				spotlightAnchor(queuedTaskPromptDeliveryQueueTabAnchorKey("t1"), {
+					requireVisibleToUser: true,
+					scrollIntoView: "only_if_out_of_view",
+					spotlightClassName: "queued-prompt-restart-reminder-active",
+					durationMs: 5000,
+				}),
+			).toBe(true);
+			expect(el.scrollIntoView).not.toHaveBeenCalled();
+			expect(el.classList.contains("queued-prompt-restart-reminder-active")).toBe(true);
+			expect(el.classList.contains(VERIFICATION_SPOTLIGHT_CLASS)).toBe(false);
+			vi.advanceTimersByTime(5000);
+			expect(el.classList.contains("queued-prompt-restart-reminder-active")).toBe(false);
+		});
 	});
 });

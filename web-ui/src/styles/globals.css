@@ -936,18 +936,10 @@ body,
 	overscroll-behavior: contain;
 }
 
-/* -- Viewport-bottom floating pills --
-   Report bug / Post-Deploy Verification 两枚 pill 是 fixed 挂在 body 上的浮层，与移动端
-   Focus View 底部那条常驻虚拟按键条互不知情 —— 不让位就正好压在方向键和 Enter 上。
-   按键条挂载时把自己的实测高度写进下面这个变量（terminal-virtual-key-bar-viewport-bottom-inset.ts），
-   pill 读它整体抬高；变量缺省 0px，所以桌面端和任何没有按键条的视图位置不变。
-   这属于「跨组件、无共同父节点的布局粘合」，Tailwind 类表达不了，故落在这里。 */
+/* 验证面板与引导浮层通过实测的视口底部让位量避开移动端虚拟按键条。
+   变量缺省 0px，桌面端及没有按键条的视图保持原位置。 */
 
-.kb-viewport-bottom-pill-primary {
-	bottom: calc(1rem + var(--kb-terminal-virtual-key-bar-viewport-bottom-inset, 0px));
-}
-
-.kb-viewport-bottom-pill-stacked {
+.kb-viewport-bottom-verification-floating-panel {
 	bottom: calc(5rem + var(--kb-terminal-virtual-key-bar-viewport-bottom-inset, 0px));
 }
 
@@ -1277,4 +1269,35 @@ body,
 	outline-offset: 2px;
 	border-radius: 6px;
 	animation: verification-spotlight-pulse 1.1s ease-out 2;
+}
+
+/* -- 排队 prompt：kanban 重启后聚焦任务时的 5 秒提醒 --
+   与上面的 verification spotlight 形态相同（脉冲 ring），但语义是「提醒」而不是「导航」：用 warning 色，
+   且时长正好 5 秒（1s × 5）。刻意不复用 .verification-spotlight-active——两件事共用一个 class，将来任一方
+   调时长 / 配色都会串味。由 spotlightAnchor({ spotlightClassName }) 挂上、到点摘除。 */
+
+@keyframes queued-prompt-restart-reminder-pulse {
+	0% {
+		box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-status-orange) 60%, transparent);
+	}
+	70% {
+		box-shadow: 0 0 0 6px color-mix(in srgb, var(--color-status-orange) 0%, transparent);
+	}
+	100% {
+		box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-status-orange) 0%, transparent);
+	}
+}
+
+.queued-prompt-restart-reminder-active {
+	outline: 2px solid var(--color-status-orange);
+	outline-offset: 1px;
+	border-radius: 4px;
+	animation: queued-prompt-restart-reminder-pulse 1s ease-out 5;
+}
+
+/* 减少动效 ≠ 取消提醒：动画关掉，静态 ring 保留，由同一个 5 秒计时器摘除。 */
+@media (prefers-reduced-motion: reduce) {
+	.queued-prompt-restart-reminder-active {
+		animation: none;
+	}
 }

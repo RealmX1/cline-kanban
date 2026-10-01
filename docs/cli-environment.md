@@ -75,7 +75,7 @@ Providers with built-in defaults (`KNOWN_MODEL_PROVIDER_DEFAULTS` in `src/model-
 
 | Provider id | Default base URL | Default model |
 |-------------|------------------|---------------|
-| `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` (stable alias for DeepSeek-V4-Flash-0731) |
+| `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` (a floating DeepSeek-side alias — which model serves it and at what rate is whatever the [official pricing page](https://api-docs.deepseek.com/quick_start/pricing) says today) |
 
 A provider with a key but no resolvable base URL or model is treated as unusable rather than having an endpoint guessed for it — sending a credential to a guessed address is worse than doing nothing.
 

@@ -107,6 +107,7 @@ import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from ".
 import { recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking } from "../inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
 import { createAgentRaisedPendingUserDecisionAnswerDelivery } from "../server/agent-raised-pending-user-decision-answer-delivery";
 import { openInBrowser } from "../server/browser";
+import type { QueuedTaskPromptDeliveryDispatcher } from "../server/queued-task-prompt-delivery-dispatcher";
 import {
 	dismissAgentRaisedPendingUserDecision,
 	isOpenAgentRaisedPendingUserDecision,
@@ -119,6 +120,12 @@ import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-s
 import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { clearNotificationLog, markTaskNotificationsVisited } from "../state/notification-log-store";
 import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
+import {
+	isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask,
+	isQueuedTaskPromptDeliveryWorkspaceQueueFull,
+	mutateWorkspaceQueuedTaskPromptDeliveries,
+	readWorkspaceQueuedTaskPromptDeliverySnapshot,
+} from "../state/queued-task-prompt-delivery-store";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
@@ -145,6 +152,10 @@ import {
 } from "../terminal/terminal-agent-model-selection";
 import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
+import {
+	cancelProgrammaticTaskChatMessageStillAwaitingAgentIdle,
+	enqueueAgentIdleGatedProgrammaticTaskChatMessage,
+} from "./agent-idle-gated-programmatic-task-chat-message-enqueue";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
 import { sendTaskChatMessageAcrossSessionTransports } from "./task-chat-message-send-across-session-transports";
 
@@ -218,6 +229,12 @@ export interface CreateRuntimeApiDependencies {
 	prepareForStateReset?: () => Promise<void>;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
+	// 排队 prompt 的出队引擎（runtime 级单例，见 src/server/queued-task-prompt-delivery-dispatcher.ts）。
+	// 缺席时（单测）队列照样可读写，只是改动后不会立刻尝试出队、投影不带阻塞原因、在途条目无法取消。
+	queuedTaskPromptDeliveryDispatcher?: Pick<
+		QueuedTaskPromptDeliveryDispatcher,
+		"notifyQueueMutated" | "cancelInFlightQueuedPromptDelivery" | "buildProjectedEntriesByTaskId"
+	>;
 }
 
 async function resolveExistingTaskCwdOrEnsure(options: {
@@ -2144,6 +2161,16 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		// 与「确认落定」共用那一把写一次即定的锁，取消与确认的竞争因此是确定性的。
 		cancelTaskChatDelivery: async (workspaceScope, input) => {
 			try {
+				// 还在等 agent 空闲的程序化排队投递不在 PTY 单飞槽里，PTY 取消对它无效——先在队列里撤下它。
+				const cancelledWhileAwaitingAgentIdle = await cancelProgrammaticTaskChatMessageStillAwaitingAgentIdle(
+					{ notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated },
+					workspaceScope.workspaceId,
+					input.taskId,
+					input.idempotencyKey,
+				);
+				if (cancelledWhileAwaitingAgentIdle !== null) {
+					return { ok: true, cancelResult: cancelledWhileAwaitingAgentIdle };
+				}
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				return {
 					ok: true,
@@ -2182,6 +2209,104 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					library: null,
 					error: error instanceof Error ? error.message : String(error),
 				};
+			}
+		},
+		getTaskPromptDeliveryQueue: async (workspaceScope) => {
+			try {
+				const queue = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceScope.workspaceId);
+				return {
+					ok: true,
+					queue,
+					projectedEntriesByTaskId:
+						(await deps.queuedTaskPromptDeliveryDispatcher?.buildProjectedEntriesByTaskId(
+							workspaceScope.workspaceId,
+							queue,
+						)) ?? null,
+				};
+			} catch (error) {
+				return {
+					ok: false,
+					queue: null,
+					projectedEntriesByTaskId: null,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+		mutateTaskPromptDeliveryQueue: async (workspaceScope, input) => {
+			const { mutation } = input;
+			const workspaceId = workspaceScope.workspaceId;
+			try {
+				if (
+					mutation.kind === "enqueue_prompt_for_delivery_after_current_turn" &&
+					mutation.text.trim().length === 0
+				) {
+					return {
+						ok: false,
+						queue: null,
+						projectedEntriesByTaskId: null,
+						error: "A queued prompt cannot be empty.",
+					};
+				}
+				// 已经交给 transport 的条目 store 的 cancel 意图动不了它（那是「可能已经发出去了」的状态），
+				// 得先走既有 cancelTaskChatDelivery；拦下之后由投递那条路径把它结算成 cancelled。
+				// 其余状态（queued / claimed_for_dispatch）由下面的 store 意图就地取消。
+				const inFlightDeliveryCancelResult =
+					mutation.kind === "cancel_queued_prompt_delivery"
+						? ((await deps.queuedTaskPromptDeliveryDispatcher?.cancelInFlightQueuedPromptDelivery(
+								workspaceId,
+								mutation.taskId,
+								mutation.queueEntryId,
+							)) ?? null)
+						: null;
+				const queue = await mutateWorkspaceQueuedTaskPromptDeliveries(workspaceId, mutation);
+				const taskEntries = queue.entriesByTaskId[mutation.taskId] ?? [];
+				// 入队 / 重排被拒与幂等重发在快照上长得一样（都是原样返回），只能事后按「那条在不在」+「满没满」分辨。
+				const expectedNewQueueEntryId =
+					mutation.kind === "enqueue_prompt_for_delivery_after_current_turn"
+						? mutation.queueEntryId
+						: mutation.kind === "retry_settled_failed_queued_prompt_delivery"
+							? mutation.replacementQueueEntryId
+							: null;
+				const enqueueRefusedBecauseQueueCapacityIsExhausted =
+					expectedNewQueueEntryId !== null &&
+					!taskEntries.some((entry) => entry.queueEntryId === expectedNewQueueEntryId) &&
+					isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(queue, mutation.taskId);
+				await deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated(workspaceId, mutation.taskId, queue);
+				return {
+					ok: !enqueueRefusedBecauseQueueCapacityIsExhausted,
+					queue,
+					projectedEntriesByTaskId:
+						(await deps.queuedTaskPromptDeliveryDispatcher?.buildProjectedEntriesByTaskId(workspaceId, queue)) ??
+						null,
+					...(enqueueRefusedBecauseQueueCapacityIsExhausted
+						? {
+								enqueueRefusedBecauseQueueCapacityIsExhausted: true,
+								error: isQueuedTaskPromptDeliveryWorkspaceQueueFull(queue)
+									? "This project already has the maximum number of queued prompts across all tasks."
+									: "This task already has the maximum number of queued prompts.",
+							}
+						: {}),
+					inFlightDeliveryCancelResult,
+				};
+			} catch (error) {
+				// 与 prompt library 同理：写失败时 queue 返回 null 而不是「变更前的快照」，前端必须知道手上那份不再可信。
+				return {
+					ok: false,
+					queue: null,
+					projectedEntriesByTaskId: null,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+		enqueueAgentIdleGatedProgrammaticTaskChatMessage: async (workspaceScope, input) => {
+			try {
+				return await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+					{ notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated },
+					workspaceScope.workspaceId,
+					input,
+				);
+			} catch (error) {
+				return { ok: false, error: error instanceof Error ? error.message : String(error) };
 			}
 		},
 		getWorkspaceTaskEditDrafts: async (workspaceScope) => {

@@ -7,6 +7,8 @@ import { z } from "zod";
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
+	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
+	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse,
 	RuntimeAgentSessionTransportSwitchRequest,
 	RuntimeAgentSessionTransportSwitchResponse,
 	RuntimeAllProjectsTaskSearchIndexResponse,
@@ -152,6 +154,10 @@ import type {
 	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkResponse,
+	RuntimeTaskPromptDeliveryQueueMutateRequest,
+	RuntimeTaskPromptDeliveryQueueMutateResponse,
+	RuntimeTaskPromptDeliveryQueueReadRequest,
+	RuntimeTaskPromptDeliveryQueueResponse,
 	RuntimeTaskSessionInputRequest,
 	RuntimeTaskSessionInputResponse,
 	RuntimeTaskSessionStartRequest,
@@ -189,6 +195,8 @@ import type {
 import {
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
+	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
+	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema,
 	runtimeAgentSessionTransportSwitchRequestSchema,
 	runtimeAgentSessionTransportSwitchResponseSchema,
 	runtimeAllProjectsTaskSearchIndexResponseSchema,
@@ -334,6 +342,10 @@ import {
 	runtimeTaskNameSuggestionResponseSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema,
+	runtimeTaskPromptDeliveryQueueMutateRequestSchema,
+	runtimeTaskPromptDeliveryQueueMutateResponseSchema,
+	runtimeTaskPromptDeliveryQueueReadRequestSchema,
+	runtimeTaskPromptDeliveryQueueResponseSchema,
 	runtimeTaskSessionInputRequestSchema,
 	runtimeTaskSessionInputResponseSchema,
 	runtimeTaskSessionStartRequestSchema,
@@ -523,6 +535,22 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimePromptLibraryMutateRequest,
 		) => Promise<RuntimePromptLibraryResponse>;
+		// 排队 prompt 投递（见 src/state/queued-task-prompt-delivery-store.ts）。读是 workspace 级整份快照 + 投影；
+		// 写是意图式 mutation，与 prompt library 同形。
+		getTaskPromptDeliveryQueue: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskPromptDeliveryQueueReadRequest,
+		) => Promise<RuntimeTaskPromptDeliveryQueueResponse>;
+		mutateTaskPromptDeliveryQueue: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskPromptDeliveryQueueMutateRequest,
+		) => Promise<RuntimeTaskPromptDeliveryQueueMutateResponse>;
+		// `kanban task message --deliver-when-agent-idle`：落注入账本 pending 记录 + 排进队列，一次调用完成
+		// （见 src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue.ts）。只给 CLI 用，浏览器不调。
+		enqueueAgentIdleGatedProgrammaticTaskChatMessage: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
+		) => Promise<RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse>;
 		getWorkspaceTaskEditDrafts: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskEditDraftsReadRequest,
@@ -1174,6 +1202,24 @@ export const runtimeAppRouter = t.router({
 			.output(runtimePromptLibraryResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.mutateWorkspacePromptLibrary(ctx.workspaceScope, input);
+			}),
+		getTaskPromptDeliveryQueue: workspaceProcedure
+			.input(runtimeTaskPromptDeliveryQueueReadRequestSchema)
+			.output(runtimeTaskPromptDeliveryQueueResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getTaskPromptDeliveryQueue(ctx.workspaceScope, input);
+			}),
+		mutateTaskPromptDeliveryQueue: workspaceProcedure
+			.input(runtimeTaskPromptDeliveryQueueMutateRequestSchema)
+			.output(runtimeTaskPromptDeliveryQueueMutateResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.mutateTaskPromptDeliveryQueue(ctx.workspaceScope, input);
+			}),
+		enqueueAgentIdleGatedProgrammaticTaskChatMessage: workspaceProcedure
+			.input(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema)
+			.output(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage(ctx.workspaceScope, input);
 			}),
 		getWorkspaceTaskEditDrafts: workspaceProcedure
 			.input(runtimeTaskEditDraftsReadRequestSchema)

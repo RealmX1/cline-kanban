@@ -26,11 +26,13 @@ export interface UsePostDeployVerificationResult {
 	loadError: string | null;
 	// 首次成功加载前为 false——用于避免面板在数据到达前闪现空态。
 	hasLoadedOnce: boolean;
+	// 未加载或无部署记录时为 null；只有历史记录时为 0，保留顶栏唯一入口。
+	pendingVerificationTaskCount: number | null;
 	refresh: () => void;
 	// 「保持最前」偏好（默认 true，见 plan 面板行为表）。
 	stayInFront: boolean;
 	setStayInFront: Dispatch<SetStateAction<boolean>>;
-	// 折叠为右下角 badge 的偏好。
+	// 面板隐藏偏好，隐藏后通过顶栏唯一入口展开。
 	collapsed: boolean;
 	setCollapsed: Dispatch<SetStateAction<boolean>>;
 	toggleChecklistItem: (deploymentId: string, taskId: string, itemId: string, checked: boolean) => Promise<void>;
@@ -293,6 +295,10 @@ export function usePostDeployVerification(workspaceId: string | null): UsePostDe
 				.sort((left, right) => Date.parse(right.deployedAtIso) - Date.parse(left.deployedAtIso)),
 		[deploymentGroups, activeDeploymentId],
 	);
+	const pendingVerificationTaskCount =
+		hasLoadedOnce && deploymentGroups.length > 0
+			? (activeGroup?.tasks.filter((task) => task.verifiedAt === null && task.droppedReason === null).length ?? 0)
+			: null;
 
 	const toggleChecklistItem = useCallback(
 		async (deploymentId: string, taskId: string, itemId: string, checked: boolean): Promise<void> => {
@@ -494,6 +500,7 @@ export function usePostDeployVerification(workspaceId: string | null): UsePostDe
 		activeDeploymentId,
 		loadError,
 		hasLoadedOnce,
+		pendingVerificationTaskCount,
 		refresh,
 		stayInFront,
 		setStayInFront,

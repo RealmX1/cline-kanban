@@ -16,6 +16,7 @@ import type {
 	RuntimeWorkspaceChangesMode,
 	RuntimeWorkspaceFileSearchResponse,
 	RuntimeWorkspaceStateResponse,
+	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
 import {
 	parseGitCheckoutRequest,
@@ -33,6 +34,7 @@ import {
 	discardTaskEditDraftsForTasksRemovedFromBoard,
 } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import { discardQueuedTaskPromptDeliveriesForTasks } from "../state/queued-task-prompt-delivery-store";
 import {
 	loadWorkspaceBoardById,
 	mutateWorkspaceState,
@@ -112,6 +114,30 @@ async function discardTaskEditDraftsForTasksRemovedFromSavedBoard(
 	}
 }
 
+// 同一条兜底旁路：任务从看板上永久消失时丢弃它的排队 prompt。与草稿相反，队列条目不是用户资产而是
+// **待执行的机器动作**——目标任务都不在了还留着它，只会在任务被恢复时突然发射。仅移进 trash 列的任务
+// 仍在两份 board 里，差集天然不碰它（trash 列里的会话不在跑，门控 4 兜住，队列只是安静地等）。
+async function discardQueuedTaskPromptDeliveriesForTasksRemovedFromSavedBoard(
+	workspaceId: string,
+	boardBeforeSave: RuntimeBoardData | null,
+	boardAfterSave: RuntimeBoardData,
+	onQueueRewritten: ((workspaceId: string, snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot) => void) | undefined,
+): Promise<void> {
+	if (boardBeforeSave === null) {
+		return;
+	}
+	const removedTaskIds = collectTaskIdsRemovedFromBoard(boardBeforeSave, boardAfterSave);
+	if (removedTaskIds.length === 0) {
+		return;
+	}
+	try {
+		const snapshot = await discardQueuedTaskPromptDeliveriesForTasks({ workspaceId, taskIds: removedTaskIds });
+		onQueueRewritten?.(workspaceId, snapshot);
+	} catch {
+		// 同上：残留的队列会在 24h 保质期后自然过期，比让看板保存整个失败好得多。
+	}
+}
+
 // 与上面的草稿清理同一条兜底旁路：任务从看板上永久消失（浏览器删卡 / 清空 Done）时，按前缀批删它的
 // 全部 turn checkpoint ref（姊妹蓝图 §1.4：存续期全量保留，永久删除时批删）。仅移进 trash 列的任务
 // 仍在两份 board 里，差集天然不碰它。失败语义照旧——任何失败就地咽掉，绝不让看板保存因此失败。
@@ -145,6 +171,11 @@ export interface CreateWorkspaceApiDependencies {
 	listProjectRuntimeSessionSummaries: (workspaceId: string) => RuntimeTaskSessionSummary[];
 	// 行动者解析 lookups（dd2db 1a）。测试注入用；缺省为读 workspace 索引与 board.json 的生产实现。
 	kanbanActorResolutionLookups?: KanbanActorResolutionLookups;
+	// 任务离开看板导致队列被丢弃之后，让出队引擎刷新缓存并重发投影。
+	onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard?: (
+		workspaceId: string,
+		snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
+	) => void;
 }
 
 function normalizeOptionalTaskWorkspaceScopeInput(
@@ -612,6 +643,12 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					workspaceScope.workspacePath,
 					boardBeforeSave,
 					response.board,
+				);
+				await discardQueuedTaskPromptDeliveriesForTasksRemovedFromSavedBoard(
+					workspaceScope.workspaceId,
+					boardBeforeSave,
+					response.board,
+					deps.onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard,
 				);
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceScope.workspaceId, workspaceScope.workspacePath);
 				void deps.broadcastRuntimeProjectsUpdated(workspaceScope.workspaceId);

@@ -9,6 +9,7 @@ import type {
 	RuntimeAgentRaisedUserDecisionHistoryEntry,
 	RuntimeAgentRaisedUserDecisionHistoryResolution,
 } from "@/runtime/types";
+import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 import { preserveAgentAuthoredLineBreaksAsMarkdownHardBreaks } from "@/utils/preserve-agent-authored-line-breaks-as-markdown-hard-breaks";
 
 // 问答记录：agent 问过什么、你怎么答的、补充了什么、在哪答的、有没有送达。
@@ -31,6 +32,44 @@ const HISTORY_RESOLUTION_TONE_CLASS: Record<RuntimeAgentRaisedUserDecisionHistor
 	cancelled_by_agent_session_transport_switch: "bg-surface-2 text-text-secondary",
 	superseded_by_later_question_without_answer: "bg-surface-2 text-text-secondary",
 };
+
+// 卡头上了结时刻的前缀词：resolvedAt 对不同结局含义不同（作答 / 拒答 / 取消 / 被新问题取代的那一刻）。
+const HISTORY_RESOLVED_AT_PREFIX_LABEL: Record<RuntimeAgentRaisedUserDecisionHistoryResolution, string> = {
+	answered_in_kanban_panel: "作答于",
+	answered_in_agent_terminal: "作答于",
+	declined_in_agent_terminal: "拒答于",
+	dismissed_in_kanban_panel: "取消于",
+	cancelled_by_agent_session_transport_switch: "取消于",
+	superseded_by_later_question_without_answer: "被取代于",
+};
+
+function isSameLocalCalendarDay(leftEpochMs: number, rightEpochMs: number): boolean {
+	return new Date(leftEpochMs).toDateString() === new Date(rightEpochMs).toDateString();
+}
+
+// 「提问于」已带日期，同一天的了结时刻只显示钟点，避免卡头重复日期。
+function formatResolvedAtOmittingDateWhenSameLocalDayAsAskedAt(askedAt: number, resolvedAt: number): string {
+	return isSameLocalCalendarDay(askedAt, resolvedAt)
+		? new Date(resolvedAt).toLocaleTimeString()
+		: new Date(resolvedAt).toLocaleString();
+}
+
+function formatQuestionWaitedDuration(askedAt: number, resolvedAt: number): string {
+	const compactElapsed = formatCompactElapsedSince(askedAt, resolvedAt);
+	return compactElapsed === "now" ? "<1m" : compactElapsed;
+}
+
+// 没有了结时刻（转录截断）时返回 null：整段不显示，绝不回退到其它字段。
+function describeHistoryEntryResolvedAtAndQuestionWaitedDuration(
+	entry: RuntimeAgentRaisedUserDecisionHistoryEntry,
+): string | null {
+	if (entry.resolvedAt === null) {
+		return null;
+	}
+	const resolvedAtText = formatResolvedAtOmittingDateWhenSameLocalDayAsAskedAt(entry.askedAt, entry.resolvedAt);
+	const questionWaitedDurationText = formatQuestionWaitedDuration(entry.askedAt, entry.resolvedAt);
+	return `${HISTORY_RESOLVED_AT_PREFIX_LABEL[entry.resolution]} ${resolvedAtText}（等了 ${questionWaitedDurationText}）`;
+}
 
 function describeAnswerDeliveryState(
 	answerDeliveryState: RuntimeAgentRaisedUserDecisionHistoryEntry["answerDeliveryState"],
@@ -55,6 +94,8 @@ function AgentRaisedUserDecisionHistoryEntryCard({
 }): ReactElement {
 	const [isQuestionBodyExpanded, setIsQuestionBodyExpanded] = useState(false);
 	const deliveryDescription = describeAnswerDeliveryState(entry.answerDeliveryState);
+	const resolvedAtAndQuestionWaitedDurationDescription =
+		describeHistoryEntryResolvedAtAndQuestionWaitedDuration(entry);
 	return (
 		<article className="space-y-2 rounded-md border border-border bg-surface-1 px-2.5 py-2">
 			<header className="flex flex-wrap items-center gap-1.5 text-[11px]">
@@ -71,6 +112,9 @@ function AgentRaisedUserDecisionHistoryEntryCard({
 					</span>
 				) : null}
 				<span className="text-text-tertiary">提问于 {new Date(entry.askedAt).toLocaleString()}</span>
+				{resolvedAtAndQuestionWaitedDurationDescription !== null ? (
+					<span className="text-text-tertiary">· {resolvedAtAndQuestionWaitedDurationDescription}</span>
+				) : null}
 				{entry.recordSource === "agent_conversation_transcript" ? (
 					<span className="text-text-tertiary">· 来自会话转录</span>
 				) : null}
