@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AddProjectDialog } from "@/components/add-project-dialog";
 import { notifyError, showAppToast } from "@/components/app-toaster";
-import { BugReportFab } from "@/components/bug-report/bug-report-fab";
+import { BugReportTriggerButton } from "@/components/bug-report/bug-report-trigger-button";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
@@ -976,15 +976,7 @@ export default function App(): ReactElement {
 	// 单实例即消除了双实例各自 30s 轮询同一 endpoint、以及新部署时重复弹「检测到新部署」toast 的根因。
 	const postDeployVerification = usePostDeployVerification(projectRuntimeWorkspaceId);
 	const { setCollapsed: setPostDeployVerificationCollapsed } = postDeployVerification;
-	const postDeployVerificationActiveGroup = postDeployVerification.activeGroup;
-	// 待核对数 = active 组内未核对且未被 reconcile 移除的任务数；与面板 countPending 语义一致。
-	// 未加载或无 active 组时为 null → 顶栏不渲染 badge（项目切换时 hook 会重置 hasLoadedOnce，badge 自动隐藏）。
-	const postDeployVerificationPendingCount =
-		postDeployVerification.hasLoadedOnce && postDeployVerificationActiveGroup
-			? postDeployVerificationActiveGroup.tasks.filter(
-					(task) => task.verifiedAt === null && task.droppedReason === null,
-				).length
-			: null;
+	const postDeployVerificationPendingCount = postDeployVerification.pendingVerificationTaskCount;
 	// 顶栏 badge 与 controller 面板共用同一实例，setCollapsed(false) 直接展开面板，无需强制 remount。
 	const handleOpenPostDeployVerification = useCallback(() => {
 		setPostDeployVerificationCollapsed(false);
@@ -1334,6 +1326,13 @@ export default function App(): ReactElement {
 						}
 						postDeployVerificationPendingCount={postDeployVerificationPendingCount}
 						onOpenPostDeployVerification={handleOpenPostDeployVerification}
+						bugReportTriggerButton={
+							<BugReportTriggerButton
+								projects={projects}
+								currentProjectId={currentProjectId}
+								activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
+							/>
+						}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 						<div
@@ -1770,12 +1769,6 @@ export default function App(): ReactElement {
 						</AlertDialogAction>
 					</AlertDialogFooter>
 				</AlertDialog>
-
-				<BugReportFab
-					projects={projects}
-					currentProjectId={currentProjectId}
-					activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
-				/>
 
 				<PostDeployVerificationController
 					verification={postDeployVerification}

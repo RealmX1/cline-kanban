@@ -51,7 +51,7 @@ export enum LocalStorageKey {
 	Theme = "kanban.theme",
 	// Post-Deploy Verification 浮动面板的「保持最前」偏好（默认 true，由消费方 use-post-deploy-verification 兜底）。
 	PostDeployVerificationStayInFront = "kanban.post-deploy-verification-stay-in-front",
-	// Post-Deploy Verification 面板折叠为右下角 badge 的偏好。
+	// Post-Deploy Verification 面板隐藏偏好，旧 key 保持兼容。
 	PostDeployVerificationCollapsed = "kanban.post-deploy-verification-collapsed",
 	// Task Pinboard（置顶板）折叠态。主看板顶部横条与 Focus View 左侧分段各自一个键：
 	// 两处的纵向空间预算完全不同（横条挤的是整个看板高度，分段挤的是左列表），用户大概率不希望联动。

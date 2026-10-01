@@ -27,7 +27,7 @@ export interface BugReportDialogProps {
 	currentProject: RuntimeProjectSummary | null;
 	/** Short label of what the user is looking at (e.g. a task id or "board"). */
 	activeView: string;
-	/** Clean-page screenshot captured by the FAB before this dialog mounted, or null on failure. */
+	/** 报告入口在此对话框挂载前获取的页面截图，失败时为 null。 */
 	initialScreenshot: TaskImage | null;
 }
 
@@ -48,7 +48,7 @@ export function BugReportDialog({
 
 	const canAutoCreateTask = devProject !== null && autoCreateTask;
 
-	// On open: reset fields and seed the attachment strip with the FAB-captured screenshot.
+	// 打开时重置字段，并把入口预先获取的截图放入附件栏。
 	useEffect(() => {
 		if (!open) {
 			return;
