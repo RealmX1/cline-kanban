@@ -154,3 +154,33 @@ run：`~/.rvf/user-local-data/run-logs/runs/rvf-20260922T122340Z-agentic-initiat
 `verification list` 自查仍为 `ok:true, count:4`，保持原 1 个 automated / 3 个 guided 定义及资产，不变更脚本、不重复注册；因此无新增 dry-run。后续正常 deployment record 后沿用原定义。自动资产位于 `~/.cline/kanban/verifications/e80b5f80-f50d-40e3-81bf-124edd13f13b/`，cleanup 为 automatic，兜底清理命令仍为 `kanban verification cleanup --verification-id e80b5f80-f50d-40e3-81bf-124edd13f13b`；无 repo instrumentation。
 
 此轮修改未提交、未部署；未重建线上 checkout 的依赖，也未改变用户语音配置。线上故障仍需在部署时按实际服务 Node 重建依赖并完成档案 API 验证，不能把新增预检等同于线上修复完成。
+
+## 语言模型与 TTS 设置分组（2026-09-24 收尾）
+
+Settings → Notifications 现在有两个独立分组：
+
+- 「语言模型」包含 OpenAI 兼容 Provider 凭据、任务起名与通知判断/摘要用途、AI 判断开关及延期兜底。
+- 「语音合成 TTS」包含 DeepInfra/阿里百炼凭据、声音模式、音色与播放参数；浏览器系统语音无需创建 Provider。
+
+两组分别选择、添加和编辑 Provider，新增配置使用所属组协议；共享摘要/播报语言位于两组上方。底部统一 Save、Cancel、凭据来源和存储机制沿用既有实现。新增但未编辑/绑定的 Provider 不会落盘，保留上一轮 RVF 修复。
+
+部署前验证：设置页 19 项回归覆盖分组筛选、独立编辑/密钥、用途归属、唯一表单 ID、空状态和统一保存；Web 全量 174 文件 / 1,712 项通过，根与 Web 类型检查、Biome 和 diff 检查通过。中断前已完成 Web 生产构建，以及真实 Chromium 挂载生产 Settings 组件的交互验证：两组独立选择与编辑、阿里地域字段、统一 Save 均通过，并检查了截图；API 由隔离 fixture 拦截，未修改现场凭据、未发出付费请求。
+
+恢复时 `/tmp` 日志已清空；重新运行的类型检查、Web 全量测试与登记自查日志保存在 `~/.cline/validation-evidence/8dc89/provider-settings-separation/`。中断前的构建与浏览器结果以上述会话中的工具输出为证，没有把已丢失的临时截图当作持久资产。
+
+部署后验证 reconcile：
+
+| 行为 | 部署前已证 | 部署后待验 | 处理 |
+| --- | --- | --- | --- |
+| 分组、独立选择/草稿、用途筛选及统一保存 | 回归测试与真实 Chromium | 无新增现场依赖 | 不新增验证 |
+| 系统语音与第三方 BYOK | 界面操作和请求边界 | 原有真实设备输出、账户权限与 OS 凭据授权 | 原两条引导更新至「语音合成 TTS」入口 |
+
+已原位更新 `0b7a1f36-5619-4472-a731-2efe8b9cf980`（系统语音）和 `3d1f0c14-84af-4a2f-9f3b-18ecbebe3c08`（真实 BYOK）步骤，仍为 guided_manual / automatic cleanup；资产目录分别为 `~/.cline/kanban/verifications/<verificationId>/`。恢复后 `verification list` 确認 `ok:true, count:4` 且步骤正确；没有重复登记。自动脚本未改，无新增 dry-run；部署记录仍沿用原 1 个自动、3 个人工引导项。未添加 instrumentation，兜底清理沿用上文同 ID 的 `kanban verification cleanup --verification-id <id>` 命令。本轮未提交、未部署。
+
+### 本轮分组修改的 RVF（2026-09-24）
+
+run：`~/.rvf/user-local-data/run-logs/runs/rvf-20260924T060300Z-agentic-initiation-start-cf68933e/`。
+
+预审先单向吸收 local main `24591cd67c0494232f675e1a79350633594eb5d4`，五文件 WIP 完整恢复，无冲突、handback 或 push。实际两路外部实现审查完成并通过结果协议校验，1 条意见合并为 RVF-001：共享语言下拉移出 fieldset 后漏掉保存/试听禁用边界。独立 validate/fix attempt 复现后补回 `disabled={busy || disabled}`；两项回归修复前失败、修复后通过，设置页 21 项通过，补丁已工具合回，无 scope 扩展。
+
+该禁用行为由自动化覆盖，部署后验证 reconcile 无需再改现场定义；仍保留原四个 ID 与此前更新的 TTS 入口文案。最终合并版本、吸收 base 后的验证以本 run 的 `artifacts/handoff.md` 和 `artifacts/validation-records.json` 为准。本次未提交、未部署。
