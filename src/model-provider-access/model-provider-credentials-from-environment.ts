@@ -40,7 +40,8 @@ export const DEFAULT_MODEL_PROVIDER_ID_ENVIRONMENT_VARIABLE_NAME = "KANBAN_DEFAU
  * base url 与 model id 也配齐。新接一家时在这里加一行，别提前塞一堆没验证过的条目。
  */
 export const KNOWN_MODEL_PROVIDER_DEFAULTS: Readonly<Record<string, { baseUrl: string; modelId: string }>> = {
-	// deepseek-v4-flash 是 DeepSeek-V4-Flash-0731 的稳定别名。
+	// deepseek-v4-flash 是 DeepSeek 侧的浮动别名：它背后是哪个模型、按哪档计价随上游变（见官方定价页），
+	// 别把某一时刻的解析结果写死进注释或文案。
 	deepseek: { baseUrl: "https://api.deepseek.com", modelId: "deepseek-v4-flash" },
 };
 
