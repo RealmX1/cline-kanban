@@ -251,6 +251,59 @@ describe("DependencyOverlay", () => {
 		]);
 	});
 
+	it("offsets the hover delete control by the board scroll offset, matching the SVG overlays", async () => {
+		// 看板 .kb-board 可横向滚动；锚点是可视区坐标，SVG 与删除按钮都要加上滚动偏移才能对齐连线。
+		let boardScrollLeft = 0;
+		let boardScrollTop = 0;
+		Object.defineProperty(boardContainer, "scrollLeft", { configurable: true, get: () => boardScrollLeft });
+		Object.defineProperty(boardContainer, "scrollTop", { configurable: true, get: () => boardScrollTop });
+
+		await act(async () => {
+			root.render(
+				<DependencyOverlay
+					containerRef={{ current: boardContainer }}
+					dependencies={[DEPENDENCY]}
+					draft={null}
+					onDeleteDependency={() => {}}
+				/>,
+			);
+		});
+		await act(async () => {
+			vi.advanceTimersByTime(100);
+		});
+
+		const hitPath = holder.querySelector(".kb-dependency-hit-path");
+		expect(hitPath).not.toBeNull();
+		await act(async () => {
+			hitPath?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }));
+		});
+		const readDeleteControlPosition = () => {
+			const deleteControl = holder.querySelector<HTMLElement>(".kb-dependency-delete-control");
+			expect(deleteControl).not.toBeNull();
+			return {
+				left: Number.parseFloat(deleteControl?.style.left ?? ""),
+				top: Number.parseFloat(deleteControl?.style.top ?? ""),
+			};
+		};
+		const unscrolledPosition = readDeleteControlPosition();
+
+		boardScrollLeft = 120;
+		boardScrollTop = 40;
+		await act(async () => {
+			boardContainer.dispatchEvent(new Event("scroll"));
+		});
+		await act(async () => {
+			vi.advanceTimersByTime(100);
+		});
+
+		const overlaySvg = holder.querySelector<SVGElement>(".kb-dependency-overlay");
+		expect(overlaySvg?.style.left).toBe("120px");
+		expect(overlaySvg?.style.top).toBe("40px");
+		const scrolledPosition = readDeleteControlPosition();
+		expect(scrolledPosition.left).toBeCloseTo(unscrolledPosition.left + 120);
+		expect(scrolledPosition.top).toBeCloseTo(unscrolledPosition.top + 40);
+	});
+
 	it("never observes when the board has no dependencies and no draft", async () => {
 		const observeSpy = vi.spyOn(MutationObserver.prototype, "observe");
 
