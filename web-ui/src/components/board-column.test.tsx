@@ -143,3 +143,59 @@ describe("BoardColumn scroll offset restore", () => {
 		expect(readBoardColumnScrollOffset("/repo-never-scrolled", "backlog")).toBeUndefined();
 	});
 });
+
+describe("BoardColumn collapse button and width style", () => {
+	let container: HTMLDivElement;
+	let root: Root;
+	let previousActEnvironment: boolean | undefined;
+
+	beforeEach(() => {
+		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
+			.IS_REACT_ACT_ENVIRONMENT;
+		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+		container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+	});
+
+	afterEach(() => {
+		act(() => {
+			root.unmount();
+		});
+		container.remove();
+		if (previousActEnvironment === undefined) {
+			delete (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+		} else {
+			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+				previousActEnvironment;
+		}
+	});
+
+	it("renders a collapse button only when the board passes a collapse handler", async () => {
+		await act(async () => {
+			root.render(<BoardColumn column={column} taskSessions={{}} />);
+		});
+		expect(container.querySelector('button[aria-label="Collapse Backlog column"]')).toBeNull();
+
+		const onCollapseColumn = vi.fn();
+		await act(async () => {
+			root.render(<BoardColumn column={column} taskSessions={{}} onCollapseColumn={onCollapseColumn} />);
+		});
+		await act(async () => {
+			container.querySelector<HTMLButtonElement>('button[aria-label="Collapse Backlog column"]')?.click();
+		});
+		expect(onCollapseColumn).toHaveBeenCalledWith("backlog");
+	});
+
+	it("uses the board-provided flex style and falls back to equal fill", async () => {
+		await act(async () => {
+			root.render(<BoardColumn column={column} taskSessions={{}} />);
+		});
+		expect(container.querySelector<HTMLElement>("section[data-column-id]")?.style.flex).toBe("1 1 0px");
+
+		await act(async () => {
+			root.render(<BoardColumn column={column} taskSessions={{}} columnFlexStyle={{ flex: "0 0 420px" }} />);
+		});
+		expect(container.querySelector<HTMLElement>("section[data-column-id]")?.style.flex).toBe("0 0 420px");
+	});
+});

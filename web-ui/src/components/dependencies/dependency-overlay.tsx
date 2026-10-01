@@ -18,6 +18,13 @@ interface TaskAnchor {
 interface DependencyLayout {
 	width: number;
 	height: number;
+	/**
+	 * 容器（`.kb-board`）当前的滚动偏移。锚点按「可视区」坐标计算，而 `position:absolute` 的 SVG
+	 * 会跟着滚动内容一起移走，所以 SVG 要平移回可视区左上角，连线才与卡片对齐
+	 * （主看板列宽可拖到超出视口而横向滚动；移动端本就横向滚动）。
+	 */
+	containerScrollLeft: number;
+	containerScrollTop: number;
 	anchors: Record<string, TaskAnchor>;
 }
 
@@ -392,7 +399,12 @@ function hasComparableValueDifference(a: number, b: number): boolean {
 }
 
 function areLayoutsEqual(a: DependencyLayout, b: DependencyLayout): boolean {
-	if (hasComparableValueDifference(a.width, b.width) || hasComparableValueDifference(a.height, b.height)) {
+	if (
+		hasComparableValueDifference(a.width, b.width) ||
+		hasComparableValueDifference(a.height, b.height) ||
+		hasComparableValueDifference(a.containerScrollLeft, b.containerScrollLeft) ||
+		hasComparableValueDifference(a.containerScrollTop, b.containerScrollTop)
+	) {
 		return false;
 	}
 	const aKeys = Object.keys(a.anchors);
@@ -423,6 +435,8 @@ function createEmptyLayout(): DependencyLayout {
 	return {
 		width: 0,
 		height: 0,
+		containerScrollLeft: 0,
+		containerScrollTop: 0,
 		anchors: {},
 	};
 }
@@ -523,6 +537,8 @@ export function DependencyOverlay({
 		const nextLayout: DependencyLayout = {
 			width: containerRect.width,
 			height: containerRect.height,
+			containerScrollLeft: container.scrollLeft,
+			containerScrollTop: container.scrollTop,
 			anchors,
 		};
 		setLayout((current) => (areLayoutsEqual(current, nextLayout) ? current : nextLayout));
@@ -975,6 +991,7 @@ export function DependencyOverlay({
 				width={layout.width}
 				height={layout.height}
 				viewBox={`0 0 ${layout.width} ${layout.height}`}
+				style={{ left: layout.containerScrollLeft, top: layout.containerScrollTop }}
 			>
 				<defs>
 					<marker
@@ -1069,6 +1086,7 @@ export function DependencyOverlay({
 					width={layout.width}
 					height={layout.height}
 					viewBox={`0 0 ${layout.width} ${layout.height}`}
+					style={{ left: layout.containerScrollLeft, top: layout.containerScrollTop }}
 				>
 					<defs>
 						<marker
@@ -1096,7 +1114,11 @@ export function DependencyOverlay({
 				<div
 					key={`${hoveredDependency.dependency.id}-delete`}
 					className="kb-dependency-delete-control"
-					style={{ left: hoveredDependency.midpointX, top: hoveredDependency.midpointY }}
+					// 中点是可视区坐标；删除按钮与两个 SVG 同在可横向滚动的 .kb-board 内绝对定位，需同样补偿滚动偏移。
+					style={{
+						left: hoveredDependency.midpointX + layout.containerScrollLeft,
+						top: hoveredDependency.midpointY + layout.containerScrollTop,
+					}}
 				>
 					<X size={10} color="var(--color-text-primary)" />
 				</div>

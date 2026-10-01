@@ -39,7 +39,6 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 	const [settings, setSettings] = useState<NotificationIntelligenceSettings | null>(null);
 	const [savedSettings, setSavedSettings] = useState<NotificationIntelligenceSettings | null>(null);
 	const [providerDrafts, setProviderDrafts] = useState<ProviderDraft[]>([]);
-	const [selectedProviderIndex, setSelectedProviderIndex] = useState(0);
 	const [browserVoiceUri, setBrowserVoiceUri] = useState("");
 	const [savedBrowserVoiceUri, setSavedBrowserVoiceUri] = useState("");
 	const [loadError, setLoadError] = useState("");
@@ -47,7 +46,6 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 		setSettings(null);
 		setSavedSettings(null);
 		setProviderDrafts([]);
-		setSelectedProviderIndex(0);
 		setLoadError("");
 		if (!open) return;
 		let cancelled = false;
@@ -60,20 +58,7 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 				if (cancelled) return;
 				setSettings(result.settings);
 				setSavedSettings(result.settings);
-				setProviderDrafts(
-					result.providers.length
-						? result.providers.map((profile) => providerDraft(profile))
-						: [providerDraft(emptyProvider, false)],
-				);
-				const boundProviderId =
-					result.settings.notificationSpeechBinding?.modelProviderId ??
-					result.settings.notificationAssessmentBinding?.modelProviderId;
-				setSelectedProviderIndex(
-					Math.max(
-						0,
-						result.providers.findIndex((profile) => profile.modelProviderId === boundProviderId),
-					),
-				);
+				setProviderDrafts(result.providers.map((profile) => providerDraft(profile)));
 			})
 			.catch(() => {
 				if (!cancelled) setLoadError("无法读取 AI 与语音设置，请关闭设置后重试");
@@ -82,12 +67,9 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 			cancelled = true;
 		};
 	}, [open]);
-	const selectedProviderDraft = providerDrafts[selectedProviderIndex];
-	function updateSelectedProvider(value: Partial<ProviderDraft>) {
+	function updateProvider(providerIndex: number, value: Partial<ProviderDraft>) {
 		setProviderDrafts((current) =>
-			current.map((draft, index) =>
-				index === selectedProviderIndex ? { ...draft, ...value, changed: true } : draft,
-			),
+			current.map((draft, index) => (index === providerIndex ? { ...draft, ...value, changed: true } : draft)),
 		);
 	}
 	const hasUnsavedChanges =
@@ -161,35 +143,42 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 		purposeBindingProblems,
 		save,
 		providers: providerDrafts.map((draft) => draft.profile),
-		profile: selectedProviderDraft?.profile ?? emptyProvider,
-		savedProfile: selectedProviderDraft?.savedProfile,
-		apiKey: selectedProviderDraft?.apiKey ?? "",
-		deleteSavedCredential: selectedProviderDraft?.deleteSavedCredential ?? false,
-		selectedProviderIndex,
-		setSelectedProviderIndex,
-		setProfile: (profile: NotificationProviderProfile) => {
-			const previousId = selectedProviderDraft?.profile.modelProviderId;
-			if (previousId !== profile.modelProviderId)
-				setSettings((current) => {
-					if (!current) return current;
-					const next = { ...current };
-					for (const key of [
-						"taskNameSuggestionBinding",
-						"notificationAssessmentBinding",
-						"notificationSpeechBinding",
-					] as const) {
-						const binding = current[key];
-						if (binding && binding.modelProviderId === previousId)
-							next[key] = { ...binding, modelProviderId: profile.modelProviderId };
-					}
-					return next;
-				});
-			updateSelectedProvider({ profile });
+		getProviderEditor: (providerIndex: number) => {
+			const selectedProviderDraft = providerDrafts[providerIndex];
+			if (!selectedProviderDraft) return null;
+			return {
+				profile: selectedProviderDraft.profile,
+				savedProfile: selectedProviderDraft.savedProfile,
+				apiKey: selectedProviderDraft.apiKey,
+				deleteSavedCredential: selectedProviderDraft.deleteSavedCredential,
+				setProfile: (profile: NotificationProviderProfile) => {
+					const previousId = selectedProviderDraft.profile.modelProviderId;
+					if (previousId !== profile.modelProviderId)
+						setSettings((current) => {
+							if (!current) return current;
+							const next = { ...current };
+							for (const key of [
+								"taskNameSuggestionBinding",
+								"notificationAssessmentBinding",
+								"notificationSpeechBinding",
+							] as const) {
+								const binding = current[key];
+								if (binding && binding.modelProviderId === previousId)
+									next[key] = { ...binding, modelProviderId: profile.modelProviderId };
+							}
+							return next;
+						});
+					updateProvider(providerIndex, { profile });
+				},
+				setApiKey: (apiKey: string) => updateProvider(providerIndex, { apiKey, deleteSavedCredential: false }),
+				toggleCredentialDeletion: () =>
+					updateProvider(providerIndex, {
+						apiKey: "",
+						deleteSavedCredential: !selectedProviderDraft.deleteSavedCredential,
+					}),
+			};
 		},
-		setApiKey: (apiKey: string) => updateSelectedProvider({ apiKey, deleteSavedCredential: false }),
-		toggleCredentialDeletion: () =>
-			updateSelectedProvider({ apiKey: "", deleteSavedCredential: !selectedProviderDraft?.deleteSavedCredential }),
-		addProvider: () => {
+		addProvider: (providerProtocol: NotificationProviderProfile["providerProtocol"]) => {
 			// 自动 id 也要避开用途绑定引用的 id：撞上悬空绑定会把历史 not_found 问题变成「新引入」而锁死保存。
 			const occupiedProviderIds = new Set([
 				...providerDrafts.map((draft) => draft.profile.modelProviderId),
@@ -208,11 +197,16 @@ export function useNotificationIntelligenceSettingsDraft(open: boolean) {
 			setProviderDrafts((current) => [
 				...current,
 				providerDraft(
-					{ ...emptyProvider, modelProviderId: `provider-${suffix}`, displayName: "新 Provider" },
+					{
+						...emptyProvider,
+						providerProtocol,
+						modelProviderId: `provider-${suffix}`,
+						displayName: providerProtocol === "openai_compatible" ? "新语言模型服务" : "新语音服务",
+					},
 					false,
 				),
 			]);
-			setSelectedProviderIndex(providerDrafts.length);
+			return providerDrafts.length;
 		},
 		browserVoiceUri,
 		setBrowserVoiceUri,
