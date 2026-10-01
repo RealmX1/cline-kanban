@@ -10,6 +10,7 @@ import {
 	createAcpTaskSessionService,
 } from "../acp-client-session/acp-task-session-service";
 import { handleClineMcpOauthCallback } from "../cline-sdk/cline-mcp-runtime-service";
+import { createClineProviderService } from "../cline-sdk/cline-provider-service";
 import {
 	type ClineTaskSessionService,
 	createInMemoryClineTaskSessionService,
@@ -50,6 +51,12 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
+import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
+import { computeQueuedTaskPromptDeliveryTextSha256 } from "../state/queued-task-prompt-delivery-store";
+import {
+	readLiveRuntimeProcessInstanceIds,
+	startRuntimeProcessInstanceHeartbeat,
+} from "../state/runtime-process-instance-heartbeat-registry";
 import { loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
@@ -60,6 +67,7 @@ import { createExploratoryApi } from "../trpc/exploratory-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
+import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
 import { createWorkspaceApi } from "../trpc/workspace-api";
 import {
 	type ActiveRuntimeSessionShutdownResult,
@@ -69,7 +77,9 @@ import { createAgentSessionInactivityReclamationScheduler } from "./agent-sessio
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import { scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart } from "./pending-task-message-injection-startup-sweep";
+import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
+import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
 import { createTransportAwareAgentSessionReclamationExecutor } from "./transport-aware-agent-session-reclamation";
 import type { WorkspaceRegistry } from "./workspace-registry";
 
@@ -145,6 +155,14 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 此刻可能正有在途投递，全扫会把它们判成不可纠正的假失败（见清扫模块头注）。
 	// 不 await 阻塞启动——清扫是纠偏动作，不是服务可用性的前置条件。
 	scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart();
+
+	// 本实例的活性心跳。必须在任何启动清扫**之前**起：清扫要按「归属实例此刻还活不活着」判定该不该
+	// 收拾一条记录，而同刻启动的另一个实例读到的心跳目录里必须已经有我——否则它会在那一拍里把我
+	// 刚接手的东西当成上一次生命周期的残骸。
+	//
+	// await 它（不像下面的清扫那样放飞）：它很便宜（一次 mkdir + 一次 writeFile），而「先写下自己
+	// 再开始服务」正是这套判据的前提。
+	const runtimeProcessInstanceHeartbeat = await startRuntimeProcessInstanceHeartbeat();
 
 	const resolveWorkspaceScopeFromRequest = async (
 		request: IncomingMessage,
@@ -316,6 +334,73 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		},
 	});
 
+	// 排队 prompt 的出队引擎（runtime 级单例）。放在这里的理由与上面的回收调度器相同：三种 transport 的
+	// 服务持有者都在本作用域，findRuntimeSessionSummary 是现成的三流合并查询面。
+	//
+	// 发送走的是与人类聊天、RVF followup **同一条**三 transport 统一出口，只是每次投递构造一份 deps、
+	// 用闭包 observer 接住 PTY 的真实终态（与 runtime-api 的「一键放行」同款写法）。
+	const clineProviderServiceForQueuedPromptDelivery = createClineProviderService();
+	const queuedTaskPromptDeliveryDispatcher = createQueuedTaskPromptDeliveryDispatcher({
+		getTaskSessionSummary: findRuntimeSessionSummary,
+		hasPendingProgrammaticTaskChatInputDelivery: (workspaceId, taskId) =>
+			deps.workspaceRegistry
+				.getTerminalManagerForWorkspace(workspaceId)
+				?.hasPendingProgrammaticTaskChatInputDelivery(taskId) ?? false,
+		resolveWorkspaceScope: (workspaceId) => {
+			const workspacePath = deps.workspaceRegistry.getWorkspacePathById(workspaceId);
+			return workspacePath === null ? null : { workspaceId, workspacePath };
+		},
+		sendThroughTaskChatTransports: async (scope, request, onProgrammaticTerminalDeliverySettled) =>
+			await sendTaskChatMessageAcrossSessionTransports(
+				{
+					getScopedTerminalManager,
+					getScopedClineTaskSessionService,
+					getScopedAcpTaskSessionService,
+					loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+					resolveClineTaskSessionLaunchConfig: async () =>
+						await clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
+					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
+					onProgrammaticTerminalDeliverySettled,
+				},
+				scope,
+				request,
+			),
+		cancelProgrammaticTerminalDelivery: async (scope, taskId, idempotencyKey) =>
+			(await getScopedTerminalManager(scope)).cancelTaskChatInputDelivery(taskId, idempotencyKey),
+		readPromptLibraryEntryTextSha256ByEntryId: async (workspaceId) => {
+			const library = await readWorkspacePromptLibrarySnapshot(workspaceId);
+			const shaByEntryId = new Map<string, string>();
+			for (const entry of [
+				...library.globalScopedPrompts,
+				...library.repoScopedPrompts,
+				...Object.values(library.taskScopedPromptsByTaskId).flat(),
+			]) {
+				shaByEntryId.set(entry.id, computeQueuedTaskPromptDeliveryTextSha256(entry.text));
+			}
+			return shaByEntryId;
+		},
+		onProjectedQueueChanged: deps.runtimeStateHub.broadcastQueuedTaskPromptDeliveriesUpdated,
+		warn: deps.warn,
+		// 托管门 + 持续盖章屏障：只发本实例托管的条目；托管者判死的条目先盖章等人确认（见 dispatcher 头注）。
+		runtimeProcessInstanceCustody: {
+			thisRuntimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+			runtimeProcessStartedAtEpochMs: runtimeProcessInstanceHeartbeat.startedAtEpochMs,
+			readLiveRuntimeProcessInstanceIds: async () => await readLiveRuntimeProcessInstanceIds(),
+		},
+	});
+	const unregisterQueuedTaskPromptDeliveryDispatchObserver =
+		deps.runtimeStateHub.registerQueuedTaskPromptDeliveryDispatchObserver(queuedTaskPromptDeliveryDispatcher);
+	// 排队 prompt 的启动清扫：收敛被上一次生命周期撂在半路的在途投递，并给跨过这次重启的条目盖章
+	// （门控 0 据此等人看见再发）。必须在心跳写下之后——盖章按「托管实例此刻不在心跳里」判，同刻启动的
+	// 另一个实例得先看得见我。不 await：纠偏动作，不是服务可用性的前置条件。
+	void scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart({
+		runtimeProcessStartedAtEpochMs: runtimeProcessInstanceHeartbeat.startedAtEpochMs,
+		sweepingRuntimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+		onWorkspaceQueueRewritten: (workspaceId, snapshot) => {
+			void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+		},
+	});
+
 	const stopAndCollectProjectRuntimeSessionsForSafePersistence = async (
 		workspaceId: string,
 	): Promise<ActiveRuntimeSessionShutdownResult> => {
@@ -463,6 +548,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				prepareForStateReset,
 				getUpdateStatus: deps.getUpdateStatus,
 				runUpdateNow: deps.runUpdateNow,
+				queuedTaskPromptDeliveryDispatcher,
 			}),
 			workspaceApi: createWorkspaceApi({
 				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
@@ -472,6 +558,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
 				buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,
 				listProjectRuntimeSessionSummaries,
+				onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard: (workspaceId, snapshot) => {
+					void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+				},
 			}),
 			projectsApi: createProjectsApi({
 				getActiveWorkspacePath: deps.workspaceRegistry.getActiveWorkspacePath,
@@ -836,12 +925,16 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 启动即扫一次：账本里存的是绝对到期时刻，故 Kanban 停机期间流逝的时间自然计入，
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	agentSessionInactivityReclamationScheduler.start();
+	queuedTaskPromptDeliveryDispatcher.start();
 
 	return {
 		url,
 		stopAllActiveRuntimeSessionsForShutdown,
 		close: async () => {
 			agentSessionInactivityReclamationScheduler.stop();
+			// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
+			queuedTaskPromptDeliveryDispatcher.stop();
+			unregisterQueuedTaskPromptDeliveryDispatchObserver();
 			// ACP agent 是持有 stdio 的真子进程：不在这里拆掉，关服后它还活着、还能改仓库，
 			// 而且它占着的 stdio 管道会把 Kanban 进程本身的退出一起拖住。
 			for (const service of acpTaskSessionServiceByWorkspaceId.values()) {
@@ -857,6 +950,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			clineTaskSessionServiceByWorkspaceId.clear();
 			clineWorkspacePathByWorkspaceId.clear();
 			await clineWatcherRegistry.close();
+			// 优雅退出主动销号，于是下一个实例不必等满宽限期才敢判本实例已死——重启后的排队 prompt
+			// 提醒因此立刻生效，而不是迟到一个宽限期。非优雅退出没有这一步，靠宽限期兜底。
+			await runtimeProcessInstanceHeartbeat.stop();
 			await deps.runtimeStateHub.close();
 			stopEventLoopDelayMonitor();
 			stopProcessFileDescriptorWatermarkMonitor();

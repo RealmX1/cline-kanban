@@ -1556,6 +1556,279 @@ export type RuntimeStateStreamExplorationThreadGraphUpdatedMessage = z.infer<
 	typeof runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema
 >;
 
+// ── 排队 Prompt 投递（Queued Task Prompt Delivery，服务端持久化）───────────────
+//
+// 「agent 正在干活时我就想好了下一步要它做什么」这件事今天没有落点：Prompt Library 只能
+// Fill into input（写进输入框、不提交），于是用户要么现在打断 agent，要么自己盯着等它停下来再手动发。
+// 本节把这条意图变成 durable 记录：入队 → agent 这一轮停下 → 经既有 sendTaskChatMessage 出口发出。
+//
+// 落点与并发语义见 src/state/queued-task-prompt-delivery-store.ts；出队时机与门控见
+// src/core/queued-task-prompt-delivery-dispatch-eligibility.ts。这里只定义线上契约。
+//
+// **v1 明确不支持**（写在契约里而不是只写在计划里，免得后来者假设它静默支持）：
+//   - images：入队的是纯文本快照，附件不进队列；
+//   - mode 透传（Cline SDK 的 plan / act）：投递时按会话当下的 mode 走，不冻结入队那一刻的 mode。
+//
+// **加字段规约**：v1 之后新增的每一个字段都必须是 optional。存储层是逐条 safeParse、坏条目直接丢，
+// 于是「新版加了个必填字段」会让所有旧条目在下一次读取时集体消失——那是用户排好的队被静默清空。
+
+export const queuedTaskPromptDeliveryStateSchema = z.enum([
+	// 等下一个「agent 停止生成」边沿。绝大多数时刻的状态。
+	"queued",
+	// dispatcher 已在文件锁内认领，尚未写出任何字节。崩溃后可安全释放回 queued。
+	"claimed_for_dispatch",
+	// 已交给 sendTaskChatMessage，回执未回。崩溃后语义暧昧（可能已经发出去了），绝不自动重投。
+	"handed_to_transport",
+	"settled_delivered",
+	"settled_failed",
+	"cancelled",
+	// 超过 expiresAt 仍未发出。**不是失败**：它从未被尝试过，只是意图放太久已经不可信了。
+	"expired",
+]);
+export type QueuedTaskPromptDeliveryState = z.infer<typeof queuedTaskPromptDeliveryStateSchema>;
+
+// 出队被什么挡住。服务端给枚举值、前端只做措辞映射——判据全在运行时侧（会话 facet、恢复守卫、
+// PTY 单飞槽），前端复算必然漂移。
+export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
+	// kanban 重启跨过来的条目，人还没在重启后看见过它。**唯一一条不会自行解除**的阻塞。
+	"awaiting_human_reconfirmation_after_runtime_restart",
+	"agent_still_generating",
+	// 已 park、正在等待已派发的后台工作。必须单列：submitTaskChatInputWhenReady 一进门就 unpark，
+	// 不拦就等于队列会把 RVF 派发的后台等待直接 unpark 掉。
+	"session_parked_awaiting_dispatched_background_work",
+	// agent 在问问题 / 等计划评审 / 等授权 / 等补充输入。**不含 review**——review 恰是本特性的目标态。
+	"agent_awaiting_modal_user_decision",
+	// 会话不在跑（含 runtime 重启后水合出来的历史会话）。保持 queued 不判失败：用户要的是「下一轮」，
+	// 死会话没有下一轮，但它随时可能被续跑起来。
+	"session_not_live",
+	// PTY 恢复守卫武装中（`--continue` 恢复对话本身不等于开始新一轮）。
+	"session_restoring_conversation",
+	// PTY 单飞槽被另一条程序化投递（例：RVF followup）占着。
+	"another_programmatic_delivery_in_flight",
+	// 这条由**另一个此刻活着的** kanban runtime 实例托管（同机多实例共享 workspaces 根）。只有托管者会发它；
+	// 托管者一旦不在心跳里，本实例会盖 restart-crossing 章并接管，转成上面那条「等人确认」。
+	"queued_under_another_live_kanban_runtime_instance",
+	// 跨过重启、人也确认过了，但 agent 在确认之后还没停下过一次。用户要的是「确认后在**下一次** stop hook
+	// 注入」——确认那一刻 agent 已经闲着，不等于「下一次 stop」已经到了。
+	"awaiting_first_agent_turn_end_after_restart_reconfirmation",
+]);
+export type QueuedTaskPromptDispatchBlockReason = z.infer<typeof queuedTaskPromptDispatchBlockReasonSchema>;
+
+export const queuedTaskPromptDeliveryEntrySchema = z.object({
+	// 取消 / 重排 / 合并的唯一句柄。由构造 mutation 的一侧生成（randomUUID），于是同一条意图重发天然幂等。
+	queueEntryId: z.string(),
+	// **会话 id**，不是看板卡片 id：by-the-way 子会话有自己独立的队列。
+	taskId: z.string(),
+	// 正文快照，**入队即冻结**。
+	//
+	// 为什么不只存 promptLibraryEntryId 到出队时再解析：prompt library 条目是可变的用户资产——面板
+	// textarea 每次击键都去抖落盘，还能被删、被换 scope、被另一个标签页改写。出队时才解析 = 用户排的是
+	// A、agent 收到 B，而没有任何一处会告诉他。
+	text: z.string(),
+	// 为 true 时本条与**下一条**在同一次投递里拼接发出（相邻可链成一串）。默认 false ⇒ 串长恒为 1
+	// ⇒ 就是「一轮一条」。合并是用户显式打开的开关，运行时绝不自作主张合并。
+	deliverTogetherWithNextQueuedEntry: z.boolean(),
+	// 溯源用。命中时 UI 显示来源徽标；sha 与库里那条此刻的正文不符时标「library prompt has changed since」。
+	// 只是**诚实提示**，不改变投递内容——投的永远是上面那份冻结快照。
+	sourcePromptLibraryEntryId: z.string().nullable(),
+	sourcePromptLibraryEntryTextSha256: z.string().nullable(),
+	deliveryState: queuedTaskPromptDeliveryStateSchema,
+	deliveryAttemptCount: z.number().int().nonnegative(),
+	lastAttemptedAt: z.number().nullable(),
+	settledAt: z.number().nullable(),
+	// 本次在途尝试的 key，取消时喂给既有 cancelTaskChatDelivery。每次重试换新的。
+	dispatchIdempotencyKey: z.string().nullable(),
+	// 认领那一刻的会话身份双判据快照。真正 send 之前重读 summary 比对，任一不符即释放认领、放弃本次
+	// （不计一次尝试）。口径与 isReclamationDeadlineStillCurrentForSession 同源。
+	claimedForSessionIncarnationId: z.string().nullable(),
+	claimedAtTurnSequence: z.number().int().nonnegative().nullable(),
+	enqueuedAt: z.number(),
+	// enqueuedAt + QUEUED_TASK_PROMPT_DELIVERY_EXPIRY_MS。存绝对时刻而非剩余时长，故停机期间流逝的
+	// 墙钟时间自然计入——系统关机三天再开机，条目已过期，不会突然发射。
+	expiresAt: z.number(),
+	// 人类可读，前端直接显示。
+	lastDeliveryFailureNote: z.string().nullable(),
+	// null = 本条没有跨过任何一次 runtime 重启；非 null = 启动清扫判定它的托管实例已经不在了（它确实跨过了
+	// 一次重启），于是盖上这个章。判据是 custodianRuntimeProcessInstanceId 指向的实例此刻不在心跳里，
+	// 而不是「本进程刚起来」——一台机器上会同时跑多个 runtime（dev:full / dogfood / 集成测试），按进程判
+	// 会让第二个实例一启动就把常驻实例的队列全标一遍。
+	survivedRuntimeRestartAtEpochMs: z.number().nullable(),
+	// 人在重启后确实看见过它的时刻。上一字段非 null 且这一字段为 null ⇒ 门控硬阻塞。
+	humanReconfirmedAfterRuntimeRestartAtEpochMs: z.number().nullable(),
+	// **此刻托管这条队列条目的** runtime 进程实例 id（见 src/state/runtime-process-instance-heartbeat-registry.ts）。
+	//
+	// 存在的唯一理由是让启动清扫能分辨「上一次生命周期留下的残骸」与「另一个此刻正活着的实例正在用的
+	// 东西」——一台机器上会同时跑常驻实例 / dev:full / dogfood / 集成测试，它们共享同一个 workspaces 根。
+	// 判据因此是「托管者此刻不活着」，而不是「条目比本进程老」。
+	//
+	// **是托管权，不是出身**，两者的区别是这个字段能不能用对的关键：托管权会**转移**。入队时归入队的
+	// 那个实例；此后每当一次清扫判定「托管者已死、这条确实跨过了重启」并盖章，托管权就交给做这次清扫的
+	// 实例。不转移的话，条目会永久指向那个最初排队、后来死掉的实例，于是**任何**一个启动时刻晚于上次
+	// 盖章的并存实例都会再判一次「托管者不活跃」、重新盖章并清空用户刚做的确认——正是这个字段被引入来
+	// 消除的多实例误标，只是换了个触发条件卷土重来。字段名不叫 enqueuedBy… 就是为了不让人照出身去读它。
+	//
+	// optional（遵守本节开头那条加字段规约）：升级前存下的条目没有这个字段，清扫对它们退回按年龄判的
+	// 保守口径——多盖一次章、多让人确认一次，绝不漏盖；盖完同样接管托管权，于是只会退化这一次。
+	custodianRuntimeProcessInstanceId: z.string().nullable().optional(),
+	// 该会话所属的**看板任务** id。主会话等于 taskId；by-the-way 子会话是它的主任务。存它是为了主任务离开看板时
+	// 把子会话的队列一并丢弃——删除路径（浏览器整份 PUT 的差集 / CLI delete）手上只有看板任务 id。
+	// optional（加字段规约）：旧条目缺它时只按 taskId 精确匹配。
+	workspaceTaskId: z.string().nullable().optional(),
+});
+export type QueuedTaskPromptDeliveryEntry = z.infer<typeof queuedTaskPromptDeliveryEntrySchema>;
+
+// 一个 workspace 下全部任务的队列。顺序即投递顺序（数组下标就是排位），不另存 order 字段——
+// 存序号会产生「序号重复 / 有洞 / 与数组顺序打架」三种必须再写代码去调和的坏状态。
+export const workspaceQueuedTaskPromptDeliverySnapshotSchema = z.object({
+	entriesByTaskId: z.record(z.string(), z.array(queuedTaskPromptDeliveryEntrySchema)),
+});
+export type WorkspaceQueuedTaskPromptDeliverySnapshot = z.infer<typeof workspaceQueuedTaskPromptDeliverySnapshotSchema>;
+
+// 写操作是**意图**而不是整份 PUT，理由同 prompt library：多个标签页 + 运行时自己（dispatcher）会并发写
+// 同一份队列，整份 PUT 的 last-write-wins 会静默抹掉别人的写。服务端在文件锁内读-改-写。
+export const queuedTaskPromptDeliveryMutationSchema = z.discriminatedUnion("kind", [
+	z.object({
+		kind: z.literal("enqueue_prompt_for_delivery_after_current_turn"),
+		taskId: z.string(),
+		queueEntryId: z.string(),
+		text: z.string(),
+		sourcePromptLibraryEntryId: z.string().nullable().optional(),
+		sourcePromptLibraryEntryTextSha256: z.string().nullable().optional(),
+		// 见条目的同名字段。缺省按 taskId（主会话）。
+		workspaceTaskId: z.string().nullable().optional(),
+	}),
+	z.object({
+		kind: z.literal("cancel_queued_prompt_delivery"),
+		taskId: z.string(),
+		queueEntryId: z.string(),
+	}),
+	// 携**完整有序 id 列表**而不是「把 X 移到位置 N」：后者在并发下会算到别人刚改过的列表上，
+	// 得到一个谁也没要过的顺序。服务端在锁内按「取交集 + 未知 id 追加到尾」调和。
+	z.object({
+		kind: z.literal("reorder_queued_prompt_deliveries"),
+		taskId: z.string(),
+		orderedQueueEntryIds: z.array(z.string()),
+	}),
+	z.object({
+		kind: z.literal("set_queued_prompt_delivery_merge_with_next"),
+		taskId: z.string(),
+		queueEntryId: z.string(),
+		deliverTogetherWithNextQueuedEntry: z.boolean(),
+	}),
+	z.object({
+		kind: z.literal("dismiss_settled_queued_prompt_delivery"),
+		taskId: z.string(),
+		queueEntryId: z.string(),
+	}),
+	// 重排到队尾，换新 queueEntryId + 新 idempotency key。**由人发起，永不自动**：
+	// settled_failed 里那几种失败（尤其 submit_confirmation_budget_exhausted）的语义是「可能已经送到了」，
+	// 自动重投 = 把同一段话送两次。
+	z.object({
+		kind: z.literal("retry_settled_failed_queued_prompt_delivery"),
+		taskId: z.string(),
+		queueEntryId: z.string(),
+		replacementQueueEntryId: z.string(),
+	}),
+	// 「人在 kanban 重启后确实看见了这些条目」。幂等，只写 humanReconfirmedAfterRuntimeRestartAtEpochMs。
+	z.object({
+		kind: z.literal("reconfirm_queued_prompt_deliveries_after_runtime_restart"),
+		taskId: z.string(),
+		queueEntryIds: z.array(z.string()),
+	}),
+]);
+export type QueuedTaskPromptDeliveryMutation = z.infer<typeof queuedTaskPromptDeliveryMutationSchema>;
+
+// 推流投影：**不是**全量条目。正文是易膨胀数据，与 board.json 的裁定同理，绝不上热广播链路——
+// 用 textPreview + textLength 替代 text，全文按需经 read procedure 拉。也因此它不进 snapshot 消息。
+export const QUEUED_TASK_PROMPT_DELIVERY_TEXT_PREVIEW_MAX_LENGTH = 200;
+
+export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
+	queueEntryId: z.string(),
+	taskId: z.string(),
+	deliveryState: queuedTaskPromptDeliveryStateSchema,
+	textPreview: z.string(),
+	textLength: z.number().int().nonnegative(),
+	deliverTogetherWithNextQueuedEntry: z.boolean(),
+	// 仅对 queued 条目有意义：此刻是什么挡着它。null = 此刻可以出队（下一个边沿就发）。
+	dispatchBlockReason: queuedTaskPromptDispatchBlockReasonSchema.nullable(),
+	// 前端靠它决定要不要播 5s 高亮、要不要发确认 mutation。
+	awaitsHumanReconfirmationAfterRuntimeRestart: z.boolean(),
+	deliveryAttemptCount: z.number().int().nonnegative(),
+	lastDeliveryFailureNote: z.string().nullable(),
+	sourcePromptLibraryEntryId: z.string().nullable(),
+	// true = 库里那条的正文在入队之后被改过；null = 没有来源条目，或来源条目已被删。
+	// 由服务端比对 sha 算好——前端手上没有库条目的 sha，让它自己算等于让它撒谎。
+	sourcePromptLibraryEntryTextChangedSinceEnqueue: z.boolean().nullable(),
+	enqueuedAt: z.number(),
+	expiresAt: z.number(),
+	settledAt: z.number().nullable(),
+});
+export type RuntimeQueuedTaskPromptDeliveryProjection = z.infer<typeof runtimeQueuedTaskPromptDeliveryProjectionSchema>;
+
+// 按 taskId 分组的投影。推流消息与读写响应共用这一个形状，前端只维护一份合并逻辑。
+export const runtimeQueuedTaskPromptDeliveryProjectionsByTaskIdSchema = z.record(
+	z.string(),
+	z.array(runtimeQueuedTaskPromptDeliveryProjectionSchema),
+);
+export type RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId = z.infer<
+	typeof runtimeQueuedTaskPromptDeliveryProjectionsByTaskIdSchema
+>;
+
+export const runtimeTaskPromptDeliveryQueueReadRequestSchema = z.object({});
+export type RuntimeTaskPromptDeliveryQueueReadRequest = z.infer<typeof runtimeTaskPromptDeliveryQueueReadRequestSchema>;
+
+// 读响应同时给全量快照（带正文，按需展开全文用）与投影（带阻塞原因，列表渲染用）。
+// 阻塞原因只有运行时算得出来（会话 facet / 恢复守卫 / PTY 单飞槽），首屏拉取不带它的话，
+// 面板在第一条推流到达之前只能显示一个撒谎的「马上就发」。
+export const runtimeTaskPromptDeliveryQueueResponseSchema = z.object({
+	ok: z.boolean(),
+	queue: workspaceQueuedTaskPromptDeliverySnapshotSchema.nullable(),
+	projectedEntriesByTaskId: runtimeQueuedTaskPromptDeliveryProjectionsByTaskIdSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskPromptDeliveryQueueResponse = z.infer<typeof runtimeTaskPromptDeliveryQueueResponseSchema>;
+
+export const runtimeTaskPromptDeliveryQueueMutateRequestSchema = z.object({
+	mutation: queuedTaskPromptDeliveryMutationSchema,
+});
+export type RuntimeTaskPromptDeliveryQueueMutateRequest = z.infer<
+	typeof runtimeTaskPromptDeliveryQueueMutateRequestSchema
+>;
+
+// 取消一条**已经交给 transport** 的条目时，既有 cancelTaskChatDelivery 的三种回执原样带回。
+// already_delivered 必须让用户看见（「来不及了，已经发出去」）——把它吞成 ok 等于对用户撒谎。
+export const queuedTaskPromptInFlightDeliveryCancelResultSchema = z.enum([
+	"cancelled_before_delivery",
+	"already_delivered",
+	"no_pending_delivery",
+]);
+export type QueuedTaskPromptInFlightDeliveryCancelResult = z.infer<
+	typeof queuedTaskPromptInFlightDeliveryCancelResultSchema
+>;
+
+export const runtimeTaskPromptDeliveryQueueMutateResponseSchema = runtimeTaskPromptDeliveryQueueResponseSchema.extend({
+	// 入队 / 重排被拒是因为队列容量用尽（该任务或整个 workspace 的非终态条目达到上限）。被拒在快照上表现为
+	// 「原样返回」，与幂等重发不可区分——必须单独说出来，否则用户会以为排上了。
+	enqueueRefusedBecauseQueueCapacityIsExhausted: z.boolean().optional(),
+	// 仅当取消的目标已经 handed_to_transport 时才有值。
+	inFlightDeliveryCancelResult: queuedTaskPromptInFlightDeliveryCancelResultSchema.nullable().optional(),
+});
+export type RuntimeTaskPromptDeliveryQueueMutateResponse = z.infer<
+	typeof runtimeTaskPromptDeliveryQueueMutateResponseSchema
+>;
+
+// 队列投影变更推流。**不进** snapshot 消息（正文与状态都以机器节拍变化，且首屏由读 procedure 拉）。
+// 按 workspace 整份替换而不是按条增量：一次认领 / 落定会同时改好几条的状态与阻塞原因，增量补丁
+// 在断连重连之间极易错位，而投影恒小（per-task 上限 20、per-workspace 上限 200、正文已截断）。
+export const runtimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessageSchema = z.object({
+	type: z.literal("queued_task_prompt_deliveries_updated"),
+	workspaceId: z.string(),
+	projectedEntriesByTaskId: runtimeQueuedTaskPromptDeliveryProjectionsByTaskIdSchema,
+});
+export type RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage = z.infer<
+	typeof runtimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessageSchema
+>;
+
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamSnapshotMessageSchema,
 	runtimeStateStreamWorkspaceStateMessageSchema,
@@ -1570,6 +1843,7 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamNotificationLogUpdatedMessageSchema,
 	runtimeStateStreamExploratoryFindingsUpdatedMessageSchema,
 	runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema,
+	runtimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessageSchema,
 	runtimeStateStreamErrorMessageSchema,
 ]);
 export type RuntimeStateStreamMessage = z.infer<typeof runtimeStateStreamMessageSchema>;
@@ -3012,6 +3286,10 @@ export const runtimePromptLibraryMutateRequestSchema = z.object({
 	mutation: workspacePromptLibraryMutationSchema,
 });
 export type RuntimePromptLibraryMutateRequest = z.infer<typeof runtimePromptLibraryMutateRequestSchema>;
+
+// ── 排队 Prompt 投递 ──
+// 契约块已上移到 runtimeStateStreamMessageSchema 之前（TDZ：queued_task_prompt_deliveries_updated 推流消息
+// 引用本节的投影 schema，union 在模块求值时就要拿到它）。
 
 // ── 任务编辑草稿（服务端持久化）──────────────────────────────────────────────
 //

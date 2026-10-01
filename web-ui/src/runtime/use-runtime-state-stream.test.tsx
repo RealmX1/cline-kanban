@@ -315,6 +315,98 @@ describe("useRuntimeStateStream", () => {
 		expect(captured.current?.exploratoryFindings).toHaveLength(1);
 	});
 
+	it("queued_task_prompt_deliveries_updated 整份替换落 store、按 workspace 过滤；快照保留 last-known", async () => {
+		const captured: { current: UseRuntimeStateStreamResult | null } = { current: null };
+		await act(async () => {
+			root.render(
+				<RuntimeStateStreamHarness
+					onSnapshot={(snapshot) => {
+						captured.current = snapshot;
+					}}
+				/>,
+			);
+		});
+		const socket = MockRuntimeStateWebSocket.instances[0];
+		if (!socket) {
+			throw new Error("Expected the initial runtime stream socket.");
+		}
+		act(() => {
+			socket.triggerOpen();
+		});
+		const projection = (queueEntryId: string) => ({
+			queueEntryId,
+			taskId: "task-1",
+			deliveryState: "queued",
+			textPreview: "跑测试",
+			textLength: 3,
+			deliverTogetherWithNextQueuedEntry: false,
+			dispatchBlockReason: "agent_still_generating",
+			awaitsHumanReconfirmationAfterRuntimeRestart: false,
+			deliveryAttemptCount: 0,
+			lastDeliveryFailureNote: null,
+			sourcePromptLibraryEntryId: null,
+			sourcePromptLibraryEntryTextChangedSinceEnqueue: null,
+			enqueuedAt: 1,
+			expiresAt: 2,
+			settledAt: null,
+		});
+		const triggerSnapshot = () =>
+			socket.triggerMessage({
+				type: "snapshot",
+				currentProjectId: "ws-a",
+				projects: [],
+				workspaceState: null,
+				workspaceMetadata: null,
+				clineSessionContextVersion: 0,
+				notificationLog: [],
+			});
+		await act(async () => {
+			triggerSnapshot();
+		});
+		expect(captured.current?.queuedTaskPromptDeliveryProjectionsByTaskId).toBeNull();
+
+		await act(async () => {
+			socket.triggerMessage({
+				type: "queued_task_prompt_deliveries_updated",
+				workspaceId: "ws-a",
+				projectedEntriesByTaskId: { "task-1": [projection("q1"), projection("q2")] },
+			});
+		});
+		expect(captured.current?.queuedTaskPromptDeliveryProjectionsByTaskId?.["task-1"]).toHaveLength(2);
+
+		// 整份替换，不是增量合并：一次认领 / 落定会同时改好几条，增量补丁在断连重连之间极易错位。
+		await act(async () => {
+			socket.triggerMessage({
+				type: "queued_task_prompt_deliveries_updated",
+				workspaceId: "ws-a",
+				projectedEntriesByTaskId: {},
+			});
+		});
+		expect(captured.current?.queuedTaskPromptDeliveryProjectionsByTaskId).toEqual({});
+
+		// 别的 workspace 的推送不得入 store（taskId 是 board-local 短 id，会撞号）。
+		await act(async () => {
+			socket.triggerMessage({
+				type: "queued_task_prompt_deliveries_updated",
+				workspaceId: "ws-b",
+				projectedEntriesByTaskId: { "task-1": [projection("foreign")] },
+			});
+		});
+		expect(captured.current?.queuedTaskPromptDeliveryProjectionsByTaskId).toEqual({});
+
+		await act(async () => {
+			socket.triggerMessage({
+				type: "queued_task_prompt_deliveries_updated",
+				workspaceId: "ws-a",
+				projectedEntriesByTaskId: { "task-1": [projection("q3")] },
+			});
+		});
+		await act(async () => {
+			triggerSnapshot();
+		});
+		expect(captured.current?.queuedTaskPromptDeliveryProjectionsByTaskId?.["task-1"]?.[0]?.queueEntryId).toBe("q3");
+	});
+
 	it("task_sessions_updated 不再经 reducer 产新 state：summaries 经旁路回调直送、workspaceState 引用不变", async () => {
 		const applier = vi.fn();
 		const snapshotCalls: UseRuntimeStateStreamResult[] = [];
