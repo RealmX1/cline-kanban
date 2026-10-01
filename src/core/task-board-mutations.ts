@@ -678,8 +678,9 @@ export function moveTaskToColumn(
 		...task,
 		updatedAt: now,
 	};
-	const targetCards =
-		targetColumnId === "trash" ? [movedTask, ...targetColumn.cards] : [...targetColumn.cards, movedTask];
+	// 列顶 = 最近移入：与浏览器程序化移列的 insertAtTop、以及建卡置顶同一语义。曾经只有 trash 置顶、
+	// 其余列追加到列尾，于是经 CLI `kanban task start` 等运行时路径启动的卡会沉到一列陈旧卡的最末。
+	const targetCards = [movedTask, ...targetColumn.cards];
 
 	const columns = board.columns.map((column, index) => {
 		if (index === found.columnIndex) {
