@@ -2,7 +2,7 @@ import {
 	describeNotificationIntelligencePurposeBindingProblem,
 	type NotificationIntelligencePurposeBindingProblem,
 } from "@runtime-notification-intelligence-purpose-binding-problems";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import type { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notification-intelligence-settings-draft";
@@ -14,6 +14,212 @@ import {
 import { playNotificationSummarySpeech } from "@/utils/notification-summary-speech";
 
 const inputClassName = "w-full rounded border border-border bg-surface-0 px-2 py-1.5 text-sm text-text-primary";
+
+type NotificationSettingsDraft = ReturnType<typeof useNotificationIntelligenceSettingsDraft>;
+function NotificationProviderCredentialsEditor({
+	draft,
+	category,
+	disabled,
+}: {
+	draft: NotificationSettingsDraft;
+	category: "language_model" | "speech";
+	disabled: boolean;
+}) {
+	const providerEditorId = useId();
+	const [selectedProviderIndex, setSelectedProviderIndex] = useState<number | null>(null);
+	const providerCategoryLabel = category === "language_model" ? "语言模型" : "TTS";
+	const matchingProviders = draft.providers
+		.map((profile, index) => ({ profile, index }))
+		.filter(({ profile }) => (profile.providerProtocol === "openai_compatible") === (category === "language_model"));
+	const boundProviderId =
+		category === "language_model"
+			? (draft.savedSettings?.notificationAssessmentBinding?.modelProviderId ??
+				draft.savedSettings?.taskNameSuggestionBinding?.modelProviderId)
+			: draft.savedSettings?.notificationSpeechBinding?.modelProviderId;
+	const providerIndex =
+		matchingProviders.find((candidate) => candidate.index === selectedProviderIndex)?.index ??
+		matchingProviders.find((candidate) => candidate.profile.modelProviderId === boundProviderId)?.index ??
+		matchingProviders[0]?.index;
+	const editor = providerIndex === undefined ? null : draft.getProviderEditor(providerIndex);
+	const profile = editor?.profile;
+	const savedProfile = editor?.savedProfile;
+	const apiKey = editor?.apiKey ?? "";
+	const setProfile = (profile: NotificationProviderProfile) => editor?.setProfile(profile);
+	const setApiKey = (value: string) => editor?.setApiKey(value);
+	return (
+		<fieldset disabled={disabled} className="space-y-3">
+			<legend className="mb-2 font-medium">{providerCategoryLabel} Provider 凭据</legend>
+			<NativeSelect
+				aria-label={`编辑${providerCategoryLabel} provider`}
+				value={providerIndex ?? ""}
+				onChange={(event) => setSelectedProviderIndex(Number(event.target.value))}
+			>
+				{providerIndex === undefined && <option value="">尚未配置{providerCategoryLabel} Provider</option>}
+				{matchingProviders.map(({ profile, index }) => (
+					<option key={index} value={index}>
+						{profile.displayName} · {profile.modelProviderId}
+					</option>
+				))}
+			</NativeSelect>
+			<Button
+				onClick={() =>
+					setSelectedProviderIndex(
+						draft.addProvider(category === "language_model" ? "openai_compatible" : "deepinfra"),
+					)
+				}
+			>
+				添加{providerCategoryLabel} Provider
+			</Button>
+			{!editor || !profile ? (
+				<p className="text-text-secondary">
+					{category === "language_model"
+						? "可添加 OpenAI 兼容服务，用于任务起名、通知判断与摘要。"
+						: "浏览器系统语音无需凭据；使用 DeepInfra 或阿里百炼时，在这里添加 TTS 凭据。"}
+				</p>
+			) : (
+				<>
+					<p role="status" className="text-text-secondary">
+						{savedProfile
+							? `已保存：${savedProfile.displayName}（${savedProfile.modelProviderId}） · ${savedProfile.credentialSource === "environment" ? "环境变量" : "系统钥匙串"} · ${savedProfile.credentialConfigured ? "凭据已配置（不回显）" : "凭据不可用"}`
+							: "新配置，尚未保存"}
+						{savedProfile?.credentialStatusMessage ? ` · ${savedProfile.credentialStatusMessage}` : ""}
+					</p>
+					{apiKey && <p className="text-text-secondary">新密钥待保存</p>}
+					{editor.deleteSavedCredential && <p className="text-text-secondary">密钥将在点击 Save 后删除</p>}
+					<label className="block">
+						Provider ID
+						<input
+							className={inputClassName}
+							value={profile.modelProviderId}
+							disabled={Boolean(savedProfile)}
+							onChange={(event) => setProfile({ ...profile, modelProviderId: event.target.value })}
+						/>
+					</label>
+					<label className="block">
+						显示名称
+						<input
+							className={inputClassName}
+							value={profile.displayName}
+							onChange={(event) => setProfile({ ...profile, displayName: event.target.value })}
+						/>
+					</label>
+					{category === "speech" ? (
+						<label className="block" htmlFor={`${providerEditorId}-protocol`}>
+							服务类型
+							<NativeSelect
+								id={`${providerEditorId}-protocol`}
+								value={profile.providerProtocol}
+								onChange={(event) =>
+									setProfile({
+										...profile,
+										providerProtocol: event.target.value as NotificationProviderProfile["providerProtocol"],
+									})
+								}
+							>
+								<option value="deepinfra">DeepInfra TTS</option>
+								<option value="alibaba">阿里百炼 TTS</option>
+							</NativeSelect>
+						</label>
+					) : (
+						<p className="text-text-secondary">接口类型：OpenAI 兼容文本模型</p>
+					)}
+					<PurposeBindingProblemAlerts
+						problems={draft.purposeBindingProblems.filter(
+							(problem) => problem.modelProviderId === profile.modelProviderId,
+						)}
+					/>
+					<label className="block" htmlFor={`${providerEditorId}-credential-source`}>
+						凭据来源
+						<NativeSelect
+							id={`${providerEditorId}-credential-source`}
+							value={profile.credentialSource}
+							onChange={(event) => {
+								setProfile({
+									...profile,
+									credentialSource: event.target.value as NotificationProviderProfile["credentialSource"],
+								});
+								setApiKey("");
+							}}
+						>
+							<option value="environment">环境变量</option>
+							<option value="system_credential_store">设置页保存至系统钥匙串</option>
+						</NativeSelect>
+					</label>
+					{profile.credentialSource === "environment" ? (
+						<p className="break-all text-text-secondary">
+							KANBAN_MODEL_PROVIDER_{profile.modelProviderId.toUpperCase().replaceAll("-", "_")}_API_KEY ·
+							修改后需重启运行时
+						</p>
+					) : (
+						<label className="block">
+							API Key（留空保留，保存后不回显）
+							<input
+								type="password"
+								autoComplete="new-password"
+								className={inputClassName}
+								value={apiKey}
+								onChange={(event) => setApiKey(event.target.value)}
+							/>
+						</label>
+					)}
+					{profile.providerProtocol === "openai_compatible" && (
+						<>
+							<label className="block">
+								Base URL
+								<input
+									className={inputClassName}
+									value={profile.baseUrl ?? ""}
+									onChange={(event) => setProfile({ ...profile, baseUrl: event.target.value })}
+								/>
+							</label>
+							<label className="block">
+								默认文本模型
+								<input
+									className={inputClassName}
+									value={profile.defaultModelId ?? ""}
+									onChange={(event) => setProfile({ ...profile, defaultModelId: event.target.value })}
+								/>
+							</label>
+						</>
+					)}
+					{profile.providerProtocol === "alibaba" && (
+						<>
+							<label className="block" htmlFor={`${providerEditorId}-region`}>
+								凭据地域
+								<NativeSelect
+									id={`${providerEditorId}-region`}
+									value={profile.alibabaRegion}
+									onChange={(event) =>
+										setProfile({ ...profile, alibabaRegion: event.target.value as "beijing" | "singapore" })
+									}
+								>
+									<option value="beijing">北京</option>
+									<option value="singapore">新加坡（仅 Qwen3）</option>
+								</NativeSelect>
+							</label>
+							<label className="block">
+								Workspace ID（可选）
+								<input
+									className={inputClassName}
+									value={profile.alibabaWorkspaceId ?? ""}
+									onChange={(event) =>
+										setProfile({ ...profile, alibabaWorkspaceId: event.target.value || undefined })
+									}
+								/>
+							</label>
+						</>
+					)}
+					{profile.credentialSource === "system_credential_store" && savedProfile && (
+						<Button variant="default" onClick={editor.toggleCredentialDeletion}>
+							{editor.deleteSavedCredential ? "撤销删除密钥" : "删除已保存密钥（待保存）"}
+						</Button>
+					)}
+				</>
+			)}
+		</fieldset>
+	);
+}
+
 function PurposeBindingProblemAlerts({ problems }: { problems: NotificationIntelligencePurposeBindingProblem[] }) {
 	return problems.map((problem) => (
 		<p
@@ -32,19 +238,7 @@ export function NotificationIntelligenceSettingsSection({
 	draft: ReturnType<typeof useNotificationIntelligenceSettingsDraft>;
 	disabled: boolean;
 }) {
-	const {
-		settings,
-		setSettings,
-		providers,
-		profile,
-		setProfile,
-		apiKey,
-		setApiKey,
-		savedProfile,
-		browserVoiceUri,
-		setBrowserVoiceUri,
-		purposeBindingProblems,
-	} = draft;
+	const { settings, setSettings, providers, browserVoiceUri, setBrowserVoiceUri, purposeBindingProblems } = draft;
 	const [notice, setNotice] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -86,164 +280,35 @@ export function NotificationIntelligenceSettingsSection({
 	}
 	const chatProviders = providers.filter((candidate) => candidate.providerProtocol === "openai_compatible");
 	return (
-		<section
-			aria-label="AI 与语音设置"
-			className="mb-4 space-y-4 rounded-lg border border-border bg-surface-0 p-4 text-sm"
-		>
-			<h3 className="font-semibold">智能通知与 BYOK</h3>
+		<section aria-label="AI 与语音设置" className="mb-4 space-y-5 text-sm">
+			<h3 className="font-semibold">智能通知与语音</h3>
 			<p className="text-text-secondary">
 				所有修改统一由底部 Save 保存；Cancel 放弃本次修改。密钥不回显，凭据来源不会自动切换。
 			</p>
-			<fieldset disabled={busy || disabled} className="space-y-3">
-				<legend className="mb-2 font-medium">Provider 凭据</legend>
+
+			<label className="block" htmlFor="notification-intelligence-selection-5">
+				摘要与播报语言
 				<NativeSelect
-					aria-label="编辑 provider"
-					value={draft.selectedProviderIndex}
-					onChange={(event) => draft.setSelectedProviderIndex(Number(event.target.value))}
+					id="notification-intelligence-selection-5"
+					disabled={busy || disabled}
+					value={settings.summaryLanguage}
+					onChange={(event) =>
+						patch({ summaryLanguage: event.target.value as "zh-CN" | "en-US", speechVoice: "" })
+					}
 				>
-					{providers.map((candidate, index) => (
-						<option key={index} value={index}>
-							{candidate.displayName} · {candidate.modelProviderId}
-						</option>
-					))}
+					<option value="zh-CN">中文</option>
+					<option value="en-US">English</option>
 				</NativeSelect>
-				<Button onClick={draft.addProvider}>添加 Provider</Button>
-				<p role="status" className="text-text-secondary">
-					{savedProfile
-						? `已保存：${savedProfile.displayName}（${savedProfile.modelProviderId}） · ${savedProfile.credentialSource === "environment" ? "环境变量" : "系统钥匙串"} · ${savedProfile.credentialConfigured ? "凭据已配置（不回显）" : "凭据不可用"}`
-						: "新配置，尚未保存"}
-					{savedProfile?.credentialStatusMessage ? ` · ${savedProfile.credentialStatusMessage}` : ""}
-				</p>
-				{apiKey && <p className="text-text-secondary">新密钥待保存</p>}
-				{draft.deleteSavedCredential && <p className="text-text-secondary">密钥将在点击 Save 后删除</p>}
-				<label className="block">
-					Provider ID
-					<input
-						className={inputClassName}
-						value={profile.modelProviderId}
-						disabled={Boolean(savedProfile)}
-						onChange={(event) => setProfile({ ...profile, modelProviderId: event.target.value })}
-					/>
-				</label>
-				<label className="block">
-					显示名称
-					<input
-						className={inputClassName}
-						value={profile.displayName}
-						onChange={(event) => setProfile({ ...profile, displayName: event.target.value })}
-					/>
-				</label>
-				<label className="block" htmlFor="notification-intelligence-selection-1">
-					服务类型
-					<NativeSelect
-						id="notification-intelligence-selection-1"
-						value={profile.providerProtocol}
-						onChange={(event) =>
-							setProfile({
-								...profile,
-								providerProtocol: event.target.value as NotificationProviderProfile["providerProtocol"],
-							})
-						}
-					>
-						<option value="openai_compatible">OpenAI 兼容文本模型</option>
-						<option value="deepinfra">DeepInfra TTS</option>
-						<option value="alibaba">阿里百炼 TTS</option>
-					</NativeSelect>
-				</label>
-				<PurposeBindingProblemAlerts
-					problems={purposeBindingProblems.filter(
-						(problem) => problem.modelProviderId === profile.modelProviderId,
-					)}
+			</label>
+			<fieldset disabled={busy || disabled} className="space-y-4 rounded-lg border border-border bg-surface-0 p-4">
+				<legend className="px-1 text-base font-semibold">语言模型</legend>
+				<p className="text-text-secondary">生成文本：任务起名、通知完成判断与摘要。</p>
+				<NotificationProviderCredentialsEditor
+					draft={draft}
+					category="language_model"
+					disabled={busy || disabled}
 				/>
-				<label className="block" htmlFor="notification-intelligence-selection-2">
-					凭据来源
-					<NativeSelect
-						id="notification-intelligence-selection-2"
-						value={profile.credentialSource}
-						onChange={(event) => {
-							setProfile({
-								...profile,
-								credentialSource: event.target.value as NotificationProviderProfile["credentialSource"],
-							});
-							setApiKey("");
-						}}
-					>
-						<option value="environment">环境变量</option>
-						<option value="system_credential_store">设置页保存至系统钥匙串</option>
-					</NativeSelect>
-				</label>
-				{profile.credentialSource === "environment" ? (
-					<p className="break-all text-text-secondary">
-						KANBAN_MODEL_PROVIDER_{profile.modelProviderId.toUpperCase().replaceAll("-", "_")}_API_KEY ·
-						修改后需重启运行时
-					</p>
-				) : (
-					<label className="block">
-						API Key（留空保留，保存后不回显）
-						<input
-							type="password"
-							autoComplete="new-password"
-							className={inputClassName}
-							value={apiKey}
-							onChange={(event) => setApiKey(event.target.value)}
-						/>
-					</label>
-				)}
-				{profile.providerProtocol === "openai_compatible" && (
-					<>
-						<label className="block">
-							Base URL
-							<input
-								className={inputClassName}
-								value={profile.baseUrl ?? ""}
-								onChange={(event) => setProfile({ ...profile, baseUrl: event.target.value })}
-							/>
-						</label>
-						<label className="block">
-							默认文本模型
-							<input
-								className={inputClassName}
-								value={profile.defaultModelId ?? ""}
-								onChange={(event) => setProfile({ ...profile, defaultModelId: event.target.value })}
-							/>
-						</label>
-					</>
-				)}
-				{profile.providerProtocol === "alibaba" && (
-					<>
-						<label className="block" htmlFor="notification-intelligence-selection-3">
-							凭据地域
-							<NativeSelect
-								id="notification-intelligence-selection-3"
-								value={profile.alibabaRegion}
-								onChange={(event) =>
-									setProfile({ ...profile, alibabaRegion: event.target.value as "beijing" | "singapore" })
-								}
-							>
-								<option value="beijing">北京</option>
-								<option value="singapore">新加坡（仅 Qwen3）</option>
-							</NativeSelect>
-						</label>
-						<label className="block">
-							Workspace ID（可选）
-							<input
-								className={inputClassName}
-								value={profile.alibabaWorkspaceId ?? ""}
-								onChange={(event) =>
-									setProfile({ ...profile, alibabaWorkspaceId: event.target.value || undefined })
-								}
-							/>
-						</label>
-					</>
-				)}
-				{profile.credentialSource === "system_credential_store" && savedProfile && (
-					<Button variant="default" onClick={draft.toggleCredentialDeletion}>
-						{draft.deleteSavedCredential ? "撤销删除密钥" : "删除已保存密钥（待保存）"}
-					</Button>
-				)}
-			</fieldset>
-			<fieldset disabled={busy || disabled} className="space-y-3">
-				<legend className="mb-2 font-medium">功能模型与通知</legend>
+				<h4 className="border-t border-border pt-4 font-medium">语言模型用途</h4>
 				{(["taskNameSuggestionBinding", "notificationAssessmentBinding"] as const).map((bindingKey) => (
 					<div key={bindingKey} className="space-y-1">
 						<label className="block" htmlFor={`notification-intelligence-selection-4-${bindingKey}`}>
@@ -312,19 +377,7 @@ export function NotificationIntelligenceSettingsSection({
 					/>
 					启用 AI 完成判断与摘要（会发送相关任务证据并产生 API 费用）
 				</label>
-				<label className="block" htmlFor="notification-intelligence-selection-5">
-					摘要与播报语言
-					<NativeSelect
-						id="notification-intelligence-selection-5"
-						value={settings.summaryLanguage}
-						onChange={(event) =>
-							patch({ summaryLanguage: event.target.value as "zh-CN" | "en-US", speechVoice: "" })
-						}
-					>
-						<option value="zh-CN">中文</option>
-						<option value="en-US">English</option>
-					</NativeSelect>
-				</label>
+
 				<label className="block">
 					延期兜底（分钟）
 					<input
@@ -336,6 +389,14 @@ export function NotificationIntelligenceSettingsSection({
 						onChange={(event) => patch({ fallbackAfterMinutes: Number(event.target.value) })}
 					/>
 				</label>
+			</fieldset>
+			<fieldset disabled={busy || disabled} className="space-y-4 rounded-lg border border-border bg-surface-0 p-4">
+				<legend className="px-1 text-base font-semibold">语音合成 TTS</legend>
+				<p className="text-text-secondary">
+					将通知摘要朗读为音频。浏览器系统语音无需 API Key；第三方语音使用独立的 TTS Provider 配置。
+				</p>
+				<NotificationProviderCredentialsEditor draft={draft} category="speech" disabled={busy || disabled} />
+				<h4 className="border-t border-border pt-4 font-medium">播报设置</h4>
 				<label className="block" htmlFor="notification-intelligence-selection-6">
 					声音模式
 					<NativeSelect

@@ -56,6 +56,8 @@
 
 每个 provider 明确选择 `environment` 或 `system_credential_store`。环境变量为 `KANBAN_MODEL_PROVIDER_<大写且连字符转下划线的ID>_API_KEY`；沿用已有文本 provider 默认解析。密钥留空表示保留，删除按钮显式删除；系统库不可用/锁定时提示错误，不静默切换来源、不落明文文件。Linux 强制 Secret Service，不使用库的内存回退。
 
+设置页分为两组：「语言模型」仅包含 OpenAI 兼容文本 Provider、任务起名及通知判断/摘要；「语音合成 TTS」仅包含 DeepInfra/阿里百炼 Provider、音色与播报设置。两组分别选择、添加和编辑凭据，新增配置默认采用所属组的协议；浏览器系统语音无需创建 Provider。摘要与播报语言是两组上方的共享设置。
+
 任务起名、通知评估和语音合成是三个用途绑定。前两者使用 OpenAI-compatible 文本协议；第三者使用各 provider 原生 TTS 协议，不把音频服务硬塞进聊天接口。
 
 | 来源 | 首批模型与能力 | 限制 |
