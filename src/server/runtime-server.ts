@@ -32,8 +32,13 @@ import {
 	getKanbanRuntimeTls,
 	isKanbanRemoteHost,
 } from "../core/runtime-endpoint";
+import { resolveSessionFacets } from "../core/session-activity";
 import { startEventLoopDelayMonitor } from "../diagnostics/event-loop-delay-monitor";
+import { startKanbanRuntimeProcessSelfResourceSampleMonitor } from "../diagnostics/kanban-runtime-process-self-resource-sample-monitor";
 import { startProcessFileDescriptorWatermarkMonitor } from "../diagnostics/process-file-descriptor-watermark-monitor";
+import { createTaskAgentConversationModelTokenUsageJournalMonitor } from "../diagnostics/task-agent-conversation-model-token-usage-journal-monitor";
+import { createTaskAttributedProcessTreeResourceSampler } from "../diagnostics/task-attributed-process-tree-resource-sampler";
+import { createTaskWorktreeDiskUsageMeasurementMonitor } from "../diagnostics/task-worktree-disk-usage-measurement-monitor";
 import { translateExplorationThreadGraphMaintenanceOutcome } from "../exploration-thread-graph/exploration-thread-graph-maintenance-outcome-translation";
 import { createExplorationThreadGraphMaintenanceTrigger } from "../exploration-thread-graph/exploration-thread-graph-maintenance-trigger";
 import { loadExplorationThreadGraphProjection } from "../exploration-thread-graph/exploration-thread-graph-projection-loader";
@@ -57,7 +62,7 @@ import {
 	readLiveRuntimeProcessInstanceIds,
 	startRuntimeProcessInstanceHeartbeat,
 } from "../state/runtime-process-instance-heartbeat-registry";
-import { loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/workspace-state";
+import { getTaskWorktreesHomePath, loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -80,6 +85,11 @@ import { scheduleStalePendingTaskMessageInjectionSweepsAfterRuntimeRestart } fro
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
 import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
+import {
+	enumerateTaskResourceUsageAttributionRoots,
+	type TaskResourceUsageAttributionSessionSource,
+} from "./task-resource-usage-attribution-root-enumeration";
+import { createLiveTaskResourceUsageSnapshotPublisher } from "./task-resource-usage-live-snapshot-publication";
 import { createTransportAwareAgentSessionReclamationExecutor } from "./transport-aware-agent-session-reclamation";
 import type { WorkspaceRegistry } from "./workspace-registry";
 
@@ -400,6 +410,91 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
 		},
 	});
+
+	const publishLiveTaskResourceUsageSnapshots = createLiveTaskResourceUsageSnapshotPublisher(
+		(workspaceId, snapshots) => {
+			deps.runtimeStateHub.broadcastTaskResourceUsageSnapshotsUpdated(workspaceId, snapshots);
+		},
+	);
+	// 按 task 归因的资源占用采集的会话源。按 transport 分别列出、不做 taskId 合并：
+	// listProjectRuntimeSessionSummaries 的「后写覆盖先写」会吞掉 PTY 会话的 pid。
+	const listTerminalTaskResourceUsageAttributionSessionSources = (): TaskResourceUsageAttributionSessionSource[] =>
+		deps.workspaceRegistry.listManagedWorkspaces().map(({ workspaceId, workspacePath, terminalManager }) => ({
+			workspaceId,
+			workspacePath,
+			listSummaries: () => terminalManager.listSummaries(),
+		}));
+	const listClineTaskResourceUsageAttributionSessionSources = (): TaskResourceUsageAttributionSessionSource[] =>
+		Array.from(clineTaskSessionServiceByWorkspaceId, ([workspaceId, service]) => ({
+			workspaceId,
+			workspacePath: clineWorkspacePathByWorkspaceId.get(workspaceId) ?? null,
+			listSummaries: () => service.listSummaries(),
+		}));
+	const listAcpTaskResourceUsageAttributionSessionSources = (): TaskResourceUsageAttributionSessionSource[] =>
+		Array.from(acpTaskSessionServiceByWorkspaceId, ([workspaceId, service]) => ({
+			workspaceId,
+			workspacePath: acpWorkspacePathByWorkspaceId.get(workspaceId) ?? null,
+			listSummaries: () => service.listSummaries(),
+		}));
+	const enumerateCurrentTaskResourceUsageAttributionRoots = () =>
+		enumerateTaskResourceUsageAttributionRoots({
+			listTerminalSessionSources: listTerminalTaskResourceUsageAttributionSessionSources,
+			listClineSessionSources: listClineTaskResourceUsageAttributionSessionSources,
+			listAcpSessionSources: listAcpTaskResourceUsageAttributionSessionSources,
+		});
+	// harness 根进程、MCP、agent 命令、残留孤儿、用户 shell / dev server 的内存与 CPU，按 task 归因后写 journal。
+	const taskAttributedProcessTreeResourceSampler = createTaskAttributedProcessTreeResourceSampler({
+		enumerateAttributionRoots: enumerateCurrentTaskResourceUsageAttributionRoots,
+		// 卡片上的实时内存 / CPU 药丸：独立推流消息，不进 session summary。
+		onLiveTaskResourceUsageSnapshotsUpdated: (snapshots) => {
+			// 附上 token 用量与 worktree 磁盘体积（各自的监视器低频刷新），详情面板一并展示。
+			publishLiveTaskResourceUsageSnapshots(
+				snapshots.map((snapshot) =>
+					snapshot.attributedTaskCardId === null
+						? snapshot
+						: {
+								...snapshot,
+								modelTokenUsageAcrossTaskSessions:
+									taskAgentConversationModelTokenUsageJournalMonitor.summarizeLatestModelTokenUsageForTaskCard(
+										snapshot.workspaceId,
+										snapshot.attributedTaskCardId,
+									),
+								latestWorktreeDiskUsageBytes:
+									taskWorktreeDiskUsageMeasurementMonitor.getLatestWorktreeDiskUsageBytesForTaskCard(
+										snapshot.workspaceId,
+										snapshot.attributedTaskCardId,
+									),
+							},
+				),
+			);
+		},
+	});
+	// Claude Code / Codex 的模型 token 用量：每 5 分钟增量读 transcript / rollout，写累计快照进 journal。
+	const taskAgentConversationModelTokenUsageJournalMonitor = createTaskAgentConversationModelTokenUsageJournalMonitor({
+		listSessionSummariesWithWorkspace: () =>
+			listTerminalTaskResourceUsageAttributionSessionSources().flatMap(({ workspaceId, listSummaries }) =>
+				listSummaries().map((summary) => ({ workspaceId, summary })),
+			),
+	});
+	// task worktree 的实体磁盘体积：每个活跃 worktree 最多 24 小时量一次。
+	const taskWorktreeDiskUsageMeasurementMonitor = createTaskWorktreeDiskUsageMeasurementMonitor({
+		listTaskWorkingDirectoryAttributions: () =>
+			enumerateCurrentTaskResourceUsageAttributionRoots().taskWorkingDirectoryAttributions,
+		isKanbanManagedTaskWorktreePath: (workingDirectoryPath) =>
+			workingDirectoryPath.startsWith(`${getTaskWorktreesHomePath()}/`),
+	});
+	const countLiveInProcessClineSdkSessions = (): number => {
+		let liveSessionCount = 0;
+		for (const { listSummaries } of listClineTaskResourceUsageAttributionSessionSources()) {
+			for (const summary of listSummaries()) {
+				const { liveness } = resolveSessionFacets(summary);
+				if (liveness === "starting" || liveness === "live" || liveness === "retrying") {
+					liveSessionCount += 1;
+				}
+			}
+		}
+		return liveSessionCount;
+	};
 
 	const stopAndCollectProjectRuntimeSessionsForSafePersistence = async (
 		workspaceId: string,
@@ -884,6 +979,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// fd 泄漏曾一路无声地越过 Darwin OPEN_MAX(10240)，才以「所有 git 调用 EBADF」的形式在一个毫不相干
 	// 的子系统里间接显形；这条探针让 fd 水位在爆炸前就可见，对任何一类 fd 泄漏回归都同样有效。
 	const stopProcessFileDescriptorWatermarkMonitor = startProcessFileDescriptorWatermarkMonitor();
+	// Kanban 进程自身的内存 / CPU 基线：固定服务器成本的对照，也是进程内 Cline SDK 会话唯一可见的资源面。
+	const stopKanbanRuntimeProcessSelfResourceSampleMonitor = startKanbanRuntimeProcessSelfResourceSampleMonitor({
+		countLiveInProcessClineSdkSessions,
+		countLiveSessionsWithOsProcess: () => enumerateCurrentTaskResourceUsageAttributionRoots().roots.length,
+	});
 	const terminalWebSocketBridge = createTerminalWebSocketBridge({
 		server,
 		resolveTerminalManager: (workspaceId) => deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId),
@@ -926,6 +1026,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	agentSessionInactivityReclamationScheduler.start();
 	queuedTaskPromptDeliveryDispatcher.start();
+	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
+	taskAttributedProcessTreeResourceSampler.start();
+	taskAgentConversationModelTokenUsageJournalMonitor.start();
+	taskWorktreeDiskUsageMeasurementMonitor.start();
 
 	return {
 		url,
@@ -935,6 +1039,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			// 在途的 PTY 投递不等它落定（最长 ~200s）：下一次启动的清扫会把撂下的那条判成「可能已发出」交给人。
 			queuedTaskPromptDeliveryDispatcher.stop();
 			unregisterQueuedTaskPromptDeliveryDispatchObserver();
+			// 先于会话拆除停止：把此刻仍存活进程的生命周期冲刷成 episode，而不是记成「进程退出」。
+			taskAttributedProcessTreeResourceSampler.stop();
+			taskAgentConversationModelTokenUsageJournalMonitor.stop();
+			taskWorktreeDiskUsageMeasurementMonitor.stop();
+			stopKanbanRuntimeProcessSelfResourceSampleMonitor();
 			// ACP agent 是持有 stdio 的真子进程：不在这里拆掉，关服后它还活着、还能改仓库，
 			// 而且它占着的 stdio 管道会把 Kanban 进程本身的退出一起拖住。
 			for (const service of acpTaskSessionServiceByWorkspaceId.values()) {

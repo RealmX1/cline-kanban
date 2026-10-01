@@ -9,7 +9,9 @@ import type {
 	RuntimeAgentRaisedToolPermissionPayload,
 	RuntimeAgentRaisedUserQuestionPayload,
 	RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
+	RuntimeAgentToolCallExecutionOutcome,
 	RuntimeHarnessUserPromptProcessingDirective,
+	RuntimeHookCliProcessResourceUsage,
 	RuntimeHookEvent,
 	RuntimeHookIngestResponse,
 	RuntimeTaskHookActivity,
@@ -34,6 +36,7 @@ import {
 	extractAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
 } from "./agent-raised-decision-payload-extraction";
 import { extractAgentNativeConversationSessionIdentityFromHookPayload } from "./hook-events/agent-native-conversation-session-identity-extraction";
+import { extractAgentToolCallExecutionOutcomeFromHookPayload } from "./hook-events/agent-tool-call-execution-outcome-extraction";
 import {
 	type CodexMappedHookEvent,
 	resolveCodexRolloutFinalMessageForCwd,
@@ -75,6 +78,8 @@ interface HooksIngestArgs {
 	submittedPromptText?: string;
 	// N0a：终端 agent 原生会话身份（session_id + transcript_path），每个事件都带，服务端幂等落 sidecar。
 	agentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity;
+	// 资源占用采集：工具类事件的执行结果（已截断脱敏），服务端只写 journal。
+	agentToolCallExecutionOutcome?: RuntimeAgentToolCallExecutionOutcome;
 }
 
 interface HookCommandMetadataOptionValues {
@@ -415,6 +420,11 @@ function parseHooksIngestArgs(
 		payload,
 		sourceAgentId: metadata?.source ?? inferHookSourceFromPayload(payload),
 	});
+	const agentToolCallExecutionOutcome = extractAgentToolCallExecutionOutcomeFromHookPayload({
+		payload,
+		hookEventName: metadata?.hookEventName,
+		toolName: metadata?.toolName,
+	});
 	return {
 		event,
 		taskId: context.taskId,
@@ -422,6 +432,7 @@ function parseHooksIngestArgs(
 		metadata,
 		payload,
 		...(agentNativeConversationSessionIdentity ? { agentNativeConversationSessionIdentity } : {}),
+		...(agentToolCallExecutionOutcome ? { agentToolCallExecutionOutcome } : {}),
 		...buildAgentRaisedDecisionPayloads(payload, metadata),
 		...(metadata?.hookEventName?.trim().toLowerCase() === "userpromptsubmit" && payload
 			? { submittedPromptText: readStringField(payload, "prompt") ?? undefined }
@@ -605,6 +616,18 @@ function recordIngestDropForLifecycleEvent(
 	});
 }
 
+// hooks CLI 进程自身到「这一次发送」为止的开销。maxRSS 的峰值主要来自模块加载；发送之后那一小段测不到。
+function captureHookCliProcessResourceUsage(hookIngestDeliveryAttempt: number): RuntimeHookCliProcessResourceUsage {
+	const resourceUsage = process.resourceUsage();
+	return {
+		lifetimeMaximumResidentSetSizeKibibytes: resourceUsage.maxRSS,
+		cumulativeUserCpuTimeSeconds: resourceUsage.userCPUTime / 1e6,
+		cumulativeSystemCpuTimeSeconds: resourceUsage.systemCPUTime / 1e6,
+		hookCliProcessUptimeMs: Math.round(process.uptime() * 1000),
+		hookIngestDeliveryAttempt: Math.max(1, hookIngestDeliveryAttempt),
+	};
+}
+
 async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngestResponse> {
 	let attempt = 0;
 	const response = await deliverHookIngestWithRetry(
@@ -640,6 +663,11 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngest
 				...(args.agentNativeConversationSessionIdentity
 					? { agentNativeConversationSessionIdentity: args.agentNativeConversationSessionIdentity }
 					: {}),
+				...(args.agentToolCallExecutionOutcome
+					? { agentToolCallExecutionOutcome: args.agentToolCallExecutionOutcome }
+					: {}),
+				// 每次尝试发送前重新取值：重试之间的等待本身也是这个 hook 进程的开销。
+				hookCliProcessResourceUsage: captureHookCliProcessResourceUsage(attempt),
 			});
 		},
 		{

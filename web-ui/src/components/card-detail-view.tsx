@@ -31,6 +31,7 @@ import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-pa
 import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/queued-task-prompt-delivery-queue-panel";
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
+import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
 import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
 import { SessionFindingsSection } from "@/components/findings/session-findings-section";
 import {
@@ -1478,6 +1479,7 @@ export function CardDetailView({
 						: null
 				}
 			/>
+			<TaskResourceUsageDetailPanel taskCardId={selection.card.id} />
 			{agentSessionContent}
 		</div>
 	);

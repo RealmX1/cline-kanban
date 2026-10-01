@@ -27,6 +27,7 @@ import type {
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeExplorationThreadGraphProjectionView,
 	RuntimeExploratoryFindingEntry,
+	RuntimeLiveTaskResourceUsageSnapshot,
 	RuntimeNotificationFeedEntry,
 	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
@@ -42,6 +43,7 @@ import type {
 	RuntimeStateStreamTaskChatClearedMessage,
 	RuntimeStateStreamTaskChatMessage,
 	RuntimeStateStreamTaskReadyForReviewMessage,
+	RuntimeStateStreamTaskResourceUsageSnapshotsUpdatedMessage,
 	RuntimeStateStreamTaskSessionsMessage,
 	RuntimeStateStreamWorkspaceMetadataMessage,
 	RuntimeStateStreamWorkspaceStateMessage,
@@ -123,6 +125,12 @@ export interface RuntimeStateHub {
 	broadcastQueuedTaskPromptDeliveriesUpdated: (
 		workspaceId: string,
 		projectedEntriesByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
+	) => void;
+	// 按 task 归因的资源占用：某 workspace 全部卡片的实时快照（全量替换）。每个采样 tick 调一次；
+	// hub 缓存最近一份，新客户端连上后立即补发，首屏不必等下一个 tick。
+	broadcastTaskResourceUsageSnapshotsUpdated: (
+		workspaceId: string,
+		snapshots: RuntimeLiveTaskResourceUsageSnapshot[],
 	) => void;
 	close: () => Promise<void>;
 }
@@ -586,6 +594,23 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
+	// 每个 workspace 最近一次资源快照消息（已序列化）：新客户端连上时补发。
+	const latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId = new Map<string, string>();
+	const broadcastTaskResourceUsageSnapshotsUpdated = (
+		workspaceId: string,
+		snapshots: RuntimeLiveTaskResourceUsageSnapshot[],
+	): void => {
+		const serializedPayload = JSON.stringify({
+			type: "task_resource_usage_snapshots_updated",
+			workspaceId,
+			snapshots,
+		} satisfies RuntimeStateStreamTaskResourceUsageSnapshotsUpdatedMessage);
+		latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId.set(workspaceId, serializedPayload);
+		for (const client of runtimeStateClientsByWorkspaceId.get(workspaceId) ?? []) {
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
+		}
+	};
+
 	const buildAggregatedNotificationFeed = async (): Promise<RuntimeNotificationFeedEntry[]> => {
 		try {
 			const logsByWorkspaceId = await readAllNotificationLogs();
@@ -778,6 +803,11 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 							summaries: conversationSummaries,
 						} satisfies RuntimeStateStreamTaskSessionsMessage);
 					}
+					const latestSerializedTaskResourceUsageSnapshotsMessage =
+						latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId.get(monitorWorkspaceId);
+					if (latestSerializedTaskResourceUsageSnapshotsMessage !== undefined) {
+						sendSerializedRuntimeStateMessage(client, latestSerializedTaskResourceUsageSnapshotsMessage);
+					}
 				}
 				// 通知重放是 best-effort：先完成订阅登记，档案慢或故障均不阻塞核心推流。
 				// 重放期间断连由 close handler 释放订阅；这里不再注册或重复释放 monitor。
@@ -889,6 +919,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			};
 		},
 		broadcastQueuedTaskPromptDeliveriesUpdated,
+		broadcastTaskResourceUsageSnapshotsUpdated,
 		close: async () => {
 			notificationAssessment.close();
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {

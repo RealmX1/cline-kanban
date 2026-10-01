@@ -24,6 +24,10 @@ import type {
 	RuntimeWorkspaceMetadata,
 	RuntimeWorkspaceStateResponse,
 } from "@/runtime/types";
+import {
+	replaceTaskResourceUsageSnapshots,
+	resetTaskResourceUsageSnapshotStore,
+} from "@/stores/task-resource-usage-snapshot-store";
 
 const STREAM_RECONNECT_BASE_DELAY_MS = 500;
 const STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
@@ -491,6 +495,20 @@ export function useRuntimeStateStream(
 		let shouldCheckServedBuildAssetsOnOpen = false;
 
 		dispatch({ type: "requested_workspace_changed" });
+		// 卡片 id 只在一个看板内唯一：换 workspace（重建连接）先清掉上一个 workspace 的资源快照，
+		// 新 workspace 的最新一份由 hub 在连接建立后立即补发（hub 尚无缓存时要等下一个采样 tick）。
+		resetTaskResourceUsageSnapshotStore();
+
+		// activeWorkspaceId 在本 effect 内还有两处换值、而 effect 不重建：projects_updated 自动切走，以及未指定
+		// workspace 的重连握手被服务端落到另一个 active workspace（snapshot）。两处都必须同样先清空资源快照，
+		// 否则新 workspace 首份快照到达前，同 id 的卡片会一直显示旧仓库的 RSS/CPU。落回同一 workspace 则保留
+		// last-known，不在下一个 tick 前闪空。
+		const switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange = (nextWorkspaceId: string | null) => {
+			if (nextWorkspaceId !== activeWorkspaceId) {
+				resetTaskResourceUsageSnapshotStore();
+			}
+			activeWorkspaceId = nextWorkspaceId;
+		};
 
 		const cleanupSocket = () => {
 			if (socket) {
@@ -549,14 +567,14 @@ export function useRuntimeStateStream(
 				try {
 					const payload = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
 					if (payload.type === "snapshot") {
-						activeWorkspaceId = payload.currentProjectId;
+						switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange(payload.currentProjectId);
 						dispatch({ type: "snapshot", payload });
 						return;
 					}
 					if (payload.type === "projects_updated") {
 						const previousWorkspaceId = activeWorkspaceId;
 						const nextProjectId = resolveProjectIdAfterProjectsUpdate(activeWorkspaceId, payload);
-						activeWorkspaceId = nextProjectId;
+						switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange(nextProjectId);
 						dispatch({
 							type: "projects_updated",
 							payload,
@@ -626,6 +644,14 @@ export function useRuntimeStateStream(
 							type: "task_ready_for_review",
 							payload,
 						});
+						return;
+					}
+					if (payload.type === "task_resource_usage_snapshots_updated") {
+						if (payload.workspaceId !== activeWorkspaceId) {
+							return;
+						}
+						// 旁路：直写按卡片订阅的 store，不 dispatch——每 15 秒一次的全量快照不应让 App 重渲染。
+						replaceTaskResourceUsageSnapshots(payload.snapshots);
 						return;
 					}
 					if (payload.type === "exploration_thread_graph_updated") {

@@ -47,6 +47,7 @@ import {
 	resolveClineModelDisplayName,
 } from "@/components/detail-panels/cline-model-picker-options";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
@@ -851,6 +852,11 @@ export const TaskCardBody = memo(function TaskCardBody({
 							</Tooltip>
 						</>
 					) : null}
+					<TaskCardResourceUsagePill
+						taskCardId={card.id}
+						isTrashCard={isTrashCard}
+						revealHoverActionTooltip={revealHoverActionTooltip}
+					/>
 					{!isTaskPinboardCopy && isPinnedToTaskPinboard ? (
 						// 置顶板里每张都是置顶的，那边不重复这个标记，改为显示 stage 标签（见下）。
 						<>

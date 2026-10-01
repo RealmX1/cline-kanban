@@ -2,11 +2,16 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { RuntimeLiveTaskResourceUsageSnapshot } from "@/runtime/types";
 import type {
 	StreamedTaskSessionSummariesApplier,
 	UseRuntimeStateStreamResult,
 } from "@/runtime/use-runtime-state-stream";
 import { useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
+import {
+	resetTaskResourceUsageSnapshotStore,
+	useTaskResourceUsageSnapshotValue,
+} from "@/stores/task-resource-usage-snapshot-store";
 
 const reloadBrowserIfServedBuildAssetsChangedMock = vi.hoisted(() => vi.fn());
 
@@ -65,6 +70,39 @@ function RuntimeStateStreamHarness({
 	return null;
 }
 
+// 模拟卡体上的资源药丸：按卡片 id 订阅资源快照 store，把每次渲染看到的值交给测试。
+function TaskResourceUsageSnapshotForTaskCardProbe({
+	taskCardId,
+	onTaskResourceUsageSnapshotRendered,
+}: {
+	taskCardId: string;
+	onTaskResourceUsageSnapshotRendered: (snapshot: RuntimeLiveTaskResourceUsageSnapshot | null) => void;
+}): null {
+	onTaskResourceUsageSnapshotRendered(useTaskResourceUsageSnapshotValue(taskCardId));
+	return null;
+}
+
+function buildTaskResourceUsageSnapshotForTaskCard(
+	workspaceId: string,
+	attributedTaskCardId: string,
+	residentSetSizeKibibytesSumUpperBound: number,
+): RuntimeLiveTaskResourceUsageSnapshot {
+	return {
+		workspaceId,
+		attributedTaskCardId,
+		sampledAtEpochMs: 1,
+		attributedProcessCount: 3,
+		residentSetSizeKibibytesSumUpperBound,
+		cpuPercentOfOneCoreOverLastSampleInterval: 5,
+		survivedSessionRootExitProcessCount: 0,
+		survivedSessionRootExitResidentSetSizeKibibytesSum: 0,
+		agentHarnessRootPhysicalFootprintBytes: null,
+		processCountByProcessClassification: {},
+		residentSetSizeKibibytesSumUpperBoundByProcessClassification: {},
+		mcpServerInstances: [],
+	};
+}
+
 describe("useRuntimeStateStream", () => {
 	let container: HTMLDivElement;
 	let root: Root;
@@ -93,6 +131,8 @@ describe("useRuntimeStateStream", () => {
 			root.unmount();
 		});
 		container.remove();
+		// 资源快照 store 是模块级单例，跨用例会残留。
+		resetTaskResourceUsageSnapshotStore();
 		Object.defineProperty(globalThis, "WebSocket", {
 			configurable: true,
 			value: previousWebSocket,
@@ -481,5 +521,135 @@ describe("useRuntimeStateStream", () => {
 		});
 		expect(applier).toHaveBeenCalledTimes(1);
 		expect(snapshotCalls.length).toBe(snapshotCallsBeforeSessionsUpdate);
+	});
+
+	describe("资源快照 store 只装当前连接 workspace 的数据（卡片 id 只在一个看板内唯一）", () => {
+		const buildProjectSummary = (projectId: string) => ({
+			id: projectId,
+			path: `/tmp/${projectId}`,
+			name: projectId,
+			taskCounts: { backlog: 0, in_progress: 0, review: 0, trash: 0 },
+			availability: { status: "available" },
+			inProgressTaskDetails: [],
+		});
+		const buildStreamSnapshotMessage = (currentProjectId: string, projectIds: string[]) => ({
+			type: "snapshot",
+			currentProjectId,
+			projects: projectIds.map(buildProjectSummary),
+			workspaceState: null,
+			workspaceMetadata: null,
+			clineSessionContextVersion: 0,
+			notificationLog: [],
+		});
+
+		// requestedWorkspaceId 为 null 挂载 hook，并在同一棵树里挂一个订阅 "aa111" 卡片资源快照的药丸探针。
+		async function mountStreamWithTaskCardResourceUsageProbe(): Promise<{
+			latestRenderedSnapshotForTaskCard: () => RuntimeLiveTaskResourceUsageSnapshot | null;
+		}> {
+			const renderedSnapshotsForTaskCard: (RuntimeLiveTaskResourceUsageSnapshot | null)[] = [];
+			await act(async () => {
+				root.render(
+					<>
+						<RuntimeStateStreamHarness
+							onSnapshot={() => {
+								// 本组用例只看资源快照 store，不关心 hook 返回值。
+							}}
+						/>
+						<TaskResourceUsageSnapshotForTaskCardProbe
+							taskCardId="aa111"
+							onTaskResourceUsageSnapshotRendered={(snapshot) => {
+								renderedSnapshotsForTaskCard.push(snapshot);
+							}}
+						/>
+					</>,
+				);
+			});
+			return {
+				latestRenderedSnapshotForTaskCard: () => renderedSnapshotsForTaskCard.at(-1) ?? null,
+			};
+		}
+
+		it("projects_updated 在同一 effect 内自动切到另一个 workspace 时先清空，旧仓库同 id 卡片的 RSS/CPU 不得残留", async () => {
+			const { latestRenderedSnapshotForTaskCard } = await mountStreamWithTaskCardResourceUsageProbe();
+			const initialSocket = MockRuntimeStateWebSocket.instances[0];
+			if (!initialSocket) {
+				throw new Error("Expected the initial runtime stream socket.");
+			}
+			act(() => initialSocket.triggerOpen());
+			await act(async () => {
+				initialSocket.triggerMessage(buildStreamSnapshotMessage("ws-a", ["ws-a", "ws-b"]));
+			});
+			await act(async () => {
+				initialSocket.triggerMessage({
+					type: "task_resource_usage_snapshots_updated",
+					workspaceId: "ws-a",
+					snapshots: [buildTaskResourceUsageSnapshotForTaskCard("ws-a", "aa111", 777_000)],
+				});
+			});
+			expect(latestRenderedSnapshotForTaskCard()?.residentSetSizeKibibytesSumUpperBound).toBe(777_000);
+
+			// ws-a 被移除，服务端把当前项目改成 ws-b：hook 内部改连 ws-b，effect 本身不重建。
+			await act(async () => {
+				initialSocket.triggerMessage({
+					type: "projects_updated",
+					currentProjectId: "ws-b",
+					projects: [buildProjectSummary("ws-b")],
+				});
+			});
+			const switchedSocket = MockRuntimeStateWebSocket.instances[1];
+			expect(switchedSocket?.url).toContain("workspaceId=ws-b");
+			// ws-b 的首份资源快照尚未到达（hub 可能还没有缓存）：ws-a 的 aa111 不得冒充 ws-b 的 aa111。
+			expect(latestRenderedSnapshotForTaskCard()).toBeNull();
+		});
+
+		it("未指定 workspace 的重连握手落到另一个 workspace 时同样清空；落回同一 workspace 则保留 last-known", async () => {
+			const { latestRenderedSnapshotForTaskCard } = await mountStreamWithTaskCardResourceUsageProbe();
+			const initialSocket = MockRuntimeStateWebSocket.instances[0];
+			if (!initialSocket) {
+				throw new Error("Expected the initial runtime stream socket.");
+			}
+			act(() => initialSocket.triggerOpen());
+			await act(async () => {
+				initialSocket.triggerMessage(buildStreamSnapshotMessage("ws-a", ["ws-a", "ws-b"]));
+			});
+			await act(async () => {
+				initialSocket.triggerMessage({
+					type: "task_resource_usage_snapshots_updated",
+					workspaceId: "ws-a",
+					snapshots: [buildTaskResourceUsageSnapshotForTaskCard("ws-a", "aa111", 777_000)],
+				});
+			});
+
+			// 重连落回同一 workspace：保留 last-known，不在下一个采样 tick 前闪成空。
+			act(() => {
+				initialSocket.triggerClose();
+				vi.advanceTimersByTime(500);
+			});
+			const sameWorkspaceReconnectedSocket = MockRuntimeStateWebSocket.instances[1];
+			if (!sameWorkspaceReconnectedSocket) {
+				throw new Error("Expected a reconnected runtime stream socket.");
+			}
+			act(() => sameWorkspaceReconnectedSocket.triggerOpen());
+			await act(async () => {
+				sameWorkspaceReconnectedSocket.triggerMessage(buildStreamSnapshotMessage("ws-a", ["ws-a", "ws-b"]));
+			});
+			expect(latestRenderedSnapshotForTaskCard()?.residentSetSizeKibibytesSumUpperBound).toBe(777_000);
+
+			// 重连时没带 workspaceId，服务端按自己的 active workspace（可被别的标签页改掉）落到 ws-b。
+			act(() => {
+				sameWorkspaceReconnectedSocket.triggerClose();
+				vi.advanceTimersByTime(500);
+			});
+			const otherWorkspaceReconnectedSocket = MockRuntimeStateWebSocket.instances[2];
+			if (!otherWorkspaceReconnectedSocket) {
+				throw new Error("Expected a second reconnected runtime stream socket.");
+			}
+			expect(otherWorkspaceReconnectedSocket.url).not.toContain("workspaceId=");
+			act(() => otherWorkspaceReconnectedSocket.triggerOpen());
+			await act(async () => {
+				otherWorkspaceReconnectedSocket.triggerMessage(buildStreamSnapshotMessage("ws-b", ["ws-a", "ws-b"]));
+			});
+			expect(latestRenderedSnapshotForTaskCard()).toBeNull();
+		});
 	});
 });

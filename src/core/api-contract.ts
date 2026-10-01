@@ -1829,6 +1829,59 @@ export type RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage = z.infer
 	typeof runtimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessageSchema
 >;
 
+// 按卡片聚合的实时资源占用快照（按 task 归因的资源占用采集，S4）。由运行时的进程树采样器每 15 秒产出，
+// 只在内存里、不进 session summary（否则会随 summary 落 sessions.json、触发观察器与项目广播）。
+// RSS 求和是上界（共享页重复计数），footprint 才是整机真实代价（低频采样，可能为 null）。
+export const runtimeLiveTaskResourceUsageSnapshotSchema = z.object({
+	workspaceId: z.string(),
+	// null = workspace 级会话（home agent、首页终端）。
+	attributedTaskCardId: z.string().nullable(),
+	sampledAtEpochMs: z.number(),
+	attributedProcessCount: z.number().int().nonnegative(),
+	residentSetSizeKibibytesSumUpperBound: z.number().nonnegative(),
+	// 以「单核 = 100%」计；没有可比的上一读数时为 null。
+	cpuPercentOfOneCoreOverLastSampleInterval: z.number().nonnegative().nullable(),
+	// 会话根进程已退出、仍在跑的残留进程（孤儿）。
+	survivedSessionRootExitProcessCount: z.number().int().nonnegative(),
+	survivedSessionRootExitResidentSetSizeKibibytesSum: z.number().nonnegative(),
+	agentHarnessRootPhysicalFootprintBytes: z.number().nonnegative().nullable(),
+	processCountByProcessClassification: z.record(z.string(), z.number()),
+	residentSetSizeKibibytesSumUpperBoundByProcessClassification: z.record(z.string(), z.number()),
+	mcpServerInstances: z.array(
+		z.object({
+			mcpServerInstanceLabel: z.string(),
+			processCount: z.number().int().nonnegative(),
+			residentSetSizeKibibytesSum: z.number().nonnegative(),
+		}),
+	),
+	// 该卡各终端 agent 会话（Claude Code / Codex）的累计模型 token，由 token 用量监视器每 5 分钟刷新；
+	// 进程内 Cline SDK / ACP 的用量只进 journal，不在这里。还没读到过时为 null。
+	modelTokenUsageAcrossTaskSessions: z
+		.object({
+			sessionCount: z.number().int().nonnegative(),
+			cumulativeInputTokens: z.number().nonnegative(),
+			cumulativeCacheCreationInputTokens: z.number().nonnegative(),
+			cumulativeCacheReadInputTokens: z.number().nonnegative(),
+			cumulativeOutputTokens: z.number().nonnegative(),
+		})
+		.nullable()
+		.optional(),
+	// 该卡 worktree 最近一次测得的实体磁盘体积（不跟随符号链接），每 24 小时最多量一次。
+	latestWorktreeDiskUsageBytes: z.number().nonnegative().nullable().optional(),
+});
+export type RuntimeLiveTaskResourceUsageSnapshot = z.infer<typeof runtimeLiveTaskResourceUsageSnapshotSchema>;
+
+// 某 workspace 全部卡片的实时资源快照（全量替换）。每个采样 tick 发一次；hub 缓存最近一份，
+// 新客户端连上后立即补发，所以首屏不必等下一个 tick。
+export const runtimeStateStreamTaskResourceUsageSnapshotsUpdatedMessageSchema = z.object({
+	type: z.literal("task_resource_usage_snapshots_updated"),
+	workspaceId: z.string(),
+	snapshots: z.array(runtimeLiveTaskResourceUsageSnapshotSchema),
+});
+export type RuntimeStateStreamTaskResourceUsageSnapshotsUpdatedMessage = z.infer<
+	typeof runtimeStateStreamTaskResourceUsageSnapshotsUpdatedMessageSchema
+>;
+
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamSnapshotMessageSchema,
 	runtimeStateStreamWorkspaceStateMessageSchema,
@@ -1844,6 +1897,7 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamExploratoryFindingsUpdatedMessageSchema,
 	runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema,
 	runtimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessageSchema,
+	runtimeStateStreamTaskResourceUsageSnapshotsUpdatedMessageSchema,
 	runtimeStateStreamErrorMessageSchema,
 ]);
 export type RuntimeStateStreamMessage = z.infer<typeof runtimeStateStreamMessageSchema>;
@@ -3809,6 +3863,36 @@ export type RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload = z.inf
 	typeof runtimeAgentRaisedUserQuestionResolvedInAgentTerminalPayloadSchema
 >;
 
+// 一次工具调用的执行结果（按 task 归因的资源占用采集，S2）。由 `kanban hooks` 从 PreToolUse /
+// PostToolUse / PostToolUseFailure 的 stdin 提取，**不进** metadata：metadata 会经 applyHookActivity 写进
+// session summary（进而进 sessions.json 与广播），而这些是只给 journal 的逐调用记录。
+// 命令文本在 hooks CLI 进程内就已截断 + 脱敏，服务端与 journal 永远拿不到原文。
+export const runtimeAgentToolCallExecutionOutcomeSchema = z.object({
+	toolCallLifecyclePhase: z.enum(["tool_call_started", "tool_call_succeeded", "tool_call_failed"]),
+	toolName: z.string(),
+	toolUseId: z.string().nullable(),
+	// hook 自报的工具本体执行时长（不含权限等待）；只有 Claude 的 Post 事件保证提供，其余 harness 为 null。
+	toolExecutionDurationMs: z.number().nonnegative().nullable(),
+	toolCallWasInterrupted: z.boolean().nullable(),
+	commandLineTextForJournal: z.string().nullable(),
+	originalCommandLineCharacterCount: z.number().int().nonnegative().nullable(),
+	commandLineTextWasTruncated: z.boolean().nullable(),
+	mcpServerName: z.string().nullable(),
+	mcpToolName: z.string().nullable(),
+});
+export type RuntimeAgentToolCallExecutionOutcome = z.infer<typeof runtimeAgentToolCallExecutionOutcomeSchema>;
+
+// `kanban hooks` CLI 进程自身的开销，在每次发送 ingest 前取值（Claude 每次工具调用会起两个这样的
+// node 进程，现场实测同时存活过 21 个、RSS 合计约 3.5 GiB）。测不到发送之后那一小段。
+export const runtimeHookCliProcessResourceUsageSchema = z.object({
+	lifetimeMaximumResidentSetSizeKibibytes: z.number().nonnegative(),
+	cumulativeUserCpuTimeSeconds: z.number().nonnegative(),
+	cumulativeSystemCpuTimeSeconds: z.number().nonnegative(),
+	hookCliProcessUptimeMs: z.number().nonnegative(),
+	hookIngestDeliveryAttempt: z.number().int().positive(),
+});
+export type RuntimeHookCliProcessResourceUsage = z.infer<typeof runtimeHookCliProcessResourceUsageSchema>;
+
 export const runtimeHookIngestRequestSchema = z.object({
 	notificationCandidateId: z.string().uuid().optional(),
 	taskId: z.string(),
@@ -3828,6 +3912,9 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// 终端 agent 原生会话身份（N0a）：`kanban hooks` 从 hook stdin 的 session_id / transcript_path 抽出，
 	// 每个事件都带（幂等），服务端只在值变化时写 summary sidecar。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.optional(),
+	// 资源占用采集：仅工具类 hook 事件携带 / 每次发送都携带。服务端只写 journal，不进 summary。
+	agentToolCallExecutionOutcome: runtimeAgentToolCallExecutionOutcomeSchema.optional(),
+	hookCliProcessResourceUsage: runtimeHookCliProcessResourceUsageSchema.optional(),
 });
 export type RuntimeHookIngestRequest = z.infer<typeof runtimeHookIngestRequestSchema>;
 

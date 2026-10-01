@@ -8,6 +8,7 @@
 //  3. 「只推进存活度」的事件必须显式带上当前实质戳，否则会把卡片的「agent 上次响应」刷成「刚刚」。
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../core/api-contract";
 import { resolveSessionFacets } from "../core/session-activity";
+import { recordTaskAgentConversationModelTokenUsageCumulativeSnapshotToJournal } from "../diagnostics/task-agent-conversation-model-token-usage-journal-recorder";
 import type { AcpSessionNotification, AcpSessionUpdate, AcpStopReason } from "./acp-protocol-boundary";
 import {
 	type AcpTaskMessage,
@@ -69,10 +70,15 @@ export function applyAcpSessionUpdate(context: AcpSessionUpdateContext, notifica
 		case "current_mode_update":
 			applyStatusMessage(context, `Mode: ${readCurrentModeId(update)}`, "mode");
 			return;
+		case "usage_update":
+			// 资源占用采集：上下文占用与 harness 自报的累计 cost 落 journal；不进聊天流，也不改变回合归属。
+			if (!context.isReplayingPersistedConversationHistory) {
+				recordAcpUsageUpdateToJournal(context, update);
+			}
+			return;
 		case "available_commands_update":
 		case "config_option_update":
 		case "session_info_update":
-		case "usage_update":
 		case "plan_update":
 		case "plan_removed":
 			// 会话元数据：不进聊天流，也不改变回合归属。
@@ -325,5 +331,28 @@ export function applyAcpConnectionClosed(
 		pid: null,
 		exitCode: detail.exitCode,
 		reviewReason: detail.errorMessage ? "error" : "completion",
+	});
+}
+
+function recordAcpUsageUpdateToJournal(
+	context: AcpSessionUpdateContext,
+	update: { used?: unknown; size?: unknown; cost?: unknown },
+): void {
+	const cost =
+		typeof update.cost === "object" && update.cost !== null ? (update.cost as Record<string, unknown>) : null;
+	const costAmount = cost?.amount;
+	const costCurrency = typeof cost?.currency === "string" ? cost.currency.toUpperCase() : null;
+	recordTaskAgentConversationModelTokenUsageCumulativeSnapshotToJournal({
+		workspaceId: null,
+		attributedTaskCardId: context.taskId,
+		sessionTaskId: context.taskId,
+		agentId: context.agentId,
+		modelTokenUsageSource: "acp_usage_update",
+		nativeSessionId: context.entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId ?? null,
+		totals: { contextWindowSizeTokens: typeof update.size === "number" ? update.size : null },
+		// 只认美元：其他币种不做换算（换算率同样会漂移）。
+		harnessReportedCumulativeCostUsd: costCurrency === "USD" && typeof costAmount === "number" ? costAmount : null,
+		contextWindowUsedTokens: typeof update.used === "number" ? update.used : null,
+		subagentTranscriptCount: null,
 	});
 }

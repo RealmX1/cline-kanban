@@ -1,9 +1,17 @@
+import { existsSync, readFileSync } from "node:fs";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import {
+	DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR,
+	getDiagnosticEventJournalActiveFilePath,
+	waitForPendingDiagnosticEventJournalWrites,
+} from "../../../src/diagnostics/rotating-jsonl-diagnostic-event-journal";
 import { getNotificationLifecycleArchive } from "../../../src/notifications/notification-lifecycle-archive";
 import { captureNotificationSignal } from "../../../src/notifications/notification-signal-capture";
 import { createHooksApi } from "../../../src/trpc/hooks-api";
+import { createTempDir } from "../../utilities/temp-dir";
 
 // 文件末尾的跨层回归用例要驱动**真实** TerminalSessionManager——两档恢复守卫的状态机住在它里面，
 // 用桩 manager 复述一遍就只是在测桩本身。真实 manager 会 spawn PTY 并做 agent 启动准备，故把这两条
@@ -382,6 +390,93 @@ describe("createHooksApi", () => {
 			source: "claude",
 			activityText: "Using Read",
 		});
+	});
+
+	it("journals the tool call outcome and hook CLI overhead without letting them into the session summary", async () => {
+		const journalRootDir = createTempDir("kanban-hooks-api-resource-usage-journal-");
+		const originalJournalRootDir = process.env[DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR];
+		process.env[DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR] = journalRootDir.path;
+		try {
+			const manager = {
+				getSummary: vi.fn(() => createSummary({ state: "running" })),
+				transitionToReview: vi.fn(),
+				transitionToRunning: vi.fn(),
+				applyHookActivity: vi.fn(),
+				recordAgentLifecycleHookConversationProgress: vi.fn(),
+				applyTurnCheckpoint: vi.fn(),
+			} as unknown as TerminalSessionManager;
+			const api = createHooksApi({
+				getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+				ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastTaskReadyForReview: vi.fn(),
+			});
+
+			await api.ingest({
+				taskId: "task-1",
+				workspaceId: "workspace-1",
+				event: "activity",
+				metadata: {
+					source: "claude",
+					hookEventName: "PostToolUse",
+					toolName: "Bash",
+					activityText: "Completed Bash",
+				},
+				agentToolCallExecutionOutcome: {
+					toolCallLifecyclePhase: "tool_call_succeeded",
+					toolName: "Bash",
+					toolUseId: "toolu_01",
+					toolExecutionDurationMs: 4_200,
+					toolCallWasInterrupted: null,
+					commandLineTextForJournal: "npm test",
+					originalCommandLineCharacterCount: 8,
+					commandLineTextWasTruncated: false,
+					mcpServerName: null,
+					mcpToolName: null,
+				},
+				hookCliProcessResourceUsage: {
+					lifetimeMaximumResidentSetSizeKibibytes: 290_000,
+					cumulativeUserCpuTimeSeconds: 0.4,
+					cumulativeSystemCpuTimeSeconds: 0.1,
+					hookCliProcessUptimeMs: 610,
+					hookIngestDeliveryAttempt: 1,
+				},
+			});
+			await waitForPendingDiagnosticEventJournalWrites();
+
+			const toolCallRecords = readFileSync(
+				getDiagnosticEventJournalActiveFilePath("agent-tool-call-execution-outcome"),
+				"utf8",
+			)
+				.trimEnd()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>);
+			expect(toolCallRecords).toEqual([
+				expect.objectContaining({
+					attributedTaskCardId: "task-1",
+					toolUseId: "toolu_01",
+					toolExecutionDurationMs: 4_200,
+				}),
+			]);
+			expect(existsSync(getDiagnosticEventJournalActiveFilePath("kanban-hook-cli-invocation-resource-usage"))).toBe(
+				true,
+			);
+			// summary 只收 metadata：逐调用的执行记录绝不能挤进「最新一条活动」。
+			expect(manager.applyHookActivity).toHaveBeenCalledWith("task-1", {
+				source: "claude",
+				hookEventName: "PostToolUse",
+				toolName: "Bash",
+				activityText: "Completed Bash",
+			});
+		} finally {
+			await waitForPendingDiagnosticEventJournalWrites();
+			if (originalJournalRootDir === undefined) {
+				delete process.env[DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR];
+			} else {
+				process.env[DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR] = originalJournalRootDir;
+			}
+			journalRootDir.cleanup();
+		}
 	});
 
 	it("B3: classifies Claude PermissionRequest into userTurnKind=permission and broadcasts it", async () => {
@@ -1562,6 +1657,129 @@ it("通知已处理的重复 hook 仍补存身份，但不再次转换状态", a
 	expect(persistIdentity).toHaveBeenCalledOnce();
 	expect(manager.transitionToReview).not.toHaveBeenCalled();
 });
+
+// 场景：首投在服务端已完整处理（finally 已记账），但客户端超时没收到响应，CLI 随后带同一个
+// candidate 重试。终端 agent 每个 hook 都带原生身份，重试会越过「无身份」去重出口，从身份补存
+// 之后的出口离开——无论是去重出口还是身份落盘失败的异常出口，都绝不能再记第二条。
+it.each([
+	{ retryIdentityPersistenceFails: false, expectedRetryResponse: { ok: true } },
+	{ retryIdentityPersistenceFails: true, expectedRetryResponse: { ok: false, error: "identity storage unavailable" } },
+])(
+	"带原生身份的已处理重试不重复写资源 journal，首投那条保留（重试身份落盘失败=$retryIdentityPersistenceFails）",
+	async ({ retryIdentityPersistenceFails, expectedRetryResponse }) => {
+		const journalRootDir = createTempDir("kanban-hooks-api-retry-dedup-resource-usage-journal-");
+		const originalJournalRootDir = process.env[DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR];
+		process.env[DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR] = journalRootDir.path;
+		try {
+			const candidateId = await captureNotificationSignal({
+				workspaceId: "workspace-retry-journal",
+				taskId: "task-1",
+				sourceKind: "hook_cli_raw",
+				rawPayload: {},
+			});
+			if (!candidateId) throw new Error("Expected notification candidate");
+			const manager = {
+				getSummary: vi.fn(() => createSummary({ state: "running" })),
+				applyAgentNativeConversationSessionIdentity: vi.fn(),
+				transitionToReview: vi.fn(() =>
+					createSummary({ state: "awaiting_review", reviewReason: "hook", userTurnKind: "question" }),
+				),
+				transitionToRunning: vi.fn(),
+				applyHookActivity: vi.fn(),
+				recordAgentLifecycleHookConversationProgress: vi.fn(),
+				applyTurnCheckpoint: vi.fn(),
+			} as unknown as TerminalSessionManager;
+			const persistIdentity = vi.fn().mockResolvedValueOnce(true);
+			if (retryIdentityPersistenceFails) {
+				persistIdentity.mockRejectedValueOnce(new Error("identity storage unavailable"));
+			} else {
+				persistIdentity.mockResolvedValueOnce(false);
+			}
+			const api = createHooksApi({
+				getWorkspacePathById: () => "/tmp/repo",
+				ensureTerminalManagerForWorkspace: async () => manager,
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastTaskReadyForReview: vi.fn(),
+				persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: persistIdentity,
+				captureTaskTurnCheckpoint: vi.fn(async () => ({
+					turn: 1,
+					ref: "refs/kanban/checkpoints/task-1/turn/1",
+					commit: "1111111",
+					createdAt: 1,
+				})),
+			});
+			const buildAskUserQuestionHookDelivery = (hookIngestDeliveryAttempt: number) => ({
+				workspaceId: "workspace-retry-journal",
+				taskId: "task-1",
+				notificationCandidateId: candidateId,
+				event: "to_review" as const,
+				metadata: { source: "claude", hookEventName: "PreToolUse", toolName: "AskUserQuestion" },
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "claude",
+					nativeSessionId: "session-1",
+					transcriptPath: null,
+					observedAt: 1,
+				},
+				agentToolCallExecutionOutcome: {
+					toolCallLifecyclePhase: "tool_call_started" as const,
+					toolName: "AskUserQuestion",
+					toolUseId: "toolu_ask_01",
+					toolExecutionDurationMs: null,
+					toolCallWasInterrupted: null,
+					commandLineTextForJournal: null,
+					originalCommandLineCharacterCount: null,
+					commandLineTextWasTruncated: false,
+					mcpServerName: null,
+					mcpToolName: null,
+				},
+				hookCliProcessResourceUsage: {
+					lifetimeMaximumResidentSetSizeKibibytes: 290_000,
+					cumulativeUserCpuTimeSeconds: 0.4,
+					cumulativeSystemCpuTimeSeconds: 0.1,
+					hookCliProcessUptimeMs: 610 + hookIngestDeliveryAttempt * 3_750,
+					hookIngestDeliveryAttempt,
+				},
+			});
+
+			// 首投：服务端完整处理并记账；客户端此时已超时，没收到这个响应。
+			expect(await api.ingest(buildAskUserQuestionHookDelivery(1))).toEqual({ ok: true });
+			// 通知管线随后把候选推进到已处理（生产里由 broadcastTaskReadyForReview 之后的评估完成）。
+			await getNotificationLifecycleArchive().update(
+				candidateId,
+				{ notificationProcessingStatus: "published" },
+				"test-published",
+				{},
+			);
+			// 客户端超时后的重试：同一个 candidate，第 2 次尝试。
+			expect(await api.ingest(buildAskUserQuestionHookDelivery(2))).toEqual(expectedRetryResponse);
+			expect(persistIdentity).toHaveBeenCalledTimes(2);
+			expect(manager.transitionToReview).toHaveBeenCalledOnce();
+			await waitForPendingDiagnosticEventJournalWrites();
+
+			const readJournalRecords = (
+				channel: "agent-tool-call-execution-outcome" | "kanban-hook-cli-invocation-resource-usage",
+			) =>
+				readFileSync(getDiagnosticEventJournalActiveFilePath(channel), "utf8")
+					.trimEnd()
+					.split("\n")
+					.map((line) => JSON.parse(line) as Record<string, unknown>);
+			expect(readJournalRecords("agent-tool-call-execution-outcome")).toEqual([
+				expect.objectContaining({ toolUseId: "toolu_ask_01", toolCallLifecyclePhase: "tool_call_started" }),
+			]);
+			expect(readJournalRecords("kanban-hook-cli-invocation-resource-usage")).toEqual([
+				expect.objectContaining({ hookIngestDeliveryAttempt: 1 }),
+			]);
+		} finally {
+			await waitForPendingDiagnosticEventJournalWrites();
+			if (originalJournalRootDir === undefined) {
+				delete process.env[DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR];
+			} else {
+				process.env[DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR] = originalJournalRootDir;
+			}
+			journalRootDir.cleanup();
+		}
+	},
+);
 
 it("SessionStart 身份事件不解除恢复守卫、不推进时间戳或通知", async () => {
 	const manager = {
