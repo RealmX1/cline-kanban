@@ -700,13 +700,13 @@ describe("source task commands", () => {
 					ok?: boolean;
 					task?: { id?: string; title?: string; column?: string };
 					taskWorkspace?: { taskId?: string; path?: string; exists?: boolean };
-					dependencies?: unknown[];
 				};
 				expect(fetchedPayload.ok).toBe(true);
 				expect(fetchedPayload.task?.id).toBe(createdTaskId);
 				expect(fetchedPayload.task?.title).toBe("Look me up by ID");
 				expect(fetchedPayload.task?.column).toBe("backlog");
-				expect(fetchedPayload.dependencies).toEqual([]);
+				// 任务连线机制已退役（dd2db 1a）：task get 不再输出 dependencies。
+				expect(fetchedPayload).not.toHaveProperty("dependencies");
 				// worktree 路径把 task ID 原样嵌在目录层级里，这正是「拿 worktree 路径反推 task ID」赖以成立的前提。
 				expect(fetchedPayload.taskWorkspace?.taskId).toBe(createdTaskId);
 				expect(fetchedPayload.taskWorkspace?.path).toContain(`/${createdTaskId}/`);

@@ -5,6 +5,11 @@ import type {
 	RuntimeWorkspaceStateSaveRequest,
 } from "@/runtime/types";
 import { WorkspaceStateConflictError } from "@/runtime/workspace-state-query";
+import {
+	buildWebUiBoardMutationInitiatorAnnotationsForSaveStatePayload,
+	discardAllPendingWebUiBoardMutationInitiatorRecords,
+	discardWebUiBoardMutationInitiatorRecordsCoveredBySuccessfulSaveState,
+} from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import type { BoardData } from "@/types";
 
 const WORKSPACE_STATE_PERSIST_DEBOUNCE_MS = 120;
@@ -57,6 +62,8 @@ export function useWorkspacePersistence({
 		if (lastPersistedWorkspaceIdRef.current !== currentProjectId) {
 			lastPersistedWorkspaceIdRef.current = currentProjectId;
 			lastPersistedBoardRef.current = null;
+			// 换了项目：上一个项目里未保存的发起方登记已无处可配。
+			discardAllPendingWebUiBoardMutationInitiatorRecords();
 		}
 	}, [currentProjectId]);
 
@@ -72,6 +79,8 @@ export function useWorkspacePersistence({
 		skipNextPersistRef.current = true;
 		lastPersistedWorkspaceIdRef.current = currentProjectId;
 		lastPersistedBoardRef.current = board;
+		// 水合 = 本地 board 被 runtime 那份整板替换，本地尚未保存的变更（连同它们的发起方登记）都已不在。
+		discardAllPendingWebUiBoardMutationInitiatorRecords();
 	}, [board, currentProjectId, hydrationNonce]);
 
 	useEffect(() => {
@@ -100,10 +109,25 @@ export function useWorkspacePersistence({
 			if (!persistWorkspaceId) {
 				return;
 			}
+			// dd2db Y-EVENT-8：自上次成功保存以来登记的发起方，按「runtime 最近确认持久化的 board → 本次 board」的差
+			// 出逐卡逐变更的标注。只进关系账本，不落 board；没有可出的标注时不带这个键。
+			const boardMutationInitiatorAnnotationsBuiltForThisSave =
+				buildWebUiBoardMutationInitiatorAnnotationsForSaveStatePayload({
+					boardLastConfirmedPersistedByRuntime:
+						lastPersistedWorkspaceIdRef.current === persistWorkspaceId ? lastPersistedBoardRef.current : null,
+					boardAboutToBeSaved: board,
+				});
 			const payload: RuntimeWorkspaceStateSaveRequest = {
 				board,
 				sessions: sessionsRef.current,
 				expectedRevision: workspaceRevision,
+				...(boardMutationInitiatorAnnotationsBuiltForThisSave
+					.boardMutationInitiatorAnnotationsForTaskMutationEventCapture.length > 0
+					? {
+							boardMutationInitiatorAnnotationsForTaskMutationEventCapture:
+								boardMutationInitiatorAnnotationsBuiltForThisSave.boardMutationInitiatorAnnotationsForTaskMutationEventCapture,
+						}
+					: {}),
 			};
 			void (async () => {
 				persistInFlightRef.current = true;
@@ -112,6 +136,11 @@ export function useWorkspacePersistence({
 						workspaceId: persistWorkspaceId,
 						payload,
 					});
+					// 成功：组载荷时已存在的登记都已随这次保存交给 runtime（或已确认无差可配），丢弃；
+					// 失败（冲突、网络、nonce 重试仍失败等）走 catch，登记原样保留到下一次保存。
+					discardWebUiBoardMutationInitiatorRecordsCoveredBySuccessfulSaveState(
+						boardMutationInitiatorAnnotationsBuiltForThisSave.pendingInitiatorRecordSequenceCoveredBySaveStatePayload,
+					);
 					if (
 						requestId !== latestPersistRequestIdRef.current ||
 						currentProjectIdRef.current !== persistWorkspaceId

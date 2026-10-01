@@ -45,8 +45,13 @@ interface RuntimeStreamClient {
 	close: () => Promise<void>;
 }
 
+// 本文件的 runtime 共用同一个按文件隔离的关系账本，而 task id 对全局 task 身份登记簿唯一（dd2db Y-EVENT-12）：
+// 不同用例的 workspace 不能复用同一个 id，每次建 board 取一个本文件内唯一的 id。
+let createBoardTaskIdSequenceWithinThisTestFile = 0;
+
 function createBoard(title: string): RuntimeBoardData {
 	const now = Date.now();
+	createBoardTaskIdSequenceWithinThisTestFile += 1;
 	return {
 		columns: [
 			{
@@ -54,7 +59,7 @@ function createBoard(title: string): RuntimeBoardData {
 				title: "Backlog",
 				cards: [
 					{
-						id: "task-1",
+						id: `runtime-state-stream-board-task-${createBoardTaskIdSequenceWithinThisTestFile}`,
 						title: title,
 						prompt: title,
 						startInPlanMode: false,
@@ -68,7 +73,6 @@ function createBoard(title: string): RuntimeBoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -108,7 +112,6 @@ function createReviewBoard(taskId: string, title: string, existingTrashTaskId?: 
 			},
 			{ id: "trash", title: "Done", cards: trashCards },
 		],
-		dependencies: [],
 	};
 }
 
@@ -1328,7 +1331,8 @@ describe.sequential("runtime state stream integration", () => {
 			const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 			const projectPath = integrationFixture.createRepository("project-safe-shutdown").repositoryPath;
 
-			const taskId = "safe-shutdown-review-task";
+			// 两个参数化用例共用按文件隔离的关系账本：id 对全局登记簿唯一，复用同一个 id 会被当成删卡后复用而拒写。
+			const taskId = `safe-shutdown-review-task-with-${extraArgs.length}-extra-args`;
 			const now = Date.now();
 			const firstPort = await getAvailablePort();
 			const firstServer = await startKanbanServer({

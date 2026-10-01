@@ -346,7 +346,7 @@ export function ColumnContextPanel({
 
 	const activateCard = useCallback((card: BoardCardModel) => onCardSelect(card.id), [onCardSelect]);
 	const pinnedTasks = useMemo(
-		() => collectTasksPinnedToTaskPinboard({ columns: selection.allColumns, dependencies: [] }),
+		() => collectTasksPinnedToTaskPinboard({ columns: selection.allColumns }),
 		[selection.allColumns],
 	);
 

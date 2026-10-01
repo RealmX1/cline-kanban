@@ -18,6 +18,10 @@ import type {
 	WorkspaceTaskEditDraftsSnapshot,
 } from "@/runtime/types";
 import { readEffectiveUserInterfacePreferenceValue } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
+import {
+	discardAllPendingWebUiBoardMutationInitiatorRecords,
+	readPendingWebUiBoardMutationInitiatorForTaskCardAspect,
+} from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
@@ -150,6 +154,35 @@ const fakeTaskNameSuggestionEndpoint = vi.hoisted(() => ({
 	callCount: 0,
 }));
 
+// 建卡 id 只由 runtime 分配（dd2db Y-EVENT-12）：测试里把预分配池换成确定性的递增 id，不发真实分配请求。
+// takeResultStatusOverride 用来模拟「池里还没备好」「runtime 分配不出 id」。
+const runtimeAllocatedTaskIdPrefetchPoolStandIn = vi.hoisted(() => ({
+	nextRuntimeAllocatedTaskIdStandInSequence: 0,
+	takeResultStatusOverride: null as
+		| null
+		| "not_enough_runtime_allocated_task_ids_prefetched_yet"
+		| "runtime_cannot_allocate_task_ids_because_relation_ledger_is_unavailable",
+	ensuredWorkspaceIds: [] as string[],
+}));
+
+vi.mock("@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards", () => ({
+	ensureRuntimeAllocatedTaskIdPrefetchPoolFilled: (workspaceId: string) => {
+		runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds.push(workspaceId);
+	},
+	takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards: (_workspaceId: string, count: number) => {
+		if (runtimeAllocatedTaskIdPrefetchPoolStandIn.takeResultStatusOverride) {
+			return { status: runtimeAllocatedTaskIdPrefetchPoolStandIn.takeResultStatusOverride };
+		}
+		return {
+			status: "taken" as const,
+			runtimeAllocatedTaskIds: Array.from({ length: count }, () => {
+				runtimeAllocatedTaskIdPrefetchPoolStandIn.nextRuntimeAllocatedTaskIdStandInSequence += 1;
+				return `r${String(runtimeAllocatedTaskIdPrefetchPoolStandIn.nextRuntimeAllocatedTaskIdStandInSequence).padStart(4, "0")}`;
+			}),
+		};
+	},
+}));
+
 vi.mock("@/runtime/task-name-suggestion-query", () => ({
 	suggestTaskNamesFromTaskDescription: vi.fn(() => {
 		fakeTaskNameSuggestionEndpoint.callCount += 1;
@@ -182,7 +215,6 @@ function createBoard(tasks: BoardCard[] = []): BoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -400,6 +432,9 @@ describe("useTaskEditor", () => {
 		fakeWorkspaceTaskEditDraftServer.releaseFetch = null;
 		fakeTaskNameSuggestionEndpoint.respond = null;
 		fakeTaskNameSuggestionEndpoint.callCount = 0;
+		runtimeAllocatedTaskIdPrefetchPoolStandIn.takeResultStatusOverride = null;
+		runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds = [];
+		discardAllPendingWebUiBoardMutationInitiatorRecords();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -445,6 +480,127 @@ describe("useTaskEditor", () => {
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Fix the SSO redirect");
 		// 用户自己给了名字就不该再去问 AI。
 		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(0);
+	});
+
+	describe("建卡 id 由 runtime 预分配（dd2db Y-EVENT-12）与发起方登记（Y-EVENT-8）", () => {
+		async function renderCreateHarness(): Promise<{ current: HookSnapshot | null }> {
+			const captured: { current: HookSnapshot | null } = { current: null };
+			await act(async () => {
+				root.render(
+					<HookHarness
+						initialBoard={createBoard()}
+						onSnapshot={(snapshot) => {
+							captured.current = snapshot;
+						}}
+					/>,
+				);
+			});
+			return captured;
+		}
+
+		it("primes the project's id pool on mount and again when the create dialog opens", async () => {
+			const captured = await renderCreateHarness();
+			expect(runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds).toEqual(["project-1"]);
+
+			await act(async () => {
+				requireSnapshot(captured.current).handleOpenCreateTask();
+			});
+			expect(runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds).toEqual(["project-1", "project-1"]);
+		});
+
+		it("creates the card with the prefetched runtime id and records the creation as a user gesture", async () => {
+			const captured = await renderCreateHarness();
+			await act(async () => {
+				requireSnapshot(captured.current).setNewTaskPrompt("Created with a runtime id");
+			});
+			let createdTaskId: string | null = null;
+			await act(async () => {
+				createdTaskId = requireSnapshot(captured.current).handleCreateTask({ taskNameOverride: "Named" });
+			});
+
+			expect(createdTaskId).toMatch(/^r\d{4}$/u);
+			expect(requireSnapshot(captured.current).board.columns[0]?.cards.map((card) => card.id)).toEqual([
+				createdTaskId,
+			]);
+			expect(
+				readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId ?? "", "task_card_creation"),
+			).toBe("web_ui_user_gesture");
+		});
+
+		it("takes one runtime id per prompt when creating a batch", async () => {
+			const captured = await renderCreateHarness();
+			let createdTaskIds: string[] = [];
+			await act(async () => {
+				createdTaskIds = requireSnapshot(captured.current).handleCreateTasks(["First", "Second", "Third"]);
+			});
+
+			expect(createdTaskIds).toHaveLength(3);
+			expect(new Set(createdTaskIds).size).toBe(3);
+			for (const taskId of createdTaskIds) {
+				expect(taskId).toMatch(/^r\d{4}$/u);
+				expect(readPendingWebUiBoardMutationInitiatorForTaskCardAspect(taskId, "task_card_creation")).toBe(
+					"web_ui_user_gesture",
+				);
+			}
+		});
+
+		it.each([
+			"not_enough_runtime_allocated_task_ids_prefetched_yet",
+			"runtime_cannot_allocate_task_ids_because_relation_ledger_is_unavailable",
+		] as const)(
+			"blocks creation and keeps the draft instead of inventing a local id (%s)",
+			async (takeResultStatus) => {
+				const captured = await renderCreateHarness();
+				await act(async () => {
+					requireSnapshot(captured.current).handleOpenCreateTask();
+					requireSnapshot(captured.current).setNewTaskPrompt("Waiting for an id");
+				});
+				runtimeAllocatedTaskIdPrefetchPoolStandIn.takeResultStatusOverride = takeResultStatus;
+
+				let createdTaskId: string | null = "not-called";
+				let createdTaskIds: string[] = ["not-called"];
+				await act(async () => {
+					createdTaskId = requireSnapshot(captured.current).handleCreateTask();
+					createdTaskIds = requireSnapshot(captured.current).handleCreateTasks(["Batch A", "Batch B"]);
+				});
+
+				expect(createdTaskId).toBeNull();
+				expect(createdTaskIds).toEqual([]);
+				const snapshot = requireSnapshot(captured.current);
+				expect(snapshot.board.columns[0]?.cards).toEqual([]);
+				expect(snapshot.newTaskPrompt).toBe("Waiting for an id");
+				expect(snapshot.isInlineTaskCreateOpen).toBe(true);
+			},
+		);
+
+		it("records title edits as user gestures but leaves the asynchronous AI title backfill without an initiator", async () => {
+			const captured = await renderCreateHarness();
+			await act(async () => {
+				requireSnapshot(captured.current).setNewTaskPrompt("Login redirects to a blank page after SSO");
+			});
+			let createdTaskId = "";
+			await act(async () => {
+				createdTaskId = requireSnapshot(captured.current).handleCreateTask({ taskNameOverride: "   " }) ?? "";
+			});
+			discardAllPendingWebUiBoardMutationInitiatorRecords();
+
+			await act(async () => {
+				fakeTaskNameSuggestionEndpoint.respond?.({
+					status: "suggested",
+					suggestedTaskNames: ["Fix the SSO redirect"],
+				});
+			});
+			expect(
+				readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId, "task_card_field_values"),
+			).toBeNull();
+
+			await act(async () => {
+				requireSnapshot(captured.current).handleSaveTaskTitle(createdTaskId, "Renamed by the user");
+			});
+			expect(readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId, "task_card_field_values")).toBe(
+				"web_ui_user_gesture",
+			);
+		});
 	});
 
 	it("derives the title from the prompt when the name field is empty, then backfills the suggested name", async () => {

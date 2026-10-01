@@ -19,6 +19,10 @@ import { parsePostDeployVerificationState } from "../core/api-validation";
 import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagnostics-logger";
 import type { LockRequest } from "../fs/locked-file-system";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import {
+	type PostDeployVerificationCompletionEvidence,
+	recordPostDeployVerificationPassedObservationWithoutBlocking,
+} from "../inter-work-unit-relation-ledger/post-deploy-verification-passed-observation-recording";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import {
 	AUTHORED_VERIFICATION_ITEM_ID_PREFIX,
@@ -584,6 +588,25 @@ export interface ConsumePendingConfirmationAndMarkVerifiedResult {
 	alreadyVerified?: boolean;
 }
 
+// verifiedAt 的两个写入点共用：只有 runtime 进程（已激活关系账本 live 捕获）才真正记账。
+function recordPostDeployVerificationPassedObservationForVerifiedTask(
+	verifiedDeploymentGroup: { workspaceId: string; deployedSourceCommit: string } | null,
+	deploymentId: string,
+	verifiedTask: RuntimePostDeployVerificationTask,
+	completionEvidence: PostDeployVerificationCompletionEvidence,
+): void {
+	if (!verifiedDeploymentGroup) {
+		return;
+	}
+	recordPostDeployVerificationPassedObservationWithoutBlocking({
+		workspaceId: verifiedDeploymentGroup.workspaceId,
+		deploymentId,
+		deployedSourceCommit: verifiedDeploymentGroup.deployedSourceCommit,
+		verifiedPostDeployVerificationTask: verifiedTask,
+		completionEvidence,
+	});
+}
+
 /**
  * 原子「消费 token + 标记完成」：在单次 state 锁内校验并一次性消费 pendingConfirmation token，随后立即置
  * verifiedAt / boardMovedToDoneAt / 清 pendingConfirmation / 清误标 droppedReason。issue B：把 consume 与 mark
@@ -596,11 +619,18 @@ export async function consumePendingConfirmationAndMarkVerified(
 	taskId: string,
 	token: string,
 	nowIso: string,
+	completionEvidence: PostDeployVerificationCompletionEvidence = {
+		postDeployVerificationCompletionPath: "web_ui_post_deploy_verification_panel_atomic_confirmation",
+		forcedCompletionWithoutAllVerificationsPassed: false,
+		confirmedAcknowledgements: [],
+	},
 ): Promise<ConsumePendingConfirmationAndMarkVerifiedResult> {
+	let verifiedDeploymentGroup: { workspaceId: string; deployedSourceCommit: string } | null = null;
 	const result = await mutatePostDeployVerificationState(
 		nowIso,
 		(state) => {
 			const task = findTask(state, deploymentId, taskId);
+			verifiedDeploymentGroup = findGroup(state, deploymentId) ?? null;
 			if (!task) {
 				return { ok: false, task: null, failureReason: "task_not_found" as const };
 			}
@@ -629,6 +659,12 @@ export async function consumePendingConfirmationAndMarkVerified(
 	);
 	// 仅在本次真正完成核对（非幂等命中）时触发自动清理，避免重复对已清理项做无谓 fs/锁操作。
 	if (result.ok && result.task && result.alreadyVerified !== true) {
+		recordPostDeployVerificationPassedObservationForVerifiedTask(
+			verifiedDeploymentGroup,
+			deploymentId,
+			result.task,
+			completionEvidence,
+		);
 		await runAutomaticCleanupForVerifiedTask(result.task, nowIso);
 	}
 	return result;
@@ -642,11 +678,18 @@ export async function markTaskVerified(
 	deploymentId: string,
 	taskId: string,
 	nowIso: string,
+	completionEvidence: PostDeployVerificationCompletionEvidence = {
+		postDeployVerificationCompletionPath: "kanban_cli_post_deploy_verification_completion_verb",
+		forcedCompletionWithoutAllVerificationsPassed: false,
+		confirmedAcknowledgements: [],
+	},
 ): Promise<PostDeployVerificationTaskMutationResult> {
+	let verifiedDeploymentGroup: { workspaceId: string; deployedSourceCommit: string } | null = null;
 	const result = await mutatePostDeployVerificationState(
 		nowIso,
 		(state) => {
 			const task = findTask(state, deploymentId, taskId);
+			verifiedDeploymentGroup = findGroup(state, deploymentId) ?? null;
 			if (!task) {
 				return { ok: false, task: null, error: taskNotFoundError(deploymentId, taskId) };
 			}
@@ -664,6 +707,12 @@ export async function markTaskVerified(
 		deploymentId,
 	);
 	if (result.ok && result.task && result.wasAlreadyVerified !== true) {
+		recordPostDeployVerificationPassedObservationForVerifiedTask(
+			verifiedDeploymentGroup,
+			deploymentId,
+			result.task,
+			completionEvidence,
+		);
 		await runAutomaticCleanupForVerifiedTask(result.task, nowIso);
 	}
 	return { ok: result.ok, task: result.task, ...(result.error ? { error: result.error } : {}) };

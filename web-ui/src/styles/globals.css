@@ -297,10 +297,6 @@ body,
 	padding: 8px;
 }
 
-.kb-dependency-surface {
-	position: relative;
-}
-
 .kb-home-layout {
 	display: flex;
 	flex: 1 1 0;
@@ -415,80 +411,6 @@ body,
 
 .kb-stage-header-rail > * {
 	pointer-events: auto;
-}
-
-.kb-board-card-dependency-source {
-	box-shadow: inset 0 0 0 1px var(--color-accent);
-}
-
-.kb-board-card-dependency-target {
-	box-shadow: inset 0 0 0 1px var(--color-accent);
-}
-
-/* -- Dependency overlay -- */
-
-.kb-dependency-overlay {
-	position: absolute;
-	inset: 0;
-	z-index: 4;
-	pointer-events: none;
-}
-
-.kb-dependency-draft-overlay {
-	position: absolute;
-	inset: 0;
-	z-index: 5;
-	pointer-events: none;
-}
-
-.kb-dependency-path {
-	fill: none;
-	stroke: var(--color-accent);
-	stroke-width: 2;
-	stroke-linecap: round;
-	stroke-linejoin: round;
-}
-
-.kb-dependency-path-hover {
-	stroke: var(--color-status-red);
-	stroke-width: 2;
-}
-
-.kb-dependency-hit-path {
-	fill: none;
-	stroke: transparent;
-	stroke-width: 14;
-	pointer-events: stroke;
-	cursor: pointer;
-}
-
-.kb-dependency-draft-path {
-	fill: none;
-	stroke: var(--color-accent);
-	stroke-width: 2;
-	stroke-dasharray: 6 4;
-	stroke-linecap: round;
-	stroke-linejoin: round;
-}
-
-.kb-dependency-delete-control {
-	position: absolute;
-	z-index: 6;
-	display: flex;
-	height: 18px;
-	width: 18px;
-	align-items: center;
-	justify-content: center;
-	transform: translate(-50%, -50%);
-	pointer-events: none;
-	border: none;
-	border-radius: 999px;
-	background: var(--color-status-red);
-}
-
-body.kb-dependency-link-mode {
-	cursor: crosshair;
-	user-select: none;
 }
 
 .kb-empty-state-center {

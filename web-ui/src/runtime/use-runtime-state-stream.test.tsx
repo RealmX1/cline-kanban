@@ -19,6 +19,15 @@ vi.mock("@/runtime/browser-build-asset-refresh", () => ({
 	reloadBrowserIfServedBuildAssetsChanged: reloadBrowserIfServedBuildAssetsChangedMock,
 }));
 
+const reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntimeMock = vi.hoisted(() =>
+	vi.fn(async () => "nonce-issued-on-stream-open"),
+);
+
+vi.mock("@/runtime/kanban-web-ui-page-load-request-origin-nonce-store", () => ({
+	reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime:
+		reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntimeMock,
+}));
+
 class MockRuntimeStateWebSocket {
 	static readonly CONNECTING = 0;
 	static readonly OPEN = 1;
@@ -112,6 +121,7 @@ describe("useRuntimeStateStream", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		reloadBrowserIfServedBuildAssetsChangedMock.mockReset();
+		reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntimeMock.mockClear();
 		MockRuntimeStateWebSocket.instances = [];
 		previousWebSocket = globalThis.WebSocket;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
@@ -181,6 +191,66 @@ describe("useRuntimeStateStream", () => {
 		});
 
 		expect(reloadBrowserIfServedBuildAssetsChangedMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("reacquires the page-load nonce from the runtime on every stream connect and reconnect", async () => {
+		await act(async () => {
+			root.render(
+				<RuntimeStateStreamHarness
+					onSnapshot={() => {
+						// Only the nonce reacquisition side effect matters here.
+					}}
+				/>,
+			);
+		});
+		// 建连本身不算连上：只有 open 之后才向 runtime 签发。
+		expect(reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntimeMock).not.toHaveBeenCalled();
+
+		const initialSocket = MockRuntimeStateWebSocket.instances[0];
+		if (!initialSocket) {
+			throw new Error("Expected the initial runtime stream socket.");
+		}
+		await act(async () => {
+			initialSocket.triggerOpen();
+		});
+		expect(reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntimeMock).toHaveBeenCalledTimes(1);
+
+		act(() => {
+			initialSocket.triggerClose();
+			vi.advanceTimersByTime(500);
+		});
+		const reconnectedSocket = MockRuntimeStateWebSocket.instances[1];
+		if (!reconnectedSocket) {
+			throw new Error("Expected a reconnected runtime stream socket.");
+		}
+		await act(async () => {
+			reconnectedSocket.triggerOpen();
+		});
+		expect(reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntimeMock).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps the stream running when reacquiring the page-load nonce fails", async () => {
+		reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntimeMock.mockRejectedValueOnce(new Error("runtime down"));
+		const captured: { current: UseRuntimeStateStreamResult | null } = { current: null };
+		await act(async () => {
+			root.render(
+				<RuntimeStateStreamHarness
+					onSnapshot={(snapshot) => {
+						captured.current = snapshot;
+					}}
+				/>,
+			);
+		});
+		const initialSocket = MockRuntimeStateWebSocket.instances[0];
+		if (!initialSocket) {
+			throw new Error("Expected the initial runtime stream socket.");
+		}
+		await act(async () => {
+			initialSocket.triggerOpen();
+		});
+
+		expect(reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntimeMock).toHaveBeenCalledTimes(1);
+		expect(captured.current?.isRuntimeDisconnected).toBe(false);
 	});
 
 	it("rechecks project availability by replacing the current runtime stream connection", async () => {
@@ -477,7 +547,7 @@ describe("useRuntimeStateStream", () => {
 					repoPath: "/tmp/ws-a",
 					statePath: "/tmp/ws-a/.cline/kanban",
 					git: null,
-					board: { columns: [], dependencies: [] },
+					board: { columns: [] },
 					sessions: {},
 					revision: 1,
 				},

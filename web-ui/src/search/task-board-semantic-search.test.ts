@@ -44,7 +44,6 @@ const board = {
 			],
 		},
 	],
-	dependencies: [],
 };
 const documents = [
 	...buildTaskBoardSearchDocuments(board, { projectId: "one", projectName: "One" }),

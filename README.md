@@ -4,7 +4,7 @@
   <img src="https://github.com/user-attachments/assets/2aa3dcc7-94e3-4076-bcfe-6d0272007cfe" width="100%" />
 </p>
 
-A replacement for your IDE better suited for running many agents in parallel and reviewing diffs. Each task card gets its own terminal and worktree, all handled for you automatically. Enable auto-commit and link cards together to create dependency chains that complete large amounts of work autonomously.
+A replacement for your IDE better suited for running many agents in parallel and reviewing diffs. Each task card gets its own terminal and worktree, all handled for you automatically. Task linking and auto-starting linked tasks on completion have been retired; they will be superseded by task Relations and wait gates.
 
 > [!WARNING]
 > Kanban is a research preview and uses experimental features of CLI agents like bypassing permissions and runtime hooks for more autonomy. We'd love your feedback in #kanban on our [discord](https://discord.gg/cline).
@@ -48,10 +48,10 @@ Run this from the root of any git repo. Kanban will detect your installed CLI ag
 Building from source instead? Prerequisites, the three-project dependency install, and linking the global `kanban` command are all in [`installation.md`](./installation.md).
 
 ### 2. Create tasks
-Create a task card manually, or open the sidebar chat and ask your agent to break work down into tasks for you. Kanban injects board-management instructions into that session so you can simply ask it to add tasks, link tasks, or start work on your board.
+Create a task card manually, or open the sidebar chat and ask your agent to break work down into tasks for you. Kanban injects board-management instructions into that session so you can simply ask it to add tasks or start work on your board.
 
-### 3. Link and automate
-<kbd>⌘</kbd> + click a card to link it to another task. When a card is completed and moved to trash, linked tasks auto-start. Combine with auto-commit for fully autonomous dependency chains: one task completes → commits → kicks off the next → repeat. It’s a pretty magical experience asking your agent to decompose a big task into subtasks that auto-commit - he’ll cleverly do it in a way that parallelizes for maximum efficiency and links tasks together for end-to-end autonomy.
+### 3. Task linking (retired)
+Task linking (<kbd>⌘</kbd> + click / `kanban task link`) and auto-starting linked tasks when a card moves to done have been retired; they will be superseded by task Relations and wait gates.
 
 ### 4. Start tasks
 Hit the play button on a card. Kanban creates an ephemeral worktree just for that task so agents work in parallel without merge conflicts. Under the hood, it also symlinks gitignored files like `node_modules` so you don't have to worry about slow `npm install`s for each copy of your project.

@@ -19,6 +19,7 @@ import {
 	type ClineSdkToolApprovalRequest,
 	type ClineSdkToolApprovalResult,
 	type ClineSdkUserInstructionService,
+	createClineSdkBashToolExecutorWithEnvironmentOverrides,
 	createClineSdkSessionHost,
 } from "./sdk-runtime-boundary";
 
@@ -81,6 +82,8 @@ export interface StartClineSessionRuntimeRequest {
 	systemPrompt: string;
 	userInstructionService?: ClineSdkUserInstructionService;
 	requestToolApproval?: (request: ClineSdkToolApprovalRequest) => Promise<ClineSdkToolApprovalResult>;
+	// 工作单元身份（KANBAN_TASK_ID 等）：注入 bash 工具子进程，工具里调用的 kanban CLI 才能声明「是哪张卡」。
+	bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity?: Record<string, string>;
 }
 
 export interface StartClineSessionRuntimeResult {
@@ -180,6 +183,8 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 			taskTitle: request.taskTitle,
 			userInstructionService: request.userInstructionService,
 			requestToolApproval: request.requestToolApproval,
+			bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity:
+				request.bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity,
 		});
 		this.bindTaskSession(request.taskId, requestedSessionId);
 
@@ -240,8 +245,21 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 					}),
 					...(hasMcpExtraTools ? { extraTools: mcpToolBundle?.tools ?? [] } : {}),
 				},
-				...(request.requestToolApproval
-					? { capabilities: { requestToolApproval: request.requestToolApproval } }
+				...(request.requestToolApproval || request.bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity
+					? {
+							capabilities: {
+								...(request.requestToolApproval ? { requestToolApproval: request.requestToolApproval } : {}),
+								...(request.bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity
+									? {
+											toolExecutors: {
+												bash: createClineSdkBashToolExecutorWithEnvironmentOverrides(
+													request.bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity,
+												),
+											},
+										}
+									: {}),
+							},
+						}
 					: {}),
 			});
 		} catch (error) {

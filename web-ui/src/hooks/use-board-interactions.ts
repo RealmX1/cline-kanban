@@ -1,4 +1,5 @@
 import type { DropResult } from "@hello-pangea/dnd";
+import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import {
 	isAgentActivelyProducingOutput,
 	isAwaitingUserReviewTurn,
@@ -10,7 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import type { TaskPinboardPinReasonDialogRequest } from "@/components/task-pinboard-pin-reason-dialog";
 import type { TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
-import { useLinkedBacklogTaskActions } from "@/hooks/use-linked-backlog-task-actions";
+import { useMoveTaskToDoneWithSessionStopAndWorkspaceCleanup } from "@/hooks/use-move-task-to-done-with-session-stop-and-workspace-cleanup";
 import { useProgrammaticCardMoves } from "@/hooks/use-programmatic-card-moves";
 import { useReviewAutoActions } from "@/hooks/use-review-auto-actions";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
@@ -27,6 +28,11 @@ import {
 	updateTask,
 } from "@/state/board-state";
 import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "@/state/task-pinboard-pinning";
+import {
+	recordWebUiBoardMutationInitiatorForTaskCardAspect,
+	recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards,
+	withWebUiBoardMutationInitiatorRecordedForChangedTaskCards,
+} from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
@@ -88,8 +94,6 @@ interface UseBoardInteractionsInput {
 export interface UseBoardInteractionsResult {
 	handleProgrammaticCardMoveReady: ReturnType<typeof useProgrammaticCardMoves>["handleProgrammaticCardMoveReady"];
 	confirmMoveTaskToTrash: (task: BoardCard, currentBoard?: BoardData) => Promise<void>;
-	handleCreateDependency: (fromTaskId: string, toTaskId: string) => void;
-	handleDeleteDependency: (dependencyId: string) => void;
 	handleDragEnd: (result: DropResult, options?: { selectDroppedTask?: boolean }) => void;
 	handleStartTask: (taskId: string) => void;
 	handleStartAllBacklogTasks: (taskIds?: string[]) => void;
@@ -398,14 +402,17 @@ export function useBoardInteractions({
 				return false;
 			}
 			if (!optimisticMove) {
-				setBoard((currentBoard) => {
-					const currentColumnId = getTaskColumnId(currentBoard, taskId);
-					if (currentColumnId !== fromColumnId) {
-						return currentBoard;
-					}
-					const moved = moveTaskToColumn(currentBoard, taskId, "in_progress", { insertAtTop: true });
-					return moved.moved ? moved.board : currentBoard;
-				});
+				// 只有用户点「开始」的路径会走到非乐观移列（见 startBacklogTaskWithAnimation 的 unavailable 分支）。
+				setBoard(
+					withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+						const currentColumnId = getTaskColumnId(currentBoard, taskId);
+						if (currentColumnId !== fromColumnId) {
+							return currentBoard;
+						}
+						const moved = moveTaskToColumn(currentBoard, taskId, "in_progress", { insertAtTop: true });
+						return moved.moved ? moved.board : currentBoard;
+					}),
+				);
 			}
 			return true;
 		},
@@ -420,14 +427,16 @@ export function useBoardInteractions({
 				return false;
 			}
 
-			setBoard((currentBoard) => {
-				const currentSelection = findCardSelection(currentBoard, task.id);
-				if (!currentSelection || currentSelection.column.id !== "backlog") {
-					return currentBoard;
-				}
-				const moved = moveTaskToColumn(currentBoard, task.id, "in_progress", { insertAtTop: true });
-				return moved.moved ? moved.board : currentBoard;
-			});
+			setBoard(
+				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+					const currentSelection = findCardSelection(currentBoard, task.id);
+					if (!currentSelection || currentSelection.column.id !== "backlog") {
+						return currentBoard;
+					}
+					const moved = moveTaskToColumn(currentBoard, task.id, "in_progress", { insertAtTop: true });
+					return moved.moved ? moved.board : currentBoard;
+				}),
+			);
 
 			return kickoffTaskInProgress(task, task.id, "backlog", {
 				optimisticMove: true,
@@ -444,7 +453,9 @@ export function useBoardInteractions({
 
 			await waitForBacklogCardHeightToSettle(task.id);
 
-			const programmaticMoveAttempt = tryProgrammaticCardMove(task.id, "backlog", "in_progress");
+			const programmaticMoveAttempt = tryProgrammaticCardMove(task.id, "backlog", "in_progress", {
+				boardMutationInitiator: "web_ui_user_gesture",
+			});
 			if (programmaticMoveAttempt === "blocked") {
 				await waitForProgrammaticCardMoveAvailability();
 				return startBacklogTaskWithAnimation(task);
@@ -482,6 +493,16 @@ export function useBoardInteractions({
 		],
 	);
 
+	// 下方 level-triggered 列自动流转（会话 facet 驱动）在 updater 里逐卡决定移列；直接落列的分支在这里登记发起方，
+	// 走动画的分支把发起方放进在途移动，由 handleDragEnd 落地时登记。登记是幂等的「按卡覆盖」，updater 重放无害。
+	const recordSessionFacetDrivenColumnAutoflowInitiator = useCallback((taskId: string) => {
+		recordWebUiBoardMutationInitiatorForTaskCardAspect({
+			taskId,
+			boardMutationAspectOfTaskCard: "task_card_column_placement",
+			boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
+		});
+	}, []);
+
 	useEffect(() => {
 		setBoard((currentBoard) => {
 			let nextBoard = currentBoard;
@@ -513,12 +534,15 @@ export function useBoardInteractions({
 				if (columnId === "backlog" && summary.startedAt != null) {
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
+						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
 						nextBoard = moved.board;
 						columnId = "in_progress";
 					}
 				}
 				if (isAwaitingUserReviewTurn(facets) && columnId === "in_progress") {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review");
+					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review", {
+						boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
+					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						// B5：本帧未落直接移列（动画接管 / 被在途移动阻塞）的 task 不得记录为已见，
 						// 否则引用短路会吃掉下一 tick 的重试（短路前由 updatedAt guard 放行每 tick 重估）。
@@ -527,6 +551,7 @@ export function useBoardInteractions({
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "review", { insertAtTop: true });
 					if (moved.moved) {
+						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
 						nextBoard = moved.board;
 					}
 					continue;
@@ -547,6 +572,7 @@ export function useBoardInteractions({
 				if (shouldBounceRunningToInProgress && (columnId === "review" || columnId === "validation")) {
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
 						skipKickoff: true,
+						boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						// B5：同 Review 落位分支——动画接管 / 被阻塞的 task 不记录为已见，保留下一 tick 重试。
@@ -555,6 +581,7 @@ export function useBoardInteractions({
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
+						recordSessionFacetDrivenColumnAutoflowInitiator(summary.taskId);
 						nextBoard = moved.board;
 					}
 					continue;
@@ -569,6 +596,7 @@ export function useBoardInteractions({
 					const nextTaskId = getNextDetailTaskIdAfterTrashMove(nextBoard, summary.taskId);
 					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "trash", {
 						skipTrashWorkflow: true,
+						boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
 					});
 					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 						if (programmaticMoveAttempt === "blocked") {
@@ -581,6 +609,11 @@ export function useBoardInteractions({
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "trash", { insertAtTop: true });
 					if (moved.moved) {
+						recordWebUiBoardMutationInitiatorForTaskCardAspect({
+							taskId: summary.taskId,
+							boardMutationAspectOfTaskCard: "task_card_column_placement",
+							boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
+						});
 						setSelectedTaskId((currentSelectedTaskId) =>
 							currentSelectedTaskId === summary.taskId ? nextTaskId : currentSelectedTaskId,
 						);
@@ -603,18 +636,13 @@ export function useBoardInteractions({
 		});
 	}, [programmaticCardMoveCycle, sessions, setBoard, setSelectedTaskId, tryProgrammaticCardMove]);
 
-	const { confirmMoveTaskToTrash, handleCreateDependency, handleDeleteDependency, requestMoveTaskToTrash } =
-		useLinkedBacklogTaskActions({
-			board,
-			setBoard,
-			setSelectedTaskId,
-			stopTaskSession,
-			cleanupTaskWorkspace,
-			maybeRequestNotificationPermissionForTaskStart,
-			kickoffTaskInProgress,
-			startBacklogTaskWithAnimation,
-			waitForBacklogStartAnimationAvailability: waitForProgrammaticCardMoveAvailability,
-		});
+	const { confirmMoveTaskToTrash, requestMoveTaskToTrash } = useMoveTaskToDoneWithSessionStopAndWorkspaceCleanup({
+		board,
+		setBoard,
+		setSelectedTaskId,
+		stopTaskSession,
+		cleanupTaskWorkspace,
+	});
 
 	useEffect(() => {
 		setRequestMoveTaskToTrashHandler(requestMoveTaskToTrash);
@@ -636,16 +664,19 @@ export function useBoardInteractions({
 				if (!options?.optimisticMoveApplied) {
 					return;
 				}
-				setBoard((currentBoard) => {
-					const currentColumnId = getTaskColumnId(currentBoard, taskId);
-					if (currentColumnId !== "review") {
-						return currentBoard;
-					}
-					const reverted = moveTaskToColumn(currentBoard, taskId, "trash", {
-						insertAtTop: true,
-					});
-					return reverted.moved ? reverted.board : currentBoard;
-				});
+				// 撤回用户「从 Done 恢复」失败后的乐观移列：仍是那次用户手势的一部分。
+				setBoard(
+					withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+						const currentColumnId = getTaskColumnId(currentBoard, taskId);
+						if (currentColumnId !== "review") {
+							return currentBoard;
+						}
+						const reverted = moveTaskToColumn(currentBoard, taskId, "trash", {
+							insertAtTop: true,
+						});
+						return reverted.moved ? reverted.board : currentBoard;
+					}),
+				);
 				return;
 			}
 			if (ensured.response?.warning) {
@@ -658,10 +689,12 @@ export function useBoardInteractions({
 			}
 			const resumed = await startTaskSession(task, { resumeFromTrash: true });
 			if (resumed.ok) {
-				setBoard((currentBoard) => {
-					const disabledAutoReview = disableTaskAutoReview(currentBoard, taskId);
-					return disabledAutoReview.updated ? disabledAutoReview.board : currentBoard;
-				});
+				setBoard(
+					withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+						const disabledAutoReview = disableTaskAutoReview(currentBoard, taskId);
+						return disabledAutoReview.updated ? disabledAutoReview.board : currentBoard;
+					}),
+				);
 				return;
 			}
 
@@ -669,16 +702,18 @@ export function useBoardInteractions({
 			if (!options?.optimisticMoveApplied) {
 				return;
 			}
-			setBoard((currentBoard) => {
-				const currentColumnId = getTaskColumnId(currentBoard, taskId);
-				if (currentColumnId !== "review") {
-					return currentBoard;
-				}
-				const reverted = moveTaskToColumn(currentBoard, taskId, "trash", {
-					insertAtTop: true,
-				});
-				return reverted.moved ? reverted.board : currentBoard;
-			});
+			setBoard(
+				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+					const currentColumnId = getTaskColumnId(currentBoard, taskId);
+					if (currentColumnId !== "review") {
+						return currentBoard;
+					}
+					const reverted = moveTaskToColumn(currentBoard, taskId, "trash", {
+						insertAtTop: true,
+					});
+					return reverted.moved ? reverted.board : currentBoard;
+				}),
+			);
 		},
 		[ensureTaskWorkspace, setBoard, startTaskSession],
 	);
@@ -694,6 +729,16 @@ export function useBoardInteractions({
 			);
 
 			const applied = applyDragResult(board, result, { programmaticCardMoveInFlight });
+			// 没有在途程序化移动 = 用户真拖拽；程序化移动（动画）落地时用发起入口随行为一起带来的发起方，没带就登记 null。
+			const boardMutationInitiatorForThisDrop: WebUiBoardMutationInitiator | null =
+				programmaticCardMoveInFlight || programmaticMoveBehavior
+					? (programmaticMoveBehavior?.boardMutationInitiator ?? null)
+					: "web_ui_user_gesture";
+			recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards({
+				boardBeforeMutation: board,
+				boardAfterMutation: applied.board,
+				boardMutationInitiator: boardMutationInitiatorForThisDrop,
+			});
 
 			const moveEvent = applied.moveEvent;
 			if (!moveEvent) {
@@ -711,6 +756,7 @@ export function useBoardInteractions({
 				const requestPromise = requestMoveTaskToTrash(moveEvent.taskId, moveEvent.fromColumnId, {
 					optimisticMoveApplied: true,
 					skipWorkingChangeWarning: programmaticMoveBehavior?.skipWorkingChangeWarning,
+					boardMutationInitiator: boardMutationInitiatorForThisDrop ?? undefined,
 				});
 				void requestPromise.finally(() => {
 					resolvePendingProgrammaticTrashMove(moveEvent.taskId);
@@ -828,6 +874,11 @@ export function useBoardInteractions({
 				return;
 			}
 
+			recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards({
+				boardBeforeMutation: board,
+				boardAfterMutation: nextBoard,
+				boardMutationInitiator: "web_ui_user_gesture",
+			});
 			setBoard(nextBoard);
 			maybeRequestNotificationPermissionForTaskStart();
 			for (const task of pendingStarts) {
@@ -865,7 +916,9 @@ export function useBoardInteractions({
 				return;
 			}
 			setTaskMoveToTrashLoading(taskId, true);
-			void requestMoveTaskToTrashWithAnimation(taskId, fromColumnId).finally(() => {
+			void requestMoveTaskToTrashWithAnimation(taskId, fromColumnId, {
+				boardMutationInitiator: "web_ui_user_gesture",
+			}).finally(() => {
 				setTaskMoveToTrashLoading(taskId, false);
 			});
 		},
@@ -885,7 +938,9 @@ export function useBoardInteractions({
 			}
 			setTaskMoveToTrashLoading(taskId, true);
 			try {
-				await requestMoveTaskToTrashWithAnimation(taskId, fromColumnId);
+				await requestMoveTaskToTrashWithAnimation(taskId, fromColumnId, {
+					boardMutationInitiator: "web_ui_user_gesture_post_deploy_verification_panel_completion",
+				});
 				return { ok: true };
 			} catch {
 				return { ok: false };
@@ -951,6 +1006,11 @@ export function useBoardInteractions({
 			}
 			const moved = moveTaskToColumn(board, taskId, "validation", { insertAtTop: true });
 			if (moved.moved) {
+				recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards({
+					boardBeforeMutation: board,
+					boardAfterMutation: moved.board,
+					boardMutationInitiator: "web_ui_user_gesture",
+				});
 				setBoard(moved.board);
 				if (fromColumnId === "review") {
 					moveFocusedReviewTaskToNextReviewTaskAfterValidationMove(board, taskId);
@@ -1021,7 +1081,9 @@ export function useBoardInteractions({
 	const handleRestoreTaskFromTrash = useCallback(
 		(taskId: string) => {
 			const { board } = latestBoardInteractionStateRef.current;
-			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review");
+			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review", {
+				boardMutationInitiator: "web_ui_user_gesture",
+			});
 			if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 				return;
 			}
@@ -1035,6 +1097,11 @@ export function useBoardInteractions({
 			if (!moved.moved) {
 				return;
 			}
+			recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards({
+				boardBeforeMutation: board,
+				boardAfterMutation: moved.board,
+				boardMutationInitiator: "web_ui_user_gesture",
+			});
 			setBoard(moved.board);
 			const movedSelection = findCardSelection(moved.board, taskId);
 			if (!movedSelection) {
@@ -1070,14 +1137,16 @@ export function useBoardInteractions({
 			return;
 		}
 
-		setBoard((currentBoard) => {
-			const currentSelection = findCardSelection(currentBoard, task.id);
-			if (!currentSelection) {
-				return currentBoard;
-			}
-			const deleted = removeTask(currentBoard, task.id);
-			return deleted.removed ? deleted.board : currentBoard;
-		});
+		setBoard(
+			withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+				const currentSelection = findCardSelection(currentBoard, task.id);
+				if (!currentSelection) {
+					return currentBoard;
+				}
+				const deleted = removeTask(currentBoard, task.id);
+				return deleted.removed ? deleted.board : currentBoard;
+			}),
+		);
 		setSessions((currentSessions) => {
 			if (!currentSessions[task.id]) {
 				return currentSessions;
@@ -1099,7 +1168,7 @@ export function useBoardInteractions({
 
 		void (async () => {
 			await stopTaskSession(task.id);
-			await cleanupTaskWorkspace(task.id, task.worktreeMode, true);
+			await cleanupTaskWorkspace(task.id, task.worktreeMode);
 		})();
 	}, [
 		board,
@@ -1115,24 +1184,26 @@ export function useBoardInteractions({
 
 	const handleCancelAutomaticTaskAction = useCallback(
 		(taskId: string) => {
-			setBoard((currentBoard) => {
-				const selection = findCardSelection(currentBoard, taskId);
-				if (!selection || selection.card.autoReviewEnabled !== true) {
-					return currentBoard;
-				}
-				const updated = updateTask(currentBoard, taskId, {
-					prompt: selection.card.prompt,
-					startInPlanMode: selection.card.startInPlanMode,
-					autoReviewEnabled: false,
-					autoReviewMode: resolveTaskAutoReviewMode(selection.card.autoReviewMode),
-					images: selection.card.images,
-					agentId: selection.card.agentId,
-					clineSettings: selection.card.clineSettings,
-					terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
-					baseRef: selection.card.baseRef,
-				});
-				return updated.updated ? updated.board : currentBoard;
-			});
+			setBoard(
+				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+					const selection = findCardSelection(currentBoard, taskId);
+					if (!selection || selection.card.autoReviewEnabled !== true) {
+						return currentBoard;
+					}
+					const updated = updateTask(currentBoard, taskId, {
+						prompt: selection.card.prompt,
+						startInPlanMode: selection.card.startInPlanMode,
+						autoReviewEnabled: false,
+						autoReviewMode: resolveTaskAutoReviewMode(selection.card.autoReviewMode),
+						images: selection.card.images,
+						agentId: selection.card.agentId,
+						clineSettings: selection.card.clineSettings,
+						terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
+						baseRef: selection.card.baseRef,
+					});
+					return updated.updated ? updated.board : currentBoard;
+				}),
+			);
 		},
 		[setBoard],
 	);
@@ -1167,20 +1238,24 @@ export function useBoardInteractions({
 		(taskId: string, pinReason: string) => {
 			setTaskPinboardPinReasonRequest(null);
 			// pinTaskToTaskPinboard 对已置顶的卡保留原 pinnedToTaskPinboardAt，所以「编辑原因」不会把它顶到板首。
-			setBoard((currentBoard) => {
-				const pinned = pinTaskToTaskPinboard(currentBoard, taskId, { pinReason });
-				return pinned.updated ? pinned.board : currentBoard;
-			});
+			setBoard(
+				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+					const pinned = pinTaskToTaskPinboard(currentBoard, taskId, { pinReason });
+					return pinned.updated ? pinned.board : currentBoard;
+				}),
+			);
 		},
 		[setBoard],
 	);
 
 	const handleUnpinTaskFromTaskPinboard = useCallback(
 		(taskId: string) => {
-			setBoard((currentBoard) => {
-				const unpinned = unpinTaskFromTaskPinboard(currentBoard, taskId);
-				return unpinned.updated ? unpinned.board : currentBoard;
-			});
+			setBoard(
+				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+					const unpinned = unpinTaskFromTaskPinboard(currentBoard, taskId);
+					return unpinned.updated ? unpinned.board : currentBoard;
+				}),
+			);
 		},
 		[setBoard],
 	);
@@ -1201,7 +1276,12 @@ export function useBoardInteractions({
 			return;
 		}
 
-		setBoard((currentBoard) => clearColumnTasks(currentBoard, "trash").board);
+		setBoard(
+			withWebUiBoardMutationInitiatorRecordedForChangedTaskCards(
+				"web_ui_user_gesture",
+				(currentBoard) => clearColumnTasks(currentBoard, "trash").board,
+			),
+		);
 		setSessions((currentSessions) => {
 			const nextSessions = { ...currentSessions };
 			for (const taskId of taskIds) {
@@ -1218,7 +1298,7 @@ export function useBoardInteractions({
 			await Promise.all(
 				trashCards.map(async (card) => {
 					await stopTaskSession(card.id);
-					await cleanupTaskWorkspace(card.id, card.worktreeMode, true);
+					await cleanupTaskWorkspace(card.id, card.worktreeMode);
 				}),
 			);
 		})();
@@ -1254,8 +1334,6 @@ export function useBoardInteractions({
 	return {
 		handleProgrammaticCardMoveReady,
 		confirmMoveTaskToTrash,
-		handleCreateDependency,
-		handleDeleteDependency,
 		handleDragEnd,
 		handleStartTask,
 		handleStartAllBacklogTasks,

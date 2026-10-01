@@ -88,7 +88,6 @@ describe("getNextDetailTaskIdAfterTrashMove", () => {
 					},
 					{ id: "trash", title: "Done", cards: [] },
 				],
-				dependencies: [],
 			},
 			"i1",
 		);
@@ -133,7 +132,6 @@ describe("getNextDetailTaskIdAfterTrashMove", () => {
 					},
 					{ id: "trash", title: "Done", cards: [] },
 				],
-				dependencies: [],
 			},
 			"r1",
 		);
@@ -192,7 +190,6 @@ describe("getNextDetailTaskIdAfterTrashMove", () => {
 					},
 					{ id: "trash", title: "Done", cards: [] },
 				],
-				dependencies: [],
 			},
 			"b1",
 		);
@@ -223,7 +220,6 @@ describe("getNextDetailTaskIdAfterTrashMove", () => {
 					{ id: "review", title: "Review", cards: [] },
 					{ id: "trash", title: "Done", cards: [] },
 				],
-				dependencies: [],
 			},
 			"b1",
 		);
@@ -243,7 +239,6 @@ describe("getNextReviewTaskIdAfterReviewTaskMovesToValidation", () => {
 					{ id: "validation", title: "Validation", cards: [] },
 					{ id: "trash", title: "Done", cards: [] },
 				],
-				dependencies: [],
 			},
 			"r2",
 		);
@@ -261,7 +256,6 @@ describe("getNextReviewTaskIdAfterReviewTaskMovesToValidation", () => {
 					{ id: "validation", title: "Validation", cards: [] },
 					{ id: "trash", title: "Done", cards: [] },
 				],
-				dependencies: [],
 			},
 			"r2",
 		);
@@ -279,7 +273,6 @@ describe("getNextReviewTaskIdAfterReviewTaskMovesToValidation", () => {
 					{ id: "validation", title: "Validation", cards: [] },
 					{ id: "trash", title: "Done", cards: [] },
 				],
-				dependencies: [],
 			},
 			"r1",
 		);
@@ -297,7 +290,6 @@ describe("getNextReviewTaskIdAfterReviewTaskMovesToValidation", () => {
 					{ id: "validation", title: "Validation", cards: [] },
 					{ id: "trash", title: "Done", cards: [] },
 				],
-				dependencies: [],
 			},
 			"b1",
 		);

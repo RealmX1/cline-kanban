@@ -3,6 +3,7 @@ import { z } from "zod";
 // bundle-safe：session-activity 是零 Node 依赖的纯函数模块，其对 api-contract 仅 type-only import
 // （编译期擦除），故二者无运行时循环；本处取值 import 不会把任何 Node 依赖拖进浏览器 bundle。
 import { isKanbanCursorAgentModelId } from "./cursor-agent-models.js";
+import { webUiBoardMutationInitiatorAnnotationForTaskMutationEventCaptureSchema } from "./kanban-web-ui-page-load-request-origin-nonce.js";
 import { projectLegacyState } from "./session-activity.js";
 import { resolveTaskTitle } from "./task-title.js";
 
@@ -414,17 +415,10 @@ export const runtimeBoardColumnSchema = z.object({
 });
 export type RuntimeBoardColumn = z.infer<typeof runtimeBoardColumnSchema>;
 
-export const runtimeBoardDependencySchema = z.object({
-	id: z.string(),
-	fromTaskId: z.string(),
-	toTaskId: z.string(),
-	createdAt: z.number(),
-});
-export type RuntimeBoardDependency = z.infer<typeof runtimeBoardDependencySchema>;
-
+// 旧版 board.json 带的 `dependencies` 键（已退役的任务连线 / 完成后自动启动机制）：本 schema 非 strict，
+// 读入时被 zod 静默剥离、不抛错，下次写盘即消失。
 export const runtimeBoardDataSchema = z.object({
 	columns: z.array(runtimeBoardColumnSchema),
-	dependencies: z.array(runtimeBoardDependencySchema).default([]),
 });
 export type RuntimeBoardData = z.infer<typeof runtimeBoardDataSchema>;
 
@@ -971,6 +965,10 @@ export const runtimeWorkspaceStateSaveRequestSchema = z.object({
 	board: runtimeBoardDataSchema,
 	sessions: z.record(z.string(), runtimeTaskSessionSummarySchema),
 	expectedRevision: z.number().int().nonnegative().optional(),
+	// dd2db Y-EVENT-8：本次整板保存里每张卡每个变更的发起方（用户手势 / 浏览器端自动流转）。只进关系账本，不落 board。
+	boardMutationInitiatorAnnotationsForTaskMutationEventCapture: z
+		.array(webUiBoardMutationInitiatorAnnotationForTaskMutationEventCaptureSchema)
+		.optional(),
 });
 export type RuntimeWorkspaceStateSaveRequest = z.infer<typeof runtimeWorkspaceStateSaveRequestSchema>;
 
@@ -1034,6 +1032,154 @@ export const runtimeAddBacklogTaskResponseSchema = z.object({
 	taskId: z.string(),
 });
 export type RuntimeAddBacklogTaskResponse = z.infer<typeof runtimeAddBacklogTaskResponseSchema>;
+
+// ---------------------------------------------------------------------------------------------
+// dd2db 1a.2b：`kanban task` 的 board 写动词（create / update / start 移列 / trash / delete）全部改走
+// `workspace.applyKanbanCliTaskBoardMutation` 这一条 runtime procedure（§R3 Y-EVENT-1/2/7）。
+// 为什么：工作单元间关系账本只由 runtime 写；CLI 进程直接写盘的变更只能在事后按 board diff 检出，
+// 行动者恒为未解析。改走 runtime 后，每次写入都带「意图 + 按 CLI 行动者声明头解析出的行动者」进入
+// 持久化漏斗。runtime 不可达时 CLI 直接失败（fail closed），绝不回退到直接写盘。
+// runtime 只做 board 变更并返回原始卡片与列；面向人与脚本的 JSON 格式化留在 CLI。
+// ---------------------------------------------------------------------------------------------
+
+// CLI 已在本进程解析完 effective settings（含 --expect-resolved-settings-fingerprint 校验）之后的建卡字段。
+// task id 由 runtime 在 board 锁内分配。
+export const runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema = z.object({
+	title: z.string().optional(),
+	prompt: z.string(),
+	startInPlanMode: z.boolean(),
+	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema,
+	autoReviewEnabled: z.boolean().optional(),
+	autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
+	agentId: runtimeAgentIdSchema.optional(),
+	clineSettings: runtimeTaskClineSettingsSchema.optional(),
+	taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
+	baseRef: z.string(),
+	parentSessionId: z.string().optional(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
+	prepFilePath: z.string().optional(),
+	// 建卡时固化会话通道的两个判据值，取自 CLI 本进程加载的 runtime config（与 effective settings 同一份），
+	// 保证预览指纹与真实建卡看到的是同一组默认值。
+	ompAgentSessionTransportForNewTasks: runtimeAgentSessionTransportSchema,
+	workspaceDefaultAgentIdForNewTasks: runtimeAgentIdSchema,
+});
+export type RuntimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCli = z.infer<
+	typeof runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema
+>;
+
+// `kanban task update` 的原始输入（尚未与卡片现值合并）。三态字段：缺省 = 保留卡片现值，null = 清除，
+// 具体值 = 改成该值。合并在 runtime 的 board 锁内对**最新**卡片进行，避免 CLI 读-改-写之间丢掉并发更新。
+export const runtimeKanbanCliTaskCardFieldUpdateRawInputSchema = z.object({
+	title: z.string().optional(),
+	prompt: z.string().optional(),
+	baseRef: z.string().optional(),
+	startInPlanMode: z.boolean().optional(),
+	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
+	autoReviewEnabled: z.boolean().optional(),
+	autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
+	agentId: runtimeAgentIdSchema.nullable().optional(),
+	clineProviderId: z.string().nullable().optional(),
+	clineModelId: z.string().nullable().optional(),
+	// "default" = 显式回落默认推理档（保留空覆盖）；null = 清除覆盖（CLI 的 inherit）。
+	clineReasoningEffort: z
+		.union([runtimeClineReasoningEffortSchema, z.literal("default")])
+		.nullable()
+		.optional(),
+	taskAgentSessionInitializationId: z.string().nullable().optional(),
+	taskAgentSessionInitializationMode: runtimeTaskAgentSessionInitializationReuseModeSchema.optional(),
+	parentSessionId: z.string().nullable().optional(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.nullable().optional(),
+	prepFilePath: z.string().nullable().optional(),
+});
+export type RuntimeKanbanCliTaskCardFieldUpdateRawInput = z.infer<
+	typeof runtimeKanbanCliTaskCardFieldUpdateRawInputSchema
+>;
+
+export const runtimeKanbanCliPermanentlyDeletedTaskCardSelectionSchema = z.discriminatedUnion(
+	"permanentlyDeletedTaskCardSelectionKind",
+	[
+		z.object({
+			permanentlyDeletedTaskCardSelectionKind: z.literal("task_cards_selected_by_task_id"),
+			selectedTaskIds: z.array(z.string()).min(1),
+		}),
+		z.object({
+			permanentlyDeletedTaskCardSelectionKind: z.literal("every_task_card_in_board_column"),
+			selectedBoardColumnId: runtimeBoardColumnIdSchema,
+		}),
+	],
+);
+export type RuntimeKanbanCliPermanentlyDeletedTaskCardSelection = z.infer<
+	typeof runtimeKanbanCliPermanentlyDeletedTaskCardSelectionSchema
+>;
+
+export const runtimeKanbanCliTaskBoardMutationRequestSchema = z.discriminatedUnion("kanbanCliTaskBoardMutationKind", [
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("create_backlog_task_card"),
+		backlogTaskCardFieldValuesResolvedByKanbanCli:
+			runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema,
+	}),
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("update_task_card_fields"),
+		updatedTaskId: z.string(),
+		kanbanCliTaskCardFieldUpdateRawInput: runtimeKanbanCliTaskCardFieldUpdateRawInputSchema,
+	}),
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("move_task_card_to_in_progress_column"),
+		movedTaskId: z.string(),
+	}),
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("move_task_card_to_trash_column"),
+		movedTaskId: z.string(),
+	}),
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("permanently_delete_task_cards"),
+		permanentlyDeletedTaskCardSelection: runtimeKanbanCliPermanentlyDeletedTaskCardSelectionSchema,
+	}),
+]);
+export type RuntimeKanbanCliTaskBoardMutationRequest = z.infer<typeof runtimeKanbanCliTaskBoardMutationRequestSchema>;
+export type RuntimeKanbanCliTaskBoardMutationKind =
+	RuntimeKanbanCliTaskBoardMutationRequest["kanbanCliTaskBoardMutationKind"];
+
+// 「盘上会话摘要」取自变更那一刻 board 锁内读到的 sessions.json（不是 runtime 内存里的活摘要）：
+// 迁移前 CLI 直接写盘时输出的就是这一份，保持输出不变。
+export const runtimeKanbanCliTaskBoardMutationResponseSchema = z.discriminatedUnion("kanbanCliTaskBoardMutationKind", [
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("create_backlog_task_card"),
+		createdBacklogTaskCard: runtimeBoardCardSchema,
+	}),
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("update_task_card_fields"),
+		updatedTaskCard: runtimeBoardCardSchema,
+		updatedTaskCardBoardColumnId: runtimeBoardColumnIdSchema,
+		updatedTaskCardSessionSummaryPersistedOnDisk: runtimeTaskSessionSummarySchema.nullable(),
+	}),
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("move_task_card_to_in_progress_column"),
+		// false = 卡片本来就在 in_progress，这次没有写盘。
+		taskCardWasMovedIntoInProgressColumn: z.boolean(),
+		movedTaskCardAfterMutation: runtimeBoardCardSchema,
+		movedTaskCardBoardColumnIdBeforeMutation: runtimeBoardColumnIdSchema.nullable(),
+	}),
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("move_task_card_to_trash_column"),
+		// true = 卡片本来就在 trash 列，这次没有写盘（对应 trashTaskById 的 alreadyInTrash）。
+		taskCardWasAlreadyInTrashColumn: z.boolean(),
+		movedTaskCardAfterMutation: runtimeBoardCardSchema,
+		movedTaskCardBoardColumnIdBeforeMutation: runtimeBoardColumnIdSchema,
+		movedTaskCardSessionSummaryPersistedOnDisk: runtimeTaskSessionSummarySchema.nullable(),
+	}),
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("permanently_delete_task_cards"),
+		permanentlyDeletedTaskCards: z.array(
+			z.object({
+				deletedTaskCard: runtimeBoardCardSchema,
+				deletedTaskCardBoardColumnIdBeforeDeletion: runtimeBoardColumnIdSchema,
+				deletedTaskCardSessionSummaryPersistedOnDisk: runtimeTaskSessionSummarySchema.nullable(),
+			}),
+		),
+	}),
+]);
+export type RuntimeKanbanCliTaskBoardMutationResponse = z.infer<typeof runtimeKanbanCliTaskBoardMutationResponseSchema>;
 
 export const runtimeProjectTaskCountsSchema = z.object({
 	backlog: z.number(),
@@ -2250,7 +2396,6 @@ export type RuntimeWorktreeEnsureResponse = z.infer<typeof runtimeWorktreeEnsure
 export const runtimeWorktreeDeleteRequestSchema = z.object({
 	taskId: z.string(),
 	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
-	removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: z.boolean().optional(),
 });
 export type RuntimeWorktreeDeleteRequest = z.infer<typeof runtimeWorktreeDeleteRequestSchema>;
 
@@ -4520,6 +4665,27 @@ export const runtimeConfirmVerificationCompleteRequestSchema = z.object({
 	acks: z.array(runtimePostDeployVerificationAcknowledgementSchema),
 });
 export type RuntimeConfirmVerificationCompleteRequest = z.infer<typeof runtimeConfirmVerificationCompleteRequestSchema>;
+
+// CLI `kanban deployment` 完成动词在 CLI 进程里做完核对与移列后，由 runtime 写 verifiedAt（dd2db Y-EVENT-14：
+// PDV 完成走 runtime procedure，「PDV 通过」事件只能由 runtime 记账）。forced 与确认项随请求带上，原样进事件。
+export const runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema = z.object({
+	deploymentId: z.string(),
+	taskId: z.string(),
+	forcedCompletionWithoutAllVerificationsPassed: z.boolean(),
+	confirmedAcknowledgements: z.array(runtimePostDeployVerificationAcknowledgementSchema),
+});
+export type RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest = z.infer<
+	typeof runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema
+>;
+
+export const runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema = z.object({
+	ok: z.boolean(),
+	task: runtimePostDeployVerificationTaskSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponse = z.infer<
+	typeof runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema
+>;
 
 export const runtimeConfirmVerificationCompleteResponseSchema = z.object({
 	ok: z.boolean(),

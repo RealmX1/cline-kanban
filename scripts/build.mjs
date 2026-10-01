@@ -61,3 +61,7 @@ await Promise.all([
 console.log("esbuild: bundled dist/cli.js and dist/index.js");
 
 await copyFile("src/notifications/notification-lifecycle-database-worker.mjs", "dist/notification-lifecycle-database-worker.mjs");
+await copyFile(
+	"src/inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker.mjs",
+	"dist/inter-work-unit-relation-ledger-database-worker.mjs",
+);

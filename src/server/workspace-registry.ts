@@ -11,6 +11,7 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import { isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
+import { recordUserTerminalInputSubmissionObservedForSessionWithoutBlocking } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
 import {
 	type PersistedAgentSessionReclamationDeadlineRecord,
@@ -333,7 +334,13 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			return loaded;
 		}
 		const loading = (async () => {
-			const manager = new TerminalSessionManager();
+			const manager = new TerminalSessionManager({
+				onUserTerminalInputSubmissionObservedForSession: (kanbanTaskConversationSessionId) =>
+					recordUserTerminalInputSubmissionObservedForSessionWithoutBlocking({
+						workspaceId,
+						kanbanTaskConversationSessionId,
+					}),
+			});
 			try {
 				const existingWorkspace = await loadWorkspaceState(repoPath, { autoCreateIfMissing: false });
 				await backfillSessionAgentIdsBeforeHydrate(workspaceId, existingWorkspace.sessions);

@@ -28,6 +28,7 @@ import {
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
 import { resolveExploratoryModeAppendSystemPrompt } from "../prompts/exploratory-mode-append-system-prompt";
+import { buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment } from "../terminal/kanban-task-agent-session-work-unit-identity-environment";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import {
 	compactPersistedMessagesForContextOverflow,
@@ -148,6 +149,9 @@ export interface CreateInMemoryClineTaskSessionServiceOptions {
 	createMessageRepository?: () => ClineMessageRepository;
 	createRuntimeSetup?: (workspacePath: string) => Promise<ClineRuntimeSetup>;
 	watcherRegistry?: ClineWatcherRegistry;
+	// 本服务所属 workspace 的身份：注入每个 Cline 卡片会话 bash 工具的工作单元身份 env（dd2db 1a）。
+	// 缺省（单测、未知 workspace）时不注入，工具调用按 Y-EVENT-15 降级为无环境 CLI。
+	kanbanWorkspaceIdentityForTaskAgentSessionEnvironment?: { workspaceId: string; workspaceRepositoryPath: string };
 }
 
 function toErrorMessage(error: unknown): string {
@@ -209,7 +213,13 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 	private readonly watcherRegistry: ClineWatcherRegistry;
 	private readonly runtimeSetupLeaseByWorkspacePath = new Map<string, Promise<ClineRuntimeSetupLease>>();
 
+	private readonly kanbanWorkspaceIdentityForTaskAgentSessionEnvironment:
+		| { workspaceId: string; workspaceRepositoryPath: string }
+		| undefined;
+
 	constructor(options: CreateInMemoryClineTaskSessionServiceOptions = {}) {
+		this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment =
+			options.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment;
 		const createSessionRuntime = options.createSessionRuntime ?? createInMemoryClineSessionRuntime;
 		const createMessageRepository = options.createMessageRepository ?? createInMemoryClineMessageRepository;
 		this.watcherRegistry =
@@ -525,6 +535,20 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 					systemPrompt,
 					userInstructionService: runtimeSetup.userInstructionService,
 					requestToolApproval: runtimeSetup.requestToolApproval,
+					...(this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment
+						? {
+								// 会话 id 即 request.taskId；by-the-way 会话经 metadata 归到主卡。
+								bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity:
+									buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment({
+										workspaceTaskId:
+											request.taskConversationSessionMetadata?.workspaceTaskId ?? request.taskId,
+										kanbanTaskConversationSessionId: request.taskId,
+										workspaceId: this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment.workspaceId,
+										workspaceRepositoryPath:
+											this.kanbanWorkspaceIdentityForTaskAgentSessionEnvironment.workspaceRepositoryPath,
+									}),
+							}
+						: {}),
 				});
 				const warningMessage = formatStartWarnings(startResult.warnings);
 				if (warningMessage) {
