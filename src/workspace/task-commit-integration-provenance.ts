@@ -717,6 +717,27 @@ async function resolveBaseRefTipCommit(repoPath: string, baseRef: string): Promi
 	return result.ok && result.stdout ? result.stdout : null;
 }
 
+// 原始落地快照（Y-EVENT-14 PDV 事件、1c 落地判据的输入）：只搬运已持久化的事实，不在这里判定是否已落地。
+export async function readRawTaskCommitLandingSnapshotForRelationLedgerEvent(
+	workspaceId: string,
+	taskId: string,
+): Promise<{
+	lastKnownTaskHeadCommit: string | null;
+	taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: ObservedTaskCommit[] | null;
+	lastKnownTaskHeadObservedAt: number | null;
+	taskCommitIntegrationProvenanceBaseRef: string | null;
+}> {
+	const entry = (await readProvenanceFile(workspaceId)).tasks[taskId] ?? null;
+	const snapshot = entry?.lastWorkspaceGitSnapshot ?? null;
+	return {
+		lastKnownTaskHeadCommit: snapshot?.headCommit ?? null,
+		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead:
+			snapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead ?? null,
+		lastKnownTaskHeadObservedAt: snapshot?.observedAt ?? null,
+		taskCommitIntegrationProvenanceBaseRef: entry?.baseRef ?? null,
+	};
+}
+
 export async function removeTaskCommitIntegrationProvenance(workspaceId: string, taskId: string): Promise<boolean> {
 	return await mutateProvenanceFile(workspaceId, (file) => {
 		if (!(taskId in file.tasks)) {

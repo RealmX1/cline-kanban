@@ -132,7 +132,6 @@ function createBoard(): RuntimeBoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 

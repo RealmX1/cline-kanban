@@ -45,7 +45,6 @@ function boardWith(cards: { columnId: "review" | "trash"; id: string; title: str
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: columnCards("trash") },
 		],
-		dependencies: [],
 	};
 }
 

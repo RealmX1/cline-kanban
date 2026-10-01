@@ -27,6 +27,7 @@ import {
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
+import { KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME } from "../core/kanban-web-ui-page-load-request-origin-nonce";
 import {
 	buildKanbanRuntimeUrl,
 	getKanbanRuntimeHost,
@@ -43,6 +44,7 @@ import { loadExplorationThreadGraphProjection } from "../exploration-thread-grap
 import { assembleExplorationThreadGraphSessionRefs } from "../exploration-thread-graph/exploration-thread-graph-session-refs";
 import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "../exploration-thread-graph/exploration-thread-graph-store-location";
 import { activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
+import { verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import {
 	checkRateLimit,
 	clearRateLimit,
@@ -256,6 +258,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		if (!service) {
 			service = createInMemoryClineTaskSessionService({
 				watcherRegistry: clineWatcherRegistry,
+				kanbanWorkspaceIdentityForTaskAgentSessionEnvironment: {
+					workspaceId: scope.workspaceId,
+					workspaceRepositoryPath: scope.workspacePath,
+				},
 			});
 			clineTaskSessionServiceByWorkspaceId.set(scope.workspaceId, service);
 			clineWorkspacePathByWorkspaceId.set(scope.workspaceId, scope.workspacePath);
@@ -461,6 +467,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				decodedCliActorClaimsRequestHeader: decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
 					req.headers[KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME],
 				),
+				webUiPageLoadRequestOriginNonceVerificationStatus:
+					verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue(
+						req.headers[KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME],
+					),
 			},
 			runtimeApi: createRuntimeApi({
 				getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,

@@ -42,7 +42,7 @@ describe("通知档案重放不阻塞核心 workspace 推送", () => {
 		repoPath: workspacePath,
 		statePath: `${workspacePath}/state.json`,
 		git: { currentBranch: null, defaultBranch: null, branches: [] },
-		board: { columns: [], dependencies: [] },
+		board: { columns: [] },
 		sessions: {},
 		revision: 1,
 	};

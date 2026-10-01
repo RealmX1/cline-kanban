@@ -395,8 +395,8 @@ describe("ColumnContextPanel", () => {
 		expect(pinnedSection.compareDocumentPosition(scrollport) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
-	// 置顶板分身与本体卡同处一个页面，唯一性一旦破掉，居中滚动 / 钉住几何 / 依赖锚点
-	// 都会随机接到分身上（dependency-overlay 的锚点表是「后出现者覆盖先出现者」）。
+	// 置顶板分身与本体卡同处一个页面，唯一性一旦破掉，居中滚动 / 钉住几何 / Post-Deploy Verification 高亮
+	// 都会随机接到分身上。
 	it("keeps data-task-id unique after a card gets pinned to the task pinboard", async () => {
 		const pinnedReviewCard = { ...createCard("task-review", "Review task"), pinnedToTaskPinboardAt: 5_000 };
 		const columns: BoardColumn[] = [

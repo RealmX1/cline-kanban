@@ -8,7 +8,6 @@ import type {
 	RuntimeAgentId,
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
-	RuntimeBoardDependency,
 	RuntimeKanbanCliTaskBoardMutationKind,
 	RuntimeKanbanCliTaskBoardMutationRequest,
 	RuntimeKanbanCliTaskBoardMutationResponse,
@@ -49,13 +48,7 @@ import {
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import { resolveSessionFacets } from "../core/session-activity";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../core/task-agent-permission-mode";
-import {
-	addTaskDependency,
-	getTaskColumnId,
-	type RuntimeAddTaskDependencyResult,
-	removeTaskDependency,
-	resolveTaskDescriptionLastUpdatedAt,
-} from "../core/task-board-mutations";
+import { getTaskColumnId, resolveTaskDescriptionLastUpdatedAt } from "../core/task-board-mutations";
 import type {
 	TaskMessageInjectionRecord,
 	TaskMessageTerminalDeliveryFailureReason,
@@ -72,13 +65,11 @@ import {
 } from "../core/task-message-injection-ledger";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
-import { buildTaskMutationIntentForKanbanCliProcessDirectBoardFileWrite } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
 	detectGitRepositoryInfo,
 	getTaskWorktreesHomePath,
 	loadWorkspaceBoardById,
 	loadWorkspaceContext,
-	mutateWorkspaceState,
 	resolveWorkspacePath,
 } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
@@ -104,11 +95,6 @@ type ResolvedTaskCommandTarget =
 			kind: "column";
 			column: ListTaskColumn;
 	  };
-
-interface RuntimeWorkspaceMutationResult<T> {
-	board: RuntimeWorkspaceStateResponse["board"];
-	value: T;
-}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -333,39 +319,6 @@ async function ensureRuntimeWorkspace(workspaceRepoPath: string): Promise<string
 	return added.project.id;
 }
 
-async function notifyRuntimeWorkspaceStateUpdated(
-	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
-): Promise<void> {
-	await runtimeClient.workspace.notifyStateUpdated.mutate().catch(() => null);
-}
-
-// 过渡期残留：只剩 `task link` / `task unlink` 还在 CLI 进程里直接写盘（dd2db 1a.6 会把这两个动词整体删除）。
-// 其余写动词一律走 applyKanbanCliTaskBoardMutationThroughRuntime，不要再往这里加调用点。
-async function updateRuntimeWorkspaceState<T>(
-	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
-	workspaceRepoPath: string,
-	kanbanCliTaskMutationIntentKind: string,
-	mutate: (state: RuntimeWorkspaceStateResponse) => RuntimeWorkspaceMutationResult<T>,
-): Promise<T> {
-	const mutationResponse = await mutateWorkspaceState(
-		workspaceRepoPath,
-		buildTaskMutationIntentForKanbanCliProcessDirectBoardFileWrite(kanbanCliTaskMutationIntentKind),
-		(state) => {
-			const mutation = mutate(state);
-			return {
-				board: mutation.board,
-				value: mutation.value,
-			};
-		},
-	);
-
-	if (mutationResponse.saved) {
-		await notifyRuntimeWorkspaceStateUpdated(runtimeClient);
-	}
-
-	return mutationResponse.value;
-}
-
 type RuntimeKanbanCliTaskBoardMutationResponseOfKind<
 	TKanbanCliTaskBoardMutationKind extends RuntimeKanbanCliTaskBoardMutationKind,
 > = Extract<
@@ -468,36 +421,6 @@ function formatTaskRecordWithSessionSummary(
 	};
 }
 
-function formatDependencyRecord(
-	state: RuntimeWorkspaceStateResponse,
-	dependency: RuntimeBoardDependency,
-): Record<string, unknown> {
-	return {
-		id: dependency.id,
-		backlogTaskId: dependency.fromTaskId,
-		backlogTaskColumn: getTaskColumnId(state.board, dependency.fromTaskId),
-		linkedTaskId: dependency.toTaskId,
-		linkedTaskColumn: getTaskColumnId(state.board, dependency.toTaskId),
-		createdAt: dependency.createdAt,
-	};
-}
-
-function getLinkFailureMessage(reason: RuntimeAddTaskDependencyResult["reason"]): string {
-	if (reason === "same_task") {
-		return "A task cannot be linked to itself.";
-	}
-	if (reason === "duplicate") {
-		return "These tasks are already linked.";
-	}
-	if (reason === "trash_task") {
-		return "Links cannot include done tasks.";
-	}
-	if (reason === "non_backlog") {
-		return "Links require at least one backlog task.";
-	}
-	return "One or both tasks could not be found.";
-}
-
 function findTasksInColumn(
 	state: RuntimeWorkspaceStateResponse,
 	columnId: ListTaskColumn,
@@ -544,7 +467,6 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 		workspacePath: workspace.repoPath,
 		column: input.column ?? null,
 		tasks,
-		dependencies: state.board.dependencies.map((dependency) => formatDependencyRecord(state, dependency)),
 		count: tasks.length,
 	};
 }
@@ -579,9 +501,6 @@ async function getTask(input: { cwd: string; taskId: string; projectPath?: strin
 		workspacePath: workspace.repoPath,
 		task: formatTaskRecord(state, found.task, found.columnId),
 		taskWorkspace: taskWorkspaceInfo,
-		dependencies: state.board.dependencies
-			.filter((dependency) => dependency.fromTaskId === found.task.id || dependency.toTaskId === found.task.id)
-			.map((dependency) => formatDependencyRecord(state, dependency)),
 	};
 }
 
@@ -599,15 +518,10 @@ async function stopTaskRuntimeSession(
 async function deleteTaskWorkspace(
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
 	taskId: string,
-	removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion = false,
 ): Promise<{ removed: boolean; error?: string }> {
 	try {
-		const deleted = await runtimeClient.workspace.deleteWorktree.mutate({
-			taskId,
-			...(removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion
-				? { removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true }
-				: {}),
-		});
+		// 永久删卡也不删 task commit provenance：落地数据保全（dd2db Y-PHASE-3），1c 的共享落地判据要读它。
+		const deleted = await runtimeClient.workspace.deleteWorktree.mutate({ taskId });
 		return {
 			removed: deleted.removed,
 			error: deleted.ok ? undefined : deleted.error,
@@ -905,79 +819,6 @@ async function updateTaskCommand(input: {
 	};
 }
 
-async function linkTasks(input: {
-	cwd: string;
-	taskId: string;
-	linkedTaskId: string;
-	projectPath?: string;
-}): Promise<JsonRecord> {
-	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
-	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const dependency = await updateRuntimeWorkspaceState(
-		runtimeClient,
-		workspaceRepoPath,
-		"kanban_cli_task_link",
-		(runtimeState) => {
-			const linked = addTaskDependency(runtimeState.board, input.taskId, input.linkedTaskId);
-			if (!linked.added || !linked.dependency) {
-				throw new Error(getLinkFailureMessage(linked.reason));
-			}
-
-			const nextState: RuntimeWorkspaceStateResponse = {
-				...runtimeState,
-				board: linked.board,
-			};
-			return {
-				board: linked.board,
-				value: formatDependencyRecord(nextState, linked.dependency),
-			};
-		},
-	);
-	return {
-		ok: true,
-		workspacePath: workspaceRepoPath,
-		dependency,
-	};
-}
-
-async function unlinkTasks(input: { cwd: string; dependencyId: string; projectPath?: string }): Promise<JsonRecord> {
-	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
-	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const removedDependency = await updateRuntimeWorkspaceState(
-		runtimeClient,
-		workspaceRepoPath,
-		"kanban_cli_task_unlink",
-		(runtimeState) => {
-			const dependency =
-				runtimeState.board.dependencies.find((candidate) => candidate.id === input.dependencyId) ?? null;
-			if (!dependency) {
-				throw new Error(`Dependency "${input.dependencyId}" was not found in workspace ${workspaceRepoPath}.`);
-			}
-
-			const unlinked = removeTaskDependency(runtimeState.board, input.dependencyId);
-			if (!unlinked.removed) {
-				throw new Error(`Dependency "${input.dependencyId}" could not be removed.`);
-			}
-
-			const nextState: RuntimeWorkspaceStateResponse = {
-				...runtimeState,
-				board: unlinked.board,
-			};
-			return {
-				board: unlinked.board,
-				value: formatDependencyRecord(nextState, dependency),
-			};
-		},
-	);
-	return {
-		ok: true,
-		workspacePath: workspaceRepoPath,
-		removedDependency,
-	};
-}
-
 async function startTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
@@ -1142,8 +983,6 @@ export interface TrashTaskExecutionResult {
 	task: JsonRecord;
 	taskId: string;
 	previousColumnId: ListTaskColumn;
-	readyTaskIds: string[];
-	autoStartedTasks: JsonRecord[];
 	worktreeDeleted: boolean;
 	worktreeDeleteError?: string;
 	alreadyInTrash: boolean;
@@ -1154,12 +993,13 @@ function columnCanHaveLiveTaskSession(columnId: ListTaskColumn): boolean {
 }
 
 // deployment CLI（verification-complete / -confirm 移列）复用其完整副作用链：
-// runtime procedure 移列（runtime 写成后自己广播）→ 按列门控 stopTaskSession → 自动启动就绪 linked 任务 → deleteWorktree。
+// runtime procedure 移列（runtime 写成后自己广播）→ 按列门控 stopTaskSession → deleteWorktree。
 export async function trashTaskById(input: {
+	// cwd / projectPath / workspaceRepoPath 已不再使用：1a.2b 起移列在 runtime 内进行、错误文案由 runtime 给出；
+	// 1a.6 退役「完成后自动启动下游 linked 任务」后也不再需要 cwd / projectPath 去启动别的任务。保留只为不改调用形状。
 	cwd: string;
 	taskId: string;
 	projectPath?: string;
-	// 1a.2b 起移列在 runtime 内进行、错误文案由 runtime 给出，本字段已不再使用；保留只为不改 deployment.ts 的调用形状。
 	workspaceRepoPath: string;
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>;
 }): Promise<TrashTaskExecutionResult> {
@@ -1180,8 +1020,6 @@ export async function trashTaskById(input: {
 			task: trashedTaskRecord,
 			taskId: input.taskId,
 			previousColumnId,
-			readyTaskIds: [],
-			autoStartedTasks: [],
 			worktreeDeleted: false,
 			alreadyInTrash: true,
 		};
@@ -1191,24 +1029,12 @@ export async function trashTaskById(input: {
 		await stopTaskRuntimeSession(input.runtimeClient, input.taskId);
 	}
 
-	const autoStartedTasks: JsonRecord[] = [];
-	for (const readyTaskId of trashMutation.linkedBacklogTaskIdsReadyToStartAfterTrash) {
-		const started = await startTask({
-			cwd: input.cwd,
-			taskId: readyTaskId,
-			projectPath: input.projectPath,
-		});
-		autoStartedTasks.push(started);
-	}
-
 	const deletedWorkspace = await deleteTaskWorkspace(input.runtimeClient, input.taskId);
 
 	return {
 		task: trashedTaskRecord,
 		taskId: input.taskId,
 		previousColumnId,
-		readyTaskIds: trashMutation.linkedBacklogTaskIdsReadyToStartAfterTrash,
-		autoStartedTasks,
 		worktreeDeleted: deletedWorkspace.removed,
 		worktreeDeleteError: deletedWorkspace.error,
 		alreadyInTrash: false,
@@ -1240,16 +1066,12 @@ async function trashTask(input: {
 				message: `Task "${target.taskId}" is already done.`,
 				task: trashed.task,
 				workspacePath: workspaceRepoPath,
-				readyTaskIds: [],
-				autoStartedTasks: [],
 			};
 		}
 		return {
 			ok: true,
 			task: trashed.task,
 			workspacePath: workspaceRepoPath,
-			readyTaskIds: trashed.readyTaskIds,
-			autoStartedTasks: trashed.autoStartedTasks,
 			worktreeDeleted: trashed.worktreeDeleted,
 			worktreeDeleteError: trashed.worktreeDeleteError,
 		};
@@ -1264,8 +1086,6 @@ async function trashTask(input: {
 			workspacePath: workspaceRepoPath,
 			trashedTasks: [],
 			alreadyTrashedTasks: [],
-			readyTaskIds: [],
-			autoStartedTasks: [],
 			worktreeCleanup: [],
 			count: 0,
 		};
@@ -1293,8 +1113,6 @@ async function trashTask(input: {
 		workspacePath: workspaceRepoPath,
 		trashedTasks: trashedTasks.map((result) => result.task),
 		alreadyTrashedTasks: alreadyTrashedTasks.map((result) => result.task),
-		readyTaskIds: [...new Set(trashedTasks.flatMap((result) => result.readyTaskIds))],
-		autoStartedTasks: trashedTasks.flatMap((result) => result.autoStartedTasks),
 		worktreeCleanup: trashedTasks.map((result) => ({
 			taskId: result.taskId,
 			removed: result.worktreeDeleted,
@@ -1362,7 +1180,7 @@ async function deleteTaskCommand(input: {
 	const workspaceCleanupResults = await Promise.all(
 		deletedTaskIds.map(async (taskId) => ({
 			taskId,
-			...(await deleteTaskWorkspace(runtimeClient, taskId, true)),
+			...(await deleteTaskWorkspace(runtimeClient, taskId)),
 		})),
 	);
 
@@ -2224,56 +2042,6 @@ export function registerTaskCommand(program: Command): void {
 						projectPath: options.projectPath,
 						taskId: options.taskId,
 						idempotencyKey: options.idempotencyKey,
-					}),
-			);
-		});
-
-	task
-		.command("link")
-		.description("Link two tasks so one task waits on another.")
-		.requiredOption("--task-id <id>", "One of the two task IDs to link.")
-		.requiredOption("--linked-task-id <id>", "The other task ID to link.")
-		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.addHelpText(
-			"after",
-			[
-				"",
-				"Dependency direction:",
-				"  If both linked tasks are in backlog, Kanban preserves the order you pass:",
-				"  --task-id waits on --linked-task-id, and on the board the arrow points into",
-				"  --linked-task-id.",
-				"  Once only one linked task remains in backlog, Kanban reorients the saved link",
-				"  so the backlog task is the waiting dependent task and the other task is the",
-				"  prerequisite.",
-				"  When the prerequisite finishes review and moves to done, the waiting backlog",
-				"  task becomes ready to start.",
-				"",
-			].join("\n"),
-		)
-		.action(async (options: { taskId: string; linkedTaskId: string; projectPath?: string }) => {
-			await runTaskCommand(
-				async () =>
-					await linkTasks({
-						cwd: process.cwd(),
-						taskId: options.taskId,
-						linkedTaskId: options.linkedTaskId,
-						projectPath: options.projectPath,
-					}),
-			);
-		});
-
-	task
-		.command("unlink")
-		.description("Remove an existing dependency link.")
-		.requiredOption("--dependency-id <id>", "Dependency ID.")
-		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.action(async (options: { dependencyId: string; projectPath?: string }) => {
-			await runTaskCommand(
-				async () =>
-					await unlinkTasks({
-						cwd: process.cwd(),
-						dependencyId: options.dependencyId,
-						projectPath: options.projectPath,
 					}),
 			);
 		});

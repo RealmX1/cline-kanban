@@ -33,7 +33,6 @@ function createBoard(backlogCards: RuntimeBoardCard[], inProgressCards: RuntimeB
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 

@@ -89,9 +89,6 @@ function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: strin
 
 /**
  * 钉在宿主行右下角；纯 overlay，不占文本流宽度；hover 时左侧渐变遮住末行被挡字符。
- * `data-card-hover-actions` 标记：内部按钮是 Tooltip 门控的 hover 换壳点，本容器绝对定位、内部
- * childList 抖动不可能移动卡片锚点；dependency-overlay 的 MutationObserver 对完全落在标记内的
- * 增删跳过布局重测（契约见 revealHoverActionTooltip 注释）。
  */
 function TaskCardRowHoverActions({
 	groupName,
@@ -102,7 +99,6 @@ function TaskCardRowHoverActions({
 }): React.ReactElement {
 	return (
 		<div
-			data-card-hover-actions=""
 			className={cn(
 				"pointer-events-none absolute bottom-0 right-0 z-10 flex items-end opacity-0 transition-opacity",
 				// 与卡面同底色的左向渐变：hover 时才显现，避免为按钮预留 pr-* 挤占换行宽度。
@@ -144,11 +140,6 @@ export interface TaskCardBusinessProps {
 	isMoveToTrashLoading?: boolean;
 	isMoveToValidationLoading?: boolean;
 	isMoveToReviewLoading?: boolean;
-	onDependencyPointerDown?: (taskId: string, event: MouseEvent<HTMLElement>) => void;
-	onDependencyPointerEnter?: (taskId: string) => void;
-	isDependencySource?: boolean;
-	isDependencyTarget?: boolean;
-	isDependencyLinking?: boolean;
 	workspacePath?: string | null;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
@@ -170,9 +161,8 @@ export interface TaskCardBodyDragBindings {
  * 同一张任务卡在界面上可能同时存在多份 DOM，本枚举声明「这一份是哪一份」。
  *
  * 只有 `canonical_card_in_its_stage_list` 那一份携带 `data-task-id` / `data-verification-anchor`
- * 并绑定 DnD。这不是风格偏好而是硬约束：程序化拖动、依赖连线锚点、Focus View 居中滚动、
- * sticky 几何测量、Post-Deploy Verification 高亮全都以「`data-task-id` 全局唯一」为前提，
- * 其中 `dependency-overlay` 的锚点表还是**后出现者覆盖先出现者**——副本一旦带上就会静默画错线。
+ * 并绑定 DnD。这不是风格偏好而是硬约束：程序化拖动、Focus View 居中滚动、sticky 几何测量、
+ * Post-Deploy Verification 高亮全都以「`data-task-id` 全局唯一」为前提。
  */
 export type TaskCardBodyRenderRole =
 	// 本体：卡片在它自己所属 stage 列表里的那一份，唯一可拖、唯一持有 DOM 身份。
@@ -180,7 +170,7 @@ export type TaskCardBodyRenderRole =
 	// Focus View：焦点卡滚出视野时，跟着 sticky stage 卡头一起留在视野里的那份只读副本。
 	// 纯为「别让我正在看的任务跑出屏幕」而存在，因此关掉全部卡级指针交互，只留 hover 动作组。
 	| "focused_card_copy_under_sticky_stage_header"
-	// Task Pinboard：被置顶的卡片在置顶板里的分身。除不可拖、不参与依赖连线、不持有 DOM 身份外，
+	// Task Pinboard：被置顶的卡片在置顶板里的分身。除不可拖、不持有 DOM 身份外，
 	// 交互与本体一致（单击进详情、双击改标题、全部动作按钮）。
 	| "pinned_card_copy_in_task_pinboard";
 
@@ -210,11 +200,6 @@ export const TaskCardBody = memo(function TaskCardBody({
 	isMoveToTrashLoading = false,
 	isMoveToValidationLoading = false,
 	isMoveToReviewLoading = false,
-	onDependencyPointerDown,
-	onDependencyPointerEnter,
-	isDependencySource = false,
-	isDependencyTarget = false,
-	isDependencyLinking = false,
 	workspacePath,
 	defaultClineModelId = null,
 	defaultAgentId = null,
@@ -243,14 +228,6 @@ export const TaskCardBody = memo(function TaskCardBody({
 	// 注意这里刻意**不**改成条件挂载整个动作组：未挂载的按钮无法被 Tab 到，而卡壳本身不可聚焦，
 	// backlog 这类没有标题编辑按钮的卡会因此彻底失去键盘可达性。DOM 常驻 + CSS `focus-within`
 	// 才是原本保住 Tab 可达的机制。
-	//
-	// 与 dependency-overlay 的契约：门控意味着 hover 进出时这些触发元素被整体卸载重挂，每个换壳都是
-	// 一次 childList mutation。这类抖动不可能移动卡片锚点，故触发元素的宿主统一带
-	// `data-card-hover-actions` 标记（右上角动作组、TaskCardRowHoverActions、头部药丸条、git 状态
-	// span），overlay 的 MutationObserver 对完全落在标记内的增删跳过全板布局重测；其余卡片内部
-	// childList（parked 角标、投递争用提示、sessionActivity 行、目录行等会改变卡片高度的条件区块）
-	// 一律照常重测。不变量：标记宿主内的一切 childList 都不得改变卡片高度（绝对定位容器 / 同尺寸
-	// 换壳才配带此标记；git 状态 span 自身随 tooltip 有无而挂载卸载属罕见豁免，代价可接受）。
 	const revealHoverActionTooltip = (label: string | null): string | undefined =>
 		isHovered && label ? label : undefined;
 	const [isPromptViewerOpen, setIsPromptViewerOpen] = useState(false);
@@ -265,8 +242,6 @@ export const TaskCardBody = memo(function TaskCardBody({
 	// sticky 卡头副本纯为「别让焦点卡跑出屏幕」而存在，是只读镜像：卡级指针交互一律关闭。
 	const isPassiveMirrorUnderStickyStageHeader = renderRole === "focused_card_copy_under_sticky_stage_header";
 	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
-	// 依赖连线（cmd/ctrl 拖）端点靠 data-task-id 定位，副本没有身份也就画不出线，索性从源头关掉。
-	const participatesInDependencyLinking = emitsCanonicalDomIdentity;
 	const isCardInteractive = !isTrashCard && !isPassiveMirrorUnderStickyStageHeader;
 	// 会跳转的列上双击改标题需先拦截单击；这些列单击会打开详情、替换看板。
 	const isNavigatingColumn = columnId === "in_progress" || columnId === "review" || columnId === "validation";
@@ -618,60 +593,24 @@ export const TaskCardBody = memo(function TaskCardBody({
 			{...(drag?.draggableProps ?? {})}
 			{...(drag?.dragHandleProps ?? {})}
 			className="kb-board-card-shell"
-			// 副本一律不输出 data-task-id：保证全局唯一（CSS sticky/scrollIntoView/依赖锚点/测试计数依赖此唯一性）。
+			// 副本一律不输出 data-task-id：保证全局唯一（CSS sticky/scrollIntoView/测试计数依赖此唯一性）。
 			data-task-id={emitsCanonicalDomIdentity ? card.id : undefined}
 			// Post-Deploy Verification 引导定位锚点：guidance.anchor 可指向此看板任务卡（副本不输出，保唯一）。
 			data-verification-anchor={emitsCanonicalDomIdentity ? boardTaskCardAnchorKey(card.id) : undefined}
 			data-task-card-render-role={renderRole}
 			data-column-id={columnId}
 			data-selected={selected}
-			onMouseDownCapture={
-				!participatesInDependencyLinking
-					? undefined
-					: (event) => {
-							// Radix Portal（如 TaskOriginalPromptDialog）挂载到 document.body，
-							// 但 React 合成事件仍沿组件树冒泡回卡片 shell；下方基于 DOM 祖先链的
-							// closest() 守卫对 portal 内容不生效，所以先做 DOM containment 检查。
-							if (!event.currentTarget.contains(event.target as Node)) {
-								return;
-							}
-							if (!isCardInteractive) {
-								return;
-							}
-							if (isDependencyLinking) {
-								event.preventDefault();
-								event.stopPropagation();
-								return;
-							}
-							if (!event.metaKey && !event.ctrlKey) {
-								return;
-							}
-							const target = event.target as HTMLElement | null;
-							if (target?.closest("button, a, input, textarea, [contenteditable='true']")) {
-								return;
-							}
-							event.preventDefault();
-							event.stopPropagation();
-							onDependencyPointerDown?.(card.id, event);
-						}
-			}
 			onClick={
 				isPassiveMirrorUnderStickyStageHeader
 					? undefined
 					: (event) => {
-							// 同上：portal 内容的合成 click 也会冒泡到这里，先做 DOM containment 检查。
+							// Radix Portal（如 TaskOriginalPromptDialog）挂载到 document.body，但 React 合成 click 仍沿
+							// 组件树冒泡回卡片 shell；下方基于 DOM 祖先链的 closest() 守卫对 portal 内容不生效，
+							// 所以先做 DOM containment 检查。
 							if (!event.currentTarget.contains(event.target as Node)) {
 								return;
 							}
 							if (!isCardInteractive) {
-								return;
-							}
-							if (isDependencyLinking) {
-								event.preventDefault();
-								event.stopPropagation();
-								return;
-							}
-							if (event.metaKey || event.ctrlKey) {
 								return;
 							}
 							const target = event.target as HTMLElement | null;
@@ -707,7 +646,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 							if (!event.currentTarget.contains(event.target as Node)) {
 								return;
 							}
-							if (!isInlineTitleEditEnabled || isDependencyLinking) {
+							if (!isInlineTitleEditEnabled) {
 								return;
 							}
 							const target = event.target as HTMLElement | null;
@@ -731,22 +670,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 				// 本体可拖 → grab；置顶板分身单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
 				cursor: emitsCanonicalDomIdentity ? "grab" : isTaskPinboardCopy ? "pointer" : "default",
 			}}
-			onMouseEnter={() => {
-				setIsHovered(true);
-				if (participatesInDependencyLinking) {
-					onDependencyPointerEnter?.(card.id);
-				}
-			}}
-			onMouseMove={
-				!participatesInDependencyLinking
-					? undefined
-					: () => {
-							if (!isDependencyLinking) {
-								return;
-							}
-							onDependencyPointerEnter?.(card.id);
-						}
-			}
+			onMouseEnter={() => setIsHovered(true)}
 			onMouseLeave={() => setIsHovered(false)}
 		>
 			<div
@@ -755,8 +679,6 @@ export const TaskCardBody = memo(function TaskCardBody({
 					isCardInteractive && "cursor-pointer hover:bg-surface-3 hover:border-border-bright",
 					isDragging && "shadow-lg",
 					isHovered && isCardInteractive && "bg-surface-3 border-border-bright",
-					isDependencySource && "kb-board-card-dependency-source",
-					isDependencyTarget && "kb-board-card-dependency-target",
 				)}
 			>
 				{/* agent 图标 + 微型时长药丸合一：钉在卡片左上角、略微超出边框（不占标题横向空间）。
@@ -765,10 +687,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 				    Activity=agent 上次响应至今（仅有时间戳时显）。各段 hover 显绝对本地时间。 */}
 				{/* 置顶板分身在末尾多挂一段 stage 标签，胶囊会因此变宽；右侧不远就是 hover 动作组（同在 -top-[6px]），
 				    所以限宽 + 标签 truncate，窄卡上宁可截断 stage 名也不与动作组叠在一起。 */}
-				<div
-					data-card-hover-actions=""
-					className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm"
-				>
+				<div className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
 					{taskAgentSettingsLabel ? (
 						<Tooltip content={revealHoverActionTooltip(taskAgentSettingsLabel)}>
 							<span
@@ -974,7 +893,6 @@ export const TaskCardBody = memo(function TaskCardBody({
 					</div>
 				</div>
 				<div
-					data-card-hover-actions=""
 					className={cn(
 						"absolute right-1 -top-[6px] z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
 						"focus-within:opacity-100 focus-within:pointer-events-auto",
@@ -1207,7 +1125,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 								// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，
 								// 不能直接是不转发 props/ref 的函数组件——否则 hover 根本触发不了 tooltip。
 								<Tooltip side="bottom" content={revealHoverActionTooltip(taskWorkspaceGitStatusTooltip)}>
-									<span data-card-hover-actions="" className="mx-1 inline-flex align-middle">
+									<span className="mx-1 inline-flex align-middle">
 										<AheadBehindIndicator
 											ahead={commitsAheadOfBaseRef}
 											behind={commitsBehindBaseRef}

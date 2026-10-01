@@ -44,6 +44,20 @@ export type WorkspaceTaskMutationCaptureState =
 			pendingBatches: PendingBoardFileWriteTaskMutationEventBatch[];
 	  };
 
+// 卡片限定引用去掉 workspace 后的身份：登记簿按 id 全局唯一，incarnation 区分「同一张卡」与「复用了 id 的另一张卡」。
+export interface TaskCardIdentityForGlobalTaskIdentityRegistry {
+	taskId: string;
+	taskIncarnationCreatedAtEpochMs: number;
+}
+
+export interface TaskIdReservationSeedEntryFromExistingLocalTrace {
+	taskId: string;
+	observedInExistingLocalTraceSourceKinds: string[];
+}
+
+export const TASK_ID_ALREADY_REGISTERED_IN_GLOBAL_TASK_IDENTITY_REGISTRY_ERROR_CODE =
+	"task_id_already_registered_in_global_task_identity_registry";
+
 export interface PendingBoardFileWriteTaskMutationEventBatchResolution {
 	pendingBatchId: string;
 	pendingBatchResolution: "commit" | "abandon";
@@ -116,6 +130,7 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 		detectedEventDrafts: InterWorkUnitRelationLedgerEventDraft[];
 		retainedFieldContents: TaskCardFieldValueRetainedContent[];
 		currentSnapshot: WorkspaceBoardCommittedTaskMutationCaptureSnapshot;
+		observedTaskCardIdentities: TaskCardIdentityForGlobalTaskIdentityRegistry[];
 	}): Promise<void> {
 		await this.request("resolvePendingBatchesAndRecordDetectedEvents", input);
 	}
@@ -128,6 +143,8 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 		nextWorkspaceBoardSnapshot: WorkspaceBoardSnapshotForTaskMutationDiff;
 		eventDrafts: InterWorkUnitRelationLedgerEventDraft[];
 		retainedFieldContents: TaskCardFieldValueRetainedContent[];
+		// 漏斗内新建的卡：worker 在同一事务里校验 id 未被别的卡占用，冲突则整批回滚并抛错（board 不写盘）。
+		createdTaskCardIdentities: TaskCardIdentityForGlobalTaskIdentityRegistry[];
 	}): Promise<void> {
 		await this.request("recordPendingTaskMutationEventBatch", input);
 	}
@@ -146,6 +163,27 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 		retainedFieldContents?: TaskCardFieldValueRetainedContent[];
 	}): Promise<void> {
 		await this.request("appendCommittedEvents", input);
+	}
+
+	// 返回 null 表示候选全部已被占用（调用方换一批候选重试）。
+	async allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry(input: {
+		candidateTaskIds: string[];
+		requestingWorkspaceId: string | null;
+	}): Promise<string | null> {
+		const result = (await this.request("allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry", input)) as {
+			allocatedTaskId: string | null;
+		};
+		return result.allocatedTaskId;
+	}
+
+	async seedTaskIdReservationsFromExistingLocalTraces(input: {
+		seededTaskIdEntries: TaskIdReservationSeedEntryFromExistingLocalTrace[];
+		seedingEventDraft: InterWorkUnitRelationLedgerEventDraft;
+	}): Promise<number> {
+		const result = (await this.request("seedTaskIdReservationsFromExistingLocalTraces", input)) as {
+			newlyReservedTaskIdCount: number;
+		};
+		return result.newlyReservedTaskIdCount;
 	}
 
 	async listCommittedEvents(input: {

@@ -26,7 +26,6 @@ function boardWith(columnId: "backlog" | "review" | "trash", cards: RuntimeBoard
 			{ id: "review", title: "Review", cards: columnId === "review" ? cards : [] },
 			{ id: "trash", title: "Done", cards: columnId === "trash" ? cards : [] },
 		],
-		dependencies: [],
 	};
 }
 

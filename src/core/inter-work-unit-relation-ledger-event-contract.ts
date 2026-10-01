@@ -238,11 +238,27 @@ export const TASK_MUTATION_EVENT_KINDS_DERIVED_FROM_BOARD_DIFF = [
 	"task_card_moved_to_trash_column",
 	"task_card_restored_from_trash_column",
 	"task_card_permanently_removed_from_board",
-	"legacy_board_dependency_link_added",
-	"legacy_board_dependency_link_removed",
 ] as const;
 export type TaskMutationEventKindDerivedFromBoardDiff =
 	(typeof TASK_MUTATION_EVENT_KINDS_DERIVED_FROM_BOARD_DIFF)[number];
+
+// 族 1 中 board diff 看不见、由专门 procedure 在 runtime 内产出的 eventKind。
+export const TASK_MUTATION_EVENT_KINDS_PRODUCED_BY_DEDICATED_RUNTIME_PROCEDURES = [
+	"task_message_delivery_requested_into_task_conversation_session",
+] as const;
+export type TaskMutationEventKindProducedByDedicatedRuntimeProcedure =
+	(typeof TASK_MUTATION_EVENT_KINDS_PRODUCED_BY_DEDICATED_RUNTIME_PROCEDURES)[number];
+
+// message 事件的「正文由谁撰写」（Y-EVENT-14）。前两个值逐字复用 ac08e 程序化注入溯源块协议的
+// intent_extraction_treatment，意图系统据此把 transcript 里的用户消息与事件日志对上；读写都按开放字符串处理。
+// actor 只回答「谁发的」：排队 prompt 是用户写的、由机器投递，agent 经 CLI 投递的正文不是用户陈述。
+export const MESSAGE_BODY_AUTHORSHIP_INTENT_EXTRACTION_TREATMENTS = [
+	"context_only_never_quote_as_user_statement",
+	"user_authored_delivered_programmatically",
+	"message_body_authorship_not_determinable_from_request_origin",
+] as const;
+export type MessageBodyAuthorshipIntentExtractionTreatment =
+	(typeof MESSAGE_BODY_AUTHORSHIP_INTENT_EXTRACTION_TREATMENTS)[number];
 
 export const TASK_MUTATION_OCCURRENCE_CAPTURE_MODES = [
 	"captured_within_runtime_persistence_funnel",

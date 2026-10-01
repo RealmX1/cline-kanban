@@ -28,15 +28,8 @@ export interface WorkspaceBoardTaskCardSnapshotEntry {
 	fieldValueSha256ByFieldName: Record<string, string>;
 }
 
-export interface WorkspaceBoardLegacyDependencySnapshotEntry {
-	legacyBoardDependencyId: string;
-	fromTaskId: string;
-	toTaskId: string;
-}
-
 export interface WorkspaceBoardSnapshotForTaskMutationDiff {
 	taskCardSnapshotEntriesByTaskId: Record<string, WorkspaceBoardTaskCardSnapshotEntry>;
-	legacyBoardDependencySnapshotEntries: WorkspaceBoardLegacyDependencySnapshotEntry[];
 }
 
 export interface TaskCardFieldValueRetainedContent {
@@ -92,11 +85,6 @@ export function buildWorkspaceBoardSnapshotWithRetainedFieldContents(
 	return {
 		snapshot: {
 			taskCardSnapshotEntriesByTaskId,
-			legacyBoardDependencySnapshotEntries: board.dependencies.map((dependency) => ({
-				legacyBoardDependencyId: dependency.id,
-				fromTaskId: dependency.fromTaskId,
-				toTaskId: dependency.toTaskId,
-			})),
 		},
 		retainedFieldContentsBySha256,
 	};
@@ -218,43 +206,7 @@ export function diffWorkspaceBoardSnapshotsIntoTaskMutationOccurrences(
 		}
 	}
 
-	const previousDependencyIds = new Set(
-		previousSnapshot.legacyBoardDependencySnapshotEntries.map((entry) => entry.legacyBoardDependencyId),
-	);
-	const nextDependencyIds = new Set(
-		nextSnapshot.legacyBoardDependencySnapshotEntries.map((entry) => entry.legacyBoardDependencyId),
-	);
-	for (const entry of previousSnapshot.legacyBoardDependencySnapshotEntries) {
-		if (!nextDependencyIds.has(entry.legacyBoardDependencyId)) {
-			occurrences.push(legacyDependencyOccurrence("legacy_board_dependency_link_removed", entry, previousEntries));
-		}
-	}
-	for (const entry of nextSnapshot.legacyBoardDependencySnapshotEntries) {
-		if (!previousDependencyIds.has(entry.legacyBoardDependencyId)) {
-			occurrences.push(legacyDependencyOccurrence("legacy_board_dependency_link_added", entry, nextEntries));
-		}
-	}
 	return occurrences;
-}
-
-function legacyDependencyOccurrence(
-	eventKind: "legacy_board_dependency_link_added" | "legacy_board_dependency_link_removed",
-	entry: WorkspaceBoardLegacyDependencySnapshotEntry,
-	taskCardSnapshotEntriesByTaskId: Record<string, WorkspaceBoardTaskCardSnapshotEntry>,
-): BoardDerivedTaskMutationOccurrence {
-	return {
-		eventKind,
-		taskId: entry.fromTaskId,
-		taskIncarnationCreatedAtEpochMs:
-			taskCardSnapshotEntriesByTaskId[entry.fromTaskId]?.taskIncarnationCreatedAtEpochMs ?? null,
-		eventPayloadSpecificToEventKind: {
-			legacyBoardDependencyId: entry.legacyBoardDependencyId,
-			legacyBoardDependencyFromTaskId: entry.fromTaskId,
-			legacyBoardDependencyToTaskId: entry.toTaskId,
-			legacyBoardDependencyToTaskIncarnationCreatedAtEpochMs:
-				taskCardSnapshotEntriesByTaskId[entry.toTaskId]?.taskIncarnationCreatedAtEpochMs ?? null,
-		},
-	};
 }
 
 export function collectRetainedFieldContentsReferencedByOccurrences(

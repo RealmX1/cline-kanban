@@ -70,8 +70,100 @@ database.exec(`
   content_canonical_json TEXT NOT NULL,
   first_recorded_at INTEGER NOT NULL
  );
+ -- 全局 task 身份登记簿的 id 占用表（Y-EVENT-12）：id 只由 runtime 分配，删卡后 id 永不复用。
+ -- 身份内容（标题史、墓碑等）是 1b 从事件日志重建的投影；这里只保证锁内校验「这个 id 有没有被占用」够快。
+ CREATE TABLE IF NOT EXISTS global_task_identity_registry_registered_task_ids (
+  task_id TEXT PRIMARY KEY,
+  task_id_registration_source TEXT NOT NULL,
+  registered_workspace_id TEXT,
+  registered_task_incarnation_created_at_epoch_ms INTEGER,
+  first_registered_at INTEGER NOT NULL,
+  last_updated_at INTEGER NOT NULL
+ );
  PRAGMA user_version = ${INTER_WORK_UNIT_RELATION_LEDGER_SCHEMA_VERSION};
 `);
+
+const TASK_ID_ALREADY_REGISTERED_ERROR_CODE = "task_id_already_registered_in_global_task_identity_registry";
+const TASK_ID_REGISTRATION_SOURCE_ALLOCATED_FOR_PENDING_CARD_CREATION =
+	"allocated_by_runtime_for_pending_task_card_creation";
+const TASK_ID_REGISTRATION_SOURCE_TASK_CARD_OBSERVED_ON_BOARD = "task_card_observed_on_board_by_live_capture";
+const TASK_ID_REGISTRATION_SOURCE_SEEDED_FROM_EXISTING_LOCAL_TRACE = "seeded_from_existing_local_trace_at_activation";
+
+const readRegisteredTaskIdStatement = database.prepare(
+	"SELECT task_id_registration_source, registered_workspace_id, registered_task_incarnation_created_at_epoch_ms FROM global_task_identity_registry_registered_task_ids WHERE task_id = ?",
+);
+const insertRegisteredTaskIdIfAbsentStatement = database.prepare(`INSERT OR IGNORE INTO global_task_identity_registry_registered_task_ids(
+ task_id, task_id_registration_source, registered_workspace_id, registered_task_incarnation_created_at_epoch_ms, first_registered_at, last_updated_at
+) VALUES (?, ?, ?, ?, ?, ?)`);
+const bindRegisteredTaskIdToTaskCardStatement = database.prepare(`UPDATE global_task_identity_registry_registered_task_ids
+ SET task_id_registration_source = ?, registered_workspace_id = ?, registered_task_incarnation_created_at_epoch_ms = ?, last_updated_at = ?
+ WHERE task_id = ?`);
+
+// 盘上已经存在的卡（基线、漏斗外检出）：只登记，不拒绝——事实已经发生，拒绝也挡不住。
+// 已被占位（分配未用 / 痕迹播种）的 id 绑定到这张卡；已绑定到别的卡的保持原样（跨 workspace 撞号由 1b 诊断）。
+function registerTaskCardsObservedOnBoard(workspaceId, observedTaskCardIdentities) {
+	const now = Date.now();
+	for (const identity of observedTaskCardIdentities ?? []) {
+		const row = readRegisteredTaskIdStatement.get(identity.taskId);
+		if (!row) {
+			insertRegisteredTaskIdIfAbsentStatement.run(
+				identity.taskId,
+				TASK_ID_REGISTRATION_SOURCE_TASK_CARD_OBSERVED_ON_BOARD,
+				workspaceId,
+				identity.taskIncarnationCreatedAtEpochMs,
+				now,
+				now,
+			);
+		} else if (row.registered_task_incarnation_created_at_epoch_ms === null) {
+			bindRegisteredTaskIdToTaskCardStatement.run(
+				TASK_ID_REGISTRATION_SOURCE_TASK_CARD_OBSERVED_ON_BOARD,
+				workspaceId,
+				identity.taskIncarnationCreatedAtEpochMs,
+				now,
+				identity.taskId,
+			);
+		}
+	}
+}
+
+// 漏斗内的新建卡（写盘之前）：id 必须是 runtime 分配给本 workspace 且尚未使用的、从未登记过的，或者就是同一张卡
+// （同 workspace、同 incarnation，如悬挂批次被放弃后的重试）。其余一律拒绝，整个 pending 批次随事务回滚，board 不写盘。
+function claimRegisteredTaskIdsForTaskCardsCreatedWithinFunnel(workspaceId, createdTaskCardIdentities) {
+	const now = Date.now();
+	for (const identity of createdTaskCardIdentities ?? []) {
+		const row = readRegisteredTaskIdStatement.get(identity.taskId);
+		if (!row) {
+			insertRegisteredTaskIdIfAbsentStatement.run(
+				identity.taskId,
+				TASK_ID_REGISTRATION_SOURCE_TASK_CARD_OBSERVED_ON_BOARD,
+				workspaceId,
+				identity.taskIncarnationCreatedAtEpochMs,
+				now,
+				now,
+			);
+			continue;
+		}
+		const isUnusedAllocationForThisWorkspace =
+			row.task_id_registration_source === TASK_ID_REGISTRATION_SOURCE_ALLOCATED_FOR_PENDING_CARD_CREATION &&
+			row.registered_task_incarnation_created_at_epoch_ms === null &&
+			(row.registered_workspace_id === null || row.registered_workspace_id === workspaceId);
+		const isSameTaskCard =
+			row.registered_workspace_id === workspaceId &&
+			row.registered_task_incarnation_created_at_epoch_ms === identity.taskIncarnationCreatedAtEpochMs;
+		if (!isUnusedAllocationForThisWorkspace && !isSameTaskCard) {
+			throw new Error(
+				`${TASK_ID_ALREADY_REGISTERED_ERROR_CODE}: task id ${identity.taskId} is already registered (${row.task_id_registration_source}${row.registered_workspace_id ? ` in workspace ${row.registered_workspace_id}` : ""})`,
+			);
+		}
+		bindRegisteredTaskIdToTaskCardStatement.run(
+			TASK_ID_REGISTRATION_SOURCE_TASK_CARD_OBSERVED_ON_BOARD,
+			workspaceId,
+			identity.taskIncarnationCreatedAtEpochMs,
+			now,
+			identity.taskId,
+		);
+	}
+}
 
 const insertEventStatement = database.prepare(`INSERT INTO inter_work_unit_relation_ledger_events(
  event_id, event_commit_status, global_committed_event_sequence, pending_board_file_write_batch_id, event_family, event_kind,
@@ -202,7 +294,14 @@ const readWorkspaceTaskMutationCaptureState = ({ workspaceId, persistedBoardFile
 };
 
 const resolvePendingBatchesAndRecordDetectedEvents = database.transaction(
-	({ workspaceId, pendingBatchResolutions, detectedEventDrafts, retainedFieldContents, currentSnapshot }) => {
+	({
+		workspaceId,
+		pendingBatchResolutions,
+		detectedEventDrafts,
+		retainedFieldContents,
+		currentSnapshot,
+		observedTaskCardIdentities,
+	}) => {
 		const now = Date.now();
 		// 先按创建顺序结算悬挂批次（它们描述的变更早于本次检测到的漏斗外变更），再追加检测事件。
 		for (const resolution of pendingBatchResolutions) {
@@ -219,6 +318,7 @@ const resolvePendingBatchesAndRecordDetectedEvents = database.transaction(
 		}
 		insertRetainedFieldContents(retainedFieldContents);
 		const committedEvents = detectedEventDrafts.map((eventDraft) => insertEventDraft(eventDraft, "committed", null));
+		registerTaskCardsObservedOnBoard(workspaceId, observedTaskCardIdentities);
 		writeSnapshot(workspaceId, currentSnapshot);
 		return { committedEvents };
 	},
@@ -233,7 +333,9 @@ const recordPendingTaskMutationEventBatch = database.transaction(
 		nextWorkspaceBoardSnapshot,
 		eventDrafts,
 		retainedFieldContents,
+		createdTaskCardIdentities,
 	}) => {
+		claimRegisteredTaskIdsForTaskCardsCreatedWithinFunnel(workspaceId, createdTaskCardIdentities);
 		insertPendingBatchStatement.run(
 			pendingBatchId,
 			workspaceId,
@@ -292,6 +394,49 @@ function listCommittedEvents({ afterGlobalCommittedEventSequence, limit, subject
 		}));
 }
 
+// 从候选里挑第一个未被占用的 id 占位（候选由 TS 侧生成，id 形状的唯一声明点仍是 src/core/task-id.ts）。
+const allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry = database.transaction(
+	({ candidateTaskIds, requestingWorkspaceId }) => {
+		const now = Date.now();
+		for (const candidateTaskId of candidateTaskIds) {
+			const insertion = insertRegisteredTaskIdIfAbsentStatement.run(
+				candidateTaskId,
+				TASK_ID_REGISTRATION_SOURCE_ALLOCATED_FOR_PENDING_CARD_CREATION,
+				requestingWorkspaceId ?? null,
+				null,
+				now,
+				now,
+			);
+			if (insertion.changes === 1) return { allocatedTaskId: candidateTaskId };
+		}
+		return { allocatedTaskId: null };
+	},
+);
+
+// 激活时把本机已有痕迹里出现过的 id 一次性占住（只占 id，不主张身份内容）；只有确实新增了占位时才写族 3 事件。
+const seedTaskIdReservationsFromExistingLocalTraces = database.transaction(({ seededTaskIdEntries, seedingEventDraft }) => {
+	const now = Date.now();
+	const newlyReservedTaskIdEntries = [];
+	for (const entry of seededTaskIdEntries) {
+		const insertion = insertRegisteredTaskIdIfAbsentStatement.run(
+			entry.taskId,
+			TASK_ID_REGISTRATION_SOURCE_SEEDED_FROM_EXISTING_LOCAL_TRACE,
+			null,
+			null,
+			now,
+			now,
+		);
+		if (insertion.changes === 1) newlyReservedTaskIdEntries.push(entry);
+	}
+	if (newlyReservedTaskIdEntries.length === 0) return { newlyReservedTaskIdCount: 0 };
+	insertEventDraft(
+		{ ...seedingEventDraft, eventPayload: { ...seedingEventDraft.eventPayload, newlyReservedTaskIdEntries } },
+		"committed",
+		null,
+	);
+	return { newlyReservedTaskIdCount: newlyReservedTaskIdEntries.length };
+});
+
 function readRetainedFieldContents({ fieldValueSha256s }) {
 	return fieldValueSha256s
 		.map((sha256) => readContentStatement.get(sha256))
@@ -305,6 +450,9 @@ const commands = {
 	recordPendingTaskMutationEventBatch: (input) => recordPendingTaskMutationEventBatch.immediate(input),
 	commitPendingTaskMutationEventBatch: (input) => commitPendingTaskMutationEventBatch.immediate(input),
 	appendCommittedEvents: (input) => appendCommittedEvents.immediate(input),
+	allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry: (input) =>
+		allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry.immediate(input),
+	seedTaskIdReservationsFromExistingLocalTraces: (input) => seedTaskIdReservationsFromExistingLocalTraces.immediate(input),
 	listCommittedEvents,
 	readRetainedFieldContents,
 	close: () => {

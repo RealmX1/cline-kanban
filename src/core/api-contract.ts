@@ -3,6 +3,7 @@ import { z } from "zod";
 // bundle-safe：session-activity 是零 Node 依赖的纯函数模块，其对 api-contract 仅 type-only import
 // （编译期擦除），故二者无运行时循环；本处取值 import 不会把任何 Node 依赖拖进浏览器 bundle。
 import { isKanbanCursorAgentModelId } from "./cursor-agent-models.js";
+import { webUiBoardMutationInitiatorAnnotationForTaskMutationEventCaptureSchema } from "./kanban-web-ui-page-load-request-origin-nonce.js";
 import { projectLegacyState } from "./session-activity.js";
 import { resolveTaskTitle } from "./task-title.js";
 
@@ -414,17 +415,10 @@ export const runtimeBoardColumnSchema = z.object({
 });
 export type RuntimeBoardColumn = z.infer<typeof runtimeBoardColumnSchema>;
 
-export const runtimeBoardDependencySchema = z.object({
-	id: z.string(),
-	fromTaskId: z.string(),
-	toTaskId: z.string(),
-	createdAt: z.number(),
-});
-export type RuntimeBoardDependency = z.infer<typeof runtimeBoardDependencySchema>;
-
+// 旧版 board.json 带的 `dependencies` 键（已退役的任务连线 / 完成后自动启动机制）：本 schema 非 strict，
+// 读入时被 zod 静默剥离、不抛错，下次写盘即消失。
 export const runtimeBoardDataSchema = z.object({
 	columns: z.array(runtimeBoardColumnSchema),
-	dependencies: z.array(runtimeBoardDependencySchema).default([]),
 });
 export type RuntimeBoardData = z.infer<typeof runtimeBoardDataSchema>;
 
@@ -971,6 +965,10 @@ export const runtimeWorkspaceStateSaveRequestSchema = z.object({
 	board: runtimeBoardDataSchema,
 	sessions: z.record(z.string(), runtimeTaskSessionSummarySchema),
 	expectedRevision: z.number().int().nonnegative().optional(),
+	// dd2db Y-EVENT-8：本次整板保存里每张卡每个变更的发起方（用户手势 / 浏览器端自动流转）。只进关系账本，不落 board。
+	boardMutationInitiatorAnnotationsForTaskMutationEventCapture: z
+		.array(webUiBoardMutationInitiatorAnnotationForTaskMutationEventCaptureSchema)
+		.optional(),
 });
 export type RuntimeWorkspaceStateSaveRequest = z.infer<typeof runtimeWorkspaceStateSaveRequestSchema>;
 
@@ -1166,8 +1164,6 @@ export const runtimeKanbanCliTaskBoardMutationResponseSchema = z.discriminatedUn
 		kanbanCliTaskBoardMutationKind: z.literal("move_task_card_to_trash_column"),
 		// true = 卡片本来就在 trash 列，这次没有写盘（对应 trashTaskById 的 alreadyInTrash）。
 		taskCardWasAlreadyInTrashColumn: z.boolean(),
-		// 这次移入 trash 后依赖全部满足、可以自动开跑的 linked backlog 卡（trashTaskAndGetReadyLinkedTaskIds 的 readyTaskIds）。
-		linkedBacklogTaskIdsReadyToStartAfterTrash: z.array(z.string()),
 		movedTaskCardAfterMutation: runtimeBoardCardSchema,
 		movedTaskCardBoardColumnIdBeforeMutation: runtimeBoardColumnIdSchema,
 		movedTaskCardSessionSummaryPersistedOnDisk: runtimeTaskSessionSummarySchema.nullable(),
@@ -1962,7 +1958,6 @@ export type RuntimeWorktreeEnsureResponse = z.infer<typeof runtimeWorktreeEnsure
 export const runtimeWorktreeDeleteRequestSchema = z.object({
 	taskId: z.string(),
 	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
-	removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: z.boolean().optional(),
 });
 export type RuntimeWorktreeDeleteRequest = z.infer<typeof runtimeWorktreeDeleteRequestSchema>;
 
@@ -4228,6 +4223,27 @@ export const runtimeConfirmVerificationCompleteRequestSchema = z.object({
 	acks: z.array(runtimePostDeployVerificationAcknowledgementSchema),
 });
 export type RuntimeConfirmVerificationCompleteRequest = z.infer<typeof runtimeConfirmVerificationCompleteRequestSchema>;
+
+// CLI `kanban deployment` 完成动词在 CLI 进程里做完核对与移列后，由 runtime 写 verifiedAt（dd2db Y-EVENT-14：
+// PDV 完成走 runtime procedure，「PDV 通过」事件只能由 runtime 记账）。forced 与确认项随请求带上，原样进事件。
+export const runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema = z.object({
+	deploymentId: z.string(),
+	taskId: z.string(),
+	forcedCompletionWithoutAllVerificationsPassed: z.boolean(),
+	confirmedAcknowledgements: z.array(runtimePostDeployVerificationAcknowledgementSchema),
+});
+export type RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest = z.infer<
+	typeof runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema
+>;
+
+export const runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema = z.object({
+	ok: z.boolean(),
+	task: runtimePostDeployVerificationTaskSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponse = z.infer<
+	typeof runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema
+>;
 
 export const runtimeConfirmVerificationCompleteResponseSchema = z.object({
 	ok: z.boolean(),

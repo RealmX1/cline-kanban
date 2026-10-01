@@ -1,6 +1,6 @@
 import { act, useEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useTaskEditor } from "@/hooks/use-task-editor";
 import type { RuntimeAgentId, RuntimeAgentSessionTransport } from "@/runtime/types";
@@ -18,6 +18,26 @@ import type { BoardCard, BoardData } from "@/types";
  * 与那份通用 harness「一把梭渲染再断言」的关注点不同。
  */
 
+// 建卡 id 只由 runtime 分配（dd2db Y-EVENT-12）：测试里把预分配池换成确定性的递增 id，不发真实分配请求。
+const runtimeAllocatedTaskIdPrefetchPoolStandIn = vi.hoisted(() => {
+	let nextRuntimeAllocatedTaskIdStandInSequence = 0;
+	return {
+		ensureRuntimeAllocatedTaskIdPrefetchPoolFilled: () => {},
+		takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards: (_workspaceId: string, count: number) => ({
+			status: "taken" as const,
+			runtimeAllocatedTaskIds: Array.from({ length: count }, () => {
+				nextRuntimeAllocatedTaskIdStandInSequence += 1;
+				return `r${String(nextRuntimeAllocatedTaskIdStandInSequence).padStart(4, "0")}`;
+			}),
+		}),
+	};
+});
+
+vi.mock(
+	"@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards",
+	() => runtimeAllocatedTaskIdPrefetchPoolStandIn,
+);
+
 const CREATE_TASK_BRANCH_OPTIONS = [{ value: "main", label: "main" }];
 const EDIT_TASK_BRANCH_OPTIONS = [{ value: "main", label: "main" }];
 
@@ -29,7 +49,6 @@ function createEmptyBoard(): BoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 

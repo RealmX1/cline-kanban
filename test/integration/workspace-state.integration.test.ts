@@ -50,7 +50,6 @@ function createBoard(title: string): RuntimeBoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -419,6 +418,36 @@ describe.sequential("workspace-state integration", () => {
 
 			await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("board.json");
 			await expect(loadWorkspaceState(workspacePath)).rejects.toThrow(/id|baseRef/);
+		});
+	});
+
+	// dd2db 1a：任务连线 / 完成后自动启动机制已整体退役。旧盘 board.json 仍可能带 `dependencies` 键，
+	// 读入时必须被静默剥离而不是让整块看板读失败。
+	it("reads a legacy board.json that still carries the retired dependencies key", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-legacy-board-with-retired-dependencies"]).repositoryPath;
+
+			const context = await loadWorkspaceContext(workspacePath);
+			mkdirSync(context.statePath, { recursive: true });
+			const legacyBoard = createBoard("Legacy task");
+			writeFileSync(
+				join(context.statePath, "board.json"),
+				JSON.stringify(
+					{
+						...legacyBoard,
+						dependencies: [{ id: "dep01", fromTaskId: "task-1", toTaskId: "task-2", createdAt: Date.now() }],
+					},
+					null,
+					2,
+				),
+				"utf8",
+			);
+
+			const state = await loadWorkspaceState(workspacePath);
+			expect(state.board).not.toHaveProperty("dependencies");
+			expect(state.board.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id)).toEqual([
+				"task-1",
+			]);
 		});
 	});
 

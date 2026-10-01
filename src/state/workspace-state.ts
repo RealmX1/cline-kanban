@@ -20,7 +20,7 @@ import {
 } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
 import { applySessionFacets, isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
-import { getTaskColumnId, moveTaskToColumn, updateTaskDependencies } from "../core/task-board-mutations";
+import { getTaskColumnId, moveTaskToColumn } from "../core/task-board-mutations";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
 import { getRuntimeHomePath } from "./runtime-home-path";
@@ -164,7 +164,6 @@ function createEmptyBoard(): RuntimeBoardData {
 			title: column.title,
 			cards: [],
 		})),
-		dependencies: [],
 	};
 }
 
@@ -420,10 +419,9 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 async function readWorkspaceBoard(workspaceId: string): Promise<RuntimeBoardData> {
 	const boardPath = getWorkspaceBoardPath(workspaceId);
 	const rawBoard = await readJsonFile(boardPath);
-	return updateTaskDependencies(
-		reconcileBoardColumns(
-			parsePersistedStateFile(boardPath, BOARD_FILENAME, rawBoard, runtimeBoardDataSchema, createEmptyBoard()),
-		),
+	// 旧盘里已退役的 `dependencies` 键由 runtimeBoardDataSchema（非 strict）在解析时静默剥离。
+	return reconcileBoardColumns(
+		parsePersistedStateFile(boardPath, BOARD_FILENAME, rawBoard, runtimeBoardDataSchema, createEmptyBoard()),
 	);
 }
 
@@ -1031,11 +1029,9 @@ export async function mutateWorkspaceState<T>(
 	});
 }
 
-async function readWorkspaceBoardFileSha256(workspaceId: string): Promise<string | null> {
+async function readWorkspaceBoardFileRawText(workspaceId: string): Promise<string | null> {
 	try {
-		return createHash("sha256")
-			.update(await readFile(getWorkspaceBoardPath(workspaceId), "utf8"), "utf8")
-			.digest("hex");
+		return await readFile(getWorkspaceBoardPath(workspaceId), "utf8");
 	} catch (error) {
 		if (isNodeErrorWithCode(error, "ENOENT")) {
 			return null;
@@ -1056,12 +1052,17 @@ async function reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock
 	if (!capture) {
 		return;
 	}
+	const persistedBoardFileRawText = await readWorkspaceBoardFileRawText(context.workspaceId);
 	await capture.reconcileLedgerWithPersistedBoardWithinBoardLock({
 		workspaceId: context.workspaceId,
 		workspaceRepositoryPath: context.repoPath,
 		persistedBoard,
 		persistedSessions,
-		persistedBoardFileSha256: await readWorkspaceBoardFileSha256(context.workspaceId),
+		persistedBoardFileSha256:
+			persistedBoardFileRawText === null
+				? null
+				: createHash("sha256").update(persistedBoardFileRawText, "utf8").digest("hex"),
+		persistedBoardFileRawText,
 		persistedBoardRevision,
 	});
 }

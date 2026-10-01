@@ -8,6 +8,8 @@ import type {
 	KanbanActor,
 	TaskMutationOccurrenceCaptureMode,
 } from "../core/inter-work-unit-relation-ledger-event-contract";
+import { resolveSessionFacets } from "../core/session-activity";
+import { createShortTaskId } from "../core/task-id";
 import type {
 	TaskMutationIntentWithResolvedActor,
 	WorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
@@ -15,8 +17,10 @@ import type {
 import type {
 	InterWorkUnitRelationLedgerDatabaseWorkerClient,
 	PendingBoardFileWriteTaskMutationEventBatchResolution,
+	TaskCardIdentityForGlobalTaskIdentityRegistry,
 } from "./inter-work-unit-relation-ledger-database-worker-client";
 import { logInterWorkUnitRelationLedgerDiagnosticWarning } from "./inter-work-unit-relation-ledger-diagnostics-logger";
+import { resolveKanbanActorForBoardDerivedOccurrenceUsingWebUiBoardMutationInitiatorAnnotations } from "./web-ui-board-mutation-initiator-annotation-pairing-with-board-diff-occurrences";
 import {
 	type BoardDerivedTaskMutationOccurrence,
 	buildWorkspaceBoardSnapshotWithRetainedFieldContents,
@@ -27,6 +31,59 @@ import {
 
 const KANBAN_RUNTIME_CODE_VERSION = typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
 const TASK_MUTATION_CAPTURE_SYSTEM_COMPONENT_NAME = "inter_work_unit_relation_ledger_task_mutation_capture";
+// 5 位十六进制 id 空间约 105 万；登记簿千级时一批 16 个候选全撞的概率可以忽略，4 批是保险。
+const TASK_ID_ALLOCATION_CANDIDATES_PER_BATCH = 16;
+const TASK_ID_ALLOCATION_MAXIMUM_CANDIDATE_BATCHES = 4;
+
+function collectTaskCardIdentitiesOfCreatedTaskCards(
+	occurrences: BoardDerivedTaskMutationOccurrence[],
+): TaskCardIdentityForGlobalTaskIdentityRegistry[] {
+	return occurrences.flatMap((occurrence) =>
+		occurrence.eventKind === "task_card_created_on_board" && occurrence.taskIncarnationCreatedAtEpochMs !== null
+			? [{ taskId: occurrence.taskId, taskIncarnationCreatedAtEpochMs: occurrence.taskIncarnationCreatedAtEpochMs }]
+			: [],
+	);
+}
+
+// J2（Y-BACKFILL-6 第 1 步）：旧 link 机制在 1a 退役，schema 读盘时静默剥掉 `dependencies`。激活基线那一刻
+// 从 board.json 原文里把残留的每条边读出来，记成族 3 事实；阶段 2 再投影成泛相关参照，阶段 3 一键升级为门。
+// 只在基线时读：基线之后 runtime 的第一次写盘就会把这个键从盘上去掉。
+function readLegacyBoardDependenciesRemainingInPersistedBoardFileRawText(
+	persistedBoardFileRawText: string | null,
+): Array<Record<string, unknown>> {
+	if (persistedBoardFileRawText === null) {
+		return [];
+	}
+	try {
+		const rawBoard = JSON.parse(persistedBoardFileRawText) as { dependencies?: unknown };
+		return Array.isArray(rawBoard.dependencies)
+			? rawBoard.dependencies.filter(
+					(dependency): dependency is Record<string, unknown> =>
+						typeof dependency === "object" && dependency !== null,
+				)
+			: [];
+	} catch {
+		return [];
+	}
+}
+
+// 卡片主会话（会话 id = taskId）在激活时刻最后一次落盘的 summary。facet 经 resolveSessionFacets 读，legacy state 只作附带记录。
+function describeMainConversationSessionLastPersistedSummaryAtBaseline(
+	mainConversationSessionSummary: RuntimeTaskSessionSummary | undefined,
+): Record<string, unknown> | null {
+	if (!mainConversationSessionSummary) {
+		return null;
+	}
+	const facets = resolveSessionFacets(mainConversationSessionSummary);
+	return {
+		legacyProjectedSessionState: mainConversationSessionSummary.state,
+		liveness: facets.liveness,
+		turnOwner: facets.turnOwner,
+		userTurnKind: facets.userTurnKind,
+		agentId: mainConversationSessionSummary.agentId ?? null,
+		summaryUpdatedAt: mainConversationSessionSummary.updatedAt ?? null,
+	};
+}
 
 export function createCapturingKanbanRuntimeInstanceIdentity(): CapturingKanbanRuntimeInstanceIdentity {
 	return {
@@ -38,7 +95,6 @@ export function createCapturingKanbanRuntimeInstanceIdentity(): CapturingKanbanR
 
 const EMPTY_WORKSPACE_BOARD_SNAPSHOT: WorkspaceBoardSnapshotForTaskMutationDiff = {
 	taskCardSnapshotEntriesByTaskId: {},
-	legacyBoardDependencySnapshotEntries: [],
 };
 
 // 漏斗外检出的变更：不知道是谁、也不知道确切何时（occurredAt 取检出时刻，payload 里明示）。
@@ -102,10 +158,17 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 		boardRevisionAfterMutation: number;
 		occurredAt: number;
 	}): InterWorkUnitRelationLedgerEventDraft[] {
-		const actor =
+		const requestLevelResolvedKanbanActor =
 			options.intent?.resolvedKanbanActor ?? ACTOR_FOR_BOARD_CHANGE_DETECTED_OUTSIDE_RUNTIME_PERSISTENCE_FUNNEL;
-		return options.occurrences.map((occurrence, occurrenceIndex) =>
-			buildEventDraft({
+		return options.occurrences.map((occurrence, occurrenceIndex) => {
+			const { actor, pairedWebUiBoardMutationInitiator } =
+				resolveKanbanActorForBoardDerivedOccurrenceUsingWebUiBoardMutationInitiatorAnnotations({
+					requestLevelResolvedKanbanActor,
+					occurrence,
+					webUiBoardMutationInitiatorAnnotations:
+						options.intent?.webUiBoardMutationInitiatorAnnotationsForTaskMutationEventCapture ?? [],
+				});
+			return buildEventDraft({
 				eventFamily: "task_mutation_event",
 				eventKind: occurrence.eventKind,
 				occurredAt: options.occurredAt,
@@ -132,10 +195,11 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 					occurredAtIsDetectionTimeNotActualOccurrenceTime:
 						options.taskMutationOccurrenceCaptureMode ===
 						"detected_by_board_diff_outside_runtime_persistence_funnel",
+					pairedWebUiBoardMutationInitiator,
 					...occurrence.eventPayloadSpecificToEventKind,
 				},
-			}),
-		);
+			});
+		});
 	}
 
 	// 族 2：原生会话身份 sidecar 的读取 / 变化。会话身份键 = {宿主 agentId, 原生 id}（Y-EVENT-11）。
@@ -315,11 +379,40 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 										},
 										boardColumnId: entry.boardColumnId,
 										fieldValueSha256ByFieldName: entry.fieldValueSha256ByFieldName,
+										// Y-BACKFILL-3：4a 据此把「激活时在 Done 且会话被中断」的存量卡推导为 open。
+										mainConversationSessionLastPersistedSummaryAtBaseline:
+											describeMainConversationSessionLastPersistedSummaryAtBaseline(
+												reconcileInput.persistedSessions[entry.taskId],
+											),
 									}),
 								),
-								baselineLegacyBoardDependencies: current.snapshot.legacyBoardDependencySnapshotEntries,
 							},
 						}),
+						...readLegacyBoardDependenciesRemainingInPersistedBoardFileRawText(
+							reconcileInput.persistedBoardFileRawText,
+						).map((legacyBoardDependency, legacyBoardDependencyIndex) =>
+							buildEventDraft({
+								eventFamily: "fact_observed_by_kanban_runtime_event",
+								eventKind: "legacy_board_dependency_observed_at_retirement",
+								occurredAt,
+								actor: {
+									kanbanActorKind: "kanban_runtime_system_component",
+									kanbanRuntimeSystemComponentName: TASK_MUTATION_CAPTURE_SYSTEM_COMPONENT_NAME,
+								},
+								intent: null,
+								idempotencyKey: `legacy-board-dependency-retirement:${reconcileInput.workspaceId}:${
+									typeof legacyBoardDependency.id === "string"
+										? legacyBoardDependency.id
+										: `index-${legacyBoardDependencyIndex}`
+								}`,
+								subjectWorkspaceId: reconcileInput.workspaceId,
+								subjectTaskId: null,
+								eventPayload: {
+									observedFactKind: "legacy_board_dependency_observed_at_retirement",
+									legacyBoardDependencyAsPersistedBeforeRetirement: legacyBoardDependency,
+								},
+							}),
+						),
 						...buildSidecarSeedingEventDraftsAtLiveCaptureActivation({
 							workspaceId: reconcileInput.workspaceId,
 							persistedBoard: reconcileInput.persistedBoard,
@@ -329,6 +422,13 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 					],
 					retainedFieldContents: [...current.retainedFieldContentsBySha256.values()],
 					currentSnapshot,
+					// 基线里的每张卡（含 trash 列）都占住自己的 id（Y-EVENT-12 的 id 保留播种）。
+					observedTaskCardIdentities: Object.values(current.snapshot.taskCardSnapshotEntriesByTaskId).map(
+						(entry) => ({
+							taskId: entry.taskId,
+							taskIncarnationCreatedAtEpochMs: entry.taskIncarnationCreatedAtEpochMs,
+						}),
+					),
 				});
 				return;
 			}
@@ -365,6 +465,7 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 					current.retainedFieldContentsBySha256,
 				),
 				currentSnapshot,
+				observedTaskCardIdentities: collectTaskCardIdentitiesOfCreatedTaskCards(detectedOccurrences),
 			});
 		},
 
@@ -412,6 +513,7 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 					occurrences,
 					retainedFieldContentsBySha256,
 				),
+				createdTaskCardIdentities: collectTaskCardIdentitiesOfCreatedTaskCards(occurrences),
 			});
 			return { pendingBatchId };
 		},
@@ -426,6 +528,22 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 					`commit of pending task mutation event batch ${commitInput.pendingBatchId} failed; it will be resolved on the next persistence funnel pass: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
+		},
+
+		async allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry(allocationInput) {
+			for (let attempt = 0; attempt < TASK_ID_ALLOCATION_MAXIMUM_CANDIDATE_BATCHES; attempt += 1) {
+				const candidateTaskIds = Array.from({ length: TASK_ID_ALLOCATION_CANDIDATES_PER_BATCH }, () =>
+					createShortTaskId(randomUUID),
+				);
+				const allocatedTaskId = await ledgerClient.allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry({
+					candidateTaskIds,
+					requestingWorkspaceId: allocationInput.requestingWorkspaceId,
+				});
+				if (allocatedTaskId !== null) {
+					return allocatedTaskId;
+				}
+			}
+			throw new Error("Could not allocate a task id that is unique against the global task identity registry.");
 		},
 
 		recordAgentConversationSessionNativeIdentityPersistedWithoutBlocking(recordInput) {

@@ -9,24 +9,19 @@ import type {
 	RuntimeKanbanCliTaskBoardMutationResponse,
 } from "../core/api-contract";
 import { buildRuntimeUpdateTaskInputFromKanbanCliTaskCardFieldUpdateRawInput } from "../core/kanban-cli-task-card-field-input-resolution";
-import {
-	addTaskToColumn,
-	deleteTasksFromBoard,
-	moveTaskToColumn,
-	trashTaskAndGetReadyLinkedTaskIds,
-	updateTask,
-} from "../core/task-board-mutations";
+import { addTaskToColumn, deleteTasksFromBoard, moveTaskToColumn, updateTask } from "../core/task-board-mutations";
 import type {
 	KanbanActorResolutionLookups,
 	KanbanRequestOriginActorEvidence,
 } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
+import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import { mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeTrpcWorkspaceScope } from "./app-router";
 
 // `workspace.applyKanbanCliTaskBoardMutation` 的 runtime 侧实现（dd2db 1a.2b）。
 // CLI 的 board 写动词全部经这里进入持久化漏斗：先按请求头上的 CLI 行动者声明解析行动者，再在 board 锁内
-// 对**最新** board 做纯变更。CLI 侧的前后副作用（停会话、删 worktree、自动开跑 linked 任务、清草稿与
+// 对**最新** board 做纯变更。CLI 侧的前后副作用（停会话、删 worktree、清草稿与
 // checkpoint ref）仍由 CLI 按原顺序编排，这里只负责 board 本身，写成后像其他 runtime 写入一样广播。
 
 export interface KanbanCliTaskBoardMutationApiDependencies {
@@ -119,6 +114,11 @@ export async function applyKanbanCliTaskBoardMutation(
 	switch (request.kanbanCliTaskBoardMutationKind) {
 		case "create_backlog_task_card": {
 			const fieldValues = request.backlogTaskCardFieldValuesResolvedByKanbanCli;
+			// Y-EVENT-12：id 由 runtime 对全局 task 身份登记簿分配；漏斗在锁内再校验一次。
+			const allocatedTaskIdForNewBacklogTaskCard =
+				await allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable({
+					requestingWorkspaceId: workspaceScope.workspaceId,
+				});
 			const mutation = await mutateWorkspaceState(
 				workspaceScope.workspacePath,
 				taskMutationIntentWithResolvedActor,
@@ -143,6 +143,9 @@ export async function applyKanbanCliTaskBoardMutation(
 								parentSessionId: fieldValues.parentSessionId,
 								worktreeMode: fieldValues.worktreeMode,
 								prepFilePath: fieldValues.prepFilePath,
+								...(allocatedTaskIdForNewBacklogTaskCard !== null
+									? { taskId: allocatedTaskIdForNewBacklogTaskCard }
+									: {}),
 							},
 							() => globalThis.crypto.randomUUID(),
 						),
@@ -228,7 +231,6 @@ export async function applyKanbanCliTaskBoardMutation(
 						board: state.board,
 						value: {
 							taskCardWasAlreadyInTrashColumn: true,
-							linkedBacklogTaskIdsReadyToStartAfterTrash: [],
 							movedTaskCardAfterMutation: found.taskCard,
 							movedTaskCardBoardColumnIdBeforeMutation: found.boardColumnId,
 							movedTaskCardSessionSummaryPersistedOnDisk,
@@ -236,7 +238,7 @@ export async function applyKanbanCliTaskBoardMutation(
 						save: false,
 					};
 				}
-				const trashed = trashTaskAndGetReadyLinkedTaskIds(state.board, request.movedTaskId);
+				const trashed = moveTaskToColumn(state.board, request.movedTaskId, "trash");
 				if (!trashed.moved || !trashed.task) {
 					throw new TRPCError({
 						code: "INTERNAL_SERVER_ERROR",
@@ -247,7 +249,6 @@ export async function applyKanbanCliTaskBoardMutation(
 					board: trashed.board,
 					value: {
 						taskCardWasAlreadyInTrashColumn: false,
-						linkedBacklogTaskIdsReadyToStartAfterTrash: trashed.readyTaskIds,
 						movedTaskCardAfterMutation: trashed.task,
 						movedTaskCardBoardColumnIdBeforeMutation: found.boardColumnId,
 						movedTaskCardSessionSummaryPersistedOnDisk,

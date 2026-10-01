@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { RuntimeBoardCard, RuntimeBoardData } from "../../src/core/api-contract";
+import type { RuntimeBoardCard, RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture } from "../../src/inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture } from "../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
@@ -38,22 +38,20 @@ function createBoardWithBacklogCards(backlogCards: RuntimeBoardCard[]): RuntimeB
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
 // 账本存储根由 vitest setup 按测试文件隔离；workspace 索引随 HOME 走，这里把 HOME 指到 fixture，绝不碰真实 ~/.cline。
 async function withIsolatedHomeContainingOneIndexedWorkspaceWrittenBeforeActivation(
 	run: (context: { workspacePath: string; workspaceId: string }) => Promise<void>,
+	// 账本存储根按测试文件隔离而不是按用例，workspaceId 又由仓库目录名派生：每个用例用自己的目录名，避免共用基线。
+	projectDirectoryName = "project-indexed-before-activation",
 ): Promise<void> {
 	const gitFixture: IsolatedGitTestWorkspaceFixture = createIsolatedGitTestWorkspaceFixture();
 	const previousHome = process.env.HOME;
 	process.env.HOME = gitFixture.isolatedHomeDirectoryPath;
 	try {
-		const repositoryPath = join(
-			gitFixture.ownedIntegrationProjectsDirectoryPath,
-			"project-indexed-before-activation",
-		);
+		const repositoryPath = join(gitFixture.ownedIntegrationProjectsDirectoryPath, projectDirectoryName);
 		mkdirSync(repositoryPath, { recursive: true });
 		gitFixture.createNonBareRepositoryAtOwnedPath({ repositoryPath, initialBranchName: "main" });
 		// 激活前（未注册捕获）写入的存量 board：模拟部署前就已存在的 workspace。
@@ -136,6 +134,105 @@ describe("inter-work-unit relation ledger eager board state baseline at runtime 
 				}
 			},
 		);
+	});
+
+	it("records each card's main session facets in the baseline and reserves task ids seen in local traces", async () => {
+		await withIsolatedHomeContainingOneIndexedWorkspaceWrittenBeforeActivation(
+			async ({ workspacePath, workspaceId }) => {
+				await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+					board: createBoardWithBacklogCards([createBacklogCard("t0001", "requirement written before deploy")]),
+					sessions: {
+						t0001: {
+							taskId: "t0001",
+							state: "interrupted",
+							agentId: "claude",
+							workspacePath: null,
+							pid: null,
+							startedAt: null,
+							updatedAt: 2_000,
+							lastOutputAt: null,
+							reviewReason: "interrupted",
+							exitCode: null,
+							lastHookAt: null,
+							latestHookActivity: null,
+						} as RuntimeTaskSessionSummary,
+					},
+				});
+				mkdirSync(join(process.env.HOME as string, ".cline", "worktrees", "d0004"), { recursive: true });
+
+				const activatedLiveCapture = activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
+				try {
+					await activatedLiveCapture.eagerBoardStateBaselineEstablishmentForEveryIndexedWorkspaceCompletion;
+					const events = await activatedLiveCapture.ledgerClient.listCommittedEvents({});
+					const baselineTaskCards = events.find(
+						(event) =>
+							event.subjectWorkspaceId === workspaceId &&
+							event.eventKind === "board_state_baseline_observed_at_live_task_mutation_capture_activation",
+					)?.eventPayload.baselineTaskCards as Array<Record<string, unknown>>;
+					expect(baselineTaskCards[0]?.mainConversationSessionLastPersistedSummaryAtBaseline).toMatchObject({
+						legacyProjectedSessionState: "interrupted",
+						liveness: expect.any(String),
+						turnOwner: expect.any(String),
+						userTurnKind: expect.any(String),
+					});
+					// 同一测试文件的前一个用例可能已占住 t0001；本用例只断言新出现的痕迹 id 被占住。
+					const newlyReservedTaskIds = events
+						.filter((event) => event.eventKind === "task_id_reservation_seeded_from_existing_artifacts")
+						.flatMap((event) =>
+							(event.eventPayload.newlyReservedTaskIdEntries as Array<{ taskId: string }>).map(
+								(entry) => entry.taskId,
+							),
+						);
+					expect(newlyReservedTaskIds).toContain("d0004");
+					expect(newlyReservedTaskIds).toContain("t0001");
+				} finally {
+					await activatedLiveCapture.deactivate();
+				}
+			},
+			"project-with-main-session-summary-before-activation",
+		);
+	});
+
+	it("exports each legacy board dependency left in board.json as a retirement observation at baseline (J2)", async () => {
+		await withIsolatedHomeContainingOneIndexedWorkspaceWrittenBeforeActivation(async ({ workspaceId }) => {
+			const boardFilePath = join(getWorkspaceDirectoryPath(workspaceId), "board.json");
+			const legacyBoardDependency = {
+				id: "7a758c2a",
+				fromTaskId: "t0001",
+				toTaskId: "t0009",
+				createdAt: 1_500,
+			};
+			writeFileSync(
+				boardFilePath,
+				JSON.stringify(
+					{
+						...JSON.parse(readFileSync(boardFilePath, "utf8")),
+						dependencies: [legacyBoardDependency],
+					},
+					null,
+					2,
+				),
+			);
+
+			const activatedLiveCapture = activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
+			try {
+				await activatedLiveCapture.eagerBoardStateBaselineEstablishmentForEveryIndexedWorkspaceCompletion;
+				const retirementObservations = (await activatedLiveCapture.ledgerClient.listCommittedEvents({})).filter(
+					(event) =>
+						event.subjectWorkspaceId === workspaceId &&
+						event.eventKind === "legacy_board_dependency_observed_at_retirement",
+				);
+				expect(retirementObservations).toHaveLength(1);
+				expect(retirementObservations[0]?.idempotencyKey).toBe(
+					`legacy-board-dependency-retirement:${workspaceId}:7a758c2a`,
+				);
+				expect(retirementObservations[0]?.eventPayload.legacyBoardDependencyAsPersistedBeforeRetirement).toEqual(
+					legacyBoardDependency,
+				);
+			} finally {
+				await activatedLiveCapture.deactivate();
+			}
+		}, "project-with-legacy-board-dependency-before-activation");
 	});
 
 	it("deactivating while the eager baseline is still in flight awaits it before closing the ledger worker, with no unhandled rejection", async () => {

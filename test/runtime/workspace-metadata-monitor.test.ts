@@ -92,7 +92,6 @@ function createBoard(): RuntimeBoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Trash", cards: [createBoardCard("task-trash")] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -413,7 +412,6 @@ describe("createWorkspaceMetadataMonitor", () => {
 					),
 				},
 			],
-			dependencies: [],
 		};
 
 		const metadata = await monitor.connectWorkspace({
@@ -511,7 +509,6 @@ describe("createWorkspaceMetadataMonitor", () => {
 					),
 				},
 			],
-			dependencies: [],
 		};
 
 		const metadata = await monitor.connectWorkspace({

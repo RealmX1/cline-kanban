@@ -64,7 +64,6 @@ function createBoard(taskIds: { inProgress?: string[]; review?: string[] }): Run
 			},
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 

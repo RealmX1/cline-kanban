@@ -96,6 +96,8 @@ import type {
 	RuntimeListAgentRaisedPendingUserDecisionsResponse,
 	RuntimeListAgentRaisedUserDecisionHistoryForTaskRequest,
 	RuntimeListAgentRaisedUserDecisionHistoryForTaskResponse,
+	RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest,
+	RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponse,
 	RuntimeNotificationClearRequest,
 	RuntimeNotificationMarkVisitedRequest,
 	RuntimeNotificationMutationResponse,
@@ -276,6 +278,8 @@ import {
 	runtimeListAgentRaisedPendingUserDecisionsResponseSchema,
 	runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema,
 	runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema,
+	runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema,
+	runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema,
 	runtimeNotificationClearRequestSchema,
 	runtimeNotificationMarkVisitedRequestSchema,
 	runtimeNotificationMutationResponseSchema,
@@ -365,6 +369,11 @@ import {
 	runtimeWorktreeEnsureResponseSchema,
 } from "../core/api-contract";
 import {
+	KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_UNKNOWN_REACQUIRE_AND_RETRY_ERROR_MESSAGE,
+	kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema,
+	runtimeTaskIdAllocationForNewWebUiTaskCardResponseSchema,
+} from "../core/kanban-web-ui-page-load-request-origin-nonce";
+import {
 	notificationIntelligenceSettingsResponseSchema,
 	notificationIntelligenceSettingsSchema,
 	saveKanbanModelProviderProfileRequestSchema,
@@ -375,6 +384,7 @@ import {
 	notificationCandidateLifecycleSchema,
 } from "../core/notification-lifecycle-contract";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
+import { issueKanbanWebUiPageLoadRequestOriginNonce } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import {
 	getNotificationIntelligenceSettings,
 	saveKanbanModelProviderProfile,
@@ -388,6 +398,7 @@ import {
 	readArchivedNotificationAudio,
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
+import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 
 export interface RuntimeTrpcWorkspaceScope {
 	workspaceId: string;
@@ -490,6 +501,7 @@ export interface RuntimeTrpcContext {
 		sendTaskChatMessage: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatSendRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeTaskChatSendResponse>;
 		getDeferredRestorationHarnessNotifications: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -728,6 +740,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeConfirmVerificationCompleteRequest,
 		) => Promise<RuntimeConfirmVerificationCompleteResponse>;
+		markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest,
+		) => Promise<RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponse>;
 	};
 	conversationTreeApi: {
 		getConversationSessionTurnProjection: (
@@ -799,7 +815,19 @@ const t = initTRPC.context<RuntimeTrpcContext>().create({
 	},
 });
 
-const workspaceProcedure = t.procedure.use(({ ctx, next }) => {
+// 带了 runtime 不认识的页面加载 nonce 的请求一律拒绝（可重试，Y-EVENT-9）：继续执行就会把一个页面请求记成
+// 裸 tRPC 调用方，而 live 事件写入后不能改写。签发 nonce 的 procedure 本身不过这道闸（它就是重取的入口）。
+const procedureRejectingUnknownWebUiPageLoadRequestOriginNonce = t.procedure.use(({ ctx, next }) => {
+	if (ctx.kanbanRequestOriginActorEvidence.webUiPageLoadRequestOriginNonceVerificationStatus === "unknown") {
+		throw new TRPCError({
+			code: "PRECONDITION_FAILED",
+			message: KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_UNKNOWN_REACQUIRE_AND_RETRY_ERROR_MESSAGE,
+		});
+	}
+	return next();
+});
+
+const workspaceProcedure = procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.use(({ ctx, next }) => {
 	if (!ctx.requestedWorkspaceId) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
@@ -827,48 +855,54 @@ const gitSyncActionInputSchema = z.object({
 
 export const runtimeAppRouter = t.router({
 	notificationIntelligence: t.router({
-		getSettings: t.procedure
+		getSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(notificationIntelligenceSettingsResponseSchema)
 			.query(() => getNotificationIntelligenceSettings()),
-		saveSettings: t.procedure.input(notificationIntelligenceSettingsSchema).mutation(async ({ input }) => {
-			await saveNotificationIntelligenceSettings(input);
-			return { ok: true };
-		}),
-		saveProvider: t.procedure.input(saveKanbanModelProviderProfileRequestSchema).mutation(async ({ input }) => {
-			await saveKanbanModelProviderProfile(input);
-			return { ok: true };
-		}),
-		speechModels: t.procedure.query(() => NOTIFICATION_SPEECH_MODEL_CATALOG),
-		markAllArchivedNotificationsVisited: t.procedure
+		saveSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(notificationIntelligenceSettingsSchema)
+			.mutation(async ({ input }) => {
+				await saveNotificationIntelligenceSettings(input);
+				return { ok: true };
+			}),
+		saveProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(saveKanbanModelProviderProfileRequestSchema)
+			.mutation(async ({ input }) => {
+				await saveKanbanModelProviderProfile(input);
+				return { ok: true };
+			}),
+		speechModels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.query(
+			() => NOTIFICATION_SPEECH_MODEL_CATALOG,
+		),
+		markAllArchivedNotificationsVisited: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(z.object({ includeCompletedTasks: z.boolean() }))
 			.mutation(async ({ input, ctx }) => {
 				const changedCount = await getNotificationLifecycleArchive().markAllVisited(input.includeCompletedTasks);
 				await ctx.runtimeApi.broadcastNotificationArchiveChanged?.();
 				return { changedCount };
 			}),
-		clearAllNotificationPanels: t.procedure.mutation(async ({ ctx }) => {
+		clearAllNotificationPanels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.mutation(async ({ ctx }) => {
 			const changedCount = await getNotificationLifecycleArchive().clearAllPanels();
 			await ctx.runtimeApi.broadcastNotificationArchiveChanged?.();
 			return { changedCount };
 		}),
-		listPanelTaskGroups: t.procedure
+		listPanelTaskGroups: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(notificationArchiveListRequestSchema)
 			.output(notificationArchiveListResponseSchema)
 			.query(({ input }) => getNotificationLifecycleArchive().panelGroups(input)),
-		listArchive: t.procedure
+		listArchive: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(notificationArchiveListRequestSchema)
 			.output(notificationArchiveListResponseSchema)
 			.query(({ input }) => getNotificationLifecycleArchive().list(input)),
-		getLifecycle: t.procedure
+		getLifecycle: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(z.object({ candidateId: z.string() }))
 			.output(notificationCandidateLifecycleSchema.nullable())
 			.query(({ input }) => getNotificationLifecycleArchive().get(input.candidateId)),
-		claimDelivery: t.procedure
+		claimDelivery: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(z.object({ candidateId: z.string(), clientId: z.string().max(100) }))
 			.mutation(async ({ input }) => ({
 				claimed: await getNotificationLifecycleArchive().claimDelivery(input.candidateId, input.clientId),
 			})),
-		recordClientFilter: t.procedure
+		recordClientFilter: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(
 				z.object({
 					candidateId: z.string(),
@@ -891,7 +925,7 @@ export const runtimeAppRouter = t.router({
 				);
 				return { ok: true };
 			}),
-		recordClientObservation: t.procedure
+		recordClientObservation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(
 				z.object({
 					candidateId: z.string(),
@@ -923,42 +957,52 @@ export const runtimeAppRouter = t.router({
 				);
 				return { ok: true };
 			}),
-		synthesizeSpeech: t.procedure
+		synthesizeSpeech: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(z.object({ candidateId: z.string(), clientId: z.string().max(100), retry: z.boolean().optional() }))
 			.mutation(({ input }) => synthesizeNotificationSpeech(input)),
-		retryArchivedSpeech: t.procedure
+		retryArchivedSpeech: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(z.object({ candidateId: z.string() }))
 			.mutation(({ input }) =>
 				synthesizeNotificationSpeech({ candidateId: input.candidateId, preview: true, retry: true }),
 			),
-		previewSpeech: t.procedure.mutation(() => previewNotificationSpeech()),
-		archivedAudio: t.procedure
+		previewSpeech: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.mutation(() =>
+			previewNotificationSpeech(),
+		),
+		archivedAudio: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(z.object({ candidateId: z.string() }))
 			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
 	}),
 	runtime: t.router({
-		getConfig: t.procedure.output(runtimeConfigResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.loadConfig(ctx.workspaceScope);
-		}),
-		saveConfig: t.procedure
+		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
+		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
+			.output(kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema)
+			.mutation(() => ({
+				kanbanWebUiPageLoadIssuedRequestOriginNonce: issueKanbanWebUiPageLoadRequestOriginNonce(),
+			})),
+		getConfig: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeConfigResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.loadConfig(ctx.workspaceScope);
+			}),
+		saveConfig: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeConfigSaveRequestSchema)
 			.output(runtimeConfigResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.saveConfig(ctx.workspaceScope, input);
 			}),
-		saveClineProviderSettings: t.procedure
+		saveClineProviderSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeClineProviderSettingsSaveRequestSchema)
 			.output(runtimeClineProviderSettingsSaveResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.saveClineProviderSettings(ctx.workspaceScope, input);
 			}),
-		addClineProvider: t.procedure
+		addClineProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeClineAddProviderRequestSchema)
 			.output(runtimeClineAddProviderResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.addClineProvider(ctx.workspaceScope, input);
 			}),
-		updateClineProvider: t.procedure
+		updateClineProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeClineUpdateProviderRequestSchema)
 			.output(runtimeClineUpdateProviderResponseSchema)
 			.mutation(async ({ ctx, input }) => {
@@ -966,7 +1010,7 @@ export const runtimeAppRouter = t.router({
 			}),
 		// mutation 而非 query：每次点「起名」都要真发一次外部请求拿一组**新**候选，被查询缓存去重掉
 		// 就实现不了「再按一次再给三个」。
-		suggestTaskNamesFromTaskDescription: t.procedure
+		suggestTaskNamesFromTaskDescription: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeTaskNameSuggestionRequestSchema)
 			.output(runtimeTaskNameSuggestionResponseSchema)
 			.mutation(async ({ ctx, input }) => {
@@ -1077,9 +1121,11 @@ export const runtimeAppRouter = t.router({
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getTaskChatMessages(ctx.workspaceScope, input);
 			}),
-		getClineSlashCommands: t.procedure.output(runtimeSlashCommandsResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineSlashCommands(ctx.workspaceScope);
-		}),
+		getClineSlashCommands: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeSlashCommandsResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getClineSlashCommands(ctx.workspaceScope);
+			}),
 		reloadTaskChatSession: workspaceProcedure
 			.input(runtimeTaskChatReloadRequestSchema)
 			.output(runtimeTaskChatReloadResponseSchema)
@@ -1090,7 +1136,11 @@ export const runtimeAppRouter = t.router({
 			.input(runtimeTaskChatSendRequestSchema)
 			.output(runtimeTaskChatSendResponseSchema)
 			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.sendTaskChatMessage(ctx.workspaceScope, input);
+				return await ctx.runtimeApi.sendTaskChatMessage(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
 			}),
 		getDeferredRestorationHarnessNotifications: workspaceProcedure
 			.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
@@ -1163,78 +1213,94 @@ export const runtimeAppRouter = t.router({
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.resolveTaskAgentUserDecision(ctx.workspaceScope, input);
 			}),
-		getClineProviderCatalog: t.procedure.output(runtimeClineProviderCatalogResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineProviderCatalog(ctx.workspaceScope);
-		}),
-		getClineAccountProfile: t.procedure.output(runtimeClineAccountProfileResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineAccountProfile(ctx.workspaceScope);
-		}),
-		getClineKanbanAccess: t.procedure.output(runtimeClineKanbanAccessResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineKanbanAccess(ctx.workspaceScope);
-		}),
-		getFeaturebaseToken: t.procedure.output(runtimeFeaturebaseTokenResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getFeaturebaseToken(ctx.workspaceScope);
-		}),
-		getClineAccountBalance: t.procedure.output(runtimeClineAccountBalanceResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineAccountBalance(ctx.workspaceScope);
-		}),
-		getClineAccountOrganizations: t.procedure
+		getClineProviderCatalog: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeClineProviderCatalogResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getClineProviderCatalog(ctx.workspaceScope);
+			}),
+		getClineAccountProfile: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeClineAccountProfileResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getClineAccountProfile(ctx.workspaceScope);
+			}),
+		getClineKanbanAccess: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeClineKanbanAccessResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getClineKanbanAccess(ctx.workspaceScope);
+			}),
+		getFeaturebaseToken: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeFeaturebaseTokenResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getFeaturebaseToken(ctx.workspaceScope);
+			}),
+		getClineAccountBalance: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeClineAccountBalanceResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getClineAccountBalance(ctx.workspaceScope);
+			}),
+		getClineAccountOrganizations: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeClineAccountOrganizationsResponseSchema)
 			.query(async ({ ctx }) => {
 				return await ctx.runtimeApi.getClineAccountOrganizations(ctx.workspaceScope);
 			}),
-		switchClineAccount: t.procedure
+		switchClineAccount: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeClineAccountSwitchRequestSchema)
 			.output(runtimeClineAccountSwitchResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.switchClineAccount(ctx.workspaceScope, input);
 			}),
-		getClineProviderModels: t.procedure
+		getClineProviderModels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeClineProviderModelsRequestSchema)
 			.output(runtimeClineProviderModelsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getClineProviderModels(ctx.workspaceScope, input);
 			}),
-		getTerminalAgentModelSelectionOptions: t.procedure
+		getTerminalAgentModelSelectionOptions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeTerminalAgentModelSelectionOptionsRequestSchema)
 			.output(runtimeTerminalAgentModelSelectionOptionsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getTerminalAgentModelSelectionOptions(ctx.workspaceScope, input);
 			}),
-		getAvailableAgentSessions: t.procedure
+		getAvailableAgentSessions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeAvailableAgentSessionsRequestSchema)
 			.output(runtimeAvailableAgentSessionsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getAvailableAgentSessions(ctx.workspaceScope, input);
 			}),
-		getClineMcpAuthStatuses: t.procedure.output(runtimeClineMcpAuthStatusResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineMcpAuthStatuses(ctx.workspaceScope);
-		}),
-		runClineMcpServerOAuth: t.procedure
+		getClineMcpAuthStatuses: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeClineMcpAuthStatusResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getClineMcpAuthStatuses(ctx.workspaceScope);
+			}),
+		runClineMcpServerOAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeClineMcpOAuthRequestSchema)
 			.output(runtimeClineMcpOAuthResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.runClineMcpServerOAuth(ctx.workspaceScope, input);
 			}),
-		getClineMcpSettings: t.procedure.output(runtimeClineMcpSettingsResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineMcpSettings(ctx.workspaceScope);
-		}),
-		saveClineMcpSettings: t.procedure
+		getClineMcpSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeClineMcpSettingsResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getClineMcpSettings(ctx.workspaceScope);
+			}),
+		saveClineMcpSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeClineMcpSettingsSaveRequestSchema)
 			.output(runtimeClineMcpSettingsSaveResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.saveClineMcpSettings(ctx.workspaceScope, input);
 			}),
-		runClineProviderOAuthLogin: t.procedure
+		runClineProviderOAuthLogin: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeClineOauthLoginRequestSchema)
 			.output(runtimeClineOauthLoginResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.runClineProviderOAuthLogin(ctx.workspaceScope, input);
 			}),
-		startClineDeviceAuth: t.procedure.output(runtimeClineDeviceAuthStartResponseSchema).mutation(async ({ ctx }) => {
-			return await ctx.runtimeApi.startClineDeviceAuth(ctx.workspaceScope);
-		}),
-		completeClineDeviceAuth: t.procedure
+		startClineDeviceAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeClineDeviceAuthStartResponseSchema)
+			.mutation(async ({ ctx }) => {
+				return await ctx.runtimeApi.startClineDeviceAuth(ctx.workspaceScope);
+			}),
+		completeClineDeviceAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeClineDeviceAuthCompleteRequestSchema)
 			.output(runtimeClineDeviceAuthCompleteResponseSchema)
 			.mutation(async ({ ctx, input }) => {
@@ -1252,29 +1318,35 @@ export const runtimeAppRouter = t.router({
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.runCommand(ctx.workspaceScope, input);
 			}),
-		resetAllState: t.procedure.output(runtimeDebugResetAllStateResponseSchema).mutation(async ({ ctx }) => {
-			return await ctx.runtimeApi.resetAllState(ctx.workspaceScope);
-		}),
-		openFile: t.procedure
+		resetAllState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeDebugResetAllStateResponseSchema)
+			.mutation(async ({ ctx }) => {
+				return await ctx.runtimeApi.resetAllState(ctx.workspaceScope);
+			}),
+		openFile: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeOpenFileRequestSchema)
 			.output(runtimeOpenFileResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.openFile(input);
 			}),
-		getUpdateStatus: t.procedure.output(runtimeUpdateStatusResponseSchema).query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getUpdateStatus(ctx.workspaceScope);
-		}),
-		runUpdateNow: t.procedure.output(runtimeRunUpdateResponseSchema).mutation(async ({ ctx }) => {
-			return await ctx.runtimeApi.runUpdateNow(ctx.workspaceScope);
-		}),
-		// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。t.procedure 不强制 workspace scope。
-		markTaskNotificationsVisited: t.procedure
+		getUpdateStatus: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeUpdateStatusResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getUpdateStatus(ctx.workspaceScope);
+			}),
+		runUpdateNow: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeRunUpdateResponseSchema)
+			.mutation(async ({ ctx }) => {
+				return await ctx.runtimeApi.runUpdateNow(ctx.workspaceScope);
+			}),
+		// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。procedureRejectingUnknownWebUiPageLoadRequestOriginNonce 不强制 workspace scope。
+		markTaskNotificationsVisited: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeNotificationMarkVisitedRequestSchema)
 			.output(runtimeNotificationMutationResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.markTaskNotificationsVisited(ctx.workspaceScope, input);
 			}),
-		clearNotificationLog: t.procedure
+		clearNotificationLog: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeNotificationClearRequestSchema)
 			.output(runtimeNotificationMutationResponseSchema)
 			.mutation(async ({ ctx, input }) => {
@@ -1282,6 +1354,14 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	workspace: t.router({
+		allocateTaskIdForNewWebUiTaskCard: workspaceProcedure
+			.output(runtimeTaskIdAllocationForNewWebUiTaskCardResponseSchema)
+			.mutation(async ({ ctx }) => ({
+				allocatedTaskIdUniqueAgainstGlobalTaskIdentityRegistry:
+					await allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable({
+						requestingWorkspaceId: ctx.workspaceScope.workspaceId,
+					}),
+			})),
 		getGitSummary: workspaceProcedure
 			.input(optionalTaskWorkspaceInfoRequestSchema)
 			.output(runtimeGitSummaryResponseSchema)
@@ -1412,46 +1492,50 @@ export const runtimeAppRouter = t.router({
 			}),
 	}),
 	projects: t.router({
-		list: t.procedure.output(runtimeProjectsResponseSchema).query(async ({ ctx }) => {
-			return await ctx.projectsApi.listProjects(ctx.requestedWorkspaceId);
-		}),
-		add: t.procedure
+		list: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeProjectsResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.projectsApi.listProjects(ctx.requestedWorkspaceId);
+			}),
+		add: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeProjectAddRequestSchema)
 			.output(runtimeProjectAddResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.projectsApi.addProject(ctx.requestedWorkspaceId, input);
 			}),
-		getPermanentDeletionPreview: t.procedure
+		getPermanentDeletionPreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeProjectPermanentDeletionPreviewRequestSchema)
 			.output(runtimeProjectPermanentDeletionPreviewResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.projectsApi.getPermanentDeletionPreview(ctx.requestedWorkspaceId, input);
 			}),
-		permanentlyDeleteProjectData: t.procedure
+		permanentlyDeleteProjectData: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeProjectPermanentDeletionRequestSchema)
 			.output(runtimeProjectPermanentDeletionResultSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.projectsApi.permanentlyDeleteProjectData(ctx.requestedWorkspaceId, input);
 			}),
-		pickDirectory: t.procedure.output(runtimeProjectDirectoryPickerResponseSchema).mutation(async ({ ctx }) => {
-			return await ctx.projectsApi.pickProjectDirectory(ctx.requestedWorkspaceId);
-		}),
-		listDirectoryContents: t.procedure
+		pickDirectory: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeProjectDirectoryPickerResponseSchema)
+			.mutation(async ({ ctx }) => {
+				return await ctx.projectsApi.pickProjectDirectory(ctx.requestedWorkspaceId);
+			}),
+		listDirectoryContents: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeDirectoryListRequestSchema)
 			.output(runtimeDirectoryListResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.projectsApi.listDirectoryContents(ctx.requestedWorkspaceId, input);
 			}),
-		// 跨全部注册项目的任务搜索索引：非 workspace-scoped（t.procedure，忽略连接 scope），供 Spotlight
+		// 跨全部注册项目的任务搜索索引：非 workspace-scoped（procedureRejectingUnknownWebUiPageLoadRequestOriginNonce，忽略连接 scope），供 Spotlight
 		// 「包含其它项目」按需拉取。
-		getAllProjectsTaskSearchIndex: t.procedure
+		getAllProjectsTaskSearchIndex: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.output(runtimeAllProjectsTaskSearchIndexResponseSchema)
 			.query(async ({ ctx }) => {
 				return await ctx.projectsApi.getAllProjectsTaskSearchIndex();
 			}),
 	}),
 	hooks: t.router({
-		ingest: t.procedure
+		ingest: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeHookIngestRequestSchema)
 			.output(runtimeHookIngestResponseSchema)
 			.mutation(async ({ ctx, input }) => {
@@ -1488,6 +1572,15 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeConfirmVerificationCompleteResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.deploymentApi.confirmVerificationComplete(ctx.workspaceScope, input);
+			}),
+		markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone: workspaceProcedure
+			.input(runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema)
+			.output(runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.deploymentApi.markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone(
+					ctx.workspaceScope,
+					input,
+				);
 			}),
 	}),
 	conversationTree: t.router({

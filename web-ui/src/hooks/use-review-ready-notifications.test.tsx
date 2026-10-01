@@ -31,7 +31,7 @@ vi.mock("@/utils/notification-sound", () => ({
 function NotificationHarness({ events }: { events: RuntimeStateStreamTaskReadyForReviewMessage[] }) {
 	useReviewReadyNotifications({
 		activeWorkspaceId: "workspace-a",
-		board: { columns: [], dependencies: [] },
+		board: { columns: [] },
 		isDocumentVisible: false,
 		latestTaskReadyForReview: null,
 		taskReadyForReviewEvents: events,

@@ -118,7 +118,6 @@ describe("sibling task work snapshot collector", () => {
 				},
 				{ id: "selfxx", column: "in_progress", prompt: "本任务自己", session: { state: "running" } },
 			],
-			dependencies: [],
 		});
 
 		const worktreeAdministrativeIndexPaths = new Map(
@@ -281,7 +280,6 @@ describe("sibling task work snapshot collector", () => {
 						cards: [{ id: "zeta66", title: "已完成的任务", prompt: "已经做完了", baseRef: "main" }],
 					},
 				],
-				dependencies: [],
 			}),
 		);
 		writeFileSync(

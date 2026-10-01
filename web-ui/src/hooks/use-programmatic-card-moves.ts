@@ -1,3 +1,4 @@
+import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { RequestProgrammaticCardMove } from "@/components/kanban-board";
@@ -7,6 +8,7 @@ import type { BoardColumnId } from "@/types";
 interface RequestMoveTaskToTrashOptions {
 	optimisticMoveApplied?: boolean;
 	skipWorkingChangeWarning?: boolean;
+	boardMutationInitiator?: WebUiBoardMutationInitiator;
 }
 
 type RequestMoveTaskToTrash = (
@@ -20,6 +22,9 @@ export interface ProgrammaticCardMoveBehavior {
 	skipTrashWorkflow?: boolean;
 	skipWorkingChangeWarning?: boolean;
 	insertAtTop?: boolean;
+	// dd2db Y-EVENT-8：动画落地时 handleDragEnd 才真正改 board，发起方随在途移动一路带到那里登记。
+	// 不带 = 说不清是谁，登记为 null（runtime 如实记缺标注）；用户真拖拽没有在途程序化移动，按用户手势登记。
+	boardMutationInitiator?: WebUiBoardMutationInitiator;
 }
 
 interface PendingProgrammaticTrashMoveCompletion {
@@ -219,6 +224,7 @@ export function useProgrammaticCardMoves(): {
 
 			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, fromColumnId, "trash", {
 				skipWorkingChangeWarning: options?.skipWorkingChangeWarning,
+				boardMutationInitiator: options?.boardMutationInitiator,
 			});
 			if (programmaticMoveAttempt === "blocked") {
 				resolvePendingProgrammaticTrashMove(taskId);

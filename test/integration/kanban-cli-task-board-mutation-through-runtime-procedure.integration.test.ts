@@ -54,15 +54,14 @@ function createSeedBoard(): RuntimeBoardData {
 						"acting card that runs the kanban CLI",
 						ACTING_TASK_INCARNATION_CREATED_AT_EPOCH_MS,
 					),
-					createCard("wait1", "waits for rev01", 2_000),
+					createCard("wait1", "stays in backlog while rev01 moves to trash", 2_000),
 				],
 			},
 			{ id: "in_progress", title: "In Progress", cards: [] },
-			{ id: "review", title: "Review", cards: [createCard("rev01", "in review, wait1 depends on it", 3_000)] },
+			{ id: "review", title: "Review", cards: [createCard("rev01", "in review", 3_000)] },
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [{ id: "dep01", fromTaskId: "wait1", toTaskId: "rev01", createdAt: 3_500 }],
 	};
 }
 
@@ -191,7 +190,7 @@ describe("kanban CLI task board mutations through the runtime procedure", () => 
 			});
 			expect(movedIntoInProgressAgain).toMatchObject({ taskCardWasMovedIntoInProgressColumn: false });
 
-			// 4) trash：review 卡移入 trash 后，依赖它的 backlog 卡就绪；再移一次是「已在 trash」。
+			// 4) trash：review 卡移入 trash（只移列，不再有「就绪的下游 backlog 卡」）；再移一次是「已在 trash」。
 			const trashed =
 				await callerFromActingCardSessionWithOnlyRepositoryPath.workspace.applyKanbanCliTaskBoardMutation({
 					kanbanCliTaskBoardMutationKind: "move_task_card_to_trash_column",
@@ -203,12 +202,10 @@ describe("kanban CLI task board mutations through the runtime procedure", () => 
 			});
 			expect(trashed).toMatchObject({
 				taskCardWasAlreadyInTrashColumn: false,
-				linkedBacklogTaskIdsReadyToStartAfterTrash: ["wait1"],
 				movedTaskCardBoardColumnIdBeforeMutation: "review",
 			});
 			expect(trashedAgain).toMatchObject({
 				taskCardWasAlreadyInTrashColumn: true,
-				linkedBacklogTaskIdsReadyToStartAfterTrash: [],
 				movedTaskCardBoardColumnIdBeforeMutation: "trash",
 			});
 

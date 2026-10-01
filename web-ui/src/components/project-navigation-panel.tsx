@@ -436,8 +436,8 @@ export function ProjectNavigationPanel({
 }
 
 const TERMINAL_AGENT_HINTS: readonly { label: string; hint: string }[] = [
-	{ label: "Create tasks", hint: "Ask your agent to add tasks, link them, and start working" },
-	{ label: "Break down work", hint: "Ask to decompose a complex feature into linked subtasks" },
+	{ label: "Create tasks", hint: "Ask your agent to add tasks and start working" },
+	{ label: "Break down work", hint: "Ask to decompose a complex feature into subtasks" },
 	{ label: "Import issues", hint: "Pull issues into task cards via GitHub CLI or Linear MCP" },
 ];
 

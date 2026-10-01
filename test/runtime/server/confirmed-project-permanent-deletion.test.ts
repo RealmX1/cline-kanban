@@ -44,7 +44,6 @@ function createBoard(taskIds: string[]): RuntimeBoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 

@@ -27,10 +27,12 @@ import { addTaskToColumn } from "../core/task-board-mutations";
 import { resolveTaskCreateBaseRef } from "../core/task-create-base-ref-resolution";
 import type { KanbanActorResolutionLookups } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
+import { recordFactObservedByActiveKanbanRuntimeWithoutBlocking } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import {
 	collectTaskIdsRemovedFromBoard,
 	discardTaskEditDraftsForTasksRemovedFromBoard,
 } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
+import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
 	loadWorkspaceBoardById,
 	mutateWorkspaceState,
@@ -54,10 +56,7 @@ import {
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
 import { runGit } from "../workspace/git-utils";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
-import {
-	probeAndRefreshTaskCommitIntegrationProvenance,
-	removeTaskCommitIntegrationProvenance,
-} from "../workspace/task-commit-integration-provenance";
+import { probeAndRefreshTaskCommitIntegrationProvenance } from "../workspace/task-commit-integration-provenance";
 import {
 	deleteTaskWorktree,
 	ensureTaskWorktreeIfDoesntExist,
@@ -448,6 +447,8 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			const body = parseWorktreeDeleteRequest(input);
 			// 删除目录前尽力落最后一份 Git 状态快照。Done-stage guard 属独立任务；这里的
 			// provenance 采集失败不得把既有 worktree cleanup 变成破坏性行为变化。
+			// 拿不到 live 快照的原因留到删除成功后记成族 3 事实（Y-PHASE-3）：1c 的落地判据据此知道「最后一份快照不新鲜」。
+			let finalTaskCommitIntegrationProbeFailureReason: string | null = null;
 			try {
 				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 				const card = board.columns
@@ -460,7 +461,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						baseRef: card.baseRef,
 						worktreeMode: body.worktreeMode,
 					});
-					await probeAndRefreshTaskCommitIntegrationProvenance({
+					const finalWorkspaceGitStatus = await probeAndRefreshTaskCommitIntegrationProvenance({
 						workspaceId: workspaceScope.workspaceId,
 						taskId: body.taskId,
 						repoPath: workspaceScope.workspacePath,
@@ -469,17 +470,30 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						worktreeMode: body.worktreeMode,
 						worktreeExists: pathInfo.exists,
 					});
+					if (finalWorkspaceGitStatus.observationSource !== "live_worktree") {
+						finalTaskCommitIntegrationProbeFailureReason = `final_probe_observation_source_was_${finalWorkspaceGitStatus.observationSource}`;
+					}
+				} else {
+					finalTaskCommitIntegrationProbeFailureReason = "task_card_not_found_on_board_at_worktree_deletion";
 				}
-			} catch {
+			} catch (error) {
 				// best effort，真正的保护由另一个 Done-stage guard task 实现。
+				finalTaskCommitIntegrationProbeFailureReason = `final_probe_threw:${error instanceof Error ? error.message : String(error)}`;
 			}
 			const deletionResult = await deleteTaskWorktree({
 				repoPath: workspaceScope.workspacePath,
 				taskId: body.taskId,
 				worktreeMode: body.worktreeMode,
 			});
-			if (deletionResult.ok && body.removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion === true) {
-				await removeTaskCommitIntegrationProvenance(workspaceScope.workspaceId, body.taskId);
+			// 删 worktree 不再连带删除 task commit provenance（落地数据保全，Y-PHASE-3）：1c 的共享落地判据要读这份数据。
+			if (deletionResult.removed && finalTaskCommitIntegrationProbeFailureReason !== null) {
+				recordFactObservedByActiveKanbanRuntimeWithoutBlocking({
+					observedFactKind: "task_commit_integration_final_snapshot_unavailable_at_worktree_deletion",
+					observingKanbanRuntimeSystemComponentName: "workspace_api_task_worktree_deletion",
+					subjectWorkspaceId: workspaceScope.workspaceId,
+					subjectTaskId: body.taskId,
+					eventPayload: { finalTaskCommitIntegrationProbeFailureReason },
+				});
 			}
 			return deletionResult;
 		},
@@ -557,15 +571,20 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				ok: true,
 			};
 		},
-		saveState: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
-			// 在 board 锁之外先解析行动者。Web UI 请求目前没有页面加载 nonce，会解析为
-			// direct_runtime_trpc_caller（预期如此，1a.3 接 nonce）；带 CLI 声明头的整份 PUT 按声明解析。
-			const taskMutationIntentWithResolvedActor =
-				await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+		saveState: async (workspaceScope, requestInput, kanbanRequestOriginActorEvidence) => {
+			// 发起方标注只进关系账本，不随 board 落盘。
+			const { boardMutationInitiatorAnnotationsForTaskMutationEventCapture, ...input } = requestInput;
+			// 在 board 锁之外先解析行动者：带页面 nonce 的请求先解析为「来自页面、缺标注」，漏斗再按标注逐条细化；
+			// 带 CLI 声明头的整份 PUT 按声明解析（标注一律不采信）；两者都没有的是裸 tRPC 调用方。
+			const taskMutationIntentWithResolvedActor = {
+				...(await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
 					taskMutationIntentKind: "web_ui_workspace_board_state_save",
 					kanbanRequestOriginActorEvidence,
 					kanbanActorResolutionLookups: deps.kanbanActorResolutionLookups,
-				});
+				})),
+				webUiBoardMutationInitiatorAnnotationsForTaskMutationEventCapture:
+					boardMutationInitiatorAnnotationsForTaskMutationEventCapture ?? [],
+			};
 			try {
 				for (const summary of deps.listProjectRuntimeSessionSummaries(workspaceScope.workspaceId)) {
 					input.sessions[summary.taskId] = summary;
@@ -631,6 +650,11 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			const rememberedBaseRefForProject =
 				runtimeConfig.userInterfacePreferencesSharedAcrossBrowserOrigins
 					.mostRecentlyUsedTaskCreateBaseRefByProjectId[workspaceScope.workspaceId] ?? null;
+			// Y-EVENT-12：id 由 runtime 对全局 task 身份登记簿分配；漏斗在锁内再校验一次。
+			const allocatedTaskIdForNewBacklogTaskCard =
+				await allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable({
+					requestingWorkspaceId: workspaceScope.workspaceId,
+				});
 			const mutationResponse = await mutateWorkspaceState(
 				workspaceScope.workspacePath,
 				taskMutationIntentWithResolvedActor,
@@ -658,6 +682,9 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 							workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
 							baseRef: resolvedBaseRef,
 							images: input.images,
+							...(allocatedTaskIdForNewBacklogTaskCard !== null
+								? { taskId: allocatedTaskIdForNewBacklogTaskCard }
+								: {}),
 						},
 						() => globalThis.crypto.randomUUID(),
 					);

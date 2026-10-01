@@ -55,7 +55,6 @@ function createBoard(
 			{ id: "review", title: "Review", cards: cardsByColumn.review ?? [] },
 			{ id: "trash", title: "Done", cards: cardsByColumn.trash ?? [] },
 		],
-		dependencies: [],
 	};
 }
 

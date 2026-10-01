@@ -170,12 +170,11 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (_path: string, _taskMutationIntent: unknown, mutate: never) => {
 				const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
-					board: { columns: [], dependencies: [] },
+					board: { columns: [] },
 				});
 				return { saved: true, value: mutation.value };
 			},

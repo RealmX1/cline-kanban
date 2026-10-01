@@ -1,3 +1,4 @@
+import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import { useCallback, useEffect, useRef } from "react";
 
 import type { TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
@@ -19,6 +20,16 @@ interface TaskGitActionLoadingStateLike {
 
 interface RequestMoveTaskToTrashOptions {
 	skipWorkingChangeWarning?: boolean;
+	boardMutationInitiator?: WebUiBoardMutationInitiator;
+}
+
+// dd2db Y-EVENT-8：auto-review 完成后自动移入 Done 的发起方按模式区分（PR 模式不结案依赖要把两者分开）。
+export function resolveWebUiBoardMutationInitiatorForAutoReviewCompletionMoveToDone(
+	autoReviewMode: TaskAutoReviewMode,
+): WebUiBoardMutationInitiator {
+	return autoReviewMode === "pr"
+		? "web_ui_client_automation_auto_review_pull_request_mode_completion"
+		: "web_ui_client_automation_auto_review_commit_mode_completion";
 }
 
 interface UseReviewAutoActionsOptions {
@@ -190,6 +201,8 @@ export function useReviewAutoActions({
 							void requestMoveTaskToTrashRef
 								.current(reviewTask.id, "review", {
 									skipWorkingChangeWarning: true,
+									boardMutationInitiator:
+										resolveWebUiBoardMutationInitiatorForAutoReviewCompletionMoveToDone(latestMode),
 								})
 								.finally(() => {
 									delete awaitingCleanActionByTaskIdRef.current[reviewTask.id];

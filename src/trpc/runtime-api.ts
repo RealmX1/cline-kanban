@@ -52,6 +52,7 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
 	RuntimeTaskAgentPermissionMode,
+	RuntimeTaskChatSendResponse,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -103,6 +104,7 @@ import {
 	type TaskSessionStartDiagnosticEvent,
 } from "../diagnostics/task-session-start-diagnostics-logger";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
+import { recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking } from "../inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
 import { createAgentRaisedPendingUserDecisionAnswerDelivery } from "../server/agent-raised-pending-user-decision-answer-delivery";
 import { openInBrowser } from "../server/browser";
 import {
@@ -2004,19 +2006,31 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		// 三 transport 分派的实现体在 task-chat-message-send-across-session-transports.ts。
 		// 搬出去是因为排队投递 dispatcher 也要用同一条出口，而它由 turn 结束边沿驱动、手上没有请求，
 		// 拿不到这个每请求新建的 runtimeApi 闭包。
-		sendTaskChatMessage: async (workspaceScope, input) =>
-			await sendTaskChatMessageAcrossSessionTransports(
-				{
-					getScopedTerminalManager: deps.getScopedTerminalManager,
-					getScopedClineTaskSessionService: deps.getScopedClineTaskSessionService,
-					getScopedAcpTaskSessionService: deps.getScopedAcpTaskSessionService,
-					loadScopedRuntimeConfig: deps.loadScopedRuntimeConfig,
-					resolveClineTaskSessionLaunchConfig: async () => await clineProviderService.resolveLaunchConfig(),
-					...(deps.broadcastTaskChatCleared ? { broadcastTaskChatCleared: deps.broadcastTaskChatCleared } : {}),
-				},
-				workspaceScope,
-				input,
-			),
+		sendTaskChatMessage: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
+			let taskChatSendResponse: RuntimeTaskChatSendResponse | null = null;
+			try {
+				taskChatSendResponse = await sendTaskChatMessageAcrossSessionTransports(
+					{
+						getScopedTerminalManager: deps.getScopedTerminalManager,
+						getScopedClineTaskSessionService: deps.getScopedClineTaskSessionService,
+						getScopedAcpTaskSessionService: deps.getScopedAcpTaskSessionService,
+						loadScopedRuntimeConfig: deps.loadScopedRuntimeConfig,
+						resolveClineTaskSessionLaunchConfig: async () => await clineProviderService.resolveLaunchConfig(),
+						...(deps.broadcastTaskChatCleared ? { broadcastTaskChatCleared: deps.broadcastTaskChatCleared } : {}),
+					},
+					workspaceScope,
+					input,
+				);
+				return taskChatSendResponse;
+			} finally {
+				recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking({
+					workspaceId: workspaceScope.workspaceId,
+					taskChatSendRequest: input,
+					taskChatSendResponse,
+					kanbanRequestOriginActorEvidence,
+				});
+			}
+		},
 		// 恢复期被暂存的 harness 通知：只读列出。UI 据此决定要不要渲染一键放行入口。
 		getDeferredRestorationHarnessNotifications: async (workspaceScope, input) => {
 			try {

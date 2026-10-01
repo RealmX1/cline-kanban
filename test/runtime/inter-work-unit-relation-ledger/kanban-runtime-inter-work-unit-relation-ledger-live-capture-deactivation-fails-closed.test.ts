@@ -79,7 +79,7 @@ vi.mock("../../../src/state/workspace-state", () => ({
 const reconcileInput = {
 	workspaceId: "workspace",
 	workspaceRepositoryPath: "/repositories/workspace",
-	persistedBoard: { columns: [], dependencies: [] },
+	persistedBoard: { columns: [] },
 	persistedSessions: {},
 	persistedBoardFileSha256: null,
 	persistedBoardRevision: 0,

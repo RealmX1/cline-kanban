@@ -242,7 +242,38 @@ describe("resolveKanbanActorFromRequestOriginEvidence", () => {
 		expect(resolved.actorNativeConversationSessionIdentity).toBeNull();
 	});
 
-	it("请求上没有 CLI 声明头（今天的 Web UI 与裸 tRPC 调用方）：direct_runtime_trpc_caller", async () => {
+	it("没有 CLI 声明头但带着已签发的页面 nonce：来自页面、未标注发起方（nonce 证明不了是用户手势）", async () => {
+		const resolved = await resolveKanbanActorFromRequestOriginEvidence(
+			{
+				decodedCliActorClaimsRequestHeader:
+					decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(undefined),
+				webUiPageLoadRequestOriginNonceVerificationStatus: "verified",
+			},
+			createLookupsWithActingCardOnBoard(),
+		);
+
+		expect(resolved.resolvedKanbanActor).toEqual({
+			kanbanActorKind:
+				"kanban_web_ui_request_with_verified_page_load_nonce_without_board_mutation_initiator_annotation",
+		});
+	});
+
+	it("CLI 声明头优先于页面 nonce：同时带两者时按 CLI 声明解析，永远不记为 Web UI 用户", async () => {
+		const resolved = await resolveKanbanActorFromRequestOriginEvidence(
+			{
+				...createEvidenceFromCliInvocationEnvironment({
+					KANBAN_TASK_ID: ACTING_TASK_ID,
+					KANBAN_HOOK_WORKSPACE_ID: ACTING_WORKSPACE_ID,
+				}),
+				webUiPageLoadRequestOriginNonceVerificationStatus: "verified",
+			},
+			createLookupsWithActingCardOnBoard(),
+		);
+
+		expect(resolved.resolvedKanbanActor.kanbanActorKind).toBe("kanban_board_card_work_unit");
+	});
+
+	it("既没有 CLI 声明头也没有页面 nonce（裸 tRPC 调用方）：direct_runtime_trpc_caller", async () => {
 		const resolved = await resolveKanbanActorFromRequestOriginEvidence(
 			{
 				decodedCliActorClaimsRequestHeader:

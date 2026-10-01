@@ -9,12 +9,15 @@ import {
 	NATIVE_CONVERSATION_SESSION_ID_ENVIRONMENT_VARIABLE_NAME_TO_CONVERSATION_SESSION_HOST_KANBAN_AGENT_ID,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
 import type { TaskMutationIntentWithResolvedActor } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import type { KanbanWebUiPageLoadRequestOriginNonceVerificationStatus } from "./kanban-web-ui-page-load-request-origin-nonce-registry";
 
 // 行动者解析（dd2db §R3 Y-EVENT-7 解析顺序第 2–4 步；第 1 步「进程内显式系统组件」不经请求，调用点直接构造）。
-// 1a.2 只接 CLI 声明头；页面加载 nonce（第 3 步）在 1a.3 接入，会话归属登记（第 2 步的原生 id 查登记）在 1a.4 接入。
+// CLI 声明头（1a.2）与页面加载 nonce（1a.3）都已接入；会话归属登记（第 2 步的原生 id 查登记）在 1b 接入。
 
 export interface KanbanRequestOriginActorEvidence {
 	decodedCliActorClaimsRequestHeader: DecodedKanbanCliInvocationEnvironmentActorClaimsRequestHeader;
+	// 1a.3：Web UI 页面加载 nonce 的校验结果。缺省等同 absent（进程内调用、测试）；unknown 在 tRPC 中间件就被拒绝。
+	webUiPageLoadRequestOriginNonceVerificationStatus?: KanbanWebUiPageLoadRequestOriginNonceVerificationStatus;
 }
 
 export interface KanbanActorResolutionLookups {
@@ -68,8 +71,17 @@ export async function resolveKanbanActorFromRequestOriginEvidence(
 		invokingKanbanCliCodeVersion: null,
 	};
 	if (decoded.cliActorClaimsRequestHeaderStatus === "absent") {
-		// 今天的 Web UI 请求也落在这里（还没有页面加载 nonce）。
-		// EXPERIMENT_NODE: 1a.3 接上页面加载 nonce 与逐卡标注后，Web UI 路径改按 nonce 解析，本兜底只剩裸 tRPC 调用方。
+		// CLI 声明头优先于 nonce，且永远不记为用户（Y-EVENT-7）。没有声明头时才看 nonce：nonce 只证明请求来自页面，
+		// 所以这里只给「来自页面、未标注发起方」；saveState 的逐卡标注在漏斗里按 occurrence 细化为手势或自动流转。
+		if (evidence.webUiPageLoadRequestOriginNonceVerificationStatus === "verified") {
+			return {
+				...emptyContext,
+				resolvedKanbanActor: {
+					kanbanActorKind:
+						"kanban_web_ui_request_with_verified_page_load_nonce_without_board_mutation_initiator_annotation",
+				},
+			};
+		}
 		return {
 			...emptyContext,
 			resolvedKanbanActor: {

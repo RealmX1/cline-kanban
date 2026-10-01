@@ -2,8 +2,8 @@ import { KANBAN_HOOK_TASK_ID_ENV, KANBAN_HOOK_WORKSPACE_ID_ENV } from "./hook-ru
 
 // 卡片 agent 会话的「工作单元身份」环境变量（dd2db §R3 R3.3 1a：三种 transport 注入 KANBAN_*）。
 // agent 及其一切子进程继承这些变量；CLI 把它们作为行动者声明发给 runtime，归属与调用方式无关。
-// PTY 路径在 session-manager 里内联构造同名变量；ACP 用本函数；Cline SDK（进程内）尚未接 executor env，
-// 其工具调用按 Y-EVENT-15 降级为无环境 CLI——前提是 runtime 启动时已擦除继承来的同名变量。
+// PTY 路径在 session-manager 里内联构造同名变量；ACP 写进 omp 进程 env；Cline SDK（进程内）经按会话的
+// bash executor env 注入（Cline 的非 bash 工具不起子进程，不涉及）。
 export function buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment(input: {
 	workspaceTaskId: string;
 	kanbanTaskConversationSessionId: string;

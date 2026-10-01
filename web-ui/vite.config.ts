@@ -88,6 +88,10 @@ export default defineConfig({
 			),
 			"@runtime-cline-tool-call-display": resolve(__dirname, "../src/cline-sdk/cline-tool-call-display.ts"),
 			"@runtime-home-agent-session": resolve(__dirname, "../src/core/home-agent-session.ts"),
+			"@runtime-kanban-web-ui-page-load-request-origin-nonce": resolve(
+				__dirname,
+				"../src/core/kanban-web-ui-page-load-request-origin-nonce.ts",
+			),
 			"@runtime-last-conversation-progress-observation": resolve(
 				__dirname,
 				"../src/core/last-conversation-progress-observation.ts",
