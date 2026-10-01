@@ -10,7 +10,6 @@ import {
 } from "@/components/post-deploy-verification/post-deploy-verification-format";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
-import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { RuntimePostDeployVerificationDeploymentGroup, RuntimePostDeployVerificationTask } from "@/runtime/types";
 import type { BoardData } from "@/types";
 
@@ -71,42 +70,17 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 		onNavigateToBoard,
 	} = props;
 
-	// 必须在下面那道早返回门控之前取，否则 hook 调用会随门控结果时有时无（违反 hooks 规则）。
-	const isMobile = useIsMobile();
-
 	// 门控：数据未到达前不闪现；本 workspace 无任何 deployment 组时不挂载（即工作区维度门控，见 plan）。
 	if (typeof document === "undefined" || !hasLoadedOnce || (!activeGroup && historyGroups.length === 0)) {
 		return null;
 	}
 
-	// stayInFront=ON 且无对话框：z-70（高于 dialog z-50 / FAB z-40）。OFF 或对话框打开：降至 z-30 可被遮挡。
+	// stayInFront=ON 且无对话框：z-70（高于 dialog z-50）。OFF 或对话框打开：降至 z-30 可被遮挡。
 	const zIndexClassName = stayInFront && !loweredForDialog ? "z-[70]" : "z-30";
 	const pendingCount = countPending(activeGroup);
 
 	if (collapsed) {
-		return createPortal(
-			<button
-				type="button"
-				onClick={onToggleCollapsed}
-				aria-label="展开 Post-Deploy Verification 面板"
-				className={cn(
-					// 移动端只留图标 + 待办计数，并随虚拟按键条整体抬高：带全称的长 pill 停在视口底部时
-					// 正好压住方向键，而 agent 提问时用户的拇指恰恰要落在那儿。
-					"kb-viewport-bottom-pill-stacked fixed right-4 inline-flex cursor-pointer items-center gap-2 rounded-full border border-border-bright bg-surface-2 text-sm text-text-primary shadow-lg transition-colors hover:bg-surface-3",
-					isMobile ? "p-2.5" : "px-3 py-2",
-					zIndexClassName,
-				)}
-			>
-				<ClipboardCheck size={16} className="text-accent" />
-				{isMobile ? null : <span className="font-medium">Post-Deploy Verification</span>}
-				{pendingCount > 0 ? (
-					<span className="inline-flex min-w-5 items-center justify-center rounded-full bg-status-orange px-1.5 text-[11px] font-semibold text-black">
-						{pendingCount}
-					</span>
-				) : null}
-			</button>,
-			document.body,
-		);
+		return null;
 	}
 
 	// ponytail: 面板位置/尺寸固定在右下角；plan 面板行为表提过的「拖拽/尺寸偏好存 localStorage」按 spike 范围延后，
@@ -114,7 +88,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 	return createPortal(
 		<div
 			className={cn(
-				"kb-viewport-bottom-pill-stacked fixed right-4 flex max-h-[70vh] w-[360px] max-w-[calc(100vw-2rem)] flex-col rounded-lg border border-border-bright bg-surface-2 shadow-2xl",
+				"kb-viewport-bottom-verification-floating-panel fixed right-4 flex max-h-[70vh] w-[360px] max-w-[calc(100vw-2rem)] flex-col rounded-lg border border-border-bright bg-surface-2 shadow-2xl",
 				zIndexClassName,
 			)}
 		>
