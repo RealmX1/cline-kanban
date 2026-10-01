@@ -8,16 +8,23 @@ import {
 	type SensorAPI,
 	type SnapDragActions,
 } from "@hello-pangea/dnd";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BoardColumn } from "@/components/board-column";
+import { BoardColumnCollapsedVerticalStrip } from "@/components/board-column-collapsed-vertical-strip";
 import { DependencyOverlay } from "@/components/dependencies/dependency-overlay";
 import { useDependencyLinking } from "@/components/dependencies/use-dependency-linking";
 import { TaskPinboardStripOnKanbanBoard } from "@/components/task-pinboard-strip-on-kanban-board";
+import { useKanbanBoardColumnCollapseAndWidthPreferences } from "@/hooks/use-kanban-board-column-collapse-and-width-preferences";
 import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
+import { ResizeHandle } from "@/resize/resize-handle";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { canCreateTaskDependency } from "@/state/board-state";
 import { findCardColumnId, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
+import {
+	KANBAN_BOARD_COLUMN_MAX_CUSTOM_WIDTH_PX,
+	KANBAN_BOARD_COLUMN_MIN_CUSTOM_WIDTH_PX,
+} from "@/state/kanban-board-column-collapse-and-width-preferences";
 import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
 import type { BoardCard, BoardColumnId, BoardData, BoardDependency } from "@/types";
 
@@ -30,6 +37,9 @@ const programmaticSensor: Sensor = (api) => {
 	programmaticSensorApiHolder.current = api;
 };
 const PROGRAMMATIC_SENSORS: Sensor[] = [programmaticSensor];
+
+const KANBAN_BOARD_COLUMN_WIDTH_RESIZE_HANDLE_TITLE =
+	"Drag (or focus and press ←/→, Home/End) to resize this column · Hold Shift to resize all expanded columns · Double-click or Enter to reset (with Shift resets all)";
 
 export type RequestProgrammaticCardMove = (move: ProgrammaticCardMoveInFlight) => boolean;
 
@@ -124,8 +134,24 @@ export const KanbanBoard = memo(function KanbanBoard({
 	});
 	// 每次 board 变化都要重扫全盘卡片，memo 掉避免拖拽期间逐帧重排（拖拽会高频重渲 KanbanBoard）。
 	const pinnedTasks = useMemo(() => collectTasksPinnedToTaskPinboard(data), [data]);
-	// 点置顶板分身上的 stage 标签 → 让本体卡所在列强制渲染到它、滚进视野并脉冲高亮。
-	const { taskIdRequestedToReveal, requestRevealCanonicalTaskCard } = useRevealCanonicalTaskCard();
+	const columnCollapseAndWidthPreferences = useKanbanBoardColumnCollapseAndWidthPreferences({
+		orderedColumnIds: BOARD_COLUMN_ORDER,
+		boardRef,
+	});
+	// 程序化移卡回调经 ref 读折叠态，免得每次折叠/展开都换掉 requestProgrammaticCardMove 的引用。
+	const isColumnCollapsedRef = useRef(columnCollapseAndWidthPreferences.isColumnCollapsed);
+	isColumnCollapsedRef.current = columnCollapseAndWidthPreferences.isColumnCollapsed;
+	const { expandColumn } = columnCollapseAndWidthPreferences;
+	// 点置顶板分身上的 stage 标签 → 让本体卡所在列强制渲染到它、滚进视野并脉冲高亮；
+	// 本体卡所在列若被折叠（卡片不在 DOM 里），先展开它。
+	const { taskIdRequestedToReveal, requestRevealCanonicalTaskCard } = useRevealCanonicalTaskCard({
+		prepareRevealTarget: (taskId) => {
+			const columnIdOfTaskToReveal = findCardColumnId(latestDataRef.current.columns, taskId);
+			if (columnIdOfTaskToReveal) {
+				expandColumn(columnIdOfTaskToReveal);
+			}
+		},
+	});
 
 	useEffect(() => {
 		latestDataRef.current = data;
@@ -236,6 +262,10 @@ export const KanbanBoard = memo(function KanbanBoard({
 			const sourceOrderIndex = BOARD_COLUMN_ORDER.indexOf(sourceColumnId);
 			const targetOrderIndex = BOARD_COLUMN_ORDER.indexOf(targetColumnId);
 			if (sourceOrderIndex < 0 || targetOrderIndex < 0) {
+				return false;
+			}
+			// 源列或目标列折叠时没有可见的卡片位可供动画落点：放弃动画，交给调用方的无动画直接移动兜底。
+			if (isColumnCollapsedRef.current(sourceColumnId) || isColumnCollapsedRef.current(targetColumnId)) {
 				return false;
 			}
 			if (move.insertAtTop && !canAnimateProgrammaticTopInsertion(taskId, targetColumnId)) {
@@ -445,49 +475,95 @@ export const KanbanBoard = memo(function KanbanBoard({
 					className="kb-board kb-dependency-surface"
 					data-programmatic-card-move={programmaticCardMoveInFlight ? "true" : undefined}
 				>
-					{data.columns.map((column) => (
-						<BoardColumn
-							key={column.id}
-							column={column}
-							taskSessions={taskSessions}
-							onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
-							onStartTask={column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined}
-							onRequestStartAllReadyBacklogTasks={
-								column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
-							}
-							onClearTrash={column.id === "trash" ? onClearTrash : undefined}
-							onEditTask={column.id === "backlog" ? onEditTask : undefined}
-							onSaveTitle={onSaveTaskTitle}
-							onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
-							onMoveToTrashTask={
-								column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
-							}
-							onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
-							onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
-							onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
-							onDeleteTask={onDeleteTask}
-							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
-							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-							taskIdRequestedToReveal={taskIdRequestedToReveal}
-							moveToTrashLoadingById={
-								column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
-							}
-							moveToValidationLoadingById={column.id === "review" ? moveToValidationLoadingById : undefined}
-							moveToReviewLoadingById={column.id === "in_progress" ? moveToReviewLoadingById : undefined}
-							activeDragTaskId={activeDragTaskId}
-							activeDragSourceColumnId={activeDragSourceColumnId}
-							programmaticCardMoveInFlight={programmaticCardMoveInFlight}
-							onDependencyPointerDown={dependencyLinking.onDependencyPointerDown}
-							onDependencyPointerEnter={dependencyLinking.onDependencyPointerEnter}
-							dependencySourceTaskId={dependencyLinking.draft?.sourceTaskId ?? null}
-							dependencyTargetTaskId={dependencyLinking.draft?.targetTaskId ?? null}
-							isDependencyLinking={dependencyLinking.draft !== null}
-							workspacePath={workspacePath}
-							defaultClineModelId={defaultClineModelId}
-							defaultAgentId={defaultAgentId}
-							onCardClick={activateCardUnlessDragged}
-						/>
-					))}
+					{data.columns.map((column) =>
+						columnCollapseAndWidthPreferences.isColumnCollapsed(column.id) ? (
+							<BoardColumnCollapsedVerticalStrip
+								key={column.id}
+								column={column}
+								onExpandColumn={columnCollapseAndWidthPreferences.toggleColumnCollapsed}
+								activeDragTaskId={activeDragTaskId}
+								activeDragSourceColumnId={activeDragSourceColumnId}
+								programmaticCardMoveInFlight={programmaticCardMoveInFlight}
+							/>
+						) : (
+							<Fragment key={column.id}>
+								<BoardColumn
+									column={column}
+									onCollapseColumn={columnCollapseAndWidthPreferences.toggleColumnCollapsed}
+									columnFlexStyle={columnCollapseAndWidthPreferences.getExpandedColumnFlexStyle(column.id)}
+									taskSessions={taskSessions}
+									onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
+									onStartTask={
+										column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined
+									}
+									onRequestStartAllReadyBacklogTasks={
+										column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
+									}
+									onClearTrash={column.id === "trash" ? onClearTrash : undefined}
+									onEditTask={column.id === "backlog" ? onEditTask : undefined}
+									onSaveTitle={onSaveTaskTitle}
+									onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
+									onMoveToTrashTask={
+										column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
+									}
+									onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
+									onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
+									onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
+									onDeleteTask={onDeleteTask}
+									onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+									onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+									taskIdRequestedToReveal={taskIdRequestedToReveal}
+									moveToTrashLoadingById={
+										column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
+									}
+									moveToValidationLoadingById={
+										column.id === "review" ? moveToValidationLoadingById : undefined
+									}
+									moveToReviewLoadingById={column.id === "in_progress" ? moveToReviewLoadingById : undefined}
+									activeDragTaskId={activeDragTaskId}
+									activeDragSourceColumnId={activeDragSourceColumnId}
+									programmaticCardMoveInFlight={programmaticCardMoveInFlight}
+									onDependencyPointerDown={dependencyLinking.onDependencyPointerDown}
+									onDependencyPointerEnter={dependencyLinking.onDependencyPointerEnter}
+									dependencySourceTaskId={dependencyLinking.draft?.sourceTaskId ?? null}
+									dependencyTargetTaskId={dependencyLinking.draft?.targetTaskId ?? null}
+									isDependencyLinking={dependencyLinking.draft !== null}
+									workspacePath={workspacePath}
+									defaultClineModelId={defaultClineModelId}
+									defaultAgentId={defaultAgentId}
+									onCardClick={activateCardUnlessDragged}
+								/>
+								{/* 列宽 handle 是 `.kb-board` 的直接子元素：负 margin 吃掉它额外引入的那一份 flex gap
+		    (8 - 4 + 1 - 5 + 8 = 8px)，列间距保持不变；移动端由 CSS 隐藏。 */}
+								<ResizeHandle
+									orientation="vertical"
+									ariaLabel={`Resize ${column.title} column`}
+									title={KANBAN_BOARD_COLUMN_WIDTH_RESIZE_HANDLE_TITLE}
+									showBaseLine={false}
+									className="rounded-full transition-colors hover:bg-accent focus-visible:outline-none focus-visible:bg-accent focus-visible:shadow-[0_0_0_2px_var(--color-accent)]"
+									style={{ marginLeft: -4, marginRight: -5 }}
+									tabIndex={0}
+									ariaValueNow={columnCollapseAndWidthPreferences.getColumnCustomWidthPx(column.id)}
+									ariaValueMin={KANBAN_BOARD_COLUMN_MIN_CUSTOM_WIDTH_PX}
+									ariaValueMax={KANBAN_BOARD_COLUMN_MAX_CUSTOM_WIDTH_PX}
+									ariaValueText={
+										columnCollapseAndWidthPreferences.getColumnCustomWidthPx(column.id) === undefined
+											? "Auto width"
+											: undefined
+									}
+									onKeyDown={(event) =>
+										columnCollapseAndWidthPreferences.handleColumnWidthResizeHandleKeyDown(event, column.id)
+									}
+									onMouseDown={(event) =>
+										columnCollapseAndWidthPreferences.startColumnWidthResizeDrag(event, column.id)
+									}
+									onDoubleClick={(event) =>
+										columnCollapseAndWidthPreferences.resetColumnWidthFromHandleDoubleClick(event, column.id)
+									}
+								/>
+							</Fragment>
+						),
+					)}
 					{shouldMountDependencyOverlay && (
 						<DependencyOverlay
 							containerRef={boardRef}

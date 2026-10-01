@@ -290,7 +290,9 @@ body,
 	display: flex;
 	flex: 1 1 0;
 	min-height: 0;
-	overflow: hidden;
+	/* 用户把列宽拖到总和超过视口时横向滚动；未自定义列宽时各列 flex 填充，不会溢出。 */
+	overflow-x: auto;
+	overflow-y: hidden;
 	gap: 8px;
 	padding: 8px;
 }
@@ -1239,6 +1241,13 @@ body.kb-dependency-link-mode {
 		min-width: 280px;
 		width: 92vw;
 		scroll-snap-align: center;
+	}
+
+	/* 折叠的 stage 列在移动端也保持窄竖条，不被上面的「一列占 92vw」规则拉宽。 */
+	.kb-board > section[data-kanban-board-column-collapsed="true"] {
+		flex: 0 0 40px !important;
+		min-width: 40px;
+		width: 40px;
 	}
 
 	.kb-board > [role="separator"] {

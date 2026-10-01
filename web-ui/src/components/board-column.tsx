@@ -1,5 +1,5 @@
 import { Droppable } from "@hello-pangea/dnd";
-import { Play, Plus, Trash2 } from "lucide-react";
+import { FoldHorizontal, Play, Plus, Trash2 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
 
@@ -51,6 +51,8 @@ export const BoardColumn = memo(function BoardColumn({
 	workspacePath,
 	defaultClineModelId,
 	defaultAgentId,
+	onCollapseColumn,
+	columnFlexStyle,
 }: {
 	column: BoardColumnModel;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
@@ -88,6 +90,10 @@ export const BoardColumn = memo(function BoardColumn({
 	workspacePath?: string | null;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
+	/** 主看板的列折叠入口；不传则不渲染折叠按钮。 */
+	onCollapseColumn?: (columnId: BoardColumnId) => void;
+	/** 主看板列宽偏好算出的 flex 样式（自动填充或固定 flex-basis）；缺省为等分填充。 */
+	columnFlexStyle?: { flex: string };
 }): React.ReactElement {
 	const canCreate = column.id === "backlog" && onCreateTask;
 	const canRequestStartAllReadyBacklogTasks = column.id === "backlog" && onRequestStartAllReadyBacklogTasks;
@@ -175,9 +181,7 @@ export const BoardColumn = memo(function BoardColumn({
 			data-column-id={column.id}
 			data-verification-anchor={boardColumnAnchorKey(column.id)}
 			className="flex flex-col min-w-0 min-h-0 bg-surface-1 rounded-lg overflow-hidden border border-border"
-			style={{
-				flex: "1 1 0",
-			}}
+			style={columnFlexStyle ?? { flex: "1 1 0" }}
 		>
 			<div className="flex flex-col min-h-0" style={{ flex: "1 1 0" }}>
 				<div
@@ -187,34 +191,47 @@ export const BoardColumn = memo(function BoardColumn({
 						padding: "0 12px",
 					}}
 				>
-					<div className="flex items-center gap-2">
+					<div className="flex items-center gap-2 min-w-0">
 						<ColumnIndicator columnId={column.id} />
-						<span className="font-semibold text-sm">{column.title}</span>
+						<span className="font-semibold text-sm truncate">{column.title}</span>
 						<span className="text-text-secondary text-xs">{column.cards.length}</span>
 					</div>
-					{canRequestStartAllReadyBacklogTasks ? (
-						<Button
-							icon={<Play size={14} />}
-							variant="ghost"
-							size="sm"
-							onClick={onRequestStartAllReadyBacklogTasks}
-							disabled={column.cards.length === 0}
-							aria-label="Start all ready backlog tasks"
-							title={column.cards.length > 0 ? "Start all ready backlog tasks" : "Backlog is empty"}
-						/>
-					) : null}
-					{canClearTrash ? (
-						<Button
-							icon={<Trash2 size={14} />}
-							variant="ghost"
-							size="sm"
-							className="text-status-red hover:text-status-red"
-							onClick={onClearTrash}
-							disabled={column.cards.length === 0}
-							aria-label="Clear done"
-							title={column.cards.length > 0 ? "Clear done items permanently" : "Done is empty"}
-						/>
-					) : null}
+					<div className="flex items-center gap-0.5 shrink-0">
+						{canRequestStartAllReadyBacklogTasks ? (
+							<Button
+								icon={<Play size={14} />}
+								variant="ghost"
+								size="sm"
+								onClick={onRequestStartAllReadyBacklogTasks}
+								disabled={column.cards.length === 0}
+								aria-label="Start all ready backlog tasks"
+								title={column.cards.length > 0 ? "Start all ready backlog tasks" : "Backlog is empty"}
+							/>
+						) : null}
+						{canClearTrash ? (
+							<Button
+								icon={<Trash2 size={14} />}
+								variant="ghost"
+								size="sm"
+								className="text-status-red hover:text-status-red"
+								onClick={onClearTrash}
+								disabled={column.cards.length === 0}
+								aria-label="Clear done"
+								title={column.cards.length > 0 ? "Clear done items permanently" : "Done is empty"}
+							/>
+						) : null}
+						{onCollapseColumn ? (
+							<Button
+								icon={<FoldHorizontal size={14} />}
+								variant="ghost"
+								size="sm"
+								onClick={() => onCollapseColumn(column.id)}
+								aria-expanded
+								aria-label={`Collapse ${column.title} column`}
+								title={`Collapse ${column.title} column`}
+							/>
+						) : null}
+					</div>
 				</div>
 
 				<Droppable droppableId={column.id} type={cardDropType} isDropDisabled={isDropDisabled}>
