@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { getNotificationLifecycleArchive } from "../../../src/notifications/notification-lifecycle-archive";
+import { captureNotificationSignal } from "../../../src/notifications/notification-signal-capture";
 import { createHooksApi } from "../../../src/trpc/hooks-api";
 
 // 文件末尾的跨层回归用例要驱动**真实** TerminalSessionManager——两档恢复守卫的状态机住在它里面，
@@ -701,6 +703,65 @@ describe("createHooksApi", () => {
 		expect(manager.applyHookActivity).toHaveBeenCalledWith("task-1", { source: "claude", hookEventName: "Stop" });
 	});
 
+	it("用户在终端答完（PostToolUse → to_in_progress）：即使带着同一问题 payload 也绝不再落待答记录，只了结账本", async () => {
+		const awaitingQuestionSummary = createSummary({
+			state: "awaiting_review",
+			reviewReason: "hook",
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "question",
+		});
+		const manager = {
+			getSummary: vi.fn(() => awaitingQuestionSummary),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
+			unparkTaskSession: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const recordPendingUserDecision = vi.fn(async () => ({}) as never);
+		const resolveFromAgentTerminal = vi.fn(async () => null);
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+			recordAgentRaisedPendingUserDecision: recordPendingUserDecision,
+			resolveAgentRaisedUserQuestionFromAgentTerminal: resolveFromAgentTerminal,
+		});
+		const resolution = {
+			decisionSourceId: "toolu_question",
+			resolutionKind: "answered_in_agent_terminal" as const,
+			answersForQuestions: [{ questionText: "请你拍板", answerText: "同意", notesText: "附带说明" }],
+		};
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "AskUserQuestion" },
+			// 旧版 CLI 仍可能为 PostToolUse 附上提问 payload：服务端必须按事件类型拒绝把它落成待答记录。
+			agentRaisedUserQuestion: {
+				decisionSourceId: "ask-user-question:请你拍板",
+				questionMarkdown: "请你拍板",
+				options: [],
+				allowsFreeformAnswer: true,
+				multiSelect: false,
+				orderedQuestions: [],
+			},
+			agentRaisedUserQuestionResolvedInAgentTerminal: resolution,
+		});
+
+		expect(response.ok).toBe(true);
+		expect(recordPendingUserDecision).not.toHaveBeenCalled();
+		expect(resolveFromAgentTerminal).toHaveBeenCalledWith("workspace-1", {
+			taskId: "task-1",
+			resolution,
+			resolvedAt: expect.any(Number),
+		});
+	});
+
 	it("parked + AskUserQuestion：先持久化决策、解除 park，再进入 question 人轴", async () => {
 		const parkedSummary = createSummary({
 			state: "running",
@@ -1357,7 +1418,9 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 			applyAgentNativeConversationSessionIdentity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
 		} as unknown as TerminalSessionManager;
+		const persistIdentity = vi.fn(async () => true);
 		const api = createHooksApi({
+			persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: persistIdentity,
 			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
 			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
 			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
@@ -1386,5 +1449,191 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 			metadata: { source: "claude", hookEventName: "PostToolUse" },
 		});
 		expect(manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledTimes(1);
+		expect(persistIdentity).toHaveBeenCalledTimes(1);
+		expect(persistIdentity).toHaveBeenCalledWith("workspace-1", "task-1", expect.any(Function));
 	});
+});
+
+describe("原生身份落盘与 hook 确认", () => {
+	it.each([false, true])("保存失败可重试，恢复拦截=%s 时仍保留 block", async (restorationBlocked) => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary()),
+			applyAgentNativeConversationSessionIdentity: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			isRestorationHarnessGeneratedTaskNotificationInterceptionActive: vi.fn(() => restorationBlocked),
+		} as unknown as TerminalSessionManager;
+		let releasePersistence: () => void = () => {};
+		const pendingPersistence = new Promise<void>((resolve) => {
+			releasePersistence = resolve;
+		});
+		const persistIdentity = vi
+			.fn()
+			.mockImplementationOnce(async () => {
+				await pendingPersistence;
+				throw new Error("disk unavailable");
+			})
+			.mockResolvedValueOnce(true);
+		const broadcast = vi.fn();
+		const api = createHooksApi({
+			getWorkspacePathById: () => "/tmp/repo",
+			ensureTerminalManagerForWorkspace: async () => manager,
+			broadcastRuntimeWorkspaceStateUpdated: broadcast,
+			broadcastTaskReadyForReview: vi.fn(),
+			persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: persistIdentity,
+			deferHarnessGeneratedPromptDuringAgentSessionRestoration: vi.fn(async () => undefined),
+		});
+		const input = {
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: restorationBlocked ? ("to_in_progress" as const) : ("activity" as const),
+			metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
+			submittedPromptText: ORPHAN_TASK_NOTIFICATION_FROM_PREVIOUS_AGENT_SESSION_INCARNATION,
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "claude",
+				nativeSessionId: "session-1",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		};
+		let completed = false;
+		const responsePromise = api.ingest(input).then((result) => {
+			completed = true;
+			return result;
+		});
+		await vi.waitFor(() => expect(persistIdentity).toHaveBeenCalledOnce());
+		expect(completed).toBe(false);
+		releasePersistence();
+		const failed = await responsePromise;
+		expect(failed).toMatchObject({ ok: false, error: "disk unavailable" });
+		expect(broadcast).not.toHaveBeenCalled();
+		if (restorationBlocked) {
+			expect(failed.harnessUserPromptProcessingDirective?.processingDecision).toBe(
+				"block_and_defer_until_explicit_user_input",
+			);
+		}
+		expect((await api.ingest(input)).ok).toBe(true);
+		expect(persistIdentity).toHaveBeenCalledTimes(2);
+		expect(broadcast).toHaveBeenCalledOnce();
+	});
+});
+
+it("通知已处理的重复 hook 仍补存身份，但不再次转换状态", async () => {
+	const candidateId = await captureNotificationSignal({
+		workspaceId: "workspace-dedup",
+		taskId: "task-1",
+		sourceKind: "hook_runtime_received",
+		rawPayload: {},
+	});
+	if (!candidateId) throw new Error("Expected notification candidate");
+	await getNotificationLifecycleArchive().update(
+		candidateId,
+		{ notificationProcessingStatus: "published" },
+		"test-published",
+		{},
+	);
+	const manager = {
+		getSummary: vi.fn(() => createSummary()),
+		applyAgentNativeConversationSessionIdentity: vi.fn(),
+		transitionToReview: vi.fn(),
+	} as unknown as TerminalSessionManager;
+	const persistIdentity = vi.fn(async () => true);
+	const api = createHooksApi({
+		getWorkspacePathById: () => "/tmp/repo",
+		ensureTerminalManagerForWorkspace: async () => manager,
+		broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+		broadcastTaskReadyForReview: vi.fn(),
+		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: persistIdentity,
+	});
+	expect(
+		await api.ingest({
+			workspaceId: "workspace-dedup",
+			taskId: "task-1",
+			notificationCandidateId: candidateId,
+			event: "to_review",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "claude",
+				nativeSessionId: "session-1",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		}),
+	).toEqual({ ok: true });
+	expect(persistIdentity).toHaveBeenCalledOnce();
+	expect(manager.transitionToReview).not.toHaveBeenCalled();
+});
+
+it("SessionStart 身份事件不解除恢复守卫、不推进时间戳或通知", async () => {
+	const manager = {
+		getSummary: vi.fn(() => createSummary()),
+		applyAgentNativeConversationSessionIdentity: vi.fn(),
+		applyHookActivity: vi.fn(),
+		transitionToRunning: vi.fn(),
+		recordAgentLifecycleHookConversationProgress: vi.fn(),
+		markRestoredAgentConversationContinued: vi.fn(),
+	} as unknown as TerminalSessionManager;
+	const notify = vi.fn();
+	const api = createHooksApi({
+		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: vi.fn(async () => false),
+		getWorkspacePathById: () => "/tmp/repo",
+		ensureTerminalManagerForWorkspace: async () => manager,
+		broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+		broadcastTaskReadyForReview: notify,
+	});
+	expect(
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "agent_conversation_session_identity_observed",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "claude",
+				nativeSessionId: "session-new",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		}),
+	).toEqual({ ok: true });
+	expect(manager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledOnce();
+	expect(manager.applyHookActivity).not.toHaveBeenCalled();
+	expect(manager.transitionToRunning).not.toHaveBeenCalled();
+	expect(manager.recordAgentLifecycleHookConversationProgress).not.toHaveBeenCalled();
+	expect(notify).not.toHaveBeenCalled();
+});
+
+it("身份落盘失败如实返回错误且保留恢复拦截指令", async () => {
+	const manager = {
+		getSummary: vi.fn(() => createSummary()),
+		applyAgentNativeConversationSessionIdentity: vi.fn(),
+		isRestorationHarnessGeneratedTaskNotificationInterceptionActive: () => true,
+		applyHookActivity: vi.fn(),
+		disarmRestorationContinuationGuard: vi.fn(),
+	} as unknown as TerminalSessionManager;
+	const api = createHooksApi({
+		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: async () => {
+			throw new Error("identity storage unavailable");
+		},
+		getWorkspacePathById: () => "/tmp/repo",
+		ensureTerminalManagerForWorkspace: async () => manager,
+		broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+		broadcastTaskReadyForReview: vi.fn(),
+	});
+	const response = await api.ingest({
+		taskId: "task-1",
+		workspaceId: "workspace-1",
+		event: "to_in_progress",
+		metadata: { source: "claude", hookEventName: "UserPromptSubmit" },
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "claude",
+			nativeSessionId: "new-session",
+			transcriptPath: null,
+			observedAt: 1,
+		},
+	});
+	expect(response).toMatchObject({
+		ok: false,
+		error: "identity storage unavailable",
+		harnessUserPromptProcessingDirective: { processingDecision: "block_and_defer_until_explicit_user_input" },
+	});
+	expect(manager.applyHookActivity).not.toHaveBeenCalled();
+	expect(manager.disarmRestorationContinuationGuard).not.toHaveBeenCalled();
 });

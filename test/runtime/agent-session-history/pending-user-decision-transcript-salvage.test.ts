@@ -64,6 +64,95 @@ describe("pending user decision transcript salvage", () => {
 		).toBeNull();
 	});
 
+	// Kanban / 系统重启后 resume：原选择器已不在、问题从未被回答，转录尾部是一次「拒绝」。按用户要求这必须
+	// 重新摆上面板。Claude 在拒绝后自动插入的「[Request interrupted by user for tool use]」是数组内容，
+	// 不是人类输入，不能据此判定「之后有人类输入」。
+	it("Claude 尾部提问被拒绝（无真实作答）且之后无人类输入时仍补录", () => {
+		const result = salvageLatestUnansweredClaudeUserQuestionFromTranscriptLines([
+			line({
+				type: "assistant",
+				timestamp: "2026-08-12T15:33:34.120Z",
+				message: {
+					content: [{ type: "tool_use", id: "toolu-question", name: "AskUserQuestion", input: CLAUDE_QUESTION }],
+				},
+			}),
+			line({
+				type: "user",
+				toolUseResult: "User rejected tool use",
+				message: {
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "toolu-question",
+							is_error: true,
+							content: "The user doesn't want to proceed with this tool use. The tool use was rejected.",
+						},
+					],
+				},
+			}),
+			line({
+				type: "user",
+				message: { content: [{ type: "text", text: "[Request interrupted by user for tool use]" }] },
+			}),
+		]);
+		expect(result?.payload.decisionSourceId).toBe("toolu-question");
+	});
+
+	it("Claude 被拒绝后用户又输入了内容：视为已越过这个问题，不补录", () => {
+		expect(
+			salvageLatestUnansweredClaudeUserQuestionFromTranscriptLines([
+				line({
+					type: "assistant",
+					timestamp: "2026-08-12T15:33:34.120Z",
+					message: {
+						content: [
+							{ type: "tool_use", id: "toolu-question", name: "AskUserQuestion", input: CLAUDE_QUESTION },
+						],
+					},
+				}),
+				line({
+					type: "user",
+					toolUseResult: "User rejected tool use",
+					message: {
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu-question", is_error: true, content: "rejected" },
+						],
+					},
+				}),
+				line({ type: "user", origin: { kind: "human" }, message: { content: "我换个思路说" } }),
+			]),
+		).toBeNull();
+	});
+
+	it("Claude 工具调用因校验错误失败（不是用户拒绝）仍按已解决处理", () => {
+		expect(
+			salvageLatestUnansweredClaudeUserQuestionFromTranscriptLines([
+				line({
+					type: "assistant",
+					timestamp: "2026-08-12T15:33:34.120Z",
+					message: {
+						content: [
+							{ type: "tool_use", id: "toolu-question", name: "AskUserQuestion", input: CLAUDE_QUESTION },
+						],
+					},
+				}),
+				line({
+					type: "user",
+					message: {
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "toolu-question",
+								is_error: true,
+								content: "<tool_use_error>InputValidationError</tool_use_error>",
+							},
+						],
+					},
+				}),
+			]),
+		).toBeNull();
+	});
+
 	it("Claude 提问后出现普通人类输入时保守不补录", () => {
 		expect(
 			salvageLatestUnansweredClaudeUserQuestionFromTranscriptLines([

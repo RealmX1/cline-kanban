@@ -861,35 +861,38 @@ describe("BoardCard", () => {
 		expect(integratedIndicator?.className).toContain("text-status-green");
 	});
 
-	it("证据不足的 legacy task 将回流数量显示为问号", async () => {
-		mockWorkspaceSnapshot = {
-			taskId: "task-1",
-			path: "/tmp/worktrees/task-1",
-			branch: null,
-			isDetached: true,
-			headCommit: null,
-			baseCommit: null,
-			commitsAheadOfBaseRef: null,
-			commitsBehindBaseRef: null,
-			taskCommitsIntegratedIntoBaseRef: null,
-			taskCommitIntegrationTrackingStatus: "legacy_history_unavailable",
-			workspaceGitStatusObservationSource: "unavailable",
-			workspaceGitStatusObservedAt: null,
-			changedFiles: null,
-			additions: null,
-			deletions: null,
-		};
+	it.each(["legacy_history_unavailable", "task_commit_ownership_history_incomplete"] as const)(
+		"回流数量证据不足（%s）时显示为问号",
+		async (taskCommitIntegrationTrackingStatus) => {
+			mockWorkspaceSnapshot = {
+				taskId: "task-1",
+				path: "/tmp/worktrees/task-1",
+				branch: null,
+				isDetached: true,
+				headCommit: null,
+				baseCommit: null,
+				commitsAheadOfBaseRef: null,
+				commitsBehindBaseRef: null,
+				taskCommitsIntegratedIntoBaseRef: null,
+				taskCommitIntegrationTrackingStatus,
+				workspaceGitStatusObservationSource: "unavailable",
+				workspaceGitStatusObservedAt: null,
+				changedFiles: null,
+				additions: null,
+				deletions: null,
+			};
 
-		await act(async () => {
-			root.render(
-				<TooltipProvider>
-					<BoardCard card={createCard()} index={0} columnId="trash" />
-				</TooltipProvider>,
-			);
-		});
+			await act(async () => {
+				root.render(
+					<TooltipProvider>
+						<BoardCard card={createCard()} index={0} columnId="trash" />
+					</TooltipProvider>,
+				);
+			});
 
-		expect(container.querySelector("[data-task-commits-integrated-into-base-ref]")?.textContent).toBe("?");
-	});
+			expect(container.querySelector("[data-task-commits-integrated-into-base-ref]")?.textContent).toBe("?");
+		},
+	);
 
 	it("shows formatted agent override details with model name and reasoning effort", async () => {
 		mockWorkspaceSnapshot = {

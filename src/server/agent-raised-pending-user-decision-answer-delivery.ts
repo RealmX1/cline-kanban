@@ -20,20 +20,24 @@ import {
 	readAgentRaisedPendingUserDecisions,
 	recordAgentRaisedPendingUserDecisionAnswer,
 	resolveAgentRaisedPendingUserDecisionOrderedQuestions,
+	resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession,
 	updateAgentRaisedPendingUserDecisionAnswerDeliveryState,
 } from "../state/agent-raised-pending-user-decision-store";
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
 
 // 投递给 agent 的正文。刻意把**原问题**也带上：会话可能已经被回收重启，新活体并不知道
 // 「你刚才问了什么」，只发一句「我选 B」它无从对应。
+// 开头措辞必须对两种投递情形都成立：会话已被回收 / 重启后恢复；或会话仍活着、为投递先用 Esc 关掉了
+// 终端里的选择器（此时原工具调用被记为拒绝）。两种情形下原 AskUserQuestion 都没有正式的作答结果。
 export function buildAgentRaisedPendingUserDecisionAnswerMessage(
 	decision: PersistedAgentRaisedPendingUserDecision,
 	answer: AgentRaisedPendingUserDecisionAnswer,
 ): string {
 	const lines = [
-		"这是 Cline Kanban 对一个因会话回收或重启而中断的待答问题所恢复的用户答复。",
+		"这是用户在 Cline Kanban 面板中对你先前提出的待答问题给出的答复。",
+		"原提问工具调用已被中断或记为拒绝，没有正式的作答结果——请以这里为准，不要重新提问。",
 		"",
-		"以下逐项重述你当时提出的全部问题、全部选项及用户答案；请勿假设恢复后的 active branch 仍保留原工具调用。",
+		"以下逐项重述你当时提出的全部问题、全部选项及用户答案。",
 	];
 	const orderedQuestions = resolveAgentRaisedPendingUserDecisionOrderedQuestions(decision);
 	for (const [questionIndex, question] of orderedQuestions.entries()) {
@@ -98,6 +102,8 @@ export interface AgentRaisedPendingUserDecisionAnswerDeliveryDependencies {
 		sessionTransport: RuntimeAgentSessionTransport;
 		text: string;
 		idempotencyKey: string;
+		// 提问它的会话活体。与当前活体相同即说明 agent 仍停在终端的提问选择器上，终端 transport 须先关掉它。
+		originRuntimeSessionIncarnationId: string | null;
 	}) => Promise<boolean>;
 	now?: () => number;
 }
@@ -161,6 +167,7 @@ export function createAgentRaisedPendingUserDecisionAnswerDelivery(
 				sessionTransport: decision.sessionTransport,
 				text: buildAgentRaisedPendingUserDecisionAnswerMessage(decision, answer),
 				idempotencyKey: decision.answerDeliveryIdempotencyKey,
+				originRuntimeSessionIncarnationId: decision.originRuntimeSessionIncarnationId,
 			});
 			if (!delivered) {
 				return await markFailed("投递未完成实际会话写入");
@@ -187,10 +194,13 @@ export function createAgentRaisedPendingUserDecisionAnswerDelivery(
 			freeformText: string | null;
 			orderedQuestionAnswers?: AgentRaisedPendingUserDecisionAnswer["orderedQuestionAnswers"];
 		}): Promise<DeliverAgentRaisedPendingUserDecisionAnswerResult> {
-			const { workspaceId, decisionId } = input;
-			const existing = (await readAgentRaisedPendingUserDecisions(workspaceId)).find(
-				(decision) => decision.decisionId === decisionId,
+			const { workspaceId } = input;
+			// UI 可能还拿着同一次提问的重复记录的 id（旧版本一问两记），沿重复链找到真正在等答的那条。
+			const existing = resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession(
+				await readAgentRaisedPendingUserDecisions(workspaceId),
+				input.decisionId,
 			);
+			const decisionId = existing?.decisionId ?? input.decisionId;
 			if (!existing) {
 				return { ok: false, delivered: false, error: `Pending decision "${decisionId}" not found` };
 			}
@@ -209,6 +219,7 @@ export function createAgentRaisedPendingUserDecisionAnswerDelivery(
 				freeformText: input.freeformText,
 				...(input.orderedQuestionAnswers ? { orderedQuestionAnswers: input.orderedQuestionAnswers } : {}),
 				answeredAt,
+				answerSource: "kanban_panel",
 			});
 			if (!answered) {
 				return { ok: false, delivered: false, error: `Pending decision "${decisionId}" could not be answered` };

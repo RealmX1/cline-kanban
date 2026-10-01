@@ -39,6 +39,7 @@ import {
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { BacklogTaskDescriptionLastUpdatedPill } from "@/components/backlog-task-description-last-updated-pill";
 import {
 	formatClineReasoningEffortLabel,
 	formatClineSelectedModelButtonText,
@@ -575,6 +576,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 			);
 		} else if (taskCommitIntegrationTrackingStatus === "legacy_history_unavailable") {
 			parts.push(`Integrated commit history is unavailable for this legacy task`);
+		} else if (taskCommitIntegrationTrackingStatus === "task_commit_ownership_history_incomplete") {
+			parts.push(`Integrated task commit count cannot be proven from recorded history`);
 		} else if (taskCommitIntegrationTrackingStatus === "inplace_task_commit_ownership_unavailable") {
 			parts.push(`Integrated task commit ownership cannot be isolated in inplace mode`);
 		} else if (taskCommitIntegrationTrackingStatus === "git_probe_unavailable") {
@@ -758,7 +761,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 			>
 				{/* agent 图标 + 微型时长药丸合一：钉在卡片左上角、略微超出边框（不占标题横向空间）。
 				    最左为 agent 图标（略放大）；完整「agent · 模型」进 hover tooltip。
-				    Clock=自创建至今（恒显）；Activity=agent 上次响应至今（仅有时间戳时显）。各段 hover 显绝对本地时间。 */}
+				    Clock=自创建至今（恒显）；PencilLine=Description 最后更新至今（仅 backlog，即该列排序键）；
+				    Activity=agent 上次响应至今（仅有时间戳时显）。各段 hover 显绝对本地时间。 */}
 				{/* 置顶板分身在末尾多挂一段 stage 标签，胶囊会因此变宽；右侧不远就是 hover 动作组（同在 -top-[6px]），
 				    所以限宽 + 标签 truncate，窄卡上宁可截断 stage 名也不与动作组叠在一起。 */}
 				<div
@@ -792,6 +796,16 @@ export const TaskCardBody = memo(function TaskCardBody({
 							{formatCompactElapsedSince(card.createdAt, elapsedNowMs)}
 						</span>
 					</Tooltip>
+					{columnId === "backlog" ? (
+						<>
+							<span className="text-text-tertiary">·</span>
+							<BacklogTaskDescriptionLastUpdatedPill
+								card={card}
+								elapsedNowMs={elapsedNowMs}
+								revealHoverActionTooltip={revealHoverActionTooltip}
+							/>
+						</>
+					) : null}
 					{agentResponseGenerationStoppedAt != null ? (
 						<>
 							<span className="text-text-tertiary">·</span>

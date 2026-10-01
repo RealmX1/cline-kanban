@@ -18,6 +18,7 @@ import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "re
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
+import { AgentRaisedUserDecisionHistoryPanel } from "@/components/detail-panels/agent-raised-user-decision-history-panel";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
@@ -1299,10 +1300,29 @@ export function CardDetailView({
 			taskColumnId={selection.column.id}
 		/>
 	);
+	// 提问它的那个会话活体仍在跑、且仍停在提问回合 ⇒ 终端里此刻显示的就是这道题的交互式选择器。
+	// 活体不同（Kanban / 系统重启后 resume、会话被回收后重建）或来源不明（转录补录）⇒ 选择器早已不在。
+	const pendingUserDecisionSessionFacets = activeTaskConversationSessionSummary
+		? resolveSessionFacets(activeTaskConversationSessionSummary)
+		: null;
+	const isAgentStoppedOnPendingQuestionSelectorInLiveTerminal =
+		pendingUserDecision.decision !== null &&
+		pendingUserDecision.decision.originRuntimeSessionIncarnationId !== null &&
+		pendingUserDecision.decision.originRuntimeSessionIncarnationId ===
+			(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null) &&
+		pendingUserDecisionSessionFacets?.turnOwner === "user" &&
+		pendingUserDecisionSessionFacets.liveness === "live" &&
+		pendingUserDecisionSessionFacets.userTurnKind === "question";
+	const isPendingQuestionRaisedByEarlierAgentSessionIncarnation =
+		pendingUserDecision.decision !== null &&
+		(pendingUserDecision.decision.originRuntimeSessionIncarnationId === null ||
+			pendingUserDecision.decision.originRuntimeSessionIncarnationId !==
+				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
 			{pendingUserDecision.decision ? (
 				<AgentRaisedPendingUserDecisionPanel
+					key={pendingUserDecision.decision.decisionId}
 					decision={pendingUserDecision.decision}
 					isSubmitting={pendingUserDecision.isSubmitting}
 					onAnswer={pendingUserDecision.answer}
@@ -1310,8 +1330,23 @@ export function CardDetailView({
 					agentResponseGenerationTurnSequence={
 						activeTaskConversationSessionSummary?.agentResponseGenerationTurnSequence ?? 0
 					}
+					isAgentStoppedOnThisQuestionSelectorInLiveTerminal={
+						isAgentStoppedOnPendingQuestionSelectorInLiveTerminal
+					}
+					isQuestionRaisedByEarlierAgentSessionIncarnation={
+						isPendingQuestionRaisedByEarlierAgentSessionIncarnation
+					}
 				/>
 			) : null}
+			<AgentRaisedUserDecisionHistoryPanel
+				workspaceId={currentProjectId}
+				taskId={selectedTaskConversationSessionId}
+				pendingUserDecisionIdentityForRefresh={
+					pendingUserDecision.decision
+						? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
+						: null
+				}
+			/>
 			{agentSessionContent}
 		</div>
 	);

@@ -66,6 +66,10 @@ import {
 import { captureAgentSessionForkReplayLaunchArguments } from "./agent-session-fork-replay-launch-arguments-capture";
 import { materializeTaskAgentSessionForExecutionWorkingDirectory } from "./agent-session-materialization";
 import {
+	type AgentUserQuestionSelectorDismissalOutcome,
+	dismissAgentUserQuestionSelectorUntilTerminalInputBoxVisible,
+} from "./agent-user-question-selector-dismissal-before-programmatic-answer-delivery";
+import {
 	hasClaudeInteractivePrompt,
 	hasClaudeStartupUiRendered,
 	// startup readiness 的 wall-clock 兜底超时值。source-of-truth 常量名在 claude-readiness.ts
@@ -748,9 +752,13 @@ function cloneSummary(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSum
 	};
 }
 
-function updateSummary(entry: SessionEntry, patch: Partial<RuntimeTaskSessionSummary>): RuntimeTaskSessionSummary {
+function updateSummary(
+	entry: SessionEntry,
+	patch: Partial<RuntimeTaskSessionSummary>,
+	summaryUpdatedAt = now(),
+): RuntimeTaskSessionSummary {
 	// 单一写侧漏斗：经 mergeSummaryWithFacets 派发（facet 写时主真相源，详见该函数）。
-	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: now() });
+	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: summaryUpdatedAt });
 	return entry.summary;
 }
 
@@ -890,12 +898,39 @@ interface TerminalEnvironmentOptions {
 	forceColor: boolean;
 }
 
+// Kanban 的 PTY 是一个全新的终端（前端 xterm.js），不是宿主 tmux / screen / zellij 的 pane，也不是
+// 宿主 iTerm 的会话。Kanban 运行时自己常跑在 tmux 里，若把这些宿主身份变量原样继承给子进程，就是
+// 在对 agent 撒谎。真实事故：Codex 0.158 起，只要看到 TMUX/TMUX_PANE 就去 `tmux display-message
+// -p '#{mouse}'` 探测（上游 codex-rs/tui/src/tui/tmux.rs），宿主 tmux `mouse off` → 放弃鼠标捕获、
+// 改开 ?1007 alternate scroll → xterm.js 在 alt buffer 里把滚轮翻译成 ↑/↓ → 滚轮不再滚 transcript，
+// 而是翻输入框的历史 prompt。TERM_PROGRAM 已被覆盖为 kanban，同源的 *_VERSION / 会话 id 等一并剥掉。
+// 只从继承的 process.env 基底里剔除：调用方经 sources 显式传入的同名键仍生效。
+// 刻意不剥 TERMINFO_DIRS 这类 terminfo 查找路径——那是能力数据库位置，不是终端身份。
+const INHERITED_HOST_TERMINAL_IDENTITY_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY: readonly string[] = [
+	"TMUX",
+	"TMUX_PANE",
+	"STY",
+	"ZELLIJ",
+	"ZELLIJ_SESSION_NAME",
+	"ZELLIJ_PANE_ID",
+	"TERM_PROGRAM_VERSION",
+	"TERM_SESSION_ID",
+	"ITERM_SESSION_ID",
+	"LC_TERMINAL",
+	"LC_TERMINAL_VERSION",
+	"TERM_FEATURES",
+];
+
 export function buildTerminalEnvironment(
 	options: TerminalEnvironmentOptions,
 	...sources: Array<Record<string, string | undefined> | undefined>
 ): Record<string, string | undefined> {
+	const inheritedProcessEnvWithoutHostTerminalIdentity: Record<string, string | undefined> = { ...process.env };
+	for (const key of INHERITED_HOST_TERMINAL_IDENTITY_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY) {
+		delete inheritedProcessEnvWithoutHostTerminalIdentity[key];
+	}
 	const env: Record<string, string | undefined> = {
-		...process.env,
+		...inheritedProcessEnvWithoutHostTerminalIdentity,
 		...Object.assign({}, ...sources),
 		COLORTERM: "truecolor",
 		TERM: "xterm-256color",
@@ -4571,7 +4606,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
-	// N0a：终端 agent 原生会话身份 sidecar（hooks.ingest 每个事件都带，这里只在值变化时写）。
+	// N0a：身份及其最新确认水位独立于对话进展，同身份的新观察也必须写入以拒绝迟到的旧身份。
 	// 经 updateSummary 漏斗写入，不碰 facet 三元组；写入即向监听者与 summary 流广播（与 applyTurnCheckpoint 同形）。
 	applyAgentNativeConversationSessionIdentity(
 		taskId: string,
@@ -4581,12 +4616,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
+		const previousIdentity = entry.summary.agentNativeConversationSessionIdentity;
 		if (
-			isSameAgentNativeConversationSessionIdentity(entry.summary.agentNativeConversationSessionIdentity, identity)
+			previousIdentity?.sourceAgentId === identity.sourceAgentId &&
+			identity.observedAt < previousIdentity.observedAt
 		) {
 			return cloneSummary(entry.summary);
 		}
-		const summary = updateSummary(entry, { agentNativeConversationSessionIdentity: identity });
+		if (
+			isSameAgentNativeConversationSessionIdentity(previousIdentity, identity) &&
+			previousIdentity?.observedAt === identity.observedAt
+		) {
+			return cloneSummary(entry.summary);
+		}
+		const summary = updateSummary(
+			entry,
+			{ agentNativeConversationSessionIdentity: identity },
+			entry.summary.updatedAt,
+		);
 		if (entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));
@@ -4774,6 +4821,47 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 		}
 		return summary;
+	}
+
+	// Kanban 面板上的答案要投递给**仍活着、正停在提问选择器上**的 agent 时，先用 Esc 关掉选择器，并读屏
+	// 确认输入框已出现（理由与约束见 agent-user-question-selector-dismissal-before-programmatic-answer-delivery.ts）。
+	// Esc 直接写 PTY、不走 writeInput：这不是人在敲键盘，不能记 lastUserInputAt 或动输入框占用账本。
+	async dismissAgentUserQuestionSelectorBeforeProgrammaticAnswerDelivery(
+		taskId: string,
+	): Promise<AgentUserQuestionSelectorDismissalOutcome> {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) {
+			return "no_active_agent_terminal_session";
+		}
+		const boxGrammar = resolveTerminalInputBoxGrammar(entry.summary.agentId);
+		const mirror = entry.terminalStateMirror;
+		if (!boxGrammar || !mirror) {
+			return "agent_terminal_input_box_structure_not_modeled";
+		}
+		// 每次读屏都跨 await：期间会话可能退出或被 refresh 换代，结论必须作废而不是拿旧屏硬答。
+		const isStillSameActiveSession = () => this.entries.get(taskId)?.active === active;
+		return await dismissAgentUserQuestionSelectorUntilTerminalInputBoxVisible({
+			isTerminalInputBoxVisibleOnScreen: async () => {
+				if (!isStillSameActiveSession()) {
+					return null;
+				}
+				const screenSnapshot = await mirror.getScreenSnapshot();
+				if (!isStillSameActiveSession()) {
+					return null;
+				}
+				return locateTerminalInputBox(screenSnapshot, boxGrammar) !== null;
+			},
+			writeEscapeKeyIntoAgentTerminal: () => {
+				if (!isStillSameActiveSession()) {
+					return false;
+				}
+				active.session.write("\u001b");
+				return true;
+			},
+			waitMilliseconds: (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
+			now,
+		});
 	}
 
 	// 会话被回收（或进程自行退出）之后，账本条目与 summary 仍然在——回收只终止运行时、不删账本——

@@ -1,10 +1,11 @@
-# 终端 IO：输出反应框架、持久终端 visibility 协议、PTY/argv 特殊字符安全
+# 终端 IO：输出反应框架、持久终端 visibility 协议、PTY/argv 特殊字符安全、PTY 环境隔离
 
-本文是终端子系统三块「读代码要拼很久才能拼出来」的机制说明：
+本文是终端子系统四块「读代码要拼很久才能拼出来」的机制说明：
 
 1. **output-reactions**：跨 harness 的「解码后 PTY 输出 → 检测信号 → 执行动作」扩展点（首个成员是连接中断自动续跑）。
 2. **持久终端 visibility 协议**：浏览器标签页隐藏/重现时，xterm 渲染与服务端快照如何协同，避免「延时摄影」回放。
 3. **PTY/argv 特殊字符安全**：agent 启动参数（如 `opus[1m]`）在 darwin/linux 与 Windows 两条链路上各自为什么安全。
+4. **PTY 环境不继承宿主终端身份**：为什么 `TMUX` 等变量必须在进 PTY 前剥掉。
 
 ---
 
@@ -87,3 +88,13 @@ agent 终端是持久 xterm（`web-ui/src/terminal/persistent-terminal-manager.t
 ### 契约侧不额外设限
 
 `runtimeTaskTerminalAgentModelOverrideSettingsSchema`（`src/core/api-contract.ts:156-160`）对模型 override 只要求 `modelId` 为非空 trimmed 字符串（superRefine 只额外校验 cursor 的 id 合法性），不限制字符集——安全责任完整落在上述启动链路上，契约层不兜底也不重复检查。
+
+---
+
+## 4. PTY 环境不继承宿主终端身份
+
+Kanban 的 PTY 是一个全新的终端（前端 xterm.js），不是宿主 tmux / screen / zellij 的 pane，也不是宿主 iTerm 的会话。`buildTerminalEnvironment`（`src/terminal/session-manager.ts`）因此在继承 `process.env` 时剥掉 `INHERITED_HOST_TERMINAL_IDENTITY_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY` 列出的身份变量（`TMUX*`、`STY`、`ZELLIJ*`、`TERM_PROGRAM_VERSION`、iTerm 的会话/能力变量等），agent 终端与 shell 终端两条路径都生效。调用方经 `sources` 显式传入的同名键不受影响；`TERMINFO_DIRS` 这类 terminfo 查找路径刻意保留。
+
+触发事故（2026-09-29，Codex 0.158.0）：Kanban 运行时跑在 tmux 里，Codex 子进程继承了 `TMUX`/`TMUX_PANE`。Codex 0.158 起会据此执行 `tmux display-message -p '#{mouse}'`（上游 `codex-rs/tui/src/tui/tmux.rs`），宿主 tmux 为 `mouse off` → `MouseCapture::DisabledByTmux` → 不开鼠标上报、改开 `?1007h` alternate scroll（`alternate_screen.rs::configure_input`）。xterm.js 在 alt buffer 且无鼠标上报时把滚轮翻译成 ↑/↓，于是滚轮不再滚 Codex 自己的全屏 transcript，而是翻输入框的历史 prompt。
+
+新增「宿主终端身份」类变量时同样加进该常量；已在运行的会话进程保留旧环境，需重启会话才生效。

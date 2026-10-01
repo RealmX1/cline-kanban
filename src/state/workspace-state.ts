@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 
+import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import {
 	type RuntimeBoardColumnId,
 	type RuntimeBoardData,
@@ -379,24 +380,35 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 // 「本来重启就能自愈」的中断变成永久损坏。
 //
 // 只在「persisted 不是空壳」时保留——两边都是空壳时留谁都一样，放行 incoming 免得把陈旧 updatedAt 钉住。
-function preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
 	incomingSessions: Record<string, RuntimeTaskSessionSummary>,
 ): Record<string, RuntimeTaskSessionSummary> {
 	let reconciledSessions = incomingSessions;
 	for (const [taskId, incomingSummary] of Object.entries(incomingSessions)) {
 		const persistedSummary = persistedSessions[taskId];
+		if (!persistedSummary) continue;
+		let reconciledSummary = incomingSummary;
 		if (
-			!persistedSummary ||
-			!isNeverStartedPlaceholderTaskSessionSummary(incomingSummary) ||
-			isNeverStartedPlaceholderTaskSessionSummary(persistedSummary)
+			isNeverStartedPlaceholderTaskSessionSummary(incomingSummary) &&
+			!isNeverStartedPlaceholderTaskSessionSummary(persistedSummary)
 		) {
-			continue;
+			reconciledSummary = persistedSummary;
+		} else {
+			// hook 已确认落盘后，延迟到达的整份 UI 快照不能撤销较新的原生身份。
+			const persistedIdentity = persistedSummary.agentNativeConversationSessionIdentity;
+			const incomingIdentity = incomingSummary.agentNativeConversationSessionIdentity;
+			if (
+				persistedIdentity &&
+				incomingSummary.agentId === persistedSummary.agentId &&
+				(!incomingIdentity || persistedIdentity.observedAt > incomingIdentity.observedAt)
+			) {
+				reconciledSummary = { ...incomingSummary, agentNativeConversationSessionIdentity: persistedIdentity };
+			}
 		}
-		if (reconciledSessions === incomingSessions) {
-			reconciledSessions = { ...incomingSessions };
-		}
-		reconciledSessions[taskId] = persistedSummary;
+		if (reconciledSummary === incomingSummary) continue;
+		if (reconciledSessions === incomingSessions) reconciledSessions = { ...incomingSessions };
+		reconciledSessions[taskId] = reconciledSummary;
 	}
 	return reconciledSessions;
 }
@@ -821,6 +833,50 @@ export async function savePersistedWorkspaceSessionsById(
 	});
 }
 
+// 身份是重启寻址所需的会话事实，不能等待浏览器保存 board 或正常关机才落盘。
+export async function persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+	workspaceId: string,
+	taskId: string,
+	readCurrentSessionSummary: () => RuntimeTaskSessionSummary | null,
+): Promise<boolean> {
+	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
+		const sessions = await readWorkspaceSessions(workspaceId);
+		const currentMeta = await readWorkspaceMeta(workspaceId);
+		// 取锁和读盘期间可能又收到 hook；此处才取当前 summary，不能保存排队前的旧快照。
+		const currentSummary = readCurrentSessionSummary();
+		if (!currentSummary || currentSummary.taskId !== taskId) {
+			throw new Error(`Session "${taskId}" is no longer available in workspace "${workspaceId}".`);
+		}
+		const parsedSummary = runtimeTaskSessionSummarySchema.parse(currentSummary);
+		const identity = parsedSummary.agentNativeConversationSessionIdentity;
+		if (!identity || identity.sourceAgentId !== parsedSummary.agentId) {
+			throw new Error(`Native conversation identity does not match session "${taskId}".`);
+		}
+		const savedIdentity = sessions[taskId]?.agentNativeConversationSessionIdentity;
+		// 同身份的新确认也要落盘，跨重启保留拒绝迟到旧身份的时间水位。
+		if (
+			savedIdentity?.sourceAgentId === identity.sourceAgentId &&
+			(savedIdentity.observedAt > identity.observedAt ||
+				(isSameAgentNativeConversationSessionIdentity(savedIdentity, identity) &&
+					savedIdentity.observedAt === identity.observedAt))
+		) {
+			return false;
+		}
+		// 先使旧快照的 revision 失效，再替换 sessions。后一步失败允许 revision 空增，重试仍会补存身份。
+		await lockedFileSystem.writeJsonFileAtomic(
+			getWorkspaceMetaPath(workspaceId),
+			{ revision: currentMeta.revision + 1, updatedAt: Date.now() } satisfies WorkspaceStateMeta,
+			{ lock: null },
+		);
+		await lockedFileSystem.writeJsonFileAtomic(
+			getWorkspaceSessionsPath(workspaceId),
+			{ ...sessions, [taskId]: parsedSummary },
+			{ lock: null },
+		);
+		return true;
+	});
+}
+
 export async function loadWorkspaceState(
 	cwd: string,
 	options: LoadWorkspaceContextOptions = {},
@@ -852,7 +908,7 @@ export async function saveWorkspaceState(
 		}
 		const persistedBoard = await readWorkspaceBoard(context.workspaceId);
 		const persistedSessions = await readWorkspaceSessions(context.workspaceId);
-		const sessions = preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+		const sessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			persistedSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				parsedPayload.board,
@@ -918,7 +974,7 @@ export async function mutateWorkspaceState<T>(
 			};
 		}
 
-		const nextSessions = preservePersistedTaskSessionsAgainstNeverStartedPlaceholders(
+		const nextSessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			currentSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 				mutation.board,

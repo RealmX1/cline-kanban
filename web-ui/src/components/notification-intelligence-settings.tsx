@@ -1,3 +1,7 @@
+import {
+	describeNotificationIntelligencePurposeBindingProblem,
+	type NotificationIntelligencePurposeBindingProblem,
+} from "@runtime-notification-intelligence-purpose-binding-problems";
 import { useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -119,6 +123,11 @@ function NotificationProviderCredentialsEditor({
 					) : (
 						<p className="text-text-secondary">接口类型：OpenAI 兼容文本模型</p>
 					)}
+					<PurposeBindingProblemAlerts
+						problems={draft.purposeBindingProblems.filter(
+							(problem) => problem.modelProviderId === profile.modelProviderId,
+						)}
+					/>
 					<label className="block" htmlFor={`${providerEditorId}-credential-source`}>
 						凭据来源
 						<NativeSelect
@@ -211,6 +220,17 @@ function NotificationProviderCredentialsEditor({
 	);
 }
 
+function PurposeBindingProblemAlerts({ problems }: { problems: NotificationIntelligencePurposeBindingProblem[] }) {
+	return problems.map((problem) => (
+		<p
+			key={`${problem.purposeBindingKey}-${problem.modelProviderId}-${problem.problemKind}`}
+			role="alert"
+			className="text-status-orange"
+		>
+			{describeNotificationIntelligencePurposeBindingProblem(problem)}
+		</p>
+	));
+}
 export function NotificationIntelligenceSettingsSection({
 	draft,
 	disabled,
@@ -218,7 +238,7 @@ export function NotificationIntelligenceSettingsSection({
 	draft: ReturnType<typeof useNotificationIntelligenceSettingsDraft>;
 	disabled: boolean;
 }) {
-	const { settings, setSettings, providers, browserVoiceUri, setBrowserVoiceUri } = draft;
+	const { settings, setSettings, providers, browserVoiceUri, setBrowserVoiceUri, purposeBindingProblems } = draft;
 	const [notice, setNotice] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -316,8 +336,20 @@ export function NotificationIntelligenceSettingsSection({
 										{candidate.displayName}
 									</option>
 								))}
+								{/* 失效的当前绑定必须照实显示，不能落到空值选项上伪装成「沿用环境变量默认配置」。 */}
+								{settings[bindingKey] &&
+									!chatProviders.some(
+										(candidate) => candidate.modelProviderId === settings[bindingKey]?.modelProviderId,
+									) && (
+										<option value={settings[bindingKey].modelProviderId}>
+											{settings[bindingKey].modelProviderId}（已失效）
+										</option>
+									)}
 							</NativeSelect>
 						</label>
+						<PurposeBindingProblemAlerts
+							problems={purposeBindingProblems.filter((problem) => problem.purposeBindingKey === bindingKey)}
+						/>
 						{settings[bindingKey] && (
 							<label className="block">
 								模型 ID
@@ -449,8 +481,24 @@ export function NotificationIntelligenceSettingsSection({
 													{candidate.displayName} · {candidate.alibabaRegion}
 												</option>
 											))}
+										{settings.notificationSpeechBinding?.modelProviderId &&
+											!providers.some(
+												(candidate) =>
+													candidate.providerProtocol === settings.speechProvider &&
+													candidate.modelProviderId ===
+														settings.notificationSpeechBinding?.modelProviderId,
+											) && (
+												<option value={settings.notificationSpeechBinding.modelProviderId}>
+													{settings.notificationSpeechBinding.modelProviderId}（已失效）
+												</option>
+											)}
 									</NativeSelect>
 								</label>
+								<PurposeBindingProblemAlerts
+									problems={purposeBindingProblems.filter(
+										(problem) => problem.purposeBindingKey === "notificationSpeechBinding",
+									)}
+								/>
 								<label className="block" htmlFor="notification-intelligence-selection-10">
 									TTS 模型
 									<NativeSelect
