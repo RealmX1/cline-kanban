@@ -46,10 +46,10 @@ ReactDOM.createRoot(root).render(
 					<Toaster
 						theme="dark"
 						position="bottom-right"
-						// 抬高 toast 起始位置：既避开常驻的 bug 反馈 FAB（右下胶囊），也避开
-						// Post-Deploy Verification 折叠 badge（fixed bottom-20，底 80px + 高约 38px），
-						// 让 toast 堆叠在两者上方而不是盖住可点击控件。
-						offset={{ bottom: 130 }}
+						offset={{ bottom: "calc(24px + var(--kb-terminal-virtual-key-bar-viewport-bottom-inset, 0px))" }}
+						mobileOffset={{
+							bottom: "calc(16px + var(--kb-terminal-virtual-key-bar-viewport-bottom-inset, 0px))",
+						}}
 						toastOptions={{
 							style: {
 								background: "var(--color-surface-1)",

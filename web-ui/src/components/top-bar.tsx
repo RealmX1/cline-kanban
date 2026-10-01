@@ -333,6 +333,7 @@ export function TopBar({
 	connectionRetrySessions = [],
 	onContinueConnectionRetrySessions,
 	onDismissConnectionRetrySessions,
+	bugReportTriggerButton,
 	notificationCenter,
 	postDeployVerificationPendingCount,
 	onOpenPostDeployVerification,
@@ -387,10 +388,11 @@ export function TopBar({
 	connectionRetrySessions?: ConnectionRetrySessionView[];
 	onContinueConnectionRetrySessions?: (taskIds: string[]) => void;
 	onDismissConnectionRetrySessions?: (taskIds: string[]) => void;
+	// 报告按钮自持截图和对话框状态，顶栏只负责入口位置。
+	bugReportTriggerButton?: React.ReactNode;
 	// 全局通知铃铛（跨 repo）：由 App.tsx 渲染 <NotificationCenter/> 后作为 slot 传入，始终可见。
 	notificationCenter?: React.ReactNode;
-	// Post-Deploy Verification 顶栏入口：null/undefined 表示当前 workspace 无 active 部署组 → 不渲染 badge；
-	// number（含 0）表示 active 组待核对任务数。点击展开面板（见 App 的 handleOpenPostDeployVerification）。
+	// null/undefined 表示尚未加载或没有部署记录；number（含 0）保留当前及历史部署的唯一入口。
 	postDeployVerificationPendingCount?: number | null;
 	onOpenPostDeployVerification?: () => void;
 }): React.ReactElement {
@@ -444,7 +446,10 @@ export function TopBar({
 	return (
 		<>
 			<nav
-				className="kb-top-bar flex flex-nowrap items-center h-10 min-h-[40px] min-w-0 bg-surface-1"
+				className={cn(
+					"kb-top-bar flex items-center min-w-0 bg-surface-1",
+					isMobile ? "flex-wrap min-h-[44px]" : "flex-nowrap h-10 min-h-[40px]",
+				)}
 				style={{
 					// 返回箭头与项目切换器都是自带内边距的 ghost 按钮，再叠 12px 外留白会显得左边空一大块。
 					paddingLeft: onBack || projectSwitcher ? 6 : 12,
@@ -453,13 +458,11 @@ export function TopBar({
 				}}
 			>
 				{/* ---- Left side: hamburger/back, path, hints, git ---- */}
-				{/* mobile 左区在 375px 上只分到约 143px，而汉堡/切换器/搜索三个 44px 触控目标本身就要 132px：
-				    保留 1.5 的间距会让最后一个入口正好压在 overflow-hidden 的裁剪边界上（实测 150 vs 149）。
-				    窄屏收紧到 0.5，触控目标尺寸不变、只让出留白。 */}
+				{/* 移动端导航独占一行，避免操作入口增多时把项目切换与搜索挤进裁剪区。 */}
 				<div
 					className={cn(
-						"flex flex-nowrap items-center h-10 flex-1 min-w-0 overflow-hidden",
-						isMobile ? "gap-0.5" : "gap-1.5",
+						"flex flex-nowrap items-center min-w-0 overflow-hidden",
+						isMobile ? "h-11 basis-full flex-none gap-0.5" : "h-10 flex-1 gap-1.5",
 					)}
 				>
 					{isMobile && onToggleSidebar ? (
@@ -581,7 +584,12 @@ export function TopBar({
 				</div>
 
 				{/* ---- Right side: actions ---- */}
-				<div className="flex flex-nowrap items-center h-10 pr-0.5 shrink-0">
+				<div
+					className={cn(
+						"flex flex-nowrap items-center pr-0.5 shrink-0",
+						isMobile ? "h-11 ml-auto min-w-0 max-w-full overflow-x-auto" : "h-10",
+					)}
+				>
 					{/* Desktop: inline shortcut, terminal, debug buttons */}
 					{!isMobile ? (
 						<>
@@ -754,24 +762,24 @@ export function TopBar({
 						</Tooltip>
 					) : null}
 
-					{/* Post-Deploy Verification badge：当前 workspace 有 active 部署组时显示待核对数，点击展开面板。 */}
+					{/* 图标和计数共用常驻边界，当前或历史部署均可从此展开面板。 */}
 					{onOpenPostDeployVerification && postDeployVerificationPendingCount != null ? (
 						<Tooltip
 							side="bottom"
 							content={
 								postDeployVerificationPendingCount > 0
-									? `Post-Deploy Verification · ${postDeployVerificationPendingCount} 项待核对`
-									: "Post-Deploy Verification · 已全部核对"
+									? `Post-Deploy Verification · ${postDeployVerificationPendingCount} 个任务待核对`
+									: "Post-Deploy Verification · 暂无待核对任务 · 查看验证记录"
 							}
 						>
 							<Button
-								variant="ghost"
+								variant="default"
 								size="sm"
 								icon={<ClipboardCheck size={16} />}
 								onClick={onOpenPostDeployVerification}
 								aria-label="Open Post-Deploy Verification"
 								data-testid="open-post-deploy-verification-button"
-								className={cn("ml-0.5", isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
+								className={cn("ml-0.5 shrink-0 gap-1!", isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
 							>
 								{postDeployVerificationPendingCount > 0 ? (
 									<span className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-status-orange px-1 text-[11px] font-semibold text-black">
@@ -828,6 +836,7 @@ export function TopBar({
 					) : null}
 
 					{/* 全局通知铃铛：跨 repo，始终可见。 */}
+					{bugReportTriggerButton}
 					{notificationCenter}
 
 					{/* Settings: always visible */}

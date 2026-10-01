@@ -317,4 +317,38 @@ describe("TopBar script shortcut onboarding", () => {
 		await act(async () => (changesButton as HTMLButtonElement).click());
 		expect(onToggleTaskChangesSidebar).toHaveBeenCalledTimes(1);
 	});
+	it.each([null, 0, 12])("验证入口保留零待核对状态并使用同一个点击区域：%s", async (pendingCount) => {
+		const onOpenPostDeployVerification = vi.fn();
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						postDeployVerificationPendingCount={pendingCount}
+						onOpenPostDeployVerification={onOpenPostDeployVerification}
+						bugReportTriggerButton={<button type="button">Report bug</button>}
+						notificationCenter={<button type="button">Notifications</button>}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		const trigger = container.querySelector<HTMLButtonElement>(
+			'[data-testid="open-post-deploy-verification-button"]',
+		);
+		if (pendingCount === null) {
+			expect(trigger).toBeNull();
+		} else {
+			expect(trigger?.textContent).toBe(pendingCount > 0 ? String(pendingCount) : "");
+			await act(async () => trigger?.click());
+			expect(onOpenPostDeployVerification).toHaveBeenCalledTimes(1);
+		}
+		expect(findButtonByText(container, "Report bug")?.nextElementSibling).toBe(
+			findButtonByText(container, "Notifications"),
+		);
+	});
 });
