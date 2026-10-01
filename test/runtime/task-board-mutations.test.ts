@@ -100,6 +100,33 @@ describe("task stage monotonicity", () => {
 	});
 });
 
+describe("moveTaskToColumn 列内插入位置", () => {
+	// CLI `kanban task start` 等运行时路径移列时，卡片必须落到目标列顶部，与浏览器程序化移列的
+	// insertAtTop 同一语义；否则正在跑的卡会沉到一列陈旧卡的最末。
+	it.each(["in_progress", "review"] as const)("把移入 %s 的卡片放到该列顶部", (targetColumnId) => {
+		const alreadyInTargetColumn = addTaskToColumn(
+			createBoard(),
+			targetColumnId,
+			{ prompt: "Task Already There", baseRef: "main" },
+			() => "aaaaa111",
+		);
+		const waitingInBacklog = addTaskToColumn(
+			alreadyInTargetColumn.board,
+			"backlog",
+			{ prompt: "Task Moved In", baseRef: "main" },
+			() => "bbbbb111",
+		);
+
+		const moved = moveTaskToColumn(waitingInBacklog.board, waitingInBacklog.task.id, targetColumnId);
+
+		expect(moved.moved).toBe(true);
+		expect(moved.board.columns.find((column) => column.id === targetColumnId)?.cards.map((card) => card.id)).toEqual([
+			waitingInBacklog.task.id,
+			alreadyInTargetColumn.task.id,
+		]);
+	});
+});
+
 describe("task images", () => {
 	it("preserves images when creating and updating tasks", () => {
 		const created = addTaskToColumn(
