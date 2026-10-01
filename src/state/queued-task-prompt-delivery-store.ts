@@ -18,6 +18,16 @@
 //     有界收敛」。一条排队 prompt 可以合法地等几个小时，写进去等于亲手打破该不变量，RVF 的启动清扫会
 //     把它当成失败记录扫掉。两者分开，只用 dispatchIdempotencyKey 关联。
 //
+// ## 例外：程序化排队投递在账本里**另有**一条回执
+//
+// `kanban task message --deliver-when-agent-idle`（例：RVF 决策点边界标记）的调用方要的是跨仓契约那套四态回执，
+// 所以这种条目除了住在本文件，还在注入账本里有一条同 key 的 pending 记录（programmaticInjectionLedgerReceiptLink）。
+// 上面那条「不变量会被打破」靠两件事守住：调用方必须给等待上限（账本的有界收敛上界随之变成「截止 + 终端投递
+// 最坏预算」，启动清扫按它判超期），以及条目落定时把结论镜像回账本——镜像挂在下面唯一的持锁读-改-写上
+// （updateWorkspaceQueuedTaskPromptDeliveriesUnderLock），任何一条落定路径都逃不掉。镜像的 IO 在
+// mirror-queued-programmatic-injection-outcomes-into-injection-ledger.ts，程序化入队在
+// enqueue-agent-idle-gated-programmatic-injection-into-prompt-delivery-queue.ts（复用这里导出的变换与写盘咽喉）。
+//
 // ## 写操作是「意图」而不是整份 PUT
 //
 // 同一份队列会被多个标签页与运行时自己（dispatcher）并发写。整份 PUT 的 last-write-wins 会让
@@ -46,6 +56,7 @@ import {
 import { collectQueuedTaskPromptDeliveryChainFromHead } from "../core/queued-task-prompt-delivery-merge";
 import type { QueuedTaskPromptDeliverySettlement } from "../core/queued-task-prompt-delivery-outcome-routing";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { mirrorProgrammaticInjectionQueueTransitionsIntoInjectionLedger } from "./mirror-queued-programmatic-injection-outcomes-into-injection-ledger";
 import { getThisRuntimeProcessInstanceId } from "./runtime-process-instance-heartbeat-registry";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath } from "./workspace-state";
 
@@ -73,6 +84,11 @@ export function isNonTerminalQueuedTaskPromptDeliveryState(
 	state: QueuedTaskPromptDeliveryEntry["deliveryState"],
 ): boolean {
 	return NON_TERMINAL_QUEUED_TASK_PROMPT_DELIVERY_STATES.has(state);
+}
+
+// 程序化排队投递（带注入账本回执）。与人排的条目三处语义不同，见 api-contract.ts 该字段的注释。
+export function isQueuedTaskPromptDeliveryProgrammaticInjection(entry: QueuedTaskPromptDeliveryEntry): boolean {
+	return entry.programmaticInjectionLedgerReceiptLink != null;
 }
 
 // 路径守卫：workspaceId 会一路走到 join()，一个 "../.." 就能把写操作带出 workspaces 根。
@@ -179,7 +195,7 @@ export async function readWorkspaceQueuedTaskPromptDeliverySnapshot(
 
 // ── 纯变换层：以下全部是纯函数，并发正确性来自调用方持锁重读 ────────────────────────────────
 
-function withTaskEntries(
+export function withTaskEntries(
 	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
 	taskId: string,
 	nextEntries: QueuedTaskPromptDeliveryEntry[],
@@ -193,7 +209,7 @@ function withTaskEntries(
 	return { entriesByTaskId };
 }
 
-function getTaskEntries(
+export function getTaskEntries(
 	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
 	taskId: string,
 ): QueuedTaskPromptDeliveryEntry[] {
@@ -258,7 +274,7 @@ export function isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(
 // 每一次意图 mutation 都先过它，再做幂等 / 容量 / dismiss / retry 判断。否则 durable 状态与投影会分裂：
 // 投影把过期条目显示成 expired（UI 给出 Dismiss），底层却仍是非终态的 queued——Dismiss 无操作，
 // 20 条这样的条目还会占满容量、永久拒绝新入队。
-function withExpiredQueuedEntriesSettled(
+export function withExpiredQueuedEntriesSettled(
 	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
 	nowEpochMs: number,
 ): WorkspaceQueuedTaskPromptDeliverySnapshot {
@@ -299,7 +315,7 @@ function withOldestTerminalEntriesDroppedDownToCap(
 //
 // 过期转写放在这里而不是靠定时器：状态改写是副作用，而「过没过期」是时间的纯函数。让每次读-改-写
 // 顺手收敛，就不存在「定时器还没跑到、于是一条早该过期的条目被发了出去」这种窗口。
-function withExpiredAndOverflowingEntriesPruned(
+export function withExpiredAndOverflowingEntriesPruned(
 	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
 	nowEpochMs: number,
 ): WorkspaceQueuedTaskPromptDeliverySnapshot {
@@ -479,7 +495,11 @@ export function applyQueuedTaskPromptDeliveryMutation(
 			snapshot,
 			mutation.taskId,
 			entries.map((entry) =>
-				entry.queueEntryId === mutation.queueEntryId && entry.deliveryState === "queued"
+				entry.queueEntryId === mutation.queueEntryId &&
+				entry.deliveryState === "queued" &&
+				// 程序化条目的正文必须逐字发出（调用方按 hash 认它），它自己的开关不许点亮。它**前一条**的开关
+				// 点亮了也无效——链在它前面就断（collectQueuedTaskPromptDeliveryChainFromHead）。
+				!isQueuedTaskPromptDeliveryProgrammaticInjection(entry)
 					? { ...entry, deliverTogetherWithNextQueuedEntry: mutation.deliverTogetherWithNextQueuedEntry }
 					: entry,
 			),
@@ -535,6 +555,9 @@ export function applyQueuedTaskPromptDeliveryMutation(
 			humanReconfirmedAfterRuntimeRestartAtEpochMs: null,
 			// 这是一条**新**意图，托管权归重排它的这个实例，而不是当初排下原条目的那个。
 			custodianRuntimeProcessInstanceId: getThisRuntimeProcessInstanceId(),
+			// 人从 Queue tab 重排一条失败的程序化条目：那是**人**的新意图，不再是调用方那次投递——调用方的账本记录
+			// 已经落定（写一次即定），它要重投自会换新 key。于是新条目是一条普通的人排条目。
+			programmaticInjectionLedgerReceiptLink: null,
 		};
 		return withExpiredAndOverflowingEntriesPruned(
 			withTaskEntries(snapshot, mutation.taskId, [...entries, requeued]),
@@ -576,8 +599,8 @@ async function quarantineUnreadableQueueFileBeforeOverwrite(
 }
 
 // 持锁读-改-写的唯一实现。所有写入口（意图 mutation、dispatcher 三原子、启动清扫）都经它，
-// 于是「锁内重读」这条不变量只需在一处成立。
-async function updateWorkspaceQueuedTaskPromptDeliveriesUnderLock<TResult>(
+// 于是「锁内重读」这条不变量只需在一处成立——程序化条目的账本镜像也因此只需挂在这一处。
+export async function updateWorkspaceQueuedTaskPromptDeliveriesUnderLock<TResult>(
 	workspaceId: string,
 	transform: (current: WorkspaceQueuedTaskPromptDeliverySnapshot) => {
 		next: WorkspaceQueuedTaskPromptDeliverySnapshot;
@@ -587,12 +610,12 @@ async function updateWorkspaceQueuedTaskPromptDeliveriesUnderLock<TResult>(
 	quarantineDiscriminator: string,
 ): Promise<{ snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot; result: TResult }> {
 	const queuePath = getWorkspaceQueuedTaskPromptDeliveriesPath(workspaceId);
-	return await lockedFileSystem.withLock({ path: queuePath, type: "file" }, async () => {
+	const { before, after, result } = await lockedFileSystem.withLock({ path: queuePath, type: "file" }, async () => {
 		// 必须在锁内重读：锁外读到的快照可能已被另一个进程 / 标签页 / dispatcher 改过。
 		const currentRead = await readWorkspaceQueuedTaskPromptDeliveryFile(workspaceId);
 		const { next, result } = transform(currentRead.snapshot);
 		if (next === currentRead.snapshot) {
-			return { snapshot: currentRead.snapshot, result };
+			return { before: currentRead.snapshot, after: currentRead.snapshot, result };
 		}
 		if (currentRead.filePresentButUnreadable) {
 			await quarantineUnreadableQueueFileBeforeOverwrite(queuePath, nowEpochMs, quarantineDiscriminator);
@@ -600,8 +623,11 @@ async function updateWorkspaceQueuedTaskPromptDeliveriesUnderLock<TResult>(
 		await lockedFileSystem.writeJsonFileAtomic(queuePath, next satisfies WorkspaceQueuedTaskPromptDeliverySnapshot, {
 			lock: null,
 		});
-		return { snapshot: next, result };
+		return { before: currentRead.snapshot, after: next, result };
 	});
+	// 程序化条目的落定镜像进注入账本——挂在这个唯一的写盘咽喉上，任何落定路径都逃不掉。锁释放之后做。
+	await mirrorProgrammaticInjectionQueueTransitionsIntoInjectionLedger({ workspaceId, before, after, nowEpochMs });
+	return { snapshot: after, result };
 }
 
 export async function mutateWorkspaceQueuedTaskPromptDeliveries(
@@ -784,9 +810,22 @@ export async function settleQueuedTaskPromptDelivery(input: {
 					) {
 						return entry;
 					}
+					const link = entry.programmaticInjectionLedgerReceiptLink ?? null;
+					// 程序化条目把真实终端回执存下来，落定后的账本镜像原样用它（确认 vs 排在回合后面、哪种失败）。
+					const withReceipt: QueuedTaskPromptDeliveryEntry =
+						link !== null && input.settlement.terminalDeliveryReceiptForInjectionLedger !== undefined
+							? {
+									...entry,
+									programmaticInjectionLedgerReceiptLink: {
+										...link,
+										settledTerminalDeliveryReceipt:
+											input.settlement.terminalDeliveryReceiptForInjectionLedger,
+									},
+								}
+							: entry;
 					if (input.settlement.outcome === "delivered") {
 						return {
-							...entry,
+							...withReceipt,
 							deliveryState: "settled_delivered" as const,
 							settledAt: nowEpochMs,
 							lastDeliveryFailureNote: null,
@@ -794,14 +833,16 @@ export async function settleQueuedTaskPromptDelivery(input: {
 					}
 					if (input.settlement.outcome === "cancelled") {
 						return {
-							...entry,
+							...withReceipt,
 							deliveryState: "cancelled" as const,
 							settledAt: nowEpochMs,
 							lastDeliveryFailureNote: null,
 						};
 					}
 					const retryBudgetExhausted = entry.deliveryAttemptCount >= MAX_QUEUED_TASK_PROMPT_DELIVERY_ATTEMPTS;
-					if (input.settlement.outcome === "retryable_failure" && !retryBudgetExhausted) {
+					// 程序化条目一次定终身：已经交给终端投递了，就绝不回头再等 agent（与 RVF 的分工约定第 3 条）。
+					// 调用方有自己的重试策略与新 key；这里再重投一次，等于替它多送一遍、还用着它已经认定落定的 key。
+					if (input.settlement.outcome === "retryable_failure" && !retryBudgetExhausted && link === null) {
 						return {
 							...entry,
 							deliveryState: "queued" as const,
@@ -812,7 +853,7 @@ export async function settleQueuedTaskPromptDelivery(input: {
 						};
 					}
 					return {
-						...entry,
+						...withReceipt,
 						deliveryState: "settled_failed" as const,
 						settledAt: nowEpochMs,
 						lastDeliveryFailureNote: input.settlement.failureNote,
@@ -879,6 +920,16 @@ export async function settleQueuedTaskPromptDelivery(input: {
 //
 // 升级前存下的条目缺这个字段。对它们退回「enqueuedAt 早于本进程启动」的老口径：它会在多实例下过度
 // 盖章，但那是 fail-safe 方向（多让人确认一次，绝不漏盖），而这批条目至多存活 24h 就会自然消失。
+//
+// ## 程序化条目不盖章，直接落定
+//
+// 「等人确认」是给人排的 prompt 设计的：人在重启后看一眼、决定还要不要。程序化条目（例：RVF 决策点）背后没有
+// 人在看 Queue tab，它的调用方要的是一条诚实的账本回执。托管实例一死，agent 进程也已经不在了，那份决策点的
+// 上下文随之过时——所以同一判据命中时它落 settled_failed，账本镜像为 runtime_restarted_before_confirmation，
+// 由调用方自己决定要不要重新排。判据（托管者是否还活着）与人排的条目完全相同，并存实例因此同样不会误伤它。
+export const PROGRAMMATIC_INJECTION_SETTLED_BY_RUNTIME_RESTART_FAILURE_NOTE =
+	"Kanban restarted while this automated delivery was waiting for the agent to become idle. Automated deliveries do not survive a restart.";
+
 export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(input: {
 	workspaceId: string;
 	runtimeProcessStartedAtEpochMs: number;
@@ -890,12 +941,17 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 	// 存储层不该在一次读-改-写的锁内做另一组文件 IO，且传入让它可被表格化单测。
 	liveRuntimeProcessInstanceIds: ReadonlySet<string>;
 	nowEpochMs?: number;
-}): Promise<{ snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot; stampedCount: number }> {
+}): Promise<{
+	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot;
+	stampedCount: number;
+	settledProgrammaticInjectionCount: number;
+}> {
 	const nowEpochMs = input.nowEpochMs ?? Date.now();
 	const { snapshot, result } = await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
 		input.workspaceId,
 		(current) => {
 			let stampedCount = 0;
+			let settledProgrammaticInjectionCount = 0;
 			const entriesByTaskId: Record<string, QueuedTaskPromptDeliveryEntry[]> = {};
 			for (const [taskId, entries] of Object.entries(current.entriesByTaskId)) {
 				entriesByTaskId[taskId] = entries.map((entry) => {
@@ -918,6 +974,16 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 					if (!survivedARuntimeRestart) {
 						return entry;
 					}
+					if (isQueuedTaskPromptDeliveryProgrammaticInjection(entry)) {
+						settledProgrammaticInjectionCount += 1;
+						return {
+							...entry,
+							deliveryState: "settled_failed" as const,
+							settledAt: nowEpochMs,
+							lastDeliveryFailureNote: PROGRAMMATIC_INJECTION_SETTLED_BY_RUNTIME_RESTART_FAILURE_NOTE,
+							custodianRuntimeProcessInstanceId: input.sweepingRuntimeProcessInstanceId,
+						};
+					}
 					stampedCount += 1;
 					// 确认属于它确认的那一次重启：新一次重启重新盖章时必须把上一次的确认清掉，
 					// 否则门控 0 会拿着上一轮的确认放行这一轮。
@@ -930,12 +996,16 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 					};
 				});
 			}
-			return { next: stampedCount === 0 ? current : { entriesByTaskId }, result: stampedCount };
+			const changed = stampedCount > 0 || settledProgrammaticInjectionCount > 0;
+			return {
+				next: changed ? { entriesByTaskId } : current,
+				result: { stampedCount, settledProgrammaticInjectionCount },
+			};
 		},
 		nowEpochMs,
 		"restart-stamp",
 	);
-	return { snapshot, stampedCount: result };
+	return { snapshot, ...result };
 }
 
 // 启动清扫用：收敛被 runtime 重启撂在半路的在途投递。**没有这一步，一次崩溃就能把某个 task 的
@@ -1010,6 +1080,26 @@ export async function settleQueuedTaskPromptDeliveriesStrandedByRuntimeRestart(i
 		"stranded-in-flight-sweep",
 	);
 	return { snapshot, ...result };
+}
+
+// 把已过截止时刻、仍标着 queued 的条目**写盘**收敛成 expired。
+//
+// 平时过期是读-改-写顺手收敛的（见 withExpiredQueuedEntriesSettled），对人排的条目这就够了：没人碰它，它在
+// 投影里照样显示 expired、也照样不会被发出去。程序化条目不够——它的调用方在等账本回执，而账本镜像只在
+// **写盘**时发生。没有人主动写一次，那条 pending 就会一直挂到下一次有人碰这个队列。出队引擎在截止时刻
+// （精确定时器）与每次兜底 sweep 调它。
+export async function settleExpiredQueuedTaskPromptDeliveries(input: {
+	workspaceId: string;
+	nowEpochMs?: number;
+}): Promise<WorkspaceQueuedTaskPromptDeliverySnapshot> {
+	const nowEpochMs = input.nowEpochMs ?? Date.now();
+	const { snapshot } = await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
+		input.workspaceId,
+		(current) => ({ next: withExpiredQueuedEntriesSettled(current, nowEpochMs), result: null }),
+		nowEpochMs,
+		"settle-expired",
+	);
+	return snapshot;
 }
 
 // 任务离开看板时丢弃它的整条队列（见文件头「生命周期」一节）。

@@ -58,6 +58,8 @@ export interface QueuedTaskPromptDeliveryRuntimeRestartSweepResult {
 	stampedCount: number;
 	// 这一趟里仍在途、且还没超期的条目里，最早会跨过预算的时刻。null = 没有这样的条目，不必复扫。
 	earliestYoungInFlightDeliveryBecomesStaleAtEpochMs: number | null;
+	// 托管实例已死的程序化条目（--deliver-when-agent-idle）不盖章，直接落 settled_failed；账本镜像由 store 完成。
+	settledProgrammaticInjectionCount: number;
 }
 
 function findEarliestYoungInFlightDeliveryBecomesStaleAtEpochMs(
@@ -89,6 +91,7 @@ export async function sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWo
 		failedStrandedDeliveryCount: 0,
 		stampedCount: 0,
 		earliestYoungInFlightDeliveryBecomesStaleAtEpochMs: null,
+		settledProgrammaticInjectionCount: 0,
 	};
 	let workspaceIds: string[];
 	try {
@@ -125,6 +128,7 @@ export async function sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWo
 			result.failedStrandedDeliveryCount += stranded.failedStrandedDeliveryCount;
 			let snapshot = stranded.snapshot;
 			let stampedCountForWorkspace = 0;
+			let settledProgrammaticInjectionCountForWorkspace = 0;
 			if (liveRuntimeProcessInstanceIds !== null) {
 				const stamped = await stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart({
 					workspaceId,
@@ -135,6 +139,8 @@ export async function sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWo
 				});
 				stampedCountForWorkspace = stamped.stampedCount;
 				result.stampedCount += stamped.stampedCount;
+				settledProgrammaticInjectionCountForWorkspace = stamped.settledProgrammaticInjectionCount;
+				result.settledProgrammaticInjectionCount += stamped.settledProgrammaticInjectionCount;
 				snapshot = stamped.snapshot;
 			}
 			const youngest = findEarliestYoungInFlightDeliveryBecomesStaleAtEpochMs(snapshot, inFlightSettlementBudgetMs);
@@ -147,11 +153,13 @@ export async function sweepQueuedTaskPromptDeliveriesAfterRuntimeRestartForAllWo
 			if (
 				stranded.releasedClaimCount > 0 ||
 				stranded.failedStrandedDeliveryCount > 0 ||
-				stampedCountForWorkspace > 0
+				stampedCountForWorkspace > 0 ||
+				settledProgrammaticInjectionCountForWorkspace > 0
 			) {
 				logTuiFreezeWarning(
 					`[tui-freeze] queued-prompt-restart-swept workspaceId=${workspaceId} released=${stranded.releasedClaimCount} ` +
-						`failed=${stranded.failedStrandedDeliveryCount} stamped=${stampedCountForWorkspace}`,
+						`failed=${stranded.failedStrandedDeliveryCount} stamped=${stampedCountForWorkspace} ` +
+						`programmatic-settled=${settledProgrammaticInjectionCountForWorkspace}`,
 				);
 				input.onWorkspaceQueueRewritten?.(workspaceId, snapshot);
 			}

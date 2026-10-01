@@ -37,8 +37,18 @@
 //
 // 队列坐在发送出口**之上**，不改它一个字节。PTY 单飞槽被 RVF 占着时门控 6 让路；剩下的 TOCTOU 窗口里
 // 被 RVF 顶掉（superseded_by_later_delivery）归可重试。RVF 那条「一条投递永不排在别人后面」的收敛承诺
-// 因此原样成立。队列**不写**注入账本（task-message-injections.json）：那是跨仓契约，其「唯一非终态必然
-// 有界收敛」不变量对可以合法等几个小时的排队意图不成立。
+// 因此原样成立。人排的条目**不写**注入账本（task-message-injections.json）：那是跨仓契约，其「唯一非终态
+// 必然有界收敛」不变量对可以合法等几个小时、又没有截止时刻的排队意图不成立。
+//
+// ## 程序化条目（`kanban task message --deliver-when-agent-idle`）
+//
+// RVF 也可以把一条投递排进来，等 agent 空闲再交出。它与人排的条目走同一套门控与触发源，只差四处：
+//   - 交给终端投递时用**调用方的** idempotency key 与 source：交出之后的取消、账本回写与不带 flag 的
+//     `kanban task message` 逐字相同；
+//   - 回执一次定终身，绝不回队首（store 的 settleQueuedTaskPromptDelivery 执行）；每个落定点都把真实终端回执
+//     随结算带进 store，由 store 镜像进账本；
+//   - 截止时刻（expiresAt）由精确定时器执行写盘收敛，账本回执不必等 60s sweep；
+//   - 兜底 sweep 额外对一次账：已落定的程序化条目，账本却还 pending 的，补写。
 
 import { randomUUID } from "node:crypto";
 
@@ -66,11 +76,14 @@ import {
 	routeQueuedTaskPromptDeliveryTerminalOutcome,
 } from "../core/queued-task-prompt-delivery-outcome-routing";
 import { buildRuntimeQueuedTaskPromptDeliveryProjectionsByTaskId } from "../core/queued-task-prompt-delivery-projection";
+import { reconcileInjectionLedgerWithSettledProgrammaticInjections } from "../state/mirror-queued-programmatic-injection-outcomes-into-injection-ledger";
 import {
 	claimNextQueuedTaskPromptDeliveryRunForDispatch,
+	isQueuedTaskPromptDeliveryProgrammaticInjection,
 	markQueuedTaskPromptDeliveryHandedToTransport,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 	releaseQueuedTaskPromptDeliveryClaim,
+	settleExpiredQueuedTaskPromptDeliveries,
 	settleQueuedTaskPromptDelivery,
 	stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart,
 } from "../state/queued-task-prompt-delivery-store";
@@ -93,6 +106,19 @@ const PROGRAMMATIC_TERMINAL_DELIVERY_OUTCOME_WAIT_MARGIN_MS = 30_000;
 
 // 会话状态变化导致阻塞原因变化时重发投影的去抖窗口：agent 回合期间 summary 以 50ms 攒批刷新。
 const PROJECTION_REBROADCAST_DEBOUNCE_MS = 150;
+
+// 程序化条目截止定时器在截止时刻之后再多等这一点才去收敛：过期判据是 `now >= expiresAt`，定时器偶尔会早到
+// 一两毫秒，早到的那一次什么都收敛不了、又不会再有下一次。
+const PROGRAMMATIC_INJECTION_DEADLINE_SETTLEMENT_MARGIN_MS = 25;
+
+// 「交出去了，但不知道有没有送到」时写进账本的原因。两处走得到：出口之外的包装层抛错（出口自己兜住一切
+// 异常，实际走不到）、PTY 在最坏预算 + 余量之后仍没回执（内存登记丢了）。契约里没有一个原因的字面恰好是
+// 「不知道」；选它是因为它的处置——「谨慎：文本可能残留，重投前宜人工确认」——正是此时调用方该做的事，
+// 而任何「确定没送到」的原因都会诱导调用方立刻重投、把同一段话送两遍。
+const INJECTION_LEDGER_RECEIPT_WHEN_DELIVERY_OUTCOME_IS_UNKNOWN = {
+	status: "delivery_failed",
+	reason: "submit_confirmation_budget_exhausted",
+} as const;
 
 export interface QueuedTaskPromptDeliveryDispatcherDependencies {
 	// 三 transport 合并后的会话摘要（runtime-server 的 findRuntimeSessionSummary）。
@@ -204,6 +230,10 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 	const lastObservedHeadBlockReasonByTaskKey = new Map<string, QueuedTaskPromptDispatchBlockReason | null>();
 	const lastBroadcastProjectionFingerprintByWorkspaceId = new Map<string, string>();
 	const projectionRebroadcastTimerByWorkspaceId = new Map<string, NodeJS.Timeout>();
+	const programmaticInjectionDeadlineTimerByWorkspaceId = new Map<
+		string,
+		{ timer: NodeJS.Timeout; firesForDeadlineAtEpochMs: number }
+	>();
 	const pendingOperations = new Set<Promise<unknown>>();
 	let fallbackSweepTimer: NodeJS.Timeout | null = null;
 	let stopped = false;
@@ -218,9 +248,71 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		return operation;
 	};
 
+	const clearProgrammaticInjectionDeadlineTimer = (workspaceId: string): void => {
+		const armed = programmaticInjectionDeadlineTimerByWorkspaceId.get(workspaceId);
+		if (armed) {
+			clearTimeout(armed.timer);
+			programmaticInjectionDeadlineTimerByWorkspaceId.delete(workspaceId);
+		}
+	};
+
+	// 每个 workspace 一个定时器，对准「还在等空闲的程序化条目里最早的截止时刻」。到点写盘收敛成 expired，
+	// store 随即把 agent_never_became_idle_before_queued_delivery_deadline 镜像进账本——调用方给的上限因此是
+	// 毫秒级兑现，而不是「上限 + 至多 60s」。人排的条目不进这里：它们过期不需要回执，投影就地显示即可。
+	const armProgrammaticInjectionDeadlineTimer = (
+		workspaceId: string,
+		snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
+	): void => {
+		if (stopped) {
+			return;
+		}
+		let earliestDeadlineAtEpochMs: number | null = null;
+		for (const entries of Object.values(snapshot.entriesByTaskId)) {
+			for (const entry of entries) {
+				if (entry.deliveryState === "queued" && isQueuedTaskPromptDeliveryProgrammaticInjection(entry)) {
+					earliestDeadlineAtEpochMs =
+						earliestDeadlineAtEpochMs === null
+							? entry.expiresAt
+							: Math.min(earliestDeadlineAtEpochMs, entry.expiresAt);
+				}
+			}
+		}
+		const armed = programmaticInjectionDeadlineTimerByWorkspaceId.get(workspaceId);
+		if (earliestDeadlineAtEpochMs === null) {
+			clearProgrammaticInjectionDeadlineTimer(workspaceId);
+			return;
+		}
+		if (armed?.firesForDeadlineAtEpochMs === earliestDeadlineAtEpochMs) {
+			return;
+		}
+		clearProgrammaticInjectionDeadlineTimer(workspaceId);
+		const timer = setTimeout(
+			() => {
+				programmaticInjectionDeadlineTimerByWorkspaceId.delete(workspaceId);
+				void track(
+					(async () => {
+						const settled = await settleExpiredQueuedTaskPromptDeliveries({ workspaceId, nowEpochMs: now() });
+						await commitSnapshotAndBroadcast(workspaceId, settled);
+					})(),
+				).catch((error: unknown) => {
+					warn(
+						`[queued-prompt] programmatic-deadline-settlement-failed workspaceId=${workspaceId} reason=${String(error)}`,
+					);
+				});
+			},
+			Math.max(0, earliestDeadlineAtEpochMs - now()) + PROGRAMMATIC_INJECTION_DEADLINE_SETTLEMENT_MARGIN_MS,
+		);
+		timer.unref?.();
+		programmaticInjectionDeadlineTimerByWorkspaceId.set(workspaceId, {
+			timer,
+			firesForDeadlineAtEpochMs: earliestDeadlineAtEpochMs,
+		});
+	};
+
 	const rememberSnapshot = (workspaceId: string, snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot): void => {
 		knownWorkspaceIds.add(workspaceId);
 		cachedSnapshotByWorkspaceId.set(workspaceId, snapshot);
+		armProgrammaticInjectionDeadlineTimer(workspaceId, snapshot);
 	};
 
 	// 单飞读取：一次 runtime 启动会水合几百个会话，每个都会喂一条 summary 进来；缓存没建好之前
@@ -335,7 +427,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			]),
 			nowEpochMs: now(),
 		});
-		if (stamped.stampedCount > 0) {
+		if (stamped.stampedCount > 0 || stamped.settledProgrammaticInjectionCount > 0) {
 			await commitSnapshotAndBroadcast(workspaceId, stamped.snapshot);
 		}
 	};
@@ -453,7 +545,11 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			return;
 		}
 
-		const dispatchIdempotencyKey = createDispatchIdempotencyKey();
+		// 程序化条目用调用方的 key 与 source 交出：交出之后的取消（message-cancel）、账本回写（发送出口的
+		// onDeliveryOutcome）就与不带 --deliver-when-agent-idle 的那条路径逐字相同，不必另造一套映射。
+		const programmaticInjectionLink = claimedHead.programmaticInjectionLedgerReceiptLink ?? null;
+		const dispatchIdempotencyKey =
+			programmaticInjectionLink?.injectionLedgerIdempotencyKey ?? createDispatchIdempotencyKey();
 		const handedOff = await markQueuedTaskPromptDeliveryHandedToTransport({
 			workspaceId,
 			taskId,
@@ -495,7 +591,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				{
 					taskId,
 					text: buildMergedQueuedTaskPromptDeliveryText(claimed.claimedEntries),
-					source: QUEUED_TASK_PROMPT_DELIVERY_CHAT_MESSAGE_SOURCE,
+					source: programmaticInjectionLink?.injectionSource ?? QUEUED_TASK_PROMPT_DELIVERY_CHAT_MESSAGE_SOURCE,
 					idempotencyKey: dispatchIdempotencyKey,
 				},
 				waiter.observer,
@@ -508,29 +604,44 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				failureNote: `Sending the queued prompt failed unexpectedly: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
+				terminalDeliveryReceiptForInjectionLedger: INJECTION_LEDGER_RECEIPT_WHEN_DELIVERY_OUTCOME_IS_UNKNOWN,
 			});
 			return;
 		}
 
+		// 每一个落定点都把「这次投递真实的终端回执」随结算带进 store：程序化条目据此镜像进账本，人排的条目忽略它。
 		const terminalDelivery = response.terminalDelivery ?? null;
 		if (terminalDelivery === null) {
+			// 出口在受理之前就回了：ok 只可能是 Cline SDK 的 /clear 这类不走投递的分支；不 ok 则一个字节都没进 agent
+			// ——与 `kanban task message` 在同一情形下落的原因相同（它回退到 no_active_terminal_session）。
 			await settleHandedOffRun(
 				workspaceId,
 				taskId,
 				claimedQueueEntryIds,
 				response.ok
-					? { outcome: "delivered", failureNote: null }
-					: routeQueuedTaskPromptDeliveryRejectedBeforeTransportAccepted(response.error),
+					? {
+							outcome: "delivered",
+							failureNote: null,
+							terminalDeliveryReceiptForInjectionLedger: {
+								status: "delivered_and_submit_confirmed",
+								reason: null,
+							},
+						}
+					: {
+							...routeQueuedTaskPromptDeliveryRejectedBeforeTransportAccepted(response.error),
+							terminalDeliveryReceiptForInjectionLedger: {
+								status: "delivery_failed",
+								reason: "no_active_terminal_session",
+							},
+						},
 			);
 			return;
 		}
 		if (terminalDelivery.status !== "accepted_pending_submit_confirmation") {
-			await settleHandedOffRun(
-				workspaceId,
-				taskId,
-				claimedQueueEntryIds,
-				routeQueuedTaskPromptDeliveryTerminalOutcome(terminalDelivery),
-			);
+			await settleHandedOffRun(workspaceId, taskId, claimedQueueEntryIds, {
+				...routeQueuedTaskPromptDeliveryTerminalOutcome(terminalDelivery),
+				terminalDeliveryReceiptForInjectionLedger: terminalDelivery,
+			});
 			return;
 		}
 		const settledOutcome = await waiter.waitWithinBudget();
@@ -543,8 +654,15 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 						outcome: "terminal_failure",
 						failureNote:
 							"No delivery confirmation arrived within the settlement budget, so the prompt may or may not have been sent.",
+						terminalDeliveryReceiptForInjectionLedger: INJECTION_LEDGER_RECEIPT_WHEN_DELIVERY_OUTCOME_IS_UNKNOWN,
 					}
-				: routeQueuedTaskPromptDeliveryTerminalOutcome(settledOutcome),
+				: {
+						...routeQueuedTaskPromptDeliveryTerminalOutcome(settledOutcome),
+						terminalDeliveryReceiptForInjectionLedger: {
+							status: settledOutcome.status,
+							reason: settledOutcome.reason,
+						},
+					},
 		);
 	};
 
@@ -621,8 +739,22 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				// 持续盖章屏障：托管者在上一次 sweep 之后才判死的条目，在这里被盖章接管。
 				await stampEntriesWhoseCustodianIsGone(workspaceId);
 				// 绕过缓存重读：兜底 sweep 的另一半职责就是捡回别的进程对队列文件的改动。
-				const snapshot = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
+				let snapshot = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
+				// 截止定时器之外的第二道：别的进程排进来、本进程没机会对准定时器的程序化条目，到点在这里写盘收敛。
+				const sweepNowEpochMs = now();
+				const hasProgrammaticInjectionPastDeadline = Object.values(snapshot.entriesByTaskId).some((entries) =>
+					entries.some(
+						(entry) =>
+							entry.deliveryState === "queued" &&
+							isQueuedTaskPromptDeliveryProgrammaticInjection(entry) &&
+							sweepNowEpochMs >= entry.expiresAt,
+					),
+				);
+				if (hasProgrammaticInjectionPastDeadline) {
+					snapshot = await settleExpiredQueuedTaskPromptDeliveries({ workspaceId, nowEpochMs: sweepNowEpochMs });
+				}
 				await commitSnapshotAndBroadcast(workspaceId, snapshot);
+				await reconcileInjectionLedgerWithSettledProgrammaticInjections({ workspaceId, snapshot });
 				for (const taskId of Object.keys(snapshot.entriesByTaskId)) {
 					if (listAwaitingDispatchEntries(snapshot, taskId, now()).length > 0) {
 						requestDispatchAttempt(workspaceId, taskId);
@@ -670,6 +802,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		runFallbackSweep,
 		forgetWorkspace: (workspaceId) => {
 			knownWorkspaceIds.delete(workspaceId);
+			clearProgrammaticInjectionDeadlineTimer(workspaceId);
 			cachedSnapshotByWorkspaceId.delete(workspaceId);
 			lastBroadcastProjectionFingerprintByWorkspaceId.delete(workspaceId);
 			const timer = projectionRebroadcastTimerByWorkspaceId.get(workspaceId);
@@ -705,6 +838,10 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 				clearTimeout(timer);
 			}
 			projectionRebroadcastTimerByWorkspaceId.clear();
+			for (const armed of programmaticInjectionDeadlineTimerByWorkspaceId.values()) {
+				clearTimeout(armed.timer);
+			}
+			programmaticInjectionDeadlineTimerByWorkspaceId.clear();
 		},
 		whenIdle: async () => {
 			while (pendingOperations.size > 0 || projectionRebroadcastTimerByWorkspaceId.size > 0) {

@@ -72,6 +72,7 @@ import {
 	mutateWorkspaceState,
 	resolveWorkspacePath,
 } from "../state/workspace-state";
+import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
 import {
@@ -1578,6 +1579,10 @@ interface TaskMessageCommandResult extends JsonRecord {
 	turn_id?: string;
 	checkpoint_id?: string;
 	status?: string;
+	// ↓ 仅 --deliver-when-agent-idle 的记录才有。pending 且 gate_passed_at 为 null ⇒ 还卡在 agent 空闲门；
+	// 非 null ⇒ 已交给终端投递、卡在终端门。契约：terminal-delivery-interface-contract.md § agent 空闲门控的排队投递。
+	agent_idle_wait_deadline_at?: string;
+	agent_idle_gate_passed_at?: string | null;
 }
 
 function hashPrompt(prompt: string): string {
@@ -1599,7 +1604,37 @@ function toTaskMessageCommandResult(record: TaskMessageInjectionRecord): TaskMes
 		...(record.turn_id ? { turn_id: record.turn_id } : {}),
 		...(record.checkpoint_id ? { checkpoint_id: record.checkpoint_id } : {}),
 		...(record.status ? { status: record.status } : {}),
+		...(record.agent_idle_wait_deadline_at
+			? {
+					agent_idle_wait_deadline_at: record.agent_idle_wait_deadline_at,
+					agent_idle_gate_passed_at: record.agent_idle_gate_passed_at ?? null,
+				}
+			: {}),
 	};
+}
+
+// --deliver-when-agent-idle 与 --max-wait-for-agent-idle-ms 必须成对出现。等多久是调用方的策略，不给默认值：
+// 一个看不见的默认上限，等于替调用方决定「晚问多久就不该再问了」。
+export function resolveTaskMessageAgentIdleGateOptions(input: {
+	deliverWhenAgentIdle: boolean;
+	maxWaitForAgentIdleMs: number | undefined;
+	maxWaitForAgentIdleUpperBoundMs: number;
+}): { maxWaitForAgentIdleMs: number } | null {
+	if (!input.deliverWhenAgentIdle) {
+		if (input.maxWaitForAgentIdleMs !== undefined) {
+			throw new Error("--max-wait-for-agent-idle-ms requires --deliver-when-agent-idle.");
+		}
+		return null;
+	}
+	if (input.maxWaitForAgentIdleMs === undefined) {
+		throw new Error("--deliver-when-agent-idle requires --max-wait-for-agent-idle-ms.");
+	}
+	if (input.maxWaitForAgentIdleMs > input.maxWaitForAgentIdleUpperBoundMs) {
+		throw new Error(
+			`--max-wait-for-agent-idle-ms must not exceed ${input.maxWaitForAgentIdleUpperBoundMs} (24 hours).`,
+		);
+	}
+	return { maxWaitForAgentIdleMs: input.maxWaitForAgentIdleMs };
 }
 
 function resolvePromptInput(input: { prompt?: string; promptFile?: string }): Promise<string> {
@@ -1628,7 +1663,14 @@ async function sendTaskMessageCommand(input: {
 	attemptId?: string;
 	waitForTerminalStatus?: boolean;
 	waitTimeoutMs?: number;
+	deliverWhenAgentIdle?: boolean;
+	maxWaitForAgentIdleMs?: number;
 }): Promise<TaskMessageCommandResult> {
+	const agentIdleGate = resolveTaskMessageAgentIdleGateOptions({
+		deliverWhenAgentIdle: input.deliverWhenAgentIdle ?? false,
+		maxWaitForAgentIdleMs: input.maxWaitForAgentIdleMs,
+		maxWaitForAgentIdleUpperBoundMs: MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS,
+	});
 	const taskId = input.taskId.trim();
 	if (!taskId) {
 		throw new Error("task message requires --task-id.");
@@ -1661,6 +1703,33 @@ async function sendTaskMessageCommand(input: {
 	}
 
 	const ledgerPath = getTaskMessageInjectionLedgerPath(workspace.statePath);
+
+	// agent 空闲门控的排队投递：账本记录由 runtime 在同一次调用里建并入队（理由见
+	// src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue.ts 文件头）。CLI 只负责把回执读出来。
+	// runtime 够不到 / 版本还没有这个入口时直接报错（ok:false，退出码 1），**不留账本记录**——与立即投递不同，
+	// 那边的记录是 CLI 自己先建的，所以得由 CLI 落失败。
+	if (agentIdleGate !== null) {
+		const enqueueResponse = await runtimeClient.runtime.enqueueAgentIdleGatedProgrammaticTaskChatMessage.mutate({
+			taskId,
+			text: prompt,
+			source,
+			idempotencyKey,
+			promptSha256,
+			...(attemptId ? { attemptId } : {}),
+			maxWaitForAgentIdleMs: agentIdleGate.maxWaitForAgentIdleMs,
+		});
+		if (!enqueueResponse.ok) {
+			throw new Error(enqueueResponse.error ?? "enqueueAgentIdleGatedProgrammaticTaskChatMessage failed.");
+		}
+		return await resolveTaskMessageResult({
+			ledgerPath,
+			taskId,
+			idempotencyKey,
+			fallbackRecord: null,
+			waitForTerminalStatus: input.waitForTerminalStatus ?? false,
+			waitTimeoutMs: input.waitTimeoutMs,
+		});
+	}
 
 	// 第一段（锁内）：幂等判定 + 落一条 pending。
 	// 与旧实现的差别：上一条仍 pending 时**不再报错**。pending 现在是合法的、会自行收敛的状态，
@@ -2331,6 +2400,14 @@ export function registerTaskCommand(program: Command): void {
 			"--wait-timeout-ms <ms>",
 			"Timeout for --wait-for-terminal-status. Defaults to 30000. Clamped to the CLI hard timeout (KANBAN_CLI_HARD_TIMEOUT_MS, default 35000) minus a small margin, so the command always prints its JSON receipt instead of being killed with exit code 124. Raise KANBAN_CLI_HARD_TIMEOUT_MS to actually wait longer.",
 		)
+		.option(
+			"--deliver-when-agent-idle",
+			"Queue the message in Kanban's durable prompt queue and hand it to the terminal only once the agent is idle (not generating, not parked awaiting background work, not waiting on a question/plan/permission). Requires --max-wait-for-agent-idle-ms. The receipt stays accepted_pending_submit_confirmation while queued.",
+		)
+		.option(
+			"--max-wait-for-agent-idle-ms <ms>",
+			"With --deliver-when-agent-idle: give up after this many milliseconds (at most 86400000) without the agent becoming idle, settling the receipt as delivery_failed{agent_never_became_idle_before_queued_delivery_deadline}.",
+		)
 		.action(
 			async (options: {
 				projectPath: string;
@@ -2342,6 +2419,8 @@ export function registerTaskCommand(program: Command): void {
 				attemptId?: string;
 				waitForTerminalStatus?: boolean;
 				waitTimeoutMs?: string;
+				deliverWhenAgentIdle?: boolean;
+				maxWaitForAgentIdleMs?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -2357,6 +2436,15 @@ export function registerTaskCommand(program: Command): void {
 							waitForTerminalStatus: options.waitForTerminalStatus ?? false,
 							...(options.waitTimeoutMs
 								? { waitTimeoutMs: parsePositiveIntegerOption(options.waitTimeoutMs, "--wait-timeout-ms") }
+								: {}),
+							deliverWhenAgentIdle: options.deliverWhenAgentIdle ?? false,
+							...(options.maxWaitForAgentIdleMs
+								? {
+										maxWaitForAgentIdleMs: parsePositiveIntegerOption(
+											options.maxWaitForAgentIdleMs,
+											"--max-wait-for-agent-idle-ms",
+										),
+									}
 								: {}),
 						}),
 				);

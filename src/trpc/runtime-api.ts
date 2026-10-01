@@ -148,6 +148,10 @@ import {
 } from "../terminal/terminal-agent-model-selection";
 import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
+import {
+	cancelProgrammaticTaskChatMessageStillAwaitingAgentIdle,
+	enqueueAgentIdleGatedProgrammaticTaskChatMessage,
+} from "./agent-idle-gated-programmatic-task-chat-message-enqueue";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
 import { sendTaskChatMessageAcrossSessionTransports } from "./task-chat-message-send-across-session-transports";
 
@@ -2118,6 +2122,16 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		// 与「确认落定」共用那一把写一次即定的锁，取消与确认的竞争因此是确定性的。
 		cancelTaskChatDelivery: async (workspaceScope, input) => {
 			try {
+				// 还在等 agent 空闲的程序化排队投递不在 PTY 单飞槽里，PTY 取消对它无效——先在队列里撤下它。
+				const cancelledWhileAwaitingAgentIdle = await cancelProgrammaticTaskChatMessageStillAwaitingAgentIdle(
+					{ notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated },
+					workspaceScope.workspaceId,
+					input.taskId,
+					input.idempotencyKey,
+				);
+				if (cancelledWhileAwaitingAgentIdle !== null) {
+					return { ok: true, cancelResult: cancelledWhileAwaitingAgentIdle };
+				}
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				return {
 					ok: true,
@@ -2243,6 +2257,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					projectedEntriesByTaskId: null,
 					error: error instanceof Error ? error.message : String(error),
 				};
+			}
+		},
+		enqueueAgentIdleGatedProgrammaticTaskChatMessage: async (workspaceScope, input) => {
+			try {
+				return await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+					{ notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated },
+					workspaceScope.workspaceId,
+					input,
+				);
+			} catch (error) {
+				return { ok: false, error: error instanceof Error ? error.message : String(error) };
 			}
 		},
 		getWorkspaceTaskEditDrafts: async (workspaceScope) => {

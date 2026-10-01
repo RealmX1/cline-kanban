@@ -27,6 +27,7 @@
 | 活性 | `src/state/runtime-process-instance-heartbeat-registry.ts` | 本机 runtime 进程实例心跳 |
 | 编排 | `src/server/queued-task-prompt-delivery-dispatcher.ts` | 出队引擎（三触发源、一轮一次、结算） |
 | 编排 | `src/server/stale-queued-task-prompt-delivery-startup-sweep.ts` | 启动清扫 |
+| 程序化 | `src/core/queued-programmatic-injection-ledger-receipt-mirroring.ts`（纯规则）、`src/state/mirror-queued-programmatic-injection-outcomes-into-injection-ledger.ts`（镜像 IO + 兜底对账）、`src/state/enqueue-agent-idle-gated-programmatic-injection-into-prompt-delivery-queue.ts`（程序化入队）、`src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue.ts`（runtime 入口 + 排队期间取消） | 见 § 11 |
 | 接线 | `runtime-state-hub.ts`（观察器挂载点）/ `runtime-server.ts`（创建与启停）/ `runtime-api.ts` + `app-router.ts`（两条 procedure）/ `workspace-api.ts` + `commands/task.ts`（任务离开看板即丢弃） | |
 | 前端 | `web-ui/src/stores/queued-task-prompt-delivery-projection-store.ts`（per-task store）、`hooks/use-queued-task-prompt-delivery-*`、`components/detail-panels/queued-task-prompt-delivery-queue-panel.tsx`、`runtime/queued-task-prompt-delivery-status-wording.ts` | |
 
@@ -34,7 +35,8 @@
 
 - `~/.cline/kanban/workspaces/<workspaceId>/queued-task-prompt-deliveries.json`，每 workspace 一份。
   不进 board.json（最热路径、正文易膨胀）、不进 sessions.json（崩溃即丢）、**不进注入账本**（跨仓契约的
-  「唯一非终态必然有界收敛」对可以合法等几小时的排队意图不成立）。
+  「唯一非终态必然有界收敛」对可以合法等几小时的排队意图不成立）。例外是 § 11 的程序化条目：它带调用方给的
+  截止时刻，于是能在账本里**另有**一条有界收敛的回执。
 - 键是**会话 id**：by-the-way 子会话有自己独立的队列。
 - 正文**入队即冻结**：prompt library 条目可变，出队时才解析 = 用户排的是 A、agent 收到 B。来源条目只做溯源，
   sha 不符时 UI 标「library prompt has changed since」。
@@ -143,5 +145,51 @@ queued ──认领(锁内)──▶ claimed_for_dispatch ──写盘──▶ 
 
 - images 与 mode 透传。
 - 把 PTY 单飞槽改成 FIFO（会动代际语义、确认链提升时机与全部 teardown 点）。
-- 让 RVF 用这条队列（`kanban task queue-message`）——**必须先改跨仓契约**。
+- ~~让 RVF 用这条队列——必须先改跨仓契约~~ 已做，契约先行（2026-10-01），见 § 11。
 - 点看板卡片的「N queued」药丸直接落到 Queue tab（药丸目前只是展示）。
+
+## 11. 程序化排队投递（`kanban task message --deliver-when-agent-idle`）
+
+> 跨仓契约：`~/.rvf/cross-repo-coordination-with-cline-kanban/terminal-delivery-interface-contract.md`
+> § agent 空闲门控的排队投递。RVF 决策点边界标记要「agent 空闲时才粘贴」，否则标记在回合中途并入、决策点过时。
+
+**一句话**：同一条 `kanban task message` 带 `--deliver-when-agent-idle --max-wait-for-agent-idle-ms <ms>`，消息先进本队列、
+等 agent 空闲（§ 6 的门控）再交给终端投递；交出之后的一切与立即投递相同。回执是注入账本里那条同 key 的四态记录。
+
+与人排的条目共用：durable 文件、§ 6 全部门控（park 恒算忙——RVF 需求 2 无需 flag）、三条触发源、一轮一条、
+先来先发、托管门。刻意不同的几处：
+
+| | 人排的 | 程序化 |
+| --- | --- | --- |
+| 回执 | 只在面板上 | 注入账本同 key 记录（跨仓契约），每条落定路径都镜像过去 |
+| 交出后的可重试失败 | 回队首等下一轮（≤3 次） | **一次定终身**：终端回执即终态，不再回头等 agent（与 33612 终端门的分工约定第 3 条） |
+| 保质期 | 24h | 调用方给的截止（≤24h），到点由精确定时器写盘收敛 ⇒ `agent_never_became_idle_before_queued_delivery_deadline` |
+| 托管实例死了 | 盖章、等人确认（§ 8） | 直接落 `settled_failed` ⇒ `runtime_restarted_before_confirmation`；不跨重启 |
+| 合并 | 可开关 | 永远独占一次投递（自身开关不许点亮，前一条的开关在它前面断开） |
+
+**账本镜像挂在哪**：store 唯一的持锁读-改-写（`updateWorkspaceQueuedTaskPromptDeliveriesUnderLock`）在每次写盘、
+锁释放之后比较写前 / 写后两份快照（纯规则在 `queued-programmatic-injection-ledger-receipt-mirroring.ts`）：
+落定 ⇒ 写终态；刚交出 ⇒ 写 `agent_idle_gate_passed_at`；非终态条目随任务被丢弃 ⇒ `session_ended_before_delivery`。
+七条落定路径（出队结算 / Queue tab 取消 / `message-cancel` / 过期 / 托管实例死 / 撂下的在途 / 删任务）因此一处全覆盖。
+镜像失败由出队引擎兜底 sweep 的对账补写（只认队列里的终态条目作证据）；证据也没了的（终态条目已被 Dismiss / 裁掉），
+由账本侧的持续清扫在「截止 + 终端投递最坏预算」之后落 `runtime_restarted_before_confirmation`（见下「有界收敛」）。出队引擎拿到的真实终端回执随结算存进条目，镜像原样使用；其余路径按落定状态推
+（取消 → `cancelled_before_delivery`，过期 → 新原因，无回执的失败 → `runtime_restarted_before_confirmation`）。
+
+**账本记录由 runtime 建**（`enqueueAgentIdleGatedProgrammaticTaskChatMessage`，一次调用里先建记录再入队）：CLI 若在两步
+之间死掉，留下的 pending 没有队列条目、截止时刻也就没人收敛。同 key 重发一律只返回当前记录、**绝不重新入队**——
+哪怕队列里已经找不到它的条目：「两段之间崩溃、一个字节没送」与「已送达但镜像丢了、终态条目又被裁掉」在这里分不清，
+补排会让后者送两遍。两种都交给账本持续清扫在上界之后诚实落定，由调用方换新 key 重排。截止时刻只在首次建记录时定下。
+
+**交出时用调用方的 key 与 source**：于是交出之后的 `message-cancel`（PTY 代际失效）与账本回写（发送出口的
+`onDeliveryOutcome`）与立即投递逐字相同。还在等空闲时 `message-cancel` 打到 PTY 是无效的（单飞槽里没有它），
+所以 runtime 的 `cancelTaskChatDelivery` 先在队列里撤下它。
+
+**有界收敛**：账本启动清扫的「超期」对门控记录从 `max(状态时间戳, agent_idle_wait_deadline_at)` 起算——
+否则并存的第二个 runtime 一启动，就把常驻实例上还在合法排队的记录写成不可纠正的假失败。上界因此是
+「截止 + 终端投递最坏预算」。
+账本清扫不止在启动时跑：`startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime` 在 runtime 活着期间持续续排（按本轮最早
+超期时刻排下一趟、最迟 60s 周期兜底，判据在契约上界外再留 5s 余量），所以「没人收敛的 pending」（两段之间崩溃、镜像证据丢失、
+并存实例死掉）都在上界之后有界时间内落定，而不是等下一次重启。
+
+**不保证**：门控放行到真正粘贴之间（TUI 就绪等待，通常毫秒到 1–3s）agent 被唤醒时，回执如实报
+`delivered_queued_behind_active_agent_turn`；终端就绪判定属于 task 33612，这里不改。RVF 侧的复工撤回仍须保留。

@@ -88,6 +88,7 @@ export function buildRuntimeQueuedTaskPromptDeliveryProjection(
 		enqueuedAt: entry.enqueuedAt,
 		expiresAt: entry.expiresAt,
 		settledAt: deliveryState === "expired" && entry.settledAt === null ? entry.expiresAt : entry.settledAt,
+		programmaticInjectionSource: entry.programmaticInjectionLedgerReceiptLink?.injectionSource ?? null,
 	};
 }
 

@@ -15,18 +15,30 @@ import {
 //
 // 最后一条的开关值被忽略（它没有「下一条」可合并）——这不是漏判：用户把队尾那条也点亮，语义只能是
 // 「等下一条排进来时跟它一起发」，而那一条此刻还不存在，本次投递里没有任何东西可拼。
+//
+// 程序化条目（programmaticInjectionLedgerReceiptLink 非空，例：RVF 决策点边界标记）**永远独占一次投递**：
+// 它在队首时链长恒为 1，它前一条的开关点亮了链也在它前面断开。调用方按正文 hash 认这条消息，拼进别的话
+// 就是另一条消息了；反过来，把人写的话拼进一条机器标记里，等于替人把话塞进了一个不属于他的回合。
 export function collectQueuedTaskPromptDeliveryChainFromHead(
 	entriesInDeliveryOrder: readonly QueuedTaskPromptDeliveryEntry[],
 ): QueuedTaskPromptDeliveryEntry[] {
 	if (entriesInDeliveryOrder.length === 0) {
 		return [];
 	}
-	const chain: QueuedTaskPromptDeliveryEntry[] = [entriesInDeliveryOrder[0]];
+	const head = entriesInDeliveryOrder[0];
+	const chain: QueuedTaskPromptDeliveryEntry[] = [head];
+	if (head.programmaticInjectionLedgerReceiptLink != null) {
+		return chain;
+	}
 	for (let index = 0; index < entriesInDeliveryOrder.length - 1; index += 1) {
-		if (!entriesInDeliveryOrder[index].deliverTogetherWithNextQueuedEntry) {
+		const next = entriesInDeliveryOrder[index + 1];
+		if (
+			!entriesInDeliveryOrder[index].deliverTogetherWithNextQueuedEntry ||
+			next.programmaticInjectionLedgerReceiptLink != null
+		) {
 			break;
 		}
-		chain.push(entriesInDeliveryOrder[index + 1]);
+		chain.push(next);
 	}
 	return chain;
 }

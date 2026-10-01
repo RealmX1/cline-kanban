@@ -1556,6 +1556,61 @@ export type RuntimeStateStreamExplorationThreadGraphUpdatedMessage = z.infer<
 	typeof runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema
 >;
 
+// 程序化投递的诚实回执。取值集合与语义由跨仓契约固定（terminal-delivery-interface-contract.md），
+// 唯一真相在 src/core/task-message-injection-ledger.ts —— 这里只是把 runtime 的**即时**判定带回 CLI，
+// 让 CLI 能立刻落一个不撒谎的初始状态；终态由 runtime 事后就地改写账本。
+// 定义在排队投递一节之前（而不是挨着 runtimeTaskChatSendResponseSchema）：排队条目要内嵌这份回执，
+// 而 zod schema 是模块求值期的值，后定义先引用会撞 TDZ。
+export const terminalDeliveryStatusSchema = z.enum([
+	"delivered_and_submit_confirmed",
+	"delivered_queued_behind_active_agent_turn",
+	"accepted_pending_submit_confirmation",
+	"delivery_failed",
+]);
+export type TerminalDeliveryStatus = z.infer<typeof terminalDeliveryStatusSchema>;
+
+export const terminalDeliveryFailureReasonSchema = z.enum([
+	"no_active_terminal_session",
+	"terminal_prompt_readiness_timeout",
+	"submit_confirmation_budget_exhausted",
+	"human_terminal_contention_timeout",
+	// 框被占着但人不在场、且机器拿不下这个框。语义与「可否重投」见
+	// task-message-injection-ledger.ts 的同名条目（那里是唯一真相）。
+	"terminal_input_box_contended_but_unstashable",
+	"agent_awaiting_user_decision_timeout",
+	"superseded_by_later_delivery",
+	"session_ended_before_delivery",
+	"cancelled_before_delivery",
+	"runtime_restarted_before_confirmation",
+]);
+export type TerminalDeliveryFailureReason = z.infer<typeof terminalDeliveryFailureReasonSchema>;
+
+export const terminalDeliveryReceiptSchema = z.object({
+	status: terminalDeliveryStatusSchema,
+	reason: terminalDeliveryFailureReasonSchema.nullable(),
+});
+export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
+
+// 注入账本（跨仓契约）里能出现的失败原因全集 = 终端投递回执能报的那些 + agent 空闲门（排队层）自己判的两个。
+// 后两个**永远不会**由终端投递产生——终端门不认识「agent 有没有空闲」——所以不进上面那个 transport 枚举，
+// 免得 session-manager 的回执类型凭空多出两个它不可能产生的取值。唯一真相仍是 task-message-injection-ledger.ts。
+export const injectionLedgerTerminalDeliveryFailureReasonSchema = z.enum([
+	...terminalDeliveryFailureReasonSchema.options,
+	// 带 --deliver-when-agent-idle 的投递到调用方给的等待上限为止 agent 一直没空闲，一次都没交给终端投递。
+	"agent_never_became_idle_before_queued_delivery_deadline",
+	// 带 --deliver-when-agent-idle 的投递入队即被拒：排队容量（per-task / per-workspace 非终态条目上限）用尽。
+	"agent_idle_gated_delivery_queue_capacity_exhausted",
+]);
+export type InjectionLedgerTerminalDeliveryFailureReason = z.infer<
+	typeof injectionLedgerTerminalDeliveryFailureReasonSchema
+>;
+
+export const injectionLedgerTerminalDeliveryReceiptSchema = z.object({
+	status: terminalDeliveryStatusSchema,
+	reason: injectionLedgerTerminalDeliveryFailureReasonSchema.nullable(),
+});
+export type InjectionLedgerTerminalDeliveryReceipt = z.infer<typeof injectionLedgerTerminalDeliveryReceiptSchema>;
+
 // ── 排队 Prompt 投递（Queued Task Prompt Delivery，服务端持久化）───────────────
 //
 // 「agent 正在干活时我就想好了下一步要它做什么」这件事今天没有落点：Prompt Library 只能
@@ -1674,8 +1729,32 @@ export const queuedTaskPromptDeliveryEntrySchema = z.object({
 	// 把子会话的队列一并丢弃——删除路径（浏览器整份 PUT 的差集 / CLI delete）手上只有看板任务 id。
 	// optional（加字段规约）：旧条目缺它时只按 taskId 精确匹配。
 	workspaceTaskId: z.string().nullable().optional(),
+	// 非 null = 这条是**程序化投递**（`kanban task message --deliver-when-agent-idle`，例：RVF 决策点边界标记），
+	// 在注入账本（task-message-injections.json，跨仓契约）里有一条同 key 的四态回执记录。null / 缺省 = 人排的。
+	// 语义与人排的条目有三处刻意不同（详见 .plan/docs/queued-task-prompt-delivery-semantics.md 的程序化一节）：
+	//   - 一次定终身：交给终端投递之后的回执就是终态，**绝不**回队首等下一轮（调用方有自己的重试与 key）；
+	//   - 不跨重启：托管实例死了就落 settled_failed，不盖「等人确认」的章（那是给人看的）；
+	//   - 永不合并：正文要逐字发出，合并开关在它两侧都不生效。
+	// expiresAt 对它而言就是调用方给的「最多等 agent 空闲多久」的截止时刻。
+	programmaticInjectionLedgerReceiptLink: z
+		.object({
+			// 账本记录的 idempotency key（= 调用方传的 --idempotency-key）。交给终端投递时也用它，
+			// 于是交出之后的取消 / 回执与不带 flag 的 `kanban task message` 逐字相同。
+			injectionLedgerIdempotencyKey: z.string(),
+			// 调用方的 --source。交给终端投递时原样带上。
+			injectionSource: z.string(),
+			// 条目落终态那一刻要镜像进账本的回执。只有出队引擎拿到真实终端回执时才写；其余落定路径
+			// （取消 / 过期 / 重启 / 撂下）的回执由落定后的 deliveryState 推出来，见
+			// src/core/queued-programmatic-injection-ledger-receipt-mirroring.ts。
+			settledTerminalDeliveryReceipt: injectionLedgerTerminalDeliveryReceiptSchema.nullable(),
+		})
+		.nullable()
+		.optional(),
 });
 export type QueuedTaskPromptDeliveryEntry = z.infer<typeof queuedTaskPromptDeliveryEntrySchema>;
+export type QueuedTaskPromptDeliveryProgrammaticInjectionLedgerReceiptLink = NonNullable<
+	QueuedTaskPromptDeliveryEntry["programmaticInjectionLedgerReceiptLink"]
+>;
 
 // 一个 workspace 下全部任务的队列。顺序即投递顺序（数组下标就是排位），不另存 order 字段——
 // 存序号会产生「序号重复 / 有洞 / 与数组顺序打架」三种必须再写代码去调和的坏状态。
@@ -1762,6 +1841,8 @@ export const runtimeQueuedTaskPromptDeliveryProjectionSchema = z.object({
 	enqueuedAt: z.number(),
 	expiresAt: z.number(),
 	settledAt: z.number().nullable(),
+	// 非 null = 程序化投递（例：RVF），值是调用方的 --source。前端据此挂来源徽标、关掉它两侧的合并开关。
+	programmaticInjectionSource: z.string().nullable().optional(),
 });
 export type RuntimeQueuedTaskPromptDeliveryProjection = z.infer<typeof runtimeQueuedTaskPromptDeliveryProjectionSchema>;
 
@@ -1815,6 +1896,35 @@ export const runtimeTaskPromptDeliveryQueueMutateResponseSchema = runtimeTaskPro
 });
 export type RuntimeTaskPromptDeliveryQueueMutateResponse = z.infer<
 	typeof runtimeTaskPromptDeliveryQueueMutateResponseSchema
+>;
+
+// 程序化入队（`kanban task message --deliver-when-agent-idle`）。由 runtime **一次调用里**先落账本 pending 记录、
+// 再入队——不让 CLI 先写账本：CLI 在两步之间被杀，就会留下一条没有队列条目、却也没人来收敛的 pending。
+// 收敛有界性：pending 必然在 agentIdleWaitDeadline + 终端投递最坏预算之内落终态。
+export const runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema = z.object({
+	taskId: z.string(),
+	text: z.string(),
+	source: z.string(),
+	idempotencyKey: z.string(),
+	promptSha256: z.string(),
+	attemptId: z.string().optional(),
+	// 最多等 agent 空闲多久。上限（24h）在 runtime 侧校验，契约这里只要求正整数。
+	maxWaitForAgentIdleMs: z.number().int().positive(),
+});
+export type RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest = z.infer<
+	typeof runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema
+>;
+
+export const runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema = z.object({
+	ok: z.boolean(),
+	// 账本里这条记录是本次新建的，还是同 key 早已存在（幂等重发）。仅 ok 时有。
+	injectionLedgerRecordDisposition: z.enum(["created", "already_existed"]).optional(),
+	// 同 key 已存在但正文 hash 不同。与 `kanban task message` 的幂等冲突同义，CLI 据此报同一句错。
+	idempotencyConflict: z.boolean().optional(),
+	error: z.string().optional(),
+});
+export type RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse = z.infer<
+	typeof runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema
 >;
 
 // 队列投影变更推流。**不进** snapshot 消息（正文与状态都以机器节拍变化，且首屏由读 procedure 拉）。
@@ -3123,39 +3233,6 @@ export const runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema
 export type RuntimeReleaseDeferredRestorationHarnessNotificationsResponse = z.infer<
 	typeof runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema
 >;
-
-// 程序化投递的诚实回执。取值集合与语义由跨仓契约固定（terminal-delivery-interface-contract.md），
-// 唯一真相在 src/core/task-message-injection-ledger.ts —— 这里只是把 runtime 的**即时**判定带回 CLI，
-// 让 CLI 能立刻落一个不撒谎的初始状态；终态由 runtime 事后就地改写账本。
-export const terminalDeliveryStatusSchema = z.enum([
-	"delivered_and_submit_confirmed",
-	"delivered_queued_behind_active_agent_turn",
-	"accepted_pending_submit_confirmation",
-	"delivery_failed",
-]);
-export type TerminalDeliveryStatus = z.infer<typeof terminalDeliveryStatusSchema>;
-
-export const terminalDeliveryFailureReasonSchema = z.enum([
-	"no_active_terminal_session",
-	"terminal_prompt_readiness_timeout",
-	"submit_confirmation_budget_exhausted",
-	"human_terminal_contention_timeout",
-	// 框被占着但人不在场、且机器拿不下这个框。语义与「可否重投」见
-	// task-message-injection-ledger.ts 的同名条目（那里是唯一真相）。
-	"terminal_input_box_contended_but_unstashable",
-	"agent_awaiting_user_decision_timeout",
-	"superseded_by_later_delivery",
-	"session_ended_before_delivery",
-	"cancelled_before_delivery",
-	"runtime_restarted_before_confirmation",
-]);
-export type TerminalDeliveryFailureReason = z.infer<typeof terminalDeliveryFailureReasonSchema>;
-
-export const terminalDeliveryReceiptSchema = z.object({
-	status: terminalDeliveryStatusSchema,
-	reason: terminalDeliveryFailureReasonSchema.nullable(),
-});
-export type TerminalDeliveryReceipt = z.infer<typeof terminalDeliveryReceiptSchema>;
 
 export const runtimeTaskChatSendResponseSchema = z.object({
 	ok: z.boolean(),
