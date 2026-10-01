@@ -105,45 +105,113 @@ async function withIsolatedGitTaskWorktreeTestHome<T>(
 }
 
 describe.sequential("task-worktree integration", () => {
-	it("does not mistake a pure base fast-forward for task-owned commits before any task commit was observed", async () => {
+	async function createTaskWorktreeForProvenanceTest(
+		createRepository: (repositoryDirectoryName: string) => IsolatedGitTestRepository,
+		taskId: string,
+	): Promise<{ repository: IsolatedGitTestRepository; repoPath: string; worktreePath: string }> {
+		const repository = createRepository(`${taskId}-repository`);
+		const repoPath = repository.repositoryPath;
+		writeFileSync(join(repoPath, "README.md"), "initial\n", "utf8");
+		repository.runGit(["add", "README.md"]);
+		repository.runGit(["commit", "-m", "initial"]);
+		const ensured = await ensureTaskWorktreeIfDoesntExist({ cwd: repoPath, taskId, baseRef: "main" });
+		expect(ensured.ok).toBe(true);
+		if (!ensured.ok || !ensured.path) {
+			throw new Error("Task worktree was not created");
+		}
+		return { repository, repoPath, worktreePath: ensured.path };
+	}
+
+	function advanceBaseRef(repository: IsolatedGitTestRepository, fileName: string): void {
+		writeFileSync(join(repository.repositoryPath, fileName), `${fileName}\n`, "utf8");
+		repository.runGit(["add", fileName]);
+		repository.runGit(["commit", "-m", `advance base ${fileName}`]);
+	}
+
+	async function probeTaskCommitIntegration(input: { repoPath: string; worktreePath: string; taskId: string }) {
+		const workspaceContext = await loadWorkspaceContext(input.repoPath);
+		return await probeAndRefreshTaskCommitIntegrationProvenance({
+			workspaceId: workspaceContext.workspaceId,
+			taskId: input.taskId,
+			repoPath: input.repoPath,
+			worktreePath: input.worktreePath,
+			baseRef: "main",
+			worktreeExists: true,
+			observedAt: 0,
+		});
+	}
+
+	it("proves zero integrated task commits when the worktree only fast-forwarded base since creation", async () => {
 		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
-			const repository = createRepository("task-commit-provenance-pure-base-fast-forward-repository");
-			const repoPath = repository.repositoryPath;
-			writeFileSync(join(repoPath, "README.md"), "initial\n", "utf8");
-			repository.runGit(["add", "README.md"]);
-			repository.runGit(["commit", "-m", "initial"]);
+			const taskId = "task-pure-base-fast-forward";
+			const { repository, repoPath, worktreePath } = await createTaskWorktreeForProvenanceTest(
+				createRepository,
+				taskId,
+			);
 
-			const ensured = await ensureTaskWorktreeIfDoesntExist({
-				cwd: repoPath,
-				taskId: "task-pure-base-fast-forward",
-				baseRef: "main",
-			});
-			expect(ensured.ok).toBe(true);
-			if (!ensured.ok || !ensured.path) {
-				throw new Error("Task worktree was not created");
-			}
-
-			writeFileSync(join(repoPath, "base-change.txt"), "base change\n", "utf8");
-			repository.runGit(["add", "base-change.txt"]);
-			repository.runGit(["commit", "-m", "advance base"]);
-			repository.runGit(["merge", "--ff-only", "main"], { workingDirectoryPath: ensured.path });
-
-			const workspaceContext = await loadWorkspaceContext(repoPath);
-			const status = await probeAndRefreshTaskCommitIntegrationProvenance({
-				workspaceId: workspaceContext.workspaceId,
-				taskId: "task-pure-base-fast-forward",
-				repoPath,
-				worktreePath: ensured.path,
-				baseRef: "main",
-				worktreeExists: true,
-				observedAt: 0,
+			advanceBaseRef(repository, "base-change-one.txt");
+			repository.runGit(["merge", "--ff-only", "main"], { workingDirectoryPath: worktreePath });
+			expect(await probeTaskCommitIntegration({ repoPath, worktreePath, taskId })).toMatchObject({
+				commitsAheadOfBaseRef: 0,
+				commitsBehindBaseRef: 0,
+				taskCommitsIntegratedIntoBaseRef: 0,
+				taskCommitIntegrationTrackingStatus: "complete",
 			});
 
-			expect(status).toMatchObject({
+			// base 再前进一次、worktree 再 FF 一次，且带未提交改动：仍然是可证明的 0。
+			advanceBaseRef(repository, "base-change-two.txt");
+			repository.runGit(["merge", "--ff-only", "main"], { workingDirectoryPath: worktreePath });
+			writeFileSync(join(worktreePath, "uncommitted-task-change.txt"), "wip\n", "utf8");
+			expect(await probeTaskCommitIntegration({ repoPath, worktreePath, taskId })).toMatchObject({
+				commitsAheadOfBaseRef: 0,
+				commitsBehindBaseRef: 0,
+				taskCommitsIntegratedIntoBaseRef: 0,
+				taskCommitIntegrationTrackingStatus: "complete",
+			});
+		});
+	});
+
+	it("keeps the integrated count unknown when an unobserved task commit was handed back before the first probe", async () => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
+			const taskId = "task-unobserved-handback";
+			const { repository, repoPath, worktreePath } = await createTaskWorktreeForProvenanceTest(
+				createRepository,
+				taskId,
+			);
+
+			writeFileSync(join(worktreePath, "task-change.txt"), "task change\n", "utf8");
+			repository.runGit(["add", "task-change.txt"], { workingDirectoryPath: worktreePath });
+			repository.runGit(["commit", "-m", "task change"], { workingDirectoryPath: worktreePath });
+			const taskCommit = repository
+				.runGit(["rev-parse", "HEAD"], { workingDirectoryPath: worktreePath })
+				.stdout.trim();
+			repository.runGit(["merge", "--ff-only", taskCommit]);
+			advanceBaseRef(repository, "base-change-after-handback.txt");
+			repository.runGit(["merge", "--ff-only", "main"], { workingDirectoryPath: worktreePath });
+
+			expect(await probeTaskCommitIntegration({ repoPath, worktreePath, taskId })).toMatchObject({
 				commitsAheadOfBaseRef: 0,
 				commitsBehindBaseRef: 0,
 				taskCommitsIntegratedIntoBaseRef: null,
-				taskCommitIntegrationTrackingStatus: "legacy_history_unavailable",
+				taskCommitIntegrationTrackingStatus: "task_commit_ownership_history_incomplete",
+			});
+		});
+	});
+
+	it("keeps the integrated count unknown when HEAD moved by something other than a fast-forward", async () => {
+		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
+			const taskId = "task-reset-to-base";
+			const { repository, repoPath, worktreePath } = await createTaskWorktreeForProvenanceTest(
+				createRepository,
+				taskId,
+			);
+
+			advanceBaseRef(repository, "base-change.txt");
+			repository.runGit(["reset", "--hard", "main"], { workingDirectoryPath: worktreePath });
+
+			expect(await probeTaskCommitIntegration({ repoPath, worktreePath, taskId })).toMatchObject({
+				taskCommitsIntegratedIntoBaseRef: null,
+				taskCommitIntegrationTrackingStatus: "task_commit_ownership_history_incomplete",
 			});
 		});
 	});

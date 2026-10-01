@@ -329,8 +329,11 @@ describe("RuntimeSettingsDialog", () => {
 			),
 		);
 	}
-	async function changeInput(labelText: string, value: string) {
-		const label = Array.from(document.querySelectorAll("label")).find((label) =>
+	async function changeInput(labelText: string, value: string, category?: "语言模型" | "TTS") {
+		const scope = category
+			? document.querySelector(`select[aria-label="编辑${category} provider"]`)?.closest("fieldset")
+			: document;
+		const label = Array.from(scope?.querySelectorAll("label") ?? []).find((label) =>
 			label.textContent?.trim().startsWith(labelText),
 		);
 		const input = label?.querySelector("input");
@@ -348,10 +351,106 @@ describe("RuntimeSettingsDialog", () => {
 			select.dispatchEvent(new Event("change", { bubbles: true }));
 		});
 	}
+	it("语言模型与 TTS 各自选择和添加 Provider，草稿与用途不串组", async () => {
+		await renderSettings();
+		const languageSelect = document.querySelector<HTMLSelectElement>('select[aria-label="编辑语言模型 provider"]');
+		const speechSelect = document.querySelector<HTMLSelectElement>('select[aria-label="编辑TTS provider"]');
+		expect(Array.from(languageSelect?.options ?? []).map((option) => option.textContent)).toEqual([
+			"文本服务 · saved-text",
+		]);
+		expect(Array.from(speechSelect?.options ?? []).map((option) => option.textContent)).toEqual([
+			"我的语音服务 · saved-tts",
+		]);
+		const languageGroup = languageSelect?.closest("fieldset")?.parentElement;
+		const speechGroup = speechSelect?.closest("fieldset")?.parentElement;
+		expect(languageGroup?.querySelector("legend")?.textContent).toBe("语言模型");
+		expect(languageGroup?.textContent).toContain("通知判断与摘要 provider");
+		expect(languageGroup?.textContent).not.toContain("TTS 模型");
+		expect(speechGroup?.querySelector("legend")?.textContent).toBe("语音合成 TTS");
+		expect(speechGroup?.textContent).toContain("TTS 模型");
+		expect(speechGroup?.textContent).not.toContain("任务起名 provider");
+		await act(async () => findButtonByText(document.body, "添加语言模型 Provider")?.click());
+		await changeInput("显示名称", "独立的语言服务", "语言模型");
+		await changeInput("Base URL", "https://example.com/v1", "语言模型");
+		await changeInput("API Key", "test-language-only", "语言模型");
+		expect(speechSelect?.value).toBe("1");
+		await act(async () => findButtonByText(document.body, "添加TTS Provider")?.click());
+		await changeInput("显示名称", "独立的语音服务", "TTS");
+		await changeInput("API Key", "test-speech-only", "TTS");
+		expect(languageSelect?.value).toBe("2");
+		const languageCredentials = languageSelect?.closest("fieldset");
+		expect(languageCredentials?.querySelector('input[type="password"]')).toHaveProperty(
+			"value",
+			"test-language-only",
+		);
+		const speechProtocol = Array.from(speechSelect?.closest("fieldset")?.querySelectorAll("select") ?? []).find(
+			(select) => select.value === "deepinfra",
+		);
+		expect(Array.from(speechProtocol?.options ?? []).map((option) => option.value)).toEqual(["deepinfra", "alibaba"]);
+		const allIds = Array.from(document.querySelectorAll("[id]")).map((element) => element.id);
+		expect(new Set(allIds).size).toBe(allIds.length);
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(notificationSettingsMocks.saveProvider).toHaveBeenCalledWith(
+			expect.objectContaining({
+				profile: expect.objectContaining({ providerProtocol: "openai_compatible", displayName: "独立的语言服务" }),
+				apiKey: "test-language-only",
+			}),
+		);
+		expect(notificationSettingsMocks.saveProvider).toHaveBeenCalledWith(
+			expect.objectContaining({
+				profile: expect.objectContaining({ providerProtocol: "deepinfra", displayName: "独立的语音服务" }),
+				apiKey: "test-speech-only",
+			}),
+		);
+	});
+	it("没有 Provider 时两组分别显示空状态，浏览器语音无需创建凭据", async () => {
+		notificationSettingsMocks.getSettings.mockResolvedValue({
+			settings: { ...savedNotificationSettings, speechProvider: "browser", notificationSpeechBinding: null },
+			providers: [],
+		});
+		await renderSettings();
+		expect(document.body.textContent).toContain("尚未配置语言模型 Provider");
+		expect(document.body.textContent).toContain("尚未配置TTS Provider");
+		expect(document.querySelectorAll('input[type="password"]')).toHaveLength(0);
+		await changeInput("延期兜底", "15");
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(notificationSettingsMocks.saveProvider).not.toHaveBeenCalled();
+	});
+
+	it.each(["保存", "试听"] as const)("%s 期间禁用共享语言选择，完成后恢复", async (operation) => {
+		await renderSettings();
+		const languageSelect = document.querySelector<HTMLSelectElement>("#notification-intelligence-selection-5");
+		if (!languageSelect) throw new Error("缺少共享语言选择");
+		expect(languageSelect.disabled).toBe(false);
+		let finishOperation = () => {};
+		const pendingOperation = new Promise<void>((resolve) => {
+			finishOperation = resolve;
+		});
+		if (operation === "保存") {
+			await changeInput("延期兜底", "15");
+			notificationSettingsMocks.saveSettings.mockImplementationOnce(async () => {
+				await pendingOperation;
+				return { ok: true };
+			});
+		} else {
+			notificationSettingsMocks.previewSpeech.mockReturnValueOnce(pendingOperation);
+		}
+		await act(async () =>
+			findButtonByText(document.body, operation === "保存" ? "Save" : "试听已保存设置（产生 API 费用）")?.click(),
+		);
+		try {
+			expect(languageSelect.disabled).toBe(true);
+			expect(languageSelect.value).toBe("zh-CN");
+		} finally {
+			await act(async () => finishOperation());
+		}
+		expect(languageSelect.disabled).toBe(false);
+	});
+
 	it("统一保存多个 Provider 草稿和通知设置，显示已保存凭据，试听不隐式保存", async () => {
 		const onOpenChange = vi.fn();
 		await renderSettings(true, onOpenChange);
-		expect(document.querySelector<HTMLSelectElement>('select[aria-label="编辑 provider"]')?.value).toBe("1");
+		expect(document.querySelector<HTMLSelectElement>('select[aria-label="编辑TTS provider"]')?.value).toBe("1");
 		expect(document.body.textContent).toContain(
 			"已保存：我的语音服务（saved-tts） · 系统钥匙串 · 凭据已配置（不回显）",
 		);
@@ -361,9 +460,9 @@ describe("RuntimeSettingsDialog", () => {
 		expect(notificationSettingsMocks.previewSpeech).toHaveBeenCalledTimes(1);
 		expect(notificationSettingsMocks.saveSettings).not.toHaveBeenCalled();
 		await changeInput("API Key", "test-only-replacement");
-		await selectValue("编辑 provider", "0");
+		await selectValue("编辑语言模型 provider", "0");
 		await changeInput("显示名称", "新的文本服务名称");
-		await selectValue("编辑 provider", "1");
+		await selectValue("编辑TTS provider", "1");
 		expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("test-only-replacement");
 		const language = document.querySelector<HTMLSelectElement>("#notification-intelligence-selection-5");
 		if (!language) throw new Error("缺少语言选择");
@@ -389,9 +488,9 @@ describe("RuntimeSettingsDialog", () => {
 		async (draftAction) => {
 			const onOpenChange = vi.fn();
 			await renderSettings(true, onOpenChange);
-			await act(async () => findButtonByText(document.body, "添加 Provider")?.click());
-			expect(document.querySelector<HTMLSelectElement>('select[aria-label="编辑 provider"]')?.value).toBe("2");
-			if (draftAction === "修改名称") await changeInput("显示名称", "新的语音服务");
+			await act(async () => findButtonByText(document.body, "添加TTS Provider")?.click());
+			expect(document.querySelector<HTMLSelectElement>('select[aria-label="编辑TTS provider"]')?.value).toBe("2");
+			if (draftAction === "修改名称") await changeInput("显示名称", "新的语音服务", "TTS");
 			if (draftAction === "输入密钥") await changeInput("API Key", "test-only-new-provider");
 			if (draftAction === "用途绑定") {
 				const binding = document.querySelector<HTMLSelectElement>("#notification-intelligence-selection-9");
@@ -431,7 +530,7 @@ describe("RuntimeSettingsDialog", () => {
 		await act(async () => findButtonByText(document.body, "Notifications")?.click());
 		expect(findButtonByText(document.body, "Notifications")?.getAttribute("aria-current")).toBe("location");
 		await act(async () => findButtonByText(document.body, "删除已保存密钥（待保存）")?.click());
-		await changeInput("显示名称", "待丢弃的名称");
+		await changeInput("显示名称", "待丢弃的名称", "TTS");
 		await act(async () => findButtonByText(document.body, "Cancel")?.click());
 		expect(onOpenChange).toHaveBeenCalledWith(false);
 		expect(notificationSettingsMocks.saveProvider).not.toHaveBeenCalled();
@@ -442,6 +541,78 @@ describe("RuntimeSettingsDialog", () => {
 		expect(document.body.textContent).not.toContain("待丢弃的名称");
 		expect(findButtonByText(document.body, "撤销删除密钥")).toBeNull();
 		expect(findButtonByText(document.body, "Save")?.disabled).toBe(true);
+	});
+	it("已落盘的坏文本绑定显示为已失效而非伪装成默认配置，且不阻止保存其它字段", async () => {
+		const onOpenChange = vi.fn();
+		notificationSettingsMocks.getSettings.mockResolvedValue({
+			settings: {
+				...savedNotificationSettings,
+				taskNameSuggestionBinding: { modelProviderId: "saved-tts", modelId: "text-model" },
+			},
+			providers: savedNotificationProviders,
+		});
+		await renderSettings(true, onOpenChange);
+		const taskNameBinding = document.querySelector<HTMLSelectElement>(
+			"#notification-intelligence-selection-4-taskNameSuggestionBinding",
+		);
+		expect(taskNameBinding?.value).toBe("saved-tts");
+		expect(taskNameBinding?.selectedOptions[0]?.textContent).toContain("已失效");
+		expect(document.body.textContent).toContain(
+			"「任务起名」绑定的 provider saved-tts 服务类型为DeepInfra TTS，需为 OpenAI 兼容文本模型",
+		);
+		await changeInput("延期兜底", "25");
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(notificationSettingsMocks.saveSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ fallbackAfterMinutes: 25 }),
+		);
+		expect(onOpenChange).toHaveBeenCalledWith(false);
+	});
+	it("添加 Provider 的自动 id 避开悬空绑定引用的 id，历史 not_found 绑定不会被误判为新引入而锁死保存", async () => {
+		const onOpenChange = vi.fn();
+		notificationSettingsMocks.getSettings.mockResolvedValue({
+			settings: {
+				...savedNotificationSettings,
+				taskNameSuggestionBinding: { modelProviderId: "provider-3", modelId: "text-model" },
+			},
+			providers: savedNotificationProviders,
+		});
+		await renderSettings(true, onOpenChange);
+		await act(async () => findButtonByText(document.body, "添加TTS Provider")?.click());
+		const providerEditor = document.querySelector('select[aria-label="编辑TTS provider"]')?.closest("fieldset");
+		const providerIdInput = Array.from(providerEditor?.querySelectorAll("label") ?? [])
+			.find((label) => label.textContent?.trim().startsWith("Provider ID"))
+			?.querySelector("input");
+		expect(providerIdInput?.value).toBe("provider-4");
+		await changeInput("延期兜底", "35");
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(notificationSettingsMocks.saveProvider).not.toHaveBeenCalled();
+		expect(notificationSettingsMocks.saveSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ fallbackAfterMinutes: 35 }),
+		);
+		expect(onOpenChange).toHaveBeenCalledWith(false);
+	});
+	it("清空被文本用途引用的 Provider Base URL 时，Save 在写入前拒绝，一个请求都不发", async () => {
+		const onOpenChange = vi.fn();
+		notificationSettingsMocks.getSettings.mockResolvedValue({
+			settings: {
+				...savedNotificationSettings,
+				taskNameSuggestionBinding: { modelProviderId: "saved-text", modelId: "text-model" },
+			},
+			providers: [
+				{ ...savedNotificationProviders[0], baseUrl: "https://example.invalid" },
+				savedNotificationProviders[1],
+			],
+		});
+		await renderSettings(true, onOpenChange);
+		await selectValue("编辑语言模型 provider", "0");
+		await changeInput("Base URL", "", "语言模型");
+		expect(document.body.textContent).toContain("「任务起名」绑定的 provider saved-text 缺少 Base URL");
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(notificationSettingsMocks.saveProvider).not.toHaveBeenCalled();
+		expect(notificationSettingsMocks.saveSettings).not.toHaveBeenCalled();
+		expect(useRuntimeConfigSaveMock).not.toHaveBeenCalled();
+		expect(onOpenChange).not.toHaveBeenCalled();
+		expect(document.body.textContent).toContain("保存未完成");
 	});
 	it("保存失败保留密钥草稿和对话框，重试后才关闭", async () => {
 		const onOpenChange = vi.fn();

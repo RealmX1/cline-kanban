@@ -106,6 +106,10 @@ export interface BoardCard {
 	prepFilePath?: string;
 	createdAt: number;
 	updatedAt: number;
+	// Description（prompt 文本 + 附图）最后一次内容真正变化的时间；Backlog 按它倒序排、卡片上显示。
+	// 与 updatedAt 分开（后者任何修改都推进）。同样受 normalizeCard 白名单铁律约束：漏声明就会在水合时
+	// 被剥掉，下一次 saveState 把盘上的值抹平。老卡片缺失时经 resolveTaskDescriptionLastUpdatedAt 回落。
+	taskDescriptionLastUpdatedAt?: number;
 }
 
 export interface BoardColumn {

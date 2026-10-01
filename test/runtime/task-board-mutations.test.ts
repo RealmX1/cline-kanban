@@ -100,6 +100,33 @@ describe("task stage monotonicity", () => {
 	});
 });
 
+describe("moveTaskToColumn 列内插入位置", () => {
+	// CLI `kanban task start` 等运行时路径移列时，卡片必须落到目标列顶部，与浏览器程序化移列的
+	// insertAtTop 同一语义；否则正在跑的卡会沉到一列陈旧卡的最末。
+	it.each(["in_progress", "review"] as const)("把移入 %s 的卡片放到该列顶部", (targetColumnId) => {
+		const alreadyInTargetColumn = addTaskToColumn(
+			createBoard(),
+			targetColumnId,
+			{ prompt: "Task Already There", baseRef: "main" },
+			() => "aaaaa111",
+		);
+		const waitingInBacklog = addTaskToColumn(
+			alreadyInTargetColumn.board,
+			"backlog",
+			{ prompt: "Task Moved In", baseRef: "main" },
+			() => "bbbbb111",
+		);
+
+		const moved = moveTaskToColumn(waitingInBacklog.board, waitingInBacklog.task.id, targetColumnId);
+
+		expect(moved.moved).toBe(true);
+		expect(moved.board.columns.find((column) => column.id === targetColumnId)?.cards.map((card) => card.id)).toEqual([
+			waitingInBacklog.task.id,
+			alreadyInTargetColumn.task.id,
+		]);
+	});
+});
+
 describe("task images", () => {
 	it("preserves images when creating and updating tasks", () => {
 		const created = addTaskToColumn(
@@ -629,5 +656,98 @@ describe("updateTask taskAgentPermissionMode", () => {
 		});
 
 		expect(updated.task?.taskAgentPermissionMode).toBe("bypass_all_permission_prompts");
+	});
+});
+
+describe("taskDescriptionLastUpdatedAt", () => {
+	function createTwoBacklogTasks() {
+		const first = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Older task", baseRef: "main" },
+			() => "aaaaa111",
+			100,
+		);
+		const second = addTaskToColumn(
+			first.board,
+			"backlog",
+			{ prompt: "Newer task", baseRef: "main" },
+			() => "bbbbb111",
+			200,
+		);
+		return { board: second.board, olderTaskId: first.task.id, newerTaskId: second.task.id };
+	}
+
+	function backlogTaskIds(board: RuntimeBoardData): string[] {
+		return board.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id) ?? [];
+	}
+
+	it("initializes the field to the creation time", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main" },
+			() => "aaaaa111",
+			123,
+		);
+		expect(created.task.taskDescriptionLastUpdatedAt).toBe(123);
+	});
+
+	it("advances and moves the task to the top of the backlog when the prompt changes", () => {
+		const { board, olderTaskId, newerTaskId } = createTwoBacklogTasks();
+		expect(backlogTaskIds(board)).toEqual([newerTaskId, olderTaskId]);
+
+		const updated = updateTask(board, olderTaskId, { prompt: "Older task, rewritten", baseRef: "main" }, 300);
+
+		expect(updated.task?.taskDescriptionLastUpdatedAt).toBe(300);
+		expect(updated.task?.updatedAt).toBe(300);
+		expect(backlogTaskIds(updated.board)).toEqual([olderTaskId, newerTaskId]);
+	});
+
+	it("advances when only the attached images change", () => {
+		const { board, olderTaskId } = createTwoBacklogTasks();
+		const updated = updateTask(
+			board,
+			olderTaskId,
+			{ prompt: "Older task", baseRef: "main", images: [{ id: "img-1", data: "abc", mimeType: "image/png" }] },
+			300,
+		);
+		expect(updated.task?.taskDescriptionLastUpdatedAt).toBe(300);
+	});
+
+	it("does not advance or reorder when only non-description fields change", () => {
+		const { board, olderTaskId, newerTaskId } = createTwoBacklogTasks();
+		const updated = updateTask(
+			board,
+			olderTaskId,
+			{ title: "Renamed", prompt: "  Older task  ", baseRef: "develop", agentId: "codex", startInPlanMode: true },
+			300,
+		);
+
+		expect(updated.task?.updatedAt).toBe(300);
+		expect(updated.task?.taskDescriptionLastUpdatedAt).toBe(100);
+		expect(backlogTaskIds(updated.board)).toEqual([newerTaskId, olderTaskId]);
+	});
+
+	it("materializes the updatedAt fallback on legacy cards instead of advancing it", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Legacy", baseRef: "main" },
+			() => "aaaaa111",
+			100,
+		);
+		const { taskDescriptionLastUpdatedAt: _removed, ...legacyTask } = created.task;
+		const legacyBoard: RuntimeBoardData = {
+			...created.board,
+			columns: created.board.columns.map((column) =>
+				column.id === "backlog" ? { ...column, cards: [{ ...legacyTask, updatedAt: 150 }] } : column,
+			),
+		};
+
+		const updated = updateTask(legacyBoard, created.task.id, { prompt: "Legacy", baseRef: "develop" }, 300);
+
+		expect(updated.task?.updatedAt).toBe(300);
+		expect(updated.task?.taskDescriptionLastUpdatedAt).toBe(150);
 	});
 });

@@ -57,6 +57,10 @@ export enum LocalStorageKey {
 	// 两处的纵向空间预算完全不同（横条挤的是整个看板高度，分段挤的是左列表），用户大概率不希望联动。
 	TaskPinboardStripCollapsedOnKanbanBoard = "kanban.task-pinboard-strip-collapsed-on-kanban-board.v1",
 	TaskPinboardSectionCollapsedInFocusView = "kanban.task-pinboard-section-collapsed-in-focus-view.v1",
+	// 主看板（非 Focus View）各 stage 列的折叠显式覆盖与自定义列宽；缺省折叠集合见
+	// state/kanban-board-column-collapse-and-width-preferences.ts。
+	KanbanBoardColumnCollapsedOverrides = "kanban.kanban-board-column-collapsed-overrides.v1",
+	KanbanBoardColumnCustomWidthsPx = "kanban.kanban-board-column-custom-widths-px.v1",
 }
 
 export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
@@ -74,6 +78,8 @@ export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
 	LocalStorageKey.GitDiffFileTreePanelRatio,
 	LocalStorageKey.TaskPinboardStripCollapsedOnKanbanBoard,
 	LocalStorageKey.TaskPinboardSectionCollapsedInFocusView,
+	LocalStorageKey.KanbanBoardColumnCollapsedOverrides,
+	LocalStorageKey.KanbanBoardColumnCustomWidthsPx,
 ] as const;
 
 function getLocalStorage(): Storage | null {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { applySessionFacets } from "../../../src/core/session-activity";
 import { buildShellCommandLine } from "../../../src/core/shell";
 import { buildTerminalEnvironment, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import {
@@ -136,6 +137,37 @@ describe("TerminalSessionManager", () => {
 		vi.unstubAllEnvs();
 	});
 
+	it("does not leak the host tmux / terminal identity into the Kanban PTY", () => {
+		// Kanban 运行时跑在 tmux 里时，Codex 0.158 看到继承的 TMUX 会去探测宿主 tmux 的 mouse 选项，
+		// 得到 off 就放弃鼠标捕获，滚轮在 xterm.js 里退化成 ↑/↓ 翻历史 prompt。
+		vi.stubEnv("TMUX", "/private/tmp/tmux-503/default,1107,1");
+		vi.stubEnv("TMUX_PANE", "%1");
+		vi.stubEnv("TERM_PROGRAM_VERSION", "3.7c");
+		vi.stubEnv("LC_TERMINAL", "iTerm2");
+
+		for (const forceColor of [true, false]) {
+			const env = buildTerminalEnvironment({ forceColor });
+
+			expect(Object.hasOwn(env, "TMUX")).toBe(false);
+			expect(Object.hasOwn(env, "TMUX_PANE")).toBe(false);
+			expect(Object.hasOwn(env, "TERM_PROGRAM_VERSION")).toBe(false);
+			expect(Object.hasOwn(env, "LC_TERMINAL")).toBe(false);
+			expect(env.TERM_PROGRAM).toBe("kanban");
+		}
+
+		vi.unstubAllEnvs();
+	});
+
+	it("keeps host terminal identity variables that a source passes explicitly", () => {
+		vi.stubEnv("TMUX", "/private/tmp/tmux-503/default,1107,1");
+
+		const env = buildTerminalEnvironment({ forceColor: false }, { TMUX: "/explicit/tmux-socket,1,0" });
+
+		expect(env.TMUX).toBe("/explicit/tmux-socket,1,0");
+
+		vi.unstubAllEnvs();
+	});
+
 	it("stores hook activity metadata on sessions", () => {
 		const manager = new TerminalSessionManager();
 		manager.hydrateFromRecord({
@@ -154,33 +186,51 @@ describe("TerminalSessionManager", () => {
 		expect(typeof updated?.lastHookAt).toBe("number");
 	});
 
-	it("applyAgentNativeConversationSessionIdentity：值变化才写 sidecar，同值幂等不推进 updatedAt", () => {
+	it("原生身份确认推进水位，延迟旧身份不能覆盖且不推进业务状态", () => {
 		const manager = new TerminalSessionManager();
 		manager.hydrateFromRecord({
-			"task-1": createSummary({ state: "running" }),
+			"task-1": applySessionFacets(
+				createSummary({
+					state: "awaiting_review",
+					pid: null,
+					updatedAt: 2,
+					lastSubstantiveOutputAt: 2,
+					lastConversationProgressObservation: { observedAtMs: 2, evidenceKind: "agent_lifecycle_hook_event" },
+					agentResponseGenerationStopped: {
+						stoppedAt: 2,
+						signalConfidence: "structured_user_turn",
+						turnSequence: 1,
+					},
+					restorationContinuationGuardState: "restored_agent_conversation_waiting_for_explicit_user_input",
+				}),
+			),
 		});
+		const originalSummary = manager.getSummary("task-1");
+		const summaryListener = vi.fn();
+		manager.onSummary(summaryListener);
 		const identity = {
 			sourceAgentId: "claude",
 			nativeSessionId: "sess-1",
 			transcriptPath: "/tmp/sess-1.jsonl",
 			observedAt: 10,
 		};
+		manager.applyAgentNativeConversationSessionIdentity("task-1", identity);
+		const forkedIdentity = { ...identity, nativeSessionId: "sess-2", observedAt: 20 };
+		manager.applyAgentNativeConversationSessionIdentity("task-1", forkedIdentity);
+		const confirmedIdentity = { ...forkedIdentity, observedAt: 40 };
+		const confirmed = manager.applyAgentNativeConversationSessionIdentity("task-1", confirmedIdentity);
 
-		const first = manager.applyAgentNativeConversationSessionIdentity("task-1", identity);
-		expect(first?.agentNativeConversationSessionIdentity).toEqual(identity);
+		// 旧会话事件的发生时间夹在两次新会话确认之间，但重试直到最后才送达。
+		const delayed = manager.applyAgentNativeConversationSessionIdentity("task-1", { ...identity, observedAt: 30 });
+		expect(delayed).toEqual(confirmed);
+		expect(confirmed?.agentNativeConversationSessionIdentity).toEqual(confirmedIdentity);
+		expect(confirmed).toEqual({ ...originalSummary, agentNativeConversationSessionIdentity: confirmedIdentity });
+		expect(summaryListener).toHaveBeenCalledTimes(3);
 
-		// 同一身份重报（每个 hook 事件都会带）：不写、不推进 updatedAt、observedAt 保留首次观测。
-		const second = manager.applyAgentNativeConversationSessionIdentity("task-1", { ...identity, observedAt: 20 });
-		expect(second?.agentNativeConversationSessionIdentity?.observedAt).toBe(10);
-		expect(second?.updatedAt).toBe(first?.updatedAt);
-
-		// harness 换了 session id（--fork-session / 续接）：整体替换。
-		const forked = manager.applyAgentNativeConversationSessionIdentity("task-1", {
-			...identity,
-			nativeSessionId: "sess-2",
-		});
-		expect(forked?.agentNativeConversationSessionIdentity?.nativeSessionId).toBe("sess-2");
-
+		// 更早的同身份确认与相同时间的重试都不能回退水位或重复广播。
+		expect(manager.applyAgentNativeConversationSessionIdentity("task-1", forkedIdentity)).toEqual(confirmed);
+		expect(manager.applyAgentNativeConversationSessionIdentity("task-1", confirmedIdentity)).toEqual(confirmed);
+		expect(summaryListener).toHaveBeenCalledTimes(3);
 		expect(manager.applyAgentNativeConversationSessionIdentity("missing-task", identity)).toBeNull();
 	});
 

@@ -92,6 +92,8 @@ import type {
 	RuntimeIngestExploratoryFindingCandidateResponse,
 	RuntimeListAgentRaisedPendingUserDecisionsRequest,
 	RuntimeListAgentRaisedPendingUserDecisionsResponse,
+	RuntimeListAgentRaisedUserDecisionHistoryForTaskRequest,
+	RuntimeListAgentRaisedUserDecisionHistoryForTaskResponse,
 	RuntimeNotificationClearRequest,
 	RuntimeNotificationMarkVisitedRequest,
 	RuntimeNotificationMutationResponse,
@@ -272,6 +274,8 @@ import {
 	runtimeIngestExploratoryFindingCandidateResponseSchema,
 	runtimeListAgentRaisedPendingUserDecisionsRequestSchema,
 	runtimeListAgentRaisedPendingUserDecisionsResponseSchema,
+	runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema,
+	runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema,
 	runtimeNotificationClearRequestSchema,
 	runtimeNotificationMarkVisitedRequestSchema,
 	runtimeNotificationMutationResponseSchema,
@@ -438,6 +442,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeListAgentRaisedPendingUserDecisionsRequest,
 		) => Promise<RuntimeListAgentRaisedPendingUserDecisionsResponse>;
+		listAgentRaisedUserDecisionHistoryForTask: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeListAgentRaisedUserDecisionHistoryForTaskRequest,
+		) => Promise<RuntimeListAgentRaisedUserDecisionHistoryForTaskResponse>;
 		answerAgentRaisedPendingUserDecision: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
@@ -999,6 +1007,13 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeListAgentRaisedPendingUserDecisionsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.listAgentRaisedPendingUserDecisions(ctx.workspaceScope, input);
+			}),
+		// 问答记录：已了结的提问与答案（面板作答 / 终端作答含备注 / 放弃 / 被新问题取代）。
+		listAgentRaisedUserDecisionHistoryForTask: workspaceProcedure
+			.input(runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema)
+			.output(runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.listAgentRaisedUserDecisionHistoryForTask(ctx.workspaceScope, input);
 			}),
 		answerAgentRaisedPendingUserDecision: workspaceProcedure
 			.input(runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema)

@@ -19,6 +19,8 @@ import {
 	readAllAgentRaisedPendingUserDecisions,
 	recordAgentRaisedPendingUserDecision,
 	recordAgentRaisedPendingUserDecisionAnswer,
+	resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession,
+	resolveAgentRaisedUserQuestionFromAgentTerminal,
 	updateAgentRaisedPendingUserDecisionAnswerDeliveryState,
 } from "../../src/state/agent-raised-pending-user-decision-store";
 import { getWorkspaceDirectoryPath } from "../../src/state/workspace-state";
@@ -315,6 +317,229 @@ describe.sequential("agent-raised-pending-user-decision-store integration", () =
 
 			await clearAgentRaisedPendingUserDecisions(first.workspaceId);
 			expect(await readAgentRaisedPendingUserDecisions(first.workspaceId)).toEqual([]);
+		});
+	});
+
+	it("同一次提问从第二条路径以另一个 id 抵达（正文相同、旧的仍在等答）→ 不新增、不顶掉用户眼前那条", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("project-a");
+			await recordAgentRaisedPendingUserDecision(workspaceId, questionInput(workspaceId));
+			const secondObservation = await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, {
+					decisionId: "ask-user-question:数据访问层用哪种方案？",
+					askedAt: ASKED_AT + 1_500,
+				}),
+			);
+			expect(secondObservation.decisionId).toBe("claude-tool-use-1");
+			const records = await readAgentRaisedPendingUserDecisions(workspaceId);
+			expect(records).toHaveLength(1);
+			expect(records[0]?.status).toBe("pending");
+		});
+	});
+
+	it("旧数据的一问两记：沿重复链走到仍在等答的那条；正文不同（agent 真问了新问题）则停在原处", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("project-a");
+			// 先真实落一条被「不同正文的新问题」顶掉的记录；再把后继改成同正文，模拟新去重上线前
+			// 旧版本写下的一问两记（新代码已不会再产生这种数据，只能从文件层构造）。
+			await recordAgentRaisedPendingUserDecision(workspaceId, questionInput(workspaceId));
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, {
+					decisionId: "claude-tool-use-2",
+					questionMarkdown: "另一个问题",
+					askedAt: ASKED_AT + 1_000,
+				}),
+			);
+			const records = await readAgentRaisedPendingUserDecisions(workspaceId);
+			// 正文不同：停在原处（superseded），不会被误当成同一次提问。
+			expect(
+				resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession(records, "claude-tool-use-1")?.decisionId,
+			).toBe("claude-tool-use-1");
+			const duplicateChainRecords = records.map((record) =>
+				record.decisionId === "claude-tool-use-2"
+					? { ...record, questionMarkdown: "数据访问层用哪种方案？" }
+					: record,
+			);
+			expect(
+				resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession(
+					duplicateChainRecords,
+					"claude-tool-use-1",
+				)?.decisionId,
+			).toBe("claude-tool-use-2");
+		});
+	});
+
+	it("终端作答：按 tool_use_id 了结，标签映射为选项、对不上的记为自由回答，备注保留，视为已送达且不再 open", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("project-a");
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, {
+					decisionId: "task-a:toolu_1",
+					orderedQuestions: [
+						{
+							decisionQuestionId: "question-0",
+							headerMarkdown: null,
+							questionMarkdown: "数据访问层用哪种方案？",
+							selectionMode: "multiple",
+							options: [
+								{ optionId: "question-0-option-0", label: "自建 SQL" },
+								{ optionId: "question-0-option-1", label: "用 ORM" },
+							],
+							allowsFreeformAnswer: true,
+						},
+					],
+				}),
+			);
+			const resolved = await resolveAgentRaisedUserQuestionFromAgentTerminal(workspaceId, {
+				taskId: "task-a",
+				resolution: {
+					decisionSourceId: "toolu_1",
+					resolutionKind: "answered_in_agent_terminal",
+					answersForQuestions: [
+						{
+							questionText: "数据访问层用哪种方案？",
+							answerText: "自建 SQL, 用 ORM, 两者混用",
+							notesText: "先做读路径",
+						},
+					],
+				},
+				resolvedAt: ASKED_AT + 5_000,
+			});
+			expect(resolved?.status).toBe("answered");
+			expect(resolved?.answerDeliveryState).toBe("delivered");
+			expect(resolved?.answer?.answerSource).toBe("agent_terminal");
+			expect(resolved?.answer?.orderedQuestionAnswers).toEqual([
+				{
+					decisionQuestionId: "question-0",
+					selectedOptionIds: ["question-0-option-0", "question-0-option-1"],
+					freeformText: "两者混用",
+				},
+			]);
+			expect(resolved?.answer?.agentTerminalAnswersForQuestions?.[0]?.notesText).toBe("先做读路径");
+			expect(isOpenAgentRaisedPendingUserDecision(resolved)).toBe(false);
+		});
+	});
+
+	it("终端多选里有一个标签本身含「, 」：写入账本时整体识别为该选项，不拆碎成自由回答", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("project-a");
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, {
+					decisionId: "task-a:toolu_comma",
+					orderedQuestions: [
+						{
+							decisionQuestionId: "question-0",
+							headerMarkdown: null,
+							questionMarkdown: "数据访问层用哪种方案？",
+							selectionMode: "multiple",
+							options: [
+								{ optionId: "question-0-option-0", label: "读写分离, 带缓存" },
+								{ optionId: "question-0-option-1", label: "用 ORM" },
+							],
+							allowsFreeformAnswer: true,
+						},
+					],
+				}),
+			);
+			const resolved = await resolveAgentRaisedUserQuestionFromAgentTerminal(workspaceId, {
+				taskId: "task-a",
+				resolution: {
+					decisionSourceId: "toolu_comma",
+					resolutionKind: "answered_in_agent_terminal",
+					answersForQuestions: [
+						{ questionText: "数据访问层用哪种方案？", answerText: "读写分离, 带缓存, 用 ORM", notesText: null },
+					],
+				},
+				resolvedAt: ASKED_AT + 5_000,
+			});
+			expect(resolved?.answer?.orderedQuestionAnswers).toEqual([
+				{
+					decisionQuestionId: "question-0",
+					selectedOptionIds: ["question-0-option-0", "question-0-option-1"],
+					freeformText: null,
+				},
+			]);
+		});
+	});
+
+	it("终端拒答 → dismissed（来源 agent_terminal）；已在面板作答的记录不被随后为投递发出的 Esc 拒答冲掉", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("project-a");
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, { decisionId: "task-a:toolu_1" }),
+			);
+			const declineResolution = {
+				decisionSourceId: "toolu_1",
+				resolutionKind: "declined_in_agent_terminal" as const,
+				answersForQuestions: [{ questionText: "数据访问层用哪种方案？", answerText: null, notesText: null }],
+			};
+			await recordAgentRaisedPendingUserDecisionAnswer(workspaceId, "task-a:toolu_1", {
+				selectedOptionIds: ["orm"],
+				freeformText: null,
+				answeredAt: ASKED_AT + 1_000,
+				answerSource: "kanban_panel",
+			});
+			expect(
+				await resolveAgentRaisedUserQuestionFromAgentTerminal(workspaceId, {
+					taskId: "task-a",
+					resolution: declineResolution,
+					resolvedAt: ASKED_AT + 2_000,
+				}),
+			).toBeNull();
+			expect((await readAgentRaisedPendingUserDecisions(workspaceId))[0]?.status).toBe("answered");
+
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, {
+					decisionId: "task-a:toolu_2",
+					questionMarkdown: "第二个问题",
+					askedAt: ASKED_AT + 3_000,
+				}),
+			);
+			const declined = await resolveAgentRaisedUserQuestionFromAgentTerminal(workspaceId, {
+				taskId: "task-a",
+				resolution: { ...declineResolution, decisionSourceId: "toolu_2" },
+				resolvedAt: ASKED_AT + 4_000,
+			});
+			expect(declined?.status).toBe("dismissed");
+			expect(declined?.dismissalSource).toBe("agent_terminal");
+		});
+	});
+
+	it("结局没有 tool_use_id 时按逐问正文回落匹配；正文对不上则不动任何记录", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("project-a");
+			await recordAgentRaisedPendingUserDecision(
+				workspaceId,
+				questionInput(workspaceId, { decisionId: "task-a:toolu_1" }),
+			);
+			expect(
+				await resolveAgentRaisedUserQuestionFromAgentTerminal(workspaceId, {
+					taskId: "task-a",
+					resolution: {
+						decisionSourceId: null,
+						resolutionKind: "answered_in_agent_terminal",
+						answersForQuestions: [{ questionText: "别的问题", answerText: "用 ORM", notesText: null }],
+					},
+					resolvedAt: ASKED_AT + 1_000,
+				}),
+			).toBeNull();
+			const resolved = await resolveAgentRaisedUserQuestionFromAgentTerminal(workspaceId, {
+				taskId: "task-a",
+				resolution: {
+					decisionSourceId: null,
+					resolutionKind: "answered_in_agent_terminal",
+					answersForQuestions: [{ questionText: "数据访问层用哪种方案？", answerText: "用 ORM", notesText: null }],
+				},
+				resolvedAt: ASKED_AT + 2_000,
+			});
+			expect(resolved?.decisionId).toBe("task-a:toolu_1");
+			expect(resolved?.answer?.selectedOptionIds).toEqual(["orm"]);
 		});
 	});
 });

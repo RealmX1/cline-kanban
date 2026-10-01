@@ -249,7 +249,9 @@ function normalizeTaskTerminalAgentModelOverrideSettings(
 	};
 }
 
-function normalizeCard(rawCard: unknown): BoardCard | null {
+// `now` 由 normalizeBoardData 统一取一次再传进来：缺时间戳的卡片共享同一个回落值，Backlog 的稳定排序
+// 才会保持它们的原次序，而不是按「逐张归一化时 Date.now() 恰好跨过的毫秒」随机翻转。
+function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 	if (!rawCard || typeof rawCard !== "object") {
 		return null;
 	}
@@ -282,6 +284,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		prepFilePath?: unknown;
 		createdAt?: unknown;
 		updatedAt?: unknown;
+		taskDescriptionLastUpdatedAt?: unknown;
 	};
 	const prompt = typeof card.prompt === "string" ? card.prompt.trim() : "";
 	if (!prompt) {
@@ -320,8 +323,6 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		: parsedLegacyTaskAgentSessionInitialization?.success
 			? parsedLegacyTaskAgentSessionInitialization.data
 			: undefined;
-
-	const now = Date.now();
 
 	const prepFilePath = typeof card.prepFilePath === "string" ? card.prepFilePath.trim() : "";
 	const worktreeMode =
@@ -366,6 +367,17 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 	// saveState 时把盘上已声明的模式抹回 operational 缺省。老卡片没有该字段 ⇒ undefined = operational。
 	const parsedTaskConversationMode = runtimeTaskConversationModeSchema.safeParse(card.taskConversationMode);
 	const taskConversationMode = parsedTaskConversationMode.success ? parsedTaskConversationMode.data : undefined;
+	const updatedAt = typeof card.updatedAt === "number" ? card.updatedAt : now;
+	// Description 最后更新时间：白名单铁律同上。缺失（老卡片）时物化回落值（= updatedAt，见
+	// resolveTaskDescriptionLastUpdatedAt），下一次保存后固定；**绝不回落到 now**——那会让每次水合都把
+	// 老卡刷成「刚更新」、打乱 Backlog 顺序。
+	const taskDescriptionLastUpdatedAt = runtimeTaskState.resolveTaskDescriptionLastUpdatedAt({
+		taskDescriptionLastUpdatedAt:
+			typeof card.taskDescriptionLastUpdatedAt === "number" && Number.isFinite(card.taskDescriptionLastUpdatedAt)
+				? card.taskDescriptionLastUpdatedAt
+				: undefined,
+		updatedAt,
+	});
 
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
@@ -393,7 +405,8 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		...(worktreeMode ? { worktreeMode } : {}),
 		...(prepFilePath ? { prepFilePath } : {}),
 		createdAt: typeof card.createdAt === "number" ? card.createdAt : now,
-		updatedAt: typeof card.updatedAt === "number" ? card.updatedAt : now,
+		updatedAt,
+		taskDescriptionLastUpdatedAt,
 	};
 }
 
@@ -465,6 +478,7 @@ export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 	}
 
 	const initial = createInitialBoardData();
+	const now = Date.now();
 	const normalizedColumns = initial.columns.map((column) => ({ ...column, cards: [] as BoardCard[] }));
 	const columnById = new Map(normalizedColumns.map((column) => [column.id, column]));
 
@@ -485,7 +499,7 @@ export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 			continue;
 		}
 		for (const rawCard of column.cards) {
-			const card = normalizeCard(rawCard);
+			const card = normalizeCard(rawCard, now);
 			if (card) {
 				normalizedColumn.cards.push(card);
 			}
@@ -504,10 +518,13 @@ export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 		}
 	}
 
-	return runtimeTaskState.updateTaskDependencies({
-		columns: normalizedColumns,
-		dependencies: normalizedDependencies,
-	});
+	// 老看板（本字段出现前的手动顺序）在首次水合时即按 Description 最后更新时间排好。
+	return runtimeTaskState.sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending(
+		runtimeTaskState.updateTaskDependencies({
+			columns: normalizedColumns,
+			dependencies: normalizedDependencies,
+		}),
+	);
 }
 
 export function addTaskToColumn(board: BoardData, columnId: BoardColumnId, draft: TaskDraft): BoardData {
@@ -616,6 +633,11 @@ export function applyDragResult(
 	}
 
 	if (sourceColumn.id === destinationColumn.id) {
+		// Backlog 按 Description 最后更新时间排序，列内手动重排会被下一次排序立刻覆盖——drag-rules 已禁止
+		// 往 backlog 放卡，这里再兜一层，免得误导性的临时顺序被落盘。
+		if (sourceColumn.id === "backlog") {
+			return { board };
+		}
 		const movedCards = reorder(sourceColumn.cards, source.index, destination.index);
 		const columns = Array.from(board.columns);
 		columns[sourceColumnIndex] = {
@@ -737,6 +759,22 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 			}
 			columnUpdated = true;
 			updated = true;
+			const nextImages =
+				draft.images === undefined
+					? card.images
+					: draft.images.length > 0
+						? draft.images.map((image) => ({ ...image }))
+						: undefined;
+			// 与运行时 updateTask 同一判据：只有 Description 内容（prompt + 附图）真正变了才推进；
+			// 没变时物化回落值，老卡片的值从此固定。
+			const taskDescriptionLastUpdatedAt = runtimeTaskState.hasTaskDescriptionContentChanged({
+				previousPrompt: card.prompt,
+				previousImages: card.images,
+				nextPrompt: prompt,
+				nextImages,
+			})
+				? Date.now()
+				: runtimeTaskState.resolveTaskDescriptionLastUpdatedAt(card);
 			return {
 				...card,
 				title: title || card.title,
@@ -747,12 +785,7 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 					: card.taskAgentPermissionMode,
 				autoReviewEnabled: Boolean(draft.autoReviewEnabled),
 				autoReviewMode: resolveTaskAutoReviewMode(draft.autoReviewMode ?? DEFAULT_TASK_AUTO_REVIEW_MODE),
-				images:
-					draft.images === undefined
-						? card.images
-						: draft.images.length > 0
-							? draft.images.map((image) => ({ ...image }))
-							: undefined,
+				images: nextImages,
 				taskCommentEntries:
 					draft.taskCommentEntries === undefined
 						? cloneTaskCommentEntries(card.taskCommentEntries)
@@ -770,6 +803,7 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				baseRef,
 				worktreeMode: shouldUpdateWorktreeMode ? draft.worktreeMode : card.worktreeMode,
 				updatedAt: Date.now(),
+				taskDescriptionLastUpdatedAt,
 			};
 		});
 		return columnUpdated ? { ...column, cards } : column;
@@ -778,7 +812,12 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 	if (!updated) {
 		return { board, updated: false };
 	}
-	return { board: withUpdatedColumns(board, columns), updated: true };
+	return {
+		board: runtimeTaskState.sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending(
+			withUpdatedColumns(board, columns),
+		),
+		updated: true,
+	};
 }
 
 export function updateTaskCommentEntries(

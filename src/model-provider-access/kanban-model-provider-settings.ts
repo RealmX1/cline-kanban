@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { AsyncEntry } from "@napi-rs/keyring";
 import { z } from "zod";
 import {
+	describeNotificationIntelligencePurposeBindingProblem,
+	findNotificationIntelligencePurposeBindingProblems,
+	listNewlyIntroducedNotificationIntelligencePurposeBindingProblems,
+} from "../core/notification-intelligence-purpose-binding-problems";
+import {
 	type KanbanModelProviderProfile,
 	kanbanModelProviderProfileSchema,
 	type NotificationIntelligenceSettings,
@@ -50,6 +55,40 @@ function credentialEntry(reference: string) {
 		linux: { store: "secret-service" },
 	});
 }
+// 仅由环境变量配置、尚未落盘的文本 provider：设置页列表与保存校验看到的是同一组档案。
+function listEnvironmentConfiguredProviderProfilesMissingFromPersisted(
+	persistedProfiles: readonly KanbanModelProviderProfile[],
+): KanbanModelProviderProfile[] {
+	return readConfiguredModelProviderIds()
+		.filter((modelProviderId) => !persistedProfiles.some((profile) => profile.modelProviderId === modelProviderId))
+		.map((modelProviderId) => {
+			const segment = toModelProviderEnvironmentVariableSegment(modelProviderId);
+			return {
+				modelProviderId,
+				displayName: modelProviderId,
+				providerProtocol: "openai_compatible",
+				credentialSource: "environment",
+				alibabaRegion: "beijing",
+				baseUrl:
+					process.env[`KANBAN_MODEL_PROVIDER_${segment}_BASE_URL`] ??
+					KNOWN_MODEL_PROVIDER_DEFAULTS[modelProviderId]?.baseUrl,
+				defaultModelId:
+					process.env[`KANBAN_MODEL_PROVIDER_${segment}_MODEL_ID`] ??
+					KNOWN_MODEL_PROVIDER_DEFAULTS[modelProviderId]?.modelId,
+			};
+		});
+}
+// 这些字段改动时才对语音配置做完整校验；档案变动导致的既有失效不阻止其它字段保存（播放时失败会回退提示音并留档）。
+const NOTIFICATION_SPEECH_CONFIGURATION_FIELDS_VALIDATED_ON_CHANGE = [
+	"speechMode",
+	"speechProvider",
+	"notificationSpeechBinding",
+	"speechVoice",
+	"speechSpeed",
+	"speechPitch",
+	"speechStyleInstruction",
+	"summaryLanguage",
+] as const satisfies readonly (keyof NotificationIntelligenceSettings)[];
 export async function readNotificationIntelligenceSettings(): Promise<NotificationIntelligenceSettings> {
 	return (await readPersistedSettings()).settings;
 }
@@ -57,17 +96,21 @@ export async function saveNotificationIntelligenceSettings(input: NotificationIn
 	const settings = notificationIntelligenceSettingsSchema.parse(input);
 	await lockedFileSystem.withLock({ path: settingsPath() }, async () => {
 		const persisted = await readPersistedSettings();
-		for (const binding of [settings.taskNameSuggestionBinding, settings.notificationAssessmentBinding]) {
-			if (!binding) continue;
-			const profile = persisted.profiles.find((candidate) => candidate.modelProviderId === binding.modelProviderId);
-			if (
-				profile
-					? profile.providerProtocol !== "openai_compatible" || !profile.baseUrl
-					: !readConfiguredModelProviderIds().includes(binding.modelProviderId)
-			)
-				throw new Error("文本用途必须绑定已配置的 OpenAI 兼容 provider");
-		}
-		if (settings.speechMode === "summary" && settings.speechProvider !== "browser")
+		const selectableProfiles = [
+			...persisted.profiles,
+			...listEnvironmentConfiguredProviderProfilesMissingFromPersisted(persisted.profiles),
+		];
+		// 只拒绝本次新引入的绑定问题；已落盘的坏绑定若也拦，会让声音模式等无关字段永远存不上。
+		const newlyIntroducedProblems = listNewlyIntroducedNotificationIntelligencePurposeBindingProblems(
+			findNotificationIntelligencePurposeBindingProblems(persisted.settings, selectableProfiles),
+			findNotificationIntelligencePurposeBindingProblems(settings, selectableProfiles),
+		);
+		if (newlyIntroducedProblems.length > 0)
+			throw new Error(newlyIntroducedProblems.map(describeNotificationIntelligencePurposeBindingProblem).join("；"));
+		const speechConfigurationChanged = NOTIFICATION_SPEECH_CONFIGURATION_FIELDS_VALIDATED_ON_CHANGE.some(
+			(field) => JSON.stringify(settings[field]) !== JSON.stringify(persisted.settings[field]),
+		);
+		if (settings.speechMode === "summary" && settings.speechProvider !== "browser" && speechConfigurationChanged)
 			validateNotificationSpeechConfiguration(
 				settings,
 				persisted.profiles.find(
@@ -179,24 +222,10 @@ export async function resolveKanbanChatCredential(
 }
 export async function getNotificationIntelligenceSettings() {
 	const persisted = await readPersistedSettings();
-	const profiles: KanbanModelProviderProfile[] = [...persisted.profiles];
-	for (const modelProviderId of readConfiguredModelProviderIds()) {
-		if (profiles.some((profile) => profile.modelProviderId === modelProviderId)) continue;
-		const segment = toModelProviderEnvironmentVariableSegment(modelProviderId);
-		profiles.push({
-			modelProviderId,
-			displayName: modelProviderId,
-			providerProtocol: "openai_compatible",
-			credentialSource: "environment",
-			alibabaRegion: "beijing",
-			baseUrl:
-				process.env[`KANBAN_MODEL_PROVIDER_${segment}_BASE_URL`] ??
-				KNOWN_MODEL_PROVIDER_DEFAULTS[modelProviderId]?.baseUrl,
-			defaultModelId:
-				process.env[`KANBAN_MODEL_PROVIDER_${segment}_MODEL_ID`] ??
-				KNOWN_MODEL_PROVIDER_DEFAULTS[modelProviderId]?.modelId,
-		});
-	}
+	const profiles: KanbanModelProviderProfile[] = [
+		...persisted.profiles,
+		...listEnvironmentConfiguredProviderProfilesMissingFromPersisted(persisted.profiles),
+	];
 	const providers = await Promise.all(
 		profiles.map(async (profile) => {
 			try {

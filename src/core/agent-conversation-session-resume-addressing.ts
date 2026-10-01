@@ -9,22 +9,20 @@
 // 这三种情形下 cwd-latest 必然抢错对话：重启 A 会把 B 的对话接过来，两条会话就此纠缠。
 //
 // 正确的 key 其实早就记下来了但没被用起来：summary 的加性 sidecar
-// `agentNativeConversationSessionIdentity`（来源只认 hook stdin 的 `session_id`），而 Claude / Codex /
-// Cursor 三家 adapter 本来就支持 `--resume <id>` 这条按-id 通道。
+// `agentNativeConversationSessionIdentity`（来自 hook、托管扩展或 ACP 协议），由各 adapter 转为各自的按-ID 恢复参数。
 //
 // 与 `agent-session-transport-selection.ts` 同层：纯函数、无 IO、无进程状态，被 `src/terminal/` 与
 // `src/trpc/` 共同消费。判定所需的一切事实由调用方查好后传进来。
 //
-// 与「建卡时的播种」（`card.taskAgentSessionInitialization`）的分工——两者形状相同但语义正交，绝不可合并：
+// 与「建卡时的播种」（`card.taskAgentSessionInitialization`）的分工——两者语义正交，且支持的 harness 与 ID 格式不同，绝不可合并：
 //   播种 = 「这张新卡要从**别人的**某段历史会话长出来」，是一次性的开局参数；
 //   本模块 = 「这条**会话自己**上一世的对话在哪」，每次重启现算。
 // 播种一旦被当作重启寻址用，从垃圾桶拖回来的任务会去续播种源的对话而不是它自己的。
 
 import {
 	type RuntimeAgentNativeConversationSessionIdentity,
-	type RuntimeTaskAgentSessionInitialization,
-	runtimeResumableAgentSessionSourceAgentIdSchema,
-	runtimeTaskAgentSessionInitializationSchema,
+	type RuntimeObservedAgentNativeConversationSessionResumeAddressing,
+	runtimeObservedAgentNativeConversationSessionResumeAddressingSchema,
 } from "./api-contract";
 
 // 与本次启动共用同一个执行工作目录的**另一条**已知会话（不含本会话自己）。
@@ -44,7 +42,7 @@ export type AgentConversationSessionResumeAddressing =
 			// session id，而 sidecar 要到下一个 hook 事件才追得上，中间这段窗口里本会话的身份是错的，
 			// 下一次重启又会去续被 fork 的那条源对话。只读约束由 `readOnlyQuestionSession` 独立保障，
 			// 不靠 fork 来实现。
-			taskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization;
+			taskAgentSessionInitialization: RuntimeObservedAgentNativeConversationSessionResumeAddressing;
 	  }
 	| {
 			kind: "latest_agent_conversation_in_execution_working_directory";
@@ -92,22 +90,18 @@ export function resolveAgentConversationSessionResumeAddressing(
 	}
 	const identity = input.observedAgentNativeConversationSessionIdentity;
 	if (identity) {
-		// ② 记录 id 的 harness 必须与本次要启动的一致。卡片换过 agent（或靠兜底救回时解析成了另一个
-		//    agent）之后，上一世的 claude session id 拿去喂 codex 只会得到一个 not found。
-		// ③ 该 agent 必须真的有按-id 续跑通道——用能力枚举而不是 agentId 字面量比较：kimi 有模型选择器
-		//    但只支持 `--continue`，omp / gemini 同样没有 `-S/--session <id>`。它们拿不到这层保护，
-		//    只能靠下面的歧义闸门兜底，这也正是本修复「不只是 Claude 的问题」的落点。
-		// ④ session id 必须过契约（要求 uuid），脏值一律当作没有记录。
-		const isSameHarnessAsLaunch = identity.sourceAgentId === input.launchAgentId;
-		const isResumableByNativeSessionId = runtimeResumableAgentSessionSourceAgentIdSchema.safeParse(
-			identity.sourceAgentId,
-		).success;
-		if (isSameHarnessAsLaunch && isResumableByNativeSessionId) {
-			const parsed = runtimeTaskAgentSessionInitializationSchema.safeParse({
+		// 原生 ID 由 harness 报告；不把 Kimi 的 session_<UUID> 强制解析成 UUID。
+		if (
+			identity.sourceAgentId === input.launchAgentId &&
+			["claude", "codex", "cursor", "kimi", "omp"].includes(input.launchAgentId)
+		) {
+			const parsed = runtimeObservedAgentNativeConversationSessionResumeAddressingSchema.safeParse({
 				sourceAgentId: identity.sourceAgentId,
 				sourceSessionId: identity.nativeSessionId,
 				sourceSessionReuseMode: "resume_existing_session",
 			});
+			if (!parsed.success)
+				throw new Error("Recorded native conversation session ID is invalid; refusing latest-session fallback.");
 			if (parsed.success) {
 				return {
 					kind: "addressed_by_observed_agent_native_session_id",

@@ -1,7 +1,14 @@
 import type { RefObject } from "react";
 import { useEffect, useState } from "react";
 
+import {
+	STAGE_HEADER_HEIGHT_PX,
+	STAGE_RAIL_FOCUSED_CARD_PADDING_PX,
+	STAGE_RAIL_GAP_PX,
+	STAGE_SECTION_BORDER_PX,
+} from "@/components/detail-panels/stage-header-rail-geometry";
 import type { SelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
+import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
 
 /**
  * Focus View 左侧列表里「全部 stage 卡头」相对滚动视口的钉住布局——把单卡钉住
@@ -23,25 +30,10 @@ import type { SelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
  * 焦点条目吞在 rail 之后（与旧 `--kb-selected-pin-top` 变量要解决的是同一类遮挡 bug）。焦点卡高取**真实卡**
  * （`[data-task-id]`，折叠时由 peek 支路保活）的实测高度——它不依赖分类结果、**无反馈环**；绝不测
  * rail 克隆（那才循环）。渲染侧仍用 flexbox 自然堆叠、不手算逐条偏移。
+ *
+ * 条目几何常量（卡头槽高 / 外框 / 间距 / 焦点卡 padding）是本 hook 与渲染方、跳转/折叠滚动计算共用的契约，
+ * 单一真源在 `@/components/detail-panels/stage-header-rail-geometry`。
  */
-
-/** stage 卡头槽高（与 `ColumnSection` / rail 条目卡头内联 `height: 40` 一致）。 */
-const STAGE_HEADER_HEIGHT_PX = 40;
-/** rail 条目间距（复刻 scrollport 的 `gap-2` = 8px）；计入阈值时略作高估以偏向「不吞卡」的安全侧。 */
-const STAGE_RAIL_GAP_PX = 8;
-/**
- * 每个 rail 条目外框 `border border-border` 的上下边框之和（1px 上 + 1px 下）。渲染侧 `StageHeaderRailEntry`
- * 的外层 `<div className="bg-surface-1 rounded-lg border border-border">` 使条目真实高度比卡头槽高多这 2px；
- * 阈值须逐条计入，否则多条堆叠后累计误差会让「首个未钉卡头」落进不透明 rail 之后被遮住（RVF-002 遮挡类 bug）。
- */
-const STAGE_SECTION_BORDER_PX = 2;
-/**
- * 焦点条目在焦点卡克隆外层 `<div style={{ padding: 8 }}>` 的上下 padding 之和（8px 上 + 8px 下）。仅焦点条目
- * （`withCard`）挂此包裹层；`focusedCardHeight` 取真实卡 border box（`getBoundingClientRect().height` 不含其
- * `marginBottom: 6`，与 rail 内 sticky 卡头副本的 `marginBottom: 0` 一致），故焦点条目真实高
- * = 卡头槽高 + 外框 + 此 padding + 焦点卡高。漏计这 16px 会使焦点条目严重低估、吞掉相邻随流卡头。
- */
-const STAGE_RAIL_FOCUSED_CARD_PADDING_PX = 16;
 
 export interface StageHeaderPinLayout {
 	/** 已滚过、卡头钉在视口顶沿的 stage columnId（文档序，顶→下堆叠）。 */
@@ -66,10 +58,6 @@ export interface UseStageHeaderPinLayoutOptions {
 }
 
 const EMPTY_LAYOUT: StageHeaderPinLayout = { topPinnedColumnIds: [], bottomPinnedColumnIds: [] };
-
-function escapeAttributeValue(value: string): string {
-	return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-}
 
 function sameIds(a: readonly string[], b: readonly string[]): boolean {
 	if (a.length !== b.length) {
@@ -132,7 +120,9 @@ export function useStageHeaderPinLayout({
 
 			let focusedCardHeight = 0;
 			if (focusedIndex >= 0) {
-				const focusedCard = root.querySelector(`[data-task-id="${escapeAttributeValue(focusedTaskId)}"]`);
+				const focusedCard = root.querySelector(
+					`[data-task-id="${escapeCssAttributeSelectorValue(focusedTaskId)}"]`,
+				);
 				if (focusedCard) {
 					focusedCardHeight = focusedCard.getBoundingClientRect().height;
 				}
@@ -141,7 +131,9 @@ export function useStageHeaderPinLayout({
 			const sectionTops: number[] = [];
 			const sectionBottoms: number[] = [];
 			for (const columnId of orderedColumnIds) {
-				const section = root.querySelector(`[data-stage-section-id="${escapeAttributeValue(columnId)}"]`);
+				const section = root.querySelector(
+					`[data-stage-section-id="${escapeCssAttributeSelectorValue(columnId)}"]`,
+				);
 				if (!section) {
 					sectionTops.push(Number.NaN);
 					sectionBottoms.push(Number.NaN);

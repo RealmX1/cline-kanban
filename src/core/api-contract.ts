@@ -122,8 +122,7 @@ export type RuntimeTerminalAgentModelSelectionAgentId = z.infer<typeof runtimeTe
 // 哪些 terminal agent 的历史会话能被按 session id 索引并续接/分叉。
 //
 // 这与「有没有模型选择器」是两件互不蕴含的事，曾经共用一个枚举，导致「给某个 agent 加模型选择器」会
-// 顺带宣称它的会话可以按 id 恢复。kimi 正是这种情况：它有 `-m/--model`，但只支持 `--continue`，
-// 没有 `-S/--session <id>` 通道，所以它进模型选择枚举、不进这个枚举。
+// 顺带开放历史会话播种。Kimi / OMP 的本任务按 ID 恢复由独立契约声明，不进入此历史选择枚举。
 export const runtimeResumableAgentSessionSourceAgentIdSchema = z.enum(["claude", "codex", "cursor"]);
 export type RuntimeResumableAgentSessionSourceAgentId = z.infer<typeof runtimeResumableAgentSessionSourceAgentIdSchema>;
 export const runtimeTaskAgentSessionInitializationReuseModeSchema = z.enum([
@@ -133,6 +132,24 @@ export const runtimeTaskAgentSessionInitializationReuseModeSchema = z.enum([
 export type RuntimeTaskAgentSessionInitializationReuseMode = z.infer<
 	typeof runtimeTaskAgentSessionInitializationReuseModeSchema
 >;
+// 本任务重启寻址与历史播种分开：Kimi / OMP 支持前者，不因此开放历史选择器。
+export const runtimeObservedAgentNativeConversationSessionResumeAddressingSchema = z.object({
+	sourceAgentId: z.enum(["claude", "codex", "cursor", "kimi", "omp"]),
+	sourceSessionId: z
+		.string()
+		.trim()
+		.min(1)
+		.refine(
+			(id) =>
+				!id.startsWith("-") &&
+				Array.from(id).every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127),
+		),
+	sourceSessionReuseMode: z.literal("resume_existing_session"),
+});
+export type RuntimeObservedAgentNativeConversationSessionResumeAddressing = z.infer<
+	typeof runtimeObservedAgentNativeConversationSessionResumeAddressingSchema
+>;
+
 export const runtimeTaskAgentSessionInitializationSchema = z
 	.object({
 		sourceAgentId: runtimeResumableAgentSessionSourceAgentIdSchema,
@@ -347,6 +364,12 @@ export const runtimeBoardCardSchema = z
 		prepFilePath: z.string().optional(),
 		createdAt: z.number(),
 		updatedAt: z.number(),
+		// Description（prompt 文本 + 附图）最后一次**内容真正变化**的时间，Backlog 列按它倒序排序、卡片上显示。
+		// 与 updatedAt 刻意分开：后者任何用户可见修改都推进（改标题 / agent / baseRef / 移列 / 评论……），
+		// 本字段只在建卡与 Description 内容变化时推进。老卡片没有该字段 ⇒ optional，读处经
+		// resolveTaskDescriptionLastUpdatedAt 回落到 updatedAt（见 backlog-task-description-last-updated-ordering.ts）。
+		// 必须声明在这里：z.object 默认剥掉未知键，不声明就会在服务端解析时被丢掉。
+		taskDescriptionLastUpdatedAt: z.number().optional(),
 	})
 	.transform(
 		({
@@ -1089,7 +1112,10 @@ export type RuntimeProjectSummary = z.infer<typeof runtimeProjectSummarySchema>;
 
 export const runtimeTaskCommitIntegrationTrackingStatusSchema = z.enum([
 	"complete",
+	// 真正缺 provenance 的旧 task（功能上线前创建、且首次可追踪时 ahead=0）。
 	"legacy_history_unavailable",
+	// 有 provenance 锚点，但现存证据不足以证明 task commit 归属（例如非纯 fast-forward 的历史）。
+	"task_commit_ownership_history_incomplete",
 	"inplace_task_commit_ownership_unavailable",
 	"git_probe_unavailable",
 ]);
@@ -3679,7 +3705,12 @@ export const runtimeGitRefsResponseSchema = z.object({
 });
 export type RuntimeGitRefsResponse = z.infer<typeof runtimeGitRefsResponseSchema>;
 
-export const runtimeHookEventSchema = z.enum(["to_review", "to_in_progress", "activity"]);
+export const runtimeHookEventSchema = z.enum([
+	"to_review",
+	"to_in_progress",
+	"activity",
+	"agent_conversation_session_identity_observed",
+]);
 export type RuntimeHookEvent = z.infer<typeof runtimeHookEventSchema>;
 
 // Canonical schema source:
@@ -3720,6 +3751,9 @@ export const runtimeAgentRaisedDecisionOptionSchema = z.object({
 	optionId: z.string(),
 	label: z.string(),
 	description: z.string().optional(),
+	// AskUserQuestion 单选题可给每个选项附一段 preview（常见为等宽对比矩阵）。原样保留换行与空白，
+	// UI 以等宽块渲染；它与 description 是两段不同内容，不能拼进同一行。
+	previewText: z.string().optional(),
 });
 export type RuntimeAgentRaisedDecisionOption = z.infer<typeof runtimeAgentRaisedDecisionOptionSchema>;
 
@@ -3752,6 +3786,29 @@ export const runtimeAgentRaisedToolPermissionPayloadSchema = z.object({
 });
 export type RuntimeAgentRaisedToolPermissionPayload = z.infer<typeof runtimeAgentRaisedToolPermissionPayloadSchema>;
 
+// 用户**直接在 agent 终端里**对 AskUserQuestion 作答（或拒答）后，PostToolUse / PostToolUseFailure
+// 带回的结局。没有它，durable 账本就永远不知道这个问题已经在终端里了结，面板会一直挂着「尚未回答」；
+// 有了它，终端里的作答（含每问备注）也能进入 Kanban 的问答记录——那些备注在 TUI 里是看不清的。
+export const runtimeAgentRaisedUserQuestionAgentTerminalAnswerForQuestionSchema = z.object({
+	questionText: z.string(),
+	// harness 回传的原始答案文本：单选为选项标签，多选为逗号拼接的标签，「其他」为用户手打的文字。
+	answerText: z.string().nullable(),
+	notesText: z.string().nullable(),
+});
+export type RuntimeAgentRaisedUserQuestionAgentTerminalAnswerForQuestion = z.infer<
+	typeof runtimeAgentRaisedUserQuestionAgentTerminalAnswerForQuestionSchema
+>;
+
+export const runtimeAgentRaisedUserQuestionResolvedInAgentTerminalPayloadSchema = z.object({
+	// 与提问时 PreToolUse 同一个 tool_use_id；缺失时服务端按问题正文回落匹配。
+	decisionSourceId: z.string().nullable(),
+	resolutionKind: z.enum(["answered_in_agent_terminal", "declined_in_agent_terminal"]),
+	answersForQuestions: z.array(runtimeAgentRaisedUserQuestionAgentTerminalAnswerForQuestionSchema),
+});
+export type RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload = z.infer<
+	typeof runtimeAgentRaisedUserQuestionResolvedInAgentTerminalPayloadSchema
+>;
+
 export const runtimeHookIngestRequestSchema = z.object({
 	notificationCandidateId: z.string().uuid().optional(),
 	taskId: z.string(),
@@ -3762,6 +3819,9 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// 两者互斥：一次 hook 只可能是其中一种。
 	agentRaisedUserQuestion: runtimeAgentRaisedUserQuestionPayloadSchema.optional(),
 	agentRaisedToolPermission: runtimeAgentRaisedToolPermissionPayloadSchema.optional(),
+	// 仅 PostToolUse / PostToolUseFailure(AskUserQuestion) 携带：问题已在终端里了结。
+	agentRaisedUserQuestionResolvedInAgentTerminal:
+		runtimeAgentRaisedUserQuestionResolvedInAgentTerminalPayloadSchema.optional(),
 	// UserPromptSubmit 的 prompt 只在同步 hook 请求内短暂流转，用于区分真人输入与 harness 在恢复时
 	// 自动塞入的任务通知；普通诊断日志与 session summary 均不得记录它。
 	submittedPromptText: z.string().optional(),
@@ -3809,8 +3869,87 @@ export const runtimeAgentRaisedPendingUserDecisionSchema = z.object({
 		"delivery_failed",
 	]),
 	lastAnswerDeliveryFailureReason: z.string().nullable(),
+	// 提问它的那个会话活体。与当前会话 summary 的 runtimeSessionIncarnationId 相同且会话仍在跑，
+	// 即说明 agent 此刻正停在终端里的交互式选择器上——UI 据此默认折叠、引导去终端作答；
+	// 不同（会话已被回收 / 重启 / resume）或为 null（来源不明，如转录补录）则选择器早已不在，UI 主动展开。
+	originRuntimeSessionIncarnationId: z.string().nullable(),
+	// 已记下但尚未确认送达的答案；让 UI 在「已保存、未送达」时如实回显用户答了什么，而不是一张空表单。
+	recordedAnswerQuestionAnswers: z
+		.array(
+			z.object({
+				decisionQuestionId: z.string(),
+				selectedOptionIds: z.array(z.string()),
+				freeformText: z.string().nullable(),
+			}),
+		)
+		.nullable(),
 });
 export type RuntimeAgentRaisedPendingUserDecision = z.infer<typeof runtimeAgentRaisedPendingUserDecisionSchema>;
+
+// ── 问答记录：已了结的 agent 提问与用户的答案（含终端里作答时写下的备注）────────────────────
+// 存在意义：答案与备注在 TUI 里要么被折叠成 [Pasted text #N]、要么和选项混在一起看不清结构；
+// 这里把「问了什么、选了什么、补充了什么、在哪答的、有没有送达」结构化地摆出来。
+export const runtimeAgentRaisedUserDecisionHistoryResolutionSchema = z.enum([
+	"answered_in_kanban_panel",
+	"answered_in_agent_terminal",
+	"declined_in_agent_terminal",
+	"dismissed_in_kanban_panel",
+	// 用户切换了该 task 的 agent 会话通道（transport），仍在等答的问题被 Kanban 自动取消回给 agent——
+	// 用户没有在面板或终端里对它做过任何动作。
+	"cancelled_by_agent_session_transport_switch",
+	// 同一 task 上 agent 接着问了新问题，旧问题从未得到回答。
+	"superseded_by_later_question_without_answer",
+]);
+export type RuntimeAgentRaisedUserDecisionHistoryResolution = z.infer<
+	typeof runtimeAgentRaisedUserDecisionHistoryResolutionSchema
+>;
+
+export const runtimeAgentRaisedUserDecisionHistoryQuestionAnswerSchema = z.object({
+	decisionQuestionId: z.string(),
+	selectedOptionLabels: z.array(z.string()),
+	// 不对应任何选项的自由回答（面板里的「其他回答」或终端里的「Other」）。
+	freeformAnswerText: z.string().nullable(),
+	// 终端作答时写下的每问备注；面板作答没有独立备注字段，为 null。
+	notesText: z.string().nullable(),
+});
+export type RuntimeAgentRaisedUserDecisionHistoryQuestionAnswer = z.infer<
+	typeof runtimeAgentRaisedUserDecisionHistoryQuestionAnswerSchema
+>;
+
+export const runtimeAgentRaisedUserDecisionHistoryEntrySchema = z.object({
+	historyEntryId: z.string(),
+	taskId: z.string(),
+	// 记录来源：Kanban 决策账本，或从 agent 转录回填（早于本功能、或账本已裁剪的旧问答）。
+	recordSource: z.enum(["kanban_decision_ledger", "agent_conversation_transcript"]),
+	decisionKind: z.enum(["ordinary_user_question", "tool_permission_request"]),
+	askedAt: z.number(),
+	resolvedAt: z.number().nullable(),
+	resolution: runtimeAgentRaisedUserDecisionHistoryResolutionSchema,
+	orderedQuestions: z.array(runtimeAgentRaisedDecisionQuestionSchema),
+	questionAnswers: z.array(runtimeAgentRaisedUserDecisionHistoryQuestionAnswerSchema),
+	// 面板作答才有投递状态；终端作答天然已送达、转录回填无此概念，均为 null。
+	answerDeliveryState: z
+		.enum(["not_answered", "answer_recorded", "delivery_in_progress", "delivered", "delivery_failed"])
+		.nullable(),
+});
+export type RuntimeAgentRaisedUserDecisionHistoryEntry = z.infer<
+	typeof runtimeAgentRaisedUserDecisionHistoryEntrySchema
+>;
+
+export const runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema = z.object({
+	taskId: z.string().trim().min(1),
+});
+export type RuntimeListAgentRaisedUserDecisionHistoryForTaskRequest = z.infer<
+	typeof runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema
+>;
+
+export const runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema = z.object({
+	// 按提问时间倒序（最近的在前）。
+	historyEntries: z.array(runtimeAgentRaisedUserDecisionHistoryEntrySchema),
+});
+export type RuntimeListAgentRaisedUserDecisionHistoryForTaskResponse = z.infer<
+	typeof runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema
+>;
 
 export const runtimeListAgentRaisedPendingUserDecisionsResponseSchema = z.object({
 	decisions: z.array(runtimeAgentRaisedPendingUserDecisionSchema),

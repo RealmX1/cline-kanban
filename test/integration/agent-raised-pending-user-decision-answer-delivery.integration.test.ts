@@ -1,5 +1,7 @@
 // 待答决策的答案回投：严格顺序（先作废计时再动进程）、幂等（绝不重复送）、
 // 会话未就绪时的失败与重试、以及投递正文里带上原问题。
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { computeAgentSessionRuntimeReclamationEligibleAt } from "../../src/core/session-activity";
 import { createAgentRaisedPendingUserDecisionAnswerDelivery } from "../../src/server/agent-raised-pending-user-decision-answer-delivery";
@@ -14,6 +16,7 @@ import {
 	readAgentSessionReclamationDeadlineRecords,
 	recordAgentSessionRetentionDeadline,
 } from "../../src/state/agent-session-reclamation-deadline-store";
+import { getWorkspaceDirectoryPath } from "../../src/state/workspace-state";
 import { withIsolatedWorkspaceHome } from "./isolated-workspace-home-fixture";
 
 const ASKED_AT = 1_700_000_000_000;
@@ -296,6 +299,54 @@ describe.sequential("agent-raised-pending-user-decision answer delivery", () => 
 			expect(result.ok).toBe(false);
 			expect(result.delivered).toBe(false);
 			expect(result.error).toContain("not found");
+		});
+	});
+
+	it("面板仍拿着旧版本一问两记里被顶掉那条的 id 作答：沿重复链落到真正在等答的记录，并把提问活体交给投递", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("project-a");
+			await recordAgentRaisedPendingUserDecision(workspaceId, questionInput(workspaceId));
+			// 新代码已不会写出同正文的重复记录，只能在文件层构造旧数据：先落一条不同正文的后继，再把它改成同正文。
+			await recordAgentRaisedPendingUserDecision(workspaceId, {
+				...questionInput(workspaceId),
+				decisionId: "task-a:ask-user-question:数据访问层用哪种方案？",
+				questionMarkdown: "临时不同的正文",
+				askedAt: ASKED_AT + 1_500,
+			});
+			const legacyDuplicateRecords = (await readAgentRaisedPendingUserDecisions(workspaceId)).map((record) => ({
+				...record,
+				questionMarkdown: "数据访问层用哪种方案？",
+			}));
+			await writeFile(
+				join(getWorkspaceDirectoryPath(workspaceId), "agent-raised-pending-user-decisions.json"),
+				JSON.stringify(legacyDuplicateRecords),
+			);
+
+			const deliverTaskSessionInput = vi.fn(async () => true);
+			const result = await createAgentRaisedPendingUserDecisionAnswerDelivery({
+				ensureTaskSessionReadyForDelivery: async () => true,
+				deliverTaskSessionInput,
+			}).answerPendingUserDecision({
+				workspaceId,
+				decisionId: DECISION_ID,
+				selectedOptionIds: ["option-1"],
+				freeformText: null,
+			});
+
+			expect(result).toEqual({ ok: true, delivered: true });
+			const records = await readAgentRaisedPendingUserDecisions(workspaceId);
+			expect(records.find((record) => record.decisionId === DECISION_ID)?.status).toBe("superseded");
+			const liveRecord = records.find((record) => record.decisionId !== DECISION_ID);
+			expect(liveRecord?.status).toBe("answered");
+			expect(liveRecord?.answer?.answerSource).toBe("kanban_panel");
+			expect(deliverTaskSessionInput).toHaveBeenCalledWith(
+				expect.objectContaining({ originRuntimeSessionIncarnationId: "incarnation-1" }),
+			);
+			const deliveredText = (deliverTaskSessionInput.mock.calls[0] as unknown as [{ text: string }])[0].text;
+			// 开头措辞对「会话已回收恢复」与「活会话先 Esc 关选择器」两种情形都必须成立。
+			expect(deliveredText).toContain("这是用户在 Cline Kanban 面板中对你先前提出的待答问题给出的答复");
+			expect(deliveredText).toContain("不要重新提问");
+			expect(deliveredText).not.toContain("因会话回收或重启而中断");
 		});
 	});
 });

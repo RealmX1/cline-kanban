@@ -54,6 +54,8 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **`lastSubstantiveOutputAt` 是「默认不推进、显式才推进」**：终端侧唯一防线是 `suppressSubstantiveOutputUntilContinues`（武装判据只读启动侧 `resumesPriorAgentConversation || resumeFromTrash || resumePriorAgentConversationWithoutResendingPrompt`，绝不用「此前是否产出过」反推；解除只认三处「用户真·继续」）；Cline/ACP 漏斗要推进必须显式 `withAgentSubstantiveOutputTimestamp`。全文同上。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。细节：`docs/architecture.md` 的 BoardCard 小节。
+- **Focus View 的 stage 卡头也有两份渲染**：行内卡头 + `StageHeaderRails` 钉住的孪生卡头（不透明 overlay，钉住时盖住行内卡头）。卡头上的状态与交互必须两边都接（孪生卡头曾写死「已展开」、折不动，两次被报）；跳到某 stage 不能用 `scrollIntoView({block:"start"})`（落点正在 rail 之下），rail 条目几何与滚动落点的单一真源是 `stage-header-rail-geometry.ts`。
+- **隐式续跑的 cwd-latest 必须保持任务目录范围**：Codex `resume/fork --last` 的隔离配置放在子命令后；显式 ID 的跨目录复用保留。不能用「切换执行 cwd」代替「重新选会话」。原生回归、OMP 例外与后备方案见 `docs/runbooks/agent-conversation-resume-working-directory-isolation.md`。
 - **终端 agent 检测/启动别走交互 shell**（`zsh -i`、shell fallback 命令发现等）：重 shell init（conda/nvm）下每任务一次会冻结运行时。显式 shell 终端例外。
 - **headless 远端**（SSH+tunnel）没有 zenity/kdialog：folder picker 用手动路径兜底，别引桌面包。
 - Node 22 CI 挂起：先查活体子进程 / SDK-host 启动路径，别先假设测试慢。调查史：`.plan/docs/node22-ci-hanging-tests-investigation.md`。
@@ -95,6 +97,7 @@ web-ui：
 | `docs/agent-session-fork-prompt-cache-measurements.md` | 五家 harness 的 fork prompt cache 实测（谁能命中、遥测陷阱、复现成本） |
 | `docs/terminal-io.md` | output-reactions、终端 visibility 协议、PTY/argv 特殊字符安全 |
 | `docs/agent-harness-kimi.md` / `docs/agent-harness-omp-acp.md` | Kimi 与 oh-my-pi(ACP) 接入坑 |
+| `docs/post-mortems/native-session-identity-rewind-resume-2026-09-24.md` | Rewind 原生 ID 追踪、Codex 配置层丢 hook、Kimi/OMP 恢复与跨重启验证 |
 | `docs/runbooks/` | 跨层改动 runbook（summary 字段/设置开关、agent CLI 能力探测） |
 | `docs/adr/` / `docs/post-mortems/` | 决策记录与事故复盘 |
 | `.plan/docs/` | 活跃计划与大型重构历史（非上手必读） |

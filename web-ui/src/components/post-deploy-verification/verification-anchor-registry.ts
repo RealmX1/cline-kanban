@@ -23,9 +23,8 @@ export function boardTaskCardAnchorKey(taskId: string): string {
 }
 
 // 看板某一列容器。
-// 注意：这是「按需扩展」键——当前没有任何看板列容器组件默认挂 `data-verification-anchor`。
-// 创作列级引导验证时，须在同一变更内给目标列容器挂上本 key 对应的锚点属性，
-// 否则 spotlightAnchor 必然未命中、只能走降级路径。
+// 主看板的列容器（board-column.tsx）已挂本锚点；Focus View 的列面板（column-context-panel.tsx）仍未挂——
+// 创作指向 Focus View 列的引导验证时，须在同一变更内给那边补上，否则 spotlightAnchor 只能走降级路径。
 export function boardColumnAnchorKey(columnId: string): string {
 	return `board-column:${columnId}`;
 }

@@ -92,7 +92,9 @@ export function isCardDropDisabled(
 		});
 	}
 	if (columnId === "backlog") {
-		return activeDragSourceColumnId !== "backlog";
+		// 别的列不能拖回 backlog；backlog 自身也不接受列内重排——它按 Description 最后更新时间排序
+		// （sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending），手动顺序会被立刻覆盖。
+		return true;
 	}
 	if (columnId === "in_progress") {
 		if (activeDragSourceColumnId === "backlog" || activeDragSourceColumnId === "in_progress") {

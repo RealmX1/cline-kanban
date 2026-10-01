@@ -290,7 +290,9 @@ body,
 	display: flex;
 	flex: 1 1 0;
 	min-height: 0;
-	overflow: hidden;
+	/* 用户把列宽拖到总和超过视口时横向滚动；未自定义列宽时各列 flex 填充，不会溢出。 */
+	overflow-x: auto;
+	overflow-y: hidden;
 	gap: 8px;
 	padding: 8px;
 }
@@ -373,8 +375,9 @@ body,
  * 会让卡变 0×0 → hook 误判 hidden → 显回 → 再测 → 抖动循环。data-selected-pinned 由
  * ColumnContextPanel 在 pinState!=="hidden" 时写到 scrollport 上。
  *
- * 限定 render-role 为本体：置顶板分段也在这个 scrollport 里，选中任务若恰好被置顶，
- * 它在置顶板里的分身同样带 data-selected，不限定就会被一起隐藏（分身与「真实卡重影」无关）。
+ * 限定 render-role 为本体：选中任务若恰好被置顶，它在置顶板里的分身同样带 data-selected。
+ * 置顶板分段现已移到 scrollport 之外的固定区、本就不会命中此选择器；限定仍保留作防御性边界，
+ * 免得分身日后再被挪进 scrollport 时被一起隐藏（分身与「真实卡重影」无关）。
  */
 .kb-detail-task-list-scroll[data-selected-pinned="true"]
 	.kb-board-card-shell[data-selected="true"][data-task-card-render-role="canonical_card_in_its_stage_list"] {
@@ -1238,6 +1241,13 @@ body.kb-dependency-link-mode {
 		min-width: 280px;
 		width: 92vw;
 		scroll-snap-align: center;
+	}
+
+	/* 折叠的 stage 列在移动端也保持窄竖条，不被上面的「一列占 92vw」规则拉宽。 */
+	.kb-board > section[data-kanban-board-column-collapsed="true"] {
+		flex: 0 0 40px !important;
+		min-width: 40px;
+		width: 40px;
 	}
 
 	.kb-board > [role="separator"] {

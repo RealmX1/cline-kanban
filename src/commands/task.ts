@@ -43,6 +43,7 @@ import {
 	moveTaskToColumn,
 	type RuntimeAddTaskDependencyResult,
 	removeTaskDependency,
+	resolveTaskDescriptionLastUpdatedAt,
 	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
 } from "../core/task-board-mutations";
@@ -509,6 +510,8 @@ function formatTaskRecord(
 		...formatTaskClineSettings(task.clineSettings),
 		createdAt: task.createdAt,
 		updatedAt: task.updatedAt,
+		// Backlog 的排序键（只在 Description 内容变化时推进）；老卡片缺字段时按同一回落规则解析后透出。
+		taskDescriptionLastUpdatedAt: resolveTaskDescriptionLastUpdatedAt(task),
 		workspaceGitStatus,
 		session:
 			session && sessionFacets

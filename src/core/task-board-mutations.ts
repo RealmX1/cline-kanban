@@ -16,9 +16,21 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "./api-contract";
+import {
+	hasTaskDescriptionContentChanged,
+	resolveTaskDescriptionLastUpdatedAt,
+	sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending,
+} from "./backlog-task-description-last-updated-ordering";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "./task-agent-permission-mode";
 import { createUniqueTaskId } from "./task-id";
 import { resolveTaskTitle } from "./task-title";
+
+// 前端经 `@runtime-task-state` 别名（指向本文件）复用这组函数，免得再加一个值别名（tsconfig/vite/vitest 三处同步）。
+export {
+	hasTaskDescriptionContentChanged,
+	resolveTaskDescriptionLastUpdatedAt,
+	sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending,
+};
 
 export interface RuntimeCreateTaskInput {
 	taskId?: string;
@@ -423,6 +435,7 @@ export function addTaskToColumn(
 		...(prepFilePath ? { prepFilePath } : {}),
 		createdAt: now,
 		updatedAt: now,
+		taskDescriptionLastUpdatedAt: now,
 	};
 
 	const targetColumnIndex = board.columns.findIndex((column) => column.id === columnId);
@@ -441,10 +454,10 @@ export function addTaskToColumn(
 	});
 
 	return {
-		board: {
+		board: sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending({
 			...board,
 			columns,
-		},
+		}),
 		task,
 	};
 }
@@ -665,8 +678,9 @@ export function moveTaskToColumn(
 		...task,
 		updatedAt: now,
 	};
-	const targetCards =
-		targetColumnId === "trash" ? [movedTask, ...targetColumn.cards] : [...targetColumn.cards, movedTask];
+	// 列顶 = 最近移入：与浏览器程序化移列的 insertAtTop、以及建卡置顶同一语义。曾经只有 trash 置顶、
+	// 其余列追加到列尾，于是经 CLI `kanban task start` 等运行时路径启动的卡会沉到一列陈旧卡的最末。
+	const targetCards = [movedTask, ...targetColumn.cards];
 
 	const columns = board.columns.map((column, index) => {
 		if (index === found.columnIndex) {
@@ -758,6 +772,17 @@ export function updateTask(
 					: input.prepFilePath === null
 						? undefined
 						: input.prepFilePath.trim() || undefined;
+			const nextImages = input.images === undefined ? card.images : cloneTaskImages(input.images);
+			// 只有 Description 内容（prompt + 附图）真正变了才推进；编辑框什么都不改直接保存、只改 baseRef / agent
+			// 等都不推进。没变时物化回落值（读推进前的卡片），老卡片的值从此固定、不再跟着 updatedAt 漂移。
+			const taskDescriptionLastUpdatedAt = hasTaskDescriptionContentChanged({
+				previousPrompt: card.prompt,
+				previousImages: card.images,
+				nextPrompt: prompt,
+				nextImages,
+			})
+				? now
+				: resolveTaskDescriptionLastUpdatedAt(card);
 			const nextTask: RuntimeBoardCard = {
 				...card,
 				title: resolveTaskTitle(input.title, prompt),
@@ -776,7 +801,7 @@ export function updateTask(
 						: (input.taskAgentPermissionMode ?? DEFAULT_TASK_AGENT_PERMISSION_MODE),
 				autoReviewEnabled: Boolean(input.autoReviewEnabled),
 				autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
-				images: input.images === undefined ? card.images : cloneTaskImages(input.images),
+				images: nextImages,
 				taskCommentEntries:
 					input.taskCommentEntries === undefined
 						? cloneTaskCommentEntries(card.taskCommentEntries)
@@ -813,6 +838,7 @@ export function updateTask(
 				worktreeMode: nextWorktreeMode,
 				prepFilePath: nextPrepFilePath,
 				updatedAt: now,
+				taskDescriptionLastUpdatedAt,
 			};
 			updatedTask = nextTask;
 			return nextTask;
@@ -829,10 +855,10 @@ export function updateTask(
 	}
 
 	return {
-		board: {
+		board: sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending({
 			...board,
 			columns,
-		},
+		}),
 		task: updatedTask,
 		updated: true,
 	};

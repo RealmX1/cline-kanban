@@ -666,6 +666,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				sessionTransport: "acp_stdio_subprocess",
 			});
 			const acpTaskSessionService = {
+				listSummaries: vi.fn(() => []),
 				getSummary: vi.fn(() => null),
 				startTaskSession: vi.fn(async () => acpSummary),
 				listMessages: vi.fn(() => []),
@@ -673,6 +674,8 @@ describe("createRuntimeApi startTaskSession", () => {
 				applyTurnCheckpoint: vi.fn(() => null),
 			};
 			const terminalManager = {
+				getSummary: vi.fn(() => null),
+				listSummaries: vi.fn(() => []),
 				startTaskSession: vi.fn(async () => createSummary()),
 				applyTurnCheckpoint: vi.fn(),
 			};
