@@ -36,6 +36,7 @@ import {
 	normalizeCodexConfigOverridesBeforeSubcommand,
 } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
+import { isKanbanTaskWorktreeWorkingDirectoryPath } from "./kanban-task-worktree-working-directory-path";
 import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
 import { hasKimiInteractivePrompt } from "./kimi-readiness";
 import { writeOmpNativeConversationSessionIdentityExtension } from "./omp-native-conversation-session-identity-extension";
@@ -91,6 +92,10 @@ export interface AgentAdapterLaunchInput {
 	// 会被前端同时发出（web-ui/src/hooks/use-task-sessions.ts 的 trash 恢复），今天靠 resumeFromTrash
 	// 压过播种才是对的，故本字段必须独立于播种轴另起一档。
 	observedAgentNativeConversationSessionResumeAddressing?: RuntimeObservedAgentNativeConversationSessionResumeAddressing;
+	// kanban 在 spawn 前为**全新开局**分配并已落盘的原生会话 id（目前只有 Cursor，见 agent-catalog 的
+	// nativeConversationSessionIdentityCaptureMethod）。与上面的重启寻址同为「按 id」，但语义相反：这里是
+	// 以新 id 开一段新对话、照常投 prompt，绝不能被当成续跑（不武装实质输出抑制、不省略 prompt）。
+	kanbanAssignedAgentNativeConversationSessionIdForFreshStart?: string;
 	readOnlyQuestionSession?: boolean;
 	forkLatestWorkingDirectorySession?: boolean;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
@@ -1623,6 +1628,29 @@ const codexAdapter: AgentSessionAdapter = {
 	},
 };
 
+// cursor-agent 的 chat 选择参数：`--continue`（cwd 桶最近一段）与 `--resume [chatId]`（chatId 可省）。kanban 一旦按 id
+// 寻址就必须先把用户 args 里的这些剥掉——实测 `--continue` 与 `--resume <id>` 同时出现时 `--continue` 胜，
+// 按 id 续跑会被静默改成「最近一段」。`--resume` 后面只吞 UUID 形状的值，免得把 positional prompt 当成 chatId 吃掉。
+const CURSOR_AGENT_CHAT_ID_ARGUMENT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+function removeCursorAgentChatSelectionArguments(args: readonly string[]): string[] {
+	const remaining: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--continue" || argument.startsWith("--resume=")) {
+			continue;
+		}
+		if (argument === "--resume") {
+			if (CURSOR_AGENT_CHAT_ID_ARGUMENT_PATTERN.test(args[index + 1] ?? "")) {
+				index += 1;
+			}
+			continue;
+		}
+		remaining.push(argument);
+	}
+	return remaining;
+}
+
 const cursorAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
@@ -1630,7 +1658,7 @@ const cursorAdapter: AgentSessionAdapter = {
 		// cursor 是唯一**无条件**传 `--model` 的 adapter（claude / codex 只在有显式 override 时才传），
 		// 所以这个默认值必须跟得上上游改名：从实际模型目录解析（带 TTL 缓存，热路径零开销），
 		// 探测失败才回落写死的常量。上一版直接用常量，结果每次会话都在传一个上游早已删除的 model id。
-		const args = setModelCliOption(input.args, explicitModelId ?? (await resolveCursorLaunchDefaultModelId()));
+		let args = setModelCliOption(input.args, explicitModelId ?? (await resolveCursorLaunchDefaultModelId()));
 		const env: Record<string, string | undefined> = {};
 
 		if (!hasCliOption(args, "--workspace")) {
@@ -1648,33 +1676,52 @@ const cursorAdapter: AgentSessionAdapter = {
 			args.push("--force");
 		}
 
+		// 未信任的 cwd 上，交互模式会先弹 Workspace Trust 对话框，prompt 要等应答后才提交（`--force` 跳不过，
+		// 只有 `--trust` 能）。kanban 从不应答它，于是 8ef28 / aa23d 这类任务的首轮从未落盘，之后每次续跑都撞
+		// `No previous chats found.`。范围与 Claude 自动信任一致：只替 kanban 自己的 task worktree 做主。
+		if (isKanbanTaskWorktreeWorkingDirectoryPath(input.cwd) && !hasCliOption(args, "--trust")) {
+			args.push("--trust");
+		}
+
 		const observedNativeSessionResumeAddressing =
 			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
-		const resumesPriorAgentConversation = Boolean(
-			observedNativeSessionResumeAddressing || input.resumeFromTrash || taskAgentSessionInitialization,
+		// 与 claude 同一口径：续跑既有对话时不再投 prompt、不重放 plan 起步（`--plan` 会把续上的 chat 的 mode 覆写回 plan）。
+		const continuesWithoutNewPrompt = Boolean(
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				input.resumePriorAgentConversationWithoutResendingPrompt,
 		);
-		// 优先级同 claude / codex：**重启寻址（按 id）→ resumeFromTrash（`--continue`）→ 建卡播种**。
-		// cursor 不支持 fork（契约层已 superRefine 拦下），故按-id 只有 resume 一种落法。
-		if (observedNativeSessionResumeAddressing) {
-			if (!hasCliOption(args, "--resume")) {
-				args.push("--resume", observedNativeSessionResumeAddressing.sourceSessionId);
-			}
-		} else if (input.resumeFromTrash) {
+		const resumesPriorAgentConversation = Boolean(continuesWithoutNewPrompt || taskAgentSessionInitialization);
+		// chat 选择优先级：**重启寻址（按记录的 id）→ 无 id 的续跑（`--continue`）→ 建卡播种 → kanban 刚分配的新 id**。
+		// cursor 不支持 fork（契约层已 superRefine 拦下），所以按 id 只有 `--resume` 一种落法；新 id 开局也用
+		// `--resume <新 id> <prompt>`：实测 cursor 会以该 id 建 chat 并自动提交 prompt。
+		const chatIdSelectedForLaunch =
+			observedNativeSessionResumeAddressing?.sourceSessionId ??
+			(continuesWithoutNewPrompt
+				? null
+				: (taskAgentSessionInitialization?.sourceSessionId ??
+					input.kanbanAssignedAgentNativeConversationSessionIdForFreshStart ??
+					null));
+		if (chatIdSelectedForLaunch !== null) {
+			args = [...removeCursorAgentChatSelectionArguments(args), "--resume", chatIdSelectedForLaunch];
+		} else if (continuesWithoutNewPrompt) {
+			// 只剩「没有记录 id、桶里有 ≥2 段已建立对话」这一条会走到这里——续跑前的预检已经排除了桶为空的情形。
 			if (!hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
 				args.push("--continue");
 			}
-		} else if (taskAgentSessionInitialization) {
-			if (!hasCliOption(args, "--resume")) {
-				args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
-			}
 		}
 
-		if (input.startInPlanMode && !hasCliOption(args, "--plan") && !hasCliOption(args, "--mode")) {
+		if (
+			input.startInPlanMode &&
+			!continuesWithoutNewPrompt &&
+			!hasCliOption(args, "--plan") &&
+			!hasCliOption(args, "--mode")
+		) {
 			args.push("--plan");
 		}
 
 		const trimmed = prependTaskSessionGuidanceToPrompt(input).trim();
-		if (!input.resumeFromTrash && trimmed) {
+		if (!continuesWithoutNewPrompt && trimmed) {
 			args.push(trimmed);
 		}
 

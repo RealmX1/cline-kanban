@@ -572,15 +572,69 @@ export type RuntimeTaskConversationSessionMetadata = z.infer<typeof runtimeTaskC
 // `kanban hooks` CLI 抽出、经 hooks.ingest 落到 summary 的加性 sidecar。它是 exploration thread graph
 // 维护作业（`claude -p --resume <nativeSessionId> --fork-session`）与 transcript 投影的唯一身份来源——
 // 不再从 ~/.claude/projects 目录扫描猜测。纯运行期事实，不参与 facet 与 superRefine。
+//
+// Cursor 例外：cursor-agent 没有可供 kanban 安装的会话级 hook（只有全局 / 工作区内的 hooks.json，且续跑时
+// sessionStart 不触发），所以 Cursor 的身份由 kanban 在**启动前**自己分配（`--resume <新 UUID>` 开局即以该 id
+// 建 chat），而不是事后观测。来源记在 identityEstablishmentMethod 上，审计时一眼可分。
+export const runtimeAgentNativeConversationSessionIdentityEstablishmentMethodSchema = z.enum([
+	// agent 自己报告的 id（hook stdin / 托管扩展 / ACP 握手）。旧盘数据缺这个字段时按此解读。
+	"observed_from_agent_hook_extension_or_acp_handshake",
+	// kanban 在 spawn 前分配、落盘，再用 `--resume <id>` 开局（Cursor）。
+	"kanban_assigned_before_agent_launch",
+	// 建卡播种：源对话已复制进本会话的执行工作目录，本会话从此按该 id 续跑。
+	"task_agent_session_initialization_seed_materialized_into_working_directory",
+	// 存量回填的窄例外：会话从未记录过 id，而其工作目录的 chat 桶里**恰好只有一段**已建立的对话、且无同 agent
+	// 竞争会话——与今天 `--continue` 会选中的那一段等价，只是把它钉住。有歧义一律不回填。
+	"unique_established_chat_in_working_directory_bucket_backfill",
+]);
+export type RuntimeAgentNativeConversationSessionIdentityEstablishmentMethod = z.infer<
+	typeof runtimeAgentNativeConversationSessionIdentityEstablishmentMethodSchema
+>;
+
 export const runtimeAgentNativeConversationSessionIdentitySchema = z.object({
 	// hook 载荷推断出的 harness 来源（claude / codex / …），与 latestHookActivity.source 同一口径。
 	sourceAgentId: z.string(),
 	nativeSessionId: z.string(),
 	transcriptPath: z.string().nullable(),
 	observedAt: z.number(),
+	// 加性可选：缺省 = observed_from_agent_hook_extension_or_acp_handshake（hook / ACP 两条既有生产者不写它）。
+	identityEstablishmentMethod: runtimeAgentNativeConversationSessionIdentityEstablishmentMethodSchema.optional(),
 });
 export type RuntimeAgentNativeConversationSessionIdentity = z.infer<
 	typeof runtimeAgentNativeConversationSessionIdentitySchema
+>;
+
+// 「这段对话有没有真的落进 agent 自己的会话存储」的观测（目前只有 Cursor 产出）。
+//
+// 存在理由：Cursor 会话可能**从未建立对话**——典型成因是停在 cursor-agent 的 Workspace Trust 对话框上，prompt
+// 根本没提交，chat 目录一直不存在。旧版要等 PTY 死掉、续跑撞上 `No previous chats found.` 连撞 5 次熔断才露馅，
+// 而熔断文案让人「手动刷新」，刷新又是同一条注定失败的续跑。本 sidecar 让这件事**在当时**就被标出来，并让续跑
+// 前的预检据此拒绝，而不是 spawn 一个注定秒退的进程。
+//
+// 只写 sidecar，不碰 facet 三元组；null / 缺省 = 没有需要提示的情况。
+export const runtimeAgentNativeConversationPersistenceStatusSchema = z.enum([
+	// 活会话：kanban 分配的 chat id 在启动窗口内仍未在 chat store 里出现 ⇒ prompt 没有被提交。
+	"first_prompt_not_persisted_within_startup_window",
+	// 首轮已在 agent 的会话存储里建立（hasConversation=true），之后可按 id 续跑。
+	"conversation_established_in_agent_native_store",
+	// 进程已退出 / 运行时重启后核对：这段对话从未建立，按 id 或 `--continue` 续跑都接不上任何东西。
+	"conversation_never_established_in_agent_native_store",
+]);
+export type RuntimeAgentNativeConversationPersistenceStatus = z.infer<
+	typeof runtimeAgentNativeConversationPersistenceStatusSchema
+>;
+
+export const runtimeAgentNativeConversationPersistenceObservationSchema = z.object({
+	persistenceStatus: runtimeAgentNativeConversationPersistenceStatusSchema,
+	// kanban 分配 / 记录的那个原生 id；从未记录过 id 的旧会话为 null。
+	nativeSessionId: z.string().nullable(),
+	workingDirectoryPath: z.string(),
+	// 可识别的阻塞成因（终端输出里匹配到的）；判不出就是 null，绝不猜。
+	suspectedBlockingCause: z.enum(["agent_workspace_trust_prompt_awaiting_answer"]).nullable(),
+	observedAt: z.number(),
+});
+export type RuntimeAgentNativeConversationPersistenceObservation = z.infer<
+	typeof runtimeAgentNativeConversationPersistenceObservationSchema
 >;
 
 // 终端 agent 启动时真正传出去的、与 fork 重放相关的 argv 三项（见
@@ -841,6 +895,11 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 加性可选：Cline / ACP 会话与旧盘数据缺它 ⇒ undefined；同一活体内 harness 换了 session id
 	// （--fork-session / 续接）时整体替换，只保留最新观测。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
+	// 「对话有没有真的落进 agent 自己的会话存储」观测（见 runtimeAgentNativeConversationPersistenceObservationSchema）。
+	// 每次真实 spawn 清为 null，由看门狗 / 退出核对 / 续跑预检 / hydrate 回填写入。
+	agentNativeConversationPersistenceObservation: runtimeAgentNativeConversationPersistenceObservationSchema
+		.nullable()
+		.optional(),
 	// 本次启动 argv 的 fork 重放快照（见 runtimeAgentSessionForkReplayLaunchArgumentsSchema 注释）。
 	// 加性可选：只有已接入的终端 agent（v1 = claude）在建会话时盖章，其余会话与旧盘数据缺它 ⇒ undefined。
 	// 每次新起活体整体替换（同一任务换 agent / 换模型后，旧快照对新会话无意义）。
@@ -3217,6 +3276,10 @@ export const runtimeTaskTerminalRefreshRequestSchema = z.object({
 	// 纯归因，不参与任何业务判定。省略时服务端按 refresh_task_terminal 记账（即「人点的刷新」），
 	// 故老客户端行为不变；前端的自动续跑路径必须显式声明 stale_session_client_auto_resume。
 	taskSessionStartOriginDeclaredByClient: runtimeTaskSessionStartOriginDeclaredByClientSchema.optional(),
+	// 「从既有 agent 对话迁入」：先把这段对话复制进本会话的执行工作目录、钉成本会话的原生身份，再按 id 续跑
+	// （不重投 prompt）。给「对话从未建立」的会话一条用户自己拍板的出路——例如把同 prompt 的另一张卡留下的
+	// 孤儿对话接过来。只对原生 id 由 kanban 分配的 agent（Cursor）开放，且源对话必须属于同一个 agent。
+	adoptExistingAgentConversationAsTaskSessionIdentity: runtimeTaskAgentSessionInitializationSchema.optional(),
 });
 export type RuntimeTaskTerminalRefreshRequest = z.infer<typeof runtimeTaskTerminalRefreshRequestSchema>;
 

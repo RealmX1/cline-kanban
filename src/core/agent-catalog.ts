@@ -13,6 +13,30 @@ export {
 // 它同时被回收审计结果 schema 复用，故必须是可校验的 zod 源，这里只做类型再导出。
 export type { RuntimeAgentSessionTransport };
 
+// kanban 怎样拿到这个 agent 的**原生会话 id**（续跑按 id 寻址的前提）。新增 agent 时必须显式声明——测试断言
+// 每个可启动 agent 都有取值，`not_captured` 也要写出来，好让「这个 agent 只能靠 cwd-latest 续跑」是可见的事实，
+// 而不是被遗忘的缺口（Cursor 就是这样被漏了一年：没有任何采集路径，续跑一律 `--continue` 猜 cwd 最近一段）。
+export type RuntimeAgentNativeConversationSessionIdentityCaptureMethod =
+	// hook stdin 的 session_id（Claude Code / Codex / Kimi）。
+	| "agent_hook_stdin_session_id"
+	// kanban 安装的托管扩展上报（omp TUI）；omp 的 ACP 通道另由会话握手给出。
+	| "managed_agent_extension_ingest"
+	// kanban 在 spawn 前自己分配 id，再让 agent 以该 id 开局（Cursor：`--resume <新 UUID>`）。
+	| "kanban_assigned_before_agent_launch"
+	// 进程内 SDK 自己管对话历史，不经原生 id 续跑（Cline）。
+	| "in_process_sdk_owns_conversation_history"
+	// 没有任何采集路径：续跑只能落到 agent 自己的「最近一段」。
+	| "not_captured";
+
+// 恢复会话后的「续跑守卫」（restorationContinuationGuardState）靠什么信号解除。
+// 只有 codex / cursor 经核实没有可靠的提交 hook；其余 agent 维持历史行为（等 hook，或 30 分钟兜底自行失效）。
+export type RuntimeAgentRestorationContinuationGuardDisarmSignal =
+	// agent 的 UserPromptSubmit 一类 hook 报告了真人提交（Claude 还要在那条同步 hook 里取出恢复期暂存的通知）。
+	| "agent_user_prompt_submit_hook"
+	// agent 没有可靠的 UserPromptSubmit hook：只能在终端 Enter / 程序化提交这一提交边沿解除，否则守卫要挂满
+	// 30 分钟兜底，期间排队投递一直被挡。
+	| "terminal_submission_edge_without_reliable_user_prompt_submit_hook";
+
 export interface RuntimeAgentCatalogEntry {
 	id: RuntimeAgentId;
 	label: string;
@@ -21,6 +45,8 @@ export interface RuntimeAgentCatalogEntry {
 	autonomousArgs: string[];
 	installUrl: string;
 	sessionTransport: RuntimeAgentSessionTransport;
+	nativeConversationSessionIdentityCaptureMethod: RuntimeAgentNativeConversationSessionIdentityCaptureMethod;
+	restorationContinuationGuardDisarmSignal: RuntimeAgentRestorationContinuationGuardDisarmSignal;
 }
 
 export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
@@ -32,6 +58,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: ["--dangerously-skip-permissions"],
 		installUrl: "https://docs.anthropic.com/en/docs/claude-code/quickstart",
 		sessionTransport: "pty_terminal",
+		nativeConversationSessionIdentityCaptureMethod: "agent_hook_stdin_session_id",
+		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
 	},
 	{
 		id: "codex",
@@ -41,6 +69,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: ["--dangerously-bypass-approvals-and-sandbox"],
 		installUrl: "https://github.com/openai/codex",
 		sessionTransport: "pty_terminal",
+		nativeConversationSessionIdentityCaptureMethod: "agent_hook_stdin_session_id",
+		restorationContinuationGuardDisarmSignal: "terminal_submission_edge_without_reliable_user_prompt_submit_hook",
 	},
 	{
 		id: "cline",
@@ -50,6 +80,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: ["--auto-approve-all"],
 		installUrl: "https://github.com/cline/cline",
 		sessionTransport: "in_process_cline_sdk",
+		nativeConversationSessionIdentityCaptureMethod: "in_process_sdk_owns_conversation_history",
+		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
 	},
 	{
 		id: "cursor",
@@ -59,6 +91,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: ["--force"],
 		installUrl: "https://cursor.com/cli",
 		sessionTransport: "pty_terminal",
+		nativeConversationSessionIdentityCaptureMethod: "kanban_assigned_before_agent_launch",
+		restorationContinuationGuardDisarmSignal: "terminal_submission_edge_without_reliable_user_prompt_submit_hook",
 	},
 	{
 		id: "opencode",
@@ -68,6 +102,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: [],
 		installUrl: "https://github.com/sst/opencode",
 		sessionTransport: "pty_terminal",
+		nativeConversationSessionIdentityCaptureMethod: "not_captured",
+		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
 	},
 	{
 		id: "droid",
@@ -77,6 +113,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: ["--auto", "high"],
 		installUrl: "https://docs.factory.ai/cli/getting-started/quickstart",
 		sessionTransport: "pty_terminal",
+		nativeConversationSessionIdentityCaptureMethod: "not_captured",
+		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
 	},
 	{
 		id: "kiro",
@@ -86,6 +124,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: ["--trust-all-tools"],
 		installUrl: "https://kiro.dev",
 		sessionTransport: "pty_terminal",
+		nativeConversationSessionIdentityCaptureMethod: "not_captured",
+		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
 	},
 	{
 		id: "gemini",
@@ -95,6 +135,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: ["--yolo"],
 		installUrl: "https://github.com/google-gemini/gemini-cli",
 		sessionTransport: "pty_terminal",
+		nativeConversationSessionIdentityCaptureMethod: "not_captured",
+		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
 	},
 	{
 		id: "kimi",
@@ -104,6 +146,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		autonomousArgs: ["--yolo"],
 		installUrl: "https://github.com/MoonshotAI/kimi-code",
 		sessionTransport: "pty_terminal",
+		nativeConversationSessionIdentityCaptureMethod: "agent_hook_stdin_session_id",
+		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
 	},
 	{
 		id: "omp",
@@ -117,6 +161,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		installUrl: "https://omp.sh",
 		// omp 的**默认**通道是 TUI；ACP 是可切换的第二条通道（见 agent-session-transport-selection.ts）。
 		sessionTransport: "pty_terminal",
+		nativeConversationSessionIdentityCaptureMethod: "managed_agent_extension_ingest",
+		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
 	},
 ];
 
@@ -207,4 +253,36 @@ export function isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
 // 在它的面板上保存模型只会写到与该任务无关的全局 Cline provider 配置。
 export function isRuntimeAgentModelSelectedThroughClineProviderSettings(agentId: RuntimeAgentId | null): boolean {
 	return agentId !== null && getRuntimeAgentSessionTransport(agentId) === "in_process_cline_sdk";
+}
+
+// 这个 agent 的原生会话 id 是否由 kanban 在 spawn 前分配（而不是事后从 hook / 扩展 / ACP 观测）。
+export function isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch(agentId: RuntimeAgentId): boolean {
+	return (
+		getRuntimeAgentCatalogEntry(agentId)?.nativeConversationSessionIdentityCaptureMethod ===
+		"kanban_assigned_before_agent_launch"
+	);
+}
+
+// 这个 agent 的会话能否按已记录的原生 id 续跑（续跑寻址解析器的白名单，取代原先写死的 agentId 列表）。
+// 入参是 string：解析器拿到的 launchAgentId 未经 RuntimeAgentId 收窄，目录里查不到的一律视为不能。
+export function canAgentResumeByRecordedNativeConversationSessionId(agentId: string): boolean {
+	const captureMethod = RUNTIME_AGENT_CATALOG.find(
+		(entry) => entry.id === agentId,
+	)?.nativeConversationSessionIdentityCaptureMethod;
+	return (
+		captureMethod === "agent_hook_stdin_session_id" ||
+		captureMethod === "managed_agent_extension_ingest" ||
+		captureMethod === "kanban_assigned_before_agent_launch"
+	);
+}
+
+// 恢复后的续跑守卫是否只能在终端提交边沿（Enter / 程序化提交）解除。
+export function isRestorationContinuationGuardDisarmedOnTerminalSubmissionEdge(
+	agentId: RuntimeAgentId | null,
+): boolean {
+	return (
+		agentId !== null &&
+		getRuntimeAgentCatalogEntry(agentId)?.restorationContinuationGuardDisarmSignal ===
+			"terminal_submission_edge_without_reliable_user_prompt_submit_hook"
+	);
 }
