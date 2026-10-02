@@ -5,10 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BoardCard } from "@/components/board-card";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskSessionSummary, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
 import type { ReviewTaskWorkspaceSnapshot } from "@/types";
 
 let mockWorkspaceSnapshot: ReviewTaskWorkspaceSnapshot | undefined;
+let mockTaskWorkspaceInfo: RuntimeTaskWorkspaceInfoResponse | null = null;
 
 vi.mock("@hello-pangea/dnd", () => ({
 	Draggable: ({
@@ -29,6 +30,7 @@ vi.mock("@hello-pangea/dnd", () => ({
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => mockWorkspaceSnapshot,
+	useTaskWorkspaceInfoValue: () => mockTaskWorkspaceInfo,
 }));
 
 vi.mock("@/utils/task-prompt", async () => {
@@ -121,6 +123,7 @@ describe("BoardCard", () => {
 
 	beforeEach(() => {
 		mockWorkspaceSnapshot = undefined;
+		mockTaskWorkspaceInfo = null;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -205,6 +208,74 @@ describe("BoardCard", () => {
 				/>,
 			);
 		});
+		expect(container.querySelector('button[aria-label="Retry task start"]')).toBeNull();
+	});
+
+	function createNeverStartedPlaceholderSummary(): RuntimeTaskSessionSummary {
+		return createSummary("idle", {
+			agentId: null,
+			workspacePath: null,
+			startedAt: null,
+			lastOutputAt: null,
+			lastHookAt: null,
+		});
+	}
+
+	function createTaskWorkspaceInfo(exists: boolean): RuntimeTaskWorkspaceInfoResponse {
+		return {
+			taskId: "task-1",
+			path: "/tmp/worktrees/task-1",
+			exists,
+			baseRef: "main",
+			branch: null,
+			isDetached: true,
+			headCommit: null,
+		};
+	}
+
+	it("offers the in-place retry for a placeholder session when the task worktree was never created", async () => {
+		// 终端面板一挂上运行时就回一份占位 summary；启动前段失败（建 worktree 锁等待超时等）后卡片上留下的正是它。
+		// worktree 根本不存在是「从没启动过」的正面证据，这时以原 prompt 重新启动才是对的。
+		mockTaskWorkspaceInfo = createTaskWorkspaceInfo(false);
+		const onStart = vi.fn();
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard()}
+					index={0}
+					columnId="in_progress"
+					sessionSummary={createNeverStartedPlaceholderSummary()}
+					onStart={onStart}
+				/>,
+			);
+		});
+
+		const retryButton = container.querySelector<HTMLButtonElement>('button[aria-label="Retry task start"]');
+		expect(retryButton).not.toBeNull();
+		await act(async () => {
+			retryButton?.click();
+		});
+		expect(onStart).toHaveBeenCalledWith("task-1");
+	});
+
+	it.each([
+		["the task worktree exists (launch history unknown)", { worktreeExists: true, launchedAgentId: undefined }],
+		["the card records a previous launch", { worktreeExists: false, launchedAgentId: "claude" as const }],
+	])("does not offer the prompt-resending retry for a placeholder session when %s", async (_label, evidence) => {
+		// 占位形状也可能是硬中断后退化的老会话：没有正面证据时，看板上不给「以原 prompt 重新启动」。
+		mockTaskWorkspaceInfo = createTaskWorkspaceInfo(evidence.worktreeExists);
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard({ mostRecentlyLaunchedAgentSessionAgentId: evidence.launchedAgentId })}
+					index={0}
+					columnId="in_progress"
+					sessionSummary={createNeverStartedPlaceholderSummary()}
+					onStart={vi.fn()}
+				/>,
+			);
+		});
+
 		expect(container.querySelector('button[aria-label="Retry task start"]')).toBeNull();
 	});
 

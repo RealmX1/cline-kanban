@@ -10,6 +10,7 @@ import {
 import { isLowConfidenceLastConversationProgressEvidence } from "@runtime-last-conversation-progress-observation";
 import {
 	deriveDisplayLiveness,
+	isNeverStartedPlaceholderTaskSessionSummary,
 	isParkedAwaitingDispatchedBackgroundWork,
 	resolveSessionFacets,
 } from "@runtime-session-activity";
@@ -61,13 +62,14 @@ import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
 import { summarizeQueuedTaskPromptDeliveryCountIndicator } from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useQueuedTaskPromptDeliveryProjectionsForTask } from "@/stores/queued-task-prompt-delivery-projection-store";
-import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
+import { useTaskWorkspaceInfoValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 import { formatPathForDisplay } from "@/utils/path-display";
 import { useCopyToClipboard } from "@/utils/react-use";
+import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
 import { getAgentVisual } from "./agent-visual";
 import {
@@ -240,6 +242,11 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const titleInputRef = useRef<HTMLTextAreaElement | null>(null);
 	const titleEditCancelledRef = useRef(false);
 	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(card.id);
+	const taskWorkspaceInfo = useTaskWorkspaceInfoValue(card.id, card.baseRef);
+	const taskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
+		mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId,
+		taskWorktreeExists: taskWorkspaceInfo?.exists,
+	});
 	const isTrashCard = columnId === "trash";
 	// 只有本体持有 DOM 身份（data-task-id / data-verification-anchor）与 DnD 绑定，见 TaskCardBodyRenderRole。
 	const emitsCanonicalDomIdentity = renderRole === "canonical_card_in_its_stage_list";
@@ -944,7 +951,16 @@ export const TaskCardBody = memo(function TaskCardBody({
 							}}
 						/>
 					</Tooltip>
-					{columnId === "backlog" || (columnId === "in_progress" && sessionSummary == null && onStart) ? (
+					{/* 「In Progress 但从没真正起过会话」包括运行时 attach 时造的占位 summary：启动前段失败（如建 worktree
+					    时锁等待超时）后卡片上留下的正是它，不认它的话这张卡在看板上就没有任何重试入口。
+					    但占位形状也可能是硬中断后退化的老会话，所以占位时只在有**正面证据**（任务 worktree 不存在、
+					    卡片也没有启动记录）时才给「以原 prompt 重新启动」；说不清的交给详情面板把两种出路都摆出来。 */}
+					{columnId === "backlog" ||
+					(columnId === "in_progress" &&
+						(sessionSummary == null ||
+							(isNeverStartedPlaceholderTaskSessionSummary(sessionSummary) &&
+								taskAgentSessionLaunchHistoryEvidence === "never_launched")) &&
+						onStart) ? (
 						<Tooltip
 							side="bottom"
 							content={revealHoverActionTooltip(columnId === "in_progress" ? "Retry task start" : "Start task")}

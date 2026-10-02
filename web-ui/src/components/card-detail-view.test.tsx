@@ -104,6 +104,7 @@ vi.mock("@/runtime/use-runtime-workspace-changes", () => ({
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceStateVersionValue: () => 0,
+	useTaskWorkspaceInfoValue: () => null,
 }));
 
 vi.mock("@/hooks/use-conversation-session-turn-projection", () => ({

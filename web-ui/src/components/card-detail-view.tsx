@@ -77,13 +77,14 @@ import type {
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
-import { useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
+import { useTaskWorkspaceInfoValue, useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel, type TaskCommentEntry } from "@/types";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { useWindowEvent } from "@/utils/react-use";
+import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 
 // We still poll the open detail diff because line content can change without changing
 // the overall file or line counts that drive the shared workspace metadata stream.
@@ -905,6 +906,11 @@ export function CardDetailView({
 		startRightPromptResize,
 	);
 	const taskWorkspaceStateVersion = useTaskWorkspaceStateVersionValue(selection.card.id);
+	const mainTaskWorkspaceInfo = useTaskWorkspaceInfoValue(selection.card.id, selection.card.baseRef);
+	const mainTaskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
+		mostRecentlyLaunchedAgentSessionAgentId: selection.card.mostRecentlyLaunchedAgentSessionAgentId,
+		taskWorktreeExists: mainTaskWorkspaceInfo?.exists,
+	});
 	const activeTaskConversationSessionSummary =
 		selectedTaskConversationSessionId === selection.card.id
 			? (taskSessions[selection.card.id] ?? sessionSummary ?? null)
@@ -1397,6 +1403,16 @@ export function CardDetailView({
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView
 			summary={activeTaskConversationSessionSummary}
 			onSummary={onSessionSummary}
+			// 启动史证据只对主会话成立（卡片字段与任务 worktree 描述的都是主会话）；侧问会话不传，沿用旧解释。
+			taskAgentSessionLaunchHistoryEvidence={
+				isMainTaskConversationSessionSelected ? mainTaskAgentSessionLaunchHistoryEvidence : undefined
+			}
+			// 只有 In Progress 的卡能被 onStartTask 就地启动（handleStartTask 对其它非 backlog 列是 no-op）。
+			onStartTaskAgentSessionWithTaskPrompt={
+				isMainTaskConversationSessionSelected && selection.column.id === "in_progress" && onStartTask
+					? () => onStartTask(selection.card.id)
+					: undefined
+			}
 			onCommit={
 				isMainTaskConversationSessionSelected && onAgentCommitTask
 					? () => onAgentCommitTask(selection.card.id)

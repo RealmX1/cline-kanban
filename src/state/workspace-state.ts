@@ -734,7 +734,7 @@ export async function loadWorkspaceContext(
 		};
 	}
 
-	return await lockedFileSystem.withLock(getWorkspaceIndexLockRequest(), async () => {
+	const ensuredWorkspaceId = await lockedFileSystem.withLock(getWorkspaceIndexLockRequest(), async () => {
 		let index = await readWorkspaceIndex();
 		const existingEntry = findWorkspaceEntry(index, repoPath);
 		const ensured = existingEntry
@@ -744,14 +744,19 @@ export async function loadWorkspaceContext(
 		if (ensured.changed) {
 			await writeWorkspaceIndex(index);
 		}
-
-		return {
-			repoPath,
-			workspaceId: ensured.entry.workspaceId,
-			statePath: getWorkspaceDirectoryPath(ensured.entry.workspaceId),
-			git: detectGitRepositoryInfo(repoPath),
-		};
+		return ensured.entry.workspaceId;
 	});
+
+	// git 探测刻意放在全局 index 锁**之外**：它是四次同步 spawnSync git，与 index 无关；放在锁里会把
+	// 高负载下被放大的 git 耗时（且期间 event loop 被同步阻塞）整段算进持锁时间，所有项目的
+	// ensureWorktree / startTaskSession / saveState 都在这把锁上排队，等太久就抛 ELOCKED。
+	// 抛错时机不变：index 条目照旧先写入，再因非 git 目录抛出。
+	return {
+		repoPath,
+		workspaceId: ensuredWorkspaceId,
+		statePath: getWorkspaceDirectoryPath(ensuredWorkspaceId),
+		git: detectGitRepositoryInfo(repoPath),
+	};
 }
 
 export async function loadWorkspaceContextById(workspaceId: string): Promise<RuntimeWorkspaceContext | null> {

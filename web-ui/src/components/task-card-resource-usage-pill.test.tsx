@@ -33,6 +33,7 @@ vi.mock("@hello-pangea/dnd", () => ({
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => undefined,
+	useTaskWorkspaceInfoValue: () => null,
 }));
 
 const NOW = Date.now();

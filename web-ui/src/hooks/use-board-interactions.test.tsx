@@ -13,6 +13,7 @@ import {
 	discardAllPendingWebUiBoardMutationInitiatorRecords,
 	readPendingWebUiBoardMutationInitiatorForTaskCardAspect,
 } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
+import { getTaskAgentSessionStartRequestInFlightPhase } from "@/stores/task-agent-session-start-request-in-flight-store";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 
 const notifyErrorMock = vi.hoisted(() => vi.fn());
@@ -523,6 +524,166 @@ describe("useBoardInteractions", () => {
 		expect(inProgressTask).toBeDefined();
 		expect(ensureTaskWorkspace).toHaveBeenCalledWith(inProgressTask);
 		expect(startTaskSession).toHaveBeenCalledWith(inProgressTask);
+	});
+
+	it("retries an In Progress task in place when only a never-started placeholder session exists", async () => {
+		// 终端面板一挂上，运行时就会回一份占位 summary（idle、agent/pid/startedAt 全空）。启动前段失败
+		// （例如建 worktree 时锁等待超时）后 sessions 里留下的就是它——此前它被当成「已有会话」，卡片再也点不起来。
+		let latestSnapshot: HookSnapshot | null = null;
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+		const board = createBoardWithTaskInColumn("task-1", "in_progress");
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>();
+		const ensureTaskWorkspace = vi.fn(async () => ({
+			ok: true as const,
+			response: { ok: true as const, path: "/tmp/task-1", baseRef: "main", baseCommit: "abc123" },
+		}));
+		const startTaskSession = vi.fn(async () => ({ ok: true as const }));
+		const neverStartedPlaceholderSummary = {
+			taskId: "task-1",
+			state: "idle",
+			agentId: null,
+			workspacePath: null,
+			pid: null,
+			startedAt: null,
+			updatedAt: 1,
+			lastOutputAt: null,
+			reviewReason: null,
+			exitCode: null,
+			lastHookAt: null,
+			latestHookActivity: null,
+		} as RuntimeTaskSessionSummary;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					setBoard={setBoard}
+					ensureTaskWorkspace={ensureTaskWorkspace}
+					startTaskSession={startTaskSession}
+					initialSessions={{ "task-1": neverStartedPlaceholderSummary }}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			(latestSnapshot as HookSnapshot | null)?.handleStartTask("task-1");
+		});
+
+		expect(ensureTaskWorkspace).toHaveBeenCalledTimes(1);
+		expect(startTaskSession).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not resend the prompt for a placeholder session when the card records a previous launch", async () => {
+		// 硬中断 / 运行时重启后 summary 也会退化成占位形状。卡片记着启动成功过的，就不能以原 prompt 再起一段
+		// 新对话（会丢掉本可续跑的旧对话）——那属于续跑路径。
+		let latestSnapshot: HookSnapshot | null = null;
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+		const board = createBoardWithTaskInColumn("task-1", "in_progress");
+		const launchedCard = board.columns.find((column) => column.id === "in_progress")?.cards[0];
+		if (launchedCard) {
+			launchedCard.mostRecentlyLaunchedAgentSessionAgentId = "claude";
+		}
+		const ensureTaskWorkspace = vi.fn(async () => ({ ok: true as const }));
+		const startTaskSession = vi.fn(async () => ({ ok: true as const }));
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					setBoard={vi.fn<Dispatch<SetStateAction<BoardData>>>()}
+					ensureTaskWorkspace={ensureTaskWorkspace}
+					startTaskSession={startTaskSession}
+					initialSessions={{
+						"task-1": {
+							taskId: "task-1",
+							state: "idle",
+							agentId: null,
+							workspacePath: null,
+							pid: null,
+							startedAt: null,
+							updatedAt: 1,
+							lastOutputAt: null,
+							reviewReason: null,
+							exitCode: null,
+							lastHookAt: null,
+							latestHookActivity: null,
+						} as RuntimeTaskSessionSummary,
+					}}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			(latestSnapshot as HookSnapshot | null)?.handleStartTask("task-1");
+		});
+
+		expect(ensureTaskWorkspace).not.toHaveBeenCalled();
+		expect(startTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("marks the start request in flight through both phases and clears it when the start settles", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+		const board = createBoardWithTaskInColumn("task-1", "in_progress");
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>();
+		const observedPhases: Array<string | null> = [];
+		let resolveEnsure: () => void = () => {};
+		let resolveStart: () => void = () => {};
+		const ensureTaskWorkspace = vi.fn(
+			() =>
+				new Promise<Awaited<ReturnType<UseTaskSessionsResult["ensureTaskWorkspace"]>>>((resolve) => {
+					observedPhases.push(getTaskAgentSessionStartRequestInFlightPhase("project-1", "task-1"));
+					resolveEnsure = () =>
+						resolve({
+							ok: true,
+							response: { ok: true, path: "/tmp/task-1", baseRef: "main", baseCommit: "abc123" },
+						});
+				}),
+		);
+		const startTaskSession = vi.fn(
+			() =>
+				new Promise<Awaited<ReturnType<UseTaskSessionsResult["startTaskSession"]>>>((resolve) => {
+					observedPhases.push(getTaskAgentSessionStartRequestInFlightPhase("project-1", "task-1"));
+					resolveStart = () => resolve({ ok: false, message: "spawn failed" });
+				}),
+		);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					setBoard={setBoard}
+					ensureTaskWorkspace={ensureTaskWorkspace}
+					startTaskSession={startTaskSession}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			(latestSnapshot as HookSnapshot | null)?.handleStartTask("task-1");
+		});
+		await act(async () => {
+			resolveEnsure();
+		});
+		await act(async () => {
+			resolveStart();
+		});
+
+		expect(observedPhases).toEqual(["preparing_task_worktree", "launching_agent_session"]);
+		// 失败也必须清掉：否则面板永远停在「正在启动」，且重启入口一直被禁用。
+		expect(getTaskAgentSessionStartRequestInFlightPhase("project-1", "task-1")).toBeNull();
 	});
 
 	it("permanently deletes one task from any column without clearing the rest of the board", async () => {

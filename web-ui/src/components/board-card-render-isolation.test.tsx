@@ -35,6 +35,7 @@ vi.mock("@/stores/workspace-metadata-store", () => ({
 		cardRenderObservation(taskId);
 		return undefined;
 	},
+	useTaskWorkspaceInfoValue: () => null,
 }));
 vi.mock("@hello-pangea/dnd", () => ({
 	DragDropContext: ({ children }: { children: ReactNode }) => children,

@@ -3,6 +3,7 @@ import type { WebUiBoardMutationInitiator } from "@runtime-kanban-web-ui-page-lo
 import {
 	isAgentActivelyProducingOutput,
 	isAwaitingUserReviewTurn,
+	isNeverStartedPlaceholderTaskSessionSummary,
 	isParkedAwaitingDispatchedBackgroundWork,
 	resolveSessionFacets,
 } from "@runtime-session-activity";
@@ -33,6 +34,7 @@ import {
 	recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards,
 	withWebUiBoardMutationInitiatorRecordedForChangedTaskCards,
 } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
+import { beginTaskAgentSessionStartRequestInFlight } from "@/stores/task-agent-session-start-request-in-flight-store";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
@@ -366,57 +368,70 @@ export function useBoardInteractions({
 			options?: { optimisticMove?: boolean },
 		): Promise<boolean> => {
 			const optimisticMove = options?.optimisticMove ?? true;
-			const ensured = await ensureTaskWorkspace(task);
-			if (!ensured.ok) {
-				notifyError(ensured.message ?? "Could not set up task workspace.");
-				return false;
-			}
-			if (ensured.response?.warning) {
-				showAppToast({
-					intent: "warning",
-					icon: "warning-sign",
-					message: ensured.response.warning,
-					timeout: 7000,
-				});
-			}
-			if (selectedTaskId === taskId) {
-				if (ensured.response) {
-					setTaskWorkspaceInfo({
-						taskId,
-						path: ensured.response.path,
-						exists: true,
-						baseRef: ensured.response.baseRef,
-						branch: null,
-						isDetached: true,
-						headCommit: ensured.response.baseCommit,
+			// 整个启动窗口（建 worktree → 启动 RPC）都标成「启动请求进行中」，让终端面板显示「正在启动」，
+			// 而不是把占位 summary + 空终端误判成「会话随上一个运行时没了」、再递出一个会和本次启动
+			// 抢 per-task 闸门的续跑按钮（详见该 store 顶部注释）。
+			const startRequestInFlight = currentProjectId
+				? beginTaskAgentSessionStartRequestInFlight(currentProjectId, taskId)
+				: null;
+			try {
+				const ensured = await ensureTaskWorkspace(task);
+				if (!ensured.ok) {
+					notifyError(ensured.message ?? "Could not set up task workspace.");
+					return false;
+				}
+				startRequestInFlight?.advanceToPhase("launching_agent_session");
+				if (ensured.response?.warning) {
+					showAppToast({
+						intent: "warning",
+						icon: "warning-sign",
+						message: ensured.response.warning,
+						timeout: 7000,
 					});
 				}
-				const infoAfterEnsure = await fetchTaskWorkspaceInfo(task);
-				if (infoAfterEnsure) {
-					setTaskWorkspaceInfo(infoAfterEnsure);
+				if (selectedTaskId === taskId) {
+					if (ensured.response) {
+						setTaskWorkspaceInfo({
+							taskId,
+							path: ensured.response.path,
+							exists: true,
+							baseRef: ensured.response.baseRef,
+							branch: null,
+							isDetached: true,
+							headCommit: ensured.response.baseCommit,
+						});
+					}
+					const infoAfterEnsure = await fetchTaskWorkspaceInfo(task);
+					if (infoAfterEnsure) {
+						setTaskWorkspaceInfo(infoAfterEnsure);
+					}
 				}
+				const started = await startTaskSession(task);
+				if (!started.ok) {
+					notifyError(started.message ?? "Could not start task session.");
+					return false;
+				}
+				if (!optimisticMove) {
+					// 只有用户点「开始」的路径会走到非乐观移列（见 startBacklogTaskWithAnimation 的 unavailable 分支）。
+					setBoard(
+						withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+							const currentColumnId = getTaskColumnId(currentBoard, taskId);
+							if (currentColumnId !== fromColumnId) {
+								return currentBoard;
+							}
+							const moved = moveTaskToColumn(currentBoard, taskId, "in_progress", { insertAtTop: true });
+							return moved.moved ? moved.board : currentBoard;
+						}),
+					);
+				}
+				return true;
+			} finally {
+				// 成功时 running summary 通常早已经由运行时状态流（spawn 后 150ms 批广播）到达，远早于这条
+				// RPC 响应（它还要等写卡片与 turn checkpoint），所以这里清标记不会让「已死」提示闪一下。
+				startRequestInFlight?.finish();
 			}
-			const started = await startTaskSession(task);
-			if (!started.ok) {
-				notifyError(started.message ?? "Could not start task session.");
-				return false;
-			}
-			if (!optimisticMove) {
-				// 只有用户点「开始」的路径会走到非乐观移列（见 startBacklogTaskWithAnimation 的 unavailable 分支）。
-				setBoard(
-					withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
-						const currentColumnId = getTaskColumnId(currentBoard, taskId);
-						if (currentColumnId !== fromColumnId) {
-							return currentBoard;
-						}
-						const moved = moveTaskToColumn(currentBoard, taskId, "in_progress", { insertAtTop: true });
-						return moved.moved ? moved.board : currentBoard;
-					}),
-				);
-			}
-			return true;
 		},
-		[ensureTaskWorkspace, fetchTaskWorkspaceInfo, selectedTaskId, setBoard, startTaskSession],
+		[currentProjectId, ensureTaskWorkspace, fetchTaskWorkspaceInfo, selectedTaskId, setBoard, startTaskSession],
 	);
 
 	const startBacklogTaskImmediately = useCallback(
@@ -822,7 +837,23 @@ export function useBoardInteractions({
 			if (!selection) {
 				return;
 			}
-			if (selection.column.id === "in_progress" && sessions[taskId] == null) {
+			// 「在 In Progress 但从没真正起过会话」：既包括本地还没有任何 summary，也包括运行时 attach 时造出来的
+			// 占位 summary（终端面板一挂上就会有）。后者此前被当成「已有会话」直接 return，
+			// 于是启动前段失败（如建 worktree 时锁等待超时）后，这张卡再也点不起来。
+			// 但占位形状本身不证明「从没启动过」：硬中断 / 运行时重启后 summary 也会退化成它。卡片上记着
+			// 启动成功过的，这里绝不能以原 prompt 再起一段新对话（那会丢掉本可续跑的旧对话）——留给续跑路径。
+			// 这里刻意只拦「确有启动记录」而不要求「从没启动过」的正面证据：启动史说不清时，详情面板把「启动」
+			// 与「续跑」都摆给人选，人选了启动就走到这里，再要求正面证据会让那个按钮点了没反应。看板 Retry 不是
+			// 人在知情下的选择，所以它在 task-card-body 里另要求正面证据（resolveTaskAgentSessionLaunchHistoryEvidence）。
+			const existingSessionSummary = sessions[taskId];
+			const isExistingSessionSummaryPlaceholderOfNeverLaunchedTask =
+				existingSessionSummary != null &&
+				isNeverStartedPlaceholderTaskSessionSummary(existingSessionSummary) &&
+				selection.card.mostRecentlyLaunchedAgentSessionAgentId == null;
+			if (
+				selection.column.id === "in_progress" &&
+				(existingSessionSummary == null || isExistingSessionSummaryPlaceholderOfNeverLaunchedTask)
+			) {
 				maybeRequestNotificationPermissionForTaskStart();
 				void kickoffTaskInProgress(selection.card, taskId, "in_progress");
 				return;

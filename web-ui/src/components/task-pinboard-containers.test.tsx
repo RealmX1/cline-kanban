@@ -15,6 +15,7 @@ import type { BoardCard } from "@/types";
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => undefined,
+	useTaskWorkspaceInfoValue: () => null,
 }));
 
 function createPinnedTask(id: string, overrides: Partial<BoardCard> = {}): TaskPinnedToTaskPinboard {

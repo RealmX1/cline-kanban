@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentTerminalPanel, describeState, getStateTagStyle } from "@/components/detail-panels/agent-terminal-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import { beginTaskAgentSessionStartRequestInFlight } from "@/stores/task-agent-session-start-request-in-flight-store";
 import type { TerminalScrollbackTranscriptLogicalLine } from "@/terminal/terminal-scrollback-transcript-extraction";
 
 // 返回类型直接绑定生产类型（而不是就地写一个窄结构），这样 transcript 逻辑行的形状再变时
@@ -530,6 +531,219 @@ describe("AgentTerminalPanel", () => {
 		});
 
 		expect(container.textContent).not.toContain("This session is no longer running.");
+	});
+
+	// ── 「新任务在高负载下起不来」的前端回归护栏 ──────────────────────────────────────────
+	// 新卡从进 In Progress 到 summary 变 running 之间，summary 是占位、终端是空的——和「随运行时没了」长得
+	// 一模一样。此前一律显示「no longer running」并递出续跑式重启按钮；高负载下这个窗口长达数十秒，
+	// 用户点下去就会和真正的启动抢同一把 per-task 闸门，把慢启动变成真失败。
+
+	it.each([
+		["preparing_task_worktree", "Preparing the task worktree…"],
+		["launching_agent_session", "Launching the agent session…"],
+	] as const)("启动请求在路上（%s）→ 显示正在启动，且不给任何重启入口", (phase, expectedHeadline) => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		const startRequestInFlight = beginTaskAgentSessionStartRequestInFlight("workspace-1", "task-1");
+		startRequestInFlight.advanceToPhase(phase);
+		try {
+			act(() => {
+				root.render(
+					<TooltipProvider>
+						<AgentTerminalPanel
+							taskId="task-1"
+							workspaceId="workspace-1"
+							summary={createBlankInterruptedSummary()}
+							taskAgentSessionLaunchHistoryEvidence="never_launched"
+							onStartTaskAgentSessionWithTaskPrompt={vi.fn()}
+							showSessionToolbar={false}
+						/>
+					</TooltipProvider>,
+				);
+			});
+
+			expect(container.textContent).toContain(expectedHeadline);
+			expect(container.textContent).not.toContain("This session is no longer running.");
+			expect(container.textContent).not.toContain("Restart terminal session");
+			expect(container.textContent).not.toContain("Start agent session");
+			const toolbarRestartButton = container.querySelector<HTMLButtonElement>(
+				'[aria-label="Restart agent session"]',
+			);
+			expect(toolbarRestartButton?.disabled).toBe(true);
+		} finally {
+			act(() => {
+				startRequestInFlight.finish();
+			});
+		}
+	});
+
+	it("启动请求结束后，空态与重启入口恢复（标记不会粘住）", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		const startRequestInFlight = beginTaskAgentSessionStartRequestInFlight("workspace-1", "task-1");
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary()}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+		expect(container.textContent).toContain("Preparing the task worktree…");
+
+		act(() => {
+			startRequestInFlight.finish();
+		});
+
+		expect(container.textContent).toContain("This session is no longer running.");
+		const toolbarRestartButton = container.querySelector<HTMLButtonElement>('[aria-label="Restart agent session"]');
+		expect(toolbarRestartButton?.disabled).toBe(false);
+	});
+
+	it("另一个 workspace 的同号任务在启动，不影响本面板", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		const startRequestInFlight = beginTaskAgentSessionStartRequestInFlight("workspace-other", "task-1");
+		try {
+			act(() => {
+				root.render(
+					<TooltipProvider>
+						<AgentTerminalPanel
+							taskId="task-1"
+							workspaceId="workspace-1"
+							summary={createBlankInterruptedSummary()}
+							showSessionToolbar={false}
+						/>
+					</TooltipProvider>,
+				);
+			});
+
+			expect(container.textContent).not.toContain("Preparing the task worktree…");
+			expect(container.textContent).toContain("This session is no longer running.");
+		} finally {
+			startRequestInFlight.finish();
+		}
+	});
+
+	it("有正面证据从没启动过（worktree 不存在）→ 说「还没启动」，动作只有启动（带原 prompt）", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		const onStartTaskAgentSessionWithTaskPrompt = vi.fn();
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary()}
+						taskAgentSessionLaunchHistoryEvidence="never_launched"
+						onStartTaskAgentSessionWithTaskPrompt={onStartTaskAgentSessionWithTaskPrompt}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("This task's agent session hasn't started.");
+		expect(container.textContent).not.toContain("This session is no longer running.");
+		expect(container.textContent).not.toContain("Restart terminal session");
+		const startButtons = [...container.querySelectorAll("button")].filter((button) =>
+			button.textContent?.includes("Start agent session"),
+		);
+		expect(startButtons).toHaveLength(1);
+		act(() => {
+			startButtons[0]?.click();
+		});
+		expect(onStartTaskAgentSessionWithTaskPrompt).toHaveBeenCalledTimes(1);
+		expect(mockRefreshTerminal).not.toHaveBeenCalled();
+	});
+
+	it("说不清有没有启动过（卡片缺启动记录但 worktree 在）→ 如实说不知道，启动与续跑都给", () => {
+		// 2026-08-13 前启动的存量卡、或写卡失败的卡：字段缺失 ≠ 从没启动过。压成任何一边都会伤到另一边。
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		const onStartTaskAgentSessionWithTaskPrompt = vi.fn();
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary()}
+						taskAgentSessionLaunchHistoryEvidence="launch_history_unknown"
+						onStartTaskAgentSessionWithTaskPrompt={onStartTaskAgentSessionWithTaskPrompt}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("This task's agent session isn't running.");
+		expect(container.textContent).not.toContain("This session is no longer running.");
+		expect(container.textContent).not.toContain("hasn't started");
+		const buttons = [...container.querySelectorAll("button")];
+		const startButton = buttons.find((button) => button.textContent?.includes("Start agent session"));
+		const resumeButton = buttons.find((button) => button.textContent?.includes("Restart terminal session"));
+		expect(startButton).toBeDefined();
+		expect(resumeButton).toBeDefined();
+		act(() => {
+			resumeButton?.click();
+		});
+		expect(mockRefreshTerminal).toHaveBeenCalledTimes(1);
+		expect(onStartTaskAgentSessionWithTaskPrompt).not.toHaveBeenCalled();
+		act(() => {
+			startButton?.click();
+		});
+		expect(onStartTaskAgentSessionWithTaskPrompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("卡片确有启动史（硬中断后 summary 退化成占位）→ 仍是「随运行时没了」+ 续跑重启", () => {
+		// a86d28ca 那个场景：首轮未结束被硬中断，summary 退化成占位，但卡片记得它启动过。
+		// 这里必须保持原解释与续跑动作，不能被误判成「还没启动」去重发 prompt。
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary()}
+						taskAgentSessionLaunchHistoryEvidence="launched_before"
+						onStartTaskAgentSessionWithTaskPrompt={vi.fn()}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("This session is no longer running.");
+		expect(container.textContent).toContain("Restart terminal session");
+		expect(container.textContent).not.toContain("Start agent session");
+	});
+
+	it("启动失败（liveness=failed）→ 说启动失败，而不是「随上一个运行时没了」", () => {
+		mockHasRenderedAnyTerminalContent.mockReturnValue(false);
+		act(() => {
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createBlankInterruptedSummary({
+							state: "failed",
+							agentId: "claude",
+							workspacePath: "/tmp/task-1",
+							reviewReason: "error",
+						})}
+						taskAgentSessionLaunchHistoryEvidence="never_launched"
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("This agent session failed to start.");
+		expect(container.textContent).not.toContain("This session is no longer running.");
+		expect(container.textContent).toContain("Restart terminal session");
 	});
 });
 
