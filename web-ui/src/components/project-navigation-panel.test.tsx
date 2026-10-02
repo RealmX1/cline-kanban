@@ -40,6 +40,7 @@ const PROJECTS: RuntimeProjectSummary[] = [
 		},
 		availability: { status: "available" },
 		inProgressTaskDetails: [],
+		crossProjectTaskSwitcherEntries: [],
 	},
 ];
 

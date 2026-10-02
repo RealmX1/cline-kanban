@@ -57,6 +57,7 @@ import type {
 	RuntimeContinueConnectionRetrySessionsResponse,
 	RuntimeConversationSessionTurnProjectionRequest,
 	RuntimeConversationSessionTurnProjectionResponse,
+	RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse,
 	RuntimeDebugResetAllStateResponse,
 	RuntimeDeferredRestorationHarnessNotificationsRequest,
 	RuntimeDeferredRestorationHarnessNotificationsResponse,
@@ -116,6 +117,8 @@ import type {
 	RuntimePromptLibraryMutateRequest,
 	RuntimePromptLibraryReadRequest,
 	RuntimePromptLibraryResponse,
+	RuntimeRecordTaskOpenedByUserRequest,
+	RuntimeRecordTaskOpenedByUserResponse,
 	RuntimeRejectExploratoryFindingRequest,
 	RuntimeRejectExploratoryFindingResponse,
 	RuntimeReleaseDeferredRestorationHarnessNotificationsResponse,
@@ -128,6 +131,8 @@ import type {
 	RuntimeRunUpdateResponse,
 	RuntimeSaveExploratoryFindingRequest,
 	RuntimeSaveExploratoryFindingResponse,
+	RuntimeSetTaskPinboardPinStateOfTaskCardRequest,
+	RuntimeSetTaskPinboardPinStateOfTaskCardResponse,
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
 	RuntimeSlashCommandsResponse,
@@ -245,6 +250,7 @@ import {
 	runtimeContinueConnectionRetrySessionsResponseSchema,
 	runtimeConversationSessionTurnProjectionRequestSchema,
 	runtimeConversationSessionTurnProjectionResponseSchema,
+	runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponseSchema,
 	runtimeDebugResetAllStateResponseSchema,
 	runtimeDeferredRestorationHarnessNotificationsRequestSchema,
 	runtimeDeferredRestorationHarnessNotificationsResponseSchema,
@@ -304,6 +310,8 @@ import {
 	runtimePromptLibraryMutateRequestSchema,
 	runtimePromptLibraryReadRequestSchema,
 	runtimePromptLibraryResponseSchema,
+	runtimeRecordTaskOpenedByUserRequestSchema,
+	runtimeRecordTaskOpenedByUserResponseSchema,
 	runtimeRejectExploratoryFindingRequestSchema,
 	runtimeRejectExploratoryFindingResponseSchema,
 	runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema,
@@ -316,6 +324,8 @@ import {
 	runtimeRunUpdateResponseSchema,
 	runtimeSaveExploratoryFindingRequestSchema,
 	runtimeSaveExploratoryFindingResponseSchema,
+	runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema,
+	runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema,
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
 	runtimeSlashCommandsResponseSchema,
@@ -698,6 +708,12 @@ export interface RuntimeTrpcContext {
 			input: RuntimeAddBacklogTaskRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeAddBacklogTaskResponse>;
+		// 跨项目切换面板对「非当前打开项目」的卡置顶 / 取消置顶：runtime 在 board 锁内对最新 board 改写。
+		setTaskPinboardPinStateOfTaskCard: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeSetTaskPinboardPinStateOfTaskCardRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeSetTaskPinboardPinStateOfTaskCardResponse>;
 		// dd2db 1a.2b：`kanban task` 的 board 写动词统一入口（见 api-contract 的 runtimeKanbanCliTaskBoardMutationRequestSchema）。
 		applyKanbanCliTaskBoardMutation: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -743,6 +759,10 @@ export interface RuntimeTrpcContext {
 			input: RuntimeDirectoryListRequest,
 		) => Promise<RuntimeDirectoryListResponse>;
 		getAllProjectsTaskSearchIndex: () => Promise<RuntimeAllProjectsTaskSearchIndexResponse>;
+		recordTaskOpenedByUser: (
+			input: RuntimeRecordTaskOpenedByUserRequest,
+		) => Promise<RuntimeRecordTaskOpenedByUserResponse>;
+		listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon: () => Promise<RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse>;
 	};
 	hooksApi: {
 		ingest: (input: RuntimeHookIngestRequest) => Promise<RuntimeHookIngestResponse>;
@@ -1491,6 +1511,16 @@ export const runtimeAppRouter = t.router({
 					ctx.kanbanRequestOriginActorEvidence,
 				);
 			}),
+		setTaskPinboardPinStateOfTaskCard: workspaceProcedure
+			.input(runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema)
+			.output(runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.setTaskPinboardPinStateOfTaskCard(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
 		// CLI 的 board 写动词（create / update / start 移列 / trash / delete）只经这里落盘：runtime 按请求头的
 		// CLI 行动者声明解析行动者后进入持久化漏斗。runtime 离线时 CLI 直接报错，不回退直接写盘（dd2db 1a.2b）。
 		applyKanbanCliTaskBoardMutation: workspaceProcedure
@@ -1579,6 +1609,21 @@ export const runtimeAppRouter = t.router({
 			.query(async ({ ctx }) => {
 				return await ctx.projectsApi.getAllProjectsTaskSearchIndex();
 			}),
+		// 跨项目切换面板（docs/context-cross-project-recently-active-task-switcher.md）：选中任务时记「我最后打开」。
+		// 非 workspace-scoped，按 input.workspaceId 写（同 markTaskNotificationsVisited）。
+		recordTaskOpenedByUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeRecordTaskOpenedByUserRequestSchema)
+			.output(runtimeRecordTaskOpenedByUserResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.projectsApi.recordTaskOpenedByUser(input);
+			}),
+		// 跨项目切换面板「显示更早」：按放宽后的时间窗现算全部项目的条目（不进广播）。
+		listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon:
+			procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+				.output(runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponseSchema)
+				.query(async ({ ctx }) => {
+					return await ctx.projectsApi.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon();
+				}),
 	}),
 	hooks: t.router({
 		ingest: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce

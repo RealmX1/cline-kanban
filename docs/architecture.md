@@ -238,6 +238,8 @@ Its shape mirrors the Cline integration: `acp-protocol-boundary.ts` is the only 
 
 This is important because Kanban is not designed around browser polling. The runtime is long-lived and streams state outward.
 
+`projects_updated` 是全局消息（覆盖全部已注册项目，切项目不清空）。跨项目视图都从它的 per-project 投影读：Board Overview 的 `inProgressTaskDetails` 与跨项目切换面板的 `crossProjectTaskSwitcherEntries` 由同一个 per-card 构造函数产出，会话事实覆盖三种 transport（Terminal manager + hub 订阅的 Cline SDK / ACP），未加载项目读 sessions.json 的文件戳缓存（`server/persisted-task-session-facts-cache-for-unloaded-projects.ts`）。就绪通知 `task_ready_for_review` 同样投给全部客户端。术语与边界见 `docs/context-cross-project-recently-active-task-switcher.md`。
+
 ## Frontend Architecture
 
 The frontend is also easier to navigate if you think in responsibilities instead of folders.

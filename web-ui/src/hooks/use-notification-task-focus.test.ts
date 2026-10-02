@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 
+const openTaskInProjectInPlace = vi.fn<(workspaceId: string, taskId: string) => void>();
+
 function HookHarness({
 	currentProjectId,
 	setSelectedTaskId,
@@ -12,7 +14,7 @@ function HookHarness({
 	currentProjectId: string | null;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 }): null {
-	useNotificationTaskFocus({ currentProjectId, setSelectedTaskId });
+	useNotificationTaskFocus({ currentProjectId, setSelectedTaskId, openTaskInProjectInPlace });
 	return null;
 }
 
@@ -35,6 +37,7 @@ describe("useNotificationTaskFocus", () => {
 			value: serviceWorkerTarget,
 		});
 		focusSpy = vi.spyOn(window, "focus").mockImplementation(() => {});
+		openTaskInProjectInPlace.mockReset();
 		container = document.createElement("div");
 		document.body.appendChild(container);
 		root = createRoot(container);
@@ -92,7 +95,7 @@ describe("useNotificationTaskFocus", () => {
 		expect(focusSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("忽略其他项目的通知点击消息", () => {
+	it("其他项目的通知点击消息：本标签页原地切到该项目打开任务（单标签页管全部项目）", () => {
 		const setSelectedTaskId = vi.fn<Dispatch<SetStateAction<string | null>>>();
 
 		renderHook(setSelectedTaskId, "p1");
@@ -104,6 +107,8 @@ describe("useNotificationTaskFocus", () => {
 		});
 
 		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(openTaskInProjectInPlace).toHaveBeenCalledWith("p2", "t1");
+		expect(focusSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("忽略形状不符合契约的消息", () => {

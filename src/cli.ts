@@ -422,6 +422,8 @@ async function startServer(): Promise<{
 		onTerminalManagerReady: (workspaceId, manager) => {
 			runtimeStateHub?.trackTerminalManager(workspaceId, manager);
 		},
+		listConversationTaskSessionSummariesForWorkspace: (workspaceId) =>
+			runtimeStateHub?.listTrackedConversationTaskSessionSummaries(workspaceId) ?? [],
 	});
 	runtimeStateHub = createRuntimeStateHub({
 		workspaceRegistry,

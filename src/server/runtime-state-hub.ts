@@ -9,7 +9,7 @@ import {
 	type NotificationAssessmentInput,
 } from "../notifications/notification-assessment-service";
 import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
-import { loadPersistedWorkspaceStateById } from "../state/workspace-state";
+import { listWorkspaceIndexEntries, loadPersistedWorkspaceStateById } from "../state/workspace-state";
 
 // 「会话型」任务来源：Kanban 直接持有结构化消息、在卡片详情里渲染成会话面板的那一类 agent。
 // 目前是 Cline SDK（进程内）与 ACP（stdio 子进程）两种。
@@ -83,6 +83,9 @@ export interface RuntimeStateHub {
 		service: ConversationTaskSessionSubscriptionSource,
 	) => void;
 	broadcastTaskChatCleared: (workspaceId: string, taskId: string) => void;
+	// 本 hub 订阅着的 Cline SDK / ACP 会话的最新 summary。workspace-registry 拼跨项目视图时用它补齐
+	// TerminalSessionManager 看不到的两种 transport。
+	listTrackedConversationTaskSessionSummaries: (workspaceId: string) => RuntimeTaskSessionSummary[];
 	handleUpgrade: (
 		request: IncomingMessage,
 		socket: Parameters<WebSocketServer["handleUpgrade"]>[1],
@@ -625,6 +628,13 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
+	// 就绪通知投给**所有**在场客户端，不只是该 workspace 的连接：一个浏览器标签页可以经跨项目切换面板
+	// 只开一个页面管全部项目（docs/context-cross-project-recently-active-task-switcher.md），只投给目标项目的
+	// 连接会让「没开着目标项目的那个标签页」永远收不到 OS 通知 / 提示音 / 播报。多标签页之间不会重复弹：
+	// 前端以 claimDelivery 领取（每个 candidate 只有一个客户端领得到），并按「有没有可见标签页正开着该项目」让位。
+	const sendTaskReadyForReviewToAllRuntimeStateClients = (payload: RuntimeStateStreamTaskReadyForReviewMessage) => {
+		for (const client of runtimeStateClients) sendRuntimeStateMessage(client, payload);
+	};
 	const notificationAssessment = createNotificationAssessmentService({
 		publishUnarchived: async (notification) => {
 			const payload: RuntimeStateStreamTaskReadyForReviewMessage = {
@@ -636,8 +646,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				summaryText: `通知留档不完整，请查看任务。${notification.finalMessage ?? ""}`,
 				archiveIncomplete: true,
 			};
-			for (const client of runtimeStateClientsByWorkspaceId.get(notification.workspaceId) ?? [])
-				sendRuntimeStateMessage(client, payload);
+			sendTaskReadyForReviewToAllRuntimeStateClients(payload);
 		},
 		getSummary: async (workspaceId, taskId) => {
 			const live = latestNotificationSummaries.get(`${workspaceId}:${taskId}`);
@@ -667,8 +676,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				taskTitleSnapshot: candidate.taskTitleSnapshot,
 				userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
 			};
-			for (const client of runtimeStateClientsByWorkspaceId.get(candidate.workspaceId) ?? [])
-				sendRuntimeStateMessage(client, payload);
+			sendTaskReadyForReviewToAllRuntimeStateClients(payload);
 		},
 	});
 	const broadcastTaskReadyForReview = (
@@ -811,25 +819,34 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				}
 				// 通知重放是 best-effort：先完成订阅登记，档案慢或故障均不阻塞核心推流。
 				// 重放期间断连由 close handler 释放订阅；这里不再注册或重复释放 monitor。
+				// 重放覆盖**全部**项目而不只是本次连接的项目：就绪通知本就投给所有客户端，而单标签页切项目会
+				// 重连 WS，切换那一两秒里别的项目完成的任务只能靠这里补上。已被领取的不重放。
 				try {
-					if (workspace.projectId)
-						for (const candidate of await getNotificationLifecycleArchive().recentReady(
-							workspace.projectId,
-							Date.now() - 60_000,
-						)) {
-							if (candidate.deliveryClaimedBy) continue;
-							sendRuntimeStateMessage(client, {
-								type: "task_ready_for_review",
-								workspaceId: candidate.workspaceId,
-								taskId: candidate.taskId,
-								candidateId: candidate.candidateId,
-								triggeredAt: candidate.notificationPanelVisibilityChangedAt,
-								userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
-								summaryText: candidate.summaryText,
-								summaryLanguage: candidate.summaryLanguage,
-								taskTitleSnapshot: candidate.taskTitleSnapshot,
-							});
-						}
+					const replayWorkspaceIds = new Set<string>(
+						(await listWorkspaceIndexEntries()).map((entry) => entry.workspaceId),
+					);
+					if (workspace.projectId) replayWorkspaceIds.add(workspace.projectId);
+					const replayCandidates = (
+						await Promise.all(
+							[...replayWorkspaceIds].map((replayWorkspaceId) =>
+								getNotificationLifecycleArchive().recentReady(replayWorkspaceId, Date.now() - 60_000),
+							),
+						)
+					).flat();
+					for (const candidate of replayCandidates) {
+						if (candidate.deliveryClaimedBy) continue;
+						sendRuntimeStateMessage(client, {
+							type: "task_ready_for_review",
+							workspaceId: candidate.workspaceId,
+							taskId: candidate.taskId,
+							candidateId: candidate.candidateId,
+							triggeredAt: candidate.notificationPanelVisibilityChangedAt,
+							userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
+							summaryText: candidate.summaryText,
+							summaryLanguage: candidate.summaryLanguage,
+							taskTitleSnapshot: candidate.taskTitleSnapshot,
+						});
+					}
 				} catch {
 					logAgentSessionRetentionWarning("notification-replay-failed: 通知档案重放失败，核心状态推流继续。");
 				}
@@ -896,6 +913,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 		broadcastTaskChatMessage,
 		broadcastTaskChatCleared,
+		listTrackedConversationTaskSessionSummaries: collectTrackedConversationSummaries,
 		handleUpgrade: (request, socket, head, context) => {
 			runtimeStateWebSocketServer.handleUpgrade(request, socket, head, (ws) => {
 				runtimeStateWebSocketServer.emit("connection", ws, context);

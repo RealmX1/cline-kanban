@@ -719,6 +719,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				},
 				warn: deps.warn,
 				buildProjectsPayload: deps.workspaceRegistry.buildProjectsPayload,
+				listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon:
+					deps.workspaceRegistry.listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon,
 				pickDirectoryPathFromSystemDialog: deps.pickDirectoryPathFromSystemDialog,
 				serverCwd: process.cwd(),
 			}),

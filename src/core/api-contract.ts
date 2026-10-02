@@ -1294,6 +1294,31 @@ export const runtimeInProgressTaskDetailSchema = z.object({
 });
 export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDetailSchema>;
 
+// 跨项目「最近活跃任务」切换面板（Focus View 左栏的 All projects 模式，见
+// docs/context-cross-project-recently-active-task-switcher.md）的 per-task 条目。
+//
+// 是上面 in_progress 明细的超集，且由同一个 per-card 构造函数产出（src/server/in-progress-task-detail-projection.ts），
+// 不是第二份实现。与它的区别只在**取景**：不按列取，而是取「非 Done 列、且近期被碰过 / 已置顶 / agent 正持有回合」
+// 的卡（取景判据见 isTaskCardWithinCrossProjectTaskSwitcherBroadcastScope）。区归属（Running / 缓存倒计时 /
+// 剩余）在前端按 now 现算，见 src/core/cross-project-recently-active-task-switcher-section-assignment.ts。
+export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskDetailSchema.extend({
+	// 卡片当前所在的 board 列。面板的区归属**不读**它（只用来排除 Done 与显示 stage 标签）——
+	// 列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。
+	columnId: runtimeBoardColumnIdSchema,
+	// 第三个 facet。缓存倒计时区的判据 isNotifiableUserTurn 要用完整三元组。
+	userTurnKind: runtimeTaskSessionUserTurnKindSchema,
+	// 主 agent 已 park、在等自己派发的后台工作（isParkedAwaitingDispatchedBackgroundWork）。归 Running 区。
+	isParkedAwaitingDispatchedBackgroundWork: z.boolean(),
+	// Description 最后一次内容变化的时刻（老卡回落 updatedAt，同 Backlog 排序）。
+	taskDescriptionLastUpdatedAt: z.number(),
+	// 用户最近一次在任一浏览器里打开这个任务的时刻（服务端记录，见 task-last-opened-by-user-record-store.ts）。
+	lastOpenedByUserAt: z.number().nullable(),
+	// Task Pinboard 置顶态（字段存在即已置顶，同 board 卡片）。
+	pinnedToTaskPinboardAt: z.number().nullable(),
+	taskPinboardPinReason: z.string().nullable(),
+});
+export type RuntimeCrossProjectTaskSwitcherEntry = z.infer<typeof runtimeCrossProjectTaskSwitcherEntrySchema>;
+
 export const runtimeProjectSummarySchema = z.object({
 	id: z.string(),
 	path: z.string(),
@@ -1308,6 +1333,8 @@ export const runtimeProjectSummarySchema = z.object({
 	// 该 project in_progress 列全部 task 的明细，供 Stage-First Overview 展开 In-Progress 阶段
 	// （前端据活跃度二分 Active/Stale）。default([])：旧广播/快照无此字段时安全回退。
 	inProgressTaskDetails: z.array(runtimeInProgressTaskDetailSchema).default([]),
+	// 跨项目切换面板的条目（取景见 runtimeCrossProjectTaskSwitcherEntrySchema）。default([])：旧广播无此字段时安全回退。
+	crossProjectTaskSwitcherEntries: z.array(runtimeCrossProjectTaskSwitcherEntrySchema).default([]),
 	// The project's git `remote.origin.url` (raw, unnormalized), or null when the repo
 	// has no origin remote / the read failed. Consumed by the bug-report FAB to detect
 	// the cline-kanban developer project by matching its GitHub owner/repo slug.
@@ -2261,6 +2288,56 @@ export const runtimeAllProjectsTaskSearchIndexResponseSchema = z.object({
 	projects: z.array(runtimeAllProjectsTaskSearchIndexProjectEntrySchema),
 });
 export type RuntimeAllProjectsTaskSearchIndexResponse = z.infer<typeof runtimeAllProjectsTaskSearchIndexResponseSchema>;
+
+// 跨项目切换面板：前端选中任务时记一笔「我最后打开」（服务端账本，跨浏览器 origin 共享）。
+// 非 workspace-scoped：按 input.workspaceId 写，与 markTaskNotificationsVisited 同口径。
+export const runtimeRecordTaskOpenedByUserRequestSchema = z.object({
+	workspaceId: z.string().min(1),
+	taskId: z.string().min(1),
+});
+export type RuntimeRecordTaskOpenedByUserRequest = z.infer<typeof runtimeRecordTaskOpenedByUserRequestSchema>;
+export const runtimeRecordTaskOpenedByUserResponseSchema = z.object({
+	recorded: z.boolean(),
+});
+export type RuntimeRecordTaskOpenedByUserResponse = z.infer<typeof runtimeRecordTaskOpenedByUserResponseSchema>;
+
+// 跨项目切换面板「显示更早」：按放宽后的时间窗现算全部项目的条目（不进 projects_updated 广播）。
+export const runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponseSchema = z.object({
+	activityHorizonMs: z.number(),
+	projects: z.array(
+		z.object({
+			workspaceId: z.string(),
+			crossProjectTaskSwitcherEntries: z.array(runtimeCrossProjectTaskSwitcherEntrySchema),
+		}),
+	),
+});
+export type RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse = z.infer<
+	typeof runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponseSchema
+>;
+
+// 置顶 / 取消置顶 / 改置顶原因，由 runtime 在 board 锁内对**最新** board 执行（workspace-scoped，作用于连接 scope
+// 的项目）。跨项目切换面板对「不是当前打开的项目」的卡置顶时走这里；当前项目仍走浏览器 setBoard → saveState。
+export const runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema = z.discriminatedUnion("taskPinboardPinAction", [
+	z.object({
+		taskPinboardPinAction: z.literal("pin_task_card_or_update_pin_reason"),
+		taskId: z.string().min(1),
+		taskPinboardPinReason: z.string().nullable(),
+	}),
+	z.object({
+		taskPinboardPinAction: z.literal("unpin_task_card"),
+		taskId: z.string().min(1),
+	}),
+]);
+export type RuntimeSetTaskPinboardPinStateOfTaskCardRequest = z.infer<
+	typeof runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema
+>;
+export const runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema = z.object({
+	taskCardFound: z.boolean(),
+	boardWasSaved: z.boolean(),
+});
+export type RuntimeSetTaskPinboardPinStateOfTaskCardResponse = z.infer<
+	typeof runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema
+>;
 
 export const runtimeProjectAddRequestSchema = z
 	.object({

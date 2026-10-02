@@ -37,6 +37,7 @@ function project(overrides: Partial<RuntimeProjectSummary> & { id: string }): Ru
 		path: `/tmp/${overrides.id}`,
 		taskCounts: counts(),
 		inProgressTaskDetails: [],
+		crossProjectTaskSwitcherEntries: [],
 		...overrides,
 		availability: overrides.availability ?? { status: "available" },
 	};

@@ -342,8 +342,10 @@ function runtimeStateStreamReducer(
 			workspaceMetadata: didProjectChange ? null : state.workspaceMetadata,
 			latestTaskChatMessage: didProjectChange ? null : state.latestTaskChatMessage,
 			taskChatMessagesByTaskId: didProjectChange ? {} : state.taskChatMessagesByTaskId,
-			latestTaskReadyForReview: didProjectChange ? null : state.latestTaskReadyForReview,
-			taskReadyForReviewEvents: didProjectChange ? [] : state.taskReadyForReviewEvents,
+			// 就绪通知是跨项目的（服务端投给所有客户端），切项目不清：单标签页切项目途中别的项目刚完成的任务
+			// 还要弹通知。事件本身 60 秒过期，消费侧按 candidateId 去重。
+			latestTaskReadyForReview: state.latestTaskReadyForReview,
+			taskReadyForReviewEvents: state.taskReadyForReviewEvents,
 			// 切项目必须清：图是 per-exploration 的，换了 project 之后旧推送里的 explorationId
 			// 可能与新 project 的某张卡片撞号（taskId 是 board-local 短 id）。
 			latestExplorationThreadGraphUpdate: didProjectChange ? null : state.latestExplorationThreadGraphUpdate,
@@ -641,9 +643,9 @@ export function useRuntimeStateStream(
 						return;
 					}
 					if (payload.type === "task_ready_for_review") {
-						if (payload.workspaceId !== activeWorkspaceId) {
-							return;
-						}
+						// 不按当前 workspace 过滤：就绪通知跨项目投递（服务端投给所有客户端），单标签页管全部项目时
+						// 别的项目的完成通知只能由这个标签页来弹。消费侧（use-review-ready-notifications）只对当前项目
+						// 按前台可见让位，并以 claimDelivery 在标签页之间去重。
 						dispatch({
 							type: "task_ready_for_review",
 							payload,

@@ -192,6 +192,7 @@ describe("TopBar script shortcut onboarding", () => {
 									},
 									availability: { status: "available" },
 									inProgressTaskDetails: [],
+									crossProjectTaskSwitcherEntries: [],
 								},
 							],
 							currentProjectId: "alpha",

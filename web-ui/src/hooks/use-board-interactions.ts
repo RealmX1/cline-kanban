@@ -7,6 +7,7 @@ import {
 	isParkedAwaitingDispatchedBackgroundWork,
 	resolveSessionFacets,
 } from "@runtime-session-activity";
+import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "@runtime-task-pinboard-pinning";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
@@ -28,7 +29,6 @@ import {
 	removeTask,
 	updateTask,
 } from "@/state/board-state";
-import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "@/state/task-pinboard-pinning";
 import {
 	recordWebUiBoardMutationInitiatorForTaskCardAspect,
 	recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards,

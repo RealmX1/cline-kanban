@@ -52,6 +52,11 @@ const RIGHT_PROMPT_RATIO_PREFERENCE: ResizeNumberPreference = {
 	normalize: (value) => clampBetween(value, 0.15, 0.85),
 };
 
+// 详情页之外也要按同一比例摆左栏的地方用（跨项目跳转在途时的 Focus View 过渡外壳）。
+export function loadDetailTaskCardsPanelRatioPreference(): number {
+	return loadResizePreference(TASK_CARDS_RATIO_PREFERENCE);
+}
+
 export function useCardDetailLayout({ isDiffExpanded }: { isDiffExpanded: boolean }): {
 	agentPanelRatio: number;
 	detailDiffFileTreeRatio: number;

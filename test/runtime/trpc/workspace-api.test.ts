@@ -784,3 +784,119 @@ describe("createWorkspaceApi ensureWorktree", () => {
 		expect(taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic).not.toHaveBeenCalled();
 	});
 });
+
+// 跨项目切换面板对「非当前打开项目」的卡置顶 / 取消置顶：runtime 在 board 锁内对最新 board 执行，
+// 与浏览器 setBoard 共用 src/core/task-pinboard-pinning.ts 的纯函数。
+describe("createWorkspaceApi setTaskPinboardPinStateOfTaskCard", () => {
+	function createBoardWithReviewCard(
+		cardOverrides: Partial<RuntimeBoardData["columns"][number]["cards"][number]> = {},
+	) {
+		const board = createBoard();
+		const reviewColumn = board.columns.find((column) => column.id === "review");
+		reviewColumn?.cards.push({
+			id: "task-review",
+			title: "Review me",
+			prompt: "p",
+			startInPlanMode: false,
+			baseRef: "main",
+			createdAt: 1,
+			updatedAt: 1,
+			...cardOverrides,
+		});
+		return board;
+	}
+
+	function mockMutateWorkspaceStateAgainst(board: RuntimeBoardData) {
+		const savedBoardRef: { current: RuntimeBoardData | null } = { current: null };
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_cwd, _taskMutationIntent, mutate) => {
+			const currentState = createWorkspaceState(board);
+			const mutation = mutate(currentState);
+			const saved = mutation.save !== false;
+			if (saved) {
+				savedBoardRef.current = mutation.board;
+			}
+			return { value: mutation.value, state: { ...currentState, board: mutation.board }, saved };
+		});
+		return savedBoardRef;
+	}
+
+	beforeEach(() => {
+		workspaceStateMocks.mutateWorkspaceState.mockReset();
+	});
+
+	it("置顶：写入置顶时刻与原因、按 web UI 置顶意图记账，并广播", async () => {
+		const savedBoardRef = mockMutateWorkspaceStateAgainst(createBoardWithReviewCard());
+		const broadcastRuntimeWorkspaceStateUpdated = vi.fn();
+		const broadcastRuntimeProjectsUpdated = vi.fn();
+		const api = createWorkspaceApiForTest({ broadcastRuntimeWorkspaceStateUpdated, broadcastRuntimeProjectsUpdated });
+
+		const response = await api.setTaskPinboardPinStateOfTaskCard(
+			{ workspaceId: "workspace-b", workspacePath: "/tmp/repo-b" },
+			{
+				taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
+				taskId: "task-review",
+				taskPinboardPinReason: " watch it ",
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+
+		expect(response).toEqual({ taskCardFound: true, boardWasSaved: true });
+		const pinnedCard = savedBoardRef.current?.columns.find((column) => column.id === "review")?.cards[0];
+		expect(pinnedCard?.pinnedToTaskPinboardAt).toEqual(expect.any(Number));
+		expect(pinnedCard?.taskPinboardPinReason).toBe("watch it");
+		// 置顶不是内容修改：不推进 updatedAt。
+		expect(pinnedCard?.updatedAt).toBe(1);
+		expect(workspaceStateMocks.mutateWorkspaceState).toHaveBeenCalledWith(
+			"/tmp/repo-b",
+			expect.objectContaining({ taskMutationIntentKind: "runtime_trpc_pin_task_card_to_task_pinboard" }),
+			expect.any(Function),
+		);
+		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledWith("workspace-b", "/tmp/repo-b");
+		expect(broadcastRuntimeProjectsUpdated).toHaveBeenCalledWith("workspace-b");
+	});
+
+	it("取消置顶：两个字段一起清掉", async () => {
+		const savedBoardRef = mockMutateWorkspaceStateAgainst(
+			createBoardWithReviewCard({ pinnedToTaskPinboardAt: 5, taskPinboardPinReason: "why" }),
+		);
+		const api = createWorkspaceApiForTest();
+
+		const response = await api.setTaskPinboardPinStateOfTaskCard(
+			{ workspaceId: "workspace-b", workspacePath: "/tmp/repo-b" },
+			{ taskPinboardPinAction: "unpin_task_card", taskId: "task-review" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+
+		expect(response).toEqual({ taskCardFound: true, boardWasSaved: true });
+		const unpinnedCard = savedBoardRef.current?.columns.find((column) => column.id === "review")?.cards[0];
+		expect(unpinnedCard).not.toHaveProperty("pinnedToTaskPinboardAt");
+		expect(unpinnedCard).not.toHaveProperty("taskPinboardPinReason");
+	});
+
+	it("卡片不在该项目 board 上 / 置顶态没变：不落盘、不广播", async () => {
+		mockMutateWorkspaceStateAgainst(
+			createBoardWithReviewCard({ pinnedToTaskPinboardAt: 5, taskPinboardPinReason: "why" }),
+		);
+		const broadcastRuntimeProjectsUpdated = vi.fn();
+		const api = createWorkspaceApiForTest({ broadcastRuntimeProjectsUpdated });
+
+		const missing = await api.setTaskPinboardPinStateOfTaskCard(
+			{ workspaceId: "workspace-b", workspacePath: "/tmp/repo-b" },
+			{ taskPinboardPinAction: "unpin_task_card", taskId: "task-elsewhere" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		const unchanged = await api.setTaskPinboardPinStateOfTaskCard(
+			{ workspaceId: "workspace-b", workspacePath: "/tmp/repo-b" },
+			{
+				taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
+				taskId: "task-review",
+				taskPinboardPinReason: "why",
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+
+		expect(missing).toEqual({ taskCardFound: false, boardWasSaved: false });
+		expect(unchanged).toEqual({ taskCardFound: true, boardWasSaved: false });
+		expect(broadcastRuntimeProjectsUpdated).not.toHaveBeenCalled();
+	});
+});
