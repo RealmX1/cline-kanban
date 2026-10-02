@@ -4,9 +4,12 @@ import type {
 } from "../core/notification-intelligence-settings-contract";
 
 // 只列已核对接口和音色的模型；添加模型必须同时补充适配契约测试。
+// 推荐依据（2026-10）：qwen-audio-3.0-tts-plus 是百炼推荐表首位，双语音色、支持 SSML 与 instruction，
+// 官方难读文本基准中文 68.7% / 英文 65.7%（qwen3-tts-flash 为 57.0% / 60.5%）。
 export const NOTIFICATION_SPEECH_MODEL_CATALOG = [
 	{
 		modelId: "hexgrad/Kokoro-82M",
+		isRecommendedForCodingAgentNotificationSpeech: false,
 		provider: "deepinfra",
 		voices: ["zf_xiaobei", "zf_xiaoni", "af_bella", "af_heart", "am_adam"],
 		instructions: false,
@@ -15,6 +18,7 @@ export const NOTIFICATION_SPEECH_MODEL_CATALOG = [
 	},
 	{
 		modelId: "qwen-audio-3.0-tts-plus",
+		isRecommendedForCodingAgentNotificationSpeech: true,
 		provider: "alibaba",
 		voices: ["longanlingxin", "longanlufeng"],
 		instructions: true,
@@ -23,6 +27,7 @@ export const NOTIFICATION_SPEECH_MODEL_CATALOG = [
 	},
 	{
 		modelId: "qwen-audio-3.0-tts-flash",
+		isRecommendedForCodingAgentNotificationSpeech: false,
 		provider: "alibaba",
 		voices: ["longanfengyue", "longanyuanfei", "longanlingxi"],
 		instructions: true,
@@ -31,6 +36,7 @@ export const NOTIFICATION_SPEECH_MODEL_CATALOG = [
 	},
 	{
 		modelId: "qwen3-tts-flash",
+		isRecommendedForCodingAgentNotificationSpeech: false,
 		provider: "alibaba",
 		voices: ["Cherry", "Ethan", "Serena"],
 		instructions: false,
@@ -39,6 +45,7 @@ export const NOTIFICATION_SPEECH_MODEL_CATALOG = [
 	},
 	{
 		modelId: "qwen3-tts-instruct-flash",
+		isRecommendedForCodingAgentNotificationSpeech: false,
 		provider: "alibaba",
 		voices: ["Cherry", "Ethan", "Serena"],
 		instructions: true,

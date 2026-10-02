@@ -665,6 +665,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				summaryText: candidate.summaryText,
 				summaryLanguage: candidate.summaryLanguage,
 				taskTitleSnapshot: candidate.taskTitleSnapshot,
+				notificationSpeechAnnouncementScript: candidate.notificationSpeechAnnouncementScript ?? undefined,
 				userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
 			};
 			for (const client of runtimeStateClientsByWorkspaceId.get(candidate.workspaceId) ?? [])
@@ -828,6 +829,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 								summaryText: candidate.summaryText,
 								summaryLanguage: candidate.summaryLanguage,
 								taskTitleSnapshot: candidate.taskTitleSnapshot,
+								notificationSpeechAnnouncementScript:
+									candidate.notificationSpeechAnnouncementScript ?? undefined,
 							});
 						}
 				} catch {

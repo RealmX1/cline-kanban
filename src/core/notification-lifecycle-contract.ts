@@ -1,6 +1,12 @@
 import { z } from "zod";
 
 export const notificationPanelVisibilitySchema = z.enum(["pending_decision", "visible", "cleared", "excluded"]);
+// 第三方 TTS 与浏览器系统语音共用的播报脚本：先导（项目 + 任务）与正文分开合成，中间插入停顿。
+export const notificationSpeechAnnouncementScriptSchema = z.object({
+	leadInText: z.string(),
+	bodyText: z.string(),
+});
+export type NotificationSpeechAnnouncementScript = z.infer<typeof notificationSpeechAnnouncementScriptSchema>;
 export const notificationCandidateSchema = z.object({
 	candidateId: z.string(),
 	sequence: z.number(),
@@ -16,6 +22,10 @@ export const notificationCandidateSchema = z.object({
 	deferredNotificationFallbackDeadlineAt: z.number().nullable(),
 	summaryText: z.string(),
 	summaryLanguage: z.enum(["zh-CN", "en-US"]),
+	// AI 评估按朗读要求另写的摘要（无路径/哈希/符号）；旧记录与未走 AI 的记录没有此字段。
+	spokenSummaryTextForNotificationSpeech: z.string().nullable().optional(),
+	// 发布时定稿的播报脚本，留档记录实际念了什么；旧记录缺省时合成前现场组装。
+	notificationSpeechAnnouncementScript: notificationSpeechAnnouncementScriptSchema.nullable().optional(),
 	taskTitleSnapshot: z.string(),
 	repositoryNameSnapshot: z.string(),
 	supersededByCandidateId: z.string().nullable(),

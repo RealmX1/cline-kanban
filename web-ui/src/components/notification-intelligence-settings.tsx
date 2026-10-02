@@ -523,6 +523,7 @@ export function NotificationIntelligenceSettingsSection({
 											.map((model) => (
 												<option key={model.modelId} value={model.modelId}>
 													{model.modelId}
+													{model.isRecommendedForCodingAgentNotificationSpeech ? "（推荐）" : ""}
 												</option>
 											))}
 									</NativeSelect>
@@ -622,6 +623,18 @@ export function NotificationIntelligenceSettingsSection({
 											settings.summaryLanguage === "zh-CN"
 												? "这是一条通知语音试听。"
 												: "This is a notification voice preview.",
+										// 浏览器系统语音试听也按「先导 → 停顿 → 正文」播放；第三方 TTS 的试听脚本由服务端组装。
+										announcementScript:
+											settings.summaryLanguage === "zh-CN"
+												? {
+														leadInText: "项目 示例项目，任务：语音试听。",
+														bodyText: "这是一条通知语音试听，先导和正文之间会停顿一下。",
+													}
+												: {
+														leadInText: "Project demo project, task: voice preview.",
+														bodyText:
+															"This is a notification voice preview, with a short pause after the lead-in.",
+													},
 										preview: true,
 									});
 								})

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { notificationIntelligenceSettingsSchema } from "../../../src/core/notification-intelligence-settings-contract";
-import { playNotificationSummarySpeech } from "./notification-summary-speech";
+import {
+	BROWSER_NOTIFICATION_SPEECH_LEAD_IN_TO_BODY_PAUSE_MILLISECONDS,
+	playNotificationSummarySpeech,
+} from "./notification-summary-speech";
 
 const observations = vi.hoisted(() => vi.fn(async () => undefined));
 const synthesis = vi.hoisted(() => vi.fn());
@@ -11,6 +14,7 @@ vi.mock("@/runtime/notification-intelligence-query", () => ({
 	}),
 }));
 afterEach(() => {
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
 	observations.mockClear();
@@ -66,5 +70,46 @@ describe("通知语音播放器", () => {
 				preview: true,
 			}),
 		).rejects.toThrow("没有所选语言");
+	});
+	it("有播报脚本时浏览器系统语音按「先导 → 停顿 → 正文」两段念", async () => {
+		vi.useFakeTimers();
+		const spokenUtterances: Array<{ text: string; spokenAt: number }> = [];
+		vi.stubGlobal(
+			"SpeechSynthesisUtterance",
+			class {
+				text: string;
+				onstart: (() => void) | null = null;
+				onend: (() => void) | null = null;
+				constructor(text: string) {
+					this.text = text;
+				}
+			},
+		);
+		vi.stubGlobal("speechSynthesis", {
+			getVoices: () => [{ lang: "zh-CN", voiceURI: "chinese", localService: true }],
+			cancel: vi.fn(),
+			speak: (utterance: { text: string; onstart: () => void; onend: () => void }) => {
+				spokenUtterances.push({ text: utterance.text, spokenAt: Date.now() });
+				queueMicrotask(() => {
+					utterance.onstart();
+					utterance.onend();
+				});
+			},
+		});
+		const playback = playNotificationSummarySpeech({
+			settings: notificationIntelligenceSettingsSchema.parse({ summaryLanguage: "zh-CN" }),
+			text: "整段摘要",
+			announcementScript: { leadInText: "项目 cline kanban，任务：修复通知语音。", bodyText: "已修复，可以查看。" },
+			preview: true,
+		});
+		await vi.advanceTimersByTimeAsync(BROWSER_NOTIFICATION_SPEECH_LEAD_IN_TO_BODY_PAUSE_MILLISECONDS);
+		await playback;
+		expect(spokenUtterances.map((utterance) => utterance.text)).toEqual([
+			"项目 cline kanban，任务：修复通知语音。",
+			"已修复，可以查看。",
+		]);
+		expect(spokenUtterances[1]!.spokenAt - spokenUtterances[0]!.spokenAt).toBeGreaterThanOrEqual(
+			BROWSER_NOTIFICATION_SPEECH_LEAD_IN_TO_BODY_PAUSE_MILLISECONDS,
+		);
 	});
 });

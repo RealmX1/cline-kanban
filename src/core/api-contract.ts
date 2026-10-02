@@ -4,8 +4,11 @@ import { z } from "zod";
 // （编译期擦除），故二者无运行时循环；本处取值 import 不会把任何 Node 依赖拖进浏览器 bundle。
 import { isKanbanCursorAgentModelId } from "./cursor-agent-models.js";
 import { webUiBoardMutationInitiatorAnnotationForTaskMutationEventCaptureSchema } from "./kanban-web-ui-page-load-request-origin-nonce.js";
+import { notificationSpeechAnnouncementScriptSchema } from "./notification-lifecycle-contract.js";
 import { projectLegacyState } from "./session-activity.js";
 import { resolveTaskTitle } from "./task-title.js";
+
+export type { NotificationSpeechAnnouncementScript } from "./notification-lifecycle-contract.js";
 
 export const runtimeWorkspaceFileStatusSchema = z.enum([
 	"modified",
@@ -1426,6 +1429,8 @@ export const runtimeStateStreamTaskReadyForReviewMessageSchema = z.object({
 	summaryText: z.string().optional(),
 	summaryLanguage: z.enum(["zh-CN", "en-US"]).optional(),
 	taskTitleSnapshot: z.string().optional(),
+	// 浏览器系统语音据此分两段念（先导 → 停顿 → 正文）；第三方 TTS 由服务端合成同一份脚本。
+	notificationSpeechAnnouncementScript: notificationSpeechAnnouncementScriptSchema.optional(),
 	type: z.literal("task_ready_for_review"),
 	workspaceId: z.string(),
 	taskId: z.string(),

@@ -147,6 +147,7 @@ describe("智能通知状态机", () => {
 				decision: "awaiting_background_work",
 				reason: "仍在等待 subagent",
 				summaryText: "正在等待子任务",
+				spokenSummaryText: "正在等待子任务。",
 			},
 		});
 		const publish = vi.fn(async () => undefined);
@@ -169,12 +170,56 @@ describe("智能通知状态机", () => {
 			await service.recover();
 			await service.recover();
 			expect(publish).toHaveBeenCalledTimes(1);
+			// 评估时写的「还在等」朗读版与兜底文案矛盾，兜底播报只念兜底文案。
 			expect(publish).toHaveBeenCalledWith(
 				expect.objectContaining({
 					summaryText: "尚未确认完成，可能需要查看。",
 					notificationPanelVisibility: "visible",
+					spokenSummaryTextForNotificationSpeech: null,
+					notificationSpeechAnnouncementScript: {
+						leadInText: "项目 test，任务：修复通知。",
+						bodyText: "尚未确认完成，可能需要查看。",
+					},
 				}),
 			);
+		} finally {
+			service.close();
+		}
+	});
+	it.each([
+		["带朗读版摘要", "通知语音模块已修复，需要你 review。", "通知语音模块已修复，需要你 review。"],
+		["弱模型漏给朗读版时回退面板摘要并规整", undefined, "已修复 notification speech synthesis。"],
+		["朗读版类型错误也不让评估失败", 42, "已修复 notification speech synthesis。"],
+	])("prompt v2：%s", async (_case, spokenSummaryText, expectedBodyText) => {
+		modelRequest.mockImplementation(async (_request, schema) => ({
+			status: "completed",
+			parsedJsonObject: schema.parse({
+				decision: "completed_turn_or_user_handoff",
+				reason: "完成",
+				summaryText: "已修复 `src/notifications/notification-speech-synthesis.ts`。",
+				spokenSummaryText,
+			}),
+		}));
+		const publish = vi.fn(async () => undefined);
+		const service = createNotificationAssessmentService({ publish, getSummary: () => undefined });
+		const candidateId = `prompt-v2-${String(spokenSummaryText)}`;
+		try {
+			await service.enqueue({ workspaceId: "assessment", taskId: "task", candidateId, userTurnKind: "review" });
+			expect(publish).toHaveBeenCalledWith(
+				expect.objectContaining({
+					summaryText: "已修复 `src/notifications/notification-speech-synthesis.ts`。",
+					notificationSpeechAnnouncementScript: {
+						leadInText: "项目 test，任务：修复通知。",
+						bodyText: expectedBodyText,
+					},
+				}),
+			);
+			const requested = (await getNotificationLifecycleArchive().get(candidateId))?.events.find(
+				(event) => event.eventType === "ai_assessment_requested",
+			)?.details as { promptVersion: number; systemPrompt: string };
+			expect(requested.promptVersion).toBe(2);
+			expect(requested.systemPrompt).toContain("spokenSummaryText");
+			expect(requested.systemPrompt).toContain("relative to the repository root");
 		} finally {
 			service.close();
 		}
