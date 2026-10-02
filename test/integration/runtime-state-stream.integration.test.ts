@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 
 import type {
@@ -32,8 +32,27 @@ import {
 	type IsolatedGitTestRepository,
 	type IsolatedGitTestWorkspaceFixture,
 } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import {
+	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
+	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
+	hasChildProcessExited,
+	sigkillChildProcessAndWaitForExit,
+	waitForChildProcessExit,
+	waitForRuntimeServerStartupBannerOrSigkillChild,
+} from "./runtime-integration-test-spawned-child-process-lifecycle";
 
 const requireFromHere = createRequire(import.meta.url);
+
+// 用例超时、断言失败、启动等待失败时 finally 里的 stop() 都可能来不及跑；afterEach 先于 fixture 的
+// onTestFinished cleanup 执行，保证「先杀 runtime、再删隔离 HOME」。
+const spawnedChildProcessRegistrySigkilledAfterEachTest = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
+
+// 本文件用例最多冷启动两次 runtime，原用例预算最高 45s。统一挂在 describe 上：给 it(...) 第三参传标识符
+// 会让 biome 放弃 test-call 排版、重缩进整个用例体。
+const RUNTIME_STATE_STREAM_TEST_TIMEOUT_MS = computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts({
+	runtimeColdStartCount: 2,
+	testBodyTimeoutBudgetMs: 45_000,
+});
 
 interface RuntimeStreamClient {
 	socket: WebSocket;
@@ -182,62 +201,6 @@ function resolveTsxLoaderImportSpecifier(): string {
 	return pathToFileURL(requireFromHere.resolve("tsx")).href;
 }
 
-async function waitForProcessStart(process: ChildProcess, timeoutMs = 10_000): Promise<{ runtimeUrl: string }> {
-	return await new Promise((resolveStart, rejectStart) => {
-		if (!process.stdout || !process.stderr) {
-			rejectStart(new Error("Expected child process stdout/stderr pipes to be available."));
-			return;
-		}
-		let settled = false;
-		let stdout = "";
-		let stderr = "";
-		const timeoutId = setTimeout(() => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			rejectStart(new Error(`Timed out waiting for server start.\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-		}, timeoutMs);
-		const handleOutput = (chunk: Buffer, source: "stdout" | "stderr") => {
-			const text = chunk.toString();
-			if (source === "stdout") {
-				stdout += text;
-			} else {
-				stderr += text;
-			}
-			const match = stdout.match(/Cline Kanban running at (http:\/\/127\.0\.0\.1:\d+(?:\/[^\s]*)?)/);
-			if (!match || settled) {
-				return;
-			}
-			const runtimeUrl = match[1];
-			if (!runtimeUrl) {
-				return;
-			}
-			settled = true;
-			clearTimeout(timeoutId);
-			resolveStart({ runtimeUrl });
-		};
-		process.stdout.on("data", (chunk: Buffer) => {
-			handleOutput(chunk, "stdout");
-		});
-		process.stderr.on("data", (chunk: Buffer) => {
-			handleOutput(chunk, "stderr");
-		});
-		process.once("exit", (code, signal) => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			clearTimeout(timeoutId);
-			rejectStart(
-				new Error(
-					`Server process exited before startup (code=${String(code)} signal=${String(signal)}).\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-				),
-			);
-		});
-	});
-}
-
 function getShutdownSignal(): NodeJS.Signals {
 	return process.platform === "win32" ? "SIGTERM" : "SIGINT";
 }
@@ -255,24 +218,6 @@ async function requestGracefulShutdown(childProcess: ChildProcess): Promise<void
 			}
 			resolveSend();
 		});
-	});
-}
-
-async function waitForExit(childProcess: ChildProcess, timeoutMs: number): Promise<boolean> {
-	if (childProcess.exitCode !== null) {
-		return true;
-	}
-
-	return await new Promise<boolean>((resolveExit) => {
-		const handleExit = () => {
-			clearTimeout(timeoutId);
-			resolveExit(true);
-		};
-		const timeoutId = setTimeout(() => {
-			childProcess.removeListener("exit", handleExit);
-			resolveExit(false);
-		}, timeoutMs);
-		childProcess.once("exit", handleExit);
 	});
 }
 
@@ -307,21 +252,21 @@ async function startKanbanServer(input: {
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		},
 	);
-	const { runtimeUrl } = await waitForProcessStart(child);
+	spawnedChildProcessRegistrySigkilledAfterEachTest.register(child);
+	const { runtimeUrl } = await waitForRuntimeServerStartupBannerOrSigkillChild(child);
 	return {
 		runtimeUrl,
 		stop: async () => {
-			if (child.exitCode !== null) {
+			if (hasChildProcessExited(child)) {
 				return;
 			}
 			await requestGracefulShutdown(child);
-			const didExitGracefully = await waitForExit(child, 5_000);
+			const didExitGracefully = await waitForChildProcessExit(child, 5_000);
 			if (didExitGracefully) {
 				return;
 			}
 
-			child.kill("SIGKILL");
-			const didExitAfterForce = await waitForExit(child, 5_000);
+			const didExitAfterForce = await sigkillChildProcessAndWaitForExit(child);
 			if (!didExitAfterForce) {
 				throw new Error("Timed out stopping kanban test server process.");
 			}
@@ -472,7 +417,12 @@ async function requestJson<T>(input: {
 	};
 }
 
-describe.sequential("runtime state stream integration", () => {
+// 文件级 afterEach：覆盖本文件所有 describe（含之后新增的）。
+afterEach(async () => {
+	await spawnedChildProcessRegistrySigkilledAfterEachTest.sigkillEveryStillRunningChildProcessAndWaitForExit();
+});
+
+describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE_STREAM_TEST_TIMEOUT_MS }, () => {
 	it("retains indexed project data and selection when the project path becomes unavailable", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const tempHome = integrationFixture.homeDirectoryPath;
@@ -584,7 +534,7 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 30_000);
+	});
 
 	it("treats core.bare=true as a retained unavailable project without deleting persisted state", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
@@ -665,7 +615,7 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 30_000);
+	});
 
 	it("starts outside a git repository with no active workspace", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
@@ -707,7 +657,7 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 30_000);
+	});
 
 	it("starts from the home directory with no active workspace", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
@@ -749,7 +699,7 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 30_000);
+	});
 
 	it("launches outside git using the first indexed project", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
@@ -824,7 +774,7 @@ describe.sequential("runtime state stream integration", () => {
 			await secondServer.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 45_000);
+	});
 
 	it("requires explicit confirmation before initializing git for a non-git added project", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
@@ -885,7 +835,7 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 45_000);
+	});
 
 	it("streams per-project snapshots and isolates workspace updates", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
@@ -999,7 +949,7 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 30_000);
+	});
 
 	it("emits task_ready_for_review when hook review event is ingested", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
@@ -1079,7 +1029,7 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 30_000);
+	});
 
 	it("streams centralized workspace metadata updates for task worktrees", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
@@ -1204,7 +1154,7 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 45_000);
+	});
 
 	it("preserves existing task worktree when base ref advances", async () => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
@@ -1314,7 +1264,7 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 45_000);
+	});
 
 	it.each([
 		{
@@ -1445,7 +1395,7 @@ describe.sequential("runtime state stream integration", () => {
 				await integrationFixture.cleanup();
 			}
 		},
-		45_000,
+		RUNTIME_STATE_STREAM_TEST_TIMEOUT_MS,
 	);
 
 	it("falls back to the remaining project after confirmed permanent deletion of the active project", async () => {
@@ -1571,5 +1521,5 @@ describe.sequential("runtime state stream integration", () => {
 			await server.stop();
 			await integrationFixture.cleanup();
 		}
-	}, 30_000);
+	});
 });

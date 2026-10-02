@@ -5,15 +5,34 @@ import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
 	type IsolatedGitTestWorkspaceFixture,
 } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import {
+	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
+	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
+	hasChildProcessExited,
+	sigkillChildProcessAndWaitForExit,
+	waitForChildProcessExit,
+	waitForRuntimeServerStartupBannerOrSigkillChild,
+} from "./runtime-integration-test-spawned-child-process-lifecycle";
 
 const requireFromHere = createRequire(import.meta.url);
+
+// runtime 与 CLI 子进程都登记：用例超时或断言失败时 finally 来不及收尾，afterEach 先于 fixture 的
+// onTestFinished cleanup 执行，保证「先杀子进程、再删隔离 HOME」。
+const spawnedChildProcessRegistrySigkilledAfterEachTest = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
+
+// 「CLI subprocess exit guarantees」里经 bootstrapWorkspaceOnDisk 冷启动一次 runtime、原预算 30s 的用例走这个
+// describe 级默认值。给 it(...) 传更长的超时表达式会让 biome 重排整个用例体，所以挂在 describe 上。
+const ONE_RUNTIME_COLD_START_TEST_TIMEOUT_MS = computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts({
+	runtimeColdStartCount: 1,
+	testBodyTimeoutBudgetMs: 30_000,
+});
 
 function resolveShutdownIpcHookPath(): string {
 	return resolve(process.cwd(), "test/integration/shutdown-ipc-hook.cjs");
@@ -79,57 +98,6 @@ async function getAvailablePort(): Promise<number> {
 	return port;
 }
 
-async function waitForServerStart(process: ChildProcess, timeoutMs = 10_000): Promise<void> {
-	await new Promise<void>((resolveStart, rejectStart) => {
-		if (!process.stdout || !process.stderr) {
-			rejectStart(new Error("Expected child process stdout/stderr pipes to be available."));
-			return;
-		}
-		let settled = false;
-		let stdout = "";
-		let stderr = "";
-		const timeoutId = setTimeout(() => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			rejectStart(new Error(`Timed out waiting for server start.\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-		}, timeoutMs);
-		const handleOutput = (chunk: Buffer, source: "stdout" | "stderr") => {
-			const text = chunk.toString();
-			if (source === "stdout") {
-				stdout += text;
-			} else {
-				stderr += text;
-			}
-			if (!stdout.includes("Cline Kanban running at ") || settled) {
-				return;
-			}
-			settled = true;
-			clearTimeout(timeoutId);
-			resolveStart();
-		};
-		process.stdout.on("data", (chunk: Buffer) => {
-			handleOutput(chunk, "stdout");
-		});
-		process.stderr.on("data", (chunk: Buffer) => {
-			handleOutput(chunk, "stderr");
-		});
-		process.once("exit", (code, signal) => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			clearTimeout(timeoutId);
-			rejectStart(
-				new Error(
-					`Server process exited before startup (code=${String(code)} signal=${String(signal)}).\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-				),
-			);
-		});
-	});
-}
-
 function installBrowserOpenStub(binDir: string, logPath: string): void {
 	mkdirSync(binDir, { recursive: true });
 	const script = `#!/usr/bin/env sh
@@ -168,24 +136,6 @@ async function waitForBrowserOpenCount(logPath: string, expectedCount: number, t
 	);
 }
 
-async function waitForExit(process: ChildProcess, timeoutMs: number): Promise<boolean> {
-	if (process.exitCode !== null) {
-		return true;
-	}
-
-	return await new Promise<boolean>((resolveExit) => {
-		const handleExit = () => {
-			clearTimeout(timeoutId);
-			resolveExit(true);
-		};
-		const timeoutId = setTimeout(() => {
-			process.removeListener("exit", handleExit);
-			resolveExit(false);
-		}, timeoutMs);
-		process.once("exit", handleExit);
-	});
-}
-
 async function requestGracefulShutdown(process: ChildProcess): Promise<void> {
 	if (typeof process.send !== "function" || !process.connected) {
 		process.kill("SIGINT");
@@ -204,11 +154,16 @@ function spawnSourceCli(
 	options: { cwd: string; env: NodeJS.ProcessEnv; stdio?: ChildProcess["stdio"] },
 ) {
 	const cliEntrypoint = resolve(process.cwd(), "src/cli.ts");
-	return spawn(process.execPath, ["--import", resolveTsxLoaderImportSpecifier(), cliEntrypoint, ...args], {
-		cwd: options.cwd,
-		env: options.env,
-		stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
-	});
+	const cliChildProcess = spawn(
+		process.execPath,
+		["--import", resolveTsxLoaderImportSpecifier(), cliEntrypoint, ...args],
+		{
+			cwd: options.cwd,
+			env: options.env,
+			stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
+		},
+	);
+	return spawnedChildProcessRegistrySigkilledAfterEachTest.register(cliChildProcess);
 }
 
 interface RunCliCommandAndCollectOutputOptions {
@@ -242,9 +197,9 @@ async function runCliCommandAndCollectOutput(
 		stderr += chunk.toString();
 	});
 
-	const didExit = await waitForExit(process, options.timeoutMs ?? 8_000);
+	const didExit = await waitForChildProcessExit(process, options.timeoutMs ?? 8_000);
 	if (!didExit) {
-		process.kill("SIGKILL");
+		await sigkillChildProcessAndWaitForExit(process);
 	}
 
 	return {
@@ -348,7 +303,7 @@ async function waitForExitWhileTrackingRss(options: {
 				}
 			}
 		}
-		if (options.process.exitCode !== null) {
+		if (hasChildProcessExited(options.process)) {
 			return { didExit: true, baselineRssKb: baselineRssKb ?? maxRssKb, maxRssKb };
 		}
 		await new Promise<void>((resolve) => {
@@ -356,7 +311,7 @@ async function waitForExitWhileTrackingRss(options: {
 		});
 	}
 
-	options.process.kill("SIGKILL");
+	await sigkillChildProcessAndWaitForExit(options.process);
 	return { didExit: false, baselineRssKb: baselineRssKb ?? maxRssKb, maxRssKb };
 }
 
@@ -384,18 +339,26 @@ async function startRuntimeServerForProject(options: {
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		},
 	);
-	await waitForServerStart(serverProcess);
+	spawnedChildProcessRegistrySigkilledAfterEachTest.register(serverProcess);
+	await waitForRuntimeServerStartupBannerOrSigkillChild(serverProcess);
 	return serverProcess;
 }
 
 async function stopRuntimeServer(serverProcess: ChildProcess): Promise<void> {
+	if (hasChildProcessExited(serverProcess)) {
+		return;
+	}
 	await requestGracefulShutdown(serverProcess);
-	const stopped = await waitForExit(serverProcess, 5_000);
+	const stopped = await waitForChildProcessExit(serverProcess, 5_000);
 	if (!stopped) {
-		serverProcess.kill("SIGKILL");
-		await waitForExit(serverProcess, 5_000);
+		await sigkillChildProcessAndWaitForExit(serverProcess);
 	}
 }
+
+// 文件级 afterEach：覆盖本文件所有 describe（含之后新增的）。
+afterEach(async () => {
+	await spawnedChildProcessRegistrySigkilledAfterEachTest.sigkillEveryStillRunningChildProcessAndWaitForExit();
+});
 
 describe("source task commands", () => {
 	it("exits after creating a task when the runtime server is already running", { timeout: 60_000 }, async () => {
@@ -442,7 +405,7 @@ describe("source task commands", () => {
 					stderr += chunk.toString();
 				});
 
-				const didExit = await waitForExit(commandProcess, 20_000);
+				const didExit = await waitForChildProcessExit(commandProcess, 20_000);
 				if (!didExit) {
 					commandProcess.kill("SIGKILL");
 				}
@@ -810,7 +773,7 @@ describe("source task commands", () => {
 	});
 });
 
-describe("CLI subprocess exit guarantees", () => {
+describe("CLI subprocess exit guarantees", { timeout: ONE_RUNTIME_COLD_START_TEST_TIMEOUT_MS }, () => {
 	it("exits after task list without --column on a multi-task workspace", { timeout: 120_000 }, async () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-cli-list-all");
@@ -970,7 +933,7 @@ describe("CLI subprocess exit guarantees", () => {
 
 	it(
 		"exits with code 1 (not 124) when tRPC times out under production-like timeout margin",
-		{ timeout: 30_000 },
+		{ timeout: ONE_RUNTIME_COLD_START_TEST_TIMEOUT_MS },
 		async () => {
 			const integrationFixture = createTaskCommandExitIntegrationFixture();
 			const repository = integrationFixture.createRepository("project-cli-trpc-margin");
@@ -1015,7 +978,7 @@ describe("CLI subprocess exit guarantees", () => {
 		},
 	);
 
-	it("enforces the CLI hard timeout with exit code 124", { timeout: 30_000 }, async () => {
+	it("enforces the CLI hard timeout with exit code 124", async () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-cli-hard-timeout");
 		const projectPath = repository.repositoryPath;
@@ -1058,7 +1021,7 @@ describe("CLI subprocess exit guarantees", () => {
 		}
 	});
 
-	it("does not grow RSS while waiting for a hanging runtime response", { timeout: 30_000 }, async () => {
+	it("does not grow RSS while waiting for a hanging runtime response", async () => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-cli-rss");
 		const projectPath = repository.repositoryPath;
