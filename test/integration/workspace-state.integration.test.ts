@@ -26,6 +26,7 @@ import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
 } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
 function createBoard(title: string): RuntimeBoardData {
 	return {
@@ -49,7 +50,6 @@ function createBoard(title: string): RuntimeBoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -165,7 +165,7 @@ describe.sequential("workspace-state integration", () => {
 			const initial = await loadWorkspaceState(workspacePath);
 			expect(initial.revision).toBe(0);
 
-			const firstSave = await saveWorkspaceState(workspacePath, {
+			const firstSave = await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoard("Task One"),
 				sessions: {},
 				expectedRevision: initial.revision,
@@ -173,7 +173,7 @@ describe.sequential("workspace-state integration", () => {
 			expect(firstSave.revision).toBe(1);
 			expect(firstSave.board.columns[0]?.cards[0]?.prompt).toBe("Task One");
 
-			const secondSave = await saveWorkspaceState(workspacePath, {
+			const secondSave = await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoard("Task Two"),
 				sessions: {},
 				expectedRevision: firstSave.revision,
@@ -182,7 +182,7 @@ describe.sequential("workspace-state integration", () => {
 			expect(secondSave.board.columns[0]?.cards[0]?.prompt).toBe("Task Two");
 
 			await expect(
-				saveWorkspaceState(workspacePath, {
+				saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 					board: createBoard("Stale Task"),
 					sessions: {},
 					expectedRevision: firstSave.revision,
@@ -212,7 +212,7 @@ describe.sequential("workspace-state integration", () => {
 				updatedAt: startedAt,
 			});
 
-			const saved = await saveWorkspaceState(workspacePath, {
+			const saved = await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoard("Started task"),
 				sessions: { "task-1": startedSession },
 				expectedRevision: initial.revision,
@@ -221,11 +221,15 @@ describe.sequential("workspace-state integration", () => {
 			expect(saved.board.columns.find((column) => column.id === "backlog")?.cards).toEqual([]);
 			expect(saved.board.columns.find((column) => column.id === "in_progress")?.cards[0]?.id).toBe("task-1");
 
-			const savedFromStaleWholeBoardSnapshot = await saveWorkspaceState(workspacePath, {
-				board: createBoard("Stale task snapshot"),
-				sessions: {},
-				expectedRevision: saved.revision,
-			});
+			const savedFromStaleWholeBoardSnapshot = await saveWorkspaceState(
+				workspacePath,
+				TASK_MUTATION_INTENT_FOR_TEST_FIXTURE,
+				{
+					board: createBoard("Stale task snapshot"),
+					sessions: {},
+					expectedRevision: saved.revision,
+				},
+			);
 			expect(
 				savedFromStaleWholeBoardSnapshot.board.columns.find((column) => column.id === "backlog")?.cards,
 			).toEqual([]);
@@ -248,13 +252,13 @@ describe.sequential("workspace-state integration", () => {
 					agentId: "claude",
 					startedAt: Date.now(),
 				});
-				const saved = await saveWorkspaceState(workspacePath, {
+				const saved = await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 					board: createBoardWithTaskInColumn("Started task", columnId),
 					sessions: { "task-1": startedSession },
 					expectedRevision: initial.revision,
 				});
 
-				const staleSave = await saveWorkspaceState(workspacePath, {
+				const staleSave = await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 					board: createBoard("Stale task snapshot"),
 					sessions: {},
 					expectedRevision: saved.revision,
@@ -276,13 +280,13 @@ describe.sequential("workspace-state integration", () => {
 				agentId: "kimi",
 				startedAt: Date.now(),
 			});
-			await saveWorkspaceState(workspacePath, {
+			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoardWithTaskInColumn("Started task", "in_progress"),
 				sessions: { "task-1": startedSession },
 				expectedRevision: initial.revision,
 			});
 
-			const mutation = await mutateWorkspaceState(workspacePath, () => ({
+			const mutation = await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, () => ({
 				board: createBoard("Regressed task"),
 				sessions: {},
 				value: null,
@@ -417,6 +421,36 @@ describe.sequential("workspace-state integration", () => {
 		});
 	});
 
+	// dd2db 1a：任务连线 / 完成后自动启动机制已整体退役。旧盘 board.json 仍可能带 `dependencies` 键，
+	// 读入时必须被静默剥离而不是让整块看板读失败。
+	it("reads a legacy board.json that still carries the retired dependencies key", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const workspacePath = createRepository(["project-legacy-board-with-retired-dependencies"]).repositoryPath;
+
+			const context = await loadWorkspaceContext(workspacePath);
+			mkdirSync(context.statePath, { recursive: true });
+			const legacyBoard = createBoard("Legacy task");
+			writeFileSync(
+				join(context.statePath, "board.json"),
+				JSON.stringify(
+					{
+						...legacyBoard,
+						dependencies: [{ id: "dep01", fromTaskId: "task-1", toTaskId: "task-2", createdAt: Date.now() }],
+					},
+					null,
+					2,
+				),
+				"utf8",
+			);
+
+			const state = await loadWorkspaceState(workspacePath);
+			expect(state.board).not.toHaveProperty("dependencies");
+			expect(state.board.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id)).toEqual([
+				"task-1",
+			]);
+		});
+	});
+
 	it("fails loudly when persisted sessions include unknown states", async () => {
 		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
 			const workspacePath = createRepository(["project-bad-sessions"]).repositoryPath;
@@ -534,13 +568,13 @@ describe.sequential("workspace-state integration", () => {
 				startedAt: 1_000,
 				updatedAt: 1_000,
 			};
-			const afterFirstSave = await saveWorkspaceState(workspacePath, {
+			const afterFirstSave = await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoardWithTaskInColumn("Task One", "in_progress"),
 				sessions: { "task-1": startedSession },
 				expectedRevision: initial.revision,
 			});
 
-			await saveWorkspaceState(workspacePath, {
+			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoardWithTaskInColumn("Task One", "in_progress"),
 				// 空壳的 updatedAt 更新，但它表达的是「刚被凭空造出来」，不是「掌握了更新的事实」。
 				sessions: { "task-1": { ...createSessionSummary("task-1"), updatedAt: 9_000 } },
@@ -566,13 +600,13 @@ describe.sequential("workspace-state integration", () => {
 				startedAt: 1_000,
 				updatedAt: 1_000,
 			};
-			await saveWorkspaceState(workspacePath, {
+			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoardWithTaskInColumn("Task One", "in_progress"),
 				sessions: { "task-1": startedSession },
 				expectedRevision: initial.revision,
 			});
 
-			await mutateWorkspaceState(workspacePath, (state) => ({
+			await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
 				board: state.board,
 				sessions: { "task-1": { ...createSessionSummary("task-1"), updatedAt: 9_000 } },
 				value: null,
@@ -588,13 +622,13 @@ describe.sequential("workspace-state integration", () => {
 		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
 			const workspacePath = createRepository(["project-a"]).repositoryPath;
 			const initial = await loadWorkspaceState(workspacePath);
-			const afterFirstSave = await saveWorkspaceState(workspacePath, {
+			const afterFirstSave = await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoardWithTaskInColumn("Task One", "in_progress"),
 				sessions: { "task-1": { ...createSessionSummary("task-1"), updatedAt: 1_000 } },
 				expectedRevision: initial.revision,
 			});
 
-			await saveWorkspaceState(workspacePath, {
+			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: createBoardWithTaskInColumn("Task One", "in_progress"),
 				sessions: { "task-1": { ...createSessionSummary("task-1"), updatedAt: 9_000 } },
 				expectedRevision: afterFirstSave.revision,
@@ -657,7 +691,10 @@ describe.sequential("原生会话身份的独立持久化", () => {
 		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
 			const repo = createRepository(["native-identity-restart"]);
 			const context = await loadWorkspaceContext(repo.repositoryPath);
-			await saveWorkspaceState(repo.repositoryPath, { board: createBoard("identity"), sessions: {} });
+			await saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+				board: createBoard("identity"),
+				sessions: {},
+			});
 			const before = await loadPersistedWorkspaceStateById(context.workspaceId);
 			const manager = new TerminalSessionManager();
 			const restored = new TerminalSessionManager();
@@ -757,7 +794,10 @@ describe.sequential("原生会话身份的独立持久化", () => {
 		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
 			const repo = createRepository(["native-identity-failure"]);
 			const context = await loadWorkspaceContext(repo.repositoryPath);
-			await saveWorkspaceState(repo.repositoryPath, { board: createBoard("identity"), sessions: {} });
+			await saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+				board: createBoard("identity"),
+				sessions: {},
+			});
 			const before = await loadPersistedWorkspaceStateById(context.workspaceId);
 			const summary = createNativeSummary(sessionKeys[1], nativeSessionIds[1]);
 			const originalWrite = lockedFileSystem.writeJsonFileAtomic.bind(lockedFileSystem);
@@ -794,7 +834,7 @@ describe.sequential("原生会话身份的独立持久化", () => {
 					.agentNativeConversationSessionIdentity,
 			).toEqual(summary.agentNativeConversationSessionIdentity);
 			await expect(
-				saveWorkspaceState(repo.repositoryPath, {
+				saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 					board: before.board,
 					sessions: before.sessions,
 					expectedRevision: before.revision,
@@ -807,7 +847,10 @@ describe.sequential("原生会话身份的独立持久化", () => {
 		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
 			const repo = createRepository(["native-identity-concurrent"]);
 			const context = await loadWorkspaceContext(repo.repositoryPath);
-			await saveWorkspaceState(repo.repositoryPath, { board: createBoard("before"), sessions: {} });
+			await saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+				board: createBoard("before"),
+				sessions: {},
+			});
 			let summary = createNativeSummary(sessionKeys[1], nativeSessionIds[0]);
 			let queuedPersistence: Promise<boolean> = Promise.resolve(false);
 			await lockedFileSystem.withLock(
@@ -831,7 +874,7 @@ describe.sequential("原生会话身份的独立持久化", () => {
 				persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(context.workspaceId, sessionKeys[2], () =>
 					createNativeSummary(sessionKeys[2], nativeSessionIds[2]),
 				),
-				mutateWorkspaceState(repo.repositoryPath, (state) => ({
+				mutateWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
 					board: {
 						...state.board,
 						columns: state.board.columns.map((column) => ({
@@ -940,7 +983,7 @@ it("原生身份在无浏览器保存时落盘，重复观察幂等且不推进�
 		expect(afterDelayedObservation?.agentNativeConversationSessionIdentity).toEqual(confirmedIdentity);
 
 		const currentState = await loadWorkspaceState(cwd);
-		await saveWorkspaceState(cwd, {
+		await saveWorkspaceState(cwd, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 			board: currentState.board,
 			sessions: { "task-1": { ...summary, agentNativeConversationSessionIdentity: identity } },
 			expectedRevision: currentState.revision,
@@ -948,7 +991,7 @@ it("原生身份在无浏览器保存时落盘，重复观察幂等且不推进�
 		expect(
 			(await loadWorkspaceState(cwd)).sessions["task-1"].agentNativeConversationSessionIdentity?.nativeSessionId,
 		).toBe("native-B");
-		await mutateWorkspaceState(cwd, (state) => ({
+		await mutateWorkspaceState(cwd, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
 			board: state.board,
 			sessions: { "task-1": { ...summary, agentNativeConversationSessionIdentity: undefined } },
 			value: null,

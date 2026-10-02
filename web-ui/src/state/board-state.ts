@@ -20,7 +20,6 @@ import {
 	type BoardColumn,
 	type BoardColumnId,
 	type BoardData,
-	type BoardDependency,
 	type CardSelection,
 	DEFAULT_TASK_AUTO_REVIEW_MODE,
 	resolveTaskAutoReviewMode,
@@ -410,69 +409,12 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 	};
 }
 
-function createDependencyId(): string {
-	return createBrowserUuid().replaceAll("-", "").slice(0, 8);
-}
-
-function collectTaskIds(columns: BoardColumn[]): Set<string> {
-	const taskIds = new Set<string>();
-	for (const column of columns) {
-		for (const card of column.cards) {
-			taskIds.add(card.id);
-		}
-	}
-	return taskIds;
-}
-
-function normalizeDependency(rawDependency: unknown, taskIds: Set<string>): BoardDependency | null {
-	if (!rawDependency || typeof rawDependency !== "object") {
-		return null;
-	}
-
-	const dependency = rawDependency as {
-		id?: unknown;
-		fromTaskId?: unknown;
-		toTaskId?: unknown;
-		createdAt?: unknown;
-	};
-	const fromTaskId = typeof dependency.fromTaskId === "string" ? dependency.fromTaskId.trim() : "";
-	const toTaskId = typeof dependency.toTaskId === "string" ? dependency.toTaskId.trim() : "";
-	if (!fromTaskId || !toTaskId || fromTaskId === toTaskId) {
-		return null;
-	}
-	if (!taskIds.has(fromTaskId) || !taskIds.has(toTaskId)) {
-		return null;
-	}
-
-	return {
-		id: typeof dependency.id === "string" && dependency.id ? dependency.id : createDependencyId(),
-		fromTaskId,
-		toTaskId,
-		createdAt: typeof dependency.createdAt === "number" ? dependency.createdAt : Date.now(),
-	};
-}
-function removeDependenciesByTaskIds(board: BoardData, taskIds: Set<string>): BoardData {
-	if (taskIds.size === 0 || board.dependencies.length === 0) {
-		return board;
-	}
-	const dependencies = board.dependencies.filter(
-		(dependency) => !taskIds.has(dependency.fromTaskId) && !taskIds.has(dependency.toTaskId),
-	);
-	if (dependencies.length === board.dependencies.length) {
-		return board;
-	}
-	return {
-		...board,
-		dependencies,
-	};
-}
 export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 	if (!rawBoard || typeof rawBoard !== "object") {
 		return null;
 	}
 
 	const candidateColumns = (rawBoard as { columns?: unknown }).columns;
-	const candidateDependencies = (rawBoard as { dependencies?: unknown }).dependencies;
 	if (!Array.isArray(candidateColumns)) {
 		return null;
 	}
@@ -506,48 +448,51 @@ export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 		}
 	}
 
-	const taskIds = collectTaskIds(normalizedColumns);
-	const normalizedDependencies: BoardDependency[] = [];
-	if (Array.isArray(candidateDependencies)) {
-		for (const rawDependency of candidateDependencies) {
-			const dependency = normalizeDependency(rawDependency, taskIds);
-			if (!dependency) {
-				continue;
-			}
-			normalizedDependencies.push(dependency);
-		}
-	}
-
 	// 老看板（本字段出现前的手动顺序）在首次水合时即按 Description 最后更新时间排好。
-	return runtimeTaskState.sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending(
-		runtimeTaskState.updateTaskDependencies({
-			columns: normalizedColumns,
-			dependencies: normalizedDependencies,
-		}),
-	);
+	// 旧盘里已退役的 `dependencies` 键（任务连线 / 完成后自动启动）在这里不再读取，水合结果里随之消失。
+	return runtimeTaskState.sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending({
+		columns: normalizedColumns,
+	});
 }
 
-export function addTaskToColumn(board: BoardData, columnId: BoardColumnId, draft: TaskDraft): BoardData {
+export function addTaskToColumn(
+	board: BoardData,
+	columnId: BoardColumnId,
+	draft: TaskDraft,
+	runtimeAllocatedTaskId: string,
+): BoardData {
 	const prompt = draft.prompt.trim();
 	if (!prompt) {
 		return board;
 	}
-	return addTaskToColumnWithResult(board, columnId, draft).board;
+	return addTaskToColumnWithResult(board, columnId, draft, runtimeAllocatedTaskId).board;
+}
+
+// dd2db Y-EVENT-12：新卡 id 只能由 runtime 分配（见 runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards）。
+// 本地随机 id 会在保存时被 runtime 的全局 task id 登记簿拒绝或绕开登记簿，所以这里不再提供本地生成的退路。
+function refuseLocallyGeneratedTaskIdForNewTaskCard(): string {
+	throw new Error("New task card ids must be allocated by the Kanban runtime; refusing to generate one locally.");
 }
 
 export function addTaskToColumnWithResult(
 	board: BoardData,
 	columnId: BoardColumnId,
 	draft: TaskDraft,
+	runtimeAllocatedTaskId: string,
 ): { board: BoardData; task: BoardCard } {
 	const prompt = draft.prompt.trim();
 	if (!prompt) {
 		throw new Error("Task prompt is required.");
 	}
+	const trimmedRuntimeAllocatedTaskId = runtimeAllocatedTaskId.trim();
+	if (!trimmedRuntimeAllocatedTaskId) {
+		throw new Error("A runtime-allocated task id is required to create a task card.");
+	}
 	const result = runtimeTaskState.addTaskToColumn(
 		board,
 		columnId,
 		{
+			taskId: trimmedRuntimeAllocatedTaskId,
 			title: draft.title,
 			prompt,
 			startInPlanMode: draft.startInPlanMode,
@@ -566,42 +511,12 @@ export function addTaskToColumnWithResult(
 			baseRef: draft.baseRef,
 			worktreeMode: draft.worktreeMode,
 		},
-		createBrowserUuid,
+		refuseLocallyGeneratedTaskIdForNewTaskCard,
 	);
 	return {
 		board: result.board,
 		task: result.task,
 	};
-}
-
-export interface AddTaskDependencyResult {
-	board: BoardData;
-	added: boolean;
-	reason?: NonNullable<runtimeTaskState.RuntimeAddTaskDependencyResult["reason"]>;
-	dependency?: BoardDependency;
-}
-
-export function addTaskDependency(board: BoardData, fromTaskId: string, toTaskId: string): AddTaskDependencyResult {
-	return runtimeTaskState.addTaskDependency(board, fromTaskId, toTaskId);
-}
-
-export function canCreateTaskDependency(board: BoardData, fromTaskId: string, toTaskId: string): boolean {
-	return runtimeTaskState.canAddTaskDependency(board, fromTaskId, toTaskId);
-}
-
-export function removeTaskDependency(board: BoardData, dependencyId: string): { board: BoardData; removed: boolean } {
-	return runtimeTaskState.removeTaskDependency(board, dependencyId);
-}
-
-export function getReadyLinkedTaskIdsForTaskInTrash(board: BoardData, taskId: string): string[] {
-	return runtimeTaskState.getReadyLinkedTaskIdsForTaskInTrash(board, taskId);
-}
-
-export function trashTaskAndGetReadyLinkedTaskIds(
-	board: BoardData,
-	taskId: string,
-): { board: BoardData; moved: boolean; readyTaskIds: string[] } {
-	return runtimeTaskState.trashTaskAndGetReadyLinkedTaskIds(board, taskId);
 }
 
 export function applyDragResult(
@@ -676,7 +591,7 @@ export function applyDragResult(
 	};
 
 	return {
-		board: runtimeTaskState.updateTaskDependencies(withUpdatedColumns(board, columns)),
+		board: withUpdatedColumns(board, columns),
 		moveEvent: {
 			taskId: movedCard.id,
 			fromColumnId: sourceColumn.id,
@@ -976,9 +891,8 @@ export function removeTask(board: BoardData, taskId: string): { board: BoardData
 	if (!removed) {
 		return { board, removed: false };
 	}
-	const boardWithUpdatedColumns = withUpdatedColumns(board, columns);
 	return {
-		board: removeDependenciesByTaskIds(boardWithUpdatedColumns, new Set([taskId])),
+		board: withUpdatedColumns(board, columns),
 		removed: true,
 	};
 }
@@ -994,10 +908,8 @@ export function clearColumnTasks(
 
 	const clearedTaskIds = targetColumn.cards.map((card) => card.id);
 	const columns = board.columns.map((column) => (column.id === columnId ? { ...column, cards: [] } : column));
-	const boardWithUpdatedColumns = withUpdatedColumns(board, columns);
-
 	return {
-		board: removeDependenciesByTaskIds(boardWithUpdatedColumns, new Set(clearedTaskIds)),
+		board: withUpdatedColumns(board, columns),
 		clearedTaskIds,
 	};
 }

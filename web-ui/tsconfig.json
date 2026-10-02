@@ -18,6 +18,9 @@
       "@runtime-cline-tool-call-display": ["../src/cline-sdk/cline-tool-call-display.ts"],
       "@runtime-contract": ["../src/core/api-contract.ts"],
       "@runtime-home-agent-session": ["../src/core/home-agent-session.ts"],
+      "@runtime-kanban-web-ui-page-load-request-origin-nonce": [
+        "../src/core/kanban-web-ui-page-load-request-origin-nonce.ts"
+      ],
       "@runtime-last-conversation-progress-observation": ["../src/core/last-conversation-progress-observation.ts"],
       "@runtime-notification-intelligence-purpose-binding-problems": [
         "../src/core/notification-intelligence-purpose-binding-problems.ts"

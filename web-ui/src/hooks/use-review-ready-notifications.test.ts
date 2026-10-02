@@ -141,7 +141,6 @@ describe("OS 通知正文保留来源身份", () => {
 								],
 							},
 						],
-						dependencies: [],
 					},
 					isDocumentVisible: false,
 					latestTaskReadyForReview: {

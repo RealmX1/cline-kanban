@@ -58,16 +58,6 @@ export const TASK_START_ONBOARDING_SLIDES: OnboardingSlide[] = [
 	},
 	{
 		kind: "media",
-		title: "Auto commit and link",
-		description:
-			"Create dependency chains of linked tasks that start one another automatically. Agents can auto commit their work as they finish, so you can orchestrate tasks in order and watch the board burn them down automatically.",
-		assetVideoUrl: "https://github.com/user-attachments/assets/9a979242-bd22-4ac1-94c5-3ed5351a99d1",
-		assetAlt: "Linking task cards in Cline Kanban",
-		assetWidthPx: 1156,
-		assetHeightPx: 720,
-	},
-	{
-		kind: "media",
 		title: "Review changes with comments",
 		description:
 			"Your workflow will feel like writing tickets, reviewing code, and shipping. Watch the agent work next to real-time diffs, then click lines to leave comments like you're reviewing a PR.",

@@ -8,6 +8,7 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../../../src/core/api-contract";
 import { addTaskToColumn } from "../../../src/core/task-board-mutations";
+import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 const workspaceTaskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
@@ -131,7 +132,6 @@ function createBoard(): RuntimeBoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -213,17 +213,31 @@ describe("createWorkspaceApi saveState", () => {
 		});
 		const payload = { board: createBoard(), sessions: {}, expectedRevision: 1 };
 
-		const response = await api.saveState({ workspaceId: "workspace-1", workspacePath: "/tmp/repo" }, payload);
+		const response = await api.saveState(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			payload,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 
 		expect(response).toBe(expectedResponse);
-		expect(workspaceStateMocks.saveWorkspaceState).toHaveBeenCalledWith("/tmp/repo", {
-			...payload,
-			sessions: {
-				"terminal-task": terminalSummary,
-				"cline-task": clineSummary,
-				"acp-task": acpSummary,
+		// Web UI 请求目前没有页面加载 nonce：行动者解析为 direct_runtime_trpc_caller（1a.3 接 nonce 前的预期）。
+		expect(workspaceStateMocks.saveWorkspaceState).toHaveBeenCalledWith(
+			"/tmp/repo",
+			expect.objectContaining({
+				taskMutationIntentKind: "web_ui_workspace_board_state_save",
+				resolvedKanbanActor: {
+					kanbanActorKind: "direct_runtime_trpc_caller_without_cli_actor_header_or_web_ui_page_load_nonce",
+				},
+			}),
+			{
+				...payload,
+				sessions: {
+					"terminal-task": terminalSummary,
+					"cline-task": clineSummary,
+					"acp-task": acpSummary,
+				},
 			},
-		});
+		);
 	});
 
 	// 浏览器删卡不走任何「删除 procedure」，就是一次整份 board PUT。「任务被删除」在这条路径上只能
@@ -240,6 +254,7 @@ describe("createWorkspaceApi saveState", () => {
 		await api.saveState(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard).toHaveBeenCalledWith(
@@ -259,6 +274,7 @@ describe("createWorkspaceApi saveState", () => {
 		await api.saveState(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard).not.toHaveBeenCalled();
@@ -278,6 +294,7 @@ describe("createWorkspaceApi saveState", () => {
 			api.saveState(
 				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 				{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 			),
 		).resolves.toBe(savedResponse);
 	});
@@ -302,6 +319,7 @@ describe("createWorkspaceApi saveState", () => {
 		await api.saveState(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(turnCheckpointMocks.deleteAllTaskTurnCheckpointRefs).toHaveBeenCalledTimes(1);
@@ -329,6 +347,7 @@ describe("createWorkspaceApi saveState", () => {
 			api.saveState(
 				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 				{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 			),
 		).resolves.toBe(savedResponse);
 	});
@@ -648,7 +667,7 @@ describe("createWorkspaceApi addBacklogTask", () => {
 
 	it("uses the runtime default when creating backlog tasks through the scoped API", async () => {
 		const savedBoardRef: { current: RuntimeBoardData | null } = { current: null };
-		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_cwd, mutate) => {
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_cwd, _taskMutationIntent, mutate) => {
 			const currentState = createWorkspaceState();
 			const mutation = mutate(currentState);
 			savedBoardRef.current = mutation.board;
@@ -681,6 +700,7 @@ describe("createWorkspaceApi addBacklogTask", () => {
 			{
 				prompt: "Create from API",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		if (!savedBoardRef.current) {
@@ -690,5 +710,15 @@ describe("createWorkspaceApi addBacklogTask", () => {
 		expect(backlogColumn?.cards[0]?.startInPlanMode).toBe(false);
 		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledWith("workspace-1", "/tmp/repo");
 		expect(broadcastRuntimeProjectsUpdated).toHaveBeenCalledWith("workspace-1");
+		expect(workspaceStateMocks.mutateWorkspaceState).toHaveBeenCalledWith(
+			"/tmp/repo",
+			expect.objectContaining({
+				taskMutationIntentKind: "runtime_trpc_add_backlog_task",
+				resolvedKanbanActor: {
+					kanbanActorKind: "direct_runtime_trpc_caller_without_cli_actor_header_or_web_ui_page_load_nonce",
+				},
+			}),
+			expect.any(Function),
+		);
 	});
 });

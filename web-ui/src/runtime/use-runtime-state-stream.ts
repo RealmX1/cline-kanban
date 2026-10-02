@@ -1,6 +1,7 @@
 import { isNeverStartedPlaceholderTaskSessionSummary } from "@runtime-session-activity";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
+import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
 import type {
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeExploratoryFindingEntry,
@@ -555,6 +556,9 @@ export function useRuntimeStateStream(
 				return;
 			}
 			socket.onopen = () => {
+				// dd2db Y-EVENT-9：每次连上 / 重连都向 runtime 重新签发页面加载 nonce（runtime 重启后旧 nonce 全部失效）。
+				// 签发失败不打断推流；之后带旧 nonce 被拒的请求会由 trpc-client 的重试 link 再重取一次。
+				void reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime().catch(() => {});
 				if (hasOpenedRuntimeStream && shouldCheckServedBuildAssetsOnOpen) {
 					void reloadBrowserIfServedBuildAssetsChanged();
 				}

@@ -144,8 +144,6 @@ function parseToolInput(input: unknown): unknown {
  */
 const KANBAN_SUBCOMMAND_LABELS: Record<string, string> = {
 	create: "Creating task",
-	link: "Linking tasks",
-	unlink: "Unlinking tasks",
 	trash: "Moving task to done",
 	done: "Moving task to done",
 	delete: "Deleting task",
@@ -164,7 +162,7 @@ function resolveKanbanCommandDisplay(command: string): ClineToolCallDisplay | nu
 	if (!/kanban/i.test(command)) {
 		return null;
 	}
-	const taskSubcommandMatch = command.match(/\btask\s+(create|link|unlink|trash|done|delete|start|update|list)\b/);
+	const taskSubcommandMatch = command.match(/\btask\s+(create|trash|done|delete|start|update|list)\b/);
 	if (!taskSubcommandMatch?.[1]) {
 		return null;
 	}
@@ -182,20 +180,6 @@ function resolveKanbanCommandDisplay(command: string): ClineToolCallDisplay | nu
 		const prompt = promptMatch?.[1] ?? promptMatch?.[2] ?? promptMatch?.[3] ?? null;
 		if (prompt) {
 			inputSummary = prompt.length > 80 ? `${prompt.slice(0, 80)}…` : prompt;
-		}
-	} else if (subcommand === "link") {
-		const taskIdMatch = command.match(/--task-id\s+(?:"([^"]*)"|'([^']*)'|(\S+))/);
-		const linkedIdMatch = command.match(/--linked-task-id\s+(?:"([^"]*)"|'([^']*)'|(\S+))/);
-		const taskId = taskIdMatch?.[1] ?? taskIdMatch?.[2] ?? taskIdMatch?.[3] ?? null;
-		const linkedId = linkedIdMatch?.[1] ?? linkedIdMatch?.[2] ?? linkedIdMatch?.[3] ?? null;
-		if (taskId && linkedId) {
-			inputSummary = `${shortId(taskId)} → ${shortId(linkedId)}`;
-		}
-	} else if (subcommand === "unlink") {
-		const depIdMatch = command.match(/--dependency-id\s+(?:"([^"]*)"|'([^']*)'|(\S+))/);
-		const depId = depIdMatch?.[1] ?? depIdMatch?.[2] ?? depIdMatch?.[3] ?? null;
-		if (depId) {
-			inputSummary = shortId(depId);
 		}
 	} else if (subcommand === "list") {
 		const columnMatch = command.match(/--column\s+(?:"([^"]*)"|'([^']*)'|(\S+))/);

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -20,10 +20,14 @@ import {
 } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
 import { applySessionFacets, isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
-import { getTaskColumnId, moveTaskToColumn, updateTaskDependencies } from "../core/task-board-mutations";
+import { getTaskColumnId, moveTaskToColumn } from "../core/task-board-mutations";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
 import { getRuntimeHomePath } from "./runtime-home-path";
+import {
+	getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
+	type TaskMutationIntentWithResolvedActor,
+} from "./workspace-board-persistence-funnel-task-mutation-event-capture-port";
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
 
@@ -160,7 +164,6 @@ function createEmptyBoard(): RuntimeBoardData {
 			title: column.title,
 			cards: [],
 		})),
-		dependencies: [],
 	};
 }
 
@@ -416,10 +419,9 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 async function readWorkspaceBoard(workspaceId: string): Promise<RuntimeBoardData> {
 	const boardPath = getWorkspaceBoardPath(workspaceId);
 	const rawBoard = await readJsonFile(boardPath);
-	return updateTaskDependencies(
-		reconcileBoardColumns(
-			parsePersistedStateFile(boardPath, BOARD_FILENAME, rawBoard, runtimeBoardDataSchema, createEmptyBoard()),
-		),
+	// 旧盘里已退役的 `dependencies` 键由 runtimeBoardDataSchema（非 strict）在解析时静默剥离。
+	return reconcileBoardColumns(
+		parsePersistedStateFile(boardPath, BOARD_FILENAME, rawBoard, runtimeBoardDataSchema, createEmptyBoard()),
 	);
 }
 
@@ -873,6 +875,9 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 			{ ...sessions, [taskId]: parsedSummary },
 			{ lock: null },
 		);
+		getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture()?.recordAgentConversationSessionNativeIdentityPersistedWithoutBlocking(
+			{ workspaceId, kanbanTaskConversationSessionId: taskId, sessionSummary: parsedSummary },
+		);
 		return true;
 	});
 }
@@ -890,12 +895,12 @@ export async function loadWorkspaceState(
 
 export async function saveWorkspaceState(
 	cwd: string,
+	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor,
 	payload: RuntimeWorkspaceStateSaveRequest,
 ): Promise<RuntimeWorkspaceStateResponse> {
 	const parsedPayload = parseWorkspaceStateSavePayload(payload);
 	const context = await loadWorkspaceContext(cwd);
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
-		const metaPath = getWorkspaceMetaPath(context.workspaceId);
 		const currentMeta = await readWorkspaceMeta(context.workspaceId);
 		const expectedRevision = parsedPayload.expectedRevision;
 		if (
@@ -908,6 +913,12 @@ export async function saveWorkspaceState(
 		}
 		const persistedBoard = await readWorkspaceBoard(context.workspaceId);
 		const persistedSessions = await readWorkspaceSessions(context.workspaceId);
+		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
+			context,
+			persistedBoard,
+			persistedSessions,
+			currentMeta.revision,
+		);
 		const sessions = preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			persistedSessions,
 			preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
@@ -927,14 +938,14 @@ export async function saveWorkspaceState(
 			updatedAt: Date.now(),
 		};
 
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceBoardPath(context.workspaceId), board, {
-			lock: null,
-		});
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), sessions, {
-			lock: null,
-		});
-		await lockedFileSystem.writeJsonFileAtomic(metaPath, nextMeta, {
-			lock: null,
+		await writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvents({
+			context,
+			previousBoard: persistedBoard,
+			previousSessions: persistedSessions,
+			nextBoard: board,
+			nextSessions: sessions,
+			nextMeta,
+			taskMutationIntentWithResolvedActor,
 		});
 
 		return toWorkspaceStateResponse(context, board, sessions, nextRevision);
@@ -956,6 +967,7 @@ export interface RuntimeWorkspaceAtomicMutationResponse<T> {
 
 export async function mutateWorkspaceState<T>(
 	cwd: string,
+	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor,
 	mutate: (state: RuntimeWorkspaceStateResponse) => RuntimeWorkspaceAtomicMutationResult<T>,
 ): Promise<RuntimeWorkspaceAtomicMutationResponse<T>> {
 	const context = await loadWorkspaceContext(cwd);
@@ -963,6 +975,12 @@ export async function mutateWorkspaceState<T>(
 		const currentBoard = await readWorkspaceBoard(context.workspaceId);
 		const currentSessions = await readWorkspaceSessions(context.workspaceId);
 		const currentMeta = await readWorkspaceMeta(context.workspaceId);
+		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
+			context,
+			currentBoard,
+			currentSessions,
+			currentMeta.revision,
+		);
 		const currentState = toWorkspaceStateResponse(context, currentBoard, currentSessions, currentMeta.revision);
 
 		const mutation = mutate(currentState);
@@ -993,14 +1011,14 @@ export async function mutateWorkspaceState<T>(
 			updatedAt: Date.now(),
 		};
 
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceBoardPath(context.workspaceId), nextBoard, {
-			lock: null,
-		});
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), nextSessions, {
-			lock: null,
-		});
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceMetaPath(context.workspaceId), nextMeta, {
-			lock: null,
+		await writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvents({
+			context,
+			previousBoard: currentBoard,
+			previousSessions: currentSessions,
+			nextBoard,
+			nextSessions,
+			nextMeta,
+			taskMutationIntentWithResolvedActor,
 		});
 
 		return {
@@ -1009,4 +1027,90 @@ export async function mutateWorkspaceState<T>(
 			saved: true,
 		};
 	});
+}
+
+async function readWorkspaceBoardFileRawText(workspaceId: string): Promise<string | null> {
+	try {
+		return await readFile(getWorkspaceBoardPath(workspaceId), "utf8");
+	} catch (error) {
+		if (isNodeErrorWithCode(error, "ENOENT")) {
+			return null;
+		}
+		throw error;
+	}
+}
+
+// Y-EVENT-2 第 1、2 步。账本不可用时抛出 InterWorkUnitRelationLedgerUnavailableError，本次写入随之失败——
+// 该实例的 board 只读，宁可拒写也不产生没有事件的 board 变更。
+async function reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
+	context: RuntimeWorkspaceContext,
+	persistedBoard: RuntimeBoardData,
+	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
+	persistedBoardRevision: number,
+): Promise<void> {
+	const capture = getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture();
+	if (!capture) {
+		return;
+	}
+	const persistedBoardFileRawText = await readWorkspaceBoardFileRawText(context.workspaceId);
+	await capture.reconcileLedgerWithPersistedBoardWithinBoardLock({
+		workspaceId: context.workspaceId,
+		workspaceRepositoryPath: context.repoPath,
+		persistedBoard,
+		persistedSessions,
+		persistedBoardFileSha256:
+			persistedBoardFileRawText === null
+				? null
+				: createHash("sha256").update(persistedBoardFileRawText, "utf8").digest("hex"),
+		persistedBoardFileRawText,
+		persistedBoardRevision,
+	});
+}
+
+// Y-EVENT-2 第 4–6 步：事件先记为 pending，再写三个 JSON，最后提交。board 序列化只做一次，
+// 期望哈希与落盘字节逐字一致；悬挂批次在下一次漏斗通过时按盘上 board 哈希结算。
+async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvents(input: {
+	context: RuntimeWorkspaceContext;
+	previousBoard: RuntimeBoardData;
+	previousSessions: Record<string, RuntimeTaskSessionSummary>;
+	nextBoard: RuntimeBoardData;
+	nextSessions: Record<string, RuntimeTaskSessionSummary>;
+	nextMeta: WorkspaceStateMeta;
+	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor;
+}): Promise<void> {
+	const { context } = input;
+	const capture = getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture();
+	const serializedNextBoard = JSON.stringify(input.nextBoard, null, 2);
+	const nextBoardFileSha256 = createHash("sha256").update(serializedNextBoard, "utf8").digest("hex");
+	const pendingBatch = capture
+		? await capture.recordPendingTaskMutationEventsBeforeBoardFileWrite({
+				workspaceId: context.workspaceId,
+				workspaceRepositoryPath: context.repoPath,
+				previousBoard: input.previousBoard,
+				nextBoard: input.nextBoard,
+				previousSessions: input.previousSessions,
+				nextSessions: input.nextSessions,
+				nextBoardFileSha256,
+				nextBoardRevision: input.nextMeta.revision,
+				taskMutationIntentWithResolvedActor: input.taskMutationIntentWithResolvedActor,
+			})
+		: null;
+
+	await lockedFileSystem.writeTextFileAtomic(getWorkspaceBoardPath(context.workspaceId), serializedNextBoard, {
+		lock: null,
+	});
+	await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), input.nextSessions, {
+		lock: null,
+	});
+	await lockedFileSystem.writeJsonFileAtomic(getWorkspaceMetaPath(context.workspaceId), input.nextMeta, {
+		lock: null,
+	});
+
+	if (capture && pendingBatch) {
+		await capture.commitPendingTaskMutationEventsAfterBoardFileWrite({
+			pendingBatchId: pendingBatch.pendingBatchId,
+			boardFileSha256: nextBoardFileSha256,
+			boardRevision: input.nextMeta.revision,
+		});
+	}
 }

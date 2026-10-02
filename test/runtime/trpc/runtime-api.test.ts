@@ -196,6 +196,7 @@ import {
 } from "../../../src/state/restoration-deferred-harness-generated-prompt-store";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
+import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 function createTestRuntimeApi(
 	deps: Omit<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "getScopedAcpTaskSessionService"> &
@@ -393,7 +394,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				},
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		});
 
 		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
@@ -1696,7 +1696,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
 		agentRegistryMocks.resolveAgentCommand.mockImplementation((config: { selectedAgentId: string }) => ({
 			agentId: config.selectedAgentId,
@@ -1827,7 +1826,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
 		agentRegistryMocks.resolveAgentCommand.mockImplementation((config: { selectedAgentId: string }) => ({
 			agentId: config.selectedAgentId,
@@ -1887,7 +1885,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
 		const terminalManager = {
 			getSummary: vi.fn(() => createSummary({ agentId: null, startedAt: null, pid: null })),
@@ -1979,6 +1976,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (
 				_workspacePath: string,
+				_taskMutationIntent: unknown,
 				mutate: (state: { board: RuntimeBoardData }) => {
 					board: RuntimeBoardData;
 					value: unknown;
@@ -2067,7 +2065,6 @@ describe("createRuntimeApi startTaskSession", () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
 			columns: [{ id: "in_progress", title: "In Progress", cards: [] }],
-			dependencies: [],
 		});
 		const terminalManager = {
 			getSummary: vi.fn(() =>
@@ -2119,7 +2116,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
 		const terminalManager = {
 			getSummary: vi.fn(() => createSummary({ agentId: null, startedAt: null, pid: null })),
@@ -2172,12 +2168,12 @@ describe("createRuntimeApi startTaskSession", () => {
 					],
 				},
 			],
-			dependencies: [],
 		} as unknown as RuntimeBoardData;
 		let savedBoard: RuntimeBoardData | null = null;
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (
 				_workspacePath: string,
+				_taskMutationIntent: unknown,
 				mutate: (state: { board: RuntimeBoardData }) => {
 					board: RuntimeBoardData;
 					value: unknown;
@@ -2492,6 +2488,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const sendResponse = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-1", text: "hello" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 		expect(sendResponse.ok).toBe(true);
 		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
@@ -2546,6 +2543,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "__home_agent__:workspace-1", text: "  /clear  " },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response).toEqual({
@@ -2588,6 +2586,7 @@ describe("createRuntimeApi startTaskSession", () => {
 					},
 				],
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2729,6 +2728,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-1", text: "continue" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2786,6 +2786,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: " rvf-run-1 ",
 				promptSha256: " abc123 ",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2831,6 +2832,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: "rvf-run-1",
 				promptSha256: "abc123",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2922,6 +2924,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: "rvf-acp-1",
 				promptSha256: "abc123",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -2972,6 +2975,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				idempotencyKey: "rvf-acp-2",
 				promptSha256: "abc123",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(false);
@@ -3012,6 +3016,7 @@ describe("createRuntimeApi startTaskSession", () => {
 					},
 				],
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response).toEqual({
@@ -3060,6 +3065,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "__home_agent__:workspace-1", text: "hello home" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -3116,6 +3122,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "__home_agent__:workspace-1", text: "continue home" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -3165,6 +3172,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const response = await api.sendTaskChatMessage(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "__home_agent__:workspace-1", text: "hello home" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(true);
@@ -4347,7 +4355,6 @@ describe("createRuntimeApi resumed claude session model", () => {
 				{ id: "review", title: "Review", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		} as RuntimeBoardData;
 	}
 
@@ -4365,6 +4372,7 @@ describe("createRuntimeApi resumed claude session model", () => {
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
 			async (
 				_workspacePath: string,
+				_taskMutationIntent: unknown,
 				mutate: (state: { board: RuntimeBoardData }) => {
 					board: RuntimeBoardData;
 					value: unknown;
@@ -4652,14 +4660,15 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
-		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_path: string, mutate: never) => {
-			const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
-				board: { columns: [], dependencies: [] },
-			});
-			return { saved: true, value: mutation.value };
-		});
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (_path: string, _taskMutationIntent: unknown, mutate: never) => {
+				const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
+					board: { columns: [] },
+				});
+				return { saved: true, value: mutation.value };
+			},
+		);
 	});
 
 	function createAcpServiceMockWithLiveSession() {
@@ -4698,6 +4707,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 		expect(response.ok).toBe(false);
 		expect(response.error).toContain("only one session transport");
@@ -4734,6 +4744,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(acpTaskSessionService.stopTaskSession).toHaveBeenCalledWith("task-omp");
@@ -4778,6 +4789,7 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(false);
@@ -4964,13 +4976,17 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			runCommand: vi.fn(),
 		});
 
-		await api.sendTaskChatMessage(scope, {
-			taskId: "task-1",
-			text: "继续 RVF",
-			source: "review-validate-fix",
-			idempotencyKey: "rvf-contention-1",
-			promptSha256: "abc123",
-		});
+		await api.sendTaskChatMessage(
+			scope,
+			{
+				taskId: "task-1",
+				text: "继续 RVF",
+				source: "review-validate-fix",
+				idempotencyKey: "rvf-contention-1",
+				promptSha256: "abc123",
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 
 		const deliveryOptions = terminalManager.submitTaskChatInputWhenReady.mock.calls[0]?.[2];
 		if (!deliveryOptions?.preemptivelyStashHumanInputBox) {
@@ -5125,13 +5141,17 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
-		await api.sendTaskChatMessage(scope, {
-			taskId: "task-1",
-			text: "继续 RVF",
-			source: "review-validate-fix",
-			idempotencyKey: `rvf-preemption-${scope.workspaceId}`,
-			promptSha256: "abc123",
-		});
+		await api.sendTaskChatMessage(
+			scope,
+			{
+				taskId: "task-1",
+				text: "继续 RVF",
+				source: "review-validate-fix",
+				idempotencyKey: `rvf-preemption-${scope.workspaceId}`,
+				promptSha256: "abc123",
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 		const preemptivelyStashHumanInputBox =
 			terminalManagerWithDelivery.submitTaskChatInputWhenReady.mock.calls[0]?.[2]?.preemptivelyStashHumanInputBox;
 		if (!preemptivelyStashHumanInputBox) {

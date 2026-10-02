@@ -34,7 +34,6 @@ function makeBoard(columnToTaskIds: Partial<Record<RuntimeBoardColumnId, string[
 			title: id,
 			cards: (columnToTaskIds[id] ?? []).map(makeCard),
 		})),
-		dependencies: [],
 	};
 }
 

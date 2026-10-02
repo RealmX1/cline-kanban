@@ -265,6 +265,13 @@ function createIsolatedChildTestEnvironment(diagnosticDirectoryPath: string): No
 		TEMP: isolatedTemporaryDirectoryPath,
 		TMP: isolatedTemporaryDirectoryPath,
 		GIT_CONFIG_GLOBAL: join(isolatedHomeDirectoryPath, ".gitconfig"),
+		// 工作单元间关系账本只追加、写进真实账本后不可逆（dd2db §R3 Y-EVENT-3）。HOME 隔离已经覆盖默认路径；
+		// 这里再显式钉住存储根，防止某条代码路径绕过 HOME 解析。不做「真实账本 mtime 前后不变」的比对：
+		// 部署后的常驻 runtime 会在测试期间持续写真实账本，那条比对必然误报。
+		KANBAN_INTER_WORK_UNIT_RELATION_LEDGER_STORAGE_ROOT: join(
+			isolatedHomeDirectoryPath,
+			"isolated-inter-work-unit-relation-ledger",
+		),
 	};
 }
 

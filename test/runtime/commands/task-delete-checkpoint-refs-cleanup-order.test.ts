@@ -8,19 +8,16 @@ import { registerTaskCommand } from "../../../src/commands/task";
 // 在途捕获仍可能 update-ref，给已删除任务留下再无清理方的孤儿 ref（竞态详见 task.ts 批删处注释）。
 const harness = vi.hoisted(() => {
 	const callOrder: string[] = [];
-	const fakeState = {
-		board: {
-			columns: [
-				{
-					id: "in_progress",
-					cards: [{ id: "task-1", title: "任务一", prompt: "prompt", createdAt: 1, updatedAt: 2 }],
-				},
-			],
-			dependencies: [],
-		},
-		sessions: {},
+	const deletedInProgressTaskCard = {
+		id: "task-1",
+		title: "任务一",
+		prompt: "prompt",
+		startInPlanMode: false,
+		baseRef: "main",
+		createdAt: 1,
+		updatedAt: 2,
 	};
-	return { callOrder, fakeState };
+	return { callOrder, deletedInProgressTaskCard };
 });
 
 vi.mock("@trpc/client", () => ({
@@ -31,6 +28,22 @@ vi.mock("@trpc/client", () => ({
 			},
 		},
 		workspace: {
+			// dd2db 1a.2b：删卡本身经 runtime procedure 落盘，它必须排在整条收尾链之前。
+			applyKanbanCliTaskBoardMutation: {
+				mutate: async (request: { kanbanCliTaskBoardMutationKind: string }) => {
+					harness.callOrder.push(`applyKanbanCliTaskBoardMutation:${request.kanbanCliTaskBoardMutationKind}`);
+					return {
+						kanbanCliTaskBoardMutationKind: "permanently_delete_task_cards",
+						permanentlyDeletedTaskCards: [
+							{
+								deletedTaskCard: harness.deletedInProgressTaskCard,
+								deletedTaskCardBoardColumnIdBeforeDeletion: "in_progress",
+								deletedTaskCardSessionSummaryPersistedOnDisk: null,
+							},
+						],
+					};
+				},
+			},
 			notifyStateUpdated: {
 				mutate: async () => ({}),
 			},
@@ -58,12 +71,9 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 	getTaskWorktreesHomePath: vi.fn(),
 	loadWorkspaceBoardById: vi.fn(),
 	loadWorkspaceContext: async () => ({ repoPath: "/fake/repo" }),
-	mutateWorkspaceState: async (
-		_workspaceRepoPath: string,
-		mutate: (state: unknown) => { board: unknown; value: unknown; save?: boolean },
-	) => {
-		const result = mutate(harness.fakeState);
-		return { saved: result.save !== false, value: result.value };
+	// CLI 进程不得再直接写盘（fail closed 到 runtime procedure）；被调用即说明回退路径复活了。
+	mutateWorkspaceState: async () => {
+		throw new Error("task delete must not write board.json from the CLI process");
 	},
 	resolveWorkspacePath: vi.fn(),
 }));
@@ -101,6 +111,7 @@ describe("task delete 的 checkpoint refs 批删顺序", () => {
 		expect(stdoutChunks.join("")).toContain('"ok": true');
 		// 批删必须是整条收尾链的最后一步——给 runtime 侧在途捕获最大收敛窗口。
 		expect(harness.callOrder).toEqual([
+			"applyKanbanCliTaskBoardMutation:permanently_delete_task_cards",
 			"stopTaskSession",
 			"deleteWorktree",
 			"deleteAllTaskTurnCheckpointRefs:/fake/repo:task-1",

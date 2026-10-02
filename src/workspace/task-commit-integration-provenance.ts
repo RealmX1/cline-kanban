@@ -44,6 +44,10 @@ const persistedTaskWorkspaceGitSnapshotSchema = z.object({
 	commitsBehindBaseRef: z.number().int().nonnegative(),
 	taskCommitsIntegratedIntoBaseRef: z.number().int().nonnegative(),
 	isDetached: z.boolean(),
+	// dd2db 1a 落地数据保全（§R3 Y-PHASE-3）：每次探测都记下「从最后已知 HEAD 可达的非 merge 自有提交」，
+	// 共享落地判据（exact SHA → patch-id 一对一进 base）在 1c 求值。可达集合必须在探测时采集，worktree 删掉后
+	// 就再也算不出来。旧文件没有这个字段（optional）。
+	taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: z.array(observedTaskCommitSchema).optional(),
 	observedAt: z.number(),
 });
 type PersistedTaskWorkspaceGitSnapshot = z.infer<typeof persistedTaskWorkspaceGitSnapshotSchema>;
@@ -235,6 +239,25 @@ async function listCommitShas(cwd: string, revisionRange: string, firstParent = 
 		.filter(Boolean);
 }
 
+// 同一次 rev-list 里用 --parents 顺带判定 merge，不为「非 merge」多起一个 git 进程。
+async function listCommitShasWithMergeCommitFlag(
+	cwd: string,
+	revisionRange: string,
+): Promise<Array<{ commitSha: string; isMergeCommit: boolean }> | null> {
+	const result = await runGit(cwd, ["rev-list", "--reverse", "--parents", revisionRange]);
+	if (!result.ok) {
+		return null;
+	}
+	return result.stdout
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.map((line) => {
+			const [commitSha = "", ...parentShas] = line.split(/\s+/);
+			return { commitSha, isMergeCommit: parentShas.length > 1 };
+		});
+}
+
 const commitIdentityPromiseByRepositoryPathAndCommitSha = new Map<string, Promise<TaskCommitIdentity>>();
 
 function rememberCommitIdentityPromise(cacheKey: string, identityPromise: Promise<TaskCommitIdentity>): void {
@@ -349,8 +372,14 @@ function snapshotFactsEqual(
 		left.commitsAheadOfBaseRef === right.commitsAheadOfBaseRef &&
 		left.commitsBehindBaseRef === right.commitsBehindBaseRef &&
 		left.taskCommitsIntegratedIntoBaseRef === right.taskCommitsIntegratedIntoBaseRef &&
-		left.isDetached === right.isDetached
+		left.isDetached === right.isDetached &&
+		describeObservedTaskCommitsForEquality(left.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead) ===
+			describeObservedTaskCommitsForEquality(right.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead)
 	);
+}
+
+function describeObservedTaskCommitsForEquality(commits: readonly ObservedTaskCommit[] | undefined): string {
+	return (commits ?? []).map((commit) => `${commit.commitSha}:${commit.stablePatchId ?? ""}`).join(",");
 }
 
 export interface RefreshTaskCommitIntegrationProvenanceInput {
@@ -510,10 +539,14 @@ export async function refreshTaskCommitIntegrationProvenance(
 	const observedTaskCommitsBySha = new Map(
 		deduplicateObservedTaskCommits(entry.incarnations).map((commit) => [commit.commitSha, commit]),
 	);
-	const candidateCommitShas = await listCommitShas(input.worktreePath, `${input.baseRef}..HEAD`);
-	if (candidateCommitShas === null) {
+	const candidateCommitsWithMergeFlag = await listCommitShasWithMergeCommitFlag(
+		input.worktreePath,
+		`${input.baseRef}..HEAD`,
+	);
+	if (candidateCommitsWithMergeFlag === null) {
 		return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
 	}
+	const candidateCommitShas = candidateCommitsWithMergeFlag.map((commit) => commit.commitSha);
 	// 从未观察到 task commit 时，baseRef..HEAD 为空无法区分「task commits 已 handback」与
 	// 「worktree 只是 fast-forward 吸收了 base」。creation floor 只能证明提交在何时出现，不能证明所有权；
 	// 唯有「单一创建 incarnation + HEAD reflog 自创建起只有 fast-forward」能证明是后者，回流计数如实为 0。
@@ -567,7 +600,14 @@ export async function refreshTaskCommitIntegrationProvenance(
 		entry.lastWorkspaceGitSnapshot?.taskCommitsIntegratedIntoBaseRef ?? 0,
 		integration.integratedTaskCommitCount,
 	);
+	const taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead = candidateCommitsWithMergeFlag
+		.filter((commit) => !commit.isMergeCommit)
+		.map(
+			(commit) =>
+				observedTaskCommitsBySha.get(commit.commitSha) ?? { commitSha: commit.commitSha, stablePatchId: null },
+		);
 	const candidateSnapshotFacts: Omit<PersistedTaskWorkspaceGitSnapshot, "observedAt"> = {
+		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
 		path: input.worktreePath,
 		headCommit: input.headCommit,
 		baseRefTipCommit: input.baseRefTipCommit,
@@ -675,6 +715,27 @@ export async function probeAndRefreshTaskCommitIntegrationProvenance(input: {
 async function resolveBaseRefTipCommit(repoPath: string, baseRef: string): Promise<string | null> {
 	const result = await runGit(repoPath, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
 	return result.ok && result.stdout ? result.stdout : null;
+}
+
+// 原始落地快照（Y-EVENT-14 PDV 事件、1c 落地判据的输入）：只搬运已持久化的事实，不在这里判定是否已落地。
+export async function readRawTaskCommitLandingSnapshotForRelationLedgerEvent(
+	workspaceId: string,
+	taskId: string,
+): Promise<{
+	lastKnownTaskHeadCommit: string | null;
+	taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: ObservedTaskCommit[] | null;
+	lastKnownTaskHeadObservedAt: number | null;
+	taskCommitIntegrationProvenanceBaseRef: string | null;
+}> {
+	const entry = (await readProvenanceFile(workspaceId)).tasks[taskId] ?? null;
+	const snapshot = entry?.lastWorkspaceGitSnapshot ?? null;
+	return {
+		lastKnownTaskHeadCommit: snapshot?.headCommit ?? null,
+		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead:
+			snapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead ?? null,
+		lastKnownTaskHeadObservedAt: snapshot?.observedAt ?? null,
+		taskCommitIntegrationProvenanceBaseRef: entry?.baseRef ?? null,
+	};
 }
 
 export async function removeTaskCommitIntegrationProvenance(workspaceId: string, taskId: string): Promise<boolean> {

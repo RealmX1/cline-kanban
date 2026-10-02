@@ -95,6 +95,7 @@ import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/run
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { saveWorkspaceState } from "@/runtime/workspace-state-query";
 import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
+import { withWebUiBoardMutationInitiatorRecordedForChangedTaskCards } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import {
 	getTaskWorkspaceInfo,
 	getTaskWorkspaceSnapshot,
@@ -894,8 +895,6 @@ export default function App(): ReactElement {
 
 	const {
 		handleProgrammaticCardMoveReady,
-		handleCreateDependency,
-		handleDeleteDependency,
 		handleDragEnd,
 		handleStartTask,
 		handleStartAllBacklogTasks,
@@ -1141,32 +1140,36 @@ export default function App(): ReactElement {
 				return;
 			}
 			const taskId = selectedCard.card.id;
-			setBoard((currentBoard) => {
-				const result = applyTaskDetailClineSettingsChange(
-					currentBoard,
-					taskId,
-					{
-						providerId,
-						modelId,
-						reasoningEffort,
-					},
-					{
-						providerId: defaultTaskClineProviderId,
-						modelId: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
-					},
-				);
-				return result.updated ? result.board : currentBoard;
-			});
+			setBoard(
+				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+					const result = applyTaskDetailClineSettingsChange(
+						currentBoard,
+						taskId,
+						{
+							providerId,
+							modelId,
+							reasoningEffort,
+						},
+						{
+							providerId: defaultTaskClineProviderId,
+							modelId: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
+						},
+					);
+					return result.updated ? result.board : currentBoard;
+				}),
+			);
 		},
 		[defaultTaskClineProviderId, runtimeProjectConfig, selectedCard, setBoard],
 	);
 
 	const handleTaskCommentEntriesChange = useCallback(
 		(taskId: string, taskCommentEntries: TaskCommentEntry[]) => {
-			setBoard((currentBoard) => {
-				const result = updateTaskCommentEntries(currentBoard, taskId, taskCommentEntries);
-				return result.updated ? result.board : currentBoard;
-			});
+			setBoard(
+				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+					const result = updateTaskCommentEntries(currentBoard, taskId, taskCommentEntries);
+					return result.updated ? result.board : currentBoard;
+				}),
+			);
 		},
 		[setBoard],
 	);
@@ -1371,8 +1374,7 @@ export default function App(): ReactElement {
 								<div className="flex flex-1 flex-col min-h-0 min-w-0">
 									<div className="flex flex-1 min-h-0 min-w-0">
 										{/* Focus View 打开时真正卸载看板视图，而不是只让外层 `visibility: hidden`。
-										    隐藏保留布局盒：DependencyOverlay 的强制同步布局照样要遍历全部卡片，
-										    两个 `DragDropContext`（看板 + Focus View 左侧栏）也会同时挂载。
+										    隐藏保留布局盒：两个 `DragDropContext`（看板 + Focus View 左侧栏）会同时挂载。
 										    只卸载这一层：外层 wrapper 与底部 home 终端保持挂载——隐藏的 xterm
 										    本就已暂停渲染，卸载它只会换来一次多余的重连 + 快照恢复。
 										    列的滚动位置与渐进渲染进度由 `board-column-scroll-offset-store` 补回。 */}
@@ -1424,9 +1426,6 @@ export default function App(): ReactElement {
 													onMoveToReviewTask={handleMoveCardToReview}
 													onRestoreFromTrashTask={handleRestoreTaskFromTrash}
 													onDeleteTask={handleOpenDeleteTask}
-													dependencies={board.dependencies}
-													onCreateDependency={handleCreateDependency}
-													onDeleteDependency={handleDeleteDependency}
 													onRequestProgrammaticCardMoveReady={
 														selectedCard ? undefined : handleProgrammaticCardMoveReady
 													}

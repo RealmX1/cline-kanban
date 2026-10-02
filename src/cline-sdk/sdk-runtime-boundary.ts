@@ -10,6 +10,7 @@ import {
 	ClineCore,
 	type ClineCoreStartInput,
 	type CoreSessionEvent,
+	createDefaultExecutors,
 	createUserInstructionConfigService,
 	formatRulesForSystemPrompt,
 	getClineDefaultSystemPrompt,
@@ -20,6 +21,7 @@ import {
 	type SessionHistoryRecord,
 	type ToolApprovalRequest,
 	type ToolApprovalResult,
+	type ToolExecutors,
 	type UserInstructionConfigService,
 } from "@clinebot/core";
 import { createClineSdkCoreLoggerForwardingWarningsAndErrorsToKanbanServerLog } from "./cline-sdk-core-logger-forwarding-warnings-and-errors-to-kanban-server-log";
@@ -45,6 +47,20 @@ export interface ClineSdkSlashCommand {
 }
 export type ClineSdkToolApprovalRequest = ToolApprovalRequest;
 export type ClineSdkToolApprovalResult = ToolApprovalResult;
+
+export type ClineSdkBashToolExecutor = NonNullable<ToolExecutors["bash"]>;
+
+// 按会话覆盖 bash 工具的 env（dd2db 1a：Cline 卡片的工具调用也要带工作单元身份）。只加 env，
+// 其余选项沿用 SDK 默认 bash executor 的缺省值（SDK 自己的默认工具也是 createDefaultExecutors() 无参构造）。
+export function createClineSdkBashToolExecutorWithEnvironmentOverrides(
+	environmentOverrides: Record<string, string>,
+): ClineSdkBashToolExecutor {
+	const bashToolExecutor = createDefaultExecutors({ bash: { env: environmentOverrides } }).bash;
+	if (!bashToolExecutor) {
+		throw new Error("The Cline SDK did not provide a default bash tool executor.");
+	}
+	return bashToolExecutor;
+}
 
 export async function createClineSdkSessionHost(): Promise<ClineSdkSessionHost> {
 	return await ClineCore.create({

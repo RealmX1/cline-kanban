@@ -1,6 +1,6 @@
 import { Droppable } from "@hello-pangea/dnd";
 import { FoldHorizontal, Play, Plus, Trash2 } from "lucide-react";
-import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { BoardCard } from "@/components/board-card";
@@ -43,11 +43,6 @@ export const BoardColumn = memo(function BoardColumn({
 	activeDragTaskId,
 	activeDragSourceColumnId,
 	programmaticCardMoveInFlight,
-	onDependencyPointerDown,
-	onDependencyPointerEnter,
-	dependencySourceTaskId,
-	dependencyTargetTaskId,
-	isDependencyLinking,
 	workspacePath,
 	defaultClineModelId,
 	defaultAgentId,
@@ -82,11 +77,6 @@ export const BoardColumn = memo(function BoardColumn({
 	activeDragTaskId?: string | null;
 	activeDragSourceColumnId?: BoardColumnId | null;
 	programmaticCardMoveInFlight?: ProgrammaticCardMoveInFlight | null;
-	onDependencyPointerDown?: (taskId: string, event: ReactMouseEvent<HTMLElement>) => void;
-	onDependencyPointerEnter?: (taskId: string) => void;
-	dependencySourceTaskId?: string | null;
-	dependencyTargetTaskId?: string | null;
-	isDependencyLinking?: boolean;
 	workspacePath?: string | null;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
@@ -280,11 +270,6 @@ export const BoardColumn = memo(function BoardColumn({
 											isMoveToTrashLoading={moveToTrashLoadingById?.[card.id] ?? false}
 											isMoveToValidationLoading={moveToValidationLoadingById?.[card.id] ?? false}
 											isMoveToReviewLoading={moveToReviewLoadingById?.[card.id] ?? false}
-											onDependencyPointerDown={onDependencyPointerDown}
-											onDependencyPointerEnter={onDependencyPointerEnter}
-											isDependencySource={dependencySourceTaskId === card.id}
-											isDependencyTarget={dependencyTargetTaskId === card.id}
-											isDependencyLinking={isDependencyLinking}
 											workspacePath={workspacePath}
 											defaultClineModelId={defaultClineModelId}
 											defaultAgentId={defaultAgentId}

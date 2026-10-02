@@ -38,16 +38,13 @@ describe("parseWorkspaceFileSearchRequest", () => {
 });
 
 describe("parseWorktreeDeleteRequest", () => {
-	it("保留永久删除 task 时清理 commit integration provenance 的显式标记", () => {
+	it("不再接受「删 worktree 后清 commit integration provenance」的旧标记（落地数据保全，dd2db Y-PHASE-3）", () => {
 		expect(
 			parseWorktreeDeleteRequest({
 				taskId: "  task-1  ",
 				removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true,
 			}),
-		).toEqual({
-			taskId: "task-1",
-			removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion: true,
-		});
+		).toEqual({ taskId: "task-1" });
 	});
 });
 

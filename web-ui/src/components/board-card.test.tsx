@@ -656,36 +656,6 @@ describe("BoardCard", () => {
 		expect(document.body.querySelector("[role='dialog'] pre")).not.toBeNull();
 	});
 
-	it("does not start dependency linking from cmd+mousedown inside the prompt dialog", async () => {
-		const onDependencyPointerDown = vi.fn();
-
-		await act(async () => {
-			root.render(
-				<BoardCard
-					card={createCard()}
-					index={0}
-					columnId="backlog"
-					onDependencyPointerDown={onDependencyPointerDown}
-				/>,
-			);
-		});
-
-		const viewPromptButton = container.querySelector<HTMLButtonElement>('button[aria-label="View original prompt"]');
-		await act(async () => {
-			viewPromptButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-			viewPromptButton?.click();
-		});
-
-		const promptBlock = document.body.querySelector<HTMLElement>("[role='dialog'] pre");
-		expect(promptBlock).not.toBeNull();
-
-		await act(async () => {
-			promptBlock?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, metaKey: true }));
-		});
-
-		expect(onDependencyPointerDown).not.toHaveBeenCalled();
-	});
-
 	it("reconstructs and shows trashed worktree path when workspace metadata is not tracked", async () => {
 		await act(async () => {
 			root.render(

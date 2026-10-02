@@ -8,11 +8,16 @@ import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import type * as BoardStateModule from "@/state/board-state";
 import { moveTaskToColumn } from "@/state/board-state";
+import type { ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
+import {
+	discardAllPendingWebUiBoardMutationInitiatorRecords,
+	readPendingWebUiBoardMutationInitiatorForTaskCardAspect,
+} from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 
 const notifyErrorMock = vi.hoisted(() => vi.fn());
 const showAppToastMock = vi.hoisted(() => vi.fn());
-const useLinkedBacklogTaskActionsMock = vi.hoisted(() => vi.fn());
+const useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock = vi.hoisted(() => vi.fn());
 const useProgrammaticCardMovesMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/components/app-toaster", () => ({
@@ -20,8 +25,8 @@ vi.mock("@/components/app-toaster", () => ({
 	showAppToast: showAppToastMock,
 }));
 
-vi.mock("@/hooks/use-linked-backlog-task-actions", () => ({
-	useLinkedBacklogTaskActions: useLinkedBacklogTaskActionsMock,
+vi.mock("@/hooks/use-move-task-to-done-with-session-stop-and-workspace-cleanup", () => ({
+	useMoveTaskToDoneWithSessionStopAndWorkspaceCleanup: useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock,
 }));
 
 vi.mock("@/hooks/use-programmatic-card-moves", () => ({
@@ -74,7 +79,6 @@ function createBoard(): BoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -111,7 +115,6 @@ function createBoardWithValidationTask(taskId: string): BoardData {
 			{ id: "validation", title: "Validation", cards: [createTask(taskId, "Validating task", 1)] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -131,7 +134,7 @@ function createBoardWithTaskInColumn(taskId: string, columnId: BoardData["column
 			column.cards = [createTask(taskId, "Mapped task", 1)];
 		}
 	}
-	return { columns, dependencies: [] };
+	return { columns };
 }
 
 function createBoardWithReviewTaskIds(
@@ -150,7 +153,6 @@ function createBoardWithReviewTaskIds(
 			{ id: "validation", title: "Validation", cards: otherColumnCardsByColumnId?.validation ?? [] },
 			{ id: "trash", title: "Done", cards: otherColumnCardsByColumnId?.trash ?? [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -161,7 +163,7 @@ const NOOP_SEND_TASK_INPUT = async (): Promise<{ ok: boolean }> => ({ ok: true }
 const NOOP_RUN_AUTO_REVIEW = async (): Promise<boolean> => false;
 
 // The level-triggered column-mapping effect only needs "unavailable" programmatic moves (so it falls
-// through to the direct moveTaskToColumn path) plus no-op linked-backlog actions. Shared by the
+// through to the direct moveTaskToColumn path) plus no-op move-to-done actions. Shared by the
 // facet-driven mapping tests below to avoid repeating the full mock objects.
 function mockUnavailableProgrammaticCardMoves(): void {
 	useProgrammaticCardMovesMock.mockReturnValue({
@@ -177,10 +179,8 @@ function mockUnavailableProgrammaticCardMoves(): void {
 	});
 }
 
-function mockNoopLinkedBacklogTaskActions(): void {
-	useLinkedBacklogTaskActionsMock.mockReturnValue({
-		handleCreateDependency: () => {},
-		handleDeleteDependency: () => {},
+function mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup(): void {
+	useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 		confirmMoveTaskToTrash: async () => {},
 		requestMoveTaskToTrash: async () => {},
 	});
@@ -201,6 +201,7 @@ interface HookSnapshot {
 	cancelMoveToDone: () => void;
 	handleMoveCardToReview: (taskId: string) => void;
 	moveToReviewLoadingById: Record<string, boolean>;
+	completePostDeployVerificationMoveToDone: (taskId: string, fromColumnId: BoardColumnId) => Promise<{ ok: boolean }>;
 }
 
 function createRect(width: number, height: number): DOMRect {
@@ -317,8 +318,10 @@ function HookHarness({
 			cancelMoveToDone: actions.cancelMoveToDone,
 			handleMoveCardToReview: actions.handleMoveCardToReview,
 			moveToReviewLoadingById: actions.moveToReviewLoadingById,
+			completePostDeployVerificationMoveToDone: actions.completePostDeployVerificationMoveToDone,
 		});
 	}, [
+		actions.completePostDeployVerificationMoveToDone,
 		actions.deleteTaskTarget,
 		actions.handleCardSelect,
 		actions.handleConfirmDeleteTask,
@@ -361,7 +364,7 @@ describe("useBoardInteractions", () => {
 		});
 		notifyErrorMock.mockReset();
 		showAppToastMock.mockReset();
-		useLinkedBacklogTaskActionsMock.mockReset();
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReset();
 		useProgrammaticCardMovesMock.mockReset();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
@@ -399,7 +402,7 @@ describe("useBoardInteractions", () => {
 		});
 
 		mockUnavailableProgrammaticCardMoves();
-		mockNoopLinkedBacklogTaskActions();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 
 		await act(async () => {
 			root.render(
@@ -435,7 +438,7 @@ describe("useBoardInteractions", () => {
 
 	it("回调身份跨 board/session 更新稳定，旧回调仍读取最新卡片及会话", async () => {
 		mockUnavailableProgrammaticCardMoves();
-		mockNoopLinkedBacklogTaskActions();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 		const setBoard = vi.fn();
 		const ensureTaskWorkspace = vi.fn();
 		const startTaskSession = vi.fn();
@@ -481,82 +484,10 @@ describe("useBoardInteractions", () => {
 		expect(snapshot!.deleteTaskTarget?.title).toBe("最新标题");
 	});
 
-	it("starts dependency-unblocked tasks even when setBoard updater is deferred", async () => {
-		let startBacklogTaskWithAnimation: ((task: BoardCard) => Promise<boolean>) | null = null;
-
-		useProgrammaticCardMovesMock.mockReturnValue({
-			handleProgrammaticCardMoveReady: () => {},
-			setRequestMoveTaskToTrashHandler: () => {},
-			tryProgrammaticCardMove: () => "unavailable",
-			consumeProgrammaticCardMove: () => ({}),
-			resolvePendingProgrammaticTrashMove: () => {},
-			waitForProgrammaticCardMoveAvailability: async () => {},
-			resetProgrammaticCardMoves: () => {},
-			requestMoveTaskToTrashWithAnimation: async () => {},
-			programmaticCardMoveCycle: 0,
-		});
-
-		useLinkedBacklogTaskActionsMock.mockImplementation(
-			(input: { startBacklogTaskWithAnimation?: (task: BoardCard) => Promise<boolean> }) => {
-				startBacklogTaskWithAnimation = input.startBacklogTaskWithAnimation ?? null;
-				return {
-					handleCreateDependency: () => {},
-					handleDeleteDependency: () => {},
-					confirmMoveTaskToTrash: async () => {},
-					requestMoveTaskToTrash: async () => {},
-				};
-			},
-		);
-
-		const board = createBoard();
-		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((_nextBoard) => {
-			// Simulate React deferring state updater execution.
-		});
-		const ensureTaskWorkspace = vi.fn(async () => ({
-			ok: true as const,
-			response: {
-				ok: true as const,
-				path: "/tmp/task-1",
-				baseRef: "main",
-				baseCommit: "abc123",
-			},
-		}));
-		const startTaskSession = vi.fn(async () => ({ ok: true as const }));
-
-		await act(async () => {
-			root.render(
-				<HookHarness
-					board={board}
-					setBoard={setBoard}
-					ensureTaskWorkspace={ensureTaskWorkspace}
-					startTaskSession={startTaskSession}
-				/>,
-			);
-		});
-
-		if (!startBacklogTaskWithAnimation) {
-			throw new Error("Expected startBacklogTaskWithAnimation to be provided.");
-		}
-
-		const backlogTask = board.columns[0]?.cards[0];
-		if (!backlogTask) {
-			throw new Error("Expected a backlog task.");
-		}
-
-		let started = false;
-		await act(async () => {
-			started = await startBacklogTaskWithAnimation!(backlogTask);
-		});
-
-		expect(started).toBe(true);
-		expect(ensureTaskWorkspace).toHaveBeenCalledWith(backlogTask);
-		expect(startTaskSession).toHaveBeenCalledWith(backlogTask);
-	});
-
 	it("retries an In Progress task in place when no session was created", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 		mockUnavailableProgrammaticCardMoves();
-		mockNoopLinkedBacklogTaskActions();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 		const board = createBoardWithTaskInColumn("task-1", "in_progress");
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>();
 		const ensureTaskWorkspace = vi.fn(async () => ({
@@ -610,9 +541,7 @@ describe("useBoardInteractions", () => {
 			programmaticCardMoveCycle: 0,
 		});
 
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -622,14 +551,6 @@ describe("useBoardInteractions", () => {
 			...initialBoard.columns[3]!,
 			cards: [createTask("done-1", "Keep done", 10), createTask("done-2", "Keep me", 11)],
 		};
-		initialBoard.dependencies = [
-			{
-				id: "dep-1",
-				fromTaskId: "task-1",
-				toTaskId: "done-1",
-				createdAt: 12,
-			},
-		];
 		const stopTaskSession = vi.fn(async () => {});
 		const cleanupTaskWorkspace = vi.fn(async () => null);
 		const ensureTaskWorkspace = vi.fn(async () => ({
@@ -694,9 +615,9 @@ describe("useBoardInteractions", () => {
 		expect(doneCards.map((card) => card.id)).toEqual(["done-1", "done-2"]);
 		const backlogCards = requireBoard().columns.find((column) => column.id === "backlog")?.cards ?? [];
 		expect(backlogCards).toEqual([]);
-		expect(requireBoard().dependencies).toEqual([]);
 		expect(stopTaskSession).toHaveBeenCalledWith("task-1");
-		expect(cleanupTaskWorkspace).toHaveBeenCalledWith("task-1", undefined, true);
+		// 永久删卡只删 worktree，不再连带删 commit provenance（dd2db 落地数据保全）。
+		expect(cleanupTaskWorkspace).toHaveBeenCalledWith("task-1", undefined);
 	});
 
 	it("waits for a new backlog card height to settle before starting animation", async () => {
@@ -729,9 +650,7 @@ describe("useBoardInteractions", () => {
 			programmaticCardMoveCycle: 0,
 		});
 
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -785,7 +704,9 @@ describe("useBoardInteractions", () => {
 			await Promise.resolve();
 		});
 
-		expect(tryProgrammaticCardMove).toHaveBeenCalledWith("task-1", "backlog", "in_progress");
+		expect(tryProgrammaticCardMove).toHaveBeenCalledWith("task-1", "backlog", "in_progress", {
+			boardMutationInitiator: "web_ui_user_gesture",
+		});
 		boardElement.remove();
 	});
 
@@ -819,9 +740,7 @@ describe("useBoardInteractions", () => {
 			programmaticCardMoveCycle: 0,
 		});
 
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -884,9 +803,7 @@ describe("useBoardInteractions", () => {
 			programmaticCardMoveCycle: 0,
 		});
 
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -899,7 +816,6 @@ describe("useBoardInteractions", () => {
 				{ id: "review", title: "Review", cards: [] },
 				{ id: "trash", title: "Done", cards: [trashTask] },
 			],
-			dependencies: [],
 		};
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((_nextBoard) => {
 			// The optimistic move is not part of this assertion.
@@ -975,9 +891,7 @@ describe("useBoardInteractions", () => {
 			programmaticCardMoveCycle: 0,
 		});
 
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -1005,7 +919,6 @@ describe("useBoardInteractions", () => {
 				{ id: "review", title: "Review", cards: [] },
 				{ id: "trash", title: "Done", cards: [trashTask] },
 			],
-			dependencies: [],
 		};
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
 			if (typeof nextBoard === "function") {
@@ -1077,9 +990,7 @@ describe("useBoardInteractions", () => {
 			programmaticCardMoveCycle: 0,
 		});
 
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -1092,7 +1003,6 @@ describe("useBoardInteractions", () => {
 				{ id: "review", title: "Review", cards: [] },
 				{ id: "trash", title: "Done", cards: [trashTask] },
 			],
-			dependencies: [],
 		};
 		const setSelectedTaskId = vi.fn<Dispatch<SetStateAction<string | null>>>();
 
@@ -1236,9 +1146,7 @@ describe("useBoardInteractions", () => {
 			requestMoveTaskToTrashWithAnimation: async () => {},
 			programmaticCardMoveCycle: 0,
 		});
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -1286,9 +1194,7 @@ describe("useBoardInteractions", () => {
 			requestMoveTaskToTrashWithAnimation: async () => {},
 			programmaticCardMoveCycle: 0,
 		});
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -1338,9 +1244,7 @@ describe("useBoardInteractions", () => {
 			requestMoveTaskToTrashWithAnimation: async () => {},
 			programmaticCardMoveCycle: 0,
 		});
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -1380,7 +1284,7 @@ describe("useBoardInteractions", () => {
 	it("keeps an idle (output-quiet) agent-turn task in Review instead of bouncing it", async () => {
 		let currentBoard = createBoardWithTaskInColumn("task-idle-review", "review");
 		mockUnavailableProgrammaticCardMoves();
-		mockNoopLinkedBacklogTaskActions();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
 			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
@@ -1414,7 +1318,7 @@ describe("useBoardInteractions", () => {
 	it("bounces an actively-producing agent-turn task out of Review back to In Progress", async () => {
 		let currentBoard = createBoardWithTaskInColumn("task-active-review", "review");
 		mockUnavailableProgrammaticCardMoves();
-		mockNoopLinkedBacklogTaskActions();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
 			currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
@@ -1460,9 +1364,7 @@ describe("useBoardInteractions", () => {
 			programmaticCardMoveCycle: 0,
 		});
 
-		useLinkedBacklogTaskActionsMock.mockReturnValue({
-			handleCreateDependency: () => {},
-			handleDeleteDependency: () => {},
+		useMoveTaskToDoneWithSessionStopAndWorkspaceCleanupMock.mockReturnValue({
 			confirmMoveTaskToTrash: async () => {},
 			requestMoveTaskToTrash: async () => {},
 		});
@@ -1475,7 +1377,6 @@ describe("useBoardInteractions", () => {
 				{ id: "validation", title: "Validation", cards: [createTask("task-val", "Validation task", 2)] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		let latestSnapshot: HookSnapshot | null = null;
@@ -1515,7 +1416,9 @@ describe("useBoardInteractions", () => {
 			requireSnapshot().confirmMoveToDone();
 		});
 		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
-		expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-review", "review");
+		expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-review", "review", {
+			boardMutationInitiator: "web_ui_user_gesture",
+		});
 
 		requestMoveTaskToTrashWithAnimation.mockClear();
 
@@ -1524,7 +1427,9 @@ describe("useBoardInteractions", () => {
 			requireSnapshot().handleMoveReviewCardToTrash("task-val");
 		});
 		expect(requireSnapshot().isMoveToDoneConfirmOpen).toBe(false);
-		expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-val", "validation");
+		expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-val", "validation", {
+			boardMutationInitiator: "web_ui_user_gesture",
+		});
 	});
 
 	// Stage 3 ④：列自动流转的 state 读已翻为 facet 权威（resolveSessionFacets + isAwaitingUserReviewTurn /
@@ -1537,7 +1442,7 @@ describe("useBoardInteractions", () => {
 			sessions: Record<string, RuntimeTaskSessionSummary>,
 		): Promise<void> => {
 			mockUnavailableProgrammaticCardMoves();
-			mockNoopLinkedBacklogTaskActions();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 			await act(async () => {
 				root.render(
 					<HookHarness
@@ -1666,7 +1571,7 @@ describe("useBoardInteractions", () => {
 
 		it("未变引用的 summary 不触发任何移列/状态写入（连 getTaskColumnId 扫描都跳过）", async () => {
 			mockUnavailableProgrammaticCardMoves();
-			mockNoopLinkedBacklogTaskActions();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 			let currentBoard = createBoardWithReviewTaskIds([], {
 				in_progress: [createTask("task-stay", "Stay task", 1), createTask("task-mover", "Mover task", 2)],
 			});
@@ -1746,7 +1651,7 @@ describe("useBoardInteractions", () => {
 				requestMoveTaskToTrashWithAnimation: async () => {},
 				programmaticCardMoveCycle: 0,
 			});
-			mockNoopLinkedBacklogTaskActions();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 			let currentBoard = createBoardWithTaskInColumn("task-blocked", "review");
 			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
 				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
@@ -1767,6 +1672,7 @@ describe("useBoardInteractions", () => {
 			});
 			expect(tryProgrammaticCardMoveMock).toHaveBeenCalledWith("task-blocked", "review", "in_progress", {
 				skipKickoff: true,
+				boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
 			});
 			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-blocked"]);
 
@@ -1778,13 +1684,14 @@ describe("useBoardInteractions", () => {
 			});
 			expect(tryProgrammaticCardMoveMock).toHaveBeenCalledWith("task-blocked", "review", "in_progress", {
 				skipKickoff: true,
+				boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
 			});
 			expect(cardIdsIn(currentBoard, "review")).toEqual(["task-blocked"]);
 		});
 
 		it("board 被外部写入（用户拖拽）后，未变引用的 summary 仍被全量重估", async () => {
 			mockUnavailableProgrammaticCardMoves();
-			mockNoopLinkedBacklogTaskActions();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 			let currentBoard = createBoardWithTaskInColumn("task-drag", "review");
 			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
 				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
@@ -1834,7 +1741,7 @@ describe("useBoardInteractions", () => {
 
 		it("in_progress 终端 agent 卡点击 → 翻会话 awaiting_review/user → Rule A 自动落位 Review", async () => {
 			mockUnavailableProgrammaticCardMoves();
-			mockNoopLinkedBacklogTaskActions();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 			let latestSnapshot: HookSnapshot | null = null;
 			let latestBoard: BoardData | null = null;
 
@@ -1880,7 +1787,7 @@ describe("useBoardInteractions", () => {
 
 		it("transitionTaskToReview 失败 → 弹 warning toast 且卡片留在 In Progress", async () => {
 			mockUnavailableProgrammaticCardMoves();
-			mockNoopLinkedBacklogTaskActions();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 			let latestSnapshot: HookSnapshot | null = null;
 			let latestBoard: BoardData | null = null;
 			const failingTransition = vi.fn(async () => false);
@@ -1924,7 +1831,7 @@ describe("useBoardInteractions", () => {
 
 		it("非 in_progress 卡 → 守卫拦截，不调用端点", async () => {
 			mockUnavailableProgrammaticCardMoves();
-			mockNoopLinkedBacklogTaskActions();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
 			let latestSnapshot: HookSnapshot | null = null;
 			const transition = vi.fn(async () => true);
 
@@ -1963,6 +1870,304 @@ describe("useBoardInteractions", () => {
 			});
 
 			expect(transition).not.toHaveBeenCalled();
+		});
+	});
+
+	// dd2db Y-EVENT-8：每个改 board 的入口按语义登记发起方，saveState 再据此出逐卡逐变更标注。
+	describe("saveState 发起方登记（Y-EVENT-8）", () => {
+		const cardIdsIn = (board: BoardData, columnId: BoardData["columns"][number]["id"]): string[] =>
+			(board.columns.find((column) => column.id === columnId)?.cards ?? []).map((card) => card.id);
+		const readColumnPlacementInitiator = (taskId: string) =>
+			readPendingWebUiBoardMutationInitiatorForTaskCardAspect(taskId, "task_card_column_placement");
+
+		beforeEach(() => {
+			discardAllPendingWebUiBoardMutationInitiatorRecords();
+		});
+
+		afterEach(() => {
+			discardAllPendingWebUiBoardMutationInitiatorRecords();
+		});
+
+		async function renderTrackingBoard(
+			initialBoard: BoardData,
+			options: { initialSessions?: Record<string, RuntimeTaskSessionSummary> } = {},
+		): Promise<{ readBoard: () => BoardData; readSnapshot: () => HookSnapshot }> {
+			let currentBoard = initialBoard;
+			let latestSnapshot: HookSnapshot | null = null;
+			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+			});
+			await act(async () => {
+				root.render(
+					<HookHarness
+						board={currentBoard}
+						setBoard={setBoard}
+						ensureTaskWorkspace={async () => ({ ok: true as const })}
+						startTaskSession={async () => ({ ok: true as const })}
+						initialSessions={options.initialSessions}
+						onSnapshot={(snapshot) => {
+							latestSnapshot = snapshot;
+						}}
+					/>,
+				);
+			});
+			return {
+				readBoard: () => currentBoard,
+				readSnapshot: () => {
+					if (!latestSnapshot) {
+						throw new Error("Expected a hook snapshot.");
+					}
+					return latestSnapshot;
+				},
+			};
+		}
+
+		function createCrossColumnDrop(
+			taskId: string,
+			fromColumnId: BoardColumnId,
+			toColumnId: BoardColumnId,
+		): DropResult {
+			return {
+				draggableId: taskId,
+				type: "CARD",
+				source: { droppableId: fromColumnId, index: 0 },
+				destination: { droppableId: toColumnId, index: 0 },
+				reason: "DROP",
+				mode: "FLUID",
+				combine: null,
+			};
+		}
+
+		it("records a real drag (no programmatic move in flight) as a user gesture", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			const harness = await renderTrackingBoard(createBoardWithTaskInColumn("task-drag", "in_progress"));
+
+			await act(async () => {
+				harness.readSnapshot().handleDragEnd(createCrossColumnDrop("task-drag", "in_progress", "validation"));
+			});
+
+			expect(cardIdsIn(harness.readBoard(), "validation")).toEqual(["task-drag"]);
+			expect(readColumnPlacementInitiator("task-drag")).toBe("web_ui_user_gesture");
+		});
+
+		it("records a programmatic (animated) move with the initiator carried by its behavior when it lands", async () => {
+			const programmaticCardMoveInFlight: ProgrammaticCardMoveInFlight = {
+				taskId: "task-anim",
+				fromColumnId: "in_progress",
+				toColumnId: "review",
+				insertAtTop: true,
+			};
+			useProgrammaticCardMovesMock.mockReturnValue({
+				handleProgrammaticCardMoveReady: () => {},
+				setRequestMoveTaskToTrashHandler: () => {},
+				tryProgrammaticCardMove: () => "unavailable",
+				consumeProgrammaticCardMove: () => ({
+					behavior: {
+						boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
+					},
+					programmaticCardMoveInFlight,
+				}),
+				resolvePendingProgrammaticTrashMove: () => {},
+				waitForProgrammaticCardMoveAvailability: async () => {},
+				resetProgrammaticCardMoves: () => {},
+				requestMoveTaskToTrashWithAnimation: async () => {},
+				programmaticCardMoveCycle: 0,
+			});
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			const harness = await renderTrackingBoard(createBoardWithTaskInColumn("task-anim", "in_progress"));
+
+			await act(async () => {
+				harness.readSnapshot().handleDragEnd(createCrossColumnDrop("task-anim", "in_progress", "review"));
+			});
+
+			expect(cardIdsIn(harness.readBoard(), "review")).toEqual(["task-anim"]);
+			expect(readColumnPlacementInitiator("task-anim")).toBe(
+				"web_ui_client_automation_session_facet_driven_column_autoflow",
+			);
+		});
+
+		it("records a programmatic move whose entry point carried no initiator as explicitly unknown (null)", async () => {
+			useProgrammaticCardMovesMock.mockReturnValue({
+				handleProgrammaticCardMoveReady: () => {},
+				setRequestMoveTaskToTrashHandler: () => {},
+				tryProgrammaticCardMove: () => "unavailable",
+				consumeProgrammaticCardMove: () => ({
+					programmaticCardMoveInFlight: {
+						taskId: "task-anon",
+						fromColumnId: "in_progress",
+						toColumnId: "review",
+						insertAtTop: true,
+					},
+				}),
+				resolvePendingProgrammaticTrashMove: () => {},
+				waitForProgrammaticCardMoveAvailability: async () => {},
+				resetProgrammaticCardMoves: () => {},
+				requestMoveTaskToTrashWithAnimation: async () => {},
+				programmaticCardMoveCycle: 0,
+			});
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			const harness = await renderTrackingBoard(createBoardWithTaskInColumn("task-anon", "in_progress"));
+
+			await act(async () => {
+				harness.readSnapshot().handleDragEnd(createCrossColumnDrop("task-anon", "in_progress", "review"));
+			});
+
+			expect(readColumnPlacementInitiator("task-anon")).toBeNull();
+		});
+
+		it("tags facet-driven autoflow moves (direct path) as session-facet-driven column autoflow", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			const harness = await renderTrackingBoard(createBoardWithTaskInColumn("task-ar", "in_progress"), {
+				initialSessions: {
+					"task-ar": createRunningSession("task-ar", { state: "awaiting_review", reviewReason: "exit" }),
+				},
+			});
+
+			expect(cardIdsIn(harness.readBoard(), "review")).toEqual(["task-ar"]);
+			expect(readColumnPlacementInitiator("task-ar")).toBe(
+				"web_ui_client_automation_session_facet_driven_column_autoflow",
+			);
+		});
+
+		it("tags the session-started backlog → in progress autoflow as session-facet-driven column autoflow", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			const harness = await renderTrackingBoard(createBoardWithTaskInColumn("task-live", "backlog"), {
+				initialSessions: { "task-live": createRunningSession("task-live") },
+			});
+
+			expect(cardIdsIn(harness.readBoard(), "in_progress")).toEqual(["task-live"]);
+			expect(readColumnPlacementInitiator("task-live")).toBe(
+				"web_ui_client_automation_session_facet_driven_column_autoflow",
+			);
+		});
+
+		it("tags the interrupted-session autoflow into Done with its own initiator", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			const harness = await renderTrackingBoard(createBoardWithTaskInColumn("task-int", "in_progress"), {
+				initialSessions: {
+					"task-int": createRunningSession("task-int", {
+						state: "interrupted",
+						reviewReason: "interrupted",
+						pid: null,
+					}),
+				},
+			});
+
+			expect(cardIdsIn(harness.readBoard(), "trash")).toEqual(["task-int"]);
+			expect(readColumnPlacementInitiator("task-int")).toBe(
+				"web_ui_client_automation_interrupted_session_autoflow_into_done_column",
+			);
+		});
+
+		it("passes the matching initiator into every animated autoflow attempt", async () => {
+			const tryProgrammaticCardMove = vi.fn(() => "started" as const);
+			useProgrammaticCardMovesMock.mockReturnValue({
+				handleProgrammaticCardMoveReady: () => {},
+				setRequestMoveTaskToTrashHandler: () => {},
+				tryProgrammaticCardMove,
+				consumeProgrammaticCardMove: () => ({}),
+				resolvePendingProgrammaticTrashMove: () => {},
+				waitForProgrammaticCardMoveAvailability: async () => {},
+				resetProgrammaticCardMoves: () => {},
+				requestMoveTaskToTrashWithAnimation: async () => {},
+				programmaticCardMoveCycle: 0,
+			});
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			await renderTrackingBoard(
+				createBoardWithReviewTaskIds([], {
+					in_progress: [createTask("task-to-review", "To review", 1), createTask("task-interrupted", "Gone", 2)],
+				}),
+				{
+					initialSessions: {
+						"task-to-review": createRunningSession("task-to-review", {
+							state: "awaiting_review",
+							reviewReason: "exit",
+						}),
+						"task-interrupted": createRunningSession("task-interrupted", {
+							state: "interrupted",
+							reviewReason: "interrupted",
+							pid: null,
+						}),
+					},
+				},
+			);
+
+			expect(tryProgrammaticCardMove).toHaveBeenCalledWith("task-to-review", "in_progress", "review", {
+				boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
+			});
+			expect(tryProgrammaticCardMove).toHaveBeenCalledWith("task-interrupted", "in_progress", "trash", {
+				skipTrashWorkflow: true,
+				boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
+			});
+		});
+
+		it("tags the Post-Deploy Verification completion move into Done with the panel-completion initiator", async () => {
+			const requestMoveTaskToTrashWithAnimation = vi.fn(async () => {});
+			useProgrammaticCardMovesMock.mockReturnValue({
+				handleProgrammaticCardMoveReady: () => {},
+				setRequestMoveTaskToTrashHandler: () => {},
+				tryProgrammaticCardMove: () => "unavailable",
+				consumeProgrammaticCardMove: () => ({}),
+				resolvePendingProgrammaticTrashMove: () => {},
+				waitForProgrammaticCardMoveAvailability: async () => {},
+				resetProgrammaticCardMoves: () => {},
+				requestMoveTaskToTrashWithAnimation,
+				programmaticCardMoveCycle: 0,
+			});
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			const harness = await renderTrackingBoard(createBoardWithTaskInColumn("task-pdv", "validation"));
+
+			let completion: { ok: boolean } | null = null;
+			await act(async () => {
+				completion = await harness
+					.readSnapshot()
+					.completePostDeployVerificationMoveToDone("task-pdv", "validation");
+			});
+
+			expect(completion).toEqual({ ok: true });
+			expect(requestMoveTaskToTrashWithAnimation).toHaveBeenCalledWith("task-pdv", "validation", {
+				boardMutationInitiator: "web_ui_user_gesture_post_deploy_verification_panel_completion",
+			});
+		});
+
+		it("records restore-from-Done and move-to-Validation buttons as user gestures", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			const harness = await renderTrackingBoard(
+				createBoardWithReviewTaskIds(["task-review"], { trash: [createTask("task-done", "Done task", 5)] }),
+			);
+
+			await act(async () => {
+				harness.readSnapshot().handleRestoreTaskFromTrash("task-done");
+			});
+			await act(async () => {
+				harness.readSnapshot().handleMoveCardToValidation("task-review");
+			});
+
+			expect(readColumnPlacementInitiator("task-done")).toBe("web_ui_user_gesture");
+			expect(readColumnPlacementInitiator("task-review")).toBe("web_ui_user_gesture");
+		});
+
+		it("records deleting a card as a user gesture on the permanent-removal aspect", async () => {
+			mockUnavailableProgrammaticCardMoves();
+			mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+			const harness = await renderTrackingBoard(createBoardWithTaskInColumn("task-delete", "backlog"));
+
+			await act(async () => {
+				harness.readSnapshot().handleOpenDeleteTask("task-delete");
+			});
+			await act(async () => {
+				harness.readSnapshot().handleConfirmDeleteTask();
+			});
+
+			expect(cardIdsIn(harness.readBoard(), "backlog")).toEqual([]);
+			expect(
+				readPendingWebUiBoardMutationInitiatorForTaskCardAspect("task-delete", "task_card_permanent_removal"),
+			).toBe("web_ui_user_gesture");
 		});
 	});
 });

@@ -31,7 +31,6 @@ function createBoard(): BoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [createCard("done-task")] },
 		],
-		dependencies: [],
 	};
 }
 

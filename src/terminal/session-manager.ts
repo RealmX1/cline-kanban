@@ -1109,7 +1109,14 @@ function takeLastLines(text: string, lineCount: number): string {
 	return lines.slice(lines.length - lineCount).join("\n");
 }
 
+export interface TerminalSessionManagerOptions {
+	// 用户在终端里提交了一次输入（dd2db 1a 终端输入观测）。由 workspace registry 接到关系账本；缺省不观测。
+	onUserTerminalInputSubmissionObservedForSession?: (kanbanTaskConversationSessionId: string) => void;
+}
+
 export class TerminalSessionManager implements TerminalSessionService {
+	constructor(private readonly terminalSessionManagerOptions: TerminalSessionManagerOptions = {}) {}
+
 	private readonly entries = new Map<string, SessionEntry>();
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
 	private readonly stallThresholdMs = readStallThresholdMs();
@@ -3882,6 +3889,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.stopAutomaticSubmissionAndSettleInterruptedDelivery(entry, false);
 		// 记录用户手动输入时刻，用于抑制自动续跑注入打断正在打字的用户。
 		entry.active.lastUserInputAt = now();
+		if (data.includes(0x0d) || data.includes(0x0a)) {
+			this.terminalSessionManagerOptions.onUserTerminalInputSubmissionObservedForSession?.(taskId);
+		}
 		// 输入侧字节跟踪：维护「框里有没有未提交内容」并给被 TUI 折叠掉的粘贴留原文账本。
 		// 必须在 session.write 之前记：这是纯内存计算，放前面才能保证「字节已进 PTY 但账没记上」
 		// 这个窗口不存在——争用判定与 Ctrl+S 取文都读这本账，漏一段就是把人类内容判丢。
