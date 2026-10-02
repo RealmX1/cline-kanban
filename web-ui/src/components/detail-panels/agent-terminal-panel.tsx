@@ -2,8 +2,13 @@ import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtim
 import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
 import "@xterm/xterm/css/xterm.css";
 
-import { isSessionInActiveTurn, resolveSessionFacets } from "@runtime-session-activity";
 import {
+	isNeverStartedPlaceholderTaskSessionSummary,
+	isSessionInActiveTurn,
+	resolveSessionFacets,
+} from "@runtime-session-activity";
+import {
+	AlertTriangle,
 	ArrowDown,
 	ArrowUp,
 	CaseSensitive,
@@ -11,6 +16,7 @@ import {
 	Maximize2,
 	MessageSquare,
 	Minimize2,
+	Play,
 	RefreshCw,
 	RotateCcw,
 	ScrollText,
@@ -41,10 +47,15 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import {
+	type TaskAgentSessionStartRequestInFlightPhase,
+	useTaskAgentSessionStartRequestInFlightPhase,
+} from "@/stores/task-agent-session-start-request-in-flight-store";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { TerminalSearchResultState } from "@/terminal/persistent-terminal-manager";
 import { usePersistentTerminalSession } from "@/terminal/use-persistent-terminal-session";
 import { isMacPlatform } from "@/utils/platform";
+import type { TaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 
 interface AgentTerminalSessionControls {
 	clearTerminal: () => void;
@@ -98,6 +109,12 @@ export interface AgentTerminalPanelProps {
 	isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView?: boolean;
 	minimalHeaderTitle?: string;
 	minimalHeaderSubtitle?: string | null;
+	// 这张卡的主 agent 会话以前有没有真正启动过（三值证据，见 task-agent-session-launch-history-evidence.ts）。
+	// 只有能拿到卡片的宿主（详情视图的主会话面板）才传；不传 = 本面板不承载这个问题，空态沿用「会话随运行时
+	// 没了」的旧解释。占位 summary + 空终端时：never_launched → 「还没启动」+ 启动（带原 prompt）；
+	// launch_history_unknown → 如实说不知道，把「启动」与「续跑」都摆出来；launched_before → 旧解释 + 续跑。
+	taskAgentSessionLaunchHistoryEvidence?: TaskAgentSessionLaunchHistoryEvidence;
+	onStartTaskAgentSessionWithTaskPrompt?: () => void;
 	panelBackgroundColor?: string;
 	terminalBackgroundColor?: string;
 	cursorColor?: string;
@@ -162,57 +179,169 @@ const statusTagColors: Record<StatusTagStyle, string> = {
 // 也不会再有输出，用户拿到的是一块**纯白无字**的 div —— 分不清是加载慢、是坏了、还是该做点什么。
 // 契约层早就要求把回收结果讲给用户听（api-contract 的 agentSessionRuntimeReclamationOutcome 注释：
 // 「用户重进任务时必须看到明确说明，而不是一个空终端让人误以为只是加载慢」），但前端一直没实现。
-function describeEmptyTerminalSessionCause(summary: RuntimeTaskSessionSummary | null): {
+//
+// 但「空终端 + 没有活跃回合」不只有「随运行时没了」这一种来历。一张刚进 In Progress 的新卡在整个启动窗口里
+// 也长这样（高负载下实测 20s～56s），此前一律被说成「随上一个运行时没了」，还递出一个续跑式重启按钮——
+// 在启动窗口里点它会和真正的启动抢同一把 per-task 闸门，把一次慢启动变成真失败。所以先分清来历，
+// 再决定说什么、给什么动作。判定顺序即优先级：
+//   1. 本标签页的启动请求还在路上 → 正在启动，不给任何会干扰启动的动作；
+//   2. 会话以 spawn/准备失败告终（liveness=failed）→ 启动失败（原因由服务端写进终端，到了就会盖掉本空态）；
+//   3. 被回收（reclamation outcome）→ 说明回收原因；
+//   4. summary 仍是占位、且宿主有正面证据「这张卡从没启动过」（任务 worktree 不存在）→ 尚未启动，
+//      动作是「启动」而不是续跑；
+//   5. summary 仍是占位、宿主说不清有没有启动过（卡片缺启动记录但 worktree 在）→ 如实说不知道，
+//      「启动」与「续跑」都给：把未知压成任何一边都会在另一边造成实伤（重发 prompt 起新对话 / 空 prompt 续跑）；
+//   6. 其余 → 确有启动史、会话随运行时没了（原解释）。
+type EmptyTerminalSessionCause =
+	| { kind: "agent_session_start_request_in_flight"; phase: TaskAgentSessionStartRequestInFlightPhase }
+	| { kind: "agent_session_failed_to_start" }
+	| {
+			kind: "agent_session_reclaimed";
+			reclamationTrigger: NonNullable<
+				RuntimeTaskSessionSummary["agentSessionRuntimeReclamationOutcome"]
+			>["reclamationTrigger"];
+	  }
+	| { kind: "agent_session_never_launched" }
+	| { kind: "agent_session_not_running_with_unknown_launch_history" }
+	| { kind: "agent_session_ended_with_previous_runtime" };
+
+export function classifyEmptyTerminalSessionCause({
+	summary,
+	startRequestInFlightPhase,
+	taskAgentSessionLaunchHistoryEvidence,
+}: {
+	summary: RuntimeTaskSessionSummary | null;
+	startRequestInFlightPhase: TaskAgentSessionStartRequestInFlightPhase | null;
+	taskAgentSessionLaunchHistoryEvidence: TaskAgentSessionLaunchHistoryEvidence | undefined;
+}): EmptyTerminalSessionCause {
+	if (startRequestInFlightPhase !== null) {
+		return { kind: "agent_session_start_request_in_flight", phase: startRequestInFlightPhase };
+	}
+	if (summary && resolveSessionFacets(summary).liveness === "failed") {
+		return { kind: "agent_session_failed_to_start" };
+	}
+	const reclamationOutcome = summary?.agentSessionRuntimeReclamationOutcome;
+	if (reclamationOutcome) {
+		return { kind: "agent_session_reclaimed", reclamationTrigger: reclamationOutcome.reclamationTrigger };
+	}
+	const isSummaryNeverStartedPlaceholder = summary === null || isNeverStartedPlaceholderTaskSessionSummary(summary);
+	if (isSummaryNeverStartedPlaceholder && taskAgentSessionLaunchHistoryEvidence === "never_launched") {
+		return { kind: "agent_session_never_launched" };
+	}
+	if (isSummaryNeverStartedPlaceholder && taskAgentSessionLaunchHistoryEvidence === "launch_history_unknown") {
+		return { kind: "agent_session_not_running_with_unknown_launch_history" };
+	}
+	return { kind: "agent_session_ended_with_previous_runtime" };
+}
+
+function describeEmptyTerminalSessionCause(cause: EmptyTerminalSessionCause): {
 	headline: string;
 	detail: string;
 } {
-	const reclamationOutcome = summary?.agentSessionRuntimeReclamationOutcome;
-	if (reclamationOutcome) {
-		return {
-			headline:
-				reclamationOutcome.reclamationTrigger === "park_abandoned"
-					? "This session was reclaimed after waiting too long on dispatched background work."
-					: "This session was reclaimed after sitting idle past its retention window.",
-			detail: "Its conversation is still on disk. Restarting resumes it in the same worktree.",
-		};
+	switch (cause.kind) {
+		case "agent_session_start_request_in_flight":
+			return {
+				headline:
+					cause.phase === "preparing_task_worktree"
+						? "Preparing the task worktree…"
+						: "Launching the agent session…",
+				detail: "This can take a while when the machine is under heavy load. The agent's output will appear here.",
+			};
+		case "agent_session_failed_to_start":
+			return {
+				headline: "This agent session failed to start.",
+				detail: "Restarting launches it again in the same worktree.",
+			};
+		case "agent_session_reclaimed":
+			return {
+				headline:
+					cause.reclamationTrigger === "park_abandoned"
+						? "This session was reclaimed after waiting too long on dispatched background work."
+						: "This session was reclaimed after sitting idle past its retention window.",
+				detail: "Its conversation is still on disk. Restarting resumes it in the same worktree.",
+			};
+		case "agent_session_never_launched":
+			return {
+				headline: "This task's agent session hasn't started.",
+				detail: "Starting it sets up the worktree if needed and sends the task prompt to the agent.",
+			};
+		case "agent_session_not_running_with_unknown_launch_history":
+			return {
+				headline: "This task's agent session isn't running.",
+				detail:
+					"If it never started, Start sends the task prompt to a new agent session. " +
+					"If it ran before, Restart resumes its previous conversation from disk instead.",
+			};
+		case "agent_session_ended_with_previous_runtime":
+			return {
+				headline: "This session is no longer running.",
+				detail:
+					"It most likely ended with the previous runtime — a machine restart or a local redeploy. " +
+					"Its conversation is still on disk. Restarting resumes it in the same worktree.",
+			};
 	}
-	return {
-		headline: "This session is no longer running.",
-		detail:
-			"It most likely ended with the previous runtime — a machine restart or a local redeploy. " +
-			"Its conversation is still on disk. Restarting resumes it in the same worktree.",
-	};
 }
 
 function AgentTerminalEmptySessionRecoveryNotice({
-	summary,
+	cause,
 	canRefresh,
 	isRefreshing,
 	onRefreshTerminal,
+	onStartTaskAgentSessionWithTaskPrompt,
 }: {
-	summary: RuntimeTaskSessionSummary | null;
+	cause: EmptyTerminalSessionCause;
 	canRefresh: boolean;
 	isRefreshing: boolean;
 	onRefreshTerminal: () => Promise<void>;
+	onStartTaskAgentSessionWithTaskPrompt: (() => void) | undefined;
 }): ReactElement {
-	const { headline, detail } = describeEmptyTerminalSessionCause(summary);
+	const { headline, detail } = describeEmptyTerminalSessionCause(cause);
+	const icon =
+		cause.kind === "agent_session_start_request_in_flight" ? (
+			<Spinner size={18} />
+		) : cause.kind === "agent_session_failed_to_start" ? (
+			<AlertTriangle size={18} className="text-status-red" />
+		) : (
+			<Unplug size={18} className="text-text-secondary" />
+		);
+	// 「启动」= 走正常启动、把卡片上的原 prompt 发给一段新对话；「续跑」= 对磁盘上的旧对话 --continue、空 prompt。
+	// 启动请求在路上时两者都不给（都会和这次启动抢 per-task 闸门）；从没启动过只给启动（没有旧对话可续）；
+	// 说不清时两者都给；其余只给续跑。
+	const offersStartWithTaskPrompt =
+		(cause.kind === "agent_session_never_launched" ||
+			cause.kind === "agent_session_not_running_with_unknown_launch_history") &&
+		onStartTaskAgentSessionWithTaskPrompt !== undefined;
+	const offersResumeOfPreviousConversation =
+		cause.kind !== "agent_session_start_request_in_flight" &&
+		cause.kind !== "agent_session_never_launched" &&
+		canRefresh;
 	return (
 		<div className="flex max-w-md flex-col items-center gap-3 rounded-md border border-border-subtle bg-surface-2 p-5 text-center">
-			<Unplug size={18} className="text-text-secondary" />
+			{icon}
 			<div className="text-[13px] font-medium text-text-primary">{headline}</div>
 			<div className="text-[12px] leading-relaxed text-text-secondary">{detail}</div>
-			{canRefresh ? (
-				<Button
-					size="sm"
-					variant="default"
-					disabled={isRefreshing}
-					onClick={() => {
-						void onRefreshTerminal();
-					}}
-				>
-					{isRefreshing ? <Spinner size={12} /> : <RotateCcw size={12} />}
-					<span className="ml-1.5">Restart terminal session</span>
-				</Button>
+			{offersStartWithTaskPrompt || offersResumeOfPreviousConversation ? (
+				<div className="flex flex-wrap items-center justify-center gap-2">
+					{offersStartWithTaskPrompt ? (
+						<Button size="sm" variant="primary" onClick={onStartTaskAgentSessionWithTaskPrompt}>
+							<Play size={12} />
+							<span className="ml-1.5">Start agent session</span>
+						</Button>
+					) : null}
+					{offersResumeOfPreviousConversation ? (
+						<Button
+							size="sm"
+							variant="default"
+							disabled={isRefreshing}
+							onClick={() => {
+								void onRefreshTerminal();
+							}}
+						>
+							{isRefreshing ? <Spinner size={12} /> : <RotateCcw size={12} />}
+							<span className="ml-1.5">Restart terminal session</span>
+						</Button>
+					) : null}
+				</div>
 			) : null}
 		</div>
 	);
@@ -610,6 +739,8 @@ function AgentTerminalPanelLayout({
 		_isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView = false,
 	minimalHeaderTitle = "Terminal",
 	minimalHeaderSubtitle = null,
+	taskAgentSessionLaunchHistoryEvidence,
+	onStartTaskAgentSessionWithTaskPrompt,
 	panelBackgroundColor = "var(--color-surface-1)",
 	terminalBackgroundColor = "var(--color-surface-1)",
 	cursorColor: _cursorColor = "var(--color-text-primary)",
@@ -661,16 +792,31 @@ function AgentTerminalPanelLayout({
 	// 判据读会话盖的通道章而不是 agentId：omp 有 TUI / ACP 两条通道，agentId 版谓词只认得它的
 	// catalog 默认，会把一条 ACP 会话当成可刷新的 PTY 会话。summary 缺席（会话已经没了）时按
 	// 「不知道 ⇒ 不禁用」放行，正是这个按钮存在的场景。
-	const canRefresh = showRefreshButton && !isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary);
+	// 本标签页对这张卡的启动请求还在路上（建 worktree / 启动 RPC）。此时「重启 agent 会话」会和这次启动抢
+	// 同一把 per-task 闸门：refresh 先进闸就把原 prompt 折叠掉永不送达，启动先进闸就被 refresh 当场杀掉。
+	const startRequestInFlightPhase = useTaskAgentSessionStartRequestInFlightPhase(workspaceId, taskId);
+	const canRefresh =
+		showRefreshButton &&
+		!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary) &&
+		startRequestInFlightPhase === null;
 	const showCompactHeader = !showSessionToolbar;
 	const isMobile = useIsMobile();
 	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
 	const showVirtualKeyInputBar = isMobile && !isSyntheticShellSession;
-	// 终端一片空白且没有任何回合在跑 —— 这正是「会话随运行时一起没了」的样子。给出解释与出路，
-	// 而不是留一块纯白的 div 让用户猜是加载慢还是坏了。
+	// 终端一片空白且没有任何回合在跑：给出解释与出路，而不是留一块纯白的 div 让用户猜是加载慢还是坏了。
+	// 来历不止一种（正在启动 / 启动失败 / 被回收 / 从没启动过 / 随运行时没了），见 classifyEmptyTerminalSessionCause。
 	// 合成 shell 排除在外：它本来就可能长时间没有输出，且没有「agent 会话」可重启。
 	const showEmptyTerminalRecoveryState =
 		!hasRenderedAnyTerminalContent && !isSyntheticShellSession && !isTranscriptReaderOpen && !canStop;
+	const emptyTerminalSessionCause = useMemo(
+		() =>
+			classifyEmptyTerminalSessionCause({
+				summary,
+				startRequestInFlightPhase,
+				taskAgentSessionLaunchHistoryEvidence,
+			}),
+		[summary, startRequestInFlightPhase, taskAgentSessionLaunchHistoryEvidence],
+	);
 	const statusLabel = useMemo(() => describeState(summary), [summary]);
 	const statusTagStyle = useMemo(() => getStateTagStyle(summary), [summary]);
 	const stallElapsedMs = useStallElapsedMs(summary);
@@ -917,10 +1063,11 @@ function AgentTerminalPanelLayout({
 				{showEmptyTerminalRecoveryState ? (
 					<div className="absolute inset-0 z-10 flex items-center justify-center p-6">
 						<AgentTerminalEmptySessionRecoveryNotice
-							summary={summary}
+							cause={emptyTerminalSessionCause}
 							canRefresh={canRefresh}
 							isRefreshing={isRefreshing}
 							onRefreshTerminal={refreshTerminal}
+							onStartTaskAgentSessionWithTaskPrompt={onStartTaskAgentSessionWithTaskPrompt}
 						/>
 					</div>
 				) : null}

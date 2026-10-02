@@ -15,6 +15,7 @@ const workspaceSnapshotMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: workspaceSnapshotMock,
+	useTaskWorkspaceInfoValue: () => null,
 }));
 
 function createCard(overrides: Partial<BoardCard> = {}): BoardCard {

@@ -26,6 +26,7 @@ import {
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
 import { resolveTaskCreateBaseRef } from "../core/task-create-base-ref-resolution";
+import { recordTaskSessionStartDiagnostic } from "../diagnostics/task-session-start-diagnostics-logger";
 import type { KanbanActorResolutionLookups } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
 import { recordFactObservedByActiveKanbanRuntimeWithoutBlocking } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
@@ -467,12 +468,30 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		ensureWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeEnsureRequest(input);
-			return await ensureTaskWorktreeIfDoesntExist({
+			const ensureRequestReceivedAt = Date.now();
+			const ensured = await ensureTaskWorktreeIfDoesntExist({
 				cwd: workspaceScope.workspacePath,
 				taskId: body.taskId,
 				baseRef: body.baseRef,
 				worktreeMode: body.worktreeMode,
 			});
+			// 浏览器启动任务是两次独立 RPC：先 ensureWorktree、再 startTaskSession。这一步失败时浏览器只弹一条
+			// toast，卡片停在 In Progress 且没有会话，而 startTaskSession 根本没被调用——启动诊断日志里一行
+			// 都没有，「新任务起不来」在服务端无从查起（高负载下锁等待超时就是这样消失的）。在这里补记。
+			if (!ensured.ok) {
+				void recordTaskSessionStartDiagnostic({
+					event: "failed",
+					workspaceId: workspaceScope.workspaceId,
+					taskId: body.taskId,
+					requestedAgentId: null,
+					effectiveAgentId: null,
+					phase: "ensure_task_worktree",
+					elapsedMs: Date.now() - ensureRequestReceivedAt,
+					error: ensured.error ?? null,
+					session: null,
+				});
+			}
+			return ensured;
 		},
 		deleteWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeDeleteRequest(input);

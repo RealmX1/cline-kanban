@@ -29,6 +29,19 @@ const turnCheckpointMocks = vi.hoisted(() => ({
 	deleteAllTaskTurnCheckpointRefs: vi.fn(),
 }));
 
+const taskSessionStartDiagnosticsMocks = vi.hoisted(() => ({
+	recordTaskSessionStartDiagnostic: vi.fn(async () => {}),
+}));
+
+const ensureTaskWorktreeMocks = vi.hoisted(() => ({
+	ensureTaskWorktreeIfDoesntExist: vi.fn(),
+}));
+
+// 真实实现会追加写 ~/.cline/kanban 下的启动诊断日志：测试绝不能污染真实 home。
+vi.mock("../../../src/diagnostics/task-session-start-diagnostics-logger.js", () => ({
+	recordTaskSessionStartDiagnostic: taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic,
+}));
+
 vi.mock("../../../src/state/discard-task-edit-drafts-for-tasks-removed-from-board.js", async (importOriginal) => {
 	// 差集计算是纯函数、正是 saveState 两条清理共用的判据，保留真实实现；只有落盘清理本体被桩掉。
 	const actual = (await importOriginal()) as {
@@ -66,7 +79,7 @@ vi.mock("../../../src/workspace/task-worktree.js", async (importOriginal) => {
 		TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX: actual.TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX,
 		TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX: actual.TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX,
 		deleteTaskWorktree: vi.fn(),
-		ensureTaskWorktreeIfDoesntExist: vi.fn(),
+		ensureTaskWorktreeIfDoesntExist: ensureTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist,
 		getTaskWorkspaceInfo: vi.fn(),
 		resolveTaskCwd: workspaceTaskWorktreeMocks.resolveTaskCwd,
 	};
@@ -720,5 +733,54 @@ describe("createWorkspaceApi addBacklogTask", () => {
 			}),
 			expect.any(Function),
 		);
+	});
+});
+
+describe("createWorkspaceApi ensureWorktree", () => {
+	const workspaceScope = { workspaceId: "workspace-for-ensure-worktree-test", workspacePath: "/tmp/repo" };
+
+	beforeEach(() => {
+		ensureTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist.mockReset();
+		taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic.mockClear();
+	});
+
+	it("records a start diagnostic when worktree setup fails, because startTaskSession is never reached", async () => {
+		// 浏览器启动 = ensureWorktree 与 startTaskSession 两次 RPC。前者失败（高负载下锁等待超时）时
+		// 后者根本不会被调用，此前启动诊断日志里一行都没有，「新任务起不来」在服务端无从查起。
+		ensureTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist.mockResolvedValue({
+			ok: false,
+			path: null,
+			baseRef: "main",
+			baseCommit: null,
+			error: "Lock file is already being held",
+		});
+		const api = createWorkspaceApiForTest();
+
+		const response = await api.ensureWorktree(workspaceScope, { taskId: "task-1", baseRef: "main" });
+
+		expect(response.ok).toBe(false);
+		expect(taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic).toHaveBeenCalledWith(
+			expect.objectContaining({
+				event: "failed",
+				workspaceId: "workspace-for-ensure-worktree-test",
+				taskId: "task-1",
+				phase: "ensure_task_worktree",
+				error: "Lock file is already being held",
+			}),
+		);
+	});
+
+	it("does not record a start diagnostic when the worktree is ready", async () => {
+		ensureTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist.mockResolvedValue({
+			ok: true,
+			path: "/tmp/worktree",
+			baseRef: "main",
+			baseCommit: "abc123",
+		});
+		const api = createWorkspaceApiForTest();
+
+		await api.ensureWorktree(workspaceScope, { taskId: "task-1", baseRef: "main" });
+
+		expect(taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic).not.toHaveBeenCalled();
 	});
 });

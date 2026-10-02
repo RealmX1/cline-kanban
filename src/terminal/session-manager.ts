@@ -5294,7 +5294,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		terminalStateMirror: TerminalStateMirror,
 		failureMessage: string,
 	): void {
-		terminalStateMirror.applyOutput(Buffer.from(`\r\n[kanban] ${failureMessage}\r\n`, "utf8"));
+		const failureExplanation = Buffer.from(`\r\n[kanban] ${failureMessage}\r\n`, "utf8");
+		terminalStateMirror.applyOutput(failureExplanation);
 		entry.terminalStateMirror = terminalStateMirror;
 		const summary = updateSummary(entry, {
 			...buildTerminalFacetPatch(entry.summary, "failed", {
@@ -5318,6 +5319,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 				? { taskConversationSessionMetadata: request.taskConversationSessionMetadata }
 				: {}),
 		});
+		// 只写镜像不够：镜像只服务**之后**才挂上来的 viewer（restore 快照）。启动那一刻已经开着面板的人
+		// （新任务恰恰如此——卡片一进 In Progress 面板就挂上了）收不到这句话，看到的是一块空终端，
+		// 面板只能猜成「会话随上一个运行时没了」。与 refresh banner / 熔断说明同一做法：镜像 + 当前监听者都给。
+		for (const listener of entry.listeners.values()) {
+			listener.onOutput?.(failureExplanation);
+			listener.onState?.(cloneSummary(summary));
+		}
 		this.emitSummary(summary);
 	}
 
