@@ -1,4 +1,5 @@
 import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { AgentNativeConversationPersistenceRecoveryNotice } from "@/components/detail-panels/agent-native-conversation-persistence-recovery-notice";
 import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
 import "@xterm/xterm/css/xterm.css";
 
@@ -46,7 +47,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskAgentSessionInitialization, RuntimeTaskSessionSummary } from "@/runtime/types";
 import {
 	type TaskAgentSessionStartRequestInFlightPhase,
 	useTaskAgentSessionStartRequestInFlightPhase,
@@ -71,6 +72,7 @@ interface AgentTerminalSessionControls {
 	searchResults: TerminalSearchResultState;
 	stopTerminal: () => Promise<void>;
 	refreshTerminal: () => Promise<void>;
+	adoptExistingAgentConversationAndResume: (initialization: RuntimeTaskAgentSessionInitialization) => Promise<void>;
 	resyncTerminalView: () => Promise<void>;
 	closeTerminalSearch: () => void;
 	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
@@ -124,6 +126,10 @@ export interface AgentTerminalPanelProps {
 	onSendAgentCommand?: () => void;
 	isExpanded?: boolean;
 	onToggleExpand?: () => void;
+	// 「对话从未建立」时的「用原 prompt 全新开局」（见 agent-native-conversation-persistence-recovery-notice.tsx）。
+	// 只有能拿到卡片的宿主（卡片详情）才传；不传就不显示这条出路。
+	originalTaskPromptForFreshStart?: string | null;
+	onStartFreshAgentSessionWithOriginalTaskPrompt?: () => Promise<void>;
 }
 
 // 读 facet 真相源（turnOwner/liveness），不再读 legacy `state`；标签文案与旧 state 映射逐项等价
@@ -750,6 +756,8 @@ function AgentTerminalPanelLayout({
 	onSendAgentCommand,
 	isExpanded = false,
 	onToggleExpand,
+	originalTaskPromptForFreshStart = null,
+	onStartFreshAgentSessionWithOriginalTaskPrompt,
 	sessionControls,
 }: AgentTerminalPanelProps & { sessionControls: AgentTerminalSessionControls }): ReactElement {
 	const {
@@ -768,6 +776,7 @@ function AgentTerminalPanelLayout({
 		findPreviousInTerminal,
 		openTerminalSearch,
 		refreshTerminal,
+		adoptExistingAgentConversationAndResume,
 		resyncTerminalView,
 		scrollTerminalToLatest,
 		stopTerminal,
@@ -1031,6 +1040,16 @@ function AgentTerminalPanelLayout({
 					<Unplug size={12} className="shrink-0" />
 					<span>Terminal stream closed — the agent process has exited. The output above is final.</span>
 				</div>
+			) : null}
+			{canRefresh ? (
+				<AgentNativeConversationPersistenceRecoveryNotice
+					summary={summary}
+					workspaceId={workspaceId}
+					originalTaskPromptForFreshStart={originalTaskPromptForFreshStart}
+					isRestartingAgentSession={isRefreshing}
+					onStartFreshAgentSessionWithOriginalTaskPrompt={onStartFreshAgentSessionWithOriginalTaskPrompt}
+					onAdoptExistingAgentConversationAndResume={adoptExistingAgentConversationAndResume}
+				/>
 			) : null}
 			{/* 阅读模式是叠加而非替换：xterm 始终挂载、PTY 继续跑、输出继续进 buffer（xterm 的渲染
 			    挂起只由整个浏览器标签页的 visibilitychange 驱动，不看元素是否可见），所以两种模式

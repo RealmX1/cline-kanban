@@ -1227,43 +1227,49 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						cardTerminalAgentModelOverrideSettings: card.terminalAgentModelOverrideSettings,
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
 					});
-				const summary = await terminalManager.refreshTaskTerminal(
-					{
-						taskId: body.taskId,
-						// 补回这两个字段（此前重建请求把它们丢了）：
-						//   workspaceTaskId 决定 hook env 里的 KANBAN_TASK_ID 归属；
-						//   taskConversationSessionMetadata 驱动侧问会话的只读约束（session-manager 的
-						//   readOnlyQuestionSession），丢了就等于重启一次侧问会话它就能写文件了。
-						// 且这份重建请求会覆盖 entry.restartRequest，残缺一次就会被此后的崩溃自动重启永久继承。
-						workspaceTaskId,
-						...(currentSummary?.taskConversationSessionMetadata
-							? { taskConversationSessionMetadata: currentSummary.taskConversationSessionMetadata }
-							: {}),
-						agentId: resolved.agentId,
-						binary: resolved.binary,
-						args: resolved.args,
-						taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
-							card.taskAgentPermissionMode,
-							scopedRuntimeConfig.agentAutonomousModeEnabled,
-						),
-						autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
-						cwd: taskCwd,
-						prompt: "",
-						images: undefined,
-						startInPlanMode: undefined,
-						resumeFromTrash: true,
-						cols: body.cols,
-						rows: body.rows,
-						workspaceId: workspaceScope.workspaceId,
-						projectPath: workspaceScope.workspacePath,
-						parentSessionId: undefined,
-						taskAgentSessionInitialization: undefined,
-						terminalAgentModelOverrideSettings: resumedTerminalAgentModelOverrideSettings,
-					},
-					// 客户端未声明即按「人点的刷新」记账。前端的陈旧会话自动续跑打的是同一个入口，
-					// 靠它显式声明 stale_session_client_auto_resume 才分得开。
-					body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal",
-				);
+				const refreshTaskTerminalRequest = {
+					taskId: body.taskId,
+					// 补回这两个字段（此前重建请求把它们丢了）：
+					//   workspaceTaskId 决定 hook env 里的 KANBAN_TASK_ID 归属；
+					//   taskConversationSessionMetadata 驱动侧问会话的只读约束（session-manager 的
+					//   readOnlyQuestionSession），丢了就等于重启一次侧问会话它就能写文件了。
+					// 且这份重建请求会覆盖 entry.restartRequest，残缺一次就会被此后的崩溃自动重启永久继承。
+					workspaceTaskId,
+					...(currentSummary?.taskConversationSessionMetadata
+						? { taskConversationSessionMetadata: currentSummary.taskConversationSessionMetadata }
+						: {}),
+					agentId: resolved.agentId,
+					binary: resolved.binary,
+					args: resolved.args,
+					taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
+						card.taskAgentPermissionMode,
+						scopedRuntimeConfig.agentAutonomousModeEnabled,
+					),
+					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
+					cwd: taskCwd,
+					prompt: "",
+					images: undefined,
+					startInPlanMode: undefined,
+					resumeFromTrash: true,
+					cols: body.cols,
+					rows: body.rows,
+					workspaceId: workspaceScope.workspaceId,
+					projectPath: workspaceScope.workspacePath,
+					parentSessionId: undefined,
+					taskAgentSessionInitialization: undefined,
+					terminalAgentModelOverrideSettings: resumedTerminalAgentModelOverrideSettings,
+				};
+				// 客户端未声明即按「人点的刷新」记账。前端的陈旧会话自动续跑打的是同一个入口，
+				// 靠它显式声明 stale_session_client_auto_resume 才分得开。
+				const refreshTaskSessionStartOrigin =
+					body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal";
+				// 「从既有对话迁入」（只有人在终端面板上选定后才会带）：先迁入、钉身份，再按 id 续跑。
+				const summary = body.adoptExistingAgentConversationAsTaskSessionIdentity
+					? await terminalManager.refreshTaskTerminal(refreshTaskTerminalRequest, refreshTaskSessionStartOrigin, {
+							adoptExistingAgentConversationAsTaskSessionIdentity:
+								body.adoptExistingAgentConversationAsTaskSessionIdentity,
+						})
+					: await terminalManager.refreshTaskTerminal(refreshTaskTerminalRequest, refreshTaskSessionStartOrigin);
 				// 重启也是一次启动：把 agent 身份重新钉到卡片上，让「靠兜底才救回来的会话」在下一次硬中断时
 				// 不必再靠兜底。
 				//

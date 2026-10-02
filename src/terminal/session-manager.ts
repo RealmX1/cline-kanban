@@ -4,6 +4,10 @@
 import { randomUUID } from "node:crypto";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import {
+	isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch,
+	isRestorationContinuationGuardDisarmedOnTerminalSubmissionEdge,
+} from "../core/agent-catalog";
+import {
 	type AgentConversationSessionResumeAddressing,
 	describeRefusedAmbiguousExecutionWorkingDirectoryResumeAddressing,
 	resolveAgentConversationSessionResumeAddressing,
@@ -11,9 +15,11 @@ import {
 } from "../core/agent-conversation-session-resume-addressing";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentNativeConversationPersistenceObservation,
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeLastConversationProgressObservation,
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskConnectionRetry,
 	RuntimeTaskConversationMode,
 	RuntimeTaskConversationSessionMetadata,
@@ -91,6 +97,18 @@ import {
 	hasCodexUnsubmittedProgrammaticPrompt,
 } from "./codex-readiness";
 import { hasCodexWorkspaceTrustPrompt, shouldAutoConfirmCodexWorkspaceTrust } from "./codex-workspace-trust";
+import {
+	assignCursorAgentChatIdBeforeLaunch,
+	buildKanbanEstablishedAgentNativeConversationSessionIdentity,
+	describeCursorAgentConversationNeverEstablishedResumeRefusal,
+} from "./cursor-agent-chat-id-assignment-and-resume-preflight-before-launch";
+import {
+	inspectKanbanAssignedCursorAgentChatFirstPromptPersistence,
+	type KanbanAssignedCursorAgentChatFirstPromptPersistenceWatch,
+	pickCursorAgentChatStoreEnvironmentOverrides,
+	runCursorAgentChatResumeTargetPreflight,
+	wasKanbanAssignedCursorAgentChatConversationEstablishedAtExit,
+} from "./cursor-agent-chat-launch-identity-orchestration";
 import { hasKimiInteractivePrompt, hasKimiStartupUiRendered } from "./kimi-readiness";
 import {
 	getDefaultOutputReactionEngine,
@@ -111,6 +129,8 @@ import {
 	describeTaskSessionAutoRestartCircuitBreak,
 	doesTaskSessionStartOriginCountAsHumanInterventionClearingAutoRestartCircuitBreak,
 	pruneAutoRestartTimestampsToRollingHour,
+	selectLastNonEmptyAgentTerminalOutputLine,
+	type TaskSessionAutoRestartCircuitBreakReason,
 } from "./task-session-auto-restart-policy";
 import { backfillFoldedPastePlaceholdersFromPasteLedger } from "./terminal-input-box-folded-paste-placeholder-backfill";
 import {
@@ -452,6 +472,9 @@ interface ActiveProcessState {
 	// 失明，而那正是「反复陈旧化 → 前端自动续跑」这类成环形态的样子。本字段与 active 同生共死，结构上
 	// 不存在 null。何况 summary.startedAt 是给 UI 的展示字段，它的含义将来若被改动，不该静默改掉熔断判定。
 	terminalSessionIncarnationSpawnedAtEpochMs: number;
+	// 「kanban 分配 id 的全新开局，首轮有没有落进 cursor 的 chat store」看门狗（只有 Cursor 会创建）。
+	// 由卡顿扫描每轮推进，对话建立后置 null；PTY 退出时若仍未建立，就把会话标成「从未建立对话」。
+	kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch: KanbanAssignedCursorAgentChatFirstPromptPersistenceWatch | null;
 }
 
 // 争用抢占的执行者：把人类未提交的输入无损暂存进 Prompt Library，并清空输入框。
@@ -1112,6 +1135,13 @@ function takeLastLines(text: string, lineCount: number): string {
 export interface TerminalSessionManagerOptions {
 	// 用户在终端里提交了一次输入（dd2db 1a 终端输入观测）。由 workspace registry 接到关系账本；缺省不观测。
 	onUserTerminalInputSubmissionObservedForSession?: (kanbanTaskConversationSessionId: string) => void;
+	// 把 summary 上刚确定的原生会话身份**立即**落盘（不等浏览器保存 board / 正常关机）。kanban 在 spawn 前为
+	// Cursor 分配 chat id 时用：spawn 之后运行时若崩溃，没落盘的 id 就丢了，下次只能退回 cwd-latest。
+	// 由 workspace registry 接到 persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId；缺省不落盘。
+	persistAgentNativeConversationSessionIdentityImmediately?: (
+		kanbanTaskConversationSessionId: string,
+		readCurrentSessionSummary: () => RuntimeTaskSessionSummary | null,
+	) => Promise<void>;
 }
 
 export class TerminalSessionManager implements TerminalSessionService {
@@ -1766,10 +1796,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 推进 lastSubstantiveOutputAt。刻意不下沉进 writePasteSubmissionWithConfirm：那个 writer 同时
 		// 服务连接中断自动续跑（submitConnectionDropContinuation），自动恢复不是用户继续、绝不可解除 guard。
 		clearResumeSubstantiveGuard(currentActive);
-		// Codex 没有可供 Kanban 识别真人提交的可靠 UserPromptSubmit hook，故在这个明确的程序化提交
-		// 边沿解除。Claude 必须把守卫保留到其 UserPromptSubmit hook：那条同步 hook 还要原子取出恢复期
-		// 暂存的 task-notification，并作为 additionalContext 附到本次用户提交；在这里提前解除会漏掉它。
-		if (currentEntry.summary.agentId === "codex") {
+		// Codex / Cursor 没有可供 Kanban 识别真人提交的可靠 UserPromptSubmit hook，故在这个明确的程序化提交
+		// 边沿解除（不解除的话守卫要挂满 30 分钟兜底，期间排队投递一直被挡）。Claude 必须把守卫保留到其
+		// UserPromptSubmit hook：那条同步 hook 还要原子取出恢复期暂存的 task-notification，并作为
+		// additionalContext 附到本次用户提交；在这里提前解除会漏掉它。
+		if (isRestorationContinuationGuardDisarmedOnTerminalSubmissionEdge(currentEntry.summary.agentId)) {
 			this.disarmRestorationContinuationGuard(taskId);
 		}
 		// 就绪命中 或 deadline 兜底：经写后确认闭环写 PTY（不走 writeInput，避免把程序化投递记成 lastUserInputAt
@@ -2649,6 +2680,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 						// 在等这个输入框」的假挂起，并在终端上方摆出「暂存我的输入并放行」，用户还可能对一条根本不
 						// 存在的投递执行暂存——正是本轮工作要根除的那种不诚实。
 						terminalDeliveryContention: null,
+						// 「首轮未在启动窗口内落盘」是活进程作用域的读数（看门狗挂在 active 上），重建条目按构造没有活进程，
+						// 留着它卡片就一直告警。「从未建立 / 已建立」是跨重启成立的事实，保留。
+						...(summary.agentNativeConversationPersistenceObservation?.persistenceStatus ===
+						"first_prompt_not_persisted_within_startup_window"
+							? { agentNativeConversationPersistenceObservation: null }
+							: {}),
 						// 同一 chokepoint 顺带补盖通道章：本改动之前落盘的记录没有这个字段，而
 						// terminalManager 持有的会话按构造恒是 PTY 的，明写好过依赖读时回退派生。
 						sessionTransport: "pty_terminal",
@@ -2857,6 +2894,256 @@ export class TerminalSessionManager implements TerminalSessionService {
 		throw new Error(message);
 	}
 
+	// 续跑前的 Cursor 预检（「kanban 分配身份」的 agent 才有，判定见 cursor-agent-chat-launch-identity-orchestration.ts）。
+	// 只在续跑时生效：全新开局不寻址，没有什么可预检的。三种结局：
+	//   - 能按记录的 id 接上 / 桶里有 ≥2 段已建立对话（维持 `--continue`）⇒ 放行；
+	//   - 没记录 id、桶里恰好一段已建立对话 ⇒ 把它钉成身份并立即落盘，下游解析器随后按 id 续跑；
+	//   - 接不上任何已建立的对话 ⇒ 在这里拒绝，**不 spawn**：旧版会起一个注定秒退的
+	//     `cursor-agent --continue`（"No previous chats found." exit 1），连撞 5 次熔断，熔断文案又让人刷新，
+	//     刷新走的是同一条续跑。拒绝不经 PTY 退出，自然也不计入熔断。
+	private async refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+	): Promise<void> {
+		if (
+			!isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch(request.agentId) ||
+			!(request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt)
+		) {
+			return;
+		}
+		const decision = await runCursorAgentChatResumeTargetPreflight({
+			workingDirectoryPath: request.cwd,
+			environmentOverrides: pickCursorAgentChatStoreEnvironmentOverrides(request.env),
+			recordedIdentity: entry.summary.agentNativeConversationSessionIdentity,
+			hasCompetingCursorSessionInWorkingDirectory:
+				this.collectTaskConversationSessionsSharingExecutionWorkingDirectory(request).some(
+					(sharingSession) => sharingSession.agentId === request.agentId,
+				),
+		});
+		switch (decision.kind) {
+			case "resume_by_recorded_chat_id":
+			case "resume_latest_established_chat_in_working_directory_bucket":
+				return;
+			case "pin_unique_established_chat_then_resume_by_id":
+				await this.establishAgentNativeConversationSessionIdentityAndPersistImmediately(
+					entry,
+					request,
+					buildKanbanEstablishedAgentNativeConversationSessionIdentity({
+						agentId: request.agentId,
+						nativeSessionId: decision.chatId,
+						observedAt: now(),
+						identityEstablishmentMethod: "unique_established_chat_in_working_directory_bucket_backfill",
+					}),
+				);
+				return;
+			case "refuse_conversation_never_established_in_working_directory": {
+				const message = describeCursorAgentConversationNeverEstablishedResumeRefusal({
+					refusalCause: decision.refusalCause,
+					recordedChatId: decision.recordedChatId,
+					workingDirectoryPath: request.cwd,
+				});
+				const explanation = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
+				// 已有镜像就写进去（不替换，保住 scrollback）。没有镜像（运行时重启后第一次打开）就装一份只写着原因的：
+				// 空快照会被前端当成「镜像丢了」去自动续跑，而续跑正是这里要拦下的动作；何况用户得看得见原因。
+				if (!entry.terminalStateMirror) {
+					const cols =
+						Number.isFinite(request.cols) && (request.cols ?? 0) > 0 ? Math.floor(request.cols ?? 0) : 120;
+					const rows =
+						Number.isFinite(request.rows) && (request.rows ?? 0) > 0 ? Math.floor(request.rows ?? 0) : 40;
+					entry.terminalStateMirror = new TerminalStateMirror(cols, rows);
+				}
+				entry.terminalStateMirror.applyOutput(explanation);
+				const summary = updateSummary(entry, {
+					warningMessage: message,
+					agentNativeConversationPersistenceObservation: {
+						persistenceStatus: "conversation_never_established_in_agent_native_store",
+						nativeSessionId: decision.recordedChatId,
+						workingDirectoryPath: request.cwd,
+						// 上一代看门狗若认出过阻塞成因（信任对话框），沿用；判不出就是 null。
+						suspectedBlockingCause:
+							entry.summary.agentNativeConversationPersistenceObservation?.suspectedBlockingCause ?? null,
+						observedAt: now(),
+					},
+				});
+				for (const listener of entry.listeners.values()) {
+					listener.onOutput?.(explanation);
+					listener.onState?.(cloneSummary(summary));
+				}
+				this.emitSummary(summary);
+				throw new Error(message);
+			}
+		}
+	}
+
+	// 全新开局 / 建卡播种时，在 spawn 前把这条会话的原生身份定下来并落盘。返回值只在全新开局时有：
+	// 要交给 adapter 以 `--resume <新 id> <prompt>` 开局的 id。续跑（按 id 或 cwd-latest）不碰身份。
+	private async establishKanbanAssignedAgentNativeConversationSessionIdentityBeforeLaunch(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+	): Promise<string | undefined> {
+		if (
+			!isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch(request.agentId) ||
+			request.resumeFromTrash ||
+			request.resumePriorAgentConversationWithoutResendingPrompt
+		) {
+			return undefined;
+		}
+		const seededChatId =
+			request.taskAgentSessionInitialization?.sourceAgentId === request.agentId
+				? request.taskAgentSessionInitialization.sourceSessionId
+				: null;
+		// 每次全新开局（含崩溃后从原始 prompt 重跑的 auto-restart）都换新 id，与 Claude「新会话新 id」同义；
+		// 播种则沿用种子 id——源对话已被物化进本会话的执行工作目录。
+		const nativeSessionId = seededChatId ?? assignCursorAgentChatIdBeforeLaunch();
+		await this.establishAgentNativeConversationSessionIdentityAndPersistImmediately(
+			entry,
+			request,
+			buildKanbanEstablishedAgentNativeConversationSessionIdentity({
+				agentId: request.agentId,
+				nativeSessionId,
+				observedAt: now(),
+				identityEstablishmentMethod:
+					seededChatId === null
+						? "kanban_assigned_before_agent_launch"
+						: "task_agent_session_initialization_seed_materialized_into_working_directory",
+			}),
+		);
+		return seededChatId === null ? nativeSessionId : undefined;
+	}
+
+	private async establishAgentNativeConversationSessionIdentityAndPersistImmediately(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+		identity: RuntimeAgentNativeConversationSessionIdentity,
+	): Promise<void> {
+		// agentId 一并写：落盘侧要求身份的 sourceAgentId 与 summary.agentId 一致，而全新任务此刻 agentId 还是 null。
+		// 启动已经越过了换代块，这条会话就是 request.agentId 的会话（失败出口写的也是它）。
+		const summary = updateSummary(entry, {
+			agentId: request.agentId,
+			agentNativeConversationSessionIdentity: identity,
+		});
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+		const persistAgentNativeConversationSessionIdentityImmediately =
+			this.terminalSessionManagerOptions.persistAgentNativeConversationSessionIdentityImmediately;
+		if (!persistAgentNativeConversationSessionIdentityImmediately) {
+			return;
+		}
+		try {
+			await persistAgentNativeConversationSessionIdentityImmediately(request.taskId, () => {
+				const currentEntry = this.entries.get(request.taskId);
+				return currentEntry ? cloneSummary(currentEntry.summary) : null;
+			});
+		} catch (error) {
+			// 落盘失败不拦启动：身份已在内存 summary 上，常规持久化（board 保存 / 正常关机）仍会带上它。代价只是
+			// 这段窗口里运行时若崩溃会丢 id，下次续跑退回预检的 cwd 桶判定——不比修之前更糟。
+			logTuiFreezeWarning(
+				`[tui-freeze] agent-native-identity-persist-before-launch-failed taskId=${request.taskId} agentId=${request.agentId} error=${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	private publishAgentNativeConversationPersistenceObservation(
+		entry: SessionEntry,
+		observation: RuntimeAgentNativeConversationPersistenceObservation | null,
+	): void {
+		const summary = updateSummary(entry, { agentNativeConversationPersistenceObservation: observation });
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+	}
+
+	// 首轮落盘看门狗的一步（卡顿扫描每 15s 调一次）。只在结论变化时写 summary。
+	private async advanceKanbanAssignedCursorAgentChatFirstPromptPersistenceWatch(
+		entry: SessionEntry,
+		currentTime: number,
+	): Promise<void> {
+		const active = entry.active;
+		const watch = active?.kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch;
+		if (!active || !watch) {
+			return;
+		}
+		const verdict = await inspectKanbanAssignedCursorAgentChatFirstPromptPersistence({
+			watch,
+			currentTimeEpochMs: currentTime,
+			readTerminalScreenText: async () => {
+				const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
+				return snapshot ? snapshot.lines.map((line) => line.text).join("\n") : null;
+			},
+		});
+		// await 期间这一代可能已经退出 / 被换代：结论只属于发起检查的那一代。
+		if (entry.active !== active || active.kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch !== watch) {
+			return;
+		}
+		switch (verdict.kind) {
+			case "still_within_startup_window":
+				return;
+			case "conversation_established_in_agent_native_store":
+				active.kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch = null;
+				this.publishAgentNativeConversationPersistenceObservation(entry, {
+					persistenceStatus: "conversation_established_in_agent_native_store",
+					nativeSessionId: watch.nativeSessionId,
+					workingDirectoryPath: watch.workingDirectoryPath,
+					suspectedBlockingCause: null,
+					observedAt: currentTime,
+				});
+				return;
+			case "first_prompt_submitted_awaiting_first_checkpoint":
+				// prompt 已提交（例如用户在终端里应答了信任对话框）：撤掉先前的告警，继续等首个检查点。
+				if (watch.lastPublishedPersistenceStatus === "first_prompt_not_persisted_within_startup_window") {
+					watch.lastPublishedPersistenceStatus = null;
+					this.publishAgentNativeConversationPersistenceObservation(entry, null);
+				}
+				return;
+			case "first_prompt_not_persisted_within_startup_window": {
+				const previousObservation = entry.summary.agentNativeConversationPersistenceObservation;
+				if (
+					watch.lastPublishedPersistenceStatus === verdict.kind &&
+					previousObservation?.suspectedBlockingCause === verdict.suspectedBlockingCause
+				) {
+					return;
+				}
+				watch.lastPublishedPersistenceStatus = verdict.kind;
+				logTuiFreezeWarning(
+					`[tui-freeze] agent-first-prompt-not-persisted taskId=${entry.summary.taskId} agentId=${entry.summary.agentId ?? "(none)"} nativeSessionId=${watch.nativeSessionId} suspectedBlockingCause=${verdict.suspectedBlockingCause ?? "(unknown)"}`,
+				);
+				this.publishAgentNativeConversationPersistenceObservation(entry, {
+					persistenceStatus: "first_prompt_not_persisted_within_startup_window",
+					nativeSessionId: watch.nativeSessionId,
+					workingDirectoryPath: watch.workingDirectoryPath,
+					suspectedBlockingCause: verdict.suspectedBlockingCause,
+					observedAt: currentTime,
+				});
+				return;
+			}
+		}
+	}
+
+	private async recordKanbanAssignedCursorAgentChatConversationNeverEstablishedAtExit(
+		entry: SessionEntry,
+		watch: KanbanAssignedCursorAgentChatFirstPromptPersistenceWatch,
+		exitedRuntimeSessionIncarnationId: string | null,
+	): Promise<void> {
+		if (await wasKanbanAssignedCursorAgentChatConversationEstablishedAtExit(watch)) {
+			return;
+		}
+		// 核对期间若已有新一代起来（auto-restart 的退避可以是 0ms），结论不再属于当前 summary，丢弃。
+		if (entry.active !== null || entry.summary.runtimeSessionIncarnationId !== exitedRuntimeSessionIncarnationId) {
+			return;
+		}
+		this.publishAgentNativeConversationPersistenceObservation(entry, {
+			persistenceStatus: "conversation_never_established_in_agent_native_store",
+			nativeSessionId: watch.nativeSessionId,
+			workingDirectoryPath: watch.workingDirectoryPath,
+			suspectedBlockingCause:
+				entry.summary.agentNativeConversationPersistenceObservation?.suspectedBlockingCause ?? null,
+			observedAt: now(),
+		});
+	}
+
 	// 每次启动**现算**续跑寻址，刻意不进 StartTaskSessionRequest：entry.restartRequest 是一份长期存活的
 	// 内存快照，把 session id 烘焙进去必然陈旧（会话每被 fork / 重开一次，harness 侧的 id 就换一个）。
 	// 现算的另一层收益是三条重放入口——手动 refreshTaskTerminal、崩溃后 auto-restart、会话回收后为投递
@@ -2920,6 +3207,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 拒绝闸门必须站在换代块**之前**：下面那段会停掉旧 active 并 dispose 旧镜像，一旦先拆再拒，
 		// 「不给续跑」就变成了「顺手把会话拆了」。放在折叠早退之后，是因为那条路上根本没有要续的东西
 		// （会话正活着且在回合中），此时谈寻址没有意义。
+		//
+		// Cursor 续跑预检排在寻址解析之前：它可能把桶里唯一那段已建立的对话钉成身份，解析器随后就按 id 续跑。
+		await this.refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(entry, request);
 		const resumeAddressingResolvedBeforeAnyDestructiveStep = this.resolveResumeAddressingForTaskSessionStart(
 			request,
 			entry,
@@ -2986,11 +3276,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 上面那道前置闸门已经把拒绝态排除干净，这里只剩「按 id」与「cwd-latest」两种。
 		const resumeAddressing = resumeAddressingResolvedBeforeAnyDestructiveStep;
 		let launch: PreparedAgentLaunch;
+		let kanbanAssignedAgentNativeConversationSessionIdForFreshStart: string | undefined;
 		try {
 			await materializeTaskAgentSessionForExecutionWorkingDirectory({
 				initialization: request.taskAgentSessionInitialization,
 				executionWorkingDirectoryPath: request.cwd,
+				cursorAgentChatStoreEnvironmentOverrides: pickCursorAgentChatStoreEnvironmentOverrides(request.env),
 			});
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart =
+				await this.establishKanbanAssignedAgentNativeConversationSessionIdentityBeforeLaunch(entry, request);
 			launch = await prepareAgentLaunch({
 				taskId: request.taskId,
 				agentId: request.agentId,
@@ -3016,6 +3310,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					resumeAddressing.kind === "addressed_by_observed_agent_native_session_id"
 						? resumeAddressing.taskAgentSessionInitialization
 						: undefined,
+				kanbanAssignedAgentNativeConversationSessionIdForFreshStart,
 				readOnlyQuestionSession:
 					taskConversationSessionMetadataForLaunch?.taskConversationSessionRole === "by_the_way",
 				forkLatestWorkingDirectorySession:
@@ -3232,6 +3527,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 				exitCode: event.exitCode,
 				interrupted: currentActive.session.wasInterrupted(),
 			});
+			const firstPromptPersistenceWatchAtExit =
+				currentActive.kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch;
+			if (firstPromptPersistenceWatchAtExit !== null) {
+				// 看门狗没等到对话建立，进程就没了：当场核对一次，没建立就标出来，不等下次打开时撞拒绝才知道。
+				void this.recordKanbanAssignedCursorAgentChatConversationNeverEstablishedAtExit(
+					currentEntry,
+					firstPromptPersistenceWatchAtExit,
+					summary.runtimeSessionIncarnationId ?? null,
+				).catch(() => {});
+			}
 			// 本代活了多久——熔断器判「健康启动 vs 秒退」的唯一依据，必须在 currentActive 被置空之前算出来。
 			const previousIncarnationLifetimeMs = now() - currentActive.terminalSessionIncarnationSpawnedAtEpochMs;
 			const isEligibleForAutoRestart = this.isTaskSessionEligibleForAutoRestart(currentEntry);
@@ -3381,6 +3686,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
 			terminalSessionIncarnationSpawnedAtEpochMs: now(),
+			kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch:
+				kanbanAssignedAgentNativeConversationSessionIdForFreshStart === undefined
+					? null
+					: {
+							nativeSessionId: kanbanAssignedAgentNativeConversationSessionIdForFreshStart,
+							workingDirectoryPath: request.cwd,
+							environmentOverrides: pickCursorAgentChatStoreEnvironmentOverrides(request.env),
+							watchStartedAtEpochMs: now(),
+							lastPublishedPersistenceStatus: null,
+						},
 		};
 		// 有别人在这期间把一条会话装进了同一个槽位 ⇒ 绝不能拿自己这条盖上去。被盖掉的那条 PTY 此后
 		// 再没有任何引用能停它，也不会被 stop / force-stop / dispose 碰到——那正是孤儿的成因。宁可丢掉
@@ -3481,6 +3796,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			workspacePath: request.cwd,
 			pid: session.pid,
 			startedAt,
+			// 新活体从「没有需要提示的情况」开始；看门狗 / 退出核对会按本代的事实重新写。
+			agentNativeConversationPersistenceObservation: null,
 			lastOutputAt: null,
 			reviewReason: startsWithoutSendingNewPrompt ? startWithoutPromptReviewReason : null,
 			exitCode: null,
@@ -3742,6 +4059,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			hasEverLocatedTerminalInputBoxOnScreen: false,
 			terminalSessionIncarnationToken: randomUUID(),
 			terminalSessionIncarnationSpawnedAtEpochMs: now(),
+			kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch: null,
 		};
 		// 同 startTaskSession 的装载前核对，见那边的注释。
 		if (entry.active !== activeSlotObservedBeforeSpawn) {
@@ -3903,9 +4221,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 人工手敲（含在 Claude resume 三选一菜单里选 1/2/3、或提交新消息）是「用户真·继续」的
 		// agent 无关信号：解除 resume substantive guard，此后 agent 的新产出才推进 lastSubstantiveOutputAt。
 		clearResumeSubstantiveGuard(entry.active);
-		// PTY 字节可能只是仍在编辑，真正的 Claude/Kimi 用户提交由 hook 解除；Codex 当前没有可靠的
+		// PTY 字节可能只是仍在编辑，真正的 Claude/Kimi 用户提交由 hook 解除；Codex / Cursor 当前没有可靠的
 		// UserPromptSubmit hook，因此只在 Enter/换行这一提交边沿解除恢复续跑守卫。
-		if (entry.summary.agentId === "codex" && (data.includes(13) || data.includes(10))) {
+		if (
+			isRestorationContinuationGuardDisarmedOnTerminalSubmissionEdge(entry.summary.agentId) &&
+			(data.includes(13) || data.includes(10))
+		) {
 			this.disarmRestorationContinuationGuard(taskId);
 		}
 		// 旧门控 `state==="awaiting_review"` → facet 真相源 isAwaitingUserReviewTurn（涵盖 live↔exited
@@ -4754,8 +5075,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 	async refreshTaskTerminal(
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin = "refresh_task_terminal",
+		refreshOptions: {
+			// 见 runtimeTaskTerminalRefreshRequestSchema 的同名字段：先迁入、钉身份，再按 id 续跑。
+			adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization;
+		} = {},
 	): Promise<RuntimeTaskSessionSummary> {
 		const arrival = createTaskSessionStartRequestArrival();
+		const { adoptExistingAgentConversationAsTaskSessionIdentity } = refreshOptions;
+		if (adoptExistingAgentConversationAsTaskSessionIdentity) {
+			return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, async () => {
+				await this.adoptExistingAgentConversationAsTaskSessionIdentityHoldingPerTaskStartExclusivity(
+					request,
+					adoptExistingAgentConversationAsTaskSessionIdentity,
+				);
+				return await this.refreshTaskTerminalHoldingPerTaskStartExclusivity(
+					request,
+					taskSessionStartOrigin,
+					arrival,
+				);
+			});
+		}
 		// 「停掉旧的 + 起一条新的」必须整体在同一把闸门里，不能只把后半段关进去。
 		//
 		// 只关后半段时：第二个刷新的 forceStop 会在第一个刷新刚装载好新代之后把它杀掉，然后排队再起一条。
@@ -4769,6 +5108,40 @@ export class TerminalSessionManager implements TerminalSessionService {
 		);
 	}
 
+	// 迁入既有对话：复制进本会话的执行工作目录（源对话不动，见 agent-session-materialization.ts）、钉成身份并
+	// 立即落盘，随后的 refresh 走续跑预检 → 按 id 续跑。持闸门执行：迁入与续跑之间不能插进别的启动。
+	private async adoptExistingAgentConversationAsTaskSessionIdentityHoldingPerTaskStartExclusivity(
+		request: StartTaskSessionRequest,
+		initialization: RuntimeTaskAgentSessionInitialization,
+	): Promise<void> {
+		if (
+			!isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch(request.agentId) ||
+			initialization.sourceAgentId !== request.agentId
+		) {
+			throw new Error(
+				`Adopting an existing conversation is only supported for agents whose session id Kanban assigns (Cursor), and the source conversation must belong to the same agent (requested ${initialization.sourceAgentId} for a ${request.agentId} session).`,
+			);
+		}
+		await materializeTaskAgentSessionForExecutionWorkingDirectory({
+			initialization,
+			executionWorkingDirectoryPath: request.cwd,
+			cursorAgentChatStoreEnvironmentOverrides: pickCursorAgentChatStoreEnvironmentOverrides(request.env),
+		});
+		const entry = this.ensureEntry(request.taskId);
+		await this.establishAgentNativeConversationSessionIdentityAndPersistImmediately(
+			entry,
+			request,
+			buildKanbanEstablishedAgentNativeConversationSessionIdentity({
+				agentId: request.agentId,
+				nativeSessionId: initialization.sourceSessionId,
+				observedAt: now(),
+				identityEstablishmentMethod: "task_agent_session_initialization_seed_materialized_into_working_directory",
+			}),
+		);
+		// 「从未建立」说的是被替换掉的那段对话，迁入之后不再成立。
+		this.publishAgentNativeConversationPersistenceObservation(entry, null);
+	}
+
 	private async refreshTaskTerminalHoldingPerTaskStartExclusivity(
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin,
@@ -4779,6 +5152,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 判据与启动漏斗里那道闸门同源（同一份 entry.summary + 同一批 entries），故结论必然一致。
 		const entryBeforeDestructiveRestart = this.entries.get(request.taskId);
 		if (entryBeforeDestructiveRestart) {
+			await this.refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(
+				entryBeforeDestructiveRestart,
+				request,
+			);
 			const resumeAddressing = this.resolveResumeAddressingForTaskSessionStart(
 				request,
 				entryBeforeDestructiveRestart,
@@ -4977,6 +5354,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private async scanForStalls(): Promise<void> {
 		const currentTime = now();
 		for (const [taskId, entry] of this.entries.entries()) {
+			// 首轮落盘看门狗与回合无关（卡在信任对话框时 turnOwner 仍是 agent，但也可能已被翻成 user），
+			// 所以排在下面的回合门控之前。
+			if (entry.active?.kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch) {
+				await this.advanceKanbanAssignedCursorAgentChatFirstPromptPersistenceWatch(entry, currentTime);
+			}
 			// parked（已派发后台工作、等自行恢复）跳过卡顿扫描：parked 主 agent 是 {agent,live,null}（active turn）
 			// 且空闲在 prompt，输出基线很快过 stall 阈值，不跳过会误报 [tui-freeze] stall-detected。
 			if (
@@ -5197,22 +5579,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		});
 
 		if (decision.kind === "circuit_broken") {
-			// 熔断是**用户可见**的终态，不是静默放弃：会话会一直停在这里直到有人手动刷新，
-			// 不说清楚的话表现就是「任务莫名其妙不动了」。
-			const message = describeTaskSessionAutoRestartCircuitBreak(decision.circuitBreakReason);
 			logTuiFreezeError(
 				`[tui-freeze] auto-restart-circuit-broken taskId=${entry.summary.taskId} agentId=${entry.summary.agentId ?? "(none)"} reason=${decision.circuitBreakReason} consecutiveFastExits=${decision.nextConsecutiveFailedFastExitAutoRestartCount} perTaskRestartsThisHour=${entry.recentAutoRestartTimestampsWithinRollingHour.length}`,
 			);
-			const summary = updateSummary(entry, { warningMessage: message });
-			const output = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
-			// 也写进镜像：只发给当前监听者的话，之后才挂上来的终端（换标签页、重新打开面板）拿到的
-			// restore 快照里没有这句话，用户看到的就是「会话停在这儿、屏幕上什么都没说」。
-			entry.terminalStateMirror?.applyOutput(output);
-			for (const listener of entry.listeners.values()) {
-				listener.onOutput?.(output);
-				listener.onState?.(cloneSummary(summary));
-			}
-			this.emitSummary(summary);
+			void this.publishAutoRestartCircuitBreak(entry, decision.circuitBreakReason).catch(() => {});
 			return;
 		}
 
@@ -5235,6 +5605,32 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			this.runAutoRestartNow(entry, entry.restartRequest.request);
 		}, decision.backoffMs);
+	}
+
+	// 熔断是**用户可见**的终态，不是静默放弃：会话会一直停在这里直到有人手动刷新，
+	// 不说清楚的话表现就是「任务莫名其妙不动了」。异步只是为了先读一眼上一代留在镜像里的最后一行输出——熔断后
+	// 不会再有新一代，晚几个微任务写不会和谁竞争。
+	private async publishAutoRestartCircuitBreak(
+		entry: SessionEntry,
+		circuitBreakReason: TaskSessionAutoRestartCircuitBreakReason,
+	): Promise<void> {
+		const screenSnapshot = await entry.terminalStateMirror?.getScreenSnapshot().catch(() => null);
+		const message = describeTaskSessionAutoRestartCircuitBreak(
+			circuitBreakReason,
+			screenSnapshot
+				? selectLastNonEmptyAgentTerminalOutputLine(screenSnapshot.lines.map((line) => line.text))
+				: null,
+		);
+		const summary = updateSummary(entry, { warningMessage: message });
+		const output = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
+		// 也写进镜像：只发给当前监听者的话，之后才挂上来的终端（换标签页、重新打开面板）拿到的
+		// restore 快照里没有这句话，用户看到的就是「会话停在这儿、屏幕上什么都没说」。
+		entry.terminalStateMirror?.applyOutput(output);
+		for (const listener of entry.listeners.values()) {
+			listener.onOutput?.(output);
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
 	}
 
 	private runAutoRestartNow(entry: SessionEntry, request: StartTaskSessionRequest): void {

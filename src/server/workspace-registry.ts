@@ -22,8 +22,10 @@ import {
 	loadWorkspaceBoardById,
 	loadWorkspaceContext,
 	loadWorkspaceState,
+	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 	type RuntimeWorkspaceIndexEntry,
 } from "../state/workspace-state";
+import { backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate } from "../terminal/cursor-agent-chat-identity-backfill-before-hydrate";
 import { TerminalSessionManager } from "../terminal/session-manager";
 import { runGit } from "../workspace/git-utils";
 import { collectInProgressTaskDetailsFromBoard } from "./in-progress-task-detail-projection";
@@ -155,6 +157,30 @@ async function backfillSessionAgentIdsBeforeHydrate(
 		() => [] as PersistedAgentSessionReclamationDeadlineRecord[],
 	);
 	backfillMissingSessionAgentIdsFromDurableSources({ board, agentSessionReclamationDeadlineRecords }, sessions);
+}
+
+// 存量 Cursor 会话的身份回填 / 「从未建立对话」校正（规则与政策例外见被调模块的文件头）。看板读不出来就整体跳过：
+// 「只动看板上确有其卡的会话」是这道回填不碰幽灵副本的唯一凭据，没有它宁可不做。
+async function backfillCursorAgentChatIdentityBeforeHydrate(
+	workspaceId: string,
+	sessions: RuntimeWorkspaceStateResponse["sessions"],
+): Promise<void> {
+	let board: RuntimeBoardData;
+	try {
+		board = await loadWorkspaceBoardById(workspaceId);
+	} catch {
+		return;
+	}
+	// 回填是锦上添花，绝不能连累 hydrate：调用方的 catch 会把任何异常当成「workspace 状态不存在」，整批会话都不水合。
+	try {
+		await backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate({
+			sessions,
+			taskIdsOnWorkspaceBoard: new Set(board.columns.flatMap((column) => column.cards.map((card) => card.id))),
+			currentTimeEpochMs: Date.now(),
+		});
+	} catch {
+		// 回填失败 ⇒ 会话维持原样，下次续跑时的预检仍会按同一套规则判定。
+	}
 }
 
 export type ResolvedWorkspaceStreamTarget =
@@ -340,10 +366,22 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 						workspaceId,
 						kanbanTaskConversationSessionId,
 					}),
+				persistAgentNativeConversationSessionIdentityImmediately: async (
+					kanbanTaskConversationSessionId,
+					readCurrentSessionSummary,
+				) => {
+					await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+						workspaceId,
+						kanbanTaskConversationSessionId,
+						readCurrentSessionSummary,
+					);
+				},
 			});
 			try {
 				const existingWorkspace = await loadWorkspaceState(repoPath, { autoCreateIfMissing: false });
 				await backfillSessionAgentIdsBeforeHydrate(workspaceId, existingWorkspace.sessions);
+				// 排在 agentId 回填之后：它只处理 agentId 已是 cursor 的会话，agentId 被修好的存量会话也该被覆盖到。
+				await backfillCursorAgentChatIdentityBeforeHydrate(workspaceId, existingWorkspace.sessions);
 				manager.hydrateFromRecord(existingWorkspace.sessions);
 			} catch {
 				// Workspace state will be created on demand.

@@ -786,6 +786,23 @@ export default function App(): ReactElement {
 		);
 	}, []);
 
+	// 终端面板上「对话从未建立」的出路之一：以卡片原 prompt 全新开局（服务端会为这次开局分配新的原生会话 id）。
+	// 面板只在人确认过 prompt 预览之后才调到这里。
+	const handleStartFreshTaskSessionWithOriginalPrompt = useCallback(
+		async (taskId: string) => {
+			const selection = findCardSelection(board, taskId);
+			if (!selection) {
+				notifyError("Card not found in the workspace board.");
+				return;
+			}
+			const result = await startTaskSession(selection.card);
+			if (!result.ok) {
+				notifyError(result.message);
+			}
+		},
+		[board, startTaskSession],
+	);
+
 	useWorkspacePersistence({
 		board,
 		sessions,
@@ -1539,6 +1556,7 @@ export default function App(): ReactElement {
 									onMoveReviewCardToValidation={handleMoveCardToValidation}
 									onMoveCardToReview={handleMoveCardToReview}
 									onRestoreTaskFromTrash={handleRestoreTaskFromTrash}
+									onStartFreshTaskSessionWithOriginalPrompt={handleStartFreshTaskSessionWithOriginalPrompt}
 									onDeleteTask={handleOpenDeleteTask}
 									onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
 									onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}

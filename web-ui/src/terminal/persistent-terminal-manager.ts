@@ -11,6 +11,7 @@ import { getTerminalThemeColors, type ThemeTerminalColors } from "@/hooks/use-th
 import { estimateTaskSessionGeometry, SHELL_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskSessionSummary,
 	RuntimeTerminalWsClientMessage,
 	RuntimeTerminalWsResizeMessage,
@@ -715,6 +716,14 @@ class PersistentTerminal {
 		// 抢跑 agent、把等待用户处理的 Review 会话强行推进。仅 agent 回合 / 无归属（真 idle）才续。
 		const facets = resolveSessionFacets(summary);
 		if (facets.turnOwner === "user" && facets.userTurnKind !== "question" && facets.userTurnKind !== "permission") {
+			return;
+		}
+		// 服务端已核对过「这段对话从未在 agent 的会话存储里建立」（Cursor 续跑预检 / hydrate 回填）：续跑注定被拒，
+		// 自动重试只会反复撞同一道拒绝。出路在终端面板上，由人来选。
+		if (
+			summary.agentNativeConversationPersistenceObservation?.persistenceStatus ===
+			"conversation_never_established_in_agent_native_store"
+		) {
 			return;
 		}
 		// 跨实例冷却：per-实例的 autoResumeAttempted 拦不住「换一份实例就重新放一次电」，
@@ -1506,8 +1515,12 @@ class PersistentTerminal {
 	// （人点的刷新），只有 maybeAutoResumeStaleSession 这条自动路径显式声明自己。不这样声明的话，服务端
 	// 收到的两种请求逐字相同，而 refresh 实测占 pty 创建量的 68%——「这 68% 里有多少是程序自己点的」
 	// 正是排查会话反复重建时的第一个问题。
+	//
+	// adoptExistingAgentConversationAsTaskSessionIdentity：「从既有对话迁入」——服务端先把这段对话复制进本会话的
+	// 工作目录并钉成身份，再按 id 续跑（见 api-contract 的同名字段）。只由人在终端面板上选定后传入。
 	async refresh(
 		taskSessionStartOriginDeclaredByClient?: "stale_session_client_auto_resume",
+		adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization,
 	): Promise<{ ok: boolean; error?: string; mode?: "resume" | "fresh" }> {
 		this.suppressNextRestartReset = true;
 		const trpcClient = getRuntimeTrpcClient(this.workspaceId);
@@ -1517,6 +1530,9 @@ class PersistentTerminal {
 				cols: this.terminal.cols,
 				rows: this.terminal.rows,
 				taskSessionStartOriginDeclaredByClient,
+				...(adoptExistingAgentConversationAsTaskSessionIdentity
+					? { adoptExistingAgentConversationAsTaskSessionIdentity }
+					: {}),
 			});
 			if (!result.ok) {
 				this.suppressNextRestartReset = false;

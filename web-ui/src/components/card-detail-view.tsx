@@ -683,6 +683,7 @@ export function CardDetailView({
 	onMoveReviewCardToValidation,
 	onMoveCardToReview,
 	onRestoreTaskFromTrash,
+	onStartFreshTaskSessionWithOriginalPrompt,
 	onDeleteTask,
 	onCancelAutomaticTaskAction,
 	onRequestPinToTaskPinboard,
@@ -754,6 +755,8 @@ export function CardDetailView({
 	// 手动把 In Progress 卡翻入 Review（仅终端 agent；by-id，路由到 column-context-panel 的 in_progress section）。
 	onMoveCardToReview?: (taskId: string) => void;
 	onRestoreTaskFromTrash?: (taskId: string) => void;
+	// 「对话从未建立」时以卡片原 prompt 全新开局（终端面板的恢复提示条调用；面板负责先让人确认 prompt）。
+	onStartFreshTaskSessionWithOriginalPrompt?: (taskId: string) => Promise<void>;
 	onDeleteTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	// Task Pinboard：透传给左侧任务列表（含列表顶部的置顶板分段）。
@@ -1446,6 +1449,13 @@ export function CardDetailView({
 			terminalBackgroundColor={terminalThemeColors.surfacePrimary}
 			cursorColor={terminalThemeColors.textPrimary}
 			taskColumnId={selection.column.id}
+			// 「用原 prompt 全新开局」只给主会话：侧问会话的 prompt 不在卡片上。
+			originalTaskPromptForFreshStart={isMainTaskConversationSessionSelected ? selection.card.prompt : null}
+			onStartFreshAgentSessionWithOriginalTaskPrompt={
+				isMainTaskConversationSessionSelected && onStartFreshTaskSessionWithOriginalPrompt
+					? () => onStartFreshTaskSessionWithOriginalPrompt(selection.card.id)
+					: undefined
+			}
 		/>
 	);
 	// 提问它的那个会话活体仍在跑、且仍停在提问回合 ⇒ 终端里此刻显示的就是这道题的交互式选择器。

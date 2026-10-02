@@ -25,7 +25,7 @@ Kanban 的隐式「继续最近会话」应在任务的执行目录内选择。�
 | Kimi PTY | 保留按工作目录的 `--continue` | 0.38.0 真实 CLI：先创建 A，再创建 B，再 continue A，实际 ID 为 A/B/A；无模型请求 |
 | OMP PTY | 保留原生 `--continue` | 安装源码的 `SessionManager.continueRecent` 实测：B breadcrumb 存在且 B 目录仍在时，A 选择 A；显式路径仍选 B |
 | OMP ACP | 独立目录校验与分页 | 真实 `omp acp` 经修改后的 Kanban runtime 完成 list/load，返回 A 的原生 ID |
-| Cursor | 保留已有 `--continue` / `--resume ID` | adapter 回归；未做原生 Cursor smoke |
+| Cursor | 2026-10-02（task 203f3）起：全新开局由 kanban 分配 id（`--resume <新 UUID> <prompt>`），续跑一律按 id；`--continue` 只留给「无 id 的存量会话、桶内 ≥2 段已建立对话」；接不上就在启动前拒绝、不 spawn | cursor-agent 2026.10.01 隔离 PTY 实测（开局、trust、跨桶复制、`--continue` 压过 `--resume`），见 `docs/agent-harness-cursor.md` |
 | DeepSeek Harness | 适用性审计 | 本仓库 catalog 没有 DSH agent；DeepSeek 模型 provider 不等于 harness。独立 dsh 的 CLI 把 app 参数交给 profile，不能借用 Codex 的 flag。未新增接入或修改另一仓库 |
 
 OMP 的 terminal breadcrumb 有刻意保留的原生例外：同目录旧 breadcrumb 可优先于最新会话；旧 cwd 已消失、目标目录无会话时会将旧会话迁移过来。后一分支已用隔离目录实测确认。不能声称 PTY 的新终端总会忽略 breadcrumb，也不能声称所有 harness 均有 Kanban 级的绝对目录隔离。

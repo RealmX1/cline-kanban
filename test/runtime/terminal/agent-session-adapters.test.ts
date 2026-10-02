@@ -185,6 +185,98 @@ describe("cursorAdapter", () => {
 			}),
 		).rejects.toThrow("Cursor");
 	});
+
+	// task 203f3：Cursor 的身份由 kanban 在启动前分配，argv 必须把这个 id 用对。
+	const KANBAN_ASSIGNED_CURSOR_CHAT_ID = "a57d8fb0-3047-45d0-9695-b73f429974a5";
+	const RECORDED_CURSOR_CHAT_ID = "4debf190-1111-4222-8333-944444444444";
+
+	it("starts a fresh Cursor session on the kanban-assigned chat id and still submits the prompt and plan mode", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-fresh-start-assigned-chat-id",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			startInPlanMode: true,
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		const resumeIndex = launch.args.indexOf("--resume");
+		expect(launch.args[resumeIndex + 1]).toBe(KANBAN_ASSIGNED_CURSOR_CHAT_ID);
+		expect(launch.args).toContain("--plan");
+		expect(launch.args.at(-1)).toContain("Implement the feature");
+		expect(launch.args).not.toContain("--continue");
+		// 全新开局不是续跑：不能武装实质输出抑制。
+		expect(launch.resumesPriorAgentConversation).toBe(false);
+	});
+
+	it("resumes a restarted Cursor session by its recorded chat id without re-sending the prompt or replaying plan mode", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-restart-by-recorded-chat-id",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			// 用户自己写进 agent 命令的 `--continue` 会静默压过 `--resume <id>`（实测），必须剥掉。
+			args: ["--continue", "--resume", "11111111-2222-4333-8444-555555555555"],
+			cwd: "/tmp/repo",
+			prompt: "",
+			startInPlanMode: true,
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "cursor",
+				sourceSessionId: RECORDED_CURSOR_CHAT_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.args.filter((argument) => argument === "--resume")).toHaveLength(1);
+		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(RECORDED_CURSOR_CHAT_ID);
+		expect(launch.args).not.toContain("11111111-2222-4333-8444-555555555555");
+		// `--plan` 在续跑时会把 chat 的 mode 覆写回 plan。
+		expect(launch.args).not.toContain("--plan");
+		expect(launch.args.at(-1)).toBe(RECORDED_CURSOR_CHAT_ID);
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	it("keeps --continue only for a legacy Cursor resume that has no recorded chat id", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-legacy-resume-latest",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "",
+			resumeFromTrash: true,
+			// 即便会话上还挂着一个分配好的 id，续跑也不该拿它开新对话。
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		expect(launch.args).toContain("--continue");
+		expect(launch.args).not.toContain("--resume");
+	});
+
+	it("passes --trust only for kanban task worktrees so the Workspace Trust dialog cannot swallow the first prompt", async () => {
+		const homeDirectoryPath = setupTempHome();
+		const taskWorktreeLaunch = await prepareAgentLaunch({
+			taskId: "task-cursor-worktree-trust",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: join(homeDirectoryPath, ".cline", "worktrees", "8ef28", "review-validate-fix"),
+			prompt: "Implement the feature",
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		expect(taskWorktreeLaunch.args).toContain("--trust");
+
+		const userRepositoryLaunch = await prepareAgentLaunch({
+			taskId: "task-cursor-inplace-no-trust",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: join(homeDirectoryPath, "Documents", "GitHub", "review-validate-fix"),
+			prompt: "Implement the feature",
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		expect(userRepositoryLaunch.args).not.toContain("--trust");
+	});
 });
 
 describe("prepareAgentLaunch hook strategies", () => {
