@@ -22,6 +22,7 @@ import {
 	type ToolApprovalResult,
 	type UserInstructionConfigService,
 } from "@clinebot/core";
+import { createClineSdkCoreLoggerForwardingWarningsAndErrorsToKanbanServerLog } from "./cline-sdk-core-logger-forwarding-warnings-and-errors-to-kanban-server-log";
 import { CLINE_BUILTIN_SLASH_COMMANDS } from "./cline-slash-commands";
 import { getCliTelemetryService } from "./cline-telemetry-service";
 
@@ -47,7 +48,13 @@ export type ClineSdkToolApprovalResult = ToolApprovalResult;
 
 export async function createClineSdkSessionHost(): Promise<ClineSdkSessionHost> {
 	return await ClineCore.create({
-		backendMode: "auto",
+		// 固定进程内后端。@clinebot/core@0.0.38 在 "auto" 下每次 create 都会 detached spawn 一个 hub 守护进程：
+		// 入口路径由 import.meta.url 推导，打包与否都指向不存在的 entry.js；即使路径正确，入口本身也会
+		// 报 `AI is not defined`。结果是每次必崩、写一条 hub-daemon.log，再静默回退到进程内后端。
+		// Kanban 不依赖 hub（没有 hub.endpoint / runtimeAddress 的使用），"local" 根本不会触发 spawn。
+		// EXPERIMENT_NODE: SDK 修好 hub 守护进程入口后，是否改回 "auto" 以共享 cline CLI 的 hub 会话
+		backendMode: "local",
+		logger: createClineSdkCoreLoggerForwardingWarningsAndErrorsToKanbanServerLog(),
 		telemetry: getCliTelemetryService(),
 	});
 }
