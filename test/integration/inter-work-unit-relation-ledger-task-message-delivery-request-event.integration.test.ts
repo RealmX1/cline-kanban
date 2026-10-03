@@ -14,7 +14,11 @@ import {
 	resolveInterWorkUnitRelationLedgerStorageRootDirectory,
 } from "../../src/inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker-client";
 import { activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture } from "../../src/inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
-import { recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking } from "../../src/inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
+import {
+	recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking,
+	recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking,
+	recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking,
+} from "../../src/inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
 import { computeSha256HexOfUtf8Text } from "../../src/inter-work-unit-relation-ledger/workspace-board-task-mutation-occurrence-diff";
 import { registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture } from "../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type * as WorkspaceStateModule from "../../src/state/workspace-state";
@@ -131,6 +135,8 @@ describe("inter-work-unit relation ledger task message delivery request event", 
 					taskMessageDeliveryIdempotencyKey: "handoff-1",
 					messageBodyContentSha256: computeSha256HexOfUtf8Text(messageBody),
 					declaredMessageSourceLabel: "test-cross-card-handoff",
+					taskMessageDeliveryChannel: "immediate_delivery_into_task_conversation_session",
+					targetKanbanTaskConversationSessionId: "r0002",
 				});
 				expect(JSON.stringify(fromCard)).not.toContain(messageBody);
 				const fromWebUi = messageEvents.find((event) => event !== fromCard);
@@ -271,6 +277,145 @@ describe("inter-work-unit relation ledger task message delivery request event", 
 		} finally {
 			stderrWriteSpy.mockRestore();
 			await verificationLedgerClient.close();
+			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			gitFixture.cleanup();
+		}
+	});
+
+	// dd2db T2：两条排队入口与立即投递记同一种事件，用 taskMessageDeliveryChannel 区分。
+	it("records queued delivery requests: agent-idle-gated CLI enqueue and user Queue-tab entries for a by-the-way session", async () => {
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const previousHome = process.env.HOME;
+		process.env.HOME = gitFixture.isolatedHomeDirectoryPath;
+		try {
+			const repositoryPath = join(gitFixture.ownedIntegrationProjectsDirectoryPath, "project-queued-message");
+			mkdirSync(repositoryPath, { recursive: true });
+			gitFixture.createNonBareRepositoryAtOwnedPath({ repositoryPath, initialBranchName: "main" });
+			const card = (taskId: string, createdAt: number) => ({
+				id: taskId,
+				title: taskId,
+				prompt: taskId,
+				startInPlanMode: false,
+				baseRef: "main",
+				createdAt,
+				updatedAt: createdAt,
+			});
+			await saveWorkspaceState(repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+				board: {
+					columns: [
+						{ id: "backlog", title: "Backlog", cards: [] },
+						{ id: "in_progress", title: "In Progress", cards: [card("s0001", 1_000), card("r0002", 2_000)] },
+						{ id: "review", title: "Review", cards: [] },
+						{ id: "trash", title: "Done", cards: [] },
+					],
+				},
+				sessions: {},
+			});
+			const { workspaceId } = await loadWorkspaceContext(repositoryPath, { autoCreateIfMissing: false });
+
+			const activatedLiveCapture = activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
+			try {
+				const cliEvidenceFromSendingCard = {
+					decodedCliActorClaimsRequestHeader: decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
+						encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
+							collectKanbanCliInvocationEnvironmentActorClaims({
+								environment: { KANBAN_TASK_ID: "s0001", KANBAN_HOOK_WORKSPACE_ID: workspaceId },
+								invokingKanbanCliCodeVersion: "0.0.0-test",
+								invokingProcessWorkingDirectory: null,
+							}),
+						),
+					),
+				};
+				const agentIdleGatedMessageBody = "等你空闲后读 s0001 的交接";
+				recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking({
+					workspaceId,
+					taskId: "r0002",
+					messageBodyText: agentIdleGatedMessageBody,
+					taskMessageDeliveryIdempotencyKey: "handoff-when-idle-1",
+					declaredMessageSourceLabel: "test-cross-card-handoff",
+					queuedPromptDeliveryQueueEntryId: "programmatic-queue-entry-1",
+					maxWaitForAgentIdleMs: 600_000,
+					kanbanRequestOriginActorEvidence: cliEvidenceFromSendingCard,
+				});
+				recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking({
+					workspaceId,
+					newlyCreatedQueueEntry: {
+						queueEntryId: "user-queue-entry-1",
+						taskId: "btw-session-of-r0002",
+						text: "这轮结束后再跑一遍测试",
+						deliverTogetherWithNextQueuedEntry: false,
+						sourcePromptLibraryEntryId: null,
+						sourcePromptLibraryEntryTextSha256: null,
+						workspaceTaskId: "r0002",
+						deliveryState: "queued",
+						deliveryAttemptCount: 0,
+						lastAttemptedAt: null,
+						settledAt: null,
+						dispatchIdempotencyKey: null,
+						claimedForSessionIncarnationId: null,
+						claimedAtTurnSequence: null,
+						enqueuedAt: 5_000,
+						expiresAt: 9_000,
+						lastDeliveryFailureNote: null,
+						survivedRuntimeRestartAtEpochMs: null,
+						humanReconfirmedAfterRuntimeRestartAtEpochMs: null,
+					},
+					retriedFromSettledFailedQueueEntryId: null,
+					kanbanRequestOriginActorEvidence:
+						KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+				});
+
+				let messageEvents: CommittedInterWorkUnitRelationLedgerEvent[] = [];
+				await vi.waitFor(async () => {
+					messageEvents = (
+						await activatedLiveCapture.ledgerClient.listCommittedEvents({ subjectWorkspaceId: workspaceId })
+					).filter(
+						(event) => event.eventKind === "task_message_delivery_requested_into_task_conversation_session",
+					);
+					expect(messageEvents).toHaveLength(2);
+				});
+				const agentIdleGated = messageEvents.find(
+					(event) =>
+						event.eventPayload.taskMessageDeliveryChannel === "agent_idle_gated_programmatic_delivery_queue",
+				);
+				expect(agentIdleGated?.actor.kanbanActorKind).toBe("kanban_board_card_work_unit");
+				expect(agentIdleGated?.subjectTaskId).toBe("r0002");
+				// 与立即投递同一命名空间：同一个 CLI 幂等键只对应一次投递意图。
+				expect(agentIdleGated?.idempotencyKey).toBe(
+					`task-message-delivery:${workspaceId}:r0002:handoff-when-idle-1`,
+				);
+				expect(agentIdleGated?.eventPayload).toMatchObject({
+					subjectKanbanBoardCard: { taskId: "r0002", taskIncarnationCreatedAtEpochMs: 2_000 },
+					targetKanbanTaskConversationSessionId: "r0002",
+					messageBodyAuthorshipIntentExtractionTreatment: "context_only_never_quote_as_user_statement",
+					messageBodyContentSha256: computeSha256HexOfUtf8Text(agentIdleGatedMessageBody),
+					queuedPromptDeliveryQueueEntryId: "programmatic-queue-entry-1",
+					maxWaitForAgentIdleMs: 600_000,
+				});
+				expect(JSON.stringify(agentIdleGated)).not.toContain(agentIdleGatedMessageBody);
+
+				const userQueued = messageEvents.find((event) => event !== agentIdleGated);
+				expect(userQueued?.eventPayload.taskMessageDeliveryChannel).toBe(
+					"user_queued_prompt_delivery_after_current_turn",
+				);
+				// by-the-way 会话的条目归到它所属的卡片名下；投递目标会话另记。
+				expect(userQueued?.subjectTaskId).toBe("r0002");
+				expect(userQueued?.idempotencyKey).toBe(
+					`task-message-delivery:${workspaceId}:btw-session-of-r0002:queue-entry:user-queue-entry-1`,
+				);
+				expect(userQueued?.eventPayload).toMatchObject({
+					subjectKanbanBoardCard: { taskId: "r0002", taskIncarnationCreatedAtEpochMs: 2_000 },
+					targetKanbanTaskConversationSessionId: "btw-session-of-r0002",
+					queuedPromptDeliveryQueueEntryId: "user-queue-entry-1",
+					retriedFromSettledFailedQueueEntryId: null,
+					queuedPromptDeliveryExpiresAtEpochMs: 9_000,
+				});
+			} finally {
+				await activatedLiveCapture.deactivate();
+			}
+		} finally {
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;

@@ -635,16 +635,42 @@ export async function mutateWorkspaceQueuedTaskPromptDeliveries(
 	mutation: QueuedTaskPromptDeliveryMutation,
 	nowEpochMs: number = Date.now(),
 ): Promise<WorkspaceQueuedTaskPromptDeliverySnapshot> {
-	const { snapshot } = await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
+	const { snapshot } = await mutateWorkspaceQueuedTaskPromptDeliveriesAndReportNewlyCreatedQueueEntries(
 		workspaceId,
-		(current) => ({
-			next: applyQueuedTaskPromptDeliveryMutation(current, mutation, nowEpochMs),
-			result: null,
-		}),
+		mutation,
+		nowEpochMs,
+	);
+	return snapshot;
+}
+
+// 同上，另报出本次变更**在锁内**新建的条目（入队、失败重排）。同 id 重发、满额被拒都原样返回快照，这里就是空数组——
+// 调用方据此判断「这次是不是一条新的投递意图」，不必事后拿快照猜（同毫秒的重发会骗过按时间戳猜的判据）。
+export async function mutateWorkspaceQueuedTaskPromptDeliveriesAndReportNewlyCreatedQueueEntries(
+	workspaceId: string,
+	mutation: QueuedTaskPromptDeliveryMutation,
+	nowEpochMs: number = Date.now(),
+): Promise<{
+	snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot;
+	newlyCreatedQueueEntries: QueuedTaskPromptDeliveryEntry[];
+}> {
+	const { snapshot, result } = await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
+		workspaceId,
+		(current) => {
+			const next = applyQueuedTaskPromptDeliveryMutation(current, mutation, nowEpochMs);
+			const queueEntryIdsBeforeMutation = new Set(
+				(current.entriesByTaskId[mutation.taskId] ?? []).map((entry) => entry.queueEntryId),
+			);
+			return {
+				next,
+				result: (next.entriesByTaskId[mutation.taskId] ?? []).filter(
+					(entry) => !queueEntryIdsBeforeMutation.has(entry.queueEntryId),
+				),
+			};
+		},
 		nowEpochMs,
 		mutation.kind,
 	);
-	return snapshot;
+	return { snapshot, newlyCreatedQueueEntries: result };
 }
 
 // ── dispatcher 专用原子操作 ────────────────────────────────────────────────

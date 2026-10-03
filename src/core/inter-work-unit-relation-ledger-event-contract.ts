@@ -2,7 +2,7 @@ import { z } from "zod";
 
 // dd2db 工作单元间关系账本的事件契约（阶段 1a：只写的前向捕获骨干）。
 // 权威设计在 dd2db 设计归档（仓库外）的 §R3：Y-EVENT-4（10 族）、Y-EVENT-6（渠道）、Y-EVENT-7（行动者）、
-// Y-EVENT-12（卡片限定引用）、Y-EVENT-14（公共信封与 TurnRef）。术语见仓库根 CONTEXT.md。
+// Y-EVENT-12（卡片限定引用）、Y-EVENT-14（公共信封与 TurnRef）。术语见 docs/context-inter-work-unit-relation-modeling-overhaul.md。
 //
 // 落盘纪律：读盘一律容忍未知取值（z.string() + 已知值集合），未知值原样保留、不抛错——账本只追加，
 // 旧 runtime 读到新 runtime 写的事件不能整库报错。写侧用已知值集合在类型层收紧。

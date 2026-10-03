@@ -174,6 +174,20 @@ vi.mock(
 	},
 );
 
+// 排队投递的两条记账入口只做间谍：断言 runtime-api 只在「本次新建了投递意图」时调它们（记账本身另有集成测试）。
+const queuedTaskMessageDeliveryRecordingMocks = vi.hoisted(() => ({
+	recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking: vi.fn(),
+	recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking: vi.fn(),
+}));
+
+vi.mock(
+	"../../../src/inter-work-unit-relation-ledger/task-message-delivery-request-event-recording.js",
+	async (importOriginal) => ({
+		...(await importOriginal<typeof TaskMessageDeliveryRequestEventRecordingModule>()),
+		...queuedTaskMessageDeliveryRecordingMocks,
+	}),
+);
+
 vi.mock("../../../src/state/workspace-state.js", () => ({
 	loadWorkspaceBoardById: workspaceStateMocks.loadWorkspaceBoardById,
 	// 程序化投递要按 workspaceId 解析注入账本路径。这个 mock 是刻意部分的，
@@ -185,6 +199,8 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 	mutateWorkspaceState: workspaceStateMocks.mutateWorkspaceState,
 }));
 
+import { buildQueuedProgrammaticInjectionQueueEntryId } from "../../../src/core/queued-programmatic-injection-ledger-receipt-mirroring";
+import type * as TaskMessageDeliveryRequestEventRecordingModule from "../../../src/inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
 import {
 	getWorkspacePromptLibraryPath,
 	readWorkspacePromptLibrarySnapshot,
@@ -5424,14 +5440,18 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 		const scope = createQueueWorkspaceScope();
 		const dispatcher = createDispatcherDouble();
 		const api = createQueueApi(scope, dispatcher);
-		const mutated = await api.mutateTaskPromptDeliveryQueue(scope as never, {
-			mutation: {
-				kind: "enqueue_prompt_for_delivery_after_current_turn",
-				taskId: "task-1",
-				queueEntryId: "q1",
-				text: "跑测试",
+		const mutated = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
+				mutation: {
+					kind: "enqueue_prompt_for_delivery_after_current_turn",
+					taskId: "task-1",
+					queueEntryId: "q1",
+					text: "跑测试",
+				},
 			},
-		});
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 		expect(mutated.ok).toBe(true);
 		expect(dispatcher.notifyQueueMutated).toHaveBeenCalledWith(scope.workspaceId, "task-1", mutated.queue);
 		const read = await api.getTaskPromptDeliveryQueue(scope as never, {});
@@ -5442,14 +5462,18 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 	it("空正文拒绝入队", async () => {
 		const scope = createQueueWorkspaceScope();
 		const api = createQueueApi(scope, createDispatcherDouble());
-		const mutated = await api.mutateTaskPromptDeliveryQueue(scope as never, {
-			mutation: {
-				kind: "enqueue_prompt_for_delivery_after_current_turn",
-				taskId: "task-1",
-				queueEntryId: "q1",
-				text: "   ",
+		const mutated = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
+				mutation: {
+					kind: "enqueue_prompt_for_delivery_after_current_turn",
+					taskId: "task-1",
+					queueEntryId: "q1",
+					text: "   ",
+				},
 			},
-		});
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 		expect(mutated.ok).toBe(false);
 	});
 
@@ -5458,35 +5482,132 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 		const scope = createQueueWorkspaceScope();
 		const api = createQueueApi(scope, createDispatcherDouble());
 		for (let index = 0; index < MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK; index += 1) {
-			await api.mutateTaskPromptDeliveryQueue(scope as never, {
+			await api.mutateTaskPromptDeliveryQueue(
+				scope as never,
+				{
+					mutation: {
+						kind: "enqueue_prompt_for_delivery_after_current_turn",
+						taskId: "task-1",
+						queueEntryId: `q${index}`,
+						text: `第 ${index} 条`,
+					},
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			);
+		}
+		const overflow = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
 				mutation: {
 					kind: "enqueue_prompt_for_delivery_after_current_turn",
 					taskId: "task-1",
-					queueEntryId: `q${index}`,
-					text: `第 ${index} 条`,
+					queueEntryId: "overflow",
+					text: "再排一条",
 				},
-			});
-		}
-		const overflow = await api.mutateTaskPromptDeliveryQueue(scope as never, {
-			mutation: {
-				kind: "enqueue_prompt_for_delivery_after_current_turn",
-				taskId: "task-1",
-				queueEntryId: "overflow",
-				text: "再排一条",
 			},
-		});
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 		expect(overflow).toMatchObject({ ok: false, enqueueRefusedBecauseQueueCapacityIsExhausted: true });
 		// 幂等重发不算被拒。
-		const replay = await api.mutateTaskPromptDeliveryQueue(scope as never, {
-			mutation: {
-				kind: "enqueue_prompt_for_delivery_after_current_turn",
-				taskId: "task-1",
-				queueEntryId: "q0",
-				text: "第 0 条",
+		const replay = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
+				mutation: {
+					kind: "enqueue_prompt_for_delivery_after_current_turn",
+					taskId: "task-1",
+					queueEntryId: "q0",
+					text: "第 0 条",
+				},
 			},
-		});
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 		expect(replay.ok).toBe(true);
 		expect(replay.enqueueRefusedBecauseQueueCapacityIsExhausted).toBeUndefined();
+	});
+
+	// dd2db T2：人排条目也是一次「请求向会话投递消息」，按请求证据记 message 事件；只有本次真的新建了条目才算新意图。
+	it("人排入队只在本次新建条目时记投递请求：同 id 重发与满额被拒都不记", async () => {
+		const recordUserQueued =
+			queuedTaskMessageDeliveryRecordingMocks.recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking;
+		recordUserQueued.mockClear();
+		const scope = createQueueWorkspaceScope();
+		const api = createQueueApi(scope, createDispatcherDouble());
+		const enqueue = (queueEntryId: string, text: string) =>
+			api.mutateTaskPromptDeliveryQueue(
+				scope as never,
+				{
+					mutation: {
+						kind: "enqueue_prompt_for_delivery_after_current_turn",
+						taskId: "task-1",
+						queueEntryId,
+						text,
+					},
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			);
+
+		await enqueue("q0", "第 0 条");
+		expect(recordUserQueued).toHaveBeenCalledTimes(1);
+		expect(recordUserQueued).toHaveBeenCalledWith({
+			workspaceId: scope.workspaceId,
+			newlyCreatedQueueEntry: expect.objectContaining({ queueEntryId: "q0", taskId: "task-1", text: "第 0 条" }),
+			retriedFromSettledFailedQueueEntryId: null,
+			kanbanRequestOriginActorEvidence:
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		});
+		await enqueue("q0", "第 0 条");
+		expect(recordUserQueued).toHaveBeenCalledTimes(1);
+
+		for (let index = 1; index < MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK; index += 1) {
+			await enqueue(`q${index}`, `第 ${index} 条`);
+		}
+		expect(recordUserQueued).toHaveBeenCalledTimes(MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK);
+		const overflow = await enqueue("overflow", "再排一条");
+		expect(overflow.enqueueRefusedBecauseQueueCapacityIsExhausted).toBe(true);
+		expect(recordUserQueued).toHaveBeenCalledTimes(MAX_QUEUED_TASK_PROMPT_DELIVERIES_PER_TASK);
+	});
+
+	it("CLI 空闲门控入队只在新建注入账本记录时记投递请求，同 key 重发不记", async () => {
+		const recordAgentIdleGated =
+			queuedTaskMessageDeliveryRecordingMocks.recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking;
+		recordAgentIdleGated.mockClear();
+		const scope = createQueueWorkspaceScope();
+		const api = createQueueApi(scope, createDispatcherDouble());
+		const request = {
+			taskId: " task-1 ",
+			text: "RVF 决策点边界标记",
+			source: "rvf",
+			idempotencyKey: " rvf-boundary-1 ",
+			promptSha256: "sha-1",
+			maxWaitForAgentIdleMs: 600_000,
+		};
+
+		const first = await api.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+			scope as never,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(first).toEqual({ ok: true, injectionLedgerRecordDisposition: "created" });
+		expect(recordAgentIdleGated).toHaveBeenCalledTimes(1);
+		expect(recordAgentIdleGated).toHaveBeenCalledWith({
+			workspaceId: scope.workspaceId,
+			taskId: "task-1",
+			messageBodyText: "RVF 决策点边界标记",
+			taskMessageDeliveryIdempotencyKey: "rvf-boundary-1",
+			declaredMessageSourceLabel: "rvf",
+			queuedPromptDeliveryQueueEntryId: buildQueuedProgrammaticInjectionQueueEntryId("rvf-boundary-1"),
+			maxWaitForAgentIdleMs: 600_000,
+			kanbanRequestOriginActorEvidence:
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		});
+
+		const replay = await api.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+			scope as never,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(replay).toEqual({ ok: true, injectionLedgerRecordDisposition: "already_existed" });
+		expect(recordAgentIdleGated).toHaveBeenCalledTimes(1);
 	});
 
 	// already_delivered 必须让用户看见（「来不及了，已经发出去」）。
@@ -5495,9 +5616,13 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 		const dispatcher = createDispatcherDouble();
 		dispatcher.cancelInFlightQueuedPromptDelivery.mockResolvedValue("already_delivered" as never);
 		const api = createQueueApi(scope, dispatcher);
-		const cancelled = await api.mutateTaskPromptDeliveryQueue(scope as never, {
-			mutation: { kind: "cancel_queued_prompt_delivery", taskId: "task-1", queueEntryId: "q1" },
-		});
+		const cancelled = await api.mutateTaskPromptDeliveryQueue(
+			scope as never,
+			{
+				mutation: { kind: "cancel_queued_prompt_delivery", taskId: "task-1", queueEntryId: "q1" },
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 		expect(dispatcher.cancelInFlightQueuedPromptDelivery).toHaveBeenCalledWith(scope.workspaceId, "task-1", "q1");
 		expect(cancelled.inFlightDeliveryCancelResult).toBe("already_delivered");
 	});

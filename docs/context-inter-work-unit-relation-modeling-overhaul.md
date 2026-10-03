@@ -1,6 +1,6 @@
-# cline-kanban 领域术语表
+# 工作单元间关系建模重构（Inter-Work-Unit Relation Modeling Overhaul）— 领域术语表
 
-本文件是 cline-kanban 的领域术语表（ubiquitous language），只收术语的定义与应避免的叫法，不写实现。当前收录的是 dd2db「任务关系建模重构（Task Relation Modeling Overhaul）」的术语；权威设计在 dd2db 设计归档（仓库外），冲突时以设计归档的最高仲裁层为准，并回头修订本文件。其余子系统的术语见 `AGENTS.md` 的参考文档表（例如 facet 模型见 `docs/session-facet-model.md`，thread graph 术语见其核心包自己的 CONTEXT）。
+本文件收录 dd2db「任务关系建模重构（Task Relation Modeling Overhaul）」引入的领域术语（ubiquitous language），只收术语的定义与应避免的叫法，不写实现（原在仓库根 `CONTEXT.md`，按 `docs/README.md`「功能术语表」约定迁入）。权威设计在 dd2db 设计归档（仓库外），冲突时以设计归档的最高仲裁层为准，并回头修订本文件。其余子系统的术语见 `AGENTS.md` 的参考文档表（例如 facet 模型见 `docs/session-facet-model.md`，thread graph 术语见其核心包自己的 CONTEXT）。
 
 写法：每条「**中文（English）**：定义」加 `_Avoid_`。标识符保持英文原文。全文禁用「推断 / inferred」一词，见「间接证据」。
 
