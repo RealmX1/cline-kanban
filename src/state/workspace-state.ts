@@ -809,6 +809,18 @@ export async function loadPersistedWorkspaceStateById(workspaceId: string): Prom
 	};
 }
 
+// 只读 sessions.json（不碰 board / meta）。给跨项目视图读未加载项目的会话用；调用方按下面的文件路径 stat
+// 做 mtime 缓存——这个文件单个可达数 MB，不能每次广播都重新解析。
+export function getPersistedWorkspaceSessionsFilePathById(workspaceId: string): string {
+	return getWorkspaceSessionsPath(workspaceId);
+}
+
+export async function loadPersistedWorkspaceSessionsById(
+	workspaceId: string,
+): Promise<Record<string, RuntimeTaskSessionSummary>> {
+	return await readWorkspaceSessions(workspaceId);
+}
+
 export async function savePersistedWorkspaceSessionsById(
 	workspaceId: string,
 	sessions: Record<string, RuntimeTaskSessionSummary>,

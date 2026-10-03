@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
+import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
+import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardColumn, CardSelection } from "@/types";
 
 // BoardCard = 列表内的可拖卡（包 <Draggable>）。mock 暴露 data-card-variant="draggable" 与它收到的
@@ -868,5 +870,93 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		// 目标 index 3 → 基值 R = 150；焦点 stage（index 2）在目标之上，试算 210 − 420 + 150 = −60 ≤ 0
 		// → 预留 16 + 80。scrollTop = 1000 + 420 − (150 + 16 + 80) = 1174。
 		expect(scrollRoot.scrollTop).toBe(1174);
+	});
+});
+
+// Focus View 左栏的列表范围切换（docs/context-cross-project-recently-active-task-switcher.md）：有宿主时才出现；
+// 切到 All projects 时 stage 列表只隐藏不卸载（钉住 rail / 焦点卡几何 hook 挂在它的 scrollport 上）。
+describe("ColumnContextPanel left column task list scope", () => {
+	let container: HTMLDivElement;
+	let root: Root;
+
+	beforeEach(() => {
+		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+		window.localStorage.clear();
+		container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+	});
+
+	afterEach(() => {
+		act(() => root.unmount());
+		container.remove();
+	});
+
+	const columns: BoardColumn[] = [
+		{ id: "backlog", title: "Backlog", cards: [] },
+		{ id: "in_progress", title: "In Progress", cards: [createCard("task-1", "In progress task")] },
+		{ id: "review", title: "Review", cards: [] },
+		{ id: "trash", title: "Done", cards: [] },
+	];
+
+	function renderPanel(withHost: boolean): void {
+		const panel = (
+			<ColumnContextPanel
+				selection={createSelection(columns, "task-1")}
+				onCardSelect={() => {}}
+				taskSessions={{}}
+				onTaskDragEnd={() => {}}
+			/>
+		);
+		act(() =>
+			root.render(
+				withHost ? (
+					<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider
+						value={{
+							projects: [],
+							notificationLogByWorkspaceId: {},
+							currentProjectId: "project-a",
+							focusedTaskInProject: { workspaceId: "project-a", taskId: "task-1" },
+							onOpenTaskInProject: vi.fn(),
+							onRequestPinCurrentProjectTaskToTaskPinboard: vi.fn(),
+							onUnpinCurrentProjectTaskFromTaskPinboard: vi.fn(),
+							onEditCurrentProjectTaskPinboardPinReason: vi.fn(),
+						}}
+					>
+						{panel}
+					</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
+				) : (
+					panel
+				),
+			),
+		);
+	}
+
+	it("没有宿主时不出现范围切换", () => {
+		renderPanel(false);
+		expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+	});
+
+	it("切到 All projects：显示切换面板、stage 列表隐藏但仍挂载，选择落 localStorage", () => {
+		renderPanel(true);
+		const allProjectsOption = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
+			(option) => option.textContent === "All projects",
+		);
+		act(() => allProjectsOption?.click());
+
+		expect(
+			container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'),
+		).not.toBeNull();
+		const stageList = container.querySelector<HTMLElement>('[data-testid="focus-view-current-project-stage-list"]');
+		expect(stageList?.className).toContain("hidden");
+		expect(stageList?.querySelector('[data-task-id="task-1"]')).not.toBeNull();
+		// 部署后引导验证从这个锚点起步（verification-anchor-registry.ts）。
+		expect(
+			container.querySelector('[data-verification-anchor="focus-view-left-column-task-list-scope-toggle"]'),
+		).not.toBeNull();
+		expect(window.localStorage.getItem(LocalStorageKey.FocusViewLeftColumnTaskListScope)).toBe(
+			"all_projects_recently_active_task_switcher",
+		);
 	});
 });

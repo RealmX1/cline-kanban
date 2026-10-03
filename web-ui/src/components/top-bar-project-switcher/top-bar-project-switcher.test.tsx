@@ -18,6 +18,7 @@ function createProject(overrides: Partial<RuntimeProjectSummary> & { id: string 
 		taskCounts: { backlog: 0, in_progress: 0, review: 0, validation: 0, trash: 0 },
 		availability: { status: "available" },
 		inProgressTaskDetails: [],
+		crossProjectTaskSwitcherEntries: [],
 		...overrides,
 	};
 }

@@ -848,13 +848,16 @@ function summaryClaimsRunningAgentProcess(summary: RuntimeTaskSessionSummary): b
 // 额外多清一个 connectionRetry：进程都不在了，不该继续渲染重连中。
 function reconcileSummaryWithUnrecoverableRunningAgentProcessClaim(
 	summary: RuntimeTaskSessionSummary,
+	logsReconciliation: boolean,
 ): RuntimeTaskSessionSummary {
 	if (!summaryClaimsRunningAgentProcess(summary)) {
 		return summary;
 	}
-	logTuiFreezeWarning(
-		`[session-hydrate-reconcile] taskId=${summary.taskId} agentId=${summary.agentId ?? "unknown"} pid=${summary.pid} 重建会话无法认领该进程，重置为 idle`,
-	);
+	if (logsReconciliation) {
+		logTuiFreezeWarning(
+			`[session-hydrate-reconcile] taskId=${summary.taskId} agentId=${summary.agentId ?? "unknown"} pid=${summary.pid} 重建会话无法认领该进程，重置为 idle`,
+		);
+	}
 	return mergeSummaryWithFacets(summary, {
 		...buildTerminalFacetPatch(summary, "idle", {
 			reviewReason: null,
@@ -873,6 +876,52 @@ function reconcileSummaryWithUnrecoverableRunningAgentProcessClaim(
 		previousTurnCheckpoint: null,
 		connectionRetry: null,
 	});
+}
+
+// 从磁盘记录重建一条「本进程不持有活 agent 进程」的 summary。hydrateFromRecord 的唯一 chokepoint，
+// 也被跨项目视图拿来读未加载项目的 sessions.json（见 persisted-task-session-facts-cache-for-unloaded-projects.ts）——
+// 两边对「盘上那条记录在本 runtime 里到底算什么状态」必须是同一个答案。
+//
+// park 是「活进程作用域」的运行时状态：从磁盘重建出来、active 为 null 的会话按定义不是「当前正在 park」。
+// graceful shutdown 经 listSummaries() 落盘的 summary 可能仍带 park sidecar（onExit 的对称清理未必在 persist
+// 前 flush），而后续重建（recoverStaleSession / startTaskSession）都走 facet-only 的 buildTerminalFacetPatch，
+// 其 mergeSummaryWithFacets 的 {...prev,...patch} 合并会保留这个 stale sidecar，使全新 agent run 恒被
+// isParkedAwaitingDispatchedBackgroundWork 误判为 parked → 真实 Stop 在 to_review 闸被误抑制、漏发一次通知。
+// 在磁盘重载这一单一 chokepoint 清掉该 optional sidecar，任何内存条目都不再带 stale marker 诞生。
+//
+// 同一 chokepoint 顺带做运行态对账：磁盘记录里声称仍挂着活 agent 进程的会话，在重建条目
+// （恒 active: null）里按构造已不可认领，故在这里就归零为 idle，而不是等用户碰到该任务时
+// 才由 recoverStaleSession 按需修正。
+//
+// options.logsReconciliation：只有真正重建内存条目（hydrateFromRecord）时才记「无法认领」告警；跨项目视图只是
+// 只读投影，每次 sessions.json 变化都会重读，记下来只会在诊断日志里刷出大量与 TUI 冻结无关的条目。
+export function reconstructTaskSessionSummaryFromPersistedRecordWithoutLiveAgentProcess(
+	summary: RuntimeTaskSessionSummary,
+	options: { logsReconciliation: boolean },
+): RuntimeTaskSessionSummary {
+	return reconcileSummaryWithUnrecoverableRunningAgentProcessClaim(
+		{
+			...summary,
+			awaitingDispatchedBackgroundWork: null,
+			// 投递挂起可见性同理，且更窄：它是「活 active 上此刻真有一条投递在等这个输入框」的派生读数，
+			// 登记本体（单飞槽、重探定时器、回执 observer）全挂在 active 上，而重建条目恒 active: null，
+			// 按构造不可能有任何在途投递。但它照样会上盘：完整 summary 经 listSummaries() 进 saveState /
+			// shutdown 持久化，这个 sidecar 一起写下去。不在这里清，重启后就会广播一条「有 1 条程序化投递
+			// 在等这个输入框」的假挂起，并在终端上方摆出「暂存我的输入并放行」，用户还可能对一条根本不
+			// 存在的投递执行暂存——正是本轮工作要根除的那种不诚实。
+			terminalDeliveryContention: null,
+			// 「首轮未在启动窗口内落盘」是活进程作用域的读数（看门狗挂在 active 上），重建条目按构造没有活进程，
+			// 留着它卡片就一直告警。「从未建立 / 已建立」是跨重启成立的事实，保留。
+			...(summary.agentNativeConversationPersistenceObservation?.persistenceStatus ===
+			"first_prompt_not_persisted_within_startup_window"
+				? { agentNativeConversationPersistenceObservation: null }
+				: {}),
+			// 同一 chokepoint 顺带补盖通道章：本改动之前落盘的记录没有这个字段，而
+			// terminalManager 持有的会话按构造恒是 PTY 的，明写好过依赖读时回退派生。
+			sessionTransport: "pty_terminal",
+		},
+		options.logsReconciliation,
+	);
 }
 
 // 「会话处于活跃回合」判据（Stage 3 余区：legacy `state` 读 → 双轴 facet 真相源）。
@@ -2658,37 +2707,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	hydrateFromRecord(record: Record<string, RuntimeTaskSessionSummary>): void {
 		for (const [taskId, summary] of Object.entries(record)) {
-			// park 是「活进程作用域」的运行时状态：从磁盘重建出来、active 为 null 的会话按定义不是「当前正在 park」。
-			// graceful shutdown 经 listSummaries() 落盘的 summary 可能仍带 park sidecar（onExit 的对称清理未必在 persist
-			// 前 flush），而后续重建（recoverStaleSession / startTaskSession）都走 facet-only 的 buildTerminalFacetPatch，
-			// 其 mergeSummaryWithFacets 的 {...prev,...patch} 合并会保留这个 stale sidecar，使全新 agent run 恒被
-			// isParkedAwaitingDispatchedBackgroundWork 误判为 parked → 真实 Stop 在 to_review 闸被误抑制、漏发一次通知。
-			// 在磁盘重载这一单一 chokepoint 清掉该 optional sidecar，任何内存条目都不再带 stale marker 诞生。
-			//
-			// 同一 chokepoint 顺带做运行态对账：磁盘记录里声称仍挂着活 agent 进程的会话，在重建条目
-			// （恒 active: null）里按构造已不可认领，故在这里就归零为 idle，而不是等用户碰到该任务时
-			// 才由 recoverStaleSession 按需修正。
 			this.entries.set(taskId, {
 				summary: cloneSummary(
-					reconcileSummaryWithUnrecoverableRunningAgentProcessClaim({
-						...summary,
-						awaitingDispatchedBackgroundWork: null,
-						// 投递挂起可见性同理，且更窄：它是「活 active 上此刻真有一条投递在等这个输入框」的派生读数，
-						// 登记本体（单飞槽、重探定时器、回执 observer）全挂在 active 上，而重建条目恒 active: null，
-						// 按构造不可能有任何在途投递。但它照样会上盘：完整 summary 经 listSummaries() 进 saveState /
-						// shutdown 持久化，这个 sidecar 一起写下去。不在这里清，重启后就会广播一条「有 1 条程序化投递
-						// 在等这个输入框」的假挂起，并在终端上方摆出「暂存我的输入并放行」，用户还可能对一条根本不
-						// 存在的投递执行暂存——正是本轮工作要根除的那种不诚实。
-						terminalDeliveryContention: null,
-						// 「首轮未在启动窗口内落盘」是活进程作用域的读数（看门狗挂在 active 上），重建条目按构造没有活进程，
-						// 留着它卡片就一直告警。「从未建立 / 已建立」是跨重启成立的事实，保留。
-						...(summary.agentNativeConversationPersistenceObservation?.persistenceStatus ===
-						"first_prompt_not_persisted_within_startup_window"
-							? { agentNativeConversationPersistenceObservation: null }
-							: {}),
-						// 同一 chokepoint 顺带补盖通道章：本改动之前落盘的记录没有这个字段，而
-						// terminalManager 持有的会话按构造恒是 PTY 的，明写好过依赖读时回退派生。
-						sessionTransport: "pty_terminal",
+					reconstructTaskSessionSummaryFromPersistedRecordWithoutLiveAgentProcess(summary, {
+						logsReconciliation: true,
 					}),
 				),
 				active: null,

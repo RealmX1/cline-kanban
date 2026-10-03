@@ -100,6 +100,10 @@ export default defineConfig({
 				__dirname,
 				"../src/core/notification-intelligence-purpose-binding-problems.ts",
 			),
+			"@runtime-cross-project-recently-active-task-switcher-section-assignment": resolve(
+				__dirname,
+				"../src/core/cross-project-recently-active-task-switcher-section-assignment.ts",
+			),
 			"@runtime-session-activity": resolve(__dirname, "../src/core/session-activity.ts"),
 			"@runtime-shortcuts": resolve(__dirname, "../src/config/shortcut-utils.ts"),
 			"@runtime-task-agent-permission-mode": resolve(__dirname, "../src/core/task-agent-permission-mode.ts"),
@@ -108,6 +112,7 @@ export default defineConfig({
 				"../src/core/task-create-base-ref-resolution.ts",
 			),
 			"@runtime-task-id": resolve(__dirname, "../src/core/task-id.ts"),
+			"@runtime-task-pinboard-pinning": resolve(__dirname, "../src/core/task-pinboard-pinning.ts"),
 			"@runtime-task-title": resolve(__dirname, "../src/core/task-title.ts"),
 			"@runtime-task-worktree-path": resolve(__dirname, "../src/workspace/task-worktree-path.ts"),
 			"@runtime-task-state": resolve(__dirname, "../src/core/task-board-mutations.ts"),

@@ -61,6 +61,12 @@ export enum LocalStorageKey {
 	// state/kanban-board-column-collapse-and-width-preferences.ts。
 	KanbanBoardColumnCollapsedOverrides = "kanban.kanban-board-column-collapsed-overrides.v1",
 	KanbanBoardColumnCustomWidthsPx = "kanban.kanban-board-column-custom-widths-px.v1",
+	// Focus View 左栏的列表范围：当前项目的 stage 列表 vs 跨项目「最近活跃任务」切换面板
+	// （docs/context-cross-project-recently-active-task-switcher.md）。per-browser 便利项，丢了回落到当前项目。
+	FocusViewLeftColumnTaskListScope = "kanban.focus-view-left-column-task-list-scope.v1",
+	// 跨项目切换面板里 Running 区的展开态（默认收起成一行「Running N」）与剩余区的排序模式。
+	CrossProjectTaskSwitcherRunningSectionExpanded = "kanban.cross-project-task-switcher-running-section-expanded.v1",
+	CrossProjectTaskSwitcherRemainingSectionOrderingMode = "kanban.cross-project-task-switcher-remaining-section-ordering-mode.v1",
 }
 
 export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [

@@ -3,10 +3,14 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import pLimit from "p-limit";
 import type {
 	RuntimeAllProjectsTaskSearchIndexResponse,
+	RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse,
+	RuntimeCrossProjectTaskSwitcherEntry,
 	RuntimeDirectoryListResponse,
 	RuntimeProjectAddResponse,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
+	RuntimeRecordTaskOpenedByUserRequest,
+	RuntimeRecordTaskOpenedByUserResponse,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
 import {
@@ -15,6 +19,7 @@ import {
 	parseProjectPermanentDeletionPreviewRequest,
 	parseProjectPermanentDeletionRequest,
 } from "../core/api-validation";
+import { CROSS_PROJECT_TASK_SWITCHER_EXTENDED_REMAINING_SECTION_ACTIVITY_HORIZON_MS } from "../core/cross-project-recently-active-task-switcher-section-assignment";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
 import type { ActiveRuntimeSessionShutdownResult } from "../server/active-runtime-session-shutdown";
 import {
@@ -22,6 +27,7 @@ import {
 	projectAllProjectsTaskSearchIndex,
 } from "../server/all-projects-task-search-index-projection";
 import { createConfirmedProjectPermanentDeletionService } from "../server/confirmed-project-permanent-deletion";
+import { recordTaskLastOpenedByUser } from "../state/task-last-opened-by-user-record-store";
 import {
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
@@ -61,6 +67,13 @@ export interface CreateProjectsApiDependencies {
 	}>;
 	pickDirectoryPathFromSystemDialog: () => string | null;
 	serverCwd: string;
+	listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon: (
+		activityHorizonMs: number,
+	) => Promise<
+		Array<{ workspaceId: string; crossProjectTaskSwitcherEntries: RuntimeCrossProjectTaskSwitcherEntry[] }>
+	>;
+	// 测试注入用；缺省 Date.now。
+	now?: () => number;
 }
 
 /**
@@ -351,5 +364,31 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 			);
 			return projectAllProjectsTaskSearchIndex(projectInputs);
 		},
+		recordTaskOpenedByUser: async (
+			input: RuntimeRecordTaskOpenedByUserRequest,
+		): Promise<RuntimeRecordTaskOpenedByUserResponse> => {
+			// 只认已注册项目：账本按 workspace 目录落盘，未知 id 不该凭空造出一个目录。
+			const isRegisteredWorkspace = (await listWorkspaceIndexEntries()).some(
+				(entry) => entry.workspaceId === input.workspaceId,
+			);
+			if (!isRegisteredWorkspace) {
+				return { recorded: false };
+			}
+			const recorded = await recordTaskLastOpenedByUser(input.workspaceId, input.taskId, (deps.now ?? Date.now)());
+			if (recorded) {
+				// 「我最后打开」进 projects_updated 的跨项目切换面板条目；其他标签页 / origin 据此重排。
+				void deps.broadcastRuntimeProjectsUpdated(null);
+			}
+			return { recorded };
+		},
+		listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon:
+			async (): Promise<RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse> => {
+				const activityHorizonMs = CROSS_PROJECT_TASK_SWITCHER_EXTENDED_REMAINING_SECTION_ACTIVITY_HORIZON_MS;
+				return {
+					activityHorizonMs,
+					projects:
+						await deps.listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon(activityHorizonMs),
+				};
+			},
 	};
 }

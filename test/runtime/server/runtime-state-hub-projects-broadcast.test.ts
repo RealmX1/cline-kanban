@@ -37,6 +37,7 @@ function makeProject(id: string, inProgressCount = 0): RuntimeProjectSummary {
 		rawColumnTaskCounts: taskCounts,
 		// 静态 payload（无活体 lastOutputAt）才能保证两次构建字节级相同、去重命中；活体输出期间广播照常。
 		inProgressTaskDetails: [],
+		crossProjectTaskSwitcherEntries: [],
 		gitRemoteOriginUrl: null,
 	};
 }
