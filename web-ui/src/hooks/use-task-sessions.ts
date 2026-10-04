@@ -38,6 +38,10 @@ interface EnsureTaskWorkspaceResult {
 	response?: Extract<RuntimeWorktreeEnsureResponse, { ok: true }>;
 }
 
+interface SendTaskSessionInputOptions extends SendTerminalInputOptions {
+	requireTerminalPasteSuccess?: boolean;
+}
+
 interface SendTaskSessionInputResult {
 	ok: boolean;
 	message?: string;
@@ -98,7 +102,7 @@ export interface UseTaskSessionsResult {
 	sendTaskSessionInput: (
 		taskId: string,
 		text: string,
-		options?: SendTerminalInputOptions,
+		options?: SendTaskSessionInputOptions,
 	) => Promise<SendTaskSessionInputResult>;
 	sendTaskChatMessage: (
 		taskId: string,
@@ -431,14 +435,24 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 	);
 
 	const sendTaskSessionInput = useCallback(
-		async (taskId: string, text: string, options?: SendTerminalInputOptions): Promise<SendTaskSessionInputResult> => {
+		async (
+			taskId: string,
+			text: string,
+			options?: SendTaskSessionInputOptions,
+		): Promise<SendTaskSessionInputResult> => {
 			const appendNewline = options?.appendNewline ?? true;
 			const controller = options?.preferTerminal === false ? null : getTerminalController(taskId);
+			if (options?.mode === "paste") {
+				if (!appendNewline && controller?.paste(text)) {
+					return { ok: true };
+				}
+				// 仅填入时，正文换行不能回落为可能提交的原始 PTY 输入。程序化发送仍保留原有回退。
+				if (options.requireTerminalPasteSuccess) {
+					return { ok: false, message: "Could not paste into the task input. Open its terminal and try again." };
+				}
+			}
 			if (controller) {
-				const sent =
-					options?.mode === "paste"
-						? !appendNewline && controller.paste(text)
-						: controller.input(appendNewline ? `${text}\n` : text);
+				const sent = controller.input(appendNewline ? `${text}\n` : text);
 				if (sent) {
 					return { ok: true };
 				}

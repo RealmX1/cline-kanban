@@ -1370,6 +1370,48 @@ describe("CardDetailView", () => {
 		expect(requireAgentPanel(container).style.width).toBe("800px");
 	});
 
+	it.each(["pty_terminal", "acp_stdio_subprocess"] as const)(
+		"Prompts 填入按 %s 通道保留换行且不发送",
+		async (sessionTransport) => {
+			const onAddReviewComments = vi.fn();
+			const summary = createSessionSummary("task-1", { agentId: "omp", sessionTransport });
+			await act(async () => {
+				root.render(
+					<CardDetailView
+						selection={createSelection()}
+						currentProjectId="workspace-1"
+						selectedAgentId="omp"
+						sessionSummary={summary}
+						taskSessions={{ "task-1": summary }}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						onAddReviewComments={onAddReviewComments}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				);
+			});
+			const promptProps = getLastMockFirstArg<{ onFillInput: (text: string) => void }>(mockPromptLibraryPanel);
+			await act(async () => {
+				promptProps.onFillInput("\n提示词\n");
+			});
+			if (sessionTransport === "acp_stdio_subprocess") {
+				expect(mockClineAppendToDraft).toHaveBeenCalledExactlyOnceWith("\n提示词\n", {
+					preserveInsertedTextBoundaryWhitespace: true,
+				});
+				expect(onAddReviewComments).not.toHaveBeenCalled();
+			} else {
+				expect(onAddReviewComments).toHaveBeenCalledExactlyOnceWith("task-1", "\n提示词\n");
+				expect(mockClineAppendToDraft).not.toHaveBeenCalled();
+			}
+			expect(mockClineSendText).not.toHaveBeenCalled();
+		},
+	);
+
 	it("queues Add diff comments into the cline composer without sending them", async () => {
 		const onAddReviewComments = vi.fn();
 

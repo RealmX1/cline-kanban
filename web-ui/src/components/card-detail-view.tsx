@@ -1162,9 +1162,7 @@ export function CardDetailView({
 		setIsDiffExpanded((previous) => !previous);
 	}, [bottomTerminalOpen, isDiffExpanded, onBottomTerminalClose]);
 
-	// Fill text into whichever agent input is active: Cline SDK composer draft (in-process) or the
-	// terminal agent's PTY (paste, no newline). Shared by the diff "add comment" action and the
-	// prompt library "fill into input" button.
+	// 填入当前会话草稿或终端输入框；终端使用粘贴，不追加提交用的回车。
 	const injectTextIntoActiveInput = useCallback(
 		(formatted: string) => {
 			if (showClineAgentChatPanel) {
@@ -1175,6 +1173,17 @@ export function CardDetailView({
 			onAddReviewComments?.(selection.card.id, formatted);
 		},
 		[onAddReviewComments, selection.card.id, showClineAgentChatPanel],
+	);
+	const handleFillPromptIntoActiveInput = useCallback(
+		(text: string) => {
+			if (showClineAgentChatPanel) {
+				clineAgentChatPanelRef.current?.appendToDraft(text, { preserveInsertedTextBoundaryWhitespace: true });
+				setIsDiffExpanded(false);
+				return;
+			}
+			injectTextIntoActiveInput(text);
+		},
+		[injectTextIntoActiveInput, showClineAgentChatPanel],
 	);
 
 	const handleSendDiffComments = useCallback(
@@ -1262,7 +1271,7 @@ export function CardDetailView({
 			<PromptLibraryPanel
 				taskId={selectedTaskConversationSessionId}
 				projectId={promptLibraryProjectId}
-				onFillInput={injectTextIntoActiveInput}
+				onFillInput={handleFillPromptIntoActiveInput}
 				onQueuePromptForAfterCurrentTurn={currentProjectId ? handleQueuePromptForAfterCurrentTurn : undefined}
 				headerContent={detailUtilityTabs}
 				taskIdsOnBoard={taskIdsOnBoard ?? null}

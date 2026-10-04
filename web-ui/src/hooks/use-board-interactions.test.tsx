@@ -196,6 +196,8 @@ function mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup(): void {
 }
 
 interface HookSnapshot {
+	handleAddReviewComments: (taskId: string, text: string) => Promise<void>;
+	handleSendReviewComments: (taskId: string, text: string) => Promise<void>;
 	handleRestoreTaskFromTrash: (taskId: string) => void;
 	handleOpenDeleteTask: (taskId: string) => void;
 	handleConfirmDeleteTask: () => void;
@@ -238,6 +240,7 @@ function HookHarness({
 	stopTaskSession = NOOP_STOP_SESSION,
 	transitionTaskToReview: transitionTaskToReviewProp,
 	cleanupTaskWorkspace = NOOP_CLEANUP_WORKSPACE,
+	sendTaskSessionInput = NOOP_SEND_TASK_INPUT,
 	initialSessions,
 	onSnapshot,
 	onSessionsControl,
@@ -252,6 +255,7 @@ function HookHarness({
 	stopTaskSession?: (taskId: string) => Promise<void>;
 	transitionTaskToReview?: (taskId: string) => Promise<boolean>;
 	cleanupTaskWorkspace?: UseTaskSessionsResult["cleanupTaskWorkspace"];
+	sendTaskSessionInput?: UseTaskSessionsResult["sendTaskSessionInput"];
 	initialSessions?: Record<string, RuntimeTaskSessionSummary>;
 	onSnapshot?: (snapshot: HookSnapshot) => void;
 	onSessionsControl?: (control: {
@@ -305,7 +309,7 @@ function HookHarness({
 		ensureTaskWorkspace,
 		startTaskSession,
 		fetchTaskWorkspaceInfo: NOOP_FETCH_WORKSPACE_INFO,
-		sendTaskSessionInput: NOOP_SEND_TASK_INPUT,
+		sendTaskSessionInput,
 		readyForReviewNotificationsEnabled: false,
 		taskGitActionLoadingByTaskId: {},
 		runAutoReviewGitAction: NOOP_RUN_AUTO_REVIEW,
@@ -313,6 +317,8 @@ function HookHarness({
 
 	useEffect(() => {
 		onSnapshot?.({
+			handleAddReviewComments: actions.handleAddReviewComments,
+			handleSendReviewComments: actions.handleSendReviewComments,
 			handleRestoreTaskFromTrash: actions.handleRestoreTaskFromTrash,
 			handleOpenDeleteTask: actions.handleOpenDeleteTask,
 			handleConfirmDeleteTask: actions.handleConfirmDeleteTask,
@@ -330,6 +336,8 @@ function HookHarness({
 			completePostDeployVerificationMoveToDone: actions.completePostDeployVerificationMoveToDone,
 		});
 	}, [
+		actions.handleAddReviewComments,
+		actions.handleSendReviewComments,
 		actions.completePostDeployVerificationMoveToDone,
 		actions.deleteTaskTarget,
 		actions.handleCardSelect,
@@ -444,6 +452,49 @@ describe("useBoardInteractions", () => {
 			setSelectedTaskId,
 		};
 	}
+
+	it("仅填入启用严格粘贴，显式发送保留程序化投递与单独提交", async () => {
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+		const sendTaskSessionInput = vi
+			.fn<UseTaskSessionsResult["sendTaskSessionInput"]>()
+			.mockResolvedValue({ ok: true });
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={createBoard()}
+					setBoard={() => {}}
+					ensureTaskWorkspace={async () => ({ ok: true })}
+					startTaskSession={async () => ({ ok: true })}
+					sendTaskSessionInput={sendTaskSessionInput}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			await latestSnapshot?.handleAddReviewComments("task-1", "\n提示词\n");
+		});
+		expect(sendTaskSessionInput).toHaveBeenCalledExactlyOnceWith("task-1", "\n提示词\n", {
+			appendNewline: false,
+			mode: "paste",
+			requireTerminalPasteSuccess: true,
+		});
+		sendTaskSessionInput.mockClear();
+		await act(async () => {
+			const sending = latestSnapshot?.handleSendReviewComments("task-1", "审查指令");
+			await vi.advanceTimersByTimeAsync(200);
+			await sending;
+		});
+		expect(sendTaskSessionInput).toHaveBeenNthCalledWith(1, "task-1", "审查指令", {
+			appendNewline: false,
+			mode: "paste",
+		});
+		expect(sendTaskSessionInput).toHaveBeenNthCalledWith(2, "task-1", "\r", { appendNewline: false });
+		expect(sendTaskSessionInput).toHaveBeenCalledTimes(2);
+	});
 
 	it("回调身份跨 board/session 更新稳定，旧回调仍读取最新卡片及会话", async () => {
 		mockUnavailableProgrammaticCardMoves();
