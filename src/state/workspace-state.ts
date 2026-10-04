@@ -910,7 +910,12 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 		);
 		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(workspaceId), nextSessions, { lock: null });
 		getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture()?.recordAgentConversationSessionNativeIdentityPersistedWithoutBlocking(
-			{ workspaceId, kanbanTaskConversationSessionId: taskId, sessionSummary: parsedSummary },
+			{
+				workspaceId,
+				kanbanTaskConversationSessionId: taskId,
+				sessionSummary: parsedSummary,
+				previouslyPersistedAgentNativeConversationSessionIdentity: savedIdentity ?? null,
+			},
 		);
 		return "persisted_new_identity_and_invalidated_stale_snapshot_revision";
 	});

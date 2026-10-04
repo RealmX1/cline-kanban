@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 import packageJson from "../../package.json" with { type: "json" };
-import { type RuntimeBoardData, type RuntimeTaskSessionSummary, runtimeBoardDataSchema } from "../core/api-contract";
+import {
+	type RuntimeAgentNativeConversationSessionIdentity,
+	type RuntimeBoardData,
+	type RuntimeTaskSessionSummary,
+	runtimeBoardDataSchema,
+} from "../core/api-contract";
 import type {
 	CapturingKanbanRuntimeInstanceIdentity,
 	InterWorkUnitRelationLedgerEventDraft,
@@ -83,6 +88,18 @@ function describeMainConversationSessionLastPersistedSummaryAtBaseline(
 		agentId: mainConversationSessionSummary.agentId ?? null,
 		summaryUpdatedAt: mainConversationSessionSummary.updatedAt ?? null,
 	};
+}
+
+// 两条记账路径（漏斗内 sessions 变化、只写 sessions 的身份落盘）共用的「新身份」判据：只看 harness 与原生会话 id。
+// observedAt 前移是同一身份的再次确认（时间水位），transcriptPath 变化也不换会话，二者都不是新身份。
+function isNewNativeConversationSessionIdentityForKanbanTaskConversationSession(
+	previouslyPersistedIdentity: RuntimeAgentNativeConversationSessionIdentity | null | undefined,
+	nextIdentity: RuntimeAgentNativeConversationSessionIdentity,
+): boolean {
+	return (
+		previouslyPersistedIdentity?.sourceAgentId !== nextIdentity.sourceAgentId ||
+		previouslyPersistedIdentity.nativeSessionId !== nextIdentity.nativeSessionId
+	);
 }
 
 export function createCapturingKanbanRuntimeInstanceIdentity(): CapturingKanbanRuntimeInstanceIdentity {
@@ -255,8 +272,7 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 				options.previousSessions[kanbanTaskConversationSessionId]?.agentNativeConversationSessionIdentity;
 			if (
 				!nextIdentity ||
-				(previousIdentity?.sourceAgentId === nextIdentity.sourceAgentId &&
-					previousIdentity.nativeSessionId === nextIdentity.nativeSessionId)
+				!isNewNativeConversationSessionIdentityForKanbanTaskConversationSession(previousIdentity, nextIdentity)
 			) {
 				continue;
 			}
@@ -547,6 +563,16 @@ export function createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBac
 		},
 
 		recordAgentConversationSessionNativeIdentityPersistedWithoutBlocking(recordInput) {
+			const nextIdentity = recordInput.sessionSummary.agentNativeConversationSessionIdentity;
+			if (
+				!nextIdentity ||
+				!isNewNativeConversationSessionIdentityForKanbanTaskConversationSession(
+					recordInput.previouslyPersistedAgentNativeConversationSessionIdentity,
+					nextIdentity,
+				)
+			) {
+				return;
+			}
 			const draft = buildAgentConversationSessionNativeIdentityEventDraft({
 				eventKind: "new_native_conversation_session_identity_observed_for_kanban_task_conversation_session",
 				workspaceId: recordInput.workspaceId,

@@ -96,6 +96,7 @@ import {
 } from "../core/api-validation";
 import { formatDeferredHarnessGeneratedPromptsAsExplicitUserReleasedPrompt } from "../core/harness-generated-restoration-prompt";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
+import { buildQueuedProgrammaticInjectionQueueEntryId } from "../core/queued-programmatic-injection-ledger-receipt-mirroring";
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "../core/task-agent-permission-mode";
 import { applyMostRecentlyLaunchedAgentSessionAgentIdToTask, updateTask } from "../core/task-board-mutations";
@@ -106,7 +107,11 @@ import {
 	type TaskSessionStartDiagnosticEvent,
 } from "../diagnostics/task-session-start-diagnostics-logger";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
-import { recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking } from "../inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
+import {
+	recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking,
+	recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking,
+	recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking,
+} from "../inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
 import { createAgentRaisedPendingUserDecisionAnswerDelivery } from "../server/agent-raised-pending-user-decision-answer-delivery";
 import { openInBrowser } from "../server/browser";
 import type { QueuedTaskPromptDeliveryDispatcher } from "../server/queued-task-prompt-delivery-dispatcher";
@@ -126,7 +131,7 @@ import { mutateWorkspacePromptLibrary, readWorkspacePromptLibrarySnapshot } from
 import {
 	isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask,
 	isQueuedTaskPromptDeliveryWorkspaceQueueFull,
-	mutateWorkspaceQueuedTaskPromptDeliveries,
+	mutateWorkspaceQueuedTaskPromptDeliveriesAndReportNewlyCreatedQueueEntries,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../state/queued-task-prompt-delivery-store";
 import {
@@ -2327,7 +2332,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
-		mutateTaskPromptDeliveryQueue: async (workspaceScope, input) => {
+		mutateTaskPromptDeliveryQueue: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
 			const { mutation } = input;
 			const workspaceId = workspaceScope.workspaceId;
 			try {
@@ -2353,7 +2358,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								mutation.queueEntryId,
 							)) ?? null)
 						: null;
-				const queue = await mutateWorkspaceQueuedTaskPromptDeliveries(workspaceId, mutation);
+				const { snapshot: queue, newlyCreatedQueueEntries } =
+					await mutateWorkspaceQueuedTaskPromptDeliveriesAndReportNewlyCreatedQueueEntries(workspaceId, mutation);
 				const taskEntries = queue.entriesByTaskId[mutation.taskId] ?? [];
 				// 入队 / 重排被拒与幂等重发在快照上长得一样（都是原样返回），只能事后按「那条在不在」+「满没满」分辨。
 				const expectedNewQueueEntryId =
@@ -2366,6 +2372,16 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					expectedNewQueueEntryId !== null &&
 					!taskEntries.some((entry) => entry.queueEntryId === expectedNewQueueEntryId) &&
 					isQueuedTaskPromptDeliveryQueueCapacityExhaustedForTask(queue, mutation.taskId);
+				// dd2db T2：人排条目也是一次投递请求。只有锁内真的新建了条目才是新意图（同 id 重发、满额被拒都不算）。
+				for (const newlyCreatedQueueEntry of newlyCreatedQueueEntries) {
+					recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking({
+						workspaceId,
+						newlyCreatedQueueEntry,
+						retriedFromSettledFailedQueueEntryId:
+							mutation.kind === "retry_settled_failed_queued_prompt_delivery" ? mutation.queueEntryId : null,
+						kanbanRequestOriginActorEvidence,
+					});
+				}
 				await deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated(workspaceId, mutation.taskId, queue);
 				return {
 					ok: !enqueueRefusedBecauseQueueCapacityIsExhausted,
@@ -2393,13 +2409,32 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
-		enqueueAgentIdleGatedProgrammaticTaskChatMessage: async (workspaceScope, input) => {
+		enqueueAgentIdleGatedProgrammaticTaskChatMessage: async (
+			workspaceScope,
+			input,
+			kanbanRequestOriginActorEvidence,
+		) => {
 			try {
-				return await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+				const enqueueResponse = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 					{ notifyQueueMutated: deps.queuedTaskPromptDeliveryDispatcher?.notifyQueueMutated },
 					workspaceScope.workspaceId,
 					input,
 				);
+				if (enqueueResponse.ok && enqueueResponse.injectionLedgerRecordDisposition === "created") {
+					recordAgentIdleGatedProgrammaticTaskMessageDeliveryRequestedWithoutBlocking({
+						workspaceId: workspaceScope.workspaceId,
+						taskId: input.taskId.trim(),
+						messageBodyText: input.text,
+						taskMessageDeliveryIdempotencyKey: input.idempotencyKey.trim(),
+						declaredMessageSourceLabel: input.source.trim(),
+						queuedPromptDeliveryQueueEntryId: buildQueuedProgrammaticInjectionQueueEntryId(
+							input.idempotencyKey.trim(),
+						),
+						maxWaitForAgentIdleMs: input.maxWaitForAgentIdleMs,
+						kanbanRequestOriginActorEvidence,
+					});
+				}
+				return enqueueResponse;
 			} catch (error) {
 				return { ok: false, error: error instanceof Error ? error.message : String(error) };
 			}
