@@ -18,6 +18,10 @@
       "@runtime-cline-tool-call-display": ["../src/cline-sdk/cline-tool-call-display.ts"],
       "@runtime-contract": ["../src/core/api-contract.ts"],
       "@runtime-home-agent-session": ["../src/core/home-agent-session.ts"],
+      "@runtime-inter-work-unit-recorded-relation-projection-contract": [
+        "../src/core/inter-work-unit-recorded-relation-projection-contract.ts"
+      ],
+      "@runtime-work-unit-relation-read-api-contract": ["../src/core/work-unit-relation-read-api-contract.ts"],
       "@runtime-kanban-web-ui-page-load-request-origin-nonce": [
         "../src/core/kanban-web-ui-page-load-request-origin-nonce.ts"
       ],

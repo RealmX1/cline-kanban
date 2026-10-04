@@ -441,6 +441,28 @@ import {
 	notificationArchiveListResponseSchema,
 	notificationCandidateLifecycleSchema,
 } from "../core/notification-lifecycle-contract";
+import {
+	type GetRelationNeighborhoodSummaryRequest,
+	type GetRelationNeighborhoodSummaryResponse,
+	type GetWorkUnitContextRequest,
+	type GetWorkUnitContextResponse,
+	getRelationNeighborhoodSummaryRequestSchema,
+	getRelationNeighborhoodSummaryResponseSchema,
+	getWorkUnitContextRequestSchema,
+	getWorkUnitContextResponseSchema,
+	type ListConversationSessionOwnershipPeriodsRequest,
+	type ListConversationSessionOwnershipPeriodsResponse,
+	listConversationSessionOwnershipPeriodsRequestSchema,
+	listConversationSessionOwnershipPeriodsResponseSchema,
+	type ResolveKanbanBoardCardIdentityByBareTaskIdRequest,
+	type ResolveKanbanBoardCardIdentityByBareTaskIdResponse,
+	resolveKanbanBoardCardIdentityByBareTaskIdRequestSchema,
+	resolveKanbanBoardCardIdentityByBareTaskIdResponseSchema,
+	type SetRecordedRelationPresentationMutePreferenceRequest,
+	type SetRecordedRelationPresentationMutePreferenceResponse,
+	setRecordedRelationPresentationMutePreferenceRequestSchema,
+	setRecordedRelationPresentationMutePreferenceResponseSchema,
+} from "../core/work-unit-relation-read-api-contract";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { issueKanbanWebUiPageLoadRequestOriginNonce } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import {
@@ -878,6 +900,26 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest,
 		) => Promise<RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponse>;
+	};
+	// dd2db 1b 读侧：跨 project、只读；关系账本只在 runtime 内打开，所以 CLI 读动词也经这里。
+	workUnitRelationReadApi: {
+		resolveKanbanBoardCardIdentityByBareTaskId: (
+			input: ResolveKanbanBoardCardIdentityByBareTaskIdRequest,
+		) => Promise<ResolveKanbanBoardCardIdentityByBareTaskIdResponse>;
+		getRelationNeighborhoodSummary: (
+			input: GetRelationNeighborhoodSummaryRequest,
+		) => Promise<GetRelationNeighborhoodSummaryResponse>;
+		listConversationSessionOwnershipPeriods: (
+			input: ListConversationSessionOwnershipPeriodsRequest,
+		) => Promise<ListConversationSessionOwnershipPeriodsResponse>;
+		getWorkUnitContext: (input: GetWorkUnitContextRequest) => Promise<GetWorkUnitContextResponse>;
+	};
+	// dd2db 1b：记录型关系的展示偏好（静音）。只在 Web UI、要求已校验的页面 nonce。
+	workUnitRelationPresentationPreferenceApi: {
+		setRecordedRelationPresentationMutePreference: (
+			input: SetRecordedRelationPresentationMutePreferenceRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<SetRecordedRelationPresentationMutePreferenceResponse>;
 	};
 	conversationTreeApi: {
 		getConversationSessionTurnProjection: (
@@ -1877,6 +1919,42 @@ export const runtimeAppRouter = t.router({
 				return await ctx.deploymentApi.markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone(
 					ctx.workspaceScope,
 					input,
+				);
+			}),
+	}),
+	// dd2db 1b：工作单元间关系的读侧（记录型邻域、跨 project 身份解析、会话归属、上下文端口）。全是只读 query。
+	workUnit: t.router({
+		resolveKanbanBoardCardIdentityByBareTaskId: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(resolveKanbanBoardCardIdentityByBareTaskIdRequestSchema)
+			.output(resolveKanbanBoardCardIdentityByBareTaskIdResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workUnitRelationReadApi.resolveKanbanBoardCardIdentityByBareTaskId(input);
+			}),
+		getRelationNeighborhoodSummary: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(getRelationNeighborhoodSummaryRequestSchema)
+			.output(getRelationNeighborhoodSummaryResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workUnitRelationReadApi.getRelationNeighborhoodSummary(input);
+			}),
+		listConversationSessionOwnershipPeriods: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(listConversationSessionOwnershipPeriodsRequestSchema)
+			.output(listConversationSessionOwnershipPeriodsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workUnitRelationReadApi.listConversationSessionOwnershipPeriods(input);
+			}),
+		getWorkUnitContext: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(getWorkUnitContextRequestSchema)
+			.output(getWorkUnitContextResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workUnitRelationReadApi.getWorkUnitContext(input);
+			}),
+		setRecordedRelationPresentationMutePreference: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(setRecordedRelationPresentationMutePreferenceRequestSchema)
+			.output(setRecordedRelationPresentationMutePreferenceResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workUnitRelationPresentationPreferenceApi.setRecordedRelationPresentationMutePreference(
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
 				);
 			}),
 	}),

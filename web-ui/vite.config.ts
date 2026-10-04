@@ -88,6 +88,11 @@ export default defineConfig({
 			),
 			"@runtime-cline-tool-call-display": resolve(__dirname, "../src/cline-sdk/cline-tool-call-display.ts"),
 			"@runtime-home-agent-session": resolve(__dirname, "../src/core/home-agent-session.ts"),
+			// dd2db 1b Relations 面板要用 kind 注册表（值引用），所以 tsconfig / vite / vitest 三处同步。
+			"@runtime-inter-work-unit-recorded-relation-projection-contract": resolve(
+				__dirname,
+				"../src/core/inter-work-unit-recorded-relation-projection-contract.ts",
+			),
 			"@runtime-kanban-web-ui-page-load-request-origin-nonce": resolve(
 				__dirname,
 				"../src/core/kanban-web-ui-page-load-request-origin-nonce.ts",

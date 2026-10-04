@@ -13,6 +13,7 @@ import { registerExploratoryCommand } from "./commands/exploratory";
 import { registerHooksCommand } from "./commands/hooks";
 import { registerTaskCommand } from "./commands/task";
 import { registerVerificationCommand } from "./commands/verification";
+import { registerWorkUnitCommand } from "./commands/work-unit";
 import { loadGlobalRuntimeConfig, loadRuntimeConfig } from "./config/runtime-config";
 import type { RuntimeCommandRunResponse } from "./core/api-contract";
 import {
@@ -703,6 +704,7 @@ function createProgram(invocationArgs: string[]): Command {
 	);
 
 	registerTaskCommand(program);
+	registerWorkUnitCommand(program);
 	registerHooksCommand(program);
 	registerExploratoryCommand(program);
 	registerDeploymentCommand(program);

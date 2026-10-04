@@ -32,6 +32,7 @@ import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/q
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
+import { WorkUnitRelationNeighborhoodPanel } from "@/components/detail-panels/work-unit-relation-neighborhood-panel";
 import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
 import { SessionFindingsSection } from "@/components/findings/session-findings-section";
 import {
@@ -1331,6 +1332,11 @@ export function CardDetailView({
 				findings={exploratoryFindings}
 			/>
 		) : null;
+	// dd2db 1b Relations（只读邻域 + 静音切换）：与探索线 / findings 同位的独立可折叠 section，主体恒为**卡片**
+	// （关系挂在卡上，不随选中的 by-the-way 会话变）。只放在详情视图里，不在 BoardCard 上加入口。
+	const workUnitRelationNeighborhoodPanel = (
+		<WorkUnitRelationNeighborhoodPanel workspaceId={currentProjectId} kanbanBoardCardTaskId={selection.card.id} />
+	);
 	const activeTaskConversationSessionMessages =
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
 		(isMainTaskConversationSessionSelected ? streamedClineChatMessages : null);
@@ -1544,6 +1550,7 @@ export function CardDetailView({
 							<div className="flex min-h-0 min-w-0 flex-1 flex-col">{taskConversationSessionsPanel}</div>
 							{explorationThreadGraphPanel}
 							{sessionFindingsSection}
+							{workUnitRelationNeighborhoodPanel}
 						</div>
 						{/* Prompts / comments utility panel */}
 						<div
@@ -1831,9 +1838,10 @@ export function CardDetailView({
 										>
 											{taskConversationSessionsPanel}
 										</div>
-										{/* 探索线（B.2）+ 本会话 findings：同位下方的独立可折叠 section（蓝图 §G.2） */}
+										{/* 探索线（B.2）+ 本会话 findings + Relations：同位下方的独立可折叠 section（蓝图 §G.2） */}
 										{explorationThreadGraphPanel}
 										{sessionFindingsSection}
+										{workUnitRelationNeighborhoodPanel}
 										<ResizeHandle
 											orientation="horizontal"
 											ariaLabel="Resize task conversation sessions and utility panels"
