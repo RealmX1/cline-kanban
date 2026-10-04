@@ -588,12 +588,14 @@ export interface RuntimeTrpcContext {
 		mutateTaskPromptDeliveryQueue: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskPromptDeliveryQueueMutateRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeTaskPromptDeliveryQueueMutateResponse>;
 		// `kanban task message --deliver-when-agent-idle`：落注入账本 pending 记录 + 排进队列，一次调用完成
 		// （见 src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue.ts）。只给 CLI 用，浏览器不调。
 		enqueueAgentIdleGatedProgrammaticTaskChatMessage: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse>;
 		getWorkspaceTaskEditDrafts: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1309,13 +1311,21 @@ export const runtimeAppRouter = t.router({
 			.input(runtimeTaskPromptDeliveryQueueMutateRequestSchema)
 			.output(runtimeTaskPromptDeliveryQueueMutateResponseSchema)
 			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.mutateTaskPromptDeliveryQueue(ctx.workspaceScope, input);
+				return await ctx.runtimeApi.mutateTaskPromptDeliveryQueue(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
 			}),
 		enqueueAgentIdleGatedProgrammaticTaskChatMessage: workspaceProcedure
 			.input(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema)
 			.output(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema)
 			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage(ctx.workspaceScope, input);
+				return await ctx.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
 			}),
 		getWorkspaceTaskEditDrafts: workspaceProcedure
 			.input(runtimeTaskEditDraftsReadRequestSchema)

@@ -893,7 +893,12 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 			{ lock: null },
 		);
 		getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture()?.recordAgentConversationSessionNativeIdentityPersistedWithoutBlocking(
-			{ workspaceId, kanbanTaskConversationSessionId: taskId, sessionSummary: parsedSummary },
+			{
+				workspaceId,
+				kanbanTaskConversationSessionId: taskId,
+				sessionSummary: parsedSummary,
+				previouslyPersistedAgentNativeConversationSessionIdentity: savedIdentity ?? null,
+			},
 		);
 		return true;
 	});

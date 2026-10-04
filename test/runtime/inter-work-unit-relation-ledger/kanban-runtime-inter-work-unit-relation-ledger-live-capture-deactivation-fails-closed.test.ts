@@ -7,6 +7,7 @@ import {
 	registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
 	type WorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
 } from "../../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 // 不变量：runtime 进程内每一次 board 写入都先过账本，否则 fail-closed——live capture 停用后
 // 绝不能退回「未注册捕获 → 直接写盘」。账本 worker 与账本支撑的捕获用内存桩替身，不打开 sqlite。
@@ -64,6 +65,18 @@ vi.mock("../../../src/terminal/kanban-task-agent-session-work-unit-identity-envi
 	scrubInheritedWorkUnitIdentityEnvironmentVariablesFromKanbanRuntimeProcess: () => [],
 }));
 
+// 播种路径另有专门的单测（…-task-id-allocation-fails-closed-with-seeding-path-executed）。这里让收集直接返回空，
+// 播种成功落定而不触账本，也绝不扫开发者真实 HOME 下的 `.claude/projects`。
+vi.mock(
+	"../../../src/inter-work-unit-relation-ledger/global-task-identity-registry-task-id-reservation-seeding-from-existing-local-traces",
+	() => ({
+		collectTaskIdReservationSeedingResultFromExistingLocalTraces: async () => ({
+			seededTaskIdEntries: [],
+			workspacesSkippedBecauseBoardSessionsOrMetaFileUnreadableAtSeeding: [],
+		}),
+	}),
+);
+
 // 激活后的急切基线任务经 workspace-state 遍历索引并走漏斗；默认索引为空，个别用例自行注入。
 const workspaceStateFakes = vi.hoisted(() => ({
 	indexedWorkspaceEntries: [] as Array<{ workspaceId: string; repoPath: string }>,
@@ -71,33 +84,46 @@ const workspaceStateFakes = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../src/state/workspace-state", () => ({
+	getTaskWorktreesHomePath: () => "/nonexistent-task-worktrees-home-for-unit-test",
 	listWorkspaceIndexEntries: async () => workspaceStateFakes.indexedWorkspaceEntries,
 	resolveWorkspacePath: async (repositoryPath: string) => repositoryPath,
 	mutateWorkspaceState: async () => await workspaceStateFakes.mutateWorkspaceStateImplementation(),
 }));
 
-const reconcileInput = {
+const emptyBoard = { columns: [] };
+
+const reconcileInput: Parameters<
+	WorkspaceBoardPersistenceFunnelTaskMutationEventCapture["reconcileLedgerWithPersistedBoardWithinBoardLock"]
+>[0] = {
 	workspaceId: "workspace",
 	workspaceRepositoryPath: "/repositories/workspace",
-	persistedBoard: { columns: [] },
+	persistedBoard: emptyBoard,
 	persistedSessions: {},
 	persistedBoardFileSha256: null,
+	persistedBoardFileRawText: null,
 	persistedBoardRevision: 0,
-} as unknown as Parameters<
-	WorkspaceBoardPersistenceFunnelTaskMutationEventCapture["reconcileLedgerWithPersistedBoardWithinBoardLock"]
->[0];
+};
 
-const recordPendingInput = {
+const recordPendingInput: Parameters<
+	WorkspaceBoardPersistenceFunnelTaskMutationEventCapture["recordPendingTaskMutationEventsBeforeBoardFileWrite"]
+>[0] = {
 	workspaceId: "workspace",
 	workspaceRepositoryPath: "/repositories/workspace",
-} as unknown as Parameters<
-	WorkspaceBoardPersistenceFunnelTaskMutationEventCapture["recordPendingTaskMutationEventsBeforeBoardFileWrite"]
->[0];
+	previousBoard: emptyBoard,
+	nextBoard: emptyBoard,
+	previousSessions: {},
+	nextSessions: {},
+	nextBoardFileSha256: "next-board-file-sha256",
+	nextBoardRevision: 1,
+	taskMutationIntentWithResolvedActor: TASK_MUTATION_INTENT_FOR_TEST_FIXTURE,
+};
 
 function requireRegisteredCapture(): WorkspaceBoardPersistenceFunnelTaskMutationEventCapture {
 	const capture = getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture();
-	expect(capture).not.toBeNull();
-	return capture as WorkspaceBoardPersistenceFunnelTaskMutationEventCapture;
+	if (!capture) {
+		throw new Error("expected a registered workspace board persistence funnel task mutation event capture");
+	}
+	return capture;
 }
 
 describe("kanban runtime inter-work-unit relation ledger live capture deactivation fails closed", () => {
