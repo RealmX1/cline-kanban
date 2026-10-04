@@ -79,7 +79,7 @@ const ClineCreditLimitNotice = React.memo(function ClineCreditLimitNotice() {
 });
 
 export interface ClineAgentChatPanelHandle {
-	appendToDraft: (text: string) => void;
+	appendToDraft: (text: string, options?: { preserveInsertedTextBoundaryWhitespace?: boolean }) => void;
 	sendText: (text: string) => Promise<void>;
 }
 
@@ -495,7 +495,12 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 		);
 
 		const handleAppendToDraft = useCallback(
-			(text: string) => {
+			(text: string, options?: { preserveInsertedTextBoundaryWhitespace?: boolean }) => {
+				// Prompts 已补好前后换行，逐字追加才能保留边界和已有草稿。
+				if (options?.preserveInsertedTextBoundaryWhitespace) {
+					setDraft(`${draft}${text}`);
+					return;
+				}
 				const trimmed = text.trim();
 				if (trimmed.length === 0) {
 					return;

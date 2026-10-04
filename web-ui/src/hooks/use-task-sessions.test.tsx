@@ -8,6 +8,7 @@ import {
 	estimateColsForPanelWidth,
 	estimateTaskAgentTerminalGeometry,
 } from "@/runtime/task-session-geometry";
+import { registerTerminalController } from "@/terminal/terminal-controller-registry";
 import type { BoardCard } from "@/types";
 
 // Persisted detail terminal panel width the (unmounted) task start path reads.
@@ -24,12 +25,14 @@ function expectedStartPanelWidth(persistedWidthPx: number): number {
 }
 
 const startTaskSessionMutateMock = vi.hoisted(() => vi.fn());
+const sendTaskSessionInputMutateMock = vi.hoisted(() => vi.fn());
 const trackTaskResumedFromTrashMock = vi.hoisted(() => vi.fn());
 const loadDetailTerminalPanelWidthMock = vi.hoisted(() => vi.fn(() => 0));
 
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
+			sendTaskSessionInput: { mutate: sendTaskSessionInputMutateMock },
 			startTaskSession: {
 				mutate: startTaskSessionMutateMock,
 			},
@@ -48,6 +51,7 @@ vi.mock("@/telemetry/events", () => ({
 }));
 
 interface HookSnapshot {
+	sendTaskSessionInput: ReturnType<typeof useTaskSessions>["sendTaskSessionInput"];
 	startTaskSession: ReturnType<typeof useTaskSessions>["startTaskSession"];
 	createByTheWayTaskConversationSession: ReturnType<typeof useTaskSessions>["createByTheWayTaskConversationSession"];
 }
@@ -74,10 +78,16 @@ function HookHarness({ onSnapshot }: { onSnapshot: (snapshot: HookSnapshot) => v
 
 	useEffect(() => {
 		onSnapshot({
+			sendTaskSessionInput: sessions.sendTaskSessionInput,
 			startTaskSession: sessions.startTaskSession,
 			createByTheWayTaskConversationSession: sessions.createByTheWayTaskConversationSession,
 		});
-	}, [onSnapshot, sessions.createByTheWayTaskConversationSession, sessions.startTaskSession]);
+	}, [
+		onSnapshot,
+		sessions.createByTheWayTaskConversationSession,
+		sessions.startTaskSession,
+		sessions.sendTaskSessionInput,
+	]);
 
 	return null;
 }
@@ -88,6 +98,7 @@ describe("useTaskSessions", () => {
 	let previousActEnvironment: boolean | undefined;
 
 	beforeEach(() => {
+		sendTaskSessionInputMutateMock.mockReset();
 		startTaskSessionMutateMock.mockReset();
 		trackTaskResumedFromTrashMock.mockReset();
 		loadDetailTerminalPanelWidthMock.mockReset();
@@ -127,6 +138,109 @@ describe("useTaskSessions", () => {
 		} else {
 			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 				previousActEnvironment;
+		}
+	});
+
+	it.each(["成功粘贴", "粘贴失败", "无终端", "禁用终端", "请求提交"])(
+		"严格填入只走终端粘贴通道，不回落为原始写入：%s",
+		async (scenario) => {
+			let latestSnapshot: HookSnapshot | null = null;
+			await act(async () => {
+				root.render(
+					<HookHarness
+						onSnapshot={(snapshot) => {
+							latestSnapshot = snapshot;
+						}}
+					/>,
+				);
+			});
+			const paste = vi.fn(() => scenario === "成功粘贴");
+			const input = vi.fn(() => true);
+			const unregister = scenario === "无终端" ? () => {} : registerTerminalController("task-1", { paste, input });
+			try {
+				await act(async () => {
+					const result = await latestSnapshot?.sendTaskSessionInput("task-1", "\n提示词\n", {
+						mode: "paste",
+						requireTerminalPasteSuccess: true,
+						appendNewline: scenario === "请求提交",
+						preferTerminal: scenario !== "禁用终端",
+					});
+					expect(result?.ok).toBe(scenario === "成功粘贴");
+				});
+				if (scenario === "成功粘贴" || scenario === "粘贴失败") {
+					expect(paste).toHaveBeenCalledExactlyOnceWith("\n提示词\n");
+				} else {
+					expect(paste).not.toHaveBeenCalled();
+				}
+				expect(input).not.toHaveBeenCalled();
+				expect(sendTaskSessionInputMutateMock).not.toHaveBeenCalled();
+			} finally {
+				unregister();
+			}
+		},
+	);
+
+	it("后台程序化粘贴在未挂载终端时仍由运行时投递", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		sendTaskSessionInputMutateMock.mockResolvedValue({ ok: true });
+		await act(async () => {
+			expect(
+				(
+					await latestSnapshot?.sendTaskSessionInput("task-1", "自动提交指令", {
+						appendNewline: false,
+						mode: "paste",
+					})
+				)?.ok,
+			).toBe(true);
+		});
+		expect(sendTaskSessionInputMutateMock).toHaveBeenCalledExactlyOnceWith({
+			taskId: "task-1",
+			text: "自动提交指令",
+			appendNewline: false,
+		});
+	});
+
+	it.each([true, false])("普通键入仍可使用终端或运行时回退：终端接收=%s", async (terminalAcceptsInput) => {
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		const input = vi.fn(() => terminalAcceptsInput);
+		const paste = vi.fn(() => true);
+		const unregister = registerTerminalController("task-1", { input, paste });
+		sendTaskSessionInputMutateMock.mockResolvedValue({ ok: true });
+		try {
+			await act(async () => {
+				expect((await latestSnapshot?.sendTaskSessionInput("task-1", "继续"))?.ok).toBe(true);
+			});
+			expect(input).toHaveBeenCalledExactlyOnceWith("继续\n");
+			expect(paste).not.toHaveBeenCalled();
+			if (terminalAcceptsInput) {
+				expect(sendTaskSessionInputMutateMock).not.toHaveBeenCalled();
+			} else {
+				expect(sendTaskSessionInputMutateMock).toHaveBeenCalledExactlyOnceWith({
+					taskId: "task-1",
+					text: "继续",
+					appendNewline: true,
+				});
+			}
+		} finally {
+			unregister();
 		}
 	});
 

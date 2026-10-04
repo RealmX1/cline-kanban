@@ -37,7 +37,6 @@ import {
 } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import { beginTaskAgentSessionStartRequestInFlight } from "@/stores/task-agent-session-start-request-in-flight-store";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
-import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
 import {
@@ -84,11 +83,7 @@ interface UseBoardInteractionsInput {
 	ensureTaskWorkspace: UseTaskSessionsResult["ensureTaskWorkspace"];
 	startTaskSession: UseTaskSessionsResult["startTaskSession"];
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
-	sendTaskSessionInput: (
-		taskId: string,
-		input: string,
-		options?: SendTerminalInputOptions,
-	) => Promise<{ ok: boolean; message?: string }>;
+	sendTaskSessionInput: UseTaskSessionsResult["sendTaskSessionInput"];
 	readyForReviewNotificationsEnabled: boolean;
 	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingStateLike>;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
@@ -299,7 +294,11 @@ export function useBoardInteractions({
 
 	const handleAddReviewComments = useCallback(
 		async (taskId: string, text: string) => {
-			const typed = await sendTaskSessionInput(taskId, text, { appendNewline: false, mode: "paste" });
+			const typed = await sendTaskSessionInput(taskId, text, {
+				appendNewline: false,
+				mode: "paste",
+				requireTerminalPasteSuccess: true,
+			});
 			if (!typed.ok) {
 				showAppToast({
 					intent: "danger",
