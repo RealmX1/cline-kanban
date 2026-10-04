@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import type { RuntimePostDeployVerificationChecklistItem, RuntimePostDeployVerificationTask } from "@/runtime/types";
 import type { BoardColumnId } from "@/types";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 
 export interface PostDeployVerificationTaskCardProps {
 	task: RuntimePostDeployVerificationTask;
@@ -163,6 +164,10 @@ export function PostDeployVerificationTaskCard({
 						value={customDraft}
 						onChange={(event) => setCustomDraft(event.target.value)}
 						onKeyDown={(event) => {
+							// 输入法组字期间，Enter 属于输入法本身（上屏字符原文），不该被当成「添加这一条」。
+							if (isKeyboardEventEmittedDuringImeComposition(event)) {
+								return;
+							}
 							if (event.key === "Enter") {
 								event.preventDefault();
 								handleAddCustom();

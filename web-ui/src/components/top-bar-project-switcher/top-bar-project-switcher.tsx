@@ -27,6 +27,7 @@ import type { RecentlyUsedProjectSwitchHistory } from "@/hooks/use-recently-used
 import type { SelectedBoardOrSingleProjectScope } from "@/hooks/use-selected-board-or-single-project-scope";
 import type { RuntimeProjectSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { useInterval, useJsonLocalStorageValue, useRawLocalStorageValue } from "@/utils/react-use";
 
 /** 项目多到扫视成本高于打字成本时才出现过滤框；少量项目下它只是多一次焦点跳转。 */
@@ -203,6 +204,10 @@ export function TopBarProjectSwitcher({
 	// 分支与 search-select-dropdown 的 handleSearchInputKeyDown 保持一致，避免两处键盘行为分叉。
 	const handleNavigationKeyDown = useCallback(
 		(event: ReactKeyboardEvent<HTMLDivElement>) => {
+			// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+			if (isKeyboardEventEmittedDuringImeComposition(event)) {
+				return;
+			}
 			if (navigableRowCount === 0) {
 				if (event.key === "Escape") {
 					event.preventDefault();

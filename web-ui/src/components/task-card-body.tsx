@@ -68,6 +68,7 @@ import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
+import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { formatPathForDisplay } from "@/utils/path-display";
 import { useCopyToClipboard } from "@/utils/react-use";
 import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
@@ -407,6 +408,10 @@ export const TaskCardBody = memo(function TaskCardBody({
 	};
 
 	const handleTitleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+		// 输入法组字期间，按键属于输入法本身（上屏字符原文、翻候选页、取消组字），处理器必须整体让开。
+		if (isKeyboardEventEmittedDuringImeComposition(event)) {
+			return;
+		}
 		if (event.key === "Enter") {
 			event.preventDefault();
 			event.stopPropagation();
