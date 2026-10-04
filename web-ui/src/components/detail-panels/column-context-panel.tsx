@@ -475,6 +475,24 @@ export function ColumnContextPanel({
 					className={cn("flex min-h-0 flex-1 flex-col", showsCrossProjectRecentlyActiveTaskSwitcher && "hidden")}
 					data-testid="focus-view-current-project-stage-list"
 				>
+					{/* 创建入口与置顶板同属固定区，不随下方 stage 列表滚走。 */}
+					{onCreateTask ? (
+						<div className="shrink-0 px-2 pt-2">
+							<Button
+								icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
+								aria-label="Create task"
+								fill
+								onClick={onCreateTask}
+							>
+								<span className="inline-flex items-center gap-1.5">
+									<span>Create task</span>
+									<span aria-hidden className="text-text-secondary">
+										(c)
+									</span>
+								</span>
+							</Button>
+						</div>
+					) : null}
 					{/* 置顶板分段是 scrollport 之外的固定区：常驻列表顶端、不随 stage 列表滚走。 */}
 					<TaskPinboardSectionInFocusView
 						pinnedTasks={pinnedTasks}
@@ -506,21 +524,6 @@ export function ColumnContextPanel({
 									overflowAnchor: "none",
 								}}
 							>
-								{onCreateTask ? (
-									<Button
-										icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
-										aria-label="Create task"
-										fill
-										onClick={onCreateTask}
-									>
-										<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-											<span>Create task</span>
-											<span aria-hidden className="text-text-secondary">
-												(c)
-											</span>
-										</span>
-									</Button>
-								) : null}
 								{selection.allColumns.map((column) => (
 									<ColumnSection
 										key={column.id}

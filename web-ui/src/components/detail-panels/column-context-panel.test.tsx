@@ -183,6 +183,7 @@ describe("ColumnContextPanel", () => {
 			);
 		});
 
+		expect(container.querySelector('button[aria-label="Create task"]')).toBeNull();
 		expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
 		expect(scrollIntoViewMock).toHaveBeenLastCalledWith({
 			block: "center",
@@ -207,9 +208,13 @@ describe("ColumnContextPanel", () => {
 		});
 	});
 
-	it("renders the create-task button at the top of the scroll list, above every stage section", async () => {
+	it.each([false, true])("创建按钮固定在滚动区外、置顶板上方（有置顶任务：%s）", async (hasPinnedTask) => {
 		const columns: BoardColumn[] = [
-			{ id: "backlog", title: "Backlog", cards: [createCard("task-1", "Backlog task")] },
+			{
+				id: "backlog",
+				title: "Backlog",
+				cards: [{ ...createCard("task-1", "Backlog task"), pinnedToTaskPinboardAt: hasPinnedTask ? 1 : undefined }],
+			},
 			{ id: "in_progress", title: "In Progress", cards: [] },
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
@@ -230,10 +235,27 @@ describe("ColumnContextPanel", () => {
 
 		const createButton = container.querySelector<HTMLButtonElement>('button[aria-label="Create task"]');
 		expect(createButton).toBeInstanceOf(HTMLButtonElement);
-		// 直接挂在 scrollport 上（不再嵌在 backlog 的 stage section / Droppable 里）。
+		// 固定区在 stage scrollport 外，不会被阶段列表滚走或被 rail 覆盖。
 		const scrollport = container.querySelector(".kb-detail-task-list-scroll");
-		expect(createButton?.parentElement).toBe(scrollport);
-		// 文档顺序上位于所有任务卡之前 = 列表最顶端。
+		expect(scrollport?.contains(createButton)).toBe(false);
+		const stageList = container.querySelector('[data-testid="focus-view-current-project-stage-list"]');
+		expect(stageList?.firstElementChild?.contains(createButton)).toBe(true);
+		const pinboard = container.querySelector('[data-task-pinboard-container="focus-view-section"]');
+		if (hasPinnedTask) {
+			expect(pinboard).not.toBeNull();
+			expect(createButton && pinboard && createButton.compareDocumentPosition(pinboard)).toBe(
+				Node.DOCUMENT_POSITION_FOLLOWING,
+			);
+			const pinboardToggle = pinboard?.querySelector<HTMLButtonElement>("button");
+			await act(async () => pinboardToggle?.click());
+			expect(pinboardToggle?.getAttribute("aria-expanded")).toBe("false");
+			expect(stageList?.firstElementChild?.contains(createButton)).toBe(true);
+			await act(async () => pinboardToggle?.click());
+			expect(pinboardToggle?.getAttribute("aria-expanded")).toBe("true");
+		} else {
+			expect(pinboard).toBeNull();
+		}
+		// 文档顺序上位于所有阶段本体卡之前。
 		const firstCard = container.querySelector("[data-task-id]");
 		expect(firstCard).not.toBeNull();
 		if (createButton && firstCard) {
