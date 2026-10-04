@@ -1,4 +1,4 @@
-# Agent 产出时间戳与卡片时长药丸（三字段模型与写路径）
+# Agent 产出时间戳与卡片时长药丸（三字段模型与写路径，外加 Cache warm 起点）
 
 > 本文是卡片左上角时长药丸与 `lastSubstantiveOutputAt` 写路径的详情文档，承接根 `AGENTS.md`
 > 铁律区的「双药丸不可合并」与「lastSubstantiveOutputAt opt-in」两条。字段语义的权威注释另见
@@ -21,6 +21,15 @@
 | 此刻在不在吐东西 | `lastSubstantiveOutputAt` | **应**（刮 TUI 的新鲜度，秒级） | TUI 实质分类器 / SDK / ACP 事件 |
 | 本轮何时停止生成（药丸 Stopped） | `agentResponseGenerationStopped` | **应**（新活体新一轮） | `mergeSummaryWithFacets` 在 turnOwner 交回 user 的**边沿**上落，与 2h 回收共用锚点 |
 | 对话上次推进（药丸 Progress） | `lastConversationProgressObservation` | **不应**（跨 incarnation 的历史事实） | 持久转录 > hook 事件 / 结构化会话事件 > TUI 分类器兜底 |
+| 主对话最后一次向模型发请求（跨项目面板 Cache warm 倒计时起点，不是卡片药丸） | `lastMainAgentConversationModelRequestDispatchObservation` | **不应**（恢复会话不发请求） | 「harness 紧接着就发请求」的 hook 的 ingest 时刻：未被拦截的 UserPromptSubmit、主对话的 PostToolUse(Failure)；Gemini 为 BeforeAgent / AfterTool |
+
+第四行是 2026-10-03 加的：prompt cache 的 TTL 由每次请求刷新，起点必须是请求发出时刻。曾用
+`agentResponseGenerationStopped` 当起点，结果会话恢复（换 incarnation 也算停止边沿）把它刷成恢复时刻，
+倒计时显示「18 分钟前」而真实最后请求在 11~21 小时前。写入判据与单调 reducer 见
+`src/core/main-agent-conversation-model-request-dispatch-hook-event-classification.ts` 与
+`src/core/last-main-agent-conversation-model-request-dispatch-observation.ts`；子代理事件（hook stdin 带
+`agent_id`）与用户回合里后台子代理的工具事件都不记。估算与资格见
+docs/context-cross-project-recently-active-task-switcher.md 的「缓存倒计时区」。
 
 ### `agentResponseGenerationStopped`：边沿触发，不是电平
 

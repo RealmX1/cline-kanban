@@ -89,6 +89,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const deferHarnessGeneratedPrompt = vi.fn(async () => undefined);
 		const api = createHooksApi({
@@ -137,6 +138,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
 			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
@@ -176,6 +178,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const deferHarnessGeneratedPrompt = vi.fn(async () => undefined);
 		const api = createHooksApi({
@@ -216,6 +219,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
 			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
@@ -255,6 +259,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
@@ -304,6 +309,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
@@ -336,6 +342,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
 		const api = createHooksApi({
@@ -363,6 +370,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -403,6 +411,7 @@ describe("createHooksApi", () => {
 				transitionToRunning: vi.fn(),
 				applyHookActivity: vi.fn(),
 				recordAgentLifecycleHookConversationProgress: vi.fn(),
+				recordMainAgentConversationModelRequestDispatch: vi.fn(),
 				applyTurnCheckpoint: vi.fn(),
 			} as unknown as TerminalSessionManager;
 			const api = createHooksApi({
@@ -493,6 +502,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -543,6 +553,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
@@ -589,6 +600,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -637,6 +649,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -687,6 +700,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -734,6 +748,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -774,6 +789,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -813,6 +829,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const recordPendingUserDecision = vi.fn(async () => ({}) as never);
@@ -877,6 +894,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const recordPendingUserDecision = vi.fn(async () => ({}) as never);
@@ -944,6 +962,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -975,6 +994,7 @@ describe("createHooksApi", () => {
 			unparkTaskSession: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1005,6 +1025,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(() => createSummary({ agentId: "gemini", state: "running" })),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1033,6 +1054,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1052,6 +1074,10 @@ describe("createHooksApi", () => {
 
 		expect(response).toEqual({ ok: true });
 		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: true });
+		expect(manager.recordMainAgentConversationModelRequestDispatch).toHaveBeenCalledWith(
+			"task-1",
+			"user_prompt_submit_hook_event_accepted",
+		);
 	});
 
 	it("to_in_progress + PostToolUse：userInitiatedResume=false（自动续跑中途活动，不解除 guard）", async () => {
@@ -1061,6 +1087,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1080,6 +1107,46 @@ describe("createHooksApi", () => {
 
 		expect(response).toEqual({ ok: true });
 		expect(manager.transitionToRunning).toHaveBeenCalledWith("task-1", { userInitiatedResume: false });
+		// 球在用户手上（attention ⇒ needs_input）时到来的工具事件来自后台子代理，不刷新主对话的缓存起点。
+		expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
+	});
+
+	it("Cache warm 起点：agent 回合里的主对话 PostToolUse 记一次发请求，子代理内的不记", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "Read" },
+			hookEventFiredInsideSubagentContext: true,
+		});
+		expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "Read" },
+		});
+		expect(manager.recordMainAgentConversationModelRequestDispatch).toHaveBeenCalledWith(
+			"task-1",
+			"post_tool_use_hook_event",
+		);
 	});
 
 	it("captures a turn checkpoint when transitioning to review", async () => {
@@ -1106,6 +1173,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1153,6 +1221,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
@@ -1197,6 +1266,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
 
@@ -1256,6 +1326,7 @@ describe("createHooksApi", () => {
 			transitionToRunning: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: vi.fn(),
 			applyTurnCheckpoint: vi.fn(),
 		} as unknown as TerminalSessionManager;
@@ -1299,6 +1370,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			disarmRestorationContinuationGuard: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const deferHarnessGeneratedPrompt = vi.fn(async () => undefined);
@@ -1347,6 +1419,7 @@ describe("createHooksApi", () => {
 			transitionToReview: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			disarmRestorationContinuationGuard: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const api = createHooksApi({
@@ -1512,6 +1585,7 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 			applyHookActivity: vi.fn(),
 			applyAgentNativeConversationSessionIdentity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
 		const persistIdentity = vi.fn(async () => true);
 		const api = createHooksApi({
@@ -1556,6 +1630,7 @@ describe("原生身份落盘与 hook 确认", () => {
 			applyAgentNativeConversationSessionIdentity: vi.fn(),
 			applyHookActivity: vi.fn(),
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 			isRestorationHarnessGeneratedTaskNotificationInterceptionActive: vi.fn(() => restorationBlocked),
 		} as unknown as TerminalSessionManager;
 		let releasePersistence: () => void = () => {};
@@ -1687,6 +1762,7 @@ it.each([
 				transitionToRunning: vi.fn(),
 				applyHookActivity: vi.fn(),
 				recordAgentLifecycleHookConversationProgress: vi.fn(),
+				recordMainAgentConversationModelRequestDispatch: vi.fn(),
 				applyTurnCheckpoint: vi.fn(),
 			} as unknown as TerminalSessionManager;
 			const persistIdentity = vi.fn().mockResolvedValueOnce(true);
@@ -1788,6 +1864,7 @@ it("SessionStart 身份事件不解除恢复守卫、不推进时间戳或通知
 		applyHookActivity: vi.fn(),
 		transitionToRunning: vi.fn(),
 		recordAgentLifecycleHookConversationProgress: vi.fn(),
+		recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		markRestoredAgentConversationContinued: vi.fn(),
 	} as unknown as TerminalSessionManager;
 	const notify = vi.fn();

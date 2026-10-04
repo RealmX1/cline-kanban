@@ -61,11 +61,17 @@ export enum LocalStorageKey {
 	// state/kanban-board-column-collapse-and-width-preferences.ts。
 	KanbanBoardColumnCollapsedOverrides = "kanban.kanban-board-column-collapsed-overrides.v1",
 	KanbanBoardColumnCustomWidthsPx = "kanban.kanban-board-column-custom-widths-px.v1",
-	// Focus View 左栏的列表范围：当前项目的 stage 列表 vs 跨项目「最近活跃任务」切换面板
-	// （docs/context-cross-project-recently-active-task-switcher.md）。per-browser 便利项，丢了回落到当前项目。
-	FocusViewLeftColumnTaskListScope = "kanban.focus-view-left-column-task-list-scope.v1",
-	// 跨项目切换面板里 Running 区的展开态（默认收起成一行「Running N」）与剩余区的排序模式。
+	// 顶栏项目切换器选中的范围：Board Scope（All projects，docs/context-stage-first-overview.md）vs 单个项目。
+	// 看板页据此在 Board Overview 与看板之间切换，Focus View 左栏据此在跨项目切换面板与 stage 列表之间切换。
+	// per-browser 便利项，丢了回落到单项目。
+	SelectedBoardOrSingleProjectScope = "kanban.selected-board-or-single-project-scope.v1",
+	// 已并入 SelectedBoardOrSingleProjectScope 的旧键（Focus View 左栏的 This project | All projects 两段切换）。
+	// 只为一次性迁移保留，见 use-selected-board-or-single-project-scope。
+	LegacyFocusViewLeftColumnTaskListScopeMigratedIntoSelectedBoardOrSingleProjectScope = "kanban.focus-view-left-column-task-list-scope.v1",
+	// 跨项目切换面板里 Running 区的展开态（默认收起成一行「Running N」）、Pinned 区的折叠态（默认展开，
+	// 与 This project 置顶分段各自一个键）与剩余区的排序模式。
 	CrossProjectTaskSwitcherRunningSectionExpanded = "kanban.cross-project-task-switcher-running-section-expanded.v1",
+	CrossProjectTaskSwitcherPinnedSectionCollapsed = "kanban.cross-project-task-switcher-pinned-section-collapsed.v1",
 	CrossProjectTaskSwitcherRemainingSectionOrderingMode = "kanban.cross-project-task-switcher-remaining-section-ordering-mode.v1",
 }
 

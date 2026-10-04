@@ -73,6 +73,7 @@ import { useProjectUiState } from "@/hooks/use-project-ui-state";
 import { useQueuedTaskPromptDeliveryProjectionSync } from "@/hooks/use-queued-task-prompt-delivery-projection-sync";
 import { useRecordTaskOpenedByUserOnRuntime } from "@/hooks/use-record-task-opened-by-user-on-runtime";
 import { useReviewReadyNotifications } from "@/hooks/use-review-ready-notifications";
+import { useSelectedBoardOrSingleProjectScope } from "@/hooks/use-selected-board-or-single-project-scope";
 import { useShortcutActions } from "@/hooks/use-shortcut-actions";
 import { useStartupOnboarding } from "@/hooks/use-startup-onboarding";
 import { useTaskBranchOptions } from "@/hooks/use-task-branch-options";
@@ -139,9 +140,12 @@ export default function App(): ReactElement {
 	// 「summaries → 一次 setSessions」的 applier，useRuntimeStateStream 收到批次经回调直接调用。
 	// 这样该消息不再经 stream reducer 新建 workspaceState，App 每批只渲染一次而不是两次。
 	const streamedTaskSessionSummariesApplierRef = useRef<StreamedTaskSessionSummariesApplier | null>(null);
-	const handleStreamedTaskSessionSummaries = useCallback((summaries: RuntimeTaskSessionSummary[]) => {
-		streamedTaskSessionSummariesApplierRef.current?.(summaries);
-	}, []);
+	const handleStreamedTaskSessionSummaries = useCallback(
+		(summaries: RuntimeTaskSessionSummary[], workspaceId: string) => {
+			streamedTaskSessionSummariesApplierRef.current?.(summaries, workspaceId);
+		},
+		[],
+	);
 	const {
 		currentProjectId,
 		projects,
@@ -336,6 +340,7 @@ export default function App(): ReactElement {
 	);
 
 	const {
+		projectIdOwningHydratedBoard,
 		workspacePath,
 		workspaceGit,
 		workspaceRevision,
@@ -388,32 +393,52 @@ export default function App(): ReactElement {
 		pushedUpdate: latestExplorationThreadGraphUpdate,
 	});
 
-	// Board Scope 的 Stage-First Overview（跨-repo 概览，见 docs/context-stage-first-overview.md）开关 + 跨-workspace 打开某 task 的待定跳转。
-	const [isBoardOverviewOpen, setIsBoardOverviewOpen] = useState(false);
+	// 范围（顶栏项目切换器首行 All projects = Board Scope，见 docs/context-stage-first-overview.md）：看板页据此在
+	// Stage-First Overview（跨-repo 概览）与当前项目看板之间切换，Focus View 左栏据此在跨项目切换面板与 stage 列表
+	// 之间切换。下面还有跨-workspace 打开某 task 的待定跳转。
+	const { selectedBoardOrSingleProjectScope, setSelectedBoardOrSingleProjectScope } =
+		useSelectedBoardOrSingleProjectScope();
+	const isBoardScopeAllProjectsSelected = selectedBoardOrSingleProjectScope === "board_scope_all_projects";
+	const selectBoardScopeAllProjects = useCallback(() => {
+		setSelectedBoardOrSingleProjectScope("board_scope_all_projects");
+		setIsGitHistoryOpen(false);
+		setIsFindingsOpen(false);
+	}, [setSelectedBoardOrSingleProjectScope]);
 	const handleToggleBoardOverview = useCallback(() => {
-		setIsBoardOverviewOpen((open) => {
-			const next = !open;
-			if (next) {
-				setIsGitHistoryOpen(false);
-				setIsFindingsOpen(false);
-			}
-			return next;
-		});
-	}, []);
+		if (isBoardScopeAllProjectsSelected) {
+			setSelectedBoardOrSingleProjectScope("single_project_scope");
+			return;
+		}
+		selectBoardScopeAllProjects();
+	}, [isBoardScopeAllProjectsSelected, selectBoardScopeAllProjects, setSelectedBoardOrSingleProjectScope]);
+	// 用户明确选了某个项目（顶栏切换器、数字槽热键、首页侧栏、概览里点 stage）：范围收窄到它。
+	// 跨项目打开任务（面板、Spotlight、通知）不走这里——Board Scope 下点别的项目的任务，范围不变。
+	const handleSelectProjectNarrowingToSingleProjectScope = useCallback(
+		(projectId: string) => {
+			setSelectedBoardOrSingleProjectScope("single_project_scope");
+			handleSelectProject(projectId);
+		},
+		[handleSelectProject, setSelectedBoardOrSingleProjectScope],
+	);
 	// 后绑定：编辑对话框的打开函数在下方 useBoardInteractions 之后才有。
 	const openBacklogTaskEditorForCrossProjectTaskOpenRef = useRef<(card: BoardCard) => void>(() => {});
 	const isCurrentProjectBoardSettled =
 		!isInitialRuntimeLoad && !isProjectSwitching && !isAwaitingWorkspaceSnapshot && !isWorkspaceMetadataPending;
-	const { pendingCrossProjectTaskOpen, handleOpenTaskInProject, cancelPendingCrossProjectTaskOpen } =
-		useCrossProjectTaskOpenInProject({
-			board,
-			currentProjectId,
-			isDetailViewOpen: selectedCard !== null,
-			isCurrentProjectBoardSettled,
-			setSelectedTaskId,
-			handleSelectProject,
-			openBacklogTaskEditor: (card) => openBacklogTaskEditorForCrossProjectTaskOpenRef.current(card),
-		});
+	const {
+		pendingCrossProjectTaskOpen,
+		handleOpenTaskInProject,
+		cancelPendingCrossProjectTaskOpenReturningToOriginTask,
+		dismissPendingCrossProjectTaskOpen,
+	} = useCrossProjectTaskOpenInProject({
+		board,
+		currentProjectId,
+		selectedTaskId,
+		isDetailViewOpen: selectedCard !== null,
+		isCurrentProjectBoardSettled,
+		setSelectedTaskId,
+		handleSelectProject,
+		openBacklogTaskEditor: (card) => openBacklogTaskEditorForCrossProjectTaskOpenRef.current(card),
+	});
 	const selectedCardTaskId = selectedCard?.card.id ?? null;
 	useRecordTaskOpenedByUserOnRuntime({
 		workspaceId: projectRuntimeWorkspaceId,
@@ -449,10 +474,9 @@ export default function App(): ReactElement {
 	});
 	const handleOpenOverviewStage = useCallback(
 		(repoId: string) => {
-			setIsBoardOverviewOpen(false);
-			handleSelectProject(repoId);
+			handleSelectProjectNarrowingToSingleProjectScope(repoId);
 		},
-		[handleSelectProject],
+		[handleSelectProjectNarrowingToSingleProjectScope],
 	);
 	// 应用内通知中心（跨 repo 铃铛）。mark/clear 是跨 repo mutation：用 notification 的 workspaceId 起 tRPC 客户端，
 	// input 显式携带同一 workspaceId（服务端 t.procedure 忽略连接 scope，按 input.workspaceId 操作）。
@@ -886,12 +910,12 @@ export default function App(): ReactElement {
 		setIsGitHistoryOpen((current) => {
 			const next = !current;
 			if (next) {
-				setIsBoardOverviewOpen(false);
+				setSelectedBoardOrSingleProjectScope("single_project_scope");
 				setIsFindingsOpen(false);
 			}
 			return next;
 		});
-	}, [hasNoProjects]);
+	}, [hasNoProjects, setSelectedBoardOrSingleProjectScope]);
 	const handleCloseGitHistory = useCallback(() => {
 		setIsGitHistoryOpen(false);
 	}, []);
@@ -902,12 +926,12 @@ export default function App(): ReactElement {
 		setIsFindingsOpen((current) => {
 			const next = !current;
 			if (next) {
-				setIsBoardOverviewOpen(false);
+				setSelectedBoardOrSingleProjectScope("single_project_scope");
 				setIsGitHistoryOpen(false);
 			}
 			return next;
 		});
-	}, [hasNoProjects]);
+	}, [hasNoProjects, setSelectedBoardOrSingleProjectScope]);
 
 	const {
 		handleProgrammaticCardMoveReady,
@@ -1001,7 +1025,7 @@ export default function App(): ReactElement {
 		projects,
 		currentProjectId,
 		numericSlotGroupAssignments,
-		onSelectProject: handleSelectProject,
+		onSelectProject: handleSelectProjectNarrowingToSingleProjectScope,
 		onAssignProjectToNumericSlotGroupNumber: assignProjectToNumericSlotGroupNumber,
 	});
 
@@ -1089,6 +1113,8 @@ export default function App(): ReactElement {
 	const navbarRuntimeHint = hasNoProjects ? undefined : runtimeHint;
 	const shouldHideProjectDependentTopBarActions =
 		isCurrentProjectRuntimeUnavailable ||
+		// 跨项目打开在途：屏幕上是过渡外壳，顶栏不该还挂着上一个任务的工作区路径、提示和运行动作。
+		pendingCrossProjectTaskOpen?.originatedFromFocusView === true ||
 		(!selectedCard && (isProjectSwitching || isAwaitingWorkspaceSnapshot || isWorkspaceMetadataPending));
 
 	// 顶栏最左侧的项目快速切换器。用 displayedProjects 而非 projects：前者把当前项目的 taskCounts
@@ -1102,18 +1128,31 @@ export default function App(): ReactElement {
 			numericSlotGroupNumberByProjectId,
 			isProjectListLoading,
 			isProjectSwitching,
-			onSelectProject: handleSelectProject,
+			onSelectProject: handleSelectProjectNarrowingToSingleProjectScope,
 			onAddProject: handleAddProject,
 			onAssignProjectToNumericSlotGroupNumber: assignProjectToNumericSlotGroupNumber,
 			onClearNumericSlotGroupNumber: clearNumericSlotGroupNumber,
+			selectedBoardOrSingleProjectScope,
+			onSelectBoardScopeAllProjects: selectBoardScopeAllProjects,
+			// Focus View（含跨项目打开在途）里显示焦点任务所属的项目：在途时是目标项目。
+			boardScopeFocusViewFocusedTaskProjectId:
+				pendingCrossProjectTaskOpen?.originatedFromFocusView === true
+					? pendingCrossProjectTaskOpen.repoId
+					: selectedCard
+						? currentProjectId
+						: null,
 		}),
 		[
+			pendingCrossProjectTaskOpen,
+			selectBoardScopeAllProjects,
+			selectedBoardOrSingleProjectScope,
+			selectedCard,
 			assignProjectToNumericSlotGroupNumber,
 			clearNumericSlotGroupNumber,
 			currentProjectId,
 			displayedProjects,
 			handleAddProject,
-			handleSelectProject,
+			handleSelectProjectNarrowingToSingleProjectScope,
 			isProjectListLoading,
 			isProjectSwitching,
 			lastVisitedEpochMsByProjectId,
@@ -1144,6 +1183,7 @@ export default function App(): ReactElement {
 		projects,
 		notificationLogByWorkspaceId,
 		currentProjectId,
+		isBoardScopeAllProjectsSelected,
 		selectedCardTaskId,
 		pendingCrossProjectTaskOpen,
 		onOpenTaskInProject: handleOpenTaskInProject,
@@ -1151,6 +1191,21 @@ export default function App(): ReactElement {
 		onUnpinCurrentProjectTaskFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
 		onEditCurrentProjectTaskPinboardPinReason: handleRequestEditTaskPinboardPinReason,
 	});
+	// Focus View 的外观（顶栏详情模式、隐藏首页布局与左侧项目栏、看板不挂载）在跨项目打开在途期间保持不变——
+	// 否则一次跨项目打开会画出「旧详情 → 首页 / 看板 → 外壳 → 新详情」四个全屏状态。
+	const isFocusViewChromeShown = selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit;
+	// 详情页（含 agent 终端）真正渲染的那张卡：在途期间不渲染；board 装的还不是当前项目的数据时也不渲染——
+	// 快照到达那一帧 currentProjectId 已是新项目、board 仍是旧项目的，拿旧卡配新 workspaceId 挂终端会在新项目里
+	// 给同号任务建出一个幽灵终端，还可能把终端 LRU 里新项目已停放的热终端挤出去。
+	// 顶栏「返回」：在途期间先丢掉在途态（导航照常落到目标项目、显示它的看板），再关详情。
+	const handleBackFromFocusView = useCallback(() => {
+		dismissPendingCrossProjectTaskOpen();
+		handleBack();
+	}, [dismissPendingCrossProjectTaskOpen, handleBack]);
+	const selectedCardRenderedInFocusView =
+		!isFocusViewCrossProjectTaskOpenInTransit && projectIdOwningHydratedBoard === projectRuntimeWorkspaceId
+			? selectedCard
+			: null;
 	const latestSelectedTaskChatMessage = selectLatestTaskChatMessageForTask(
 		selectedCard?.card.id,
 		latestTaskChatMessage,
@@ -1233,7 +1288,7 @@ export default function App(): ReactElement {
 				onResetBottomTerminalLayoutCustomizations={resetBottomTerminalLayoutCustomizations}
 			>
 				<div className="flex h-[100svh] min-w-0 overflow-hidden">
-					{!selectedCard && !isFocusViewCrossProjectTaskOpenInTransit ? (
+					{!isFocusViewChromeShown ? (
 						<ProjectNavigationPanel
 							projects={displayedProjects}
 							isLoadingProjects={isProjectListLoading}
@@ -1247,7 +1302,7 @@ export default function App(): ReactElement {
 							clineProviderSettings={settingsRuntimeProjectConfig?.clineProviderSettings ?? null}
 							featurebaseFeedbackState={featurebaseFeedbackState}
 							onSelectProject={(projectId) => {
-								void handleSelectProject(projectId);
+								handleSelectProjectNarrowingToSingleProjectScope(projectId);
 							}}
 							onGetPermanentDeletionPreview={handleGetPermanentDeletionPreview}
 							onPermanentlyDeleteProjectData={handlePermanentlyDeleteProjectData}
@@ -1262,56 +1317,72 @@ export default function App(): ReactElement {
 					) : null}
 					<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
 						<TopBar
-							onToggleSidebar={!selectedCard ? handleToggleSidebar : undefined}
+							onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
 							projectSwitcher={topBarProjectSwitcherState}
 							onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
 							onToggleBoardOverview={
-								!selectedCard && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+								!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
 									? handleToggleBoardOverview
 									: undefined
 							}
-							isBoardOverviewOpen={isBoardOverviewOpen}
-							onBack={selectedCard ? handleBack : undefined}
-							workspacePath={navbarWorkspacePath}
+							isBoardOverviewOpen={isBoardScopeAllProjectsSelected}
+							onBack={isFocusViewChromeShown ? handleBackFromFocusView : undefined}
+							workspacePath={isFocusViewCrossProjectTaskOpenInTransit ? undefined : navbarWorkspacePath}
 							isWorkspacePathLoading={shouldShowProjectLoadingState}
 							workspaceHint={navbarWorkspaceHint}
 							runtimeHint={navbarRuntimeHint}
-							selectedTaskId={selectedCard?.card.id ?? null}
-							selectedTaskBaseRef={selectedCard?.card.baseRef ?? null}
-							showHomeGitSummary={!hasNoProjects && !selectedCard && !isCurrentProjectRuntimeUnavailable}
+							selectedTaskId={selectedCardRenderedInFocusView?.card.id ?? null}
+							selectedTaskBaseRef={selectedCardRenderedInFocusView?.card.baseRef ?? null}
+							showHomeGitSummary={
+								!hasNoProjects && !isFocusViewChromeShown && !isCurrentProjectRuntimeUnavailable
+							}
 							runningGitAction={
-								selectedCard || hasNoProjects || isCurrentProjectRuntimeUnavailable ? null : runningGitAction
+								isFocusViewChromeShown || hasNoProjects || isCurrentProjectRuntimeUnavailable
+									? null
+									: runningGitAction
 							}
 							onGitFetch={
-								selectedCard || isCurrentProjectRuntimeUnavailable
+								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
 									? undefined
 									: () => {
 											void runGitAction("fetch");
 										}
 							}
 							onGitPull={
-								selectedCard || isCurrentProjectRuntimeUnavailable
+								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
 									? undefined
 									: () => {
 											void runGitAction("pull");
 										}
 							}
 							onGitPush={
-								selectedCard || isCurrentProjectRuntimeUnavailable
+								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
 									? undefined
 									: () => {
 											void runGitAction("push");
 										}
 							}
 							onToggleTerminal={
-								hasNoProjects || isCurrentProjectRuntimeUnavailable
+								hasNoProjects || isCurrentProjectRuntimeUnavailable || isFocusViewCrossProjectTaskOpenInTransit
 									? undefined
 									: selectedCard
 										? handleToggleDetailTerminal
 										: handleToggleHomeTerminal
 							}
-							isTerminalOpen={selectedCard ? isDetailTerminalOpen : showHomeBottomTerminal}
-							isTerminalLoading={selectedCard ? isDetailTerminalStarting : isHomeTerminalStarting}
+							isTerminalOpen={
+								isFocusViewCrossProjectTaskOpenInTransit
+									? false
+									: selectedCard
+										? isDetailTerminalOpen
+										: showHomeBottomTerminal
+							}
+							isTerminalLoading={
+								isFocusViewCrossProjectTaskOpenInTransit
+									? false
+									: selectedCard
+										? isDetailTerminalStarting
+										: isHomeTerminalStarting
+							}
 							onOpenSettings={handleOpenSettings}
 							showDebugButton={debugModeEnabled}
 							onOpenDebugDialog={debugModeEnabled ? handleOpenDebugDialog : undefined}
@@ -1332,15 +1403,15 @@ export default function App(): ReactElement {
 							}
 							isGitHistoryOpen={isGitHistoryOpen}
 							onToggleFindings={
-								!selectedCard && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+								!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
 									? handleToggleFindings
 									: undefined
 							}
 							isFindingsOpen={isFindingsOpen}
 							onToggleTaskChangesSidebar={
-								selectedCard ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
+								selectedCardRenderedInFocusView ? () => setIsTaskChangesSidebarOpen((open) => !open) : undefined
 							}
-							isTaskChangesSidebarOpen={selectedCard ? isTaskChangesSidebarOpen : false}
+							isTaskChangesSidebarOpen={selectedCardRenderedInFocusView ? isTaskChangesSidebarOpen : false}
 							hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
 							connectionRetrySessions={connectionRetrySessions}
 							onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
@@ -1376,8 +1447,8 @@ export default function App(): ReactElement {
 						<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
 							<div
 								className="kb-home-layout"
-								aria-hidden={selectedCard ? true : undefined}
-								style={selectedCard ? { visibility: "hidden" } : undefined}
+								aria-hidden={isFocusViewChromeShown ? true : undefined}
+								style={isFocusViewChromeShown ? { visibility: "hidden" } : undefined}
 							>
 								{shouldShowProjectLoadingState ? (
 									<div className="flex flex-1 min-h-0 items-center justify-center bg-surface-0">
@@ -1414,7 +1485,7 @@ export default function App(): ReactElement {
 										    只卸载这一层：外层 wrapper 与底部 home 终端保持挂载——隐藏的 xterm
 										    本就已暂停渲染，卸载它只会换来一次多余的重连 + 快照恢复。
 										    列的滚动位置与渐进渲染进度由 `board-column-scroll-offset-store` 补回。 */}
-											{selectedCard ? null : isBoardOverviewOpen ? (
+											{isFocusViewChromeShown ? null : isBoardScopeAllProjectsSelected ? (
 												<CrossRepositoryStageFirstOverview
 													projects={projects}
 													onOpenTask={handleOpenTaskInProject}
@@ -1465,7 +1536,7 @@ export default function App(): ReactElement {
 														onRestoreFromTrashTask={handleRestoreTaskFromTrash}
 														onDeleteTask={handleOpenDeleteTask}
 														onRequestProgrammaticCardMoveReady={
-															selectedCard ? undefined : handleProgrammaticCardMoveReady
+															isFocusViewChromeShown ? undefined : handleProgrammaticCardMoveReady
 														}
 														onDragEnd={handleDragEnd}
 														defaultClineModelId={
@@ -1519,10 +1590,19 @@ export default function App(): ReactElement {
 									</div>
 								)}
 							</div>
-							{selectedCard && detailSession ? (
+							{isFocusViewCrossProjectTaskOpenInTransit ? (
+								<div className="absolute inset-0 flex min-h-0 min-w-0">
+									<FocusViewCrossProjectTaskOpenInTransitShell
+										host={crossProjectRecentlyActiveTaskSwitcherHost}
+										targetProjectName={crossProjectTaskOpenInTransitTarget?.projectName ?? null}
+										targetTaskTitle={crossProjectTaskOpenInTransitTarget?.taskTitle ?? null}
+										onCancel={cancelPendingCrossProjectTaskOpenReturningToOriginTask}
+									/>
+								</div>
+							) : selectedCardRenderedInFocusView && detailSession ? (
 								<div className="absolute inset-0 flex min-h-0 min-w-0">
 									<CardDetailView
-										selection={selectedCard}
+										selection={selectedCardRenderedInFocusView}
 										currentProjectId={currentProjectId}
 										taskIdsOnBoard={taskIdsOnBoard}
 										workspacePath={workspacePath}
@@ -1538,7 +1618,7 @@ export default function App(): ReactElement {
 										onCreateByTheWayTaskConversationSession={async (input) => {
 											const effectiveAgentId =
 												detailSession.agentId ??
-												selectedCard.card.agentId ??
+												selectedCardRenderedInFocusView.card.agentId ??
 												runtimeProjectConfig?.selectedAgentId;
 											if (
 												!effectiveAgentId ||
@@ -1554,7 +1634,7 @@ export default function App(): ReactElement {
 												};
 											}
 											return await createByTheWayTaskConversationSession({
-												task: selectedCard.card,
+												task: selectedCardRenderedInFocusView.card,
 												agentId: effectiveAgentId,
 												...input,
 											});
@@ -1596,7 +1676,9 @@ export default function App(): ReactElement {
 										latestClineChatMessage={latestSelectedTaskChatMessage}
 										streamedClineChatMessages={selectedTaskChatMessages}
 										onMoveToTrash={handleMoveToTrash}
-										isMoveToTrashLoading={moveToTrashLoadingById[selectedCard.card.id] ?? false}
+										isMoveToTrashLoading={
+											moveToTrashLoadingById[selectedCardRenderedInFocusView.card.id] ?? false
+										}
 										onMoveToValidation={handleMoveSelectedCardToValidation}
 										gitHistoryPanel={
 											isGitHistoryOpen ? (
@@ -1621,15 +1703,6 @@ export default function App(): ReactElement {
 										onClineSettingsSaved={refreshRuntimeProjectConfig}
 										onTaskClineSettingsChanged={handleClineTaskSettingsChangedForTask}
 										onTaskCommentEntriesChange={handleTaskCommentEntriesChange}
-									/>
-								</div>
-							) : isFocusViewCrossProjectTaskOpenInTransit ? (
-								<div className="absolute inset-0 flex min-h-0 min-w-0">
-									<FocusViewCrossProjectTaskOpenInTransitShell
-										host={crossProjectRecentlyActiveTaskSwitcherHost}
-										targetProjectName={crossProjectTaskOpenInTransitTarget?.projectName ?? null}
-										targetTaskTitle={crossProjectTaskOpenInTransitTarget?.taskTitle ?? null}
-										onCancel={cancelPendingCrossProjectTaskOpen}
 									/>
 								</div>
 							) : null}

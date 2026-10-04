@@ -5,6 +5,7 @@ import type {
 	RuntimeBoardData,
 	RuntimeInProgressTaskDetail,
 	RuntimeLastConversationProgressObservation,
+	RuntimeLastMainAgentConversationModelRequestDispatchObservation,
 	RuntimeTaskSessionLiveness,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionTurnOwner,
@@ -24,6 +25,9 @@ export interface TaskSessionFactsForCrossProjectTaskViews {
 	lastSubstantiveOutputAt: number | null;
 	agentResponseGenerationStopped: RuntimeAgentResponseGenerationStopped | null;
 	lastConversationProgressObservation: RuntimeLastConversationProgressObservation | null;
+	// 只有跨项目切换面板的 Cache warm 估算要读这两个（Board Overview 明细不投影它们）。
+	lastMainAgentConversationModelRequestDispatchObservation: RuntimeLastMainAgentConversationModelRequestDispatchObservation | null;
+	agentProcessStartedAt: number | null;
 	turnOwner: RuntimeTaskSessionTurnOwner;
 	liveness: RuntimeTaskSessionLiveness;
 	userTurnKind: RuntimeTaskSessionUserTurnKind;
@@ -41,6 +45,9 @@ export function extractTaskSessionFactsForCrossProjectTaskViews(
 		lastSubstantiveOutputAt: summary.lastSubstantiveOutputAt ?? null,
 		agentResponseGenerationStopped: summary.agentResponseGenerationStopped ?? null,
 		lastConversationProgressObservation: summary.lastConversationProgressObservation ?? null,
+		lastMainAgentConversationModelRequestDispatchObservation:
+			summary.lastMainAgentConversationModelRequestDispatchObservation ?? null,
+		agentProcessStartedAt: summary.startedAt,
 		turnOwner: facets.turnOwner,
 		liveness: facets.liveness,
 		userTurnKind: facets.userTurnKind,

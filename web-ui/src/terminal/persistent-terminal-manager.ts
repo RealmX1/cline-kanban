@@ -1387,6 +1387,15 @@ class PersistentTerminal {
 			});
 	}
 
+	// 会话重启（sessionStartedAt 变了）时的清屏，清完立刻向服务端 mirror 要一份快照。只清不补会永久白屏：
+	// sessionStartedAt 也会因为摘要错配而变（跨项目切换时同号任务的旧摘要残留），这时 PTY 根本没换，
+	// agent 停在那里不会再有新输出。真重启时 mirror 本就是新会话的画面，补一份也无害。顺序有保证：
+	// applyRestore 先等写队列（含这次 reset）再清屏写快照。
+	resetForSessionRestartAndRequestServerMirrorSnapshot(): void {
+		this.reset();
+		this.requestSnapshotResync();
+	}
+
 	waitForLikelyPrompt(timeoutMs: number): Promise<boolean> {
 		if (timeoutMs <= 0) {
 			return Promise.resolve(false);

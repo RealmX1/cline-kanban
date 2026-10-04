@@ -76,6 +76,8 @@ interface HooksIngestArgs {
 	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
 	agentRaisedUserQuestionResolvedInAgentTerminal?: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload;
 	submittedPromptText?: string;
+	// hook stdin 带 `agent_id` ⇔ 事件从子代理内部触发（Claude Code 只在子代理内的事件上带它）。
+	hookEventFiredInsideSubagentContext?: boolean;
 	// N0a：终端 agent 原生会话身份（session_id + transcript_path），每个事件都带，服务端幂等落 sidecar。
 	agentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity;
 	// 资源占用采集：工具类事件的执行结果（已截断脱敏），服务端只写 journal。
@@ -437,6 +439,7 @@ function parseHooksIngestArgs(
 		...(metadata?.hookEventName?.trim().toLowerCase() === "userpromptsubmit" && payload
 			? { submittedPromptText: readStringField(payload, "prompt") ?? undefined }
 			: {}),
+		...(payload && readStringField(payload, "agent_id") ? { hookEventFiredInsideSubagentContext: true } : {}),
 	};
 }
 
@@ -660,6 +663,9 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngest
 					? { agentRaisedUserQuestionResolvedInAgentTerminal: args.agentRaisedUserQuestionResolvedInAgentTerminal }
 					: {}),
 				...(args.submittedPromptText !== undefined ? { submittedPromptText: args.submittedPromptText } : {}),
+				...(args.hookEventFiredInsideSubagentContext
+					? { hookEventFiredInsideSubagentContext: args.hookEventFiredInsideSubagentContext }
+					: {}),
 				...(args.agentNativeConversationSessionIdentity
 					? { agentNativeConversationSessionIdentity: args.agentNativeConversationSessionIdentity }
 					: {}),

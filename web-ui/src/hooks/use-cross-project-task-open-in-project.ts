@@ -8,6 +8,8 @@ export interface PendingCrossProjectTaskOpen {
 	taskId: string;
 	// 发起时 Focus View 正开着：在途期间渲染 FocusViewCrossProjectTaskOpenInTransitShell，左栏不闪退成看板。
 	originatedFromFocusView: boolean;
+	// 发起那一刻 Focus View 里打开着的任务。过渡外壳上的 Cancel 回到这里；连点多次跨项目打开时保留最早那个。
+	originFocusedTaskInProject: { repoId: string; taskId: string } | null;
 }
 
 /**
@@ -27,6 +29,7 @@ export interface PendingCrossProjectTaskOpen {
 export function useCrossProjectTaskOpenInProject({
 	board,
 	currentProjectId,
+	selectedTaskId,
 	isDetailViewOpen,
 	isCurrentProjectBoardSettled,
 	setSelectedTaskId,
@@ -35,6 +38,7 @@ export function useCrossProjectTaskOpenInProject({
 }: {
 	board: BoardData;
 	currentProjectId: string | null;
+	selectedTaskId: string | null;
 	isDetailViewOpen: boolean;
 	// 当前项目的 board 已是该项目的完整快照（不在切项目 / 等快照 / 等元数据中）。
 	isCurrentProjectBoardSettled: boolean;
@@ -44,13 +48,18 @@ export function useCrossProjectTaskOpenInProject({
 }): {
 	pendingCrossProjectTaskOpen: PendingCrossProjectTaskOpen | null;
 	handleOpenTaskInProject: (repoId: string, taskId: string) => void;
-	cancelPendingCrossProjectTaskOpen: () => void;
+	// 外壳上的 Cancel：回到发起时打开着的任务（必要时反向再切一次项目）。
+	cancelPendingCrossProjectTaskOpenReturningToOriginTask: () => void;
+	// 只丢掉在途态、不改导航（顶栏「返回看板」用：导航照常落到目标项目，落地后显示它的看板）。
+	dismissPendingCrossProjectTaskOpen: () => void;
 } {
 	const [pendingCrossProjectTaskOpen, setPendingCrossProjectTaskOpen] = useState<PendingCrossProjectTaskOpen | null>(
 		null,
 	);
 	const isDetailViewOpenRef = useRef(isDetailViewOpen);
 	isDetailViewOpenRef.current = isDetailViewOpen;
+	const selectedTaskIdRef = useRef(selectedTaskId);
+	selectedTaskIdRef.current = selectedTaskId;
 	const latestBoardRef = useRef(board);
 	latestBoardRef.current = board;
 	const openBacklogTaskEditorRef = useRef(openBacklogTaskEditor);
@@ -63,6 +72,9 @@ export function useCrossProjectTaskOpenInProject({
 			// 后返回回到面板的行为一致（避免「从概览点进去、返回却落到普通 board」的困惑）。
 			if (repoId === currentProjectId) {
 				setPendingCrossProjectTaskOpen(null);
+				// 在途期间点回当前项目的任务：先撤销在途切换（handleSelectProject 选回当前项目即撤销；
+				// 不在途时是 no-op），否则导航仍会落到在途目标项目、刚选中的详情随即被切项目关掉。
+				handleSelectProject(repoId);
 				const selection = findCardSelection(latestBoardRef.current, taskId);
 				if (selection?.column.id === "backlog") {
 					openBacklogTaskEditorRef.current(selection.card);
@@ -76,6 +88,11 @@ export function useCrossProjectTaskOpenInProject({
 				taskId,
 				// 连点两个跨项目任务时，第二次发起那一刻 detail 已因切项目被关掉，但用户仍在过渡外壳里。
 				originatedFromFocusView: isDetailViewOpenRef.current || (previous?.originatedFromFocusView ?? false),
+				originFocusedTaskInProject:
+					previous?.originFocusedTaskInProject ??
+					(isDetailViewOpenRef.current && currentProjectId && selectedTaskIdRef.current
+						? { repoId: currentProjectId, taskId: selectedTaskIdRef.current }
+						: null),
 			}));
 			handleSelectProject(repoId);
 		},
@@ -107,7 +124,21 @@ export function useCrossProjectTaskOpenInProject({
 		showAppToast({ intent: "warning", message: "That task is no longer on its project's board." });
 	}, [board, currentProjectId, isCurrentProjectBoardSettled, pendingCrossProjectTaskOpen, setSelectedTaskId]);
 
-	const cancelPendingCrossProjectTaskOpen = useCallback(() => setPendingCrossProjectTaskOpen(null), []);
+	const dismissPendingCrossProjectTaskOpen = useCallback(() => setPendingCrossProjectTaskOpen(null), []);
+	const cancelPendingCrossProjectTaskOpenReturningToOriginTask = useCallback(() => {
+		const origin = pendingCrossProjectTaskOpen?.originFocusedTaskInProject ?? null;
+		if (!origin) {
+			setPendingCrossProjectTaskOpen(null);
+			return;
+		}
+		// 走同一个入口：原项目仍是当前项目（快照未到）时它撤销在途切换并选中原任务；已切过去时反向打开。
+		handleOpenTaskInProject(origin.repoId, origin.taskId);
+	}, [handleOpenTaskInProject, pendingCrossProjectTaskOpen]);
 
-	return { pendingCrossProjectTaskOpen, handleOpenTaskInProject, cancelPendingCrossProjectTaskOpen };
+	return {
+		pendingCrossProjectTaskOpen,
+		handleOpenTaskInProject,
+		cancelPendingCrossProjectTaskOpenReturningToOriginTask,
+		dismissPendingCrossProjectTaskOpen,
+	};
 }

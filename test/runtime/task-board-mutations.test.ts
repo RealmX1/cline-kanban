@@ -5,6 +5,7 @@ import {
 	addTaskToColumn,
 	deleteTasksFromBoard,
 	moveTaskToColumn,
+	reorderTaskWithinBoardColumn,
 	updateTask,
 } from "../../src/core/task-board-mutations";
 
@@ -100,6 +101,55 @@ describe("moveTaskToColumn 列内插入位置", () => {
 			waitingInBacklog.task.id,
 			alreadyInTargetColumn.task.id,
 		]);
+	});
+});
+
+describe("moveTaskToColumn 的拖放落点（insertAtIndex）与列内重排", () => {
+	function createBoardWithThreeReviewCardsAndOneInProgressCard(): RuntimeBoardData {
+		let board = createBoard();
+		for (const [columnId, taskId] of [
+			["review", "rev01"],
+			["review", "rev02"],
+			["review", "rev03"],
+			["in_progress", "inp01"],
+		] as const) {
+			board = addTaskToColumn(board, columnId, { prompt: taskId, baseRef: "main" }, () => taskId).board;
+		}
+		return board;
+	}
+
+	function readColumnTaskIds(board: RuntimeBoardData, columnId: string): string[] {
+		return board.columns.find((column) => column.id === columnId)?.cards.map((card) => card.id) ?? [];
+	}
+
+	it("带 insertAtIndex 时保留落点、越界钳到列尾；不传时仍落在列顶", () => {
+		const board = createBoardWithThreeReviewCardsAndOneInProgressCard();
+
+		const droppedInTheMiddle = moveTaskToColumn(board, "inp01", "review", 5, { insertAtIndex: 1 });
+		expect(readColumnTaskIds(droppedInTheMiddle.board, "review")).toEqual(["rev03", "inp01", "rev02", "rev01"]);
+		expect(droppedInTheMiddle.task?.updatedAt).toBe(5);
+
+		const droppedPastTheEnd = moveTaskToColumn(board, "inp01", "review", 5, { insertAtIndex: 99 });
+		expect(readColumnTaskIds(droppedPastTheEnd.board, "review")).toEqual(["rev03", "rev02", "rev01", "inp01"]);
+
+		const withoutPlacement = moveTaskToColumn(board, "inp01", "review");
+		expect(readColumnTaskIds(withoutPlacement.board, "review")).toEqual(["inp01", "rev03", "rev02", "rev01"]);
+	});
+
+	it("列内重排只改顺序、不推进 updatedAt；原位与 backlog 不重排", () => {
+		const board = createBoardWithThreeReviewCardsAndOneInProgressCard();
+		const updatedAtBeforeReorder = board.columns.find((column) => column.id === "review")?.cards[0]?.updatedAt;
+
+		const reordered = reorderTaskWithinBoardColumn(board, "rev03", 2);
+		expect(reordered.reordered).toBe(true);
+		expect(readColumnTaskIds(reordered.board, "review")).toEqual(["rev02", "rev01", "rev03"]);
+		expect(reordered.board.columns.find((column) => column.id === "review")?.cards[2]?.updatedAt).toBe(
+			updatedAtBeforeReorder,
+		);
+
+		expect(reorderTaskWithinBoardColumn(board, "rev03", 0).reordered).toBe(false);
+		const backlogBoard = addTaskToColumn(board, "backlog", { prompt: "b", baseRef: "main" }, () => "bak01").board;
+		expect(reorderTaskWithinBoardColumn(backlogBoard, "bak01", 0).reordered).toBe(false);
 	});
 });
 

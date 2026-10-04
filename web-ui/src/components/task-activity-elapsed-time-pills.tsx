@@ -5,7 +5,7 @@ import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 
 /**
  * 跨项目视图（Board Overview 的 In-Progress 行、跨项目切换面板的行）共用的时长药丸，与主看板卡片头部逐字同源、同语义：
- *   Clock          = 自创建至今（可关）；
+ *   Clock          = 自创建至今；
  *   Activity       = 本轮停止生成至今（agent 回合 / park 期间无值 ⇒ 不显）；
  *   MessagesSquare = 对话上次推进至今（低置信来源加 `~` 前缀）。
  * 后两颗刻意不合并成一颗：前者是 per-incarnation 的离散状态转移（会话重开时刷新是**对**的），
@@ -16,26 +16,22 @@ import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 export function TaskActivityElapsedTimePills({
 	task,
 	nowMs,
-	showsCreatedAtPill = true,
 }: {
 	task: Pick<
 		RuntimeInProgressTaskDetail,
 		"createdAt" | "agentResponseGenerationStopped" | "lastConversationProgressObservation"
 	>;
 	nowMs: number;
-	showsCreatedAtPill?: boolean;
 }): React.ReactElement {
 	return (
 		<span className="ml-1 flex shrink-0 items-center gap-1.5 text-[10px] leading-none text-text-tertiary">
-			{showsCreatedAtPill ? (
-				<span
-					className="inline-flex items-center gap-0.5"
-					title={`Created · ${new Date(task.createdAt).toLocaleString()}`}
-				>
-					<Clock size={10} className="shrink-0" />
-					{formatCompactElapsedSince(task.createdAt, nowMs)}
-				</span>
-			) : null}
+			<span
+				className="inline-flex items-center gap-0.5"
+				title={`Created · ${new Date(task.createdAt).toLocaleString()}`}
+			>
+				<Clock size={10} className="shrink-0" />
+				{formatCompactElapsedSince(task.createdAt, nowMs)}
+			</span>
 			{task.agentResponseGenerationStopped != null ? (
 				<span
 					className="inline-flex items-center gap-0.5"

@@ -6,6 +6,7 @@ import { createInitialBoardData } from "@/data/board-data";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
+	RuntimeBoardCard,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
@@ -250,40 +251,50 @@ function normalizeTaskTerminalAgentModelOverrideSettings(
 
 // `now` 由 normalizeBoardData 统一取一次再传进来：缺时间戳的卡片共享同一个回落值，Backlog 的稳定排序
 // 才会保持它们的原次序，而不是按「逐张归一化时 Date.now() 恰好跨过的毫秒」随机翻转。
+// normalizeCard 白名单铁律的编译期守卫。水合出来的 board 会被原样整板 saveState 回盘，而服务端是整块覆盖
+// board.json——白名单漏掉的字段会在下一次保存时被抹平。卡片动作改走服务端之后，服务端写进卡片的新字段只会越来越多，
+// 靠注释提醒已经兜不住：服务端 board 卡片 schema 每加一个字段，这里不登记就 typecheck 失败（satisfies 既查漏也查多）。
+// 登记后还要在下面真正带过它，并补进 board-state 测试里的「全字段往返」夹具。
+export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
+	id: true,
+	title: true,
+	prompt: true,
+	startInPlanMode: true,
+	taskAgentPermissionMode: true,
+	autoReviewEnabled: true,
+	autoReviewMode: true,
+	images: true,
+	taskCommentEntries: true,
+	pinnedToTaskPinboardAt: true,
+	taskPinboardPinReason: true,
+	agentId: true,
+	ompAgentSessionTransport: true,
+	taskConversationMode: true,
+	mostRecentlyLaunchedAgentSessionAgentId: true,
+	clineSettings: true,
+	terminalAgentModelOverrideSettings: true,
+	taskAgentSessionInitialization: true,
+	baseRef: true,
+	parentSessionId: true,
+	worktreeMode: true,
+	prepFilePath: true,
+	createdAt: true,
+	updatedAt: true,
+	taskDescriptionLastUpdatedAt: true,
+} as const satisfies Record<keyof RuntimeBoardCard, true>;
+
 function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 	if (!rawCard || typeof rawCard !== "object") {
 		return null;
 	}
 
+	// 字段表由上面的守卫约束：键与服务端卡片 schema 一一对应，外加三个只读不写的旧字段（clineProviderId 等）。
 	const card = rawCard as {
-		id?: unknown;
-		title?: unknown;
-		prompt?: unknown;
-		startInPlanMode?: unknown;
-		taskAgentPermissionMode?: unknown;
-		autoReviewEnabled?: unknown;
-		autoReviewMode?: unknown;
-		images?: unknown;
-		taskCommentEntries?: unknown;
-		pinnedToTaskPinboardAt?: unknown;
-		taskPinboardPinReason?: unknown;
-		baseRef?: unknown;
-		agentId?: unknown;
-		ompAgentSessionTransport?: unknown;
-		taskConversationMode?: unknown;
-		mostRecentlyLaunchedAgentSessionAgentId?: unknown;
-		clineSettings?: unknown;
-		terminalAgentModelOverrideSettings?: unknown;
-		taskAgentSessionInitialization?: unknown;
+		[fieldName in keyof typeof BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION]?: unknown;
+	} & {
 		clineProviderId?: unknown;
 		clineModelId?: unknown;
 		clineReasoningEffort?: unknown;
-		parentSessionId?: unknown;
-		worktreeMode?: unknown;
-		prepFilePath?: unknown;
-		createdAt?: unknown;
-		updatedAt?: unknown;
-		taskDescriptionLastUpdatedAt?: unknown;
 	};
 	const prompt = typeof card.prompt === "string" ? card.prompt.trim() : "";
 	if (!prompt) {

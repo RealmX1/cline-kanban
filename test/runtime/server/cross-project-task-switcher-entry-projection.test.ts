@@ -43,6 +43,8 @@ function makeFacts(
 		lastSubstantiveOutputAt: null,
 		agentResponseGenerationStopped: null,
 		lastConversationProgressObservation: null,
+		lastMainAgentConversationModelRequestDispatchObservation: null,
+		agentProcessStartedAt: null,
 		turnOwner: null,
 		liveness: "none",
 		userTurnKind: null,

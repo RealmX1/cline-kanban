@@ -3,18 +3,15 @@ import {
 	CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_ID,
 	type CodingAgentPromptCacheRetentionMeasuredLowerBound,
 } from "./coding-agent-prompt-cache-retention-measured-ttl-lower-bounds";
-import {
-	isAgentOutputWithinActiveWindow,
-	isNotifiableUserTurn,
-	RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS,
-} from "./session-activity";
+import { isLowConfidenceLastConversationProgressEvidence } from "./last-conversation-progress-observation";
+import { isAgentOutputWithinActiveWindow, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS } from "./session-activity";
 
 // 跨项目「最近活跃任务」切换面板的区归属（领域词汇见 docs/context-cross-project-recently-active-task-switcher.md）。
 //
 // 四个区自上而下：
 //   Pinned                      —— 各项目 Task Pinboard 的汇总。**允许**与下面三区重复。
 //   Running                     —— agent 正持有回合且近 5 分钟有输出，或已 park 在等自己派发的后台工作。
-//   Cache warm · your turn      —— 轮到用户、且按 agent 的实测 TTL 估算 prompt cache 仍热；按失效时刻升序。
+//   Cache warm · your turn      —— agent 没在持有回合、且按 agent 的实测 TTL 估算主对话 prompt cache 仍热；按失效时刻升序。
 //   剩余区                       —— 其余全部，三种排序模式可切换。
 // 下面三区**互斥**，优先级 Running > 缓存倒计时 > 剩余。区归属只读 session facet 与时间戳，**不读 board 列**
 // （唯一例外是排除 Done）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。
@@ -50,9 +47,16 @@ export interface CrossProjectTaskSwitcherEntryInProject {
 	entry: RuntimeCrossProjectTaskSwitcherEntry;
 }
 
+export type CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource =
+	| "main_agent_conversation_model_request_dispatch_observation"
+	| "last_substantive_agent_terminal_output"
+	| "high_confidence_last_conversation_progress_observation_fallback";
+
 export interface CrossProjectTaskSwitcherPromptCacheWarmthEstimate {
-	// 计时起点：本轮停止生成的时刻；runtime 重启后它被清空，回落到对话上次推进的时刻。
+	// 计时起点：主对话最后一次向模型发请求的时刻（取不到时的回落见 resolveMainAgentConversationPromptCacheWarmthAnchor）。
 	promptCacheWarmthAnchorAt: number;
+	// 起点读自哪个信号；倒计时药丸的 tooltip 据此说明。
+	promptCacheWarmthAnchorSource: CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource;
 	promptCacheExpectedExpiryAt: number;
 }
 
@@ -119,29 +123,31 @@ export function isCrossProjectTaskSwitcherEntryRunning(
 	);
 }
 
-// 轮到用户、且 prompt cache 估计仍热时返回估算；否则 null。**不看是否已读**：读过但没回复的任务，缓存照样在流失。
-export function estimatePromptCacheWarmthForTaskAwaitingUser(
+// 主 agent 没在持有回合、且主对话的 prompt cache 估计仍热时返回估算；否则 null。**不看是否已读**：读过但
+// 没回复的任务，缓存照样在流失。
+//
+// 资格按缓存所在位置分两类（见 CodingAgentPromptCacheRetentionScope）：
+//   - 服务端缓存（Claude / Cursor）：只要求 turnOwner !== "agent"。不要求「可通知的用户回合」——runtime
+//     重启、会话被回收后 facet 变成 none，但服务端缓存照样热，用户此刻回复照样命中。
+//   - 同进程缓存（Codex / Kimi）：要求 agent 进程还活着，且起点不早于当前进程的启动时刻——恢复出来的
+//     新进程拿不到旧进程的缓存。
+export function estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn(
 	entry: Pick<
 		RuntimeCrossProjectTaskSwitcherEntry,
 		| "turnOwner"
 		| "liveness"
-		| "userTurnKind"
 		| "agentId"
-		| "agentResponseGenerationStopped"
+		| "lastSubstantiveOutputAt"
 		| "lastConversationProgressObservation"
+		| "lastMainAgentConversationModelRequestDispatchObservation"
+		| "agentProcessStartedAt"
 	>,
 	nowMs: number,
 	promptCacheRetentionMeasuredLowerBoundByAgentId: Readonly<
 		Partial<Record<RuntimeAgentId, CodingAgentPromptCacheRetentionMeasuredLowerBound>>
 	> = CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_ID,
 ): CrossProjectTaskSwitcherPromptCacheWarmthEstimate | null {
-	if (
-		!isNotifiableUserTurn({
-			turnOwner: entry.turnOwner,
-			liveness: entry.liveness,
-			userTurnKind: entry.userTurnKind,
-		})
-	) {
+	if (entry.turnOwner === "agent") {
 		return null;
 	}
 	const measuredLowerBound = entry.agentId
@@ -150,25 +156,70 @@ export function estimatePromptCacheWarmthForTaskAwaitingUser(
 	if (!measuredLowerBound) {
 		return null;
 	}
+	const isPromptCacheLostWhenAgentProcessExits =
+		measuredLowerBound.promptCacheRetentionScope === "same_agent_process_only_cache_lost_when_agent_process_exits";
+	if (isPromptCacheLostWhenAgentProcessExits && entry.liveness !== "live") {
+		return null;
+	}
+	const anchor = resolveMainAgentConversationPromptCacheWarmthAnchor(entry, measuredLowerBound);
+	if (anchor === null) {
+		return null;
+	}
 	if (
-		measuredLowerBound.promptCacheRetentionScope === "same_agent_process_only_cache_lost_when_agent_process_exits" &&
-		entry.liveness !== "live"
+		isPromptCacheLostWhenAgentProcessExits &&
+		(entry.agentProcessStartedAt == null || anchor.promptCacheWarmthAnchorAt < entry.agentProcessStartedAt)
 	) {
 		return null;
 	}
-	const promptCacheWarmthAnchorAt =
-		entry.agentResponseGenerationStopped?.stoppedAt ??
-		entry.lastConversationProgressObservation?.observedAtMs ??
-		null;
-	if (promptCacheWarmthAnchorAt === null) {
-		return null;
-	}
 	const promptCacheExpectedExpiryAt =
-		promptCacheWarmthAnchorAt + measuredLowerBound.promptCacheRetentionTtlLowerBoundMs;
+		anchor.promptCacheWarmthAnchorAt + measuredLowerBound.promptCacheRetentionTtlLowerBoundMs;
 	if (nowMs >= promptCacheExpectedExpiryAt) {
 		return null;
 	}
-	return { promptCacheWarmthAnchorAt, promptCacheExpectedExpiryAt };
+	return { ...anchor, promptCacheExpectedExpiryAt };
+}
+
+// 倒计时起点。**绝不读 agentResponseGenerationStopped**：会话恢复（换 incarnation）也算一次「停止生成」
+// 边沿，起点会被刷成恢复时刻（2026-10-03 实测偏差 11~21 小时），runtime 重启后它又被清空。
+function resolveMainAgentConversationPromptCacheWarmthAnchor(
+	entry: Pick<
+		RuntimeCrossProjectTaskSwitcherEntry,
+		| "lastSubstantiveOutputAt"
+		| "lastConversationProgressObservation"
+		| "lastMainAgentConversationModelRequestDispatchObservation"
+	>,
+	measuredLowerBound: CodingAgentPromptCacheRetentionMeasuredLowerBound,
+): Pick<
+	CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
+	"promptCacheWarmthAnchorAt" | "promptCacheWarmthAnchorSource"
+> | null {
+	if (
+		measuredLowerBound.promptCacheWarmthAnchorSignal === "main_agent_conversation_model_request_dispatch_hook_events"
+	) {
+		const dispatchObservation = entry.lastMainAgentConversationModelRequestDispatchObservation;
+		if (dispatchObservation) {
+			return {
+				promptCacheWarmthAnchorAt: dispatchObservation.observedAtMs,
+				promptCacheWarmthAnchorSource: "main_agent_conversation_model_request_dispatch_observation",
+			};
+		}
+	} else if (entry.lastSubstantiveOutputAt != null) {
+		return {
+			promptCacheWarmthAnchorAt: entry.lastSubstantiveOutputAt,
+			promptCacheWarmthAnchorSource: "last_substantive_agent_terminal_output",
+		};
+	}
+	// 兜底：还没观测到过发请求事件的会话（本字段上线前最后一次请求的存量会话、hook 丢投）。对话推进
+	// 观测略晚于真实请求（停止时刻、Notification 会把它往后推），所以只在没有更好信号时用；低置信的
+	// TUI 猜测会被恢复重播刷成 now，不用。
+	const progressObservation = entry.lastConversationProgressObservation;
+	if (progressObservation && !isLowConfidenceLastConversationProgressEvidence(progressObservation.evidenceKind)) {
+		return {
+			promptCacheWarmthAnchorAt: progressObservation.observedAtMs,
+			promptCacheWarmthAnchorSource: "high_confidence_last_conversation_progress_observation_fallback",
+		};
+	}
+	return null;
 }
 
 // 模式 ① 的排序键：三个「人或对话真正碰过它」的时刻取最大。刻意**不**用 card.updatedAt——
@@ -320,7 +371,7 @@ export function assignCrossProjectTaskSwitcherSections(
 			runningEntries.push(entryInProject);
 			continue;
 		}
-		const promptCacheWarmthEstimate = estimatePromptCacheWarmthForTaskAwaitingUser(
+		const promptCacheWarmthEstimate = estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn(
 			entry,
 			input.nowMs,
 			input.promptCacheRetentionMeasuredLowerBoundByAgentId,

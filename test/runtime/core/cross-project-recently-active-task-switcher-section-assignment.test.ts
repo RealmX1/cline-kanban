@@ -7,7 +7,7 @@ import {
 	CROSS_PROJECT_TASK_SWITCHER_RECENTLY_OPENED_BY_USER_SUBSECTION_MAXIMUM_ENTRY_COUNT,
 	type CrossProjectTaskSwitcherEntryInProject,
 	type CrossProjectTaskSwitcherRemainingSectionOrderingMode,
-	estimatePromptCacheWarmthForTaskAwaitingUser,
+	estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn,
 	isCrossProjectTaskSwitcherEntryRunning,
 } from "../../../src/core/cross-project-recently-active-task-switcher-section-assignment";
 
@@ -40,6 +40,8 @@ function makeEntry(
 		lastOpenedByUserAt: null,
 		pinnedToTaskPinboardAt: null,
 		taskPinboardPinReason: null,
+		lastMainAgentConversationModelRequestDispatchObservation: null,
+		agentProcessStartedAt: null,
 		...overrides,
 	};
 }
@@ -61,6 +63,12 @@ function stoppedAt(stoppedAtMs: number): RuntimeCrossProjectTaskSwitcherEntry["a
 
 function progressAt(observedAtMs: number): RuntimeCrossProjectTaskSwitcherEntry["lastConversationProgressObservation"] {
 	return { observedAtMs, evidenceKind: "agent_lifecycle_hook_event" };
+}
+
+function dispatchedAt(
+	observedAtMs: number,
+): RuntimeCrossProjectTaskSwitcherEntry["lastMainAgentConversationModelRequestDispatchObservation"] {
+	return { observedAtMs, evidenceKind: "post_tool_use_hook_event" };
 }
 
 function assign(
@@ -124,68 +132,131 @@ describe("isCrossProjectTaskSwitcherEntryRunning", () => {
 	});
 });
 
-describe("estimatePromptCacheWarmthForTaskAwaitingUser", () => {
-	it("Claude 用户回合：stoppedAt + 55 分钟内仍热，到点即掉出", () => {
-		const entry = makeEntry("a", { ...USER_REVIEW_EXITED, agentResponseGenerationStopped: stoppedAt(NOW_MS) });
-		expect(estimatePromptCacheWarmthForTaskAwaitingUser(entry, NOW_MS + 54 * MINUTE_MS)).toEqual({
+describe("estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn", () => {
+	const estimate = estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn;
+
+	it("Claude：主对话最后一次发请求 + 55 分钟内仍热，到点即掉出", () => {
+		const entry = makeEntry("a", {
+			...USER_REVIEW_EXITED,
+			lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS),
+		});
+		expect(estimate(entry, NOW_MS + 54 * MINUTE_MS)).toEqual({
 			promptCacheWarmthAnchorAt: NOW_MS,
+			promptCacheWarmthAnchorSource: "main_agent_conversation_model_request_dispatch_observation",
 			promptCacheExpectedExpiryAt: NOW_MS + 55 * MINUTE_MS,
 		});
-		expect(estimatePromptCacheWarmthForTaskAwaitingUser(entry, NOW_MS + 55 * MINUTE_MS)).toBeNull();
+		expect(estimate(entry, NOW_MS + 55 * MINUTE_MS)).toBeNull();
 	});
 
-	it("Claude 的缓存在服务端：agent 进程已退出（exited）照样算热", () => {
-		const entry = makeEntry("a", { ...USER_REVIEW_EXITED, agentResponseGenerationStopped: stoppedAt(NOW_MS) });
-		expect(estimatePromptCacheWarmthForTaskAwaitingUser(entry, NOW_MS + MINUTE_MS)).not.toBeNull();
+	it("会话恢复把 stoppedAt 刷成恢复时刻：起点不读它，仍按真实最后一次请求算（2026-10-03 实测场景）", () => {
+		const entry = makeEntry("a", {
+			...USER_REVIEW_LIVE,
+			agentResponseGenerationStopped: stoppedAt(NOW_MS - 18 * MINUTE_MS),
+			lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - 697 * MINUTE_MS),
+			lastConversationProgressObservation: progressAt(NOW_MS - 694 * MINUTE_MS),
+		});
+		expect(estimate(entry, NOW_MS)).toBeNull();
 	});
 
-	it("Codex / Kimi 的缓存只在同一进程内有效：进程退出即不热", () => {
+	it("服务端缓存（Claude）：runtime 重启后 facet 归零（none）照样在区内", () => {
+		const entry = makeEntry("a", {
+			turnOwner: null,
+			liveness: "none",
+			userTurnKind: null,
+			lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - 10 * MINUTE_MS),
+		});
+		expect(estimate(entry, NOW_MS)?.promptCacheExpectedExpiryAt).toBe(NOW_MS + 45 * MINUTE_MS);
+	});
+
+	it("agent 正持有回合时不估算（由 Running / 剩余区处理）", () => {
+		const entry = makeEntry("a", {
+			...AGENT_RUNNING,
+			lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS),
+		});
+		expect(estimate(entry, NOW_MS)).toBeNull();
+	});
+
+	it("同进程缓存（Codex / Kimi）：进程退出即不热；恢复成新进程后，早于进程启动的请求不算", () => {
 		for (const agentId of ["codex", "kimi"] as const) {
-			const anchor = { agentResponseGenerationStopped: stoppedAt(NOW_MS) };
+			const anchor = {
+				agentId,
+				lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - 5 * MINUTE_MS),
+			};
 			expect(
-				estimatePromptCacheWarmthForTaskAwaitingUser(
-					makeEntry("a", { ...USER_REVIEW_EXITED, ...anchor, agentId }),
-					NOW_MS + MINUTE_MS,
+				estimate(
+					makeEntry("a", { ...USER_REVIEW_EXITED, ...anchor, agentProcessStartedAt: NOW_MS - 60 * MINUTE_MS }),
+					NOW_MS,
 				),
 			).toBeNull();
 			expect(
-				estimatePromptCacheWarmthForTaskAwaitingUser(
-					makeEntry("a", { ...USER_REVIEW_LIVE, ...anchor, agentId }),
-					NOW_MS + MINUTE_MS,
+				estimate(
+					makeEntry("a", { ...USER_REVIEW_LIVE, ...anchor, agentProcessStartedAt: NOW_MS - 60 * MINUTE_MS }),
+					NOW_MS,
 				),
 			).not.toBeNull();
+			expect(
+				estimate(
+					makeEntry("a", { ...USER_REVIEW_LIVE, ...anchor, agentProcessStartedAt: NOW_MS - MINUTE_MS }),
+					NOW_MS,
+				),
+			).toBeNull();
+			expect(
+				estimate(makeEntry("a", { ...USER_REVIEW_LIVE, ...anchor, agentProcessStartedAt: null }), NOW_MS),
+			).toBeNull();
 		}
 	});
 
-	it("runtime 重启清空 stoppedAt 后回落到对话上次推进的时刻", () => {
+	it("Cursor 没有回合类 hook：起点读最近一次实质输出", () => {
 		const entry = makeEntry("a", {
-			...USER_REVIEW_EXITED,
-			lastConversationProgressObservation: progressAt(NOW_MS - 10 * MINUTE_MS),
+			...USER_REVIEW_LIVE,
+			agentId: "cursor",
+			lastSubstantiveOutputAt: NOW_MS - 5 * MINUTE_MS,
+			lastConversationProgressObservation: progressAt(NOW_MS - MINUTE_MS),
 		});
-		expect(estimatePromptCacheWarmthForTaskAwaitingUser(entry, NOW_MS)?.promptCacheExpectedExpiryAt).toBe(
-			NOW_MS + 45 * MINUTE_MS,
-		);
+		expect(estimate(entry, NOW_MS)).toEqual({
+			promptCacheWarmthAnchorAt: NOW_MS - 5 * MINUTE_MS,
+			promptCacheWarmthAnchorSource: "last_substantive_agent_terminal_output",
+			promptCacheExpectedExpiryAt: NOW_MS + 15 * MINUTE_MS,
+		});
 	});
 
-	it("没有任何计时锚点 / 没测过 TTL 的 agent / 被中断的用户回合 → 不进倒计时区", () => {
-		expect(estimatePromptCacheWarmthForTaskAwaitingUser(makeEntry("a", USER_REVIEW_EXITED), NOW_MS)).toBeNull();
+	it("还没观测到发请求事件的存量会话：回落到高置信的对话推进观测，低置信 TUI 猜测不用", () => {
 		expect(
-			estimatePromptCacheWarmthForTaskAwaitingUser(
+			estimate(
 				makeEntry("a", {
-					...USER_REVIEW_LIVE,
-					agentId: "cline",
-					agentResponseGenerationStopped: stoppedAt(NOW_MS),
+					...USER_REVIEW_EXITED,
+					lastConversationProgressObservation: progressAt(NOW_MS - 10 * MINUTE_MS),
+				}),
+				NOW_MS,
+			),
+		).toMatchObject({
+			promptCacheWarmthAnchorSource: "high_confidence_last_conversation_progress_observation_fallback",
+			promptCacheExpectedExpiryAt: NOW_MS + 45 * MINUTE_MS,
+		});
+		expect(
+			estimate(
+				makeEntry("a", {
+					...USER_REVIEW_EXITED,
+					lastConversationProgressObservation: {
+						observedAtMs: NOW_MS,
+						evidenceKind: "terminal_output_heuristic_classification",
+					},
 				}),
 				NOW_MS,
 			),
 		).toBeNull();
+	});
+
+	it("没有任何起点 / 没测过 TTL 的 agent → 不进倒计时区", () => {
 		expect(
-			estimatePromptCacheWarmthForTaskAwaitingUser(
+			estimate(makeEntry("a", { ...USER_REVIEW_EXITED, agentResponseGenerationStopped: stoppedAt(NOW_MS) }), NOW_MS),
+		).toBeNull();
+		expect(
+			estimate(
 				makeEntry("a", {
-					turnOwner: "user",
-					liveness: "interrupted",
-					userTurnKind: "interrupted",
-					agentResponseGenerationStopped: stoppedAt(NOW_MS),
+					...USER_REVIEW_LIVE,
+					agentId: "cline",
+					lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS),
 				}),
 				NOW_MS,
 			),
@@ -199,13 +270,16 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 			inProject("ws-1", makeEntry("running", { ...AGENT_RUNNING, lastOutputAt: NOW_MS, pinnedToTaskPinboardAt: 5 })),
 			inProject(
 				"ws-1",
-				makeEntry("warm", { ...USER_REVIEW_EXITED, agentResponseGenerationStopped: stoppedAt(NOW_MS - MINUTE_MS) }),
+				makeEntry("warm", {
+					...USER_REVIEW_EXITED,
+					lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - MINUTE_MS),
+				}),
 			),
 			inProject(
 				"ws-2",
 				makeEntry("cold", {
 					...USER_REVIEW_EXITED,
-					agentResponseGenerationStopped: stoppedAt(NOW_MS - 2 * 60 * MINUTE_MS),
+					lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - 2 * 60 * MINUTE_MS),
 					lastConversationProgressObservation: progressAt(NOW_MS - 2 * 60 * MINUTE_MS),
 					pinnedToTaskPinboardAt: 9,
 				}),
@@ -229,7 +303,7 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 				makeEntry("lagging-column", {
 					...USER_REVIEW_EXITED,
 					columnId: "in_progress",
-					agentResponseGenerationStopped: stoppedAt(NOW_MS),
+					lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS),
 				}),
 			),
 		]);
@@ -256,14 +330,15 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 				makeEntry("codex-just-stopped", {
 					...USER_REVIEW_LIVE,
 					agentId: "codex",
-					agentResponseGenerationStopped: stoppedAt(NOW_MS),
+					agentProcessStartedAt: NOW_MS - 60 * MINUTE_MS,
+					lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS),
 				}),
 			),
 			inProject(
 				"ws-1",
 				makeEntry("claude-40m-ago", {
 					...USER_REVIEW_EXITED,
-					agentResponseGenerationStopped: stoppedAt(NOW_MS - 40 * MINUTE_MS),
+					lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - 40 * MINUTE_MS),
 				}),
 			),
 			inProject(
@@ -271,7 +346,8 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 				makeEntry("kimi-just-stopped", {
 					...USER_REVIEW_LIVE,
 					agentId: "kimi",
-					agentResponseGenerationStopped: stoppedAt(NOW_MS),
+					agentProcessStartedAt: NOW_MS - 60 * MINUTE_MS,
+					lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS),
 				}),
 			),
 		]);
@@ -287,7 +363,10 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 			inProject("ws-1", makeEntry("same-id", { ...AGENT_RUNNING, lastOutputAt: NOW_MS })),
 			inProject(
 				"ws-2",
-				makeEntry("same-id", { ...USER_REVIEW_EXITED, agentResponseGenerationStopped: stoppedAt(NOW_MS) }),
+				makeEntry("same-id", {
+					...USER_REVIEW_EXITED,
+					lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS),
+				}),
 			),
 		]);
 		expect(sections.runningEntries.map(({ workspaceId }) => workspaceId)).toEqual(["ws-1"]);
@@ -353,7 +432,7 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 				"ws-1",
 				makeEntry("a", {
 					...USER_REVIEW_EXITED,
-					agentResponseGenerationStopped: stoppedAt(NOW_MS),
+					lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS),
 					lastConversationProgressObservation: progressAt(NOW_MS),
 				}),
 			),
