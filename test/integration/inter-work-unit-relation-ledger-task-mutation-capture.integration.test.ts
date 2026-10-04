@@ -401,8 +401,8 @@ describe("inter-work-unit relation ledger task mutation capture", () => {
 					"t0001",
 					() => createSessionSummaryWithNativeIdentity("t0001", "native-a", observedAt),
 				);
-				// 时间水位照常落盘，只是不再记账。
-				expect(persisted).toBe(true);
+				// 时间水位照常落盘（不推 revision，cf427），只是不再记账。
+				expect(persisted).toBe("persisted_reconfirmed_identity_observation_time_without_revision_change");
 			}
 			await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(workspaceId, "t0001", () =>
 				createSessionSummaryWithNativeIdentity("t0001", "native-b", 4_000),
