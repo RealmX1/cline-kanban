@@ -205,6 +205,43 @@ describe("就绪通知跨项目投递（单标签页管全部项目）", () => {
 		);
 	});
 
+	// cf427：通知可能由别的项目的标签页代为弹出。点击要回到目标项目的标签页，而不是弹通知的这个；
+	// taskId 只在一个看板内唯一，tag 不带 workspaceId 会让别的项目的同号任务通知互相替换。
+	it("service worker 承载的通知：tag 带 workspaceId，点击数据指向目标项目的路径而不是弹出它的标签页", async () => {
+		vi.spyOn(document, "hasFocus").mockReturnValue(false);
+		vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+		const showNotification = vi.fn(async () => undefined);
+		const originalServiceWorkerDescriptor = Object.getOwnPropertyDescriptor(navigator, "serviceWorker");
+		Object.defineProperty(navigator, "serviceWorker", {
+			configurable: true,
+			value: { ready: Promise.resolve({ showNotification }) },
+		});
+		try {
+			await act(async () =>
+				root.render(
+					createElement(NotificationHarness, {
+						events: [readyEvent("workspace-b", "task-b")],
+						isDocumentVisible: false,
+					}),
+				),
+			);
+			await vi.waitFor(() => expect(showNotification).toHaveBeenCalledTimes(1));
+			expect(showNotification).toHaveBeenCalledWith(
+				"Ready for review",
+				expect.objectContaining({
+					tag: "task-ready-for-review-workspace-b-task-b",
+					data: { taskId: "task-b", workspaceId: "workspace-b", workspacePathname: "/workspace-b" },
+				}),
+			);
+		} finally {
+			if (originalServiceWorkerDescriptor) {
+				Object.defineProperty(navigator, "serviceWorker", originalServiceWorkerDescriptor);
+			} else {
+				Reflect.deleteProperty(navigator, "serviceWorker");
+			}
+		}
+	});
+
 	it("标签页正前台看着 A 项目时，A 项目自己的任务完成仍按前台可见让位（不弹）", async () => {
 		vi.spyOn(document, "hasFocus").mockReturnValue(true);
 		vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");

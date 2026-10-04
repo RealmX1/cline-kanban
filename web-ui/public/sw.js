@@ -147,7 +147,13 @@ async function handleNotificationClick(data) {
     (workspaceId ? windowClients[0] || null : null);
 
   if (target) {
-    await target.focus();
+    // focus() 被浏览器拒绝（例如超出 notificationclick 的激活窗口）时照样转发选中消息：任务仍会在目标标签页就位，
+    // 否则一次聚焦失败就让点击整个失效（cf427）。
+    try {
+      await target.focus();
+    } catch {
+      // 聚焦失败不阻断下方的选中消息。
+    }
     postFocusTaskFromNotificationMessage(target, taskId, workspaceId);
     return;
   }

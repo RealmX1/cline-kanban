@@ -2,7 +2,7 @@
 // It owns how the board and detail view start, stop, resize, and route task
 // sessions across native Cline and PTY-backed agents.
 import type { Dispatch, SetStateAction } from "react";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 
 import { notifyError } from "@/components/app-toaster";
 import { selectNewestTaskSessionSummary } from "@/hooks/home-sidebar-agent-panel-session-summary";
@@ -158,6 +158,19 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		},
 		[setSessions],
 	);
+	// 请求发出后切了项目：响应里的 summary 属于上一个项目，不能并进当前项目的 sessions——
+	// 否则它会随下一次整板保存写进当前项目的 sessions.json（cf427 的跨项目串写）。
+	const latestCurrentProjectIdRef = useRef(currentProjectId);
+	latestCurrentProjectIdRef.current = currentProjectId;
+	const upsertSessionUnlessProjectSwitchedSinceRequest = useCallback(
+		(requestProjectId: string, summary: RuntimeTaskSessionSummary) => {
+			if (latestCurrentProjectIdRef.current !== requestProjectId) {
+				return;
+			}
+			upsertSession(summary);
+		},
+		[upsertSession],
+	);
 	const {
 		sendTaskChatMessage,
 		loadTaskChatMessages: fetchTaskChatMessages,
@@ -269,7 +282,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 						message,
 					};
 				}
-				upsertSession(payload.summary);
+				upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
 				if (options?.resumeFromTrash) {
 					trackTaskResumedFromTrash();
 				}
@@ -285,7 +298,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				return { ok: false, message };
 			}
 		},
-		[currentProjectId, upsertSession],
+		[currentProjectId, upsertSessionUnlessProjectSwitchedSinceRequest],
 	);
 
 	const stopTaskSession = useCallback(
@@ -354,13 +367,13 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				if (!payload.ok || !payload.summary) {
 					return { ok: false, message: payload.error ?? "Could not create the By the way session." };
 				}
-				upsertSession(payload.summary);
+				upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
 				return { ok: true, taskConversationSessionId };
 			} catch (error) {
 				return { ok: false, message: error instanceof Error ? error.message : String(error) };
 			}
 		},
-		[currentProjectId, upsertSession],
+		[currentProjectId, upsertSessionUnlessProjectSwitchedSinceRequest],
 	);
 
 	const transitionTaskToReview = useCallback(
@@ -373,14 +386,14 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				const payload = await trpcClient.runtime.transitionTaskToReview.mutate({ taskId });
 				if (payload.ok && payload.summary) {
 					// 即时 upsert：不等 WS 广播，直接喂新 summary（turnOwner=user）给 Rule A → 立刻落位 Review。
-					upsertSession(payload.summary);
+					upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
 				}
 				return payload.ok;
 			} catch {
 				return false;
 			}
 		},
-		[currentProjectId, upsertSession],
+		[currentProjectId, upsertSessionUnlessProjectSwitchedSinceRequest],
 	);
 
 	const continueConnectionRetrySessions = useCallback(
@@ -445,7 +458,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					return { ok: false, message: errorMessage };
 				}
 				if (payload.summary) {
-					upsertSession(payload.summary);
+					upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
 				}
 				return { ok: true };
 			} catch (error) {
@@ -453,7 +466,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				return { ok: false, message };
 			}
 		},
-		[currentProjectId, upsertSession],
+		[currentProjectId, upsertSessionUnlessProjectSwitchedSinceRequest],
 	);
 
 	const cleanupTaskWorkspace = useCallback(

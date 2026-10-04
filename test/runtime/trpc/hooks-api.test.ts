@@ -1587,7 +1587,9 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 			recordAgentLifecycleHookConversationProgress: vi.fn(),
 			recordMainAgentConversationModelRequestDispatch: vi.fn(),
 		} as unknown as TerminalSessionManager;
-		const persistIdentity = vi.fn(async () => true);
+		const persistIdentity = vi.fn(
+			async () => "persisted_new_identity_and_invalidated_stale_snapshot_revision" as const,
+		);
 		const api = createHooksApi({
 			persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: persistIdentity,
 			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
@@ -1624,6 +1626,48 @@ describe("恢复守卫两档解除时序（hook 摄入 × 真实 TerminalSession
 });
 
 describe("原生身份落盘与 hook 确认", () => {
+	// cf427：Codex/Claude 每个带 session id 的 hook 都会再确认一次同一身份；若每次都广播整份快照，
+	// 所有客户端都会整板重水合，抹掉浏览器里尚未落盘的新卡。
+	it.each([
+		["persisted_new_identity_and_invalidated_stale_snapshot_revision" as const, 1],
+		["persisted_reconfirmed_identity_observation_time_without_revision_change" as const, 0],
+		["already_persisted_without_write" as const, 0],
+	])(
+		"身份落盘结果为 %s 时广播整份 workspace 快照 %i 次",
+		async (identityPersistenceOutcome, expectedBroadcastCount) => {
+			const manager = {
+				getSummary: vi.fn(() => createSummary({ state: "running" })),
+				applyAgentNativeConversationSessionIdentity: vi.fn(),
+				applyHookActivity: vi.fn(),
+				recordAgentLifecycleHookConversationProgress: vi.fn(),
+			} as unknown as TerminalSessionManager;
+			const broadcastRuntimeWorkspaceStateUpdated = vi.fn();
+			const api = createHooksApi({
+				persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: vi.fn(
+					async () => identityPersistenceOutcome,
+				),
+				getWorkspacePathById: () => "/tmp/repo",
+				ensureTerminalManagerForWorkspace: async () => manager,
+				broadcastRuntimeWorkspaceStateUpdated,
+				broadcastTaskReadyForReview: vi.fn(),
+			});
+			expect(
+				await api.ingest({
+					taskId: "task-1",
+					workspaceId: "workspace-1",
+					event: "agent_conversation_session_identity_observed",
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId: "claude",
+						nativeSessionId: "session-1",
+						transcriptPath: null,
+						observedAt: 2,
+					},
+				}),
+			).toEqual({ ok: true });
+			expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledTimes(expectedBroadcastCount);
+		},
+	);
+
 	it.each([false, true])("保存失败可重试，恢复拦截=%s 时仍保留 block", async (restorationBlocked) => {
 		const manager = {
 			getSummary: vi.fn(() => createSummary()),
@@ -1643,7 +1687,7 @@ describe("原生身份落盘与 hook 确认", () => {
 				await pendingPersistence;
 				throw new Error("disk unavailable");
 			})
-			.mockResolvedValueOnce(true);
+			.mockResolvedValueOnce("persisted_new_identity_and_invalidated_stale_snapshot_revision" as const);
 		const broadcast = vi.fn();
 		const api = createHooksApi({
 			getWorkspacePathById: () => "/tmp/repo",
@@ -1707,7 +1751,7 @@ it("通知已处理的重复 hook 仍补存身份，但不再次转换状态", a
 		applyAgentNativeConversationSessionIdentity: vi.fn(),
 		transitionToReview: vi.fn(),
 	} as unknown as TerminalSessionManager;
-	const persistIdentity = vi.fn(async () => true);
+	const persistIdentity = vi.fn(async () => "persisted_new_identity_and_invalidated_stale_snapshot_revision" as const);
 	const api = createHooksApi({
 		getWorkspacePathById: () => "/tmp/repo",
 		ensureTerminalManagerForWorkspace: async () => manager,
@@ -1765,11 +1809,13 @@ it.each([
 				recordMainAgentConversationModelRequestDispatch: vi.fn(),
 				applyTurnCheckpoint: vi.fn(),
 			} as unknown as TerminalSessionManager;
-			const persistIdentity = vi.fn().mockResolvedValueOnce(true);
+			const persistIdentity = vi
+				.fn()
+				.mockResolvedValueOnce("persisted_new_identity_and_invalidated_stale_snapshot_revision" as const);
 			if (retryIdentityPersistenceFails) {
 				persistIdentity.mockRejectedValueOnce(new Error("identity storage unavailable"));
 			} else {
-				persistIdentity.mockResolvedValueOnce(false);
+				persistIdentity.mockResolvedValueOnce("already_persisted_without_write" as const);
 			}
 			const api = createHooksApi({
 				getWorkspacePathById: () => "/tmp/repo",
@@ -1869,7 +1915,9 @@ it("SessionStart 身份事件不解除恢复守卫、不推进时间戳或通知
 	} as unknown as TerminalSessionManager;
 	const notify = vi.fn();
 	const api = createHooksApi({
-		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: vi.fn(async () => false),
+		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId: vi.fn(
+			async () => "already_persisted_without_write" as const,
+		),
 		getWorkspacePathById: () => "/tmp/repo",
 		ensureTerminalManagerForWorkspace: async () => manager,
 		broadcastRuntimeWorkspaceStateUpdated: vi.fn(),

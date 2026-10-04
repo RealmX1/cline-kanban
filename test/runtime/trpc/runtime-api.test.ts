@@ -785,6 +785,213 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
 
+	// cf427：浏览器乐观建卡后立刻启动，卡片却可能永远落不了盘，agent 就成了没有卡片的孤儿会话。
+	describe("宿主卡未落盘时拒绝启动卡片会话", () => {
+		function createRuntimeApiWithTerminalManagerSpy() {
+			const terminalManager = {
+				getSummary: vi.fn(() => null),
+				listSummaries: vi.fn(() => []),
+				startTaskSession: vi.fn(async () => createSummary()),
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+			return { api, terminalManager };
+		}
+
+		it("主会话的卡不在盘上 board 里：不建 worktree、不 spawn，返回机器可读的拒绝原因", async () => {
+			const { api, terminalManager } = createRuntimeApiWithTerminalManagerSpy();
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-created-only-in-browser-memory", baseRef: "main", prompt: "Install the skill" },
+			);
+			expect(response).toMatchObject({
+				ok: false,
+				summary: null,
+				taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+			});
+			expect(response.error).toContain("task-created-only-in-browser-memory");
+			expect(taskWorktreeMocks.resolveTaskCwd).not.toHaveBeenCalled();
+			expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		});
+
+		it("By the way 侧问会话按宿主卡（workspaceTaskId）判定", async () => {
+			const { api, terminalManager } = createRuntimeApiWithTerminalManagerSpy();
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{
+					taskId: "task-conversation-session-side",
+					workspaceTaskId: "task-created-only-in-browser-memory",
+					baseRef: "main",
+					prompt: "Why?",
+					agentId: "codex",
+					taskConversationSessionMetadata: {
+						workspaceTaskId: "task-created-only-in-browser-memory",
+						taskConversationSessionRole: "by_the_way",
+						taskConversationSessionContextSource: "started_from_scratch",
+						parentTaskConversationSessionId: "task-created-only-in-browser-memory",
+						mainSessionOriginTurnNumber: null,
+						mainSessionOriginUserMessagePreview: null,
+						latestUserMessagePreview: "Why?",
+					},
+				},
+			);
+			expect(response.taskSessionStartRejectionReason).toBe("task_card_not_yet_persisted_on_workspace_board");
+			expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		});
+
+		it("宿主卡已在盘上（含 trash 列里的卡从 trash 恢复）时照常启动", async () => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/task-1-worktree");
+			const { api, terminalManager } = createRuntimeApiWithTerminalManagerSpy();
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", baseRef: "main", prompt: "Implement task" },
+			);
+			expect(response.ok).toBe(true);
+			expect(response.taskSessionStartRejectionReason).toBeUndefined();
+			expect(terminalManager.startTaskSession).toHaveBeenCalledOnce();
+		});
+
+		// 启动开始时卡还在、spawn 期间被别的客户端删掉：删卡方那时还看不到会话，只能由启动方自己停掉。
+		describe("启动开始时宿主卡在盘上、会话启动期间卡被删", () => {
+			function simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient(): void {
+				workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+					columns: [
+						{ id: "backlog", title: "Backlog", cards: [] },
+						{ id: "in_progress", title: "In Progress", cards: [] },
+						{ id: "review", title: "Review", cards: [] },
+						{ id: "trash", title: "Done", cards: [] },
+					],
+				});
+			}
+
+			it("终端会话：停掉刚启动的会话、不回写卡片、不打 checkpoint，返回同一拒绝原因", async () => {
+				taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/task-1-worktree");
+				workspaceStateMocks.mutateWorkspaceState.mockClear();
+				const terminalManager = {
+					getSummary: vi.fn(() => null),
+					listSummaries: vi.fn(() => []),
+					startTaskSession: vi.fn(async () => {
+						simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient();
+						return createSummary();
+					}),
+					stopTaskSession: vi.fn(() => createSummary({ state: "interrupted" })),
+					applyTurnCheckpoint: vi.fn(),
+				};
+				const api = createTestRuntimeApi({
+					getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+					loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+					setActiveRuntimeConfig: vi.fn(),
+					getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+					getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+					resolveInteractiveShellCommand: vi.fn(),
+					runCommand: vi.fn(),
+				});
+
+				const response = await api.startTaskSession(
+					{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+					{ taskId: "task-1", baseRef: "main", prompt: "Implement task" },
+				);
+
+				expect(response).toMatchObject({
+					ok: false,
+					summary: null,
+					taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+				});
+				expect(response.error).toContain("task-1");
+				expect(terminalManager.startTaskSession).toHaveBeenCalledOnce();
+				expect(terminalManager.stopTaskSession).toHaveBeenCalledExactlyOnceWith("task-1");
+				expect(workspaceStateMocks.mutateWorkspaceState).not.toHaveBeenCalled();
+				expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
+			});
+
+			it("Cline 会话：经 Cline 会话服务停掉刚启动的会话，返回同一拒绝原因", async () => {
+				taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/task-1-worktree");
+				agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
+				setSelectedProviderSettings({
+					provider: "anthropic",
+					model: "claude-sonnet-4-6",
+					apiKey: "anthropic-api-key",
+				});
+				const terminalManager = {
+					getSummary: vi.fn(() => null),
+					listSummaries: vi.fn(() => []),
+					startTaskSession: vi.fn(async () => createSummary()),
+					stopTaskSession: vi.fn(() => null),
+					applyTurnCheckpoint: vi.fn(),
+				};
+				const clineTaskSessionService = createClineTaskSessionServiceMock();
+				clineTaskSessionService.startTaskSession.mockImplementation(async () => {
+					simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient();
+					return createSummary({ agentId: "cline", pid: null });
+				});
+				const api = createTestRuntimeApi({
+					getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+					loadScopedRuntimeConfig: vi.fn(async () => {
+						const runtimeConfigState = createRuntimeConfigState();
+						runtimeConfigState.selectedAgentId = "cline";
+						return runtimeConfigState;
+					}),
+					setActiveRuntimeConfig: vi.fn(),
+					getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+					getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+					resolveInteractiveShellCommand: vi.fn(),
+					runCommand: vi.fn(),
+				});
+
+				const response = await api.startTaskSession(
+					{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+					{ taskId: "task-1", baseRef: "main", prompt: "Implement task" },
+				);
+
+				expect(response).toMatchObject({
+					ok: false,
+					summary: null,
+					taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+				});
+				expect(clineTaskSessionService.stopTaskSession).toHaveBeenCalledExactlyOnceWith("task-1");
+				expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
+			});
+
+			it("侧边栏 home agent 会话不属于任何卡片：盘上 board 怎么变都照常启动、不被停", async () => {
+				const homeTaskId = "__home_agent__:workspace-1:codex";
+				simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient();
+				const terminalManager = {
+					getSummary: vi.fn(() => null),
+					listSummaries: vi.fn(() => []),
+					startTaskSession: vi.fn(async () => createSummary({ taskId: homeTaskId })),
+					stopTaskSession: vi.fn(() => null),
+					applyTurnCheckpoint: vi.fn(),
+				};
+				const api = createTestRuntimeApi({
+					getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+					loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+					setActiveRuntimeConfig: vi.fn(),
+					getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+					getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+					resolveInteractiveShellCommand: vi.fn(),
+					runCommand: vi.fn(),
+				});
+
+				const response = await api.startTaskSession(
+					{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+					{ taskId: homeTaskId, baseRef: "main", prompt: "" },
+				);
+
+				expect(response.ok).toBe(true);
+				expect(response.taskSessionStartRejectionReason).toBeUndefined();
+				expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
+			});
+		});
+	});
+
 	it("rejects By the way runtime sessions for unsupported agents", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
 		const terminalManager = {

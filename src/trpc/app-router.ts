@@ -106,6 +106,7 @@ import type {
 	RuntimeNotificationMutationResponse,
 	RuntimeOpenFileRequest,
 	RuntimeOpenFileResponse,
+	RuntimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequest,
 	RuntimeProjectAddRequest,
 	RuntimeProjectAddResponse,
 	RuntimeProjectDirectoryPickerResponse,
@@ -315,6 +316,7 @@ import {
 	runtimeNotificationMutationResponseSchema,
 	runtimeOpenFileRequestSchema,
 	runtimeOpenFileResponseSchema,
+	runtimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequestSchema,
 	runtimeProjectAddRequestSchema,
 	runtimeProjectAddResponseSchema,
 	runtimeProjectDirectoryPickerResponseSchema,
@@ -744,6 +746,12 @@ export interface RuntimeTrpcContext {
 			input: RuntimeAddBacklogTaskRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeAddBacklogTaskResponse>;
+		// cf427：Web UI 新建的卡在启动 agent 前先经此落盘（board 锁内对最新 board 插卡，不走整板 CAS）。
+		persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeWorkspaceStateResponse>;
 		// dd2db 1a.2b：`kanban task create` 的落盘入口（见 api-contract 的 runtimeKanbanCliTaskBoardMutationRequestSchema）。
 		// 其余 CLI 写动词已收编进 taskCardActionApi。
 		applyKanbanCliTaskBoardMutation: (
@@ -1592,6 +1600,17 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeAddBacklogTaskResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.addBacklogTask(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		// 浏览器建卡后、放行 agent 启动前调用：卡片落盘不再依赖 120ms 防抖的整板保存赢下 revision 竞争（cf427）。
+		persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: workspaceProcedure
+			.input(runtimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequestSchema)
+			.output(runtimeWorkspaceStateResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart(
 					ctx.workspaceScope,
 					input,
 					ctx.kanbanRequestOriginActorEvidence,

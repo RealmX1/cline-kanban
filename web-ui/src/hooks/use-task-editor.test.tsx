@@ -183,6 +183,12 @@ vi.mock("@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-c
 	},
 }));
 
+// cf427：建卡同时向 runtime 发起「启动 agent 前先落盘」。这里只记录调用，落盘与等待语义在该模块自己的测试里。
+const beginPersistingNewBacklogTaskCardsMock = vi.hoisted(() => vi.fn());
+vi.mock("@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start", () => ({
+	beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: beginPersistingNewBacklogTaskCardsMock,
+}));
+
 vi.mock("@/runtime/task-name-suggestion-query", () => ({
 	suggestTaskNamesFromTaskDescription: vi.fn(() => {
 		fakeTaskNameSuggestionEndpoint.callCount += 1;
@@ -428,6 +434,7 @@ describe("useTaskEditor", () => {
 	beforeEach(() => {
 		localStorage.clear();
 		resetTaskEditDraftStoreForTests();
+		beginPersistingNewBacklogTaskCardsMock.mockClear();
 		fakeWorkspaceTaskEditDraftServer.snapshot = null;
 		fakeWorkspaceTaskEditDraftServer.releaseFetch = null;
 		fakeTaskNameSuggestionEndpoint.respond = null;
@@ -525,6 +532,11 @@ describe("useTaskEditor", () => {
 			expect(
 				readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId ?? "", "task_card_creation"),
 			).toBe("web_ui_user_gesture");
+			expect(beginPersistingNewBacklogTaskCardsMock).toHaveBeenLastCalledWith({
+				workspaceId: "project-1",
+				newBacklogTaskCardsCreatedFromWebUi: [expect.objectContaining({ id: createdTaskId, title: "Named" })],
+				boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+			});
 		});
 
 		it("takes one runtime id per prompt when creating a batch", async () => {
@@ -542,6 +554,15 @@ describe("useTaskEditor", () => {
 					"web_ui_user_gesture",
 				);
 			}
+			// 整批一次请求落盘，顺序取本地 backlog 列自上而下（后建的在上）。
+			expect(beginPersistingNewBacklogTaskCardsMock).toHaveBeenLastCalledWith(
+				expect.objectContaining({
+					workspaceId: "project-1",
+					newBacklogTaskCardsCreatedFromWebUi: [...createdTaskIds]
+						.reverse()
+						.map((taskId) => expect.objectContaining({ id: taskId })),
+				}),
+			);
 		});
 
 		it.each([

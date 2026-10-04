@@ -100,6 +100,17 @@ describe("useCrossProjectTaskOpenInProject", () => {
 		expect(handleSelectProject.mock.calls.every(([projectId]) => projectId === "project-a")).toBe(true);
 	});
 
+	// cf427：选中一个看板上没有的 id，Focus View 会无卡可显、静默关掉（通知点击「跳不进 Focus」的一种形态）。
+	it("同项目找不到该任务：保持当前视图（不改选中），如实提示", () => {
+		render();
+		act(() => latest?.handleOpenTaskInProject("project-a", "task-not-on-board"));
+		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(openBacklogTaskEditor).not.toHaveBeenCalled();
+		expect(showAppToastMock).toHaveBeenCalledWith(
+			expect.objectContaining({ message: "That task is no longer on its project's board." }),
+		);
+	});
+
 	it("跨项目：先切项目并挂在途态（记下是否从 Focus View 发起），目标 board 加载出该任务后再选中", () => {
 		render();
 		act(() => latest?.handleOpenTaskInProject("project-b", "b-review"));

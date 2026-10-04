@@ -1,4 +1,3 @@
-import type { Dispatch, SetStateAction } from "react";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,14 +6,8 @@ import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
 
 const openTaskInProjectInPlace = vi.fn<(workspaceId: string, taskId: string) => void>();
 
-function HookHarness({
-	currentProjectId,
-	setSelectedTaskId,
-}: {
-	currentProjectId: string | null;
-	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
-}): null {
-	useNotificationTaskFocus({ currentProjectId, setSelectedTaskId, openTaskInProjectInPlace });
+function HookHarness(): null {
+	useNotificationTaskFocus({ openTaskInProjectInPlace });
 	return null;
 }
 
@@ -65,12 +58,9 @@ describe("useNotificationTaskFocus", () => {
 		}
 	});
 
-	function renderHook(
-		setSelectedTaskId: Dispatch<SetStateAction<string | null>>,
-		currentProjectId: string | null,
-	): void {
+	function renderHook(): void {
 		act(() => {
-			root?.render(createElement(HookHarness, { currentProjectId, setSelectedTaskId }));
+			root?.render(createElement(HookHarness));
 		});
 	}
 
@@ -80,54 +70,37 @@ describe("useNotificationTaskFocus", () => {
 		});
 	}
 
-	it("收到当前项目的通知点击消息时选中对应任务", () => {
-		const setSelectedTaskId = vi.fn<Dispatch<SetStateAction<string | null>>>();
-
-		renderHook(setSelectedTaskId, "p1");
+	// 同项目与跨项目一律交给统一入口：它在切项目途中挂 pending、目标 board 落定再选中，找不到卡时提示而不关 Focus
+	// （cf427：此前同项目分支直接 setSelectedTaskId，切项目途中会被 closeDetail 吞掉）。
+	it.each([
+		["当前项目", "p1"],
+		["其他项目（单标签页管全部项目时原地切过去）", "p2"],
+	])("%s的通知点击消息交给统一的「在项目里打开任务」入口", (_label, workspaceId) => {
+		renderHook();
 		dispatchServiceWorkerMessage({
 			source: "cline-kanban",
 			type: "focus-task-from-notification",
 			taskId: "t1",
-			workspaceId: "p1",
+			workspaceId,
 		});
 
-		expect(setSelectedTaskId).toHaveBeenCalledWith("t1");
-		expect(focusSpy).toHaveBeenCalledTimes(1);
-	});
-
-	it("其他项目的通知点击消息：本标签页原地切到该项目打开任务（单标签页管全部项目）", () => {
-		const setSelectedTaskId = vi.fn<Dispatch<SetStateAction<string | null>>>();
-
-		renderHook(setSelectedTaskId, "p1");
-		dispatchServiceWorkerMessage({
-			source: "cline-kanban",
-			type: "focus-task-from-notification",
-			taskId: "t1",
-			workspaceId: "p2",
-		});
-
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
-		expect(openTaskInProjectInPlace).toHaveBeenCalledWith("p2", "t1");
+		expect(openTaskInProjectInPlace).toHaveBeenCalledWith(workspaceId, "t1");
 		expect(focusSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("忽略形状不符合契约的消息", () => {
-		const setSelectedTaskId = vi.fn<Dispatch<SetStateAction<string | null>>>();
-
-		renderHook(setSelectedTaskId, "p1");
+		renderHook();
 		dispatchServiceWorkerMessage({
 			type: "other-message",
 			taskId: "t1",
 			workspaceId: "p1",
 		});
 
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(openTaskInProjectInPlace).not.toHaveBeenCalled();
 	});
 
 	it("卸载后移除 service worker message 监听", () => {
-		const setSelectedTaskId = vi.fn<Dispatch<SetStateAction<string | null>>>();
-
-		renderHook(setSelectedTaskId, "p1");
+		renderHook();
 		act(() => {
 			root?.unmount();
 		});
@@ -139,6 +112,6 @@ describe("useNotificationTaskFocus", () => {
 			workspaceId: "p1",
 		});
 
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(openTaskInProjectInPlace).not.toHaveBeenCalled();
 	});
 });
