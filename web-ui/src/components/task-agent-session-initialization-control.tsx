@@ -28,6 +28,8 @@ export function TaskAgentSessionInitializationControl({
 	value,
 	onChange,
 	onAgentIdChange,
+	initialSessionSearchScope = "current_repository",
+	initialSessionSearchQuery = "",
 }: {
 	agentId: RuntimeAgentId | undefined;
 	defaultAgentId: RuntimeAgentId | null | undefined;
@@ -35,6 +37,10 @@ export function TaskAgentSessionInitializationControl({
 	value: RuntimeTaskAgentSessionInitialization | undefined;
 	onChange: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
 	onAgentIdChange: (value: RuntimeAgentId | undefined) => void;
+	// 会话浏览器打开时的预设范围 / 关键词。「从既有对话迁入」用它预填 all_local_sessions + 原 prompt 摘要：
+	// 同 prompt 的孤儿对话多半在别的 worktree 里，限定在当前仓库就搜不到。
+	initialSessionSearchScope?: RuntimeAvailableAgentSessionSearchScope;
+	initialSessionSearchQuery?: string;
 }): ReactElement | null {
 	const effectiveAgentId = agentId ?? defaultAgentId;
 	const initializableAgentId = isSessionInitializableAgentId(effectiveAgentId) ? effectiveAgentId : null;
@@ -43,8 +49,8 @@ export function TaskAgentSessionInitializationControl({
 	const [showValidationError, setShowValidationError] = useState(false);
 	const [isSessionBrowserOpen, setIsSessionBrowserOpen] = useState(false);
 	const [sessionSearchScope, setSessionSearchScope] =
-		useState<RuntimeAvailableAgentSessionSearchScope>("current_repository");
-	const [sessionSearchQuery, setSessionSearchQuery] = useState("");
+		useState<RuntimeAvailableAgentSessionSearchScope>(initialSessionSearchScope);
+	const [sessionSearchQuery, setSessionSearchQuery] = useState(initialSessionSearchQuery);
 	const [availableSessions, setAvailableSessions] = useState<RuntimeAvailableAgentSessionSummary[]>([]);
 	const [nextPageCursor, setNextPageCursor] = useState<number | null>(null);
 	const [totalMatchingSessions, setTotalMatchingSessions] = useState(0);
@@ -329,7 +335,7 @@ export function TaskAgentSessionInitializationControl({
 			<p className="mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-text-secondary">
 				<GitFork size={13} className="mt-0.5 shrink-0" />
 				{initializableAgentId === "cursor"
-					? "Cursor resumes the original chat; Kanban links its local chat store into the task workspace."
+					? "Cursor resumes the original chat; Kanban copies its local chat store into the task workspace and leaves the source chat untouched."
 					: initializableAgentId === "claude"
 						? "Claude resumes or forks the selected session; Kanban links its transcript into the task workspace."
 						: "Resume continues the original session. Fork keeps the source session independent."}

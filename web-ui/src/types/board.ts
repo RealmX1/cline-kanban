@@ -77,6 +77,11 @@ export interface BoardCard {
 	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
 	taskCommentEntries?: TaskCommentEntry[];
+	// Task Pinboard（置顶板）：**字段存在即已置顶**，值同时就是置顶板内的排序键（倒序）。
+	// 同样受 normalizeCard 白名单约束——见下方 ompAgentSessionTransport 那段注释。
+	pinnedToTaskPinboardAt?: number;
+	// 置顶时填的一句原因，可留空（留空时不写字段）。
+	taskPinboardPinReason?: string;
 	agentId?: RuntimeAgentId;
 	// 建卡那一刻固化的「这张卡下次启动该走哪条通道」（见 runtimeBoardCardSchema.ompAgentSessionTransport）。
 	// 浏览器侧必须声明它：详情视图在**没有活会话**时只能靠它预判该渲染 xterm 还是会话面板，
@@ -101,6 +106,10 @@ export interface BoardCard {
 	prepFilePath?: string;
 	createdAt: number;
 	updatedAt: number;
+	// Description（prompt 文本 + 附图）最后一次内容真正变化的时间；Backlog 按它倒序排、卡片上显示。
+	// 与 updatedAt 分开（后者任何修改都推进）。同样受 normalizeCard 白名单铁律约束：漏声明就会在水合时
+	// 被剥掉，下一次 saveState 把盘上的值抹平。老卡片缺失时经 resolveTaskDescriptionLastUpdatedAt 回落。
+	taskDescriptionLastUpdatedAt?: number;
 }
 
 export interface BoardColumn {
@@ -109,16 +118,8 @@ export interface BoardColumn {
 	cards: BoardCard[];
 }
 
-export interface BoardDependency {
-	id: string;
-	fromTaskId: string;
-	toTaskId: string;
-	createdAt: number;
-}
-
 export interface BoardData {
 	columns: BoardColumn[];
-	dependencies: BoardDependency[];
 }
 
 export interface ReviewTaskWorkspaceSnapshot {

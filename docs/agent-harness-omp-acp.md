@@ -2,7 +2,7 @@
 
 oh-my-pi（`omp`）是仓库里第一个「非 PTY、非 Cline SDK」的 agent：它经 **ACP（Agent Client Protocol，JSON-RPC over stdio）** 与 Kanban 通话。本文记录 ACP 层的骨架对位、接入 omp 时实测踩出的坑（读协议文档发现不了），以及协议冒烟脚本的用法。
 
-> 补充形态事实：omp 另有一条 PTY TUI 通道（`agent-session-adapters.ts:1969-1974`，模板是 cursorAdapter——omp 根命令吃**位置 prompt** 并自动提交，不需要 deferredStartupInput）。两条通道共用 omp 的同一份磁盘会话存储（omp 的 SessionManager 按 cwd 建库），可随时互相切换；走哪条由 `src/core/agent-session-transport-selection.ts` 决定。本文只覆盖 ACP 通道。
+> 补充形态事实：omp 另有一条 PTY TUI 通道（`src/terminal/agent-session-adapters.ts` 的 `ompAdapter`，模板是 cursorAdapter——omp 根命令吃**位置 prompt** 并自动提交，不需要 `deferredStartupPromptText`）。两条通道共用 omp 的同一份磁盘会话存储（omp 的 SessionManager 按 cwd 建库），可随时互相切换；走哪条由 `src/core/agent-session-transport-selection.ts` 决定。本文只覆盖 ACP 通道。
 
 ## 1. 三种会话传输形态与能力谓词
 

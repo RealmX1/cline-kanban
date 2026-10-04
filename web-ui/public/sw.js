@@ -139,10 +139,21 @@ async function handleNotificationClick(data) {
     type: "window",
     includeUncontrolled: true,
   });
-  const target = findWorkspaceWindowClientByPathname(windowClients, workspacePathname, null);
+  // 优先开着目标项目的标签页；没有时退到最近用过的任一 Kanban 标签页，由它原地切到目标项目再打开任务
+  // （use-notification-task-focus.ts 对跨项目消息原地跳转）——一个标签页管全部项目是一等用法，不该每次点通知
+  // 都新开一个标签页。matchAll 按最近聚焦优先排序。两处都没有才新开深链窗口。
+  const target =
+    findWorkspaceWindowClientByPathname(windowClients, workspacePathname, null) ||
+    (workspaceId ? windowClients[0] || null : null);
 
   if (target) {
-    await target.focus();
+    // focus() 被浏览器拒绝（例如超出 notificationclick 的激活窗口）时照样转发选中消息：任务仍会在目标标签页就位，
+    // 否则一次聚焦失败就让点击整个失效（cf427）。
+    try {
+      await target.focus();
+    } catch {
+      // 聚焦失败不阻断下方的选中消息。
+    }
     postFocusTaskFromNotificationMessage(target, taskId, workspaceId);
     return;
   }

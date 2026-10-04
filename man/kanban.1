@@ -8,7 +8,7 @@ kanban \- local orchestration board for coding agents
 .RI [ command ]
 .br
 .B kanban task
-.RI " " list|create|update|link|unlink|start
+.RI " " list|create|update|start
 .RI " " [ options ]
 .br
 .B kanban hooks
@@ -67,18 +67,6 @@ Subcommands:
 .RI [ --auto-review-enabled " " true|false ]
 .RI [ --auto-review-mode " " commit|pr|move_to_trash ]
 .br
-.B link
-.B --task-id
-.RI " " id
-.B --linked-task-id
-.RI " " id
-.RI [ --project-path " " path ]
-.br
-.B unlink
-.B --dependency-id
-.RI " " id
-.RI [ --project-path " " path ]
-.br
 .B start
 .B --task-id
 .RI " " id
@@ -87,6 +75,13 @@ Subcommands:
 All task commands return JSON.
 
 Use kebab-case flags only.
+
+Task linking (formerly
+.B task link
+/
+.BR "task unlink" )
+and auto-starting linked tasks on completion are retired;
+they will be superseded by task Relations and wait gates.
 
 .TP
 .B hooks

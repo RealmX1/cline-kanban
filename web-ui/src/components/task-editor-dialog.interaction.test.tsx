@@ -163,9 +163,9 @@ describe("TaskEditorDialog interactions", () => {
 		expect(findButtonByText("Discard")).toBeUndefined();
 	});
 
-	it("does NOT guard in edit mode: closes directly even with edits (edit close saves a draft)", async () => {
+	it("does NOT guard in edit mode: closes directly even with edits (edit close clears the draft)", async () => {
 		const onOpenChange = vi.fn();
-		// edit 模式：即便表单有改动，关闭也不弹「放弃」确认——直通 base 的关闭语义。
+		// edit 模式：即便表单有改动，关闭也不弹「放弃」确认——直通 base 的关闭语义（草稿随关闭清除）。
 		await render(makeProps({ onOpenChange, taskEditorMode: "edit", prompt: "" }));
 		await render(makeProps({ onOpenChange, taskEditorMode: "edit", prompt: "Edited body" }));
 

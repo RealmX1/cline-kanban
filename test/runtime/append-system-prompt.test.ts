@@ -70,7 +70,7 @@ describe("renderAppendSystemPrompt", () => {
 		expect(rendered).toContain("Provide exactly one of");
 		expect(rendered).toContain("task delete --column done");
 		expect(rendered).toContain("kanban task get --task-id <task_id>");
-		expect(rendered).toContain("kanban task link");
+		expect(rendered).not.toContain("task link");
 		expect(rendered).toContain("If a task command fails because the runtime is unavailable");
 		expect(rendered).toContain("If the user asks for GitHub work");
 		expect(rendered).toContain("gh issue view");
@@ -222,12 +222,13 @@ describe("combineAppendSystemPrompts", () => {
 describe("renderExploratoryModeAppendSystemPrompt", () => {
 	it("把指令文件绝对路径原样内联，并要求 agent 完整阅读且遵守", () => {
 		const rendered = renderExploratoryModeAppendSystemPrompt(
-			"/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-session-map.md",
+			"/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-conversation-etiquette-and-findings.md",
 		);
 		expect(rendered).toContain("exploratory");
-		expect(rendered).toContain("session map");
+		expect(rendered).toContain("exploration thread graph");
+		expect(rendered).toContain("never write that structure yourself");
 		expect(rendered).toContain(
-			"`/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-session-map.md`",
+			"`/Users/example/.cline/kanban/agent-exploratory-mode-instructions/exploratory-mode-conversation-etiquette-and-findings.md`",
 		);
 		expect(rendered).toContain("IN FULL");
 	});

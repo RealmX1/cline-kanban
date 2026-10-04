@@ -2,7 +2,8 @@
 // 纯委托：读写 verification state 交给 src/deployment/post-deploy-verification-state.ts，
 // 看板当前列 / agent 回复预览由 runtime-server 经 DI 注入。
 // 硬约束（plan 1d）：confirmVerificationComplete **只更新 verification state，绝不移列** —— Web 侧移列由
-// completePostDeployVerificationMoveToDone 负责、CLI 走 trashTaskById 链；本层不触碰 board.json。
+// completePostDeployVerificationMoveToDone 负责、CLI 走 taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree；
+// 本层不触碰 board.json。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
@@ -31,6 +32,7 @@ import {
 	consumePendingConfirmationAndMarkVerified,
 	getActiveGroup,
 	getPostDeployVerificationStatePath,
+	markTaskVerified,
 	reconcileGroup,
 	setPendingConfirmation,
 	setVerificationRunState,
@@ -303,11 +305,31 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 				input.taskId,
 				input.token,
 				nowIso,
+				{
+					postDeployVerificationCompletionPath: "web_ui_post_deploy_verification_panel_atomic_confirmation",
+					forcedCompletionWithoutAllVerificationsPassed: false,
+					confirmedAcknowledgements: [...pending.requiredAcknowledgements],
+				},
 			);
 			if (!marked.ok) {
 				return { ok: false, task: marked.task, error: describeConsumeFailure(marked.failureReason) };
 			}
 			return { ok: true, task: marked.task };
+		},
+		// CLI 已在自己进程里核对（token / force / validation 直通）并经 runtime procedure 移入 Done；这里只写 verifiedAt，
+		// 让「PDV 通过」由 runtime 记账。归属校验与 confirmVerificationComplete 同形：跨 workspace 的 deploymentId 一律拒绝。
+		markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone: async (scope, input) => {
+			const snapshot = await readPostDeployVerificationStateSnapshot();
+			const group = snapshot.deploymentGroups.find((entry) => entry.deploymentId === input.deploymentId);
+			if (!group || group.workspaceId !== scope.workspaceId) {
+				return { ok: false, task: null, error: `部署组未找到：deploymentId=${input.deploymentId}` };
+			}
+			const marked = await markTaskVerified(input.deploymentId, input.taskId, new Date().toISOString(), {
+				postDeployVerificationCompletionPath: "kanban_cli_post_deploy_verification_completion_verb",
+				forcedCompletionWithoutAllVerificationsPassed: input.forcedCompletionWithoutAllVerificationsPassed,
+				confirmedAcknowledgements: [...input.confirmedAcknowledgements],
+			});
+			return { ok: marked.ok, task: marked.task, ...(marked.error ? { error: marked.error } : {}) };
 		},
 	};
 }

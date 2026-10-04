@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { notificationIntelligenceClient } from "@/runtime/notification-intelligence-query";
 import type { RuntimeNotificationFeedEntry, RuntimeTaskSessionUserTurnKind } from "@/runtime/types";
 
 // 一个通知「组」= 同一 (workspaceId, taskId) 下的全部通知条目。标记最新 = 标记整组（后端置整组已读）。
@@ -17,6 +18,8 @@ export interface NotificationGroup {
 }
 
 export interface UseNotificationCenterInput {
+	permanentArchiveEnabled?: boolean;
+	selectedWorkspaceId?: string | null;
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	// 当前选中的 task（跨 repo taskId 全局唯一），用于「打开即自动已读」。
 	selectedTaskId: string | null;
@@ -25,6 +28,9 @@ export interface UseNotificationCenterInput {
 }
 
 export interface UseNotificationCenterResult {
+	loadMorePanelGroups: () => void;
+	hasMorePanelGroups: boolean;
+	archiveReadError: string | null;
 	// 铃铛面板：排除 done 的组，按最新触发时间降序。
 	panelGroups: NotificationGroup[];
 	// 历史弹窗的「按 task 分组」排列：全部组（含 done），按各组最新触发时间降序。
@@ -37,8 +43,8 @@ export interface UseNotificationCenterResult {
 	// 铃铛面板的「全部已读」：范围 = panelGroups（非 done），与徽标 unreadCount 同口径。
 	markAllPanelGroupsVisited: () => void;
 	// 历史弹窗的「全部已读」：范围 = allGroups（含 done），与历史视图里看得见的未读同口径。
-	markAllHistoryGroupsVisited: () => void;
-	clearAll: () => void;
+	markAllHistoryGroupsVisited: () => undefined | Promise<boolean>;
+	clearAll: () => undefined | Promise<boolean>;
 }
 
 export function buildNotificationGroups(
@@ -108,6 +114,59 @@ function markGroupsWithUnvisitedEntries(
 
 export function useNotificationCenter(input: UseNotificationCenterInput): UseNotificationCenterResult {
 	const { notificationLogByWorkspaceId, selectedTaskId, onMarkTaskVisited, onClearWorkspace } = input;
+	const [archivedPanelGroups, setArchivedPanelGroups] = useState<NotificationGroup[] | null>(null);
+	const [archivedUnreadCount, setArchivedUnreadCount] = useState<number | null>(null);
+	const [nextPanelCursor, setNextPanelCursor] = useState<number | null>(null);
+	const [archiveReadError, setArchiveReadError] = useState<string | null>(null);
+	const panelReadGeneration = useRef(0);
+	const loadArchivedPanel = useCallback(async (cursor?: number) => {
+		const generation = ++panelReadGeneration.current;
+		try {
+			const page = await notificationIntelligenceClient().listPanelTaskGroups.query({
+				beforeSequence: cursor,
+				limit: 50,
+			});
+			if (generation !== panelReadGeneration.current) return;
+			const buckets: Record<string, RuntimeNotificationFeedEntry[]> = {};
+			for (const entry of page.entries) {
+				const bucket = buckets[entry.workspaceId] ?? [];
+				buckets[entry.workspaceId] = bucket;
+				bucket.push({
+					id: entry.candidateId,
+					candidateId: entry.candidateId,
+					workspaceId: entry.workspaceId,
+					taskId: entry.taskId,
+					repoName: entry.repositoryNameSnapshot,
+					taskTitle: entry.taskTitleSnapshot,
+					userTurnKind: entry.userTurnKind as RuntimeTaskSessionUserTurnKind,
+					triggeredAt: entry.triggeredAt,
+					visitedAt: entry.notificationVisitedAt,
+					summaryText: entry.summaryText,
+					isDone: false,
+				});
+			}
+			const groups = buildNotificationGroups(buckets);
+			setArchivedPanelGroups((previous) =>
+				cursor
+					? [
+							...(previous ?? []),
+							...groups.filter((group) => !previous?.some((existing) => existing.key === group.key)),
+						]
+					: groups,
+			);
+			setArchivedUnreadCount(page.unreadTaskCount);
+			setNextPanelCursor(page.nextBeforeSequence);
+			setArchiveReadError(null);
+		} catch {
+			if (generation === panelReadGeneration.current) setArchiveReadError("无法读取完整通知档案或未读统计");
+		}
+	}, []);
+	useEffect(() => {
+		if (input.permanentArchiveEnabled) void loadArchivedPanel();
+	}, [input.permanentArchiveEnabled, notificationLogByWorkspaceId, loadArchivedPanel]);
+	const loadMorePanelGroups = useCallback(() => {
+		if (nextPanelCursor) void loadArchivedPanel(nextPanelCursor);
+	}, [nextPanelCursor, loadArchivedPanel]);
 
 	const allGroups = useMemo(
 		() => buildNotificationGroups(notificationLogByWorkspaceId),
@@ -117,15 +176,21 @@ export function useNotificationCenter(input: UseNotificationCenterInput): UseNot
 		() => buildNotificationEntriesSortedByTriggeredAtDescending(notificationLogByWorkspaceId),
 		[notificationLogByWorkspaceId],
 	);
-	const panelGroups = useMemo(() => allGroups.filter((group) => !group.isDone), [allGroups]);
-	const unreadCount = useMemo(() => panelGroups.filter((group) => group.hasUnvisited).length, [panelGroups]);
+	const panelGroups = useMemo(
+		() => archivedPanelGroups ?? allGroups.filter((group) => !group.isDone),
+		[allGroups, archivedPanelGroups],
+	);
+	const unreadCount = useMemo(
+		() => archivedUnreadCount ?? panelGroups.filter((group) => group.hasUnvisited).length,
+		[panelGroups, archivedUnreadCount],
+	);
 	const groupByTaskId = useMemo(() => {
 		const map = new Map<string, NotificationGroup>();
-		for (const group of allGroups) {
+		for (const group of [...allGroups, ...panelGroups]) {
 			map.set(group.taskId, group);
 		}
 		return map;
-	}, [allGroups]);
+	}, [allGroups, panelGroups]);
 
 	const markGroupVisited = useCallback(
 		(workspaceId: string, taskId: string) => {
@@ -138,18 +203,46 @@ export function useNotificationCenter(input: UseNotificationCenterInput): UseNot
 	// 铃铛面板只看得见非 done 组，故它的 action 也只覆盖 panelGroups（与徽标 unreadCount 同口径）；
 	// 历史弹窗看得见含 done 的全部组，故它的 action 覆盖 allGroups。
 	const markAllPanelGroupsVisited = useCallback(() => {
-		markGroupsWithUnvisitedEntries(panelGroups, onMarkTaskVisited);
-	}, [panelGroups, onMarkTaskVisited]);
+		if (input.permanentArchiveEnabled) {
+			void notificationIntelligenceClient()
+				.markAllArchivedNotificationsVisited.mutate({ includeCompletedTasks: false })
+				.then(() => loadArchivedPanel())
+				.catch(() => setArchiveReadError("全部已读操作未完成"));
+		} else markGroupsWithUnvisitedEntries(panelGroups, onMarkTaskVisited);
+	}, [panelGroups, onMarkTaskVisited, input.permanentArchiveEnabled, loadArchivedPanel]);
 
 	const markAllHistoryGroupsVisited = useCallback(() => {
-		markGroupsWithUnvisitedEntries(allGroups, onMarkTaskVisited);
-	}, [allGroups, onMarkTaskVisited]);
+		if (input.permanentArchiveEnabled) {
+			return notificationIntelligenceClient()
+				.markAllArchivedNotificationsVisited.mutate({ includeCompletedTasks: true })
+				.then(async () => {
+					await loadArchivedPanel();
+					return true;
+				})
+				.catch(() => {
+					setArchiveReadError("全部已读操作未完成");
+					return false;
+				});
+		} else markGroupsWithUnvisitedEntries(allGroups, onMarkTaskVisited);
+	}, [allGroups, onMarkTaskVisited, input.permanentArchiveEnabled, loadArchivedPanel]);
 
 	const clearAll = useCallback(() => {
+		if (input.permanentArchiveEnabled) {
+			return notificationIntelligenceClient()
+				.clearAllNotificationPanels.mutate()
+				.then(async () => {
+					await loadArchivedPanel();
+					return true;
+				})
+				.catch(() => {
+					setArchiveReadError("清空面板未完成，历史记录仍保留");
+					return false;
+				});
+		}
 		for (const workspaceId of Object.keys(notificationLogByWorkspaceId)) {
 			onClearWorkspace(workspaceId);
 		}
-	}, [notificationLogByWorkspaceId, onClearWorkspace]);
+	}, [notificationLogByWorkspaceId, onClearWorkspace, input.permanentArchiveEnabled, loadArchivedPanel]);
 
 	// 打开 task 即自动已读：选中的 task 若有未读则标记整组。用 ref 去重（同一选择只标一次），
 	// 但当该 task 又来新通知（latestTriggeredAt 变化）时允许再次自动标记。
@@ -157,6 +250,23 @@ export function useNotificationCenter(input: UseNotificationCenterInput): UseNot
 	useEffect(() => {
 		if (!selectedTaskId) {
 			return;
+		}
+		if (input.permanentArchiveEnabled && input.selectedWorkspaceId) {
+			const workspaceId = input.selectedWorkspaceId;
+			let cancelled = false;
+			void notificationIntelligenceClient()
+				.listArchive.query({ workspaceId, taskId: selectedTaskId, panelOnly: true, limit: 1 })
+				.then((page) => {
+					if (cancelled || !page.unreadTaskCount) return;
+					const marker = `${workspaceId}:${selectedTaskId}:${page.revision}`;
+					if (lastAutoMarkedRef.current === marker) return;
+					lastAutoMarkedRef.current = marker;
+					onMarkTaskVisited(workspaceId, selectedTaskId);
+				})
+				.catch(() => setArchiveReadError("读取所选任务未读状态失败"));
+			return () => {
+				cancelled = true;
+			};
 		}
 		const group = groupByTaskId.get(selectedTaskId);
 		if (!group || !group.hasUnvisited) {
@@ -168,9 +278,12 @@ export function useNotificationCenter(input: UseNotificationCenterInput): UseNot
 		}
 		lastAutoMarkedRef.current = marker;
 		onMarkTaskVisited(group.workspaceId, group.taskId);
-	}, [selectedTaskId, groupByTaskId, onMarkTaskVisited]);
+	}, [selectedTaskId, groupByTaskId, onMarkTaskVisited, input.permanentArchiveEnabled, input.selectedWorkspaceId]);
 
 	return {
+		loadMorePanelGroups,
+		hasMorePanelGroups: nextPanelCursor !== null,
+		archiveReadError,
 		panelGroups,
 		allGroups,
 		allEntriesSortedByTriggeredAtDescending,

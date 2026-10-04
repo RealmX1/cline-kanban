@@ -53,8 +53,28 @@ export enum LocalStorageKey {
 	Theme = "kanban.theme",
 	// Post-Deploy Verification 浮动面板的「保持最前」偏好（默认 true，由消费方 use-post-deploy-verification 兜底）。
 	PostDeployVerificationStayInFront = "kanban.post-deploy-verification-stay-in-front",
-	// Post-Deploy Verification 面板折叠为右下角 badge 的偏好。
+	// Post-Deploy Verification 面板隐藏偏好，旧 key 保持兼容。
 	PostDeployVerificationCollapsed = "kanban.post-deploy-verification-collapsed",
+	// Task Pinboard（置顶板）折叠态。主看板顶部横条与 Focus View 左侧分段各自一个键：
+	// 两处的纵向空间预算完全不同（横条挤的是整个看板高度，分段挤的是左列表），用户大概率不希望联动。
+	TaskPinboardStripCollapsedOnKanbanBoard = "kanban.task-pinboard-strip-collapsed-on-kanban-board.v1",
+	TaskPinboardSectionCollapsedInFocusView = "kanban.task-pinboard-section-collapsed-in-focus-view.v1",
+	// 主看板（非 Focus View）各 stage 列的折叠显式覆盖与自定义列宽；缺省折叠集合见
+	// state/kanban-board-column-collapse-and-width-preferences.ts。
+	KanbanBoardColumnCollapsedOverrides = "kanban.kanban-board-column-collapsed-overrides.v1",
+	KanbanBoardColumnCustomWidthsPx = "kanban.kanban-board-column-custom-widths-px.v1",
+	// 顶栏项目切换器选中的范围：Board Scope（All projects，docs/context-stage-first-overview.md）vs 单个项目。
+	// 看板页据此在 Board Overview 与看板之间切换，Focus View 左栏据此在跨项目切换面板与 stage 列表之间切换。
+	// per-browser 便利项，丢了回落到单项目。
+	SelectedBoardOrSingleProjectScope = "kanban.selected-board-or-single-project-scope.v1",
+	// 已并入 SelectedBoardOrSingleProjectScope 的旧键（Focus View 左栏的 This project | All projects 两段切换）。
+	// 只为一次性迁移保留，见 use-selected-board-or-single-project-scope。
+	LegacyFocusViewLeftColumnTaskListScopeMigratedIntoSelectedBoardOrSingleProjectScope = "kanban.focus-view-left-column-task-list-scope.v1",
+	// 跨项目切换面板里 Running 区的展开态（默认收起成一行「Running N」）、Pinned 区的折叠态（默认展开，
+	// 与 This project 置顶分段各自一个键）与剩余区的排序模式。
+	CrossProjectTaskSwitcherRunningSectionExpanded = "kanban.cross-project-task-switcher-running-section-expanded.v1",
+	CrossProjectTaskSwitcherPinnedSectionCollapsed = "kanban.cross-project-task-switcher-pinned-section-collapsed.v1",
+	CrossProjectTaskSwitcherRemainingSectionOrderingMode = "kanban.cross-project-task-switcher-remaining-section-ordering-mode.v1",
 }
 
 export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
@@ -70,6 +90,10 @@ export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
 	LocalStorageKey.GitHistoryRefsPanelWidth,
 	LocalStorageKey.GitHistoryCommitsPanelWidth,
 	LocalStorageKey.GitDiffFileTreePanelRatio,
+	LocalStorageKey.TaskPinboardStripCollapsedOnKanbanBoard,
+	LocalStorageKey.TaskPinboardSectionCollapsedInFocusView,
+	LocalStorageKey.KanbanBoardColumnCollapsedOverrides,
+	LocalStorageKey.KanbanBoardColumnCustomWidthsPx,
 ] as const;
 
 function getLocalStorage(): Storage | null {

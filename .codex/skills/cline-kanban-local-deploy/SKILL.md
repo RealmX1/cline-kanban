@@ -48,6 +48,7 @@ Present this as the default because source edits are not live until the build/li
    - Do not rely on app metadata backups alone; preserve dirty worktree content or patch files too.
 
 3. Build and install deliberately.
+   - 安装、构建和启动必须使用同一 Node 二进制及其对应的 npm。先从实际启动命令确认 Node 的绝对路径，再固定 PATH；不要把当前 shell 的 `node` 当成服务的 Node。本项目依赖 `better-sqlite3`：Node 22 安装的原生模块不能直接交给 Node 24 服务加载。
    - Install dependencies using the repo's documented command.
    - Build using the repo's production build command.
    - Link or install the CLI only after a successful build.
@@ -55,6 +56,7 @@ Present this as the default because source edits are not live until the build/li
    - Do not assume a symlinked global CLI hot-reloads source edits. Running processes keep the build they already loaded; source changes usually require rebuild plus process restart.
 
 4. Restart with state-preserving flags.
+   - **重启前硬闸**：在即将部署的源 checkout 内，用实际启动服务的 Node 绝对路径执行 `scripts/verify-notification-archive-native-runtime.mjs`。脚本只操作内存 SQLite；非零退出立即停止部署，保留旧服务。即使 `npm run build` 的预检通过，也不能省略这一步（构建 Node 与启动 Node 可能不同）。失败时用目标 Node 对应的 npm 执行 `npm rebuild better-sqlite3` 并重新预检；禁止仅换一个能通过的 Node 测试后仍用原来的不匹配 Node 启动。
    - Before stopping the old process, check whether shutdown cleanup mutates worktrees or task state.
    - Prefer `--skip-shutdown-cleanup` or the tool's equivalent for upgrade restarts.
    - Preserve the user's PATH when launching via service managers. GUI/launchd/launchctl environments often miss `~/.local/bin`, nvm, asdf, pyenv, Homebrew, or custom tool directories.
@@ -62,6 +64,7 @@ Present this as the default because source edits are not live until the build/li
    - After restart, verify HTTP/API health, CLI version, global link path, and detected agent/tool commands.
 
 5. Validate behavior and state.
+   - 永久通知档案是部署健康检查的一部分：对实际运行实例调用 `notificationIntelligence.listArchive`，要求 HTTP 成功且返回有效分页结果；500 或原生模块加载失败即部署验证失败，不能仅以首页可打开 / CLI 版本正确宣告成功。复用任务已登记的档案 API 自动验证，不读取或更改 BYOK 密钥。
    - Run focused tests for the local changes and runtime-sensitive paths.
    - Verify runtime data counts and task/worktree mappings before declaring success.
    - For task systems, inspect a known task's worktree and session metadata, not just the card list.

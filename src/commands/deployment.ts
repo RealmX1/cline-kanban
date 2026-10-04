@@ -25,7 +25,6 @@ import {
 	createPostDeployVerificationTaskWithSeededChecklist,
 	getActiveGroup,
 	getPostDeployVerificationStatePath,
-	markTaskVerified,
 	migrateLegacyPostDeployVerificationStateFileIfNeeded,
 	setPendingConfirmation,
 	updateTaskChecklist,
@@ -36,7 +35,14 @@ import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagno
 import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceBoardById, loadWorkspaceContext, loadWorkspaceContextById } from "../state/workspace-state";
 import { runGit } from "../workspace/git-utils";
-import { createRuntimeTrpcClient, printJson, trashTaskById } from "./task";
+import {
+	acknowledgementSetsEqual,
+	decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded,
+	formatKanbanCliPostDeployVerificationCompletionRetryCommand,
+	type KanbanCliPostDeployVerificationCompletionEntryPoint,
+	type KanbanCliRetryDecisionForTaskMovedToDoneButVerifiedAtUnrecorded,
+} from "./post-deploy-verification-moved-to-done-but-verified-at-unrecorded-cli-retry";
+import { createRuntimeTrpcClient, printJson } from "./task";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -117,23 +123,6 @@ function checklistFullyChecked(task: RuntimePostDeployVerificationTask): boolean
 	return task.checklist.length > 0 && task.checklist.every((item) => item.checked);
 }
 
-function acknowledgementSetsEqual(
-	left: RuntimePostDeployVerificationAcknowledgement[],
-	right: RuntimePostDeployVerificationAcknowledgement[],
-): boolean {
-	const leftSet = new Set(left);
-	const rightSet = new Set(right);
-	if (leftSet.size !== rightSet.size) {
-		return false;
-	}
-	for (const value of leftSet) {
-		if (!rightSet.has(value)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 function acknowledgementMismatchMessage(required: RuntimePostDeployVerificationAcknowledgement[]): string {
 	return required.length === 0
 		? "This task requires no acknowledgements; pass --ack with an empty list."
@@ -210,7 +199,7 @@ interface LiveWorkspaceRuntime {
 }
 
 // 凡触发移列的路径都须 live runtime（plan server 依赖边界）：server 不在则明确报错、不静默降级
-// （trashTaskById 内部对 tRPC 副作用是 catch-and-ignore，故必须在移列前显式探活）。
+// （移入 Done 的停会话 / 删 worktree 收尾对失败是吞掉不抛的，故必须在移列前显式探活）。
 async function requireLiveWorkspaceRuntime(workspaceId: string): Promise<LiveWorkspaceRuntime> {
 	const context = await loadWorkspaceContextById(workspaceId);
 	if (!context) {
@@ -227,34 +216,156 @@ async function requireLiveWorkspaceRuntime(workspaceId: string): Promise<LiveWor
 	}
 }
 
+function confirmedAcknowledgementsOfEntryPoint(
+	entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint,
+): RuntimePostDeployVerificationAcknowledgement[] {
+	// validation 列直接完成（verification-complete）不需要任何确认项。
+	return entryPoint.kind === "verification_complete_without_confirmation_token"
+		? []
+		: entryPoint.presentedAcknowledgements;
+}
+
+// verifiedAt 由 runtime 写：「PDV 通过」事件只能由 runtime 记进关系账本（dd2db Y-EVENT-14），CLI 进程直接写状态文件会漏记。
+async function markTaskVerifiedThroughRuntimeAfterItWasMovedToDone(input: {
+	deploymentId: string;
+	taskId: string;
+	live: LiveWorkspaceRuntime;
+	forcedCompletionWithoutAllVerificationsPassed: boolean;
+	confirmedAcknowledgements: RuntimePostDeployVerificationAcknowledgement[];
+}): Promise<{ ok: boolean; task: RuntimePostDeployVerificationTask | null; error?: string }> {
+	return await input.live.client.deployment.markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone
+		.mutate({
+			deploymentId: input.deploymentId,
+			taskId: input.taskId,
+			forcedCompletionWithoutAllVerificationsPassed: input.forcedCompletionWithoutAllVerificationsPassed,
+			confirmedAcknowledgements: input.confirmedAcknowledgements,
+		})
+		.catch((error: unknown) => ({ ok: false, task: null, error: toErrorMessage(error) }));
+}
+
+function describeVerifiedAtUnrecordedAfterMoveToDone(input: {
+	markError: string | undefined;
+	movedToDoneByThisCommand: boolean;
+	inFlightCompletionRecordExpiresAtIso: string;
+	kanbanCliCommandToRetry: string;
+}): JsonRecord {
+	return {
+		ok: false,
+		moved: input.movedToDoneByThisCommand,
+		verifiedAt: null,
+		error: `${input.markError ?? "Failed to mark task verified after moving it to done."} The task is already in done but its verification was not recorded; re-run the same command before ${input.inFlightCompletionRecordExpiresAtIso} to record it.`,
+		retryCommand: input.kanbanCliCommandToRetry,
+		retryBeforeIso: input.inFlightCompletionRecordExpiresAtIso,
+	};
+}
+
 async function moveTaskToDoneAndMarkVerified(input: {
 	deploymentId: string;
 	taskId: string;
 	currentColumnId: RuntimeBoardColumnId;
 	live: LiveWorkspaceRuntime;
 	nowIso: string;
-	forced: boolean;
+	entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint;
 }): Promise<JsonRecord> {
-	const trashed = await trashTaskById({
-		cwd: process.cwd(),
-		taskId: input.taskId,
-		projectPath: input.live.repoPath,
-		workspaceRepoPath: input.live.repoPath,
-		runtimeClient: input.live.client,
-	});
+	const forced = input.entryPoint.kind === "verification_confirm_with_force_break_glass";
+	const confirmedAcknowledgements = confirmedAcknowledgementsOfEntryPoint(input.entryPoint);
+	// 移列前先落「在途完成记录」（pendingConfirmation 形状；token 路径沿用用户手里那枚 token、只刷新过期）：
+	// 移列成功而 runtime 补记 verifiedAt 失败时，它让 reconcile 不把任务误标 moved_out_manually，
+	// 并作为原样重跑本命令时「只补记 verifiedAt」的授权证据（判定见 decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded）。
+	const inFlightCompletionRecord: RuntimePostDeployVerificationPendingConfirmation = {
+		token:
+			input.entryPoint.kind === "verification_confirm_with_confirmation_token"
+				? input.entryPoint.presentedConfirmationToken
+				: randomUUID(),
+		expiresAtIso: new Date(Date.parse(input.nowIso) + CONFIRMATION_TOKEN_TTL_MS).toISOString(),
+		requiredAcknowledgements: confirmedAcknowledgements,
+		columnIdAtIssuance: input.currentColumnId,
+	};
+	const recorded = await setPendingConfirmation(
+		input.deploymentId,
+		input.taskId,
+		inFlightCompletionRecord,
+		input.nowIso,
+	);
+	if (!recorded.ok) {
+		return { ok: false, error: recorded.error ?? "Failed to record the in-flight completion before moving to done." };
+	}
+	// 移入 Done 的整条副作用链（移列 → 停 agent 会话与详情 shell 终端 → 删 worktree）由 runtime 的
+	// taskCardAction 执行，与浏览器 PDV 面板「全勾入 Done」走的是同一个实现。
+	const movedIntoDone =
+		await input.live.client.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree.mutate({
+			taskId: input.taskId,
+		});
+	const taskWorktreeDeletionResult = movedIntoDone.taskWorktreeDeletionResult;
 	// 移列成功后才标记 verified（markTaskVerified 顺带清 pendingConfirmation token）。
-	const marked = await markTaskVerified(input.deploymentId, input.taskId, input.nowIso);
+	const marked = await markTaskVerifiedThroughRuntimeAfterItWasMovedToDone({
+		deploymentId: input.deploymentId,
+		taskId: input.taskId,
+		live: input.live,
+		forcedCompletionWithoutAllVerificationsPassed: forced,
+		confirmedAcknowledgements,
+	});
 	if (!marked.ok) {
-		return { ok: false, error: marked.error ?? "Failed to mark task verified after moving it to done." };
+		return describeVerifiedAtUnrecordedAfterMoveToDone({
+			markError: marked.error,
+			movedToDoneByThisCommand: true,
+			inFlightCompletionRecordExpiresAtIso: inFlightCompletionRecord.expiresAtIso,
+			kanbanCliCommandToRetry: formatKanbanCliPostDeployVerificationCompletionRetryCommand({
+				deploymentId: input.deploymentId,
+				taskId: input.taskId,
+				entryPoint: input.entryPoint,
+			}),
+		});
 	}
 	return {
 		ok: true,
 		moved: true,
-		forced: input.forced,
+		forced,
 		previousColumn: input.currentColumnId,
 		verifiedAt: marked.task?.verifiedAt ?? input.nowIso,
-		worktreeDeleted: trashed.worktreeDeleted,
-		...(trashed.worktreeDeleteError ? { worktreeDeleteError: trashed.worktreeDeleteError } : {}),
+		worktreeDeleted: taskWorktreeDeletionResult?.taskWorktreeWasRemoved ?? false,
+		...(taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage
+			? { worktreeDeleteError: taskWorktreeDeletionResult.taskWorktreeDeletionErrorMessage }
+			: {}),
+		task: marked.task,
+	};
+}
+
+// 「移入 Done 成功、verifiedAt 未记」滞留态的重试：任务已在 trash，只经 runtime 补记 verifiedAt，不再移列。
+async function recordVerifiedAtForTaskAlreadyMovedToDone(input: {
+	deploymentId: string;
+	taskId: string;
+	live: LiveWorkspaceRuntime;
+	nowIso: string;
+	entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint;
+	retryDecision: Extract<KanbanCliRetryDecisionForTaskMovedToDoneButVerifiedAtUnrecorded, { retryAllowed: true }>;
+}): Promise<JsonRecord> {
+	const marked = await markTaskVerifiedThroughRuntimeAfterItWasMovedToDone({
+		deploymentId: input.deploymentId,
+		taskId: input.taskId,
+		live: input.live,
+		forcedCompletionWithoutAllVerificationsPassed: input.retryDecision.forcedCompletionWithoutAllVerificationsPassed,
+		confirmedAcknowledgements: input.retryDecision.confirmedAcknowledgements,
+	});
+	if (!marked.ok) {
+		return describeVerifiedAtUnrecordedAfterMoveToDone({
+			markError: marked.error,
+			movedToDoneByThisCommand: false,
+			inFlightCompletionRecordExpiresAtIso: input.retryDecision.inFlightCompletionRecordExpiresAtIso,
+			kanbanCliCommandToRetry: formatKanbanCliPostDeployVerificationCompletionRetryCommand({
+				deploymentId: input.deploymentId,
+				taskId: input.taskId,
+				entryPoint: input.entryPoint,
+			}),
+		});
+	}
+	return {
+		ok: true,
+		moved: false,
+		recordedVerificationForTaskAlreadyMovedToDone: true,
+		forced: input.retryDecision.forcedCompletionWithoutAllVerificationsPassed,
+		previousColumn: input.retryDecision.sourceColumnIdBeforeMoveToDone,
+		verifiedAt: marked.task?.verifiedAt ?? input.nowIso,
 		task: marked.task,
 	};
 }
@@ -630,7 +741,37 @@ async function verificationComplete(input: { deploymentId: string; taskId: strin
 		return { ok: false, needsConfirmation: false, error: "Task is no longer on the board (deleted or moved out)." };
 	}
 	if (offlineColumnId === "trash") {
-		return { ok: false, needsConfirmation: false, error: "Task is already in done." };
+		// 「移入 Done 成功、runtime 补记 verifiedAt 失败」后原样重跑 verification-complete：在途记录授权时只补记 verifiedAt。
+		const entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint = {
+			kind: "verification_complete_without_confirmation_token",
+		};
+		const retryDecision = decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded({ task, entryPoint, nowIso });
+		if (!retryDecision.retryAllowed) {
+			return {
+				ok: false,
+				needsConfirmation: false,
+				error: retryDecision.error,
+				...(retryDecision.requiredAcknowledgements
+					? { requiredAcknowledgements: retryDecision.requiredAcknowledgements }
+					: {}),
+			};
+		}
+		const live = await requireLiveWorkspaceRuntime(group.workspaceId);
+		if (getTaskColumnId(live.board, input.taskId) !== "trash") {
+			return {
+				ok: false,
+				needsConfirmation: false,
+				error: "Task left done while its verification was being recorded; re-run verification-complete.",
+			};
+		}
+		return await recordVerifiedAtForTaskAlreadyMovedToDone({
+			deploymentId: input.deploymentId,
+			taskId: input.taskId,
+			live,
+			nowIso,
+			entryPoint,
+			retryDecision,
+		});
 	}
 	// 列门控与 Web 对齐（issue C）：仅 validation/review/in_progress 是合法完成来源；backlog 等非法列直接拒绝，
 	// 否则后续 propose → verification-confirm/--force 可把手动移回 backlog、尚未 reconcile-dropped 的任务直接推入 Done。
@@ -653,7 +794,7 @@ async function verificationComplete(input: { deploymentId: string; taskId: strin
 				currentColumnId: liveColumnId,
 				live,
 				nowIso,
-				forced: false,
+				entryPoint: { kind: "verification_complete_without_confirmation_token" },
 			});
 		}
 		// 竞态：live 已流转出 validation → 回落 propose（按 live 列重算）。
@@ -723,7 +864,38 @@ async function verificationConfirm(input: {
 		return { ok: false, error: "Task is no longer on the board (deleted); cannot confirm." };
 	}
 	if (currentColumnId === "trash") {
-		return { ok: false, error: "Task is already in done." };
+		// 「移入 Done 成功、runtime 补记 verifiedAt 失败」后原样重跑本命令：在途记录 + 同 token / --force 与同 --ack 授权时只补记 verifiedAt。
+		const entryPoint: KanbanCliPostDeployVerificationCompletionEntryPoint = input.force
+			? { kind: "verification_confirm_with_force_break_glass", presentedAcknowledgements: input.acks }
+			: {
+					kind: "verification_confirm_with_confirmation_token",
+					presentedConfirmationToken: input.token ?? "",
+					presentedAcknowledgements: input.acks,
+				};
+		const retryDecision = decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded({ task, entryPoint, nowIso });
+		if (!retryDecision.retryAllowed) {
+			return {
+				ok: false,
+				error: retryDecision.error,
+				...(retryDecision.requiredAcknowledgements
+					? { requiredAcknowledgements: retryDecision.requiredAcknowledgements }
+					: {}),
+			};
+		}
+		if (input.force && !(await isForceCompleteEnabled(live.repoPath))) {
+			return {
+				ok: false,
+				error: "--force requires postDeployVerificationForceCompleteEnabled to be enabled in the runtime config.",
+			};
+		}
+		return await recordVerifiedAtForTaskAlreadyMovedToDone({
+			deploymentId: input.deploymentId,
+			taskId: input.taskId,
+			live,
+			nowIso,
+			entryPoint,
+			retryDecision,
+		});
 	}
 	// 列门控与 Web 对齐（issue C）：--force break-glass 与 token 两条路径都在此之后，故统一在此拒绝非法列（backlog 等），
 	// 避免把手动移回 backlog、尚未 reconcile-dropped 的任务经 --force 或重发 token 直接推入 Done。
@@ -755,7 +927,7 @@ async function verificationConfirm(input: {
 			currentColumnId,
 			live,
 			nowIso,
-			forced: true,
+			entryPoint: { kind: "verification_confirm_with_force_break_glass", presentedAcknowledgements: input.acks },
 		});
 	}
 
@@ -798,7 +970,11 @@ async function verificationConfirm(input: {
 		currentColumnId,
 		live,
 		nowIso,
-		forced: false,
+		entryPoint: {
+			kind: "verification_confirm_with_confirmation_token",
+			presentedConfirmationToken: pending.token,
+			presentedAcknowledgements: input.acks,
+		},
 	});
 }
 

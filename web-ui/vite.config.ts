@@ -56,6 +56,7 @@ export default defineConfig({
 	// Compared with fully minifying everything, this costs about 545 KB raw and
 	// 58.5 KB gzipped, which is the current tradeoff for keeping OpenCode stable.
 	plugins: [tailwindcss(), react(), selectiveBuildMinifyPlugin()],
+	worker: { format: "es" },
 	envPrefix: ["VITE_", "POSTHOG_"],
 	define: {
 		__APP_VERSION__: JSON.stringify(rootPkg.version),
@@ -87,9 +88,21 @@ export default defineConfig({
 			),
 			"@runtime-cline-tool-call-display": resolve(__dirname, "../src/cline-sdk/cline-tool-call-display.ts"),
 			"@runtime-home-agent-session": resolve(__dirname, "../src/core/home-agent-session.ts"),
+			"@runtime-kanban-web-ui-page-load-request-origin-nonce": resolve(
+				__dirname,
+				"../src/core/kanban-web-ui-page-load-request-origin-nonce.ts",
+			),
 			"@runtime-last-conversation-progress-observation": resolve(
 				__dirname,
 				"../src/core/last-conversation-progress-observation.ts",
+			),
+			"@runtime-notification-intelligence-purpose-binding-problems": resolve(
+				__dirname,
+				"../src/core/notification-intelligence-purpose-binding-problems.ts",
+			),
+			"@runtime-cross-project-recently-active-task-switcher-section-assignment": resolve(
+				__dirname,
+				"../src/core/cross-project-recently-active-task-switcher-section-assignment.ts",
 			),
 			"@runtime-session-activity": resolve(__dirname, "../src/core/session-activity.ts"),
 			"@runtime-shortcuts": resolve(__dirname, "../src/config/shortcut-utils.ts"),
@@ -99,6 +112,7 @@ export default defineConfig({
 				"../src/core/task-create-base-ref-resolution.ts",
 			),
 			"@runtime-task-id": resolve(__dirname, "../src/core/task-id.ts"),
+			"@runtime-task-pinboard-pinning": resolve(__dirname, "../src/core/task-pinboard-pinning.ts"),
 			"@runtime-task-title": resolve(__dirname, "../src/core/task-title.ts"),
 			"@runtime-task-worktree-path": resolve(__dirname, "../src/workspace/task-worktree-path.ts"),
 			"@runtime-task-state": resolve(__dirname, "../src/core/task-board-mutations.ts"),

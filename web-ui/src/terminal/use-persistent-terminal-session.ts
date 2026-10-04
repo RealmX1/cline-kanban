@@ -2,7 +2,7 @@ import type { MutableRefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getTerminalThemeColors, useTheme } from "@/hooks/use-theme";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskAgentSessionInitialization, RuntimeTaskSessionSummary } from "@/runtime/types";
 import {
 	disposePersistentTerminal,
 	ensurePersistentTerminal,
@@ -52,6 +52,9 @@ export interface UsePersistentTerminalSessionResult {
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	openTerminalSearch: () => void;
 	refreshTerminal: () => Promise<void>;
+	// 「从既有对话迁入」：把选定的那段对话迁进本会话再按 id 续跑（服务端语义见 api-contract 的
+	// adoptExistingAgentConversationAsTaskSessionIdentity）。与 refreshTerminal 共用 isRefreshing / lastError。
+	adoptExistingAgentConversationAndResume: (initialization: RuntimeTaskAgentSessionInitialization) => Promise<void>;
 	resyncTerminalView: () => Promise<void>;
 	scrollTerminalToLatest: () => void;
 	stopTerminal: () => Promise<void>;
@@ -181,7 +184,7 @@ export function usePersistentTerminalSession({
 			// (including the "[kanban] Refreshing terminal session..." banner) survives
 			// the PTY swap. Normal restarts (e.g., trash-resume drag) still reset.
 			if (!terminal.consumeRestartResetSuppression()) {
-				terminal.reset();
+				terminal.resetForSessionRestartAndRequestServerMirrorSnapshot();
 			}
 		}
 		previousSessionRef.current = {
@@ -298,24 +301,38 @@ export function usePersistentTerminalSession({
 		}
 	}, []);
 
-	const refreshTerminal = useCallback(async () => {
-		const terminal = terminalRef.current;
-		if (!terminal) {
-			return;
-		}
-		setIsRefreshing(true);
-		try {
-			const result = await terminal.refresh();
-			if (!result.ok && result.error) {
-				setLastError(result.error);
+	const refreshTerminalAdoptingOptionalExistingAgentConversation = useCallback(
+		async (adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization) => {
+			const terminal = terminalRef.current;
+			if (!terminal) {
+				return;
 			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			setLastError(message);
-		} finally {
-			setIsRefreshing(false);
-		}
-	}, []);
+			setIsRefreshing(true);
+			try {
+				const result = await terminal.refresh(undefined, adoptExistingAgentConversationAsTaskSessionIdentity);
+				if (!result.ok && result.error) {
+					setLastError(result.error);
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				setLastError(message);
+			} finally {
+				setIsRefreshing(false);
+			}
+		},
+		[],
+	);
+
+	const refreshTerminal = useCallback(
+		async () => await refreshTerminalAdoptingOptionalExistingAgentConversation(),
+		[refreshTerminalAdoptingOptionalExistingAgentConversation],
+	);
+
+	const adoptExistingAgentConversationAndResume = useCallback(
+		async (initialization: RuntimeTaskAgentSessionInitialization) =>
+			await refreshTerminalAdoptingOptionalExistingAgentConversation(initialization),
+		[refreshTerminalAdoptingOptionalExistingAgentConversation],
+	);
 
 	// 与 refreshTerminal 并列的另一件事：只重画屏幕，不动 agent 进程。走同一套 lastError 出口，
 	// 但状态位分开——两者可以各自独立地转 spinner。
@@ -377,6 +394,7 @@ export function usePersistentTerminalSession({
 		findPreviousInTerminal,
 		openTerminalSearch,
 		refreshTerminal,
+		adoptExistingAgentConversationAndResume,
 		resyncTerminalView,
 		scrollTerminalToLatest,
 		stopTerminal,

@@ -76,6 +76,13 @@ describe("drag rules", () => {
 		expect(isCardDropDisabled("validation", "trash")).toBe(true);
 	});
 
+	it("blocks every drop into backlog, including same-column reorders", () => {
+		expect(isCardDropDisabled("backlog", "backlog")).toBe(true);
+		expect(isCardDropDisabled("backlog", "in_progress")).toBe(true);
+		expect(isCardDropDisabled("backlog", "trash")).toBe(true);
+		expect(isCardDropDisabled("backlog", null)).toBe(false);
+	});
+
 	it("allows manual validation to done drops", () => {
 		expect(isAllowedCrossColumnCardMove("validation", "trash")).toBe(true);
 		expect(isCardDropDisabled("trash", "validation")).toBe(false);

@@ -57,6 +57,7 @@ vi.mock("../../../src/state/workspace-state.js", () => ({
 
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
+import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 const ACP_SPAWN_FAILURE_MESSAGE = "spawn omp ENOENT";
 
@@ -169,14 +170,15 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 					],
 				},
 			],
-			dependencies: [],
 		});
-		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_path: string, mutate: never) => {
-			const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
-				board: { columns: [], dependencies: [] },
-			});
-			return { saved: true, value: mutation.value };
-		});
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
+			async (_path: string, _taskMutationIntent: unknown, mutate: never) => {
+				const mutation = (mutate as unknown as (state: unknown) => { board: unknown; value: unknown })({
+					board: { columns: [] },
+				});
+				return { saved: true, value: mutation.value };
+			},
+		);
 	});
 
 	// 承重回归：ACP 起不来时切换必须回 ok:false，并如实说明旧会话已经停了。
@@ -190,6 +192,7 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 			listSummaries: vi.fn(() => []),
 		};
 		const acpTaskSessionService = {
+			listSummaries: vi.fn(() => []),
 			getSummary: vi.fn(() => null),
 			stopTaskSession: vi.fn(async () => null),
 			discardTaskSessionLedgerEntry: vi.fn(),
@@ -213,6 +216,7 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(response.ok).toBe(false);
@@ -237,6 +241,7 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 			listSummaries: vi.fn(() => []),
 		};
 		const acpTaskSessionService = {
+			listSummaries: vi.fn(() => []),
 			getSummary: vi.fn(() => null),
 			stopTaskSession: vi.fn(async () => null),
 			discardTaskSessionLedgerEntry: vi.fn(),
@@ -276,8 +281,16 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 	// 续跑分支的终态正是 awaiting_review + reviewReason "hook"（见 AcpTaskSessionService.startTaskSession），
 	// 它是 user 回合但**活着**，故 isSessionInActiveTurn 为真。
 	it("still reports success when the resumed ACP session lands on an awaiting-review turn", async () => {
+		const identity = {
+			sourceAgentId: "omp",
+			nativeSessionId: "native-explicit",
+			transcriptPath: null,
+			observedAt: 10,
+		};
 		const terminalManager = {
-			getSummary: vi.fn(() => createSummary({ sessionTransport: "pty_terminal" })),
+			getSummary: vi.fn(() =>
+				createSummary({ sessionTransport: "pty_terminal", agentNativeConversationSessionIdentity: identity }),
+			),
 			stopTaskSession: vi.fn(() => null),
 			forceStopTaskSession: vi.fn(async () => {}),
 			startTaskSession: vi.fn(async () => createSummary({ sessionTransport: "pty_terminal" })),
@@ -285,6 +298,7 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 			listSummaries: vi.fn(() => []),
 		};
 		const acpTaskSessionService = {
+			listSummaries: vi.fn(() => []),
 			getSummary: vi.fn(() => null),
 			stopTaskSession: vi.fn(async () => null),
 			discardTaskSessionLedgerEntry: vi.fn(),
@@ -293,6 +307,7 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 					state: "awaiting_review",
 					reviewReason: "hook",
 					sessionTransport: "acp_stdio_subprocess",
+					agentNativeConversationSessionIdentity: identity,
 				}),
 			),
 			applyTurnCheckpoint: vi.fn(() => null),
@@ -313,10 +328,72 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 		const response = await api.switchAgentSessionTransport(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-omp", targetSessionTransport: "acp_stdio_subprocess" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
+		expect(acpTaskSessionService.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				observedAgentNativeConversationSessionIdentity: identity,
+				resumePriorAgentConversationWithoutResendingPrompt: true,
+			}),
+		);
+		expect(response.summary?.agentNativeConversationSessionIdentity).toEqual(identity);
 		expect(response.error).toBeUndefined();
 		expect(response.ok).toBe(true);
 		expect(response.summary?.state).toBe("awaiting_review");
+	});
+	it("ACP 切回终端先移交原生身份，再移除 ACP 账本", async () => {
+		const identity = {
+			sourceAgentId: "omp",
+			nativeSessionId: "native-acp-child",
+			transcriptPath: null,
+			observedAt: 20,
+		};
+		let terminalSummary = createSummary({ sessionTransport: "pty_terminal" });
+		const acpSummary = createSummary({
+			sessionTransport: "acp_stdio_subprocess",
+			agentNativeConversationSessionIdentity: identity,
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => terminalSummary),
+			listSummaries: vi.fn(() => [terminalSummary]),
+			applyAgentNativeConversationSessionIdentity: vi.fn((_taskId, nativeIdentity) => {
+				terminalSummary = { ...terminalSummary, agentNativeConversationSessionIdentity: nativeIdentity };
+				return terminalSummary;
+			}),
+			startTaskSession: vi.fn(async () => terminalSummary),
+			applyTurnCheckpoint: vi.fn(() => null),
+		};
+		let acpEntryExists = true;
+		const acpTaskSessionService = {
+			getSummary: vi.fn(() => (acpEntryExists ? acpSummary : null)),
+			stopTaskSession: vi.fn(async () => acpSummary),
+			discardTaskSessionLedgerEntry: vi.fn(() => {
+				acpEntryExists = false;
+			}),
+			listSummaries: vi.fn(() => []),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => ({ listSummaries: () => [] }) as never),
+			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		} as never);
+		const response = await api.switchAgentSessionTransport(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-omp", targetSessionTransport: "pty_terminal" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
+		expect(response.error).toBeUndefined();
+		expect(response.ok).toBe(true);
+		expect(terminalManager.applyAgentNativeConversationSessionIdentity).toHaveBeenCalledWith("task-omp", identity);
+		expect(terminalManager.applyAgentNativeConversationSessionIdentity.mock.invocationCallOrder[0]).toBeLessThan(
+			acpTaskSessionService.discardTaskSessionLedgerEntry.mock.invocationCallOrder[0],
+		);
+		expect(response.summary?.agentNativeConversationSessionIdentity).toEqual(identity);
 	});
 });

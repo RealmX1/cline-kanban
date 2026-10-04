@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getStartableBacklogTaskIds, useTaskStartActions } from "@/hooks/use-task-start-actions";
-import type { BoardCard, BoardData, BoardDependency } from "@/types";
+import type { BoardCard, BoardData } from "@/types";
 
 function createCard(id: string, prompt = "Do something"): BoardCard {
 	return {
@@ -21,11 +21,9 @@ function createCard(id: string, prompt = "Do something"): BoardCard {
 
 function createBoard({
 	backlogCards,
-	dependencies = [],
 	inProgressCards = [],
 }: {
 	backlogCards: BoardCard[];
-	dependencies?: BoardDependency[];
 	inProgressCards?: BoardCard[];
 }): BoardData {
 	return {
@@ -35,35 +33,17 @@ function createBoard({
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies,
 	};
 }
 
 describe("getStartableBacklogTaskIds", () => {
-	it("returns all backlog task ids when there are no dependencies", () => {
+	it("returns all backlog task ids", () => {
 		const board = createBoard({ backlogCards: [createCard("task-1"), createCard("task-2"), createCard("task-3")] });
 		expect(getStartableBacklogTaskIds(board)).toEqual(["task-1", "task-2", "task-3"]);
 	});
 
 	it("returns empty array when backlog is empty", () => {
 		const board = createBoard({ backlogCards: [] });
-		expect(getStartableBacklogTaskIds(board)).toEqual([]);
-	});
-
-	it("excludes a parent task whose child is also in the backlog", () => {
-		const board = createBoard({
-			backlogCards: [createCard("task-a"), createCard("task-b")],
-			dependencies: [{ id: "dep-1", fromTaskId: "task-a", toTaskId: "task-b", createdAt: 1 }],
-		});
-		expect(getStartableBacklogTaskIds(board)).toEqual(["task-b"]);
-	});
-
-	it("excludes a parent task whose child is in progress", () => {
-		const board = createBoard({
-			backlogCards: [createCard("task-a")],
-			dependencies: [{ id: "dep-1", fromTaskId: "task-a", toTaskId: "task-b", createdAt: 1 }],
-			inProgressCards: [createCard("task-b")],
-		});
 		expect(getStartableBacklogTaskIds(board)).toEqual([]);
 	});
 });
@@ -161,6 +141,25 @@ describe("useTaskStartActions start-all confirmation", () => {
 			);
 		});
 	}
+
+	it("稳定启动入口读取更新后的看板，不启动刚离开 backlog 的卡", async () => {
+		const handleStartTask = vi.fn();
+		const handleStartAllBacklogTasks = vi.fn();
+		const board = createBoard({ backlogCards: [createCard("task-1", "First"), createCard("task-2", "Second")] });
+		await renderHarness({ board, handleStartTask, handleStartAllBacklogTasks });
+		const first = requireSnapshot();
+		const changedBoard = createBoard({
+			backlogCards: [createCard("task-2", "Second")],
+			inProgressCards: [createCard("task-1", "First")],
+		});
+		await renderHarness({ board: changedBoard, handleStartTask, handleStartAllBacklogTasks });
+		expect(requireSnapshot().handleStartTaskFromBoard).toBe(first.handleStartTaskFromBoard);
+		expect(requireSnapshot().requestStartAllReadyBacklogTasksConfirmation).toBe(
+			first.requestStartAllReadyBacklogTasksConfirmation,
+		);
+		act(() => first.requestStartAllReadyBacklogTasksConfirmation());
+		expect(requireSnapshot().pendingStartAllReadyBacklogTaskCards?.map((card) => card.id)).toEqual(["task-2"]);
+	});
 
 	it("requires confirmation before starting multiple ready backlog tasks and cancellation has no side effects", async () => {
 		const handleStartTask = vi.fn();

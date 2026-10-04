@@ -179,17 +179,6 @@ describe("kanban command display", () => {
 		expect(display.inputSummary).toBe(`${"A".repeat(80)}\u2026`);
 	});
 
-	it("shows Linking tasks with short IDs", () => {
-		const display = getToolDisplay(
-			"run_commands",
-			JSON.stringify({
-				commands: ["kanban task link --task-id abc12345-6789 --linked-task-id def98765-4321"],
-			}),
-		);
-		expect(display.toolName).toBe("Linking tasks");
-		expect(display.inputSummary).toBe("abc123 \u2192 def987");
-	});
-
 	it("shows Moving task to done with short task ID", () => {
 		const display = getToolDisplay(
 			"run_commands",
@@ -250,15 +239,6 @@ describe("kanban command display", () => {
 		);
 		expect(display.toolName).toBe("Deleting task");
 		expect(display.inputSummary).toBe("abc123");
-	});
-
-	it("shows Unlinking tasks with short dependency ID", () => {
-		const display = getToolDisplay(
-			"run_commands",
-			JSON.stringify({ commands: ["kanban task unlink --dependency-id dep12345-6789"] }),
-		);
-		expect(display.toolName).toBe("Unlinking tasks");
-		expect(display.inputSummary).toBe("dep123");
 	});
 
 	it("falls back to standard run_commands display for non-kanban commands", () => {

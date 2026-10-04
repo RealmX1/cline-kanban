@@ -25,7 +25,7 @@ export function canTransitionTaskForHookEvent(
 	event: RuntimeHookEvent,
 	explicitUserTurnKind: RuntimeTaskSessionUserTurnKind | null = null,
 ): boolean {
-	if (event === "activity") {
+	if (event === "activity" || event === "agent_conversation_session_identity_observed") {
 		return false;
 	}
 	if (event === "to_review") {

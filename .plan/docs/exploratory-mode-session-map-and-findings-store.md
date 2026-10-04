@@ -1,5 +1,7 @@
 # Exploratory Mode —— Session Map 与 Findings Store 设计蓝图
 
+> **2026-09-09 状态更新**：本蓝图的 session map 部分（§B / §C / §G.1 及 M0–M1 的 map 链）已在任务 b04a4 的 Pass B.1 退役——会话结构改由独立包 `agent-conversation-exploration-thread-graph`（`~/Documents/GitHub/` 同名仓库）以 git-graph 语义的 thread graph 建模，本仓库只做宿主胶水（现状见 `docs/exploratory-mode-host-integration.md`）。findings 部分（§D / §G.2，M2）继续有效。以下正文保留为设计史，不再更新。
+
 > 状态：**设计蓝图（blueprint）；实施时点另定**。本文档只锁定数据模型、持久化、写入通道、
 > web-ui 挂载与降级决策，不含实现代码。§H 的 M0–M6 是**技术依赖排序，不是开工时点授权**——
 > 与姊妹蓝图「Stage 0 标注 ≠ 开工时点授权」同一约定。
@@ -50,6 +52,40 @@
 > > env（`KANBAN_HOOK_TASK_ID` / `KANBAN_HOOK_WORKSPACE_ID`）> 报错」，flag 与 env 不一致
 > 硬报错（风险 6 的单任务作用域纪律）；workspace scope 经 `x-kanban-workspace-id` 请求头
 > 传递（workspaceProcedure 与 hooks.ingest 的 input 带 scope 不同）。
+> 实施注记（2026-08-28，**M2 已落地**）：M2（§H：findings store + 人工保存 + agent 建议
+> 通道 + 待确认流 + `exploratory_findings_updated` + findings 浏览器）已实现。实施层决定
+> 记录于此：**(1)** store 上限 500 的 cap-and-trim 裁剪序从「丢最旧 archived」扩展为三级：
+> archived（最旧 updatedAt）→ superseded → 非 pending 最旧 updatedAt；
+> `suggested_pending_confirmation` 永不静默裁（它等人拍板）。该取舍的代价（2026-08-28
+> RVF 补齐）：容量被 pending 占满时 cap 无可裁候选——此时显式拒绝让超限更糟的写入
+> （store 抛 `ExploratoryFindingsCapOverflowError`，不落盘不广播；ingest 通道翻译为
+> `rejectionReason: "findings_cap_overflow"`，人工保存/确认/归档经 handler 目标存活检查
+> 抛 `PRECONDITION_FAILED`），绝不「返回成功但 finding 消失」；让总量回落的写入
+> （reject 等）即使结果仍超限也放行，不堵死存量超限 workspace 的清理路径。
+> **(2)** `ingest-finding-candidate`
+> 的 provenance 校验三态：投影可用 → turnNumber 超最新 turn 整份拒绝
+> （`anchor_turn_number_unresolvable`）+ checkpoint commit 不在保留集合降级 null；投影源
+> `unavailable_live_terminal_pty`（PTY）→ 接受且 checkpoint 降级 null（能力矩阵 best-effort
+> 档）；投影加载抛错 → 拒绝 `provenance_conversation_session_unresolvable`。findingId 由服务端
+> 派生 `agent-<clientProposalId>`（同建议重发幂等 ack，不落成两条）。**(3)** map apply 漏斗
+> 新增闸 2.5（referencedFindingId 可解析性：任意状态含 archived 的 finding 均可解析——
+> archived 不级联删节点，§B.1），置于锚点可解析性（闸 2b）之后、签名对账（闸 3）之前，
+> 拒绝原因 `referenced_finding_unresolvable`；指令文件的 finding_reference 同步解禁，成文
+> 「先 `get-findings` 列出现有 finding 再引用；pending 可引用但被拒后引用悬空、UI 容错」。
+> **(4)** 状态机裁决：confirm/reject 仅 pending（reject = 物理删除，建议尚未成为资产）；
+> archive 仅 active↔archived，对 pending/superseded 抛 BAD_REQUEST（superseded 的互链审计
+> 不经 archive 改写）；对不存在 id 的 confirm/reject/archive 幂等空转不报错（UI 幂等）。
+> **(5)** web-ui 单一真相是 `useExploratoryFindings`（初始 getFindings query + 推送全量替换
+> 归并，mutation 不做乐观更新、经推送收敛）；「存为 finding」挂 `cline-agent-chat-panel.tsx`
+> 消息项——Cline 与 ACP 共用同一组件，一个挂载点覆盖两种 transport；provenance 组装在
+> `findings-model.ts` 纯函数（turn 不可锚 → `user_authored_freeform`，绝不伪造锚）；findings
+> 浏览器 = `App.tsx` 的 `isFindingsOpen` home 置换（`isGitHistoryOpen` 先例，与 overview/
+> git history 三向互斥）；查重提示范围收窄为 active + pending（与 archived/superseded 退役
+> 条目撞标题不构成重复）；§G.3 深链（`?view=findings`）未做，属 M3。**(6)** CLI 投递骨架
+> 泛型化为 `deliverExploratoryMutation<T>`（原 deliverExploratorySessionMapUpdate——适配逻辑
+> 与响应类型零耦合，两份照抄的漂移面大于泛型化成本）；`get-findings` 复用 task 级 scope
+> 解析（findings 本是 workspace 级资产，但 agent 环境恒有 task/workspace 双注入，不新造
+> workspace-only 解析路径）。
 
 ## 需求（用户原语转写）
 

@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { createTRPCProxyClient, httpBatchLink, TRPCClientError } from "@trpc/client";
 import type { Command } from "commander";
 import type {
-	RuntimeIngestExploratorySessionMapUpdateRequest,
-	RuntimeIngestExploratorySessionMapUpdateResponse,
+	RuntimeIngestExploratoryFindingCandidateRequest,
+	RuntimeIngestExploratoryFindingCandidateResponse,
 } from "../core/api-contract";
 import { mergeAbortSignals } from "../core/cli-process-guards";
 import { buildKanbanRuntimeUrl, getRuntimeFetch } from "../core/runtime-endpoint";
@@ -13,9 +13,17 @@ import { KANBAN_HOOK_TASK_ID_ENV, KANBAN_HOOK_WORKSPACE_ID_ENV } from "../termin
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { deliverHookIngestWithRetry } from "./hooks";
 
-// Exploratory Mode（蓝图 .plan/docs/exploratory-mode-session-map-and-findings-store.md §B.2）：
-// agent 写回 session map 的 CLI 通道。读-改-写协议 = get-session-map 拿现状集合 + 投影签名，
-// 再 ingest-map-update 提交整份修订提案，过服务端 apply 漏斗。
+// Exploratory Mode（蓝图 .plan/docs/exploratory-mode-session-map-and-findings-store.md §D）：
+// agent 侧的 CLI 通道——get-findings 列出现有 finding、ingest-finding-candidate 提交建议
+// （落库即待人确认）、get-exploration-thread-graph 读出这次探索的会话结构图。
+// 旧的 session map 读-改-写通道（get-session-map / ingest-map-update）已退役：会话结构改由
+// 独立包 agent-conversation-exploration-thread-graph 的 work-branch 作业维护，agent 不再手写结构
+// （宿主胶水见 docs/exploratory-mode-host-integration.md）。
+//
+// **结构图只有读通道，没有写通道**，这是刻意的非对称：图由 fork 出的分身作业单独维护，
+// agent 手写结构正是 session map 时代退役掉的那条路。读是纯投影合成、零 fork、零成本，
+// 想读多少次都行；真正花钱的 requestExplorationThreadGraphMaintenance 只暴露给 UI 的显式点击，
+// 不进 CLI——否则 agent 可以在自己的回合里反复烧掉 fork 预算（重型会话一次 ≈ $4.5）。
 //
 // 与 hooks ingest 的关键差异：exploratory.* / conversationTree.* 都是 workspaceProcedure，
 // workspace scope 走 `x-kanban-workspace-id` 请求头（hooks.ingest 是 input 带 workspaceId 的
@@ -201,15 +209,17 @@ export async function readExploratoryPayloadText(
 
 // ---- payload 廉价校验 ----
 
-// 只锁白名单三键的形状；节点级完整校验（含 referencedFindingId 配对 superRefine、长度/数量上限）
-// 交给服务端 schema——它的 TRPCClientError message 会原样透传到 stderr。
-export interface ExploratoryMapUpdatePayload {
+// ingest-finding-candidate 的廉价校验：只锁白名单四键的形状；provenance link 字段级
+// 完整校验（linkKind 枚举、三元约束、长度上限）交给服务端 schema——它的
+// TRPCClientError message 会原样透传到 stderr。
+export interface ExploratoryFindingCandidatePayload {
 	clientProposalId: string;
-	sourceTurnProjectionSignature: string;
-	nodes: unknown[];
+	findingTitle: string;
+	findingBodyMarkdown: string;
+	provenanceLinks: unknown[];
 }
 
-export function parseExploratoryMapUpdatePayload(payloadText: string): ExploratoryMapUpdatePayload {
+export function parseExploratoryFindingCandidatePayload(payloadText: string): ExploratoryFindingCandidatePayload {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(payloadText);
@@ -217,25 +227,28 @@ export function parseExploratoryMapUpdatePayload(payloadText: string): Explorato
 		throw new Error(`Payload is not valid JSON: ${formatError(error)}`);
 	}
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-		throw new Error("Payload must be a JSON object with clientProposalId, sourceTurnProjectionSignature, and nodes.");
+		throw new Error(
+			"Payload must be a JSON object with clientProposalId, findingTitle, findingBodyMarkdown, and provenanceLinks.",
+		);
 	}
 	const record = parsed as Record<string, unknown>;
 	if (typeof record.clientProposalId !== "string" || record.clientProposalId.trim().length === 0) {
 		throw new Error('Payload is missing required string field "clientProposalId".');
 	}
-	if (
-		typeof record.sourceTurnProjectionSignature !== "string" ||
-		record.sourceTurnProjectionSignature.trim().length === 0
-	) {
-		throw new Error('Payload is missing required string field "sourceTurnProjectionSignature".');
+	if (typeof record.findingTitle !== "string" || record.findingTitle.trim().length === 0) {
+		throw new Error('Payload is missing required string field "findingTitle".');
 	}
-	if (!Array.isArray(record.nodes)) {
-		throw new Error('Payload field "nodes" must be an array of map node proposals.');
+	if (typeof record.findingBodyMarkdown !== "string" || record.findingBodyMarkdown.trim().length === 0) {
+		throw new Error('Payload is missing required string field "findingBodyMarkdown".');
+	}
+	if (!Array.isArray(record.provenanceLinks)) {
+		throw new Error('Payload field "provenanceLinks" must be an array of provenance links.');
 	}
 	return {
 		clientProposalId: record.clientProposalId,
-		sourceTurnProjectionSignature: record.sourceTurnProjectionSignature,
-		nodes: record.nodes,
+		findingTitle: record.findingTitle,
+		findingBodyMarkdown: record.findingBodyMarkdown,
+		provenanceLinks: record.provenanceLinks,
 	};
 }
 
@@ -283,16 +296,18 @@ function createExploratoryTrpcClient(workspaceId: string, deliverySignal?: Abort
 
 // deliverHookIngestWithRetry 的判定面锁在 RuntimeHookIngestResponse（{ok, error?}）上，
 // 这里用闭包暂存真实响应，把 exploratory mutation 的结果适配成它的两态：
-//   - mutation resolve → 投递成功（applied true/false 都算——rejectionReason 是给 agent 的
-//     业务信息，两者退出码都为 0）；
+//   - mutation resolve → 投递成功（applied/ingested false 都算——rejectionReason 是给 agent
+//     的 业务信息，两者退出码都为 0）；
 //   - TRPCClientError（daemon 可达但 schema/procedure 拒绝）→ {ok:false} 业务拒绝：
 //     骨架立即抛、不重试，message 由调用方透传 stderr；
 //   - 其它抛出（超时 / daemon 不可达）→ 传输故障，走骨架的有界重试。
-export async function deliverExploratorySessionMapUpdate(
-	mutate: (signal: AbortSignal) => Promise<RuntimeIngestExploratorySessionMapUpdateResponse>,
+// 泛型化：适配逻辑与响应类型零耦合（历史上 map / findings 两个消费者共用，map 通道退役后
+// 保留泛型形态，thread graph 相关 mutation 接入时直接复用）。
+export async function deliverExploratoryMutation<TResponse>(
+	mutate: (signal: AbortSignal) => Promise<TResponse>,
 	options: { timeoutMs: number; maxAttempts: number; backoffMs: number },
-): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> {
-	let delivered: RuntimeIngestExploratorySessionMapUpdateResponse | null = null;
+): Promise<TResponse> {
+	let delivered: TResponse | null = null;
 	await deliverHookIngestWithRetry(async (signal) => {
 		try {
 			delivered = await mutate(signal);
@@ -306,26 +321,27 @@ export async function deliverExploratorySessionMapUpdate(
 	}, options);
 	if (!delivered) {
 		// 不可达（mutation resolve 必先赋值）；满足 TS 控制流分析的兜底。
-		throw new Error("ingestSessionMapUpdate resolved without a response.");
+		throw new Error("exploratory mutation resolved without a response.");
 	}
 	return delivered;
 }
 
-async function ingestSessionMapUpdate(
+async function ingestFindingCandidate(
 	scope: ExploratoryCommandScope,
-	payload: ExploratoryMapUpdatePayload,
-): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> {
-	const request: RuntimeIngestExploratorySessionMapUpdateRequest = {
+	payload: ExploratoryFindingCandidatePayload,
+): Promise<RuntimeIngestExploratoryFindingCandidateResponse> {
+	const request: RuntimeIngestExploratoryFindingCandidateRequest = {
 		conversationSessionTaskId: scope.taskId,
 		clientProposalId: payload.clientProposalId,
-		sourceTurnProjectionSignature: payload.sourceTurnProjectionSignature,
-		// 节点形状按契约类型断言——完整校验刻意留给服务端 schema（见 parseExploratoryMapUpdatePayload）。
-		nodes: payload.nodes as RuntimeIngestExploratorySessionMapUpdateRequest["nodes"],
+		findingTitle: payload.findingTitle,
+		findingBodyMarkdown: payload.findingBodyMarkdown,
+		// link 形状按契约类型断言——完整校验刻意留给服务端 schema（见 parseExploratoryFindingCandidatePayload）。
+		provenanceLinks: payload.provenanceLinks as RuntimeIngestExploratoryFindingCandidateRequest["provenanceLinks"],
 	};
-	return await deliverExploratorySessionMapUpdate(
+	return await deliverExploratoryMutation(
 		async (signal) => {
 			const trpcClient = createExploratoryTrpcClient(scope.workspaceId, signal);
-			return await trpcClient.exploratory.ingestSessionMapUpdate.mutate(request);
+			return await trpcClient.exploratory.ingestFindingCandidate.mutate(request);
 		},
 		{
 			timeoutMs: resolveExploratoryIngestTimeoutMs(),
@@ -337,59 +353,90 @@ async function ingestSessionMapUpdate(
 
 // ---- 子命令实现 ----
 
-async function runGetSessionMap(options: ExploratoryScopeOptions): Promise<void> {
+async function runGetFindings(options: ExploratoryScopeOptions): Promise<void> {
 	let scope: ExploratoryCommandScope;
 	try {
+		// 复用同一 scope 解析：findings 本身是 workspace 级资产（只需要 workspaceId），但
+		// agent 运行环境恒有 task/workspace 双注入，统一走同一解析函数不另开第二套
+		// workspace-only 解析路径（缺 task 时的报错文案与 map 子命令一致）。
 		scope = await resolveExploratoryCommandScope(options);
 	} catch (error) {
-		process.stderr.write(`kanban exploratory get-session-map: ${formatError(error)}\n`);
+		process.stderr.write(`kanban exploratory get-findings: ${formatError(error)}\n`);
 		process.exitCode = 1;
 		return;
 	}
 
 	try {
-		// 一个 client 依次调两个 query：agent 的读-改-写协议要「现状集合 + 当前投影签名」一次拿到。
 		const trpcClient = createExploratoryTrpcClient(scope.workspaceId);
-		const mapResponse = await trpcClient.exploratory.getSessionMap.query({
-			conversationSessionTaskId: scope.taskId,
-		});
-		const projection = await trpcClient.conversationTree.getConversationSessionTurnProjection.query({
-			conversationSessionTaskId: scope.taskId,
-		});
-		// harnessSource=unavailable_live_terminal_pty 时照常输出（mapCollection 多为 null）——
-		// agent 据此判断本会话不可写 map。
-		process.stdout.write(
-			`${JSON.stringify({
-				mapCollection: mapResponse.mapCollection,
-				harnessSource: projection.harnessSource,
-				turnProjectionSignature: projection.turnProjectionSignature,
-				latestTurnNumber: projection.turnProjectionEntries.at(-1)?.turnNumber ?? 0,
-			})}\n`,
-		);
+		const response = await trpcClient.exploratory.getFindings.query({});
+		process.stdout.write(`${JSON.stringify({ findings: response.findings })}\n`);
 	} catch (error) {
-		process.stderr.write(`kanban exploratory get-session-map: ${formatError(error)}\n`);
+		process.stderr.write(`kanban exploratory get-findings: ${formatError(error)}\n`);
 		process.exitCode = 1;
 	}
 }
 
-async function runIngestMapUpdate(options: ExploratoryScopeOptions & { payload: string }): Promise<void> {
+async function runIngestFindingCandidate(options: ExploratoryScopeOptions & { payload: string }): Promise<void> {
 	let scope: ExploratoryCommandScope;
-	let payload: ExploratoryMapUpdatePayload;
+	let payload: ExploratoryFindingCandidatePayload;
 	try {
 		scope = await resolveExploratoryCommandScope(options);
-		payload = parseExploratoryMapUpdatePayload(await readExploratoryPayloadText(options.payload));
+		payload = parseExploratoryFindingCandidatePayload(await readExploratoryPayloadText(options.payload));
 	} catch (error) {
-		process.stderr.write(`kanban exploratory ingest-map-update: ${formatError(error)}\n`);
+		process.stderr.write(`kanban exploratory ingest-finding-candidate: ${formatError(error)}\n`);
 		process.exitCode = 1;
 		return;
 	}
 
 	try {
-		const response = await ingestSessionMapUpdate(scope, payload);
-		// applied=false 时 rejectionReason 必在输出 JSON 里（schema 保证非 null）。
+		const response = await ingestFindingCandidate(scope, payload);
+		// ingested=false 时 rejectionReason 必在输出 JSON 里（schema 保证非 null）。
 		process.stdout.write(`${JSON.stringify(response)}\n`);
 	} catch (error) {
-		process.stderr.write(`kanban exploratory ingest-map-update: ${formatError(error)}\n`);
+		process.stderr.write(`kanban exploratory ingest-finding-candidate: ${formatError(error)}\n`);
+		process.exitCode = 1;
+	}
+}
+
+// explorationId 的默认值是本会话的 taskId——主会话场景下两者本就相同（契约：explorationId
+// = 主任务卡片 id）。by-the-way 会话有自己的 taskId、其 turn 归在主卡片的图里，所以它必须用
+// --exploration-id 显式指向主卡片；默认值在那种场景下只会查出一张空图，不会串到别人的图上。
+//
+// 这里刻意**不做** scope 解析那套「两来源不一致即硬报错」：--exploration-id 与 taskId 不同
+// 恰恰是 by-the-way 会话的正常形态，冲突校验会把唯一的正确用法判成错误。读路径也没有
+// 「写错了会污染谁」的风险——读别人的图只是读不到自己的。
+export function resolveExplorationIdForThreadGraphRead(input: {
+	explicitExplorationId: string | undefined;
+	taskId: string;
+}): string {
+	return readTrimmedValue(input.explicitExplorationId) ?? input.taskId;
+}
+
+async function runGetExplorationThreadGraph(
+	options: ExploratoryScopeOptions & { explorationId?: string },
+): Promise<void> {
+	let scope: ExploratoryCommandScope;
+	try {
+		scope = await resolveExploratoryCommandScope(options);
+	} catch (error) {
+		process.stderr.write(`kanban exploratory get-exploration-thread-graph: ${formatError(error)}\n`);
+		process.exitCode = 1;
+		return;
+	}
+
+	const explorationId = resolveExplorationIdForThreadGraphRead({
+		explicitExplorationId: options.explorationId,
+		taskId: scope.taskId,
+	});
+
+	try {
+		const trpcClient = createExploratoryTrpcClient(scope.workspaceId);
+		const response = await trpcClient.exploratory.getExplorationThreadGraph.query({ explorationId });
+		// 整份响应原样输出（view + turnSourceUnavailableSessionIds）：后者是「哪些会话的转录
+		// 暂时读不出来」，缺了它，读到的空图会被误读成「还没有任何 turn 归位」。
+		process.stdout.write(`${JSON.stringify(response)}\n`);
+	} catch (error) {
+		process.stderr.write(`kanban exploratory get-exploration-thread-graph: ${formatError(error)}\n`);
 		process.exitCode = 1;
 	}
 }
@@ -397,11 +444,11 @@ async function runIngestMapUpdate(options: ExploratoryScopeOptions & { payload: 
 export function registerExploratoryCommand(program: Command): void {
 	const exploratory = program
 		.command("exploratory")
-		.description("Exploratory Mode session map helpers for agent integrations.");
+		.description("Exploratory Mode helpers for agent integrations (findings + thread graph).");
 
 	exploratory
-		.command("get-session-map")
-		.description("Print the session map collection and turn projection signature as a single JSON object.")
+		.command("get-findings")
+		.description("Print the workspace's findings as JSON. List existing findings before proposing a duplicate.")
 		.option("--task <taskId>", `Conversation session task id (defaults to ${KANBAN_HOOK_TASK_ID_ENV}).`)
 		.option("--workspace-id <id>", `Workspace id (defaults to --project-path, then ${KANBAN_HOOK_WORKSPACE_ID_ENV}).`)
 		.option(
@@ -409,12 +456,32 @@ export function registerExploratoryCommand(program: Command): void {
 			"Resolve workspace from a registered project path (pass the main repo path when invoking from a task worktree).",
 		)
 		.action(async (options: ExploratoryScopeOptions) => {
-			await runGetSessionMap(options);
+			await runGetFindings(options);
 		});
 
 	exploratory
-		.command("ingest-map-update")
-		.description("Deliver a whole-map revision proposal to the runtime apply funnel.")
+		.command("get-exploration-thread-graph")
+		.description(
+			"Print this exploration's thread graph as JSON (read-only, never forks). " +
+				"Use it to look up your own turn numbers before citing them in a finding's provenance links.",
+		)
+		.option("--task <taskId>", `Conversation session task id (defaults to ${KANBAN_HOOK_TASK_ID_ENV}).`)
+		.option("--workspace-id <id>", `Workspace id (defaults to --project-path, then ${KANBAN_HOOK_WORKSPACE_ID_ENV}).`)
+		.option(
+			"--project-path <path>",
+			"Resolve workspace from a registered project path (pass the main repo path when invoking from a task worktree).",
+		)
+		.option(
+			"--exploration-id <id>",
+			"Exploration to read (defaults to --task). Pass the main task id from a by-the-way session.",
+		)
+		.action(async (options: ExploratoryScopeOptions & { explorationId?: string }) => {
+			await runGetExplorationThreadGraph(options);
+		});
+
+	exploratory
+		.command("ingest-finding-candidate")
+		.description("Submit a finding suggestion for human confirmation (lands as pending, never auto-active).")
 		.option("--task <taskId>", `Conversation session task id (defaults to ${KANBAN_HOOK_TASK_ID_ENV}).`)
 		.option("--workspace-id <id>", `Workspace id (defaults to --project-path, then ${KANBAN_HOOK_WORKSPACE_ID_ENV}).`)
 		.option(
@@ -423,9 +490,9 @@ export function registerExploratoryCommand(program: Command): void {
 		)
 		.requiredOption(
 			"--payload <json>",
-			'Map update payload: inline JSON string, "@<path>" to read a file, or "-" to read stdin.',
+			'Finding candidate payload: inline JSON string, "@<path>" to read a file, or "-" to read stdin.',
 		)
 		.action(async (options: ExploratoryScopeOptions & { payload: string }) => {
-			await runIngestMapUpdate(options);
+			await runIngestFindingCandidate(options);
 		});
 }

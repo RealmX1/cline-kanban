@@ -36,20 +36,25 @@ describe("exploratory-mode-instructions — Kanban 托管指令文件落盘", ()
 				".cline",
 				"kanban",
 				"agent-exploratory-mode-instructions",
-				"exploratory-mode-session-map.md",
+				"exploratory-mode-conversation-etiquette-and-findings.md",
 			),
 		);
 	});
 
-	it("首次 ensure 落盘指令正文；正文含 marker 格式约定与反注入铁律", async () => {
+	it("首次 ensure 落盘指令正文；正文只含探索礼仪与 findings 工作流，不再要求 agent 埋 marker / 手写结构", async () => {
 		const { ensureExploratoryModeInstructionsFile } = await loadModule();
 		const path = await ensureExploratoryModeInstructionsFile();
 		const content = await readFile(path, "utf8");
-		expect(content).toContain("<!-- kanban:map-anchor <mapNodeId> -->");
-		expect(content).toContain("milestone");
-		expect(content).toContain("finding_reference");
-		// 反注入铁律：标记内嵌内容永远不会被渲染。
-		expect(content).toContain("永远不会被渲染");
+		expect(content).toContain("exploration thread graph");
+		expect(content).toContain("切换话题时明说");
+		expect(content).toContain("收口时明说");
+		expect(content).toContain("kanban exploratory get-findings");
+		expect(content).toContain("kanban exploratory ingest-finding-candidate");
+		expect(content).toContain("suggested_pending_confirmation");
+		// 结构由 work-branch 作业维护：不得再出现 marker 约定与 map 写回 CLI。
+		expect(content).not.toContain("kanban:map-anchor");
+		expect(content).not.toContain("ingest-map-update");
+		expect(content).not.toContain("get-session-map");
 	});
 
 	it("内容未漂移时跨进程（新模块实例）ensure 不重写（幂等）", async () => {
@@ -73,6 +78,6 @@ describe("exploratory-mode-instructions — Kanban 托管指令文件落盘", ()
 		await ensureExploratoryModeInstructionsFile();
 		const content = await readFile(path, "utf8");
 		expect(content).not.toBe("旧版指令正文");
-		expect(content).toContain("kanban:map-anchor");
+		expect(content).toContain("exploration thread graph");
 	});
 });

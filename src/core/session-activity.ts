@@ -22,6 +22,7 @@ import type {
 	RuntimeTaskSessionUserTurnKind,
 } from "./api-contract.js";
 import { mergeLastConversationProgressObservation } from "./last-conversation-progress-observation.js";
+import { mergeLastMainAgentConversationModelRequestDispatchObservation } from "./last-main-agent-conversation-model-request-dispatch-observation.js";
 
 // 「agent 仍在持续产出」的活跃窗口阈值（毫秒）。前后端有意取不同值、语义相反，故分别命名、
 // 不强行统一为一个常量：
@@ -289,7 +290,11 @@ export function mergeSummaryWithFacets(
 			// mergeSummaryWithFacets 与 applySessionFacets 的既有等价关系产生无谓差异。
 			mergedWithFacets;
 
-	const withProgressObservation = resolveLastConversationProgressObservation(prev, patch, withTurnSequence);
+	const withProgressObservation = resolveLastMainAgentConversationModelRequestDispatchObservation(
+		prev,
+		patch,
+		resolveLastConversationProgressObservation(prev, patch, withTurnSequence),
+	);
 
 	const stopped = resolveAgentResponseGenerationStopped(prev, patch, withProgressObservation);
 	// `?? null` 是要点不是噪声：字段缺失（undefined）与「已判定为无停止事件」（null）在语义上同为
@@ -335,6 +340,29 @@ function resolveLastConversationProgressObservation(
 	}
 	// merged 此刻装的是 patch 里那条**未经裁决**的原始观测，必须换成 reducer 的裁决结果。
 	return { ...mergedWithFacets, lastConversationProgressObservation: merged };
+}
+
+// 「主对话最后一次向模型发出请求」观测的合并落点，与上面那个观测同理放在共用漏斗里，让单调性成为结构性
+// 保证。「哪些事件该写」由写点判定（main-agent-conversation-model-request-dispatch-hook-event-classification.ts），
+// 这里只负责不倒退、不跑到未来。
+function resolveLastMainAgentConversationModelRequestDispatchObservation(
+	prev: RuntimeTaskSessionSummary,
+	patch: Partial<RuntimeTaskSessionSummary>,
+	merged: RuntimeTaskSessionSummary,
+): RuntimeTaskSessionSummary {
+	const incoming = patch.lastMainAgentConversationModelRequestDispatchObservation;
+	if (incoming == null) {
+		return merged;
+	}
+	const reduced = mergeLastMainAgentConversationModelRequestDispatchObservation(
+		prev.lastMainAgentConversationModelRequestDispatchObservation,
+		incoming,
+		{ nowMs: merged.updatedAt },
+	);
+	if (reduced === merged.lastMainAgentConversationModelRequestDispatchObservation) {
+		return merged;
+	}
+	return { ...merged, lastMainAgentConversationModelRequestDispatchObservation: reduced };
 }
 
 // 「本轮何时停止生成」离散事件的唯一写点（与回合序号同处这条三 transport 共用漏斗，故三侧自动一致）。
@@ -554,6 +582,63 @@ export function isAgentAwaitingModalUserDecision(facets: SessionFacets): boolean
 	return facets.userTurnKind !== null && MODAL_USER_DECISION_TURN_KINDS.has(facets.userTurnKind);
 }
 
+// ── 恢复守卫：「这条会话正在重建历史对话，还没有人真正让它继续」的唯一被认可判据 ────────────────
+// 恢复一个落盘会话只负责重建上下文，绝不等价于开始新一轮生成。守卫有**两个**武装态，缺一不可：
+//   restoring_…            spawn 前置位，覆盖「子进程一起来就恢复后台通知并同步触发 UserPromptSubmit」；
+//   restored_…_waiting_…   summary 装载时置位，覆盖恢复重放跑完之后、人还没开口的那整段。
+// 只有货真价实的用户提交（UserPromptSubmit 源的 to_in_progress）或显式 disarm 才解除。
+//
+// 定义在这里而不是 session-manager：判「守卫是否武装」的消费者不止 PTY 自己——排队 prompt 的出队门控
+// 也必须用同一份判据，而这条判据的**唯一**正确写法就是「两个枚举值都算」。在别处照抄一个枚举比较，
+// 漏掉第二个值的后果是确定性的：`--continue` 恢复重放自己那次 Stop hook 会落在第二个状态上，于是
+// 「用户只是点开了一张卡片」就足以把几小时前排的队全部引爆。
+//
+// 只吃 summary 不吃 facets：守卫是 sidecar 字段，不参与 facet 派生（facet 描述「球在谁手上」，
+// 守卫描述「这一局到底算不算开始了」，两者正交）。
+// 恢复守卫的最长武装时长。守卫本该在恢复后的**首个**用户回合就解除，这条兜底只防「解除信号因任何
+// 未预见的路径没能送达」——那种情况下它会永久武装，把 agent 自己 dispatch 的后台工作唤醒信号一并吞掉
+// （2026-08 实测 38 条会话记录已无解除路径）。它真正要防的「恢复瞬间 harness 重放旧通知自动续跑」只
+// 发生在 spawn 后的头几分钟，30 分钟足够宽松，不削弱保护强度。
+export const RESTORATION_CONTINUATION_GUARD_MAXIMUM_ARMED_DURATION_MS = 30 * 60 * 1000;
+
+// 计时锚点用 summary.startedAt——那正是本活体 spawn 的时刻，每次真实 spawn 都会重置。
+// startedAt 为 null = 这条记录从未真正 spawn 过（durable 重建出的壳）。没有可信计时锚点就不判过期；
+// 这类记录也没有 entry.active，hook 根本到不了，不构成永久武装的实际风险。
+export function hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(
+	summary: RuntimeTaskSessionSummary,
+	nowEpochMs: number,
+): boolean {
+	if (summary.startedAt === null) {
+		return false;
+	}
+	return nowEpochMs - summary.startedAt >= RESTORATION_CONTINUATION_GUARD_MAXIMUM_ARMED_DURATION_MS;
+}
+
+// 守卫**声明上**是否武装（两个武装态之一），不看 30 分钟兜底过期。
+//
+// 为什么要把「声明」单独导出：兜底过期是为「拦截 harness 自己的唤醒通知」这件事设的——守卫永久武装会把
+// agent 自己派发的后台工作唤醒信号无限期吞掉，所以宁可 30 分钟后放行。排队 prompt 的方向恰好相反：
+// 放行 = 在用户从没继续过对话的情况下，把几小时前排的一句话发进一个刚恢复的会话。那一侧的代价是「不提醒
+// 就发」，而等下去的代价只是「队列一直等到用户继续」（面板如实写着原因）。所以排队门控读声明态，
+// 不读带兜底过期的那一个。两态的枚举仍只在这里定义一次。
+export function isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration(
+	summary: RuntimeTaskSessionSummary,
+): boolean {
+	return (
+		summary.restorationContinuationGuardState === "restoring_agent_conversation_without_starting_new_turn" ||
+		summary.restorationContinuationGuardState === "restored_agent_conversation_waiting_for_explicit_user_input"
+	);
+}
+
+// 取 nowEpochMs 而不是自己读 Date.now()：本模块是纯函数真相源，且 session-manager 有自己的可注入
+// 时间源 now()，两边各读一次系统时钟会让「同一判定在同一刻给出两个答案」成为可能。
+export function isRestorationContinuationGuardArmed(summary: RuntimeTaskSessionSummary, nowEpochMs: number): boolean {
+	return (
+		isRestorationContinuationGuardDeclaredArmedIgnoringMaximumArmedDuration(summary) &&
+		!hasRestorationContinuationGuardOutlivedItsMaximumArmedDuration(summary, nowEpochMs)
+	);
+}
+
 // ── park：「已 park、正在等待已派发后台工作」的唯一被认可判据 ────────────────────────────────
 // 主 agent 以非 native 方式 dispatch 一个后台任务（例：把 reviewer 计划作为独立 Kanban 任务发出）后，结束自己
 // 这一轮去等它完成。Claude 此刻只发一个裸 Stop（它不知道刚才那是子 agent，不发 SubagentStop），裸 Stop 经
@@ -580,13 +665,13 @@ export function isParkedAwaitingDispatchedBackgroundWork(
 //   5s  VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS 读 lastSubstantiveOutputAt Validation 列自动打回
 //   5min RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS      读 lastOutputAt        Active/Stale 二分
 //   5min IDLE_STALL_AUTO_REVIEW_THRESHOLD_MS（session-manager） 读实质戳   停在提示符时自愈翻人回合
-//   2h   本常量                                     读**离散停止事件**      回收 agent 进程 + 其 MCP 后代
+//   5h   本常量                                     读**离散停止事件**      回收 agent 进程 + 其 MCP 后代
 // 关键区别：上面四个都读「时间戳新鲜度」，本常量读的是一次明确的状态转移（agentResponseGenerationStopped）。
 // spinner 重绘会推进 lastOutputAt、实质分类器有节流窗口，二者都不表达「这一轮已经结束」。
 //
-// 2 小时统一适用于 task 会话、sidebar 项目会话（__home_agent__:*）、以及 error / interrupted / failed
+// 5 小时统一适用于 task 会话、sidebar 项目会话（__home_agent__:*）、以及 error / interrupted / failed
 // 等人回合——单一常数、零 per-kind 分档（用户拍板）。
-export const AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS = 2 * 60 * 60_000;
+export const AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS = 5 * 60 * 60_000;
 
 // park 轨道的独立兜底上限（默认值）：park 不走上面的宽限期——它表示「主 agent 正在等自己派发的
 // 后台工作」，那本就可能跑很久。24h 只是**未显式声明期限时**的兜底；`kanban task park --max-retention`

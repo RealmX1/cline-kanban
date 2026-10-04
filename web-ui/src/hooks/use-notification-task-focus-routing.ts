@@ -1,28 +1,24 @@
-import type { Dispatch, SetStateAction } from "react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useRef } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
-import { buildProjectPathname, buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
+import { buildProjectPathname } from "@/hooks/app-utils";
 import { requestWorkspaceTabFocusViaServiceWorker } from "@/utils/workspace-tab-focus-via-service-worker";
 
 // 应用内通知点击（铃铛面板 / 通知完整日志）定位 task 的「发送侧」路由，与「接收侧」
 // use-notification-task-focus.ts（监听 SW 转发的 focus-task-from-notification）成对：
-//  ① 同项目：本 tab 直接选中；
-//  ② 本 tab 正切向目标项目途中：挂 pending 待落地选中（原 App.tsx 语义原样保留）；
-//  ③ 真·跨项目：经 SW 中转定位既有目标项目标签页（无则 window.open 新开深链标签页），
-//     本 tab 保持不动；仅当机制不可用时才降级为现状的 in-tab 切项目行为。
+//  ① 同项目：交给 openTaskInProjectInPlace 的同项目分支选中（找不到卡时提示、不清掉当前 Focus View）；
+//  ② 本 tab 正切向目标项目途中：交给原地跳转（它挂 pending、目标 board 加载出该任务后再选中）；
+//  ③ 真·跨项目：经 SW 中转定位既有目标项目标签页，本 tab 保持不动；没有开着目标项目的标签页、或机制
+//     不可用时，在本 tab **原地跳转**——与跨项目切换面板、Board Overview 走同一条
+//     openTaskInProjectInPlace（use-cross-project-task-open-in-project.ts），不再新开深链标签页：
+//     一个标签页管全部项目是一等用法（docs/context-cross-project-recently-active-task-switcher.md）。
 export function useNotificationTaskFocusRouting(input: {
 	currentProjectId: string | null;
 	isProjectSwitching: boolean;
 	navigationCurrentProjectId: string | null;
-	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
-	handleSelectProject: (projectId: string) => void;
+	openTaskInProjectInPlace: (workspaceId: string, taskId: string) => void;
 }): { focusNotificationTask: (workspaceId: string, taskId: string) => void } {
-	const { currentProjectId, isProjectSwitching, navigationCurrentProjectId, setSelectedTaskId, handleSelectProject } =
-		input;
-
-	// 在途 / 降级路径的待选中任务：目标项目落地后由下方 effect 收尾。
-	const pendingNotificationFocusRef = useRef<{ workspaceId: string; taskId: string } | null>(null);
+	const { currentProjectId, isProjectSwitching, navigationCurrentProjectId, openTaskInProjectInPlace } = input;
 
 	// 迟到降级守卫（两把锁，缺一不可）：分支③的 .then 回调最长 ~1.5s 后才 resolve
 	//（WORKSPACE_TAB_FOCUS_RESPONSE_TIMEOUT_MS 超时兜底），而降级会写 pending 并 in-tab
@@ -44,18 +40,18 @@ export function useNotificationTaskFocusRouting(input: {
 			latestFocusNotificationTaskInvocationTokenRef.current += 1;
 			const invocationTokenForThisNotificationClick = latestFocusNotificationTaskInvocationTokenRef.current;
 			const navigationCurrentProjectIdAtNotificationClickTime = navigationCurrentProjectId;
-			// ① 目标项目已在本 tab 完全落地（loaded 且非切换中）→ 直接选中——与下方 pending-effect
+			// ① 目标项目已在本 tab 完全落地（loaded 且非切换中）→ 交给统一入口的同项目分支选中——与下方 pending-effect
 			// 同轴（currentProjectId）。若只看 navigationCurrentProjectId（导航意图），切换在途时会
 			// 过早 setSelectedTaskId，随后被 useDetailTaskNavigation 切项目的 closeDetail 清掉且无
 			// pending 恢复，通知点击打不开详情。
 			if (workspaceId === currentProjectId && !isProjectSwitching) {
-				setSelectedTaskId(taskId);
+				openTaskInProjectInPlace(workspaceId, taskId);
 				return;
 			}
-			// ② 本 tab 的导航意图已指向目标（正切向目标项目途中）→ 只挂 pending 待落地选中，
-			// 不重复 handleSelectProject。
+			// ② 本 tab 的导航意图已指向目标（正切向目标项目途中）→ 原地跳转只挂 pending 待落地选中
+			// （它调的 handleSelectProject 对相等 projectId 自带 no-op 守卫，不会重复切）。
 			if (workspaceId === navigationCurrentProjectId) {
-				pendingNotificationFocusRef.current = { workspaceId, taskId };
+				openTaskInProjectInPlace(workspaceId, taskId);
 				return;
 			}
 			// ③ 真·跨项目：SW 中转定位目标项目的既有标签页；本 tab 不切项目。
@@ -81,24 +77,11 @@ export function useNotificationTaskFocusRouting(input: {
 					);
 					return;
 				}
-				if (result === "no-existing-tab") {
-					// 仍处于点击的 transient activation 窗口内（往返 ≤1.5s < Chrome ~5s），不会被
-					// popup blocker 拦。必须恰好两参：任何非空第三参 features（含 "noopener"）都会让
-					// Chrome 开弹窗式 window 而非标签页；同源页面保留 opener 无安全问题。
-					const openedWindow = window.open(buildProjectTaskDeepLinkUrl(workspaceId, taskId), "_blank");
-					if (openedWindow) {
-						return;
-					}
-					// 站点级弹窗拦截 → 落入下方降级。
-				}
-				// mechanism-unavailable（无 controller / 旧 SW 超时 / SW 异常 / window.open 被拦）
-				// → 降级为现状行为：in-tab 切项目 + 待落地选中（handleSelectProject 对相等
-				// projectId 自带 no-op 守卫）。
-				// 仅此降级分支需要迟到守卫：focused-existing-tab 零副作用；
-				// task-selected-in-background-tab 只弹 toast（任务确已在目标 tab 后台就位，
-				// 陈述迟到也依然为真，且不动本 tab 导航）；no-existing-tab 的 window.open
-				// 新开目标深链标签页、不劫持本 tab（每次点击都独立值得开出自己的 tab，
-				// 不适用 last-wins 语义）。唯有此处会写 pending 并 in-tab 切项目。
+				// no-existing-tab / mechanism-unavailable（无 controller / 旧 SW 超时 / SW 异常）
+				// → 本 tab 原地跳转。
+				// 仅此分支需要迟到守卫：focused-existing-tab 零副作用；task-selected-in-background-tab
+				// 只弹 toast（任务确已在目标 tab 后台就位，陈述迟到也依然为真，且不动本 tab 导航）。
+				// 唯有此处会在 1.5s 往返之后 in-tab 切项目。
 				const invocationSupersededByNewerNotificationClick =
 					latestFocusNotificationTaskInvocationTokenRef.current !== invocationTokenForThisNotificationClick;
 				const navigationIntentChangedSinceNotificationClick =
@@ -107,25 +90,11 @@ export function useNotificationTaskFocusRouting(input: {
 					// 迟到的降级不得覆盖更新的点击 / 显式导航 → 静默放弃。
 					return;
 				}
-				pendingNotificationFocusRef.current = { workspaceId, taskId };
-				handleSelectProject(workspaceId);
+				openTaskInProjectInPlace(workspaceId, taskId);
 			});
 		},
-		[currentProjectId, isProjectSwitching, navigationCurrentProjectId, setSelectedTaskId, handleSelectProject],
+		[currentProjectId, isProjectSwitching, navigationCurrentProjectId, openTaskInProjectInPlace],
 	);
-
-	// 在途 / 降级收尾：目标项目数据落地（currentProjectId 到位、非切换中）后再选中——
-	// 否则会被 useDetailTaskNavigation 切项目时的 closeDetail 清掉（原 App.tsx effect 原样搬入）。
-	useEffect(() => {
-		const pending = pendingNotificationFocusRef.current;
-		if (!pending) {
-			return;
-		}
-		if (currentProjectId === pending.workspaceId && !isProjectSwitching) {
-			pendingNotificationFocusRef.current = null;
-			setSelectedTaskId(pending.taskId);
-		}
-	}, [currentProjectId, isProjectSwitching, setSelectedTaskId]);
 
 	return { focusNotificationTask };
 }

@@ -8,6 +8,7 @@ import ora, { type Ora } from "ora";
 import packageJson from "../package.json" with { type: "json" };
 import { disposeCliTelemetryService } from "./cline-sdk/cline-telemetry-service.js";
 import { registerDeploymentCommand } from "./commands/deployment";
+import { registerDiagnosticsCommand } from "./commands/diagnostics";
 import { registerExploratoryCommand } from "./commands/exploratory";
 import { registerHooksCommand } from "./commands/hooks";
 import { registerTaskCommand } from "./commands/task";
@@ -421,6 +422,8 @@ async function startServer(): Promise<{
 		onTerminalManagerReady: (workspaceId, manager) => {
 			runtimeStateHub?.trackTerminalManager(workspaceId, manager);
 		},
+		listConversationTaskSessionSummariesForWorkspace: (workspaceId) =>
+			runtimeStateHub?.listTrackedConversationTaskSessionSummaries(workspaceId) ?? [],
 	});
 	runtimeStateHub = createRuntimeStateHub({
 		workspaceRegistry,
@@ -704,6 +707,7 @@ function createProgram(invocationArgs: string[]): Command {
 	registerExploratoryCommand(program);
 	registerDeploymentCommand(program);
 	registerVerificationCommand(program);
+	registerDiagnosticsCommand(program);
 
 	program
 		.command("mcp")

@@ -2,6 +2,7 @@ import * as RadixPopover from "@radix-ui/react-popover";
 import { Plus } from "lucide-react";
 import { type KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { ProjectSwitcherBoardScopeAllProjectsPseudoRow } from "@/components/top-bar-project-switcher/project-switcher-board-scope-all-projects-pseudo-row";
 import { ProjectSwitcherColumnVisibilityMenu } from "@/components/top-bar-project-switcher/project-switcher-column-visibility-menu";
 import {
 	buildProjectSwitcherRows,
@@ -23,6 +24,7 @@ import { cn } from "@/components/ui/cn";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { ProjectNumericSlotGroupNumber } from "@/hooks/use-project-numeric-slot-group-assignments";
 import type { RecentlyUsedProjectSwitchHistory } from "@/hooks/use-recently-used-project-switch-history";
+import type { SelectedBoardOrSingleProjectScope } from "@/hooks/use-selected-board-or-single-project-scope";
 import type { RuntimeProjectSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
@@ -50,7 +52,15 @@ export interface TopBarProjectSwitcherState {
 	onAddProject: () => void;
 	onAssignProjectToNumericSlotGroupNumber: (slotNumber: ProjectNumericSlotGroupNumber, projectId: string) => void;
 	onClearNumericSlotGroupNumber: (slotNumber: ProjectNumericSlotGroupNumber) => void;
+	// 范围控件（见 use-selected-board-or-single-project-scope）：表格首行「All projects」= Board Scope；
+	// 选具体项目行由 onSelectProject 负责切回单项目范围。
+	selectedBoardOrSingleProjectScope: SelectedBoardOrSingleProjectScope;
+	onSelectBoardScopeAllProjects: () => void;
+	// Board Scope 下 Focus View 打开着的任务所属的项目：触发按钮显示成「All projects › 项目名」。
+	boardScopeFocusViewFocusedTaskProjectId: string | null;
 }
+
+const BOARD_SCOPE_ALL_PROJECTS_PSEUDO_ROW_LABEL = "all projects";
 
 export function TopBarProjectSwitcher({
 	projects,
@@ -64,6 +74,9 @@ export function TopBarProjectSwitcher({
 	onAddProject,
 	onAssignProjectToNumericSlotGroupNumber,
 	onClearNumericSlotGroupNumber,
+	selectedBoardOrSingleProjectScope,
+	onSelectBoardScopeAllProjects,
+	boardScopeFocusViewFocusedTaskProjectId,
 }: TopBarProjectSwitcherState): React.ReactElement | null {
 	const isMobile = useIsMobile();
 	const [isOpen, setIsOpen] = useState(false);
@@ -98,6 +111,13 @@ export function TopBarProjectSwitcher({
 		[lastVisitedEpochMsByProjectId, numericSlotGroupNumberByProjectId, projects, storedSortOrder],
 	);
 	const visibleRows = useMemo(() => filterProjectSwitcherRowsByQuery(orderedRows, query), [orderedRows, query]);
+	const isBoardScopeAllProjectsSelected = selectedBoardOrSingleProjectScope === "board_scope_all_projects";
+	// 伪行占键盘高亮索引的第 0 行；过滤词与它的标签对不上时隐藏，项目行的索引随之前移。
+	const normalizedQuery = query.trim().toLowerCase();
+	const isBoardScopeAllProjectsPseudoRowVisible =
+		normalizedQuery.length === 0 || BOARD_SCOPE_ALL_PROJECTS_PSEUDO_ROW_LABEL.includes(normalizedQuery);
+	const projectRowIndexOffset = isBoardScopeAllProjectsPseudoRowVisible ? 1 : 0;
+	const navigableRowCount = projectRowIndexOffset + visibleRows.length;
 
 	const projectNameByNumericSlotGroupNumber = useMemo(() => {
 		const byNumericSlotGroupNumber = new Map<ProjectNumericSlotGroupNumber, string>();
@@ -123,33 +143,43 @@ export function TopBarProjectSwitcher({
 		}
 	}, []);
 
-	// 打开时把高亮落在第一个非当前项目上，于是「打开 + Enter」= 跳回上一个项目（alt-tab 语义）。
+	// 打开时把高亮落在第一个非当前项目上，于是「打开 + Enter」= 跳回上一个项目（alt-tab 语义）。Board Scope 下
+	// 落在当前项目（焦点任务所属的项目）上：「打开 + Enter」= 收窄回它的单项目视图。
 	useEffect(() => {
 		if (!isOpen) {
 			return;
 		}
-		setActiveRowIndex(resolveInitialActiveProjectSwitcherRowIndex(orderedRows, currentProjectId));
+		const currentProjectRowIndex = orderedRows.findIndex((row) => row.project.id === currentProjectId);
+		setActiveRowIndex(
+			1 +
+				(isBoardScopeAllProjectsSelected && currentProjectRowIndex >= 0
+					? currentProjectRowIndex
+					: resolveInitialActiveProjectSwitcherRowIndex(orderedRows, currentProjectId)),
+		);
 		// 只在打开的那一刻定位，之后由键鼠接管；orderedRows 的后续推送不该把高亮拽回去。
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [isOpen]);
 
-	// 过滤结果变短后把高亮夹回合法区间。
+	// 伪行随过滤词显隐时项目行的索引整体平移一位，高亮按 offset 差值跟着平移，才仍指向同一个项目行
+	// （原本在伪行上、伪行被隐藏时落到第一个项目行）。ref 记住上一次的 offset，只在它真的变化时平移一次。
+	const previousProjectRowIndexOffsetRef = useRef(projectRowIndexOffset);
+	// 平移后再把高亮夹回合法区间（过滤结果变短时）。
 	useEffect(() => {
+		const projectRowIndexOffsetDelta = projectRowIndexOffset - previousProjectRowIndexOffsetRef.current;
+		previousProjectRowIndexOffsetRef.current = projectRowIndexOffset;
 		setActiveRowIndex((currentIndex) => {
-			if (visibleRows.length === 0) {
+			if (navigableRowCount === 0) {
 				return 0;
 			}
-			return Math.min(currentIndex, visibleRows.length - 1);
+			return Math.min(Math.max(currentIndex + projectRowIndexOffsetDelta, 0), navigableRowCount - 1);
 		});
-	}, [visibleRows.length]);
+	}, [navigableRowCount, projectRowIndexOffset]);
 
 	useEffect(() => {
 		if (!isOpen) {
 			return;
 		}
-		const activeRowElement = contentRef.current?.querySelector<HTMLElement>(
-			'[data-testid="project-switcher-table-row"][aria-current="true"]',
-		);
+		const activeRowElement = contentRef.current?.querySelector<HTMLElement>('tbody > tr[aria-current="true"]');
 		activeRowElement?.scrollIntoView({ block: "nearest" });
 	}, [activeRowIndex, isOpen, visibleRows]);
 
@@ -158,13 +188,18 @@ export function TopBarProjectSwitcher({
 	const handleSelectProjectAndClose = useCallback(
 		(projectId: string) => {
 			handleOpenChange(false);
-			if (projectId === currentProjectId) {
+			// Board Scope 下选当前项目不是 no-op：它把范围收窄回这个项目。
+			if (projectId === currentProjectId && !isBoardScopeAllProjectsSelected) {
 				return;
 			}
 			onSelectProject(projectId);
 		},
-		[currentProjectId, handleOpenChange, onSelectProject],
+		[currentProjectId, handleOpenChange, isBoardScopeAllProjectsSelected, onSelectProject],
 	);
+	const handleSelectBoardScopeAllProjectsAndClose = useCallback(() => {
+		handleOpenChange(false);
+		onSelectBoardScopeAllProjects();
+	}, [handleOpenChange, onSelectBoardScopeAllProjects]);
 
 	// 分支与 search-select-dropdown 的 handleSearchInputKeyDown 保持一致，避免两处键盘行为分叉。
 	const handleNavigationKeyDown = useCallback(
@@ -173,7 +208,7 @@ export function TopBarProjectSwitcher({
 			if (isKeyboardEventEmittedDuringImeComposition(event)) {
 				return;
 			}
-			if (visibleRows.length === 0) {
+			if (navigableRowCount === 0) {
 				if (event.key === "Escape") {
 					event.preventDefault();
 					handleOpenChange(false);
@@ -183,7 +218,7 @@ export function TopBarProjectSwitcher({
 
 			if (event.key === "ArrowDown") {
 				event.preventDefault();
-				setActiveRowIndex((currentIndex) => Math.min(currentIndex + 1, visibleRows.length - 1));
+				setActiveRowIndex((currentIndex) => Math.min(currentIndex + 1, navigableRowCount - 1));
 				return;
 			}
 
@@ -201,13 +236,17 @@ export function TopBarProjectSwitcher({
 
 			if (event.key === "End") {
 				event.preventDefault();
-				setActiveRowIndex(visibleRows.length - 1);
+				setActiveRowIndex(navigableRowCount - 1);
 				return;
 			}
 
 			if (event.key === "Enter") {
 				event.preventDefault();
-				const row = visibleRows[activeRowIndex];
+				if (isBoardScopeAllProjectsPseudoRowVisible && activeRowIndex === 0) {
+					handleSelectBoardScopeAllProjectsAndClose();
+					return;
+				}
+				const row = visibleRows[activeRowIndex - projectRowIndexOffset];
 				if (!row) {
 					return;
 				}
@@ -220,7 +259,16 @@ export function TopBarProjectSwitcher({
 				handleOpenChange(false);
 			}
 		},
-		[activeRowIndex, handleOpenChange, handleSelectProjectAndClose, visibleRows],
+		[
+			activeRowIndex,
+			handleOpenChange,
+			handleSelectBoardScopeAllProjectsAndClose,
+			handleSelectProjectAndClose,
+			isBoardScopeAllProjectsPseudoRowVisible,
+			navigableRowCount,
+			projectRowIndexOffset,
+			visibleRows,
+		],
 	);
 
 	const handleToggleColumnVisibility = useCallback(
@@ -240,6 +288,15 @@ export function TopBarProjectSwitcher({
 		<RadixPopover.Root open={isOpen} onOpenChange={handleOpenChange}>
 			<RadixPopover.Trigger asChild>
 				<ProjectSwitcherTriggerButton
+					boardScopeAllProjectsBreadcrumb={
+						isBoardScopeAllProjectsSelected
+							? {
+									focusViewFocusedTaskProjectName:
+										projects.find((project) => project.id === boardScopeFocusViewFocusedTaskProjectId)
+											?.name ?? null,
+								}
+							: null
+					}
 					projectName={navigationCurrentProject?.name ?? null}
 					liveAgentTaskCount={navigationCurrentProject ? deriveLiveAgentTaskCount(navigationCurrentProject) : 0}
 					isProjectUnavailable={navigationCurrentProject?.availability.status === "unavailable"}
@@ -327,14 +384,29 @@ export function TopBarProjectSwitcher({
 
 					<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1 py-1">
 						<ProjectSwitcherTable
+							boardScopeAllProjectsPseudoRow={
+								isBoardScopeAllProjectsPseudoRowVisible ? (
+									<ProjectSwitcherBoardScopeAllProjectsPseudoRow
+										projects={projects}
+										isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
+										isActiveRow={activeRowIndex === 0}
+										columnVisibility={columnVisibility}
+										onSelectBoardScopeAllProjects={handleSelectBoardScopeAllProjectsAndClose}
+										onActivateRow={() => setActiveRowIndex(0)}
+									/>
+								) : null
+							}
 							rows={visibleRows}
-							currentProjectId={currentProjectId}
-							activeRowIndex={activeRowIndex}
+							// Board Scope 下没有哪个项目是「当前选中的范围」，「Current」标记挂在伪行上。
+							currentProjectId={isBoardScopeAllProjectsSelected ? null : currentProjectId}
+							activeRowIndex={activeRowIndex - projectRowIndexOffset}
 							columnVisibility={columnVisibility}
 							nowEpochMs={nowEpochMs}
 							projectNameByNumericSlotGroupNumber={projectNameByNumericSlotGroupNumber}
 							onSelectProject={handleSelectProjectAndClose}
-							onActiveRowIndexChange={setActiveRowIndex}
+							onActiveRowIndexChange={(projectRowIndex) =>
+								setActiveRowIndex(projectRowIndex + projectRowIndexOffset)
+							}
 							onAssignProjectToNumericSlotGroupNumber={onAssignProjectToNumericSlotGroupNumber}
 							onClearNumericSlotGroupNumber={onClearNumericSlotGroupNumber}
 						/>

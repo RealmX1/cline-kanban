@@ -194,6 +194,23 @@ describe("useWindowedAgentChatMessageList", () => {
 		expect(getState().hiddenOlderMessageCount).toBe(150);
 	});
 
+	// 下游（如面板的 auto-scroll effect）依赖 visibleMessages 的引用：messages 与隐藏条数都没变时
+	// 重渲染不得换新切片引用，否则每帧广播重渲都会把下游 effect 再跑一遍。
+	it("keeps the visibleMessages reference stable across rerenders with unchanged inputs", () => {
+		const messages = createMessages(130);
+		const { getState, rerender } = renderWindowedMessageList({ messages, windowSize: 50 });
+		const firstVisibleMessages = getState().visibleMessages;
+		expect(firstVisibleMessages).toHaveLength(50);
+
+		rerender({ messages, windowSize: 50 });
+		expect(getState().visibleMessages).toBe(firstVisibleMessages);
+
+		// 尾部追加（新数组引用）仍会得到新切片。
+		rerender({ messages: [...messages, "message-130"], windowSize: 50 });
+		expect(getState().visibleMessages).not.toBe(firstVisibleMessages);
+		expect(getState().visibleMessages.at(-1)).toBe("message-130");
+	});
+
 	it("defaults to a 50-message window", () => {
 		const { getState } = renderWindowedMessageList({ messages: createMessages(120) });
 		expect(DEFAULT_AGENT_CHAT_MESSAGE_WINDOW_SIZE).toBe(50);

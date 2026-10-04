@@ -8,6 +8,7 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../../../src/core/api-contract";
 import { addTaskToColumn } from "../../../src/core/task-board-mutations";
+import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 const workspaceTaskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
@@ -26,6 +27,19 @@ const orphanedDraftCleanupMocks = vi.hoisted(() => ({
 
 const turnCheckpointMocks = vi.hoisted(() => ({
 	deleteAllTaskTurnCheckpointRefs: vi.fn(),
+}));
+
+const taskSessionStartDiagnosticsMocks = vi.hoisted(() => ({
+	recordTaskSessionStartDiagnostic: vi.fn(async () => {}),
+}));
+
+const ensureTaskWorktreeMocks = vi.hoisted(() => ({
+	ensureTaskWorktreeIfDoesntExist: vi.fn(),
+}));
+
+// 真实实现会追加写 ~/.cline/kanban 下的启动诊断日志：测试绝不能污染真实 home。
+vi.mock("../../../src/diagnostics/task-session-start-diagnostics-logger.js", () => ({
+	recordTaskSessionStartDiagnostic: taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic,
 }));
 
 vi.mock("../../../src/state/discard-task-edit-drafts-for-tasks-removed-from-board.js", async (importOriginal) => {
@@ -65,7 +79,7 @@ vi.mock("../../../src/workspace/task-worktree.js", async (importOriginal) => {
 		TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX: actual.TASK_WORKTREE_NOT_FOUND_ERROR_MESSAGE_PREFIX,
 		TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX: actual.TASK_WORKTREE_SETUP_IN_PROGRESS_ERROR_MESSAGE_PREFIX,
 		deleteTaskWorktree: vi.fn(),
-		ensureTaskWorktreeIfDoesntExist: vi.fn(),
+		ensureTaskWorktreeIfDoesntExist: ensureTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist,
 		getTaskWorkspaceInfo: vi.fn(),
 		resolveTaskCwd: workspaceTaskWorktreeMocks.resolveTaskCwd,
 	};
@@ -131,7 +145,6 @@ function createBoard(): RuntimeBoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -213,17 +226,31 @@ describe("createWorkspaceApi saveState", () => {
 		});
 		const payload = { board: createBoard(), sessions: {}, expectedRevision: 1 };
 
-		const response = await api.saveState({ workspaceId: "workspace-1", workspacePath: "/tmp/repo" }, payload);
+		const response = await api.saveState(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			payload,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+		);
 
 		expect(response).toBe(expectedResponse);
-		expect(workspaceStateMocks.saveWorkspaceState).toHaveBeenCalledWith("/tmp/repo", {
-			...payload,
-			sessions: {
-				"terminal-task": terminalSummary,
-				"cline-task": clineSummary,
-				"acp-task": acpSummary,
+		// Web UI 请求目前没有页面加载 nonce：行动者解析为 direct_runtime_trpc_caller（1a.3 接 nonce 前的预期）。
+		expect(workspaceStateMocks.saveWorkspaceState).toHaveBeenCalledWith(
+			"/tmp/repo",
+			expect.objectContaining({
+				taskMutationIntentKind: "web_ui_workspace_board_state_save",
+				resolvedKanbanActor: {
+					kanbanActorKind: "direct_runtime_trpc_caller_without_cli_actor_header_or_web_ui_page_load_nonce",
+				},
+			}),
+			{
+				...payload,
+				sessions: {
+					"terminal-task": terminalSummary,
+					"cline-task": clineSummary,
+					"acp-task": acpSummary,
+				},
 			},
-		});
+		);
 	});
 
 	// 浏览器删卡不走任何「删除 procedure」，就是一次整份 board PUT。「任务被删除」在这条路径上只能
@@ -240,6 +267,7 @@ describe("createWorkspaceApi saveState", () => {
 		await api.saveState(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard).toHaveBeenCalledWith(
@@ -259,6 +287,7 @@ describe("createWorkspaceApi saveState", () => {
 		await api.saveState(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(orphanedDraftCleanupMocks.discardTaskEditDraftsForTasksRemovedFromBoard).not.toHaveBeenCalled();
@@ -278,6 +307,7 @@ describe("createWorkspaceApi saveState", () => {
 			api.saveState(
 				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 				{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 			),
 		).resolves.toBe(savedResponse);
 	});
@@ -302,6 +332,7 @@ describe("createWorkspaceApi saveState", () => {
 		await api.saveState(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		expect(turnCheckpointMocks.deleteAllTaskTurnCheckpointRefs).toHaveBeenCalledTimes(1);
@@ -329,6 +360,7 @@ describe("createWorkspaceApi saveState", () => {
 			api.saveState(
 				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 				{ board: createBoard(), sessions: {}, expectedRevision: 1 },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 			),
 		).resolves.toBe(savedResponse);
 	});
@@ -648,7 +680,7 @@ describe("createWorkspaceApi addBacklogTask", () => {
 
 	it("uses the runtime default when creating backlog tasks through the scoped API", async () => {
 		const savedBoardRef: { current: RuntimeBoardData | null } = { current: null };
-		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_cwd, mutate) => {
+		workspaceStateMocks.mutateWorkspaceState.mockImplementation(async (_cwd, _taskMutationIntent, mutate) => {
 			const currentState = createWorkspaceState();
 			const mutation = mutate(currentState);
 			savedBoardRef.current = mutation.board;
@@ -681,6 +713,7 @@ describe("createWorkspaceApi addBacklogTask", () => {
 			{
 				prompt: "Create from API",
 			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
 		if (!savedBoardRef.current) {
@@ -690,5 +723,66 @@ describe("createWorkspaceApi addBacklogTask", () => {
 		expect(backlogColumn?.cards[0]?.startInPlanMode).toBe(false);
 		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledWith("workspace-1", "/tmp/repo");
 		expect(broadcastRuntimeProjectsUpdated).toHaveBeenCalledWith("workspace-1");
+		expect(workspaceStateMocks.mutateWorkspaceState).toHaveBeenCalledWith(
+			"/tmp/repo",
+			expect.objectContaining({
+				taskMutationIntentKind: "runtime_trpc_add_backlog_task",
+				resolvedKanbanActor: {
+					kanbanActorKind: "direct_runtime_trpc_caller_without_cli_actor_header_or_web_ui_page_load_nonce",
+				},
+			}),
+			expect.any(Function),
+		);
 	});
 });
+
+describe("createWorkspaceApi ensureWorktree", () => {
+	const workspaceScope = { workspaceId: "workspace-for-ensure-worktree-test", workspacePath: "/tmp/repo" };
+
+	beforeEach(() => {
+		ensureTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist.mockReset();
+		taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic.mockClear();
+	});
+
+	it("records a start diagnostic when worktree setup fails, because startTaskSession is never reached", async () => {
+		// 浏览器启动 = ensureWorktree 与 startTaskSession 两次 RPC。前者失败（高负载下锁等待超时）时
+		// 后者根本不会被调用，此前启动诊断日志里一行都没有，「新任务起不来」在服务端无从查起。
+		ensureTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist.mockResolvedValue({
+			ok: false,
+			path: null,
+			baseRef: "main",
+			baseCommit: null,
+			error: "Lock file is already being held",
+		});
+		const api = createWorkspaceApiForTest();
+
+		const response = await api.ensureWorktree(workspaceScope, { taskId: "task-1", baseRef: "main" });
+
+		expect(response.ok).toBe(false);
+		expect(taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic).toHaveBeenCalledWith(
+			expect.objectContaining({
+				event: "failed",
+				workspaceId: "workspace-for-ensure-worktree-test",
+				taskId: "task-1",
+				phase: "ensure_task_worktree",
+				error: "Lock file is already being held",
+			}),
+		);
+	});
+
+	it("does not record a start diagnostic when the worktree is ready", async () => {
+		ensureTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist.mockResolvedValue({
+			ok: true,
+			path: "/tmp/worktree",
+			baseRef: "main",
+			baseCommit: "abc123",
+		});
+		const api = createWorkspaceApiForTest();
+
+		await api.ensureWorktree(workspaceScope, { taskId: "task-1", baseRef: "main" });
+
+		expect(taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic).not.toHaveBeenCalled();
+	});
+});
+
+// setTaskPinboardPinStateOfTaskCard 已迁入 taskCardAction（见 task-card-action-api.test.ts 的同名段）。

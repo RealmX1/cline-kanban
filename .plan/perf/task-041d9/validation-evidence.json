@@ -1,0 +1,388 @@
+{
+  "taskId": "041d9",
+  "baseCommit": "64faca997963cd137d4e86852a7370ccdeb766bf",
+  "batch1Commit": "6accac9e",
+  "liveDeployedCommit": "e3ffbbc44343bb3bcb0eb5ec46f13b3d1246eedf",
+  "bundleMeasurements": {
+    "before": {
+      "main": {
+        "filename": "index-D8uubjY9.js",
+        "bytes": 4084566,
+        "gzipBytesLevel9": 922019,
+        "sha256": "18937879a0530f94c6c6e5c67f1991b4b28f6d1c091710c509236d25ac4d717e",
+        "tensorflowSourceCount": 700,
+        "oramaSourceCount": 89
+      },
+      "xterm": {
+        "filename": "xterm-vendor-BYEQ7Wvt.js",
+        "bytes": 666307,
+        "gzipBytesLevel9": 152325,
+        "sha256": "69b1f53d2f13411663bff06e260650254fd191098d2e21f9c5059f738ff53a04",
+        "tensorflowSourceCount": 0,
+        "oramaSourceCount": 0
+      }
+    },
+    "after": {
+      "main": {
+        "filename": "index-BQoAYfZn.js",
+        "bytes": 2717442,
+        "gzipBytesLevel9": 702386,
+        "sha256": "046fdf066827779e9d5943299d2cc8894a3468e4f91a105a509ad679623b43a4",
+        "tensorflowSourceCount": 0,
+        "oramaSourceCount": 0
+      },
+      "worker": {
+        "filename": "task-board-semantic-search-worker-Dv1359wT.js",
+        "bytes": 1491312,
+        "gzipBytesLevel9": 212831,
+        "sha256": "2587f5743789031433fc276373202785b0dce9b2ee6dbb141d9a63603e6d1e65",
+        "tensorflowSourceCount": 575,
+        "oramaSourceCount": 89
+      },
+      "xterm": {
+        "filename": "xterm-vendor-BYEQ7Wvt.js",
+        "bytes": 666307,
+        "gzipBytesLevel9": 152325,
+        "sha256": "69b1f53d2f13411663bff06e260650254fd191098d2e21f9c5059f738ff53a04",
+        "tensorflowSourceCount": 0,
+        "oramaSourceCount": 0
+      }
+    }
+  },
+  "batch1LiveHover": {
+    "idle": null,
+    "hoveredTaskIds": [
+      "3341b",
+      "81904",
+      "ecee5",
+      "049a5",
+      "a6224"
+    ],
+    "cardCount": 42,
+    "dependencyPathCount": 953,
+    "layoutCount": 257,
+    "stackedLayouts": [],
+    "traceEventCount": 10067
+  },
+  "batch1LiveIdleReactProbe": {
+    "commits": 33,
+    "names": {
+      "jkt": 1,
+      "JLe": 1
+    },
+    "messages": {},
+    "rectReads": 0
+  },
+  "cpuWorkerRealBrowser": {
+    "ok": true,
+    "semantic": {
+      "requestId": 1,
+      "ok": true,
+      "results": [
+        {
+          "score": 0.6402582705098439,
+          "matchSources": [
+            "title",
+            "prompt"
+          ],
+          "titleMatchCharacterPositions": {},
+          "promptMatchCharacterPositions": {},
+          "documentIndex": 0
+        }
+      ]
+    },
+    "hybrid": {
+      "requestId": 2,
+      "ok": true,
+      "results": [
+        {
+          "score": 0.55,
+          "matchSources": [
+            "title",
+            "prompt"
+          ],
+          "titleMatchCharacterPositions": {},
+          "promptMatchCharacterPositions": {},
+          "documentIndex": 1
+        }
+      ]
+    },
+    "mainThreadTimerTicks": 964,
+    "elapsedMs": 9647.699999999255
+  },
+  "mutationTests": [
+    {
+      "label": "B1-eager-copy",
+      "exitCode": 1,
+      "log": "/tmp/041d9-mutation-B1-eager-copy.log"
+    },
+    {
+      "label": "B1-same-ms",
+      "exitCode": 1,
+      "log": "/tmp/041d9-mutation-B1-same-ms.log"
+    },
+    {
+      "label": "B3-hover-filter",
+      "exitCode": 1,
+      "log": "/tmp/041d9-mutation-B3-hover-filter.log"
+    },
+    {
+      "label": "B5-reference-bailout",
+      "exitCode": 1,
+      "log": "/tmp/041d9-mutation-B5-reference-bailout.log"
+    },
+    {
+      "label": "B6-fingerprint",
+      "exitCode": 1,
+      "log": "/tmp/041d9-mutation-B6-fingerprint.log"
+    }
+  ],
+  "registeredVerifications": {
+    "ok": true,
+    "workspaceId": "cline-kanban",
+    "taskId": "041d9",
+    "registeredCount": 2,
+    "registered": [
+      {
+        "verificationId": "6db145cf-1b44-49a8-931c-090291a23730",
+        "kind": "guided_manual",
+        "label": "会话推流只更新变化卡片；主看板、Focus View、置顶板和 sticky 副本的动作及拖拽保持可用",
+        "assetsDir": "/Users/bominzhang/.cline/kanban/verifications/6db145cf-1b44-49a8-931c-090291a23730",
+        "cleanupMode": "manual"
+      },
+      {
+        "verificationId": "80d85664-5d49-483d-a137-09c396e4cce5",
+        "kind": "guided_manual",
+        "label": "真实部署的语义搜索按需创建 CPU Worker，搜索完成或失败后 UI 仍可交互，退出搜索能释放 Worker",
+        "assetsDir": "/Users/bominzhang/.cline/kanban/verifications/80d85664-5d49-483d-a137-09c396e4cce5",
+        "cleanupMode": "manual"
+      }
+    ]
+  },
+  "validationLogs": [
+    {
+      "path": "/tmp/041d9-final-root-tests.log",
+      "sha256": "d0d95f8501274fab760fbd0f81152779f2185b21bc55219b72b5c46c95a70642",
+      "tail": [
+        "(node:4719) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "(node:4720) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "(node:4721) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "",
+        " Test Files  179 passed (179)",
+        "      Tests  2320 passed (2320)",
+        "   Start at  22:31:47",
+        "   Duration  45.36s (transform 3.28s, setup 6.48s, import 14.33s, tests 55.59s, environment 8ms)",
+        ""
+      ]
+    },
+    {
+      "path": "/tmp/041d9-final-web-tests.log",
+      "sha256": "a066329e19743587b7beb037e83c1ac68e0a94bf92a52120e2ed33997d3d1cf8",
+      "tail": [
+        "(node:6677) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "(node:6696) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "(node:7049) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "",
+        " Test Files  177 passed (177)",
+        "      Tests  1724 passed (1724)",
+        "   Start at  22:40:31",
+        "   Duration  37.58s (transform 2.79s, setup 565ms, import 12.39s, tests 16.97s, environment 31.96s)",
+        ""
+      ]
+    },
+    {
+      "path": "/tmp/041d9-runtime-stream-integration-fixed.log",
+      "sha256": "84b5f93a11bc47ef43b9fcf7bf516f17de2dbf57de10d56331b9f88bb9ec10b0",
+      "tail": [
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "",
+        " RUN  v4.1.0 /Users/bominzhang/.cline/worktrees/041d9/cline-kanban",
+        "",
+        "(node:93391) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "",
+        " Test Files  1 passed (1)",
+        "      Tests  13 passed (13)",
+        "   Start at  22:42:35",
+        "   Duration  34.76s (transform 67ms, setup 63ms, import 59ms, tests 34.57s, environment 0ms)",
+        ""
+      ]
+    },
+    {
+      "path": "/tmp/041d9-final-root-typecheck.log",
+      "sha256": "e570dedcc3fc2001c14e3c91dca9758599e4ed2248ffffec972a4f15c3640478",
+      "tail": [
+        "",
+        "> kanban@0.1.68 typecheck",
+        "> tsc -p tsconfig.json --noEmit",
+        ""
+      ]
+    },
+    {
+      "path": "/tmp/041d9-final-web-typecheck.log",
+      "sha256": "f2289b6941ca4ece593384a25e9d130cceed7f67fec1bd5a7ac38d6e3c530c53",
+      "tail": [
+        "",
+        "> kanban@0.1.68 web:typecheck",
+        "> npm --prefix web-ui run typecheck",
+        "",
+        "",
+        "> @kanban/web@0.1.0 typecheck",
+        "> tsc --noEmit",
+        ""
+      ]
+    },
+    {
+      "path": "/tmp/041d9-final-build.log",
+      "sha256": "25d355415f8d4f751668eb0f4f1c75dd6201b360fa243b22b6bdcc6b1d4f6fdb",
+      "tail": [
+        "dist/assets/index-BjWUNnel.css                                98.42 kB │ gzip:  15.84 kB",
+        "dist/assets/xterm-vendor-BYEQ7Wvt.js                         666.31 kB │ gzip: 153.88 kB │ map: 1,141.54 kB",
+        "dist/assets/index-BQoAYfZn.js                              2,717.44 kB │ gzip: 707.44 kB │ map: 9,498.19 kB",
+        "✓ built in 5.69s",
+        "esbuild: bundled dist/cli.js and dist/index.js",
+        "(node:11407) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "(node:11411) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "Skipping Sentry sourcemap upload because SENTRY_AUTH_TOKEN is not set.",
+        "(node:11503) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)"
+      ]
+    },
+    {
+      "path": "/tmp/041d9-engine-red.log",
+      "sha256": "9b0765b9fa5e3bde372cbbae33631008b045050a6d580a583115305be6647bad",
+      "tail": [
+        "     93|        term: query,",
+        "     94|        mode: \"vector\",",
+        " ❯ src/search/task-board-semantic-search-engine.test.ts:33:19",
+        "",
+        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯",
+        "",
+        "",
+        " Test Files  1 failed (1)",
+        "      Tests  1 failed (1)",
+        "   Start at  22:38:34",
+        "   Duration  402ms (transform 45ms, setup 18ms, import 77ms, tests 4ms, environment 235ms)",
+        ""
+      ]
+    },
+    {
+      "path": "/tmp/041d9-engine-green.log",
+      "sha256": "6d7cce1f9d96bffbf129a67d732f601e27973ff4d617d6fbbd2765bb2612a159",
+      "tail": [
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "",
+        " RUN  v4.1.0 /Users/bominzhang/.cline/worktrees/041d9/cline-kanban/web-ui",
+        "",
+        "(node:18237) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "",
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed (1)",
+        "   Start at  22:38:59",
+        "   Duration  275ms (transform 38ms, setup 13ms, import 64ms, tests 8ms, environment 132ms)",
+        ""
+      ]
+    },
+    {
+      "path": "/tmp/041d9-memo-red.log",
+      "sha256": "d102292084a23cbfc01c8182968aee5c8cb9a6c0d8dab6b3d7992ef2e47b7e17",
+      "tail": [
+        "AssertionError: 不变的 first 卡及其副本不应重渲染: expected [ 'first', 'second', 'first', …(2) ] to not include 'first'",
+        " ❯ src/components/board-card-render-isolation.test.tsx:46:87",
+        "",
+        "",
+        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯",
+        "",
+        "",
+        " Test Files  1 failed (1)",
+        "      Tests  2 failed (2)",
+        "   Start at  22:18:57",
+        "   Duration  1.03s (transform 277ms, setup 17ms, import 525ms, tests 115ms, environment 297ms)",
+        ""
+      ]
+    }
+  ],
+  "rvfFollowup": {
+    "runId": "rvf-20260922T144727Z-agentic-initiation-start-ac0d6774",
+    "reviewerPlanStatus": "completed",
+    "effectiveReviewers": 2,
+    "issueCount": 1,
+    "fixedIssueCount": 1,
+    "attemptId": "rvf-attempt-rvf-20260922T144727Z-age-RVF-001-e9aede51",
+    "fix": "逐条 await insert，索引初始化等待全部文档并传播失败",
+    "engineRegressionTestsPassed": 3,
+    "finalBundleMeasurements": {
+      "main": {
+        "filename": "index-Cismjlsw.js",
+        "bytes": 2717442,
+        "gzipBytesLevel9": 702391,
+        "sha256": "ff498796c5d95d976f329e837b13260ce18507d61f75965cd7f6ec2f0a0402ac",
+        "tensorflowSourceCount": 0,
+        "oramaSourceCount": 0
+      },
+      "worker": {
+        "filename": "task-board-semantic-search-worker-C3A2XhWt.js",
+        "bytes": 1487554,
+        "gzipBytesLevel9": 212165,
+        "sha256": "df3f8d8ceee9bacb259059ac6c29be1f9b456897db37eb27c8851f725c67ed80",
+        "tensorflowSourceCount": 575,
+        "oramaSourceCount": 89
+      },
+      "xterm": {
+        "filename": "xterm-vendor-BYEQ7Wvt.js",
+        "bytes": 666307,
+        "gzipBytesLevel9": 152325,
+        "sha256": "69b1f53d2f13411663bff06e260650254fd191098d2e21f9c5059f738ff53a04",
+        "tensorflowSourceCount": 0,
+        "oramaSourceCount": 0
+      }
+    },
+    "realBrowserAfterFixAttempts": [
+      {
+        "ok": false,
+        "error": "Error: Failed to fetch",
+        "mainThreadTimerTicks": 8026,
+        "elapsedMs": 80263.5
+      },
+      {
+        "ok": false,
+        "error": "Error: Failed to fetch",
+        "mainThreadTimerTicks": 9884,
+        "elapsedMs": 98843.19999999925
+      }
+    ],
+    "realBrowserAfterFixConclusion": "两次真实模型下载 Failed to fetch；不能声明修复后联网复测通过。原实施阶段成功仍为历史证据，离线可控回归已证索引等待与失败传播。",
+    "finalValidationRecords": "/Users/bominzhang/.rvf/user-local-data/run-logs/runs/rvf-20260922T144727Z-agentic-initiation-start-ac0d6774/artifacts/validation-records.json",
+    "reconciledVerifications": {
+      "ok": true,
+      "workspaceId": "cline-kanban",
+      "taskId": "041d9",
+      "registeredCount": 2,
+      "registered": [
+        {
+          "verificationId": "6db145cf-1b44-49a8-931c-090291a23730",
+          "kind": "guided_manual",
+          "label": "会话推流只更新变化卡片；主看板、Focus View、置顶板和 sticky 副本的动作及拖拽保持可用",
+          "assetsDir": "/Users/bominzhang/.cline/kanban/verifications/6db145cf-1b44-49a8-931c-090291a23730",
+          "cleanupMode": "manual"
+        },
+        {
+          "verificationId": "80d85664-5d49-483d-a137-09c396e4cce5",
+          "kind": "guided_manual",
+          "label": "真实部署的语义搜索按需创建 CPU Worker，搜索完成或失败后 UI 仍可交互，退出搜索能释放 Worker",
+          "assetsDir": "/Users/bominzhang/.cline/kanban/verifications/80d85664-5d49-483d-a137-09c396e4cce5",
+          "cleanupMode": "manual"
+        }
+      ]
+    }
+  }
+}

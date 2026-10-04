@@ -8,11 +8,7 @@ import type {
 	RuntimeTaskEditDraft,
 	WorkspaceTaskEditDraftMutation,
 } from "../../../src/core/api-contract";
-import {
-	addTaskToColumn,
-	deleteTasksFromBoard,
-	trashTaskAndGetReadyLinkedTaskIds,
-} from "../../../src/core/task-board-mutations";
+import { addTaskToColumn, deleteTasksFromBoard, moveTaskToColumn } from "../../../src/core/task-board-mutations";
 
 // 草稿落在 ~/.cline/kanban/workspaces/<id> 之下，路径由 workspace-state 解析。重定向到临时目录，
 // 而不是去动 homedir()——后者会让本套件在用户真实的草稿上跑。
@@ -50,7 +46,6 @@ function createEmptyBoard(): RuntimeBoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -132,7 +127,7 @@ describe("任务从看板上消失时清掉它的编辑草稿", () => {
 	// 此时清草稿本身就是丢内容——判据必须是「还在不在 board 上」，而不是「在哪一列」。
 	it("移进 trash 列**不算**被移除：任务还在，草稿还能被认领", () => {
 		const { board, taskIds } = createBoardWithTasks(["甲"]);
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(board, taskIds[0] ?? "");
+		const trashed = moveTaskToColumn(board, taskIds[0] ?? "", "trash");
 
 		expect(collectTaskIdsRemovedFromBoard(board, trashed.board)).toEqual([]);
 	});

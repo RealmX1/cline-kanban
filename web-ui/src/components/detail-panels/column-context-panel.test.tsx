@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
+import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import type { BoardColumn, CardSelection } from "@/types";
 
 // BoardCard = 列表内的可拖卡（包 <Draggable>）。mock 暴露 data-card-variant="draggable" 与它收到的
@@ -45,28 +46,29 @@ vi.mock("@/components/board-card", () => ({
 	},
 }));
 
-// TaskCardBody = 裸卡体（无 <Draggable>、不收 index）。折叠 peek 的焦点卡与 StageHeaderRails 的钉住克隆
-// 都走这里。mock 忠实还原真实契约：pinnedClone 不输出 data-task-id（保全局唯一），非 clone 输出真实 id 且
-// data-card-variant="static"（不可拖），供断言「peek 卡不带假 Draggable index、不可拖」。
+// TaskCardBody = 裸卡体（无 <Draggable>、不收 index）。折叠 peek 的焦点卡、StageHeaderRails 的 sticky 卡头副本、
+// 置顶板分身都走这里。mock 忠实还原真实契约：只有 canonical 角色输出 data-task-id（保全局唯一），
+// 且 data-card-variant="static"（不可拖），供断言「peek 卡不带假 Draggable index、不可拖」。
 vi.mock("@/components/task-card-body", () => ({
 	TaskCardBody: ({
 		card,
 		selected,
-		pinnedClone,
+		renderRole = "canonical_card_in_its_stage_list",
 		onMoveToTrash,
 		onMoveToValidation,
 	}: {
 		card: { id: string; prompt: string };
 		selected?: boolean;
-		pinnedClone?: boolean;
+		renderRole?: string;
 		onMoveToTrash?: (taskId: string) => void;
 		onMoveToValidation?: (taskId: string) => void;
 	}): React.ReactElement => {
+		const emitsCanonicalDomIdentity = renderRole === "canonical_card_in_its_stage_list";
 		return (
 			<div
-				data-task-id={pinnedClone ? undefined : card.id}
+				data-task-id={emitsCanonicalDomIdentity ? card.id : undefined}
 				data-selected={selected ? "true" : "false"}
-				data-card-variant={pinnedClone ? "pinned-clone" : "static"}
+				data-card-variant={emitsCanonicalDomIdentity ? "static" : renderRole}
 			>
 				{card.prompt}
 				{onMoveToTrash ? (
@@ -349,6 +351,80 @@ describe("ColumnContextPanel", () => {
 		});
 	});
 
+	// Pinned 分段要常驻列表顶端、不随 stage 列表滚走：它必须在 scrollport 之外；且 stage 卡头 rail 以
+	// 绝对定位锚在「stage 列表区」（scrollport 的父节点）上，Pinned 若也落在那个定位父级里就会被顶沿 rail 盖住。
+	it("keeps the Focus View pinned section outside the scrollport and outside the stage-header rail anchor", async () => {
+		const pinnedReviewCard = { ...createCard("task-review", "Review task"), pinnedToTaskPinboardAt: 5_000 };
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: [createCard("task-1", "Backlog task")] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [pinnedReviewCard] },
+			{ id: "trash", title: "Done", cards: [] },
+		];
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-1")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+					onCreateTask={() => {}}
+				/>,
+			);
+		});
+
+		const pinnedSection = container.querySelector('[data-task-pinboard-container="focus-view-section"]');
+		const scrollport = container.querySelector(".kb-detail-task-list-scroll");
+		expect(pinnedSection).not.toBeNull();
+		expect(scrollport).not.toBeNull();
+		if (!pinnedSection || !scrollport?.parentElement) {
+			return;
+		}
+		expect(scrollport.contains(pinnedSection)).toBe(false);
+		expect(scrollport.parentElement.contains(pinnedSection)).toBe(false);
+		expect(
+			scrollport.parentElement.style.position === "relative" ||
+				scrollport.parentElement.classList.contains("relative"),
+		).toBe(true);
+		// rail 定位锚同时须是裁剪边界：底沿 rail 向上堆叠超出本区高度时，不得溢出本区上沿去盖住 Pinned 分段。
+		expect(
+			scrollport.parentElement.style.overflow === "clip" ||
+				scrollport.parentElement.classList.contains("overflow-clip"),
+		).toBe(true);
+		// 文档序在 scrollport 之前 = 视觉上位于任务列表最顶端。
+		expect(pinnedSection.compareDocumentPosition(scrollport) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
+	// 置顶板分身与本体卡同处一个页面，唯一性一旦破掉，居中滚动 / 钉住几何 / Post-Deploy Verification 高亮
+	// 都会随机接到分身上。
+	it("keeps data-task-id unique after a card gets pinned to the task pinboard", async () => {
+		const pinnedReviewCard = { ...createCard("task-review", "Review task"), pinnedToTaskPinboardAt: 5_000 };
+		const columns: BoardColumn[] = [
+			{ id: "backlog", title: "Backlog", cards: [] },
+			{ id: "in_progress", title: "In Progress", cards: [] },
+			{ id: "review", title: "Review", cards: [pinnedReviewCard] },
+			{ id: "validation", title: "Validation", cards: [] },
+			{ id: "trash", title: "Done", cards: [] },
+		];
+
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, "task-review")}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+				/>,
+			);
+		});
+
+		// 置顶板分段渲染了这张卡的分身，但只有 review 列表里的本体带 data-task-id。
+		expect(container.querySelector('[data-task-pinboard-container="focus-view-section"]')).not.toBeNull();
+		expect(container.querySelectorAll('[data-task-id="task-review"]').length).toBe(1);
+		expect(container.querySelectorAll('[data-card-variant="pinned_card_copy_in_task_pinboard"]').length).toBe(1);
+	});
+
 	it("restores the most recently updated done task from the collapsed done header", async () => {
 		const olderDoneTask = {
 			...createCard("task-done-older", "Older done task"),
@@ -531,5 +607,348 @@ describe("ColumnContextPanel", () => {
 			validationDone?.click();
 		});
 		expect(onMoveToTrashTask).toHaveBeenCalledWith("task-val");
+	});
+});
+
+/**
+ * 钉住 rail 的孪生卡头：折叠状态呈现、折叠开关、跳转与折叠/展开后的滚动落点。
+ *
+ * 必须先给 `getBoundingClientRect` 铺一层受控几何——否则 jsdom 下 `rootRect.bottom <= rootRect.top`
+ * 使 `useStageHeaderPinLayout` 返回空布局、rails 根本不渲染，这些断言会全部落空。
+ *
+ * 版图（滚动口视口 [0, 500]；section 折叠后只剩 40px 卡头 + 2px 外框）：
+ *   backlog     [-300, -100]  整段在视口上沿之上 → 钉顶
+ *   in_progress [ -80,  150]  横跨视口上沿（卡片仍露在视口里）→ 钉顶
+ *   review      [ 200,  400]  随流（焦点卡 [210, 290] 完整可见 → focusedCardPinState = hidden）
+ *   validation  [ 420,  480]  钉底
+ *   trash       [ 500,  560]  钉底（Done 默认折叠）
+ * 顶 rail = backlog, in_progress；底 rail = validation, trash。
+ */
+describe("ColumnContextPanel pinned stage header rails", () => {
+	const FOCUSED_TASK_ID = "task-review";
+	const COLLAPSED_STAGE_SECTION_HEIGHT = 42;
+	const SCROLL_ROOT_RECT = { top: 0, height: 500 };
+	const FOCUSED_CARD_RECT = { top: 210, height: 80 };
+	const EXPANDED_SECTION_RECTS: Record<string, { top: number; height: number }> = {
+		backlog: { top: -300, height: 200 },
+		in_progress: { top: -80, height: 230 },
+		review: { top: 200, height: 200 },
+		validation: { top: 420, height: 60 },
+		trash: { top: 500, height: 60 },
+	};
+
+	const columns: BoardColumn[] = [
+		{ id: "backlog", title: "Backlog", cards: [createCard("task-backlog", "Backlog task")] },
+		{ id: "in_progress", title: "In Progress", cards: [createCard("task-ip", "In progress task")] },
+		{ id: "review", title: "Review", cards: [createCard(FOCUSED_TASK_ID, "Review task")] },
+		{ id: "validation", title: "Validation", cards: [createCard("task-val", "Validation task")] },
+		{ id: "trash", title: "Done", cards: [createCard("task-done", "Done task")] },
+	];
+
+	function toDomRect(top: number, height: number): DOMRect {
+		return {
+			top,
+			bottom: top + height,
+			left: 0,
+			right: 240,
+			width: 240,
+			height,
+			x: 0,
+			y: top,
+			toJSON: () => ({}),
+		} as DOMRect;
+	}
+
+	let container: HTMLDivElement;
+	let root: Root;
+	let previousActEnvironment: boolean | undefined;
+	let scrollIntoViewMock: ReturnType<typeof vi.fn>;
+
+	const railButton = (label: string): HTMLButtonElement | null =>
+		container.querySelector<HTMLButtonElement>(`[data-testid="stage-header-rail"] button[aria-label="${label}"]`);
+
+	const inFlowHeaderButton = (columnId: string): HTMLButtonElement | null =>
+		container.querySelector<HTMLButtonElement>(`[data-stage-section-id="${columnId}"] button`);
+
+	const scrollRootWithWritableScrollTop = (initialScrollTop: number): HTMLElement => {
+		const scrollRoot = container.querySelector<HTMLElement>(".kb-detail-task-list-scroll");
+		if (!scrollRoot) {
+			throw new Error("scroll root missing");
+		}
+		let scrollTop = initialScrollTop;
+		Object.defineProperty(scrollRoot, "scrollTop", {
+			configurable: true,
+			get: () => scrollTop,
+			set: (value: number) => {
+				scrollTop = value;
+			},
+		});
+		return scrollRoot;
+	};
+
+	const renderPanel = async (): Promise<void> => {
+		await act(async () => {
+			root.render(
+				<ColumnContextPanel
+					selection={createSelection(columns, FOCUSED_TASK_ID)}
+					onCardSelect={() => {}}
+					taskSessions={{}}
+					onTaskDragEnd={() => {}}
+				/>,
+			);
+		});
+	};
+
+	beforeEach(() => {
+		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
+			.IS_REACT_ACT_ENVIRONMENT;
+		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+		container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+		scrollIntoViewMock = vi.fn();
+		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+			configurable: true,
+			value: scrollIntoViewMock,
+		});
+		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback: FrameRequestCallback) => {
+			callback(0);
+			return 1;
+		});
+		vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+			const columnId = this.getAttribute("data-stage-section-id");
+			const expandedRect = columnId ? EXPANDED_SECTION_RECTS[columnId] : undefined;
+			if (expandedRect) {
+				// section 的第二个子节点是卡片区包裹层，折叠时整段 display:none。
+				const stageSectionBody = this.children[1] as HTMLElement | undefined;
+				const isCollapsed = stageSectionBody?.style.display === "none";
+				return toDomRect(expandedRect.top, isCollapsed ? COLLAPSED_STAGE_SECTION_HEIGHT : expandedRect.height);
+			}
+			if (this.getAttribute("data-task-id") === FOCUSED_TASK_ID) {
+				return toDomRect(FOCUSED_CARD_RECT.top, FOCUSED_CARD_RECT.height);
+			}
+			if (this.classList.contains("kb-detail-task-list-scroll")) {
+				return toDomRect(SCROLL_ROOT_RECT.top, SCROLL_ROOT_RECT.height);
+			}
+			return toDomRect(0, 0);
+		});
+	});
+
+	afterEach(() => {
+		act(() => {
+			root.unmount();
+		});
+		vi.restoreAllMocks();
+		container.remove();
+		if (previousActEnvironment === undefined) {
+			delete (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+		} else {
+			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+				previousActEnvironment;
+		}
+	});
+
+	it("renders the expected top and bottom rails for the controlled geometry", async () => {
+		await renderPanel();
+
+		const rails = container.querySelectorAll('[data-testid="stage-header-rail"]');
+		expect([...rails].map((rail) => rail.getAttribute("data-edge"))).toEqual(["top", "bottom"]);
+		for (const title of ["Backlog", "In Progress", "Validation", "Done"]) {
+			expect(railButton(`Jump to ${title}`)).toBeInstanceOf(HTMLButtonElement);
+		}
+		// 嵌套 <button> 是非法 HTML，浏览器会重整 DOM、内层控件行为不可预期；折叠与跳转必须是同级按钮。
+		expect(container.querySelectorAll('[data-testid="stage-header-rail"] button button').length).toBe(0);
+	});
+
+	it("shows the real fold state on the pinned twin header instead of a hard-coded expanded chevron", async () => {
+		await renderPanel();
+
+		expect(railButton("Collapse Backlog")?.getAttribute("aria-expanded")).toBe("true");
+		expect(railButton("Collapse In Progress")?.getAttribute("aria-expanded")).toBe("true");
+		expect(railButton("Collapse Validation")?.getAttribute("aria-expanded")).toBe("true");
+		// Done 默认折叠——钉住条目必须如实呈现，而不是永远显示「已展开」。
+		expect(railButton("Expand Done")?.getAttribute("aria-expanded")).toBe("false");
+		expect(inFlowHeaderButton("trash")?.getAttribute("aria-expanded")).toBe("false");
+	});
+
+	it("mirrors a fold made from the in-flow header onto the pinned twin header", async () => {
+		await renderPanel();
+
+		await act(async () => {
+			inFlowHeaderButton("in_progress")?.click();
+		});
+
+		expect(inFlowHeaderButton("in_progress")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("Expand In Progress")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("Collapse In Progress")).toBeNull();
+	});
+
+	it("collapses a stage whose cards are still in view from the top rail and docks its header at the rail slot", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Collapse In Progress")?.click();
+		});
+
+		// 折叠真的发生了，且与行内卡头是同一份状态……
+		expect(inFlowHeaderButton("in_progress")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("Expand In Progress")?.getAttribute("aria-expanded")).toBe("false");
+		// ……卡头停回它的 rail 槽位（其上只有 backlog 一条：50px）：1000 + (−80 − 0) − 50 = 870，
+		// 下一个 stage 紧随其后。保持 1000 不动会让下方内容整段上移 188px、视口落进 review 中段。
+		expect(scrollRoot.scrollTop).toBe(870);
+	});
+
+	it("collapses a stage that is entirely above the viewport from the top rail without moving the visible content", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Collapse Backlog")?.click();
+		});
+
+		expect(inFlowHeaderButton("backlog")?.getAttribute("aria-expanded")).toBe("false");
+		// backlog 从 200 折到 42，变矮 158：等量补偿，视口里的内容零位移。
+		expect(scrollRoot.scrollTop).toBe(1000 - 158);
+	});
+
+	it("collapses a stage from the bottom rail without scrolling (its cards are all below the viewport)", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Collapse Validation")?.click();
+		});
+
+		expect(inFlowHeaderButton("validation")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("Expand Validation")?.getAttribute("aria-expanded")).toBe("false");
+		expect(scrollRoot.scrollTop).toBe(1000);
+	});
+
+	it("expands a stage from a rail and jumps to it so its first card is actually visible", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Expand Done")?.click();
+		});
+
+		expect(inFlowHeaderButton("trash")?.getAttribute("aria-expanded")).toBe("true");
+		// 目标 index 4 → 基值 R = 4 × 50 = 200；焦点 stage（review，index 2）在目标之上，且以基值试算时
+		// 焦点卡会落到视口上沿之上（210 − 500 + 200 = −90 ≤ 0）→ 预留克隆 16 + 80。
+		// scrollTop = 1000 + (500 − 0) − (200 + 16 + 80) = 1204。
+		expect(scrollRoot.scrollTop).toBe(1204);
+	});
+
+	it("parks the jumped-to stage below the top rail instead of under it", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Jump to In Progress")?.click();
+		});
+
+		// 目标之上只有 backlog 一个条目：R = 40 + 2 + 8 = 50；焦点卡在 review（不在目标之上）→ 无克隆项。
+		// scrollTop = 1000 + (−80 − 0) − 50 = 870。旧的裸 scrollIntoView({block:"start"}) 会把 section 顶对齐到
+		// 滚动口顶沿，正好落在不透明 rail 之下。
+		expect(scrollRoot.scrollTop).toBe(870);
+		expect(scrollIntoViewMock).not.toHaveBeenCalledWith({ block: "start", inline: "nearest" });
+		// 跳转不改折叠状态。
+		expect(railButton("Collapse In Progress")?.getAttribute("aria-expanded")).toBe("true");
+	});
+
+	it("reserves the focused card clone when the focused stage would pin above the jump target", async () => {
+		await renderPanel();
+		const scrollRoot = scrollRootWithWritableScrollTop(1000);
+
+		await act(async () => {
+			railButton("Jump to Validation")?.click();
+		});
+
+		// 目标 index 3 → 基值 R = 150；焦点 stage（index 2）在目标之上，试算 210 − 420 + 150 = −60 ≤ 0
+		// → 预留 16 + 80。scrollTop = 1000 + 420 − (150 + 16 + 80) = 1174。
+		expect(scrollRoot.scrollTop).toBe(1174);
+	});
+});
+
+// Focus View 左栏的列表范围切换（docs/context-cross-project-recently-active-task-switcher.md）：有宿主时才出现；
+// 切到 All projects 时 stage 列表只隐藏不卸载（钉住 rail / 焦点卡几何 hook 挂在它的 scrollport 上）。
+describe("ColumnContextPanel left column task list scope", () => {
+	let container: HTMLDivElement;
+	let root: Root;
+
+	beforeEach(() => {
+		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+		window.localStorage.clear();
+		container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+	});
+
+	afterEach(() => {
+		act(() => root.unmount());
+		container.remove();
+	});
+
+	const columns: BoardColumn[] = [
+		{ id: "backlog", title: "Backlog", cards: [] },
+		{ id: "in_progress", title: "In Progress", cards: [createCard("task-1", "In progress task")] },
+		{ id: "review", title: "Review", cards: [] },
+		{ id: "trash", title: "Done", cards: [] },
+	];
+
+	function renderPanel(withHost: boolean, isBoardScopeAllProjectsSelected = false): void {
+		const panel = (
+			<ColumnContextPanel
+				selection={createSelection(columns, "task-1")}
+				onCardSelect={() => {}}
+				taskSessions={{}}
+				onTaskDragEnd={() => {}}
+			/>
+		);
+		act(() =>
+			root.render(
+				withHost ? (
+					<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider
+						value={{
+							projects: [],
+							notificationLogByWorkspaceId: {},
+							currentProjectId: "project-a",
+							isBoardScopeAllProjectsSelected,
+							focusedTaskInProject: { workspaceId: "project-a", taskId: "task-1" },
+							onOpenTaskInProject: vi.fn(),
+							onRequestPinCurrentProjectTaskToTaskPinboard: vi.fn(),
+							onUnpinCurrentProjectTaskFromTaskPinboard: vi.fn(),
+							onEditCurrentProjectTaskPinboardPinReason: vi.fn(),
+						}}
+					>
+						{panel}
+					</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
+				) : (
+					panel
+				),
+			),
+		);
+	}
+
+	it("没有宿主时只有 stage 列表；左栏不再有自己的范围切换（范围收进顶栏项目切换器）", () => {
+		renderPanel(false);
+		expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+		expect(container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]')).toBeNull();
+		renderPanel(true, false);
+		expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+		expect(container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]')).toBeNull();
+	});
+
+	it("Board Scope（顶栏选了 All projects）：显示切换面板，stage 列表隐藏但仍挂载", () => {
+		renderPanel(true, true);
+		expect(
+			container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'),
+		).not.toBeNull();
+		const stageList = container.querySelector<HTMLElement>('[data-testid="focus-view-current-project-stage-list"]');
+		expect(stageList?.className).toContain("hidden");
+		expect(stageList?.querySelector('[data-task-id="task-1"]')).not.toBeNull();
 	});
 });

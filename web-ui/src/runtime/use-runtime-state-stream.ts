@@ -1,17 +1,21 @@
 import { isNeverStartedPlaceholderTaskSessionSummary } from "@runtime-session-activity";
-import { useCallback, useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
+import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
 import type {
 	RuntimeClineMcpServerAuthStatus,
-	RuntimeExploratorySessionMapCollection,
+	RuntimeExploratoryFindingEntry,
 	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
+	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
-	RuntimeStateStreamExploratorySessionMapUpdatedMessage,
+	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
+	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamNotificationLogUpdatedMessage,
 	RuntimeStateStreamProjectsMessage,
+	RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage,
 	RuntimeStateStreamSnapshotMessage,
 	RuntimeStateStreamTaskChatClearedMessage,
 	RuntimeStateStreamTaskChatMessage,
@@ -21,6 +25,10 @@ import type {
 	RuntimeWorkspaceMetadata,
 	RuntimeWorkspaceStateResponse,
 } from "@/runtime/types";
+import {
+	replaceTaskResourceUsageSnapshots,
+	resetTaskResourceUsageSnapshotStore,
+} from "@/stores/task-resource-usage-snapshot-store";
 
 const STREAM_RECONNECT_BASE_DELAY_MS = 500;
 const STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
@@ -30,16 +38,20 @@ const STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
 // 注意本函数**只合并、从不删除**：某个 taskId 一旦进过这张表，就不会因为后续推流不再包含它而消失。
 // 「跨 workspace 的外来条目在此累积」是另一个已知问题（看板卡 c0724），本文件的守卫不覆盖它——
 // 别因为这里有守卫就以为归属问题已经解决了。
-function mergeTaskSessionSummaries(
+//
+// 引用纪律：整批没有任何 key 被实际替换时返回入参原引用（惰性拷贝，首个真实写入才 spread），
+// 让 reducer / setSessions 的 Object.is bailout 生效——150ms 一批的推流里大量批次内容并没动，
+// 为它们白产新对象就是白触发一轮渲染。
+export function mergeTaskSessionSummaries(
 	currentSessions: Record<string, RuntimeTaskSessionSummary>,
 	summaries: RuntimeTaskSessionSummary[],
 ): Record<string, RuntimeTaskSessionSummary> {
 	if (summaries.length === 0) {
 		return currentSessions;
 	}
-	const nextSessions = { ...currentSessions };
+	let nextSessions: Record<string, RuntimeTaskSessionSummary> | null = null;
 	for (const summary of summaries) {
-		const existing = nextSessions[summary.taskId];
+		const existing = (nextSessions ?? currentSessions)[summary.taskId];
 		// 唯一一种「更新的 updatedAt 反而信息更少」的情况：服务端因为前端聚焦了这张卡而就地造出一条
 		// 全 null 的占位 summary（session-manager 的 ensureEntry）。它的 updatedAt 是「刚被凭空造出来」，
 		// 不是「掌握了更新的事实」。放它盖掉手上那条记着 agentId 的记录，就会让 TUI 变全白、
@@ -52,14 +64,24 @@ function mergeTaskSessionSummaries(
 			continue;
 		}
 		if (!existing || existing.updatedAt <= summary.updatedAt) {
+			if (nextSessions === null) {
+				nextSessions = { ...currentSessions };
+			}
 			nextSessions[summary.taskId] = summary;
 		}
 	}
-	return nextSessions;
+	return nextSessions ?? currentSessions;
 }
 
-/** 仅供测试：这条合并规则是「空壳把真实记录盖掉」那条 bug 的最后一道闸，值得单独钉住。 */
-export const mergeTaskSessionSummariesForTest = mergeTaskSessionSummaries;
+// task_sessions_updated 的旁路出口：这条消息 150ms 一批、是最高频推流，不再进 reducer（不为它新建
+// workspaceState、不让 App 多渲染一次）。useWorkspaceSync 挂载时把「summaries → 一次 setSessions 合并」
+// 注册成 applier，stream hook 收到该批消息直接调用；App 持有这个 ref 并在两个 hook 之间接线。
+// workspaceId 是这批摘要所属的项目（流只转发当前连着的项目的批次）。接收方据此分辨「切项目之后新项目推来的
+// 摘要」与「上一个项目残留的同号任务摘要」——taskId 跨项目会撞号。
+export type StreamedTaskSessionSummariesApplier = (summaries: RuntimeTaskSessionSummary[], workspaceId: string) => void;
+export interface StreamedTaskSessionSummariesApplierRef {
+	current: StreamedTaskSessionSummariesApplier | null;
+}
 
 // 快照下发的是「跨全部 workspace 的扁平 feed」，按 workspaceId 分桶存，便于 notification_log_updated 增量按桶替换。
 function bucketNotificationFeedByWorkspaceId(
@@ -109,13 +131,23 @@ export interface UseRuntimeStateStreamResult {
 	latestTaskChatMessage: RuntimeStateStreamTaskChatMessage | null;
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
+	taskReadyForReviewEvents: RuntimeStateStreamTaskReadyForReviewMessage[];
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
-	// Exploratory session map 集合推送（蓝图 §B.2 exploratory_session_map_updated）：
-	// 按 conversationSessionTaskId 存最近一次推送的完整集合（null = 服务端明示此会话无集合）。
-	// 推送只覆盖「在场期间」的变更；断连窗口的变更靠重连后 getSessionMap 重查对齐（不补发），
-	// 重连信号 = streamSnapshotGeneration 递增（每次快照 = 一次（重）连握手完成）。
-	exploratorySessionMapCollectionsByTaskId: Record<string, RuntimeExploratorySessionMapCollection | null>;
+	// 流（重）连握手代数：每次快照递增（每次快照 = 一次（重）连握手完成）。推送只覆盖「在场期间」
+	// 的变更；断连窗口的变更不补发，消费者以它为重连信号重查对齐。
 	streamSnapshotGeneration: number;
+	// Exploratory findings 推送（蓝图 §D.3 exploratory_findings_updated）：workspace 级全量
+	// 替换（集合恒小，上限 500）；null = 尚未收到过推送。不搭车 summary 广播，
+	// 断连窗口的变更靠重连后 getFindings 重查对齐（重连信号 = streamSnapshotGeneration）。
+	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
+	// exploration thread graph 推送（B.2 exploration_thread_graph_updated）：**按 exploration 分**，
+	// 不是 workspace 级全量——一个 workspace 下可以有多张图。这里只保留最近一条推送（同
+	// latestTaskReadyForReview 的模式），由 use-exploration-thread-graph 按 explorationId 过滤后消费；
+	// 存成按 id 索引的表会随打开过的卡片数无界增长。
+	latestExplorationThreadGraphUpdate: RuntimeStateStreamExplorationThreadGraphUpdatedMessage | null;
+	// 排队 prompt 投影推送（queued_task_prompt_deliveries_updated）：当前 workspace 的整份替换；null = 尚未
+	// 收到过推送。与 findings 同一纪律——断连窗口不补发，重连后由消费者经 streamSnapshotGeneration 重查对齐。
+	queuedTaskPromptDeliveryProjectionsByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId | null;
 	// 跨 repo 聚合的通知 feed，按 workspaceId 分桶（切项目不清空——铃铛看整台服务器）。
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
@@ -133,9 +165,12 @@ interface RuntimeStateStreamStore {
 	latestTaskChatMessage: RuntimeStateStreamTaskChatMessage | null;
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
+	taskReadyForReviewEvents: RuntimeStateStreamTaskReadyForReviewMessage[];
 	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
-	exploratorySessionMapCollectionsByTaskId: Record<string, RuntimeExploratorySessionMapCollection | null>;
 	streamSnapshotGeneration: number;
+	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
+	latestExplorationThreadGraphUpdate: RuntimeStateStreamExplorationThreadGraphUpdatedMessage | null;
+	queuedTaskPromptDeliveryProjectionsByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId | null;
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	clineSessionContextVersion: number;
 	streamError: string | null;
@@ -157,11 +192,18 @@ type RuntimeStateStreamAction =
 	| { type: "workspace_metadata_updated"; workspaceMetadata: RuntimeWorkspaceMetadata }
 	| { type: "task_ready_for_review"; payload: RuntimeStateStreamTaskReadyForReviewMessage }
 	| { type: "notification_log_updated"; payload: RuntimeStateStreamNotificationLogUpdatedMessage }
-	| { type: "exploratory_session_map_updated"; payload: RuntimeStateStreamExploratorySessionMapUpdatedMessage }
+	| { type: "exploratory_findings_updated"; payload: RuntimeStateStreamExploratoryFindingsUpdatedMessage }
+	| {
+			type: "queued_task_prompt_deliveries_updated";
+			payload: RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage;
+	  }
+	| {
+			type: "exploration_thread_graph_updated";
+			payload: RuntimeStateStreamExplorationThreadGraphUpdatedMessage;
+	  }
 	| { type: "mcp_auth_updated"; payload: RuntimeStateStreamMcpAuthUpdatedMessage }
 	| { type: "cline_session_context_updated"; payload: RuntimeStateStreamClineSessionContextUpdatedMessage }
 	| { type: "workspace_state_updated"; workspaceState: RuntimeWorkspaceStateResponse }
-	| { type: "task_sessions_updated"; summaries: RuntimeTaskSessionSummary[] }
 	| { type: "stream_error"; message: string }
 	| { type: "stream_disconnected"; message: string };
 
@@ -174,9 +216,12 @@ function createInitialRuntimeStateStreamStore(requestedWorkspaceId: string | nul
 		latestTaskChatMessage: null,
 		taskChatMessagesByTaskId: {},
 		latestTaskReadyForReview: null,
+		taskReadyForReviewEvents: [],
 		latestMcpAuthStatuses: null,
-		exploratorySessionMapCollectionsByTaskId: {},
 		streamSnapshotGeneration: 0,
+		exploratoryFindings: null,
+		latestExplorationThreadGraphUpdate: null,
+		queuedTaskPromptDeliveryProjectionsByTaskId: null,
 		notificationLogByWorkspaceId: {},
 		clineSessionContextVersion: 0,
 		streamError: null,
@@ -229,8 +274,10 @@ function runtimeStateStreamReducer(
 			workspaceMetadata: null,
 			latestTaskChatMessage: null,
 			taskChatMessagesByTaskId: {},
-			// map 推送按 workspace 作用域隔离：切走后旧 workspace 的集合不得带进新会话面板。
-			exploratorySessionMapCollectionsByTaskId: {},
+			// findings 是 workspace 级集合：切 workspace 即清空，等 getFindings 重拉。
+			exploratoryFindings: null,
+			// 队列投影同为 workspace 级：taskId 是 board-local 短 id，跨 workspace 沿用会撞号。
+			queuedTaskPromptDeliveryProjectionsByTaskId: null,
 			streamSnapshotGeneration: 0,
 			streamError: null,
 			isRuntimeDisconnected: false,
@@ -264,14 +311,21 @@ function runtimeStateStreamReducer(
 			latestTaskChatMessage: null,
 			taskChatMessagesByTaskId: {},
 			latestTaskReadyForReview: state.latestTaskReadyForReview,
+			taskReadyForReviewEvents: state.taskReadyForReviewEvents,
 			latestMcpAuthStatuses: state.latestMcpAuthStatuses,
 			// 快照是聚合日志的权威源：整体替换分桶（含重连后从后端恢复已访问态）。
 			// ?? [] 兜底旧服务端/异常 payload——缺字段时不因 for-of undefined 抛错而丢掉整个 snapshot。
 			notificationLogByWorkspaceId: bucketNotificationFeedByWorkspaceId(action.payload.notificationLog ?? []),
 			clineSessionContextVersion: action.payload.clineSessionContextVersion,
-			// 每次快照 = 一次（重）连握手完成：递增代数给 map 面板做「重连后重查对齐」的触发
-			// （断连窗口的 ingest 不补发）。推送集合本身保留作 last-known，查询落定前不出现空窗。
-			exploratorySessionMapCollectionsByTaskId: state.exploratorySessionMapCollectionsByTaskId,
+			// 每次快照 = 一次（重）连握手完成：递增代数给消费者做「重连后重查对齐」的触发
+			// （断连窗口的变更不补发）。findings 保留作 last-known（重连后由 use-exploratory-findings
+			// 经快照代数重拉对齐），查询落定前不出现空窗。
+			exploratoryFindings: state.exploratoryFindings,
+			// 图同样保留作 last-known：重连后由 use-exploration-thread-graph 经快照代数重拉对齐，
+			// 查询落定前不出现空窗（读图免费，重拉没有成本顾虑）。
+			latestExplorationThreadGraphUpdate: state.latestExplorationThreadGraphUpdate,
+			// 队列投影同样保留作 last-known，重连后由 use-queued-task-prompt-delivery-projection-sync 重拉对齐。
+			queuedTaskPromptDeliveryProjectionsByTaskId: state.queuedTaskPromptDeliveryProjectionsByTaskId,
 			streamSnapshotGeneration: state.streamSnapshotGeneration + 1,
 			streamError: null,
 			isRuntimeDisconnected: false,
@@ -290,7 +344,16 @@ function runtimeStateStreamReducer(
 			workspaceMetadata: didProjectChange ? null : state.workspaceMetadata,
 			latestTaskChatMessage: didProjectChange ? null : state.latestTaskChatMessage,
 			taskChatMessagesByTaskId: didProjectChange ? {} : state.taskChatMessagesByTaskId,
-			latestTaskReadyForReview: didProjectChange ? null : state.latestTaskReadyForReview,
+			// 就绪通知是跨项目的（服务端投给所有客户端），切项目不清：单标签页切项目途中别的项目刚完成的任务
+			// 还要弹通知。事件本身 60 秒过期，消费侧按 candidateId 去重。
+			latestTaskReadyForReview: state.latestTaskReadyForReview,
+			taskReadyForReviewEvents: state.taskReadyForReviewEvents,
+			// 切项目必须清：图是 per-exploration 的，换了 project 之后旧推送里的 explorationId
+			// 可能与新 project 的某张卡片撞号（taskId 是 board-local 短 id）。
+			latestExplorationThreadGraphUpdate: didProjectChange ? null : state.latestExplorationThreadGraphUpdate,
+			queuedTaskPromptDeliveryProjectionsByTaskId: didProjectChange
+				? null
+				: state.queuedTaskPromptDeliveryProjectionsByTaskId,
 			notificationLogByWorkspaceId: pruneNotificationLogToWorkspaces(
 				state.notificationLogByWorkspaceId,
 				liveWorkspaceIds,
@@ -329,6 +392,10 @@ function runtimeStateStreamReducer(
 		return {
 			...state,
 			latestTaskReadyForReview: action.payload,
+			taskReadyForReviewEvents: [
+				...state.taskReadyForReviewEvents.filter((event) => Date.now() - event.triggeredAt < 60_000),
+				action.payload,
+			],
 		};
 	}
 	if (action.type === "notification_log_updated") {
@@ -347,15 +414,26 @@ function runtimeStateStreamReducer(
 			latestMcpAuthStatuses: action.payload.statuses,
 		};
 	}
-	if (action.type === "exploratory_session_map_updated") {
-		// 全量替换该会话的集合（推送恒为完整集合，量级 = 节点数，恒小）；
-		// null 载荷 = 服务端明示集合已不存在，同样落 store（面板据此回退投影骨架）。
+	if (action.type === "exploration_thread_graph_updated") {
+		// 单张图的全量替换。按 exploration 分发，消费侧负责过滤出当前卡片那张。
 		return {
 			...state,
-			exploratorySessionMapCollectionsByTaskId: {
-				...state.exploratorySessionMapCollectionsByTaskId,
-				[action.payload.conversationSessionTaskId]: action.payload.mapCollection,
-			},
+			latestExplorationThreadGraphUpdate: action.payload,
+		};
+	}
+	if (action.type === "queued_task_prompt_deliveries_updated") {
+		// workspace 级整份替换：一次认领 / 落定会同时改好几条的状态与阻塞原因，增量补丁在断连重连之间极易错位。
+		return {
+			...state,
+			queuedTaskPromptDeliveryProjectionsByTaskId: action.payload.projectedEntriesByTaskId,
+		};
+	}
+	if (action.type === "exploratory_findings_updated") {
+		// workspace 级全量替换（推送恒为完整集合，上限 500）——save/confirm/reject/archive/
+		// ingest 落盘成功后服务端广播，本地不做乐观更新，状态经推送收敛。
+		return {
+			...state,
+			exploratoryFindings: action.payload.findings,
 		};
 	}
 	if (action.type === "cline_session_context_updated") {
@@ -377,18 +455,6 @@ function runtimeStateStreamReducer(
 			workspaceState: mergedWorkspaceState,
 		};
 	}
-	if (action.type === "task_sessions_updated") {
-		if (!state.workspaceState) {
-			return state;
-		}
-		return {
-			...state,
-			workspaceState: {
-				...state.workspaceState,
-				sessions: mergeTaskSessionSummaries(state.workspaceState.sessions, action.summaries),
-			},
-		};
-	}
 	if (action.type === "stream_error") {
 		return {
 			...state,
@@ -406,12 +472,19 @@ function runtimeStateStreamReducer(
 	return state;
 }
 
-export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseRuntimeStateStreamResult {
+export function useRuntimeStateStream(
+	requestedWorkspaceId: string | null,
+	onTaskSessionSummaries?: StreamedTaskSessionSummariesApplier,
+): UseRuntimeStateStreamResult {
 	const [state, dispatch] = useReducer(
 		runtimeStateStreamReducer,
 		requestedWorkspaceId,
 		createInitialRuntimeStateStreamStore,
 	);
+	// render 期同步赋值（react-use useLatest 的标准实现，本仓库同款写法见 use-notification-task-focus-routing）：
+	// WS 回调经此 ref 读最新 applier，避免把回调身份编进连接 effect 的依赖（那会每次渲染都重连）。
+	const onTaskSessionSummariesRef = useRef<StreamedTaskSessionSummariesApplier | undefined>(undefined);
+	onTaskSessionSummariesRef.current = onTaskSessionSummaries;
 	const [runtimeStreamConnectionGeneration, setRuntimeStreamConnectionGeneration] = useState(0);
 	const recheckProjectAvailability = useCallback(() => {
 		setRuntimeStreamConnectionGeneration((currentGeneration) => currentGeneration + 1);
@@ -427,6 +500,20 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 		let shouldCheckServedBuildAssetsOnOpen = false;
 
 		dispatch({ type: "requested_workspace_changed" });
+		// 卡片 id 只在一个看板内唯一：换 workspace（重建连接）先清掉上一个 workspace 的资源快照，
+		// 新 workspace 的最新一份由 hub 在连接建立后立即补发（hub 尚无缓存时要等下一个采样 tick）。
+		resetTaskResourceUsageSnapshotStore();
+
+		// activeWorkspaceId 在本 effect 内还有两处换值、而 effect 不重建：projects_updated 自动切走，以及未指定
+		// workspace 的重连握手被服务端落到另一个 active workspace（snapshot）。两处都必须同样先清空资源快照，
+		// 否则新 workspace 首份快照到达前，同 id 的卡片会一直显示旧仓库的 RSS/CPU。落回同一 workspace 则保留
+		// last-known，不在下一个 tick 前闪空。
+		const switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange = (nextWorkspaceId: string | null) => {
+			if (nextWorkspaceId !== activeWorkspaceId) {
+				resetTaskResourceUsageSnapshotStore();
+			}
+			activeWorkspaceId = nextWorkspaceId;
+		};
 
 		const cleanupSocket = () => {
 			if (socket) {
@@ -473,6 +560,9 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 				return;
 			}
 			socket.onopen = () => {
+				// dd2db Y-EVENT-9：每次连上 / 重连都向 runtime 重新签发页面加载 nonce（runtime 重启后旧 nonce 全部失效）。
+				// 签发失败不打断推流；之后带旧 nonce 被拒的请求会由 trpc-client 的重试 link 再重取一次。
+				void reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime().catch(() => {});
 				if (hasOpenedRuntimeStream && shouldCheckServedBuildAssetsOnOpen) {
 					void reloadBrowserIfServedBuildAssetsChanged();
 				}
@@ -485,14 +575,14 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 				try {
 					const payload = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
 					if (payload.type === "snapshot") {
-						activeWorkspaceId = payload.currentProjectId;
+						switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange(payload.currentProjectId);
 						dispatch({ type: "snapshot", payload });
 						return;
 					}
 					if (payload.type === "projects_updated") {
 						const previousWorkspaceId = activeWorkspaceId;
 						const nextProjectId = resolveProjectIdAfterProjectsUpdate(activeWorkspaceId, payload);
-						activeWorkspaceId = nextProjectId;
+						switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange(nextProjectId);
 						dispatch({
 							type: "projects_updated",
 							payload,
@@ -549,18 +639,35 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 						if (payload.workspaceId !== activeWorkspaceId) {
 							return;
 						}
-						dispatch({
-							type: "task_sessions_updated",
-							summaries: payload.summaries,
-						});
+						// 旁路（见 StreamedTaskSessionSummariesApplier）：summaries 直送 useWorkspaceSync 注册的
+						// applier，一次 setSessions 并入；reducer 不再为该消息产新 state，App 每批只渲染一次。
+						onTaskSessionSummariesRef.current?.(payload.summaries, payload.workspaceId);
 						return;
 					}
 					if (payload.type === "task_ready_for_review") {
+						// 不按当前 workspace 过滤：就绪通知跨项目投递（服务端投给所有客户端），单标签页管全部项目时
+						// 别的项目的完成通知只能由这个标签页来弹。消费侧（use-review-ready-notifications）只对当前项目
+						// 按前台可见让位，并以 claimDelivery 在标签页之间去重。
+						dispatch({
+							type: "task_ready_for_review",
+							payload,
+						});
+						return;
+					}
+					if (payload.type === "task_resource_usage_snapshots_updated") {
+						if (payload.workspaceId !== activeWorkspaceId) {
+							return;
+						}
+						// 旁路：直写按卡片订阅的 store，不 dispatch——每 15 秒一次的全量快照不应让 App 重渲染。
+						replaceTaskResourceUsageSnapshots(payload.snapshots);
+						return;
+					}
+					if (payload.type === "exploration_thread_graph_updated") {
 						if (payload.workspaceId !== activeWorkspaceId) {
 							return;
 						}
 						dispatch({
-							type: "task_ready_for_review",
+							type: "exploration_thread_graph_updated",
 							payload,
 						});
 						return;
@@ -573,12 +680,22 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 						});
 						return;
 					}
-					if (payload.type === "exploratory_session_map_updated") {
+					if (payload.type === "queued_task_prompt_deliveries_updated") {
 						if (payload.workspaceId !== activeWorkspaceId) {
 							return;
 						}
 						dispatch({
-							type: "exploratory_session_map_updated",
+							type: "queued_task_prompt_deliveries_updated",
+							payload,
+						});
+						return;
+					}
+					if (payload.type === "exploratory_findings_updated") {
+						if (payload.workspaceId !== activeWorkspaceId) {
+							return;
+						}
+						dispatch({
+							type: "exploratory_findings_updated",
 							payload,
 						});
 						return;
@@ -650,9 +767,12 @@ export function useRuntimeStateStream(requestedWorkspaceId: string | null): UseR
 		latestTaskChatMessage: state.latestTaskChatMessage,
 		taskChatMessagesByTaskId: state.taskChatMessagesByTaskId,
 		latestTaskReadyForReview: state.latestTaskReadyForReview,
+		taskReadyForReviewEvents: state.taskReadyForReviewEvents,
 		latestMcpAuthStatuses: state.latestMcpAuthStatuses,
-		exploratorySessionMapCollectionsByTaskId: state.exploratorySessionMapCollectionsByTaskId,
 		streamSnapshotGeneration: state.streamSnapshotGeneration,
+		exploratoryFindings: state.exploratoryFindings,
+		latestExplorationThreadGraphUpdate: state.latestExplorationThreadGraphUpdate,
+		queuedTaskPromptDeliveryProjectionsByTaskId: state.queuedTaskPromptDeliveryProjectionsByTaskId,
 		notificationLogByWorkspaceId: state.notificationLogByWorkspaceId,
 		clineSessionContextVersion: state.clineSessionContextVersion,
 		streamError: state.streamError,

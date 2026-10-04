@@ -37,6 +37,7 @@ export interface UseTaskBoardSearchResult {
 interface TaskBoardSemanticSearchIndexCacheEntry {
 	documents: readonly TaskBoardSearchDocument[];
 	indexPromise: Promise<TaskBoardSemanticSearchIndex>;
+	abortController: AbortController;
 }
 
 interface TaskBoardSemanticSearchResultSnapshot {
@@ -130,6 +131,16 @@ export function useTaskBoardSearch({
 		setSemanticSearchStatus(shouldRunSemanticSearch ? "loading" : "idle");
 	}, [documents, mode, normalizedQuery, shouldRunSemanticSearch]);
 
+	// 换项目/文档、离开语义模式或关闭搜索时释放 Worker，包括尚未完成的模型下载。
+	useEffect(
+		() => () => {
+			semanticSearchRequestIdRef.current += 1;
+			semanticSearchIndexCacheRef.current?.abortController.abort();
+			semanticSearchIndexCacheRef.current = null;
+		},
+		[documents, shouldRunSemanticSearch],
+	);
+
 	useDebouncedEffect(
 		() => {
 			semanticSearchRequestIdRef.current += 1;
@@ -141,13 +152,17 @@ export function useTaskBoardSearch({
 			}
 			setSemanticSearchStatus("loading");
 			if (semanticSearchIndexCacheRef.current?.documents !== documents) {
+				const abortController = new AbortController();
 				semanticSearchIndexCacheRef.current = {
 					documents,
-					indexPromise: createTaskBoardSemanticSearchIndex(documents),
+					abortController,
+					indexPromise: createTaskBoardSemanticSearchIndex(documents, abortController.signal),
 				};
 			}
 			void semanticSearchIndexCacheRef.current.indexPromise
-				.then((index) => index.findResults(normalizedQuery, mode))
+				.then((index) =>
+					semanticSearchRequestIdRef.current === requestId ? index.findResults(normalizedQuery, mode) : [],
+				)
 				.then((results) => {
 					if (semanticSearchRequestIdRef.current !== requestId) {
 						return;
@@ -165,6 +180,8 @@ export function useTaskBoardSearch({
 						return;
 					}
 					setSemanticResultSnapshot(null);
+					semanticSearchIndexCacheRef.current?.abortController.abort();
+					semanticSearchIndexCacheRef.current = null;
 					setSemanticSearchStatus("error");
 				});
 		},

@@ -11,6 +11,7 @@ import { getTerminalThemeColors, type ThemeTerminalColors } from "@/hooks/use-th
 import { estimateTaskSessionGeometry, SHELL_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
+	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskSessionSummary,
 	RuntimeTerminalWsClientMessage,
 	RuntimeTerminalWsResizeMessage,
@@ -717,6 +718,14 @@ class PersistentTerminal {
 		if (facets.turnOwner === "user" && facets.userTurnKind !== "question" && facets.userTurnKind !== "permission") {
 			return;
 		}
+		// 服务端已核对过「这段对话从未在 agent 的会话存储里建立」（Cursor 续跑预检 / hydrate 回填）：续跑注定被拒，
+		// 自动重试只会反复撞同一道拒绝。出路在终端面板上，由人来选。
+		if (
+			summary.agentNativeConversationPersistenceObservation?.persistenceStatus ===
+			"conversation_never_established_in_agent_native_store"
+		) {
+			return;
+		}
 		// 跨实例冷却：per-实例的 autoResumeAttempted 拦不住「换一份实例就重新放一次电」，
 		// 而持续性故障（服务端起不来）恰恰会不断制造新实例。见模块顶部该冷却表的注释。
 		const staleSessionAutoResumeCooldownKey = `${this.workspaceId}:${this.taskId}`;
@@ -1378,6 +1387,15 @@ class PersistentTerminal {
 			});
 	}
 
+	// 会话重启（sessionStartedAt 变了）时的清屏，清完立刻向服务端 mirror 要一份快照。只清不补会永久白屏：
+	// sessionStartedAt 也会因为摘要错配而变（跨项目切换时同号任务的旧摘要残留），这时 PTY 根本没换，
+	// agent 停在那里不会再有新输出。真重启时 mirror 本就是新会话的画面，补一份也无害。顺序有保证：
+	// applyRestore 先等写队列（含这次 reset）再清屏写快照。
+	resetForSessionRestartAndRequestServerMirrorSnapshot(): void {
+		this.reset();
+		this.requestSnapshotResync();
+	}
+
 	waitForLikelyPrompt(timeoutMs: number): Promise<boolean> {
 		if (timeoutMs <= 0) {
 			return Promise.resolve(false);
@@ -1506,8 +1524,12 @@ class PersistentTerminal {
 	// （人点的刷新），只有 maybeAutoResumeStaleSession 这条自动路径显式声明自己。不这样声明的话，服务端
 	// 收到的两种请求逐字相同，而 refresh 实测占 pty 创建量的 68%——「这 68% 里有多少是程序自己点的」
 	// 正是排查会话反复重建时的第一个问题。
+	//
+	// adoptExistingAgentConversationAsTaskSessionIdentity：「从既有对话迁入」——服务端先把这段对话复制进本会话的
+	// 工作目录并钉成身份，再按 id 续跑（见 api-contract 的同名字段）。只由人在终端面板上选定后传入。
 	async refresh(
 		taskSessionStartOriginDeclaredByClient?: "stale_session_client_auto_resume",
+		adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization,
 	): Promise<{ ok: boolean; error?: string; mode?: "resume" | "fresh" }> {
 		this.suppressNextRestartReset = true;
 		const trpcClient = getRuntimeTrpcClient(this.workspaceId);
@@ -1517,6 +1539,9 @@ class PersistentTerminal {
 				cols: this.terminal.cols,
 				rows: this.terminal.rows,
 				taskSessionStartOriginDeclaredByClient,
+				...(adoptExistingAgentConversationAsTaskSessionIdentity
+					? { adoptExistingAgentConversationAsTaskSessionIdentity }
+					: {}),
 			});
 			if (!result.ok) {
 				this.suppressNextRestartReset = false;

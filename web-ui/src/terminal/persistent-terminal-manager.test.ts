@@ -976,6 +976,29 @@ describe("persistent-terminal-manager", () => {
 			expect(secondRefreshSpy).not.toHaveBeenCalled();
 		});
 
+		it("does not auto-refresh a session the server has already found to have never established its conversation", async () => {
+			// 8ef28 / aa23d：续跑注定被服务端预检拒绝，自动重试只会反复撞同一道拒绝；出路在终端面板上由人选。
+			const terminal = mountedTerminal();
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState({
+				taskId: "task-a",
+				agentId: "cursor",
+				pid: null,
+				state: "idle",
+				liveness: "none",
+				agentNativeConversationPersistenceObservation: {
+					persistenceStatus: "conversation_never_established_in_agent_native_store",
+					nativeSessionId: null,
+					workingDirectoryPath: "/tmp/worktree",
+					suspectedBlockingCause: null,
+					observedAt: 1,
+				},
+			});
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
 		it("does not auto-refresh when the restore snapshot is non-empty (live/exited session, mirror intact)", async () => {
 			const terminal = mountedTerminal();
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });

@@ -1,0 +1,219 @@
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	type ConversationSessionTurnProjectionData,
+	useConversationSessionTurnProjection,
+} from "@/hooks/use-conversation-session-turn-projection";
+import type {
+	RuntimeConversationSessionTurnProjectionResponse,
+	RuntimeConversationTurnProjectionEntry,
+} from "@/runtime/types";
+
+const { fetchProjectionMock } = vi.hoisted(() => ({
+	fetchProjectionMock: vi.fn(),
+}));
+
+vi.mock("@/runtime/conversation-turn-projection-query", () => ({
+	fetchConversationSessionTurnProjection: fetchProjectionMock,
+}));
+
+function createProjection(
+	signature: string,
+	entryOverrides?: Partial<RuntimeConversationTurnProjectionEntry>,
+): RuntimeConversationSessionTurnProjectionResponse {
+	return {
+		harnessSource: "exact_structured",
+		turnProjectionEntries: [
+			{
+				turnNumber: 1,
+				turnStartedAt: 1,
+				turnUserMessageExcerpt: "首轮消息",
+				turnAssistantResponseExcerpt: null,
+				turnMessageCount: 2,
+				turnCheckpointCommit: "commit-1",
+				turnCheckpointAlignmentConfidence: "exact_ordinal_match",
+				turnIsInProgress: false,
+				turnHasConversationTreeForkAnchor: false,
+				...entryOverrides,
+			},
+		],
+		turnProjectionSignature: signature,
+		turnProjectionIsIncomplete: false,
+	};
+}
+
+function HookHarness({
+	workspaceId,
+	conversationSessionTaskId,
+	refreshKey,
+	onSnapshot,
+}: {
+	workspaceId: string | null;
+	conversationSessionTaskId: string | null;
+	refreshKey: string | null;
+	onSnapshot: (data: ConversationSessionTurnProjectionData) => void;
+}): null {
+	onSnapshot(useConversationSessionTurnProjection({ workspaceId, conversationSessionTaskId, refreshKey }));
+	return null;
+}
+
+describe("useConversationSessionTurnProjection", () => {
+	let container: HTMLDivElement;
+	let root: Root;
+	let snapshots: ConversationSessionTurnProjectionData[];
+
+	async function renderHarness(props: {
+		workspaceId: string | null;
+		conversationSessionTaskId: string | null;
+		refreshKey: string | null;
+	}): Promise<void> {
+		await act(async () => {
+			root.render(<HookHarness {...props} onSnapshot={(data) => snapshots.push(data)} />);
+		});
+		// 等 effect 里的异步拉取落定。
+		await act(async () => {
+			await Promise.resolve();
+		});
+	}
+
+	function lastSnapshot(): ConversationSessionTurnProjectionData {
+		const snapshot = snapshots.at(-1);
+		expect(snapshot).toBeDefined();
+		return snapshot!;
+	}
+
+	beforeEach(() => {
+		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+		container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+		snapshots = [];
+		fetchProjectionMock.mockReset();
+		fetchProjectionMock.mockImplementation(async () => createProjection("1:first:10"));
+	});
+
+	afterEach(() => {
+		act(() => {
+			root.unmount();
+		});
+		container.remove();
+	});
+
+	it("conversationSessionTaskId 为 null 时不发任何请求", async () => {
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: null, refreshKey: null });
+		expect(fetchProjectionMock).not.toHaveBeenCalled();
+		expect(lastSnapshot().queryPhase).toBe("idle");
+	});
+
+	it("挂载后拉取投影", async () => {
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		expect(fetchProjectionMock).toHaveBeenCalledWith("workspace-1", { conversationSessionTaskId: "session-1" });
+		expect(lastSnapshot().queryPhase).toBe("ready");
+		expect(lastSnapshot().projection?.turnProjectionSignature).toBe("1:first:10");
+	});
+
+	it("refreshKey 推进触发重拉；响应内容完全相等时保留旧 state 引用（内容短路）", async () => {
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		const readySnapshot = lastSnapshot();
+		expect(readySnapshot.queryPhase).toBe("ready");
+
+		fetchProjectionMock.mockClear();
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "2:0:" });
+		expect(fetchProjectionMock).toHaveBeenCalledTimes(1);
+		// 同内容 → state 引用不变（下游 memo 不被打扰），且不会闪回 loading。
+		expect(lastSnapshot()).toBe(readySnapshot);
+	});
+
+	it("投影签名变化时换成新数据", async () => {
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		const firstSnapshot = lastSnapshot();
+
+		fetchProjectionMock.mockImplementation(async () => createProjection("2:second:20"));
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "2:0:" });
+		expect(lastSnapshot().projection?.turnProjectionSignature).toBe("2:second:20");
+		expect(lastSnapshot()).not.toBe(firstSnapshot);
+	});
+
+	it("签名相同但 turnIsInProgress 翻转时不短路（回合结束必须停掉 spinner）", async () => {
+		fetchProjectionMock.mockImplementation(async () => createProjection("1:first:10", { turnIsInProgress: true }));
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		const generatingSnapshot = lastSnapshot();
+		expect(generatingSnapshot.projection?.turnProjectionEntries[0]?.turnIsInProgress).toBe(true);
+
+		fetchProjectionMock.mockImplementation(async () => createProjection("1:first:10", { turnIsInProgress: false }));
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "2:0:" });
+		expect(lastSnapshot().projection?.turnProjectionEntries[0]?.turnIsInProgress).toBe(false);
+		expect(lastSnapshot()).not.toBe(generatingSnapshot);
+	});
+
+	it("签名相同但 checkpoint 落地（commit / 对齐置信度变化）时不短路", async () => {
+		fetchProjectionMock.mockImplementation(async () =>
+			createProjection("1:first:10", {
+				turnCheckpointCommit: null,
+				turnCheckpointAlignmentConfidence: "unaligned",
+			}),
+		);
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		const unalignedSnapshot = lastSnapshot();
+		expect(unalignedSnapshot.projection?.turnProjectionEntries[0]?.turnCheckpointAlignmentConfidence).toBe(
+			"unaligned",
+		);
+
+		fetchProjectionMock.mockImplementation(async () => createProjection("1:first:10"));
+		await renderHarness({
+			workspaceId: "workspace-1",
+			conversationSessionTaskId: "session-1",
+			refreshKey: "2:1:commit-1",
+		});
+		const alignedEntry = lastSnapshot().projection?.turnProjectionEntries[0];
+		expect(alignedEntry?.turnCheckpointCommit).toBe("commit-1");
+		expect(alignedEntry?.turnCheckpointAlignmentConfidence).toBe("exact_ordinal_match");
+		expect(lastSnapshot()).not.toBe(unalignedSnapshot);
+	});
+
+	it("切换会话时立即清空旧会话数据，绝不用上一会话的投影渲染", async () => {
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		expect(lastSnapshot().projection?.turnProjectionSignature).toBe("1:first:10");
+
+		// 让 session-2 的拉取挂起：切换瞬间必须先落入「清空的 loading」，而不是带着旧数据。
+		let resolveSecond!: (value: RuntimeConversationSessionTurnProjectionResponse) => void;
+		fetchProjectionMock.mockImplementation(
+			async () =>
+				await new Promise<RuntimeConversationSessionTurnProjectionResponse>((resolve) => {
+					resolveSecond = resolve;
+				}),
+		);
+		await act(async () => {
+			root.render(
+				<HookHarness
+					workspaceId="workspace-1"
+					conversationSessionTaskId="session-2"
+					refreshKey="1:0:"
+					onSnapshot={(data) => snapshots.push(data)}
+				/>,
+			);
+		});
+		expect(lastSnapshot().queryPhase).toBe("loading");
+		expect(lastSnapshot().projection).toBeNull();
+
+		resolveSecond(createProjection("3:third:30"));
+		await act(async () => {
+			await Promise.resolve();
+		});
+		expect(lastSnapshot().queryPhase).toBe("ready");
+		expect(lastSnapshot().projection?.turnProjectionSignature).toBe("3:third:30");
+	});
+
+	it("拉取失败标 error 相位并保留旧数据，下一次 refreshKey 变化自然重试", async () => {
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "1:0:" });
+		expect(lastSnapshot().queryPhase).toBe("ready");
+
+		fetchProjectionMock.mockImplementation(async () => {
+			throw new Error("network down");
+		});
+		await renderHarness({ workspaceId: "workspace-1", conversationSessionTaskId: "session-1", refreshKey: "2:0:" });
+		expect(lastSnapshot().queryPhase).toBe("error");
+		expect(lastSnapshot().projection?.turnProjectionSignature).toBe("1:first:10");
+	});
+});

@@ -9,7 +9,7 @@
 // 「这次没成」，而不是一个把业务流程打断的异常。调用方拿到 `unavailable` 自己决定怎么降级。
 
 import { z } from "zod";
-
+import { resolveKanbanChatCredential } from "./kanban-model-provider-settings";
 import {
 	type ModelProviderCredential,
 	resolveDefaultModelProviderId,
@@ -76,6 +76,16 @@ export interface ModelProviderRequestOptions {
 	environmentVariables?: NodeJS.ProcessEnv;
 	/** 单测用：不必真的联网。 */
 	fetchImplementation?: typeof globalThis.fetch;
+	credential?: ModelProviderCredential | null;
+	observeAttempt?: (observation: {
+		modelProviderId: string;
+		modelId: string;
+		elapsedMs: number;
+		httpStatusCode?: number;
+		promptTokenCount?: number;
+		completionTokenCount?: number;
+		result: ModelProviderTextResult;
+	}) => Promise<void>;
 }
 
 const CHAT_COMPLETION_RESPONSE_SCHEMA = z.object({
@@ -231,9 +241,20 @@ async function requestChatCompletionAnswerInterpretedByCaller<TInterpretedAnswer
 ): Promise<InterpretedChatCompletionAnswer<TInterpretedAnswer>> {
 	const environmentVariables = options?.environmentVariables;
 	const requestedModelProviderId = request.modelProviderId ?? resolveDefaultModelProviderId(environmentVariables);
-	const credential = requestedModelProviderId
-		? resolveModelProviderCredential(requestedModelProviderId, environmentVariables)
-		: null;
+	let credential: ModelProviderCredential | null;
+	try {
+		credential =
+			options && "credential" in options
+				? (options.credential ?? null)
+				: environmentVariables
+					? requestedModelProviderId
+						? resolveModelProviderCredential(requestedModelProviderId, environmentVariables)
+						: null
+					: await resolveKanbanChatCredential(request.modelUsagePurpose, request.modelProviderId);
+	} catch {
+		return unavailable("model_provider_not_configured", "模型设置或系统凭据库不可用。");
+	}
+
 	if (!credential) {
 		// 没发出请求也要记一条：否则「一家都没配」在统计里与「从没用过这个功能」逐字同形。
 		recordModelProviderUsage({
@@ -257,6 +278,12 @@ async function requestChatCompletionAnswerInterpretedByCaller<TInterpretedAnswer
 	);
 	const elapsedMs = Date.now() - startedAtEpochMs;
 	const interpretedAnswer = interpretAttemptOutcome(attemptOutcome, interpretMessageContent);
+	await options?.observeAttempt?.({
+		modelProviderId: credential.modelProviderId,
+		modelId: credential.modelId,
+		elapsedMs,
+		...attemptOutcome,
+	});
 	recordModelProviderUsage({
 		modelUsagePurpose: request.modelUsagePurpose,
 		modelProviderId: credential.modelProviderId,

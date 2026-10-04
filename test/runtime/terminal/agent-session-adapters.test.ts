@@ -185,6 +185,98 @@ describe("cursorAdapter", () => {
 			}),
 		).rejects.toThrow("Cursor");
 	});
+
+	// task 203f3：Cursor 的身份由 kanban 在启动前分配，argv 必须把这个 id 用对。
+	const KANBAN_ASSIGNED_CURSOR_CHAT_ID = "a57d8fb0-3047-45d0-9695-b73f429974a5";
+	const RECORDED_CURSOR_CHAT_ID = "4debf190-1111-4222-8333-944444444444";
+
+	it("starts a fresh Cursor session on the kanban-assigned chat id and still submits the prompt and plan mode", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-fresh-start-assigned-chat-id",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "Implement the feature",
+			startInPlanMode: true,
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		const resumeIndex = launch.args.indexOf("--resume");
+		expect(launch.args[resumeIndex + 1]).toBe(KANBAN_ASSIGNED_CURSOR_CHAT_ID);
+		expect(launch.args).toContain("--plan");
+		expect(launch.args.at(-1)).toContain("Implement the feature");
+		expect(launch.args).not.toContain("--continue");
+		// 全新开局不是续跑：不能武装实质输出抑制。
+		expect(launch.resumesPriorAgentConversation).toBe(false);
+	});
+
+	it("resumes a restarted Cursor session by its recorded chat id without re-sending the prompt or replaying plan mode", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-restart-by-recorded-chat-id",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			// 用户自己写进 agent 命令的 `--continue` 会静默压过 `--resume <id>`（实测），必须剥掉。
+			args: ["--continue", "--resume", "11111111-2222-4333-8444-555555555555"],
+			cwd: "/tmp/repo",
+			prompt: "",
+			startInPlanMode: true,
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "cursor",
+				sourceSessionId: RECORDED_CURSOR_CHAT_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.args.filter((argument) => argument === "--resume")).toHaveLength(1);
+		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(RECORDED_CURSOR_CHAT_ID);
+		expect(launch.args).not.toContain("11111111-2222-4333-8444-555555555555");
+		// `--plan` 在续跑时会把 chat 的 mode 覆写回 plan。
+		expect(launch.args).not.toContain("--plan");
+		expect(launch.args.at(-1)).toBe(RECORDED_CURSOR_CHAT_ID);
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	it("keeps --continue only for a legacy Cursor resume that has no recorded chat id", async () => {
+		const launch = await prepareAgentLaunch({
+			taskId: "task-cursor-legacy-resume-latest",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/repo",
+			prompt: "",
+			resumeFromTrash: true,
+			// 即便会话上还挂着一个分配好的 id，续跑也不该拿它开新对话。
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		expect(launch.args).toContain("--continue");
+		expect(launch.args).not.toContain("--resume");
+	});
+
+	it("passes --trust only for kanban task worktrees so the Workspace Trust dialog cannot swallow the first prompt", async () => {
+		const homeDirectoryPath = setupTempHome();
+		const taskWorktreeLaunch = await prepareAgentLaunch({
+			taskId: "task-cursor-worktree-trust",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: join(homeDirectoryPath, ".cline", "worktrees", "8ef28", "review-validate-fix"),
+			prompt: "Implement the feature",
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		expect(taskWorktreeLaunch.args).toContain("--trust");
+
+		const userRepositoryLaunch = await prepareAgentLaunch({
+			taskId: "task-cursor-inplace-no-trust",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: join(homeDirectoryPath, "Documents", "GitHub", "review-validate-fix"),
+			prompt: "Implement the feature",
+			kanbanAssignedAgentNativeConversationSessionIdForFreshStart: KANBAN_ASSIGNED_CURSOR_CHAT_ID,
+		});
+		expect(userRepositoryLaunch.args).not.toContain("--trust");
+	});
 });
 
 describe("prepareAgentLaunch hook strategies", () => {
@@ -392,7 +484,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 
 		expect(launch.args).toContain("Implement the task");
-		expect(launch.deferredStartupInput).toBeUndefined();
+		expect(launch.deferredStartupPromptText).toBeUndefined();
 	});
 
 	it("does not replay the saved Claude task prompt when resuming a task", async () => {
@@ -409,7 +501,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 		expect(launch.args).toContain("--continue");
 		expect(launch.args).not.toContain("Original task prompt");
-		expect(launch.deferredStartupInput).toBeUndefined();
+		expect(launch.deferredStartupPromptText).toBeUndefined();
 	});
 
 	it("appends task workspace guard instructions for Claude task sessions", async () => {
@@ -1071,9 +1163,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 
 		expect(launch.args).not.toContain("Audit the deployment pipeline");
-		expect(launch.deferredStartupInput).toContain("\u001b[200~");
-		expect(launch.deferredStartupInput).toContain("/plan Audit the deployment pipeline");
-		expect(launch.deferredStartupInput?.endsWith("\r")).toBe(true);
+		expect(launch.deferredStartupPromptText).toBe("/plan Audit the deployment pipeline");
 	});
 
 	it("defers a bare /plan command when Codex plan mode has no prompt text", async () => {
@@ -1088,10 +1178,59 @@ describe("prepareAgentLaunch hook strategies", () => {
 			startInPlanMode: true,
 		});
 
-		expect(launch.deferredStartupInput).toContain("/plan");
-		expect(launch.deferredStartupInput).not.toContain("/plan ");
-		expect(launch.deferredStartupInput?.endsWith("\r")).toBe(true);
+		expect(launch.deferredStartupPromptText).toBe("/plan");
+		expect(launch.deferredStartupPromptText).not.toContain("/plan ");
 	});
+
+	it.each(["resumeFromTrash", "resumePriorAgentConversationWithoutResendingPrompt"] as const)(
+		"Codex 恢复标记 %s 不重发原任务或残留 Plan 命令",
+		async (resumeFlag) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "task-codex-plan-restoration",
+				agentId: "codex",
+				args: [],
+				cwd: "/tmp",
+				prompt: "不应重发的原始任务",
+				startInPlanMode: true,
+				[resumeFlag]: true,
+				workspaceId: "workspace-1",
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: "codex",
+					sourceSessionId: "11111111-2222-3333-4444-555555555555",
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			});
+			expect(launch.deferredStartupPromptText).toBeUndefined();
+			expect(launch.args).not.toContain("不应重发的原始任务");
+			expect(launch.args).not.toContain("--last");
+			expect(launch.args).toContain("11111111-2222-3333-4444-555555555555");
+		},
+	);
+
+	it.each(["resume_existing_session", "fork_existing_session"] as const)(
+		"Codex 从历史 %s 播种的新任务仍提交新的 Plan 文本",
+		async (sourceSessionReuseMode) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "task-codex-plan-seeding",
+				agentId: "codex",
+				args: [],
+				cwd: "/tmp",
+				prompt: "新的任务\n保留换行",
+				startInPlanMode: true,
+				workspaceId: "workspace-1",
+				taskAgentSessionInitialization: {
+					sourceAgentId: "codex",
+					sourceSessionId: "11111111-2222-3333-4444-555555555555",
+					sourceSessionReuseMode,
+				},
+			});
+			expect(launch.deferredStartupPromptText).toBe("/plan 新的任务\n保留换行");
+			expect(launch.resumesPriorAgentConversation).toBe(true);
+			expect(launch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
+		},
+	);
 
 	it("writes Cline hook scripts and injects --hooks-dir", async () => {
 		setupTempHome();
@@ -1805,11 +1944,11 @@ describe("ompAdapter", () => {
 		expect(launch.args).not.toContain("acp");
 	});
 
-	// 位置 prompt 会在 TUI 初始化完成后由 omp 自动提交，因此不需要 deferredStartupInput。
+	// 位置 prompt 会在 TUI 初始化完成后由 omp 自动提交，因此不需要 deferredStartupPromptText。
 	it("passes the task prompt positionally and does not defer startup input", async () => {
 		const launch = await prepareOmpLaunch({ prompt: "Implement the feature" });
 		expect(launch.args.some((argument) => argument.includes("Implement the feature"))).toBe(true);
-		expect(launch.deferredStartupInput).toBeUndefined();
+		expect(launch.deferredStartupPromptText).toBeUndefined();
 	});
 
 	// 坑 ①：omp 的大粘贴菜单默认 100 行触发，会挂住会话等人选。overlay 必须把它关掉（0）。
@@ -1883,4 +2022,503 @@ describe("ompAdapter", () => {
 		// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
 		expect(launch.shouldInspectOutputForTransition).toBeUndefined();
 	});
+});
+
+// 重启寻址轴（observedAgentNativeConversationSessionResumeAddressing）——本轴修的是：主会话与它的
+// By the way 侧问、以及同仓库下多个 inplace 任务共用同一个 cwd 时，`--continue` / `resume --last`
+// 这种「工作目录下最近一段对话」寻址必然抢错对话。
+describe("observed agent native conversation session resume addressing", () => {
+	const OBSERVED_NATIVE_SESSION_ID = "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c";
+	const SEEDED_SOURCE_SESSION_ID = "11111111-2222-3333-4444-555555555555";
+
+	it("resumes Claude by the observed session id without forking", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-claude-by-id",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "claude",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		const resumeIndex = launch.args.indexOf("--resume");
+		expect(resumeIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[resumeIndex + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+		// fork 会让 harness 新造 id，sidecar 追不上，下次重启就会去续被 fork 的源对话。
+		expect(launch.args).not.toContain("--fork-session");
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	// 本次修复的核心断言：重启路径恒发 resumeFromTrash，寻址轴必须压过它，否则 By the way 的重启
+	// 会用 `--continue` 抢到主会话的对话。
+	it("lets the addressing axis win over resumeFromTrash for Claude", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-claude-refresh",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "claude",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+	});
+
+	// 回归护栏：前端从垃圾桶恢复时会**同时**发 resumeFromTrash 与卡片上的播种 id，此时续的必须是
+	// 本任务自己的对话（`--continue`），不是播种源。寻址轴不得让这条既有行为改变。
+	it("keeps resumeFromTrash winning over the card's seeding initialization when no addressing is given", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-trash-restore-with-seeding",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			taskAgentSessionInitialization: {
+				sourceAgentId: "claude",
+				sourceSessionId: SEEDED_SOURCE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args).toContain("--continue");
+		expect(launch.args).not.toContain("--resume");
+		expect(launch.args).not.toContain(SEEDED_SOURCE_SESSION_ID);
+	});
+
+	it("does not weaken the read-only constraint of a By the way session addressed by id", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-claude-read-only",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			readOnlyQuestionSession: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "claude",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+		expect(launch.args).toContain("--permission-mode");
+		expect(launch.args).toContain("plan");
+	});
+
+	it("resumes Codex by the observed session id instead of `resume --last`", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-codex-by-id",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "codex",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		const resumeIndex = launch.args.indexOf("resume");
+		expect(resumeIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[resumeIndex + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+		expect(launch.args).not.toContain("--last");
+		expect(launch.args).not.toContain("fork");
+		// 按-id 续跑必须钉住工作目录，否则 codex 会在别处找这条会话。
+		expect(launch.args[launch.args.indexOf("-C") + 1]).toBe("/tmp/task-worktree");
+	});
+
+	it("resumes Cursor by the observed session id instead of `--continue`", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-cursor-by-id",
+			agentId: "cursor",
+			binary: "cursor-agent",
+			args: [],
+			cwd: "/tmp/task-worktree",
+			prompt: "",
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "cursor",
+				sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+
+		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+	});
+
+	// 解析器已保证两者一致；走到 adapter 还不一致说明有人绕过了漏斗，此时静默换回 cwd-latest 更糟。
+	it("throws when the addressing was recorded by a different harness than the one being launched", async () => {
+		setupTempHome();
+		await expect(
+			prepareAgentLaunch({
+				taskId: "task-conversation-session-mismatched-harness",
+				agentId: "codex",
+				binary: "codex",
+				args: [],
+				cwd: "/tmp/task-worktree",
+				prompt: "",
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: "claude",
+					sourceSessionId: OBSERVED_NATIVE_SESSION_ID,
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			}),
+		).rejects.toThrow(/does not match selected agent/);
+	});
+});
+
+describe("Kimi 延迟首发文本", () => {
+	it.each([false, true])("恢复标记 %s：仅新会话保留原始多行文本", async (resumeFromTrash) => {
+		const launch = await prepareAgentLaunch({
+			taskId: "kimi-startup-text",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			cwd: "/tmp",
+			prompt: "第一行\n第二行",
+			resumeFromTrash,
+		});
+		expect(launch.deferredStartupPromptText).toBe(resumeFromTrash ? undefined : "第一行\n第二行");
+	});
+});
+
+// 回归：配置不能分别落到 Codex 根命令与 resume 子命令的独立配置层。
+describe("原生会话身份恢复回归", () => {
+	it.each(["resume", "fork"])("Codex %s 的全部配置保持在根参数区", async (subcommand) => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "identity",
+			agentId: "codex",
+			args: [
+				"--config",
+				'model="before"',
+				subcommand,
+				"6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+				"-c",
+				'model="after"',
+			],
+			cwd: "/tmp",
+			prompt: "literal resume and fork",
+			workspaceId: "workspace-1",
+		});
+		const boundary = launch.args.indexOf(subcommand);
+		expect(boundary).toBeGreaterThan(0);
+		expect(launch.args.slice(boundary)).not.toContain("-c");
+		expect(launch.args.slice(boundary)).not.toContain("--config");
+		expect(getCodexConfigOverrideValues(launch.args, "model")).toEqual(['"before"', '"after"']);
+		expect(getCodexConfigOverrideValues(launch.args, "hooks.SessionStart")[0]).toContain(
+			"agent_conversation_session_identity_observed",
+		);
+	});
+	it.each(["kimi", "omp"] as const)("%s 绑定优先于 continue，恢复不重发 prompt 或 plan", async (agentId) => {
+		setupTempHome();
+		const sessionId =
+			agentId === "kimi" ? "session_6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c" : "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c";
+		const launch = await prepareAgentLaunch({
+			taskId: "identity",
+			agentId,
+			args: ["--continue"],
+			cwd: "/tmp",
+			prompt: "must not replay",
+			startInPlanMode: true,
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: agentId,
+				sourceSessionId: sessionId,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.args).not.toContain("--plan");
+		expect(launch.args).not.toContain("must not replay");
+		expect(launch.args[launch.args.indexOf(agentId === "kimi" ? "--session" : "--resume") + 1]).toBe(sessionId);
+		expect(launch.resumesPriorAgentConversation).toBe(true);
+		expect(launch.deferredStartupPromptText).toBeUndefined();
+	});
+});
+
+it("Codex 已绑定身份压过配置的旧 resume ID，并保留同名字面模型值", async () => {
+	setupTempHome();
+	const id = "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c";
+	const launch = await prepareAgentLaunch({
+		taskId: "identity",
+		agentId: "codex",
+		args: ["--model", "fork", "resume", "old-native-id", "--last"],
+		cwd: "/tmp",
+		prompt: "",
+		resumeFromTrash: true,
+		observedAgentNativeConversationSessionResumeAddressing: {
+			sourceAgentId: "codex",
+			sourceSessionId: id,
+			sourceSessionReuseMode: "resume_existing_session",
+		},
+	});
+	expect(launch.args).not.toContain("old-native-id");
+	expect(launch.args).not.toContain("--last");
+	expect(launch.args[launch.args.indexOf("--model") + 1]).toBe("fork");
+	expect(launch.args[launch.args.indexOf("resume") + 1]).toBe(id);
+});
+
+it.each(["claude", "codex", "kimi", "omp"] as const)("%s 已绑定身份拒绝被位置参数分隔符吞掉", async (agentId) => {
+	setupTempHome();
+	await expect(
+		prepareAgentLaunch({
+			taskId: "identity-argument-separator",
+			agentId,
+			args: ["--", "literal"],
+			cwd: "/tmp",
+			prompt: "",
+			resumeFromTrash: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: agentId,
+				sourceSessionId: "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		}),
+	).rejects.toThrow("argument separator");
+});
+
+it.each(["claude", "codex"] as const)("%s 仅有本任务绑定也不重发开局 prompt 或 plan", async (agentId) => {
+	setupTempHome();
+	const launch = await prepareAgentLaunch({
+		taskId: "observed-resume",
+		agentId,
+		args: [],
+		cwd: "/tmp",
+		prompt: "must not replay",
+		startInPlanMode: true,
+		observedAgentNativeConversationSessionResumeAddressing: {
+			sourceAgentId: agentId,
+			sourceSessionId: "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+			sourceSessionReuseMode: "resume_existing_session",
+		},
+	});
+	expect(launch.args).not.toContain("must not replay");
+	expect(launch.args).not.toContain("plan");
+	expect(launch.deferredStartupPromptText).toBeUndefined();
+	expect(launch.resumesPriorAgentConversation).toBe(true);
+});
+
+it.each([
+	{
+		agentId: "codex",
+		args: ["--model", "fork", "resume", "old-native-id", "stale startup prompt"],
+		preserved: ["--model", "fork"],
+	},
+	{
+		agentId: "codex",
+		args: ["fork", "--model", "resume", "old-native-id", "stale startup prompt", "--all"],
+		preserved: ["--model", "resume"],
+	},
+	{
+		agentId: "claude",
+		args: ["--resume", "old-native-id", "stale startup prompt", "--append-system-prompt", "--continue"],
+		preserved: ["--append-system-prompt", "--continue"],
+	},
+	{
+		agentId: "claude",
+		args: ["--continue", "stale startup prompt", "--allowedTools", "Read", "Edit"],
+		preserved: ["--allowedTools", "Read", "Edit"],
+	},
+	{
+		agentId: "kimi",
+		args: ["--session", "old-native-id", "--prompt", "stale startup prompt", "--model", "--continue", "--plan"],
+		preserved: ["--model", "--continue"],
+	},
+	{ agentId: "kimi", args: ["-S=old-native-id", "-pstale startup prompt", "--yolo"], preserved: ["--yolo"] },
+	{
+		agentId: "omp",
+		args: ["--resume", "old-native-id", "stale startup prompt", "--append-system-prompt", "--continue"],
+		preserved: ["--append-system-prompt", "--continue"],
+	},
+	{
+		agentId: "omp",
+		args: ["--continue", "stale startup prompt", "--plan", "plan-model", "--approval-mode", "write"],
+		preserved: ["--plan", "plan-model", "--approval-mode", "write"],
+	},
+] as const)(
+	"$agentId 已绑定恢复移除已有开局输入并按本家语法保留参数值 ($args)",
+	async ({ agentId, args, preserved }) => {
+		setupTempHome();
+		const nativeSessionId = "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c";
+		const launch = await prepareAgentLaunch({
+			taskId: "observed-resume-existing-arguments",
+			agentId,
+			args: [...args],
+			cwd: "/tmp",
+			prompt: "must not replay",
+			startInPlanMode: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: agentId,
+				sourceSessionId: nativeSessionId,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(launch.args).not.toContain("old-native-id");
+		expect(launch.args.join("\n")).not.toContain("stale startup prompt");
+		expect(launch.args).not.toContain("must not replay");
+		expect(launch.args.join("\0")).toContain(preserved.join("\0"));
+		expect(launch.args).toContain(nativeSessionId);
+		expect(launch.deferredStartupPromptText).toBeUndefined();
+		if (agentId === "kimi") expect(launch.args).not.toContain("--plan");
+	},
+);
+
+it.each(["claude", "codex", "kimi", "omp"] as const)("%s 已绑定恢复拒绝歧义的未知选项值", async (agentId) => {
+	setupTempHome();
+	for (const unknownOptionValue of ["must preserve this value", "--continue"]) {
+		await expect(
+			prepareAgentLaunch({
+				taskId: "observed-resume-unknown-option",
+				agentId,
+				args: ["--future-option", unknownOptionValue],
+				cwd: "/tmp",
+				prompt: "",
+				observedAgentNativeConversationSessionResumeAddressing: {
+					sourceAgentId: agentId,
+					sourceSessionId: "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+					sourceSessionReuseMode: "resume_existing_session",
+				},
+			}),
+		).rejects.toThrow("ambiguous value");
+	}
+});
+
+it.each(["--session", "--fork"])("OMP 已绑定恢复清理隐藏选择器 %s", async (selector) => {
+	setupTempHome();
+	const launch = await prepareAgentLaunch({
+		taskId: "observed-omp-resume-hidden-selector",
+		agentId: "omp",
+		args: [selector, "old-native-id", "stale startup prompt"],
+		cwd: "/tmp",
+		prompt: "",
+		observedAgentNativeConversationSessionResumeAddressing: {
+			sourceAgentId: "omp",
+			sourceSessionId: "6f1a0c9e-4f8b-4a2f-9b3c-2f4d5e6a7b8c",
+			sourceSessionReuseMode: "resume_existing_session",
+		},
+	});
+	expect(launch.args).not.toContain(selector);
+	expect(launch.args).not.toContain("old-native-id");
+	expect(launch.args).not.toContain("stale startup prompt");
+});
+
+describe("Codex 当前任务目录最近会话隔离", () => {
+	it.each(["resume", "fork", "resume-without-prompt"] as const)(
+		"%s --last 关闭跨 worktree 扩展且不解析 prompt 为参数",
+		async (operation) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "cwd-isolation",
+				agentId: "codex",
+				args: [],
+				cwd: "/tmp/task-a",
+				prompt: "--all --enable worktrees",
+				resumeFromTrash: operation === "resume",
+				resumePriorAgentConversationWithoutResendingPrompt: operation === "resume-without-prompt",
+				forkLatestWorkingDirectorySession: operation === "fork",
+			});
+			expect(launch.args[launch.args.indexOf("-C") + 1]).toBe("/tmp/task-a");
+			expect(launch.args.indexOf("features.worktrees=false")).toBeLessThan(
+				launch.args.indexOf(operation === "fork" ? "fork" : "resume"),
+			);
+			expect(launch.args).toContain(operation === "fork" ? "fork" : "resume");
+			expect(launch.args).toContain("--last");
+			expect(launch.args.filter((arg) => arg === "-C")).toHaveLength(1);
+		},
+	);
+
+	it.each([
+		["--all"],
+		["--all=true"],
+		["--cd", "/tmp/task-b"],
+		["--cd=/tmp/task-b"],
+		["-C/tmp/task-b"],
+		["-C=/tmp/task-b"],
+		["-C", "/tmp/task-a", "-C", "/tmp/task-b"],
+		["-c", "features.worktrees=true"],
+		["--config=features.worktrees=true"],
+		["-cfeatures.worktrees=true"],
+		["-c=features.worktrees=true"],
+		["-c", 'features."worktrees" = true'],
+		["-c", "features={worktrees=true}"],
+		["--enable", "worktrees"],
+		["--enable=foo,worktrees"],
+		["-c", "features.worktrees=true", "-c", "features.worktrees=false"],
+		["--"],
+	])("拒绝破坏目录隔离的参数 %j", async (...args) => {
+		setupTempHome();
+		await expect(
+			prepareAgentLaunch({
+				taskId: "cwd-isolation",
+				agentId: "codex",
+				args,
+				cwd: "/tmp/task-a",
+				prompt: "",
+				resumeFromTrash: true,
+			}),
+		).rejects.toThrow("latest conversation in this task directory");
+	});
+
+	it.each([["-C/tmp/task-a"], ["--cd=/tmp/task-a"], ["-C", "."], ["-c", "features.worktrees=false"]])(
+		"允许等价目录和显式关闭扩展 %j",
+		async (...args) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "cwd-isolation",
+				agentId: "codex",
+				args,
+				cwd: "/tmp/task-a",
+				prompt: "",
+				forkLatestWorkingDirectorySession: true,
+			});
+			expect(launch.args.filter((arg) => arg === "-C")).toHaveLength(1);
+			expect(getCodexConfigOverrideValues(launch.args, "features.worktrees")).toContain("false");
+		},
+	);
+
+	it.each([undefined, "11111111-2222-3333-4444-555555555555"])(
+		"新会话 / 显式 ID %s 不关闭扩展",
+		async (parentSessionId) => {
+			setupTempHome();
+			const launch = await prepareAgentLaunch({
+				taskId: "cwd-isolation",
+				agentId: "codex",
+				args: ["--cd", "/tmp/task-b"],
+				cwd: "/tmp/task-a",
+				prompt: "",
+				parentSessionId,
+			});
+			expect(getCodexConfigOverrideValues(launch.args, "features.worktrees")).toEqual([]);
+			expect(launch.args[launch.args.indexOf("--cd") + 1]).toBe("/tmp/task-b");
+		},
+	);
 });

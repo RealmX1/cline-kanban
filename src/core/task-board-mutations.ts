@@ -5,7 +5,6 @@ import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
-	RuntimeBoardDependency,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAutoReviewMode,
@@ -16,9 +15,21 @@ import type {
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 } from "./api-contract";
+import {
+	hasTaskDescriptionContentChanged,
+	resolveTaskDescriptionLastUpdatedAt,
+	sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending,
+} from "./backlog-task-description-last-updated-ordering";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "./task-agent-permission-mode";
 import { createUniqueTaskId } from "./task-id";
 import { resolveTaskTitle } from "./task-title";
+
+// 前端经 `@runtime-task-state` 别名（指向本文件）复用这组函数，免得再加一个值别名（tsconfig/vite/vitest 三处同步）。
+export {
+	hasTaskDescriptionContentChanged,
+	resolveTaskDescriptionLastUpdatedAt,
+	sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending,
+};
 
 export interface RuntimeCreateTaskInput {
 	taskId?: string;
@@ -164,22 +175,6 @@ export interface RuntimeUpdateTaskResult {
 	updated: boolean;
 }
 
-export interface RuntimeAddTaskDependencyResult {
-	board: RuntimeBoardData;
-	added: boolean;
-	reason?: "missing_task" | "same_task" | "duplicate" | "trash_task" | "non_backlog";
-	dependency?: RuntimeBoardDependency;
-}
-
-export interface RuntimeRemoveTaskDependencyResult {
-	board: RuntimeBoardData;
-	removed: boolean;
-}
-
-export interface RuntimeTrashTaskResult extends RuntimeMoveTaskResult {
-	readyTaskIds: string[];
-}
-
 export interface RuntimeDeleteTasksResult {
 	board: RuntimeBoardData;
 	deleted: boolean;
@@ -194,38 +189,6 @@ function collectExistingTaskIds(board: RuntimeBoardData): Set<string> {
 		}
 	}
 	return existingIds;
-}
-
-function collectTaskIds(board: RuntimeBoardData): Set<string> {
-	const taskIds = new Set<string>();
-	for (const column of board.columns) {
-		for (const card of column.cards) {
-			taskIds.add(card.id);
-		}
-	}
-	return taskIds;
-}
-
-function createDependencyId(): string {
-	return crypto.randomUUID().replaceAll("-", "").slice(0, 8);
-}
-
-function createDependencyPairKey(backlogTaskId: string, linkedTaskId: string): string {
-	return `${backlogTaskId}::${linkedTaskId}`;
-}
-
-function hasDependencyPair(board: RuntimeBoardData, backlogTaskId: string, linkedTaskId: string): boolean {
-	const pairKey = createDependencyPairKey(backlogTaskId, linkedTaskId);
-	for (const dependency of board.dependencies) {
-		const existing = resolveDependencyEndpoints(board, dependency.fromTaskId, dependency.toTaskId);
-		if ("reason" in existing) {
-			continue;
-		}
-		if (createDependencyPairKey(existing.backlogTaskId, existing.linkedTaskId) === pairKey) {
-			return true;
-		}
-	}
-	return false;
 }
 
 function findTaskLocation(
@@ -254,114 +217,6 @@ function findTaskLocation(
 		};
 	}
 	return null;
-}
-
-function resolveDependencyEndpoints(
-	board: RuntimeBoardData,
-	firstTaskId: string,
-	secondTaskId: string,
-):
-	| {
-			backlogTaskId: string;
-			linkedTaskId: string;
-	  }
-	| { reason: RuntimeAddTaskDependencyResult["reason"] } {
-	const firstColumnId = getTaskColumnId(board, firstTaskId);
-	const secondColumnId = getTaskColumnId(board, secondTaskId);
-	if (!firstColumnId || !secondColumnId) {
-		return { reason: "missing_task" };
-	}
-	if (firstColumnId === "trash" || secondColumnId === "trash") {
-		return { reason: "trash_task" };
-	}
-	const firstIsBacklog = firstColumnId === "backlog";
-	const secondIsBacklog = secondColumnId === "backlog";
-	if (firstIsBacklog && secondIsBacklog) {
-		return {
-			backlogTaskId: firstTaskId,
-			linkedTaskId: secondTaskId,
-		};
-	}
-	if (!firstIsBacklog && !secondIsBacklog) {
-		return { reason: "non_backlog" };
-	}
-	return firstIsBacklog
-		? { backlogTaskId: firstTaskId, linkedTaskId: secondTaskId }
-		: { backlogTaskId: secondTaskId, linkedTaskId: firstTaskId };
-}
-
-function getLinkedBacklogTaskIdsReadyAfterTaskTrashed(
-	board: RuntimeBoardData,
-	taskId: string,
-	fromColumnId: RuntimeBoardColumnId | null,
-): string[] {
-	if (!taskId || board.dependencies.length === 0 || (fromColumnId !== "review" && fromColumnId !== "validation")) {
-		return [];
-	}
-	const readyTaskIds = new Set<string>();
-	for (const dependency of board.dependencies) {
-		if (dependency.toTaskId !== taskId) {
-			continue;
-		}
-		if (getTaskColumnId(board, dependency.fromTaskId) !== "backlog") {
-			continue;
-		}
-		readyTaskIds.add(dependency.fromTaskId);
-	}
-	return [...readyTaskIds];
-}
-
-export function updateTaskDependencies(board: RuntimeBoardData): RuntimeBoardData {
-	if (board.dependencies.length === 0) {
-		return board;
-	}
-	const taskIds = collectTaskIds(board);
-	const dependencies: RuntimeBoardDependency[] = [];
-	const existingPairs = new Set<string>();
-	for (const dependency of board.dependencies) {
-		const firstTaskId = dependency.fromTaskId.trim();
-		const secondTaskId = dependency.toTaskId.trim();
-		if (!firstTaskId || !secondTaskId || firstTaskId === secondTaskId) {
-			continue;
-		}
-		if (!taskIds.has(firstTaskId) || !taskIds.has(secondTaskId)) {
-			continue;
-		}
-		const resolved = resolveDependencyEndpoints(board, firstTaskId, secondTaskId);
-		if ("reason" in resolved) {
-			continue;
-		}
-		const pairKey = createDependencyPairKey(resolved.backlogTaskId, resolved.linkedTaskId);
-		if (existingPairs.has(pairKey)) {
-			continue;
-		}
-		existingPairs.add(pairKey);
-		dependencies.push({
-			id: dependency.id,
-			fromTaskId: resolved.backlogTaskId,
-			toTaskId: resolved.linkedTaskId,
-			createdAt: dependency.createdAt,
-		});
-	}
-	if (
-		dependencies.length === board.dependencies.length &&
-		dependencies.every((dependency, index) => {
-			const current = board.dependencies[index];
-			return (
-				current &&
-				current.id === dependency.id &&
-				current.fromTaskId === dependency.fromTaskId &&
-				current.toTaskId === dependency.toTaskId &&
-				current.createdAt === dependency.createdAt
-			);
-		})
-	) {
-		return board;
-	}
-	return {
-		...board,
-		dependencies,
-	};
 }
 
 export function addTaskToColumn(
@@ -423,6 +278,7 @@ export function addTaskToColumn(
 		...(prepFilePath ? { prepFilePath } : {}),
 		createdAt: now,
 		updatedAt: now,
+		taskDescriptionLastUpdatedAt: now,
 	};
 
 	const targetColumnIndex = board.columns.findIndex((column) => column.id === columnId);
@@ -441,10 +297,10 @@ export function addTaskToColumn(
 	});
 
 	return {
-		board: {
+		board: sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending({
 			...board,
 			columns,
-		},
+		}),
 		task,
 	};
 }
@@ -456,87 +312,6 @@ export function getTaskColumnId(board: RuntimeBoardData, taskId: string): Runtim
 	}
 	const found = findTaskLocation(board, normalizedTaskId);
 	return found ? found.columnId : null;
-}
-
-export function addTaskDependency(
-	board: RuntimeBoardData,
-	firstTaskId: string,
-	secondTaskId: string,
-): RuntimeAddTaskDependencyResult {
-	const normalizedFirstTaskId = firstTaskId.trim();
-	const normalizedSecondTaskId = secondTaskId.trim();
-	if (!normalizedFirstTaskId || !normalizedSecondTaskId) {
-		return { board, added: false, reason: "missing_task" };
-	}
-	if (normalizedFirstTaskId === normalizedSecondTaskId) {
-		return { board, added: false, reason: "same_task" };
-	}
-	const resolved = resolveDependencyEndpoints(board, normalizedFirstTaskId, normalizedSecondTaskId);
-	if ("reason" in resolved) {
-		return { board, added: false, reason: resolved.reason };
-	}
-	if (hasDependencyPair(board, resolved.backlogTaskId, resolved.linkedTaskId)) {
-		return { board, added: false, reason: "duplicate" };
-	}
-	const dependency: RuntimeBoardDependency = {
-		id: createDependencyId(),
-		fromTaskId: resolved.backlogTaskId,
-		toTaskId: resolved.linkedTaskId,
-		createdAt: Date.now(),
-	};
-	return {
-		board: {
-			...board,
-			dependencies: [...board.dependencies, dependency],
-		},
-		added: true,
-		dependency,
-	};
-}
-
-export function canAddTaskDependency(board: RuntimeBoardData, firstTaskId: string, secondTaskId: string): boolean {
-	const normalizedFirstTaskId = firstTaskId.trim();
-	const normalizedSecondTaskId = secondTaskId.trim();
-	if (!normalizedFirstTaskId || !normalizedSecondTaskId || normalizedFirstTaskId === normalizedSecondTaskId) {
-		return false;
-	}
-	const resolved = resolveDependencyEndpoints(board, normalizedFirstTaskId, normalizedSecondTaskId);
-	if ("reason" in resolved) {
-		return false;
-	}
-	return !hasDependencyPair(board, resolved.backlogTaskId, resolved.linkedTaskId);
-}
-
-export function removeTaskDependency(board: RuntimeBoardData, dependencyId: string): RuntimeRemoveTaskDependencyResult {
-	const dependencies = board.dependencies.filter((dependency) => dependency.id !== dependencyId);
-	if (dependencies.length === board.dependencies.length) {
-		return { board, removed: false };
-	}
-	return {
-		board: {
-			...board,
-			dependencies,
-		},
-		removed: true,
-	};
-}
-
-export function getReadyLinkedTaskIdsForTaskInTrash(board: RuntimeBoardData, taskId: string): string[] {
-	return getLinkedBacklogTaskIdsReadyAfterTaskTrashed(board, taskId, getTaskColumnId(board, taskId));
-}
-
-export function trashTaskAndGetReadyLinkedTaskIds(
-	board: RuntimeBoardData,
-	taskId: string,
-	now: number = Date.now(),
-): RuntimeTrashTaskResult {
-	const fromColumnId = getTaskColumnId(board, taskId);
-	const readyTaskIds = getLinkedBacklogTaskIdsReadyAfterTaskTrashed(board, taskId, fromColumnId);
-	const movedToTrash = moveTaskToColumn(board, taskId, "trash", now);
-	return {
-		...movedToTrash,
-		readyTaskIds: movedToTrash.moved ? readyTaskIds : [],
-	};
 }
 
 export function deleteTasksFromBoard(board: RuntimeBoardData, taskIds: Iterable<string>): RuntimeDeleteTasksResult {
@@ -571,20 +346,28 @@ export function deleteTasksFromBoard(board: RuntimeBoardData, taskIds: Iterable<
 		};
 	}
 
-	const deletedTaskIdSet = new Set(deletedTaskIds);
-	const dependencies = board.dependencies.filter(
-		(dependency) => !deletedTaskIdSet.has(dependency.fromTaskId) && !deletedTaskIdSet.has(dependency.toTaskId),
-	);
-
 	return {
 		board: {
 			...board,
 			columns,
-			dependencies,
 		},
 		deleted: true,
 		deletedTaskIds,
 	};
+}
+
+// 卡片落进目标列的位置。缺省（不传 insertAtIndex）= 列顶，即历来的「最近移入在最上」语义。
+export interface RuntimeMoveTaskTargetColumnPlacement {
+	// 拖放落点：目标列里**插入之后**这张卡所在的下标（与 @hello-pangea/dnd 的 destination.index 同义）。
+	// 越界时钳到 [0, 目标列现有卡数]，不报错——落点是 UI 几何的近似值，列在请求途中被别人改过也不该让移列失败。
+	insertAtIndex?: number;
+}
+
+function clampInsertAtIndexIntoBoardColumn(insertAtIndex: number | undefined, boardColumnCardCount: number): number {
+	if (insertAtIndex === undefined || !Number.isFinite(insertAtIndex)) {
+		return 0;
+	}
+	return Math.min(Math.max(Math.trunc(insertAtIndex), 0), boardColumnCardCount);
 }
 
 export function moveTaskToColumn(
@@ -592,6 +375,7 @@ export function moveTaskToColumn(
 	taskId: string,
 	targetColumnId: RuntimeBoardColumnId,
 	now: number = Date.now(),
+	targetColumnPlacement: RuntimeMoveTaskTargetColumnPlacement = {},
 ): RuntimeMoveTaskResult {
 	const normalizedTaskId = taskId.trim();
 	if (!normalizedTaskId) {
@@ -665,8 +449,15 @@ export function moveTaskToColumn(
 		...task,
 		updatedAt: now,
 	};
-	const targetCards =
-		targetColumnId === "trash" ? [movedTask, ...targetColumn.cards] : [...targetColumn.cards, movedTask];
+	// 列顶 = 最近移入：与浏览器程序化移列的 insertAtTop、以及建卡置顶同一语义。曾经只有 trash 置顶、
+	// 其余列追加到列尾，于是经 CLI `kanban task start` 等运行时路径启动的卡会沉到一列陈旧卡的最末。
+	// 带 insertAtIndex 时（用户拖放到列中某处）保留落点。
+	const targetCards = [...targetColumn.cards];
+	targetCards.splice(
+		clampInsertAtIndexIntoBoardColumn(targetColumnPlacement.insertAtIndex, targetCards.length),
+		0,
+		movedTask,
+	);
 
 	const columns = board.columns.map((column, index) => {
 		if (index === found.columnIndex) {
@@ -686,12 +477,55 @@ export function moveTaskToColumn(
 
 	return {
 		moved: true,
-		board: updateTaskDependencies({
+		board: {
 			...board,
 			columns,
-		}),
+		},
 		task: movedTask,
 		fromColumnId: found.columnId,
+	};
+}
+
+export interface RuntimeReorderTaskWithinBoardColumnResult {
+	// 卡片位置确实变了才为 true；卡片不存在、或落点就是原位时为 false（调用方据此跳过落盘）。
+	reordered: boolean;
+	board: RuntimeBoardData;
+	task: RuntimeBoardCard | null;
+	boardColumnId: RuntimeBoardColumnId | null;
+}
+
+// 列内重排（拖放把卡挪到同一列的另一个位置）。与浏览器 applyDragResult 的同列分支同语义：
+// 只改顺序、**不推进 updatedAt**（重排不是对卡片内容的修改）。backlog 按 Description 最后更新时间排序，
+// 手动顺序会被下一次排序立刻覆盖，所以这里拒绝重排 backlog（与 drag-rules 一致）。
+export function reorderTaskWithinBoardColumn(
+	board: RuntimeBoardData,
+	taskId: string,
+	insertAtIndex: number,
+): RuntimeReorderTaskWithinBoardColumnResult {
+	const found = findTaskLocation(board, taskId.trim());
+	if (!found) {
+		return { reordered: false, board, task: null, boardColumnId: null };
+	}
+	const column = board.columns[found.columnIndex];
+	if (!column || found.columnId === "backlog") {
+		return { reordered: false, board, task: found.task, boardColumnId: found.columnId };
+	}
+	const remainingCards = column.cards.filter((_, index) => index !== found.taskIndex);
+	const nextTaskIndex = clampInsertAtIndexIntoBoardColumn(insertAtIndex, remainingCards.length);
+	if (nextTaskIndex === found.taskIndex) {
+		return { reordered: false, board, task: found.task, boardColumnId: found.columnId };
+	}
+	remainingCards.splice(nextTaskIndex, 0, found.task);
+	return {
+		reordered: true,
+		board: {
+			...board,
+			columns: board.columns.map((candidate, index) =>
+				index === found.columnIndex ? { ...candidate, cards: remainingCards } : candidate,
+			),
+		},
+		task: found.task,
+		boardColumnId: found.columnId,
 	};
 }
 
@@ -758,6 +592,17 @@ export function updateTask(
 					: input.prepFilePath === null
 						? undefined
 						: input.prepFilePath.trim() || undefined;
+			const nextImages = input.images === undefined ? card.images : cloneTaskImages(input.images);
+			// 只有 Description 内容（prompt + 附图）真正变了才推进；编辑框什么都不改直接保存、只改 baseRef / agent
+			// 等都不推进。没变时物化回落值（读推进前的卡片），老卡片的值从此固定、不再跟着 updatedAt 漂移。
+			const taskDescriptionLastUpdatedAt = hasTaskDescriptionContentChanged({
+				previousPrompt: card.prompt,
+				previousImages: card.images,
+				nextPrompt: prompt,
+				nextImages,
+			})
+				? now
+				: resolveTaskDescriptionLastUpdatedAt(card);
 			const nextTask: RuntimeBoardCard = {
 				...card,
 				title: resolveTaskTitle(input.title, prompt),
@@ -776,7 +621,7 @@ export function updateTask(
 						: (input.taskAgentPermissionMode ?? DEFAULT_TASK_AGENT_PERMISSION_MODE),
 				autoReviewEnabled: Boolean(input.autoReviewEnabled),
 				autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
-				images: input.images === undefined ? card.images : cloneTaskImages(input.images),
+				images: nextImages,
 				taskCommentEntries:
 					input.taskCommentEntries === undefined
 						? cloneTaskCommentEntries(card.taskCommentEntries)
@@ -813,6 +658,7 @@ export function updateTask(
 				worktreeMode: nextWorktreeMode,
 				prepFilePath: nextPrepFilePath,
 				updatedAt: now,
+				taskDescriptionLastUpdatedAt,
 			};
 			updatedTask = nextTask;
 			return nextTask;
@@ -829,10 +675,10 @@ export function updateTask(
 	}
 
 	return {
-		board: {
+		board: sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending({
 			...board,
 			columns,
-		},
+		}),
 		task: updatedTask,
 		updated: true,
 	};

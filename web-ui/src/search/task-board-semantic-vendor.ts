@@ -1,4 +1,4 @@
-import "@tensorflow/tfjs-backend-webgl";
+import "@tensorflow/tfjs-backend-cpu";
 
-export { create, insertMultiple, search } from "@orama/orama";
+export { create, insert, search } from "@orama/orama";
 export { embeddingsType, pluginEmbeddings } from "@orama/plugin-embeddings";

@@ -55,7 +55,6 @@ function createBoard(): BoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
@@ -205,7 +204,6 @@ describe("useTaskBoardSearch", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 	}
 
@@ -280,6 +278,62 @@ describe("useTaskBoardSearch", () => {
 
 		expect(getState().orderedResults.map((result) => result.document.taskId)).toEqual(["task-alpha"]);
 		expect(semanticSearchMocks.createTaskBoardSemanticSearchIndex).not.toHaveBeenCalled();
+	});
+
+	it("文档变化、关闭搜索及卸载会取消索引；失败后的下一次查询能重新初始化", async () => {
+		vi.useFakeTimers();
+		const documents = createDocuments();
+		semanticSearchMocks.createTaskBoardSemanticSearchIndex.mockResolvedValue({ findResults: async () => [] });
+		const { rerender, getState } = await renderHook({ documents, query: "alpha", mode: "semantic" });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+		});
+		const firstSignal = semanticSearchMocks.createTaskBoardSemanticSearchIndex.mock.calls[0]![1] as AbortSignal;
+		await rerender({ documents: createDocuments(), query: "alpha", mode: "semantic" });
+		expect(firstSignal.aborted).toBe(true);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+		});
+		const secondSignal = semanticSearchMocks.createTaskBoardSemanticSearchIndex.mock.calls[1]![1] as AbortSignal;
+		await rerender({ documents, query: "", mode: "semantic" });
+		expect(secondSignal.aborted).toBe(true);
+		semanticSearchMocks.createTaskBoardSemanticSearchIndex.mockRejectedValueOnce(new Error("网络不可用"));
+		await rerender({ documents, query: "alpha", mode: "semantic" });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+		});
+		expect(getState().semanticSearchStatus).toBe("error");
+		await rerender({ documents, query: "beta", mode: "semantic" });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+		});
+		expect(getState().semanticSearchStatus).toBe("ready");
+		const lastSignal = semanticSearchMocks.createTaskBoardSemanticSearchIndex.mock.calls.at(-1)![1] as AbortSignal;
+		await act(async () => root.render(null));
+		expect(lastSignal.aborted).toBe(true);
+	});
+
+	it("初始化迟到时不把已过期查询送进 Worker", async () => {
+		vi.useFakeTimers();
+		let finish: ((index: { findResults: ReturnType<typeof vi.fn> }) => void) | undefined;
+		semanticSearchMocks.createTaskBoardSemanticSearchIndex.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					finish = resolve;
+				}),
+		);
+		const documents = createDocuments();
+		const { rerender } = await renderHook({ documents, query: "alpha", mode: "semantic" });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+		});
+		await rerender({ documents, query: "beta", mode: "semantic" });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(220);
+		});
+		const findResults = vi.fn(async () => []);
+		await act(async () => finish?.({ findResults }));
+		expect(findResults).toHaveBeenCalledExactlyOnceWith("beta", "semantic");
 	});
 
 	it("reuses the semantic index for query changes and does not show stale semantic results", async () => {

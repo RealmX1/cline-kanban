@@ -6,8 +6,50 @@ import { NotificationLogDialog } from "@/components/notification-log-dialog";
 import {
 	buildNotificationEntriesSortedByTriggeredAtDescending,
 	buildNotificationGroups,
+	useNotificationCenter,
 } from "@/hooks/use-notification-center";
+import type { ArchivedNotificationCandidate } from "@/runtime/notification-intelligence-query";
 import type { RuntimeNotificationFeedEntry } from "@/runtime/types";
+
+const archiveRequests = vi.hoisted(() => ({
+	listArchive: vi.fn(),
+	getLifecycle: vi.fn(),
+	listPanelTaskGroups: vi.fn(),
+	markAllArchivedNotificationsVisited: vi.fn(),
+	clearAllNotificationPanels: vi.fn(),
+}));
+vi.mock("@/runtime/notification-intelligence-query", () => ({
+	notificationIntelligenceClient: () => ({
+		listArchive: { query: archiveRequests.listArchive },
+		getLifecycle: { query: archiveRequests.getLifecycle },
+		listPanelTaskGroups: { query: archiveRequests.listPanelTaskGroups },
+		markAllArchivedNotificationsVisited: { mutate: archiveRequests.markAllArchivedNotificationsVisited },
+		clearAllNotificationPanels: { mutate: archiveRequests.clearAllNotificationPanels },
+	}),
+}));
+const emptyNotificationLog = {};
+function PermanentArchiveDialogWithNotificationCenter() {
+	const notifications = useNotificationCenter({
+		permanentArchiveEnabled: true,
+		selectedTaskId: null,
+		notificationLogByWorkspaceId: emptyNotificationLog,
+		onMarkTaskVisited: () => {},
+		onClearWorkspace: () => {},
+	});
+	return (
+		<NotificationLogDialog
+			usePermanentArchive
+			open
+			onOpenChange={() => {}}
+			groups={notifications.allGroups}
+			entriesSortedByTriggeredAtDescending={notifications.allEntriesSortedByTriggeredAtDescending}
+			onFocusTask={() => {}}
+			onMarkGroupVisited={() => {}}
+			onMarkAllHistoryVisited={notifications.markAllHistoryGroupsVisited}
+			onClearAll={notifications.clearAll}
+		/>
+	);
+}
 
 type ActEnvironmentGlobal = typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 
@@ -48,6 +90,7 @@ describe("NotificationLogDialog", () => {
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
+	let archivedCandidate: ArchivedNotificationCandidate;
 
 	function renderDialog(
 		overrides: {
@@ -94,6 +137,47 @@ describe("NotificationLogDialog", () => {
 	}
 
 	beforeEach(() => {
+		for (const request of Object.values(archiveRequests)) request.mockReset();
+		archivedCandidate = {
+			candidateId: "archived-one",
+			sequence: 1,
+			workspaceId: "ws-a",
+			taskId: "task-one",
+			triggeredAt: 1,
+			userTurnKind: "review",
+			sourceKind: "test",
+			notificationPanelVisibility: "visible",
+			notificationPanelVisibilityChangedAt: 1,
+			notificationVisitedAt: null,
+			notificationProcessingStatus: "published",
+			deferredNotificationFallbackDeadlineAt: null,
+			summaryText: "已完成任务",
+			summaryLanguage: "zh-CN",
+			taskTitleSnapshot: "归档任务",
+			repositoryNameSnapshot: "测试项目",
+			supersededByCandidateId: null,
+			runtimeSessionIncarnationId: null,
+			agentResponseGenerationTurnSequence: null,
+			audioSha256: null,
+			deliveryClaimedBy: null,
+		};
+		archiveRequests.listArchive.mockImplementation(async () => ({
+			entries: [{ ...archivedCandidate }],
+			totalCount: 1,
+			unreadTaskCount: 1,
+			nextBeforeSequence: null,
+			revision: 1,
+		}));
+		archiveRequests.getLifecycle.mockImplementation(async () => ({
+			candidate: { ...archivedCandidate },
+			events: [],
+		}));
+		archiveRequests.listPanelTaskGroups.mockResolvedValue({
+			entries: [],
+			unreadTaskCount: 0,
+			nextBeforeSequence: null,
+			revision: 1,
+		});
 		previousActEnvironment = (globalThis as ActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as ActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
 		container = document.createElement("div");
@@ -111,6 +195,125 @@ describe("NotificationLogDialog", () => {
 		} else {
 			(globalThis as ActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 		}
+	});
+
+	it.each(["全部已读", "清空"])("%s 完成后才刷新永久档案列表及已打开详情", async (operation) => {
+		const mutation =
+			operation === "清空"
+				? archiveRequests.clearAllNotificationPanels
+				: archiveRequests.markAllArchivedNotificationsVisited;
+		let finishMutation: () => void = () => {
+			throw new Error("尚未开始 mutation");
+		};
+		mutation.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					finishMutation = () => {
+						if (operation === "清空") archivedCandidate.notificationPanelVisibility = "cleared";
+						else archivedCandidate.notificationVisitedAt = 123;
+						resolve({ updatedCount: 1 });
+					};
+				}),
+		);
+		await act(async () => {
+			root.render(<PermanentArchiveDialogWithNotificationCenter />);
+		});
+		await act(async () => {
+			requireButtonByText("查看原文与判断过程").click();
+		});
+		const originalListCalls = archiveRequests.listArchive.mock.calls.length;
+		const originalDetailCalls = archiveRequests.getLifecycle.mock.calls.length;
+		await act(async () => {
+			requireButtonByText(operation).click();
+		});
+		if (operation === "清空")
+			await act(async () => {
+				(document.querySelector('[role="alertdialog"] button:last-child') as HTMLButtonElement).click();
+			});
+		expect(mutation).toHaveBeenCalledTimes(1);
+		expect(archiveRequests.listArchive).toHaveBeenCalledTimes(originalListCalls);
+		expect(archiveRequests.getLifecycle).toHaveBeenCalledTimes(originalDetailCalls);
+		await act(async () => {
+			finishMutation();
+		});
+		expect(archiveRequests.listArchive).toHaveBeenCalledTimes(originalListCalls + 1);
+		expect(archiveRequests.getLifecycle).toHaveBeenCalledTimes(originalDetailCalls + 1);
+		const detail = JSON.parse(document.querySelector("pre")?.textContent ?? "null");
+		expect(detail.candidate.notificationPanelVisibility).toBe(archivedCandidate.notificationPanelVisibility);
+		expect(detail.candidate.notificationVisitedAt).toBe(archivedCandidate.notificationVisitedAt);
+		if (operation === "清空") expect(document.querySelector("article")?.textContent).toContain("cleared");
+	});
+
+	it.each(["全部已读", "清空"])("%s 失败显示错误且不刷新为成功状态", async (operation) => {
+		const mutation =
+			operation === "清空"
+				? archiveRequests.clearAllNotificationPanels
+				: archiveRequests.markAllArchivedNotificationsVisited;
+		mutation.mockRejectedValue(new Error("runtime unavailable"));
+		await act(async () => {
+			root.render(<PermanentArchiveDialogWithNotificationCenter />);
+		});
+		await act(async () => {
+			requireButtonByText("查看原文与判断过程").click();
+		});
+		const originalListCalls = archiveRequests.listArchive.mock.calls.length;
+		const originalDetailCalls = archiveRequests.getLifecycle.mock.calls.length;
+		await act(async () => {
+			requireButtonByText(operation).click();
+		});
+		if (operation === "清空")
+			await act(async () => {
+				(document.querySelector('[role="alertdialog"] button:last-child') as HTMLButtonElement).click();
+			});
+		expect(document.querySelector('[role="alert"]')?.textContent).toContain("未完成");
+		expect(archiveRequests.listArchive).toHaveBeenCalledTimes(originalListCalls);
+		expect(archiveRequests.getLifecycle).toHaveBeenCalledTimes(originalDetailCalls);
+		expect(
+			JSON.parse(document.querySelector("pre")?.textContent ?? "null").candidate.notificationVisitedAt,
+		).toBeNull();
+	});
+
+	it("手动刷新档案也刷新已打开详情，详情读取失败不继续显示旧状态", async () => {
+		await act(async () => {
+			root.render(<PermanentArchiveDialogWithNotificationCenter />);
+		});
+		await act(async () => {
+			requireButtonByText("查看原文与判断过程").click();
+		});
+		archiveRequests.getLifecycle.mockRejectedValueOnce(new Error("detail unavailable"));
+		await act(async () => {
+			requireButtonByText("刷新档案").click();
+		});
+		expect(document.querySelector('[role="alert"]')?.textContent).toContain("读取生命周期失败");
+		expect(document.querySelector("pre")).toBeNull();
+	});
+
+	it("永久档案操作不受旧快照为空或只含最近一页的限制", async () => {
+		const markAll = vi.fn();
+		await act(async () => {
+			root.render(
+				<NotificationLogDialog
+					usePermanentArchive
+					open
+					onOpenChange={() => {}}
+					groups={[]}
+					entriesSortedByTriggeredAtDescending={[]}
+					onFocusTask={() => {}}
+					onMarkGroupVisited={() => {}}
+					onMarkAllHistoryVisited={markAll}
+					onClearAll={() => {}}
+				/>,
+			);
+		});
+		const buttons = Array.from(document.querySelectorAll("button"));
+		const mark = buttons.find((button) => button.textContent?.trim() === "全部已读");
+		const clear = buttons.find((button) => button.textContent?.trim() === "清空");
+		expect(mark?.disabled).toBe(false);
+		expect(clear?.disabled).toBe(false);
+		await act(async () => {
+			mark?.click();
+		});
+		expect(markAll).toHaveBeenCalledTimes(1);
 	});
 
 	it("默认按时间流排列，已读条目与 done 条目一并按 triggeredAt 降序展示", () => {

@@ -2,7 +2,7 @@ import {
 	isRuntimeAgentSessionRenderedAsConversationPanel,
 	isRuntimeAgentSessionSummaryRenderedAsConversationPanel,
 } from "@runtime-agent-catalog";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import { type UseGitHistoryDataResult, useGitHistoryData } from "@/components/git-history/use-git-history-data";
 import { buildTaskGitActionPrompt, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
@@ -28,7 +28,7 @@ import {
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardData, CardSelection } from "@/types";
 
-type TaskGitActionSource = "card" | "agent";
+type TaskGitActionSource = "automatic_review" | "agent";
 
 interface TaskGitActionLoadingState {
 	commitSource: TaskGitActionSource | null;
@@ -61,8 +61,6 @@ interface UseGitActionsInput {
 export interface UseGitActionsResult {
 	runningGitAction: RuntimeGitSyncAction | null;
 	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingState>;
-	commitTaskLoadingById: Record<string, boolean>;
-	openPrTaskLoadingById: Record<string, boolean>;
 	agentCommitTaskLoadingById: Record<string, boolean>;
 	agentOpenPrTaskLoadingById: Record<string, boolean>;
 	isSwitchingHomeBranch: boolean;
@@ -78,8 +76,6 @@ export interface UseGitActionsResult {
 	runGitAction: (action: RuntimeGitSyncAction) => Promise<void>;
 	switchHomeBranch: (branch: string) => Promise<void>;
 	discardHomeWorkingChanges: () => Promise<void>;
-	handleCommitTask: (taskId: string) => void;
-	handleOpenPrTask: (taskId: string) => void;
 	handleAgentCommitTask: (taskId: string) => void;
 	handleAgentOpenPrTask: (taskId: string) => void;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
@@ -108,6 +104,9 @@ export function useGitActions({
 	isGitHistoryOpen,
 	refreshWorkspaceState,
 }: UseGitActionsInput): UseGitActionsResult {
+	// 事件入口读取最新状态，避免每个 session tick 改变整棵卡片树的 handler 身份。
+	const latestTaskGitActionStateRef = useRef({ board, taskConversationSessionSummariesByTaskId });
+	latestTaskGitActionStateRef.current = { board, taskConversationSessionSummariesByTaskId };
 	const [runningGitAction, setRunningGitAction] = useState<RuntimeGitSyncAction | null>(null);
 	const [taskGitActionLoadingByTaskId, setTaskGitActionLoadingByTaskId] = useState<
 		Record<string, TaskGitActionLoadingState>
@@ -188,26 +187,6 @@ export function useGitActions({
 		[],
 	);
 
-	const commitTaskLoadingById = useMemo(() => {
-		const next: Record<string, boolean> = {};
-		for (const [taskId, loading] of Object.entries(taskGitActionLoadingByTaskId)) {
-			if (loading.commitSource === "card") {
-				next[taskId] = true;
-			}
-		}
-		return next;
-	}, [taskGitActionLoadingByTaskId]);
-
-	const openPrTaskLoadingById = useMemo(() => {
-		const next: Record<string, boolean> = {};
-		for (const [taskId, loading] of Object.entries(taskGitActionLoadingByTaskId)) {
-			if (loading.prSource === "card") {
-				next[taskId] = true;
-			}
-		}
-		return next;
-	}, [taskGitActionLoadingByTaskId]);
-
 	const agentCommitTaskLoadingById = useMemo(() => {
 		const next: Record<string, boolean> = {};
 		for (const [taskId, loading] of Object.entries(taskGitActionLoadingByTaskId)) {
@@ -235,6 +214,7 @@ export function useGitActions({
 	// 到按 agentId 预判（此时两条通道都不存在，粘不粘得进去都是后话）。
 	const resolveShouldUseChatChannelForTaskGitActions = useCallback(
 		(taskId: string, taskAgentId: RuntimeAgentId | null | undefined): boolean => {
+			const { taskConversationSessionSummariesByTaskId } = latestTaskGitActionStateRef.current;
 			const sessionSummary = taskConversationSessionSummariesByTaskId[taskId];
 			if (sessionSummary) {
 				return isRuntimeAgentSessionSummaryRenderedAsConversationPanel(sessionSummary);
@@ -243,11 +223,12 @@ export function useGitActions({
 				taskAgentId ?? runtimeProjectConfig?.selectedAgentId ?? null,
 			);
 		},
-		[runtimeProjectConfig?.selectedAgentId, taskConversationSessionSummariesByTaskId],
+		[runtimeProjectConfig?.selectedAgentId],
 	);
 
 	const runTaskGitAction = useCallback(
 		async (taskId: string, action: TaskGitAction, source: TaskGitActionSource) => {
+			const { board } = latestTaskGitActionStateRef.current;
 			const taskLoadingState = taskGitActionLoadingByTaskId[taskId];
 			const actionInFlightSource = action === "commit" ? taskLoadingState?.commitSource : taskLoadingState?.prSource;
 			if (actionInFlightSource !== null && actionInFlightSource !== undefined) {
@@ -356,7 +337,6 @@ export function useGitActions({
 			}
 		},
 		[
-			board,
 			fetchTaskWorkspaceInfo,
 			runtimeProjectConfig,
 			sendTaskChatMessage,
@@ -365,20 +345,6 @@ export function useGitActions({
 			resolveShouldUseChatChannelForTaskGitActions,
 			taskGitActionLoadingByTaskId,
 		],
-	);
-
-	const handleCommitTask = useCallback(
-		(taskId: string) => {
-			void runTaskGitAction(taskId, "commit", "card");
-		},
-		[runTaskGitAction],
-	);
-
-	const handleOpenPrTask = useCallback(
-		(taskId: string) => {
-			void runTaskGitAction(taskId, "pr", "card");
-		},
-		[runTaskGitAction],
 	);
 
 	const handleAgentCommitTask = useCallback(
@@ -528,7 +494,7 @@ export function useGitActions({
 
 	const runAutoReviewGitAction = useCallback(
 		async (taskId: string, action: TaskGitAction) => {
-			return await runTaskGitAction(taskId, action, "card");
+			return await runTaskGitAction(taskId, action, "automatic_review");
 		},
 		[runTaskGitAction],
 	);
@@ -557,8 +523,6 @@ export function useGitActions({
 	return {
 		runningGitAction,
 		taskGitActionLoadingByTaskId,
-		commitTaskLoadingById,
-		openPrTaskLoadingById,
 		agentCommitTaskLoadingById,
 		agentOpenPrTaskLoadingById,
 		isSwitchingHomeBranch,
@@ -572,8 +536,6 @@ export function useGitActions({
 		runGitAction,
 		switchHomeBranch,
 		discardHomeWorkingChanges,
-		handleCommitTask,
-		handleOpenPrTask,
 		handleAgentCommitTask,
 		handleAgentOpenPrTask,
 		runAutoReviewGitAction,

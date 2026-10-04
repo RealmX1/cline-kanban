@@ -2,11 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import type { RuntimeBoardData } from "../../src/core/api-contract";
 import {
-	addTaskDependency,
 	addTaskToColumn,
 	deleteTasksFromBoard,
 	moveTaskToColumn,
-	trashTaskAndGetReadyLinkedTaskIds,
+	reorderTaskWithinBoardColumn,
 	updateTask,
 } from "../../src/core/task-board-mutations";
 
@@ -18,32 +17,10 @@ function createBoard(): RuntimeBoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
 }
 
 describe("deleteTasksFromBoard", () => {
-	it("removes a trashed task and any dependencies that reference it", () => {
-		const createA = addTaskToColumn(
-			createBoard(),
-			"backlog",
-			{ prompt: "Task A", baseRef: "main" },
-			() => "aaaaa111",
-		);
-		const createB = addTaskToColumn(createA.board, "review", { prompt: "Task B", baseRef: "main" }, () => "bbbbb111");
-		const linked = addTaskDependency(createB.board, "aaaaa", "bbbbb");
-		if (!linked.added) {
-			throw new Error("Expected dependency to be created.");
-		}
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(linked.board, "bbbbb");
-		const deleted = deleteTasksFromBoard(trashed.board, ["bbbbb"]);
-
-		expect(deleted.deleted).toBe(true);
-		expect(deleted.deletedTaskIds).toEqual(["bbbbb"]);
-		expect(deleted.board.columns.find((column) => column.id === "trash")?.cards).toEqual([]);
-		expect(deleted.board.dependencies).toEqual([]);
-	});
-
 	it("removes multiple trashed tasks at once", () => {
 		const createA = addTaskToColumn(createBoard(), "trash", { prompt: "Task A", baseRef: "main" }, () => "aaaaa111");
 		const createB = addTaskToColumn(createA.board, "trash", { prompt: "Task B", baseRef: "main" }, () => "bbbbb111");
@@ -97,6 +74,82 @@ describe("task stage monotonicity", () => {
 		expect(attemptedBacklogMove.board.columns.find((column) => column.id === "in_progress")?.cards[0]?.id).toBe(
 			created.task.id,
 		);
+	});
+});
+
+describe("moveTaskToColumn 列内插入位置", () => {
+	// CLI `kanban task start` 等运行时路径移列时，卡片必须落到目标列顶部，与浏览器程序化移列的
+	// insertAtTop 同一语义；否则正在跑的卡会沉到一列陈旧卡的最末。
+	it.each(["in_progress", "review"] as const)("把移入 %s 的卡片放到该列顶部", (targetColumnId) => {
+		const alreadyInTargetColumn = addTaskToColumn(
+			createBoard(),
+			targetColumnId,
+			{ prompt: "Task Already There", baseRef: "main" },
+			() => "aaaaa111",
+		);
+		const waitingInBacklog = addTaskToColumn(
+			alreadyInTargetColumn.board,
+			"backlog",
+			{ prompt: "Task Moved In", baseRef: "main" },
+			() => "bbbbb111",
+		);
+
+		const moved = moveTaskToColumn(waitingInBacklog.board, waitingInBacklog.task.id, targetColumnId);
+
+		expect(moved.moved).toBe(true);
+		expect(moved.board.columns.find((column) => column.id === targetColumnId)?.cards.map((card) => card.id)).toEqual([
+			waitingInBacklog.task.id,
+			alreadyInTargetColumn.task.id,
+		]);
+	});
+});
+
+describe("moveTaskToColumn 的拖放落点（insertAtIndex）与列内重排", () => {
+	function createBoardWithThreeReviewCardsAndOneInProgressCard(): RuntimeBoardData {
+		let board = createBoard();
+		for (const [columnId, taskId] of [
+			["review", "rev01"],
+			["review", "rev02"],
+			["review", "rev03"],
+			["in_progress", "inp01"],
+		] as const) {
+			board = addTaskToColumn(board, columnId, { prompt: taskId, baseRef: "main" }, () => taskId).board;
+		}
+		return board;
+	}
+
+	function readColumnTaskIds(board: RuntimeBoardData, columnId: string): string[] {
+		return board.columns.find((column) => column.id === columnId)?.cards.map((card) => card.id) ?? [];
+	}
+
+	it("带 insertAtIndex 时保留落点、越界钳到列尾；不传时仍落在列顶", () => {
+		const board = createBoardWithThreeReviewCardsAndOneInProgressCard();
+
+		const droppedInTheMiddle = moveTaskToColumn(board, "inp01", "review", 5, { insertAtIndex: 1 });
+		expect(readColumnTaskIds(droppedInTheMiddle.board, "review")).toEqual(["rev03", "inp01", "rev02", "rev01"]);
+		expect(droppedInTheMiddle.task?.updatedAt).toBe(5);
+
+		const droppedPastTheEnd = moveTaskToColumn(board, "inp01", "review", 5, { insertAtIndex: 99 });
+		expect(readColumnTaskIds(droppedPastTheEnd.board, "review")).toEqual(["rev03", "rev02", "rev01", "inp01"]);
+
+		const withoutPlacement = moveTaskToColumn(board, "inp01", "review");
+		expect(readColumnTaskIds(withoutPlacement.board, "review")).toEqual(["inp01", "rev03", "rev02", "rev01"]);
+	});
+
+	it("列内重排只改顺序、不推进 updatedAt；原位与 backlog 不重排", () => {
+		const board = createBoardWithThreeReviewCardsAndOneInProgressCard();
+		const updatedAtBeforeReorder = board.columns.find((column) => column.id === "review")?.cards[0]?.updatedAt;
+
+		const reordered = reorderTaskWithinBoardColumn(board, "rev03", 2);
+		expect(reordered.reordered).toBe(true);
+		expect(readColumnTaskIds(reordered.board, "review")).toEqual(["rev02", "rev01", "rev03"]);
+		expect(reordered.board.columns.find((column) => column.id === "review")?.cards[2]?.updatedAt).toBe(
+			updatedAtBeforeReorder,
+		);
+
+		expect(reorderTaskWithinBoardColumn(board, "rev03", 0).reordered).toBe(false);
+		const backlogBoard = addTaskToColumn(board, "backlog", { prompt: "b", baseRef: "main" }, () => "bak01").board;
+		expect(reorderTaskWithinBoardColumn(backlogBoard, "bak01", 0).reordered).toBe(false);
 	});
 });
 
@@ -629,5 +682,98 @@ describe("updateTask taskAgentPermissionMode", () => {
 		});
 
 		expect(updated.task?.taskAgentPermissionMode).toBe("bypass_all_permission_prompts");
+	});
+});
+
+describe("taskDescriptionLastUpdatedAt", () => {
+	function createTwoBacklogTasks() {
+		const first = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Older task", baseRef: "main" },
+			() => "aaaaa111",
+			100,
+		);
+		const second = addTaskToColumn(
+			first.board,
+			"backlog",
+			{ prompt: "Newer task", baseRef: "main" },
+			() => "bbbbb111",
+			200,
+		);
+		return { board: second.board, olderTaskId: first.task.id, newerTaskId: second.task.id };
+	}
+
+	function backlogTaskIds(board: RuntimeBoardData): string[] {
+		return board.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id) ?? [];
+	}
+
+	it("initializes the field to the creation time", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main" },
+			() => "aaaaa111",
+			123,
+		);
+		expect(created.task.taskDescriptionLastUpdatedAt).toBe(123);
+	});
+
+	it("advances and moves the task to the top of the backlog when the prompt changes", () => {
+		const { board, olderTaskId, newerTaskId } = createTwoBacklogTasks();
+		expect(backlogTaskIds(board)).toEqual([newerTaskId, olderTaskId]);
+
+		const updated = updateTask(board, olderTaskId, { prompt: "Older task, rewritten", baseRef: "main" }, 300);
+
+		expect(updated.task?.taskDescriptionLastUpdatedAt).toBe(300);
+		expect(updated.task?.updatedAt).toBe(300);
+		expect(backlogTaskIds(updated.board)).toEqual([olderTaskId, newerTaskId]);
+	});
+
+	it("advances when only the attached images change", () => {
+		const { board, olderTaskId } = createTwoBacklogTasks();
+		const updated = updateTask(
+			board,
+			olderTaskId,
+			{ prompt: "Older task", baseRef: "main", images: [{ id: "img-1", data: "abc", mimeType: "image/png" }] },
+			300,
+		);
+		expect(updated.task?.taskDescriptionLastUpdatedAt).toBe(300);
+	});
+
+	it("does not advance or reorder when only non-description fields change", () => {
+		const { board, olderTaskId, newerTaskId } = createTwoBacklogTasks();
+		const updated = updateTask(
+			board,
+			olderTaskId,
+			{ title: "Renamed", prompt: "  Older task  ", baseRef: "develop", agentId: "codex", startInPlanMode: true },
+			300,
+		);
+
+		expect(updated.task?.updatedAt).toBe(300);
+		expect(updated.task?.taskDescriptionLastUpdatedAt).toBe(100);
+		expect(backlogTaskIds(updated.board)).toEqual([newerTaskId, olderTaskId]);
+	});
+
+	it("materializes the updatedAt fallback on legacy cards instead of advancing it", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Legacy", baseRef: "main" },
+			() => "aaaaa111",
+			100,
+		);
+		const { taskDescriptionLastUpdatedAt: _removed, ...legacyTask } = created.task;
+		const legacyBoard: RuntimeBoardData = {
+			...created.board,
+			columns: created.board.columns.map((column) =>
+				column.id === "backlog" ? { ...column, cards: [{ ...legacyTask, updatedAt: 150 }] } : column,
+			),
+		};
+
+		const updated = updateTask(legacyBoard, created.task.id, { prompt: "Legacy", baseRef: "develop" }, 300);
+
+		expect(updated.task?.updatedAt).toBe(300);
+		expect(updated.task?.taskDescriptionLastUpdatedAt).toBe(150);
 	});
 });

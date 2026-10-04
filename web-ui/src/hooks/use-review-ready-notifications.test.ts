@@ -1,9 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionUserTurnKind } from "@/runtime/types";
 import {
 	resolveReviewReadyNotificationBody,
 	resolveReviewReadyNotificationTitle,
+	useReviewReadyNotifications,
 } from "./use-review-ready-notifications";
+
+const playSummarySpeech = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("@/utils/notification-summary-speech", () => ({ playNotificationSummarySpeech: playSummarySpeech }));
+vi.mock("@/runtime/notification-intelligence-query", () => ({
+	notificationIntelligenceClient: () => ({
+		claimDelivery: { mutate: async () => ({ claimed: true }) },
+		recordClientFilter: { mutate: async () => ({}) },
+		recordClientObservation: { mutate: async () => ({}) },
+		getSettings: { query: async () => ({ settings: { speechMode: "summary" } }) },
+	}),
+}));
+vi.mock("@/utils/notification-permission", () => ({ getBrowserNotificationPermission: () => "granted" }));
 
 // 标题随「人轴」userTurnKind 措辞，kind 取自一次性 ready 事件 payload（非延迟 summary 流）。
 // 双轴重构后标题 = 措辞本身（首字母大写、独立成句），不再前缀项目名——项目名/任务标题改放正文前两行。
@@ -90,4 +105,72 @@ describe("resolveReviewReadyNotificationBody", () => {
 	it("仅任务标题（workspace 与 finalMessage 均缺）→ 单行", () => {
 		expect(resolveReviewReadyNotificationBody(null, "Fix the login bug", null)).toBe("Fix the login bug");
 	});
+});
+
+describe("OS 通知正文保留来源身份", () => {
+	it.each(["Done — all tests green", "任务已完成的 AI 摘要"])(
+		"服务端填充 summaryText=%s 时仍包含工作区与任务标题",
+		async (summaryText) => {
+			playSummarySpeech.mockClear();
+			const browserNotification = vi.fn(function BrowserNotification() {});
+			vi.stubGlobal("Notification", browserNotification);
+			vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+			const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+			localStorage.clear();
+			const container = document.createElement("div");
+			const root = createRoot(container);
+			function NotificationHarness() {
+				useReviewReadyNotifications({
+					activeWorkspaceId: "workspace-a",
+					workspacePath: "/projects/my-repo",
+					projects: [],
+					board: {
+						columns: [
+							{
+								id: "review",
+								title: "Review",
+								cards: [
+									{
+										id: "task-a",
+										title: "Fix login",
+										prompt: "Fix the login bug",
+										startInPlanMode: false,
+										baseRef: "main",
+										createdAt: 0,
+										updatedAt: 0,
+									},
+								],
+							},
+						],
+					},
+					isDocumentVisible: false,
+					latestTaskReadyForReview: {
+						type: "task_ready_for_review",
+						workspaceId: "workspace-a",
+						taskId: "task-a",
+						candidateId: "candidate-a",
+						triggeredAt: Date.now(),
+						summaryText,
+					},
+					taskSessions: {},
+					readyForReviewNotificationsEnabled: true,
+					notificationSoundEnabled: true,
+				});
+				return null;
+			}
+			try {
+				await act(async () => root.render(createElement(NotificationHarness)));
+				expect(browserNotification).toHaveBeenCalledWith(
+					"Ready for review",
+					expect.objectContaining({ body: `my-repo\nFix the login bug\n${summaryText}` }),
+				);
+				expect(playSummarySpeech).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ text: summaryText }));
+			} finally {
+				act(() => root.unmount());
+				hasFocus.mockRestore();
+				vi.unstubAllGlobals();
+				container.remove();
+			}
+		},
+	);
 });

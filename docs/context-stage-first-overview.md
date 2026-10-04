@@ -6,6 +6,7 @@
 
 **Board Scope（看板作用域）**：
 整个 Kanban 看板这一层级——跨所有 project/repository 的汇总视角。本概览功能作用在 Board Scope。
+用户在顶栏项目切换器的首行「All projects」选中它（与选具体项目互斥，见 `web-ui/src/hooks/use-selected-board-or-single-project-scope.ts`）：看板页显示本概览，Focus View 左栏显示跨项目「最近活跃任务」切换面板（docs/context-cross-project-recently-active-task-switcher.md）。范围持久化在 localStorage，不再是一个只在内存里的「Board overview」开关。
 _Avoid_: global scope, workspace scope（workspace 已专指单个 project）
 
 **Project Scope（项目作用域）**：

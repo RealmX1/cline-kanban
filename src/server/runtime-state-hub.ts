@@ -4,6 +4,12 @@
 import type { IncomingMessage } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
+import {
+	createNotificationAssessmentService,
+	type NotificationAssessmentInput,
+} from "../notifications/notification-assessment-service";
+import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
+import { listWorkspaceIndexEntries, loadPersistedWorkspaceStateById } from "../state/workspace-state";
 
 // 「会话型」任务来源：Kanban 直接持有结构化消息、在卡片详情里渲染成会话面板的那一类 agent。
 // 目前是 Cline SDK（进程内）与 ACP（stdio 子进程）两种。
@@ -19,19 +25,25 @@ export interface ConversationTaskSessionSubscriptionSource {
 
 import type {
 	RuntimeClineMcpServerAuthStatus,
-	RuntimeExploratorySessionMapCollection,
+	RuntimeExplorationThreadGraphProjectionView,
+	RuntimeExploratoryFindingEntry,
+	RuntimeLiveTaskResourceUsageSnapshot,
 	RuntimeNotificationFeedEntry,
+	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamErrorMessage,
-	RuntimeStateStreamExploratorySessionMapUpdatedMessage,
+	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
+	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
 	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamNotificationLogUpdatedMessage,
 	RuntimeStateStreamProjectsMessage,
+	RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage,
 	RuntimeStateStreamSnapshotMessage,
 	RuntimeStateStreamTaskChatClearedMessage,
 	RuntimeStateStreamTaskChatMessage,
 	RuntimeStateStreamTaskReadyForReviewMessage,
+	RuntimeStateStreamTaskResourceUsageSnapshotsUpdatedMessage,
 	RuntimeStateStreamTaskSessionsMessage,
 	RuntimeStateStreamWorkspaceMetadataMessage,
 	RuntimeStateStreamWorkspaceStateMessage,
@@ -42,14 +54,9 @@ import type {
 import { isNotifiableUserTurn, resolveSessionFacets } from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
-import {
-	appendNotificationLogEntry,
-	readAllNotificationLogs,
-	readNotificationLog,
-} from "../state/notification-log-store";
+import { readAllNotificationLogs, readNotificationLog } from "../state/notification-log-store";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
-import { createExploratorySessionMapMaintenanceObserver } from "./exploratory-session-map-maintenance-observer";
 import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
 import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
@@ -76,6 +83,9 @@ export interface RuntimeStateHub {
 		service: ConversationTaskSessionSubscriptionSource,
 	) => void;
 	broadcastTaskChatCleared: (workspaceId: string, taskId: string) => void;
+	// 本 hub 订阅着的 Cline SDK / ACP 会话的最新 summary。workspace-registry 拼跨项目视图时用它补齐
+	// TerminalSessionManager 看不到的两种 transport。
+	listTrackedConversationTaskSessionSummaries: (workspaceId: string) => RuntimeTaskSessionSummary[];
 	handleUpgrade: (
 		request: IncomingMessage,
 		socket: Parameters<WebSocketServer["handleUpgrade"]>[1],
@@ -93,26 +103,50 @@ export interface RuntimeStateHub {
 		workspaceId: string,
 		taskId: string,
 		userTurnKind: RuntimeTaskSessionUserTurnKind,
+		evidence?: Pick<NotificationAssessmentInput, "candidateId" | "summary" | "finalMessage">,
 	) => void;
 	// 通知中心：某 workspace 的日志变更（mark-visited / clear / board 变更导致 isDone 刷新）后，
 	// 重建该 workspace 的派生 feed 并全局广播给所有客户端（铃铛跨 repo 聚合）。
 	broadcastNotificationLogUpdated: (workspaceId: string) => Promise<void>;
-	// Exploratory session map 集合变更（ingest apply 成功 / stale 标记翻转）后，把该会话的完整
-	// 集合发给本 workspace 在场客户端（量级 = 节点数，恒小）。不搭车 summary 广播（蓝图 §B.2）。
-	broadcastExploratorySessionMapUpdated: (
+	// Exploratory findings 集合变更（save/confirm/reject/archive/ingest 落盘成功）后，把该
+	// workspace 的完整 finding 集合全量替换推送给在场客户端（恒小，上限 500；蓝图 §D.3）。
+	// 不搭车 summary 广播。
+	broadcastExploratoryFindingsUpdated: (workspaceId: string, findings: RuntimeExploratoryFindingEntry[]) => void;
+	// exploration thread graph（B.2）：某个 exploration 的整张图变更后全量替换推送。
+	// 按 exploration 分发而不是按 workspace 合并：一个 workspace 下可以有多张图，合并推送会让
+	// 打开 A 卡片的客户端因为 B 卡片判完图而整份重渲染。
+	broadcastExplorationThreadGraphUpdated: (
 		workspaceId: string,
-		conversationSessionTaskId: string,
-		mapCollection: RuntimeExploratorySessionMapCollection | null,
+		explorationId: string,
+		view: RuntimeExplorationThreadGraphProjectionView,
 	) => void;
-	// Exploratory session map 再维护提醒的投递出口（统一发送出口在 runtime-server 层，hub 建好后
-	// 由它注入一次）。未注入时观察器只做 stale 落账、不投递提醒。
-	setExploratorySessionMapMaintenanceNudgeSender: (
-		sender: (workspaceId: string, conversationSessionTaskId: string, text: string) => Promise<void>,
+	// 排队 prompt 的出队观察器。**后绑定**：hub 在 cli.ts 里早于 runtime server 创建，而 dispatcher 要用
+	// server 作用域里的三 transport 服务，只能等 server 起来之后再挂上。返回解绑函数。
+	registerQueuedTaskPromptDeliveryDispatchObserver: (observer: QueuedTaskPromptDeliveryDispatchObserver) => () => void;
+	// 排队 prompt 投影变更推送：本 workspace 在场客户端整份替换。0 客户端时跳过——客户端重连后靠
+	// getTaskPromptDeliveryQueue 重查对齐，不补发。
+	broadcastQueuedTaskPromptDeliveriesUpdated: (
+		workspaceId: string,
+		projectedEntriesByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
+	) => void;
+	// 按 task 归因的资源占用：某 workspace 全部卡片的实时快照（全量替换）。每个采样 tick 调一次；
+	// hub 缓存最近一份，新客户端连上后立即补发，首屏不必等下一个 tick。
+	broadcastTaskResourceUsageSnapshotsUpdated: (
+		workspaceId: string,
+		snapshots: RuntimeLiveTaskResourceUsageSnapshot[],
 	) => void;
 	close: () => Promise<void>;
 }
 
+// hub 只需要知道「把每条 summary 交出去」与「workspace 没了就忘掉它」，不依赖 dispatcher 的具体实现。
+export interface QueuedTaskPromptDeliveryDispatchObserver {
+	observeTaskSessionSummary(workspaceId: string, summary: RuntimeTaskSessionSummary): void;
+	forgetWorkspace(workspaceId: string): void;
+}
+
 export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): RuntimeStateHub {
+	const latestNotificationAssistantMessages = new Map<string, string>();
+	const latestNotificationSummaries = new Map<string, RuntimeTaskSessionSummary>();
 	const terminalSummaryUnsubscribeByWorkspaceId = new Map<string, () => void>();
 	// 一个 workspace 可能同时挂着多种「会话型」来源（Cline SDK 与 ACP），故按
 	// `${workspaceId}::${sourceKind}` 复合键登记订阅，避免二者互相顶掉。
@@ -131,6 +165,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		);
 	const pendingTaskSessionSummariesByWorkspaceId = new Map<string, Map<string, RuntimeTaskSessionSummary>>();
 	// 三 transport 共用的「停止生成响应」边沿观察器（见 queueTaskSessionSummaryBroadcast 的挂载点注释）。
+	let queuedTaskPromptDeliveryDispatchObserver: QueuedTaskPromptDeliveryDispatchObserver | null = null;
 	const agentSessionResponseGenerationStopObserver = createAgentSessionResponseGenerationStopObserver({
 		onPersistError: (error, context) => {
 			logAgentSessionRetentionWarning(
@@ -150,30 +185,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				);
 			},
 		});
-	// Exploratory session map 的漂移检测 + 防抖再维护观察器（蓝图 §B.3，M1）。挂在下方
-	// queueTaskSessionSummaryBroadcast 的 join point，与停止生成观察器同位同节律。
-	// nudge 投递出口由 runtime-server 建好后经 setter 注入（统一发送出口的 deps 不在本层）；
-	// 未注入时只做 stale 落账，不投递。
-	const clineTaskSessionServiceByWorkspaceId = new Map<string, ClineTaskSessionService>();
-	let exploratorySessionMapMaintenanceNudgeSender:
-		| ((workspaceId: string, conversationSessionTaskId: string, text: string) => Promise<void>)
-		| undefined;
-	const exploratorySessionMapMaintenanceObserver = createExploratorySessionMapMaintenanceObserver({
-		getClineTaskSessionService: (workspaceId) => clineTaskSessionServiceByWorkspaceId.get(workspaceId) ?? null,
-		onCollectionUpdated: (workspaceId, conversationSessionTaskId, mapCollection) => {
-			broadcastExploratorySessionMapUpdated(workspaceId, conversationSessionTaskId, mapCollection);
-		},
-		sendMaintenanceNudge: (workspaceId, conversationSessionTaskId, text) =>
-			exploratorySessionMapMaintenanceNudgeSender?.(workspaceId, conversationSessionTaskId, text) ??
-			Promise.resolve(),
-		onNudgeFailed: (error, context) => {
-			logAgentSessionRetentionWarning(
-				`exploratory-session-map-maintenance-nudge-failed workspaceId=${context.workspaceId} taskId=${
-					context.conversationSessionTaskId
-				} reason=${error instanceof Error ? error.message : String(error)}`,
-			);
-		},
-	});
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
@@ -197,16 +208,31 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 	});
 
-	const sendRuntimeStateMessage = (client: WebSocket, payload: RuntimeStateStreamMessage) => {
+	const sendSerializedRuntimeStateMessage = (client: WebSocket, serializedPayload: string) => {
 		if (client.readyState !== WebSocket.OPEN) {
 			return;
 		}
 		try {
-			client.send(JSON.stringify(payload));
+			client.send(serializedPayload);
 		} catch {
 			// Ignore websocket write errors; close handlers clean up disconnected sockets.
 		}
 	};
+
+	const sendRuntimeStateMessage = (client: WebSocket, payload: RuntimeStateStreamMessage) => {
+		sendSerializedRuntimeStateMessage(client, JSON.stringify(payload));
+	};
+
+	// projects payload 是全局的（覆盖全部已注册 project、同一份发往所有在场客户端），故去重指纹也只
+	// 需一份全局值：与上次实际发送的序列化结果相同 ⇒ 每个在场客户端都已持有这份数据，可整条跳过。
+	// 命中条件是「两次构建的 payload 字节级相同」：agent 无输出窗口、纯心跳 flush 这类场景挡掉
+	// flushTaskSessionSummaries 每 150ms 触发的重发（前端每收一条 projects_updated 都要重 dispatch
+	// 一轮）；agent 活跃输出期间 inProgressTaskDetails 的 lastOutputAt 随每个非空 PTY chunk 刷新，
+	// payload 每次都不同、广播照常发送——那是合法新数据而非浪费。失效是天然的、无需按 workspace 记账：项目增删 /
+	// board 变化 / currentProjectId 切换都会改变序列化结果；新连接客户端登记进广播集合时会把指纹
+	// 置回 null（见连接握手处），保证注册后下一次广播必定发送——snapshot 全量替换可能把该客户端
+	// 回滚到旧数据，靠这次必发补洞；payload 构建失败时指纹不动，下次调用照常重试。
+	let lastBroadcastProjectsPayloadFingerprint: string | null = null;
 
 	const broadcastRuntimeProjectsUpdated = async (preferredCurrentProjectId: string | null): Promise<void> => {
 		if (runtimeStateClients.size === 0) {
@@ -217,13 +243,18 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
 					preferredCurrentProjectId,
 				);
-			for (const client of runtimeStateClients) {
-				sendRuntimeStateMessage(client, {
-					type: "projects_updated",
-					currentProjectId: payload.currentProjectId,
-					projects: payload.projects,
-				} satisfies RuntimeStateStreamProjectsMessage);
+			const serializedPayload = JSON.stringify({
+				type: "projects_updated",
+				currentProjectId: payload.currentProjectId,
+				projects: payload.projects,
+			} satisfies RuntimeStateStreamProjectsMessage);
+			if (serializedPayload === lastBroadcastProjectsPayloadFingerprint) {
+				return;
 			}
+			for (const client of runtimeStateClients) {
+				sendSerializedRuntimeStateMessage(client, serializedPayload);
+			}
+			lastBroadcastProjectsPayloadFingerprint = serializedPayload;
 		} catch {
 			// Ignore transient project summary failures; next update will resync.
 		}
@@ -278,14 +309,19 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const queueTaskSessionSummaryBroadcast = (workspaceId: string, summary: RuntimeTaskSessionSummary) => {
+		latestNotificationSummaries.set(`${workspaceId}:${summary.taskId}`, summary);
 		// 「停止生成响应后固定宽限期」回收的归一化边沿检测。刻意挂在这里而不是各 transport 内部：
 		// 终端 / Cline SDK / ACP 三条 summary 流全部经此排队，是唯一的跨 transport 汇聚点；且这一句
 		// 位于下方「0 客户端提前返回」之前，故计时与「有没有人在看」彻底解耦——关标签页 / 切项目 /
 		// 折叠侧栏都不影响期限。观察器内部只在状态边沿动账本，不会被高频 summary 刷成 IO 风暴。
 		agentSessionResponseGenerationStopObserver.observeTaskSessionSummary(workspaceId, summary);
-		// Exploratory session map 维护观察：同位挂载（join point 注释见上）。观察器内部自带
-		// 模式/transport/活体三道门，非 exploratory 会话零开销。
-		exploratorySessionMapMaintenanceObserver.observeTaskSessionSummary(workspaceId, summary);
+		// 排队 prompt 出队的停止边沿（触发源 (a)）。与上一句同理必须在「0 客户端提前返回」之前——
+		// 否则关掉浏览器标签页，队列就再也不会在 agent 停下时排空。观察器内部只在边沿上动 IO。
+		try {
+			queuedTaskPromptDeliveryDispatchObserver?.observeTaskSessionSummary(workspaceId, summary);
+		} catch {
+			// 出队是附加动作：它的任何异常都不能掀翻 summary 广播链路。
+		}
 		const pending =
 			pendingTaskSessionSummariesByWorkspaceId.get(workspaceId) ?? new Map<string, RuntimeTaskSessionSummary>();
 		pending.set(summary.taskId, summary);
@@ -337,15 +373,19 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			const currentFacets = resolveSessionFacets(summary);
 			if (
 				previousSummary &&
-				summary.taskConversationSessionMetadata?.taskConversationSessionRole !== "by_the_way" &&
 				!isNotifiableUserTurn(resolveSessionFacets(previousSummary)) &&
 				isNotifiableUserTurn(currentFacets)
 			) {
-				broadcastTaskReadyForReview(workspaceId, summary.taskId, currentFacets.userTurnKind);
+				broadcastTaskReadyForReview(workspaceId, summary.taskId, currentFacets.userTurnKind, {
+					summary,
+					finalMessage: latestNotificationAssistantMessages.get(`${workspaceId}:${summary.taskId}`),
+				});
 			}
 		});
 		conversationSummaryUnsubscribeBySubscriptionKey.set(subscriptionKey, unsubscribe);
 		const unsubscribeMessage = service.onMessage((taskId, message) => {
+			if (message.role === "assistant")
+				latestNotificationAssistantMessages.set(`${workspaceId}:${taskId}`, message.content);
 			broadcastTaskChatMessage(workspaceId, taskId, message);
 		});
 		conversationMessageUnsubscribeBySubscriptionKey.set(subscriptionKey, unsubscribeMessage);
@@ -408,6 +448,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const disposeWorkspace = (workspaceId: string) => {
+		for (const key of latestNotificationSummaries.keys())
+			if (key.startsWith(`${workspaceId}:`)) latestNotificationSummaries.delete(key);
+		for (const key of latestNotificationAssistantMessages.keys())
+			if (key.startsWith(`${workspaceId}:`)) latestNotificationAssistantMessages.delete(key);
 		const unsubscribeSummary = terminalSummaryUnsubscribeByWorkspaceId.get(workspaceId);
 		if (unsubscribeSummary) {
 			try {
@@ -436,9 +480,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 		disposeTaskSessionSummaryBroadcast(workspaceId);
 		agentSessionResponseGenerationStopObserver.forgetWorkspace(workspaceId);
+		queuedTaskPromptDeliveryDispatchObserver?.forgetWorkspace(workspaceId);
 		persistedAgentTranscriptConversationProgressObserver.forgetWorkspace(workspaceId);
-		exploratorySessionMapMaintenanceObserver.forgetWorkspace(workspaceId);
-		clineTaskSessionServiceByWorkspaceId.delete(workspaceId);
 		workspaceMetadataMonitor.disposeWorkspace(workspaceId);
 	};
 
@@ -478,7 +521,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			return;
 		}
 		try {
-			const entries = await readNotificationLog(workspaceId);
+			const entries = await readNotificationLog(workspaceId, 50);
 			const feed = await buildNotificationFeedEntries(workspaceId, entries);
 			const payload: RuntimeStateStreamNotificationLogUpdatedMessage = {
 				type: "notification_log_updated",
@@ -493,40 +536,82 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
-	// Exploratory session map 集合变更推送：持久化早已在 ingest 的串行写队列完成
-	// （durable-write-before-ack），这里只把完整集合发给本 workspace 在场客户端；
-	// 0 客户端时跳过——客户端重连后靠 getSessionMap 查询对齐，不补发。
-	const broadcastExploratorySessionMapUpdated = (
+	// Exploratory findings 集合变更推送：持久化早已在 mutation 的串行写队列完成（durable-write-before-ack），这里只把完整集合
+	// （全量替换，恒小）发给本 workspace 在场客户端；0 客户端时跳过——客户端重连后靠
+	// getFindings 查询对齐，不补发。
+	const broadcastExploratoryFindingsUpdated = (
 		workspaceId: string,
-		conversationSessionTaskId: string,
-		mapCollection: RuntimeExploratorySessionMapCollection | null,
+		findings: RuntimeExploratoryFindingEntry[],
 	): void => {
 		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
 		if (!clients || clients.size === 0) {
 			return;
 		}
-		const payload: RuntimeStateStreamExploratorySessionMapUpdatedMessage = {
-			type: "exploratory_session_map_updated",
+		const payload: RuntimeStateStreamExploratoryFindingsUpdatedMessage = {
+			type: "exploratory_findings_updated",
 			workspaceId,
-			conversationSessionTaskId,
-			mapCollection,
+			findings,
+		};
+		for (const client of clients) {
+			sendRuntimeStateMessage(client, payload);
+		}
+	};
+	// exploration thread graph 变更推送（B.2）：单个 exploration 的整张图全量替换。与 findings 同款
+	// 纪律——落盘成功后才发、0 客户端时跳过、断连窗口不补发（客户端重连后靠 getExplorationThreadGraph
+	// 重查对齐）。图恒小（一次探索场次的 turn 行数），全量替换比增量补丁简单且不会错位。
+	const broadcastExplorationThreadGraphUpdated = (
+		workspaceId: string,
+		explorationId: string,
+		view: RuntimeExplorationThreadGraphProjectionView,
+	): void => {
+		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
+		if (!clients || clients.size === 0) {
+			return;
+		}
+		const payload: RuntimeStateStreamExplorationThreadGraphUpdatedMessage = {
+			type: "exploration_thread_graph_updated",
+			workspaceId,
+			explorationId,
+			view,
 		};
 		for (const client of clients) {
 			sendRuntimeStateMessage(client, payload);
 		}
 	};
 
-	// 先无条件落库（可通知边沿的持久化），再全局广播 feed。落库独立于客户端在场与否。
-	const persistNotification = async (
+	const broadcastQueuedTaskPromptDeliveriesUpdated = (
 		workspaceId: string,
-		input: { taskId: string; userTurnKind: RuntimeTaskSessionUserTurnKind; triggeredAt: number },
-	): Promise<void> => {
-		try {
-			await appendNotificationLogEntry(workspaceId, input);
-		} catch {
-			// 落库失败（磁盘错误等）不应打断 OS 通知路径；容忍并继续。
+		projectedEntriesByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
+	): void => {
+		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
+		if (!clients || clients.size === 0) {
+			return;
 		}
-		await broadcastNotificationLogUpdated(workspaceId);
+		const payload: RuntimeStateStreamQueuedTaskPromptDeliveriesUpdatedMessage = {
+			type: "queued_task_prompt_deliveries_updated",
+			workspaceId,
+			projectedEntriesByTaskId,
+		};
+		for (const client of clients) {
+			sendRuntimeStateMessage(client, payload);
+		}
+	};
+
+	// 每个 workspace 最近一次资源快照消息（已序列化）：新客户端连上时补发。
+	const latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId = new Map<string, string>();
+	const broadcastTaskResourceUsageSnapshotsUpdated = (
+		workspaceId: string,
+		snapshots: RuntimeLiveTaskResourceUsageSnapshot[],
+	): void => {
+		const serializedPayload = JSON.stringify({
+			type: "task_resource_usage_snapshots_updated",
+			workspaceId,
+			snapshots,
+		} satisfies RuntimeStateStreamTaskResourceUsageSnapshotsUpdatedMessage);
+		latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId.set(workspaceId, serializedPayload);
+		for (const client of runtimeStateClientsByWorkspaceId.get(workspaceId) ?? []) {
+			sendSerializedRuntimeStateMessage(client, serializedPayload);
+		}
 	};
 
 	const buildAggregatedNotificationFeed = async (): Promise<RuntimeNotificationFeedEntry[]> => {
@@ -543,31 +628,65 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
+	// 就绪通知投给**所有**在场客户端，不只是该 workspace 的连接：一个浏览器标签页可以经跨项目切换面板
+	// 只开一个页面管全部项目（docs/context-cross-project-recently-active-task-switcher.md），只投给目标项目的
+	// 连接会让「没开着目标项目的那个标签页」永远收不到 OS 通知 / 提示音 / 播报。多标签页之间不会重复弹：
+	// 前端以 claimDelivery 领取（每个 candidate 只有一个客户端领得到），并按「有没有可见标签页正开着该项目」让位。
+	const sendTaskReadyForReviewToAllRuntimeStateClients = (payload: RuntimeStateStreamTaskReadyForReviewMessage) => {
+		for (const client of runtimeStateClients) sendRuntimeStateMessage(client, payload);
+	};
+	const notificationAssessment = createNotificationAssessmentService({
+		publishUnarchived: async (notification) => {
+			const payload: RuntimeStateStreamTaskReadyForReviewMessage = {
+				type: "task_ready_for_review",
+				workspaceId: notification.workspaceId,
+				taskId: notification.taskId,
+				triggeredAt: Date.now(),
+				userTurnKind: notification.userTurnKind,
+				summaryText: `通知留档不完整，请查看任务。${notification.finalMessage ?? ""}`,
+				archiveIncomplete: true,
+			};
+			sendTaskReadyForReviewToAllRuntimeStateClients(payload);
+		},
+		getSummary: async (workspaceId, taskId) => {
+			const live = latestNotificationSummaries.get(`${workspaceId}:${taskId}`);
+			if (live) return live;
+			try {
+				const persisted = await loadPersistedWorkspaceStateById(workspaceId);
+				return (
+					persisted.sessions[taskId] ??
+					(persisted.board.columns.some((column) => column.cards.some((card) => card.id === taskId))
+						? undefined
+						: null)
+				);
+			} catch {
+				return undefined;
+			}
+		},
+		publish: async (candidate) => {
+			await broadcastNotificationLogUpdated(candidate.workspaceId);
+			const payload: RuntimeStateStreamTaskReadyForReviewMessage = {
+				type: "task_ready_for_review",
+				workspaceId: candidate.workspaceId,
+				taskId: candidate.taskId,
+				triggeredAt: Date.now(),
+				candidateId: candidate.candidateId,
+				summaryText: candidate.summaryText,
+				summaryLanguage: candidate.summaryLanguage,
+				taskTitleSnapshot: candidate.taskTitleSnapshot,
+				userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
+			};
+			sendTaskReadyForReviewToAllRuntimeStateClients(payload);
+		},
+	});
 	const broadcastTaskReadyForReview = (
 		workspaceId: string,
 		taskId: string,
 		userTurnKind: RuntimeTaskSessionUserTurnKind,
+		evidence?: Pick<NotificationAssessmentInput, "candidateId" | "summary" | "finalMessage">,
 	) => {
-		const triggeredAt = Date.now();
-		// ① 先无条件落库 + 全局广播通知 feed——在下方 per-workspace「0 客户端」guard 之前，
-		// 故浏览器全关时段的后台事件也进持久化日志（跨 repo 聚合方案的核心卖点）。同一 triggeredAt
-		// 复用给下方一次性 OS 通知事件，保证两条路径的 id/时间一致。
-		void persistNotification(workspaceId, { taskId, userTurnKind, triggeredAt });
-		// ② 照旧广播一次性 task_ready_for_review（OS 通知用），仅发给本 workspace 的在场客户端，行为不变。
-		const runtimeClients = runtimeStateClientsByWorkspaceId.get(workspaceId);
-		if (!runtimeClients || runtimeClients.size === 0) {
-			return;
-		}
-		const payload: RuntimeStateStreamTaskReadyForReviewMessage = {
-			type: "task_ready_for_review",
-			workspaceId,
-			taskId,
-			triggeredAt,
-			userTurnKind,
-		};
-		for (const client of runtimeClients) {
-			sendRuntimeStateMessage(client, payload);
-		}
+		if (evidence?.summary) latestNotificationSummaries.set(`${workspaceId}:${taskId}`, evidence.summary);
+		void notificationAssessment.enqueue({ workspaceId, taskId, userTurnKind, ...evidence });
 	};
 
 	runtimeStateWebSocketServer.on("connection", async (client: WebSocket, context: unknown) => {
@@ -620,6 +739,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				state for a client that never finished the handshake.
 			*/
 			runtimeStateClients.add(client);
+			// 去重指纹此刻对该客户端不成立（后续 snapshot 全量替换可能把它回滚到旧数据）：置回 null，
+			// 保证注册后的下一次 projects_updated 广播必定发送，自愈补洞。
+			lastBroadcastProjectsPayloadFingerprint = null;
 			let monitorWorkspaceId: string | null = null;
 			let didConnectWorkspaceMonitor = false;
 
@@ -667,6 +789,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					clineSessionContextVersion,
 					notificationLog,
 				} satisfies RuntimeStateStreamSnapshotMessage);
+
 				if (client.readyState !== WebSocket.OPEN) {
 					if (monitorWorkspaceId) {
 						workspaceMetadataMonitor.disconnectWorkspace(monitorWorkspaceId);
@@ -688,6 +811,44 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 							summaries: conversationSummaries,
 						} satisfies RuntimeStateStreamTaskSessionsMessage);
 					}
+					const latestSerializedTaskResourceUsageSnapshotsMessage =
+						latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId.get(monitorWorkspaceId);
+					if (latestSerializedTaskResourceUsageSnapshotsMessage !== undefined) {
+						sendSerializedRuntimeStateMessage(client, latestSerializedTaskResourceUsageSnapshotsMessage);
+					}
+				}
+				// 通知重放是 best-effort：先完成订阅登记，档案慢或故障均不阻塞核心推流。
+				// 重放期间断连由 close handler 释放订阅；这里不再注册或重复释放 monitor。
+				// 重放覆盖**全部**项目而不只是本次连接的项目：就绪通知本就投给所有客户端，而单标签页切项目会
+				// 重连 WS，切换那一两秒里别的项目完成的任务只能靠这里补上。已被领取的不重放。
+				try {
+					const replayWorkspaceIds = new Set<string>(
+						(await listWorkspaceIndexEntries()).map((entry) => entry.workspaceId),
+					);
+					if (workspace.projectId) replayWorkspaceIds.add(workspace.projectId);
+					const replayCandidates = (
+						await Promise.all(
+							[...replayWorkspaceIds].map((replayWorkspaceId) =>
+								getNotificationLifecycleArchive().recentReady(replayWorkspaceId, Date.now() - 60_000),
+							),
+						)
+					).flat();
+					for (const candidate of replayCandidates) {
+						if (candidate.deliveryClaimedBy) continue;
+						sendRuntimeStateMessage(client, {
+							type: "task_ready_for_review",
+							workspaceId: candidate.workspaceId,
+							taskId: candidate.taskId,
+							candidateId: candidate.candidateId,
+							triggeredAt: candidate.notificationPanelVisibilityChangedAt,
+							userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
+							summaryText: candidate.summaryText,
+							summaryLanguage: candidate.summaryLanguage,
+							taskTitleSnapshot: candidate.taskTitleSnapshot,
+						});
+					}
+				} catch {
+					logAgentSessionRetentionWarning("notification-replay-failed: 通知档案重放失败，核心状态推流继续。");
 				}
 			} catch (error) {
 				if (didConnectWorkspaceMonitor && monitorWorkspaceId) {
@@ -745,7 +906,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			terminalSummaryUnsubscribeByWorkspaceId.set(workspaceId, unsubscribe);
 		},
 		trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => {
-			clineTaskSessionServiceByWorkspaceId.set(workspaceId, service);
 			trackConversationTaskSessionService(workspaceId, workspacePath, service, "cline");
 		},
 		trackAcpTaskSessionService: (workspaceId, workspacePath, service) => {
@@ -753,6 +913,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 		broadcastTaskChatMessage,
 		broadcastTaskChatCleared,
+		listTrackedConversationTaskSessionSummaries: collectTrackedConversationSummaries,
 		handleUpgrade: (request, socket, head, context) => {
 			runtimeStateWebSocketServer.handleUpgrade(request, socket, head, (ws) => {
 				runtimeStateWebSocketServer.emit("connection", ws, context);
@@ -765,11 +926,20 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		bumpClineSessionContextVersion,
 		broadcastTaskReadyForReview,
 		broadcastNotificationLogUpdated,
-		broadcastExploratorySessionMapUpdated,
-		setExploratorySessionMapMaintenanceNudgeSender: (sender) => {
-			exploratorySessionMapMaintenanceNudgeSender = sender;
+		broadcastExploratoryFindingsUpdated,
+		broadcastExplorationThreadGraphUpdated,
+		registerQueuedTaskPromptDeliveryDispatchObserver: (observer) => {
+			queuedTaskPromptDeliveryDispatchObserver = observer;
+			return () => {
+				if (queuedTaskPromptDeliveryDispatchObserver === observer) {
+					queuedTaskPromptDeliveryDispatchObserver = null;
+				}
+			};
 		},
+		broadcastQueuedTaskPromptDeliveriesUpdated,
+		broadcastTaskResourceUsageSnapshotsUpdated,
 		close: async () => {
+			notificationAssessment.close();
 			for (const timer of taskSessionBroadcastTimersByWorkspaceId.values()) {
 				clearTimeout(timer);
 			}
@@ -785,7 +955,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			terminalSummaryUnsubscribeByWorkspaceId.clear();
 			// 关停后在途探测的回调不得再写 summary（会写进一个正在被拆掉的管理器）。
 			persistedAgentTranscriptConversationProgressObserver.dispose();
-			exploratorySessionMapMaintenanceObserver.dispose();
 			for (const unsubscribe of conversationSummaryUnsubscribeBySubscriptionKey.values()) {
 				try {
 					unsubscribe();

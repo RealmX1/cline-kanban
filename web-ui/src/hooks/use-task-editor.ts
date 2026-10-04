@@ -4,6 +4,7 @@ import { deriveTaskTitleFromPrompt } from "@runtime-task-title";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { showAppToast } from "@/components/app-toaster";
 import {
 	areTaskEditDraftFormValuesEqual,
 	clearTaskEditDraft,
@@ -13,6 +14,10 @@ import {
 	type TaskEditDraft,
 	type TaskEditDraftFormValues,
 } from "@/hooks/task-edit-drafts";
+import {
+	ensureRuntimeAllocatedTaskIdPrefetchPoolFilled,
+	takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards,
+} from "@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards";
 import {
 	hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror,
 	subscribeToTaskEditDraftStore,
@@ -39,10 +44,60 @@ import {
 	saveUserInterfacePreferencesSharedAcrossBrowserOrigins,
 } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import { addTaskToColumnWithResult, findCardSelection, updateTask, updateTaskTitle } from "@/state/board-state";
+import { beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
+import {
+	recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards,
+	withWebUiBoardMutationInitiatorRecordedForChangedTaskCards,
+} from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import { toTelemetrySelectedAgentId, trackTaskCreated } from "@/telemetry/events";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskEditorSubmitOptions, TaskImage } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
 import { useDebouncedEffect } from "@/utils/react-use";
+
+// dd2db Y-EVENT-12：建卡只用 runtime 预分配的 id。池里不够时如实提示并阻止这次建卡（调用方返回 null / []，
+// 建卡框与已填内容保持原样），绝不回退到本地随机 id——那会在保存时被 runtime 的全局 task id 登记簿拒绝。
+function takeRuntimeAllocatedTaskIdsForNewTaskCardsOrExplainWhyTaskCreationIsBlocked(
+	currentProjectId: string | null,
+	requestedTaskCardCount: number,
+): string[] | null {
+	if (!currentProjectId) {
+		showAppToast(
+			{ intent: "warning", icon: "warning-sign", message: "Open a project before creating tasks.", timeout: 5000 },
+			"task-creation-blocked-without-project",
+		);
+		return null;
+	}
+	const taken = takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards(currentProjectId, requestedTaskCardCount);
+	if (taken.status === "taken") {
+		return taken.runtimeAllocatedTaskIds;
+	}
+	if (taken.status === "runtime_cannot_allocate_task_ids_because_relation_ledger_is_unavailable") {
+		showAppToast(
+			{
+				intent: "danger",
+				icon: "warning-sign",
+				message:
+					"The Kanban runtime cannot allocate task IDs right now (its relation ledger is unavailable), so new tasks cannot be saved.",
+				timeout: 7000,
+			},
+			"task-creation-blocked-runtime-cannot-allocate-task-ids",
+		);
+		return null;
+	}
+	showAppToast(
+		{
+			intent: "warning",
+			icon: "warning-sign",
+			message:
+				requestedTaskCardCount > 1
+					? `Reserving ${requestedTaskCardCount} task IDs from the Kanban runtime — try creating again in a moment.`
+					: "Reserving a task ID from the Kanban runtime — try creating again in a moment.",
+			timeout: 5000,
+		},
+		"task-creation-blocked-awaiting-runtime-allocated-task-ids",
+	);
+	return null;
+}
 
 function isTerminalAgentModelSelectionAgentId(
 	agentId: RuntimeAgentId | null | undefined,
@@ -348,6 +403,13 @@ export function useTaskEditor({
 	const resolvedDefaultTaskBranchRef = defaultTaskBranchRef;
 	const resolvedDefaultCreateTaskBranchRef = defaultCreateTaskBranchRef;
 
+	// 进入（或切换到）一个项目就先把建卡 id 池备上，让第一次建卡不必等 runtime 分配。
+	useEffect(() => {
+		if (currentProjectId) {
+			ensureRuntimeAllocatedTaskIdPrefetchPoolFilled(currentProjectId);
+		}
+	}, [currentProjectId]);
+
 	useEffect(() => {
 		if (isInlineTaskCreateOpen) {
 			return;
@@ -521,6 +583,10 @@ export function useTaskEditor({
 	const handleOpenCreateTask = useCallback(() => {
 		if (!isNewTaskStartInPlanModeDefaultLoaded) {
 			return;
+		}
+		if (currentProjectId) {
+			// 之前的分配若因 runtime 暂时不在而失败，打开建卡框时再补一次，填完内容时 id 通常已就绪。
+			ensureRuntimeAllocatedTaskIdPrefetchPoolFilled(currentProjectId);
 		}
 		setEditingTaskId(null);
 		setEditTaskPrompt("");
@@ -763,27 +829,29 @@ export function useTaskEditor({
 			const savedTaskId = editingTaskId;
 			clearTaskEditDraft(currentProjectId, savedTaskId);
 
-			setBoard((currentBoard) => {
-				const currentCard = currentBoard.columns.flatMap((c) => c.cards).find((c) => c.id === savedTaskId);
-				const title = currentCard?.title ?? "";
-				const updated = updateTask(currentBoard, savedTaskId, {
-					title,
-					prompt,
-					startInPlanMode: editTaskStartInPlanMode,
-					taskAgentPermissionMode: editTaskAgentPermissionMode,
-					taskConversationMode: editTaskConversationMode,
-					autoReviewEnabled: editTaskAutoReviewEnabled,
-					autoReviewMode: editTaskAutoReviewMode,
-					images: editTaskImages,
-					agentId: editTaskAgentId,
-					clineSettings: editTaskClineSettings,
-					terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
-					taskAgentSessionInitialization: editTaskAgentSessionInitialization,
-					baseRef,
-					worktreeMode: editTaskWorktreeMode,
-				});
-				return updated.updated ? updated.board : currentBoard;
-			});
+			setBoard(
+				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+					const currentCard = currentBoard.columns.flatMap((c) => c.cards).find((c) => c.id === savedTaskId);
+					const title = currentCard?.title ?? "";
+					const updated = updateTask(currentBoard, savedTaskId, {
+						title,
+						prompt,
+						startInPlanMode: editTaskStartInPlanMode,
+						taskAgentPermissionMode: editTaskAgentPermissionMode,
+						taskConversationMode: editTaskConversationMode,
+						autoReviewEnabled: editTaskAutoReviewEnabled,
+						autoReviewMode: editTaskAutoReviewMode,
+						images: editTaskImages,
+						agentId: editTaskAgentId,
+						clineSettings: editTaskClineSettings,
+						terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
+						taskAgentSessionInitialization: editTaskAgentSessionInitialization,
+						baseRef,
+						worktreeMode: editTaskWorktreeMode,
+					});
+					return updated.updated ? updated.board : currentBoard;
+				}),
+			);
 			setEditingTaskId(null);
 
 			setEditTaskPrompt("");
@@ -835,10 +903,12 @@ export function useTaskEditor({
 
 	const handleSaveTaskTitle = useCallback(
 		(taskId: string, title: string) => {
-			setBoard((currentBoard) => {
-				const updated = updateTaskTitle(currentBoard, taskId, title);
-				return updated.updated ? updated.board : currentBoard;
-			});
+			setBoard(
+				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
+					const updated = updateTaskTitle(currentBoard, taskId, title);
+					return updated.updated ? updated.board : currentBoard;
+				}),
+			);
 		},
 		[setBoard],
 	);
@@ -867,14 +937,18 @@ export function useTaskEditor({
 				if (!suggestedTaskName) {
 					return;
 				}
-				setBoard((currentBoard) => {
-					const selection = findCardSelection(currentBoard, taskId);
-					if (!selection || selection.card.title !== titleWrittenAtCreateTime) {
-						return currentBoard;
-					}
-					const updated = updateTaskTitle(currentBoard, taskId, suggestedTaskName);
-					return updated.updated ? updated.board : currentBoard;
-				});
+				// AI 起名回填是浏览器端的异步自动化，不属于任何一种已定义的发起方：登记 null，如实留给 runtime 记缺标注
+				//（同一保存窗口里若还有建卡，runtime 只会看到一条「建卡」，回填被它吸收）。
+				setBoard(
+					withWebUiBoardMutationInitiatorRecordedForChangedTaskCards(null, (currentBoard) => {
+						const selection = findCardSelection(currentBoard, taskId);
+						if (!selection || selection.card.title !== titleWrittenAtCreateTime) {
+							return currentBoard;
+						}
+						const updated = updateTaskTitle(currentBoard, taskId, suggestedTaskName);
+						return updated.updated ? updated.board : currentBoard;
+					}),
+				);
 			})();
 		},
 		[setBoard],
@@ -896,27 +970,53 @@ export function useTaskEditor({
 			// 留空与省略同义：两者都走「先推导、再异步回填 AI 名字」。
 			const explicitTaskName = options?.taskNameOverride?.trim() ?? "";
 			const title = explicitTaskName || deriveTaskTitleFromPrompt(prompt);
-			const created = addTaskToColumnWithResult(board, "backlog", {
-				title,
-				prompt,
-				startInPlanMode: newTaskStartInPlanMode,
-				taskAgentPermissionMode: newTaskAgentPermissionMode,
-				taskConversationMode: newTaskConversationMode,
-				autoReviewEnabled: newTaskAutoReviewEnabled,
-				autoReviewMode: newTaskAutoReviewMode,
-				images: newTaskImages,
-				agentId: newTaskAgentId,
-				// 用户没在建卡对话框里挑 agent 时 newTaskAgentId 是空的，这张卡会跑工作区默认 agent。
-				// 会话通道要不要固化看的正是「实际会跑哪个 agent」，所以工作区默认也得一起下沉到域层。
-				workspaceDefaultAgentIdForNewTasks: selectedAgentId ?? undefined,
-				ompAgentSessionTransportForNewTasks,
-				clineSettings: newTaskClineSettings,
-				terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
-				taskAgentSessionInitialization: newTaskAgentSessionInitialization,
-				baseRef,
-				worktreeMode: newTaskWorktreeMode,
+			const runtimeAllocatedTaskIds = takeRuntimeAllocatedTaskIdsForNewTaskCardsOrExplainWhyTaskCreationIsBlocked(
+				currentProjectId,
+				1,
+			);
+			const runtimeAllocatedTaskId = runtimeAllocatedTaskIds?.[0];
+			if (!runtimeAllocatedTaskId) {
+				return null;
+			}
+			const created = addTaskToColumnWithResult(
+				board,
+				"backlog",
+				{
+					title,
+					prompt,
+					startInPlanMode: newTaskStartInPlanMode,
+					taskAgentPermissionMode: newTaskAgentPermissionMode,
+					taskConversationMode: newTaskConversationMode,
+					autoReviewEnabled: newTaskAutoReviewEnabled,
+					autoReviewMode: newTaskAutoReviewMode,
+					images: newTaskImages,
+					agentId: newTaskAgentId,
+					// 用户没在建卡对话框里挑 agent 时 newTaskAgentId 是空的，这张卡会跑工作区默认 agent。
+					// 会话通道要不要固化看的正是「实际会跑哪个 agent」，所以工作区默认也得一起下沉到域层。
+					workspaceDefaultAgentIdForNewTasks: selectedAgentId ?? undefined,
+					ompAgentSessionTransportForNewTasks,
+					clineSettings: newTaskClineSettings,
+					terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
+					taskAgentSessionInitialization: newTaskAgentSessionInitialization,
+					baseRef,
+					worktreeMode: newTaskWorktreeMode,
+				},
+				runtimeAllocatedTaskId,
+			);
+			recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards({
+				boardBeforeMutation: board,
+				boardAfterMutation: created.board,
+				boardMutationInitiator: "web_ui_user_gesture",
 			});
 			setBoard(created.board);
+			// cf427：乐观插入之外立刻让 runtime 落盘，启动 agent 前等它确认（见该登记模块顶部注释）。
+			if (currentProjectId) {
+				beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart({
+					workspaceId: currentProjectId,
+					newBacklogTaskCardsCreatedFromWebUi: [created.task],
+					boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+				});
+			}
 			if (!explicitTaskName) {
 				backfillSuggestedTaskTitleForCreatedTask(created.task.id, prompt, created.task.title);
 			}
@@ -996,30 +1096,63 @@ export function useTaskEditor({
 			if (!baseRef) {
 				return [];
 			}
+			const runtimeAllocatedTaskIds = takeRuntimeAllocatedTaskIdsForNewTaskCardsOrExplainWhyTaskCreationIsBlocked(
+				currentProjectId,
+				validPrompts.length,
+			);
+			if (!runtimeAllocatedTaskIds) {
+				return [];
+			}
 			const createdTaskIds: string[] = [];
 			let updatedBoard = board;
-			for (const prompt of validPrompts) {
-				const created = addTaskToColumnWithResult(updatedBoard, "backlog", {
-					prompt,
-					startInPlanMode: newTaskStartInPlanMode,
-					taskAgentPermissionMode: newTaskAgentPermissionMode,
-					taskConversationMode: newTaskConversationMode,
-					autoReviewEnabled: newTaskAutoReviewEnabled,
-					autoReviewMode: newTaskAutoReviewMode,
-					images: newTaskImages,
-					agentId: newTaskAgentId,
-					// 同 handleCreateTask：agentId 留空的卡片跑的是工作区默认 agent，固化判据要看它。
-					workspaceDefaultAgentIdForNewTasks: selectedAgentId ?? undefined,
-					ompAgentSessionTransportForNewTasks,
-					clineSettings: newTaskClineSettings,
-					terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
-					baseRef,
-					worktreeMode: newTaskWorktreeMode,
-				});
+			for (const [promptIndex, prompt] of validPrompts.entries()) {
+				const runtimeAllocatedTaskId = runtimeAllocatedTaskIds[promptIndex];
+				if (!runtimeAllocatedTaskId) {
+					break;
+				}
+				const created = addTaskToColumnWithResult(
+					updatedBoard,
+					"backlog",
+					{
+						prompt,
+						startInPlanMode: newTaskStartInPlanMode,
+						taskAgentPermissionMode: newTaskAgentPermissionMode,
+						taskConversationMode: newTaskConversationMode,
+						autoReviewEnabled: newTaskAutoReviewEnabled,
+						autoReviewMode: newTaskAutoReviewMode,
+						images: newTaskImages,
+						agentId: newTaskAgentId,
+						// 同 handleCreateTask：agentId 留空的卡片跑的是工作区默认 agent，固化判据要看它。
+						workspaceDefaultAgentIdForNewTasks: selectedAgentId ?? undefined,
+						ompAgentSessionTransportForNewTasks,
+						clineSettings: newTaskClineSettings,
+						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
+						baseRef,
+						worktreeMode: newTaskWorktreeMode,
+					},
+					runtimeAllocatedTaskId,
+				);
 				updatedBoard = created.board;
 				createdTaskIds.push(created.task.id);
 			}
+			recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards({
+				boardBeforeMutation: board,
+				boardAfterMutation: updatedBoard,
+				boardMutationInitiator: "web_ui_user_gesture",
+			});
 			setBoard(updatedBoard);
+			// 同 handleCreateTask：一次请求落盘整批新卡，顺序取本地 backlog 列自上而下的顺序。
+			if (currentProjectId && createdTaskIds.length > 0) {
+				const createdTaskIdSet = new Set(createdTaskIds);
+				beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart({
+					workspaceId: currentProjectId,
+					newBacklogTaskCardsCreatedFromWebUi:
+						updatedBoard.columns
+							.find((column) => column.id === "backlog")
+							?.cards.filter((card) => createdTaskIdSet.has(card.id)) ?? [],
+					boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+				});
+			}
 			writeMostRecentlyUsedTaskCreateBaseRefForProject(currentProjectId, baseRef);
 			for (const prompt of validPrompts) {
 				trackTaskCreated({

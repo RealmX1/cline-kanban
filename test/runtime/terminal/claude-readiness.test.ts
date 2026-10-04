@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as AgentSessionAdapters from "../../../src/terminal/agent-session-adapters";
 
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 
-vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
+vi.mock("../../../src/terminal/agent-session-adapters.js", async (importOriginal) => ({
+	...(await importOriginal<typeof AgentSessionAdapters>()),
 	prepareAgentLaunch: prepareAgentLaunchMock,
 }));
 
@@ -131,6 +133,7 @@ describe("Claude startup readiness wall-clock fallback (RVF G1-001)", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		vi.useRealTimers();
 	});
 
@@ -144,8 +147,8 @@ describe("Claude startup readiness wall-clock fallback (RVF G1-001)", () => {
 			binary: input.binary,
 			args: [...input.args],
 			env: {},
-			// 模拟真实 Claude adapter：非空 prompt 会产出 deferredStartupInput。
-			deferredStartupInput: "[200~Implement the task[201~\r\r",
+			// 构造延迟文本以验证共享的 Claude readiness 兜底。
+			deferredStartupPromptText: "Implement the task",
 		}));
 
 		let spawnedSession: ReturnType<typeof createMockPtySession> | null = null;
@@ -174,7 +177,7 @@ describe("Claude startup readiness wall-clock fallback (RVF G1-001)", () => {
 		await vi.advanceTimersByTimeAsync(CLAUDE_STARTUP_READINESS_TIMEOUT_MS + 50);
 
 		expect(session.write).toHaveBeenCalledTimes(1);
-		expect(session.write).toHaveBeenCalledWith("[200~Implement the task[201~\r\r");
+		expect(session.write).toHaveBeenCalledWith("\u001b[200~Implement the task\u001b[201~");
 
 		// stopTaskSession 应该把残留 timer / 句柄都清掉，不会再有额外的 write。
 		manager.stopTaskSession("task-claude-readiness-fallback");
@@ -183,13 +186,15 @@ describe("Claude startup readiness wall-clock fallback (RVF G1-001)", () => {
 	});
 
 	it("does not re-fire the wall-clock fallback after readiness predicate already injected the prompt", async () => {
-		// 一旦 readiness predicate（输入框 / 启动横幅）触发 trySendDeferredStartupInput，
+		const scheduleTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+		// 一旦 readiness predicate（输入框 / 启动横幅）触发 trySubmitDeferredStartupPrompt，
 		// 兜底 timer 应当被清除，避免重复写入 prompt。
 		prepareAgentLaunchMock.mockImplementation(async (input: { args: string[]; binary?: string }) => ({
 			binary: input.binary,
 			args: [...input.args],
 			env: {},
-			deferredStartupInput: "[200~Hello[201~\r\r",
+			deferredStartupPromptText: "Hello",
 		}));
 
 		let spawnedSession: ReturnType<typeof createMockPtySession> | null = null;
@@ -213,14 +218,24 @@ describe("Claude startup readiness wall-clock fallback (RVF G1-001)", () => {
 			triggerData: (chunk: string | Buffer) => void;
 		};
 
+		const startupReadinessTimerCallIndex = scheduleTimeoutSpy.mock.calls.findIndex(
+			([, delay]) => delay === CLAUDE_STARTUP_READINESS_TIMEOUT_MS,
+		);
+		expect(startupReadinessTimerCallIndex).toBeGreaterThanOrEqual(0);
+		const startupReadinessTimer = scheduleTimeoutSpy.mock.results[startupReadinessTimerCallIndex]?.value;
+
 		// 模拟 Claude TUI 渲染输入框边框 — readiness predicate 命中并注入 prompt。
 		session.triggerData("╭──────────────────────╮\n│ > │\n╰──────────────────────╯");
 		expect(session.write).toHaveBeenCalledTimes(1);
 
-		// 后续即便超过 deadline，wall-clock timer 也不该再次注入 prompt。
-		await vi.advanceTimersByTimeAsync(CLAUDE_STARTUP_READINESS_TIMEOUT_MS * 2);
-		expect(session.write).toHaveBeenCalledTimes(1);
+		// 直接验证 readiness 路径清了兜底 timer，避免只靠 deferred prompt 清空后的守卫通过。
+		expect(clearTimeoutSpy).toHaveBeenCalledWith(startupReadinessTimer);
 
+		// 保持会话存活跨过 deadline；提交确认允许补 CR，但不能重复粘贴 prompt。
+		session.triggerData("正在处理启动任务");
+		await vi.advanceTimersByTimeAsync(1_000);
+		await vi.advanceTimersByTimeAsync(CLAUDE_STARTUP_READINESS_TIMEOUT_MS * 2);
+		expect(session.write.mock.calls.filter(([input]) => String(input).startsWith("\u001b[200~"))).toHaveLength(1);
 		manager.stopTaskSession("task-claude-readiness-no-double");
 	});
 });

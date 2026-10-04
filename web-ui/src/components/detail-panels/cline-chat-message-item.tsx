@@ -2,6 +2,11 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import { Brain, ChevronDown, ChevronRight, XCircle } from "lucide-react";
 import React, { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import {
+	ConversationAnchorChip,
+	type ResolveConversationAnchor,
+} from "@/components/conversation-anchor/conversation-anchor-chip";
+import { extractConversationAnchorMarkers } from "@/components/conversation-anchor/conversation-anchor-markers";
+import {
 	isAgentChatReasoningMessageStillStreaming,
 	isAgentChatToolMessageStillRunning,
 } from "@/components/detail-panels/agent-chat-message-activity-state";
@@ -13,8 +18,6 @@ import {
 } from "@/components/detail-panels/cline-chat-message-utils";
 import { ClineMarkdownContent } from "@/components/detail-panels/cline-markdown-content";
 import { TaskAgentUserDecisionBlock } from "@/components/detail-panels/task-agent-user-decision-block";
-import { type ResolveSessionMapAnchor, SessionMapAnchorChip } from "@/components/session-map/session-map-anchor-chip";
-import { extractSessionMapAnchorMarkers } from "@/components/session-map/session-map-anchor-markers";
 import { TaskImageStrip } from "@/components/task-image-strip";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
@@ -191,8 +194,8 @@ export const ClineChatMessageItem = React.memo(function ClineChatMessageItem({
 	message,
 	taskId,
 	onResolveUserDecision,
-	resolveSessionMapAnchor,
-	onSessionMapAnchorClick,
+	resolveConversationAnchor,
+	onConversationAnchorClick,
 }: {
 	message: ClineChatMessage;
 	taskId?: string | null;
@@ -203,8 +206,8 @@ export const ClineChatMessageItem = React.memo(function ClineChatMessageItem({
 	) => Promise<{ ok: boolean; message?: string }>;
 	// Session Map 聊天内锚（蓝图 §C.2）：按 id 查服务端 map 集合的解析器与点击回调。
 	// 缺省（无集合上下文，如 home 侧栏）时 marker 段不渲染 chip——整条 marker 按不可见处理。
-	resolveSessionMapAnchor?: ResolveSessionMapAnchor | null;
-	onSessionMapAnchorClick?: (mapNodeId: string) => void;
+	resolveConversationAnchor?: ResolveConversationAnchor | null;
+	onConversationAnchorClick?: (anchorId: string) => void;
 }): ReactElement {
 	// 「等你拍板」的消息优先于 role 分派：它虽然以 status 消息承载，但要渲染成可操作卡片。
 	const userDecision = message.meta?.userDecision;
@@ -243,7 +246,7 @@ export const ClineChatMessageItem = React.memo(function ClineChatMessageItem({
 		// Session Map 锚 marker（蓝图 §C.1/§C.2）：摘除 HTML 注释 marker 后分段渲染——
 		// text 段照常 markdown，marker 段原位渲 chip（id 在 map 集合不可解析则不渲）。
 		// 无 marker 时与接入前完全同构的单块渲染（绝大多数消息走这条快路径）。
-		const anchorExtraction = extractSessionMapAnchorMarkers(normalizedAssistantContent);
+		const anchorExtraction = extractConversationAnchorMarkers(normalizedAssistantContent);
 		const hasAnchorMarkerSegment = anchorExtraction.segments.some((segment) => segment.kind === "marker");
 		if (!hasAnchorMarkerSegment) {
 			return (
@@ -257,12 +260,12 @@ export const ClineChatMessageItem = React.memo(function ClineChatMessageItem({
 				{anchorExtraction.segments.map((segment, index) =>
 					segment.kind === "text" ? (
 						<ClineMarkdownContent key={index} content={segment.text} />
-					) : resolveSessionMapAnchor ? (
-						<SessionMapAnchorChip
+					) : resolveConversationAnchor ? (
+						<ConversationAnchorChip
 							key={index}
-							mapNodeId={segment.mapNodeId}
-							resolve={resolveSessionMapAnchor}
-							onClick={onSessionMapAnchorClick}
+							anchorId={segment.anchorId}
+							resolve={resolveConversationAnchor}
+							onClick={onConversationAnchorClick}
 						/>
 					) : null,
 				)}

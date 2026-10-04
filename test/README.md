@@ -25,6 +25,14 @@ fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 t
 
 `npm test`、`npm run test:precommit`、`npm run test:integration` 与 `npm run test:watch` 都通过 invoking-repository mutation canary 启动 Vitest。canary 在测试前后比较 worktree/git-dir/common-dir、symbolic HEAD、HEAD OID、local config、index、porcelain v2 status 与 dirty/untracked 内容 hash。检测到漂移时 fail closed，保存脱敏报告，绝不自动恢复宿主仓库。
 
+## 派生真实 runtime / CLI 的 integration 测试必须收口子进程
+
+启动 helper 超时后只 reject 不 kill，晚到 banner 的 runtime 会变成 ppid=1 的长寿孤儿（单个约 350 MB）。共享收口在 `test/integration/runtime-integration-test-spawned-child-process-lifecycle.ts`：
+
+- spawn 出的每个子进程都登记到本文件的 `createSpawnedChildProcessRegistrySigkilledAfterEachTest()`，并在 `afterEach` 里 SIGKILL 仍在运行的子进程、等到退出；它先于 fixture 的 `onTestFinished` cleanup 执行，顺序天然是「先杀进程、再删隔离 HOME」。
+- 等启动 banner 用 `waitForRuntimeServerStartupBannerOrSigkillChild`（失败分支先 SIGKILL 并等退出再 reject）；判退出用 `hasChildProcessExited`（被信号结束的进程 `exitCode` 为 null）。启动等待放宽后，用例超时用 `computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts` 按冷启动次数计算，并挂在 `describe(name, { timeout }, fn)` 上——给 `it(title, fn, <标识符>)` 传非数字字面量会让 biome 放弃 test-call 排版、重缩进整个用例体。
+- `test/integration/shutdown-ipc-hook.cjs` 把 IPC 断开（vitest worker 被杀）当作父进程死亡：已装 SIGINT 处理器则发一次 SIGINT 走优雅关停并设兜底退出，仍在启动则立即退出。
+
 ## 判读全量套件里「看似无关」的失败
 
 断言一条失败「与本次改动无关」之前，先确认它不是被本次改动所在文件的副作用跨文件触发的（典型形态：某测试文件写 localStorage 后不清理，让另一个文件里毫无关系的用例失败——2026-07 实证）。注意：当时归因的机制解释（vitest setup 的 Map mock 跨文件沿用）在 2026-08 经对照实验未能复现——vitest 4.1.0 + Node 22 下 jsdom 环境每文件重建、Map mock 实际未安装；机制存疑，事件与教训仍成立。基线复跑能证明「改动前就失败」，但证明不了「与改动文件无因果关系」；两者表面同时成立、实际存在因果的情形真实发生过。

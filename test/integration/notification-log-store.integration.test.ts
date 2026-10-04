@@ -1,21 +1,27 @@
-// 应用内通知中心后端：store（append 幂等 / 300 上限丢最旧 / mark 整组 / 并发串行 / readAll 聚合）、
+// 应用内通知中心后端：store（append 幂等 / 超过 300 条永久保留 / mark 整组 / 并发串行 / readAll 聚合）、
 // feed-builder（isDone 随 board 派生 / taskTitle / repoName / 缺失回退）、以及「无客户端也落库」的核心卖点。
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-
-import { describe, expect, it } from "vitest";
-
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import type { RuntimeBoardData } from "../../src/core/api-contract";
+import * as notificationDiagnosticLogger from "../../src/diagnostics/agent-session-retention-logger";
+import {
+	closeDefaultNotificationLifecycleArchive,
+	getNotificationLifecycleArchive,
+} from "../../src/notifications/notification-lifecycle-archive";
 import { createRuntimeStateHub } from "../../src/server/runtime-state-hub";
 import { buildNotificationFeedEntries } from "../../src/state/notification-feed-builder";
 import {
 	appendNotificationLogEntry,
 	clearNotificationLog,
 	markTaskNotificationsVisited,
+	notificationCandidateToPersistedEntry,
 	readAllNotificationLogs,
 	readNotificationLog,
 } from "../../src/state/notification-log-store";
 import { getWorkspacesRootPath, loadWorkspaceState, saveWorkspaceState } from "../../src/state/workspace-state";
+import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 import { withIsolatedWorkspaceHome as withIsolatedNotificationLogWorkspaces } from "./isolated-workspace-home-fixture";
 
 function boardWith(cards: { columnId: "review" | "trash"; id: string; title: string }[]): RuntimeBoardData {
@@ -39,12 +45,100 @@ function boardWith(cards: { columnId: "review" | "trash"; id: string; title: str
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: columnCards("trash") },
 		],
-		dependencies: [],
 	};
 }
 
 describe.sequential("notification-log-store integration", () => {
-	it("append 幂等、300 上限丢最旧", async () => {
+	it.each(["{broken", '[{"id":"missing-required-fields"}]'])(
+		"已迁移的旧文件损坏不影响重启后的档案操作：%s",
+		async (corruptedLegacyContents) => {
+			await withIsolatedNotificationLogWorkspaces(async (registerIsolatedWorkspace) => {
+				const { workspaceId } = await registerIsolatedWorkspace("migrated-project");
+				const sourcePath = join(getWorkspacesRootPath(), workspaceId, "notifications.json");
+				// 直接种入持久导入标记，模拟重启后兼容层没有内存缓存。
+				await getNotificationLifecycleArchive().importLegacy(sourcePath, [
+					{
+						candidateId: `${workspaceId}:old:1`,
+						workspaceId,
+						taskId: "old",
+						triggeredAt: 1,
+						userTurnKind: "review",
+						sourceKind: "legacy_imported",
+						notificationPanelVisibility: "visible",
+					},
+				]);
+				await closeDefaultNotificationLifecycleArchive();
+				await mkdir(dirname(sourcePath), { recursive: true });
+				await writeFile(sourcePath, corruptedLegacyContents);
+				const diagnostic = vi.spyOn(notificationDiagnosticLogger, "logAgentSessionRetentionWarning");
+				try {
+					expect(await readNotificationLog(workspaceId)).toHaveLength(1);
+					await markTaskNotificationsVisited(workspaceId, "old", 99);
+					expect((await readNotificationLog(workspaceId))[0]?.visitedAt).toBe(99);
+					await clearNotificationLog(workspaceId);
+					expect(await readNotificationLog(workspaceId)).toEqual([]);
+					expect((await getNotificationLifecycleArchive().list({ workspaceId })).totalCount).toBe(1);
+					expect(await readFile(sourcePath, "utf8")).toBe(corruptedLegacyContents);
+					expect(diagnostic).not.toHaveBeenCalled();
+				} finally {
+					diagnostic.mockRestore();
+					await closeDefaultNotificationLifecycleArchive();
+				}
+			});
+		},
+	);
+
+	it.each(["{broken", '[{"id":"missing-required-fields"}]'])(
+		"未迁移的损坏旧文件可诊断并可重试，不阻断其它工作区：%s",
+		async (corruptedLegacyContents) => {
+			await withIsolatedNotificationLogWorkspaces(async (registerIsolatedWorkspace) => {
+				const first = await registerIsolatedWorkspace("corrupted-project");
+				const second = await registerIsolatedWorkspace("healthy-project");
+				const sourcePath = join(getWorkspacesRootPath(), first.workspaceId, "notifications.json");
+				await mkdir(dirname(sourcePath), { recursive: true });
+				await writeFile(sourcePath, corruptedLegacyContents);
+				const diagnostic = vi.spyOn(notificationDiagnosticLogger, "logAgentSessionRetentionWarning");
+				try {
+					await appendNotificationLogEntry(first.workspaceId, {
+						taskId: "new",
+						triggeredAt: 2,
+						userTurnKind: "review",
+					});
+					await appendNotificationLogEntry(second.workspaceId, {
+						taskId: "healthy",
+						triggeredAt: 3,
+						userTurnKind: "review",
+					});
+					const all = await readAllNotificationLogs();
+					expect(all[first.workspaceId]).toHaveLength(1);
+					expect(all[second.workspaceId]).toHaveLength(1);
+					await markTaskNotificationsVisited(first.workspaceId, "new", 99);
+					expect((await readNotificationLog(first.workspaceId))[0]?.visitedAt).toBe(99);
+					await clearNotificationLog(first.workspaceId);
+					expect(await readNotificationLog(first.workspaceId)).toEqual([]);
+					expect(await readFile(sourcePath, "utf8")).toBe(corruptedLegacyContents);
+					expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining(sourcePath));
+					expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining("notification-legacy-import-failed"));
+					// 失败不写成功标记，修复原文件后下次访问仍会导入。
+					await writeFile(
+						sourcePath,
+						JSON.stringify([
+							{ id: "old:1", taskId: "old", triggeredAt: 1, userTurnKind: "review", visitedAt: null },
+						]),
+					);
+					expect((await readNotificationLog(first.workspaceId)).map((entry) => entry.taskId)).toEqual(["old"]);
+					expect(
+						(await getNotificationLifecycleArchive().list({ workspaceId: first.workspaceId })).totalCount,
+					).toBe(2);
+				} finally {
+					diagnostic.mockRestore();
+					await closeDefaultNotificationLifecycleArchive();
+				}
+			});
+		},
+	);
+
+	it("append 幂等、超过 300 条永久保留", async () => {
 		await withIsolatedNotificationLogWorkspaces(async (registerIsolatedWorkspace) => {
 			const { workspaceId } = await registerIsolatedWorkspace("project-a");
 
@@ -72,9 +166,9 @@ describe.sequential("notification-log-store integration", () => {
 				});
 			}
 			entries = await readNotificationLog(workspaceId);
-			expect(entries).toHaveLength(300);
+			expect(entries).toHaveLength(306);
 			// 最旧的 task-1:1000 与最早几条 bulk 已被丢弃；最新的仍在。
-			expect(entries.some((entry) => entry.id === "task-1:1000")).toBe(false);
+			expect(entries.some((entry) => entry.id === "task-1:1000")).toBe(true);
 			expect(entries.some((entry) => entry.id === "task-bulk-304:2304")).toBe(true);
 		});
 	});
@@ -151,7 +245,7 @@ describe.sequential("notification-log-store integration", () => {
 		await withIsolatedNotificationLogWorkspaces(async (registerIsolatedWorkspace) => {
 			const { workspaceId, path: workspacePath } = await registerIsolatedWorkspace("project-a");
 			const initial = await loadWorkspaceState(workspacePath);
-			await saveWorkspaceState(workspacePath, {
+			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 				board: boardWith([
 					{ columnId: "review", id: "task-active", title: "Active task title" },
 					{ columnId: "trash", id: "task-done", title: "Done task title" },
@@ -176,7 +270,9 @@ describe.sequential("notification-log-store integration", () => {
 				triggeredAt: 3,
 			});
 
-			const entries = await readNotificationLog(workspaceId);
+			const entries = (await getNotificationLifecycleArchive().list({ workspaceId })).entries.map(
+				notificationCandidateToPersistedEntry,
+			);
 			const feed = await buildNotificationFeedEntries(workspaceId, entries);
 			const byTaskId = new Map(feed.map((entry) => [entry.taskId, entry]));
 

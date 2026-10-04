@@ -4,26 +4,27 @@ import { join } from "node:path";
 import { TRPCClientError } from "@trpc/client";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import {
-	deliverExploratorySessionMapUpdate,
-	parseExploratoryMapUpdatePayload,
+	deliverExploratoryMutation,
+	parseExploratoryFindingCandidatePayload,
 	readExploratoryPayloadText,
+	resolveExplorationIdForThreadGraphRead,
 	resolveExploratoryCommandScope,
 	resolveExploratoryPayloadSource,
 } from "../../../src/commands/exploratory";
-import type { RuntimeIngestExploratorySessionMapUpdateResponse } from "../../../src/core/api-contract";
+import type { RuntimeIngestExploratoryFindingCandidateResponse } from "../../../src/core/api-contract";
 import { KANBAN_HOOK_TASK_ID_ENV, KANBAN_HOOK_WORKSPACE_ID_ENV } from "../../../src/terminal/hook-runtime-context";
 
 // exploratory CLI 纯函数层的行为锁测：payload 三形态、flag/env 优先级与不一致报错、廉价校验文案、
-// 投递骨架的三态适配（applied=false 业务结果 / TRPCClientError 业务拒绝 / 传输重试）。
+// 投递骨架的三态适配（ingested=false 业务结果 / TRPCClientError 业务拒绝 / 传输重试）。
 const FAST_DELIVERY_OPTIONS = { timeoutMs: 5, maxAttempts: 2, backoffMs: 0 } as const;
 
 function createIngestResponse(
-	overrides: Partial<RuntimeIngestExploratorySessionMapUpdateResponse> = {},
-): RuntimeIngestExploratorySessionMapUpdateResponse {
+	overrides: Partial<RuntimeIngestExploratoryFindingCandidateResponse> = {},
+): RuntimeIngestExploratoryFindingCandidateResponse {
 	return {
-		applied: true,
+		ingested: true,
 		rejectionReason: null,
-		mapCollection: null,
+		finding: null,
 		...overrides,
 	};
 }
@@ -87,49 +88,63 @@ describe("readExploratoryPayloadText", () => {
 	});
 });
 
-describe("parseExploratoryMapUpdatePayload", () => {
-	it("接受白名单三键齐全的合法 payload", () => {
+describe("parseExploratoryFindingCandidatePayload", () => {
+	it("接受白名单四键齐全的合法 payload", () => {
 		expect(
-			parseExploratoryMapUpdatePayload(
+			parseExploratoryFindingCandidatePayload(
 				JSON.stringify({
-					clientProposalId: "proposal-1",
-					sourceTurnProjectionSignature: "12:msg-9:340",
-					nodes: [{ anchorTurnNumber: 3, nodeKind: "milestone", nodeTitle: "定下方向" }],
+					clientProposalId: "prop-1",
+					findingTitle: "结论标题",
+					findingBodyMarkdown: "正文",
+					provenanceLinks: [{ linkKind: "turn_anchor", conversationSessionTaskId: "t", turnNumber: 3 }],
 				}),
 			),
 		).toEqual({
-			clientProposalId: "proposal-1",
-			sourceTurnProjectionSignature: "12:msg-9:340",
-			nodes: [{ anchorTurnNumber: 3, nodeKind: "milestone", nodeTitle: "定下方向" }],
+			clientProposalId: "prop-1",
+			findingTitle: "结论标题",
+			findingBodyMarkdown: "正文",
+			provenanceLinks: [{ linkKind: "turn_anchor", conversationSessionTaskId: "t", turnNumber: 3 }],
 		});
 	});
 
 	it("JSON.parse 失败时报人话错误", () => {
-		expect(() => parseExploratoryMapUpdatePayload("{not json")).toThrow(/not valid JSON/);
+		expect(() => parseExploratoryFindingCandidatePayload("{not json")).toThrow(/not valid JSON/);
 	});
 
-	it.each([["[1,2]"], ['"text"'], ["null"], ["42"]])("非对象 JSON（%s）报人话错误", (text) => {
-		expect(() => parseExploratoryMapUpdatePayload(text)).toThrow(/must be a JSON object/);
+	it("非对象 JSON 报人话错误", () => {
+		expect(() => parseExploratoryFindingCandidatePayload("[1,2]")).toThrow(/must be a JSON object/);
 	});
 
 	it("缺 clientProposalId 报人话错误", () => {
 		expect(() =>
-			parseExploratoryMapUpdatePayload(JSON.stringify({ sourceTurnProjectionSignature: "s", nodes: [] })),
+			parseExploratoryFindingCandidatePayload(
+				JSON.stringify({ findingTitle: "t", findingBodyMarkdown: "b", provenanceLinks: [] }),
+			),
 		).toThrow(/missing required string field "clientProposalId"/);
 	});
 
-	it("缺 sourceTurnProjectionSignature 报人话错误", () => {
-		expect(() => parseExploratoryMapUpdatePayload(JSON.stringify({ clientProposalId: "p", nodes: [] }))).toThrow(
-			/missing required string field "sourceTurnProjectionSignature"/,
-		);
+	it("缺 findingTitle 报人话错误", () => {
+		expect(() =>
+			parseExploratoryFindingCandidatePayload(
+				JSON.stringify({ clientProposalId: "p", findingBodyMarkdown: "b", provenanceLinks: [] }),
+			),
+		).toThrow(/missing required string field "findingTitle"/);
 	});
 
-	it("nodes 非数组报人话错误", () => {
+	it("缺 findingBodyMarkdown 报人话错误", () => {
 		expect(() =>
-			parseExploratoryMapUpdatePayload(
-				JSON.stringify({ clientProposalId: "p", sourceTurnProjectionSignature: "s", nodes: {} }),
+			parseExploratoryFindingCandidatePayload(
+				JSON.stringify({ clientProposalId: "p", findingTitle: "t", provenanceLinks: [] }),
 			),
-		).toThrow(/"nodes" must be an array/);
+		).toThrow(/missing required string field "findingBodyMarkdown"/);
+	});
+
+	it("provenanceLinks 非数组报人话错误", () => {
+		expect(() =>
+			parseExploratoryFindingCandidatePayload(
+				JSON.stringify({ clientProposalId: "p", findingTitle: "t", findingBodyMarkdown: "b", provenanceLinks: {} }),
+			),
+		).toThrow(/"provenanceLinks" must be an array/);
 	});
 });
 
@@ -279,32 +294,32 @@ describe("resolveExploratoryCommandScope（--project-path workspace 解析）", 
 	});
 });
 
-describe("deliverExploratorySessionMapUpdate", () => {
-	it("applied=false 是业务结果而非失败：正常 resolve，rejectionReason 随响应带出", async () => {
+describe("deliverExploratoryMutation", () => {
+	it("ingested=false 是业务结果而非失败：正常 resolve，rejectionReason 随响应带出", async () => {
 		const rejected = createIngestResponse({
-			applied: false,
-			rejectionReason: "stale_source_turn_projection_signature",
+			ingested: false,
+			rejectionReason: "findings_cap_overflow",
 		});
 		const mutate = vi.fn(async () => rejected);
 
-		await expect(deliverExploratorySessionMapUpdate(mutate, FAST_DELIVERY_OPTIONS)).resolves.toEqual(rejected);
+		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).resolves.toEqual(rejected);
 		expect(mutate).toHaveBeenCalledTimes(1);
 	});
 
 	it("TRPCClientError（schema/procedure 拒绝）按业务拒绝处理：立即抛、不重试、message 原样保留", async () => {
-		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> => {
-			throw new TRPCClientError("referencedFindingId 仅允许出现在 finding_reference 节点上");
+		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratoryFindingCandidateResponse> => {
+			throw new TRPCClientError("provenanceLinks 至少一条");
 		});
 
-		await expect(deliverExploratorySessionMapUpdate(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow(
-			"referencedFindingId 仅允许出现在 finding_reference 节点上",
+		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow(
+			"provenanceLinks 至少一条",
 		);
 		expect(mutate).toHaveBeenCalledTimes(1);
 	});
 
 	it("非 TRPCClientError 的抛出按传输故障处理：有界重试后抛出", async () => {
 		let attempt = 0;
-		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> => {
+		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratoryFindingCandidateResponse> => {
 			attempt += 1;
 			if (attempt === 1) {
 				throw new Error("fetch failed");
@@ -312,18 +327,48 @@ describe("deliverExploratorySessionMapUpdate", () => {
 			return createIngestResponse();
 		});
 
-		await expect(deliverExploratorySessionMapUpdate(mutate, FAST_DELIVERY_OPTIONS)).resolves.toEqual(
-			createIngestResponse(),
-		);
+		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).resolves.toEqual(createIngestResponse());
 		expect(mutate).toHaveBeenCalledTimes(2);
 	});
 
 	it("传输故障重试耗尽后抛出最后一次错误", async () => {
-		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratorySessionMapUpdateResponse> => {
+		const mutate = vi.fn(async (): Promise<RuntimeIngestExploratoryFindingCandidateResponse> => {
 			throw new Error("fetch failed");
 		});
 
-		await expect(deliverExploratorySessionMapUpdate(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow("fetch failed");
+		await expect(deliverExploratoryMutation(mutate, FAST_DELIVERY_OPTIONS)).rejects.toThrow("fetch failed");
 		expect(mutate).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("resolveExplorationIdForThreadGraphRead", () => {
+	it("缺 --exploration-id 时默认取本会话 taskId（主会话场景两者本就相同）", () => {
+		expect(resolveExplorationIdForThreadGraphRead({ explicitExplorationId: undefined, taskId: "task-main" })).toBe(
+			"task-main",
+		);
+	});
+
+	it("--exploration-id 覆盖 taskId——by-the-way 会话读主卡片的图靠的就是它", () => {
+		expect(resolveExplorationIdForThreadGraphRead({ explicitExplorationId: "task-main", taskId: "task-btw" })).toBe(
+			"task-main",
+		);
+	});
+
+	it("--exploration-id 与 taskId 不同不报错：这是 by-the-way 会话的正常形态，不是冲突", () => {
+		expect(() =>
+			resolveExplorationIdForThreadGraphRead({ explicitExplorationId: "task-other", taskId: "task-mine" }),
+		).not.toThrow();
+	});
+
+	it("--exploration-id 为空白 → 视为未提供，回落 taskId", () => {
+		expect(resolveExplorationIdForThreadGraphRead({ explicitExplorationId: "   ", taskId: "task-main" })).toBe(
+			"task-main",
+		);
+	});
+
+	it("--exploration-id 两侧空白被 trim（shell 引号里多带的空格不该变成另一个 exploration）", () => {
+		expect(
+			resolveExplorationIdForThreadGraphRead({ explicitExplorationId: "  task-main  ", taskId: "task-btw" }),
+		).toBe("task-main");
 	});
 });

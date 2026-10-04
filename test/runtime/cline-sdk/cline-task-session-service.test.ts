@@ -422,6 +422,43 @@ describe("InMemoryClineTaskSessionService", () => {
 		expect(service.listMessages("task-1").map((message) => message.content)).toEqual(["Investigate startup"]);
 	});
 
+	it("injects the card's work-unit identity into the bash tool environment when the service knows its workspace", async () => {
+		const runtime = createFakeClineSessionRuntime();
+		const runtimeSetup = createFakeRuntimeSetup();
+		const service = createInMemoryClineTaskSessionService({
+			createSessionRuntime: (options) => runtime.createRuntime(options),
+			createRuntimeSetup: vi.fn(async (_workspacePath: string) => runtimeSetup.setup),
+			kanbanWorkspaceIdentityForTaskAgentSessionEnvironment: {
+				workspaceId: "workspace-1",
+				workspaceRepositoryPath: "/tmp/repo",
+			},
+		});
+		services.push(service);
+
+		await service.startTaskSession({ taskId: "c0001", cwd: "/tmp/worktree", prompt: "Investigate startup" });
+		await waitForTaskSessionId(runtime, "c0001");
+
+		expect(
+			runtime.startTaskSessionMock.mock.calls[0]?.[0].bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity,
+		).toMatchObject({
+			KANBAN_TASK_ID: "c0001",
+			KANBAN_TASK_CONVERSATION_SESSION_ID: "c0001",
+			KANBAN_HOOK_WORKSPACE_ID: "workspace-1",
+			KANBAN_PROJECT_PATH: "/tmp/repo",
+		});
+	});
+
+	it("leaves the bash tool environment untouched when the service has no workspace identity", async () => {
+		const { service, runtime } = createTrackedService();
+
+		await service.startTaskSession({ taskId: "c0002", cwd: "/tmp/worktree", prompt: "Investigate startup" });
+		await waitForTaskSessionId(runtime, "c0002");
+
+		expect(
+			runtime.startTaskSessionMock.mock.calls[0]?.[0].bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity,
+		).toBeUndefined();
+	});
+
 	it("getTaskSessionMessagesProjectionSignature：未知任务 → null；live 会话 → 三元与末条一致", async () => {
 		const { service } = createTrackedService();
 		expect(service.getTaskSessionMessagesProjectionSignature("task-unknown")).toBeNull();

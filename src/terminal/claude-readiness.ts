@@ -1,7 +1,7 @@
 // Claude Code 启动 readiness 检测。
 //
-// 与 Codex 的 `hasCodexInteractivePrompt` / `hasCodexStartupUiRendered`
-// 对称：用于在 deferredStartupInput 注入前判断 TUI 是否已经渲染并可接收
+// 与 Codex 的 `hasCodexInteractivePrompt` / `hasCodexStartupPromptReady`
+// 对称：用于在 deferredStartupPromptText 注入前判断 TUI 是否已经渲染并可接收
 // bracketed-paste prompt。
 //
 // 设计上做"宽松启发式 + fallback 超时"组合：

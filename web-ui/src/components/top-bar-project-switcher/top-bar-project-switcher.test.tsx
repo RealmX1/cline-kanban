@@ -18,6 +18,7 @@ function createProject(overrides: Partial<RuntimeProjectSummary> & { id: string 
 		taskCounts: { backlog: 0, in_progress: 0, review: 0, validation: 0, trash: 0 },
 		availability: { status: "available" },
 		inProgressTaskDetails: [],
+		crossProjectTaskSwitcherEntries: [],
 		...overrides,
 	};
 }
@@ -43,6 +44,9 @@ function createSwitcherState(overrides: Partial<TopBarProjectSwitcherState> = {}
 		onAddProject: () => {},
 		onAssignProjectToNumericSlotGroupNumber: () => {},
 		onClearNumericSlotGroupNumber: () => {},
+		selectedBoardOrSingleProjectScope: "single_project_scope",
+		onSelectBoardScopeAllProjects: () => {},
+		boardScopeFocusViewFocusedTaskProjectId: null,
 		...overrides,
 	};
 }
@@ -55,6 +59,57 @@ function queryRowProjectIds(): string[] {
 	return Array.from(document.body.querySelectorAll('[data-testid="project-switcher-table-row"]')).map(
 		(row) => row.getAttribute("data-project-id") ?? "",
 	);
+}
+
+function queryKeyboardHighlightedProjectRowProjectId(): string | null {
+	return (
+		document.body
+			.querySelector('[data-testid="project-switcher-table-row"][aria-current="true"]')
+			?.getAttribute("data-project-id") ?? null
+	);
+}
+
+function queryBoardScopeAllProjectsPseudoRow(): Element | null {
+	return document.body.querySelector('[data-testid="project-switcher-board-scope-all-projects-pseudo-row"]');
+}
+
+async function typeIntoProjectSwitcherFilterInput(value: string): Promise<void> {
+	const filterInput = document.body.querySelector<HTMLInputElement>('[data-testid="project-switcher-filter-input"]');
+	await act(async () => {
+		Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set?.call(filterInput, value);
+		filterInput?.dispatchEvent(new Event("input", { bubbles: true }));
+	});
+}
+
+async function pressKeyOnProjectSwitcherPanel(key: string): Promise<void> {
+	const panel = document.body.querySelector('[data-testid="top-bar-project-switcher-panel"]');
+	await act(async () => {
+		panel?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+	});
+}
+
+// 过滤词 "a" 是伪行标签「all projects」的子串（伪行可见），"ab" 不是（伪行隐藏）。三个 lab 项目的名字里既没有 a
+// 也没有 b，两个过滤词都只经路径子串命中它们，于是过滤前后项目行集合与相对顺序完全一致——只剩伪行显隐这一个变量。
+// filler 项目只为凑够过滤框的出现门槛，名字和路径都不含 a。
+const FILTER_QUERY_KEEPING_ALL_PROJECTS_PSEUDO_ROW_VISIBLE = "a";
+const FILTER_QUERY_HIDING_ALL_PROJECTS_PSEUDO_ROW = "ab";
+
+function createAllProjectsPseudoRowVisibilityToggleSwitcherState(
+	overrides: Partial<TopBarProjectSwitcherState> = {},
+): TopBarProjectSwitcherState {
+	const labProjectsMatchedOnlyByPath = ["one", "two", "three"].map((id) =>
+		createProject({ id, path: `/work/lab/${id}` }),
+	);
+	const fillerProjectsMatchedByNeitherFilterQuery = Array.from({ length: 5 }, (_unused, index) =>
+		createProject({ id: `filler-${index}` }),
+	);
+	return createSwitcherState({
+		projects: [...labProjectsMatchedOnlyByPath, ...fillerProjectsMatchedByNeitherFilterQuery],
+		currentProjectId: "filler-0",
+		navigationCurrentProjectId: "filler-0",
+		lastVisitedEpochMsByProjectId: { one: 3_000, two: 2_000, three: 1_000 },
+		...overrides,
+	});
 }
 
 describe("TopBarProjectSwitcher", () => {
@@ -197,6 +252,68 @@ describe("TopBarProjectSwitcher", () => {
 		expect(onSelectProject).not.toHaveBeenCalled();
 	});
 
+	it("lists the All projects pseudo-row (Board Scope) first; clicking it selects Board Scope and closes", async () => {
+		const onSelectBoardScopeAllProjects = vi.fn();
+		const onSelectProject = vi.fn();
+		await openSwitcher(createSwitcherState({ onSelectBoardScopeAllProjects, onSelectProject }));
+
+		const firstBodyRow = document.body.querySelector("tbody > tr");
+		expect(firstBodyRow?.getAttribute("data-testid")).toBe("project-switcher-board-scope-all-projects-pseudo-row");
+		await act(async () => (firstBodyRow as HTMLElement | null)?.click());
+		expect(onSelectBoardScopeAllProjects).toHaveBeenCalledTimes(1);
+		expect(onSelectProject).not.toHaveBeenCalled();
+		expect(document.body.querySelector('[data-testid="top-bar-project-switcher-panel"]')).toBeNull();
+	});
+
+	it("reaches the pseudo-row with the keyboard: ArrowUp from the initial row then Enter selects Board Scope", async () => {
+		const onSelectBoardScopeAllProjects = vi.fn();
+		await openSwitcher(createSwitcherState({ onSelectBoardScopeAllProjects }));
+		const panel = document.body.querySelector('[data-testid="top-bar-project-switcher-panel"]');
+		await act(async () => {
+			panel?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+		});
+		expect(
+			document.body
+				.querySelector('[data-testid="project-switcher-board-scope-all-projects-pseudo-row"]')
+				?.getAttribute("aria-current"),
+		).toBe("true");
+		await act(async () => {
+			panel?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		});
+		expect(onSelectBoardScopeAllProjects).toHaveBeenCalledTimes(1);
+	});
+
+	it("in Board Scope: trigger reads All projects › focused task's project, Current moves to the pseudo-row, and open + Enter narrows back to the current project", async () => {
+		const onSelectProject = vi.fn();
+		await renderSwitcher(
+			createSwitcherState({
+				onSelectProject,
+				selectedBoardOrSingleProjectScope: "board_scope_all_projects",
+				boardScopeFocusViewFocusedTaskProjectId: "bravo",
+			}),
+		);
+		expect(queryTrigger()?.textContent).toContain("All projects");
+		expect(
+			document.body.querySelector(
+				'[data-testid="top-bar-project-switcher-board-scope-focused-task-project-breadcrumb"]',
+			)?.textContent,
+		).toContain("bravo");
+
+		await openSwitcher(
+			createSwitcherState({ onSelectProject, selectedBoardOrSingleProjectScope: "board_scope_all_projects" }),
+		);
+		expect(document.body.querySelector('[data-testid="project-switcher-current-project-marker"]')).toBeNull();
+		expect(
+			document.body.querySelector('[data-testid="project-switcher-board-scope-all-projects-pseudo-row"]')
+				?.textContent,
+		).toContain("Current");
+		const panel = document.body.querySelector('[data-testid="top-bar-project-switcher-panel"]');
+		await act(async () => {
+			panel?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		});
+		expect(onSelectProject).toHaveBeenCalledWith("alpha");
+	});
+
 	it("selects the first non-current project when Enter is pressed right after opening", async () => {
 		const onSelectProject = vi.fn();
 		await openSwitcher(createSwitcherState({ onSelectProject }));
@@ -206,6 +323,55 @@ describe("TopBarProjectSwitcher", () => {
 			panel?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 		});
 		expect(onSelectProject).toHaveBeenCalledWith("bravo");
+	});
+
+	it("keeps the keyboard highlight on the same project when the filter query hides the All projects pseudo-row", async () => {
+		const onSelectProject = vi.fn();
+		await openSwitcher(createAllProjectsPseudoRowVisibilityToggleSwitcherState({ onSelectProject }));
+		await typeIntoProjectSwitcherFilterInput(FILTER_QUERY_KEEPING_ALL_PROJECTS_PSEUDO_ROW_VISIBLE);
+		expect(queryBoardScopeAllProjectsPseudoRow()).not.toBeNull();
+		expect(queryRowProjectIds()).toEqual(["one", "two", "three"]);
+		await pressKeyOnProjectSwitcherPanel("Home");
+		await pressKeyOnProjectSwitcherPanel("ArrowDown");
+		await pressKeyOnProjectSwitcherPanel("ArrowDown");
+		expect(queryKeyboardHighlightedProjectRowProjectId()).toBe("two");
+
+		await typeIntoProjectSwitcherFilterInput(FILTER_QUERY_HIDING_ALL_PROJECTS_PSEUDO_ROW);
+		expect(queryBoardScopeAllProjectsPseudoRow()).toBeNull();
+		expect(queryRowProjectIds()).toEqual(["one", "two", "three"]);
+		expect(queryKeyboardHighlightedProjectRowProjectId()).toBe("two");
+		await pressKeyOnProjectSwitcherPanel("Enter");
+		expect(onSelectProject).toHaveBeenCalledWith("two");
+	});
+
+	it("keeps the keyboard highlight on the same project when the All projects pseudo-row reappears", async () => {
+		const onSelectProject = vi.fn();
+		await openSwitcher(createAllProjectsPseudoRowVisibilityToggleSwitcherState({ onSelectProject }));
+		await typeIntoProjectSwitcherFilterInput(FILTER_QUERY_HIDING_ALL_PROJECTS_PSEUDO_ROW);
+		expect(queryBoardScopeAllProjectsPseudoRow()).toBeNull();
+		await pressKeyOnProjectSwitcherPanel("Home");
+		await pressKeyOnProjectSwitcherPanel("ArrowDown");
+		expect(queryKeyboardHighlightedProjectRowProjectId()).toBe("two");
+
+		await typeIntoProjectSwitcherFilterInput(FILTER_QUERY_KEEPING_ALL_PROJECTS_PSEUDO_ROW_VISIBLE);
+		expect(queryBoardScopeAllProjectsPseudoRow()).not.toBeNull();
+		expect(queryRowProjectIds()).toEqual(["one", "two", "three"]);
+		expect(queryKeyboardHighlightedProjectRowProjectId()).toBe("two");
+		await pressKeyOnProjectSwitcherPanel("Enter");
+		expect(onSelectProject).toHaveBeenCalledWith("two");
+	});
+
+	it("moves the keyboard highlight from the All projects pseudo-row to the first project row when the pseudo-row hides", async () => {
+		const onSelectProject = vi.fn();
+		await openSwitcher(createAllProjectsPseudoRowVisibilityToggleSwitcherState({ onSelectProject }));
+		await typeIntoProjectSwitcherFilterInput(FILTER_QUERY_KEEPING_ALL_PROJECTS_PSEUDO_ROW_VISIBLE);
+		await pressKeyOnProjectSwitcherPanel("Home");
+		expect(queryBoardScopeAllProjectsPseudoRow()?.getAttribute("aria-current")).toBe("true");
+
+		await typeIntoProjectSwitcherFilterInput(FILTER_QUERY_HIDING_ALL_PROJECTS_PSEUDO_ROW);
+		expect(queryKeyboardHighlightedProjectRowProjectId()).toBe("one");
+		await pressKeyOnProjectSwitcherPanel("Enter");
+		expect(onSelectProject).toHaveBeenCalledWith("one");
 	});
 
 	it("keeps the load-bearing columns out of the column menu and toggles the optional ones", async () => {

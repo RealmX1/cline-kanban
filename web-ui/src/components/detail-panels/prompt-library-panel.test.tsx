@@ -301,4 +301,42 @@ describe("PromptLibraryPanel", () => {
 
 		expect(container.textContent).not.toContain("from deleted tasks");
 	});
+	// 「排队」与「填进输入框」是两种意图，并存而不是替换；调用方不给排队能力时（例：home 侧栏）不显示按钮。
+	it("给了排队回调才显示排队按钮，点击把那条 prompt 原样交出去", async () => {
+		promptsHeldByFakeServerByTaskId["task-1"] = [
+			{ id: "prompt-q", text: "跑一遍测试再提交", scope: "task", createdAt: 1, updatedAt: 1 },
+		];
+		const onQueue = vi.fn();
+		await act(async () => {
+			renderPanel(
+				root,
+				<PromptLibraryPanel
+					taskId="task-1"
+					projectId="project-1"
+					onFillInput={() => {}}
+					onQueuePromptForAfterCurrentTurn={onQueue}
+				/>,
+			);
+		});
+		await act(async () => {
+			getButton(container, "Queue prompt for after the current turn").click();
+		});
+		expect(onQueue).toHaveBeenCalledWith(expect.objectContaining({ id: "prompt-q", text: "跑一遍测试再提交" }));
+		// 与 Fill 并存。
+		expect(getButton(container, "Fill prompt into input")).toBeInstanceOf(HTMLButtonElement);
+	});
+
+	it("不给排队回调时没有排队按钮", async () => {
+		promptsHeldByFakeServerByTaskId["task-1"] = [
+			{ id: "prompt-q", text: "跑一遍测试再提交", scope: "task", createdAt: 1, updatedAt: 1 },
+		];
+		await act(async () => {
+			renderPanel(root, <PromptLibraryPanel taskId="task-1" projectId="project-1" onFillInput={() => {}} />);
+		});
+		expect(
+			Array.from(container.querySelectorAll("button")).some(
+				(button) => button.getAttribute("aria-label") === "Queue prompt for after the current turn",
+			),
+		).toBe(false);
+	});
 });

@@ -1,0 +1,56 @@
+[
+  {
+    "kind": "guided_manual",
+    "label": "会话推流只更新变化卡片；主看板、Focus View、置顶板和 sticky 副本的动作及拖拽保持可用",
+    "guidance": {
+      "steps": [
+        "打开本项目看板，确认部署版本包含 task 041d9 的实现，准备一张持续输出卡和一张静止卡。",
+        "在浏览器中用 React DevTools 的更新高亮或渲染计数探针观察 session 推流；排除 hover、共享时钟及工作区元数据自身的更新。",
+        "分别在主看板与 Focus View 观察不变卡和两个置顶板副本；将焦点卡滚出视口后观察 sticky 副本。",
+        "核对编辑、选择、启动、Review/Validation 动作入口随实际列保持一致；用可回收测试卡验证点击与拖拽，然后还原测试卡。"
+      ],
+      "expectedObservation": "仅 summary 实际变化的卡体随该次推流重渲染；卡片自身时钟/交互/元数据仍会正常更新。各宿主的入口能读取最新卡片和会话，没有过期闭包。",
+      "failureSignature": "单条 summary 推流让所有不变卡体重渲染，或按钮可见但无响应、操作仍使用旧列/旧标题。",
+      "anchor": {
+        "view": "board",
+        "anchorKey": "board-task-card:041d9"
+      }
+    },
+    "script": null,
+    "cleanup": {
+      "mode": "manual",
+      "assetsDir": null,
+      "manualSteps": [
+        "仅浏览器观察，无仓库插桩；移除临时 Network 阻断并关闭验证标签页。"
+      ]
+    },
+    "verificationId": "6db145cf-1b44-49a8-931c-090291a23730"
+  },
+  {
+    "kind": "guided_manual",
+    "label": "真实部署的语义搜索按需创建 CPU Worker，搜索完成或失败后 UI 仍可交互，退出搜索能释放 Worker",
+    "guidance": {
+      "steps": [
+        "打开真实运行实例的看板及浏览器 Network/Performance；刷新后先使用 direct/fuzzy 搜索，确认尚未加载 semantic Worker 或模型。",
+        "切换 semantic/hybrid 并输入本项目已有任务的主题，等待模型首次下载与全部文档索引完成；首次查询即应返回相应命中，不应先出现因索引尚未就绪而产生的空结果。观察 Worker 中的计算和命中结果。",
+        "在计算期间输入、切换查询；确认没有旧查询结果覆盖当前查询。关闭搜索后确认 Worker 结束。",
+        "重新打开搜索；在 DevTools 临时阻断模型请求或 Worker 资源后触发新查询，确认现有模糊搜索降级并可继续操作；移除阻断并重新查询应可恢复。"
+      ],
+      "expectedObservation": "主线程启动包不包含 TensorFlow/Orama；CPU Worker 仅语义搜索时启动，真实模型能返回命中；输入保持响应；关闭、切项目或离开语义模式能终止旧 Worker，故障不会永久卡在 loading。 初始化应等待所有文档嵌入完成，文档嵌入失败应进入既有错误降级。",
+      "failureSignature": "Worker 路径/CSP/模型下载导致持续失败、主线程出现 embedding 计算长任务、旧项目结果串入新项目，或关闭后 Worker 长驻。",
+      "anchor": {
+        "view": "board",
+        "anchorKey": "board-task-card:041d9"
+      }
+    },
+    "script": null,
+    "cleanup": {
+      "mode": "manual",
+      "assetsDir": null,
+      "manualSteps": [
+        "仅浏览器观察，无仓库插桩；移除临时 Network 阻断并关闭验证标签页。"
+      ]
+    },
+    "verificationId": "80d85664-5d49-483d-a137-09c396e4cce5"
+  }
+]

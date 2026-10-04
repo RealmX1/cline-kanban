@@ -4,7 +4,7 @@ Kimi Code 是 Moonshot 的原生终端 agent：`agentId === "kimi"`，二进制 
 
 ## 1. 形态模板是 codex，不是 droid/kiro
 
-kimi 是**全屏 TUI，且交互模式没有位置 prompt 槽**：`kimi -p/--prompt` 只是单发 print 模式，跑完即退，不产生持久交互会话，不能用于托管会话。因此任务 prompt 一律走 `PreparedAgentLaunch.deferredStartupInput`（= `toBracketedPasteSubmission(prompt)`），在 TUI 就绪后由 `session-manager.ts` 以 bracketed paste 注入——与 codex 同一机制。实现：`agent-session-adapters.ts:1913-1967`（`kimiAdapter`，模块注释明确写了这个形态判断）；resumeFromTrash 时不注入（:1957，避免把 prompt 重打进续跑会话）。
+kimi 是**全屏 TUI，且交互模式没有位置 prompt 槽**：`kimi -p/--prompt` 只是单发 print 模式，跑完即退，不产生持久交互会话，不能用于托管会话。因此任务 prompt 一律走 `PreparedAgentLaunch.deferredStartupPromptText`（原始任务文本），在 TUI 就绪后由 `session-manager.ts` 经共享确认链先写 bracketed paste、再单独写提交回车——与 codex 同一机制。实现：`agent-session-adapters.ts:1913-1967`（`kimiAdapter`，模块注释明确写了这个形态判断）；resumeFromTrash 时不注入（:1957，避免把 prompt 重打进续跑会话）。
 
 **就绪信号**（`src/terminal/kimi-readiness.ts`）：
 

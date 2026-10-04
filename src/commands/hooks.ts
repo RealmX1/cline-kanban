@@ -5,9 +5,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createTRPCProxyClient, httpBatchLink, TRPCClientError } from "@trpc/client";
 import type { Command } from "commander";
 import type {
+	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentRaisedToolPermissionPayload,
 	RuntimeAgentRaisedUserQuestionPayload,
+	RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
+	RuntimeAgentToolCallExecutionOutcome,
 	RuntimeHarnessUserPromptProcessingDirective,
+	RuntimeHookCliProcessResourceUsage,
 	RuntimeHookEvent,
 	RuntimeHookIngestResponse,
 	RuntimeTaskHookActivity,
@@ -20,18 +24,29 @@ import {
 	type HookDeliveryFailureKind,
 	recordHookDeliveryFailure,
 } from "../diagnostics/hook-ingest-delivery-failure-logger";
+import {
+	captureNotificationSignal,
+	recordNotificationSignalDecision,
+} from "../notifications/notification-signal-capture";
 import { parseHookRuntimeContextFromEnv } from "../terminal/hook-runtime-context";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import {
 	extractAgentRaisedToolPermissionPayload,
 	extractAgentRaisedUserQuestionPayload,
+	extractAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
 } from "./agent-raised-decision-payload-extraction";
+import { extractAgentNativeConversationSessionIdentityFromHookPayload } from "./hook-events/agent-native-conversation-session-identity-extraction";
+import { extractAgentToolCallExecutionOutcomeFromHookPayload } from "./hook-events/agent-tool-call-execution-outcome-extraction";
 import {
 	type CodexMappedHookEvent,
 	resolveCodexRolloutFinalMessageForCwd,
 	startCodexSessionWatcher,
 } from "./hook-events/codex-hook-events";
 import { enrichDroidReviewMetadata } from "./hook-events/droid-hook-events";
+import {
+	type ExplorationWorkBranchJobHookDisposition,
+	resolveExplorationWorkBranchJobHookDisposition,
+} from "./hook-events/exploration-work-branch-job-hook-short-circuit";
 import { asRecord, normalizeWhitespace, readNestedString, readStringField } from "./hook-events/hook-utils";
 import { normalizeKiroHookMetadata } from "./hook-events/kiro-hook-events";
 
@@ -42,9 +57,15 @@ export {
 	startCodexSessionWatcher,
 } from "./hook-events/codex-hook-events";
 
-const VALID_EVENTS = new Set<RuntimeHookEvent>(["to_review", "to_in_progress", "activity"]);
+const VALID_EVENTS = new Set<RuntimeHookEvent>([
+	"to_review",
+	"to_in_progress",
+	"activity",
+	"agent_conversation_session_identity_observed",
+]);
 
 interface HooksIngestArgs {
+	notificationCandidateId?: string;
 	event: RuntimeHookEvent;
 	taskId: string;
 	workspaceId: string;
@@ -53,10 +74,18 @@ interface HooksIngestArgs {
 	// agent 正在等你拍板时才携带的白名单 payload（二者互斥）。会话被回收后靠它重现问题。
 	agentRaisedUserQuestion?: RuntimeAgentRaisedUserQuestionPayload;
 	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
+	agentRaisedUserQuestionResolvedInAgentTerminal?: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload;
 	submittedPromptText?: string;
+	// hook stdin 带 `agent_id` ⇔ 事件从子代理内部触发（Claude Code 只在子代理内的事件上带它）。
+	hookEventFiredInsideSubagentContext?: boolean;
+	// N0a：终端 agent 原生会话身份（session_id + transcript_path），每个事件都带，服务端幂等落 sidecar。
+	agentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity;
+	// 资源占用采集：工具类事件的执行结果（已截断脱敏），服务端只写 journal。
+	agentToolCallExecutionOutcome?: RuntimeAgentToolCallExecutionOutcome;
 }
 
 interface HookCommandMetadataOptionValues {
+	notificationCandidateId?: string;
 	source?: string;
 	activityText?: string;
 	toolName?: string;
@@ -389,16 +418,28 @@ function parseHooksIngestArgs(
 	const payloadFromArg = payloadArg ? parseJsonObject(payloadArg) : null;
 	const payload = payloadFromBase64 ?? payloadFromStdin ?? payloadFromArg;
 	const metadata = normalizeHookMetadata(event, payload, flagMetadata);
+	const agentNativeConversationSessionIdentity = extractAgentNativeConversationSessionIdentityFromHookPayload({
+		payload,
+		sourceAgentId: metadata?.source ?? inferHookSourceFromPayload(payload),
+	});
+	const agentToolCallExecutionOutcome = extractAgentToolCallExecutionOutcomeFromHookPayload({
+		payload,
+		hookEventName: metadata?.hookEventName,
+		toolName: metadata?.toolName,
+	});
 	return {
 		event,
 		taskId: context.taskId,
 		workspaceId: context.workspaceId,
 		metadata,
 		payload,
+		...(agentNativeConversationSessionIdentity ? { agentNativeConversationSessionIdentity } : {}),
+		...(agentToolCallExecutionOutcome ? { agentToolCallExecutionOutcome } : {}),
 		...buildAgentRaisedDecisionPayloads(payload, metadata),
 		...(metadata?.hookEventName?.trim().toLowerCase() === "userpromptsubmit" && payload
 			? { submittedPromptText: readStringField(payload, "prompt") ?? undefined }
 			: {}),
+		...(payload && readStringField(payload, "agent_id") ? { hookEventFiredInsideSubagentContext: true } : {}),
 	};
 }
 
@@ -430,6 +471,7 @@ export function buildAgentRaisedDecisionPayloads(
 ): {
 	agentRaisedUserQuestion?: RuntimeAgentRaisedUserQuestionPayload;
 	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
+	agentRaisedUserQuestionResolvedInAgentTerminal?: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload;
 } {
 	if (!payload) {
 		return {};
@@ -440,7 +482,27 @@ export function buildAgentRaisedDecisionPayloads(
 		readNestedString(payload, ["preToolUse", "toolUseId"]);
 	const toolName = metadata?.toolName ?? null;
 	const normalizedToolName = toolName?.trim().toLowerCase() ?? null;
+	const hookEventName = metadata?.hookEventName?.trim().toLowerCase() ?? null;
 	if (isClaudeUserQuestionToolName(normalizedToolName)) {
+		// 同一次 AskUserQuestion 会先后经过三个 hook，各自只承担一件事：
+		//   - PreToolUse：提问的那一刻，落 durable 记录（唯一的提问采集点）；
+		//   - PermissionRequest：「允许提问」对话框。它的 stdin **不带 tool_use_id**，若也采集，问题正文
+		//     派生出的第二个 decisionId 会在 1–2 秒后把刚落库的那条顶成 superseded——实测每次提问都稳定
+		//     落两条，面板持有的旧 id 随即 answer/dismiss 全部失败。故此处既不记提问、也不记工具授权；
+		//   - PostToolUse / PostToolUseFailure：用户已在终端里作答或拒答，带回结局让账本了结这个问题。
+		// hookEventName 缺失（非 Claude hook stdin 的调用路径）时保持旧行为：按提问采集。
+		if (hookEventName === "posttooluse" || hookEventName === "posttoolusefailure") {
+			const resolution = extractAgentRaisedUserQuestionResolvedInAgentTerminalPayload({
+				toolUseId,
+				toolInput: extractToolInput(payload),
+				toolResponse: payload.tool_response ?? payload.toolResponse ?? null,
+				toolExecutionFailed: hookEventName === "posttoolusefailure",
+			});
+			return resolution ? { agentRaisedUserQuestionResolvedInAgentTerminal: resolution } : {};
+		}
+		if (hookEventName !== null && hookEventName !== "pretooluse") {
+			return {};
+		}
 		const question = extractAgentRaisedUserQuestionPayload({ toolUseId, toolInput: extractToolInput(payload) });
 		return question ? { agentRaisedUserQuestion: question } : {};
 	}
@@ -448,7 +510,6 @@ export function buildAgentRaisedDecisionPayloads(
 	if (isClaudePlanApprovalToolName(normalizedToolName)) {
 		return {};
 	}
-	const hookEventName = metadata?.hookEventName?.toLowerCase() ?? null;
 	const notificationType = metadata?.notificationType?.toLowerCase() ?? null;
 	if (hookEventName === "permissionrequest" || notificationType === "permission_prompt") {
 		const permission = extractAgentRaisedToolPermissionPayload({
@@ -486,7 +547,8 @@ function resolveHookIngestTimeoutMs(): number {
 // F2 核心：把「有界重试 + 传输/业务失败分流」抽成纯函数（注入 mutate + 回调），使单测能在不起真实
 // tRPC/网络的前提下锁住行为。分流判据天然干净：
 //   - mutate 成功 resolve（HTTP 200，body 带逻辑结果）→ 看 .ok。{ok:false} 是 daemon **可达**但逻辑拒绝
-//     （workspace/task not found 等），重试不会变 → 立即按 "rejected" 记录并抛，**不重试**。
+//     （workspace/task not found 等），立即按 "rejected" 记录并抛，**不重试**；携带恢复 block 时保留
+//     失败响应交给调用方序列化，不能让普通错误退出丢掉拦截指令。
 //   - mutate / withTimeout **抛出** → 传输层故障（超时 / daemon 不可达 / 锁争用）→ 可重试；耗尽后按
 //     "transport" 记录并抛。
 // onFinalFailure 仅在「最终放弃」时触发一次（中途重试不触发），由调用方接 F3 的丢投记录。
@@ -520,6 +582,13 @@ export async function deliverHookIngestWithRetry(
 		if (ingestResponse.ok === false) {
 			const businessError = new Error(ingestResponse.error ?? "Hook ingest failed");
 			await options.onFinalFailure?.({ attempts: attempt, failureKind: "rejected", error: businessError });
+			// 落盘失败必须上报，但不能丢掉恢复守卫的 block，让 Claude 因普通错误退出而 fail-open。
+			if (
+				ingestResponse.harnessUserPromptProcessingDirective?.processingDecision ===
+				"block_and_defer_until_explicit_user_input"
+			) {
+				return ingestResponse;
+			}
 			throw businessError;
 		}
 		return ingestResponse;
@@ -550,9 +619,25 @@ function recordIngestDropForLifecycleEvent(
 	});
 }
 
+// hooks CLI 进程自身到「这一次发送」为止的开销。maxRSS 的峰值主要来自模块加载；发送之后那一小段测不到。
+function captureHookCliProcessResourceUsage(hookIngestDeliveryAttempt: number): RuntimeHookCliProcessResourceUsage {
+	const resourceUsage = process.resourceUsage();
+	return {
+		lifetimeMaximumResidentSetSizeKibibytes: resourceUsage.maxRSS,
+		cumulativeUserCpuTimeSeconds: resourceUsage.userCPUTime / 1e6,
+		cumulativeSystemCpuTimeSeconds: resourceUsage.systemCPUTime / 1e6,
+		hookCliProcessUptimeMs: Math.round(process.uptime() * 1000),
+		hookIngestDeliveryAttempt: Math.max(1, hookIngestDeliveryAttempt),
+	};
+}
+
 async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngestResponse> {
-	return await deliverHookIngestWithRetry(
+	let attempt = 0;
+	const response = await deliverHookIngestWithRetry(
 		async (signal) => {
+			await recordNotificationSignalDecision(args.notificationCandidateId, "hook_transport_attempt_started", {
+				attempt: ++attempt,
+			});
 			const trpcClient = createTRPCProxyClient<RuntimeAppRouter>({
 				links: [
 					httpBatchLink({
@@ -567,23 +652,51 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngest
 				],
 			});
 			return await trpcClient.hooks.ingest.mutate({
+				notificationCandidateId: args.notificationCandidateId,
 				taskId: args.taskId,
 				workspaceId: args.workspaceId,
 				event: args.event,
 				metadata: args.metadata,
 				...(args.agentRaisedUserQuestion ? { agentRaisedUserQuestion: args.agentRaisedUserQuestion } : {}),
 				...(args.agentRaisedToolPermission ? { agentRaisedToolPermission: args.agentRaisedToolPermission } : {}),
+				...(args.agentRaisedUserQuestionResolvedInAgentTerminal
+					? { agentRaisedUserQuestionResolvedInAgentTerminal: args.agentRaisedUserQuestionResolvedInAgentTerminal }
+					: {}),
 				...(args.submittedPromptText !== undefined ? { submittedPromptText: args.submittedPromptText } : {}),
+				...(args.hookEventFiredInsideSubagentContext
+					? { hookEventFiredInsideSubagentContext: args.hookEventFiredInsideSubagentContext }
+					: {}),
+				...(args.agentNativeConversationSessionIdentity
+					? { agentNativeConversationSessionIdentity: args.agentNativeConversationSessionIdentity }
+					: {}),
+				...(args.agentToolCallExecutionOutcome
+					? { agentToolCallExecutionOutcome: args.agentToolCallExecutionOutcome }
+					: {}),
+				// 每次尝试发送前重新取值：重试之间的等待本身也是这个 hook 进程的开销。
+				hookCliProcessResourceUsage: captureHookCliProcessResourceUsage(attempt),
 			});
 		},
 		{
 			timeoutMs: resolveHookIngestTimeoutMs(),
 			maxAttempts: HOOK_INGEST_MAX_ATTEMPTS,
 			backoffMs: HOOK_INGEST_RETRY_BACKOFF_MS,
-			onFinalFailure: ({ attempts, failureKind, error }) =>
-				recordIngestDropForLifecycleEvent(args, attempts, failureKind, error),
+			onFinalFailure: async ({ attempts, failureKind, error }) => {
+				await recordNotificationSignalDecision(
+					args.notificationCandidateId,
+					"hook_transport_failed",
+					{ attempts, failureKind },
+					true,
+				);
+				await recordIngestDropForLifecycleEvent(args, attempts, failureKind, error);
+			},
 		},
 	);
+	if (response.ok) {
+		await recordNotificationSignalDecision(args.notificationCandidateId, "hook_transport_accepted", {
+			attempts: attempt,
+		});
+	}
+	return response;
 }
 
 export function serializeHarnessUserPromptProcessingDirective(
@@ -698,19 +811,57 @@ async function enrichCodexReviewMetadata(args: HooksIngestArgs, cwd: string): Pr
 	};
 }
 
+// exploration thread graph 维护作业分身的 hook 短路（判定与理由见 exploration-work-branch-job-hook-short-circuit.ts）。
+// 必须在 parseHooksIngestArgs 之前调用：作业进程未必带 KANBAN_HOOK_* 身份 env。
+function resolveExplorationWorkBranchJobHookDispositionForStdin(
+	stdinPayload: string,
+	optionHookEventName: string | undefined,
+): ExplorationWorkBranchJobHookDisposition {
+	const payload = parseJsonObject(stdinPayload.trim());
+	const hookEventName =
+		optionHookEventName ??
+		(payload
+			? (readStringField(payload, "hook_event_name") ??
+				readStringField(payload, "hookEventName") ??
+				readStringField(payload, "hookName"))
+			: null);
+	return resolveExplorationWorkBranchJobHookDisposition({ hookEventName });
+}
+
 async function runHooksNotify(
 	event: RuntimeHookEvent,
 	options: HookCommandMetadataOptionValues,
 	payloadArg: string | undefined,
 ): Promise<void> {
+	let notificationCandidateId: string | null = null;
 	try {
 		const stdinPayload = await readStdinText();
-		const parsedArgs = parseHooksIngestArgs(event, options, payloadArg, stdinPayload);
+		notificationCandidateId = await captureRawNotificationHook(event, stdinPayload, payloadArg, options);
+		const jobDisposition = resolveExplorationWorkBranchJobHookDispositionForStdin(
+			stdinPayload,
+			options.hookEventName,
+		);
+		if (jobDisposition.kind !== "ingest_normally") {
+			await recordNotificationSignalDecision(
+				notificationCandidateId,
+				"exploration_job_hook_excluded",
+				{ disposition: jobDisposition.kind },
+				true,
+			);
+			if (jobDisposition.kind === "short_circuit_with_pre_tool_use_deny") {
+				process.stdout.write(`${jobDisposition.stdoutJson}\n`);
+			}
+			return;
+		}
+		const parsedArgs = {
+			...parseHooksIngestArgs(event, options, payloadArg, stdinPayload),
+			notificationCandidateId: notificationCandidateId ?? undefined,
+		};
 		const codexEnrichedArgs = await enrichCodexReviewMetadata(parsedArgs, process.cwd());
 		const args = await enrichDroidReviewMetadata(codexEnrichedArgs);
 		await ingestHookEvent(args);
 	} catch {
-		// Best effort only.
+		await recordNotificationSignalDecision(notificationCandidateId, "hook_cli_processing_failed", {}, true);
 	}
 }
 
@@ -751,14 +902,32 @@ async function runCodexHookSubcommand(
 		payload = "";
 	}
 
+	const notificationCandidateId = await captureRawNotificationHook(event, payload, payloadArg, options);
+	const jobDisposition = resolveExplorationWorkBranchJobHookDispositionForStdin(payload, options.hookEventName);
+	if (jobDisposition.kind !== "ingest_normally") {
+		await recordNotificationSignalDecision(
+			notificationCandidateId,
+			"exploration_job_hook_excluded",
+			{ disposition: jobDisposition.kind },
+			true,
+		);
+		process.stdout.write(
+			`${jobDisposition.kind === "short_circuit_with_pre_tool_use_deny" ? jobDisposition.stdoutJson : "{}"}\n`,
+		);
+		return;
+	}
+
 	process.stdout.write("{}\n");
 
 	try {
-		const parsedArgs = parseHooksIngestArgs(event, options, payloadArg, payload);
+		const parsedArgs = {
+			...parseHooksIngestArgs(event, options, payloadArg, payload),
+			notificationCandidateId: notificationCandidateId ?? undefined,
+		};
 		const codexEnrichedArgs = await enrichCodexReviewMetadata(parsedArgs, process.cwd());
 		await ingestHookEvent(codexEnrichedArgs);
 	} catch {
-		// Best effort only.
+		await recordNotificationSignalDecision(notificationCandidateId, "hook_cli_processing_failed", {}, true);
 	}
 }
 
@@ -768,6 +937,15 @@ async function runGeminiHookSubcommand(): Promise<void> {
 		payload = await readStdinText();
 	} catch {
 		payload = "";
+	}
+
+	const notificationCandidateId = await captureRawNotificationHook("activity", payload, undefined, {
+		source: "gemini",
+	});
+	if (resolveExplorationWorkBranchJobHookDispositionForStdin(payload, undefined).kind !== "ingest_normally") {
+		await recordNotificationSignalDecision(notificationCandidateId, "exploration_job_hook_excluded", {}, true);
+		process.stdout.write("{}\n");
+		return;
 	}
 
 	let hookEventName = "";
@@ -796,7 +974,18 @@ async function runGeminiHookSubcommand(): Promise<void> {
 		source: "gemini",
 		hookEventName: hookEventName || undefined,
 	});
-	spawnBackgroundKanban(appendMetadataFlags(["hooks", "notify", "--event", mappedEvent], metadata));
+	spawnBackgroundKanban(
+		appendMetadataFlags(
+			[
+				"hooks",
+				"notify",
+				"--event",
+				mappedEvent,
+				...(notificationCandidateId ? ["--notification-candidate-id", notificationCandidateId] : []),
+			],
+			metadata,
+		),
+	);
 }
 
 export function buildCodexWrapperChildArgs(agentArgs: string[]): string[] {
@@ -927,7 +1116,27 @@ async function runHooksIngest(
 	let args: HooksIngestArgs;
 	try {
 		const stdinPayload = await readStdinText();
-		const parsedArgs = parseHooksIngestArgs(event, options, payloadArg, stdinPayload);
+		const notificationCandidateId = await captureRawNotificationHook(event, stdinPayload, payloadArg, options);
+		const jobDisposition = resolveExplorationWorkBranchJobHookDispositionForStdin(
+			stdinPayload,
+			options.hookEventName,
+		);
+		if (jobDisposition.kind !== "ingest_normally") {
+			await recordNotificationSignalDecision(
+				notificationCandidateId,
+				"exploration_job_hook_excluded",
+				{ disposition: jobDisposition.kind },
+				true,
+			);
+			if (jobDisposition.kind === "short_circuit_with_pre_tool_use_deny") {
+				process.stdout.write(`${jobDisposition.stdoutJson}\n`);
+			}
+			return;
+		}
+		const parsedArgs = {
+			...parseHooksIngestArgs(event, options, payloadArg, stdinPayload),
+			notificationCandidateId: notificationCandidateId ?? undefined,
+		};
 		const codexEnrichedArgs = await enrichCodexReviewMetadata(parsedArgs, process.cwd());
 		args = await enrichDroidReviewMetadata(codexEnrichedArgs);
 	} catch (error) {
@@ -956,7 +1165,12 @@ export function registerHooksCommand(program: Command): void {
 	hooks
 		.command("ingest [payload]")
 		.description("Ingest hook event into Kanban runtime.")
-		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.requiredOption(
+			"--event <event>",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			parseHookEvent,
+		)
+		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
 		.option("--tool-name <name>", "Tool name.")
@@ -976,7 +1190,12 @@ export function registerHooksCommand(program: Command): void {
 	hooks
 		.command("notify [payload]")
 		.description("Best-effort hook ingest that never throws.")
-		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.requiredOption(
+			"--event <event>",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			parseHookEvent,
+		)
+		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
 		.option("--tool-name <name>", "Tool name.")
@@ -1003,7 +1222,12 @@ export function registerHooksCommand(program: Command): void {
 	hooks
 		.command("codex-hook [payload]")
 		.description("Codex hook entrypoint.")
-		.requiredOption("--event <event>", "Event: to_review | to_in_progress | activity.", parseHookEvent)
+		.requiredOption(
+			"--event <event>",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			parseHookEvent,
+		)
+		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
 		.option("--source <source>", "Hook source.")
 		.option("--activity-text <text>", "Activity summary text.")
 		.option("--tool-name <name>", "Tool name.")
@@ -1031,4 +1255,23 @@ export function registerHooksCommand(program: Command): void {
 				agentArgs: agentArgs ?? [],
 			});
 		});
+}
+
+async function captureRawNotificationHook(
+	event: RuntimeHookEvent,
+	stdinPayload: string,
+	payloadArg: string | undefined,
+	options: HookCommandMetadataOptionValues,
+): Promise<string | null> {
+	if (options.notificationCandidateId) return options.notificationCandidateId;
+	const payload = parseJsonObject(stdinPayload.trim());
+	const hookEventName = options.hookEventName ?? (payload ? readStringField(payload, "hook_event_name") : null);
+	if (event !== "to_review" && !/stop|afteragent|notification|permission|question/iu.test(hookEventName ?? ""))
+		return null;
+	return await captureNotificationSignal({
+		workspaceId: process.env.KANBAN_HOOK_WORKSPACE_ID ?? "unresolved-workspace",
+		taskId: process.env.KANBAN_HOOK_TASK_ID ?? "unresolved-task",
+		sourceKind: "hook_cli_raw",
+		rawPayload: { event, stdinPayload, payloadArg, options },
+	});
 }

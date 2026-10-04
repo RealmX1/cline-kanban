@@ -8,7 +8,7 @@ import {
 	resolveRuntimeAgentSessionTransportFromSummary,
 } from "@runtime-agent-catalog";
 import { canAgentSessionTransportBeSwitched } from "@runtime-agent-session-transport-selection";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, BookmarkPlus } from "lucide-react";
 import React, {
 	type ReactElement,
 	useCallback,
@@ -23,6 +23,7 @@ import React, {
 // 距顶多少像素以内算「滚到顶了」，触发回填。留一点余量：滚动惯性与子像素误差常让 scrollTop 停在 0 之上。
 const OLDER_MESSAGE_BACKFILL_SCROLL_TOP_THRESHOLD_PX = 48;
 
+import type { ResolveConversationAnchor } from "@/components/conversation-anchor/conversation-anchor-chip";
 import {
 	buildTurnBoundaryDerivationMemoKey,
 	deriveTurnBoundariesFromChatMessages,
@@ -36,7 +37,8 @@ import {
 	getClineReasoningEnabledModelIds,
 } from "@/components/detail-panels/cline-model-picker-options";
 import { ClineThinkingIndicator } from "@/components/detail-panels/cline-thinking-indicator";
-import type { ResolveSessionMapAnchor } from "@/components/session-map/session-map-anchor-chip";
+import { buildSaveFindingBodyPrefill, resolveSaveFindingTurnAnchor } from "@/components/findings/findings-model";
+import { SaveFindingDialog } from "@/components/findings/save-finding-dialog";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/components/ui/link";
 import { Spinner } from "@/components/ui/spinner";
@@ -49,6 +51,8 @@ import type {
 	RuntimeAgentId,
 	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
+	RuntimeConversationSessionTurnProjectionResponse,
+	RuntimeExploratoryFindingEntry,
 	RuntimeTaskClineSettings,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
@@ -129,8 +133,13 @@ export interface ClineAgentChatPanelProps {
 	agentEntryKeyboardFocusRequestKey?: number;
 	// Session Map 聊天内锚（蓝图 §C.2）：按 id 查服务端 map 集合的解析器与 chip 点击回调。
 	// 不传则 marker 段不渲 chip（home 侧栏等无 map 集合上下文的面板走这条）。
-	resolveSessionMapAnchor?: ResolveSessionMapAnchor | null;
-	onSessionMapAnchorClick?: (mapNodeId: string) => void;
+	resolveConversationAnchor?: ResolveConversationAnchor | null;
+	onConversationAnchorClick?: (anchorId: string) => void;
+	// Exploratory findings（蓝图 §D.2.1）：workspace 级集合（查重提示用）+ 服务端 turn 投影
+	// （锚三元 commit 解析用）。undefined = 无 findings 上下文（home 侧栏等），消息项不出
+	// 「存为 finding」affordance；PTY 终端会话没有结构化消息项，本面板本就不渲染。
+	exploratoryFindings?: RuntimeExploratoryFindingEntry[] | null;
+	turnProjection?: RuntimeConversationSessionTurnProjectionResponse | null;
 }
 
 export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, ClineAgentChatPanelProps>(
@@ -168,8 +177,10 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			cancelAutomaticActionLabel,
 			showMoveToTrash = false,
 			showMoveToValidation = false,
-			resolveSessionMapAnchor = null,
-			onSessionMapAnchorClick,
+			resolveConversationAnchor = null,
+			onConversationAnchorClick,
+			exploratoryFindings,
+			turnProjection = null,
 		},
 		ref,
 	): ReactElement {
@@ -222,6 +233,39 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 			() => deriveTurnBoundariesFromChatMessages(messages),
 			[turnBoundaryMemoKey],
 		);
+		// 「存为 finding」（蓝图 §D.2.1）：affordance 只出现在有 findings 上下文的宿主
+		// （detail 视图传 exploratoryFindings；home 侧栏不传）。选区在 mousedown 时捕获
+		// ——click 时浏览器已把选区坍缩掉；只有选区落在该消息元素内才作预填来源。
+		const canSaveMessageAsFinding = Boolean(workspaceId) && exploratoryFindings !== undefined;
+		const [saveFindingDraft, setSaveFindingDraft] = useState<{
+			bodyMarkdown: string;
+			turnNumber: number | undefined;
+		} | null>(null);
+		const pendingFindingSelectionTextRef = useRef<string | null>(null);
+		const handleSaveFindingButtonMouseDown = (event: React.MouseEvent<HTMLButtonElement>) => {
+			const wrapperElement = event.currentTarget.parentElement;
+			const selection = window.getSelection();
+			const selectionText = selection && !selection.isCollapsed ? selection.toString() : "";
+			const isSelectionInsideMessage =
+				selection !== null &&
+				wrapperElement !== null &&
+				selection.anchorNode !== null &&
+				selection.focusNode !== null &&
+				wrapperElement.contains(selection.anchorNode) &&
+				wrapperElement.contains(selection.focusNode);
+			pendingFindingSelectionTextRef.current = isSelectionInsideMessage ? selectionText : null;
+		};
+		const handleOpenSaveFinding = (message: ClineChatMessage, turnNumber: number | undefined) => {
+			const bodyMarkdown = buildSaveFindingBodyPrefill({
+				selectedText: pendingFindingSelectionTextRef.current,
+				messageContent: message.content,
+			});
+			pendingFindingSelectionTextRef.current = null;
+			if (bodyMarkdown.length === 0) {
+				return;
+			}
+			setSaveFindingDraft({ bodyMarkdown, turnNumber });
+		};
 		const pendingOlderMessageBackfillScrollHeightRef = useRef<number | null>(null);
 		// TODO: Persist per-task mode immediately when toggled so page refresh restores unsent mode changes.
 		const modeByTaskIdRef = useRef<Map<string, RuntimeTaskSessionMode>>(new Map());
@@ -553,15 +597,33 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 						const turnNumber = turnNumberByMessageId.get(message.id);
 						// 包装 div 承载 per-message DOM 锚（首个 turn 边界之前的旁白消息无 turn 不挂）。
 						// user 消息的 ml-auto 右对齐在 block 级包装内照常生效（margin auto 不依赖 flex 上下文）。
+						const isSaveableMessage =
+							(message.role === "assistant" || message.role === "user") && message.content.trim().length > 0;
 						return (
-							<div key={message.id} data-turn-anchor={turnNumber !== undefined ? `T${turnNumber}` : undefined}>
+							<div
+								key={message.id}
+								data-turn-anchor={turnNumber !== undefined ? `T${turnNumber}` : undefined}
+								className="group relative"
+							>
 								<ClineChatMessageItem
 									message={message}
 									taskId={taskId}
 									onResolveUserDecision={onResolveUserDecision}
-									resolveSessionMapAnchor={resolveSessionMapAnchor}
-									onSessionMapAnchorClick={onSessionMapAnchorClick}
+									resolveConversationAnchor={resolveConversationAnchor}
+									onConversationAnchorClick={onConversationAnchorClick}
 								/>
+								{canSaveMessageAsFinding && isSaveableMessage ? (
+									<button
+										type="button"
+										title="Save as finding"
+										aria-label="Save as finding"
+										onMouseDown={handleSaveFindingButtonMouseDown}
+										onClick={() => handleOpenSaveFinding(message, turnNumber)}
+										className="absolute top-1 right-1 z-10 flex h-6 w-6 items-center justify-center rounded-md border border-border bg-surface-2 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100 hover:text-text-primary focus-visible:opacity-100 max-md:opacity-100"
+									>
+										<BookmarkPlus size={13} />
+									</button>
+								) : null}
 							</div>
 						);
 					})}
@@ -648,6 +710,21 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 							</Button>
 						) : null}
 					</div>
+				) : null}
+				{saveFindingDraft && workspaceId ? (
+					<SaveFindingDialog
+						workspaceId={workspaceId}
+						conversationSessionTaskId={taskId}
+						// 锚三元在打开那一刻解析：turn 号来自位置性映射，commit 查投影 entries；
+						// 映射不到 turn / 投影不可用 → null → 对话框按 freeform 降级（绝不伪造锚）。
+						anchor={resolveSaveFindingTurnAnchor({
+							turnNumber: saveFindingDraft.turnNumber,
+							projection: turnProjection,
+						})}
+						initialBodyMarkdown={saveFindingDraft.bodyMarkdown}
+						existingFindings={exploratoryFindings ?? []}
+						onClose={() => setSaveFindingDraft(null)}
+					/>
 				) : null}
 			</div>
 		);

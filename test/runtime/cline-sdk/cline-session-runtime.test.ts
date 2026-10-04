@@ -162,6 +162,46 @@ describe("InMemoryClineSessionRuntime", () => {
 		);
 	});
 
+	it("passes a per-session bash tool executor carrying the work-unit identity environment", async () => {
+		const fakeHost = {
+			start: vi.fn(
+				async (input: {
+					config?: { sessionId?: string };
+					capabilities?: { toolExecutors?: { bash?: unknown }; requestToolApproval?: unknown };
+				}) => ({
+					sessionId: input.config?.sessionId ?? "session-1",
+					result: {},
+				}),
+			),
+			send: vi.fn(async () => ({})),
+			stop: vi.fn(async () => {}),
+			abort: vi.fn(async () => {}),
+			delete: vi.fn(async () => true),
+			dispose: vi.fn(async () => {}),
+			get: vi.fn(async () => undefined),
+			list: vi.fn(async () => []),
+			readMessages: vi.fn(async () => []),
+			subscribe: vi.fn(() => () => {}),
+		};
+		const runtime = createInMemoryClineSessionRuntime({
+			createSessionHost: async () => fakeHost,
+			createMcpRuntimeService: createNoopMcpRuntimeService,
+		});
+
+		await runtime.startTaskSession({
+			taskId: "task-1",
+			cwd: "/tmp/worktree",
+			prompt: "",
+			providerId: "anthropic",
+			modelId: "claude-sonnet-4-6",
+			systemPrompt: "You are a helpful coding assistant.",
+			bashToolExecutionEnvironmentOverridesForKanbanWorkUnitIdentity: { KANBAN_TASK_ID: "task-1" },
+		});
+
+		expect(typeof fakeHost.start.mock.calls[0]?.[0].capabilities?.toolExecutors?.bash).toBe("function");
+		expect(fakeHost.start.mock.calls[0]?.[0].capabilities?.requestToolApproval).toBeUndefined();
+	});
+
 	it("persists provided task title to session metadata when supported", async () => {
 		const update = vi.fn(async () => ({ updated: true }));
 		const fakeHost = {

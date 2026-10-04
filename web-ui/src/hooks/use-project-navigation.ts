@@ -17,7 +17,7 @@ import type {
 	RuntimeProjectPermanentDeletionRequest,
 	RuntimeProjectPermanentDeletionResult,
 } from "@/runtime/types";
-import { useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
+import { type StreamedTaskSessionSummariesApplier, useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
 import { isLocalhostAccess } from "@/utils/localhost-detection";
 import { useWindowEvent } from "@/utils/react-use";
 
@@ -41,6 +41,8 @@ function isDirectoryPickerUnavailableError(message: string | null | undefined): 
 
 interface UseProjectNavigationInput {
 	onProjectSwitchStart: () => void;
+	// task_sessions_updated 旁路（见 use-runtime-state-stream）：summaries 直送、不经 reducer。
+	onTaskSessionSummaries: StreamedTaskSessionSummariesApplier;
 }
 
 export interface UseProjectNavigationResult {
@@ -57,10 +59,13 @@ export interface UseProjectNavigationResult {
 	latestTaskChatMessage: ReturnType<typeof useRuntimeStateStream>["latestTaskChatMessage"];
 	taskChatMessagesByTaskId: ReturnType<typeof useRuntimeStateStream>["taskChatMessagesByTaskId"];
 	latestTaskReadyForReview: ReturnType<typeof useRuntimeStateStream>["latestTaskReadyForReview"];
+	taskReadyForReviewEvents: ReturnType<typeof useRuntimeStateStream>["taskReadyForReviewEvents"];
 	latestMcpAuthStatuses: ReturnType<typeof useRuntimeStateStream>["latestMcpAuthStatuses"];
-	exploratorySessionMapCollectionsByTaskId: ReturnType<
+	exploratoryFindings: ReturnType<typeof useRuntimeStateStream>["exploratoryFindings"];
+	latestExplorationThreadGraphUpdate: ReturnType<typeof useRuntimeStateStream>["latestExplorationThreadGraphUpdate"];
+	queuedTaskPromptDeliveryProjectionsByTaskId: ReturnType<
 		typeof useRuntimeStateStream
-	>["exploratorySessionMapCollectionsByTaskId"];
+	>["queuedTaskPromptDeliveryProjectionsByTaskId"];
 	streamSnapshotGeneration: ReturnType<typeof useRuntimeStateStream>["streamSnapshotGeneration"];
 	notificationLogByWorkspaceId: ReturnType<typeof useRuntimeStateStream>["notificationLogByWorkspaceId"];
 	clineSessionContextVersion: ReturnType<typeof useRuntimeStateStream>["clineSessionContextVersion"];
@@ -85,7 +90,10 @@ export interface UseProjectNavigationResult {
 	resetProjectNavigationState: () => void;
 }
 
-export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigationInput): UseProjectNavigationResult {
+export function useProjectNavigation({
+	onProjectSwitchStart,
+	onTaskSessionSummaries,
+}: UseProjectNavigationInput): UseProjectNavigationResult {
 	const [requestedProjectId, setRequestedProjectId] = useState<string | null>(() => {
 		if (typeof window === "undefined") {
 			return null;
@@ -105,8 +113,11 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		latestTaskChatMessage,
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
+		taskReadyForReviewEvents,
 		latestMcpAuthStatuses,
-		exploratorySessionMapCollectionsByTaskId,
+		exploratoryFindings,
+		latestExplorationThreadGraphUpdate,
+		queuedTaskPromptDeliveryProjectionsByTaskId,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,
@@ -114,7 +125,7 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		isRuntimeDisconnected,
 		hasReceivedSnapshot,
 		recheckProjectAvailability,
-	} = useRuntimeStateStream(requestedProjectId);
+	} = useRuntimeStateStream(requestedProjectId, onTaskSessionSummaries);
 
 	const hasNoProjects = hasReceivedSnapshot && projects.length === 0 && currentProjectId === null;
 	const isProjectSwitching = requestedProjectId !== null && requestedProjectId !== currentProjectId && !hasNoProjects;
@@ -140,13 +151,21 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 
 	const handleSelectProject = useCallback(
 		(projectId: string) => {
-			if (!projectId || projectId === currentProjectId) {
+			if (!projectId) {
+				return;
+			}
+			if (projectId === currentProjectId) {
+				// 切换在途时选回当前项目 = 撤销这次切换。只 return 的话 requestedProjectId 仍指向在途目标，
+				// 导航最后照样落到目标项目（跨项目打开的 Cancel、在途期间点回原项目的任务都踩过）。
+				if (requestedProjectId !== null && requestedProjectId !== currentProjectId) {
+					setRequestedProjectId(projectId);
+				}
 				return;
 			}
 			onProjectSwitchStart();
 			setRequestedProjectId(projectId);
 		},
-		[currentProjectId, onProjectSwitchStart],
+		[currentProjectId, onProjectSwitchStart, requestedProjectId],
 	);
 
 	const handleAddProjectSuccess = useCallback(
@@ -334,8 +353,11 @@ export function useProjectNavigation({ onProjectSwitchStart }: UseProjectNavigat
 		latestTaskChatMessage,
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
+		taskReadyForReviewEvents,
 		latestMcpAuthStatuses,
-		exploratorySessionMapCollectionsByTaskId,
+		exploratoryFindings,
+		latestExplorationThreadGraphUpdate,
+		queuedTaskPromptDeliveryProjectionsByTaskId,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
 		clineSessionContextVersion,

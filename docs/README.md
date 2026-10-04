@@ -39,6 +39,7 @@
 ## 功能术语表
 
 - [`context-stage-first-overview.md`](./context-stage-first-overview.md)——跨仓库 stage-first overview 的领域语言（从仓库根 `CONTEXT.md` 迁入）。
+- [`context-inter-work-unit-relation-modeling-overhaul.md`](./context-inter-work-unit-relation-modeling-overhaul.md)——dd2db 工作单元间关系建模重构的领域语言：工作单元、行动者、关系账本事件、记录型与断言型关系等（从仓库根 `CONTEXT.md` 迁入）。
 
 说明：`docs/architecture.md`、`DEVELOPMENT.md`、`web-ui/README.md` 等上游继承的人类向文档仍为英文（属既定策略）；新增 agent 向文档以中文为主。
 

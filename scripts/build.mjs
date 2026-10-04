@@ -1,3 +1,4 @@
+import { copyFile } from "node:fs/promises";
 import * as esbuild from "esbuild";
 
 /**
@@ -5,7 +6,7 @@ import * as esbuild from "esbuild";
  * and a spawn-helper binary that must live on disk, so it can't be bundled.
  * Everything else esbuild can inline.
  */
-const external = ["node-pty"];
+const external = ["node-pty", "better-sqlite3", "@napi-rs/keyring"];
 
 /** Bake OTEL telemetry env vars into the bundle at build time. */
 const define = {
@@ -58,3 +59,9 @@ await Promise.all([
 ]);
 
 console.log("esbuild: bundled dist/cli.js and dist/index.js");
+
+await copyFile("src/notifications/notification-lifecycle-database-worker.mjs", "dist/notification-lifecycle-database-worker.mjs");
+await copyFile(
+	"src/inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker.mjs",
+	"dist/inter-work-unit-relation-ledger-database-worker.mjs",
+);

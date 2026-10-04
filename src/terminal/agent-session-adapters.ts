@@ -1,11 +1,12 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeHookEvent,
+	RuntimeObservedAgentNativeConversationSessionResumeAddressing,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskConversationMode,
@@ -28,10 +29,17 @@ import {
 import { resolveExploratoryModeAppendSystemPrompt } from "../prompts/exploratory-mode-append-system-prompt";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { hasClaudeInteractivePrompt, hasClaudeStartupUiRendered } from "./claude-readiness";
-import { configureCodexHooks, hasCodexConfigOverride } from "./codex-hook-config";
+import {
+	CODEX_CLI_OPTIONS_WITH_VALUES,
+	configureCodexHooks,
+	hasCodexConfigOverride,
+	normalizeCodexConfigOverridesBeforeSubcommand,
+} from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
+import { isKanbanTaskWorktreeWorkingDirectoryPath } from "./kanban-task-worktree-working-directory-path";
 import { seedKanbanManagedKimiCodeHome } from "./kimi-hook-config";
 import { hasKimiInteractivePrompt } from "./kimi-readiness";
+import { writeOmpNativeConversationSessionIdentityExtension } from "./omp-native-conversation-session-identity-extension";
 import { detectOmpTerminalTitleStateTransition } from "./omp-terminal-title-state";
 import { writeOmpTuiLaunchConfigOverlay } from "./omp-tui-launch-config";
 import {
@@ -73,6 +81,21 @@ export interface AgentAdapterLaunchInput {
 	workspaceId?: string;
 	parentSessionId?: string;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
+	// 「这条会话**自己**上一世的对话在哪」——由 session-manager 每次启动现算（解析器见
+	// core/agent-conversation-session-resume-addressing.ts，唯一来源是 summary 上由 hook 落下的
+	// `agentNativeConversationSessionIdentity`）。命中即按 id 续跑，压过下面所有 cwd-latest 分支。
+	//
+	// 与上面的 taskAgentSessionInitialization **契约分离，绝不可合并**：
+	//   taskAgentSessionInitialization = 建卡时的**播种**（这张新卡从别人的某段历史会话长出来），一次性开局参数；
+	//   本字段 = **重启寻址**（这条会话接回它自己的上一段对话），每次启动重新解析。
+	// 合并的后果是从垃圾桶拖回来的任务会去续播种源的对话而不是它自己的——`resumeFromTrash` 与播种 id
+	// 会被前端同时发出（web-ui/src/hooks/use-task-sessions.ts 的 trash 恢复），今天靠 resumeFromTrash
+	// 压过播种才是对的，故本字段必须独立于播种轴另起一档。
+	observedAgentNativeConversationSessionResumeAddressing?: RuntimeObservedAgentNativeConversationSessionResumeAddressing;
+	// kanban 在 spawn 前为**全新开局**分配并已落盘的原生会话 id（目前只有 Cursor，见 agent-catalog 的
+	// nativeConversationSessionIdentityCaptureMethod）。与上面的重启寻址同为「按 id」，但语义相反：这里是
+	// 以新 id 开一段新对话、照常投 prompt，绝不能被当成续跑（不武装实质输出抑制、不省略 prompt）。
+	kanbanAssignedAgentNativeConversationSessionIdForFreshStart?: string;
 	readOnlyQuestionSession?: boolean;
 	forkLatestWorkingDirectorySession?: boolean;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
@@ -90,7 +113,8 @@ export interface PreparedAgentLaunch {
 	args: string[];
 	env: Record<string, string | undefined>;
 	cleanup?: () => Promise<void>;
-	deferredStartupInput?: string;
+	// 待 TUI 就绪后提交的原始文本，不含粘贴框架或提交回车。
+	deferredStartupPromptText?: string;
 	// 本次启动是否会接续 / 重播一段既有的 agent 对话（`--continue` / `--resume <id>` / `--fork-session`
 	// 等已被拼进 args）。session-manager 用它武装 resume substantive guard：重播出来的旧 transcript
 	// 不是「agent 刚刚响应」，不得推进 lastSubstantiveOutputAt（卡片左上角的「agent 上次响应」读它）。
@@ -191,6 +215,288 @@ function removeCliOptionsWithValues(args: string[], optionNames: readonly string
 	return nextArgs;
 }
 
+// 按各 CLI 的值参数边界保护字面值；恢复只移除选择器与会自动提交的新输入。
+// Claude 的列表选项会吃到下一个旗标；Kimi 的 -p 是 prompt，OMP 的 -p 则只是 print 开关。
+const NATIVE_SESSION_RESUME_VALUE_OPTIONS = {
+	claude: new Set([
+		"--agent",
+		"--agents",
+		"--append-system-prompt",
+		"--append-system-prompt-file",
+		"--autocompact",
+		"--debug-file",
+		"--effort",
+		"--environment",
+		"--fallback-model",
+		"--input-format",
+		"--json-schema",
+		"--max-budget-usd",
+		"--model",
+		"--name",
+		"-n",
+		"--output-format",
+		"--permission-mode",
+		"--permission-prompts",
+		"--permission-prompt-tool",
+		"--plugin-dir",
+		"--plugin-url",
+		"--remote-control-session-name-prefix",
+		"--setting-sources",
+		"--settings",
+		"--system-prompt",
+		"--system-prompt-file",
+		"--system-prompt-snapshot",
+	]),
+	kimi: new Set(["--model", "-m", "--output-format", "--skills-dir", "--agent", "--agent-file", "--add-dir"]),
+	omp: new Set([
+		"--model",
+		"--smol",
+		"--slow",
+		"--plan",
+		"--prewalk-into",
+		"--plan-yolo-into",
+		"--provider",
+		"--api-key",
+		"--system-prompt",
+		"--append-system-prompt",
+		"--profile",
+		"--alias",
+		"--cwd",
+		"--mode",
+		"--config",
+		"--add-dir",
+		"--session-dir",
+		"--provider-session-id",
+		"--prompt-cache-key",
+		"--models",
+		"--tools",
+		"--thinking",
+		"--service-tier",
+		"--hook",
+		"--extension",
+		"-e",
+		"--trusted-extension",
+		"--skills",
+		"--export",
+		"--max-time",
+		"--approval-mode",
+		"--plugin-dir",
+	]),
+};
+const CLAUDE_CLI_VARIADIC_VALUE_OPTIONS = new Set([
+	"--add-dir",
+	"--allowedTools",
+	"--allowed-tools",
+	"--disallowedTools",
+	"--disallowed-tools",
+	"--betas",
+	"--file",
+	"--mcp-config",
+	"--tools",
+]);
+const CLAUDE_CLI_OPTIONAL_VALUE_OPTIONS = new Set([
+	"--debug",
+	"-d",
+	"--prompt-suggestions",
+	"--remote-control",
+	"--worktree",
+	"-w",
+]);
+
+// 未识别的裸选项可能吞掉下一个旗标；只接受无歧义的等号写法，绝不猜测或静默删值。
+const NATIVE_SESSION_RESUME_BOOLEAN_OPTIONS = {
+	claude: new Set([
+		"--allow-dangerously-skip-permissions",
+		"--ax-screen-reader",
+		"--bg",
+		"--background",
+		"--bare",
+		"--brief",
+		"--chrome",
+		"--dangerously-skip-permissions",
+		"--disable-slash-commands",
+		"--exclude-dynamic-system-prompt-sections",
+		"--forward-subagent-text",
+		"--help",
+		"-h",
+		"--ide",
+		"--include-hook-events",
+		"--include-partial-messages",
+		"--no-chrome",
+		"--no-session-persistence",
+		"--print",
+		"-p",
+		"--replay-user-messages",
+		"--restricted",
+		"--safe-mode",
+		"--strict-mcp-config",
+		"--tmux",
+		"--verbose",
+		"--version",
+		"-v",
+	]),
+	kimi: new Set(["--version", "-V", "--yolo", "-y", "--auto", "--help", "-h"]),
+	omp: new Set([
+		"--prewalk",
+		"--no-prewalk",
+		"--allow-home",
+		"--print",
+		"-p",
+		"--no-session",
+		"--no-tools",
+		"--no-lsp",
+		"--no-pty",
+		"--hide-thinking",
+		"--advisor",
+		"--external-thinking",
+		"--no-extensions",
+		"--no-skills",
+		"--no-rules",
+		"--no-title",
+		"--print-thoughts",
+		"--auto-approve",
+		"--help",
+		"-h",
+		"--version",
+		"-v",
+	]),
+	codex: new Set([
+		"--include-non-interactive",
+		"--strict-config",
+		"--oss",
+		"--approve-for-me",
+		"--full-auto",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--dangerously-bypass-hook-trust",
+		"--worktree",
+		"--search",
+		"--no-alt-screen",
+		"--no-daemon",
+		"--help",
+		"-h",
+		"--version",
+		"-V",
+	]),
+};
+
+function assertNativeSessionResumeOptionHasUnambiguousValue(
+	args: string[],
+	index: number,
+	agentId: keyof typeof NATIVE_SESSION_RESUME_BOOLEAN_OPTIONS,
+	valueOptions: ReadonlySet<string>,
+): void {
+	const argument = args[index];
+	const optionName = argument.split("=", 1)[0];
+	const hasAttachedShortValue = [...valueOptions].some(
+		(option) => option.length === 2 && argument.startsWith(option) && argument.length > 2,
+	);
+	if (
+		(!argument.includes("=") || (args[index + 1] !== undefined && !args[index + 1].startsWith("-"))) &&
+		!NATIVE_SESSION_RESUME_BOOLEAN_OPTIONS[agentId].has(optionName) &&
+		!valueOptions.has(optionName) &&
+		!hasAttachedShortValue
+	) {
+		throw new Error(`Cannot safely resume ${agentId}: unrecognized option ${optionName} has an ambiguous value.`);
+	}
+}
+
+function removeNativeSessionSelectionArguments(
+	args: string[],
+	agentId: "claude" | "kimi" | "omp",
+	selectors: readonly string[],
+): string[] {
+	const remaining: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--") {
+			throw new Error("Remove the -- argument separator before resuming a recorded session.");
+		}
+		if (NATIVE_SESSION_RESUME_VALUE_OPTIONS[agentId].has(argument)) {
+			remaining.push(argument);
+			if (index + 1 < args.length) remaining.push(args[++index]);
+		} else if (agentId === "claude" && CLAUDE_CLI_VARIADIC_VALUE_OPTIONS.has(argument.split("=", 1)[0])) {
+			remaining.push(argument);
+			while (index + 1 < args.length && !args[index + 1].startsWith("-")) remaining.push(args[++index]);
+		} else if (agentId === "claude" && CLAUDE_CLI_OPTIONAL_VALUE_OPTIONS.has(argument)) {
+			remaining.push(argument);
+			if (index + 1 < args.length && !args[index + 1].startsWith("-")) remaining.push(args[++index]);
+		} else if (agentId === "kimi" && (argument === "--prompt" || argument === "-p")) {
+			index += 1;
+		} else if (selectors.includes(argument)) {
+			if (args[index + 1] && !args[index + 1].startsWith("-")) index += 1;
+		} else if (
+			argument.startsWith("-") &&
+			argument !== "-" &&
+			![
+				"--continue",
+				"-c",
+				...(agentId === "claude" ? ["--fork-session"] : []),
+				...(agentId === "omp" ? ["--from-claude", "--from-codex", "--plan-yolo"] : []),
+			].includes(argument) &&
+			!selectors.some(
+				(selector) =>
+					argument.startsWith(`${selector}=`) ||
+					(selector.length === 2 && argument.startsWith(selector) && agentId !== "omp"),
+			) &&
+			!(
+				agentId === "kimi" &&
+				(argument === "--plan" || argument.startsWith("--prompt=") || argument.startsWith("-p"))
+			)
+		) {
+			assertNativeSessionResumeOptionHasUnambiguousValue(
+				args,
+				index,
+				agentId,
+				agentId === "claude"
+					? new Set([...NATIVE_SESSION_RESUME_VALUE_OPTIONS.claude, ...CLAUDE_CLI_OPTIONAL_VALUE_OPTIONS])
+					: NATIVE_SESSION_RESUME_VALUE_OPTIONS[agentId],
+			);
+			remaining.push(argument);
+		}
+	}
+	return remaining;
+}
+
+function applyObservedCodexNativeSessionResumeArguments(args: string[], nativeSessionId: string): void {
+	const remaining: string[] = [];
+	let hasSessionSubcommand = false;
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--")
+			throw new Error("Remove the Codex -- argument separator before resuming a recorded session.");
+		if (
+			argument === "-c" ||
+			argument === "--config" ||
+			CODEX_CLI_OPTIONS_WITH_VALUES.has(argument) ||
+			["--remote", "--remote-auth-token-env", "--local-provider"].includes(argument)
+		) {
+			remaining.push(argument);
+			if (index + 1 < args.length) remaining.push(args[++index]);
+		} else if (!hasSessionSubcommand && (argument === "resume" || argument === "fork")) {
+			remaining.push("resume", nativeSessionId);
+			hasSessionSubcommand = true;
+		} else if (argument.startsWith("-") && argument !== "-" && argument !== "--last" && argument !== "--all") {
+			assertNativeSessionResumeOptionHasUnambiguousValue(
+				args,
+				index,
+				"codex",
+				new Set([
+					...CODEX_CLI_OPTIONS_WITH_VALUES,
+					"-c",
+					"--config",
+					"--remote",
+					"--remote-auth-token-env",
+					"--local-provider",
+				]),
+			);
+			remaining.push(argument);
+		}
+		// 其余位置参数是旧 session ID 或开局 prompt，绑定恢复均不得重放。
+	}
+	if (!hasSessionSubcommand) remaining.push("resume", nativeSessionId);
+	args.splice(0, args.length, ...remaining);
+}
+
 function setModelCliOption(args: string[], modelId: string): string[] {
 	const trimmedModelId = modelId.trim();
 	if (!trimmedModelId) {
@@ -214,7 +520,55 @@ function resolveTerminalAgentModelOverride(
 }
 
 function hasCodexWorkingDirectoryOverride(args: string[]): boolean {
-	return args.includes("-C") || hasCliOption(args, "--cd");
+	return args.some((arg) => arg.startsWith("-C")) || hasCliOption(args, "--cd");
+}
+
+// Codex 0.156 起默认把 --last 扩展到同仓库所有 worktree；Kanban 的隐式续跑必须留在任务目录。
+// 只作用于 cwd-latest：显式会话 ID 的跨目录播种 / fork 保留原生行为。
+async function constrainCodexLatestSessionToTaskWorkingDirectory(args: string[], cwd: string): Promise<void> {
+	const taskDirectory = await realpath(cwd).catch(() => resolve(cwd));
+	const conflict = (option: string): never => {
+		throw new Error(
+			`Cannot select the latest conversation in this task directory with ${option}. ` +
+				"Remove the conflicting Codex argument or select an explicit conversation ID.",
+		);
+	};
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		const optionIndex = index;
+		if (arg === "--" || hasCliOption([arg], "--all")) conflict(arg);
+		let directory: string | undefined;
+		if (arg === "-C" || arg === "--cd") directory = args[++index] ?? conflict(arg);
+		else if (arg.startsWith("--cd=")) directory = arg.slice(5);
+		else if (arg.startsWith("-C")) directory = arg.slice(2).replace(/^=/, "");
+		if (directory !== undefined) {
+			if (!directory) conflict(arg);
+			const resolvedDirectory = resolve(cwd, directory);
+			if ((await realpath(resolvedDirectory).catch(() => resolvedDirectory)) !== taskDirectory) conflict(arg);
+			args.splice(optionIndex, index - optionIndex + 1);
+			index = optionIndex - 1;
+			continue;
+		}
+		let config: string | undefined;
+		if (arg === "-c" || arg === "--config") config = args[++index] ?? conflict(arg);
+		else if (arg.startsWith("--config=")) config = arg.slice(9);
+		else if (arg.startsWith("-c")) config = arg.slice(2).replace(/^=/, "");
+		if (config !== undefined) {
+			const separator = config.indexOf("=");
+			const key = config.slice(0, separator).replace(/["'\s]/g, "");
+			const value = config.slice(separator + 1).trim();
+			if (key === "features" || (key === "features.worktrees" && value !== "false")) conflict(arg);
+			continue;
+		}
+		if (arg === "--enable" || arg.startsWith("--enable=")) {
+			const features = arg === "--enable" ? (args[++index] ?? "") : arg.slice(9);
+			if (features.split(",").some((feature) => feature.trim() === "worktrees")) conflict(arg);
+		}
+	}
+	// -C 固定执行目录；所有配置最终归一到根命令层，同时保留目录隔离和生命周期 hooks。
+	// EXPERIMENT_NODE: 若原生目录选择再次漂移，再评估由 Kanban 枚举校验会话并固定 ID，见目录隔离 runbook。
+	args.unshift("-C", cwd);
+	args.push("-c", "features.worktrees=false");
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -710,6 +1064,24 @@ function resolveTaskAgentSessionInitialization(
 		: null;
 }
 
+// 重启寻址轴的取值口。不匹配即抛：解析器（core/agent-conversation-session-resume-addressing.ts）
+// 已经保证 sourceAgentId === 本次启动的 agent，走到这里还不一致说明有人绕过了漏斗——
+// 那种情况下继续启动只会把别的 harness 的 session id 喂给本 agent，静默换回 cwd-latest 更糟。
+function resolveObservedAgentNativeConversationSessionResumeAddressing(
+	input: AgentAdapterLaunchInput,
+): RuntimeObservedAgentNativeConversationSessionResumeAddressing | null {
+	const addressing = input.observedAgentNativeConversationSessionResumeAddressing;
+	if (!addressing) {
+		return null;
+	}
+	if (addressing.sourceAgentId !== input.agentId) {
+		throw new Error(
+			`Observed agent native conversation session addressing agent "${addressing.sourceAgentId}" does not match selected agent "${input.agentId}".`,
+		);
+	}
+	return addressing;
+}
+
 function getHookAgentDirectory(agentId: RuntimeAgentId): string {
 	return join(getRuntimeHomePath(), "hooks", agentId);
 }
@@ -758,17 +1130,6 @@ export function toBracketedPasteFramingWithoutTrailingSubmit(command: string): s
 
 // 提交用的那个单独的 CR。写成 \u 转义而非字面量：控制字符在编辑器里不可见，极易在复制粘贴中被悄悄弄丢。
 export const BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN = "\u000d";
-
-// Wraps a command in bracketed-paste framing so a TUI agent (Claude Code, Codex)
-// treats it as a single pasted submission terminated by Enter. Exported so the
-// output-reactions framework can inject continuation prompts through the same
-// mechanism used for deferred startup input.
-//
-// ⚠️ 这个合并形态仍把 CR 拼在同一串里，故只保留给 deferred startup input 那条路径（启动时注入一次，
-// 自带就绪 deadline 兜底）。程序化投递与连接中断续跑一律改走上面两个导出分离写。
-export function toBracketedPasteSubmission(command: string): string {
-	return `${toBracketedPasteFramingWithoutTrailingSubmit(command)}${BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN}`;
-}
 
 function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string | null {
 	return combineAppendSystemPrompts(
@@ -891,20 +1252,53 @@ const claudeAdapter: AgentSessionAdapter = {
 			FORCE_HYPERLINK: "1",
 		};
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
-		applyClaudePermissionAndPlanModeArgs(args, input);
-		// 三条互斥的续跑分支任一命中 ⇒ 本次启动会重播既有对话（见 PreparedAgentLaunch 同名字段）。
-		const resumesPriorAgentConversation = Boolean(
-			input.resumeFromTrash || taskAgentSessionInitialization || input.forkLatestWorkingDirectorySession,
+		const observedNativeSessionResumeAddressing =
+			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
+		const continuesWithoutNewPrompt = Boolean(
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				input.resumePriorAgentConversationWithoutResendingPrompt,
 		);
-		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
-			args.push("--continue");
-		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
-			args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
-			if (
-				taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" &&
-				!hasCliOption(args, "--fork-session")
-			) {
-				args.push("--fork-session");
+		applyClaudePermissionAndPlanModeArgs(args, {
+			...input,
+			startInPlanMode: input.startInPlanMode && !continuesWithoutNewPrompt,
+		});
+		// 四条互斥的续跑分支任一命中 ⇒ 本次启动会重播既有对话（见 PreparedAgentLaunch 同名字段）。
+		const resumesPriorAgentConversation = Boolean(
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				input.resumePriorAgentConversationWithoutResendingPrompt ||
+				taskAgentSessionInitialization ||
+				input.forkLatestWorkingDirectorySession,
+		);
+		// 优先级：**重启寻址（按 id）→ resumeFromTrash（cwd-latest）→ 建卡播种 → fork cwd-latest**。
+		// 按-id 必须排在最前：`--continue` 挑的是「工作目录下最近一段对话」，而主会话与它的 By the way
+		// 侧问、以及同仓库下多个 inplace 任务都共用同一个 cwd，那时 cwd-latest 必然抢错对话。
+		// 分支选择只看轴本身，「args 里是否已有该旗标」只决定推不推——否则用户把 `--continue` 写进 agent
+		// 命令时会掉进下一条分支，拼出 `--continue --resume <id>` 这种自相矛盾的 argv。
+		if (observedNativeSessionResumeAddressing) {
+			const resumeArgs = removeNativeSessionSelectionArguments(args, "claude", [
+				"--resume",
+				"-r",
+				"--session-id",
+				"--from-pr",
+				"--teleport",
+				"--cloud",
+			]);
+			args.splice(0, args.length, ...resumeArgs, "--resume", observedNativeSessionResumeAddressing.sourceSessionId);
+		} else if (continuesWithoutNewPrompt) {
+			if (!hasCliOption(args, "--continue")) {
+				args.push("--continue");
+			}
+		} else if (taskAgentSessionInitialization) {
+			if (!hasCliOption(args, "--resume")) {
+				args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
+				if (
+					taskAgentSessionInitialization.sourceSessionReuseMode === "fork_existing_session" &&
+					!hasCliOption(args, "--fork-session")
+				) {
+					args.push("--fork-session");
+				}
 			}
 		} else if (input.forkLatestWorkingDirectorySession) {
 			if (!hasCliOption(args, "--continue")) {
@@ -930,6 +1324,18 @@ const claudeAdapter: AgentSessionAdapter = {
 			const settingsPath = join(getHookAgentDirectory("claude"), "settings.json");
 			const hooksSettings = {
 				hooks: {
+					SessionStart: [
+						{
+							hooks: [
+								{
+									type: "command",
+									command: buildHookCommand("agent_conversation_session_identity_observed", {
+										source: "claude",
+									}),
+								},
+							],
+						},
+					],
 					Stop: [{ hooks: [{ type: "command", command: buildHookCommand("to_review", { source: "claude" }) }] }],
 					SubagentStop: [
 						{ hooks: [{ type: "command", command: buildHookCommand("activity", { source: "claude" }) }] },
@@ -1006,7 +1412,7 @@ const claudeAdapter: AgentSessionAdapter = {
 		}
 
 		const trimmed = input.prompt.trim();
-		if (!input.resumeFromTrash && trimmed) {
+		if (!continuesWithoutNewPrompt && trimmed) {
 			args.push(trimmed);
 		}
 		return {
@@ -1072,11 +1478,13 @@ function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummar
 const codexAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
+		const observedNativeSessionResumeAddressing =
+			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "codex");
 		const codexArgs = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
-		let deferredStartupInput: string | undefined;
+		let deferredStartupPromptText: string | undefined;
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 
 		if (!hasCodexConfigOverride(codexArgs, "check_for_update_on_startup")) {
@@ -1105,13 +1513,28 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("--ask-for-approval", "untrusted");
 		}
 		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
+		const continuesWithoutNewPrompt = Boolean(
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				input.resumePriorAgentConversationWithoutResendingPrompt,
+		);
 		if (input.readOnlyQuestionSession) {
 			const withoutBypass = codexArgs.filter((arg) => arg !== "--dangerously-bypass-approvals-and-sandbox");
 			codexArgs.length = 0;
 			codexArgs.push(...removeCliOptionsWithValues(withoutBypass, ["--sandbox", "-s", "--ask-for-approval", "-a"]));
 			codexArgs.push("--sandbox", "read-only", "--ask-for-approval", "never");
 		}
-		if (input.resumeFromTrash) {
+		// 优先级同 claude：**重启寻址（按 id）→ resumeFromTrash（`resume --last`）→ 建卡播种 → fork cwd-latest**。
+		// `resume --last` 与 `--continue` 是同一种「工作目录下最近一段对话」寻址，共用 cwd 时同样会抢错。
+		if (observedNativeSessionResumeAddressing) {
+			if (!hasCodexWorkingDirectoryOverride(codexArgs)) {
+				codexArgs.push("-C", input.cwd);
+			}
+			applyObservedCodexNativeSessionResumeArguments(
+				codexArgs,
+				observedNativeSessionResumeAddressing.sourceSessionId,
+			);
+		} else if (continuesWithoutNewPrompt) {
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");
 			}
@@ -1141,6 +1564,14 @@ const codexAdapter: AgentSessionAdapter = {
 			}
 		}
 
+		const selectsLatestWorkingDirectorySession =
+			!observedNativeSessionResumeAddressing &&
+			(continuesWithoutNewPrompt ||
+				(!taskAgentSessionInitialization && !parentSessionId && input.forkLatestWorkingDirectorySession));
+		if (selectsLatestWorkingDirectorySession) {
+			await constrainCodexLatestSessionToTaskWorkingDirectory(codexArgs, input.cwd);
+		}
+
 		if (appendedSystemPrompt && !hasCodexConfigOverride(codexArgs, "developer_instructions")) {
 			codexArgs.push("-c", `developer_instructions=${JSON.stringify(appendedSystemPrompt)}`);
 		}
@@ -1157,25 +1588,25 @@ const codexAdapter: AgentSessionAdapter = {
 			);
 		}
 
-		const trimmed = input.prompt.trim();
-		if (input.startInPlanMode) {
-			const planCommand = trimmed ? `/plan ${trimmed}` : "/plan";
-			deferredStartupInput = toBracketedPasteSubmission(planCommand);
+		normalizeCodexConfigOverridesBeforeSubcommand(codexArgs);
+		const trimmed = continuesWithoutNewPrompt ? "" : input.prompt.trim();
+		if (input.startInPlanMode && !continuesWithoutNewPrompt) {
+			deferredStartupPromptText = trimmed ? `/plan ${trimmed}` : "/plan";
 		} else if (trimmed) {
 			codexArgs.push(trimmed);
 		}
 		const resumesSession =
-			Boolean(input.resumeFromTrash) ||
-			(!input.resumeFromTrash &&
+			continuesWithoutNewPrompt ||
+			(!continuesWithoutNewPrompt &&
 				taskAgentSessionInitialization?.sourceSessionReuseMode === "resume_existing_session");
 		const forksSession =
-			!input.resumeFromTrash &&
+			!continuesWithoutNewPrompt &&
 			(taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session" ||
 				(!taskAgentSessionInitialization &&
 					(parentSessionId !== null || Boolean(input.forkLatestWorkingDirectorySession))));
 
 		logTuiFreezeWarning(
-			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${forksSession} hasResume=${resumesSession} promptChars=${trimmed.length} deferredViaInput=${deferredStartupInput !== undefined}`,
+			`[tui-freeze] codex-startup-prompt taskId=${input.taskId} hasFork=${forksSession} hasResume=${resumesSession} promptChars=${trimmed.length} deferredViaInput=${deferredStartupPromptText !== undefined}`,
 		);
 
 		// 这里刻意只保留**唯一一个** return：hooks 配置只是就地改写 codexArgs / env（见上方
@@ -1188,7 +1619,7 @@ const codexAdapter: AgentSessionAdapter = {
 			binary,
 			args: codexArgs,
 			env,
-			deferredStartupInput,
+			deferredStartupPromptText,
 			// resume 与 fork 都会把既有会话的 transcript 重播进新 TUI（见 PreparedAgentLaunch 同名字段）。
 			resumesPriorAgentConversation: resumesSession || forksSession,
 			detectOutputTransition: codexPromptDetector,
@@ -1197,6 +1628,29 @@ const codexAdapter: AgentSessionAdapter = {
 	},
 };
 
+// cursor-agent 的 chat 选择参数：`--continue`（cwd 桶最近一段）与 `--resume [chatId]`（chatId 可省）。kanban 一旦按 id
+// 寻址就必须先把用户 args 里的这些剥掉——实测 `--continue` 与 `--resume <id>` 同时出现时 `--continue` 胜，
+// 按 id 续跑会被静默改成「最近一段」。`--resume` 后面只吞 UUID 形状的值，免得把 positional prompt 当成 chatId 吃掉。
+const CURSOR_AGENT_CHAT_ID_ARGUMENT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+function removeCursorAgentChatSelectionArguments(args: readonly string[]): string[] {
+	const remaining: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--continue" || argument.startsWith("--resume=")) {
+			continue;
+		}
+		if (argument === "--resume") {
+			if (CURSOR_AGENT_CHAT_ID_ARGUMENT_PATTERN.test(args[index + 1] ?? "")) {
+				index += 1;
+			}
+			continue;
+		}
+		remaining.push(argument);
+	}
+	return remaining;
+}
+
 const cursorAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
@@ -1204,7 +1658,7 @@ const cursorAdapter: AgentSessionAdapter = {
 		// cursor 是唯一**无条件**传 `--model` 的 adapter（claude / codex 只在有显式 override 时才传），
 		// 所以这个默认值必须跟得上上游改名：从实际模型目录解析（带 TTL 缓存，热路径零开销），
 		// 探测失败才回落写死的常量。上一版直接用常量，结果每次会话都在传一个上游早已删除的 model id。
-		const args = setModelCliOption(input.args, explicitModelId ?? (await resolveCursorLaunchDefaultModelId()));
+		let args = setModelCliOption(input.args, explicitModelId ?? (await resolveCursorLaunchDefaultModelId()));
 		const env: Record<string, string | undefined> = {};
 
 		if (!hasCliOption(args, "--workspace")) {
@@ -1222,19 +1676,52 @@ const cursorAdapter: AgentSessionAdapter = {
 			args.push("--force");
 		}
 
-		const resumesPriorAgentConversation = Boolean(input.resumeFromTrash || taskAgentSessionInitialization);
-		if (input.resumeFromTrash && !hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
-			args.push("--continue");
-		} else if (taskAgentSessionInitialization && !hasCliOption(args, "--resume")) {
-			args.push("--resume", taskAgentSessionInitialization.sourceSessionId);
+		// 未信任的 cwd 上，交互模式会先弹 Workspace Trust 对话框，prompt 要等应答后才提交（`--force` 跳不过，
+		// 只有 `--trust` 能）。kanban 从不应答它，于是 8ef28 / aa23d 这类任务的首轮从未落盘，之后每次续跑都撞
+		// `No previous chats found.`。范围与 Claude 自动信任一致：只替 kanban 自己的 task worktree 做主。
+		if (isKanbanTaskWorktreeWorkingDirectoryPath(input.cwd) && !hasCliOption(args, "--trust")) {
+			args.push("--trust");
 		}
 
-		if (input.startInPlanMode && !hasCliOption(args, "--plan") && !hasCliOption(args, "--mode")) {
+		const observedNativeSessionResumeAddressing =
+			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
+		// 与 claude 同一口径：续跑既有对话时不再投 prompt、不重放 plan 起步（`--plan` 会把续上的 chat 的 mode 覆写回 plan）。
+		const continuesWithoutNewPrompt = Boolean(
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				input.resumePriorAgentConversationWithoutResendingPrompt,
+		);
+		const resumesPriorAgentConversation = Boolean(continuesWithoutNewPrompt || taskAgentSessionInitialization);
+		// chat 选择优先级：**重启寻址（按记录的 id）→ 无 id 的续跑（`--continue`）→ 建卡播种 → kanban 刚分配的新 id**。
+		// cursor 不支持 fork（契约层已 superRefine 拦下），所以按 id 只有 `--resume` 一种落法；新 id 开局也用
+		// `--resume <新 id> <prompt>`：实测 cursor 会以该 id 建 chat 并自动提交 prompt。
+		const chatIdSelectedForLaunch =
+			observedNativeSessionResumeAddressing?.sourceSessionId ??
+			(continuesWithoutNewPrompt
+				? null
+				: (taskAgentSessionInitialization?.sourceSessionId ??
+					input.kanbanAssignedAgentNativeConversationSessionIdForFreshStart ??
+					null));
+		if (chatIdSelectedForLaunch !== null) {
+			args = [...removeCursorAgentChatSelectionArguments(args), "--resume", chatIdSelectedForLaunch];
+		} else if (continuesWithoutNewPrompt) {
+			// 只剩「没有记录 id、桶里有 ≥2 段已建立对话」这一条会走到这里——续跑前的预检已经排除了桶为空的情形。
+			if (!hasCliOption(args, "--continue") && !hasCliOption(args, "--resume")) {
+				args.push("--continue");
+			}
+		}
+
+		if (
+			input.startInPlanMode &&
+			!continuesWithoutNewPrompt &&
+			!hasCliOption(args, "--plan") &&
+			!hasCliOption(args, "--mode")
+		) {
 			args.push("--plan");
 		}
 
 		const trimmed = prependTaskSessionGuidanceToPrompt(input).trim();
-		if (!input.resumeFromTrash && trimmed) {
+		if (!continuesWithoutNewPrompt && trimmed) {
 			args.push(trimmed);
 		}
 
@@ -1923,12 +2410,19 @@ function shouldInspectKimiOutputForTransition(summary: RuntimeTaskSessionSummary
 }
 
 // Kimi Code CLI（Moonshot 的原生终端 agent）。与 codexAdapter 同为「全屏 TUI + 无位置
-// prompt」形态，故任务 prompt 一律经 deferredStartupInput 在 TUI 就绪后 bracketed-paste 注入
-//（`kimi -p` 是单发 print 模式，不产生持久交互会话，不能用于托管会话）。
+// prompt」形态，故任务 prompt 一律经 deferredStartupPromptText 在 TUI 就绪后 bracketed-paste 注入
+//（`kimi -p` 是单发模式，虽然会保存会话，但不提供托管所需的持续交互终端）。
 const kimiAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		// 仅在有显式 override 时才注入 `-m/--model`（setModelCliOption 正好清理这两个写法）；
 		// 无 override 时不传，交回 kimi config.toml 的 default_model——与 claude / codex adapter 一致。
+		const observedNativeSessionResumeAddressing =
+			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
+		const resumesPriorAgentConversation = Boolean(
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				input.resumePriorAgentConversationWithoutResendingPrompt,
+		);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "kimi");
 		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const env: Record<string, string | undefined> = {
@@ -1944,10 +2438,13 @@ const kimiAdapter: AgentSessionAdapter = {
 		) {
 			args.push("--yolo");
 		}
-		if (input.startInPlanMode && !hasCliOption(args, "--plan")) {
+		if (!resumesPriorAgentConversation && input.startInPlanMode && !hasCliOption(args, "--plan")) {
 			args.push("--plan");
 		}
-		if (input.resumeFromTrash && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
+		if (observedNativeSessionResumeAddressing) {
+			const resumeArgs = removeNativeSessionSelectionArguments(args, "kimi", ["--session", "-S"]);
+			args.splice(0, args.length, ...resumeArgs, "--session", observedNativeSessionResumeAddressing.sourceSessionId);
+		} else if (resumesPriorAgentConversation && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
 			args.push("--continue");
 		}
 
@@ -1966,12 +2463,13 @@ const kimiAdapter: AgentSessionAdapter = {
 		}
 
 		const trimmed = input.prompt.trim();
-		const deferredStartupInput = !input.resumeFromTrash && trimmed ? toBracketedPasteSubmission(trimmed) : undefined;
+		const deferredStartupPromptText = !resumesPriorAgentConversation && trimmed ? trimmed : undefined;
 
 		return {
 			args,
 			env,
-			deferredStartupInput,
+			deferredStartupPromptText,
+			resumesPriorAgentConversation,
 			detectOutputTransition: kimiPromptDetector,
 			shouldInspectOutputForTransition: shouldInspectKimiOutputForTransition,
 		};
@@ -1983,11 +2481,13 @@ const kimiAdapter: AgentSessionAdapter = {
 // 走哪条由 core/agent-session-transport-selection.ts 决定，不是这里。
 //
 // 形态上模板是 cursorAdapter 而不是 codex/kimi：omp 的根命令吃**位置 prompt** 并在 mode.init()
-// 完成后自动提交（main.ts 的 `session.prompt(initialMessage)`），所以不需要 deferredStartupInput，
+// 完成后自动提交（main.ts 的 `session.prompt(initialMessage)`），所以不需要 deferredStartupPromptText，
 // 也就完全不必碰 session-manager 的就绪判定与注入闸。
 const ompAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const args = [...input.args];
+		const observedNativeSessionResumeAddressing =
+			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
 		const env: Record<string, string | undefined> = {
 			// 首启的全屏 setup 向导会切 alt-screen 盖住 TUI 并等人操作，托管会话必须跳过。
 			// 这是 omp 侧唯一的读取点（setup-wizard/index.ts）。
@@ -2003,10 +2503,12 @@ const ompAdapter: AgentSessionAdapter = {
 
 		// plan 起步经 Kanban 托管的设置 overlay 表达，**不动放权档**（AGENTS.md 的正交轴铁律）。
 		// 续跑时不重放 plan 起步：用户已在对话中途，omp 的会话记录里存着当前模式。
-		// 续跑（垃圾桶恢复 / 通道切换）在 adapter 里是同一条分支：都不重投 prompt、都加 --continue、
+		// 续跑（垃圾桶恢复 / 通道切换）在 adapter 里是同一条分支：都不重投 prompt、都按已观察 ID 优先恢复、
 		// 都武装重播守卫、都不重放 plan 起步。
 		const shouldContinuePriorConversation = Boolean(
-			input.resumeFromTrash || input.resumePriorAgentConversationWithoutResendingPrompt,
+			observedNativeSessionResumeAddressing ||
+				input.resumeFromTrash ||
+				input.resumePriorAgentConversationWithoutResendingPrompt,
 		);
 		const shouldStartInPlanMode = Boolean(input.startInPlanMode) && !shouldContinuePriorConversation;
 		const launchConfigOverlay = await writeOmpTuiLaunchConfigOverlay({
@@ -2016,14 +2518,31 @@ const ompAdapter: AgentSessionAdapter = {
 		});
 		args.push("--config", launchConfigOverlay.configFilePath);
 
-		// 续跑用 `--continue`。**绝不**发裸 `-r` / `--resume`：无值时 omp 会弹一个全屏 session picker
+		// 已观察身份时用完整 ID 的 `--resume`；旧记录才用 `--continue`。裸 `--resume` 会打开 picker，
 		// 等人上下键选（main.ts），托管会话会就此卡死。
 		// omp 的 terminal breadcrumb 认的是 TTY 设备路径（ttyid.ts），新 PTY 每次 id 都不同，于是
-		// `--continue` 落到 fallback「该 cwd 下最近的一条 session」——每 task 一个 worktree，这个
-		// fallback 恰好正确。注意它并不锁定某个具体 sessionId。
+		// `--continue` 落到 fallback「该 cwd 下最近的一条 session」；仅在上游确认无同 harness 的
+		// 共目录竞争者且没有绑定时允许使用，它不锁定具体 sessionId。
 		const resumesPriorAgentConversation = shouldContinuePriorConversation;
-		if (shouldContinuePriorConversation && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
+		if (observedNativeSessionResumeAddressing) {
+			const resumeArgs = removeNativeSessionSelectionArguments(args, "omp", [
+				"--resume",
+				"-r",
+				"--session",
+				"--fork",
+			]);
+			args.splice(0, args.length, ...resumeArgs, "--resume", observedNativeSessionResumeAddressing.sourceSessionId);
+		} else if (shouldContinuePriorConversation && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
 			args.push("--continue");
+		}
+
+		const hooks = resolveHookContext(input);
+		if (hooks) {
+			args.push(
+				"--extension",
+				await writeOmpNativeConversationSessionIdentityExtension(getHookAgentDirectory("omp")),
+			);
+			Object.assign(env, createHookRuntimeEnv(hooks));
 		}
 
 		// 位置 prompt：omp 在 TUI 初始化完成后自动提交它。续跑时不重投——那会凭空多出一轮。
@@ -2037,7 +2556,7 @@ const ompAdapter: AgentSessionAdapter = {
 			env,
 			resumesPriorAgentConversation,
 			// 状态判定读 OSC 终端标题（omp 把三态编码在标题分隔符里），比 cursor/kiro/droid 那种
-			// 「只能靠 scanForStalls 兜底」结构化得多，且不需要写 omp extension。
+			// 「只能靠 scanForStalls 兜底」结构化得多；身份扩展不参与这个状态判定。
 			// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
 			detectOutputTransition: detectOmpTerminalTitleStateTransition,
 		};

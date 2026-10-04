@@ -9,6 +9,7 @@ import {
 	GitCompareArrows,
 	Hourglass,
 	List,
+	ListOrdered,
 	Maximize2,
 	MessageSquare,
 	Minimize2,
@@ -17,7 +18,9 @@ import {
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
+import { showAppToast } from "@/components/app-toaster";
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
+import { AgentRaisedUserDecisionHistoryPanel } from "@/components/detail-panels/agent-raised-user-decision-history-panel";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
@@ -25,18 +28,28 @@ import { DeferredRestorationHarnessNotificationReleaseBanner } from "@/component
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
 import { PromptLibraryPanel } from "@/components/detail-panels/prompt-library-panel";
+import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/queued-task-prompt-delivery-queue-panel";
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
-import { taskDetailAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
-import { spotlightSessionMapNodeAnchor } from "@/components/session-map/session-map-anchor-registry";
-import { SessionMapPanel } from "@/components/session-map/session-map-panel";
+import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
+import { ExplorationThreadGraphPanel } from "@/components/exploration-thread-graph/exploration-thread-graph-panel";
+import { SessionFindingsSection } from "@/components/findings/session-findings-section";
+import {
+	queuedTaskPromptDeliveryQueueTabAnchorKey,
+	taskDetailAnchorKey,
+	VERIFICATION_ANCHOR_ATTR,
+} from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
 import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
+import { useConversationSessionTurnProjection } from "@/hooks/use-conversation-session-turn-projection";
+import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
 import { useIsMobile } from "@/hooks/use-is-mobile";
-import { useSessionMapPanelData } from "@/hooks/use-session-map-panel-data";
+import type { StoredPrompt } from "@/hooks/use-prompt-library";
+import { useQueuedTaskPromptDeliveryQueueController } from "@/hooks/use-queued-task-prompt-delivery-queue-controller";
+import { useQueuedTaskPromptDeliveryRestartReminder } from "@/hooks/use-queued-task-prompt-delivery-restart-reminder";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
 import { ResizeHandle } from "@/resize/resize-handle";
 import { clampBetween } from "@/resize/resize-persistence";
@@ -47,13 +60,16 @@ import {
 	useCardDetailLayout,
 } from "@/resize/use-card-detail-layout";
 import { useResizeDrag } from "@/resize/use-resize-drag";
+import {
+	type QueuedTaskPromptDeliveryCountIndicator,
+	summarizeQueuedTaskPromptDeliveryCountIndicator,
+} from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
 	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
-	RuntimeExploratorySessionMapCollection,
-	RuntimeExploratorySessionMapNode,
+	RuntimeExploratoryFindingEntry,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
@@ -61,13 +77,14 @@ import type {
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
-import { useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
+import { useTaskWorkspaceInfoValue, useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
 import { stashTerminalInputBoxToPromptLibrary } from "@/terminal/terminal-input-box-stash-shortcut";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel, type TaskCommentEntry } from "@/types";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { useWindowEvent } from "@/utils/react-use";
+import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 
 // We still poll the open detail diff because line content can change without changing
 // the overall file or line counts that drive the shared workspace metadata stream.
@@ -416,12 +433,13 @@ function WorkspaceChangesStaleDataWarning({
 	);
 }
 
-type MobileTab = "chat" | "sessions" | "prompts" | "comments" | "diff" | "files";
+type MobileTab = "chat" | "sessions" | "prompts" | "queue" | "comments" | "diff" | "files";
 
 const MOBILE_DEFAULT_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "chat", label: "Chat", icon: <MessageSquare size={14} /> },
 	{ id: "sessions", label: "Sessions", icon: <List size={14} /> },
 	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
+	{ id: "queue", label: "Queue", icon: <ListOrdered size={14} /> },
 	{ id: "comments", label: "Comments", icon: <MessageSquare size={14} /> },
 ];
 
@@ -430,21 +448,64 @@ const MOBILE_WORKSPACE_CHANGES_TABS: { id: MobileTab; label: string; icon: React
 	{ id: "files", label: "Files", icon: <Files size={14} /> },
 ];
 
-type DetailUtilityTab = "prompts" | "comments";
+type DetailUtilityTab = "prompts" | "queue" | "comments";
 
 const DETAIL_UTILITY_TABS: { id: DetailUtilityTab; label: string; icon: React.ReactElement }[] = [
 	{ id: "prompts", label: "Prompts", icon: <FileText size={14} /> },
+	{ id: "queue", label: "Queue", icon: <ListOrdered size={14} /> },
 	{ id: "comments", label: "Comments", icon: <MessageSquare size={14} /> },
 ];
+
+function isDetailUtilityTab(tab: MobileTab): tab is DetailUtilityTab {
+	return tab === "prompts" || tab === "queue" || tab === "comments";
+}
+
+// Queue 页签上的计数角标。页签条在 Prompts / Queue / Comments 三个 tab 下都渲染，所以不管停在哪个 tab，
+// 「还有几条在排队」都看得见、点一下就过去。有失败条目时转红；有重启后待确认的条目时转 warning 色。
+function QueuedTaskPromptDeliveryCountBadge({
+	indicator,
+}: {
+	indicator: QueuedTaskPromptDeliveryCountIndicator;
+}): React.ReactElement | null {
+	if (indicator.pendingCount === 0 && !indicator.hasFailedEntries) {
+		return null;
+	}
+	const toneClass = indicator.hasFailedEntries
+		? "bg-status-red/20 text-status-red"
+		: indicator.hasEntriesAwaitingReconfirmationAfterRestart
+			? "bg-status-orange/20 text-status-orange"
+			: "bg-accent/20 text-accent";
+	return (
+		<span
+			className={cn(
+				"inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] leading-4",
+				toneClass,
+			)}
+			title={
+				indicator.hasEntriesAwaitingReconfirmationAfterRestart
+					? "Queued before Kanban restarted — check whether they are still needed"
+					: indicator.hasFailedEntries
+						? "A queued prompt failed to send"
+						: `${indicator.pendingCount} queued prompt${indicator.pendingCount === 1 ? "" : "s"}`
+			}
+		>
+			{indicator.pendingCount > 0 ? indicator.pendingCount : "!"}
+		</span>
+	);
+}
 
 function MobileDetailTabBar({
 	activeTab,
 	onTabChange,
 	showWorkspaceChangesTabs,
+	queuedPromptTaskId,
+	queuedPromptCountIndicator,
 }: {
 	activeTab: MobileTab;
 	onTabChange: (tab: MobileTab) => void;
 	showWorkspaceChangesTabs: boolean;
+	queuedPromptTaskId: string;
+	queuedPromptCountIndicator: QueuedTaskPromptDeliveryCountIndicator;
 }): React.ReactElement {
 	const tabs = showWorkspaceChangesTabs
 		? [...MOBILE_DEFAULT_TABS, ...MOBILE_WORKSPACE_CHANGES_TABS]
@@ -460,9 +521,15 @@ function MobileDetailTabBar({
 						activeTab === tab.id ? "text-accent" : "text-text-secondary",
 					)}
 					onClick={() => onTabChange(tab.id)}
+					{...(tab.id === "queue"
+						? { [VERIFICATION_ANCHOR_ATTR]: queuedTaskPromptDeliveryQueueTabAnchorKey(queuedPromptTaskId) }
+						: {})}
 				>
 					{tab.icon}
 					{tab.label}
+					{tab.id === "queue" ? (
+						<QueuedTaskPromptDeliveryCountBadge indicator={queuedPromptCountIndicator} />
+					) : null}
 					{activeTab === tab.id ? <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" /> : null}
 				</button>
 			))}
@@ -473,9 +540,17 @@ function MobileDetailTabBar({
 function DetailUtilityTabList({
 	activeTab,
 	onTabChange,
+	queuedPromptTaskId,
+	queuedPromptCountIndicator,
+	emitsQueueTabAnchor,
 }: {
 	activeTab: DetailUtilityTab;
 	onTabChange: (tab: DetailUtilityTab) => void;
+	queuedPromptTaskId: string;
+	queuedPromptCountIndicator: QueuedTaskPromptDeliveryCountIndicator;
+	// 窄屏下顶部 MobileDetailTabBar 才是常驻可见的那份页签，锚点挂在那边；这里再挂一份会让 spotlight
+	// 命中到一个可能被 display:none 藏起来的元素上。
+	emitsQueueTabAnchor: boolean;
 }): React.ReactElement {
 	return (
 		<div role="tablist" aria-label="Task detail utility panel" className="flex min-w-0 items-center gap-0.5">
@@ -492,9 +567,15 @@ function DetailUtilityTabList({
 							: "text-text-secondary hover:bg-surface-3 hover:text-text-primary",
 					)}
 					onClick={() => onTabChange(tab.id)}
+					{...(tab.id === "queue" && emitsQueueTabAnchor
+						? { [VERIFICATION_ANCHOR_ATTR]: queuedTaskPromptDeliveryQueueTabAnchorKey(queuedPromptTaskId) }
+						: {})}
 				>
 					{tab.icon}
 					<span className="truncate">{tab.label}</span>
+					{tab.id === "queue" ? (
+						<QueuedTaskPromptDeliveryCountBadge indicator={queuedPromptCountIndicator} />
+					) : null}
 				</button>
 			))}
 		</div>
@@ -596,18 +677,18 @@ export function CardDetailView({
 	onClearTrash,
 	onEditTask,
 	onSaveTaskTitle,
-	onCommitTask,
-	onOpenPrTask,
 	onAgentCommitTask,
 	onAgentOpenPrTask,
 	onMoveReviewCardToTrash,
 	onMoveReviewCardToValidation,
 	onMoveCardToReview,
 	onRestoreTaskFromTrash,
+	onStartFreshTaskSessionWithOriginalPrompt,
 	onDeleteTask,
 	onCancelAutomaticTaskAction,
-	commitTaskLoadingById,
-	openPrTaskLoadingById,
+	onRequestPinToTaskPinboard,
+	onUnpinFromTaskPinboard,
+	onEditTaskPinboardPinReason,
 	agentCommitTaskLoadingById,
 	agentOpenPrTaskLoadingById,
 	moveToTrashLoadingById,
@@ -645,7 +726,8 @@ export function CardDetailView({
 	isTaskChangesSidebarOpen = false,
 	onCreateByTheWayTaskConversationSession,
 	taskChatMessagesByTaskId,
-	exploratorySessionMapCollectionsByTaskId,
+	exploratoryFindings,
+	explorationThreadGraph,
 	runtimeStreamSnapshotGeneration = 0,
 }: {
 	selection: CardSelection;
@@ -666,8 +748,6 @@ export function CardDetailView({
 	onClearTrash?: () => void;
 	onEditTask?: (card: BoardCard) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
 	onAgentCommitTask?: (taskId: string) => void;
 	onAgentOpenPrTask?: (taskId: string) => void;
 	onMoveReviewCardToTrash?: (taskId: string) => void;
@@ -675,10 +755,14 @@ export function CardDetailView({
 	// 手动把 In Progress 卡翻入 Review（仅终端 agent；by-id，路由到 column-context-panel 的 in_progress section）。
 	onMoveCardToReview?: (taskId: string) => void;
 	onRestoreTaskFromTrash?: (taskId: string) => void;
+	// 「对话从未建立」时以卡片原 prompt 全新开局（终端面板的恢复提示条调用；面板负责先让人确认 prompt）。
+	onStartFreshTaskSessionWithOriginalPrompt?: (taskId: string) => Promise<void>;
 	onDeleteTask?: (taskId: string) => void;
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
+	// Task Pinboard：透传给左侧任务列表（含列表顶部的置顶板分段）。
+	onRequestPinToTaskPinboard?: (taskId: string) => void;
+	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	agentCommitTaskLoadingById?: Record<string, boolean>;
 	agentOpenPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
@@ -733,11 +817,15 @@ export function CardDetailView({
 		mainSessionOriginUserMessagePreview: string | null;
 	}) => Promise<{ ok: boolean; message?: string; taskConversationSessionId?: string }>;
 	taskChatMessagesByTaskId?: Record<string, RuntimeTaskChatMessage[]>;
-	// Exploratory session map 的 WS 推送集合（exploratory_session_map_updated，M1）：
-	// 按 conversationSessionTaskId 取当前会话的条目喂给 map 面板数据 hook。
-	exploratorySessionMapCollectionsByTaskId?: Record<string, RuntimeExploratorySessionMapCollection | null>;
-	// 流（重）连握手代数：每次快照递增。断连窗口的 map ingest 不补发，客户端靠它触发
-	// getSessionMap 重查对齐（契约语义）；拼进 map 面板的 refreshKey 即可。
+	// Exploratory findings 的 workspace 级集合（M2，App 侧 use-exploratory-findings 归并结果）：
+	// 「本会话 findings」切片与聊天消息「存为 finding」查重共用同一份；undefined =
+	// 无 findings 上下文（两者都不渲染 affordance），null = 尚未加载。
+	exploratoryFindings?: RuntimeExploratoryFindingEntry[] | null;
+	// exploration thread graph（B.2）：当前卡片那张图的编排结果（App 侧 use-exploration-thread-graph）。
+	// undefined = 无图上下文，面板不渲染。
+	explorationThreadGraph?: ExplorationThreadGraphData;
+	// 流（重）连握手代数：每次快照递增。断连窗口的变更不补发，拼进 turn 投影的 refreshKey
+	// 让重连后重拉一次对齐。
 	runtimeStreamSnapshotGeneration?: number;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
@@ -818,6 +906,11 @@ export function CardDetailView({
 		startRightPromptResize,
 	);
 	const taskWorkspaceStateVersion = useTaskWorkspaceStateVersionValue(selection.card.id);
+	const mainTaskWorkspaceInfo = useTaskWorkspaceInfoValue(selection.card.id, selection.card.baseRef);
+	const mainTaskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
+		mostRecentlyLaunchedAgentSessionAgentId: selection.card.mostRecentlyLaunchedAgentSessionAgentId,
+		taskWorktreeExists: mainTaskWorkspaceInfo?.exists,
+	});
 	const activeTaskConversationSessionSummary =
 		selectedTaskConversationSessionId === selection.card.id
 			? (taskSessions[selection.card.id] ?? sessionSummary ?? null)
@@ -913,92 +1006,39 @@ export function CardDetailView({
 	const showClineAgentChatPanel = activeTaskConversationSessionSummary
 		? isRuntimeAgentSessionSummaryRenderedAsConversationPanel(activeTaskConversationSessionSummary)
 		: nextLaunchAgentSessionTransport !== null && nextLaunchAgentSessionTransport !== "pty_terminal";
-	// ── Session Map 面板（蓝图 §G.1）──────────────────────────────────────
-	// 只对「渲染为 conversation 面板」的会话出现（Cline SDK 与 ACP；PTY 终端会话不挂）。
-	// 数据双通道：WS 推送（exploratory_session_map_updated，集合变更实时到达）+ 查询重拉
-	// （投影层不新增 WS 事件，搭 summary 广播边沿；断连窗口的 map 变更不补发，靠重连
-	// 代数触发重查对齐）。重拉信号 = 低频精确边沿（姊妹蓝图 §2.3）：
+	// ── 会话 turn 投影（姊妹蓝图 §2.2）──────────────────────────────────
+	// 只对「渲染为 conversation 面板」的会话拉取（Cline SDK 与 ACP；PTY 终端会话不拉）。消费者：
+	// 聊天面板「存为 finding」的锚三元 commit 解析；B.2 的 exploration thread graph 面板复用同一份。
+	// 投影层不新增 WS 事件，搭 summary 广播边沿重拉。重拉信号 = 低频精确边沿（姊妹蓝图 §2.3）：
 	// 新 turn 开始 / 回合结束（turnOwner 翻转——投影的 in-progress 判定与它同源）、
 	// checkpoint 异步落地（latestTurnCheckpoint.turn/commit 变化）、存活度翻转（liveness，
 	// 如 agent 回合中崩溃退出后投影的 liveSummary 消失、spinner 必须停）。facet 一律经
 	// resolveSessionFacets 读（铁律：consumer 不直接读裸 facet 字段做决策）。
 	// 绝不许把 summary.updatedAt 拼回来：updateSummary 漏斗每次写都推进 updatedAt，
 	// Cline 流式期间经 ~150ms 批次广播（TASK_SESSION_STREAM_BATCH_MS），含它会让 hook
-	// 每个批次都重发两个 query——服务端 Cline 路径每次克隆/遍历全量消息并跑
+	// 每个批次都重发 query——服务端 Cline 路径每次克隆/遍历全量消息并跑
 	// git for-each-ref（listTaskTurnCheckpointRefs），长会话/多标签页下形成无界历史
 	// 重算与 git 子进程轮询（本仓 AGENTS.md 记载过同类事件循环停摆事故）。上述三类
 	// 边沿与 updatedAt 在同一个广播批次里到达，去掉它不引入任何可感知延迟。
-	const sessionMapConversationSessionTaskId = showClineAgentChatPanel ? selectedTaskConversationSessionId : null;
-	const sessionMapRefreshFacets = activeTaskConversationSessionSummary
+	const turnProjectionConversationSessionTaskId = showClineAgentChatPanel ? selectedTaskConversationSessionId : null;
+	const turnProjectionRefreshFacets = activeTaskConversationSessionSummary
 		? resolveSessionFacets(activeTaskConversationSessionSummary)
 		: null;
-	const sessionMapSummaryRefreshKey = sessionMapConversationSessionTaskId
+	const turnProjectionRefreshKey = turnProjectionConversationSessionTaskId
 		? [
 				activeTaskConversationSessionSummary?.latestTurnCheckpoint?.turn ?? 0,
 				activeTaskConversationSessionSummary?.latestTurnCheckpoint?.commit ?? "",
-				sessionMapRefreshFacets?.turnOwner ?? "none",
-				sessionMapRefreshFacets?.liveness ?? "none",
-				// 流重连代数：断连窗口的 map ingest 不补发，靠这次重拉把投影与集合一起对齐。
+				turnProjectionRefreshFacets?.turnOwner ?? "none",
+				turnProjectionRefreshFacets?.liveness ?? "none",
+				// 流重连代数：断连窗口的变更不补发，靠这次重拉对齐。
 				runtimeStreamSnapshotGeneration,
 			].join(":")
 		: null;
-	const sessionMapPanelData = useSessionMapPanelData({
+	const conversationSessionTurnProjection = useConversationSessionTurnProjection({
 		workspaceId: currentProjectId,
-		conversationSessionTaskId: sessionMapConversationSessionTaskId,
-		refreshKey: sessionMapSummaryRefreshKey,
-		// WS 推送通道（M1）：agent 写回 / stale 置位时实时刷新，不等下一次重拉边沿。
-		pushedMapCollection: sessionMapConversationSessionTaskId
-			? exploratorySessionMapCollectionsByTaskId?.[sessionMapConversationSessionTaskId]
-			: undefined,
+		conversationSessionTaskId: turnProjectionConversationSessionTaskId,
+		refreshKey: turnProjectionRefreshKey,
 	});
-	// 模式驱动默认展开（蓝图 §A.2 效应 1）：活会话只看会话自己的盖章，缺字段按 operational
-	// （旧会话在功能上线前启动，卡片声明对它不适用）；没有活会话（任务尚未启动）时卡片即真相。
-	// 卡片改了模式而会话存续时，按会话盖章显示，不做任何强刷（§A.1 v1 不热切换决策）——
-	// 绝不能回退到卡片声明值，否则改卡片会立刻热切换活会话面板的默认展开。
-	const sessionMapPanelDefaultOpen =
-		(activeTaskConversationSessionSummary
-			? (activeTaskConversationSessionSummary.taskConversationMode ?? "operational")
-			: (selection.card.taskConversationMode ?? "operational")) === "exploratory";
-	// 聊天内锚 chip 点击 → 展开面板 + spotlight 节点的信号令牌（selectedPathExpandToken 同款先例）。
-	const [sessionMapPanelExpandToken, setSessionMapPanelExpandToken] = useState(0);
-	const sessionMapNodeById = useMemo(() => {
-		const byId = new Map<string, RuntimeExploratorySessionMapNode>();
-		for (const node of sessionMapPanelData.mapCollection?.mapNodes ?? []) {
-			byId.set(node.mapNodeId, node);
-		}
-		return byId;
-	}, [sessionMapPanelData.mapCollection]);
-	// 反注入铁律（蓝图 §C.1）：chip 显示内容恒来自服务端 map 集合，按 id 查不到即不渲染。
-	const resolveSessionMapAnchor = useCallback(
-		(mapNodeId: string) => {
-			const node = sessionMapNodeById.get(mapNodeId);
-			return node ? { nodeTitle: node.nodeTitle, nodeKind: node.nodeKind } : null;
-		},
-		[sessionMapNodeById],
-	);
-	const handleSessionMapAnchorClick = useCallback(
-		(mapNodeId: string) => {
-			setSessionMapPanelExpandToken((token) => token + 1);
-			if (isMobile) {
-				// 移动端 chip 在 chat tab、map 面板在 sessions tab，先切过去再 spotlight。
-				setMobileTab("sessions");
-			}
-			// 展开是 React 状态更新，spotlight 必须等节点锚挂进 DOM；rAF 重试吸收更慢的渲染
-			// （column-context-panel 的 centerSelectedCard 同款模式），始终未命中则静默降级。
-			let attempts = 0;
-			const spotlightWhenMounted = () => {
-				if (spotlightSessionMapNodeAnchor(mapNodeId)) {
-					return;
-				}
-				if (attempts < 10) {
-					attempts += 1;
-					window.requestAnimationFrame(spotlightWhenMounted);
-				}
-			};
-			window.requestAnimationFrame(spotlightWhenMounted);
-		},
-		[isMobile],
-	);
 	const agentPanelStyle: CSSProperties = showClineAgentChatPanel
 		? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
 		: {
@@ -1167,8 +1207,55 @@ export function CardDetailView({
 		},
 		[isMobile],
 	);
+	// 排队 prompt：按**会话 id** 取队列（by-the-way 子会话有自己独立的队列），与 Prompt Library 同一口径。
+	const queuedPromptQueueController = useQueuedTaskPromptDeliveryQueueController(
+		currentProjectId,
+		selectedTaskConversationSessionId,
+		selection.card.id,
+	);
+	const queuedPromptCountIndicator = useMemo(
+		() => summarizeQueuedTaskPromptDeliveryCountIndicator(queuedPromptQueueController.projections),
+		[queuedPromptQueueController.projections],
+	);
+	// kanban 重启后聚焦这个任务：Queue 页签闪 5 秒 + 同时确认「人看见了」（见 hook 头注）。
+	const { restartReminderAnnouncement: queuedPromptRestartReminderAnnouncement } =
+		useQueuedTaskPromptDeliveryRestartReminder({
+			taskId: selectedTaskConversationSessionId,
+			projections: queuedPromptQueueController.projections,
+			reconfirmQueuedPromptDeliveriesAfterRuntimeRestart:
+				queuedPromptQueueController.reconfirmQueuedPromptDeliveriesAfterRuntimeRestart,
+		});
+	const { enqueuePromptForDeliveryAfterCurrentTurn } = queuedPromptQueueController;
+	const handleQueuePromptForAfterCurrentTurn = useCallback(
+		(prompt: StoredPrompt) => {
+			void enqueuePromptForDeliveryAfterCurrentTurn({
+				text: prompt.text,
+				sourcePromptLibraryEntryId: prompt.id,
+			}).then((queued) => {
+				if (queued) {
+					showAppToast({
+						intent: "success",
+						message: "Queued — it will be sent after the agent finishes its current turn.",
+					});
+				}
+			});
+		},
+		[enqueuePromptForDeliveryAfterCurrentTurn],
+	);
 	const detailUtilityTabs = (
-		<DetailUtilityTabList activeTab={detailUtilityTab} onTabChange={handleDetailUtilityTabChange} />
+		<>
+			<DetailUtilityTabList
+				activeTab={detailUtilityTab}
+				onTabChange={handleDetailUtilityTabChange}
+				queuedPromptTaskId={selectedTaskConversationSessionId}
+				queuedPromptCountIndicator={queuedPromptCountIndicator}
+				emitsQueueTabAnchor={!isMobile}
+			/>
+			{/* 重启后提醒的屏幕阅读器播报：Queue 页签的高亮是纯视觉的，看不见它的人需要一句话。 */}
+			<span className="sr-only" role="status" aria-live="polite">
+				{queuedPromptRestartReminderAnnouncement ?? ""}
+			</span>
+		</>
 	);
 	const detailUtilityPanel =
 		detailUtilityTab === "prompts" ? (
@@ -1176,8 +1263,14 @@ export function CardDetailView({
 				taskId={selectedTaskConversationSessionId}
 				projectId={promptLibraryProjectId}
 				onFillInput={injectTextIntoActiveInput}
+				onQueuePromptForAfterCurrentTurn={currentProjectId ? handleQueuePromptForAfterCurrentTurn : undefined}
 				headerContent={detailUtilityTabs}
 				taskIdsOnBoard={taskIdsOnBoard ?? null}
+			/>
+		) : detailUtilityTab === "queue" ? (
+			<QueuedTaskPromptDeliveryQueuePanel
+				controller={queuedPromptQueueController}
+				headerContent={detailUtilityTabs}
 			/>
 		) : (
 			<TaskCommentsPanel
@@ -1216,15 +1309,28 @@ export function CardDetailView({
 	const isMainTaskConversationSessionSelected = selectedTaskConversationSessionId === selection.card.id;
 	// map 面板与 TaskConversationSessionsPanel 同位下方的独立可折叠 section（蓝图 §G.1：
 	// 不抢占其挂载点）；出现条件与聊天面板一致（conversation 面板会话）。
-	const sessionMapPanel = sessionMapConversationSessionTaskId ? (
-		<SessionMapPanel
-			queryPhase={sessionMapPanelData.queryPhase}
-			projection={sessionMapPanelData.projection}
-			mapCollection={sessionMapPanelData.mapCollection}
-			expandToken={sessionMapPanelExpandToken}
-			defaultOpen={sessionMapPanelDefaultOpen}
-		/>
-	) : null;
+	// 「本会话 findings」section（蓝图 §G.2）：复用同一份 workspace 级 findings 集合，只在调用方传了
+	// findings 上下文时出现（exploratoryFindings !== undefined）。旧 session map 面板退役后独立挂在
+	// sessions 面板同位下方；B.2 的 exploration thread graph 面板落地后迁入其底部。
+	// exploration thread graph 面板（B.2）：挂在 sessions 面板与「本会话 findings」之间——
+	// 图在上、从图里长出来的结论在下。explorationId 恒取**卡片 id**（不是当前选中的会话 id）：
+	// 图挂在探索场次上，by-the-way 会话的轮次也归进同一张图。
+	const explorationThreadGraphPanel =
+		explorationThreadGraph !== undefined && currentProjectId ? (
+			<ExplorationThreadGraphPanel
+				workspaceId={currentProjectId}
+				explorationId={selection.card.id}
+				data={explorationThreadGraph}
+			/>
+		) : null;
+	const sessionFindingsSection =
+		turnProjectionConversationSessionTaskId && exploratoryFindings !== undefined && currentProjectId ? (
+			<SessionFindingsSection
+				workspaceId={currentProjectId}
+				conversationSessionTaskId={turnProjectionConversationSessionTaskId}
+				findings={exploratoryFindings}
+			/>
+		) : null;
 	const activeTaskConversationSessionMessages =
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
 		(isMainTaskConversationSessionSelected ? streamedClineChatMessages : null);
@@ -1282,8 +1388,10 @@ export function CardDetailView({
 					? getTaskAutoReviewCancelButtonLabel(selection.card.autoReviewMode)
 					: null
 			}
-			resolveSessionMapAnchor={resolveSessionMapAnchor}
-			onSessionMapAnchorClick={handleSessionMapAnchorClick}
+			// 「存为 finding」（蓝图 §D.2.1）：查重集合 + turn 投影（锚三元 commit 解析）；
+			// 不传 exploratoryFindings 时消息项不出该 affordance。聊天内锚 chip 已休眠：不传 resolver。
+			exploratoryFindings={exploratoryFindings}
+			turnProjection={conversationSessionTurnProjection.projection}
 		/>
 	) : (
 		<AgentTerminalPanel
@@ -1295,6 +1403,16 @@ export function CardDetailView({
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView
 			summary={activeTaskConversationSessionSummary}
 			onSummary={onSessionSummary}
+			// 启动史证据只对主会话成立（卡片字段与任务 worktree 描述的都是主会话）；侧问会话不传，沿用旧解释。
+			taskAgentSessionLaunchHistoryEvidence={
+				isMainTaskConversationSessionSelected ? mainTaskAgentSessionLaunchHistoryEvidence : undefined
+			}
+			// 只有 In Progress 的卡能被 onStartTask 就地启动（handleStartTask 对其它非 backlog 列是 no-op）。
+			onStartTaskAgentSessionWithTaskPrompt={
+				isMainTaskConversationSessionSelected && selection.column.id === "in_progress" && onStartTask
+					? () => onStartTask(selection.card.id)
+					: undefined
+			}
 			onCommit={
 				isMainTaskConversationSessionSelected && onAgentCommitTask
 					? () => onAgentCommitTask(selection.card.id)
@@ -1331,12 +1449,38 @@ export function CardDetailView({
 			terminalBackgroundColor={terminalThemeColors.surfacePrimary}
 			cursorColor={terminalThemeColors.textPrimary}
 			taskColumnId={selection.column.id}
+			// 「用原 prompt 全新开局」只给主会话：侧问会话的 prompt 不在卡片上。
+			originalTaskPromptForFreshStart={isMainTaskConversationSessionSelected ? selection.card.prompt : null}
+			onStartFreshAgentSessionWithOriginalTaskPrompt={
+				isMainTaskConversationSessionSelected && onStartFreshTaskSessionWithOriginalPrompt
+					? () => onStartFreshTaskSessionWithOriginalPrompt(selection.card.id)
+					: undefined
+			}
 		/>
 	);
+	// 提问它的那个会话活体仍在跑、且仍停在提问回合 ⇒ 终端里此刻显示的就是这道题的交互式选择器。
+	// 活体不同（Kanban / 系统重启后 resume、会话被回收后重建）或来源不明（转录补录）⇒ 选择器早已不在。
+	const pendingUserDecisionSessionFacets = activeTaskConversationSessionSummary
+		? resolveSessionFacets(activeTaskConversationSessionSummary)
+		: null;
+	const isAgentStoppedOnPendingQuestionSelectorInLiveTerminal =
+		pendingUserDecision.decision !== null &&
+		pendingUserDecision.decision.originRuntimeSessionIncarnationId !== null &&
+		pendingUserDecision.decision.originRuntimeSessionIncarnationId ===
+			(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null) &&
+		pendingUserDecisionSessionFacets?.turnOwner === "user" &&
+		pendingUserDecisionSessionFacets.liveness === "live" &&
+		pendingUserDecisionSessionFacets.userTurnKind === "question";
+	const isPendingQuestionRaisedByEarlierAgentSessionIncarnation =
+		pendingUserDecision.decision !== null &&
+		(pendingUserDecision.decision.originRuntimeSessionIncarnationId === null ||
+			pendingUserDecision.decision.originRuntimeSessionIncarnationId !==
+				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
 			{pendingUserDecision.decision ? (
 				<AgentRaisedPendingUserDecisionPanel
+					key={pendingUserDecision.decision.decisionId}
 					decision={pendingUserDecision.decision}
 					isSubmitting={pendingUserDecision.isSubmitting}
 					onAnswer={pendingUserDecision.answer}
@@ -1344,8 +1488,24 @@ export function CardDetailView({
 					agentResponseGenerationTurnSequence={
 						activeTaskConversationSessionSummary?.agentResponseGenerationTurnSequence ?? 0
 					}
+					isAgentStoppedOnThisQuestionSelectorInLiveTerminal={
+						isAgentStoppedOnPendingQuestionSelectorInLiveTerminal
+					}
+					isQuestionRaisedByEarlierAgentSessionIncarnation={
+						isPendingQuestionRaisedByEarlierAgentSessionIncarnation
+					}
 				/>
 			) : null}
+			<AgentRaisedUserDecisionHistoryPanel
+				workspaceId={currentProjectId}
+				taskId={selectedTaskConversationSessionId}
+				pendingUserDecisionIdentityForRefresh={
+					pendingUserDecision.decision
+						? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
+						: null
+				}
+			/>
+			<TaskResourceUsageDetailPanel taskCardId={selection.card.id} />
 			{agentSessionContent}
 		</div>
 	);
@@ -1353,7 +1513,7 @@ export function CardDetailView({
 	if (isMobile) {
 		const handleMobileTabChange = (tab: MobileTab) => {
 			setMobileTab(tab);
-			if (tab === "prompts" || tab === "comments") {
+			if (isDetailUtilityTab(tab)) {
 				setDetailUtilityTab(tab);
 			}
 		};
@@ -1363,6 +1523,8 @@ export function CardDetailView({
 					activeTab={mobileTab}
 					onTabChange={handleMobileTabChange}
 					showWorkspaceChangesTabs={isTaskChangesSidebarOpen}
+					queuedPromptTaskId={selectedTaskConversationSessionId}
+					queuedPromptCountIndicator={queuedPromptCountIndicator}
 				/>
 				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -1374,18 +1536,19 @@ export function CardDetailView({
 						>
 							{agentChatPanel}
 						</div>
-						{/* Sessions panel + Session Map（同位下方的独立可折叠 section） */}
+						{/* Sessions panel + 本会话 findings（同位下方的独立可折叠 section） */}
 						<div
 							className="min-h-0 min-w-0 flex-1 flex-col"
 							style={{ display: mobileTab === "sessions" ? "flex" : "none" }}
 						>
 							<div className="flex min-h-0 min-w-0 flex-1 flex-col">{taskConversationSessionsPanel}</div>
-							{sessionMapPanel}
+							{explorationThreadGraphPanel}
+							{sessionFindingsSection}
 						</div>
 						{/* Prompts / comments utility panel */}
 						<div
 							className="min-h-0 min-w-0 flex-1 flex-col"
-							style={{ display: mobileTab === "prompts" || mobileTab === "comments" ? "flex" : "none" }}
+							style={{ display: isDetailUtilityTab(mobileTab) ? "flex" : "none" }}
 						>
 							{detailUtilityPanel}
 						</div>
@@ -1536,15 +1699,14 @@ export function CardDetailView({
 							onClearTrash={onClearTrash}
 							onEditTask={onEditTask}
 							onSaveTaskTitle={onSaveTaskTitle}
-							onCommitTask={onCommitTask}
-							onOpenPrTask={onOpenPrTask}
 							onMoveToTrashTask={onMoveReviewCardToTrash}
 							onMoveToValidationTask={onMoveReviewCardToValidation}
 							onMoveToReviewTask={onMoveCardToReview}
 							onRestoreFromTrashTask={onRestoreTaskFromTrash}
 							onDeleteTask={onDeleteTask}
-							commitTaskLoadingById={commitTaskLoadingById}
-							openPrTaskLoadingById={openPrTaskLoadingById}
+							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+							onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 							moveToTrashLoadingById={moveToTrashLoadingById}
 							panelWidth="100%"
 							defaultClineModelId={runtimeConfig?.clineProviderSettings?.modelId ?? null}
@@ -1669,8 +1831,9 @@ export function CardDetailView({
 										>
 											{taskConversationSessionsPanel}
 										</div>
-										{/* Session Map：同位下方的独立可折叠 section（蓝图 §G.1） */}
-										{sessionMapPanel}
+										{/* 探索线（B.2）+ 本会话 findings：同位下方的独立可折叠 section（蓝图 §G.2） */}
+										{explorationThreadGraphPanel}
+										{sessionFindingsSection}
 										<ResizeHandle
 											orientation="horizontal"
 											ariaLabel="Resize task conversation sessions and utility panels"

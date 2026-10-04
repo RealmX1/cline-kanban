@@ -6,6 +6,7 @@ import { createInitialBoardData } from "@/data/board-data";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
+	RuntimeBoardCard,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
@@ -20,7 +21,6 @@ import {
 	type BoardColumn,
 	type BoardColumnId,
 	type BoardData,
-	type BoardDependency,
 	type CardSelection,
 	DEFAULT_TASK_AUTO_REVIEW_MODE,
 	resolveTaskAutoReviewMode,
@@ -249,37 +249,52 @@ function normalizeTaskTerminalAgentModelOverrideSettings(
 	};
 }
 
-function normalizeCard(rawCard: unknown): BoardCard | null {
+// `now` 由 normalizeBoardData 统一取一次再传进来：缺时间戳的卡片共享同一个回落值，Backlog 的稳定排序
+// 才会保持它们的原次序，而不是按「逐张归一化时 Date.now() 恰好跨过的毫秒」随机翻转。
+// normalizeCard 白名单铁律的编译期守卫。水合出来的 board 会被原样整板 saveState 回盘，而服务端是整块覆盖
+// board.json——白名单漏掉的字段会在下一次保存时被抹平。卡片动作改走服务端之后，服务端写进卡片的新字段只会越来越多，
+// 靠注释提醒已经兜不住：服务端 board 卡片 schema 每加一个字段，这里不登记就 typecheck 失败（satisfies 既查漏也查多）。
+// 登记后还要在下面真正带过它，并补进 board-state 测试里的「全字段往返」夹具。
+export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
+	id: true,
+	title: true,
+	prompt: true,
+	startInPlanMode: true,
+	taskAgentPermissionMode: true,
+	autoReviewEnabled: true,
+	autoReviewMode: true,
+	images: true,
+	taskCommentEntries: true,
+	pinnedToTaskPinboardAt: true,
+	taskPinboardPinReason: true,
+	agentId: true,
+	ompAgentSessionTransport: true,
+	taskConversationMode: true,
+	mostRecentlyLaunchedAgentSessionAgentId: true,
+	clineSettings: true,
+	terminalAgentModelOverrideSettings: true,
+	taskAgentSessionInitialization: true,
+	baseRef: true,
+	parentSessionId: true,
+	worktreeMode: true,
+	prepFilePath: true,
+	createdAt: true,
+	updatedAt: true,
+	taskDescriptionLastUpdatedAt: true,
+} as const satisfies Record<keyof RuntimeBoardCard, true>;
+
+function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 	if (!rawCard || typeof rawCard !== "object") {
 		return null;
 	}
 
+	// 字段表由上面的守卫约束：键与服务端卡片 schema 一一对应，外加三个只读不写的旧字段（clineProviderId 等）。
 	const card = rawCard as {
-		id?: unknown;
-		title?: unknown;
-		prompt?: unknown;
-		startInPlanMode?: unknown;
-		taskAgentPermissionMode?: unknown;
-		autoReviewEnabled?: unknown;
-		autoReviewMode?: unknown;
-		images?: unknown;
-		taskCommentEntries?: unknown;
-		baseRef?: unknown;
-		agentId?: unknown;
-		ompAgentSessionTransport?: unknown;
-		taskConversationMode?: unknown;
-		mostRecentlyLaunchedAgentSessionAgentId?: unknown;
-		clineSettings?: unknown;
-		terminalAgentModelOverrideSettings?: unknown;
-		taskAgentSessionInitialization?: unknown;
+		[fieldName in keyof typeof BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION]?: unknown;
+	} & {
 		clineProviderId?: unknown;
 		clineModelId?: unknown;
 		clineReasoningEffort?: unknown;
-		parentSessionId?: unknown;
-		worktreeMode?: unknown;
-		prepFilePath?: unknown;
-		createdAt?: unknown;
-		updatedAt?: unknown;
 	};
 	const prompt = typeof card.prompt === "string" ? card.prompt.trim() : "";
 	if (!prompt) {
@@ -319,8 +334,6 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 			? parsedLegacyTaskAgentSessionInitialization.data
 			: undefined;
 
-	const now = Date.now();
-
 	const prepFilePath = typeof card.prepFilePath === "string" ? card.prepFilePath.trim() : "";
 	const worktreeMode =
 		card.worktreeMode === "branch" || card.worktreeMode === "inplace" ? card.worktreeMode : undefined;
@@ -349,10 +362,32 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		? parsedMostRecentlyLaunchedAgentSessionAgentId.data
 		: undefined;
 
+	// Task Pinboard 置顶态：同样受上面那条白名单铁律约束——不在这里带过就等于「下一次保存把盘上的置顶抹平」。
+	// 用「字段存在即已置顶」的时间戳表达，所以非有限数一律当成未置顶（而不是当成置顶但时间未知）。
+	const pinnedToTaskPinboardAt =
+		typeof card.pinnedToTaskPinboardAt === "number" && Number.isFinite(card.pinnedToTaskPinboardAt)
+			? card.pinnedToTaskPinboardAt
+			: undefined;
+	// 原因留空 ⇒ 不写字段，避免盘上出现一堆空串。
+	const taskPinboardPinReason =
+		typeof card.taskPinboardPinReason === "string" && card.taskPinboardPinReason.trim()
+			? card.taskPinboardPinReason
+			: undefined;
 	// 会话模式声明（蓝图 §A.1）：与 ompAgentSessionTransport 同款白名单保留——漏掉它会在下一次
 	// saveState 时把盘上已声明的模式抹回 operational 缺省。老卡片没有该字段 ⇒ undefined = operational。
 	const parsedTaskConversationMode = runtimeTaskConversationModeSchema.safeParse(card.taskConversationMode);
 	const taskConversationMode = parsedTaskConversationMode.success ? parsedTaskConversationMode.data : undefined;
+	const updatedAt = typeof card.updatedAt === "number" ? card.updatedAt : now;
+	// Description 最后更新时间：白名单铁律同上。缺失（老卡片）时物化回落值（= updatedAt，见
+	// resolveTaskDescriptionLastUpdatedAt），下一次保存后固定；**绝不回落到 now**——那会让每次水合都把
+	// 老卡刷成「刚更新」、打乱 Backlog 顺序。
+	const taskDescriptionLastUpdatedAt = runtimeTaskState.resolveTaskDescriptionLastUpdatedAt({
+		taskDescriptionLastUpdatedAt:
+			typeof card.taskDescriptionLastUpdatedAt === "number" && Number.isFinite(card.taskDescriptionLastUpdatedAt)
+				? card.taskDescriptionLastUpdatedAt
+				: undefined,
+		updatedAt,
+	});
 
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
@@ -366,6 +401,8 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		),
 		images: normalizeTaskImages(card.images),
 		taskCommentEntries: normalizeTaskCommentEntries(card.taskCommentEntries),
+		...(pinnedToTaskPinboardAt !== undefined ? { pinnedToTaskPinboardAt } : {}),
+		...(taskPinboardPinReason !== undefined ? { taskPinboardPinReason } : {}),
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(ompAgentSessionTransport !== undefined ? { ompAgentSessionTransport } : {}),
@@ -378,78 +415,23 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		...(worktreeMode ? { worktreeMode } : {}),
 		...(prepFilePath ? { prepFilePath } : {}),
 		createdAt: typeof card.createdAt === "number" ? card.createdAt : now,
-		updatedAt: typeof card.updatedAt === "number" ? card.updatedAt : now,
+		updatedAt,
+		taskDescriptionLastUpdatedAt,
 	};
 }
 
-function createDependencyId(): string {
-	return createBrowserUuid().replaceAll("-", "").slice(0, 8);
-}
-
-function collectTaskIds(columns: BoardColumn[]): Set<string> {
-	const taskIds = new Set<string>();
-	for (const column of columns) {
-		for (const card of column.cards) {
-			taskIds.add(card.id);
-		}
-	}
-	return taskIds;
-}
-
-function normalizeDependency(rawDependency: unknown, taskIds: Set<string>): BoardDependency | null {
-	if (!rawDependency || typeof rawDependency !== "object") {
-		return null;
-	}
-
-	const dependency = rawDependency as {
-		id?: unknown;
-		fromTaskId?: unknown;
-		toTaskId?: unknown;
-		createdAt?: unknown;
-	};
-	const fromTaskId = typeof dependency.fromTaskId === "string" ? dependency.fromTaskId.trim() : "";
-	const toTaskId = typeof dependency.toTaskId === "string" ? dependency.toTaskId.trim() : "";
-	if (!fromTaskId || !toTaskId || fromTaskId === toTaskId) {
-		return null;
-	}
-	if (!taskIds.has(fromTaskId) || !taskIds.has(toTaskId)) {
-		return null;
-	}
-
-	return {
-		id: typeof dependency.id === "string" && dependency.id ? dependency.id : createDependencyId(),
-		fromTaskId,
-		toTaskId,
-		createdAt: typeof dependency.createdAt === "number" ? dependency.createdAt : Date.now(),
-	};
-}
-function removeDependenciesByTaskIds(board: BoardData, taskIds: Set<string>): BoardData {
-	if (taskIds.size === 0 || board.dependencies.length === 0) {
-		return board;
-	}
-	const dependencies = board.dependencies.filter(
-		(dependency) => !taskIds.has(dependency.fromTaskId) && !taskIds.has(dependency.toTaskId),
-	);
-	if (dependencies.length === board.dependencies.length) {
-		return board;
-	}
-	return {
-		...board,
-		dependencies,
-	};
-}
 export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 	if (!rawBoard || typeof rawBoard !== "object") {
 		return null;
 	}
 
 	const candidateColumns = (rawBoard as { columns?: unknown }).columns;
-	const candidateDependencies = (rawBoard as { dependencies?: unknown }).dependencies;
 	if (!Array.isArray(candidateColumns)) {
 		return null;
 	}
 
 	const initial = createInitialBoardData();
+	const now = Date.now();
 	const normalizedColumns = initial.columns.map((column) => ({ ...column, cards: [] as BoardCard[] }));
 	const columnById = new Map(normalizedColumns.map((column) => [column.id, column]));
 
@@ -470,52 +452,58 @@ export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 			continue;
 		}
 		for (const rawCard of column.cards) {
-			const card = normalizeCard(rawCard);
+			const card = normalizeCard(rawCard, now);
 			if (card) {
 				normalizedColumn.cards.push(card);
 			}
 		}
 	}
 
-	const taskIds = collectTaskIds(normalizedColumns);
-	const normalizedDependencies: BoardDependency[] = [];
-	if (Array.isArray(candidateDependencies)) {
-		for (const rawDependency of candidateDependencies) {
-			const dependency = normalizeDependency(rawDependency, taskIds);
-			if (!dependency) {
-				continue;
-			}
-			normalizedDependencies.push(dependency);
-		}
-	}
-
-	return runtimeTaskState.updateTaskDependencies({
+	// 老看板（本字段出现前的手动顺序）在首次水合时即按 Description 最后更新时间排好。
+	// 旧盘里已退役的 `dependencies` 键（任务连线 / 完成后自动启动）在这里不再读取，水合结果里随之消失。
+	return runtimeTaskState.sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending({
 		columns: normalizedColumns,
-		dependencies: normalizedDependencies,
 	});
 }
 
-export function addTaskToColumn(board: BoardData, columnId: BoardColumnId, draft: TaskDraft): BoardData {
+export function addTaskToColumn(
+	board: BoardData,
+	columnId: BoardColumnId,
+	draft: TaskDraft,
+	runtimeAllocatedTaskId: string,
+): BoardData {
 	const prompt = draft.prompt.trim();
 	if (!prompt) {
 		return board;
 	}
-	return addTaskToColumnWithResult(board, columnId, draft).board;
+	return addTaskToColumnWithResult(board, columnId, draft, runtimeAllocatedTaskId).board;
+}
+
+// dd2db Y-EVENT-12：新卡 id 只能由 runtime 分配（见 runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards）。
+// 本地随机 id 会在保存时被 runtime 的全局 task id 登记簿拒绝或绕开登记簿，所以这里不再提供本地生成的退路。
+function refuseLocallyGeneratedTaskIdForNewTaskCard(): string {
+	throw new Error("New task card ids must be allocated by the Kanban runtime; refusing to generate one locally.");
 }
 
 export function addTaskToColumnWithResult(
 	board: BoardData,
 	columnId: BoardColumnId,
 	draft: TaskDraft,
+	runtimeAllocatedTaskId: string,
 ): { board: BoardData; task: BoardCard } {
 	const prompt = draft.prompt.trim();
 	if (!prompt) {
 		throw new Error("Task prompt is required.");
 	}
+	const trimmedRuntimeAllocatedTaskId = runtimeAllocatedTaskId.trim();
+	if (!trimmedRuntimeAllocatedTaskId) {
+		throw new Error("A runtime-allocated task id is required to create a task card.");
+	}
 	const result = runtimeTaskState.addTaskToColumn(
 		board,
 		columnId,
 		{
+			taskId: trimmedRuntimeAllocatedTaskId,
 			title: draft.title,
 			prompt,
 			startInPlanMode: draft.startInPlanMode,
@@ -534,42 +522,12 @@ export function addTaskToColumnWithResult(
 			baseRef: draft.baseRef,
 			worktreeMode: draft.worktreeMode,
 		},
-		createBrowserUuid,
+		refuseLocallyGeneratedTaskIdForNewTaskCard,
 	);
 	return {
 		board: result.board,
 		task: result.task,
 	};
-}
-
-export interface AddTaskDependencyResult {
-	board: BoardData;
-	added: boolean;
-	reason?: NonNullable<runtimeTaskState.RuntimeAddTaskDependencyResult["reason"]>;
-	dependency?: BoardDependency;
-}
-
-export function addTaskDependency(board: BoardData, fromTaskId: string, toTaskId: string): AddTaskDependencyResult {
-	return runtimeTaskState.addTaskDependency(board, fromTaskId, toTaskId);
-}
-
-export function canCreateTaskDependency(board: BoardData, fromTaskId: string, toTaskId: string): boolean {
-	return runtimeTaskState.canAddTaskDependency(board, fromTaskId, toTaskId);
-}
-
-export function removeTaskDependency(board: BoardData, dependencyId: string): { board: BoardData; removed: boolean } {
-	return runtimeTaskState.removeTaskDependency(board, dependencyId);
-}
-
-export function getReadyLinkedTaskIdsForTaskInTrash(board: BoardData, taskId: string): string[] {
-	return runtimeTaskState.getReadyLinkedTaskIdsForTaskInTrash(board, taskId);
-}
-
-export function trashTaskAndGetReadyLinkedTaskIds(
-	board: BoardData,
-	taskId: string,
-): { board: BoardData; moved: boolean; readyTaskIds: string[] } {
-	return runtimeTaskState.trashTaskAndGetReadyLinkedTaskIds(board, taskId);
 }
 
 export function applyDragResult(
@@ -601,6 +559,11 @@ export function applyDragResult(
 	}
 
 	if (sourceColumn.id === destinationColumn.id) {
+		// Backlog 按 Description 最后更新时间排序，列内手动重排会被下一次排序立刻覆盖——drag-rules 已禁止
+		// 往 backlog 放卡，这里再兜一层，免得误导性的临时顺序被落盘。
+		if (sourceColumn.id === "backlog") {
+			return { board };
+		}
 		const movedCards = reorder(sourceColumn.cards, source.index, destination.index);
 		const columns = Array.from(board.columns);
 		columns[sourceColumnIndex] = {
@@ -639,7 +602,7 @@ export function applyDragResult(
 	};
 
 	return {
-		board: runtimeTaskState.updateTaskDependencies(withUpdatedColumns(board, columns)),
+		board: withUpdatedColumns(board, columns),
 		moveEvent: {
 			taskId: movedCard.id,
 			fromColumnId: sourceColumn.id,
@@ -722,6 +685,22 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 			}
 			columnUpdated = true;
 			updated = true;
+			const nextImages =
+				draft.images === undefined
+					? card.images
+					: draft.images.length > 0
+						? draft.images.map((image) => ({ ...image }))
+						: undefined;
+			// 与运行时 updateTask 同一判据：只有 Description 内容（prompt + 附图）真正变了才推进；
+			// 没变时物化回落值，老卡片的值从此固定。
+			const taskDescriptionLastUpdatedAt = runtimeTaskState.hasTaskDescriptionContentChanged({
+				previousPrompt: card.prompt,
+				previousImages: card.images,
+				nextPrompt: prompt,
+				nextImages,
+			})
+				? Date.now()
+				: runtimeTaskState.resolveTaskDescriptionLastUpdatedAt(card);
 			return {
 				...card,
 				title: title || card.title,
@@ -732,12 +711,7 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 					: card.taskAgentPermissionMode,
 				autoReviewEnabled: Boolean(draft.autoReviewEnabled),
 				autoReviewMode: resolveTaskAutoReviewMode(draft.autoReviewMode ?? DEFAULT_TASK_AUTO_REVIEW_MODE),
-				images:
-					draft.images === undefined
-						? card.images
-						: draft.images.length > 0
-							? draft.images.map((image) => ({ ...image }))
-							: undefined,
+				images: nextImages,
 				taskCommentEntries:
 					draft.taskCommentEntries === undefined
 						? cloneTaskCommentEntries(card.taskCommentEntries)
@@ -755,6 +729,7 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				baseRef,
 				worktreeMode: shouldUpdateWorktreeMode ? draft.worktreeMode : card.worktreeMode,
 				updatedAt: Date.now(),
+				taskDescriptionLastUpdatedAt,
 			};
 		});
 		return columnUpdated ? { ...column, cards } : column;
@@ -763,7 +738,12 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 	if (!updated) {
 		return { board, updated: false };
 	}
-	return { board: withUpdatedColumns(board, columns), updated: true };
+	return {
+		board: runtimeTaskState.sortBacklogColumnCardsByTaskDescriptionLastUpdatedAtDescending(
+			withUpdatedColumns(board, columns),
+		),
+		updated: true,
+	};
 }
 
 export function updateTaskCommentEntries(
@@ -922,9 +902,8 @@ export function removeTask(board: BoardData, taskId: string): { board: BoardData
 	if (!removed) {
 		return { board, removed: false };
 	}
-	const boardWithUpdatedColumns = withUpdatedColumns(board, columns);
 	return {
-		board: removeDependenciesByTaskIds(boardWithUpdatedColumns, new Set([taskId])),
+		board: withUpdatedColumns(board, columns),
 		removed: true,
 	};
 }
@@ -940,10 +919,8 @@ export function clearColumnTasks(
 
 	const clearedTaskIds = targetColumn.cards.map((card) => card.id);
 	const columns = board.columns.map((column) => (column.id === columnId ? { ...column, cards: [] } : column));
-	const boardWithUpdatedColumns = withUpdatedColumns(board, columns);
-
 	return {
-		board: removeDependenciesByTaskIds(boardWithUpdatedColumns, new Set(clearedTaskIds)),
+		board: withUpdatedColumns(board, columns),
 		clearedTaskIds,
 	};
 }

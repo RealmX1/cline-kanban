@@ -29,6 +29,7 @@ import {
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { NotificationIntelligenceSettingsSection } from "@/components/notification-intelligence-settings";
 import { AccountOrganizationSection } from "@/components/shared/account-organization-section";
 import { ClineSetupSection } from "@/components/shared/cline-setup-section";
 import {
@@ -43,6 +44,7 @@ import { cn } from "@/components/ui/cn";
 import { Dialog, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
+import { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notification-intelligence-settings-draft";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
 import { useRuntimeSettingsClineMcpController } from "@/hooks/use-runtime-settings-cline-mcp-controller";
 import { previewThemeId, readStoredThemeId, saveThemeId, THEME_GROUPS, THEMES, type ThemeId } from "@/hooks/use-theme";
@@ -359,6 +361,7 @@ function SettingsNav({
 					key={item.id}
 					type="button"
 					onClick={() => onSelect(item.id)}
+					aria-current={activeId === item.id ? "location" : undefined}
 					className={cn(
 						"flex items-center gap-2.5 text-left px-3 py-2 rounded-md text-[13px] font-medium cursor-pointer",
 						activeId === item.id
@@ -427,7 +430,9 @@ export function RuntimeSettingsDialog({
 	const bodyRef = useRef<HTMLDivElement>(null);
 	const isScrollingProgrammatically = useRef(false);
 	const [activeSection, setActiveSection] = useState<SettingsNavId>("general");
-	const controlsDisabled = isLoading || isSaving || config === null;
+	const notificationSettings = useNotificationIntelligenceSettingsDraft(open);
+	const [isSavingAllSettings, setIsSavingAllSettings] = useState(false);
+	const controlsDisabled = isLoading || isSaving || isSavingAllSettings || config === null;
 	const commitPromptTemplateDefault = config?.commitPromptTemplateDefault ?? "";
 	const openPrPromptTemplateDefault = config?.openPrPromptTemplateDefault ?? "";
 	const isCommitPromptAtDefault =
@@ -547,6 +552,7 @@ export function RuntimeSettingsDialog({
 		if (postDeployVerificationForceCompleteEnabled !== initialPostDeployVerificationForceCompleteEnabled) {
 			return true;
 		}
+		if (notificationSettings.hasUnsavedChanges) return true;
 		if (clineSettings.hasUnsavedChanges) {
 			return true;
 		}
@@ -576,6 +582,7 @@ export function RuntimeSettingsDialog({
 		postDeployVerificationForceCompleteEnabled,
 		clineMcpSettings.hasUnsavedChanges,
 		clineSettings.hasUnsavedChanges,
+		notificationSettings.hasUnsavedChanges,
 		commitPromptTemplate,
 		config,
 		draftThemeId,
@@ -640,6 +647,9 @@ export function RuntimeSettingsDialog({
 		if (!open) {
 			return;
 		}
+		setActiveSection("general");
+		isScrollingProgrammatically.current = false;
+		if (bodyRef.current) bodyRef.current.scrollTop = 0;
 		const persistedThemeId = readStoredThemeId();
 		setInitialThemeId(persistedThemeId);
 		setDraftThemeId(persistedThemeId);
@@ -700,6 +710,10 @@ export function RuntimeSettingsDialog({
 		if (isScrollingProgrammatically.current) return;
 		const body = bodyRef.current;
 		if (!body) return;
+		if (body.scrollTop <= 0) {
+			setActiveSection("general");
+			return;
+		}
 		const headings = body.querySelectorAll<HTMLElement>("[data-settings-section]");
 		const bodyRect = body.getBoundingClientRect();
 		let current: SettingsNavId = "general";
@@ -716,10 +730,10 @@ export function RuntimeSettingsDialog({
 	}, []);
 
 	const handleNavSelect = useCallback((id: SettingsNavId) => {
-		setActiveSection(id);
-		isScrollingProgrammatically.current = true;
 		const body = bodyRef.current;
 		if (!body) return;
+		setActiveSection(id);
+		isScrollingProgrammatically.current = true;
 		const target = body.querySelector(`[data-settings-section="${id}"]`);
 		if (target) {
 			const bodyRect = body.getBoundingClientRect();
@@ -764,7 +778,7 @@ export function RuntimeSettingsDialog({
 		handleSelectedPromptChange(selectedPromptDefaultValue);
 	};
 
-	const handleSave = async () => {
+	const persistAllSettings = async () => {
 		setSaveError(null);
 		if (!config) {
 			setSaveError("Runtime settings are still loading. Try again in a moment.");
@@ -799,6 +813,7 @@ export function RuntimeSettingsDialog({
 				return;
 			}
 		}
+		await notificationSettings.save();
 		const saved = await save({
 			selectedAgentId,
 			agentAutonomousModeEnabled,
@@ -822,7 +837,21 @@ export function RuntimeSettingsDialog({
 			setInitialThemeId(draftThemeId);
 		}
 		onSaved?.();
-		handleDialogOpenChange(false);
+		onOpenChange(false);
+	};
+
+	const handleSave = async () => {
+		if (isSavingAllSettings) return;
+		setIsSavingAllSettings(true);
+		try {
+			await persistAllSettings();
+		} catch (error) {
+			setSaveError(
+				`保存未完成，草稿已保留；部分更改可能已保存，可重试。${error instanceof Error ? error.message : "请检查运行时日志"}`,
+			);
+		} finally {
+			setIsSavingAllSettings(false);
+		}
 	};
 
 	const handleRequestPermission = () => {
@@ -850,6 +879,7 @@ export function RuntimeSettingsDialog({
 
 	const handleDialogOpenChange = useCallback(
 		(nextOpen: boolean) => {
+			if (isSavingAllSettings) return;
 			if (!nextOpen) {
 				const persistedThemeId = readStoredThemeId();
 				if (draftThemeId !== persistedThemeId) {
@@ -860,7 +890,7 @@ export function RuntimeSettingsDialog({
 			}
 			onOpenChange(nextOpen);
 		},
-		[draftThemeId, onOpenChange],
+		[draftThemeId, onOpenChange, isSavingAllSettings],
 	);
 
 	const currentThemeDef = THEMES.find((t) => t.id === draftThemeId);
@@ -1116,6 +1146,8 @@ export function RuntimeSettingsDialog({
 						</div>
 					</div>
 
+					<NotificationIntelligenceSettingsSection draft={notificationSettings} disabled={controlsDisabled} />
+
 					{/* ---- 终端 agent 可靠性 ---- */}
 					<div data-settings-section="agent-reliability" />
 					<div className="sticky top-0 -mx-5 px-5 pt-4 pb-2 bg-surface-1 z-10">
@@ -1265,7 +1297,8 @@ export function RuntimeSettingsDialog({
 							Reset layout
 						</Button>
 						<p className="text-text-secondary text-[13px] mt-2 mb-0">
-							Reset sidebar, split pane, and terminal resize customizations back to their defaults.
+							Reset sidebar, split pane, terminal, and board column (collapse and width) customizations back to
+							their defaults.
 						</p>
 					</div>
 					<div data-settings-section="project" />
@@ -1405,7 +1438,7 @@ export function RuntimeSettingsDialog({
 				<Button
 					variant="primary"
 					onClick={() => void handleSave()}
-					disabled={controlsDisabled || !hasUnsavedChanges}
+					disabled={controlsDisabled || (!hasUnsavedChanges && !saveError)}
 				>
 					Save
 				</Button>

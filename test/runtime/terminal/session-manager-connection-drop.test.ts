@@ -70,7 +70,7 @@ function spawnManagerWithSession(pid: number) {
 		binary: input.binary,
 		args: [...input.args],
 		env: {},
-		// 不产出 deferredStartupInput，避免与续跑注入混淆。
+		// 不产出 deferredStartupPromptText，避免与续跑注入混淆。
 	}));
 	ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 		spawnedSession = createMockPtySession(pid, request);

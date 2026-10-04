@@ -16,6 +16,7 @@ import type {
 	RuntimeWorkspaceChangesMode,
 	RuntimeWorkspaceFileSearchResponse,
 	RuntimeWorkspaceStateResponse,
+	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
 import {
 	parseGitCheckoutRequest,
@@ -25,10 +26,16 @@ import {
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
 import { resolveTaskCreateBaseRef } from "../core/task-create-base-ref-resolution";
+import { recordTaskSessionStartDiagnostic } from "../diagnostics/task-session-start-diagnostics-logger";
+import type { KanbanActorResolutionLookups } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
+import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
+import { recordFactObservedByActiveKanbanRuntimeWithoutBlocking } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import {
 	collectTaskIdsRemovedFromBoard,
 	discardTaskEditDraftsForTasksRemovedFromBoard,
 } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
+import { discardQueuedTaskPromptDeliveriesForTasks } from "../state/queued-task-prompt-delivery-store";
+import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
 	loadWorkspaceBoardById,
 	mutateWorkspaceState,
@@ -52,10 +59,7 @@ import {
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
 import { runGit } from "../workspace/git-utils";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
-import {
-	probeAndRefreshTaskCommitIntegrationProvenance,
-	removeTaskCommitIntegrationProvenance,
-} from "../workspace/task-commit-integration-provenance";
+import { probeAndRefreshTaskCommitIntegrationProvenance } from "../workspace/task-commit-integration-provenance";
 import {
 	deleteTaskWorktree,
 	ensureTaskWorktreeIfDoesntExist,
@@ -67,6 +71,8 @@ import {
 } from "../workspace/task-worktree";
 import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
+import { applyKanbanCliTaskBoardMutation } from "./kanban-cli-task-board-mutation-api";
+import { persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart } from "./web-ui-new-backlog-task-card-persistence-before-agent-session-start-api";
 
 const TASK_WORKSPACE_GIT_STATUS_BATCH_CONCURRENCY_LIMIT = 4;
 const taskWorkspaceGitStatusBatchConcurrencyLimiter = pLimit(TASK_WORKSPACE_GIT_STATUS_BATCH_CONCURRENCY_LIMIT);
@@ -110,6 +116,30 @@ async function discardTaskEditDraftsForTasksRemovedFromSavedBoard(
 	}
 }
 
+// 同一条兜底旁路：任务从看板上永久消失时丢弃它的排队 prompt。与草稿相反，队列条目不是用户资产而是
+// **待执行的机器动作**——目标任务都不在了还留着它，只会在任务被恢复时突然发射。仅移进 trash 列的任务
+// 仍在两份 board 里，差集天然不碰它（trash 列里的会话不在跑，门控 4 兜住，队列只是安静地等）。
+async function discardQueuedTaskPromptDeliveriesForTasksRemovedFromSavedBoard(
+	workspaceId: string,
+	boardBeforeSave: RuntimeBoardData | null,
+	boardAfterSave: RuntimeBoardData,
+	onQueueRewritten: ((workspaceId: string, snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot) => void) | undefined,
+): Promise<void> {
+	if (boardBeforeSave === null) {
+		return;
+	}
+	const removedTaskIds = collectTaskIdsRemovedFromBoard(boardBeforeSave, boardAfterSave);
+	if (removedTaskIds.length === 0) {
+		return;
+	}
+	try {
+		const snapshot = await discardQueuedTaskPromptDeliveriesForTasks({ workspaceId, taskIds: removedTaskIds });
+		onQueueRewritten?.(workspaceId, snapshot);
+	} catch {
+		// 同上：残留的队列会在 24h 保质期后自然过期，比让看板保存整个失败好得多。
+	}
+}
+
 // 与上面的草稿清理同一条兜底旁路：任务从看板上永久消失（浏览器删卡 / 清空 Done）时，按前缀批删它的
 // 全部 turn checkpoint ref（姊妹蓝图 §1.4：存续期全量保留，永久删除时批删）。仅移进 trash 列的任务
 // 仍在两份 board 里，差集天然不碰它。失败语义照旧——任何失败就地咽掉，绝不让看板保存因此失败。
@@ -141,6 +171,13 @@ export interface CreateWorkspaceApiDependencies {
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void> | void;
 	buildWorkspaceStateSnapshot: (workspaceId: string, workspacePath: string) => Promise<RuntimeWorkspaceStateResponse>;
 	listProjectRuntimeSessionSummaries: (workspaceId: string) => RuntimeTaskSessionSummary[];
+	// 行动者解析 lookups（dd2db 1a）。测试注入用；缺省为读 workspace 索引与 board.json 的生产实现。
+	kanbanActorResolutionLookups?: KanbanActorResolutionLookups;
+	// 任务离开看板导致队列被丢弃之后，让出队引擎刷新缓存并重发投影。
+	onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard?: (
+		workspaceId: string,
+		snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot,
+	) => void;
 }
 
 function normalizeOptionalTaskWorkspaceScopeInput(
@@ -432,17 +469,37 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		ensureWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeEnsureRequest(input);
-			return await ensureTaskWorktreeIfDoesntExist({
+			const ensureRequestReceivedAt = Date.now();
+			const ensured = await ensureTaskWorktreeIfDoesntExist({
 				cwd: workspaceScope.workspacePath,
 				taskId: body.taskId,
 				baseRef: body.baseRef,
 				worktreeMode: body.worktreeMode,
 			});
+			// 浏览器启动任务是两次独立 RPC：先 ensureWorktree、再 startTaskSession。这一步失败时浏览器只弹一条
+			// toast，卡片停在 In Progress 且没有会话，而 startTaskSession 根本没被调用——启动诊断日志里一行
+			// 都没有，「新任务起不来」在服务端无从查起（高负载下锁等待超时就是这样消失的）。在这里补记。
+			if (!ensured.ok) {
+				void recordTaskSessionStartDiagnostic({
+					event: "failed",
+					workspaceId: workspaceScope.workspaceId,
+					taskId: body.taskId,
+					requestedAgentId: null,
+					effectiveAgentId: null,
+					phase: "ensure_task_worktree",
+					elapsedMs: Date.now() - ensureRequestReceivedAt,
+					error: ensured.error ?? null,
+					session: null,
+				});
+			}
+			return ensured;
 		},
 		deleteWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeDeleteRequest(input);
 			// 删除目录前尽力落最后一份 Git 状态快照。Done-stage guard 属独立任务；这里的
 			// provenance 采集失败不得把既有 worktree cleanup 变成破坏性行为变化。
+			// 拿不到 live 快照的原因留到删除成功后记成族 3 事实（Y-PHASE-3）：1c 的落地判据据此知道「最后一份快照不新鲜」。
+			let finalTaskCommitIntegrationProbeFailureReason: string | null = null;
 			try {
 				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 				const card = board.columns
@@ -455,7 +512,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						baseRef: card.baseRef,
 						worktreeMode: body.worktreeMode,
 					});
-					await probeAndRefreshTaskCommitIntegrationProvenance({
+					const finalWorkspaceGitStatus = await probeAndRefreshTaskCommitIntegrationProvenance({
 						workspaceId: workspaceScope.workspaceId,
 						taskId: body.taskId,
 						repoPath: workspaceScope.workspacePath,
@@ -464,17 +521,30 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						worktreeMode: body.worktreeMode,
 						worktreeExists: pathInfo.exists,
 					});
+					if (finalWorkspaceGitStatus.observationSource !== "live_worktree") {
+						finalTaskCommitIntegrationProbeFailureReason = `final_probe_observation_source_was_${finalWorkspaceGitStatus.observationSource}`;
+					}
+				} else {
+					finalTaskCommitIntegrationProbeFailureReason = "task_card_not_found_on_board_at_worktree_deletion";
 				}
-			} catch {
+			} catch (error) {
 				// best effort，真正的保护由另一个 Done-stage guard task 实现。
+				finalTaskCommitIntegrationProbeFailureReason = `final_probe_threw:${error instanceof Error ? error.message : String(error)}`;
 			}
 			const deletionResult = await deleteTaskWorktree({
 				repoPath: workspaceScope.workspacePath,
 				taskId: body.taskId,
 				worktreeMode: body.worktreeMode,
 			});
-			if (deletionResult.ok && body.removeTaskCommitIntegrationProvenanceAfterWorktreeDeletion === true) {
-				await removeTaskCommitIntegrationProvenance(workspaceScope.workspaceId, body.taskId);
+			// 删 worktree 不再连带删除 task commit provenance（落地数据保全，Y-PHASE-3）：1c 的共享落地判据要读这份数据。
+			if (deletionResult.removed && finalTaskCommitIntegrationProbeFailureReason !== null) {
+				recordFactObservedByActiveKanbanRuntimeWithoutBlocking({
+					observedFactKind: "task_commit_integration_final_snapshot_unavailable_at_worktree_deletion",
+					observingKanbanRuntimeSystemComponentName: "workspace_api_task_worktree_deletion",
+					subjectWorkspaceId: workspaceScope.workspaceId,
+					subjectTaskId: body.taskId,
+					eventPayload: { finalTaskCommitIntegrationProbeFailureReason },
+				});
 			}
 			return deletionResult;
 		},
@@ -552,7 +622,20 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				ok: true,
 			};
 		},
-		saveState: async (workspaceScope, input) => {
+		saveState: async (workspaceScope, requestInput, kanbanRequestOriginActorEvidence) => {
+			// 发起方标注只进关系账本，不随 board 落盘。
+			const { boardMutationInitiatorAnnotationsForTaskMutationEventCapture, ...input } = requestInput;
+			// 在 board 锁之外先解析行动者：带页面 nonce 的请求先解析为「来自页面、缺标注」，漏斗再按标注逐条细化；
+			// 带 CLI 声明头的整份 PUT 按声明解析（标注一律不采信）；两者都没有的是裸 tRPC 调用方。
+			const taskMutationIntentWithResolvedActor = {
+				...(await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+					taskMutationIntentKind: "web_ui_workspace_board_state_save",
+					kanbanRequestOriginActorEvidence,
+					kanbanActorResolutionLookups: deps.kanbanActorResolutionLookups,
+				})),
+				webUiBoardMutationInitiatorAnnotationsForTaskMutationEventCapture:
+					boardMutationInitiatorAnnotationsForTaskMutationEventCapture ?? [],
+			};
 			try {
 				for (const summary of deps.listProjectRuntimeSessionSummaries(workspaceScope.workspaceId)) {
 					input.sessions[summary.taskId] = summary;
@@ -566,7 +649,11 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				// 偶发漏清一条孤儿草稿——不丢任何用户内容，而浏览器侧的删除 handler 本来也会各自清一次，
 				// 这里是给「不经那个 handler 的写入」兜底。
 				const boardBeforeSave = await readBoardBeforeSaveForOrphanedDraftCleanup(workspaceScope.workspaceId);
-				const response = await saveWorkspaceState(workspaceScope.workspacePath, input);
+				const response = await saveWorkspaceState(
+					workspaceScope.workspacePath,
+					taskMutationIntentWithResolvedActor,
+					input,
+				);
 				await discardTaskEditDraftsForTasksRemovedFromSavedBoard(
 					workspaceScope.workspaceId,
 					boardBeforeSave,
@@ -576,6 +663,12 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					workspaceScope.workspacePath,
 					boardBeforeSave,
 					response.board,
+				);
+				await discardQueuedTaskPromptDeliveriesForTasksRemovedFromSavedBoard(
+					workspaceScope.workspaceId,
+					boardBeforeSave,
+					response.board,
+					deps.onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard,
 				);
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceScope.workspaceId, workspaceScope.workspacePath);
 				void deps.broadcastRuntimeProjectsUpdated(workspaceScope.workspaceId);
@@ -593,12 +686,18 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				throw error;
 			}
 		},
-		addBacklogTask: async (workspaceScope, input) => {
+		addBacklogTask: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
 			const prompt = input.prompt.trim();
 			if (!prompt) {
 				throw new TRPCError({ code: "BAD_REQUEST", message: "Task prompt is required." });
 			}
 			const runtimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+			const taskMutationIntentWithResolvedActor =
+				await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+					taskMutationIntentKind: "runtime_trpc_add_backlog_task",
+					kanbanRequestOriginActorEvidence,
+					kanbanActorResolutionLookups: deps.kanbanActorResolutionLookups,
+				});
 			// Reuses the exact `kanban task create` core pipeline: atomic locked
 			// load→mutate→save via mutateWorkspaceState + the pure addTaskToColumn. baseRef is
 			// resolved server-side from the workspace's git state (same rule as the CLI).
@@ -608,43 +707,83 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			const rememberedBaseRefForProject =
 				runtimeConfig.userInterfacePreferencesSharedAcrossBrowserOrigins
 					.mostRecentlyUsedTaskCreateBaseRefByProjectId[workspaceScope.workspaceId] ?? null;
-			const mutationResponse = await mutateWorkspaceState(workspaceScope.workspacePath, (state) => {
-				const resolvedBaseRef = resolveTaskCreateBaseRef({
-					rememberedBaseRefForProject,
-					repository: state.git,
-				}).baseRef;
-				if (!resolvedBaseRef) {
-					throw new TRPCError({
-						code: "BAD_REQUEST",
-						message: "Could not determine task base branch for this workspace.",
-					});
-				}
-				const result = addTaskToColumn(
-					state.board,
-					"backlog",
-					{
-						title: input.title,
-						prompt,
-						startInPlanMode: runtimeConfig.newTaskStartInPlanModeByDefault,
-						ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
-						// 这条入口不让用户挑 agent，卡片 agentId 恒为空 ⇒ 这张卡实际会跑工作区默认 agent。
-						// 不把它传下去的话，「工作区默认是 omp」的新卡不会固化通道，之后改全局默认会反向改掉它。
-						workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
-						baseRef: resolvedBaseRef,
-						images: input.images,
-					},
-					() => globalThis.crypto.randomUUID(),
-				);
-				return {
-					board: result.board,
-					value: { taskId: result.task.id },
-				};
-			});
+			// Y-EVENT-12：id 由 runtime 对全局 task 身份登记簿分配；漏斗在锁内再校验一次。
+			const allocatedTaskIdForNewBacklogTaskCard =
+				await allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable({
+					requestingWorkspaceId: workspaceScope.workspaceId,
+				});
+			const mutationResponse = await mutateWorkspaceState(
+				workspaceScope.workspacePath,
+				taskMutationIntentWithResolvedActor,
+				(state) => {
+					const resolvedBaseRef = resolveTaskCreateBaseRef({
+						rememberedBaseRefForProject,
+						repository: state.git,
+					}).baseRef;
+					if (!resolvedBaseRef) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: "Could not determine task base branch for this workspace.",
+						});
+					}
+					const result = addTaskToColumn(
+						state.board,
+						"backlog",
+						{
+							title: input.title,
+							prompt,
+							startInPlanMode: runtimeConfig.newTaskStartInPlanModeByDefault,
+							ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
+							// 这条入口不让用户挑 agent，卡片 agentId 恒为空 ⇒ 这张卡实际会跑工作区默认 agent。
+							// 不把它传下去的话，「工作区默认是 omp」的新卡不会固化通道，之后改全局默认会反向改掉它。
+							workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
+							baseRef: resolvedBaseRef,
+							images: input.images,
+							...(allocatedTaskIdForNewBacklogTaskCard !== null
+								? { taskId: allocatedTaskIdForNewBacklogTaskCard }
+								: {}),
+						},
+						() => globalThis.crypto.randomUUID(),
+					);
+					return {
+						board: result.board,
+						value: { taskId: result.task.id },
+					};
+				},
+			);
 			if (mutationResponse.saved) {
 				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceScope.workspaceId, workspaceScope.workspacePath);
 				void deps.broadcastRuntimeProjectsUpdated(workspaceScope.workspaceId);
 			}
 			return { taskId: mutationResponse.value.taskId };
+		},
+		persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: async (
+			workspaceScope,
+			input,
+			kanbanRequestOriginActorEvidence,
+		) => {
+			return await persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart(
+				{
+					broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
+					broadcastRuntimeProjectsUpdated: deps.broadcastRuntimeProjectsUpdated,
+					kanbanActorResolutionLookups: deps.kanbanActorResolutionLookups,
+				},
+				workspaceScope,
+				input,
+				kanbanRequestOriginActorEvidence,
+			);
+		},
+		applyKanbanCliTaskBoardMutation: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
+			return await applyKanbanCliTaskBoardMutation(
+				{
+					broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
+					broadcastRuntimeProjectsUpdated: deps.broadcastRuntimeProjectsUpdated,
+					kanbanActorResolutionLookups: deps.kanbanActorResolutionLookups,
+				},
+				workspaceScope,
+				input,
+				kanbanRequestOriginActorEvidence,
+			);
 		},
 		loadWorkspaceChanges: async (workspaceScope) => {
 			return await getWorkspaceChanges(workspaceScope.workspacePath);

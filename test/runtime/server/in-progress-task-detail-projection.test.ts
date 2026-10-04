@@ -32,7 +32,6 @@ function makeBoard(columnToTaskIds: Partial<Record<RuntimeBoardColumnId, string[
 			title: id,
 			cards: (columnToTaskIds[id] ?? []).map((taskId) => makeCard(taskId)),
 		})),
-		dependencies: [],
 	};
 }
 
@@ -133,7 +132,6 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 	it("agentId 优先取 session、回退卡片声明", () => {
 		const board: RuntimeBoardData = {
 			columns: [{ id: "in_progress", title: "in_progress", cards: [makeCard("a", { agentId: "codex" })] }],
-			dependencies: [],
 		};
 		const result = collectInProgressTaskDetailsFromBoard(board, {});
 		expect(result[0]?.agentId).toBe("codex");

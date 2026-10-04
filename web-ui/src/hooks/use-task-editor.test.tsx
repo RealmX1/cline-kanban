@@ -18,6 +18,10 @@ import type {
 	WorkspaceTaskEditDraftsSnapshot,
 } from "@/runtime/types";
 import { readEffectiveUserInterfacePreferenceValue } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
+import {
+	discardAllPendingWebUiBoardMutationInitiatorRecords,
+	readPendingWebUiBoardMutationInitiatorForTaskCardAspect,
+} from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
@@ -150,6 +154,41 @@ const fakeTaskNameSuggestionEndpoint = vi.hoisted(() => ({
 	callCount: 0,
 }));
 
+// 建卡 id 只由 runtime 分配（dd2db Y-EVENT-12）：测试里把预分配池换成确定性的递增 id，不发真实分配请求。
+// takeResultStatusOverride 用来模拟「池里还没备好」「runtime 分配不出 id」。
+const runtimeAllocatedTaskIdPrefetchPoolStandIn = vi.hoisted(() => ({
+	nextRuntimeAllocatedTaskIdStandInSequence: 0,
+	takeResultStatusOverride: null as
+		| null
+		| "not_enough_runtime_allocated_task_ids_prefetched_yet"
+		| "runtime_cannot_allocate_task_ids_because_relation_ledger_is_unavailable",
+	ensuredWorkspaceIds: [] as string[],
+}));
+
+vi.mock("@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards", () => ({
+	ensureRuntimeAllocatedTaskIdPrefetchPoolFilled: (workspaceId: string) => {
+		runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds.push(workspaceId);
+	},
+	takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards: (_workspaceId: string, count: number) => {
+		if (runtimeAllocatedTaskIdPrefetchPoolStandIn.takeResultStatusOverride) {
+			return { status: runtimeAllocatedTaskIdPrefetchPoolStandIn.takeResultStatusOverride };
+		}
+		return {
+			status: "taken" as const,
+			runtimeAllocatedTaskIds: Array.from({ length: count }, () => {
+				runtimeAllocatedTaskIdPrefetchPoolStandIn.nextRuntimeAllocatedTaskIdStandInSequence += 1;
+				return `r${String(runtimeAllocatedTaskIdPrefetchPoolStandIn.nextRuntimeAllocatedTaskIdStandInSequence).padStart(4, "0")}`;
+			}),
+		};
+	},
+}));
+
+// cf427：建卡同时向 runtime 发起「启动 agent 前先落盘」。这里只记录调用，落盘与等待语义在该模块自己的测试里。
+const beginPersistingNewBacklogTaskCardsMock = vi.hoisted(() => vi.fn());
+vi.mock("@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start", () => ({
+	beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: beginPersistingNewBacklogTaskCardsMock,
+}));
+
 vi.mock("@/runtime/task-name-suggestion-query", () => ({
 	suggestTaskNamesFromTaskDescription: vi.fn(() => {
 		fakeTaskNameSuggestionEndpoint.callCount += 1;
@@ -182,8 +221,12 @@ function createBoard(tasks: BoardCard[] = []): BoardData {
 			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
-		dependencies: [],
 	};
+}
+
+// 字段顺序与 runtimeTaskImageSchema / fileToTaskImage 一致（id, data, mimeType, name?）。
+function createTaskImage(id: string, data: string, overrides: Partial<TaskImage> = {}): TaskImage {
+	return { id, data, mimeType: "image/png", ...overrides };
 }
 
 interface HookSnapshot {
@@ -201,6 +244,7 @@ interface HookSnapshot {
 	newTaskConversationMode: RuntimeTaskConversationMode;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
+	editTaskImages: TaskImage[];
 	editTaskStartInPlanMode: boolean;
 	editTaskWorktreeMode: RuntimeTaskWorktreeMode;
 	editTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
@@ -219,6 +263,7 @@ interface HookSnapshot {
 	handleSaveEditedTask: () => string | null;
 	handleSaveAndStartEditedTask: () => void;
 	setEditTaskPrompt: (value: string) => void;
+	setEditTaskImages: (value: TaskImage[]) => void;
 	setEditTaskAutoReviewEnabled: (value: boolean) => void;
 	setEditTaskAutoReviewMode: (value: TaskAutoReviewMode) => void;
 	setEditTaskWorktreeMode: (value: RuntimeTaskWorktreeMode) => void;
@@ -303,6 +348,7 @@ function HookHarness({
 			newTaskConversationMode: editor.newTaskConversationMode,
 			editingTaskId: editor.editingTaskId,
 			editTaskPrompt: editor.editTaskPrompt,
+			editTaskImages: editor.editTaskImages,
 			editTaskStartInPlanMode: editor.editTaskStartInPlanMode,
 			editTaskWorktreeMode: editor.editTaskWorktreeMode,
 			editTaskAgentSessionInitialization: editor.editTaskAgentSessionInitialization,
@@ -321,6 +367,7 @@ function HookHarness({
 			handleSaveEditedTask: editor.handleSaveEditedTask,
 			handleSaveAndStartEditedTask: editor.handleSaveAndStartEditedTask,
 			setEditTaskPrompt: editor.setEditTaskPrompt,
+			setEditTaskImages: editor.setEditTaskImages,
 			setEditTaskAutoReviewEnabled: editor.setEditTaskAutoReviewEnabled,
 			setEditTaskAutoReviewMode: editor.setEditTaskAutoReviewMode,
 			setEditTaskWorktreeMode: editor.setEditTaskWorktreeMode,
@@ -339,6 +386,7 @@ function HookHarness({
 		editor.handleCreateTasks,
 		editor.handleOpenCreateTask,
 		editor.editTaskPrompt,
+		editor.editTaskImages,
 		editor.editTaskAgentSessionInitialization,
 		editor.editTaskConversationMode,
 		editor.editTaskStartInPlanMode,
@@ -365,6 +413,7 @@ function HookHarness({
 		editor.setEditTaskAgentSessionInitialization,
 		editor.setEditTaskConversationMode,
 		editor.setEditTaskPrompt,
+		editor.setEditTaskImages,
 		editor.setNewTaskImages,
 		editor.setNewTaskBranchRef,
 		editor.setNewTaskPrompt,
@@ -385,10 +434,14 @@ describe("useTaskEditor", () => {
 	beforeEach(() => {
 		localStorage.clear();
 		resetTaskEditDraftStoreForTests();
+		beginPersistingNewBacklogTaskCardsMock.mockClear();
 		fakeWorkspaceTaskEditDraftServer.snapshot = null;
 		fakeWorkspaceTaskEditDraftServer.releaseFetch = null;
 		fakeTaskNameSuggestionEndpoint.respond = null;
 		fakeTaskNameSuggestionEndpoint.callCount = 0;
+		runtimeAllocatedTaskIdPrefetchPoolStandIn.takeResultStatusOverride = null;
+		runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds = [];
+		discardAllPendingWebUiBoardMutationInitiatorRecords();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -434,6 +487,141 @@ describe("useTaskEditor", () => {
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Fix the SSO redirect");
 		// 用户自己给了名字就不该再去问 AI。
 		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(0);
+	});
+
+	describe("建卡 id 由 runtime 预分配（dd2db Y-EVENT-12）与发起方登记（Y-EVENT-8）", () => {
+		async function renderCreateHarness(): Promise<{ current: HookSnapshot | null }> {
+			const captured: { current: HookSnapshot | null } = { current: null };
+			await act(async () => {
+				root.render(
+					<HookHarness
+						initialBoard={createBoard()}
+						onSnapshot={(snapshot) => {
+							captured.current = snapshot;
+						}}
+					/>,
+				);
+			});
+			return captured;
+		}
+
+		it("primes the project's id pool on mount and again when the create dialog opens", async () => {
+			const captured = await renderCreateHarness();
+			expect(runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds).toEqual(["project-1"]);
+
+			await act(async () => {
+				requireSnapshot(captured.current).handleOpenCreateTask();
+			});
+			expect(runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds).toEqual(["project-1", "project-1"]);
+		});
+
+		it("creates the card with the prefetched runtime id and records the creation as a user gesture", async () => {
+			const captured = await renderCreateHarness();
+			await act(async () => {
+				requireSnapshot(captured.current).setNewTaskPrompt("Created with a runtime id");
+			});
+			let createdTaskId: string | null = null;
+			await act(async () => {
+				createdTaskId = requireSnapshot(captured.current).handleCreateTask({ taskNameOverride: "Named" });
+			});
+
+			expect(createdTaskId).toMatch(/^r\d{4}$/u);
+			expect(requireSnapshot(captured.current).board.columns[0]?.cards.map((card) => card.id)).toEqual([
+				createdTaskId,
+			]);
+			expect(
+				readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId ?? "", "task_card_creation"),
+			).toBe("web_ui_user_gesture");
+			expect(beginPersistingNewBacklogTaskCardsMock).toHaveBeenLastCalledWith({
+				workspaceId: "project-1",
+				newBacklogTaskCardsCreatedFromWebUi: [expect.objectContaining({ id: createdTaskId, title: "Named" })],
+				boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+			});
+		});
+
+		it("takes one runtime id per prompt when creating a batch", async () => {
+			const captured = await renderCreateHarness();
+			let createdTaskIds: string[] = [];
+			await act(async () => {
+				createdTaskIds = requireSnapshot(captured.current).handleCreateTasks(["First", "Second", "Third"]);
+			});
+
+			expect(createdTaskIds).toHaveLength(3);
+			expect(new Set(createdTaskIds).size).toBe(3);
+			for (const taskId of createdTaskIds) {
+				expect(taskId).toMatch(/^r\d{4}$/u);
+				expect(readPendingWebUiBoardMutationInitiatorForTaskCardAspect(taskId, "task_card_creation")).toBe(
+					"web_ui_user_gesture",
+				);
+			}
+			// 整批一次请求落盘，顺序取本地 backlog 列自上而下（后建的在上）。
+			expect(beginPersistingNewBacklogTaskCardsMock).toHaveBeenLastCalledWith(
+				expect.objectContaining({
+					workspaceId: "project-1",
+					newBacklogTaskCardsCreatedFromWebUi: [...createdTaskIds]
+						.reverse()
+						.map((taskId) => expect.objectContaining({ id: taskId })),
+				}),
+			);
+		});
+
+		it.each([
+			"not_enough_runtime_allocated_task_ids_prefetched_yet",
+			"runtime_cannot_allocate_task_ids_because_relation_ledger_is_unavailable",
+		] as const)(
+			"blocks creation and keeps the draft instead of inventing a local id (%s)",
+			async (takeResultStatus) => {
+				const captured = await renderCreateHarness();
+				await act(async () => {
+					requireSnapshot(captured.current).handleOpenCreateTask();
+					requireSnapshot(captured.current).setNewTaskPrompt("Waiting for an id");
+				});
+				runtimeAllocatedTaskIdPrefetchPoolStandIn.takeResultStatusOverride = takeResultStatus;
+
+				let createdTaskId: string | null = "not-called";
+				let createdTaskIds: string[] = ["not-called"];
+				await act(async () => {
+					createdTaskId = requireSnapshot(captured.current).handleCreateTask();
+					createdTaskIds = requireSnapshot(captured.current).handleCreateTasks(["Batch A", "Batch B"]);
+				});
+
+				expect(createdTaskId).toBeNull();
+				expect(createdTaskIds).toEqual([]);
+				const snapshot = requireSnapshot(captured.current);
+				expect(snapshot.board.columns[0]?.cards).toEqual([]);
+				expect(snapshot.newTaskPrompt).toBe("Waiting for an id");
+				expect(snapshot.isInlineTaskCreateOpen).toBe(true);
+			},
+		);
+
+		it("records title edits as user gestures but leaves the asynchronous AI title backfill without an initiator", async () => {
+			const captured = await renderCreateHarness();
+			await act(async () => {
+				requireSnapshot(captured.current).setNewTaskPrompt("Login redirects to a blank page after SSO");
+			});
+			let createdTaskId = "";
+			await act(async () => {
+				createdTaskId = requireSnapshot(captured.current).handleCreateTask({ taskNameOverride: "   " }) ?? "";
+			});
+			discardAllPendingWebUiBoardMutationInitiatorRecords();
+
+			await act(async () => {
+				fakeTaskNameSuggestionEndpoint.respond?.({
+					status: "suggested",
+					suggestedTaskNames: ["Fix the SSO redirect"],
+				});
+			});
+			expect(
+				readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId, "task_card_field_values"),
+			).toBeNull();
+
+			await act(async () => {
+				requireSnapshot(captured.current).handleSaveTaskTitle(createdTaskId, "Renamed by the user");
+			});
+			expect(readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId, "task_card_field_values")).toBe(
+				"web_ui_user_gesture",
+			);
+		});
 	});
 
 	it("derives the title from the prompt when the name field is empty, then backfills the suggested name", async () => {
@@ -1025,6 +1213,182 @@ describe("useTaskEditor", () => {
 
 		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Initial prompt");
+	});
+
+	it("does not autosave a draft when an image-bearing edit form still matches the task", async () => {
+		// 粘贴图是 MB 级 base64：表单没动过时，去抖那一拍必须判出「等于任务本体」并什么也不写。
+		// 任务显式带上与 harness 默认一致的 permission mode，让图片成为唯一可能不等的字段。
+		const largeImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(1_000_000)}`);
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				images: [largeImage],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await settleTaskEditDraftPersistence();
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
+	});
+
+	it("autosaves a draft when an edited image keeps its byte length but changes its content", async () => {
+		// 同 id / 同 mimeType / data 长度也相同，只有内容不同：长度早退放它过去，必须靠 data 本身判出不等。
+		const originalImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(1_000_000)}`);
+		const editedImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(999_999)}b`);
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				images: [originalImage],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskImages([editedImage]);
+		});
+		await settleTaskEditDraftPersistence();
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toContain("image-1");
+	});
+
+	it("does not autosave a draft when images are replaced by copies with identical content", async () => {
+		// 内容逐字相同、引用不同的另一份图片对象（含可选 name）：也必须判等，
+		// 否则任何一次「重建图片数组」都会被当成改动而落一份假草稿。
+		const largeData = `data:image/png;base64,${"a".repeat(1_000_000)}`;
+		const taskImage = createTaskImage("image-1", largeData, { name: "paste.png" });
+		const identicalCopy = createTaskImage("image-1", largeData, { name: "paste.png" });
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				images: [taskImage],
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskImages([identicalCopy]);
+		});
+		await settleTaskEditDraftPersistence();
+
+		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
+	});
+
+	it("rebases an image-bearing edit form whose images were only replaced by identical copies", async () => {
+		// 迟到的服务端快照只有在「用户还没动过表单」时才允许重铺。图片被换成内容相同的副本不算动过——
+		// 否则每一次图片数组重建都会把重铺闸门焊死，胜出的服务端草稿永远铺不上来。
+		const task = createTask("task-1", "Initial prompt", 1);
+		const mirrorImage = createTaskImage("image-1", `data:image/png;base64,${"a".repeat(1_000_000)}`);
+		const serverImage = createTaskImage("image-2", `data:image/png;base64,${"c".repeat(1_000_000)}`);
+		const losingMirrorDraft: RuntimeTaskEditDraft = {
+			taskId: task.id,
+			prompt: "Losing mirror draft",
+			images: [mirrorImage],
+			startInPlanMode: false,
+			autoReviewEnabled: false,
+			autoReviewMode: "commit",
+			branchRef: "main",
+			worktreeMode: "branch",
+			savedAt: 1_000,
+		};
+		const winningServerDraft: RuntimeTaskEditDraft = {
+			...losingMirrorDraft,
+			prompt: "Winning server draft",
+			images: [serverImage],
+			savedAt: 2_000,
+		};
+		window.localStorage.setItem(
+			LocalStorageKey.TaskEditDrafts,
+			JSON.stringify({ drafts: { [JSON.stringify(["project-1", task.id])]: losingMirrorDraft } }),
+		);
+		fakeWorkspaceTaskEditDraftServer.snapshot = {
+			draftsByTaskId: { [task.id]: winningServerDraft },
+			supersededDraftCopies: [],
+		};
+
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([task])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+
+		// 用户把图片「换」成了内容逐字相同的另一份对象——表单值与铺表种子判等，重铺闸门必须放行。
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskImages([createTaskImage("image-1", mirrorImage.data)]);
+		});
+
+		await act(async () => {
+			fakeWorkspaceTaskEditDraftServer.releaseFetch?.();
+			await new Promise((resolve) => {
+				setTimeout(resolve, 0);
+			});
+		});
+
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Winning server draft");
+		expect(requireSnapshot(latestSnapshot).editTaskImages).toEqual([serverImage]);
 	});
 
 	it("does not disable start in plan mode when auto review is enabled while editing", async () => {

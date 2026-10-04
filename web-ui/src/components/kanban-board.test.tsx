@@ -4,7 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { KanbanBoard, type RequestProgrammaticCardMove } from "@/components/kanban-board";
-import type { BoardData } from "@/types";
+import { LocalStorageKey } from "@/storage/local-storage-store";
+import type { BoardColumnId, BoardData } from "@/types";
 
 const dndMock = vi.hoisted(() => ({
 	sensorApi: null as {
@@ -16,6 +17,8 @@ const dndMock = vi.hoisted(() => ({
 const boardColumnMock = vi.hoisted(() => ({
 	onSaveTitleByColumnId: new Map<string, ((taskId: string, title: string) => void) | undefined>(),
 	onRequestStartAllReadyBacklogTasksByColumnId: new Map<string, (() => void) | undefined>(),
+	onCollapseColumnByColumnId: new Map<string, ((columnId: BoardColumnId) => void) | undefined>(),
+	columnFlexStyleByColumnId: new Map<string, { flex: string } | undefined>(),
 }));
 
 vi.mock("@hello-pangea/dnd", async () => {
@@ -48,13 +51,19 @@ vi.mock("@/components/board-column", () => ({
 		column,
 		onSaveTitle,
 		onRequestStartAllReadyBacklogTasks,
+		onCollapseColumn,
+		columnFlexStyle,
 	}: {
 		column: BoardData["columns"][number];
 		onSaveTitle?: (taskId: string, title: string) => void;
 		onRequestStartAllReadyBacklogTasks?: () => void;
+		onCollapseColumn?: (columnId: BoardColumnId) => void;
+		columnFlexStyle?: { flex: string };
 	}): React.ReactElement => {
 		boardColumnMock.onSaveTitleByColumnId.set(column.id, onSaveTitle);
 		boardColumnMock.onRequestStartAllReadyBacklogTasksByColumnId.set(column.id, onRequestStartAllReadyBacklogTasks);
+		boardColumnMock.onCollapseColumnByColumnId.set(column.id, onCollapseColumn);
+		boardColumnMock.columnFlexStyleByColumnId.set(column.id, columnFlexStyle);
 		return (
 			<section data-column-id={column.id}>
 				<div className="kb-column-cards">
@@ -67,16 +76,19 @@ vi.mock("@/components/board-column", () => ({
 	},
 }));
 
-vi.mock("@/components/dependencies/dependency-overlay", () => ({
-	DependencyOverlay: (): null => null,
-}));
-
-vi.mock("@/components/dependencies/use-dependency-linking", () => ({
-	useDependencyLinking: () => ({
-		draft: null,
-		onDependencyPointerDown: vi.fn(),
-		onDependencyPointerEnter: vi.fn(),
-	}),
+// 折叠竖条的真实实现依赖 Droppable（本文件的 dnd mock 只提供 DragDropContext），这里只保留可点击展开的骨架。
+vi.mock("@/components/board-column-collapsed-vertical-strip", () => ({
+	BoardColumnCollapsedVerticalStrip: ({
+		column,
+		onExpandColumn,
+	}: {
+		column: BoardData["columns"][number];
+		onExpandColumn: (columnId: BoardColumnId) => void;
+	}): React.ReactElement => (
+		<section data-column-id={column.id} data-kanban-board-column-collapsed="true">
+			<button type="button" aria-label={`Expand ${column.title} column`} onClick={() => onExpandColumn(column.id)} />
+		</section>
+	),
 }));
 
 function createRect(left: number, top: number, width: number, height: number): DOMRect {
@@ -101,6 +113,9 @@ describe("KanbanBoard", () => {
 	beforeEach(() => {
 		boardColumnMock.onSaveTitleByColumnId.clear();
 		boardColumnMock.onRequestStartAllReadyBacklogTasksByColumnId.clear();
+		boardColumnMock.onCollapseColumnByColumnId.clear();
+		boardColumnMock.columnFlexStyleByColumnId.clear();
+		window.localStorage.clear();
 		vi.useFakeTimers();
 		vi.spyOn(performance, "now").mockImplementation(() => Date.now());
 		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback: FrameRequestCallback) => {
@@ -210,7 +225,6 @@ describe("KanbanBoard", () => {
 				{ id: "review", title: "Review", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		let requestMove: RequestProgrammaticCardMove | null = null;
@@ -222,7 +236,6 @@ describe("KanbanBoard", () => {
 					taskSessions={{}}
 					onCardSelect={() => {}}
 					onCreateTask={() => {}}
-					dependencies={[]}
 					onDragEnd={() => {}}
 					onRequestProgrammaticCardMoveReady={(nextRequestMove) => {
 						requestMove = nextRequestMove;
@@ -247,6 +260,11 @@ describe("KanbanBoard", () => {
 	});
 
 	it("wires onSaveTitle to every column including done/trash so inline title editing stays reachable", async () => {
+		// validation / done 默认折叠（不挂 BoardColumn）；这里先把它们展开，断言展开后的 wiring。
+		window.localStorage.setItem(
+			LocalStorageKey.KanbanBoardColumnCollapsedOverrides,
+			JSON.stringify({ validation: false, trash: false }),
+		);
 		const onSaveTaskTitle = vi.fn();
 		const board: BoardData = {
 			columns: [
@@ -256,7 +274,6 @@ describe("KanbanBoard", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		await act(async () => {
@@ -267,7 +284,6 @@ describe("KanbanBoard", () => {
 					onCardSelect={() => {}}
 					onCreateTask={() => {}}
 					onSaveTaskTitle={onSaveTaskTitle}
-					dependencies={[]}
 					onDragEnd={() => {}}
 				/>,
 			);
@@ -290,7 +306,6 @@ describe("KanbanBoard", () => {
 				{ id: "validation", title: "Validation", cards: [] },
 				{ id: "trash", title: "Done", cards: [] },
 			],
-			dependencies: [],
 		};
 
 		await act(async () => {
@@ -301,7 +316,6 @@ describe("KanbanBoard", () => {
 					onCardSelect={() => {}}
 					onCreateTask={() => {}}
 					onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
-					dependencies={[]}
 					onDragEnd={() => {}}
 				/>,
 			);
@@ -311,5 +325,164 @@ describe("KanbanBoard", () => {
 			onRequestStartAllReadyBacklogTasks,
 		);
 		expect(boardColumnMock.onRequestStartAllReadyBacklogTasksByColumnId.get("in_progress")).toBeUndefined();
+	});
+	function createFiveEmptyColumnBoard(): BoardData {
+		return {
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [] },
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "validation", title: "Validation", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+		};
+	}
+
+	async function renderFiveEmptyColumnBoard(
+		onRequestProgrammaticCardMoveReady?: (requestMove: RequestProgrammaticCardMove | null) => void,
+		board: BoardData = createFiveEmptyColumnBoard(),
+	): Promise<void> {
+		await act(async () => {
+			root.render(
+				<KanbanBoard
+					data={board}
+					taskSessions={{}}
+					onCardSelect={() => {}}
+					onCreateTask={() => {}}
+					onDragEnd={() => {}}
+					onRequestProgrammaticCardMoveReady={onRequestProgrammaticCardMoveReady}
+				/>,
+			);
+		});
+	}
+
+	function readCollapsedColumnIds(): string[] {
+		return Array.from(
+			container.querySelectorAll<HTMLElement>('section[data-kanban-board-column-collapsed="true"]'),
+			(element) => element.dataset.columnId ?? "",
+		);
+	}
+
+	it("collapses validation and done by default and renders a width handle only after expanded columns", async () => {
+		await renderFiveEmptyColumnBoard();
+
+		expect(readCollapsedColumnIds()).toEqual(["validation", "trash"]);
+		expect(Array.from(boardColumnMock.onCollapseColumnByColumnId.keys())).toEqual([
+			"backlog",
+			"in_progress",
+			"review",
+		]);
+		const resizeHandleLabels = Array.from(
+			container.querySelectorAll<HTMLElement>('.kb-board > [role="separator"]'),
+			(element) => element.getAttribute("aria-label"),
+		);
+		expect(resizeHandleLabels).toEqual([
+			"Resize Backlog column",
+			"Resize In Progress column",
+			"Resize Review column",
+		]);
+		expect(boardColumnMock.columnFlexStyleByColumnId.get("backlog")).toEqual({ flex: "1 1 0" });
+	});
+
+	it("expands a collapsed column from its strip and collapses any expanded column, persisting both", async () => {
+		await renderFiveEmptyColumnBoard();
+
+		await act(async () => {
+			container.querySelector<HTMLButtonElement>('button[aria-label="Expand Done column"]')?.click();
+		});
+		expect(readCollapsedColumnIds()).toEqual(["validation"]);
+
+		await act(async () => {
+			boardColumnMock.onCollapseColumnByColumnId.get("backlog")?.("backlog");
+		});
+		expect(readCollapsedColumnIds()).toEqual(["backlog", "validation"]);
+		expect(
+			JSON.parse(window.localStorage.getItem(LocalStorageKey.KanbanBoardColumnCollapsedOverrides) ?? "{}"),
+		).toEqual({ trash: false, backlog: true });
+	});
+
+	it("applies persisted custom widths as a fixed flex-basis", async () => {
+		window.localStorage.setItem(LocalStorageKey.KanbanBoardColumnCustomWidthsPx, JSON.stringify({ review: 420 }));
+		await renderFiveEmptyColumnBoard();
+
+		expect(boardColumnMock.columnFlexStyleByColumnId.get("review")).toEqual({ flex: "0 0 420px" });
+		expect(boardColumnMock.columnFlexStyleByColumnId.get("backlog")).toEqual({ flex: "1 1 0" });
+	});
+
+	it("declines to animate a programmatic move into a collapsed column so the caller falls back to a direct move", async () => {
+		const tryGetLock = vi.fn();
+		dndMock.sensorApi = { tryGetLock };
+		const board = createFiveEmptyColumnBoard();
+		board.columns[2] = {
+			id: "review",
+			title: "Review",
+			cards: [
+				{
+					id: "source-task",
+					title: "Source task",
+					prompt: "Source task",
+					startInPlanMode: false,
+					baseRef: "main",
+					createdAt: 1,
+					updatedAt: 1,
+				},
+			],
+		};
+		let requestMove: RequestProgrammaticCardMove | null = null;
+		await renderFiveEmptyColumnBoard((nextRequestMove) => {
+			requestMove = nextRequestMove;
+		}, board);
+
+		let started: boolean | undefined;
+		await act(async () => {
+			started = (requestMove as RequestProgrammaticCardMove | null)?.({
+				taskId: "source-task",
+				fromColumnId: "review",
+				toColumnId: "trash",
+				insertAtTop: true,
+			});
+		});
+
+		expect(started).toBe(false);
+		expect(tryGetLock).not.toHaveBeenCalled();
+	});
+	it("resizes columns from the focused width handle with the keyboard, mirroring the mouse semantics", async () => {
+		window.localStorage.setItem(LocalStorageKey.KanbanBoardColumnCustomWidthsPx, JSON.stringify({ backlog: 300 }));
+		await renderFiveEmptyColumnBoard();
+		const pressKeyOnResizeHandle = async (columnTitle: string, key: string, shiftKey = false): Promise<void> => {
+			const handle = container.querySelector<HTMLElement>(
+				`.kb-board > [role="separator"][aria-label="Resize ${columnTitle} column"]`,
+			);
+			expect(handle?.tabIndex).toBe(0);
+			await act(async () => {
+				handle?.dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey, bubbles: true }));
+			});
+		};
+		const readStoredWidths = (): unknown =>
+			JSON.parse(window.localStorage.getItem(LocalStorageKey.KanbanBoardColumnCustomWidthsPx) ?? "{}");
+
+		expect(
+			container
+				.querySelector('.kb-board > [role="separator"][aria-label="Resize Backlog column"]')
+				?.getAttribute("aria-valuenow"),
+		).toBe("300");
+
+		await pressKeyOnResizeHandle("Backlog", "ArrowRight");
+		expect(boardColumnMock.columnFlexStyleByColumnId.get("backlog")).toEqual({ flex: "0 0 316px" });
+		expect(readStoredWidths()).toEqual({ backlog: 316 });
+
+		// 自动填充列（测试里实测宽度为 0）按 End 直接设到最大宽度，与当前实测宽度无关。
+		await pressKeyOnResizeHandle("Review", "End");
+		expect(readStoredWidths()).toEqual({ backlog: 316, review: 900 });
+
+		await pressKeyOnResizeHandle("Backlog", "ArrowLeft", true);
+		expect(readStoredWidths()).toEqual({ backlog: 300, in_progress: 300, review: 300 });
+
+		await pressKeyOnResizeHandle("Review", "Enter");
+		expect(readStoredWidths()).toEqual({ backlog: 300, in_progress: 300 });
+
+		await pressKeyOnResizeHandle("Backlog", "Delete", true);
+		expect(readStoredWidths()).toEqual({});
+		expect(boardColumnMock.columnFlexStyleByColumnId.get("backlog")).toEqual({ flex: "1 1 0" });
 	});
 });

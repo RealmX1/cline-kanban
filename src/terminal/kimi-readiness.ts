@@ -1,7 +1,7 @@
 // Kimi Code CLI 启动 / 提示符 readiness 检测。
 //
-// 与 codex-readiness 的 `hasCodexInteractivePrompt` / `hasCodexStartupUiRendered`
-// 对称：用于在 deferredStartupInput 注入前判断 TUI 是否已渲染并可接收 bracketed-paste
+// 与 codex-readiness 的 `hasCodexInteractivePrompt` / `hasCodexStartupPromptReady`
+// 对称：用于在 deferredStartupPromptText 注入前判断 TUI 是否已渲染并可接收 bracketed-paste
 // prompt，同时供 output-reactions 框架在连接中断后判断 agent 是否已回到空闲输入提示符。
 
 import { stripAnsi } from "./output-utils";
