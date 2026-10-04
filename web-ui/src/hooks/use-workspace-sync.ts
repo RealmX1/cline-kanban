@@ -57,6 +57,12 @@ interface UseWorkspaceSyncInput {
 }
 
 interface UseWorkspaceSyncResult {
+	// 本地 board / sessions 此刻装的是哪个项目的数据。与 currentProjectId 不同步的窗口真实存在：切项目时
+	// currentProjectId 先于 board 换成目标项目（快照到达那一帧 board 仍是上一个项目的，applyWorkspaceState
+	// 要到其后的 effect 里才 setBoard）。凡是「拿 board 里的卡 + currentProjectId 去做有副作用的事」的地方
+	// （详情页挂终端），都必须先确认二者一致——taskId 跨项目会撞号，错配一帧就会在目标项目里给别人的卡建终端。
+	// 与 isWorkspaceMetadataPending 不同：切项目开始时它不清空（board 里确实还是上一个项目的数据）。
+	projectIdOwningHydratedBoard: string | null;
 	workspacePath: string | null;
 	workspaceGit: RuntimeGitRepositoryInfo | null;
 	workspaceRevision: number | null;
@@ -92,27 +98,6 @@ function mergeTaskSessionSummaries(
 	return mergedSessions ?? currentSessions;
 }
 
-// 头一份快照（首屏、或切项目后 reset 过）的 sessions 吸收：本地 sessions 里快照没有的 key 只可能是别的项目留下的，
-// 一律丢掉——否则它们会随下一次整板保存写进这个项目的 sessions.json（cf427 的跨项目串写）。但 reset 之后、
-// 头一份快照被吸收之前，task_sessions_updated 旁路 applier 可能已并入本项目更新的 summary：快照里出现的 taskId
-// 仍按与后续快照相同的 updatedAt 单调规则取较新者，不能被头一份快照里较旧的 summary 整份替换掉。
-function restrictTaskSessionSummariesToFirstWorkspaceSnapshotKeepingNewerSummaryPerTask(
-	currentSessions: Record<string, RuntimeTaskSessionSummary>,
-	firstWorkspaceSnapshotSessions: Record<string, RuntimeTaskSessionSummary>,
-): Record<string, RuntimeTaskSessionSummary> {
-	const currentSessionsWhoseTaskIdIsInFirstWorkspaceSnapshot: Record<string, RuntimeTaskSessionSummary> = {};
-	for (const taskId of Object.keys(firstWorkspaceSnapshotSessions)) {
-		const currentSummary = currentSessions[taskId];
-		if (currentSummary) {
-			currentSessionsWhoseTaskIdIsInFirstWorkspaceSnapshot[taskId] = currentSummary;
-		}
-	}
-	return mergeTaskSessionSummaries(
-		currentSessionsWhoseTaskIdIsInFirstWorkspaceSnapshot,
-		firstWorkspaceSnapshotSessions,
-	);
-}
-
 export function useWorkspaceSync({
 	currentProjectId,
 	board,
@@ -129,6 +114,7 @@ export function useWorkspaceSync({
 	const [workspacePath, setWorkspacePath] = useState<string | null>(null);
 	const [workspaceGit, setWorkspaceGit] = useState<RuntimeGitRepositoryInfo | null>(null);
 	const [appliedWorkspaceProjectId, setAppliedWorkspaceProjectId] = useState<string | null>(null);
+	const [projectIdOwningHydratedBoard, setProjectIdOwningHydratedBoard] = useState<string | null>(null);
 	const [workspaceRevision, setWorkspaceRevision] = useState<number | null>(null);
 	const [workspaceHydrationNonce, setWorkspaceHydrationNonce] = useState(0);
 	const [latestWorkspaceBoardHydrationFromRuntime, setLatestWorkspaceBoardHydrationFromRuntime] =
@@ -150,6 +136,13 @@ export function useWorkspaceSync({
 		revision: null,
 	});
 	const workspaceRefreshRequestIdRef = useRef(0);
+	// 推流（task_sessions_updated）送来的每个任务的最新摘要，按所属项目记。换项目时快照整体替换 sessions，
+	// 靠它把新项目已经推来的摘要带回去（见 applyWorkspaceState）。只记最近一个项目：推流一次只连一个项目，
+	// 换项目即整份丢弃，所以条数以单个项目的任务数为上界。
+	const latestStreamedSummariesByWorkspaceRef = useRef<{
+		workspaceId: string | null;
+		summaryByTaskId: Map<string, RuntimeTaskSessionSummary>;
+	}>({ workspaceId: null, summaryByTaskId: new Map() });
 
 	const isWorkspaceMetadataPending = currentProjectId !== null && appliedWorkspaceProjectId !== currentProjectId;
 
@@ -174,6 +167,7 @@ export function useWorkspaceSync({
 			// 同一 tick 里紧接着到达的下一份快照（建卡确认与广播常前后脚）要拿水合后的 board 做判定，不等重渲染。
 			latestLocalBoardRef.current = input.hydratedBoard;
 			setBoard(input.hydratedBoard);
+			setProjectIdOwningHydratedBoard(currentProjectId);
 			setLatestWorkspaceBoardHydrationFromRuntime({
 				workspaceHydrationNonce: nextWorkspaceHydrationNonce,
 				boardAcknowledgedByRuntime: input.boardAcknowledgedByRuntime,
@@ -182,7 +176,7 @@ export function useWorkspaceSync({
 			});
 			setWorkspaceHydrationNonce(nextWorkspaceHydrationNonce);
 		},
-		[setBoard],
+		[currentProjectId, setBoard],
 	);
 
 	// 远端 board 按三方规则吸收进本地 board，并把它记为 runtime 最近确认的基线。基线为 null（头一份快照、
@@ -243,6 +237,7 @@ export function useWorkspaceSync({
 				setAppliedWorkspaceProjectId(null);
 				setBoard(createInitialBoardData());
 				setSessions({});
+				setProjectIdOwningHydratedBoard(null);
 				setWorkspaceRevision(null);
 				boardLastAcknowledgedByRuntimeRef.current = null;
 				workspaceVersionRef.current = {
@@ -257,20 +252,26 @@ export function useWorkspaceSync({
 			if (isSameProject && currentRevision !== null && nextWorkspaceState.revision < currentRevision) {
 				return;
 			}
-			// 头一份快照（首屏、或切项目后 reset 过）：丢掉快照里没有的 key（别的项目留下的），快照里有的 key
-			// 仍按 updatedAt 取较新者（保住 reset 后经旁路 applier 先到的本项目更新），见上方函数注释。
+			// 头一份快照：换了项目，或切项目 reset 后（reset 时 currentProjectId 可能已是目标项目，只看 projectId 会漏判）。
 			const isFirstWorkspaceSnapshotForThisProject = !isSameProject || currentRevision === null;
 			setWorkspacePath(nextWorkspaceState.repoPath);
 			setWorkspaceGit(nextWorkspaceState.git);
-			setSessions((currentSessions) => {
-				const incomingSessions = nextWorkspaceState.sessions ?? {};
-				return isFirstWorkspaceSnapshotForThisProject
-					? restrictTaskSessionSummariesToFirstWorkspaceSnapshotKeepingNewerSummaryPerTask(
-							currentSessions,
-							incomingSessions,
-						)
-					: mergeTaskSessionSummaries(currentSessions, incomingSessions);
-			});
+			const incomingSessions = nextWorkspaceState.sessions ?? {};
+			if (!isFirstWorkspaceSnapshotForThisProject) {
+				setSessions((currentSessions) => mergeTaskSessionSummaries(currentSessions, incomingSessions));
+			} else {
+				// 换了项目（或切项目 reset 后的头一份快照）就以快照为底整体替换，绝不与上一个项目的 sessions 合并：
+				// taskId 只在一个项目内唯一，合并会让上一个项目的同号任务摘要按 updatedAt 胜出、残留下来（sessionStartedAt
+				// 随之变化 → 终端被当成会话重启清屏），还会随下一次整板保存写进这个项目的 sessions.json（cf427 的跨项目串写）。
+				// 本项目推流已经送来的摘要单独带回：推流批次与这次替换在 sessions 更新队列里谁先谁后不确定，先到的那批若被
+				// 替换掉，比快照更新的摘要就丢了；而且必须取推流原件，不能从当前 sessions 里按 taskId 捞——那里的同号条目
+				// 可能正是上一个项目的。
+				const streamedSessionsOfThisProject =
+					latestStreamedSummariesByWorkspaceRef.current.workspaceId === currentProjectId
+						? Object.fromEntries(latestStreamedSummariesByWorkspaceRef.current.summaryByTaskId)
+						: {};
+				setSessions(() => mergeTaskSessionSummaries(incomingSessions, streamedSessionsOfThisProject));
+			}
 			if (isFirstWorkspaceSnapshotForThisProject || currentRevision !== nextWorkspaceState.revision) {
 				const remoteBoard = normalizeBoardData(nextWorkspaceState.board) ?? createInitialBoardData();
 				const boardLastAcknowledgedByRuntime =
@@ -344,9 +345,19 @@ export function useWorkspaceSync({
 	// task_sessions_updated 旁路出口：summaries 不再经 stream reducer 新建 workspaceState（那条路会让
 	// App 每批渲染两次），而是经这里注册的 applier 一次 setSessions 并入。与 reducer 时代共用同一条
 	// 数组合并规则（含空壳守卫与 updatedAt 单调）。setSessions 身份稳定，整个挂载期注册一次即可；
-	// 切项目时的清场在 resetWorkspaceSyncState（清空）与新项目头一份快照（丢掉快照里没有的 key）两处，与通道无关。
+	// 切项目时的清场在新项目头一份快照（以快照为底整体替换，见 applyWorkspaceState）一处，与通道无关。
 	useEffect(() => {
-		const applier: StreamedTaskSessionSummariesApplier = (summaries) => {
+		const applier: StreamedTaskSessionSummariesApplier = (summaries, workspaceId) => {
+			if (latestStreamedSummariesByWorkspaceRef.current.workspaceId !== workspaceId) {
+				latestStreamedSummariesByWorkspaceRef.current = { workspaceId, summaryByTaskId: new Map() };
+			}
+			const { summaryByTaskId } = latestStreamedSummariesByWorkspaceRef.current;
+			for (const summary of summaries) {
+				const newestSummary = selectNewestTaskSessionSummary(summaryByTaskId.get(summary.taskId) ?? null, summary);
+				if (newestSummary) {
+					summaryByTaskId.set(summary.taskId, newestSummary);
+				}
+			}
 			setSessions((currentSessions) => mergeStreamedTaskSessionSummaries(currentSessions, summaries));
 		};
 		streamedTaskSessionSummariesApplierRef.current = applier;
@@ -393,8 +404,7 @@ export function useWorkspaceSync({
 	const resetWorkspaceSyncState = useCallback(() => {
 		workspaceRefreshRequestIdRef.current += 1;
 		setCanPersistWorkspaceState(false);
-		// 上一个项目的会话摘要不能带进下一个项目：整板保存会把整份 sessions 发给 runtime（cf427 的跨项目串写）。
-		setSessions({});
+		// sessions 不在这里清空：在途期间仍是上一个项目的（只渲染过渡外壳、也不保存），由新项目头一份快照整体替换。
 		boardLastAcknowledgedByRuntimeRef.current = null;
 		setWorkspaceRevision(null);
 		setIsWorkspaceStateRefreshing(false);
@@ -403,7 +413,7 @@ export function useWorkspaceSync({
 			projectId: currentProjectId,
 			revision: null,
 		};
-	}, [currentProjectId, setCanPersistWorkspaceState, setSessions]);
+	}, [currentProjectId, setCanPersistWorkspaceState]);
 
 	useEffect(() => {
 		if (hasNoProjects) {
@@ -424,6 +434,7 @@ export function useWorkspaceSync({
 	}, [hasReceivedSnapshot, isDocumentVisible, refreshWorkspaceState]);
 
 	return {
+		projectIdOwningHydratedBoard,
 		workspacePath,
 		workspaceGit,
 		workspaceRevision,

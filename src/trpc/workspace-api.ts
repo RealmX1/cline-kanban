@@ -26,7 +26,6 @@ import {
 import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
 import { resolveTaskCreateBaseRef } from "../core/task-create-base-ref-resolution";
-import { pinTaskToTaskPinboard, unpinTaskFromTaskPinboard } from "../core/task-pinboard-pinning";
 import { recordTaskSessionStartDiagnostic } from "../diagnostics/task-session-start-diagnostics-logger";
 import type { KanbanActorResolutionLookups } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
@@ -757,42 +756,6 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				void deps.broadcastRuntimeProjectsUpdated(workspaceScope.workspaceId);
 			}
 			return { taskId: mutationResponse.value.taskId };
-		},
-		setTaskPinboardPinStateOfTaskCard: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
-			const taskMutationIntentWithResolvedActor =
-				await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
-					taskMutationIntentKind:
-						input.taskPinboardPinAction === "unpin_task_card"
-							? "runtime_trpc_unpin_task_card_from_task_pinboard"
-							: "runtime_trpc_pin_task_card_to_task_pinboard",
-					kanbanRequestOriginActorEvidence,
-					kanbanActorResolutionLookups: deps.kanbanActorResolutionLookups,
-				});
-			// 与浏览器 setBoard 用同一组纯函数（src/core/task-pinboard-pinning.ts），只是在 board 锁内对最新 board 执行。
-			const mutationResponse = await mutateWorkspaceState(
-				workspaceScope.workspacePath,
-				taskMutationIntentWithResolvedActor,
-				(state) => {
-					const taskCardFound = state.board.columns.some((column) =>
-						column.cards.some((card) => card.id === input.taskId),
-					);
-					const mutation =
-						input.taskPinboardPinAction === "unpin_task_card"
-							? unpinTaskFromTaskPinboard(state.board, input.taskId)
-							: pinTaskToTaskPinboard(state.board, input.taskId, {
-									pinReason: input.taskPinboardPinReason,
-								});
-					if (!mutation.updated) {
-						return { board: state.board, value: { taskCardFound }, save: false };
-					}
-					return { board: mutation.board, value: { taskCardFound } };
-				},
-			);
-			if (mutationResponse.saved) {
-				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceScope.workspaceId, workspaceScope.workspacePath);
-				void deps.broadcastRuntimeProjectsUpdated(workspaceScope.workspaceId);
-			}
-			return { taskCardFound: mutationResponse.value.taskCardFound, boardWasSaved: mutationResponse.saved };
 		},
 		persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: async (
 			workspaceScope,

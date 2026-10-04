@@ -16,6 +16,10 @@ import type {
 	RuntimeProjectSummary,
 } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
+import {
+	readCrossProjectTaskSwitcherPanelViewContinuity,
+	writeCrossProjectTaskSwitcherPanelViewContinuity,
+} from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
 import { useBooleanLocalStorageValue, useInterval, useRawLocalStorageValue } from "@/utils/react-use";
 
 // 区归属随时间漂移（Running 的 5 分钟窗、缓存倒计时到期），广播不会为此专门推送，故本地 tick 重算。
@@ -129,11 +133,25 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 		false,
 	);
 
-	// 「显示更早」只存内存：每次重新挂载回到默认 7 天窗。
-	const [entriesWithinExtendedActivityHorizon, setEntriesWithinExtendedActivityHorizon] =
-		useState<RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse | null>(null);
+	// 「显示更早」不落 localStorage（刷新页面回到默认 7 天窗），但跨重挂载保留：跨项目打开途中面板会在
+	// Focus View 左栏与过渡外壳之间重挂载，见 cross-project-task-switcher-panel-view-continuity-store。
+	const [entriesWithinExtendedActivityHorizon, setEntriesWithinExtendedActivityHorizonState] =
+		useState<RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse | null>(
+			() => readCrossProjectTaskSwitcherPanelViewContinuity().entriesWithinExtendedActivityHorizon,
+		);
+	const setEntriesWithinExtendedActivityHorizon = useCallback(
+		(response: RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse) => {
+			writeCrossProjectTaskSwitcherPanelViewContinuity({ entriesWithinExtendedActivityHorizon: response });
+			setEntriesWithinExtendedActivityHorizonState(response);
+		},
+		[],
+	);
 	const [extendedActivityHorizonLoadState, setExtendedActivityHorizonLoadState] =
-		useState<CrossProjectTaskSwitcherExtendedActivityHorizonLoadState>("not_requested");
+		useState<CrossProjectTaskSwitcherExtendedActivityHorizonLoadState>(() =>
+			readCrossProjectTaskSwitcherPanelViewContinuity().entriesWithinExtendedActivityHorizon === null
+				? "not_requested"
+				: "loaded",
+		);
 	// 定期刷新可能与上一次请求重叠：只采纳最后发出的那次的结果，防止慢的旧响应覆盖新快照。
 	const latestExtendedActivityHorizonFetchSequenceNumberRef = useRef(0);
 	const fetchEntriesWithinExtendedActivityHorizon = useCallback(
@@ -161,7 +179,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherSections({
 					}
 				});
 		},
-		[currentProjectId],
+		[currentProjectId, setEntriesWithinExtendedActivityHorizon],
 	);
 	const requestEntriesWithinExtendedActivityHorizon = useCallback(() => {
 		fetchEntriesWithinExtendedActivityHorizon("requested_by_user_show_older");

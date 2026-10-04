@@ -114,6 +114,7 @@ function createDeferred<T>() {
 }
 
 interface HookSnapshot {
+	projectIdOwningHydratedBoard: string | null;
 	board: BoardData;
 	sessions: Record<string, RuntimeTaskSessionSummary>;
 	canPersistWorkspaceState: boolean;
@@ -127,6 +128,7 @@ interface HookSnapshot {
 }
 
 function HookHarness({
+	currentProjectId = "project-a",
 	streamedWorkspaceState,
 	streamedTaskSessionSummariesApplierRef,
 	hasReceivedSnapshot = true,
@@ -134,6 +136,7 @@ function HookHarness({
 	onLocalUnsavedBoardChangesDiscardedByRemoteBoardChange,
 	onSnapshot,
 }: {
+	currentProjectId?: string;
 	streamedWorkspaceState: RuntimeWorkspaceStateResponse | null;
 	streamedTaskSessionSummariesApplierRef: StreamedTaskSessionSummariesApplierRef;
 	hasReceivedSnapshot?: boolean;
@@ -145,6 +148,7 @@ function HookHarness({
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
 	const [canPersistWorkspaceState, setCanPersistWorkspaceState] = useState(false);
 	const {
+		projectIdOwningHydratedBoard,
 		workspaceRevision,
 		workspaceHydrationNonce,
 		latestWorkspaceBoardHydrationFromRuntime,
@@ -152,7 +156,7 @@ function HookHarness({
 		refreshWorkspaceState,
 		resetWorkspaceSyncState,
 	} = useWorkspaceSync({
-		currentProjectId: "project-a",
+		currentProjectId,
 		board,
 		streamedWorkspaceState,
 		streamedTaskSessionSummariesApplierRef,
@@ -167,6 +171,7 @@ function HookHarness({
 
 	useEffect(() => {
 		onSnapshot({
+			projectIdOwningHydratedBoard,
 			board,
 			sessions,
 			canPersistWorkspaceState,
@@ -183,6 +188,7 @@ function HookHarness({
 		canPersistWorkspaceState,
 		latestWorkspaceBoardHydrationFromRuntime,
 		onSnapshot,
+		projectIdOwningHydratedBoard,
 		recordWorkspaceBoardSavedByRuntime,
 		refreshWorkspaceState,
 		resetWorkspaceSyncState,
@@ -408,7 +414,10 @@ describe("useWorkspaceSync", () => {
 
 		// 旁路批次：一次 setSessions 并入——已有 key 按 updatedAt 单调更新，新 key 直接收录。
 		await act(async () => {
-			applier([createSessionSummary("task-1", 2000, "All done"), createSessionSummary("task-2", 1500, null)]);
+			applier(
+				[createSessionSummary("task-1", 2000, "All done"), createSessionSummary("task-2", 1500, null)],
+				"project-a",
+			);
 		});
 
 		if (latestSnapshot === null) {
@@ -422,7 +431,7 @@ describe("useWorkspaceSync", () => {
 		// stale 批次（updatedAt 更旧）：没有 key 被替换，sessions 引用不变、不多渲染。
 		const sessionsBeforeStaleBatch = afterUpdateSnapshot.sessions;
 		await act(async () => {
-			applier([createSessionSummary("task-1", 1500, "Stale output")]);
+			applier([createSessionSummary("task-1", 1500, "Stale output")], "project-a");
 		});
 
 		if (latestSnapshot === null) {
@@ -744,7 +753,7 @@ describe("useWorkspaceSync", () => {
 		);
 	});
 
-	it("切项目 reset 时清空 sessions，新项目头一份快照整份替换而不是合并（cf427 跨项目串写）", async () => {
+	it("切项目 reset 后的头一份快照以快照为底整体替换 sessions，不与上一个项目的合并（cf427 跨项目串写）", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 		const onSnapshot = (snapshot: HookSnapshot) => {
 			latestSnapshot = snapshot;
@@ -764,10 +773,14 @@ describe("useWorkspaceSync", () => {
 			"task-from-previous-project",
 		]);
 
+		// reset 时 currentProjectId 已是目标项目：只看 projectId 会把头一份快照当成同项目合并。
 		await act(async () => {
 			(latestSnapshot as HookSnapshot | null)?.resetWorkspaceSyncState();
 		});
-		expect((latestSnapshot as HookSnapshot | null)?.sessions).toEqual({});
+		// 在途期间不清空（只渲染过渡外壳、也不保存），由头一份快照整体替换。
+		expect(Object.keys((latestSnapshot as HookSnapshot | null)?.sessions ?? {})).toEqual([
+			"task-from-previous-project",
+		]);
 
 		await act(async () => {
 			root.render(
@@ -781,5 +794,62 @@ describe("useWorkspaceSync", () => {
 			);
 		});
 		expect(Object.keys((latestSnapshot as HookSnapshot | null)?.sessions ?? {})).toEqual(["task-of-this-project"]);
+	});
+
+	it("换项目时以新项目快照整体替换 sessions：上一个项目的同号任务摘要不残留，新项目先到的推流摘要保留", async () => {
+		const applierRef: StreamedTaskSessionSummariesApplierRef = { current: null };
+		let latestSnapshot: HookSnapshot | null = null;
+		const onSnapshot = (snapshot: HookSnapshot) => {
+			latestSnapshot = snapshot;
+		};
+		await act(async () => {
+			root.render(
+				<HookHarness
+					currentProjectId="project-a"
+					streamedWorkspaceState={createWorkspaceStateWithSessions("a-task", 1, {
+						// 上一个项目里的同号任务，updatedAt 比新项目的还新——合并会让它胜出。
+						"shared-task": createSessionSummary("shared-task", 9000, "from project a"),
+					})}
+					streamedTaskSessionSummariesApplierRef={applierRef}
+					onSnapshot={onSnapshot}
+				/>,
+			);
+		});
+		expect((latestSnapshot as HookSnapshot | null)?.projectIdOwningHydratedBoard).toBe("project-a");
+
+		// 切到 B：快照到达那一帧（还没 apply）board 仍属于 A。
+		await act(async () => {
+			root.render(
+				<HookHarness
+					currentProjectId="project-b"
+					streamedWorkspaceState={null}
+					streamedTaskSessionSummariesApplierRef={applierRef}
+					onSnapshot={onSnapshot}
+				/>,
+			);
+		});
+		expect((latestSnapshot as HookSnapshot | null)?.projectIdOwningHydratedBoard).toBe("project-a");
+
+		// B 的推流批次比 B 快照的 apply 先进 sessions 更新队列。
+		await act(async () => {
+			applierRef.current?.([createSessionSummary("b-streamed-task", 5000, "from project b stream")], "project-b");
+		});
+		await act(async () => {
+			root.render(
+				<HookHarness
+					currentProjectId="project-b"
+					streamedWorkspaceState={createWorkspaceStateWithSessions("b-task", 1, {
+						"shared-task": createSessionSummary("shared-task", 2000, "from project b"),
+					})}
+					streamedTaskSessionSummariesApplierRef={applierRef}
+					onSnapshot={onSnapshot}
+				/>,
+			);
+		});
+
+		const afterSwitch = latestSnapshot as HookSnapshot | null;
+		expect(afterSwitch?.projectIdOwningHydratedBoard).toBe("project-b");
+		expect(afterSwitch?.sessions["shared-task"]?.latestHookActivity?.finalMessage).toBe("from project b");
+		expect(afterSwitch?.sessions["b-streamed-task"]?.updatedAt).toBe(5000);
 	});
 });

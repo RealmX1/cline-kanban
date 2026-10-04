@@ -4,6 +4,7 @@ import { ProjectSwitcherTableRow } from "@/components/top-bar-project-switcher/p
 import type { ProjectNumericSlotGroupNumber } from "@/hooks/use-project-numeric-slot-group-assignments";
 
 export function ProjectSwitcherTable({
+	boardScopeAllProjectsPseudoRow,
 	rows,
 	currentProjectId,
 	activeRowIndex,
@@ -15,6 +16,9 @@ export function ProjectSwitcherTable({
 	onAssignProjectToNumericSlotGroupNumber,
 	onClearNumericSlotGroupNumber,
 }: {
+	// 首行「All projects」伪行（Board Scope）；被过滤掉时为 null。它占键盘高亮索引的第 0 行，
+	// 下面的 activeRowIndex / onActiveRowIndexChange 只按项目行计（调用方负责换算）。
+	boardScopeAllProjectsPseudoRow: React.ReactElement | null;
 	rows: readonly ProjectSwitcherRow[];
 	currentProjectId: string | null;
 	activeRowIndex: number;
@@ -72,6 +76,7 @@ export function ProjectSwitcherTable({
 					</tr>
 				</thead>
 				<tbody>
+					{boardScopeAllProjectsPseudoRow}
 					{rows.length === 0 ? (
 						<tr>
 							<td colSpan={visibleColumnCount} className="px-2 py-3 text-[13px] text-text-tertiary">

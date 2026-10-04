@@ -13,6 +13,7 @@ import {
 	isTaskNotificationOrphanedByPreviousAgentSessionIncarnation,
 } from "../core/harness-generated-restoration-prompt";
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
+import { classifyHookEventAsMainAgentConversationModelRequestDispatch } from "../core/main-agent-conversation-model-request-dispatch-hook-event-classification";
 import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { recordHookIngestToolCallAndHookCliResourceUsageToJournal } from "../diagnostics/hook-ingest-tool-call-and-hook-cli-resource-usage-journal-recorder";
@@ -449,6 +450,22 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				const isAgentSideConversationProgressHookEvent = event === "activity" || event === "to_review";
 				if (isAgentSideConversationProgressHookEvent) {
 					manager.recordAgentLifecycleHookConversationProgress(taskId);
+				}
+				// Cache warm 倒计时起点：「harness 紧接着要向主对话模型发请求」的事件（判据见分类函数）。
+				// 同样放在转移门之前——Codex 的 PostToolUse 是 activity，过不了闸，但它确实触发了一次请求。
+				// 用转移前的 facet 判定「用户回合冻结」：Stop 之后到来的工具事件属于后台子代理。
+				const mainAgentConversationModelRequestDispatchEvidenceKind =
+					classifyHookEventAsMainAgentConversationModelRequestDispatch({
+						event,
+						normalizedHookEventName,
+						hookEventFiredInsideSubagentContext: body.hookEventFiredInsideSubagentContext === true,
+						sessionFacetsBeforeTransition: resolveSessionFacets(summary),
+					});
+				if (mainAgentConversationModelRequestDispatchEvidenceKind !== null) {
+					manager.recordMainAgentConversationModelRequestDispatch(
+						taskId,
+						mainAgentConversationModelRequestDispatchEvidenceKind,
+					);
 				}
 				if (
 					event === "to_review" &&

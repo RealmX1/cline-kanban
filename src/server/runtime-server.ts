@@ -79,6 +79,8 @@ import { createExploratoryApi } from "../trpc/exploratory-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
+import { createTaskCardActionApi } from "../trpc/task-card-action-api";
+import { createTaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
 import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
 import { createWorkspaceApi } from "../trpc/workspace-api";
 import {
@@ -639,9 +641,46 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 	};
 
+	// taskCardAction.* 的按卡串行器：必须是 runtime 级单例——api 对象按请求新建，串行器若也按请求新建就串不住任何东西。
+	const taskCardActionPerTaskCommandSerializer = createTaskCardActionPerTaskCommandSerializer();
+
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
+		// runtimeApi / workspaceApi 提成局部变量：taskCardActionApi 复用它们的起停会话、ensure / 删 worktree 实现，
+		// 与路由上暴露的是同一个实例，不复制逻辑。
+		const runtimeApi = createRuntimeApi({
+			getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
+			getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
+			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+			setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
+			getScopedTerminalManager,
+			getScopedClineTaskSessionService,
+			getScopedAcpTaskSessionService,
+			resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
+			runCommand: deps.runCommand,
+			broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
+			broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
+			broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
+			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+			bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
+			prepareForStateReset,
+			getUpdateStatus: deps.getUpdateStatus,
+			runUpdateNow: deps.runUpdateNow,
+			queuedTaskPromptDeliveryDispatcher,
+		});
+		const workspaceApi = createWorkspaceApi({
+			ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
+			getScopedClineTaskSessionService,
+			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+			broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
+			buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,
+			listProjectRuntimeSessionSummaries,
+			onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard: (workspaceId, snapshot) => {
+				void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
+			},
+		});
 		return {
 			requestedWorkspaceId: scope.requestedWorkspaceId,
 			workspaceScope: scope.workspaceScope,
@@ -654,35 +693,17 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						req.headers[KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME],
 					),
 			},
-			runtimeApi: createRuntimeApi({
-				getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
-				getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
-				loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-				setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
-				getScopedTerminalManager,
-				getScopedClineTaskSessionService,
-				getScopedAcpTaskSessionService,
-				resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
-				runCommand: deps.runCommand,
-				broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
-				broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
-				broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
-				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-				bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
-				prepareForStateReset,
-				getUpdateStatus: deps.getUpdateStatus,
-				runUpdateNow: deps.runUpdateNow,
-				queuedTaskPromptDeliveryDispatcher,
-			}),
-			workspaceApi: createWorkspaceApi({
-				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
-				getScopedClineTaskSessionService,
-				loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+			runtimeApi,
+			workspaceApi,
+			taskCardActionApi: createTaskCardActionApi({
+				runtimeApi,
+				workspaceApi,
 				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
-				buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,
-				listProjectRuntimeSessionSummaries,
-				onQueuedTaskPromptDeliveriesRewrittenForTasksRemovedFromBoard: (workspaceId, snapshot) => {
+				findTaskSessionSummaryLiveInRuntimeProcessMemory: findRuntimeSessionSummary,
+				taskCardActionPerTaskCommandSerializer,
+				// 永久删除丢掉排队 prompt 后立刻让出队引擎重读，不等兜底 sweep（与 saveState 差集清理同一个钩子）。
+				onQueuedTaskPromptDeliveriesDiscardedForPermanentlyDeletedTaskCards: (workspaceId, snapshot) => {
 					void queuedTaskPromptDeliveryDispatcher.notifyQueueRewrittenOutsideDispatcher(workspaceId, snapshot);
 				},
 			}),

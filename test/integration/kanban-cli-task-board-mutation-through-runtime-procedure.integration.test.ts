@@ -3,7 +3,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeBoardCard, RuntimeBoardData } from "../../src/core/api-contract";
+import type {
+	RuntimeBoardCard,
+	RuntimeBoardData,
+	RuntimeTaskSessionStartRequest,
+	RuntimeTaskSessionSummary,
+} from "../../src/core/api-contract";
 import type { CommittedInterWorkUnitRelationLedgerEvent } from "../../src/core/inter-work-unit-relation-ledger-event-contract";
 import {
 	collectKanbanCliInvocationEnvironmentActorClaims,
@@ -18,14 +23,17 @@ import {
 import { registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture } from "../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import { loadWorkspaceBoardById, loadWorkspaceContext, saveWorkspaceState } from "../../src/state/workspace-state";
 import { type RuntimeTrpcContext, runtimeAppRouter } from "../../src/trpc/app-router";
+import { createTaskCardActionApi } from "../../src/trpc/task-card-action-api";
+import { createTaskCardActionPerTaskCommandSerializer } from "../../src/trpc/task-card-action-per-task-command-serializer";
 import { createWorkspaceApi } from "../../src/trpc/workspace-api";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
-// dd2db 1a.2b：`kanban task` 的写动词经 `workspace.applyKanbanCliTaskBoardMutation` 落盘。
-// 这里走真实的 tRPC 路由（含输入/输出 zod 校验）、真实的 workspace api、真实的行动者解析 lookups
-// （读隔离 HOME 下的 workspace 索引与 board.json）与真实的关系账本捕获，断言账本里每条漏斗内事件
-// 都记在「发起调用的那张卡」名下，且卡片限定引用带 incarnation 戳。
+// dd2db 1a.2b：`kanban task create` 经 `workspace.applyKanbanCliTaskBoardMutation` 落盘；update / start / done /
+// delete 经 `taskCardAction.*`（与浏览器共用的唯一实现）。这里走真实的 tRPC 路由（含输入/输出 zod 校验）、真实的
+// workspace api、真实的 board 漏斗、真实的行动者解析 lookups（读隔离 HOME 下的 workspace 索引与 board.json）与
+// 真实的关系账本捕获，断言账本里每条漏斗内事件都记在「发起调用的那张卡」名下、意图名沿用迁移前的 CLI 旧名，
+// 且卡片限定引用带 incarnation 戳。会话起停与 worktree 建删不是本测试的对象，换成桩。
 
 const ACTING_TASK_ID = "act01";
 const ACTING_TASK_INCARNATION_CREATED_AT_EPOCH_MS = 4_242;
@@ -62,6 +70,25 @@ function createSeedBoard(): RuntimeBoardData {
 			{ id: "validation", title: "Validation", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
+	};
+}
+
+function createRunningTaskSessionSummary(taskId: string): RuntimeTaskSessionSummary {
+	return {
+		taskId,
+		state: "running",
+		agentId: "claude",
+		workspacePath: null,
+		pid: null,
+		startedAt: 1,
+		updatedAt: 1,
+		lastOutputAt: null,
+		reviewReason: null,
+		exitCode: null,
+		lastHookAt: null,
+		latestHookActivity: null,
+		latestTurnCheckpoint: null,
+		previousTurnCheckpoint: null,
 	};
 }
 
@@ -119,13 +146,42 @@ describe("kanban CLI task board mutations through the runtime procedure", () => 
 				buildWorkspaceStateSnapshot: vi.fn(),
 				listProjectRuntimeSessionSummaries: vi.fn(() => []),
 			});
+			const startedTaskSessionRequests: RuntimeTaskSessionStartRequest[] = [];
+			const stoppedTaskSessionIds: string[] = [];
+			const taskCardActionApi = createTaskCardActionApi({
+				runtimeApi: {
+					startTaskSession: async (_scope, request) => {
+						startedTaskSessionRequests.push(request);
+						return { ok: true, summary: createRunningTaskSessionSummary(request.taskId) };
+					},
+					stopTaskSession: async (_scope, request) => {
+						stoppedTaskSessionIds.push(request.taskId);
+						return { ok: true, summary: null };
+					},
+					transitionTaskToReview: async () => ({ ok: false, summary: null }),
+				},
+				workspaceApi: {
+					ensureWorktree: async (_scope, request) => ({
+						ok: true,
+						path: join(gitFixture.isolatedHomeDirectoryPath, "worktrees", request.taskId),
+						baseRef: request.baseRef,
+						baseCommit: "0000000000000000000000000000000000000000",
+					}),
+					deleteWorktree: async () => ({ ok: true, removed: false }),
+				},
+				broadcastRuntimeWorkspaceStateUpdated,
+				broadcastRuntimeProjectsUpdated: vi.fn(),
+				findTaskSessionSummaryLiveInRuntimeProcessMemory: () => null,
+				taskCardActionPerTaskCommandSerializer: createTaskCardActionPerTaskCommandSerializer(),
+			});
 			const createCallerForCliInvocationEnvironment = (environment: Record<string, string>) =>
 				runtimeAppRouter.createCaller({
 					requestedWorkspaceId: workspaceId,
 					workspaceScope,
 					kanbanRequestOriginActorEvidence: createEvidenceFromCliInvocationEnvironment(environment),
 					workspaceApi,
-					// 本测试只触达 workspace 路由；其余 api 不参与，故不构造。
+					taskCardActionApi,
+					// 本测试只触达 workspace / taskCardAction 路由；其余 api 不参与，故不构造。
 				} as unknown as RuntimeTrpcContext);
 			// 卡片会话注入的全套环境变量（含 workspace id）。
 			const callerFromActingCardSession = createCallerForCliInvocationEnvironment({
@@ -161,74 +217,81 @@ describe("kanban CLI task board mutations through the runtime procedure", () => 
 			expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledWith(workspaceId, workspaceContext.repoPath);
 
 			// 2) update：只改标题；合并在 runtime 锁内对最新卡片进行，未传字段保留现值。
-			const updated = await callerFromActingCardSession.workspace.applyKanbanCliTaskBoardMutation({
-				kanbanCliTaskBoardMutationKind: "update_task_card_fields",
-				updatedTaskId: createdTaskId,
-				kanbanCliTaskCardFieldUpdateRawInput: { title: "renamed follow-up" },
-			});
-			if (updated.kanbanCliTaskBoardMutationKind !== "update_task_card_fields") {
-				throw new Error("expected an update response");
-			}
-			expect(updated.updatedTaskCard.title).toBe("renamed follow-up");
-			expect(updated.updatedTaskCard.prompt).toBe("follow-up spawned by the acting card");
-			expect(updated.updatedTaskCard.clineSettings).toEqual({ providerId: "anthropic", modelId: "claude-sonnet" });
-			expect(updated.updatedTaskCardBoardColumnId).toBe("backlog");
-			expect(updated.updatedTaskCardSessionSummaryPersistedOnDisk).toBeNull();
-
-			// 3) start 的移列：第一次移入，第二次已在 in_progress、不写盘。
-			const movedIntoInProgress = await callerFromActingCardSession.workspace.applyKanbanCliTaskBoardMutation({
-				kanbanCliTaskBoardMutationKind: "move_task_card_to_in_progress_column",
-				movedTaskId: createdTaskId,
-			});
-			const movedIntoInProgressAgain = await callerFromActingCardSession.workspace.applyKanbanCliTaskBoardMutation({
-				kanbanCliTaskBoardMutationKind: "move_task_card_to_in_progress_column",
-				movedTaskId: createdTaskId,
-			});
-			expect(movedIntoInProgress).toMatchObject({
-				taskCardWasMovedIntoInProgressColumn: true,
-				movedTaskCardBoardColumnIdBeforeMutation: "backlog",
-			});
-			expect(movedIntoInProgressAgain).toMatchObject({ taskCardWasMovedIntoInProgressColumn: false });
-
-			// 4) trash：review 卡移入 trash（只移列，不再有「就绪的下游 backlog 卡」）；再移一次是「已在 trash」。
-			const trashed =
-				await callerFromActingCardSessionWithOnlyRepositoryPath.workspace.applyKanbanCliTaskBoardMutation({
-					kanbanCliTaskBoardMutationKind: "move_task_card_to_trash_column",
-					movedTaskId: "rev01",
-				});
-			const trashedAgain = await callerFromActingCardSession.workspace.applyKanbanCliTaskBoardMutation({
-				kanbanCliTaskBoardMutationKind: "move_task_card_to_trash_column",
-				movedTaskId: "rev01",
-			});
-			expect(trashed).toMatchObject({
-				taskCardWasAlreadyInTrashColumn: false,
-				movedTaskCardBoardColumnIdBeforeMutation: "review",
-			});
-			expect(trashedAgain).toMatchObject({
-				taskCardWasAlreadyInTrashColumn: true,
-				movedTaskCardBoardColumnIdBeforeMutation: "trash",
-			});
-
-			// 5) delete：按 task id 永久删除，回传删除前所在的列。
-			const deleted = await callerFromActingCardSession.workspace.applyKanbanCliTaskBoardMutation({
-				kanbanCliTaskBoardMutationKind: "permanently_delete_task_cards",
-				permanentlyDeletedTaskCardSelection: {
-					permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
-					selectedTaskIds: [createdTaskId],
+			const updated = await callerFromActingCardSession.taskCardAction.updateTaskCardFieldValues({
+				taskId: createdTaskId,
+				taskCardFieldUpdate: {
+					taskCardFieldUpdateInputKind: "kanban_cli_task_update_command_raw_arguments",
+					kanbanCliTaskCardFieldUpdateRawInput: { title: "renamed follow-up" },
 				},
 			});
+			expect(updated.taskCardSnapshotAfterAction.taskCard.title).toBe("renamed follow-up");
+			expect(updated.taskCardSnapshotAfterAction.taskCard.prompt).toBe("follow-up spawned by the acting card");
+			expect(updated.taskCardSnapshotAfterAction.taskCard.clineSettings).toEqual({
+				providerId: "anthropic",
+				modelId: "claude-sonnet",
+			});
+			expect(updated.taskCardSnapshotAfterAction.boardColumnIdContainingTaskCard).toBe("backlog");
+			expect(updated.taskCardSnapshotAfterAction.taskSessionSummaryPersistedInWorkspaceSessionsFile).toBeNull();
+
+			// 3) start：第一次移入 in_progress 并起会话；第二次已在 in_progress、不写盘，会话照样会再起
+			// （桩不维护活会话摘要，所以 runtime 看不到「已在 agent 回合」）。
+			const movedIntoInProgress =
+				await callerFromActingCardSession.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({
+					taskId: createdTaskId,
+				});
+			const movedIntoInProgressAgain =
+				await callerFromActingCardSession.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({
+					taskId: createdTaskId,
+				});
+			expect(movedIntoInProgress).toMatchObject({
+				taskCardWasMovedIntoInProgressColumnByThisAction: true,
+				boardColumnIdOfTaskCardBeforeAction: "backlog",
+				agentSessionStartOutcome: "agent_session_started",
+			});
+			expect(movedIntoInProgressAgain).toMatchObject({ taskCardWasMovedIntoInProgressColumnByThisAction: false });
+			expect(startedTaskSessionRequests[0]).toMatchObject({ taskId: createdTaskId, startInPlanMode: true });
+
+			// 4) done：review 卡移入 Done 并停会话（含详情终端）；再移一次是「已在 Done」，不再停。
+			const trashed =
+				await callerFromActingCardSessionWithOnlyRepositoryPath.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+					{ taskId: "rev01" },
+				);
+			const trashedAgain =
+				await callerFromActingCardSession.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree({
+					taskId: "rev01",
+				});
+			expect(trashed).toMatchObject({
+				taskCardWasAlreadyInTrashColumnSoNoSessionOrWorktreeCleanupRan: false,
+				boardColumnIdOfTaskCardBeforeAction: "review",
+			});
+			expect(trashedAgain).toMatchObject({
+				taskCardWasAlreadyInTrashColumnSoNoSessionOrWorktreeCleanupRan: true,
+				boardColumnIdOfTaskCardBeforeAction: "trash",
+			});
+			expect(stoppedTaskSessionIds.sort()).toEqual(["__detail_terminal__:rev01", "rev01"]);
+
+			// 5) delete：按 task id 永久删除，回传删除前所在的列（收尾链里的草稿 / 队列 / checkpoint ref 清理真实执行）。
+			const deleted =
+				await callerFromActingCardSession.taskCardAction.permanentlyDeleteTaskCardsWithFullResourceCleanup({
+					permanentlyDeletedTaskCardSelection: {
+						permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+						selectedTaskIds: [createdTaskId],
+					},
+				});
 			expect(deleted).toMatchObject({
 				permanentlyDeletedTaskCards: [
-					{ deletedTaskCard: { id: createdTaskId }, deletedTaskCardBoardColumnIdBeforeDeletion: "in_progress" },
+					{ deletedTaskCard: { id: createdTaskId }, boardColumnIdOfDeletedTaskCardBeforeDeletion: "in_progress" },
 				],
 			});
 
 			// 找不到的卡：原文案报错、不写盘。
 			await expect(
-				callerFromActingCardSession.workspace.applyKanbanCliTaskBoardMutation({
-					kanbanCliTaskBoardMutationKind: "update_task_card_fields",
-					updatedTaskId: "nope1",
-					kanbanCliTaskCardFieldUpdateRawInput: { title: "x" },
+				callerFromActingCardSession.taskCardAction.updateTaskCardFieldValues({
+					taskId: "nope1",
+					taskCardFieldUpdate: {
+						taskCardFieldUpdateInputKind: "kanban_cli_task_update_command_raw_arguments",
+						kanbanCliTaskCardFieldUpdateRawInput: { title: "x" },
+					},
 				}),
 			).rejects.toThrow(`Task "nope1" was not found in workspace ${workspaceContext.repoPath}.`);
 

@@ -356,11 +356,26 @@ export function deleteTasksFromBoard(board: RuntimeBoardData, taskIds: Iterable<
 	};
 }
 
+// 卡片落进目标列的位置。缺省（不传 insertAtIndex）= 列顶，即历来的「最近移入在最上」语义。
+export interface RuntimeMoveTaskTargetColumnPlacement {
+	// 拖放落点：目标列里**插入之后**这张卡所在的下标（与 @hello-pangea/dnd 的 destination.index 同义）。
+	// 越界时钳到 [0, 目标列现有卡数]，不报错——落点是 UI 几何的近似值，列在请求途中被别人改过也不该让移列失败。
+	insertAtIndex?: number;
+}
+
+function clampInsertAtIndexIntoBoardColumn(insertAtIndex: number | undefined, boardColumnCardCount: number): number {
+	if (insertAtIndex === undefined || !Number.isFinite(insertAtIndex)) {
+		return 0;
+	}
+	return Math.min(Math.max(Math.trunc(insertAtIndex), 0), boardColumnCardCount);
+}
+
 export function moveTaskToColumn(
 	board: RuntimeBoardData,
 	taskId: string,
 	targetColumnId: RuntimeBoardColumnId,
 	now: number = Date.now(),
+	targetColumnPlacement: RuntimeMoveTaskTargetColumnPlacement = {},
 ): RuntimeMoveTaskResult {
 	const normalizedTaskId = taskId.trim();
 	if (!normalizedTaskId) {
@@ -436,7 +451,13 @@ export function moveTaskToColumn(
 	};
 	// 列顶 = 最近移入：与浏览器程序化移列的 insertAtTop、以及建卡置顶同一语义。曾经只有 trash 置顶、
 	// 其余列追加到列尾，于是经 CLI `kanban task start` 等运行时路径启动的卡会沉到一列陈旧卡的最末。
-	const targetCards = [movedTask, ...targetColumn.cards];
+	// 带 insertAtIndex 时（用户拖放到列中某处）保留落点。
+	const targetCards = [...targetColumn.cards];
+	targetCards.splice(
+		clampInsertAtIndexIntoBoardColumn(targetColumnPlacement.insertAtIndex, targetCards.length),
+		0,
+		movedTask,
+	);
 
 	const columns = board.columns.map((column, index) => {
 		if (index === found.columnIndex) {
@@ -462,6 +483,49 @@ export function moveTaskToColumn(
 		},
 		task: movedTask,
 		fromColumnId: found.columnId,
+	};
+}
+
+export interface RuntimeReorderTaskWithinBoardColumnResult {
+	// 卡片位置确实变了才为 true；卡片不存在、或落点就是原位时为 false（调用方据此跳过落盘）。
+	reordered: boolean;
+	board: RuntimeBoardData;
+	task: RuntimeBoardCard | null;
+	boardColumnId: RuntimeBoardColumnId | null;
+}
+
+// 列内重排（拖放把卡挪到同一列的另一个位置）。与浏览器 applyDragResult 的同列分支同语义：
+// 只改顺序、**不推进 updatedAt**（重排不是对卡片内容的修改）。backlog 按 Description 最后更新时间排序，
+// 手动顺序会被下一次排序立刻覆盖，所以这里拒绝重排 backlog（与 drag-rules 一致）。
+export function reorderTaskWithinBoardColumn(
+	board: RuntimeBoardData,
+	taskId: string,
+	insertAtIndex: number,
+): RuntimeReorderTaskWithinBoardColumnResult {
+	const found = findTaskLocation(board, taskId.trim());
+	if (!found) {
+		return { reordered: false, board, task: null, boardColumnId: null };
+	}
+	const column = board.columns[found.columnIndex];
+	if (!column || found.columnId === "backlog") {
+		return { reordered: false, board, task: found.task, boardColumnId: found.columnId };
+	}
+	const remainingCards = column.cards.filter((_, index) => index !== found.taskIndex);
+	const nextTaskIndex = clampInsertAtIndexIntoBoardColumn(insertAtIndex, remainingCards.length);
+	if (nextTaskIndex === found.taskIndex) {
+		return { reordered: false, board, task: found.task, boardColumnId: found.columnId };
+	}
+	remainingCards.splice(nextTaskIndex, 0, found.task);
+	return {
+		reordered: true,
+		board: {
+			...board,
+			columns: board.columns.map((candidate, index) =>
+				index === found.columnIndex ? { ...candidate, cards: remainingCards } : candidate,
+			),
+		},
+		task: found.task,
+		boardColumnId: found.columnId,
 	};
 }
 

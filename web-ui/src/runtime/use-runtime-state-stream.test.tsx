@@ -580,7 +580,7 @@ describe("useRuntimeStateStream", () => {
 
 		// 旁路：summaries 原样送达 applier（经 JSON 往返，按深比较断言）。
 		expect(applier).toHaveBeenCalledTimes(1);
-		expect(applier).toHaveBeenCalledWith([summary]);
+		expect(applier).toHaveBeenCalledWith([summary], "ws-a");
 		// reducer 不再为该消息产新 state：没有重渲染，workspaceState 引用保持不动。
 		expect(snapshotCalls.length).toBe(snapshotCallsBeforeSessionsUpdate);
 		expect(snapshotCalls[snapshotCalls.length - 1]?.workspaceState).toBe(workspaceStateBeforeSessionsUpdate);

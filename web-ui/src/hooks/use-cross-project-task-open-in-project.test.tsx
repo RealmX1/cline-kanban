@@ -24,6 +24,7 @@ function makeBoard(cardsByColumn: Partial<Record<BoardColumnId, string[]>>): Boa
 interface HarnessProps {
 	board: BoardData;
 	currentProjectId: string | null;
+	selectedTaskId: string | null;
 	isDetailViewOpen: boolean;
 	isCurrentProjectBoardSettled: boolean;
 }
@@ -79,6 +80,7 @@ function render(props: Partial<HarnessProps> = {}): void {
 			createElement(Harness, {
 				board: makeBoard({ review: ["a-review"], backlog: ["a-backlog"] }),
 				currentProjectId: "project-a",
+				selectedTaskId: "a-review",
 				isDetailViewOpen: true,
 				isCurrentProjectBoardSettled: true,
 				...props,
@@ -94,7 +96,8 @@ describe("useCrossProjectTaskOpenInProject", () => {
 		expect(setSelectedTaskId).toHaveBeenCalledWith("a-review");
 		act(() => latest?.handleOpenTaskInProject("project-a", "a-backlog"));
 		expect(openBacklogTaskEditor).toHaveBeenCalledWith(expect.objectContaining({ id: "a-backlog" }));
-		expect(handleSelectProject).not.toHaveBeenCalled();
+		// 同项目只会「选回当前项目」（不在途时是 no-op，在途时撤销切换），绝不切去别的项目。
+		expect(handleSelectProject.mock.calls.every(([projectId]) => projectId === "project-a")).toBe(true);
 	});
 
 	// cf427：选中一个看板上没有的 id，Focus View 会无卡可显、静默关掉（通知点击「跳不进 Focus」的一种形态）。
@@ -116,6 +119,7 @@ describe("useCrossProjectTaskOpenInProject", () => {
 			repoId: "project-b",
 			taskId: "b-review",
 			originatedFromFocusView: true,
+			originFocusedTaskInProject: { repoId: "project-a", taskId: "a-review" },
 		});
 
 		// 切项目途中：board 已清空、还没落定，不提示「找不到」。
@@ -208,10 +212,52 @@ describe("useCrossProjectTaskOpenInProject", () => {
 		expect(showAppToastMock).not.toHaveBeenCalled();
 	});
 
-	it("取消在途跳转", () => {
+	it("快照未到时 Cancel：撤销在途切换、回到发起时的任务（不再落到目标项目）", () => {
 		render();
 		act(() => latest?.handleOpenTaskInProject("project-b", "b-review"));
-		act(() => latest?.cancelPendingCrossProjectTaskOpen());
+		handleSelectProject.mockClear();
+		act(() => latest?.cancelPendingCrossProjectTaskOpenReturningToOriginTask());
 		expect(latest?.pendingCrossProjectTaskOpen).toBeNull();
+		expect(handleSelectProject).toHaveBeenLastCalledWith("project-a");
+		expect(setSelectedTaskId).toHaveBeenLastCalledWith("a-review");
+	});
+
+	it("目标项目已激活后 Cancel：反向跨项目打开发起时的任务，外壳保持到原项目落定", () => {
+		render();
+		act(() => latest?.handleOpenTaskInProject("project-b", "b-review"));
+		render({
+			currentProjectId: "project-b",
+			board: makeBoard({ review: ["shared"] }),
+			isDetailViewOpen: false,
+			selectedTaskId: null,
+			isCurrentProjectBoardSettled: false,
+		});
+		act(() => latest?.cancelPendingCrossProjectTaskOpenReturningToOriginTask());
+		expect(handleSelectProject).toHaveBeenLastCalledWith("project-a");
+		expect(latest?.pendingCrossProjectTaskOpen).toEqual(
+			expect.objectContaining({ repoId: "project-a", taskId: "a-review", originatedFromFocusView: true }),
+		);
+		render({ currentProjectId: "project-a", selectedTaskId: null, isDetailViewOpen: false });
+		expect(setSelectedTaskId).toHaveBeenLastCalledWith("a-review");
+		expect(latest?.pendingCrossProjectTaskOpen).toBeNull();
+	});
+
+	it("在途期间点当前项目的任务：撤销在途切换并直接选中它", () => {
+		render();
+		act(() => latest?.handleOpenTaskInProject("project-b", "b-review"));
+		handleSelectProject.mockClear();
+		act(() => latest?.handleOpenTaskInProject("project-a", "a-review"));
+		expect(handleSelectProject).toHaveBeenCalledWith("project-a");
+		expect(setSelectedTaskId).toHaveBeenLastCalledWith("a-review");
+		expect(latest?.pendingCrossProjectTaskOpen).toBeNull();
+	});
+
+	it("dismiss 只丢在途态，不动导航", () => {
+		render();
+		act(() => latest?.handleOpenTaskInProject("project-b", "b-review"));
+		handleSelectProject.mockClear();
+		act(() => latest?.dismissPendingCrossProjectTaskOpen());
+		expect(latest?.pendingCrossProjectTaskOpen).toBeNull();
+		expect(handleSelectProject).not.toHaveBeenCalled();
 	});
 });

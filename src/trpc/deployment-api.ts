@@ -2,7 +2,8 @@
 // 纯委托：读写 verification state 交给 src/deployment/post-deploy-verification-state.ts，
 // 看板当前列 / agent 回复预览由 runtime-server 经 DI 注入。
 // 硬约束（plan 1d）：confirmVerificationComplete **只更新 verification state，绝不移列** —— Web 侧移列由
-// completePostDeployVerificationMoveToDone 负责、CLI 走 trashTaskById 链；本层不触碰 board.json。
+// completePostDeployVerificationMoveToDone 负责、CLI 走 taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree；
+// 本层不触碰 board.json。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 

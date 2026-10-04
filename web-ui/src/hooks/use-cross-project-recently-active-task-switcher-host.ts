@@ -11,6 +11,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	projects,
 	notificationLogByWorkspaceId,
 	currentProjectId,
+	isBoardScopeAllProjectsSelected,
 	selectedCardTaskId,
 	pendingCrossProjectTaskOpen,
 	onOpenTaskInProject,
@@ -21,6 +22,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	projects: RuntimeProjectSummary[];
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	currentProjectId: string | null;
+	isBoardScopeAllProjectsSelected: boolean;
 	selectedCardTaskId: string | null;
 	pendingCrossProjectTaskOpen: PendingCrossProjectTaskOpen | null;
 	onOpenTaskInProject: (workspaceId: string, taskId: string) => void;
@@ -37,6 +39,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 			projects,
 			notificationLogByWorkspaceId,
 			currentProjectId,
+			isBoardScopeAllProjectsSelected,
 			focusedTaskInProject: pendingCrossProjectTaskOpen
 				? { workspaceId: pendingCrossProjectTaskOpen.repoId, taskId: pendingCrossProjectTaskOpen.taskId }
 				: currentProjectId && selectedCardTaskId
@@ -49,6 +52,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 		}),
 		[
 			currentProjectId,
+			isBoardScopeAllProjectsSelected,
 			notificationLogByWorkspaceId,
 			onEditCurrentProjectTaskPinboardPinReason,
 			onOpenTaskInProject,
@@ -72,9 +76,10 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	}, [pendingCrossProjectTaskOpen, projects]);
 	return {
 		crossProjectRecentlyActiveTaskSwitcherHost,
-		// 只有从 Focus View 发起、且详情页因切项目已关掉时才渲染过渡外壳。
-		isFocusViewCrossProjectTaskOpenInTransit:
-			selectedCardTaskId === null && pendingCrossProjectTaskOpen?.originatedFromFocusView === true,
+		// 从 Focus View 发起的跨项目打开，在途全程都渲染过渡外壳、不渲染详情页。不能等详情页因切项目关掉再出现：
+		// 切项目开始时 board 不清空，详情页会撑过整个 WS 重连、一点点掉内容，快照到达那一帧还会拿上一个
+		// 项目的卡配新项目的 workspaceId 去挂终端。
+		isFocusViewCrossProjectTaskOpenInTransit: pendingCrossProjectTaskOpen?.originatedFromFocusView === true,
 		crossProjectTaskOpenInTransitTarget,
 	};
 }

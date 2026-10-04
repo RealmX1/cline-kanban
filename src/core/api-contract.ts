@@ -812,6 +812,41 @@ export type RuntimeLastConversationProgressObservation = z.infer<
 	typeof runtimeLastConversationProgressObservationSchema
 >;
 
+// 「主对话最后一次向模型发出请求」观测——跨项目切换面板「Cache warm」倒计时的起点。
+//
+// 为什么不复用上面两个时间戳：prompt cache 的 TTL 由**每一次请求**刷新，起点应是最后一次请求的发出时刻。
+//   - agentResponseGenerationStopped 记的是「停止生成」边沿，会话恢复（换 incarnation）也算一次边沿，
+//     于是恢复时刻被当成了起点——2026-10-03 实测三个 Claude 任务显示「18 分钟前」，真实最后请求在
+//     11~21 小时前；runtime 重启后它又被清空，缓存其实还热的任务掉出倒计时区。
+//   - lastConversationProgressObservation 会被 Notification / 后台 SubagentStop 往后推，且 PostToolUse
+//     不推进它，与「请求发出」口径不同。
+// 写点只认「harness 紧接着就会向主对话模型发请求」的 hook 事件（见 evidenceKind），时间取 ingest 时刻；
+// 子代理内部的事件、以及用户回合期间的工具事件（主 agent 已 Stop、后台子代理还在跑）一律不写。
+// 判定在 src/core/main-agent-conversation-model-request-dispatch-hook-event-classification.ts，
+// 合并只经 src/core/last-main-agent-conversation-model-request-dispatch-observation.ts 的单调 reducer。
+export const runtimeMainAgentConversationModelRequestDispatchEvidenceKindSchema = z.enum([
+	// 用户（或 harness 的任务通知）提交了一轮输入且未被恢复守卫拦截——harness 随即发首个请求。
+	"user_prompt_submit_hook_event_accepted",
+	// 主对话的工具调用执行完毕——harness 随即把工具结果发回模型。
+	"post_tool_use_hook_event",
+	"post_tool_use_failure_hook_event",
+	// Gemini 的等价事件（BeforeAgent ≈ UserPromptSubmit，AfterTool ≈ PostToolUse）。
+	"before_agent_hook_event",
+	"after_tool_hook_event",
+]);
+export type RuntimeMainAgentConversationModelRequestDispatchEvidenceKind = z.infer<
+	typeof runtimeMainAgentConversationModelRequestDispatchEvidenceKindSchema
+>;
+
+export const runtimeLastMainAgentConversationModelRequestDispatchObservationSchema = z.object({
+	// 发出请求的时刻（epoch ms，取 hook ingest 时刻）。
+	observedAtMs: z.number(),
+	evidenceKind: runtimeMainAgentConversationModelRequestDispatchEvidenceKindSchema,
+});
+export type RuntimeLastMainAgentConversationModelRequestDispatchObservation = z.infer<
+	typeof runtimeLastMainAgentConversationModelRequestDispatchObservationSchema
+>;
+
 // 一次回收尝试的**可审计**结果。三种 transport 共用同一形状，故「回收到底做成了没有」在 UI /
 // 日志 / 测试里是同一套判据，而不是各 transport 各说各话。
 export const runtimeAgentSessionReclamationOutcomeSchema = z.object({
@@ -862,6 +897,10 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 旧盘数据 / 手构造 summary 缺它 ⇒
 	// 药丸 B 隐藏（而非退回读 lastSubstantiveOutputAt——那正是本 bug 的成因）。
 	lastConversationProgressObservation: runtimeLastConversationProgressObservationSchema.nullable().optional(),
+	// 「主对话最后一次向模型发出请求」观测（Cache warm 倒计时起点），语义见其 schema 注释。跨重启保留；
+	// 加性可选：旧盘数据 / 无回合类 hook 的 agent 缺它 ⇒ 估算回落到其它锚点（见 section-assignment）。
+	lastMainAgentConversationModelRequestDispatchObservation:
+		runtimeLastMainAgentConversationModelRequestDispatchObservationSchema.nullable().optional(),
 	reviewReason: runtimeTaskSessionReviewReasonSchema,
 	exitCode: z.number().nullable(),
 	lastHookAt: z.number().nullable().default(null),
@@ -1109,12 +1148,11 @@ export type RuntimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionS
 >;
 
 // ---------------------------------------------------------------------------------------------
-// dd2db 1a.2b：`kanban task` 的 board 写动词（create / update / start 移列 / trash / delete）全部改走
-// `workspace.applyKanbanCliTaskBoardMutation` 这一条 runtime procedure（§R3 Y-EVENT-1/2/7）。
-// 为什么：工作单元间关系账本只由 runtime 写；CLI 进程直接写盘的变更只能在事后按 board diff 检出，
-// 行动者恒为未解析。改走 runtime 后，每次写入都带「意图 + 按 CLI 行动者声明头解析出的行动者」进入
-// 持久化漏斗。runtime 不可达时 CLI 直接失败（fail closed），绝不回退到直接写盘。
-// runtime 只做 board 变更并返回原始卡片与列；面向人与脚本的 JSON 格式化留在 CLI。
+// dd2db 1a.2b：`kanban task create` 经 `workspace.applyKanbanCliTaskBoardMutation` 这一条 runtime procedure 落盘
+// （§R3 Y-EVENT-1/2/7）。为什么：工作单元间关系账本只由 runtime 写；CLI 进程直接写盘的变更只能在事后按
+// board diff 检出，行动者恒为未解析。改走 runtime 后，每次写入都带「意图 + 按 CLI 行动者声明头解析出的行动者」
+// 进入持久化漏斗。runtime 不可达时 CLI 直接失败（fail closed），绝不回退到直接写盘。
+// update / start / done / delete 已收编进 `taskCardAction.*`（见下一节），这里只剩建卡一种。
 // ---------------------------------------------------------------------------------------------
 
 // CLI 已在本进程解析完 effective settings（含 --expect-resolved-settings-fingerprint 校验）之后的建卡字段。
@@ -1142,8 +1180,278 @@ export type RuntimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCli = z.in
 	typeof runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema
 >;
 
+// 仍保留判别联合的外形（哪怕只剩一种）：CLI 请求体与响应体的 JSON 形状不变。
+export const runtimeKanbanCliTaskBoardMutationRequestSchema = z.discriminatedUnion("kanbanCliTaskBoardMutationKind", [
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("create_backlog_task_card"),
+		backlogTaskCardFieldValuesResolvedByKanbanCli:
+			runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema,
+	}),
+]);
+export type RuntimeKanbanCliTaskBoardMutationRequest = z.infer<typeof runtimeKanbanCliTaskBoardMutationRequestSchema>;
+export type RuntimeKanbanCliTaskBoardMutationKind =
+	RuntimeKanbanCliTaskBoardMutationRequest["kanbanCliTaskBoardMutationKind"];
+
+export const runtimeKanbanCliTaskBoardMutationResponseSchema = z.discriminatedUnion("kanbanCliTaskBoardMutationKind", [
+	z.object({
+		kanbanCliTaskBoardMutationKind: z.literal("create_backlog_task_card"),
+		createdBacklogTaskCard: runtimeBoardCardSchema,
+	}),
+]);
+export type RuntimeKanbanCliTaskBoardMutationResponse = z.infer<typeof runtimeKanbanCliTaskBoardMutationResponseSchema>;
+
+// ---------------------------------------------------------------------------------------------
+// `taskCardAction.*`：看板卡片 per-card 动作的**唯一**服务端实现（实现在 src/trpc/task-card-action-api.ts）。
+// 主看板、Focus View、跨项目切换面板与 kanban CLI 都调这里——浏览器不再「改内存 board → 整板 saveState」，
+// CLI 也不再在自己进程里编排停会话 / 删 worktree / 清草稿。所有 procedure 都是 workspace-scoped：
+// 作用于 `x-kanban-workspace-id` 指向的**任意**已注册项目，这是「跨项目执行动作而不切换当前项目」的基础。
+//
+// 错误语义（全部 procedure 一致）：
+//   - 卡片不在该项目 board 上 → TRPCError NOT_FOUND，文案 `Task "<id>" was not found in workspace <path>.`
+//     （与迁移前 CLI 逐字一致，脚本可能在匹配它）；只读的 readTaskCardWithBoardColumn 例外，回传「不存在」结果；
+//   - 卡片当前所在列不允许该动作 → TRPCError PRECONDITION_FAILED（卡片在请求途中被别处挪走时也是它）；
+//   - 输入组合非法（空 prompt、切 agent 却不给会话 id 等）→ TRPCError BAD_REQUEST；
+//   - 会话 / worktree 这类**执行期**失败不抛错，回传在响应的 outcome 字段里，并带上动作之后卡片的真实位置。
+// ---------------------------------------------------------------------------------------------
+
+// 浏览器声明的这次动作的发起方（用户手势 / PDV 面板完成 / 浏览器端自动流转…，词表同 saveState 的逐卡标注）。
+// 只在请求带已校验的页面 nonce 时被采信：runtime 把它合成为该卡全部 board 变更的发起方标注，账本据此记成
+// 「用户手势」或「浏览器端自动流转」而不是「缺标注」。带 CLI 声明头的请求一律忽略它（CLI 永远不记为用户）。
+// 不传 = 说不清，账本如实记缺标注。
+const runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema = webUiBoardMutationInitiatorSchema.optional();
+
+// 浏览器按终端面板几何估出的 agent PTY 尺寸（与 runtimeTaskSessionStartRequestSchema 的 cols / rows 同义）。
+export const runtimeAgentTerminalGeometryForTaskSessionSpawnSchema = z.object({
+	cols: z.number().int().positive(),
+	rows: z.number().int().positive(),
+});
+export type RuntimeAgentTerminalGeometryForTaskSessionSpawn = z.infer<
+	typeof runtimeAgentTerminalGeometryForTaskSessionSpawnSchema
+>;
+
+// 动作之后（或只读查询那一刻）卡片的完整快照：卡片本体、所在列、两份会话摘要。
+// 两份摘要分开给：盘上那份是 board 锁内读到的 sessions.json（CLI 的 JSON 输出一直用它）；活的那份是 runtime 内存里
+// 三种 transport 合并后的当前摘要（未加载过该项目的终端管理器时为 null）。浏览器取「活的 ?? 盘上的」。
+export const runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema = z.object({
+	taskCard: runtimeBoardCardSchema,
+	boardColumnIdContainingTaskCard: runtimeBoardColumnIdSchema,
+	taskSessionSummaryLiveInRuntimeProcessMemory: runtimeTaskSessionSummarySchema.nullable(),
+	taskSessionSummaryPersistedInWorkspaceSessionsFile: runtimeTaskSessionSummarySchema.nullable(),
+});
+export type RuntimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummaries = z.infer<
+	typeof runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema
+>;
+
+export const runtimeTaskWorktreeDeletionResultOfTaskCardActionSchema = z.object({
+	taskWorktreeWasRemoved: z.boolean(),
+	// 删 worktree 失败不让动作失败（卡片已经移成 / 删成），如实带回原因。
+	taskWorktreeDeletionErrorMessage: z.string().nullable(),
+});
+export type RuntimeTaskWorktreeDeletionResultOfTaskCardAction = z.infer<
+	typeof runtimeTaskWorktreeDeletionResultOfTaskCardActionSchema
+>;
+
+// --- readTaskCardWithBoardColumn（query，只读）---
+// 供浏览器在**非当前项目**上打开编辑器、看原始 prompt、展开跨项目行。
+export const runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema = z.object({
+	taskId: z.string().min(1),
+});
+export type RuntimeTaskCardActionReadTaskCardWithBoardColumnRequest = z.infer<
+	typeof runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema
+>;
+export const runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema = z.discriminatedUnion(
+	"taskCardLookupOutcome",
+	[
+		z.object({
+			taskCardLookupOutcome: z.literal("task_card_found_on_workspace_board"),
+			taskCardSnapshot: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+		}),
+		z.object({
+			taskCardLookupOutcome: z.literal("task_card_not_found_on_workspace_board"),
+			lookedUpTaskId: z.string(),
+		}),
+	],
+);
+export type RuntimeTaskCardActionReadTaskCardWithBoardColumnResponse = z.infer<
+	typeof runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema
+>;
+
+// --- startTaskCardAgentSessionMovingItIntoInProgress ---
+// 只允许 backlog / in_progress 的卡。先移列到 in_progress、再 ensure worktree、再启动会话（与浏览器一致，也守住
+// 「backlog 单向」：启动失败后卡留在 in_progress，让会话状态与错误保持可见）。会话已在 agent 回合时不重复启动。
+export const runtimeTaskCardActionStartAgentSessionRequestSchema = z.object({
+	taskId: z.string().min(1),
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
+	// 拖放进 in_progress 的落点；缺省 = 列顶。卡片本来就在 in_progress 时忽略。
+	insertAtIndexWithinInProgressBoardColumn: z.number().int().nonnegative().optional(),
+});
+export type RuntimeTaskCardActionStartAgentSessionRequest = z.infer<
+	typeof runtimeTaskCardActionStartAgentSessionRequestSchema
+>;
+export const runtimeTaskCardAgentSessionStartOutcomeSchema = z.enum([
+	"agent_session_started",
+	// 会话已在 agent 回合（turnOwner === "agent"）：不重复启动，视为成功。
+	"agent_session_already_in_agent_turn_so_start_was_skipped",
+	// 下面两种失败时卡片**留在** in_progress（不回滚到 backlog），失败原文在 agentSessionStartFailureMessage。
+	"task_worktree_ensure_failed",
+	"agent_session_start_failed",
+]);
+export type RuntimeTaskCardAgentSessionStartOutcome = z.infer<typeof runtimeTaskCardAgentSessionStartOutcomeSchema>;
+export const runtimeTaskCardActionStartAgentSessionResponseSchema = z.object({
+	boardColumnIdOfTaskCardBeforeAction: runtimeBoardColumnIdSchema,
+	// false = 卡片本来就在 in_progress，这次没有移列。
+	taskCardWasMovedIntoInProgressColumnByThisAction: z.boolean(),
+	agentSessionStartOutcome: runtimeTaskCardAgentSessionStartOutcomeSchema,
+	agentSessionStartFailureMessage: z.string().nullable(),
+	// ensureWorktree 成功但带提示（例如 ignored path 同步不完整）时的原文；浏览器照旧弹 warning toast。
+	ensuredTaskWorktreeWarningMessage: z.string().nullable(),
+	startedAgentSessionSummary: runtimeTaskSessionSummarySchema.nullable(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionStartAgentSessionResponse = z.infer<
+	typeof runtimeTaskCardActionStartAgentSessionResponseSchema
+>;
+
+// --- moveTaskCardIntoReviewByHandingTurnToUser ---
+// 只允许 in_progress 的卡。先把会话回合翻给用户（runtime.transitionTaskToReview），成功后**显式**移列到 review——
+// 跨项目时没有浏览器在跑列自动流转（Rule A），不能指望它把卡挪过去。翻回合失败则不移列。
+export const runtimeTaskCardActionMoveIntoReviewRequestSchema = z.object({
+	taskId: z.string().min(1),
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export type RuntimeTaskCardActionMoveIntoReviewRequest = z.infer<
+	typeof runtimeTaskCardActionMoveIntoReviewRequestSchema
+>;
+export const runtimeTaskCardAgentTurnHandoffToUserOutcomeSchema = z.enum([
+	"agent_turn_handed_to_user",
+	// 例如会话不是终端 agent（Cline / ACP 自报完成，不经此入口）或会话已不存在。卡片不移列。
+	"agent_turn_handoff_to_user_failed",
+]);
+export const runtimeTaskCardActionMoveIntoReviewResponseSchema = z.object({
+	agentTurnHandoffToUserOutcome: runtimeTaskCardAgentTurnHandoffToUserOutcomeSchema,
+	agentTurnHandoffToUserFailureMessage: z.string().nullable(),
+	// false = 翻回合失败没有移列，或卡片在翻回合期间已被别处（例如浏览器的列自动流转）挪进 review。
+	taskCardWasMovedIntoReviewColumnByThisAction: z.boolean(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionMoveIntoReviewResponse = z.infer<
+	typeof runtimeTaskCardActionMoveIntoReviewResponseSchema
+>;
+
+// --- moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects ---
+// 纯看板重新归类（进出 validation、in_progress 列内重排）。准入判据见
+// src/core/task-card-action-board-column-transitions.ts；有会话副作用的移列必须走各自的 procedure。
+export const runtimeTaskCardActionMoveBetweenNonTrashColumnsRequestSchema = z.object({
+	taskId: z.string().min(1),
+	targetBoardColumnId: runtimeBoardColumnIdSchema,
+	// 拖放落点（目标列里插入后的下标）；缺省 = 列顶。同列重排时必填，否则视为原位不动。
+	insertAtIndexWithinTargetBoardColumn: z.number().int().nonnegative().optional(),
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export type RuntimeTaskCardActionMoveBetweenNonTrashColumnsRequest = z.infer<
+	typeof runtimeTaskCardActionMoveBetweenNonTrashColumnsRequestSchema
+>;
+export const runtimeTaskCardActionMoveBetweenNonTrashColumnsResponseSchema = z.object({
+	boardColumnIdOfTaskCardBeforeAction: runtimeBoardColumnIdSchema,
+	// false = 卡片已在目标位置，这次没有写盘。
+	taskCardPlacementWasChangedByThisAction: z.boolean(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse = z.infer<
+	typeof runtimeTaskCardActionMoveBetweenNonTrashColumnsResponseSchema
+>;
+
+// --- moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree ---
+// 移入 Done（trash 列）→ 停 agent 会话与详情 shell 终端会话 → 删 worktree（按卡片的 worktreeMode）。
+// 卡片本来就在 Done 时什么副作用都不做（会话中断自动流转进 Done 的卡刻意保留 worktree 供恢复）。
+export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
+	taskId: z.string().min(1),
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export type RuntimeTaskCardActionMoveIntoDoneRequest = z.infer<typeof runtimeTaskCardActionMoveIntoDoneRequestSchema>;
+export const runtimeTaskCardActionMoveIntoDoneResponseSchema = z.object({
+	boardColumnIdOfTaskCardBeforeAction: runtimeBoardColumnIdSchema,
+	taskCardWasAlreadyInTrashColumnSoNoSessionOrWorktreeCleanupRan: z.boolean(),
+	// 卡片移入前所在列可能挂着活 agent 会话（in_progress / review / validation）时才发 stop；详情 shell 终端总是停。
+	taskAgentSessionStopWasRequested: z.boolean(),
+	// 已在 Done 时为 null（没有尝试删）。
+	taskWorktreeDeletionResult: runtimeTaskWorktreeDeletionResultOfTaskCardActionSchema.nullable(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionMoveIntoDoneResponse = z.infer<typeof runtimeTaskCardActionMoveIntoDoneResponseSchema>;
+
+// --- restoreTaskCardFromDoneIntoReviewResumingAgentSession ---
+// 只允许 Done 里的卡。移回 review → ensure worktree → 以 resumeFromTrash 续跑会话；任一步失败都把卡移回 Done
+// 并如实回传失败。成功后关掉卡片的自动 review 动作（与浏览器一致：恢复出来的卡不该被自动提交再次带走）。
+export const runtimeTaskCardActionRestoreFromDoneRequestSchema = z.object({
+	taskId: z.string().min(1),
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
+});
+export type RuntimeTaskCardActionRestoreFromDoneRequest = z.infer<
+	typeof runtimeTaskCardActionRestoreFromDoneRequestSchema
+>;
+export const runtimeTaskCardRestoreFromDoneOutcomeSchema = z.enum([
+	"agent_session_resumed_and_task_card_kept_in_review",
+	"task_worktree_ensure_failed_so_task_card_was_moved_back_into_done",
+	"agent_session_resume_failed_so_task_card_was_moved_back_into_done",
+]);
+export type RuntimeTaskCardRestoreFromDoneOutcome = z.infer<typeof runtimeTaskCardRestoreFromDoneOutcomeSchema>;
+export const runtimeTaskCardActionRestoreFromDoneResponseSchema = z.object({
+	taskCardRestoreFromDoneOutcome: runtimeTaskCardRestoreFromDoneOutcomeSchema,
+	taskCardRestoreFromDoneFailureMessage: z.string().nullable(),
+	ensuredTaskWorktreeWarningMessage: z.string().nullable(),
+	resumedAgentSessionSummary: runtimeTaskSessionSummarySchema.nullable(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionRestoreFromDoneResponse = z.infer<
+	typeof runtimeTaskCardActionRestoreFromDoneResponseSchema
+>;
+
+// --- permanentlyDeleteTaskCardsWithFullResourceCleanup ---
+export const runtimePermanentlyDeletedTaskCardSelectionSchema = z.discriminatedUnion(
+	"permanentlyDeletedTaskCardSelectionKind",
+	[
+		z.object({
+			permanentlyDeletedTaskCardSelectionKind: z.literal("task_cards_selected_by_task_id"),
+			selectedTaskIds: z.array(z.string()).min(1),
+		}),
+		z.object({
+			permanentlyDeletedTaskCardSelectionKind: z.literal("every_task_card_in_board_column"),
+			selectedBoardColumnId: runtimeBoardColumnIdSchema,
+		}),
+	],
+);
+export type RuntimePermanentlyDeletedTaskCardSelection = z.infer<
+	typeof runtimePermanentlyDeletedTaskCardSelectionSchema
+>;
+// 收尾链顺序固定：board 删卡 → 清编辑草稿 → 清排队 prompt（并通知出队引擎重读）→ 停会话 → 删 worktree →
+// **最后**批删 turn checkpoint ref。按 task id 选中而有一张不在 board 上时整批 NOT_FOUND、什么都不删。
+export const runtimeTaskCardActionPermanentlyDeleteRequestSchema = z.object({
+	permanentlyDeletedTaskCardSelection: runtimePermanentlyDeletedTaskCardSelectionSchema,
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export type RuntimeTaskCardActionPermanentlyDeleteRequest = z.infer<
+	typeof runtimeTaskCardActionPermanentlyDeleteRequestSchema
+>;
+export const runtimeTaskCardActionPermanentlyDeleteResponseSchema = z.object({
+	permanentlyDeletedTaskCards: z.array(
+		z.object({
+			deletedTaskCard: runtimeBoardCardSchema,
+			boardColumnIdOfDeletedTaskCardBeforeDeletion: runtimeBoardColumnIdSchema,
+			taskSessionSummaryPersistedInWorkspaceSessionsFileBeforeDeletion: runtimeTaskSessionSummarySchema.nullable(),
+			taskWorktreeDeletionResult: runtimeTaskWorktreeDeletionResultOfTaskCardActionSchema,
+		}),
+	),
+});
+export type RuntimeTaskCardActionPermanentlyDeleteResponse = z.infer<
+	typeof runtimeTaskCardActionPermanentlyDeleteResponseSchema
+>;
+
+// --- updateTaskCardFieldValues ---
 // `kanban task update` 的原始输入（尚未与卡片现值合并）。三态字段：缺省 = 保留卡片现值，null = 清除，
-// 具体值 = 改成该值。合并在 runtime 的 board 锁内对**最新**卡片进行，避免 CLI 读-改-写之间丢掉并发更新。
+// 具体值 = 改成该值。clineReasoningEffort 的 "default" = 显式回落默认推理档（保留空覆盖）。
 export const runtimeKanbanCliTaskCardFieldUpdateRawInputSchema = z.object({
 	title: z.string().optional(),
 	prompt: z.string().optional(),
@@ -1155,7 +1463,6 @@ export const runtimeKanbanCliTaskCardFieldUpdateRawInputSchema = z.object({
 	agentId: runtimeAgentIdSchema.nullable().optional(),
 	clineProviderId: z.string().nullable().optional(),
 	clineModelId: z.string().nullable().optional(),
-	// "default" = 显式回落默认推理档（保留空覆盖）；null = 清除覆盖（CLI 的 inherit）。
 	clineReasoningEffort: z
 		.union([runtimeClineReasoningEffortSchema, z.literal("default")])
 		.nullable()
@@ -1170,91 +1477,59 @@ export type RuntimeKanbanCliTaskCardFieldUpdateRawInput = z.infer<
 	typeof runtimeKanbanCliTaskCardFieldUpdateRawInputSchema
 >;
 
-export const runtimeKanbanCliPermanentlyDeletedTaskCardSelectionSchema = z.discriminatedUnion(
-	"permanentlyDeletedTaskCardSelectionKind",
-	[
-		z.object({
-			permanentlyDeletedTaskCardSelectionKind: z.literal("task_cards_selected_by_task_id"),
-			selectedTaskIds: z.array(z.string()).min(1),
-		}),
-		z.object({
-			permanentlyDeletedTaskCardSelectionKind: z.literal("every_task_card_in_board_column"),
-			selectedBoardColumnId: runtimeBoardColumnIdSchema,
-		}),
-	],
-);
-export type RuntimeKanbanCliPermanentlyDeletedTaskCardSelection = z.infer<
-	typeof runtimeKanbanCliPermanentlyDeletedTaskCardSelectionSchema
->;
+// 编辑器整卡保存 / 行内改名 / 取消自动动作用的字段 patch。每个字段三态：键缺省 = 保留卡片**最新**现值；
+// null = 清除（回落到默认 / 由 prompt 派生 / 跟随全局）；具体值 = 改成该值。合并在 runtime 的 board 锁内对最新
+// 卡片进行，所以「只改标题」不会抹掉别人刚改的 prompt。taskAgentPermissionMode 的 null = 复位到默认档位。
+// taskAgentSessionInitialization 出现在 patch 里（含 null）而 parentSessionId 缺省时，parentSessionId 一并清除——
+// 否则卡片 schema 会从遗留 parentSessionId 重新派生出刚被清掉的初始化（与浏览器 updateTask 同语义）。
+export const runtimeTaskCardFieldValuePatchSchema = z.object({
+	title: z.string().nullable().optional(),
+	prompt: z.string().optional(),
+	images: z.array(runtimeTaskImageSchema).nullable().optional(),
+	startInPlanMode: z.boolean().optional(),
+	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.nullable().optional(),
+	autoReviewEnabled: z.boolean().optional(),
+	autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
+	taskCommentEntries: z.array(runtimeTaskCommentEntrySchema).nullable().optional(),
+	agentId: runtimeAgentIdSchema.nullable().optional(),
+	ompAgentSessionTransport: runtimeAgentSessionTransportSchema.nullable().optional(),
+	taskConversationMode: runtimeTaskConversationModeSchema.nullable().optional(),
+	clineSettings: runtimeTaskClineSettingsSchema.nullable().optional(),
+	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.nullable().optional(),
+	taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.nullable().optional(),
+	baseRef: z.string().optional(),
+	parentSessionId: z.string().nullable().optional(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.nullable().optional(),
+	prepFilePath: z.string().nullable().optional(),
+});
+export type RuntimeTaskCardFieldValuePatch = z.infer<typeof runtimeTaskCardFieldValuePatchSchema>;
 
-export const runtimeKanbanCliTaskBoardMutationRequestSchema = z.discriminatedUnion("kanbanCliTaskBoardMutationKind", [
+export const runtimeTaskCardFieldUpdateSchema = z.discriminatedUnion("taskCardFieldUpdateInputKind", [
 	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("create_backlog_task_card"),
-		backlogTaskCardFieldValuesResolvedByKanbanCli:
-			runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema,
-	}),
-	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("update_task_card_fields"),
-		updatedTaskId: z.string(),
+		taskCardFieldUpdateInputKind: z.literal("kanban_cli_task_update_command_raw_arguments"),
 		kanbanCliTaskCardFieldUpdateRawInput: runtimeKanbanCliTaskCardFieldUpdateRawInputSchema,
 	}),
 	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("move_task_card_to_in_progress_column"),
-		movedTaskId: z.string(),
-	}),
-	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("move_task_card_to_trash_column"),
-		movedTaskId: z.string(),
-	}),
-	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("permanently_delete_task_cards"),
-		permanentlyDeletedTaskCardSelection: runtimeKanbanCliPermanentlyDeletedTaskCardSelectionSchema,
+		taskCardFieldUpdateInputKind: z.literal("three_state_task_card_field_value_patch"),
+		taskCardFieldValuePatch: runtimeTaskCardFieldValuePatchSchema,
 	}),
 ]);
-export type RuntimeKanbanCliTaskBoardMutationRequest = z.infer<typeof runtimeKanbanCliTaskBoardMutationRequestSchema>;
-export type RuntimeKanbanCliTaskBoardMutationKind =
-	RuntimeKanbanCliTaskBoardMutationRequest["kanbanCliTaskBoardMutationKind"];
+export type RuntimeTaskCardFieldUpdate = z.infer<typeof runtimeTaskCardFieldUpdateSchema>;
 
-// 「盘上会话摘要」取自变更那一刻 board 锁内读到的 sessions.json（不是 runtime 内存里的活摘要）：
-// 迁移前 CLI 直接写盘时输出的就是这一份，保持输出不变。
-export const runtimeKanbanCliTaskBoardMutationResponseSchema = z.discriminatedUnion("kanbanCliTaskBoardMutationKind", [
-	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("create_backlog_task_card"),
-		createdBacklogTaskCard: runtimeBoardCardSchema,
-	}),
-	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("update_task_card_fields"),
-		updatedTaskCard: runtimeBoardCardSchema,
-		updatedTaskCardBoardColumnId: runtimeBoardColumnIdSchema,
-		updatedTaskCardSessionSummaryPersistedOnDisk: runtimeTaskSessionSummarySchema.nullable(),
-	}),
-	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("move_task_card_to_in_progress_column"),
-		// false = 卡片本来就在 in_progress，这次没有写盘。
-		taskCardWasMovedIntoInProgressColumn: z.boolean(),
-		movedTaskCardAfterMutation: runtimeBoardCardSchema,
-		movedTaskCardBoardColumnIdBeforeMutation: runtimeBoardColumnIdSchema.nullable(),
-	}),
-	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("move_task_card_to_trash_column"),
-		// true = 卡片本来就在 trash 列，这次没有写盘（对应 trashTaskById 的 alreadyInTrash）。
-		taskCardWasAlreadyInTrashColumn: z.boolean(),
-		movedTaskCardAfterMutation: runtimeBoardCardSchema,
-		movedTaskCardBoardColumnIdBeforeMutation: runtimeBoardColumnIdSchema,
-		movedTaskCardSessionSummaryPersistedOnDisk: runtimeTaskSessionSummarySchema.nullable(),
-	}),
-	z.object({
-		kanbanCliTaskBoardMutationKind: z.literal("permanently_delete_task_cards"),
-		permanentlyDeletedTaskCards: z.array(
-			z.object({
-				deletedTaskCard: runtimeBoardCardSchema,
-				deletedTaskCardBoardColumnIdBeforeDeletion: runtimeBoardColumnIdSchema,
-				deletedTaskCardSessionSummaryPersistedOnDisk: runtimeTaskSessionSummarySchema.nullable(),
-			}),
-		),
-	}),
-]);
-export type RuntimeKanbanCliTaskBoardMutationResponse = z.infer<typeof runtimeKanbanCliTaskBoardMutationResponseSchema>;
+export const runtimeTaskCardActionUpdateFieldValuesRequestSchema = z.object({
+	taskId: z.string().min(1),
+	taskCardFieldUpdate: runtimeTaskCardFieldUpdateSchema,
+	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+});
+export type RuntimeTaskCardActionUpdateFieldValuesRequest = z.infer<
+	typeof runtimeTaskCardActionUpdateFieldValuesRequestSchema
+>;
+export const runtimeTaskCardActionUpdateFieldValuesResponseSchema = z.object({
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionUpdateFieldValuesResponse = z.infer<
+	typeof runtimeTaskCardActionUpdateFieldValuesResponseSchema
+>;
 
 export const runtimeProjectTaskCountsSchema = z.object({
 	backlog: z.number(),
@@ -1332,6 +1607,12 @@ export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskD
 	// Task Pinboard 置顶态（字段存在即已置顶，同 board 卡片）。
 	pinnedToTaskPinboardAt: z.number().nullable(),
 	taskPinboardPinReason: z.string().nullable(),
+	// Cache warm 倒计时的两个输入（见 estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn）：
+	// 主对话最后一次发请求的时刻，以及当前 agent 进程的启动时刻（summary.startedAt）——后者用来判定
+	// 「缓存只活在同一进程里」的 agent（Codex / Kimi）在恢复成新进程后旧缓存已失效。加性 optional。
+	lastMainAgentConversationModelRequestDispatchObservation:
+		runtimeLastMainAgentConversationModelRequestDispatchObservationSchema.nullable().optional(),
+	agentProcessStartedAt: z.number().nullable().optional(),
 });
 export type RuntimeCrossProjectTaskSwitcherEntry = z.infer<typeof runtimeCrossProjectTaskSwitcherEntrySchema>;
 
@@ -2332,7 +2613,8 @@ export type RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonR
 >;
 
 // 置顶 / 取消置顶 / 改置顶原因，由 runtime 在 board 锁内对**最新** board 执行（workspace-scoped，作用于连接 scope
-// 的项目）。跨项目切换面板对「不是当前打开的项目」的卡置顶时走这里；当前项目仍走浏览器 setBoard → saveState。
+// 的项目）。唯一实现是 `taskCardAction.setTaskPinboardPinStateOfTaskCard`；`workspace.setTaskPinboardPinStateOfTaskCard`
+// 只为旧浏览器构建保留一个版本，内部转发过去、把响应收窄回本 schema。
 export const runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema = z.discriminatedUnion("taskPinboardPinAction", [
 	z.object({
 		taskPinboardPinAction: z.literal("pin_task_card_or_update_pin_reason"),
@@ -2353,6 +2635,34 @@ export const runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema = z.object({
 });
 export type RuntimeSetTaskPinboardPinStateOfTaskCardResponse = z.infer<
 	typeof runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema
+>;
+
+// --- taskCardAction.setTaskPinboardPinStateOfTaskCard ---
+// 与上面的旧请求同形，外加浏览器声明的发起方（置顶恒为用户手势，浏览器应传 web_ui_user_gesture）。
+// 卡片不在该项目 board 上 → TRPCError NOT_FOUND（与其余 taskCardAction 一致；旧 procedure 把它转回 taskCardFound:false）。
+export const runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema = z.discriminatedUnion("taskPinboardPinAction", [
+	z.object({
+		taskPinboardPinAction: z.literal("pin_task_card_or_update_pin_reason"),
+		taskId: z.string().min(1),
+		taskPinboardPinReason: z.string().nullable(),
+		boardMutationInitiator: webUiBoardMutationInitiatorSchema.optional(),
+	}),
+	z.object({
+		taskPinboardPinAction: z.literal("unpin_task_card"),
+		taskId: z.string().min(1),
+		boardMutationInitiator: webUiBoardMutationInitiatorSchema.optional(),
+	}),
+]);
+export type RuntimeTaskCardActionSetTaskPinboardPinStateRequest = z.infer<
+	typeof runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema
+>;
+export const runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema = z.object({
+	// false = 置顶态本来就是请求的样子，这次没有写盘。
+	boardWasSaved: z.boolean(),
+	taskCardSnapshotAfterAction: runtimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummariesSchema,
+});
+export type RuntimeTaskCardActionSetTaskPinboardPinStateResponse = z.infer<
+	typeof runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema
 >;
 
 export const runtimeProjectAddRequestSchema = z
@@ -4296,6 +4606,10 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// UserPromptSubmit 的 prompt 只在同步 hook 请求内短暂流转，用于区分真人输入与 harness 在恢复时
 	// 自动塞入的任务通知；普通诊断日志与 session summary 均不得记录它。
 	submittedPromptText: z.string().optional(),
+	// hook 是否从子代理内部触发（`kanban hooks` 从 hook stdin 的 `agent_id` 派生；Claude Code 只在子代理
+	// 内的事件上带它，主线程一律不带）。子代理的请求走自己的缓存前缀，不刷新主对话的 Cache warm 起点。
+	// 只传布尔、不传 id 本身：服务端唯一用途就是这道排除。
+	hookEventFiredInsideSubagentContext: z.boolean().optional(),
 	// 终端 agent 原生会话身份（N0a）：`kanban hooks` 从 hook stdin 的 session_id / transcript_path 抽出，
 	// 每个事件都带（幂等），服务端只在值变化时写 summary sidecar。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.optional(),
@@ -4821,7 +5135,7 @@ export type RuntimeRequestVerificationCompleteResponse = z.infer<
 
 // deployment.confirmVerificationComplete（mutation）：
 // **此过程只更新 verification state**（校验并消费 token、置 verifiedAt/boardMovedToDoneAt、清 pendingConfirmation），
-// **绝不移列**。移列职责：Web = completePostDeployVerificationMoveToDone、CLI = trashTaskById 链（plan 1d）。
+// **绝不移列**。移列职责：Web = completePostDeployVerificationMoveToDone、CLI = taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree（plan 1d）。
 // Web 时序为「先移列后 confirm」，故 confirm 校验任务已在 trash、checklist 仍全勾、token 有效。
 export const runtimeConfirmVerificationCompleteRequestSchema = z.object({
 	deploymentId: z.string(),

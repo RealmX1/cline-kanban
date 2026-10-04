@@ -178,12 +178,14 @@ describe("useWorkspaceSync first workspace snapshot after a project switch", () 
 		// reset 之后、新项目头一份快照被吸收之前，旁路 applier 先后并入：上一个项目尾巴上的一批（推流尚未切走），
 		// 以及新项目里比头一份快照更新的一批。
 		await act(async () => {
-			streamedTaskSessionSummariesApplier([
-				createSessionSummary("previous-project-task", previousProjectRepoPath, 900, "Previous project output"),
-			]);
-			streamedTaskSessionSummariesApplier([
-				createSessionSummary("next-project-task", nextProjectRepoPath, 2000, "Newer streamed output"),
-			]);
+			streamedTaskSessionSummariesApplier(
+				[createSessionSummary("previous-project-task", previousProjectRepoPath, 900, "Previous project output")],
+				"previous-project",
+			);
+			streamedTaskSessionSummariesApplier(
+				[createSessionSummary("next-project-task", nextProjectRepoPath, 2000, "Newer streamed output")],
+				"next-project",
+			);
 		});
 
 		// 新项目头一份快照到达，里面是同一张卡较旧的 summary。
@@ -241,9 +243,10 @@ describe("useWorkspaceSync first workspace snapshot after a project switch", () 
 			initialSnapshot.resetWorkspaceSyncState();
 		});
 		await act(async () => {
-			streamedTaskSessionSummariesApplier([
-				createSessionSummary("next-project-task", nextProjectRepoPath, 1000, "Older streamed output"),
-			]);
+			streamedTaskSessionSummariesApplier(
+				[createSessionSummary("next-project-task", nextProjectRepoPath, 1000, "Older streamed output")],
+				"next-project",
+			);
 		});
 		await act(async () => {
 			root.render(

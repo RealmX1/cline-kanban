@@ -9,8 +9,8 @@ import { StageHeaderLabel } from "@/components/detail-panels/stage-header-label"
 import { StageHeaderRails } from "@/components/detail-panels/stage-header-rails";
 import { TaskPinboardSectionInFocusView } from "@/components/detail-panels/task-pinboard-section-in-focus-view";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
-import { focusViewLeftColumnTaskListScopeToggleAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { TaskCardBody, type TaskCardBusinessProps } from "@/components/task-card-body";
+import { TaskCardBodyVisualDensityProvider } from "@/components/task-card-body-visual-density-context";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -22,59 +22,8 @@ import { useStageHeaderPinLayout } from "@/hooks/use-stage-header-pin-layout";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { findCardColumnId, isCardDropDisabled } from "@/state/drag-rules";
 import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
-import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard as BoardCardModel, BoardColumn, BoardColumnId, CardSelection } from "@/types";
 import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
-import { useRawLocalStorageValue } from "@/utils/react-use";
-
-// Focus View 左栏的列表范围：当前项目的 stage 列表，或跨项目「最近活跃任务」切换面板
-// （docs/context-cross-project-recently-active-task-switcher.md）。
-type FocusViewLeftColumnTaskListScope = "current_project_stage_list" | "all_projects_recently_active_task_switcher";
-
-function normalizeFocusViewLeftColumnTaskListScope(value: string): FocusViewLeftColumnTaskListScope | null {
-	return value === "current_project_stage_list" || value === "all_projects_recently_active_task_switcher"
-		? value
-		: null;
-}
-
-function FocusViewLeftColumnTaskListScopeToggle({
-	scope,
-	onScopeChange,
-}: {
-	scope: FocusViewLeftColumnTaskListScope;
-	onScopeChange: (scope: FocusViewLeftColumnTaskListScope) => void;
-}): React.ReactElement {
-	const options: Array<{ scope: FocusViewLeftColumnTaskListScope; label: string }> = [
-		{ scope: "current_project_stage_list", label: "This project" },
-		{ scope: "all_projects_recently_active_task_switcher", label: "All projects" },
-	];
-	return (
-		<div
-			role="radiogroup"
-			aria-label="Task list scope"
-			data-verification-anchor={focusViewLeftColumnTaskListScopeToggleAnchorKey()}
-			className="mx-2 mt-2 flex shrink-0 rounded-md border border-border bg-surface-1 p-0.5"
-		>
-			{options.map((option) => (
-				<button
-					key={option.scope}
-					type="button"
-					role="radio"
-					aria-checked={scope === option.scope}
-					onClick={() => onScopeChange(option.scope)}
-					className={cn(
-						"h-6 flex-1 cursor-pointer rounded-sm border-none text-xs",
-						scope === option.scope
-							? "bg-surface-3 font-semibold text-text-primary"
-							: "bg-transparent text-text-secondary hover:text-text-primary",
-					)}
-				>
-					{option.label}
-				</button>
-			))}
-		</div>
-	);
-}
 
 // 详情页左侧所有 section 共用一个滚动容器；模块级常量保持引用稳定。
 const getDetailTaskListScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
@@ -381,18 +330,12 @@ export function ColumnContextPanel({
 }): React.ReactElement {
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-	// 没有宿主（单测里独立挂载）时不提供 All projects 模式。stage 列表在 All projects 模式下只隐藏不卸载：
-	// 下面的钉住 rail / 焦点卡几何 hook 都挂在它的 scrollport 上，卸载再挂回会让它们丢掉观察目标。
+	// 范围由顶栏项目切换器决定（Board Scope = All projects，见 use-selected-board-or-single-project-scope）；
+	// 没有宿主（单测里独立挂载）时只有 stage 列表。stage 列表在 Board Scope 下只隐藏不卸载：下面的钉住 rail /
+	// 焦点卡几何 hook 都挂在它的 scrollport 上，卸载再挂回会让它们丢掉观察目标。
 	const crossProjectRecentlyActiveTaskSwitcherHost = useCrossProjectRecentlyActiveTaskSwitcherHostContext();
-	const [focusViewLeftColumnTaskListScope, setFocusViewLeftColumnTaskListScope] =
-		useRawLocalStorageValue<FocusViewLeftColumnTaskListScope>(
-			LocalStorageKey.FocusViewLeftColumnTaskListScope,
-			"current_project_stage_list",
-			normalizeFocusViewLeftColumnTaskListScope,
-		);
 	const showsCrossProjectRecentlyActiveTaskSwitcher =
-		crossProjectRecentlyActiveTaskSwitcherHost !== null &&
-		focusViewLeftColumnTaskListScope === "all_projects_recently_active_task_switcher";
+		crossProjectRecentlyActiveTaskSwitcherHost?.isBoardScopeAllProjectsSelected === true;
 
 	const columnIds = useMemo(() => selection.allColumns.map((column) => column.id), [selection.allColumns]);
 
@@ -512,138 +455,138 @@ export function ColumnContextPanel({
 	}, [selection.card.id, selection.column.id, showsCrossProjectRecentlyActiveTaskSwitcher]);
 
 	return (
-		<div
-			style={{
-				display: "flex",
-				flexDirection: "column",
-				width: panelWidth ?? "20%",
-				minHeight: 0,
-				overflow: "hidden",
-				background: "var(--color-surface-0)",
-			}}
-		>
-			{crossProjectRecentlyActiveTaskSwitcherHost ? (
-				<FocusViewLeftColumnTaskListScopeToggle
-					scope={focusViewLeftColumnTaskListScope}
-					onScopeChange={setFocusViewLeftColumnTaskListScope}
-				/>
-			) : null}
-			{showsCrossProjectRecentlyActiveTaskSwitcher && crossProjectRecentlyActiveTaskSwitcherHost ? (
-				<CrossProjectRecentlyActiveTaskSwitcherPanel host={crossProjectRecentlyActiveTaskSwitcherHost} />
-			) : null}
+		// Focus View 左栏的三种卡片渲染角色（本体卡、rail 焦点卡克隆、置顶板分身）都在这棵子树里，一处提供紧凑密度
+		// 即全覆盖（见 TaskCardBodyVisualDensity）；主看板不在这里，保持标准密度。
+		<TaskCardBodyVisualDensityProvider value="compact_row_in_focus_view_left_column">
 			<div
-				className={cn("flex min-h-0 flex-1 flex-col", showsCrossProjectRecentlyActiveTaskSwitcher && "hidden")}
-				data-testid="focus-view-current-project-stage-list"
+				style={{
+					display: "flex",
+					flexDirection: "column",
+					width: panelWidth ?? "20%",
+					minHeight: 0,
+					overflow: "hidden",
+					background: "var(--color-surface-0)",
+				}}
 			>
-				{/* 置顶板分段是 scrollport 之外的固定区：常驻列表顶端、不随 stage 列表滚走。 */}
-				<TaskPinboardSectionInFocusView
-					pinnedTasks={pinnedTasks}
-					selectedCardId={selection.card.id}
-					taskSessions={taskSessions}
-					handlers={taskCardActionHandlers}
-					onActivateCard={activateCard}
-					onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
-					onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
-					workspacePath={workspacePath}
-					defaultClineModelId={defaultClineModelId}
-					defaultAgentId={defaultAgentId}
-				/>
-				{/* stage 列表区：StageHeaderRails 以绝对定位锚在这里，顶沿 rail 从置顶板分段下沿起算、不会盖住它。
-			    它同时必须是 rail 的裁剪边界：底沿 rail 自 bottom:0 向上堆叠，本区矮于 rail 时会越过本区上沿，
-			    以 z-index:5 的不透明底盖住上方的置顶板分段（外层面板的 overflow:hidden 只裁面板边界）。
-			    用 clip 而非 hidden：不创建滚动容器，scrollIntoView 不会把本区自身滚动错位。 */}
-				<div className="relative flex min-h-0 flex-1 flex-col overflow-clip">
-					<DragDropContext onBeforeCapture={handleBeforeCapture} onDragEnd={handleDragEnd}>
-						<div
-							ref={scrollContainerRef}
-							className="kb-detail-task-list-scroll flex flex-col gap-2 p-2"
-							data-selected-pinned={selectedCardPinState !== "hidden" ? "true" : undefined}
-							style={{
-								flex: "1 1 0",
-								minHeight: 0,
-								overflowY: "auto",
-								overscrollBehavior: "contain",
-								overflowAnchor: "none",
-							}}
-						>
-							{onCreateTask ? (
-								<Button
-									icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
-									aria-label="Create task"
-									fill
-									onClick={onCreateTask}
-								>
-									<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-										<span>Create task</span>
-										<span aria-hidden className="text-text-secondary">
-											(c)
-										</span>
-									</span>
-								</Button>
-							) : null}
-							{selection.allColumns.map((column) => (
-								<ColumnSection
-									key={column.id}
-									column={column}
-									selectedCardId={selection.card.id}
-									open={isStageSectionExpanded(column.id)}
-									onToggleOpen={() => toggleStageSectionExpandedFromInFlowHeader(column.id)}
-									taskIdRequestedToReveal={taskIdRequestedToReveal}
-									onCardClick={activateCard}
-									taskSessions={taskSessions}
-									onStartTask={
-										column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined
-									}
-									onRequestStartAllReadyBacklogTasks={
-										column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
-									}
-									onClearTrash={column.id === "trash" ? onClearTrash : undefined}
-									onEditTask={column.id === "backlog" ? onEditTask : undefined}
-									onSaveTitle={onSaveTaskTitle}
-									onMoveToTrashTask={
-										column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
-									}
-									onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
-									onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
-									onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
-									onDeleteTask={onDeleteTask}
-									onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
-									onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-									moveToTrashLoadingById={
-										column.id === "review" || column.id === "validation" ? moveToTrashLoadingById : undefined
-									}
-									activeDragSourceColumnId={activeDragSourceColumnId}
-									workspacePath={workspacePath}
-									defaultClineModelId={defaultClineModelId}
-									defaultAgentId={defaultAgentId}
-								/>
-							))}
-						</div>
-					</DragDropContext>
-					<StageHeaderRails
-						selection={selection}
-						topPinnedColumnIds={stageHeaderPinLayout.topPinnedColumnIds}
-						bottomPinnedColumnIds={stageHeaderPinLayout.bottomPinnedColumnIds}
-						focusedCardPinState={selectedCardPinState}
-						isStageSectionExpanded={isStageSectionExpanded}
-						onToggleStageSectionExpandedFromStageHeaderRail={toggleStageSectionExpandedFromStageHeaderRail}
-						onJumpToStageSectionBelowTopRail={jumpToStageSectionBelowTopRail}
-						scrollRootRef={scrollContainerRef}
+				{showsCrossProjectRecentlyActiveTaskSwitcher && crossProjectRecentlyActiveTaskSwitcherHost ? (
+					<CrossProjectRecentlyActiveTaskSwitcherPanel host={crossProjectRecentlyActiveTaskSwitcherHost} />
+				) : null}
+				<div
+					className={cn("flex min-h-0 flex-1 flex-col", showsCrossProjectRecentlyActiveTaskSwitcher && "hidden")}
+					data-testid="focus-view-current-project-stage-list"
+				>
+					{/* 置顶板分段是 scrollport 之外的固定区：常驻列表顶端、不随 stage 列表滚走。 */}
+					<TaskPinboardSectionInFocusView
+						pinnedTasks={pinnedTasks}
+						selectedCardId={selection.card.id}
 						taskSessions={taskSessions}
-						onStartTask={onStartTask}
-						onMoveToTrashTask={onMoveToTrashTask}
-						onMoveToValidationTask={onMoveToValidationTask}
-						onRestoreFromTrashTask={onRestoreFromTrashTask}
-						onDeleteTask={onDeleteTask}
-						onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
-						onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-						moveToTrashLoadingById={moveToTrashLoadingById}
+						handlers={taskCardActionHandlers}
+						onActivateCard={activateCard}
+						onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
+						onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 						workspacePath={workspacePath}
 						defaultClineModelId={defaultClineModelId}
 						defaultAgentId={defaultAgentId}
 					/>
+					{/* stage 列表区：StageHeaderRails 以绝对定位锚在这里，顶沿 rail 从置顶板分段下沿起算、不会盖住它。
+			    它同时必须是 rail 的裁剪边界：底沿 rail 自 bottom:0 向上堆叠，本区矮于 rail 时会越过本区上沿，
+			    以 z-index:5 的不透明底盖住上方的置顶板分段（外层面板的 overflow:hidden 只裁面板边界）。
+			    用 clip 而非 hidden：不创建滚动容器，scrollIntoView 不会把本区自身滚动错位。 */}
+					<div className="relative flex min-h-0 flex-1 flex-col overflow-clip">
+						<DragDropContext onBeforeCapture={handleBeforeCapture} onDragEnd={handleDragEnd}>
+							<div
+								ref={scrollContainerRef}
+								className="kb-detail-task-list-scroll flex flex-col gap-2 p-2"
+								data-selected-pinned={selectedCardPinState !== "hidden" ? "true" : undefined}
+								style={{
+									flex: "1 1 0",
+									minHeight: 0,
+									overflowY: "auto",
+									overscrollBehavior: "contain",
+									overflowAnchor: "none",
+								}}
+							>
+								{onCreateTask ? (
+									<Button
+										icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
+										aria-label="Create task"
+										fill
+										onClick={onCreateTask}
+									>
+										<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+											<span>Create task</span>
+											<span aria-hidden className="text-text-secondary">
+												(c)
+											</span>
+										</span>
+									</Button>
+								) : null}
+								{selection.allColumns.map((column) => (
+									<ColumnSection
+										key={column.id}
+										column={column}
+										selectedCardId={selection.card.id}
+										open={isStageSectionExpanded(column.id)}
+										onToggleOpen={() => toggleStageSectionExpandedFromInFlowHeader(column.id)}
+										taskIdRequestedToReveal={taskIdRequestedToReveal}
+										onCardClick={activateCard}
+										taskSessions={taskSessions}
+										onStartTask={
+											column.id === "backlog" || column.id === "in_progress" ? onStartTask : undefined
+										}
+										onRequestStartAllReadyBacklogTasks={
+											column.id === "backlog" ? onRequestStartAllReadyBacklogTasks : undefined
+										}
+										onClearTrash={column.id === "trash" ? onClearTrash : undefined}
+										onEditTask={column.id === "backlog" ? onEditTask : undefined}
+										onSaveTitle={onSaveTaskTitle}
+										onMoveToTrashTask={
+											column.id === "review" || column.id === "validation" ? onMoveToTrashTask : undefined
+										}
+										onMoveToValidationTask={column.id === "review" ? onMoveToValidationTask : undefined}
+										onMoveToReviewTask={column.id === "in_progress" ? onMoveToReviewTask : undefined}
+										onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
+										onDeleteTask={onDeleteTask}
+										onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+										onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+										moveToTrashLoadingById={
+											column.id === "review" || column.id === "validation"
+												? moveToTrashLoadingById
+												: undefined
+										}
+										activeDragSourceColumnId={activeDragSourceColumnId}
+										workspacePath={workspacePath}
+										defaultClineModelId={defaultClineModelId}
+										defaultAgentId={defaultAgentId}
+									/>
+								))}
+							</div>
+						</DragDropContext>
+						<StageHeaderRails
+							selection={selection}
+							topPinnedColumnIds={stageHeaderPinLayout.topPinnedColumnIds}
+							bottomPinnedColumnIds={stageHeaderPinLayout.bottomPinnedColumnIds}
+							focusedCardPinState={selectedCardPinState}
+							isStageSectionExpanded={isStageSectionExpanded}
+							onToggleStageSectionExpandedFromStageHeaderRail={toggleStageSectionExpandedFromStageHeaderRail}
+							onJumpToStageSectionBelowTopRail={jumpToStageSectionBelowTopRail}
+							scrollRootRef={scrollContainerRef}
+							taskSessions={taskSessions}
+							onStartTask={onStartTask}
+							onMoveToTrashTask={onMoveToTrashTask}
+							onMoveToValidationTask={onMoveToValidationTask}
+							onRestoreFromTrashTask={onRestoreFromTrashTask}
+							onDeleteTask={onDeleteTask}
+							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
+							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+							moveToTrashLoadingById={moveToTrashLoadingById}
+							workspacePath={workspacePath}
+							defaultClineModelId={defaultClineModelId}
+							defaultAgentId={defaultAgentId}
+						/>
+					</div>
 				</div>
 			</div>
-		</div>
+		</TaskCardBodyVisualDensityProvider>
 	);
 }

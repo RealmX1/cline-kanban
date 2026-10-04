@@ -19,6 +19,7 @@ import type {
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeLastConversationProgressObservation,
+	RuntimeMainAgentConversationModelRequestDispatchEvidenceKind,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskConnectionRetry,
 	RuntimeTaskConversationMode,
@@ -4833,6 +4834,28 @@ export class TerminalSessionManager implements TerminalSessionService {
 		observation: RuntimeLastConversationProgressObservation,
 	): RuntimeTaskSessionSummary | null {
 		return this.recordLastConversationProgressObservation(taskId, observation);
+	}
+
+	// 记一次「主对话向模型发出请求」（Cache warm 倒计时起点）。判定由 hooks-api 经
+	// classifyHookEventAsMainAgentConversationModelRequestDispatch 做完，本方法只如实落值；单调性由
+	// mergeSummaryWithFacets 里的 reducer 保证。值没变（同一毫秒重复投递）就不广播。
+	recordMainAgentConversationModelRequestDispatch(
+		taskId: string,
+		evidenceKind: RuntimeMainAgentConversationModelRequestDispatchEvidenceKind,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return null;
+		}
+		const previousObservation = entry.summary.lastMainAgentConversationModelRequestDispatchObservation ?? null;
+		const summary = updateSummary(entry, {
+			lastMainAgentConversationModelRequestDispatchObservation: { observedAtMs: now(), evidenceKind },
+		});
+		if (summary.lastMainAgentConversationModelRequestDispatchObservation === previousObservation) {
+			return cloneSummary(summary);
+		}
+		this.emitSummary(summary);
+		return cloneSummary(summary);
 	}
 
 	private recordLastConversationProgressObservation(
