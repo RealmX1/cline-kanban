@@ -474,16 +474,107 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 // 「task get」：按 task ID 取回单条任务的只读快照。存在的意义是补上「别的 agent 拿到一个 task ID
 // （或一条 worktree 路径）之后该怎么找回这个任务」这一段——task list 要求调用方自己在整块 JSON 里筛，
 // 而任务标题既不唯一也会随 prompt 编辑而变，ID 才是唯一可靠的引用键。
+// dd2db 1b：当前（或推断的）project 里没有这张卡时，经 runtime 的全局 task 身份登记簿跨 project 解析。
+// 显式传了 --project-path 就不替调用方换 project，只在报错里指出它实际在哪。
 async function getTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
-	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
-		autoCreateIfMissing: false,
-	});
+	const explicitProjectPath = input.projectPath?.trim() || undefined;
+	let workspace: Awaited<ReturnType<typeof resolveRuntimeWorkspace>> | null = null;
+	let workspaceResolutionFailureMessage: string | null = null;
+	try {
+		workspace = await resolveRuntimeWorkspace(explicitProjectPath, input.cwd, { autoCreateIfMissing: false });
+	} catch (error) {
+		if (explicitProjectPath) {
+			throw error;
+		}
+		workspaceResolutionFailureMessage = toErrorMessage(error);
+	}
+	if (workspace) {
+		const taskInWorkspace = await getTaskFromRuntimeWorkspace(workspace, input.taskId);
+		if (taskInWorkspace) {
+			return taskInWorkspace;
+		}
+	}
+	const notFoundMessage = workspace
+		? `Task "${input.taskId}" was not found in workspace ${workspace.repoPath}`
+		: `Task "${input.taskId}" could not be looked up in the current directory (${workspaceResolutionFailureMessage})`;
+	const kanbanBoardCardIdentityCandidates = await createRuntimeTrpcClient(null)
+		.workUnit.resolveKanbanBoardCardIdentityByBareTaskId.query({ bareTaskId: input.taskId })
+		.then((response) => response.kanbanBoardCardIdentityCandidates)
+		.catch(() => null);
+	if (!kanbanBoardCardIdentityCandidates || kanbanBoardCardIdentityCandidates.length === 0) {
+		throw new Error(
+			kanbanBoardCardIdentityCandidates === null
+				? `${notFoundMessage}, and the cross-project lookup through the Kanban runtime is unavailable.`
+				: `${notFoundMessage}, and no other project knows this task id.`,
+		);
+	}
+	const describeCandidateLocations = () =>
+		kanbanBoardCardIdentityCandidates
+			.map(
+				(candidate) =>
+					`${candidate.workspaceRepositoryPath ?? candidate.kanbanBoardCard.workspaceId}${candidate.permanentlyRemovedFromBoardAt !== null ? " (permanently removed)" : ""}`,
+			)
+			.join(", ");
+	if (explicitProjectPath) {
+		throw new Error(
+			`${notFoundMessage}; it is known in: ${describeCandidateLocations()}. Omit --project-path to resolve it across projects.`,
+		);
+	}
+	const liveCandidates = kanbanBoardCardIdentityCandidates.filter(
+		(candidate) => candidate.permanentlyRemovedFromBoardAt === null,
+	);
+	if (liveCandidates.length === 0) {
+		// 墓碑：卡已永久删除，id 仍能解析出它是什么、在哪、何时删的。
+		return {
+			ok: true,
+			taskPermanentlyRemovedFromBoard: true,
+			permanentlyRemovedTaskIdentityTombstones: kanbanBoardCardIdentityCandidates,
+		};
+	}
+	const [onlyLiveCandidate, ...otherLiveCandidates] = liveCandidates;
+	if (!onlyLiveCandidate || otherLiveCandidates.length > 0) {
+		throw new Error(
+			`Task id "${input.taskId}" matches more than one Kanban task card (${describeCandidateLocations()}); pass --project-path to choose one.`,
+		);
+	}
+	// 以下只有唯一一个活卡候选：定位或读取不到它时如实报「在哪、为何读不到」，绝不误报「匹配多张卡」。
+	const onlyLiveCandidateRepositoryPath = onlyLiveCandidate.workspaceRepositoryPath;
+	if (!onlyLiveCandidateRepositoryPath) {
+		throw new Error(
+			`${notFoundMessage}; the global task identity registry places it in workspace ${onlyLiveCandidate.kanbanBoardCard.workspaceId}, which is not a project the Kanban runtime currently knows (no repository path is recorded for it), so it cannot be read across projects. Add that project to Kanban and pass --project-path <that project's path> to read it.`,
+		);
+	}
+	const describeCrossProjectReadFailure = (failureReason: string) =>
+		`${notFoundMessage}; the cross-project lookup through the global task identity registry places it in ${onlyLiveCandidateRepositoryPath}, but reading it there failed: ${failureReason}`;
+	let taskInOwningWorkspace: JsonRecord | null;
+	try {
+		const owningWorkspace = await resolveRuntimeWorkspace(onlyLiveCandidateRepositoryPath, input.cwd, {
+			autoCreateIfMissing: false,
+		});
+		taskInOwningWorkspace = await getTaskFromRuntimeWorkspace(owningWorkspace, input.taskId);
+	} catch (error) {
+		throw new Error(describeCrossProjectReadFailure(toErrorMessage(error)));
+	}
+	if (!taskInOwningWorkspace) {
+		throw new Error(
+			describeCrossProjectReadFailure(
+				"that project's board has no task with this id (the card may have been moved away, or the registry may lag behind the board).",
+			),
+		);
+	}
+	return { ...taskInOwningWorkspace, resolvedAcrossProjectsThroughGlobalTaskIdentityRegistry: true };
+}
+
+async function getTaskFromRuntimeWorkspace(
+	workspace: Awaited<ReturnType<typeof resolveRuntimeWorkspace>>,
+	taskId: string,
+): Promise<JsonRecord | null> {
 	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
 	const state = await runtimeClient.workspace.getState.query();
 
-	const found = findTaskRecord(state, input.taskId);
+	const found = findTaskRecord(state, taskId);
 	if (!found) {
-		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspace.repoPath}.`);
+		return null;
 	}
 
 	// worktree 路径与 HEAD 状态由运行时给出而非本地拼接：调用方通常正是为了「进到那个目录去」才来查的，
@@ -496,11 +587,27 @@ async function getTask(input: { cwd: string; taskId: string; projectPath?: strin
 		})
 		.catch(() => null);
 
+	// C5（dd2db 1b 起）：只输出记录型邻域；门段落在阶段 3 加入。关系读不到不让整条命令失败，如实给出原因。
+	const workUnitRelationNeighborhood = await runtimeClient.workUnit.getRelationNeighborhoodSummary
+		.query({
+			workUnit: {
+				workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+				bareTaskId: found.task.id,
+				workspaceId: workspace.workspaceId,
+			},
+		})
+		.then((response) => ({
+			recordedRelationCount: response.recordedRelations.length,
+			renderedNeighborhoodSummaryText: response.renderedNeighborhoodSummaryText,
+		}))
+		.catch((error: unknown) => ({ neighborhoodUnavailableReason: toErrorMessage(error) }));
+
 	return {
 		ok: true,
 		workspacePath: workspace.repoPath,
 		task: formatTaskRecord(state, found.task, found.columnId),
 		taskWorkspace: taskWorkspaceInfo,
+		workUnitRelationNeighborhood,
 	};
 }
 

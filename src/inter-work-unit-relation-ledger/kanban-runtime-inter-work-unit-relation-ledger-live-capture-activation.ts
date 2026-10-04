@@ -27,6 +27,10 @@ import {
 } from "./inter-work-unit-relation-ledger-database-worker-client";
 import { logInterWorkUnitRelationLedgerDiagnosticWarning } from "./inter-work-unit-relation-ledger-diagnostics-logger";
 import {
+	RecordedInterWorkUnitRelationProjectionKeptCaughtUpWithLedger,
+	type RecordedInterWorkUnitRelationProjectionReader,
+} from "./recorded-inter-work-unit-relation-projection-kept-caught-up-with-ledger";
+import {
 	createCapturingKanbanRuntimeInstanceIdentity,
 	createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBackedByRelationLedger,
 } from "./workspace-board-persistence-funnel-task-mutation-event-capture-backed-by-relation-ledger";
@@ -86,6 +90,9 @@ interface ActiveKanbanRuntimeInterWorkUnitRelationLedgerLiveCaptureState {
 	// 不阻塞调用方的后台账本记录（族 3 事实、message 事件、PDV 观测……）中仍在途的整段工作（含追加前的异步读取）。
 	// 停用 drain 等它们全部落定之后才关 worker；落定后自行移出。
 	backgroundLedgerEventRecordingsInFlight: Set<Promise<void>>;
+	// dd2db 1b 读侧：本实例的记录型关系投影（内存态，随实例生灭）与在途的投影读取（停用 drain 同样等它们）。
+	recordedInterWorkUnitRelationProjection: RecordedInterWorkUnitRelationProjectionKeptCaughtUpWithLedger;
+	recordedInterWorkUnitRelationProjectionReadsInFlight: Set<Promise<unknown>>;
 }
 
 // 最近一次激活的实例状态。停用后**不清空**：保留已停用的状态，入口才能区分「本进程从未激活」（CLI 进程、单测：静默跳过）
@@ -536,6 +543,55 @@ function wrapCaptureSoItFailsClosedAfterDeactivation(
 	};
 }
 
+// dd2db 1b 读侧的唯一入口：读本实例的记录型关系投影（读之前先增量追上账本）。
+// 从未激活（CLI 进程、单测）或停用已开始时抛 InterWorkUnitRelationLedgerUnavailableError——调用方据此如实回答「关系不可用」，
+// 绝不退回空邻域冒充「没有关系」。在途的读纳入停用 drain：关 worker 之前等它们落定，否则后续分页请求会悄悄重开 worker。
+export async function readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture<T>(
+	read: (reader: RecordedInterWorkUnitRelationProjectionReader) => Promise<T> | T,
+): Promise<T> {
+	const state = activeLiveCaptureState;
+	if (!state || state.liveCaptureLifecyclePhase !== "live_capture_active") {
+		throw new InterWorkUnitRelationLedgerUnavailableError(
+			state
+				? "the live capture of this Kanban runtime instance was deactivated (runtime is shutting down)"
+				: "this process never activated the inter-work-unit relation ledger (only the Kanban runtime opens it)",
+		);
+	}
+	const projectionRead = state.recordedInterWorkUnitRelationProjection.readCaughtUpProjection(read);
+	state.recordedInterWorkUnitRelationProjectionReadsInFlight.add(projectionRead);
+	try {
+		return await projectionRead;
+	} finally {
+		state.recordedInterWorkUnitRelationProjectionReadsInFlight.delete(projectionRead);
+	}
+}
+
+// 需要调用方等到落账的追加（例如 Web UI 的静音偏好：响应之后的下一次读必须看得到它）。与读共用在途集合，
+// 同样纳入停用 drain；从未激活或停用已开始时抛 InterWorkUnitRelationLedgerUnavailableError，调用方如实报错。
+export async function appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit(
+	buildEventDrafts: (
+		capturingKanbanRuntimeInstance: CapturingKanbanRuntimeInstanceIdentity,
+	) => InterWorkUnitRelationLedgerEventDraft[],
+): Promise<void> {
+	const state = activeLiveCaptureState;
+	if (!state || state.liveCaptureLifecyclePhase !== "live_capture_active") {
+		throw new InterWorkUnitRelationLedgerUnavailableError(
+			state
+				? "the live capture of this Kanban runtime instance was deactivated (runtime is shutting down)"
+				: "this process never activated the inter-work-unit relation ledger (only the Kanban runtime opens it)",
+		);
+	}
+	const ledgerAppend = state.ledgerClient.appendCommittedEvents({
+		eventDrafts: buildEventDrafts(state.capturingKanbanRuntimeInstance),
+	});
+	state.recordedInterWorkUnitRelationProjectionReadsInFlight.add(ledgerAppend);
+	try {
+		await ledgerAppend;
+	} finally {
+		state.recordedInterWorkUnitRelationProjectionReadsInFlight.delete(ledgerAppend);
+	}
+}
+
 // 关系账本只在 runtime 进程内打开（dd2db §R3 Y-EVENT-1）。注册之后，本进程每一次 board 写入都先过账本；
 // 账本打不开时漏斗拒写（board 只读），这里只记告警、不阻塞 runtime 启动。
 // 能力激活标记不 await：worker 按消息顺序处理，标记在本函数返回前已同步入队，必然排在任何漏斗事件之前。
@@ -552,6 +608,10 @@ export function activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture(): A
 		eagerBoardStateBaselineEstablishmentCancelledByDeactivation: false,
 		liveCaptureLifecyclePhase: "live_capture_active",
 		backgroundLedgerEventRecordingsInFlight: new Set(),
+		recordedInterWorkUnitRelationProjection: new RecordedInterWorkUnitRelationProjectionKeptCaughtUpWithLedger(
+			ledgerClient,
+		),
+		recordedInterWorkUnitRelationProjectionReadsInFlight: new Set(),
 	};
 	activeLiveCaptureState = state;
 	// 首次播种尝试随屏障创建立即发起、不 await（不阻塞 runtime 启动）。它的账本请求必然排在下面的能力激活标记之后：
@@ -617,6 +677,7 @@ export function activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture(): A
 			await eagerBoardStateBaselineEstablishmentForEveryIndexedWorkspaceCompletion;
 			await drainOfLedgerCallsInFlightAtDeactivation;
 			await Promise.allSettled([...state.backgroundLedgerEventRecordingsInFlight]);
+			await Promise.allSettled([...state.recordedInterWorkUnitRelationProjectionReadsInFlight]);
 			// 只在注册的仍是本实例时才替换：之后激活的实例的捕获不能被旧实例停用清掉。
 			// 激活前没有任何注册（真实 runtime 进程）时，保留本实例已停用的捕获：此后进程内 board 写入一律拒写。
 			if (

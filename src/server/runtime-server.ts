@@ -49,7 +49,11 @@ import { createExplorationThreadGraphMaintenanceTrigger } from "../exploration-t
 import { loadExplorationThreadGraphProjection } from "../exploration-thread-graph/exploration-thread-graph-projection-loader";
 import { assembleExplorationThreadGraphSessionRefs } from "../exploration-thread-graph/exploration-thread-graph-session-refs";
 import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "../exploration-thread-graph/exploration-thread-graph-store-location";
-import { activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
+import {
+	activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture,
+	appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
+	readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+} from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import {
 	checkRateLimit,
@@ -82,6 +86,11 @@ import { createRuntimeApi } from "../trpc/runtime-api";
 import { createTaskCardActionApi } from "../trpc/task-card-action-api";
 import { createTaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
 import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
+import { createWorkUnitRelationPresentationPreferenceApi } from "../trpc/work-unit-relation-presentation-preference-api";
+import {
+	createWorkUnitRelationReadApi,
+	readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
+} from "../trpc/work-unit-relation-read-api";
 import { createWorkspaceApi } from "../trpc/workspace-api";
 import {
 	type ActiveRuntimeSessionShutdownResult,
@@ -806,6 +815,19 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					const manager = await getScopedTerminalManager(scope);
 					return manager.getSummary(taskId)?.latestHookActivity?.finalMessage ?? null;
 				},
+			}),
+			workUnitRelationReadApi: createWorkUnitRelationReadApi({
+				readRecordedInterWorkUnitRelationProjection:
+					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+				readLatestNotificationSummaryTextOfTaskCard:
+					readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
+			}),
+			workUnitRelationPresentationPreferenceApi: createWorkUnitRelationPresentationPreferenceApi({
+				readRecordedInterWorkUnitRelationProjection:
+					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+				appendCommittedEventsIntoLedgerAndWaitForCommit:
+					appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
 			}),
 			conversationTreeApi: createConversationTreeApi({
 				getScopedClineTaskSessionService,

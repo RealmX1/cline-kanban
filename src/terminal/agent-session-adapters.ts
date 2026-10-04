@@ -27,6 +27,7 @@ import {
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
 import { resolveExploratoryModeAppendSystemPrompt } from "../prompts/exploratory-mode-append-system-prompt";
+import { resolveInterWorkUnitRelationNeighborhoodAppendSystemPrompt } from "../prompts/inter-work-unit-relation-neighborhood-append-system-prompt";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { hasClaudeInteractivePrompt, hasClaudeStartupUiRendered } from "./claude-readiness";
 import {
@@ -77,6 +78,9 @@ export interface AgentAdapterLaunchInput {
 	// prepareAgentLaunch 解析好的 exploratory 注入段（非 exploratory / 物化失败 ⇒ null），
 	// 由 resolveAgentAppendSystemPrompt 与 prependTaskSessionGuidanceToPrompt 两处组合点并入（§A.2）。
 	exploratoryModeAppendSystemPrompt?: string | null;
+	// prepareAgentLaunch 解析好的工作单元间关系邻域注入段（dd2db 1b；没有默认可见的关系 / 读不到 ⇒ null），
+	// 与 exploratory 注入段走同样两处组合点。
+	interWorkUnitRelationNeighborhoodAppendSystemPrompt?: string | null;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	parentSessionId?: string;
@@ -1136,6 +1140,7 @@ function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string 
 		resolveHomeAgentAppendSystemPrompt(input.taskId),
 		resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd),
 		input.exploratoryModeAppendSystemPrompt,
+		input.interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	);
 }
 
@@ -1144,6 +1149,7 @@ function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): str
 	const taskSessionPrompt = combineAppendSystemPrompts(
 		resolveTaskSessionAppendSystemPrompt(input.taskId, input.cwd),
 		input.exploratoryModeAppendSystemPrompt,
+		input.interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	);
 	if (!prompt || !taskSessionPrompt) {
 		return input.prompt;
@@ -2583,6 +2589,12 @@ export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promis
 	});
 	// Exploratory Mode 注入（§A.2）：仅 exploratory 启动物化指令文件；非 exploratory / 物化失败恒为 null。
 	const exploratoryModeAppendSystemPrompt = await resolveExploratoryModeAppendSystemPrompt(input.taskConversationMode);
+	// dd2db 1b：会话启动时注入工作单元间关系邻域摘要；读不到或超时即不注入，绝不阻断启动。
+	const interWorkUnitRelationNeighborhoodAppendSystemPrompt =
+		await resolveInterWorkUnitRelationNeighborhoodAppendSystemPrompt({
+			workspaceId: input.workspaceId,
+			taskId: input.taskId,
+		});
 	if (input.agentId !== "codex") {
 		warnUnsupportedParentSessionId(input.agentId, input.parentSessionId);
 	}
@@ -2590,5 +2602,6 @@ export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promis
 		...input,
 		prompt: preparedPrompt,
 		exploratoryModeAppendSystemPrompt,
+		interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	});
 }
