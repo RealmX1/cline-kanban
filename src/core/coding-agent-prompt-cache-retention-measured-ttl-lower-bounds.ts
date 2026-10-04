@@ -18,9 +18,19 @@ export type CodingAgentPromptCacheRetentionScope =
 	// 所以只有 agent 进程还活着（liveness === "live"）时，倒计时才有意义。
 	| "same_agent_process_only_cache_lost_when_agent_process_exits";
 
+// 倒计时起点（最后一次向主对话模型发请求的时刻）从哪个信号读。
+export type CodingAgentPromptCacheWarmthAnchorSignal =
+	// harness 有「紧接着就发请求」的 hook（UserPromptSubmit / PostToolUse …），读
+	// summary.lastMainAgentConversationModelRequestDispatchObservation。
+	| "main_agent_conversation_model_request_dispatch_hook_events"
+	// harness 没有回合类 hook（Cursor），退而读最近一次实质 TUI 输出（≈ 最后一次响应结束）。它有会话恢复
+	// 重播保护（suppressSubstantiveOutputUntilContinues），不会被恢复刷成 now。
+	| "last_substantive_agent_terminal_output_because_harness_has_no_turn_hooks";
+
 export interface CodingAgentPromptCacheRetentionMeasuredLowerBound {
 	promptCacheRetentionTtlLowerBoundMs: number;
 	promptCacheRetentionScope: CodingAgentPromptCacheRetentionScope;
+	promptCacheWarmthAnchorSignal: CodingAgentPromptCacheWarmthAnchorSignal;
 }
 
 const MINUTE_MS = 60_000;
@@ -33,20 +43,24 @@ export const CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_I
 	claude: {
 		promptCacheRetentionTtlLowerBoundMs: 55 * MINUTE_MS,
 		promptCacheRetentionScope: "provider_server_side_cache_survives_agent_process_restart",
+		promptCacheWarmthAnchorSignal: "main_agent_conversation_model_request_dispatch_hook_events",
 	},
 	// ≤2h 13/14 命中，3h 起 0/8。文档只写「至少 30m」。
 	codex: {
 		promptCacheRetentionTtlLowerBoundMs: 120 * MINUTE_MS,
 		promptCacheRetentionScope: "same_agent_process_only_cache_lost_when_agent_process_exits",
+		promptCacheWarmthAnchorSignal: "main_agent_conversation_model_request_dispatch_hook_events",
 	},
 	// 20m、25m 各 2/2 命中，30m 起 0/16。边界陡峭，像固定 30m TTL。
 	kimi: {
 		promptCacheRetentionTtlLowerBoundMs: 25 * MINUTE_MS,
 		promptCacheRetentionScope: "same_agent_process_only_cache_lost_when_agent_process_exits",
+		promptCacheWarmthAnchorSignal: "main_agent_conversation_model_request_dispatch_hook_events",
 	},
 	// 20m 6/6、25m 3/4，30m 起 0/19；短间隔也常失配（请求落到没有该缓存的后端），命中是概率性的。
 	cursor: {
 		promptCacheRetentionTtlLowerBoundMs: 20 * MINUTE_MS,
 		promptCacheRetentionScope: "provider_server_side_cache_survives_agent_process_restart",
+		promptCacheWarmthAnchorSignal: "last_substantive_agent_terminal_output_because_harness_has_no_turn_hooks",
 	},
 };

@@ -184,7 +184,7 @@ export function usePersistentTerminalSession({
 			// (including the "[kanban] Refreshing terminal session..." banner) survives
 			// the PTY swap. Normal restarts (e.g., trash-resume drag) still reset.
 			if (!terminal.consumeRestartResetSuppression()) {
-				terminal.reset();
+				terminal.resetForSessionRestartAndRequestServerMirrorSnapshot();
 			}
 		}
 		previousSessionRef.current = {

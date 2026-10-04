@@ -48,6 +48,7 @@ import {
 	resolveClineModelDisplayName,
 } from "@/components/detail-panels/cline-model-picker-options";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
@@ -224,6 +225,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	/** 仅置顶板分身：点置顶原因行编辑原因。 */
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
 }): React.ReactElement {
+	const isCompactRowInFocusViewLeftColumn = useTaskCardBodyVisualDensity() === "compact_row_in_focus_view_left_column";
 	const [isHovered, setIsHovered] = useState(false);
 	// 卡片各处的 Tooltip（右上角动作组、行内 Edit/Copy、头部药丸、git 状态）content 统一收成
 	// 「hover 时才给」：Radix 在关闭态仍会挂 Root+Trigger（Popper context + state + 一串事件绑定）。
@@ -605,6 +607,285 @@ export const TaskCardBody = memo(function TaskCardBody({
 		}, 1500);
 	};
 
+	// ── 两种视觉密度共用的信息项（见 TaskCardBodyVisualDensity）：内容只此一份，密度只决定摆在哪里 ──
+	const agentBadge = taskAgentSettingsLabel ? (
+		<Tooltip content={revealHoverActionTooltip(taskAgentSettingsLabel)}>
+			<span
+				data-agent-badge=""
+				role="img"
+				aria-label={taskAgentSettingsLabel}
+				className="inline-flex shrink-0 items-center"
+			>
+				<agentVisual.Icon
+					size={isCompactRowInFocusViewLeftColumn ? 13 : 12}
+					className={cn("shrink-0", isTrashCard ? "text-text-tertiary" : agentVisual.className)}
+				/>
+			</span>
+		</Tooltip>
+	) : null;
+	// Clock=自创建至今（恒显）；PencilLine=Description 最后更新至今（仅 backlog，即该列排序键）；
+	// Activity / MessagesSquare 见上方两颗时长药丸的注释。各段 hover 显绝对本地时间。
+	const elapsedTimePills = (
+		<>
+			<Tooltip content={revealHoverActionTooltip(createdAtTooltipContent)}>
+				<span
+					className={cn(
+						"inline-flex items-center gap-0.5 text-[10px] leading-none",
+						isTrashCard ? "text-text-tertiary" : "text-text-secondary",
+					)}
+				>
+					<Clock size={8} className="shrink-0" />
+					{formatCompactElapsedSince(card.createdAt, elapsedNowMs)}
+				</span>
+			</Tooltip>
+			{columnId === "backlog" ? (
+				<>
+					<span className="text-text-tertiary">·</span>
+					<BacklogTaskDescriptionLastUpdatedPill
+						card={card}
+						elapsedNowMs={elapsedNowMs}
+						revealHoverActionTooltip={revealHoverActionTooltip}
+					/>
+				</>
+			) : null}
+			{agentResponseGenerationStoppedAt != null ? (
+				<>
+					<span className="text-text-tertiary">·</span>
+					<Tooltip content={revealHoverActionTooltip(agentResponseGenerationStoppedTooltipContent)}>
+						<span
+							data-agent-response-generation-stopped-pill=""
+							className={cn(
+								"inline-flex items-center gap-0.5 text-[10px] leading-none",
+								isTrashCard ? "text-text-tertiary" : "text-text-secondary",
+							)}
+						>
+							<Activity size={8} className="shrink-0" />
+							{formatCompactElapsedSince(agentResponseGenerationStoppedAt, elapsedNowMs)}
+						</span>
+					</Tooltip>
+				</>
+			) : null}
+			{lastConversationProgressObservation != null ? (
+				<>
+					<span className="text-text-tertiary">·</span>
+					<Tooltip content={revealHoverActionTooltip(lastConversationProgressTooltipContent)}>
+						<span
+							data-last-conversation-progress-pill=""
+							className={cn(
+								"inline-flex items-center gap-0.5 text-[10px] leading-none",
+								isTrashCard ? "text-text-tertiary" : "text-text-secondary",
+							)}
+						>
+							<MessagesSquare size={8} className="shrink-0" />
+							{isConversationProgressApproximate ? "~" : ""}
+							{formatCompactElapsedSince(lastConversationProgressObservation.observedAtMs, elapsedNowMs)}
+						</span>
+					</Tooltip>
+				</>
+			) : null}
+		</>
+	);
+	const resourceUsagePill = (
+		<TaskCardResourceUsagePill
+			taskCardId={card.id}
+			isTrashCard={isTrashCard}
+			revealHoverActionTooltip={revealHoverActionTooltip}
+		/>
+	);
+	const pinnedMarkerOrTaskPinboardStageLabel = (
+		<>
+			{!isTaskPinboardCopy && isPinnedToTaskPinboard ? (
+				// 置顶板里每张都是置顶的，那边不重复这个标记，改为显示 stage 标签（见下）。
+				<>
+					<span className="text-text-tertiary">·</span>
+					<Tooltip
+						content={
+							card.taskPinboardPinReason
+								? `Pinned to pinboard · ${card.taskPinboardPinReason}`
+								: "Pinned to pinboard"
+						}
+					>
+						<span
+							data-task-pinboard-pinned-marker=""
+							className={cn(
+								"inline-flex shrink-0 items-center",
+								isTrashCard ? "text-text-tertiary" : "text-accent",
+							)}
+						>
+							<Pin size={8} className="shrink-0" />
+						</span>
+					</Tooltip>
+				</>
+			) : null}
+			{isTaskPinboardCopy && stageDisplayNameForTaskPinboardCopy ? (
+				<>
+					<span className="text-text-tertiary">·</span>
+					<Tooltip content={`In ${stageDisplayNameForTaskPinboardCopy} · click to reveal the card in its stage`}>
+						<button
+							type="button"
+							data-task-pinboard-stage-label=""
+							aria-label={`Reveal this task in ${stageDisplayNameForTaskPinboardCopy}`}
+							onMouseDown={stopEvent}
+							onClick={(event) => {
+								stopEvent(event);
+								onNavigateToCanonicalCardInItsStage?.(card.id);
+							}}
+							className={cn(
+								"inline-flex min-w-0 items-center gap-0.5 rounded-full text-[10px] leading-none hover:underline",
+								isTrashCard ? "text-text-tertiary" : "text-text-secondary",
+							)}
+						>
+							<ColumnIndicator columnId={columnId} size={8} />
+							<span className="truncate">{stageDisplayNameForTaskPinboardCopy}</span>
+						</button>
+					</Tooltip>
+				</>
+			) : null}
+		</>
+	);
+
+	// 「机器在等」的三种徽标（parked / 程序化投递等输入框 / 排队 prompt）。内容与判据两种密度一致，
+	// 紧凑密度只是缩成行内小标签。
+	const machineWaitingBadgeSizeClassName = isCompactRowInFocusViewLeftColumn
+		? "gap-0.5 rounded-sm px-1 text-[10px] leading-4"
+		: "gap-1 rounded-md px-1.5 py-0.5 text-xs";
+	const machineWaitingBadgeIconSize = isCompactRowInFocusViewLeftColumn ? 10 : 12;
+	const machineWaitingBadges: Array<{ machineWaitingBadgeKey: string; machineWaitingBadgeElement: ReactNode }> = [];
+	if (!isTrashCard && isParkedAwaitingBackgroundWork) {
+		machineWaitingBadges.push({
+			machineWaitingBadgeKey: "parked_awaiting_dispatched_background_work",
+			machineWaitingBadgeElement: (
+				<span
+					className={cn(
+						"inline-flex max-w-full items-center border border-status-purple/30 bg-status-purple/10 text-status-purple",
+						machineWaitingBadgeSizeClassName,
+					)}
+				>
+					<Hourglass size={machineWaitingBadgeIconSize} className="shrink-0" />
+					<span className="truncate">
+						{sessionSummary?.awaitingDispatchedBackgroundWork?.label
+							? `Parked — awaiting ${sessionSummary.awaitingDispatchedBackgroundWork.label}`
+							: "Parked — awaiting dispatched background work"}
+					</span>
+				</span>
+			),
+		});
+	}
+	if (!isTrashCard && terminalDeliveryContentionNotice) {
+		machineWaitingBadges.push({
+			machineWaitingBadgeKey: "programmatic_terminal_delivery_waiting_for_input_box",
+			machineWaitingBadgeElement: (
+				<span
+					className={cn(
+						"inline-flex max-w-full items-center border border-status-orange/30 bg-status-orange/10 text-status-orange",
+						machineWaitingBadgeSizeClassName,
+					)}
+				>
+					<Hourglass size={machineWaitingBadgeIconSize} className="shrink-0" />
+					<span className="truncate">{terminalDeliveryContentionNotice.headline}</span>
+				</span>
+			),
+		});
+	}
+	// 仅在无争用提示时显示：两条「机器在等」的提示叠在一起只会互相淹没，争用那条更紧急。
+	if (!isTrashCard && !terminalDeliveryContentionNotice && queuedPromptCountIndicator.pendingCount > 0) {
+		machineWaitingBadges.push({
+			machineWaitingBadgeKey: "queued_task_prompt_deliveries",
+			machineWaitingBadgeElement: (
+				<span
+					className={cn(
+						"inline-flex max-w-full items-center border",
+						machineWaitingBadgeSizeClassName,
+						queuedPromptCountIndicator.hasEntriesAwaitingReconfirmationAfterRestart
+							? "border-status-orange/30 bg-status-orange/10 text-status-orange"
+							: "border-border-bright bg-surface-3 text-text-secondary",
+					)}
+				>
+					<ListOrdered size={machineWaitingBadgeIconSize} className="shrink-0" />
+					<span className="truncate">
+						{queuedPromptCountIndicator.pendingCount} queued
+						{queuedPromptCountIndicator.hasEntriesAwaitingReconfirmationAfterRestart
+							? " · confirm after restart"
+							: ""}
+					</span>
+				</span>
+			),
+		});
+	}
+	const taskDirectoryRow = (
+		<div
+			data-task-directory=""
+			title={copyableDirectoryPath ?? undefined}
+			className={cn(
+				"group/directory relative flex items-start gap-1 font-mono",
+				isCompactRowInFocusViewLeftColumn ? "min-w-0" : "mt-1",
+			)}
+			style={{
+				fontSize: isCompactRowInFocusViewLeftColumn ? 11 : 12,
+				lineHeight: 1.4,
+				color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : SESSION_ACTIVITY_COLOR.secondary,
+			}}
+		>
+			{card.worktreeMode === "inplace" ? (
+				<Home size={10} className="shrink-0" />
+			) : (
+				<GitBranch size={10} className="shrink-0" />
+			)}
+			<span className={cn("min-w-0 flex-1 break-words", isTrashCard && "line-through")}>
+				<span>{worktreeModeLabel}</span>
+				{taskWorkspaceGitStatusTooltip ? (
+					// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，
+					// 不能直接是不转发 props/ref 的函数组件——否则 hover 根本触发不了 tooltip。
+					<Tooltip side="bottom" content={revealHoverActionTooltip(taskWorkspaceGitStatusTooltip)}>
+						<span className="mx-1 inline-flex align-middle">
+							<AheadBehindIndicator
+								ahead={commitsAheadOfBaseRef}
+								behind={commitsBehindBaseRef}
+								tone="semantic"
+								iconSize={10}
+							/>
+							{showTaskCommitIntegrationIndicator ? (
+								<span className="ml-1">
+									<TaskCommitsIntegratedIntoBaseRefIndicator
+										taskCommitsIntegratedIntoBaseRef={taskCommitsIntegratedIntoBaseRef}
+									/>
+								</span>
+							) : null}
+						</span>
+					</Tooltip>
+				) : null}
+				{reviewChangeSummary ? (
+					<>
+						<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> (</span>
+						<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>{reviewChangeSummary.filesLabel}</span>
+						<span className="text-status-green"> +{reviewChangeSummary.additions}</span>
+						<span className="text-status-red"> -{reviewChangeSummary.deletions}</span>
+						<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>)</span>
+					</>
+				) : null}
+			</span>
+			{showDirectoryCopyButton ? (
+				<TaskCardRowHoverActions groupName="directory">
+					<Tooltip side="bottom" content={revealHoverActionTooltip("Copy directory path")}>
+						<Button
+							icon={
+								isDirectoryPathCopied ? <Check size={12} className="text-status-green" /> : <Copy size={12} />
+							}
+							variant="ghost"
+							size="xs"
+							aria-label="Copy directory path"
+							onMouseDown={stopEvent}
+							onClick={(event) => {
+								stopEvent(event);
+								handleCopyDirectoryPath();
+							}}
+						/>
+					</Tooltip>
+				</TaskCardRowHoverActions>
+			) : null}
+		</div>
+	);
+
 	const cardShell = (
 		<div
 			ref={drag?.innerRef}
@@ -684,7 +965,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 			}
 			style={{
 				...(drag?.draggableStyle ?? {}),
-				marginBottom: emitsCanonicalDomIdentity ? 6 : 0,
+				// 紧凑密度的行之间靠 hover 底色区分，不需要标准卡片那么大的间距。
+				marginBottom: emitsCanonicalDomIdentity ? (isCompactRowInFocusViewLeftColumn ? 2 : 6) : 0,
 				// 本体可拖 → grab；置顶板分身单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
 				cursor: emitsCanonicalDomIdentity ? "grab" : isTaskPinboardCopy ? "pointer" : "default",
 			}}
@@ -692,149 +974,52 @@ export const TaskCardBody = memo(function TaskCardBody({
 			onMouseLeave={() => setIsHovered(false)}
 		>
 			<div
-				className={cn(
-					"group/card relative rounded-md border border-border-bright bg-surface-2 p-2.5",
-					isCardInteractive && "cursor-pointer hover:bg-surface-3 hover:border-border-bright",
-					isDragging && "shadow-lg",
-					isHovered && isCardInteractive && "bg-surface-3 border-border-bright",
-				)}
+				className={
+					isCompactRowInFocusViewLeftColumn
+						? // 紧凑密度：与 All projects 行同一风格的平铺行（无边框、无底色，hover 才显底）。
+							cn(
+								"group/card relative rounded-md px-2 py-1.5",
+								isCardInteractive && "cursor-pointer hover:bg-surface-3",
+								isDragging && "bg-surface-3 shadow-lg",
+								isHovered && isCardInteractive && "bg-surface-3",
+							)
+						: cn(
+								"group/card relative rounded-md border border-border-bright bg-surface-2 p-2.5",
+								isCardInteractive && "cursor-pointer hover:bg-surface-3 hover:border-border-bright",
+								isDragging && "shadow-lg",
+								isHovered && isCardInteractive && "bg-surface-3 border-border-bright",
+							)
+				}
 			>
-				{/* agent 图标 + 微型时长药丸合一：钉在卡片左上角、略微超出边框（不占标题横向空间）。
-				    最左为 agent 图标（略放大）；完整「agent · 模型」进 hover tooltip。
-				    Clock=自创建至今（恒显）；PencilLine=Description 最后更新至今（仅 backlog，即该列排序键）；
-				    Activity=agent 上次响应至今（仅有时间戳时显）。各段 hover 显绝对本地时间。 */}
-				{/* 置顶板分身在末尾多挂一段 stage 标签，胶囊会因此变宽；右侧不远就是 hover 动作组（同在 -top-[6px]），
+				{/* 标准密度：agent 图标 + 微型时长药丸合一，钉在卡片左上角、略微超出边框（不占标题横向空间）。
+				    完整「agent · 模型」进 hover tooltip。紧凑密度不画胶囊，这些项分别并入第 1 行与元信息行。
+				    置顶板分身在末尾多挂一段 stage 标签，胶囊会因此变宽；右侧不远就是 hover 动作组（同在 -top-[6px]），
 				    所以限宽 + 标签 truncate，窄卡上宁可截断 stage 名也不与动作组叠在一起。 */}
-				<div className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
-					{taskAgentSettingsLabel ? (
-						<Tooltip content={revealHoverActionTooltip(taskAgentSettingsLabel)}>
-							<span
-								data-agent-badge=""
-								role="img"
-								aria-label={taskAgentSettingsLabel}
-								className="inline-flex shrink-0 items-center"
-							>
-								<agentVisual.Icon
-									size={12}
-									className={cn("shrink-0", isTrashCard ? "text-text-tertiary" : agentVisual.className)}
-								/>
-							</span>
-						</Tooltip>
+				{isCompactRowInFocusViewLeftColumn ? null : (
+					<div className="absolute -left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm">
+						{agentBadge}
+						{taskAgentSettingsLabel ? (
+							<span aria-hidden className="h-2.5 w-px shrink-0 bg-border-bright" />
+						) : null}
+						{elapsedTimePills}
+						{resourceUsagePill}
+						{pinnedMarkerOrTaskPinboardStageLabel}
+					</div>
+				)}
+				<div
+					className={
+						isCompactRowInFocusViewLeftColumn ? "flex items-start gap-1.5" : "flex items-start gap-2 pt-0.5"
+					}
+					style={isCompactRowInFocusViewLeftColumn ? undefined : { minHeight: 24 }}
+				>
+					{statusMarker ? (
+						<div className={cn("inline-flex items-center", isCompactRowInFocusViewLeftColumn && "mt-[3px]")}>
+							{statusMarker}
+						</div>
 					) : null}
-					{taskAgentSettingsLabel ? <span aria-hidden className="h-2.5 w-px shrink-0 bg-border-bright" /> : null}
-					<Tooltip content={revealHoverActionTooltip(createdAtTooltipContent)}>
-						<span
-							className={cn(
-								"inline-flex items-center gap-0.5 text-[10px] leading-none",
-								isTrashCard ? "text-text-tertiary" : "text-text-secondary",
-							)}
-						>
-							<Clock size={8} className="shrink-0" />
-							{formatCompactElapsedSince(card.createdAt, elapsedNowMs)}
-						</span>
-					</Tooltip>
-					{columnId === "backlog" ? (
-						<>
-							<span className="text-text-tertiary">·</span>
-							<BacklogTaskDescriptionLastUpdatedPill
-								card={card}
-								elapsedNowMs={elapsedNowMs}
-								revealHoverActionTooltip={revealHoverActionTooltip}
-							/>
-						</>
+					{isCompactRowInFocusViewLeftColumn && agentBadge ? (
+						<span className="mt-[3px] inline-flex shrink-0">{agentBadge}</span>
 					) : null}
-					{agentResponseGenerationStoppedAt != null ? (
-						<>
-							<span className="text-text-tertiary">·</span>
-							<Tooltip content={revealHoverActionTooltip(agentResponseGenerationStoppedTooltipContent)}>
-								<span
-									data-agent-response-generation-stopped-pill=""
-									className={cn(
-										"inline-flex items-center gap-0.5 text-[10px] leading-none",
-										isTrashCard ? "text-text-tertiary" : "text-text-secondary",
-									)}
-								>
-									<Activity size={8} className="shrink-0" />
-									{formatCompactElapsedSince(agentResponseGenerationStoppedAt, elapsedNowMs)}
-								</span>
-							</Tooltip>
-						</>
-					) : null}
-					{lastConversationProgressObservation != null ? (
-						<>
-							<span className="text-text-tertiary">·</span>
-							<Tooltip content={revealHoverActionTooltip(lastConversationProgressTooltipContent)}>
-								<span
-									data-last-conversation-progress-pill=""
-									className={cn(
-										"inline-flex items-center gap-0.5 text-[10px] leading-none",
-										isTrashCard ? "text-text-tertiary" : "text-text-secondary",
-									)}
-								>
-									<MessagesSquare size={8} className="shrink-0" />
-									{isConversationProgressApproximate ? "~" : ""}
-									{formatCompactElapsedSince(lastConversationProgressObservation.observedAtMs, elapsedNowMs)}
-								</span>
-							</Tooltip>
-						</>
-					) : null}
-					<TaskCardResourceUsagePill
-						taskCardId={card.id}
-						isTrashCard={isTrashCard}
-						revealHoverActionTooltip={revealHoverActionTooltip}
-					/>
-					{!isTaskPinboardCopy && isPinnedToTaskPinboard ? (
-						// 置顶板里每张都是置顶的，那边不重复这个标记，改为显示 stage 标签（见下）。
-						<>
-							<span className="text-text-tertiary">·</span>
-							<Tooltip
-								content={
-									card.taskPinboardPinReason
-										? `Pinned to pinboard · ${card.taskPinboardPinReason}`
-										: "Pinned to pinboard"
-								}
-							>
-								<span
-									data-task-pinboard-pinned-marker=""
-									className={cn(
-										"inline-flex shrink-0 items-center",
-										isTrashCard ? "text-text-tertiary" : "text-accent",
-									)}
-								>
-									<Pin size={8} className="shrink-0" />
-								</span>
-							</Tooltip>
-						</>
-					) : null}
-					{isTaskPinboardCopy && stageDisplayNameForTaskPinboardCopy ? (
-						<>
-							<span className="text-text-tertiary">·</span>
-							<Tooltip
-								content={`In ${stageDisplayNameForTaskPinboardCopy} · click to reveal the card in its stage`}
-							>
-								<button
-									type="button"
-									data-task-pinboard-stage-label=""
-									aria-label={`Reveal this task in ${stageDisplayNameForTaskPinboardCopy}`}
-									onMouseDown={stopEvent}
-									onClick={(event) => {
-										stopEvent(event);
-										onNavigateToCanonicalCardInItsStage?.(card.id);
-									}}
-									className={cn(
-										"inline-flex min-w-0 items-center gap-0.5 rounded-full text-[10px] leading-none hover:underline",
-										isTrashCard ? "text-text-tertiary" : "text-text-secondary",
-									)}
-								>
-									<ColumnIndicator columnId={columnId} size={8} />
-									<span className="truncate">{stageDisplayNameForTaskPinboardCopy}</span>
-								</button>
-							</Tooltip>
-						</>
-					) : null}
-				</div>
-				<div className="flex items-start gap-2 pt-0.5" style={{ minHeight: 24 }}>
-					{statusMarker ? <div className="inline-flex items-center">{statusMarker}</div> : null}
 					<div className={cn("relative min-w-0 flex-1", showTitleEditButton && "group/title")}>
 						{isEditingTitle ? (
 							// 标题语义上仍是单串；改 textarea 只为长标题视觉 wraparound + 随内容自增高
@@ -855,7 +1040,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 							<>
 								<p
 									className={cn(
-										"line-clamp-3 m-0 font-medium text-sm",
+										"line-clamp-3 m-0 font-medium",
+										isCompactRowInFocusViewLeftColumn ? "text-[13px] leading-snug" : "text-sm",
 										isTrashCard && "line-through text-text-tertiary",
 									)}
 								>
@@ -917,7 +1103,9 @@ export const TaskCardBody = memo(function TaskCardBody({
 				</div>
 				<div
 					className={cn(
-						"absolute right-1 -top-[6px] z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+						"absolute right-1 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+						// 紧凑密度没有上边框可伸出，动作组覆盖在第 1 行右侧。
+						isCompactRowInFocusViewLeftColumn ? "top-1" : "-top-[6px]",
 						"focus-within:opacity-100 focus-within:pointer-events-auto",
 						isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
 					)}
@@ -1075,50 +1263,17 @@ export const TaskCardBody = memo(function TaskCardBody({
 				{isPromptViewerOpen ? (
 					<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
 				) : null}
-				{!isTrashCard && isParkedAwaitingBackgroundWork ? (
-					<div className="mt-1">
-						<span className="inline-flex max-w-full items-center gap-1 rounded-md border border-status-purple/30 bg-status-purple/10 px-1.5 py-0.5 text-xs text-status-purple">
-							<Hourglass size={12} className="shrink-0" />
-							<span className="truncate">
-								{sessionSummary?.awaitingDispatchedBackgroundWork?.label
-									? `Parked — awaiting ${sessionSummary.awaitingDispatchedBackgroundWork.label}`
-									: "Parked — awaiting dispatched background work"}
-							</span>
-						</span>
-					</div>
-				) : null}
-				{!isTrashCard && terminalDeliveryContentionNotice ? (
-					<div className="mt-1">
-						<span className="inline-flex max-w-full items-center gap-1 rounded-md border border-status-orange/30 bg-status-orange/10 px-1.5 py-0.5 text-xs text-status-orange">
-							<Hourglass size={12} className="shrink-0" />
-							<span className="truncate">{terminalDeliveryContentionNotice.headline}</span>
-						</span>
-					</div>
-				) : null}
-				{/* 仅在无争用提示时显示：两条「机器在等」的提示叠在一起只会互相淹没，争用那条更紧急。 */}
-				{!isTrashCard && !terminalDeliveryContentionNotice && queuedPromptCountIndicator.pendingCount > 0 ? (
-					<div className="mt-1">
-						<span
-							className={cn(
-								"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
-								queuedPromptCountIndicator.hasEntriesAwaitingReconfirmationAfterRestart
-									? "border-status-orange/30 bg-status-orange/10 text-status-orange"
-									: "border-border-bright bg-surface-3 text-text-secondary",
-							)}
-						>
-							<ListOrdered size={12} className="shrink-0" />
-							<span className="truncate">
-								{queuedPromptCountIndicator.pendingCount} queued
-								{queuedPromptCountIndicator.hasEntriesAwaitingReconfirmationAfterRestart
-									? " · confirm after restart"
-									: ""}
-							</span>
-						</span>
-					</div>
-				) : null}
+				{/* 「机器在等」的徽标：标准密度各占一行；紧凑密度并入元信息行（见下）。 */}
+				{isCompactRowInFocusViewLeftColumn
+					? null
+					: machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
+							<div key={machineWaitingBadgeKey} className="mt-1">
+								{machineWaitingBadgeElement}
+							</div>
+						))}
 				{sessionActivity ? (
 					<div
-						className="flex gap-1.5 items-start mt-[6px]"
+						className={cn("flex gap-1.5 items-start", isCompactRowInFocusViewLeftColumn ? "mt-1" : "mt-[6px]")}
 						style={{
 							color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : undefined,
 						}}
@@ -1156,94 +1311,57 @@ export const TaskCardBody = memo(function TaskCardBody({
 						</div>
 					</div>
 				) : null}
-				{showDirectoryRow ? (
+				{isCompactRowInFocusViewLeftColumn ? (
+					// 紧凑密度的元信息行：目录 / git 统计 / 徽标 / 取消自动动作靠左，时长药丸 + 资源占用 + 置顶标记靠右
+					// （与标准密度胶囊里的顺序一致），窄宽度下换行而不截断。
 					<div
-						data-task-directory=""
-						title={copyableDirectoryPath ?? undefined}
-						className={cn("group/directory relative mt-1 flex items-start gap-1 font-mono")}
-						style={{
-							fontSize: 12,
-							lineHeight: 1.4,
-							color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : SESSION_ACTIVITY_COLOR.secondary,
-						}}
+						data-task-card-compact-metadata-row=""
+						className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] leading-none"
 					>
-						{card.worktreeMode === "inplace" ? (
-							<Home size={10} className="shrink-0" />
-						) : (
-							<GitBranch size={10} className="shrink-0" />
-						)}
-						<span className={cn("min-w-0 flex-1 break-words", isTrashCard && "line-through")}>
-							<span>{worktreeModeLabel}</span>
-							{taskWorkspaceGitStatusTooltip ? (
-								// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，
-								// 不能直接是不转发 props/ref 的函数组件——否则 hover 根本触发不了 tooltip。
-								<Tooltip side="bottom" content={revealHoverActionTooltip(taskWorkspaceGitStatusTooltip)}>
-									<span className="mx-1 inline-flex align-middle">
-										<AheadBehindIndicator
-											ahead={commitsAheadOfBaseRef}
-											behind={commitsBehindBaseRef}
-											tone="semantic"
-											iconSize={10}
-										/>
-										{showTaskCommitIntegrationIndicator ? (
-											<span className="ml-1">
-												<TaskCommitsIntegratedIntoBaseRefIndicator
-													taskCommitsIntegratedIntoBaseRef={taskCommitsIntegratedIntoBaseRef}
-												/>
-											</span>
-										) : null}
-									</span>
-								</Tooltip>
-							) : null}
-							{reviewChangeSummary ? (
-								<>
-									<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> (</span>
-									<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>{reviewChangeSummary.filesLabel}</span>
-									<span className="text-status-green"> +{reviewChangeSummary.additions}</span>
-									<span className="text-status-red"> -{reviewChangeSummary.deletions}</span>
-									<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>)</span>
-								</>
-							) : null}
-						</span>
-						{showDirectoryCopyButton ? (
-							<TaskCardRowHoverActions groupName="directory">
-								<Tooltip side="bottom" content={revealHoverActionTooltip("Copy directory path")}>
-									<Button
-										icon={
-											isDirectoryPathCopied ? (
-												<Check size={12} className="text-status-green" />
-											) : (
-												<Copy size={12} />
-											)
-										}
-										variant="ghost"
-										size="xs"
-										aria-label="Copy directory path"
-										onMouseDown={stopEvent}
-										onClick={(event) => {
-											stopEvent(event);
-											handleCopyDirectoryPath();
-										}}
-									/>
-								</Tooltip>
-							</TaskCardRowHoverActions>
+						{showDirectoryRow ? taskDirectoryRow : null}
+						{machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
+							<span key={machineWaitingBadgeKey} className="inline-flex min-w-0">
+								{machineWaitingBadgeElement}
+							</span>
+						))}
+						{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
+							<button
+								type="button"
+								className="cursor-pointer rounded-sm border-none bg-transparent p-0 text-[11px] text-accent hover:underline"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onCancelAutomaticAction(card.id);
+								}}
+							>
+								{cancelAutomaticActionLabel}
+							</button>
 						) : null}
+						<span className="ml-auto inline-flex shrink-0 items-center gap-1">
+							{elapsedTimePills}
+							{resourceUsagePill}
+							{pinnedMarkerOrTaskPinboardStageLabel}
+						</span>
 					</div>
-				) : null}
-				{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
-					<Button
-						size="sm"
-						fill
-						style={{ marginTop: 12 }}
-						onMouseDown={stopEvent}
-						onClick={(event) => {
-							stopEvent(event);
-							onCancelAutomaticAction(card.id);
-						}}
-					>
-						{cancelAutomaticActionLabel}
-					</Button>
-				) : null}
+				) : (
+					<>
+						{showDirectoryRow ? taskDirectoryRow : null}
+						{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
+							<Button
+								size="sm"
+								fill
+								style={{ marginTop: 12 }}
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									onCancelAutomaticAction(card.id);
+								}}
+							>
+								{cancelAutomaticActionLabel}
+							</Button>
+						) : null}
+					</>
+				)}
 			</div>
 		</div>
 	);

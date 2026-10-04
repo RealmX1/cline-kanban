@@ -34,6 +34,9 @@ function buildCrossProjectTaskSwitcherEntryFromBoardCard(
 		lastOpenedByUserAt,
 		pinnedToTaskPinboardAt: card.pinnedToTaskPinboardAt ?? null,
 		taskPinboardPinReason: card.taskPinboardPinReason ?? null,
+		lastMainAgentConversationModelRequestDispatchObservation:
+			sessionFacts?.lastMainAgentConversationModelRequestDispatchObservation ?? null,
+		agentProcessStartedAt: sessionFacts?.agentProcessStartedAt ?? null,
 	};
 }
 

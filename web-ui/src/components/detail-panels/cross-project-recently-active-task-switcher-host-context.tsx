@@ -12,6 +12,9 @@ export interface CrossProjectRecentlyActiveTaskSwitcherHostContextValue {
 	projects: RuntimeProjectSummary[];
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
 	currentProjectId: string | null;
+	// 顶栏项目切换器选中了 Board Scope（All projects）：Focus View 左栏显示本面板而不是当前项目的 stage 列表。
+	// 范围只有一份状态，由 App 持有（use-selected-board-or-single-project-scope）。
+	isBoardScopeAllProjectsSelected: boolean;
 	// Focus View 此刻对准的任务：当前项目里选中的卡，或跨项目跳转在途的目标。行高亮据此判断。
 	focusedTaskInProject: { workspaceId: string; taskId: string } | null;
 	// 同项目直接选中；跨项目先切 workspace，目标 board 加载出该任务后再打开（App 的 pendingCrossProjectTaskOpen）。
@@ -29,7 +32,7 @@ const CrossProjectRecentlyActiveTaskSwitcherHostContext =
 export const CrossProjectRecentlyActiveTaskSwitcherHostContextProvider =
 	CrossProjectRecentlyActiveTaskSwitcherHostContext.Provider;
 
-// null = 没有宿主（单测 / 独立挂载的 ColumnContextPanel）：左栏不提供 All projects 模式。
+// null = 没有宿主（单测 / 独立挂载的 ColumnContextPanel）：左栏只有当前项目的 stage 列表。
 export function useCrossProjectRecentlyActiveTaskSwitcherHostContext(): CrossProjectRecentlyActiveTaskSwitcherHostContextValue | null {
 	return useContext(CrossProjectRecentlyActiveTaskSwitcherHostContext);
 }

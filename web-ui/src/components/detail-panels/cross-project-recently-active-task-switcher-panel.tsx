@@ -4,7 +4,7 @@ import {
 	type CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { ChevronDown, ChevronRight, ChevronUp, Flame, History, Pin } from "lucide-react";
-import { type ReactElement, type ReactNode, useCallback, useState } from "react";
+import { type ReactElement, type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "react";
 import { notifyError } from "@/components/app-toaster";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
@@ -21,6 +21,12 @@ import { Spinner } from "@/components/ui/spinner";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
 import { setTaskPinboardPinStateOfTaskCardInProject } from "@/runtime/cross-project-recently-active-task-switcher-query";
+import { LocalStorageKey } from "@/storage/local-storage-store";
+import {
+	readCrossProjectTaskSwitcherPanelViewContinuity,
+	writeCrossProjectTaskSwitcherPanelViewContinuity,
+} from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
+import { useBooleanLocalStorageValue } from "@/utils/react-use";
 
 /** Pinned 区默认露出的条数；超出部分由区底的按钮展开（同 Focus View 置顶板分段）。 */
 const DEFAULT_VISIBLE_PINNED_ENTRY_COUNT_IN_CROSS_PROJECT_TASK_SWITCHER = 5;
@@ -176,7 +182,24 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	});
 	const { togglePinnedToTaskPinboard, editTaskPinboardPinReason, otherProjectPinReasonDialog } =
 		useCrossProjectTaskPinboardPinning(host);
-	const [showsAllPinnedEntries, setShowsAllPinnedEntries] = useState(false);
+	// 跨重挂载保留（Focus View 左栏 ↔ 过渡外壳），见 cross-project-task-switcher-panel-view-continuity-store。
+	const [showsAllPinnedEntries, setShowsAllPinnedEntriesState] = useState(
+		() => readCrossProjectTaskSwitcherPanelViewContinuity().showsAllPinnedEntries,
+	);
+	const setShowsAllPinnedEntries = (nextShowsAllPinnedEntries: boolean) => {
+		writeCrossProjectTaskSwitcherPanelViewContinuity({ showsAllPinnedEntries: nextShowsAllPinnedEntries });
+		setShowsAllPinnedEntriesState(nextShowsAllPinnedEntries);
+	};
+	const panelScrollContainerRef = useRef<HTMLDivElement | null>(null);
+	useLayoutEffect(() => {
+		if (panelScrollContainerRef.current) {
+			panelScrollContainerRef.current.scrollTop = readCrossProjectTaskSwitcherPanelViewContinuity().panelScrollTopPx;
+		}
+	}, []);
+	const [isPinnedSectionCollapsed, setIsPinnedSectionCollapsed] = useBooleanLocalStorageValue(
+		LocalStorageKey.CrossProjectTaskSwitcherPinnedSectionCollapsed,
+		false,
+	);
 
 	// Pinned 点击：打开任务，并把它在下方区里的那一行滚进视野、脉冲高亮（同 Focus View 置顶板「跳回本体卡」）。
 	// 目标在折叠的 Running 区里时先展开。
@@ -244,6 +267,10 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 
 	return (
 		<div
+			ref={panelScrollContainerRef}
+			onScroll={(event) =>
+				writeCrossProjectTaskSwitcherPanelViewContinuity({ panelScrollTopPx: event.currentTarget.scrollTop })
+			}
 			className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-2"
 			data-testid="cross-project-recently-active-task-switcher-panel"
 		>
@@ -251,23 +278,37 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 				<CrossProjectTaskSwitcherSectionFrame
 					testIdSuffix="pinned"
 					header={
-						<>
-							<Pin size={13} className="shrink-0 text-accent" />
-							<CrossProjectTaskSwitcherSectionTitle title="Pinned" count={sections.pinnedEntries.length} />
-						</>
-					}
-				>
-					{visiblePinnedEntries.map((entryInProject) => renderRow(entryInProject, "pinned"))}
-					{hiddenPinnedEntryCount > 0 || showsAllPinnedEntries ? (
 						<button
 							type="button"
-							onClick={() => setShowsAllPinnedEntries((previous) => !previous)}
-							className="flex cursor-pointer items-center justify-center gap-1 rounded-md border-none bg-transparent py-1 text-xs text-text-tertiary hover:bg-surface-3 hover:text-text-secondary"
+							onClick={() => setIsPinnedSectionCollapsed((previous) => !previous)}
+							aria-expanded={!isPinnedSectionCollapsed}
+							className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md border-none bg-transparent text-left text-inherit"
 						>
-							{showsAllPinnedEntries ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-							{showsAllPinnedEntries ? "Show less" : `Show ${hiddenPinnedEntryCount} more`}
+							{isPinnedSectionCollapsed ? (
+								<ChevronRight size={14} className="shrink-0 text-text-secondary" />
+							) : (
+								<ChevronDown size={14} className="shrink-0 text-text-secondary" />
+							)}
+							<Pin size={13} className="shrink-0 text-accent" />
+							<CrossProjectTaskSwitcherSectionTitle title="Pinned" count={sections.pinnedEntries.length} />
 						</button>
-					) : null}
+					}
+				>
+					{isPinnedSectionCollapsed ? null : (
+						<>
+							{visiblePinnedEntries.map((entryInProject) => renderRow(entryInProject, "pinned"))}
+							{hiddenPinnedEntryCount > 0 || showsAllPinnedEntries ? (
+								<button
+									type="button"
+									onClick={() => setShowsAllPinnedEntries(!showsAllPinnedEntries)}
+									className="flex cursor-pointer items-center justify-center gap-1 rounded-md border-none bg-transparent py-1 text-xs text-text-tertiary hover:bg-surface-3 hover:text-text-secondary"
+								>
+									{showsAllPinnedEntries ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+									{showsAllPinnedEntries ? "Show less" : `Show ${hiddenPinnedEntryCount} more`}
+								</button>
+							) : null}
+						</>
+					)}
 				</CrossProjectTaskSwitcherSectionFrame>
 			) : null}
 

@@ -22,10 +22,10 @@ export function boardTaskCardAnchorKey(taskId: string): string {
 	return `board-task-card:${taskId}`;
 }
 
-// Focus View 左栏顶部的列表范围切换（This project | All projects）。Focus View 里单例、不带 id。
+// 顶栏项目切换器的触发按钮（范围控件：首行 All projects = Board Scope，其余为单个项目）。全局单例、不带 id。
 // 跨项目切换面板的部署后引导验证（真实 Claude 回合结束进倒计时区、跨项目原地跳转不闪退）从这里起步。
-export function focusViewLeftColumnTaskListScopeToggleAnchorKey(): string {
-	return "focus-view-left-column-task-list-scope-toggle";
+export function topBarProjectSwitcherBoardOrSingleProjectScopeTriggerAnchorKey(): string {
+	return "top-bar-project-switcher-board-or-single-project-scope-trigger";
 }
 
 // 跨项目「最近活跃任务」切换面板里 Running / 缓存倒计时 / 剩余区的一行（Pinned 区的行不带它：Pinned 点击后

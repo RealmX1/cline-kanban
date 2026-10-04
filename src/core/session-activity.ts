@@ -22,6 +22,7 @@ import type {
 	RuntimeTaskSessionUserTurnKind,
 } from "./api-contract.js";
 import { mergeLastConversationProgressObservation } from "./last-conversation-progress-observation.js";
+import { mergeLastMainAgentConversationModelRequestDispatchObservation } from "./last-main-agent-conversation-model-request-dispatch-observation.js";
 
 // 「agent 仍在持续产出」的活跃窗口阈值（毫秒）。前后端有意取不同值、语义相反，故分别命名、
 // 不强行统一为一个常量：
@@ -289,7 +290,11 @@ export function mergeSummaryWithFacets(
 			// mergeSummaryWithFacets 与 applySessionFacets 的既有等价关系产生无谓差异。
 			mergedWithFacets;
 
-	const withProgressObservation = resolveLastConversationProgressObservation(prev, patch, withTurnSequence);
+	const withProgressObservation = resolveLastMainAgentConversationModelRequestDispatchObservation(
+		prev,
+		patch,
+		resolveLastConversationProgressObservation(prev, patch, withTurnSequence),
+	);
 
 	const stopped = resolveAgentResponseGenerationStopped(prev, patch, withProgressObservation);
 	// `?? null` 是要点不是噪声：字段缺失（undefined）与「已判定为无停止事件」（null）在语义上同为
@@ -335,6 +340,29 @@ function resolveLastConversationProgressObservation(
 	}
 	// merged 此刻装的是 patch 里那条**未经裁决**的原始观测，必须换成 reducer 的裁决结果。
 	return { ...mergedWithFacets, lastConversationProgressObservation: merged };
+}
+
+// 「主对话最后一次向模型发出请求」观测的合并落点，与上面那个观测同理放在共用漏斗里，让单调性成为结构性
+// 保证。「哪些事件该写」由写点判定（main-agent-conversation-model-request-dispatch-hook-event-classification.ts），
+// 这里只负责不倒退、不跑到未来。
+function resolveLastMainAgentConversationModelRequestDispatchObservation(
+	prev: RuntimeTaskSessionSummary,
+	patch: Partial<RuntimeTaskSessionSummary>,
+	merged: RuntimeTaskSessionSummary,
+): RuntimeTaskSessionSummary {
+	const incoming = patch.lastMainAgentConversationModelRequestDispatchObservation;
+	if (incoming == null) {
+		return merged;
+	}
+	const reduced = mergeLastMainAgentConversationModelRequestDispatchObservation(
+		prev.lastMainAgentConversationModelRequestDispatchObservation,
+		incoming,
+		{ nowMs: merged.updatedAt },
+	);
+	if (reduced === merged.lastMainAgentConversationModelRequestDispatchObservation) {
+		return merged;
+	}
+	return { ...merged, lastMainAgentConversationModelRequestDispatchObservation: reduced };
 }
 
 // 「本轮何时停止生成」离散事件的唯一写点（与回合序号同处这条三 transport 共用漏斗，故三侧自动一致）。

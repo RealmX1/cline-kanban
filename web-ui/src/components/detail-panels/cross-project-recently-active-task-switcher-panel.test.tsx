@@ -10,6 +10,7 @@ import {
 } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import type { RuntimeCrossProjectTaskSwitcherEntry, RuntimeProjectSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
+import { resetCrossProjectTaskSwitcherPanelViewContinuity } from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
 
 // 跨项目切换面板（docs/context-cross-project-recently-active-task-switcher.md）的渲染契约：四个区、Running 默认收起、
 // Pinned 与下方区重复、点击走宿主的跨项目打开、对非当前项目的卡取消置顶走 runtime。
@@ -74,10 +75,9 @@ function makeHost(
 					turnOwner: "user",
 					liveness: "exited",
 					userTurnKind: "review",
-					agentResponseGenerationStopped: {
-						stoppedAt: NOW_MS - 5 * 60_000,
-						signalConfidence: "harness_turn_complete",
-						turnSequence: 1,
+					lastMainAgentConversationModelRequestDispatchObservation: {
+						observedAtMs: NOW_MS - 5 * 60_000,
+						evidenceKind: "post_tool_use_hook_event",
 					},
 				}),
 			]),
@@ -87,6 +87,7 @@ function makeHost(
 		],
 		notificationLogByWorkspaceId: {},
 		currentProjectId: "project-a",
+		isBoardScopeAllProjectsSelected: true,
 		focusedTaskInProject: { workspaceId: "project-a", taskId: "warm" },
 		onOpenTaskInProject: vi.fn(),
 		onRequestPinCurrentProjectTaskToTaskPinboard: vi.fn(),
@@ -105,6 +106,7 @@ beforeEach(() => {
 		.IS_REACT_ACT_ENVIRONMENT;
 	(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 	window.localStorage.clear();
+	resetCrossProjectTaskSwitcherPanelViewContinuity();
 	setTaskPinboardPinStateOfTaskCardInProject.mockReset();
 	setTaskPinboardPinStateOfTaskCardInProject.mockResolvedValue({ taskCardFound: true, boardWasSaved: true });
 	fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon.mockReset();
@@ -151,6 +153,67 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(rowTaskIds(section("remaining"))).toEqual(["recent"]);
 		// 焦点任务高亮。
 		expect(section("prompt-cache-warm").querySelector('[aria-current="true"]')).not.toBeNull();
+	});
+
+	it("重挂载（Focus View 左栏 ↔ 跨项目打开的过渡外壳）后保留「显示更早」与滚动位置", async () => {
+		fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon.mockResolvedValue({
+			activityHorizonMs: EXTENDED_ACTIVITY_HORIZON_MS,
+			projects: [
+				{
+					workspaceId: "project-b",
+					crossProjectTaskSwitcherEntries: [
+						makeEntry("older", { taskDescriptionLastUpdatedAt: NOW_MS - 20 * DAY_MS }),
+					],
+				},
+			],
+		});
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
+		const showOlderButton = [...section("remaining").querySelectorAll("button")].find((button) =>
+			button.textContent?.includes("Show older"),
+		);
+		await act(async () => {
+			showOlderButton?.click();
+		});
+		expect(rowTaskIds(section("remaining"))).toContain("older");
+		const panel = container.querySelector<HTMLElement>(
+			'[data-testid="cross-project-recently-active-task-switcher-panel"]',
+		);
+		if (panel) {
+			panel.scrollTop = 120;
+			act(() => panel.dispatchEvent(new Event("scroll")));
+		}
+
+		act(() => root.render(<div />));
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
+		expect(rowTaskIds(section("remaining"))).toContain("older");
+		expect(
+			container.querySelector<HTMLElement>('[data-testid="cross-project-recently-active-task-switcher-panel"]')
+				?.scrollTop,
+		).toBe(120);
+	});
+
+	it("Pinned 区可折叠（默认展开），折叠态落 localStorage", () => {
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
+		const toggle = section("pinned").querySelector<HTMLButtonElement>("button[aria-expanded]");
+		expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+		act(() => toggle?.click());
+
+		expect(rowTaskIds(section("pinned"))).toEqual([]);
+		expect(section("pinned").textContent).toContain("Pinned1");
+		expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherPinnedSectionCollapsed)).toBe("true");
+	});
+
+	it("行内三颗时长药丸全部显示（含创建时长），倒计时 tooltip 写明起点与来源", () => {
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
+		const warmRow = section("prompt-cache-warm").querySelector<HTMLElement>(
+			'[data-cross-project-task-switcher-task-id="warm"]',
+		);
+		expect(warmRow?.querySelector('[title^="Created ·"]')).not.toBeNull();
+		const countdownTitle = warmRow
+			?.querySelector('[title^="Prompt cache expected to expire"]')
+			?.getAttribute("title");
+		expect(countdownTitle).toContain("Countdown started");
+		expect(countdownTitle).toContain("last main-conversation model request");
 	});
 
 	it("展开 Running 后列出在跑的任务，展开态落 localStorage", () => {

@@ -14,8 +14,8 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAgentSessionInitializationReuseMode,
+	RuntimeTaskCardActionMoveIntoDoneResponse,
 	RuntimeTaskClineSettings,
-	RuntimeTaskSessionStartRequest,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskWorkspaceGitStatus,
 	RuntimeTaskWorktreeMode,
@@ -39,16 +39,16 @@ import {
 	encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
+import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
+import { resolveSessionFacets } from "../core/session-activity";
+import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../core/task-agent-permission-mode";
+import { resolveTaskDescriptionLastUpdatedAt } from "../core/task-board-mutations";
 import {
 	buildTaskAgentSessionInitialization,
 	buildTaskClineSettingsForCreate,
 	cloneTaskClineSettings,
 	type ParsedTaskClineReasoningEffort,
-} from "../core/kanban-cli-task-card-field-input-resolution";
-import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
-import { resolveSessionFacets } from "../core/session-activity";
-import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../core/task-agent-permission-mode";
-import { getTaskColumnId, resolveTaskDescriptionLastUpdatedAt } from "../core/task-board-mutations";
+} from "../core/task-card-field-patch-resolution";
 import type {
 	TaskMessageInjectionRecord,
 	TaskMessageTerminalDeliveryFailureReason,
@@ -64,8 +64,6 @@ import {
 	withTaskMessageInjectionLedgerLock,
 } from "../core/task-message-injection-ledger";
 import { resolveProjectInputPath } from "../projects/project-path";
-import { discardTaskEditDraftsForDeletedTasks } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
-import { discardQueuedTaskPromptDeliveriesForTasks } from "../state/queued-task-prompt-delivery-store";
 import {
 	detectGitRepositoryInfo,
 	getTaskWorktreesHomePath,
@@ -75,7 +73,6 @@ import {
 } from "../state/workspace-state";
 import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import type { RuntimeAppRouter } from "../trpc/app-router";
-import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
 import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
@@ -328,8 +325,9 @@ type RuntimeKanbanCliTaskBoardMutationResponseOfKind<
 	{ kanbanCliTaskBoardMutationKind: TKanbanCliTaskBoardMutationKind }
 >;
 
-// dd2db 1a.2b：create / update / start 移列 / trash / delete 只经 runtime procedure 落盘，由 runtime 按本进程
-// 随请求发出的行动者声明头解析行动者、写进关系账本；广播也由 runtime 在写成后自己做。
+// dd2db 1a.2b：create 只经 runtime procedure 落盘，由 runtime 按本进程随请求发出的行动者声明头解析行动者、写进
+// 关系账本；广播也由 runtime 在写成后自己做。update / start / done / delete 走 taskCardAction.*（连同停会话、删
+// worktree、清草稿与 checkpoint ref 的整条收尾链都在 runtime 里执行，CLI 只做参数解析与输出格式化）。
 // runtime 不可达时 tRPC 调用直接抛错、命令以 exit 1 失败（fail closed）——这里刻意没有「回退到直接写盘」的分支。
 async function applyKanbanCliTaskBoardMutationThroughRuntime<
 	TKanbanCliTaskBoardMutationKind extends RuntimeKanbanCliTaskBoardMutationKind,
@@ -504,36 +502,6 @@ async function getTask(input: { cwd: string; taskId: string; projectPath?: strin
 		task: formatTaskRecord(state, found.task, found.columnId),
 		taskWorkspace: taskWorkspaceInfo,
 	};
-}
-
-async function stopTaskRuntimeSession(
-	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
-	taskId: string,
-): Promise<void> {
-	await runtimeClient.runtime.stopTaskSession
-		.mutate({
-			taskId,
-		})
-		.catch(() => null);
-}
-
-async function deleteTaskWorkspace(
-	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
-	taskId: string,
-): Promise<{ removed: boolean; error?: string }> {
-	try {
-		// 永久删卡也不删 task commit provenance：落地数据保全（dd2db Y-PHASE-3），1c 的共享落地判据要读它。
-		const deleted = await runtimeClient.workspace.deleteWorktree.mutate({ taskId });
-		return {
-			removed: deleted.removed,
-			error: deleted.ok ? undefined : deleted.error,
-		};
-	} catch (error) {
-		return {
-			removed: false,
-			error: toErrorMessage(error),
-		};
-	}
 }
 
 interface TaskCreateCommandInput {
@@ -787,35 +755,38 @@ async function updateTaskCommand(input: {
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 	// 只传原始输入：与卡片现值的合并在 runtime 的 board 锁内对最新卡片进行，CLI 这边不做读-改-写，
 	// 否则两次读写之间别人的更新会被这次整卡回写抹掉。
-	const updateMutation = await applyKanbanCliTaskBoardMutationThroughRuntime(runtimeClient, {
-		kanbanCliTaskBoardMutationKind: "update_task_card_fields",
-		updatedTaskId: input.taskId,
-		kanbanCliTaskCardFieldUpdateRawInput: {
-			title: input.title,
-			prompt: input.prompt,
-			baseRef: input.baseRef,
-			startInPlanMode: input.startInPlanMode,
-			taskAgentPermissionMode: input.taskAgentPermissionMode,
-			autoReviewEnabled: input.autoReviewEnabled,
-			autoReviewMode: input.autoReviewMode,
-			agentId: input.agentId,
-			clineProviderId: input.clineProviderId,
-			clineModelId: input.clineModelId,
-			clineReasoningEffort: input.clineReasoningEffort,
-			taskAgentSessionInitializationId: input.taskAgentSessionInitializationId,
-			taskAgentSessionInitializationMode: input.taskAgentSessionInitializationMode,
-			parentSessionId: input.parentSessionId,
-			worktreeMode: input.worktreeMode,
-			prepFilePath: input.prepFilePath,
+	const updated = await runtimeClient.taskCardAction.updateTaskCardFieldValues.mutate({
+		taskId: input.taskId,
+		taskCardFieldUpdate: {
+			taskCardFieldUpdateInputKind: "kanban_cli_task_update_command_raw_arguments",
+			kanbanCliTaskCardFieldUpdateRawInput: {
+				title: input.title,
+				prompt: input.prompt,
+				baseRef: input.baseRef,
+				startInPlanMode: input.startInPlanMode,
+				taskAgentPermissionMode: input.taskAgentPermissionMode,
+				autoReviewEnabled: input.autoReviewEnabled,
+				autoReviewMode: input.autoReviewMode,
+				agentId: input.agentId,
+				clineProviderId: input.clineProviderId,
+				clineModelId: input.clineModelId,
+				clineReasoningEffort: input.clineReasoningEffort,
+				taskAgentSessionInitializationId: input.taskAgentSessionInitializationId,
+				taskAgentSessionInitializationMode: input.taskAgentSessionInitializationMode,
+				parentSessionId: input.parentSessionId,
+				worktreeMode: input.worktreeMode,
+				prepFilePath: input.prepFilePath,
+			},
 		},
 	});
+	const updatedTaskCardSnapshot = updated.taskCardSnapshotAfterAction;
 
 	return {
 		ok: true,
 		task: formatTaskRecordWithSessionSummary(
-			updateMutation.updatedTaskCard,
-			updateMutation.updatedTaskCardBoardColumnId,
-			updateMutation.updatedTaskCardSessionSummaryPersistedOnDisk,
+			updatedTaskCardSnapshot.taskCard,
+			updatedTaskCardSnapshot.boardColumnIdContainingTaskCard,
+			updatedTaskCardSnapshot.taskSessionSummaryPersistedInWorkspaceSessionsFile,
 		),
 		workspacePath: workspaceRepoPath,
 	};
@@ -825,87 +796,42 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const runtimeState = await runtimeClient.workspace.getState.query();
-	const fromColumnId = getTaskColumnId(runtimeState.board, input.taskId);
-	if (!fromColumnId) {
-		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
-	}
-
-	if (fromColumnId !== "backlog" && fromColumnId !== "in_progress") {
+	// runtime 一次做完：只收 backlog / in_progress 的卡 → 先移列到 in_progress → ensure worktree → 起会话
+	// （会话已在 agent 回合就不重复起）。卡不存在 / 所在列不允许时 runtime 抛错，原文案与迁移前 CLI 本地报错一致。
+	const started = await runtimeClient.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress.mutate({
+		taskId: input.taskId,
+	});
+	// 执行期失败时卡已留在 in_progress（backlog 单向）；命令照旧以失败退出，带回 runtime 给的原因。
+	if (
+		started.agentSessionStartOutcome === "task_worktree_ensure_failed" ||
+		started.agentSessionStartOutcome === "agent_session_start_failed"
+	) {
 		throw new Error(
-			`Task "${input.taskId}" is in "${fromColumnId}" and can only be started from backlog or in_progress.`,
+			started.agentSessionStartFailureMessage ??
+				(started.agentSessionStartOutcome === "task_worktree_ensure_failed"
+					? "Could not ensure task worktree."
+					: "Could not start task session."),
 		);
 	}
+	const startedTaskCard = started.taskCardSnapshotAfterAction.taskCard;
+	const startedTaskRecord = {
+		id: startedTaskCard.id,
+		prompt: startedTaskCard.prompt,
+		column: "in_progress",
+		workspacePath: workspaceRepoPath,
+	};
 
-	const currentRecord = findTaskRecord(runtimeState, input.taskId);
-	const task = currentRecord?.task;
-	if (!task) {
-		throw new Error(`Task "${input.taskId}" could not be resolved.`);
-	}
-
-	const existingSession = runtimeState.sessions[task.id] ?? null;
-	// 旧 `state==="running"` → facet 真相源 turnOwner==="agent"（running 是 agent 回合唯一来源，严格等价）。
-	const shouldStartSession = !existingSession || resolveSessionFacets(existingSession).turnOwner !== "agent";
-
-	if (shouldStartSession) {
-		const ensured = await runtimeClient.workspace.ensureWorktree.mutate({
-			taskId: task.id,
-			baseRef: task.baseRef,
-			worktreeMode: task.worktreeMode,
-		});
-		if (!ensured.ok) {
-			throw new Error(ensured.error ?? "Could not ensure task worktree.");
-		}
-
-		const started = await runtimeClient.runtime.startTaskSession.mutate(buildCliTaskSessionStartRequest(task));
-		if (!started.ok || !started.summary) {
-			throw new Error(started.error ?? "Could not start task session.");
-		}
-	}
-
-	const moveMutation = await applyKanbanCliTaskBoardMutationThroughRuntime(runtimeClient, {
-		kanbanCliTaskBoardMutationKind: "move_task_card_to_in_progress_column",
-		movedTaskId: input.taskId,
-	});
-
-	if (!moveMutation.taskCardWasMovedIntoInProgressColumn) {
+	if (!started.taskCardWasMovedIntoInProgressColumnByThisAction) {
 		return {
 			ok: true,
 			message: `Task "${input.taskId}" is already in progress.`,
-			task: {
-				id: task.id,
-				prompt: task.prompt,
-				column: "in_progress",
-				workspacePath: workspaceRepoPath,
-			},
+			task: startedTaskRecord,
 		};
 	}
 
 	return {
 		ok: true,
-		task: {
-			id: task.id,
-			prompt: task.prompt,
-			column: "in_progress",
-			workspacePath: workspaceRepoPath,
-		},
-	};
-}
-
-export function buildCliTaskSessionStartRequest(task: RuntimeBoardCard): RuntimeTaskSessionStartRequest {
-	return {
-		taskId: task.id,
-		prompt: task.prompt,
-		taskTitle: task.title,
-		startInPlanMode: task.startInPlanMode,
-		taskAgentPermissionMode: task.taskAgentPermissionMode,
-		baseRef: task.baseRef,
-		agentId: task.agentId,
-		clineSettings: task.clineSettings,
-		taskAgentSessionInitialization: task.taskAgentSessionInitialization,
-		parentSessionId: task.parentSessionId,
-		worktreeMode: task.worktreeMode,
-		prepFilePath: task.prepFilePath,
+		task: startedTaskRecord,
 	};
 }
 
@@ -981,7 +907,7 @@ async function isTaskParkedCommand(input: { cwd: string; taskId: string; project
 	};
 }
 
-export interface TrashTaskExecutionResult {
+interface TrashTaskExecutionResult {
 	task: JsonRecord;
 	taskId: string;
 	previousColumnId: ListTaskColumn;
@@ -990,57 +916,36 @@ export interface TrashTaskExecutionResult {
 	alreadyInTrash: boolean;
 }
 
-function columnCanHaveLiveTaskSession(columnId: ListTaskColumn): boolean {
-	return columnId === "in_progress" || columnId === "review" || columnId === "validation";
+function toTrashTaskExecutionResult(
+	taskId: string,
+	movedIntoDone: RuntimeTaskCardActionMoveIntoDoneResponse,
+): TrashTaskExecutionResult {
+	const movedTaskCardSnapshot = movedIntoDone.taskCardSnapshotAfterAction;
+	return {
+		task: formatTaskRecordWithSessionSummary(
+			movedTaskCardSnapshot.taskCard,
+			"trash",
+			movedTaskCardSnapshot.taskSessionSummaryPersistedInWorkspaceSessionsFile,
+		),
+		taskId,
+		previousColumnId: movedIntoDone.boardColumnIdOfTaskCardBeforeAction,
+		worktreeDeleted: movedIntoDone.taskWorktreeDeletionResult?.taskWorktreeWasRemoved ?? false,
+		worktreeDeleteError: movedIntoDone.taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage ?? undefined,
+		alreadyInTrash: movedIntoDone.taskCardWasAlreadyInTrashColumnSoNoSessionOrWorktreeCleanupRan,
+	};
 }
 
-// deployment CLI（verification-complete / -confirm 移列）复用其完整副作用链：
-// runtime procedure 移列（runtime 写成后自己广播）→ 按列门控 stopTaskSession → deleteWorktree。
-export async function trashTaskById(input: {
-	// cwd / projectPath / workspaceRepoPath 已不再使用：1a.2b 起移列在 runtime 内进行、错误文案由 runtime 给出；
-	// 1a.6 退役「完成后自动启动下游 linked 任务」后也不再需要 cwd / projectPath 去启动别的任务。保留只为不改调用形状。
-	cwd: string;
+// 移入 Done 的整条副作用链（移列 → 停 agent 会话与详情 shell 终端 → 删 worktree）都在 runtime 的
+// taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree 里执行；CLI 只把响应摊成旧 JSON 字段。
+async function trashTaskById(input: {
 	taskId: string;
-	projectPath?: string;
-	workspaceRepoPath: string;
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>;
 }): Promise<TrashTaskExecutionResult> {
-	// 移列经 runtime procedure 落盘（runtime 写成后自己广播）；其余副作用仍按原顺序由 CLI 编排。
-	const trashMutation = await applyKanbanCliTaskBoardMutationThroughRuntime(input.runtimeClient, {
-		kanbanCliTaskBoardMutationKind: "move_task_card_to_trash_column",
-		movedTaskId: input.taskId,
-	});
-	const trashedTaskRecord = formatTaskRecordWithSessionSummary(
-		trashMutation.movedTaskCardAfterMutation,
-		"trash",
-		trashMutation.movedTaskCardSessionSummaryPersistedOnDisk,
-	);
-	const previousColumnId = trashMutation.movedTaskCardBoardColumnIdBeforeMutation;
-
-	if (trashMutation.taskCardWasAlreadyInTrashColumn) {
-		return {
-			task: trashedTaskRecord,
+	const movedIntoDone =
+		await input.runtimeClient.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree.mutate({
 			taskId: input.taskId,
-			previousColumnId,
-			worktreeDeleted: false,
-			alreadyInTrash: true,
-		};
-	}
-
-	if (columnCanHaveLiveTaskSession(previousColumnId)) {
-		await stopTaskRuntimeSession(input.runtimeClient, input.taskId);
-	}
-
-	const deletedWorkspace = await deleteTaskWorkspace(input.runtimeClient, input.taskId);
-
-	return {
-		task: trashedTaskRecord,
-		taskId: input.taskId,
-		previousColumnId,
-		worktreeDeleted: deletedWorkspace.removed,
-		worktreeDeleteError: deletedWorkspace.error,
-		alreadyInTrash: false,
-	};
+		});
+	return toTrashTaskExecutionResult(input.taskId, movedIntoDone);
 }
 
 async function trashTask(input: {
@@ -1055,13 +960,7 @@ async function trashTask(input: {
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 
 	if (target.kind === "task") {
-		const trashed = await trashTaskById({
-			cwd: input.cwd,
-			taskId: target.taskId,
-			projectPath: input.projectPath,
-			workspaceRepoPath,
-			runtimeClient,
-		});
+		const trashed = await trashTaskById({ taskId: target.taskId, runtimeClient });
 		if (trashed.alreadyInTrash) {
 			return {
 				ok: true,
@@ -1095,15 +994,7 @@ async function trashTask(input: {
 
 	const results: TrashTaskExecutionResult[] = [];
 	for (const { task } of targetTasks) {
-		results.push(
-			await trashTaskById({
-				cwd: input.cwd,
-				taskId: task.id,
-				projectPath: input.projectPath,
-				workspaceRepoPath,
-				runtimeClient,
-			}),
-		);
+		results.push(await trashTaskById({ taskId: task.id, runtimeClient }));
 	}
 
 	const trashedTasks = results.filter((result) => !result.alreadyInTrash);
@@ -1134,8 +1025,9 @@ async function deleteTaskCommand(input: {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const deleteMutation = await applyKanbanCliTaskBoardMutationThroughRuntime(runtimeClient, {
-		kanbanCliTaskBoardMutationKind: "permanently_delete_task_cards",
+	// 整条收尾链（board 删卡 → 清编辑草稿 → 清排队 prompt → 停会话 → 删 worktree → 最后批删 turn checkpoint ref）
+	// 都在 runtime 的 taskCardAction.permanentlyDeleteTaskCardsWithFullResourceCleanup 里按这个顺序执行。
+	const deleted = await runtimeClient.taskCardAction.permanentlyDeleteTaskCardsWithFullResourceCleanup.mutate({
 		permanentlyDeletedTaskCardSelection:
 			target.kind === "task"
 				? {
@@ -1147,23 +1039,9 @@ async function deleteTaskCommand(input: {
 						selectedBoardColumnId: target.column,
 					},
 	});
-	const permanentlyDeletedTaskCards = deleteMutation.permanentlyDeletedTaskCards;
-	const deletedTaskIds = permanentlyDeletedTaskCards.map(({ deletedTaskCard }) => deletedTaskCard.id);
-	const taskIdsRequiringStop = permanentlyDeletedTaskCards
-		.filter(({ deletedTaskCardBoardColumnIdBeforeDeletion }) =>
-			columnCanHaveLiveTaskSession(deletedTaskCardBoardColumnIdBeforeDeletion),
-		)
-		.map(({ deletedTaskCard }) => deletedTaskCard.id);
-	const deletedTasks = permanentlyDeletedTaskCards.map(
-		({ deletedTaskCard, deletedTaskCardBoardColumnIdBeforeDeletion, deletedTaskCardSessionSummaryPersistedOnDisk }) =>
-			formatTaskRecordWithSessionSummary(
-				deletedTaskCard,
-				deletedTaskCardBoardColumnIdBeforeDeletion,
-				deletedTaskCardSessionSummaryPersistedOnDisk,
-			),
-	);
+	const permanentlyDeletedTaskCards = deleted.permanentlyDeletedTaskCards;
 
-	if (deletedTaskIds.length === 0) {
+	if (permanentlyDeletedTaskCards.length === 0) {
 		return {
 			ok: true,
 			workspacePath: workspaceRepoPath,
@@ -1173,49 +1051,28 @@ async function deleteTaskCommand(input: {
 		};
 	}
 
-	// 任务本体没了之后，它的编辑草稿与落败副本再也没有可以认领的地方——界面上连打开它的入口都不存在了。
-	// 浏览器侧的删除 handler 会自己清一次，但 CLI 这条路径完全不经过它。
-	await discardTaskEditDraftsForDeletedTasks(workspaceId, deletedTaskIds);
-	// 排队 prompt 同理，而且更要紧：它们是待执行的机器动作，不是资产。留着只会在同 id 的任务被恢复时突然发射。
-	// runtime 里的出队引擎会在下一次兜底 sweep 时重读文件、跟上这次改动。失败只记不抛：条目 24h 后自然过期。
-	try {
-		await discardQueuedTaskPromptDeliveriesForTasks({ workspaceId, taskIds: deletedTaskIds });
-	} catch {
-		// 见上。
-	}
-
-	await Promise.all(taskIdsRequiringStop.map(async (taskId) => await stopTaskRuntimeSession(runtimeClient, taskId)));
-
-	const workspaceCleanupResults = await Promise.all(
-		deletedTaskIds.map(async (taskId) => ({
-			taskId,
-			...(await deleteTaskWorkspace(runtimeClient, taskId)),
-		})),
-	);
-
-	// 批删全部 turn checkpoint ref（姊妹蓝图 §1.4：存续期全量保留，永久删除时按前缀批删）。
-	// 顺序铁律：必须排在会话停止与 worktree 清理**之后**。hooks-api 的 to_review checkpoint 捕获是
-	// runtime 侧不 await 的后台任务（hooks-api.ts F1），若先批删，枚举完成后在途捕获仍可能
-	// update-ref，给已删除任务留下再无清理方的孤儿 ref。会话停止切断新 hook 来源（任务已从看板
-	// 移除，transition 失败也不会再派生新捕获），批删放到最后给在途捕获最大收敛窗口。
-	// 残余窗口：CLI 无法 await runtime 侧已派生的在途捕获，理论上仍可能有批删后才落定的孤儿 ref——
-	// 与草稿清理同一套失败语义：这是删除已成之后的收尾，失败只吞不抛，残留几个无人认领的 ref，
-	// 不该让已经删成的任务被报成失败。
-	for (const taskId of deletedTaskIds) {
-		try {
-			await deleteAllTaskTurnCheckpointRefs({ cwd: workspaceRepoPath, taskId });
-		} catch {
-			// 收尾清理，best-effort。
-		}
-	}
-
 	return {
 		ok: true,
 		workspacePath: workspaceRepoPath,
 		column: target.kind === "column" ? target.column : null,
-		deletedTasks: deletedTasks,
-		count: deletedTaskIds.length,
-		worktreeCleanup: workspaceCleanupResults,
+		deletedTasks: permanentlyDeletedTaskCards.map(
+			({
+				deletedTaskCard,
+				boardColumnIdOfDeletedTaskCardBeforeDeletion,
+				taskSessionSummaryPersistedInWorkspaceSessionsFileBeforeDeletion,
+			}) =>
+				formatTaskRecordWithSessionSummary(
+					deletedTaskCard,
+					boardColumnIdOfDeletedTaskCardBeforeDeletion,
+					taskSessionSummaryPersistedInWorkspaceSessionsFileBeforeDeletion,
+				),
+		),
+		count: permanentlyDeletedTaskCards.length,
+		worktreeCleanup: permanentlyDeletedTaskCards.map(({ deletedTaskCard, taskWorktreeDeletionResult }) => ({
+			taskId: deletedTaskCard.id,
+			removed: taskWorktreeDeletionResult.taskWorktreeWasRemoved,
+			error: taskWorktreeDeletionResult.taskWorktreeDeletionErrorMessage ?? undefined,
+		})),
 	};
 }
 

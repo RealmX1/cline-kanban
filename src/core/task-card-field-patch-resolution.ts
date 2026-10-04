@@ -5,14 +5,19 @@ import type {
 	RuntimeKanbanCliTaskCardFieldUpdateRawInput,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAgentSessionInitializationReuseMode,
+	RuntimeTaskCardFieldUpdate,
+	RuntimeTaskCardFieldValuePatch,
 	RuntimeTaskClineSettings,
 } from "./api-contract";
 import { runtimeTaskAgentSessionInitializationSchema } from "./api-contract";
 import type { RuntimeUpdateTaskInput } from "./task-board-mutations";
 
-// `kanban task create / update` 的命令行参数 → 卡片字段值的纯函数解析。
-// 为什么放在 core：dd2db 1a.2b 之后 update 的「与卡片现值合并」挪进 runtime 的 board 锁内执行
-// （src/trpc/kanban-cli-task-board-mutation-api.ts），CLI 进程与 runtime 进程必须共用同一份合并规则。
+// 「改卡片字段」的各种输入 → updateTask 完整输入的纯函数解析。两类输入：
+//   - `kanban task create / update` 的命令行参数（inherit / default 哨兵、会话初始化 id + 模式的组合规则）；
+//   - 编辑器整卡保存 / 行内改名 / 取消自动动作提交的三态字段 patch。
+// 为什么放在 core：与卡片现值的合并在 runtime 的 board 锁内对**最新**卡片执行
+// （src/trpc/task-card-action-api.ts 的 updateTaskCardFieldValues），CLI 进程与 runtime 进程必须共用同一份规则；
+// 浏览器之后也可经 alias 复用（解析出的结果与服务端逐字一致）。
 
 // CLI `--cline-reasoning-effort` 解析后的四态：具体档位 / "default"（显式回落默认档）/ null（inherit，清除）/ undefined（未传）。
 export type ParsedTaskClineReasoningEffort = RuntimeClineReasoningEffort | "default" | null | undefined;
@@ -182,4 +187,59 @@ export function buildRuntimeUpdateTaskInputFromKanbanCliTaskCardFieldUpdateRawIn
 		worktreeMode: rawInput.worktreeMode,
 		prepFilePath: rawInput.prepFilePath,
 	};
+}
+
+// 三态 patch 与卡片**最新**现值合并成 updateTask 的完整输入（规则见 api-contract 的 runtimeTaskCardFieldValuePatchSchema）。
+// updateTask 里 title / prompt / startInPlanMode / autoReview* / baseRef 不是三态字段（漏传即复位），所以这里一律从现值回填；
+// 其余字段 updateTask 本身就按「undefined 保留、null 清除」处理，原样下传。
+export function buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch(
+	currentTaskCard: RuntimeBoardCard,
+	patch: RuntimeTaskCardFieldValuePatch,
+): RuntimeUpdateTaskInput {
+	const patchTouchesTaskAgentSessionInitialization = patch.taskAgentSessionInitialization !== undefined;
+	return {
+		// null / 空白 = 不要显式标题，由 updateTask 按 prompt 派生。
+		title: patch.title === undefined ? currentTaskCard.title : (patch.title ?? undefined),
+		prompt: patch.prompt ?? currentTaskCard.prompt,
+		startInPlanMode: patch.startInPlanMode ?? currentTaskCard.startInPlanMode,
+		taskAgentPermissionMode: patch.taskAgentPermissionMode,
+		autoReviewEnabled: patch.autoReviewEnabled ?? currentTaskCard.autoReviewEnabled === true,
+		autoReviewMode: patch.autoReviewMode ?? currentTaskCard.autoReviewMode ?? "commit",
+		// updateTask 的 images 只有两态（undefined 保留 / 数组覆盖，空数组 = 清空），null 折成空数组。
+		images: patch.images === undefined ? undefined : (patch.images ?? []),
+		taskCommentEntries: patch.taskCommentEntries,
+		agentId: patch.agentId,
+		ompAgentSessionTransport: patch.ompAgentSessionTransport,
+		taskConversationMode: patch.taskConversationMode,
+		clineSettings: patch.clineSettings,
+		terminalAgentModelOverrideSettings: patch.terminalAgentModelOverrideSettings,
+		taskAgentSessionInitialization: patch.taskAgentSessionInitialization,
+		baseRef: patch.baseRef ?? currentTaskCard.baseRef,
+		parentSessionId:
+			patch.parentSessionId === undefined && patchTouchesTaskAgentSessionInitialization
+				? null
+				: patch.parentSessionId,
+		worktreeMode: patch.worktreeMode,
+		prepFilePath: patch.prepFilePath,
+	};
+}
+
+// `taskCardAction.updateTaskCardFieldValues` 的单一入口：按输入种类分派。必须在读到最新卡片的同一把 board 锁内调用；
+// 输入组合非法时抛普通 Error（调用方转成 BAD_REQUEST），不产生任何写入。
+export function resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskCard(
+	latestTaskCard: RuntimeBoardCard,
+	taskCardFieldUpdate: RuntimeTaskCardFieldUpdate,
+): RuntimeUpdateTaskInput {
+	switch (taskCardFieldUpdate.taskCardFieldUpdateInputKind) {
+		case "kanban_cli_task_update_command_raw_arguments":
+			return buildRuntimeUpdateTaskInputFromKanbanCliTaskCardFieldUpdateRawInput(
+				latestTaskCard,
+				taskCardFieldUpdate.kanbanCliTaskCardFieldUpdateRawInput,
+			);
+		case "three_state_task_card_field_value_patch":
+			return buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch(
+				latestTaskCard,
+				taskCardFieldUpdate.taskCardFieldValuePatch,
+			);
+	}
 }

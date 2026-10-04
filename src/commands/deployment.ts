@@ -42,7 +42,7 @@ import {
 	type KanbanCliPostDeployVerificationCompletionEntryPoint,
 	type KanbanCliRetryDecisionForTaskMovedToDoneButVerifiedAtUnrecorded,
 } from "./post-deploy-verification-moved-to-done-but-verified-at-unrecorded-cli-retry";
-import { createRuntimeTrpcClient, printJson, trashTaskById } from "./task";
+import { createRuntimeTrpcClient, printJson } from "./task";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -199,7 +199,7 @@ interface LiveWorkspaceRuntime {
 }
 
 // 凡触发移列的路径都须 live runtime（plan server 依赖边界）：server 不在则明确报错、不静默降级
-// （trashTaskById 内部对 tRPC 副作用是 catch-and-ignore，故必须在移列前显式探活）。
+// （移入 Done 的停会话 / 删 worktree 收尾对失败是吞掉不抛的，故必须在移列前显式探活）。
 async function requireLiveWorkspaceRuntime(workspaceId: string): Promise<LiveWorkspaceRuntime> {
 	const context = await loadWorkspaceContextById(workspaceId);
 	if (!context) {
@@ -290,13 +290,13 @@ async function moveTaskToDoneAndMarkVerified(input: {
 	if (!recorded.ok) {
 		return { ok: false, error: recorded.error ?? "Failed to record the in-flight completion before moving to done." };
 	}
-	const trashed = await trashTaskById({
-		cwd: process.cwd(),
-		taskId: input.taskId,
-		projectPath: input.live.repoPath,
-		workspaceRepoPath: input.live.repoPath,
-		runtimeClient: input.live.client,
-	});
+	// 移入 Done 的整条副作用链（移列 → 停 agent 会话与详情 shell 终端 → 删 worktree）由 runtime 的
+	// taskCardAction 执行，与浏览器 PDV 面板「全勾入 Done」走的是同一个实现。
+	const movedIntoDone =
+		await input.live.client.taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree.mutate({
+			taskId: input.taskId,
+		});
+	const taskWorktreeDeletionResult = movedIntoDone.taskWorktreeDeletionResult;
 	// 移列成功后才标记 verified（markTaskVerified 顺带清 pendingConfirmation token）。
 	const marked = await markTaskVerifiedThroughRuntimeAfterItWasMovedToDone({
 		deploymentId: input.deploymentId,
@@ -323,8 +323,10 @@ async function moveTaskToDoneAndMarkVerified(input: {
 		forced,
 		previousColumn: input.currentColumnId,
 		verifiedAt: marked.task?.verifiedAt ?? input.nowIso,
-		worktreeDeleted: trashed.worktreeDeleted,
-		...(trashed.worktreeDeleteError ? { worktreeDeleteError: trashed.worktreeDeleteError } : {}),
+		worktreeDeleted: taskWorktreeDeletionResult?.taskWorktreeWasRemoved ?? false,
+		...(taskWorktreeDeletionResult?.taskWorktreeDeletionErrorMessage
+			? { worktreeDeleteError: taskWorktreeDeletionResult.taskWorktreeDeletionErrorMessage }
+			: {}),
 		task: marked.task,
 	};
 }

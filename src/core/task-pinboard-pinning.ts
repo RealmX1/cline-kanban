@@ -1,6 +1,9 @@
 /**
- * Task Pinboard（置顶板）的纯状态函数，前后端共用：浏览器对当前项目经 setBoard 改写，runtime 对其他项目
- * （跨项目切换面板发起）经 `workspace.setTaskPinboardPinStateOfTaskCard` 在 board 锁内改写，两边是同一份代码。
+ * Task Pinboard（置顶板）的纯状态函数，前后端共用，两条改写路径跑的是同一份代码：
+ *   - 浏览器对当前项目（主看板、Focus View，以及跨项目切换面板里属于当前项目的卡）经 setBoard 改写内存 board，
+ *     再走整板 saveState——这些卡片动作尚未迁移到 `taskCardAction.*`；
+ *   - runtime 经 `taskCardAction.setTaskPinboardPinStateOfTaskCard` 在 board 锁内对最新 board 改写；目前只有跨项目
+ *     切换面板对非当前项目的置顶走这条，且浏览器调用的是旧入口 `workspace.setTaskPinboardPinStateOfTaskCard`（转发到它）。
  * web-ui 经 `@runtime-task-pinboard-pinning` 引用。
  *
  * 置顶态存在**卡片本身**上（`pinnedToTaskPinboardAt` / `taskPinboardPinReason`），不存在

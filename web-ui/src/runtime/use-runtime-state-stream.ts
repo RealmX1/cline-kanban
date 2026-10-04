@@ -76,7 +76,9 @@ export function mergeTaskSessionSummaries(
 // task_sessions_updated 的旁路出口：这条消息 150ms 一批、是最高频推流，不再进 reducer（不为它新建
 // workspaceState、不让 App 多渲染一次）。useWorkspaceSync 挂载时把「summaries → 一次 setSessions 合并」
 // 注册成 applier，stream hook 收到该批消息直接调用；App 持有这个 ref 并在两个 hook 之间接线。
-export type StreamedTaskSessionSummariesApplier = (summaries: RuntimeTaskSessionSummary[]) => void;
+// workspaceId 是这批摘要所属的项目（流只转发当前连着的项目的批次）。接收方据此分辨「切项目之后新项目推来的
+// 摘要」与「上一个项目残留的同号任务摘要」——taskId 跨项目会撞号。
+export type StreamedTaskSessionSummariesApplier = (summaries: RuntimeTaskSessionSummary[], workspaceId: string) => void;
 export interface StreamedTaskSessionSummariesApplierRef {
 	current: StreamedTaskSessionSummariesApplier | null;
 }
@@ -639,7 +641,7 @@ export function useRuntimeStateStream(
 						}
 						// 旁路（见 StreamedTaskSessionSummariesApplier）：summaries 直送 useWorkspaceSync 注册的
 						// applier，一次 setSessions 并入；reducer 不再为该消息产新 state，App 每批只渲染一次。
-						onTaskSessionSummariesRef.current?.(payload.summaries);
+						onTaskSessionSummariesRef.current?.(payload.summaries, payload.workspaceId);
 						return;
 					}
 					if (payload.type === "task_ready_for_review") {

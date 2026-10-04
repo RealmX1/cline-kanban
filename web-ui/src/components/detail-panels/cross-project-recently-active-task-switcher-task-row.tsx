@@ -1,5 +1,6 @@
 import type {
 	CrossProjectTaskSwitcherEntryInProject,
+	CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource,
 	CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { Pin, PinOff, Timer } from "lucide-react";
@@ -26,6 +27,25 @@ function formatPromptCacheWarmthRemainingDuration(remainingMs: number): string {
 		return `${remainingMinutes}m`;
 	}
 	return `${Math.floor(remainingMinutes / 60)}h${String(remainingMinutes % 60).padStart(2, "0")}m`;
+}
+
+const PROMPT_CACHE_WARMTH_ANCHOR_SOURCE_DESCRIPTION: Record<
+	CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource,
+	string
+> = {
+	main_agent_conversation_model_request_dispatch_observation: "last main-conversation model request",
+	last_substantive_agent_terminal_output: "last substantive agent output (agent has no turn hooks)",
+	high_confidence_last_conversation_progress_observation_fallback:
+		"conversation last advanced (fallback: no model request observed yet)",
+};
+
+function describePromptCacheWarmthEstimate(estimate: CrossProjectTaskSwitcherPromptCacheWarmthEstimate): string {
+	return [
+		`Prompt cache expected to expire · ${new Date(estimate.promptCacheExpectedExpiryAt).toLocaleString()}`,
+		`Countdown started · ${new Date(estimate.promptCacheWarmthAnchorAt).toLocaleString()} · ${
+			PROMPT_CACHE_WARMTH_ANCHOR_SOURCE_DESCRIPTION[estimate.promptCacheWarmthAnchorSource]
+		}`,
+	].join("\n");
 }
 
 export type CrossProjectTaskSwitcherTaskRowSection = "pinned" | "running" | "prompt_cache_warm" | "remaining";
@@ -107,17 +127,16 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 									? "bg-status-gold/15 text-status-gold"
 									: "bg-accent/15 text-accent",
 							)}
-							title={`Prompt cache expected to expire · ${new Date(
-								promptCacheWarmthEstimate.promptCacheExpectedExpiryAt,
-							).toLocaleString()}`}
+							title={describePromptCacheWarmthEstimate(promptCacheWarmthEstimate)}
 						>
 							<Timer size={10} className="shrink-0" />
 							{formatPromptCacheWarmthRemainingDuration(promptCacheWarmthRemainingMs)}
 						</span>
 					) : null}
 				</span>
-				<span className="flex min-w-0 items-center gap-1.5 pl-[19px] text-[10px] leading-none text-text-tertiary">
-					{showsProjectName ? <span className="min-w-0 max-w-[45%] truncate">{projectName}</span> : null}
+				{/* 换行而不是截断：时长药丸必须完整显示，窄宽度下整组药丸折到下一行。 */}
+				<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[19px] text-[10px] leading-none text-text-tertiary">
+					{showsProjectName ? <span className="min-w-0 max-w-full truncate">{projectName}</span> : null}
 					{section === "pinned" ? (
 						<span className="inline-flex shrink-0 items-center gap-0.5">
 							<ColumnIndicator columnId={entry.columnId} size={10} />
@@ -125,7 +144,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 						</span>
 					) : null}
 					<span className="ml-auto flex shrink-0">
-						<TaskActivityElapsedTimePills task={entry} nowMs={nowMs} showsCreatedAtPill={false} />
+						<TaskActivityElapsedTimePills task={entry} nowMs={nowMs} />
 					</span>
 				</span>
 				{section === "pinned" && entry.taskPinboardPinReason ? (

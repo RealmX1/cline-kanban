@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
-import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardColumn, CardSelection } from "@/types";
 
 // BoardCard = 列表内的可拖卡（包 <Draggable>）。mock 暴露 data-card-variant="draggable" 与它收到的
@@ -900,7 +899,7 @@ describe("ColumnContextPanel left column task list scope", () => {
 		{ id: "trash", title: "Done", cards: [] },
 	];
 
-	function renderPanel(withHost: boolean): void {
+	function renderPanel(withHost: boolean, isBoardScopeAllProjectsSelected = false): void {
 		const panel = (
 			<ColumnContextPanel
 				selection={createSelection(columns, "task-1")}
@@ -917,6 +916,7 @@ describe("ColumnContextPanel left column task list scope", () => {
 							projects: [],
 							notificationLogByWorkspaceId: {},
 							currentProjectId: "project-a",
+							isBoardScopeAllProjectsSelected,
 							focusedTaskInProject: { workspaceId: "project-a", taskId: "task-1" },
 							onOpenTaskInProject: vi.fn(),
 							onRequestPinCurrentProjectTaskToTaskPinboard: vi.fn(),
@@ -933,30 +933,22 @@ describe("ColumnContextPanel left column task list scope", () => {
 		);
 	}
 
-	it("没有宿主时不出现范围切换", () => {
+	it("没有宿主时只有 stage 列表；左栏不再有自己的范围切换（范围收进顶栏项目切换器）", () => {
 		renderPanel(false);
 		expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+		expect(container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]')).toBeNull();
+		renderPanel(true, false);
+		expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+		expect(container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]')).toBeNull();
 	});
 
-	it("切到 All projects：显示切换面板、stage 列表隐藏但仍挂载，选择落 localStorage", () => {
-		renderPanel(true);
-		const allProjectsOption = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
-			(option) => option.textContent === "All projects",
-		);
-		act(() => allProjectsOption?.click());
-
+	it("Board Scope（顶栏选了 All projects）：显示切换面板，stage 列表隐藏但仍挂载", () => {
+		renderPanel(true, true);
 		expect(
 			container.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'),
 		).not.toBeNull();
 		const stageList = container.querySelector<HTMLElement>('[data-testid="focus-view-current-project-stage-list"]');
 		expect(stageList?.className).toContain("hidden");
 		expect(stageList?.querySelector('[data-task-id="task-1"]')).not.toBeNull();
-		// 部署后引导验证从这个锚点起步（verification-anchor-registry.ts）。
-		expect(
-			container.querySelector('[data-verification-anchor="focus-view-left-column-task-list-scope-toggle"]'),
-		).not.toBeNull();
-		expect(window.localStorage.getItem(LocalStorageKey.FocusViewLeftColumnTaskListScope)).toBe(
-			"all_projects_recently_active_task_switcher",
-		);
 	});
 });

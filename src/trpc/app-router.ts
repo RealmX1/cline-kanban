@@ -131,13 +131,29 @@ import type {
 	RuntimeRunUpdateResponse,
 	RuntimeSaveExploratoryFindingRequest,
 	RuntimeSaveExploratoryFindingResponse,
-	RuntimeSetTaskPinboardPinStateOfTaskCardRequest,
-	RuntimeSetTaskPinboardPinStateOfTaskCardResponse,
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
 	RuntimeSlashCommandsResponse,
 	RuntimeTaskAgentUserDecisionResolveRequest,
 	RuntimeTaskAgentUserDecisionResolveResponse,
+	RuntimeTaskCardActionMoveBetweenNonTrashColumnsRequest,
+	RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse,
+	RuntimeTaskCardActionMoveIntoDoneRequest,
+	RuntimeTaskCardActionMoveIntoDoneResponse,
+	RuntimeTaskCardActionMoveIntoReviewRequest,
+	RuntimeTaskCardActionMoveIntoReviewResponse,
+	RuntimeTaskCardActionPermanentlyDeleteRequest,
+	RuntimeTaskCardActionPermanentlyDeleteResponse,
+	RuntimeTaskCardActionReadTaskCardWithBoardColumnRequest,
+	RuntimeTaskCardActionReadTaskCardWithBoardColumnResponse,
+	RuntimeTaskCardActionRestoreFromDoneRequest,
+	RuntimeTaskCardActionRestoreFromDoneResponse,
+	RuntimeTaskCardActionSetTaskPinboardPinStateRequest,
+	RuntimeTaskCardActionSetTaskPinboardPinStateResponse,
+	RuntimeTaskCardActionStartAgentSessionRequest,
+	RuntimeTaskCardActionStartAgentSessionResponse,
+	RuntimeTaskCardActionUpdateFieldValuesRequest,
+	RuntimeTaskCardActionUpdateFieldValuesResponse,
 	RuntimeTaskChatAbortRequest,
 	RuntimeTaskChatAbortResponse,
 	RuntimeTaskChatCancelRequest,
@@ -331,6 +347,24 @@ import {
 	runtimeSlashCommandsResponseSchema,
 	runtimeTaskAgentUserDecisionResolveRequestSchema,
 	runtimeTaskAgentUserDecisionResolveResponseSchema,
+	runtimeTaskCardActionMoveBetweenNonTrashColumnsRequestSchema,
+	runtimeTaskCardActionMoveBetweenNonTrashColumnsResponseSchema,
+	runtimeTaskCardActionMoveIntoDoneRequestSchema,
+	runtimeTaskCardActionMoveIntoDoneResponseSchema,
+	runtimeTaskCardActionMoveIntoReviewRequestSchema,
+	runtimeTaskCardActionMoveIntoReviewResponseSchema,
+	runtimeTaskCardActionPermanentlyDeleteRequestSchema,
+	runtimeTaskCardActionPermanentlyDeleteResponseSchema,
+	runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema,
+	runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema,
+	runtimeTaskCardActionRestoreFromDoneRequestSchema,
+	runtimeTaskCardActionRestoreFromDoneResponseSchema,
+	runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema,
+	runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema,
+	runtimeTaskCardActionStartAgentSessionRequestSchema,
+	runtimeTaskCardActionStartAgentSessionResponseSchema,
+	runtimeTaskCardActionUpdateFieldValuesRequestSchema,
+	runtimeTaskCardActionUpdateFieldValuesResponseSchema,
 	runtimeTaskChatAbortRequestSchema,
 	runtimeTaskChatAbortResponseSchema,
 	runtimeTaskChatCancelRequestSchema,
@@ -708,13 +742,8 @@ export interface RuntimeTrpcContext {
 			input: RuntimeAddBacklogTaskRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeAddBacklogTaskResponse>;
-		// 跨项目切换面板对「非当前打开项目」的卡置顶 / 取消置顶：runtime 在 board 锁内对最新 board 改写。
-		setTaskPinboardPinStateOfTaskCard: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: RuntimeSetTaskPinboardPinStateOfTaskCardRequest,
-			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
-		) => Promise<RuntimeSetTaskPinboardPinStateOfTaskCardResponse>;
-		// dd2db 1a.2b：`kanban task` 的 board 写动词统一入口（见 api-contract 的 runtimeKanbanCliTaskBoardMutationRequestSchema）。
+		// dd2db 1a.2b：`kanban task create` 的落盘入口（见 api-contract 的 runtimeKanbanCliTaskBoardMutationRequestSchema）。
+		// 其余 CLI 写动词已收编进 taskCardActionApi。
 		applyKanbanCliTaskBoardMutation: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeKanbanCliTaskBoardMutationRequest,
@@ -738,6 +767,53 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeGitCommitFileDiffPatchRequest,
 		) => Promise<RuntimeGitCommitFileDiffPatchResponse>;
+	};
+	// 看板卡片 per-card 动作的唯一服务端实现（src/trpc/task-card-action-api.ts）。浏览器与 CLI 都调它。
+	taskCardActionApi: {
+		readTaskCardWithBoardColumn: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionReadTaskCardWithBoardColumnRequest,
+		) => Promise<RuntimeTaskCardActionReadTaskCardWithBoardColumnResponse>;
+		startTaskCardAgentSessionMovingItIntoInProgress: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionStartAgentSessionRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionStartAgentSessionResponse>;
+		moveTaskCardIntoReviewByHandingTurnToUser: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionMoveIntoReviewRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionMoveIntoReviewResponse>;
+		moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionMoveBetweenNonTrashColumnsRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse>;
+		moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionMoveIntoDoneRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionMoveIntoDoneResponse>;
+		restoreTaskCardFromDoneIntoReviewResumingAgentSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionRestoreFromDoneRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionRestoreFromDoneResponse>;
+		permanentlyDeleteTaskCardsWithFullResourceCleanup: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionPermanentlyDeleteRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionPermanentlyDeleteResponse>;
+		updateTaskCardFieldValues: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionUpdateFieldValuesRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionUpdateFieldValuesResponse>;
+		setTaskPinboardPinStateOfTaskCard: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskCardActionSetTaskPinboardPinStateRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionSetTaskPinboardPinStateResponse>;
 	};
 	projectsApi: {
 		listProjects: (preferredWorkspaceId: string | null) => Promise<RuntimeProjectsResponse>;
@@ -1511,18 +1587,29 @@ export const runtimeAppRouter = t.router({
 					ctx.kanbanRequestOriginActorEvidence,
 				);
 			}),
+		// 旧入口，只为还没切到 taskCardAction 的浏览器构建保留一个版本：转发到唯一实现
+		// taskCardAction.setTaskPinboardPinStateOfTaskCard，再把响应收窄回旧形状（卡不存在 → taskCardFound:false）。
+		// 旧调用方只有跨项目切换面板的置顶按钮，恒为用户手势，所以转发时补上发起方——迁移前这里在账本里记成「缺标注」。
 		setTaskPinboardPinStateOfTaskCard: workspaceProcedure
 			.input(runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema)
 			.output(runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema)
 			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.setTaskPinboardPinStateOfTaskCard(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
+				try {
+					const response = await ctx.taskCardActionApi.setTaskPinboardPinStateOfTaskCard(
+						ctx.workspaceScope,
+						{ ...input, boardMutationInitiator: "web_ui_user_gesture" },
+						ctx.kanbanRequestOriginActorEvidence,
+					);
+					return { taskCardFound: true, boardWasSaved: response.boardWasSaved };
+				} catch (error) {
+					if (error instanceof TRPCError && error.code === "NOT_FOUND") {
+						return { taskCardFound: false, boardWasSaved: false };
+					}
+					throw error;
+				}
 			}),
-		// CLI 的 board 写动词（create / update / start 移列 / trash / delete）只经这里落盘：runtime 按请求头的
-		// CLI 行动者声明解析行动者后进入持久化漏斗。runtime 离线时 CLI 直接报错，不回退直接写盘（dd2db 1a.2b）。
+		// `kanban task create` 只经这里落盘：runtime 按请求头的 CLI 行动者声明解析行动者后进入持久化漏斗。
+		// runtime 离线时 CLI 直接报错，不回退直接写盘（dd2db 1a.2b）。其余 CLI 写动词走 taskCardAction.*。
 		applyKanbanCliTaskBoardMutation: workspaceProcedure
 			.input(runtimeKanbanCliTaskBoardMutationRequestSchema)
 			.output(runtimeKanbanCliTaskBoardMutationResponseSchema)
@@ -1565,6 +1652,96 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeGitCommitFileDiffPatchResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadCommitFileDiffPatch(ctx.workspaceScope, input);
+			}),
+	}),
+	// 看板卡片 per-card 动作（契约与错误语义见 api-contract 的 taskCardAction 一节）。全部 workspace-scoped：
+	// 作用于 x-kanban-workspace-id 指向的任意已注册项目，跨项目执行动作不需要切换浏览器当前项目。
+	taskCardAction: t.router({
+		readTaskCardWithBoardColumn: workspaceProcedure
+			.input(runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema)
+			.output(runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.taskCardActionApi.readTaskCardWithBoardColumn(ctx.workspaceScope, input);
+			}),
+		startTaskCardAgentSessionMovingItIntoInProgress: workspaceProcedure
+			.input(runtimeTaskCardActionStartAgentSessionRequestSchema)
+			.output(runtimeTaskCardActionStartAgentSessionResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.taskCardActionApi.startTaskCardAgentSessionMovingItIntoInProgress(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		moveTaskCardIntoReviewByHandingTurnToUser: workspaceProcedure
+			.input(runtimeTaskCardActionMoveIntoReviewRequestSchema)
+			.output(runtimeTaskCardActionMoveIntoReviewResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.taskCardActionApi.moveTaskCardIntoReviewByHandingTurnToUser(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects: workspaceProcedure
+			.input(runtimeTaskCardActionMoveBetweenNonTrashColumnsRequestSchema)
+			.output(runtimeTaskCardActionMoveBetweenNonTrashColumnsResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.taskCardActionApi.moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree: workspaceProcedure
+			.input(runtimeTaskCardActionMoveIntoDoneRequestSchema)
+			.output(runtimeTaskCardActionMoveIntoDoneResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.taskCardActionApi.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		restoreTaskCardFromDoneIntoReviewResumingAgentSession: workspaceProcedure
+			.input(runtimeTaskCardActionRestoreFromDoneRequestSchema)
+			.output(runtimeTaskCardActionRestoreFromDoneResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.taskCardActionApi.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		permanentlyDeleteTaskCardsWithFullResourceCleanup: workspaceProcedure
+			.input(runtimeTaskCardActionPermanentlyDeleteRequestSchema)
+			.output(runtimeTaskCardActionPermanentlyDeleteResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.taskCardActionApi.permanentlyDeleteTaskCardsWithFullResourceCleanup(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		updateTaskCardFieldValues: workspaceProcedure
+			.input(runtimeTaskCardActionUpdateFieldValuesRequestSchema)
+			.output(runtimeTaskCardActionUpdateFieldValuesResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.taskCardActionApi.updateTaskCardFieldValues(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		setTaskPinboardPinStateOfTaskCard: workspaceProcedure
+			.input(runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema)
+			.output(runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.taskCardActionApi.setTaskPinboardPinStateOfTaskCard(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
 			}),
 	}),
 	projects: t.router({
