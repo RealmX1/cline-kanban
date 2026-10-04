@@ -127,8 +127,11 @@ export default function App(): ReactElement {
 	const [isTaskChangesSidebarOpen, setIsTaskChangesSidebarOpen] = useState(false);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
 	const taskEditorResetRef = useRef<() => void>(() => {});
+	// useWorkspacePersistence 在本组件更下方才调用；切项目入口经这个 ref 先把旧项目防抖中的整板保存立刻发出。
+	const flushPendingWorkspaceStatePersistImmediatelyRef = useRef<() => void>(() => {});
 	const lastStreamErrorRef = useRef<string | null>(null);
 	const handleProjectSwitchStart = useCallback(() => {
+		flushPendingWorkspaceStatePersistImmediatelyRef.current();
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
@@ -141,6 +144,18 @@ export default function App(): ReactElement {
 	const streamedTaskSessionSummariesApplierRef = useRef<StreamedTaskSessionSummariesApplier | null>(null);
 	const handleStreamedTaskSessionSummaries = useCallback((summaries: RuntimeTaskSessionSummary[]) => {
 		streamedTaskSessionSummariesApplierRef.current?.(summaries);
+	}, []);
+	// 只在本地未保存的改动与远端改了同一张卡的同一个面、被以远端为准丢弃时提示；能逐卡合并的（含本地新建的卡）不提示。
+	const handleLocalUnsavedBoardChangesDiscardedByRemoteBoardChange = useCallback(() => {
+		showAppToast(
+			{
+				intent: "warning",
+				icon: "warning-sign",
+				message: "Workspace changed elsewhere. Synced latest state. Retry your last edit if needed.",
+				timeout: 5000,
+			},
+			"workspace-state-conflict",
+		);
 	}, []);
 	const {
 		currentProjectId,
@@ -339,14 +354,16 @@ export default function App(): ReactElement {
 		workspacePath,
 		workspaceGit,
 		workspaceRevision,
-		setWorkspaceRevision,
 		workspaceHydrationNonce,
+		latestWorkspaceBoardHydrationFromRuntime,
+		recordWorkspaceBoardSavedByRuntime,
 		isWorkspaceStateRefreshing,
 		isWorkspaceMetadataPending,
 		refreshWorkspaceState,
 		resetWorkspaceSyncState,
 	} = useWorkspaceSync({
 		currentProjectId: projectRuntimeWorkspaceId,
+		board,
 		streamedWorkspaceState,
 		streamedTaskSessionSummariesApplierRef,
 		hasNoProjects,
@@ -355,6 +372,8 @@ export default function App(): ReactElement {
 		setBoard,
 		setSessions,
 		setCanPersistWorkspaceState,
+		onLocalUnsavedBoardChangesDiscardedByRemoteBoardChange:
+			handleLocalUnsavedBoardChangesDiscardedByRemoteBoardChange,
 	});
 	// 看板上此刻存在的任务 id。Prompt Library 靠它认出归属任务已被删掉的孤儿条目——判据必须是**当下**
 	// 的看板，不能存进库里：trash 里的任务还能恢复，把一个会过期的判断固化进用户资产，任务一恢复它
@@ -479,20 +498,15 @@ export default function App(): ReactElement {
 		onClearWorkspace: handleClearWorkspaceNotifications,
 	});
 
-	// 跨 repo 点击通知定位 task：同项目直接选中；跨项目经 SW 中转定位既有目标项目标签页
-	// （无则新开深链标签页），本 tab 保持不动，仅机制不可用时降级为 in-tab 切项目。见 hook 内注释。
+	// 跨 repo 点击通知定位 task：同项目经统一入口选中（找不到卡时提示、不关 Focus）；跨项目经 SW 中转定位既有
+	// 目标项目标签页，本 tab 保持不动；没有开着目标项目的标签页、或机制不可用时，本 tab 原地切项目。见 hook 内注释。
 	const { focusNotificationTask } = useNotificationTaskFocusRouting({
 		currentProjectId,
 		isProjectSwitching,
 		navigationCurrentProjectId,
-		setSelectedTaskId,
 		openTaskInProjectInPlace: handleOpenTaskInProject,
 	});
-	useNotificationTaskFocus({
-		currentProjectId: navigationCurrentProjectId,
-		setSelectedTaskId,
-		openTaskInProjectInPlace: handleOpenTaskInProject,
-	});
+	useNotificationTaskFocus({ openTaskInProjectInPlace: handleOpenTaskInProject });
 
 	useEffect(() => {
 		replaceWorkspaceMetadata(workspaceMetadata);
@@ -773,17 +787,6 @@ export default function App(): ReactElement {
 			await saveWorkspaceState(input.workspaceId, input.payload),
 		[],
 	);
-	const handleWorkspaceStateConflict = useCallback(() => {
-		showAppToast(
-			{
-				intent: "warning",
-				icon: "warning-sign",
-				message: "Workspace changed elsewhere. Synced latest state. Retry your last edit if needed.",
-				timeout: 5000,
-			},
-			"workspace-state-conflict",
-		);
-	}, []);
 
 	// 终端面板上「对话从未建立」的出路之一：以卡片原 prompt 全新开局（服务端会为这次开局分配新的原生会话 id）。
 	// 面板只在人确认过 prompt 预览之后才调到这里。
@@ -802,20 +805,21 @@ export default function App(): ReactElement {
 		[board, startTaskSession],
 	);
 
-	useWorkspacePersistence({
+	const { flushPendingWorkspaceStatePersistImmediately } = useWorkspacePersistence({
 		board,
 		sessions,
 		currentProjectId: projectRuntimeWorkspaceId,
 		workspaceRevision,
 		hydrationNonce: workspaceHydrationNonce,
+		latestWorkspaceBoardHydrationFromRuntime,
 		canPersistWorkspaceState: canPersistWorkspaceState && !isCurrentProjectRuntimeUnavailable,
 		isDocumentVisible,
 		isWorkspaceStateRefreshing,
 		persistWorkspaceState: persistWorkspaceStateAsync,
 		refetchWorkspaceState: refreshWorkspaceState,
-		onWorkspaceRevisionChange: setWorkspaceRevision,
-		onWorkspaceStateConflict: handleWorkspaceStateConflict,
+		onWorkspaceBoardSavedByRuntime: recordWorkspaceBoardSavedByRuntime,
 	});
+	flushPendingWorkspaceStatePersistImmediatelyRef.current = flushPendingWorkspaceStatePersistImmediately;
 
 	useEffect(() => {
 		if (!streamError) {

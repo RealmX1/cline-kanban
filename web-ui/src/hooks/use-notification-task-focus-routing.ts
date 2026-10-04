@@ -1,4 +1,3 @@
-import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useRef } from "react";
 
 import { showAppToast } from "@/components/app-toaster";
@@ -7,7 +6,7 @@ import { requestWorkspaceTabFocusViaServiceWorker } from "@/utils/workspace-tab-
 
 // 应用内通知点击（铃铛面板 / 通知完整日志）定位 task 的「发送侧」路由，与「接收侧」
 // use-notification-task-focus.ts（监听 SW 转发的 focus-task-from-notification）成对：
-//  ① 同项目：本 tab 直接选中；
+//  ① 同项目：交给 openTaskInProjectInPlace 的同项目分支选中（找不到卡时提示、不清掉当前 Focus View）；
 //  ② 本 tab 正切向目标项目途中：交给原地跳转（它挂 pending、目标 board 加载出该任务后再选中）；
 //  ③ 真·跨项目：经 SW 中转定位既有目标项目标签页，本 tab 保持不动；没有开着目标项目的标签页、或机制
 //     不可用时，在本 tab **原地跳转**——与跨项目切换面板、Board Overview 走同一条
@@ -17,16 +16,9 @@ export function useNotificationTaskFocusRouting(input: {
 	currentProjectId: string | null;
 	isProjectSwitching: boolean;
 	navigationCurrentProjectId: string | null;
-	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	openTaskInProjectInPlace: (workspaceId: string, taskId: string) => void;
 }): { focusNotificationTask: (workspaceId: string, taskId: string) => void } {
-	const {
-		currentProjectId,
-		isProjectSwitching,
-		navigationCurrentProjectId,
-		setSelectedTaskId,
-		openTaskInProjectInPlace,
-	} = input;
+	const { currentProjectId, isProjectSwitching, navigationCurrentProjectId, openTaskInProjectInPlace } = input;
 
 	// 迟到降级守卫（两把锁，缺一不可）：分支③的 .then 回调最长 ~1.5s 后才 resolve
 	//（WORKSPACE_TAB_FOCUS_RESPONSE_TIMEOUT_MS 超时兜底），而降级会写 pending 并 in-tab
@@ -48,12 +40,12 @@ export function useNotificationTaskFocusRouting(input: {
 			latestFocusNotificationTaskInvocationTokenRef.current += 1;
 			const invocationTokenForThisNotificationClick = latestFocusNotificationTaskInvocationTokenRef.current;
 			const navigationCurrentProjectIdAtNotificationClickTime = navigationCurrentProjectId;
-			// ① 目标项目已在本 tab 完全落地（loaded 且非切换中）→ 直接选中——与下方 pending-effect
+			// ① 目标项目已在本 tab 完全落地（loaded 且非切换中）→ 交给统一入口的同项目分支选中——与下方 pending-effect
 			// 同轴（currentProjectId）。若只看 navigationCurrentProjectId（导航意图），切换在途时会
 			// 过早 setSelectedTaskId，随后被 useDetailTaskNavigation 切项目的 closeDetail 清掉且无
 			// pending 恢复，通知点击打不开详情。
 			if (workspaceId === currentProjectId && !isProjectSwitching) {
-				setSelectedTaskId(taskId);
+				openTaskInProjectInPlace(workspaceId, taskId);
 				return;
 			}
 			// ② 本 tab 的导航意图已指向目标（正切向目标项目途中）→ 原地跳转只挂 pending 待落地选中
@@ -101,7 +93,7 @@ export function useNotificationTaskFocusRouting(input: {
 				openTaskInProjectInPlace(workspaceId, taskId);
 			});
 		},
-		[currentProjectId, isProjectSwitching, navigationCurrentProjectId, setSelectedTaskId, openTaskInProjectInPlace],
+		[currentProjectId, isProjectSwitching, navigationCurrentProjectId, openTaskInProjectInPlace],
 	);
 
 	return { focusNotificationTask };

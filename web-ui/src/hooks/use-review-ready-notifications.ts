@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { buildProjectPathname } from "@/hooks/app-utils";
 import { notificationIntelligenceClient } from "@/runtime/notification-intelligence-query";
 import type {
 	RuntimeProjectSummary,
@@ -103,12 +104,15 @@ async function showReadyForReviewNotification(input: {
 	if (!canShowBrowserNotifications()) {
 		return false;
 	}
-	const notificationTag = `task-ready-for-review-${input.taskId}`;
+	// taskId 只在一个看板内唯一、跨项目会撞号：tag 带上 workspaceId，免得别的项目的同号任务通知互相替换。
+	const notificationTag = `task-ready-for-review-${input.workspaceId}-${input.taskId}`;
 	const notificationIcon = "/assets/icon-notification.png";
 	const data = {
 		taskId: input.taskId,
 		workspaceId: input.workspaceId,
-		workspacePathname: typeof window === "undefined" ? "/" : window.location.pathname,
+		// 目标项目的路径，而不是弹出通知的这个标签页自己的路径：就绪通知跨项目投递（任一标签页都可能替别的项目弹），
+		// SW 据此聚焦已经开着目标项目的标签页，而不是把弹通知的标签页原地切走（cf427）。
+		workspacePathname: buildProjectPathname(input.workspaceId),
 	};
 	if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
 		try {

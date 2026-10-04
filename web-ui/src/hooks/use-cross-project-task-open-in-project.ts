@@ -68,6 +68,11 @@ export function useCrossProjectTaskOpenInProject({
 					openBacklogTaskEditorRef.current(selection.card);
 					return;
 				}
+				if (!selection) {
+					// 选中一个看板上没有的 id 会让 Focus View 无卡可显、静默关掉——保持当前视图，如实提示（cf427）。
+					showAppToast({ intent: "warning", message: "That task is no longer on its project's board." });
+					return;
+				}
 				setSelectedTaskId(taskId);
 				return;
 			}

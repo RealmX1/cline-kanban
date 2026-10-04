@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -7,8 +7,13 @@ import { resolveAgentConversationSessionResumeAddressing } from "../../src/core/
 import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { applySessionFacets, SESSION_SUMMARY_SCHEMA_VERSION } from "../../src/core/session-activity";
 import { lockedFileSystem } from "../../src/fs/locked-file-system";
-import type { WorkspaceStateConflictError } from "../../src/state/workspace-state";
+import { removeTaskSessionSummariesOwnedByOtherWorkspaces } from "../../src/state/task-session-summaries-owned-by-other-workspaces-removal";
+import type {
+	AgentNativeConversationSessionIdentityPersistenceOutcome,
+	WorkspaceStateConflictError,
+} from "../../src/state/workspace-state";
 import {
+	getTaskWorktreesHomePath,
 	getWorkspacesRootPath,
 	listWorkspaceIndexEntries,
 	loadPersistedWorkspaceStateById,
@@ -667,6 +672,79 @@ describe.sequential("workspace-state integration", () => {
 	});
 });
 
+describe.sequential("别的项目串写进 sessions.json 的会话（cf427）", () => {
+	function createSessionSummaryWorkingIn(taskId: string, workspacePath: string): RuntimeTaskSessionSummary {
+		return { ...createSessionSummary(taskId), agentId: "codex", startedAt: 1, workspacePath };
+	}
+
+	it("整板保存只收本项目的会话；读取时隐藏盘上的外来条目，下一次写入把它们从盘上清掉", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const ownerRepository = createRepository(["owner-project"]);
+			const ownerContext = await loadWorkspaceContext(ownerRepository.repositoryPath);
+			const ownSummary = createSessionSummaryWorkingIn(
+				"own01",
+				join(getTaskWorktreesHomePath(), "own01", "owner-project"),
+			);
+			const foreignSummary = createSessionSummaryWorkingIn(
+				"frgn1",
+				join(getTaskWorktreesHomePath(), "frgn1", "other-project"),
+			);
+
+			// 1) 客户端（例如没刷新的旧 bundle）整板保存时夹带了别的项目的会话：不落盘。
+			const saved = await saveWorkspaceState(ownerRepository.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+				board: createBoard("owner"),
+				sessions: { own01: ownSummary, frgn1: foreignSummary },
+			});
+			expect(Object.keys(saved.sessions)).toEqual(["own01"]);
+			expect(Object.keys((await loadPersistedWorkspaceStateById(ownerContext.workspaceId)).sessions)).toEqual([
+				"own01",
+			]);
+
+			// 2) 部署前就已串写进盘的条目：读取（重启水合、快照）时隐藏。
+			const sessionsFilePath = join(getWorkspacesRootPath(), ownerContext.workspaceId, "sessions.json");
+			writeFileSync(sessionsFilePath, JSON.stringify({ own01: ownSummary, frgn1: foreignSummary }));
+			expect(Object.keys((await loadWorkspaceState(ownerRepository.repositoryPath)).sessions)).toEqual(["own01"]);
+
+			// 3) 下一次 board 写入（不带 sessions 的锁内变更）把它们从盘上清掉。
+			await mutateWorkspaceState(ownerRepository.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
+				board: state.board,
+				value: null,
+			}));
+			expect(Object.keys(JSON.parse(readFileSync(sessionsFilePath, "utf8")) as object)).toEqual(["own01"]);
+		});
+	});
+
+	it("Windows 上 inplace 任务的仓库与 task worktree 根跨盘符时保留其会话（relative() 返回绝对路径，不得按段误判）", () => {
+		const windowsTaskWorktreesHomePath = "C:\\Users\\dev\\.cline\\worktrees";
+		const sessions = {
+			"inplace-task-on-other-drive": createSessionSummaryWorkingIn(
+				"inplace-task-on-other-drive",
+				"D:\\repos\\owner-project",
+			),
+			"inplace-task-on-other-drive-subdirectory": createSessionSummaryWorkingIn(
+				"inplace-task-on-other-drive-subdirectory",
+				"D:\\repos\\owner-project\\web-ui",
+			),
+			own01: createSessionSummaryWorkingIn("own01", `${windowsTaskWorktreesHomePath}\\own01\\owner-project`),
+			frgn1: createSessionSummaryWorkingIn("frgn1", `${windowsTaskWorktreesHomePath}\\frgn1\\other-project`),
+		};
+		const removal = removeTaskSessionSummariesOwnedByOtherWorkspaces({
+			workspaceId: "owner-project",
+			workspaceRepositoryPath: "D:\\repos\\owner-project",
+			taskWorktreesHomePath: windowsTaskWorktreesHomePath,
+			sessions,
+			sessionWorkingDirectoryOwnershipPathOperations: win32,
+		});
+		// 同盘符的 worktree 判定照旧：只剔除别的仓库目录名下的 worktree 会话。
+		expect(removal.removedTaskSessionIdsOwnedByOtherWorkspaces).toEqual(["frgn1"]);
+		expect(Object.keys(removal.sessionsWithoutSummariesOwnedByOtherWorkspaces)).toEqual([
+			"inplace-task-on-other-drive",
+			"inplace-task-on-other-drive-subdirectory",
+			"own01",
+		]);
+	});
+});
+
 describe.sequential("原生会话身份的独立持久化", () => {
 	const nativeSessionIds = [
 		"aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
@@ -770,8 +848,8 @@ describe.sequential("原生会话身份的独立持久化", () => {
 					},
 				});
 				const confirmed = await loadPersistedWorkspaceStateById(context.workspaceId);
-				// 同身份的新确认必须推进磁盘水位；相同观察重试才是幂等操作。
-				expect(confirmed.revision).toBe(persisted.revision + 1);
+				// 同身份的新确认必须推进磁盘上的 observedAt 水位，但不推进 revision（cf427：否则每个 hook 都让客户端整板重水合）。
+				expect(confirmed.revision).toBe(persisted.revision);
 				expect(confirmed.sessions[sessionKeys[1]].agentNativeConversationSessionIdentity?.observedAt).toBe(999);
 				await api.ingest({
 					workspaceId: context.workspaceId,
@@ -828,7 +906,7 @@ describe.sequential("原生会话身份的独立持久化", () => {
 					summary.taskId,
 					() => summary,
 				),
-			).toBe(true);
+			).toBe("persisted_new_identity_and_invalidated_stale_snapshot_revision");
 			expect(
 				(await loadPersistedWorkspaceStateById(context.workspaceId)).sessions[summary.taskId]
 					.agentNativeConversationSessionIdentity,
@@ -843,6 +921,67 @@ describe.sequential("原生会话身份的独立持久化", () => {
 		});
 	});
 
+	it("同一身份的再次确认只推进 observedAt 水位，不推进 revision；之后的陈旧整板保存不会冲突也不回退水位", async () => {
+		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+			const repo = createRepository(["native-identity-reconfirmation"]);
+			const context = await loadWorkspaceContext(repo.repositoryPath);
+			await saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+				board: createBoard("identity"),
+				sessions: {},
+			});
+			const summary = createNativeSummary(sessionKeys[0], nativeSessionIds[0]);
+			expect(
+				await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+					context.workspaceId,
+					summary.taskId,
+					() => summary,
+				),
+			).toBe("persisted_new_identity_and_invalidated_stale_snapshot_revision");
+			// 浏览器在这一刻拿到的快照：之后它会带着这份 sessions 与 revision 发起整板保存。
+			const snapshotHeldByBrowser = await loadPersistedWorkspaceStateById(context.workspaceId);
+			const reconfirmedSummary: RuntimeTaskSessionSummary = {
+				...summary,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "codex",
+					nativeSessionId: nativeSessionIds[0],
+					transcriptPath: null,
+					observedAt: 50,
+				},
+			};
+			expect(
+				await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+					context.workspaceId,
+					summary.taskId,
+					() => reconfirmedSummary,
+				),
+			).toBe("persisted_reconfirmed_identity_observation_time_without_revision_change");
+			const afterReconfirmation = await loadPersistedWorkspaceStateById(context.workspaceId);
+			expect(afterReconfirmation.revision).toBe(snapshotHeldByBrowser.revision);
+			expect(afterReconfirmation.sessions[summary.taskId].agentNativeConversationSessionIdentity?.observedAt).toBe(
+				50,
+			);
+			expect(
+				await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+					context.workspaceId,
+					summary.taskId,
+					() => reconfirmedSummary,
+				),
+			).toBe("already_persisted_without_write");
+
+			// 陈旧快照照常保存成功（revision 没被再确认推走），但盘上较新的 observedAt 水位保留。
+			const saved = await saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+				board: snapshotHeldByBrowser.board,
+				sessions: snapshotHeldByBrowser.sessions,
+				expectedRevision: snapshotHeldByBrowser.revision,
+			});
+			expect(saved.revision).toBe(snapshotHeldByBrowser.revision + 1);
+			expect(
+				(await loadPersistedWorkspaceStateById(context.workspaceId)).sessions[summary.taskId]
+					.agentNativeConversationSessionIdentity?.observedAt,
+			).toBe(50);
+		});
+	});
+
 	it("锁内读取最新身份，并发保存不同会话及看板不丢修改", async () => {
 		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
 			const repo = createRepository(["native-identity-concurrent"]);
@@ -852,7 +991,9 @@ describe.sequential("原生会话身份的独立持久化", () => {
 				sessions: {},
 			});
 			let summary = createNativeSummary(sessionKeys[1], nativeSessionIds[0]);
-			let queuedPersistence: Promise<boolean> = Promise.resolve(false);
+			let queuedPersistence: Promise<AgentNativeConversationSessionIdentityPersistenceOutcome> = Promise.resolve(
+				"already_persisted_without_write",
+			);
 			await lockedFileSystem.withLock(
 				{
 					type: "directory",

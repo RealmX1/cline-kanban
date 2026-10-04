@@ -73,6 +73,7 @@ import {
 import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
 import { applyKanbanCliTaskBoardMutation } from "./kanban-cli-task-board-mutation-api";
+import { persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart } from "./web-ui-new-backlog-task-card-persistence-before-agent-session-start-api";
 
 const TASK_WORKSPACE_GIT_STATUS_BATCH_CONCURRENCY_LIMIT = 4;
 const taskWorkspaceGitStatusBatchConcurrencyLimiter = pLimit(TASK_WORKSPACE_GIT_STATUS_BATCH_CONCURRENCY_LIMIT);
@@ -792,6 +793,22 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				void deps.broadcastRuntimeProjectsUpdated(workspaceScope.workspaceId);
 			}
 			return { taskCardFound: mutationResponse.value.taskCardFound, boardWasSaved: mutationResponse.saved };
+		},
+		persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: async (
+			workspaceScope,
+			input,
+			kanbanRequestOriginActorEvidence,
+		) => {
+			return await persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart(
+				{
+					broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
+					broadcastRuntimeProjectsUpdated: deps.broadcastRuntimeProjectsUpdated,
+					kanbanActorResolutionLookups: deps.kanbanActorResolutionLookups,
+				},
+				workspaceScope,
+				input,
+				kanbanRequestOriginActorEvidence,
+			);
 		},
 		applyKanbanCliTaskBoardMutation: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
 			return await applyKanbanCliTaskBoardMutation(

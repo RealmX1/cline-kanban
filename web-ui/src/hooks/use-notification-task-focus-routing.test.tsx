@@ -1,4 +1,3 @@
-import type { Dispatch, SetStateAction } from "react";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,7 +35,6 @@ interface HarnessInput {
 	currentProjectId: string | null;
 	isProjectSwitching: boolean;
 	navigationCurrentProjectId: string | null;
-	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	openTaskInProjectInPlace: (workspaceId: string, taskId: string) => void;
 }
 
@@ -53,7 +51,6 @@ describe("useNotificationTaskFocusRouting", () => {
 	let root: Root | null;
 	let previousActEnvironment: boolean | undefined;
 	let windowOpenSpy: ReturnType<typeof vi.spyOn>;
-	let setSelectedTaskId: ReturnType<typeof vi.fn<Dispatch<SetStateAction<string | null>>>>;
 	let openTaskInProjectInPlace: ReturnType<typeof vi.fn<(workspaceId: string, taskId: string) => void>>;
 
 	beforeEach(() => {
@@ -63,7 +60,6 @@ describe("useNotificationTaskFocusRouting", () => {
 		requestWorkspaceTabFocusViaServiceWorkerMock.mockReset();
 		showAppToastMock.mockReset();
 		windowOpenSpy = vi.spyOn(window, "open").mockReturnValue({} as Window);
-		setSelectedTaskId = vi.fn<Dispatch<SetStateAction<string | null>>>();
 		openTaskInProjectInPlace = vi.fn<(workspaceId: string, taskId: string) => void>();
 		latestFocusNotificationTask = null;
 		container = document.createElement("div");
@@ -95,7 +91,6 @@ describe("useNotificationTaskFocusRouting", () => {
 					currentProjectId: "project-a",
 					isProjectSwitching: false,
 					navigationCurrentProjectId: "project-a",
-					setSelectedTaskId,
 					openTaskInProjectInPlace,
 					...input,
 				}),
@@ -109,13 +104,12 @@ describe("useNotificationTaskFocusRouting", () => {
 		});
 	}
 
-	it("分支①：目标项目已在本 tab 落地 → 直接选中，不发 SW 请求", async () => {
+	it("分支①：目标项目已在本 tab 落地 → 交给统一入口的同项目分支选中（找不到卡时提示、不关 Focus），不发 SW 请求", async () => {
 		renderHook();
 		await invokeFocusNotificationTask("project-a", "task-1");
 
-		expect(setSelectedTaskId).toHaveBeenCalledWith("task-1");
+		expect(openTaskInProjectInPlace).toHaveBeenCalledWith("project-a", "task-1");
 		expect(requestWorkspaceTabFocusViaServiceWorkerMock).not.toHaveBeenCalled();
-		expect(openTaskInProjectInPlace).not.toHaveBeenCalled();
 	});
 
 	it("分支②：本 tab 正切向目标项目途中 → 交给原地跳转挂 pending，不发 SW 请求", async () => {
@@ -123,7 +117,6 @@ describe("useNotificationTaskFocusRouting", () => {
 		await invokeFocusNotificationTask("project-b", "task-2");
 
 		expect(openTaskInProjectInPlace).toHaveBeenCalledWith("project-b", "task-2");
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
 		expect(requestWorkspaceTabFocusViaServiceWorkerMock).not.toHaveBeenCalled();
 	});
 
@@ -137,7 +130,6 @@ describe("useNotificationTaskFocusRouting", () => {
 			taskId: "task-3",
 			workspacePathname: "/project-b",
 		});
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
 		expect(openTaskInProjectInPlace).not.toHaveBeenCalled();
 		expect(windowOpenSpy).not.toHaveBeenCalled();
 		expect(showAppToastMock).not.toHaveBeenCalled();
@@ -149,7 +141,6 @@ describe("useNotificationTaskFocusRouting", () => {
 		await invokeFocusNotificationTask("project-b", "task-4");
 
 		expect(showAppToastMock).toHaveBeenCalledTimes(1);
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
 		expect(openTaskInProjectInPlace).not.toHaveBeenCalled();
 		expect(windowOpenSpy).not.toHaveBeenCalled();
 	});
@@ -161,7 +152,6 @@ describe("useNotificationTaskFocusRouting", () => {
 
 		expect(openTaskInProjectInPlace).toHaveBeenCalledWith("project-b", "task-5");
 		expect(windowOpenSpy).not.toHaveBeenCalled();
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
 	});
 
 	it("分支③ mechanism-unavailable（无 controller / 旧 SW 超时）→ 本 tab 原地跳转", async () => {
@@ -171,7 +161,6 @@ describe("useNotificationTaskFocusRouting", () => {
 
 		expect(openTaskInProjectInPlace).toHaveBeenCalledWith("project-b", "task-7");
 		expect(windowOpenSpy).not.toHaveBeenCalled();
-		expect(setSelectedTaskId).not.toHaveBeenCalled();
 	});
 
 	it("分支③ 迟到守卫（token 锁）：SW 超时窗口内又点击了新通知 → 迟到的原地跳转被否决", async () => {

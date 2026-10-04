@@ -53,6 +53,8 @@ import type {
 	RuntimeRunUpdateResponse,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskChatSendResponse,
+	RuntimeTaskSessionStartRequest,
+	RuntimeTaskSessionStartResponse,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -108,6 +110,7 @@ import { recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlo
 import { createAgentRaisedPendingUserDecisionAnswerDelivery } from "../server/agent-raised-pending-user-decision-answer-delivery";
 import { openInBrowser } from "../server/browser";
 import type { QueuedTaskPromptDeliveryDispatcher } from "../server/queued-task-prompt-delivery-dispatcher";
+import { resolveSessionCategoryAndAttributedTaskCardId } from "../server/task-resource-usage-attribution-root-enumeration";
 import {
 	dismissAgentRaisedPendingUserDecision,
 	isOpenAgentRaisedPendingUserDecision,
@@ -277,6 +280,27 @@ function findWorkspaceBoardCard(board: RuntimeBoardData, taskId: string): Runtim
 		}
 	}
 	return null;
+}
+
+// cf427 启动门：卡片会话（主会话 / By the way 侧问）的宿主卡必须已在**盘上** board 里才放行，返回缺席的那张卡的 id。
+// 浏览器建卡是乐观的，卡片曾只活在浏览器内存里就照常启动了 agent；之后一次整板重水合抹掉卡片，会话就成了
+// 搜不到、进不了 Focus 的孤儿。这道门对所有客户端成立，包括没刷新的旧 bundle 与其他设备。
+// 不属于任何卡片的会话（home 侧边栏 agent、shell 终端）不受影响。
+async function findHostTaskCardIdNotYetPersistedOnWorkspaceBoard(
+	workspaceId: string,
+	startRequest: Pick<RuntimeTaskSessionStartRequest, "taskId" | "workspaceTaskId" | "taskConversationSessionMetadata">,
+): Promise<string | null> {
+	const { attributedTaskCardId } = resolveSessionCategoryAndAttributedTaskCardId({
+		taskId: startRequest.taskId,
+		taskConversationSessionMetadata: startRequest.taskConversationSessionMetadata,
+	});
+	if (attributedTaskCardId === null) {
+		return null;
+	}
+	// 与下方 cwd 解析同一口径：显式的 workspaceTaskId 就是宿主卡。
+	const hostTaskCardId = startRequest.workspaceTaskId ?? attributedTaskCardId;
+	const persistedBoard = await loadWorkspaceBoardById(workspaceId);
+	return findWorkspaceBoardCard(persistedBoard, hostTaskCardId) ? null : hostTaskCardId;
 }
 
 // 恢复既有对话（终端 agent 的「Restart terminal session」与从 trash 拖回，两者都走 `--continue`）时，
@@ -703,6 +727,50 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const body = parseTaskSessionStartRequest(input);
 				diagnosticTaskId = body.taskId;
 				requestedAgentIdForDiagnostics = body.agentId ?? null;
+				startFailurePhase = "verify_host_task_card_persisted_on_workspace_board";
+				const hostTaskCardIdNotYetPersistedOnWorkspaceBoard =
+					await findHostTaskCardIdNotYetPersistedOnWorkspaceBoard(workspaceScope.workspaceId, body);
+				if (hostTaskCardIdNotYetPersistedOnWorkspaceBoard !== null) {
+					const message = `Task card "${hostTaskCardIdNotYetPersistedOnWorkspaceBoard}" is not saved on the workspace board yet, so its agent session was not started. Wait for the card to be saved, then start it again.`;
+					recordStartDiagnostic("failed", startFailurePhase, message);
+					return {
+						ok: false,
+						summary: null,
+						error: message,
+						taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+					};
+				}
+				// cf427 启动门的第二道核对（会话启动之后）。上面那次读盘到真正 spawn 之间隔着配置加载、worktree 准备
+				// （可能数秒）与 transport 启动；这段时间里别的客户端删卡时还看不到会话（它的 stopTaskSession 落空），
+				// 会照常删掉卡片，而之后把 agentId 回写卡片的 mutate 对缺卡静默 no-op——会话又成了搜不到、进不了
+				// Focus 的孤儿。所以会话登记进各自的会话管理器之后再读一次盘：此后的删卡方必能经 stopTaskSession
+				// 看到并停掉它；若此刻宿主卡已不在盘上，就由本请求按 transport 停掉刚启动的会话，以同一拒绝原因回 ok:false。
+				// 不属于任何卡片的会话（home 侧边栏 agent、shell 终端）在 find… 里直接放行，不受影响。
+				const stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart = async (
+					stopJustStartedTaskSessionThroughItsTransport: () => Promise<unknown>,
+				): Promise<RuntimeTaskSessionStartResponse | null> => {
+					startFailurePhase = "reverify_host_task_card_persisted_on_workspace_board_after_session_start";
+					let hostTaskCardIdRemovedFromWorkspaceBoardDuringStart: string | null;
+					try {
+						hostTaskCardIdRemovedFromWorkspaceBoardDuringStart =
+							await findHostTaskCardIdNotYetPersistedOnWorkspaceBoard(workspaceScope.workspaceId, body);
+					} catch {
+						// 读盘失败 = 无法确定卡片已被删：保留已启动的会话照常返回，绝不因核对本身失败误停合法会话。
+						return null;
+					}
+					if (hostTaskCardIdRemovedFromWorkspaceBoardDuringStart === null) {
+						return null;
+					}
+					await stopJustStartedTaskSessionThroughItsTransport();
+					const message = `Task card "${hostTaskCardIdRemovedFromWorkspaceBoardDuringStart}" was removed from the workspace board while its agent session was starting, so the session was stopped.`;
+					recordStartDiagnostic("failed", startFailurePhase, message);
+					return {
+						ok: false,
+						summary: null,
+						error: message,
+						taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
+					};
+				};
 				if (body.resumeFromTrash) {
 					deps.broadcastTaskChatCleared?.(workspaceScope.workspaceId, body.taskId);
 				}
@@ -863,6 +931,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						return { ok: false, summary: acpSummary, error: acpStartFailureMessage };
 					}
 					recordStartDiagnostic("runtime_started", startFailurePhase);
+					const acpStartRejectedBecauseHostTaskCardRemovedDuringStart =
+						await stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart(
+							async () => await acpTaskSessionService.stopTaskSession(body.taskId),
+						);
+					if (acpStartRejectedBecauseHostTaskCardRemovedDuringStart) {
+						return acpStartRejectedBecauseHostTaskCardRemovedDuringStart;
+					}
 					await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
 						workspaceScope,
 						taskId: body.taskId,
@@ -962,6 +1037,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					});
 					latestStartedSummaryForDiagnostics = summary;
 					recordStartDiagnostic("runtime_started", startFailurePhase);
+					const clineStartRejectedBecauseHostTaskCardRemovedDuringStart =
+						await stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart(
+							async () => await clineTaskSessionService.stopTaskSession(body.taskId),
+						);
+					if (clineStartRejectedBecauseHostTaskCardRemovedDuringStart) {
+						return clineStartRejectedBecauseHostTaskCardRemovedDuringStart;
+					}
 					// 记 summary 的 agentId 而不是 effectiveAgentId：`shouldProbePersistedClineSession` 那条
 					// 分支会在 effectiveAgentId 仍是别的 agent 时把 useClinePath 翻成 true，此时真正跑起来的
 					// 是 Cline，卡片上必须记下这个事实。
@@ -1064,6 +1146,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				);
 				latestStartedSummaryForDiagnostics = summary;
 				recordStartDiagnostic("runtime_started", startFailurePhase);
+				const terminalStartRejectedBecauseHostTaskCardRemovedDuringStart =
+					await stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart(async () =>
+						terminalManager.stopTaskSession(body.taskId),
+					);
+				if (terminalStartRejectedBecauseHostTaskCardRemovedDuringStart) {
+					return terminalStartRejectedBecauseHostTaskCardRemovedDuringStart;
+				}
 				await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
 					workspaceScope,
 					taskId: body.taskId,

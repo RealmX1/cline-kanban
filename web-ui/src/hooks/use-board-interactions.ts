@@ -29,6 +29,7 @@ import {
 	removeTask,
 	updateTask,
 } from "@/state/board-state";
+import { waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
 import {
 	recordWebUiBoardMutationInitiatorForTaskCardAspect,
 	recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards,
@@ -375,6 +376,18 @@ export function useBoardInteractions({
 				? beginTaskAgentSessionStartRequestInFlight(currentProjectId, taskId)
 				: null;
 			try {
+				// cf427：本页面刚建的卡先等 runtime 确认落盘再启动。卡片只活在浏览器内存里时启动的 agent，
+				// 一旦卡片被整板重水合抹掉就成了孤儿会话；runtime 的 startTaskSession 也有同义的门。
+				if (currentProjectId) {
+					const persisted = await waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart({
+						workspaceId: currentProjectId,
+						taskCard: task,
+					});
+					if (!persisted.ok) {
+						notifyError(`Could not save the new task card, so its agent was not started: ${persisted.message}`);
+						return false;
+					}
+				}
 				const ensured = await ensureTaskWorkspace(task);
 				if (!ensured.ok) {
 					notifyError(ensured.message ?? "Could not set up task workspace.");

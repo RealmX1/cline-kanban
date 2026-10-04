@@ -44,6 +44,7 @@ import {
 	saveUserInterfacePreferencesSharedAcrossBrowserOrigins,
 } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
 import { addTaskToColumnWithResult, findCardSelection, updateTask, updateTaskTitle } from "@/state/board-state";
+import { beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
 import {
 	recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards,
 	withWebUiBoardMutationInitiatorRecordedForChangedTaskCards,
@@ -1008,6 +1009,14 @@ export function useTaskEditor({
 				boardMutationInitiator: "web_ui_user_gesture",
 			});
 			setBoard(created.board);
+			// cf427：乐观插入之外立刻让 runtime 落盘，启动 agent 前等它确认（见该登记模块顶部注释）。
+			if (currentProjectId) {
+				beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart({
+					workspaceId: currentProjectId,
+					newBacklogTaskCardsCreatedFromWebUi: [created.task],
+					boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+				});
+			}
 			if (!explicitTaskName) {
 				backfillSuggestedTaskTitleForCreatedTask(created.task.id, prompt, created.task.title);
 			}
@@ -1132,6 +1141,18 @@ export function useTaskEditor({
 				boardMutationInitiator: "web_ui_user_gesture",
 			});
 			setBoard(updatedBoard);
+			// 同 handleCreateTask：一次请求落盘整批新卡，顺序取本地 backlog 列自上而下的顺序。
+			if (currentProjectId && createdTaskIds.length > 0) {
+				const createdTaskIdSet = new Set(createdTaskIds);
+				beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart({
+					workspaceId: currentProjectId,
+					newBacklogTaskCardsCreatedFromWebUi:
+						updatedBoard.columns
+							.find((column) => column.id === "backlog")
+							?.cards.filter((card) => createdTaskIdSet.has(card.id)) ?? [],
+					boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+				});
+			}
 			writeMostRecentlyUsedTaskCreateBaseRefForProject(currentProjectId, baseRef);
 			for (const prompt of validPrompts) {
 				trackTaskCreated({

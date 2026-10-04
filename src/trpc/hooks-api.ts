@@ -229,10 +229,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 							taskId,
 							body.agentNativeConversationSessionIdentity,
 						);
-						const saved = await persistNativeConversationIdentity(workspaceId, taskId, () =>
+						const identityPersistenceOutcome = await persistNativeConversationIdentity(workspaceId, taskId, () =>
 							manager.getSummary(taskId),
 						);
-						if (saved) {
+						// 只有 revision 推进了才需要让客户端换新快照；再确认的 observedAt 由 task_sessions_updated 送达，
+						// 每个 hook 都广播整份快照会让所有客户端反复整板重水合。
+						if (identityPersistenceOutcome === "persisted_new_identity_and_invalidated_stale_snapshot_revision") {
 							void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
 						}
 					} catch (error) {

@@ -3,7 +3,10 @@ import { z } from "zod";
 // bundle-safe：session-activity 是零 Node 依赖的纯函数模块，其对 api-contract 仅 type-only import
 // （编译期擦除），故二者无运行时循环；本处取值 import 不会把任何 Node 依赖拖进浏览器 bundle。
 import { isKanbanCursorAgentModelId } from "./cursor-agent-models.js";
-import { webUiBoardMutationInitiatorAnnotationForTaskMutationEventCaptureSchema } from "./kanban-web-ui-page-load-request-origin-nonce.js";
+import {
+	webUiBoardMutationInitiatorAnnotationForTaskMutationEventCaptureSchema,
+	webUiBoardMutationInitiatorSchema,
+} from "./kanban-web-ui-page-load-request-origin-nonce.js";
 import { projectLegacyState } from "./session-activity.js";
 import { resolveTaskTitle } from "./task-title.js";
 
@@ -1091,6 +1094,19 @@ export const runtimeAddBacklogTaskResponseSchema = z.object({
 	taskId: z.string(),
 });
 export type RuntimeAddBacklogTaskResponse = z.infer<typeof runtimeAddBacklogTaskResponseSchema>;
+
+// cf427：Web UI 建卡后立刻让 runtime 在 board 锁内把新卡写进**最新**盘上 board（不走整板 CAS），
+// 浏览器拿到确认后才放行 agent 启动。此前新卡只活在浏览器内存里等 120ms 防抖的整板保存，期间任何
+// revision 变化引起的整板重水合都会把它抹掉，而照常启动的 agent 就成了没有卡片的孤儿会话。
+// 卡片由浏览器组好（id 来自 runtime 预取的分配池）；同 id 的卡已在盘上时幂等跳过，供重试与「整板保存先到」两种情况。
+export const runtimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequestSchema = z.object({
+	// 按浏览器本地 backlog 列里自上而下的顺序；runtime 把其中尚未落盘的卡整块插到 backlog 顶部。
+	newBacklogTaskCardsCreatedFromWebUi: z.array(runtimeBoardCardSchema).min(1),
+	boardMutationInitiatorOfNewBacklogTaskCards: webUiBoardMutationInitiatorSchema,
+});
+export type RuntimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequest = z.infer<
+	typeof runtimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequestSchema
+>;
 
 // ---------------------------------------------------------------------------------------------
 // dd2db 1a.2b：`kanban task` 的 board 写动词（create / update / start 移列 / trash / delete）全部改走
@@ -3186,10 +3202,19 @@ export const runtimeAvailableAgentSessionsResponseSchema = z.object({
 });
 export type RuntimeAvailableAgentSessionsResponse = z.infer<typeof runtimeAvailableAgentSessionsResponseSchema>;
 
+// 启动被 runtime 有意拒绝时的机器可读原因（error 仍是给人看的文案）。
+export const runtimeTaskSessionStartRejectionReasonSchema = z.enum([
+	// cf427：卡片会话（主会话 / By the way 侧问）的宿主卡还不在盘上 board 里。放行的话 agent 照常跑，
+	// 卡片却可能永远落不了盘（浏览器整板重水合把它抹掉），会话就成了搜不到、进不了 Focus 的孤儿。
+	"task_card_not_yet_persisted_on_workspace_board",
+]);
+export type RuntimeTaskSessionStartRejectionReason = z.infer<typeof runtimeTaskSessionStartRejectionReasonSchema>;
+
 export const runtimeTaskSessionStartResponseSchema = z.object({
 	ok: z.boolean(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
 	error: z.string().optional(),
+	taskSessionStartRejectionReason: runtimeTaskSessionStartRejectionReasonSchema.optional(),
 });
 export type RuntimeTaskSessionStartResponse = z.infer<typeof runtimeTaskSessionStartResponseSchema>;
 

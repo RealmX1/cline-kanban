@@ -34,6 +34,14 @@ vi.mock("@/hooks/use-programmatic-card-moves", () => ({
 	useProgrammaticCardMoves: useProgrammaticCardMovesMock,
 }));
 
+// cf427：启动前等「本页面新建的卡已被 runtime 确认落盘」。缺省放行；个别用例改成落盘失败。
+const waitForNewTaskCardPersistedByRuntimeMock = vi.hoisted(() =>
+	vi.fn(async (): Promise<{ ok: true } | { ok: false; message: string }> => ({ ok: true })),
+);
+vi.mock("@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start", () => ({
+	waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart: waitForNewTaskCardPersistedByRuntimeMock,
+}));
+
 vi.mock("@/hooks/use-review-auto-actions", () => ({
 	useReviewAutoActions: () => ({}) as ReturnType<typeof useBoardInteractions>,
 }));
@@ -483,6 +491,46 @@ describe("useBoardInteractions", () => {
 			expect(snapshot![key], key).toBe(first[key]);
 		act(() => first.handleOpenDeleteTask("task-1"));
 		expect(snapshot!.deleteTaskTarget?.title).toBe("最新标题");
+	});
+
+	it("does not set up the worktree or start the agent when the new card could not be saved by the runtime (cf427)", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		mockUnavailableProgrammaticCardMoves();
+		mockNoopMoveTaskToDoneWithSessionStopAndWorkspaceCleanup();
+		waitForNewTaskCardPersistedByRuntimeMock.mockResolvedValueOnce({ ok: false, message: "runtime unreachable" });
+		const board = createBoardWithTaskInColumn("task-1", "in_progress");
+		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>();
+		const ensureTaskWorkspace = vi.fn(async () => ({
+			ok: true as const,
+			response: { ok: true as const, path: "/tmp/task-1", baseRef: "main", baseCommit: "abc123" },
+		}));
+		const startTaskSession = vi.fn(async () => ({ ok: true as const }));
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					setBoard={setBoard}
+					ensureTaskWorkspace={ensureTaskWorkspace}
+					startTaskSession={startTaskSession}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			(latestSnapshot as HookSnapshot | null)?.handleStartTask("task-1");
+		});
+
+		expect(waitForNewTaskCardPersistedByRuntimeMock).toHaveBeenCalledWith({
+			workspaceId: "project-1",
+			taskCard: expect.objectContaining({ id: "task-1" }),
+		});
+		expect(ensureTaskWorkspace).not.toHaveBeenCalled();
+		expect(startTaskSession).not.toHaveBeenCalled();
+		expect(notifyErrorMock).toHaveBeenCalledWith(expect.stringContaining("runtime unreachable"));
 	});
 
 	it("retries an In Progress task in place when no session was created", async () => {
