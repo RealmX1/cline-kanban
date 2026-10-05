@@ -8,19 +8,67 @@ import {
 	collectCrossProjectTaskSwitcherEntriesInProjects,
 	collectUnreadHandoffEntryKeysFromNotificationLog,
 } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
-import type { RuntimeCrossProjectTaskSwitcherEntry, RuntimeProjectSummary } from "@/runtime/types";
+import type {
+	RuntimeCrossProjectTaskSwitcherEntry,
+	RuntimeProjectSummary,
+	RuntimeTaskWorkspaceMetadata,
+} from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import { resetCrossProjectTaskSwitcherPanelViewContinuity } from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
+import { resetCrossProjectTaskWorktreeGitMetadataStore } from "@/stores/cross-project-task-worktree-git-metadata-store";
+import { clearAllTaskCardActionCommandsInFlight } from "@/stores/task-card-action-commands-in-flight-store";
+import { replaceWorkspaceMetadata, resetWorkspaceMetadataStore } from "@/stores/workspace-metadata-store";
 
 // 跨项目切换面板（docs/context-cross-project-recently-active-task-switcher.md）的渲染契约：四个区、Running 默认收起、
 // Pinned 与下方区重复、点击走宿主的跨项目打开、对非当前项目的卡取消置顶走 runtime。
 
-const setTaskPinboardPinStateOfTaskCardInProject = vi.hoisted(() => vi.fn());
+const setTaskPinboardPinStateOfTaskCardInWorkspace = vi.hoisted(() => vi.fn());
+const readTaskCardWithBoardColumnInWorkspace = vi.hoisted(() => vi.fn());
+const moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace = vi.hoisted(() => vi.fn());
+vi.mock("@/runtime/task-card-action-query", () => ({
+	setTaskPinboardPinStateOfTaskCardInWorkspace,
+	readTaskCardWithBoardColumnInWorkspace,
+	moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace,
+}));
 const fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon = vi.hoisted(() => vi.fn());
 vi.mock("@/runtime/cross-project-recently-active-task-switcher-query", () => ({
-	setTaskPinboardPinStateOfTaskCardInProject,
 	fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon,
 }));
+const fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries = vi.hoisted(() => vi.fn());
+vi.mock("@/runtime/cross-project-task-worktree-git-metadata-query", () => ({
+	fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries,
+}));
+
+function makeTaskWorkspaceMetadata(
+	taskId: string,
+	counts: { ahead: number; behind: number; changedFiles: number; additions: number; deletions: number },
+): RuntimeTaskWorkspaceMetadata {
+	return {
+		taskId,
+		path: `/worktrees/${taskId}`,
+		exists: true,
+		baseRef: "main",
+		baseCommit: null,
+		commitsAheadOfBaseRef: counts.ahead,
+		commitsBehindBaseRef: counts.behind,
+		workspaceGitStatus: {
+			baseRef: "main",
+			commitsAheadOfBaseRef: counts.ahead,
+			commitsBehindBaseRef: counts.behind,
+			taskCommitsIntegratedIntoBaseRef: 0,
+			taskCommitIntegrationTrackingStatus: "complete",
+			observationSource: "live_worktree",
+			observedAt: 1,
+		},
+		branch: null,
+		isDetached: true,
+		headCommit: "abc",
+		changedFiles: counts.changedFiles,
+		additions: counts.additions,
+		deletions: counts.deletions,
+		stateVersion: 1,
+	};
+}
 
 const NOW_MS = Date.now();
 const DAY_MS = 24 * 60 * 60_000;
@@ -107,13 +155,20 @@ beforeEach(() => {
 	(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 	window.localStorage.clear();
 	resetCrossProjectTaskSwitcherPanelViewContinuity();
-	setTaskPinboardPinStateOfTaskCardInProject.mockReset();
-	setTaskPinboardPinStateOfTaskCardInProject.mockResolvedValue({ taskCardFound: true, boardWasSaved: true });
+	setTaskPinboardPinStateOfTaskCardInWorkspace.mockReset();
+	setTaskPinboardPinStateOfTaskCardInWorkspace.mockResolvedValue({ boardWasSaved: true });
+	readTaskCardWithBoardColumnInWorkspace.mockReset();
+	moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace.mockReset();
+	clearAllTaskCardActionCommandsInFlight();
 	fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon.mockReset();
 	fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon.mockResolvedValue({
 		activityHorizonMs: EXTENDED_ACTIVITY_HORIZON_MS,
 		projects: [],
 	});
+	fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockReset();
+	fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockResolvedValue({ tasks: [] });
+	resetCrossProjectTaskWorktreeGitMetadataStore();
+	resetWorkspaceMetadataStore();
 	container = document.createElement("div");
 	document.body.appendChild(container);
 	root = createRoot(container);
@@ -216,6 +271,121 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(countdownTitle).toContain("last main-conversation model request");
 	});
 
+	// 用户拍板 B′（2026-10-05）：手动 /compact 后留在 Cache warm，但不显示倒计时，改显示「已压缩」。
+	it("手动压缩后的行留在 Cache warm，显示 Compacted 而不是倒计时；harness 报了大小就带 ~N k", () => {
+		function compactedEntry(taskId: string, contextTokenCount?: number) {
+			return makeEntry(taskId, {
+				turnOwner: "user",
+				liveness: "live",
+				userTurnKind: "review",
+				lastMainAgentConversationModelRequestDispatchObservation: {
+					observedAtMs: NOW_MS - 60_000,
+					evidenceKind:
+						"manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request",
+					...(contextTokenCount !== undefined
+						? { mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: contextTokenCount }
+						: {}),
+				},
+			});
+		}
+		act(() =>
+			root.render(
+				<CrossProjectRecentlyActiveTaskSwitcherPanel
+					host={makeHost({
+						projects: [
+							makeProject("project-a", [
+								compactedEntry("claude-compacted"),
+								{
+									...compactedEntry("kimi-compacted", 41_600),
+									agentId: "kimi",
+									agentProcessStartedAt: NOW_MS - 3_600_000,
+								},
+							]),
+						],
+					})}
+				/>,
+			),
+		);
+		const claudeRow = section("prompt-cache-warm").querySelector<HTMLElement>(
+			'[data-cross-project-task-switcher-task-id="claude-compacted"]',
+		);
+		const compactedPill = claudeRow?.querySelector('[title^="Compacted ·"]');
+		expect(compactedPill?.textContent).toBe("Compacted");
+		expect(compactedPill?.getAttribute("title")).toContain("rewrites the compacted context");
+		expect(claudeRow?.querySelector('[title^="Prompt cache expected to expire"]')).toBeNull();
+
+		const kimiRow = section("prompt-cache-warm").querySelector<HTMLElement>(
+			'[data-cross-project-task-switcher-task-id="kimi-compacted"]',
+		);
+		expect(kimiRow?.querySelector('[title^="Compacted ·"]')?.textContent).toBe("Compacted · ~42k");
+	});
+
+	// 2026-10-05 用户反馈：This project 卡片上「相对 base 的提交关系」与「未提交改动」也要出现在 All projects 的默认行上。
+	it("行上显示 ahead/behind 与未提交改动：其他项目读轮询结果，当前项目读推流 store；Backlog 与无改动不显示", async () => {
+		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockResolvedValue({
+			tasks: [
+				{
+					workspaceId: "project-b",
+					taskId: "recent",
+					availability: "available",
+					taskWorkspaceMetadata: makeTaskWorkspaceMetadata("recent", {
+						ahead: 2,
+						behind: 1,
+						changedFiles: 3,
+						additions: 5,
+						deletions: 2,
+					}),
+				},
+			],
+		});
+		replaceWorkspaceMetadata({
+			homeGitSummary: null,
+			homeGitStateVersion: 0,
+			taskWorkspaces: [
+				makeTaskWorkspaceMetadata("warm", { ahead: 4, behind: 0, changedFiles: 0, additions: 0, deletions: 0 }),
+			],
+		});
+		const host = makeHost({
+			projects: [
+				makeProject("project-a", [
+					makeEntry("warm", {
+						turnOwner: "user",
+						liveness: "exited",
+						userTurnKind: "review",
+						lastMainAgentConversationModelRequestDispatchObservation: {
+							observedAtMs: NOW_MS - 5 * 60_000,
+							evidenceKind: "post_tool_use_hook_event",
+						},
+					}),
+					makeEntry("backlog-task", { columnId: "backlog" }),
+				]),
+				makeProject("project-b", [makeEntry("recent", { baseRef: "develop" })]),
+			],
+		});
+		await act(async () => {
+			root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />);
+		});
+
+		// 只请求其他项目、非 Backlog 的条目。
+		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).toHaveBeenCalledWith("project-a", {
+			tasks: [{ workspaceId: "project-b", taskId: "recent" }],
+		});
+		const gitMetadataOf = (taskId: string) =>
+			container.querySelector<HTMLElement>(
+				`[data-cross-project-task-switcher-section="remaining"][data-cross-project-task-switcher-task-id="${taskId}"] [data-cross-project-task-switcher-row-worktree-git-metadata]`,
+			) ??
+			container.querySelector<HTMLElement>(
+				`[data-cross-project-task-switcher-section="prompt_cache_warm"][data-cross-project-task-switcher-task-id="${taskId}"] [data-cross-project-task-switcher-row-worktree-git-metadata]`,
+			);
+		const otherProjectGitMetadata = gitMetadataOf("recent");
+		expect(otherProjectGitMetadata?.textContent).toContain("(3 files +5 -2)");
+		expect(otherProjectGitMetadata?.getAttribute("title")).toContain("2 commits ahead of develop");
+		const currentProjectGitMetadata = gitMetadataOf("warm");
+		expect(currentProjectGitMetadata?.getAttribute("title")).toContain("4 commits ahead of base branch");
+		expect(currentProjectGitMetadata?.textContent).not.toContain("files");
+		expect(gitMetadataOf("backlog-task")).toBeNull();
+	});
+
 	it("展开 Running 后列出在跑的任务，展开态落 localStorage", () => {
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
 		const toggle = section("running").querySelector<HTMLButtonElement>("button[aria-expanded]");
@@ -225,15 +395,168 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded)).toBe("true");
 	});
 
+	// 2026-10-04 用户反馈：Running 区随 agent 动作不断重排闪烁。agent 输出（spinner 重绘）只推进 lastOutputAt，
+	// 不该改变顺序；新进入 agent 回合的任务追加在末尾。
+	it("Running 区顺序不随 agent 输出变化，新进入的任务追加在末尾", () => {
+		window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
+		function runningEntry(taskId: string, turnStartedAgoMs: number, lastOutputAgoMs: number) {
+			return makeEntry(taskId, {
+				turnOwner: "agent",
+				liveness: "live",
+				lastOutputAt: NOW_MS - lastOutputAgoMs,
+				agentResponseGenerationTurnStarted: { startedAt: NOW_MS - turnStartedAgoMs, turnSequence: 1 },
+			});
+		}
+		function renderWithRunningEntries(entries: RuntimeCrossProjectTaskSwitcherEntry[]) {
+			act(() =>
+				root.render(
+					<CrossProjectRecentlyActiveTaskSwitcherPanel
+						host={makeHost({ projects: [makeProject("project-a", entries)] })}
+					/>,
+				),
+			);
+		}
+
+		renderWithRunningEntries([runningEntry("b", 60_000, 3_000), runningEntry("a", 120_000, 1_000)]);
+		expect(rowTaskIds(section("running"))).toEqual(["a", "b"]);
+		renderWithRunningEntries([runningEntry("b", 60_000, 500), runningEntry("a", 120_000, 2_500)]);
+		expect(rowTaskIds(section("running"))).toEqual(["a", "b"]);
+		renderWithRunningEntries([
+			runningEntry("c", 1_000, 100),
+			runningEntry("b", 60_000, 4_000),
+			runningEntry("a", 120_000, 200),
+		]);
+		expect(rowTaskIds(section("running"))).toEqual(["a", "b", "c"]);
+	});
+
 	it("点击行走宿主的跨项目打开，键是 (workspaceId, taskId)", () => {
 		const host = makeHost();
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
 		const recentRowButton = section("remaining").querySelector<HTMLButtonElement>(
-			'[data-cross-project-task-switcher-task-id="recent"] button',
+			'[data-cross-project-task-switcher-task-id="recent"] button:not([aria-expanded])',
 		);
 		act(() => recentRowButton?.click());
 
 		expect(host.onOpenTaskInProject).toHaveBeenCalledWith("project-b", "recent");
+	});
+
+	it("点 backlog 行原地打开编辑对话框（不切项目、不打开任务）", () => {
+		const host = makeHost({
+			projects: [
+				makeProject("project-a", []),
+				makeProject("project-b", [makeEntry("backlog-task", { columnId: "backlog" })]),
+			],
+			onOpenBacklogTaskEditorInProject: vi.fn(),
+		});
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		act(() =>
+			section("remaining")
+				.querySelector<HTMLButtonElement>(
+					'[data-cross-project-task-switcher-task-id="backlog-task"] button:not([aria-expanded])',
+				)
+				?.click(),
+		);
+
+		expect(host.onOpenBacklogTaskEditorInProject).toHaveBeenCalledWith("project-b", "backlog-task");
+		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
+	});
+
+	it("其他项目的行展开：按需读服务端快照，渲染同一个紧凑卡体；动作走同一组 taskCardAction 命令（不带 overlay）", async () => {
+		readTaskCardWithBoardColumnInWorkspace.mockResolvedValue({
+			taskCardLookupOutcome: "task_card_found_on_workspace_board",
+			taskCardSnapshot: {
+				taskCard: {
+					id: "recent",
+					title: "Recent task in project B",
+					prompt: "Do the recent thing",
+					startInPlanMode: false,
+					baseRef: "main",
+					createdAt: NOW_MS - DAY_MS,
+					updatedAt: NOW_MS - DAY_MS,
+				},
+				boardColumnIdContainingTaskCard: "review",
+				taskSessionSummaryLiveInRuntimeProcessMemory: null,
+				taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+			},
+		});
+		moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace.mockResolvedValue({
+			taskCardSnapshotAfterAction: {
+				taskCard: { id: "recent" },
+				boardColumnIdContainingTaskCard: "validation",
+			},
+		});
+		const host = makeHost();
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const recentRow = section("remaining").querySelector<HTMLElement>(
+			'[data-cross-project-task-switcher-task-id="recent"]',
+		);
+		await act(async () => recentRow?.querySelector<HTMLButtonElement>('[aria-label="Expand task card"]')?.click());
+
+		expect(readTaskCardWithBoardColumnInWorkspace).toHaveBeenCalledWith("project-b", "recent");
+		expect(recentRow?.getAttribute("data-cross-project-task-switcher-row-expanded")).toBe("true");
+		const expandedTaskCard = recentRow?.querySelector(
+			'[data-task-card-render-role="expanded_card_copy_in_cross_project_task_switcher_row"]',
+		);
+		expect(expandedTaskCard?.textContent).toContain("Recent task in project B");
+		// 展开副本不持有 DOM 身份（data-task-id 全局唯一属于本体卡）。
+		expect(expandedTaskCard?.hasAttribute("data-task-id")).toBe(false);
+
+		await act(async () =>
+			expandedTaskCard?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
+		);
+		expect(moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace).toHaveBeenCalledWith("project-b", {
+			taskId: "recent",
+			targetBoardColumnId: "validation",
+			boardMutationInitiator: "web_ui_user_gesture",
+		});
+		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
+	});
+
+	it("当前项目的行展开：直接用宿主给的本页 board 与动作，不读服务端", async () => {
+		const onMoveToValidationTask = vi.fn();
+		const host = makeHost();
+		act(() =>
+			root.render(
+				<CrossProjectRecentlyActiveTaskSwitcherPanel
+					host={host}
+					currentProjectTaskCards={{
+						currentProjectDisplayedBoard: {
+							columns: [
+								{
+									id: "review",
+									title: "Review",
+									cards: [
+										{
+											id: "warm",
+											title: "Warm task from the in-browser board",
+											prompt: "warm",
+											startInPlanMode: false,
+											baseRef: "main",
+											createdAt: NOW_MS - DAY_MS,
+											updatedAt: NOW_MS - DAY_MS,
+										},
+									],
+								},
+							],
+						},
+						currentProjectTaskSessions: {},
+						currentProjectTaskCardActionHandlers: { onMoveToValidationTask },
+						currentProjectWorkspacePath: "/repos/project-a",
+					}}
+				/>,
+			),
+		);
+		const warmRow = section("prompt-cache-warm").querySelector<HTMLElement>(
+			'[data-cross-project-task-switcher-task-id="warm"]',
+		);
+		await act(async () => warmRow?.querySelector<HTMLButtonElement>('[aria-label="Expand task card"]')?.click());
+
+		expect(readTaskCardWithBoardColumnInWorkspace).not.toHaveBeenCalled();
+		expect(warmRow?.textContent).toContain("Warm task from the in-browser board");
+		await act(async () =>
+			warmRow?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
+		);
+		expect(onMoveToValidationTask).toHaveBeenCalledWith("warm");
 	});
 
 	it("对非当前项目的卡取消置顶走 runtime；当前项目的卡走浏览器既有链路", async () => {
@@ -243,9 +566,11 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			'[aria-label="Unpin from Pinboard"]',
 		);
 		await act(async () => unpinOtherProject?.click());
-		expect(setTaskPinboardPinStateOfTaskCardInProject).toHaveBeenCalledWith("project-b", {
+		// 与当前项目同一个 taskCardAction 命令，只是不带 overlay。
+		expect(setTaskPinboardPinStateOfTaskCardInWorkspace).toHaveBeenCalledWith("project-b", {
 			taskPinboardPinAction: "unpin_task_card",
 			taskId: "recent",
+			boardMutationInitiator: "web_ui_user_gesture",
 		});
 
 		const pinCurrentProject = section("prompt-cache-warm").querySelector<HTMLButtonElement>(

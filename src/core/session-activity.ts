@@ -281,11 +281,12 @@ export function mergeSummaryWithFacets(
 	})();
 
 	const withTurnSequence = didEnterAgentTurn(prev, patch, mergedWithFacets)
-		? {
+		? stampAgentResponseGenerationTurnStarted(patch, {
 				...mergedWithFacets,
 				agentResponseGenerationTurnSequence: (prev.agentResponseGenerationTurnSequence ?? 0) + 1,
-			}
+			})
 		: // 没有开始新的 agent 回合：序号原样透传（含「从未开始过任何回合、字段仍缺失」这一态）。
+			// 回合开始事件同理：不在边沿上就不碰它（离开 agent 回合后保留原值，缺失就继续缺失）。
 			// 刻意不在此把缺失字段补成 0——那会给每一条历史 summary 平白加一个字段、也让
 			// mergeSummaryWithFacets 与 applySessionFacets 的既有等价关系产生无谓差异。
 			mergedWithFacets;
@@ -451,6 +452,28 @@ function didEnterUserTurnEndingAgentResponseGeneration(
 		return true;
 	}
 	return prev.runtimeSessionIncarnationId !== mergedWithFacets.runtimeSessionIncarnationId;
+}
+
+// 「本轮何时开始生成」边沿事件的唯一写点：与回合序号 +1 同一分支，故三条 transport 自动一致，且只在
+// 「非 agent → agent」那一次写上盖章——agent 回合内的 lastOutputAt bump / hook activity / connectionRetry
+// 等元数据写都不经过这里，跨项目切换面板 Running 区的顺序因此不随 spinner 抖动。
+// EXPERIMENT_NODE: 模态决策（permission/question/plan_review）往返后是否保留原 startedAt（当前：重新盖章，排到 Running 末尾）
+function stampAgentResponseGenerationTurnStarted(
+	patch: Partial<RuntimeTaskSessionSummary>,
+	withTurnSequence: RuntimeTaskSessionSummary,
+): RuntimeTaskSessionSummary {
+	if (patch.agentResponseGenerationTurnStarted !== undefined) {
+		// 显式覆写优先：磁盘水合、测试构造按原值采信（已在 merged 里），不在此重新盖章。
+		return withTurnSequence;
+	}
+	return {
+		...withTurnSequence,
+		agentResponseGenerationTurnStarted: {
+			// 与停止事件同口径：取本次写入时刻，那正是翻入 agent 回合的瞬间。
+			startedAt: withTurnSequence.updatedAt,
+			turnSequence: withTurnSequence.agentResponseGenerationTurnSequence ?? 0,
+		},
+	};
 }
 
 // 回合序号推进：本函数是终端 / Cline SDK / ACP **三条 transport 共用**的唯一 summary 写漏斗，

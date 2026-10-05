@@ -4842,6 +4842,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 	recordMainAgentConversationModelRequestDispatch(
 		taskId: string,
 		evidenceKind: RuntimeMainAgentConversationModelRequestDispatchEvidenceKind,
+		// 仅手动压缩完成且 harness 报了压缩后上下文大小时传（见 schema 注释）。
+		mainAgentConversationContextTokenCountAfterCompactionReportedByHarness?: number,
 	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
@@ -4849,7 +4851,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const previousObservation = entry.summary.lastMainAgentConversationModelRequestDispatchObservation ?? null;
 		const summary = updateSummary(entry, {
-			lastMainAgentConversationModelRequestDispatchObservation: { observedAtMs: now(), evidenceKind },
+			lastMainAgentConversationModelRequestDispatchObservation: {
+				observedAtMs: now(),
+				evidenceKind,
+				...(mainAgentConversationContextTokenCountAfterCompactionReportedByHarness !== undefined
+					? { mainAgentConversationContextTokenCountAfterCompactionReportedByHarness }
+					: {}),
+			},
 		});
 		if (summary.lastMainAgentConversationModelRequestDispatchObservation === previousObservation) {
 			return cloneSummary(summary);

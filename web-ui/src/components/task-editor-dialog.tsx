@@ -32,6 +32,10 @@ import { TaskAgentPermissionModeControl } from "@/components/task-agent-permissi
 import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
 import { TaskConversationModeControl } from "@/components/task-conversation-mode-control";
 import {
+	type TaskCreationTargetProjectField,
+	TaskCreationTargetProjectFieldControl,
+} from "@/components/task-creation-target-project-field";
+import {
 	type TaskEditDraftComparableValues,
 	TaskEditDraftRecoveryNotice,
 } from "@/components/task-edit-draft-recovery-notice";
@@ -237,6 +241,7 @@ export function TaskEditorDialog({
 	editTaskFormSeededFromSavedDraftAt = null,
 	onRevertEditTaskFormToSavedTaskContent,
 	onAdoptPromotedTaskEditDraft,
+	taskCreationTargetProjectField,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -307,6 +312,8 @@ export function TaskEditorDialog({
 	editTaskFormSeededFromSavedDraftAt?: number | null;
 	onRevertEditTaskFormToSavedTaskContent?: () => void;
 	onAdoptPromotedTaskEditDraft?: (promotedDraft: TaskEditDraft) => void;
+	/** 不传 = 隐藏（单项目范围）。见 TaskCreationTargetProjectField。 */
+	taskCreationTargetProjectField?: TaskCreationTargetProjectField;
 }): ReactElement {
 	// 逐字输入下沉到这里，不再每次按键都经 `onPromptChange` 打到 `App` 根节点。
 	// 那条老路径会把 1566 行的 `App` 连同整棵卡片树一起重渲，是「在任务创建界面打字很卡」的主因。
@@ -924,6 +931,11 @@ export function TaskEditorDialog({
 					)}
 
 					<div className="flex flex-col gap-2.5 mt-4 pt-4 border-t border-border">
+						{taskCreationTargetProjectField ? (
+							<TaskCreationTargetProjectFieldControl
+								taskCreationTargetProjectField={taskCreationTargetProjectField}
+							/>
+						) : null}
 						<label
 							htmlFor={startInPlanModeId}
 							className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"

@@ -6,6 +6,7 @@
 
 import type {
 	RuntimeHookEvent,
+	RuntimeMainAgentConversationContextCompactionTrigger,
 	RuntimeMainAgentConversationModelRequestDispatchEvidenceKind,
 	RuntimeTaskSessionUserTurnKind,
 } from "./api-contract.js";
@@ -33,10 +34,24 @@ export function classifyHookEventAsMainAgentConversationModelRequestDispatch(inp
 	hookEventFiredInsideSubagentContext: boolean;
 	// ingest 时（转移之前）的会话 facet。
 	sessionFacetsBeforeTransition: SessionFacets;
+	// 仅压缩完成事件携带。
+	mainAgentConversationContextCompactionTriggerReportedByHarness?: RuntimeMainAgentConversationContextCompactionTrigger;
 }): RuntimeMainAgentConversationModelRequestDispatchEvidenceKind | null {
-	// 子代理的请求走它自己的缓存前缀，不刷新主对话的缓存。
+	// 子代理的请求走它自己的缓存前缀，不刷新主对话的缓存（子代理自己的自动压缩同理）。
 	if (input.hookEventFiredInsideSubagentContext) {
 		return null;
+	}
+	if (input.event === "main_agent_conversation_context_compaction_completed") {
+		// 不受下方「用户回合冻结」约束：手动 /compact 本来就发生在用户回合，而 PostCompact 在主线程触发、
+		// 不带 agent_id，不会混入后台子代理的事件。trigger 缺失时按回合归属判：agent 回合里的压缩只可能是自动的。
+		const isAutomaticCompactionFollowedByContinuationRequest =
+			input.mainAgentConversationContextCompactionTriggerReportedByHarness ===
+				"automatic_context_window_compaction" ||
+			(input.mainAgentConversationContextCompactionTriggerReportedByHarness === undefined &&
+				input.sessionFacetsBeforeTransition.turnOwner === "agent");
+		return isAutomaticCompactionFollowedByContinuationRequest
+			? "automatic_context_compaction_completed_continuation_model_request_follows_immediately"
+			: "manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request";
 	}
 	if (input.event === "to_in_progress" && input.normalizedHookEventName === "userpromptsubmit") {
 		return "user_prompt_submit_hook_event_accepted";

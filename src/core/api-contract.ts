@@ -771,6 +771,18 @@ export const runtimeAgentResponseGenerationStoppedSchema = z.object({
 });
 export type RuntimeAgentResponseGenerationStopped = z.infer<typeof runtimeAgentResponseGenerationStoppedSchema>;
 
+// 「本轮 agent 回合何时开始生成」——runtimeAgentResponseGenerationStoppedSchema 的对偶边沿事件。
+// 只在 facet 由非 agent 回合翻入 agent 回合（回合序号 +1）的那一次写入盖章；agent 回合内的元数据写
+// （lastOutputAt bump、hook activity、connectionRetry 等）一律不动它。跨项目切换面板 Running 区
+// 按它升序排（先进入的在前、后进入的在后），不读每秒被 spinner 推进的 lastOutputAt。
+export const runtimeAgentResponseGenerationTurnStartedSchema = z.object({
+	// 翻入 agent 回合的时刻（epoch ms，= 该次合并的 updatedAt）。
+	startedAt: z.number(),
+	// 盖章时的回合序号（即 +1 之后的新值），用于和 agentResponseGenerationStopped.turnSequence 对照。
+	turnSequence: z.number().int().nonnegative(),
+});
+export type RuntimeAgentResponseGenerationTurnStarted = z.infer<typeof runtimeAgentResponseGenerationTurnStartedSchema>;
+
 // ── 「对话上次推进」观测（加性 sidecar；卡片时长药丸 B 的唯一真相源）──────────────────────────
 // 回答的问题是：**这个任务的对话，上一次真正往前走，是什么时候？**
 //
@@ -833,6 +845,12 @@ export const runtimeMainAgentConversationModelRequestDispatchEvidenceKindSchema 
 	// Gemini 的等价事件（BeforeAgent ≈ UserPromptSubmit，AfterTool ≈ PostToolUse）。
 	"before_agent_hook_event",
 	"after_tool_hook_event",
+	// 用户回合里手动 /compact 完成（PostCompact，trigger=manual）。压缩请求读的是被替换前的旧对话前缀
+	// （5 分钟档）、写入为 0；对话层随即被摘要替换，下一条请求不论早晚都要重写摘要部分（实测 86k–103k）。
+	// Cache warm 估算对它的取舍见 resolveMainAgentConversationPromptCacheWarmthAnchor。
+	"manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request",
+	// agent 回合中自动压缩完成（PostCompact，trigger=auto）：续写请求紧随其后，与普通发请求同等对待。
+	"automatic_context_compaction_completed_continuation_model_request_follows_immediately",
 ]);
 export type RuntimeMainAgentConversationModelRequestDispatchEvidenceKind = z.infer<
 	typeof runtimeMainAgentConversationModelRequestDispatchEvidenceKindSchema
@@ -842,6 +860,10 @@ export const runtimeLastMainAgentConversationModelRequestDispatchObservationSche
 	// 发出请求的时刻（epoch ms，取 hook ingest 时刻）。
 	observedAtMs: z.number(),
 	evidenceKind: runtimeMainAgentConversationModelRequestDispatchEvidenceKindSchema,
+	// 仅手动压缩完成、且 harness 自己报了压缩后上下文大小时携带（目前只有 Kimi PostCompact 的
+	// estimatedTokenCount）。Cache warm 行据此显示「回复需重写约 N k」。Claude / Codex 的 PostCompact 不报大小，
+	// 而按摘要长度或 transcript 内容估算与实测重写量相差 3–10 倍（2026-10-05 实测），故宁缺不估。
+	mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: z.number().int().nonnegative().optional(),
 });
 export type RuntimeLastMainAgentConversationModelRequestDispatchObservation = z.infer<
 	typeof runtimeLastMainAgentConversationModelRequestDispatchObservationSchema
@@ -926,6 +948,9 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	agentResponseGenerationTurnSequence: z.number().int().nonnegative().optional(),
 	// 当前这次「进入非生成态」的离散事件；agent 回合 / park 期间为 null。
 	agentResponseGenerationStopped: runtimeAgentResponseGenerationStoppedSchema.nullable().optional(),
+	// 最近一次「翻入 agent 回合」的边沿事件（与上一字段对偶，语义见其 schema 注释）。离开 agent 回合后
+	// 保留原值不清空；加性可选：旧盘数据 / 从未进过 agent 回合的会话缺它 ⇒ Running 排序回落到 startedAt。
+	agentResponseGenerationTurnStarted: runtimeAgentResponseGenerationTurnStartedSchema.nullable().optional(),
 	// 可回收时刻（epoch ms 绝对时刻，= stoppedAt + 宽限期）。存绝对时刻而非剩余时长，故停机期间
 	// 流逝的墙钟时间自然计入，重启后按同一口径判定。
 	agentSessionRuntimeReclamationEligibleAt: z.number().nullable().optional(),
@@ -1368,6 +1393,8 @@ export type RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse = z.infer<
 export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
+	// 拖放进 Done 的落点；缺省 = 列顶（CLI / 程序化移入不传）。卡片本来就在 Done 时忽略。
+	insertAtIndexWithinDoneBoardColumn: z.number().int().nonnegative().optional(),
 });
 export type RuntimeTaskCardActionMoveIntoDoneRequest = z.infer<typeof runtimeTaskCardActionMoveIntoDoneRequestSchema>;
 export const runtimeTaskCardActionMoveIntoDoneResponseSchema = z.object({
@@ -1388,6 +1415,8 @@ export const runtimeTaskCardActionRestoreFromDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
+	// 从 Done 拖回 review 的落点；缺省 = 列顶。恢复失败移回 Done 时不用它（回到 Done 列顶）。
+	insertAtIndexWithinReviewBoardColumn: z.number().int().nonnegative().optional(),
 });
 export type RuntimeTaskCardActionRestoreFromDoneRequest = z.infer<
 	typeof runtimeTaskCardActionRestoreFromDoneRequestSchema
@@ -1580,6 +1609,9 @@ export const runtimeInProgressTaskDetailSchema = z.object({
 	// 加性 optional：旧 runtime payload 不带 ⇒ 该颗药丸隐藏，绝不回退读上面那个实质戳。
 	agentResponseGenerationStopped: runtimeAgentResponseGenerationStoppedSchema.nullable().optional(),
 	lastConversationProgressObservation: runtimeLastConversationProgressObservationSchema.nullable().optional(),
+	// 本轮 agent 回合的开始时刻（见 runtimeAgentResponseGenerationTurnStartedSchema）。概览 Active 组与
+	// 跨项目切换面板 Running 区都按它升序排，顺序只在回合边沿变化，不随 spinner 重绘抖动。加性 optional。
+	agentResponseGenerationTurnStarted: runtimeAgentResponseGenerationTurnStartedSchema.nullable().optional(),
 	turnOwner: runtimeTaskSessionTurnOwnerSchema,
 	liveness: runtimeTaskSessionLivenessSchema,
 });
@@ -1613,6 +1645,10 @@ export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskD
 	lastMainAgentConversationModelRequestDispatchObservation:
 		runtimeLastMainAgentConversationModelRequestDispatchObservationSchema.nullable().optional(),
 	agentProcessStartedAt: z.number().nullable().optional(),
+	// 行上 git 元数据（ahead/behind、未提交改动）旁要显示的两个卡片静态字段：tooltip 里的 base 分支名，
+	// 以及 worktree / inplace 图标。几乎不变，不会让广播指纹抖动。加性 optional。
+	baseRef: z.string().optional(),
+	worktreeMode: runtimeTaskWorktreeModeSchema.optional(),
 });
 export type RuntimeCrossProjectTaskSwitcherEntry = z.infer<typeof runtimeCrossProjectTaskSwitcherEntrySchema>;
 
@@ -2610,6 +2646,50 @@ export const runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon
 });
 export type RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse = z.infer<
 	typeof runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponseSchema
+>;
+
+// 跨项目切换面板：其他项目任务 worktree 的 git 元数据（相对 base 的 ahead/behind、已集成提交、未提交改动），
+// 浏览器在面板可见时按需轮询。当前项目的行不走这里，读既有的 workspace_metadata_updated 推流 store。
+// 不并入 projects_updated：未提交改动在 agent 写文件时几秒一变，会让 100 KB 级的整份广播变频繁。
+export const CROSS_PROJECT_TASK_WORKTREE_GIT_METADATA_REQUEST_MAXIMUM_TASK_COUNT = 100;
+export const runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema = z.object({
+	tasks: z
+		.array(z.object({ workspaceId: z.string().min(1), taskId: z.string().min(1) }))
+		.max(CROSS_PROJECT_TASK_WORKTREE_GIT_METADATA_REQUEST_MAXIMUM_TASK_COUNT),
+});
+export type RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest = z.infer<
+	typeof runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema
+>;
+export const runtimeCrossProjectTaskWorktreeGitMetadataUnavailableReasonSchema = z.enum([
+	"project_not_registered",
+	"task_card_not_found",
+	// Backlog 卡还没有 worktree，与 workspace-metadata-monitor 的取景一致。
+	"task_card_in_backlog_has_no_worktree",
+	"git_metadata_probe_failed",
+]);
+export const runtimeCrossProjectTaskWorktreeGitMetadataSchema = z.discriminatedUnion("availability", [
+	z.object({
+		workspaceId: z.string(),
+		taskId: z.string(),
+		availability: z.literal("available"),
+		// 与当前项目推流里的同名结构完全一致（同一个探针算出），浏览器用同一套展示规则。
+		taskWorkspaceMetadata: runtimeTaskWorkspaceMetadataSchema,
+	}),
+	z.object({
+		workspaceId: z.string(),
+		taskId: z.string(),
+		availability: z.literal("unavailable"),
+		unavailableReason: runtimeCrossProjectTaskWorktreeGitMetadataUnavailableReasonSchema,
+	}),
+]);
+export type RuntimeCrossProjectTaskWorktreeGitMetadata = z.infer<
+	typeof runtimeCrossProjectTaskWorktreeGitMetadataSchema
+>;
+export const runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema = z.object({
+	tasks: z.array(runtimeCrossProjectTaskWorktreeGitMetadataSchema),
+});
+export type RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse = z.infer<
+	typeof runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema
 >;
 
 // 置顶 / 取消置顶 / 改置顶原因，由 runtime 在 board 锁内对**最新** board 执行（workspace-scoped，作用于连接 scope
@@ -4461,8 +4541,22 @@ export const runtimeHookEventSchema = z.enum([
 	"to_in_progress",
 	"activity",
 	"agent_conversation_session_identity_observed",
+	// harness 的 PostCompact（Claude / Codex / Kimi）：主对话上下文压缩已完成。专用事件、不复用 activity：
+	// 它只推进 Cache warm 起点，不该顺带推进「对话推进」药丸、刷新活动行或进入通知捕获。
+	"main_agent_conversation_context_compaction_completed",
 ]);
 export type RuntimeHookEvent = z.infer<typeof runtimeHookEventSchema>;
+
+// 压缩的触发方式（三家 harness 的 PostCompact 载荷都叫 `trigger: "manual" | "auto"`）。
+export const runtimeMainAgentConversationContextCompactionTriggerSchema = z.enum([
+	// 用户在终端里敲了 /compact（发生在用户回合，压缩完不会紧跟续写请求）。
+	"manual_compact_command",
+	// 上下文窗口接近上限时 harness 在 agent 回合中自动压缩，续写请求紧随其后。
+	"automatic_context_window_compaction",
+]);
+export type RuntimeMainAgentConversationContextCompactionTrigger = z.infer<
+	typeof runtimeMainAgentConversationContextCompactionTriggerSchema
+>;
 
 // Canonical schema source:
 //   workflow-plugin-design-system/schemas/report-validation-contract.schema.json
@@ -4610,6 +4704,12 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// 内的事件上带它，主线程一律不带）。子代理的请求走自己的缓存前缀，不刷新主对话的 Cache warm 起点。
 	// 只传布尔、不传 id 本身：服务端唯一用途就是这道排除。
 	hookEventFiredInsideSubagentContext: z.boolean().optional(),
+	// 仅 main_agent_conversation_context_compaction_completed 携带：harness 报告的压缩触发方式（从 hook stdin 的
+	// `trigger` 派生）。缺失时服务端按当时的回合归属判定。
+	mainAgentConversationContextCompactionTriggerReportedByHarness:
+		runtimeMainAgentConversationContextCompactionTriggerSchema.optional(),
+	// 仅压缩完成事件、且 harness 报了压缩后上下文大小时携带（Kimi 的 estimatedTokenCount）。
+	mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: z.number().int().nonnegative().optional(),
 	// 终端 agent 原生会话身份（N0a）：`kanban hooks` 从 hook stdin 的 session_id / transcript_path 抽出，
 	// 每个事件都带（幂等），服务端只在值变化时写 summary sidecar。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.optional(),

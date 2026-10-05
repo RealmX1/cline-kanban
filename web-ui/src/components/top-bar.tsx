@@ -39,6 +39,7 @@ import { cn } from "@/components/ui/cn";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+import { WorktreeUncommittedChangeSummaryIndicator } from "@/components/ui/worktree-uncommitted-change-summary-indicator";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { RuntimeGitSyncAction, RuntimeProjectShortcut } from "@/runtime/types";
 import {
@@ -151,9 +152,11 @@ function GitBranchStatusControl({
 					<span className="truncate w-full text-left">{branchLabel}</span>
 				</Button>
 				<span className="font-mono text-xs text-text-tertiary ml-1.5 shrink-0 whitespace-nowrap">
-					({changedFiles} {changedFiles === 1 ? "file" : "files"}
-					<span className="text-status-green"> +{additions}</span>
-					<span className="text-status-red"> -{deletions}</span>)
+					<WorktreeUncommittedChangeSummaryIndicator
+						changedFiles={changedFiles}
+						additions={additions}
+						deletions={deletions}
+					/>
 				</span>
 			</div>
 		);
@@ -164,12 +167,12 @@ function GitBranchStatusControl({
 			<GitBranch size={12} className="inline-block mr-1" style={{ verticalAlign: -1 }} />
 			<span className="text-text-primary">{branchLabel}</span>
 			<span className="ml-1.5">
-				<span className="text-text-tertiary">
-					({changedFiles} {changedFiles === 1 ? "file" : "files"}
-				</span>
-				<span className="text-status-green"> +{additions}</span>
-				<span className="text-status-red"> -{deletions}</span>
-				<span className="text-text-tertiary">)</span>
+				<WorktreeUncommittedChangeSummaryIndicator
+					changedFiles={changedFiles}
+					additions={additions}
+					deletions={deletions}
+					parenthesesAndChangedFileCountClassName="text-text-tertiary"
+				/>
 			</span>
 		</span>
 	);

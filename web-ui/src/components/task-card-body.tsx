@@ -57,11 +57,17 @@ import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { Spinner } from "@/components/ui/spinner";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
+import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
 import { Tooltip } from "@/components/ui/tooltip";
+import {
+	shouldDisplayWorktreeUncommittedChangeSummary,
+	WorktreeUncommittedChangeSummaryIndicator,
+} from "@/components/ui/worktree-uncommitted-change-summary-indicator";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
 import { useSharedFineClockTimestampMs } from "@/hooks/use-shared-fine-clock";
 import { summarizeQueuedTaskPromptDeliveryCountIndicator } from "@/runtime/queued-task-prompt-delivery-status-wording";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import { useCrossProjectTaskWorktreeGitMetadataSnapshotValue } from "@/stores/cross-project-task-worktree-git-metadata-store";
 import { useQueuedTaskPromptDeliveryProjectionsForTask } from "@/stores/queued-task-prompt-delivery-projection-store";
 import { useTaskWorkspaceInfoValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery-contention-notice";
@@ -180,7 +186,10 @@ export type TaskCardBodyRenderRole =
 	| "focused_card_copy_under_sticky_stage_header"
 	// Task Pinboard：被置顶的卡片在置顶板里的分身。除不可拖、不持有 DOM 身份外，
 	// 交互与本体一致（单击进详情、双击改标题、全部动作按钮）。
-	| "pinned_card_copy_in_task_pinboard";
+	| "pinned_card_copy_in_task_pinboard"
+	// All projects 切换面板里展开的一行（可以是任何项目的卡）。同置顶板分身：不可拖、不持有 DOM 身份，
+	// 交互与本体一致；不显示置顶板专属的 stage 标签与原因行。
+	| "expanded_card_copy_in_cross_project_task_switcher_row";
 
 /**
  * 任务卡的纯展示卡体（卡壳 + 内层可视卡 + 全部展示态/交互）。
@@ -216,9 +225,16 @@ export const TaskCardBody = memo(function TaskCardBody({
 	stageDisplayNameForTaskPinboardCopy,
 	onNavigateToCanonicalCardInItsStage,
 	onEditTaskPinboardPinReason,
+	taskCardOwnedByOtherProjectWorkspaceId = null,
 }: TaskCardBusinessProps & {
 	drag?: TaskCardBodyDragBindings | null;
 	renderRole?: TaskCardBodyRenderRole;
+	/**
+	 * 非 null = 这张卡属于**另一个**项目（All projects 面板的展开行）。卡体里几个推流 store 只按 taskId 分键、只装
+	 * 当前项目的数据，跨项目同号会读到别人的值，所以此时一律不读它们：git 元数据改读跨项目轮询 store，资源占用与
+	 * 排队 prompt 不显示（这两样只对当前项目推流）。
+	 */
+	taskCardOwnedByOtherProjectWorkspaceId?: string | null;
 	/** 仅置顶板分身：分身上 stage 标签的展示名，取自该卡真正所在 board 列的 `title`（trash 即 "Done"）。 */
 	stageDisplayNameForTaskPinboardCopy?: string;
 	/** 仅置顶板分身：点 stage 标签跳回原 stage 里的本体卡并高亮。 */
@@ -244,8 +260,19 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const [draftTitle, setDraftTitle] = useState(card.title);
 	const titleInputRef = useRef<HTMLTextAreaElement | null>(null);
 	const titleEditCancelledRef = useRef(false);
-	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(card.id);
-	const taskWorkspaceInfo = useTaskWorkspaceInfoValue(card.id, card.baseRef);
+	const isTaskCardOwnedByOtherProject = taskCardOwnedByOtherProjectWorkspaceId !== null;
+	const currentProjectReviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(
+		isTaskCardOwnedByOtherProject ? null : card.id,
+	);
+	const otherProjectReviewWorkspaceSnapshot = useCrossProjectTaskWorktreeGitMetadataSnapshotValue(
+		taskCardOwnedByOtherProjectWorkspaceId ?? "",
+		card.id,
+		isTaskCardOwnedByOtherProject,
+	);
+	const reviewWorkspaceSnapshot = isTaskCardOwnedByOtherProject
+		? otherProjectReviewWorkspaceSnapshot
+		: currentProjectReviewWorkspaceSnapshot;
+	const taskWorkspaceInfo = useTaskWorkspaceInfoValue(isTaskCardOwnedByOtherProject ? null : card.id, card.baseRef);
 	const taskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
 		mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId,
 		taskWorktreeExists: taskWorkspaceInfo?.exists,
@@ -288,7 +315,9 @@ export const TaskCardBody = memo(function TaskCardBody({
 	// 程序化投递正等着这张卡的终端输入框腾出来（计划 §4.4）：在看板上就要看得见，否则又是一次「机器在等、屏幕不说」。
 	// 排队 prompt（主会话的队列；by-the-way 子会话的队列只在详情视图里看）。按 taskId 订阅 store，
 	// 只有这张卡自己的队列变了才重渲。
-	const queuedPromptProjections = useQueuedTaskPromptDeliveryProjectionsForTask(card.id);
+	const queuedPromptProjections = useQueuedTaskPromptDeliveryProjectionsForTask(
+		isTaskCardOwnedByOtherProject ? null : card.id,
+	);
 	const queuedPromptCountIndicator = useMemo(
 		() => summarizeQueuedTaskPromptDeliveryCountIndicator(queuedPromptProjections),
 		[queuedPromptProjections],
@@ -455,21 +484,16 @@ export const TaskCardBody = memo(function TaskCardBody({
 					: null
 				: reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
 			: null;
-	const reviewWorkspaceChangedFilesCount = reviewWorkspaceSnapshot?.changedFiles ?? null;
-	const reviewWorkspaceAddedLinesCount = reviewWorkspaceSnapshot?.additions ?? 0;
-	const reviewWorkspaceRemovedLinesCount = reviewWorkspaceSnapshot?.deletions ?? 0;
-	const shouldDisplayReviewWorkspaceChangeSummary =
-		reviewWorkspaceChangedFilesCount != null &&
-		(reviewWorkspaceChangedFilesCount !== 0 ||
-			reviewWorkspaceAddedLinesCount !== 0 ||
-			reviewWorkspaceRemovedLinesCount !== 0);
-	const reviewChangeSummary = shouldDisplayReviewWorkspaceChangeSummary
-		? {
-				filesLabel: `${reviewWorkspaceChangedFilesCount} ${reviewWorkspaceChangedFilesCount === 1 ? "file" : "files"}`,
-				additions: reviewWorkspaceAddedLinesCount,
-				deletions: reviewWorkspaceRemovedLinesCount,
-			}
-		: null;
+	const reviewChangeSummary =
+		reviewWorkspaceSnapshot &&
+		reviewWorkspaceSnapshot.changedFiles != null &&
+		shouldDisplayWorktreeUncommittedChangeSummary(reviewWorkspaceSnapshot)
+			? {
+					changedFiles: reviewWorkspaceSnapshot.changedFiles,
+					additions: reviewWorkspaceSnapshot.additions ?? 0,
+					deletions: reviewWorkspaceSnapshot.deletions ?? 0,
+				}
+			: null;
 	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath);
 	const showTitleEditButton =
 		(onSaveTitle != null || onOpenTaskEditor != null) && !isPassiveMirrorUnderStickyStageHeader && !isEditingTitle;
@@ -561,36 +585,23 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const taskCommitsIntegratedIntoBaseRef = reviewWorkspaceSnapshot?.taskCommitsIntegratedIntoBaseRef ?? null;
 	const taskCommitIntegrationTrackingStatus = reviewWorkspaceSnapshot?.taskCommitIntegrationTrackingStatus;
 	const showTaskCommitIntegrationIndicator = taskCommitIntegrationTrackingStatus !== undefined;
-	const taskWorkspaceGitStatusTooltip = useMemo(() => {
-		const pluralizeCommits = (count: number) => `${count} ${count === 1 ? "commit" : "commits"}`;
-		const parts: string[] = [];
-		if (commitsAheadOfBaseRef) {
-			parts.push(`${pluralizeCommits(commitsAheadOfBaseRef)} ahead of ${card.baseRef}`);
-		}
-		if (commitsBehindBaseRef) {
-			parts.push(`${pluralizeCommits(commitsBehindBaseRef)} behind ${card.baseRef}`);
-		}
-		if (taskCommitsIntegratedIntoBaseRef !== null) {
-			parts.push(
-				`${pluralizeCommits(taskCommitsIntegratedIntoBaseRef)} from this task integrated into ${card.baseRef}`,
-			);
-		} else if (taskCommitIntegrationTrackingStatus === "legacy_history_unavailable") {
-			parts.push(`Integrated commit history is unavailable for this legacy task`);
-		} else if (taskCommitIntegrationTrackingStatus === "task_commit_ownership_history_incomplete") {
-			parts.push(`Integrated task commit count cannot be proven from recorded history`);
-		} else if (taskCommitIntegrationTrackingStatus === "inplace_task_commit_ownership_unavailable") {
-			parts.push(`Integrated task commit ownership cannot be isolated in inplace mode`);
-		} else if (taskCommitIntegrationTrackingStatus === "git_probe_unavailable") {
-			parts.push(`Integrated task commit count is temporarily unavailable`);
-		}
-		return parts.length > 0 ? parts.join(" · ") : null;
-	}, [
-		commitsAheadOfBaseRef,
-		commitsBehindBaseRef,
-		card.baseRef,
-		taskCommitIntegrationTrackingStatus,
-		taskCommitsIntegratedIntoBaseRef,
-	]);
+	const taskWorkspaceGitStatusTooltip = useMemo(
+		() =>
+			describeTaskWorkspaceGitStatusAgainstBaseRef({
+				baseRef: card.baseRef,
+				commitsAheadOfBaseRef,
+				commitsBehindBaseRef,
+				taskCommitsIntegratedIntoBaseRef,
+				taskCommitIntegrationTrackingStatus,
+			}),
+		[
+			commitsAheadOfBaseRef,
+			commitsBehindBaseRef,
+			card.baseRef,
+			taskCommitIntegrationTrackingStatus,
+			taskCommitsIntegratedIntoBaseRef,
+		],
+	);
 	// 复制源优先绝对路径（snapshot.path），trash 无快照时退回重建的展示路径，再退回 base 仓库路径。
 	const copyableDirectoryPath = reviewWorkspaceSnapshot?.path ?? reviewWorkspacePath ?? workspacePath ?? null;
 	const showDirectoryCopyButton = showDirectoryRow && Boolean(copyableDirectoryPath);
@@ -690,7 +701,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 			) : null}
 		</>
 	);
-	const resourceUsagePill = (
+	const resourceUsagePill = isTaskCardOwnedByOtherProject ? null : (
 		<TaskCardResourceUsagePill
 			taskCardId={card.id}
 			isTrashCard={isTrashCard}
@@ -861,11 +872,11 @@ export const TaskCardBody = memo(function TaskCardBody({
 				) : null}
 				{reviewChangeSummary ? (
 					<>
-						<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> (</span>
-						<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>{reviewChangeSummary.filesLabel}</span>
-						<span className="text-status-green"> +{reviewChangeSummary.additions}</span>
-						<span className="text-status-red"> -{reviewChangeSummary.deletions}</span>
-						<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>)</span>
+						{" "}
+						<WorktreeUncommittedChangeSummaryIndicator
+							{...reviewChangeSummary}
+							parenthesesAndChangedFileCountStyle={{ color: SESSION_ACTIVITY_COLOR.muted }}
+						/>
 					</>
 				) : null}
 			</span>
@@ -972,8 +983,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 				...(drag?.draggableStyle ?? {}),
 				// 紧凑密度的行之间靠 hover 底色区分，不需要标准卡片那么大的间距。
 				marginBottom: emitsCanonicalDomIdentity ? (isCompactRowInFocusViewLeftColumn ? 2 : 6) : 0,
-				// 本体可拖 → grab；置顶板分身单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
-				cursor: emitsCanonicalDomIdentity ? "grab" : isTaskPinboardCopy ? "pointer" : "default",
+				// 本体可拖 → grab；置顶板分身 / 跨项目展开行单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
+				cursor: emitsCanonicalDomIdentity ? "grab" : isPassiveMirrorUnderStickyStageHeader ? "default" : "pointer",
 			}}
 			onMouseEnter={() => setIsHovered(true)}
 			onMouseLeave={() => setIsHovered(false)}

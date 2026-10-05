@@ -13,6 +13,7 @@ const CODEX_HOOK_TIMEOUT_SECONDS = 8;
 type CodexHookConfigEvent =
 	| "SessionStart"
 	| "PermissionRequest"
+	| "PostCompact"
 	| "PostToolUse"
 	| "PreToolUse"
 	| "Stop"
@@ -127,6 +128,10 @@ function codexHookEventKeyLabel(eventName: CodexHookConfigEvent): string {
 			return "session_start";
 		case "PermissionRequest":
 			return "permission_request";
+		// 与 Codex 0.160.0 二进制里的事件标签一致（strings 实测：pre_compact / post_compact）；标签错了
+		// 信任哈希就对不上，Codex 会弹 hooks 审批对话框并吞掉终端输入。
+		case "PostCompact":
+			return "post_compact";
 		case "PostToolUse":
 			return "post_tool_use";
 		case "PreToolUse":
@@ -218,6 +223,12 @@ export function configureCodexHooks(args: string[]): void {
 		eventName: "SessionStart",
 		command: buildCodexHookCommand("agent_conversation_session_identity_observed"),
 	};
+	// 压缩完成即时触发；刻意不用 SessionStart(source=compact)——Codex 要等到下一次模型请求前才触发它，
+	// 晚一个回合（Codex hooks 文档原文）。
+	const postCompactHook: CodexHookConfig = {
+		eventName: "PostCompact",
+		command: buildCodexHookCommand("main_agent_conversation_context_compaction_completed"),
+	};
 	const trustStateConfigValue = buildCodexHookTrustStateConfigValue(
 		[
 			sessionStartHook,
@@ -226,6 +237,7 @@ export function configureCodexHooks(args: string[]): void {
 			permissionRequestHook,
 			preToolUseActivityHook,
 			postToolUseActivityHook,
+			postCompactHook,
 		].map(buildCodexHookTrustEntry),
 	);
 
@@ -256,5 +268,10 @@ export function configureCodexHooks(args: string[]): void {
 		args,
 		"hooks.PostToolUse",
 		buildCodexHookConfigValue(postToolUseActivityHook.command, postToolUseActivityHook.matcher),
+	);
+	addCodexConfigOverrideBeforeSubcommand(
+		args,
+		"hooks.PostCompact",
+		buildCodexHookConfigValue(postCompactHook.command),
 	);
 }

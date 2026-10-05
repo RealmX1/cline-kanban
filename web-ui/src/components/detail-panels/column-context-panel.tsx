@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BoardCard } from "@/components/board-card";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
+import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { StageHeaderLabel } from "@/components/detail-panels/stage-header-label";
 import { StageHeaderRails } from "@/components/detail-panels/stage-header-rails";
 import { TaskPinboardSectionInFocusView } from "@/components/detail-panels/task-pinboard-section-in-focus-view";
@@ -49,6 +50,7 @@ function ColumnSection({
 	onDeleteTask,
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
+	onCancelAutomaticTaskAction,
 	moveToTrashLoadingById,
 	activeDragSourceColumnId,
 	workspacePath,
@@ -80,6 +82,7 @@ function ColumnSection({
 	onDeleteTask?: (taskId: string) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	activeDragSourceColumnId?: BoardColumnId | null;
 	workspacePath?: string | null;
@@ -143,6 +146,7 @@ function ColumnSection({
 				onEditTask,
 				onRequestPinToTaskPinboard,
 				onUnpinFromTaskPinboard,
+				onCancelAutomaticTaskAction,
 				moveToTrashLoadingById,
 			},
 			onActivateCard: onCardClick,
@@ -301,6 +305,7 @@ export function ColumnContextPanel({
 	onRequestPinToTaskPinboard,
 	onUnpinFromTaskPinboard,
 	onEditTaskPinboardPinReason,
+	onCancelAutomaticTaskAction,
 	moveToTrashLoadingById,
 	panelWidth,
 }: {
@@ -323,6 +328,7 @@ export function ColumnContextPanel({
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
+	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	panelWidth?: string;
 	defaultClineModelId?: string | null;
@@ -383,8 +389,17 @@ export function ColumnContextPanel({
 		onEditTask,
 		onRequestPinToTaskPinboard,
 		onUnpinFromTaskPinboard,
+		onCancelAutomaticTaskAction,
 		moveToTrashLoadingById,
 	};
+	// All projects 面板里当前项目的展开行：与这里的卡同一份数据（带 overlay 的 board、推流 session）与同一套动作。
+	const currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion: CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion =
+		{
+			currentProjectDisplayedBoard: { columns: selection.allColumns },
+			currentProjectTaskSessions: taskSessions,
+			currentProjectTaskCardActionHandlers: taskCardActionHandlers,
+			currentProjectWorkspacePath: workspacePath ?? null,
+		};
 
 	const handleBeforeCapture = useCallback(
 		(start: BeforeCapture) => {
@@ -469,7 +484,11 @@ export function ColumnContextPanel({
 				}}
 			>
 				{showsCrossProjectRecentlyActiveTaskSwitcher && crossProjectRecentlyActiveTaskSwitcherHost ? (
-					<CrossProjectRecentlyActiveTaskSwitcherPanel host={crossProjectRecentlyActiveTaskSwitcherHost} />
+					<CrossProjectRecentlyActiveTaskSwitcherPanel
+						host={crossProjectRecentlyActiveTaskSwitcherHost}
+						currentProjectTaskCards={currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion}
+						defaultAgentId={defaultAgentId ?? null}
+					/>
 				) : null}
 				<div
 					className={cn("flex min-h-0 flex-1 flex-col", showsCrossProjectRecentlyActiveTaskSwitcher && "hidden")}
@@ -552,6 +571,7 @@ export function ColumnContextPanel({
 										onDeleteTask={onDeleteTask}
 										onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 										onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
+										onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 										moveToTrashLoadingById={
 											column.id === "review" || column.id === "validation"
 												? moveToTrashLoadingById
@@ -575,14 +595,7 @@ export function ColumnContextPanel({
 							onJumpToStageSectionBelowTopRail={jumpToStageSectionBelowTopRail}
 							scrollRootRef={scrollContainerRef}
 							taskSessions={taskSessions}
-							onStartTask={onStartTask}
-							onMoveToTrashTask={onMoveToTrashTask}
-							onMoveToValidationTask={onMoveToValidationTask}
-							onRestoreFromTrashTask={onRestoreFromTrashTask}
-							onDeleteTask={onDeleteTask}
-							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
-							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-							moveToTrashLoadingById={moveToTrashLoadingById}
+							taskCardActionHandlers={taskCardActionHandlers}
 							workspacePath={workspacePath}
 							defaultClineModelId={defaultClineModelId}
 							defaultAgentId={defaultAgentId}

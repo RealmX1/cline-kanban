@@ -1,10 +1,12 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
+import { createComparatorByCurrentAgentTurnStartAscendingThenStableKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { isAgentOutputWithinActiveWindow, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS } from "@runtime-session-activity";
 import { Activity, ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { getAgentVisual } from "@/components/agent-visual";
 import { SESSION_ACTIVITY_COLOR } from "@/components/board-card-session-activity";
 import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed-time-pills";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { RuntimeInProgressTaskDetail, RuntimeProjectSummary, RuntimeProjectTaskCounts } from "@/runtime/types";
 import { useInterval } from "@/utils/react-use";
@@ -21,6 +23,13 @@ function isActiveInProgressTask(task: RuntimeInProgressTaskDetail, nowMs: number
 		isAgentOutputWithinActiveWindow(task.lastOutputAt, nowMs, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS)
 	);
 }
+
+// 已按 repo 分组，组内 taskId 不会撞号，稳定键用 taskId 即可。
+const compareActiveInProgressTasksByCurrentAgentTurnStartAscendingThenTaskId =
+	createComparatorByCurrentAgentTurnStartAscendingThenStableKey<RuntimeInProgressTaskDetail>(
+		(task) => task,
+		(task) => task.taskId,
+	);
 
 interface RepoTaskGroup {
 	repo: RuntimeProjectSummary;
@@ -43,10 +52,12 @@ export function CrossRepositoryStageFirstOverview({
 	projects,
 	onOpenTask,
 	onOpenStage,
+	onRequestCreateTask,
 }: {
 	projects: RuntimeProjectSummary[];
 	onOpenTask: (repoId: string, taskId: string) => void;
 	onOpenStage?: (repoId: string, stage: keyof RuntimeProjectTaskCounts) => void;
+	onRequestCreateTask?: () => void;
 }): React.ReactElement {
 	// 本地 tick：summary 不会每分钟推送，故自行 tick 让「近期活跃」窗口随时间衰减（同 task-card-body）。
 	const [nowMs, setNowMs] = useState(() => Date.now());
@@ -70,8 +81,9 @@ export function CrossRepositoryStageFirstOverview({
 				}
 			}
 			if (activeTasks.length > 0) {
-				// 活跃组内最近有输出的排前面。
-				activeTasks.sort((a, b) => (b.lastOutputAt ?? 0) - (a.lastOutputAt ?? 0));
+				// 活跃组内先进入 agent 回合的在前，与跨项目切换面板 Running 区同一比较器；不按 lastOutputAt 排，
+				// 否则 spinner 每次重绘都会让组内顺序抖动。
+				activeTasks.sort(compareActiveInProgressTasksByCurrentAgentTurnStartAscendingThenTaskId);
 				active.push({ repo, tasks: activeTasks });
 				activeCount += activeTasks.length;
 			}
@@ -91,6 +103,17 @@ export function CrossRepositoryStageFirstOverview({
 				<header className="flex items-baseline gap-2">
 					<h1 className="text-lg font-semibold text-text-primary">Board Overview</h1>
 					<span className="text-xs text-text-tertiary">across all repositories</span>
+					{/* Board Scope 建卡：对话框带目标项目字段（Task Creation Target Project），不切项目。 */}
+					{onRequestCreateTask ? (
+						<Button
+							icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
+							size="sm"
+							className="ml-auto self-center"
+							onClick={onRequestCreateTask}
+						>
+							New task
+						</Button>
+					) : null}
 				</header>
 
 				{/* In-Progress 阶段：stage → {Active, Stale} → repo → task */}

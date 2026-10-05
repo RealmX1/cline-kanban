@@ -43,6 +43,7 @@ function makeFacts(
 		lastSubstantiveOutputAt: null,
 		agentResponseGenerationStopped: null,
 		lastConversationProgressObservation: null,
+		agentResponseGenerationTurnStarted: null,
 		lastMainAgentConversationModelRequestDispatchObservation: null,
 		agentProcessStartedAt: null,
 		turnOwner: null,
@@ -100,12 +101,38 @@ describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
 		expect(entries.find((entry) => entry.taskId === "opened")?.lastOpenedByUserAt).toBe(NOW_MS - DAY_MS);
 	});
 
-	it("agent 正持有回合的卡不论多久没碰都进（Running 候选）", () => {
+	it("agent 正持有回合的卡不论多久没碰都进（Running 候选），并带上本轮回合开始事件供 Running 排序", () => {
 		const entries = collect(
 			makeBoard({ review: [makeCard("running")] }),
-			new Map([["running", makeFacts({ turnOwner: "agent", liveness: "live", lastOutputAt: NOW_MS })]]),
+			new Map([
+				[
+					"running",
+					makeFacts({
+						turnOwner: "agent",
+						liveness: "live",
+						lastOutputAt: NOW_MS,
+						agentResponseGenerationTurnStarted: { startedAt: NOW_MS - 1_000, turnSequence: 3 },
+					}),
+				],
+			]),
 		);
 		expect(entries.map((entry) => entry.taskId)).toEqual(["running"]);
+		expect(entries[0]?.agentResponseGenerationTurnStarted).toEqual({ startedAt: NOW_MS - 1_000, turnSequence: 3 });
+	});
+
+	it("带上卡片的 baseRef 与 worktreeMode（行上 git 元数据的 tooltip 与图标用）", () => {
+		const entries = collect(
+			makeBoard({
+				review: [
+					makeCard("branch-task", { taskDescriptionLastUpdatedAt: NOW_MS, baseRef: "develop" }),
+					makeCard("inplace-task", { taskDescriptionLastUpdatedAt: NOW_MS, worktreeMode: "inplace" }),
+				],
+			}),
+		);
+		expect(entries.map((entry) => [entry.taskId, entry.baseRef, entry.worktreeMode])).toEqual([
+			["branch-task", "develop", undefined],
+			["inplace-task", "main", "inplace"],
+		]);
 	});
 
 	it("置顶的卡即使在 Done 列、很久没碰也进；未置顶的 Done 卡即使刚碰过也不进", () => {

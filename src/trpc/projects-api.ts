@@ -5,10 +5,13 @@ import type {
 	RuntimeAllProjectsTaskSearchIndexResponse,
 	RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse,
 	RuntimeCrossProjectTaskSwitcherEntry,
+	RuntimeCrossProjectTaskWorktreeGitMetadata,
 	RuntimeDirectoryListResponse,
 	RuntimeProjectAddResponse,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
+	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
+	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse,
 	RuntimeRecordTaskOpenedByUserRequest,
 	RuntimeRecordTaskOpenedByUserResponse,
 	RuntimeTaskSessionSummary,
@@ -72,6 +75,10 @@ export interface CreateProjectsApiDependencies {
 	) => Promise<
 		Array<{ workspaceId: string; crossProjectTaskSwitcherEntries: RuntimeCrossProjectTaskSwitcherEntry[] }>
 	>;
+	// runtime 级单例缓存（见 cross-project-task-worktree-git-metadata-cache.ts）；api 对象按请求新建，缓存不能跟着新建。
+	readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries: (
+		request: RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
+	) => Promise<RuntimeCrossProjectTaskWorktreeGitMetadata[]>;
 	// 测试注入用；缺省 Date.now。
 	now?: () => number;
 }
@@ -390,5 +397,10 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 						await deps.listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon(activityHorizonMs),
 				};
 			},
+		readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries: async (
+			input: RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
+		): Promise<RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse> => {
+			return { tasks: await deps.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries(input) };
+		},
 	};
 }

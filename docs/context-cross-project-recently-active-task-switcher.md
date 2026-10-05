@@ -15,11 +15,13 @@ _Avoid_: dashboard, global view, left column scope toggle
 _Avoid_: card（它不是 board 卡片，没有 prompt / 动作按钮）
 
 **Pinned（置顶区）**：
-各项目 Task Pinboard 的汇总，只有一种 pin（不另设「面板专用 pin」）。**允许**与下面三区重复；点击后打开任务，并把它在下方区里的那一行滚进视野、脉冲高亮。可折叠（默认展开，`kanban.cross-project-task-switcher-pinned-section-collapsed.v1`，与 This project 置顶分段各自一个键）。对非当前项目的卡置顶走 runtime 的 `workspace.setTaskPinboardPinStateOfTaskCard`（现已转发到 `taskCardAction.setTaskPinboardPinStateOfTaskCard`；浏览器卡片动作迁到 `taskCardAction.*` 后改直调新入口并删掉旧入口），当前项目的卡仍走浏览器 setBoard，两条路共用 `src/core/task-pinboard-pinning.ts`。
+各项目 Task Pinboard 的汇总，只有一种 pin（不另设「面板专用 pin」）。**允许**与下面三区重复；点击后打开任务，并把它在下方区里的那一行滚进视野、脉冲高亮。可折叠（默认展开，`kanban.cross-project-task-switcher-pinned-section-collapsed.v1`，与 This project 置顶分段各自一个键）。置顶 / 取消置顶 / 改原因一律走 `taskCardAction.setTaskPinboardPinStateOfTaskCard`：当前项目的卡由宿主弹原因对话框、带 overlay；其他项目的卡由面板弹同一个对话框、不带 overlay（结果随广播回来）。
 
 **Running（运行区）**：
 `turnOwner === "agent"` 且（近 5 分钟有 PTY 输出，或已 park 在等自己派发的后台工作）。默认收起成一行「Running N」：在跑的任务暂时不需要人。
 与 Board Overview 的 **Active In-Progress Task** 用同一个输出窗口判据，但**不按列取**：review 列里被误放、其实还在跑的任务也算 Running。
+排序：按**本轮 agent 回合开始时刻升序**（先进入的在前、后进入的在后；summary sidecar `agentResponseGenerationTurnStarted`，在 `mergeSummaryWithFacets` 的「非 agent → agent」边沿上盖章，与 `agentResponseGenerationStopped` 对偶）。缺字段时回落到 agent 进程启动时刻，再缺排到末尾；同一时刻按 (workspaceId, taskId) 兜底。比较器 `compareRunningSectionEntriesByCurrentAgentTurnStartAscendingThenStableKey`，Board Overview 的 Active 组共用同一工厂。**绝不按 `lastOutputAt` 排**：spinner 每次重绘都推进它，2026-10-04 在 3484 上实测成员不变的相邻样本 30/38 次顺序变了（用户报为闪烁）。
+- 离开 Running 再回来的位置：交出回合（Stop、权限 / 提问 / 计划审批、idle_stall）后再进入 agent 回合是新边沿，排到**末尾**（`EXPERIMENT_NODE`：模态决策往返后是否保留原位）；同一 agent 回合内 5 分钟无输出掉出、输出恢复后回来，没有新边沿，回到原相对位置；park 期间仍在 Running，位置不变。
 _Avoid_: In Progress（那是 board 列名，列里允许停着已中断的任务）, active task
 
 **Prompt Cache Warm Awaiting User（缓存倒计时区，UI 名 Cache warm · your turn）**：
@@ -27,14 +29,35 @@ agent 没在持有回合、且按 agent 的实测 TTL 估算**主对话** prompt
 - 计时起点 = 主对话最后一次向模型发请求的时刻：summary sidecar `lastMainAgentConversationModelRequestDispatchObservation`，由 hooks-api 在「harness 紧接着就会发请求」的 hook（未被恢复守卫拦下的 UserPromptSubmit、主对话的 PostToolUse / PostToolUseFailure，Gemini 的 BeforeAgent / AfterTool）上以 ingest 时刻记下（判据 `main-agent-conversation-model-request-dispatch-hook-event-classification.ts`）。子代理内的事件（hook stdin 带 `agent_id`，2026-10-03 用 Claude Code 2.1.288 实测确认只在子代理事件上出现）不记；用户回合里到来的工具事件（主 agent 已 Stop、后台子代理还在跑）不记，例外是工具调用自己引出的提问 / 计划审批 / 授权答完之后。
 - **绝不读 `agentResponseGenerationStopped`**：会话恢复（换 incarnation）也算一次停止边沿，起点会被刷成恢复时刻（2026-10-03 实测三个 Claude 任务显示「18 分钟前」，真实最后请求在 11~21 小时前）。
 - Cursor 没有回合类 hook，起点读最近一次实质输出（有恢复重播保护）。还没观测到发请求事件的存量会话回落到高置信的对话推进观测，低置信 TUI 猜测不用。
+- 列资格：只收 **In progress / Review** 列（`isTaskCardBoardColumnEligibleForPromptCacheWarmAwaitingUserSection`）。已移入 Validation 的任务即使缓存仍热也下放到剩余区，由剩余区的排序模式与时间窗决定显不显示（2026-10-04 用户反馈：移入 Validation / Done 就是不打算再接这一轮对话）；Done 本来就在分区前排除。Validation 里 agent 正在干活照样进 Running，置顶照样在 Pinned。
 - 资格按缓存所在位置分：服务端缓存（Claude / Cursor）只要求 `turnOwner !== "agent"`，runtime 重启、会话被回收后照样在区内；同进程缓存（Codex / Kimi）要求 `liveness === "live"` 且起点不早于当前进程的启动时刻，恢复出来的新进程不算。
 - 倒计时药丸的 tooltip 写明起点的绝对时间与来源。
-- 已知残余：会话恢复后到 idle_stall 之前（约 1.5 分钟）facet 是 agent 回合，这段时间任务显示在 Running 区。
+- **压缩**（2026-10-05 用户拍板 B′）：Claude / Codex / Kimi 的 `PostCompact` 经专用 hook 事件 `main_agent_conversation_context_compaction_completed` 推进起点（不复用 `activity`，故不推进对话推进、不进通知捕获；Codex 刻意不用 SessionStart(compact)，它要等到下一次请求前才触发）。
+  - 自动压缩（agent 回合中，`trigger=auto`）：续写请求紧随其后，按普通发请求计。
+  - 手动 `/compact`（用户回合）：任务**留在区内但不显示倒计时**，行上显示「Compacted」，tooltip 写明压缩时刻与「下一条回复要重写压缩后的上下文」。理由（ccflare 逐请求实测）：压缩请求只按 5 分钟档读了被替换前的旧前缀、写入为 0；压缩后下一条请求不论早晚都要重写 86k–103k，只有 system + 项目上下文层（34k–47k）还能命中。留区时长按该 agent 的 TTL 下界（`EXPERIMENT_NODE`：A 续期 / B 退出 / B′ 留区、以及留区时长）。下一次真实请求后恢复普通倒计时。
+  - 「回复需重写约 N k」只在 harness 自己报了压缩后大小时显示（目前只有 Kimi 的 `estimatedTokenCount`，载荷拼写未经真机核对）。Claude / Codex 不报，按摘要长度或 transcript 内容估算与实测相差 3–10 倍，故不造数字。
+  - 残余：Cursor 没有 postCompact（它的起点读 TUI 实质输出，压缩时是否推进未验证）；子代理自己的自动压缩带 `agent_id`，不记；omp / Cline 没有压缩事件，也不在 TTL 表里。
+- 已知残余：会话恢复后到 idle_stall 之前（2026-10-04 实测 12 秒到约 80 秒）facet 是 agent 回合，这段时间任务显示在 Running 区（排在末尾，不扰动别的行）。部署重启自动续跑、点终端的重启按钮、从 Done 恢复都会触发。修法要动 Claude / Kimi / Codex 共用的 prompt-ready 状态机，另起任务。
 TTL 表在 `src/core/coding-agent-prompt-cache-retention-measured-ttl-lower-bounds.ts`（2026-10-02 本机实测下限，带 `EXPERIMENT_NODE`）。表里没有的 agent 不进这一区。
 _Avoid_: hot tasks, urgent
 
 **Row（面板行）**：
 紧凑行：第 1 行状态点 / agent 图标 / 标题（+ 倒计时药丸），第 2 行项目名 / stage 标签（仅置顶区）与三颗时长药丸（创建、停止生成、对话推进，与卡片同源），置顶区另有第 3 行置顶理由。元信息行 `flex-wrap`：窄宽度下药丸整组折到下一行，不截断、不挑着显示。
+元信息行还显示 worktree 的 git 元数据（2026-10-05 用户要求，与 This project 卡片目录行同一套显隐规则）：相对 base 分支的 ahead / behind 与已集成提交数，以及未提交改动「(N files +A -D)」。Backlog 不显示；没有可说的提交关系、且未提交改动全为 0 时整组隐藏。取数唯一入口 `useTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntry`：
+- 当前项目的行：读既有 `workspace_metadata_updated` 推流 store，零额外 git。
+- 其他项目的行：面板挂载且页面可见时，每 5 秒（`EXPERIMENT_NODE`）轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`（每次最多 100 条），结果进按 (workspaceId, taskId) 复合键的 store。服务端 `cross-project-task-worktree-git-metadata-cache.ts` 按键缓存，复用 `workspace-metadata-monitor` 的同一个探针（`src/workspace/task-worktree-git-metadata-probe.ts`）：fs-stat 门控、10 秒兜底、全局 git spawn 并发上限 4、同键单飞、base tip 每次请求每项目每 baseRef 只解析一次，5 分钟没被请求的键淘汰。baseRef / worktreeMode 以服务端 board 为准，不信任客户端。
+- 不并入 `projects_updated`：未提交改动在 agent 写文件时几秒一变，会让 100 KB 级的整份广播变频繁。
+
+**Expanded Row（展开行）**：
+行左侧 chevron（hover / 获得焦点时显示）把行展开成与 This project 同一个紧凑 `TaskCardBody`（渲染角色 `expanded_card_copy_in_cross_project_task_switcher_row`：不可拖、不持有 `data-task-id`，交互与本体一致），同一个任务在 Pinned 与下方区一起展开，展开状态跨重挂载保留。门控同 This project（`buildTaskCardBusinessProps`）。
+- 当前项目：直接用 Focus View 左栏手里的数据与动作（带 overlay 的 board、推流 session、同一套 handler），与 This project 那张卡逐字一致。
+- 其他项目：按需只读 `taskCardAction.readTaskCardWithBoardColumn`，条目变了去抖重读（重读期间保留上一份）。卡体经 `taskCardOwnedByOtherProjectWorkspaceId` 不读只按 taskId 分键的当前项目 store（git 元数据改读上面的跨项目轮询 store；资源占用与排队 prompt 只对当前项目推流，不显示）。动作调同一组 `taskCardAction.*` 命令、同样的删除 / 跳过 Validation 确认框，不带 overlay、不切项目，期间显示在途 spinner（`use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher.tsx`）。
+
+**Backlog Row In-Place Edit（backlog 行原地编辑）**：
+点 backlog 行（问题 5）在 Focus View 之上原地打开那张卡的编辑对话框，不切项目、焦点任务不动，与 This project 点 backlog 卡同语义（`use-backlog-task-editor-opening-in-any-project.ts`）。其他项目的卡：草稿按那个项目记，分支列表只读那个项目的 `workspace.getState`，保存只发改过的字段、不带 overlay，Save & Start 直接对那个项目发启动命令；对话框显示只读的「Project」标签。
+
+**Create Task In Board Scope（Board Scope 建卡）**：
+面板顶部「Create task (c)」、热键 `c`、Board Overview 的「New task」打开带目标项目字段的建卡框（**Task Creation Target Project**，见 `docs/context-stage-first-overview.md`），默认上下文项目，往别的项目建卡不切项目、弹提示，新卡随广播出现在面板里。
 
 **Remaining Section（剩余区，UI 名 Recent）**：
 不在 Running、也不在缓存倒计时区的其余条目，三种排序模式可切（per-browser）：
@@ -44,7 +67,7 @@ _Avoid_: hot tasks, urgent
 默认 7 天窗；「Show older」按需查询 30 天窗（`projects.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon`，不进广播）。快照只补广播取景范围**之外**的旧任务：落在取景范围内却不在广播里的快照条目已失效（取消置顶 / 移入 Done / 已删除），不补回；扩展期间随面板 30 秒 tick 重新拉取快照，范围外任务的变化在一个 tick 内收敛。
 
 **Section Exclusivity（三区互斥）**：
-Running / 缓存倒计时 / 剩余三区互斥，优先级 Running > 缓存倒计时 > 剩余。区归属**只读 session facet 与时间戳，不读 board 列**（唯一例外是排除 Done）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。回合一交出，`turnOwner` 就翻转，任务在同一帧从 Running 进入缓存倒计时区。区归属是纯函数（`src/core/cross-project-recently-active-task-switcher-section-assignment.ts`），前端每 30 秒按 now 重算。
+Running / 缓存倒计时 / 剩余三区互斥，优先级 Running > 缓存倒计时 > 剩余。区归属**只读 session facet 与时间戳，不读 board 列**（例外两处：排除 Done；Validation 不进缓存倒计时区）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。回合一交出，`turnOwner` 就翻转，任务在同一帧从 Running 进入缓存倒计时区。区归属是纯函数（`src/core/cross-project-recently-active-task-switcher-section-assignment.ts`），前端每 30 秒按 now 重算。
 
 **Unread Handoff（未读交接）**：
 通知中心里该 (workspaceId, taskId) 还有 `visitedAt` 为空的条目，与铃铛同源。三种模式下都用圆点标出。
