@@ -1,5 +1,7 @@
 name: Test
 
+# DIAGNOSTIC_458B1：一次性诊断分支专用，不合入。只在 ubuntu / Node 22 上并行跑 4 份完整根测试（保留与正式 CI 相同的并发负载），
+# 收集 pending-task-message-injection-startup-sweep「真实账本」每趟清扫的分阶段耗时，以及旧版 2000 次空转预算本会判失败的等待。
 on:
   workflow_call:
   workflow_dispatch:
@@ -8,24 +10,13 @@ permissions:
   contents: read
 
 jobs:
-  build-check-test:
-    # 2026-10-05 在 fork 上实测：Node 22 的 job 用时 8–10.5 分钟（根测试 352–384s、web-ui 约 95s），
-    # 10 分钟上限已撞上一次（macos 在 web-ui 测试中途被取消），另一次只差 21s。
-    # EXPERIMENT_NODE: CI job 上限取 20 分钟；更短 = 慢 runner 上被取消、不出红色报告，更长 = 真挂死时更晚被取消。
+  diagnostic-task-458b1-root-tests-with-instrumented-real-ledger-sweep:
     timeout-minutes: 20
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # 只测 package.json engines 声明支持的版本（>=22，14b3d0da 起）。Node 20 已于 2026-04-30 停止维护，
-        # 上游升 engines 时漏删了它的 job，2026-10-05 移除。
-        include:
-          - os: ubuntu-latest
-            node-version: 22
-          # - os: windows-latest
-          #   node-version: 22
-          - os: macos-latest
-            node-version: 22
+        repetition: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,15 +24,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 22
           cache: npm
-
-      # macOS node-gyp/electron rebuilds can fail with Python 3.12/distutils; pin 3.11.
-      - name: Setup Python (for node-gyp on macOS)
-        if: matrix.os == 'macos-latest'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
 
       - name: Install dependencies
         run: npm ci
@@ -49,26 +33,24 @@ jobs:
       - name: Install web-ui dependencies
         run: npm ci --prefix web-ui
 
-      - name: Install packages/desktop dependencies
-        run: npm ci --prefix packages/desktop
-
       - name: Build
         run: npm run build
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Runner hardware
+        run: nproc && free -m && cat /proc/loadavg
 
       - name: Root tests
         run: npm test
+        env:
+          DIAG_458B1_OUTPUT_DIRECTORY: ${{ runner.temp }}/diag-458b1
 
-      - name: Web UI tests
-        run: npm --prefix web-ui run test
+      - name: Print real-ledger sweep diagnostic summaries
+        if: always()
+        run: cat "${{ runner.temp }}"/diag-458b1/summary-*.txt || true
 
-      - name: packages/desktop typecheck
-        run: npm --prefix packages/desktop run typecheck
-
-      - name: packages/desktop tests
-        run: npm --prefix packages/desktop test
+      - name: Upload real-ledger sweep diagnostic data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-458b1-repetition-${{ matrix.repetition }}
+          path: ${{ runner.temp }}/diag-458b1
