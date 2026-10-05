@@ -3,8 +3,20 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import type { DiagnosticEventJournalChannel } from "../../src/diagnostics/rotating-jsonl-diagnostic-event-journal";
 import { createTaskAttributedProcessTreeResourceSampler } from "../../src/diagnostics/task-attributed-process-tree-resource-sampler";
-import { isProcessAlive } from "../../src/server/agent-session-descendant-process-inspection";
+import { isProcessAlive, snapshotDescendantPids } from "../../src/server/agent-session-descendant-process-inspection";
 import type { TaskResourceUsageAttributionRootEnumeration } from "../../src/server/task-resource-usage-attribution-root-enumeration";
+import {
+	type LoadSensitiveWallClockTwoTierDeadline,
+	waitForConditionWithinLoadSensitiveTwoTierDeadline,
+} from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
+
+// 根进程在 spawn 之后立刻打印 `sh -c` 的 pid，此时 sh 未必已经 fork 出 `sleep`；高负载下第一次采样
+// 会只看到外壳一个进程（推断的 flake 根因）。第一次采样前显式等到 sh 下出现子进程。
+const DETACHED_SHELL_COMMAND_FORKED_SLEEP_CHILD_TWO_TIER_DEADLINE: LoadSensitiveWallClockTwoTierDeadline = {
+	waitedForDescription: "detached `sh -c` 外壳 fork 出 sleep 子进程",
+	softDeadlineMsExpectedOnUncontendedHost: 2_000,
+	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 15_000,
+};
 
 // 用真实的 ps / lsof 验证整条链：一个「harness 根进程」拉起一个 detached（= setsid，与 Claude 的 Bash 工具
 // 外壳同形）的 `sh -c` 子进程；根进程退出后子进程被 launchd 收养，采样器仍须把它记在原 task 上并标为残留。
@@ -73,7 +85,7 @@ describeOnPosix("task attributed process tree resource sampler against real proc
 		}
 	});
 
-	it("keeps billing a setsid'd command to its task after the harness root exits, then closes its lifetime when it ends", async () => {
+	it("keeps billing a setsid'd command to its task after the harness root exits, then closes its lifetime when it ends", async (testContext) => {
 		const { root, detachedShellCommandProcessId } = spawnHarnessLikeRootWithDetachedShellCommand();
 		const rootProcessId = root.pid;
 		if (rootProcessId === undefined) {
@@ -82,6 +94,12 @@ describeOnPosix("task attributed process tree resource sampler against real proc
 		spawnedProcessIds.push(rootProcessId);
 		const shellCommandProcessId = await detachedShellCommandProcessId;
 		spawnedProcessIds.push(shellCommandProcessId);
+		await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+			testContext,
+			DETACHED_SHELL_COMMAND_FORKED_SLEEP_CHILD_TWO_TIER_DEADLINE,
+			async () => (await snapshotDescendantPids(shellCommandProcessId)).length > 0,
+			{ pollIntervalMs: 50 },
+		);
 
 		let rootIsRegistered = true;
 		const rootSessionStartedAtEpochMs = Date.now();
@@ -154,5 +172,6 @@ describeOnPosix("task attributed process tree resource sampler against real proc
 			survivedAttributionRootProcessExit: true,
 			processLifetimeEndedBy: "process_exited_between_samples",
 		});
-	});
+		// 用例超时覆盖：等 sleep 子进程的硬档 15s + 两次等进程退出各 10s + 三次采样。
+	}, 45_000);
 });

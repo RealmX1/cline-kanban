@@ -6,6 +6,13 @@ import { describe, expect, it, beforeAll, afterAll } from "vitest";
 
 const BUILD_BIN_DIR = path.resolve(import.meta.dirname, "..", "build", "bin");
 
+// shim 执行的「终会结束」上限：execFileSync 要冷启动 bash + node，原先 5s 在高负载下会被调度吃掉。
+// 这些用例判的是输出与退出码，不是多快，放宽不损失判别力。
+const SHIM_EXECUTION_TIMEOUT_MS_TOLERANT_OF_HOST_LOAD = 30_000;
+// 同步 execFileSync 期间 vitest 的超时定时器无法抢占，但用例结束后会按实际耗时补判超时，
+// 所以用例超时必须盖住单次 shim 执行的上限。
+const SHIM_INVOCATION_TEST_TIMEOUT_MS = SHIM_EXECUTION_TIMEOUT_MS_TOLERANT_OF_HOST_LOAD + 15_000;
+
 describe("CLI shim (packaging level)", () => {
 	it("build/bin/kanban exists and is executable", () => {
 		const shimPath = path.join(BUILD_BIN_DIR, "kanban");
@@ -36,7 +43,7 @@ describe("CLI shim (packaging level)", () => {
 		expect(content).toContain("node");
 	});
 
-	describe("shim invocation (simulated packaged layout)", () => {
+	describe("shim invocation (simulated packaged layout)", { timeout: SHIM_INVOCATION_TEST_TIMEOUT_MS }, () => {
 		// Create a fake Electron Resources layout and verify the shim
 		// actually runs node against the correct entry point.
 		let fakeResourcesDir: string;
@@ -87,7 +94,7 @@ describe("CLI shim (packaging level)", () => {
 			const output = execFileSync(fakeShimPath, ["--version", "--json"], {
 				encoding: "utf-8",
 				env: { ...process.env, PATH: process.env.PATH },
-				timeout: 5_000,
+				timeout: SHIM_EXECUTION_TIMEOUT_MS_TOLERANT_OF_HOST_LOAD,
 			}).trim();
 
 			// The fake CLI entry prints SHIM_TEST_OK:<args>
@@ -117,7 +124,7 @@ describe("CLI shim (packaging level)", () => {
 			try {
 				execFileSync(emptyShim, [], {
 					encoding: "utf-8",
-					timeout: 5_000,
+					timeout: SHIM_EXECUTION_TIMEOUT_MS_TOLERANT_OF_HOST_LOAD,
 				});
 				// Should not reach here
 				expect.unreachable("Shim should have exited with error");
@@ -133,7 +140,7 @@ describe("CLI shim (packaging level)", () => {
 
 	// Shell-shim edge cases (bash-only). Regression coverage for exit-code
 	// propagation, paths with spaces, and arg forwarding with special chars.
-	describe("shim shell semantics (macOS/Linux)", () => {
+	describe("shim shell semantics (macOS/Linux)", { timeout: SHIM_INVOCATION_TEST_TIMEOUT_MS }, () => {
 		/**
 		 * Build an isolated fake Resources/ layout with a custom CLI body
 		 * and return the shim path. Each caller is responsible for cleanup.
@@ -168,7 +175,7 @@ describe("CLI shim (packaging level)", () => {
 				cliBody: `process.exit(42);`,
 			});
 			try {
-				execFileSync(shimPath, [], { encoding: "utf-8", timeout: 5_000 });
+				execFileSync(shimPath, [], { encoding: "utf-8", timeout: SHIM_EXECUTION_TIMEOUT_MS_TOLERANT_OF_HOST_LOAD });
 				expect.unreachable("Shim should have exited with the CLI's status");
 			} catch (error: unknown) {
 				// The `exec` builtin replaces the shell process with node, so
@@ -192,7 +199,7 @@ describe("CLI shim (packaging level)", () => {
 			try {
 				const output = execFileSync(shimPath, [], {
 					encoding: "utf-8",
-					timeout: 5_000,
+					timeout: SHIM_EXECUTION_TIMEOUT_MS_TOLERANT_OF_HOST_LOAD,
 				}).trim();
 				expect(output.startsWith("OK:")).toBe(true);
 				expect(output).toContain(" "); // resolved CLI path kept the space
@@ -260,7 +267,7 @@ exec node "$@"
 			try {
 				const output = execFileSync(shimPath, ["--version"], {
 					encoding: "utf-8",
-					timeout: 5_000,
+					timeout: SHIM_EXECUTION_TIMEOUT_MS_TOLERANT_OF_HOST_LOAD,
 				}).trim();
 				// Marker proves: (1) the bundled Electron stub ran, not
 				// system node directly; (2) ELECTRON_RUN_AS_NODE was "1"
@@ -288,7 +295,7 @@ exec node "$@"
 				];
 				const output = execFileSync(shimPath, args, {
 					encoding: "utf-8",
-					timeout: 5_000,
+					timeout: SHIM_EXECUTION_TIMEOUT_MS_TOLERANT_OF_HOST_LOAD,
 				});
 				// Round-trip via JSON: the CLI's argv[2..] must match what we
 				// passed, byte-for-byte.

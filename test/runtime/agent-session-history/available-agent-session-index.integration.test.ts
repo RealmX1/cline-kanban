@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	configureAvailableAgentSessionIndexLimitsForTests,
 	getAvailableAgentSessionIndexCacheSizeForTests,
@@ -26,6 +26,17 @@ function writeJsonLines(filePath: string, records: unknown[]): void {
 	mkdirSync(dirname(filePath), { recursive: true });
 	writeFileSync(filePath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
 }
+
+// 内容扫描类用例把扫描期限放宽到 10s：默认 3s 是产品对单次请求的截断上限，高负载下扫描循环会被截断，
+// 用例就从「验证索引内容」变成了「验证截断」。截断契约本身由下面 sessionScanDeadlineMilliseconds: 0 的用例守护。
+// 自行调用 configure 的用例会整体覆盖这里的设置，所以它们各自也带上 10s。
+const SESSION_SCAN_DEADLINE_MILLISECONDS_TOLERANT_OF_HOST_LOAD_FOR_CONTENT_SCAN_TESTS = 10_000;
+
+beforeEach(() => {
+	configureAvailableAgentSessionIndexLimitsForTests({
+		sessionScanDeadlineMilliseconds: SESSION_SCAN_DEADLINE_MILLISECONDS_TOLERANT_OF_HOST_LOAD_FOR_CONTENT_SCAN_TESTS,
+	});
+});
 
 afterEach(() => {
 	resetAvailableAgentSessionIndexStateForTests();
@@ -175,7 +186,8 @@ describe("listAvailableAgentSessions", () => {
 		configureAvailableAgentSessionIndexLimitsForTests({
 			maximumTranscriptBytesPerFile,
 			maximumTranscriptBytesPerScan: 8_000,
-			sessionScanDeadlineMilliseconds: 10_000,
+			sessionScanDeadlineMilliseconds:
+				SESSION_SCAN_DEADLINE_MILLISECONDS_TOLERANT_OF_HOST_LOAD_FOR_CONTENT_SCAN_TESTS,
 		});
 		writeJsonLines(join(root, ".claude", "projects", "repository", `${sessionId}.jsonl`), [
 			headRecord,
@@ -213,7 +225,8 @@ describe("listAvailableAgentSessions", () => {
 		configureAvailableAgentSessionIndexLimitsForTests({
 			maximumTranscriptBytesPerFile: 500,
 			maximumTranscriptBytesPerScan: 1_000,
-			sessionScanDeadlineMilliseconds: 10_000,
+			sessionScanDeadlineMilliseconds:
+				SESSION_SCAN_DEADLINE_MILLISECONDS_TOLERANT_OF_HOST_LOAD_FOR_CONTENT_SCAN_TESTS,
 		});
 		const sessionsDirectory = join(root, ".cursor", "projects", "repository", "agent-transcripts");
 		for (const [index, sessionId] of [
@@ -251,7 +264,8 @@ describe("listAvailableAgentSessions", () => {
 		mkdirSync(workspacePath, { recursive: true });
 		configureAvailableAgentSessionIndexLimitsForTests({
 			parsedSessionCacheMaximumEntries: 2,
-			sessionScanDeadlineMilliseconds: 10_000,
+			sessionScanDeadlineMilliseconds:
+				SESSION_SCAN_DEADLINE_MILLISECONDS_TOLERANT_OF_HOST_LOAD_FOR_CONTENT_SCAN_TESTS,
 		});
 		const sessionsDirectory = join(root, ".codex", "sessions", "2026", "07", "12");
 		for (const sessionId of [

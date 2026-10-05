@@ -52,6 +52,10 @@ vi.mock("../../src/state/workspace-state", async (importOriginal) => {
 	};
 });
 
+// 「终会发生」的单档等待：首次提交要等账本 Worker 线程冷启动并加载 better-sqlite3，vi.waitFor 默认 1s
+// 在高负载下不够。放宽不损失判别力——断言判的是「最终落了几条、内容对不对」，不是多快。
+const LEDGER_EVENT_COMMIT_WAIT_OPTIONS_COVERING_WORKER_COLD_START = { timeout: 15_000 };
+
 describe("inter-work-unit relation ledger task message delivery request event", () => {
 	it("records who sent the message, who authored the body, the idempotency key and the body hash, without the body", async () => {
 		const gitFixture = createIsolatedGitTestWorkspaceFixture();
@@ -122,7 +126,7 @@ describe("inter-work-unit relation ledger task message delivery request event", 
 						(event) => event.eventKind === "task_message_delivery_requested_into_task_conversation_session",
 					);
 					expect(messageEvents).toHaveLength(2);
-				});
+				}, LEDGER_EVENT_COMMIT_WAIT_OPTIONS_COVERING_WORKER_COLD_START);
 				const fromCard = messageEvents.find(
 					(event) => event.actor.kanbanActorKind === "kanban_board_card_work_unit",
 				);
@@ -152,7 +156,8 @@ describe("inter-work-unit relation ledger task message delivery request event", 
 			else process.env.HOME = previousHome;
 			gitFixture.cleanup();
 		}
-	});
+		// 用例超时覆盖：账本提交等待 15s + 激活与停用 Worker。
+	}, 45_000);
 
 	it("停用时仍在读 board 的 message 记录先落到发起时的实例再关 worker；停用开始后才发起的记录只告警，不写账本也不重开 worker", async () => {
 		const gitFixture = createIsolatedGitTestWorkspaceFixture();
@@ -375,7 +380,7 @@ describe("inter-work-unit relation ledger task message delivery request event", 
 						(event) => event.eventKind === "task_message_delivery_requested_into_task_conversation_session",
 					);
 					expect(messageEvents).toHaveLength(2);
-				});
+				}, LEDGER_EVENT_COMMIT_WAIT_OPTIONS_COVERING_WORKER_COLD_START);
 				const agentIdleGated = messageEvents.find(
 					(event) =>
 						event.eventPayload.taskMessageDeliveryChannel === "agent_idle_gated_programmatic_delivery_queue",
@@ -421,5 +426,6 @@ describe("inter-work-unit relation ledger task message delivery request event", 
 			else process.env.HOME = previousHome;
 			gitFixture.cleanup();
 		}
-	});
+		// 用例超时覆盖：账本提交等待 15s + 激活与停用 Worker。
+	}, 45_000);
 });

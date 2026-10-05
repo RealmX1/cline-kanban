@@ -32,12 +32,15 @@ import {
 	type IsolatedGitTestRepository,
 	type IsolatedGitTestWorkspaceFixture,
 } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import type {
+	LoadSensitiveDeadlineAnnotatingTestContext,
+	LoadSensitiveWallClockTwoTierDeadline,
+} from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
 import {
 	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	hasChildProcessExited,
-	sigkillChildProcessAndWaitForExit,
-	waitForChildProcessExit,
+	waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline,
 	waitForRuntimeServerStartupBannerOrSigkillChild,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 
@@ -47,11 +50,15 @@ const requireFromHere = createRequire(import.meta.url);
 // onTestFinished cleanup 执行，保证「先杀 runtime、再删隔离 HOME」。
 const spawnedChildProcessRegistrySigkilledAfterEachTest = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 
-// 本文件用例最多冷启动两次 runtime，原用例预算最高 45s。统一挂在 describe 上：给 it(...) 第三参传标识符
-// 会让 biome 放弃 test-call 排版、重缩进整个用例体。
+// 「终会到达」的单档等待（WS 连接、流消息）：原先 5s 在高负载下会被 runtime 冷启动后的首次快照构建吃掉；
+// 这些断言判的是「最终收到了什么」，放宽不损失判别力。
+const RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS = 15_000;
+
+// 本文件用例最多冷启动两次 runtime，原用例预算最高 45s；另加两次优雅关停的硬档（各含 SIGKILL 确认 5s）。
+// 统一挂在 describe 上：给 it(...) 第三参传标识符会让 biome 放弃 test-call 排版、重缩进整个用例体。
 const RUNTIME_STATE_STREAM_TEST_TIMEOUT_MS = computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts({
 	runtimeColdStartCount: 2,
-	testBodyTimeoutBudgetMs: 45_000,
+	testBodyTimeoutBudgetMs: 45_000 + 2 * (30_000 + 5_000),
 });
 
 interface RuntimeStreamClient {
@@ -221,14 +228,129 @@ async function requestGracefulShutdown(childProcess: ChildProcess): Promise<void
 	});
 }
 
+// runtime 收到 shutdown IPC 后的优雅关停：超过软档只告警；超过硬档时 SIGKILL 并确认退出。
+const RUNTIME_GRACEFUL_SHUTDOWN_EXIT_TWO_TIER_DEADLINE: LoadSensitiveWallClockTwoTierDeadline = {
+	waitedForDescription: "runtime 收到 shutdown IPC 后优雅退出（超过硬档时退化为 SIGKILL）",
+	softDeadlineMsExpectedOnUncontendedHost: 5_000,
+	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 30_000,
+};
+
+interface StopKanbanServerOptions {
+	// 断言「优雅关停之后仍保留」的用例必须真的走完优雅关停：退化成 SIGKILL 时关停清理根本没跑，
+	// 「保留」会平凡成立、用例空转通过，所以这类用例在退化时直接失败。
+	// 产品侧强退（src/cli.ts 的 10s 关停兜底、onShutdown 抛错、第二个信号）同理：子进程照样在硬档内退出，
+	// 只能凭关停期间的 stderr 文案识别，见 assertRuntimeShutdownCompletedGracefullyRatherThanProductForcedExit。
+	requireGracefulShutdownExit?: boolean;
+}
+
+// src/cli.ts 的关停指示器在 stderr 是 pipe（非 TTY）时写纯文本：开始写「Cleaning up...」，结局只写 done /
+// interrupted / failed 三者之一（互斥：先到的结局把指示器置为非运行态，后到的 stop 是 no-op）。
+const RUNTIME_GRACEFUL_SHUTDOWN_COMPLETED_STDERR_MARKER = "Cleanup done.";
+// 产品侧关停失败 / 强退路径写到 stderr 的文案。退出状态不能当判据：installGracefulShutdownHandlers 在
+// 已记下关停信号时，兜底超时 / 关停抛错的 finalizeExit(1) 也是 reraise 该信号，与优雅完成同为被 SIGINT 结束。
+const RUNTIME_SHUTDOWN_FAILED_OR_FORCED_EXIT_STDERR_MARKERS = [
+	"Forced exit after shutdown timeout",
+	"Shutdown failed:",
+	"Forced exit on second signal",
+	"Cleanup interrupted.",
+	"Cleanup failed.",
+] as const;
+// 子进程 exit 之后 stdio 可能还没读完（Node 的 'exit' 先于 'close'），判定前等 'close'。正常是毫秒级；
+// 上限借用 stop 预算里「SIGKILL 确认 5s」那一格——走到这里说明进程已在硬档内自行退出，没有用到 SIGKILL 确认。
+const RUNTIME_CHILD_PROCESS_STDIO_CLOSE_AFTER_EXIT_WAIT_TIMEOUT_MS = 5_000;
+const RUNTIME_SHUTDOWN_OUTPUT_TAIL_CHARACTER_LIMIT_FOR_FAILURE_MESSAGE = 4_000;
+
+interface RuntimeChildProcessOutputCapturedDuringShutdown {
+	readCapturedStderr(): string;
+	describeCapturedOutputForFailureMessage(): string;
+	waitForChildProcessStdioClosed(timeoutMs: number): Promise<boolean>;
+	stopCapturing(): void;
+}
+
+function keepOutputTailForFailureMessage(output: string): string {
+	return output.length <= RUNTIME_SHUTDOWN_OUTPUT_TAIL_CHARACTER_LIMIT_FOR_FAILURE_MESSAGE
+		? output
+		: `…(截断，只保留末尾 ${RUNTIME_SHUTDOWN_OUTPUT_TAIL_CHARACTER_LIMIT_FOR_FAILURE_MESSAGE} 字符)${output.slice(-RUNTIME_SHUTDOWN_OUTPUT_TAIL_CHARACTER_LIMIT_FOR_FAILURE_MESSAGE)}`;
+}
+
+// 必须在发出 shutdown 请求之前开始收集，否则会漏掉「Cleaning up...」之类的早期关停输出。
+function startCapturingRuntimeChildProcessOutputDuringShutdown(
+	child: ChildProcess,
+): RuntimeChildProcessOutputCapturedDuringShutdown {
+	let capturedStdout = "";
+	let capturedStderr = "";
+	let didChildProcessStdioClose = false;
+	const handleStdoutData = (chunk: Buffer) => {
+		capturedStdout += chunk.toString();
+	};
+	const handleStderrData = (chunk: Buffer) => {
+		capturedStderr += chunk.toString();
+	};
+	const childProcessStdioClosed = new Promise<void>((resolveClosed) => {
+		child.once("close", () => {
+			didChildProcessStdioClose = true;
+			resolveClosed();
+		});
+	});
+	child.stdout?.on("data", handleStdoutData);
+	child.stderr?.on("data", handleStderrData);
+	return {
+		readCapturedStderr: () => capturedStderr,
+		describeCapturedOutputForFailureMessage: () =>
+			`关停期间 runtime 子进程输出（exitCode=${String(child.exitCode)} signal=${String(child.signalCode)} stdio 已关闭=${String(didChildProcessStdioClose)}）：\nstdout:\n${keepOutputTailForFailureMessage(capturedStdout)}\nstderr:\n${keepOutputTailForFailureMessage(capturedStderr)}`,
+		async waitForChildProcessStdioClosed(timeoutMs) {
+			if (didChildProcessStdioClose) {
+				return true;
+			}
+			let timeoutId: ReturnType<typeof setTimeout> | undefined;
+			const didCloseInTime = await Promise.race([
+				childProcessStdioClosed.then(() => true),
+				new Promise<boolean>((resolveTimeout) => {
+					timeoutId = setTimeout(() => resolveTimeout(false), timeoutMs);
+				}),
+			]);
+			clearTimeout(timeoutId);
+			return didCloseInTime;
+		},
+		stopCapturing() {
+			child.stdout?.removeListener("data", handleStdoutData);
+			child.stderr?.removeListener("data", handleStderrData);
+		},
+	};
+}
+
+// 调用前子进程已在两档期限内自行退出。正向要求「Cleanup done.」：未知的异常结局同样缺这条文案；
+// 反向拒绝已知的失败 / 强退文案，命中时失败消息能直接指出走了哪条产品路径。
+async function assertRuntimeShutdownCompletedGracefullyRatherThanProductForcedExit(
+	runtimeOutputCapturedDuringShutdown: RuntimeChildProcessOutputCapturedDuringShutdown,
+): Promise<void> {
+	await runtimeOutputCapturedDuringShutdown.waitForChildProcessStdioClosed(
+		RUNTIME_CHILD_PROCESS_STDIO_CLOSE_AFTER_EXIT_WAIT_TIMEOUT_MS,
+	);
+	const capturedStderr = runtimeOutputCapturedDuringShutdown.readCapturedStderr();
+	const matchedFailedOrForcedExitMarkers = RUNTIME_SHUTDOWN_FAILED_OR_FORCED_EXIT_STDERR_MARKERS.filter((marker) =>
+		capturedStderr.includes(marker),
+	);
+	const didReportGracefulShutdownCompleted = capturedStderr.includes(
+		RUNTIME_GRACEFUL_SHUTDOWN_COMPLETED_STDERR_MARKER,
+	);
+	if (didReportGracefulShutdownCompleted && matchedFailedOrForcedExitMarkers.length === 0) {
+		return;
+	}
+	throw new Error(
+		`runtime 进程虽已退出，但没有优雅完成关停（产品侧失败 / 强退路径）：命中失败或强退文案 [${matchedFailedOrForcedExitMarkers.join(", ")}]；stderr ${didReportGracefulShutdownCompleted ? "含" : "缺少"}「${RUNTIME_GRACEFUL_SHUTDOWN_COMPLETED_STDERR_MARKER}」。\n${runtimeOutputCapturedDuringShutdown.describeCapturedOutputForFailureMessage()}`,
+	);
+}
+
 async function startKanbanServer(input: {
+	testContext: LoadSensitiveDeadlineAnnotatingTestContext;
 	cwd: string;
 	gitFixture: IsolatedGitTestWorkspaceFixture;
 	port: number;
 	extraArgs?: string[];
 }): Promise<{
 	runtimeUrl: string;
-	stop: () => Promise<void>;
+	stop: (options?: StopKanbanServerOptions) => Promise<void>;
 }> {
 	const cliEntrypoint = resolve(process.cwd(), "src/cli.ts");
 	const shutdownIpcHookPath = resolveShutdownIpcHookPath();
@@ -256,19 +378,39 @@ async function startKanbanServer(input: {
 	const { runtimeUrl } = await waitForRuntimeServerStartupBannerOrSigkillChild(child);
 	return {
 		runtimeUrl,
-		stop: async () => {
+		stop: async (options = {}) => {
 			if (hasChildProcessExited(child)) {
 				return;
 			}
-			await requestGracefulShutdown(child);
-			const didExitGracefully = await waitForChildProcessExit(child, 5_000);
-			if (didExitGracefully) {
-				return;
-			}
-
-			const didExitAfterForce = await sigkillChildProcessAndWaitForExit(child);
-			if (!didExitAfterForce) {
-				throw new Error("Timed out stopping kanban test server process.");
+			const runtimeOutputCapturedDuringShutdown = startCapturingRuntimeChildProcessOutputDuringShutdown(child);
+			try {
+				await requestGracefulShutdown(child);
+				try {
+					await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
+						input.testContext,
+						child,
+						RUNTIME_GRACEFUL_SHUTDOWN_EXIT_TWO_TIER_DEADLINE,
+						{
+							describeChildProcessOutputForFailureMessage:
+								runtimeOutputCapturedDuringShutdown.describeCapturedOutputForFailureMessage,
+						},
+					);
+				} catch (gracefulShutdownFailure) {
+					// 子进程此时已被 SIGKILL 并确认退出，annotation 也已写下；只有依赖优雅关停的用例才判失败。
+					if (options.requireGracefulShutdownExit) {
+						throw gracefulShutdownFailure;
+					}
+					if (!hasChildProcessExited(child)) {
+						throw new Error("Timed out stopping kanban test server process.");
+					}
+				}
+				if (options.requireGracefulShutdownExit) {
+					await assertRuntimeShutdownCompletedGracefullyRatherThanProductForcedExit(
+						runtimeOutputCapturedDuringShutdown,
+					);
+				}
+			} finally {
+				runtimeOutputCapturedDuringShutdown.stopCapturing();
 			}
 		},
 	};
@@ -292,7 +434,7 @@ async function connectRuntimeStream(url: string): Promise<RuntimeStreamClient> {
 	await new Promise<void>((resolveOpen, rejectOpen) => {
 		const timeoutId = setTimeout(() => {
 			rejectOpen(new Error(`Timed out connecting websocket: ${url}`));
-		}, 5_000);
+		}, RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS);
 		socket.once("open", () => {
 			clearTimeout(timeoutId);
 			resolveOpen();
@@ -305,7 +447,7 @@ async function connectRuntimeStream(url: string): Promise<RuntimeStreamClient> {
 
 	const waitForMessage = async (
 		predicate: (message: RuntimeStateStreamMessage) => boolean,
-		timeoutMs = 5_000,
+		timeoutMs = RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
 	): Promise<RuntimeStateStreamMessage> =>
 		await new Promise((resolveMessage, rejectMessage) => {
 			let settled = false;
@@ -423,7 +565,7 @@ afterEach(async () => {
 });
 
 describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE_STREAM_TEST_TIMEOUT_MS }, () => {
-	it("retains indexed project data and selection when the project path becomes unavailable", async () => {
+	it("retains indexed project data and selection when the project path becomes unavailable", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const tempHome = integrationFixture.homeDirectoryPath;
 		const repository = integrationFixture.createRepository("unavailable-project");
@@ -432,6 +574,7 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
 			port,
@@ -536,13 +679,14 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it("treats core.bare=true as a retained unavailable project without deleting persisted state", async () => {
+	it("treats core.bare=true as a retained unavailable project without deleting persisted state", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const tempHome = integrationFixture.homeDirectoryPath;
 		const repository = integrationFixture.createRepository("bare-project");
 		const projectPath = repository.repositoryPath;
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
 			port,
@@ -617,12 +761,13 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it("starts outside a git repository with no active workspace", async () => {
+	it("starts outside a git repository with no active workspace", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const nonGitPath = integrationFixture.createNonGitDirectory("no-git-directory");
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: nonGitPath,
 			gitFixture: integrationFixture.gitFixture,
 			port,
@@ -659,12 +804,13 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it("starts from the home directory with no active workspace", async () => {
+	it("starts from the home directory with no active workspace", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const tempHome = integrationFixture.homeDirectoryPath;
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: tempHome,
 			gitFixture: integrationFixture.gitFixture,
 			port,
@@ -701,7 +847,7 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it("launches outside git using the first indexed project", async () => {
+	it("launches outside git using the first indexed project", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const projectAPath = integrationFixture.createRepository("project-a").repositoryPath;
 		const projectBPath = integrationFixture.createRepository("project-b").repositoryPath;
@@ -709,6 +855,7 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 
 		const firstPort = await getAvailablePort();
 		const firstServer = await startKanbanServer({
+			testContext,
 			cwd: projectAPath,
 			gitFixture: integrationFixture.gitFixture,
 			port: firstPort,
@@ -737,6 +884,7 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 
 		const secondPort = await getAvailablePort();
 		const secondServer = await startKanbanServer({
+			testContext,
 			cwd: nonGitPath,
 			gitFixture: integrationFixture.gitFixture,
 			port: secondPort,
@@ -776,13 +924,14 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it("requires explicit confirmation before initializing git for a non-git added project", async () => {
+	it("requires explicit confirmation before initializing git for a non-git added project", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const projectAPath = integrationFixture.createRepository("project-a").repositoryPath;
 		const nonGitPath = integrationFixture.createNonGitDirectory("non-git-project");
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: projectAPath,
 			gitFixture: integrationFixture.gitFixture,
 			port,
@@ -837,13 +986,14 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it("streams per-project snapshots and isolates workspace updates", async () => {
+	it("streams per-project snapshots and isolates workspace updates", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const projectAPath = integrationFixture.createRepository("project-a").repositoryPath;
 		const projectBPath = integrationFixture.createRepository("project-b").repositoryPath;
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: projectAPath,
 			gitFixture: integrationFixture.gitFixture,
 			port,
@@ -951,12 +1101,13 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it("emits task_ready_for_review when hook review event is ingested", async () => {
+	it("emits task_ready_for_review when hook review event is ingested", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const projectPath = integrationFixture.createRepository("project-hook-stream").repositoryPath;
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
 			port,
@@ -1031,7 +1182,7 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it("streams centralized workspace metadata updates for task worktrees", async () => {
+	it("streams centralized workspace metadata updates for task worktrees", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-metadata-stream");
 		const projectPath = repository.repositoryPath;
@@ -1040,6 +1191,7 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
 			port,
@@ -1156,7 +1308,7 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it("preserves existing task worktree when base ref advances", async () => {
+	it("preserves existing task worktree when base ref advances", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-preserve-worktree");
 		const projectPath = repository.repositoryPath;
@@ -1166,6 +1318,7 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: projectPath,
 			gitFixture: integrationFixture.gitFixture,
 			port,
@@ -1266,7 +1419,8 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		}
 	});
 
-	it.each([
+	// it.for 而非 it.each：要拿到 testContext，stop() 才能写软档告警、并在退化成 SIGKILL 时判失败。
+	it.for([
 		{
 			label: "default shutdown",
 			extraArgs: [] as string[],
@@ -1275,136 +1429,136 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 			label: "the hidden --skip-shutdown-cleanup compatibility flag",
 			extraArgs: ["--skip-shutdown-cleanup"],
 		},
-	])(
-		"preserves completed review cards and task worktrees with $label",
-		async ({ extraArgs }) => {
-			const integrationFixture = createRuntimeStateStreamIntegrationFixture();
-			const projectPath = integrationFixture.createRepository("project-safe-shutdown").repositoryPath;
+	])("preserves completed review cards and task worktrees with $label", async ({ extraArgs }, testContext) => {
+		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+		const projectPath = integrationFixture.createRepository("project-safe-shutdown").repositoryPath;
 
-			// 两个参数化用例共用按文件隔离的关系账本：id 对全局登记簿唯一，复用同一个 id 会被当成删卡后复用而拒写。
-			const taskId = `safe-shutdown-review-task-with-${extraArgs.length}-extra-args`;
-			const now = Date.now();
-			const firstPort = await getAvailablePort();
-			const firstServer = await startKanbanServer({
-				cwd: projectPath,
-				gitFixture: integrationFixture.gitFixture,
-				port: firstPort,
-				extraArgs,
+		// 两个参数化用例共用按文件隔离的关系账本：id 对全局登记簿唯一，复用同一个 id 会被当成删卡后复用而拒写。
+		const taskId = `safe-shutdown-review-task-with-${extraArgs.length}-extra-args`;
+		const now = Date.now();
+		const firstPort = await getAvailablePort();
+		const firstServer = await startKanbanServer({
+			testContext,
+			cwd: projectPath,
+			gitFixture: integrationFixture.gitFixture,
+			port: firstPort,
+			extraArgs,
+		});
+
+		try {
+			const firstRuntimeUrl = new URL(firstServer.runtimeUrl);
+			const workspaceId = decodeURIComponent(firstRuntimeUrl.pathname.slice(1));
+			expect(workspaceId).not.toBe("");
+
+			const currentState = await requestJson<RuntimeWorkspaceStateResponse>({
+				baseUrl: `http://127.0.0.1:${firstPort}`,
+				procedure: "workspace.getState",
+				type: "query",
+				workspaceId,
 			});
+			expect(currentState.status).toBe(200);
 
-			try {
-				const firstRuntimeUrl = new URL(firstServer.runtimeUrl);
-				const workspaceId = decodeURIComponent(firstRuntimeUrl.pathname.slice(1));
-				expect(workspaceId).not.toBe("");
-
-				const currentState = await requestJson<RuntimeWorkspaceStateResponse>({
-					baseUrl: `http://127.0.0.1:${firstPort}`,
-					procedure: "workspace.getState",
-					type: "query",
-					workspaceId,
-				});
-				expect(currentState.status).toBe(200);
-
-				const seedResponse = await requestJson<RuntimeWorkspaceStateResponse>({
-					baseUrl: `http://127.0.0.1:${firstPort}`,
-					procedure: "workspace.saveState",
-					type: "mutation",
-					workspaceId,
-					payload: {
-						board: createReviewBoard(taskId, "Safe Shutdown Review Task"),
-						sessions: {
-							[taskId]: {
-								taskId,
-								state: "awaiting_review",
-								agentId: "codex",
-								workspacePath: projectPath,
-								pid: null,
-								startedAt: now - 2_000,
-								updatedAt: now,
-								lastOutputAt: now,
-								reviewReason: "hook",
-								exitCode: null,
-								lastHookAt: null,
-								latestHookActivity: null,
-							},
+			const seedResponse = await requestJson<RuntimeWorkspaceStateResponse>({
+				baseUrl: `http://127.0.0.1:${firstPort}`,
+				procedure: "workspace.saveState",
+				type: "mutation",
+				workspaceId,
+				payload: {
+					board: createReviewBoard(taskId, "Safe Shutdown Review Task"),
+					sessions: {
+						[taskId]: {
+							taskId,
+							state: "awaiting_review",
+							agentId: "codex",
+							workspacePath: projectPath,
+							pid: null,
+							startedAt: now - 2_000,
+							updatedAt: now,
+							lastOutputAt: now,
+							reviewReason: "hook",
+							exitCode: null,
+							lastHookAt: null,
+							latestHookActivity: null,
 						},
-						expectedRevision: currentState.payload.revision,
 					},
-				});
-				expect(seedResponse.status).toBe(200);
-
-				const taskWorkspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
-					baseUrl: `http://127.0.0.1:${firstPort}`,
-					procedure: "workspace.getTaskContext",
-					type: "query",
-					workspaceId,
-					payload: { taskId, baseRef: "HEAD" },
-				});
-				expect(taskWorkspaceInfo.status).toBe(200);
-				mkdirSync(taskWorkspaceInfo.payload.path, { recursive: true });
-			} finally {
-				await firstServer.stop();
-			}
-
-			const secondPort = await getAvailablePort();
-			const secondServer = await startKanbanServer({
-				cwd: projectPath,
-				gitFixture: integrationFixture.gitFixture,
-				port: secondPort,
+					expectedRevision: currentState.payload.revision,
+				},
 			});
+			expect(seedResponse.status).toBe(200);
 
-			try {
-				const secondRuntimeUrl = new URL(secondServer.runtimeUrl);
-				const workspaceId = decodeURIComponent(secondRuntimeUrl.pathname.slice(1));
-				expect(workspaceId).not.toBe("");
+			const taskWorkspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
+				baseUrl: `http://127.0.0.1:${firstPort}`,
+				procedure: "workspace.getTaskContext",
+				type: "query",
+				workspaceId,
+				payload: { taskId, baseRef: "HEAD" },
+			});
+			expect(taskWorkspaceInfo.status).toBe(200);
+			mkdirSync(taskWorkspaceInfo.payload.path, { recursive: true });
+		} finally {
+			// 本用例断言的正是「优雅关停之后卡片与 worktree 仍在」：退化成 SIGKILL 就判失败，不能空转通过。
+			await firstServer.stop({ requireGracefulShutdownExit: true });
+		}
 
-				const finalState = await requestJson<RuntimeWorkspaceStateResponse>({
-					baseUrl: `http://127.0.0.1:${secondPort}`,
-					procedure: "workspace.getState",
-					type: "query",
-					workspaceId,
-				});
-				expect(finalState.status).toBe(200);
+		const secondPort = await getAvailablePort();
+		const secondServer = await startKanbanServer({
+			testContext,
+			cwd: projectPath,
+			gitFixture: integrationFixture.gitFixture,
+			port: secondPort,
+		});
 
-				const reviewCards = finalState.payload.board.columns.find((column) => column.id === "review")?.cards ?? [];
-				const trashCards = finalState.payload.board.columns.find((column) => column.id === "trash")?.cards ?? [];
-				expect(reviewCards.some((card) => card.id === taskId)).toBe(true);
-				expect(trashCards.some((card) => card.id === taskId)).toBe(false);
-				expect(finalState.payload.sessions[taskId]).toEqual(
-					expect.objectContaining({
-						state: "awaiting_review",
-						turnOwner: "user",
-						liveness: "exited",
-						userTurnKind: "review",
-						reviewReason: "hook",
-						pid: null,
-					}),
-				);
+		try {
+			const secondRuntimeUrl = new URL(secondServer.runtimeUrl);
+			const workspaceId = decodeURIComponent(secondRuntimeUrl.pathname.slice(1));
+			expect(workspaceId).not.toBe("");
 
-				const workspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
-					baseUrl: `http://127.0.0.1:${secondPort}`,
-					procedure: "workspace.getTaskContext",
-					type: "query",
-					workspaceId,
-					payload: { taskId, baseRef: "HEAD" },
-				});
-				expect(workspaceInfo.status).toBe(200);
-				expect(workspaceInfo.payload.exists).toBe(true);
-			} finally {
-				await secondServer.stop();
-				await integrationFixture.cleanup();
-			}
-		},
-		RUNTIME_STATE_STREAM_TEST_TIMEOUT_MS,
-	);
+			const finalState = await requestJson<RuntimeWorkspaceStateResponse>({
+				baseUrl: `http://127.0.0.1:${secondPort}`,
+				procedure: "workspace.getState",
+				type: "query",
+				workspaceId,
+			});
+			expect(finalState.status).toBe(200);
 
-	it("falls back to the remaining project after confirmed permanent deletion of the active project", async () => {
+			const reviewCards = finalState.payload.board.columns.find((column) => column.id === "review")?.cards ?? [];
+			const trashCards = finalState.payload.board.columns.find((column) => column.id === "trash")?.cards ?? [];
+			expect(reviewCards.some((card) => card.id === taskId)).toBe(true);
+			expect(trashCards.some((card) => card.id === taskId)).toBe(false);
+			expect(finalState.payload.sessions[taskId]).toEqual(
+				expect.objectContaining({
+					state: "awaiting_review",
+					turnOwner: "user",
+					liveness: "exited",
+					userTurnKind: "review",
+					reviewReason: "hook",
+					pid: null,
+				}),
+			);
+
+			const workspaceInfo = await requestJson<RuntimeTaskWorkspaceInfoResponse>({
+				baseUrl: `http://127.0.0.1:${secondPort}`,
+				procedure: "workspace.getTaskContext",
+				type: "query",
+				workspaceId,
+				payload: { taskId, baseRef: "HEAD" },
+			});
+			expect(workspaceInfo.status).toBe(200);
+			expect(workspaceInfo.payload.exists).toBe(true);
+		} finally {
+			await secondServer.stop();
+			await integrationFixture.cleanup();
+		}
+	});
+
+	it("falls back to the remaining project after confirmed permanent deletion of the active project", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const projectAPath = integrationFixture.createRepository("project-a").repositoryPath;
 		const projectBPath = integrationFixture.createRepository("project-b").repositoryPath;
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
+			testContext,
 			cwd: projectAPath,
 			gitFixture: integrationFixture.gitFixture,
 			port,
