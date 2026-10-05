@@ -37,6 +37,8 @@ function buildCrossProjectTaskSwitcherEntryFromBoardCard(
 		lastMainAgentConversationModelRequestDispatchObservation:
 			sessionFacts?.lastMainAgentConversationModelRequestDispatchObservation ?? null,
 		agentProcessStartedAt: sessionFacts?.agentProcessStartedAt ?? null,
+		baseRef: card.baseRef,
+		...(card.worktreeMode ? { worktreeMode: card.worktreeMode } : {}),
 	};
 }
 

@@ -36,6 +36,7 @@
       "@runtime-trpc": ["../src/trpc/app-router.ts"],
       "@runtime-shortcuts": ["../src/config/shortcut-utils.ts"],
       "@runtime-task-agent-permission-mode": ["../src/core/task-agent-permission-mode.ts"],
+      "@runtime-task-card-action-board-column-transitions": ["../src/core/task-card-action-board-column-transitions.ts"],
       "@runtime-task-create-base-ref-resolution": ["../src/core/task-create-base-ref-resolution.ts"],
       "@runtime-task-id": ["../src/core/task-id.ts"],
       "@runtime-task-pinboard-pinning": ["../src/core/task-pinboard-pinning.ts"],

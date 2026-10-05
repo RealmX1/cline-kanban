@@ -610,6 +610,106 @@ export function applyDragResult(
 		},
 	};
 }
+// 拖放落点按 taskId 解出，不信任 `source.index`：看板显示的是叠了卡片动作 overlay 的 displayedBoard，命令在途时
+// 它的下标与内存里那份会被保存的 board 不一定一致，按下标从内存 board 里取卡可能取到另一张。判据与 applyDragResult
+// 一致（drag-rules 的跨列白名单、backlog 不重排、程序化移动的「插到列顶」）。
+export type TaskCardDropResolvedByTaskId =
+	| { taskCardDropKind: "no_effective_task_card_drop" }
+	| {
+			taskCardDropKind: "task_card_reordered_within_board_column";
+			taskId: string;
+			boardColumnId: BoardColumnId;
+			destinationIndex: number;
+	  }
+	| {
+			taskCardDropKind: "task_card_moved_between_board_columns";
+			taskId: string;
+			fromColumnId: BoardColumnId;
+			toColumnId: BoardColumnId;
+			destinationIndex: number;
+	  };
+
+export function resolveTaskCardDropFromDragResultByTaskId(
+	board: BoardData,
+	result: DropResult,
+	options?: { programmaticCardMoveInFlight?: ProgrammaticCardMoveInFlight | null },
+): TaskCardDropResolvedByTaskId {
+	const { source, destination, type } = result;
+	if (!destination || type === "COLUMN") {
+		return { taskCardDropKind: "no_effective_task_card_drop" };
+	}
+	const selection = findCardSelection(board, result.draggableId);
+	const toColumnId = board.columns.find((column) => column.id === destination.droppableId)?.id;
+	if (!selection || !toColumnId) {
+		return { taskCardDropKind: "no_effective_task_card_drop" };
+	}
+	const fromColumnId = selection.column.id;
+	if (fromColumnId === toColumnId) {
+		const isDroppedOntoOwnPosition =
+			source.droppableId === destination.droppableId && source.index === destination.index;
+		// Backlog 按 Description 最后更新时间排序，手动重排会被下一次排序立刻覆盖（同 applyDragResult）。
+		if (isDroppedOntoOwnPosition || fromColumnId === "backlog") {
+			return { taskCardDropKind: "no_effective_task_card_drop" };
+		}
+		return {
+			taskCardDropKind: "task_card_reordered_within_board_column",
+			taskId: result.draggableId,
+			boardColumnId: fromColumnId,
+			destinationIndex: destination.index,
+		};
+	}
+	if (
+		!isAllowedCrossColumnCardMove(fromColumnId, toColumnId, {
+			taskId: result.draggableId,
+			programmaticCardMoveInFlight: options?.programmaticCardMoveInFlight,
+		})
+	) {
+		return { taskCardDropKind: "no_effective_task_card_drop" };
+	}
+	return {
+		taskCardDropKind: "task_card_moved_between_board_columns",
+		taskId: result.draggableId,
+		fromColumnId,
+		toColumnId,
+		destinationIndex: options?.programmaticCardMoveInFlight?.insertAtTop ? 0 : destination.index,
+	};
+}
+
+// 按 taskId 把卡放到目标列的指定下标（夹取到列长）。同列即重排（不推 updatedAt，同 applyDragResult 的列内分支），
+// 跨列推 updatedAt（同 applyDragResult 的跨列分支）。只给仍留在浏览器的移动用：列内重排、浏览器端列自动流转。
+export function placeTaskCardIntoBoardColumnAtIndexByTaskId(
+	board: BoardData,
+	taskId: string,
+	targetColumnId: BoardColumnId,
+	destinationIndex: number,
+): { board: BoardData; placed: boolean } {
+	const selection = findCardSelection(board, taskId);
+	const targetColumn = board.columns.find((column) => column.id === targetColumnId);
+	if (!selection || !targetColumn) {
+		return { board, placed: false };
+	}
+	const isReorderWithinColumn = selection.column.id === targetColumnId;
+	const cardToPlace = isReorderWithinColumn ? selection.card : updateTaskTimestamp(selection.card);
+	const columns = board.columns.map((column) => {
+		const cardsWithoutTaskCard = column.cards.filter((card) => card.id !== taskId);
+		if (column.id !== targetColumnId) {
+			return cardsWithoutTaskCard.length === column.cards.length
+				? column
+				: { ...column, cards: cardsWithoutTaskCard };
+		}
+		const insertAtIndex = Math.max(0, Math.min(destinationIndex, cardsWithoutTaskCard.length));
+		return {
+			...column,
+			cards: [
+				...cardsWithoutTaskCard.slice(0, insertAtIndex),
+				cardToPlace,
+				...cardsWithoutTaskCard.slice(insertAtIndex),
+			],
+		};
+	});
+	return { board: withUpdatedColumns(board, columns), placed: true };
+}
+
 export function moveTaskToColumn(
 	board: BoardData,
 	taskId: string,

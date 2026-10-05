@@ -118,6 +118,8 @@ import type {
 	RuntimePromptLibraryMutateRequest,
 	RuntimePromptLibraryReadRequest,
 	RuntimePromptLibraryResponse,
+	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
+	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse,
 	RuntimeRecordTaskOpenedByUserRequest,
 	RuntimeRecordTaskOpenedByUserResponse,
 	RuntimeRejectExploratoryFindingRequest,
@@ -328,6 +330,8 @@ import {
 	runtimePromptLibraryMutateRequestSchema,
 	runtimePromptLibraryReadRequestSchema,
 	runtimePromptLibraryResponseSchema,
+	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema,
+	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema,
 	runtimeRecordTaskOpenedByUserRequestSchema,
 	runtimeRecordTaskOpenedByUserResponseSchema,
 	runtimeRejectExploratoryFindingRequestSchema,
@@ -871,6 +875,9 @@ export interface RuntimeTrpcContext {
 			input: RuntimeRecordTaskOpenedByUserRequest,
 		) => Promise<RuntimeRecordTaskOpenedByUserResponse>;
 		listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon: () => Promise<RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse>;
+		readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries: (
+			input: RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
+		) => Promise<RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse>;
 	};
 	hooksApi: {
 		ingest: (input: RuntimeHookIngestRequest) => Promise<RuntimeHookIngestResponse>;
@@ -1871,6 +1878,15 @@ export const runtimeAppRouter = t.router({
 				.output(runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponseSchema)
 				.query(async ({ ctx }) => {
 					return await ctx.projectsApi.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon();
+				}),
+		// 跨项目切换面板：其他项目任务 worktree 的 git 元数据（ahead/behind、未提交改动），面板可见时按需轮询。
+		// 非 workspace-scoped：按 input 里每条的 workspaceId 读；服务端按键缓存并用 fs-stat 门控。
+		readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries:
+			procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+				.input(runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema)
+				.output(runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema)
+				.query(async ({ ctx, input }) => {
+					return await ctx.projectsApi.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries(input);
 				}),
 	}),
 	hooks: t.router({

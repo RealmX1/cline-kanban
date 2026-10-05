@@ -757,7 +757,9 @@ export function createTaskCardActionApi(
 									save: false,
 								};
 							}
-							const trashed = moveTaskToColumn(state.board, input.taskId, "trash");
+							const trashed = moveTaskToColumn(state.board, input.taskId, "trash", undefined, {
+								insertAtIndex: input.insertAtIndexWithinDoneBoardColumn,
+							});
 							if (!trashed.moved || !trashed.task) {
 								throw new TRPCError({
 									code: "INTERNAL_SERVER_ERROR",
@@ -850,7 +852,9 @@ export function createTaskCardActionApi(
 									`Task "${input.taskId}" is in "${found.boardColumnId}" and can only be restored from done.`,
 								);
 							}
-							const restored = moveTaskToColumn(state.board, input.taskId, "review");
+							const restored = moveTaskToColumn(state.board, input.taskId, "review", undefined, {
+								insertAtIndex: input.insertAtIndexWithinReviewBoardColumn,
+							});
 							if (!restored.moved || !restored.task) {
 								throw new TRPCError({
 									code: "INTERNAL_SERVER_ERROR",

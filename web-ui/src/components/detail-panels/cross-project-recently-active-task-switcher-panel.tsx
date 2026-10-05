@@ -4,28 +4,40 @@ import {
 	type CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { ChevronDown, ChevronRight, ChevronUp, Flame, History, Pin } from "lucide-react";
-import { type ReactElement, type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "react";
+import { type ReactElement, type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { notifyError } from "@/components/app-toaster";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
 	CrossProjectRecentlyActiveTaskSwitcherTaskRow,
 	type CrossProjectTaskSwitcherTaskRowSection,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
+import {
+	CrossProjectRecentlyActiveTaskSwitcherTaskRowExpandedTaskCard,
+	type CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion,
+} from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { crossProjectTaskSwitcherSectionRowAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import {
 	TaskPinboardPinReasonDialog,
 	type TaskPinboardPinReasonDialogRequest,
 } from "@/components/task-pinboard-pin-reason-dialog";
+import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
+import {
+	collectEntriesShownInCrossProjectTaskSwitcherSections,
+	useCrossProjectTaskWorktreeGitMetadataPolling,
+} from "@/hooks/use-cross-project-task-worktree-git-metadata-polling";
 import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
-import { setTaskPinboardPinStateOfTaskCardInProject } from "@/runtime/cross-project-recently-active-task-switcher-query";
+import { useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher } from "@/hooks/use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher";
+import type { RuntimeAgentId } from "@/runtime/types";
+import { setTaskPinboardPinStateOfTaskCardThroughRuntime } from "@/state/task-card-action-commands-for-any-workspace";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import {
 	readCrossProjectTaskSwitcherPanelViewContinuity,
 	writeCrossProjectTaskSwitcherPanelViewContinuity,
 } from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
+import type { BoardCard } from "@/types";
 import { useBooleanLocalStorageValue } from "@/utils/react-use";
 
 /** Pinned 区默认露出的条数；超出部分由区底的按钮展开（同 Focus View 置顶板分段）。 */
@@ -42,20 +54,50 @@ function splitCrossProjectTaskSwitcherEntryKey(entryKey: string): { workspaceId:
 	return { workspaceId: entryKey.slice(0, separatorIndex), taskId: entryKey.slice(separatorIndex + 1) };
 }
 
-// 跨项目置顶：当前项目的卡沿用浏览器链路（宿主给的三个回调）；其他项目的卡在这里弹同一个原因对话框，
-// 确认后经 runtime 在目标项目的 board 锁内改写。结果随 projects_updated 广播回来，不在本地乐观改。
+// 跨项目置顶：当前项目的卡走宿主给的三个回调（原因对话框由宿主弹，命令带 overlay）；其他项目的卡在这里弹同一个
+// 原因对话框，确认后调同一个 taskCardAction 命令（不带 overlay，结果随 projects_updated 广播回来）。
 function useCrossProjectTaskPinboardPinning(host: CrossProjectRecentlyActiveTaskSwitcherHostContextValue) {
 	const [otherProjectPinReasonDialogRequest, setOtherProjectPinReasonDialogRequest] = useState<
 		(TaskPinboardPinReasonDialogRequest & { workspaceId: string }) | null
 	>(null);
 
 	const submitOtherProjectPinStateChange = useCallback(
-		(workspaceId: string, request: Parameters<typeof setTaskPinboardPinStateOfTaskCardInProject>[1]) => {
-			void setTaskPinboardPinStateOfTaskCardInProject(workspaceId, request).catch((error: unknown) => {
-				notifyError(`Could not update Pinboard: ${error instanceof Error ? error.message : String(error)}`);
+		(
+			workspaceId: string,
+			taskId: string,
+			taskPinboardPinChange: Parameters<
+				typeof setTaskPinboardPinStateOfTaskCardThroughRuntime
+			>[0]["taskPinboardPinChange"],
+		) => {
+			void setTaskPinboardPinStateOfTaskCardThroughRuntime({ workspaceId, taskId, taskPinboardPinChange }).then(
+				(result) => {
+					if (result.taskCardActionCommandExecutionOutcome === "command_failed") {
+						notifyError(`Could not update Pinboard: ${result.commandFailureMessage}`);
+					}
+				},
+			);
+		},
+		[],
+	);
+
+	const requestPinTaskCardInOtherProjectToTaskPinboard = useCallback(
+		(workspaceId: string, taskId: string, taskTitle: string) => {
+			setOtherProjectPinReasonDialogRequest({
+				workspaceId,
+				taskId,
+				taskTitle,
+				isEditingExistingPin: false,
+				initialPinReason: "",
 			});
 		},
 		[],
+	);
+
+	const unpinTaskCardInOtherProjectFromTaskPinboard = useCallback(
+		(workspaceId: string, taskId: string) => {
+			submitOtherProjectPinStateChange(workspaceId, taskId, { taskPinboardPinAction: "unpin_task_card" });
+		},
+		[submitOtherProjectPinStateChange],
 	);
 
 	const togglePinnedToTaskPinboard = useCallback(
@@ -70,21 +112,12 @@ function useCrossProjectTaskPinboardPinning(host: CrossProjectRecentlyActiveTask
 				return;
 			}
 			if (isPinned) {
-				submitOtherProjectPinStateChange(workspaceId, {
-					taskPinboardPinAction: "unpin_task_card",
-					taskId: entry.taskId,
-				});
+				unpinTaskCardInOtherProjectFromTaskPinboard(workspaceId, entry.taskId);
 				return;
 			}
-			setOtherProjectPinReasonDialogRequest({
-				workspaceId,
-				taskId: entry.taskId,
-				taskTitle: entry.title,
-				isEditingExistingPin: false,
-				initialPinReason: "",
-			});
+			requestPinTaskCardInOtherProjectToTaskPinboard(workspaceId, entry.taskId, entry.title);
 		},
-		[host, submitOtherProjectPinStateChange],
+		[host, requestPinTaskCardInOtherProjectToTaskPinboard, unpinTaskCardInOtherProjectFromTaskPinboard],
 	);
 
 	const editTaskPinboardPinReason = useCallback(
@@ -114,16 +147,44 @@ function useCrossProjectTaskPinboardPinning(host: CrossProjectRecentlyActiveTask
 				if (!workspaceId) {
 					return;
 				}
-				submitOtherProjectPinStateChange(workspaceId, {
+				submitOtherProjectPinStateChange(workspaceId, taskId, {
 					taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
-					taskId,
 					taskPinboardPinReason: pinReason,
 				});
 			}}
 		/>
 	);
 
-	return { togglePinnedToTaskPinboard, editTaskPinboardPinReason, otherProjectPinReasonDialog };
+	return {
+		togglePinnedToTaskPinboard,
+		editTaskPinboardPinReason,
+		requestPinTaskCardInOtherProjectToTaskPinboard,
+		unpinTaskCardInOtherProjectFromTaskPinboard,
+		otherProjectPinReasonDialog,
+	};
+}
+
+// 展开成完整卡片的行（按任务记，Pinned 与下方区同一个任务一起展开），跨重挂载保留。
+function useExpandedCrossProjectTaskSwitcherEntryKeys(): {
+	expandedEntryKeys: ReadonlySet<string>;
+	toggleEntryExpanded: (entryKey: string) => void;
+} {
+	const [expandedEntryKeys, setExpandedEntryKeys] = useState<ReadonlySet<string>>(
+		() => new Set(readCrossProjectTaskSwitcherPanelViewContinuity().expandedCrossProjectTaskSwitcherEntryKeys),
+	);
+	const toggleEntryExpanded = useCallback((entryKey: string) => {
+		setExpandedEntryKeys((previousExpandedEntryKeys) => {
+			const nextExpandedEntryKeys = new Set(previousExpandedEntryKeys);
+			if (!nextExpandedEntryKeys.delete(entryKey)) {
+				nextExpandedEntryKeys.add(entryKey);
+			}
+			writeCrossProjectTaskSwitcherPanelViewContinuity({
+				expandedCrossProjectTaskSwitcherEntryKeys: [...nextExpandedEntryKeys],
+			});
+			return nextExpandedEntryKeys;
+		});
+	}, []);
+	return { expandedEntryKeys, toggleEntryExpanded };
 }
 
 function CrossProjectTaskSwitcherSectionFrame({
@@ -162,8 +223,14 @@ function CrossProjectTaskSwitcherSectionTitle({ title, count }: { title: string;
  */
 export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	host,
+	currentProjectTaskCards = null,
+	defaultAgentId = null,
 }: {
 	host: CrossProjectRecentlyActiveTaskSwitcherHostContextValue;
+	// Focus View 左栏挂载时由 ColumnContextPanel 给出（当前项目的展开行与 This project 同数据、同动作）；
+	// 过渡外壳里没有，当前项目的展开行改读服务端。
+	currentProjectTaskCards?: CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion | null;
+	defaultAgentId?: RuntimeAgentId | null;
 }): ReactElement {
 	const {
 		sections,
@@ -180,8 +247,47 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 		notificationLogByWorkspaceId: host.notificationLogByWorkspaceId,
 		currentProjectId: host.currentProjectId,
 	});
-	const { togglePinnedToTaskPinboard, editTaskPinboardPinReason, otherProjectPinReasonDialog } =
-		useCrossProjectTaskPinboardPinning(host);
+	const {
+		togglePinnedToTaskPinboard,
+		editTaskPinboardPinReason,
+		requestPinTaskCardInOtherProjectToTaskPinboard,
+		unpinTaskCardInOtherProjectFromTaskPinboard,
+		otherProjectPinReasonDialog,
+	} = useCrossProjectTaskPinboardPinning(host);
+	const { expandedEntryKeys, toggleEntryExpanded } = useExpandedCrossProjectTaskSwitcherEntryKeys();
+	// 点 backlog 行 = 原地打开编辑对话框（不切项目、不离开 Focus View），与 This project 点 backlog 卡同语义。
+	const { onOpenBacklogTaskEditorInProject } = host;
+	const requestPinTaskCardInOtherProjectFromExpandedTaskCard = useCallback(
+		(workspaceId: string, taskCard: BoardCard) =>
+			requestPinTaskCardInOtherProjectToTaskPinboard(workspaceId, taskCard.id, taskCard.title),
+		[requestPinTaskCardInOtherProjectToTaskPinboard],
+	);
+	const requestEditBacklogTaskCardInOtherProjectFromExpandedTaskCard = useMemo(
+		() =>
+			onOpenBacklogTaskEditorInProject
+				? (workspaceId: string, taskCard: BoardCard) => onOpenBacklogTaskEditorInProject(workspaceId, taskCard.id)
+				: undefined,
+		[onOpenBacklogTaskEditorInProject],
+	);
+	const { buildTaskCardActionHandlerBundleForOtherProjectTaskCard, otherProjectTaskCardActionConfirmationDialogs } =
+		useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher({
+			onRequestPinTaskCardInOtherProjectToTaskPinboard: requestPinTaskCardInOtherProjectFromExpandedTaskCard,
+			onUnpinTaskCardInOtherProjectFromTaskPinboard: unpinTaskCardInOtherProjectFromTaskPinboard,
+			onRequestEditBacklogTaskCardInOtherProject: requestEditBacklogTaskCardInOtherProjectFromExpandedTaskCard,
+		});
+	const projectPathByWorkspaceId = useMemo(
+		() => new Map(host.projects.map((project) => [project.id, project.path])),
+		[host.projects],
+	);
+	// 其他项目行的 git 元数据（ahead/behind、未提交改动）只在面板挂载且页面可见时轮询；当前项目的行读推流 store。
+	const entriesShownInSections = useMemo(
+		() => collectEntriesShownInCrossProjectTaskSwitcherSections(sections),
+		[sections],
+	);
+	useCrossProjectTaskWorktreeGitMetadataPolling({
+		entriesInProjects: entriesShownInSections,
+		currentProjectId: host.currentProjectId,
+	});
 	// 跨重挂载保留（Focus View 左栏 ↔ 过渡外壳），见 cross-project-task-switcher-panel-view-continuity-store。
 	const [showsAllPinnedEntries, setShowsAllPinnedEntriesState] = useState(
 		() => readCrossProjectTaskSwitcherPanelViewContinuity().showsAllPinnedEntries,
@@ -228,6 +334,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	): ReactElement => {
 		const { workspaceId, entry } = entryInProject;
 		const entryKey = buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId);
+		const isExpanded = expandedEntryKeys.has(entryKey);
 		return (
 			<CrossProjectRecentlyActiveTaskSwitcherTaskRow
 				key={`${section}:${entryKey}`}
@@ -240,7 +347,29 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 				isUnreadHandoff={unreadHandoffEntryKeys.has(entryKey)}
 				nowMs={nowMs}
 				showsProjectName={showsProjectName}
+				currentProjectId={host.currentProjectId}
+				isExpanded={isExpanded}
+				onToggleExpanded={() => toggleEntryExpanded(entryKey)}
+				expandedTaskCard={
+					isExpanded ? (
+						<CrossProjectRecentlyActiveTaskSwitcherTaskRowExpandedTaskCard
+							entryInProject={entryInProject}
+							currentProjectId={host.currentProjectId}
+							currentProjectTaskCards={currentProjectTaskCards}
+							otherProjectWorkspacePath={projectPathByWorkspaceId.get(workspaceId) ?? null}
+							defaultAgentId={defaultAgentId}
+							buildTaskCardActionHandlerBundleForOtherProjectTaskCard={
+								buildTaskCardActionHandlerBundleForOtherProjectTaskCard
+							}
+							onActivateTaskCard={(card) => host.onOpenTaskInProject(workspaceId, card.id)}
+						/>
+					) : undefined
+				}
 				onOpen={() => {
+					if (entry.columnId === "backlog" && onOpenBacklogTaskEditorInProject) {
+						onOpenBacklogTaskEditorInProject(workspaceId, entry.taskId);
+						return;
+					}
 					host.onOpenTaskInProject(workspaceId, entry.taskId);
 					if (section === "pinned") {
 						requestRevealSectionRow(entryKey);
@@ -274,6 +403,23 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 			className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-2"
 			data-testid="cross-project-recently-active-task-switcher-panel"
 		>
+			{/* 与 This project 左栏同一个入口样式；Board Scope 下打开带目标项目字段的建卡框（默认上下文项目）。 */}
+			{host.onRequestCreateTaskInBoardScope ? (
+				<Button
+					icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
+					aria-label="Create task"
+					fill
+					onClick={host.onRequestCreateTaskInBoardScope}
+					className="shrink-0"
+				>
+					<span className="inline-flex items-center gap-1.5">
+						<span>Create task</span>
+						<span aria-hidden className="text-text-secondary">
+							(c)
+						</span>
+					</span>
+				</Button>
+			) : null}
 			{sections.pinnedEntries.length > 0 ? (
 				<CrossProjectTaskSwitcherSectionFrame
 					testIdSuffix="pinned"
@@ -429,6 +575,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 				)}
 			</CrossProjectTaskSwitcherSectionFrame>
 			{otherProjectPinReasonDialog}
+			{otherProjectTaskCardActionConfirmationDialogs}
 		</div>
 	);
 }

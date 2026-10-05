@@ -505,6 +505,34 @@ describe("taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree
 		expect(response.taskAgentSessionStopWasRequested).toBe(false);
 	});
 
+	it("拖放落点贯穿到服务端：带下标时落在 Done 列该位置，不带时（CLI / 程序化）落在列顶", async () => {
+		seedWorkspace(
+			createBoard({
+				review: [createCard("task-dropped"), createCard("task-default")],
+				trash: [createCard("task-done-1"), createCard("task-done-2")],
+			}),
+		);
+		const { api } = createApiForTest();
+
+		await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			{
+				taskId: "task-dropped",
+				boardMutationInitiator: "web_ui_user_gesture",
+				insertAtIndexWithinDoneBoardColumn: 1,
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+		);
+		expect(readColumnTaskIds("trash")).toEqual(["task-done-1", "task-dropped", "task-done-2"]);
+
+		await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			{ taskId: "task-default" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(readColumnTaskIds("trash")).toEqual(["task-default", "task-done-1", "task-dropped", "task-done-2"]);
+	});
+
 	it("本来就在 Done：不写盘、不停会话、不删 worktree（中断自动流转进 Done 的卡要留着 worktree 供恢复）", async () => {
 		seedWorkspace(createBoard({ trash: [createCard("task-t")] }));
 		const { api, broadcastRuntimeProjectsUpdated } = createApiForTest();
@@ -699,6 +727,35 @@ describe("taskCardAction.restoreTaskCardFromDoneIntoReviewResumingAgentSession",
 		});
 		expect(readColumnTaskIds("trash")).toEqual(["task-t"]);
 		expect(readColumnTaskIds("review")).toEqual([]);
+	});
+
+	it("拖放落点贯穿到服务端：带下标时落在 review 列该位置，不带时落在列顶", async () => {
+		seedWorkspace(
+			createBoard({
+				review: [createCard("task-review-1"), createCard("task-review-2")],
+				trash: [createCard("task-dropped"), createCard("task-default")],
+			}),
+		);
+		const { api } = createApiForTest();
+
+		const droppedResponse = await api.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+			WORKSPACE_SCOPE,
+			{
+				taskId: "task-dropped",
+				boardMutationInitiator: "web_ui_user_gesture",
+				insertAtIndexWithinReviewBoardColumn: 1,
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+		);
+		expect(droppedResponse.taskCardRestoreFromDoneOutcome).toBe("agent_session_resumed_and_task_card_kept_in_review");
+		expect(readColumnTaskIds("review")).toEqual(["task-review-1", "task-dropped", "task-review-2"]);
+
+		await api.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+			WORKSPACE_SCOPE,
+			{ taskId: "task-default" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(readColumnTaskIds("review")).toEqual(["task-default", "task-review-1", "task-dropped", "task-review-2"]);
 	});
 
 	it("只收 Done 里的卡", async () => {

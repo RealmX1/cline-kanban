@@ -5,23 +5,21 @@ import { useEffect, useMemo, useState } from "react";
 import { StageHeaderLabel } from "@/components/detail-panels/stage-header-label";
 import { STAGE_HEADER_HEIGHT_PX } from "@/components/detail-panels/stage-header-rail-geometry";
 import { TaskCardBody } from "@/components/task-card-body";
+import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import type { StageHeaderRailEdge } from "@/hooks/use-focus-view-stage-section-expansion";
 import type { SelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { BoardColumn, BoardColumnId, CardSelection } from "@/types";
 import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
 
-/** 焦点 stage 的动作 handler 与卡片数据；顶/底 rail 的焦点条目挂焦点卡克隆时透传给 `TaskCardBody`。 */
+/**
+ * 焦点 stage 的动作集合与卡片数据；顶/底 rail 的焦点条目挂焦点卡克隆时经 `buildTaskCardBusinessProps` 交给
+ * `TaskCardBody`——与本体卡、置顶板分身、All projects 展开行同一个 stage 门控。这里曾手抄一份门控，漏了
+ * 「移到 Review」与「取消自动动作」，按钮显示出来却什么都不做。
+ */
 interface StageRailFocusedCardProps {
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
-	onStartTask?: (taskId: string) => void;
-	onMoveToTrashTask?: (taskId: string) => void;
-	onMoveToValidationTask?: (taskId: string) => void;
-	onRestoreFromTrashTask?: (taskId: string) => void;
-	onDeleteTask?: (taskId: string) => void;
-	onRequestPinToTaskPinboard?: (taskId: string) => void;
-	onUnpinFromTaskPinboard?: (taskId: string) => void;
-	moveToTrashLoadingById?: Record<string, boolean>;
+	taskCardActionHandlers: TaskCardActionHandlerBundle;
 	workspacePath?: string | null;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
@@ -54,14 +52,7 @@ function StageHeaderRailEntry({
 	onScrollToSection,
 	onScrollToFocusedCard,
 	taskSessions,
-	onStartTask,
-	onMoveToTrashTask,
-	onMoveToValidationTask,
-	onRestoreFromTrashTask,
-	onDeleteTask,
-	onRequestPinToTaskPinboard,
-	onUnpinFromTaskPinboard,
-	moveToTrashLoadingById,
+	taskCardActionHandlers,
 	workspacePath,
 	defaultClineModelId,
 	defaultAgentId,
@@ -76,8 +67,6 @@ function StageHeaderRailEntry({
 }): React.ReactElement {
 	const columnId = column.id;
 	const { card } = selection;
-	const isReview = columnId === "review";
-	const isReviewOrValidation = columnId === "review" || columnId === "validation";
 
 	return (
 		<div className="bg-surface-1 rounded-lg border border-border">
@@ -150,21 +139,16 @@ function StageHeaderRailEntry({
 				>
 					<TaskCardBody
 						renderRole="focused_card_copy_under_sticky_stage_header"
-						card={card}
-						columnId={columnId}
-						sessionSummary={taskSessions[card.id]}
-						selected
-						onStart={columnId === "backlog" || columnId === "in_progress" ? onStartTask : undefined}
-						onMoveToValidation={isReview ? onMoveToValidationTask : undefined}
-						onMoveToTrash={isReviewOrValidation ? onMoveToTrashTask : undefined}
-						onRestoreFromTrash={columnId === "trash" ? onRestoreFromTrashTask : undefined}
-						onDeleteTask={onDeleteTask}
-						onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
-						onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
-						isMoveToTrashLoading={isReviewOrValidation ? (moveToTrashLoadingById?.[card.id] ?? false) : false}
-						workspacePath={workspacePath}
-						defaultClineModelId={defaultClineModelId}
-						defaultAgentId={defaultAgentId}
+						{...buildTaskCardBusinessProps({
+							card,
+							columnId,
+							sessionSummary: taskSessions[card.id],
+							selected: true,
+							handlers: taskCardActionHandlers,
+							workspacePath,
+							defaultClineModelId,
+							defaultAgentId,
+						})}
 					/>
 				</div>
 			) : null}

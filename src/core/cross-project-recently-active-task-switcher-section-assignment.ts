@@ -1,4 +1,4 @@
-import type { RuntimeAgentId, RuntimeCrossProjectTaskSwitcherEntry } from "./api-contract";
+import type { RuntimeAgentId, RuntimeCrossProjectTaskSwitcherEntry, RuntimeInProgressTaskDetail } from "./api-contract";
 import {
 	CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_ID,
 	type CodingAgentPromptCacheRetentionMeasuredLowerBound,
@@ -10,11 +10,12 @@ import { isAgentOutputWithinActiveWindow, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS 
 //
 // 四个区自上而下：
 //   Pinned                      —— 各项目 Task Pinboard 的汇总。**允许**与下面三区重复。
-//   Running                     —— agent 正持有回合且近 5 分钟有输出，或已 park 在等自己派发的后台工作。
+//   Running                     —— agent 正持有回合且近 5 分钟有输出，或已 park 在等自己派发的后台工作；按本轮
+//                                  agent 回合开始时刻升序（后来的放后面），不随输出抖动。
 //   Cache warm · your turn      —— agent 没在持有回合、且按 agent 的实测 TTL 估算主对话 prompt cache 仍热；按失效时刻升序。
 //   剩余区                       —— 其余全部，三种排序模式可切换。
 // 下面三区**互斥**，优先级 Running > 缓存倒计时 > 剩余。区归属只读 session facet 与时间戳，**不读 board 列**
-// （唯一例外是排除 Done）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。
+// （例外两处：排除 Done；Validation 不进缓存倒计时区）：列自动流转只在打开着该项目的浏览器里跑，没人看的项目列会滞后。
 //
 // 纯函数，前后端共用（web-ui 经 @runtime-cross-project-recently-active-task-switcher-section-assignment 引用）。
 
@@ -49,6 +50,8 @@ export interface CrossProjectTaskSwitcherEntryInProject {
 
 export type CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource =
 	| "main_agent_conversation_model_request_dispatch_observation"
+	// 手动 /compact 完成后、还没有新请求：对话层已被摘要替换。行上不显示倒计时，改显示「已压缩」。
+	| "manual_compaction_replaced_main_conversation_without_follow_up_request"
 	| "last_substantive_agent_terminal_output"
 	| "high_confidence_last_conversation_progress_observation_fallback";
 
@@ -57,7 +60,10 @@ export interface CrossProjectTaskSwitcherPromptCacheWarmthEstimate {
 	promptCacheWarmthAnchorAt: number;
 	// 起点读自哪个信号；倒计时药丸的 tooltip 据此说明。
 	promptCacheWarmthAnchorSource: CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource;
+	// 区归属与排序用的失效时刻。起点是手动压缩时它只决定「在区里留多久」，行上不显示倒计时。
 	promptCacheExpectedExpiryAt: number;
+	// 仅起点是手动压缩、且 harness 报了压缩后上下文大小时有值（行上显示「回复需重写约 N k」）。
+	mainAgentConversationContextTokenCountAfterCompactionReportedByHarness?: number;
 }
 
 export interface CrossProjectTaskSwitcherPromptCacheWarmEntryInProject extends CrossProjectTaskSwitcherEntryInProject {
@@ -122,6 +128,55 @@ export function isCrossProjectTaskSwitcherEntryRunning(
 		isAgentOutputWithinActiveWindow(entry.lastOutputAt, nowMs, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS)
 	);
 }
+
+// Cache warm 区只收「还等着人回复 agent」的列：In progress / Review。用户把任务移进 Validation（交给验证）或
+// Done，就是表态「这一轮对话我不打算再接」，此时缓存还热也没有提醒的意义（2026-10-04 用户反馈）。Backlog 没有
+// 会话锚点，本来就进不来。这是区归属里唯二读 board 列的地方（另一处是排除 Done），列滞后的代价只是晚一点下放。
+export function isTaskCardBoardColumnEligibleForPromptCacheWarmAwaitingUserSection(
+	columnId: RuntimeCrossProjectTaskSwitcherEntry["columnId"],
+): boolean {
+	return columnId === "in_progress" || columnId === "review";
+}
+
+// Running 区（以及 Board Overview 的 Active 组）的排序输入。
+export type RunningSectionArrivalOrderingFacts = Pick<
+	RuntimeInProgressTaskDetail,
+	"agentResponseGenerationTurnStarted"
+> &
+	Partial<Pick<RuntimeCrossProjectTaskSwitcherEntry, "agentProcessStartedAt">>;
+
+// 「它是什么时候进入 Running 的」：本轮 agent 回合的开始时刻；旧 runtime 没有这个字段时回落到 agent 进程
+// 启动时刻；两者都没有就排到末尾（+∞）。刻意不读 lastOutputAt——spinner 每次重绘都推进它，按它排会让
+// 成员没变的 Running 区每秒重排（2026-10-04 实测相邻样本 30/38 次顺序变化）。
+export function resolveRunningSectionArrivalOrderingKeyAt(facts: RunningSectionArrivalOrderingFacts): number {
+	return (
+		facts.agentResponseGenerationTurnStarted?.startedAt ?? facts.agentProcessStartedAt ?? Number.POSITIVE_INFINITY
+	);
+}
+
+// 先进入的在前、后进入的在后；同一时刻按稳定键兜底，保证确定性。按调用方的条目形状产出比较器：
+// 切换面板的条目跨项目，稳定键必须是 (workspaceId, taskId)；Board Overview 已按 repo 分组，taskId 即可。
+export function createComparatorByCurrentAgentTurnStartAscendingThenStableKey<TItem>(
+	resolveOrderingFacts: (item: TItem) => RunningSectionArrivalOrderingFacts,
+	resolveStableKey: (item: TItem) => string,
+): (left: TItem, right: TItem) => number {
+	return (left, right) => {
+		const leftOrderingKeyAt = resolveRunningSectionArrivalOrderingKeyAt(resolveOrderingFacts(left));
+		const rightOrderingKeyAt = resolveRunningSectionArrivalOrderingKeyAt(resolveOrderingFacts(right));
+		if (leftOrderingKeyAt !== rightOrderingKeyAt) {
+			// 不用减法：两侧都是 +∞ 时差为 NaN。
+			return leftOrderingKeyAt < rightOrderingKeyAt ? -1 : 1;
+		}
+		return resolveStableKey(left).localeCompare(resolveStableKey(right));
+	};
+}
+
+export const compareRunningSectionEntriesByCurrentAgentTurnStartAscendingThenStableKey =
+	createComparatorByCurrentAgentTurnStartAscendingThenStableKey<CrossProjectTaskSwitcherEntryInProject>(
+		(entryInProject) => entryInProject.entry,
+		(entryInProject) =>
+			buildCrossProjectTaskSwitcherEntryKey(entryInProject.workspaceId, entryInProject.entry.taskId),
+	);
 
 // 主 agent 没在持有回合、且主对话的 prompt cache 估计仍热时返回估算；否则 null。**不看是否已读**：读过但
 // 没回复的任务，缓存照样在流失。
@@ -189,14 +244,31 @@ function resolveMainAgentConversationPromptCacheWarmthAnchor(
 		| "lastMainAgentConversationModelRequestDispatchObservation"
 	>,
 	measuredLowerBound: CodingAgentPromptCacheRetentionMeasuredLowerBound,
-): Pick<
-	CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
-	"promptCacheWarmthAnchorAt" | "promptCacheWarmthAnchorSource"
-> | null {
+): Omit<CrossProjectTaskSwitcherPromptCacheWarmthEstimate, "promptCacheExpectedExpiryAt"> | null {
 	if (
 		measuredLowerBound.promptCacheWarmthAnchorSignal === "main_agent_conversation_model_request_dispatch_hook_events"
 	) {
 		const dispatchObservation = entry.lastMainAgentConversationModelRequestDispatchObservation;
+		if (
+			dispatchObservation?.evidenceKind ===
+			"manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request"
+		) {
+			// 手动压缩完成（2026-10-05 用户拍板 B′）：任务留在 Cache warm 区，但行上不显示倒计时，改显示「已压缩，
+			// 回复需重写」。实测压缩请求只按 5 分钟档读了被替换前的旧前缀，下一条回复不论早晚都要重写 86k–103k，
+			// 「又热了 55 分钟」会误导。这一支必须在下方 lastConversationProgressObservation 兜底**之前**返回：
+			// 压缩 fork 的 SubagentStop 刚把对话推进推到压缩结束，落进兜底就会退化成普通倒计时。
+			// EXPERIMENT_NODE: 手动压缩后 Cache warm 取舍（A 续期 / B 退出 / B′ 留区显示「已压缩」，当前 B′）及留区时长（当前按该 agent 的 TTL 下界，可改 5 分钟档）
+			return {
+				promptCacheWarmthAnchorAt: dispatchObservation.observedAtMs,
+				promptCacheWarmthAnchorSource: "manual_compaction_replaced_main_conversation_without_follow_up_request",
+				...(dispatchObservation.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness !== undefined
+					? {
+							mainAgentConversationContextTokenCountAfterCompactionReportedByHarness:
+								dispatchObservation.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness,
+						}
+					: {}),
+			};
+		}
 		if (dispatchObservation) {
 			return {
 				promptCacheWarmthAnchorAt: dispatchObservation.observedAtMs,
@@ -371,6 +443,11 @@ export function assignCrossProjectTaskSwitcherSections(
 			runningEntries.push(entryInProject);
 			continue;
 		}
+		if (!isTaskCardBoardColumnEligibleForPromptCacheWarmAwaitingUserSection(entry.columnId)) {
+			// 已移入 Validation 的任务即使缓存仍热也不进 Cache warm，交给剩余区按它的排序模式与时间窗决定显不显示。
+			remainingCandidates.push(entryInProject);
+			continue;
+		}
 		const promptCacheWarmthEstimate = estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn(
 			entry,
 			input.nowMs,
@@ -389,13 +466,16 @@ export function assignCrossProjectTaskSwitcherSections(
 				buildCrossProjectTaskSwitcherEntryKey(right.workspaceId, right.entry.taskId),
 			),
 	);
-	// Running 内按最近输出倒序：刚刚还在吐字的排前面。
-	runningEntries.sort((left, right) => (right.entry.lastOutputAt ?? 0) - (left.entry.lastOutputAt ?? 0));
-	// 最快失效的排最前。
+	// Running 内先进入的在前、后进入的在后；顺序只在回合边沿变化，不随 agent 输出抖动。
+	runningEntries.sort(compareRunningSectionEntriesByCurrentAgentTurnStartAscendingThenStableKey);
+	// 最快失效的排最前；同一失效时刻按键兜底。
 	promptCacheWarmAwaitingUserEntries.sort(
 		(left, right) =>
 			left.promptCacheWarmthEstimate.promptCacheExpectedExpiryAt -
-			right.promptCacheWarmthEstimate.promptCacheExpectedExpiryAt,
+				right.promptCacheWarmthEstimate.promptCacheExpectedExpiryAt ||
+			buildCrossProjectTaskSwitcherEntryKey(left.workspaceId, left.entry.taskId).localeCompare(
+				buildCrossProjectTaskSwitcherEntryKey(right.workspaceId, right.entry.taskId),
+			),
 	);
 	return {
 		pinnedEntries,

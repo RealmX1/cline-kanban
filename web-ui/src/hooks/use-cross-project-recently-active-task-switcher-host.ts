@@ -15,6 +15,8 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	selectedCardTaskId,
 	pendingCrossProjectTaskOpen,
 	onOpenTaskInProject,
+	onOpenBacklogTaskEditorInProject,
+	onRequestCreateTaskInBoardScope,
 	onRequestPinCurrentProjectTaskToTaskPinboard,
 	onUnpinCurrentProjectTaskFromTaskPinboard,
 	onEditCurrentProjectTaskPinboardPinReason,
@@ -26,6 +28,8 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	selectedCardTaskId: string | null;
 	pendingCrossProjectTaskOpen: PendingCrossProjectTaskOpen | null;
 	onOpenTaskInProject: (workspaceId: string, taskId: string) => void;
+	onOpenBacklogTaskEditorInProject: (workspaceId: string, taskId: string) => void;
+	onRequestCreateTaskInBoardScope: () => void;
 	onRequestPinCurrentProjectTaskToTaskPinboard: (taskId: string) => void;
 	onUnpinCurrentProjectTaskFromTaskPinboard: (taskId: string) => void;
 	onEditCurrentProjectTaskPinboardPinReason: (taskId: string) => void;
@@ -46,6 +50,8 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 					? { workspaceId: currentProjectId, taskId: selectedCardTaskId }
 					: null,
 			onOpenTaskInProject,
+			onOpenBacklogTaskEditorInProject,
+			onRequestCreateTaskInBoardScope,
 			onRequestPinCurrentProjectTaskToTaskPinboard,
 			onUnpinCurrentProjectTaskFromTaskPinboard,
 			onEditCurrentProjectTaskPinboardPinReason,
@@ -55,7 +61,9 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 			isBoardScopeAllProjectsSelected,
 			notificationLogByWorkspaceId,
 			onEditCurrentProjectTaskPinboardPinReason,
+			onOpenBacklogTaskEditorInProject,
 			onOpenTaskInProject,
+			onRequestCreateTaskInBoardScope,
 			onRequestPinCurrentProjectTaskToTaskPinboard,
 			onUnpinCurrentProjectTaskFromTaskPinboard,
 			pendingCrossProjectTaskOpen,
