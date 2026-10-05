@@ -1,9 +1,10 @@
 // 终端 TUI 输入框读取：定位输入框、抽出框内用户尚未提交的内容。
 //
-// 三个消费者共用同一份语法，避免「同一套 TUI 画法在多处各写一遍、各自腐烂」：
+// 四个消费者共用同一份语法，避免「同一套 TUI 画法在多处各写一遍、各自腐烂」：
 //   - W1 提示符就绪判据（替代原先靠正则猜画法的 hasClaudeInteractivePrompt）
 //   - W1 程序化投递的人机争用让路判据
 //   - W2 Ctrl+S 把未提交输入暂存进 Prompt Library
+//   - 面板答案投递前确认提问选择器已关闭（读不到框就不粘贴，没有兜底）
 //
 // ## 真机实测约束（Claude Code v2.1.227，cols=100，2026-08-11）
 //
@@ -35,9 +36,33 @@
 //    「按 dim 属性识别占位提示」不可靠。
 //    ⇒ **本模块不承担判空职责**。判空由输入侧字节跟踪（terminal-input-box-occupancy.ts）负责，
 //      本模块只负责「框在哪、框里的文本是什么」。两者在 resolveTerminalInputBoxOccupancy 汇合。
+//
+// ## 真机实测补充：上边框嵌入 agent 名（Claude Code v2.1.289，2026-10-05）
+//
+// 会话有 agent 名时（转录里的 `agent-name` 记录），Claude 把它嵌进输入框**上边框**；下边框仍是
+// 整行横线。agent 名在会话退出计划模式时生成：近 3 天 21 份带 `agent-name` 的转录里，20 份的首条
+// 紧挨着 ExitPlanMode。Kanban 默认以计划模式起任务，所以这是 Claude 任务会话的常态，不是个例——
+// 当时 3484 上 4 个空闲的 Claude 会话全部带标签。cols=132 与 cols=120 都拍到过，标签都贴右、
+// 右侧只留 1 个横线：
+//     ──────────────────── fix-load-sensitive-flaky-tests ─   ← 上边框，带标签
+//     ❯                                                        ← U+276F + U+00A0
+//     ─────────────────────────────────────────────────────   ← 下边框，整行横线
+//
+// 旧判据要求边界行整行都是横线，带标签的上边框因此不算边界，整个框都「读不到」。四个消费者里
+// 面板答案投递没有兜底，直接硬失败（task df9d8，2026-10-05）。
+//
+// 只放宽上边框，且标签两侧的横线只认 U+2500：这是实测到的唯一形态。读框误判（提问选择器还在
+// 屏上，却以为输入框已出现）的后果是粘贴 + 回车替用户选中高亮项，所以放宽面越窄越好——
+// `╭─── 标题 ───╮` 这类对话框标题边也因此不会被当成上边框。将来若见到下边框带标签、或标签换了
+// 画法，按实测再扩展。
 
 // 框边界行：整行都是横线类盒绘制字符（U+2500 段）。实测 Claude 用 U+2500 且宽度 == cols。
+// 上下边框都可以是这种画法。
 const BOX_BOUNDARY_LINE_PATTERN = /^[─-╿]+$/u;
+
+// 上边框的第二种画法：两段 U+2500 横线中间嵌着 agent 名（见文件头「上边框嵌入 agent 名」）。
+// 标签与两侧横线各隔一个空格，标签首尾不是空白；标签可以是中文，判据只看字符类别、不量列宽。
+const TERMINAL_INPUT_BOX_TOP_BOUNDARY_LINE_WITH_EMBEDDED_LABEL_PATTERN = /^(─+) \S(?:.*\S)? (─+)$/u;
 
 // 边界行的最小宽度。取一个远低于任何真实终端宽度、又高于零星装饰横线的下限。
 const MIN_BOX_BOUNDARY_WIDTH = 10;
@@ -191,37 +216,77 @@ export const CLAUDE_TERMINAL_INPUT_BOX_GRAMMAR: TerminalInputBoxGrammar = {
 	rightMarginWidth: 2,
 };
 
-function isBoxBoundaryLine(text: string): boolean {
+// 整行横线的边界行，可以当上边框，也可以当下边框。
+function isUnlabeledBoxBoundaryLine(text: string): boolean {
 	const trimmed = text.trim();
 	return trimmed.length >= MIN_BOX_BOUNDARY_WIDTH && BOX_BOUNDARY_LINE_PATTERN.test(trimmed);
+}
+
+// 嵌着 agent 名的边界行，只可能是上边框。宽度下限只数两段横线、不算标签，免得一段长标签配
+// 两三个横线就凑够了宽度。
+function isLabeledTopBoxBoundaryLine(text: string): boolean {
+	const labeledBoundaryMatch = text.trim().match(TERMINAL_INPUT_BOX_TOP_BOUNDARY_LINE_WITH_EMBEDDED_LABEL_PATTERN);
+	return (
+		labeledBoundaryMatch !== null &&
+		labeledBoundaryMatch[1].length + labeledBoundaryMatch[2].length >= MIN_BOX_BOUNDARY_WIDTH
+	);
 }
 
 function stripTrailingWhitespace(text: string): string {
 	return text.replace(/\s+$/u, "");
 }
 
+// 某一行的紧下一行是否以提示符前缀开头。配对判上边框、筛带标签候选用的是同一条判据，
+// 两处必须一致——候选过滤「不扩大命中面」的论证正依赖于此（见 locateTerminalInputBox）。
+function isLineImmediatelyFollowedByPromptPrefixLine(
+	snapshot: TerminalScreenSnapshot,
+	lineIndex: number,
+	grammar: TerminalInputBoxGrammar,
+): boolean {
+	const followingLine = snapshot.lines[lineIndex + 1];
+	return followingLine !== undefined && grammar.promptPrefixPattern.test(followingLine.text);
+}
+
 // 定位输入框：自下而上找最后一对「中间夹着以提示符开头的行」的边界行。
 //
 // 要求首个非空内容行以提示符前缀开头，是为了把 agent 输出里的装饰性横线对排除掉——
 // 只按「最后一对横线」取会在 agent 打印表格 / 分隔线时误命中。
+//
+// 带标签的边界行也收进候选，但只能充当一对里的上边框：下边框必须是整行横线（见文件头
+// 「上边框嵌入 agent 名」）。并且只收「紧下一行就是提示符行」的带标签行：用户在框里敲出一行
+// `──── 小节标题 ─`，剥掉续行缩进后正好长成带标签的上边框；照收的话它会夹在真实上下边框之间、
+// 挡住相邻配对，整个框读不到。框内续行都以续行缩进开头，带标签形态的续行下面只会是续行或下边框，
+// 不会是行首提示符，于是不再进候选；真实的带标签上边框下面必然是提示符行，照收不误。
+// 这条过滤不扩大命中面：被滤掉的带标签行本来就当不了下边框，也不可能成为配对成功的上边框
+// （配对同样要求上边框紧下一行是提示符行）；滤掉它们后新能配上的只有整行横线的一对，
+// 那正是加入带标签判据之前就会命中的屏幕。
 export function locateTerminalInputBox(
 	snapshot: TerminalScreenSnapshot,
 	grammar: TerminalInputBoxGrammar,
 ): TerminalInputBoxLocation | null {
-	const boundaryLineIndexes: number[] = [];
+	const boundaryLineCandidates: { lineIndex: number; canServeAsBottomBoundary: boolean }[] = [];
 	for (let index = 0; index < snapshot.lines.length; index += 1) {
-		if (isBoxBoundaryLine(snapshot.lines[index].text)) {
-			boundaryLineIndexes.push(index);
+		const text = snapshot.lines[index].text;
+		if (isUnlabeledBoxBoundaryLine(text)) {
+			boundaryLineCandidates.push({ lineIndex: index, canServeAsBottomBoundary: true });
+		} else if (
+			isLabeledTopBoxBoundaryLine(text) &&
+			isLineImmediatelyFollowedByPromptPrefixLine(snapshot, index, grammar)
+		) {
+			boundaryLineCandidates.push({ lineIndex: index, canServeAsBottomBoundary: false });
 		}
 	}
-	for (let pairIndex = boundaryLineIndexes.length - 1; pairIndex >= 1; pairIndex -= 1) {
-		const bottomBoundaryLineIndex = boundaryLineIndexes[pairIndex];
-		const topBoundaryLineIndex = boundaryLineIndexes[pairIndex - 1];
+	for (let pairIndex = boundaryLineCandidates.length - 1; pairIndex >= 1; pairIndex -= 1) {
+		const bottomBoundaryCandidate = boundaryLineCandidates[pairIndex];
+		if (!bottomBoundaryCandidate.canServeAsBottomBoundary) {
+			continue;
+		}
+		const bottomBoundaryLineIndex = bottomBoundaryCandidate.lineIndex;
+		const topBoundaryLineIndex = boundaryLineCandidates[pairIndex - 1].lineIndex;
 		if (bottomBoundaryLineIndex - topBoundaryLineIndex < 2) {
 			continue;
 		}
-		const firstContentLine = snapshot.lines[topBoundaryLineIndex + 1];
-		if (firstContentLine && grammar.promptPrefixPattern.test(firstContentLine.text)) {
+		if (isLineImmediatelyFollowedByPromptPrefixLine(snapshot, topBoundaryLineIndex, grammar)) {
 			return { topBoundaryLineIndex, bottomBoundaryLineIndex };
 		}
 	}
