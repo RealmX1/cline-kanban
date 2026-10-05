@@ -39,6 +39,10 @@ vi.mock("../../src/workspace/task-commit-integration-provenance", async (importO
 	};
 });
 
+// 「终会发生」的单档等待：首次提交要等账本 Worker 线程冷启动并加载 better-sqlite3，vi.waitFor 默认 1s
+// 在高负载下不够。放宽不损失判别力——断言判的是「最终落了几条、内容对不对」，不是多快。
+const LEDGER_EVENT_COMMIT_WAIT_OPTIONS_COVERING_WORKER_COLD_START = { timeout: 15_000 };
+
 describe("inter-work-unit relation ledger post-deploy verification passed observation", () => {
 	it("records one passed observation with the raw landing snapshot when verifiedAt is first set, and none on an idempotent repeat", async () => {
 		const sandbox = createTempDir("kanban-post-deploy-verification-passed-observation-");
@@ -124,7 +128,7 @@ describe("inter-work-unit relation ledger post-deploy verification passed observ
 						taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: null,
 					},
 				});
-			});
+			}, LEDGER_EVENT_COMMIT_WAIT_OPTIONS_COVERING_WORKER_COLD_START);
 		} finally {
 			await activatedLiveCapture.deactivate();
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
@@ -132,7 +136,8 @@ describe("inter-work-unit relation ledger post-deploy verification passed observ
 			else process.env.HOME = previousHome;
 			sandbox.cleanup();
 		}
-	});
+		// 用例超时覆盖：账本提交等待 15s + 激活与停用 Worker。
+	}, 45_000);
 
 	it("读快照期间发起实例停用、随后激活了新实例：观测仍落到发起时的实例，且在它关 worker 之前；新实例收不到", async () => {
 		const sandbox = createTempDir("kanban-post-deploy-verification-passed-observation-drain-");

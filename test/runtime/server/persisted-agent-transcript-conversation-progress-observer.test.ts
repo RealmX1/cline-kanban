@@ -27,6 +27,10 @@ const TRANSCRIPT_OBSERVATION: RuntimeLastConversationProgressObservation = {
 const WORKSPACE_ALPHA = "workspace-alpha";
 const WORKSPACE_BETA = "workspace-beta";
 
+// 「终会发生」的单档等待：探测回调要等事件循环轮转，vi.waitFor 默认 1s 在高负载（两个 worker 共享宿主）下
+// 会被调度饥饿吃掉。放宽不损失判别力——这些断言判的是「最终发生了几次」，不是多快。
+const OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD = { timeout: 10_000 };
+
 function summary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
 	return applySessionFacets({
 		taskId: "task-1",
@@ -97,7 +101,7 @@ describe("持久转录推进观察器", () => {
 		const observer = createObserver({ probe, nowMs: () => 0 });
 
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary(), manager);
-		await vi.waitFor(() => expect(recorded).toHaveLength(1));
+		await vi.waitFor(() => expect(recorded).toHaveLength(1), OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD);
 
 		expect(probe).toHaveBeenCalledTimes(1);
 		expect(probe).toHaveBeenCalledWith({ agentId: "claude", workspacePath: "/tmp/worktree" });
@@ -133,7 +137,7 @@ describe("持久转录推进观察器", () => {
 		const observer = createObserver({ probe, nowMs: () => clock });
 
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary(), manager);
-		await vi.waitFor(() => expect(recorded).toHaveLength(1));
+		await vi.waitFor(() => expect(recorded).toHaveLength(1), OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD);
 
 		for (let tick = 1; tick <= 20; tick += 1) {
 			clock = tick * 100;
@@ -143,7 +147,10 @@ describe("持久转录推进观察器", () => {
 
 		clock = PERSISTED_AGENT_TRANSCRIPT_PROBE_COOLDOWN_MS;
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary({ lastOutputAt: clock }), manager);
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(2),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 	});
 
 	// 闸门③的例外，也是整个纠偏链条最要紧的一刻：会话被重开 / 进程重启 ⇒ 换活体。
@@ -154,7 +161,7 @@ describe("持久转录推进观察器", () => {
 		const observer = createObserver({ probe, nowMs: () => 0 });
 
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary(), manager);
-		await vi.waitFor(() => expect(recorded).toHaveLength(1));
+		await vi.waitFor(() => expect(recorded).toHaveLength(1), OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD);
 
 		// 同一时刻（冷却完全没走）+ 新活体 ⇒ 仍应探测。
 		observer.observeTaskSessionSummary(
@@ -162,7 +169,10 @@ describe("持久转录推进观察器", () => {
 			summary({ runtimeSessionIncarnationId: "incarnation-second" }),
 			manager,
 		);
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(2),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 	});
 
 	// 闸门②：上一次探测还没回来就不发第二次，否则慢盘上会堆起一串并发读。
@@ -187,10 +197,13 @@ describe("持久转录推进观察器", () => {
 		expect(probe).toHaveBeenCalledTimes(1);
 
 		releaseProbe(TRANSCRIPT_OBSERVATION);
-		await vi.waitFor(() => expect(recorded).toHaveLength(1));
+		await vi.waitFor(() => expect(recorded).toHaveLength(1), OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD);
 
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary({ lastOutputAt: clock }), manager);
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(2),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 	});
 
 	// 探测返回 null 的含义是「这次问不出结论」，绝不是「对话没推进过」——必须保持原值、不写回。
@@ -200,7 +213,10 @@ describe("持久转录推进观察器", () => {
 		const observer = createObserver({ probe, nowMs: () => 0 });
 
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary(), manager);
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(1));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(1),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 
 		expect(recorded).toHaveLength(0);
 	});
@@ -215,12 +231,18 @@ describe("持久转录推进观察器", () => {
 		const observer = createObserver({ probe, nowMs: () => clock, onProbeFailed });
 
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary(), manager);
-		await vi.waitFor(() => expect(onProbeFailed).toHaveBeenCalledTimes(1));
+		await vi.waitFor(
+			() => expect(onProbeFailed).toHaveBeenCalledTimes(1),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 		expect(recorded).toHaveLength(0);
 
 		clock = PERSISTED_AGENT_TRANSCRIPT_PROBE_COOLDOWN_MS;
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary({ lastOutputAt: clock }), manager);
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(2),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 	});
 
 	it("dispose 之后既不再探测，在途探测的结果也不再写回", async () => {
@@ -237,7 +259,10 @@ describe("持久转录推进观察器", () => {
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary(), manager);
 		observer.dispose();
 		releaseProbe(TRANSCRIPT_OBSERVATION);
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(1));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(1),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 
 		expect(recorded).toHaveLength(0);
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary({ taskId: "task-2" }), manager);
@@ -260,7 +285,10 @@ describe("持久转录推进观察器", () => {
 		);
 		observer.observeTaskSessionSummary(WORKSPACE_BETA, summary({ workspacePath: "/tmp/worktree-beta" }), betaManager);
 
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(2),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 		expect(probe).toHaveBeenNthCalledWith(1, { agentId: "claude", workspacePath: "/tmp/worktree-alpha" });
 		expect(probe).toHaveBeenNthCalledWith(2, { agentId: "claude", workspacePath: "/tmp/worktree-beta" });
 	});
@@ -290,13 +318,19 @@ describe("持久转录推进观察器", () => {
 
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary(), alphaManager);
 		observer.observeTaskSessionSummary(WORKSPACE_BETA, summary(), betaManager);
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(2),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 
 		observer.forgetWorkspace(WORKSPACE_ALPHA);
 
 		// alpha 的账本已清空 ⇒ 冷却窗口内也会被当成「首次见到」重新探测。
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary(), alphaManager);
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(3));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(3),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 
 		// beta 没被碰过 ⇒ 冷却仍然拦着。
 		observer.observeTaskSessionSummary(WORKSPACE_BETA, summary(), betaManager);
@@ -317,7 +351,10 @@ describe("持久转录推进观察器", () => {
 		observer.observeTaskSessionSummary(WORKSPACE_ALPHA, summary(), manager);
 		observer.forgetWorkspace(WORKSPACE_ALPHA);
 		releaseProbe(TRANSCRIPT_OBSERVATION);
-		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(1));
+		await vi.waitFor(
+			() => expect(probe).toHaveBeenCalledTimes(1),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 
 		expect(recorded).toHaveLength(0);
 	});
@@ -352,7 +389,10 @@ describe("持久转录推进观察器", () => {
 
 		// 限流只是排队，不是丢弃：每一条最终都得被探到并写回，否则「水合任务一辈子仅有的一次探测机会」
 		// 就被闸门④吃掉了。
-		await vi.waitFor(() => expect(recorded).toHaveLength(HYDRATED_TASK_COUNT), { timeout: 4_000 });
+		await vi.waitFor(
+			() => expect(recorded).toHaveLength(HYDRATED_TASK_COUNT),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 		expect(probe).toHaveBeenCalledTimes(HYDRATED_TASK_COUNT);
 		expect(new Set(recorded.map((entry) => entry.taskId)).size).toBe(HYDRATED_TASK_COUNT);
 		expect(peakInFlightProbeCount).toBe(MAX_CONCURRENT_PERSISTED_AGENT_TRANSCRIPT_PROBES);
@@ -371,7 +411,7 @@ describe("持久转录推进观察器", () => {
 			manager,
 		);
 		await releaseNextProbe();
-		await vi.waitFor(() => expect(recorded).toHaveLength(1));
+		await vi.waitFor(() => expect(recorded).toHaveLength(1), OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD);
 
 		// 水合回填灌满队列：名额被 hydrated-0 占住，其余全在常规车道排着。
 		for (let index = 0; index < 10; index += 1) {
@@ -412,7 +452,10 @@ describe("持久转录推进观察器", () => {
 		for (let index = 0; index < LIVE_TASK_COUNT; index += 1) {
 			await releaseNextProbe();
 		}
-		await vi.waitFor(() => expect(recorded).toHaveLength(LIVE_TASK_COUNT));
+		await vi.waitFor(
+			() => expect(recorded).toHaveLength(LIVE_TASK_COUNT),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 
 		for (let index = 0; index < 10; index += 1) {
 			observer.observeTaskSessionSummary(
@@ -460,7 +503,10 @@ describe("持久转录推进观察器", () => {
 
 		observer.observeTaskSessionSummary(WORKSPACE_BETA, summary(), manager);
 
-		await vi.waitFor(() => expect(onProbeFailed).toHaveBeenCalledTimes(1));
+		await vi.waitFor(
+			() => expect(onProbeFailed).toHaveBeenCalledTimes(1),
+			OBSERVER_ASSERTION_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
 		expect(onProbeFailed.mock.calls[0]?.[1]).toEqual({ workspaceId: WORKSPACE_BETA, taskId: "task-1" });
 	});
 });

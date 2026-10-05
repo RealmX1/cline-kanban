@@ -4,6 +4,21 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { NotificationLifecycleArchive } from "../../src/notifications/notification-lifecycle-archive";
+import {
+	judgeMeasuredElapsedAgainstLoadSensitiveTwoTierDeadline,
+	type LoadSensitiveWallClockTwoTierDeadline,
+} from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
+
+// C 类性能绊线，按 D1-b 判定：GitHub Actions 上超过软档 5s 即失败（与改动前一致）；本地高负载下
+// 同步 SQLite 查询被抢走 CPU 的耗时与退化同一量级，超过软档只告警，超过硬档才失败。
+// EXPERIMENT_NODE: 十万条首页查询本地硬档 20000ms，待在负载下标定实际耗时分布后再定
+const PANEL_GROUPS_FIRST_PAGE_OVER_ONE_HUNDRED_THOUSAND_ENTRIES_TWO_TIER_DEADLINE: LoadSensitiveWallClockTwoTierDeadline =
+	{
+		waitedForDescription: "十万条档案上 panelGroups 首页（50 条）查询耗时",
+		softDeadlineMsExpectedOnUncontendedHost: 5_000,
+		hardDeadlineMsOnlyExplainedByRealHangOrRegression: 20_000,
+		strictAtSoftDeadlineWhenRunningInContinuousIntegration: true,
+	};
 
 describe("通知永久档案", () => {
 	it("旧档案重开后音频恢复按事件类型查索引，并保留去重与已完成过滤", async () => {
@@ -101,7 +116,7 @@ describe("通知永久档案", () => {
 			await rm(directory, { recursive: true, force: true });
 		}
 	});
-	it("十万条档案按页读取，全量未读操作不受 50 条显示上限影响", async () => {
+	it("十万条档案按页读取，全量未读操作不受 50 条显示上限影响", async (testContext) => {
 		const directory = await mkdtemp(join(tmpdir(), "kanban-notification-volume-test-"));
 		const archive = new NotificationLifecycleArchive(directory);
 		try {
@@ -119,9 +134,14 @@ describe("通知永久档案", () => {
 			);
 			const started = performance.now();
 			const page = await archive.panelGroups({ limit: 50 });
+			const panelGroupsFirstPageElapsedMs = performance.now() - started;
 			expect(page.entries).toHaveLength(50);
 			expect(page.unreadTaskCount).toBe(101);
-			expect(performance.now() - started).toBeLessThan(5_000);
+			await judgeMeasuredElapsedAgainstLoadSensitiveTwoTierDeadline(
+				testContext,
+				PANEL_GROUPS_FIRST_PAGE_OVER_ONE_HUNDRED_THOUSAND_ENTRIES_TWO_TIER_DEADLINE,
+				panelGroupsFirstPageElapsedMs,
+			);
 			await archive.markAllVisited(false);
 			expect((await archive.panelGroups()).unreadTaskCount).toBe(0);
 			await archive.clearAllPanels();

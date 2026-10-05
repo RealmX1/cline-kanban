@@ -36,6 +36,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 
 - `npm test` 是 `test:guarded`（`test:policy` AST 静态策略 + invoking-repository mutation canary），**不要直接 `npx vitest`**——那会绕过策略与 canary。两个 project：`precommit-safe`（`test/**/*.test.ts`）与 `runtime-integration`（`*.integration.test.ts`，串行单 worker）。单文件：`npm run test:guarded -- --project precommit-safe <file>`。web-ui 是另一套 vitest（jsdom、测试与源码同目录）：`npm run web:test`；e2e 用 Playwright：`npm --prefix web-ui run e2e`。桌面壳：`npm --prefix packages/desktop run typecheck|test`。
 - 真实 git 测试只能经 `test/git-repository-mutation-safety/isolated-git-test-workspace-fixture.ts` 操作仓库（细则见 `test/README.md`）。
+- 计时 / 资源阈值断言（等子进程退出、性能绊线、RSS 上限）按 `test/README.md`「负载敏感的墙钟 / 资源断言」分类：测试侧等待用两档（软档只告警、硬档才失败），并闭合用例与 hook 超时；**不要**用宿主 CPU 争用信号放过失败（实测不可靠）。
 - pre-commit（husky）顺序：`biome check --staged` → `npm run typecheck` → `npm run test:precommit`。
 
 ## 架构 orientation（读单个文件看不出来的部分）

@@ -15,6 +15,11 @@ import { createTerminalWebSocketBridge, type TerminalWebSocketBridge } from "../
 const TASK_ID = "task-1";
 const WORKSPACE_ID = "workspace-1";
 
+// 「终会到达」的单档等待上限（WS 连接、控制消息、输出帧、记账收敛）。原先的 250ms / 1–2s 在高负载
+// （两个 worker 共享宿主）下会被调度饥饿吃掉；这些断言判的是「最终收到了什么、记账是否配平」，
+// 放宽不损失判别力。反向断言（等一段时间后断言「没发生」）不在此列，见 :565 一带的说明。
+const TERMINAL_WEBSOCKET_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS = 10_000;
+
 function createSummary(taskId = TASK_ID): RuntimeTaskSessionSummary {
 	return {
 		taskId,
@@ -97,7 +102,10 @@ async function openQueuedWebSocket(url: string): Promise<QueuedWebSocket> {
 		events.emit("message");
 	});
 	await new Promise<void>((resolve, reject) => {
-		const timeoutId = setTimeout(() => reject(new Error(`Timed out connecting websocket: ${url}`)), 2_000);
+		const timeoutId = setTimeout(
+			() => reject(new Error(`Timed out connecting websocket: ${url}`)),
+			TERMINAL_WEBSOCKET_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
+		);
 		socket.once("open", () => {
 			clearTimeout(timeoutId);
 			resolve();
@@ -113,7 +121,7 @@ async function openQueuedWebSocket(url: string): Promise<QueuedWebSocket> {
 async function waitForControlMessage(
 	queuedSocket: QueuedWebSocket,
 	predicate: (message: RuntimeTerminalWsServerMessage) => boolean,
-	timeoutMs = 2_000,
+	timeoutMs = TERMINAL_WEBSOCKET_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
 ): Promise<RuntimeTerminalWsServerMessage> {
 	return await new Promise((resolve, reject) => {
 		const tryResolve = () => {
@@ -143,7 +151,10 @@ async function waitForControlMessage(
 	});
 }
 
-async function waitForIoMessage(queuedSocket: QueuedWebSocket, timeoutMs = 2_000): Promise<Buffer> {
+async function waitForIoMessage(
+	queuedSocket: QueuedWebSocket,
+	timeoutMs = TERMINAL_WEBSOCKET_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
+): Promise<Buffer> {
 	return await new Promise((resolve, reject) => {
 		// 成功/超时路径也要摘掉 error 监听器:渐进 ack 的用例会按帧数反复调用本函数,
 		// 残留的 once("error") 会线性堆积并触发 MaxListenersExceededWarning。
@@ -184,7 +195,7 @@ async function collectIoFramesTotalingBytesWithPerFrameAcks(
 	ioSocket: QueuedWebSocket,
 	controlSocket: QueuedWebSocket,
 	expectedTotalBytes: number,
-	timeoutMs = 2_000,
+	timeoutMs = TERMINAL_WEBSOCKET_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
 ): Promise<{ combined: Buffer; frameByteLengths: number[] }> {
 	const frames: Buffer[] = [];
 	let receivedBytes = 0;
@@ -216,7 +227,10 @@ async function closeSocket(socket: WebSocket): Promise<void> {
 	await once(socket, "close");
 }
 
-async function waitForAssertion(assertion: () => void, timeoutMs = 250): Promise<void> {
+async function waitForAssertion(
+	assertion: () => void,
+	timeoutMs = TERMINAL_WEBSOCKET_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
+): Promise<void> {
 	const startedAt = Date.now();
 	let lastError: unknown = null;
 	while (Date.now() - startedAt < timeoutMs) {
@@ -240,7 +254,7 @@ async function waitForAssertion(assertion: () => void, timeoutMs = 250): Promise
 async function attemptUpgradeAndReadResponse(
 	url: string,
 	cookieHeader?: string,
-	timeoutMs = 2_000,
+	timeoutMs = TERMINAL_WEBSOCKET_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
 ): Promise<{ statusLine: string }> {
 	return await new Promise((resolve, reject) => {
 		const timeoutId = setTimeout(() => {
@@ -389,7 +403,13 @@ describe("createTerminalWebSocketBridge – passcode gate", () => {
 	});
 });
 
-describe("createTerminalWebSocketBridge", () => {
+// 用例超时挂在 describe 上（嵌套的「永久卡死的兜底」随之继承），取组内串行等待最多的用例：「broadcasts one PTY
+// session…」与「keeps the PTY paused…」各 9 段「终会到达」等待（4 次开 socket + 2 次等 restore + 3 次等输出帧 / 收帧 /
+// 记账收敛）× 单段上限，外加 5s 关 socket 与短观察窗的余量——内层等待到点时带诊断的失败不会被用例超时截断。
+const TEST_TIMEOUT_MS_COVERING_NINE_SERIAL_ARRIVAL_WAITS =
+	9 * TERMINAL_WEBSOCKET_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS + 5_000;
+
+describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NINE_SERIAL_ARRIVAL_WAITS }, () => {
 	let server: Server;
 	let bridge: TerminalWebSocketBridge;
 	let terminalManager: FakeTerminalManager;
@@ -562,9 +582,16 @@ describe("createTerminalWebSocketBridge", () => {
 		terminalManager.emitOutput(TASK_ID, output);
 
 		// 不发任何 ack:收到的字节数被钳制在「高水位 + 至多一帧」以内,余帧留在服务端队列。
+		// 正向屏障:先等到服务端确实暂停、且跨过高水位的那一帧已经到达客户端——原先固定等 50ms,
+		// 负载下帧还在路上就断言,会因「收到 0 字节」误报。
+		await waitForAssertion(() => {
+			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
+			expect(sumQueuedIoBytes(ioSocket)).toBeGreaterThan(OUTPUT_ACK_HIGH_WATER_MARK_BYTES);
+		});
+		// 反向观察(「没有过量发送」):暂停之后再留一小段窗口,看有没有越过暂停点继续发出的帧。
+		// 这是「等一段时间后断言没发生」的弱观察,负载下只会漏报、不会误报,窗口沿用原值。
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		const bytesReceivedBeforeAnyAck = sumQueuedIoBytes(ioSocket);
-		expect(bytesReceivedBeforeAnyAck).toBeGreaterThan(0);
 		expect(bytesReceivedBeforeAnyAck).toBeLessThanOrEqual(OUTPUT_ACK_HIGH_WATER_MARK_BYTES + OUTPUT_FRAME_MAX_BYTES);
 		expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
 		expect(terminalManager.resumeOutput).not.toHaveBeenCalled();
@@ -742,7 +769,7 @@ describe("createTerminalWebSocketBridge", () => {
 			// 逐出 → close → ioState.dispose → 摘出 backpressuredViewerIds → PTY 放开。
 			await waitForAssertion(() => {
 				expect(terminalManager.resumeOutput.mock.calls.length).toBeGreaterThan(0);
-			}, 2_000);
+			});
 
 			await closeSocket(ioSocket.socket);
 			await closeSocket(controlSocket.socket);
@@ -757,7 +784,7 @@ describe("createTerminalWebSocketBridge", () => {
 			terminalManager.emitOutput(TASK_ID, "z".repeat(120_000));
 			await waitForAssertion(() => {
 				expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
-			}, 1_000);
+			});
 			expect(terminalManager.resumeOutput).not.toHaveBeenCalled();
 
 			// control 抖断重连：在途的那批 ack 就此永远补不回来。ack 记在 io 侧、却从 control 上来，
@@ -768,7 +795,7 @@ describe("createTerminalWebSocketBridge", () => {
 
 			await waitForAssertion(() => {
 				expect(terminalManager.resumeOutput.mock.calls.length).toBeGreaterThan(0);
-			}, 1_000);
+			});
 
 			await closeSocket(ioSocket.socket);
 			await closeSocket(controlSocketAfterReconnect.socket);

@@ -25,6 +25,9 @@ import { createTempDir } from "../../utilities/temp-dir";
 const WORKSPACE_ID = "workspace-1";
 // flush 批次窗口 150ms + 处理裕量；负面断言（不应再收到消息）必须等过这个窗口。
 const FLUSH_OVERSHOOT_MS = 400;
+// 「终会到达」的单档等待（WS 连接、正向广播消息）：原先 2s 在高负载（两个 worker 共享宿主）下不够；
+// 断言判的是「最终收到了什么」，放宽不损失判别力。FLUSH_OVERSHOOT_MS 是反向观察窗口，不在此列。
+const RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS = 10_000;
 
 function makeProject(id: string, inProgressCount = 0): RuntimeProjectSummary {
 	const taskCounts = { backlog: 0, in_progress: inProgressCount, review: 0, validation: 0, trash: 0 };
@@ -78,7 +81,10 @@ async function openQueuedRuntimeSocket(url: string): Promise<QueuedRuntimeSocket
 		}
 	});
 	await new Promise<void>((resolve, reject) => {
-		const timeoutId = setTimeout(() => reject(new Error(`Timed out connecting websocket: ${url}`)), 2_000);
+		const timeoutId = setTimeout(
+			() => reject(new Error(`Timed out connecting websocket: ${url}`)),
+			RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
+		);
 		socket.once("open", () => {
 			clearTimeout(timeoutId);
 			resolve();
@@ -94,7 +100,7 @@ async function openQueuedRuntimeSocket(url: string): Promise<QueuedRuntimeSocket
 async function waitForRuntimeMessage<T extends RuntimeStateStreamMessage = RuntimeStateStreamMessage>(
 	queued: QueuedRuntimeSocket,
 	predicate: (message: RuntimeStateStreamMessage) => message is T,
-	timeoutMs = 2_000,
+	timeoutMs = RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
 ): Promise<T> {
 	return await new Promise((resolve, reject) => {
 		const tryResolve = () => {
@@ -191,7 +197,17 @@ async function setupHubHarness(): Promise<HubTestHarness> {
 	};
 }
 
-describe("runtime-state-hub projects_updated 广播去重", () => {
+// beforeEach 依次等 WS 握手与首帧 snapshot 两段「终会到达」等待，外加 5s 建临时 HOME 与起 HTTP server 的余量；
+// 默认 hookTimeout 10s 只够一段，第二段到点前 hook 就会超时，内层带诊断的失败被截断。
+const BEFORE_EACH_HOOK_TIMEOUT_MS_COVERING_SOCKET_OPEN_AND_FIRST_SNAPSHOT_WAITS =
+	2 * RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS + 5_000;
+
+// 用例超时挂在 describe 上，取组内串行等待最多的用例「新客户端注册后同内容广播仍发送」：4 段「终会到达」等待（既有
+// 客户端等广播 + 新客户端开 socket + 等首帧 snapshot + 等广播）× 单段上限 + 一个 FLUSH_OVERSHOOT_MS 反向观察窗 + 5s 关 socket 余量。
+const TEST_TIMEOUT_MS_COVERING_FOUR_SERIAL_WAITS =
+	4 * RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS + FLUSH_OVERSHOOT_MS + 5_000;
+
+describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIMEOUT_MS_COVERING_FOUR_SERIAL_WAITS }, () => {
 	// 连接握手会聚合通知 feed（读 ~/.cline/kanban/workspaces/**）；把 HOME 指到临时目录保持 hermetic。
 	let tempHome: { path: string; cleanup: () => void };
 	let previousHome: string | undefined;
@@ -210,7 +226,7 @@ describe("runtime-state-hub projects_updated 广播去重", () => {
 		client = await openQueuedRuntimeSocket(harness.streamUrl);
 		// 首帧 snapshot 到达即说明客户端已登记进全局广播集合；后续只盯 projects_updated 增量。
 		await waitForRuntimeMessage(client, (message) => message.type === "snapshot");
-	});
+	}, BEFORE_EACH_HOOK_TIMEOUT_MS_COVERING_SOCKET_OPEN_AND_FIRST_SNAPSHOT_WAITS);
 
 	afterEach(async () => {
 		if (client.socket.readyState !== WebSocket.CLOSED && client.socket.readyState !== WebSocket.CLOSING) {

@@ -8,6 +8,7 @@ import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	hasChildProcessExited,
 	waitForChildProcessExit,
+	waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline,
 	waitForRuntimeServerStartupBannerOrSigkillChild,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 
@@ -124,6 +125,41 @@ describe("runtime integration test spawned child process lifecycle", () => {
 		expect(selfExitingChild.exitCode).toBe(0);
 		expect(selfExitingChild.signalCode).toBeNull();
 	});
+
+	it("两档等待子进程退出：自行退出的子进程在硬档内返回；超过硬档时先 SIGKILL 并等到退出再抛错", async (testContext) => {
+		const selfExitingChild = spawnLightweightNodeChildProcess({
+			script: "process.exit(0);",
+			preloadShutdownIpcHookWithIpcChannel: false,
+		});
+		await expect(
+			waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(testContext, selfExitingChild, {
+				waitedForDescription: "自行退出的轻量子进程",
+				softDeadlineMsExpectedOnUncontendedHost: 5_000,
+				hardDeadlineMsOnlyExplainedByRealHangOrRegression: 10_000,
+			}),
+		).resolves.toMatchObject({ elapsedMs: expect.any(Number) });
+
+		const neverExitingChild = spawnLightweightNodeChildProcess({
+			script: KEEP_CHILD_PROCESS_ALIVE_SCRIPT_STATEMENT,
+			preloadShutdownIpcHookWithIpcChannel: false,
+		});
+		// 这里刻意超过硬档：annotation 记到丢弃型上下文里，不进运行末尾的软档告警汇总。
+		const annotationsDiscardingTestContext = { annotate: async () => undefined };
+		await expect(
+			waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
+				annotationsDiscardingTestContext,
+				neverExitingChild,
+				{
+					waitedForDescription: "永不退出的轻量子进程",
+					softDeadlineMsExpectedOnUncontendedHost: 100,
+					hardDeadlineMsOnlyExplainedByRealHangOrRegression: 300,
+				},
+				{ describeChildProcessOutputForFailureMessage: () => "stdout 为空" },
+			),
+		).rejects.toThrow(/超过硬档[\s\S]*最后观察到的状态：stdout 为空/);
+		expect(neverExitingChild.signalCode).toBe("SIGKILL");
+		// 用例超时覆盖：第一段硬档 10s + 超档后 SIGKILL 确认最多 5s，第二段硬档 0.3s + SIGKILL 确认最多 5s，外加两次 spawn 与断言余量。
+	}, 25_000);
 
 	it("shutdown IPC hook：父进程断开 IPC 且已有 SIGINT 处理器时，走 SIGINT 优雅关停", async () => {
 		const child = spawnLightweightNodeChildProcess({
