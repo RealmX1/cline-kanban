@@ -1,9 +1,10 @@
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import {
 	collectCrossProjectTaskSwitcherEntriesInProjects,
 	collectUnreadHandoffEntryKeysFromNotificationLog,
@@ -25,6 +26,8 @@ import { replaceWorkspaceMetadata, resetWorkspaceMetadataStore } from "@/stores/
 
 const setTaskPinboardPinStateOfTaskCardInWorkspace = vi.hoisted(() => vi.fn());
 const readTaskCardWithBoardColumnInWorkspace = vi.hoisted(() => vi.fn());
+const fetchTaskWorkspaceInfoForWorkspace = vi.hoisted(() => vi.fn());
+vi.mock("@/runtime/workspace-state-query", () => ({ fetchTaskWorkspaceInfoForWorkspace }));
 const moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace = vi.hoisted(() => vi.fn());
 vi.mock("@/runtime/task-card-action-query", () => ({
 	setTaskPinboardPinStateOfTaskCardInWorkspace,
@@ -159,6 +162,8 @@ beforeEach(() => {
 	setTaskPinboardPinStateOfTaskCardInWorkspace.mockReset();
 	setTaskPinboardPinStateOfTaskCardInWorkspace.mockResolvedValue({ boardWasSaved: true });
 	readTaskCardWithBoardColumnInWorkspace.mockReset();
+	fetchTaskWorkspaceInfoForWorkspace.mockReset();
+	fetchTaskWorkspaceInfoForWorkspace.mockResolvedValue({ path: "/Users/test/.cline/worktrees/recent/project-b" });
 	moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace.mockReset();
 	clearAllTaskCardActionCommandsInFlight();
 	fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon.mockReset();
@@ -173,7 +178,12 @@ beforeEach(() => {
 	resetLastLoadedOtherProjectTaskCardSnapshotCache();
 	container = document.createElement("div");
 	document.body.appendChild(container);
-	root = createRoot(container);
+	// 与真实应用一致：卡片复制按钮的 ID tooltip 在键盘聚焦时也必须可用。
+	const baseRoot = createRoot(container);
+	root = {
+		render: (children: ReactNode) => baseRoot.render(<TooltipProvider>{children}</TooltipProvider>),
+		unmount: () => baseRoot.unmount(),
+	};
 });
 
 afterEach(() => {
@@ -607,6 +617,16 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		// 已 Keep open 的行不再弹浮层。
 		await hoverRowUntilFullTaskCardOverlayIsRevealed(keptOpenRow);
 		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+
+		// 复制使用卡片所属项目的只读查询，不能借当前项目 project-a 的路径。
+		await act(async () =>
+			keptOpenRow?.querySelector<HTMLButtonElement>('[aria-label="Copy directory path"]')?.click(),
+		);
+		expect(fetchTaskWorkspaceInfoForWorkspace).toHaveBeenCalledWith("project-b", {
+			taskId: "recent",
+			baseRef: "main",
+			worktreeMode: undefined,
+		});
 
 		await act(async () =>
 			keptOpenRow?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),

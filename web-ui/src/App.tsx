@@ -101,7 +101,7 @@ import type { StreamedTaskSessionSummariesApplier } from "@/runtime/use-runtime-
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
-import { saveWorkspaceState } from "@/runtime/workspace-state-query";
+import { fetchTaskWorkspaceInfoForWorkspace, saveWorkspaceState } from "@/runtime/workspace-state-query";
 import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
 import { applyPendingTaskCardCommandBoardOverlay } from "@/state/pending-task-card-command-board-overlay";
 import { withWebUiBoardMutationInitiatorRecordedForChangedTaskCards } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
@@ -318,6 +318,19 @@ export default function App(): ReactElement {
 		currentProjectId: projectRuntimeWorkspaceId,
 		setSessions,
 	});
+	const resolveTaskWorkspaceAbsoluteDirectoryPath = useCallback(
+		async (card: BoardCard) =>
+			projectRuntimeWorkspaceId
+				? (
+						await fetchTaskWorkspaceInfoForWorkspace(projectRuntimeWorkspaceId, {
+							taskId: card.id,
+							baseRef: card.baseRef,
+							worktreeMode: card.worktreeMode,
+						})
+					).path
+				: null,
+		[projectRuntimeWorkspaceId],
+	);
 
 	// 当前 workspace 内正处于连接重试的会话视图（驱动顶栏「重连中」指示器）。
 	// sessions 已按 workspace 范围维护，因此这里天然是 per-tab 范围。
@@ -1692,6 +1705,9 @@ export default function App(): ReactElement {
 														data={displayedBoard}
 														taskSessions={sessions}
 														workspacePath={workspacePath}
+														resolveTaskWorkspaceAbsoluteDirectoryPath={
+															resolveTaskWorkspaceAbsoluteDirectoryPath
+														}
 														onCardSelect={handleCardSelect}
 														onCreateTask={handleOpenCreateTask}
 														onStartTask={handleStartTaskFromBoard}
@@ -1783,6 +1799,7 @@ export default function App(): ReactElement {
 										currentProjectId={currentProjectId}
 										taskIdsOnBoard={taskIdsOnBoard}
 										workspacePath={workspacePath}
+										resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
 										selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 										runtimeConfig={runtimeProjectConfig ?? null}
 										sessionSummary={detailSession}
