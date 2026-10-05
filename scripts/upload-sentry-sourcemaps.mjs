@@ -9,7 +9,8 @@ const SENTRY_NODE_PROJECT = "kanban-node";
 
 const scriptDir = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
-const distDir = resolve(repoRoot, "dist");
+// scripts/build.mjs 在把产物换入 dist 之前，用这个变量指向它的暂存目录：inject 会改写产物，必须在换入前做。
+const distDir = resolve(process.env.KANBAN_SENTRY_SOURCEMAP_UPLOAD_DISTRIBUTION_DIRECTORY ?? resolve(repoRoot, "dist"));
 const webDistDir = resolve(distDir, "web-ui");
 const stagingRoot = resolve(repoRoot, ".sentry-artifacts");
 const nodeStagingDir = resolve(stagingRoot, "node");

@@ -31,6 +31,10 @@ import {
 } from "../state/workspace-state";
 import { backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate } from "../terminal/cursor-agent-chat-identity-backfill-before-hydrate";
 import { TerminalSessionManager } from "../terminal/session-manager";
+import type {
+	HostedTerminalPtyProcessSpawner,
+	HostedTerminalPtySessionAdoptionCandidate,
+} from "../terminal/terminal-pty-process-handle";
 import { runGit } from "../workspace/git-utils";
 import { collectCrossProjectTaskSwitcherEntriesFromBoard } from "./cross-project-task-switcher-entry-projection";
 import {
@@ -58,6 +62,16 @@ export interface CreateWorkspaceRegistryDependencies {
 	// Cline SDK / ACP 会话不在 TerminalSessionManager 里，由 runtime-state-hub 订阅持有。跨项目视图
 	// （Board Overview 明细、跨项目切换面板）要覆盖全部三种 transport，故后绑定一个读口（hub 晚于 registry 创建）。
 	listConversationTaskSessionSummariesForWorkspace?: (workspaceId: string) => RuntimeTaskSessionSummary[];
+	// agent session PTY host 模式启用时提供：每个 workspace 的 TerminalSessionManager 经它把 PTY 交给 host 进程持有。
+	createHostedTerminalPtyProcessSpawnerForWorkspace?: (
+		workspaceId: string,
+		workspaceRepositoryPath: string,
+	) => HostedTerminalPtyProcessSpawner;
+	// 热重启接管：该 workspace 在 PTY host 里仍有的会话（取走即消费）。在 terminal manager 首次加载时、
+	// hydrate 之后立刻接管，保证接管先于任何浏览器连接（runtime 在接管全部完成后才 listen）。
+	takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace?: (
+		workspaceId: string,
+	) => HostedTerminalPtySessionAdoptionCandidate[];
 	// 测试注入用；缺省 Date.now。
 	now?: () => number;
 }
@@ -388,6 +402,10 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		}
 		const loading = (async () => {
 			const manager = new TerminalSessionManager({
+				hostedTerminalPtyProcessSpawner: deps.createHostedTerminalPtyProcessSpawnerForWorkspace?.(
+					workspaceId,
+					repoPath,
+				),
 				onUserTerminalInputSubmissionObservedForSession: (kanbanTaskConversationSessionId) =>
 					recordUserTerminalInputSubmissionObservedForSessionWithoutBlocking({
 						workspaceId,
@@ -404,14 +422,22 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 					);
 				},
 			});
+			const hostedTerminalPtySessionAdoptionCandidates =
+				deps.takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace?.(workspaceId) ?? [];
 			try {
 				const existingWorkspace = await loadWorkspaceState(repoPath, { autoCreateIfMissing: false });
 				await backfillSessionAgentIdsBeforeHydrate(workspaceId, existingWorkspace.sessions);
 				// 排在 agentId 回填之后：它只处理 agentId 已是 cursor 的会话，agentId 被修好的存量会话也该被覆盖到。
 				await backfillCursorAgentChatIdentityBeforeHydrate(workspaceId, existingWorkspace.sessions);
-				manager.hydrateFromRecord(existingWorkspace.sessions);
+				manager.hydrateFromRecord(
+					existingWorkspace.sessions,
+					new Set(hostedTerminalPtySessionAdoptionCandidates.map((candidate) => candidate.taskId)),
+				);
 			} catch {
 				// Workspace state will be created on demand.
+			}
+			if (hostedTerminalPtySessionAdoptionCandidates.length > 0) {
+				await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart(hostedTerminalPtySessionAdoptionCandidates);
 			}
 			terminalManagersByWorkspaceId.set(workspaceId, manager);
 			return manager;
