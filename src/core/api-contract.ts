@@ -2577,6 +2577,36 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 ]);
 export type RuntimeStateStreamMessage = z.infer<typeof runtimeStateStreamMessageSchema>;
 
+// 状态流的每个连接声明「这个连接需要哪些任务 worktree 的 git 元数据」。All projects（Board Scope）下屏幕上只有焦点
+// 任务要逐卡 git 状态，跨项目打开任务时只探它，不必等整个项目每张卡的 git 跑完（大项目约 7 秒）。
+// 不声明（旧客户端）按整个项目处理。连接时经 WS URL 参数（JSON，参数名与组装规则见
+// runtime-state-stream-workspace-metadata-probe-scope-declaration.ts）给出初值，之后经客户端→服务端消息
+// declare_workspace_metadata_probe_scope 更新。同一项目多个连接取并集。
+export const runtimeWorkspaceMetadataProbeScopeDeclaredByStreamClientSchema = z.discriminatedUnion(
+	"workspaceMetadataProbeScopeKind",
+	[
+		z.object({ workspaceMetadataProbeScopeKind: z.literal("all_tracked_task_worktrees_of_workspace") }),
+		z.object({
+			// 服务端自动并上 Review 列里开了 auto-review 的卡：自动提交 / 自动 PR 要看它们有没有未提交改动。
+			workspaceMetadataProbeScopeKind: z.literal("focused_task_worktrees_plus_auto_review_tasks_in_review_column"),
+			focusedTaskIds: z.array(z.string()).max(50),
+		}),
+	],
+);
+export type RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient = z.infer<
+	typeof runtimeWorkspaceMetadataProbeScopeDeclaredByStreamClientSchema
+>;
+
+export const runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSchema = z.object({
+	type: z.literal("declare_workspace_metadata_probe_scope"),
+	workspaceMetadataProbeScope: runtimeWorkspaceMetadataProbeScopeDeclaredByStreamClientSchema,
+});
+// 浏览器 → 服务端的状态流消息（其余消息都是服务端 → 浏览器）。
+export const runtimeStateStreamClientMessageSchema = z.discriminatedUnion("type", [
+	runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSchema,
+]);
+export type RuntimeStateStreamClientMessage = z.infer<typeof runtimeStateStreamClientMessageSchema>;
+
 export const runtimeProjectsResponseSchema = z.object({
 	currentProjectId: z.string().nullable(),
 	projects: z.array(runtimeProjectSummarySchema),

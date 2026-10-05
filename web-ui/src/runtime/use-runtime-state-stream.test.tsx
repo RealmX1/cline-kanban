@@ -12,6 +12,10 @@ import {
 	resetTaskResourceUsageSnapshotStore,
 	useTaskResourceUsageSnapshotValue,
 } from "@/stores/task-resource-usage-snapshot-store";
+import {
+	resetWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab,
+	writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab,
+} from "@/stores/workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store";
 
 const reloadBrowserIfServedBuildAssetsChangedMock = vi.hoisted(() => vi.fn());
 
@@ -39,9 +43,14 @@ class MockRuntimeStateWebSocket {
 	onerror: (() => void) | null = null;
 	onclose: (() => void) | null = null;
 	readyState = MockRuntimeStateWebSocket.CONNECTING;
+	readonly sentMessages: unknown[] = [];
 
 	constructor(readonly url: string) {
 		MockRuntimeStateWebSocket.instances.push(this);
+	}
+
+	send(data: string): void {
+		this.sentMessages.push(JSON.parse(data));
 	}
 
 	close(): void {
@@ -80,6 +89,15 @@ function RuntimeStateStreamHarness({
 }
 
 // 模拟卡体上的资源药丸：按卡片 id 订阅资源快照 store，把每次渲染看到的值交给测试。
+function RuntimeStateStreamForRequestedWorkspaceHarness({
+	requestedWorkspaceId,
+}: {
+	requestedWorkspaceId: string;
+}): null {
+	useRuntimeStateStream(requestedWorkspaceId);
+	return null;
+}
+
 function TaskResourceUsageSnapshotForTaskCardProbe({
 	taskCardId,
 	onTaskResourceUsageSnapshotRendered,
@@ -141,8 +159,9 @@ describe("useRuntimeStateStream", () => {
 			root.unmount();
 		});
 		container.remove();
-		// 资源快照 store 是模块级单例，跨用例会残留。
+		// 资源快照 store 与探测范围声明 store 都是模块级单例，跨用例会残留。
 		resetTaskResourceUsageSnapshotStore();
+		resetWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab();
 		Object.defineProperty(globalThis, "WebSocket", {
 			configurable: true,
 			value: previousWebSocket,
@@ -154,6 +173,53 @@ describe("useRuntimeStateStream", () => {
 				previousActEnvironment;
 		}
 		vi.useRealTimers();
+	});
+
+	it("declares the git metadata probe scope in the connect URL, then sends a message when the focused task changes", async () => {
+		writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({
+			isBoardScopeAllProjectsSelected: true,
+			focusedTaskInProject: { workspaceId: "project-b", taskId: "task-1" },
+		});
+		await act(async () => {
+			root.render(<RuntimeStateStreamForRequestedWorkspaceHarness requestedWorkspaceId="project-b" />);
+		});
+		const socket = MockRuntimeStateWebSocket.instances[0];
+		if (!socket) {
+			throw new Error("Expected the runtime stream socket.");
+		}
+		// All projects 下只声明焦点任务：服务端首轮只探它，不等整个项目。
+		expect(JSON.parse(new URL(socket.url).searchParams.get("workspaceMetadataProbeScope") ?? "null")).toEqual({
+			workspaceMetadataProbeScopeKind: "focused_task_worktrees_plus_auto_review_tasks_in_review_column",
+			focusedTaskIds: ["task-1"],
+		});
+
+		act(() => {
+			socket.triggerOpen();
+		});
+		// URL 里已声明过、没变：不重复发。
+		expect(socket.sentMessages).toEqual([]);
+
+		act(() => {
+			writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({
+				focusedTaskInProject: { workspaceId: "project-b", taskId: "task-2" },
+			});
+		});
+		act(() => {
+			writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({ isBoardScopeAllProjectsSelected: false });
+		});
+		expect(socket.sentMessages).toEqual([
+			{
+				type: "declare_workspace_metadata_probe_scope",
+				workspaceMetadataProbeScope: {
+					workspaceMetadataProbeScopeKind: "focused_task_worktrees_plus_auto_review_tasks_in_review_column",
+					focusedTaskIds: ["task-2"],
+				},
+			},
+			{
+				type: "declare_workspace_metadata_probe_scope",
+				workspaceMetadataProbeScope: { workspaceMetadataProbeScopeKind: "all_tracked_task_worktrees_of_workspace" },
+			},
+		]);
 	});
 
 	it("checks whether the served frontend build changed after the runtime stream reconnects", async () => {

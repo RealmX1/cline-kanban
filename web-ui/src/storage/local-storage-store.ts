@@ -65,7 +65,8 @@ export enum LocalStorageKey {
 	KanbanBoardColumnCustomWidthsPx = "kanban.kanban-board-column-custom-widths-px.v1",
 	// 顶栏项目切换器选中的范围：Board Scope（All projects，docs/context-stage-first-overview.md）vs 单个项目。
 	// 看板页据此在 Board Overview 与看板之间切换，Focus View 左栏据此在跨项目切换面板与 stage 列表之间切换。
-	// per-browser 便利项，丢了回落到单项目。
+	// localStorage 里这份只是新开标签页的默认值；每个标签页的实际范围存在 sessionStorage 同名键里
+	// （见 use-selected-board-or-single-project-scope）。便利项，丢了回落到单项目。
 	SelectedBoardOrSingleProjectScope = "kanban.selected-board-or-single-project-scope.v1",
 	// 已并入 SelectedBoardOrSingleProjectScope 的旧键（Focus View 左栏的 This project | All projects 两段切换）。
 	// 只为一次性迁移保留，见 use-selected-board-or-single-project-scope。

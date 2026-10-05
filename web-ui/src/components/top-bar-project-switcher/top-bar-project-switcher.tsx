@@ -2,6 +2,7 @@ import * as RadixPopover from "@radix-ui/react-popover";
 import { Plus } from "lucide-react";
 import { type KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { BoardScopeFocusedTaskProjectBreadcrumbNarrowingButton } from "@/components/top-bar-project-switcher/board-scope-focused-task-project-breadcrumb-narrowing-button";
 import { ProjectSwitcherBoardScopeAllProjectsPseudoRow } from "@/components/top-bar-project-switcher/project-switcher-board-scope-all-projects-pseudo-row";
 import { ProjectSwitcherColumnVisibilityMenu } from "@/components/top-bar-project-switcher/project-switcher-column-visibility-menu";
 import {
@@ -56,7 +57,7 @@ export interface TopBarProjectSwitcherState {
 	// 选具体项目行由 onSelectProject 负责切回单项目范围。
 	selectedBoardOrSingleProjectScope: SelectedBoardOrSingleProjectScope;
 	onSelectBoardScopeAllProjects: () => void;
-	// Board Scope 下 Focus View 打开着的任务所属的项目：触发按钮显示成「All projects › 项目名」。
+	// Board Scope 下 Focus View 打开着的任务所属的项目：触发按钮后面接一个「› 项目名」按钮，点它收窄到该项目。
 	boardScopeFocusViewFocusedTaskProjectId: string | null;
 }
 
@@ -283,151 +284,157 @@ export function TopBarProjectSwitcher({
 	}
 
 	const shouldShowFilterInput = projects.length >= PROJECT_COUNT_THRESHOLD_FOR_FILTER_INPUT;
+	const boardScopeFocusViewFocusedTaskProject =
+		isBoardScopeAllProjectsSelected && boardScopeFocusViewFocusedTaskProjectId
+			? (projects.find((project) => project.id === boardScopeFocusViewFocusedTaskProjectId) ?? null)
+			: null;
 
 	return (
-		<RadixPopover.Root open={isOpen} onOpenChange={handleOpenChange}>
-			<RadixPopover.Trigger asChild>
-				<ProjectSwitcherTriggerButton
-					boardScopeAllProjectsBreadcrumb={
-						isBoardScopeAllProjectsSelected
-							? {
-									focusViewFocusedTaskProjectName:
-										projects.find((project) => project.id === boardScopeFocusViewFocusedTaskProjectId)
-											?.name ?? null,
-								}
-							: null
-					}
-					projectName={navigationCurrentProject?.name ?? null}
-					liveAgentTaskCount={navigationCurrentProject ? deriveLiveAgentTaskCount(navigationCurrentProject) : 0}
-					isProjectUnavailable={navigationCurrentProject?.availability.status === "unavailable"}
-					isProjectSwitching={isProjectSwitching}
-					isMobile={isMobile}
-					isOpen={isOpen}
-					disabled={isProjectListLoading}
-					title={navigationCurrentProject?.path ?? undefined}
-				/>
-			</RadixPopover.Trigger>
-			<RadixPopover.Portal>
-				<RadixPopover.Content
-					ref={contentRef}
-					className="z-50 flex max-h-[min(480px,70svh)] w-[min(720px,calc(100vw-24px))] flex-col overflow-hidden rounded-lg border border-border bg-surface-2 shadow-xl outline-none"
-					style={{ animation: "kb-tooltip-show 100ms ease" }}
-					align="start"
-					sideOffset={5}
-					collisionPadding={8}
-					onKeyDown={handleNavigationKeyDown}
-					onOpenAutoFocus={(event) => {
-						// Radix 默认把焦点丢到第一个可聚焦子元素（会是过滤框或第一行的槽位按钮）；
-						// 我们自己决定焦点归属，键盘导航才好使。
-						//
-						// 刻意同步 focus、不套 requestAnimationFrame：延后一帧的话，如果这期间用户已经点开了
-						// 行内的槽位选择器（嵌套 popover），这次迟到的 focus 就落在它外面，会把刚打开的选择器
-						// 当作「焦点移出」立刻关掉。
-						event.preventDefault();
-						if (shouldShowFilterInput && !isMobile) {
-							filterInputRef.current?.focus();
-							return;
-						}
-						contentRef.current?.focus();
-					}}
-					tabIndex={-1}
-					data-testid="top-bar-project-switcher-panel"
-				>
-					<div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
-						{shouldShowFilterInput ? (
-							<input
-								ref={filterInputRef}
-								className="h-7 min-w-0 flex-1 rounded-md border border-border bg-surface-1 px-2 text-xs text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
-								placeholder="Filter projects..."
-								value={query}
-								onChange={(event) => setQuery(event.target.value)}
-								data-testid="project-switcher-filter-input"
+		// 与触发按钮同样的收缩规则：桌面不收缩，否则这一组被挤得比内容窄、搜索按钮压在「› 项目名」上。
+		<span className={cn("flex items-center", isMobile ? "min-w-0 shrink" : "shrink-0")}>
+			<RadixPopover.Root open={isOpen} onOpenChange={handleOpenChange}>
+				<RadixPopover.Trigger asChild>
+					<ProjectSwitcherTriggerButton
+						isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
+						projectName={navigationCurrentProject?.name ?? null}
+						liveAgentTaskCount={navigationCurrentProject ? deriveLiveAgentTaskCount(navigationCurrentProject) : 0}
+						isProjectUnavailable={navigationCurrentProject?.availability.status === "unavailable"}
+						isProjectSwitching={isProjectSwitching}
+						isMobile={isMobile}
+						isOpen={isOpen}
+						disabled={isProjectListLoading}
+						title={navigationCurrentProject?.path ?? undefined}
+					/>
+				</RadixPopover.Trigger>
+				<RadixPopover.Portal>
+					<RadixPopover.Content
+						ref={contentRef}
+						className="z-50 flex max-h-[min(480px,70svh)] w-[min(720px,calc(100vw-24px))] flex-col overflow-hidden rounded-lg border border-border bg-surface-2 shadow-xl outline-none"
+						style={{ animation: "kb-tooltip-show 100ms ease" }}
+						align="start"
+						sideOffset={5}
+						collisionPadding={8}
+						onKeyDown={handleNavigationKeyDown}
+						onOpenAutoFocus={(event) => {
+							// Radix 默认把焦点丢到第一个可聚焦子元素（会是过滤框或第一行的槽位按钮）；
+							// 我们自己决定焦点归属，键盘导航才好使。
+							//
+							// 刻意同步 focus、不套 requestAnimationFrame：延后一帧的话，如果这期间用户已经点开了
+							// 行内的槽位选择器（嵌套 popover），这次迟到的 focus 就落在它外面，会把刚打开的选择器
+							// 当作「焦点移出」立刻关掉。
+							event.preventDefault();
+							if (shouldShowFilterInput && !isMobile) {
+								filterInputRef.current?.focus();
+								return;
+							}
+							contentRef.current?.focus();
+						}}
+						tabIndex={-1}
+						data-testid="top-bar-project-switcher-panel"
+					>
+						<div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
+							{shouldShowFilterInput ? (
+								<input
+									ref={filterInputRef}
+									className="h-7 min-w-0 flex-1 rounded-md border border-border bg-surface-1 px-2 text-xs text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
+									placeholder="Filter projects..."
+									value={query}
+									onChange={(event) => setQuery(event.target.value)}
+									data-testid="project-switcher-filter-input"
+								/>
+							) : (
+								<span className="flex-1 text-[11px] font-medium uppercase tracking-[0.02em] text-text-tertiary">
+									Switch project
+								</span>
+							)}
+							<div
+								className="inline-flex shrink-0 items-center rounded-md border border-border bg-surface-1 p-0.5"
+								role="group"
+								aria-label="Sort projects"
+							>
+								{(
+									[
+										{ sortOrder: "last_visited_desc", label: "Recent" },
+										{ sortOrder: "name_asc", label: "A–Z" },
+									] as const
+								).map((option) => (
+									<button
+										key={option.sortOrder}
+										type="button"
+										className={cn(
+											"rounded px-2 py-0.5 text-[11px] font-medium",
+											storedSortOrder === option.sortOrder
+												? "bg-surface-3 text-text-primary"
+												: "text-text-secondary hover:text-text-primary",
+										)}
+										aria-pressed={storedSortOrder === option.sortOrder}
+										data-testid={`project-switcher-sort-order-${option.sortOrder}`}
+										onClick={() => setStoredSortOrder(option.sortOrder)}
+									>
+										{option.label}
+									</button>
+								))}
+							</div>
+							<ProjectSwitcherColumnVisibilityMenu
+								columnVisibility={columnVisibility}
+								onToggleColumnVisibility={handleToggleColumnVisibility}
 							/>
-						) : (
-							<span className="flex-1 text-[11px] font-medium uppercase tracking-[0.02em] text-text-tertiary">
-								Switch project
-							</span>
-						)}
-						<div
-							className="inline-flex shrink-0 items-center rounded-md border border-border bg-surface-1 p-0.5"
-							role="group"
-							aria-label="Sort projects"
-						>
-							{(
-								[
-									{ sortOrder: "last_visited_desc", label: "Recent" },
-									{ sortOrder: "name_asc", label: "A–Z" },
-								] as const
-							).map((option) => (
-								<button
-									key={option.sortOrder}
-									type="button"
-									className={cn(
-										"rounded px-2 py-0.5 text-[11px] font-medium",
-										storedSortOrder === option.sortOrder
-											? "bg-surface-3 text-text-primary"
-											: "text-text-secondary hover:text-text-primary",
-									)}
-									aria-pressed={storedSortOrder === option.sortOrder}
-									data-testid={`project-switcher-sort-order-${option.sortOrder}`}
-									onClick={() => setStoredSortOrder(option.sortOrder)}
-								>
-									{option.label}
-								</button>
-							))}
 						</div>
-						<ProjectSwitcherColumnVisibilityMenu
-							columnVisibility={columnVisibility}
-							onToggleColumnVisibility={handleToggleColumnVisibility}
-						/>
-					</div>
 
-					<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1 py-1">
-						<ProjectSwitcherTable
-							boardScopeAllProjectsPseudoRow={
-								isBoardScopeAllProjectsPseudoRowVisible ? (
-									<ProjectSwitcherBoardScopeAllProjectsPseudoRow
-										projects={projects}
-										isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
-										isActiveRow={activeRowIndex === 0}
-										columnVisibility={columnVisibility}
-										onSelectBoardScopeAllProjects={handleSelectBoardScopeAllProjectsAndClose}
-										onActivateRow={() => setActiveRowIndex(0)}
-									/>
-								) : null
-							}
-							rows={visibleRows}
-							// Board Scope 下没有哪个项目是「当前选中的范围」，「Current」标记挂在伪行上。
-							currentProjectId={isBoardScopeAllProjectsSelected ? null : currentProjectId}
-							activeRowIndex={activeRowIndex - projectRowIndexOffset}
-							columnVisibility={columnVisibility}
-							nowEpochMs={nowEpochMs}
-							projectNameByNumericSlotGroupNumber={projectNameByNumericSlotGroupNumber}
-							onSelectProject={handleSelectProjectAndClose}
-							onActiveRowIndexChange={(projectRowIndex) =>
-								setActiveRowIndex(projectRowIndex + projectRowIndexOffset)
-							}
-							onAssignProjectToNumericSlotGroupNumber={onAssignProjectToNumericSlotGroupNumber}
-							onClearNumericSlotGroupNumber={onClearNumericSlotGroupNumber}
-						/>
-					</div>
+						<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1 py-1">
+							<ProjectSwitcherTable
+								boardScopeAllProjectsPseudoRow={
+									isBoardScopeAllProjectsPseudoRowVisible ? (
+										<ProjectSwitcherBoardScopeAllProjectsPseudoRow
+											projects={projects}
+											isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
+											isActiveRow={activeRowIndex === 0}
+											columnVisibility={columnVisibility}
+											onSelectBoardScopeAllProjects={handleSelectBoardScopeAllProjectsAndClose}
+											onActivateRow={() => setActiveRowIndex(0)}
+										/>
+									) : null
+								}
+								rows={visibleRows}
+								// Board Scope 下没有哪个项目是「当前选中的范围」，「Current」标记挂在伪行上。
+								currentProjectId={isBoardScopeAllProjectsSelected ? null : currentProjectId}
+								activeRowIndex={activeRowIndex - projectRowIndexOffset}
+								columnVisibility={columnVisibility}
+								nowEpochMs={nowEpochMs}
+								projectNameByNumericSlotGroupNumber={projectNameByNumericSlotGroupNumber}
+								onSelectProject={handleSelectProjectAndClose}
+								onActiveRowIndexChange={(projectRowIndex) =>
+									setActiveRowIndex(projectRowIndex + projectRowIndexOffset)
+								}
+								onAssignProjectToNumericSlotGroupNumber={onAssignProjectToNumericSlotGroupNumber}
+								onClearNumericSlotGroupNumber={onClearNumericSlotGroupNumber}
+							/>
+						</div>
 
-					<div className="shrink-0 border-t border-border p-1">
-						<button
-							type="button"
-							className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-							data-testid="project-switcher-add-project"
-							onClick={() => {
-								handleOpenChange(false);
-								onAddProject();
-							}}
-						>
-							<Plus size={14} />
-							Add project
-						</button>
-					</div>
-				</RadixPopover.Content>
-			</RadixPopover.Portal>
-		</RadixPopover.Root>
+						<div className="shrink-0 border-t border-border p-1">
+							<button
+								type="button"
+								className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+								data-testid="project-switcher-add-project"
+								onClick={() => {
+									handleOpenChange(false);
+									onAddProject();
+								}}
+							>
+								<Plus size={14} />
+								Add project
+							</button>
+						</div>
+					</RadixPopover.Content>
+				</RadixPopover.Portal>
+			</RadixPopover.Root>
+			{boardScopeFocusViewFocusedTaskProject ? (
+				<BoardScopeFocusedTaskProjectBreadcrumbNarrowingButton
+					focusedTaskProjectName={boardScopeFocusViewFocusedTaskProject.name}
+					isMobile={isMobile}
+					onNarrowToFocusedTaskProject={() => onSelectProject(boardScopeFocusViewFocusedTaskProject.id)}
+				/>
+			) : null}
+		</span>
 	);
 }

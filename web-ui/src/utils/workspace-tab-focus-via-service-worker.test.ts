@@ -121,7 +121,13 @@ describe("requestWorkspaceTabFocusViaServiceWorker", () => {
 		await expect(respondWith("focused")).resolves.toBe("focused-existing-tab");
 	});
 
-	it('outcome "task-selected-in-background-tab" → task-selected-in-background-tab', async () => {
+	it('outcome "existing-tab-focus-denied-open-in-sender-tab" → existing-tab-focus-denied-by-browser', async () => {
+		await expect(respondWith("existing-tab-focus-denied-open-in-sender-tab")).resolves.toBe(
+			"existing-tab-focus-denied-by-browser",
+		);
+	});
+
+	it('旧 SW 的 outcome "task-selected-in-background-tab" → task-selected-in-background-tab', async () => {
 		await expect(respondWith("task-selected-in-background-tab")).resolves.toBe("task-selected-in-background-tab");
 	});
 
@@ -182,7 +188,9 @@ describe("public/sw.js 协议字面量防漂移（sw.js 无法 import src 模块
 
 	it("四种 outcome 回报路径齐备（与上方映射用例的字面量三角锁定）", () => {
 		expect(swSource).toContain('respond("focused")');
-		expect(swSource).toContain('respond("task-selected-in-background-tab")');
+		expect(swSource).toContain('respond("existing-tab-focus-denied-open-in-sender-tab")');
+		// 聚焦被拒时不再把选中消息投给后台标签页。
+		expect(swSource).not.toContain('respond("task-selected-in-background-tab")');
 		expect(swSource).toContain('respond("no-tab-found")');
 		expect(swSource).toContain('respond("focus-failed")');
 	});

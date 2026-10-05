@@ -49,6 +49,10 @@ export default defineConfig({
 				"../src/core/cross-project-recently-active-task-switcher-section-assignment.ts",
 			),
 			"@runtime-session-activity": resolve(__dirname, "../src/core/session-activity.ts"),
+			"@runtime-state-stream-workspace-metadata-probe-scope-declaration": resolve(
+				__dirname,
+				"../src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration.ts",
+			),
 			"@runtime-shortcuts": resolve(__dirname, "../src/config/shortcut-utils.ts"),
 			"@runtime-task-agent-permission-mode": resolve(__dirname, "../src/core/task-agent-permission-mode.ts"),
 			"@runtime-task-card-action-board-column-transitions": resolve(

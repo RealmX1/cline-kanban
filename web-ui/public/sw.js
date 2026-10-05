@@ -212,15 +212,14 @@ async function handleFocusWorkspaceTabRequest(data, senderClient, responsePort) 
     // Chromium 现实现只在 notificationclick 的 window-interaction token 下允许 client.focus()
     // （w3c/ServiceWorker#602），页面点击发起的 message 上下文会以 InvalidAccessError 拒绝；
     // 仍保留尝试：未来实现若放宽为 MDN 描述的「origin 级 transient activation」门槛，
-    // 此处自动升级为真聚焦。被拒时仍转发选中消息（postMessage 无门槛），让任务在后台
-    // 目标 tab 就位打开，由页面侧 toast 提示用户手动切换。
+    // 此处自动升级为真聚焦。被拒时**不**转发选中消息：用户看不见的后台标签页不该自己切进
+    // Focus View（多标签页下「没做任何操作就跳了」的成因之一），改由发起页原地打开。
     // matchAll 按最近聚焦优先排序，多个同项目 tab 时第一个即用户最近用过的那个。
     let focusedClient = null;
     try {
       focusedClient = await target.focus();
     } catch {
-      postFocusTaskFromNotificationMessage(target, taskId, workspaceId);
-      respond("task-selected-in-background-tab");
+      respond("existing-tab-focus-denied-open-in-sender-tab");
       return;
     }
     postFocusTaskFromNotificationMessage(focusedClient || target, taskId, workspaceId);

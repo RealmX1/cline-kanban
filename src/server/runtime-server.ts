@@ -108,6 +108,7 @@ import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import { startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime } from "./pending-task-message-injection-startup-sweep";
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
+import { parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl } from "./runtime-state-stream-workspace-metadata-probe-scope-url-parameter";
 import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
 import {
 	enumerateTaskResourceUsageAttributionRoots,
@@ -1059,7 +1060,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		// ── End passcode gate ─────────────────────────────────────────────────
 		(request as IncomingMessage & { __kanbanUpgradeHandled?: boolean }).__kanbanUpgradeHandled = true;
 		const requestedWorkspaceId = requestUrl.searchParams.get("workspaceId")?.trim() || null;
-		deps.runtimeStateHub.handleUpgrade(request, socket, head, { requestedWorkspaceId });
+		deps.runtimeStateHub.handleUpgrade(request, socket, head, {
+			requestedWorkspaceId,
+			initialWorkspaceMetadataProbeScope: parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl(requestUrl),
+		});
 	});
 	// [tui-freeze] 诊断:终端回显链路与所有任务的输入处理共享这个 Node 事件循环,
 	// 循环被同步重活占据时键盘输入会整体延迟——在 bridge 生命周期内持续采样延迟直方图。

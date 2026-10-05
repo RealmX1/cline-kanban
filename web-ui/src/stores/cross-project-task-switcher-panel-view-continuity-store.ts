@@ -15,9 +15,10 @@ export interface CrossProjectTaskSwitcherPanelViewContinuityRecord {
 	showsAllPinnedEntries: boolean;
 	// 「显示更早」拉回的快照；null = 没展开（默认 7 天窗）。
 	entriesWithinExtendedActivityHorizon: RuntimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponse | null;
-	// 展开成完整卡片的行（buildCrossProjectTaskSwitcherEntryKey 复合键）。同一个任务在 Pinned 与下方区各有一行，
-	// 按任务记而不是按行记：展开一处，两处一起展开。
-	expandedCrossProjectTaskSwitcherEntryKeys: readonly string[];
+	// 用户在 hover 浮层上点了「Keep open」、原地换成完整卡片的行（buildCrossProjectTaskSwitcherEntryKey 复合键）。
+	// 同一个任务在 Pinned 与下方区各有一行，按任务记而不是按行记：一处 Keep open，两处一起换。
+	// 只存在进程内（按标签页隔离、刷新即清），不进 localStorage。
+	crossProjectTaskSwitcherEntryKeysKeptOpenAsFullTaskCardByUser: readonly string[];
 }
 
 const INITIAL_CROSS_PROJECT_TASK_SWITCHER_PANEL_VIEW_CONTINUITY_RECORD: CrossProjectTaskSwitcherPanelViewContinuityRecord =
@@ -25,7 +26,7 @@ const INITIAL_CROSS_PROJECT_TASK_SWITCHER_PANEL_VIEW_CONTINUITY_RECORD: CrossPro
 		panelScrollTopPx: 0,
 		showsAllPinnedEntries: false,
 		entriesWithinExtendedActivityHorizon: null,
-		expandedCrossProjectTaskSwitcherEntryKeys: [],
+		crossProjectTaskSwitcherEntryKeysKeptOpenAsFullTaskCardByUser: [],
 	};
 
 let crossProjectTaskSwitcherPanelViewContinuityRecord =

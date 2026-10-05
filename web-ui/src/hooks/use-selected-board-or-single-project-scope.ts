@@ -1,11 +1,10 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import {
 	LocalStorageKey,
 	readLocalStorageItem,
 	removeLocalStorageItem,
 	writeLocalStorageItem,
 } from "@/storage/local-storage-store";
-import { useRawLocalStorageValue } from "@/utils/react-use";
 
 /**
  * 顶栏项目切换器选中的范围（docs/context-stage-first-overview.md 的 Board Scope / Project Scope）：
@@ -14,7 +13,11 @@ import { useRawLocalStorageValue } from "@/utils/react-use";
  *                               （焦点任务所属的项目）。
  *   single_project_scope     —— 切换器里选了某个项目。看板页显示该项目看板，Focus View 左栏显示它的 stage 列表。
  *
- * 只能有一份状态：react-use 的 useLocalStorage 各实例互不同步，所以由 App 持有、经 props / 宿主 context 下发。
+ * 只能有一份状态：由 App 持有、经 props / 宿主 context 下发。
+ *
+ * 每个标签页各存一份（sessionStorage，重载与 Chrome 丢弃后恢复都保留）；localStorage 只记「最后一次选的」，
+ * 给新开的标签页当默认值。若两边共用 localStorage，重载时每个标签页都会继承最后写入者的范围——
+ * 多标签页下「没做任何操作，范围自己变了」。
  */
 export type SelectedBoardOrSingleProjectScope = "board_scope_all_projects" | "single_project_scope";
 
@@ -43,17 +46,58 @@ function migrateLegacyFocusViewLeftColumnTaskListScopeIntoSelectedBoardOrSingleP
 	);
 }
 
+// sessionStorage 与 localStorage 用同一个键名，两边各存各的。
+const SELECTED_BOARD_OR_SINGLE_PROJECT_SCOPE_OF_THIS_BROWSER_TAB_SESSION_STORAGE_KEY =
+	LocalStorageKey.SelectedBoardOrSingleProjectScope;
+
+function readSelectedBoardOrSingleProjectScopeOfThisBrowserTab(): string | null {
+	try {
+		return window.sessionStorage.getItem(
+			SELECTED_BOARD_OR_SINGLE_PROJECT_SCOPE_OF_THIS_BROWSER_TAB_SESSION_STORAGE_KEY,
+		);
+	} catch {
+		return null;
+	}
+}
+
+function writeSelectedBoardOrSingleProjectScopeOfThisBrowserTab(scope: SelectedBoardOrSingleProjectScope): void {
+	try {
+		window.sessionStorage.setItem(
+			SELECTED_BOARD_OR_SINGLE_PROJECT_SCOPE_OF_THIS_BROWSER_TAB_SESSION_STORAGE_KEY,
+			scope,
+		);
+	} catch {
+		// 存不了只是重载后回落到新标签页默认值。
+	}
+}
+
+function readInitialSelectedBoardOrSingleProjectScopeOfThisBrowserTab(): SelectedBoardOrSingleProjectScope {
+	migrateLegacyFocusViewLeftColumnTaskListScopeIntoSelectedBoardOrSingleProjectScope();
+	const scopeOfThisBrowserTab = normalizeSelectedBoardOrSingleProjectScope(
+		readSelectedBoardOrSingleProjectScopeOfThisBrowserTab() ?? "",
+	);
+	if (scopeOfThisBrowserTab) {
+		return scopeOfThisBrowserTab;
+	}
+	const scopeDefaultForNewlyOpenedBrowserTabs =
+		normalizeSelectedBoardOrSingleProjectScope(
+			readLocalStorageItem(LocalStorageKey.SelectedBoardOrSingleProjectScope) ?? "",
+		) ?? "single_project_scope";
+	// 落一份到本标签页：之后别的标签页改了默认值，本页重载也不跟着变。
+	writeSelectedBoardOrSingleProjectScopeOfThisBrowserTab(scopeDefaultForNewlyOpenedBrowserTabs);
+	return scopeDefaultForNewlyOpenedBrowserTabs;
+}
+
 export function useSelectedBoardOrSingleProjectScope(): {
 	selectedBoardOrSingleProjectScope: SelectedBoardOrSingleProjectScope;
 	setSelectedBoardOrSingleProjectScope: (scope: SelectedBoardOrSingleProjectScope) => void;
 } {
-	// 必须排在下面那个读存储的 hook 之前：首次渲染时它的初始化器先跑，迁移落盘后才被读到。
-	useState(migrateLegacyFocusViewLeftColumnTaskListScopeIntoSelectedBoardOrSingleProjectScope);
-	const [selectedBoardOrSingleProjectScope, setSelectedBoardOrSingleProjectScope] =
-		useRawLocalStorageValue<SelectedBoardOrSingleProjectScope>(
-			LocalStorageKey.SelectedBoardOrSingleProjectScope,
-			"single_project_scope",
-			normalizeSelectedBoardOrSingleProjectScope,
-		);
+	const [selectedBoardOrSingleProjectScope, setSelectedBoardOrSingleProjectScopeState] =
+		useState<SelectedBoardOrSingleProjectScope>(readInitialSelectedBoardOrSingleProjectScopeOfThisBrowserTab);
+	const setSelectedBoardOrSingleProjectScope = useCallback((scope: SelectedBoardOrSingleProjectScope) => {
+		setSelectedBoardOrSingleProjectScopeState(scope);
+		writeSelectedBoardOrSingleProjectScopeOfThisBrowserTab(scope);
+		writeLocalStorageItem(LocalStorageKey.SelectedBoardOrSingleProjectScope, scope);
+	}, []);
 	return { selectedBoardOrSingleProjectScope, setSelectedBoardOrSingleProjectScope };
 }

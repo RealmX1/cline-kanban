@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import { findCardSelection } from "@/state/board-state";
+import { writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab } from "@/stores/workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store";
 import type { BoardCard, BoardData } from "@/types";
 
 export interface PendingCrossProjectTaskOpen {
@@ -99,6 +100,11 @@ export function useCrossProjectTaskOpenInProject({
 						? { repoId: currentProjectId, taskId: selectedTaskIdRef.current }
 						: null),
 			}));
+			// 切项目（WS 重连）之前同步登记目标任务：新连接的 URL 就带上它，All projects 下首轮 git 探测只探它，
+			// 不等目标项目每张卡的 git 跑完。
+			writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({
+				focusedTaskInProject: { workspaceId: repoId, taskId },
+			});
 			handleSelectProject(repoId);
 		},
 		[currentProjectId, handleSelectProject, setSelectedTaskId],

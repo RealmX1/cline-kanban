@@ -1,4 +1,8 @@
 import { isNeverStartedPlaceholderTaskSessionSummary } from "@runtime-session-activity";
+import {
+	RUNTIME_WORKSPACE_METADATA_PROBE_SCOPE_URL_SEARCH_PARAM,
+	resolveWorkspaceMetadataProbeScopeDeclaredForWorkspace,
+} from "@runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
@@ -8,6 +12,7 @@ import type {
 	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
 	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
+	RuntimeStateStreamClientMessage,
 	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
 	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
@@ -23,12 +28,17 @@ import type {
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionSummary,
 	RuntimeWorkspaceMetadata,
+	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 	RuntimeWorkspaceStateResponse,
 } from "@/runtime/types";
 import {
 	replaceTaskResourceUsageSnapshots,
 	resetTaskResourceUsageSnapshotStore,
 } from "@/stores/task-resource-usage-snapshot-store";
+import {
+	readWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab,
+	subscribeToWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab,
+} from "@/stores/workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store";
 
 const STREAM_RECONNECT_BASE_DELAY_MS = 500;
 const STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
@@ -114,13 +124,29 @@ function pruneNotificationLogToWorkspaces(
 	return pruned;
 }
 
-function getRuntimeStreamUrl(workspaceId: string | null): string {
+function getRuntimeStreamUrl(
+	workspaceId: string | null,
+	workspaceMetadataProbeScope: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
+): string {
 	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	const url = new URL(`${protocol}//${window.location.host}/api/runtime/ws`);
 	if (workspaceId) {
 		url.searchParams.set("workspaceId", workspaceId);
 	}
+	url.searchParams.set(
+		RUNTIME_WORKSPACE_METADATA_PROBE_SCOPE_URL_SEARCH_PARAM,
+		JSON.stringify(workspaceMetadataProbeScope),
+	);
 	return url.toString();
+}
+
+function resolveWorkspaceMetadataProbeScopeOfThisBrowserTabForWorkspace(
+	workspaceId: string | null,
+): RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient {
+	return resolveWorkspaceMetadataProbeScopeDeclaredForWorkspace(
+		readWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab(),
+		workspaceId ?? "",
+	);
 }
 
 export interface UseRuntimeStateStreamResult {
@@ -515,6 +541,32 @@ export function useRuntimeStateStream(
 			activeWorkspaceId = nextWorkspaceId;
 		};
 
+		// 当前 socket 已经向服务端声明过的 git 元数据探测范围（连接 URL 里的，或之后经消息发过的）。
+		let workspaceMetadataProbeScopeJsonDeclaredOnSocket: string | null = null;
+		const declareWorkspaceMetadataProbeScopeOnOpenSocketIfChanged = () => {
+			if (!socket || socket.readyState !== WebSocket.OPEN) {
+				return;
+			}
+			const workspaceMetadataProbeScope = resolveWorkspaceMetadataProbeScopeOfThisBrowserTabForWorkspace(
+				activeWorkspaceId ?? requestedWorkspaceForConnection,
+			);
+			const workspaceMetadataProbeScopeJson = JSON.stringify(workspaceMetadataProbeScope);
+			if (workspaceMetadataProbeScopeJson === workspaceMetadataProbeScopeJsonDeclaredOnSocket) {
+				return;
+			}
+			workspaceMetadataProbeScopeJsonDeclaredOnSocket = workspaceMetadataProbeScopeJson;
+			socket.send(
+				JSON.stringify({
+					type: "declare_workspace_metadata_probe_scope",
+					workspaceMetadataProbeScope,
+				} satisfies RuntimeStateStreamClientMessage),
+			);
+		};
+		const unsubscribeFromWorkspaceMetadataProbeScopeDeclarationInputs =
+			subscribeToWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab(
+				declareWorkspaceMetadataProbeScopeOnOpenSocketIfChanged,
+			);
+
 		const cleanupSocket = () => {
 			if (socket) {
 				socket.onopen = null;
@@ -550,7 +602,11 @@ export function useRuntimeStateStream(
 			}
 			cleanupSocket();
 			try {
-				socket = new WebSocket(getRuntimeStreamUrl(requestedWorkspaceForConnection));
+				const workspaceMetadataProbeScope = resolveWorkspaceMetadataProbeScopeOfThisBrowserTabForWorkspace(
+					requestedWorkspaceForConnection,
+				);
+				socket = new WebSocket(getRuntimeStreamUrl(requestedWorkspaceForConnection, workspaceMetadataProbeScope));
+				workspaceMetadataProbeScopeJsonDeclaredOnSocket = JSON.stringify(workspaceMetadataProbeScope);
 			} catch (error) {
 				dispatch({
 					type: "stream_disconnected",
@@ -570,6 +626,8 @@ export function useRuntimeStateStream(
 				shouldCheckServedBuildAssetsOnOpen = false;
 				reconnectAttempt = 0;
 				dispatch({ type: "stream_connected" });
+				// 建连到 open 之间焦点任务 / 范围变过：补发一次。
+				declareWorkspaceMetadataProbeScopeOnOpenSocketIfChanged();
 			};
 			socket.onmessage = (event) => {
 				try {
@@ -752,6 +810,7 @@ export function useRuntimeStateStream(
 
 		return () => {
 			cancelled = true;
+			unsubscribeFromWorkspaceMetadataProbeScopeDeclarationInputs();
 			if (reconnectTimer != null) {
 				window.clearTimeout(reconnectTimer);
 			}

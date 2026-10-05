@@ -33,6 +33,7 @@
         "../src/core/cross-project-recently-active-task-switcher-section-assignment.ts"
       ],
       "@runtime-session-activity": ["../src/core/session-activity.ts"],
+      "@runtime-state-stream-workspace-metadata-probe-scope-declaration": ["../src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration.ts"],
       "@runtime-trpc": ["../src/trpc/app-router.ts"],
       "@runtime-shortcuts": ["../src/config/shortcut-utils.ts"],
       "@runtime-task-agent-permission-mode": ["../src/core/task-agent-permission-mode.ts"],

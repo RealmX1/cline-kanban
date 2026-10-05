@@ -109,6 +109,7 @@ import {
 	prunePendingTaskCardCommandBoardOverlayEntriesSatisfiedByBoard,
 	usePendingTaskCardCommandBoardOverlayEntries,
 } from "@/stores/pending-task-card-command-board-overlay-store";
+import { writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab } from "@/stores/workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store";
 import {
 	getTaskWorkspaceInfo,
 	getTaskWorkspaceSnapshot,
@@ -1134,9 +1135,63 @@ export default function App(): ReactElement {
 		setPostDeployVerificationCollapsed(false);
 	}, [setPostDeployVerificationCollapsed]);
 
+	// Board Scope 的 Focus View（含跨项目打开在途）里焦点任务所属的项目：在途时是目标项目。
+	const boardScopeFocusViewFocusedTaskProjectId =
+		pendingCrossProjectTaskOpen?.originatedFromFocusView === true
+			? pendingCrossProjectTaskOpen.repoId
+			: selectedCard
+				? currentProjectId
+				: null;
+	// 状态流据此向服务端声明要哪些任务的 git 元数据：All projects 下只要焦点任务（跨项目打开在途时是目标任务）。
+	const workspaceMetadataProbeFocusedTaskWorkspaceId = pendingCrossProjectTaskOpen
+		? pendingCrossProjectTaskOpen.repoId
+		: selectedCard
+			? currentProjectId
+			: null;
+	const workspaceMetadataProbeFocusedTaskId = pendingCrossProjectTaskOpen
+		? pendingCrossProjectTaskOpen.taskId
+		: (selectedCard?.card.id ?? null);
+	useEffect(() => {
+		writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({
+			isBoardScopeAllProjectsSelected,
+			focusedTaskInProject:
+				workspaceMetadataProbeFocusedTaskWorkspaceId && workspaceMetadataProbeFocusedTaskId
+					? {
+							workspaceId: workspaceMetadataProbeFocusedTaskWorkspaceId,
+							taskId: workspaceMetadataProbeFocusedTaskId,
+						}
+					: null,
+		});
+	}, [
+		isBoardScopeAllProjectsSelected,
+		workspaceMetadataProbeFocusedTaskId,
+		workspaceMetadataProbeFocusedTaskWorkspaceId,
+	]);
+	// ⌘E：Board Scope ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
+	const handleToggleBetweenBoardScopeAndFocusedTaskProjectScope = useCallback(() => {
+		if (!isBoardScopeAllProjectsSelected) {
+			selectBoardScopeAllProjects();
+			return;
+		}
+		const projectIdToNarrowTo =
+			boardScopeFocusViewFocusedTaskProjectId ?? navigationCurrentProjectId ?? currentProjectId;
+		if (!projectIdToNarrowTo) {
+			return;
+		}
+		handleSelectProjectNarrowingToSingleProjectScope(projectIdToNarrowTo);
+	}, [
+		boardScopeFocusViewFocusedTaskProjectId,
+		currentProjectId,
+		handleSelectProjectNarrowingToSingleProjectScope,
+		isBoardScopeAllProjectsSelected,
+		navigationCurrentProjectId,
+		selectBoardScopeAllProjects,
+	]);
+
 	useProjectNumericSlotGroupHotkeys({
 		projects,
 		currentProjectId,
+		isBoardScopeAllProjectsSelected,
 		numericSlotGroupAssignments,
 		onSelectProject: handleSelectProjectNarrowingToSingleProjectScope,
 		onAssignProjectToNumericSlotGroupNumber: assignProjectToNumericSlotGroupNumber,
@@ -1161,6 +1216,9 @@ export default function App(): ReactElement {
 		handleToggleGitHistory,
 		handleCloseGitHistory,
 		onRequestStartAllReadyBacklogTasks: requestStartAllReadyBacklogTasksConfirmation,
+		handleToggleBetweenBoardScopeAndFocusedTaskProjectScope: hasNoProjects
+			? null
+			: handleToggleBetweenBoardScopeAndFocusedTaskProjectScope,
 	});
 
 	useEffect(() => {
@@ -1249,19 +1307,12 @@ export default function App(): ReactElement {
 			onClearNumericSlotGroupNumber: clearNumericSlotGroupNumber,
 			selectedBoardOrSingleProjectScope,
 			onSelectBoardScopeAllProjects: selectBoardScopeAllProjects,
-			// Focus View（含跨项目打开在途）里显示焦点任务所属的项目：在途时是目标项目。
-			boardScopeFocusViewFocusedTaskProjectId:
-				pendingCrossProjectTaskOpen?.originatedFromFocusView === true
-					? pendingCrossProjectTaskOpen.repoId
-					: selectedCard
-						? currentProjectId
-						: null,
+			boardScopeFocusViewFocusedTaskProjectId,
 		}),
 		[
-			pendingCrossProjectTaskOpen,
+			boardScopeFocusViewFocusedTaskProjectId,
 			selectBoardScopeAllProjects,
 			selectedBoardOrSingleProjectScope,
-			selectedCard,
 			assignProjectToNumericSlotGroupNumber,
 			clearNumericSlotGroupNumber,
 			currentProjectId,

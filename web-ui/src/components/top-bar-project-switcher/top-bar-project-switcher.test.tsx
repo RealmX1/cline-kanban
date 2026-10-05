@@ -293,11 +293,18 @@ describe("TopBarProjectSwitcher", () => {
 			}),
 		);
 		expect(queryTrigger()?.textContent).toContain("All projects");
-		expect(
-			document.body.querySelector(
-				'[data-testid="top-bar-project-switcher-board-scope-focused-task-project-breadcrumb"]',
-			)?.textContent,
-		).toContain("bravo");
+		const focusedTaskProjectBreadcrumbButton = document.body.querySelector<HTMLButtonElement>(
+			'[data-testid="top-bar-project-switcher-board-scope-focused-task-project-breadcrumb"]',
+		);
+		expect(focusedTaskProjectBreadcrumbButton?.textContent).toContain("bravo");
+		// 面包屑是独立按钮：点它直接收窄到焦点任务所属项目，不打开切换器。
+		expect(queryTrigger()?.contains(focusedTaskProjectBreadcrumbButton ?? null)).toBe(false);
+		await act(async () => {
+			focusedTaskProjectBreadcrumbButton?.click();
+		});
+		expect(onSelectProject).toHaveBeenCalledWith("bravo");
+		expect(document.body.querySelector('[data-testid="top-bar-project-switcher-panel"]')).toBeNull();
+		onSelectProject.mockClear();
 
 		await openSwitcher(
 			createSwitcherState({ onSelectProject, selectedBoardOrSingleProjectScope: "board_scope_all_projects" }),

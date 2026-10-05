@@ -8,8 +8,9 @@ import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 
 interface ProjectSwitcherTriggerButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-	// 非 null = 选中了 Board Scope：按钮显示「All projects」，Focus View 里再接「› 焦点任务所属项目」。
-	boardScopeAllProjectsBreadcrumb: { focusViewFocusedTaskProjectName: string | null } | null;
+	// 选中了 Board Scope：按钮显示「All projects」。Focus View 里后面那段「› 焦点任务所属项目」是另一个按钮
+	//（board-scope-focused-task-project-breadcrumb-narrowing-button），点它收窄到该项目。
+	isBoardScopeAllProjectsSelected: boolean;
 	projectName: string | null;
 	/** 有 live main agent 的任务数。0 时不渲染徽章——空闲是常态，渲染一个「0」只是噪声。 */
 	liveAgentTaskCount: number;
@@ -22,7 +23,7 @@ interface ProjectSwitcherTriggerButtonProps extends ButtonHTMLAttributes<HTMLBut
 export const ProjectSwitcherTriggerButton = forwardRef<HTMLButtonElement, ProjectSwitcherTriggerButtonProps>(
 	function ProjectSwitcherTriggerButton(
 		{
-			boardScopeAllProjectsBreadcrumb,
+			isBoardScopeAllProjectsSelected,
 			projectName,
 			liveAgentTaskCount,
 			isProjectUnavailable,
@@ -53,18 +54,10 @@ export const ProjectSwitcherTriggerButton = forwardRef<HTMLButtonElement, Projec
 				)}
 				{...buttonProps}
 			>
-				{boardScopeAllProjectsBreadcrumb ? (
+				{isBoardScopeAllProjectsSelected ? (
 					<>
 						<Layers size={13} className="shrink-0 text-text-secondary" aria-hidden />
 						<span className="shrink-0 font-medium text-text-primary">All projects</span>
-						{boardScopeAllProjectsBreadcrumb.focusViewFocusedTaskProjectName ? (
-							<span
-								className={cn("truncate text-text-secondary", isMobile ? "max-w-[80px]" : "max-w-[140px]")}
-								data-testid="top-bar-project-switcher-board-scope-focused-task-project-breadcrumb"
-							>
-								› {boardScopeAllProjectsBreadcrumb.focusViewFocusedTaskProjectName}
-							</span>
-						) : null}
 					</>
 				) : (
 					<>

@@ -242,7 +242,9 @@ This is important because Kanban is not designed around browser polling. The run
 
 两个**有意的轮询例外**：
 - workspace diff 是定时轮询。
-- 跨项目切换面板里「其他项目」行的 git 元数据（ahead/behind、未提交改动）由面板按需轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`，服务端按 (workspaceId, taskId) 缓存（`server/cross-project-task-worktree-git-metadata-cache.ts`）。`workspace_metadata_updated` 只为有浏览器连着的项目推流；而未提交改动几秒一变，并入 `projects_updated` 会让整份广播变频繁。单任务探针与 git spawn 并发上限由 `workspace/task-worktree-git-metadata-probe.ts` 统一提供，推流 monitor 与按需缓存共用。
+- 跨项目切换面板里各行（含当前项目里不在推流探测范围内的行）的 git 元数据（ahead/behind、未提交改动）由面板按需轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`，服务端按 (workspaceId, taskId) 缓存（`server/cross-project-task-worktree-git-metadata-cache.ts`）。`workspace_metadata_updated` 只为有浏览器连着的项目推流；而未提交改动几秒一变，并入 `projects_updated` 会让整份广播变频繁。单任务探针与 git spawn 并发上限由 `workspace/task-worktree-git-metadata-probe.ts` 统一提供，推流 monitor 与按需缓存共用。
+
+`workspace_metadata_updated` 的**探测范围由每个连接声明**（2026-10-05）：单项目范围要整个项目，All projects（Board Scope）只要焦点任务（服务端并上 auto-review 的 Review 列任务），同一项目多个连接取并集。初值在 WS URL 参数里，之后经状态流**唯一一种浏览器 → 服务端消息** `declare_workspace_metadata_probe_scope` 更新（schema `runtimeStateStreamClientMessageSchema`）。这样跨项目打开不必等目标项目每张卡的 git 跑完才收到快照。细节与代价见 `docs/context-cross-project-recently-active-task-switcher.md` 的 Workspace Metadata Probe Scope。
 
 ## Frontend Architecture
 

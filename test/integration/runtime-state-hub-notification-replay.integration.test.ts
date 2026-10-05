@@ -70,7 +70,10 @@ describe("通知档案重放不阻塞核心 workspace 推送", { timeout: 40_000
 		});
 		server = createServer();
 		server.on("upgrade", (request, socket, head) => {
-			hub.handleUpgrade(request, socket, head, { requestedWorkspaceId: workspaceId });
+			hub.handleUpgrade(request, socket, head, {
+				requestedWorkspaceId: workspaceId,
+				initialWorkspaceMetadataProbeScope: null,
+			});
 		});
 		server.listen(0, "127.0.0.1");
 		await once(server, "listening");

@@ -1,5 +1,6 @@
 import { Layers } from "lucide-react";
 
+import { formatBoardOrFocusedTaskProjectScopeToggleHotkeyLabel } from "@/components/top-bar-project-switcher/board-or-focused-task-project-scope-toggle-hotkey-descriptor";
 import {
 	deriveAwaitingUserTaskCount,
 	deriveLiveAgentTaskCount,
@@ -62,7 +63,8 @@ export function ProjectSwitcherBoardScopeAllProjectsPseudoRow({
 					) : null}
 				</div>
 				<div className="truncate text-[10px] text-text-secondary">
-					Board overview · recent tasks across projects
+					Board overview · recent tasks across projects · {formatBoardOrFocusedTaskProjectScopeToggleHotkeyLabel()}{" "}
+					toggles with the focused task's project
 				</div>
 			</td>
 			{columnVisibility.numeric_slot_group ? <td className="px-2 py-1.5" /> : null}
