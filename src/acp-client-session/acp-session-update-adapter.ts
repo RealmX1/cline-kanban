@@ -7,7 +7,7 @@
 //  2. 任何构造 entry 的地方都要过 applySessionFacets 重新 stamp，不能只 spread 默认 summary。
 //  3. 「只推进存活度」的事件必须显式带上当前实质戳，否则会把卡片的「agent 上次响应」刷成「刚刚」。
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../core/api-contract";
-import { resolveSessionFacets } from "../core/session-activity";
+import { isParkedAwaitingDispatchedBackgroundWork, resolveSessionFacets } from "../core/session-activity";
 import { recordTaskAgentConversationModelTokenUsageCumulativeSnapshotToJournal } from "../diagnostics/task-agent-conversation-model-token-usage-journal-recorder";
 import type { AcpSessionNotification, AcpSessionUpdate, AcpStopReason } from "./acp-protocol-boundary";
 import {
@@ -30,6 +30,7 @@ import {
 	renderAcpToolCallContentAsMarkdown,
 	renderAcpToolCallLocationsAsMarkdown,
 } from "./acp-session-update-rendering";
+import { ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK } from "./acp-task-session-park-awaiting-dispatched-background-work";
 
 export interface AcpSessionUpdateContext {
 	taskId: string;
@@ -284,6 +285,7 @@ export function applyAcpPromptTurnCompletion(
 		// 用户主动取消不是错误：也不落成 error 人轴。
 		return updateAcpSummary(context.entry, {
 			...deriveAcpFacetPatch("interrupted", null, { pid: context.pid, agentId: context.agentId }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			reviewReason: null,
 			lastOutputAt: timestamp,
 		});
@@ -292,9 +294,16 @@ export function applyAcpPromptTurnCompletion(
 	if (stopReason === "refusal") {
 		return updateAcpSummary(context.entry, {
 			...deriveAcpFacetPatch("awaiting_review", "error", { pid: context.pid, agentId: context.agentId }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			reviewReason: "error",
 			lastOutputAt: timestamp,
 		});
+	}
+
+	// dd2db 2x：park 中正常收束 = 主 agent 结束本轮去等自己派发的后台工作，不是在等用户审查。facet 保持 agent 回合
+	// （与 PTY 上 hook 的 to_review 闸抑制同义），由编排方之后发来的 prompt 恢复并清 park。
+	if (isParkedAwaitingDispatchedBackgroundWork(context.entry.summary)) {
+		return updateAcpSummary(context.entry, { lastOutputAt: timestamp });
 	}
 
 	// end_turn / max_tokens / max_turn_requests：回合正常收束，交回用户。
@@ -328,6 +337,7 @@ export function applyAcpConnectionClosed(
 			pid: null,
 			agentId: context.agentId,
 		}),
+		...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 		pid: null,
 		exitCode: detail.exitCode,
 		reviewReason: detail.errorMessage ? "error" : "completion",

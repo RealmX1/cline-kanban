@@ -63,11 +63,21 @@ export interface PendingBoardFileWriteTaskMutationEventBatchResolution {
 	pendingBatchResolution: "commit" | "abandon";
 }
 
+// better-sqlite3 是原生模块，只能被编译它的那个 Node ABI 加载。`dev:full` / `dogfood` 按 PATH 取 node，
+// 与安装 node_modules 时的 Node 不同就会打不开账本、board 只读——原始报错只说 NODE_MODULE_VERSION 不符，
+// 这里补上怎么办。task worktree 的 node_modules 软链到主 checkout，`npm rebuild` 会改掉正在服务的 runtime 用的那份。
+function appendNativeModuleNodeAbiMismatchGuidanceToLedgerUnavailableReason(ledgerUnavailableReason: string): string {
+	if (!ledgerUnavailableReason.includes("NODE_MODULE_VERSION")) {
+		return ledgerUnavailableReason;
+	}
+	return `${ledgerUnavailableReason} — this runtime runs on Node ${process.version}, but better-sqlite3 in node_modules was built for another Node version. Start Kanban with the Node version that installed node_modules (for example \`nvm use <that version>\`). Do not run \`npm rebuild\` from a task worktree: its node_modules is shared with the main checkout and with any Kanban runtime already serving from it.`;
+}
+
 // 账本 worker 打不开（例如 better-sqlite3 ABI 不符）时抛出；持久化漏斗据此让该实例的 board 只读（Y-EVENT-1）。
 export class InterWorkUnitRelationLedgerUnavailableError extends Error {
 	constructor(readonly ledgerUnavailableReason: string) {
 		super(
-			`Inter-work-unit relation ledger is unavailable, so this Kanban runtime keeps the board read-only: ${ledgerUnavailableReason}`,
+			`Inter-work-unit relation ledger is unavailable, so this Kanban runtime keeps the board read-only: ${appendNativeModuleNodeAbiMismatchGuidanceToLedgerUnavailableReason(ledgerUnavailableReason)}`,
 		);
 		this.name = "InterWorkUnitRelationLedgerUnavailableError";
 	}
@@ -163,6 +173,16 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 		retainedFieldContents?: TaskCardFieldValueRetainedContent[];
 	}): Promise<void> {
 		await this.request("appendCommittedEvents", input);
+	}
+
+	// 幂等键已记过的草稿原子跳过（同一事实只记一条）；返回实际追加与跳过的幂等键。
+	async appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded(input: {
+		eventDrafts: InterWorkUnitRelationLedgerEventDraft[];
+	}): Promise<{ appendedIdempotencyKeys: string[]; skippedIdempotencyKeysAlreadyRecorded: string[] }> {
+		return (await this.request("appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded", input)) as {
+			appendedIdempotencyKeys: string[];
+			skippedIdempotencyKeysAlreadyRecorded: string[];
+		};
 	}
 
 	// 返回 null 表示候选全部已被占用（调用方换一批候选重试）。

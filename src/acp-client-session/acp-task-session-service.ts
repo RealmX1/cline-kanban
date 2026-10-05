@@ -49,6 +49,13 @@ import {
 	applyAcpPromptTurnCompletion,
 	applyAcpSessionUpdate,
 } from "./acp-session-update-adapter";
+import {
+	ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
+	type AcpTaskSessionParkAwaitingDispatchedBackgroundWorkResult,
+	describeAcpTaskSessionAwaitingDispatchedBackgroundWork,
+	parkAcpTaskSessionEntryAwaitingDispatchedBackgroundWork,
+	unparkAcpTaskSessionEntry,
+} from "./acp-task-session-park-awaiting-dispatched-background-work";
 import { AcpTaskSessionRegistry } from "./acp-task-session-registry";
 
 export interface StartAcpTaskSessionRequest {
@@ -287,6 +294,8 @@ export class AcpTaskSessionService {
 					reviewReasonWhileConnectionIsBeingEstablished,
 					{ pid: null, agentId: request.agentId },
 				),
+				// 新活体不继承上一个活体的 park（park 只描述某次回合在等什么）。
+				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 				agentId: request.agentId,
 				workspacePath: request.cwd,
 				reviewReason: reviewReasonWhileConnectionIsBeingEstablished,
@@ -418,11 +427,50 @@ export class AcpTaskSessionService {
 		);
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("running", null, { pid: connection.pid, agentId: connection.agentId }),
+			// 新 prompt 到达 = 编排方回来恢复（或用户亲自接手），等同 PTY 的 UserPromptSubmit 清 park。
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			reviewReason: null,
 		});
 		this.emitSummary(summary);
 		void this.runPromptTurn(taskId, connection, buildAcpPromptBlocks(text, images));
 		return summary;
+	}
+
+	// dd2db 2x：与 TerminalSessionManager 同名同义的 park 三件套（见 acp-task-session-park-awaiting-dispatched-background-work.ts）。
+	// 编排方须 await park 成功再让 agent 结束这一轮：回合收束读的是此刻内存里的 summary。
+	parkTaskSessionAwaitingDispatchedBackgroundWork(
+		taskId: string,
+		options: { label?: string } = {},
+	): AcpTaskSessionParkAwaitingDispatchedBackgroundWorkResult {
+		const result = parkAcpTaskSessionEntryAwaitingDispatchedBackgroundWork({
+			taskId,
+			entry: this.registry.getEntry(taskId),
+			hasLiveAcpConnection: this.connectionRuntime.getConnection(taskId) !== null,
+			label: options.label,
+		});
+		if (result.ok) {
+			this.emitSummary(result.summary);
+		}
+		return result;
+	}
+
+	unparkTaskSession(taskId: string): RuntimeTaskSessionSummary | null {
+		const entry = this.registry.getEntry(taskId);
+		if (!entry) {
+			return null;
+		}
+		const unparkedSummary = unparkAcpTaskSessionEntry(entry);
+		if (unparkedSummary) {
+			this.emitSummary(unparkedSummary);
+			return unparkedSummary;
+		}
+		return cloneAcpSummary(entry.summary);
+	}
+
+	getAwaitingDispatchedBackgroundWork(
+		taskId: string,
+	): ReturnType<typeof describeAcpTaskSessionAwaitingDispatchedBackgroundWork> {
+		return describeAcpTaskSessionAwaitingDispatchedBackgroundWork(this.registry.getEntry(taskId));
 	}
 
 	// 会话被回收之后，registry 里的 entry / summary 仍在（回收只拆连接与子进程、不删账本），
@@ -465,6 +513,7 @@ export class AcpTaskSessionService {
 		await connection.cancel().catch(() => null);
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("idle", null, { pid: connection.pid, agentId: connection.agentId }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			reviewReason: null,
 		});
 		this.emitSummary(summary);
@@ -481,6 +530,7 @@ export class AcpTaskSessionService {
 		await connection.cancel().catch(() => null);
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("interrupted", null, { pid: connection.pid, agentId: connection.agentId }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			reviewReason: null,
 		});
 		this.emitSummary(summary);
@@ -496,6 +546,7 @@ export class AcpTaskSessionService {
 		this.connectionRuntime.disposeTaskConnection(taskId);
 		const summary = updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			pid: null,
 			runtimeSessionIncarnationId: null,
 			reviewReason: null,
@@ -525,6 +576,7 @@ export class AcpTaskSessionService {
 			this.emitSummary(
 				updateAcpSummary(entry, {
 					...deriveAcpFacetPatch("interrupted", null, { pid: null, agentId: entry.summary.agentId ?? "omp" }),
+					...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 					pid: null,
 					reviewReason: null,
 				}),
@@ -643,6 +695,7 @@ export class AcpTaskSessionService {
 		);
 		return updateAcpSummary(entry, {
 			...deriveAcpFacetPatch("failed", "error", { pid: null, agentId }),
+			...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 			pid: null,
 			reviewReason: "error",
 			warningMessage: message,

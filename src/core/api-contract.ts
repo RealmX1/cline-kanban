@@ -4951,6 +4951,16 @@ export const runtimePostDeployVerificationPendingConfirmationSchema = z.object({
 	expiresAtIso: z.string(),
 	requiredAcknowledgements: z.array(runtimePostDeployVerificationAcknowledgementSchema),
 	columnIdAtIssuance: runtimeBoardColumnIdSchema,
+	// 只有 CLI 完成动词在移入 Done 之前写的「在途完成记录」才带：完成已在 CLI 侧授权（token / --ack / --force 都已核对），
+	// 只差 runtime 写 verifiedAt。普通的待确认 token（用户还没确认）没有它。带它的记录不受过期回收，
+	// runtime 下次为该项目加载 PDV 状态时（getPostDeployVerificationState，如 Web UI 面板轮询），在卡已入 Done 后跨该项目全部
+	// 部署组（含已被新部署折叠的组）补写 verifiedAt——CLI 两次调用之间 runtime 不可达时，核对不再随 15 分钟过期丢失。
+	kanbanCliCompletionAuthorizedBeforeMoveIntoDone: z
+		.object({
+			authorizedAtIso: z.string(),
+			forcedCompletionWithoutAllVerificationsPassed: z.boolean(),
+		})
+		.optional(),
 });
 export type RuntimePostDeployVerificationPendingConfirmation = z.infer<
 	typeof runtimePostDeployVerificationPendingConfirmationSchema

@@ -3,10 +3,12 @@ import { readRawTaskCommitLandingSnapshotForRelationLedgerEvent } from "../works
 import { logInterWorkUnitRelationLedgerDiagnosticWarning } from "./inter-work-unit-relation-ledger-diagnostics-logger";
 import { startBackgroundLedgerEventRecordingBoundToActiveKanbanRuntimeLiveCaptureWithoutBlocking } from "./kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 
-// 完成核对走的是哪条入口：Web 面板的原子确认，或 CLI `kanban deployment` 的完成动词。
+// 完成核对走的是哪条入口：Web 面板的原子确认，CLI `kanban deployment` 的完成动词，或 runtime 对账替 CLI 补写
+// （CLI 已授权并移入 Done，补记 verifiedAt 的调用却没成、也没人重跑命令；授权证据是 CLI 移列前写下的在途完成记录）。
 export type PostDeployVerificationCompletionPath =
 	| "web_ui_post_deploy_verification_panel_atomic_confirmation"
-	| "kanban_cli_post_deploy_verification_completion_verb";
+	| "kanban_cli_post_deploy_verification_completion_verb"
+	| "kanban_runtime_reconciliation_finalizing_kanban_cli_completion_authorized_but_left_in_flight";
 
 export interface PostDeployVerificationCompletionEvidence {
 	postDeployVerificationCompletionPath: PostDeployVerificationCompletionPath;
