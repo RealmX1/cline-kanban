@@ -41,6 +41,8 @@ database.exec(`
   ON inter_work_unit_relation_ledger_events(subject_workspace_id, subject_task_id, global_committed_event_sequence);
  CREATE INDEX IF NOT EXISTS ledger_events_by_pending_batch
   ON inter_work_unit_relation_ledger_events(pending_board_file_write_batch_id);
+ CREATE INDEX IF NOT EXISTS ledger_events_by_idempotency_key
+  ON inter_work_unit_relation_ledger_events(idempotency_key) WHERE idempotency_key IS NOT NULL;
  CREATE TABLE IF NOT EXISTS ledger_global_committed_event_sequence_counter (
   singleton_row_key INTEGER PRIMARY KEY CHECK (singleton_row_key = 1),
   last_assigned_global_committed_event_sequence INTEGER NOT NULL
@@ -370,6 +372,36 @@ const appendCommittedEvents = database.transaction(({ eventDrafts, retainedField
 	return { committedEvents: eventDrafts.map((eventDraft) => insertEventDraft(eventDraft, "committed", null)) };
 });
 
+const readEventWithIdempotencyKeyNotAbandonedStatement = database.prepare(
+	"SELECT 1 FROM inter_work_unit_relation_ledger_events WHERE idempotency_key = ? AND event_commit_status != 'abandoned' LIMIT 1",
+);
+
+// 「同一事实只记一条」的原子追加（dd2db 1c 起）：幂等键已记过（committed 或仍 pending）的草稿跳过，同批内重复的也只记第一条。
+// 查与插在同一个事务里，worker 单线程串行执行——并发上报的同一观测不会各记一条。没有幂等键的草稿照常追加。
+const appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded = database.transaction(
+	({ eventDrafts }) => {
+		const idempotencyKeysAppendedInThisBatch = new Set();
+		const appendedIdempotencyKeys = [];
+		const skippedIdempotencyKeysAlreadyRecorded = [];
+		for (const eventDraft of eventDrafts) {
+			const idempotencyKey = eventDraft.idempotencyKey ?? null;
+			if (idempotencyKey !== null) {
+				if (
+					idempotencyKeysAppendedInThisBatch.has(idempotencyKey) ||
+					readEventWithIdempotencyKeyNotAbandonedStatement.get(idempotencyKey)
+				) {
+					skippedIdempotencyKeysAlreadyRecorded.push(idempotencyKey);
+					continue;
+				}
+				idempotencyKeysAppendedInThisBatch.add(idempotencyKey);
+				appendedIdempotencyKeys.push(idempotencyKey);
+			}
+			insertEventDraft(eventDraft, "committed", null);
+		}
+		return { appendedIdempotencyKeys, skippedIdempotencyKeysAlreadyRecorded };
+	},
+);
+
 function listCommittedEvents({ afterGlobalCommittedEventSequence, limit, subjectWorkspaceId, subjectTaskId }) {
 	const conditions = ["event_commit_status = 'committed'", "global_committed_event_sequence > ?"];
 	const parameters = [afterGlobalCommittedEventSequence ?? 0];
@@ -450,6 +482,8 @@ const commands = {
 	recordPendingTaskMutationEventBatch: (input) => recordPendingTaskMutationEventBatch.immediate(input),
 	commitPendingTaskMutationEventBatch: (input) => commitPendingTaskMutationEventBatch.immediate(input),
 	appendCommittedEvents: (input) => appendCommittedEvents.immediate(input),
+	appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded: (input) =>
+		appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded.immediate(input),
 	allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry: (input) =>
 		allocateTaskIdUniqueAgainstGlobalTaskIdentityRegistry.immediate(input),
 	seedTaskIdReservationsFromExistingLocalTraces: (input) => seedTaskIdReservationsFromExistingLocalTraces.immediate(input),

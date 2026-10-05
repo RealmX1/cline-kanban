@@ -19,6 +19,10 @@ import {
 	resolveWorkspacePath,
 } from "../state/workspace-state";
 import { scrubInheritedWorkUnitIdentityEnvironmentVariablesFromKanbanRuntimeProcess } from "../terminal/kanban-task-agent-session-work-unit-identity-environment";
+import {
+	getRegisteredSharedTaskCommitLandingCriterionSatisfiedObservationSink,
+	registerSharedTaskCommitLandingCriterionSatisfiedObservationSink,
+} from "../workspace/shared-task-commit-landing-criterion-satisfied-observation-port";
 import { collectTaskIdReservationSeedingResultFromExistingLocalTraces } from "./global-task-identity-registry-task-id-reservation-seeding-from-existing-local-traces";
 import {
 	InterWorkUnitRelationLedgerDatabaseWorkerClient,
@@ -30,6 +34,8 @@ import {
 	RecordedInterWorkUnitRelationProjectionKeptCaughtUpWithLedger,
 	type RecordedInterWorkUnitRelationProjectionReader,
 } from "./recorded-inter-work-unit-relation-projection-kept-caught-up-with-ledger";
+import { sweepTaskCommitIntegrationProvenanceProbedSinceLandingDataPreservationForSharedLandingCriterion } from "./shared-task-commit-landing-criterion-activation-backfill-sweep";
+import { createSharedTaskCommitLandingCriterionSatisfiedObservationSinkRecordingIntoLedger } from "./task-commits-integrated-into-local-base-observation-recording";
 import {
 	createCapturingKanbanRuntimeInstanceIdentity,
 	createWorkspaceBoardPersistenceFunnelTaskMutationEventCaptureBackedByRelationLedger,
@@ -57,6 +63,10 @@ const KANBAN_RUNTIME_LIVE_CAPTURE_CAPABILITIES_ACTIVATED_BY_THIS_CODE_VERSION = 
 	"task_message_delivery_request_capture_with_body_authorship_idempotency_key_and_body_sha256",
 	// Y-PHASE-3：删 worktree 不再连带删 provenance；最终探测拿不到 live 快照时记族 3 事件。
 	"task_commit_integration_provenance_retained_after_worktree_deletion_with_final_probe_failure_observation",
+	// dd2db 1c：每次落地探测都按共享判据求值，满足即记族 3 `task_commits_integrated_into_local_base_observed`（账本按幂等键去重）；
+	// 激活后对 1a 起探测过的每份 provenance 补探一次（含已删卡）。
+	"shared_task_commit_landing_criterion_evaluated_at_every_task_commit_integration_probe",
+	"shared_task_commit_landing_criterion_backfill_sweep_over_provenance_probed_since_landing_data_preservation_at_activation",
 ] as const;
 
 // EXPERIMENT_NODE: 终端输入提交观测每会话 60s 至多一条——够判定「用户介入过」，又不把按键频率写进账本。
@@ -70,6 +80,8 @@ export interface ActivatedKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture {
 	// 急切基线任务的完成信号（排在首次 id 播种尝试之后；永不 reject；播种或单个 workspace 失败只记告警）。
 	// runtime 不等它，测试与关停用它对齐。id 分配只等播种、不等它（见就绪屏障）。
 	eagerBoardStateBaselineEstablishmentForEveryIndexedWorkspaceCompletion: Promise<void>;
+	// 共享落地判据的激活补发扫描（排在急切基线之后；永不 reject）。runtime 不等它，测试与关停用它对齐。
+	sharedTaskCommitLandingCriterionActivationBackfillSweepCompletion: Promise<void>;
 	deactivate(): Promise<void>;
 }
 
@@ -106,6 +118,8 @@ function buildFactObservedByKanbanRuntimeEventDraft(input: {
 	subjectWorkspaceId: string | null;
 	subjectTaskId: string | null;
 	eventPayload: Record<string, unknown>;
+	// 只有「同一事实只记一条」的观测才带（经 appendFactObservedByKanbanRuntimeUnlessIdempotencyKeyAlreadyRecorded… 追加）。
+	idempotencyKey?: string | null;
 }): InterWorkUnitRelationLedgerEventDraft {
 	return {
 		eventFamily: "fact_observed_by_kanban_runtime_event",
@@ -124,7 +138,7 @@ function buildFactObservedByKanbanRuntimeEventDraft(input: {
 		capturingKanbanRuntimeInstance: input.state.capturingKanbanRuntimeInstance,
 		invokingKanbanCliCodeVersion: null,
 		occurredAtConversationTurnReference: null,
-		idempotencyKey: null,
+		idempotencyKey: input.idempotencyKey ?? null,
 		subjectWorkspaceId: input.subjectWorkspaceId,
 		subjectTaskId: input.subjectTaskId,
 		eventPayload: { observedFactKind: input.observedFactKind, ...input.eventPayload },
@@ -146,21 +160,27 @@ export interface KanbanRuntimeLiveCaptureBoundAtBackgroundLedgerEventRecordingIn
 	appendFactObservedByKanbanRuntimeIntoLedgerOfBoundLiveCapture(
 		observation: FactObservedByKanbanRuntimeObservation,
 	): Promise<void>;
+	// 同一幂等键已记过（含其他实例、重启之前记的）就原子跳过；返回这次是否真的追加了。
+	appendFactObservedByKanbanRuntimeUnlessIdempotencyKeyAlreadyRecordedIntoLedgerOfBoundLiveCapture(
+		observation: FactObservedByKanbanRuntimeObservation & { idempotencyKey: string },
+	): Promise<{ appendedIntoLedger: boolean }>;
 }
 
 function bindLiveCaptureStateForBackgroundLedgerEventRecording(
 	state: ActiveKanbanRuntimeInterWorkUnitRelationLedgerLiveCaptureState,
 ): KanbanRuntimeLiveCaptureBoundAtBackgroundLedgerEventRecordingInitiation {
 	// 不能在调用 client 之前 await：同步发起的记录（能力激活标记等）靠「本函数返回前请求已同步入队」保序。
+	const rejectBecauseLedgerWorkerClientClosed = (): Promise<never> =>
+		Promise.reject(
+			new InterWorkUnitRelationLedgerUnavailableError(
+				"the ledger worker client of this Kanban runtime instance was already closed by deactivation",
+			),
+		);
 	const appendCommittedEventsIntoLedgerOfBoundLiveCapture = (input: {
 		eventDrafts: InterWorkUnitRelationLedgerEventDraft[];
 	}): Promise<void> => {
 		if (state.liveCaptureLifecyclePhase === "ledger_worker_client_closed_after_deactivation") {
-			return Promise.reject(
-				new InterWorkUnitRelationLedgerUnavailableError(
-					"the ledger worker client of this Kanban runtime instance was already closed by deactivation",
-				),
-			);
+			return rejectBecauseLedgerWorkerClientClosed();
 		}
 		return state.ledgerClient.appendCommittedEvents(input);
 	};
@@ -171,6 +191,18 @@ function bindLiveCaptureStateForBackgroundLedgerEventRecording(
 			appendCommittedEventsIntoLedgerOfBoundLiveCapture({
 				eventDrafts: [buildFactObservedByKanbanRuntimeEventDraft({ ...observation, state })],
 			}),
+		appendFactObservedByKanbanRuntimeUnlessIdempotencyKeyAlreadyRecordedIntoLedgerOfBoundLiveCapture: async (
+			observation,
+		) => {
+			if (state.liveCaptureLifecyclePhase === "ledger_worker_client_closed_after_deactivation") {
+				return await rejectBecauseLedgerWorkerClientClosed();
+			}
+			const { appendedIdempotencyKeys } =
+				await state.ledgerClient.appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded({
+					eventDrafts: [buildFactObservedByKanbanRuntimeEventDraft({ ...observation, state })],
+				});
+			return { appendedIntoLedger: appendedIdempotencyKeys.includes(observation.idempotencyKey) };
+		},
 	};
 }
 
@@ -188,7 +220,7 @@ function refuseBackgroundLedgerEventRecordingBecauseLiveCaptureWasDeactivated(
 	return true;
 }
 
-interface BackgroundLedgerEventRecordingRequest {
+export interface BackgroundLedgerEventRecordingRequest {
 	// 只用于告警文案，例如 "task message delivery request for r0002"。
 	backgroundLedgerEventRecordingDescriptionForDiagnostics: string;
 	// 整段后台工作：先做异步读取，再经绑定实例追加。抛错只记告警，绝不外溢成未处理 rejection。
@@ -634,6 +666,17 @@ export function activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture(): A
 	// 同进程先后激活多个实例（测试）时，本实例停用后把注册还给激活前的那一个，而不是清空成 null。
 	const captureRegisteredBeforeThisActivation = getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture();
 	registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(captureThatFailsClosedAfterDeactivation.capture);
+	// 落地探测（provenance）经端口把「判据满足」交给本实例记账；停用开始时注销，停机期间的探测不再上报。
+	const sharedTaskCommitLandingCriterionSatisfiedObservationSinkRegisteredBeforeThisActivation =
+		getRegisteredSharedTaskCommitLandingCriterionSatisfiedObservationSink();
+	const sharedTaskCommitLandingCriterionSatisfiedObservationSinkOfThisActivation =
+		createSharedTaskCommitLandingCriterionSatisfiedObservationSinkRecordingIntoLedger({
+			startBackgroundLedgerEventRecordingBoundToThisLiveCapture: (request) =>
+				startBackgroundLedgerEventRecordingBoundToLiveCaptureState(state, request),
+		});
+	registerSharedTaskCommitLandingCriterionSatisfiedObservationSink(
+		sharedTaskCommitLandingCriterionSatisfiedObservationSinkOfThisActivation,
+	);
 	recordFactObservedByKanbanRuntimeWithoutBlocking(state, {
 		observedFactKind: "runtime_instance_live_capture_capabilities_activated",
 		observingKanbanRuntimeSystemComponentName:
@@ -655,12 +698,34 @@ export function activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture(): A
 				`eager board state baseline establishment failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		});
+	// 排在急切基线之后，免得启动期两路 git 探测互相抢。
+	const sharedTaskCommitLandingCriterionActivationBackfillSweepCompletion =
+		eagerBoardStateBaselineEstablishmentForEveryIndexedWorkspaceCompletion
+			.then(() =>
+				sweepTaskCommitIntegrationProvenanceProbedSinceLandingDataPreservationForSharedLandingCriterion({
+					isLiveCaptureStillActive: () => state.liveCaptureLifecyclePhase === "live_capture_active",
+				}),
+			)
+			.catch((error: unknown) => {
+				logInterWorkUnitRelationLedgerDiagnosticWarning(
+					`shared task commit landing criterion backfill sweep failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			});
 	return {
 		ledgerClient,
 		eagerBoardStateBaselineEstablishmentForEveryIndexedWorkspaceCompletion,
+		sharedTaskCommitLandingCriterionActivationBackfillSweepCompletion,
 		deactivate: async () => {
 			// activeLiveCaptureState 不清空：之后的入口据停用阶段拒绝并告警，而不是当成「从未激活」静默跳过。
 			state.eagerBoardStateBaselineEstablishmentCancelledByDeactivation = true;
+			if (
+				getRegisteredSharedTaskCommitLandingCriterionSatisfiedObservationSink() ===
+				sharedTaskCommitLandingCriterionSatisfiedObservationSinkOfThisActivation
+			) {
+				registerSharedTaskCommitLandingCriterionSatisfiedObservationSink(
+					sharedTaskCommitLandingCriterionSatisfiedObservationSinkRegisteredBeforeThisActivation,
+				);
+			}
 			// 阶段只向前推进：重复调用 deactivate 不得把「已关闭」退回「drain 中」。
 			if (state.liveCaptureLifecyclePhase === "live_capture_active") {
 				state.liveCaptureLifecyclePhase =
@@ -675,6 +740,8 @@ export function activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture(): A
 			// 不阻塞的后台账本记录（message 事件、PDV 观测等追加前先做异步读取的）等它们整段落定。
 			// 停用阶段已置位，后台记录集合此后只减不增，快照一次即可等全。
 			await eagerBoardStateBaselineEstablishmentForEveryIndexedWorkspaceCompletion;
+			// 补发扫描在下一条之前看到停用阶段即退出；正在探测的那一条先探完（它的上报此时已注销，不再记账）。
+			await sharedTaskCommitLandingCriterionActivationBackfillSweepCompletion;
 			await drainOfLedgerCallsInFlightAtDeactivation;
 			await Promise.allSettled([...state.backgroundLedgerEventRecordingsInFlight]);
 			await Promise.allSettled([...state.recordedInterWorkUnitRelationProjectionReadsInFlight]);

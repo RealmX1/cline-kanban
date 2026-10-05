@@ -34,6 +34,7 @@ import {
 	getPostDeployVerificationStatePath,
 	markTaskVerified,
 	reconcileGroup,
+	reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups,
 	setPendingConfirmation,
 	setVerificationRunState,
 	updateTaskChecklist,
@@ -117,9 +118,9 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 			const nowIso = new Date().toISOString();
 			// active 组选取顺带触发 state 模块的损坏隔离 + 过期 token GC（读时经 mutate 骨架）。
 			const activeGroup = await getActiveGroup(scope.workspaceId, nowIso);
+			const boardTasks = await deps.loadBoardTasksForWorkspace(scope);
 			if (activeGroup) {
 				// 每次轮询对当前组做双向 reconcile：新进 validation 任务动态加入 + 悬挂任务标 droppedReason（plan 数据流）。
-				const boardTasks = await deps.loadBoardTasksForWorkspace(scope);
 				await reconcileGroup({
 					deploymentId: activeGroup.deploymentId,
 					workspaceId: scope.workspaceId,
@@ -127,6 +128,13 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 					nowIso,
 				});
 			}
+			// CLI 已授权、已移入 Done、却没来得及写 verifiedAt 的在途完成记录：跨该 workspace 全部组（含已被新部署折叠的组）补写，
+			// 不论有无活跃组——所属组被折叠后 reconcileGroup 不再触达它（RVF-002）。
+			await reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups({
+				workspaceId: scope.workspaceId,
+				currentBoardTasks: boardTasks,
+				nowIso,
+			});
 			// getActiveGroup 已确保盘上为合法 JSON，可安全直读全量并按当前 workspaceId 过滤。
 			const snapshot = await readPostDeployVerificationStateSnapshot();
 			const workspaceGroups = snapshot.deploymentGroups.filter((group) => group.workspaceId === scope.workspaceId);
