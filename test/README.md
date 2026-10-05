@@ -45,6 +45,7 @@ fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 t
 | D 资源阈值 | 等待挂起 runtime 时 CLI 的 RSS | 以事件为锚点按阶段采样、设最低有效样本数；数值两档 |
 | E 反向断言 | 等 N ms 后断言「没发生」 | 不放宽。负载下只会漏报、不会误报；改动既有正向又有反向观察的用例时保留观察屏障 |
 | F 就绪竞态 | 第一次采样时子进程还没 fork 出来 | 改成显式等待就绪条件 |
+| 按轮数设上限的等待 | 空转 2000 次 `setImmediate` 等真实账本 IO 落地（`pending-task-message-injection-startup-sweep.test.ts`，458b1） | 轮数其实是一个没声明的墙钟上限，而且很短：GitHub Actions ubuntu 上 2000 轮的中位数只有 3–5ms（同样 2000 轮在 macOS 本机要 26ms，所以本地从不失败），线程池上的 fs 操作一抖就超。等的是真实 IO、子进程或线程池时，改成墙钟上限，再按 B 类或「终会发生」单档处理。假时钟下用 `performance.now()` 计时、用 `setImmediate` 让出，不能用 `vi.waitFor`，它每轮都会推进假时钟。按超时数值盘点找不到这类等待，要另外搜 `for (… < N …) await …` 形状的循环。只等 microtask 链的（IO 已 mock 掉，`await Promise.resolve()` × N）是确定性的，不在此列 |
 | 行为契约写成了计时 | 「不空等沉降窗」「send 不等整轮完成」 | 改成确定性断言（假时钟、结构断言、顺序断言），不进两档 |
 
 **共享设施**：`test/utilities/load-sensitive-wall-clock-two-tier-deadline.ts`（`waitForConditionWithinLoadSensitiveTwoTierDeadline` / `judgeMeasuredElapsedAgainstLoadSensitiveTwoTierDeadline`，`now` 与 CI 判定都可注入）；子进程退出用 `runtime-integration-test-spawned-child-process-lifecycle.ts` 的 `waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline`（超过硬档先 SIGKILL 并确认退出再抛错）。
@@ -54,6 +55,10 @@ fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 t
 - CI 与本地用同一套常量，唯一例外是 C 类在 CI 上严格执行软档（`strictAtSoftDeadlineWhenRunningInContinuousIntegration`）。
 - 硬档不按 loadavg 拉长。宿主 CPU 争用信号（loadavg、窗口内 `os.cpus()` busy 比例）**只写进 annotation 作诊断，绝不参与判定**：2026-10-05 实测进程内忙循环比值、窗口内 busy 比例、参考子进程定时器迟到都不可靠（同一负载下 busy 比例在 0.47–0.97 之间跳；macOS 定时器合并让参考进程恒迟到约 20ms），拿它们放过失败会制造新的假通过。
 - **外层预算必须闭合**：内层等待放宽后，`testTimeout`（15s）与 hook 默认（10s）会先触发。每个用例的超时 = 准备 + 各次等待的硬档 + 清理 + SIGKILL 确认；多次 CLI spawn 按累计预算计（`computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts` 的 `cliChildProcessSpawns`：每次按软档 × 2，外加一个硬档），不按「次数 × 硬档」。超时挂在 `describe` 上，或用 `it(title, fn, <数字字面量>)`：`it(title, { timeout: <表达式> }, fn)` 在首行超过 120 列时同样会让 biome 重缩进整个用例体。
+
+**假时钟 + 真实 IO**（458b1）：
+- 用例中途断言失败时，用例体末尾的 `stop()` 和清理都执行不到。自续排的定时器链和在途 IO 要登记给 `afterEach`，按「停链 → 等在途 IO 落地（同样用墙钟上限）→ 卸假时钟 → 删目录」的顺序收尾。否则在途 IO 会拖到下一个用例里才落地，把定时器排到下一个用例的假时钟上，连带后续用例一起失败（458b1 第二例的 `1≠2` 就是这样来的）。不要用 `onTestFinished`，它在 `afterEach` 之后才执行，那时假时钟已经卸掉、目录也已删除。
+- 被等待的 IO 链上不能有依赖假定时器的步骤。proper-lockfile 的取锁重试、graceful-fs 的 EMFILE 重试都走 `setTimeout`，一旦 `setTimeout` 被假掉，墙钟上限设多长都等不到。要区分「IO 慢」和「挂在假定时器上」，看在途操作在超时之后的第二个上限内（例如 afterEach 停链后的那次等待）是否落地：落地即慢，不落地即卡死。单看 `vi.getTimerCount()` 分不出来，因为持锁期间 proper-lockfile 刷新锁 mtime 的定时器本身就是一个假定时器。
 
 **D1-b 的理由**：本地高负载下，消费端被抢走 CPU 造成的积压与真实退化同一量级，没有可靠信号能区分二者；CI 机器负载可控，保留改动前的全部判别力。回显延迟当年的三个根因另有确定性用例守护（`session-manager-output-fanout.test.ts`、`terminal-output-normalization.test.ts`）。代价：同一份代码本地与 CI 判据不同。
 

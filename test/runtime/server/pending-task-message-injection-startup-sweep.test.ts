@@ -5,6 +5,7 @@
 //   - 上一趟扫完之后才出现的 pending（链不认识它）由周期兜底在上界之后一个周期内判掉；
 //   - 任何一趟都不在记录自己的上界之前判它（不把手伸进别人的在途投递）；
 //   - 一趟意外抛错不掐断链；stop() 之后不再扫。
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -84,18 +85,75 @@ async function flushRealInputOutput() {
 	await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+// 等一趟真实账本清扫落地的墙钟上限。这是单档的「终会发生」等待（test/README.md「负载敏感的墙钟 / 资源断言」），
+// 上限只兜「真卡住了」。
+// 不按轮数设上限：旧版空转 2000 次 setImmediate，在 GitHub Actions ubuntu 上中位数只合 3–5ms，线程池上的 fs 操作一抖就超（458b1）。
+// setTimeout 与 Date 都是假的，所以用 performance.now() 计时、用 setImmediate 让出；也不能用 vi.waitFor，它每轮都推进假时钟。
+// 实测（2026-10-05）：CI ubuntu / Node 22 单趟 p99 约 4.7ms、最慢 98.5ms；本地 10 核压满时 p99 约 6.6ms、最慢 69ms。
+// EXPERIMENT_NODE: 上限取 5s（实测最慢的 50 倍以上）；更长 = 真卡住时更晚失败，更短 = 慢 runner 上把慢 IO 判成失败。
+const REAL_LEDGER_SWEEP_PASS_COMPLETION_WALL_CLOCK_BOUND_MS = 5_000;
+
+async function waitForConditionWithinRealLedgerSweepPassCompletionWallClockBound(
+	isConditionSatisfied: () => boolean,
+): Promise<{ satisfied: boolean; elapsedMs: number }> {
+	const waitStartedAt = performance.now();
+	while (!isConditionSatisfied()) {
+		if (performance.now() - waitStartedAt >= REAL_LEDGER_SWEEP_PASS_COMPLETION_WALL_CLOCK_BOUND_MS) {
+			return { satisfied: false, elapsedMs: performance.now() - waitStartedAt };
+		}
+		await flushRealInputOutput();
+	}
+	return { satisfied: true, elapsedMs: performance.now() - waitStartedAt };
+}
+
+// 本用例启动的真实账本清扫链，由 afterEach 收尾：先停链、等在途那一趟落地，再卸假时钟、删目录。
+// 用例中途断言失败时，用例体末尾的 stop() 执行不到，在途那一趟会拖到下一个用例里才落地（testRuntimeHome.path 是模块级的），
+// 再把下一趟续排到下一个用例的假时钟上。这个定时器和下一个用例自己的定时器同一时刻到期、但建得更早，
+// 会先被 advanceTimersToNextTimerAsync 触发，于是下一个用例的计数停住。CI 上第二例的 `1≠2` 就是这样连带出来的（458b1）。
+const settleRealLedgerSweepChainsStartedInCurrentTest: Array<() => Promise<void>> = [];
+
 // 真实账本清扫外面包一层计数：定时器是假的，账本 IO 是真的，推进假时钟之后要等真 IO 落地。
-function createObservedRealLedgerSweep() {
+function startRealLedgerSweepChainObservedForCurrentTest() {
 	let completedSweepCount = 0;
-	return {
+	let sweepPassInFlight = false;
+	const describeRealLedgerSweepState = () =>
+		`已完成 ${completedSweepCount} 趟，${sweepPassInFlight ? "有" : "没有"}在途的一趟，` +
+		`假定时器 ${vi.getTimerCount()} 个，账本锁文件${existsSync(`${ledgerPath()}.lock`) ? "存在" : "不存在"}。`;
+	const sweeps = startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime({
 		sweepAllWorkspacesOnce: async () => {
-			const result = await sweepStalePendingTaskMessageInjectionsForAllWorkspaces();
-			completedSweepCount += 1;
-			return result;
+			sweepPassInFlight = true;
+			try {
+				const result = await sweepStalePendingTaskMessageInjectionsForAllWorkspaces();
+				completedSweepCount += 1;
+				return result;
+			} finally {
+				sweepPassInFlight = false;
+			}
 		},
+	});
+	settleRealLedgerSweepChainsStartedInCurrentTest.push(async () => {
+		sweeps.stop();
+		const waited = await waitForConditionWithinRealLedgerSweepPassCompletionWallClockBound(() => !sweepPassInFlight);
+		if (!waited.satisfied) {
+			throw new Error(
+				`清扫链已 stop()，在途的那一趟又等了 ${waited.elapsedMs.toFixed(1)}ms 仍没落地，是卡死而不是慢` +
+					`（例如取锁重试挂在了被假掉的 setTimeout 上）：${describeRealLedgerSweepState()}`,
+			);
+		}
+	});
+	return {
 		waitForCompletedSweepCount: async (expectedCount: number) => {
-			for (let spin = 0; spin < 2_000 && completedSweepCount < expectedCount; spin += 1) {
-				await flushRealInputOutput();
+			const waited = await waitForConditionWithinRealLedgerSweepPassCompletionWallClockBound(
+				() => completedSweepCount >= expectedCount,
+			);
+			if (!waited.satisfied) {
+				throw new Error(
+					`等第 ${expectedCount} 趟真实账本清扫落地，超过墙钟上限 ` +
+						`${REAL_LEDGER_SWEEP_PASS_COMPLETION_WALL_CLOCK_BOUND_MS}ms（已等 ${waited.elapsedMs.toFixed(1)}ms）：` +
+						describeRealLedgerSweepState() +
+						"afterEach 停链后会再等一个上限：届时落地 ⇒ 真实 IO 慢；仍不落地 ⇒ 卡死，afterEach 会另报一条错。" +
+						"持锁期间 proper-lockfile 刷新锁 mtime 的定时器也算一个假定时器，单看定时器数分不出这两种。",
+				);
 			}
 			expect(completedSweepCount).toBe(expectedCount);
 			// 让「扫完 → 续排下一趟」那一步也落地。
@@ -112,8 +170,14 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	vi.useRealTimers();
-	await rm(testRuntimeHome.path, { recursive: true, force: true });
+	try {
+		for (const settleRealLedgerSweepChain of settleRealLedgerSweepChainsStartedInCurrentTest.splice(0)) {
+			await settleRealLedgerSweepChain();
+		}
+	} finally {
+		vi.useRealTimers();
+		await rm(testRuntimeHome.path, { recursive: true, force: true });
+	}
 });
 
 describe("startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime（真实账本）", () => {
@@ -133,10 +197,7 @@ describe("startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime（真实
 		const nearBecomesStaleAt = nearDeadline + STALE_THRESHOLD_MS;
 		const farBecomesStaleAt = farDeadline + STALE_THRESHOLD_MS;
 
-		const observed = createObservedRealLedgerSweep();
-		const sweeps = startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime({
-			sweepAllWorkspacesOnce: observed.sweepAllWorkspacesOnce,
-		});
+		const observed = startRealLedgerSweepChainObservedForCurrentTest();
 		let completedSweepCount = 1;
 		await observed.waitForCompletedSweepCount(completedSweepCount);
 		expect((await readLedgerRecord("near"))?.terminal_delivery_status).toBe("accepted_pending_submit_confirmation");
@@ -165,14 +226,10 @@ describe("startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime（真实
 			}
 		}
 		expect(Date.now()).toBe(farBecomesStaleAt);
-		sweeps.stop();
 	});
 
 	it("上一趟扫完之后才出现的无主 pending（续排链不认识它）⇒ 周期兜底在它的上界之后一个周期内判掉", async () => {
-		const observed = createObservedRealLedgerSweep();
-		const sweeps = startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime({
-			sweepAllWorkspacesOnce: observed.sweepAllWorkspacesOnce,
-		});
+		const observed = startRealLedgerSweepChainObservedForCurrentTest();
 		let completedSweepCount = 1;
 		await observed.waitForCompletedSweepCount(completedSweepCount);
 
@@ -199,7 +256,6 @@ describe("startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime（真实
 			expect(Date.now()).toBeLessThanOrEqual(becomesStaleAt + STALE_PENDING_SWEEP_PERIODIC_BACKSTOP_INTERVAL_MS);
 		}
 		expect(judgedAt).toBeGreaterThanOrEqual(becomesStaleAt);
-		sweeps.stop();
 	});
 });
 
