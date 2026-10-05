@@ -14,6 +14,7 @@ import type {
 	RuntimeHookCliProcessResourceUsage,
 	RuntimeHookEvent,
 	RuntimeHookIngestResponse,
+	RuntimeMainAgentConversationContextCompactionTrigger,
 	RuntimeTaskHookActivity,
 } from "../core/api-contract";
 import { mergeAbortSignals } from "../core/cli-process-guards";
@@ -49,6 +50,7 @@ import {
 } from "./hook-events/exploration-work-branch-job-hook-short-circuit";
 import { asRecord, normalizeWhitespace, readNestedString, readStringField } from "./hook-events/hook-utils";
 import { normalizeKiroHookMetadata } from "./hook-events/kiro-hook-events";
+import { extractMainAgentConversationContextCompactionFactsFromHookPayload } from "./hook-events/main-agent-conversation-context-compaction-hook-payload-extraction";
 
 export {
 	createCodexWatcherState,
@@ -62,6 +64,7 @@ const VALID_EVENTS = new Set<RuntimeHookEvent>([
 	"to_in_progress",
 	"activity",
 	"agent_conversation_session_identity_observed",
+	"main_agent_conversation_context_compaction_completed",
 ]);
 
 interface HooksIngestArgs {
@@ -78,6 +81,10 @@ interface HooksIngestArgs {
 	submittedPromptText?: string;
 	// hook stdin 带 `agent_id` ⇔ 事件从子代理内部触发（Claude Code 只在子代理内的事件上带它）。
 	hookEventFiredInsideSubagentContext?: boolean;
+	// 仅压缩完成事件：hook stdin 的 `trigger`（manual / auto）派生而来；未知值或缺失时不带。
+	mainAgentConversationContextCompactionTriggerReportedByHarness?: RuntimeMainAgentConversationContextCompactionTrigger;
+	// 仅压缩完成事件：harness 报告的压缩后上下文大小（Kimi 的 estimatedTokenCount）；不报则不带。
+	mainAgentConversationContextTokenCountAfterCompactionReportedByHarness?: number;
 	// N0a：终端 agent 原生会话身份（session_id + transcript_path），每个事件都带，服务端幂等落 sidecar。
 	agentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity;
 	// 资源占用采集：工具类事件的执行结果（已截断脱敏），服务端只写 journal。
@@ -440,6 +447,7 @@ function parseHooksIngestArgs(
 			? { submittedPromptText: readStringField(payload, "prompt") ?? undefined }
 			: {}),
 		...(payload && readStringField(payload, "agent_id") ? { hookEventFiredInsideSubagentContext: true } : {}),
+		...extractMainAgentConversationContextCompactionFactsFromHookPayload(event, payload),
 	};
 }
 
@@ -665,6 +673,18 @@ async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngest
 				...(args.submittedPromptText !== undefined ? { submittedPromptText: args.submittedPromptText } : {}),
 				...(args.hookEventFiredInsideSubagentContext
 					? { hookEventFiredInsideSubagentContext: args.hookEventFiredInsideSubagentContext }
+					: {}),
+				...(args.mainAgentConversationContextCompactionTriggerReportedByHarness
+					? {
+							mainAgentConversationContextCompactionTriggerReportedByHarness:
+								args.mainAgentConversationContextCompactionTriggerReportedByHarness,
+						}
+					: {}),
+				...(args.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness !== undefined
+					? {
+							mainAgentConversationContextTokenCountAfterCompactionReportedByHarness:
+								args.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness,
+						}
 					: {}),
 				...(args.agentNativeConversationSessionIdentity
 					? { agentNativeConversationSessionIdentity: args.agentNativeConversationSessionIdentity }
@@ -1167,7 +1187,7 @@ export function registerHooksCommand(program: Command): void {
 		.description("Ingest hook event into Kanban runtime.")
 		.requiredOption(
 			"--event <event>",
-			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed | main_agent_conversation_context_compaction_completed.",
 			parseHookEvent,
 		)
 		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
@@ -1192,7 +1212,7 @@ export function registerHooksCommand(program: Command): void {
 		.description("Best-effort hook ingest that never throws.")
 		.requiredOption(
 			"--event <event>",
-			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed | main_agent_conversation_context_compaction_completed.",
 			parseHookEvent,
 		)
 		.option("--notification-candidate-id <id>", "Internal notification archive identity.")
@@ -1224,7 +1244,7 @@ export function registerHooksCommand(program: Command): void {
 		.description("Codex hook entrypoint.")
 		.requiredOption(
 			"--event <event>",
-			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed.",
+			"Event: to_review | to_in_progress | activity | agent_conversation_session_identity_observed | main_agent_conversation_context_compaction_completed.",
 			parseHookEvent,
 		)
 		.option("--notification-candidate-id <id>", "Internal notification archive identity.")

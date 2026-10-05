@@ -81,6 +81,7 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 				// 两颗时长药丸的字段同样只是**透传**：无 session ⇒ 都是 null ⇒ 前端两颗都隐藏。
 				agentResponseGenerationStopped: null,
 				lastConversationProgressObservation: null,
+				agentResponseGenerationTurnStarted: null,
 				turnOwner: null,
 				liveness: "none",
 			},
@@ -98,6 +99,7 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 					agentId: "claude",
 					lastOutputAt: 5_000,
 					lastSubstantiveOutputAt: 4_000,
+					agentResponseGenerationTurnStarted: { startedAt: 3_000, turnSequence: 2 },
 				}),
 			),
 		);
@@ -112,6 +114,8 @@ describe("collectInProgressTaskDetailsFromBoard", () => {
 				// agent 回合期间没有停止事件；本用例的 summary 也没带推进观测 ⇒ 两颗都是 null。
 				agentResponseGenerationStopped: null,
 				lastConversationProgressObservation: null,
+				// 本轮回合开始事件原样透传：Board Overview Active 组与切换面板 Running 区据此排序。
+				agentResponseGenerationTurnStarted: { startedAt: 3_000, turnSequence: 2 },
 				turnOwner: "agent",
 				liveness: "live",
 			},

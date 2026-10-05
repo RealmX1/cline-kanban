@@ -19,6 +19,11 @@ export interface CrossProjectRecentlyActiveTaskSwitcherHostContextValue {
 	focusedTaskInProject: { workspaceId: string; taskId: string } | null;
 	// 同项目直接选中；跨项目先切 workspace，目标 board 加载出该任务后再打开（App 的 pendingCrossProjectTaskOpen）。
 	onOpenTaskInProject: (workspaceId: string, taskId: string) => void;
+	// backlog 卡没有详情页：点它在 Focus View 之上原地打开任意项目的编辑对话框，不切项目、焦点任务不动。
+	// 缺省（单测宿主）时 backlog 行退回 onOpenTaskInProject。
+	onOpenBacklogTaskEditorInProject?: (workspaceId: string, taskId: string) => void;
+	// 面板顶部「Create task (c)」：Board Scope 建卡框（带目标项目字段，默认上下文项目）。缺省时不显示按钮。
+	onRequestCreateTaskInBoardScope?: () => void;
 	// 当前项目的卡沿用浏览器既有链路（打开置顶原因对话框 → setBoard → saveState）；其他项目的卡由面板自己走
 	// runtime 的 setTaskPinboardPinStateOfTaskCard。两条路改写的是同一组纯函数（src/core/task-pinboard-pinning.ts）。
 	onRequestPinCurrentProjectTaskToTaskPinboard: (taskId: string) => void;

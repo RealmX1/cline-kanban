@@ -253,6 +253,29 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				// 身份确认不代表对话继续，不触碰恢复守卫、活动时间或通知。
 				if (event === "agent_conversation_session_identity_observed") return identityPersistenceResponse;
 
+				// 压缩完成（PostCompact）只推进 Cache warm 起点：不触碰恢复守卫、对话推进、通知或回合转移。
+				if (event === "main_agent_conversation_context_compaction_completed") {
+					const compactionEvidenceKind = classifyHookEventAsMainAgentConversationModelRequestDispatch({
+						event,
+						normalizedHookEventName: body.metadata?.hookEventName?.trim().toLowerCase() ?? "",
+						hookEventFiredInsideSubagentContext: body.hookEventFiredInsideSubagentContext === true,
+						sessionFacetsBeforeTransition: resolveSessionFacets(summary),
+						mainAgentConversationContextCompactionTriggerReportedByHarness:
+							body.mainAgentConversationContextCompactionTriggerReportedByHarness,
+					});
+					if (compactionEvidenceKind !== null) {
+						manager.recordMainAgentConversationModelRequestDispatch(
+							taskId,
+							compactionEvidenceKind,
+							compactionEvidenceKind ===
+								"manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request"
+								? body.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness
+								: undefined,
+						);
+					}
+					return identityPersistenceResponse;
+				}
+
 				const normalizedHookEventName = body.metadata?.hookEventName?.trim().toLowerCase() ?? "";
 				const isClaudeUserPromptSubmit =
 					event === "to_in_progress" &&

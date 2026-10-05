@@ -310,6 +310,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:permission_request:0:0"');
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:pre_tool_use:0:0"');
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:post_tool_use:0:0"');
+		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:post_compact:0:0"');
 		expect(hookTrustState[0]).toContain('trusted_hash="sha256:');
 		expect(launchCommand).toContain("timeout=8");
 		expect(launchCommand).not.toContain("codex-wrapper");
@@ -897,6 +898,10 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(settings.hooks?.PreToolUse).toBeDefined();
 		expect(settings.hooks?.PostToolUse).toBeDefined();
 		expect(settings.hooks?.PostToolUseFailure).toBeDefined();
+		// 压缩完成推进 Cache warm 起点：不带 matcher（manual / auto 都收）。
+		expect(JSON.stringify(settings.hooks?.PostCompact)).toContain(
+			"main_agent_conversation_context_compaction_completed",
+		);
 	});
 
 	it("forks Claude with a read-only tool set for a By the way session", async () => {
@@ -1424,6 +1429,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			"hooks.PermissionRequest",
 			"hooks.PreToolUse",
 			"hooks.PostToolUse",
+			"hooks.PostCompact",
 		]) {
 			const configIndex = launch.args.findIndex((arg) => arg.startsWith(`${key}=`));
 			expect(configIndex).toBeGreaterThan(-1);

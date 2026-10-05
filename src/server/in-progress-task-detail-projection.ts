@@ -1,6 +1,7 @@
 import type {
 	RuntimeAgentId,
 	RuntimeAgentResponseGenerationStopped,
+	RuntimeAgentResponseGenerationTurnStarted,
 	RuntimeBoardCard,
 	RuntimeBoardData,
 	RuntimeInProgressTaskDetail,
@@ -25,6 +26,8 @@ export interface TaskSessionFactsForCrossProjectTaskViews {
 	lastSubstantiveOutputAt: number | null;
 	agentResponseGenerationStopped: RuntimeAgentResponseGenerationStopped | null;
 	lastConversationProgressObservation: RuntimeLastConversationProgressObservation | null;
+	// 概览 Active 组与切换面板 Running 区的排序键（本轮 agent 回合的开始时刻）。
+	agentResponseGenerationTurnStarted: RuntimeAgentResponseGenerationTurnStarted | null;
 	// 只有跨项目切换面板的 Cache warm 估算要读这两个（Board Overview 明细不投影它们）。
 	lastMainAgentConversationModelRequestDispatchObservation: RuntimeLastMainAgentConversationModelRequestDispatchObservation | null;
 	agentProcessStartedAt: number | null;
@@ -45,6 +48,7 @@ export function extractTaskSessionFactsForCrossProjectTaskViews(
 		lastSubstantiveOutputAt: summary.lastSubstantiveOutputAt ?? null,
 		agentResponseGenerationStopped: summary.agentResponseGenerationStopped ?? null,
 		lastConversationProgressObservation: summary.lastConversationProgressObservation ?? null,
+		agentResponseGenerationTurnStarted: summary.agentResponseGenerationTurnStarted ?? null,
 		lastMainAgentConversationModelRequestDispatchObservation:
 			summary.lastMainAgentConversationModelRequestDispatchObservation ?? null,
 		agentProcessStartedAt: summary.startedAt,
@@ -83,6 +87,7 @@ export function buildTaskActivityDetailFromBoardCardAndTaskSessionFacts(
 		// 只投影、不在此合并或推断——合并是 mergeSummaryWithFacets 里那个唯一 reducer 的事。
 		agentResponseGenerationStopped: sessionFacts?.agentResponseGenerationStopped ?? null,
 		lastConversationProgressObservation: sessionFacts?.lastConversationProgressObservation ?? null,
+		agentResponseGenerationTurnStarted: sessionFacts?.agentResponseGenerationTurnStarted ?? null,
 		turnOwner: sessionFacts?.turnOwner ?? null,
 		liveness: sessionFacts?.liveness ?? "none",
 	};

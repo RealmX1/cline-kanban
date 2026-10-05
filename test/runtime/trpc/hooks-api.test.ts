@@ -1149,6 +1149,90 @@ describe("createHooksApi", () => {
 		);
 	});
 
+	// 压缩完成（PostCompact）只推进 Cache warm 起点：不推进对话推进、不刷新活动行、不转移回合、不产生通知。
+	it("Cache warm 起点：用户回合里的手动压缩记一次替换类观测（带 harness 报的上下文大小），其余一概不碰", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "awaiting_review", reviewReason: "hook" })),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const broadcastTaskReadyForReview = vi.fn();
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview,
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "main_agent_conversation_context_compaction_completed",
+			metadata: { source: "kimi", hookEventName: "PostCompact" },
+			mainAgentConversationContextCompactionTriggerReportedByHarness: "manual_compact_command",
+			mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: 42_000,
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.recordMainAgentConversationModelRequestDispatch).toHaveBeenCalledWith(
+			"task-1",
+			"manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request",
+			42_000,
+		);
+		expect(manager.recordAgentLifecycleHookConversationProgress).not.toHaveBeenCalled();
+		expect(manager.applyHookActivity).not.toHaveBeenCalled();
+		expect(manager.transitionToReview).not.toHaveBeenCalled();
+		expect(manager.transitionToRunning).not.toHaveBeenCalled();
+		expect(broadcastTaskReadyForReview).not.toHaveBeenCalled();
+	});
+
+	it("Cache warm 起点：agent 回合里的自动压缩记续写类（不带上下文大小）；子代理内的压缩不记", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			applyTurnCheckpoint: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "main_agent_conversation_context_compaction_completed",
+			metadata: { source: "claude", hookEventName: "PostCompact" },
+			mainAgentConversationContextCompactionTriggerReportedByHarness: "automatic_context_window_compaction",
+			hookEventFiredInsideSubagentContext: true,
+		});
+		expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "main_agent_conversation_context_compaction_completed",
+			metadata: { source: "claude", hookEventName: "PostCompact" },
+			mainAgentConversationContextCompactionTriggerReportedByHarness: "automatic_context_window_compaction",
+			mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: 42_000,
+		});
+		expect(manager.recordMainAgentConversationModelRequestDispatch).toHaveBeenCalledWith(
+			"task-1",
+			"automatic_context_compaction_completed_continuation_model_request_follows_immediately",
+			undefined,
+		);
+		expect(manager.transitionToRunning).not.toHaveBeenCalled();
+	});
+
 	it("captures a turn checkpoint when transitioning to review", async () => {
 		const transitionedSummary = createSummary({
 			state: "awaiting_review",
@@ -1940,6 +2024,9 @@ it("SessionStart 身份事件不解除恢复守卫、不推进时间戳或通知
 	expect(manager.applyHookActivity).not.toHaveBeenCalled();
 	expect(manager.transitionToRunning).not.toHaveBeenCalled();
 	expect(manager.recordAgentLifecycleHookConversationProgress).not.toHaveBeenCalled();
+	// ca0af 回归（2026-10-04）：续跑 / 终端重启只带来 SessionStart，绝不能推进 Cache warm 起点——否则
+	// 「只是打开过」的任务会被当成刚发过请求，进 Cache warm 区。
+	expect(manager.recordMainAgentConversationModelRequestDispatch).not.toHaveBeenCalled();
 	expect(notify).not.toHaveBeenCalled();
 });
 

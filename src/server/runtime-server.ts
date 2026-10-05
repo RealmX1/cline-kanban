@@ -73,7 +73,12 @@ import {
 	readLiveRuntimeProcessInstanceIds,
 	startRuntimeProcessInstanceHeartbeat,
 } from "../state/runtime-process-instance-heartbeat-registry";
-import { getTaskWorktreesHomePath, loadWorkspaceBoardById, loadWorkspaceContextById } from "../state/workspace-state";
+import {
+	getTaskWorktreesHomePath,
+	listWorkspaceIndexEntries,
+	loadWorkspaceBoardById,
+	loadWorkspaceContextById,
+} from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -98,6 +103,7 @@ import {
 } from "./active-runtime-session-shutdown";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
+import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import { startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime } from "./pending-task-message-injection-startup-sweep";
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
@@ -652,6 +658,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	// taskCardAction.* 的按卡串行器：必须是 runtime 级单例——api 对象按请求新建，串行器若也按请求新建就串不住任何东西。
 	const taskCardActionPerTaskCommandSerializer = createTaskCardActionPerTaskCommandSerializer();
+	// 跨项目切换面板「其他项目」行的 git 元数据缓存：同理必须是 runtime 级单例，多个标签页的轮询才能在这里去重。
+	const crossProjectTaskWorktreeGitMetadataCache = createCrossProjectTaskWorktreeGitMetadataCache({
+		listRegisteredWorkspacePathsById: async () =>
+			new Map((await listWorkspaceIndexEntries()).map((entry) => [entry.workspaceId, entry.repoPath])),
+		loadWorkspaceBoardById,
+	});
 
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
@@ -751,6 +763,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				buildProjectsPayload: deps.workspaceRegistry.buildProjectsPayload,
 				listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon:
 					deps.workspaceRegistry.listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon,
+				readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries:
+					crossProjectTaskWorktreeGitMetadataCache.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries,
 				pickDirectoryPathFromSystemDialog: deps.pickDirectoryPathFromSystemDialog,
 				serverCwd: process.cwd(),
 			}),

@@ -52,6 +52,7 @@ function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 		pickDirectoryPathFromSystemDialog: vi.fn(() => null),
 		serverCwd,
 		listCrossProjectTaskSwitcherEntriesForAllProjectsWithinActivityHorizon: vi.fn(async () => []),
+		readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries: vi.fn(async () => []),
 	};
 }
 

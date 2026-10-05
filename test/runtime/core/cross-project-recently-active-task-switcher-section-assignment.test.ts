@@ -12,7 +12,8 @@ import {
 } from "../../../src/core/cross-project-recently-active-task-switcher-section-assignment";
 
 // 跨项目切换面板的区归属（docs/context-cross-project-recently-active-task-switcher.md）。核心不变量：
-// Running / 缓存倒计时 / 剩余三区互斥（Running 优先），Pinned 可与它们重复；区归属不读 board 列（只排除 Done）。
+// Running / 缓存倒计时 / 剩余三区互斥（Running 优先），Pinned 可与它们重复；区归属不读 board 列（例外：排除 Done；
+// Validation 不进缓存倒计时区）。
 
 const NOW_MS = 10_000_000_000;
 const MINUTE_MS = 60_000;
@@ -69,6 +70,12 @@ function dispatchedAt(
 	observedAtMs: number,
 ): RuntimeCrossProjectTaskSwitcherEntry["lastMainAgentConversationModelRequestDispatchObservation"] {
 	return { observedAtMs, evidenceKind: "post_tool_use_hook_event" };
+}
+
+function turnStartedAt(
+	startedAtMs: number,
+): RuntimeCrossProjectTaskSwitcherEntry["agentResponseGenerationTurnStarted"] {
+	return { startedAt: startedAtMs, turnSequence: 1 };
 }
 
 function assign(
@@ -156,6 +163,98 @@ describe("estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn"
 			lastConversationProgressObservation: progressAt(NOW_MS - 694 * MINUTE_MS),
 		});
 		expect(estimate(entry, NOW_MS)).toBeNull();
+	});
+
+	// ca0af 回归（2026-10-04 用户反馈「只是 visit 了那个 task 就进了 Cache warm」）：部署版读 stoppedAt，而终端
+	// 重启、从 Done 恢复的自动续跑都会把它刷成续跑时刻；续跑只带来 SessionStart，没发任何模型请求。
+	// 还没有 dispatch sidecar 的存量会话回落到对话推进观测，它停在真实最后一次请求附近，不受续跑影响。
+	it("没有 dispatch sidecar + 续跑把 stoppedAt 刷成刚才：不进倒计时区", () => {
+		const entry = makeEntry("ca0af", {
+			...USER_REVIEW_LIVE,
+			agentResponseGenerationStopped: stoppedAt(NOW_MS - MINUTE_MS),
+			lastConversationProgressObservation: progressAt(NOW_MS - 43 * 60 * MINUTE_MS),
+		});
+		expect(estimate(entry, NOW_MS)).toBeNull();
+	});
+
+	describe("手动压缩完成（用户拍板 B′：留区，但不显示倒计时）", () => {
+		const manualCompactionAt = (observedAtMs: number, contextTokenCount?: number) =>
+			({
+				observedAtMs,
+				evidenceKind:
+					"manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request",
+				...(contextTokenCount !== undefined
+					? { mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: contextTokenCount }
+					: {}),
+			}) as const;
+
+		it("按 TTL 下界留区，起点来源标成手动压缩；harness 报了上下文大小就带上", () => {
+			expect(
+				estimate(
+					makeEntry("a", {
+						...USER_REVIEW_LIVE,
+						lastMainAgentConversationModelRequestDispatchObservation: manualCompactionAt(NOW_MS - MINUTE_MS),
+					}),
+					NOW_MS,
+				),
+			).toEqual({
+				promptCacheWarmthAnchorAt: NOW_MS - MINUTE_MS,
+				promptCacheWarmthAnchorSource: "manual_compaction_replaced_main_conversation_without_follow_up_request",
+				promptCacheExpectedExpiryAt: NOW_MS + 54 * MINUTE_MS,
+			});
+			expect(
+				estimate(
+					makeEntry("a", {
+						...USER_REVIEW_LIVE,
+						lastMainAgentConversationModelRequestDispatchObservation: manualCompactionAt(
+							NOW_MS - MINUTE_MS,
+							42_000,
+						),
+					}),
+					NOW_MS,
+				)?.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness,
+			).toBe(42_000);
+		});
+
+		it("不落入对话推进兜底：压缩 fork 的 SubagentStop 刚推进的高置信观测不会把来源改回普通倒计时", () => {
+			expect(
+				estimate(
+					makeEntry("a", {
+						...USER_REVIEW_LIVE,
+						lastMainAgentConversationModelRequestDispatchObservation: manualCompactionAt(NOW_MS - 2 * MINUTE_MS),
+						lastConversationProgressObservation: progressAt(NOW_MS - MINUTE_MS),
+					}),
+					NOW_MS,
+				)?.promptCacheWarmthAnchorSource,
+			).toBe("manual_compaction_replaced_main_conversation_without_follow_up_request");
+		});
+
+		it("压缩之后再来一次真实请求：恢复普通倒计时", () => {
+			expect(
+				estimate(
+					makeEntry("a", {
+						...USER_REVIEW_LIVE,
+						lastMainAgentConversationModelRequestDispatchObservation: {
+							observedAtMs: NOW_MS - MINUTE_MS,
+							evidenceKind: "user_prompt_submit_hook_event_accepted",
+						},
+					}),
+					NOW_MS,
+				)?.promptCacheWarmthAnchorSource,
+			).toBe("main_agent_conversation_model_request_dispatch_observation");
+		});
+
+		it("同进程缓存（Codex）：仍受同进程门约束", () => {
+			const compacted = {
+				...USER_REVIEW_LIVE,
+				agentId: "codex" as const,
+				lastMainAgentConversationModelRequestDispatchObservation: manualCompactionAt(NOW_MS - MINUTE_MS),
+			};
+			expect(
+				estimate(makeEntry("a", { ...compacted, agentProcessStartedAt: NOW_MS - 60 * MINUTE_MS }), NOW_MS),
+			).not.toBeNull();
+			expect(estimate(makeEntry("a", { ...compacted, agentProcessStartedAt: NOW_MS }), NOW_MS)).toBeNull();
+		});
 	});
 
 	it("服务端缓存（Claude）：runtime 重启后 facet 归零（none）照样在区内", () => {
@@ -323,6 +422,67 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 		expect(remainingTaskIds(sections)).toEqual([]);
 	});
 
+	// 2026-10-04 用户反馈：移入 Validation / Done 的任务即使缓存仍热，也不该留在 Cache warm，而是下放到 Recent
+	// 由它的规则决定显不显示。Done 本来就在分区前排除（上一条用例）；这里钉 Validation。
+	describe("Validation 列不进缓存倒计时区，下放到剩余区", () => {
+		const warmAnchor = {
+			...USER_REVIEW_EXITED,
+			lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - MINUTE_MS),
+			lastConversationProgressObservation: progressAt(NOW_MS - MINUTE_MS),
+		};
+
+		it("缓存仍热的 Validation 条目进 Recent；同样数据的 Review / In progress 条目进 Cache warm", () => {
+			const sections = assign([
+				inProject("ws-1", makeEntry("validation", { ...warmAnchor, columnId: "validation" })),
+				inProject("ws-1", makeEntry("review", { ...warmAnchor, columnId: "review" })),
+				inProject("ws-1", makeEntry("in-progress", { ...warmAnchor, columnId: "in_progress" })),
+			]);
+			expect(sections.promptCacheWarmAwaitingUserEntries.map(({ entry }) => entry.taskId).sort()).toEqual([
+				"in-progress",
+				"review",
+			]);
+			expect(remainingTaskIds(sections)).toEqual(["validation"]);
+		});
+
+		it("超出剩余区时间窗的 Validation 条目两区都不出现", () => {
+			const sections = assign([
+				inProject(
+					"ws-1",
+					makeEntry("validation-old", {
+						...USER_REVIEW_EXITED,
+						columnId: "validation",
+						lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - MINUTE_MS),
+						lastConversationProgressObservation: progressAt(NOW_MS - 8 * DAY_MS),
+					}),
+				),
+			]);
+			expect(sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+			expect(remainingTaskIds(sections)).toEqual([]);
+		});
+
+		it("Validation 列里 agent 正在干活的任务照常进 Running", () => {
+			const sections = assign([
+				inProject(
+					"ws-1",
+					makeEntry("validating", { ...AGENT_RUNNING, columnId: "validation", lastOutputAt: NOW_MS }),
+				),
+			]);
+			expect(sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["validating"]);
+		});
+
+		it("已置顶的 Validation 条目照常在 Pinned，但不进 Cache warm", () => {
+			const sections = assign([
+				inProject(
+					"ws-1",
+					makeEntry("pinned-validation", { ...warmAnchor, columnId: "validation", pinnedToTaskPinboardAt: 3 }),
+				),
+			]);
+			expect(sections.pinnedEntries.map(({ entry }) => entry.taskId)).toEqual(["pinned-validation"]);
+			expect(sections.promptCacheWarmAwaitingUserEntries).toEqual([]);
+			expect(remainingTaskIds(sections)).toEqual(["pinned-validation"]);
+		});
+	});
+
 	it("缓存倒计时区按失效时刻升序（最快失效的在最前），跨 agent TTL 也比较失效时刻", () => {
 		const sections = assign([
 			inProject(
@@ -371,6 +531,106 @@ describe("assignCrossProjectTaskSwitcherSections", () => {
 		]);
 		expect(sections.runningEntries.map(({ workspaceId }) => workspaceId)).toEqual(["ws-1"]);
 		expect(sections.promptCacheWarmAwaitingUserEntries.map(({ workspaceId }) => workspaceId)).toEqual(["ws-2"]);
+	});
+
+	// 2026-10-04 用户反馈：Running 区随 agent 动作不断重排闪烁。根因是按 lastOutputAt 倒序，而 spinner 每次
+	// 重绘都推进它。现在按本轮 agent 回合开始时刻升序：先进入的在前、后进入的在后。
+	describe("Running 区排序：按本轮 agent 回合开始时刻升序，不随输出抖动", () => {
+		function runningEntry(
+			workspaceId: string,
+			taskId: string,
+			overrides: Partial<RuntimeCrossProjectTaskSwitcherEntry>,
+		): CrossProjectTaskSwitcherEntryInProject {
+			return inProject(workspaceId, makeEntry(taskId, { ...AGENT_RUNNING, lastOutputAt: NOW_MS, ...overrides }));
+		}
+		function runningTaskIds(entriesInProjects: CrossProjectTaskSwitcherEntryInProject[]): string[] {
+			return assign(entriesInProjects).runningEntries.map(({ entry }) => entry.taskId);
+		}
+
+		it("先进入 agent 回合的在前", () => {
+			expect(
+				runningTaskIds([
+					runningEntry("ws-1", "late", { agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - MINUTE_MS) }),
+					runningEntry("ws-1", "early", {
+						agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - 3 * MINUTE_MS),
+					}),
+					runningEntry("ws-2", "middle", {
+						agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - 2 * MINUTE_MS),
+					}),
+				]),
+			).toEqual(["early", "middle", "late"]);
+		});
+
+		it("只打乱 lastOutputAt（spinner 重绘）时顺序不变", () => {
+			const turnStarts = { a: NOW_MS - 3 * MINUTE_MS, b: NOW_MS - 2 * MINUTE_MS, c: NOW_MS - MINUTE_MS };
+			const lastOutputAtPermutations = [
+				{ a: NOW_MS, b: NOW_MS - 1_000, c: NOW_MS - 2_000 },
+				{ a: NOW_MS - 2_000, b: NOW_MS, c: NOW_MS - 1_000 },
+				{ a: NOW_MS - 1_000, b: NOW_MS - 2_000, c: NOW_MS },
+			];
+			for (const lastOutputAtByTaskId of lastOutputAtPermutations) {
+				expect(
+					runningTaskIds(
+						(["c", "a", "b"] as const).map((taskId) =>
+							runningEntry("ws-1", taskId, {
+								lastOutputAt: lastOutputAtByTaskId[taskId],
+								agentResponseGenerationTurnStarted: turnStartedAt(turnStarts[taskId]),
+							}),
+						),
+					),
+				).toEqual(["a", "b", "c"]);
+			}
+		});
+
+		it("开始时刻相同按 (workspaceId, taskId) 兜底", () => {
+			const sameStart = { agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - MINUTE_MS) };
+			expect(
+				assign([
+					runningEntry("ws-2", "x", sameStart),
+					runningEntry("ws-1", "y", sameStart),
+					runningEntry("ws-1", "x", sameStart),
+				]).runningEntries.map(({ workspaceId, entry }) => `${workspaceId}:${entry.taskId}`),
+			).toEqual(["ws-1:x", "ws-1:y", "ws-2:x"]);
+		});
+
+		it("旧 runtime 没有回合开始事件：回落到 agent 进程启动时刻，两者都没有的排末尾", () => {
+			expect(
+				runningTaskIds([
+					runningEntry("ws-1", "no-timestamps", {}),
+					runningEntry("ws-1", "process-started", { agentProcessStartedAt: NOW_MS - 5 * MINUTE_MS }),
+					runningEntry("ws-1", "turn-started", {
+						agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - MINUTE_MS),
+					}),
+				]),
+			).toEqual(["process-started", "turn-started", "no-timestamps"]);
+		});
+
+		it("两个项目里同号的任务都在 Running：各按自己的开始时刻排", () => {
+			expect(
+				assign([
+					runningEntry("ws-1", "same-id", {
+						agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - MINUTE_MS),
+					}),
+					runningEntry("ws-2", "same-id", {
+						agentResponseGenerationTurnStarted: turnStartedAt(NOW_MS - 2 * MINUTE_MS),
+					}),
+				]).runningEntries.map(({ workspaceId }) => workspaceId),
+			).toEqual(["ws-2", "ws-1"]);
+		});
+	});
+
+	it("缓存倒计时区同一失效时刻按 (workspaceId, taskId) 兜底", () => {
+		const sameAnchor = {
+			...USER_REVIEW_EXITED,
+			lastMainAgentConversationModelRequestDispatchObservation: dispatchedAt(NOW_MS - MINUTE_MS),
+		};
+		expect(
+			assign([
+				inProject("ws-2", makeEntry("a", sameAnchor)),
+				inProject("ws-1", makeEntry("b", sameAnchor)),
+				inProject("ws-1", makeEntry("a", sameAnchor)),
+			]).promptCacheWarmAwaitingUserEntries.map(({ workspaceId, entry }) => `${workspaceId}:${entry.taskId}`),
+		).toEqual(["ws-1:a", "ws-1:b", "ws-2:a"]);
 	});
 
 	it("剩余区模式 ①：max(对话推进, 我最后打开, Description 编辑) 倒序，时间窗外的不显示", () => {

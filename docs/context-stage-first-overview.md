@@ -13,6 +13,10 @@ _Avoid_: global scope, workspace scope（workspace 已专指单个 project）
 单个 project、即单个 git repository 的层级（一个 `workspaceId`）。现有主看板一次只呈现一个 Project Scope。
 _Avoid_: repo view, workspace（歧义）
 
+**Task Creation Target Project（建卡目标项目）**：
+新卡要落到哪个 Project Scope。单项目范围里它恒为当前项目、建卡框不显示这个字段（与改动前一致）；Board Scope 里建卡框多一个「Project」选择器（`web-ui/src/components/task-creation-target-project-field.tsx`），默认取上下文项目（跨项目打开在途时是目标项目，否则当前项目；不跨次记忆「上次所用」，免得建错仓库，`EXPERIMENT_NODE`），同一次对话框里「Create more」保留所选。目标是其他项目时卡不进本页 board：同一个纯函数算卡、取那个项目的 runtime 预分配 id、经同一个 persist 端点落盘，不切项目；分支列表、默认 base ref、记住的终端模型都跟着目标项目走。入口：热键 `c`、跨项目切换面板顶部「Create task (c)」、Board Overview 页头「New task」。编辑其他项目的卡时同一字段显示为只读标签（卡不能换项目）。
+_Avoid_: destination repo, target workspace（workspace 已专指单个 project 的运行时作用域，这里说的是用户选的项目）
+
 **Stage（阶段）**：
 任务在看板流程中的列位置——`in_progress` / `review` / `validation` / `done`（`done` 是内部 `trash` 列的展示名）。
 _Avoid_: column, status
@@ -22,7 +26,7 @@ _Avoid_: column, status
 _Avoid_: dashboard, aggregate view, activity panel
 
 **Active In-Progress Task（活跃进行中任务）**：
-In-Progress 阶段中 `turnOwner=agent` 且距最近一次 PTY 输出（`lastOutputAt`）在 5 分钟内的 task。概览中高亮。
+In-Progress 阶段中 `turnOwner=agent` 且距最近一次 PTY 输出（`lastOutputAt`）在 5 分钟内的 task。概览中高亮。repo 组内按本轮 agent 回合开始时刻升序（`agentResponseGenerationTurnStarted`，与跨项目切换面板 Running 区同一比较器）；不按 `lastOutputAt` 排，否则 spinner 重绘会让组内顺序抖动。
 _Avoid_: running task, live task
 
 **Stale In-Progress Task（停滞进行中任务）**：

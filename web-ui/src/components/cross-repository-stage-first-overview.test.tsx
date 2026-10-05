@@ -114,6 +114,42 @@ describe("CrossRepositoryStageFirstOverview", () => {
 		expect(host.textContent).toContain("Stale");
 	});
 
+	// 与跨项目切换面板 Running 区同一缺陷、同一比较器：spinner 重绘推进 lastOutputAt，不该让组内重排。
+	it("Active 组按本轮 agent 回合开始时刻升序，不随 lastOutputAt 变化", () => {
+		function activeTask(taskId: string, turnStartedAgoMs: number, lastOutputAgoMs: number) {
+			return detail({
+				taskId,
+				turnOwner: "agent",
+				liveness: "live",
+				lastOutputAt: now - lastOutputAgoMs,
+				agentResponseGenerationTurnStarted: { startedAt: now - turnStartedAgoMs, turnSequence: 1 },
+			});
+		}
+		function renderedActiveTaskIds(tasks: RuntimeInProgressTaskDetail[]): string[] {
+			const host = render(
+				<CrossRepositoryStageFirstOverview
+					projects={[project({ id: "alpha", inProgressTaskDetails: tasks })]}
+					onOpenTask={vi.fn()}
+				/>,
+			);
+			const taskIds = [...host.querySelectorAll<HTMLElement>('[data-testid^="overview-task-"]')].map((row) =>
+				(row.dataset.testid ?? "").replace("overview-task-", ""),
+			);
+			act(() => root?.unmount());
+			container?.remove();
+			return taskIds;
+		}
+
+		expect(renderedActiveTaskIds([activeTask("later", 60_000, 500), activeTask("earlier", 120_000, 3_000)])).toEqual([
+			"earlier",
+			"later",
+		]);
+		expect(renderedActiveTaskIds([activeTask("later", 60_000, 3_000), activeTask("earlier", 120_000, 500)])).toEqual([
+			"earlier",
+			"later",
+		]);
+	});
+
 	it("Review/Validation/Done 显示跨-repo 总计数（rawColumnTaskCounts）", () => {
 		const host = render(<CrossRepositoryStageFirstOverview projects={PROJECTS} onOpenTask={vi.fn()} />);
 		// Review 总计 = 2 + 1 = 3

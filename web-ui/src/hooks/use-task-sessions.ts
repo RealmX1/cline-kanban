@@ -7,9 +7,6 @@ import { useCallback, useRef } from "react";
 import { notifyError } from "@/components/app-toaster";
 import { selectNewestTaskSessionSummary } from "@/hooks/home-sidebar-agent-panel-session-summary";
 import { type ClineChatActionResult, useClineChatRuntimeActions } from "@/hooks/use-cline-chat-runtime-actions";
-import { loadDetailTerminalPanelWidth } from "@/resize/detail-terminal-panel-width";
-import { MIN_DETAIL_DIFF_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
-import { clampPanelWidthToWindow, estimateTaskAgentTerminalGeometry } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeAgentId,
@@ -22,8 +19,8 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "@/runtime/types";
 import { trackTaskResumedFromTrash } from "@/telemetry/events";
+import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
 import { getTerminalController } from "@/terminal/terminal-controller-registry";
-import { getTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard } from "@/types";
 
@@ -222,32 +219,9 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			try {
 				const kickoffPrompt = options?.resumeFromTrash ? "" : task.prompt.trim();
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
-				// When the task terminal has never been mounted, fall back to the
-				// persisted, user-resizable detail terminal panel width so the PTY
-				// spawns at the width the agent TUI will actually be viewed at — not
-				// a fixed 60-column default. A TUI hard-wraps its history at startup
-				// width, so spawning at the wrong width can't be repaired by a later
-				// resize. Once mounted, the measured per-task geometry takes priority.
-				//
-				// The persisted width is clamped to [320, 1400] but not to the
-				// CURRENT window: a width persisted in a wide window can exceed what
-				// a narrower window can display (the detail view renders the agent
-				// panel at min(persisted, container − MIN_DETAIL_DIFF_PANEL_WIDTH_PX)).
-				// Upper-bound it by the window before deriving columns so a
-				// background-started task in a narrow window doesn't spawn at a column
-				// count its visible width can never show. `window.innerWidth` is a
-				// loose stand-in for the (still unmounted) detail container width;
-				// clampPanelWidthToWindow falls back to the persisted width when the
-				// window width is unavailable, so this never narrows below current
-				// behavior.
-				const windowDisplayableTerminalPanelWidth = clampPanelWidthToWindow(
-					loadDetailTerminalPanelWidth(),
-					MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
-					window.innerWidth,
-				);
-				const geometry =
-					getTerminalGeometry(task.id) ??
-					estimateTaskAgentTerminalGeometry(windowDisplayableTerminalPanelWidth, window.innerHeight);
+				// 估算口径（实测几何优先、否则按持久化面板宽度并以窗口宽度为上界）见该函数注释；经 taskCardAction
+				// 起会话的路径共用同一份。
+				const geometry = resolveAgentTerminalGeometryForTaskSessionSpawn(task.id);
 				const payload = await trpcClient.runtime.startTaskSession.mutate({
 					taskId: task.id,
 					prompt: kickoffPrompt,
@@ -331,16 +305,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			}
 			const taskConversationSessionId = `task-conversation-session-${crypto.randomUUID()}`;
 			try {
-				const geometry =
-					getTerminalGeometry(taskConversationSessionId) ??
-					estimateTaskAgentTerminalGeometry(
-						clampPanelWidthToWindow(
-							loadDetailTerminalPanelWidth(),
-							MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
-							window.innerWidth,
-						),
-						window.innerHeight,
-					);
+				const geometry = resolveAgentTerminalGeometryForTaskSessionSpawn(taskConversationSessionId);
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
 				const payload = await trpcClient.runtime.startTaskSession.mutate({
 					taskId: taskConversationSessionId,

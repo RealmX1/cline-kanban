@@ -1346,6 +1346,20 @@ const claudeAdapter: AgentSessionAdapter = {
 					SubagentStop: [
 						{ hooks: [{ type: "command", command: buildHookCommand("activity", { source: "claude" }) }] },
 					],
+					// 压缩完成：manual / auto 都收（不带 matcher），trigger 由 `kanban hooks` 从 stdin 派生。
+					// 刻意不用 SessionStart(source=compact)——它被映射为身份事件，且语义是「会话（重新）开始」。
+					PostCompact: [
+						{
+							hooks: [
+								{
+									type: "command",
+									command: buildHookCommand("main_agent_conversation_context_compaction_completed", {
+										source: "claude",
+									}),
+								},
+							],
+						},
+					],
 					PreToolUse: [
 						{
 							// Stage 5：Claude 原生「计划待批 / 澄清提问」经它自己的工具触发（ExitPlanMode /

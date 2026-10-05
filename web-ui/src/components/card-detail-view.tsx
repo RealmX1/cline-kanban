@@ -1723,6 +1723,7 @@ export function CardDetailView({
 							onRequestPinToTaskPinboard={onRequestPinToTaskPinboard}
 							onUnpinFromTaskPinboard={onUnpinFromTaskPinboard}
 							onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
+							onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 							moveToTrashLoadingById={moveToTrashLoadingById}
 							panelWidth="100%"
 							defaultClineModelId={runtimeConfig?.clineProviderSettings?.modelId ?? null}

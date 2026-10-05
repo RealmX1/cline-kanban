@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TaskEditorDialog } from "@/components/task-editor-dialog";
+import { readSavedTaskEditDraft, saveTaskEditDraft } from "@/hooks/task-edit-drafts";
 import { useTaskEditor } from "@/hooks/use-task-editor";
 import { resetTaskEditDraftStoreForTests } from "@/runtime/task-edit-draft-store";
 import type {
@@ -18,11 +19,17 @@ import type {
 	WorkspaceTaskEditDraftsSnapshot,
 } from "@/runtime/types";
 import { readEffectiveUserInterfacePreferenceValue } from "@/runtime/user-interface-preferences-shared-across-browser-origins-store";
+import { applyPendingTaskCardCommandBoardOverlay } from "@/state/pending-task-card-command-board-overlay";
 import {
 	discardAllPendingWebUiBoardMutationInitiatorRecords,
 	readPendingWebUiBoardMutationInitiatorForTaskCardAspect,
 } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import { LocalStorageKey } from "@/storage/local-storage-store";
+import {
+	resetPendingTaskCardCommandBoardOverlayStore,
+	usePendingTaskCardCommandBoardOverlayEntries,
+} from "@/stores/pending-task-card-command-board-overlay-store";
+import { clearAllTaskCardActionCommandsInFlight } from "@/stores/task-card-action-commands-in-flight-store";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
 /**
@@ -185,8 +192,81 @@ vi.mock("@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-c
 
 // cf427：建卡同时向 runtime 发起「启动 agent 前先落盘」。这里只记录调用，落盘与等待语义在该模块自己的测试里。
 const beginPersistingNewBacklogTaskCardsMock = vi.hoisted(() => vi.fn());
+const waitForNewTaskCardPersistedByRuntimeMock = vi.hoisted(() => vi.fn(async () => ({ ok: true as const })));
 vi.mock("@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start", () => ({
 	beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: beginPersistingNewBacklogTaskCardsMock,
+	waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart: waitForNewTaskCardPersistedByRuntimeMock,
+}));
+
+// 行内改名、编辑器保存走 taskCardAction.updateTaskCardFieldValues：回一份「服务端已按 patch 写下」的动作后快照
+//（null = 清除），广播回灌不在这里模拟——断言看 harness 的 displayedBoard（叠了 overlay）。
+const updateTaskCardFieldValuesInWorkspaceMock = vi.hoisted(() =>
+	vi.fn(
+		async (
+			_workspaceId: string,
+			request: {
+				taskId: string;
+				taskCardFieldUpdate: { taskCardFieldValuePatch?: Record<string, unknown> };
+			},
+		) => ({
+			taskCardSnapshotAfterAction: {
+				taskCard: {
+					id: request.taskId,
+					title: "",
+					prompt: "",
+					startInPlanMode: false,
+					baseRef: "main",
+					createdAt: 0,
+					updatedAt: 0,
+					...Object.fromEntries(
+						Object.entries(request.taskCardFieldUpdate.taskCardFieldValuePatch ?? {}).map(
+							([fieldName, fieldValue]) => [fieldName, fieldValue ?? undefined],
+						),
+					),
+				},
+				boardColumnIdContainingTaskCard: "backlog",
+				taskSessionSummaryLiveInRuntimeProcessMemory: null,
+				taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+			},
+		}),
+	),
+);
+const startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock = vi.hoisted(() =>
+	vi.fn(async (_workspaceId: string, request: { taskId: string }) => ({
+		taskCardSnapshotAfterAction: {
+			taskCard: {
+				id: request.taskId,
+				title: "",
+				prompt: "",
+				startInPlanMode: false,
+				baseRef: "main",
+				createdAt: 0,
+				updatedAt: 0,
+			},
+			boardColumnIdContainingTaskCard: "in_progress",
+			taskSessionSummaryLiveInRuntimeProcessMemory: null,
+			taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+		},
+	})),
+);
+vi.mock("@/runtime/task-card-action-query", () => ({
+	updateTaskCardFieldValuesInWorkspace: updateTaskCardFieldValuesInWorkspaceMock,
+	startTaskCardAgentSessionMovingItIntoInProgressInWorkspace:
+		startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock,
+}));
+
+// 编辑其他项目的卡时按那个项目只读 workspace.getState 拿分支列表。
+const fetchWorkspaceStateMock = vi.hoisted(() =>
+	vi.fn(async (_workspaceId: string) => ({
+		git: {
+			currentBranch: "main",
+			defaultBranch: "main",
+			branches: [{ name: "main" }, { name: "release" }],
+		},
+	})),
+);
+vi.mock("@/runtime/workspace-state-query", () => ({
+	fetchWorkspaceState: fetchWorkspaceStateMock,
 }));
 
 vi.mock("@/runtime/task-name-suggestion-query", () => ({
@@ -231,6 +311,8 @@ function createTaskImage(id: string, data: string, overrides: Partial<TaskImage>
 
 interface HookSnapshot {
 	board: BoardData;
+	// 与 App 同算法：会被保存的 board 叠上在途卡片命令的 overlay（服务端命令的结果在广播回灌前只在这里可见）。
+	displayedBoard: BoardData;
 	isInlineTaskCreateOpen: boolean;
 	newTaskPrompt: string;
 	newTaskImages: TaskImage[];
@@ -259,6 +341,16 @@ interface HookSnapshot {
 	setNewTaskBranchRef: (value: string) => void;
 	setNewTaskWorktreeMode: (value: RuntimeTaskWorktreeMode) => void;
 	handleOpenEditTask: (task: BoardCard) => void;
+	handleOpenEditTaskCardInOtherProject: (workspaceId: string, task: BoardCard) => void;
+	handleOpenCreateTaskInBoardScope: (defaultTargetWorkspaceId: string) => void;
+	handleSelectTaskCreationTargetProject: (targetWorkspaceId: string) => void;
+	taskCreationTargetWorkspaceId: string | null;
+	taskCreationTargetOtherProjectWorkspaceId: string | null;
+	createTaskBranchOptionsForCreationTarget: Array<{ value: string; label: string }>;
+	handleCreateAndStartTaskInOtherProject: () => string | null;
+	editTaskWorkspaceId: string | null;
+	editTaskBranchOptionsForEditTarget: Array<{ value: string; label: string }>;
+	editTaskBranchRef: string;
 	handleCancelEditTask: () => void;
 	handleSaveEditedTask: () => string | null;
 	handleSaveAndStartEditedTask: () => void;
@@ -314,6 +406,8 @@ function HookHarness({
 	isNewTaskStartInPlanModeDefaultLoaded?: boolean;
 }): null {
 	const [board, setBoard] = useState<BoardData>(initialBoard);
+	const pendingTaskCardCommandBoardOverlayEntries = usePendingTaskCardCommandBoardOverlayEntries(currentProjectId);
+	const displayedBoard = applyPendingTaskCardCommandBoardOverlay(board, pendingTaskCardCommandBoardOverlayEntries);
 	const [, setSelectedTaskId] = useState<string | null>(null);
 	const editor = useTaskEditor({
 		board,
@@ -335,6 +429,7 @@ function HookHarness({
 	useEffect(() => {
 		onSnapshot({
 			board,
+			displayedBoard,
 			isInlineTaskCreateOpen: editor.isInlineTaskCreateOpen,
 			newTaskPrompt: editor.newTaskPrompt,
 			newTaskImages: editor.newTaskImages,
@@ -363,6 +458,16 @@ function HookHarness({
 			setNewTaskBranchRef: editor.setNewTaskBranchRef,
 			setNewTaskWorktreeMode: editor.setNewTaskWorktreeMode,
 			handleOpenEditTask: editor.handleOpenEditTask,
+			handleOpenEditTaskCardInOtherProject: editor.handleOpenEditTaskCardInOtherProject,
+			handleOpenCreateTaskInBoardScope: editor.handleOpenCreateTaskInBoardScope,
+			handleSelectTaskCreationTargetProject: editor.handleSelectTaskCreationTargetProject,
+			taskCreationTargetWorkspaceId: editor.taskCreationTargetWorkspaceId,
+			taskCreationTargetOtherProjectWorkspaceId: editor.taskCreationTargetOtherProjectWorkspaceId,
+			createTaskBranchOptionsForCreationTarget: editor.createTaskBranchOptionsForCreationTarget,
+			handleCreateAndStartTaskInOtherProject: editor.handleCreateAndStartTaskInOtherProject,
+			editTaskWorkspaceId: editor.editTaskWorkspaceId,
+			editTaskBranchOptionsForEditTarget: editor.editTaskBranchOptionsForEditTarget,
+			editTaskBranchRef: editor.editTaskBranchRef,
 			handleCancelEditTask: editor.handleCancelEditTask,
 			handleSaveEditedTask: editor.handleSaveEditedTask,
 			handleSaveAndStartEditedTask: editor.handleSaveAndStartEditedTask,
@@ -381,6 +486,17 @@ function HookHarness({
 		});
 	}, [
 		board,
+		displayedBoard,
+		editor.handleOpenEditTaskCardInOtherProject,
+		editor.handleOpenCreateTaskInBoardScope,
+		editor.handleSelectTaskCreationTargetProject,
+		editor.taskCreationTargetWorkspaceId,
+		editor.taskCreationTargetOtherProjectWorkspaceId,
+		editor.createTaskBranchOptionsForCreationTarget,
+		editor.handleCreateAndStartTaskInOtherProject,
+		editor.editTaskWorkspaceId,
+		editor.editTaskBranchOptionsForEditTarget,
+		editor.editTaskBranchRef,
 		editor.handleCreateTask,
 		editor.handleSaveTaskTitle,
 		editor.handleCreateTasks,
@@ -442,6 +558,9 @@ describe("useTaskEditor", () => {
 		runtimeAllocatedTaskIdPrefetchPoolStandIn.takeResultStatusOverride = null;
 		runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds = [];
 		discardAllPendingWebUiBoardMutationInitiatorRecords();
+		updateTaskCardFieldValuesInWorkspaceMock.mockClear();
+		resetPendingTaskCardCommandBoardOverlayStore();
+		clearAllTaskCardActionCommandsInFlight();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -615,12 +734,18 @@ describe("useTaskEditor", () => {
 				readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId, "task_card_field_values"),
 			).toBeNull();
 
+			// 用户改名走 taskCardAction：发起方随命令交给服务端（账本在服务端记），不进 saveState 的待配登记。
 			await act(async () => {
 				requireSnapshot(captured.current).handleSaveTaskTitle(createdTaskId, "Renamed by the user");
 			});
-			expect(readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId, "task_card_field_values")).toBe(
-				"web_ui_user_gesture",
-			);
+			expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith(expect.any(String), {
+				taskId: createdTaskId,
+				taskCardFieldUpdate: {
+					taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+					taskCardFieldValuePatch: { title: "Renamed by the user" },
+				},
+				boardMutationInitiator: "web_ui_user_gesture",
+			});
 		});
 	});
 
@@ -721,7 +846,12 @@ describe("useTaskEditor", () => {
 			});
 		});
 
-		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Renamed by hand");
+		// 改名已发给服务端（广播回灌前只在 overlay 里）：回填看到的是叠了 overlay 的标题，让路，不顶掉用户的名字。
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith(
+			expect.any(String),
+			expect.objectContaining({ taskId: createdTaskId }),
+		);
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).not.toBe("Fix the SSO redirect");
 	});
 
 	it("defaults new tasks to plan mode from the runtime setting", async () => {
@@ -791,7 +921,10 @@ describe("useTaskEditor", () => {
 		await act(async () => {
 			requireSnapshot(latestSnapshot).handleSaveEditedTask();
 		});
-		const savedTask = requireSnapshot(latestSnapshot).board.columns[0]?.cards.find((card) => card.id === taskId);
+		// 保存走 taskCardAction：广播回灌前，结果在叠了 overlay 的显示看板上。
+		const savedTask = requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards.find(
+			(card) => card.id === taskId,
+		);
 		expect(savedTask?.taskConversationMode).toBe("operational");
 	});
 
@@ -907,7 +1040,58 @@ describe("useTaskEditor", () => {
 
 		expect(savedTaskId).toBe("task-1");
 		expect(requireSnapshot(latestSnapshot).editingTaskId).toBeNull();
-		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Updated prompt");
+		// 只发改过的字段（标题不发：服务端保留最新标题）；会被保存的 board 不动，显示看板立刻是新值。
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith("project-1", {
+			taskId: "task-1",
+			taskCardFieldUpdate: {
+				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+				taskCardFieldValuePatch: expect.objectContaining({ prompt: "Updated prompt" }),
+			},
+			boardMutationInitiator: "web_ui_user_gesture",
+		});
+		const sentPatch =
+			updateTaskCardFieldValuesInWorkspaceMock.mock.calls[0]?.[1].taskCardFieldUpdate.taskCardFieldValuePatch;
+		expect(sentPatch).not.toHaveProperty("title");
+		expect(sentPatch).not.toHaveProperty("baseRef");
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Initial prompt");
+		expect(requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0]?.prompt).toBe("Updated prompt");
+	});
+
+	it("keeps the submitted edits as a draft and does not start when the runtime rejects the save", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const queueTaskStartAfterEdit = vi.fn();
+		const task = createTask("task-1", "Initial prompt", 1);
+		updateTaskCardFieldValuesInWorkspaceMock.mockImplementationOnce(async () => {
+			throw new Error('Task "task-1" was not found');
+		});
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([task])}
+					queueTaskStartAfterEdit={queueTaskStartAfterEdit}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskPrompt("Edits that must not be lost");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveAndStartEditedTask();
+		});
+
+		expect(queueTaskStartAfterEdit).not.toHaveBeenCalled();
+		expect(requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0]?.prompt).toBe("Initial prompt");
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Edits that must not be lost");
 	});
 
 	it("saves edited worktree mode and agent session initialization", async () => {
@@ -954,12 +1138,12 @@ describe("useTaskEditor", () => {
 			requireSnapshot(latestSnapshot).handleSaveEditedTask();
 		});
 
-		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]).toMatchObject({
+		expect(requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0]).toMatchObject({
 			worktreeMode: "inplace",
 			taskAgentSessionInitialization: updatedInitialization,
 		});
 
-		const updatedTask = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		const updatedTask = requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0];
 		if (!updatedTask) {
 			throw new Error("Expected the updated backlog task.");
 		}
@@ -972,8 +1156,17 @@ describe("useTaskEditor", () => {
 		});
 
 		expect(
-			requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.taskAgentSessionInitialization,
+			requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0]?.taskAgentSessionInitialization,
 		).toBeUndefined();
+		// 清掉可选字段发 null（服务端三态 patch 的「清除」）。
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenLastCalledWith(
+			"project-1",
+			expect.objectContaining({
+				taskCardFieldUpdate: expect.objectContaining({
+					taskCardFieldValuePatch: { taskAgentSessionInitialization: null },
+				}),
+			}),
+		);
 	});
 
 	it("falls back to an inplace task when a legacy edit draft has no worktree mode", async () => {
@@ -1174,7 +1367,7 @@ describe("useTaskEditor", () => {
 		});
 
 		expect(window.localStorage.getItem(LocalStorageKey.TaskEditDrafts)).toBeNull();
-		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Saved draft prompt");
+		expect(requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0]?.prompt).toBe("Saved draft prompt");
 	});
 
 	it("clears the autosaved edit draft after canceling", async () => {
@@ -1459,12 +1652,254 @@ describe("useTaskEditor", () => {
 			latestSnapshot?.setEditTaskPrompt("Updated prompt");
 		});
 
+		// 保存命令在途时还不能排队启动：服务端启动读的是它自己板上的卡，抢先启动会拿旧 prompt 起会话。
+		let resolveSaveCommand: () => void = () => {};
+		updateTaskCardFieldValuesInWorkspaceMock.mockImplementationOnce(async () => {
+			await new Promise<void>((resolve) => {
+				resolveSaveCommand = resolve;
+			});
+			return {
+				taskCardSnapshotAfterAction: {
+					taskCard: { ...task, prompt: "Updated prompt" },
+					boardColumnIdContainingTaskCard: "backlog",
+					taskSessionSummaryLiveInRuntimeProcessMemory: null,
+					taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+				},
+			};
+		});
 		await act(async () => {
 			latestSnapshot?.handleSaveAndStartEditedTask();
 		});
+		expect(queueTaskStartAfterEdit).not.toHaveBeenCalled();
+		expect(requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0]?.prompt).toBe("Updated prompt");
 
+		await act(async () => {
+			resolveSaveCommand();
+		});
 		expect(queueTaskStartAfterEdit).toHaveBeenCalledWith("task-1");
-		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.prompt).toBe("Updated prompt");
+	});
+
+	it("编辑其他项目的 backlog 卡：草稿、分支、保存、保存并启动都作用于那个项目，不叠当前项目的 overlay", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const queueTaskStartAfterEdit = vi.fn();
+		// 当前项目的 board 里有一张同号的卡：跨项目撞号时不得读到它。
+		const currentProjectTaskWithSameId = createTask("task-1", "Current project prompt", 1);
+		const otherProjectTask = createTask("task-1", "Other project prompt", 2, { baseRef: "release" });
+		startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock.mockClear();
+		fetchWorkspaceStateMock.mockClear();
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([currentProjectTaskWithSameId])}
+					queueTaskStartAfterEdit={queueTaskStartAfterEdit}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTaskCardInOtherProject("project-b", otherProjectTask);
+		});
+
+		expect(requireSnapshot(latestSnapshot).editTaskWorkspaceId).toBe("project-b");
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Other project prompt");
+		expect(fetchWorkspaceStateMock).toHaveBeenCalledWith("project-b");
+		// 分支列表按那个项目取；卡上的 base ref 不被当前项目的默认分支覆盖。
+		expect(requireSnapshot(latestSnapshot).editTaskBranchOptionsForEditTarget.map((option) => option.value)).toEqual([
+			"main",
+			"release",
+		]);
+		expect(requireSnapshot(latestSnapshot).editTaskBranchRef).toBe("release");
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskPrompt("Edited in place from All projects");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveAndStartEditedTask();
+		});
+
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith("project-b", {
+			taskId: "task-1",
+			taskCardFieldUpdate: {
+				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+				taskCardFieldValuePatch: expect.objectContaining({ prompt: "Edited in place from All projects" }),
+			},
+			boardMutationInitiator: "web_ui_user_gesture",
+		});
+		// 当前项目同号的卡不受影响（没有 overlay 叠到它身上）。
+		expect(requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0]?.prompt).toBe(
+			"Current project prompt",
+		);
+		// 保存结算后直接对那个项目发启动命令，不进当前项目的启动队列。
+		expect(queueTaskStartAfterEdit).not.toHaveBeenCalled();
+		expect(startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock).toHaveBeenCalledWith(
+			"project-b",
+			expect.objectContaining({ taskId: "task-1" }),
+		);
+		expect(requireSnapshot(latestSnapshot).editTaskWorkspaceId).toBe("project-1");
+	});
+
+	it("编辑其他项目的 backlog 卡：当前项目 board 里没有同号卡时编辑框保持打开，不按当前项目清草稿，保存发给目标项目", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		// 当前项目只有一张不相干的卡；被编辑的卡只存在于 project-b（跨项目 taskId 通常不重号）。
+		const unrelatedCurrentProjectTask = createTask("task-only-in-current-project", "Current project prompt", 1);
+		const otherProjectTask = createTask("task-only-in-project-b", "Other project prompt", 2);
+		// 当前项目名下一份同号草稿：「卡不在本页 backlog 就关编辑器」若按当前项目清草稿，这份会被误删。
+		saveTaskEditDraft("project-1", {
+			taskId: otherProjectTask.id,
+			prompt: "Draft recorded under the current project",
+			images: [],
+			startInPlanMode: false,
+			autoReviewEnabled: false,
+			autoReviewMode: "commit",
+			branchRef: "main",
+			savedAt: 1,
+		});
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([unrelatedCurrentProjectTask])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTaskCardInOtherProject("project-b", otherProjectTask);
+		});
+
+		// 编辑框一打开就被关掉正是要钉住的回归：按编辑目标判定，那张卡（快照）就在 backlog。
+		expect(requireSnapshot(latestSnapshot).editingTaskId).toBe("task-only-in-project-b");
+		expect(requireSnapshot(latestSnapshot).editTaskWorkspaceId).toBe("project-b");
+		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Other project prompt");
+		expect(readSavedTaskEditDraft("project-1", otherProjectTask.id)?.prompt).toBe(
+			"Draft recorded under the current project",
+		);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskPrompt("Edited in place from All projects");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveEditedTask();
+		});
+
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith("project-b", {
+			taskId: "task-only-in-project-b",
+			taskCardFieldUpdate: {
+				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+				taskCardFieldValuePatch: expect.objectContaining({ prompt: "Edited in place from All projects" }),
+			},
+			boardMutationInitiator: "web_ui_user_gesture",
+		});
+		expect(readSavedTaskEditDraft("project-1", otherProjectTask.id)?.prompt).toBe(
+			"Draft recorded under the current project",
+		);
+	});
+
+	it("Board Scope 往其他项目建卡：id 取目标项目的池、经同一个 persist 端点落到目标项目，本页 board 不动", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		fetchWorkspaceStateMock.mockClear();
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTaskInBoardScope("project-b");
+		});
+
+		expect(requireSnapshot(latestSnapshot).isInlineTaskCreateOpen).toBe(true);
+		expect(requireSnapshot(latestSnapshot).taskCreationTargetOtherProjectWorkspaceId).toBe("project-b");
+		expect(runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds).toContain("project-b");
+		// 分支选项按目标项目取。
+		expect(fetchWorkspaceStateMock).toHaveBeenCalledWith("project-b");
+		expect(
+			requireSnapshot(latestSnapshot).createTaskBranchOptionsForCreationTarget.map((option) => option.value),
+		).toEqual(["main", "release"]);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Created from All projects");
+		});
+		let createdTaskId: string | null = null;
+		await act(async () => {
+			createdTaskId = requireSnapshot(latestSnapshot).handleCreateTask({ taskNameOverride: "Named task" });
+		});
+
+		expect(createdTaskId).not.toBeNull();
+		expect(beginPersistingNewBacklogTaskCardsMock).toHaveBeenCalledWith({
+			workspaceId: "project-b",
+			newBacklogTaskCardsCreatedFromWebUi: [
+				expect.objectContaining({ id: createdTaskId, prompt: "Created from All projects", baseRef: "main" }),
+			],
+			boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
+		});
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards).toEqual([]);
+		// 关框后不再钉住目标。
+		expect(requireSnapshot(latestSnapshot).isInlineTaskCreateOpen).toBe(false);
+		expect(requireSnapshot(latestSnapshot).taskCreationTargetWorkspaceId).toBe("project-1");
+	});
+
+	it("Board Scope 选回当前项目时走本页建卡路径；往其他项目「建卡并启动」等落盘确认后对目标项目发启动命令", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock.mockClear();
+		waitForNewTaskCardPersistedByRuntimeMock.mockClear();
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTaskInBoardScope("project-b");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSelectTaskCreationTargetProject("project-1");
+		});
+		expect(requireSnapshot(latestSnapshot).taskCreationTargetOtherProjectWorkspaceId).toBeNull();
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Lands on this project's board");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask({ keepDialogOpen: true });
+		});
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards.map((card) => card.prompt)).toEqual([
+			"Lands on this project's board",
+		]);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSelectTaskCreationTargetProject("project-b");
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskPrompt("Start me in project B");
+		});
+		let createdTaskId: string | null = null;
+		await act(async () => {
+			createdTaskId = requireSnapshot(latestSnapshot).handleCreateAndStartTaskInOtherProject();
+		});
+
+		expect(waitForNewTaskCardPersistedByRuntimeMock).toHaveBeenCalledWith({
+			workspaceId: "project-b",
+			taskCard: expect.objectContaining({ id: createdTaskId }),
+		});
+		expect(startTaskCardAgentSessionMovingItIntoInProgressInWorkspaceMock).toHaveBeenCalledWith(
+			"project-b",
+			expect.objectContaining({ taskId: createdTaskId }),
+		);
+		// 本页 board 只有选回当前项目时建的那张。
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards).toHaveLength(1);
 	});
 
 	it("keeps the create dialog open when requested after creating a task", async () => {
@@ -1624,6 +2059,56 @@ describe("useTaskEditor", () => {
 		});
 		await act(async () => {});
 
+		expect(requireSnapshot(latestSnapshot).newTaskTerminalAgentModelOverrideSettings).toEqual({
+			agentId: "cursor",
+			modelId: "auto",
+		});
+	});
+
+	it("Board Scope 往其他项目建卡时挑的终端模型记在目标项目名下，不污染当前项目", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const readRememberedTerminalAgentModelSelectionsByProjectAndAgentKey = () =>
+			readEffectiveUserInterfacePreferenceValue("taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey") ?? {};
+		const creationTargetOtherProjectCursorSelectionKey = JSON.stringify(["project-b", "cursor"]);
+		const currentProjectCursorSelectionKey = JSON.stringify(["project-1", "cursor"]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					selectedAgentId="cursor"
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTaskInBoardScope("project-b");
+		});
+		expect(requireSnapshot(latestSnapshot).taskCreationTargetWorkspaceId).toBe("project-b");
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setNewTaskTerminalAgentModelOverrideSettings({
+				agentId: "cursor",
+				modelId: "auto",
+			});
+		});
+
+		const rememberedSelections = readRememberedTerminalAgentModelSelectionsByProjectAndAgentKey();
+		expect(rememberedSelections[creationTargetOtherProjectCursorSelectionKey]).toBe("auto");
+		expect(rememberedSelections[currentProjectCursorSelectionKey]).toBeUndefined();
+
+		// 改回在当前项目建卡：读不到在其他项目挑的模型；再往目标项目建卡：记住的模型回填。
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+		});
+		expect(requireSnapshot(latestSnapshot).taskCreationTargetWorkspaceId).toBe("project-1");
+		expect(requireSnapshot(latestSnapshot).newTaskTerminalAgentModelOverrideSettings).toBeUndefined();
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTaskInBoardScope("project-b");
+		});
 		expect(requireSnapshot(latestSnapshot).newTaskTerminalAgentModelOverrideSettings).toEqual({
 			agentId: "cursor",
 			modelId: "auto",

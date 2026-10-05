@@ -144,4 +144,56 @@ describe("classifyHookEventAsMainAgentConversationModelRequestDispatch", () => {
 			).toBeNull();
 		}
 	});
+
+	it("压缩 fork 的 SubagentStop（agent_type 为空、带 agent_id）不算", () => {
+		expect(
+			classify({
+				event: "activity",
+				normalizedHookEventName: "subagentstop",
+				hookEventFiredInsideSubagentContext: true,
+				sessionFacetsBeforeTransition: reviewTurn,
+			}),
+		).toBeNull();
+	});
+
+	describe("压缩完成（PostCompact）", () => {
+		const MANUAL =
+			"manual_compact_command_completed_main_conversation_prompt_cache_replaced_without_follow_up_request";
+		const AUTOMATIC = "automatic_context_compaction_completed_continuation_model_request_follows_immediately";
+		const compaction = (
+			sessionFacetsBeforeTransition: Parameters<typeof classify>[0]["sessionFacetsBeforeTransition"],
+			trigger?: "manual_compact_command" | "automatic_context_window_compaction",
+			hookEventFiredInsideSubagentContext = false,
+		) =>
+			classify({
+				event: "main_agent_conversation_context_compaction_completed",
+				normalizedHookEventName: "postcompact",
+				hookEventFiredInsideSubagentContext,
+				sessionFacetsBeforeTransition,
+				...(trigger ? { mainAgentConversationContextCompactionTriggerReportedByHarness: trigger } : {}),
+			});
+
+		it("手动压缩在用户回合（review / needs_input）或无会话 facet 下都记为替换类：不受用户回合冻结约束", () => {
+			expect(compaction(reviewTurn, "manual_compact_command")).toBe(MANUAL);
+			expect(
+				compaction({ turnOwner: "user", liveness: "live", userTurnKind: "needs_input" }, "manual_compact_command"),
+			).toBe(MANUAL);
+			expect(compaction({ turnOwner: null, liveness: "none", userTurnKind: null }, "manual_compact_command")).toBe(
+				MANUAL,
+			);
+		});
+
+		it("自动压缩记为续写类（续写请求紧随其后）", () => {
+			expect(compaction(agentTurn, "automatic_context_window_compaction")).toBe(AUTOMATIC);
+		});
+
+		it("trigger 缺失时按回合归属判：agent 回合 → 续写类，否则 → 替换类", () => {
+			expect(compaction(agentTurn)).toBe(AUTOMATIC);
+			expect(compaction(reviewTurn)).toBe(MANUAL);
+		});
+
+		it("子代理内的压缩不算", () => {
+			expect(compaction(agentTurn, "automatic_context_window_compaction", true)).toBeNull();
+		});
+	});
 });
