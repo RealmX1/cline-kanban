@@ -19,7 +19,10 @@ import { computeRequiredAcknowledgementsForColumn } from "../deployment/post-dep
 //    resolvePostDeployVerificationStuckDoneRecovery 同一安全边界）。
 //  - verification-confirm --token：token 必须与在途记录一致，--ack 必须与记录的 acks 完全一致。
 //  - verification-confirm --force：--ack 必须与记录的 acks 完全一致（force 开关由调用方另行校验）。
-// 在途记录过期后会被写盘 GC，随后 reconcile 把任务标为 moved_out_manually——CLI 不再能补记，判定返回不放行。
+// 在途记录过期后 CLI 不再能补记，判定返回不放行；但它带「已在 CLI 侧授权」标记、不受过期回收：runtime 下次为该项目加载
+// PDV 状态时（getPostDeployVerificationState，例如 Web UI 部署后验证面板轮询），在卡已入 Done 后自行补写 verifiedAt，
+// 所属部署组已被新部署折叠也一样（见 post-deploy-verification-state.ts 的
+// reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups）。CLI 的 verification-state 只读文件，不触发它。
 
 export type KanbanCliPostDeployVerificationCompletionEntryPoint =
 	| { kind: "verification_complete_without_confirmation_token" }
@@ -94,7 +97,11 @@ export function decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded(in
 	if (isInFlightCompletionRecordExpired(inFlightCompletionRecord.expiresAtIso, nowIso)) {
 		return {
 			retryAllowed: false,
-			error: `Task is already in done, but its in-flight completion record expired at ${inFlightCompletionRecord.expiresAtIso}; its verification can no longer be recorded from the CLI.`,
+			error: `Task is already in done, but its in-flight completion record expired at ${inFlightCompletionRecord.expiresAtIso}; its verification can no longer be recorded from the CLI.${
+				inFlightCompletionRecord.kanbanCliCompletionAuthorizedBeforeMoveIntoDone
+					? " Because this completion was already authorized before the move, the Kanban runtime records it on its own the next time it loads post-deploy verification state for this project (for example, when the Web UI post-deploy verification panel polls it); `kanban deployment verification-state` only reads the state file and does not trigger that."
+					: ""
+			}`,
 		};
 	}
 	if (computeRequiredAcknowledgementsForColumn(inFlightCompletionRecord.columnIdAtIssuance) === null) {

@@ -271,7 +271,9 @@ async function moveTaskToDoneAndMarkVerified(input: {
 	const confirmedAcknowledgements = confirmedAcknowledgementsOfEntryPoint(input.entryPoint);
 	// 移列前先落「在途完成记录」（pendingConfirmation 形状；token 路径沿用用户手里那枚 token、只刷新过期）：
 	// 移列成功而 runtime 补记 verifiedAt 失败时，它让 reconcile 不把任务误标 moved_out_manually，
-	// 并作为原样重跑本命令时「只补记 verifiedAt」的授权证据（判定见 decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded）。
+	// 并作为原样重跑本命令时「只补记 verifiedAt」的授权证据（判定见 decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded）；
+	// 没人重跑时，runtime 下次为该项目加载 PDV 状态（如 Web UI 面板轮询）时凭它自行补写，不受 15 分钟过期限制，
+	// 所属部署组已被新部署折叠也一样；CLI 的 verification-state 只读文件，不触发补写。
 	const inFlightCompletionRecord: RuntimePostDeployVerificationPendingConfirmation = {
 		token:
 			input.entryPoint.kind === "verification_confirm_with_confirmation_token"
@@ -280,6 +282,11 @@ async function moveTaskToDoneAndMarkVerified(input: {
 		expiresAtIso: new Date(Date.parse(input.nowIso) + CONFIRMATION_TOKEN_TTL_MS).toISOString(),
 		requiredAcknowledgements: confirmedAcknowledgements,
 		columnIdAtIssuance: input.currentColumnId,
+		// 走到这里时授权已核对完毕；runtime 据此在补记失败、又没人重跑命令时自行补写 verifiedAt。
+		kanbanCliCompletionAuthorizedBeforeMoveIntoDone: {
+			authorizedAtIso: input.nowIso,
+			forcedCompletionWithoutAllVerificationsPassed: forced,
+		},
 	};
 	const recorded = await setPendingConfirmation(
 		input.deploymentId,

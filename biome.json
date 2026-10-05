@@ -86,7 +86,7 @@
 									},
 									{
 										"group": ["**/deployment/post-deploy-verification-state"],
-										"importNamePattern": "(markTaskVerified|consumePendingConfirmationAndMarkVerified)",
+										"importNamePattern": "(markTaskVerified|consumePendingConfirmationAndMarkVerified|reconcileGroup|reconcileKanbanCliCompletionsAuthorizedButLeftInFlightAcrossWorkspaceDeploymentGroups)",
 										"message": "dd2db: Post-Deploy Verification completion (verifiedAt) is written only by the runtime; call deployment.markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone."
 									}
 								]

@@ -77,6 +77,14 @@ vi.mock(
 	}),
 );
 
+// 共享落地判据的激活补发扫描另有专门的集成测试；这里不让它去读替身 workspace 的 provenance 文件。
+vi.mock(
+	"../../../src/inter-work-unit-relation-ledger/shared-task-commit-landing-criterion-activation-backfill-sweep",
+	() => ({
+		sweepTaskCommitIntegrationProvenanceProbedSinceLandingDataPreservationForSharedLandingCriterion: async () => {},
+	}),
+);
+
 // 激活后的急切基线任务经 workspace-state 遍历索引并走漏斗；默认索引为空，个别用例自行注入。
 const workspaceStateFakes = vi.hoisted(() => ({
 	indexedWorkspaceEntries: [] as Array<{ workspaceId: string; repoPath: string }>,

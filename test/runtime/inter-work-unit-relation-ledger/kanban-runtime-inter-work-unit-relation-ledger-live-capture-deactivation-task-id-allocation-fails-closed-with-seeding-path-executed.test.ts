@@ -80,6 +80,14 @@ vi.mock("../../../src/terminal/kanban-task-agent-session-work-unit-identity-envi
 	scrubInheritedWorkUnitIdentityEnvironmentVariablesFromKanbanRuntimeProcess: () => [],
 }));
 
+// 共享落地判据的激活补发扫描另有专门的集成测试；这里不让它去读替身 workspace 的 provenance 文件。
+vi.mock(
+	"../../../src/inter-work-unit-relation-ledger/shared-task-commit-landing-criterion-activation-backfill-sweep",
+	() => ({
+		sweepTaskCommitIntegrationProvenanceProbedSinceLandingDataPreservationForSharedLandingCriterion: async () => {},
+	}),
+);
+
 // 播种与急切基线经 workspace-state 读本机痕迹、走漏斗。播种用到的导出必须齐全，否则播种一进入就抛错、分配永远 fail-closed，
 // 「播种成功后放行」那条用例会直接失败——替身漂移在这里会被行为断言抓到，而不是被强转掩盖。
 const workspaceStateFakes = vi.hoisted(() => ({

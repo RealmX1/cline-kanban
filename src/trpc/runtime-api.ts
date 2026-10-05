@@ -1797,13 +1797,22 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
+		// park 三件套按这条会话当下的 transport 分派：ACP（omp）会话由 ACP 服务持有 summary（dd2db 2x），其余走终端。
+		// 同一个 sidecar、同一个谓词，下游（UI、通知、回收、排队投递）不区分 transport。
 		parkTaskAwaitingDispatchedBackgroundWork: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskParkAwaitingDispatchedBackgroundWorkRequest(input);
-				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const result = terminalManager.parkTaskSessionAwaitingDispatchedBackgroundWork(body.taskId, {
-					label: body.label,
-				});
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const taskSessionIsDrivenByAcpProtocol = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
+					acpTaskSessionService.getSummary(body.taskId),
+				);
+				const parkOptions = { label: body.label };
+				const result = taskSessionIsDrivenByAcpProtocol
+					? acpTaskSessionService.parkTaskSessionAwaitingDispatchedBackgroundWork(body.taskId, parkOptions)
+					: (await deps.getScopedTerminalManager(workspaceScope)).parkTaskSessionAwaitingDispatchedBackgroundWork(
+							body.taskId,
+							parkOptions,
+						);
 				if (!result.ok) {
 					return { ok: false, summary: null, error: result.error };
 				}
@@ -1816,8 +1825,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		unparkTaskAwaitingDispatchedBackgroundWork: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskUnparkAwaitingDispatchedBackgroundWorkRequest(input);
-				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const summary = terminalManager.unparkTaskSession(body.taskId);
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const taskSessionIsDrivenByAcpProtocol = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
+					acpTaskSessionService.getSummary(body.taskId),
+				);
+				const summary = taskSessionIsDrivenByAcpProtocol
+					? acpTaskSessionService.unparkTaskSession(body.taskId)
+					: (await deps.getScopedTerminalManager(workspaceScope)).unparkTaskSession(body.taskId);
 				return { ok: Boolean(summary), summary };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -1827,8 +1841,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		isTaskParkedAwaitingDispatchedBackgroundWork: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskIsParkedAwaitingDispatchedBackgroundWorkRequest(input);
-				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const state = terminalManager.getAwaitingDispatchedBackgroundWork(body.taskId);
+				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+				const taskSessionIsDrivenByAcpProtocol = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
+					acpTaskSessionService.getSummary(body.taskId),
+				);
+				const state = taskSessionIsDrivenByAcpProtocol
+					? acpTaskSessionService.getAwaitingDispatchedBackgroundWork(body.taskId)
+					: (await deps.getScopedTerminalManager(workspaceScope)).getAwaitingDispatchedBackgroundWork(body.taskId);
 				return { ok: true, parked: state.parked, label: state.label, sinceMs: state.sinceMs };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
