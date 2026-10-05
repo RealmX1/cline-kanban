@@ -24,7 +24,7 @@ RVF-PRE-REVIEW-BASE-SYNC-SKILL: sync-local-base-into-task-worktree-only
 
 ## 仓库形态与命令
 
-一个 git 仓里**三个互相独立的 npm 项目**（各有 package.json / tsconfig / vitest 配置）：运行时（根 `src/`）、Web UI（`web-ui/`）、Electron 壳（`packages/desktop/`）。根 vitest 排除 `packages/**` 与 `web-ui/**`——**在 `packages/` 下新增 workspace 时必须给 `.github/workflows/test.yml` 补 install/test 步骤**，否则悄悄掉出 CI。Node `engines >= 22`，但 CI 矩阵跑 20+22：涉及新 Node API 时以 20 为下限验证。
+一个 git 仓里**三个互相独立的 npm 项目**（各有 package.json / tsconfig / vitest 配置）：运行时（根 `src/`）、Web UI（`web-ui/`）、Electron 壳（`packages/desktop/`）。根 vitest 排除 `packages/**` 与 `web-ui/**`——**在 `packages/` 下新增 workspace 时必须给 `.github/workflows/test.yml` 补 install/test 步骤**，否则悄悄掉出 CI。Node 支持下限就是 `engines >= 22`（CI 跑 ubuntu + macOS 的 Node 22）：涉及新 Node API 时以 22 为下限验证。
 
 ```bash
 npm run dev:full         # 首选：运行时 watch + Vite 同开，自动挑空闲端口

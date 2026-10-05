@@ -62,7 +62,7 @@ fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 t
 **明文承认的代价**：
 - CLI RSS 用例的绝对值硬档从 512MiB 放宽到 768MiB（待标定），「基线已高 + 中等增长」（例：450→650MiB）不再判失败；补偿是锚点后基线起算的增长判定（软 64MiB / 硬 256MiB）。
 - B 类软档只告警后，命令型 CLI 启动变慢不再在本地失败；补偿是 `cli-entrypoint-static-import-closure-excludes-lazily-loaded-runtime-server-stack.test.ts`，确定性断言 `src/cli.ts` 的静态 import 闭包不含懒加载的 server 栈（25ba59f 类退化）。
-- 通过路径变长（RSS 用例 tRPC 800ms→3000ms、两条空转用例补了 bootstrap 各多一次 runtime 冷启动）；真实回归让整批 CLI 都挂到硬档时，CI job 可能撞上 `test.yml` 的 10 分钟上限被取消，而不是给出红色报告——本地 check 与 RVF 仍会明确失败。
+- 通过路径变长（RSS 用例 tRPC 800ms→3000ms、两条空转用例补了 bootstrap 各多一次 runtime 冷启动）；真实回归让整批 CLI 都挂到硬档时，CI job 可能撞上 `test.yml` 的 job 上限（20 分钟，正常用时 8–10.5 分钟）被取消，而不是给出红色报告——本地 check 与 RVF 仍会明确失败。
 - 残余 flake（要改产品才能修，未处理）：`canReachKanbanServer` 写死 `AbortSignal.timeout(1_500)`（`src/cli.ts`），「opens only for launch invocations」在负载下仍可能因此误判 server 不存在。
 
 ## 判读全量套件里「看似无关」的失败

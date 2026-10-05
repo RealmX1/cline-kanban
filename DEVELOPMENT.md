@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Node.js 22 or newer (`package.json` declares `engines: node >=22`); the CI matrix also runs on Node 20, so treat Node 20 as the floor when using newer Node APIs
+- Node.js 22 or newer (`package.json` declares `engines: node >=22`); CI runs Node 22 on ubuntu and macOS, so treat Node 22 as the floor when using newer Node APIs
 - npm 10+
 - 运行 runtime（`dev:full`、`dogfood`、`node dist/cli.js`）和根项目测试时，Node 的大版本必须与安装 `node_modules` 时一致：关系账本用的 better-sqlite3 是原生模块，ABI 不符就打不开，runtime 会把 board 置为只读，报错里带 `NODE_MODULE_VERSION`。`dev:full` / `dogfood` 按 PATH 取 node，PATH 上的版本与装依赖时不同就会撞上。task worktree 的 `node_modules` 软链到主 checkout，不要在 worktree 里 `npm rebuild`，那会改掉正在服务的 runtime 所用的那份。
 
