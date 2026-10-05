@@ -1441,8 +1441,7 @@ const claudeAdapter: AgentSessionAdapter = {
 				...env,
 			},
 			resumesPriorAgentConversation,
-			detectOutputTransition: claudePromptDetector,
-			shouldInspectOutputForTransition: shouldInspectClaudeOutputForTransition,
+			...resolveAgentOutputTransitionDetectionForAgentId("claude"),
 		};
 	},
 };
@@ -1642,8 +1641,7 @@ const codexAdapter: AgentSessionAdapter = {
 			deferredStartupPromptText,
 			// resume 与 fork 都会把既有会话的 transcript 重播进新 TUI（见 PreparedAgentLaunch 同名字段）。
 			resumesPriorAgentConversation: resumesSession || forksSession,
-			detectOutputTransition: codexPromptDetector,
-			shouldInspectOutputForTransition: shouldInspectCodexOutputForTransition,
+			...resolveAgentOutputTransitionDetectionForAgentId("codex"),
 		};
 	},
 };
@@ -2490,8 +2488,7 @@ const kimiAdapter: AgentSessionAdapter = {
 			env,
 			deferredStartupPromptText,
 			resumesPriorAgentConversation,
-			detectOutputTransition: kimiPromptDetector,
-			shouldInspectOutputForTransition: shouldInspectKimiOutputForTransition,
+			...resolveAgentOutputTransitionDetectionForAgentId("kimi"),
 		};
 	},
 };
@@ -2575,13 +2572,44 @@ const ompAdapter: AgentSessionAdapter = {
 			args,
 			env,
 			resumesPriorAgentConversation,
-			// 状态判定读 OSC 终端标题（omp 把三态编码在标题分隔符里），比 cursor/kiro/droid 那种
-			// 「只能靠 scanForStalls 兜底」结构化得多；身份扩展不参与这个状态判定。
-			// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
-			detectOutputTransition: detectOmpTerminalTitleStateTransition,
+			...resolveAgentOutputTransitionDetectionForAgentId("omp"),
 		};
 	},
 };
+
+// 按 agent 绑定的「从 PTY 输出推断状态迁移」检测器。与启动参数无关，只由 agentId 决定，因此集中在一张表：
+// 新 spawn（各 adapter 的 PreparedAgentLaunch）与热重启后接管仍在跑的会话（不经 prepareAgentLaunch）
+// 都从这里取，保证两条路径挂的是同一套检测器。不在表里的 agent 没有输出检测，只靠 hook 与 scanForStalls。
+const AGENT_OUTPUT_TRANSITION_DETECTION_BY_AGENT_ID: Readonly<
+	Partial<
+		Record<RuntimeAgentId, Pick<PreparedAgentLaunch, "detectOutputTransition" | "shouldInspectOutputForTransition">>
+	>
+> = {
+	claude: {
+		detectOutputTransition: claudePromptDetector,
+		shouldInspectOutputForTransition: shouldInspectClaudeOutputForTransition,
+	},
+	codex: {
+		detectOutputTransition: codexPromptDetector,
+		shouldInspectOutputForTransition: shouldInspectCodexOutputForTransition,
+	},
+	kimi: {
+		detectOutputTransition: kimiPromptDetector,
+		shouldInspectOutputForTransition: shouldInspectKimiOutputForTransition,
+	},
+	// 状态判定读 OSC 终端标题（omp 把三态编码在标题分隔符里），比 cursor/kiro/droid 那种
+	// 「只能靠 scanForStalls 兜底」结构化得多；身份扩展不参与这个状态判定。
+	// 不设 shouldInspectOutputForTransition：缺省即恒扫，spinner 帧本来就要被看到。
+	omp: {
+		detectOutputTransition: detectOmpTerminalTitleStateTransition,
+	},
+};
+
+export function resolveAgentOutputTransitionDetectionForAgentId(
+	agentId: RuntimeAgentId,
+): Pick<PreparedAgentLaunch, "detectOutputTransition" | "shouldInspectOutputForTransition"> {
+	return AGENT_OUTPUT_TRANSITION_DETECTION_BY_AGENT_ID[agentId] ?? {};
+}
 
 const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	claude: claudeAdapter,

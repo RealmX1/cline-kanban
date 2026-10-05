@@ -39,7 +39,12 @@
 	"plugins": ["grit/no-process-env-destructure.grit", "grit/no-home-agent-prefix-literal.grit"],
 	"overrides": [
 		{
-			"includes": ["src/**/*.ts", "src/**/*.tsx", "!src/cli.ts"],
+			"includes": [
+				"src/**/*.ts",
+				"src/**/*.tsx",
+				"!src/cli.ts",
+				"!src/agent-session-pty-host/host-process/agent-session-pty-host-process-entry.ts"
+			],
 			"plugins": ["grit/no-console.grit", "grit/no-process-exit.grit"]
 		},
 		{
