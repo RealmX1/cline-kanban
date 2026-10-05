@@ -29,6 +29,10 @@ async function countLandingObservationsInLedgerAfterAllWritersClosed(taskId: str
 	}
 }
 
+// 「终会发生」的单档等待：激活后首次查询要等账本 Worker 线程冷启动并加载 better-sqlite3，vi.waitFor 默认 1s
+// 在高负载下不够。放宽不损失判别力——断言判的是「最终落了几条、内容对不对」，不是多快。
+const LEDGER_EVENT_COMMIT_WAIT_OPTIONS_COVERING_WORKER_COLD_START = { timeout: 15_000 };
+
 describe.sequential("inter-work-unit relation ledger task commits integrated into local base observation", () => {
 	it("backfills a landing that happened while no runtime was capturing (worktree already removed), records it once, and stays at one across probes and re-activations", async () => {
 		const gitFixture = createIsolatedGitTestWorkspaceFixture();
@@ -92,7 +96,7 @@ describe.sequential("inter-work-unit relation ledger task commits integrated int
 							}),
 						],
 					});
-				});
+				}, LEDGER_EVENT_COMMIT_WAIT_OPTIONS_COVERING_WORKER_COLD_START);
 				// 同一实例里再次探测：内存去重，不再往返 worker。
 				await probeAndRefreshTaskCommitIntegrationProvenance({ ...probeInput, worktreeExists: false });
 			} finally {
@@ -113,5 +117,6 @@ describe.sequential("inter-work-unit relation ledger task commits integrated int
 			else process.env.HOME = previousHome;
 			gitFixture.cleanup();
 		}
-	});
+		// 用例超时覆盖：账本提交等待 15s + 两次激活 / 停用 Worker + 真实 git worktree 操作。
+	}, 45_000);
 });
