@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { assertedInterWorkUnitRelationSchema } from "./inter-work-unit-asserted-relation-kind-registry-contract";
 import { recordedInterWorkUnitRelationSchema } from "./inter-work-unit-recorded-relation-projection-contract";
 import {
 	agentConversationSessionIdentityKeySchema,
@@ -82,8 +83,10 @@ export const getRelationNeighborhoodSummaryRequestSchema = z.object({
 export type GetRelationNeighborhoodSummaryRequest = z.infer<typeof getRelationNeighborhoodSummaryRequestSchema>;
 export const getRelationNeighborhoodSummaryResponseSchema = z.object({
 	subjectWorkUnit: workUnitDisplayEntrySchema,
-	// 一度邻域：以主体为 S 或 A 的全部记录型关系（断言型关系阶段 2 起加入）。被静音的也在，带 mutedAt。
+	// 一度邻域：以主体为 S 或 A 的全部记录型关系。被静音的也在，带 mutedAt。
 	recordedRelations: z.array(recordedInterWorkUnitRelationSchema),
+	// 阶段 2 起：以主体为 S 或 A、当前生效的断言型关系（已撤销的不列；挂起中的变更不是资产，也不列）。
+	assertedRelations: z.array(assertedInterWorkUnitRelationSchema),
 	neighborWorkUnits: z.array(workUnitDisplayEntrySchema),
 	// 只在 relationNeighborhoodDepth = 2 时非空：一度邻居各自的、不触及主体的关系，以及由此多出的二度邻居。
 	secondHopRecordedRelations: z.array(recordedInterWorkUnitRelationSchema),

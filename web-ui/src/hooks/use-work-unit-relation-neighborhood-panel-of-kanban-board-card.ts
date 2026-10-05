@@ -5,18 +5,30 @@
 // 切卡那一帧不会把上一张卡的邻域当成这张卡的渲染。读失败（含 SERVICE_UNAVAILABLE）如实落成失败态，
 // 绝不降级成空邻域——「关系暂不可用」和「没有关系」是两回事。
 //
-// 写：静音是决策类 procedure（R3），本 hook 只**造**点击处理器（createRecordedRelationMuteToggleButtonClickHandler），
-// 不在任何 effect / 自动流程里调用它；处理器只能绑在按钮的 onClick 上。
+// 写：静音与撤销断言都是决策类 procedure（R3），本 hook 只**造**点击处理器
+// （createRecordedRelationMuteToggleButtonClickHandler / createEffectiveRelationAssertionRevocationChoiceClickHandler），
+// 不在任何 effect / 自动流程里调用它们；处理器只能绑在按钮的 onClick 上（撤销还要把这次点击事件交给传输层，
+// runtime 据此拒绝脚本合成的点击）。
 
+import type { RelationAssertionRevocationReason } from "@runtime-inter-work-unit-relation-assertion-lifecycle-event-contract";
 import type { GetRelationNeighborhoodSummaryResponse } from "@runtime-work-unit-relation-read-api-contract";
 import { type MouseEventHandler, useCallback, useEffect, useMemo, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
+	buildWorkUnitAssertedRelationNeighborhoodPresentation,
+	type WorkUnitAssertedRelationNeighborhoodPresentation,
+} from "@/hooks/work-unit-asserted-relation-neighborhood-presentation-model";
+import {
 	buildWorkUnitRelationNeighborhoodPanelPresentation,
 	type KnownKanbanProjectByWorkspaceIdForRelationNeighborhoodPanel,
 	type WorkUnitRelationNeighborhoodPanelPresentation,
 } from "@/hooks/work-unit-relation-neighborhood-panel-presentation-model";
+import {
+	classifyInterWorkUnitRelationAssertionWriteFailure,
+	type InterWorkUnitRelationAssertionWriteFailure,
+	revokeEffectiveRelationAssertionDirectlyAsWebUiUserFromExplicitUserGesture,
+} from "@/runtime/work-unit-relation-assertion-write-query";
 import {
 	classifyRecordedRelationPresentationMutePreferenceWriteFailure,
 	classifyWorkUnitRelationNeighborhoodSummaryReadFailure,
@@ -36,6 +48,7 @@ export type WorkUnitRelationNeighborhoodPanelReadState =
 	| {
 			relationNeighborhoodReadPhase: "relation_neighborhood_loaded";
 			relationNeighborhoodPanelPresentation: WorkUnitRelationNeighborhoodPanelPresentation;
+			assertedRelationNeighborhoodPresentation: WorkUnitAssertedRelationNeighborhoodPresentation;
 	  };
 
 export interface WorkUnitRelationNeighborhoodPanelController {
@@ -50,6 +63,12 @@ export interface WorkUnitRelationNeighborhoodPanelController {
 	createRecordedRelationMuteToggleButtonClickHandler: (
 		relationId: string,
 		nextRecordedRelationMutedInPresentation: boolean,
+	) => MouseEventHandler<HTMLButtonElement>;
+	relationIdsWithAssertionRevocationInFlight: ReadonlySet<string>;
+	// 只能绑在撤销选项按钮的 onClick 上（见文件头）；点击事件原样交给传输层。
+	createEffectiveRelationAssertionRevocationChoiceClickHandler: (
+		relationId: string,
+		relationAssertionRevocationReason: RelationAssertionRevocationReason,
 	) => MouseEventHandler<HTMLButtonElement>;
 }
 
@@ -87,6 +106,24 @@ export function describeRecordedRelationPresentationMutePreferenceWriteFailureFo
 	}
 }
 
+// 断言写入（撤销 / 添加关系）失败的提示：runtime 给的那句人话原样转述，前面只补一句它属于哪类失败。
+export function describeInterWorkUnitRelationAssertionWriteFailureForUser(
+	writeFailure: InterWorkUnitRelationAssertionWriteFailure,
+	attemptedActionLabel: string,
+): string {
+	const runtimeSentence = writeFailure.writeFailureHumanReadableSentence;
+	switch (writeFailure.writeFailureKind) {
+		case "inter_work_unit_relation_ledger_unavailable":
+			return `${attemptedActionLabel}没有保存：关系账本暂不可用（${runtimeSentence}）`;
+		case "web_ui_user_decision_request_origin_rejected_by_runtime":
+			return `${attemptedActionLabel}没有保存：runtime 没有把这次操作认作你的决定（${runtimeSentence}）`;
+		case "relation_assertion_write_kept_conflicting_with_concurrent_writes":
+			return `${attemptedActionLabel}没有保存：与并发写入冲突，可以直接重试（${runtimeSentence}）`;
+		default:
+			return `${attemptedActionLabel}没有保存：${runtimeSentence}`;
+	}
+}
+
 export function useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard(input: {
 	workspaceId: string | null;
 	kanbanBoardCardTaskId: string | null;
@@ -98,6 +135,9 @@ export function useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard(input: {
 	// 递增即重拉（手动刷新、静音切换成功后）。
 	const [relationNeighborhoodRefetchRequestSequence, setRelationNeighborhoodRefetchRequestSequence] = useState(0);
 	const [relationIdsWithPresentationMuteToggleInFlight, setRelationIdsWithPresentationMuteToggleInFlight] = useState<
+		ReadonlySet<string>
+	>(() => new Set());
+	const [relationIdsWithAssertionRevocationInFlight, setRelationIdsWithAssertionRevocationInFlight] = useState<
 		ReadonlySet<string>
 	>(() => new Set());
 
@@ -166,13 +206,16 @@ export function useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard(input: {
 				relationNeighborhoodReadFailure: taggedReadOutcome.relationNeighborhoodReadFailure,
 			};
 		}
+		const presentationInput = {
+			relationNeighborhoodSummary: taggedReadOutcome.relationNeighborhoodSummary,
+			currentKanbanProjectWorkspaceId: workspaceId,
+			knownKanbanProjectByWorkspaceId,
+		};
 		return {
 			relationNeighborhoodReadPhase: "relation_neighborhood_loaded",
-			relationNeighborhoodPanelPresentation: buildWorkUnitRelationNeighborhoodPanelPresentation({
-				relationNeighborhoodSummary: taggedReadOutcome.relationNeighborhoodSummary,
-				currentKanbanProjectWorkspaceId: workspaceId,
-				knownKanbanProjectByWorkspaceId,
-			}),
+			relationNeighborhoodPanelPresentation: buildWorkUnitRelationNeighborhoodPanelPresentation(presentationInput),
+			assertedRelationNeighborhoodPresentation:
+				buildWorkUnitAssertedRelationNeighborhoodPresentation(presentationInput),
 		};
 	}, [currentReadSubjectKey, knownKanbanProjectByWorkspaceId, taggedReadOutcome, workspaceId]);
 
@@ -219,6 +262,48 @@ export function useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard(input: {
 		[workspaceId],
 	);
 
+	const createEffectiveRelationAssertionRevocationChoiceClickHandler = useCallback(
+		(
+			relationId: string,
+			relationAssertionRevocationReason: RelationAssertionRevocationReason,
+		): MouseEventHandler<HTMLButtonElement> =>
+			(revocationChoiceClickEvent) => {
+				if (!workspaceId) {
+					return;
+				}
+				setRelationIdsWithAssertionRevocationInFlight((current) => new Set(current).add(relationId));
+				revokeEffectiveRelationAssertionDirectlyAsWebUiUserFromExplicitUserGesture(revocationChoiceClickEvent, {
+					workspaceId,
+					relationId,
+					relationAssertionRevocationReason,
+				})
+					.then(
+						() => {
+							// 已撤销（含「本来就已撤销」）：以 runtime 为准重拉邻域，不在本地乐观删行。
+							setRelationNeighborhoodRefetchRequestSequence((sequence) => sequence + 1);
+						},
+						(error: unknown) => {
+							showAppToast({
+								intent: "danger",
+								message: describeInterWorkUnitRelationAssertionWriteFailureForUser(
+									classifyInterWorkUnitRelationAssertionWriteFailure(error),
+									"撤销",
+								),
+								timeout: 7000,
+							});
+						},
+					)
+					.finally(() => {
+						setRelationIdsWithAssertionRevocationInFlight((current) => {
+							const next = new Set(current);
+							next.delete(relationId);
+							return next;
+						});
+					});
+			},
+		[workspaceId],
+	);
+
 	return {
 		relationNeighborhoodReadState,
 		isRelationNeighborhoodRefetchInFlight:
@@ -228,5 +313,7 @@ export function useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard(input: {
 		openNeighborKanbanBoardCardInItsProject: crossProjectTaskOpenHost?.onOpenTaskInProject ?? null,
 		relationIdsWithPresentationMuteToggleInFlight,
 		createRecordedRelationMuteToggleButtonClickHandler,
+		relationIdsWithAssertionRevocationInFlight,
+		createEffectiveRelationAssertionRevocationChoiceClickHandler,
 	};
 }

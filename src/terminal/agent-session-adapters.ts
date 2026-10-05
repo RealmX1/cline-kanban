@@ -27,7 +27,7 @@ import {
 	resolveTaskSessionAppendSystemPrompt,
 } from "../prompts/append-system-prompt";
 import { resolveExploratoryModeAppendSystemPrompt } from "../prompts/exploratory-mode-append-system-prompt";
-import { resolveInterWorkUnitRelationNeighborhoodAppendSystemPrompt } from "../prompts/inter-work-unit-relation-neighborhood-append-system-prompt";
+import { resolveInterWorkUnitRelationNeighborhoodSessionStartInjection } from "../prompts/inter-work-unit-relation-neighborhood-append-system-prompt";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { hasClaudeInteractivePrompt, hasClaudeStartupUiRendered } from "./claude-readiness";
 import {
@@ -130,6 +130,13 @@ export interface PreparedAgentLaunch {
 	resumesPriorAgentConversation?: boolean;
 	detectOutputTransition?: AgentOutputTransitionDetector;
 	shouldInspectOutputForTransition?: AgentOutputTransitionInspectionPredicate;
+	// 只给把工作单元间关系邻域注入段写在 argv 之外（agent 配置文件）的 adapter 用（目前只有 kiro）：如实声明本次启动
+	// 带上了这段文本。写进 argv / deferredStartupPromptText 的不用设，prepareAgentLaunch 在合流点直接查验。
+	carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv?: boolean;
+	// 本次启动确实带上了关系邻域注入段、且段里列出了断言型关系时才有（由 prepareAgentLaunch 在合流点填写，adapter 不设）。
+	// session-manager 在 PTY spawn 成功、新会话装载之后调用一次，提交注入回执；准备或 spawn 失败绝不调用。
+	// 后台记账、按幂等键去重、绝不抛错，不影响启动。
+	commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded?: () => void;
 }
 
 interface HookContext {
@@ -2239,6 +2246,7 @@ const kiroAdapter: AgentSessionAdapter = {
 
 		const hooks = resolveHookContext(input);
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
+		let carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv = false;
 		if (hooks || appendedSystemPrompt) {
 			const configPath = getKiroAgentConfigPath();
 			const config: Record<string, unknown> = {
@@ -2313,6 +2321,10 @@ const kiroAdapter: AgentSessionAdapter = {
 			await ensureTextFile(configPath, JSON.stringify(config, null, 2));
 			if (!hasCliOption(args, "--agent")) {
 				args.push("--agent", KIRO_KANBAN_AGENT_NAME);
+				// 只有选中的是 Kanban 托管 agent，配置文件里的 prompt 才生效；用户自带 --agent 时如实不算带上。
+				carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv = Boolean(
+					appendedSystemPrompt && input.interWorkUnitRelationNeighborhoodAppendSystemPrompt,
+				);
 			}
 		}
 
@@ -2334,6 +2346,7 @@ const kiroAdapter: AgentSessionAdapter = {
 				...withPromptLaunch.env,
 				...env,
 			},
+			carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv,
 		};
 	},
 };
@@ -2624,6 +2637,30 @@ const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	omp: ompAdapter,
 };
 
+// 合流点查验：adapter 产出的启动参数里是否真的带上了关系邻域注入段。不在 adapter 里逐个上报，是因为「推没推进 argv」
+// 散落在各 adapter 的分支里（续跑不重投 prompt、prompt 为空时不拼接、用户已带 --system-prompt 时不追加……），
+// 查最终 argv 才是如实的。combineAppendSystemPrompts 会 trim 每一段；codex 以 JSON 字符串字面量放进
+// `-c developer_instructions=…`，所以同时认原文与 JSON 转义后的形式。
+function doesPreparedAgentLaunchCarryInterWorkUnitRelationNeighborhoodAppendSystemPrompt(
+	preparedAgentLaunch: PreparedAgentLaunch,
+	interWorkUnitRelationNeighborhoodAppendSystemPrompt: string,
+): boolean {
+	if (preparedAgentLaunch.carriesInterWorkUnitRelationNeighborhoodAppendSystemPromptOutsideLaunchArgv === true) {
+		return true;
+	}
+	const trimmedAppendSystemPromptText = interWorkUnitRelationNeighborhoodAppendSystemPrompt.trim();
+	const jsonStringLiteralEscapedAppendSystemPromptText = JSON.stringify(trimmedAppendSystemPromptText).slice(1, -1);
+	const launchTextsThatReachTheAgent = [
+		...preparedAgentLaunch.args,
+		preparedAgentLaunch.deferredStartupPromptText ?? "",
+	];
+	return launchTextsThatReachTheAgent.some(
+		(launchText) =>
+			launchText.includes(trimmedAppendSystemPromptText) ||
+			launchText.includes(jsonStringLiteralEscapedAppendSystemPromptText),
+	);
+}
+
 export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promise<PreparedAgentLaunch> {
 	const preparedPrompt = await prepareTaskPromptWithImages({
 		prompt: input.prompt,
@@ -2632,18 +2669,35 @@ export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promis
 	// Exploratory Mode 注入（§A.2）：仅 exploratory 启动物化指令文件；非 exploratory / 物化失败恒为 null。
 	const exploratoryModeAppendSystemPrompt = await resolveExploratoryModeAppendSystemPrompt(input.taskConversationMode);
 	// dd2db 1b：会话启动时注入工作单元间关系邻域摘要；读不到或超时即不注入，绝不阻断启动。
-	const interWorkUnitRelationNeighborhoodAppendSystemPrompt =
-		await resolveInterWorkUnitRelationNeighborhoodAppendSystemPrompt({
+	// 解析只给文本与「待提交的注入回执」，此刻绝不记账（见下方合流点与 session-manager 的提交点）。
+	const interWorkUnitRelationNeighborhoodSessionStartInjection =
+		await resolveInterWorkUnitRelationNeighborhoodSessionStartInjection({
 			workspaceId: input.workspaceId,
 			taskId: input.taskId,
 		});
+	const interWorkUnitRelationNeighborhoodAppendSystemPrompt =
+		interWorkUnitRelationNeighborhoodSessionStartInjection?.interWorkUnitRelationNeighborhoodAppendSystemPromptText ??
+		null;
 	if (input.agentId !== "codex") {
 		warnUnsupportedParentSessionId(input.agentId, input.parentSessionId);
 	}
-	return await ADAPTERS[input.agentId].prepare({
+	const preparedAgentLaunch = await ADAPTERS[input.agentId].prepare({
 		...input,
 		prompt: preparedPrompt,
 		exploratoryModeAppendSystemPrompt,
 		interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	});
+	const commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded =
+		interWorkUnitRelationNeighborhoodSessionStartInjection?.commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded;
+	if (
+		!interWorkUnitRelationNeighborhoodAppendSystemPrompt ||
+		!commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded ||
+		!doesPreparedAgentLaunchCarryInterWorkUnitRelationNeighborhoodAppendSystemPrompt(
+			preparedAgentLaunch,
+			interWorkUnitRelationNeighborhoodAppendSystemPrompt,
+		)
+	) {
+		return preparedAgentLaunch;
+	}
+	return { ...preparedAgentLaunch, commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded };
 }

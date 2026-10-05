@@ -11,7 +11,7 @@ import {
 	appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
 	readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
 } from "../../src/inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
-import { resolveInterWorkUnitRelationNeighborhoodAppendSystemPrompt } from "../../src/prompts/inter-work-unit-relation-neighborhood-append-system-prompt";
+import { resolveInterWorkUnitRelationNeighborhoodSessionStartInjection } from "../../src/prompts/inter-work-unit-relation-neighborhood-append-system-prompt";
 import {
 	registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture,
 	type TaskMutationIntentWithResolvedActor,
@@ -183,14 +183,16 @@ describe("recorded inter-work-unit relation neighborhood read through the runtim
 				).rejects.toMatchObject({ code: "NOT_FOUND" });
 
 				// 会话启动注入：有默认可见关系的卡注入邻域摘要；认不出的会话 id（by-the-way 会话）不注入。
-				const childSessionStartInjection = await resolveInterWorkUnitRelationNeighborhoodAppendSystemPrompt({
-					workspaceId,
-					taskId: "c0001",
-				});
+				const childSessionStartInjection = (
+					await resolveInterWorkUnitRelationNeighborhoodSessionStartInjection({
+						workspaceId,
+						taskId: "c0001",
+					})
+				)?.interWorkUnitRelationNeighborhoodAppendSystemPromptText;
 				expect(childSessionStartInjection).toContain("# Kanban Relations Of This Task");
 				expect(childSessionStartInjection).toContain("This task was created by task p0001");
 				expect(
-					await resolveInterWorkUnitRelationNeighborhoodAppendSystemPrompt({
+					await resolveInterWorkUnitRelationNeighborhoodSessionStartInjection({
 						workspaceId,
 						taskId: "by-the-way-session-of-c0001",
 					}),
@@ -233,11 +235,12 @@ describe("recorded inter-work-unit relation neighborhood read through the runtim
 				});
 				expect(childNeighborhoodAfterMute.recordedRelations[0]?.mutedInPresentationAt).not.toBeNull();
 				// 只隐藏被静音的那条：「需求被 p0001 修订」仍默认可见，所以照常注入，只是不再说「由 p0001 创建」。
-				const childSessionStartInjectionAfterMute =
-					await resolveInterWorkUnitRelationNeighborhoodAppendSystemPrompt({
+				const childSessionStartInjectionAfterMute = (
+					await resolveInterWorkUnitRelationNeighborhoodSessionStartInjection({
 						workspaceId,
 						taskId: "c0001",
-					});
+					})
+				)?.interWorkUnitRelationNeighborhoodAppendSystemPromptText;
 				expect(childSessionStartInjectionAfterMute).not.toContain("was created by");
 				expect(childSessionStartInjectionAfterMute).toContain(
 					"This task had its requirements amended by task p0001",

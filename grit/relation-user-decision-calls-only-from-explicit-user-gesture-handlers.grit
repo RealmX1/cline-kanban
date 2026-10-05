@@ -1,0 +1,18 @@
+// dd2db R3 (b)：用户决策类传输函数（命名约定：以 FromExplicitUserGesture / FromExplicitUserClick 结尾）只能在显式用户手势
+// 处理器里调用。本规则拦截出现在 effect 回调（useEffect / useLayoutEffect / useInsertionEffect / React.use*Effect，以及
+// useDebouncedEffect 等一切 use*Effect 形 hook）里的这类调用，含回调里嵌套的 then / 箭头函数。
+// 拦不到的（静态分析的边界）：经中间函数间接调用（effect 调 helper、helper 再调决策函数）、以别名 / 解构改名后调用、
+// 以及不叫 use*Effect 的自动触发器（setTimeout、订阅回调）。命名约定本身是这条防线的一部分。
+or {
+	`$effectHookCallee($effectCallback, $effectDependencies)`,
+	`$effectHookCallee($effectCallback)`
+} where {
+	$effectHookCallee <: r"(?:React\.)?use[A-Za-z]*Effect",
+	$effectCallback <: contains `$userDecisionCallee($userDecisionArguments)` as $userDecisionCall where {
+		$userDecisionCallee <: r"(?:.*\.)?[A-Za-z0-9_]*From(?:ExplicitUserGesture|ExplicitUserClick)",
+		register_diagnostic(
+			span=$userDecisionCall,
+			message="dd2db R3: user-decision procedures (functions named *FromExplicitUserGesture / *FromExplicitUserClick) may only be called from an explicit user gesture handler (onClick / onSubmit), never from an effect callback."
+		)
+	}
+}

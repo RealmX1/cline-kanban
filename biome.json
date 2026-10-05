@@ -133,6 +133,10 @@
 			}
 		},
 		{
+			"includes": ["web-ui/src/**/*.ts", "web-ui/src/**/*.tsx"],
+			"plugins": ["grit/relation-user-decision-calls-only-from-explicit-user-gesture-handlers.grit"]
+		},
+		{
 			"includes": [
 				"web-ui/src/**/*.ts",
 				"web-ui/src/**/*.tsx",

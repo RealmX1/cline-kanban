@@ -11,6 +11,11 @@ import type {
 	KanbanBoardCardWorkUnitQualifiedReference,
 } from "../core/inter-work-unit-relation-ledger-event-contract";
 import {
+	type AssertedInterWorkUnitRelationProjectionState,
+	applyInterWorkUnitRelationAssertionLifecycleEvent,
+	createEmptyAssertedInterWorkUnitRelationProjectionState,
+} from "./asserted-inter-work-unit-relation-projection-from-ledger-events";
+import {
 	applyConversationSessionIdentityObservedInKanbanBoardCard,
 	applyKanbanUnmanagedStandaloneSessionActedAsActor,
 	applyTaskAgentSessionInitializationSetOnKanbanBoardCard,
@@ -71,6 +76,8 @@ export interface RecordedInterWorkUnitRelationProjectionState {
 		string,
 		{ mutedInPresentationAt: number; mutedInPresentationByActorKind: string }
 	>;
+	// 阶段 2 起：断言型关系（族 4）的投影跟记录型共用这一份状态与游标，邻域读一次追赶就同时拿到两种关系。
+	assertedInterWorkUnitRelationProjectionState: AssertedInterWorkUnitRelationProjectionState;
 }
 
 export function createEmptyRecordedInterWorkUnitRelationProjectionState(): RecordedInterWorkUnitRelationProjectionState {
@@ -102,6 +109,7 @@ function createEmptyRecordedInterWorkUnitRelationProjectionStateWithConversation
 		recordedRelationsByRelationId: new Map(),
 		recordedRelationIdsByWorkUnitKey: new Map(),
 		presentationMuteStateByRelationId: new Map(),
+		assertedInterWorkUnitRelationProjectionState: createEmptyAssertedInterWorkUnitRelationProjectionState(),
 	};
 }
 
@@ -732,6 +740,8 @@ export function applyCommittedLedgerEventsToRecordedInterWorkUnitRelationProject
 			applyAgentConversationSessionIdentityEvent(state, event);
 		} else if (event.eventFamily === "relation_presentation_preference_event") {
 			applyRelationPresentationPreferenceEvent(state, event);
+		} else if (event.eventFamily === "inter_work_unit_relation_assertion_lifecycle_event") {
+			applyInterWorkUnitRelationAssertionLifecycleEvent(state.assertedInterWorkUnitRelationProjectionState, event);
 		}
 		state.lastAppliedGlobalCommittedEventSequence = event.globalCommittedEventSequence;
 	}
