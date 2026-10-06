@@ -274,7 +274,7 @@ Components in `web-ui/src/components/` are mostly rendering and composition. Goo
 - 同一张卡的生命周期命令经 `task-card-action-per-task-command-serializer.ts` 在进程内串行（防双击、防 done 与 start 交错）；改字段与置顶不排队。
 - 哪种移列走哪个 procedure 由 `src/core/task-card-action-board-column-transitions.ts` 判定（语义源自 `drag-rules.ts`）；启动请求由 `src/core/task-session-start-request-from-board-card.ts` 从卡片构造；字段合并规则在 `src/core/task-card-field-patch-resolution.ts`。
 - 账本记账：带 CLI 声明头的请求沿用 `kanban_cli_task_*` 旧意图名、记成 CLI 行动者；页面请求用 `web_ui_task_card_action_*`，并把输入里浏览器声明的 `boardMutationInitiator` 合成为该卡的发起方标注（见 `task-card-action-task-mutation-intent-resolution.ts`）。浏览器侧的接线细节见下文 / web-ui 各 hook。
-- `workspace.setTaskPinboardPinStateOfTaskCard` 内部转发到 `taskCardAction.setTaskPinboardPinStateOfTaskCard`；浏览器（2026-10-05 起）已直调新入口，保留旧入口一个版本给未刷新的旧标签页，之后删。
+- 置顶动作统一直调 `taskCardAction.setTaskPinboardPinStateOfTaskCard`；部署版浏览器已迁移，旧 workspace 转发入口及其专用契约已移除。
 
 **浏览器侧接线（2026-10-05）**：
 - 唯一入口 `web-ui/src/state/task-card-action-commands-for-any-workspace.ts`（每个动作一个 `*ThroughRuntime`），编排在 `task-card-action-command-execution.ts`：同一张卡在三处只有一个在途命令（`stores/task-card-action-commands-in-flight-store.ts`，键带 workspace）→ 当前项目写 overlay → 发命令 → 按服务端的动作后快照核对期望（不符立即撤、字段 patch 换成服务端实际写下的值）→ 等广播回灌把 overlay 换成真相（5 秒兜底）；失败立即撤 overlay。

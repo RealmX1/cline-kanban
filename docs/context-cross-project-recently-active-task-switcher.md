@@ -31,7 +31,7 @@ _Avoid_: In Progress（那是 board 列名，列里允许停着已中断的任�
 agent 没在持有回合、且按 agent 的实测 TTL 估算**主对话** prompt cache 仍热的任务，按**失效时刻升序**排（最快失效的在最前）。**不看是否已读**：读过但没回复的任务，缓存照样在流失。估算在 `estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn`：
 - 计时起点 = 主对话最后一次向模型发请求的时刻：summary sidecar `lastMainAgentConversationModelRequestDispatchObservation`，由 hooks-api 在「harness 紧接着就会发请求」的 hook（未被恢复守卫拦下的 UserPromptSubmit、主对话的 PostToolUse / PostToolUseFailure，Gemini 的 BeforeAgent / AfterTool）上以 ingest 时刻记下（判据 `main-agent-conversation-model-request-dispatch-hook-event-classification.ts`）。子代理内的事件（hook stdin 带 `agent_id`，2026-10-03 用 Claude Code 2.1.288 实测确认只在子代理事件上出现）不记；用户回合里到来的工具事件（主 agent 已 Stop、后台子代理还在跑）不记，例外是工具调用自己引出的提问 / 计划审批 / 授权答完之后。
 - **绝不读 `agentResponseGenerationStopped`**：会话恢复（换 incarnation）也算一次停止边沿，起点会被刷成恢复时刻（2026-10-03 实测三个 Claude 任务显示「18 分钟前」，真实最后请求在 11~21 小时前）。
-- Cursor 没有回合类 hook，起点读最近一次实质输出（有恢复重播保护）。还没观测到发请求事件的存量会话回落到高置信的对话推进观测，低置信 TUI 猜测不用。
+- Cursor 没有回合类 hook，起点读最近一次实质输出（有恢复重播保护）。其余 agent 没有发请求观测时不进 Cache warm 区；对话推进观测只参与剩余区排序。
 - 列资格：只收 **In progress / Review** 列（`isTaskCardBoardColumnEligibleForPromptCacheWarmAwaitingUserSection`）。已移入 Validation 的任务即使缓存仍热也下放到剩余区，由剩余区的排序模式与时间窗决定显不显示（2026-10-04 用户反馈：移入 Validation / Done 就是不打算再接这一轮对话）；Done 本来就在分区前排除。Validation 里 agent 正在干活照样进 Running，置顶照样在 Pinned。
 - 资格按缓存所在位置分：服务端缓存（Claude / Cursor）只要求 `turnOwner !== "agent"`，runtime 重启、会话被回收后照样在区内；同进程缓存（Codex / Kimi）要求 `liveness === "live"` 且起点不早于当前进程的启动时刻，恢复出来的新进程不算。
 - 倒计时药丸的 tooltip 写明起点的绝对时间与来源。
@@ -47,7 +47,7 @@ _Avoid_: hot tasks, urgent
 **Row（面板行）**：
 紧凑行：第 1 行状态点 / agent 图标 / 标题（+ 倒计时药丸），第 2 行项目名 / stage 标签（仅置顶区）与三颗时长药丸（创建、停止生成、对话推进，与卡片同源），置顶区另有第 3 行置顶理由。元信息行 `flex-wrap`：窄宽度下药丸整组折到下一行，不截断、不挑着显示。
 元信息行还显示 worktree 的 git 元数据（2026-10-05 用户要求，与 This project 卡片目录行同一套显隐规则）：相对 base 分支的 ahead / behind 与已集成提交数，以及未提交改动「(N files +A -D)」。Backlog 不显示；没有可说的提交关系、且未提交改动全为 0 时整组隐藏。取数唯一入口 `useTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntry`：
-- 当前项目的行：优先读 `workspace_metadata_updated` 推流 store；Board Scope 下推流只探焦点任务与 auto-review 的 Review 列任务，其余行在推流里没有数据，回落到下面的轮询 store。
+- 当前项目的精简行与完整卡（hover / Keep open）：优先读 `workspace_metadata_updated` 推流 store；Board Scope 下推流只探焦点任务与 auto-review 的 Review 列任务，其余任务在推流里没有数据，回落到下面的轮询 store。完整卡由展开宿主显式传入项目 ID，普通看板卡继续只订阅推流。
 - 全部非 Backlog 的行（含当前项目）：面板挂载且页面可见时，每 5 秒（`EXPERIMENT_NODE`）轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`（每次最多 100 条），结果进按 (workspaceId, taskId) 复合键的 store。服务端 `cross-project-task-worktree-git-metadata-cache.ts` 按键缓存，复用 `workspace-metadata-monitor` 的同一个探针（`src/workspace/task-worktree-git-metadata-probe.ts`）：fs-stat 门控、10 秒兜底、全局 git spawn 并发上限 4、同键单飞、base tip 每次请求每项目每 baseRef 只解析一次，5 分钟没被请求的键淘汰。baseRef / worktreeMode 以服务端 board 为准，不信任客户端。
 - 不并入 `projects_updated`：未提交改动在 agent 写文件时几秒一变，会让 100 KB 级的整份广播变频繁。
 

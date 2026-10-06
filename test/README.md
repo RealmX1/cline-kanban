@@ -79,3 +79,18 @@ fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 t
 - `npm run test:watch`：在相同保护下启动 watch；退出时执行最终 canary 复查。
 
 pre-commit 保持 Biome → typecheck → tests 的顺序；测试子进程的 Git 环境清洗不会改变 hook 随后的 Git 环境。
+
+### 跨项目卡片动作真实浏览器检查
+
+`cross-project-task-switcher-server-card-actions-real-browser.integration.test.ts` 按需启用：真实 runtime、Vite、Chromium、PTY 与 worktree 都由隔离 fixture 管理；本地 Claude 桩不请求模型。覆盖阶段 3/4 的卡片动作与三种跨项目建卡入口，以及阶段 5 的本体卡、置顶分身、rail 副本截图。普通套件跳过此用例，不要求安装 Chromium。
+
+先确保 `web-ui` 的 Playwright Chromium 已安装。将下面两个路径分别换成该浏览器缓存和持久证据目录；显式浏览器缓存路径可避免 guarded runner 覆写 HOME 后找不到浏览器：
+
+```sh
+PLAYWRIGHT_BROWSERS_PATH=/absolute/path/to/playwright-browser-cache \
+KANBAN_RUN_ISOLATED_CROSS_PROJECT_CARD_ACTION_REAL_BROWSER_CHECK=1 \
+KANBAN_ISOLATED_REAL_BROWSER_CHECK_EVIDENCE_OUTPUT_DIRECTORY=/absolute/persistent/browser-check-evidence \
+npm run test:guarded -- --project runtime-integration test/integration/cross-project-task-switcher-server-card-actions-real-browser.integration.test.ts
+```
+
+证据目录包含结果 JSON、截图、fixture 请求与隔离进程日志。测试自行分配端口并拒绝 3484，只收口自己派生的进程；CLI、runtime 和 Vite 均登记到现有子进程清理设施，异常路径也会回收。

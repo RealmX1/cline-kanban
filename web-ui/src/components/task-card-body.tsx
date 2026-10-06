@@ -221,6 +221,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	onNavigateToCanonicalCardInItsStage,
 	onEditTaskPinboardPinReason,
 	taskCardOwnedByOtherProjectWorkspaceId = null,
+	taskCardWorkspaceIdForCrossProjectGitMetadataPolling = null,
 }: TaskCardBusinessProps & {
 	drag?: TaskCardBodyDragBindings | null;
 	renderRole?: TaskCardBodyRenderRole;
@@ -230,6 +231,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 	 * 排队 prompt 不显示（这两样只对当前项目推流）。
 	 */
 	taskCardOwnedByOtherProjectWorkspaceId?: string | null;
+	/** 当前项目展开卡的轮询复合键；普通看板卡继续只订阅推流 store。 */
+	taskCardWorkspaceIdForCrossProjectGitMetadataPolling?: string | null;
 	/** 仅置顶板分身：分身上 stage 标签的展示名，取自该卡真正所在 board 列的 `title`（trash 即 "Done"）。 */
 	stageDisplayNameForTaskPinboardCopy?: string;
 	/** 仅置顶板分身：点 stage 标签跳回原 stage 里的本体卡并高亮。 */
@@ -257,17 +260,19 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const titleInputRef = useRef<HTMLTextAreaElement | null>(null);
 	const titleEditCancelledRef = useRef(false);
 	const isTaskCardOwnedByOtherProject = taskCardOwnedByOtherProjectWorkspaceId !== null;
+	const taskWorkspaceId =
+		taskCardOwnedByOtherProjectWorkspaceId ?? taskCardWorkspaceIdForCrossProjectGitMetadataPolling;
 	const currentProjectReviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(
 		isTaskCardOwnedByOtherProject ? null : card.id,
 	);
-	const otherProjectReviewWorkspaceSnapshot = useCrossProjectTaskWorktreeGitMetadataSnapshotValue(
-		taskCardOwnedByOtherProjectWorkspaceId ?? "",
+	const polledReviewWorkspaceSnapshot = useCrossProjectTaskWorktreeGitMetadataSnapshotValue(
+		taskWorkspaceId ?? "",
 		card.id,
-		isTaskCardOwnedByOtherProject,
+		taskWorkspaceId != null && (isTaskCardOwnedByOtherProject || currentProjectReviewWorkspaceSnapshot == null),
 	);
 	const reviewWorkspaceSnapshot = isTaskCardOwnedByOtherProject
-		? otherProjectReviewWorkspaceSnapshot
-		: currentProjectReviewWorkspaceSnapshot;
+		? polledReviewWorkspaceSnapshot
+		: (currentProjectReviewWorkspaceSnapshot ?? polledReviewWorkspaceSnapshot);
 	const taskWorkspaceInfo = useTaskWorkspaceInfoValue(isTaskCardOwnedByOtherProject ? null : card.id, card.baseRef);
 	const taskAgentSessionLaunchHistoryEvidence = resolveTaskAgentSessionLaunchHistoryEvidence({
 		mostRecentlyLaunchedAgentSessionAgentId: card.mostRecentlyLaunchedAgentSessionAgentId,

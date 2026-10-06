@@ -346,8 +346,6 @@ import {
 	runtimeRunUpdateResponseSchema,
 	runtimeSaveExploratoryFindingRequestSchema,
 	runtimeSaveExploratoryFindingResponseSchema,
-	runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema,
-	runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema,
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
 	runtimeSlashCommandsResponseSchema,
@@ -1695,27 +1693,6 @@ export const runtimeAppRouter = t.router({
 					input,
 					ctx.kanbanRequestOriginActorEvidence,
 				);
-			}),
-		// 旧入口，只为还没切到 taskCardAction 的浏览器构建保留一个版本：转发到唯一实现
-		// taskCardAction.setTaskPinboardPinStateOfTaskCard，再把响应收窄回旧形状（卡不存在 → taskCardFound:false）。
-		// 旧调用方只有跨项目切换面板的置顶按钮，恒为用户手势，所以转发时补上发起方——迁移前这里在账本里记成「缺标注」。
-		setTaskPinboardPinStateOfTaskCard: workspaceProcedure
-			.input(runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema)
-			.output(runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				try {
-					const response = await ctx.taskCardActionApi.setTaskPinboardPinStateOfTaskCard(
-						ctx.workspaceScope,
-						{ ...input, boardMutationInitiator: "web_ui_user_gesture" },
-						ctx.kanbanRequestOriginActorEvidence,
-					);
-					return { taskCardFound: true, boardWasSaved: response.boardWasSaved };
-				} catch (error) {
-					if (error instanceof TRPCError && error.code === "NOT_FOUND") {
-						return { taskCardFound: false, boardWasSaved: false };
-					}
-					throw error;
-				}
 			}),
 		// `kanban task create` 只经这里落盘：runtime 按请求头的 CLI 行动者声明解析行动者后进入持久化漏斗。
 		// runtime 离线时 CLI 直接报错，不回退直接写盘（dd2db 1a.2b）。其余 CLI 写动词走 taskCardAction.*。

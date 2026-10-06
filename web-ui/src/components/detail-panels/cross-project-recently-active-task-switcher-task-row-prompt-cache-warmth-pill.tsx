@@ -31,8 +31,6 @@ const PROMPT_CACHE_WARMTH_ANCHOR_SOURCE_DESCRIPTION: Record<
 	manual_compaction_replaced_main_conversation_without_follow_up_request:
 		"manual /compact completed (conversation replaced by a summary)",
 	last_substantive_agent_terminal_output: "last substantive agent output (agent has no turn hooks)",
-	high_confidence_last_conversation_progress_observation_fallback:
-		"conversation last advanced (fallback: no model request observed yet)",
 };
 
 function isPromptCacheWarmthAnchoredOnManualCompaction(
