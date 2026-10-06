@@ -4750,6 +4750,25 @@ export type RuntimeHookIngestResponse = z.infer<typeof runtimeHookIngestResponse
 
 // ── 待答用户决策的读写契约（会话被回收后仍能重现并作答）─────────────────────────────────
 // decisionKind 刻意只有两种、**没有 plan_review**：计划审批不做 carry-forward。
+export const runtimePendingUserDecisionQuestionAnswerDraftSchema = z.object({
+	decisionQuestionId: z.string(),
+	selectedOptionIds: z.array(z.string()),
+	freeformText: z.string().nullable(),
+});
+export type RuntimePendingUserDecisionQuestionAnswerDraft = z.infer<
+	typeof runtimePendingUserDecisionQuestionAnswerDraftSchema
+>;
+
+export const runtimeAgentRaisedPendingUserDecisionAnswerDraftSchema = z.object({
+	orderedQuestionAnswers: z.array(runtimePendingUserDecisionQuestionAnswerDraftSchema),
+	savedAt: z.number(),
+	// 浏览器编辑时产生的递增版本；旧草稿无此字段，不能让旧备份覆盖已确认的新版本。
+	answerDraftEditVersion: z.number().int().nonnegative().optional(),
+});
+export type RuntimeAgentRaisedPendingUserDecisionAnswerDraft = z.infer<
+	typeof runtimeAgentRaisedPendingUserDecisionAnswerDraftSchema
+>;
+
 export const runtimeAgentRaisedPendingUserDecisionSchema = z.object({
 	decisionId: z.string(),
 	taskId: z.string(),
@@ -4774,6 +4793,8 @@ export const runtimeAgentRaisedPendingUserDecisionSchema = z.object({
 	// 即说明 agent 此刻正停在终端里的交互式选择器上——UI 据此默认折叠、引导去终端作答；
 	// 不同（会话已被回收 / 重启 / resume）或为 null（来源不明，如转录补录）则选择器早已不在，UI 主动展开。
 	originRuntimeSessionIncarnationId: z.string().nullable(),
+	// 尚未提交的面板编辑，与已记录答案分开；旧版本无此字段。
+	pendingAnswerDraft: runtimeAgentRaisedPendingUserDecisionAnswerDraftSchema.nullable().optional(),
 	// 已记下但尚未确认送达的答案；让 UI 在「已保存、未送达」时如实回显用户答了什么，而不是一张空表单。
 	recordedAnswerQuestionAnswers: z
 		.array(
@@ -4864,6 +4885,26 @@ export const runtimeListAgentRaisedPendingUserDecisionsRequestSchema = z.object(
 });
 export type RuntimeListAgentRaisedPendingUserDecisionsRequest = z.infer<
 	typeof runtimeListAgentRaisedPendingUserDecisionsRequestSchema
+>;
+
+export const runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema = z.object({
+	taskId: z.string().min(1),
+	decisionId: z.string().min(1),
+	orderedQuestionAnswers: z.array(runtimePendingUserDecisionQuestionAnswerDraftSchema),
+	answerDraftEditVersion: z.number().int().nonnegative().optional(),
+});
+export type RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequest = z.infer<
+	typeof runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema
+>;
+
+export const runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema = z.object({
+	ok: z.boolean(),
+	pendingAnswerDraft: runtimeAgentRaisedPendingUserDecisionAnswerDraftSchema.nullable(),
+	decisionIsNoLongerPending: z.boolean(),
+	error: z.string().optional(),
+});
+export type RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponse = z.infer<
+	typeof runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema
 >;
 
 export const runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema = z.object({

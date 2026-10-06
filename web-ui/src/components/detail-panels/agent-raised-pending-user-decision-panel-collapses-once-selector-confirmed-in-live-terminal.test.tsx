@@ -46,6 +46,7 @@ function renderPanelWithSelectorSignals(signals: {
 	act(() => {
 		root?.render(
 			<AgentRaisedPendingUserDecisionPanel
+				workspaceId="workspace-test"
 				decision={pendingDecisionRaisedInCurrentIncarnation}
 				isSubmitting={false}
 				onAnswer={vi.fn(async () => true)}

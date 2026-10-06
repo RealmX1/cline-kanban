@@ -132,6 +132,8 @@ import type {
 	RuntimeRunPostDeployVerificationItemRequest,
 	RuntimeRunPostDeployVerificationItemResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequest,
+	RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponse,
 	RuntimeSaveExploratoryFindingRequest,
 	RuntimeSaveExploratoryFindingResponse,
 	RuntimeShellSessionStartRequest,
@@ -344,6 +346,8 @@ import {
 	runtimeRunPostDeployVerificationItemRequestSchema,
 	runtimeRunPostDeployVerificationItemResponseSchema,
 	runtimeRunUpdateResponseSchema,
+	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema,
+	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema,
 	runtimeSaveExploratoryFindingRequestSchema,
 	runtimeSaveExploratoryFindingResponseSchema,
 	runtimeShellSessionStartRequestSchema,
@@ -555,6 +559,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 		) => Promise<RuntimeAnswerAgentRaisedPendingUserDecisionResponse>;
+		saveAgentRaisedPendingUserDecisionAnswerDraft: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequest,
+		) => Promise<RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponse>;
 		dismissAgentRaisedPendingUserDecision: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeDismissAgentRaisedPendingUserDecisionRequest,
@@ -1272,6 +1280,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.listAgentRaisedUserDecisionHistoryForTask(ctx.workspaceScope, input);
+			}),
+		saveAgentRaisedPendingUserDecisionAnswerDraft: workspaceProcedure
+			.input(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema)
+			.output(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.saveAgentRaisedPendingUserDecisionAnswerDraft(ctx.workspaceScope, input);
 			}),
 		answerAgentRaisedPendingUserDecision: workspaceProcedure
 			.input(runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema)
