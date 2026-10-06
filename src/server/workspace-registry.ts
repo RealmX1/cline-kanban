@@ -29,6 +29,7 @@ import {
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 	type RuntimeWorkspaceIndexEntry,
 } from "../state/workspace-state";
+import { createClaudeCodeBackgroundSessionDaemonCliClient } from "../terminal/claude-code-background-session-ownership-preflight-before-resume";
 import { backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate } from "../terminal/cursor-agent-chat-identity-backfill-before-hydrate";
 import { TerminalSessionManager } from "../terminal/session-manager";
 import type {
@@ -421,6 +422,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 						readCurrentSessionSummary,
 					);
 				},
+				claudeCodeBackgroundSessionDaemonClient: createClaudeCodeBackgroundSessionDaemonCliClient(),
 			});
 			const hostedTerminalPtySessionAdoptionCandidates =
 				deps.takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace?.(workspaceId) ?? [];

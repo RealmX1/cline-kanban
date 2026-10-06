@@ -55,6 +55,10 @@ export interface UsePersistentTerminalSessionResult {
 	// 「从既有对话迁入」：把选定的那段对话迁进本会话再按 id 续跑（服务端语义见 api-contract 的
 	// adoptExistingAgentConversationAsTaskSessionIdentity）。与 refreshTerminal 共用 isRefreshing / lastError。
 	adoptExistingAgentConversationAndResume: (initialization: RuntimeTaskAgentSessionInitialization) => Promise<void>;
+	// 「停止后台会话并在这里续跑」：对话被 Claude 后台会话占着、又不能安全收回时，用户确认后无条件接管
+	// （服务端语义见 api-contract 的 forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser）。
+	// 与 refreshTerminal 共用 isRefreshing / lastError。
+	forceStopHarnessBackgroundSessionAndResumeHere: () => Promise<void>;
 	resyncTerminalView: () => Promise<void>;
 	scrollTerminalToLatest: () => void;
 	stopTerminal: () => Promise<void>;
@@ -302,14 +306,21 @@ export function usePersistentTerminalSession({
 	}, []);
 
 	const refreshTerminalAdoptingOptionalExistingAgentConversation = useCallback(
-		async (adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization) => {
+		async (
+			adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization,
+			forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser?: boolean,
+		) => {
 			const terminal = terminalRef.current;
 			if (!terminal) {
 				return;
 			}
 			setIsRefreshing(true);
 			try {
-				const result = await terminal.refresh(undefined, adoptExistingAgentConversationAsTaskSessionIdentity);
+				const result = await terminal.refresh(
+					undefined,
+					adoptExistingAgentConversationAsTaskSessionIdentity,
+					forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
+				);
 				if (!result.ok && result.error) {
 					setLastError(result.error);
 				}
@@ -331,6 +342,11 @@ export function usePersistentTerminalSession({
 	const adoptExistingAgentConversationAndResume = useCallback(
 		async (initialization: RuntimeTaskAgentSessionInitialization) =>
 			await refreshTerminalAdoptingOptionalExistingAgentConversation(initialization),
+		[refreshTerminalAdoptingOptionalExistingAgentConversation],
+	);
+
+	const forceStopHarnessBackgroundSessionAndResumeHere = useCallback(
+		async () => await refreshTerminalAdoptingOptionalExistingAgentConversation(undefined, true),
 		[refreshTerminalAdoptingOptionalExistingAgentConversation],
 	);
 
@@ -395,6 +411,7 @@ export function usePersistentTerminalSession({
 		openTerminalSearch,
 		refreshTerminal,
 		adoptExistingAgentConversationAndResume,
+		forceStopHarnessBackgroundSessionAndResumeHere,
 		resyncTerminalView,
 		scrollTerminalToLatest,
 		stopTerminal,

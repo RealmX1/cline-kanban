@@ -71,6 +71,7 @@ export function doesTaskSessionStartOriginCountAsHumanInterventionClearingAutoRe
 		case "stale_session_client_auto_resume":
 		case "home_agent_panel_auto_start":
 		case "durable_record_rebuilt_resume":
+		case "harness_background_session_reclaim_watch_auto_resume":
 			return false;
 	}
 }

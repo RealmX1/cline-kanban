@@ -37,6 +37,18 @@ export type RuntimeAgentRestorationContinuationGuardDisarmSignal =
 	// 30 分钟兜底，期间排队投递一直被挡。
 	| "terminal_submission_edge_without_reliable_user_prompt_submit_hook";
 
+// 这个 agent 的对话能否被 **harness 自己的后台会话守护进程**占住，以及续跑前怎样核对、收回。
+//
+// 存在理由：Claude Code 2.1.29x 起，用户在 kanban 终端里执行 `/background`（`/bg`）会把对话 fork 进 Claude
+// 自己的守护进程（`claude daemon` → `bg-pty-host`），原会话转录末尾写下 `continued-in`。之后 kanban 按 id
+// 续跑，`claude --resume <id>` 会被拒绝并立即 exit 1（"That session is running in the background"）。
+// 只有声明了核对方式的 agent，续跑前才会去问 harness「这段对话是不是被后台会话占着」。
+export type RuntimeAgentNativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod =
+	// `claude agents --json --cwd <cwd>` 列出存活会话；空闲的后台会话用 `claude stop <id>` 收回（对话保留）。
+	| "claude_code_agents_json_listing_and_stop"
+	// 这个 harness 没有能把对话搬出 kanban 终端的后台守护进程。
+	| "not_applicable";
+
 export interface RuntimeAgentCatalogEntry {
 	id: RuntimeAgentId;
 	label: string;
@@ -47,6 +59,7 @@ export interface RuntimeAgentCatalogEntry {
 	sessionTransport: RuntimeAgentSessionTransport;
 	nativeConversationSessionIdentityCaptureMethod: RuntimeAgentNativeConversationSessionIdentityCaptureMethod;
 	restorationContinuationGuardDisarmSignal: RuntimeAgentRestorationContinuationGuardDisarmSignal;
+	nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: RuntimeAgentNativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod;
 }
 
 export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
@@ -60,6 +73,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "agent_hook_stdin_session_id",
 		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod:
+			"claude_code_agents_json_listing_and_stop",
 	},
 	{
 		id: "codex",
@@ -71,6 +86,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "agent_hook_stdin_session_id",
 		restorationContinuationGuardDisarmSignal: "terminal_submission_edge_without_reliable_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 	{
 		id: "cline",
@@ -82,6 +98,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "in_process_cline_sdk",
 		nativeConversationSessionIdentityCaptureMethod: "in_process_sdk_owns_conversation_history",
 		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 	{
 		id: "cursor",
@@ -93,6 +110,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "kanban_assigned_before_agent_launch",
 		restorationContinuationGuardDisarmSignal: "terminal_submission_edge_without_reliable_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 	{
 		id: "opencode",
@@ -104,6 +122,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "not_captured",
 		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 	{
 		id: "droid",
@@ -115,6 +134,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "not_captured",
 		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 	{
 		id: "kiro",
@@ -126,6 +146,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "not_captured",
 		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 	{
 		id: "gemini",
@@ -137,6 +158,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "not_captured",
 		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 	{
 		id: "kimi",
@@ -148,6 +170,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "agent_hook_stdin_session_id",
 		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 	{
 		id: "omp",
@@ -163,6 +186,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "managed_agent_extension_ingest",
 		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
+		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 ];
 
@@ -260,6 +284,15 @@ export function isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch(a
 	return (
 		getRuntimeAgentCatalogEntry(agentId)?.nativeConversationSessionIdentityCaptureMethod ===
 		"kanban_assigned_before_agent_launch"
+	);
+}
+
+// 续跑前是否要核对「这段对话正被 harness 自己的后台会话守护进程占着」（见上方同名类型）。
+export function isAgentNativeConversationHoldableByHarnessBackgroundSessionDaemon(agentId: RuntimeAgentId): boolean {
+	return (
+		getRuntimeAgentCatalogEntry(agentId)
+			?.nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod ===
+		"claude_code_agents_json_listing_and_stop"
 	);
 }
 
