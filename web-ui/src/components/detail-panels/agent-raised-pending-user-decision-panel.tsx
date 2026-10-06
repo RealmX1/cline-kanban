@@ -9,11 +9,13 @@ import {
 } from "@/components/detail-panels/agent-raised-user-decision-question-content";
 import { Button } from "@/components/ui/button";
 import type { PendingUserDecisionQuestionAnswerDraft } from "@/hooks/use-agent-raised-pending-user-decision";
+import { useAgentRaisedPendingUserDecisionAnswerDraft } from "@/hooks/use-agent-raised-pending-user-decision-answer-draft";
 import type { RuntimeAgentRaisedPendingUserDecision } from "@/runtime/types";
 
-// 调用方必须以 decision.decisionId 作为 key 挂载本组件：草稿选择、展开状态都是「这一次提问」的局部状态，
+// 调用方必须以 workspace + task + decision 作为 key 挂载本组件：草稿选择、展开状态属于「这一次提问」，
 // 换了问题就该从头开始，而不是把上一题勾选的选项 id 带进新题。
 export function AgentRaisedPendingUserDecisionPanel({
+	workspaceId,
 	decision,
 	isSubmitting,
 	onAnswer,
@@ -21,7 +23,9 @@ export function AgentRaisedPendingUserDecisionPanel({
 	agentResponseGenerationTurnSequence,
 	isAgentStoppedOnThisQuestionSelectorInLiveTerminal,
 	isQuestionRaisedByEarlierAgentSessionIncarnation,
+	onDecisionNoLongerPending,
 }: {
+	workspaceId: string | null;
 	decision: RuntimeAgentRaisedPendingUserDecision;
 	isSubmitting: boolean;
 	onAnswer: (answers: PendingUserDecisionQuestionAnswerDraft[]) => Promise<boolean>;
@@ -34,20 +38,26 @@ export function AgentRaisedPendingUserDecisionPanel({
 	// 刻意**不**用「选择器从在线变为不在线」触发：用户在同一会话里拒答后继续工作时它同样成立，
 	// 那时弹出面板只会打断人（Claude 的终端拒答不触发任何 hook，账本无从得知这次拒答）。
 	isQuestionRaisedByEarlierAgentSessionIncarnation: boolean;
+	onDecisionNoLongerPending?: () => void;
 }) {
 	const [isExpanded, setIsExpanded] = useState(!isAgentStoppedOnThisQuestionSelectorInLiveTerminal);
 	const initialAgentResponseGenerationTurnSequenceRef = useRef(agentResponseGenerationTurnSequence);
-	const [selectedOptionIdsByQuestionId, setSelectedOptionIdsByQuestionId] = useState<Record<string, string[]>>({});
-	const [freeformTextByQuestionId, setFreeformTextByQuestionId] = useState<Record<string, string>>({});
+	const { questionAnswerDrafts, updateQuestionAnswerDraft, discardAnswerDraft, draftSaveStatusText } =
+		useAgentRaisedPendingUserDecisionAnswerDraft({ workspaceId, decision, onDecisionNoLongerPending });
 	const answerIsRecordedButNotYetDelivered = decision.recordedAnswerQuestionAnswers !== null;
 	const answers = useMemo(
 		() =>
 			decision.orderedQuestions.map((question) => ({
 				decisionQuestionId: question.decisionQuestionId,
-				selectedOptionIds: selectedOptionIdsByQuestionId[question.decisionQuestionId] ?? [],
-				freeformText: freeformTextByQuestionId[question.decisionQuestionId]?.trim() || null,
+				selectedOptionIds:
+					questionAnswerDrafts.find((answer) => answer.decisionQuestionId === question.decisionQuestionId)
+						?.selectedOptionIds ?? [],
+				freeformText:
+					questionAnswerDrafts
+						.find((answer) => answer.decisionQuestionId === question.decisionQuestionId)
+						?.freeformText?.trim() || null,
 			})),
-		[decision.orderedQuestions, freeformTextByQuestionId, selectedOptionIdsByQuestionId],
+		[decision.orderedQuestions, questionAnswerDrafts],
 	);
 
 	useEffect(() => {
@@ -130,7 +140,10 @@ export function AgentRaisedPendingUserDecisionPanel({
 					) : (
 						<>
 							{decision.orderedQuestions.map((question, questionIndex) => {
-								const selectedOptionIds = selectedOptionIdsByQuestionId[question.decisionQuestionId] ?? [];
+								const questionAnswerDraft = questionAnswerDrafts.find(
+									(answer) => answer.decisionQuestionId === question.decisionQuestionId,
+								);
+								const selectedOptionIds = questionAnswerDraft?.selectedOptionIds ?? [];
 								const selectedOptionWithPreview = question.options.find(
 									(option) => selectedOptionIds.includes(option.optionId) && option.previewText,
 								);
@@ -165,10 +178,9 @@ export function AgentRaisedPendingUserDecisionPanel({
 																value={option.optionId}
 																checked={checked}
 																onChange={() =>
-																	setSelectedOptionIdsByQuestionId((previous) => ({
-																		...previous,
-																		[question.decisionQuestionId]: [option.optionId],
-																	}))
+																	updateQuestionAnswerDraft(question.decisionQuestionId, {
+																		selectedOptionIds: [option.optionId],
+																	})
 																}
 																className="mt-1 size-3.5 shrink-0 accent-accent"
 															/>
@@ -177,13 +189,12 @@ export function AgentRaisedPendingUserDecisionPanel({
 																id={optionInputId}
 																checked={checked}
 																onCheckedChange={(nextChecked) =>
-																	setSelectedOptionIdsByQuestionId((previous) => ({
-																		...previous,
-																		[question.decisionQuestionId]:
+																	updateQuestionAnswerDraft(question.decisionQuestionId, {
+																		selectedOptionIds:
 																			nextChecked === true
 																				? [...selectedOptionIds, option.optionId]
 																				: selectedOptionIds.filter((id) => id !== option.optionId),
-																	}))
+																	})
 																}
 																className="mt-1 flex size-3.5 shrink-0 items-center justify-center rounded-sm border border-border-bright data-[state=checked]:border-accent data-[state=checked]:bg-accent"
 															>
@@ -204,12 +215,11 @@ export function AgentRaisedPendingUserDecisionPanel({
 										) : null}
 										{question.allowsFreeformAnswer ? (
 											<textarea
-												value={freeformTextByQuestionId[question.decisionQuestionId] ?? ""}
+												value={questionAnswerDraft?.freeformText ?? ""}
 												onChange={(event) =>
-													setFreeformTextByQuestionId((previous) => ({
-														...previous,
-														[question.decisionQuestionId]: event.target.value,
-													}))
+													updateQuestionAnswerDraft(question.decisionQuestionId, {
+														freeformText: event.target.value,
+													})
 												}
 												placeholder={
 													questionIndex === 0 ? "其他回答或补充说明" : "此问题的其他回答或补充说明"
@@ -226,12 +236,19 @@ export function AgentRaisedPendingUserDecisionPanel({
 								</p>
 							) : null}
 							<div className="flex justify-end gap-2">
+								{draftSaveStatusText ? (
+									<span role="status" className="mr-auto self-center text-[11px] text-text-secondary">
+										{draftSaveStatusText}
+									</span>
+								) : null}
 								<Button
 									variant="ghost"
 									size="sm"
 									icon={<X size={14} />}
 									disabled={isSubmitting}
-									onClick={() => void onDismiss()}
+									onClick={async () => {
+										if (await onDismiss()) discardAnswerDraft();
+									}}
 								>
 									取消问题
 								</Button>
@@ -240,7 +257,10 @@ export function AgentRaisedPendingUserDecisionPanel({
 									size="sm"
 									disabled={isSubmitting}
 									onClick={async () => {
-										if (await onAnswer(answers)) setIsExpanded(false);
+										if (await onAnswer(answers)) {
+											discardAnswerDraft();
+											setIsExpanded(false);
+										}
 									}}
 								>
 									提交回答

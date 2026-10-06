@@ -1497,11 +1497,17 @@ export function CardDetailView({
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
 			{pendingUserDecision.decision ? (
 				<AgentRaisedPendingUserDecisionPanel
-					key={pendingUserDecision.decision.decisionId}
+					key={JSON.stringify([
+						currentProjectId,
+						selectedTaskConversationSessionId,
+						pendingUserDecision.decision.decisionId,
+					])}
+					workspaceId={currentProjectId}
 					decision={pendingUserDecision.decision}
 					isSubmitting={pendingUserDecision.isSubmitting}
 					onAnswer={pendingUserDecision.answer}
 					onDismiss={pendingUserDecision.dismiss}
+					onDecisionNoLongerPending={() => void pendingUserDecision.refresh()}
 					agentResponseGenerationTurnSequence={
 						activeTaskConversationSessionSummary?.agentResponseGenerationTurnSequence ?? 0
 					}

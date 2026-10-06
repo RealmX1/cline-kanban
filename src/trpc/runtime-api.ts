@@ -123,6 +123,7 @@ import {
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedPendingUserDecisionOrderedQuestions,
 	resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession,
+	saveAgentRaisedPendingUserDecisionAnswerDraft,
 } from "../state/agent-raised-pending-user-decision-store";
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
 import { withMigratedTaskEditDraftsForTasksNoLongerOnBoardDropped } from "../state/discard-task-edit-drafts-for-tasks-removed-from-board";
@@ -1543,6 +1544,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						answerDeliveryState: decision.answerDeliveryState,
 						lastAnswerDeliveryFailureReason: decision.lastAnswerDeliveryFailureReason,
 						originRuntimeSessionIncarnationId: decision.originRuntimeSessionIncarnationId,
+						pendingAnswerDraft: decision.status === "pending" ? (decision.pendingAnswerDraft ?? null) : null,
 						recordedAnswerQuestionAnswers:
 							decision.answer === null
 								? null
@@ -1555,6 +1557,24 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									]),
 					})),
 			};
+		},
+		saveAgentRaisedPendingUserDecisionAnswerDraft: async (workspaceScope, input) => {
+			try {
+				const saved = await saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceScope.workspaceId, input);
+				return {
+					ok: saved !== null,
+					pendingAnswerDraft: saved?.pendingAnswerDraft ?? null,
+					decisionIsNoLongerPending: saved === null,
+					...(saved === null ? { error: "问题已了结，无法保存草稿" } : {}),
+				};
+			} catch (error) {
+				return {
+					ok: false,
+					pendingAnswerDraft: null,
+					decisionIsNoLongerPending: false,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
 		},
 		answerAgentRaisedPendingUserDecision: async (workspaceScope, input) => {
 			try {
