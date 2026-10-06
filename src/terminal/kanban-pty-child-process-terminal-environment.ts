@@ -3,6 +3,11 @@
 // 从 session-manager.ts 抽出：runtime 进程内 spawn 与 agent session PTY host 代 spawn（热重启方案）
 // 都必须用同一份环境；host 不能自己再拼一遍，否则两条路径起出来的 agent 看到的终端身份会漂移。
 
+import {
+	AGENT_SESSION_PTY_HOST_HOSTED_SESSION_KEY_ENVIRONMENT_VARIABLE_NAME,
+	AGENT_SESSION_PTY_HOST_SOCKET_PATH_ENVIRONMENT_VARIABLE_NAME,
+} from "../agent-session-pty-host/runtime-client/hosted-session-cli-client-requests-to-agent-session-pty-host";
+
 export interface TerminalEnvironmentOptions {
 	forceColor: boolean;
 }
@@ -30,12 +35,23 @@ const INHERITED_HOST_TERMINAL_IDENTITY_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY: readon
 	"TERM_FEATURES",
 ];
 
+// 「这条会话由哪个 agent session PTY host 托管」的绑定只属于被托管的那条会话本身（host 模式下由 runtime 在
+// spawn 时显式写入）。runtime 自己若跑在某条 hosted 会话里（例如在 agent 里起的隔离实例），会继承外层会话的
+// 绑定；原样传下去，内层 agent 的 hook 在内层 runtime 不可达时就会存进外层会话的 spool、被外层 runtime 应用。
+const INHERITED_AGENT_SESSION_PTY_HOST_BINDING_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY: readonly string[] = [
+	AGENT_SESSION_PTY_HOST_SOCKET_PATH_ENVIRONMENT_VARIABLE_NAME,
+	AGENT_SESSION_PTY_HOST_HOSTED_SESSION_KEY_ENVIRONMENT_VARIABLE_NAME,
+];
+
 export function buildTerminalEnvironment(
 	options: TerminalEnvironmentOptions,
 	...sources: Array<Record<string, string | undefined> | undefined>
 ): Record<string, string | undefined> {
 	const inheritedProcessEnvWithoutHostTerminalIdentity: Record<string, string | undefined> = { ...process.env };
-	for (const key of INHERITED_HOST_TERMINAL_IDENTITY_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY) {
+	for (const key of [
+		...INHERITED_HOST_TERMINAL_IDENTITY_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY,
+		...INHERITED_AGENT_SESSION_PTY_HOST_BINDING_ENV_KEYS_STRIPPED_FROM_KANBAN_PTY,
+	]) {
 		delete inheritedProcessEnvWithoutHostTerminalIdentity[key];
 	}
 	const env: Record<string, string | undefined> = {

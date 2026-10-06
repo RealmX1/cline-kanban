@@ -493,6 +493,17 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 	const runtimeServer = await createRuntimeServer({
 		workspaceRegistry,
 		runtimeStateHub: runtimeHub,
+		agentSessionPtyHostHookSpool: agentSessionPtyHostRuntimeFacade
+			? {
+					bindSpooledHookIngestRequestApplier: (spooledHookIngestRequestApplier) =>
+						agentSessionPtyHostRuntimeFacade.bindSpooledHookIngestRequestApplier(spooledHookIngestRequestApplier),
+					drainPendingHookSpoolEntriesBeforeDirectHookIngest: (workspaceId, taskId) =>
+						agentSessionPtyHostRuntimeFacade.drainPendingHookSpoolEntriesBeforeDirectHookIngest(
+							workspaceId,
+							taskId,
+						),
+				}
+			: undefined,
 		warn: (message) => {
 			console.warn(`[kanban] ${message}`);
 		},

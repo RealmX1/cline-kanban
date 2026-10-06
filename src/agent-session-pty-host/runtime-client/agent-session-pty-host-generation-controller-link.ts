@@ -34,6 +34,20 @@ interface CatchUpOutputRoutingAwaitingFullDelivery {
 	rejectBecauseConnectionClosedBeforeCatchUpRangeFullyDelivered: (error: Error) => void;
 }
 
+// 会话的 hook spool 与退出之间的先后：先排空 → 交付退出 → 确认退出 → 再读直到 host 不认识这条会话才注销目标
+// （支持 spool 的 host 在确认退出时若 spool 非空会保留会话，等 spool 被确认清空再移除）。
+export interface AgentSessionPtyHostGenerationControllerLinkHookSpoolCallbacks {
+	onHostedSessionHookSpoolEntriesPending: (hostedSessionKey: string, pendingHookSpoolEntryCount: number) => void;
+	// 只有登记了排空目标的会话（支持 spool 的 host 上、本 runtime spawn / 接管的）才走排空顺序；其余同步交付退出。
+	isHostedSessionRegisteredAsHookSpoolDrainTarget: (hostedSessionKey: string) => boolean;
+	drainHookSpoolBeforeDeliveringExit: (hostedSessionKey: string) => Promise<void>;
+	drainHookSpoolAfterExitAcknowledgedUntilHostForgetsHostedSessionThenForgetTarget: (
+		hostedSessionKey: string,
+	) => Promise<void>;
+	// 连接断开、本 runtime 再也操作不到这条会话：取消它的排空（在途 / 排队的排空不再应用、不再确认）。
+	forgetHostedSessionHookSpoolDrainTarget: (hostedSessionKey: string) => void;
+}
+
 export class AgentSessionPtyHostGenerationControllerLink {
 	private readonly handlesByChannelNumber = new Map<number, HostedTerminalPtyProcessHandleOverAgentSessionPtyHost>();
 	private readonly handlesByHostedSessionKey = new Map<
@@ -61,8 +75,14 @@ export class AgentSessionPtyHostGenerationControllerLink {
 		readonly connection: AgentSessionPtyHostControllerConnection,
 		private readonly warn: (message: string) => void,
 		private readonly onLinkClosed: (link: AgentSessionPtyHostGenerationControllerLink) => void,
+		private readonly hookSpoolCallbacks?: AgentSessionPtyHostGenerationControllerLinkHookSpoolCallbacks,
 	) {
 		connection.setEventHandlers({
+			onHostedSessionHookSpoolEntriesPending: (hostedSessionKey, pendingHookSpoolEntryCount) =>
+				this.hookSpoolCallbacks?.onHostedSessionHookSpoolEntriesPending(
+					hostedSessionKey,
+					pendingHookSpoolEntryCount,
+				),
 			onHostedSessionOutput: (hostedSessionChannelNumber, startByteOffset, bytes) =>
 				this.routeHostedSessionOutputFrame(hostedSessionChannelNumber, startByteOffset, bytes),
 			onHostedSessionExited: (hostedSessionKey, exitRecord) => {
@@ -72,7 +92,7 @@ export class AgentSessionPtyHostGenerationControllerLink {
 					return;
 				}
 				if (this.hostedSessionKeysAcknowledgedOnExitWithoutHandle.delete(hostedSessionKey)) {
-					this.acknowledgeHostedSessionExit(hostedSessionKey);
+					this.acknowledgeExitOfHostedSessionTerminatedAfterRefusedAdoption(hostedSessionKey);
 					return;
 				}
 				this.exitRecordsArrivedBeforeHandleRegistrationByHostedSessionKey.set(hostedSessionKey, exitRecord);
@@ -121,23 +141,49 @@ export class AgentSessionPtyHostGenerationControllerLink {
 		}
 	}
 
+	// spool 里可能还有该会话退出前的 hook 事件（最后一个 Stop 往往就在其中）：先排空、再交付退出、再确认，
+	// 确认之后再读到 host 不认识这条会话为止（排空之后、确认之前才存进来的条目由 host 保留到被取走）。
+	// 没有登记排空目标（旧 host、或 runtime 未接管）时同步交付，与没有 spool 时的时序一致。
 	deliverExitToHandleAndAcknowledge(
 		handle: HostedTerminalPtyProcessHandleOverAgentSessionPtyHost,
 		exitRecord: AgentSessionPtyHostHostedSessionExitRecord,
 	): void {
 		this.handlesByChannelNumber.delete(handle.hostedSessionChannelNumber);
 		this.handlesByHostedSessionKey.delete(handle.hostedSessionKey);
-		handle.deliverHostedSessionExit({
-			exitCode: exitRecord.exitCode,
-			...(exitRecord.signal !== null ? { signal: exitRecord.signal } : {}),
-		});
-		// EXPERIMENT_NODE: 退出一交付就确认；补齐 hook spool 之后改为「先排空该会话的 spool，再确认」（计划 P3）。
-		this.acknowledgeHostedSessionExit(handle.hostedSessionKey);
+		const deliverExitThenAcknowledge = () => {
+			handle.deliverHostedSessionExit({
+				exitCode: exitRecord.exitCode,
+				...(exitRecord.signal !== null ? { signal: exitRecord.signal } : {}),
+			});
+			this.connection.sendControlMessage({
+				type: "acknowledge_hosted_session_exit",
+				hostedSessionKey: handle.hostedSessionKey,
+			});
+		};
+		const hookSpoolCallbacks = this.hookSpoolCallbacks;
+		if (
+			hookSpoolCallbacks === undefined ||
+			!hookSpoolCallbacks.isHostedSessionRegisteredAsHookSpoolDrainTarget(handle.hostedSessionKey)
+		) {
+			deliverExitThenAcknowledge();
+			return;
+		}
+		// 排空失败（连接断开、读超时）也照样交付退出：会话确实已经退出了，未取走的条目由 host 随会话保留。
+		void hookSpoolCallbacks
+			.drainHookSpoolBeforeDeliveringExit(handle.hostedSessionKey)
+			.catch(() => undefined)
+			.then(() => {
+				deliverExitThenAcknowledge();
+				// 读请求与刚发出的退出确认在同一连接上有序：读到的是确认之后的状态。
+				void hookSpoolCallbacks.drainHookSpoolAfterExitAcknowledgedUntilHostForgetsHostedSessionThenForgetTarget(
+					handle.hostedSessionKey,
+				);
+			});
 	}
 
 	terminateHostedSessionWithoutHandle(hostedSessionKey: string, alreadyExited: boolean): void {
 		if (alreadyExited) {
-			this.acknowledgeHostedSessionExit(hostedSessionKey);
+			this.acknowledgeExitOfHostedSessionTerminatedAfterRefusedAdoption(hostedSessionKey);
 			return;
 		}
 		this.hostedSessionKeysAcknowledgedOnExitWithoutHandle.add(hostedSessionKey);
@@ -148,8 +194,14 @@ export class AgentSessionPtyHostGenerationControllerLink {
 		this.runtimeIsClosingControllerConnections = true;
 	}
 
-	private acknowledgeHostedSessionExit(hostedSessionKey: string): void {
-		this.connection.sendControlMessage({ type: "acknowledge_hosted_session_exit", hostedSessionKey });
+	// 拒绝接管、已下令终止的会话：本 runtime 不为它排空 spool，显式要求 host 连同 spool 一并移除（host 记日志），
+	// 否则支持 spool 的 host 会为它保留会话、等一个永远不会来的排空。
+	private acknowledgeExitOfHostedSessionTerminatedAfterRefusedAdoption(hostedSessionKey: string): void {
+		this.connection.sendControlMessage({
+			type: "acknowledge_hosted_session_exit",
+			hostedSessionKey,
+			discardHookSpoolEntriesNotYetAcknowledgedTogetherWithHostedSession: true,
+		});
 	}
 
 	// 一帧输出的去向，依次判定：追赶区间内 → onCatchUpOutput；已登记句柄 → 实时输出；否则暂存到句柄登记。
@@ -250,6 +302,7 @@ export class AgentSessionPtyHostGenerationControllerLink {
 			);
 		}
 		for (const handle of orphanedHandles) {
+			this.hookSpoolCallbacks?.forgetHostedSessionHookSpoolDrainTarget(handle.hostedSessionKey);
 			handle.deliverHostedSessionExit({ exitCode: 128 + SIGHUP_SIGNAL_NUMBER, signal: SIGHUP_SIGNAL_NUMBER });
 		}
 	}

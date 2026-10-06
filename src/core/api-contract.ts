@@ -1854,6 +1854,8 @@ export const runtimeStateStreamTaskReadyForReviewMessageSchema = z.object({
 	// 杜绝上次 ③(b) 命中的「事件先到、summary 后到 → 标题读 stale userTurnKind」竞态。
 	// 可选：旧服务端/缓存旧构建可能不带该字段，缺省时前端按 review 措辞兜底（加性 schema 纪律）。
 	userTurnKind: runtimeTaskSessionUserTurnKindSchema.optional(),
+	// 触发它的 agent 事件是 runtime 缺席期间存下、很久之后才送到的（热重启 P3）：照常弹通知，但不朗读。
+	notificationSpeechSuppressedBecauseAgentEventWasDeliveredLate: z.boolean().optional(),
 });
 export type RuntimeStateStreamTaskReadyForReviewMessage = z.infer<
 	typeof runtimeStateStreamTaskReadyForReviewMessageSchema
@@ -4720,6 +4722,13 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// 资源占用采集：仅工具类 hook 事件携带 / 每次发送都携带。服务端只写 journal，不进 summary。
 	agentToolCallExecutionOutcome: runtimeAgentToolCallExecutionOutcomeSchema.optional(),
 	hookCliProcessResourceUsage: runtimeHookCliProcessResourceUsageSchema.optional(),
+	// hooks CLI 进程启动那一刻的墙钟（热重启 P3）。runtime 缺席时事件先进 agent session PTY host 的 spool，
+	// 晚几秒到几小时才送达；停止 / 开始 / 对话推进 / 提问这些领域时刻按它记账，而不是按送达时刻。
+	// 缺失（旧 CLI）时服务端按送达时刻处理；晚于送达时刻的值按送达时刻截断（不信任跑到未来的时钟）。
+	hookEventCapturedAtEpochMs: z.number().int().nonnegative().optional(),
+	// 每次 hooks CLI 调用生成一个，传输重试与 spool 重放复用同一个：同一事件只应用一次。
+	// 旧 runtime 已应用、但没来得及回响应就崩溃的事件，CLI 会把它 spool 起来，新 runtime 靠它识别出来。
+	hookEventDeliveryIdempotencyKey: z.string().min(1).max(128).optional(),
 });
 export type RuntimeHookIngestRequest = z.infer<typeof runtimeHookIngestRequestSchema>;
 

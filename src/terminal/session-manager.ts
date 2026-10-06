@@ -51,6 +51,7 @@ import {
 	MODAL_USER_DECISION_TURN_KINDS,
 	mergeSummaryWithFacets,
 	resolveSessionFacets,
+	type SummaryWriteDomainEventTiming,
 	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 } from "../core/session-activity";
 import {
@@ -171,6 +172,7 @@ import {
 	buildTerminalSessionAdoptionRecord,
 	type ParsedTerminalSessionAdoptionRecord,
 	parseTerminalSessionAdoptionRecord,
+	readRecentlyAppliedHookEventDeliveryIdempotencyKeysFromCarriedFields,
 } from "./terminal-session-adoption-record-for-runtime-restart";
 import type { TerminalSessionListener, TerminalSessionService } from "./terminal-session-service";
 import { TerminalStateMirror } from "./terminal-state-mirror";
@@ -184,6 +186,9 @@ const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
 const TERMINAL_SESSION_ADOPTION_RECORD_PUBLICATION_DEBOUNCE_MS = 250;
 // EXPERIMENT_NODE: 接管后的 resize nudge 两步之间的间隔；TUI 需要看到一次真实的尺寸变化才会整屏重绘。
 const POST_ADOPTION_RESIZE_NUDGE_RESTORE_DELAY_MS = 150;
+// 同一事件的两次送达之间最多隔着多少条别的已应用 hook：CLI 重试在秒级，spool 重放发生在 runtime 回来之后、
+// 期间 agent 被串行的同步 hook 卡住发不出几条新事件。
+const MAX_RECENTLY_APPLIED_HOOK_EVENT_DELIVERY_IDEMPOTENCY_KEYS = 32;
 const MAX_LIVE_OUTPUT_CHUNKS_BUFFERED_BEFORE_ADOPTED_SESSION_INSTALL = 256;
 // 输出反应（output-reactions）扫描缓冲上限：镜像 workspace-trust 缓冲，约 16KB。
 const MAX_OUTPUT_REACTION_SCAN_BUFFER_CHARS = 16_384;
@@ -645,9 +650,10 @@ function updateSummary(
 	entry: SessionEntry,
 	patch: Partial<RuntimeTaskSessionSummary>,
 	summaryUpdatedAt = now(),
+	domainEventTiming?: SummaryWriteDomainEventTiming,
 ): RuntimeTaskSessionSummary {
 	// 单一写侧漏斗：经 mergeSummaryWithFacets 派发（facet 写时主真相源，详见该函数）。
-	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: summaryUpdatedAt });
+	entry.summary = mergeSummaryWithFacets(entry.summary, { ...patch, updatedAt: summaryUpdatedAt }, domainEventTiming);
 	return entry.summary;
 }
 
@@ -2833,6 +2839,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			terminalSessionIncarnationSpawnedAtEpochMs: adoptionCandidate.spawnedAtEpochMs,
 			kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch:
 				carriedFields?.kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch ?? null,
+			recentlyAppliedHookEventDeliveryIdempotencyKeys:
+				readRecentlyAppliedHookEventDeliveryIdempotencyKeysFromCarriedFields(carriedFields),
 		};
 		entry.summary = cloneSummary(summaryChoice.summary);
 		entry.active = active;
@@ -3787,6 +3795,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							watchStartedAtEpochMs: now(),
 							lastPublishedPersistenceStatus: null,
 						},
+			recentlyAppliedHookEventDeliveryIdempotencyKeys: [],
 		};
 		// 有别人在这期间把一条会话装进了同一个槽位 ⇒ 绝不能拿自己这条盖上去。被盖掉的那条 PTY 此后
 		// 再没有任何引用能停它，也不会被 stop / force-stop / dispose 碰到——那正是孤儿的成因。宁可丢掉
@@ -4393,6 +4402,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			terminalSessionIncarnationToken: randomUUID(),
 			terminalSessionIncarnationSpawnedAtEpochMs: now(),
 			kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch: null,
+			recentlyAppliedHookEventDeliveryIdempotencyKeys: [],
 		};
 		// 同 startTaskSession 的装载前核对，见那边的注释。
 		if (entry.active !== activeSlotObservedBeforeSpawn) {
@@ -5032,6 +5042,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskId: string,
 		reason: RuntimeTaskSessionReviewReason,
 		userTurnKindOverride?: RuntimeTaskSessionUserTurnKind,
+		// hook 驱动时传入事件的捕获时刻（spool 晚送达时停止时刻按它记，见 SummaryWriteDomainEventTiming）。
+		domainEventTiming?: SummaryWriteDomainEventTiming,
 	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
@@ -5047,11 +5059,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// reviewReason 透传进 hook.to_review 事件 → 既 stamp 进 summary、又驱动 userTurnKind 派生。
 		// userTurnKindOverride（B3 Claude permission 采集）随同事件下发，由 reducer 在 user 回合覆写人轴
 		// （经完整 facet 三元组，不裸写单字段）。
-		const summary = this.applySessionEvent(entry, {
-			type: "hook.to_review",
-			reviewReason: reason,
-			userTurnKindOverride,
-		});
+		const summary = this.applySessionEvent(
+			entry,
+			{
+				type: "hook.to_review",
+				reviewReason: reason,
+				userTurnKindOverride,
+			},
+			domainEventTiming,
+		);
 		if (summary !== before && entry.active) {
 			for (const listener of entry.listeners.values()) {
 				listener.onState?.(cloneSummary(summary));
@@ -5139,9 +5155,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 	//
 	// **绝不可**在 to_in_progress（UserPromptSubmit）上调用：那一刻说话的是用户，不是 agent；
 	// 把它算作「对话推进」就等于让用户自己的输入刷新「agent 上次回复」——正是本次要根治的那类错误。
-	recordAgentLifecycleHookConversationProgress(taskId: string): RuntimeTaskSessionSummary | null {
+	//
+	// observedAtMs：hook 的捕获时刻（spool 晚送达时早于此刻）；单调 reducer 会拒收比已存值更旧的观测。
+	recordAgentLifecycleHookConversationProgress(
+		taskId: string,
+		observedAtMs: number = now(),
+	): RuntimeTaskSessionSummary | null {
 		return this.recordLastConversationProgressObservation(taskId, {
-			observedAtMs: now(),
+			observedAtMs: Math.min(observedAtMs, now()),
 			evidenceKind: "agent_lifecycle_hook_event",
 		});
 	}
@@ -5164,6 +5185,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		evidenceKind: RuntimeMainAgentConversationModelRequestDispatchEvidenceKind,
 		// 仅手动压缩完成且 harness 报了压缩后上下文大小时传（见 schema 注释）。
 		mainAgentConversationContextTokenCountAfterCompactionReportedByHarness?: number,
+		// hook 的捕获时刻（spool 晚送达时早于此刻）。
+		observedAtMs: number = now(),
 	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
@@ -5172,7 +5195,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const previousObservation = entry.summary.lastMainAgentConversationModelRequestDispatchObservation ?? null;
 		const summary = updateSummary(entry, {
 			lastMainAgentConversationModelRequestDispatchObservation: {
-				observedAtMs: now(),
+				observedAtMs: Math.min(observedAtMs, now()),
 				evidenceKind,
 				...(mainAgentConversationContextTokenCountAfterCompactionReportedByHarness !== undefined
 					? { mainAgentConversationContextTokenCountAfterCompactionReportedByHarness }
@@ -5205,13 +5228,51 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
-	transitionToRunning(taskId: string, options?: { userInitiatedResume?: boolean }): RuntimeTaskSessionSummary | null {
+	// 这条 hook 投递是否已被本会话应用过（见 ActiveProcessState.recentlyAppliedHookEventDeliveryIdempotencyKeys）。
+	// 会话不在运行（无 active）时没有记忆，一律视为未应用——那时也不会有 spool 重放。
+	hasAppliedHookEventDeliveryIdempotencyKey(taskId: string, hookEventDeliveryIdempotencyKey: string): boolean {
+		return (
+			this.entries
+				.get(taskId)
+				?.active?.recentlyAppliedHookEventDeliveryIdempotencyKeys.includes(hookEventDeliveryIdempotencyKey) === true
+		);
+	}
+
+	// 记下一条已应用的 hook 投递。publishImmediately：生命周期事件立即推接管记录，把「已应用却没来得及告诉 host」
+	// 的窗口压到一次 socket 写；高频的 activity 走去抖推送（重复应用一次 activity 只是元数据被同值覆盖）。
+	rememberAppliedHookEventDeliveryIdempotencyKey(
+		taskId: string,
+		hookEventDeliveryIdempotencyKey: string,
+		options: { publishAdoptionRecordImmediately: boolean },
+	): void {
+		const active = this.entries.get(taskId)?.active;
+		if (!active || active.recentlyAppliedHookEventDeliveryIdempotencyKeys.includes(hookEventDeliveryIdempotencyKey)) {
+			return;
+		}
+		active.recentlyAppliedHookEventDeliveryIdempotencyKeys.push(hookEventDeliveryIdempotencyKey);
+		if (
+			active.recentlyAppliedHookEventDeliveryIdempotencyKeys.length >
+			MAX_RECENTLY_APPLIED_HOOK_EVENT_DELIVERY_IDEMPOTENCY_KEYS
+		) {
+			active.recentlyAppliedHookEventDeliveryIdempotencyKeys.shift();
+		}
+		if (options.publishAdoptionRecordImmediately) {
+			this.publishTerminalSessionAdoptionRecordForRuntimeRestart(taskId);
+		} else {
+			this.scheduleTerminalSessionAdoptionRecordPublication(taskId);
+		}
+	}
+
+	transitionToRunning(
+		taskId: string,
+		options?: { userInitiatedResume?: boolean; domainEventTiming?: SummaryWriteDomainEventTiming },
+	): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return null;
 		}
 		const before = entry.summary;
-		let summary = this.applySessionEvent(entry, { type: "hook.to_in_progress" });
+		let summary = this.applySessionEvent(entry, { type: "hook.to_in_progress" }, options?.domainEventTiming);
 		// 状态机翻 running 无条件；但 resume substantive guard 只在「用户真·继续」时解除——
 		// 仅源自 UserPromptSubmit 的 to_in_progress 才算，PostToolUse 等自动续跑旧回合的中途活动不算，
 		// 否则 Claude --continue 自动续跑一次工具调用就会误解除 guard、让重播刷 lastSubstantiveOutputAt。
@@ -5677,7 +5738,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return activeEntries.map((entry) => cloneSummary(entry.summary));
 	}
 
-	private applySessionEvent(entry: SessionEntry, event: SessionTransitionEvent): RuntimeTaskSessionSummary {
+	private applySessionEvent(
+		entry: SessionEntry,
+		event: SessionTransitionEvent,
+		domainEventTiming?: SummaryWriteDomainEventTiming,
+	): RuntimeTaskSessionSummary {
 		const transition = reduceSessionTransition(entry.summary, event);
 		if (!transition.changed) {
 			return entry.summary;
@@ -5708,7 +5773,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		) {
 			this.stopAutomaticSubmissionAndSettleInterruptedDelivery(entry, true);
 		}
-		return updateSummary(entry, transition.patch);
+		return updateSummary(entry, transition.patch, now(), domainEventTiming);
 	}
 
 	private ensureStallScanRunning(): void {

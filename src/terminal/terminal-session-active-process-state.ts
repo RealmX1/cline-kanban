@@ -144,6 +144,10 @@ export interface ActiveProcessState {
 	// 「kanban 分配 id 的全新开局，首轮有没有落进 cursor 的 chat store」看门狗（只有 Cursor 会创建）。
 	// 由卡顿扫描每轮推进，对话建立后置 null；PTY 退出时若仍未建立，就把会话标成「从未建立对话」。
 	kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch: KanbanAssignedCursorAgentChatFirstPromptPersistenceWatch | null;
+	// 最近已应用的 hook 投递幂等 key（新的在后，上限见 MAX_RECENTLY_APPLIED_HOOK_EVENT_DELIVERY_IDEMPOTENCY_KEYS）。
+	// 同一个 hook 事件可能送达两次：CLI 超时后重试、或旧 runtime 已应用却没来得及回响应就崩溃，CLI 随后把它
+	// spool 进 agent session PTY host、由新 runtime 重放。命中即确认、不再应用；所以它随接管记录跨 runtime 重启。
+	recentlyAppliedHookEventDeliveryIdempotencyKeys: string[];
 }
 
 // 一条程序化投递的回执登记。存在的意义：让投递链路上**每一个出口**都能给出结论，

@@ -20,7 +20,10 @@ import type {
 	TerminalPtyProcessExitEvent,
 	TerminalPtyProcessHandle,
 } from "../../../src/terminal/terminal-pty-process-handle";
-import { parseTerminalSessionAdoptionRecord } from "../../../src/terminal/terminal-session-adoption-record-for-runtime-restart";
+import {
+	parseTerminalSessionAdoptionRecord,
+	readRecentlyAppliedHookEventDeliveryIdempotencyKeysFromCarriedFields,
+} from "../../../src/terminal/terminal-session-adoption-record-for-runtime-restart";
 
 interface FakeHostedTerminalPtyProcessHandle extends TerminalPtyProcessHandle {
 	write: ReturnType<typeof vi.fn<(data: string | Buffer) => void>>;
@@ -234,6 +237,40 @@ describe("TerminalSessionManager hosted PTY session adoption after runtime resta
 		await vi.waitFor(() => {
 			expect(writtenTextOf(handle)).toContain("Implement the adoption feature");
 		});
+	});
+
+	it("carries applied hook delivery keys across the restart so a spooled replay of an applied event is recognized", async () => {
+		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({
+			taskId: "task-hook-delivery-keys",
+			pid: 5252,
+			prompt: "",
+		});
+		// 生命周期事件立即推接管记录：旧 runtime 应用完就被 kill -9，host 里的记录也已带上这个 key。
+		previousRuntime.previousRuntimeManager.rememberAppliedHookEventDeliveryIdempotencyKey(
+			"task-hook-delivery-keys",
+			"stop-applied-just-before-crash",
+			{ publishAdoptionRecordImmediately: true },
+		);
+
+		const restartedRuntimeManager = new TerminalSessionManager();
+		const { candidate } = createFakeAdoptionCandidate({
+			taskId: "task-hook-delivery-keys",
+			pid: 5252,
+			terminalSessionAdoptionRecord: previousRuntime.readLatestPublishedAdoptionRecord(),
+		});
+		await restartedRuntimeManager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]);
+
+		expect(
+			restartedRuntimeManager.hasAppliedHookEventDeliveryIdempotencyKey(
+				"task-hook-delivery-keys",
+				"stop-applied-just-before-crash",
+			),
+		).toBe(true);
+	});
+
+	it("reads an adoption record written before delivery keys existed as having no applied keys", () => {
+		expect(readRecentlyAppliedHookEventDeliveryIdempotencyKeysFromCarriedFields({} as never)).toEqual([]);
+		expect(readRecentlyAppliedHookEventDeliveryIdempotencyKeysFromCarriedFields(null)).toEqual([]);
 	});
 
 	it("refuses adoption and terminates the hosted process when the record pid differs from the host reported pid", async () => {

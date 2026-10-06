@@ -127,12 +127,18 @@ function buildRetentionDeadlineInput(
 		};
 	}
 
-	// 停止生成轨道：锚点取 summary 的写入时刻——那正是这次状态转移发生的瞬间，比观测时刻更准确
-	// （观测可能因批处理迟到几十毫秒）。刻意不取 lastOutputAt / lastSubstantiveOutputAt：前者被
-	// spinner 重绘推进，后者有节流窗口，二者都不表达「这一轮结束了」。
+	// 停止生成轨道：锚点取这次状态转移发生的瞬间，比观测时刻更准确（观测可能因批处理迟到几十毫秒）。
+	// 本轮的停止边沿章在就用它：经 agent session PTY host spool 晚送达的 Stop hook 会把章盖在捕获时刻，
+	// 而写入时刻是 runtime 回来 drain 的那一刻（可能晚几小时，按它起算会把回收期限平白推迟）。
+	// 没有本轮的章时退回写入时刻，二者在非 spool 路径上相同。刻意不取 lastOutputAt / lastSubstantiveOutputAt：
+	// 前者被 spinner 重绘推进，后者有节流窗口，二者都不表达「这一轮结束了」。
 	const gracePeriodMs =
 		options.gracePeriodMs ?? AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS;
-	const retentionAnchorAt = Math.min(summary.updatedAt, options.nowMs);
+	const stopEdgeOfCurrentTurn =
+		summary.agentResponseGenerationStopped?.turnSequence === (summary.agentResponseGenerationTurnSequence ?? 0)
+			? summary.agentResponseGenerationStopped
+			: null;
+	const retentionAnchorAt = Math.min(stopEdgeOfCurrentTurn?.stoppedAt ?? summary.updatedAt, options.nowMs);
 	return {
 		...shared,
 		retentionAnchorKind: "agent_response_generation_stopped",

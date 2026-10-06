@@ -360,9 +360,12 @@ export function useReviewReadyNotifications({
 						recordSoundDisposition("sound_disabled", "runtime_speech_mode");
 						return;
 					}
+					// runtime 缺席期间存下、很久之后才送到的事件（热重启后排空 spool）：照常弹通知、照常提示音，但不朗读——
+					// runtime 停了很久之后一回来连播 N 条过时语音只是噪音。
 					if (
 						settings?.speechMode === "summary" &&
-						(latestTaskReadyForReview.userTurnKind ?? "review") === "review"
+						(latestTaskReadyForReview.userTurnKind ?? "review") === "review" &&
+						latestTaskReadyForReview.notificationSpeechSuppressedBecauseAgentEventWasDeliveredLate !== true
 					) {
 						try {
 							await playNotificationSummarySpeech({

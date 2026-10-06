@@ -64,6 +64,7 @@ export const ACTIVE_PROCESS_STATE_FIELD_DISPOSITION_ACROSS_RUNTIME_RESTART = {
 	terminalSessionIncarnationToken: "reset_on_adoption",
 	terminalSessionIncarnationSpawnedAtEpochMs: "taken_from_agent_session_pty_host",
 	kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch: "carried_in_adoption_record",
+	recentlyAppliedHookEventDeliveryIdempotencyKeys: "carried_in_adoption_record",
 } as const satisfies Record<keyof ActiveProcessState, ActiveProcessStateFieldDispositionAcrossRuntimeRestart>;
 
 type ActiveProcessStateFieldNameCarriedInAdoptionRecord = {
@@ -111,7 +112,19 @@ export function captureActiveProcessStateFieldsCarriedInAdoptionRecord(
 		hasEverLocatedTerminalInputBoxOnScreen: active.hasEverLocatedTerminalInputBoxOnScreen,
 		kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch:
 			active.kanbanAssignedCursorAgentChatFirstPromptPersistenceWatch,
+		recentlyAppliedHookEventDeliveryIdempotencyKeys: [...active.recentlyAppliedHookEventDeliveryIdempotencyKeys],
 	};
+}
+
+// 只增字段的读侧兼容：P0–P2 的 runtime 写的记录没有这个字段（schema 版本不变，缺省即空）。
+export function readRecentlyAppliedHookEventDeliveryIdempotencyKeysFromCarriedFields(
+	carriedActiveProcessStateFields: ActiveProcessStateFieldsCarriedInAdoptionRecord | null,
+): string[] {
+	const carriedKeys: unknown = carriedActiveProcessStateFields?.recentlyAppliedHookEventDeliveryIdempotencyKeys;
+	if (!Array.isArray(carriedKeys)) {
+		return [];
+	}
+	return carriedKeys.filter((carriedKey): carriedKey is string => typeof carriedKey === "string");
 }
 
 export function buildTerminalSessionAdoptionRecord(input: {

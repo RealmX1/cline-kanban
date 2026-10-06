@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { notificationIntelligenceSettingsSchema } from "../../src/core/notification-intelligence-settings-contract";
-import { createNotificationAssessmentService } from "../../src/notifications/notification-assessment-service";
+import {
+	createNotificationAssessmentService,
+	isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate,
+	LATE_DELIVERED_AGENT_EVENT_NOTIFICATION_SPEECH_SUPPRESSION_THRESHOLD_MS,
+} from "../../src/notifications/notification-assessment-service";
 import {
 	closeDefaultNotificationLifecycleArchive,
 	getNotificationLifecycleArchive,
@@ -175,6 +179,34 @@ describe("智能通知状态机", () => {
 					notificationPanelVisibility: "visible",
 				}),
 			);
+		} finally {
+			service.close();
+		}
+	});
+	it("触发通知的 agent 事件晚到超过阈值：照常发布，候选证据里带着晚到时长，据此不朗读", async () => {
+		const publish = vi.fn(async (_candidate: { evidence?: Record<string, unknown> }) => undefined);
+		const service = createNotificationAssessmentService({ publish, getSummary: () => summary() });
+		try {
+			await service.enqueue({
+				workspaceId: "assessment",
+				taskId: "task",
+				candidateId: "delivered-late-after-runtime-restart",
+				userTurnKind: "permission",
+				summary: summary(),
+				agentEventDeliveredLateToRuntimeByMilliseconds: 2 * 60 * 60 * 1000,
+			});
+			expect(publish).toHaveBeenCalledTimes(1);
+			const publishedCandidate = publish.mock.calls[0]?.[0];
+			expect(isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate(publishedCandidate?.evidence)).toBe(
+				true,
+			);
+			expect(
+				isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate({
+					agentEventDeliveredLateToRuntimeByMilliseconds:
+						LATE_DELIVERED_AGENT_EVENT_NOTIFICATION_SPEECH_SUPPRESSION_THRESHOLD_MS,
+				}),
+			).toBe(false);
+			expect(isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate(undefined)).toBe(false);
 		} finally {
 			service.close();
 		}
