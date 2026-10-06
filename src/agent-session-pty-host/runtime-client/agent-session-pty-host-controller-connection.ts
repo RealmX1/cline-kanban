@@ -16,6 +16,7 @@ import {
 	type AgentSessionPtyHostHostedSessionListing,
 	type AttachHostedSessionOutputStreamOutcome,
 	type HostHelloAcknowledgedMessage,
+	type ReadHostedSessionHookSpoolEntriesOutcome,
 	readWireControlMessageType,
 	type SpawnHostedSessionOutcome,
 	type SpawnHostedSessionRequestMessage,
@@ -37,6 +38,8 @@ export class AgentSessionPtyHostUnreachableError extends Error {
 export interface AgentSessionPtyHostControllerConnectionEventHandlers {
 	onHostedSessionOutput: (hostedSessionChannelNumber: number, startByteOffset: number, bytes: Buffer) => void;
 	onHostedSessionExited: (hostedSessionKey: string, exitRecord: AgentSessionPtyHostHostedSessionExitRecord) => void;
+	// runtime 不在时 hooks CLI 存进 host 的 hook 事件；有 controller 时每存一条推一次。
+	onHostedSessionHookSpoolEntriesPending?: (hostedSessionKey: string, pendingHookSpoolEntryCount: number) => void;
 	// 连接断开（host 退出 / 崩溃 / 被新 controller 顶替）。之后本连接不可再用。
 	onConnectionClosed: (closeReason: "controller_superseded" | "connection_closed") => void;
 }
@@ -208,6 +211,33 @@ export class AgentSessionPtyHostControllerConnection {
 		return response.hostedSessions;
 	}
 
+	// 直投 hook 与退出交付都在等这次读：调用方传较短的期限，超时按读失败处理（fail-open），不拖满 15s。
+	async requestReadHostedSessionHookSpoolEntries(
+		hostedSessionKey: string,
+		responseDeadlineMilliseconds: number = CONTROLLER_REQUEST_RESPONSE_DEADLINE_MS,
+	): Promise<ReadHostedSessionHookSpoolEntriesOutcome> {
+		const response = (await this.sendRequestAndAwaitResponse(
+			(requestId) => ({
+				type: "read_hosted_session_hook_spool_entries_request",
+				requestId,
+				hostedSessionKey,
+			}),
+			responseDeadlineMilliseconds,
+		)) as { outcome: ReadHostedSessionHookSpoolEntriesOutcome };
+		return response.outcome;
+	}
+
+	acknowledgeHostedSessionHookSpoolEntries(
+		hostedSessionKey: string,
+		throughHookSpoolEntrySequenceNumber: number,
+	): void {
+		this.sendControlMessage({
+			type: "acknowledge_hosted_session_hook_spool_entries",
+			hostedSessionKey,
+			throughHookSpoolEntrySequenceNumber,
+		});
+	}
+
 	// 等已排队的帧全部写进内核后关闭（runtime 退出前用：stop 等消息不能丢在用户态缓冲里）。
 	async closeAfterFlushingPendingFrames(): Promise<void> {
 		if (this.closed) {
@@ -235,6 +265,7 @@ export class AgentSessionPtyHostControllerConnection {
 
 	private sendRequestAndAwaitResponse(
 		buildRequest: (requestId: string) => AgentSessionPtyHostControllerToHostMessage,
+		responseDeadlineMilliseconds: number = CONTROLLER_REQUEST_RESPONSE_DEADLINE_MS,
 	): Promise<unknown> {
 		if (this.closed) {
 			return Promise.reject(
@@ -246,7 +277,7 @@ export class AgentSessionPtyHostControllerConnection {
 			const deadlineTimer = setTimeout(() => {
 				this.pendingRequestsByRequestId.delete(requestId);
 				reject(new AgentSessionPtyHostUnreachableError("agent session pty host request timed out", false));
-			}, CONTROLLER_REQUEST_RESPONSE_DEADLINE_MS);
+			}, responseDeadlineMilliseconds);
 			this.pendingRequestsByRequestId.set(requestId, { resolve, reject, deadlineTimer });
 			this.sendControlMessage(buildRequest(requestId));
 		});
@@ -304,6 +335,19 @@ export class AgentSessionPtyHostControllerConnection {
 			this.eventHandlers?.onHostedSessionExited(exitedMessage.hostedSessionKey, exitedMessage.exitRecord);
 			return;
 		}
+		if (messageType === "hosted_session_hook_spool_entries_pending") {
+			const pendingMessage = message as { hostedSessionKey?: unknown; pendingHookSpoolEntryCount?: unknown };
+			if (
+				typeof pendingMessage.hostedSessionKey === "string" &&
+				typeof pendingMessage.pendingHookSpoolEntryCount === "number"
+			) {
+				this.eventHandlers?.onHostedSessionHookSpoolEntriesPending?.(
+					pendingMessage.hostedSessionKey,
+					pendingMessage.pendingHookSpoolEntryCount,
+				);
+			}
+			return;
+		}
 		if (messageType === "controller_superseded") {
 			this.closeReason = "controller_superseded";
 			return;
@@ -311,7 +355,8 @@ export class AgentSessionPtyHostControllerConnection {
 		if (
 			messageType === "spawn_hosted_session_response" ||
 			messageType === "list_hosted_sessions_response" ||
-			messageType === "attach_hosted_session_output_stream_response"
+			messageType === "attach_hosted_session_output_stream_response" ||
+			messageType === "read_hosted_session_hook_spool_entries_response"
 		) {
 			const requestId = (message as { requestId?: unknown }).requestId;
 			if (typeof requestId !== "string") {

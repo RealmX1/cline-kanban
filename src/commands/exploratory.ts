@@ -11,6 +11,7 @@ import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceContext } from "../state/workspace-state";
 import { KANBAN_HOOK_TASK_ID_ENV, KANBAN_HOOK_WORKSPACE_ID_ENV } from "../terminal/hook-runtime-context";
 import type { RuntimeAppRouter } from "../trpc/app-router";
+import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
 import { deliverHookIngestWithRetry } from "./hooks";
 
 // Exploratory Mode（蓝图 .plan/docs/exploratory-mode-session-map-and-findings-store.md §D）：
@@ -338,16 +339,20 @@ async function ingestFindingCandidate(
 		// link 形状按契约类型断言——完整校验刻意留给服务端 schema（见 parseExploratoryFindingCandidatePayload）。
 		provenanceLinks: payload.provenanceLinks as RuntimeIngestExploratoryFindingCandidateRequest["provenanceLinks"],
 	};
-	return await deliverExploratoryMutation(
-		async (signal) => {
-			const trpcClient = createExploratoryTrpcClient(scope.workspaceId, signal);
-			return await trpcClient.exploratory.ingestFindingCandidate.mutate(request);
-		},
-		{
-			timeoutMs: resolveExploratoryIngestTimeoutMs(),
-			maxAttempts: EXPLORATORY_INGEST_MAX_ATTEMPTS,
-			backoffMs: EXPLORATORY_INGEST_RETRY_BACKOFF_MS,
-		},
+	// runtime 热重启窗口内整次投递再来一遍：clientProposalId 让服务端对重复投递幂等，
+	// 所以即便前一次尝试是「超时后再撞上 ECONNREFUSED」也不会落两条。
+	return await retryCliRuntimeRequestWhileKanbanRuntimeRestarts(() =>
+		deliverExploratoryMutation(
+			async (signal) => {
+				const trpcClient = createExploratoryTrpcClient(scope.workspaceId, signal);
+				return await trpcClient.exploratory.ingestFindingCandidate.mutate(request);
+			},
+			{
+				timeoutMs: resolveExploratoryIngestTimeoutMs(),
+				maxAttempts: EXPLORATORY_INGEST_MAX_ATTEMPTS,
+				backoffMs: EXPLORATORY_INGEST_RETRY_BACKOFF_MS,
+			},
+		),
 	);
 }
 

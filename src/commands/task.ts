@@ -73,6 +73,7 @@ import {
 } from "../state/workspace-state";
 import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 import type { RuntimeAppRouter } from "../trpc/app-router";
+import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
 import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
@@ -276,11 +277,13 @@ export function createRuntimeTrpcClient(workspaceId: string | null) {
 							}),
 						),
 				}),
-				fetch: async (url, options) => {
-					const runtimeFetch = await getRuntimeFetch();
-					const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
-					return runtimeFetch(url, { ...options, signal });
-				},
+				// runtime 热重启的几秒里，确定没发出的请求等它回来再发（只在有重启证据时；见该函数）。
+				fetch: (url, options) =>
+					retryCliRuntimeRequestWhileKanbanRuntimeRestarts(async () => {
+						const runtimeFetch = await getRuntimeFetch();
+						const signal = mergeAbortSignals(options?.signal, AbortSignal.timeout(trpcTimeoutMs));
+						return runtimeFetch(url, { ...options, signal });
+					}),
 			}),
 		],
 	});

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { access, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -1102,6 +1103,26 @@ async function ensureTextFile(filePath: string, content: string, executable = fa
 	});
 }
 
+// agent 启动时读到的 hook 配置文件，在 agent 存活期间不能被改写：热重启之后会话不再随部署重开，原地改写会让
+// 存活会话中途读到新 build 的配置（Claude 会察觉 settings 被外部修改）；droid 的 settings 还随任务权限档而异，
+// 共用一个路径会被并发启动的任务互相覆盖。所以按内容寻址：内容不同就是另一个文件，已有文件永不改写。
+// EXPERIMENT_NODE: 旧内容的文件目前不回收——每种内容一份、体积很小，只在 hook 配置变化的部署或不同权限档时新增。
+async function ensureContentAddressedTextFile(input: {
+	directoryPath: string;
+	fileNameStem: string;
+	fileNameExtension: string;
+	content: string;
+}): Promise<string> {
+	const contentSha256Prefix = createHash("sha256").update(input.content).digest("hex").slice(0, 12);
+	const filePath = join(input.directoryPath, `${input.fileNameStem}-${contentSha256Prefix}${input.fileNameExtension}`);
+	const existingContent = await readFile(filePath, "utf8").catch(() => null);
+	if (existingContent !== input.content) {
+		// 只有文件不存在（或被截断 / 损坏）时才写；内容相同的文件名就是它的内容。
+		await ensureTextFile(filePath, input.content);
+	}
+	return filePath;
+}
+
 function withPrompt(args: string[], prompt: string, mode: "append" | "flag", flag?: string): PreparedAgentLaunch {
 	const trimmed = prompt.trim();
 	if (!trimmed) {
@@ -1327,7 +1348,6 @@ const claudeAdapter: AgentSessionAdapter = {
 		}
 		const hooks = resolveHookContext(input);
 		if (hooks) {
-			const settingsPath = join(getHookAgentDirectory("claude"), "settings.json");
 			const hooksSettings = {
 				hooks: {
 					SessionStart: [
@@ -1412,7 +1432,12 @@ const claudeAdapter: AgentSessionAdapter = {
 					],
 				},
 			};
-			await ensureTextFile(settingsPath, JSON.stringify(hooksSettings, null, 2));
+			const settingsPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("claude"),
+				fileNameStem: "settings",
+				fileNameExtension: ".json",
+				content: JSON.stringify(hooksSettings, null, 2),
+			});
 			args.push("--settings", settingsPath);
 			Object.assign(
 				env,
@@ -1775,7 +1800,6 @@ const geminiAdapter: AgentSessionAdapter = {
 
 		const hooks = resolveHookContext(input);
 		if (hooks) {
-			const configPath = join(getHookAgentDirectory("gemini"), "settings.json");
 			const geminiHookCommand = buildHooksCommand(["gemini-hook"]);
 
 			const config = {
@@ -1807,7 +1831,12 @@ const geminiAdapter: AgentSessionAdapter = {
 					],
 				},
 			};
-			await ensureTextFile(configPath, JSON.stringify(config, null, 2));
+			const configPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("gemini"),
+				fileNameStem: "settings",
+				fileNameExtension: ".json",
+				content: JSON.stringify(config, null, 2),
+			});
 			Object.assign(
 				env,
 				createHookRuntimeEnv({
@@ -2080,20 +2109,27 @@ const opencodeAdapter: AgentSessionAdapter = {
 
 		const hooks = resolveHookContext(input);
 		if (hooks) {
-			const pluginPath = join(getHookAgentDirectory("opencode"), "kanban.js");
-			const configPath = join(getHookAgentDirectory("opencode"), "opencode.json");
-
 			const pluginContent = buildOpenCodePluginContent(
 				buildHookCommand("to_review", { source: "opencode" }),
 				buildHookCommand("to_in_progress", { source: "opencode" }),
 				buildHookCommand("activity", { source: "opencode" }),
 			);
-			await ensureTextFile(pluginPath, pluginContent);
+			const pluginPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("opencode"),
+				fileNameStem: "kanban",
+				fileNameExtension: ".js",
+				content: pluginContent,
+			});
 			const pluginFileUrl = pathToFileURL(pluginPath).href;
 			const config = {
 				plugin: [pluginFileUrl],
 			};
-			await ensureTextFile(configPath, JSON.stringify(config));
+			const configPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("opencode"),
+				fileNameStem: "opencode",
+				fileNameExtension: ".json",
+				content: JSON.stringify(config),
+			});
 			Object.assign(
 				env,
 				createHookRuntimeEnv({
@@ -2143,7 +2179,6 @@ const droidAdapter: AgentSessionAdapter = {
 		// settings.json 必写：autonomyMode 要如实反映当前放权档（"normal" 同样是一个有意义的档位，
 		// 不写就会退回 droid 自己的默认，权限档形同虚设）。
 		{
-			const settingsPath = join(getHookAgentDirectory("droid"), "settings.json");
 			const settings: Record<string, unknown> = {
 				// droid 的 autonomyMode 是**单轴**（spec / normal / auto-high），无法同时表达
 				// 「plan 起步」与「放权档位」。这是已知的 harness 限制，由
@@ -2194,7 +2229,12 @@ const droidAdapter: AgentSessionAdapter = {
 				);
 			}
 
-			await ensureTextFile(settingsPath, JSON.stringify(settings, null, 2));
+			const settingsPath = await ensureContentAddressedTextFile({
+				directoryPath: getHookAgentDirectory("droid"),
+				fileNameStem: "settings",
+				fileNameExtension: ".json",
+				content: JSON.stringify(settings, null, 2),
+			});
 			if (!hasCliOption(args, "--settings")) {
 				args.push("--settings", settingsPath);
 			}
