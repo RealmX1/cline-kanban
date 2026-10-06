@@ -319,7 +319,7 @@ describe("estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn"
 		});
 	});
 
-	it("还没观测到发请求事件的存量会话：回落到高置信的对话推进观测，低置信 TUI 猜测不用", () => {
+	it("没有发请求观测的会话：高置信对话推进也不作为 Cache warm 起点", () => {
 		expect(
 			estimate(
 				makeEntry("a", {
@@ -328,10 +328,7 @@ describe("estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn"
 				}),
 				NOW_MS,
 			),
-		).toMatchObject({
-			promptCacheWarmthAnchorSource: "high_confidence_last_conversation_progress_observation_fallback",
-			promptCacheExpectedExpiryAt: NOW_MS + 45 * MINUTE_MS,
-		});
+		).toBeNull();
 		expect(
 			estimate(
 				makeEntry("a", {

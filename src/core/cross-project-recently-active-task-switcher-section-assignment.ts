@@ -3,7 +3,6 @@ import {
 	CODING_AGENT_PROMPT_CACHE_RETENTION_MEASURED_LOWER_BOUND_BY_AGENT_ID,
 	type CodingAgentPromptCacheRetentionMeasuredLowerBound,
 } from "./coding-agent-prompt-cache-retention-measured-ttl-lower-bounds";
-import { isLowConfidenceLastConversationProgressEvidence } from "./last-conversation-progress-observation";
 import { isAgentOutputWithinActiveWindow, RECENTLY_ACTIVE_IN_PROGRESS_WINDOW_MS } from "./session-activity";
 
 // 跨项目「最近活跃任务」切换面板的区归属（领域词汇见 docs/context-cross-project-recently-active-task-switcher.md）。
@@ -52,11 +51,10 @@ export type CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource =
 	| "main_agent_conversation_model_request_dispatch_observation"
 	// 手动 /compact 完成后、还没有新请求：对话层已被摘要替换。行上不显示倒计时，改显示「已压缩」。
 	| "manual_compaction_replaced_main_conversation_without_follow_up_request"
-	| "last_substantive_agent_terminal_output"
-	| "high_confidence_last_conversation_progress_observation_fallback";
+	| "last_substantive_agent_terminal_output";
 
 export interface CrossProjectTaskSwitcherPromptCacheWarmthEstimate {
-	// 计时起点：主对话最后一次向模型发请求的时刻（取不到时的回落见 resolveMainAgentConversationPromptCacheWarmthAnchor）。
+	// 计时起点：主对话最后一次向模型发请求的时刻；Cursor 用实质终端输出。
 	promptCacheWarmthAnchorAt: number;
 	// 起点读自哪个信号；倒计时药丸的 tooltip 据此说明。
 	promptCacheWarmthAnchorSource: CrossProjectTaskSwitcherPromptCacheWarmthAnchorSource;
@@ -193,7 +191,6 @@ export function estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgen
 		| "liveness"
 		| "agentId"
 		| "lastSubstantiveOutputAt"
-		| "lastConversationProgressObservation"
 		| "lastMainAgentConversationModelRequestDispatchObservation"
 		| "agentProcessStartedAt"
 	>,
@@ -239,9 +236,7 @@ export function estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgen
 function resolveMainAgentConversationPromptCacheWarmthAnchor(
 	entry: Pick<
 		RuntimeCrossProjectTaskSwitcherEntry,
-		| "lastSubstantiveOutputAt"
-		| "lastConversationProgressObservation"
-		| "lastMainAgentConversationModelRequestDispatchObservation"
+		"lastSubstantiveOutputAt" | "lastMainAgentConversationModelRequestDispatchObservation"
 	>,
 	measuredLowerBound: CodingAgentPromptCacheRetentionMeasuredLowerBound,
 ): Omit<CrossProjectTaskSwitcherPromptCacheWarmthEstimate, "promptCacheExpectedExpiryAt"> | null {
@@ -255,8 +250,7 @@ function resolveMainAgentConversationPromptCacheWarmthAnchor(
 		) {
 			// 手动压缩完成（2026-10-05 用户拍板 B′）：任务留在 Cache warm 区，但行上不显示倒计时，改显示「已压缩，
 			// 回复需重写」。实测压缩请求只按 5 分钟档读了被替换前的旧前缀，下一条回复不论早晚都要重写 86k–103k，
-			// 「又热了 55 分钟」会误导。这一支必须在下方 lastConversationProgressObservation 兜底**之前**返回：
-			// 压缩 fork 的 SubagentStop 刚把对话推进推到压缩结束，落进兜底就会退化成普通倒计时。
+			// 「又热了 55 分钟」会误导，所以压缩观测采用独立的展示来源。
 			// EXPERIMENT_NODE: 手动压缩后 Cache warm 取舍（A 续期 / B 退出 / B′ 留区显示「已压缩」，当前 B′）及留区时长（当前按该 agent 的 TTL 下界，可改 5 分钟档）
 			return {
 				promptCacheWarmthAnchorAt: dispatchObservation.observedAtMs,
@@ -279,16 +273,6 @@ function resolveMainAgentConversationPromptCacheWarmthAnchor(
 		return {
 			promptCacheWarmthAnchorAt: entry.lastSubstantiveOutputAt,
 			promptCacheWarmthAnchorSource: "last_substantive_agent_terminal_output",
-		};
-	}
-	// 兜底：还没观测到过发请求事件的会话（本字段上线前最后一次请求的存量会话、hook 丢投）。对话推进
-	// 观测略晚于真实请求（停止时刻、Notification 会把它往后推），所以只在没有更好信号时用；低置信的
-	// TUI 猜测会被恢复重播刷成 now，不用。
-	const progressObservation = entry.lastConversationProgressObservation;
-	if (progressObservation && !isLowConfidenceLastConversationProgressEvidence(progressObservation.evidenceKind)) {
-		return {
-			promptCacheWarmthAnchorAt: progressObservation.observedAtMs,
-			promptCacheWarmthAnchorSource: "high_confidence_last_conversation_progress_observation_fallback",
 		};
 	}
 	return null;
