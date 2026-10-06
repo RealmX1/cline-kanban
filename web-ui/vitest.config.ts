@@ -32,6 +32,15 @@ export default defineConfig({
 				__dirname,
 				"../src/core/inter-work-unit-recorded-relation-projection-contract.ts",
 			),
+			// dd2db 2.1 断言型关系：「添加关系」对话框列 kind、面板按决策来源分组都是值引用，同样三处同步。
+			"@runtime-inter-work-unit-asserted-relation-kind-registry-contract": resolve(
+				__dirname,
+				"../src/core/inter-work-unit-asserted-relation-kind-registry-contract.ts",
+			),
+			"@runtime-inter-work-unit-relation-assertion-lifecycle-event-contract": resolve(
+				__dirname,
+				"../src/core/inter-work-unit-relation-assertion-lifecycle-event-contract.ts",
+			),
 			"@runtime-kanban-web-ui-page-load-request-origin-nonce": resolve(
 				__dirname,
 				"../src/core/kanban-web-ui-page-load-request-origin-nonce.ts",
@@ -49,6 +58,10 @@ export default defineConfig({
 				"../src/core/cross-project-recently-active-task-switcher-section-assignment.ts",
 			),
 			"@runtime-session-activity": resolve(__dirname, "../src/core/session-activity.ts"),
+			"@runtime-state-stream-workspace-metadata-probe-scope-declaration": resolve(
+				__dirname,
+				"../src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration.ts",
+			),
 			"@runtime-shortcuts": resolve(__dirname, "../src/config/shortcut-utils.ts"),
 			"@runtime-task-agent-permission-mode": resolve(__dirname, "../src/core/task-agent-permission-mode.ts"),
 			"@runtime-task-card-action-board-column-transitions": resolve(

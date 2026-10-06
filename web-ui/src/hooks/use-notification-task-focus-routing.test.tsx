@@ -135,7 +135,17 @@ describe("useNotificationTaskFocusRouting", () => {
 		expect(showAppToastMock).not.toHaveBeenCalled();
 	});
 
-	it("分支③ task-selected-in-background-tab：目标 tab 后台就位 → 仅 toast 引导手动切换", async () => {
+	it("分支③ existing-tab-focus-denied-by-browser：浏览器不许切到目标 tab → 本 tab 原地跳转，不弹 toast", async () => {
+		requestWorkspaceTabFocusViaServiceWorkerMock.mockResolvedValue("existing-tab-focus-denied-by-browser");
+		renderHook();
+		await invokeFocusNotificationTask("project-b", "task-6");
+
+		expect(openTaskInProjectInPlace).toHaveBeenCalledWith("project-b", "task-6");
+		expect(showAppToastMock).not.toHaveBeenCalled();
+		expect(windowOpenSpy).not.toHaveBeenCalled();
+	});
+
+	it("分支③ 旧 SW 的 task-selected-in-background-tab：目标 tab 后台就位 → 仅 toast 引导手动切换", async () => {
 		requestWorkspaceTabFocusViaServiceWorkerMock.mockResolvedValue("task-selected-in-background-tab");
 		renderHook();
 		await invokeFocusNotificationTask("project-b", "task-4");

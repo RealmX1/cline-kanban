@@ -1,13 +1,15 @@
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import {
 	collectCrossProjectTaskSwitcherEntriesInProjects,
 	collectUnreadHandoffEntryKeysFromNotificationLog,
 } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
+import { resetLastLoadedOtherProjectTaskCardSnapshotCache } from "@/hooks/use-task-card-snapshot-of-other-project-for-cross-project-task-switcher-row-expansion";
 import type {
 	RuntimeCrossProjectTaskSwitcherEntry,
 	RuntimeProjectSummary,
@@ -24,6 +26,8 @@ import { replaceWorkspaceMetadata, resetWorkspaceMetadataStore } from "@/stores/
 
 const setTaskPinboardPinStateOfTaskCardInWorkspace = vi.hoisted(() => vi.fn());
 const readTaskCardWithBoardColumnInWorkspace = vi.hoisted(() => vi.fn());
+const fetchTaskWorkspaceInfoForWorkspace = vi.hoisted(() => vi.fn());
+vi.mock("@/runtime/workspace-state-query", () => ({ fetchTaskWorkspaceInfoForWorkspace }));
 const moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace = vi.hoisted(() => vi.fn());
 vi.mock("@/runtime/task-card-action-query", () => ({
 	setTaskPinboardPinStateOfTaskCardInWorkspace,
@@ -158,6 +162,8 @@ beforeEach(() => {
 	setTaskPinboardPinStateOfTaskCardInWorkspace.mockReset();
 	setTaskPinboardPinStateOfTaskCardInWorkspace.mockResolvedValue({ boardWasSaved: true });
 	readTaskCardWithBoardColumnInWorkspace.mockReset();
+	fetchTaskWorkspaceInfoForWorkspace.mockReset();
+	fetchTaskWorkspaceInfoForWorkspace.mockResolvedValue({ path: "/Users/test/.cline/worktrees/recent/project-b" });
 	moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace.mockReset();
 	clearAllTaskCardActionCommandsInFlight();
 	fetchCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon.mockReset();
@@ -169,9 +175,15 @@ beforeEach(() => {
 	fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockResolvedValue({ tasks: [] });
 	resetCrossProjectTaskWorktreeGitMetadataStore();
 	resetWorkspaceMetadataStore();
+	resetLastLoadedOtherProjectTaskCardSnapshotCache();
 	container = document.createElement("div");
 	document.body.appendChild(container);
-	root = createRoot(container);
+	// 与真实应用一致：卡片复制按钮的 ID tooltip 在键盘聚焦时也必须可用。
+	const baseRoot = createRoot(container);
+	root = {
+		render: (children: ReactNode) => baseRoot.render(<TooltipProvider>{children}</TooltipProvider>),
+		unmount: () => baseRoot.unmount(),
+	};
 });
 
 afterEach(() => {
@@ -188,6 +200,45 @@ function section(name: string): HTMLElement {
 		throw new Error(`section ${name} not rendered`);
 	}
 	return element;
+}
+
+function queryFullTaskCardHoverOverlay(): HTMLElement | null {
+	return document.body.querySelector<HTMLElement>(
+		'[data-testid="cross-project-task-switcher-row-full-task-card-hover-overlay"]',
+	);
+}
+
+// 指针移进精简行（React 的 onPointerEnter 由 pointerover 合成），再等过 hover 意图的延时。
+async function hoverRowUntilFullTaskCardOverlayIsRevealed(row: HTMLElement | null | undefined): Promise<void> {
+	const rowMainButton = row?.querySelector<HTMLButtonElement>("button");
+	await act(async () => {
+		rowMainButton?.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+	});
+	await act(async () => {
+		vi.advanceTimersByTime(400);
+	});
+}
+
+// jsdom 没有 PointerEvent：用同名 MouseEvent 补上 pointerType（React 的合成事件从原生事件上读它）。
+function dispatchTouchPointerEvent(target: Element | null | undefined, type: "pointerdown" | "pointerup"): void {
+	const touchPointerEvent = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: 10, clientY: 10 });
+	Object.defineProperty(touchPointerEvent, "pointerType", { value: "touch" });
+	target?.dispatchEvent(touchPointerEvent);
+}
+
+// 触屏没有 hover：手指按住精简行等过长按延时弹出浮层，再抬手（这里不派发 click，抬手后的 click 由用例自己决定）。
+async function longPressRowByTouchUntilFullTaskCardOverlayIsRevealed(
+	rowMainButton: HTMLElement | null | undefined,
+): Promise<void> {
+	await act(async () => {
+		dispatchTouchPointerEvent(rowMainButton, "pointerdown");
+	});
+	await act(async () => {
+		vi.advanceTimersByTime(600);
+	});
+	await act(async () => {
+		dispatchTouchPointerEvent(rowMainButton, "pointerup");
+	});
 }
 
 function rowTaskIds(sectionElement: HTMLElement): string[] {
@@ -321,7 +372,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 	});
 
 	// 2026-10-05 用户反馈：This project 卡片上「相对 base 的提交关系」与「未提交改动」也要出现在 All projects 的默认行上。
-	it("行上显示 ahead/behind 与未提交改动：其他项目读轮询结果，当前项目读推流 store；Backlog 与无改动不显示", async () => {
+	it("行上显示 ahead/behind 与未提交改动：其他项目读轮询结果，当前项目优先读推流 store；Backlog 与无改动不显示", async () => {
 		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockResolvedValue({
 			tasks: [
 				{
@@ -366,9 +417,12 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />);
 		});
 
-		// 只请求其他项目、非 Backlog 的条目。
+		// 请求全部非 Backlog 条目，含当前项目：All projects 下状态流只探焦点任务，当前项目其余行也靠轮询。
 		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).toHaveBeenCalledWith("project-a", {
-			tasks: [{ workspaceId: "project-b", taskId: "recent" }],
+			tasks: [
+				{ workspaceId: "project-a", taskId: "warm" },
+				{ workspaceId: "project-b", taskId: "recent" },
+			],
 		});
 		const gitMetadataOf = (taskId: string) =>
 			container.querySelector<HTMLElement>(
@@ -384,6 +438,35 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(currentProjectGitMetadata?.getAttribute("title")).toContain("4 commits ahead of base branch");
 		expect(currentProjectGitMetadata?.textContent).not.toContain("files");
 		expect(gitMetadataOf("backlog-task")).toBeNull();
+	});
+
+	it("当前项目的行在推流里没有数据（All projects 下不在探测范围）时回落到轮询结果", async () => {
+		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockResolvedValue({
+			tasks: [
+				{
+					workspaceId: "project-a",
+					taskId: "warm",
+					availability: "available",
+					taskWorkspaceMetadata: makeTaskWorkspaceMetadata("warm", {
+						ahead: 7,
+						behind: 0,
+						changedFiles: 0,
+						additions: 0,
+						deletions: 0,
+					}),
+				},
+			],
+		});
+		await act(async () => {
+			root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />);
+		});
+		expect(
+			container
+				.querySelector<HTMLElement>(
+					'[data-cross-project-task-switcher-section="prompt_cache_warm"][data-cross-project-task-switcher-task-id="warm"] [data-cross-project-task-switcher-row-worktree-git-metadata]',
+				)
+				?.getAttribute("title"),
+		).toContain("7 commits ahead of");
 	});
 
 	it("展开 Running 后列出在跑的任务，展开态落 localStorage", () => {
@@ -461,7 +544,8 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
 	});
 
-	it("其他项目的行展开：按需读服务端快照，渲染同一个紧凑卡体；动作走同一组 taskCardAction 命令（不带 overlay）", async () => {
+	it("其他项目的行 hover：意图期间就预取服务端快照，浮层盖在原位渲染同一个紧凑卡体；Keep open 后原地换成完整卡片，动作走同一组 taskCardAction 命令（不带 overlay）", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		readTaskCardWithBoardColumnInWorkspace.mockResolvedValue({
 			taskCardLookupOutcome: "task_card_found_on_workspace_board",
 			taskCardSnapshot: {
@@ -490,19 +574,62 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		const recentRow = section("remaining").querySelector<HTMLElement>(
 			'[data-cross-project-task-switcher-task-id="recent"]',
 		);
-		await act(async () => recentRow?.querySelector<HTMLButtonElement>('[aria-label="Expand task card"]')?.click());
-
+		// 行上不再有常驻占位的展开 chevron。
+		expect(recentRow?.querySelector('[aria-label="Expand task card"]')).toBeNull();
+		await act(async () => {
+			recentRow
+				?.querySelector<HTMLButtonElement>("button")
+				?.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+		});
+		// 还没到 hover 意图的延时：浮层已挂载（预取）但不可见。
 		expect(readTaskCardWithBoardColumnInWorkspace).toHaveBeenCalledWith("project-b", "recent");
-		expect(recentRow?.getAttribute("data-cross-project-task-switcher-row-expanded")).toBe("true");
-		const expandedTaskCard = recentRow?.querySelector(
+		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("false");
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		const hoverOverlay = queryFullTaskCardHoverOverlay();
+		expect(hoverOverlay?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
+		// 浮层不在行里（portal），不推挤下方的行。
+		expect(recentRow?.contains(hoverOverlay ?? null)).toBe(false);
+		const overlayTaskCard = hoverOverlay?.querySelector(
 			'[data-task-card-render-role="expanded_card_copy_in_cross_project_task_switcher_row"]',
 		);
-		expect(expandedTaskCard?.textContent).toContain("Recent task in project B");
-		// 展开副本不持有 DOM 身份（data-task-id 全局唯一属于本体卡）。
-		expect(expandedTaskCard?.hasAttribute("data-task-id")).toBe(false);
+		expect(overlayTaskCard?.textContent).toContain("Recent task in project B");
+		// 卡片副本不持有 DOM 身份（data-task-id 全局唯一属于本体卡）。
+		expect(overlayTaskCard?.hasAttribute("data-task-id")).toBe(false);
 
 		await act(async () =>
-			expandedTaskCard?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
+			hoverOverlay
+				?.querySelector<HTMLButtonElement>(
+					'[data-testid="cross-project-task-switcher-keep-full-task-card-open-button"]',
+				)
+				?.click(),
+		);
+		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+		const keptOpenRow = section("remaining").querySelector<HTMLElement>(
+			'[data-cross-project-task-switcher-task-id="recent"]',
+		);
+		expect(keptOpenRow?.getAttribute("data-cross-project-task-switcher-row-kept-open-as-full-task-card")).toBe(
+			"true",
+		);
+		// 原地替换，不是「精简行 + 下方完整卡」：标题只出现一次。
+		expect(keptOpenRow?.textContent?.split("Recent task in project B")).toHaveLength(2);
+		// 已 Keep open 的行不再弹浮层。
+		await hoverRowUntilFullTaskCardOverlayIsRevealed(keptOpenRow);
+		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+
+		// 复制使用卡片所属项目的只读查询，不能借当前项目 project-a 的路径。
+		await act(async () =>
+			keptOpenRow?.querySelector<HTMLButtonElement>('[aria-label="Copy directory path"]')?.click(),
+		);
+		expect(fetchTaskWorkspaceInfoForWorkspace).toHaveBeenCalledWith("project-b", {
+			taskId: "recent",
+			baseRef: "main",
+			worktreeMode: undefined,
+		});
+
+		await act(async () =>
+			keptOpenRow?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
 		);
 		expect(moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace).toHaveBeenCalledWith("project-b", {
 			taskId: "recent",
@@ -510,9 +637,95 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			boardMutationInitiator: "web_ui_user_gesture",
 		});
 		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
+
+		await act(async () =>
+			keptOpenRow
+				?.querySelector<HTMLButtonElement>(
+					'[data-testid="cross-project-task-switcher-collapse-kept-open-full-task-card-button"]',
+				)
+				?.click(),
+		);
+		expect(
+			section("remaining")
+				.querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]')
+				?.getAttribute("data-cross-project-task-switcher-row-kept-open-as-full-task-card"),
+		).toBe("false");
 	});
 
-	it("当前项目的行展开：直接用宿主给的本页 board 与动作，不读服务端", async () => {
+	it("hover 浮层：没等到意图就离开不弹；Esc 收起", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
+		const rowMainButton = section("remaining").querySelector<HTMLButtonElement>(
+			'[data-cross-project-task-switcher-task-id="recent"] button',
+		);
+		await act(async () => {
+			rowMainButton?.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+		});
+		await act(async () => {
+			vi.advanceTimersByTime(100);
+			rowMainButton?.dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+			vi.advanceTimersByTime(400);
+		});
+		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+
+		await hoverRowUntilFullTaskCardOverlayIsRevealed(
+			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]'),
+		);
+		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
+		await act(async () => {
+			document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+		});
+		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+	});
+
+	it("触屏长按弹浮层：紧随的那次行 click 被吞；长按后没有 click 落到行上时，「吞 click」标志不滞留到之后的点行", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		const host = makeHost();
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const queryRecentRowMainButton = () =>
+			section("remaining").querySelector<HTMLButtonElement>(
+				'[data-cross-project-task-switcher-task-id="recent"] button',
+			);
+		const pressEscape = async () => {
+			await act(async () => {
+				document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+			});
+		};
+
+		// 原意图：长按弹出后抬手紧随的 click 不当成「打开任务」。
+		await longPressRowByTouchUntilFullTaskCardOverlayIsRevealed(queryRecentRowMainButton());
+		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
+		await act(async () => queryRecentRowMainButton()?.click());
+		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
+		await pressEscape();
+		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+
+		// 长按后浏览器没发 click（或 click 落在盖住行的浮层上）→ Esc 收起浮层 → 再点行要照常打开任务。
+		await longPressRowByTouchUntilFullTaskCardOverlayIsRevealed(queryRecentRowMainButton());
+		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
+		await pressEscape();
+		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+		await act(async () => queryRecentRowMainButton()?.click());
+		expect(host.onOpenTaskInProject).toHaveBeenCalledWith("project-b", "recent");
+
+		// 长按后没发 click、浮层还开着，直接轻点另一行（新手势）也要照常打开任务。
+		await longPressRowByTouchUntilFullTaskCardOverlayIsRevealed(queryRecentRowMainButton());
+		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
+		const warmRowMainButton = section("prompt-cache-warm").querySelector<HTMLButtonElement>(
+			'[data-cross-project-task-switcher-task-id="warm"] button',
+		);
+		await act(async () => {
+			dispatchTouchPointerEvent(warmRowMainButton, "pointerdown");
+			dispatchTouchPointerEvent(warmRowMainButton, "pointerup");
+			warmRowMainButton?.click();
+		});
+		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-a", "warm");
+	});
+
+	it("当前项目的行 hover：浮层直接用宿主给的本页 board 与动作，不读服务端", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		const onMoveToValidationTask = vi.fn();
 		const host = makeHost();
 		act(() =>
@@ -549,12 +762,13 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		const warmRow = section("prompt-cache-warm").querySelector<HTMLElement>(
 			'[data-cross-project-task-switcher-task-id="warm"]',
 		);
-		await act(async () => warmRow?.querySelector<HTMLButtonElement>('[aria-label="Expand task card"]')?.click());
+		await hoverRowUntilFullTaskCardOverlayIsRevealed(warmRow);
 
 		expect(readTaskCardWithBoardColumnInWorkspace).not.toHaveBeenCalled();
-		expect(warmRow?.textContent).toContain("Warm task from the in-browser board");
+		const hoverOverlay = queryFullTaskCardHoverOverlay();
+		expect(hoverOverlay?.textContent).toContain("Warm task from the in-browser board");
 		await act(async () =>
-			warmRow?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
+			hoverOverlay?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
 		);
 		expect(onMoveToValidationTask).toHaveBeenCalledWith("warm");
 	});

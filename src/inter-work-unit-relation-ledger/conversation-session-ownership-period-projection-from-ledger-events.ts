@@ -344,6 +344,14 @@ function findCurrentOwnershipPeriod(
 	return listOwnershipPeriodsOfConversationSession(state, identityKey).at(-1) ?? null;
 }
 
+// 写入点名一个原生会话时按「此刻」查归属（d-vocab §2.1）：已被某张卡采纳的会话存成那张卡的引用；没人认领时为 null。
+export function findCurrentlyOwningWorkUnitOfConversationSessionIdentity(
+	state: ConversationSessionOwnershipProjectionState,
+	identityKey: AgentConversationSessionIdentityKey,
+): InterWorkUnitRelationWorkUnitReference | null {
+	return findCurrentOwnershipPeriod(state, identityKey)?.owningWorkUnit ?? null;
+}
+
 function appendOwnershipPeriod(
 	state: ConversationSessionOwnershipProjectionState,
 	period: ConversationSessionOwnershipPeriod,

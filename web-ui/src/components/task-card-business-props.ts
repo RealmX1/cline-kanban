@@ -27,6 +27,7 @@ export interface TaskCardActionHandlerBundle {
 	onEditTask?: (card: BoardCard) => void;
 	onRequestPinToTaskPinboard?: (taskId: string) => void;
 	onUnpinFromTaskPinboard?: (taskId: string) => void;
+	resolveTaskWorkspaceAbsoluteDirectoryPath?: TaskCardBusinessProps["resolveTaskWorkspaceAbsoluteDirectoryPath"];
 	moveToTrashLoadingById?: Record<string, boolean>;
 	moveToValidationLoadingById?: Record<string, boolean>;
 	moveToReviewLoadingById?: Record<string, boolean>;
@@ -86,6 +87,7 @@ export function buildTaskCardBusinessProps({
 		isMoveToValidationLoading: isReview ? (handlers.moveToValidationLoadingById?.[card.id] ?? false) : false,
 		isMoveToReviewLoading: isInProgress ? (handlers.moveToReviewLoadingById?.[card.id] ?? false) : false,
 		workspacePath,
+		resolveTaskWorkspaceAbsoluteDirectoryPath: handlers.resolveTaskWorkspaceAbsoluteDirectoryPath,
 		defaultClineModelId,
 		defaultAgentId,
 		onClick: isBacklog ? handlers.onEditTask : onActivateCard,

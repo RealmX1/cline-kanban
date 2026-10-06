@@ -7,7 +7,10 @@
 ## Language
 
 **Selected Board Or Single Project Scope（范围）**：
-顶栏项目切换器选中的范围，`board_scope_all_projects`（首行 All projects）或 `single_project_scope`（选了某个项目），只有一份状态（`web-ui/src/hooks/use-selected-board-or-single-project-scope.ts`，App 持有、经宿主 context 下发；react-use 的 localStorage hook 各实例互不同步，不能各处各读）。看板页据此在 Board Overview 与项目看板之间切换，Focus View 左栏据此在本面板与当前项目的 stage 列表之间切换。从面板里跨项目打开任务时范围不变，变的只是当前项目（焦点任务所属的项目，触发按钮显示成「All projects › 项目名」）；只有用户明确选了某个项目（切换器、数字槽热键、首页侧栏、概览里点 stage）才收窄到单项目。旧键 `kanban.focus-view-left-column-task-list-scope.v1` 一次性迁移后删除。
+顶栏项目切换器选中的范围，`board_scope_all_projects`（首行 All projects）或 `single_project_scope`（选了某个项目），只有一份状态（`web-ui/src/hooks/use-selected-board-or-single-project-scope.ts`，App 持有、经宿主 context 下发）。看板页据此在 Board Overview 与项目看板之间切换，Focus View 左栏据此在本面板与当前项目的 stage 列表之间切换。从面板里跨项目打开任务时范围不变，变的只是当前项目（焦点任务所属的项目，触发按钮后面接一个「› 项目名」按钮）；只有用户明确选了某个项目才收窄到单项目：切换器、数字槽热键（Board Scope 下按到当前项目也收窄，不是 no-op）、首页侧栏、概览里点 stage、点「› 项目名」、或 `⌘E`。旧键 `kanban.focus-view-left-column-task-list-scope.v1` 一次性迁移后删除。
+- **每个标签页各存一份**（2026-10-05）：实际范围存 sessionStorage（重载、Chrome 丢弃后恢复都保留），localStorage 同名键只是新开标签页的默认值。共用 localStorage 时，重载会让每个标签页继承「最后写入者」的范围，多标签页下表现为「没操作就跳了」。
+- **`⌘E`（非 mac 为 Ctrl+E）**：Board Scope ⇄ 焦点任务所属项目（看板页没有焦点任务时是当前项目）。选它的理由：左手单手可按、不与本应用及 Chrome / macOS 的常用键重合；mac 上终端不吃 ⌘ 组合。非 mac 的 Ctrl+E 会盖掉终端 readline 的「行尾」，与 mod+j / k / g 同样处理。对话框开着时不响应。备选 `mod+shift+e`（`EXPERIMENT_NODE`）。
+- **探测范围**：范围决定状态流要哪些任务的 git 元数据，见下方 **Workspace Metadata Probe Scope**。
 _Avoid_: dashboard, global view, left column scope toggle
 
 **Cross-Project Task Switcher Entry（切换面板条目）**：
@@ -44,12 +47,17 @@ _Avoid_: hot tasks, urgent
 **Row（面板行）**：
 紧凑行：第 1 行状态点 / agent 图标 / 标题（+ 倒计时药丸），第 2 行项目名 / stage 标签（仅置顶区）与三颗时长药丸（创建、停止生成、对话推进，与卡片同源），置顶区另有第 3 行置顶理由。元信息行 `flex-wrap`：窄宽度下药丸整组折到下一行，不截断、不挑着显示。
 元信息行还显示 worktree 的 git 元数据（2026-10-05 用户要求，与 This project 卡片目录行同一套显隐规则）：相对 base 分支的 ahead / behind 与已集成提交数，以及未提交改动「(N files +A -D)」。Backlog 不显示；没有可说的提交关系、且未提交改动全为 0 时整组隐藏。取数唯一入口 `useTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntry`：
-- 当前项目的行：读既有 `workspace_metadata_updated` 推流 store，零额外 git。
-- 其他项目的行：面板挂载且页面可见时，每 5 秒（`EXPERIMENT_NODE`）轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`（每次最多 100 条），结果进按 (workspaceId, taskId) 复合键的 store。服务端 `cross-project-task-worktree-git-metadata-cache.ts` 按键缓存，复用 `workspace-metadata-monitor` 的同一个探针（`src/workspace/task-worktree-git-metadata-probe.ts`）：fs-stat 门控、10 秒兜底、全局 git spawn 并发上限 4、同键单飞、base tip 每次请求每项目每 baseRef 只解析一次，5 分钟没被请求的键淘汰。baseRef / worktreeMode 以服务端 board 为准，不信任客户端。
+- 当前项目的行：优先读 `workspace_metadata_updated` 推流 store；Board Scope 下推流只探焦点任务与 auto-review 的 Review 列任务，其余行在推流里没有数据，回落到下面的轮询 store。
+- 全部非 Backlog 的行（含当前项目）：面板挂载且页面可见时，每 5 秒（`EXPERIMENT_NODE`）轮询 `projects.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries`（每次最多 100 条），结果进按 (workspaceId, taskId) 复合键的 store。服务端 `cross-project-task-worktree-git-metadata-cache.ts` 按键缓存，复用 `workspace-metadata-monitor` 的同一个探针（`src/workspace/task-worktree-git-metadata-probe.ts`）：fs-stat 门控、10 秒兜底、全局 git spawn 并发上限 4、同键单飞、base tip 每次请求每项目每 baseRef 只解析一次，5 分钟没被请求的键淘汰。baseRef / worktreeMode 以服务端 board 为准，不信任客户端。
 - 不并入 `projects_updated`：未提交改动在 agent 写文件时几秒一变，会让 100 KB 级的整份广播变频繁。
 
-**Expanded Row（展开行）**：
-行左侧 chevron（hover / 获得焦点时显示）把行展开成与 This project 同一个紧凑 `TaskCardBody`（渲染角色 `expanded_card_copy_in_cross_project_task_switcher_row`：不可拖、不持有 `data-task-id`，交互与本体一致），同一个任务在 Pinned 与下方区一起展开，展开状态跨重挂载保留。门控同 This project（`buildTaskCardBusinessProps`）。
+**Full Task Card Hover Overlay / Keep Open（hover 浮层与 Keep open）**：
+2026-10-05 起取代原来的 chevron 展开（chevron 常驻占位、在 title 前留白边；展开后在精简行下方再画一张完整卡，内容重复）。
+- hover 一行约 350ms（`EXPERIMENT_NODE`），与 This project 同一个紧凑 `TaskCardBody` 以浮层盖在该行原位（同左沿、同宽，portal 到 body，靠近视口底部时向上翻），不推挤下方的行；离开约 150ms 收起，指针可以移进浮层点动作；Esc、滚动、点浮层以外都收起。触屏没有 hover，改用长按约 500ms，抬手那一下的点击被吞掉、不会打开任务。hover 意图期间浮层已隐形挂载，借此预取其他项目的卡；每张卡上一次读到的快照留在内存里，再 hover 时先显示它再刷新。
+- 浮层上方一条显示项目名、未读交接圆点、Cache warm 药丸（完整卡片本身不显示这些），以及「**Keep open**」（tooltip「Keep this task open in the list」）。点了之后这一行在列表里**原地换成**完整卡片（推挤下方的行，用户主动触发所以可以接受），可以同时固定多张；固定后那一条的按钮变成「Collapse」，已固定的卡不再弹浮层。不叫 Pin：Pin 是 Pinboard 的专名。
+- 固定状态按任务记（Pinned 与下方区同一个任务一起换），存在 `cross-project-task-switcher-panel-view-continuity-store`（字段 `crossProjectTaskSwitcherEntryKeysKeptOpenAsFullTaskCardByUser`）：过渡外壳重挂载时保留，按标签页隔离，刷新即清，不进 localStorage。
+- 卡体渲染角色 `expanded_card_copy_in_cross_project_task_switcher_row`：不可拖、不持有 `data-task-id`，交互与本体一致。门控同 This project（`buildTaskCardBusinessProps`）。
+- 残余：键盘用户还没有打开浮层 / Keep open 的入口（原 chevron 可以 Tab 到）。
 - 当前项目：直接用 Focus View 左栏手里的数据与动作（带 overlay 的 board、推流 session、同一套 handler），与 This project 那张卡逐字一致。
 - 其他项目：按需只读 `taskCardAction.readTaskCardWithBoardColumn`，条目变了去抖重读（重读期间保留上一份）。卡体经 `taskCardOwnedByOtherProjectWorkspaceId` 不读只按 taskId 分键的当前项目 store（git 元数据改读上面的跨项目轮询 store；资源占用与排队 prompt 只对当前项目推流，不显示）。动作调同一组 `taskCardAction.*` 命令、同样的删除 / 跳过 Validation 确认框，不带 overlay、不切项目，期间显示在途 spinner（`use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher.tsx`）。
 
@@ -84,8 +92,17 @@ Running / 缓存倒计时 / 剩余三区互斥，优先级 Running > 缓存倒�
 - 换项目时 sessions 以新快照为底**整体替换**，不与上一个项目合并（同号任务的旧摘要会残留、让终端误判会话重启清屏）；新项目已推来的摘要按原件带回。终端因会话重启清屏后立即向服务端 mirror 重拉快照，不再出现清完不补的永久白屏。
 - 外壳上的 Cancel 回到**发起时打开着的任务**（快照未到时撤销在途切换，已切过去则反向打开）；在途期间点当前项目的任务同样先撤销在途切换。`handleSelectProject` 选回当前项目 = 撤销在途切换。
 
+**Workspace Metadata Probe Scope（git 元数据探测范围）**：
+2026-10-05 用户观察：All projects 里打开其他项目的任务要等很久。成因：服务端发快照前要等目标项目**每张非 backlog 卡**（含 Done）的 git 元数据首轮刷新跑完（每卡 5 条 git、全局并发 4，cline-kanban 224 个 worktree 约 6.5 秒），且最后一个连接断开时缓存直接删掉，单标签页切回来必然全量冷探。修法（用户提议）：Board Scope 下屏幕上只有焦点任务要逐卡 git 状态，就只探它。
+- 每个状态流连接声明范围（`src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration.ts` 组装，浏览器与服务端共用）：单项目范围 = 整个项目；Board Scope = 焦点任务（跨项目打开在途时是目标任务）。服务端自己并上 Review 列开了 auto-review 的卡（自动提交 / 自动 PR 要看它们有没有未提交改动）。不声明的旧客户端按整个项目。
+- 初值在 WS URL 参数 `workspaceMetadataProbeScope`（JSON）里，首轮探测就只探它；之后经浏览器 → 服务端消息 `declare_workspace_metadata_probe_scope` 更新（状态流里唯一一种上行消息），不阻塞、探完照常推 `workspace_metadata_updated`。跨项目打开在切项目**之前**同步登记目标任务（`workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store`），所以新连接的 URL 已带上它。握手期间到达的声明在注册进广播名单之后才补探，否则补探的推送到不了这个连接。
+- 同一项目多个连接取并集，任一要整个项目就探整个项目；快照只放范围内的任务。范围外仍跟踪的任务保留上次的结果，`⌘E` 收窄到单项目时补探整个项目，没变的 worktree 只需一条 `git status` 复核。
+- 最后一个连接断开后缓存保留 5 分钟（`EXPERIMENT_NODE`）、期间不轮询，切回来不必全量冷探。
+- 代价：落地检测（`refreshTaskCommitIntegrationProvenance`）挂在同一个探针上，Board Scope 下没被探的卡要等它被看到（面板轮询或切到单项目）才更新，与其他项目现状一致。
+
 **Cross-Project Ready Notification（跨项目就绪通知）**：
 `task_ready_for_review` 投给所有在场客户端，不只是该项目的连接；前端只对**当前项目**按前台可见让位，别的项目照样弹 OS 通知 / 提示音 / 播报。多标签页之间靠 `claimDelivery` 领取（每个 candidate 只有一个客户端领得到）与「有可见标签页正开着该项目」让位去重。连接握手时按全部项目重放最近 60 秒未领取的通知（单标签页切项目会重连 WS）。
+- 应用内通知点击别的项目的任务：SW 先找开着目标项目的标签页并尝试聚焦；浏览器不许页面切标签页（当前 Chromium 的常态）时**不再**把选中消息投给后台的那个标签页，改由发起页原地打开（2026-10-05：后台标签页自己跳进 Focus View 是「没操作就跳了」的成因之一）。旧 SW 还会回 `task-selected-in-background-tab`，页面照旧弹 toast。
 
 ## 不在本功能内
 

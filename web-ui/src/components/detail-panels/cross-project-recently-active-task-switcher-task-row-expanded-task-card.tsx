@@ -128,8 +128,9 @@ function OtherProjectExpandedTaskCard({
 }
 
 /**
- * All projects 面板里一行展开后的完整卡片：与 This project 同一个紧凑 `TaskCardBody`、同一套 stage 门控
- *（buildTaskCardBusinessProps）与同一组服务端卡片动作。当前项目读浏览器里的 board；其他项目按需读服务端。
+ * All projects 面板里一行的完整卡片（hover 浮层里、或用户点了「Keep open」后原地替换精简行）：与 This project
+ * 同一个紧凑 `TaskCardBody`、同一套 stage 门控（buildTaskCardBusinessProps）与同一组服务端卡片动作。
+ * 当前项目读浏览器里的 board；其他项目按需读服务端。
  */
 export function CrossProjectRecentlyActiveTaskSwitcherTaskRowExpandedTaskCard({
 	entryInProject,
@@ -150,7 +151,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowExpandedTaskCard({
 	onActivateTaskCard: (card: BoardCard) => void;
 }): ReactElement {
 	return (
-		<div className="pb-1 pl-[19px] pr-1" data-testid="cross-project-task-switcher-expanded-task-card">
+		<div className="min-w-0" data-testid="cross-project-task-switcher-full-task-card">
 			{entryInProject.workspaceId === currentProjectId && currentProjectTaskCards ? (
 				<CurrentProjectExpandedTaskCard
 					taskId={entryInProject.entry.taskId}

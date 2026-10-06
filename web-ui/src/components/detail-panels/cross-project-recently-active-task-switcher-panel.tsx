@@ -4,8 +4,18 @@ import {
 	type CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { ChevronDown, ChevronRight, ChevronUp, Flame, History, Pin } from "lucide-react";
-import { type ReactElement, type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+	type ReactElement,
+	type ReactNode,
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { notifyError } from "@/components/app-toaster";
+import { CrossProjectTaskSwitcherFullTaskCardHeaderStrip } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-header-strip";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
 	CrossProjectRecentlyActiveTaskSwitcherTaskRow,
@@ -15,6 +25,7 @@ import {
 	CrossProjectRecentlyActiveTaskSwitcherTaskRowExpandedTaskCard,
 	type CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
+import { CrossProjectRecentlyActiveTaskSwitcherTaskRowFullTaskCardHoverOverlay } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-full-task-card-hover-overlay";
 import { crossProjectTaskSwitcherSectionRowAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import {
 	TaskPinboardPinReasonDialog,
@@ -24,6 +35,7 @@ import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
+import { useCrossProjectTaskSwitcherRowFullTaskCardHoverOverlay } from "@/hooks/use-cross-project-task-switcher-row-full-task-card-hover-overlay";
 import {
 	collectEntriesShownInCrossProjectTaskSwitcherSections,
 	useCrossProjectTaskWorktreeGitMetadataPolling,
@@ -164,27 +176,41 @@ function useCrossProjectTaskPinboardPinning(host: CrossProjectRecentlyActiveTask
 	};
 }
 
-// 展开成完整卡片的行（按任务记，Pinned 与下方区同一个任务一起展开），跨重挂载保留。
-function useExpandedCrossProjectTaskSwitcherEntryKeys(): {
-	expandedEntryKeys: ReadonlySet<string>;
-	toggleEntryExpanded: (entryKey: string) => void;
+// 用户点了「Keep open」、原地换成完整卡片的行（按任务记，Pinned 与下方区同一个任务一起换），跨重挂载保留。
+function useCrossProjectTaskSwitcherRowsKeptOpenAsFullTaskCardByUser(): {
+	entryKeysKeptOpenAsFullTaskCardByUser: ReadonlySet<string>;
+	setEntryKeptOpenAsFullTaskCardByUser: (entryKey: string, isKeptOpen: boolean) => void;
 } {
-	const [expandedEntryKeys, setExpandedEntryKeys] = useState<ReadonlySet<string>>(
-		() => new Set(readCrossProjectTaskSwitcherPanelViewContinuity().expandedCrossProjectTaskSwitcherEntryKeys),
+	const [entryKeysKeptOpenAsFullTaskCardByUser, setEntryKeysKeptOpenAsFullTaskCardByUser] = useState<
+		ReadonlySet<string>
+	>(
+		() =>
+			new Set(
+				readCrossProjectTaskSwitcherPanelViewContinuity()
+					.crossProjectTaskSwitcherEntryKeysKeptOpenAsFullTaskCardByUser,
+			),
 	);
-	const toggleEntryExpanded = useCallback((entryKey: string) => {
-		setExpandedEntryKeys((previousExpandedEntryKeys) => {
-			const nextExpandedEntryKeys = new Set(previousExpandedEntryKeys);
-			if (!nextExpandedEntryKeys.delete(entryKey)) {
-				nextExpandedEntryKeys.add(entryKey);
+	const setEntryKeptOpenAsFullTaskCardByUser = useCallback((entryKey: string, isKeptOpen: boolean) => {
+		setEntryKeysKeptOpenAsFullTaskCardByUser((previousEntryKeys) => {
+			if (previousEntryKeys.has(entryKey) === isKeptOpen) {
+				return previousEntryKeys;
 			}
-			writeCrossProjectTaskSwitcherPanelViewContinuity({
-				expandedCrossProjectTaskSwitcherEntryKeys: [...nextExpandedEntryKeys],
-			});
-			return nextExpandedEntryKeys;
+			const nextEntryKeys = new Set(previousEntryKeys);
+			if (isKeptOpen) {
+				nextEntryKeys.add(entryKey);
+			} else {
+				nextEntryKeys.delete(entryKey);
+			}
+			return nextEntryKeys;
 		});
 	}, []);
-	return { expandedEntryKeys, toggleEntryExpanded };
+	// 写记忆放在提交之后，不在 updater 里做副作用。
+	useEffect(() => {
+		writeCrossProjectTaskSwitcherPanelViewContinuity({
+			crossProjectTaskSwitcherEntryKeysKeptOpenAsFullTaskCardByUser: [...entryKeysKeptOpenAsFullTaskCardByUser],
+		});
+	}, [entryKeysKeptOpenAsFullTaskCardByUser]);
+	return { entryKeysKeptOpenAsFullTaskCardByUser, setEntryKeptOpenAsFullTaskCardByUser };
 }
 
 function CrossProjectTaskSwitcherSectionFrame({
@@ -254,7 +280,15 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 		unpinTaskCardInOtherProjectFromTaskPinboard,
 		otherProjectPinReasonDialog,
 	} = useCrossProjectTaskPinboardPinning(host);
-	const { expandedEntryKeys, toggleEntryExpanded } = useExpandedCrossProjectTaskSwitcherEntryKeys();
+	const { entryKeysKeptOpenAsFullTaskCardByUser, setEntryKeptOpenAsFullTaskCardByUser } =
+		useCrossProjectTaskSwitcherRowsKeptOpenAsFullTaskCardByUser();
+	const {
+		hoverOverlayTarget,
+		buildRowHoverOverlayTriggerProps,
+		overlayPointerHandlers,
+		closeHoverOverlay,
+		hoverOverlayElementRef,
+	} = useCrossProjectTaskSwitcherRowFullTaskCardHoverOverlay();
 	// 点 backlog 行 = 原地打开编辑对话框（不切项目、不离开 Focus View），与 This project 点 backlog 卡同语义。
 	const { onOpenBacklogTaskEditorInProject } = host;
 	const requestPinTaskCardInOtherProjectFromExpandedTaskCard = useCallback(
@@ -327,6 +361,38 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	});
 
 	const showsProjectName = new Set(host.projects.map((project) => project.id)).size > 1;
+	// hover 浮层里与「Keep open」后同一张完整卡片。点卡片打开任务时先收起浮层。
+	const renderFullTaskCard = (
+		entryInProject: CrossProjectTaskSwitcherEntryInProject,
+		onBeforeActivateTaskCard?: () => void,
+	): ReactElement => (
+		<CrossProjectRecentlyActiveTaskSwitcherTaskRowExpandedTaskCard
+			entryInProject={entryInProject}
+			currentProjectId={host.currentProjectId}
+			currentProjectTaskCards={currentProjectTaskCards}
+			otherProjectWorkspacePath={projectPathByWorkspaceId.get(entryInProject.workspaceId) ?? null}
+			defaultAgentId={defaultAgentId}
+			buildTaskCardActionHandlerBundleForOtherProjectTaskCard={
+				buildTaskCardActionHandlerBundleForOtherProjectTaskCard
+			}
+			onActivateTaskCard={(card) => {
+				onBeforeActivateTaskCard?.();
+				host.onOpenTaskInProject(entryInProject.workspaceId, card.id);
+			}}
+		/>
+	);
+	const hoverOverlayEntryInProject = hoverOverlayTarget
+		? (entriesShownInSections.find(
+				({ workspaceId, entry }) =>
+					buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) === hoverOverlayTarget.entryKey,
+			) ?? null)
+		: null;
+	const hoverOverlayPromptCacheWarmthEstimate = hoverOverlayTarget
+		? sections.promptCacheWarmAwaitingUserEntries.find(
+				({ workspaceId, entry }) =>
+					buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) === hoverOverlayTarget.entryKey,
+			)?.promptCacheWarmthEstimate
+		: undefined;
 	const renderRow = (
 		entryInProject: CrossProjectTaskSwitcherEntryInProject,
 		section: CrossProjectTaskSwitcherTaskRowSection,
@@ -334,7 +400,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	): ReactElement => {
 		const { workspaceId, entry } = entryInProject;
 		const entryKey = buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId);
-		const isExpanded = expandedEntryKeys.has(entryKey);
+		const isKeptOpenAsFullTaskCardByUser = entryKeysKeptOpenAsFullTaskCardByUser.has(entryKey);
 		return (
 			<CrossProjectRecentlyActiveTaskSwitcherTaskRow
 				key={`${section}:${entryKey}`}
@@ -348,24 +414,15 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 				nowMs={nowMs}
 				showsProjectName={showsProjectName}
 				currentProjectId={host.currentProjectId}
-				isExpanded={isExpanded}
-				onToggleExpanded={() => toggleEntryExpanded(entryKey)}
-				expandedTaskCard={
-					isExpanded ? (
-						<CrossProjectRecentlyActiveTaskSwitcherTaskRowExpandedTaskCard
-							entryInProject={entryInProject}
-							currentProjectId={host.currentProjectId}
-							currentProjectTaskCards={currentProjectTaskCards}
-							otherProjectWorkspacePath={projectPathByWorkspaceId.get(workspaceId) ?? null}
-							defaultAgentId={defaultAgentId}
-							buildTaskCardActionHandlerBundleForOtherProjectTaskCard={
-								buildTaskCardActionHandlerBundleForOtherProjectTaskCard
-							}
-							onActivateTaskCard={(card) => host.onOpenTaskInProject(workspaceId, card.id)}
-						/>
-					) : undefined
+				isKeptOpenAsFullTaskCardByUser={isKeptOpenAsFullTaskCardByUser}
+				fullTaskCardKeptOpenByUser={isKeptOpenAsFullTaskCardByUser ? renderFullTaskCard(entryInProject) : undefined}
+				onCollapseKeptOpenFullTaskCard={() => setEntryKeptOpenAsFullTaskCardByUser(entryKey, false)}
+				rowHoverOverlayTriggerProps={
+					isKeptOpenAsFullTaskCardByUser ? undefined : buildRowHoverOverlayTriggerProps(entryKey)
 				}
 				onOpen={() => {
+					// 等 hover 意图期间点了行：撤掉预取用的隐形浮层。
+					closeHoverOverlay();
 					if (entry.columnId === "backlog" && onOpenBacklogTaskEditorInProject) {
 						onOpenBacklogTaskEditorInProject(workspaceId, entry.taskId);
 						return;
@@ -574,6 +631,31 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 					</button>
 				)}
 			</CrossProjectTaskSwitcherSectionFrame>
+			{hoverOverlayTarget && hoverOverlayEntryInProject ? (
+				<CrossProjectRecentlyActiveTaskSwitcherTaskRowFullTaskCardHoverOverlay
+					key={hoverOverlayTarget.entryKey}
+					anchorRowElement={hoverOverlayTarget.anchorRowElement}
+					isRevealed={hoverOverlayTarget.isRevealed}
+					hoverOverlayElementRef={hoverOverlayElementRef}
+					onPointerEnter={overlayPointerHandlers.onPointerEnter}
+					onPointerLeave={overlayPointerHandlers.onPointerLeave}
+				>
+					<CrossProjectTaskSwitcherFullTaskCardHeaderStrip
+						projectName={showsProjectName ? hoverOverlayEntryInProject.projectName : null}
+						isUnreadHandoff={unreadHandoffEntryKeys.has(hoverOverlayTarget.entryKey)}
+						promptCacheWarmthEstimate={hoverOverlayPromptCacheWarmthEstimate}
+						nowMs={nowMs}
+						fullTaskCardKeepOpenAction={{
+							kind: "keep_full_task_card_open_in_list",
+							onKeepOpen: () => {
+								setEntryKeptOpenAsFullTaskCardByUser(hoverOverlayTarget.entryKey, true);
+								closeHoverOverlay();
+							},
+						}}
+					/>
+					{renderFullTaskCard(hoverOverlayEntryInProject, closeHoverOverlay)}
+				</CrossProjectRecentlyActiveTaskSwitcherTaskRowFullTaskCardHoverOverlay>
+			) : null}
 			{otherProjectPinReasonDialog}
 			{otherProjectTaskCardActionConfirmationDialogs}
 		</div>

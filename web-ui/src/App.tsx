@@ -101,7 +101,7 @@ import type { StreamedTaskSessionSummariesApplier } from "@/runtime/use-runtime-
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
-import { saveWorkspaceState } from "@/runtime/workspace-state-query";
+import { fetchTaskWorkspaceInfoForWorkspace, saveWorkspaceState } from "@/runtime/workspace-state-query";
 import { applyTaskDetailClineSettingsChange, findCardSelection, updateTaskCommentEntries } from "@/state/board-state";
 import { applyPendingTaskCardCommandBoardOverlay } from "@/state/pending-task-card-command-board-overlay";
 import { withWebUiBoardMutationInitiatorRecordedForChangedTaskCards } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
@@ -109,6 +109,7 @@ import {
 	prunePendingTaskCardCommandBoardOverlayEntriesSatisfiedByBoard,
 	usePendingTaskCardCommandBoardOverlayEntries,
 } from "@/stores/pending-task-card-command-board-overlay-store";
+import { writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab } from "@/stores/workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store";
 import {
 	getTaskWorkspaceInfo,
 	getTaskWorkspaceSnapshot,
@@ -317,6 +318,19 @@ export default function App(): ReactElement {
 		currentProjectId: projectRuntimeWorkspaceId,
 		setSessions,
 	});
+	const resolveTaskWorkspaceAbsoluteDirectoryPath = useCallback(
+		async (card: BoardCard) =>
+			projectRuntimeWorkspaceId
+				? (
+						await fetchTaskWorkspaceInfoForWorkspace(projectRuntimeWorkspaceId, {
+							taskId: card.id,
+							baseRef: card.baseRef,
+							worktreeMode: card.worktreeMode,
+						})
+					).path
+				: null,
+		[projectRuntimeWorkspaceId],
+	);
 
 	// 当前 workspace 内正处于连接重试的会话视图（驱动顶栏「重连中」指示器）。
 	// sessions 已按 workspace 范围维护，因此这里天然是 per-tab 范围。
@@ -1134,9 +1148,63 @@ export default function App(): ReactElement {
 		setPostDeployVerificationCollapsed(false);
 	}, [setPostDeployVerificationCollapsed]);
 
+	// Board Scope 的 Focus View（含跨项目打开在途）里焦点任务所属的项目：在途时是目标项目。
+	const boardScopeFocusViewFocusedTaskProjectId =
+		pendingCrossProjectTaskOpen?.originatedFromFocusView === true
+			? pendingCrossProjectTaskOpen.repoId
+			: selectedCard
+				? currentProjectId
+				: null;
+	// 状态流据此向服务端声明要哪些任务的 git 元数据：All projects 下只要焦点任务（跨项目打开在途时是目标任务）。
+	const workspaceMetadataProbeFocusedTaskWorkspaceId = pendingCrossProjectTaskOpen
+		? pendingCrossProjectTaskOpen.repoId
+		: selectedCard
+			? currentProjectId
+			: null;
+	const workspaceMetadataProbeFocusedTaskId = pendingCrossProjectTaskOpen
+		? pendingCrossProjectTaskOpen.taskId
+		: (selectedCard?.card.id ?? null);
+	useEffect(() => {
+		writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({
+			isBoardScopeAllProjectsSelected,
+			focusedTaskInProject:
+				workspaceMetadataProbeFocusedTaskWorkspaceId && workspaceMetadataProbeFocusedTaskId
+					? {
+							workspaceId: workspaceMetadataProbeFocusedTaskWorkspaceId,
+							taskId: workspaceMetadataProbeFocusedTaskId,
+						}
+					: null,
+		});
+	}, [
+		isBoardScopeAllProjectsSelected,
+		workspaceMetadataProbeFocusedTaskId,
+		workspaceMetadataProbeFocusedTaskWorkspaceId,
+	]);
+	// ⌘E：Board Scope ⇄ 焦点任务所属的项目（看板页没有焦点任务时是当前项目）。
+	const handleToggleBetweenBoardScopeAndFocusedTaskProjectScope = useCallback(() => {
+		if (!isBoardScopeAllProjectsSelected) {
+			selectBoardScopeAllProjects();
+			return;
+		}
+		const projectIdToNarrowTo =
+			boardScopeFocusViewFocusedTaskProjectId ?? navigationCurrentProjectId ?? currentProjectId;
+		if (!projectIdToNarrowTo) {
+			return;
+		}
+		handleSelectProjectNarrowingToSingleProjectScope(projectIdToNarrowTo);
+	}, [
+		boardScopeFocusViewFocusedTaskProjectId,
+		currentProjectId,
+		handleSelectProjectNarrowingToSingleProjectScope,
+		isBoardScopeAllProjectsSelected,
+		navigationCurrentProjectId,
+		selectBoardScopeAllProjects,
+	]);
+
 	useProjectNumericSlotGroupHotkeys({
 		projects,
 		currentProjectId,
+		isBoardScopeAllProjectsSelected,
 		numericSlotGroupAssignments,
 		onSelectProject: handleSelectProjectNarrowingToSingleProjectScope,
 		onAssignProjectToNumericSlotGroupNumber: assignProjectToNumericSlotGroupNumber,
@@ -1161,6 +1229,9 @@ export default function App(): ReactElement {
 		handleToggleGitHistory,
 		handleCloseGitHistory,
 		onRequestStartAllReadyBacklogTasks: requestStartAllReadyBacklogTasksConfirmation,
+		handleToggleBetweenBoardScopeAndFocusedTaskProjectScope: hasNoProjects
+			? null
+			: handleToggleBetweenBoardScopeAndFocusedTaskProjectScope,
 	});
 
 	useEffect(() => {
@@ -1249,19 +1320,12 @@ export default function App(): ReactElement {
 			onClearNumericSlotGroupNumber: clearNumericSlotGroupNumber,
 			selectedBoardOrSingleProjectScope,
 			onSelectBoardScopeAllProjects: selectBoardScopeAllProjects,
-			// Focus View（含跨项目打开在途）里显示焦点任务所属的项目：在途时是目标项目。
-			boardScopeFocusViewFocusedTaskProjectId:
-				pendingCrossProjectTaskOpen?.originatedFromFocusView === true
-					? pendingCrossProjectTaskOpen.repoId
-					: selectedCard
-						? currentProjectId
-						: null,
+			boardScopeFocusViewFocusedTaskProjectId,
 		}),
 		[
-			pendingCrossProjectTaskOpen,
+			boardScopeFocusViewFocusedTaskProjectId,
 			selectBoardScopeAllProjects,
 			selectedBoardOrSingleProjectScope,
-			selectedCard,
 			assignProjectToNumericSlotGroupNumber,
 			clearNumericSlotGroupNumber,
 			currentProjectId,
@@ -1641,6 +1705,9 @@ export default function App(): ReactElement {
 														data={displayedBoard}
 														taskSessions={sessions}
 														workspacePath={workspacePath}
+														resolveTaskWorkspaceAbsoluteDirectoryPath={
+															resolveTaskWorkspaceAbsoluteDirectoryPath
+														}
 														onCardSelect={handleCardSelect}
 														onCreateTask={handleOpenCreateTask}
 														onStartTask={handleStartTaskFromBoard}
@@ -1732,6 +1799,7 @@ export default function App(): ReactElement {
 										currentProjectId={currentProjectId}
 										taskIdsOnBoard={taskIdsOnBoard}
 										workspacePath={workspacePath}
+										resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
 										selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 										runtimeConfig={runtimeProjectConfig ?? null}
 										sessionSummary={detailSession}

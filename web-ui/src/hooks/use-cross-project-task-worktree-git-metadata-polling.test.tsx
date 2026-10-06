@@ -30,21 +30,19 @@ function entryInProject(
 }
 
 describe("selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll", () => {
-	it("排除当前项目与 Backlog，按 (workspaceId, taskId) 去重", () => {
+	it("排除 Backlog、含当前项目（All projects 下状态流只探焦点任务），按 (workspaceId, taskId) 去重", () => {
 		expect(
-			selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll(
-				[
-					entryInProject("current", "c1"),
-					entryInProject("other", "o1"),
-					entryInProject("other", "o1"),
-					entryInProject("other", "same-id"),
-					entryInProject("third", "same-id"),
-					entryInProject("other", "backlog-task", "backlog"),
-					entryInProject("other", "done-task", "trash"),
-				],
-				"current",
-			),
+			selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll([
+				entryInProject("current", "c1"),
+				entryInProject("other", "o1"),
+				entryInProject("other", "o1"),
+				entryInProject("other", "same-id"),
+				entryInProject("third", "same-id"),
+				entryInProject("other", "backlog-task", "backlog"),
+				entryInProject("other", "done-task", "trash"),
+			]),
 		).toEqual([
+			{ workspaceId: "current", taskId: "c1" },
 			{ workspaceId: "other", taskId: "o1" },
 			{ workspaceId: "other", taskId: "same-id" },
 			{ workspaceId: "third", taskId: "same-id" },
@@ -54,7 +52,7 @@ describe("selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll", 
 
 	it("每次最多请求 100 个（与服务端 schema 上限一致）", () => {
 		const entries = Array.from({ length: 130 }, (_, index) => entryInProject("other", `t${index}`));
-		expect(selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll(entries, null)).toHaveLength(100);
+		expect(selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll(entries)).toHaveLength(100);
 	});
 });
 
@@ -112,10 +110,12 @@ describe("useCrossProjectTaskWorktreeGitMetadataPolling", () => {
 		expect(fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries).toHaveBeenCalledTimes(2);
 	});
 
-	it("只有当前项目或 Backlog 条目时不发请求", async () => {
+	it("只有 Backlog 条目时不发请求", async () => {
 		await act(async () => {
 			root.render(
-				<PollingHost entries={[entryInProject("current", "c1"), entryInProject("other", "b1", "backlog")]} />,
+				<PollingHost
+					entries={[entryInProject("current", "b0", "backlog"), entryInProject("other", "b1", "backlog")]}
+				/>,
 			);
 		});
 		await act(async () => {

@@ -4,6 +4,7 @@ import { notifyError, showAppToast } from "@/components/app-toaster";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import type { TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
+import { fetchTaskWorkspaceInfoForWorkspace } from "@/runtime/workspace-state-query";
 import type { TaskCardActionCommandExecutionResult } from "@/state/task-card-action-command-execution";
 import {
 	moveTaskCardBetweenNonTrashColumnsThroughRuntime,
@@ -98,6 +99,14 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 			boardColumnIdContainingTaskCard: BoardColumnId;
 			taskCardActionCommandKindInFlight: TaskCardActionCommandKind | null;
 		}): TaskCardActionHandlerBundle => ({
+			resolveTaskWorkspaceAbsoluteDirectoryPath: async (card) =>
+				(
+					await fetchTaskWorkspaceInfoForWorkspace(workspaceId, {
+						taskId: card.id,
+						baseRef: card.baseRef,
+						worktreeMode: card.worktreeMode,
+					})
+				).path,
 			onStartTask: (taskId) => {
 				void startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime({
 					workspaceId,

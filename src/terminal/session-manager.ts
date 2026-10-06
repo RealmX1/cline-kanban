@@ -3825,6 +3825,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry.terminalStateMirror = terminalStateMirror;
 		entry.lastStallLoggedAt = null;
 		this.ensureStallScanRunning();
+		// 注入回执的唯一提交点：PTY 已 spawn 成功、新会话已装进槽位，关系邻域注入段这才算真的进了会话。
+		// 准备失败、spawn 失败、槽位被别人占了而丢掉自己这条（上面三处提前返回 / 抛出）都走不到这里。
+		// 后台记账、按幂等键去重、绝不抛错，不影响启动。
+		launch.commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded?.();
 
 		// 独立的 wall-clock 兜底：claude / kimi 可能在一个 chunk 里渲染完启动 UI，而 readiness
 		// predicate 漏识别（例如 TUI 文案改写、边框 / 输入框被切分到两块 chunk 里），此后不会

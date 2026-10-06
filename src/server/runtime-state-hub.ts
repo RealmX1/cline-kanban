@@ -51,7 +51,10 @@ import type {
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionUserTurnKind,
+	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 } from "../core/api-contract";
+import { runtimeStateStreamClientMessageSchema } from "../core/api-contract";
+import { ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE } from "../core/runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import { isNotifiableUserTurn, resolveSessionFacets } from "../core/session-activity";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import { buildNotificationFeedEntries } from "../state/notification-feed-builder";
@@ -93,6 +96,8 @@ export interface RuntimeStateHub {
 		head: Buffer,
 		context: {
 			requestedWorkspaceId: string | null;
+			// WS URL 带来的初始 git 元数据探测范围；null = 没声明（旧客户端），按整个项目。
+			initialWorkspaceMetadataProbeScope: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient | null;
 		},
 	) => void;
 	disposeWorkspace: (workspaceId: string) => void;
@@ -193,6 +198,23 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
 	const runtimeStateWorkspaceIdByClient = new Map<WebSocket, string>();
+	// 每个连接在 git 元数据监视器里的订阅（调用 connectWorkspace 之前就登记，好让首轮刷新失败或等待期间断开时都能断开它；
+	// 早于 runtimeStateWorkspaceIdByClient，消息里的改范围仍以后者为门，握手期间不直接改监视器），
+	// 与它最近声明的探测范围（握手期间到达的声明先记在这里，订阅建立后补上）。
+	const workspaceMetadataSubscriptionByClient = new Map<WebSocket, { workspaceId: string; subscriberId: string }>();
+	const latestWorkspaceMetadataProbeScopeDeclaredByClient = new Map<
+		WebSocket,
+		RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient
+	>();
+	let workspaceMetadataSubscriberSequenceNumber = 0;
+	const disconnectWorkspaceMetadataSubscriptionOfClient = (client: WebSocket) => {
+		const subscription = workspaceMetadataSubscriptionByClient.get(client);
+		if (!subscription) {
+			return;
+		}
+		workspaceMetadataSubscriptionByClient.delete(client);
+		workspaceMetadataMonitor.disconnectWorkspace(subscription.workspaceId, subscription.subscriberId);
+	};
 	let clineSessionContextVersion = 0;
 	const runtimeStateWebSocketServer = new WebSocketServer({ noServer: true });
 	const workspaceMetadataMonitor = createWorkspaceMetadataMonitor({
@@ -436,9 +458,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const cleanupRuntimeStateClient = (client: WebSocket) => {
+		disconnectWorkspaceMetadataSubscriptionOfClient(client);
+		latestWorkspaceMetadataProbeScopeDeclaredByClient.delete(client);
 		const workspaceId = runtimeStateWorkspaceIdByClient.get(client);
 		if (workspaceId) {
-			workspaceMetadataMonitor.disconnectWorkspace(workspaceId);
 			const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
 			if (clients) {
 				clients.delete(client);
@@ -703,6 +726,35 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		client.on("close", () => {
 			cleanupRuntimeStateClient(client);
 		});
+		// 浏览器 → 服务端只有一种消息：改 git 元数据探测范围。解析不了的一律忽略（不断连）。
+		client.on("message", (rawMessage, isBinary) => {
+			if (isBinary) {
+				return;
+			}
+			let parsedMessage: unknown;
+			try {
+				parsedMessage = JSON.parse(String(rawMessage));
+			} catch {
+				return;
+			}
+			const clientMessage = runtimeStateStreamClientMessageSchema.safeParse(parsedMessage);
+			if (!clientMessage.success) {
+				return;
+			}
+			const { workspaceMetadataProbeScope } = clientMessage.data;
+			latestWorkspaceMetadataProbeScopeDeclaredByClient.set(client, workspaceMetadataProbeScope);
+			// 还在握手（没注册进按 workspace 的广播名单）：先记下，注册后再补探，否则补探的推送到不了这个连接。
+			const subscription = runtimeStateWorkspaceIdByClient.has(client)
+				? workspaceMetadataSubscriptionByClient.get(client)
+				: undefined;
+			if (subscription) {
+				workspaceMetadataMonitor.updateSubscriberProbeScope({
+					workspaceId: subscription.workspaceId,
+					subscriberId: subscription.subscriberId,
+					probeScope: workspaceMetadataProbeScope,
+				});
+			}
+		});
 		try {
 			const requestedWorkspaceId =
 				typeof context === "object" &&
@@ -711,6 +763,17 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				typeof (context as { requestedWorkspaceId?: unknown }).requestedWorkspaceId === "string"
 					? (context as { requestedWorkspaceId: string }).requestedWorkspaceId || null
 					: null;
+			const initialWorkspaceMetadataProbeScope =
+				typeof context === "object" && context !== null && "initialWorkspaceMetadataProbeScope" in context
+					? ((
+							context as {
+								initialWorkspaceMetadataProbeScope?: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient | null;
+							}
+						).initialWorkspaceMetadataProbeScope ?? null)
+					: null;
+			if (initialWorkspaceMetadataProbeScope && !latestWorkspaceMetadataProbeScopeDeclaredByClient.has(client)) {
+				latestWorkspaceMetadataProbeScopeDeclaredByClient.set(client, initialWorkspaceMetadataProbeScope);
+			}
 			const workspace: ResolvedWorkspaceStreamTarget =
 				await deps.workspaceRegistry.resolveWorkspaceForStream(requestedWorkspaceId);
 			if (client.readyState !== WebSocket.OPEN) {
@@ -742,6 +805,12 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				3. send the combined "snapshot" message
 				4. only then register the socket in runtimeStateClientsByWorkspaceId so future incremental
 				   workspace_metadata_updated events can flow normally
+				5. if the browser declared a different git metadata probe scope during the handshake (the URL still
+				   carried the previous focused task), apply it only now, so the follow-up probe's
+				   workspace_metadata_updated reaches this socket
+
+				The initial probe only covers the scope the connection declared (Board Scope: the focused task plus
+				auto-review tasks in Review), so a cross-project open no longer waits for every task's git status.
 
 				The extra readyState checks and monitor cleanup below are paired with this delayed registration. If the
 				socket closes while we are still assembling or sending the initial snapshot, we must disconnect the
@@ -753,7 +822,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			// 保证注册后的下一次 projects_updated 广播必定发送，自愈补洞。
 			lastBroadcastProjectsPayloadFingerprint = null;
 			let monitorWorkspaceId: string | null = null;
-			let didConnectWorkspaceMonitor = false;
+			// 连接那一刻用的探测范围；注册完成后若浏览器已声明了别的范围，再按新范围补探。
+			let workspaceMetadataProbeScopeUsedAtConnect: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient =
+				ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE;
 
 			try {
 				let projectsPayload: {
@@ -768,12 +839,21 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 						deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(workspace.projectId),
 						deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspace.projectId, workspace.workspacePath),
 					]);
+					workspaceMetadataProbeScopeUsedAtConnect =
+						latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client) ??
+						ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE;
+					workspaceMetadataSubscriberSequenceNumber += 1;
+					const subscriberId = `runtime-state-stream-client-${workspaceMetadataSubscriberSequenceNumber}`;
+					// 先登记再等首轮刷新：刷新失败走下面的 catch、或客户端在等待期间断开走 cleanupRuntimeStateClient，
+					// 都能找到这条订阅去断开（重复断开对监视器无害）。
+					workspaceMetadataSubscriptionByClient.set(client, { workspaceId: workspace.projectId, subscriberId });
 					workspaceMetadata = await workspaceMetadataMonitor.connectWorkspace({
 						workspaceId: workspace.projectId,
 						workspacePath: workspace.workspacePath,
 						board: workspaceState.board,
+						subscriberId,
+						probeScope: workspaceMetadataProbeScopeUsedAtConnect,
 					});
-					didConnectWorkspaceMonitor = true;
 				} else {
 					projectsPayload = await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
 						workspace.projectId,
@@ -784,9 +864,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				// 聚合全部 workspace 的通知 feed，随首帧快照下发（铃铛跨 repo）。独立于当前连接的 workspace scope。
 				const notificationLog = await buildAggregatedNotificationFeed();
 				if (client.readyState !== WebSocket.OPEN) {
-					if (monitorWorkspaceId) {
-						workspaceMetadataMonitor.disconnectWorkspace(monitorWorkspaceId);
-					}
 					cleanupRuntimeStateClient(client);
 					return;
 				}
@@ -801,9 +878,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				} satisfies RuntimeStateStreamSnapshotMessage);
 
 				if (client.readyState !== WebSocket.OPEN) {
-					if (monitorWorkspaceId) {
-						workspaceMetadataMonitor.disconnectWorkspace(monitorWorkspaceId);
-					}
 					cleanupRuntimeStateClient(client);
 					return;
 				}
@@ -813,6 +887,23 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					workspaceClients.add(client);
 					runtimeStateClientsByWorkspaceId.set(monitorWorkspaceId, workspaceClients);
 					runtimeStateWorkspaceIdByClient.set(client, monitorWorkspaceId);
+					// 握手期间浏览器改过范围（例如连接 URL 里还是上一个焦点任务）：注册之后再按新范围补探，
+					// 补探结果经 workspace_metadata_updated 推到这个连接（注册之前推就收不到了）。
+					const workspaceMetadataSubscription = workspaceMetadataSubscriptionByClient.get(client);
+					const latestDeclaredWorkspaceMetadataProbeScope =
+						latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client);
+					if (
+						workspaceMetadataSubscription &&
+						latestDeclaredWorkspaceMetadataProbeScope &&
+						JSON.stringify(latestDeclaredWorkspaceMetadataProbeScope) !==
+							JSON.stringify(workspaceMetadataProbeScopeUsedAtConnect)
+					) {
+						workspaceMetadataMonitor.updateSubscriberProbeScope({
+							workspaceId: workspaceMetadataSubscription.workspaceId,
+							subscriberId: workspaceMetadataSubscription.subscriberId,
+							probeScope: latestDeclaredWorkspaceMetadataProbeScope,
+						});
+					}
 					const conversationSummaries = collectTrackedConversationSummaries(monitorWorkspaceId);
 					if (conversationSummaries.length > 0) {
 						sendRuntimeStateMessage(client, {
@@ -861,9 +952,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					logAgentSessionRetentionWarning("notification-replay-failed: 通知档案重放失败，核心状态推流继续。");
 				}
 			} catch (error) {
-				if (didConnectWorkspaceMonitor && monitorWorkspaceId) {
-					workspaceMetadataMonitor.disconnectWorkspace(monitorWorkspaceId);
-				}
+				disconnectWorkspaceMetadataSubscriptionOfClient(client);
 				const message = error instanceof Error ? error.message : String(error);
 				sendRuntimeStateMessage(client, {
 					type: "error",

@@ -171,7 +171,10 @@ async function setupHubHarness(): Promise<HubTestHarness> {
 
 	const httpServer: Server = createServer();
 	httpServer.on("upgrade", (request, socket, head) => {
-		hub.handleUpgrade(request, socket, head, { requestedWorkspaceId: null });
+		hub.handleUpgrade(request, socket, head, {
+			requestedWorkspaceId: null,
+			initialWorkspaceMetadataProbeScope: null,
+		});
 	});
 	httpServer.listen(0, "127.0.0.1");
 	await once(httpServer, "listening");

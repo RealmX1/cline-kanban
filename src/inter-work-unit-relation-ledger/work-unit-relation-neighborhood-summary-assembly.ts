@@ -4,6 +4,7 @@ import type {
 	KanbanBoardCardIdentityResolutionCandidate,
 	WorkUnitDisplayEntry,
 } from "../core/work-unit-relation-read-api-contract";
+import { listAssertedInterWorkUnitRelationsTouchingWorkUnit } from "./asserted-inter-work-unit-relation-projection-from-ledger-events";
 import { listConversationSessionOwnershipConflictDiagnosticsTouchingWorkUnit } from "./conversation-session-ownership-period-projection-from-ledger-events";
 import {
 	buildInterWorkUnitRelationWorkUnitKey,
@@ -132,8 +133,15 @@ export async function assembleRecordedRelationNeighborhoodSummaryOfWorkUnit(
 	const projectionState = reader.projectionState;
 	const subjectWorkUnitKey = buildInterWorkUnitRelationWorkUnitKey(subjectWorkUnit);
 	const recordedRelations = listRecordedInterWorkUnitRelationsTouchingWorkUnit(projectionState, subjectWorkUnit);
+	const assertedRelations = listAssertedInterWorkUnitRelationsTouchingWorkUnit(
+		projectionState.assertedInterWorkUnitRelationProjectionState,
+		subjectWorkUnit,
+	);
 	const collectCounterpartWorkUnits = (
-		relations: typeof recordedRelations,
+		relations: readonly {
+			relationStatementSubjectWorkUnitRef: InterWorkUnitRelationWorkUnitReference;
+			relationStatementAnchorWorkUnitRef: InterWorkUnitRelationWorkUnitReference;
+		}[],
 		excludedWorkUnitKeys: Set<string>,
 	): Map<string, InterWorkUnitRelationWorkUnitReference> => {
 		const counterpartWorkUnitsByKey = new Map<string, InterWorkUnitRelationWorkUnitReference>();
@@ -150,8 +158,12 @@ export async function assembleRecordedRelationNeighborhoodSummaryOfWorkUnit(
 		}
 		return counterpartWorkUnitsByKey;
 	};
-	const neighborWorkUnitsByKey = collectCounterpartWorkUnits(recordedRelations, new Set([subjectWorkUnitKey]));
+	const neighborWorkUnitsByKey = collectCounterpartWorkUnits(
+		[...recordedRelations, ...assertedRelations],
+		new Set([subjectWorkUnitKey]),
+	);
 	// depth 2：一度邻居各自的关系里，不触及主体的那些（触及主体的已在一度里）；多出的端点就是二度邻居。
+	// 二度只看记录型关系：断言型关系的二度展开等 2c 的邻域图一起做。
 	const secondHopRecordedRelationsById = new Map<string, (typeof recordedRelations)[number]>();
 	if (relationNeighborhoodDepth === 2) {
 		for (const neighborWorkUnit of neighborWorkUnitsByKey.values()) {
@@ -190,6 +202,7 @@ export async function assembleRecordedRelationNeighborhoodSummaryOfWorkUnit(
 	const renderedSummary = renderWorkUnitRelationNeighborhoodSummaryText({
 		subjectWorkUnit: subjectDisplayEntry,
 		recordedRelations,
+		assertedRelations,
 		...(relationNeighborhoodDepth === 2 ? { secondHopRecordedRelations } : {}),
 		workUnitDisplayLabelByWorkUnitKey: new Map(
 			[subjectDisplayEntry, ...otherDisplayEntries].map((entry) => [entry.workUnitKey, entry.workUnitDisplayLabel]),
@@ -199,6 +212,7 @@ export async function assembleRecordedRelationNeighborhoodSummaryOfWorkUnit(
 	return {
 		subjectWorkUnit: subjectDisplayEntry,
 		recordedRelations,
+		assertedRelations,
 		neighborWorkUnits: neighborDisplayEntries,
 		secondHopRecordedRelations,
 		secondHopNeighborWorkUnits: secondHopNeighborDisplayEntries,

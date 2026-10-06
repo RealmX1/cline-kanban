@@ -33,15 +33,15 @@ export function collectEntriesShownInCrossProjectTaskSwitcherSections(
 	];
 }
 
-// 要轮询的条目：其他项目、且不在 Backlog（还没有 worktree）。当前项目的行读既有推流 store，不在这里请求。
+// 要轮询的条目：不在 Backlog（还没有 worktree）的全部条目，**含当前项目**。All projects 下状态流只探焦点任务
+//（与 auto-review 的 Review 列任务），当前项目其余行的 git 状态也得靠这里。
 export function selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll(
 	entriesInProjects: readonly CrossProjectTaskSwitcherEntryInProject[],
-	currentProjectId: string | null,
 ): Array<{ workspaceId: string; taskId: string }> {
 	const seenEntryKeys = new Set<string>();
 	const tasks: Array<{ workspaceId: string; taskId: string }> = [];
 	for (const { workspaceId, entry } of entriesInProjects) {
-		if (workspaceId === currentProjectId || entry.columnId === "backlog") {
+		if (entry.columnId === "backlog") {
 			continue;
 		}
 		const entryKey = buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId);
@@ -67,8 +67,8 @@ export function useCrossProjectTaskWorktreeGitMetadataPolling({
 }): void {
 	const isDocumentVisible = useDocumentVisibility();
 	const tasksNeedingPoll = useMemo(
-		() => selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll(entriesInProjects, currentProjectId),
-		[entriesInProjects, currentProjectId],
+		() => selectCrossProjectTaskSwitcherEntriesNeedingWorktreeGitMetadataPoll(entriesInProjects),
+		[entriesInProjects],
 	);
 	// 广播每 150ms 就换一份 entries 数组，但要请求的键集合很少变；按签名触发「立刻补一轮」，避免每批都发请求。
 	const tasksNeedingPollSignature = tasksNeedingPoll

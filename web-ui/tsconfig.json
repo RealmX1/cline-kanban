@@ -21,7 +21,16 @@
       "@runtime-inter-work-unit-recorded-relation-projection-contract": [
         "../src/core/inter-work-unit-recorded-relation-projection-contract.ts"
       ],
+      "@runtime-inter-work-unit-asserted-relation-kind-registry-contract": [
+        "../src/core/inter-work-unit-asserted-relation-kind-registry-contract.ts"
+      ],
+      "@runtime-inter-work-unit-relation-assertion-lifecycle-event-contract": [
+        "../src/core/inter-work-unit-relation-assertion-lifecycle-event-contract.ts"
+      ],
       "@runtime-work-unit-relation-read-api-contract": ["../src/core/work-unit-relation-read-api-contract.ts"],
+      "@runtime-work-unit-relation-assertion-write-api-contract": [
+        "../src/core/work-unit-relation-assertion-write-api-contract.ts"
+      ],
       "@runtime-kanban-web-ui-page-load-request-origin-nonce": [
         "../src/core/kanban-web-ui-page-load-request-origin-nonce.ts"
       ],
@@ -33,6 +42,7 @@
         "../src/core/cross-project-recently-active-task-switcher-section-assignment.ts"
       ],
       "@runtime-session-activity": ["../src/core/session-activity.ts"],
+      "@runtime-state-stream-workspace-metadata-probe-scope-declaration": ["../src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration.ts"],
       "@runtime-trpc": ["../src/trpc/app-router.ts"],
       "@runtime-shortcuts": ["../src/config/shortcut-utils.ts"],
       "@runtime-task-agent-permission-mode": ["../src/core/task-agent-permission-mode.ts"],

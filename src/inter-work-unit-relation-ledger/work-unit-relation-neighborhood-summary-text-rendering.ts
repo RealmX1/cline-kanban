@@ -1,3 +1,4 @@
+import type { AssertedInterWorkUnitRelation } from "../core/inter-work-unit-asserted-relation-kind-registry-contract";
 import {
 	isRecordedInterWorkUnitRelationKind,
 	RECORDED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY,
@@ -8,6 +9,7 @@ import type {
 	InterWorkUnitRelationWorkUnitReference,
 } from "../core/inter-work-unit-relation-ledger-event-contract";
 import type { WorkUnitDisplayEntry } from "../core/work-unit-relation-read-api-contract";
+import { renderAssertedRelationNeighborhoodSummarySections } from "./asserted-relation-neighborhood-summary-text-rendering";
 import { buildInterWorkUnitRelationWorkUnitKey } from "./kanban-board-card-identity-projection-from-ledger-events";
 
 // dd2db 1b：邻域摘要的文本渲染（给 agent 读：CLI 默认输出与会话启动注入共用这一份）。
@@ -119,6 +121,8 @@ function renderSecondHopNeighborhoodLines(input: {
 export function renderWorkUnitRelationNeighborhoodSummaryText(input: {
 	subjectWorkUnit: WorkUnitDisplayEntry;
 	recordedRelations: RecordedInterWorkUnitRelation[];
+	// 阶段 2 起：当前生效的断言型关系（参照轴排在来源、需求修订之后，d-vocab §10 分区 8）。
+	assertedRelations?: AssertedInterWorkUnitRelation[];
 	// 只在 depth 2 时传入：一度邻居各自的、不触及主体的关系。
 	secondHopRecordedRelations?: RecordedInterWorkUnitRelation[];
 	workUnitDisplayLabelByWorkUnitKey: Map<string, string>;
@@ -174,14 +178,42 @@ export function renderWorkUnitRelationNeighborhoodSummaryText(input: {
 		);
 		visibleLinesBySectionPriority.set(registryEntry.neighborhoodSummarySectionPriority, sectionLines);
 	}
+	const assertedRelations = input.assertedRelations ?? [];
+	for (const relation of assertedRelations) {
+		for (const endpoint of [
+			relation.relationStatementSubjectWorkUnitRef,
+			relation.relationStatementAnchorWorkUnitRef,
+		]) {
+			const endpointKey = buildInterWorkUnitRelationWorkUnitKey(endpoint);
+			if (endpointKey !== subjectWorkUnitKey) {
+				firstHopNeighborWorkUnitKeys.add(endpointKey);
+			}
+		}
+	}
+	const renderedAssertedSections = renderAssertedRelationNeighborhoodSummarySections({
+		subjectWorkUnitKey,
+		subjectSelfReference,
+		assertedRelations,
+		labelOf,
+	});
+	for (const [
+		readingPhrase,
+		relationCount,
+	] of renderedAssertedSections.collapsedAssertedRelationCountByReadingPhrase) {
+		collapsedRelationCountByPhrase.set(
+			readingPhrase,
+			(collapsedRelationCountByPhrase.get(readingPhrase) ?? 0) + relationCount,
+		);
+	}
 	const lines = [`# Kanban relation neighborhood of ${input.subjectWorkUnit.workUnitDisplayLabel}`];
-	if (input.recordedRelations.length === 0) {
+	if (input.recordedRelations.length === 0 && assertedRelations.length === 0) {
 		lines.push("No recorded relations with other Kanban work units yet.");
 	}
 	for (const sectionPriority of [...visibleLinesBySectionPriority.keys()].sort((left, right) => left - right)) {
 		lines.push(`## ${NEIGHBORHOOD_SUMMARY_SECTION_TITLE_BY_PRIORITY[sectionPriority] ?? "Relations"}`);
 		lines.push(...(visibleLinesBySectionPriority.get(sectionPriority) ?? []));
 	}
+	lines.push(...renderedAssertedSections.renderedLines);
 	if (collapsedRelationCountByPhrase.size > 0) {
 		lines.push("## Collapsed (counts only; pass --json for details)");
 		for (const [readingPhrase, relationCount] of collapsedRelationCountByPhrase) {
@@ -209,6 +241,7 @@ export function renderWorkUnitRelationNeighborhoodSummaryText(input: {
 	}
 	return {
 		renderedNeighborhoodSummaryText: lines.join("\n"),
-		hasAnyRelationVisibleByDefault: visibleLinesBySectionPriority.size > 0,
+		hasAnyRelationVisibleByDefault:
+			visibleLinesBySectionPriority.size > 0 || renderedAssertedSections.listedAssertedRelations.length > 0,
 	};
 }

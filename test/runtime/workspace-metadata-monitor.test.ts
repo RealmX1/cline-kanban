@@ -51,6 +51,7 @@ const DEFAULT_COMMITS_BEHIND_BASE_REF = 12;
 const DEFAULT_COMMITS_AHEAD_OF_BASE_REF = 3;
 
 import type { RuntimeBoardCard, RuntimeBoardData, RuntimeTaskWorktreeMode } from "../../src/core/api-contract";
+import { ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE } from "../../src/core/runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import {
 	createWorkspaceMetadataMonitor,
 	type WorkspaceMetadataMonitor,
@@ -100,6 +101,18 @@ describe("createWorkspaceMetadataMonitor", () => {
 	// 可变，供「base 分支单方面推进」的用例改写 rev-parse 的返回。
 	let stubbedBaseRefTipCommit: string;
 	const onMetadataUpdated = vi.fn();
+
+	// 改动前的语义：一个订阅、整个项目。按范围探测的用例另行声明订阅与范围。
+	const connectWorkspaceAsWholeProjectSubscriber = (input: {
+		workspaceId: string;
+		workspacePath: string;
+		board: RuntimeBoardData;
+	}) =>
+		monitor.connectWorkspace({
+			...input,
+			subscriberId: "subscriber-declaring-whole-project",
+			probeScope: ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+		});
 
 	const countRevParseCalls = () =>
 		gitUtilsMocks.runGit.mock.calls.filter((call) => (call[1] as string[])[0] === "rev-parse").length;
@@ -216,7 +229,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 	});
 
 	it("forwards each tracked card's worktreeMode to getTaskWorkspacePathInfo", async () => {
-		await monitor.connectWorkspace({
+		await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-1",
 			workspacePath: WORKSPACE_PATH,
 			board: createBoard(),
@@ -242,7 +255,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 	});
 
 	it("reports the repo root as an existing workspace for inplace tasks", async () => {
-		const metadata = await monitor.connectWorkspace({
+		const metadata = await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-1",
 			workspacePath: WORKSPACE_PATH,
 			board: createBoard(),
@@ -287,8 +300,198 @@ describe("createWorkspaceMetadataMonitor", () => {
 		});
 	});
 
+	describe("按连接声明的范围探测（Board Scope 下跨项目打开不等整个项目的 git）", () => {
+		const createBoardWithReviewColumnCards = (): RuntimeBoardData => {
+			const board = createBoard();
+			const reviewColumn = board.columns.find((column) => column.id === "review");
+			reviewColumn?.cards.push(
+				{ ...createBoardCard("task-review-auto-review"), autoReviewEnabled: true },
+				createBoardCard("task-review-without-auto-review"),
+			);
+			return board;
+		};
+		const probedTaskIds = () =>
+			new Set(
+				taskWorktreeMocks.getTaskWorkspacePathInfo.mock.calls.map(
+					(call) => (call[0] as TaskWorkspacePathInfoOptions).taskId,
+				),
+			);
+		const focusedTaskProbeScope = (focusedTaskIds: string[]) =>
+			({
+				workspaceMetadataProbeScopeKind: "focused_task_worktrees_plus_auto_review_tasks_in_review_column",
+				focusedTaskIds,
+			}) as const;
+
+		it("只探焦点任务与 Review 列开了 auto-review 的卡，快照也只含它们", async () => {
+			const metadata = await monitor.connectWorkspace({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: createBoardWithReviewColumnCards(),
+				subscriberId: "board-scope-tab",
+				probeScope: focusedTaskProbeScope(["task-branch"]),
+			});
+
+			expect(probedTaskIds()).toEqual(new Set(["task-branch", "task-review-auto-review"]));
+			expect(metadata.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-branch", "task-review-auto-review"]);
+		});
+
+		it("同一项目另一个连接要整个项目时取并集", async () => {
+			await monitor.connectWorkspace({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: createBoardWithReviewColumnCards(),
+				subscriberId: "board-scope-tab",
+				probeScope: focusedTaskProbeScope(["task-branch"]),
+			});
+			const metadata = await monitor.connectWorkspace({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: createBoardWithReviewColumnCards(),
+				subscriberId: "single-project-tab",
+				probeScope: ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+			});
+
+			expect(metadata.taskWorkspaces.map((task) => task.taskId)).toEqual([
+				"task-branch",
+				"task-inplace",
+				"task-review-auto-review",
+				"task-review-without-auto-review",
+				"task-trash",
+			]);
+		});
+
+		it("连接改成整个项目后不等结果，补探完经 onMetadataUpdated 推送全部任务", async () => {
+			await monitor.connectWorkspace({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: createBoard(),
+				subscriberId: "board-scope-tab",
+				probeScope: focusedTaskProbeScope(["task-branch"]),
+			});
+			expect(probedTaskIds()).toEqual(new Set(["task-branch"]));
+			onMetadataUpdated.mockReset();
+
+			monitor.updateSubscriberProbeScope({
+				workspaceId: "workspace-1",
+				subscriberId: "board-scope-tab",
+				probeScope: ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+			});
+			await vi.waitFor(() => expect(onMetadataUpdated).toHaveBeenCalled());
+
+			const pushedMetadata = onMetadataUpdated.mock.calls.at(-1)?.[1] as {
+				taskWorkspaces: Array<{ taskId: string }>;
+			};
+			expect(pushedMetadata.taskWorkspaces.map((task) => task.taskId)).toEqual([
+				"task-branch",
+				"task-inplace",
+				"task-trash",
+			]);
+		});
+
+		it("范围收窄回焦点任务后也推送（基准是上一轮的快照，不是按新范围现算的）", async () => {
+			await connectWorkspaceAsWholeProjectSubscriber({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: createBoard(),
+			});
+			onMetadataUpdated.mockReset();
+
+			monitor.updateSubscriberProbeScope({
+				workspaceId: "workspace-1",
+				subscriberId: "subscriber-declaring-whole-project",
+				probeScope: focusedTaskProbeScope(["task-branch"]),
+			});
+			await vi.waitFor(() => expect(onMetadataUpdated).toHaveBeenCalled());
+
+			const pushedMetadata = onMetadataUpdated.mock.calls.at(-1)?.[1] as {
+				taskWorkspaces: Array<{ taskId: string }>;
+			};
+			expect(pushedMetadata.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-branch"]);
+		});
+
+		it("未声明过的订阅改范围被忽略（连接已断开或从未连上）", async () => {
+			monitor.updateSubscriberProbeScope({
+				workspaceId: "workspace-1",
+				subscriberId: "never-connected",
+				probeScope: ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+			});
+			await Promise.resolve();
+			expect(taskWorktreeMocks.getTaskWorkspacePathInfo).not.toHaveBeenCalled();
+		});
+
+		it("最后一个连接断开后保留缓存：重连时没变的 worktree 不再跑完整探针", async () => {
+			await connectWorkspaceAsWholeProjectSubscriber({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: createBoard(),
+			});
+			const summaryCallsAfterFirstConnect = gitSyncMocks.getGitSyncSummary.mock.calls.length;
+			monitor.disconnectWorkspace("workspace-1", "subscriber-declaring-whole-project");
+
+			await connectWorkspaceAsWholeProjectSubscriber({
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: createBoard(),
+			});
+			// token 不变、在兜底窗口内：复用保留的缓存，不再算 git 摘要。
+			expect(gitSyncMocks.getGitSyncSummary.mock.calls.length).toBe(summaryCallsAfterFirstConnect);
+		});
+
+		describe("首轮刷新失败时 connectWorkspace 自己摘掉刚登记的订阅（调用方拿不到结果，没法替它断开）", () => {
+			const FIRST_REFRESH_FAILURE_MESSAGE = "首轮刷新里解析 task worktree 路径失败";
+			const connectWholeProjectSubscriberWhoseFirstRefreshFails = () => {
+				taskWorktreeMocks.getTaskWorkspacePathInfo.mockRejectedValueOnce(new Error(FIRST_REFRESH_FAILURE_MESSAGE));
+				return monitor.connectWorkspace({
+					workspaceId: "workspace-1",
+					workspacePath: WORKSPACE_PATH,
+					board: createBoard(),
+					subscriberId: "whole-project-tab-whose-first-refresh-failed",
+					probeScope: ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+				});
+			};
+
+			it("失败的订阅声明的整个项目不再钉住同项目后续 Board Scope 连接的范围并集", async () => {
+				await expect(connectWholeProjectSubscriberWhoseFirstRefreshFails()).rejects.toThrow(
+					FIRST_REFRESH_FAILURE_MESSAGE,
+				);
+
+				const metadata = await monitor.connectWorkspace({
+					workspaceId: "workspace-1",
+					workspacePath: WORKSPACE_PATH,
+					board: createBoard(),
+					subscriberId: "board-scope-tab",
+					probeScope: focusedTaskProbeScope(["task-branch"]),
+				});
+
+				expect(metadata.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-branch"]);
+			});
+
+			it("没有别的连接时随之停掉轮询，不再定时探测", async () => {
+				// 只假轮询用的 setInterval：setImmediate 保持真实，用来冲掉首轮里其余任务还在飞的探针。
+				vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+				try {
+					await expect(connectWholeProjectSubscriberWhoseFirstRefreshFails()).rejects.toThrow(
+						FIRST_REFRESH_FAILURE_MESSAGE,
+					);
+					await new Promise((resolve) => setImmediate(resolve));
+					const probeCallsAfterFailedFirstRefresh = taskWorktreeMocks.getTaskWorkspacePathInfo.mock.calls.length;
+
+					expect(vi.getTimerCount()).toBe(0);
+					// 跨过好几个轮询间隔（监视器里是 3s）：残留的定时器会在这里重新探测。
+					await vi.advanceTimersByTimeAsync(10_000);
+					await new Promise((resolve) => setImmediate(resolve));
+					expect(taskWorktreeMocks.getTaskWorkspacePathInfo.mock.calls.length).toBe(
+						probeCallsAfterFailedFirstRefresh,
+					);
+				} finally {
+					vi.useRealTimers();
+				}
+			});
+		});
+	});
+
 	it("不追踪 backlog，但保留 Done 卡片的持久 Git 状态投影", async () => {
-		const metadata = await monitor.connectWorkspace({
+		const metadata = await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-1",
 			workspacePath: WORKSPACE_PATH,
 			board: createBoard(),
@@ -307,7 +510,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 	it("廉价 token 未变且在兜底窗口内时，二次刷新跳过 probe（不再 spawn git）", async () => {
 		gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("stable-token");
 
-		await monitor.connectWorkspace({
+		await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-1",
 			workspacePath: WORKSPACE_PATH,
 			board: createBoard(),
@@ -328,7 +531,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 		// 这是 behind 的承重回归：worktree 自身完全没动（廉价 token 与 probe 的 stateToken 都恒定），
 		// 只有 base 分支前进。若门控不比对 base tip，commitsBehindBaseRef 会被永久冻结在首次算出的值。
 		gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("stable-token");
-		const firstMetadata = await monitor.connectWorkspace({
+		const firstMetadata = await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-1",
 			workspacePath: WORKSPACE_PATH,
 			board: createBoard(),
@@ -384,7 +587,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 
 	it("base tip 未变时不因新增的 rev-parse 而破坏既有的「跳过 probe」门控", async () => {
 		gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("stable-token");
-		await monitor.connectWorkspace({
+		await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-1",
 			workspacePath: WORKSPACE_PATH,
 			board: createBoard(),
@@ -414,7 +617,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 			],
 		};
 
-		const metadata = await monitor.connectWorkspace({
+		const metadata = await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-dedupe",
 			workspacePath: WORKSPACE_PATH,
 			board: sharedBaseRefBoard,
@@ -429,7 +632,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 
 	it("廉价 token 变化时，二次刷新重新跑 probe", async () => {
 		gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("token-v1");
-		await monitor.connectWorkspace({
+		await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-1",
 			workspacePath: WORKSPACE_PATH,
 			board: createBoard(),
@@ -452,7 +655,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 			vi.setSystemTime(new Date(0));
 			gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("stable-token");
 
-			await monitor.connectWorkspace({
+			await connectWorkspaceAsWholeProjectSubscriber({
 				workspaceId: "workspace-1",
 				workspacePath: WORKSPACE_PATH,
 				board: createBoard(),
@@ -511,7 +714,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 			],
 		};
 
-		const metadata = await monitor.connectWorkspace({
+		const metadata = await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-concurrency",
 			workspacePath: WORKSPACE_PATH,
 			board: manyInplaceCardsBoard,
