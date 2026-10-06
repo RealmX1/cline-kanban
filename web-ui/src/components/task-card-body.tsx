@@ -41,6 +41,7 @@ import {
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { notifyError } from "@/components/app-toaster";
 import { BacklogTaskDescriptionLastUpdatedPill } from "@/components/backlog-task-description-last-updated-pill";
 import {
 	formatClineReasoningEffortLabel,
@@ -76,7 +77,6 @@ import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { formatPathForDisplay } from "@/utils/path-display";
-import { useCopyToClipboard } from "@/utils/react-use";
 import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 import { normalizePromptForDisplay, truncateTaskPromptLabel } from "@/utils/task-prompt";
 import { getAgentVisual } from "./agent-visual";
@@ -104,22 +104,14 @@ function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: strin
 /**
  * 钉在宿主行右下角；纯 overlay，不占文本流宽度；hover 时左侧渐变遮住末行被挡字符。
  */
-function TaskCardRowHoverActions({
-	groupName,
-	children,
-}: {
-	groupName: "title" | "directory";
-	children: ReactNode;
-}): React.ReactElement {
+function TaskCardTitleRowHoverActions({ children }: { children: ReactNode }): React.ReactElement {
 	return (
 		<div
 			className={cn(
 				"pointer-events-none absolute bottom-0 right-0 z-10 flex items-end opacity-0 transition-opacity",
 				// 与卡面同底色的左向渐变：hover 时才显现，避免为按钮预留 pr-* 挤占换行宽度。
 				"bg-gradient-to-l from-surface-2 from-45% to-transparent pl-4 group-hover/card:from-surface-3",
-				groupName === "title"
-					? "group-hover/title:opacity-100 group-hover/title:pointer-events-auto group-focus-within/title:opacity-100 group-focus-within/title:pointer-events-auto"
-					: "group-hover/directory:opacity-100 group-hover/directory:pointer-events-auto group-focus-within/directory:opacity-100 group-focus-within/directory:pointer-events-auto",
+				"group-hover/title:opacity-100 group-hover/title:pointer-events-auto group-focus-within/title:opacity-100 group-focus-within/title:pointer-events-auto",
 			)}
 		>
 			<div className="pointer-events-auto mb-px flex rounded-md bg-surface-3 px-0.5 shadow-sm">{children}</div>
@@ -155,6 +147,8 @@ export interface TaskCardBusinessProps {
 	isMoveToValidationLoading?: boolean;
 	isMoveToReviewLoading?: boolean;
 	workspacePath?: string | null;
+	/** 只读解析预定工作区的绝对路径；Backlog 不需要创建工作树或启动会话。 */
+	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }
@@ -218,6 +212,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	isMoveToValidationLoading = false,
 	isMoveToReviewLoading = false,
 	workspacePath,
+	resolveTaskWorkspaceAbsoluteDirectoryPath,
 	defaultClineModelId = null,
 	defaultAgentId = null,
 	drag = null,
@@ -247,11 +242,12 @@ export const TaskCardBody = memo(function TaskCardBody({
 }): React.ReactElement {
 	const isCompactRowInFocusViewLeftColumn = useTaskCardBodyVisualDensity() === "compact_row_in_focus_view_left_column";
 	const [isHovered, setIsHovered] = useState(false);
-	// 卡片各处的 Tooltip（右上角动作组、行内 Edit/Copy、头部药丸、git 状态）content 统一收成
+	// 卡片多数 Tooltip（右上角动作组、行内 Edit、头部药丸、git 状态）content 统一收成
 	// 「hover 时才给」：Radix 在关闭态仍会挂 Root+Trigger（Popper context + state + 一串事件绑定）。
 	// 200 张卡 × 数个 Tooltip = 上千个常驻实例，看板每次重渲都要 reconcile 一遍。`Tooltip` 对 falsy
 	// `content` 直接返回 children，空闲态就退化成裸元素。头部药丸 / git 状态的触发点是不可聚焦的
 	// span，键盘可达性不受门控影响；动作按钮靠 aria-label 保留可访问名。
+	// 目录复制的 ID tooltip 常驻，保证键盘聚焦也能立即看到完整 ID。
 	//
 	// 注意这里刻意**不**改成条件挂载整个动作组：未挂载的按钮无法被 Tab 到，而卡壳本身不可聚焦，
 	// backlog 这类没有标题编辑按钮的卡会因此彻底失去键盘可达性。DOM 常驻 + CSS `focus-within`
@@ -607,25 +603,98 @@ export const TaskCardBody = memo(function TaskCardBody({
 			taskCommitsIntegratedIntoBaseRef,
 		],
 	);
-	// 复制源优先绝对路径（snapshot.path），trash 无快照时退回重建的展示路径，再退回 base 仓库路径。
-	const copyableDirectoryPath = reviewWorkspaceSnapshot?.path ?? reviewWorkspacePath ?? workspacePath ?? null;
-	const showDirectoryCopyButton = showDirectoryRow && Boolean(copyableDirectoryPath);
-	const [, copyToClipboard] = useCopyToClipboard();
+	// 复制与 Git 元数据、目录行独立；无回调的宿主只可使用已知绝对路径，不能复制展示用的 ~/ 简写。
+	const knownTaskWorkspaceAbsoluteDirectoryPath =
+		card.worktreeMode === "inplace" ? workspacePath : reviewWorkspaceSnapshot?.path;
+	// resolver 的函数身份可能随宿主重渲改变；只按影响路径的任务/项目参数失效。
+	const directoryPathResolutionForCopy = useMemo(
+		() => ({ directoryPath: null as string | null, promise: null as Promise<string> | null }),
+		[card.id, card.baseRef, card.worktreeMode, workspacePath, taskCardOwnedByOtherProjectWorkspaceId],
+	);
+	const currentDirectoryPathResolutionForCopyRef = useRef(directoryPathResolutionForCopy);
+	currentDirectoryPathResolutionForCopyRef.current = directoryPathResolutionForCopy;
+	const prepareTaskWorkspaceDirectoryPathForCopy = (): Promise<string> => {
+		if (knownTaskWorkspaceAbsoluteDirectoryPath) {
+			return Promise.resolve(knownTaskWorkspaceAbsoluteDirectoryPath);
+		}
+		if (!directoryPathResolutionForCopy.promise) {
+			directoryPathResolutionForCopy.promise = (
+				resolveTaskWorkspaceAbsoluteDirectoryPath?.(card) ?? Promise.resolve(null)
+			)
+				.then((directoryPath) => {
+					if (currentDirectoryPathResolutionForCopyRef.current !== directoryPathResolutionForCopy) {
+						throw new Error("Task workspace settings changed. Please copy again.");
+					}
+					if (!directoryPath) {
+						throw new Error("Could not resolve the task workspace directory.");
+					}
+					directoryPathResolutionForCopy.directoryPath = directoryPath;
+					return directoryPath;
+				})
+				.catch((error) => {
+					directoryPathResolutionForCopy.promise = null;
+					throw error;
+				});
+		}
+		return directoryPathResolutionForCopy.promise;
+	};
+	const prefetchTaskWorkspaceDirectoryPathForCopy = () => {
+		void prepareTaskWorkspaceDirectoryPathForCopy().catch(() => {});
+	};
+	const showDirectoryCopyButton = Boolean(
+		resolveTaskWorkspaceAbsoluteDirectoryPath || knownTaskWorkspaceAbsoluteDirectoryPath,
+	);
 	const [isDirectoryPathCopied, setIsDirectoryPathCopied] = useState(false);
 	const directoryCopyResetTimerRef = useRef<number | null>(null);
-	const handleCopyDirectoryPath = () => {
-		if (!copyableDirectoryPath) {
-			return;
-		}
-		copyToClipboard(copyableDirectoryPath);
-		setIsDirectoryPathCopied(true);
+	const handleCopyDirectoryPath = async () => {
+		setIsDirectoryPathCopied(false);
 		if (directoryCopyResetTimerRef.current != null) {
 			clearTimeout(directoryCopyResetTimerRef.current);
 		}
-		directoryCopyResetTimerRef.current = window.setTimeout(() => {
-			setIsDirectoryPathCopied(false);
-			directoryCopyResetTimerRef.current = null;
-		}, 1500);
+		try {
+			const directoryPath = knownTaskWorkspaceAbsoluteDirectoryPath ?? directoryPathResolutionForCopy.directoryPath;
+			if (!directoryPath && navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+				// 在点击手势内启动写入；只把内容的解析延后，WebKit 不接受网络 await 后才调用 write。
+				await navigator.clipboard.write([
+					new ClipboardItem({
+						"text/plain": prepareTaskWorkspaceDirectoryPathForCopy().then(
+							(path) => new Blob([path], { type: "text/plain" }),
+						),
+					}),
+				]);
+			} else if (!directoryPath) {
+				// HTTP 无异步 Clipboard API：预取尚未完成时保留下一次点击的原生复制手势。
+				prefetchTaskWorkspaceDirectoryPathForCopy();
+				throw new Error("Directory path is still loading. Please try copying again.");
+			} else if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(directoryPath);
+			} else {
+				// 局域网 HTTP 没有 Clipboard API，保留原先可用的原生复制通道并检查其返回值。
+				const previouslyFocusedElement = document.activeElement;
+				const clipboardTextArea = document.createElement("textarea");
+				clipboardTextArea.value = directoryPath;
+				clipboardTextArea.className = "fixed left-0 top-0 opacity-0 pointer-events-none";
+				document.body.append(clipboardTextArea);
+				try {
+					clipboardTextArea.select();
+					if (!document.execCommand("copy")) {
+						throw new Error("The browser could not copy the directory path.");
+					}
+				} finally {
+					clipboardTextArea.remove();
+					if (previouslyFocusedElement instanceof HTMLElement) {
+						previouslyFocusedElement.focus({ preventScroll: true });
+					}
+				}
+			}
+			setIsDirectoryPathCopied(true);
+			directoryCopyResetTimerRef.current = window.setTimeout(() => {
+				setIsDirectoryPathCopied(false);
+				directoryCopyResetTimerRef.current = null;
+			}, 1500);
+		} catch (error) {
+			notifyError(error instanceof Error ? error.message : String(error));
+		}
 	};
 
 	// ── 两种视觉密度共用的信息项（见 TaskCardBodyVisualDensity）：内容只此一份，密度只决定摆在哪里 ──
@@ -836,11 +905,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	const taskDirectoryRow = (
 		<div
 			data-task-directory=""
-			title={copyableDirectoryPath ?? undefined}
-			className={cn(
-				"group/directory relative flex items-start gap-1 font-mono",
-				isCompactRowInFocusViewLeftColumn ? "min-w-0" : "mt-1",
-			)}
+			className={cn("flex items-start gap-1 font-mono", isCompactRowInFocusViewLeftColumn ? "min-w-0" : "mt-1")}
 			style={{
 				fontSize: isCompactRowInFocusViewLeftColumn ? 11 : 12,
 				lineHeight: 1.4,
@@ -885,25 +950,6 @@ export const TaskCardBody = memo(function TaskCardBody({
 					</>
 				) : null}
 			</span>
-			{showDirectoryCopyButton ? (
-				<TaskCardRowHoverActions groupName="directory">
-					<Tooltip side="bottom" content={revealHoverActionTooltip("Copy directory path")}>
-						<Button
-							icon={
-								isDirectoryPathCopied ? <Check size={12} className="text-status-green" /> : <Copy size={12} />
-							}
-							variant="ghost"
-							size="xs"
-							aria-label="Copy directory path"
-							onMouseDown={stopEvent}
-							onClick={(event) => {
-								stopEvent(event);
-								handleCopyDirectoryPath();
-							}}
-						/>
-					</Tooltip>
-				</TaskCardRowHoverActions>
-			) : null}
 		</div>
 	);
 
@@ -994,18 +1040,21 @@ export const TaskCardBody = memo(function TaskCardBody({
 			onMouseEnter={() => setIsHovered(true)}
 			onMouseLeave={() => setIsHovered(false)}
 		>
+			{/* 为右下角复制叠层留出横向空间，编辑动作与时长药丸仍可独立命中。 */}
 			<div
 				className={
 					isCompactRowInFocusViewLeftColumn
 						? // 紧凑密度：与 All projects 行同一风格的平铺行（无边框、无底色，hover 才显底）。
 							cn(
 								"group/card relative rounded-md px-2 py-1.5",
+								showDirectoryCopyButton && "pr-8",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3",
 								isDragging && "bg-surface-3 shadow-lg",
 								isHovered && isCardInteractive && "bg-surface-3",
 							)
 						: cn(
 								"group/card relative rounded-md border border-border-bright bg-surface-2 p-2.5",
+								showDirectoryCopyButton && "pr-8",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3 hover:border-border-bright",
 								isDragging && "shadow-lg",
 								isHovered && isCardInteractive && "bg-surface-3 border-border-bright",
@@ -1096,7 +1145,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 							</button>
 						) : null}
 						{showTitleEditButton ? (
-							<TaskCardRowHoverActions groupName="title">
+							<TaskCardTitleRowHoverActions>
 								<Tooltip
 									side="bottom"
 									content={revealHoverActionTooltip(onOpenTaskEditor ? "Edit task" : "Edit title")}
@@ -1118,7 +1167,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 										}}
 									/>
 								</Tooltip>
-							</TaskCardRowHoverActions>
+							</TaskCardTitleRowHoverActions>
 						) : null}
 					</div>
 				</div>
@@ -1383,6 +1432,38 @@ export const TaskCardBody = memo(function TaskCardBody({
 						) : null}
 					</>
 				)}
+				{showDirectoryCopyButton ? (
+					<div
+						data-task-directory-copy-actions=""
+						className={cn(
+							"absolute bottom-0 right-0 z-10 rounded-md bg-surface-3 px-0.5 shadow-sm",
+							"group-focus-within/card:opacity-100 group-focus-within/card:pointer-events-auto",
+							isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
+						)}
+					>
+						<Tooltip side="bottom" content={card.id} delayDuration={0}>
+							<Button
+								icon={
+									isDirectoryPathCopied ? (
+										<Check size={12} className="text-status-green" />
+									) : (
+										<Copy size={12} />
+									)
+								}
+								variant="ghost"
+								size="xs"
+								aria-label="Copy directory path"
+								onPointerEnter={prefetchTaskWorkspaceDirectoryPathForCopy}
+								onFocus={prefetchTaskWorkspaceDirectoryPathForCopy}
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									void handleCopyDirectoryPath();
+								}}
+							/>
+						</Tooltip>
+					</div>
+				) : null}
 			</div>
 		</div>
 	);
