@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { notifyError } from "@/components/app-toaster";
 import { BoardCard } from "@/components/board-card";
+import { TaskCardBody } from "@/components/task-card-body";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeTaskSessionSummary, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
 import type { ReviewTaskWorkspaceSnapshot } from "@/types";
@@ -13,7 +14,13 @@ class DeferredClipboardItem {
 }
 
 let mockWorkspaceSnapshot: ReviewTaskWorkspaceSnapshot | undefined;
+let mockPolledWorkspaceSnapshot: ReviewTaskWorkspaceSnapshot | null = null;
 let mockTaskWorkspaceInfo: RuntimeTaskWorkspaceInfoResponse | null = null;
+
+vi.mock("@/stores/cross-project-task-worktree-git-metadata-store", () => ({
+	useCrossProjectTaskWorktreeGitMetadataSnapshotValue: (workspaceId: string, _taskId: string, isEnabled: boolean) =>
+		isEnabled && workspaceId === "project-a" ? mockPolledWorkspaceSnapshot : null,
+}));
 
 vi.mock("@/components/app-toaster", () => ({ notifyError: vi.fn() }));
 
@@ -130,6 +137,7 @@ describe("BoardCard", () => {
 	beforeEach(() => {
 		vi.mocked(notifyError).mockClear();
 		mockWorkspaceSnapshot = undefined;
+		mockPolledWorkspaceSnapshot = null;
 		mockTaskWorkspaceInfo = null;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
@@ -1119,6 +1127,54 @@ describe("BoardCard", () => {
 		const directoryRow = container.querySelector("[data-task-directory]");
 		expect(directoryRow).not.toBeNull();
 		expect(directoryRow?.hasAttribute("title")).toBe(false);
+	});
+
+	it("All projects 当前项目非焦点完整卡用轮询补齐目录行，并优先采用之后收到的推流", async () => {
+		mockPolledWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/isolated/worktrees/current-project-non-focused-task",
+			branch: null,
+			isDetached: true,
+			headCommit: "1234567890abcdef",
+			baseCommit: "fedcba0987654321",
+			commitsAheadOfBaseRef: 3,
+			commitsBehindBaseRef: 12,
+			changedFiles: 2,
+			additions: 5,
+			deletions: 1,
+		};
+		const renderExpandedCard = () =>
+			root.render(
+				<TaskCardBody
+					taskCardWorkspaceIdForCrossProjectGitMetadataPolling="project-a"
+					card={createCard()}
+					columnId="review"
+					renderRole="expanded_card_copy_in_cross_project_task_switcher_row"
+				/>,
+			);
+		await act(async () => renderExpandedCard());
+		const directoryRow = container.querySelector("[data-task-directory]");
+		expect(directoryRow).not.toBeNull();
+		expect(directoryRow?.hasAttribute("title")).toBe(false);
+		expect(directoryRow?.textContent).toContain("2 files");
+		expect(directoryRow?.querySelector("svg.lucide-arrow-up")).not.toBeNull();
+		expect(directoryRow?.querySelector("svg.lucide-arrow-down")).not.toBeNull();
+
+		mockWorkspaceSnapshot = { ...mockPolledWorkspaceSnapshot, changedFiles: 4 };
+		await act(async () => renderExpandedCard());
+		expect(container.querySelector("[data-task-directory]")?.textContent).toContain("4 files");
+
+		await act(async () => {
+			root.render(
+				<TaskCardBody
+					card={createCard()}
+					columnId="review"
+					taskCardOwnedByOtherProjectWorkspaceId="project-b"
+					renderRole="expanded_card_copy_in_cross_project_task_switcher_row"
+				/>,
+			);
+		});
+		expect(container.querySelector("[data-task-directory]")).toBeNull();
 	});
 
 	it("目录行展示与 base 分支的双向分歧，且不再展示 HEAD 短 SHA", async () => {

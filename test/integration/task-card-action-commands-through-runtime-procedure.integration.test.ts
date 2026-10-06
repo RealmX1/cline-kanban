@@ -33,7 +33,7 @@ import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutatio
 //   1) 同一个服务端动作按请求来源记账：带页面 nonce 的请求按浏览器声明的发起方记成「用户手势」/「浏览器端自动流转」，
 //      带 CLI 声明头的请求记成 CLI 行动者（带了发起方也不采信），意图名分别是 web_ui_task_card_action_* 与 CLI 旧名；
 //   2) 动作作用于连接 scope 指向的那个项目——浏览器当前打开的是项目 A，也能对项目 B 的卡执行动作，A 不受影响。
-// 会话起停与 worktree 建删不是本测试的对象，换成桩；旧 workspace.setTaskPinboardPinStateOfTaskCard 的转发也在这里验。
+// 会话起停与 worktree 建删不是本测试的对象，换成桩；现行 taskCardAction 置顶路径也在这里验。
 
 function createCard(taskId: string, createdAt: number): RuntimeBoardCard {
 	return {
@@ -175,7 +175,7 @@ describe("taskCardAction commands through the runtime procedure", () => {
 					workspaceScope: otherProjectScope,
 					kanbanRequestOriginActorEvidence,
 					taskCardActionApi,
-					// 本测试只触达 taskCardAction 与旧 pin 路由；其余 api 不参与，故不构造。
+					// 本测试只触达 taskCardAction；其余 api 不参与，故不构造。
 				} as unknown as RuntimeTrpcContext);
 			const webUiPageCaller = createCallerScopedToOtherProject(
 				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE_WITH_VERIFIED_NONCE,
@@ -199,20 +199,20 @@ describe("taskCardAction commands through the runtime procedure", () => {
 				taskId: "web01",
 				boardMutationInitiator: "web_ui_client_automation_auto_review_commit_mode_completion",
 			});
-			// 旧 pin 路由（还没切过来的浏览器构建）：转发到唯一实现，并补上「用户手势」——迁移前这里记成缺标注。
-			expect(
-				await webUiPageCaller.workspace.setTaskPinboardPinStateOfTaskCard({
-					taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
-					taskId: "rev01",
-					taskPinboardPinReason: "watch it",
-				}),
-			).toEqual({ taskCardFound: true, boardWasSaved: true });
-			expect(
-				await webUiPageCaller.workspace.setTaskPinboardPinStateOfTaskCard({
+			// 页面置顶经唯一 taskCardAction 入口，并保留用户手势行动者证据。
+			await webUiPageCaller.taskCardAction.setTaskPinboardPinStateOfTaskCard({
+				taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
+				taskId: "rev01",
+				taskPinboardPinReason: "watch it",
+				boardMutationInitiator: "web_ui_user_gesture",
+			});
+			await expect(
+				webUiPageCaller.taskCardAction.setTaskPinboardPinStateOfTaskCard({
 					taskPinboardPinAction: "unpin_task_card",
 					taskId: "gone1",
+					boardMutationInitiator: "web_ui_user_gesture",
 				}),
-			).toEqual({ taskCardFound: false, boardWasSaved: false });
+			).rejects.toMatchObject({ code: "NOT_FOUND" });
 
 			// CLI：启动 cli01、改 rev01 的标题；带了发起方也照样记成 CLI 行动者。
 			await kanbanCliCaller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: "cli01" });

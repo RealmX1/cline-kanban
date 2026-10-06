@@ -27,11 +27,13 @@ function ExpandedTaskCardUnavailableNotice({ children }: { children: string }): 
 }
 
 function CurrentProjectExpandedTaskCard({
+	workspaceId,
 	taskId,
 	currentProjectTaskCards,
 	defaultAgentId,
 	onActivateTaskCard,
 }: {
+	workspaceId: string;
 	taskId: string;
 	currentProjectTaskCards: CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion;
 	defaultAgentId: RuntimeAgentId | null;
@@ -45,6 +47,7 @@ function CurrentProjectExpandedTaskCard({
 	}
 	return (
 		<TaskCardBody
+			taskCardWorkspaceIdForCrossProjectGitMetadataPolling={workspaceId}
 			{...buildTaskCardBusinessProps({
 				card: selection.card,
 				columnId: selection.column.id,
@@ -154,6 +157,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowExpandedTaskCard({
 		<div className="min-w-0" data-testid="cross-project-task-switcher-full-task-card">
 			{entryInProject.workspaceId === currentProjectId && currentProjectTaskCards ? (
 				<CurrentProjectExpandedTaskCard
+					workspaceId={entryInProject.workspaceId}
 					taskId={entryInProject.entry.taskId}
 					currentProjectTaskCards={currentProjectTaskCards}
 					defaultAgentId={defaultAgentId}

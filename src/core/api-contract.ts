@@ -2722,34 +2722,8 @@ export type RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries
 	typeof runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema
 >;
 
-// 置顶 / 取消置顶 / 改置顶原因，由 runtime 在 board 锁内对**最新** board 执行（workspace-scoped，作用于连接 scope
-// 的项目）。唯一实现是 `taskCardAction.setTaskPinboardPinStateOfTaskCard`；`workspace.setTaskPinboardPinStateOfTaskCard`
-// 只为旧浏览器构建保留一个版本，内部转发过去、把响应收窄回本 schema。
-export const runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema = z.discriminatedUnion("taskPinboardPinAction", [
-	z.object({
-		taskPinboardPinAction: z.literal("pin_task_card_or_update_pin_reason"),
-		taskId: z.string().min(1),
-		taskPinboardPinReason: z.string().nullable(),
-	}),
-	z.object({
-		taskPinboardPinAction: z.literal("unpin_task_card"),
-		taskId: z.string().min(1),
-	}),
-]);
-export type RuntimeSetTaskPinboardPinStateOfTaskCardRequest = z.infer<
-	typeof runtimeSetTaskPinboardPinStateOfTaskCardRequestSchema
->;
-export const runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema = z.object({
-	taskCardFound: z.boolean(),
-	boardWasSaved: z.boolean(),
-});
-export type RuntimeSetTaskPinboardPinStateOfTaskCardResponse = z.infer<
-	typeof runtimeSetTaskPinboardPinStateOfTaskCardResponseSchema
->;
-
-// --- taskCardAction.setTaskPinboardPinStateOfTaskCard ---
-// 与上面的旧请求同形，外加浏览器声明的发起方（置顶恒为用户手势，浏览器应传 web_ui_user_gesture）。
-// 卡片不在该项目 board 上 → TRPCError NOT_FOUND（与其余 taskCardAction 一致；旧 procedure 把它转回 taskCardFound:false）。
+// 置顶 / 取消置顶 / 改置顶原因，统一经 taskCardAction 在连接 scope 的项目 board 锁内执行。
+// 浏览器声明发起方（置顶恒为用户手势，应传 web_ui_user_gesture）；卡片不存在时抛 NOT_FOUND。
 export const runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema = z.discriminatedUnion("taskPinboardPinAction", [
 	z.object({
 		taskPinboardPinAction: z.literal("pin_task_card_or_update_pin_reason"),
