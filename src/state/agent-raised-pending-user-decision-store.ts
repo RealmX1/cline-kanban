@@ -22,8 +22,10 @@ import { splitAgentTerminalAnswerTextIntoSelectedOptionLabelsAndFreeformAnswerTe
 import {
 	type RuntimeAgentRaisedDecisionQuestion,
 	type RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
+	type RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequest,
 	runtimeAgentIdSchema,
 	runtimeAgentRaisedDecisionQuestionSchema,
+	runtimeAgentRaisedPendingUserDecisionAnswerDraftSchema,
 	runtimeAgentSessionTransportSchema,
 } from "../core/api-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
@@ -136,6 +138,7 @@ const persistedAgentRaisedPendingUserDecisionSchema = z.object({
 	dismissalSource: z.enum(["kanban_panel", "agent_terminal", "agent_session_transport_switch"]).optional(),
 	supersededByDecisionId: z.string().nullable(),
 	answer: agentRaisedPendingUserDecisionAnswerSchema.nullable(),
+	pendingAnswerDraft: runtimeAgentRaisedPendingUserDecisionAnswerDraftSchema.nullable().optional(),
 	answerDeliveryState: agentRaisedPendingUserDecisionAnswerDeliveryStateSchema,
 	// 幂等键：语义与 task-message-injections.json 一致——同一条答案无论重试多少次，只会真正
 	// 送进 agent 一次。
@@ -344,6 +347,7 @@ export async function recordAgentRaisedPendingUserDecision(
 			status: "pending",
 			supersededByDecisionId: null,
 			answer: null,
+			pendingAnswerDraft: null,
 			answerDeliveryState: "not_answered",
 			answerDeliveryIdempotencyKey: buildAgentRaisedPendingUserDecisionAnswerDeliveryIdempotencyKey(
 				input.decisionId,
@@ -358,6 +362,7 @@ export async function recordAgentRaisedPendingUserDecision(
 				? {
 						...record,
 						status: "superseded" as const,
+						pendingAnswerDraft: null,
 						supersededByDecisionId: input.decisionId,
 						updatedAt: input.askedAt,
 					}
@@ -393,6 +398,55 @@ export async function markAgentRaisedPendingUserDecisionsReclaimed(
 	});
 }
 
+// 草稿允许空选与未完成问题；只有显式提交才进入 answer / 投递状态机。
+export async function saveAgentRaisedPendingUserDecisionAnswerDraft(
+	workspaceId: string,
+	input: RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequest,
+): Promise<PersistedAgentRaisedPendingUserDecision | null> {
+	return await enqueueWrite(workspaceId, async () => {
+		const records = await readRawDecisions(workspaceId);
+		const existing = records.find((record) => record.decisionId === input.decisionId);
+		if (existing && existing.taskId !== input.taskId) {
+			throw new Error("草稿所属任务与问题不匹配");
+		}
+		if (!existing || existing.status !== "pending") return null;
+		const orderedQuestions = resolveAgentRaisedPendingUserDecisionOrderedQuestions(existing);
+		const seenQuestionIds = new Set<string>();
+		for (const answer of input.orderedQuestionAnswers) {
+			const question = orderedQuestions.find(
+				(candidate) => candidate.decisionQuestionId === answer.decisionQuestionId,
+			);
+			if (!question || seenQuestionIds.has(answer.decisionQuestionId)) throw new Error("草稿包含未知或重复的问题");
+			seenQuestionIds.add(answer.decisionQuestionId);
+			if (
+				answer.selectedOptionIds.some(
+					(optionId) => !question.options.some((option) => option.optionId === optionId),
+				) ||
+				new Set(answer.selectedOptionIds).size !== answer.selectedOptionIds.length ||
+				(question.selectionMode === "single" && answer.selectedOptionIds.length > 1)
+			)
+				throw new Error("草稿选项不符合问题的选择规则");
+			if (!question.allowsFreeformAnswer && answer.freeformText) throw new Error("此问题不允许自由回答");
+		}
+		const savedAt = Date.now();
+		const previousAnswerDraftEditVersion = existing.pendingAnswerDraft?.answerDraftEditVersion ?? -1;
+		const answerDraftEditVersion =
+			input.answerDraftEditVersion ?? Math.max(savedAt, previousAnswerDraftEditVersion + 1);
+		// 重试与迟到请求只能确认已有版本，不能回滚更晚的编辑。
+		if (answerDraftEditVersion <= previousAnswerDraftEditVersion) return existing;
+		const saved: PersistedAgentRaisedPendingUserDecision = {
+			...existing,
+			pendingAnswerDraft: { orderedQuestionAnswers: input.orderedQuestionAnswers, savedAt, answerDraftEditVersion },
+			updatedAt: savedAt,
+		};
+		await writeDecisions(
+			workspaceId,
+			records.map((record) => (record.decisionId === input.decisionId ? saved : record)),
+		);
+		return saved;
+	});
+}
+
 // 用户给出答案：原子写 answer + answerDeliveryState="answer_recorded"。
 // 调用方**必须**在此之后才去恢复会话与投递（见计划 §7.4 的严格顺序：先作废计时、再动进程）。
 // 已回答过的记录再次调用返回 null，绝不覆盖既有答案（幂等守门的第一道）。
@@ -410,6 +464,7 @@ export async function recordAgentRaisedPendingUserDecisionAnswer(
 		const answered: PersistedAgentRaisedPendingUserDecision = {
 			...existing,
 			status: "answered",
+			pendingAnswerDraft: null,
 			answer,
 			answerDeliveryState: "answer_recorded",
 			updatedAt: answer.answeredAt,
@@ -497,6 +552,7 @@ export async function dismissAgentRaisedPendingUserDecision(
 		const dismissed: PersistedAgentRaisedPendingUserDecision = {
 			...existing,
 			status: "dismissed",
+			pendingAnswerDraft: null,
 			dismissalSource,
 			updatedAt: dismissedAt,
 		};
@@ -625,6 +681,7 @@ export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
 						return {
 							...target,
 							status: "answered",
+							pendingAnswerDraft: null,
 							answer: {
 								selectedOptionIds: orderedQuestionAnswers[0]?.selectedOptionIds ?? [],
 								freeformText: orderedQuestionAnswers[0]?.freeformText ?? null,
@@ -639,7 +696,13 @@ export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
 							updatedAt: resolvedAt,
 						};
 					})()
-				: { ...target, status: "dismissed", dismissalSource: "agent_terminal", updatedAt: resolvedAt };
+				: {
+						...target,
+						status: "dismissed",
+						pendingAnswerDraft: null,
+						dismissalSource: "agent_terminal",
+						updatedAt: resolvedAt,
+					};
 		await writeDecisions(
 			workspaceId,
 			records.map((record) => (record.decisionId === target.decisionId ? resolved : record)),

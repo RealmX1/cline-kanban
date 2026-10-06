@@ -2,6 +2,7 @@ export enum LocalStorageKey {
 	TaskAutoReviewEnabled = "kanban.task-auto-review-enabled",
 	TaskAutoReviewMode = "kanban.task-auto-review-mode",
 	TaskEditDrafts = "kanban.task-edit-drafts.v1",
+	AgentRaisedPendingUserDecisionAnswerDrafts = "kanban.agent-raised-pending-user-decision-answer-drafts.v1",
 	TaskCreateTerminalAgentModelSelections = "kanban.task-create-terminal-agent-model-selections.v1",
 	// projectId → 该项目上次成功建卡所用的 base ref。真相源在服务端 config.json，这里只是本地镜像
 	// （服务端写失败时不丢用户这次的选择）。
@@ -101,7 +102,11 @@ function getLocalStorage(): Storage | null {
 	if (typeof window === "undefined") {
 		return null;
 	}
-	return window.localStorage;
+	try {
+		return window.localStorage;
+	} catch {
+		return null;
+	}
 }
 
 export function readLocalStorageItem(key: LocalStorageKey): string | null {
@@ -116,15 +121,16 @@ export function readLocalStorageItem(key: LocalStorageKey): string | null {
 	}
 }
 
-export function writeLocalStorageItem(key: LocalStorageKey, value: string): void {
+export function writeLocalStorageItem(key: LocalStorageKey, value: string): boolean {
 	const storage = getLocalStorage();
 	if (!storage) {
-		return;
+		return false;
 	}
 	try {
 		storage.setItem(key, value);
+		return true;
 	} catch {
-		// Ignore storage write failures.
+		return false;
 	}
 }
 
