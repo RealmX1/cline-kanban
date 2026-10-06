@@ -226,6 +226,25 @@ export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeT
 	};
 }
 
+// 写入时刻（updatedAt）之外，本次写所对应的领域事件真实发生的时刻。只有经 agent session PTY host spool
+// 晚送达的 hook 会让两者分开（runtime 缺席期间 agent 停下了，几小时后 runtime 回来才收到 Stop）；
+// 缺省时两者相同。只影响「本轮何时开始 / 停止生成」两个边沿章，updatedAt 仍是写入墙钟。
+export interface SummaryWriteDomainEventTiming {
+	domainEventObservedAtEpochMs?: number;
+}
+
+// 晚于写入时刻的值按写入时刻截断：跑到未来的时钟不可信，边沿章也不该比记下它的那次写更晚。
+function resolveDomainEventObservedAtEpochMs(
+	summaryUpdatedAt: number,
+	domainEventTiming: SummaryWriteDomainEventTiming | undefined,
+): number {
+	const domainEventObservedAtEpochMs = domainEventTiming?.domainEventObservedAtEpochMs;
+	if (domainEventObservedAtEpochMs === undefined || !Number.isFinite(domainEventObservedAtEpochMs)) {
+		return summaryUpdatedAt;
+	}
+	return Math.min(domainEventObservedAtEpochMs, summaryUpdatedAt);
+}
+
 // ── 写侧主真相源派发器（Stage 4 全写侧反转）────────────────────────────────────
 // 单一 per-patch 派发器：按 patch 形状决定 facet 与 legacy state 谁是权威，产出「三 facet 与 state
 // 自洽」的 summary。两个 updateSummary 漏斗（cline-session-state.ts / session-manager.ts）统一经此写。
@@ -247,6 +266,7 @@ export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeT
 export function mergeSummaryWithFacets(
 	prev: RuntimeTaskSessionSummary,
 	patch: Partial<RuntimeTaskSessionSummary>,
+	domainEventTiming?: SummaryWriteDomainEventTiming,
 ): RuntimeTaskSessionSummary {
 	const merged = { ...prev, ...patch };
 	const patchHasFacet =
@@ -280,11 +300,19 @@ export function mergeSummaryWithFacets(
 		return refreshed;
 	})();
 
+	const domainEventObservedAtEpochMs = resolveDomainEventObservedAtEpochMs(
+		mergedWithFacets.updatedAt,
+		domainEventTiming,
+	);
 	const withTurnSequence = didEnterAgentTurn(prev, patch, mergedWithFacets)
-		? stampAgentResponseGenerationTurnStarted(patch, {
-				...mergedWithFacets,
-				agentResponseGenerationTurnSequence: (prev.agentResponseGenerationTurnSequence ?? 0) + 1,
-			})
+		? stampAgentResponseGenerationTurnStarted(
+				patch,
+				{
+					...mergedWithFacets,
+					agentResponseGenerationTurnSequence: (prev.agentResponseGenerationTurnSequence ?? 0) + 1,
+				},
+				domainEventObservedAtEpochMs,
+			)
 		: // 没有开始新的 agent 回合：序号原样透传（含「从未开始过任何回合、字段仍缺失」这一态）。
 			// 回合开始事件同理：不在边沿上就不碰它（离开 agent 回合后保留原值，缺失就继续缺失）。
 			// 刻意不在此把缺失字段补成 0——那会给每一条历史 summary 平白加一个字段、也让
@@ -297,7 +325,12 @@ export function mergeSummaryWithFacets(
 		resolveLastConversationProgressObservation(prev, patch, withTurnSequence),
 	);
 
-	const stopped = resolveAgentResponseGenerationStopped(prev, patch, withProgressObservation);
+	const stopped = resolveAgentResponseGenerationStopped(
+		prev,
+		patch,
+		withProgressObservation,
+		domainEventObservedAtEpochMs,
+	);
 	// `?? null` 是要点不是噪声：字段缺失（undefined）与「已判定为无停止事件」（null）在语义上同为
 	// 「没有可显示的停止时刻」，但若在此把 undefined 视作不等于 null，每一次 agent 回合期间的
 	// metadata-only 写都会给 summary 凭空补一个 `agentResponseGenerationStopped: null`——历史盘上
@@ -397,6 +430,7 @@ function resolveAgentResponseGenerationStopped(
 	prev: RuntimeTaskSessionSummary,
 	patch: Partial<RuntimeTaskSessionSummary>,
 	mergedWithFacets: RuntimeTaskSessionSummary,
+	domainEventObservedAtEpochMs: number,
 ): RuntimeAgentResponseGenerationStopped | null {
 	if (patch.agentResponseGenerationStopped !== undefined) {
 		// 显式覆写优先：磁盘水合、回收流程、测试构造按原值采信（已在 merged 里），不在此重新推算。
@@ -414,9 +448,10 @@ function resolveAgentResponseGenerationStopped(
 		return prev.agentResponseGenerationStopped ?? null;
 	}
 	return {
-		// 锚点取本次写入时刻——那正是这次状态转移发生的瞬间。刻意不取 lastOutputAt /
-		// lastSubstantiveOutputAt：前者被 spinner 重绘推进，后者有节流窗口，都不表达「这一轮结束了」。
-		stoppedAt: mergedWithFacets.updatedAt,
+		// 锚点取这次状态转移发生的瞬间：通常就是本次写入时刻；spool 晚送达的 Stop hook 取它的捕获时刻
+		// （见 resolveDomainEventObservedAtEpochMs）。刻意不取 lastOutputAt / lastSubstantiveOutputAt：
+		// 前者被 spinner 重绘推进，后者有节流窗口，都不表达「这一轮结束了」。
+		stoppedAt: domainEventObservedAtEpochMs,
 		signalConfidence: deriveAgentResponseGenerationStopSignalConfidence(mergedWithFacets),
 		turnSequence: mergedWithFacets.agentResponseGenerationTurnSequence ?? 0,
 	};
@@ -461,6 +496,7 @@ function didEnterUserTurnEndingAgentResponseGeneration(
 function stampAgentResponseGenerationTurnStarted(
 	patch: Partial<RuntimeTaskSessionSummary>,
 	withTurnSequence: RuntimeTaskSessionSummary,
+	domainEventObservedAtEpochMs: number,
 ): RuntimeTaskSessionSummary {
 	if (patch.agentResponseGenerationTurnStarted !== undefined) {
 		// 显式覆写优先：磁盘水合、测试构造按原值采信（已在 merged 里），不在此重新盖章。
@@ -469,8 +505,8 @@ function stampAgentResponseGenerationTurnStarted(
 	return {
 		...withTurnSequence,
 		agentResponseGenerationTurnStarted: {
-			// 与停止事件同口径：取本次写入时刻，那正是翻入 agent 回合的瞬间。
-			startedAt: withTurnSequence.updatedAt,
+			// 与停止事件同口径：取翻入 agent 回合的瞬间（通常即本次写入时刻，spool 晚送达时取捕获时刻）。
+			startedAt: domainEventObservedAtEpochMs,
 			turnSequence: withTurnSequence.agentResponseGenerationTurnSequence ?? 0,
 		},
 	};

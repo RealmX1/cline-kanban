@@ -50,6 +50,20 @@
   7. Cline 已停止维护：类型表 Cline 行改为「不做」，删除范围外的 Cline SDK 发消息 bug；P4 第 6 步对 Cline 只保持现状。
   8. `deployment.ts` 新增了「CLI 已授权 PDV 完成」的 runtime 补写。P6 给 `kanban deployment record` 加字段时只动 record 子命令，不碰该路径。
 
+**第二次对齐（2026-10-05，P0–P2 落回 main 时）**
+- **吸收**：local main `746d5c69` → `42d8099b`，1 个提交，与本任务无文件交集，自动合并无冲突。
+- **内容**：`42d8099b` 修复读框判据。Claude Code 2.1.289 退出计划模式后，会把 agent 名嵌进输入框上边框（`──── <agent 名> ─`）；旧判据要求整行横线，于是 `locateTerminalInputBox` 恒返回 null。修复后上边框额外接受「两段横线夹标签」的形态。
+- **语义复核**：只改了 `terminal-input-box-reader.ts` 的内部判据，导出 API 和 `TerminalScreenSnapshot` 形状都没变；本任务的改动不依赖被改的私有函数，无需适配。
+- **对计划的影响**：
+  - 接管后读屏补判依赖这个读框模块（deferred startup prompt 的就绪判定，以及 P2 余项里的「输入框占用」补判），自动受益。
+  - 后续 e2e 跑真 Claude 时，带标签上边框的会话是常态（Kanban 默认以计划模式起任务），接管后的就绪补判要在这种屏幕上验证一次 → 已并入下方「验证 · 端到端」。
+- **验证**：吸收后 typecheck、biome、全量 `test:guarded`（309 文件 / 3475 例）均通过。
+- **落地**：经 `base-branch-sync` legacy 路径以 `merge --no-ff` 落回 local main（`65574551`），三条后置条件通过；未 push。
+
+**第三次对齐（2026-10-05，P3 开工前）**
+- **吸收**：local main `65574551` → `e5349b6f`，1 个提交（只改 CI 矩阵与文档：CI 只测 Node 22、job 上限 10 → 20 分钟；AGENTS.md 等的 Node 下限改为 22）。task HEAD 是 main 的祖先、脏文件只有本计划文档且不相交，`merge --ff-only` 快进。
+- **对计划的影响**：无。涉及新 Node API 时的验证下限从 20 改为 22。
+
 ## 方案总览
 
 ```
@@ -110,7 +124,10 @@ kanban hooks ingest ───┘ ECONNREFUSED 时 ─UDS──▶┘  （host �
 
 ## 实施进度（2026-10-05）
 
-**已完成：P0、P1、P2 主体。** base 仍为 `746d5c69`，未提交。
+**已完成并落回 local main：P0、P1、P2 主体。**
+- 提交 `c49c9799`，经 RVF strict 双评审（run `rvf-20261005T061732Z-agentic-initiation-start-86418fc2`）。
+- 吸收 main 的 `42d8099b` 后，以 `65574551` 落回 local main，未 push。
+- P3 按用户 2026-10-05「continue」开工，主体已完成（未提交，见下方「P3 进度」）。
 
 验证结果：
 - 全量 `npm run test:guarded`（precommit-safe + runtime-integration）：305 文件 / 3454 例通过，canary 干净。
@@ -136,9 +153,21 @@ kanban hooks ingest ───┘ ECONNREFUSED 时 ─UDS──▶┘  （host �
 - 未被接管的 hosted 会话（workspace 加载失败或已移除）**只告警、不自动终止**。理由：杀活 agent 不可撤销。这些会话留给下次重启接管，或由显式全停 / 孤儿回收（P4）处理。
 - host 拒绝不安全的 socket 目录：必须是真目录、属当前用户、组和其他人都不可写，防 `/tmp` 回退目录被抢建。
 - `launchedByKanbanBuildIdentity` 推迟到 P6：只有 deploy skill 消费它。
+- **当前 build 的 host 拉不起来时的降级（RVF-003 引入）**：原计划只有「整体退回进程内 PTY」一条路。现在分两种情况：
+  - 没有待接管的会话：行为不变，整体退回进程内 PTY。
+  - 旧 generation 里有待接管的会话：facade 照常交出，经旧 generation 链路接管存量；新会话降级为进程内 `PtySession`（热重启后不存活），告警一次，后台单飞重试当前 generation，连上后新会话重回 host。
+  - 影响 P6：deploy skill 的盘点「将中断」类要把这种降级状态下起的会话算进去（它们是 runtime 自持的 PTY）。
+
+**RVF 结论（P0–P2，strict 双评审 cursor-cli + kimi-code，41/41 路径正式覆盖）**：3 条真问题，均已修复并附基线下失败的新测试。
+- RVF-001：接管时追赶帧在句柄登记之后到达，会被当成实时输出（应答旧终端查询、误推实质输出）。修法：链路按通道常驻追赶路由，逐帧按偏移分流，追赶区间全部交付后才登记句柄（`registerHandleAfterCatchUpOutputFullyDelivered`），断连则 reject。
+- RVF-002：attach 失败后被拒绝接管的会话既没被终止也不进未接管告警。修法：接管候选改为显式六态状态机。
+- RVF-003：见上一条偏差。
+- 顺带发现、已转 backlog：
+  - `9c0dd`：拒绝接管前已到达的退出记录不会被确认，旧 generation host 因此永不排空退休 → 与 P4 的退出确认 / 孤儿回收一起处理。
+  - `066c1`：attach 请求超时后，host 晚到的输出帧在链路暂存表里无人认领。
 
 **P2 余项（未做）：**
-- 接管后读屏补判中的输出反应、输入框占用、omp 标题状态（代码注释已标）。
+- 接管后读屏补判中的输出反应、输入框占用、omp 标题状态（代码注释已标）。输入框占用补判直接复用 `locateTerminalInputBox`，带标签上边框已由 `42d8099b` 覆盖。
 - 接管会话的自动重启随 P5 的 `restartRequest` 持久化恢复，代码里已标 `EXPERIMENT_NODE`。
 - runtime 级集成测试 (B) 与 P4 的 handover / SIGTERM 变体一起写。
 
@@ -150,6 +179,51 @@ kanban hooks ingest ───┘ ECONNREFUSED 时 ─UDS──▶┘  （host �
 - 原子构建首版把 worktree 里软链的 `web-ui/dist` 原样复制进 scratch 产物，陈旧清理顺着软链删空了主 checkout 的 `web-ui/dist`。
 - 已从内容一致的 `dist/web-ui` 恢复，`diff` 一致。3484 在服务的 `dist/web-ui` 未受影响。
 - 已改为：复制时解引用软链，判断目录用 `lstat`，遍历遇软链即失败。
+
+### P3 进度（2026-10-05，未提交）
+
+**已完成**（基于 local main `e5349b6f`）：
+- **spool**：
+  - 第二种客户端角色「hosted 会话里的 CLI」（`hosted_session_cli_client_hello`）：一问一答、不占 controller 槽。旧 host 不认这个握手会断开连接，CLI 按 host 不可用处理。
+  - host 侧每会话一个 spool：相邻的可合并条目只留最新一条；生命周期事件逐条保留，上限 512 条（`EXPERIMENT_NODE`）；会话已退出、退出未确认时照收。确认退出时 spool 若非空，host 保留会话（listing 标 `exitAcknowledgedWhileHookSpoolEntriesRemainUnacknowledged`）并推一次 pending，spool 被确认清空后才移除；只有 controller 带 `discardHookSpoolEntriesNotYetAcknowledgedTogetherWithHostedSession`（拒绝接管、已下令终止的会话）才连同非空 spool 一起移除，并写 host 日志。这类会话与未确认的退出记录同等对待：计入退休的「排空」条件，没有 controller 时按保留期限等新 runtime。
+  - runtime spawn hosted 会话时注入 `KANBAN_AGENT_SESSION_PTY_HOST_SOCKET_PATH` / `KANBAN_AGENT_SESSION_PTY_HOST_HOSTED_SESSION_KEY`；`buildTerminalEnvironment` 剥掉继承来的同名变量（防嵌套实例串用）。
+  - hooks CLI：有 host 绑定时，ECONNREFUSED 不再重试、立即存 spool；超时 / reset 重试耗尽后同样存 spool；存进去即 exit 0（无 directive，fail-open）；存不进去才照旧记丢投。
+  - runtime 侧 `HostedSessionHookSpoolDrainCoordinator`：只为支持 spool 的 host（listing 带 `pendingHookSpoolEntryCount`；新 spawn 一律进当前 build 的 host）上、本 runtime spawn / 接管的会话登记排空目标，旧 build 的 host 收不到 spool 读请求；读请求期限 1.5s（`EXPERIMENT_NODE`），超时 fail-open。不靠通知标志判断有没有待排空：登记时、hooks ingest 绑定时、每次直投前、交付退出前都等一次「请求之后才发出」的读（同时到来的请求共享一次读）。按序应用、每应用完一条就确认；单飞；读回空且期间没有新的读请求才结束。注销即取消：在途 / 排队的排空不再应用、不再确认。应用失败每条最多 3 次（退避 100 / 400ms，`EXPERIMENT_NODE`），耗尽后告警并写持久丢投记录（`failureKind=rejected`，activity 只告警），再确认。读不等 hooks ingest 绑定，读到条目才等（接管发生在 runtime server 建好之前；spool 为空时退出照常交付）。
+  - 顺序：直投 hook 应用前先排空该会话的 spool（`drainPendingHookSpoolEntriesBeforeDirectHookIngest`，该 task 没有已登记目标时不碰 socket）；已登记目标的会话退出：先排空 → 交付退出 → 确认退出 → 再读到 host 报 `unknown_hosted_session` 才注销目标（未登记的同步交付，时序与之前一致）。上一个 runtime 已确认退出、spool 还没排空的会话（listing 带上述标记）不进接管候选，只排空。
+- **捕获时刻**：`hooks.ingest` 契约新增 `hookEventCapturedAtEpochMs`（CLI 取 `performance.timeOrigin`），晚于送达时刻的按送达时刻截断。
+  - `mergeSummaryWithFacets` 新增可选的 `SummaryWriteDomainEventTiming`，开始 / 停止两个边沿章取它，`updatedAt` 仍是写入墙钟。
+  - 对话推进、Cache warm 起点（含压缩完成）、提问 `askedAt`、终端作答 `resolvedAt`、恢复期暂存通知 `receivedAt` 都按捕获时刻。
+  - 回收期限锚点改取本轮停止边沿章（同一回合序号才采信），spool 晚送达不再推迟期限。
+- **幂等**：契约新增 `hookEventDeliveryIdempotencyKey`（每次 CLI 调用一个，重试与 spool 复用）。
+  - 每会话记最近 32 个已应用 key（`ActiveProcessState.recentlyAppliedHookEventDeliveryIdempotencyKeys`，随接管记录携带；schema 版本不变，旧记录缺省为空）。生命周期事件应用后立即推接管记录，activity 走去抖。
+  - 同 key 并发投递：后到的等先到的结果，不并行应用。重复投递拿不到首投的 directive，只能 fail-open。
+- **迟到通知**：晚到超过 60s（`EXPERIMENT_NODE`）的事件照常入档、弹通知、响提示音，但不朗读摘要。通知决策日志新增 `hook_transport_spooled_to_agent_session_pty_host` / `hook_spool_drained_into_runtime`。
+- **CLI 写动词等待重试**：`createRuntimeTrpcClient`（`kanban task …` / `work-unit` / `deployment`）与 `exploratory ingest-finding-candidate` 在 ECONNREFUSED 且有重启证据时等待重试，上限 60s，首次向 stderr 提示。
+  - 证据只来自本会话的 host：有 controller 连着（新 runtime 已连上、尚未 listen），或 controller 离开不到 90s。
+  - 超时 / reset 不重试。exploratory 整次投递重来，靠 `clientProposalId` 幂等。
+- **按内容寻址的 hook 配置**：Claude / Gemini / Droid 的 settings 与 OpenCode 的插件和配置改为 `<名字>-<sha12>.<扩展名>`，已有文件永不改写。顺带修掉 droid 共用 `settings.json`、不同权限档的并发任务互相覆盖的问题。
+- **hook 调用面跨版本契约测试**：录下各 harness 当前生成的 `kanban hooks …` argv（Claude / Codex / codex wrapper notify / Gemini / Kimi / OpenCode / Droid / Kiro）与 4 个 env 名，只许追加；删子命令 / flag / 事件名会失败（已反向验证）。
+
+**与计划的偏差：**
+- spool 的 activity 合并由 CLI 判定（不带决策 / 提交载荷的 activity 才可合并），host 不解析载荷。
+- 「runtime 正在重启」证据只做了「问 host」这一条；`runtime-handover-restart-in-progress-marker.json` 随 P4 handover 一起落地。
+- hook stdin 样本没有录 fixture：stdin 由 harness 产生，与 Kanban 版本无关，不构成跨版本面；冻结的是 Kanban 生成的 argv 与 env 名。
+- 按内容寻址的旧文件暂不回收（`EXPERIMENT_NODE`）：每种内容一份、体积很小，只在 hook 配置变化或不同权限档时新增。
+- 迟到通知仍响提示音、只不朗读摘要。
+
+**P3 余项（未做）：**
+- Kimi 的 seeded `config.toml` 仍原地重建：它经 `KIMI_CODE_HOME` 整目录传入，按内容寻址要改成按内容寻址的整个 seeded home；且未实测 kimi 运行中是否重读该文件。先记为待实测项。
+- `kanban hooks` 调用面「只增不改」写进 AGENTS.md 铁律、spool / directive fail-open 写进文档，随 P5 文档一起做。
+
+**验证：**
+- 全量 `npm run test:guarded`：316 文件 / 3537 例通过（2 skipped），canary 干净；typecheck、biome、test:policy、web:typecheck 通过。
+- 新增测试：host spool 注册表 5 例；排空协调器 5 例；hooks CLI spool 回退与可合并判据；CLI 等待重试 6 例；hooks ingest 晚到 / 幂等（真 TerminalSessionManager）6 例；停止观察器锚点 2 例；接管记录携带 key 2 例；hook argv 契约 28 例；通知评估晚到 1 例；web-ui 不朗读 1 例；真 host 集成 1 例（崩溃期间存 spool、会话退出后再存最后一个 Stop、新 runtime 先按序排空再交付退出）。
+- 隔离实例 e2e（HOME 覆写、端口 3497，home shell，不碰 3484）：
+  - shell 里能读到 host 绑定 env。
+  - 在 shell 里预约 +8s 的真 `kanban hooks ingest --event activity` 与 +9s 的真 `kanban task list`，随后 `kill -9` runtime A：
+    - hook CLI 存进 spool（host 日志 `hook_event_spooled`），`hook-exit=0`；
+    - `task list` 打印「Kanban runtime 正在重启（runtime 已离开 3s），最多等待 60s 后重试…」并等待。
+  - runtime B 在 listen 前接管同一 shell（pid、startedAt 不变），排空 spool：summary 的 `latestHookActivity.activityText` = `spooled-while-runtime-down`；等待中的 `task list` 随即成功（`ok: true`，`task-list-exit=0`）。
 
 ## 分阶段实现
 
@@ -290,6 +364,7 @@ kanban hooks ingest ───┘ ECONNREFUSED 时 ─UDS──▶┘  （host �
 - `graceful-shutdown.ts` 的 `onShutdown` 改为接收 `RuntimeShutdownTrigger`。信号触发同样走 detach，退出码保持 130/143；停止时打印保留会话数与终止命令。
 - 新 CLI `kanban runtime stop --terminate-hosted-agent-sessions`（`src/commands/runtime-stop-and-terminate-hosted-agent-sessions.ts`）：runtime 在线走 tRPC，离线时直连 host socket。
 - 孤儿回收：adoption record 携带 `agentSessionRuntimeReclamationEligibleAt`。runtime 回来后按 exit 记录里的 reason 补记回收账本。
+- 一并修 backlog `9c0dd`：拒绝接管前就已到达的退出记录也要确认，否则旧 generation host 永不排空退休。
 - 仓库外的运维改动（只有这一处）需用户确认后再动：supervisor（`~/Documents/GitHub/tmux-plugins/run-cline-kanban-3484-service.sh`）加 `export KANBAN_AGENT_SESSION_PTY_HOST_MODE=enabled`，退出码 75 时立即重拉。不改也能用：现契约下非 130/143 的退出本就 sleep 5 后重拉。deploy skill 在仓库内，见 P6。
 
 **P5：收尾**
@@ -418,6 +493,7 @@ OpenRig 的形态：agent 跑在用户默认 tmux server 里，一个 seat 对�
 - **全量**：`npm run check`、`npm run web:typecheck`、`npm run web:test`；在 Node 24 下跑（better-sqlite3 ABI）。
 - **端到端**：按记忆里的隔离实例配方（HOME 覆写 + 写死端口，剥 `CLAUDE_CODE_*` / `KANBAN_*`）起 runtime，跑真 claude 与 codex 各一个 task。
   - 中途执行 `kanban runtime handover-restart`，以及 `kill -9`。
+  - 至少一个 Claude 会话带标签上边框（退出过计划模式）：接管后挂着的 deferred prompt 能按读屏就绪判定投递出去。
   - 断言 agent pid 不变、轮次继续、Stop hook 落地使卡片进 review、浏览器 restore 内容连续。
   - 窗口内专门制造一次 Stop：断言卡片的停止时刻是窗口内的真实时刻，而不是 drain 时刻。
   - 窗口内在 agent 里跑一次 `kanban task message`：断言等待后成功，而不是报错。

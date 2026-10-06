@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
@@ -880,7 +881,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 	it("writes Claude settings with explicit permission hook", async () => {
 		setupTempHome();
-		await prepareAgentLaunch({
+		const launch = await prepareAgentLaunch({
 			taskId: "task-1",
 			agentId: "claude",
 			binary: "claude",
@@ -890,7 +891,8 @@ describe("prepareAgentLaunch hook strategies", () => {
 			workspaceId: "workspace-1",
 		});
 
-		const settingsPath = join(homedir(), ".cline", "kanban", "hooks", "claude", "settings.json");
+		const settingsPath = launch.args[launch.args.indexOf("--settings") + 1] ?? "";
+		expect(settingsPath).toMatch(/[/\\]\.cline[/\\]kanban[/\\]hooks[/\\]claude[/\\]settings-[0-9a-f]{12}\.json$/);
 		const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
 			hooks?: Record<string, unknown>;
 		};
@@ -901,6 +903,52 @@ describe("prepareAgentLaunch hook strategies", () => {
 		// 压缩完成推进 Cache warm 起点：不带 matcher（manual / auto 都收）。
 		expect(JSON.stringify(settings.hooks?.PostCompact)).toContain(
 			"main_agent_conversation_context_compaction_completed",
+		);
+	});
+
+	it("never rewrites a hook settings file a running agent may have loaded: new content goes to a new file", async () => {
+		setupTempHome();
+		const launchWithDefaultPermissions = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "droid",
+			binary: "droid",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			workspaceId: "workspace-1",
+		});
+		const settingsPathOfDefaultPermissions =
+			launchWithDefaultPermissions.args[launchWithDefaultPermissions.args.indexOf("--settings") + 1] ?? "";
+		const settingsContentLoadedByFirstAgent = readFileSync(settingsPathOfDefaultPermissions, "utf8");
+
+		const launchStartingInPlanMode = await prepareAgentLaunch({
+			taskId: "task-2",
+			agentId: "droid",
+			binary: "droid",
+			args: [],
+			startInPlanMode: true,
+			cwd: "/tmp",
+			prompt: "",
+			workspaceId: "workspace-1",
+		});
+		const settingsPathOfPlanModeStart =
+			launchStartingInPlanMode.args[launchStartingInPlanMode.args.indexOf("--settings") + 1] ?? "";
+
+		expect(settingsPathOfPlanModeStart).not.toBe(settingsPathOfDefaultPermissions);
+		expect(readFileSync(settingsPathOfDefaultPermissions, "utf8")).toBe(settingsContentLoadedByFirstAgent);
+		expect(JSON.parse(readFileSync(settingsPathOfPlanModeStart, "utf8")).autonomyMode).toBe("spec");
+
+		const relaunchWithDefaultPermissions = await prepareAgentLaunch({
+			taskId: "task-3",
+			agentId: "droid",
+			binary: "droid",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			workspaceId: "workspace-1",
+		});
+		expect(relaunchWithDefaultPermissions.args[relaunchWithDefaultPermissions.args.indexOf("--settings") + 1]).toBe(
+			settingsPathOfDefaultPermissions,
 		);
 	});
 
@@ -946,7 +994,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 	it("writes Gemini settings with AfterTool mapped to to_in_progress", async () => {
 		setupTempHome();
-		await prepareAgentLaunch({
+		const launch = await prepareAgentLaunch({
 			taskId: "task-1",
 			agentId: "gemini",
 			binary: "gemini",
@@ -956,7 +1004,8 @@ describe("prepareAgentLaunch hook strategies", () => {
 			workspaceId: "workspace-1",
 		});
 
-		const settingsPath = join(homedir(), ".cline", "kanban", "hooks", "gemini", "settings.json");
+		const settingsPath = launch.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH ?? "";
+		expect(settingsPath.startsWith(join(homedir(), ".cline", "kanban", "hooks", "gemini", "settings-"))).toBe(true);
 		const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
 			hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
 		};
@@ -969,7 +1018,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 	it("writes OpenCode plugin with root-session filtering and permission hooks", async () => {
 		setupTempHome();
-		await prepareAgentLaunch({
+		const launch = await prepareAgentLaunch({
 			taskId: "task-1",
 			agentId: "opencode",
 			binary: "opencode",
@@ -979,7 +1028,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 			workspaceId: "workspace-1",
 		});
 
-		const pluginPath = join(homedir(), ".cline", "kanban", "hooks", "opencode", "kanban.js");
+		const config = JSON.parse(readFileSync(launch.env.OPENCODE_CONFIG ?? "", "utf8")) as { plugin: string[] };
+		const pluginPath = fileURLToPath(config.plugin[0] ?? "");
+		expect(pluginPath.startsWith(join(homedir(), ".cline", "kanban", "hooks", "opencode", "kanban-"))).toBe(true);
 		const plugin = readFileSync(pluginPath, "utf8");
 		expect(plugin).toContain("parentID");
 		expect(plugin).toContain('"permission.ask"');

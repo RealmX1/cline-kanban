@@ -1,9 +1,15 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createTRPCProxyClient, httpBatchLink, TRPCClientError } from "@trpc/client";
 import type { Command } from "commander";
+import {
+	appendHookEventToHostedSessionSpoolThroughAgentSessionPtyHost,
+	type HostedSessionBindingToAgentSessionPtyHost,
+	readHostedSessionBindingToAgentSessionPtyHostFromEnvironment,
+} from "../agent-session-pty-host/runtime-client/hosted-session-cli-client-requests-to-agent-session-pty-host";
 import type {
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentRaisedToolPermissionPayload,
@@ -13,6 +19,7 @@ import type {
 	RuntimeHarnessUserPromptProcessingDirective,
 	RuntimeHookCliProcessResourceUsage,
 	RuntimeHookEvent,
+	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
 	RuntimeMainAgentConversationContextCompactionTrigger,
 	RuntimeTaskHookActivity,
@@ -533,12 +540,29 @@ export function buildAgentRaisedDecisionPayloads(
 // F2：单次投递的客户端超时（ms）。env 可调（过度指定命名），默认略宽于旧硬编码 3000——F1 落地后
 // 服务端响应已降到亚秒级，这层超时只作上限兜底，留出余量给冷启动 manager 加载等慢路径。
 const DEFAULT_HOOK_INGEST_TIMEOUT_MS = 3500;
-// F2：投递最多尝试次数（含首次）。有界，使 codex 路径最坏总耗时（MAX_ATTEMPTS × timeoutMs + backoff）
-// 仍落在 CODEX_HOOK_TIMEOUT_SECONDS（已随本批抬到 8s）窗口内、不被 codex 先回收 hook 进程。
+// F2：投递最多尝试次数（含首次）。有界，使 codex 路径最坏总耗时落在 CODEX_HOOK_TIMEOUT_SECONDS（8s）
+// 窗口内、不被 codex 先回收 hook 进程。按会话是否有 agent session PTY host 绑定分两条预算（默认值下）：
+//   - 无 host 绑定：MAX_ATTEMPTS × timeoutMs + backoff = 2 × 3500 + 250 = 7250ms，走完重试即放弃。
+//   - 有 host 绑定：任何传输失败都不重试（见 buildHookIngestStopRetryingAfterTransportErrorPredicateForHostedSessionBinding），
+//     最坏 = 1 × timeoutMs + spool 期限 = 3500 + 1500（HOOK_SPOOL_APPEND_RESPONSE_DEADLINE_MS）= 5000ms。
+//     若照样重试，最坏会变成 2 × 3500 + 250 + 1500 = 8750ms，spool 确认前 hook 进程就可能被回收。
 // 2 次 = 首投 + 1 次重试；F1 落地后首投几乎必中，这次重试是给瞬时尖刺（daemon 忙 / .git/index.lock
-// 争用 / 短暂不可达）的兜底。
+// 争用 / 短暂不可达）的兜底。env 抬高 KANBAN_HOOK_INGEST_TIMEOUT_MS 时预算随之变大，由调整者自行负责。
 const HOOK_INGEST_MAX_ATTEMPTS = 2;
 const HOOK_INGEST_RETRY_BACKOFF_MS = 250;
+
+// 有 host 绑定时：任何传输失败（拒连、超时、挂起、连接重置）都立即停止重试，转去存 host 的 spool。
+// 不必靠重试兜底：spool 里的请求带同一个 hookEventDeliveryIdempotencyKey，直投若其实已被服务端应用
+// （例如超时只是响应慢），重放时服务端按幂等 key 识别、不会重复应用。无 host 绑定时返回 undefined，
+// 保持原有的有界重试。
+export function buildHookIngestStopRetryingAfterTransportErrorPredicateForHostedSessionBinding(
+	hostedSessionBinding: HostedSessionBindingToAgentSessionPtyHost | null,
+): ((transportError: unknown) => boolean) | undefined {
+	if (hostedSessionBinding === null) {
+		return undefined;
+	}
+	return () => true;
+}
 
 function resolveHookIngestTimeoutMs(): number {
 	const raw = process.env.KANBAN_HOOK_INGEST_TIMEOUT_MS;
@@ -566,6 +590,8 @@ export async function deliverHookIngestWithRetry(
 		timeoutMs: number;
 		maxAttempts: number;
 		backoffMs: number;
+		// 返回 true：这次传输失败不再重试，直接按最终失败处理（例如有 host spool 可存，存进去比再等一轮直投更稳）。
+		shouldStopRetryingAfterTransportError?: (transportError: unknown) => boolean;
 		onFinalFailure?: (info: {
 			attempts: number;
 			failureKind: HookDeliveryFailureKind;
@@ -580,7 +606,10 @@ export async function deliverHookIngestWithRetry(
 			ingestResponse = await withTimeout((signal) => mutate(signal), options.timeoutMs, "kanban hooks ingest");
 		} catch (transportError) {
 			lastTransportError = transportError;
-			if (attempt < options.maxAttempts) {
+			if (
+				attempt < options.maxAttempts &&
+				options.shouldStopRetryingAfterTransportError?.(transportError) !== true
+			) {
 				await delay(options.backoffMs);
 				continue;
 			}
@@ -639,84 +668,185 @@ function captureHookCliProcessResourceUsage(hookIngestDeliveryAttempt: number): 
 	};
 }
 
-async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngestResponse> {
-	let attempt = 0;
-	const response = await deliverHookIngestWithRetry(
-		async (signal) => {
-			await recordNotificationSignalDecision(args.notificationCandidateId, "hook_transport_attempt_started", {
-				attempt: ++attempt,
-			});
-			const trpcClient = createTRPCProxyClient<RuntimeAppRouter>({
-				links: [
-					httpBatchLink({
-						url: buildKanbanRuntimeUrl("/api/trpc"),
-						maxItems: 1,
-						fetch: async (url, options) => {
-							const runtimeFetch = await getRuntimeFetch();
-							const mergedSignal = mergeAbortSignals(signal, options?.signal);
-							return runtimeFetch(url, { ...options, signal: mergedSignal });
-						},
-					}),
-				],
-			});
-			return await trpcClient.hooks.ingest.mutate({
-				notificationCandidateId: args.notificationCandidateId,
-				taskId: args.taskId,
-				workspaceId: args.workspaceId,
-				event: args.event,
-				metadata: args.metadata,
-				...(args.agentRaisedUserQuestion ? { agentRaisedUserQuestion: args.agentRaisedUserQuestion } : {}),
-				...(args.agentRaisedToolPermission ? { agentRaisedToolPermission: args.agentRaisedToolPermission } : {}),
-				...(args.agentRaisedUserQuestionResolvedInAgentTerminal
-					? { agentRaisedUserQuestionResolvedInAgentTerminal: args.agentRaisedUserQuestionResolvedInAgentTerminal }
-					: {}),
-				...(args.submittedPromptText !== undefined ? { submittedPromptText: args.submittedPromptText } : {}),
-				...(args.hookEventFiredInsideSubagentContext
-					? { hookEventFiredInsideSubagentContext: args.hookEventFiredInsideSubagentContext }
-					: {}),
-				...(args.mainAgentConversationContextCompactionTriggerReportedByHarness
-					? {
-							mainAgentConversationContextCompactionTriggerReportedByHarness:
-								args.mainAgentConversationContextCompactionTriggerReportedByHarness,
-						}
-					: {}),
-				...(args.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness !== undefined
-					? {
-							mainAgentConversationContextTokenCountAfterCompactionReportedByHarness:
-								args.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness,
-						}
-					: {}),
-				...(args.agentNativeConversationSessionIdentity
-					? { agentNativeConversationSessionIdentity: args.agentNativeConversationSessionIdentity }
-					: {}),
-				...(args.agentToolCallExecutionOutcome
-					? { agentToolCallExecutionOutcome: args.agentToolCallExecutionOutcome }
-					: {}),
-				// 每次尝试发送前重新取值：重试之间的等待本身也是这个 hook 进程的开销。
-				hookCliProcessResourceUsage: captureHookCliProcessResourceUsage(attempt),
-			});
-		},
-		{
-			timeoutMs: resolveHookIngestTimeoutMs(),
-			maxAttempts: HOOK_INGEST_MAX_ATTEMPTS,
-			backoffMs: HOOK_INGEST_RETRY_BACKOFF_MS,
-			onFinalFailure: async ({ attempts, failureKind, error }) => {
-				await recordNotificationSignalDecision(
-					args.notificationCandidateId,
-					"hook_transport_failed",
-					{ attempts, failureKind },
-					true,
-				);
-				await recordIngestDropForLifecycleEvent(args, attempts, failureKind, error);
-			},
-		},
+// 一次 hooks CLI 调用的请求体：直投与存进 host spool 用同一份，服务端按同一个幂等 key 只应用一次。
+function buildHookIngestRequest(
+	args: HooksIngestArgs,
+	hookEventCapturedAtEpochMs: number,
+	hookEventDeliveryIdempotencyKey: string,
+	hookIngestDeliveryAttempt: number,
+): RuntimeHookIngestRequest {
+	return {
+		notificationCandidateId: args.notificationCandidateId,
+		taskId: args.taskId,
+		workspaceId: args.workspaceId,
+		event: args.event,
+		metadata: args.metadata,
+		...(args.agentRaisedUserQuestion ? { agentRaisedUserQuestion: args.agentRaisedUserQuestion } : {}),
+		...(args.agentRaisedToolPermission ? { agentRaisedToolPermission: args.agentRaisedToolPermission } : {}),
+		...(args.agentRaisedUserQuestionResolvedInAgentTerminal
+			? { agentRaisedUserQuestionResolvedInAgentTerminal: args.agentRaisedUserQuestionResolvedInAgentTerminal }
+			: {}),
+		...(args.submittedPromptText !== undefined ? { submittedPromptText: args.submittedPromptText } : {}),
+		...(args.hookEventFiredInsideSubagentContext
+			? { hookEventFiredInsideSubagentContext: args.hookEventFiredInsideSubagentContext }
+			: {}),
+		...(args.mainAgentConversationContextCompactionTriggerReportedByHarness
+			? {
+					mainAgentConversationContextCompactionTriggerReportedByHarness:
+						args.mainAgentConversationContextCompactionTriggerReportedByHarness,
+				}
+			: {}),
+		...(args.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness !== undefined
+			? {
+					mainAgentConversationContextTokenCountAfterCompactionReportedByHarness:
+						args.mainAgentConversationContextTokenCountAfterCompactionReportedByHarness,
+				}
+			: {}),
+		...(args.agentNativeConversationSessionIdentity
+			? { agentNativeConversationSessionIdentity: args.agentNativeConversationSessionIdentity }
+			: {}),
+		...(args.agentToolCallExecutionOutcome
+			? { agentToolCallExecutionOutcome: args.agentToolCallExecutionOutcome }
+			: {}),
+		// 每次发送前重新取值：重试之间的等待本身也是这个 hook 进程的开销。
+		hookCliProcessResourceUsage: captureHookCliProcessResourceUsage(hookIngestDeliveryAttempt),
+		hookEventCapturedAtEpochMs,
+		hookEventDeliveryIdempotencyKey,
+	};
+}
+
+// spool 里相邻的同类条目可合并为最后一条：只有不带任何决策 / 提交载荷的 activity。它推进的「对话上次推进」
+// 与 Cache warm 起点都是单调量，中间值没有信息；生命周期事件与带载荷的事件一律逐条保留。
+export function isHookEventCoalescibleInAgentSessionPtyHostSpool(args: HooksIngestArgs): boolean {
+	return (
+		args.event === "activity" &&
+		args.agentRaisedUserQuestion === undefined &&
+		args.agentRaisedToolPermission === undefined &&
+		args.agentRaisedUserQuestionResolvedInAgentTerminal === undefined &&
+		args.submittedPromptText === undefined
 	);
+}
+
+async function ingestHookEvent(args: HooksIngestArgs): Promise<RuntimeHookIngestResponse> {
+	// 本进程启动那一刻即事件的捕获时刻（hook 进程由 agent 在事件发生时拉起）。runtime 缺席、事件晚送达时，
+	// 服务端按它记停止 / 开始 / 对话推进等领域时刻。
+	const hookEventCapturedAtEpochMs = Math.floor(performance.timeOrigin);
+	// 一次调用一个：下面的直投（无 host 绑定时含一次重试）与 spool 复用它，服务端据此只应用一次。
+	const hookEventDeliveryIdempotencyKey = randomUUID();
+	// 会话由 agent session PTY host 托管时才有：runtime 不可达就把事件存进 host 的 spool，等 runtime 回来重放。
+	const hostedSessionBinding = readHostedSessionBindingToAgentSessionPtyHostFromEnvironment(process.env);
+	let attempt = 0;
+	let finalTransportFailure: { attempts: number; error: unknown } | null = null;
+	let response: RuntimeHookIngestResponse;
+	try {
+		response = await deliverHookIngestWithRetry(
+			async (signal) => {
+				await recordNotificationSignalDecision(args.notificationCandidateId, "hook_transport_attempt_started", {
+					attempt: ++attempt,
+				});
+				const trpcClient = createTRPCProxyClient<RuntimeAppRouter>({
+					links: [
+						httpBatchLink({
+							url: buildKanbanRuntimeUrl("/api/trpc"),
+							maxItems: 1,
+							fetch: async (url, options) => {
+								const runtimeFetch = await getRuntimeFetch();
+								const mergedSignal = mergeAbortSignals(signal, options?.signal);
+								return runtimeFetch(url, { ...options, signal: mergedSignal });
+							},
+						}),
+					],
+				});
+				return await trpcClient.hooks.ingest.mutate(
+					buildHookIngestRequest(args, hookEventCapturedAtEpochMs, hookEventDeliveryIdempotencyKey, attempt),
+				);
+			},
+			{
+				timeoutMs: resolveHookIngestTimeoutMs(),
+				maxAttempts: HOOK_INGEST_MAX_ATTEMPTS,
+				backoffMs: HOOK_INGEST_RETRY_BACKOFF_MS,
+				// 有 spool 可存时，任何传输失败都不再等一轮重试：立即存（预算见 HOOK_INGEST_MAX_ATTEMPTS）。
+				shouldStopRetryingAfterTransportError:
+					buildHookIngestStopRetryingAfterTransportErrorPredicateForHostedSessionBinding(hostedSessionBinding),
+				onFinalFailure: async ({ attempts, failureKind, error }) => {
+					if (failureKind === "transport" && hostedSessionBinding) {
+						// 先试 spool，存不进去再记丢投（见下）。
+						finalTransportFailure = { attempts, error };
+						return;
+					}
+					await recordNotificationSignalDecision(
+						args.notificationCandidateId,
+						"hook_transport_failed",
+						{ attempts, failureKind },
+						true,
+					);
+					await recordIngestDropForLifecycleEvent(args, attempts, failureKind, error);
+				},
+			},
+		);
+	} catch (deliveryError) {
+		const transportFailure = finalTransportFailure as { attempts: number; error: unknown } | null;
+		if (transportFailure === null || hostedSessionBinding === null) {
+			throw deliveryError;
+		}
+		return await spoolHookEventIntoAgentSessionPtyHostAfterTransportFailure({
+			args,
+			hostedSessionBinding,
+			spooledHookIngestRequest: buildHookIngestRequest(
+				args,
+				hookEventCapturedAtEpochMs,
+				hookEventDeliveryIdempotencyKey,
+				transportFailure.attempts + 1,
+			),
+			transportFailure,
+		});
+	}
 	if (response.ok) {
 		await recordNotificationSignalDecision(args.notificationCandidateId, "hook_transport_accepted", {
 			attempts: attempt,
 		});
 	}
 	return response;
+}
+
+// 存进 spool 即视为送达：hook 退出码 0、没有 harness 指令（spool 的事件回不了指令，只能 fail-open）。
+// 存不进去（旧 host 不认 / host 也不在 / 会话已不在 host 里 / spool 满）才按原样记丢投并报错。
+async function spoolHookEventIntoAgentSessionPtyHostAfterTransportFailure(input: {
+	args: HooksIngestArgs;
+	hostedSessionBinding: HostedSessionBindingToAgentSessionPtyHost;
+	spooledHookIngestRequest: RuntimeHookIngestRequest;
+	transportFailure: { attempts: number; error: unknown };
+}): Promise<RuntimeHookIngestResponse> {
+	const { args, transportFailure } = input;
+	const spoolOutcome = await appendHookEventToHostedSessionSpoolThroughAgentSessionPtyHost({
+		hostedSessionBinding: input.hostedSessionBinding,
+		spooledHookIngestRequest: input.spooledHookIngestRequest,
+		coalescibleWithAdjacentCoalescibleHookSpoolEntry: isHookEventCoalescibleInAgentSessionPtyHostSpool(args),
+	});
+	if (spoolOutcome.kind === "spooled") {
+		await recordNotificationSignalDecision(
+			args.notificationCandidateId,
+			"hook_transport_spooled_to_agent_session_pty_host",
+			{
+				attempts: transportFailure.attempts,
+				hookSpoolEntrySequenceNumber: spoolOutcome.hookSpoolEntrySequenceNumber,
+			},
+		);
+		return { ok: true };
+	}
+	await recordNotificationSignalDecision(
+		args.notificationCandidateId,
+		"hook_transport_failed",
+		{
+			attempts: transportFailure.attempts,
+			failureKind: "transport",
+			agentSessionPtyHostSpoolFailure:
+				spoolOutcome.kind === "spool_rejected" ? spoolOutcome.reason : spoolOutcome.failureMessage,
+		},
+		true,
+	);
+	await recordIngestDropForLifecycleEvent(args, transportFailure.attempts, "transport", transportFailure.error);
+	throw transportFailure.error;
 }
 
 export function serializeHarnessUserPromptProcessingDirective(

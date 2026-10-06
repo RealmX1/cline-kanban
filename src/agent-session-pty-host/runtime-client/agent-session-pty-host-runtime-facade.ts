@@ -3,7 +3,9 @@
 //   整理成按 workspace 分组的接管候选（新 runtime 在 listen 之前把它们装回 session-manager）；
 // - 旧 generation 的 host 令其「排空后退休」：继续服务存量会话，不再接新 spawn；
 // - 为每个 workspace 提供 HostedTerminalPtyProcessSpawner，新会话一律进当前 generation 的 host；
-//   唯一例外：启动时当前 generation 拉不起来而旧 generation 有会话待接管，此后新会话降级为进程内 PTY（见 start）。
+//   唯一例外：启动时当前 generation 拉不起来而旧 generation 有会话待接管，此后新会话降级为进程内 PTY（见 start）；
+// - 本 runtime spawn / 接管的会话，其 hook spool（runtime 缺席期间存进 host 的 hook 事件）经
+//   HostedSessionHookSpoolDrainCoordinator 按序应用回 hooks ingest。
 
 import { randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
@@ -34,7 +36,29 @@ import {
 	resolveAgentSessionPtyHostLogFilePath,
 	resolveAgentSessionPtyHostSocketPath,
 } from "./agent-session-pty-host-socket-path-for-runtime-identity";
+import {
+	AGENT_SESSION_PTY_HOST_HOSTED_SESSION_KEY_ENVIRONMENT_VARIABLE_NAME,
+	AGENT_SESSION_PTY_HOST_SOCKET_PATH_ENVIRONMENT_VARIABLE_NAME,
+} from "./hosted-session-cli-client-requests-to-agent-session-pty-host";
+import {
+	HostedSessionHookSpoolDrainCoordinator,
+	type HostedSessionHookSpoolDrainCoordinatorOptions,
+	recordSpooledHookEventDroppedToHookDeliveryFailureLog,
+	type SpooledHookIngestRequestApplier,
+} from "./hosted-session-hook-spool-drain-coordinator";
 import { HostedTerminalPtyProcessHandleOverAgentSessionPtyHost } from "./hosted-terminal-pty-process-handle-over-agent-session-pty-host";
+
+// EXPERIMENT_NODE: spool 读请求的应答期限。host 只是读内存里的数组，正常亚毫秒级；直投 hook 与退出交付都在等这次读，
+// 期限必须明显短于 hooks CLI 单次投递超时（3.5s），超时 fail-open（直投照常应用、退出照常交付，条目留在 host）。
+const HOOK_SPOOL_READ_RESPONSE_DEADLINE_MILLISECONDS = 1_500;
+
+// 支持 hook spool 的 host 在 listing 里总会带 pendingHookSpoolEntryCount（哪怕是 0）；旧 build（P2）的 host 不带，
+// 也不认 spool 读请求（只会等满请求期限）——不为它们的会话登记排空目标。
+function hostedSessionListingComesFromHostThatSupportsHookSpool(
+	listing: AgentSessionPtyHostHostedSessionListing,
+): boolean {
+	return typeof listing.pendingHookSpoolEntryCount === "number";
+}
 
 // 一个 host 活着（socket 有人监听）却不应答握手 / 请求：它手里可能还有会话，本 runtime 既接管不了、
 // 也不能当它们不存在（旧路径会把会话归零、前端随后再起第二个 agent）。启动必须失败，交给 supervisor 重试。
@@ -50,6 +74,9 @@ export interface AgentSessionPtyHostRuntimeFacadeOptions {
 	launchHostAndWaitUntilSocketAcceptsConnections?: (
 		request: AgentSessionPtyHostDetachedLaunchRequest,
 	) => Promise<void>;
+	// 测试注入：缺省写 hooks CLI 同一份持久丢投记录（~/.cline/kanban/agent-hook-delivery-failures/）。
+	recordSpooledHookEventDroppedAfterApplyRetriesExhausted?: HostedSessionHookSpoolDrainCoordinatorOptions["recordSpooledHookEventDroppedAfterApplyRetriesExhausted"];
+	waitBeforeRetryingSpooledHookEventApply?: HostedSessionHookSpoolDrainCoordinatorOptions["waitBeforeRetryingSpooledHookEventApply"];
 }
 
 export interface HostedTerminalPtySessionAdoptionCandidatesOfWorkspace {
@@ -88,11 +115,20 @@ export class AgentSessionPtyHostRuntimeFacade {
 	// 启动时当前 build 的 host 拉不起来、但旧 generation 里有会话待接管时置位（之后不再复位）：
 	// 此后凡当前 generation 未连上的 spawn 都降级为进程内 PtySession，并在后台再试连接当前 generation。
 	private newSpawnsFallBackToInProcessPtySessionWhileCurrentGenerationHostIsUnreachable = false;
+	private readonly hostedSessionHookSpoolDrainCoordinator: HostedSessionHookSpoolDrainCoordinator;
 
 	private constructor(
 		private readonly options: AgentSessionPtyHostRuntimeFacadeOptions,
 		private readonly currentBuildHostDescriptor: CurrentBuildAgentSessionPtyHostDescriptor,
-	) {}
+	) {
+		this.hostedSessionHookSpoolDrainCoordinator = new HostedSessionHookSpoolDrainCoordinator({
+			warn: options.warn,
+			recordSpooledHookEventDroppedAfterApplyRetriesExhausted:
+				options.recordSpooledHookEventDroppedAfterApplyRetriesExhausted ??
+				recordSpooledHookEventDroppedToHookDeliveryFailureLog,
+			waitBeforeRetryingSpooledHookEventApply: options.waitBeforeRetryingSpooledHookEventApply,
+		});
+	}
 
 	static async start(options: AgentSessionPtyHostRuntimeFacadeOptions): Promise<AgentSessionPtyHostRuntimeFacade> {
 		const facade = new AgentSessionPtyHostRuntimeFacade(
@@ -174,6 +210,20 @@ export class AgentSessionPtyHostRuntimeFacade {
 		};
 	}
 
+	// runtime server 建好 hooks ingest 之后绑定：此前 spool 的排空请求都在等它。
+	bindSpooledHookIngestRequestApplier(spooledHookIngestRequestApplier: SpooledHookIngestRequestApplier): void {
+		this.hostedSessionHookSpoolDrainCoordinator.bindSpooledHookIngestRequestApplier(spooledHookIngestRequestApplier);
+	}
+
+	// 直投 hook 应用前调用，保证同一会话里 spool 的事件先于直投的事件被应用（该 task 有已登记的排空目标时，
+	// 至少等一次在此之后发出的 spool 读；同时到来的直投共享同一次读）。
+	drainPendingHookSpoolEntriesBeforeDirectHookIngest(workspaceId: string, taskId: string): Promise<void> {
+		return this.hostedSessionHookSpoolDrainCoordinator.drainPendingHookSpoolEntriesBeforeDirectHookIngest(
+			workspaceId,
+			taskId,
+		);
+	}
+
 	// runtime 退出前调用：把已排队的 stop / 接管记录等消息写进内核再断开。
 	async closeControllerConnectionsAfterFlushingPendingFrames(): Promise<void> {
 		const links = [...this.generationLinksBySocketPath.values()];
@@ -204,6 +254,10 @@ export class AgentSessionPtyHostRuntimeFacade {
 				environmentWithoutUndefinedValues[environmentKey] = environmentValue;
 			}
 		}
+		// 会话里的 hooks CLI 在 runtime 不可达时凭它们直连 host，把事件存进这条会话的 spool。
+		environmentWithoutUndefinedValues[AGENT_SESSION_PTY_HOST_SOCKET_PATH_ENVIRONMENT_VARIABLE_NAME] = link.socketPath;
+		environmentWithoutUndefinedValues[AGENT_SESSION_PTY_HOST_HOSTED_SESSION_KEY_ENVIRONMENT_VARIABLE_NAME] =
+			hostedSessionKey;
 		const outcome = await link.connection.requestSpawnHostedSession({
 			hostedSessionKey,
 			hostedSessionDescriptor: {
@@ -234,8 +288,52 @@ export class AgentSessionPtyHostRuntimeFacade {
 			request.onData,
 			request.onExit,
 		);
+		// 新会话只进当前 build 的 host，它一定支持 spool。登记即请求一次读（不靠 0 计数跳过）。
+		this.registerHookSpoolDrainTargetHostedSession(link, hostedSessionKey, workspaceId, request.taskId);
 		link.registerHandleAndDeliverEventsThatArrivedEarlier(handle);
 		return handle;
+	}
+
+	private registerHookSpoolDrainTargetHostedSession(
+		link: AgentSessionPtyHostGenerationControllerLink,
+		hostedSessionKey: string,
+		workspaceId: string,
+		taskId: string,
+	): void {
+		this.hostedSessionHookSpoolDrainCoordinator.registerHookSpoolDrainTargetHostedSession({
+			hostedSessionKey,
+			workspaceId,
+			taskId,
+			readHookSpoolEntries: async () => {
+				const outcome = await link.connection.requestReadHostedSessionHookSpoolEntries(
+					hostedSessionKey,
+					HOOK_SPOOL_READ_RESPONSE_DEADLINE_MILLISECONDS,
+				);
+				return outcome.kind === "read" ? outcome.hookSpoolEntries : null;
+			},
+			acknowledgeHookSpoolEntriesThrough: (throughHookSpoolEntrySequenceNumber) =>
+				link.connection.acknowledgeHostedSessionHookSpoolEntries(
+					hostedSessionKey,
+					throughHookSpoolEntrySequenceNumber,
+				),
+		});
+	}
+
+	// 上一个 runtime 已交付并确认了这条会话的退出，但当时 spool 非空、host 把会话留着等排空（随后 runtime 崩溃 / 重启）。
+	// 它不是接管候选（退出已交付过）；只把 spool 排空，读到 host 移除会话为止。
+	private drainHookSpoolOfHostedSessionWhoseExitWasAlreadyAcknowledged(
+		link: AgentSessionPtyHostGenerationControllerLink,
+		listing: AgentSessionPtyHostHostedSessionListing,
+	): void {
+		this.registerHookSpoolDrainTargetHostedSession(
+			link,
+			listing.hostedSessionKey,
+			listing.hostedSessionDescriptor.workspaceId,
+			listing.hostedSessionDescriptor.taskId,
+		);
+		void this.hostedSessionHookSpoolDrainCoordinator.drainHookSpoolAfterExitAcknowledgedUntilHostForgetsHostedSessionThenForgetTarget(
+			listing.hostedSessionKey,
+		);
 	}
 
 	private buildAdoptionCandidate(
@@ -282,6 +380,16 @@ export class AgentSessionPtyHostRuntimeFacade {
 						callbacks.onData,
 						callbacks.onExit,
 					);
+					// 先于句柄登记：登记时交付的退出（接管期间进程退出）也要等 spool 排空。
+					// 登记即请求一次读（应用函数绑定后发出），不信 listing 里较早的计数：listing 之后存进来的条目也要取走。
+					if (hostedSessionListingComesFromHostThatSupportsHookSpool(listing)) {
+						this.registerHookSpoolDrainTargetHostedSession(
+							link,
+							listing.hostedSessionKey,
+							listing.hostedSessionDescriptor.workspaceId,
+							listing.hostedSessionDescriptor.taskId,
+						);
+					}
 					// 追赶帧在 attach 响应之后分多个 socket data 事件到达：必须等追赶区间全部交给 onCatchUpOutput 再返回句柄，
 					// 否则调用方会在屏幕还原完成前读屏、开查询应答，晚到的追赶字节也会被当成实时输出。
 					await link.registerHandleAfterCatchUpOutputFullyDelivered(handle, {
@@ -292,7 +400,12 @@ export class AgentSessionPtyHostRuntimeFacade {
 				} catch (error) {
 					// 没接管成功：退回可终止状态，调用方随后的拒绝路径才能真正发出终止
 					// （连接已断开、发不出去时，会话如实留在未接管名单里）。
+					// 注销即取消：登记时已排队的排空不得再应用 / 确认它的 spool——会话没被接管，spool 留在 host 里
+					// （下次成功接管时取走；被拒绝并终止时随退出确认一并丢弃，host 记日志）。
 					bookkeeping.dispositionState = "adoption_output_stream_attach_failed_awaiting_termination";
+					this.hostedSessionHookSpoolDrainCoordinator.forgetHookSpoolDrainTargetHostedSession(
+						listing.hostedSessionKey,
+					);
 					throw error;
 				}
 				bookkeeping.dispositionState = "adopted_with_handle_owned_by_terminal_session_manager";
@@ -371,6 +484,10 @@ export class AgentSessionPtyHostRuntimeFacade {
 				);
 			}
 			for (const listing of hostedSessions) {
+				if (listing.exitAcknowledgedWhileHookSpoolEntriesRemainUnacknowledged === true) {
+					this.drainHookSpoolOfHostedSessionWhoseExitWasAlreadyAcknowledged(link, listing);
+					continue;
+				}
 				this.recordAdoptionCandidate(link, listing);
 			}
 			if (generationSocketPath !== currentGenerationSocketPath) {
@@ -384,6 +501,7 @@ export class AgentSessionPtyHostRuntimeFacade {
 		socketPath: string,
 		connection: AgentSessionPtyHostControllerConnection,
 	): AgentSessionPtyHostGenerationControllerLink {
+		const coordinator = this.hostedSessionHookSpoolDrainCoordinator;
 		const link = new AgentSessionPtyHostGenerationControllerLink(
 			socketPath,
 			connection,
@@ -392,6 +510,20 @@ export class AgentSessionPtyHostRuntimeFacade {
 				if (this.generationLinksBySocketPath.get(closedLink.socketPath) === closedLink) {
 					this.generationLinksBySocketPath.delete(closedLink.socketPath);
 				}
+			},
+			{
+				onHostedSessionHookSpoolEntriesPending: (hostedSessionKey, pendingHookSpoolEntryCount) =>
+					coordinator.noteHookSpoolEntriesPending(hostedSessionKey, pendingHookSpoolEntryCount),
+				isHostedSessionRegisteredAsHookSpoolDrainTarget: (hostedSessionKey) =>
+					coordinator.isHostedSessionRegisteredAsHookSpoolDrainTarget(hostedSessionKey),
+				drainHookSpoolBeforeDeliveringExit: (hostedSessionKey) =>
+					coordinator.drainHookSpoolBeforeDeliveringExit(hostedSessionKey),
+				drainHookSpoolAfterExitAcknowledgedUntilHostForgetsHostedSessionThenForgetTarget: (hostedSessionKey) =>
+					coordinator.drainHookSpoolAfterExitAcknowledgedUntilHostForgetsHostedSessionThenForgetTarget(
+						hostedSessionKey,
+					),
+				forgetHostedSessionHookSpoolDrainTarget: (hostedSessionKey) =>
+					coordinator.forgetHookSpoolDrainTargetHostedSession(hostedSessionKey),
 			},
 		);
 		this.generationLinksBySocketPath.set(socketPath, link);

@@ -136,6 +136,14 @@ describe("通知领取失败后的去重边界", () => {
 		expect(deliveryMocks.playSummarySpeech).not.toHaveBeenCalled();
 	});
 
+	it("runtime 缺席期间存下、很久之后才送到的事件：照常弹通知并响提示音，但不朗读", async () => {
+		await renderEvents([]);
+		await renderEvents([{ ...event, notificationSpeechSuppressedBecauseAgentEventWasDeliveredLate: true }]);
+		expect(browserNotification).toHaveBeenCalledTimes(1);
+		expect(deliveryMocks.playSummarySpeech).not.toHaveBeenCalled();
+		expect(deliveryMocks.playNotificationSound).toHaveBeenCalledTimes(1);
+	});
+
 	it("领取后的语音与回退声音失败不释放去重，不重复已发起的付费操作", async () => {
 		await renderEvents([]);
 		deliveryMocks.playSummarySpeech.mockRejectedValueOnce(new Error("语音播放失败"));

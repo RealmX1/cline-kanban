@@ -19,6 +19,8 @@ import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry"
 import { isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeCommandRunResponse,
+	RuntimeHookIngestRequest,
+	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
 	RuntimeRunUpdateResponse,
 	RuntimeTaskSessionSummary,
@@ -144,6 +146,13 @@ export interface CreateRuntimeServerDependencies {
 	pickDirectoryPathFromSystemDialog: () => string | null;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
+	// agent session PTY host 模式才有：runtime 缺席期间存进 host 的 hook 事件，由这里的 hooks ingest 按序应用。
+	agentSessionPtyHostHookSpool?: {
+		bindSpooledHookIngestRequestApplier: (
+			spooledHookIngestRequestApplier: (spooledHookIngestRequest: unknown) => Promise<RuntimeHookIngestResponse>,
+		) => void;
+		drainPendingHookSpoolEntriesBeforeDirectHookIngest: (workspaceId: string, taskId: string) => Promise<void>;
+	};
 }
 
 export interface RuntimeServer {
@@ -668,6 +677,24 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		loadWorkspaceBoardById,
 	});
 
+	const hooksApiDependenciesSharedByDirectAndSpooledHookIngest = {
+		getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
+		ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
+		broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		broadcastTaskReadyForReview: deps.runtimeStateHub.broadcastTaskReadyForReview,
+		// Stop 边沿 → exploration thread graph 维护（B.2）。触发器自带四道闸，这里只交出边沿事实；
+		// 绝不 await，判图要 fork 一个分身，压进 hook 响应路径会触发客户端硬超时。
+		notifyExplorationThreadGraphAgentTurnStopped: explorationThreadGraphMaintenanceTrigger.notifyAgentTurnStopped,
+	};
+	// spool 重放走同一套 hooks ingest，只是不再「先排空 spool」（它自己就是排空）。
+	const hooksApiForHookEventsSpooledInAgentSessionPtyHost = createHooksApi({
+		...hooksApiDependenciesSharedByDirectAndSpooledHookIngest,
+		ingestsHookEventsReplayedFromAgentSessionPtyHostSpool: true,
+	});
+	deps.agentSessionPtyHostHookSpool?.bindSpooledHookIngestRequestApplier((spooledHookIngestRequest) =>
+		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
+	);
+
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
 		const scope = await resolveWorkspaceScopeFromRequest(req, requestUrl);
@@ -772,14 +799,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				serverCwd: process.cwd(),
 			}),
 			hooksApi: createHooksApi({
-				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
-				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
-				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-				broadcastTaskReadyForReview: deps.runtimeStateHub.broadcastTaskReadyForReview,
-				// Stop 边沿 → exploration thread graph 维护（B.2）。触发器自带四道闸，这里只交出边沿事实；
-				// 绝不 await，判图要 fork 一个分身，压进 hook 响应路径会触发客户端硬超时。
-				notifyExplorationThreadGraphAgentTurnStopped:
-					explorationThreadGraphMaintenanceTrigger.notifyAgentTurnStopped,
+				...hooksApiDependenciesSharedByDirectAndSpooledHookIngest,
+				drainPendingHookSpoolEntriesBeforeDirectHookIngest:
+					deps.agentSessionPtyHostHookSpool?.drainPendingHookSpoolEntriesBeforeDirectHookIngest,
 			}),
 			deploymentApi: createDeploymentApi({
 				// 看板当前列快照：直读该 workspace 的 board.json，摊平 columns×cards → (taskId, columnId)。

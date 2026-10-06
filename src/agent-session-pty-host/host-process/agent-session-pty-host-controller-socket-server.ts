@@ -1,5 +1,6 @@
 // host 进程的 Unix socket 服务端：握手、单 controller 槽、把控制消息路由到会话注册表、把输出推给 controller，
 // 以及 host 自身的生命周期（空闲自退、排空后退休、显式全停）。
+// 另一种连接是 hosted 会话里的 CLI（hooks CLI 等）：一问一答、不占 controller 槽（见 wire-protocol）。
 //
 // 本文件属于 host 进程的依赖闭包：只允许 import `node:*`、wire-protocol 与同目录模块。
 
@@ -14,6 +15,7 @@ import {
 import {
 	AGENT_SESSION_PTY_HOST_WIRE_PROTOCOL_VERSION,
 	type AgentSessionPtyHostHostToControllerMessage,
+	type AgentSessionPtyHostHostToHostedSessionCliClientMessage,
 	readWireControlMessageType,
 } from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
 import {
@@ -31,7 +33,8 @@ export interface AgentSessionPtyHostControllerSocketServerOptions {
 	spawnHostedPtyProcess: SpawnHostedPtyProcess;
 	// 没有 controller、也没有任何会话（含未确认的退出记录）时，过这么久自行退出。
 	idleExitAfterMilliseconds: number;
-	// 没有 controller、没有运行中的会话、只剩未确认的退出记录时，保留这么久等新 runtime 来取，然后退出。
+	// 没有 controller、没有运行中的会话、只剩未确认的退出记录（或退出已确认、spool 还没排空的会话）时，
+	// 保留这么久等新 runtime 来取，然后退出。
 	unacknowledgedExitRecordRetentionMilliseconds: number;
 	appendHostLogEntry: (entry: Record<string, unknown>) => void;
 	requestHostProcessExit: (exitCode: number) => void;
@@ -40,6 +43,8 @@ export interface AgentSessionPtyHostControllerSocketServerOptions {
 }
 
 type HostLifecycleState = "serving" | "retiring_when_drained" | "terminating_all_hosted_sessions";
+
+type AcceptedConnectionRole = "awaiting_hello" | "controller" | "hosted_session_cli_client";
 
 function readStringField(message: unknown, fieldName: string): string | null {
 	const value = (message as Record<string, unknown>)[fieldName];
@@ -76,10 +81,15 @@ export class AgentSessionPtyHostControllerSocketServer {
 	private idleExitTimer: NodeJS.Timeout | null = null;
 	private idleExitTimerDelayMilliseconds: number | null = null;
 	private hostExitRequested = false;
+	// 没有 controller 时：自哪一刻起没有（上一个 controller 断开的时刻；从未有过时为 host 启动时刻）。
+	private controllerAbsentSinceEpochMs: number;
+	private readonly readNowEpochMs: () => number;
 
 	constructor(private readonly options: AgentSessionPtyHostControllerSocketServerOptions) {
 		const readNowEpochMs = options.readNowEpochMs ?? Date.now;
+		this.readNowEpochMs = readNowEpochMs;
 		this.hostStartedAtEpochMs = readNowEpochMs();
+		this.controllerAbsentSinceEpochMs = this.hostStartedAtEpochMs;
 		this.hostedSessionRegistry = new AgentSessionPtyHostHostedSessionRegistry(
 			options.spawnHostedPtyProcess,
 			{
@@ -95,6 +105,13 @@ export class AgentSessionPtyHostControllerSocketServer {
 				},
 				onHostedSessionSetChanged: () => {
 					this.evaluateHostLifecycle();
+				},
+				onHostedSessionHookSpoolEntriesPending: (hostedSessionKey, pendingHookSpoolEntryCount) => {
+					this.sendMessageToCurrentController({
+						type: "hosted_session_hook_spool_entries_pending",
+						hostedSessionKey,
+						pendingHookSpoolEntryCount,
+					});
 				},
 			},
 			readNowEpochMs,
@@ -180,9 +197,9 @@ export class AgentSessionPtyHostControllerSocketServer {
 
 	private acceptConnection(socket: Socket): void {
 		const decoder = new AgentSessionPtyHostWireFrameDecoder();
-		let handshakeCompleted = false;
+		let acceptedConnectionRole: AcceptedConnectionRole = "awaiting_hello";
 		const helloDeadlineTimer = setTimeout(() => {
-			if (!handshakeCompleted) {
+			if (acceptedConnectionRole === "awaiting_hello") {
 				socket.destroy();
 			}
 		}, CONTROLLER_HELLO_DEADLINE_MS);
@@ -193,6 +210,7 @@ export class AgentSessionPtyHostControllerSocketServer {
 			clearTimeout(helloDeadlineTimer);
 			if (this.currentControllerSocket === socket) {
 				this.currentControllerSocket = null;
+				this.controllerAbsentSinceEpochMs = this.readNowEpochMs();
 				this.hostedSessionRegistry.releaseControllerStateAfterControllerDisconnected();
 				this.options.appendHostLogEntry({ event: "controller_disconnected" });
 				this.evaluateHostLifecycle();
@@ -216,15 +234,32 @@ export class AgentSessionPtyHostControllerSocketServer {
 				return;
 			}
 			for (const frame of frames) {
-				if (!handshakeCompleted) {
+				if (acceptedConnectionRole === "awaiting_hello") {
 					if (frame.kind !== "json_control_message") {
 						socket.destroy();
 						return;
 					}
-					handshakeCompleted = this.completeControllerHandshake(socket, frame.message);
 					clearTimeout(helloDeadlineTimer);
-					if (!handshakeCompleted) {
+					if (readWireControlMessageType(frame.message) === "hosted_session_cli_client_hello") {
+						if (
+							readFiniteNumberField(frame.message, "protocolVersion") !==
+							AGENT_SESSION_PTY_HOST_WIRE_PROTOCOL_VERSION
+						) {
+							socket.destroy();
+							return;
+						}
+						acceptedConnectionRole = "hosted_session_cli_client";
+						continue;
+					}
+					if (!this.completeControllerHandshake(socket, frame.message)) {
 						return;
+					}
+					acceptedConnectionRole = "controller";
+					continue;
+				}
+				if (acceptedConnectionRole === "hosted_session_cli_client") {
+					if (frame.kind === "json_control_message") {
+						this.handleHostedSessionCliClientRequest(socket, frame.message);
 					}
 					continue;
 				}
@@ -363,7 +398,22 @@ export class AgentSessionPtyHostControllerSocketServer {
 			case "acknowledge_hosted_session_exit": {
 				const hostedSessionKey = readStringField(message, "hostedSessionKey");
 				if (hostedSessionKey !== null) {
-					this.hostedSessionRegistry.acknowledgeHostedSessionExit(hostedSessionKey);
+					const outcome = this.hostedSessionRegistry.acknowledgeHostedSessionExit(
+						hostedSessionKey,
+						(message as Record<string, unknown>)
+							.discardHookSpoolEntriesNotYetAcknowledgedTogetherWithHostedSession === true,
+					);
+					// spool 非空时的两种处置都留痕：保留（等 runtime 取走）或按 controller 要求一并丢弃。
+					if (
+						outcome.kind === "hosted_session_retained_until_hook_spool_drained" ||
+						(outcome.kind === "hosted_session_removed" && outcome.discardedHookSpoolEntryCount > 0)
+					) {
+						this.options.appendHostLogEntry({
+							event: "hosted_session_exit_acknowledged",
+							hostedSessionKey,
+							outcome,
+						});
+					}
 				}
 				return;
 			}
@@ -411,6 +461,30 @@ export class AgentSessionPtyHostControllerSocketServer {
 				}
 				return;
 			}
+			case "read_hosted_session_hook_spool_entries_request": {
+				this.sendMessageToCurrentController({
+					type: "read_hosted_session_hook_spool_entries_response",
+					requestId: readStringField(message, "requestId") ?? "",
+					outcome: this.hostedSessionRegistry.readHostedSessionHookSpoolEntries(
+						readStringField(message, "hostedSessionKey") ?? "",
+					),
+				});
+				return;
+			}
+			case "acknowledge_hosted_session_hook_spool_entries": {
+				const hostedSessionKey = readStringField(message, "hostedSessionKey");
+				const throughHookSpoolEntrySequenceNumber = readFiniteNumberField(
+					message,
+					"throughHookSpoolEntrySequenceNumber",
+				);
+				if (hostedSessionKey !== null && throughHookSpoolEntrySequenceNumber !== null) {
+					this.hostedSessionRegistry.acknowledgeHostedSessionHookSpoolEntries(
+						hostedSessionKey,
+						throughHookSpoolEntrySequenceNumber,
+					);
+				}
+				return;
+			}
 			case "retire_when_drained": {
 				if (this.hostLifecycleState === "serving") {
 					this.hostLifecycleState = "retiring_when_drained";
@@ -426,6 +500,47 @@ export class AgentSessionPtyHostControllerSocketServer {
 			default:
 				// 向前兼容：旧 host 收到不认识的消息类型时忽略，不断连。
 				this.options.appendHostLogEntry({ event: "unknown_controller_message_ignored", messageType });
+		}
+	}
+
+	// hosted 会话里的 CLI：一问一答，回完就由 CLI 断开。不认识的请求不回（CLI 等到超时按 host 不可用处理）。
+	private handleHostedSessionCliClientRequest(socket: Socket, message: unknown): void {
+		const requestId = readStringField(message, "requestId") ?? "";
+		const respond = (response: AgentSessionPtyHostHostToHostedSessionCliClientMessage) => {
+			if (!socket.destroyed) {
+				socket.write(encodeJsonControlMessageFrame(response));
+			}
+		};
+		switch (readWireControlMessageType(message)) {
+			case "append_hook_event_to_hosted_session_spool_request": {
+				const hostedSessionKey = readStringField(message, "hostedSessionKey") ?? "";
+				const outcome =
+					this.hostLifecycleState === "terminating_all_hosted_sessions"
+						? ({ kind: "spool_rejected", reason: "host_is_terminating" } as const)
+						: this.hostedSessionRegistry.appendHookEventToHostedSessionSpool(
+								hostedSessionKey,
+								(message as Record<string, unknown>).spooledHookIngestRequest ?? null,
+								(message as Record<string, unknown>).coalescibleWithAdjacentCoalescibleHookSpoolEntry === true,
+							);
+				this.options.appendHostLogEntry({ event: "hook_event_spooled", hostedSessionKey, outcome });
+				respond({ type: "append_hook_event_to_hosted_session_spool_response", requestId, outcome });
+				return;
+			}
+			case "query_controller_presence_request": {
+				const controllerConnected = this.currentControllerSocket !== null;
+				respond({
+					type: "query_controller_presence_response",
+					requestId,
+					controllerConnected,
+					controllerAbsentSinceEpochMs: controllerConnected ? null : this.controllerAbsentSinceEpochMs,
+				});
+				return;
+			}
+			default:
+				this.options.appendHostLogEntry({
+					event: "unknown_hosted_session_cli_client_request_ignored",
+					messageType: readWireControlMessageType(message),
+				});
 		}
 	}
 
@@ -476,6 +591,8 @@ export class AgentSessionPtyHostControllerSocketServer {
 	}
 
 	// null：不该空闲退出（有 controller 或有运行中的会话）。
+	// 「退出已确认、等 spool 排空」的会话与未确认的退出记录同等对待：计入 hostedSessionCount（退休要等它们排空），
+	// 没有 controller 时按保留期限等新 runtime 来取。
 	private resolveIdleExitDelayMilliseconds(): number | null {
 		if (this.currentControllerSocket !== null || this.hostedSessionRegistry.hasRunningHostedSessions()) {
 			return null;

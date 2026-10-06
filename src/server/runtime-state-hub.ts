@@ -6,6 +6,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import {
 	createNotificationAssessmentService,
+	isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate,
 	type NotificationAssessmentInput,
 } from "../notifications/notification-assessment-service";
 import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
@@ -108,7 +109,10 @@ export interface RuntimeStateHub {
 		workspaceId: string,
 		taskId: string,
 		userTurnKind: RuntimeTaskSessionUserTurnKind,
-		evidence?: Pick<NotificationAssessmentInput, "candidateId" | "summary" | "finalMessage">,
+		evidence?: Pick<
+			NotificationAssessmentInput,
+			"candidateId" | "summary" | "finalMessage" | "agentEventDeliveredLateToRuntimeByMilliseconds"
+		>,
 	) => void;
 	// 通知中心：某 workspace 的日志变更（mark-visited / clear / board 变更导致 isDone 刷新）后，
 	// 重建该 workspace 的派生 feed 并全局广播给所有客户端（铃铛跨 repo 聚合）。
@@ -698,6 +702,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				summaryLanguage: candidate.summaryLanguage,
 				taskTitleSnapshot: candidate.taskTitleSnapshot,
 				userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
+				...(isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate(candidate.evidence)
+					? { notificationSpeechSuppressedBecauseAgentEventWasDeliveredLate: true }
+					: {}),
 			};
 			sendTaskReadyForReviewToAllRuntimeStateClients(payload);
 		},
@@ -706,7 +713,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		workspaceId: string,
 		taskId: string,
 		userTurnKind: RuntimeTaskSessionUserTurnKind,
-		evidence?: Pick<NotificationAssessmentInput, "candidateId" | "summary" | "finalMessage">,
+		evidence?: Pick<
+			NotificationAssessmentInput,
+			"candidateId" | "summary" | "finalMessage" | "agentEventDeliveredLateToRuntimeByMilliseconds"
+		>,
 	) => {
 		if (evidence?.summary) latestNotificationSummaries.set(`${workspaceId}:${taskId}`, evidence.summary);
 		void notificationAssessment.enqueue({ workspaceId, taskId, userTurnKind, ...evidence });
