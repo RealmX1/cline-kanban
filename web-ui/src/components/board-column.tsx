@@ -44,6 +44,7 @@ export const BoardColumn = memo(function BoardColumn({
 	activeDragSourceColumnId,
 	programmaticCardMoveInFlight,
 	workspacePath,
+	resolveTaskWorkspaceAbsoluteDirectoryPath,
 	defaultClineModelId,
 	defaultAgentId,
 	onCollapseColumn,
@@ -78,6 +79,7 @@ export const BoardColumn = memo(function BoardColumn({
 	activeDragSourceColumnId?: BoardColumnId | null;
 	programmaticCardMoveInFlight?: ProgrammaticCardMoveInFlight | null;
 	workspacePath?: string | null;
+	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 	/** 主看板的列折叠入口；不传则不渲染折叠按钮。 */
@@ -271,6 +273,7 @@ export const BoardColumn = memo(function BoardColumn({
 											isMoveToValidationLoading={moveToValidationLoadingById?.[card.id] ?? false}
 											isMoveToReviewLoading={moveToReviewLoadingById?.[card.id] ?? false}
 											workspacePath={workspacePath}
+											resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
 											defaultClineModelId={defaultClineModelId}
 											defaultAgentId={defaultAgentId}
 											onSaveTitle={onSaveTitle}

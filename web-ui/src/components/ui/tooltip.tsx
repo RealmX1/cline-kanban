@@ -9,17 +9,19 @@ export function Tooltip({
 	content,
 	children,
 	side,
+	delayDuration,
 }: {
 	content: ReactNode;
 	children: ReactNode;
 	side?: "top" | "right" | "bottom" | "left";
+	delayDuration?: number;
 }): React.ReactElement {
 	if (!content) {
 		return <>{children}</>;
 	}
 
 	return (
-		<RadixTooltip.Root>
+		<RadixTooltip.Root delayDuration={delayDuration}>
 			<RadixTooltip.Trigger asChild>{children}</RadixTooltip.Trigger>
 			<RadixTooltip.Portal>
 				<RadixTooltip.Content

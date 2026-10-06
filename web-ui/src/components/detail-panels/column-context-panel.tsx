@@ -54,6 +54,7 @@ function ColumnSection({
 	moveToTrashLoadingById,
 	activeDragSourceColumnId,
 	workspacePath,
+	resolveTaskWorkspaceAbsoluteDirectoryPath,
 	defaultClineModelId,
 	defaultAgentId,
 }: {
@@ -86,6 +87,7 @@ function ColumnSection({
 	moveToTrashLoadingById?: Record<string, boolean>;
 	activeDragSourceColumnId?: BoardColumnId | null;
 	workspacePath?: string | null;
+	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
 	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
@@ -146,6 +148,7 @@ function ColumnSection({
 				onEditTask,
 				onRequestPinToTaskPinboard,
 				onUnpinFromTaskPinboard,
+				resolveTaskWorkspaceAbsoluteDirectoryPath,
 				onCancelAutomaticTaskAction,
 				moveToTrashLoadingById,
 			},
@@ -286,6 +289,7 @@ function ColumnSection({
 export function ColumnContextPanel({
 	selection,
 	workspacePath,
+	resolveTaskWorkspaceAbsoluteDirectoryPath,
 	defaultClineModelId,
 	defaultAgentId,
 	onCardSelect,
@@ -311,6 +315,7 @@ export function ColumnContextPanel({
 }: {
 	selection: CardSelection;
 	workspacePath?: string | null;
+	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
 	onCardSelect: (taskId: string) => void;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	onTaskDragEnd: (result: DropResult) => void;
@@ -379,6 +384,7 @@ export function ColumnContextPanel({
 	});
 
 	const taskCardActionHandlers: TaskCardActionHandlerBundle = {
+		resolveTaskWorkspaceAbsoluteDirectoryPath,
 		onStartTask,
 		onMoveToTrashTask,
 		onMoveToValidationTask,
@@ -579,6 +585,7 @@ export function ColumnContextPanel({
 										}
 										activeDragSourceColumnId={activeDragSourceColumnId}
 										workspacePath={workspacePath}
+										resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
 										defaultClineModelId={defaultClineModelId}
 										defaultAgentId={defaultAgentId}
 									/>
