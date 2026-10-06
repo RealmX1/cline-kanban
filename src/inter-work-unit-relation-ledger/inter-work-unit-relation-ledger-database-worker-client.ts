@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 
+import type { AssertedInterWorkUnitRelationEffectivenessState } from "../core/inter-work-unit-asserted-relation-kind-registry-contract";
+import type { UserRejectionSuppressionTombstone } from "../core/inter-work-unit-relation-assertion-lifecycle-event-contract";
 import {
 	type CommittedInterWorkUnitRelationLedgerEvent,
 	committedInterWorkUnitRelationLedgerEventSchema,
@@ -62,6 +64,41 @@ export interface PendingBoardFileWriteTaskMutationEventBatchResolution {
 	pendingBatchId: string;
 	pendingBatchResolution: "commit" | "abandon";
 }
+
+// dd2db 阶段 2 断言型关系的写侧守卫（worker 里的当前态表与墓碑表，都是可从族 4 事件重建的缓存）。
+export interface InterWorkUnitAssertedRelationCurrentStateRow {
+	relationId: string;
+	relationAssertionNaturalKey: string;
+	relationKind: string;
+	assertionEffectivenessState: AssertedInterWorkUnitRelationEffectivenessState;
+	assertedRelationStateVersion: number;
+}
+
+export interface InterWorkUnitRelationAssertionWriteGuardState {
+	effectiveAssertedRelationOfNaturalKey: { relationId: string; assertedRelationStateVersion: number } | null;
+	assertedRelationStateOfRelationId: InterWorkUnitAssertedRelationCurrentStateRow | null;
+	userRejectionSuppressionTombstonesOfNaturalKey: UserRejectionSuppressionTombstone[];
+}
+
+export interface InterWorkUnitRelationAssertionWriteCompareAndSetExpectations {
+	relationAssertionNaturalKey: string;
+	expectedEffectiveRelationIdOfNaturalKey: string | null;
+	expectedUserRejectionSuppressionTombstoneCountOfNaturalKey: number;
+}
+
+export type InterWorkUnitAssertedRelationCurrentStateWrite =
+	| {
+			assertedRelationStateWriteKind: "insert_newly_effective_asserted_relation";
+			relationId: string;
+			relationKind: string;
+	  }
+	| {
+			assertedRelationStateWriteKind:
+				| "bump_version_of_effective_asserted_relation"
+				| "mark_effective_asserted_relation_revoked";
+			relationId: string;
+			expectedAssertedRelationStateVersion: number;
+	  };
 
 // better-sqlite3 是原生模块，只能被编译它的那个 Node ABI 加载。`dev:full` / `dogfood` 按 PATH 取 node，
 // 与安装 node_modules 时的 Node 不同就会打不开账本、board 只读——原始报错只说 NODE_MODULE_VERSION 不符，
@@ -204,6 +241,43 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 			newlyReservedTaskIdCount: number;
 		};
 		return result.newlyReservedTaskIdCount;
+	}
+
+	async readInterWorkUnitRelationAssertionWriteGuardState(input: {
+		relationAssertionNaturalKey: string | null;
+		relationId: string | null;
+	}): Promise<InterWorkUnitRelationAssertionWriteGuardState> {
+		return (await this.request(
+			"readInterWorkUnitRelationAssertionWriteGuardState",
+			input,
+		)) as InterWorkUnitRelationAssertionWriteGuardState;
+	}
+
+	// CAS 失败（守卫状态在读与写之间变了）返回 null，调用方重读重判；成功返回已提交事件的 id 与全局序号。
+	async commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet(input: {
+		compareAndSetExpectations: InterWorkUnitRelationAssertionWriteCompareAndSetExpectations;
+		assertedRelationStateWrite: InterWorkUnitAssertedRelationCurrentStateWrite;
+		userRejectionSuppressionTombstoneInsert: UserRejectionSuppressionTombstone | null;
+		eventDrafts: InterWorkUnitRelationLedgerEventDraft[];
+	}): Promise<{ eventId: string; globalCommittedEventSequence: number }[] | null> {
+		const result = (await this.request(
+			"commitInterWorkUnitRelationAssertionStateTransitionWithCompareAndSet",
+			input,
+		)) as
+			| { compareAndSetSucceeded: false }
+			| {
+					compareAndSetSucceeded: true;
+					committedEvents: { eventId: string; globalCommittedEventSequence: number }[];
+			  };
+		return result.compareAndSetSucceeded ? result.committedEvents : null;
+	}
+
+	// 一致性测试用：可从族 4 事件重建的当前态缓存（「全量重建 = 增量维护」）。
+	async listInterWorkUnitAssertedRelationCurrentStateRows(): Promise<InterWorkUnitAssertedRelationCurrentStateRow[]> {
+		return (await this.request(
+			"listInterWorkUnitAssertedRelationCurrentStateRows",
+			{},
+		)) as InterWorkUnitAssertedRelationCurrentStateRow[];
 	}
 
 	async listCommittedEvents(input: {

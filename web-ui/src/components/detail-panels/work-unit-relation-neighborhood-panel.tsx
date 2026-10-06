@@ -4,18 +4,21 @@
 //
 // 分区、读法、静音归组都在 use-work-unit-relation-neighborhood-panel-of-kanban-board-card 里算好，这里只渲染。
 // 读失败（关系账本不可用等）如实显示原因，绝不显示成「没有关系」。静音按钮的点击处理器由 hook 造好，只绑在 onClick 上。
+// dd2db 2.1 起：断言型关系区块在 work-unit-relation-asserted-relations-section，「添加关系」对话框在
+// work-unit-relation-add-reference-relation-dialog；两者的决策调用同样只绑在按钮 onClick 上。
 
-import {
-	ArrowUpRight,
-	Bell,
-	BellOff,
-	ChevronDown,
-	ChevronRight,
-	RefreshCw,
-	TriangleAlert,
-	Waypoints,
-} from "lucide-react";
+import type { InterWorkUnitRelationAssertionWriteResponse } from "@runtime-work-unit-relation-assertion-write-api-contract";
+import { Bell, BellOff, ChevronDown, ChevronRight, Plus, RefreshCw, TriangleAlert, Waypoints } from "lucide-react";
 import { type MouseEventHandler, type ReactElement, type ReactNode, useState } from "react";
+import { showAppToast } from "@/components/app-toaster";
+import { WorkUnitRelationAddReferenceRelationDialog } from "@/components/detail-panels/work-unit-relation-add-reference-relation-dialog";
+import { WorkUnitRelationAssertedRelationsSection } from "@/components/detail-panels/work-unit-relation-asserted-relations-section";
+import {
+	formatEpochMsAsUtcMinuteForRelationTooltip,
+	RelationNeighborhoodSectionHeading,
+	RelationNeighborWorkUnitReference,
+	RelationStatusBadge,
+} from "@/components/detail-panels/work-unit-relation-neighborhood-panel-neighbor-reference-and-badges";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
@@ -23,9 +26,9 @@ import {
 	useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard,
 	type WorkUnitRelationNeighborhoodPanelController,
 } from "@/hooks/use-work-unit-relation-neighborhood-panel-of-kanban-board-card";
+import type { WorkUnitAssertedRelationNeighborhoodPresentation } from "@/hooks/work-unit-asserted-relation-neighborhood-presentation-model";
 import type {
 	WorkUnitRelationNeighborhoodPanelPresentation,
-	WorkUnitRelationNeighborPresentation,
 	WorkUnitRelationSentenceFromPanelSubjectPerspective,
 } from "@/hooks/work-unit-relation-neighborhood-panel-presentation-model";
 import type { WorkUnitRelationNeighborhoodSummaryReadFailure } from "@/runtime/work-unit-relation-neighborhood-summary-query";
@@ -40,84 +43,24 @@ const RELATION_NEIGHBORHOOD_READ_FAILURE_HEADLINE_BY_READ_FAILURE_KIND: Record<
 	unexpected_relation_neighborhood_read_failure: "读取关系失败",
 };
 
-function formatEpochMsAsUtcMinuteForRelationTooltip(epochMs: number): string {
-	return `${new Date(epochMs).toISOString().slice(0, 16)}Z`;
-}
-
-function countListedRelationsInPresentation(presentation: WorkUnitRelationNeighborhoodPanelPresentation): number {
+function countListedRelationsInPresentation(
+	presentation: WorkUnitRelationNeighborhoodPanelPresentation,
+	assertedRelationNeighborhoodPresentation: WorkUnitAssertedRelationNeighborhoodPresentation,
+): number {
 	return (
 		presentation.visibleSections.reduce((total, section) => total + section.relationSentences.length, 0) +
-		presentation.collapsedCountGroups.reduce((total, group) => total + group.collapsedRelationSentences.length, 0)
+		presentation.collapsedCountGroups.reduce((total, group) => total + group.collapsedRelationSentences.length, 0) +
+		assertedRelationNeighborhoodPresentation.effectiveAssertedRelationCount
 	);
 }
 
-function RelationStatusBadge({ className, children }: { className: string; children: ReactNode }): ReactElement {
-	return <span className={cn("shrink-0 rounded-sm px-1.5 py-px text-[11px] font-medium", className)}>{children}</span>;
-}
-
-function RelationNeighborWorkUnitReference({
-	neighbor,
-	openNeighborKanbanBoardCardInItsProject,
-}: {
-	neighbor: WorkUnitRelationNeighborPresentation;
-	openNeighborKanbanBoardCardInItsProject: WorkUnitRelationNeighborhoodPanelController["openNeighborKanbanBoardCardInItsProject"];
-}): ReactElement {
-	if (neighbor.neighborWorkUnitType === "kanban_unmanaged_standalone_agent_conversation_session") {
-		return <span className="text-text-primary">{neighbor.neighborWorkUnitDisplayLabel}</span>;
+function describeReferenceRelationAssertionWriteSuccessForToast(
+	writeResponse: InterWorkUnitRelationAssertionWriteResponse,
+): string {
+	if (writeResponse.relationAssertionWriteOutcome === "reassertion_merged_into_already_effective_assertion") {
+		return "这条关系已经存在，这次填写的内容已合并进原关系。";
 	}
-	const neighborTitle =
-		neighbor.neighborKanbanBoardCardCurrentTitle ?? `task ${neighbor.neighborKanbanBoardCardTaskId}`;
-	const openAvailability = neighbor.neighborKanbanBoardCardOpenInProjectAvailability;
-	const openThisNeighborKanbanBoardCardInItsProject = openAvailability.isNeighborKanbanBoardCardOpenable
-		? openNeighborKanbanBoardCardInItsProject
-		: null;
-	return (
-		<span className="inline-flex max-w-full flex-wrap items-center gap-1 align-middle">
-			{openThisNeighborKanbanBoardCardInItsProject ? (
-				<button
-					type="button"
-					className="inline-flex min-w-0 items-center gap-0.5 text-left text-text-primary underline-offset-2 hover:text-accent hover:underline"
-					title={`打开 ${neighbor.neighborWorkUnitDisplayLabel}`}
-					aria-label={`打开 ${neighbor.neighborWorkUnitDisplayLabel}`}
-					onClick={() =>
-						openThisNeighborKanbanBoardCardInItsProject(
-							neighbor.neighborKanbanBoardCardWorkspaceId,
-							neighbor.neighborKanbanBoardCardTaskId,
-						)
-					}
-				>
-					<span className="min-w-0 break-words">{neighborTitle}</span>
-					<ArrowUpRight size={11} className="shrink-0" />
-				</button>
-			) : (
-				<span
-					className="min-w-0 break-words text-text-primary"
-					title={
-						openAvailability.isNeighborKanbanBoardCardOpenable
-							? neighbor.neighborWorkUnitDisplayLabel
-							: openAvailability.neighborKanbanBoardCardNotOpenableReason
-					}
-				>
-					{neighborTitle}
-				</span>
-			)}
-			<RelationStatusBadge className="bg-surface-3 font-normal text-text-secondary">
-				<span title={neighbor.neighborKanbanBoardCardWorkspaceId}>
-					{neighbor.neighborKanbanBoardCardWorkspaceDisplayName}
-					{neighbor.isNeighborKanbanBoardCardInCurrentKanbanProject ? "（本项目）" : ""}
-				</span>
-			</RelationStatusBadge>
-			{neighbor.neighborKanbanBoardCardPresenceOnBoardStatus === "moved_to_done_trash_column" ? (
-				<RelationStatusBadge className="bg-status-orange/15 text-status-orange">
-					在 Done（trash）
-				</RelationStatusBadge>
-			) : null}
-			{neighbor.neighborKanbanBoardCardPresenceOnBoardStatus ===
-			"permanently_removed_from_kanban_board_tombstone" ? (
-				<RelationStatusBadge className="bg-status-red/15 text-status-red">墓碑 · 已永久删除</RelationStatusBadge>
-			) : null}
-		</span>
-	);
+	return `已添加关系：${writeResponse.relationStatementReadFromSubjectPerspective}`;
 }
 
 function RecordedRelationSentenceRow({
@@ -242,21 +185,20 @@ function ExpandableRelationSentenceGroup({
 	);
 }
 
-function RelationNeighborhoodSectionHeading({ children }: { children: ReactNode }): ReactElement {
-	return <div className="px-2 pt-1.5 pb-0.5 text-[11px] font-medium text-text-tertiary">{children}</div>;
-}
-
 function LoadedRelationNeighborhoodBody({
 	presentation,
+	assertedRelationNeighborhoodPresentation,
 	controller,
 }: {
 	presentation: WorkUnitRelationNeighborhoodPanelPresentation;
+	assertedRelationNeighborhoodPresentation: WorkUnitAssertedRelationNeighborhoodPresentation;
 	controller: WorkUnitRelationNeighborhoodPanelController;
 }): ReactElement {
 	const subjectSelfReference = presentation.panelSubjectSelfReferenceInSentence;
 	return (
 		<>
-			{presentation.hasNoRecordedRelationAtAll ? (
+			{presentation.hasNoRecordedRelationAtAll &&
+			assertedRelationNeighborhoodPresentation.effectiveAssertedRelationCount === 0 ? (
 				<div className="px-3 py-2 text-xs text-text-tertiary">还没有记录到与其他工作单元的关系</div>
 			) : null}
 			{presentation.visibleSections.map((section) => (
@@ -277,6 +219,12 @@ function LoadedRelationNeighborhoodBody({
 					))}
 				</section>
 			))}
+			{/* 断言型（参照）关系排在来源、需求修订之后、折叠计数之前（与 runtime 邻域摘要的分区顺序一致）。 */}
+			<WorkUnitRelationAssertedRelationsSection
+				assertedRelationNeighborhoodPresentation={assertedRelationNeighborhoodPresentation}
+				panelSubjectSelfReferenceInSentence={subjectSelfReference}
+				controller={controller}
+			/>
 			{presentation.collapsedCountGroups.length > 0 ? (
 				<section aria-label="折叠（仅计数）">
 					<RelationNeighborhoodSectionHeading>折叠（仅计数）</RelationNeighborhoodSectionHeading>
@@ -380,6 +328,7 @@ function RelationNeighborhoodHeaderSummaryBadge({
 		case "relation_neighborhood_loaded": {
 			const listedRelationCount = countListedRelationsInPresentation(
 				readState.relationNeighborhoodPanelPresentation,
+				readState.assertedRelationNeighborhoodPresentation,
 			);
 			const mutedRelationCount =
 				readState.relationNeighborhoodPanelPresentation.mutedInPresentationRelationSentences.length;
@@ -407,7 +356,18 @@ export function WorkUnitRelationNeighborhoodPanel({
 }): ReactElement {
 	const controller = useWorkUnitRelationNeighborhoodPanelOfKanbanBoardCard({ workspaceId, kanbanBoardCardTaskId });
 	const [isRelationNeighborhoodPanelExpanded, setIsRelationNeighborhoodPanelExpanded] = useState(false);
+	const [isAddReferenceRelationDialogOpen, setIsAddReferenceRelationDialogOpen] = useState(false);
 	const readState = controller.relationNeighborhoodReadState;
+	const handleReferenceRelationAssertionWriteSucceeded = (
+		writeResponse: InterWorkUnitRelationAssertionWriteResponse,
+	) => {
+		setIsAddReferenceRelationDialogOpen(false);
+		controller.refetchRelationNeighborhood();
+		showAppToast({
+			intent: "success",
+			message: describeReferenceRelationAssertionWriteSuccessForToast(writeResponse),
+		});
+	};
 
 	return (
 		<section className="flex shrink-0 flex-col border-t border-border bg-surface-1" aria-label="Relations">
@@ -434,6 +394,18 @@ export function WorkUnitRelationNeighborhoodPanel({
 					<span className="text-xs font-medium text-text-primary">Relations</span>
 					<RelationNeighborhoodHeaderSummaryBadge controller={controller} />
 				</button>
+				{isRelationNeighborhoodPanelExpanded && workspaceId ? (
+					<Button
+						variant="ghost"
+						size="xs"
+						className="mr-0.5"
+						icon={<Plus size={11} />}
+						title="Add a relation from this task to another task"
+						onClick={() => setIsAddReferenceRelationDialogOpen(true)}
+					>
+						Add relation
+					</Button>
+				) : null}
 				{isRelationNeighborhoodPanelExpanded ? (
 					<Button
 						variant="ghost"
@@ -448,6 +420,15 @@ export function WorkUnitRelationNeighborhoodPanel({
 					/>
 				) : null}
 			</div>
+			{workspaceId ? (
+				<WorkUnitRelationAddReferenceRelationDialog
+					isAddReferenceRelationDialogOpen={isAddReferenceRelationDialogOpen}
+					onAddReferenceRelationDialogOpenChange={setIsAddReferenceRelationDialogOpen}
+					subjectKanbanBoardCardWorkspaceId={workspaceId}
+					subjectKanbanBoardCardTaskId={kanbanBoardCardTaskId}
+					onReferenceRelationAssertionWriteSucceeded={handleReferenceRelationAssertionWriteSucceeded}
+				/>
+			) : null}
 			{isRelationNeighborhoodPanelExpanded ? (
 				<div className="max-h-64 min-h-0 overflow-y-auto border-t border-border py-1">
 					{readState.relationNeighborhoodReadPhase === "loading_relation_neighborhood" ? (
@@ -463,6 +444,7 @@ export function WorkUnitRelationNeighborhoodPanel({
 					) : readState.relationNeighborhoodReadPhase === "relation_neighborhood_loaded" ? (
 						<LoadedRelationNeighborhoodBody
 							presentation={readState.relationNeighborhoodPanelPresentation}
+							assertedRelationNeighborhoodPresentation={readState.assertedRelationNeighborhoodPresentation}
 							controller={controller}
 						/>
 					) : (

@@ -67,6 +67,10 @@ const KANBAN_RUNTIME_LIVE_CAPTURE_CAPABILITIES_ACTIVATED_BY_THIS_CODE_VERSION = 
 	// 激活后对 1a 起探测过的每份 provenance 补探一次（含已删卡）。
 	"shared_task_commit_landing_criterion_evaluated_at_every_task_commit_integration_probe",
 	"shared_task_commit_landing_criterion_backfill_sweep_over_provenance_probed_since_landing_data_preservation_at_activation",
+	// dd2db 2.1：参照轴断言型关系的族 4 生命周期（agent 经 CLI 走 M1 / S1；Web UI 用户带 nonce 直接断言与撤销；
+	// 「关系有误」撤销留拒绝墓碑并抑制同证据重断言），以及会话启动注入断言型关系时的注入回执。
+	"inter_work_unit_reference_relation_assertion_lifecycle_with_confirmation_matrix_routing_and_user_rejection_tombstones",
+	"asserted_inter_work_unit_relation_injection_receipt_at_session_start_append_system_prompt",
 ] as const;
 
 // EXPERIMENT_NODE: 终端输入提交观测每会话 60s 至多一条——够判定「用户介入过」，又不把按键频率写进账本。
@@ -164,6 +168,10 @@ export interface KanbanRuntimeLiveCaptureBoundAtBackgroundLedgerEventRecordingIn
 	appendFactObservedByKanbanRuntimeUnlessIdempotencyKeyAlreadyRecordedIntoLedgerOfBoundLiveCapture(
 		observation: FactObservedByKanbanRuntimeObservation & { idempotencyKey: string },
 	): Promise<{ appendedIntoLedger: boolean }>;
+	// 任意族的草稿版：幂等键已记过的草稿在同一事务里原子跳过（例如会话注入回执：同一会话重启不重复记）。
+	appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecordedIntoLedgerOfBoundLiveCapture(input: {
+		eventDrafts: InterWorkUnitRelationLedgerEventDraft[];
+	}): Promise<{ appendedIdempotencyKeys: string[]; skippedIdempotencyKeysAlreadyRecorded: string[] }>;
 }
 
 function bindLiveCaptureStateForBackgroundLedgerEventRecording(
@@ -184,6 +192,14 @@ function bindLiveCaptureStateForBackgroundLedgerEventRecording(
 		}
 		return state.ledgerClient.appendCommittedEvents(input);
 	};
+	const appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecordedIntoLedgerOfBoundLiveCapture = (input: {
+		eventDrafts: InterWorkUnitRelationLedgerEventDraft[];
+	}): Promise<{ appendedIdempotencyKeys: string[]; skippedIdempotencyKeysAlreadyRecorded: string[] }> => {
+		if (state.liveCaptureLifecyclePhase === "ledger_worker_client_closed_after_deactivation") {
+			return rejectBecauseLedgerWorkerClientClosed();
+		}
+		return state.ledgerClient.appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded(input);
+	};
 	return {
 		capturingKanbanRuntimeInstance: state.capturingKanbanRuntimeInstance,
 		appendCommittedEventsIntoLedgerOfBoundLiveCapture,
@@ -194,15 +210,13 @@ function bindLiveCaptureStateForBackgroundLedgerEventRecording(
 		appendFactObservedByKanbanRuntimeUnlessIdempotencyKeyAlreadyRecordedIntoLedgerOfBoundLiveCapture: async (
 			observation,
 		) => {
-			if (state.liveCaptureLifecyclePhase === "ledger_worker_client_closed_after_deactivation") {
-				return await rejectBecauseLedgerWorkerClientClosed();
-			}
 			const { appendedIdempotencyKeys } =
-				await state.ledgerClient.appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecorded({
+				await appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecordedIntoLedgerOfBoundLiveCapture({
 					eventDrafts: [buildFactObservedByKanbanRuntimeEventDraft({ ...observation, state })],
 				});
 			return { appendedIntoLedger: appendedIdempotencyKeys.includes(observation.idempotencyKey) };
 		},
+		appendCommittedEventsSkippingDraftsWhoseIdempotencyKeyIsAlreadyRecordedIntoLedgerOfBoundLiveCapture,
 	};
 }
 
@@ -621,6 +635,31 @@ export async function appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCa
 		await ledgerAppend;
 	} finally {
 		state.recordedInterWorkUnitRelationProjectionReadsInFlight.delete(ledgerAppend);
+	}
+}
+
+// dd2db 阶段 2 断言型关系写入：守卫读与 CAS 提交都直接用账本客户端，与读、追加共用在途集合（纳入停用 drain）。
+// 从未激活或停用已开始时抛 InterWorkUnitRelationLedgerUnavailableError，调用方如实报错，绝不假装写成。
+export async function runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture<T>(
+	operation: (
+		ledgerClient: InterWorkUnitRelationLedgerDatabaseWorkerClient,
+		capturingKanbanRuntimeInstance: CapturingKanbanRuntimeInstanceIdentity,
+	) => Promise<T>,
+): Promise<T> {
+	const state = activeLiveCaptureState;
+	if (!state || state.liveCaptureLifecyclePhase !== "live_capture_active") {
+		throw new InterWorkUnitRelationLedgerUnavailableError(
+			state
+				? "the live capture of this Kanban runtime instance was deactivated (runtime is shutting down)"
+				: "this process never activated the inter-work-unit relation ledger (only the Kanban runtime opens it)",
+		);
+	}
+	const ledgerOperation = operation(state.ledgerClient, state.capturingKanbanRuntimeInstance);
+	state.recordedInterWorkUnitRelationProjectionReadsInFlight.add(ledgerOperation);
+	try {
+		return await ledgerOperation;
+	} finally {
+		state.recordedInterWorkUnitRelationProjectionReadsInFlight.delete(ledgerOperation);
 	}
 }
 

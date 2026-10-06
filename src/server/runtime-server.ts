@@ -53,6 +53,7 @@ import {
 	activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture,
 	appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
 	readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+	runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
 } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { verifyKanbanWebUiPageLoadRequestOriginNonceRequestHeaderValue } from "../inter-work-unit-relation-ledger/kanban-web-ui-page-load-request-origin-nonce-registry";
 import {
@@ -91,6 +92,7 @@ import { createRuntimeApi } from "../trpc/runtime-api";
 import { createTaskCardActionApi } from "../trpc/task-card-action-api";
 import { createTaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
 import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
+import { createWorkUnitRelationAssertionWriteApi } from "../trpc/work-unit-relation-assertion-write-api";
 import { createWorkUnitRelationPresentationPreferenceApi } from "../trpc/work-unit-relation-presentation-preference-api";
 import {
 	createWorkUnitRelationReadApi,
@@ -843,6 +845,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
 				appendCommittedEventsIntoLedgerAndWaitForCommit:
 					appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
+			}),
+			workUnitRelationAssertionWriteApi: createWorkUnitRelationAssertionWriteApi({
+				readRecordedInterWorkUnitRelationProjection:
+					readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+				runInterWorkUnitRelationLedgerClientOperation:
+					runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
+				getWorkspacePathById: deps.workspaceRegistry.getWorkspacePathById,
 			}),
 			conversationTreeApi: createConversationTreeApi({
 				getScopedClineTaskSessionService,

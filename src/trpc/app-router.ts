@@ -446,6 +446,18 @@ import {
 	notificationCandidateLifecycleSchema,
 } from "../core/notification-lifecycle-contract";
 import {
+	type AssertReferenceRelationAsActingWorkUnitRequest,
+	type AssertReferenceRelationDirectlyAsWebUiUserRequest,
+	assertReferenceRelationAsActingWorkUnitRequestSchema,
+	assertReferenceRelationDirectlyAsWebUiUserRequestSchema,
+	type InterWorkUnitRelationAssertionWriteResponse,
+	interWorkUnitRelationAssertionWriteResponseSchema,
+	type RevokeEffectiveRelationAssertionAsActingWorkUnitRequest,
+	type RevokeEffectiveRelationAssertionDirectlyAsWebUiUserRequest,
+	revokeEffectiveRelationAssertionAsActingWorkUnitRequestSchema,
+	revokeEffectiveRelationAssertionDirectlyAsWebUiUserRequestSchema,
+} from "../core/work-unit-relation-assertion-write-api-contract";
+import {
 	type GetRelationNeighborhoodSummaryRequest,
 	type GetRelationNeighborhoodSummaryResponse,
 	type GetWorkUnitContextRequest,
@@ -927,6 +939,25 @@ export interface RuntimeTrpcContext {
 			input: SetRecordedRelationPresentationMutePreferenceRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<SetRecordedRelationPresentationMutePreferenceResponse>;
+	};
+	// dd2db 2.1：断言型关系的写入面。agent 经 CLI（主语 = 请求方工作单元，走确认矩阵）；Web UI 用户带 nonce 直接断言 / 撤销。
+	workUnitRelationAssertionWriteApi: {
+		assertReferenceRelationAsActingWorkUnit: (
+			input: AssertReferenceRelationAsActingWorkUnitRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<InterWorkUnitRelationAssertionWriteResponse>;
+		revokeEffectiveRelationAssertionAsActingWorkUnit: (
+			input: RevokeEffectiveRelationAssertionAsActingWorkUnitRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<InterWorkUnitRelationAssertionWriteResponse>;
+		assertReferenceRelationDirectlyAsWebUiUser: (
+			input: AssertReferenceRelationDirectlyAsWebUiUserRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<InterWorkUnitRelationAssertionWriteResponse>;
+		revokeEffectiveRelationAssertionDirectlyAsWebUiUser: (
+			input: RevokeEffectiveRelationAssertionDirectlyAsWebUiUserRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<InterWorkUnitRelationAssertionWriteResponse>;
 	};
 	conversationTreeApi: {
 		getConversationSessionTurnProjection: (
@@ -1969,6 +2000,44 @@ export const runtimeAppRouter = t.router({
 			.output(setRecordedRelationPresentationMutePreferenceResponseSchema)
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.workUnitRelationPresentationPreferenceApi.setRecordedRelationPresentationMutePreference(
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		// dd2db 2.1 断言型关系写入（R3.4 `assert-reference-relation` / `revoke-effective-relation-assertion`）。
+		assertReferenceRelationAsActingWorkUnit: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(assertReferenceRelationAsActingWorkUnitRequestSchema)
+			.output(interWorkUnitRelationAssertionWriteResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workUnitRelationAssertionWriteApi.assertReferenceRelationAsActingWorkUnit(
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		revokeEffectiveRelationAssertionAsActingWorkUnit: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(revokeEffectiveRelationAssertionAsActingWorkUnitRequestSchema)
+			.output(interWorkUnitRelationAssertionWriteResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workUnitRelationAssertionWriteApi.revokeEffectiveRelationAssertionAsActingWorkUnit(
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		// 决策类：只在 Web UI、只由显式用户手势触发；runtime 校验 nonce、拒绝 CLI 头与不可信的合成 DOM 事件。
+		assertReferenceRelationDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(assertReferenceRelationDirectlyAsWebUiUserRequestSchema)
+			.output(interWorkUnitRelationAssertionWriteResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workUnitRelationAssertionWriteApi.assertReferenceRelationDirectlyAsWebUiUser(
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				);
+			}),
+		revokeEffectiveRelationAssertionDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(revokeEffectiveRelationAssertionDirectlyAsWebUiUserRequestSchema)
+			.output(interWorkUnitRelationAssertionWriteResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workUnitRelationAssertionWriteApi.revokeEffectiveRelationAssertionDirectlyAsWebUiUser(
 					input,
 					ctx.kanbanRequestOriginActorEvidence,
 				);

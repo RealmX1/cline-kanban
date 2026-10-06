@@ -186,7 +186,8 @@ function resolveNeighborKanbanBoardCardOpenInProjectAvailability(input: {
 	return { isNeighborKanbanBoardCardOpenable: true };
 }
 
-function buildWorkUnitRelationNeighborPresentation(input: {
+// 断言型关系的展示模型（work-unit-asserted-relation-neighborhood-presentation-model.ts）复用同一套邻居展示。
+export function buildWorkUnitRelationNeighborPresentation(input: {
 	neighborWorkUnit: InterWorkUnitRelationWorkUnitReference;
 	neighborDisplayEntry: WorkUnitDisplayEntry | null;
 	currentKanbanProjectWorkspaceId: string | null;
