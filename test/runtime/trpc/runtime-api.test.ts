@@ -1994,6 +1994,42 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
+	// 「停止后台会话并在这里续跑」：终端面板确认接管后，字段必须一路传到 terminalManager——漏在这一环就是
+	// 按钮能点、确认框能弹，服务端却照旧拒绝（runbook「runtime-api 传参最易漏」同一类）。
+	it("forwards the user-confirmed takeover of a Claude background session to the terminal manager", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ id: "in_progress", cards: [{ id: "task-1", agentId: "claude" }] }],
+		});
+		const terminalManager = {
+			getSummary: vi.fn(() => createSummary({ agentId: "claude", startedAt: null, pid: null })),
+			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		await api.refreshTaskTerminal(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-1",
+				cols: 120,
+				rows: 40,
+				forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: true,
+			},
+		);
+
+		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(expect.anything(), "refresh_task_terminal", {
+			forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: true,
+		});
+	});
+
 	it("keeps recording an undeclared refresh as a human refresh so older clients read the same", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({

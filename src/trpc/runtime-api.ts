@@ -1358,12 +1358,31 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const refreshTaskSessionStartOrigin =
 					body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal";
 				// 「从既有对话迁入」（只有人在终端面板上选定后才会带）：先迁入、钉身份，再按 id 续跑。
-				const summary = body.adoptExistingAgentConversationAsTaskSessionIdentity
-					? await terminalManager.refreshTaskTerminal(refreshTaskTerminalRequest, refreshTaskSessionStartOrigin, {
-							adoptExistingAgentConversationAsTaskSessionIdentity:
-								body.adoptExistingAgentConversationAsTaskSessionIdentity,
-						})
-					: await terminalManager.refreshTaskTerminal(refreshTaskTerminalRequest, refreshTaskSessionStartOrigin);
+				// 「从既有对话迁入」与「停止后台会话并在这里续跑」都只有人在终端面板上选定 / 确认后才会带：前者先迁入、
+				// 钉身份再按 id 续跑；后者在对话被 Claude 后台会话占着又不能安全收回时，不再看是否安全，停掉后续跑。
+				// 两者都没带时保持两参调用，与旧行为逐字一致。
+				const refreshOptions = {
+					...(body.adoptExistingAgentConversationAsTaskSessionIdentity
+						? {
+								adoptExistingAgentConversationAsTaskSessionIdentity:
+									body.adoptExistingAgentConversationAsTaskSessionIdentity,
+							}
+						: {}),
+					...(body.forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser
+						? { forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: true }
+						: {}),
+				};
+				const summary =
+					Object.keys(refreshOptions).length > 0
+						? await terminalManager.refreshTaskTerminal(
+								refreshTaskTerminalRequest,
+								refreshTaskSessionStartOrigin,
+								refreshOptions,
+							)
+						: await terminalManager.refreshTaskTerminal(
+								refreshTaskTerminalRequest,
+								refreshTaskSessionStartOrigin,
+							);
 				// 重启也是一次启动：把 agent 身份重新钉到卡片上，让「靠兜底才救回来的会话」在下一次硬中断时
 				// 不必再靠兜底。
 				//

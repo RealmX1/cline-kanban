@@ -53,7 +53,10 @@ export type TaskSessionStartOrigin =
 	// 服务端从 durable board + runtime config 重建续跑请求（Kanban 整进程重启后内存态 restartRequest 已丢失）。
 	// 刻意不复用 resume_reclaimed_task_session_for_pending_user_decision_answer_delivery：那会抹掉
 	// 「内存 restartRequest 续跑」与「durable 重建续跑」的区别，而这两者的成因与修法完全不同。
-	| "durable_record_rebuilt_resume";
+	| "durable_record_rebuilt_resume"
+	// 服务端盯梢：对话被 harness 后台会话（Claude `/background`）占着、当时不能安全收回而拒绝了续跑；
+	// 盯到它能安全收回时，由计时器自动发起这次续跑。
+	| "harness_background_session_reclaim_watch_auto_resume";
 
 export interface PtySessionSpawnAttribution {
 	reason: PtySessionSpawnReason;

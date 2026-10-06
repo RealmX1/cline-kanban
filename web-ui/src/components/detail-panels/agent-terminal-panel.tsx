@@ -1,4 +1,5 @@
 import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
+import { AgentConversationHeldByHarnessBackgroundSessionNotice } from "@/components/detail-panels/agent-conversation-held-by-harness-background-session-notice";
 import { AgentNativeConversationPersistenceRecoveryNotice } from "@/components/detail-panels/agent-native-conversation-persistence-recovery-notice";
 import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
 import "@xterm/xterm/css/xterm.css";
@@ -74,6 +75,7 @@ interface AgentTerminalSessionControls {
 	stopTerminal: () => Promise<void>;
 	refreshTerminal: () => Promise<void>;
 	adoptExistingAgentConversationAndResume: (initialization: RuntimeTaskAgentSessionInitialization) => Promise<void>;
+	forceStopHarnessBackgroundSessionAndResumeHere: () => Promise<void>;
 	resyncTerminalView: () => Promise<void>;
 	closeTerminalSearch: () => void;
 	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
@@ -782,6 +784,7 @@ function AgentTerminalPanelLayout({
 		openTerminalSearch,
 		refreshTerminal,
 		adoptExistingAgentConversationAndResume,
+		forceStopHarnessBackgroundSessionAndResumeHere,
 		resyncTerminalView,
 		scrollTerminalToLatest,
 		stopTerminal,
@@ -1054,6 +1057,13 @@ function AgentTerminalPanelLayout({
 					isRestartingAgentSession={isRefreshing}
 					onStartFreshAgentSessionWithOriginalTaskPrompt={onStartFreshAgentSessionWithOriginalTaskPrompt}
 					onAdoptExistingAgentConversationAndResume={adoptExistingAgentConversationAndResume}
+				/>
+			) : null}
+			{canRefresh ? (
+				<AgentConversationHeldByHarnessBackgroundSessionNotice
+					summary={summary}
+					isRestartingAgentSession={isRefreshing}
+					onForceStopHarnessBackgroundSessionAndResumeHere={forceStopHarnessBackgroundSessionAndResumeHere}
 				/>
 			) : null}
 			{/* 阅读模式是叠加而非替换：xterm 始终挂载、PTY 继续跑、输出继续进 buffer（xterm 的渲染

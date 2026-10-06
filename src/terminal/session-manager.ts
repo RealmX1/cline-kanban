@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import {
+	isAgentNativeConversationHoldableByHarnessBackgroundSessionDaemon,
 	isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch,
 	isRestorationContinuationGuardDisarmedOnTerminalSubmissionEdge,
 } from "../core/agent-catalog";
@@ -15,6 +16,7 @@ import {
 } from "../core/agent-conversation-session-resume-addressing";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentNativeConversationHeldByHarnessBackgroundSessionObservation,
 	RuntimeAgentNativeConversationPersistenceObservation,
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
@@ -79,6 +81,13 @@ import {
 	dismissAgentUserQuestionSelectorUntilTerminalInputBoxVisible,
 } from "./agent-user-question-selector-dismissal-before-programmatic-answer-delivery";
 import {
+	type ClaudeCodeBackgroundSessionDaemonClient,
+	describeClaudeCodeResumeTargetHeldByBackgroundSessionRefusal,
+	followClaudeCodeConversationContinuedInChainFromTranscript,
+	inspectClaudeCodeResumeTargetBackgroundSessionReclaimability,
+	runClaudeCodeResumeTargetBackgroundSessionOwnershipPreflight,
+} from "./claude-code-background-session-ownership-preflight-before-resume";
+import {
 	hasClaudeInteractivePrompt,
 	hasClaudeStartupUiRendered,
 	// startup readiness 的 wall-clock 兜底超时值。source-of-truth 常量名在 claude-readiness.ts
@@ -110,6 +119,12 @@ import {
 	runCursorAgentChatResumeTargetPreflight,
 	wasKanbanAssignedCursorAgentChatConversationEstablishedAtExit,
 } from "./cursor-agent-chat-launch-identity-orchestration";
+import {
+	armHarnessBackgroundSessionReclaimWatch,
+	cancelHarnessBackgroundSessionReclaimWatch,
+	createIdleHarnessBackgroundSessionReclaimWatchState,
+	type HarnessBackgroundSessionReclaimWatchState,
+} from "./harness-background-session-reclaim-watch-after-unsafe-resume-refusal";
 import { buildTerminalEnvironment } from "./kanban-pty-child-process-terminal-environment";
 import { hasKimiInteractivePrompt, hasKimiStartupUiRendered } from "./kimi-readiness";
 import {
@@ -548,6 +563,9 @@ interface SessionEntry {
 	// stop / forceStop 都会在自己的空守卫处早退，于是「用户按了停止、机器照样把会话拉起来」。
 	// 每个取消点推进这个代际，在途的自动重启拿到闸门后复查代际不符即自行放弃。
 	autoRestartCancellationGeneration: number;
+	// 盯梢：续跑因对话被 harness 后台会话占着、不能安全收回而被拒后，等它能安全收回时自动再续一次
+	// （见 harness-background-session-reclaim-watch-after-unsafe-resume-refusal.ts）。
+	harnessBackgroundSessionReclaimWatchState: HarnessBackgroundSessionReclaimWatchState<StartTaskSessionRequest>;
 	// Reference timestamp for the most recent stall window we have already logged.
 	// Reset to null when output advances, so each new silent window gets exactly one log line.
 	lastStallLoggedAt: number | null;
@@ -875,6 +893,16 @@ export function reconstructTaskSessionSummaryFromPersistedRecordWithoutLiveAgent
 			"first_prompt_not_persisted_within_startup_window"
 				? { agentNativeConversationPersistenceObservation: null }
 				: {}),
+			// 盯梢计时器活在内存里，运行时重启后就没了：留着「正在盯」会让终端面板说谎。观测本身（被谁占着、
+			// 为什么没收回）保留，下次续跑时预检会重新核对、必要时重新武装。
+			...(summary.agentNativeConversationHeldByHarnessBackgroundSessionObservation?.automaticReclaimWatchActive
+				? {
+						agentNativeConversationHeldByHarnessBackgroundSessionObservation: {
+							...summary.agentNativeConversationHeldByHarnessBackgroundSessionObservation,
+							automaticReclaimWatchActive: false,
+						},
+					}
+				: {}),
 			// 同一 chokepoint 顺带补盖通道章：本改动之前落盘的记录没有这个字段，而
 			// terminalManager 持有的会话按构造恒是 PTY 的，明写好过依赖读时回退派生。
 			sessionTransport: "pty_terminal",
@@ -1090,6 +1118,9 @@ export interface TerminalSessionManagerOptions {
 		kanbanTaskConversationSessionId: string,
 		readCurrentSessionSummary: () => RuntimeTaskSessionSummary | null,
 	) => Promise<void>;
+	// 按 id 续跑 Claude 前，核对对话是不是正被 Claude Code 自己的后台会话守护进程占着（`/background` 之后），
+	// 空闲就 `claude stop` 收回，回合中就拒绝。由 workspace registry 注入 CLI 实现；缺省不核对（行为与修复前相同）。
+	claudeCodeBackgroundSessionDaemonClient?: ClaudeCodeBackgroundSessionDaemonClient;
 }
 
 export class TerminalSessionManager implements TerminalSessionService {
@@ -2640,6 +2671,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				pendingAutoRestartBackoffTimer: null,
 				pendingAutoRestart: null,
 				autoRestartCancellationGeneration: 0,
+				harnessBackgroundSessionReclaimWatchState: createIdleHarnessBackgroundSessionReclaimWatchState(),
 				lastStallLoggedAt: null,
 			});
 		}
@@ -3177,19 +3209,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					recordedChatId: decision.recordedChatId,
 					workingDirectoryPath: request.cwd,
 				});
-				const explanation = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
-				// 已有镜像就写进去（不替换，保住 scrollback）。没有镜像（运行时重启后第一次打开）就装一份只写着原因的：
-				// 空快照会被前端当成「镜像丢了」去自动续跑，而续跑正是这里要拦下的动作；何况用户得看得见原因。
-				if (!entry.terminalStateMirror) {
-					const cols =
-						Number.isFinite(request.cols) && (request.cols ?? 0) > 0 ? Math.floor(request.cols ?? 0) : 120;
-					const rows =
-						Number.isFinite(request.rows) && (request.rows ?? 0) > 0 ? Math.floor(request.rows ?? 0) : 40;
-					entry.terminalStateMirror = new TerminalStateMirror(cols, rows);
-				}
-				entry.terminalStateMirror.applyOutput(explanation);
-				const summary = updateSummary(entry, {
-					warningMessage: message,
+				this.refuseResumeBeforeSpawnWithExplanationInTerminalStateMirror(entry, request, message, {
 					agentNativeConversationPersistenceObservation: {
 						persistenceStatus: "conversation_never_established_in_agent_native_store",
 						nativeSessionId: decision.recordedChatId,
@@ -3200,13 +3220,186 @@ export class TerminalSessionManager implements TerminalSessionService {
 						observedAt: now(),
 					},
 				});
-				for (const listener of entry.listeners.values()) {
-					listener.onOutput?.(explanation);
-					listener.onState?.(cloneSummary(summary));
-				}
-				this.emitSummary(summary);
-				throw new Error(message);
 			}
+		}
+	}
+
+	// 续跑前预检的拒绝出口（Cursor 对话从未建立、Claude 对话被回合中的后台会话占着）：不 spawn、不经 PTY 退出，
+	// 自然也不计入熔断。已有镜像就写进去（不替换，保住 scrollback）。没有镜像（运行时重启后第一次打开）就装一份
+	// 只写着原因的：空快照会被前端当成「镜像丢了」去自动续跑，而续跑正是这里要拦下的动作；何况用户得看得见原因。
+	private refuseResumeBeforeSpawnWithExplanationInTerminalStateMirror(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+		message: string,
+		additionalSummaryPatch: Partial<RuntimeTaskSessionSummary> = {},
+	): never {
+		const explanation = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
+		if (!entry.terminalStateMirror) {
+			const cols = Number.isFinite(request.cols) && (request.cols ?? 0) > 0 ? Math.floor(request.cols ?? 0) : 120;
+			const rows = Number.isFinite(request.rows) && (request.rows ?? 0) > 0 ? Math.floor(request.rows ?? 0) : 40;
+			entry.terminalStateMirror = new TerminalStateMirror(cols, rows);
+		}
+		entry.terminalStateMirror.applyOutput(explanation);
+		const summary = updateSummary(entry, { warningMessage: message, ...additionalSummaryPatch });
+		for (const listener of entry.listeners.values()) {
+			listener.onOutput?.(explanation);
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+		throw new Error(message);
+	}
+
+	// 续跑前的 Claude 后台会话预检（判定与理由见 claude-code-background-session-ownership-preflight-before-resume.ts）。
+	// 只在「按已记录的原生 id 续跑」时生效，且必须站在任何销毁动作之前（与 Cursor 预检同一道闸门位置）：
+	//   1. 沿转录的 `continued-in` 链走到对话最新所在的 id，有更新就改钉身份并落盘，下游寻址随之按新 id 续跑；
+	//   2. 新 id 正被后台会话占着：能安全收回（idle 且输入框为空）⇒ `claude stop` 后放行；不能 ⇒ 拒绝并武装盯梢，
+	//      等它能安全收回时自动再续一次。用户在终端面板上确认了接管 ⇒ 不看是否安全，停掉后放行。
+	private async reclaimOrRefuseHarnessBackgroundSessionHoldingResumeTargetBeforeAnyDestructiveStep(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+		options: { stopEvenIfReclaimIsUnsafeBecauseUserConfirmedTakeover?: boolean } = {},
+	): Promise<void> {
+		if (
+			!isAgentNativeConversationHoldableByHarnessBackgroundSessionDaemon(request.agentId) ||
+			!(request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt)
+		) {
+			return;
+		}
+		const recordedIdentity = entry.summary.agentNativeConversationSessionIdentity;
+		if (!recordedIdentity || recordedIdentity.sourceAgentId !== request.agentId) {
+			return;
+		}
+		let resumeTargetNativeSessionId = recordedIdentity.nativeSessionId;
+		const continuation = recordedIdentity.transcriptPath
+			? await followClaudeCodeConversationContinuedInChainFromTranscript({
+					transcriptPath: recordedIdentity.transcriptPath,
+				})
+			: null;
+		if (continuation && continuation.nativeSessionId !== recordedIdentity.nativeSessionId) {
+			await this.establishAgentNativeConversationSessionIdentityAndPersistImmediately(entry, request, {
+				sourceAgentId: recordedIdentity.sourceAgentId,
+				nativeSessionId: continuation.nativeSessionId,
+				transcriptPath: continuation.transcriptPath,
+				observedAt: now(),
+				identityEstablishmentMethod:
+					"followed_claude_code_transcript_continued_in_record_to_conversation_continuation",
+			});
+			resumeTargetNativeSessionId = continuation.nativeSessionId;
+		}
+		const daemonClient = this.terminalSessionManagerOptions.claudeCodeBackgroundSessionDaemonClient;
+		if (!daemonClient) {
+			return;
+		}
+		const outcome = await runClaudeCodeResumeTargetBackgroundSessionOwnershipPreflight({
+			daemonClient,
+			claudeBinary: request.binary,
+			workingDirectoryPath: request.cwd,
+			resumeTargetNativeSessionId,
+			stopEvenIfReclaimIsUnsafeBecauseUserConfirmedTakeover:
+				options.stopEvenIfReclaimIsUnsafeBecauseUserConfirmedTakeover === true,
+		});
+		if (outcome.kind === "refuse_resume_target_held_by_background_session_not_safe_to_reclaim") {
+			this.armHarnessBackgroundSessionReclaimWatch(entry, request);
+			this.refuseResumeBeforeSpawnWithExplanationInTerminalStateMirror(
+				entry,
+				request,
+				describeClaudeCodeResumeTargetHeldByBackgroundSessionRefusal(outcome),
+				{
+					agentNativeConversationHeldByHarnessBackgroundSessionObservation: {
+						harnessBackgroundSessionShortId: outcome.claudeCodeSessionShortId,
+						nativeSessionId: resumeTargetNativeSessionId,
+						reclaimBlockedReason: outcome.reclaimBlockedReason,
+						automaticReclaimWatchActive: true,
+						observedAt: now(),
+					},
+				},
+			);
+		}
+		// 以下都是放行：盯梢到此为止，残留的观测也不再成立（spawn 时还会再清一次，这里先清是为了 spawn 失败时
+		// 终端面板不继续挂着一条过时的「被后台会话占着」）。
+		this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
+		this.publishAgentNativeConversationHeldByHarnessBackgroundSessionObservation(entry, null);
+		if (outcome.kind === "proceed_because_background_session_ownership_inspection_failed") {
+			logTuiFreezeWarning(
+				`[tui-freeze] claude-code-background-session-ownership-inspection-failed taskId=${request.taskId} error=${outcome.failureMessage}`,
+			);
+		} else if (outcome.kind === "proceed_after_stopping_background_session") {
+			logTuiFreezeWarning(
+				`[tui-freeze] claude-code-background-session-stopped-before-resume taskId=${request.taskId} claudeCodeSessionShortId=${outcome.claudeCodeSessionShortId} nativeSessionId=${resumeTargetNativeSessionId} stoppedDespiteUnsafeReclaimBecauseUserConfirmedTakeover=${outcome.stoppedDespiteUnsafeReclaimBecauseUserConfirmedTakeover}`,
+			);
+		}
+	}
+
+	private publishAgentNativeConversationHeldByHarnessBackgroundSessionObservation(
+		entry: SessionEntry,
+		observation: RuntimeAgentNativeConversationHeldByHarnessBackgroundSessionObservation | null,
+	): void {
+		if (observation === null && !entry.summary.agentNativeConversationHeldByHarnessBackgroundSessionObservation) {
+			return;
+		}
+		const summary = updateSummary(entry, {
+			agentNativeConversationHeldByHarnessBackgroundSessionObservation: observation,
+		});
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+	}
+
+	private armHarnessBackgroundSessionReclaimWatch(entry: SessionEntry, request: StartTaskSessionRequest): void {
+		armHarnessBackgroundSessionReclaimWatch(
+			entry.harnessBackgroundSessionReclaimWatchState,
+			cloneStartTaskSessionRequest(request),
+			{
+				readCurrentObservation: () =>
+					entry.summary.agentNativeConversationHeldByHarnessBackgroundSessionObservation,
+				publishObservation: (observation) =>
+					this.publishAgentNativeConversationHeldByHarnessBackgroundSessionObservation(entry, observation),
+				inspectReclaimability: ({ watchedTaskSessionStartRequest, resumeTargetNativeSessionId }) => {
+					const daemonClient = this.terminalSessionManagerOptions.claudeCodeBackgroundSessionDaemonClient;
+					return daemonClient
+						? inspectClaudeCodeResumeTargetBackgroundSessionReclaimability({
+								daemonClient,
+								claudeBinary: watchedTaskSessionStartRequest.binary,
+								workingDirectoryPath: watchedTaskSessionStartRequest.cwd,
+								resumeTargetNativeSessionId,
+							})
+						: null;
+				},
+				// 自己拿闸门、拿到之后**再复查一次**，而不是直接调 startTaskSession（同 runAutoRestartNow）：排队等
+				// 闸门的这段时间里用户可能已经停掉了会话、或 manager 已关停，盯梢状态虽已清空，排进链里的这一次
+				// 却照样会进启动体——预检会 `claude stop` 后台会话再 spawn，人工停止就成了摆设。
+				startWatchedTaskSession: (watchedTaskSessionStartRequest, isWatchStillNotCancelledSinceHandoff) => {
+					const arrival = createTaskSessionStartRequestArrival();
+					return this.runTaskSessionStartExclusivelyPerTask(watchedTaskSessionStartRequest.taskId, async () => {
+						if (!isWatchStillNotCancelledSinceHandoff()) {
+							return null;
+						}
+						return await this.startTaskSessionHoldingPerTaskStartExclusivity(
+							watchedTaskSessionStartRequest,
+							"harness_background_session_reclaim_watch_auto_resume",
+							arrival,
+						);
+					});
+				},
+				logWarning: (message) => logTuiFreezeWarning(`${message} taskId=${request.taskId}`),
+				now,
+			},
+		);
+	}
+
+	private cancelPendingHarnessBackgroundSessionReclaimWatch(entry: SessionEntry): void {
+		cancelHarnessBackgroundSessionReclaimWatch(entry.harnessBackgroundSessionReclaimWatchState);
+		// 盯梢一停，观测就不能再说「正在盯」：人工 stop / forceStop / shell 启动 / 关停都会走到这里，不复位的话
+		// 终端面板会一直挂着「Kanban 正在盯着它」，还会被持久化。观测本身（被谁占着、为什么）保留，与 2h 超时、
+		// hydrate 复位同形。预检放行也先经过这里，随后观测被清为 null；再被拒则由拒绝路径重新写回 true。
+		const heldObservation = entry.summary.agentNativeConversationHeldByHarnessBackgroundSessionObservation;
+		if (heldObservation?.automaticReclaimWatchActive) {
+			this.publishAgentNativeConversationHeldByHarnessBackgroundSessionObservation(entry, {
+				...heldObservation,
+				automaticReclaimWatchActive: false,
+				observedAt: now(),
+			});
 		}
 	}
 
@@ -3415,6 +3608,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (taskSessionStartOrigin !== "auto_restart_after_pty_exit") {
 			this.cancelPendingAutoRestart(entry);
 		}
+		// 同理，别的路径要起会话了，盯梢就该停；盯梢自己发起的这次除外（它的时限要跨过「再被拒一次」延续下去）。
+		if (taskSessionStartOrigin !== "harness_background_session_reclaim_watch_auto_resume") {
+			this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
+		}
 		// 熔断的解除点。挂在 startTaskSession 而不是 refreshTaskTerminal，是因为它是所有人因入口的
 		// 公共下游，一次覆盖三条、更难漏；且必须放在下面那道「已在活跃回合就早退」之前，否则用户在
 		// 一个还活着的会话上点刷新时清不掉账。
@@ -3436,6 +3633,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 				taskSessionStartRequestStartedAtIso,
 				taskSessionStartExclusivityAcquiredAtIso,
 			});
+			// 盯梢发起的这次被折叠：它没走到预检，而盯梢把「下一拍 / 清观测」全交给了预检，不在这里收尾就会停摆——
+			// 计时器为空、观测却一直说「正在盯」，连 2h 时限都不会再执行。
+			//
+			// 选「明确结束盯梢」而不是「重新武装继续盯」：能走到这里，说明这个任务上有一条活着且在回合中
+			// （running / awaiting_review）的 kanban 会话（refresh 被拒时不会停掉它；例如用户正在 kanban 终端里经
+			// agent view attach 着那条后台会话）。继续盯只会每 5s 白问一次守护进程，等这条会话一离开回合，
+			// 就由自动路径把它换代掉（停掉活会话 + `claude stop` 后台会话）——而「能安全收回」只判了后台会话，
+			// 没判这条活会话能不能拆。
+			// 自动路径只收紧不放宽：交还给人，面板改为「已停止自动等待」（取消 helper 负责复位观测），接管按钮照常可用。
+			if (taskSessionStartOrigin === "harness_background_session_reclaim_watch_auto_resume") {
+				this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
+			}
 			return cloneSummary(entry.summary);
 		}
 
@@ -3445,6 +3654,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		//
 		// Cursor 续跑预检排在寻址解析之前：它可能把桶里唯一那段已建立的对话钉成身份，解析器随后就按 id 续跑。
 		await this.refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(entry, request);
+		// Claude 后台会话预检同样排在寻址解析之前：它可能沿 `continued-in` 链改钉身份。
+		await this.reclaimOrRefuseHarnessBackgroundSessionHoldingResumeTargetBeforeAnyDestructiveStep(entry, request);
 		const resumeAddressingResolvedBeforeAnyDestructiveStep = this.resolveResumeAddressingForTaskSessionStart(
 			request,
 			entry,
@@ -3902,6 +4113,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			startedAt,
 			// 新活体从「没有需要提示的情况」开始；看门狗 / 退出核对会按本代的事实重新写。
 			agentNativeConversationPersistenceObservation: null,
+			// 能 spawn 就说明后台会话已不再占着这段对话。
+			agentNativeConversationHeldByHarnessBackgroundSessionObservation: null,
 			lastOutputAt: null,
 			reviewReason: startsWithoutSendingNewPrompt ? startWithoutPromptReviewReason : null,
 			exitCode: null,
@@ -4216,6 +4429,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const entry = this.ensureEntry(request.taskId);
 		// shell 启动同样意味着有人接管了这个槽位，在途的自动重启必须作废。
 		this.cancelPendingAutoRestart(entry);
+		this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
 		entry.restartRequest = {
 			kind: "shell",
 			request: cloneStartShellSessionRequest(request),
@@ -5420,6 +5634,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 放在早退之后等于这条路径永远碰不到它——用户按了停止，几秒后机器照样把会话拉起来，
 		// 那是最刺眼的一种不听话。
 		this.cancelPendingAutoRestart(entry);
+		this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
 		if (!entry.active) {
 			return cloneSummary(entry.summary);
 		}
@@ -5453,6 +5668,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		// 同 stopTaskSession：必须掐在早退之前，理由见那边的注释。
 		this.cancelPendingAutoRestart(entry);
+		this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
 		if (!entry.active) {
 			return;
 		}
@@ -5512,10 +5728,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		refreshOptions: {
 			// 见 runtimeTaskTerminalRefreshRequestSchema 的同名字段：先迁入、钉身份，再按 id 续跑。
 			adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization;
+			// 见 runtimeTaskTerminalRefreshRequestSchema 的同名字段：用户确认接管被 harness 后台会话占着的对话。
+			forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser?: boolean;
 		} = {},
 	): Promise<RuntimeTaskSessionSummary> {
 		const arrival = createTaskSessionStartRequestArrival();
-		const { adoptExistingAgentConversationAsTaskSessionIdentity } = refreshOptions;
+		const {
+			adoptExistingAgentConversationAsTaskSessionIdentity,
+			forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser = false,
+		} = refreshOptions;
 		if (adoptExistingAgentConversationAsTaskSessionIdentity) {
 			return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, async () => {
 				await this.adoptExistingAgentConversationAsTaskSessionIdentityHoldingPerTaskStartExclusivity(
@@ -5526,6 +5747,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					request,
 					taskSessionStartOrigin,
 					arrival,
+					forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
 				);
 			});
 		}
@@ -5538,7 +5760,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 内部调私有的启动体而不是公开的 startTaskSession：后者会再抢一次同一把闸门，当场自死锁。
 		// forceStopTaskSession 自己不抢闸门，可以安全地在闸门内调用。
 		return await this.runTaskSessionStartExclusivelyPerTask(request.taskId, () =>
-			this.refreshTaskTerminalHoldingPerTaskStartExclusivity(request, taskSessionStartOrigin, arrival),
+			this.refreshTaskTerminalHoldingPerTaskStartExclusivity(
+				request,
+				taskSessionStartOrigin,
+				arrival,
+				forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
+			),
 		);
 	}
 
@@ -5580,6 +5807,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin,
 		arrival: TaskSessionStartRequestArrival,
+		forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: boolean,
 	): Promise<RuntimeTaskSessionSummary> {
 		// 预检必须在 forceStopTaskSession **之前**：本方法是「停掉再起一条」，而拒绝的语义是「这次不动它」。
 		// 先停再让下游拒绝，等于用户点一次重启就把一条还活着的会话杀掉、还什么都没续上。
@@ -5589,6 +5817,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			await this.refuseOrPinKanbanAssignedAgentNativeConversationResumeTargetBeforeAnyDestructiveStep(
 				entryBeforeDestructiveRestart,
 				request,
+			);
+			await this.reclaimOrRefuseHarnessBackgroundSessionHoldingResumeTargetBeforeAnyDestructiveStep(
+				entryBeforeDestructiveRestart,
+				request,
+				{
+					stopEvenIfReclaimIsUnsafeBecauseUserConfirmedTakeover:
+						forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
+				},
 			);
 			const resumeAddressing = this.resolveResumeAddressingForTaskSessionStart(
 				request,
@@ -5710,6 +5946,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		for (const entry of this.entries.values()) {
 			entry.suppressAutoRestartOnExit = true;
 			this.cancelPendingAutoRestart(entry);
+			this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
 		}
 		const activeEntries = Array.from(this.entries.values()).filter((entry) => entry.active != null);
 		for (const entry of activeEntries) {
@@ -5897,6 +6134,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 没人管的 PTY。此前这里只清 stallScanInterval，是因为当时自动重启路径上根本没有计时器。
 		for (const entry of this.entries.values()) {
 			this.cancelPendingAutoRestart(entry);
+			this.cancelPendingHarnessBackgroundSessionReclaimWatch(entry);
 		}
 	}
 
@@ -5918,6 +6156,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			pendingAutoRestartBackoffTimer: null,
 			pendingAutoRestart: null,
 			autoRestartCancellationGeneration: 0,
+			harnessBackgroundSessionReclaimWatchState: createIdleHarnessBackgroundSessionReclaimWatchState(),
 			lastStallLoggedAt: null,
 		};
 		this.entries.set(taskId, created);

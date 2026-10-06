@@ -589,6 +589,9 @@ export const runtimeAgentNativeConversationSessionIdentityEstablishmentMethodSch
 	// 存量回填的窄例外：会话从未记录过 id，而其工作目录的 chat 桶里**恰好只有一段**已建立的对话、且无同 agent
 	// 竞争会话——与今天 `--continue` 会选中的那一段等价，只是把它钉住。有歧义一律不回填。
 	"unique_established_chat_in_working_directory_bucket_backfill",
+	// 续跑前沿 Claude 转录末尾的 `continued-in` 记录走到对话最新所在的 id（对话曾被 `/background` 搬进
+	// Claude 后台会话，而那个后台会话的 hook 没把新 id 报回本任务）。
+	"followed_claude_code_transcript_continued_in_record_to_conversation_continuation",
 ]);
 export type RuntimeAgentNativeConversationSessionIdentityEstablishmentMethod = z.infer<
 	typeof runtimeAgentNativeConversationSessionIdentityEstablishmentMethodSchema
@@ -638,6 +641,39 @@ export const runtimeAgentNativeConversationPersistenceObservationSchema = z.obje
 });
 export type RuntimeAgentNativeConversationPersistenceObservation = z.infer<
 	typeof runtimeAgentNativeConversationPersistenceObservationSchema
+>;
+
+// 「按 id 要续跑的对话正被 harness 自己的后台会话守护进程占着、而且不能安全收回」的观测（目前只有 Claude Code：
+// 终端里 `/background` 之后对话在 Claude 守护进程里）。能安全收回的情形 kanban 直接 `claude stop` 后续跑，不留观测。
+// 判据与处置见 src/terminal/claude-code-background-session-ownership-preflight-before-resume.ts。
+export const runtimeHarnessBackgroundSessionReclaimBlockedReasonSchema = z.enum([
+	// Claude 自报 busy：请求在途或工具在跑。
+	"background_session_generating_response_mid_turn",
+	// Claude 自报 waiting：对话框 / 权限请求 / elicitation 等着人回答。
+	"background_session_waiting_for_user_decision",
+	// Claude 自报 idle，但读屏发现输入框里有没提交的内容，或输入框被外部编辑器（Ctrl+G）等盖住、读不到。
+	"background_session_input_box_has_unsent_text_or_is_hidden",
+	// Claude 报了一个不认识的 status。
+	"background_session_activity_status_unrecognized",
+	// `claude stop` 失败，或报成功后它仍占着这段对话。
+	"background_session_did_not_release_after_stop",
+]);
+export type RuntimeHarnessBackgroundSessionReclaimBlockedReason = z.infer<
+	typeof runtimeHarnessBackgroundSessionReclaimBlockedReasonSchema
+>;
+
+export const runtimeAgentNativeConversationHeldByHarnessBackgroundSessionObservationSchema = z.object({
+	// `claude attach / stop / logs` 认的短 id。
+	harnessBackgroundSessionShortId: z.string(),
+	nativeSessionId: z.string(),
+	reclaimBlockedReason: runtimeHarnessBackgroundSessionReclaimBlockedReasonSchema,
+	// kanban 是否还在盯着它、等它能安全收回时自动接回。盯梢有时限，运行时重启后也不会自动恢复
+	// （下次打开这张卡触发续跑时会重新武装）。
+	automaticReclaimWatchActive: z.boolean(),
+	observedAt: z.number(),
+});
+export type RuntimeAgentNativeConversationHeldByHarnessBackgroundSessionObservation = z.infer<
+	typeof runtimeAgentNativeConversationHeldByHarnessBackgroundSessionObservationSchema
 >;
 
 // 终端 agent 启动时真正传出去的、与 fork 重放相关的 argv 三项（见
@@ -967,6 +1003,10 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	agentNativeConversationPersistenceObservation: runtimeAgentNativeConversationPersistenceObservationSchema
 		.nullable()
 		.optional(),
+	// 「要续跑的对话正被 harness 后台会话占着、不能安全收回」观测（见同名 schema 注释）。续跑被拒时写入，
+	// 每次真实 spawn 清为 null。
+	agentNativeConversationHeldByHarnessBackgroundSessionObservation:
+		runtimeAgentNativeConversationHeldByHarnessBackgroundSessionObservationSchema.nullable().optional(),
 	// 本次启动 argv 的 fork 重放快照（见 runtimeAgentSessionForkReplayLaunchArgumentsSchema 注释）。
 	// 加性可选：只有已接入的终端 agent（v1 = claude）在建会话时盖章，其余会话与旧盘数据缺它 ⇒ undefined。
 	// 每次新起活体整体替换（同一任务换 agent / 换模型后，旧快照对新会话无意义）。
@@ -3778,6 +3818,9 @@ export const runtimeTaskTerminalRefreshRequestSchema = z.object({
 	// （不重投 prompt）。给「对话从未建立」的会话一条用户自己拍板的出路——例如把同 prompt 的另一张卡留下的
 	// 孤儿对话接过来。只对原生 id 由 kanban 分配的 agent（Cursor）开放，且源对话必须属于同一个 agent。
 	adoptExistingAgentConversationAsTaskSessionIdentity: runtimeTaskAgentSessionInitializationSchema.optional(),
+	// 「停止后台会话并在这里续跑」：对话正被 harness 后台会话（Claude `/background`）占着、又不能安全收回时，
+	// 用户在终端面板上显式确认接管——不再看是否安全，`claude stop` 后按 id 续跑（在途回合 / 未提交的输入随之丢弃）。
+	forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: z.boolean().optional(),
 });
 export type RuntimeTaskTerminalRefreshRequest = z.infer<typeof runtimeTaskTerminalRefreshRequestSchema>;
 
