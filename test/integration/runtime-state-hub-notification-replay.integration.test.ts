@@ -3,13 +3,26 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
-import type { RuntimeStateStreamMessage, RuntimeWorkspaceStateResponse } from "../../src/core/api-contract";
+import type {
+	RuntimeStateStreamMessage,
+	RuntimeWorkspaceMetadata,
+	RuntimeWorkspaceStateResponse,
+} from "../../src/core/api-contract";
 import type { NotificationCandidate } from "../../src/core/notification-lifecycle-contract";
 import { createRuntimeStateHub, type RuntimeStateHub } from "../../src/server/runtime-state-hub";
 
-const { recentReady, disconnectWorkspace } = vi.hoisted(() => ({
+const {
+	recentReady,
+	disconnectWorkspace,
+	connectWorkspace,
+	readAllNotificationLogs,
+	readCachedWorkspaceMetadataSnapshot,
+} = vi.hoisted(() => ({
 	recentReady: vi.fn<() => Promise<NotificationCandidate[]>>(),
+	readAllNotificationLogs: vi.fn<() => Promise<Record<string, never[]>>>(),
+	readCachedWorkspaceMetadataSnapshot: vi.fn<() => RuntimeWorkspaceMetadata>(),
 	disconnectWorkspace: vi.fn(),
+	connectWorkspace: vi.fn<() => Promise<RuntimeWorkspaceMetadata>>(),
 }));
 vi.mock("../../src/notifications/notification-lifecycle-archive", () => ({
 	getNotificationLifecycleArchive: () => ({ recentReady }),
@@ -18,12 +31,13 @@ vi.mock("../../src/notifications/notification-assessment-service", () => ({
 	createNotificationAssessmentService: () => ({ close: vi.fn() }),
 }));
 vi.mock("../../src/state/notification-log-store", () => ({
-	readAllNotificationLogs: async () => ({}),
+	readAllNotificationLogs,
 	readNotificationLog: async () => [],
 }));
 vi.mock("../../src/server/workspace-metadata-monitor", () => ({
 	createWorkspaceMetadataMonitor: () => ({
-		connectWorkspace: async () => ({ homeGitSummary: null, homeGitStateVersion: 0, taskWorkspaces: [] }),
+		readCachedWorkspaceMetadataSnapshot,
+		connectWorkspace,
 		updateWorkspaceState: vi.fn(),
 		disconnectWorkspace,
 		close: vi.fn(),
@@ -56,6 +70,13 @@ describe("通知档案重放不阻塞核心 workspace 推送", { timeout: 40_000
 	beforeEach(async () => {
 		vi.clearAllMocks();
 		recentReady.mockReset();
+		readAllNotificationLogs.mockReset().mockResolvedValue({});
+		readCachedWorkspaceMetadataSnapshot
+			.mockReset()
+			.mockReturnValue({ homeGitSummary: null, homeGitStateVersion: 0, taskWorkspaces: [] });
+		connectWorkspace
+			.mockReset()
+			.mockResolvedValue({ homeGitSummary: null, homeGitStateVersion: 0, taskWorkspaces: [] });
 		messages = [];
 		client = undefined;
 		hub = createRuntimeStateHub({
@@ -105,6 +126,67 @@ describe("通知档案重放不阻塞核心 workspace 推送", { timeout: 40_000
 		);
 		expect(messages.some((message) => message.type === "error")).toBe(false);
 	}
+
+	it("通知读取等待期间缓存改变，首帧取最新元数据且没有增量抢先", async () => {
+		let finishNotificationRead!: () => void;
+		readAllNotificationLogs.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishNotificationRead = () => resolve({});
+				}),
+		);
+		recentReady.mockResolvedValue([]);
+		client = new WebSocket(streamUrl);
+		client.on("message", (message) => messages.push(JSON.parse(String(message)) as RuntimeStateStreamMessage));
+		await vi.waitFor(
+			() => expect(readAllNotificationLogs).toHaveBeenCalled(),
+			STREAM_MESSAGE_ARRIVAL_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
+		expect(readCachedWorkspaceMetadataSnapshot).not.toHaveBeenCalled();
+		readCachedWorkspaceMetadataSnapshot.mockReturnValue({
+			homeGitSummary: null,
+			homeGitStateVersion: 2,
+			taskWorkspaces: [],
+		});
+		finishNotificationRead();
+		await vi.waitFor(
+			() => expect(messages[0]).toMatchObject({ type: "snapshot", workspaceMetadata: { homeGitStateVersion: 2 } }),
+			STREAM_MESSAGE_ARRIVAL_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+		);
+	});
+
+	it.each(["resolve", "reject"] as const)(
+		"git 首轮仍在等待时已经收到快照；断连后的 %s 不重复释放",
+		async (outcome) => {
+			let finishProbe!: () => void;
+			connectWorkspace.mockImplementationOnce(
+				() =>
+					new Promise((resolve, reject) => {
+						finishProbe = () =>
+							outcome === "resolve"
+								? resolve({ homeGitSummary: null, homeGitStateVersion: 0, taskWorkspaces: [] })
+								: reject(new Error("probe unavailable"));
+					}),
+			);
+			recentReady.mockResolvedValue([]);
+			try {
+				const connected = await connectAndReceiveSnapshot();
+				expect(messages[0]?.type).toBe("snapshot");
+				expect(connectWorkspace).toHaveBeenCalledTimes(1);
+				await expectWorkspaceUpdate();
+				connected.close();
+				await once(connected, "close");
+				await vi.waitFor(
+					() => expect(disconnectWorkspace).toHaveBeenCalledTimes(1),
+					STREAM_MESSAGE_ARRIVAL_WAIT_OPTIONS_TOLERANT_OF_HOST_LOAD,
+				);
+			} finally {
+				finishProbe?.();
+			}
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(disconnectWorkspace).toHaveBeenCalledTimes(1);
+		},
+	);
 
 	it("档案读取拒绝后仍收到核心 workspace 更新", async () => {
 		recentReady.mockRejectedValue(new Error("SQLITE_BUSY"));

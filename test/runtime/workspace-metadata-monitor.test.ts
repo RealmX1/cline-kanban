@@ -228,6 +228,41 @@ describe("createWorkspaceMetadataMonitor", () => {
 		monitor.close();
 	});
 
+	it("首帧只读缓存：冷缓存为空，不启动探针；热缓存按当前 board 与订阅并集裁剪", async () => {
+		const input = {
+			workspaceId: "workspace-1",
+			board: createBoard(),
+			probeScope: ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+		};
+		expect(monitor.readCachedWorkspaceMetadataSnapshot(input).taskWorkspaces).toEqual([]);
+		expect(gitSyncMocks.probeGitWorkspaceState).not.toHaveBeenCalled();
+		await connectWorkspaceAsWholeProjectSubscriber({ ...input, workspacePath: WORKSPACE_PATH });
+		const probeCount = gitSyncMocks.probeGitWorkspaceState.mock.calls.length;
+		const cached = monitor.readCachedWorkspaceMetadataSnapshot({
+			...input,
+			probeScope: {
+				workspaceMetadataProbeScopeKind: "focused_task_worktrees_plus_auto_review_tasks_in_review_column",
+				focusedTaskIds: ["task-branch"],
+			},
+		});
+		expect(cached.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-branch", "task-inplace", "task-trash"]);
+		expect(gitSyncMocks.probeGitWorkspaceState.mock.calls.length).toBe(probeCount);
+		monitor.disconnectWorkspace(input.workspaceId, "subscriber-declaring-whole-project");
+		expect(
+			monitor
+				.readCachedWorkspaceMetadataSnapshot({
+					...input,
+					probeScope: {
+						workspaceMetadataProbeScopeKind: "focused_task_worktrees_plus_auto_review_tasks_in_review_column",
+						focusedTaskIds: ["task-branch"],
+					},
+				})
+				.taskWorkspaces.map((task) => task.taskId),
+		).toEqual(["task-branch"]);
+		const emptyBoard = { columns: [] };
+		expect(monitor.readCachedWorkspaceMetadataSnapshot({ ...input, board: emptyBoard }).taskWorkspaces).toEqual([]);
+	});
+
 	it("forwards each tracked card's worktreeMode to getTaskWorkspacePathInfo", async () => {
 		await connectWorkspaceAsWholeProjectSubscriber({
 			workspaceId: "workspace-1",
@@ -358,6 +393,41 @@ describe("createWorkspaceMetadataMonitor", () => {
 				"task-review-without-auto-review",
 				"task-trash",
 			]);
+		});
+
+		it("首帧保留已有订阅并集：新连接从 A 切到 B 且并集不变时仍有 B 的缓存", async () => {
+			const input = {
+				workspaceId: "workspace-1",
+				workspacePath: WORKSPACE_PATH,
+				board: createBoard(),
+			};
+			await monitor.connectWorkspace({
+				...input,
+				subscriberId: "subscriber-covering-tasks-a-and-b",
+				probeScope: focusedTaskProbeScope(["task-branch", "task-inplace"]),
+			});
+			onMetadataUpdated.mockReset();
+			const probeCount = gitSyncMocks.probeGitWorkspaceState.mock.calls.length;
+			const cached = monitor.readCachedWorkspaceMetadataSnapshot({
+				...input,
+				probeScope: focusedTaskProbeScope(["task-branch"]),
+			});
+			expect(gitSyncMocks.probeGitWorkspaceState.mock.calls.length).toBe(probeCount);
+			await monitor.connectWorkspace({
+				...input,
+				subscriberId: "new-subscriber-switching-from-task-a-to-b",
+				probeScope: focusedTaskProbeScope(["task-branch"]),
+			});
+			monitor.updateSubscriberProbeScope({
+				workspaceId: input.workspaceId,
+				subscriberId: "new-subscriber-switching-from-task-a-to-b",
+				probeScope: focusedTaskProbeScope(["task-inplace"]),
+			});
+			await monitor.updateWorkspaceState(input);
+
+			// 并集与 git 均未变，不会再补推，因此首帧必须已经包含 B。
+			expect(onMetadataUpdated).not.toHaveBeenCalled();
+			expect(cached.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-branch", "task-inplace"]);
 		});
 
 		it("连接改成整个项目后不等结果，补探完经 onMetadataUpdated 推送全部任务", async () => {

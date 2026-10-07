@@ -193,6 +193,12 @@ vi.mock("@xterm/xterm", () => ({
 }));
 
 class MockResizeObserver implements ResizeObserver {
+	static readonly instances: MockResizeObserver[] = [];
+
+	constructor(readonly callback: ResizeObserverCallback) {
+		MockResizeObserver.instances.push(this);
+	}
+
 	readonly root: Element | Document | null = null;
 	readonly rootMargin = "";
 	readonly thresholds = [0];
@@ -305,6 +311,7 @@ describe("persistent-terminal-manager", () => {
 		platformOverrides.isSafari = false;
 		createdTerminalOptions.length = 0;
 		webSocketInstances.length = 0;
+		MockResizeObserver.instances.length = 0;
 		screenPixelSize.width = 480;
 		screenPixelSize.height = 320;
 		Object.defineProperty(globalThis, "ResizeObserver", {
@@ -372,6 +379,39 @@ describe("persistent-terminal-manager", () => {
 				rows: 30,
 				type: "resize",
 			},
+		]);
+	});
+
+	it.each([false, true])("隐藏挂载的异步尺寸回调不调整 PTY，可见后正常调整（预热=%s）", async (prewarmed) => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({
+			...appearance,
+			taskId: "task-hidden-resize",
+			workspaceId: "workspace-1",
+			deferAutomaticSessionResumeUntilVisibleMount: prewarmed,
+		});
+		const container = createContainer();
+		terminal.mount(container, appearance, { isVisible: false });
+		const observer = MockResizeObserver.instances.at(-1);
+		if (!observer) throw new Error("隐藏挂载未注册 ResizeObserver");
+		// 浏览器首次尺寸通知在 observe 返回后异步到达，再经 manager 的防抖计时器执行。
+		await Promise.resolve().then(() => observer.callback([], observer));
+		vi.advanceTimersByTime(50);
+
+		expect(fitAddonProposeDimensionsMock).not.toHaveBeenCalled();
+		expect(getResizeMessages()).toEqual([]);
+		terminal.mount(container, appearance, { isVisible: true });
+		vi.advanceTimersByTime(20);
+		expect(getResizeMessages().map((message) => [message.cols, message.rows])).toEqual([[80, 30]]);
+
+		const visibleObserver = MockResizeObserver.instances.at(-1);
+		if (!visibleObserver) throw new Error("可见挂载未注册 ResizeObserver");
+		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 100, rows: 31 });
+		await Promise.resolve().then(() => visibleObserver.callback([], visibleObserver));
+		vi.advanceTimersByTime(50);
+		expect(getResizeMessages().map((message) => [message.cols, message.rows])).toEqual([
+			[80, 30],
+			[100, 31],
 		]);
 	});
 
@@ -906,6 +946,58 @@ describe("persistent-terminal-manager", () => {
 
 		// 死会话（服务器重启后 hydrate 出的 idle、agentId 已由服务端从 board card 回填、pid=null）+ 空 restore
 		// 快照 → 聚焦即自动一次性续跑；再次空 restore（切走再切回）不重复触发。
+		it.each([false, true])(
+			"隐藏预热（复用停放=%s）不续跑、不输入、不 resize，可见挂载后恢复",
+			async (reuseParked) => {
+				if (reuseParked) ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+				const terminal = ensurePersistentTerminal({
+					...appearance,
+					taskId: "task-a",
+					workspaceId: "workspace-1",
+					deferAutomaticSessionResumeUntilVisibleMount: true,
+				});
+				const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+				dispatchState({ taskId: "task-a", agentId: "claude", pid: null, state: "idle", liveness: "none" });
+				dispatchRestore("");
+				await waitForRestoreCompleted();
+				expect(refreshSpy).not.toHaveBeenCalled();
+				expect(terminal.input("隐藏输入")).toBe(false);
+				expect(terminal.paste("隐藏粘贴")).toBe(false);
+				expect(parseControlMessages(findControlSocket()).some((message) => message.type === "resize")).toBe(false);
+				const container = createContainer();
+				terminal.mount(container, appearance, { isVisible: false });
+				expect(refreshSpy).not.toHaveBeenCalled();
+				terminal.mount(container, appearance, { isVisible: true });
+				expect(refreshSpy).toHaveBeenCalledTimes(1);
+				expect(terminal.input("可见输入")).toBe(true);
+				terminal.mount(container, appearance, { isVisible: true });
+				expect(refreshSpy).toHaveBeenCalledTimes(1);
+			},
+		);
+
+		it.each([false, true])("预热期间的画面重同步不能变成续跑（恢复前挂载=%s）", async (mountBeforeRestore) => {
+			const terminal = ensurePersistentTerminal({
+				...appearance,
+				taskId: "task-a",
+				workspaceId: "workspace-1",
+				deferAutomaticSessionResumeUntilVisibleMount: true,
+			});
+			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			dispatchState({ taskId: "task-a", agentId: "claude", pid: null, state: "idle", liveness: "none" });
+			dispatchRestore("");
+			await waitForRestoreCompleted();
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			const container = createContainer();
+			if (mountBeforeRestore) {
+				terminal.mount(container, appearance, { isVisible: true });
+				expect(refreshSpy).not.toHaveBeenCalled();
+			}
+			dispatchRestore("");
+			await resync;
+			terminal.mount(container, appearance, { isVisible: true });
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
 		it("auto-refreshes once for an empty snapshot terminal-agent session, then debounces", async () => {
 			const terminal = mountedTerminal();
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
