@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import type { RuntimeHookIngestResponse, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import * as agentSessionRetentionLogger from "../../../src/diagnostics/agent-session-retention-logger";
 import {
 	DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR,
 	getDiagnosticEventJournalActiveFilePath,
@@ -16,6 +17,13 @@ import { createTempDir } from "../../utilities/temp-dir";
 // 文件末尾的跨层回归用例要驱动**真实** TerminalSessionManager——两档恢复守卫的状态机住在它里面，
 // 用桩 manager 复述一遍就只是在测桩本身。真实 manager 会 spawn PTY 并做 agent 启动准备，故把这两条
 // 外部边界桩掉。本文件其余用例仍用「按需实现方法的类型级 manager 桩」，完全不受这两个 mock 影响。
+const readNativePhaseGoalMock = vi.hoisted(() =>
+	vi.fn(async () => null as { goalText: string; updatedAt: number } | null),
+);
+vi.mock("../../../src/terminal/claude-native-task-list-current-work-phase-goal-projection.js", () => ({
+	readClaudeNativeTaskListCurrentWorkPhaseGoal: readNativePhaseGoalMock,
+}));
+
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 
@@ -75,6 +83,233 @@ const LIVE_INCARNATION_BACKGROUND_WORK_COMPLETION_NOTIFICATION = [
 ].join("\n");
 
 describe("createHooksApi", () => {
+	it("Claude 清单慢读取不阻塞 hook 响应与 activity，幂等重投只投影一次", async () => {
+		const current = createSummary({
+			runtimeSessionIncarnationId: "incarnation-1",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "claude",
+				nativeSessionId: "native-1",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		});
+		const applyCurrentWorkPhaseGoal = vi.fn();
+		const applyHookActivity = vi.fn();
+		const recordAgentLifecycleHookConversationProgress = vi.fn();
+		const appliedDeliveryKeys = new Set<string>();
+		const manager = {
+			getSummary: () => current,
+			applyCurrentWorkPhaseGoal,
+			applyHookActivity,
+			recordAgentLifecycleHookConversationProgress,
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			hasAppliedHookEventDeliveryIdempotencyKey: (_taskId: string, key: string) => appliedDeliveryKeys.has(key),
+			rememberAppliedHookEventDeliveryIdempotencyKey: (_taskId: string, key: string) => appliedDeliveryKeys.add(key),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: () => "/tmp/repo",
+			ensureTerminalManagerForWorkspace: async () => manager,
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+		let finishRead: (projection: { goalText: string; updatedAt: number }) => void = () => {
+			throw new Error("读取尚未开始");
+		};
+		readNativePhaseGoalMock.mockReset();
+		readNativePhaseGoalMock.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishRead = resolve;
+				}),
+		);
+		const hook = {
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "activity" as const,
+			hookEventDeliveryIdempotencyKey: "native-projection-delivery-1",
+			claudeNativeTaskListIdForPhaseGoalProjection: "native-1",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "TaskUpdate" },
+		};
+		let response: RuntimeHookIngestResponse | undefined;
+		const ingestion = api.ingest(hook).then((result) => {
+			response = result;
+		});
+		try {
+			await vi.waitFor(() => expect(readNativePhaseGoalMock).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+			await vi.waitFor(() => expect(response).toEqual({ ok: true }), { timeout: 10_000 });
+			expect(applyHookActivity).toHaveBeenCalledWith("task-1", hook.metadata);
+			expect(recordAgentLifecycleHookConversationProgress).toHaveBeenCalledTimes(1);
+			expect(applyCurrentWorkPhaseGoal).not.toHaveBeenCalled();
+			expect(await api.ingest(hook)).toEqual({ ok: true });
+			expect(readNativePhaseGoalMock).toHaveBeenCalledTimes(1);
+			expect(applyHookActivity).toHaveBeenCalledTimes(1);
+		} finally {
+			finishRead({ goalText: "当前阶段目标", updatedAt: Date.now() });
+			await ingestion;
+		}
+		await vi.waitFor(() => expect(applyCurrentWorkPhaseGoal).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+	});
+
+	it.each([
+		"user_prompt_delivered",
+		"new_incarnation",
+		"newer_projection",
+		"new_native_identity",
+		"user_turn",
+	] as const)("Claude 清单读取过程中发生 %s 时，旧异步结果不得覆盖当前会话", async (interruption) => {
+		let current = createSummary({
+			runtimeSessionIncarnationId: "incarnation-1",
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "claude",
+				nativeSessionId: "native-1",
+				transcriptPath: null,
+				observedAt: 1,
+			},
+		});
+		const applyCurrentWorkPhaseGoal = vi.fn();
+		const applyHookActivity = vi.fn();
+		let firstReadReleased = false;
+		let finishProjectionCheck: () => void = () => {};
+		const projectionCheckCompleted = new Promise<void>((resolve) => {
+			finishProjectionCheck = resolve;
+		});
+		const manager = {
+			getSummary: () => {
+				if (firstReadReleased) finishProjectionCheck();
+				return current;
+			},
+			applyCurrentWorkPhaseGoal,
+			applyHookActivity,
+			transitionToRunning: vi.fn(),
+			transitionToReview: vi.fn(),
+			recordAgentLifecycleHookConversationProgress: vi.fn(),
+			recordMainAgentConversationModelRequestDispatch: vi.fn(),
+		} as unknown as TerminalSessionManager;
+		const api = createHooksApi({
+			getWorkspacePathById: () => "/tmp/repo",
+			ensureTerminalManagerForWorkspace: async () => manager,
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+		let finishRead: (projection: { goalText: string; updatedAt: number }) => void = () => {
+			throw new Error("读取尚未开始");
+		};
+		readNativePhaseGoalMock.mockReset();
+		readNativePhaseGoalMock.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishRead = resolve;
+				}),
+		);
+		const hook = {
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "activity" as const,
+			claudeNativeTaskListIdForPhaseGoalProjection: "native-1",
+			metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "TaskUpdate" },
+		};
+		const inFlight = api.ingest(hook);
+		await vi.waitFor(() => expect(readNativePhaseGoalMock).toHaveBeenCalledTimes(1));
+		if (interruption === "user_prompt_delivered")
+			current = { ...current, agentCurrentWorkPhaseGoalInvalidatedAt: Date.now() };
+		else if (interruption === "new_incarnation")
+			current = { ...current, runtimeSessionIncarnationId: "incarnation-2" };
+		else if (interruption === "new_native_identity")
+			current = {
+				...current,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "claude",
+					nativeSessionId: "native-2",
+					transcriptPath: null,
+					observedAt: 2,
+				},
+			};
+		else if (interruption === "user_turn")
+			current = { ...current, turnOwner: "user", liveness: "live", userTurnKind: "review" };
+		else {
+			readNativePhaseGoalMock.mockResolvedValueOnce(null);
+			expect(await api.ingest(hook)).toEqual({ ok: true });
+		}
+		firstReadReleased = true;
+		finishRead({ goalText: "已经过期的阶段目标", updatedAt: Date.now() });
+		await projectionCheckCompleted;
+		expect(await inFlight).toEqual({ ok: true });
+		expect(applyCurrentWorkPhaseGoal).toHaveBeenCalledTimes(interruption === "newer_projection" ? 1 : 0);
+		expect(applyHookActivity).toHaveBeenCalledTimes(interruption === "newer_projection" ? 2 : 1);
+	});
+
+	it.each(["read_failure", "apply_failure"] as const)(
+		"Claude 后台投影 %s 被捕获，不影响 hook 响应与 activity",
+		async (failure) => {
+			const current = createSummary({
+				runtimeSessionIncarnationId: "incarnation-1",
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "claude",
+					nativeSessionId: "native-1",
+					transcriptPath: null,
+					observedAt: 1,
+				},
+			});
+			const applyCurrentWorkPhaseGoal = vi.fn(() => {
+				throw new Error("模拟投影写入失败");
+			});
+			const applyHookActivity = vi.fn();
+			const manager = {
+				getSummary: () => current,
+				applyCurrentWorkPhaseGoal,
+				applyHookActivity,
+				recordAgentLifecycleHookConversationProgress: vi.fn(),
+				recordMainAgentConversationModelRequestDispatch: vi.fn(),
+			} as unknown as TerminalSessionManager;
+			const api = createHooksApi({
+				getWorkspacePathById: () => "/tmp/repo",
+				ensureTerminalManagerForWorkspace: async () => manager,
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastTaskReadyForReview: vi.fn(),
+			});
+			let releaseRead: () => void = () => {
+				throw new Error("读取尚未开始");
+			};
+			readNativePhaseGoalMock.mockReset();
+			readNativePhaseGoalMock.mockImplementationOnce(
+				() =>
+					new Promise((resolve, reject) => {
+						releaseRead = () =>
+							failure === "read_failure"
+								? reject(new Error("模拟清单读取失败"))
+								: resolve({ goalText: "当前阶段目标", updatedAt: Date.now() });
+					}),
+			);
+			let finishFailureHandling: () => void = () => {};
+			const failureHandled = new Promise<void>((resolve) => {
+				finishFailureHandling = resolve;
+			});
+			const warning = vi
+				.spyOn(agentSessionRetentionLogger, "logAgentSessionRetentionWarning")
+				.mockImplementation(finishFailureHandling);
+			try {
+				expect(
+					await api.ingest({
+						taskId: "task-1",
+						workspaceId: "workspace-1",
+						event: "activity",
+						claudeNativeTaskListIdForPhaseGoalProjection: "native-1",
+						metadata: { source: "claude", hookEventName: "PostToolUse", toolName: "TaskUpdate" },
+					}),
+				).toEqual({ ok: true });
+				expect(applyHookActivity).toHaveBeenCalledTimes(1);
+				releaseRead();
+				await failureHandled;
+				expect(warning).toHaveBeenCalledWith(
+					expect.stringContaining("claude-native-task-list-current-work-phase-goal-projection-failed"),
+				);
+				expect(applyCurrentWorkPhaseGoal).toHaveBeenCalledTimes(failure === "apply_failure" ? 1 : 0);
+			} finally {
+				warning.mockRestore();
+			}
+		},
+	);
+
 	it("恢复旧 Claude 会话时阻止并持久暂存 harness 自动 task-notification", async () => {
 		const manager = {
 			getSummary: vi.fn(() =>

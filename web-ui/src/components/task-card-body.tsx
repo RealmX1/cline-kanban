@@ -41,6 +41,7 @@ import {
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
 import { notifyError } from "@/components/app-toaster";
 import { BacklogTaskDescriptionLastUpdatedPill } from "@/components/backlog-task-description-last-updated-pill";
 import {
@@ -1144,7 +1145,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 								</span>
 							</button>
 						) : null}
-						{showTitleEditButton ? (
+						{showTitleEditButton && !isCompactRowInFocusViewLeftColumn ? (
 							<TaskCardTitleRowHoverActions>
 								<Tooltip
 									side="bottom"
@@ -1173,13 +1174,37 @@ export const TaskCardBody = memo(function TaskCardBody({
 				</div>
 				<div
 					className={cn(
-						"absolute right-1 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+						// 动作显示或获得键盘焦点时覆盖 z-20 摘要胶囊，避免长摘要拦截恢复、归档等按钮。
+						"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
 						// 紧凑密度没有上边框可伸出，动作组覆盖在第 1 行右侧。
 						isCompactRowInFocusViewLeftColumn ? "top-1" : "-top-[6px]",
 						"focus-within:opacity-100 focus-within:pointer-events-auto",
 						isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
 					)}
 				>
+					{showTitleEditButton && isCompactRowInFocusViewLeftColumn ? (
+						<Tooltip
+							side="bottom"
+							content={revealHoverActionTooltip(onOpenTaskEditor ? "Edit task" : "Edit title")}
+						>
+							<Button
+								icon={<Pencil size={12} />}
+								variant="ghost"
+								size="xs"
+								aria-label="Edit task title"
+								onMouseDown={stopEvent}
+								onClick={(event) => {
+									stopEvent(event);
+									if (onOpenTaskEditor) onOpenTaskEditor(card);
+									else {
+										setDraftTitle(card.title);
+										setIsEditingTitle(true);
+									}
+								}}
+							/>
+						</Tooltip>
+					) : null}
+
 					{taskPinboardToggle ? (
 						<Tooltip side="bottom" content={revealHoverActionTooltip(taskPinboardToggle.tooltip)}>
 							<Button
@@ -1341,6 +1366,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 								{machineWaitingBadgeElement}
 							</div>
 						))}
+				<AgentCurrentWorkPhaseGoal summary={sessionSummary} />
 				{sessionActivity ? (
 					<div
 						className={cn("flex gap-1.5 items-start", isCompactRowInFocusViewLeftColumn ? "mt-1" : "mt-[6px]")}

@@ -689,7 +689,51 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			deps.bumpClineSessionContextVersion?.();
 			return response;
 		},
-		// 起名不需要任何运行时状态（无工作区、无会话），所以这里就是一层薄转发：协调者不沉淀逻辑。
+		// 阶段目标只允许写调用者所属的当前对话，主卡与旁支对话分别保存。
+		setCurrentWorkPhaseGoal: async (workspaceScope, input, evidence) => {
+			const intent = await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+				taskMutationIntentKind: "kanban_cli_task_set_current_work_phase_goal",
+				kanbanRequestOriginActorEvidence: evidence,
+			});
+			const actor = intent.resolvedKanbanActor;
+			if (
+				actor.kanbanActorKind !== "kanban_board_card_work_unit" ||
+				actor.actingKanbanBoardCardWorkUnit.workspaceId !== workspaceScope.workspaceId
+			) {
+				throw new TRPCError({ code: "FORBIDDEN", message: "当前调用环境没有可解析的 Task 身份。" });
+			}
+			const taskId = actor.actingKanbanBoardCardWorkUnit.taskId;
+			const conversationId = intent.actorKanbanTaskConversationSessionId ?? taskId;
+			const acp = await deps.getScopedAcpTaskSessionService(workspaceScope);
+			const terminal = await deps.getScopedTerminalManager(workspaceScope);
+			const acpSummary = acp.getSummary(conversationId);
+			const summary = acpSummary ?? terminal.getSummary(conversationId);
+			const nativeId = summary?.agentNativeConversationSessionIdentity?.nativeSessionId;
+			if (
+				!summary ||
+				resolveSessionCategoryAndAttributedTaskCardId(summary).attributedTaskCardId !== taskId ||
+				(intent.actorNativeConversationSessionIdentity &&
+					intent.actorNativeConversationSessionIdentity.nativeConversationSessionId !== nativeId)
+			) {
+				throw new TRPCError({ code: "FORBIDDEN", message: "当前对话身份缺失或不属于当前 Task。" });
+			}
+			const goal =
+				input.goal === null
+					? null
+					: {
+							goalText: input.goal,
+							source: "agent_explicit_declaration" as const,
+							updatedAt: Math.max(Date.now(), (summary.agentCurrentWorkPhaseGoalInvalidatedAt ?? 0) + 1),
+							owningNativeConversationSessionId: nativeId ?? null,
+							owningKanbanTaskConversationSessionId: conversationId,
+							owningRuntimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? null,
+						};
+			const updated = acpSummary
+				? acp.applyCurrentWorkPhaseGoal(conversationId, goal)
+				: terminal.applyCurrentWorkPhaseGoal(conversationId, goal);
+			return { ok: true, summary: updated };
+		},
+
 		suggestTaskNamesFromTaskDescription: async (_workspaceScope, input) => {
 			return await suggestTaskNamesFromTaskDescription(input);
 		},

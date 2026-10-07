@@ -1,3 +1,4 @@
+import { projectUniqueNativeInProgressWorkPhaseGoal } from "../core/agent-current-work-phase-goal";
 // 协议翻译层：把一条 ACP SessionUpdate 变成 summary facet 补丁 + 聊天消息 mutation。
 // 单一入口 applyAcpSessionUpdate，对位 src/cline-sdk/cline-event-adapter.ts。
 //
@@ -181,6 +182,31 @@ function applyPlan(
 	context: AcpSessionUpdateContext,
 	entries: ReadonlyArray<{ content: string; status: string; priority: string }>,
 ): void {
+	const nativeSessionId = context.entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId;
+	if (
+		!context.isReplayingPersistedConversationHistory &&
+		nativeSessionId &&
+		resolveSessionFacets(context.entry.summary).turnOwner === "agent"
+	) {
+		const goalText = projectUniqueNativeInProgressWorkPhaseGoal(entries);
+		context.emitSummary(
+			updateAcpSummary(context.entry, {
+				agentNativeCurrentWorkPhaseGoal: goalText
+					? {
+							goalText,
+							source: "acp_structured_plan",
+							updatedAt: Math.max(
+								now(),
+								(context.entry.summary.agentCurrentWorkPhaseGoalInvalidatedAt ?? 0) + 1,
+							),
+							owningNativeConversationSessionId: nativeSessionId,
+							owningKanbanTaskConversationSessionId: context.taskId,
+							owningRuntimeSessionIncarnationId: context.entry.summary.runtimeSessionIncarnationId ?? null,
+						}
+					: null,
+			}),
+		);
+	}
 	// plan 每次都是全量列表、客户端整体替换，所以只维护一条消息反复重写。
 	const content = renderAcpPlanEntriesAsMarkdown(entries);
 	if (context.entry.planMessageId) {

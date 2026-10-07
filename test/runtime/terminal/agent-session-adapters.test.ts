@@ -2263,7 +2263,12 @@ describe("Kimi 延迟首发文本", () => {
 			prompt: "第一行\n第二行",
 			resumeFromTrash,
 		});
-		expect(launch.deferredStartupPromptText).toBe(resumeFromTrash ? undefined : "第一行\n第二行");
+		if (resumeFromTrash) {
+			expect(launch.deferredStartupPromptText).toBeUndefined();
+		} else {
+			expect(launch.deferredStartupPromptText).toContain("rename-current-task");
+			expect(launch.deferredStartupPromptText?.endsWith("第一行\n第二行")).toBe(true);
+		}
 	});
 });
 

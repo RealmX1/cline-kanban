@@ -671,6 +671,8 @@ export default function App(): ReactElement {
 		newTaskAgentSessionInitialization,
 		setNewTaskAgentSessionInitialization,
 		editingTaskId,
+		editTaskName,
+		setEditTaskName,
 		editTaskPrompt,
 		setEditTaskPrompt,
 		editTaskImages,
@@ -1931,6 +1933,8 @@ export default function App(): ReactElement {
 						open={!isCurrentProjectRuntimeUnavailable && (isInlineTaskCreateOpen || editingTaskId !== null)}
 						onOpenChange={handleCreateDialogOpenChange}
 						taskEditorMode={editingTaskId ? "edit" : "create"}
+						editingTaskName={editTaskName}
+						onEditingTaskNameChange={setEditTaskName}
 						editingTaskId={editingTaskId}
 						editTaskFormSeededFromSavedDraftAt={editTaskFormSeededFromSavedDraftAt}
 						onRevertEditTaskFormToSavedTaskContent={handleRevertEditTaskFormToSavedTaskContent}

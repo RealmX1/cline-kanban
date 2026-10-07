@@ -117,11 +117,11 @@ setInterval(() => {}, 1000);
 					}),
 				],
 			});
-		async function runCli(arguments_: string[], cwd: string) {
+		async function runCli(arguments_: string[], cwd: string, actorEnvironment: Record<string, string> = {}) {
 			const child = spawnedChildProcessRegistry.register(
 				spawn(process.execPath, [...nodeCliArguments, ...arguments_], {
 					cwd,
-					env: environment,
+					env: { ...environment, ...actorEnvironment },
 					stdio: ["ignore", "pipe", "pipe", "ipc"],
 				}),
 			);
@@ -172,7 +172,7 @@ setInterval(() => {}, 1000);
 			console.log(`通过：${description}`);
 		};
 		try {
-			startOwnedProcess(
+			const initialRuntimeProcess = startOwnedProcess(
 				"isolated-runtime",
 				process.execPath,
 				[...nodeCliArguments, "--port", String(runtimePort), "--no-open", "--no-passcode"],
@@ -483,7 +483,23 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 			const createdByKeyboardId = await createOtherProjectTaskViaDialog("c 键往另一个项目建卡");
 			if (!createdByKeyboardId) throw new Error("缺创建结果");
 			recordCheck("Board Scope c 键往别的项目建卡不切项目");
-			await row(createdByKeyboardId).click();
+			await row(createdByKeyboardId).locator("button").first().hover();
+			await hoverCard.waitFor();
+			await hoverCard.getByRole("button", { name: "Keep open", exact: true }).click();
+			await row(createdByKeyboardId).hover();
+			const expandedBacklogPencil = row(createdByKeyboardId).getByRole("button", {
+				name: "Edit task title",
+				exact: true,
+			});
+			expect(
+				await expandedBacklogPencil.evaluate((element) => {
+					const bounds = element.getBoundingClientRect();
+					return element.contains(
+						element.ownerDocument.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
+					);
+				}),
+			).toBe(true);
+			await expandedBacklogPencil.click();
 			const editor = page.getByRole("dialog").filter({ hasText: "Edit backlog task" });
 			await editor
 				.locator('[data-testid="task-creation-target-project-field"]')
@@ -511,7 +527,7 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				.taskCardFieldValuePatch;
 			expect(editorFieldPatch).toEqual({ prompt: "仅保存修改的 prompt" });
 			expect(page.url()).toContain(`task=${focusId}`);
-			recordCheck("任意项目 backlog 原地编辑，保存只改过的字段并保留并发改名");
+			recordCheck("跨项目 expanded compact Pencil 中心命中编辑器；只保存改过字段并保留并发改名");
 			await page.getByRole("button", { name: "Create task", exact: true }).click();
 			await createOtherProjectTaskViaDialog("面板按钮往另一个项目建卡");
 			recordCheck("面板顶部 Create task 入口");
@@ -575,6 +591,158 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				path: join(evidenceOutputDirectory, "compact-card-this-project-focused-stage-header-rail.png"),
 			});
 			recordCheck("阶段 5 rail 焦点卡克隆保留相同标题、活动和目录/git 内容");
+			const actorEnvironment = {
+				KANBAN_PROJECT_PATH: firstProject.repositoryPath,
+				KANBAN_TASK_ID: dragStartId,
+				KANBAN_TASK_CONVERSATION_SESSION_ID: dragStartId,
+			};
+			await runCli(
+				["task", "set-current-work-phase-goal", "--goal", "验证当前阶段的最终行为"],
+				firstProject.repositoryPath,
+				actorEnvironment,
+			);
+			await observeUntil(
+				async () =>
+					(await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal?.goalText === "验证当前阶段的最终行为",
+				"CLI 写入阶段目标",
+			);
+			await page
+				.locator('[data-task-card-render-role="pinned_card_copy_in_task_pinboard"]')
+				.filter({ hasText: "拖放启动" })
+				.locator("[data-agent-current-work-phase-goal]")
+				.waitFor();
+			await focusedCardRailCopy.locator("[data-agent-current-work-phase-goal]").waitFor();
+			expect(await page.locator("[data-agent-current-work-phase-goal]").count()).toBeGreaterThanOrEqual(3);
+			await runCli(
+				[
+					"task",
+					"rename-current-task",
+					"--title",
+					"[FIX,UI]验证 Task 名称与阶段目标",
+					"--reason",
+					"已核对完整任务范围",
+				],
+				firstProject.repositoryPath,
+				actorEnvironment,
+			);
+			expect((await taskState(dragStartId)).card?.taskCommentEntries?.at(-1)?.commentText).toContain(
+				"已核对完整任务范围",
+			);
+			const commentsBeforeRetry = (await taskState(dragStartId)).card?.taskCommentEntries?.length;
+			await runCli(
+				["task", "rename-current-task", "--title", "[FIX,UI]验证 Task 名称与阶段目标", "--reason", "同名重试"],
+				firstProject.repositoryPath,
+				actorEnvironment,
+			);
+			expect((await taskState(dragStartId)).card?.taskCommentEntries?.length).toBe(commentsBeforeRetry);
+			await expect(
+				runCli(
+					["task", "rename-current-task", "--title", "不得改名", "--reason", "身份缺失"],
+					firstProject.repositoryPath,
+				),
+			).rejects.toThrow("隔离 CLI 失败");
+			const byTheWayConversationId = "task-conversation-session-isolated-phase-goal";
+			const byTheWayStart = await runtimeClient(alphaWorkspaceId).runtime.startTaskSession.mutate({
+				taskId: byTheWayConversationId,
+				workspaceTaskId: dragStartId,
+				prompt: "旁支问题",
+				baseRef: "main",
+				agentId: "claude",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: dragStartId,
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "旁支问题",
+				},
+			});
+			expect(byTheWayStart.ok).toBe(true);
+			await runCli(
+				["task", "set-current-work-phase-goal", "--goal", "只属于旁支的阶段目标"],
+				firstProject.repositoryPath,
+				{ ...actorEnvironment, KANBAN_TASK_CONVERSATION_SESSION_ID: byTheWayConversationId },
+			);
+			expect((await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal?.goalText).toBe(
+				"验证当前阶段的最终行为",
+			);
+			expect((await taskState(byTheWayConversationId)).summary?.agentCurrentWorkPhaseGoal?.goalText).toBe(
+				"只属于旁支的阶段目标",
+			);
+			await expect(
+				runCli(["task", "set-current-work-phase-goal", "--goal", "不属于这个 Task"], firstProject.repositoryPath, {
+					...actorEnvironment,
+					KANBAN_TASK_ID: focusId,
+					KANBAN_TASK_CONVERSATION_SESSION_ID: byTheWayConversationId,
+				}),
+			).rejects.toThrow("隔离 CLI 失败");
+			await runCli(["task", "clear-current-work-phase-goal"], firstProject.repositoryPath, actorEnvironment);
+			expect((await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal).toBeNull();
+			recordCheck("CLI 自改名按环境归属且同名幂等；阶段目标同步主卡、置顶分身、rail 与会话详情");
+
+			await page.setViewportSize({ width: 1600, height: 1000 });
+			const namingBacklogId = await createTask(firstProject.repositoryPath, "Backlog 已保存名称");
+			await observeUntil(async () => (await card(namingBacklogId).count()) > 0, "新 Backlog 卡广播");
+			await clickCardAction(namingBacklogId, "Pin task to pinboard");
+			const namingPinDialog = page.getByRole("dialog").filter({ hasText: /Pin task|Pin to/ });
+			if (await namingPinDialog.count()) await namingPinDialog.getByRole("button", { name: /Pin/ }).last().click();
+			const compactNamingCard = page
+				.locator('[data-task-card-render-role="pinned_card_copy_in_task_pinboard"]')
+				.filter({ hasText: "Backlog 已保存名称" });
+			await compactNamingCard.waitFor();
+			await compactNamingCard.hover();
+			const pencil = compactNamingCard.getByRole("button", { name: "Edit task title", exact: true });
+			const pencilCenterHitsPencil = await pencil.evaluate((element) => {
+				const bounds = element.getBoundingClientRect();
+				return element.contains(
+					element.ownerDocument.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
+				);
+			});
+			expect(pencilCenterHitsPencil).toBe(true);
+			await pencil.click();
+			const namingEditor = page.getByRole("dialog").filter({ hasText: "Edit backlog task" });
+			expect(await namingEditor.getByLabel("Task name", { exact: true }).inputValue()).toBe("Backlog 已保存名称");
+			await namingEditor.getByLabel("Task name", { exact: true }).fill("[FIX,UI]补齐 Backlog 名称编辑");
+			await namingEditor.getByRole("button", { name: "Save changes", exact: true }).click();
+			await observeUntil(
+				async () => (await taskState(namingBacklogId)).card?.title === "[FIX,UI]补齐 Backlog 名称编辑",
+				"Backlog 名称保存",
+			);
+			expect((await taskState(namingBacklogId)).columnId).toBe("backlog");
+			expect((await taskState(namingBacklogId)).summary?.pid ?? null).toBeNull();
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "task-naming-compact-backlog-pencil-and-phase-goal.png"),
+			});
+			recordCheck("compact pinboard 编辑按钮中心命中 Pencil，名称预填并保存，不会意外启动 Task");
+
+			await runCli(
+				["task", "set-current-work-phase-goal", "--goal", "跨运行时重启保留的阶段目标"],
+				firstProject.repositoryPath,
+				actorEnvironment,
+			);
+			const phaseGoalBeforeRestart = (await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal;
+			initialRuntimeProcess.send({ type: "kanban.shutdown" });
+			await observeUntil(async () => hasChildProcessExited(initialRuntimeProcess), "隔离 runtime 优雅退出");
+			startOwnedProcess(
+				"isolated-runtime-after-restart",
+				process.execPath,
+				[...nodeCliArguments, "--port", String(runtimePort), "--no-open", "--no-passcode"],
+				firstProject.repositoryPath,
+			);
+			await observeUntil(async () => {
+				try {
+					return (
+						JSON.stringify((await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal) ===
+						JSON.stringify(phaseGoalBeforeRestart)
+					);
+				} catch {
+					return false;
+				}
+			}, "阶段目标跨运行时进程重启持久保存");
+			expect((await taskState(dragStartId)).card?.title).toBe("[FIX,UI]验证 Task 名称与阶段目标");
+			recordCheck("当前主对话与旁支目标分别归属；错误 Task 身份被拒绝；目标与名称跨 runtime 重启保存");
+
 			expect(pageErrors).toEqual([]);
 			expect(pageRequests.some((url) => url.includes(":3484/"))).toBe(false);
 			expect(pageRequests.some((url) => url.includes("workspace.setTaskPinboardPinStateOfTaskCard"))).toBe(false);

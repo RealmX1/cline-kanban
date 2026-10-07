@@ -15,6 +15,7 @@ import {
 	type TaskConversationSessionSharingExecutionWorkingDirectory,
 } from "../core/agent-conversation-session-resume-addressing";
 import type {
+	RuntimeAgentCurrentWorkPhaseGoal,
 	RuntimeAgentId,
 	RuntimeAgentNativeConversationHeldByHarnessBackgroundSessionObservation,
 	RuntimeAgentNativeConversationPersistenceObservation,
@@ -1582,15 +1583,28 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 否则它的等待者（RVF）会永远停在 pending——这正是契约里 superseded_by_later_delivery 的用途。
 		settleActiveProgrammaticDelivery(active, "delivery_failed", "superseded_by_later_delivery");
 		if (options?.onDeliveryOutcome) {
-			active.programmaticDeliveryReceipt = {
+			const receipt: PendingProgrammaticDeliveryReceipt = {
 				idempotencyKey: options.idempotencyKey ?? null,
 				phase: "awaiting_readiness",
 				promptText: text,
 				outputChunkArrivalSequenceNumberAtSubmitCarriageReturn: null,
 				queuedBehindActiveAgentTurn: false,
 				settled: false,
-				observer: options.onDeliveryOutcome,
+				observer: (outcome) => {
+					if (
+						outcome.status === "delivered_and_submit_confirmed" ||
+						outcome.status === "delivered_queued_behind_active_agent_turn"
+					) {
+						if (this.entries.get(taskId)?.active === active)
+							this.invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt(
+								taskId,
+								receipt.firstSubmitCarriageReturnAtEpochMs ?? now(),
+							);
+					}
+					options.onDeliveryOutcome?.(outcome);
+				},
 			};
+			active.programmaticDeliveryReceipt = receipt;
 		}
 		const generation = ++active.taskChatInputDeliveryGeneration;
 		const deadlineAt = now() + TASK_CHAT_INPUT_DELIVERY_DEADLINE_MS;
@@ -2179,6 +2193,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		if (active.programmaticDeliveryReceipt?.phase === "awaiting_submit_confirmation") {
+			active.programmaticDeliveryReceipt.firstSubmitCarriageReturnAtEpochMs ??= now();
 			active.programmaticDeliveryReceipt.outputChunkArrivalSequenceNumberAtSubmitCarriageReturn =
 				active.ptyOutputChunkArrivalSequenceNumber;
 		}
@@ -5297,6 +5312,47 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
+	applyCurrentWorkPhaseGoal(
+		taskId: string,
+		goal: RuntimeAgentCurrentWorkPhaseGoal | null,
+		nativeProjection = false,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) return null;
+		if (
+			goal &&
+			(goal.owningKanbanTaskConversationSessionId !== taskId ||
+				(goal.owningRuntimeSessionIncarnationId != null &&
+					goal.owningRuntimeSessionIncarnationId !== entry.summary.runtimeSessionIncarnationId) ||
+				(goal.owningNativeConversationSessionId !== null &&
+					goal.owningNativeConversationSessionId !==
+						entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId))
+		)
+			return null;
+		const summary = updateSummary(
+			entry,
+			nativeProjection ? { agentNativeCurrentWorkPhaseGoal: goal } : { agentCurrentWorkPhaseGoal: goal },
+		);
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
+	invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt(
+		taskId: string,
+		deliveredAt = now(),
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) return null;
+		const summary = updateSummary(entry, {
+			agentCurrentWorkPhaseGoalInvalidatedAt: Math.max(
+				deliveredAt,
+				entry.summary.agentCurrentWorkPhaseGoalInvalidatedAt ?? 0,
+			),
+		});
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
 	applyHookActivity(taskId: string, activity: Partial<RuntimeTaskHookActivity>): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
@@ -5490,6 +5546,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 状态机翻 running 无条件；但 resume substantive guard 只在「用户真·继续」时解除——
 		// 仅源自 UserPromptSubmit 的 to_in_progress 才算，PostToolUse 等自动续跑旧回合的中途活动不算，
 		// 否则 Claude --continue 自动续跑一次工具调用就会误解除 guard、让重播刷 lastSubstantiveOutputAt。
+		if (options?.userInitiatedResume === true) {
+			this.invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt(
+				taskId,
+				options.domainEventTiming?.domainEventObservedAtEpochMs ?? now(),
+			);
+			summary = entry.summary;
+		}
 		if (entry.active && options?.userInitiatedResume === true) {
 			clearResumeSubstantiveGuard(entry.active);
 		}

@@ -1,3 +1,7 @@
+import { mergeWorkPhaseGoalConversationOwnership } from "./agent-current-work-phase-goal";
+
+export { resolveAgentCurrentWorkPhaseGoalForDisplay } from "./agent-current-work-phase-goal";
+
 // 会话「执行活性」派生的单一真相源（纯函数、零运行时依赖，可被 Node 后端 / 浏览器前端 /
 // 部署探针共享 import；唯一的类型 import 在编译期被擦除，故打进浏览器 bundle 不会带入任何
 // Node 依赖）。
@@ -268,7 +272,7 @@ export function mergeSummaryWithFacets(
 	patch: Partial<RuntimeTaskSessionSummary>,
 	domainEventTiming?: SummaryWriteDomainEventTiming,
 ): RuntimeTaskSessionSummary {
-	const merged = { ...prev, ...patch };
+	const merged = mergeWorkPhaseGoalConversationOwnership(prev, { ...prev, ...patch });
 	const patchHasFacet =
 		patch.turnOwner !== undefined || patch.liveness !== undefined || patch.userTurnKind !== undefined;
 	const patchHasState = patch.state !== undefined;
