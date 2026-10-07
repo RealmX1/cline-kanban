@@ -125,6 +125,7 @@ import type {
 	RuntimeRejectExploratoryFindingRequest,
 	RuntimeRejectExploratoryFindingResponse,
 	RuntimeReleaseDeferredRestorationHarnessNotificationsResponse,
+	RuntimeRenameCurrentTaskRequest,
 	RuntimeRequestExplorationThreadGraphMaintenanceRequest,
 	RuntimeRequestExplorationThreadGraphMaintenanceResponse,
 	RuntimeRequestVerificationCompleteRequest,
@@ -136,6 +137,7 @@ import type {
 	RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponse,
 	RuntimeSaveExploratoryFindingRequest,
 	RuntimeSaveExploratoryFindingResponse,
+	RuntimeSetCurrentWorkPhaseGoalRequest,
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
 	RuntimeSlashCommandsResponse,
@@ -339,6 +341,7 @@ import {
 	runtimeRejectExploratoryFindingRequestSchema,
 	runtimeRejectExploratoryFindingResponseSchema,
 	runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema,
+	runtimeRenameCurrentTaskRequestSchema,
 	runtimeRequestExplorationThreadGraphMaintenanceRequestSchema,
 	runtimeRequestExplorationThreadGraphMaintenanceResponseSchema,
 	runtimeRequestVerificationCompleteRequestSchema,
@@ -350,6 +353,7 @@ import {
 	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema,
 	runtimeSaveExploratoryFindingRequestSchema,
 	runtimeSaveExploratoryFindingResponseSchema,
+	runtimeSetCurrentWorkPhaseGoalRequestSchema,
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
 	runtimeSlashCommandsResponseSchema,
@@ -526,6 +530,12 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeClineUpdateProviderRequest,
 		) => Promise<RuntimeClineUpdateProviderResponse>;
+		setCurrentWorkPhaseGoal: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeSetCurrentWorkPhaseGoalRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskSessionInputResponse>;
+
 		suggestTaskNamesFromTaskDescription: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeTaskNameSuggestionRequest,
@@ -858,6 +868,12 @@ export interface RuntimeTrpcContext {
 			input: RuntimeTaskCardActionPermanentlyDeleteRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeTaskCardActionPermanentlyDeleteResponse>;
+		renameCurrentTask: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRenameCurrentTaskRequest,
+			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskCardActionUpdateFieldValuesResponse>;
+
 		updateTaskCardFieldValues: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskCardActionUpdateFieldValuesRequest,
@@ -1230,6 +1246,18 @@ export const runtimeAppRouter = t.router({
 			}),
 		// mutation 而非 query：每次点「起名」都要真发一次外部请求拿一组**新**候选，被查询缓存去重掉
 		// 就实现不了「再按一次再给三个」。
+		setCurrentWorkPhaseGoal: workspaceProcedure
+			.input(runtimeSetCurrentWorkPhaseGoalRequestSchema)
+			.output(runtimeTaskSessionInputResponseSchema)
+			.mutation(
+				async ({ ctx, input }) =>
+					await ctx.runtimeApi.setCurrentWorkPhaseGoal(
+						ctx.workspaceScope,
+						input,
+						ctx.kanbanRequestOriginActorEvidence,
+					),
+			),
+
 		suggestTaskNamesFromTaskDescription: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 			.input(runtimeTaskNameSuggestionRequestSchema)
 			.output(runtimeTaskNameSuggestionResponseSchema)
@@ -1823,6 +1851,18 @@ export const runtimeAppRouter = t.router({
 					ctx.kanbanRequestOriginActorEvidence,
 				);
 			}),
+		renameCurrentTask: workspaceProcedure
+			.input(runtimeRenameCurrentTaskRequestSchema)
+			.output(runtimeTaskCardActionUpdateFieldValuesResponseSchema)
+			.mutation(
+				async ({ ctx, input }) =>
+					await ctx.taskCardActionApi.renameCurrentTask(
+						ctx.workspaceScope,
+						input,
+						ctx.kanbanRequestOriginActorEvidence,
+					),
+			),
+
 		updateTaskCardFieldValues: workspaceProcedure
 			.input(runtimeTaskCardActionUpdateFieldValuesRequestSchema)
 			.output(runtimeTaskCardActionUpdateFieldValuesResponseSchema)

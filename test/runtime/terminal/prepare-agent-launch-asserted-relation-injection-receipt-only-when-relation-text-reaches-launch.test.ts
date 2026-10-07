@@ -102,10 +102,14 @@ describe("prepareAgentLaunch hands out the injection receipt commit only when th
 		expect(launch.commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded).toBeUndefined();
 	});
 
-	it("withholds it when the agent never carries the relation text (kimi)", async () => {
+	it("Kimi 的延迟首轮输入携带关系段时提供注入回执", async () => {
 		const launch = await prepareAgentLaunch(launchInputFor("kimi"));
 
-		expect(launch.commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded).toBeUndefined();
+		expect(launch.deferredStartupPromptText).toContain(RELATION_NEIGHBORHOOD_APPEND_SYSTEM_PROMPT_TEXT);
+		expect(launch.commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded).toBe(
+			commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded,
+		);
+		expect(commitAssertedRelationInjectionReceiptAfterSessionLaunchSucceeded).not.toHaveBeenCalled();
 	});
 
 	it("withholds it when the injected text lists no asserted relation", async () => {

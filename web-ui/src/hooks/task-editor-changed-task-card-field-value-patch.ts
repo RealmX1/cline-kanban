@@ -13,6 +13,7 @@ import type { BoardCard, TaskAutoReviewMode, TaskImage } from "@/types";
 
 // 编辑对话框点保存时，表单里的全部字段值（baseRef 已按默认分支补齐、prompt 已 trim）。
 export interface TaskEditorSubmittedTaskCardFieldValues {
+	taskTitleOverride?: string;
 	prompt: string;
 	images: TaskImage[];
 	startInPlanMode: boolean;
@@ -42,7 +43,7 @@ function areOptionalStructuredFieldValuesEqual(left: unknown, right: unknown): b
  *
  * 卡片上缺省、表单里补了默认值的字段（权限档、会话模式、自动 review、worktree 模式）与卡片「不同」，照发：
  * 改动前浏览器整卡覆盖时也会把这些默认值写成显式值，这里保持同样的落盘结果。
- * 标题不在表单里，永远不发（服务端保留最新标题）。
+ * 名称同样与铺表单时的值比较；未修改时不发，保留服务端并发改名。
  */
 export function buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(
 	taskCardTheEditorFormWasSeededFrom: BoardCard,
@@ -50,6 +51,10 @@ export function buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEdi
 ): RuntimeTaskCardFieldValuePatch {
 	const seed = taskCardTheEditorFormWasSeededFrom;
 	const patch: RuntimeTaskCardFieldValuePatch = {};
+	if (submitted.taskTitleOverride !== undefined && submitted.taskTitleOverride.trim() !== seed.title) {
+		patch.title = submitted.taskTitleOverride.trim() || null;
+	}
+
 	if (submitted.prompt !== seed.prompt.trim()) {
 		patch.prompt = submitted.prompt;
 	}

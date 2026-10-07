@@ -74,6 +74,7 @@ export async function updateTaskCardFieldValuesThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;
 	taskCardFieldValuePatch: RuntimeTaskCardFieldValuePatch;
+	expectedTaskTitleAndPromptForAiNameBackfill?: { title: string; prompt: string };
 	currentProjectBoardForOptimisticOverlay?: BoardData;
 	optimisticBoardTransformation?: (board: BoardData) => { board: BoardData; updated: boolean };
 	// null = 不属于任何已定义的发起方（AI 起名回填这类浏览器端异步自动化）：不带标注，runtime 如实记缺标注。
@@ -104,6 +105,7 @@ export async function updateTaskCardFieldValuesThroughRuntime(input: {
 		sendCommand: () =>
 			updateTaskCardFieldValuesInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				expectedTaskTitleAndPromptForAiNameBackfill: input.expectedTaskTitleAndPromptForAiNameBackfill,
 				taskCardFieldUpdate: {
 					taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
 					taskCardFieldValuePatch: input.taskCardFieldValuePatch,

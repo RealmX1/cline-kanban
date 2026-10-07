@@ -36,6 +36,7 @@ import {
 	loadWorkspaceContextById,
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 } from "../state/workspace-state";
+import { readClaudeNativeTaskListCurrentWorkPhaseGoal } from "../terminal/claude-native-task-list-current-work-phase-goal-projection";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
@@ -168,6 +169,10 @@ function resolveHookEventObservedAtEpochMs(
 }
 
 export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcContext["hooksApi"] {
+	const latestClaudeNativeTaskListProjectionRequestByConversation = new Map<
+		string,
+		{ observedAt: number; token: symbol }
+	>();
 	const persistNativeConversationIdentity =
 		deps.persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId ??
 		persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId;
@@ -425,6 +430,10 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				event === "to_in_progress" &&
 				(normalizedHookEventName === "userpromptsubmit" || normalizedHookEventName === "beforeagent");
 			if (isExplicitUserTurnStartHookEvent && !isClaudeHarnessGeneratedTaskNotification) {
+				manager.invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt?.(
+					taskId,
+					hookEventObservedAtEpochMs ?? Date.now(),
+				);
 				manager.disarmRestorationContinuationGuard?.(taskId);
 			}
 			if (isClaudeUserPromptSubmit && !isClaudeHarnessGeneratedTaskNotification) {
@@ -497,6 +506,75 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					logAgentSessionRetentionWarning(
 						`pending-user-decision-agent-terminal-resolution-failed workspaceId=${workspaceId} taskId=${taskId} reason=${reason}`,
 					);
+				}
+			}
+
+			if (
+				body.claudeNativeTaskListIdForPhaseGoalProjection !== undefined &&
+				body.hookEventFiredInsideSubagentContext !== true &&
+				body.metadata?.source?.toLowerCase() === "claude" &&
+				normalizedHookEventName === "posttooluse" &&
+				/^task(create|update|list|get)$/iu.test(body.metadata?.toolName ?? "")
+			) {
+				const current = manager.getSummary(taskId);
+				const nativeId = current?.agentNativeConversationSessionIdentity?.nativeSessionId;
+				if (
+					current &&
+					nativeId &&
+					resolveSessionFacets(current).turnOwner === "agent" &&
+					(hookEventObservedAtEpochMs ?? Date.now()) > (current.agentCurrentWorkPhaseGoalInvalidatedAt ?? -1)
+				) {
+					const projectionKey = `${workspaceId}:${taskId}`;
+					const observedAt = hookEventObservedAtEpochMs ?? Date.now();
+					const previousRequest = latestClaudeNativeTaskListProjectionRequestByConversation.get(projectionKey);
+					if (!previousRequest || previousRequest.observedAt <= observedAt) {
+						const requestToken = Symbol();
+						latestClaudeNativeTaskListProjectionRequestByConversation.set(projectionKey, {
+							observedAt,
+							token: requestToken,
+						});
+						const reportedClaudeNativeTaskListIdForPhaseGoalProjection =
+							body.claudeNativeTaskListIdForPhaseGoalProjection;
+						// 原生清单仅补充阶段目标；慢盘读取不应占用 hook 响应窗口或阻塞活动/facet 处理。
+						void (async () => {
+							try {
+								const projection = await readClaudeNativeTaskListCurrentWorkPhaseGoal({
+									nativeConversationSessionId: nativeId,
+									reportedTaskListId: reportedClaudeNativeTaskListIdForPhaseGoalProjection,
+									userPromptDeliveredAt: current.agentCurrentWorkPhaseGoalInvalidatedAt,
+								});
+								const afterRead = manager.getSummary(taskId);
+								if (
+									afterRead &&
+									latestClaudeNativeTaskListProjectionRequestByConversation.get(projectionKey)?.token ===
+										requestToken &&
+									afterRead.runtimeSessionIncarnationId === current.runtimeSessionIncarnationId &&
+									afterRead.agentNativeConversationSessionIdentity?.nativeSessionId === nativeId &&
+									afterRead.agentCurrentWorkPhaseGoalInvalidatedAt ===
+										current.agentCurrentWorkPhaseGoalInvalidatedAt &&
+									resolveSessionFacets(afterRead).turnOwner === "agent"
+								)
+									manager.applyCurrentWorkPhaseGoal(
+										taskId,
+										projection
+											? {
+													...projection,
+													source: "claude_native_task_list",
+													owningNativeConversationSessionId: nativeId,
+													owningKanbanTaskConversationSessionId: taskId,
+													owningRuntimeSessionIncarnationId: current.runtimeSessionIncarnationId ?? null,
+												}
+											: null,
+										true,
+									);
+							} catch (error) {
+								const reason = error instanceof Error ? error.message : String(error);
+								logAgentSessionRetentionWarning(
+									`claude-native-task-list-current-work-phase-goal-projection-failed workspaceId=${workspaceId} taskId=${taskId} reason=${reason}`,
+								);
+							}
+						})();
+					}
 				}
 			}
 

@@ -326,6 +326,7 @@ interface HookSnapshot {
 	newTaskConversationMode: RuntimeTaskConversationMode;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
+	editTaskName: string;
 	editTaskImages: TaskImage[];
 	editTaskStartInPlanMode: boolean;
 	editTaskWorktreeMode: RuntimeTaskWorktreeMode;
@@ -355,6 +356,7 @@ interface HookSnapshot {
 	handleSaveEditedTask: () => string | null;
 	handleSaveAndStartEditedTask: () => void;
 	setEditTaskPrompt: (value: string) => void;
+	setEditTaskName: (value: string) => void;
 	setEditTaskImages: (value: TaskImage[]) => void;
 	setEditTaskAutoReviewEnabled: (value: boolean) => void;
 	setEditTaskAutoReviewMode: (value: TaskAutoReviewMode) => void;
@@ -443,6 +445,7 @@ function HookHarness({
 			newTaskConversationMode: editor.newTaskConversationMode,
 			editingTaskId: editor.editingTaskId,
 			editTaskPrompt: editor.editTaskPrompt,
+			editTaskName: editor.editTaskName,
 			editTaskImages: editor.editTaskImages,
 			editTaskStartInPlanMode: editor.editTaskStartInPlanMode,
 			editTaskWorktreeMode: editor.editTaskWorktreeMode,
@@ -472,6 +475,7 @@ function HookHarness({
 			handleSaveEditedTask: editor.handleSaveEditedTask,
 			handleSaveAndStartEditedTask: editor.handleSaveAndStartEditedTask,
 			setEditTaskPrompt: editor.setEditTaskPrompt,
+			setEditTaskName: editor.setEditTaskName,
 			setEditTaskImages: editor.setEditTaskImages,
 			setEditTaskAutoReviewEnabled: editor.setEditTaskAutoReviewEnabled,
 			setEditTaskAutoReviewMode: editor.setEditTaskAutoReviewMode,
@@ -502,6 +506,7 @@ function HookHarness({
 		editor.handleCreateTasks,
 		editor.handleOpenCreateTask,
 		editor.editTaskPrompt,
+		editor.editTaskName,
 		editor.editTaskImages,
 		editor.editTaskAgentSessionInitialization,
 		editor.editTaskConversationMode,
@@ -583,6 +588,21 @@ describe("useTaskEditor", () => {
 		localStorage.clear();
 	});
 
+	async function renderCreateHarness(): Promise<{ current: HookSnapshot | null }> {
+		const captured: { current: HookSnapshot | null } = { current: null };
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						captured.current = snapshot;
+					}}
+				/>,
+			);
+		});
+		return captured;
+	}
+
 	it("uses the name typed in the task name field as the card title", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
@@ -609,21 +629,6 @@ describe("useTaskEditor", () => {
 	});
 
 	describe("建卡 id 由 runtime 预分配（dd2db Y-EVENT-12）与发起方登记（Y-EVENT-8）", () => {
-		async function renderCreateHarness(): Promise<{ current: HookSnapshot | null }> {
-			const captured: { current: HookSnapshot | null } = { current: null };
-			await act(async () => {
-				root.render(
-					<HookHarness
-						initialBoard={createBoard()}
-						onSnapshot={(snapshot) => {
-							captured.current = snapshot;
-						}}
-					/>,
-				);
-			});
-			return captured;
-		}
-
 		it("primes the project's id pool on mount and again when the create dialog opens", async () => {
 			const captured = await renderCreateHarness();
 			expect(runtimeAllocatedTaskIdPrefetchPoolStandIn.ensuredWorkspaceIds).toEqual(["project-1"]);
@@ -732,7 +737,20 @@ describe("useTaskEditor", () => {
 			});
 			expect(
 				readPendingWebUiBoardMutationInitiatorForTaskCardAspect(createdTaskId, "task_card_field_values"),
-			).toBeNull();
+			).toBeUndefined();
+			expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith(
+				"project-1",
+				expect.objectContaining({
+					expectedTaskTitleAndPromptForAiNameBackfill: {
+						title: "Login redirects to a blank page after SSO",
+						prompt: "Login redirects to a blank page after SSO",
+					},
+				}),
+			);
+
+			expect(updateTaskCardFieldValuesInWorkspaceMock.mock.calls.at(-1)?.[1]).not.toHaveProperty(
+				"boardMutationInitiator",
+			);
 
 			// 用户改名走 taskCardAction：发起方随命令交给服务端（账本在服务端记），不进 saveState 的待配登记。
 			await act(async () => {
@@ -782,7 +800,20 @@ describe("useTaskEditor", () => {
 			});
 		});
 
-		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("Fix the SSO redirect");
+		// 服务端锁内回填，浏览器等广播；不再写一份可能覆盖并发改名的旧 board。
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenCalledWith(
+			"project-1",
+			expect.objectContaining({
+				taskCardFieldUpdate: {
+					taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+					taskCardFieldValuePatch: { title: "Fix the SSO redirect" },
+				},
+				expectedTaskTitleAndPromptForAiNameBackfill: {
+					title: "Login redirects to a blank page after SSO",
+					prompt: "Login redirects to a blank page after SSO",
+				},
+			}),
+		);
 	});
 
 	it("leaves the derived title alone when the naming endpoint is unavailable", async () => {
@@ -1057,6 +1088,107 @@ describe("useTaskEditor", () => {
 		expect(requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0]?.prompt).toBe("Updated prompt");
 	});
 
+	it("清空名称时保存请求未完成也先显示本次提交描述推导的名称", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const task = createTask("task-1", "原始完整描述", 1, { title: "旧名称" });
+		const submittedPrompt = "新的首行描述\n第二行补充说明";
+		let resolveSaveCommand: () => void = () => {};
+		updateTaskCardFieldValuesInWorkspaceMock.mockImplementationOnce(async () => {
+			await new Promise<void>((resolve) => {
+				resolveSaveCommand = resolve;
+			});
+			return {
+				taskCardSnapshotAfterAction: {
+					taskCard: { ...task, title: "新的首行描述", prompt: submittedPrompt },
+					boardColumnIdContainingTaskCard: "backlog",
+					taskSessionSummaryLiveInRuntimeProcessMemory: null,
+					taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+				},
+			};
+		});
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([task])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).setEditTaskName(" ");
+			requireSnapshot(latestSnapshot).setEditTaskPrompt(submittedPrompt);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveEditedTask();
+		});
+		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.title).toBe("旧名称");
+		expect(requireSnapshot(latestSnapshot).displayedBoard.columns[0]?.cards[0]?.title).toBe("新的首行描述");
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(0);
+		await act(async () => {
+			resolveSaveCommand();
+		});
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(1);
+	});
+
+	it("Backlog 名称预填且单独改名只提交 title；清空后才发起有条件 AI 回填", async () => {
+		const captured = await renderCreateHarness();
+		await act(async () => {
+			requireSnapshot(captured.current).setNewTaskPrompt("完整初始需求");
+		});
+		await act(async () => {
+			requireSnapshot(captured.current).handleCreateTask({ taskNameOverride: "已保存名称" });
+		});
+		const task = requireSnapshot(captured.current).board.columns[0]?.cards[0];
+		if (!task) throw new Error("Expected a task");
+		await act(async () => {
+			requireSnapshot(captured.current).handleOpenEditTask(task);
+		});
+		expect(requireSnapshot(captured.current).editTaskName).toBe("已保存名称");
+		await act(async () => {
+			requireSnapshot(captured.current).setEditTaskName("[FIX]明确名称");
+		});
+		await act(async () => {
+			requireSnapshot(captured.current).handleSaveEditedTask();
+		});
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenLastCalledWith(
+			"project-1",
+			expect.objectContaining({
+				taskCardFieldUpdate: expect.objectContaining({ taskCardFieldValuePatch: { title: "[FIX]明确名称" } }),
+			}),
+		);
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(0);
+		await act(async () => {
+			requireSnapshot(captured.current).handleOpenEditTask(task);
+		});
+		await act(async () => {
+			requireSnapshot(captured.current).setEditTaskName(" ");
+		});
+		await act(async () => {
+			requireSnapshot(captured.current).handleSaveEditedTask();
+		});
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenLastCalledWith(
+			"project-1",
+			expect.objectContaining({
+				taskCardFieldUpdate: expect.objectContaining({ taskCardFieldValuePatch: { title: null } }),
+			}),
+		);
+		expect(fakeTaskNameSuggestionEndpoint.callCount).toBe(1);
+		await act(async () => {
+			fakeTaskNameSuggestionEndpoint.respond?.({ status: "suggested", suggestedTaskNames: ["[FIX]建议名称"] });
+		});
+		expect(updateTaskCardFieldValuesInWorkspaceMock).toHaveBeenLastCalledWith(
+			"project-1",
+			expect.objectContaining({
+				expectedTaskTitleAndPromptForAiNameBackfill: { title: "完整初始需求", prompt: "完整初始需求" },
+			}),
+		);
+	});
+
 	it("keeps the submitted edits as a draft and does not start when the runtime rejects the save", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 		const queueTaskStartAfterEdit = vi.fn();
@@ -1081,6 +1213,7 @@ describe("useTaskEditor", () => {
 		});
 		await act(async () => {
 			requireSnapshot(latestSnapshot).setEditTaskPrompt("Edits that must not be lost");
+			requireSnapshot(latestSnapshot).setEditTaskName("[FIX]不能丢失的名称草稿");
 		});
 		await act(async () => {
 			requireSnapshot(latestSnapshot).handleSaveAndStartEditedTask();
@@ -1092,6 +1225,7 @@ describe("useTaskEditor", () => {
 			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
 		});
 		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Edits that must not be lost");
+		expect(requireSnapshot(latestSnapshot).editTaskName).toBe("[FIX]不能丢失的名称草稿");
 	});
 
 	it("saves edited worktree mode and agent session initialization", async () => {
@@ -1206,6 +1340,7 @@ describe("useTaskEditor", () => {
 		});
 
 		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Legacy draft prompt");
+		expect(requireSnapshot(latestSnapshot).editTaskName).toBe(task.title);
 		expect(requireSnapshot(latestSnapshot).editTaskWorktreeMode).toBe("inplace");
 	});
 
@@ -1299,6 +1434,7 @@ describe("useTaskEditor", () => {
 		});
 		await act(async () => {
 			requireSnapshot(latestSnapshot).setEditTaskPrompt("Autosaved draft prompt");
+			requireSnapshot(latestSnapshot).setEditTaskName("[FIX]跨重开恢复名称");
 		});
 		await settleTaskEditDraftPersistence();
 
@@ -1330,6 +1466,7 @@ describe("useTaskEditor", () => {
 		});
 
 		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Autosaved draft prompt");
+		expect(requireSnapshot(latestSnapshot).editTaskName).toBe("[FIX]跨重开恢复名称");
 	});
 
 	it("clears the autosaved edit draft after saving", async () => {

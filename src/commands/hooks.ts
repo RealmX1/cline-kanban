@@ -86,6 +86,7 @@ interface HooksIngestArgs {
 	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
 	agentRaisedUserQuestionResolvedInAgentTerminal?: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload;
 	submittedPromptText?: string;
+	claudeNativeTaskListIdForPhaseGoalProjection?: string | null;
 	// hook stdin 带 `agent_id` ⇔ 事件从子代理内部触发（Claude Code 只在子代理内的事件上带它）。
 	hookEventFiredInsideSubagentContext?: boolean;
 	// 仅压缩完成事件：hook stdin 的 `trigger`（manual / auto）派生而来；未知值或缺失时不带。
@@ -443,6 +444,15 @@ function parseHooksIngestArgs(
 	});
 	return {
 		event,
+		...(agentNativeConversationSessionIdentity?.sourceAgentId === "claude" &&
+		/^task(create|update|list|get)$/iu.test(metadata?.toolName ?? "") &&
+		metadata?.hookEventName?.toLowerCase() === "posttooluse"
+			? {
+					claudeNativeTaskListIdForPhaseGoalProjection:
+						process.env.CLAUDE_CODE_TASK_LIST_ID?.trim() ||
+						agentNativeConversationSessionIdentity.nativeSessionId,
+				}
+			: {}),
 		taskId: context.taskId,
 		workspaceId: context.workspaceId,
 		metadata,
@@ -681,6 +691,9 @@ function buildHookIngestRequest(
 		workspaceId: args.workspaceId,
 		event: args.event,
 		metadata: args.metadata,
+		...(args.claudeNativeTaskListIdForPhaseGoalProjection !== undefined
+			? { claudeNativeTaskListIdForPhaseGoalProjection: args.claudeNativeTaskListIdForPhaseGoalProjection }
+			: {}),
 		...(args.agentRaisedUserQuestion ? { agentRaisedUserQuestion: args.agentRaisedUserQuestion } : {}),
 		...(args.agentRaisedToolPermission ? { agentRaisedToolPermission: args.agentRaisedToolPermission } : {}),
 		...(args.agentRaisedUserQuestionResolvedInAgentTerminal
@@ -723,6 +736,7 @@ export function isHookEventCoalescibleInAgentSessionPtyHostSpool(args: HooksInge
 		args.agentRaisedUserQuestion === undefined &&
 		args.agentRaisedToolPermission === undefined &&
 		args.agentRaisedUserQuestionResolvedInAgentTerminal === undefined &&
+		args.claudeNativeTaskListIdForPhaseGoalProjection === undefined &&
 		args.submittedPromptText === undefined
 	);
 }

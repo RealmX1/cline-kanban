@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { TRPCError } from "@trpc/server";
 
 import type {
@@ -1116,6 +1117,62 @@ export function createTaskCardActionApi(
 			);
 		},
 
+		renameCurrentTask: async (workspaceScope, input, evidence) => {
+			const intent = await resolveIntent("update_task_card_field_values", evidence, undefined, []);
+			const actor = intent.resolvedKanbanActor;
+			if (
+				actor.kanbanActorKind !== "kanban_board_card_work_unit" ||
+				actor.actingKanbanBoardCardWorkUnit.workspaceId !== workspaceScope.workspaceId
+			) {
+				throw new TRPCError({ code: "FORBIDDEN", message: "当前调用环境没有可解析的 Kanban Task 身份。" });
+			}
+			const identity = actor.actingKanbanBoardCardWorkUnit;
+			const renamed = await mutateWorkspaceState<RuntimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummaries>(
+				workspaceScope.workspacePath,
+				intent,
+				(state) => {
+					const found = findTaskCardWithBoardColumnOrThrowNotFound(
+						state.board,
+						identity.taskId,
+						workspaceScope.workspacePath,
+					);
+					if (found.taskCard.createdAt !== identity.taskIncarnationCreatedAtEpochMs) {
+						throw new TRPCError({ code: "FORBIDDEN", message: "当前 Task 身份已失效。" });
+					}
+					const snapshot = () =>
+						buildTaskCardSnapshot(workspaceScope, found, state.sessions[identity.taskId] ?? null);
+					if (found.taskCard.title === input.title) return { board: state.board, value: snapshot(), save: false };
+					const timestamp = Date.now();
+					const updated = updateTask(
+						state.board,
+						identity.taskId,
+						buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch(found.taskCard, {
+							title: input.title,
+							taskCommentEntries: [
+								...(found.taskCard.taskCommentEntries ?? []),
+								{
+									taskCommentEntryId: randomUUID(),
+									commentText: `Agent 自行改名：${found.taskCard.title} → ${input.title}\n原因：${input.reason}\n时间：${new Date(timestamp).toISOString()}`,
+									createdAt: timestamp,
+									updatedAt: timestamp,
+								},
+							],
+						}),
+					);
+					return {
+						board: updated.board,
+						value: buildTaskCardSnapshot(
+							workspaceScope,
+							{ ...found, taskCard: updated.task ?? found.taskCard },
+							state.sessions[identity.taskId] ?? null,
+						),
+					};
+				},
+			);
+			broadcastWorkspaceStateUpdatedWhenBoardWasSaved(workspaceScope, renamed.saved);
+			return { taskCardSnapshotAfterAction: renamed.value };
+		},
+
 		// 不进按卡串行器：纯 board 字段编辑在 board 锁内对最新卡片合并，与进行中的启动 / 移入 Done 不冲突；
 		// 排在一次慢启动（建 worktree 可达十几秒）后面只会让改名、置顶显得卡顿。
 		// EXPERIMENT_NODE: 改字段 / 置顶是否也进按卡串行器（换「启动途中改的 prompt 不会被这次启动读到」的确定性，代价是编辑卡顿）。
@@ -1134,6 +1191,14 @@ export function createTaskCardActionApi(
 						input.taskId,
 						workspaceScope.workspacePath,
 					);
+					const expected = input.expectedTaskTitleAndPromptForAiNameBackfill;
+					if (expected && (found.taskCard.title !== expected.title || found.taskCard.prompt !== expected.prompt)) {
+						return {
+							board: state.board,
+							value: buildTaskCardSnapshot(workspaceScope, found, state.sessions[input.taskId] ?? null),
+							save: false,
+						};
+					}
 					// 与卡片**最新**现值合并：updateTask 里非三态的字段漏传会被复位，所以必须在同一把锁内回填。
 					const updated = runPureTaskBoardMutationRejectingInvalidInputAsBadRequest(() =>
 						updateTask(
