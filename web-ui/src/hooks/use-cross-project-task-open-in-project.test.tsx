@@ -8,6 +8,11 @@ import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 // 「在某个项目里打开某个任务」的唯一入口：Board Overview、Spotlight、跨项目切换面板、通知点击共用。
 
 const showAppToastMock = vi.hoisted(() => vi.fn());
+const readTaskCardMock = vi.hoisted(() => vi.fn());
+const ensureTerminalMock = vi.hoisted(() => vi.fn());
+vi.mock("@/runtime/task-card-action-query", () => ({ readTaskCardWithBoardColumnInWorkspace: readTaskCardMock }));
+vi.mock("@/terminal/persistent-terminal-manager", () => ({ ensurePersistentTerminal: ensureTerminalMock }));
+
 vi.mock("@/components/app-toaster", () => ({ showAppToast: showAppToastMock }));
 
 function makeCard(id: string): BoardCard {
@@ -64,6 +69,8 @@ beforeEach(() => {
 	handleSelectProject.mockReset();
 	openBacklogTaskEditor.mockReset();
 	showAppToastMock.mockReset();
+	readTaskCardMock.mockReset().mockResolvedValue({ taskCardLookupOutcome: "task_card_not_found_on_workspace_board" });
+	ensureTerminalMock.mockReset();
 	latest = null;
 	requestProjectNavigationBypassingCrossProjectTaskOpen = null;
 	container = document.createElement("div");
@@ -90,6 +97,66 @@ function render(props: Partial<HarnessProps> = {}): void {
 }
 
 describe("useCrossProjectTaskOpenInProject", () => {
+	it.each(["pty_terminal", "acp_stdio_subprocess", "in_process_cline_sdk", undefined])(
+		"在途仅预热已知 PTY 会话；通道=%s，跨项目同号卡仍保持身份",
+		async (sessionTransport) => {
+			readTaskCardMock.mockResolvedValue({
+				taskCardLookupOutcome: "task_card_found_on_workspace_board",
+				taskCardSnapshot: {
+					taskSessionSummaryLiveInRuntimeProcessMemory: { agentId: "claude", sessionTransport },
+					taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+				},
+			});
+			render();
+			await act(async () => latest?.handleOpenTaskInProject("project-b", "a-review"));
+			expect(readTaskCardMock).toHaveBeenCalledWith("project-b", "a-review");
+			if (sessionTransport === "pty_terminal")
+				expect(ensureTerminalMock).toHaveBeenCalledWith(
+					expect.objectContaining({
+						workspaceId: "project-b",
+						taskId: "a-review",
+						deferAutomaticSessionResumeUntilVisibleMount: true,
+					}),
+				);
+			else expect(ensureTerminalMock).not.toHaveBeenCalled();
+			expect(setSelectedTaskId).not.toHaveBeenCalled();
+		},
+	);
+	it("取消在途后，迟到的会话读取不会建立终端", async () => {
+		let finishSessionRead!: (response: unknown) => void;
+		readTaskCardMock.mockReturnValue(
+			new Promise((resolve) => {
+				finishSessionRead = resolve;
+			}),
+		);
+		render();
+		act(() => latest?.handleOpenTaskInProject("project-b", "a-review"));
+		act(() => latest?.cancelPendingCrossProjectTaskOpenReturningToOriginTask());
+		await act(async () =>
+			finishSessionRead({
+				taskCardLookupOutcome: "task_card_found_on_workspace_board",
+				taskCardSnapshot: {
+					taskSessionSummaryLiveInRuntimeProcessMemory: { agentId: "claude", sessionTransport: "pty_terminal" },
+					taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+				},
+			}),
+		);
+		expect(ensureTerminalMock).not.toHaveBeenCalled();
+	});
+	it("跨项目 backlog 即使残留 PTY 会话也不预热终端", async () => {
+		readTaskCardMock.mockResolvedValue({
+			taskCardLookupOutcome: "task_card_found_on_workspace_board",
+			taskCardSnapshot: {
+				boardColumnIdContainingTaskCard: "backlog",
+				taskSessionSummaryLiveInRuntimeProcessMemory: { agentId: "claude", sessionTransport: "pty_terminal" },
+				taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+			},
+		});
+		render();
+		await act(async () => latest?.handleOpenTaskInProject("project-b", "b-backlog"));
+		expect(ensureTerminalMock).not.toHaveBeenCalled();
+	});
+
 	it("同项目：非 backlog 直接选中，backlog 打开编辑对话框", () => {
 		render();
 		act(() => latest?.handleOpenTaskInProject("project-a", "a-review"));

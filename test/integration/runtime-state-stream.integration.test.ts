@@ -1263,21 +1263,27 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 				(message): message is RuntimeStateStreamSnapshotMessage => message.type === "snapshot",
 			)) as RuntimeStateStreamSnapshotMessage;
 			expect(snapshot.workspaceMetadata).not.toBeNull();
+			// 首帧允许空缓存，完整 git 元数据随后补推；Done 的持久投影仍须保留。
+			const initialMetadata = await stream.waitForMessage(
+				(message) =>
+					message.type === "workspace_metadata_updated" &&
+					message.workspaceId === workspaceId &&
+					message.workspaceMetadata.taskWorkspaces.some((task) => task.taskId === taskId),
+			);
+			if (initialMetadata.type !== "workspace_metadata_updated") throw new Error("缺少首轮元数据补推");
 			const initialTaskMetadata =
-				snapshot.workspaceMetadata?.taskWorkspaces.find((task) => task.taskId === taskId) ?? null;
+				initialMetadata.workspaceMetadata?.taskWorkspaces.find((task) => task.taskId === taskId) ?? null;
 			expect(initialTaskMetadata).not.toBeNull();
 			expect(initialTaskMetadata?.changedFiles ?? 0).toBe(0);
 			// Done 卡仍保留元数据投影（f51f9786），缺失 worktree 不等于缺失记录。
-			expect(snapshot.workspaceMetadata?.taskWorkspaces.find((task) => task.taskId === trashTaskId)).toMatchObject({
+			expect(
+				initialMetadata.workspaceMetadata?.taskWorkspaces.find((task) => task.taskId === trashTaskId),
+			).toMatchObject({
 				taskId: trashTaskId,
 				exists: false,
 				baseRef,
 				changedFiles: null,
 			});
-			const messagesAfterInitialSnapshot = await stream.collectFor(250);
-			expect(messagesAfterInitialSnapshot.some((message) => message.type === "workspace_metadata_updated")).toBe(
-				false,
-			);
 
 			writeFileSync(join(ensureResponse.payload.path, "task-change.txt"), "updated\n", "utf8");
 
