@@ -202,21 +202,92 @@ function section(name: string): HTMLElement {
 	return element;
 }
 
-function queryFullTaskCardHoverOverlay(): HTMLElement | null {
-	return document.body.querySelector<HTMLElement>(
-		'[data-testid="cross-project-task-switcher-row-full-task-card-hover-overlay"]',
+function rowInPlaceExpansionState(row: HTMLElement | null | undefined): string | undefined {
+	return row?.dataset.crossProjectTaskSwitcherRowInPlaceExpansionState;
+}
+
+// hook 只认坐标真的变了的 pointermove（同坐标 = 布局 / 滚动把别的行换到了静止的光标下）：每次真实移动换一个坐标。
+let lastDispatchedPointerClientY = 100;
+function dispatchPointerMoveAtFreshCoordinates(target: Element | null | undefined): void {
+	lastDispatchedPointerClientY += 7;
+	target?.dispatchEvent(
+		new MouseEvent("pointermove", { bubbles: true, clientX: 40, clientY: lastDispatchedPointerClientY }),
+	);
+}
+function dispatchPointerMoveAtLastCoordinates(target: Element | null | undefined): void {
+	target?.dispatchEvent(
+		new MouseEvent("pointermove", { bubbles: true, clientX: 40, clientY: lastDispatchedPointerClientY }),
 	);
 }
 
-// 指针移进精简行（React 的 onPointerEnter 由 pointerover 合成），再等过 hover 意图的延时。
-async function hoverRowUntilFullTaskCardOverlayIsRevealed(row: HTMLElement | null | undefined): Promise<void> {
-	const rowMainButton = row?.querySelector<HTMLButtonElement>("button");
-	await act(async () => {
-		rowMainButton?.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
-	});
+// 指针在一行上真实移动，再等过 hover 意图的延时。展开后的行没有精简行按钮，事件派发到卡片里的第一个按钮或行本身。
+async function hoverRowUntilExpandedInPlace(row: HTMLElement | null | undefined): Promise<void> {
+	await act(async () => dispatchPointerMoveAtFreshCoordinates(row?.querySelector("button") ?? row));
 	await act(async () => {
 		vi.advanceTimersByTime(400);
 	});
+}
+
+// 指针从一行挪到另一行（不离开面板）：React 的 onPointerLeave / onPointerEnter 由 pointerout + relatedTarget 合成。
+async function movePointerFromRowToRow(
+	fromRow: HTMLElement | null | undefined,
+	toRow: HTMLElement | null | undefined,
+): Promise<void> {
+	const toRowPointerTarget = toRow?.querySelector("button") ?? toRow;
+	await act(async () => {
+		(fromRow?.querySelector("button") ?? fromRow)?.dispatchEvent(
+			new MouseEvent("pointerout", { bubbles: true, relatedTarget: toRowPointerTarget ?? null }),
+		);
+		dispatchPointerMoveAtFreshCoordinates(toRowPointerTarget);
+	});
+}
+
+const IN_LIST_EXPANSION_TOGGLE_SELECTOR =
+	'[data-testid="cross-project-task-switcher-full-task-card-in-list-expansion-toggle-button"]';
+
+function queryInListExpansionToggle(scope: ParentNode | null | undefined): HTMLButtonElement | null {
+	return scope?.querySelector<HTMLButtonElement>(IN_LIST_EXPANSION_TOGGLE_SELECTOR) ?? null;
+}
+
+// 指针移出一行、也移出面板（relatedTarget 是 body）。
+async function movePointerOutOfRow(row: HTMLElement | null | undefined): Promise<void> {
+	await act(async () => {
+		(row?.querySelector("button") ?? row)?.dispatchEvent(
+			new MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body }),
+		);
+	});
+}
+
+// 点卡体上非按钮的位置（标题）：走卡壳自己的 onClick。
+function clickTaskCardBodyTitle(scope: ParentNode | null | undefined): void {
+	const title = scope?.querySelector<HTMLElement>("[data-task-card-title]");
+	if (!title) {
+		throw new Error("task card body title not rendered");
+	}
+	title.click();
+}
+
+function makeOtherProjectTaskCardSnapshot(
+	taskId: string,
+	boardColumnIdContainingTaskCard: "backlog" | "in_progress" | "review" | "trash",
+) {
+	return {
+		taskCardLookupOutcome: "task_card_found_on_workspace_board",
+		taskCardSnapshot: {
+			taskCard: {
+				id: taskId,
+				title: `Card title ${taskId}`,
+				prompt: `Prompt ${taskId}`,
+				startInPlanMode: false,
+				baseRef: "main",
+				createdAt: NOW_MS - DAY_MS,
+				updatedAt: NOW_MS - DAY_MS,
+			},
+			boardColumnIdContainingTaskCard,
+			taskSessionSummaryLiveInRuntimeProcessMemory: null,
+			taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+		},
+	};
 }
 
 // jsdom 没有 PointerEvent：用同名 MouseEvent 补上 pointerType（React 的合成事件从原生事件上读它）。
@@ -226,10 +297,8 @@ function dispatchTouchPointerEvent(target: Element | null | undefined, type: "po
 	target?.dispatchEvent(touchPointerEvent);
 }
 
-// 触屏没有 hover：手指按住精简行等过长按延时弹出浮层，再抬手（这里不派发 click，抬手后的 click 由用例自己决定）。
-async function longPressRowByTouchUntilFullTaskCardOverlayIsRevealed(
-	rowMainButton: HTMLElement | null | undefined,
-): Promise<void> {
+// 触屏没有 hover：手指按住精简行等过长按延时原地展开，再抬手（这里不派发 click，抬手后的 click 由用例自己决定）。
+async function longPressRowByTouchUntilExpandedInPlace(rowMainButton: HTMLElement | null | undefined): Promise<void> {
 	await act(async () => {
 		dispatchTouchPointerEvent(rowMainButton, "pointerdown");
 	});
@@ -544,7 +613,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
 	});
 
-	it("其他项目的行 hover：意图期间就预取服务端快照，浮层盖在原位渲染同一个紧凑卡体；Keep open 后原地换成完整卡片，动作走同一组 taskCardAction 命令（不带 overlay）", async () => {
+	it("其他项目的行 hover：意图期间就隐藏挂载完整卡片、预取服务端快照；停够后这一行在列表里原地换成同一个紧凑卡体（不是浮层），行级信息并进卡体；右上角开关固定展开 / 收起，动作走同一组 taskCardAction 命令（不带 overlay）", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		readTaskCardWithBoardColumnInWorkspace.mockResolvedValue({
 			taskCardLookupOutcome: "task_card_found_on_workspace_board",
@@ -571,56 +640,67 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		const host = makeHost();
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
-		const recentRow = section("remaining").querySelector<HTMLElement>(
-			'[data-cross-project-task-switcher-task-id="recent"]',
-		);
+		const queryRecentRow = () =>
+			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
 		// 行上不再有常驻占位的展开 chevron。
-		expect(recentRow?.querySelector('[aria-label="Expand task card"]')).toBeNull();
-		await act(async () => {
-			recentRow
-				?.querySelector<HTMLButtonElement>("button")
-				?.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
-		});
-		// 还没到 hover 意图的延时：浮层已挂载（预取）但不可见。
+		expect(queryRecentRow()?.querySelector('[aria-label="Expand task card"]')).toBeNull();
+		await act(async () => dispatchPointerMoveAtFreshCoordinates(queryRecentRow()?.querySelector("button")));
+		// 还没到 hover 意图的延时：完整卡片已隐藏挂载在这一行里（预取），行仍是精简行。
 		expect(readTaskCardWithBoardColumnInWorkspace).toHaveBeenCalledWith("project-b", "recent");
-		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("false");
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("compact_row");
+		expect(
+			queryRecentRow()
+				?.querySelector('[data-testid="cross-project-task-switcher-full-task-card"]')
+				?.closest("[hidden]"),
+		).not.toBeNull();
 		await act(async () => {
 			vi.advanceTimersByTime(400);
 		});
-		const hoverOverlay = queryFullTaskCardHoverOverlay();
-		expect(hoverOverlay?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
-		// 浮层不在行里（portal），不推挤下方的行。
-		expect(recentRow?.contains(hoverOverlay ?? null)).toBe(false);
-		const overlayTaskCard = hoverOverlay?.querySelector(
+		const expandedRow = queryRecentRow();
+		expect(rowInPlaceExpansionState(expandedRow)).toBe("expanded_in_place_by_hover");
+		// 原地：完整卡片就在这一行里（推下方的行），不是 portal 出去的浮层；精简行的首行换掉了。
+		expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+		expect(expandedRow?.querySelector("[data-cross-project-task-switcher-row-title]")).toBeNull();
+		expect(
+			expandedRow?.querySelector('[data-testid="cross-project-task-switcher-full-task-card"]')?.closest("[hidden]"),
+		).toBeNull();
+		// 展开用的就是预取时挂载的那个实例：没有再读一次。
+		expect(readTaskCardWithBoardColumnInWorkspace).toHaveBeenCalledTimes(1);
+		const expandedTaskCard = expandedRow?.querySelector(
 			'[data-task-card-render-role="expanded_card_copy_in_cross_project_task_switcher_row"]',
 		);
-		expect(overlayTaskCard?.textContent).toContain("Recent task in project B");
+		expect(expandedTaskCard?.textContent).toContain("Recent task in project B");
 		// 卡片副本不持有 DOM 身份（data-task-id 全局唯一属于本体卡）。
-		expect(overlayTaskCard?.hasAttribute("data-task-id")).toBe(false);
+		expect(expandedTaskCard?.hasAttribute("data-task-id")).toBe(false);
+		// 项目名并进卡体元信息行最左（对应精简行第 2 行最左）。
+		expect(
+			expandedTaskCard?.querySelector("[data-task-card-compact-metadata-row]")?.firstElementChild?.textContent,
+		).toBe("project-b");
+		// 展开开关在卡体 hover 动作组的最右一格；展开发生在静止的光标下，动作组第一帧就可见，精简行上的开关不会闪没。
+		const hoverExpandedToggle = queryInListExpansionToggle(expandedRow);
+		expect(hoverExpandedToggle?.parentElement?.lastElementChild).toBe(hoverExpandedToggle);
+		expect(hoverExpandedToggle?.parentElement?.classList.contains("opacity-100")).toBe(true);
+		expect(hoverExpandedToggle?.dataset.crossProjectTaskSwitcherFullTaskCardInListExpansionState).toBe(
+			"collapsed_to_compact_row",
+		);
+		expect(hoverExpandedToggle?.getAttribute("aria-label")).toBe("Keep expanded in list");
 
-		await act(async () =>
-			hoverOverlay
-				?.querySelector<HTMLButtonElement>(
-					'[data-testid="cross-project-task-switcher-keep-full-task-card-open-button"]',
-				)
-				?.click(),
-		);
-		expect(queryFullTaskCardHoverOverlay()).toBeNull();
-		const keptOpenRow = section("remaining").querySelector<HTMLElement>(
-			'[data-cross-project-task-switcher-task-id="recent"]',
-		);
-		expect(keptOpenRow?.getAttribute("data-cross-project-task-switcher-row-kept-open-as-full-task-card")).toBe(
-			"true",
-		);
+		await act(async () => hoverExpandedToggle?.click());
+		const keptExpandedRow = queryRecentRow();
+		expect(rowInPlaceExpansionState(keptExpandedRow)).toBe("kept_expanded_in_list");
 		// 原地替换，不是「精简行 + 下方完整卡」：标题只出现一次。
-		expect(keptOpenRow?.textContent?.split("Recent task in project B")).toHaveLength(2);
-		// 已 Keep open 的行不再弹浮层。
-		await hoverRowUntilFullTaskCardOverlayIsRevealed(keptOpenRow);
-		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+		expect(keptExpandedRow?.textContent?.split("Recent task in project B")).toHaveLength(2);
+		const keptExpandedToggle = queryInListExpansionToggle(keptExpandedRow);
+		expect(keptExpandedToggle?.dataset.crossProjectTaskSwitcherFullTaskCardInListExpansionState).toBe(
+			"kept_expanded_in_list",
+		);
+		expect(keptExpandedToggle?.getAttribute("aria-label")).toBe("Collapse to compact row");
+		// 固定展开的卡在列表里常驻：动作组照常只在 hover / 聚焦时显形。
+		expect(keptExpandedToggle?.parentElement?.classList.contains("opacity-0")).toBe(true);
 
 		// 复制使用卡片所属项目的只读查询，不能借当前项目 project-a 的路径。
 		await act(async () =>
-			keptOpenRow?.querySelector<HTMLButtonElement>('[aria-label="Copy directory path"]')?.click(),
+			keptExpandedRow?.querySelector<HTMLButtonElement>('[aria-label="Copy directory path"]')?.click(),
 		);
 		expect(fetchTaskWorkspaceInfoForWorkspace).toHaveBeenCalledWith("project-b", {
 			taskId: "recent",
@@ -629,7 +709,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 
 		await act(async () =>
-			keptOpenRow?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
+			keptExpandedRow?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
 		);
 		expect(moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace).toHaveBeenCalledWith("project-b", {
 			taskId: "recent",
@@ -638,81 +718,605 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
 
-		await act(async () =>
-			keptOpenRow
-				?.querySelector<HTMLButtonElement>(
-					'[data-testid="cross-project-task-switcher-collapse-kept-open-full-task-card-button"]',
-				)
-				?.click(),
-		);
-		expect(
-			section("remaining")
-				.querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]')
-				?.getAttribute("data-cross-project-task-switcher-row-kept-open-as-full-task-card"),
-		).toBe("false");
+		await act(async () => queryInListExpansionToggle(queryRecentRow())?.click());
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("compact_row");
+		// 刚收起、指针还在这一行上：不能一动又原地展开。
+		await hoverRowUntilExpandedInPlace(queryRecentRow());
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("compact_row");
+		// 指针离开这一行再回来：照常展开。
+		await movePointerOutOfRow(queryRecentRow());
+		await hoverRowUntilExpandedInPlace(queryRecentRow());
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("expanded_in_place_by_hover");
 	});
 
-	it("hover 浮层：没等到意图就离开不弹；Esc 收起", async () => {
+	it("交接：指针从展开的行挪到下一行时它不收起，下一行停够意图时长后两行在同一次提交里换过来；坐标没变的指针事件不发起意图；离开面板（延时）与 Esc 收起", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
-		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
-		const rowMainButton = section("remaining").querySelector<HTMLButtonElement>(
-			'[data-cross-project-task-switcher-task-id="recent"] button',
-		);
-		await act(async () => {
-			rowMainButton?.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+		const host = makeHost({
+			projects: [makeProject("project-a", []), makeProject("project-b", [makeEntry("first"), makeEntry("second")])],
 		});
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const queryRow = (taskId: string) =>
+			section("remaining").querySelector<HTMLElement>(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
+
+		await hoverRowUntilExpandedInPlace(queryRow("first"));
+		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("expanded_in_place_by_hover");
+
+		await movePointerFromRowToRow(queryRow("first"), queryRow("second"));
+		await act(async () => {
+			vi.advanceTimersByTime(300);
+		});
+		// 离开展开的行不收起：否则它一收、整列上移，指针脚下换成更下面的行。
+		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("expanded_in_place_by_hover");
+		expect(rowInPlaceExpansionState(queryRow("second"))).toBe("compact_row");
 		await act(async () => {
 			vi.advanceTimersByTime(100);
-			rowMainButton?.dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+		});
+		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("compact_row");
+		expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
+
+		// 布局 / 滚动把别的行换到静止的光标下时浏览器补发的同坐标事件：不算移动，不发起意图、不连锁展开。
+		await act(async () => dispatchPointerMoveAtLastCoordinates(queryRow("first")?.querySelector("button")));
+		await act(async () => {
 			vi.advanceTimersByTime(400);
 		});
-		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+		expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
+		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("compact_row");
 
-		await hoverRowUntilFullTaskCardOverlayIsRevealed(
-			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]'),
-		);
-		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
+		// 指针离开整个面板：延时后收起；延时内回来就不收。
+		await movePointerOutOfRow(queryRow("second"));
+		await act(async () => {
+			vi.advanceTimersByTime(200);
+		});
+		expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
+		await act(async () => dispatchPointerMoveAtFreshCoordinates(queryRow("second")?.querySelector("button")));
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
+		await movePointerOutOfRow(queryRow("second"));
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		expect(rowInPlaceExpansionState(queryRow("second"))).toBe("compact_row");
+
+		await hoverRowUntilExpandedInPlace(queryRow("first"));
+		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("expanded_in_place_by_hover");
 		await act(async () => {
 			document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 		});
-		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+		expect(rowInPlaceExpansionState(queryRow("first"))).toBe("compact_row");
 	});
 
-	it("触屏长按弹浮层：紧随的那次行 click 被吞；长按后没有 click 落到行上时，「吞 click」标志不滞留到之后的点行", async () => {
+	it.each([
+		{ panelScrollTopBeforeHandOffPx: 200, expectedScrollTopPx: 140, expectedTopSpacerPx: 0 },
+		// 面板差不多在顶：scrollTop 只够补 30，余下 30 垫成顶部空白。
+		{ panelScrollTopBeforeHandOffPx: 30, expectedScrollTopPx: 0, expectedTopSpacerPx: 30 },
+	])(
+		"交接时收起的行在新行上方：提交后先用 scrollTop、不够再用面板顶部空白补回新行被带着上移的距离，新展开的行停在指针下不动；指针离开面板收起时空白撤掉（scrollTop $panelScrollTopBeforeHandOffPx）",
+		async ({ panelScrollTopBeforeHandOffPx, expectedScrollTopPx, expectedTopSpacerPx }) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+			const host = makeHost({
+				projects: [
+					makeProject("project-a", []),
+					makeProject("project-b", [makeEntry("first"), makeEntry("second")]),
+				],
+			});
+			act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+			const queryRow = (taskId: string) =>
+				section("remaining").querySelector<HTMLElement>(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
+			const panel = container.querySelector<HTMLElement>(
+				'[data-testid="cross-project-recently-active-task-switcher-panel"]',
+			);
+			// 自带 scroll anchoring 关掉，补偿只由 hook 做一次。
+			expect(panel?.className).toContain("[overflow-anchor:none]");
+			let panelScrollTopPx = panelScrollTopBeforeHandOffPx;
+			if (panel) {
+				Object.defineProperty(panel, "scrollTop", {
+					configurable: true,
+					get: () => panelScrollTopPx,
+					set: (nextScrollTopPx: number) => {
+						panelScrollTopPx = Math.max(0, nextScrollTopPx);
+					},
+				});
+			}
+			await hoverRowUntilExpandedInPlace(queryRow("first"));
+			const secondRow = queryRow("second");
+			if (!secondRow) {
+				throw new Error("second row not rendered");
+			}
+			// 交接前量到 300，上方的 first 收起后量到 240：被带着上移了 60px。
+			secondRow.getBoundingClientRect = vi
+				.fn<() => DOMRect>()
+				.mockReturnValueOnce({ top: 300 } as DOMRect)
+				.mockReturnValue({ top: 240 } as DOMRect);
+			await movePointerFromRowToRow(queryRow("first"), secondRow);
+			await act(async () => {
+				vi.advanceTimersByTime(400);
+			});
+			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
+			expect(panelScrollTopPx).toBe(expectedScrollTopPx);
+			// jsdom 会把 calc 的两项重排，只认垫的那一项。
+			if (expectedTopSpacerPx > 0) {
+				expect(panel?.style.paddingTop).toContain(`${expectedTopSpacerPx}px`);
+			} else {
+				expect(panel?.style.paddingTop).toBe("");
+			}
+
+			await movePointerOutOfRow(queryRow("second"));
+			await act(async () => {
+				vi.advanceTimersByTime(400);
+			});
+			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("compact_row");
+			expect(panel?.style.paddingTop).toBe("");
+		},
+	);
+
+	it.each([
+		{
+			panelTopSpacerClearingTrigger: "escape_key",
+			dispatchPanelTopSpacerClearingTrigger: () =>
+				document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })),
+		},
+		{
+			panelTopSpacerClearingTrigger: "pointer_down_outside_panel",
+			dispatchPanelTopSpacerClearingTrigger: () =>
+				document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })),
+		},
+	])(
+		"交接垫出顶部空白后把这一行固定展开再收起：指针仍在面板里时空白不撤（撤了指针下的行会移动），之后不靠指针离开面板也能撤掉（触屏 / 键盘）（$panelTopSpacerClearingTrigger）",
+		async ({ dispatchPanelTopSpacerClearingTrigger }) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+			const host = makeHost({
+				projects: [
+					makeProject("project-a", []),
+					makeProject("project-b", [makeEntry("first"), makeEntry("second")]),
+				],
+			});
+			act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+			const queryRow = (taskId: string) =>
+				section("remaining").querySelector<HTMLElement>(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
+			const panel = container.querySelector<HTMLElement>(
+				'[data-testid="cross-project-recently-active-task-switcher-panel"]',
+			);
+			// 面板差不多在顶：scrollTop 只够补 30，余下 30 垫成顶部空白。
+			let panelScrollTopPx = 30;
+			if (panel) {
+				Object.defineProperty(panel, "scrollTop", {
+					configurable: true,
+					get: () => panelScrollTopPx,
+					set: (nextScrollTopPx: number) => {
+						panelScrollTopPx = Math.max(0, nextScrollTopPx);
+					},
+				});
+			}
+			await hoverRowUntilExpandedInPlace(queryRow("first"));
+			const secondRow = queryRow("second");
+			if (!secondRow) {
+				throw new Error("second row not rendered");
+			}
+			secondRow.getBoundingClientRect = vi
+				.fn<() => DOMRect>()
+				.mockReturnValueOnce({ top: 300 } as DOMRect)
+				.mockReturnValue({ top: 240 } as DOMRect);
+			await movePointerFromRowToRow(queryRow("first"), secondRow);
+			await act(async () => {
+				vi.advanceTimersByTime(400);
+			});
+			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
+			expect(panel?.style.paddingTop).toContain("30px");
+
+			// 固定展开：hover 记录清掉，空白留着；在面板里按下指针（触屏点开关）也不撤。
+			await act(async () => queryInListExpansionToggle(queryRow("second"))?.click());
+			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("kept_expanded_in_list");
+			expect(panel?.style.paddingTop).toContain("30px");
+			await act(async () => {
+				queryInListExpansionToggle(queryRow("second"))?.dispatchEvent(
+					new MouseEvent("pointerdown", { bubbles: true }),
+				);
+			});
+			expect(panel?.style.paddingTop).toContain("30px");
+			await act(async () => queryInListExpansionToggle(queryRow("second"))?.click());
+			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("compact_row");
+			expect(panel?.style.paddingTop).toContain("30px");
+
+			await act(async () => dispatchPanelTopSpacerClearingTrigger());
+			expect(panel?.style.paddingTop).toBe("");
+		},
+	);
+
+	it("精简行右上角的展开开关常驻 DOM（键盘 Tab 得到），点它不等 hover 意图直接原地固定展开；卡快照未到时完整卡先画同一个首行", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		const host = makeHost({
+			notificationLogByWorkspaceId: {
+				"project-b": [{ id: "n1", workspaceId: "project-b", taskId: "recent", visitedAt: null } as never],
+			},
+		});
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const queryRecentRow = () =>
+			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
+		const compactRowToggle = queryInListExpansionToggle(queryRecentRow());
+		expect(compactRowToggle).not.toBeNull();
+		expect(compactRowToggle?.disabled).toBe(false);
+		expect(compactRowToggle?.dataset.crossProjectTaskSwitcherFullTaskCardInListExpansionState).toBe(
+			"collapsed_to_compact_row",
+		);
+		// 与完整卡片同一几何：叠在右上角的 hover 动作组里、是最右一格。
+		expect(compactRowToggle?.parentElement?.className).toContain("absolute right-1 top-1");
+		expect(compactRowToggle?.parentElement?.lastElementChild).toBe(compactRowToggle);
+		expect(
+			queryRecentRow()?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]"),
+		).not.toBeNull();
+
+		// 指针移进行（hover 意图开始）后按下开关：意图作废，直接固定展开。
+		await act(async () => dispatchPointerMoveAtFreshCoordinates(queryRecentRow()?.querySelector("button")));
+		await act(async () => {
+			compactRowToggle?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+			compactRowToggle?.click();
+		});
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		const keptExpandedRow = queryRecentRow();
+		expect(rowInPlaceExpansionState(keptExpandedRow)).toBe("kept_expanded_in_list");
+		// 快照还在读：先画与精简行同一个首行（前导点 + 标题），提示放在下面，开关仍在。
+		const unavailableFallback = keptExpandedRow?.querySelector(
+			"[data-cross-project-task-switcher-full-task-card-unavailable-fallback]",
+		);
+		expect(unavailableFallback?.querySelector("[data-cross-project-task-switcher-row-title]")?.textContent).toBe(
+			"Title recent",
+		);
+		expect(
+			unavailableFallback
+				?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]")
+				?.getAttribute("data-cross-project-task-switcher-row-leading-activity-indicator"),
+		).toBe("unread_handoff");
+		expect(unavailableFallback?.textContent).toContain("Loading task…");
+		expect(
+			queryInListExpansionToggle(unavailableFallback)?.dataset
+				.crossProjectTaskSwitcherFullTaskCardInListExpansionState,
+		).toBe("kept_expanded_in_list");
+		// 兜底态点它也等于点精简行。
+		act(() =>
+			unavailableFallback?.querySelector<HTMLElement>("[data-cross-project-task-switcher-row-title]")?.click(),
+		);
+		expect(host.onOpenTaskInProject).toHaveBeenCalledWith("project-b", "recent");
+	});
+
+	it("键盘按展开开关切换形态后焦点交给触发那一行新形态下的开关（含卡快照到达后兜底换成卡体），不落到 body；展开态的首行 / 卡体标题是可聚焦、Enter / Space 打开任务的键盘入口", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		let resolveOtherProjectTaskCardSnapshot: (snapshot: unknown) => void = () => {};
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(
+			new Promise((resolve) => {
+				resolveOtherProjectTaskCardSnapshot = resolve;
+			}),
+		);
+		const host = makeHost();
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		// 置顶的任务在 Pinned 与下方区各有一行，固定展开按任务记、两行一起展开：焦点只回到触发的下方区那一行。
+		const queryRemainingRecentRow = () =>
+			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
+		const queryPinnedRecentRow = () =>
+			section("pinned").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
+		// 浏览器里键盘 Enter / Space 按在按钮上 = 先有焦点、再派发 click。
+		const pressInListExpansionToggleByKeyboard = async (toggle: HTMLButtonElement | null) => {
+			await act(async () => {
+				toggle?.focus();
+				toggle?.click();
+			});
+			// 焦点接力排在这次提交之后的微任务里。
+			await act(async () => {
+				await Promise.resolve();
+			});
+		};
+		const flushMicrotasksAfterCommit = async () => {
+			await act(async () => {
+				await Promise.resolve();
+			});
+		};
+
+		// 精简行 → 固定展开：卡快照还在读，焦点落在兜底上的开关（同一坐标），不是 body。
+		await pressInListExpansionToggleByKeyboard(queryInListExpansionToggle(queryRemainingRecentRow()));
+		expect(rowInPlaceExpansionState(queryRemainingRecentRow())).toBe("kept_expanded_in_list");
+		expect(rowInPlaceExpansionState(queryPinnedRecentRow())).toBe("kept_expanded_in_list");
+		const unavailableFallback = queryRemainingRecentRow()?.querySelector<HTMLElement>(
+			"[data-cross-project-task-switcher-full-task-card-unavailable-fallback]",
+		);
+		const fallbackToggle = queryInListExpansionToggle(unavailableFallback);
+		expect(fallbackToggle?.dataset.crossProjectTaskSwitcherFullTaskCardInListExpansionState).toBe(
+			"kept_expanded_in_list",
+		);
+		expect(document.activeElement).toBe(fallbackToggle);
+
+		// 兜底的首行是打开任务的键盘入口：可聚焦、Enter 打开，与点首行同一结果。
+		const fallbackOpenTaskKeyboardEntry = unavailableFallback?.querySelector<HTMLElement>(
+			"[data-cross-project-task-switcher-full-task-card-unavailable-fallback-open-task-keyboard-entry]",
+		);
+		expect(fallbackOpenTaskKeyboardEntry?.getAttribute("role")).toBe("button");
+		expect(fallbackOpenTaskKeyboardEntry?.tabIndex).toBe(0);
+		expect(fallbackOpenTaskKeyboardEntry?.querySelector("button")).toBeNull();
+		act(() => {
+			fallbackOpenTaskKeyboardEntry?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		});
+		expect(host.onOpenTaskInProject).toHaveBeenCalledTimes(1);
+		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "recent");
+
+		// 快照到了，兜底换成卡体：焦点跟到卡体上的开关。
+		await act(async () => {
+			fallbackToggle?.focus();
+		});
+		await act(async () => {
+			resolveOtherProjectTaskCardSnapshot(makeOtherProjectTaskCardSnapshot("recent", "review"));
+		});
+		await flushMicrotasksAfterCommit();
+		const keptExpandedRemainingRow = queryRemainingRecentRow();
+		expect(
+			keptExpandedRemainingRow?.querySelector(
+				"[data-cross-project-task-switcher-full-task-card-unavailable-fallback]",
+			),
+		).toBeNull();
+		const taskCardBodyToggle = queryInListExpansionToggle(
+			keptExpandedRemainingRow?.querySelector(
+				'[data-task-card-render-role="expanded_card_copy_in_cross_project_task_switcher_row"]',
+			),
+		);
+		expect(taskCardBodyToggle).not.toBeNull();
+		expect(document.activeElement).toBe(taskCardBodyToggle);
+
+		// 卡体标题是打开任务的键盘入口：可聚焦、Enter / Space 打开；标题里没有嵌套的按钮。
+		const taskCardBodyTitle = keptExpandedRemainingRow?.querySelector<HTMLElement>("[data-task-card-title]");
+		expect(taskCardBodyTitle?.getAttribute("role")).toBe("button");
+		expect(taskCardBodyTitle?.tabIndex).toBe(0);
+		expect(taskCardBodyTitle?.querySelector("button")).toBeNull();
+		act(() => {
+			taskCardBodyTitle?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		});
+		expect(host.onOpenTaskInProject).toHaveBeenCalledTimes(2);
+		act(() => {
+			taskCardBodyTitle?.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+		});
+		expect(host.onOpenTaskInProject).toHaveBeenCalledTimes(3);
+		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "recent");
+
+		// 固定展开 → 精简行：焦点回到这一行精简行上的开关。
+		await pressInListExpansionToggleByKeyboard(taskCardBodyToggle);
+		expect(rowInPlaceExpansionState(queryRemainingRecentRow())).toBe("compact_row");
+		const compactRowToggle = queryInListExpansionToggle(queryRemainingRecentRow());
+		expect(compactRowToggle?.dataset.crossProjectTaskSwitcherFullTaskCardInListExpansionState).toBe(
+			"collapsed_to_compact_row",
+		);
+		expect(document.activeElement).toBe(compactRowToggle);
+
+		// 焦点不在开关上（鼠标点、Safari 不给按钮焦点）时不接力：照旧不抢焦点。
+		await act(async () => {
+			compactRowToggle?.blur();
+			queryInListExpansionToggle(queryRemainingRecentRow())?.click();
+		});
+		await flushMicrotasksAfterCommit();
+		expect(rowInPlaceExpansionState(queryRemainingRecentRow())).toBe("kept_expanded_in_list");
+		expect(document.activeElement).toBe(document.body);
+	});
+
+	it("展开开关三态：命中区用伪元素向上、向右扩到 24×24（不向左盖住相邻动作按钮，按钮盒子不动）；读屏用 aria-pressed 表达「保持展开」开关、不用 aria-expanded——hover 原地展开时内容已可见展开但开关未按下", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		readTaskCardWithBoardColumnInWorkspace.mockResolvedValue(makeOtherProjectTaskCardSnapshot("recent", "review"));
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
+		const queryRecentRow = () =>
+			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
+		const expectToggleHitAreaExtendedUpAndRightOnlyWithButtonBoxUnchanged = (toggle: HTMLButtonElement | null) => {
+			expect(toggle).not.toBeNull();
+			for (const hitAreaExtensionClassName of [
+				"relative",
+				"after:absolute",
+				"after:-top-1",
+				"after:-right-1",
+				"after:bottom-0",
+				"after:left-0",
+			]) {
+				expect(toggle?.classList.contains(hitAreaExtensionClassName), hitAreaExtensionClassName).toBe(true);
+			}
+			// 按钮盒子本身仍是 xs icon-only（20×20）：三态同一坐标不受影响。
+			expect(toggle?.classList.contains("h-5")).toBe(true);
+			expect(toggle?.classList.contains("aspect-square")).toBe(true);
+		};
+
+		const compactRowToggle = queryInListExpansionToggle(queryRecentRow());
+		expectToggleHitAreaExtendedUpAndRightOnlyWithButtonBoxUnchanged(compactRowToggle);
+		expect(compactRowToggle?.hasAttribute("aria-expanded")).toBe(false);
+		expect(compactRowToggle?.getAttribute("aria-pressed")).toBe("false");
+
+		await hoverRowUntilExpandedInPlace(queryRecentRow());
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("expanded_in_place_by_hover");
+		const hoverExpandedToggle = queryInListExpansionToggle(queryRecentRow());
+		expect(hoverExpandedToggle?.dataset.crossProjectTaskSwitcherFullTaskCardInListExpansionState).toBe(
+			"collapsed_to_compact_row",
+		);
+		expectToggleHitAreaExtendedUpAndRightOnlyWithButtonBoxUnchanged(hoverExpandedToggle);
+		// 内容已可见展开，但「保持展开」没按下：不宣布 collapsed，也不宣布 pressed。
+		expect(hoverExpandedToggle?.hasAttribute("aria-expanded")).toBe(false);
+		expect(hoverExpandedToggle?.getAttribute("aria-pressed")).toBe("false");
+
+		await act(async () => hoverExpandedToggle?.click());
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("kept_expanded_in_list");
+		const keptExpandedToggle = queryInListExpansionToggle(queryRecentRow());
+		expectToggleHitAreaExtendedUpAndRightOnlyWithButtonBoxUnchanged(keptExpandedToggle);
+		expect(keptExpandedToggle?.hasAttribute("aria-expanded")).toBe(false);
+		expect(keptExpandedToggle?.getAttribute("aria-pressed")).toBe("true");
+		// label 文案照旧随状态切换。
+		expect(keptExpandedToggle?.getAttribute("aria-label")).toBe("Collapse to compact row");
+
+		await act(async () => keptExpandedToggle?.click());
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("compact_row");
+		expect(queryInListExpansionToggle(queryRecentRow())?.getAttribute("aria-pressed")).toBe("false");
+	});
+
+	it("点完整卡片（hover 展开 / 固定展开）的卡体 = 点精简行：立即打开不延迟、不接双击改标题；Pinned 行照样跳到下方区那一行；置顶的 Done 卡也能点开；Backlog 原地打开编辑框；点完不收起（收起会让列表在指针下移动）", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		readTaskCardWithBoardColumnInWorkspace.mockImplementation((_workspaceId: string, taskId: string) =>
+			Promise.resolve(
+				makeOtherProjectTaskCardSnapshot(
+					taskId,
+					taskId === "done-pinned" ? "trash" : taskId === "backlog-task" ? "backlog" : "in_progress",
+				),
+			),
+		);
+		const host = makeHost({
+			projects: [
+				makeProject("project-a", []),
+				makeProject("project-b", [
+					makeEntry("running-pinned", {
+						columnId: "in_progress",
+						turnOwner: "agent",
+						liveness: "live",
+						lastOutputAt: NOW_MS - 1_000,
+						pinnedToTaskPinboardAt: 2,
+					}),
+					makeEntry("done-pinned", { columnId: "trash", pinnedToTaskPinboardAt: 1 }),
+					makeEntry("backlog-task", { columnId: "backlog" }),
+				]),
+			],
+			onOpenBacklogTaskEditorInProject: vi.fn(),
+		});
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const queryRow = (sectionName: string, taskId: string) =>
+			section(sectionName).querySelector<HTMLElement>(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
+		expect(section("running").querySelector('button[aria-expanded="true"]')).toBeNull();
+
+		// Pinned 区的 In progress 行：卡体单击立即打开（不等 220ms 双击窗口），并像精简行一样展开 Running、跳过去。
+		await hoverRowUntilExpandedInPlace(queryRow("pinned", "running-pinned"));
+		const pinnedRunningRow = queryRow("pinned", "running-pinned");
+		expect(rowInPlaceExpansionState(pinnedRunningRow)).toBe("expanded_in_place_by_hover");
+		expect(pinnedRunningRow?.textContent).toContain("Card title running-pinned");
+		// 首行前导位换成精简行同一个前导点：Pinned 行没有前导点，也不画 In progress 的 Spinner。
+		expect(
+			pinnedRunningRow?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]"),
+		).toBeNull();
+		expect(pinnedRunningRow?.querySelector(".animate-spin")).toBeNull();
+		act(() => clickTaskCardBodyTitle(pinnedRunningRow));
+		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "running-pinned");
+		expect(rowInPlaceExpansionState(queryRow("pinned", "running-pinned"))).toBe("expanded_in_place_by_hover");
+		expect(section("running").querySelector('button[aria-expanded="true"]')).not.toBeNull();
+		// Running 区那一行的完整卡有 Running 的脉动前导点，与精简行一致。
+		await movePointerFromRowToRow(queryRow("pinned", "running-pinned"), queryRow("running", "running-pinned"));
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		expect(
+			queryRow("running", "running-pinned")
+				?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]")
+				?.getAttribute("data-cross-project-task-switcher-row-leading-activity-indicator"),
+		).toBe("running");
+
+		// 置顶的 Done 卡：本体卡上不可点，这里与精简行一样能打开。
+		await movePointerFromRowToRow(queryRow("running", "running-pinned"), queryRow("pinned", "done-pinned"));
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		act(() => clickTaskCardBodyTitle(queryRow("pinned", "done-pinned")));
+		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "done-pinned");
+
+		// Backlog：原地打开编辑框（与点精简行同一条路径，不是卡体自己的编辑回调）。
+		await movePointerFromRowToRow(queryRow("pinned", "done-pinned"), queryRow("remaining", "backlog-task"));
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		act(() => clickTaskCardBodyTitle(queryRow("remaining", "backlog-task")));
+		expect(host.onOpenBacklogTaskEditorInProject).toHaveBeenCalledWith("project-b", "backlog-task");
+		expect(host.onOpenTaskInProject).not.toHaveBeenCalledWith("project-b", "backlog-task");
+
+		// 固定展开的卡同样：单击立即打开；双击不进改标题（改标题走铅笔）。
+		await act(async () => queryInListExpansionToggle(queryRow("pinned", "running-pinned"))?.click());
+		const keptExpandedRunningRow = queryRow("running", "running-pinned");
+		expect(rowInPlaceExpansionState(keptExpandedRunningRow)).toBe("kept_expanded_in_list");
+		const openCallCountBeforeKeptCardClick = vi.mocked(host.onOpenTaskInProject).mock.calls.length;
+		act(() => clickTaskCardBodyTitle(keptExpandedRunningRow));
+		expect(vi.mocked(host.onOpenTaskInProject).mock.calls.length).toBe(openCallCountBeforeKeptCardClick + 1);
+		act(() => {
+			keptExpandedRunningRow
+				?.querySelector("[data-task-card-title]")
+				?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+		});
+		expect(keptExpandedRunningRow?.querySelector("textarea")).toBeNull();
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		// 没有被延迟的第二次打开。
+		expect(vi.mocked(host.onOpenTaskInProject).mock.calls.length).toBe(openCallCountBeforeKeptCardClick + 1);
+	});
+
+	it("hover 意图期间在行上按下鼠标：不再在按下与抬起之间把这一行换成卡片，这次点击照常打开任务", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
 		const host = makeHost();
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
-		const queryRecentRowMainButton = () =>
-			section("remaining").querySelector<HTMLButtonElement>(
-				'[data-cross-project-task-switcher-task-id="recent"] button',
-			);
+		const queryRecentRow = () =>
+			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
+		const rowMainButton = queryRecentRow()?.querySelector<HTMLButtonElement>("button");
+		await act(async () => dispatchPointerMoveAtFreshCoordinates(rowMainButton));
+		await act(async () => {
+			vi.advanceTimersByTime(300);
+			rowMainButton?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+			vi.advanceTimersByTime(300);
+		});
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("compact_row");
+		await act(async () => rowMainButton?.click());
+		expect(host.onOpenTaskInProject).toHaveBeenCalledWith("project-b", "recent");
+	});
+
+	it("没等到意图就离开不展开", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
+		const queryRecentRow = () =>
+			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
+		await act(async () => dispatchPointerMoveAtFreshCoordinates(queryRecentRow()?.querySelector("button")));
+		await act(async () => {
+			vi.advanceTimersByTime(100);
+		});
+		await movePointerOutOfRow(queryRecentRow());
+		await act(async () => {
+			vi.advanceTimersByTime(400);
+		});
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("compact_row");
+		// 意图作废后预取用的隐藏卡片也撤掉。
+		expect(queryRecentRow()?.querySelector('[data-testid="cross-project-task-switcher-full-task-card"]')).toBeNull();
+	});
+
+	it("触屏长按原地展开：紧随的那次行 click 被吞；长按后没有 click 落到行上时，「吞 click」标志不滞留到之后的点行", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		const host = makeHost();
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const queryRecentRow = () =>
+			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
 		const pressEscape = async () => {
 			await act(async () => {
 				document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 			});
 		};
 
-		// 原意图：长按弹出后抬手紧随的 click 不当成「打开任务」。
-		await longPressRowByTouchUntilFullTaskCardOverlayIsRevealed(queryRecentRowMainButton());
-		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
-		await act(async () => queryRecentRowMainButton()?.click());
+		// 原意图：长按展开后抬手紧随的 click（手指下已经换成了卡片，这里快照未到、是兜底首行）不当成「打开任务」。
+		await longPressRowByTouchUntilExpandedInPlace(queryRecentRow()?.querySelector("button"));
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("expanded_in_place_by_hover");
+		act(() => queryRecentRow()?.querySelector<HTMLElement>("[data-cross-project-task-switcher-row-title]")?.click());
 		expect(host.onOpenTaskInProject).not.toHaveBeenCalled();
 		await pressEscape();
-		expect(queryFullTaskCardHoverOverlay()).toBeNull();
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("compact_row");
 
-		// 长按后浏览器没发 click（或 click 落在盖住行的浮层上）→ Esc 收起浮层 → 再点行要照常打开任务。
-		await longPressRowByTouchUntilFullTaskCardOverlayIsRevealed(queryRecentRowMainButton());
-		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
+		// 长按后浏览器没发 click → Esc 收起 → 再点行要照常打开任务。
+		await longPressRowByTouchUntilExpandedInPlace(queryRecentRow()?.querySelector("button"));
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("expanded_in_place_by_hover");
 		await pressEscape();
-		expect(queryFullTaskCardHoverOverlay()).toBeNull();
-		await act(async () => queryRecentRowMainButton()?.click());
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("compact_row");
+		await act(async () => queryRecentRow()?.querySelector<HTMLButtonElement>("button")?.click());
 		expect(host.onOpenTaskInProject).toHaveBeenCalledWith("project-b", "recent");
 
-		// 长按后没发 click、浮层还开着，直接轻点另一行（新手势）也要照常打开任务。
-		await longPressRowByTouchUntilFullTaskCardOverlayIsRevealed(queryRecentRowMainButton());
-		expect(queryFullTaskCardHoverOverlay()?.dataset.crossProjectTaskSwitcherHoverOverlayRevealed).toBe("true");
+		// 长按后没发 click、这一行还展开着，直接轻点另一行（新手势）也要照常打开任务。
+		await longPressRowByTouchUntilExpandedInPlace(queryRecentRow()?.querySelector("button"));
+		expect(rowInPlaceExpansionState(queryRecentRow())).toBe("expanded_in_place_by_hover");
 		const warmRowMainButton = section("prompt-cache-warm").querySelector<HTMLButtonElement>(
 			'[data-cross-project-task-switcher-task-id="warm"] button',
 		);
@@ -724,7 +1328,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-a", "warm");
 	});
 
-	it("当前项目的行 hover：浮层直接用宿主给的本页 board 与动作，不读服务端", async () => {
+	it("当前项目的行 hover：原地展开的卡直接用宿主给的本页 board 与动作，不读服务端", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		const onMoveToValidationTask = vi.fn();
 		const host = makeHost();
@@ -759,16 +1363,15 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 				/>,
 			),
 		);
-		const warmRow = section("prompt-cache-warm").querySelector<HTMLElement>(
-			'[data-cross-project-task-switcher-task-id="warm"]',
-		);
-		await hoverRowUntilFullTaskCardOverlayIsRevealed(warmRow);
+		const queryWarmRow = () =>
+			section("prompt-cache-warm").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="warm"]');
+		await hoverRowUntilExpandedInPlace(queryWarmRow());
 
 		expect(readTaskCardWithBoardColumnInWorkspace).not.toHaveBeenCalled();
-		const hoverOverlay = queryFullTaskCardHoverOverlay();
-		expect(hoverOverlay?.textContent).toContain("Warm task from the in-browser board");
+		expect(rowInPlaceExpansionState(queryWarmRow())).toBe("expanded_in_place_by_hover");
+		expect(queryWarmRow()?.textContent).toContain("Warm task from the in-browser board");
 		await act(async () =>
-			hoverOverlay?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
+			queryWarmRow()?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
 		);
 		expect(onMoveToValidationTask).toHaveBeenCalledWith("warm");
 	});

@@ -182,9 +182,30 @@ export type TaskCardBodyRenderRole =
 	// Task Pinboard：被置顶的卡片在置顶板里的分身。除不可拖、不持有 DOM 身份外，
 	// 交互与本体一致（单击进详情、双击改标题、全部动作按钮）。
 	| "pinned_card_copy_in_task_pinboard"
-	// All projects 切换面板里展开的一行（可以是任何项目的卡）。同置顶板分身：不可拖、不持有 DOM 身份，
-	// 交互与本体一致；不显示置顶板专属的 stage 标签与原因行。
+	// All projects 切换面板里原地展开的一行（hover 展开 / 固定展开，可以是任何项目的卡）。同置顶板分身：不可拖、
+	// 不持有 DOM 身份，动作按钮与本体一致；不显示置顶板专属的 stage 标签与原因行。单击与点那一行的精简行
+	// 同一结果（面板的主动作是切换任务）：不延迟、不接双击改标题（铅笔照旧可改），Done 也能点开。
 	| "expanded_card_copy_in_cross_project_task_switcher_row";
+
+/**
+ * 仅 All projects 切换面板的行副本（`expanded_card_copy_in_cross_project_task_switcher_row`）：精简行上有、卡体本身没有的
+ * 行级信息与开关。并进卡体已有的位置，不在卡片上方另叠一条——另叠一条会把标题往下挤，hover 前后标题跳位。
+ */
+export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
+	/** 首行前导位，替换 Spinner / 失败图标：与精简行同一个前导点，三态之间标题左沿不动。「在跑 / 失败」由下方会话活动行表达。 */
+	firstLineLeadingActivityIndicator: ReactNode;
+	/** 元信息行最左，对应精简行第 2 行最左的项目名；null = 只有一个项目。 */
+	projectName: string | null;
+	/** 元信息行右侧药丸组最前，对应精简行第 2 行右侧（不放首行右端：hover 动作组会盖住首行右端）。 */
+	promptCacheWarmthPill: ReactNode;
+	/** hover 动作组最右一格：与精简行上的展开开关同一坐标。 */
+	inListExpansionToggle: ReactNode;
+	/**
+	 * true = 这一行刚因 hover 原地展开、指针还在它上面：第一帧就以 hover 态呈现（动作组、底色）。展开发生在静止的
+	 * 光标下，卡体要等指针再动一下才收到 mouseenter——否则精简行上刚看到的展开开关会在换成卡片的那一刻消失。
+	 */
+	isPresentedAsHoveredFromFirstFrame: boolean;
+}
 
 /**
  * 任务卡的纯展示卡体（卡壳 + 内层可视卡 + 全部展示态/交互）。
@@ -223,6 +244,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 	onEditTaskPinboardPinReason,
 	taskCardOwnedByOtherProjectWorkspaceId = null,
 	taskCardWorkspaceIdForCrossProjectGitMetadataPolling = null,
+	crossProjectTaskSwitcherRowElementsMergedIntoCardCopy = null,
 }: TaskCardBusinessProps & {
 	drag?: TaskCardBodyDragBindings | null;
 	renderRole?: TaskCardBodyRenderRole;
@@ -240,6 +262,8 @@ export const TaskCardBody = memo(function TaskCardBody({
 	onNavigateToCanonicalCardInItsStage?: (taskId: string) => void;
 	/** 仅置顶板分身：点置顶原因行编辑原因。 */
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
+	/** 仅 All projects 切换面板的行副本，见 TaskCardBodyCrossProjectTaskSwitcherRowElements。其他角色下忽略。 */
+	crossProjectTaskSwitcherRowElementsMergedIntoCardCopy?: TaskCardBodyCrossProjectTaskSwitcherRowElements | null;
 }): React.ReactElement {
 	const isCompactRowInFocusViewLeftColumn = useTaskCardBodyVisualDensity() === "compact_row_in_focus_view_left_column";
 	const [isHovered, setIsHovered] = useState(false);
@@ -285,12 +309,31 @@ export const TaskCardBody = memo(function TaskCardBody({
 	// sticky 卡头副本纯为「别让焦点卡跑出屏幕」而存在，是只读镜像：卡级指针交互一律关闭。
 	const isPassiveMirrorUnderStickyStageHeader = renderRole === "focused_card_copy_under_sticky_stage_header";
 	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
-	const isCardInteractive = !isTrashCard && !isPassiveMirrorUnderStickyStageHeader;
+	// All projects 切换面板的行副本：单击必须与点精简行同一结果（见 TaskCardBodyRenderRole），Done 卡也能点开。
+	const isCrossProjectTaskSwitcherRowCopy = renderRole === "expanded_card_copy_in_cross_project_task_switcher_row";
+	const crossProjectTaskSwitcherRowElements = isCrossProjectTaskSwitcherRowCopy
+		? crossProjectTaskSwitcherRowElementsMergedIntoCardCopy
+		: null;
+	const isCardInteractive =
+		(!isTrashCard || isCrossProjectTaskSwitcherRowCopy) && !isPassiveMirrorUnderStickyStageHeader;
+	// 切换面板的行副本：「点卡体 = 打开任务」只挂在卡壳的 onClick 上，键盘够不到（精简行有主按钮，展开后没有）。
+	// 标题兼作打开任务的键盘入口（Enter / Space，与点卡体同一个 onClick）；标题里没有别的可交互元素，不形成交互元素
+	// 嵌套，也不改标题几何。其他角色不变。
+	const isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow =
+		isCrossProjectTaskSwitcherRowCopy && onClick != null;
+	// 动作组 / 底色 / 复制按钮的 hover 呈现；tooltip 仍只认真实 hover（见 revealHoverActionTooltip）。
+	const isHoverPresentationShown =
+		isHovered || crossProjectTaskSwitcherRowElements?.isPresentedAsHoveredFromFirstFrame === true;
 	// 会跳转的列上双击改标题需先拦截单击；这些列单击会打开详情、替换看板。
 	const isNavigatingColumn = columnId === "in_progress" || columnId === "review" || columnId === "validation";
-	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog；只读镜像不参与编辑。
+	// 双击改标题覆盖 in_progress / review / validation / done(trash)，不含 backlog；只读镜像不参与编辑；
+	// 切换面板的行副本也不接（单击要立即生效，改标题走铅笔）。
 	const isInlineTitleEditEnabled =
-		!isPassiveMirrorUnderStickyStageHeader && onSaveTitle != null && (isNavigatingColumn || isTrashCard);
+		!isPassiveMirrorUnderStickyStageHeader &&
+		!isCrossProjectTaskSwitcherRowCopy &&
+		onSaveTitle != null &&
+		(isNavigatingColumn || isTrashCard);
+	const delaysSingleClickActivationForDoubleClickTitleEdit = isNavigatingColumn && !isCrossProjectTaskSwitcherRowCopy;
 	const clickActivationTimerRef = useRef<number | null>(null);
 	const isDragging = drag?.isDragging ?? false;
 	const rawSessionActivity = useMemo(() => deriveCardSessionActivity(sessionSummary), [sessionSummary]);
@@ -992,7 +1035,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 								return;
 							}
 							// 会跳转的列：延迟单击，留出双击拦截窗口（双击会清掉这个计时器）。
-							if (isNavigatingColumn) {
+							if (delaysSingleClickActivationForDoubleClickTitleEdit) {
 								if (clickActivationTimerRef.current != null) {
 									clearTimeout(clickActivationTimerRef.current);
 								}
@@ -1002,7 +1045,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 								}, CLICK_ACTIVATION_DELAY_MS);
 								return;
 							}
-							// backlog 立即开编辑弹窗；trash 在上方 !isCardInteractive 已 return，到不了这里。
+							// backlog 立即开编辑弹窗；trash 在上方 !isCardInteractive 已 return（切换面板的行副本除外）。
 							onClick(card);
 						}
 			}
@@ -1051,7 +1094,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 								showDirectoryCopyButton && "pr-8",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3",
 								isDragging && "bg-surface-3 shadow-lg",
-								isHovered && isCardInteractive && "bg-surface-3",
+								isHoverPresentationShown && isCardInteractive && "bg-surface-3",
 							)
 						: cn(
 								"group/card relative rounded-md border border-border-bright bg-surface-2 p-2.5",
@@ -1083,7 +1126,9 @@ export const TaskCardBody = memo(function TaskCardBody({
 					}
 					style={isCompactRowInFocusViewLeftColumn ? undefined : { minHeight: 24 }}
 				>
-					{statusMarker ? (
+					{crossProjectTaskSwitcherRowElements ? (
+						crossProjectTaskSwitcherRowElements.firstLineLeadingActivityIndicator
+					) : statusMarker ? (
 						<div className={cn("inline-flex items-center", isCompactRowInFocusViewLeftColumn && "mt-[3px]")}>
 							{statusMarker}
 						</div>
@@ -1110,10 +1155,25 @@ export const TaskCardBody = memo(function TaskCardBody({
 						) : (
 							<>
 								<p
+									data-task-card-title=""
+									role={isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow ? "button" : undefined}
+									tabIndex={isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow ? 0 : undefined}
+									onKeyDown={
+										isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow
+											? (event) => {
+													if (event.key === "Enter" || event.key === " ") {
+														event.preventDefault();
+														onClick?.(card);
+													}
+												}
+											: undefined
+									}
 									className={cn(
 										"line-clamp-3 m-0 font-medium",
 										isCompactRowInFocusViewLeftColumn ? "text-[13px] leading-snug" : "text-sm",
 										isTrashCard && "line-through text-text-tertiary",
+										isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow &&
+											"rounded-sm focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent",
 									)}
 								>
 									{displayTitle}
@@ -1179,7 +1239,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 						// 紧凑密度没有上边框可伸出，动作组覆盖在第 1 行右侧。
 						isCompactRowInFocusViewLeftColumn ? "top-1" : "-top-[6px]",
 						"focus-within:opacity-100 focus-within:pointer-events-auto",
-						isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
+						isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
 					)}
 				>
 					{showTitleEditButton && isCompactRowInFocusViewLeftColumn ? (
@@ -1354,6 +1414,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 							/>
 						</Tooltip>
 					) : null}
+					{crossProjectTaskSwitcherRowElements?.inListExpansionToggle}
 				</div>
 				{isPromptViewerOpen ? (
 					<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
@@ -1414,6 +1475,11 @@ export const TaskCardBody = memo(function TaskCardBody({
 						data-task-card-compact-metadata-row=""
 						className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] leading-none"
 					>
+						{crossProjectTaskSwitcherRowElements?.projectName ? (
+							<span className="min-w-0 max-w-full truncate text-text-tertiary">
+								{crossProjectTaskSwitcherRowElements.projectName}
+							</span>
+						) : null}
 						{showDirectoryRow ? taskDirectoryRow : null}
 						{machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
 							<span key={machineWaitingBadgeKey} className="inline-flex min-w-0">
@@ -1434,6 +1500,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 							</button>
 						) : null}
 						<span className="ml-auto inline-flex shrink-0 items-center gap-1">
+							{crossProjectTaskSwitcherRowElements?.promptCacheWarmthPill}
 							{elapsedTimePills}
 							{resourceUsagePill}
 							{pinnedMarkerOrTaskPinboardStageLabel}
@@ -1464,7 +1531,7 @@ export const TaskCardBody = memo(function TaskCardBody({
 						className={cn(
 							"absolute bottom-0 right-0 z-10 rounded-md bg-surface-3 px-0.5 shadow-sm",
 							"group-focus-within/card:opacity-100 group-focus-within/card:pointer-events-auto",
-							isHovered ? "opacity-100" : "opacity-0 pointer-events-none",
+							isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
 						)}
 					>
 						<Tooltip side="bottom" content={card.id} delayDuration={0}>

@@ -72,8 +72,8 @@ function describePromptCacheWarmthEstimate(estimate: CrossProjectTaskSwitcherPro
 }
 
 /**
- * Cache warm 区的倒计时药丸（手动压缩后改显示「Compacted」）。精简行、hover 浮层的卡头条与「Keep open」后的卡头条
- * 共用：完整卡片本身不显示这颗药丸，换成完整卡时不能把它丢掉。
+ * Cache warm 区的倒计时药丸（手动压缩后改显示「Compacted」）。精简行第 2 行右侧与完整卡片（hover 展开 / 固定展开）
+ * 元信息行右侧共用，两处都在时长药丸组的最前面：换成完整卡时不能把它丢掉。
  */
 export function CrossProjectTaskSwitcherRowPromptCacheWarmthPill({
 	promptCacheWarmthEstimate,

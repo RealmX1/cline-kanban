@@ -420,6 +420,24 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				workingDirectoryPath: nonFocusedTaskWorktreePath,
 			});
 			writeFileSync(join(nonFocusedTaskWorktreePath, "initial.txt"), "initial\nchanged\n");
+			// 别的项目里一张没起过会话的 In progress 卡：旧设计在完整卡首行画 Spinner，标题因此右移约 23px。
+			// 只改 beta 的 board（浏览器此刻停在 alpha，不会并发写 beta）。
+			const betaInProgressGeometryAnchorId = await createTask(secondProject.repositoryPath, "进行中几何锚点");
+			// 别的项目里的 backlog 卡：点它展开后卡片的上沿，应当原地打开编辑框（可观察、不换焦点、不起会话）。
+			const betaBacklogClickAnchorId = await createTask(secondProject.repositoryPath, "顶部点击锚点");
+			const betaGeometryState = await runtimeClient(betaWorkspaceId).workspace.getState.query();
+			const betaGeometryBacklog = betaGeometryState.board.columns.find((column) => column.id === "backlog");
+			const betaGeometryCard = betaGeometryBacklog?.cards.find((task) => task.id === betaInProgressGeometryAnchorId);
+			if (!betaGeometryCard || !betaGeometryBacklog) throw new Error("缺少几何锚点卡");
+			betaGeometryBacklog.cards = betaGeometryBacklog.cards.filter(
+				(task) => task.id !== betaInProgressGeometryAnchorId,
+			);
+			betaGeometryState.board.columns.find((column) => column.id === "in_progress")?.cards.push(betaGeometryCard);
+			await runtimeClient(betaWorkspaceId).workspace.saveState.mutate({
+				board: betaGeometryState.board,
+				sessions: betaGeometryState.sessions,
+				expectedRevision: betaGeometryState.revision,
+			});
 			await page.evaluate(() => {
 				sessionStorage.setItem("kanban.selected-board-or-single-project-scope.v1", "board_scope_all_projects");
 				localStorage.setItem("kanban.selected-board-or-single-project-scope.v1", "board_scope_all_projects");
@@ -431,34 +449,307 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				async () => (await row(dragStartId).textContent())?.includes("+1") === true,
 				"非焦点精简行轮询已刷新",
 			);
-			await row(dragStartId).locator("button").first().hover();
-			const hoverCard = page.locator('[data-testid="cross-project-task-switcher-row-full-task-card-hover-overlay"]');
-			await hoverCard.waitFor();
-			await hoverCard.getByText("拖放启动", { exact: true }).waitFor();
-			const hoverDirectory = hoverCard.locator("[data-task-directory]");
+			const rowInPlaceExpansionStateAttribute = "data-cross-project-task-switcher-row-in-place-expansion-state";
+			const rowInPlaceExpandedByHover = (taskId: string) =>
+				page
+					.locator(
+						`[data-cross-project-task-switcher-task-id="${taskId}"][${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`,
+					)
+					.first();
+			const inListExpansionToggleTestId =
+				"cross-project-task-switcher-full-task-card-in-list-expansion-toggle-button";
+			const panel = page.locator('[data-testid="cross-project-recently-active-task-switcher-panel"]');
+			// 阶段 6：精简行 → hover 原地展开 → 固定展开三态之间标题首行一像素不动、展开开关同一坐标；
+			// 往下挪到下一行时交接、新行停在指针下（面板有滚动余量时）、静止的光标下不连锁展开。
+			type MeasuredRect = { left: number; top: number; width: number; height: number };
+			const measureRect = (locator: ReturnType<typeof page.locator>) =>
+				locator.evaluate((element): MeasuredRect => {
+					const rect = element.getBoundingClientRect();
+					return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+				});
+			const titleAndToggleGeometryEvidence: Record<string, unknown> = {};
+			const expectSamePlacementWithinOnePixel = (actual: MeasuredRect, expected: MeasuredRect, label: string) => {
+				expect(Math.abs(actual.left - expected.left), `${label} left`).toBeLessThanOrEqual(1);
+				expect(Math.abs(actual.top - expected.top), `${label} top`).toBeLessThanOrEqual(1);
+			};
+			const measureCompactRow = async (taskId: string, compactRow = row(taskId)) => {
+				return {
+					row: await measureRect(compactRow),
+					title: await measureRect(compactRow.locator("[data-cross-project-task-switcher-row-title]")),
+					toggle: await measureRect(compactRow.getByTestId(inListExpansionToggleTestId)),
+					leadingActivityIndicator: await compactRow
+						.locator("[data-cross-project-task-switcher-row-leading-activity-indicator]")
+						.first()
+						.getAttribute("data-cross-project-task-switcher-row-leading-activity-indicator", { timeout: 200 })
+						.catch(() => null),
+				};
+			};
+			const measureExpandedRow = async (expandedRow: ReturnType<typeof page.locator>) => ({
+				row: await measureRect(expandedRow),
+				title: await measureRect(expandedRow.locator("[data-task-card-title]")),
+				toggle: await measureRect(expandedRow.getByTestId(inListExpansionToggleTestId)),
+			});
+			const hoverRowUntilExpandedInPlace = async (taskId: string, title: string) => {
+				await row(taskId).locator("button").first().hover();
+				await rowInPlaceExpandedByHover(taskId)
+					.locator("[data-task-card-title]")
+					.filter({ hasText: title })
+					.waitFor();
+				return rowInPlaceExpandedByHover(taskId);
+			};
+			const leavePanelAndWaitForHoverExpansionToCollapse = async () => {
+				await page.mouse.move(1500, 950);
+				await page
+					.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`)
+					.first()
+					.waitFor({ state: "detached" });
+			};
+			for (const [taskId, title, geometryCaseLabel] of [
+				[betaInProgressGeometryAnchorId, "进行中几何锚点", "other_project_in_progress_without_session"],
+				[betaId, "别的项目任务", "other_project_review"],
+			] as const) {
+				await row(taskId).waitFor();
+				const compactRowGeometry = await measureCompactRow(taskId);
+				const expandedRowGeometry = await measureExpandedRow(await hoverRowUntilExpandedInPlace(taskId, title));
+				// 原地展开：行的上沿与左沿不动，只向下长。
+				expectSamePlacementWithinOnePixel(
+					expandedRowGeometry.row,
+					compactRowGeometry.row,
+					`${geometryCaseLabel} 行`,
+				);
+				expect(expandedRowGeometry.row.height).toBeGreaterThan(compactRowGeometry.row.height);
+				expectSamePlacementWithinOnePixel(
+					expandedRowGeometry.title,
+					compactRowGeometry.title,
+					`${geometryCaseLabel} 标题`,
+				);
+				expectSamePlacementWithinOnePixel(
+					expandedRowGeometry.toggle,
+					compactRowGeometry.toggle,
+					`${geometryCaseLabel} 开关`,
+				);
+				titleAndToggleGeometryEvidence[geometryCaseLabel] = { compactRowGeometry, expandedRowGeometry };
+				await leavePanelAndWaitForHoverExpansionToCollapse();
+			}
+
+			// 往下挪到下一行：上一行不在离开时收起，下一行停够意图时长后交接；收起的行在上方，新行被带着上移的距离
+			// 先由面板滚动补回，scrollTop 不够时差额垫成面板顶部空白——两种视口下新行都停在指针下不动。
+			// 之后指针静止，不得再有任何展开 / 收起。
+			const measureHandOffToNextRowBelow = async (handOffCaseLabel: string) => {
+				const remainingRowTaskIds = await page
+					.locator(
+						'[data-testid="cross-project-task-switcher-section-remaining"] [data-cross-project-task-switcher-task-id]',
+					)
+					.evaluateAll((rows) =>
+						rows.map((element) => element.getAttribute("data-cross-project-task-switcher-task-id")),
+					);
+				const upperTaskId = remainingRowTaskIds.at(-2);
+				const lowerTaskId = remainingRowTaskIds.at(-1);
+				if (!upperTaskId || !lowerTaskId) throw new Error("Recent 区不足两行，无法验证交接");
+				// 同一个任务可能也在 Pinned：只认 Recent 区里的那两行。
+				const remainingRow = (taskId: string) =>
+					page
+						.locator('[data-testid="cross-project-task-switcher-section-remaining"]')
+						.locator(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
+				const remainingRowExpandedByHover = (taskId: string) =>
+					remainingRow(taskId).and(
+						page.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`),
+					);
+				await panel.evaluate((element) => {
+					element.scrollTop = element.scrollHeight;
+				});
+				const upperRowCompactHeight = (await measureRect(remainingRow(upperTaskId))).height;
+				await remainingRow(upperTaskId).locator("button").first().hover();
+				await remainingRowExpandedByHover(upperTaskId).waitFor();
+				const upperRowGrowthPx = (await measureRect(remainingRow(upperTaskId))).height - upperRowCompactHeight;
+				// 展开后内容变高：再滚到底，让下一行进入视野（也让面板有尽量多的滚动余量）。
+				await panel.evaluate((element) => {
+					element.scrollTop = element.scrollHeight;
+				});
+				const panelScrollTopBeforeHandOffPx = await panel.evaluate((element) => element.scrollTop);
+				const lowerRowCompactGeometry = await measureCompactRow(lowerTaskId, remainingRow(lowerTaskId));
+				// 根 tsconfig 不带 DOM lib：浏览器端脚本以字符串交给页面执行。
+				await page.evaluate(`(() => {
+					const attributeName = ${JSON.stringify(rowInPlaceExpansionStateAttribute)};
+					const recordedExpansionStateChanges = [];
+					window.recordedExpansionStateChanges = recordedExpansionStateChanges;
+					new MutationObserver((mutations) => {
+						for (const mutation of mutations) {
+							recordedExpansionStateChanges.push(
+								mutation.target.getAttribute("data-cross-project-task-switcher-task-id") + ":" + mutation.target.getAttribute(attributeName),
+							);
+						}
+					}).observe(document.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'), {
+						subtree: true,
+						attributes: true,
+						attributeFilter: [attributeName],
+					});
+				})()`);
+				const pointerX = lowerRowCompactGeometry.row.left + lowerRowCompactGeometry.row.width * 0.4;
+				const pointerY = lowerRowCompactGeometry.row.top + 6;
+				await page.mouse.move(pointerX, pointerY, { steps: 4 });
+				await remainingRowExpandedByHover(lowerTaskId).waitFor();
+				const lowerRowExpandedGeometry = await measureExpandedRow(remainingRowExpandedByHover(lowerTaskId));
+				// 指针静止 1.2s：布局位移不得引发连锁展开 / 收起。
+				await waitForNextObservation(1200);
+				const recordedExpansionStateChanges = (await page.evaluate(
+					"window.recordedExpansionStateChanges",
+				)) as string[];
+				const uncompensablePartOfUpperRowGrowthPx = Math.max(0, upperRowGrowthPx - panelScrollTopBeforeHandOffPx);
+				const panelTopPaddingDuringHandOff = await panel.evaluate((element) => element.style.paddingTop);
+				const lowerRowTitleShiftPx = lowerRowExpandedGeometry.title.top - lowerRowCompactGeometry.title.top;
+				titleAndToggleGeometryEvidence[handOffCaseLabel] = {
+					upperTaskId,
+					lowerTaskId,
+					upperRowGrowthPx,
+					panelScrollTopBeforeHandOffPx,
+					uncompensablePartOfUpperRowGrowthPx,
+					panelTopPaddingDuringHandOff,
+					lowerRowTitleShiftPx,
+					pointerY,
+					lowerRowExpandedGeometry,
+					recordedExpansionStateChanges,
+				};
+				expect(Math.abs(lowerRowTitleShiftPx), `${handOffCaseLabel} 新展开的下一行标题不动`).toBeLessThanOrEqual(
+					1.5,
+				);
+				// scrollTop 不够补时才垫顶部空白。
+				expect(panelTopPaddingDuringHandOff === "", `${handOffCaseLabel} 顶部空白`).toBe(
+					uncompensablePartOfUpperRowGrowthPx === 0,
+				);
+				expect(recordedExpansionStateChanges.sort(), `${handOffCaseLabel} 只交接一次、不连锁`).toEqual(
+					[`${lowerTaskId}:expanded_in_place_by_hover`, `${upperTaskId}:compact_row`].sort(),
+				);
+				// 指针仍在新展开的那一行里：再动一下也不会去展开再下一行。
+				expect(pointerY).toBeGreaterThanOrEqual(lowerRowExpandedGeometry.row.top);
+				expect(pointerY).toBeLessThan(lowerRowExpandedGeometry.row.top + lowerRowExpandedGeometry.row.height);
+				await leavePanelAndWaitForHoverExpansionToCollapse();
+				// 收起时顶部空白一并撤掉。
+				expect(await panel.evaluate((element) => element.style.paddingTop)).toBe("");
+				await panel.evaluate((element) => {
+					element.scrollTop = 0;
+				});
+				return uncompensablePartOfUpperRowGrowthPx;
+			};
+			// 面板不可滚（scrollTop 0）：差额全部垫成顶部空白。
+			expect(await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_1000px")).toBeGreaterThan(
+				0,
+			);
+			// 矮视口：面板可滚，交接时收起的行的增量应当被滚动完全补回。
+			await page.setViewportSize({ width: 1600, height: 420 });
+			expect(await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_420px_scrollable")).toBe(
+				0,
+			);
+			await page.setViewportSize({ width: 1600, height: 1000 });
+
+			await page.mouse.move(1500, 950);
+			const panelBoundingBox = await panel.boundingBox();
+			if (!panelBoundingBox) throw new Error("面板未渲染");
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "cross-project-row-1-compact-before-hover.png"),
+				clip: panelBoundingBox,
+			});
+			const currentProjectCompactRowGeometry = await measureCompactRow(dragStartId);
+			const currentProjectExpandedRow = await hoverRowUntilExpandedInPlace(dragStartId, "拖放启动");
+			const hoverDirectory = currentProjectExpandedRow.locator("[data-task-directory]");
 			await hoverDirectory.waitFor();
 			await observeUntil(
 				async () => (await hoverDirectory.textContent())?.includes("+1") === true,
 				"hover 目录行 git 统计",
 			);
 			expect(await hoverDirectory.locator(".lucide-arrow-up").count()).toBe(1);
-			await hoverCard.getByRole("button", { name: "Keep open", exact: true }).click();
+			const currentProjectHoverExpandedGeometry = await measureExpandedRow(currentProjectExpandedRow);
+			expectSamePlacementWithinOnePixel(
+				currentProjectHoverExpandedGeometry.title,
+				currentProjectCompactRowGeometry.title,
+				"current_project_review 标题",
+			);
+			expectSamePlacementWithinOnePixel(
+				currentProjectHoverExpandedGeometry.toggle,
+				currentProjectCompactRowGeometry.toggle,
+				"current_project_review 开关",
+			);
+			// 开关命中区用伪元素向上、向右扩到 24×24，按钮盒子不动：点按钮外右上角 2px 处也命中开关。
+			expect(
+				await currentProjectExpandedRow.getByTestId(inListExpansionToggleTestId).evaluate((element) => {
+					const bounds = element.getBoundingClientRect();
+					return element.contains(element.ownerDocument.elementFromPoint(bounds.right + 2, bounds.top - 2));
+				}),
+			).toBe(true);
+			// 展开发生在静止的光标下：开关第一帧就可见、可点（不必先晃一下鼠标）。
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "cross-project-row-2-expanded-in-place-by-hover.png"),
+				clip: panelBoundingBox,
+			});
+			await currentProjectExpandedRow.getByTestId(inListExpansionToggleTestId).click();
 			const expandedCard = row(dragStartId).locator("[data-task-directory]");
 			await expandedCard.waitFor();
 			expect(await expandedCard.textContent()).toContain("+1");
 			expect(await expandedCard.locator(".lucide-arrow-up").count()).toBe(1);
+			expect(await row(dragStartId).getAttribute(rowInPlaceExpansionStateAttribute)).toBe("kept_expanded_in_list");
+			const keptExpandedToggle = row(dragStartId).getByTestId(inListExpansionToggleTestId);
+			expect(
+				await keptExpandedToggle.getAttribute(
+					"data-cross-project-task-switcher-full-task-card-in-list-expansion-state",
+				),
+			).toBe("kept_expanded_in_list");
+			const currentProjectKeptExpandedGeometry = await measureExpandedRow(row(dragStartId));
+			expectSamePlacementWithinOnePixel(
+				currentProjectKeptExpandedGeometry.title,
+				currentProjectCompactRowGeometry.title,
+				"current_project_review 固定展开标题",
+			);
+			expectSamePlacementWithinOnePixel(
+				currentProjectKeptExpandedGeometry.toggle,
+				currentProjectCompactRowGeometry.toggle,
+				"current_project_review 固定展开开关",
+			);
+			// hover 展开 → 固定展开：高度不变，下方的行不动。
+			expect(
+				Math.abs(currentProjectKeptExpandedGeometry.row.height - currentProjectHoverExpandedGeometry.row.height),
+			).toBeLessThanOrEqual(1);
+			titleAndToggleGeometryEvidence.current_project_review = {
+				compactRowGeometry: currentProjectCompactRowGeometry,
+				hoverExpandedGeometry: currentProjectHoverExpandedGeometry,
+				keptExpandedGeometry: currentProjectKeptExpandedGeometry,
+			};
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "cross-project-row-3-kept-expanded-in-list.png"),
+				clip: panelBoundingBox,
+			});
 			await page.screenshot({
 				path: join(evidenceOutputDirectory, "compact-card-current-project-polled-worktree.png"),
 			});
-			recordCheck("当前项目非焦点卡 hover 与 Keep open 完整卡有目录、领先提交与未提交统计（阶段 5 截图）");
-			await row(betaId).locator("button").first().hover();
-			await hoverCard.waitFor();
-			await hoverCard.getByText("别的项目任务", { exact: true }).waitFor();
-			await hoverCard.getByTestId("cross-project-task-switcher-full-task-card").hover();
-			await hoverCard.getByRole("button", { name: "Move task to validation", exact: true }).click();
+			recordCheck("当前项目非焦点卡 hover 与固定展开的完整卡有目录、领先提交与未提交统计（阶段 5 截图）");
+			writeFileSync(
+				join(evidenceOutputDirectory, "cross-project-row-title-and-toggle-geometry.json"),
+				JSON.stringify(titleAndToggleGeometryEvidence, null, 2),
+			);
+			recordCheck(
+				"阶段 6 精简行 / hover 原地展开 / 固定展开三态标题首行左上角相差 ≤1px、展开开关同一坐标（In progress 与 Review、当前与其他项目）",
+			);
+			recordCheck(
+				"阶段 6 往下挪到下一行：交接一次、不连锁；新行停在指针下不动（面板可滚用 scrollTop 补，滚到顶用顶部空白补）",
+			);
+			const betaExpandedRow = await hoverRowUntilExpandedInPlace(betaId, "别的项目任务");
+			await betaExpandedRow.getByRole("button", { name: "Move task to validation", exact: true }).click();
 			await assertColumn(betaId, "validation", betaWorkspaceId);
 			expect(page.url()).toContain(`/${alphaWorkspaceId}`);
 			recordCheck("对别的项目卡执行动作，当前项目与焦点不变");
+			// 点展开卡片原来顶条所在的位置（卡框上沿往下 0–18px）= 点精简行：backlog 行原地打开编辑框。
+			await leavePanelAndWaitForHoverExpansionToCollapse();
+			await hoverRowUntilExpandedInPlace(betaBacklogClickAnchorId, "顶部点击锚点");
+			const backlogExpandedRowBox = await rowInPlaceExpandedByHover(betaBacklogClickAnchorId).boundingBox();
+			if (!backlogExpandedRowBox) throw new Error("展开的 backlog 行未渲染");
+			await page.mouse.click(
+				backlogExpandedRowBox.x + backlogExpandedRowBox.width * 0.4,
+				backlogExpandedRowBox.y + 3,
+			);
+			const backlogEditor = page.getByRole("dialog").filter({ hasText: "Edit backlog task" });
+			await backlogEditor.waitFor();
+			await page.keyboard.press("Escape");
+			await backlogEditor.waitFor({ state: "detached" });
+			recordCheck("阶段 6 点展开卡片原顶条位置等于点精简行（backlog 原地打开编辑框）");
 			async function createOtherProjectTaskViaDialog(title: string) {
 				const dialog = page.getByRole("dialog").filter({ hasText: "New task" });
 				await dialog.locator('[data-testid="task-creation-target-project-field"]').getByRole("button").click();
@@ -484,8 +775,10 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 			if (!createdByKeyboardId) throw new Error("缺创建结果");
 			recordCheck("Board Scope c 键往别的项目建卡不切项目");
 			await row(createdByKeyboardId).locator("button").first().hover();
-			await hoverCard.waitFor();
-			await hoverCard.getByRole("button", { name: "Keep open", exact: true }).click();
+			await rowInPlaceExpandedByHover(createdByKeyboardId).getByTestId(inListExpansionToggleTestId).click();
+			expect(await row(createdByKeyboardId).getAttribute(rowInPlaceExpansionStateAttribute)).toBe(
+				"kept_expanded_in_list",
+			);
 			await row(createdByKeyboardId).hover();
 			const expandedBacklogPencil = row(createdByKeyboardId).getByRole("button", {
 				name: "Edit task title",
