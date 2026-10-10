@@ -1756,6 +1756,40 @@ export function registerTaskCommand(program: Command): void {
 			);
 		});
 
+	for (const commandName of ["set-current-work-phase-goal", "clear-current-work-phase-goal"] as const) {
+		const command = task.command(commandName).description("按调用环境身份更新当前对话的阶段目标。");
+		if (commandName === "set-current-work-phase-goal")
+			command.requiredOption("--goal <text>", "阶段目标（最多 160 字）。");
+		command.action(async (options: { goal?: string }) => {
+			await runTaskCommand(async () => {
+				const projectPath = process.env.KANBAN_PROJECT_PATH?.trim();
+				if (!projectPath || !process.env.KANBAN_TASK_ID?.trim())
+					throw new Error("当前调用环境缺少 Task 身份；不会从 cwd 推测。");
+				const workspaceId = await ensureRuntimeWorkspace(projectPath);
+				return await createRuntimeTrpcClient(workspaceId).runtime.setCurrentWorkPhaseGoal.mutate({
+					goal: commandName === "clear-current-work-phase-goal" ? null : (options.goal ?? ""),
+				});
+			});
+		});
+	}
+
+	task
+		.command("rename-current-task")
+		.description("按调用环境身份给自己的 Task 改名，并记录原因。")
+		.requiredOption("--title <text>", "新名称（最多 80 字）。")
+		.requiredOption("--reason <text>", "改名原因（最多 500 字）。")
+		.action(async (options: { title: string; reason: string }) => {
+			await runTaskCommand(async () => {
+				const projectPath = process.env.KANBAN_PROJECT_PATH?.trim();
+				if (!projectPath || !process.env.KANBAN_TASK_ID?.trim()) {
+					throw new Error("当前调用环境缺少 KANBAN_TASK_ID 或 KANBAN_PROJECT_PATH；不会从 cwd 推测。 ");
+				}
+				const workspaceId = await ensureRuntimeWorkspace(projectPath);
+				const renamed = await createRuntimeTrpcClient(workspaceId).taskCardAction.renameCurrentTask.mutate(options);
+				return { ok: true, task: renamed.taskCardSnapshotAfterAction.taskCard };
+			});
+		});
+
 	task
 		.command("create")
 		.description("Create a task in backlog.")

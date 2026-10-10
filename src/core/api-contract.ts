@@ -930,6 +930,21 @@ export const runtimeAgentSessionReclamationOutcomeSchema = z.object({
 });
 export type RuntimeAgentSessionReclamationOutcome = z.infer<typeof runtimeAgentSessionReclamationOutcomeSchema>;
 
+// 阶段目标独立于整个 Task 名称；原生候选与显式声明分开，clear 后可回退原生候选。
+export const runtimeAgentCurrentWorkPhaseGoalSchema = z.object({
+	goalText: z.string().trim().min(1).max(160),
+	source: z.enum(["agent_explicit_declaration", "claude_native_task_list", "acp_structured_plan"]),
+	updatedAt: z.number(),
+	owningKanbanTaskConversationSessionId: z.string().min(1),
+	owningNativeConversationSessionId: z.string().min(1).nullable(),
+	owningRuntimeSessionIncarnationId: z.string().nullable().optional(),
+});
+export type RuntimeAgentCurrentWorkPhaseGoal = z.infer<typeof runtimeAgentCurrentWorkPhaseGoalSchema>;
+export const runtimeSetCurrentWorkPhaseGoalRequestSchema = z
+	.object({ goal: z.string().trim().min(1).max(160).nullable() })
+	.strict();
+export type RuntimeSetCurrentWorkPhaseGoalRequest = z.infer<typeof runtimeSetCurrentWorkPhaseGoalRequestSchema>;
+
 const runtimeTaskSessionSummaryObjectSchema = z.object({
 	taskId: z.string(),
 	// Stage 4 全写侧反转：`state` 降为派生投影 → 输入可选（facet-only 写不带 state）；末位 .transform
@@ -955,6 +970,9 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 旧盘数据 / 手构造 summary 缺它 ⇒
 	// 药丸 B 隐藏（而非退回读 lastSubstantiveOutputAt——那正是本 bug 的成因）。
 	lastConversationProgressObservation: runtimeLastConversationProgressObservationSchema.nullable().optional(),
+	agentCurrentWorkPhaseGoal: runtimeAgentCurrentWorkPhaseGoalSchema.nullable().optional(),
+	agentNativeCurrentWorkPhaseGoal: runtimeAgentCurrentWorkPhaseGoalSchema.nullable().optional(),
+	agentCurrentWorkPhaseGoalInvalidatedAt: z.number().optional(),
 	// 「主对话最后一次向模型发出请求」观测（Cache warm 倒计时起点），语义见其 schema 注释。跨重启保留；
 	// 加性可选：旧盘数据 / 无回合类 hook 的 agent 缺它 ⇒ 估算回落到其它锚点（见 section-assignment）。
 	lastMainAgentConversationModelRequestDispatchObservation:
@@ -1588,6 +1606,8 @@ export type RuntimeTaskCardFieldUpdate = z.infer<typeof runtimeTaskCardFieldUpda
 export const runtimeTaskCardActionUpdateFieldValuesRequestSchema = z.object({
 	taskId: z.string().min(1),
 	taskCardFieldUpdate: runtimeTaskCardFieldUpdateSchema,
+	// 异步 AI 回填锁内检查，防止顶掉并发名称或描述编辑。
+	expectedTaskTitleAndPromptForAiNameBackfill: z.object({ title: z.string(), prompt: z.string() }).optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 });
 export type RuntimeTaskCardActionUpdateFieldValuesRequest = z.infer<
@@ -1599,6 +1619,17 @@ export const runtimeTaskCardActionUpdateFieldValuesResponseSchema = z.object({
 export type RuntimeTaskCardActionUpdateFieldValuesResponse = z.infer<
 	typeof runtimeTaskCardActionUpdateFieldValuesResponseSchema
 >;
+
+export const runtimeRenameCurrentTaskRequestSchema = z
+	.object({
+		title: z
+			.string()
+			.transform((value) => value.trim().replace(/\s+/gu, " "))
+			.pipe(z.string().min(1).max(80)),
+		reason: z.string().trim().min(1).max(500),
+	})
+	.strict();
+export type RuntimeRenameCurrentTaskRequest = z.infer<typeof runtimeRenameCurrentTaskRequestSchema>;
 
 export const runtimeProjectTaskCountsSchema = z.object({
 	backlog: z.number(),
@@ -4180,6 +4211,7 @@ export type RuntimePromptLibraryMutateRequest = z.infer<typeof runtimePromptLibr
 // **不进 board.json**：草稿带内联 base64 图片，而 board.json 是每次看板改动都整体读写 + 广播的最热
 // 路径，把易膨胀数据塞进去等于把膨胀直接打在那条链上。
 export const runtimeTaskEditDraftSchema = z.object({
+	taskTitleOverride: z.string().optional(),
 	taskId: z.string(),
 	prompt: z.string(),
 	images: z.array(runtimeTaskImageSchema),
@@ -4749,6 +4781,7 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// UserPromptSubmit 的 prompt 只在同步 hook 请求内短暂流转，用于区分真人输入与 harness 在恢复时
 	// 自动塞入的任务通知；普通诊断日志与 session summary 均不得记录它。
 	submittedPromptText: z.string().optional(),
+	claudeNativeTaskListIdForPhaseGoalProjection: z.string().min(1).max(200).nullable().optional(),
 	// hook 是否从子代理内部触发（`kanban hooks` 从 hook stdin 的 `agent_id` 派生；Claude Code 只在子代理
 	// 内的事件上带它，主线程一律不带）。子代理的请求走自己的缓存前缀，不刷新主对话的 Cache warm 起点。
 	// 只传布尔、不传 id 本身：服务端唯一用途就是这道排除。

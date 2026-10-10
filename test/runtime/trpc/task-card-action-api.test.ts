@@ -222,6 +222,20 @@ function createApiForTest() {
 		harness.callOrder.push("notifyQueuedTaskPromptDeliveryDispatcher");
 	});
 	const api = createTaskCardActionApi({
+		kanbanActorResolutionLookups: {
+			findWorkspaceIdByRepositoryPathForActorResolution: async () => WORKSPACE_SCOPE.workspaceId,
+			findKanbanBoardCardIncarnationForActorResolution: async (_workspaceId, taskId) => {
+				const card = readBoard()
+					.columns.flatMap((column) => column.cards)
+					.find((card) => card.id === taskId);
+				return card
+					? {
+							taskIncarnationCreatedAtEpochMs: card.createdAt,
+							workspaceRepositoryPath: WORKSPACE_SCOPE.workspacePath,
+						}
+					: null;
+			},
+		},
 		runtimeApi: runtimeApi as unknown as Parameters<typeof createTaskCardActionApi>[0]["runtimeApi"],
 		workspaceApi: workspaceApi as unknown as Parameters<typeof createTaskCardActionApi>[0]["workspaceApi"],
 		broadcastRuntimeWorkspaceStateUpdated,
@@ -1409,5 +1423,60 @@ describe("createTaskCardActionPerTaskCommandSerializer", () => {
 		await expect(onCardsAAndB).resolves.toBe("ab");
 		expect(events.indexOf("a1:end")).toBeLessThan(events.indexOf("a2:run"));
 		expect(events.indexOf("a2:run")).toBeLessThan(events.indexOf("ab:run"));
+	});
+});
+
+describe("自己的 Task 改名与异步建议回填", () => {
+	it("拒绝没有身份的 CLI 调用，不写 board", async () => {
+		const { api } = createApiForTest();
+		await expect(
+			api.renameCurrentTask(
+				WORKSPACE_SCOPE,
+				{ title: "新名称", reason: "范围明确" },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(harness.callOrder).toEqual([]);
+	});
+	it("按环境身份原子改名与追加原因，同名重试不重复写入", async () => {
+		seedWorkspace(createBoard({ backlog: [createCard("task-a"), createCard("task-b")] }));
+		const { api } = createApiForTest();
+		const evidence: KanbanRequestOriginActorEvidence = {
+			decodedCliActorClaimsRequestHeader: {
+				cliActorClaimsRequestHeaderStatus: "present",
+				claims: collectKanbanCliInvocationEnvironmentActorClaims({
+					environment: { KANBAN_TASK_ID: "task-a", KANBAN_PROJECT_PATH: WORKSPACE_SCOPE.workspacePath },
+					invokingKanbanCliCodeVersion: "test",
+					invokingProcessWorkingDirectory: "/wrong-cwd",
+				}),
+			},
+		};
+		await api.renameCurrentTask(WORKSPACE_SCOPE, { title: "[FIX]明确任务结果", reason: "核对持久范围" }, evidence);
+		await api.renameCurrentTask(WORKSPACE_SCOPE, { title: "[FIX]明确任务结果", reason: "重复调用" }, evidence);
+		const [renamed, other] = readBoard().columns[0].cards;
+		expect(renamed.title).toBe("[FIX]明确任务结果");
+		expect(renamed.taskCommentEntries).toHaveLength(1);
+		expect(renamed.taskCommentEntries?.[0].commentText).toContain("title of task-a → [FIX]明确任务结果");
+		expect(renamed.taskCommentEntries?.[0].commentText).toContain("核对持久范围");
+		expect(other.title).toBe("title of task-b");
+		expect(harness.callOrder.filter((value) => value.startsWith("boardWrite:"))).toHaveLength(1);
+	});
+	it("迟到的 AI 建议不能覆盖已经变更的描述", async () => {
+		seedWorkspace(createBoard({ backlog: [createCard("task-a", { prompt: "已经编辑的描述" })] }));
+		const { api } = createApiForTest();
+		await api.updateTaskCardFieldValues(
+			WORKSPACE_SCOPE,
+			{
+				taskId: "task-a",
+				taskCardFieldUpdate: {
+					taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+					taskCardFieldValuePatch: { title: "AI 名称" },
+				},
+				expectedTaskTitleAndPromptForAiNameBackfill: { title: "title of task-a", prompt: "旧描述" },
+			},
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_WEB_UI_PAGE,
+		);
+		expect(readBoard().columns[0].cards[0].title).toBe("title of task-a");
+		expect(harness.callOrder).toEqual([]);
 	});
 });

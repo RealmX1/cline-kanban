@@ -1,7 +1,11 @@
+import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
+import { getTerminalThemeColors } from "@/hooks/use-theme";
+import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-action-query";
 import { findCardSelection } from "@/state/board-state";
 import { writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab } from "@/stores/workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store";
+import { ensurePersistentTerminal } from "@/terminal/persistent-terminal-manager";
 import type { BoardCard, BoardData } from "@/types";
 
 export interface PendingCrossProjectTaskOpen {
@@ -109,6 +113,45 @@ export function useCrossProjectTaskOpenInProject({
 		},
 		[currentProjectId, handleSelectProject, setSelectedTaskId],
 	);
+
+	useEffect(() => {
+		if (!pendingCrossProjectTaskOpen) return;
+		let isTerminalPrewarmReadCancelledByTaskNavigation = false;
+		const { repoId, taskId } = pendingCrossProjectTaskOpen;
+		void readTaskCardWithBoardColumnInWorkspace(repoId, taskId)
+			.then((response) => {
+				if (
+					isTerminalPrewarmReadCancelledByTaskNavigation ||
+					response.taskCardLookupOutcome !== "task_card_found_on_workspace_board"
+				)
+					return;
+				const taskCardSnapshotReadForTerminalPrewarm = response.taskCardSnapshot;
+				if (taskCardSnapshotReadForTerminalPrewarm.boardColumnIdContainingTaskCard === "backlog") return;
+				const existingTaskSessionSummaryForTerminalPrewarm =
+					taskCardSnapshotReadForTerminalPrewarm.taskSessionSummaryLiveInRuntimeProcessMemory ??
+					taskCardSnapshotReadForTerminalPrewarm.taskSessionSummaryPersistedInWorkspaceSessionsFile;
+				// 只预热已经存在且明确走 PTY 的会话；未知通道交给正式详情页。
+				if (
+					!existingTaskSessionSummaryForTerminalPrewarm ||
+					existingTaskSessionSummaryForTerminalPrewarm.sessionTransport === undefined ||
+					isRuntimeAgentSessionSummaryRenderedAsConversationPanel(existingTaskSessionSummaryForTerminalPrewarm)
+				)
+					return;
+				const terminalThemeColorsForTerminalPrewarm = getTerminalThemeColors();
+				ensurePersistentTerminal({
+					workspaceId: repoId,
+					taskId,
+					cursorColor: terminalThemeColorsForTerminalPrewarm.textPrimary,
+					terminalBackgroundColor: terminalThemeColorsForTerminalPrewarm.surfacePrimary,
+					themeColors: terminalThemeColorsForTerminalPrewarm,
+					deferAutomaticSessionResumeUntilVisibleMount: true,
+				});
+			})
+			.catch(() => undefined);
+		return () => {
+			isTerminalPrewarmReadCancelledByTaskNavigation = true;
+		};
+	}, [pendingCrossProjectTaskOpen]);
 
 	useEffect(() => {
 		// 未落定时 board 可能还是上一个项目的（见顶部注释），任何分支都不能拿它做决策。

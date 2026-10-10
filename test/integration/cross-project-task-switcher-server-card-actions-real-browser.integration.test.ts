@@ -117,11 +117,11 @@ setInterval(() => {}, 1000);
 					}),
 				],
 			});
-		async function runCli(arguments_: string[], cwd: string) {
+		async function runCli(arguments_: string[], cwd: string, actorEnvironment: Record<string, string> = {}) {
 			const child = spawnedChildProcessRegistry.register(
 				spawn(process.execPath, [...nodeCliArguments, ...arguments_], {
 					cwd,
-					env: environment,
+					env: { ...environment, ...actorEnvironment },
 					stdio: ["ignore", "pipe", "pipe", "ipc"],
 				}),
 			);
@@ -172,7 +172,7 @@ setInterval(() => {}, 1000);
 			console.log(`通过：${description}`);
 		};
 		try {
-			startOwnedProcess(
+			const initialRuntimeProcess = startOwnedProcess(
 				"isolated-runtime",
 				process.execPath,
 				[...nodeCliArguments, "--port", String(runtimePort), "--no-open", "--no-passcode"],
@@ -420,6 +420,24 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				workingDirectoryPath: nonFocusedTaskWorktreePath,
 			});
 			writeFileSync(join(nonFocusedTaskWorktreePath, "initial.txt"), "initial\nchanged\n");
+			// 别的项目里一张没起过会话的 In progress 卡：旧设计在完整卡首行画 Spinner，标题因此右移约 23px。
+			// 只改 beta 的 board（浏览器此刻停在 alpha，不会并发写 beta）。
+			const betaInProgressGeometryAnchorId = await createTask(secondProject.repositoryPath, "进行中几何锚点");
+			// 别的项目里的 backlog 卡：点它展开后卡片的上沿，应当原地打开编辑框（可观察、不换焦点、不起会话）。
+			const betaBacklogClickAnchorId = await createTask(secondProject.repositoryPath, "顶部点击锚点");
+			const betaGeometryState = await runtimeClient(betaWorkspaceId).workspace.getState.query();
+			const betaGeometryBacklog = betaGeometryState.board.columns.find((column) => column.id === "backlog");
+			const betaGeometryCard = betaGeometryBacklog?.cards.find((task) => task.id === betaInProgressGeometryAnchorId);
+			if (!betaGeometryCard || !betaGeometryBacklog) throw new Error("缺少几何锚点卡");
+			betaGeometryBacklog.cards = betaGeometryBacklog.cards.filter(
+				(task) => task.id !== betaInProgressGeometryAnchorId,
+			);
+			betaGeometryState.board.columns.find((column) => column.id === "in_progress")?.cards.push(betaGeometryCard);
+			await runtimeClient(betaWorkspaceId).workspace.saveState.mutate({
+				board: betaGeometryState.board,
+				sessions: betaGeometryState.sessions,
+				expectedRevision: betaGeometryState.revision,
+			});
 			await page.evaluate(() => {
 				sessionStorage.setItem("kanban.selected-board-or-single-project-scope.v1", "board_scope_all_projects");
 				localStorage.setItem("kanban.selected-board-or-single-project-scope.v1", "board_scope_all_projects");
@@ -431,34 +449,307 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				async () => (await row(dragStartId).textContent())?.includes("+1") === true,
 				"非焦点精简行轮询已刷新",
 			);
-			await row(dragStartId).locator("button").first().hover();
-			const hoverCard = page.locator('[data-testid="cross-project-task-switcher-row-full-task-card-hover-overlay"]');
-			await hoverCard.waitFor();
-			await hoverCard.getByText("拖放启动", { exact: true }).waitFor();
-			const hoverDirectory = hoverCard.locator("[data-task-directory]");
+			const rowInPlaceExpansionStateAttribute = "data-cross-project-task-switcher-row-in-place-expansion-state";
+			const rowInPlaceExpandedByHover = (taskId: string) =>
+				page
+					.locator(
+						`[data-cross-project-task-switcher-task-id="${taskId}"][${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`,
+					)
+					.first();
+			const inListExpansionToggleTestId =
+				"cross-project-task-switcher-full-task-card-in-list-expansion-toggle-button";
+			const panel = page.locator('[data-testid="cross-project-recently-active-task-switcher-panel"]');
+			// 阶段 6：精简行 → hover 原地展开 → 固定展开三态之间标题首行一像素不动、展开开关同一坐标；
+			// 往下挪到下一行时交接、新行停在指针下（面板有滚动余量时）、静止的光标下不连锁展开。
+			type MeasuredRect = { left: number; top: number; width: number; height: number };
+			const measureRect = (locator: ReturnType<typeof page.locator>) =>
+				locator.evaluate((element): MeasuredRect => {
+					const rect = element.getBoundingClientRect();
+					return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+				});
+			const titleAndToggleGeometryEvidence: Record<string, unknown> = {};
+			const expectSamePlacementWithinOnePixel = (actual: MeasuredRect, expected: MeasuredRect, label: string) => {
+				expect(Math.abs(actual.left - expected.left), `${label} left`).toBeLessThanOrEqual(1);
+				expect(Math.abs(actual.top - expected.top), `${label} top`).toBeLessThanOrEqual(1);
+			};
+			const measureCompactRow = async (taskId: string, compactRow = row(taskId)) => {
+				return {
+					row: await measureRect(compactRow),
+					title: await measureRect(compactRow.locator("[data-cross-project-task-switcher-row-title]")),
+					toggle: await measureRect(compactRow.getByTestId(inListExpansionToggleTestId)),
+					leadingActivityIndicator: await compactRow
+						.locator("[data-cross-project-task-switcher-row-leading-activity-indicator]")
+						.first()
+						.getAttribute("data-cross-project-task-switcher-row-leading-activity-indicator", { timeout: 200 })
+						.catch(() => null),
+				};
+			};
+			const measureExpandedRow = async (expandedRow: ReturnType<typeof page.locator>) => ({
+				row: await measureRect(expandedRow),
+				title: await measureRect(expandedRow.locator("[data-task-card-title]")),
+				toggle: await measureRect(expandedRow.getByTestId(inListExpansionToggleTestId)),
+			});
+			const hoverRowUntilExpandedInPlace = async (taskId: string, title: string) => {
+				await row(taskId).locator("button").first().hover();
+				await rowInPlaceExpandedByHover(taskId)
+					.locator("[data-task-card-title]")
+					.filter({ hasText: title })
+					.waitFor();
+				return rowInPlaceExpandedByHover(taskId);
+			};
+			const leavePanelAndWaitForHoverExpansionToCollapse = async () => {
+				await page.mouse.move(1500, 950);
+				await page
+					.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`)
+					.first()
+					.waitFor({ state: "detached" });
+			};
+			for (const [taskId, title, geometryCaseLabel] of [
+				[betaInProgressGeometryAnchorId, "进行中几何锚点", "other_project_in_progress_without_session"],
+				[betaId, "别的项目任务", "other_project_review"],
+			] as const) {
+				await row(taskId).waitFor();
+				const compactRowGeometry = await measureCompactRow(taskId);
+				const expandedRowGeometry = await measureExpandedRow(await hoverRowUntilExpandedInPlace(taskId, title));
+				// 原地展开：行的上沿与左沿不动，只向下长。
+				expectSamePlacementWithinOnePixel(
+					expandedRowGeometry.row,
+					compactRowGeometry.row,
+					`${geometryCaseLabel} 行`,
+				);
+				expect(expandedRowGeometry.row.height).toBeGreaterThan(compactRowGeometry.row.height);
+				expectSamePlacementWithinOnePixel(
+					expandedRowGeometry.title,
+					compactRowGeometry.title,
+					`${geometryCaseLabel} 标题`,
+				);
+				expectSamePlacementWithinOnePixel(
+					expandedRowGeometry.toggle,
+					compactRowGeometry.toggle,
+					`${geometryCaseLabel} 开关`,
+				);
+				titleAndToggleGeometryEvidence[geometryCaseLabel] = { compactRowGeometry, expandedRowGeometry };
+				await leavePanelAndWaitForHoverExpansionToCollapse();
+			}
+
+			// 往下挪到下一行：上一行不在离开时收起，下一行停够意图时长后交接；收起的行在上方，新行被带着上移的距离
+			// 先由面板滚动补回，scrollTop 不够时差额垫成面板顶部空白——两种视口下新行都停在指针下不动。
+			// 之后指针静止，不得再有任何展开 / 收起。
+			const measureHandOffToNextRowBelow = async (handOffCaseLabel: string) => {
+				const remainingRowTaskIds = await page
+					.locator(
+						'[data-testid="cross-project-task-switcher-section-remaining"] [data-cross-project-task-switcher-task-id]',
+					)
+					.evaluateAll((rows) =>
+						rows.map((element) => element.getAttribute("data-cross-project-task-switcher-task-id")),
+					);
+				const upperTaskId = remainingRowTaskIds.at(-2);
+				const lowerTaskId = remainingRowTaskIds.at(-1);
+				if (!upperTaskId || !lowerTaskId) throw new Error("Recent 区不足两行，无法验证交接");
+				// 同一个任务可能也在 Pinned：只认 Recent 区里的那两行。
+				const remainingRow = (taskId: string) =>
+					page
+						.locator('[data-testid="cross-project-task-switcher-section-remaining"]')
+						.locator(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
+				const remainingRowExpandedByHover = (taskId: string) =>
+					remainingRow(taskId).and(
+						page.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`),
+					);
+				await panel.evaluate((element) => {
+					element.scrollTop = element.scrollHeight;
+				});
+				const upperRowCompactHeight = (await measureRect(remainingRow(upperTaskId))).height;
+				await remainingRow(upperTaskId).locator("button").first().hover();
+				await remainingRowExpandedByHover(upperTaskId).waitFor();
+				const upperRowGrowthPx = (await measureRect(remainingRow(upperTaskId))).height - upperRowCompactHeight;
+				// 展开后内容变高：再滚到底，让下一行进入视野（也让面板有尽量多的滚动余量）。
+				await panel.evaluate((element) => {
+					element.scrollTop = element.scrollHeight;
+				});
+				const panelScrollTopBeforeHandOffPx = await panel.evaluate((element) => element.scrollTop);
+				const lowerRowCompactGeometry = await measureCompactRow(lowerTaskId, remainingRow(lowerTaskId));
+				// 根 tsconfig 不带 DOM lib：浏览器端脚本以字符串交给页面执行。
+				await page.evaluate(`(() => {
+					const attributeName = ${JSON.stringify(rowInPlaceExpansionStateAttribute)};
+					const recordedExpansionStateChanges = [];
+					window.recordedExpansionStateChanges = recordedExpansionStateChanges;
+					new MutationObserver((mutations) => {
+						for (const mutation of mutations) {
+							recordedExpansionStateChanges.push(
+								mutation.target.getAttribute("data-cross-project-task-switcher-task-id") + ":" + mutation.target.getAttribute(attributeName),
+							);
+						}
+					}).observe(document.querySelector('[data-testid="cross-project-recently-active-task-switcher-panel"]'), {
+						subtree: true,
+						attributes: true,
+						attributeFilter: [attributeName],
+					});
+				})()`);
+				const pointerX = lowerRowCompactGeometry.row.left + lowerRowCompactGeometry.row.width * 0.4;
+				const pointerY = lowerRowCompactGeometry.row.top + 6;
+				await page.mouse.move(pointerX, pointerY, { steps: 4 });
+				await remainingRowExpandedByHover(lowerTaskId).waitFor();
+				const lowerRowExpandedGeometry = await measureExpandedRow(remainingRowExpandedByHover(lowerTaskId));
+				// 指针静止 1.2s：布局位移不得引发连锁展开 / 收起。
+				await waitForNextObservation(1200);
+				const recordedExpansionStateChanges = (await page.evaluate(
+					"window.recordedExpansionStateChanges",
+				)) as string[];
+				const uncompensablePartOfUpperRowGrowthPx = Math.max(0, upperRowGrowthPx - panelScrollTopBeforeHandOffPx);
+				const panelTopPaddingDuringHandOff = await panel.evaluate((element) => element.style.paddingTop);
+				const lowerRowTitleShiftPx = lowerRowExpandedGeometry.title.top - lowerRowCompactGeometry.title.top;
+				titleAndToggleGeometryEvidence[handOffCaseLabel] = {
+					upperTaskId,
+					lowerTaskId,
+					upperRowGrowthPx,
+					panelScrollTopBeforeHandOffPx,
+					uncompensablePartOfUpperRowGrowthPx,
+					panelTopPaddingDuringHandOff,
+					lowerRowTitleShiftPx,
+					pointerY,
+					lowerRowExpandedGeometry,
+					recordedExpansionStateChanges,
+				};
+				expect(Math.abs(lowerRowTitleShiftPx), `${handOffCaseLabel} 新展开的下一行标题不动`).toBeLessThanOrEqual(
+					1.5,
+				);
+				// scrollTop 不够补时才垫顶部空白。
+				expect(panelTopPaddingDuringHandOff === "", `${handOffCaseLabel} 顶部空白`).toBe(
+					uncompensablePartOfUpperRowGrowthPx === 0,
+				);
+				expect(recordedExpansionStateChanges.sort(), `${handOffCaseLabel} 只交接一次、不连锁`).toEqual(
+					[`${lowerTaskId}:expanded_in_place_by_hover`, `${upperTaskId}:compact_row`].sort(),
+				);
+				// 指针仍在新展开的那一行里：再动一下也不会去展开再下一行。
+				expect(pointerY).toBeGreaterThanOrEqual(lowerRowExpandedGeometry.row.top);
+				expect(pointerY).toBeLessThan(lowerRowExpandedGeometry.row.top + lowerRowExpandedGeometry.row.height);
+				await leavePanelAndWaitForHoverExpansionToCollapse();
+				// 收起时顶部空白一并撤掉。
+				expect(await panel.evaluate((element) => element.style.paddingTop)).toBe("");
+				await panel.evaluate((element) => {
+					element.scrollTop = 0;
+				});
+				return uncompensablePartOfUpperRowGrowthPx;
+			};
+			// 面板不可滚（scrollTop 0）：差额全部垫成顶部空白。
+			expect(await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_1000px")).toBeGreaterThan(
+				0,
+			);
+			// 矮视口：面板可滚，交接时收起的行的增量应当被滚动完全补回。
+			await page.setViewportSize({ width: 1600, height: 420 });
+			expect(await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_420px_scrollable")).toBe(
+				0,
+			);
+			await page.setViewportSize({ width: 1600, height: 1000 });
+
+			await page.mouse.move(1500, 950);
+			const panelBoundingBox = await panel.boundingBox();
+			if (!panelBoundingBox) throw new Error("面板未渲染");
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "cross-project-row-1-compact-before-hover.png"),
+				clip: panelBoundingBox,
+			});
+			const currentProjectCompactRowGeometry = await measureCompactRow(dragStartId);
+			const currentProjectExpandedRow = await hoverRowUntilExpandedInPlace(dragStartId, "拖放启动");
+			const hoverDirectory = currentProjectExpandedRow.locator("[data-task-directory]");
 			await hoverDirectory.waitFor();
 			await observeUntil(
 				async () => (await hoverDirectory.textContent())?.includes("+1") === true,
 				"hover 目录行 git 统计",
 			);
 			expect(await hoverDirectory.locator(".lucide-arrow-up").count()).toBe(1);
-			await hoverCard.getByRole("button", { name: "Keep open", exact: true }).click();
+			const currentProjectHoverExpandedGeometry = await measureExpandedRow(currentProjectExpandedRow);
+			expectSamePlacementWithinOnePixel(
+				currentProjectHoverExpandedGeometry.title,
+				currentProjectCompactRowGeometry.title,
+				"current_project_review 标题",
+			);
+			expectSamePlacementWithinOnePixel(
+				currentProjectHoverExpandedGeometry.toggle,
+				currentProjectCompactRowGeometry.toggle,
+				"current_project_review 开关",
+			);
+			// 开关命中区用伪元素向上、向右扩到 24×24，按钮盒子不动：点按钮外右上角 2px 处也命中开关。
+			expect(
+				await currentProjectExpandedRow.getByTestId(inListExpansionToggleTestId).evaluate((element) => {
+					const bounds = element.getBoundingClientRect();
+					return element.contains(element.ownerDocument.elementFromPoint(bounds.right + 2, bounds.top - 2));
+				}),
+			).toBe(true);
+			// 展开发生在静止的光标下：开关第一帧就可见、可点（不必先晃一下鼠标）。
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "cross-project-row-2-expanded-in-place-by-hover.png"),
+				clip: panelBoundingBox,
+			});
+			await currentProjectExpandedRow.getByTestId(inListExpansionToggleTestId).click();
 			const expandedCard = row(dragStartId).locator("[data-task-directory]");
 			await expandedCard.waitFor();
 			expect(await expandedCard.textContent()).toContain("+1");
 			expect(await expandedCard.locator(".lucide-arrow-up").count()).toBe(1);
+			expect(await row(dragStartId).getAttribute(rowInPlaceExpansionStateAttribute)).toBe("kept_expanded_in_list");
+			const keptExpandedToggle = row(dragStartId).getByTestId(inListExpansionToggleTestId);
+			expect(
+				await keptExpandedToggle.getAttribute(
+					"data-cross-project-task-switcher-full-task-card-in-list-expansion-state",
+				),
+			).toBe("kept_expanded_in_list");
+			const currentProjectKeptExpandedGeometry = await measureExpandedRow(row(dragStartId));
+			expectSamePlacementWithinOnePixel(
+				currentProjectKeptExpandedGeometry.title,
+				currentProjectCompactRowGeometry.title,
+				"current_project_review 固定展开标题",
+			);
+			expectSamePlacementWithinOnePixel(
+				currentProjectKeptExpandedGeometry.toggle,
+				currentProjectCompactRowGeometry.toggle,
+				"current_project_review 固定展开开关",
+			);
+			// hover 展开 → 固定展开：高度不变，下方的行不动。
+			expect(
+				Math.abs(currentProjectKeptExpandedGeometry.row.height - currentProjectHoverExpandedGeometry.row.height),
+			).toBeLessThanOrEqual(1);
+			titleAndToggleGeometryEvidence.current_project_review = {
+				compactRowGeometry: currentProjectCompactRowGeometry,
+				hoverExpandedGeometry: currentProjectHoverExpandedGeometry,
+				keptExpandedGeometry: currentProjectKeptExpandedGeometry,
+			};
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "cross-project-row-3-kept-expanded-in-list.png"),
+				clip: panelBoundingBox,
+			});
 			await page.screenshot({
 				path: join(evidenceOutputDirectory, "compact-card-current-project-polled-worktree.png"),
 			});
-			recordCheck("当前项目非焦点卡 hover 与 Keep open 完整卡有目录、领先提交与未提交统计（阶段 5 截图）");
-			await row(betaId).locator("button").first().hover();
-			await hoverCard.waitFor();
-			await hoverCard.getByText("别的项目任务", { exact: true }).waitFor();
-			await hoverCard.getByTestId("cross-project-task-switcher-full-task-card").hover();
-			await hoverCard.getByRole("button", { name: "Move task to validation", exact: true }).click();
+			recordCheck("当前项目非焦点卡 hover 与固定展开的完整卡有目录、领先提交与未提交统计（阶段 5 截图）");
+			writeFileSync(
+				join(evidenceOutputDirectory, "cross-project-row-title-and-toggle-geometry.json"),
+				JSON.stringify(titleAndToggleGeometryEvidence, null, 2),
+			);
+			recordCheck(
+				"阶段 6 精简行 / hover 原地展开 / 固定展开三态标题首行左上角相差 ≤1px、展开开关同一坐标（In progress 与 Review、当前与其他项目）",
+			);
+			recordCheck(
+				"阶段 6 往下挪到下一行：交接一次、不连锁；新行停在指针下不动（面板可滚用 scrollTop 补，滚到顶用顶部空白补）",
+			);
+			const betaExpandedRow = await hoverRowUntilExpandedInPlace(betaId, "别的项目任务");
+			await betaExpandedRow.getByRole("button", { name: "Move task to validation", exact: true }).click();
 			await assertColumn(betaId, "validation", betaWorkspaceId);
 			expect(page.url()).toContain(`/${alphaWorkspaceId}`);
 			recordCheck("对别的项目卡执行动作，当前项目与焦点不变");
+			// 点展开卡片原来顶条所在的位置（卡框上沿往下 0–18px）= 点精简行：backlog 行原地打开编辑框。
+			await leavePanelAndWaitForHoverExpansionToCollapse();
+			await hoverRowUntilExpandedInPlace(betaBacklogClickAnchorId, "顶部点击锚点");
+			const backlogExpandedRowBox = await rowInPlaceExpandedByHover(betaBacklogClickAnchorId).boundingBox();
+			if (!backlogExpandedRowBox) throw new Error("展开的 backlog 行未渲染");
+			await page.mouse.click(
+				backlogExpandedRowBox.x + backlogExpandedRowBox.width * 0.4,
+				backlogExpandedRowBox.y + 3,
+			);
+			const backlogEditor = page.getByRole("dialog").filter({ hasText: "Edit backlog task" });
+			await backlogEditor.waitFor();
+			await page.keyboard.press("Escape");
+			await backlogEditor.waitFor({ state: "detached" });
+			recordCheck("阶段 6 点展开卡片原顶条位置等于点精简行（backlog 原地打开编辑框）");
 			async function createOtherProjectTaskViaDialog(title: string) {
 				const dialog = page.getByRole("dialog").filter({ hasText: "New task" });
 				await dialog.locator('[data-testid="task-creation-target-project-field"]').getByRole("button").click();
@@ -483,7 +774,25 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 			const createdByKeyboardId = await createOtherProjectTaskViaDialog("c 键往另一个项目建卡");
 			if (!createdByKeyboardId) throw new Error("缺创建结果");
 			recordCheck("Board Scope c 键往别的项目建卡不切项目");
-			await row(createdByKeyboardId).click();
+			await row(createdByKeyboardId).locator("button").first().hover();
+			await rowInPlaceExpandedByHover(createdByKeyboardId).getByTestId(inListExpansionToggleTestId).click();
+			expect(await row(createdByKeyboardId).getAttribute(rowInPlaceExpansionStateAttribute)).toBe(
+				"kept_expanded_in_list",
+			);
+			await row(createdByKeyboardId).hover();
+			const expandedBacklogPencil = row(createdByKeyboardId).getByRole("button", {
+				name: "Edit task title",
+				exact: true,
+			});
+			expect(
+				await expandedBacklogPencil.evaluate((element) => {
+					const bounds = element.getBoundingClientRect();
+					return element.contains(
+						element.ownerDocument.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
+					);
+				}),
+			).toBe(true);
+			await expandedBacklogPencil.click();
 			const editor = page.getByRole("dialog").filter({ hasText: "Edit backlog task" });
 			await editor
 				.locator('[data-testid="task-creation-target-project-field"]')
@@ -511,7 +820,7 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				.taskCardFieldValuePatch;
 			expect(editorFieldPatch).toEqual({ prompt: "仅保存修改的 prompt" });
 			expect(page.url()).toContain(`task=${focusId}`);
-			recordCheck("任意项目 backlog 原地编辑，保存只改过的字段并保留并发改名");
+			recordCheck("跨项目 expanded compact Pencil 中心命中编辑器；只保存改过字段并保留并发改名");
 			await page.getByRole("button", { name: "Create task", exact: true }).click();
 			await createOtherProjectTaskViaDialog("面板按钮往另一个项目建卡");
 			recordCheck("面板顶部 Create task 入口");
@@ -575,6 +884,158 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				path: join(evidenceOutputDirectory, "compact-card-this-project-focused-stage-header-rail.png"),
 			});
 			recordCheck("阶段 5 rail 焦点卡克隆保留相同标题、活动和目录/git 内容");
+			const actorEnvironment = {
+				KANBAN_PROJECT_PATH: firstProject.repositoryPath,
+				KANBAN_TASK_ID: dragStartId,
+				KANBAN_TASK_CONVERSATION_SESSION_ID: dragStartId,
+			};
+			await runCli(
+				["task", "set-current-work-phase-goal", "--goal", "验证当前阶段的最终行为"],
+				firstProject.repositoryPath,
+				actorEnvironment,
+			);
+			await observeUntil(
+				async () =>
+					(await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal?.goalText === "验证当前阶段的最终行为",
+				"CLI 写入阶段目标",
+			);
+			await page
+				.locator('[data-task-card-render-role="pinned_card_copy_in_task_pinboard"]')
+				.filter({ hasText: "拖放启动" })
+				.locator("[data-agent-current-work-phase-goal]")
+				.waitFor();
+			await focusedCardRailCopy.locator("[data-agent-current-work-phase-goal]").waitFor();
+			expect(await page.locator("[data-agent-current-work-phase-goal]").count()).toBeGreaterThanOrEqual(3);
+			await runCli(
+				[
+					"task",
+					"rename-current-task",
+					"--title",
+					"[FIX,UI]验证 Task 名称与阶段目标",
+					"--reason",
+					"已核对完整任务范围",
+				],
+				firstProject.repositoryPath,
+				actorEnvironment,
+			);
+			expect((await taskState(dragStartId)).card?.taskCommentEntries?.at(-1)?.commentText).toContain(
+				"已核对完整任务范围",
+			);
+			const commentsBeforeRetry = (await taskState(dragStartId)).card?.taskCommentEntries?.length;
+			await runCli(
+				["task", "rename-current-task", "--title", "[FIX,UI]验证 Task 名称与阶段目标", "--reason", "同名重试"],
+				firstProject.repositoryPath,
+				actorEnvironment,
+			);
+			expect((await taskState(dragStartId)).card?.taskCommentEntries?.length).toBe(commentsBeforeRetry);
+			await expect(
+				runCli(
+					["task", "rename-current-task", "--title", "不得改名", "--reason", "身份缺失"],
+					firstProject.repositoryPath,
+				),
+			).rejects.toThrow("隔离 CLI 失败");
+			const byTheWayConversationId = "task-conversation-session-isolated-phase-goal";
+			const byTheWayStart = await runtimeClient(alphaWorkspaceId).runtime.startTaskSession.mutate({
+				taskId: byTheWayConversationId,
+				workspaceTaskId: dragStartId,
+				prompt: "旁支问题",
+				baseRef: "main",
+				agentId: "claude",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: dragStartId,
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "started_from_scratch",
+					parentTaskConversationSessionId: null,
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "旁支问题",
+				},
+			});
+			expect(byTheWayStart.ok).toBe(true);
+			await runCli(
+				["task", "set-current-work-phase-goal", "--goal", "只属于旁支的阶段目标"],
+				firstProject.repositoryPath,
+				{ ...actorEnvironment, KANBAN_TASK_CONVERSATION_SESSION_ID: byTheWayConversationId },
+			);
+			expect((await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal?.goalText).toBe(
+				"验证当前阶段的最终行为",
+			);
+			expect((await taskState(byTheWayConversationId)).summary?.agentCurrentWorkPhaseGoal?.goalText).toBe(
+				"只属于旁支的阶段目标",
+			);
+			await expect(
+				runCli(["task", "set-current-work-phase-goal", "--goal", "不属于这个 Task"], firstProject.repositoryPath, {
+					...actorEnvironment,
+					KANBAN_TASK_ID: focusId,
+					KANBAN_TASK_CONVERSATION_SESSION_ID: byTheWayConversationId,
+				}),
+			).rejects.toThrow("隔离 CLI 失败");
+			await runCli(["task", "clear-current-work-phase-goal"], firstProject.repositoryPath, actorEnvironment);
+			expect((await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal).toBeNull();
+			recordCheck("CLI 自改名按环境归属且同名幂等；阶段目标同步主卡、置顶分身、rail 与会话详情");
+
+			await page.setViewportSize({ width: 1600, height: 1000 });
+			const namingBacklogId = await createTask(firstProject.repositoryPath, "Backlog 已保存名称");
+			await observeUntil(async () => (await card(namingBacklogId).count()) > 0, "新 Backlog 卡广播");
+			await clickCardAction(namingBacklogId, "Pin task to pinboard");
+			const namingPinDialog = page.getByRole("dialog").filter({ hasText: /Pin task|Pin to/ });
+			if (await namingPinDialog.count()) await namingPinDialog.getByRole("button", { name: /Pin/ }).last().click();
+			const compactNamingCard = page
+				.locator('[data-task-card-render-role="pinned_card_copy_in_task_pinboard"]')
+				.filter({ hasText: "Backlog 已保存名称" });
+			await compactNamingCard.waitFor();
+			await compactNamingCard.hover();
+			const pencil = compactNamingCard.getByRole("button", { name: "Edit task title", exact: true });
+			const pencilCenterHitsPencil = await pencil.evaluate((element) => {
+				const bounds = element.getBoundingClientRect();
+				return element.contains(
+					element.ownerDocument.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
+				);
+			});
+			expect(pencilCenterHitsPencil).toBe(true);
+			await pencil.click();
+			const namingEditor = page.getByRole("dialog").filter({ hasText: "Edit backlog task" });
+			expect(await namingEditor.getByLabel("Task name", { exact: true }).inputValue()).toBe("Backlog 已保存名称");
+			await namingEditor.getByLabel("Task name", { exact: true }).fill("[FIX,UI]补齐 Backlog 名称编辑");
+			await namingEditor.getByRole("button", { name: "Save changes", exact: true }).click();
+			await observeUntil(
+				async () => (await taskState(namingBacklogId)).card?.title === "[FIX,UI]补齐 Backlog 名称编辑",
+				"Backlog 名称保存",
+			);
+			expect((await taskState(namingBacklogId)).columnId).toBe("backlog");
+			expect((await taskState(namingBacklogId)).summary?.pid ?? null).toBeNull();
+			await page.screenshot({
+				path: join(evidenceOutputDirectory, "task-naming-compact-backlog-pencil-and-phase-goal.png"),
+			});
+			recordCheck("compact pinboard 编辑按钮中心命中 Pencil，名称预填并保存，不会意外启动 Task");
+
+			await runCli(
+				["task", "set-current-work-phase-goal", "--goal", "跨运行时重启保留的阶段目标"],
+				firstProject.repositoryPath,
+				actorEnvironment,
+			);
+			const phaseGoalBeforeRestart = (await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal;
+			initialRuntimeProcess.send({ type: "kanban.shutdown" });
+			await observeUntil(async () => hasChildProcessExited(initialRuntimeProcess), "隔离 runtime 优雅退出");
+			startOwnedProcess(
+				"isolated-runtime-after-restart",
+				process.execPath,
+				[...nodeCliArguments, "--port", String(runtimePort), "--no-open", "--no-passcode"],
+				firstProject.repositoryPath,
+			);
+			await observeUntil(async () => {
+				try {
+					return (
+						JSON.stringify((await taskState(dragStartId)).summary?.agentCurrentWorkPhaseGoal) ===
+						JSON.stringify(phaseGoalBeforeRestart)
+					);
+				} catch {
+					return false;
+				}
+			}, "阶段目标跨运行时进程重启持久保存");
+			expect((await taskState(dragStartId)).card?.title).toBe("[FIX,UI]验证 Task 名称与阶段目标");
+			recordCheck("当前主对话与旁支目标分别归属；错误 Task 身份被拒绝；目标与名称跨 runtime 重启保存");
+
 			expect(pageErrors).toEqual([]);
 			expect(pageRequests.some((url) => url.includes(":3484/"))).toBe(false);
 			expect(pageRequests.some((url) => url.includes("workspace.setTaskPinboardPinStateOfTaskCard"))).toBe(false);

@@ -4,27 +4,41 @@ import type {
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { Pin, PinOff } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
-import { getAgentVisual } from "@/components/agent-visual";
-import { SESSION_ACTIVITY_COLOR } from "@/components/board-card-session-activity";
-import { CrossProjectTaskSwitcherFullTaskCardHeaderStrip } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-header-strip";
+import { CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button";
+import { CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
+import { CrossProjectTaskSwitcherRowFirstLine } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-first-line";
 import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-prompt-cache-warmth-pill";
 import { CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-worktree-git-metadata";
 import { crossProjectTaskSwitcherSectionRowAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed-time-pills";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { resolveBoardColumnTitle } from "@/data/board-data";
-import type { CrossProjectTaskSwitcherRowHoverOverlayTriggerProps } from "@/hooks/use-cross-project-task-switcher-row-full-task-card-hover-overlay";
+import type { CrossProjectTaskSwitcherRowHoverExpansionTriggerProps } from "@/hooks/use-cross-project-task-switcher-row-hover-expansion-in-place";
+import { useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved } from "@/hooks/use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff";
 
 export type CrossProjectTaskSwitcherTaskRowSection = "pinned" | "running" | "prompt_cache_warm" | "remaining";
 
 /**
- * 跨项目切换面板的一行。默认态是精简行（只用 projects 广播里的条目）；hover（触屏长按）后完整卡片以浮层盖在原位
- *（面板负责，见 use-cross-project-task-switcher-row-full-task-card-hover-overlay）。用户在浮层上点了「Keep open」后，
- * 这一行在列表里原地换成完整卡片（`fullTaskCardKeptOpenByUser`，由面板按「当前项目读浏览器 board / 其他项目读
- * 服务端」备好），点「Collapse」换回精简行。
+ * 一行在列表里的形态。hover 展开是临时的（指针挪到别的行停够、或离开面板就收回，见
+ * use-cross-project-task-switcher-row-hover-expansion-in-place）；固定展开由用户点右上角开关决定，按任务记。
+ */
+export type CrossProjectTaskSwitcherRowInPlaceExpansionState =
+	| "compact_row"
+	| "expanded_in_place_by_hover"
+	| "kept_expanded_in_list";
+
+/**
+ * 跨项目切换面板的一行。默认态是精简行（只用 projects 广播里的条目）；指针停够 hover 意图（触屏长按）后，这一行在列表里
+ * **原地**换成完整卡片、把下面的行往下推；点右上角「Keep expanded in list」后固定展开，收起开关在卡片自己的 hover 动作组里。
+ * 完整卡片（`fullTaskCard`）由面板按「当前项目读浏览器 board / 其他项目读服务端」备好。
  *
- * 精简行的结构是「主按钮 + 并列的置顶按钮」而不是一整个按钮：按钮里不能嵌按钮。
+ * 三种形态共用同一个根节点（hover 展开的滚动补偿量的就是它），精简行与完整卡片的首行同一套度量、同一个左上角起点，
+ * 右上角 hover 动作组同一个坐标（见 cross-project-recently-active-task-switcher-task-row-first-line.tsx）：
+ * 三态之间标题一像素不动、开关不挪位，多出来的内容只向下长。
+ *
+ * 精简行的结构是「主按钮 + 叠在右上角的 hover 动作组」而不是一整个按钮：按钮里不能嵌按钮。
  */
 export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	entryInProject,
@@ -35,10 +49,10 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	promptCacheWarmthEstimate,
 	showsProjectName,
 	currentProjectId,
-	isKeptOpenAsFullTaskCardByUser = false,
-	fullTaskCardKeptOpenByUser,
-	onCollapseKeptOpenFullTaskCard,
-	rowHoverOverlayTriggerProps,
+	inPlaceExpansionState,
+	fullTaskCard,
+	onKeepExpandedInListAsFullTaskCard,
+	rowHoverExpansionTriggerProps,
 	onOpen,
 	onTogglePinnedToTaskPinboard,
 	onEditTaskPinboardPinReason,
@@ -52,139 +66,159 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	showsProjectName: boolean;
 	// 决定行上 git 元数据读哪个来源（当前项目的推流 store / 其他项目的轮询 store）。
 	currentProjectId: string | null;
-	isKeptOpenAsFullTaskCardByUser?: boolean;
-	// 只在 isKeptOpenAsFullTaskCardByUser 时由面板给出。
-	fullTaskCardKeptOpenByUser?: ReactNode;
-	onCollapseKeptOpenFullTaskCard?: () => void;
-	// 精简行上触发 hover 浮层的指针处理器；已经 Keep open 的行没有浮层。
-	rowHoverOverlayTriggerProps?: CrossProjectTaskSwitcherRowHoverOverlayTriggerProps;
+	inPlaceExpansionState: CrossProjectTaskSwitcherRowInPlaceExpansionState;
+	// 展开时显示；精简行在 hover 意图计时期间也给出，隐藏挂载，借此在展开前就读好其他项目的卡（展开时是同一个实例）。
+	fullTaskCard?: ReactNode;
+	onKeepExpandedInListAsFullTaskCard?: () => void;
+	rowHoverExpansionTriggerProps?: CrossProjectTaskSwitcherRowHoverExpansionTriggerProps;
 	onOpen: () => void;
 	onTogglePinnedToTaskPinboard: () => void;
 	onEditTaskPinboardPinReason?: () => void;
 }): ReactElement {
 	const { entry, workspaceId, projectName } = entryInProject;
-	const visual = getAgentVisual(entry.agentId);
 	const isPinned = entry.pinnedToTaskPinboardAt !== null;
 	const rowContainerAttributes = {
 		"data-cross-project-task-switcher-section": section,
 		"data-cross-project-task-switcher-workspace-id": workspaceId,
 		"data-cross-project-task-switcher-task-id": entry.taskId,
-		"data-cross-project-task-switcher-row-kept-open-as-full-task-card": isKeptOpenAsFullTaskCardByUser,
+		"data-cross-project-task-switcher-row-in-place-expansion-state": inPlaceExpansionState,
 		// Pinned 行不挂锚点：Pinned 点击后要跳到的正是下方区里的这一行。
 		"data-verification-anchor":
 			section === "pinned" ? undefined : crossProjectTaskSwitcherSectionRowAnchorKey(workspaceId, entry.taskId),
 	};
 
-	if (isKeptOpenAsFullTaskCardByUser && fullTaskCardKeptOpenByUser) {
-		return (
-			<div
-				className={cn(
-					"flex min-w-0 flex-col rounded-md border border-border/60 p-1",
-					isFocused && "bg-surface-3 ring-1 ring-border-focus",
-				)}
-				{...rowContainerAttributes}
-			>
-				<CrossProjectTaskSwitcherFullTaskCardHeaderStrip
-					projectName={showsProjectName ? projectName : null}
-					isUnreadHandoff={isUnreadHandoff}
-					promptCacheWarmthEstimate={promptCacheWarmthEstimate}
-					nowMs={nowMs}
-					fullTaskCardKeepOpenAction={{
-						kind: "collapse_kept_open_full_task_card_back_to_compact_row",
-						onCollapse: () => onCollapseKeptOpenFullTaskCard?.(),
-					}}
-				/>
-				{fullTaskCardKeptOpenByUser}
-			</div>
-		);
-	}
+	const showsFullTaskCard = inPlaceExpansionState !== "compact_row" && fullTaskCard !== undefined;
+	// 键盘按展开开关切换形态时，旧形态（连同它的开关）整块卸载：把焦点交给新形态下同一坐标的开关，不落到 body。
+	const compactRowElementRefHandingOffToggleKeyboardFocus =
+		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved();
+	const fullTaskCardFrameElementRefHandingOffToggleKeyboardFocus =
+		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved();
 
 	return (
 		<div
-			className={cn("flex min-w-0 flex-col rounded-md", isFocused && "bg-surface-3 ring-1 ring-border-focus")}
+			className={cn(
+				"flex min-w-0 flex-col",
+				showsFullTaskCard ? CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME : "rounded-md",
+				isFocused && "bg-surface-3 ring-1 ring-border-focus",
+				!isFocused && inPlaceExpansionState === "expanded_in_place_by_hover" && "bg-surface-2 ring-border",
+				!isFocused && inPlaceExpansionState === "kept_expanded_in_list" && "ring-border/60",
+			)}
 			{...rowContainerAttributes}
+			{...rowHoverExpansionTriggerProps}
 		>
-			<div
-				className="group flex min-w-0 items-center rounded-md hover:bg-surface-3"
-				{...rowHoverOverlayTriggerProps}
-			>
-				<button
-					type="button"
-					onClick={onOpen}
-					aria-current={isFocused ? "true" : undefined}
-					className="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 border-none bg-transparent py-1.5 pl-2 pr-2 text-left text-inherit"
+			{showsFullTaskCard ? null : (
+				<div
+					ref={compactRowElementRefHandingOffToggleKeyboardFocus}
+					className="group relative flex min-w-0 rounded-md hover:bg-surface-3"
 				>
-					<span className="flex min-w-0 items-center gap-1.5">
-						{section === "running" ? (
-							<span
-								className="inline-block size-1.5 shrink-0 animate-pulse rounded-full"
-								style={{ backgroundColor: SESSION_ACTIVITY_COLOR.thinking }}
-							/>
-						) : isUnreadHandoff ? (
-							<span
-								className="inline-block size-1.5 shrink-0 rounded-full bg-accent"
-								title="Unread handoff notification"
-							/>
-						) : null}
-						<visual.Icon size={13} className={cn("shrink-0", visual.className)} />
-						<span className="min-w-0 flex-1 truncate text-[13px] text-text-primary">{entry.title}</span>
-						{promptCacheWarmthEstimate ? (
-							<CrossProjectTaskSwitcherRowPromptCacheWarmthPill
-								promptCacheWarmthEstimate={promptCacheWarmthEstimate}
-								nowMs={nowMs}
-							/>
-						) : null}
-					</span>
-					{/* 换行而不是截断：时长药丸必须完整显示，窄宽度下整组药丸折到下一行。 */}
-					<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[19px] text-[10px] leading-none text-text-tertiary">
-						{showsProjectName ? <span className="min-w-0 max-w-full truncate">{projectName}</span> : null}
-						<CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
-							entryInProject={entryInProject}
-							currentProjectId={currentProjectId}
-						/>
-						{section === "pinned" ? (
-							<span className="inline-flex shrink-0 items-center gap-0.5">
-								<ColumnIndicator columnId={entry.columnId} size={10} />
-								{resolveBoardColumnTitle(entry.columnId)}
-							</span>
-						) : null}
-						<span className="ml-auto flex shrink-0">
-							<TaskActivityElapsedTimePills task={entry} nowMs={nowMs} />
-						</span>
-					</span>
-					{section === "pinned" && entry.taskPinboardPinReason ? (
-						<span
-							className="truncate pl-[19px] text-[11px] text-text-secondary"
-							title={entry.taskPinboardPinReason}
-						>
-							{entry.taskPinboardPinReason}
-						</span>
-					) : null}
-				</button>
-				{section === "pinned" && onEditTaskPinboardPinReason ? (
 					<button
 						type="button"
-						onClick={onEditTaskPinboardPinReason}
-						aria-label="Edit pin reason"
-						title="Edit pin reason"
-						className="hidden shrink-0 cursor-pointer rounded-sm border-none bg-transparent px-1 py-1 text-[10px] text-text-tertiary hover:text-text-primary group-hover:block"
+						onClick={onOpen}
+						aria-current={isFocused ? "true" : undefined}
+						className="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 border-none bg-transparent py-1.5 pl-2 pr-2 text-left text-inherit"
 					>
-						Edit
+						<CrossProjectTaskSwitcherRowFirstLine
+							section={section}
+							isUnreadHandoff={isUnreadHandoff}
+							agentId={entry.agentId}
+							title={entry.title}
+						/>
+						{/* 换行而不是截断：时长药丸必须完整显示，窄宽度下整组药丸折到下一行。 */}
+						<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[19px] text-[10px] leading-none text-text-tertiary">
+							{showsProjectName ? <span className="min-w-0 max-w-full truncate">{projectName}</span> : null}
+							<CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
+								entryInProject={entryInProject}
+								currentProjectId={currentProjectId}
+							/>
+							{section === "pinned" ? (
+								<span className="inline-flex shrink-0 items-center gap-0.5">
+									<ColumnIndicator columnId={entry.columnId} size={10} />
+									{resolveBoardColumnTitle(entry.columnId)}
+								</span>
+							) : null}
+							{/* 与完整卡片元信息行右侧同一组、同一顺序：Cache warm 药丸、时长药丸、置顶标记。
+						    不放首行右端：hover 动作组叠在首行右端，会把它们盖住。 */}
+							<span className="ml-auto flex shrink-0 items-center gap-1">
+								{promptCacheWarmthEstimate ? (
+									<CrossProjectTaskSwitcherRowPromptCacheWarmthPill
+										promptCacheWarmthEstimate={promptCacheWarmthEstimate}
+										nowMs={nowMs}
+									/>
+								) : null}
+								<TaskActivityElapsedTimePills task={entry} nowMs={nowMs} />
+								{isPinned && section !== "pinned" ? (
+									<span
+										data-cross-project-task-switcher-row-pinned-marker=""
+										className="inline-flex shrink-0 text-accent"
+										title={
+											entry.taskPinboardPinReason
+												? `Pinned to Pinboard · ${entry.taskPinboardPinReason}`
+												: "Pinned to Pinboard"
+										}
+									>
+										<Pin size={10} />
+									</span>
+								) : null}
+							</span>
+						</span>
+						{section === "pinned" && entry.taskPinboardPinReason ? (
+							<span
+								className="truncate pl-[19px] text-[11px] text-text-secondary"
+								title={entry.taskPinboardPinReason}
+							>
+								{entry.taskPinboardPinReason}
+							</span>
+						) : null}
 					</button>
-				) : null}
-				<button
-					type="button"
-					onClick={onTogglePinnedToTaskPinboard}
-					aria-label={isPinned ? "Unpin from Pinboard" : "Pin to Pinboard"}
-					title={isPinned ? "Unpin from Pinboard" : "Pin to Pinboard"}
-					className={cn(
-						"mr-1 shrink-0 cursor-pointer rounded-sm border-none bg-transparent p-1 text-text-tertiary hover:text-text-primary",
-						isPinned && section !== "pinned" ? "block text-accent" : "hidden group-hover:block",
-					)}
+					{/* hover 动作组：与完整卡片的 hover 动作组同一几何（absolute right-1 top-1 + px-0.5、Button xs），
+				    最右一格的展开开关因此与 hover 展开 / 固定展开卡上的开关同一坐标。常驻 DOM（只切透明度），
+				    键盘 Tab 得到，聚焦时显形。 */}
+					<div
+						className={cn(
+							"absolute right-1 top-1 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+							"pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100",
+							"focus-within:pointer-events-auto focus-within:opacity-100",
+						)}
+					>
+						{section === "pinned" && onEditTaskPinboardPinReason ? (
+							<Button
+								variant="ghost"
+								size="xs"
+								onClick={onEditTaskPinboardPinReason}
+								aria-label="Edit pin reason"
+								title="Edit pin reason"
+							>
+								Edit
+							</Button>
+						) : null}
+						<Button
+							icon={isPinned && section === "pinned" ? <PinOff size={12} /> : <Pin size={12} />}
+							variant="ghost"
+							size="xs"
+							className={isPinned ? "text-accent" : undefined}
+							onClick={onTogglePinnedToTaskPinboard}
+							aria-label={isPinned ? "Unpin from Pinboard" : "Pin to Pinboard"}
+							title={isPinned ? "Unpin from Pinboard" : "Pin to Pinboard"}
+						/>
+						{onKeepExpandedInListAsFullTaskCard ? (
+							<CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton
+								expansionState="collapsed_to_compact_row"
+								onToggleInListExpansion={onKeepExpandedInListAsFullTaskCard}
+							/>
+						) : null}
+					</div>
+				</div>
+			)}
+			{/* 固定位置（第 2 个子节点）：精简行 ↔ 展开之间完整卡片是同一个实例，不重挂载、不重读。 */}
+			{fullTaskCard !== undefined ? (
+				<div
+					ref={fullTaskCardFrameElementRefHandingOffToggleKeyboardFocus}
+					hidden={!showsFullTaskCard}
+					className="min-w-0"
 				>
-					{isPinned && section === "pinned" ? <PinOff size={12} /> : <Pin size={12} />}
-				</button>
-			</div>
+					{fullTaskCard}
+				</div>
+			) : null}
 		</div>
 	);
 }

@@ -153,6 +153,7 @@ export interface ActiveProcessState {
 // 一条程序化投递的回执登记。存在的意义：让投递链路上**每一个出口**都能给出结论，
 // 而不是像 2026-08-08 之前那样只有「写进去了」这一条路径有反馈、其余出口一律静默。
 export interface PendingProgrammaticDeliveryReceipt {
+	firstSubmitCarriageReturnAtEpochMs?: number;
 	// 取消要认的 key；用户发起的发送没有 key（不写账本），恒 null。
 	idempotencyKey: string | null;
 	// awaiting_readiness：还没写进 PTY，取消能真正拦下。

@@ -18,6 +18,7 @@ import {
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
+import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
 import { showAppToast } from "@/components/app-toaster";
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
 import { AgentRaisedUserDecisionHistoryPanel } from "@/components/detail-panels/agent-raised-user-decision-history-panel";
@@ -1495,6 +1496,7 @@ export function CardDetailView({
 				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+			<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
 			{pendingUserDecision.decision ? (
 				<AgentRaisedPendingUserDecisionPanel
 					key={JSON.stringify([

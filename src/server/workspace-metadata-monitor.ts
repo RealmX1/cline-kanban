@@ -59,6 +59,12 @@ export interface CreateWorkspaceMetadataMonitorDependencies {
 }
 
 export interface WorkspaceMetadataMonitor {
+	// 只读缓存，不登记订阅、不启动 git；首帧之后再 connectWorkspace，避免元数据抢在快照之前广播。
+	readCachedWorkspaceMetadataSnapshot: (input: {
+		workspaceId: string;
+		board: RuntimeBoardData;
+		probeScope: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient;
+	}) => RuntimeWorkspaceMetadata;
 	connectWorkspace: (input: {
 		workspaceId: string;
 		workspacePath: string;
@@ -415,6 +421,20 @@ export function createWorkspaceMetadataMonitor(
 	};
 
 	return {
+		readCachedWorkspaceMetadataSnapshot: ({ workspaceId, board, probeScope }) => {
+			const entry = workspaces.get(workspaceId);
+			if (!entry) return createEmptyWorkspaceMetadata();
+			return buildWorkspaceMetadataSnapshot({
+				...entry,
+				trackedTasks: collectTrackedTasks(board),
+				autoReviewTaskIdsInReviewColumn: collectAutoReviewTaskIdsInReviewColumn(board),
+				// 首帧与后续整包广播都用订阅并集；并集不变时不会补推，不能只给新连接自己的范围。
+				probeScopeBySubscriberId: new Map([
+					...entry.probeScopeBySubscriberId,
+					["initial-stream-snapshot", probeScope],
+				]),
+			});
+		},
 		connectWorkspace: async ({ workspaceId, workspacePath, board, subscriberId, probeScope }) => {
 			const entry = updateWorkspaceEntry({ workspaceId, workspacePath, board });
 			cancelEvictionAfterLastSubscriberDisconnected(entry);

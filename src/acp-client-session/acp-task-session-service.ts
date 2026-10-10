@@ -7,6 +7,7 @@ import {
 	type TaskConversationSessionSharingExecutionWorkingDirectory,
 } from "../core/agent-conversation-session-resume-addressing";
 import type {
+	RuntimeAgentCurrentWorkPhaseGoal,
 	RuntimeAgentId,
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
@@ -16,6 +17,10 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
+import {
+	resolveHomeAgentAppendSystemPrompt,
+	resolveTaskSessionAppendSystemPrompt,
+} from "../prompts/append-system-prompt";
 import { buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment } from "../terminal/kanban-task-agent-session-work-unit-identity-environment";
 import {
 	AcpClientConnectionRuntime,
@@ -397,7 +402,14 @@ export class AcpTaskSessionService {
 					}),
 				);
 			} else if (promptText || (request.images?.length ?? 0) > 0) {
-				void this.runPromptTurn(request.taskId, connection, buildAcpPromptBlocks(request.prompt, request.images));
+				void this.runPromptTurn(
+					request.taskId,
+					connection,
+					buildAcpPromptBlocks(
+						`${resolveTaskSessionAppendSystemPrompt(request.taskId, request.cwd) ?? resolveHomeAgentAppendSystemPrompt(request.taskId) ?? ""}\n\n${request.prompt}`,
+						request.images,
+					),
+				);
 			}
 		} catch (error) {
 			if (
@@ -634,6 +646,27 @@ export class AcpTaskSessionService {
 		this.registry.deleteEntry(taskId);
 	}
 
+	applyCurrentWorkPhaseGoal(
+		taskId: string,
+		goal: RuntimeAgentCurrentWorkPhaseGoal | null,
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.registry.getEntry(taskId);
+		if (!entry) return null;
+		if (
+			goal &&
+			(goal.owningKanbanTaskConversationSessionId !== taskId ||
+				(goal.owningRuntimeSessionIncarnationId != null &&
+					goal.owningRuntimeSessionIncarnationId !== entry.summary.runtimeSessionIncarnationId) ||
+				(goal.owningNativeConversationSessionId !== null &&
+					goal.owningNativeConversationSessionId !==
+						entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId))
+		)
+			return null;
+		const summary = updateAcpSummary(entry, { agentCurrentWorkPhaseGoal: goal });
+		this.emitSummary(summary);
+		return summary;
+	}
+
 	applyTurnCheckpoint(taskId: string, checkpoint: RuntimeTaskTurnCheckpoint): RuntimeTaskSessionSummary | null {
 		const entry = this.registry.getEntry(taskId);
 		if (!entry) {
@@ -657,7 +690,12 @@ export class AcpTaskSessionService {
 		promptBlocks: AcpContentBlock[],
 	): Promise<void> {
 		try {
-			const response = await connection.prompt(promptBlocks);
+			const promptTurn = connection.prompt(promptBlocks);
+			const liveEntry = this.registry.getEntry(taskId);
+			if (liveEntry && this.connectionRuntime.getConnection(taskId) === connection) {
+				this.emitSummary(updateAcpSummary(liveEntry, { agentCurrentWorkPhaseGoalInvalidatedAt: now() }));
+			}
+			const response = await promptTurn;
 			// 上下文必须在 await 之后重新取：这段时间里会话可能已被 stop 掉或被 clear 换成新的，
 			// 那时旧回合的结果一律丢弃，否则会把 interrupted 改写回 awaiting_review，
 			// 或者把结果写到刚重建的空会话上。

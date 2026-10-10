@@ -1922,6 +1922,14 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 			lastOutputAt: null,
 		});
 		const { outcomes, onDeliveryOutcome } = collectOutcomes();
+		entry.summary.agentCurrentWorkPhaseGoal = {
+			goalText: "上一轮阶段目标",
+			source: "agent_explicit_declaration",
+			updatedAt: Date.now() - 1,
+			owningKanbanTaskConversationSessionId: "task-receipt-confirmed",
+			owningNativeConversationSessionId: null,
+			owningRuntimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId ?? null,
+		};
 
 		manager.submitTaskChatInputWhenReady("task-receipt-confirmed", "继续 RVF", {
 			idempotencyKey: "key-confirmed",
@@ -1931,11 +1939,15 @@ describe("session-manager · 程序化投递的诚实回执与取消", () => {
 		await vi.advanceTimersByTimeAsync(PASTE_INGESTION_MAX_WAIT_MS); // 提交 CR
 		// 写入完成、尚未确认：此刻不得有任何结论（pending 就是「还没有结论」的诚实表达）。
 		expect(outcomes).toHaveLength(0);
+		expect(manager.getSummary("task-receipt-confirmed")?.agentCurrentWorkPhaseGoalInvalidatedAt).toBeUndefined();
 
 		// agent 开始干活 → 输出恢复流动 → 确认 tick 判定已提交。
 		entry.summary.lastOutputAt = Date.now() + SUBMIT_CONFIRM_DELAY_MS;
 		await vi.advanceTimersByTimeAsync(SUBMIT_CONFIRM_DELAY_MS);
 		expect(outcomes).toEqual([{ status: "delivered_and_submit_confirmed", reason: null }]);
+		expect(manager.getSummary("task-receipt-confirmed")?.agentCurrentWorkPhaseGoalInvalidatedAt).toBeGreaterThan(
+			entry.summary.agentCurrentWorkPhaseGoal.updatedAt,
+		);
 	});
 
 	it("写入时 agent 已在自己的回合中 → delivered_queued_behind_active_agent_turn（该标记在写入时捕获，不是确认时）", async () => {

@@ -52,6 +52,29 @@ describe("buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor", 
 		).toEqual({});
 	});
 
+	it("名称未改保持并发名称，显式修改与清空才进入 patch", () => {
+		const card = seededTaskCard();
+		const submitted = submittedValuesMatching(card);
+		expect(
+			buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, {
+				...submitted,
+				taskTitleOverride: card.title,
+			}),
+		).toEqual({});
+		expect(
+			buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, {
+				...submitted,
+				taskTitleOverride: "新名称",
+			}),
+		).toEqual({ title: "新名称" });
+		expect(
+			buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, {
+				...submitted,
+				taskTitleOverride: " ",
+			}),
+		).toEqual({ title: null });
+	});
+
 	it("只带改过的字段；清掉可选字段发 null，清空图片发 null", () => {
 		const card = seededTaskCard({
 			agentId: "codex",

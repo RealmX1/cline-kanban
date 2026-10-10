@@ -17,6 +17,7 @@ import { resolveTaskAutoReviewMode } from "@/types";
 // 与契约的 runtimeTaskEditDraftSchema 一一对应（store 就用那个 schema 校验磁盘/镜像数据）。
 // 这里保留一个本地 interface 只是为了让 web-ui 侧引用 TaskImage / TaskAutoReviewMode 这两个前端别名。
 export interface TaskEditDraft {
+	taskTitleOverride?: string;
 	taskId: string;
 	prompt: string;
 	images: TaskImage[];
@@ -94,6 +95,7 @@ export function areTaskEditDraftFormValuesEqual(
 	right: TaskEditDraftFormValues,
 ): boolean {
 	return (
+		left.taskTitleOverride === right.taskTitleOverride &&
 		left.prompt === right.prompt &&
 		areTaskImagesEqual(left.images, right.images) &&
 		left.startInPlanMode === right.startInPlanMode &&
@@ -138,6 +140,7 @@ export function clearTaskEditDraft(projectId: string | null, taskId: string): vo
 
 export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">, task: BoardCard): boolean {
 	return (
+		(draft.taskTitleOverride === undefined || draft.taskTitleOverride.trim() === task.title) &&
 		draft.prompt === task.prompt.trim() &&
 		areTaskImagesEqual(draft.images, task.images ?? []) &&
 		draft.startInPlanMode === task.startInPlanMode &&

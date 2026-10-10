@@ -2533,7 +2533,7 @@ const kimiAdapter: AgentSessionAdapter = {
 			);
 		}
 
-		const trimmed = input.prompt.trim();
+		const trimmed = prependTaskSessionGuidanceToPrompt(input).trim();
 		const deferredStartupPromptText = !resumesPriorAgentConversation && trimmed ? trimmed : undefined;
 
 		return {

@@ -199,7 +199,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	const runtimeStateClients = new Set<WebSocket>();
 	const runtimeStateWorkspaceIdByClient = new Map<WebSocket, string>();
 	// 每个连接在 git 元数据监视器里的订阅（调用 connectWorkspace 之前就登记，好让首轮刷新失败或等待期间断开时都能断开它；
-	// 早于 runtimeStateWorkspaceIdByClient，消息里的改范围仍以后者为门，握手期间不直接改监视器），
+	// 与 runtimeStateWorkspaceIdByClient 一起在首帧之后登记，握手期间不直接改监视器），
 	// 与它最近声明的探测范围（握手期间到达的声明先记在这里，订阅建立后补上）。
 	const workspaceMetadataSubscriptionByClient = new Map<WebSocket, { workspaceId: string; subscriberId: string }>();
 	const latestWorkspaceMetadataProbeScopeDeclaredByClient = new Map<
@@ -781,50 +781,13 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				return;
 			}
 
-			/*
-				Connection setup for workspace-scoped runtime streams is intentionally split into two phases.
-
-				We need the initial snapshot to already contain the first workspace metadata payload, but we do not want
-				the client to receive a separate "workspace_metadata_updated" event before that snapshot arrives.
-
-				That race can happen if we register the websocket in runtimeStateClientsByWorkspaceId first and then call
-				workspaceMetadataMonitor.connectWorkspace(...). connectWorkspace() performs an immediate refresh, and that
-				refresh may broadcast "workspace_metadata_updated" to every currently registered workspace client. In that
-				old ordering, a newly connected client could observe:
-
-				1. workspace_metadata_updated
-				2. snapshot
-
-				which makes the initial load look wrong and forces the UI to process the same logical data twice in the
-				opposite order from what readers expect.
-
-				To avoid that, we:
-
-				1. add the socket only to the global runtimeStateClients set so project-wide broadcasts still work
-				2. build workspace state and connect the metadata monitor to get the initial metadata snapshot
-				3. send the combined "snapshot" message
-				4. only then register the socket in runtimeStateClientsByWorkspaceId so future incremental
-				   workspace_metadata_updated events can flow normally
-				5. if the browser declared a different git metadata probe scope during the handshake (the URL still
-				   carried the previous focused task), apply it only now, so the follow-up probe's
-				   workspace_metadata_updated reaches this socket
-
-				The initial probe only covers the scope the connection declared (Board Scope: the focused task plus
-				auto-review tasks in Review), so a cross-project open no longer waits for every task's git status.
-
-				The extra readyState checks and monitor cleanup below are paired with this delayed registration. If the
-				socket closes while we are still assembling or sending the initial snapshot, we must disconnect the
-				temporary metadata monitor subscription before returning, otherwise we would leave behind subscriber count
-				state for a client that never finished the handshake.
-			*/
+			// 首帧不等 git：先用缓存或空元数据发送 snapshot，再注册广播，最后登记监视器并启动探测。
+			// 新连接尚未进入 workspace 广播名单时，既有连接的后台探测不会抢在它的 snapshot 前送增量。
 			runtimeStateClients.add(client);
 			// 去重指纹此刻对该客户端不成立（后续 snapshot 全量替换可能把它回滚到旧数据）：置回 null，
 			// 保证注册后的下一次 projects_updated 广播必定发送，自愈补洞。
 			lastBroadcastProjectsPayloadFingerprint = null;
 			let monitorWorkspaceId: string | null = null;
-			// 连接那一刻用的探测范围；注册完成后若浏览器已声明了别的范围，再按新范围补探。
-			let workspaceMetadataProbeScopeUsedAtConnect: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient =
-				ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE;
 
 			try {
 				let projectsPayload: {
@@ -832,28 +795,13 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					projects: RuntimeStateStreamProjectsMessage["projects"];
 				};
 				let workspaceState: RuntimeStateStreamSnapshotMessage["workspaceState"];
-				let workspaceMetadata: RuntimeStateStreamSnapshotMessage["workspaceMetadata"];
+				let workspaceMetadata: RuntimeStateStreamSnapshotMessage["workspaceMetadata"] = null;
 				if (workspace.status === "available") {
 					monitorWorkspaceId = workspace.projectId;
 					[projectsPayload, workspaceState] = await Promise.all([
 						deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(workspace.projectId),
 						deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspace.projectId, workspace.workspacePath),
 					]);
-					workspaceMetadataProbeScopeUsedAtConnect =
-						latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client) ??
-						ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE;
-					workspaceMetadataSubscriberSequenceNumber += 1;
-					const subscriberId = `runtime-state-stream-client-${workspaceMetadataSubscriberSequenceNumber}`;
-					// 先登记再等首轮刷新：刷新失败走下面的 catch、或客户端在等待期间断开走 cleanupRuntimeStateClient，
-					// 都能找到这条订阅去断开（重复断开对监视器无害）。
-					workspaceMetadataSubscriptionByClient.set(client, { workspaceId: workspace.projectId, subscriberId });
-					workspaceMetadata = await workspaceMetadataMonitor.connectWorkspace({
-						workspaceId: workspace.projectId,
-						workspacePath: workspace.workspacePath,
-						board: workspaceState.board,
-						subscriberId,
-						probeScope: workspaceMetadataProbeScopeUsedAtConnect,
-					});
 				} else {
 					projectsPayload = await deps.workspaceRegistry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
 						workspace.projectId,
@@ -866,6 +814,16 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				if (client.readyState !== WebSocket.OPEN) {
 					cleanupRuntimeStateClient(client);
 					return;
+				}
+				// 通知读取也可能让出事件循环：直到发帧前才读缓存，避免漏掉这段等待期间的 git 更新。
+				if (workspace.status === "available" && workspaceState) {
+					workspaceMetadata = workspaceMetadataMonitor.readCachedWorkspaceMetadataSnapshot({
+						workspaceId: workspace.projectId,
+						board: workspaceState.board,
+						probeScope:
+							latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client) ??
+							ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+					});
 				}
 				sendRuntimeStateMessage(client, {
 					type: "snapshot",
@@ -887,22 +845,30 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					workspaceClients.add(client);
 					runtimeStateClientsByWorkspaceId.set(monitorWorkspaceId, workspaceClients);
 					runtimeStateWorkspaceIdByClient.set(client, monitorWorkspaceId);
-					// 握手期间浏览器改过范围（例如连接 URL 里还是上一个焦点任务）：注册之后再按新范围补探，
-					// 补探结果经 workspace_metadata_updated 推到这个连接（注册之前推就收不到了）。
-					const workspaceMetadataSubscription = workspaceMetadataSubscriptionByClient.get(client);
-					const latestDeclaredWorkspaceMetadataProbeScope =
-						latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client);
-					if (
-						workspaceMetadataSubscription &&
-						latestDeclaredWorkspaceMetadataProbeScope &&
-						JSON.stringify(latestDeclaredWorkspaceMetadataProbeScope) !==
-							JSON.stringify(workspaceMetadataProbeScopeUsedAtConnect)
-					) {
-						workspaceMetadataMonitor.updateSubscriberProbeScope({
-							workspaceId: workspaceMetadataSubscription.workspaceId,
-							subscriberId: workspaceMetadataSubscription.subscriberId,
-							probeScope: latestDeclaredWorkspaceMetadataProbeScope,
-						});
+					if (workspace.status === "available" && workspaceState) {
+						workspaceMetadataSubscriberSequenceNumber += 1;
+						const subscriberId = `runtime-state-stream-client-${workspaceMetadataSubscriberSequenceNumber}`;
+						workspaceMetadataSubscriptionByClient.set(client, { workspaceId: monitorWorkspaceId, subscriberId });
+						// 登记前再读最新范围：握手途中改变的焦点也能进入首轮，不必先探旧范围。
+						void workspaceMetadataMonitor
+							.connectWorkspace({
+								workspaceId: monitorWorkspaceId,
+								workspacePath: workspace.workspacePath,
+								board: workspaceState.board,
+								subscriberId,
+								probeScope:
+									latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client) ??
+									ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+							})
+							.catch((error: unknown) => {
+								// 监视器已摘掉失败订阅；只处理仍属于本连接的订阅，不留下未捕获 rejection。
+								if (workspaceMetadataSubscriptionByClient.get(client)?.subscriberId !== subscriberId) return;
+								disconnectWorkspaceMetadataSubscriptionOfClient(client);
+								sendRuntimeStateMessage(client, {
+									type: "error",
+									message: error instanceof Error ? error.message : String(error),
+								} satisfies RuntimeStateStreamErrorMessage);
+							});
 					}
 					const conversationSummaries = collectTrackedConversationSummaries(monitorWorkspaceId);
 					if (conversationSummaries.length > 0) {

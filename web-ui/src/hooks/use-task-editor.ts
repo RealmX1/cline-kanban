@@ -1,6 +1,6 @@
 import { isKanbanCursorAgentModelId } from "@runtime-agent-catalog";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "@runtime-task-agent-permission-mode";
-import { deriveTaskTitleFromPrompt } from "@runtime-task-title";
+import { deriveTaskTitleFromPrompt, resolveTaskTitle } from "@runtime-task-title";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -24,7 +24,6 @@ import {
 	ensureRuntimeAllocatedTaskIdPrefetchPoolFilled,
 	takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards,
 } from "@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards";
-import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-action-query";
 import {
 	hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror,
 	subscribeToTaskEditDraftStore,
@@ -37,7 +36,6 @@ import type {
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskClineSettings,
 	RuntimeTaskConversationMode,
-	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
 	RuntimeTerminalAgentModelSelectionAgentId,
@@ -55,17 +53,11 @@ import {
 	beginPersistingNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart,
 	waitForNewTaskCardPersistedByRuntimeBeforeAgentSessionStart,
 } from "@/state/new-backlog-task-cards-awaiting-runtime-persistence-before-agent-session-start";
-import { applyPendingTaskCardCommandBoardOverlay } from "@/state/pending-task-card-command-board-overlay";
 import {
 	startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime,
 	updateTaskCardFieldValuesThroughRuntime,
 } from "@/state/task-card-action-commands-for-any-workspace";
-import {
-	recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards,
-	withWebUiBoardMutationInitiatorRecordedForChangedTaskCards,
-} from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
-import { readPendingTaskCardCommandBoardOverlayEntries } from "@/stores/pending-task-card-command-board-overlay-store";
-import { readTaskCardActionCommandKindInFlight } from "@/stores/task-card-action-commands-in-flight-store";
+import { recordWebUiBoardMutationInitiatorForTaskCardsChangedBetweenBoards } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import { toTelemetrySelectedAgentId, trackTaskCreated } from "@/telemetry/events";
 import { resolveAgentTerminalGeometryForTaskSessionSpawn } from "@/terminal/agent-terminal-geometry-for-task-session-spawn";
 import type {
@@ -268,6 +260,28 @@ interface EditTaskFormSeed {
  */
 const TASK_EDIT_DRAFT_PERSIST_DEBOUNCE_MS = 400;
 
+async function backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
+	workspaceId: string,
+	taskId: string,
+	prompt: string,
+	priorTitle: string,
+): Promise<void> {
+	try {
+		const suggestion = await suggestTaskNamesFromTaskDescription(prompt);
+		const title = suggestion.status === "suggested" ? suggestion.suggestedTaskNames[0] : undefined;
+		if (!title) return;
+		await updateTaskCardFieldValuesThroughRuntime({
+			workspaceId,
+			taskId,
+			taskCardFieldValuePatch: { title },
+			boardMutationInitiator: null,
+			expectedTaskTitleAndPromptForAiNameBackfill: { title: priorTitle, prompt },
+		});
+	} catch {
+		/* 起名失败保留描述推导名称。 */
+	}
+}
+
 export interface UseTaskEditorResult {
 	isInlineTaskCreateOpen: boolean;
 	newTaskPrompt: string;
@@ -298,6 +312,8 @@ export interface UseTaskEditorResult {
 	newTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
 	setNewTaskAgentSessionInitialization: Dispatch<SetStateAction<RuntimeTaskAgentSessionInitialization | undefined>>;
 	editingTaskId: string | null;
+	editTaskName: string;
+	setEditTaskName: Dispatch<SetStateAction<string>>;
 	editTaskPrompt: string;
 	setEditTaskPrompt: Dispatch<SetStateAction<string>>;
 	editTaskImages: TaskImage[];
@@ -398,6 +414,7 @@ export function useTaskEditor({
 	// 这次打开编辑对话框时，表单是不是被草稿铺过（值 = 那份草稿的 savedAt）。通知栏的文案与
 	//「改回已保存内容」按钮都挂在它上面；null = 表单就是任务本体，通知栏那一条不出现。
 	const [editTaskFormSeededFromSavedDraftAt, setEditTaskFormSeededFromSavedDraftAt] = useState<number | null>(null);
+	const [editTaskName, setEditTaskName] = useState("");
 	const [editTaskPrompt, setEditTaskPrompt] = useState("");
 	const [editTaskImages, setEditTaskImages] = useState<TaskImage[]>([]);
 	const [editTaskStartInPlanMode, setEditTaskStartInPlanMode] = useState(false);
@@ -617,6 +634,7 @@ export function useTaskEditor({
 	// 表单此刻的值，与「这次是用什么铺上去的」。两者都得能在渲染循环之外被读到：重铺的判据挂在草稿
 	// store 的订阅回调上，而那是 React 之外的调用；进依赖数组则会让订阅随每一次击键重挂一遍。
 	const editTaskFormValues: TaskEditDraftFormValues = {
+		taskTitleOverride: editTaskName,
 		prompt: editTaskPrompt,
 		images: editTaskImages,
 		startInPlanMode: editTaskStartInPlanMode,
@@ -708,6 +726,7 @@ export function useTaskEditor({
 			}
 			const draft = {
 				taskId: editingTaskId,
+				taskTitleOverride: editTaskName,
 				prompt: editTaskPrompt,
 				// 图片可能是几 MB 的 dataURL，深拷贝要等到确定「真的要写盘」之后再做。
 				images: editTaskImages,
@@ -745,6 +764,7 @@ export function useTaskEditor({
 			editTaskTerminalAgentModelOverrideSettings,
 			editTaskAgentSessionInitialization,
 			editTaskImages,
+			editTaskName,
 			editTaskPrompt,
 			editTaskStartInPlanMode,
 			editTaskWorktreeMode,
@@ -839,6 +859,7 @@ export function useTaskEditor({
 	// 「改回已保存内容」之后某个字段仍旧停在草稿里的值——一个没人会去核对的静默错位。
 	const resolveEditTaskFormValuesFromTask = useCallback(
 		(task: BoardCard, savedDraft: TaskEditDraft | null): TaskEditDraftFormValues => ({
+			taskTitleOverride: savedDraft?.taskTitleOverride ?? task.title,
 			prompt: savedDraft?.prompt ?? task.prompt.trim(),
 			images: savedDraft
 				? savedDraft.images.map((image) => ({ ...image }))
@@ -868,6 +889,7 @@ export function useTaskEditor({
 			// 记下这一铺用的是什么：迟到的服务端快照只有在表单仍与它逐字相等（＝用户还没动过）时才可以重铺。
 			editTaskFormSeedRef.current = { savedDraftSavedAt: savedDraft?.savedAt ?? null, formValues };
 			editTaskCardTheFormWasSeededFromRef.current = task;
+			setEditTaskName(formValues.taskTitleOverride ?? task.title);
 			setEditTaskPrompt(formValues.prompt);
 			setEditTaskImages(formValues.images);
 			setEditTaskStartInPlanMode(formValues.startInPlanMode);
@@ -1073,6 +1095,7 @@ export function useTaskEditor({
 			const isEditedTaskCardInOtherProject = editingTaskCardInOtherProjectRef.current !== null;
 			const savedTaskId = editingTaskId;
 			const submitted: TaskEditorSubmittedTaskCardFieldValues = {
+				taskTitleOverride: options?.taskNameOverride ?? editTaskName,
 				prompt,
 				images: editTaskImages,
 				startInPlanMode: editTaskStartInPlanMode,
@@ -1096,6 +1119,7 @@ export function useTaskEditor({
 			const keepSubmittedEditsAsTaskEditDraft = (): void => {
 				saveTaskEditDraft(workspaceId, {
 					taskId: savedTaskId,
+					taskTitleOverride: submitted.taskTitleOverride,
 					prompt: submitted.prompt,
 					images: submitted.images.map((image) => ({ ...image })),
 					startInPlanMode: submitted.startInPlanMode,
@@ -1135,11 +1159,22 @@ export function useTaskEditor({
 								optimisticBoardTransformation: (currentBoard: BoardData) =>
 									updateTask(currentBoard, savedTaskId, {
 										...submitted,
-										title: findCardSelection(currentBoard, savedTaskId)?.card.title ?? "",
+										title:
+											taskCardFieldValuePatch.title === undefined
+												? (findCardSelection(currentBoard, savedTaskId)?.card.title ?? "")
+												: (taskCardFieldValuePatch.title ?? resolveTaskTitle(undefined, submitted.prompt)),
 									}),
 							}),
 				}).then((result) => {
 					if (result.taskCardActionCommandExecutionOutcome === "command_completed_by_runtime") {
+						if (taskCardFieldValuePatch.title === null) {
+							void backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
+								workspaceId,
+								savedTaskId,
+								submitted.prompt,
+								resolveTaskTitle(undefined, submitted.prompt),
+							);
+						}
 						return true;
 					}
 					keepSubmittedEditsAsTaskEditDraft();
@@ -1183,6 +1218,7 @@ export function useTaskEditor({
 			editTaskClineSettings,
 			editTaskTerminalAgentModelOverrideSettings,
 			editTaskAgentSessionInitialization,
+			editTaskName,
 			editTaskPrompt,
 			editTaskImages,
 			editTaskStartInPlanMode,
@@ -1264,90 +1300,15 @@ export function useTaskEditor({
 	 *   - 回填前比对标题：卡片仍是当初那个推导标题才写。用户手改过、或 agent 已经改过名的卡不该被顶掉。
 	 */
 	const backfillSuggestedTaskTitleForCreatedTask = useCallback(
-		(taskId: string, prompt: string, titleWrittenAtCreateTime: string) => {
-			void (async () => {
-				let suggestion: RuntimeTaskNameSuggestionResponse;
-				try {
-					suggestion = await suggestTaskNamesFromTaskDescription(prompt);
-				} catch {
-					return;
-				}
-				if (suggestion.status !== "suggested") {
-					return;
-				}
-				const suggestedTaskName = suggestion.suggestedTaskNames[0];
-				if (!suggestedTaskName) {
-					return;
-				}
-				// AI 起名回填是浏览器端的异步自动化，不属于任何一种已定义的发起方：登记 null，如实留给 runtime 记缺标注
-				//（同一保存窗口里若还有建卡，runtime 只会看到一条「建卡」，回填被它吸收）。
-				setBoard(
-					withWebUiBoardMutationInitiatorRecordedForChangedTaskCards(null, (currentBoard) => {
-						// 用户改名走 taskCardAction，广播回灌前只在 overlay 里：比对的是叠了 overlay 的卡，且这张卡有命令
-						// 在途时一律让路，免得把用户刚改的名字顶掉。
-						const displayedSelection = currentProjectId
-							? findCardSelection(
-									applyPendingTaskCardCommandBoardOverlay(
-										currentBoard,
-										readPendingTaskCardCommandBoardOverlayEntries(currentProjectId),
-									),
-									taskId,
-								)
-							: findCardSelection(currentBoard, taskId);
-						const isTaskCardAwaitingTaskCardActionCommand =
-							currentProjectId !== null &&
-							readTaskCardActionCommandKindInFlight(currentProjectId, taskId) !== null;
-						if (
-							!displayedSelection ||
-							displayedSelection.card.title !== titleWrittenAtCreateTime ||
-							isTaskCardAwaitingTaskCardActionCommand
-						) {
-							return currentBoard;
-						}
-						const updated = updateTaskTitle(currentBoard, taskId, suggestedTaskName);
-						return updated.updated ? updated.board : currentBoard;
-					}),
-				);
-			})();
+		(taskId: string, prompt: string, priorTitle: string) => {
+			if (currentProjectId)
+				void backfillSuggestedTaskTitleWithRuntimeCompareAndSet(currentProjectId, taskId, prompt, priorTitle);
 		},
-		[currentProjectId, setBoard],
+		[currentProjectId],
 	);
-
-	// 同上，卡建在其他项目（Board Scope）：那张卡不在本页 board，先只读服务端现值，仍是建卡时的推导标题、且没有命令在途
-	// 才经 taskCardAction 回填（发起方同样不标注）。
 	const backfillSuggestedTaskTitleForTaskCardCreatedInOtherProject = useCallback(
-		(workspaceId: string, taskId: string, prompt: string, titleWrittenAtCreateTime: string) => {
-			void (async () => {
-				let suggestion: RuntimeTaskNameSuggestionResponse;
-				try {
-					suggestion = await suggestTaskNamesFromTaskDescription(prompt);
-				} catch {
-					return;
-				}
-				const suggestedTaskName = suggestion.status === "suggested" ? suggestion.suggestedTaskNames[0] : undefined;
-				if (!suggestedTaskName) {
-					return;
-				}
-				let lookup: Awaited<ReturnType<typeof readTaskCardWithBoardColumnInWorkspace>>;
-				try {
-					lookup = await readTaskCardWithBoardColumnInWorkspace(workspaceId, taskId);
-				} catch {
-					return;
-				}
-				if (
-					lookup.taskCardLookupOutcome !== "task_card_found_on_workspace_board" ||
-					lookup.taskCardSnapshot.taskCard.title !== titleWrittenAtCreateTime ||
-					readTaskCardActionCommandKindInFlight(workspaceId, taskId) !== null
-				) {
-					return;
-				}
-				await updateTaskCardFieldValuesThroughRuntime({
-					workspaceId,
-					taskId,
-					taskCardFieldValuePatch: { title: suggestedTaskName },
-					boardMutationInitiator: null,
-				});
-			})();
+		(workspaceId: string, taskId: string, prompt: string, priorTitle: string) => {
+			void backfillSuggestedTaskTitleWithRuntimeCompareAndSet(workspaceId, taskId, prompt, priorTitle);
 		},
 		[],
 	);
@@ -1952,6 +1913,8 @@ export function useTaskEditor({
 		newTaskAgentSessionInitialization,
 		setNewTaskAgentSessionInitialization,
 		editingTaskId,
+		editTaskName,
+		setEditTaskName,
 		editTaskPrompt,
 		setEditTaskPrompt,
 		editTaskImages,
