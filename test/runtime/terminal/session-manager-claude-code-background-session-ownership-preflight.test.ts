@@ -278,6 +278,44 @@ describe("TerminalSessionManager Claude Code background session ownership prefli
 		);
 	});
 
+	it("resumes on the next watch tick once only the retired job record of the background session is left", async () => {
+		// 99b7e 10-08 现场：守护进程已退役 bdd73afb，`claude agents --json` 仍列着它的 jobs 残留（无 pid / status）。
+		// 旧实现把残留当成「看不出是否空闲」的占用者，盯满 2 小时也不放行。
+		vi.useFakeTimers();
+		const retiredJobRecordOfBackgroundSession: ClaudeCodeLiveSessionListingEntry = {
+			...buildBackgroundSessionHolding(BACKGROUND_CONTINUATION_NATIVE_SESSION_ID, "idle"),
+			processId: null,
+			turnActivityStatus: null,
+		};
+		const daemonClient = createFakeDaemonClient([
+			// 被拒那一次：后台会话还活着、在跑回合
+			[buildBackgroundSessionHolding(BACKGROUND_CONTINUATION_NATIVE_SESSION_ID, "busy")],
+			// 盯梢第一拍：守护进程已退役它，只剩残留 ⇒ 交给启动漏斗；漏斗里的预检再看一次，照样只有残留
+			[retiredJobRecordOfBackgroundSession],
+			[retiredJobRecordOfBackgroundSession],
+		]);
+		const { manager } = createManager(daemonClient);
+		await startFreshClaudeSession(manager);
+		manager.applyAgentNativeConversationSessionIdentity(TASK_ID, {
+			sourceAgentId: "claude",
+			nativeSessionId: BACKGROUND_CONTINUATION_NATIVE_SESSION_ID,
+			transcriptPath: null,
+			observedAt: 1,
+		});
+		manager.stopTaskSession(TASK_ID);
+		await manager.refreshTaskTerminal(buildRefreshRequest()).catch(() => undefined);
+		const spawnCountAfterRefusal = ptySessionSpawnMock.mock.calls.length;
+
+		await vi.advanceTimersByTimeAsync(5_000);
+		await vi.waitFor(() => expect(ptySessionSpawnMock.mock.calls.length).toBe(spawnCountAfterRefusal + 1));
+
+		expect(readMostRecentResumeAddressing()?.sourceSessionId).toBe(BACKGROUND_CONTINUATION_NATIVE_SESSION_ID);
+		// 残留没有可停的进程：既不读屏也不 stop。
+		expect(daemonClient.readBackgroundSessionRecentTerminalOutput).not.toHaveBeenCalled();
+		expect(daemonClient.stopBackgroundSession).not.toHaveBeenCalled();
+		expect(manager.getSummary(TASK_ID)?.agentNativeConversationHeldByHarnessBackgroundSessionObservation).toBeNull();
+	});
+
 	it("ends the watch visibly when its auto-resume is folded into a live kanban session that is mid-turn", async () => {
 		vi.useFakeTimers();
 		const daemonClient = createFakeDaemonClient([

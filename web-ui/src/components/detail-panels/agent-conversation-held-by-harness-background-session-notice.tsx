@@ -1,4 +1,4 @@
-// 「要续跑的对话正被 harness 后台会话（Claude `/background`）占着、不能安全收回」的终端面板提示条。
+// 「要续跑的对话正被 harness 后台会话（Claude `/background` 或空输入框按 ←）占着、不能安全收回」的终端面板提示条。
 //
 // 服务端续跑预检拒绝时写入 summary sidecar（api-contract 的
 // runtimeAgentNativeConversationHeldByHarnessBackgroundSessionObservationSchema），并武装盯梢。这里给人三条路：
@@ -68,8 +68,8 @@ export function AgentConversationHeldByHarnessBackgroundSessionNotice({
 			<div className="flex items-start gap-2 text-status-orange">
 				<AlertTriangle size={14} className="mt-0.5 shrink-0" />
 				<span>
-					这段对话在 Claude Code 后台会话 {observation.harnessBackgroundSessionShortId} 里（终端里执行过
-					/background），
+					这段对话在 Claude Code 后台会话 {observation.harnessBackgroundSessionShortId} 里（例如终端里执行过
+					/background，或在空输入框按了 ←），
 					{DESCRIPTION_OF_WHY_HARNESS_BACKGROUND_SESSION_WAS_NOT_RECLAIMED[observation.reclaimBlockedReason]}
 					，为了不丢东西没有自动收回。
 					{observation.automaticReclaimWatchActive

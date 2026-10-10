@@ -1,4 +1,4 @@
-// 盯梢：续跑因对话被 harness 后台会话（Claude `/background`）占着、当时不能安全收回而被拒后，等它能安全收回时
+// 盯梢：续跑因对话被 harness 后台会话（Claude `/background` 或空输入框按 ←）占着、当时不能安全收回而被拒后，等它能安全收回时
 // 自动再续一次（用户选定的「自动盯梢 + 一键接管」里的前一半；判据见
 // claude-code-background-session-ownership-preflight-before-resume.ts）。
 //

@@ -164,6 +164,38 @@ describe("decideClaudeCodeBackgroundSessionReclaimSafety", () => {
 			),
 		).toBeNull();
 	});
+
+	it("ignores a retired background job record that `claude agents --json` still lists", () => {
+		// 2026-10-08 本机原样输出（Claude Code 2.1.293，守护进程未运行）：bdd73afb 10-07 已被守护进程退役，
+		// jobs 目录里的记录仍以 state=blocked 列出，没有 pid / status。Claude 对这种目标照常允许按 id 续跑。
+		const retiredJobRecordListing = parseClaudeCodeLiveSessionListingJson(
+			JSON.stringify([
+				{
+					id: "bdd73afb",
+					cwd: TASK_WORKING_DIRECTORY,
+					kind: "background",
+					startedAt: 1791310736097,
+					sessionId: RESUME_TARGET_NATIVE_SESSION_ID,
+					name: "Orchestrator agent for parallel tasks",
+					state: "blocked",
+				},
+			]),
+		);
+		expect(retiredJobRecordListing).toEqual([buildLiveSession({ processId: null, turnActivityStatus: null })]);
+		expect(
+			findLiveBackgroundSessionHoldingResumeTarget(retiredJobRecordListing, RESUME_TARGET_NATIVE_SESSION_ID),
+		).toBeNull();
+	});
+
+	it("picks the live holder even when a retired record of the same conversation is listed before it", () => {
+		const liveHolder = buildLiveSession({ claudeCodeSessionShortId: "c0ffee01", processId: 70001 });
+		expect(
+			findLiveBackgroundSessionHoldingResumeTarget(
+				[buildLiveSession({ processId: null, turnActivityStatus: null }), liveHolder],
+				RESUME_TARGET_NATIVE_SESSION_ID,
+			),
+		).toBe(liveHolder);
+	});
 });
 
 function createFakeDaemonClient(input: {
@@ -271,6 +303,18 @@ describe("runClaudeCodeResumeTargetBackgroundSessionOwnershipPreflight", () => {
 			stoppedDespiteUnsafeReclaimBecauseUserConfirmedTakeover: true,
 		});
 		expect(takingOver.stopBackgroundSession).toHaveBeenCalledTimes(1);
+	});
+
+	it("proceeds without stopping anything when only a retired background job record matches the target", async () => {
+		// 99b7e 10-08 现场：只剩退役残留时，旧实现判成「看不出是否空闲」并挡住任务、开始盯梢。
+		const daemonClient = createFakeDaemonClient({
+			listings: [[buildLiveSession({ processId: null, turnActivityStatus: null })]],
+		});
+		expect(await runPreflight(daemonClient)).toEqual({
+			kind: "proceed_resume_target_not_held_by_live_background_session",
+		});
+		expect(daemonClient.readBackgroundSessionRecentTerminalOutput).not.toHaveBeenCalled();
+		expect(daemonClient.stopBackgroundSession).not.toHaveBeenCalled();
 	});
 
 	it("proceeds without blocking the launch when the ownership listing itself fails", async () => {
