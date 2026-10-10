@@ -1,8 +1,10 @@
 // 续跑前核对：要按 id 续跑的 Claude 对话，此刻是不是正被 **Claude Code 自己的后台会话守护进程**占着；
 // 若是，能安全收回就收回，不能就拒绝（并交给盯梢 / 一键接管，见 session manager）。
 //
-// 存在理由（2026-10-07 任务 99b7e 取证）：用户在 kanban 终端里执行 `/background`（`/bg`），Claude 把对话以
-// resume + fork 搬进自己的守护进程（`claude daemon` → `bg-pty-host`），原转录末尾写下
+// 存在理由（2026-10-07 任务 99b7e 取证）：kanban 终端里的 Claude 被转成后台会话——`/background`（`/bg`），或
+// 输入框为空时按一下 ←（agent view 手势，不可改键，可在 `/config` 关掉「← opens agents」；99b7e 实为后者：
+// 用户从未输入过 /bg，见 post-mortem）。
+// Claude 把对话以 resume + fork 搬进自己的守护进程（`claude daemon` → `bg-pty-host`），原转录末尾写下
 // `continued-in → <新 id>`。之后 kanban 按 id 续跑，`claude --resume <id>` 被拒并立即 exit 1：
 // "That session is running in the background (<short>). Run `claude attach …` or `claude stop …` first"。
 // kanban 对此毫无感知，只能当普通秒退处理，任务就此打不开。
@@ -130,7 +132,9 @@ function describeExecFileFailure(error: unknown): string {
 
 // 直接 execFile，不经交互 shell（AGENTS.md 铁律：重 shell init 下每任务一次会冻结运行时）。
 // env 沿用运行时自己的：运行时启动时已擦掉继承的任务身份变量。`claude agents --json` 在守护进程没跑时
-// 只返回 `[]`，不会把守护进程拉起来（隔离 HOME 实测），所以这里不会把运行时 env 泄进守护进程。
+// 不会把它拉起来（隔离 HOME 与本机 10-08 实测），所以这里不会把运行时 env 泄进守护进程。列表里除了存活会话，
+// 不论守护进程在不在跑，都可能混着已退役后台任务的残留记录（没有 pid），由
+// findLiveBackgroundSessionHoldingResumeTarget 排除。
 export function createClaudeCodeBackgroundSessionDaemonCliClient(): ClaudeCodeBackgroundSessionDaemonClient {
 	return {
 		async listLiveSessionsStartedUnderWorkingDirectory(input) {
@@ -173,6 +177,11 @@ export function createClaudeCodeBackgroundSessionDaemonCliClient(): ClaudeCodeBa
 	};
 }
 
+// 只认带 pid 的后台记录。`claude agents --json` 还会列出守护进程已退役的后台任务（`~/.claude/jobs/<短 id>/`
+// 的残留，state 多为 blocked）：没有 pid、没有 status。Claude 自己的续跑拒绝只查存活会话登记，这类残留不会
+// 让续跑被拒（2026-10-08 99b7e：bdd73afb 10-07 05:45 已退役，06:13 按 id 续跑成功并跑了 6.8 小时，
+// 次日预检却因它把任务挡住）。代价：后台任务创建后约 5 秒内 worker 尚未登记、暂无 pid，这期间会漏判，
+// 漏判的后果与没有预检时相同（Claude 自己拒绝、exit 1），不丢东西。
 export function findLiveBackgroundSessionHoldingResumeTarget(
 	liveSessions: readonly ClaudeCodeLiveSessionListingEntry[],
 	resumeTargetNativeSessionId: string,
@@ -180,7 +189,9 @@ export function findLiveBackgroundSessionHoldingResumeTarget(
 	return (
 		liveSessions.find(
 			(session) =>
-				session.sessionHostKind === "background" && session.nativeSessionId === resumeTargetNativeSessionId,
+				session.sessionHostKind === "background" &&
+				session.processId !== null &&
+				session.nativeSessionId === resumeTargetNativeSessionId,
 		) ?? null
 	);
 }
@@ -374,7 +385,7 @@ export function describeClaudeCodeResumeTargetHeldByBackgroundSessionRefusal(inp
 		background_session_did_not_release_after_stop: `\`claude stop ${shortId}\` 之后它仍未释放这段对话`,
 	};
 	return (
-		`这段对话正在 Claude Code 后台会话 ${shortId} 里（先前在终端里执行过 /background），` +
+		`这段对话正在 Claude Code 后台会话 ${shortId} 里（例如终端里执行过 /background，或在空输入框按了 ←），` +
 		`${whyNotReclaimed[input.reclaimBlockedReason]}，为了不丢东西没有自动收回。` +
 		`Kanban 会继续盯着，等它能安全收回时自动接回这个终端；也可以用 \`claude attach ${shortId}\` 去那边处理，` +
 		`或在终端面板上选择「停止后台会话并在这里续跑」。`
@@ -382,7 +393,7 @@ export function describeClaudeCodeResumeTargetHeldByBackgroundSessionRefusal(inp
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// `continued-in` 链：被 `/background` 搬走的对话，在原转录末尾留下 `{type:"continued-in", continuedInSessionId}`。
+// `continued-in` 链：被 `/background` 或 ← 手势搬进后台的对话，在原转录末尾留下 `{type:"continued-in", continuedInSessionId}`。
 // hook 没能把新 id 报回本任务时（后台会话的 hook env 继承自守护进程，可能指向别的任务，实测），记录的身份还停在
 // 原 id 上；按原 id 续跑会撞上 "moved to a background session"，或接回一段已被后续对话甩在后面的历史。
 // 沿链走到对话最新所在的 id，才是要核对、要续跑的目标。
