@@ -297,7 +297,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 		cancelPendingHoverIntent,
 		suppressHoverExpansionUntilPointerLeavesRow,
 		forgetHoverExpansionOfRowNowKeptExpandedInList,
-		panelTopSpacerKeepingHoverAnchorRowInPlacePx,
 	} = useCrossProjectTaskSwitcherRowHoverExpansionInPlace({ panelScrollContainerRef });
 	// 点 backlog 行 = 原地打开编辑对话框（不切项目、不离开 Focus View），与 This project 点 backlog 卡同语义。
 	const { onOpenBacklogTaskEditorInProject } = host;
@@ -524,15 +523,9 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 			}
 			onPointerEnter={panelPointerHandlers.onPointerEnter}
 			onPointerLeave={panelPointerHandlers.onPointerLeave}
-			// overflow-anchor: none —— hover 原地展开 / 交接时由 use-cross-project-task-switcher-row-hover-expansion-in-place
-			// 自己补 scrollTop，浏览器自带的 scroll anchoring 再补一次就会叠加。
+			// overflow-anchor: none —— hover 交接时列表顶边固定（见 use-cross-project-task-switcher-row-hover-expansion-in-place）；
+			// 浏览器自带的 scroll anchoring 会在面板滚动过时自己补 scrollTop，把指针上方的整列往下拖。
 			className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-2 [overflow-anchor:none]"
-			// 交接时 scrollTop 不够补的差额（见 hook）：p-2 之外再垫这么多。
-			style={
-				panelTopSpacerKeepingHoverAnchorRowInPlacePx > 0
-					? { paddingTop: `calc(0.5rem + ${panelTopSpacerKeepingHoverAnchorRowInPlacePx}px)` }
-					: undefined
-			}
 			data-testid="cross-project-recently-active-task-switcher-panel"
 		>
 			{/* 与 This project 左栏同一个入口样式；Board Scope 下打开带目标项目字段的建卡框（默认上下文项目）。 */}

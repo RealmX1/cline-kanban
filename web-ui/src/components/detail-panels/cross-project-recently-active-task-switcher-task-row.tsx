@@ -11,6 +11,10 @@ import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/d
 import { CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-worktree-git-metadata";
 import { crossProjectTaskSwitcherSectionRowAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed-time-pills";
+import {
+	CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME,
+	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
+} from "@/components/task-card-body";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
@@ -34,8 +38,8 @@ export type CrossProjectTaskSwitcherRowInPlaceExpansionState =
  * **原地**换成完整卡片、把下面的行往下推；点右上角「Keep expanded in list」后固定展开，收起开关在卡片自己的 hover 动作组里。
  * 完整卡片（`fullTaskCard`）由面板按「当前项目读浏览器 board / 其他项目读服务端」备好。
  *
- * 三种形态共用同一个根节点（hover 展开的滚动补偿量的就是它），精简行与完整卡片的首行同一套度量、同一个左上角起点，
- * 右上角 hover 动作组同一个坐标（见 cross-project-recently-active-task-switcher-task-row-first-line.tsx）：
+ * 三种形态共用同一个根节点（hover 交接后检查顶边是否还在可视区的就是它），精简行与完整卡片的首行同一套度量、
+ * 同一个左上角起点，hover 动作组同一个坐标（叠在首行上方）（见 cross-project-recently-active-task-switcher-task-row-first-line.tsx）：
  * 三态之间标题一像素不动、开关不挪位，多出来的内容只向下长。
  *
  * 精简行的结构是「主按钮 + 叠在右上角的 hover 动作组」而不是一整个按钮：按钮里不能嵌按钮。
@@ -98,6 +102,8 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 		<div
 			className={cn(
 				"flex min-w-0 flex-col",
+				// 分区第一行给伸出行顶边的 hover 动作组（连同展开开关向上扩的命中区）让出 header 下方的空间（不压 header 的折叠按钮 / 排序下拉框）。
+				CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME,
 				showsFullTaskCard ? CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME : "rounded-md",
 				isFocused && "bg-surface-3 ring-1 ring-border-focus",
 				!isFocused && inPlaceExpansionState === "expanded_in_place_by_hover" && "bg-surface-2 ring-border",
@@ -136,8 +142,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 									{resolveBoardColumnTitle(entry.columnId)}
 								</span>
 							) : null}
-							{/* 与完整卡片元信息行右侧同一组、同一顺序：Cache warm 药丸、时长药丸、置顶标记。
-						    不放首行右端：hover 动作组叠在首行右端，会把它们盖住。 */}
+							{/* 与完整卡片元信息行右侧同一组、同一顺序：Cache warm 药丸、时长药丸、置顶标记。 */}
 							<span className="ml-auto flex shrink-0 items-center gap-1">
 								{promptCacheWarmthEstimate ? (
 									<CrossProjectTaskSwitcherRowPromptCacheWarmthPill
@@ -170,12 +175,13 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 							</span>
 						) : null}
 					</button>
-					{/* hover 动作组：与完整卡片的 hover 动作组同一几何（absolute right-1 top-1 + px-0.5、Button xs），
-				    最右一格的展开开关因此与 hover 展开 / 固定展开卡上的开关同一坐标。常驻 DOM（只切透明度），
+					{/* hover 动作组：与完整卡片的 hover 动作组同一几何（叠在首行上方 + right-1 + px-0.5、Button xs），
+				    最右一格的展开开关因此与 hover 展开 / 固定展开卡上的开关同一坐标；不压首行的字。常驻 DOM（只切透明度），
 				    键盘 Tab 得到，聚焦时显形。 */}
 					<div
 						className={cn(
-							"absolute right-1 top-1 z-10 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+							"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+							CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
 							"pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100",
 							"focus-within:pointer-events-auto focus-within:opacity-100",
 						)}

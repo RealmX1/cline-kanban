@@ -547,6 +547,45 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded)).toBe("true");
 	});
 
+	// hover 动作组伸出行顶边 12px（-top-3），最右一格展开开关的命中区伪元素再向上扩 4px（after:-top-1）。分区第一行上方是
+	// 分区 header（Pinned / Running 的折叠按钮、Recent 的排序下拉框）：首行若贴着 header，动作组与开关命中区会盖住它们的
+	// 右下沿、截走点击。jsdom 不排版，这里断言的几何约定是「紧挨 header 的首行 = 分区内容容器的第一个子节点，行根节点带
+	// first:mt-4（16px = 伸出量 12px + 命中区向上扩展 4px）」，开关命中区顶边因此落在 header 底边上；首行前是小标题时它不是
+	// 第一个子节点，上外边距不生效、不多出空白。真实像素与命中区由集成测试阶段 6 用 elementFromPoint 量。
+	it("分区第一行留出 hover 动作组伸出量 + 展开开关命中区向上扩展量的上外边距：动作组不压分区 header 的折叠按钮 / 排序下拉框", () => {
+		window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
+		for (const sectionName of ["pinned", "running", "prompt-cache-warm", "remaining"]) {
+			const firstRow = section(sectionName).querySelector<HTMLElement>("[data-cross-project-task-switcher-task-id]");
+			expect(firstRow?.matches(":first-child"), `${sectionName} 首行紧挨 header`).toBe(true);
+			expect(firstRow?.classList.contains("first:mt-4"), `${sectionName} 首行上外边距`).toBe(true);
+			expect(queryInListExpansionToggle(firstRow)?.parentElement?.classList.contains("-top-3")).toBe(true);
+		}
+
+		// 「Unread + opened」排序：首行前是「Unread」小标题，首行不是第一个子节点，上外边距不生效。
+		window.localStorage.setItem(
+			LocalStorageKey.CrossProjectTaskSwitcherRemainingSectionOrderingMode,
+			"unread_handoffs_then_recently_opened_by_user",
+		);
+		act(() => root.render(<div />));
+		act(() =>
+			root.render(
+				<CrossProjectRecentlyActiveTaskSwitcherPanel
+					host={makeHost({
+						notificationLogByWorkspaceId: {
+							"project-b": [{ id: "n1", workspaceId: "project-b", taskId: "recent", visitedAt: null } as never],
+						},
+					})}
+				/>,
+			),
+		);
+		const firstUnreadRow = section("remaining").querySelector<HTMLElement>(
+			'[data-cross-project-task-switcher-task-id="recent"]',
+		);
+		expect(firstUnreadRow?.previousElementSibling?.textContent).toBe("Unread");
+		expect(firstUnreadRow?.matches(":first-child")).toBe(false);
+	});
+
 	// 2026-10-04 用户反馈：Running 区随 agent 动作不断重排闪烁。agent 输出（spinner 重绘）只推进 lastOutputAt，
 	// 不该改变顺序；新进入 agent 回合的任务追加在末尾。
 	it("Running 区顺序不随 agent 输出变化，新进入的任务追加在末尾", () => {
@@ -680,6 +719,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		const hoverExpandedToggle = queryInListExpansionToggle(expandedRow);
 		expect(hoverExpandedToggle?.parentElement?.lastElementChild).toBe(hoverExpandedToggle);
 		expect(hoverExpandedToggle?.parentElement?.classList.contains("opacity-100")).toBe(true);
+		// 卡体动作组（铅笔、置顶、原始 prompt、移列、删除……）与精简行同一坐标：叠在首行上方，不压首行的字。
+		// 一般紧凑密度（Focus View 左栏列表）的 top-1 压在首行右端，这里不能用。
+		expect(hoverExpandedToggle?.parentElement?.classList.contains("-top-3")).toBe(true);
+		expect(hoverExpandedToggle?.parentElement?.classList.contains("top-1")).toBe(false);
 		expect(hoverExpandedToggle?.dataset.crossProjectTaskSwitcherFullTaskCardInListExpansionState).toBe(
 			"collapsed_to_compact_row",
 		);
@@ -789,12 +832,53 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 	});
 
 	it.each([
-		{ panelScrollTopBeforeHandOffPx: 200, expectedScrollTopPx: 140, expectedTopSpacerPx: 0 },
-		// 面板差不多在顶：scrollTop 只够补 30，余下 30 垫成顶部空白。
-		{ panelScrollTopBeforeHandOffPx: 30, expectedScrollTopPx: 0, expectedTopSpacerPx: 30 },
+		// 新行顶边在可视区里（面板上沿 0 + 动作组伸出的 12px 之下）：列表顶边固定，scrollTop 不动、不垫空白。
+		{
+			handOffCase: "new_row_top_edge_still_visible",
+			panelScrollTopBeforeHandOffPx: 200,
+			panelViewportTopPx: 0,
+			secondRowTopBeforeHandOffPx: 300,
+			secondRowTopAfterHandOffPx: 240,
+			expectedScrollTopPx: 200,
+		},
+		// 面板滚过、上方那一行收起把新行顶边带到可视区上沿（100）之外：只回滚到刚好露出顶边与叠在首行上方的动作组
+		//（新行顶边 40 → 要到 112，回滚 72）。
+		{
+			handOffCase: "new_row_top_edge_hidden_above_scrolled_panel",
+			panelScrollTopBeforeHandOffPx: 200,
+			panelViewportTopPx: 100,
+			secondRowTopBeforeHandOffPx: 300,
+			secondRowTopAfterHandOffPx: 40,
+			expectedScrollTopPx: 128,
+		},
+		// 同上但 scrollTop 不够回滚：停在 0，不垫空白。
+		{
+			handOffCase: "new_row_top_edge_hidden_but_panel_nearly_at_top",
+			panelScrollTopBeforeHandOffPx: 30,
+			panelViewportTopPx: 100,
+			secondRowTopBeforeHandOffPx: 300,
+			secondRowTopAfterHandOffPx: 40,
+			expectedScrollTopPx: 0,
+		},
+		// 交接前顶边就已露不全（用户自己滚的，50 < 112），交接又带上去 20：只回滚这 20，不替用户改滚动位置。
+		// 第一次展开 first 时（jsdom 量到的顶边恒为 0、前后不动）同理不回滚，各用例的 scrollTop 都依赖这一点。
+		{
+			handOffCase: "new_row_top_edge_partly_hidden_before_hand_off_scrolls_back_only_hand_off_drift",
+			panelScrollTopBeforeHandOffPx: 200,
+			panelViewportTopPx: 100,
+			secondRowTopBeforeHandOffPx: 50,
+			secondRowTopAfterHandOffPx: 30,
+			expectedScrollTopPx: 180,
+		},
 	])(
-		"交接时收起的行在新行上方：提交后先用 scrollTop、不够再用面板顶部空白补回新行被带着上移的距离，新展开的行停在指针下不动；指针离开面板收起时空白撤掉（scrollTop $panelScrollTopBeforeHandOffPx）",
-		async ({ panelScrollTopBeforeHandOffPx, expectedScrollTopPx, expectedTopSpacerPx }) => {
+		"交接时列表顶边固定（经典手风琴）：上方的行收起后新行跟着上移，不补 scrollTop、不垫面板顶部空白；只有新行顶边被带出可视区时回滚到刚好露出（$handOffCase）",
+		async ({
+			panelScrollTopBeforeHandOffPx,
+			panelViewportTopPx,
+			secondRowTopBeforeHandOffPx,
+			secondRowTopAfterHandOffPx,
+			expectedScrollTopPx,
+		}) => {
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 			readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
 			const host = makeHost({
@@ -809,121 +893,37 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			const panel = container.querySelector<HTMLElement>(
 				'[data-testid="cross-project-recently-active-task-switcher-panel"]',
 			);
-			// 自带 scroll anchoring 关掉，补偿只由 hook 做一次。
-			expect(panel?.className).toContain("[overflow-anchor:none]");
-			let panelScrollTopPx = panelScrollTopBeforeHandOffPx;
-			if (panel) {
-				Object.defineProperty(panel, "scrollTop", {
-					configurable: true,
-					get: () => panelScrollTopPx,
-					set: (nextScrollTopPx: number) => {
-						panelScrollTopPx = Math.max(0, nextScrollTopPx);
-					},
-				});
+			if (!panel) {
+				throw new Error("panel not rendered");
 			}
+			// 自带 scroll anchoring 关掉：否则面板滚过时浏览器自己补 scrollTop，指针上方的整列又被往下拖。
+			expect(panel.className).toContain("[overflow-anchor:none]");
+			let panelScrollTopPx = panelScrollTopBeforeHandOffPx;
+			Object.defineProperty(panel, "scrollTop", {
+				configurable: true,
+				get: () => panelScrollTopPx,
+				set: (nextScrollTopPx: number) => {
+					panelScrollTopPx = Math.max(0, nextScrollTopPx);
+				},
+			});
+			panel.getBoundingClientRect = () => ({ top: panelViewportTopPx }) as DOMRect;
 			await hoverRowUntilExpandedInPlace(queryRow("first"));
 			const secondRow = queryRow("second");
 			if (!secondRow) {
 				throw new Error("second row not rendered");
 			}
-			// 交接前量到 300，上方的 first 收起后量到 240：被带着上移了 60px。
 			secondRow.getBoundingClientRect = vi
 				.fn<() => DOMRect>()
-				.mockReturnValueOnce({ top: 300 } as DOMRect)
-				.mockReturnValue({ top: 240 } as DOMRect);
+				.mockReturnValueOnce({ top: secondRowTopBeforeHandOffPx } as DOMRect)
+				.mockReturnValue({ top: secondRowTopAfterHandOffPx } as DOMRect);
 			await movePointerFromRowToRow(queryRow("first"), secondRow);
 			await act(async () => {
 				vi.advanceTimersByTime(400);
 			});
+			expect(rowInPlaceExpansionState(queryRow("first"))).toBe("compact_row");
 			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
 			expect(panelScrollTopPx).toBe(expectedScrollTopPx);
-			// jsdom 会把 calc 的两项重排，只认垫的那一项。
-			if (expectedTopSpacerPx > 0) {
-				expect(panel?.style.paddingTop).toContain(`${expectedTopSpacerPx}px`);
-			} else {
-				expect(panel?.style.paddingTop).toBe("");
-			}
-
-			await movePointerOutOfRow(queryRow("second"));
-			await act(async () => {
-				vi.advanceTimersByTime(400);
-			});
-			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("compact_row");
-			expect(panel?.style.paddingTop).toBe("");
-		},
-	);
-
-	it.each([
-		{
-			panelTopSpacerClearingTrigger: "escape_key",
-			dispatchPanelTopSpacerClearingTrigger: () =>
-				document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })),
-		},
-		{
-			panelTopSpacerClearingTrigger: "pointer_down_outside_panel",
-			dispatchPanelTopSpacerClearingTrigger: () =>
-				document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })),
-		},
-	])(
-		"交接垫出顶部空白后把这一行固定展开再收起：指针仍在面板里时空白不撤（撤了指针下的行会移动），之后不靠指针离开面板也能撤掉（触屏 / 键盘）（$panelTopSpacerClearingTrigger）",
-		async ({ dispatchPanelTopSpacerClearingTrigger }) => {
-			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-			readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
-			const host = makeHost({
-				projects: [
-					makeProject("project-a", []),
-					makeProject("project-b", [makeEntry("first"), makeEntry("second")]),
-				],
-			});
-			act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
-			const queryRow = (taskId: string) =>
-				section("remaining").querySelector<HTMLElement>(`[data-cross-project-task-switcher-task-id="${taskId}"]`);
-			const panel = container.querySelector<HTMLElement>(
-				'[data-testid="cross-project-recently-active-task-switcher-panel"]',
-			);
-			// 面板差不多在顶：scrollTop 只够补 30，余下 30 垫成顶部空白。
-			let panelScrollTopPx = 30;
-			if (panel) {
-				Object.defineProperty(panel, "scrollTop", {
-					configurable: true,
-					get: () => panelScrollTopPx,
-					set: (nextScrollTopPx: number) => {
-						panelScrollTopPx = Math.max(0, nextScrollTopPx);
-					},
-				});
-			}
-			await hoverRowUntilExpandedInPlace(queryRow("first"));
-			const secondRow = queryRow("second");
-			if (!secondRow) {
-				throw new Error("second row not rendered");
-			}
-			secondRow.getBoundingClientRect = vi
-				.fn<() => DOMRect>()
-				.mockReturnValueOnce({ top: 300 } as DOMRect)
-				.mockReturnValue({ top: 240 } as DOMRect);
-			await movePointerFromRowToRow(queryRow("first"), secondRow);
-			await act(async () => {
-				vi.advanceTimersByTime(400);
-			});
-			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("expanded_in_place_by_hover");
-			expect(panel?.style.paddingTop).toContain("30px");
-
-			// 固定展开：hover 记录清掉，空白留着；在面板里按下指针（触屏点开关）也不撤。
-			await act(async () => queryInListExpansionToggle(queryRow("second"))?.click());
-			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("kept_expanded_in_list");
-			expect(panel?.style.paddingTop).toContain("30px");
-			await act(async () => {
-				queryInListExpansionToggle(queryRow("second"))?.dispatchEvent(
-					new MouseEvent("pointerdown", { bubbles: true }),
-				);
-			});
-			expect(panel?.style.paddingTop).toContain("30px");
-			await act(async () => queryInListExpansionToggle(queryRow("second"))?.click());
-			expect(rowInPlaceExpansionState(queryRow("second"))).toBe("compact_row");
-			expect(panel?.style.paddingTop).toContain("30px");
-
-			await act(async () => dispatchPanelTopSpacerClearingTrigger());
-			expect(panel?.style.paddingTop).toBe("");
+			expect(panel.style.paddingTop).toBe("");
 		},
 	);
 
@@ -944,8 +944,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(compactRowToggle?.dataset.crossProjectTaskSwitcherFullTaskCardInListExpansionState).toBe(
 			"collapsed_to_compact_row",
 		);
-		// 与完整卡片同一几何：叠在右上角的 hover 动作组里、是最右一格。
-		expect(compactRowToggle?.parentElement?.className).toContain("absolute right-1 top-1");
+		// 与完整卡片同一几何：hover 动作组叠在首行上方（不压首行的字）、开关是最右一格。
+		expect(compactRowToggle?.parentElement?.classList.contains("absolute")).toBe(true);
+		expect(compactRowToggle?.parentElement?.classList.contains("right-1")).toBe(true);
+		expect(compactRowToggle?.parentElement?.classList.contains("-top-3")).toBe(true);
 		expect(compactRowToggle?.parentElement?.lastElementChild).toBe(compactRowToggle);
 		expect(
 			queryRecentRow()?.querySelector("[data-cross-project-task-switcher-row-leading-activity-indicator]"),

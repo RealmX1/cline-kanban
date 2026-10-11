@@ -196,9 +196,9 @@ export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
 	firstLineLeadingActivityIndicator: ReactNode;
 	/** 元信息行最左，对应精简行第 2 行最左的项目名；null = 只有一个项目。 */
 	projectName: string | null;
-	/** 元信息行右侧药丸组最前，对应精简行第 2 行右侧（不放首行右端：hover 动作组会盖住首行右端）。 */
+	/** 元信息行右侧药丸组最前，对应精简行第 2 行右侧。 */
 	promptCacheWarmthPill: ReactNode;
-	/** hover 动作组最右一格：与精简行上的展开开关同一坐标。 */
+	/** hover 动作组最右一格：与精简行上的展开开关同一坐标（动作组位置见下方常量）。 */
 	inListExpansionToggle: ReactNode;
 	/**
 	 * true = 这一行刚因 hover 原地展开、指针还在它上面：第一帧就以 hover 态呈现（动作组、底色）。展开发生在静止的
@@ -206,6 +206,33 @@ export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
 	 */
 	isPresentedAsHoveredFromFirstFrame: boolean;
 }
+
+/**
+ * All projects 切换面板一行里 hover 动作组的竖直位置：叠在首行**上方**，底边落在首行字形之上——与标准密度卡片把动作组
+ * 伸出上边框（-top-[6px]）同一个思路，首行的字不被盖住，也不为它在右侧预留空白（预留会让长标题提前折行、
+ * 标题可用宽度变窄）。精简行、卡体（`expanded_card_copy_in_cross_project_task_switcher_row`）、卡体兜底三处共用，
+ * 最右一格的展开开关因此三态同一坐标。代价：行间只有 2px，动作组上半截会伸进上一行的右下角，hover 时盖住那里几像素。
+ * 分区第一行上方不是上一行而是分区 header（右侧有折叠按钮 / 排序下拉框），不能伸进去：见下方首行上外边距常量。
+ * 一般紧凑密度（Focus View 左栏列表）仍是 top-1，压在首行右端。
+ */
+export const CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME =
+	"-top-3";
+// 上面那个类名伸出行顶边的距离（-top-3 = 12px）：面板把一行的顶边滚回可视区时，连动作组一起露出来。
+export const CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX = 12;
+/**
+ * 行根节点是分区内容容器的第一个子节点时（紧挨分区 header 的第一行）上方留出 16px（mt-4）=
+ * 动作组伸出行顶边的 12px（`CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX`）
+ * + 动作组最右一格展开开关的命中区伪元素再向上扩的 4px（cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button.tsx
+ * 的 `IN_LIST_EXPANSION_TOGGLE_HIT_AREA_EXTENDED_UP_AND_RIGHT_BEYOND_BUTTON_BOX_CLASS_NAME` 里的 `after:-top-1`）。
+ * 只让出 12px 时动作组盒子顶边落在 header 底边上，但开关命中区仍高出 header 底边 4px，伸进 Pinned / Running 折叠按钮
+ *（h-9 header 里居中的 h-8，底边距 header 底边 2px）的底沿约 2px、截走点击。让出 16px 后命中区顶边正好落在 header 底边上，
+ * 不盖住 header 里的折叠按钮（Pinned / Running）与排序下拉框（Recent），指针从首行往上移时不截走它们的点击。
+ * 改伸出量或命中区向上扩展量中的任何一项，这里都要跟着改（真实浏览器集成测试阶段 6 用 elementFromPoint 在 header 底沿取点守着）。
+ * 三态共用行根节点，首行整体下移、三态之间仍同一坐标；非首行不受影响（非首行开关命中区仍是 24×24）。
+ * 第一个子节点是别的东西（Recent「Unread + opened」排序下的小标题、空态提示）时不生效：那时首行不紧挨 header，也不多出空白。
+ */
+export const CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME =
+	"first:mt-4";
 
 /**
  * 任务卡的纯展示卡体（卡壳 + 内层可视卡 + 全部展示态/交互）。
@@ -1236,8 +1263,12 @@ export const TaskCardBody = memo(function TaskCardBody({
 					className={cn(
 						// 动作显示或获得键盘焦点时覆盖 z-20 摘要胶囊，避免长摘要拦截恢复、归档等按钮。
 						"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
-						// 紧凑密度没有上边框可伸出，动作组覆盖在第 1 行右侧。
-						isCompactRowInFocusViewLeftColumn ? "top-1" : "-top-[6px]",
+						// 紧凑密度没有上边框可伸出，动作组覆盖在第 1 行右侧；All projects 切换面板的行例外，叠在首行上方。
+						isCrossProjectTaskSwitcherRowCopy
+							? CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME
+							: isCompactRowInFocusViewLeftColumn
+								? "top-1"
+								: "-top-[6px]",
 						"focus-within:opacity-100 focus-within:pointer-events-auto",
 						isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
 					)}

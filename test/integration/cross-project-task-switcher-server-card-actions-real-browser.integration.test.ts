@@ -472,11 +472,27 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				expect(Math.abs(actual.left - expected.left), `${label} left`).toBeLessThanOrEqual(1);
 				expect(Math.abs(actual.top - expected.top), `${label} top`).toBeLessThanOrEqual(1);
 			};
+			// hover 动作组 = 展开开关所在的那一组（开关是它最右一格）。
+			const measureHoverActionGroupBottomPx = (toggleLocator: ReturnType<typeof page.locator>) =>
+				toggleLocator.evaluate((element) => element.parentElement?.getBoundingClientRect().bottom ?? Number.NaN);
+			// 动作组叠在首行上方：底边最多伸进首行行盒顶上的行距留白（leading-snug 下 ≈2.4px），不压到字。
+			const expectHoverActionGroupAboveFirstLine = (
+				geometry: { title: MeasuredRect; hoverActionGroupBottomPx: number },
+				label: string,
+			) => {
+				expect(
+					geometry.hoverActionGroupBottomPx - geometry.title.top,
+					`${label} 动作组不压首行`,
+				).toBeLessThanOrEqual(2.5);
+			};
 			const measureCompactRow = async (taskId: string, compactRow = row(taskId)) => {
 				return {
 					row: await measureRect(compactRow),
 					title: await measureRect(compactRow.locator("[data-cross-project-task-switcher-row-title]")),
 					toggle: await measureRect(compactRow.getByTestId(inListExpansionToggleTestId)),
+					hoverActionGroupBottomPx: await measureHoverActionGroupBottomPx(
+						compactRow.getByTestId(inListExpansionToggleTestId),
+					),
 					leadingActivityIndicator: await compactRow
 						.locator("[data-cross-project-task-switcher-row-leading-activity-indicator]")
 						.first()
@@ -488,6 +504,9 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				row: await measureRect(expandedRow),
 				title: await measureRect(expandedRow.locator("[data-task-card-title]")),
 				toggle: await measureRect(expandedRow.getByTestId(inListExpansionToggleTestId)),
+				hoverActionGroupBottomPx: await measureHoverActionGroupBottomPx(
+					expandedRow.getByTestId(inListExpansionToggleTestId),
+				),
 			});
 			const hoverRowUntilExpandedInPlace = async (taskId: string, title: string) => {
 				await row(taskId).locator("button").first().hover();
@@ -504,6 +523,225 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 					.first()
 					.waitFor({ state: "detached" });
 			};
+			// 分区第一行的 hover 动作组伸出行顶边 12px，最右一格展开开关的命中区伪元素（after:-top-1）再向上扩 4px；上方是本分区
+			// header：动作组盒子与开关命中区的顶边都不得高于 header 底边，否则盖住 header 里的折叠按钮（Pinned / Running）/ 排序
+			// 下拉框（Recent）的右下沿、截走点击。夹具里有行的分区都量；Recent 必须量到（它的 header 有排序下拉框），带折叠按钮的
+			// Pinned 也必须量到：本夹具的置顶在阶段 2 就取消了、下一次置顶在阶段 6 之后，Running 分区又默认收起，不先置顶就只量得到
+			// 没有折叠按钮的分区。所以先经 runtime 置顶焦点锚点让 Pinned 分区有行，量完取消置顶、等 Pinned 分区消失再往下走
+			// （后续断言按原夹具布局）。
+			await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
+				taskPinboardPinAction: "pin_task_card_or_update_pin_reason",
+				taskId: focusId,
+				taskPinboardPinReason: null,
+			});
+			const pinnedSectionTestId = "cross-project-task-switcher-section-pinned";
+			const pinnedSection = page.locator(`[data-testid="${pinnedSectionTestId}"]`);
+			await pinnedSection.locator(`[data-cross-project-task-switcher-task-id="${focusId}"]`).waitFor();
+			// 静态几何（动作组常驻 DOM、只切透明度，不必 hover）：动作组盒子顶边，以及按开关 ::after 的 top 算出的命中区顶边。
+			// 根 tsconfig 不带 DOM lib：浏览器端脚本以字符串交给页面执行。
+			const firstRowHoverActionGroupAgainstSectionHeaderGeometry = (await page.evaluate(`(() => {
+				const toggleTestId = ${JSON.stringify(inListExpansionToggleTestId)};
+				return [...document.querySelectorAll('[data-testid^="cross-project-task-switcher-section-"]')].flatMap((sectionElement) => {
+					const firstRow = sectionElement.querySelector("[data-cross-project-task-switcher-task-id]");
+					const inListExpansionToggle = firstRow?.querySelector('[data-testid="' + toggleTestId + '"]');
+					const hoverActionGroup = inListExpansionToggle?.parentElement;
+					if (!hoverActionGroup) return [];
+					const sectionHeader = sectionElement.firstElementChild;
+					const headerInteractiveControlBottomsPx = [...sectionHeader.querySelectorAll("button, select")].map(
+						(control) => control.getBoundingClientRect().bottom,
+					);
+					return [{
+						sectionTestId: sectionElement.getAttribute("data-testid"),
+						hoverActionGroupTopPx: hoverActionGroup.getBoundingClientRect().top,
+						inListExpansionToggleHitAreaTopPx:
+							inListExpansionToggle.getBoundingClientRect().top +
+							Number.parseFloat(getComputedStyle(inListExpansionToggle, "::after").top),
+						sectionHeaderBottomPx: sectionHeader.getBoundingClientRect().bottom,
+						headerInteractiveControlBottomsPx,
+						sortSelectBottomPx: sectionHeader.querySelector("select")?.getBoundingClientRect().bottom ?? null,
+					}];
+				});
+			})()`)) as Array<{
+				sectionTestId: string;
+				hoverActionGroupTopPx: number;
+				inListExpansionToggleHitAreaTopPx: number;
+				sectionHeaderBottomPx: number;
+				headerInteractiveControlBottomsPx: number[];
+				sortSelectBottomPx: number | null;
+			}>;
+			titleAndToggleGeometryEvidence.first_row_hover_action_group_against_section_header =
+				firstRowHoverActionGroupAgainstSectionHeaderGeometry;
+			const remainingSectionFirstRowGeometry = firstRowHoverActionGroupAgainstSectionHeaderGeometry.find(
+				(geometry) => geometry.sectionTestId === "cross-project-task-switcher-section-remaining",
+			);
+			expect(remainingSectionFirstRowGeometry?.sortSelectBottomPx, "Recent 首行与排序下拉框都已渲染").toBeTypeOf(
+				"number",
+			);
+			const pinnedSectionFirstRowGeometry = firstRowHoverActionGroupAgainstSectionHeaderGeometry.find(
+				(geometry) => geometry.sectionTestId === pinnedSectionTestId,
+			);
+			expect(
+				pinnedSectionFirstRowGeometry?.headerInteractiveControlBottomsPx.length ?? 0,
+				"Pinned 首行与折叠按钮都已渲染",
+			).toBeGreaterThan(0);
+			for (const geometry of firstRowHoverActionGroupAgainstSectionHeaderGeometry) {
+				for (const [measuredTopEdgeLabel, measuredTopEdgePx] of [
+					["动作组盒子", geometry.hoverActionGroupTopPx],
+					["展开开关命中区", geometry.inListExpansionToggleHitAreaTopPx],
+				] as const) {
+					expect(
+						measuredTopEdgePx,
+						`${geometry.sectionTestId} 首行${measuredTopEdgeLabel}顶边不高于 header 底边`,
+					).toBeGreaterThanOrEqual(geometry.sectionHeaderBottomPx - 0.5);
+					for (const controlBottomPx of geometry.headerInteractiveControlBottomsPx) {
+						expect(
+							measuredTopEdgePx,
+							`${geometry.sectionTestId} 首行${measuredTopEdgeLabel}不压 header 控件`,
+						).toBeGreaterThanOrEqual(controlBottomPx);
+					}
+				}
+			}
+			// 命中区只在 hover（group-hover 打开 pointer-events）时生效，且包括伪元素：hover 每个有行的分区的首行，在 header 底边
+			// 内侧 0.5px、以及 header 里每个控件底边内侧 1px 处，横向取开关命中区覆盖的 x（按钮左沿内侧、中心、右侧扩展区）用
+			// elementFromPoint 取点：命中的不得是动作组里的元素，落在控件范围内的点必须命中控件本身。hover 刚开始（意图计时未到，
+			// 一般还是精简行）与 hover 原地展开后各量一次：两态动作组同一坐标，但 DOM 是两套。
+			type FirstRowHoverActionGroupHitTestingAgainstSectionHeaderControls = {
+				sectionTestId: string;
+				firstRowInPlaceExpansionState: string | null;
+				inListExpansionTogglePointerEvents: string;
+				inListExpansionToggleExtendedHitAreaCornerHitsToggle: boolean;
+				hitTestingProbes: Array<{
+					probedTargetKind:
+						| "section_header_bottom_edge_inner_side"
+						| "section_header_interactive_control_bottom_edge_inner_side";
+					probedHeaderControlDescription: string | null;
+					probeXPx: number;
+					probeYPx: number;
+					hitElementDescription: string | null;
+					hitElementIsInsideHoverActionGroup: boolean;
+					hitElementIsInsideProbedHeaderControl: boolean | null;
+				}>;
+			};
+			const hitTestFirstRowHoverActionGroupAgainstSectionHeaderControls = async (sectionTestId: string) =>
+				(await page.evaluate(`(() => {
+					const toggleTestId = ${JSON.stringify(inListExpansionToggleTestId)};
+					const sectionElement = document.querySelector('[data-testid="' + ${JSON.stringify(sectionTestId)} + '"]');
+					const firstRow = sectionElement.querySelector("[data-cross-project-task-switcher-task-id]");
+					const inListExpansionToggle = firstRow.querySelector('[data-testid="' + toggleTestId + '"]');
+					const hoverActionGroup = inListExpansionToggle.parentElement;
+					const sectionHeader = sectionElement.firstElementChild;
+					const toggleRect = inListExpansionToggle.getBoundingClientRect();
+					const probeXsPx = [toggleRect.left + 1, toggleRect.left + toggleRect.width / 2, toggleRect.right + 2];
+					const describeElement = (element) =>
+						element
+							? element.tagName.toLowerCase() +
+								(element.getAttribute("aria-label") ? '[aria-label="' + element.getAttribute("aria-label") + '"]' : "") +
+								(element.getAttribute("data-testid") ? '[data-testid="' + element.getAttribute("data-testid") + '"]' : "")
+							: null;
+					const hitTestingProbes = [];
+					const probe = (probedTargetKind, probedHeaderControl, probeXPx, probeYPx) => {
+						const hitElement = document.elementFromPoint(probeXPx, probeYPx);
+						hitTestingProbes.push({
+							probedTargetKind,
+							probedHeaderControlDescription: probedHeaderControl ? describeElement(probedHeaderControl) : null,
+							probeXPx,
+							probeYPx,
+							hitElementDescription: describeElement(hitElement),
+							hitElementIsInsideHoverActionGroup: hitElement !== null && hoverActionGroup.contains(hitElement),
+							hitElementIsInsideProbedHeaderControl: probedHeaderControl
+								? hitElement !== null && probedHeaderControl.contains(hitElement)
+								: null,
+						});
+					};
+					const sectionHeaderBottomPx = sectionHeader.getBoundingClientRect().bottom;
+					for (const probeXPx of probeXsPx) {
+						probe("section_header_bottom_edge_inner_side", null, probeXPx, sectionHeaderBottomPx - 0.5);
+					}
+					for (const headerControl of sectionHeader.querySelectorAll("button, select")) {
+						const controlRect = headerControl.getBoundingClientRect();
+						for (const probeXPx of probeXsPx) {
+							if (probeXPx < controlRect.left || probeXPx >= controlRect.right) continue;
+							probe("section_header_interactive_control_bottom_edge_inner_side", headerControl, probeXPx, controlRect.bottom - 1);
+						}
+					}
+					// 阳性对照：命中区此刻确实生效（伪元素扩出的右上角命中开关），上面「没命中动作组」才不是因为动作组隐形。
+					const extendedHitAreaCornerHitElement = document.elementFromPoint(toggleRect.right + 2, toggleRect.top - 2);
+					return {
+						sectionTestId: ${JSON.stringify(sectionTestId)},
+						firstRowInPlaceExpansionState: firstRow.getAttribute(${JSON.stringify(rowInPlaceExpansionStateAttribute)}),
+						inListExpansionTogglePointerEvents: getComputedStyle(inListExpansionToggle).pointerEvents,
+						inListExpansionToggleExtendedHitAreaCornerHitsToggle:
+							extendedHitAreaCornerHitElement !== null && inListExpansionToggle.contains(extendedHitAreaCornerHitElement),
+						hitTestingProbes,
+					};
+				})()`)) as FirstRowHoverActionGroupHitTestingAgainstSectionHeaderControls;
+			const firstRowHoverActionGroupHitTestingEvidence: FirstRowHoverActionGroupHitTestingAgainstSectionHeaderControls[] =
+				[];
+			for (const { sectionTestId } of firstRowHoverActionGroupAgainstSectionHeaderGeometry) {
+				const sectionFirstRow = page
+					.locator(`[data-testid="${sectionTestId}"] [data-cross-project-task-switcher-task-id]`)
+					.first();
+				await page.mouse.move(1500, 950);
+				await sectionFirstRow.locator("button").first().hover();
+				firstRowHoverActionGroupHitTestingEvidence.push(
+					await hitTestFirstRowHoverActionGroupAgainstSectionHeaderControls(sectionTestId),
+				);
+				await sectionFirstRow
+					.and(page.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`))
+					.getByTestId(inListExpansionToggleTestId)
+					.waitFor();
+				firstRowHoverActionGroupHitTestingEvidence.push(
+					await hitTestFirstRowHoverActionGroupAgainstSectionHeaderControls(sectionTestId),
+				);
+				await leavePanelAndWaitForHoverExpansionToCollapse();
+			}
+			titleAndToggleGeometryEvidence.first_row_hover_action_group_hit_testing_against_section_header_controls =
+				firstRowHoverActionGroupHitTestingEvidence;
+			expect(
+				firstRowHoverActionGroupHitTestingEvidence.some(
+					(hitTesting) => hitTesting.firstRowInPlaceExpansionState === "expanded_in_place_by_hover",
+				),
+			).toBe(true);
+			expect(
+				firstRowHoverActionGroupHitTestingEvidence.some(
+					(hitTesting) =>
+						hitTesting.sectionTestId === pinnedSectionTestId &&
+						hitTesting.hitTestingProbes.some(
+							(hitTestingProbe) =>
+								hitTestingProbe.probedTargetKind ===
+								"section_header_interactive_control_bottom_edge_inner_side",
+						),
+				),
+				"Pinned 折叠按钮底沿被取点",
+			).toBe(true);
+			for (const hitTesting of firstRowHoverActionGroupHitTestingEvidence) {
+				const hitTestingLabel = `${hitTesting.sectionTestId} 首行（${hitTesting.firstRowInPlaceExpansionState}）`;
+				expect(hitTesting.inListExpansionTogglePointerEvents, `${hitTestingLabel} 动作组可点`).toBe("auto");
+				expect(
+					hitTesting.inListExpansionToggleExtendedHitAreaCornerHitsToggle,
+					`${hitTestingLabel} 开关命中区生效`,
+				).toBe(true);
+				for (const hitTestingProbe of hitTesting.hitTestingProbes) {
+					const hitTestingProbeLabel = `${hitTestingLabel} ${hitTestingProbe.probedTargetKind} ${hitTestingProbe.probedHeaderControlDescription ?? ""} (${hitTestingProbe.probeXPx}, ${hitTestingProbe.probeYPx}) 命中 ${hitTestingProbe.hitElementDescription}`;
+					expect(hitTestingProbe.hitElementIsInsideHoverActionGroup, `${hitTestingProbeLabel}：不得截走`).toBe(
+						false,
+					);
+					if (hitTestingProbe.hitElementIsInsideProbedHeaderControl !== null) {
+						expect(
+							hitTestingProbe.hitElementIsInsideProbedHeaderControl,
+							`${hitTestingProbeLabel}：应命中 header 控件`,
+						).toBe(true);
+					}
+				}
+			}
+			await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
+				taskPinboardPinAction: "unpin_task_card",
+				taskId: focusId,
+			});
+			await pinnedSection.waitFor({ state: "detached" });
+			recordCheck(
+				"阶段 6 分区首行 hover 动作组与展开开关命中区顶边不高于本分区 header 底边，hover 时 elementFromPoint 在折叠按钮（Pinned）/ 排序下拉框（Recent）底沿命中控件本身",
+			);
 			for (const [taskId, title, geometryCaseLabel] of [
 				[betaInProgressGeometryAnchorId, "进行中几何锚点", "other_project_in_progress_without_session"],
 				[betaId, "别的项目任务", "other_project_review"],
@@ -528,13 +766,15 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 					compactRowGeometry.toggle,
 					`${geometryCaseLabel} 开关`,
 				);
+				expectHoverActionGroupAboveFirstLine(compactRowGeometry, `${geometryCaseLabel} 精简行`);
+				expectHoverActionGroupAboveFirstLine(expandedRowGeometry, `${geometryCaseLabel} hover 展开`);
 				titleAndToggleGeometryEvidence[geometryCaseLabel] = { compactRowGeometry, expandedRowGeometry };
 				await leavePanelAndWaitForHoverExpansionToCollapse();
 			}
 
-			// 往下挪到下一行：上一行不在离开时收起，下一行停够意图时长后交接；收起的行在上方，新行被带着上移的距离
-			// 先由面板滚动补回，scrollTop 不够时差额垫成面板顶部空白——两种视口下新行都停在指针下不动。
-			// 之后指针静止，不得再有任何展开 / 收起。
+			// 往下挪到下一行：上一行不在离开时收起，下一行停够意图时长后交接。列表顶边固定（经典手风琴，用户 2026-10-08
+			// 选定）：收起的行在上方，新行跟着上移那一行多出的高度；不补 scrollTop、不垫面板顶部空白，上方的内容不动。
+			// 之后指针静止，不得再有任何展开 / 收起（指针可能落到新行下沿之外，同坐标事件不得连锁展开再下一行）。
 			const measureHandOffToNextRowBelow = async (handOffCaseLabel: string) => {
 				const remainingRowTaskIds = await page
 					.locator(
@@ -555,18 +795,26 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 					remainingRow(taskId).and(
 						page.locator(`[${rowInPlaceExpansionStateAttribute}="expanded_in_place_by_hover"]`),
 					);
+				const readPanelScrollState = () =>
+					panel.evaluate((element) => ({
+						scrollTop: element.scrollTop,
+						maxScrollTop: element.scrollHeight - element.clientHeight,
+						paddingTop: element.style.paddingTop,
+					}));
 				await panel.evaluate((element) => {
 					element.scrollTop = element.scrollHeight;
 				});
 				const upperRowCompactHeight = (await measureRect(remainingRow(upperTaskId))).height;
 				await remainingRow(upperTaskId).locator("button").first().hover();
-				await remainingRowExpandedByHover(upperTaskId).waitFor();
+				// 等卡体真的读到（不是加载兜底）再量：交接时收起的是这个高度。
+				await remainingRowExpandedByHover(upperTaskId).locator("[data-task-card-title]").waitFor();
 				const upperRowGrowthPx = (await measureRect(remainingRow(upperTaskId))).height - upperRowCompactHeight;
-				// 展开后内容变高：再滚到底，让下一行进入视野（也让面板有尽量多的滚动余量）。
+				// 展开后内容变高：再滚到底，让下一行进入视野。
 				await panel.evaluate((element) => {
 					element.scrollTop = element.scrollHeight;
 				});
-				const panelScrollTopBeforeHandOffPx = await panel.evaluate((element) => element.scrollTop);
+				const panelScrollStateBeforeHandOff = await readPanelScrollState();
+				const upperRowTopBeforeHandOffPx = (await measureRect(remainingRow(upperTaskId))).top;
 				const lowerRowCompactGeometry = await measureCompactRow(lowerTaskId, remainingRow(lowerTaskId));
 				// 根 tsconfig 不带 DOM lib：浏览器端脚本以字符串交给页面执行。
 				await page.evaluate(`(() => {
@@ -590,56 +838,85 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				await page.mouse.move(pointerX, pointerY, { steps: 4 });
 				await remainingRowExpandedByHover(lowerTaskId).waitFor();
 				const lowerRowExpandedGeometry = await measureExpandedRow(remainingRowExpandedByHover(lowerTaskId));
+				const panelScrollStateAfterHandOff = await readPanelScrollState();
+				const upperRowTopAfterHandOffPx = (await measureRect(remainingRow(upperTaskId))).top;
 				// 指针静止 1.2s：布局位移不得引发连锁展开 / 收起。
 				await waitForNextObservation(1200);
 				const recordedExpansionStateChanges = (await page.evaluate(
 					"window.recordedExpansionStateChanges",
 				)) as string[];
-				const uncompensablePartOfUpperRowGrowthPx = Math.max(0, upperRowGrowthPx - panelScrollTopBeforeHandOffPx);
-				const panelTopPaddingDuringHandOff = await panel.evaluate((element) => element.style.paddingTop);
+				// 滚到底时内容变矮，浏览器会把 scrollTop 夹到新的最大值——这是唯一允许的 scrollTop 变化（不是补偿）。
+				const panelScrollTopClampedByBrowserPx = Math.max(
+					0,
+					panelScrollStateBeforeHandOff.scrollTop - panelScrollStateAfterHandOff.maxScrollTop,
+				);
+				// 唯一的例外：交接把新行顶边（连同伸出顶边 12px 的 hover 动作组，见
+				// CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX）带出面板可视区上沿时，
+				// 回滚到刚好露出，最多回滚它被带上去的距离。按交接前量到的几何预测这一项，本夹具里一般为 0。
+				const panelViewportTopPx = (await measureRect(panel)).top;
+				const lowerRowCarriedUpwardByHandOffPx = upperRowGrowthPx - panelScrollTopClampedByBrowserPx;
+				const panelScrollTopScrolledBackToRevealLowerRowTopEdgePx = Math.max(
+					0,
+					Math.min(
+						lowerRowCarriedUpwardByHandOffPx,
+						panelViewportTopPx + 12 - (lowerRowCompactGeometry.row.top - lowerRowCarriedUpwardByHandOffPx),
+					),
+				);
+				const panelContentShiftedDownByHandOffPx =
+					panelScrollTopClampedByBrowserPx + panelScrollTopScrolledBackToRevealLowerRowTopEdgePx;
 				const lowerRowTitleShiftPx = lowerRowExpandedGeometry.title.top - lowerRowCompactGeometry.title.top;
+				const isPointerStillInsideLowerRowAfterHandOff =
+					pointerY >= lowerRowExpandedGeometry.row.top &&
+					pointerY < lowerRowExpandedGeometry.row.top + lowerRowExpandedGeometry.row.height;
 				titleAndToggleGeometryEvidence[handOffCaseLabel] = {
 					upperTaskId,
 					lowerTaskId,
 					upperRowGrowthPx,
-					panelScrollTopBeforeHandOffPx,
-					uncompensablePartOfUpperRowGrowthPx,
-					panelTopPaddingDuringHandOff,
+					panelScrollStateBeforeHandOff,
+					panelScrollStateAfterHandOff,
+					panelScrollTopClampedByBrowserPx,
+					panelViewportTopPx,
+					panelScrollTopScrolledBackToRevealLowerRowTopEdgePx,
+					upperRowTopBeforeHandOffPx,
+					upperRowTopAfterHandOffPx,
 					lowerRowTitleShiftPx,
 					pointerY,
+					isPointerStillInsideLowerRowAfterHandOff,
 					lowerRowExpandedGeometry,
 					recordedExpansionStateChanges,
 				};
-				expect(Math.abs(lowerRowTitleShiftPx), `${handOffCaseLabel} 新展开的下一行标题不动`).toBeLessThanOrEqual(
-					1.5,
-				);
-				// scrollTop 不够补时才垫顶部空白。
-				expect(panelTopPaddingDuringHandOff === "", `${handOffCaseLabel} 顶部空白`).toBe(
-					uncompensablePartOfUpperRowGrowthPx === 0,
-				);
+				expect(panelScrollStateAfterHandOff.paddingTop, `${handOffCaseLabel} 不垫顶部空白`).toBe("");
+				expect(
+					Math.abs(
+						panelScrollStateAfterHandOff.scrollTop -
+							(panelScrollStateBeforeHandOff.scrollTop - panelContentShiftedDownByHandOffPx),
+					),
+					`${handOffCaseLabel} 不补 scrollTop`,
+				).toBeLessThanOrEqual(1);
+				// 上方的行（收起的那一行）顶边在列表内容里不动：视口坐标只随浏览器夹 scrollTop（与露出顶边的回滚）平移。
+				expect(
+					Math.abs(upperRowTopAfterHandOffPx - (upperRowTopBeforeHandOffPx + panelContentShiftedDownByHandOffPx)),
+					`${handOffCaseLabel} 上方的行不被往下拖`,
+				).toBeLessThanOrEqual(1);
+				// 新行跟着上移那一行多出的高度。
+				expect(
+					Math.abs(lowerRowTitleShiftPx - (panelContentShiftedDownByHandOffPx - upperRowGrowthPx)),
+					`${handOffCaseLabel} 新行上移上一行多出的高度`,
+				).toBeLessThanOrEqual(1.5);
 				expect(recordedExpansionStateChanges.sort(), `${handOffCaseLabel} 只交接一次、不连锁`).toEqual(
 					[`${lowerTaskId}:expanded_in_place_by_hover`, `${upperTaskId}:compact_row`].sort(),
 				);
-				// 指针仍在新展开的那一行里：再动一下也不会去展开再下一行。
-				expect(pointerY).toBeGreaterThanOrEqual(lowerRowExpandedGeometry.row.top);
-				expect(pointerY).toBeLessThan(lowerRowExpandedGeometry.row.top + lowerRowExpandedGeometry.row.height);
 				await leavePanelAndWaitForHoverExpansionToCollapse();
-				// 收起时顶部空白一并撤掉。
-				expect(await panel.evaluate((element) => element.style.paddingTop)).toBe("");
+				expect((await readPanelScrollState()).paddingTop).toBe("");
 				await panel.evaluate((element) => {
 					element.scrollTop = 0;
 				});
-				return uncompensablePartOfUpperRowGrowthPx;
 			};
-			// 面板不可滚（scrollTop 0）：差额全部垫成顶部空白。
-			expect(await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_1000px")).toBeGreaterThan(
-				0,
-			);
-			// 矮视口：面板可滚，交接时收起的行的增量应当被滚动完全补回。
+			// 面板不可滚（scrollTop 0）：以前这里会垫顶部空白，现在列表顶边固定。
+			await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_1000px");
+			// 矮视口：面板可滚，也不补 scrollTop（不把指针上方的整列往下拖）。
 			await page.setViewportSize({ width: 1600, height: 420 });
-			expect(await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_420px_scrollable")).toBe(
-				0,
-			);
+			await measureHandOffToNextRowBelow("hand_off_to_next_row_below_panel_viewport_420px_scrollable");
 			await page.setViewportSize({ width: 1600, height: 1000 });
 
 			await page.mouse.move(1500, 950);
@@ -704,6 +981,8 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				currentProjectCompactRowGeometry.toggle,
 				"current_project_review 固定展开开关",
 			);
+			expectHoverActionGroupAboveFirstLine(currentProjectHoverExpandedGeometry, "current_project_review hover 展开");
+			expectHoverActionGroupAboveFirstLine(currentProjectKeptExpandedGeometry, "current_project_review 固定展开");
 			// hover 展开 → 固定展开：高度不变，下方的行不动。
 			expect(
 				Math.abs(currentProjectKeptExpandedGeometry.row.height - currentProjectHoverExpandedGeometry.row.height),
@@ -726,10 +1005,10 @@ export default { ...baseConfiguration, cacheDir: ${JSON.stringify(join(fixture.f
 				JSON.stringify(titleAndToggleGeometryEvidence, null, 2),
 			);
 			recordCheck(
-				"阶段 6 精简行 / hover 原地展开 / 固定展开三态标题首行左上角相差 ≤1px、展开开关同一坐标（In progress 与 Review、当前与其他项目）",
+				"阶段 6 精简行 / hover 原地展开 / 固定展开三态标题首行左上角相差 ≤1px、展开开关同一坐标、hover 动作组叠在首行上方不压字（In progress 与 Review、当前与其他项目）",
 			);
 			recordCheck(
-				"阶段 6 往下挪到下一行：交接一次、不连锁；新行停在指针下不动（面板可滚用 scrollTop 补，滚到顶用顶部空白补）",
+				"阶段 6 往下挪到下一行：交接一次、不连锁；列表顶边固定（不补 scrollTop、不垫顶部空白，上方的行不被往下拖），新行上移上一行多出的高度",
 			);
 			const betaExpandedRow = await hoverRowUntilExpandedInPlace(betaId, "别的项目任务");
 			await betaExpandedRow.getByRole("button", { name: "Move task to validation", exact: true }).click();
