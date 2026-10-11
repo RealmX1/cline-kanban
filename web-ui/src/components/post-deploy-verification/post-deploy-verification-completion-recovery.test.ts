@@ -2,18 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import type { RuntimePostDeployVerificationTask } from "@/runtime/types";
 import { resolvePostDeployVerificationStuckDoneRecovery } from "./post-deploy-verification-completion-recovery";
+import { createPostDeployVerificationTaskReadModelTestFixture } from "./post-deploy-verification-task-read-model-test-fixtures";
 
 const NOW_MS = Date.parse("2026-07-05T12:00:00.000Z");
 
 function makeTask(overrides: Partial<RuntimePostDeployVerificationTask> = {}): RuntimePostDeployVerificationTask {
-	return {
-		taskId: "task-1",
-		columnIdAtMatch: "review",
-		matchedCommits: [],
-		inclusionReason: "commit_correlation",
-		checklist: [],
-		verifiedAt: null,
-		boardMovedToDoneAt: null,
+	return createPostDeployVerificationTaskReadModelTestFixture({
 		pendingConfirmation: {
 			token: "tok-1",
 			expiresAtIso: "2026-07-05T12:10:00.000Z", // NOW + 10min：未过期
@@ -21,9 +15,8 @@ function makeTask(overrides: Partial<RuntimePostDeployVerificationTask> = {}): R
 			requiredAcknowledgements: [],
 			columnIdAtIssuance: "validation",
 		},
-		droppedReason: null,
 		...overrides,
-	};
+	});
 }
 
 describe("resolvePostDeployVerificationStuckDoneRecovery", () => {

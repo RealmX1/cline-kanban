@@ -2,7 +2,13 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimePostDeployVerificationAcknowledgement,
 	RuntimePostDeployVerificationTask,
+	RuntimePostDeployVerificationUncheckedChecklistItemClosureReason,
 } from "../core/api-contract";
+import {
+	type KanbanCliCompletionAuthorizedBeforeMoveIntoDone,
+	resolveUncheckedChecklistItemClosureReasonsForPostDeployVerificationTask,
+} from "../deployment/post-deploy-verification-closure-application";
+import { isPostDeployVerificationTaskClosed } from "../deployment/post-deploy-verification-deployment-group-task-assembly";
 import { computeRequiredAcknowledgementsForColumn } from "../deployment/post-deploy-verification-state";
 
 // 「CLI 已把任务移入 Done（trash）、但 runtime 写 verifiedAt 的 procedure 调用失败」滞留态的重试判定。
@@ -12,8 +18,9 @@ import { computeRequiredAcknowledgementsForColumn } from "../deployment/post-dep
 // 先落一条「在途完成记录」（复用 pendingConfirmation 形状：来源列 + 已确认的 acks + 15min 过期），它同时让
 // reconcile 跳过该任务（不误标 moved_out_manually），并作为重试时的授权证据——重跑「同一条命令」即可只补记 verifiedAt。
 //
-// 不变量（未经核对的任务不能被标为 verified）：调用方已确认 droppedReason===null 且 checklist 全勾；本判定再要求
-// 在途记录存在、未过期、来源列是合法完成来源，并按入口重新校验与原完成路径同强度的授权：
+// 不变量（未经核对的任务不能被标为 verified）：调用方已确认 droppedReason===null；本判定再要求在途记录存在、未过期、
+// 来源列是合法完成来源、checklist 全勾或在途记录里的原因覆盖全部未勾项（原因只认移列前写下的那份，重跑命令不必、
+// 也无从再带 --closure-reason-*），并按入口重新校验与原完成路径同强度的授权：
 //  - verification-complete（无 token）：只放行空 acks（validation 来源）记录——它本就无需任何确认；非空 acks
 //    若无 token 放行，会伪造用户从未给出的 skip_validation / in_progress_active（与 Web 端
 //    resolvePostDeployVerificationStuckDoneRecovery 同一安全边界）。
@@ -42,13 +49,36 @@ export type KanbanCliRetryDecisionForTaskMovedToDoneButVerifiedAtUnrecorded =
 			sourceColumnIdBeforeMoveToDone: RuntimeBoardColumnId;
 			inFlightCompletionRecordExpiresAtIso: string;
 			confirmedAcknowledgements: RuntimePostDeployVerificationAcknowledgement[];
-			forcedCompletionWithoutAllVerificationsPassed: boolean;
+			confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: boolean;
+			// CLI 移列前在在途记录里写下的逐项原因（带原因结案时）；全勾结案为空。
+			uncheckedChecklistItemClosureReasons: RuntimePostDeployVerificationUncheckedChecklistItemClosureReason[];
 	  }
 	| {
 			retryAllowed: false;
 			error: string;
 			requiredAcknowledgements?: RuntimePostDeployVerificationAcknowledgement[];
 	  };
+
+/**
+ * CLI 完成动词移列前写进在途完成记录的「已授权」标记（本模块的重试判定与 runtime 对账都读它）。
+ * 旧 binary 兼容：2026-10-11 之前的 schema 把 forcedCompletionWithoutAllVerificationsPassed 定为必填，只写新字段的记录
+ * 一旦留在状态文件里（CLI 授权后中断即可留下），回滚后旧 binary 整文件解析失败、隔离成 .corrupt-*、降级为空组。
+ * 过渡期两个字段同值双写；读取以新字段为准。
+ */
+export function buildKanbanCliCompletionAuthorizedBeforeMoveIntoDone(input: {
+	authorizedAtIso: string;
+	confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: boolean;
+	uncheckedChecklistItemClosureReasons: RuntimePostDeployVerificationUncheckedChecklistItemClosureReason[];
+}): KanbanCliCompletionAuthorizedBeforeMoveIntoDone {
+	return {
+		authorizedAtIso: input.authorizedAtIso,
+		forcedCompletionWithoutAllVerificationsPassed:
+			input.confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag,
+		confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag:
+			input.confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag,
+		uncheckedChecklistItemClosureReasons: input.uncheckedChecklistItemClosureReasons,
+	};
+}
 
 export function acknowledgementSetsEqual(
 	left: RuntimePostDeployVerificationAcknowledgement[],
@@ -76,7 +106,7 @@ function isInFlightCompletionRecordExpired(expiresAtIso: string, nowIso: string)
 
 /**
  * 任务已在 Done（trash）时，判定 CLI 本次入口能否「只补记 verifiedAt、不再移列」。
- * 前置条件（调用方负责）：task.droppedReason===null 且 checklist 全勾。
+ * 前置条件（调用方负责）：task.droppedReason===null。未勾项的原因由本判定从在途记录取回并校验覆盖。
  */
 export function decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded(input: {
 	task: RuntimePostDeployVerificationTask;
@@ -84,7 +114,7 @@ export function decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded(in
 	nowIso: string;
 }): KanbanCliRetryDecisionForTaskMovedToDoneButVerifiedAtUnrecorded {
 	const { task, entryPoint, nowIso } = input;
-	if (task.verifiedAt !== null) {
+	if (isPostDeployVerificationTaskClosed(task)) {
 		return { retryAllowed: false, error: "Task is already in done." };
 	}
 	const inFlightCompletionRecord = task.pendingConfirmation;
@@ -111,6 +141,25 @@ export function decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded(in
 		};
 	}
 	const recordedAcknowledgements = inFlightCompletionRecord.requiredAcknowledgements;
+	const recordedUncheckedChecklistItemClosureReasons =
+		inFlightCompletionRecord.kanbanCliCompletionAuthorizedBeforeMoveIntoDone?.uncheckedChecklistItemClosureReasons ??
+		[];
+	// 原因只认移列前写下的那份：调用方不再用命令行原因校验这条补记路径，否则带原因结案的任务照提示重跑必然报缺原因。
+	// 移列后 checklist 又多出未勾项（如对账合并了晚注册的 authored 项）时，记录里的原因不再覆盖，fail closed。
+	const recordedClosureReasonsResolution = resolveUncheckedChecklistItemClosureReasonsForPostDeployVerificationTask(
+		task,
+		{
+			uncheckedChecklistItemClosureReasons: recordedUncheckedChecklistItemClosureReasons,
+		},
+	);
+	if (!recordedClosureReasonsResolution.uncheckedChecklistItemClosureReasonsCoverAllUncheckedItems) {
+		return {
+			retryAllowed: false,
+			error: `Task is already in done, but the closure reasons recorded before it was moved to done do not cover these unchecked checklist items, so its verification cannot be recorded from the CLI: ${recordedClosureReasonsResolution.uncheckedChecklistItemsMissingClosureReason
+				.map((item) => `${item.id} (${item.label})`)
+				.join("; ")}`,
+		};
+	}
 	const acknowledgementMismatchError = `--ack must exactly match the acknowledgements confirmed before the task was moved to done: ${
 		recordedAcknowledgements.length === 0 ? "(none)" : recordedAcknowledgements.join(", ")
 	}.`;
@@ -129,7 +178,8 @@ export function decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded(in
 				sourceColumnIdBeforeMoveToDone: inFlightCompletionRecord.columnIdAtIssuance,
 				inFlightCompletionRecordExpiresAtIso: inFlightCompletionRecord.expiresAtIso,
 				confirmedAcknowledgements: [],
-				forcedCompletionWithoutAllVerificationsPassed: false,
+				confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: false,
+				uncheckedChecklistItemClosureReasons: recordedUncheckedChecklistItemClosureReasons,
 			};
 		}
 		case "verification_confirm_with_confirmation_token": {
@@ -148,7 +198,8 @@ export function decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded(in
 				sourceColumnIdBeforeMoveToDone: inFlightCompletionRecord.columnIdAtIssuance,
 				inFlightCompletionRecordExpiresAtIso: inFlightCompletionRecord.expiresAtIso,
 				confirmedAcknowledgements: entryPoint.presentedAcknowledgements,
-				forcedCompletionWithoutAllVerificationsPassed: false,
+				confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: false,
+				uncheckedChecklistItemClosureReasons: recordedUncheckedChecklistItemClosureReasons,
 			};
 		}
 		case "verification_confirm_with_force_break_glass": {
@@ -164,13 +215,15 @@ export function decideKanbanCliRetryForTaskMovedToDoneButVerifiedAtUnrecorded(in
 				sourceColumnIdBeforeMoveToDone: inFlightCompletionRecord.columnIdAtIssuance,
 				inFlightCompletionRecordExpiresAtIso: inFlightCompletionRecord.expiresAtIso,
 				confirmedAcknowledgements: entryPoint.presentedAcknowledgements,
-				forcedCompletionWithoutAllVerificationsPassed: true,
+				confirmationTokenHandshakeSkippedByKanbanCliBreakGlassForceFlag: true,
+				uncheckedChecklistItemClosureReasons: recordedUncheckedChecklistItemClosureReasons,
 			};
 		}
 	}
 }
 
 // 移列成功但 verifiedAt 补记失败时回给调用者的「原样重跑」命令：在途记录未过期前重跑它即只补记 verifiedAt。
+// 刻意不带 --closure-reason-*：补记路径只用在途记录里移列前写下的原因（见上方判定），重跑时给的原因参数不参与。
 export function formatKanbanCliPostDeployVerificationCompletionRetryCommand(input: {
 	deploymentId: string;
 	taskId: string;

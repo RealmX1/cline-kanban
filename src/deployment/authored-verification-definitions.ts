@@ -128,6 +128,37 @@ export async function materializeAuthoredVerificationItemsForTask(
 	nowIso: string,
 ): Promise<RuntimePostDeployVerificationChecklistItem[]> {
 	const definitions = await listAuthoredVerificationDefinitions({ workspaceId, taskId }, nowIso);
+	return await materializeAuthoredVerificationDefinitionsIntoChecklistItems(definitions);
+}
+
+// 同上，一次读定义文件、按 taskId 分组 materialize：record 建组与 30s 对账要给整组任务补 authored 项（含晚注册的），
+// 逐任务调用会让每轮对账随任务数线性重读定义文件。没有定义的任务映射为空数组。
+export async function materializeAuthoredVerificationItemsForWorkspaceTasks(
+	workspaceId: string,
+	taskIds: readonly string[],
+	nowIso: string,
+): Promise<Map<string, RuntimePostDeployVerificationChecklistItem[]>> {
+	const wantedTaskIds = new Set(taskIds);
+	const definitions = (await listAuthoredVerificationDefinitions({ workspaceId }, nowIso)).filter((definition) =>
+		wantedTaskIds.has(definition.taskId),
+	);
+	const itemsByTaskId = new Map<string, RuntimePostDeployVerificationChecklistItem[]>(
+		taskIds.map((taskId) => [taskId, []]),
+	);
+	for (const taskId of wantedTaskIds) {
+		itemsByTaskId.set(
+			taskId,
+			await materializeAuthoredVerificationDefinitionsIntoChecklistItems(
+				definitions.filter((definition) => definition.taskId === taskId),
+			),
+		);
+	}
+	return itemsByTaskId;
+}
+
+async function materializeAuthoredVerificationDefinitionsIntoChecklistItems(
+	definitions: readonly RuntimeAuthoredVerificationDefinition[],
+): Promise<RuntimePostDeployVerificationChecklistItem[]> {
 	const items: RuntimePostDeployVerificationChecklistItem[] = [];
 	for (const definition of definitions) {
 		if (definition.kind === "automated_script" && !(await verificationAssetsDirExists(definition.verificationId))) {

@@ -2,7 +2,8 @@
 // 取 task 最新一世里、从最后已知 HEAD 可达的非 merge 自有提交集合 S；|S| ≥ 1，且 S 中每个提交都按
 // exact SHA → stable patch-id 一对一匹配进了本地 base，才算「task 的提交已落地到本地 base」。
 // 门条件 3/4、义务 M17、覆盖核对都只经这里求值——不许再出现第二套「算不算落地」的判据。
-// 部署关联（src/deployment/task-deploy-correlation.ts）回答的是「哪些 task 进了这次部署」，不是落地判据。
+// 部署归属（src/deployment/task-deployment-attribution-from-commit-integration-provenance.ts）复用本文件的匹配器，
+// 回答的是「哪些 task 随这次部署上线」，不是落地判据。
 // 不读拓扑 ahead：吸收 base 产生的 merge 与被 rebase 丢掉的旧 SHA 都不在 S 里，ahead 计数会被它们卡死。
 
 export interface TaskCommitShaWithStablePatchId {

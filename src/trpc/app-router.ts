@@ -99,6 +99,7 @@ import type {
 	RuntimeListAgentRaisedPendingUserDecisionsResponse,
 	RuntimeListAgentRaisedUserDecisionHistoryForTaskRequest,
 	RuntimeListAgentRaisedUserDecisionHistoryForTaskResponse,
+	RuntimeListDeferredNaturalUsageObservationRecordsResponse,
 	RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest,
 	RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponse,
 	RuntimeNotificationClearRequest,
@@ -315,6 +316,7 @@ import {
 	runtimeListAgentRaisedPendingUserDecisionsResponseSchema,
 	runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema,
 	runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema,
+	runtimeListDeferredNaturalUsageObservationRecordsResponseSchema,
 	runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema,
 	runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema,
 	runtimeNotificationClearRequestSchema,
@@ -941,6 +943,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequest,
 		) => Promise<RuntimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponse>;
+		// 以「转为在自然使用中观察」结案的未勾项（只读；将来的自然使用观察 pipeline 消费它们）。
+		listDeferredNaturalUsageObservationRecords: (
+			scope: RuntimeTrpcWorkspaceScope,
+		) => Promise<RuntimeListDeferredNaturalUsageObservationRecordsResponse>;
 	};
 	// dd2db 1b 读侧：跨 project、只读；关系账本只在 runtime 内打开，所以 CLI 读动词也经这里。
 	workUnitRelationReadApi: {
@@ -1998,6 +2004,11 @@ export const runtimeAppRouter = t.router({
 					ctx.workspaceScope,
 					input,
 				);
+			}),
+		listDeferredNaturalUsageObservationRecords: workspaceProcedure
+			.output(runtimeListDeferredNaturalUsageObservationRecordsResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.deploymentApi.listDeferredNaturalUsageObservationRecords(ctx.workspaceScope);
 			}),
 	}),
 	// dd2db 1b：工作单元间关系的读侧（记录型邻域、跨 project 身份解析、会话归属、上下文端口）。全是只读 query。

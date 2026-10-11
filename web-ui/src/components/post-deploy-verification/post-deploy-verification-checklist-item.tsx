@@ -113,20 +113,22 @@ function AutomatedScriptItem({
 
 	return (
 		<div className="rounded-sm border border-border bg-surface-2 p-1.5">
-			<div className="flex items-center gap-2">
+			<div className="flex items-start gap-2">
 				{/* 只读结果格：反映 run pass/fail，不可手动切换 */}
 				<span
 					aria-hidden
 					className={cn(
-						"flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border",
+						"mt-px flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border",
 						item.checked ? "border-accent bg-accent" : "border-border-bright bg-surface-3",
 					)}
 				>
 					{item.checked ? <Check size={11} className="text-white" /> : null}
 				</span>
+				{/* min-w-0 + break-words：断言里常有不可断行的长标识符（如 agentConversationProgressObservedAt），
+				    flex 子项默认最小宽度 = 最长不可断片段，不放开就会把状态徽标挤出卡片、把运行按钮挤出面板裁剪区。 */}
 				<span
 					className={cn(
-						"flex-1 text-[12px]",
+						"min-w-0 flex-1 break-words text-[12px]",
 						item.checked ? "text-text-tertiary line-through" : "text-text-secondary",
 					)}
 				>
@@ -151,6 +153,7 @@ function AutomatedScriptItem({
 							disabled={isRunning || isCompleting}
 							onClick={onRun}
 							aria-label={hasRun ? "重新运行验证脚本" : "运行验证脚本"}
+							className="shrink-0"
 						/>
 					</Tooltip>
 				) : null}
@@ -200,12 +203,12 @@ function GuidedManualItem({
 	const canLocate = interactive && guidance !== null;
 
 	return (
-		<div className="group/item flex items-center gap-2">
+		<div className="group/item flex items-start gap-2">
 			<RadixCheckbox.Root
 				checked={item.checked}
 				disabled={!interactive || isCompleting}
 				onCheckedChange={(next) => onToggle(next === true)}
-				className="flex h-3.5 w-3.5 shrink-0 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:border-accent data-[state=checked]:bg-accent disabled:cursor-default disabled:opacity-50"
+				className="mt-px flex h-3.5 w-3.5 shrink-0 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:border-accent data-[state=checked]:bg-accent disabled:cursor-default disabled:opacity-50"
 			>
 				<RadixCheckbox.Indicator>
 					<Check size={11} className="text-white" />
@@ -213,7 +216,7 @@ function GuidedManualItem({
 			</RadixCheckbox.Root>
 			<span
 				className={cn(
-					"flex-1 text-[12px]",
+					"min-w-0 flex-1 break-words text-[12px]",
 					item.checked ? "text-text-tertiary line-through" : "text-text-secondary",
 				)}
 			>
@@ -231,6 +234,7 @@ function GuidedManualItem({
 							setOverlayOpen(true);
 						}}
 						aria-label="定位并核对"
+						className="shrink-0"
 					/>
 				</Tooltip>
 			) : null}
