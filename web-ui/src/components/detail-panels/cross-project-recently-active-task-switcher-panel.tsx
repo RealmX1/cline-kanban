@@ -523,6 +523,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 			}
 			onPointerEnter={panelPointerHandlers.onPointerEnter}
 			onPointerLeave={panelPointerHandlers.onPointerLeave}
+			onPointerDownCapture={panelPointerHandlers.onPointerDownCapture}
 			// overflow-anchor: none —— hover 交接时列表顶边固定（见 use-cross-project-task-switcher-row-hover-expansion-in-place）；
 			// 浏览器自带的 scroll anchoring 会在面板滚动过时自己补 scrollTop，把指针上方的整列往下拖。
 			className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-2 [overflow-anchor:none]"
