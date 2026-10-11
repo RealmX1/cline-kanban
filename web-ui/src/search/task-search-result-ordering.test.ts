@@ -11,6 +11,7 @@ import {
 	normalizeTaskSearchResultSortOrder,
 	resolveEffectiveTaskSearchResultSortOrder,
 	sortTaskSearchResults,
+	sortTaskSearchResultsByAgentConversationProgressThenLastModified,
 } from "@/search/task-search-result-ordering";
 
 function createResult(overrides: {
@@ -30,6 +31,7 @@ function createResult(overrides: {
 		taskLastModifiedAtEpochMs: overrides.taskLastModifiedAtEpochMs ?? 0,
 		taskAgentOverrideAgentId: null,
 		mostRecentlyLaunchedAgentSessionAgentId: null,
+		crossProjectAgentConversationProgressAtEpochMs: null,
 	});
 	return {
 		document,
@@ -166,6 +168,85 @@ describe("sortTaskSearchResults", () => {
 		sortTaskSearchResults({
 			results,
 			sortOrder: "task_last_modified_at_desc",
+			resolveAgentConversationProgressAtEpochMs: NO_AGENT_CONVERSATION_PROGRESS,
+		});
+
+		expect(orderedTaskIds(results)).toEqual(["a", "b"]);
+	});
+});
+
+describe("sortTaskSearchResultsByAgentConversationProgressThenLastModified", () => {
+	it("puts every row with agent activity first, newest first, then the rest by last modified", () => {
+		// 两种时间只分段不混排：没有推进时刻的行哪怕「上次修改」比谁都新，也排在全部有推进时刻的行之后——
+		// 修改不是活跃，拿它和推进时刻比大小就是把「修改」冒充成「活跃」。
+		const results = [
+			createResult({ taskId: "edited-just-now-never-ran", taskLastModifiedAtEpochMs: 9_000 }),
+			createResult({ taskId: "ran-long-ago", taskLastModifiedAtEpochMs: 10 }),
+			createResult({ taskId: "edited-earlier-never-ran", taskLastModifiedAtEpochMs: 5_000 }),
+			createResult({ taskId: "ran-recently", taskLastModifiedAtEpochMs: 20 }),
+		];
+		const progressByTaskId: Record<string, number> = { "ran-long-ago": 100, "ran-recently": 800 };
+
+		expect(
+			orderedTaskIds(
+				sortTaskSearchResultsByAgentConversationProgressThenLastModified({
+					results,
+					resolveAgentConversationProgressAtEpochMs: (document: TaskBoardSearchDocument) =>
+						progressByTaskId[document.taskId] ?? null,
+				}),
+			),
+		).toEqual(["ran-recently", "ran-long-ago", "edited-just-now-never-ran", "edited-earlier-never-ran"]);
+	});
+
+	it("keeps the incoming position order between rows that tie on the same instant", () => {
+		// 传入顺序是 direct 匹配器的位置序（标题命中优先 → 标题最早位置 → prompt 最早位置），同刻时它决胜。
+		const results = [
+			createResult({ taskId: "title-hit-at-0", taskLastModifiedAtEpochMs: 1 }),
+			createResult({ taskId: "title-hit-at-5", taskLastModifiedAtEpochMs: 1 }),
+			createResult({ taskId: "prompt-only-hit", taskLastModifiedAtEpochMs: 1 }),
+			createResult({ taskId: "same-progress-a", taskLastModifiedAtEpochMs: 1 }),
+			createResult({ taskId: "same-progress-b", taskLastModifiedAtEpochMs: 1 }),
+		];
+		const progressByTaskId: Record<string, number> = { "same-progress-a": 700, "same-progress-b": 700 };
+
+		expect(
+			orderedTaskIds(
+				sortTaskSearchResultsByAgentConversationProgressThenLastModified({
+					results,
+					resolveAgentConversationProgressAtEpochMs: (document: TaskBoardSearchDocument) =>
+						progressByTaskId[document.taskId] ?? null,
+				}),
+			),
+		).toEqual(["same-progress-a", "same-progress-b", "title-hit-at-0", "title-hit-at-5", "prompt-only-hit"]);
+	});
+
+	it("compares rows from other projects on the same footing as the current project", () => {
+		// 跨项目行的推进时刻来自索引快照、当前项目的来自会话推流，但比较的是同一个量。
+		const results = [
+			createResult({ taskId: "current-project-task", projectId: "proj-a" }),
+			createResult({ taskId: "other-project-task", projectId: "proj-b" }),
+		];
+		const progressByProjectId: Record<string, number> = { "proj-a": 100, "proj-b": 900 };
+
+		expect(
+			orderedTaskIds(
+				sortTaskSearchResultsByAgentConversationProgressThenLastModified({
+					results,
+					resolveAgentConversationProgressAtEpochMs: (document: TaskBoardSearchDocument) =>
+						progressByProjectId[document.projectId] ?? null,
+				}),
+			),
+		).toEqual(["other-project-task", "current-project-task"]);
+	});
+
+	it("does not mutate the input array", () => {
+		const results = [
+			createResult({ taskId: "a", taskLastModifiedAtEpochMs: 1 }),
+			createResult({ taskId: "b", taskLastModifiedAtEpochMs: 2 }),
+		];
+
+		sortTaskSearchResultsByAgentConversationProgressThenLastModified({
+			results,
 			resolveAgentConversationProgressAtEpochMs: NO_AGENT_CONVERSATION_PROGRESS,
 		});
 

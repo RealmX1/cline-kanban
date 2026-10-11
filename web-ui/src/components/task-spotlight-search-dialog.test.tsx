@@ -31,6 +31,8 @@ function createControllerStub(overrides: Partial<TaskSpotlightSearchController> 
 		forgetRecentSearchQuery: () => {},
 		mode: "direct",
 		setMode: () => {},
+		matchedTextFieldScope: "title_and_prompt",
+		setMatchedTextFieldScope: () => {},
 		sortOrder: "relevance",
 		setSortOrder: () => {},
 		effectiveSortOrder: "relevance",

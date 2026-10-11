@@ -11,12 +11,16 @@ import {
 	type TaskSpotlightSearchResultRowFieldId,
 	type TaskSpotlightSearchResultRowFieldVisibility,
 } from "@/components/task-spotlight-search-result-row-field-visibility";
+import { useTaskSpotlightSearchActiveResultIndex } from "@/hooks/use-task-spotlight-search-active-result-index";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import {
 	buildTaskBoardSearchDocuments,
+	DEFAULT_TASK_SEARCH_MATCHED_TEXT_FIELD_SCOPE,
+	normalizeSearchQuery,
 	type TaskBoardSearchDocument,
 	type TaskBoardSearchMode,
 	type TaskBoardSearchResult,
+	type TaskSearchMatchedTextFieldScope,
 } from "@/search/task-board-search";
 import {
 	appendTaskSearchQueryToHistory,
@@ -137,6 +141,9 @@ export interface TaskSpotlightSearchController {
 	forgetRecentSearchQuery: (query: string) => void;
 	mode: TaskBoardSearchMode;
 	setMode: (mode: TaskBoardSearchMode) => void;
+	/** 文本匹配的字段范围（标题 + prompt / 仅标题 / 仅 prompt），四种模式通用。 */
+	matchedTextFieldScope: TaskSearchMatchedTextFieldScope;
+	setMatchedTextFieldScope: (matchedTextFieldScope: TaskSearchMatchedTextFieldScope) => void;
 	sortOrder: TaskSearchResultSortOrder;
 	setSortOrder: (sortOrder: TaskSearchResultSortOrder) => void;
 	/** 生效档：空查询浏览时 relevance 会回落（见 task-search-result-ordering）。 */
@@ -173,7 +180,7 @@ export interface TaskSpotlightSearchController {
 }
 
 function buildDocumentsSignature(documents: readonly TaskBoardSearchDocument[]): string {
-	// 内容签名：taskId + columnId（stage 过滤依赖）+ title + prompt + 排序/展示用的四个卡片级字段。
+	// 内容签名：taskId + columnId（stage 过滤依赖）+ title + prompt + 排序/展示用的五个卡片级字段。
 	// 实时 board 流每 tick 换引用但内容不变时，签名一致 → 保持旧 documents 引用 → 语义索引不无谓重建
 	// （详见 use-task-board-search 注释）。字段间那个不可见字符是 U+0001，任何字段值里都不可能出现，避免拼接歧义。
 	//
@@ -191,6 +198,7 @@ function buildDocumentsSignature(documents: readonly TaskBoardSearchDocument[]):
 				doc.taskLastModifiedAtEpochMs,
 				doc.taskAgentOverrideAgentId ?? "",
 				doc.mostRecentlyLaunchedAgentSessionAgentId ?? "",
+				doc.crossProjectAgentConversationProgressAtEpochMs ?? "",
 			].join(""),
 		)
 		.join("\n");
@@ -283,11 +291,11 @@ export function useTaskSpotlightSearchController({
 	const [isOpen, setIsOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	const [mode, setMode] = useState<TaskBoardSearchMode>("direct");
+	const [matchedTextFieldScope, setMatchedTextFieldScope] = useState<TaskSearchMatchedTextFieldScope>(
+		DEFAULT_TASK_SEARCH_MATCHED_TEXT_FIELD_SCOPE,
+	);
 	const [filterSelection, setFilterSelection] = useState<TaskFilterSelection>(EMPTY_TASK_FILTER_SELECTION);
 	const [includeOtherProjects, setIncludeOtherProjects] = useState(false);
-	// 空查询浏览态刻意不预选任何行（-1）：⌘K 之后直接回车是既有的肌肉记忆，预选第 0 行会让它变成
-	// 「随手打开某个任务」。用户按 ↓ 或开始输入后才进入有选中行的状态。
-	const [activeIndex, setActiveIndex] = useState(-1);
 	const [nowEpochMs, setNowEpochMs] = useState(() => Date.now());
 
 	useEffect(() => {
@@ -362,39 +370,9 @@ export function useTaskSpotlightSearchController({
 
 	// 关闭/打开结果这些**终止事件**要记录「刚才搜的是什么」，但不该因此让 close/toggle 的函数标识
 	// 随每次按键变化——用 ref 读最新查询串，依赖表里就只剩 rememberSearchQuery。
+	// open / close / toggle 本身定义在选中行 hook 之后（要用它返回的 setActiveIndex）。
 	const latestQueryRef = useRef(query);
 	latestQueryRef.current = query;
-
-	const open = useCallback(() => {
-		if (!canOpen) {
-			return;
-		}
-		setQuery("");
-		setActiveIndex(-1);
-		setIsOpen(true);
-	}, [canOpen]);
-
-	const close = useCallback(() => {
-		rememberSearchQuery(latestQueryRef.current);
-		setIsOpen(false);
-		setQuery("");
-	}, [rememberSearchQuery]);
-
-	const toggle = useCallback(() => {
-		setIsOpen((previous) => {
-			if (previous) {
-				rememberSearchQuery(latestQueryRef.current);
-				setQuery("");
-				return false;
-			}
-			if (!canOpen) {
-				return false;
-			}
-			setQuery("");
-			setActiveIndex(-1);
-			return true;
-		});
-	}, [canOpen, rememberSearchQuery]);
 
 	// 切换项目时自动关闭弹层（当前项目上下文已失效）。
 	useEffect(() => {
@@ -459,10 +437,18 @@ export function useTaskSpotlightSearchController({
 		[currentProjectId, taskSessionOverlayByTaskId],
 	);
 
+	/**
+	 * 「对话上次推进」时刻：当前项目读实时会话叠加层，其它项目读跨项目索引投影进文档的快照。
+	 * 两路不互相回退——当前项目文档上的快照字段恒为 null，其它项目又查不到叠加项。
+	 */
 	const resolveAgentConversationProgressAtEpochMs = useCallback(
-		(document: TaskBoardSearchDocument): number | null =>
-			resolveTaskSessionOverlayEntry(document)?.agentConversationProgressAtEpochMs ?? null,
-		[resolveTaskSessionOverlayEntry],
+		(document: TaskBoardSearchDocument): number | null => {
+			if (document.projectId !== currentProjectId) {
+				return document.crossProjectAgentConversationProgressAtEpochMs;
+			}
+			return resolveTaskSessionOverlayEntry(document)?.agentConversationProgressAtEpochMs ?? null;
+		},
+		[currentProjectId, resolveTaskSessionOverlayEntry],
 	);
 
 	/**
@@ -494,10 +480,10 @@ export function useTaskSpotlightSearchController({
 				effectiveAgentId,
 				agentLabel: effectiveAgentId ? (getRuntimeAgentCatalogEntry(effectiveAgentId)?.label ?? null) : null,
 				sessionActivity: overlayEntry?.sessionActivity ?? null,
-				agentConversationProgressAtEpochMs: overlayEntry?.agentConversationProgressAtEpochMs ?? null,
+				agentConversationProgressAtEpochMs: resolveAgentConversationProgressAtEpochMs(document),
 			};
 		},
-		[resolveEffectiveAgentId, resolveTaskSessionOverlayEntry],
+		[resolveAgentConversationProgressAtEpochMs, resolveEffectiveAgentId, resolveTaskSessionOverlayEntry],
 	);
 
 	const { isSearchActive, isBrowsingAllTasksWithoutQuery, orderedResults, effectiveSortOrder, semanticSearchStatus } =
@@ -505,6 +491,7 @@ export function useTaskSpotlightSearchController({
 			documents,
 			query,
 			mode,
+			matchedTextFieldScope,
 			sortOrder,
 			resolveAgentConversationProgressAtEpochMs,
 			isBrowsingAllTasksWithoutQueryEnabled: isOpen,
@@ -576,47 +563,55 @@ export function useTaskSpotlightSearchController({
 		};
 	}, [documents, resolveEffectiveAgentId]);
 
-	/**
-	 * 结果集的**身份签名**：成员 + 顺序，此外什么都不含。收敛 activeIndex 只认它，**不认 `results` 的数组引用**。
-	 *
-	 * `results` 来自 `filterApplication.filteredRows`，而那个 useMemo 的依赖里含 `resolveTaskSessionOverlayEntry`
-	 * → `taskSessionOverlayByTaskId`，后者的内容签名纳入了 `sessionActivity` 的 dotColor 与 text —— 当前项目
-	 * 有任一 agent 在产出时，这两个值随 hook 文案不断变化；启用「上次修改」时间窗后 `nowEpochMs` 的 30s 心跳
-	 * 同样会重算。于是结果集的成员与顺序分毫未动、数组引用却每隔几秒换一次。以引用为依赖，实时 agent 输出
-	 * 就会把用户用 ↑↓ 选中的第 N 行抢回首行（搜索态回车打开错误的任务）或抢回无选中（浏览态回车什么也不开）。
-	 *
-	 * 字段间那个不可见字符是 U+0001，projectId / taskId 里都不可能出现，避免拼接歧义。
-	 */
-	const resultsIdentitySignature = useMemo(
-		() => results.map((result) => `${result.document.projectId}${result.document.taskId}`).join("\n"),
-		[results],
-	);
+	// 选中行的收敛与导航（含「纯实时重排时选中行跟着同一个任务走」）见该 hook 的注释。
+	// `results` 来自 `filterApplication.filteredRows`，其依赖含会话叠加层——当前项目有 agent 在产出时，
+	// 成员与顺序不变、数组引用却每隔几秒换一次；启用「上次修改」时间窗后 nowEpochMs 的 30s 心跳同样会重算。
+	// 所以那边只认结果集身份签名、不认数组引用。
+	const {
+		activeIndex: activeIndexClamped,
+		setActiveIndex,
+		moveActive,
+	} = useTaskSpotlightSearchActiveResultIndex({
+		results,
+		isBrowsingAllTasksWithoutQuery,
+		resultOrderingIntentSignature: [
+			mode,
+			matchedTextFieldScope,
+			effectiveSortOrder,
+			normalizeSearchQuery(query),
+		].join("\u0001"),
+	});
 
-	// 结果集变化时收敛 activeIndex：浏览态回到「无选中」（-1），搜索态回到第 0 行
-	// （有查询串时第 0 行就是最佳命中，回车直达是这个弹层的核心动作）。
-	useEffect(() => {
-		setActiveIndex(isBrowsingAllTasksWithoutQuery ? -1 : 0);
-	}, [resultsIdentitySignature, isBrowsingAllTasksWithoutQuery]);
+	const open = useCallback(() => {
+		if (!canOpen) {
+			return;
+		}
+		setQuery("");
+		setActiveIndex(-1);
+		setIsOpen(true);
+	}, [canOpen, setActiveIndex]);
 
-	const activeIndexClamped = results.length === 0 || activeIndex < 0 ? -1 : Math.min(activeIndex, results.length - 1);
+	const close = useCallback(() => {
+		rememberSearchQuery(latestQueryRef.current);
+		setIsOpen(false);
+		setQuery("");
+	}, [rememberSearchQuery]);
 
-	const moveActive = useCallback(
-		(delta: number) => {
-			setActiveIndex((previous) => {
-				if (results.length === 0) {
-					return -1;
-				}
-				// 「无选中」态下按 ↓ 落到第一行、按 ↑ 落到最后一行。不能走下面的取模式环绕：
-				// previous=-1 时它会算出第 1 行，把第 0 行整个跳过去。
-				if (previous < 0) {
-					return delta > 0 ? 0 : results.length - 1;
-				}
-				const base = previous % results.length;
-				return (base + (delta % results.length) + results.length) % results.length;
-			});
-		},
-		[results.length],
-	);
+	const toggle = useCallback(() => {
+		setIsOpen((previous) => {
+			if (previous) {
+				rememberSearchQuery(latestQueryRef.current);
+				setQuery("");
+				return false;
+			}
+			if (!canOpen) {
+				return false;
+			}
+			setQuery("");
+			setActiveIndex(-1);
+			return true;
+		});
+	}, [canOpen, rememberSearchQuery, setActiveIndex]);
 
 	const openResultAt = useCallback(
 		(index: number) => {
@@ -651,6 +646,8 @@ export function useTaskSpotlightSearchController({
 		forgetRecentSearchQuery,
 		mode,
 		setMode,
+		matchedTextFieldScope,
+		setMatchedTextFieldScope,
 		sortOrder,
 		setSortOrder,
 		effectiveSortOrder,

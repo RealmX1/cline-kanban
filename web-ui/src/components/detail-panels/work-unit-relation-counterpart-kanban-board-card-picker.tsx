@@ -13,7 +13,10 @@ import { DEFAULT_TASK_SPOTLIGHT_SEARCH_RESULT_ROW_FIELD_VISIBILITY } from "@/com
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useIsMobile } from "@/hooks/use-is-mobile";
-import { useWorkUnitRelationCounterpartKanbanBoardCardPickerSearch } from "@/hooks/use-work-unit-relation-counterpart-kanban-board-card-picker-search";
+import {
+	resolveAgentConversationProgressForCounterpartPickerFromAllProjectsTaskSearchIndex,
+	useWorkUnitRelationCounterpartKanbanBoardCardPickerSearch,
+} from "@/hooks/use-work-unit-relation-counterpart-kanban-board-card-picker-search";
 import type { SelectedCounterpartKanbanBoardCardForAddReferenceRelation } from "@/hooks/work-unit-relation-add-reference-relation-dialog-draft-validation";
 import type { TaskBoardSearchDocument } from "@/search/task-board-search";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
@@ -150,6 +153,10 @@ export function WorkUnitRelationCounterpartKanbanBoardCardPicker({
 					</div>
 				) : (
 					shownCounterpartSearchResults.map((result, resultIndex) => {
+						const agentConversationProgressAtEpochMs =
+							resolveAgentConversationProgressForCounterpartPickerFromAllProjectsTaskSearchIndex(
+								result.document,
+							);
 						const effectiveAgentId =
 							result.document.taskAgentOverrideAgentId ??
 							result.document.mostRecentlyLaunchedAgentSessionAgentId;
@@ -168,8 +175,12 @@ export function WorkUnitRelationCounterpartKanbanBoardCardPicker({
 										effectiveAgentId ? (getRuntimeAgentCatalogEntry(effectiveAgentId)?.label ?? null) : null
 									}
 									sessionActivity={null}
-									timePillKind={resolveTaskSpotlightSearchResultRowTimePillKind(effectiveSortOrder)}
-									agentConversationProgressAtEpochMs={null}
+									timePillKind={resolveTaskSpotlightSearchResultRowTimePillKind({
+										effectiveSortOrder,
+										mode: "direct",
+										agentConversationProgressAtEpochMs,
+									})}
+									agentConversationProgressAtEpochMs={agentConversationProgressAtEpochMs}
 									nowEpochMs={nowEpochMsForResultRowTimePills}
 									shouldUseMobileMinimumTouchTarget={isMobile}
 									onSelect={() =>

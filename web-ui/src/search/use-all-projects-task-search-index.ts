@@ -21,6 +21,7 @@ function buildDocumentsFromProjectEntry(
 			taskLastModifiedAtEpochMs: task.updatedAt,
 			taskAgentOverrideAgentId: task.agentId,
 			mostRecentlyLaunchedAgentSessionAgentId: task.mostRecentlyLaunchedAgentSessionAgentId,
+			crossProjectAgentConversationProgressAtEpochMs: task.agentConversationProgressObservedAt,
 		}),
 	);
 }

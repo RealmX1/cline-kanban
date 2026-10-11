@@ -7,7 +7,11 @@
 // Spotlight 的历史。这里只取搜索与结果行两层，当前项目也走同一份索引（快照即可，选卡不需要实时会话状态）。
 
 import { useEffect, useMemo, useState } from "react";
-import type { TaskBoardSearchDocument, TaskBoardSearchResult } from "@/search/task-board-search";
+import {
+	DEFAULT_TASK_SEARCH_MATCHED_TEXT_FIELD_SCOPE,
+	type TaskBoardSearchDocument,
+	type TaskBoardSearchResult,
+} from "@/search/task-board-search";
 import type { TaskSearchResultSortOrder } from "@/search/task-search-result-ordering";
 import {
 	type AllProjectsTaskSearchIndexStatus,
@@ -21,9 +25,13 @@ export const MAXIMUM_COUNTERPART_KANBAN_BOARD_CARD_PICKER_RESULTS_SHOWN = 40;
 // 选择器不排除任何项目：当前项目也从同一份跨项目索引里挑（引用稳定，免得索引文档每次渲染重算）。
 const NO_PROJECT_IDS_EXCLUDED_FROM_COUNTERPART_PICKER_INDEX: ReadonlySet<string> = new Set();
 
-// 选择器没有会话推流：「对话上次推进」一律未知（引用稳定，useTaskBoardSearch 要求）。
-function resolveNoAgentConversationProgressForCounterpartPicker(_document: TaskBoardSearchDocument): number | null {
-	return null;
+// 选择器没有会话推流，但跨项目索引本身逐任务带着「对话上次推进」快照（当前项目那份也是服务端用内存摘要覆盖过的）。
+// direct 的 Relevance 按它排序（与 Spotlight「All projects」同一口径），行上的活跃药丸也读它。
+// 模块级函数、引用稳定（useTaskBoardSearch 要求）。
+export function resolveAgentConversationProgressForCounterpartPickerFromAllProjectsTaskSearchIndex(
+	document: TaskBoardSearchDocument,
+): number | null {
+	return document.crossProjectAgentConversationProgressAtEpochMs;
 }
 
 export interface WorkUnitRelationCounterpartKanbanBoardCardPickerSearch {
@@ -70,8 +78,10 @@ export function useWorkUnitRelationCounterpartKanbanBoardCardPickerSearch(input:
 		documents: counterpartCandidateDocuments,
 		query: counterpartSearchQuery,
 		mode: "direct",
+		matchedTextFieldScope: DEFAULT_TASK_SEARCH_MATCHED_TEXT_FIELD_SCOPE,
 		sortOrder: "relevance",
-		resolveAgentConversationProgressAtEpochMs: resolveNoAgentConversationProgressForCounterpartPicker,
+		resolveAgentConversationProgressAtEpochMs:
+			resolveAgentConversationProgressForCounterpartPickerFromAllProjectsTaskSearchIndex,
 		isBrowsingAllTasksWithoutQueryEnabled: input.isCounterpartPickerSearchActive,
 	});
 	const shownCounterpartSearchResults = useMemo(
