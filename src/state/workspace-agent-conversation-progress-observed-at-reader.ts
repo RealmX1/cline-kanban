@@ -1,6 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 
-import { getWorkspaceSessionsPath } from "./workspace-state";
+import { getPersistedWorkspaceSessionsFilePathById } from "./workspace-state";
 
 // sessions.json 是 taskId → 会话摘要的 record。这里只抽一个量：不走完整的 workspaceSessionsSchema
 // （含 facet superRefine）+ backfillSessionFacets，也不为这一个字段跑 zod——跨项目索引一次要读全部注册项目的
@@ -80,7 +80,7 @@ function parseAgentConversationProgressObservedAtByTaskId(
 export async function loadWorkspaceAgentConversationProgressObservedAtByTaskId(
 	workspaceId: string,
 ): Promise<ReadonlyMap<string, number>> {
-	const sessionsPath = getWorkspaceSessionsPath(workspaceId);
+	const sessionsPath = getPersistedWorkspaceSessionsFilePathById(workspaceId);
 	let sessionsFileModifiedAtMs: number;
 	let sessionsFileSizeBytes: number;
 	try {

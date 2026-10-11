@@ -227,7 +227,7 @@ function getWorkspaceBoardPath(workspaceId: string): string {
 	return join(getWorkspaceDirectoryPath(workspaceId), BOARD_FILENAME);
 }
 
-export function getWorkspaceSessionsPath(workspaceId: string): string {
+function getWorkspaceSessionsPath(workspaceId: string): string {
 	return join(getWorkspaceDirectoryPath(workspaceId), SESSIONS_FILENAME);
 }
 

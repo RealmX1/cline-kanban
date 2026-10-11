@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // 重定向到临时目录，而不是去动 homedir()（与 exploratory-findings-store 测试同一手法）。
 const testRuntimeHome = { path: "" };
 vi.mock("../../../src/state/workspace-state", () => ({
-	getWorkspaceSessionsPath: (workspaceId: string) =>
+	getPersistedWorkspaceSessionsFilePathById: (workspaceId: string) =>
 		join(testRuntimeHome.path, "workspaces", workspaceId, "sessions.json"),
 }));
 
